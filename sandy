@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =============================================================================
+# sandy — Claude's isolated sibling
+#
+# Runs Claude Code in a Docker container with:
+#   - Filesystem: read/write limited to current directory only
+#   - Network: public internet only, NO LAN access
+#   - Resources: capped CPU and memory
+#   - Per-project sandbox: isolated ~/.claude per working directory
+#
+# Usage:
+#   sandy                     Start interactive session
+#   sandy -p "prompt"         One-shot prompt
+# =============================================================================
+
+SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
+BRIDGE_NAME="br-claude"
+IMAGE_NAME="sandy-claude-code"
+NETWORK_NAME="sandy_internet-only"
+
+# --- Colors (disabled when not a terminal) ---
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' NC=''
+fi
+
+info()  { echo -e "${GREEN}[sandy]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[sandy]${NC} $*"; }
+error() { echo -e "${RED}[sandy]${NC} $*" >&2; }
+
+# --- Preflight checks ---
+if ! command -v docker &>/dev/null; then
+    error "Docker is not installed or not in PATH."
+    exit 1
+fi
+
+# --- Ensure SANDY_HOME and build files exist ---
+ensure_build_files() {
+    if [ ! -f "$SANDY_HOME/Dockerfile" ]; then
+        info "Setting up sandy in $SANDY_HOME..."
+        mkdir -p "$SANDY_HOME"
+
+        cat > "$SANDY_HOME/Dockerfile" <<'DOCKERFILE'
+FROM node:20-slim
+RUN apt-get update && apt-get install -y ca-certificates curl git jq less ripgrep tmux ncurses-term && rm -rf /var/lib/apt/lists/*
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+RUN npm install -g @anthropic-ai/claude-code
+RUN useradd -m -s /bin/bash claude
+COPY tmux.conf /etc/tmux.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+USER claude
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+DOCKERFILE
+
+        cat > "$SANDY_HOME/entrypoint.sh" <<'ENTRYPOINT'
+#!/bin/bash
+export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+export DISABLE_SPINNER_TIPS=1
+
+# Remap ANSI dark blue (color 4) to a readable bright blue
+printf '\033]4;4;rgb:61/8f/ff\033\\'
+trap 'printf "\033]104;4\033\\"' EXIT
+
+# Ensure project-level settings exist
+mkdir -p /workspace/.claude 2>/dev/null || true
+
+# Build the claude command with any passed args
+CLAUDE_CMD="claude --dangerously-skip-permissions --model ${SANDY_MODEL:-claude-opus-4-6} --teammate-mode tmux"
+for arg in "$@"; do
+    CLAUDE_CMD+=" $(printf '%q' "$arg")"
+done
+
+cd /workspace
+tmux new-session -s sandy -- bash -c "$CLAUDE_CMD"
+ENTRYPOINT
+
+        cat > "$SANDY_HOME/tmux.conf" <<'TMUXCONF'
+set -g history-limit 10000
+set -g mouse on
+set -g default-terminal "tmux-256color"
+set -as terminal-features ",tmux-256color:RGB"
+set -as terminal-overrides ",*:U8=1"
+set -sg escape-time 0
+
+# Pane borders — clean single-line, short labels
+set -g pane-border-lines single
+set -g pane-border-style "fg=colour240"
+set -g pane-active-border-style "fg=colour51"
+set -g pane-border-status top
+set -g pane-border-format " #[fg=colour51]#{pane_index}#[default] "
+
+# Status bar
+set -g status-position bottom
+set -g status-style "bg=colour235,fg=colour248"
+set -g status-left "#[fg=colour51,bold] sandy "
+set -g status-left-length 10
+set -g status-right "#[fg=colour248] %H:%M "
+set -g status-right-length 10
+
+# Better redraw behavior
+set -g focus-events on
+setw -g aggressive-resize on
+TMUXCONF
+
+        info "Build files written."
+    fi
+}
+
+# --- Initialize ---
+ensure_build_files
+
+# --- Detect available resources ---
+AVAILABLE_CPUS="$(docker info --format '{{.NCPU}}' 2>/dev/null || echo 2)"
+AVAILABLE_MEM_GB="$(docker info --format '{{.MemTotal}}' 2>/dev/null | awk '{printf "%d", $1/1073741824}')"
+# Validate: must be a positive integer, default to 4 on parse failure
+if ! [[ "$AVAILABLE_MEM_GB" =~ ^[0-9]+$ ]] || [ "$AVAILABLE_MEM_GB" -eq 0 ]; then
+    AVAILABLE_MEM_GB=4
+fi
+SANDY_CPUS="$AVAILABLE_CPUS"
+SANDY_MEM="$(( AVAILABLE_MEM_GB > 2 ? AVAILABLE_MEM_GB - 1 : 2 ))g"
+
+# --- Build image (skip if up to date) ---
+BUILD_HASH="$(cat "$SANDY_HOME/Dockerfile" "$SANDY_HOME/entrypoint.sh" "$SANDY_HOME/tmux.conf" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -d' ' -f1)"
+HASH_FILE="$SANDY_HOME/.build_hash"
+if [ ! -f "$HASH_FILE" ] || [ "$(cat "$HASH_FILE")" != "$BUILD_HASH" ] || ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    info "Building sandbox image..."
+    docker build -q -t "$IMAGE_NAME" "$SANDY_HOME"
+    echo "$BUILD_HASH" > "$HASH_FILE"
+else
+    info "Sandbox image up to date."
+fi
+
+# --- Ensure the isolated network exists ---
+ensure_network() {
+    if ! docker network inspect "$NETWORK_NAME" &>/dev/null; then
+        info "Creating isolated network..."
+        docker network create \
+            --driver bridge \
+            --subnet 172.30.0.0/24 \
+            -o com.docker.network.bridge.name="$BRIDGE_NAME" \
+            "$NETWORK_NAME" >/dev/null
+    fi
+}
+
+ensure_network
+
+# --- Per-project sandbox directory ---
+WORK_DIR="$(pwd)"
+SANDBOX_HASH="$(printf '%s' "$WORK_DIR" | shasum -a 256 2>/dev/null || printf '%s' "$WORK_DIR" | sha256sum)"
+SANDBOX_HASH="${SANDBOX_HASH%% *}"
+SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_HASH}"
+
+if [ ! -d "$SANDBOX_DIR" ]; then
+    info "Creating new sandbox: $SANDBOX_DIR"
+    mkdir -p "$SANDBOX_DIR"
+    # Seed credentials and settings from host's ~/.claude if available
+    for f in .credentials.json settings.json; do
+        if [ -f "$HOME/.claude/$f" ]; then
+            cp "$HOME/.claude/$f" "$SANDBOX_DIR/$f"
+            info "  Seeded $f"
+        fi
+    done
+    # Write sandy-required defaults into settings.json (merge with seeded copy)
+    SETTINGS_FILE="$SANDBOX_DIR/settings.json"
+    [ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
+    # Use node to safely merge JSON (available from the host or as a fallback)
+    if command -v node &>/dev/null; then
+        node -e "
+            const fs = require('fs');
+            const f = process.argv[1];
+            let raw = fs.readFileSync(f, 'utf8');
+            // Fix common JSON issues: trailing commas, missing commas before keys
+            raw = raw.replace(/,(\s*[}\]])/g, '\$1');
+            raw = raw.replace(/(\"[^\"]*\")\s*\n(\s*\")/g, '\$1,\n\$2');
+            let s;
+            try { s = JSON.parse(raw); } catch { s = {}; }
+            const defaults = {teammateMode:'tmux', spinnerTipsEnabled:false};
+            for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
+            fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
+        " "$SETTINGS_FILE"
+    else
+        # Fallback: write defaults only if file is empty/bare
+        if [ "$(cat "$SETTINGS_FILE")" = "{}" ]; then
+            printf '{"teammateMode":"tmux","spinnerTipsEnabled":false}\n' > "$SETTINGS_FILE"
+        fi
+    fi
+else
+    info "Reusing sandbox: $SANDBOX_DIR"
+fi
+
+# --- Detect platform ---
+OS="$(uname -s)"
+
+# --- Apply LAN-blocking iptables rules (Linux only) ---
+PRIVATE_RANGES=(
+    "10.0.0.0/8"
+    "172.16.0.0/12"
+    "192.168.0.0/16"
+    "169.254.0.0/16"
+    "100.64.0.0/10"
+)
+
+apply_network_isolation() {
+    if [[ "$OS" == "Linux" ]]; then
+        # Clean up any stale rules from a previous unclean exit
+        sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d 172.30.0.0/24 -j ACCEPT 2>/dev/null || true
+        for range in "${PRIVATE_RANGES[@]}"; do
+            sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d "$range" -j DROP 2>/dev/null || true
+        done
+
+        info "Applying network isolation rules..."
+        # Test that iptables works before relying on it
+        if ! sudo iptables -L DOCKER-USER -n &>/dev/null; then
+            warn "WARNING: iptables DOCKER-USER chain not accessible — LAN isolation is NOT active."
+            warn "The container may be able to reach your local network."
+            return
+        fi
+
+        for range in "${PRIVATE_RANGES[@]}"; do
+            sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d "$range" -j DROP 2>/dev/null || true
+        done
+        # Inserted last → lands at top → evaluated first
+        sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d 172.30.0.0/24 -j ACCEPT 2>/dev/null || true
+        info "Network isolation rules applied."
+    fi
+}
+
+cleanup_network_isolation() {
+    if [[ "$OS" == "Linux" ]]; then
+        info "Cleaning up network isolation rules..."
+        sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d 172.30.0.0/24 -j ACCEPT 2>/dev/null || true
+        for range in "${PRIVATE_RANGES[@]}"; do
+            sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d "$range" -j DROP 2>/dev/null || true
+        done
+    fi
+}
+
+trap cleanup_network_isolation EXIT
+apply_network_isolation
+
+# --- Ensure .claude.json exists (setup state: theme, terms acceptance, etc.) ---
+CLAUDE_JSON="$SANDBOX_DIR/.claude.json"
+if [ ! -f "$CLAUDE_JSON" ]; then
+    printf '{"tipsDisabled":true}\n' > "$CLAUDE_JSON"
+fi
+
+# --- Build docker run flags ---
+RUN_FLAGS=(--rm -it)
+RUN_FLAGS+=(--cpus "$SANDY_CPUS" --memory "$SANDY_MEM")
+RUN_FLAGS+=(--security-opt no-new-privileges:true)
+RUN_FLAGS+=(--read-only)
+RUN_FLAGS+=(--tmpfs /tmp:size=1G)
+RUN_FLAGS+=(--tmpfs /home/claude:size=512M,uid=1001,gid=1001)
+RUN_FLAGS+=(--network "$NETWORK_NAME")
+RUN_FLAGS+=(-v "$SANDBOX_DIR:/home/claude/.claude")
+RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/claude/.claude.json")
+RUN_FLAGS+=(-v "$WORK_DIR:/workspace")
+RUN_FLAGS+=(-w /workspace)
+# Validate SANDY_MODEL — only allow alphanumeric, hyphens, dots, underscores
+SANDY_MODEL="${SANDY_MODEL:-claude-opus-4-6}"
+if ! [[ "$SANDY_MODEL" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    error "Invalid SANDY_MODEL: $SANDY_MODEL (only alphanumeric, hyphens, dots, underscores allowed)"
+    exit 1
+fi
+RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+fi
+
+# --- Launch ---
+info "Launching Claude Code sandbox..."
+info "  Working directory: $WORK_DIR"
+info "  Sandbox:           $SANDBOX_DIR"
+info "  Resources:         ${SANDY_CPUS} CPUs, ${SANDY_MEM} memory"
+info "  Network:           Public internet only (LAN blocked)"
+echo ""
+
+docker run "${RUN_FLAGS[@]}" "$IMAGE_NAME" "$@"
