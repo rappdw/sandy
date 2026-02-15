@@ -34,6 +34,29 @@ info()  { echo -e "${GREEN}[sandy]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[sandy]${NC} $*"; }
 error() { echo -e "${RED}[sandy]${NC} $*" >&2; }
 
+# --- Help ---
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+sandy — Claude's isolated sibling
+
+Run Claude Code in a Docker container with filesystem isolation,
+network isolation, resource limits, and per-project credential sandboxes.
+
+Usage:
+  sandy                          Start interactive session
+  sandy -p "prompt"              One-shot prompt
+  sandy --help                   Show this help
+
+Environment variables:
+  SANDY_MODEL      Model to use (default: claude-opus-4-6)
+  ANTHROPIC_API_KEY  API key (not needed with Claude Max / OAuth)
+  SANDY_HOME       Sandy config directory (default: ~/.sandy)
+
+All other arguments are forwarded to claude.
+EOF
+    exit 0
+fi
+
 # --- Preflight checks ---
 if ! command -v docker &>/dev/null; then
     error "Docker is not installed or not in PATH."
@@ -52,7 +75,7 @@ RUN apt-get update && apt-get install -y ca-certificates curl git jq less ripgre
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 RUN npm install -g @anthropic-ai/claude-code
-RUN useradd -m -s /bin/bash claude
+RUN useradd -m -s /bin/bash -u 1001 claude
 COPY tmux.conf /etc/tmux.conf
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

@@ -84,7 +84,7 @@ curl -m 5 https://api.anthropic.com
 
 ## Security Notes
 
-- The container runs as a non-root user (`claude`, UID 1000)
+- The container runs as a non-root user (`claude`, UID 1001)
 - The root filesystem is read-only (`/tmp` and `/home/claude` are tmpfs)
 - `no-new-privileges` prevents privilege escalation
 - Credentials are seeded into per-project sandboxes, not shared across projects
