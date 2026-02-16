@@ -1,3 +1,7 @@
+[![License: MIT](https://img.shields.io/github/license/rappdw/sandy)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/rappdw/sandy)](https://github.com/rappdw/sandy/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)]()
+
 # sandy — Claude's isolated sibling
 
 Run Claude Code with `--dangerously-skip-permissions` in a Docker container with proper isolation:
