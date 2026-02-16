@@ -178,20 +178,39 @@ ensure_network
 
 # --- Per-project sandbox directory ---
 WORK_DIR="$(pwd)"
-SANDBOX_HASH="$(printf '%s' "$WORK_DIR" | shasum -a 256 2>/dev/null || printf '%s' "$WORK_DIR" | sha256sum)"
-SANDBOX_HASH="${SANDBOX_HASH%% *}"
-SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_HASH}"
+FULL_HASH="$(printf '%s' "$WORK_DIR" | { shasum -a 256 2>/dev/null || sha256sum; })"
+FULL_HASH="${FULL_HASH%% *}"
+SHORT_HASH="${FULL_HASH:0:8}"
+# Sanitize the directory basename for use in the sandbox name
+DIR_BASE="$(basename "$WORK_DIR" | tr -cd 'a-zA-Z0-9._-')"
+DIR_BASE="${DIR_BASE:-project}"
+SANDBOX_NAME="${DIR_BASE}-${SHORT_HASH}"
+SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
+
+# Migrate legacy hash-only sandbox if it exists
+LEGACY_SANDBOX="$SANDY_HOME/sandboxes/${FULL_HASH}"
+if [ -d "$LEGACY_SANDBOX" ] && [ ! -d "$SANDBOX_DIR" ]; then
+    info "Migrating sandbox: ${FULL_HASH} → ${SANDBOX_NAME}"
+    mv "$LEGACY_SANDBOX" "$SANDBOX_DIR"
+    # Migrate the companion .claude.json too
+    if [ -f "$LEGACY_SANDBOX.claude.json" ]; then
+        mv "$LEGACY_SANDBOX.claude.json" "$SANDY_HOME/sandboxes/${SANDBOX_NAME}.claude.json"
+    fi
+fi
 
 if [ ! -d "$SANDBOX_DIR" ]; then
     info "Creating new sandbox: $SANDBOX_DIR"
     mkdir -p "$SANDBOX_DIR"
-    # Seed credentials and settings from host's ~/.claude if available
-    for f in .credentials.json settings.json; do
-        if [ -f "$HOME/.claude/$f" ]; then
-            cp "$HOME/.claude/$f" "$SANDBOX_DIR/$f"
-            info "  Seeded $f"
-        fi
-    done
+    # Seed settings from host's ~/.claude if available
+    if [ -f "$HOME/.claude/settings.json" ]; then
+        cp "$HOME/.claude/settings.json" "$SANDBOX_DIR/settings.json"
+        info "  Seeded settings.json"
+    fi
+    # Seed statsig cache for feature flags
+    if [ -d "$HOME/.claude/statsig" ]; then
+        cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/statsig"
+        info "  Seeded statsig/"
+    fi
     # Write sandy-required defaults into settings.json (merge with seeded copy)
     SETTINGS_FILE="$SANDBOX_DIR/settings.json"
     [ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
@@ -206,14 +225,14 @@ if [ ! -d "$SANDBOX_DIR" ]; then
             raw = raw.replace(/(\"[^\"]*\")\s*\n(\s*\")/g, '\$1,\n\$2');
             let s;
             try { s = JSON.parse(raw); } catch { s = {}; }
-            const defaults = {teammateMode:'tmux', spinnerTipsEnabled:false};
+            const defaults = {teammateMode:'tmux', spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:true};
             for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
             fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
         " "$SETTINGS_FILE"
     else
         # Fallback: write defaults only if file is empty/bare
         if [ "$(cat "$SETTINGS_FILE")" = "{}" ]; then
-            printf '{"teammateMode":"tmux","spinnerTipsEnabled":false}\n' > "$SETTINGS_FILE"
+            printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true}\n' > "$SETTINGS_FILE"
         fi
     fi
 else
@@ -267,13 +286,55 @@ cleanup_network_isolation() {
     fi
 }
 
-trap cleanup_network_isolation EXIT
+cleanup() {
+    cleanup_network_isolation
+    if [ -n "${CRED_TMPDIR:-}" ]; then
+        rm -rf "$CRED_TMPDIR"
+    fi
+}
+
+trap cleanup EXIT
 apply_network_isolation
 
 # --- Ensure .claude.json exists (setup state: theme, terms acceptance, etc.) ---
-CLAUDE_JSON="$SANDBOX_DIR/.claude.json"
+# Stored outside SANDBOX_DIR to avoid overlapping Docker bind mounts
+CLAUDE_JSON="$SANDY_HOME/sandboxes/${SANDBOX_NAME}.claude.json"
 if [ ! -f "$CLAUDE_JSON" ]; then
-    printf '{"tipsDisabled":true}\n' > "$CLAUDE_JSON"
+    # Seed from host's ~/.claude.json (contains onboarding, theme, OAuth, etc.)
+    if [ -f "$HOME/.claude.json" ]; then
+        cp "$HOME/.claude.json" "$CLAUDE_JSON"
+        info "Seeded .claude.json from host"
+        # Merge sandy-specific overrides
+        if command -v node &>/dev/null; then
+            node -e "
+                const fs = require('fs');
+                const f = process.argv[1];
+                let s;
+                try { s = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { s = {}; }
+                s.tipsDisabled = true;
+                fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
+            " "$CLAUDE_JSON"
+        fi
+    else
+        printf '{"tipsDisabled":true}\n' > "$CLAUDE_JSON"
+    fi
+fi
+
+# --- Ephemeral credential loading (fresh each launch, never persisted in sandbox) ---
+CRED_TMPDIR=""
+if [ -f "$HOME/.claude/.credentials.json" ]; then
+    CRED_TMPDIR="$(mktemp -d)"
+    cp "$HOME/.claude/.credentials.json" "$CRED_TMPDIR/.credentials.json"
+    chmod 600 "$CRED_TMPDIR/.credentials.json"
+    info "Loaded credentials (from file)"
+elif [[ "$(uname -s)" == "Darwin" ]]; then
+    KEYCHAIN_CREDS="$(security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w 2>/dev/null || true)"
+    if [ -n "$KEYCHAIN_CREDS" ]; then
+        CRED_TMPDIR="$(mktemp -d)"
+        printf '%s\n' "$KEYCHAIN_CREDS" > "$CRED_TMPDIR/.credentials.json"
+        chmod 600 "$CRED_TMPDIR/.credentials.json"
+        info "Loaded credentials (from macOS Keychain)"
+    fi
 fi
 
 # --- Build docker run flags ---
@@ -285,6 +346,9 @@ RUN_FLAGS+=(--tmpfs /tmp:size=1G)
 RUN_FLAGS+=(--tmpfs /home/claude:size=512M,uid=1001,gid=1001)
 RUN_FLAGS+=(--network "$NETWORK_NAME")
 RUN_FLAGS+=(-v "$SANDBOX_DIR:/home/claude/.claude")
+if [ -n "$CRED_TMPDIR" ]; then
+    RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json:ro")
+fi
 RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/claude/.claude.json")
 RUN_FLAGS+=(-v "$WORK_DIR:/workspace")
 RUN_FLAGS+=(-w /workspace)
