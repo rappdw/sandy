@@ -19,10 +19,23 @@ info()  { echo -e "${GREEN}[sandy]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[sandy]${NC} $*"; }
 error() { echo -e "${RED}[sandy]${NC} $*" >&2; }
 
-# --- Check for Docker ---
+# --- Check prerequisites ---
 if ! command -v docker &>/dev/null; then
     warn "Docker is not installed. sandy requires Docker to run."
-    warn "Install Docker: https://docs.docker.com/get-docker/"
+    warn "  Install: https://docs.docker.com/get-docker/"
+fi
+
+if ! command -v node &>/dev/null; then
+    warn "Node.js is not installed. sandy requires Node.js for setup and SSH agent relay."
+    warn "  Install: https://nodejs.org/"
+fi
+
+if ! command -v gh &>/dev/null; then
+    warn "GitHub CLI (gh) is not installed. Required for default git auth (SANDY_SSH=token)."
+    warn "  Install: https://cli.github.com"
+    warn "  Then run: gh auth login"
+elif ! gh auth token &>/dev/null; then
+    warn "GitHub CLI is installed but not authenticated. Run: gh auth login"
 fi
 
 # --- Create install dir if needed ---

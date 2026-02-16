@@ -15,10 +15,18 @@ set -euo pipefail
 #   sandy -p "prompt"         One-shot prompt
 # =============================================================================
 
+SANDY_VERSION="0.1.0"
+
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
-BRIDGE_NAME="br-claude"
+# Validate SANDY_HOME — reject shell metacharacters
+if [[ "$SANDY_HOME" =~ [\;\$\`\&\|\<\>] ]]; then
+    echo "[sandy] ERROR: Invalid SANDY_HOME: contains shell metacharacters" >&2
+    exit 1
+fi
 IMAGE_NAME="sandy-claude-code"
-NETWORK_NAME="sandy_internet-only"
+# Per-instance network names keyed on PID to avoid concurrent iptables races
+BRIDGE_NAME="br-claude-$$"
+NETWORK_NAME="sandy_net_$$"
 
 # --- Colors (disabled when not a terminal) ---
 if [ -t 1 ]; then
@@ -34,10 +42,16 @@ info()  { echo -e "${GREEN}[sandy]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[sandy]${NC} $*"; }
 error() { echo -e "${RED}[sandy]${NC} $*" >&2; }
 
+# --- Version ---
+if [[ "${1:-}" == "-v" || "${1:-}" == "--version" ]]; then
+    echo "sandy $SANDY_VERSION"
+    exit 0
+fi
+
 # --- Help ---
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    cat <<'EOF'
-sandy — Claude's isolated sibling
+    cat <<EOF
+sandy $SANDY_VERSION — Claude's isolated sibling
 
 Run Claude Code in a Docker container with filesystem isolation,
 network isolation, resource limits, and per-project credential sandboxes.
@@ -48,13 +62,31 @@ Usage:
   sandy --help                   Show this help
 
 Environment variables:
-  SANDY_MODEL      Model to use (default: claude-opus-4-6)
+  SANDY_MODEL        Model to use (default: claude-opus-4-6)
   ANTHROPIC_API_KEY  API key (not needed with Claude Max / OAuth)
-  SANDY_HOME       Sandy config directory (default: ~/.sandy)
+  SANDY_HOME         Sandy config directory (default: ~/.sandy)
+  SANDY_SSH          Git SSH method: "token" (default) uses gh CLI token
+                     with HTTPS; "agent" forwards host SSH agent via relay
+  SANDY_SKIP_PERMISSIONS  Set to "false" to keep Claude Code's permission
+                     system active (default: "true" — bypasses permissions)
+  SANDY_ALLOW_NO_ISOLATION  Set to "1" to allow launch when iptables
+                     rules cannot be applied (Linux only)
+
+Flags:
+  --help             Show this help
+  --version          Show version
+  --rebuild          Force rebuild of the sandbox Docker image
 
 All other arguments are forwarded to claude.
 EOF
     exit 0
+fi
+
+# --- --rebuild flag ---
+SANDY_REBUILD=false
+if [[ "${1:-}" == "--rebuild" ]]; then
+    SANDY_REBUILD=true
+    shift
 fi
 
 # --- Preflight checks ---
@@ -65,48 +97,118 @@ fi
 
 # --- Ensure SANDY_HOME and build files exist ---
 ensure_build_files() {
-    if [ ! -f "$SANDY_HOME/Dockerfile" ]; then
-        info "Setting up sandy in $SANDY_HOME..."
-        mkdir -p "$SANDY_HOME"
+    mkdir -p "$SANDY_HOME"
 
-        cat > "$SANDY_HOME/Dockerfile" <<'DOCKERFILE'
+    cat > "$SANDY_HOME/Dockerfile.new" <<'DOCKERFILE'
 FROM node:20-slim
-RUN apt-get update && apt-get install -y ca-certificates curl git jq less ripgrep tmux ncurses-term && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates curl git jq less openssh-client ripgrep tmux ncurses-term && rm -rf /var/lib/apt/lists/*
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 RUN npm install -g @anthropic-ai/claude-code
 RUN useradd -m -s /bin/bash -u 1001 claude
 COPY tmux.conf /etc/tmux.conf
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN apt-get update && apt-get install -y gosu && rm -rf /var/lib/apt/lists/*
 RUN chmod +x /usr/local/bin/entrypoint.sh
-USER claude
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 DOCKERFILE
 
-        cat > "$SANDY_HOME/entrypoint.sh" <<'ENTRYPOINT'
+    cat > "$SANDY_HOME/entrypoint.sh.new" <<'ENTRYPOINT'
 #!/bin/bash
+# --- Root-only setup (runs before dropping to user claude) ---
+
+# Seed known_hosts from host if available
+if [ -f "/tmp/host-ssh-known_hosts" ]; then
+    mkdir -p /home/claude/.ssh
+    cp /tmp/host-ssh-known_hosts /home/claude/.ssh/known_hosts
+    chown -R claude:claude /home/claude/.ssh
+    chmod 700 /home/claude/.ssh
+    chmod 644 /home/claude/.ssh/known_hosts
+fi
+
+if [ "${SANDY_SSH:-token}" = "agent" ]; then
+    # --- SSH agent mode ---
+    # SSH agent relay: create a Unix socket that relays to the host's TCP relay
+    if [ -n "${SSH_RELAY_PORT:-}" ]; then
+        node -e "
+            const net = require('net'), fs = require('fs');
+            const SOCK = '/tmp/ssh-agent.sock';
+            try { fs.unlinkSync(SOCK); } catch {}
+            const server = net.createServer(unix => {
+                const tcp = net.createConnection(${SSH_RELAY_PORT}, 'host.docker.internal');
+                unix.pipe(tcp).pipe(unix);
+                unix.on('error', () => tcp.destroy());
+                tcp.on('error', () => unix.destroy());
+            });
+            server.listen(SOCK, () => { fs.chmodSync(SOCK, 0o600); try{fs.chownSync(SOCK, 1001, 1001);}catch{} });
+        " &
+        # Wait for socket to appear
+        for i in $(seq 1 50); do [ -S /tmp/ssh-agent.sock ] && break; sleep 0.1; done
+        export SSH_AUTH_SOCK=/tmp/ssh-agent.sock
+    elif [ -S "/tmp/ssh-agent.sock" ]; then
+        # Linux: socket was mounted directly
+        chmod 600 /tmp/ssh-agent.sock && chown claude:claude /tmp/ssh-agent.sock
+    fi
+
+    # Copy host SSH config/keys with correct ownership and permissions
+    if [ -d "/tmp/host-ssh" ]; then
+        mkdir -p /home/claude/.ssh
+        cp -a /tmp/host-ssh/. /home/claude/.ssh/
+        chown -R claude:claude /home/claude/.ssh
+        chmod 700 /home/claude/.ssh
+        chmod 600 /home/claude/.ssh/* 2>/dev/null || true
+        chmod 644 /home/claude/.ssh/*.pub 2>/dev/null || true
+        chmod 644 /home/claude/.ssh/known_hosts 2>/dev/null || true
+        chmod 644 /home/claude/.ssh/config 2>/dev/null || true
+    fi
+fi
+
+# Drop privileges and continue as user claude
+exec gosu claude bash -c '
+set -e
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 export DISABLE_SPINNER_TIPS=1
 
 # Remap ANSI dark blue (color 4) to a readable bright blue
-printf '\033]4;4;rgb:61/8f/ff\033\\'
-trap 'printf "\033]104;4\033\\"' EXIT
+printf "\033]4;4;rgb:61/8f/ff\033\\"
+trap "printf \"\033]104;4\033\\\\\"" EXIT
 
 # Ensure project-level settings exist
 mkdir -p /workspace/.claude 2>/dev/null || true
 
+# Trust the mounted workspace (host UID differs from container UID)
+git config --global --add safe.directory /workspace
+
+# Set git identity from host
+if [ -n "${GIT_USER_NAME:-}" ]; then
+    git config --global user.name "$GIT_USER_NAME"
+fi
+if [ -n "${GIT_USER_EMAIL:-}" ]; then
+    git config --global user.email "$GIT_USER_EMAIL"
+fi
+
+# Configure git auth: GitHub token (default) or SSH agent
+if [ "${SANDY_SSH:-token}" = "token" ] && [ -n "${GIT_TOKEN:-}" ]; then
+    git config --global url."https://oauth2:${GIT_TOKEN}@github.com/".insteadOf "git@github.com:"
+    git config --global --add url."https://oauth2:${GIT_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+fi
+
 # Build the claude command with any passed args
-CLAUDE_CMD="claude --dangerously-skip-permissions --model ${SANDY_MODEL:-claude-opus-4-6} --teammate-mode tmux"
+CLAUDE_CMD="claude --model ${SANDY_MODEL:-claude-opus-4-6} --teammate-mode tmux"
+if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+    CLAUDE_CMD+=" --dangerously-skip-permissions"
+fi
 for arg in "$@"; do
-    CLAUDE_CMD+=" $(printf '%q' "$arg")"
+    CLAUDE_CMD+=" $(printf "%q" "$arg")"
 done
 
 cd /workspace
 tmux new-session -s sandy -- bash -c "$CLAUDE_CMD"
+' -- "$@"
 ENTRYPOINT
 
-        cat > "$SANDY_HOME/tmux.conf" <<'TMUXCONF'
+    cat > "$SANDY_HOME/tmux.conf.new" <<'TMUXCONF'
 set -g history-limit 10000
 set -g mouse on
 set -g default-terminal "tmux-256color"
@@ -134,12 +236,29 @@ set -g focus-events on
 setw -g aggressive-resize on
 TMUXCONF
 
-        info "Build files written."
+    # Only update on-disk files if content has changed
+    local changed=false
+    for f in Dockerfile entrypoint.sh tmux.conf; do
+        if [ ! -f "$SANDY_HOME/$f" ] || ! diff -q "$SANDY_HOME/$f.new" "$SANDY_HOME/$f" &>/dev/null; then
+            mv "$SANDY_HOME/$f.new" "$SANDY_HOME/$f"
+            changed=true
+        else
+            rm "$SANDY_HOME/$f.new"
+        fi
+    done
+    if [ "$changed" = true ]; then
+        info "Build files updated."
     fi
 }
 
 # --- Initialize ---
 ensure_build_files
+
+# Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
+if [ "$SANDY_REBUILD" = true ]; then
+    rm -f "$SANDY_HOME/.build_hash"
+    info "Build cache cleared. Image will be rebuilt."
+fi
 
 # --- Detect available resources ---
 AVAILABLE_CPUS="$(docker info --format '{{.NCPU}}' 2>/dev/null || echo 2)"
@@ -162,16 +281,18 @@ else
     info "Sandbox image up to date."
 fi
 
-# --- Ensure the isolated network exists ---
+# --- Ensure the per-instance isolated network exists ---
+CONTAINER_SUBNET=""
 ensure_network() {
-    if ! docker network inspect "$NETWORK_NAME" &>/dev/null; then
-        info "Creating isolated network..."
-        docker network create \
-            --driver bridge \
-            --subnet 172.30.0.0/24 \
-            -o com.docker.network.bridge.name="$BRIDGE_NAME" \
-            "$NETWORK_NAME" >/dev/null
-    fi
+    info "Creating isolated network..."
+    docker network create \
+        --driver bridge \
+        --ipv6=false \
+        -o com.docker.network.bridge.name="$BRIDGE_NAME" \
+        "$NETWORK_NAME" >/dev/null
+    # Query the dynamically-assigned subnet and bridge name
+    CONTAINER_SUBNET="$(docker network inspect "$NETWORK_NAME" --format '{{(index .IPAM.Config 0).Subnet}}')"
+    BRIDGE_NAME="$(docker network inspect "$NETWORK_NAME" --format '{{index .Options "com.docker.network.bridge.name"}}')"
 }
 
 ensure_network
@@ -253,33 +374,31 @@ PRIVATE_RANGES=(
 
 apply_network_isolation() {
     if [[ "$OS" == "Linux" ]]; then
-        # Clean up any stale rules from a previous unclean exit
-        sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d 172.30.0.0/24 -j ACCEPT 2>/dev/null || true
-        for range in "${PRIVATE_RANGES[@]}"; do
-            sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d "$range" -j DROP 2>/dev/null || true
-        done
-
         info "Applying network isolation rules..."
-        # Test that iptables works before relying on it
+        # Test that iptables works before relying on it (fail-closed)
         if ! sudo iptables -L DOCKER-USER -n &>/dev/null; then
-            warn "WARNING: iptables DOCKER-USER chain not accessible — LAN isolation is NOT active."
-            warn "The container may be able to reach your local network."
-            return
+            if [[ "${SANDY_ALLOW_NO_ISOLATION:-}" == "1" ]]; then
+                warn "WARNING: LAN isolation NOT active (SANDY_ALLOW_NO_ISOLATION=1)."
+                return
+            fi
+            error "Cannot apply network isolation (iptables DOCKER-USER chain not accessible)."
+            error "Refusing to start without LAN isolation. To override: SANDY_ALLOW_NO_ISOLATION=1"
+            exit 1
         fi
 
         for range in "${PRIVATE_RANGES[@]}"; do
             sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d "$range" -j DROP 2>/dev/null || true
         done
-        # Inserted last → lands at top → evaluated first
-        sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d 172.30.0.0/24 -j ACCEPT 2>/dev/null || true
+        # Inserted last → lands at top → evaluated first: allow container's own subnet
+        sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d "$CONTAINER_SUBNET" -j ACCEPT 2>/dev/null || true
         info "Network isolation rules applied."
     fi
 }
 
 cleanup_network_isolation() {
-    if [[ "$OS" == "Linux" ]]; then
+    if [[ "$OS" == "Linux" ]] && [ -n "$CONTAINER_SUBNET" ]; then
         info "Cleaning up network isolation rules..."
-        sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d 172.30.0.0/24 -j ACCEPT 2>/dev/null || true
+        sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d "$CONTAINER_SUBNET" -j ACCEPT 2>/dev/null || warn "Note: could not remove ACCEPT rule (may already be cleaned)"
         for range in "${PRIVATE_RANGES[@]}"; do
             sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d "$range" -j DROP 2>/dev/null || true
         done
@@ -288,12 +407,17 @@ cleanup_network_isolation() {
 
 cleanup() {
     cleanup_network_isolation
+    # Remove per-instance Docker network
+    docker network rm "$NETWORK_NAME" 2>/dev/null || true
     if [ -n "${CRED_TMPDIR:-}" ]; then
         rm -rf "$CRED_TMPDIR"
     fi
+    if [ -n "${SSH_RELAY_PID:-}" ]; then
+        kill "$SSH_RELAY_PID" 2>/dev/null || true
+    fi
 }
 
-trap cleanup EXIT
+trap cleanup EXIT INT TERM HUP
 apply_network_isolation
 
 # --- Ensure .claude.json exists (setup state: theme, terms acceptance, etc.) ---
@@ -359,8 +483,92 @@ if ! [[ "$SANDY_MODEL" =~ ^[a-zA-Z0-9._-]+$ ]]; then
     exit 1
 fi
 RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
+RUN_FLAGS+=(-e "SANDY_SKIP_PERMISSIONS=${SANDY_SKIP_PERMISSIONS:-true}")
+# Forward git identity from host
+GIT_USER_NAME="${GIT_USER_NAME:-$(git config user.name 2>/dev/null || true)}"
+GIT_USER_EMAIL="${GIT_USER_EMAIL:-$(git config user.email 2>/dev/null || true)}"
+if [ -n "$GIT_USER_NAME" ]; then
+    RUN_FLAGS+=(-e "GIT_USER_NAME=$GIT_USER_NAME")
+fi
+if [ -n "$GIT_USER_EMAIL" ]; then
+    RUN_FLAGS+=(-e "GIT_USER_EMAIL=$GIT_USER_EMAIL")
+fi
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+fi
+
+# --- Git authentication ---
+# Default (SANDY_SSH=token): use GitHub CLI token with HTTPS — scoped, no SSH agent exposure.
+# Opt-in (SANDY_SSH=agent): forward host SSH agent via TCP relay — full agent access.
+SANDY_SSH="${SANDY_SSH:-token}"
+SSH_RELAY_PID=""
+
+# Mount ~/.ssh/known_hosts for either mode (needed for SSH host verification)
+if [ -f "$HOME/.ssh/known_hosts" ]; then
+    RUN_FLAGS+=(-v "$HOME/.ssh/known_hosts:/tmp/host-ssh-known_hosts:ro")
+fi
+
+if [[ "$SANDY_SSH" == "agent" ]]; then
+    # --- SSH agent forwarding (opt-in) ---
+    # Mount ~/.ssh read-only at a staging path; entrypoint copies to ~/.ssh with correct ownership.
+    if [ -d "$HOME/.ssh" ]; then
+        RUN_FLAGS+=(-v "$HOME/.ssh:/tmp/host-ssh:ro")
+    fi
+    if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK}" ]; then
+        if [[ "$OS" == "Linux" ]]; then
+            # Linux: direct socket mount works
+            RUN_FLAGS+=(-v "$SSH_AUTH_SOCK:/tmp/ssh-agent.sock")
+            RUN_FLAGS+=(-e "SSH_AUTH_SOCK=/tmp/ssh-agent.sock")
+        else
+            # macOS: start a TCP relay on the host, container connects back via host.docker.internal
+            SSH_RELAY_PORTFILE="$(mktemp)"
+            node -e "
+                const net = require('net'), fs = require('fs');
+                const server = net.createServer(tcp => {
+                    const unix = net.createConnection(process.env.SSH_AUTH_SOCK);
+                    tcp.pipe(unix).pipe(tcp);
+                    tcp.on('error', () => unix.destroy());
+                    unix.on('error', () => tcp.destroy());
+                });
+                server.listen(0, '127.0.0.1', () => {
+                    fs.writeFileSync('$SSH_RELAY_PORTFILE', String(server.address().port));
+                });
+            " &
+            SSH_RELAY_PID=$!
+            # Wait for the relay to write its port
+            for _ in $(seq 1 50); do
+                [ -s "$SSH_RELAY_PORTFILE" ] && break
+                sleep 0.1
+            done
+            SSH_RELAY_PORT="$(cat "$SSH_RELAY_PORTFILE" 2>/dev/null || true)"
+            rm -f "$SSH_RELAY_PORTFILE"
+            if [ -z "$SSH_RELAY_PORT" ]; then
+                error "SSH agent relay failed to start. Check that Node.js is working."
+                kill "$SSH_RELAY_PID" 2>/dev/null || true
+                SSH_RELAY_PID=""
+                exit 1
+            fi
+            RUN_FLAGS+=(-e "SSH_RELAY_PORT=$SSH_RELAY_PORT")
+            info "SSH agent relay on localhost:$SSH_RELAY_PORT (PID $SSH_RELAY_PID)"
+        fi
+    else
+        warn "SANDY_SSH=agent but no SSH agent found (SSH_AUTH_SOCK not set)"
+    fi
+    RUN_FLAGS+=(-e "SANDY_SSH=agent")
+else
+    # --- GitHub token via HTTPS (default) ---
+    GIT_TOKEN=""
+    if command -v gh &>/dev/null; then
+        GIT_TOKEN="$(gh auth token 2>/dev/null || true)"
+    fi
+    if [ -n "$GIT_TOKEN" ]; then
+        RUN_FLAGS+=(-e "GIT_TOKEN=$GIT_TOKEN")
+        info "Git auth: GitHub token via gh CLI (HTTPS)"
+    else
+        warn "No gh CLI token found. Git push/pull may not work."
+        warn "Install gh (https://cli.github.com) and run 'gh auth login', or use SANDY_SSH=agent."
+    fi
+    RUN_FLAGS+=(-e "SANDY_SSH=token")
 fi
 
 # --- Launch ---
