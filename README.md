@@ -15,7 +15,7 @@ Run Claude Code with `--dangerously-skip-permissions` in a Docker container with
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | bash
 ```
 
 Or install locally from a clone:
@@ -93,3 +93,5 @@ curl -m 5 https://api.anthropic.com
 - `no-new-privileges` prevents privilege escalation
 - Credentials are seeded into per-project sandboxes, not shared across projects
 - The working directory is bind-mounted read/write — Claude can modify your files there (that's the point)
+
+https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers&code_challenge=C4PBbCAG07gHP4W3AyS9JKIDLWvW5WGP9F-lAR7zQ2k&code_challenge_method=S256&state=Q8WKME9eT_mlNNhPFG1HJALA6LkGXB0VyjZaGvfZmKQ

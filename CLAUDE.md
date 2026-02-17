@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Installation
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | bash
 ```
 
 Or install locally from a clone:

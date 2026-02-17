@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # sandy installer
 #
-# Usage: curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | bash
 # =============================================================================
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
