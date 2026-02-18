@@ -26,7 +26,7 @@ if ! command -v docker &>/dev/null; then
 fi
 
 if ! command -v node &>/dev/null; then
-    warn "Node.js is not installed. sandy requires Node.js for setup and SSH agent relay."
+    warn "Node.js is not installed. sandy uses Node.js for JSON config merging (optional)."
     warn "  Install: https://nodejs.org/"
 fi
 

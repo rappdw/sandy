@@ -10,3 +10,6 @@
 
 # Sandy runtime (generated in ~/.sandy/, not in repo)
 *.bak
+
+# Working analysis artifacts
+analysis/

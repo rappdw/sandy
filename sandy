@@ -15,7 +15,7 @@ set -euo pipefail
 #   sandy -p "prompt"         One-shot prompt
 # =============================================================================
 
-SANDY_VERSION="0.1.0"
+SANDY_VERSION="0.2.0"
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 # Validate SANDY_HOME — reject shell metacharacters
@@ -100,15 +100,22 @@ ensure_build_files() {
     mkdir -p "$SANDY_HOME"
 
     cat > "$SANDY_HOME/Dockerfile.new" <<'DOCKERFILE'
-FROM node:20-slim
-RUN apt-get update && apt-get install -y ca-certificates curl git jq less openssh-client ripgrep tmux ncurses-term && rm -rf /var/lib/apt/lists/*
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates curl git gosu jq less openssh-client ripgrep socat tmux ncurses-term && rm -rf /var/lib/apt/lists/*
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
-RUN npm install -g @anthropic-ai/claude-code
 RUN useradd -m -s /bin/bash -u 1001 claude
+ENV PATH="/home/claude/.local/bin:$PATH"
+# Install Claude Code natively. The installer places the binary under
+# /home/claude/.local/share/claude/versions/<ver> with symlinks from
+# ~/.local/bin/claude.  We dereference (-L) the symlink chain to copy
+# the real binary to /usr/local/bin so it survives the tmpfs overlay
+# on /home/claude at runtime.
+RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \
+ && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \
+ && rm -rf /home/claude/.local/share/claude
 COPY tmux.conf /etc/tmux.conf
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN apt-get update && apt-get install -y gosu && rm -rf /var/lib/apt/lists/*
 RUN chmod +x /usr/local/bin/entrypoint.sh
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
@@ -131,18 +138,9 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
     # --- SSH agent mode ---
     # SSH agent relay: create a Unix socket that relays to the host's TCP relay
     if [ -n "${SSH_RELAY_PORT:-}" ]; then
-        node -e "
-            const net = require('net'), fs = require('fs');
-            const SOCK = '/tmp/ssh-agent.sock';
-            try { fs.unlinkSync(SOCK); } catch {}
-            const server = net.createServer(unix => {
-                const tcp = net.createConnection(${SSH_RELAY_PORT}, 'host.docker.internal');
-                unix.pipe(tcp).pipe(unix);
-                unix.on('error', () => tcp.destroy());
-                tcp.on('error', () => unix.destroy());
-            });
-            server.listen(SOCK, () => { fs.chmodSync(SOCK, 0o600); try{fs.chownSync(SOCK, 1001, 1001);}catch{} });
-        " &
+        rm -f /tmp/ssh-agent.sock
+        socat UNIX-LISTEN:/tmp/ssh-agent.sock,fork,mode=0600,user=claude \
+              TCP:host.docker.internal:${SSH_RELAY_PORT} &
         # Wait for socket to appear
         for i in $(seq 1 50); do [ -S /tmp/ssh-agent.sock ] && break; sleep 0.1; done
         export SSH_AUTH_SOCK=/tmp/ssh-agent.sock
@@ -164,10 +162,17 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
     fi
 fi
 
+# Create native install symlink so Claude Code finds its binary at the expected path
+# (the real binary lives in /usr/local/bin; /home/claude is a tmpfs overlay)
+mkdir -p /home/claude/.local/bin
+ln -sf /usr/local/bin/claude /home/claude/.local/bin/claude
+chown -R claude:claude /home/claude/.local
+
 # Drop privileges and continue as user claude
 exec gosu claude bash -c '
 set -e
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+export DISABLE_AUTOUPDATER=1
 export DISABLE_SPINNER_TIPS=1
 
 # Remap ANSI dark blue (color 4) to a readable bright blue
@@ -175,10 +180,11 @@ printf "\033]4;4;rgb:61/8f/ff\033\\"
 trap "printf \"\033]104;4\033\\\\\"" EXIT
 
 # Ensure project-level settings exist
-mkdir -p /workspace/.claude 2>/dev/null || true
+WORKSPACE="${SANDY_WORKSPACE:-/workspace}"
+mkdir -p "$WORKSPACE/.claude" 2>/dev/null || true
 
 # Trust the mounted workspace (host UID differs from container UID)
-git config --global --add safe.directory /workspace
+git config --global --add safe.directory "$WORKSPACE"
 
 # Set git identity from host
 if [ -n "${GIT_USER_NAME:-}" ]; then
@@ -203,7 +209,7 @@ for arg in "$@"; do
     CLAUDE_CMD+=" $(printf "%q" "$arg")"
 done
 
-cd /workspace
+cd "$WORKSPACE"
 tmux new-session -s sandy -- bash -c "$CLAUDE_CMD"
 ' -- "$@"
 ENTRYPOINT
@@ -273,9 +279,24 @@ SANDY_MEM="$(( AVAILABLE_MEM_GB > 2 ? AVAILABLE_MEM_GB - 1 : 2 ))g"
 # --- Build image (skip if up to date) ---
 BUILD_HASH="$(cat "$SANDY_HOME/Dockerfile" "$SANDY_HOME/entrypoint.sh" "$SANDY_HOME/tmux.conf" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -d' ' -f1)"
 HASH_FILE="$SANDY_HOME/.build_hash"
+NEEDS_BUILD=false
 if [ ! -f "$HASH_FILE" ] || [ "$(cat "$HASH_FILE")" != "$BUILD_HASH" ] || ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    NEEDS_BUILD=true
+fi
+
+# Check for newer Claude Code (skip if already rebuilding)
+if [ "$NEEDS_BUILD" = false ]; then
+    INSTALLED_VERSION="$(docker run --rm --entrypoint claude "$IMAGE_NAME" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    LATEST_VERSION="$(curl -fsSL https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null || true)"
+    if [ -n "$LATEST_VERSION" ] && [ -n "$INSTALLED_VERSION" ] && [ "$LATEST_VERSION" != "$INSTALLED_VERSION" ]; then
+        info "Claude Code update available: $INSTALLED_VERSION → $LATEST_VERSION"
+        NEEDS_BUILD=true
+    fi
+fi
+
+if [ "$NEEDS_BUILD" = true ]; then
     info "Building sandbox image..."
-    docker build -q -t "$IMAGE_NAME" "$SANDY_HOME"
+    docker build -q --no-cache -t "$IMAGE_NAME" "$SANDY_HOME"
     echo "$BUILD_HASH" > "$HASH_FILE"
 else
     info "Sandbox image up to date."
@@ -436,11 +457,26 @@ if [ ! -f "$CLAUDE_JSON" ]; then
                 let s;
                 try { s = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { s = {}; }
                 s.tipsDisabled = true;
+                s.installMethod = 'native';
                 fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
             " "$CLAUDE_JSON"
         fi
     else
-        printf '{"tipsDisabled":true}\n' > "$CLAUDE_JSON"
+        printf '{"tipsDisabled":true,"installMethod":"native"}\n' > "$CLAUDE_JSON"
+    fi
+else
+    # Migrate existing sandboxes: ensure installMethod is native
+    if command -v node &>/dev/null; then
+        node -e "
+            const fs = require('fs');
+            const f = process.argv[1];
+            let s;
+            try { s = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { process.exit(0); }
+            if (s.installMethod !== 'native') {
+                s.installMethod = 'native';
+                fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
+            }
+        " "$CLAUDE_JSON"
     fi
 fi
 
@@ -474,8 +510,34 @@ if [ -n "$CRED_TMPDIR" ]; then
     RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json:ro")
 fi
 RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/claude/.claude.json")
-RUN_FLAGS+=(-v "$WORK_DIR:/workspace")
-RUN_FLAGS+=(-w /workspace)
+# --- Git submodule support ---
+# Submodules use a .git *file* with a relative gitdir: path. Both the forward
+# path (worktree→gitdir) and reverse path (gitdir config→worktree) are relative,
+# so we must mount the workspace deep enough to preserve the path relationship.
+SANDY_WORKSPACE="/workspace"
+if [ -f "$WORK_DIR/.git" ]; then
+    GITDIR_REL="$(sed 's/^gitdir: //' "$WORK_DIR/.git" | tr -d '[:space:]')"
+    if [ -n "$GITDIR_REL" ]; then
+        GITDIR_HOST="$(cd "$WORK_DIR" && cd "$GITDIR_REL" && pwd)"
+        SUBMODULE_PATHS="$(node -e "
+            const path = require('path');
+            const rel = process.argv[1], wd = process.argv[2];
+            const ups = (rel.match(/\.\.\//g) || []).length;
+            const parts = wd.split('/').filter(Boolean);
+            const sub = parts.slice(-ups).join('/');
+            const ws = '/repo/' + sub;
+            const gd = path.resolve(ws, rel);
+            console.log(ws); console.log(gd);
+        " "$GITDIR_REL" "$WORK_DIR")"
+        SANDY_WORKSPACE="$(echo "$SUBMODULE_PATHS" | head -1)"
+        CONTAINER_GITDIR="$(echo "$SUBMODULE_PATHS" | tail -1)"
+        RUN_FLAGS+=(-v "$GITDIR_HOST:$CONTAINER_GITDIR")
+        info "  Git submodule: workspace at $SANDY_WORKSPACE"
+    fi
+fi
+RUN_FLAGS+=(-v "$WORK_DIR:$SANDY_WORKSPACE")
+RUN_FLAGS+=(-w "$SANDY_WORKSPACE")
+RUN_FLAGS+=(-e "SANDY_WORKSPACE=$SANDY_WORKSPACE")
 # Validate SANDY_MODEL — only allow alphanumeric, hyphens, dots, underscores
 SANDY_MODEL="${SANDY_MODEL:-claude-opus-4-6}"
 if ! [[ "$SANDY_MODEL" =~ ^[a-zA-Z0-9._-]+$ ]]; then
@@ -522,19 +584,43 @@ if [[ "$SANDY_SSH" == "agent" ]]; then
         else
             # macOS: start a TCP relay on the host, container connects back via host.docker.internal
             SSH_RELAY_PORTFILE="$(mktemp)"
-            node -e "
-                const net = require('net'), fs = require('fs');
-                const server = net.createServer(tcp => {
-                    const unix = net.createConnection(process.env.SSH_AUTH_SOCK);
-                    tcp.pipe(unix).pipe(tcp);
-                    tcp.on('error', () => unix.destroy());
-                    unix.on('error', () => tcp.destroy());
-                });
-                server.listen(0, '127.0.0.1', () => {
-                    fs.writeFileSync('$SSH_RELAY_PORTFILE', String(server.address().port));
-                });
-            " &
-            SSH_RELAY_PID=$!
+            if command -v socat &>/dev/null; then
+                # Pick an ephemeral port, write it to the portfile, then relay
+                python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()" > "$SSH_RELAY_PORTFILE"
+                SSH_RELAY_PORT="$(cat "$SSH_RELAY_PORTFILE")"
+                socat TCP-LISTEN:"$SSH_RELAY_PORT",bind=127.0.0.1,fork,reuseaddr \
+                      UNIX-CONNECT:"$SSH_AUTH_SOCK" &
+                SSH_RELAY_PID=$!
+            elif command -v python3 &>/dev/null; then
+                python3 -c "
+import socket, os, threading, sys
+ssh_sock = os.environ['SSH_AUTH_SOCK']
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(('127.0.0.1', 0))
+srv.listen(5)
+with open(sys.argv[1], 'w') as f:
+    f.write(str(srv.getsockname()[1]))
+def relay(a, b):
+    try:
+        while True:
+            d = a.recv(4096)
+            if not d: break
+            b.sendall(d)
+    except: pass
+    finally: a.close(); b.close()
+while True:
+    tcp, _ = srv.accept()
+    unix = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    unix.connect(ssh_sock)
+    threading.Thread(target=relay, args=(tcp, unix), daemon=True).start()
+    threading.Thread(target=relay, args=(unix, tcp), daemon=True).start()
+" "$SSH_RELAY_PORTFILE" &
+                SSH_RELAY_PID=$!
+            else
+                error "SSH agent relay requires socat or python3 on the host."
+                exit 1
+            fi
             # Wait for the relay to write its port
             for _ in $(seq 1 50); do
                 [ -s "$SSH_RELAY_PORTFILE" ] && break
@@ -543,7 +629,7 @@ if [[ "$SANDY_SSH" == "agent" ]]; then
             SSH_RELAY_PORT="$(cat "$SSH_RELAY_PORTFILE" 2>/dev/null || true)"
             rm -f "$SSH_RELAY_PORTFILE"
             if [ -z "$SSH_RELAY_PORT" ]; then
-                error "SSH agent relay failed to start. Check that Node.js is working."
+                error "SSH agent relay failed to start."
                 kill "$SSH_RELAY_PID" 2>/dev/null || true
                 SSH_RELAY_PID=""
                 exit 1
