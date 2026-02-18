@@ -1,32 +1,23 @@
-## sandy v0.1.0
+## sandy v0.2.0
 
-Run Claude Code in a Docker sandbox — so the power stays, but the blast radius shrinks.
+### What's Changed
 
-### Features
+**Native Claude Code installation** — switched from `node:20-slim` to `debian:bookworm-slim` with the official Claude Code native installer. Node.js is no longer required inside the container.
 
-- **One-command install** — `curl -fsSL ... | sh` or install from a local clone
-- **Filesystem isolation** — read/write limited to the mounted working directory only
-- **Network isolation** — public internet access only; all LAN/private networks are blocked
-  - Linux: automatic `iptables` rules block RFC 1918, link-local, and CGNAT/Tailscale ranges
-  - macOS: Docker Desktop VM provides LAN isolation by default
-  - IPv6 disabled on container networks to prevent bypass of IPv4 iptables rules
-  - Per-instance Docker networks keyed on PID — concurrent sandy sessions get independent networks and iptables rulesets with no race conditions
-  - **Fail-closed**: if iptables rules cannot be applied on Linux, sandy refuses to start (override with `SANDY_ALLOW_NO_ISOLATION=1`)
-- **Resource limits** — CPU and memory caps auto-detected from host
-- **Security hardening** — non-root user, read-only root filesystem, `no-new-privileges`
-  - SSH agent socket uses restrictive `0600` permissions (owner-only) instead of world-accessible
-  - Claude Code's `--dangerously-skip-permissions` is now configurable via `SANDY_SKIP_PERMISSIONS` (default: `true`; set to `false` to keep the permission system active)
-  - `SANDY_HOME` validated against shell metacharacters to prevent injection
-- **Per-project sandboxes** — each working directory gets its own isolated `~/.claude` under `~/.sandy/sandboxes/`, with mnemonic names (e.g. `myproject-a1b2c3d4`)
-- **Ephemeral credential loading** — OAuth/API credentials are read fresh from the host each launch (never persisted in the sandbox)
-- **macOS Keychain support** — credentials are extracted from the Keychain when no `.credentials.json` file exists
-- **macOS SSH relay validation** — relay startup failures are detected and reported instead of silently passing broken config to the container
-- **Model selection** — defaults to `claude-opus-4-6`, configurable via `SANDY_MODEL`
-- **tmux integration** — sessions run inside tmux with agent teams support enabled
-- **Robust cleanup** — trap covers `EXIT`, `INT`, `TERM`, and `HUP` signals; cleanup failures are logged
-- **`--help` flag** — usage, environment variable, and flags documentation
-- **`--version` flag** — prints `sandy <version>`
-- **`--rebuild` flag** — force rebuild of the sandbox Docker image without manually deleting cache files
+**Removed Node.js dependency for SSH relay** — the in-container SSH agent relay now uses `socat`; the host-side relay prefers `socat` with a `python3` fallback. Node.js on the host is now optional (used only for JSON config merging).
+
+**Auto-update check** — sandy checks for newer Claude Code versions on launch and rebuilds the image automatically when an update is available.
+
+**Git submodule support** — when launched from a git submodule, sandy mounts the workspace at the correct depth to preserve relative gitdir paths.
+
+**Container stability** — `DISABLE_AUTOUPDATER=1` prevents Claude Code from attempting self-updates inside the read-only container. `installMethod: 'native'` is set in `.claude.json` (with migration for existing sandboxes).
+
+**Dynamic workspace paths** — the entrypoint now uses `SANDY_WORKSPACE` instead of hardcoded `/workspace`, supporting submodule and non-standard mount points.
+
+### Fixes
+
+- Removed leaked OAuth URL from README
+- Updated installer to reflect Node.js is now optional
 
 ### Environment Variables
 
@@ -43,8 +34,8 @@ Run Claude Code in a Docker sandbox — so the power stays, but the blast radius
 
 | File | Purpose |
 |---|---|
-| `sandy` | Self-contained launcher (~560 lines of bash) |
-| `install.sh` | `curl \| sh` installer |
+| `sandy` | Self-contained launcher (~670 lines of bash) |
+| `install.sh` | `curl \| bash` installer |
 
 ### Requirements
 
