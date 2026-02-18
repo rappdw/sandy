@@ -30,13 +30,30 @@ No `ANTHROPIC_API_KEY` required if using Claude Max (OAuth) — credentials are 
 
 ## Per-project Sandboxes
 
-Each project directory gets its own isolated `~/.claude` sandbox under `~/.sandy/sandboxes/`, derived from the working directory path (e.g. `/Users/drapp/dev/myproject` → `~/.sandy/sandboxes/Users_drapp_dev_myproject/`). On first run, `.credentials.json` and `settings.json` are seeded from the host's `~/.claude/`.
+Each project directory gets its own isolated `~/.claude` sandbox under `~/.sandy/sandboxes/`, named with a mnemonic prefix and hash (e.g. `myproject-a1b2c3d4`). On first run, `.credentials.json` and `settings.json` are seeded from the host's `~/.claude/`.
 
 ## Architecture
 
-- `sandy` — Self-contained launcher script installed to `~/.local/bin/`. On first run, generates Dockerfile, entrypoint.sh, and tmux.conf in `~/.sandy/`, builds the Docker image, creates per-project sandbox directories, applies network isolation, and launches the container via `docker run`.
-- `install.sh` — `curl | sh` installer that downloads `sandy` to `~/.local/bin/` and checks PATH setup.
+- **Base image**: `debian:bookworm-slim` with Claude Code installed via the official native installer (`curl -fsSL https://claude.ai/install.sh | bash`). The binary is copied to `/usr/local/bin/claude` to survive the tmpfs overlay on `/home/claude`.
+- `sandy` — Self-contained launcher (~670 lines of bash) installed to `~/.local/bin/`. On first run, generates Dockerfile, entrypoint.sh, and tmux.conf in `~/.sandy/`, builds the Docker image, creates per-project sandbox directories, applies network isolation, and launches the container via `docker run`.
+- `install.sh` — `curl | bash` installer that downloads `sandy` to `~/.local/bin/` and checks PATH setup.
+
+## Auto-update
+
+On each launch, sandy checks for newer Claude Code versions by comparing the installed version against the latest release. If an update is available, the image is rebuilt with `--no-cache`. Inside the container, `DISABLE_AUTOUPDATER=1` prevents Claude Code from attempting self-updates against the read-only filesystem.
+
+## Git Submodule Support
+
+When launched from a git submodule, sandy detects the `.git` file (vs directory), resolves the relative gitdir path, and mounts both the worktree and gitdir at the correct container paths to preserve the relative path relationship. The workspace path is passed via the `SANDY_WORKSPACE` environment variable.
+
+## SSH Agent Relay
+
+Two modes controlled by `SANDY_SSH`:
+- `token` (default) — uses `gh auth token` for HTTPS-based git auth
+- `agent` — forwards the host SSH agent into the container
+  - **Linux**: direct socket mount
+  - **macOS**: host-side TCP relay via `socat` (preferred) or `python3` fallback; in-container relay via `socat`
 
 ## Network Isolation Details
 
-The bridge network `br-claude` (subnet `172.30.0.0/24`) is created via `docker network create`. On Linux, iptables DROP rules block RFC 1918 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`), and CGNAT/Tailscale (`100.64.0.0/10`), while allowing the container's own subnet. On macOS, Docker Desktop's VM provides LAN isolation by default. Rules are cleaned up on script exit. Stale rules from previous unclean exits are cleaned up on startup.
+Per-instance Docker bridge networks are created with names keyed on PID (`sandy_net_$$`) to avoid races between concurrent sessions. On Linux, iptables DROP rules block RFC 1918 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`), and CGNAT/Tailscale (`100.64.0.0/10`), while allowing the container's own subnet. On macOS, Docker Desktop's VM provides LAN isolation by default. Rules are cleaned up on script exit.
