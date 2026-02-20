@@ -106,14 +106,14 @@ ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 RUN useradd -m -s /bin/bash -u 1001 claude
 ENV PATH="/home/claude/.local/bin:$PATH"
-# Install Claude Code natively. The installer places the binary under
-# /home/claude/.local/share/claude/versions/<ver> with symlinks from
-# ~/.local/bin/claude.  We dereference (-L) the symlink chain to copy
-# the real binary to /usr/local/bin so it survives the tmpfs overlay
-# on /home/claude at runtime.
+# Install Claude Code natively. The installer places files under
+# /home/claude/.local/{bin,share}/claude.  Since /home/claude gets a
+# tmpfs overlay at runtime, we relocate the binary to /usr/local/bin
+# and the data directory to /opt/claude-code.  The entrypoint symlinks
+# them back into the expected paths.
 RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \
  && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \
- && rm -rf /home/claude/.local/share/claude
+ && mv /home/claude/.local/share/claude /opt/claude-code
 COPY tmux.conf /etc/tmux.conf
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
@@ -162,10 +162,11 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
     fi
 fi
 
-# Create native install symlink so Claude Code finds its binary at the expected path
-# (the real binary lives in /usr/local/bin; /home/claude is a tmpfs overlay)
-mkdir -p /home/claude/.local/bin
+# Restore native install layout so Claude Code finds its binary and data at the
+# expected paths (the real files live outside /home/claude to survive the tmpfs overlay)
+mkdir -p /home/claude/.local/bin /home/claude/.local/share
 ln -sf /usr/local/bin/claude /home/claude/.local/bin/claude
+ln -sf /opt/claude-code /home/claude/.local/share/claude
 chown -R claude:claude /home/claude/.local
 
 # Drop privileges and continue as user claude
@@ -183,8 +184,8 @@ trap "printf \"\033]104;4\033\\\\\"" EXIT
 WORKSPACE="${SANDY_WORKSPACE:-/workspace}"
 mkdir -p "$WORKSPACE/.claude" 2>/dev/null || true
 
-# Trust the mounted workspace (host UID differs from container UID)
-git config --global --add safe.directory "$WORKSPACE"
+# Trust all directories (host UID differs from container UID; container is sandboxed)
+git config --global --add safe.directory "*"
 
 # Set git identity from host
 if [ -n "${GIT_USER_NAME:-}" ]; then
@@ -353,6 +354,22 @@ if [ ! -d "$SANDBOX_DIR" ]; then
         cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/statsig"
         info "  Seeded statsig/"
     fi
+    # Seed plugin marketplace catalog (but not installed plugins — start clean)
+    if [ -d "$HOME/.claude/plugins/marketplaces" ]; then
+        mkdir -p "$SANDBOX_DIR/plugins"
+        cp -r "$HOME/.claude/plugins/marketplaces" "$SANDBOX_DIR/plugins/marketplaces"
+        # Seed known_marketplaces.json with container paths
+        if [ -f "$HOME/.claude/plugins/known_marketplaces.json" ] && command -v node &>/dev/null; then
+            node -e "
+                const fs = require('fs');
+                const src = process.argv[1], dst = process.argv[2];
+                let raw = fs.readFileSync(src, 'utf8');
+                raw = raw.replaceAll(process.env.HOME + '/.claude/plugins', '/home/claude/.claude/plugins');
+                fs.writeFileSync(dst, raw);
+            " "$HOME/.claude/plugins/known_marketplaces.json" "$SANDBOX_DIR/plugins/known_marketplaces.json"
+        fi
+        info "  Seeded plugin marketplace catalog"
+    fi
     # Write sandy-required defaults into settings.json (merge with seeded copy)
     SETTINGS_FILE="$SANDBOX_DIR/settings.json"
     [ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
@@ -369,6 +386,8 @@ if [ ! -d "$SANDBOX_DIR" ]; then
             try { s = JSON.parse(raw); } catch { s = {}; }
             const defaults = {teammateMode:'tmux', spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:true};
             for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
+            // Strip enabledPlugins — no plugins installed in fresh sandbox
+            delete s.enabledPlugins;
             fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
         " "$SETTINGS_FILE"
     else
@@ -379,6 +398,12 @@ if [ ! -d "$SANDBOX_DIR" ]; then
     fi
 else
     info "Reusing sandbox: $SANDBOX_DIR"
+fi
+
+# Always refresh statsig cache (feature flags may have changed since sandbox was created)
+if [ -d "$HOME/.claude/statsig" ]; then
+    rm -rf "$SANDBOX_DIR/statsig"
+    cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/statsig"
 fi
 
 # --- Detect platform ---
