@@ -506,20 +506,59 @@ else
 fi
 
 # --- Ephemeral credential loading (fresh each launch, never persisted in sandbox) ---
-CRED_TMPDIR=""
-if [ -f "$HOME/.claude/.credentials.json" ]; then
-    CRED_TMPDIR="$(mktemp -d)"
-    cp "$HOME/.claude/.credentials.json" "$CRED_TMPDIR/.credentials.json"
-    chmod 600 "$CRED_TMPDIR/.credentials.json"
-    info "Loaded credentials (from file)"
-elif [[ "$(uname -s)" == "Darwin" ]]; then
-    KEYCHAIN_CREDS="$(security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w 2>/dev/null || true)"
-    if [ -n "$KEYCHAIN_CREDS" ]; then
-        CRED_TMPDIR="$(mktemp -d)"
-        printf '%s\n' "$KEYCHAIN_CREDS" > "$CRED_TMPDIR/.credentials.json"
-        chmod 600 "$CRED_TMPDIR/.credentials.json"
-        info "Loaded credentials (from macOS Keychain)"
+# Helper: read credentials JSON from file or macOS Keychain
+load_credentials() {
+    if [ -f "$HOME/.claude/.credentials.json" ]; then
+        cat "$HOME/.claude/.credentials.json"
+    elif [[ "$(uname -s)" == "Darwin" ]]; then
+        security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w 2>/dev/null || true
     fi
+}
+
+# Helper: check if OAuth token is expired or expiring within 5 minutes
+token_needs_refresh() {
+    local creds="$1"
+    [ -z "$creds" ] && return 1  # no credentials → nothing to refresh
+    if command -v node &>/dev/null; then
+        node -e "
+            try {
+                const c = JSON.parse(process.argv[1]);
+                const exp = c.claudeAiOauth?.expiresAt;
+                if (!exp) process.exit(1);  // no OAuth token
+                const bufferMs = 5 * 60 * 1000;  // 5 minute buffer
+                process.exit(Date.now() + bufferMs > exp ? 0 : 1);
+            } catch { process.exit(1); }
+        " "$creds"
+    else
+        return 1  # can't check without node
+    fi
+}
+
+CRED_JSON="$(load_credentials)"
+
+# Refresh expired OAuth tokens before launching the container
+if token_needs_refresh "$CRED_JSON"; then
+    warn "OAuth token expired or expiring soon. Refreshing..."
+    if command -v claude &>/dev/null; then
+        claude auth login
+        CRED_JSON="$(load_credentials)"
+        if token_needs_refresh "$CRED_JSON"; then
+            error "Token still expired after login. Continuing anyway..."
+        else
+            info "OAuth token refreshed successfully."
+        fi
+    else
+        error "claude CLI not found on host. Cannot refresh token."
+        error "Run 'claude auth login' manually, then restart sandy."
+    fi
+fi
+
+CRED_TMPDIR=""
+if [ -n "$CRED_JSON" ]; then
+    CRED_TMPDIR="$(mktemp -d)"
+    printf '%s\n' "$CRED_JSON" > "$CRED_TMPDIR/.credentials.json"
+    chmod 600 "$CRED_TMPDIR/.credentials.json"
+    info "Loaded credentials"
 fi
 
 # --- Build docker run flags ---
