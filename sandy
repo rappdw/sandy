@@ -23,6 +23,7 @@ if [[ "$SANDY_HOME" =~ [\;\$\`\&\|\<\>] ]]; then
     echo "[sandy] ERROR: Invalid SANDY_HOME: contains shell metacharacters" >&2
     exit 1
 fi
+BASE_IMAGE_NAME="sandy-base"
 IMAGE_NAME="sandy-claude-code"
 # Per-instance network names keyed on PID to avoid concurrent iptables races
 BRIDGE_NAME="br-sdy-$$"
@@ -99,20 +100,66 @@ fi
 ensure_build_files() {
     mkdir -p "$SANDY_HOME"
 
-    cat > "$SANDY_HOME/Dockerfile.new" <<'DOCKERFILE'
+    cat > "$SANDY_HOME/Dockerfile.base.new" <<'DOCKERFILE_BASE'
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates curl git gosu jq less openssh-client ripgrep socat tmux ncurses-term && rm -rf /var/lib/apt/lists/*
+
+# System tools + C/C++ toolchain
+RUN apt-get update && apt-get install -y \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        git \
+        gosu \
+        jq \
+        less \
+        libssl-dev \
+        ncurses-term \
+        openssh-client \
+        pkg-config \
+        python3 \
+        python3-pip \
+        python3-venv \
+        ripgrep \
+        socat \
+        tmux \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 LTS via NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go (arch-aware)
+ARG GO_VERSION=1.24.1
+RUN ARCH="$(dpkg --print-architecture)" \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" \
+       | tar -C /usr/local -xz
+
+# Rust stable (system-wide)
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --no-modify-path --default-toolchain stable \
+    && chmod -R a+rX /usr/local/rustup /usr/local/cargo
+
+# User
+RUN useradd -m -s /bin/bash -u 1001 claude
+
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
-RUN useradd -m -s /bin/bash -u 1001 claude
-ENV PATH="/home/claude/.local/bin:$PATH"
+ENV PATH="/home/claude/.local/bin:/usr/local/cargo/bin:/usr/local/go/bin:$PATH"
+DOCKERFILE_BASE
+
+    cat > "$SANDY_HOME/Dockerfile.new" <<DOCKERFILE
+FROM ${BASE_IMAGE_NAME}
 # Install Claude Code natively. The installer places files under
 # /home/claude/.local/{bin,share}/claude.  Since /home/claude gets a
 # tmpfs overlay at runtime, we relocate the binary to /usr/local/bin
 # and the data directory to /opt/claude-code.  The entrypoint symlinks
 # them back into the expected paths.
-RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \
- && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \
+RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
+ && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \\
  && mv /home/claude/.local/share/claude /opt/claude-code
 COPY tmux.conf /etc/tmux.conf
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -184,6 +231,24 @@ export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 export DISABLE_AUTOUPDATER=1
 export DISABLE_SPINNER_TIPS=1
 
+# Cargo: writable registry cache + cargo-install binaries
+export CARGO_HOME="$HOME/.cargo"
+mkdir -p "$CARGO_HOME/bin"
+for bin in /usr/local/cargo/bin/*; do
+    ln -sf "$bin" "$CARGO_HOME/bin/$(basename "$bin")"
+done
+
+# Go: writable GOPATH
+export GOPATH="$HOME/go"
+mkdir -p "$GOPATH/bin"
+
+# npm: global installs to writable location
+export NPM_CONFIG_PREFIX="$HOME/.npm-global"
+mkdir -p "$NPM_CONFIG_PREFIX/bin"
+
+# Writable bin dirs on PATH
+export PATH="$NPM_CONFIG_PREFIX/bin:$GOPATH/bin:$CARGO_HOME/bin:$PATH"
+
 # Remap ANSI dark blue (color 4) to a readable bright blue
 printf "\033]4;4;rgb:61/8f/ff\033\\"
 trap "printf \"\033]104;4\033\\\\\"" EXIT
@@ -219,7 +284,7 @@ for arg in "$@"; do
 done
 
 cd "$WORKSPACE"
-tmux new-session -s sandy -- bash -c "$CLAUDE_CMD 2>&1; echo \"[sandy] claude exited with code \$? — press Enter to close\"; read"
+tmux new-session -s sandy -- bash -c "$CLAUDE_CMD 2>&1"
 ' -- "$@"
 ENTRYPOINT
 
@@ -253,7 +318,7 @@ TMUXCONF
 
     # Only update on-disk files if content has changed
     local changed=false
-    for f in Dockerfile entrypoint.sh tmux.conf; do
+    for f in Dockerfile.base Dockerfile entrypoint.sh tmux.conf; do
         if [ ! -f "$SANDY_HOME/$f" ] || ! diff -q "$SANDY_HOME/$f.new" "$SANDY_HOME/$f" &>/dev/null; then
             mv "$SANDY_HOME/$f.new" "$SANDY_HOME/$f"
             changed=true
@@ -271,8 +336,8 @@ ensure_build_files
 
 # Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
 if [ "$SANDY_REBUILD" = true ]; then
-    rm -f "$SANDY_HOME/.build_hash"
-    info "Build cache cleared. Image will be rebuilt."
+    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash"
+    info "Build cache cleared. Images will be rebuilt."
 fi
 
 # --- Detect available resources ---
@@ -285,11 +350,26 @@ fi
 SANDY_CPUS="$AVAILABLE_CPUS"
 SANDY_MEM="$(( AVAILABLE_MEM_GB > 2 ? AVAILABLE_MEM_GB - 1 : 2 ))g"
 
-# --- Build image (skip if up to date) ---
+# --- Build images (two-phase: base + final) ---
+
+# Phase 1: Base image (language runtimes — rebuilds rarely)
+BASE_HASH="$(cat "$SANDY_HOME/Dockerfile.base" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -d' ' -f1)"
+BASE_HASH_FILE="$SANDY_HOME/.base_build_hash"
+BASE_REBUILT=false
+if [ ! -f "$BASE_HASH_FILE" ] || [ "$(cat "$BASE_HASH_FILE")" != "$BASE_HASH" ] || ! docker image inspect "$BASE_IMAGE_NAME" &>/dev/null; then
+    info "Building base image (language runtimes)..."
+    docker build --no-cache -t "$BASE_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.base" "$SANDY_HOME"
+    echo "$BASE_HASH" > "$BASE_HASH_FILE"
+    BASE_REBUILT=true
+else
+    info "Base image up to date."
+fi
+
+# Phase 2: Final image (Claude Code — rebuilds on CC updates or base change)
 BUILD_HASH="$(cat "$SANDY_HOME/Dockerfile" "$SANDY_HOME/entrypoint.sh" "$SANDY_HOME/tmux.conf" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -d' ' -f1)"
 HASH_FILE="$SANDY_HOME/.build_hash"
 NEEDS_BUILD=false
-if [ ! -f "$HASH_FILE" ] || [ "$(cat "$HASH_FILE")" != "$BUILD_HASH" ] || ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+if [ ! -f "$HASH_FILE" ] || [ "$(cat "$HASH_FILE")" != "$BUILD_HASH" ] || [ "$BASE_REBUILT" = true ] || ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     NEEDS_BUILD=true
 fi
 
@@ -305,7 +385,7 @@ fi
 
 if [ "$NEEDS_BUILD" = true ]; then
     info "Building sandbox image..."
-    docker build -q --no-cache -t "$IMAGE_NAME" "$SANDY_HOME"
+    docker build -q --no-cache -t "$IMAGE_NAME" -f "$SANDY_HOME/Dockerfile" "$SANDY_HOME"
     echo "$BUILD_HASH" > "$HASH_FILE"
 else
     info "Sandbox image up to date."
@@ -575,7 +655,7 @@ RUN_FLAGS+=(--cpus "$SANDY_CPUS" --memory "$SANDY_MEM")
 RUN_FLAGS+=(--security-opt no-new-privileges:true)
 RUN_FLAGS+=(--read-only)
 RUN_FLAGS+=(--tmpfs /tmp:size=1G)
-RUN_FLAGS+=(--tmpfs /home/claude:size=512M,uid=1001,gid=1001)
+RUN_FLAGS+=(--tmpfs /home/claude:size=2G,uid=1001,gid=1001)
 RUN_FLAGS+=(--network "$NETWORK_NAME")
 RUN_FLAGS+=(-v "$SANDBOX_DIR:/home/claude/.claude")
 if [ -n "$CRED_TMPDIR" ]; then
