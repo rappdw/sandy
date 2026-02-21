@@ -25,7 +25,7 @@ if [[ "$SANDY_HOME" =~ [\;\$\`\&\|\<\>] ]]; then
 fi
 IMAGE_NAME="sandy-claude-code"
 # Per-instance network names keyed on PID to avoid concurrent iptables races
-BRIDGE_NAME="br-claude-$$"
+BRIDGE_NAME="br-sdy-$$"
 NETWORK_NAME="sandy_net_$$"
 
 # --- Colors (disabled when not a terminal) ---
@@ -125,11 +125,18 @@ DOCKERFILE
 #!/bin/bash
 # --- Root-only setup (runs before dropping to user claude) ---
 
+# Determine runtime UID/GID (match host user for bind-mount permissions on Linux)
+RUN_UID="${HOST_UID:-1001}"
+RUN_GID="${HOST_GID:-1001}"
+
+# Fix ownership of tmpfs home directory (mounted with uid=1001, may differ from host)
+chown "$RUN_UID:$RUN_GID" /home/claude
+
 # Seed known_hosts from host if available
 if [ -f "/tmp/host-ssh-known_hosts" ]; then
     mkdir -p /home/claude/.ssh
     cp /tmp/host-ssh-known_hosts /home/claude/.ssh/known_hosts
-    chown -R claude:claude /home/claude/.ssh
+    chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
     chmod 700 /home/claude/.ssh
     chmod 644 /home/claude/.ssh/known_hosts
 fi
@@ -139,21 +146,21 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
     # SSH agent relay: create a Unix socket that relays to the host's TCP relay
     if [ -n "${SSH_RELAY_PORT:-}" ]; then
         rm -f /tmp/ssh-agent.sock
-        socat UNIX-LISTEN:/tmp/ssh-agent.sock,fork,mode=0600,user=claude \
+        socat UNIX-LISTEN:/tmp/ssh-agent.sock,fork,mode=0600,uid="$RUN_UID" \
               TCP:host.docker.internal:${SSH_RELAY_PORT} &
         # Wait for socket to appear
         for i in $(seq 1 50); do [ -S /tmp/ssh-agent.sock ] && break; sleep 0.1; done
         export SSH_AUTH_SOCK=/tmp/ssh-agent.sock
     elif [ -S "/tmp/ssh-agent.sock" ]; then
         # Linux: socket was mounted directly
-        chmod 600 /tmp/ssh-agent.sock && chown claude:claude /tmp/ssh-agent.sock
+        chmod 600 /tmp/ssh-agent.sock && chown "$RUN_UID:$RUN_GID" /tmp/ssh-agent.sock
     fi
 
     # Copy host SSH config/keys with correct ownership and permissions
     if [ -d "/tmp/host-ssh" ]; then
         mkdir -p /home/claude/.ssh
         cp -a /tmp/host-ssh/. /home/claude/.ssh/
-        chown -R claude:claude /home/claude/.ssh
+        chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
         chmod 700 /home/claude/.ssh
         chmod 600 /home/claude/.ssh/* 2>/dev/null || true
         chmod 644 /home/claude/.ssh/*.pub 2>/dev/null || true
@@ -167,11 +174,12 @@ fi
 mkdir -p /home/claude/.local/bin /home/claude/.local/share
 ln -sf /usr/local/bin/claude /home/claude/.local/bin/claude
 ln -sf /opt/claude-code /home/claude/.local/share/claude
-chown -R claude:claude /home/claude/.local
+chown -R "$RUN_UID:$RUN_GID" /home/claude/.local
 
-# Drop privileges and continue as user claude
-exec gosu claude bash -c '
+# Drop privileges to host user's UID/GID
+exec gosu "$RUN_UID:$RUN_GID" bash -c '
 set -e
+export HOME=/home/claude
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 export DISABLE_AUTOUPDATER=1
 export DISABLE_SPINNER_TIPS=1
@@ -211,7 +219,7 @@ for arg in "$@"; do
 done
 
 cd "$WORKSPACE"
-tmux new-session -s sandy -- bash -c "$CLAUDE_CMD"
+tmux new-session -s sandy -- bash -c "$CLAUDE_CMD 2>&1; echo \"[sandy] claude exited with code \$? — press Enter to close\"; read"
 ' -- "$@"
 ENTRYPOINT
 
@@ -619,6 +627,9 @@ fi
 if [ -n "$GIT_USER_EMAIL" ]; then
     RUN_FLAGS+=(-e "GIT_USER_EMAIL=$GIT_USER_EMAIL")
 fi
+# Pass host UID/GID so entrypoint can remap claude user (fixes bind-mount permissions on Linux)
+RUN_FLAGS+=(-e "HOST_UID=$(id -u)")
+RUN_FLAGS+=(-e "HOST_GID=$(id -g)")
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
 fi
