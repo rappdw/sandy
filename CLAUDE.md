@@ -34,8 +34,8 @@ Each project directory gets its own isolated `~/.claude` sandbox under `~/.sandy
 
 ## Architecture
 
-- **Base image**: `debian:bookworm-slim` with Claude Code installed via the official native installer (`curl -fsSL https://claude.ai/install.sh | bash`). The binary is copied to `/usr/local/bin/claude` to survive the tmpfs overlay on `/home/claude`.
-- `sandy` — Self-contained launcher (~670 lines of bash) installed to `~/.local/bin/`. On first run, generates Dockerfile, entrypoint.sh, and tmux.conf in `~/.sandy/`, builds the Docker image, creates per-project sandbox directories, applies network isolation, and launches the container via `docker run`.
+- **Two-phase Docker build**: A `sandy-base` image contains the OS, toolchains (Node.js 22, Go 1.24, Rust stable, Python 3, C/C++), and system tools. A `sandy-claude-code` image layers Claude Code on top. The base image rebuilds rarely; Claude Code updates rebuild only the thin top layer.
+- `sandy` — Self-contained launcher (~820 lines of bash) installed to `~/.local/bin/`. On first run, generates Dockerfile.base, Dockerfile, entrypoint.sh, and tmux.conf in `~/.sandy/`, builds both Docker images, creates per-project sandbox directories, applies network isolation, and launches the container via `docker run`.
 - `install.sh` — `curl | bash` installer that downloads `sandy` to `~/.local/bin/` and checks PATH setup.
 
 ## Auto-update

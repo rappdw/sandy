@@ -15,7 +15,7 @@ set -euo pipefail
 #   sandy -p "prompt"         One-shot prompt
 # =============================================================================
 
-SANDY_VERSION="0.2.0"
+SANDY_VERSION="0.3.0"
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 # Validate SANDY_HOME — reject shell metacharacters
@@ -123,6 +123,14 @@ RUN apt-get update && apt-get install -y \
         ripgrep \
         socat \
         tmux \
+    && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js 22 LTS via NodeSource
@@ -272,6 +280,10 @@ fi
 if [ "${SANDY_SSH:-token}" = "token" ] && [ -n "${GIT_TOKEN:-}" ]; then
     git config --global url."https://oauth2:${GIT_TOKEN}@github.com/".insteadOf "git@github.com:"
     git config --global --add url."https://oauth2:${GIT_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+    # Authenticate gh CLI so PR/issue/release commands work
+    if command -v gh &>/dev/null; then
+        echo "${GIT_TOKEN}" | gh auth login --with-token 2>/dev/null || true
+    fi
 fi
 
 # Build the claude command with any passed args

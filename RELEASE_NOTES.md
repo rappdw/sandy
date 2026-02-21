@@ -1,23 +1,21 @@
-## sandy v0.2.0
+## sandy v0.3.0
 
 ### What's Changed
 
-**Native Claude Code installation** — switched from `node:20-slim` to `debian:bookworm-slim` with the official Claude Code native installer. Node.js is no longer required inside the container.
+**Layered Docker image with language runtimes** — the Docker build is now two-phase: a `sandy-base` image installs OS packages and language toolchains (Node.js 22 LTS, Go 1.24, Rust stable, Python 3, C/C++ via build-essential), while the thin `sandy-claude-code` layer installs only Claude Code on top. The base image rebuilds rarely, so Claude Code updates are fast. Inside the container, Go, Rust, and npm are configured with writable home-directory paths so `go install`, `cargo install`, and `npm install -g` work out of the box.
 
-**Removed Node.js dependency for SSH relay** — the in-container SSH agent relay now uses `socat`; the host-side relay prefers `socat` with a `python3` fallback. Node.js on the host is now optional (used only for JSON config merging).
+**OAuth token refresh** — sandy now detects expired or soon-to-expire OAuth tokens before launch and automatically runs `claude auth login` to refresh them. Credential loading has been unified into a single `load_credentials()` helper that reads from `~/.claude/.credentials.json` or the macOS Keychain.
 
-**Auto-update check** — sandy checks for newer Claude Code versions on launch and rebuilds the image automatically when an update is available.
+**Improved sandbox fidelity** — the Claude Code data directory (`~/.local/share/claude`) is now persisted via `/opt/claude-code` and symlinked back at runtime, so Claude Code finds both its binary and data directory at the expected paths. Statsig feature-flag caches are refreshed on every launch (not just on sandbox creation). Plugin marketplace catalogs are seeded into new sandboxes, and stale `enabledPlugins` entries are stripped.
 
-**Git submodule support** — when launched from a git submodule, sandy mounts the workspace at the correct depth to preserve relative gitdir paths.
-
-**Container stability** — `DISABLE_AUTOUPDATER=1` prevents Claude Code from attempting self-updates inside the read-only container. `installMethod: 'native'` is set in `.claude.json` (with migration for existing sandboxes).
-
-**Dynamic workspace paths** — the entrypoint now uses `SANDY_WORKSPACE` instead of hardcoded `/workspace`, supporting submodule and non-standard mount points.
+**Home directory tmpfs increased** — the `/home/claude` tmpfs overlay was increased from 512 MB to 2 GB, giving language toolchains enough room for package caches and build artifacts.
 
 ### Fixes
 
-- Removed leaked OAuth URL from README
-- Updated installer to reflect Node.js is now optional
+- **UID mismatch on Linux** — the entrypoint now reads `HOST_UID`/`HOST_GID` from the host and runs `gosu` with matching IDs. All `chown` calls use the runtime UID/GID instead of the hardcoded `claude:claude` username, fixing permission errors on bind-mounted files when the host user's UID differs from 1001.
+- **Bridge name length** — shortened the per-instance bridge name prefix from `br-claude-` to `br-sdy-` to stay within the Linux 15-character `IFNAMSIZ` limit.
+- **git safe.directory** — changed from trusting only `$WORKSPACE` to trusting `*`, since the entire container is sandboxed and host UID mismatches are expected.
+- **tmux stderr** — Claude Code's tmux session now captures stderr (`2>&1`) so error output is visible in the terminal.
 
 ### Environment Variables
 
@@ -34,7 +32,7 @@
 
 | File | Purpose |
 |---|---|
-| `sandy` | Self-contained launcher (~670 lines of bash) |
+| `sandy` | Self-contained launcher (~820 lines of bash) |
 | `install.sh` | `curl \| bash` installer |
 
 ### Requirements
