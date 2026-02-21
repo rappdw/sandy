@@ -254,8 +254,12 @@ mkdir -p "$GOPATH/bin"
 export NPM_CONFIG_PREFIX="$HOME/.npm-global"
 mkdir -p "$NPM_CONFIG_PREFIX/bin"
 
+# Python: allow user-scoped pip installs (PEP 668 workaround for Debian)
+export PIP_BREAK_SYSTEM_PACKAGES=1
+mkdir -p "$HOME/.local/bin"
+
 # Writable bin dirs on PATH
-export PATH="$NPM_CONFIG_PREFIX/bin:$GOPATH/bin:$CARGO_HOME/bin:$PATH"
+export PATH="$HOME/.local/bin:$NPM_CONFIG_PREFIX/bin:$GOPATH/bin:$CARGO_HOME/bin:$PATH"
 
 # Remap ANSI dark blue (color 4) to a readable bright blue
 printf "\033]4;4;rgb:61/8f/ff\033\\"
@@ -666,8 +670,8 @@ RUN_FLAGS=(--rm -it)
 RUN_FLAGS+=(--cpus "$SANDY_CPUS" --memory "$SANDY_MEM")
 RUN_FLAGS+=(--security-opt no-new-privileges:true)
 RUN_FLAGS+=(--read-only)
-RUN_FLAGS+=(--tmpfs /tmp:size=1G)
-RUN_FLAGS+=(--tmpfs /home/claude:size=2G,uid=1001,gid=1001)
+RUN_FLAGS+=(--tmpfs /tmp:exec,size=1G)
+RUN_FLAGS+=(--tmpfs /home/claude:exec,size=2G,uid=1001,gid=1001)
 RUN_FLAGS+=(--network "$NETWORK_NAME")
 RUN_FLAGS+=(-v "$SANDBOX_DIR:/home/claude/.claude")
 if [ -n "$CRED_TMPDIR" ]; then
