@@ -715,7 +715,7 @@ RUN_FLAGS+=(--tmpfs /home/claude:exec,size=2G,uid=1001,gid=1001)
 RUN_FLAGS+=(--network "$NETWORK_NAME")
 RUN_FLAGS+=(-v "$SANDBOX_DIR:/home/claude/.claude")
 if [ -n "$CRED_TMPDIR" ]; then
-    RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json:ro")
+    RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json")
 fi
 RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/claude/.claude.json")
 # --- Git submodule support ---
