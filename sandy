@@ -162,6 +162,9 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --no-modify-path --default-toolchain stable \
     && chmod -R a+rX /usr/local/rustup /usr/local/cargo
 
+# uv — fast Python package/version manager
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
+
 # User
 RUN useradd -m -s /bin/bash -u 1001 claude
 
@@ -235,12 +238,21 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
     fi
 fi
 
+# Fix ownership of persistent package mounts
+for d in /home/claude/.pip-packages /home/claude/.local/share/uv \
+         /home/claude/.npm-global /home/claude/go /home/claude/.cargo; do
+    chown "$RUN_UID:$RUN_GID" "$d" 2>/dev/null || true
+done
+
 # Restore native install layout so Claude Code finds its binary and data at the
 # expected paths (the real files live outside /home/claude to survive the tmpfs overlay)
 mkdir -p /home/claude/.local/bin /home/claude/.local/share
 ln -sf /usr/local/bin/claude /home/claude/.local/bin/claude
 ln -sf /opt/claude-code /home/claude/.local/share/claude
-chown -R "$RUN_UID:$RUN_GID" /home/claude/.local
+# chown the tmpfs dirs individually — avoid -R which would recurse into
+# the bind-mounted uv directory at .local/share/uv
+chown "$RUN_UID:$RUN_GID" /home/claude/.local /home/claude/.local/bin \
+    /home/claude/.local/share /home/claude/.local/share/claude 2>/dev/null || true
 
 # Drop privileges to host user's UID/GID
 exec gosu "$RUN_UID:$RUN_GID" bash -c '
@@ -265,12 +277,21 @@ mkdir -p "$GOPATH/bin"
 export NPM_CONFIG_PREFIX="$HOME/.npm-global"
 mkdir -p "$NPM_CONFIG_PREFIX/bin"
 
-# Python: allow user-scoped pip installs (PEP 668 workaround for Debian)
+# Python: persistent user-scoped pip installs via PYTHONUSERBASE
+# pip.conf sets user=true so bare "pip install" goes to PYTHONUSERBASE.
+# We use pip.conf (not PIP_USER env var) because pip ignores the config
+# setting inside activated virtualenvs, but honours the env var — which
+# would break venvs by installing to --user instead of the venv.
 export PIP_BREAK_SYSTEM_PACKAGES=1
-mkdir -p "$HOME/.local/bin"
+export PYTHONUSERBASE="$HOME/.pip-packages"
+mkdir -p "$PYTHONUSERBASE/bin" "$HOME/.config/pip"
+cat > "$HOME/.config/pip/pip.conf" <<PIPCONF
+[install]
+user = true
+PIPCONF
 
 # Writable bin dirs on PATH
-export PATH="$HOME/.local/bin:$NPM_CONFIG_PREFIX/bin:$GOPATH/bin:$CARGO_HOME/bin:$PATH"
+export PATH="$HOME/.local/bin:$PYTHONUSERBASE/bin:$NPM_CONFIG_PREFIX/bin:$GOPATH/bin:$CARGO_HOME/bin:$PATH"
 
 # Remap ANSI dark blue (color 4) to a readable bright blue
 printf "\033]4;4;rgb:61/8f/ff\033\\"
@@ -289,6 +310,33 @@ if [ -n "${GIT_USER_NAME:-}" ]; then
 fi
 if [ -n "${GIT_USER_EMAIL:-}" ]; then
     git config --global user.email "$GIT_USER_EMAIL"
+fi
+
+# --- Dev environment checks ---
+# Auto-install Python version if .python-version exists (uv is idempotent & fast)
+if [ -f "$WORKSPACE/.python-version" ]; then
+    PY_WANT="$(cat "$WORKSPACE/.python-version" | tr -d "[:space:]")"
+    if [ -n "$PY_WANT" ] && command -v uv &>/dev/null; then
+        uv python install "$PY_WANT" 2>/dev/null && \
+            printf "\033[0;36m● Installed Python %s via uv\033[0m\n" "$PY_WANT" || true
+    fi
+fi
+
+# Warn if .venv exists but its python symlink is broken
+if [ -L "$WORKSPACE/.venv/bin/python" ] && [ ! -e "$WORKSPACE/.venv/bin/python" ]; then
+    VENV_TARGET="$(readlink "$WORKSPACE/.venv/bin/python")"
+    printf "\033[0;33m⚠ .venv/bin/python → %s (not found in container)\033[0m\n" "$VENV_TARGET"
+    printf "\033[0;33m  Fix: uv venv && uv pip install -r requirements.txt\033[0m\n"
+fi
+
+# Warn if node_modules contains native addons built for a different platform
+if [ -d "$WORKSPACE/node_modules" ]; then
+    # Check for .node files — if any exist, verify they are Linux ELF binaries
+    BAD_NATIVE="$(find "$WORKSPACE/node_modules" -name "*.node" -type f 2>/dev/null | head -1)"
+    if [ -n "$BAD_NATIVE" ] && ! file "$BAD_NATIVE" 2>/dev/null | grep -q "ELF"; then
+        printf "\033[0;33m⚠ node_modules/ contains native addons built for a different platform\033[0m\n"
+        printf "\033[0;33m  Fix: npm rebuild\033[0m\n"
+    fi
 fi
 
 # Configure git auth: GitHub token (default) or SSH agent
@@ -530,6 +578,13 @@ else
     info "Reusing sandbox: $SANDBOX_DIR"
 fi
 
+# Ensure persistent package directories exist (created once, reused across sessions)
+mkdir -p "$SANDBOX_DIR/pip"                 # PYTHONUSERBASE (pip install --user)
+mkdir -p "$SANDBOX_DIR/uv"                 # uv-managed Python versions
+mkdir -p "$SANDBOX_DIR/npm-global"         # npm -g installs
+mkdir -p "$SANDBOX_DIR/go"                 # GOPATH (go install)
+mkdir -p "$SANDBOX_DIR/cargo"              # cargo install
+
 # Always refresh statsig cache (feature flags may have changed since sandbox was created)
 if [ -d "$HOME/.claude/statsig" ]; then
     rm -rf "$SANDBOX_DIR/statsig"
@@ -718,6 +773,12 @@ if [ -n "$CRED_TMPDIR" ]; then
     RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json")
 fi
 RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/claude/.claude.json")
+# Persistent package environment mounts
+RUN_FLAGS+=(-v "$SANDBOX_DIR/pip:/home/claude/.pip-packages")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/uv:/home/claude/.local/share/uv")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/npm-global:/home/claude/.npm-global")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/go:/home/claude/go")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/cargo:/home/claude/.cargo")
 # --- Git submodule support ---
 # Submodules use a .git *file* with a relative gitdir: path. Both the forward
 # path (worktree→gitdir) and reverse path (gitdir config→worktree) are relative,

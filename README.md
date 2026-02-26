@@ -86,6 +86,55 @@ curl -m 5 http://192.168.1.1
 curl -m 5 https://api.anthropic.com
 ```
 
+## Development Environments
+
+Sandy's base image includes Python 3, Node.js 22, Go 1.24, Rust stable, C/C++ (build-essential), and [`uv`](https://docs.astral.sh/uv/) for Python version management.
+
+### Persistent packages
+
+Packages installed inside sandy persist across sessions per project. Each project sandbox has dedicated bind-mounted directories for each package manager:
+
+```bash
+pip install flask          # persists in sandbox pip/ dir
+npm install -g typescript  # persists in sandbox npm-global/ dir
+go install golang.org/x/tools/gopls@latest  # persists in sandbox go/ dir
+cargo install ripgrep      # persists in sandbox cargo/ dir
+```
+
+These are per-project — packages installed in one project don't leak to another.
+
+### Python version management
+
+The base image ships one system Python (Debian bookworm's default). If your project needs a specific version, use `uv`:
+
+```bash
+uv python install 3.11        # downloads once, persists across sessions
+uv venv --python 3.11         # creates .venv in project dir
+source .venv/bin/activate
+uv pip install -r requirements.txt
+```
+
+Different projects can use different Python versions with the same sandy image — each project's sandbox stores its own `uv`-managed Python installations.
+
+### Using host virtual environments and build artifacts
+
+Your project directory is bind-mounted read-write, so `.venv/`, `node_modules/`, `target/`, and other build directories from the host are visible inside the container:
+
+- **Python `.venv/`** — works if host and container have the same Python version at the same path (e.g. both have `/usr/bin/python3.12`). If versions differ, the venv's symlinks will be broken. Fix: `uv venv --python 3.12 && uv pip install -r requirements.txt`
+- **Node.js `node_modules/`** — pure JS packages work fine. Native addons compiled on the host work if the host is also Linux with compatible glibc. Fix: `npm rebuild`
+- **Rust `target/`** — reusable if both sides are Linux x86_64. macOS host → Linux container triggers a full rebuild automatically
+- **Go `vendor/`** — pure source, always works
+
+### Automatic environment detection
+
+Sandy checks your project on startup and handles common issues:
+
+- **`.python-version`** — if present, sandy auto-installs that Python version via `uv` (persists across sessions)
+- **Broken `.venv`** — if `.venv/bin/python` is a dead symlink (host Python version differs from container), sandy warns with the fix command
+- **Foreign native modules** — if `node_modules/` contains native addons compiled for a different platform (e.g. macOS), sandy warns with `npm rebuild` as the fix
+
+These checks run on every session start and add negligible overhead.
+
 ## Security Notes
 
 - The container runs as a non-root user (`claude`, UID 1001)
