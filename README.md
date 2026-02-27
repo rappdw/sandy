@@ -146,7 +146,7 @@ Sandy detects this file and builds a project-specific image layered on top of th
 - Is cached per-project (tagged as `sandy-project-<name>-<hash>`)
 - Uses the `.sandy/` directory as build context, so you can `COPY` files from there
 
-This is the right approach for system packages (`apt-get`), large binary tools, or anything that needs root to install.
+This is the right approach for system packages (`apt-get`), large binary tools, or anything that needs root to install. See [`examples/`](examples/) for ready-to-use configurations.
 
 ### Automatic environment detection
 
