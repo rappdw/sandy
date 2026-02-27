@@ -125,6 +125,29 @@ Your project directory is bind-mounted read-write, so `.venv/`, `node_modules/`,
 - **Rust `target/`** — reusable if both sides are Linux x86_64. macOS host → Linux container triggers a full rebuild automatically
 - **Go `vendor/`** — pure source, always works
 
+### Per-project tooling (`.sandy/Dockerfile`)
+
+If your project needs system tools beyond the base image, create a `.sandy/Dockerfile` in your project directory:
+
+```dockerfile
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+RUN apt-get update && apt-get install -y typst && rm -rf /var/lib/apt/lists/*
+RUN curl -LO https://github.com/quarto-dev/quarto-cli/releases/download/v1.7.29/quarto-1.7.29-linux-amd64.deb \
+    && dpkg -i quarto-*.deb && rm quarto-*.deb
+USER claude
+```
+
+Sandy detects this file and builds a project-specific image layered on top of the standard sandy image. The project image:
+
+- Rebuilds automatically when the Dockerfile changes or the base sandy image updates
+- Is cached per-project (tagged as `sandy-project-<name>-<hash>`)
+- Uses the `.sandy/` directory as build context, so you can `COPY` files from there
+
+This is the right approach for system packages (`apt-get`), large binary tools, or anything that needs root to install.
+
 ### Automatic environment detection
 
 Sandy checks your project on startup and handles common issues:

@@ -491,6 +491,30 @@ else
     info "Sandbox image up to date."
 fi
 
+# Phase 3: Per-project image (optional — extends sandy-claude-code with project tools)
+PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"
+if [ -f "$PROJECT_DOCKERFILE" ]; then
+    PROJECT_IMAGE_NAME="sandy-project-${SANDBOX_NAME}"
+    PROJECT_HASH="$(cat "$PROJECT_DOCKERFILE" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -d' ' -f1)"
+    PROJECT_HASH_FILE="$SANDBOX_DIR/.project_build_hash"
+    PROJECT_NEEDS_BUILD=false
+    if [ ! -f "$PROJECT_HASH_FILE" ] || [ "$(cat "$PROJECT_HASH_FILE")" != "$PROJECT_HASH" ] \
+            || [ "$NEEDS_BUILD" = true ] || ! docker image inspect "$PROJECT_IMAGE_NAME" &>/dev/null; then
+        PROJECT_NEEDS_BUILD=true
+    fi
+    if [ "$PROJECT_NEEDS_BUILD" = true ]; then
+        info "Building project image from .sandy/Dockerfile..."
+        docker build -q --no-cache \
+            --build-arg BASE_IMAGE="$IMAGE_NAME" \
+            -t "$PROJECT_IMAGE_NAME" \
+            -f "$PROJECT_DOCKERFILE" "$WORK_DIR/.sandy"
+        echo "$PROJECT_HASH" > "$PROJECT_HASH_FILE"
+    else
+        info "Project image up to date."
+    fi
+    IMAGE_NAME="$PROJECT_IMAGE_NAME"
+fi
+
 # --- Ensure the per-instance isolated network exists ---
 CONTAINER_SUBNET=""
 ensure_network() {
