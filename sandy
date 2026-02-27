@@ -362,6 +362,7 @@ if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
 fi
 
 # Auto-resume: inject --continue unless user passed --new, -p, --resume, or --continue
+# Also skip if there are no prior sessions to continue (first run in this sandbox)
 SANDY_AUTO_CONTINUE=true
 if [ "${SANDY_NEW_SESSION:-false}" = "true" ]; then
     SANDY_AUTO_CONTINUE=false
@@ -372,7 +373,10 @@ for arg in "$@"; do
     esac
 done
 if [ "$SANDY_AUTO_CONTINUE" = "true" ]; then
-    CLAUDE_CMD+=" --continue"
+    # Check if any session files exist (workspace is always /workspace in container)
+    if ls "$HOME/.claude/projects/-workspace/"*.jsonl &>/dev/null; then
+        CLAUDE_CMD+=" --continue"
+    fi
 fi
 
 for arg in "$@"; do
