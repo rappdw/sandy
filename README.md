@@ -133,11 +133,13 @@ If your project needs system tools beyond the base image, create a `.sandy/Docke
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-USER root
-RUN apt-get update && apt-get install -y typst && rm -rf /var/lib/apt/lists/*
-RUN curl -LO https://github.com/quarto-dev/quarto-cli/releases/download/v1.7.29/quarto-1.7.29-linux-amd64.deb \
-    && dpkg -i quarto-*.deb && rm quarto-*.deb
-USER claude
+# No USER directive needed — entrypoint handles privilege dropping
+RUN curl -LsSf https://github.com/typst/typst/releases/latest/download/typst-x86_64-unknown-linux-musl.tar.xz \
+    | tar -xJ --strip-components=1 -C /usr/local/bin
+ARG QUARTO_VERSION=1.8.27
+RUN curl -fL "https://github.com/quarto-dev/quarto-cli/releases/download/v${QUARTO_VERSION}/quarto-${QUARTO_VERSION}-linux-amd64.tar.gz" \
+    | tar -xz -C /opt \
+    && ln -s /opt/quarto-${QUARTO_VERSION}/bin/quarto /usr/local/bin/quarto
 ```
 
 Sandy detects this file and builds a project-specific image layered on top of the standard sandy image. The project image:

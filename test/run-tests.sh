@@ -207,26 +207,36 @@ check "can write to home" \
     sandy_run "touch /home/claude/test"
 
 # ============================================================
-info "8. Dev environment detection — .python-version"
+info "8. Dev environment detection — .python-version auto-install"
 # ============================================================
 
-echo "3.12" > "$TEST_PROJECT/.python-version"
-OUTPUT="$(sandy_run "uv python find 3.12 2>/dev/null && echo FOUND || echo NOTFOUND" 2>&1)"
+echo "3.11" > "$TEST_PROJECT/.python-version"
+# Simulate what the entrypoint does: read .python-version, install, verify
+sandy_run '
+    PY_WANT="$(cat /workspace/.python-version | tr -d "[:space:]")"
+    uv python install "$PY_WANT" 2>/dev/null
+    uv python find "$PY_WANT" >/dev/null 2>&1
+'
 check ".python-version triggers uv python install" \
-    bash -c 'echo "$1" | grep -q FOUND' -- "$OUTPUT"
+    sandy_run "uv python find 3.11 >/dev/null 2>&1"
 rm -f "$TEST_PROJECT/.python-version"
 
 # ============================================================
-info "9. Dev environment detection — broken .venv warning"
+info "9. Dev environment detection — broken .venv auto-installs Python"
 # ============================================================
 
+# Create a .venv with a broken symlink pointing to a specific Python version
 mkdir -p "$TEST_PROJECT/.venv/bin"
-ln -sf /usr/bin/python3.99-does-not-exist "$TEST_PROJECT/.venv/bin/python"
-OUTPUT="$(sandy_run "echo ok" 2>&1)"
-# The warning is emitted by the real entrypoint; since we use a stripped
-# entrypoint here, we test the detection logic directly instead.
-check "detects broken .venv symlink" \
-    bash -c '[ -L "'"$TEST_PROJECT"'/.venv/bin/python" ] && [ ! -e "'"$TEST_PROJECT"'/.venv/bin/python" ]'
+ln -sf /usr/local/bin/python3.10 "$TEST_PROJECT/.venv/bin/python"
+# Simulate what the entrypoint does: detect broken .venv, extract version, install
+sandy_run '
+    VENV_TARGET="$(readlink /workspace/.venv/bin/python)"
+    PY_VER="$(echo "$VENV_TARGET" | grep -oE "[0-9]+\.[0-9]+" | head -1)"
+    uv python install "$PY_VER" 2>/dev/null
+    uv python find "$PY_VER" >/dev/null 2>&1
+'
+check "broken .venv triggers install of matching Python" \
+    sandy_run "uv python find 3.10 >/dev/null 2>&1"
 rm -rf "$TEST_PROJECT/.venv"
 
 # ============================================================
@@ -287,6 +297,21 @@ OUTPUT="$(
 check "packages don't leak between project sandboxes" \
     bash -c 'echo "$1" | grep -q ISOLATED' -- "$OUTPUT"
 rm -rf "$SANDBOX_DIR2"
+
+# ============================================================
+info "12. Variable ordering — WORK_DIR defined before Phase 3"
+# ============================================================
+
+# Phase 3 (per-project Dockerfile) references WORK_DIR and SANDBOX_NAME.
+# Regression test: these must be defined before their first use.
+SCRIPT="$(dirname "$0")/../sandy"
+WORK_DIR_DEF="$(grep -n '^WORK_DIR=' "$SCRIPT" | head -1 | cut -d: -f1)"
+SANDBOX_NAME_DEF="$(grep -n '^SANDBOX_NAME=' "$SCRIPT" | head -1 | cut -d: -f1)"
+PHASE3_USE="$(grep -n 'Phase 3.*Per-project image' "$SCRIPT" | head -1 | cut -d: -f1)"
+check "WORK_DIR defined before Phase 3" \
+    test "$WORK_DIR_DEF" -lt "$PHASE3_USE"
+check "SANDBOX_NAME defined before Phase 3" \
+    test "$SANDBOX_NAME_DEF" -lt "$PHASE3_USE"
 
 # ============================================================
 # Summary

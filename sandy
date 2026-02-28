@@ -323,16 +323,27 @@ fi
 if [ -f "$WORKSPACE/.python-version" ]; then
     PY_WANT="$(cat "$WORKSPACE/.python-version" | tr -d "[:space:]")"
     if [ -n "$PY_WANT" ] && command -v uv &>/dev/null; then
+        printf "\033[0;36m● Installing Python %s via uv...\033[0m\n" "$PY_WANT"
         uv python install "$PY_WANT" 2>/dev/null && \
-            printf "\033[0;36m● Installed Python %s via uv\033[0m\n" "$PY_WANT" || true
+            printf "\033[0;36m● Python %s ready\033[0m\n" "$PY_WANT" || true
     fi
 fi
 
-# Warn if .venv exists but its python symlink is broken
+# If .venv exists but its python symlink is broken, auto-install the needed version
 if [ -L "$WORKSPACE/.venv/bin/python" ] && [ ! -e "$WORKSPACE/.venv/bin/python" ]; then
     VENV_TARGET="$(readlink "$WORKSPACE/.venv/bin/python")"
-    printf "\033[0;33m⚠ .venv/bin/python → %s (not found in container)\033[0m\n" "$VENV_TARGET"
-    printf "\033[0;33m  Fix: uv venv && uv pip install -r requirements.txt\033[0m\n"
+    # Extract version from symlink (e.g. /usr/bin/python3.12 → 3.12, .pyenv/versions/3.10.4/... → 3.10)
+    PY_VER="$(echo "$VENV_TARGET" | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+    if [ -n "$PY_VER" ] && command -v uv &>/dev/null; then
+        printf "\033[0;36m● Installing Python %s via uv (.venv needs it)...\033[0m\n" "$PY_VER"
+        if uv python install "$PY_VER" 2>/dev/null; then
+            printf "\033[0;36m● Python %s ready\033[0m\n" "$PY_VER"
+        else
+            printf "\033[0;33m⚠ .venv needs Python %s but uv could not install it\033[0m\n" "$PY_VER"
+        fi
+    else
+        printf "\033[0;33m⚠ .venv/bin/python → %s (not found in container)\033[0m\n" "$VENV_TARGET"
+    fi
 fi
 
 # Warn if node_modules contains native addons built for a different platform
@@ -491,30 +502,6 @@ else
     info "Sandbox image up to date."
 fi
 
-# Phase 3: Per-project image (optional — extends sandy-claude-code with project tools)
-PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"
-if [ -f "$PROJECT_DOCKERFILE" ]; then
-    PROJECT_IMAGE_NAME="sandy-project-${SANDBOX_NAME}"
-    PROJECT_HASH="$(cat "$PROJECT_DOCKERFILE" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -d' ' -f1)"
-    PROJECT_HASH_FILE="$SANDBOX_DIR/.project_build_hash"
-    PROJECT_NEEDS_BUILD=false
-    if [ ! -f "$PROJECT_HASH_FILE" ] || [ "$(cat "$PROJECT_HASH_FILE")" != "$PROJECT_HASH" ] \
-            || [ "$NEEDS_BUILD" = true ] || ! docker image inspect "$PROJECT_IMAGE_NAME" &>/dev/null; then
-        PROJECT_NEEDS_BUILD=true
-    fi
-    if [ "$PROJECT_NEEDS_BUILD" = true ]; then
-        info "Building project image from .sandy/Dockerfile..."
-        docker build -q --no-cache \
-            --build-arg BASE_IMAGE="$IMAGE_NAME" \
-            -t "$PROJECT_IMAGE_NAME" \
-            -f "$PROJECT_DOCKERFILE" "$WORK_DIR/.sandy"
-        echo "$PROJECT_HASH" > "$PROJECT_HASH_FILE"
-    else
-        info "Project image up to date."
-    fi
-    IMAGE_NAME="$PROJECT_IMAGE_NAME"
-fi
-
 # --- Ensure the per-instance isolated network exists ---
 CONTAINER_SUBNET=""
 ensure_network() {
@@ -623,6 +610,30 @@ mkdir -p "$SANDBOX_DIR/cargo"              # cargo install
 if [ -d "$HOME/.claude/statsig" ]; then
     rm -rf "$SANDBOX_DIR/statsig"
     cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/statsig"
+fi
+
+# Phase 3: Per-project image (optional — extends sandy-claude-code with project tools)
+PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"
+if [ -f "$PROJECT_DOCKERFILE" ]; then
+    PROJECT_IMAGE_NAME="sandy-project-${SANDBOX_NAME}"
+    PROJECT_HASH="$(cat "$PROJECT_DOCKERFILE" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -d' ' -f1)"
+    PROJECT_HASH_FILE="$SANDBOX_DIR/.project_build_hash"
+    PROJECT_NEEDS_BUILD=false
+    if [ ! -f "$PROJECT_HASH_FILE" ] || [ "$(cat "$PROJECT_HASH_FILE")" != "$PROJECT_HASH" ] \
+            || [ "$NEEDS_BUILD" = true ] || ! docker image inspect "$PROJECT_IMAGE_NAME" &>/dev/null; then
+        PROJECT_NEEDS_BUILD=true
+    fi
+    if [ "$PROJECT_NEEDS_BUILD" = true ]; then
+        info "Building project image from .sandy/Dockerfile..."
+        docker build -q --no-cache \
+            --build-arg BASE_IMAGE="$IMAGE_NAME" \
+            -t "$PROJECT_IMAGE_NAME" \
+            -f "$PROJECT_DOCKERFILE" "$WORK_DIR/.sandy"
+        echo "$PROJECT_HASH" > "$PROJECT_HASH_FILE"
+    else
+        info "Project image up to date."
+    fi
+    IMAGE_NAME="$PROJECT_IMAGE_NAME"
 fi
 
 # --- Detect platform ---
