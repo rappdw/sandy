@@ -1,0 +1,53 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker (macOS)
+        if: runner.os == 'macOS'
+        uses: docker/setup-docker-action@v4
+
+      - name: Verify Docker
+        run: docker info
+
+      # Cache the final Docker image as a tarball between runs.
+      # sandy-claude-code includes all sandy-base layers, so one save covers both.
+      # Cache key is based on the sandy script hash (Dockerfiles are inline).
+      - name: Cache Docker image
+        id: cache-image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/sandy-images
+          key: sandy-image-${{ runner.os }}-${{ hashFiles('sandy') }}
+
+      - name: Load cached image
+        if: steps.cache-image.outputs.cache-hit == 'true'
+        run: docker load < /tmp/sandy-images/sandy-claude-code.tar
+
+      - name: Build images
+        if: steps.cache-image.outputs.cache-hit != 'true'
+        run: ./sandy --build-only
+
+      - name: Save image to cache
+        if: steps.cache-image.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/sandy-images
+          docker save sandy-claude-code:latest > /tmp/sandy-images/sandy-claude-code.tar
+
+      - name: Run tests
+        run: ./test/run-tests.sh

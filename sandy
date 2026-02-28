@@ -80,6 +80,7 @@ Flags:
   --help             Show this help
   --version          Show version
   --rebuild          Force rebuild of the sandbox Docker image
+  --build-only       Build images and exit (for CI)
   --new              Start a fresh session (default: resume last)
 
 All other arguments are forwarded to claude.
@@ -87,19 +88,20 @@ EOF
     exit 0
 fi
 
-# --- --rebuild flag ---
+# --- Parse sandy flags (order-independent, consumed before forwarding to claude) ---
 SANDY_REBUILD=false
-if [[ "${1:-}" == "--rebuild" ]]; then
-    SANDY_REBUILD=true
-    shift
-fi
-
-# --- --new flag (start fresh session instead of resuming) ---
+SANDY_BUILD_ONLY=false
 SANDY_NEW_SESSION=false
-if [[ "${1:-}" == "--new" ]]; then
-    SANDY_NEW_SESSION=true
-    shift
-fi
+REMAINING_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --rebuild)    SANDY_REBUILD=true ;;
+        --build-only) SANDY_BUILD_ONLY=true ;;
+        --new)        SANDY_NEW_SESSION=true ;;
+        *)            REMAINING_ARGS+=("$arg") ;;
+    esac
+done
+set -- "${REMAINING_ARGS[@]}"
 
 # --- Preflight checks ---
 if ! command -v docker &>/dev/null; then
@@ -500,6 +502,11 @@ if [ "$NEEDS_BUILD" = true ]; then
     echo "$BUILD_HASH" > "$HASH_FILE"
 else
     info "Sandbox image up to date."
+fi
+
+if [ "$SANDY_BUILD_ONLY" = true ]; then
+    info "Build complete. Exiting (--build-only)."
+    exit 0
 fi
 
 # --- Ensure the per-instance isolated network exists ---
