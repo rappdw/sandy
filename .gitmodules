@@ -1,3 +1,6 @@
 [submodule "research/claude-code"]
 	path = research/claude-code
 	url = git@github.com:anthropics/claude-code.git
+[submodule "research/sandbox-runtime"]
+	path = research/sandbox-runtime
+	url = git@github.com:anthropic-experimental/sandbox-runtime.git
