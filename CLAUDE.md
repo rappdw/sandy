@@ -118,3 +118,12 @@ On every session start, the entrypoint checks the workspace for common issues:
 ## Network Isolation Details
 
 Per-instance Docker bridge networks are created with names keyed on PID (`sandy_net_$$`) to avoid races between concurrent sessions. On Linux, iptables DROP rules block RFC 1918 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`), and CGNAT/Tailscale (`100.64.0.0/10`), while allowing the container's own subnet. On macOS, Docker Desktop's VM provides LAN isolation by default. Rules are cleaned up on script exit.
+
+## Protected Files
+
+Certain sensitive files and directories in the workspace are mounted read-only inside the container to prevent modification by Claude Code. This blocks shell config injection, git hook injection, and Claude command/agent tampering — the most dangerous attack vectors for an AI coding agent.
+
+**Protected files**: `.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile`
+**Protected directories**: `.git/hooks/`, `.claude/commands/`, `.claude/agents/`, `.vscode/`, `.idea/`
+
+These are overlaid as read-only bind mounts at container launch. The host filesystem is unaffected. Files that don't exist in the workspace are skipped (no empty placeholders created).

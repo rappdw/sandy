@@ -858,6 +858,16 @@ if [ -f "$WORK_DIR/.git" ]; then
 fi
 RUN_FLAGS+=(-v "$WORK_DIR:$SANDY_WORKSPACE")
 RUN_FLAGS+=(-w "$SANDY_WORKSPACE")
+
+# Protect sensitive files/dirs from modification inside the container by overlaying
+# read-only bind mounts. Prevents shell config injection, git hook injection, and
+# Claude command/agent directory tampering. Does not affect the host filesystem.
+for _pf in .bashrc .bash_profile .zshrc .zprofile .profile; do
+    [ -e "$WORK_DIR/$_pf" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_pf:$SANDY_WORKSPACE/$_pf:ro")
+done
+for _pd in .git/hooks .claude/commands .claude/agents .vscode .idea; do
+    [ -d "$WORK_DIR/$_pd" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_pd:$SANDY_WORKSPACE/$_pd:ro")
+done
 RUN_FLAGS+=(-e "SANDY_WORKSPACE=$SANDY_WORKSPACE")
 # Validate SANDY_MODEL — only allow alphanumeric, hyphens, dots, underscores
 SANDY_MODEL="${SANDY_MODEL:-claude-opus-4-6}"

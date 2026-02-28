@@ -167,3 +167,4 @@ These checks run on every session start and add negligible overhead.
 - `no-new-privileges` prevents privilege escalation
 - Credentials are seeded into per-project sandboxes, not shared across projects
 - The working directory is bind-mounted read/write — Claude can modify your files there (that's the point)
+- **Protected files**: Shell configs (`.bashrc`, `.zshrc`, etc.), `.git/hooks/`, `.claude/commands/`, `.claude/agents/`, `.vscode/`, and `.idea/` are mounted read-only to prevent config injection and hook tampering

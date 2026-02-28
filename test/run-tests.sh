@@ -44,6 +44,13 @@ setup_project() {
 # The entrypoint runs as root, drops to user, sets up PATH/envs, then
 # execs our command instead of launching claude.
 sandy_run() {
+    local _ro_mounts=()
+    for _pf in .bashrc .bash_profile .zshrc .zprofile .profile; do
+        [ -e "$TEST_PROJECT/$_pf" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_pf:/workspace/$_pf:ro")
+    done
+    for _pd in .git/hooks .claude/commands .claude/agents .vscode .idea; do
+        [ -d "$TEST_PROJECT/$_pd" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_pd:/workspace/$_pd:ro")
+    done
     docker run --rm \
         --read-only \
         --tmpfs /tmp:exec,size=256M \
@@ -55,6 +62,7 @@ sandy_run() {
         -v "$SANDBOX_DIR/go:/home/claude/go" \
         -v "$SANDBOX_DIR/cargo:/home/claude/.cargo" \
         -v "$TEST_PROJECT:/workspace" \
+        "${_ro_mounts[@]}" \
         -w /workspace \
         -e SANDY_WORKSPACE=/workspace \
         -e HOST_UID="$(id -u)" \
@@ -312,6 +320,42 @@ check "WORK_DIR defined before Phase 3" \
     test "$WORK_DIR_DEF" -lt "$PHASE3_USE"
 check "SANDBOX_NAME defined before Phase 3" \
     test "$SANDBOX_NAME_DEF" -lt "$PHASE3_USE"
+
+# ============================================================
+info "13. Protected files are read-only inside container"
+# ============================================================
+
+# Create protected files and dirs in the project
+echo "# host bashrc" > "$TEST_PROJECT/.bashrc"
+echo "# host zshrc" > "$TEST_PROJECT/.zshrc"
+mkdir -p "$TEST_PROJECT/.git/hooks"
+echo "#!/bin/sh" > "$TEST_PROJECT/.git/hooks/pre-commit"
+mkdir -p "$TEST_PROJECT/.claude/commands"
+echo "test" > "$TEST_PROJECT/.claude/commands/test.md"
+
+# Verify writes to protected files fail
+sandy_run "echo injected >> /workspace/.bashrc 2>/dev/null" >/dev/null 2>&1 && WRITE_BASHRC=yes || WRITE_BASHRC=no
+check "cannot write to .bashrc" test "$WRITE_BASHRC" = "no"
+
+sandy_run "echo injected >> /workspace/.zshrc 2>/dev/null" >/dev/null 2>&1 && WRITE_ZSHRC=yes || WRITE_ZSHRC=no
+check "cannot write to .zshrc" test "$WRITE_ZSHRC" = "no"
+
+sandy_run "echo injected > /workspace/.git/hooks/pre-commit 2>/dev/null" >/dev/null 2>&1 && WRITE_HOOK=yes || WRITE_HOOK=no
+check "cannot write to .git/hooks/" test "$WRITE_HOOK" = "no"
+
+sandy_run "echo injected > /workspace/.claude/commands/test.md 2>/dev/null" >/dev/null 2>&1 && WRITE_CMD=yes || WRITE_CMD=no
+check "cannot write to .claude/commands/" test "$WRITE_CMD" = "no"
+
+# Verify reads still work
+check "can read protected .bashrc" \
+    sandy_run "cat /workspace/.bashrc | grep -q 'host bashrc'"
+
+# Verify unprotected files are still writable
+check "can write to unprotected files" \
+    sandy_run "echo test > /workspace/test-file.txt"
+
+rm -f "$TEST_PROJECT/.bashrc" "$TEST_PROJECT/.zshrc" "$TEST_PROJECT/test-file.txt"
+rm -rf "$TEST_PROJECT/.git" "$TEST_PROJECT/.claude"
 
 # ============================================================
 # Summary
