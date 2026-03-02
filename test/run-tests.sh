@@ -358,6 +358,60 @@ rm -f "$TEST_PROJECT/.bashrc" "$TEST_PROJECT/.zshrc" "$TEST_PROJECT/test-file.tx
 rm -rf "$TEST_PROJECT/.git" "$TEST_PROJECT/.claude"
 
 # ============================================================
+info "14. git-lfs is available"
+# ============================================================
+
+check "git-lfs is installed" sandy_run "git lfs version"
+
+# ============================================================
+info "15. LFS auto-detection sets up filters"
+# ============================================================
+
+# Create a .gitattributes with LFS filter
+echo "*.bin filter=lfs diff=lfs merge=lfs -text" > "$TEST_PROJECT/.gitattributes"
+# Simulate what the entrypoint does: find .gitattributes with filter=lfs, run git lfs install
+OUTPUT="$(sandy_run '
+    if find /workspace -name .gitattributes -maxdepth 3 -exec grep -ql "filter=lfs" {} + 2>/dev/null; then
+        git lfs install 2>/dev/null
+    fi
+    git config --get filter.lfs.smudge
+' 2>&1)"
+check "LFS filters configured when .gitattributes has filter=lfs" \
+    bash -c 'echo "$1" | grep -q "git-lfs smudge"' -- "$OUTPUT"
+rm -f "$TEST_PROJECT/.gitattributes"
+
+# ============================================================
+info "16. Container runs as host UID"
+# ============================================================
+
+EXPECTED_UID="$(id -u)"
+CONTAINER_UID="$(sandy_run 'id -u' 2>&1 | tr -d '[:space:]')"
+check "container UID matches host UID" \
+    test "$CONTAINER_UID" = "$EXPECTED_UID"
+
+# Static analysis: verify passwd overlay logic exists for non-default UIDs
+check "passwd overlay for non-default UID" \
+    grep -q 'SANDY_PASSWD.*passwd' "$SCRIPT"
+
+# ============================================================
+info "17. Per-project config is sourced"
+# ============================================================
+
+# Static analysis: verify .sandy/config sourcing happens before SSH relay setup
+CONFIG_SOURCE="$(grep -n 'source.*\.sandy/config' "$SCRIPT" | head -1 | cut -d: -f1)"
+SSH_RELAY="$(grep -n 'SANDY_SSH=.*token' "$SCRIPT" | tail -1 | cut -d: -f1)"
+check ".sandy/config sourced before SSH relay setup" \
+    test "$CONFIG_SOURCE" -lt "$SSH_RELAY"
+
+# ============================================================
+info "18. Container naming"
+# ============================================================
+
+# Static analysis: verify --name flag is set in RUN_FLAGS
+check "container name includes sandbox name" \
+    grep -q -- '--name "$CONTAINER_NAME"' "$SCRIPT"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
