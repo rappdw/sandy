@@ -76,6 +76,9 @@ Environment variables:
   SANDY_ALLOW_NO_ISOLATION  Set to "1" to allow launch when iptables
                      rules cannot be applied (Linux only)
 
+Per-project config:
+  .sandy/config      Sourced on launch (e.g. SANDY_SSH=agent)
+
 Flags:
   --help             Show this help
   --version          Show version
@@ -101,7 +104,7 @@ for arg in "$@"; do
         *)            REMAINING_ARGS+=("$arg") ;;
     esac
 done
-set -- "${REMAINING_ARGS[@]}"
+set -- ${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}
 
 # --- Preflight checks ---
 if ! command -v docker &>/dev/null; then
@@ -123,6 +126,7 @@ RUN apt-get update && apt-get install -y \
         cmake \
         curl \
         git \
+        git-lfs \
         gosu \
         jq \
         less \
@@ -321,6 +325,11 @@ if [ -n "${GIT_USER_EMAIL:-}" ]; then
 fi
 
 # --- Dev environment checks ---
+# Set up git-lfs filters if the workspace uses LFS (home is tmpfs, so config is lost each session)
+if find "$WORKSPACE" -name .gitattributes -maxdepth 3 -exec grep -ql "filter=lfs" {} + 2>/dev/null; then
+    git lfs install 2>/dev/null || true
+fi
+
 # Auto-install Python version if .python-version exists (uv is idempotent & fast)
 if [ -f "$WORKSPACE/.python-version" ]; then
     PY_WANT="$(cat "$WORKSPACE/.python-version" | tr -d "[:space:]")"
@@ -527,6 +536,13 @@ ensure_network
 
 # --- Per-project sandbox directory ---
 WORK_DIR="$(pwd)"
+
+# Source per-project config if present (sets env vars like SANDY_SSH, SANDY_MODEL, etc.)
+if [ -f "$WORK_DIR/.sandy/config" ]; then
+    # shellcheck source=/dev/null
+    source "$WORK_DIR/.sandy/config"
+fi
+
 FULL_HASH="$(printf '%s' "$WORK_DIR" | { shasum -a 256 2>/dev/null || sha256sum; })"
 FULL_HASH="${FULL_HASH%% *}"
 SHORT_HASH="${FULL_HASH:0:8}"
@@ -813,7 +829,10 @@ if [ -n "$CRED_JSON" ]; then
 fi
 
 # --- Build docker run flags ---
-RUN_FLAGS=(--rm -it)
+CONTAINER_NAME="sandy-${SANDBOX_NAME}"
+# Remove stale container from a previous unclean exit (--rm handles normal exits)
+docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+RUN_FLAGS=(--rm -it --name "$CONTAINER_NAME")
 RUN_FLAGS+=(--cpus "$SANDY_CPUS" --memory "$SANDY_MEM")
 RUN_FLAGS+=(--security-opt no-new-privileges:true)
 RUN_FLAGS+=(--read-only)
@@ -888,8 +907,28 @@ if [ -n "$GIT_USER_EMAIL" ]; then
     RUN_FLAGS+=(-e "GIT_USER_EMAIL=$GIT_USER_EMAIL")
 fi
 # Pass host UID/GID so entrypoint can remap claude user (fixes bind-mount permissions on Linux)
-RUN_FLAGS+=(-e "HOST_UID=$(id -u)")
-RUN_FLAGS+=(-e "HOST_GID=$(id -g)")
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+RUN_FLAGS+=(-e "HOST_UID=$HOST_UID")
+RUN_FLAGS+=(-e "HOST_GID=$HOST_GID")
+# If host UID/GID differs from the image default (1001), overlay /etc/passwd and /etc/group
+# so tools that need username resolution (git, SSH, etc.) work correctly.
+if [ "$HOST_UID" != "1001" ] || [ "$HOST_GID" != "1001" ]; then
+    SANDY_PASSWD="$SANDY_HOME/passwd"
+    SANDY_GROUP="$SANDY_HOME/group"
+    # Generate passwd/group with correct UID/GID for the claude user.
+    # Only root and claude exist in the container; other system users are
+    # from the base image and only needed at build time.
+    if [ ! -f "$SANDY_PASSWD" ] \
+        || ! grep -q "^claude:x:${HOST_UID}:${HOST_GID}:" "$SANDY_PASSWD" 2>/dev/null; then
+        docker run --rm --entrypoint cat "$IMAGE_NAME" /etc/passwd \
+            | sed "s/^claude:x:1001:1001:/claude:x:${HOST_UID}:${HOST_GID}:/" > "$SANDY_PASSWD"
+        docker run --rm --entrypoint cat "$IMAGE_NAME" /etc/group \
+            | sed "s/^claude:x:1001:/claude:x:${HOST_GID}:/" > "$SANDY_GROUP"
+    fi
+    RUN_FLAGS+=(-v "$SANDY_PASSWD:/etc/passwd:ro")
+    RUN_FLAGS+=(-v "$SANDY_GROUP:/etc/group:ro")
+fi
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
 fi
