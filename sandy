@@ -543,6 +543,15 @@ if [ -f "$WORK_DIR/.sandy/config" ]; then
     source "$WORK_DIR/.sandy/config"
 fi
 
+# Preflight: SSH agent mode on macOS requires socat for the relay
+if [ "${SANDY_SSH:-token}" = "agent" ] && [ "$(uname -s)" != "Linux" ]; then
+    if ! command -v socat &>/dev/null; then
+        error "SANDY_SSH=agent requires socat on macOS."
+        error "Install it: brew install socat"
+        exit 1
+    fi
+fi
+
 FULL_HASH="$(printf '%s' "$WORK_DIR" | { shasum -a 256 2>/dev/null || sha256sum; })"
 FULL_HASH="${FULL_HASH%% *}"
 SHORT_HASH="${FULL_HASH:0:8}"
