@@ -130,6 +130,9 @@ RUN apt-get update && apt-get install -y \
         gosu \
         jq \
         less \
+        libcairo2 \
+        libgdk-pixbuf-2.0-0 \
+        libpango1.0-0 \
         libssl-dev \
         ncurses-term \
         openssh-client \
