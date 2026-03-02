@@ -34,6 +34,42 @@ Analysis of [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-
 
 - [ ] **Get listed in [awesome-claude-code](https://github.com/hesreallyhim/awesome-claude-code)** — Sandy doesn't appear in any community lists. Would increase visibility.
 
+  <details>
+  <summary>How to submit & draft issue text</summary>
+
+  **Steps:**
+  1. Go to https://github.com/hesreallyhim/awesome-claude-code/issues/new
+  2. Select the **"Recommend a resource"** issue template (do NOT submit a PR — only the repo owner's Claude submits PRs)
+  3. Fill in the template with the details below
+
+  **Suggested section:** Tooling > General (alongside `run-claude-docker`, `viwo-cli`, `TSK`)
+
+  **Resource name:** sandy
+
+  **Resource URL:** https://github.com/rappdw/sandy
+
+  **Description:**
+
+  > **sandy** — Claude's isolated sibling. A single command that runs Claude Code in a fully sandboxed Docker container.
+  >
+  > `curl | bash` install, then just run `sandy` from any project directory. No config needed.
+  >
+  > **Key features:**
+  > - **Filesystem isolation**: Read-only root filesystem, non-root user, no-new-privileges
+  > - **Network isolation**: LAN/private ranges blocked via iptables, internet access preserved
+  > - **Per-project sandboxes**: Each project gets its own isolated `~/.claude`, credentials, and package storage
+  > - **Persistent dev environments**: pip, npm, go, cargo, and uv installs survive across sessions per project
+  > - **Multi-language toolchains**: Python 3, Node.js 22, Go 1.24, Rust stable, C/C++ pre-installed
+  > - **Protected files**: Shell configs, `.git/hooks/`, `.claude/commands/`, `.claude/agents/` mounted read-only to prevent injection attacks
+  > - **Per-project Dockerfile**: Drop a `.sandy/Dockerfile` in your project to layer custom tools (e.g., quarto, typst) on top
+  > - **SSH agent relay**: Token-based (default) or socket-forwarded git authentication
+  > - **Auto-update**: Detects new Claude Code releases and rebuilds automatically
+  > - **Git submodule support**: Correctly mounts worktree and gitdir for submodule workspaces
+  >
+  > Self-contained bash script (~950 lines). Works on Linux and macOS (via Docker Desktop or Colima).
+
+  </details>
+
 - [ ] **Emphasize the "one command" story** — Projects like [cco](https://github.com/nikvdp/cco) (173 stars) and [ClaudeCage](https://github.com/PACHAKUTlQ/ClaudeCage) (134 stars) are popular partly because they're drop-in `claude` replacements. Sandy has a similar UX (`curl | bash` install + `sandy` command) but could market this more prominently.
 
-- [ ] **Document Lima/Colima as Docker alternative for macOS** — A significant user segment wants sandboxing on macOS without Docker Desktop. Documenting lightweight Docker alternatives would help.
+- [ ] **Document Docker Desktop alternatives for macOS** — A significant user segment wants sandboxing on macOS without Docker Desktop. Sandy just needs a Docker-compatible CLI — document alternatives like Rancher Desktop, Colima, and Lima that provide this without a Docker Desktop license.

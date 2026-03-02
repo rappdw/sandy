@@ -4,13 +4,34 @@
 
 # sandy — Claude's isolated sibling
 
-Run Claude Code with `--dangerously-skip-permissions` in a Docker container with proper isolation:
+Install it, run it. That's it.
 
-- **Filesystem**: Read/write access limited to the mounted working directory only
-- **Network**: Public internet access only — all LAN/private networks are blocked
+```bash
+curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | bash
+cd /path/to/your/project
+sandy
+```
+
+Sandy runs Claude Code in a Docker container with `--dangerously-skip-permissions` — so Claude works without interruption while your system stays protected:
+
+- **Filesystem**: Read/write limited to the mounted working directory only
+- **Network**: Public internet only — all LAN/private networks blocked
 - **Resources**: Capped CPU and memory (auto-detected from host)
 - **Security**: Non-root user, read-only root filesystem, no privilege escalation
-- **Per-project sandboxes**: Isolated `~/.claude` per working directory
+- **Protected files**: Shell configs, git hooks, and Claude commands mounted read-only
+- **Per-project sandboxes**: Isolated `~/.claude`, credentials, and package storage per project
+- **Dev environments**: Python, Node.js, Go, Rust, and C/C++ with persistent package installs
+
+No `ANTHROPIC_API_KEY` required if using a Claude paid account (Pro/Max) — credentials are seeded from the host on first run.
+
+## Prerequisites
+
+Sandy works with any Docker-compatible runtime:
+
+- [Rancher Desktop](https://rancherdesktop.io/)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- [Colima](https://github.com/abiosoft/colima)
+- [Lima](https://github.com/lima-vm/lima)
 
 ## Installation
 
@@ -24,20 +45,13 @@ Or install locally from a clone:
 LOCAL_INSTALL=./sandy ./install.sh
 ```
 
-## Quick Start
+## Usage
 
 ```bash
-# cd into whatever project you want Claude to work on
 cd /path/to/your/project
-
-# Start an interactive session
-sandy
-
-# Or run with a one-shot prompt
-sandy -p "Review the code in src/ for security issues"
+sandy                                              # interactive session
+sandy -p "Review the code in src/ for security issues"  # one-shot prompt
 ```
-
-No `ANTHROPIC_API_KEY` required if using Claude paid account (Pro/Max) (OAuth) — credentials are seeded from docker host (if present) on first run.
 
 ## Configuration
 
