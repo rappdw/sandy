@@ -263,6 +263,21 @@ ln -sf /opt/claude-code /home/claude/.local/share/claude
 chown "$RUN_UID:$RUN_GID" /home/claude/.local /home/claude/.local/bin \
     /home/claude/.local/share /home/claude/.local/share/claude 2>/dev/null || true
 
+# Create pip/pip3 wrappers that auto-add --user for install commands when NOT
+# inside a virtualenv. Created here (root section) because the user section is
+# inside bash -c '...' where heredoc quoting breaks.
+cat > /home/claude/.local/bin/pip <<'PIPWRAP'
+#!/bin/bash
+if [ -z "$VIRTUAL_ENV" ] && [ "${1:-}" = "install" ]; then
+    shift
+    exec python3 -m pip install --user "$@"
+fi
+exec python3 -m pip "$@"
+PIPWRAP
+cp /home/claude/.local/bin/pip /home/claude/.local/bin/pip3
+chmod +x /home/claude/.local/bin/pip /home/claude/.local/bin/pip3
+chown "$RUN_UID:$RUN_GID" /home/claude/.local/bin/pip /home/claude/.local/bin/pip3
+
 # Drop privileges to host user's UID/GID
 exec gosu "$RUN_UID:$RUN_GID" bash -c '
 set -e
@@ -287,23 +302,11 @@ export NPM_CONFIG_PREFIX="$HOME/.npm-global"
 mkdir -p "$NPM_CONFIG_PREFIX/bin"
 
 # Python: persistent user-scoped pip installs via PYTHONUSERBASE
-# We create pip/pip3 wrapper scripts that auto-add --user for install
-# commands when NOT inside a virtualenv. Neither pip.conf user=true
-# nor PIP_USER=1 work because both cause errors inside virtualenvs.
+# pip/pip3 wrapper scripts are created in the root section above (heredoc
+# quoting breaks inside bash -c single quotes).
 export PIP_BREAK_SYSTEM_PACKAGES=1
 export PYTHONUSERBASE="$HOME/.pip-packages"
 mkdir -p "$PYTHONUSERBASE/bin"
-for _pip_cmd in pip pip3; do
-    cat > "$HOME/.local/bin/$_pip_cmd" <<'PIPWRAP'
-#!/bin/bash
-if [ -z "$VIRTUAL_ENV" ] && [ "${1:-}" = "install" ]; then
-    shift
-    exec python3 -m pip install --user "$@"
-fi
-exec python3 -m pip "$@"
-PIPWRAP
-    chmod +x "$HOME/.local/bin/$_pip_cmd"
-done
 
 # Writable bin dirs on PATH
 export PATH="$HOME/.local/bin:$PYTHONUSERBASE/bin:$NPM_CONFIG_PREFIX/bin:$GOPATH/bin:$CARGO_HOME/bin:$PATH"
