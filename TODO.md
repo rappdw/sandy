@@ -70,6 +70,6 @@ Analysis of [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-
 
   </details>
 
-- [ ] **Emphasize the "one command" story** — Projects like [cco](https://github.com/nikvdp/cco) (173 stars) and [ClaudeCage](https://github.com/PACHAKUTlQ/ClaudeCage) (134 stars) are popular partly because they're drop-in `claude` replacements. Sandy has a similar UX (`curl | bash` install + `sandy` command) but could market this more prominently.
+- [x] **Emphasize the "one command" story** — Projects like [cco](https://github.com/nikvdp/cco) (173 stars) and [ClaudeCage](https://github.com/PACHAKUTlQ/ClaudeCage) (134 stars) are popular partly because they're drop-in `claude` replacements. Sandy has a similar UX (`curl | bash` install + `sandy` command) but could market this more prominently. *(Done: README now leads with three-line install-and-run.)*
 
-- [ ] **Document Docker Desktop alternatives for macOS** — A significant user segment wants sandboxing on macOS without Docker Desktop. Sandy just needs a Docker-compatible CLI — document alternatives like Rancher Desktop, Colima, and Lima that provide this without a Docker Desktop license.
+- [x] **Document Docker Desktop alternatives for macOS** — A significant user segment wants sandboxing on macOS without Docker Desktop. Sandy just needs a Docker-compatible CLI — document alternatives like Rancher Desktop, Colima, and Lima that provide this without a Docker Desktop license. *(Done: README Prerequisites section lists Rancher Desktop, Docker Desktop, Colima, and Lima.)*
