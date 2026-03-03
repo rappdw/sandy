@@ -283,6 +283,7 @@ exec gosu "$RUN_UID:$RUN_GID" bash -c '
 set -e
 export HOME=/home/claude
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}"
 export DISABLE_AUTOUPDATER=1
 export DISABLE_SPINNER_TIPS=1
 
@@ -331,9 +332,11 @@ if [ -n "${GIT_USER_EMAIL:-}" ]; then
 fi
 
 # --- Dev environment checks ---
-# Set up git-lfs filters if the workspace uses LFS (home is tmpfs, so config is lost each session)
-if find "$WORKSPACE" -name .gitattributes -maxdepth 3 -exec grep -ql "filter=lfs" {} + 2>/dev/null; then
-    git lfs install 2>/dev/null || true
+# Set up git-lfs filters if the workspace is a git repo using LFS (home is tmpfs, so config is lost each session)
+if [ -d "$WORKSPACE/.git" ] || [ -f "$WORKSPACE/.git" ]; then
+    if find "$WORKSPACE" -name .gitattributes -maxdepth 3 -exec grep -ql "filter=lfs" {} + 2>/dev/null; then
+        git lfs install 2>/dev/null || true
+    fi
 fi
 
 # Auto-install Python version if .python-version exists (uv is idempotent & fast)
