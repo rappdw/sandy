@@ -62,7 +62,7 @@ sandy_run() {
         -v "$SANDBOX_DIR/go:/home/claude/go" \
         -v "$SANDBOX_DIR/cargo:/home/claude/.cargo" \
         -v "$TEST_PROJECT:/workspace" \
-        "${_ro_mounts[@]}" \
+        ${_ro_mounts[@]+"${_ro_mounts[@]}"} \
         -w /workspace \
         -e SANDY_WORKSPACE=/workspace \
         -e HOST_UID="$(id -u)" \
@@ -85,15 +85,8 @@ sandy_run() {
             chown \"\$RUN_UID:\$RUN_GID\" /home/claude/.local /home/claude/.local/bin \
                 /home/claude/.local/share /home/claude/.local/share/claude 2>/dev/null || true
 
-            # Create pip/pip3 wrappers (root phase, simpler quoting)
-            cat > /home/claude/.local/bin/pip <<'PIPWRAP'
-#!/bin/bash
-if [ -z \"\$VIRTUAL_ENV\" ] && [ \"\${1:-}\" = \"install\" ]; then
-    shift
-    exec python3 -m pip install --user \"\$@\"
-fi
-exec python3 -m pip \"\$@\"
-PIPWRAP
+            # Create pip/pip3 wrappers (base64-encoded to avoid quoting hell)
+            echo IyEvYmluL2Jhc2gKaWYgWyAteiAiJFZJUlRVQUxfRU5WIiBdICYmIFsgIiR7MTotfSIgPSAiaW5zdGFsbCIgXTsgdGhlbgogICAgc2hpZnQKICAgIGV4ZWMgcHl0aG9uMyAtbSBwaXAgaW5zdGFsbCAtLXVzZXIgIiRAIgpmaQpleGVjIHB5dGhvbjMgLW0gcGlwICIkQCIK | base64 -d > /home/claude/.local/bin/pip
             cp /home/claude/.local/bin/pip /home/claude/.local/bin/pip3
             chmod +x /home/claude/.local/bin/pip /home/claude/.local/bin/pip3
             chown \"\$RUN_UID:\$RUN_GID\" /home/claude/.local/bin/pip /home/claude/.local/bin/pip3
