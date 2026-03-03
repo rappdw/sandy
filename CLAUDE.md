@@ -28,6 +28,17 @@ sandy -p "your prompt here"  # one-shot prompt
 
 No `ANTHROPIC_API_KEY` required if using Claude Max (OAuth) — credentials are seeded from `~/.claude/` on first run.
 
+## Per-project Configuration
+
+Create `.sandy/config` in any project directory to set per-project defaults:
+
+```sh
+SANDY_SSH=agent                          # use SSH agent forwarding
+SANDY_MODEL=claude-sonnet-4-5-20250929   # override model
+```
+
+This file is sourced as a bash script on every launch. Any sandy environment variable can be set here: `SANDY_MODEL`, `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`.
+
 ## Per-project Sandboxes
 
 Each project directory gets its own isolated `~/.claude` sandbox under `~/.sandy/sandboxes/`, named with a mnemonic prefix and hash (e.g. `myproject-a1b2c3d4`). On first run, `.credentials.json` and `settings.json` are seeded from the host's `~/.claude/`.

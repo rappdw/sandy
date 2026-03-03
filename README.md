@@ -55,20 +55,42 @@ sandy -p "Review the code in src/ for security issues"  # one-shot prompt
 
 ## Configuration
 
-### Model selection
+### Per-project config (`.sandy/config`)
+
+Create a `.sandy/config` file in any project to set defaults for that project:
 
 ```bash
-SANDY_MODEL=claude-sonnet-4-5-20250929 sandy
+# .sandy/config — sourced on every sandy launch in this directory
+SANDY_SSH=agent                          # use SSH agent instead of gh token
+SANDY_MODEL=claude-sonnet-4-5-20250929   # override default model
+SANDY_SKIP_PERMISSIONS=false             # keep Claude's permission prompts
 ```
 
-Defaults to `claude-opus-4-6` if not set.
+Any environment variable can go here. It's sourced as a bash script before anything else runs.
 
-### API key (non-OAuth)
+### Environment variables
 
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-sandy
-```
+| Variable | Default | Description |
+|---|---|---|
+| `SANDY_MODEL` | `claude-opus-4-6` | Claude model to use |
+| `SANDY_SSH` | `token` | Git auth method: `token` (gh CLI + HTTPS) or `agent` (SSH agent forwarding) |
+| `SANDY_SKIP_PERMISSIONS` | `true` | Set to `false` to keep Claude Code's permission system active |
+| `SANDY_HOME` | `~/.sandy` | Sandy config/build/sandbox directory |
+| `SANDY_ALLOW_NO_ISOLATION` | (unset) | Set to `1` to allow launch without iptables rules (Linux) |
+| `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth) |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max output tokens per response (Claude Code default is 32K) |
+
+### Flags
+
+| Flag | Description |
+|---|---|
+| `--new` | Start a fresh session (default: resume last) |
+| `--resume` | Open session picker |
+| `--rebuild` | Force rebuild of the Docker image |
+| `--build-only` | Build images and exit (for CI) |
+| `-p "prompt"` | One-shot prompt (no interactive session) |
+
+All other arguments are forwarded to `claude`.
 
 ## How Network Isolation Works
 
