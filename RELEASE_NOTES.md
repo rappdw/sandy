@@ -1,41 +1,27 @@
-## sandy v0.3.0
+## sandy v0.5.0
 
 ### What's Changed
 
-**Layered Docker image with language runtimes** — the Docker build is now two-phase: a `sandy-base` image installs OS packages and language toolchains (Node.js 22 LTS, Go 1.24, Rust stable, Python 3, C/C++ via build-essential), while the thin `sandy-claude-code` layer installs only Claude Code on top. The base image rebuilds rarely, so Claude Code updates are fast. Inside the container, Go, Rust, and npm are configured with writable home-directory paths so `go install`, `cargo install`, and `npm install -g` work out of the box.
+**Protected files** — Shell configs (`.bashrc`, `.zshrc`, `.profile`, etc.), `.git/hooks/`, `.claude/commands/`, `.claude/agents/`, `.vscode/`, and `.idea/` are now mounted read-only inside the container. This prevents Claude from injecting shell configs, git hooks, or tampering with Claude command/agent definitions — the most dangerous attack vectors for an AI coding agent. The host filesystem is unaffected.
 
-**OAuth token refresh** — sandy now detects expired or soon-to-expire OAuth tokens before launch and automatically runs `claude auth login` to refresh them. Credential loading has been unified into a single `load_credentials()` helper that reads from `~/.claude/.credentials.json` or the macOS Keychain.
+**Per-project config** — Drop a `.sandy/config` file in any project directory to set environment variables for that project. For example, `SANDY_SSH=agent` for repos that use SSH-based git remotes (Gitea, GitLab, self-hosted). The config is sourced before anything else runs.
 
-**Improved sandbox fidelity** — the Claude Code data directory (`~/.local/share/claude`) is now persisted via `/opt/claude-code` and symlinked back at runtime, so Claude Code finds both its binary and data directory at the expected paths. Statsig feature-flag caches are refreshed on every launch (not just on sandbox creation). Plugin marketplace catalogs are seeded into new sandboxes, and stale `enabledPlugins` entries are stripped.
+**UID/passwd fix for macOS** — When the host UID differs from the container default (1001), sandy now overlays `/etc/passwd` and `/etc/group` with the correct UID so that git, SSH, and other tools that need username resolution work correctly. Fixes "No user exists for uid 501" errors on macOS.
 
-**Home directory tmpfs increased** — the `/home/claude` tmpfs overlay was increased from 512 MB to 2 GB, giving language toolchains enough room for package caches and build artifacts.
+**Container naming** — Containers are now named `sandy-<project>-<hash>` so `docker ps` shows which project each container is running against. Stale containers from unclean exits are automatically cleaned up.
 
-### Fixes
+**git-lfs support** — `git-lfs` is now included in the base image. When sandy detects `.gitattributes` with LFS filter rules, it automatically runs `git lfs install` to configure the smudge/clean filters.
 
-- **UID mismatch on Linux** — the entrypoint now reads `HOST_UID`/`HOST_GID` from the host and runs `gosu` with matching IDs. All `chown` calls use the runtime UID/GID instead of the hardcoded `claude:claude` username, fixing permission errors on bind-mounted files when the host user's UID differs from 1001.
-- **Bridge name length** — shortened the per-instance bridge name prefix from `br-claude-` to `br-sdy-` to stay within the Linux 15-character `IFNAMSIZ` limit.
-- **git safe.directory** — changed from trusting only `$WORKSPACE` to trusting `*`, since the entire container is sandboxed and host UID mismatches are expected.
-- **tmux stderr** — Claude Code's tmux session now captures stderr (`2>&1`) so error output is visible in the terminal.
+**Cairo/Pango/GDK-Pixbuf runtime libs** — Added to the base image for PDF generation tools (synthkit, WeasyPrint, etc.) without requiring per-project Dockerfile customization.
 
-### Environment Variables
+**pip/pip3 wrapper fix** — Fixed a quoting bug where the pip wrapper scripts had variables expanded at container startup instead of at invocation time, causing `ERROR: unknown command ""` on every `pip install`.
 
-| Variable | Default | Description |
-|---|---|---|
-| `SANDY_MODEL` | `claude-opus-4-6` | Model to use |
-| `ANTHROPIC_API_KEY` | — | API key (not needed with Claude Max / OAuth) |
-| `SANDY_HOME` | `~/.sandy` | Sandy config directory |
-| `SANDY_SSH` | `token` | Git SSH method: `token` (gh CLI HTTPS) or `agent` (SSH agent forwarding) |
-| `SANDY_SKIP_PERMISSIONS` | `true` | Set to `false` to keep Claude Code's permission system active |
-| `SANDY_ALLOW_NO_ISOLATION` | — | Set to `1` to allow launch when iptables rules cannot be applied (Linux only) |
+**socat preflight check** — Sandy now checks for socat before starting when `SANDY_SSH=agent` is set on macOS, failing early with install instructions instead of silently hanging.
 
-### Files
+**README improvements** — Restructured to lead with the three-line install-and-run story. Added Prerequisites section listing compatible Docker runtimes (Rancher Desktop, Docker Desktop, Colima, Lima).
 
-| File | Purpose |
-|---|---|
-| `sandy` | Self-contained launcher (~820 lines of bash) |
-| `install.sh` | `curl \| bash` installer |
+**Test suite expanded** — From 12 to 36 tests covering protected files, git-lfs, LFS auto-detection, UID mapping, per-project config, container naming, and pip wrapper correctness.
 
-### Requirements
+### Research
 
-- Docker
-- No `ANTHROPIC_API_KEY` needed if using Claude Max (OAuth)
+Added `claude-code` and `sandbox-runtime` as git submodules under `research/` for ongoing analysis of patterns and capabilities to adopt.
