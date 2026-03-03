@@ -412,6 +412,23 @@ check "container name includes sandbox name" \
     grep -q -- '--name "$CONTAINER_NAME"' "$SCRIPT"
 
 # ============================================================
+info "19. pip wrapper created in root section (not inside bash -c)"
+# ============================================================
+
+# The pip wrapper heredoc must be in the root section of the entrypoint, NOT
+# inside the 'exec gosu ... bash -c' single-quoted string, because <<'PIPWRAP'
+# would break the outer quoting and expand variables at startup time.
+GOSU_LINE="$(grep -n "exec gosu" "$SCRIPT" | head -1 | cut -d: -f1)"
+PIP_WRAPPER_LINE="$(grep -n "cat > .*/pip <<" "$SCRIPT" | head -1 | cut -d: -f1)"
+check "pip wrapper created before exec gosu (root section)" \
+    test "$PIP_WRAPPER_LINE" -lt "$GOSU_LINE"
+
+# Also verify the wrapper actually works (not just passes through empty args)
+OUTPUT="$(sandy_run 'pip install --quiet cowsay 2>&1; echo EXIT:$?' 2>&1)"
+check "pip install works (wrapper passes args correctly)" \
+    bash -c 'echo "$1" | grep -q "EXIT:0"' -- "$OUTPUT"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
