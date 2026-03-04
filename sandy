@@ -189,7 +189,7 @@ FROM ${BASE_IMAGE_NAME}
 # tmpfs overlay at runtime, we relocate the binary to /usr/local/bin
 # and the data directory to /opt/claude-code.  The entrypoint symlinks
 # them back into the expected paths.
-RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
+RUN HOME=/home/claude NODE_OPTIONS="--max-old-space-size=1536" su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
  && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \\
  && mv /home/claude/.local/share/claude /opt/claude-code
 COPY tmux.conf /etc/tmux.conf
@@ -415,7 +415,7 @@ for arg in "$@"; do
 done
 
 cd "$WORKSPACE"
-tmux new-session -s sandy -n "sandy: $(basename "$WORKSPACE")" -- bash -c "$CLAUDE_CMD 2>&1"
+tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$CLAUDE_CMD 2>&1"
 ' -- "$@"
 ENTRYPOINT
 
@@ -906,6 +906,7 @@ for _pd in .git/hooks .claude/commands .claude/agents .vscode .idea; do
     [ -d "$WORK_DIR/$_pd" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_pd:$SANDY_WORKSPACE/$_pd:ro")
 done
 RUN_FLAGS+=(-e "SANDY_WORKSPACE=$SANDY_WORKSPACE")
+RUN_FLAGS+=(-e "SANDY_PROJECT_NAME=$(basename "$WORK_DIR")")
 # Validate SANDY_MODEL — only allow alphanumeric, hyphens, dots, underscores
 SANDY_MODEL="${SANDY_MODEL:-claude-opus-4-6}"
 if ! [[ "$SANDY_MODEL" =~ ^[a-zA-Z0-9._-]+$ ]]; then
