@@ -422,6 +422,60 @@ check "pip install works (wrapper passes args correctly)" \
     bash -c 'echo "$1" | grep -q "EXIT:0"' -- "$OUTPUT"
 
 # ============================================================
+info "20. Symlink protection — detects escaping symlinks"
+# ============================================================
+
+# Extract the symlink check logic from sandy and test it directly
+REAL_WORK_DIR="$(cd "$TEST_PROJECT" && pwd -P)"
+
+# Create a symlink that escapes the workspace
+ln -sf /etc/hostname "$TEST_PROJECT/escape-link"
+DANGEROUS_SYMLINKS=()
+while IFS= read -r -d '' link; do
+    target="$(readlink -f "$link" 2>/dev/null || true)"
+    [ -z "$target" ] && continue
+    if [[ "$target" != "$REAL_WORK_DIR"* ]]; then
+        link_rel="${link#$TEST_PROJECT/}"
+        DANGEROUS_SYMLINKS+=("$link_rel -> $target")
+    fi
+done < <(find "$TEST_PROJECT" -maxdepth 5 -type l \
+    -not -path '*/node_modules/*' \
+    -not -path '*/.venv/*' \
+    -not -path '*/.git/*' \
+    -print0 2>/dev/null)
+check "detects symlink escaping workspace" \
+    test ${#DANGEROUS_SYMLINKS[@]} -gt 0
+rm -f "$TEST_PROJECT/escape-link"
+
+# Create a safe relative symlink inside the workspace
+mkdir -p "$TEST_PROJECT/subdir"
+echo "target" > "$TEST_PROJECT/subdir/real-file"
+ln -sf subdir/real-file "$TEST_PROJECT/safe-link"
+DANGEROUS_SYMLINKS=()
+while IFS= read -r -d '' link; do
+    target="$(readlink -f "$link" 2>/dev/null || true)"
+    [ -z "$target" ] && continue
+    if [[ "$target" != "$REAL_WORK_DIR"* ]]; then
+        link_rel="${link#$TEST_PROJECT/}"
+        DANGEROUS_SYMLINKS+=("$link_rel -> $target")
+    fi
+done < <(find "$TEST_PROJECT" -maxdepth 5 -type l \
+    -not -path '*/node_modules/*' \
+    -not -path '*/.venv/*' \
+    -not -path '*/.git/*' \
+    -print0 2>/dev/null)
+check "does not flag safe internal symlink" \
+    test ${#DANGEROUS_SYMLINKS[@]} -eq 0
+rm -f "$TEST_PROJECT/safe-link"
+rm -rf "$TEST_PROJECT/subdir"
+
+# Static analysis: verify symlink check exists in sandy before docker run
+SYMLINK_CHECK="$(grep -n 'DANGEROUS_SYMLINKS' "$SCRIPT" | head -1 | cut -d: -f1)"
+DOCKER_RUN="$(grep -n 'docker run.*RUN_FLAGS' "$SCRIPT" | head -1 | cut -d: -f1)"
+check "symlink check runs before docker run" \
+    test "$SYMLINK_CHECK" -lt "$DOCKER_RUN"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

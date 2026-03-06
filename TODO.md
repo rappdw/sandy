@@ -12,7 +12,7 @@ Analysis of [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-
 
 - [ ] **Violation monitoring / logging** — srt logs sandbox violations in real-time so users can see what was blocked. Sandy currently blocks silently. Adding visibility (at minimum, logging denied network connections and write attempts to protected files) would help debugging and build trust. Could log to `~/.sandy/sandboxes/<project>/violations.log`.
 
-- [ ] **Symlink attack prevention** — srt checks for symlinks that cross isolation boundaries (e.g., `.claude → /etc/passwd`). Sandy's bind mounts could be vulnerable to symlinks in the project directory pointing outside the intended scope. Should validate that protected paths and workspace contents don't symlink outside the project tree.
+- [x] **Symlink protection** — Scans workspace for symlinks that escape the project tree before mounting. Prompts user to confirm if dangerous symlinks are found. Skips node_modules, .venv, and .git directories. *(Implemented: interactive prompt at startup.)*
 
 ### Medium Value
 
