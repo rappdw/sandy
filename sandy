@@ -191,7 +191,8 @@ FROM ${BASE_IMAGE_NAME}
 # them back into the expected paths.
 RUN HOME=/home/claude NODE_OPTIONS="--max-old-space-size=1536" su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
  && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \\
- && mv /home/claude/.local/share/claude /opt/claude-code
+ && mv /home/claude/.local/share/claude /opt/claude-code \\
+ && { /usr/local/bin/claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version || true; }
 COPY tmux.conf /etc/tmux.conf
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
@@ -506,8 +507,8 @@ fi
 
 # Check for newer Claude Code (skip if already rebuilding)
 if [ "$NEEDS_BUILD" = false ]; then
-    INSTALLED_VERSION="$(docker run --rm --entrypoint claude "$IMAGE_NAME" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-    LATEST_VERSION="$(curl -fsSL https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null || true)"
+    INSTALLED_VERSION="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/claude-code/.version 2>/dev/null || true)"
+    LATEST_VERSION="$(curl -fsSL --max-time 5 https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null || true)"
     if [ -n "$LATEST_VERSION" ] && [ -n "$INSTALLED_VERSION" ] && [ "$LATEST_VERSION" != "$INSTALLED_VERSION" ]; then
         info "Claude Code update available: $INSTALLED_VERSION → $LATEST_VERSION"
         NEEDS_BUILD=true
