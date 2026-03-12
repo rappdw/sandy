@@ -23,6 +23,7 @@ Sandy runs Claude Code in a Docker container with `--dangerously-skip-permission
 - **Protected files**: Shell configs, git hooks, and Claude commands mounted read-only
 - **Per-project sandboxes**: Isolated `~/.claude`, credentials, and package storage per project
 - **Dev environments**: Python, Node.js, Go, Rust, and C/C++ with persistent package installs
+- **Terminal notifications**: OSC passthrough enabled — works with [cmux](https://www.cmux.dev/), iTerm2, and other notification-aware terminals
 
 No `ANTHROPIC_API_KEY` required if using a Claude paid account (Pro/Max) — credentials are seeded from the host on first run.
 
@@ -197,6 +198,14 @@ Sandy checks your project on startup and handles common issues:
 - **Foreign native modules** — if `node_modules/` contains native addons compiled for a different platform (e.g. macOS), sandy warns with `npm rebuild` as the fix
 
 These checks run on every session start and add negligible overhead.
+
+## Terminal Notifications
+
+Sandy passes through OSC escape sequences (9/99/777) from Claude Code to the outer terminal. This enables notification features in terminals like [cmux](https://www.cmux.dev/) and iTerm2 — pane rings, desktop alerts, and badges when Claude needs attention.
+
+**cmux auto-setup**: When sandy detects it's running inside cmux (via the `CMUX_WORKSPACE_ID` environment variable), it automatically installs a notification hook that emits OSC 777 sequences on Claude Code events. No manual configuration needed — just run `sandy` in a cmux pane.
+
+**Custom hooks**: If you have Claude Code hooks configured on the host (`~/.claude/hooks/`), sandy mounts them read-only into the container automatically. Host hooks take precedence over auto-setup (cmux auto-setup is skipped if `~/.claude/hooks/` exists on the host).
 
 ## Security Notes
 

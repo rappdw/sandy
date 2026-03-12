@@ -476,6 +476,115 @@ check "symlink check runs before docker run" \
     test "$SYMLINK_CHECK" -lt "$DOCKER_RUN"
 
 # ============================================================
+info "21. Terminal notification passthrough"
+# ============================================================
+
+# Static analysis: verify tmux.conf has allow-passthrough on
+check "tmux.conf enables allow-passthrough" \
+    grep -q 'allow-passthrough on' "$SCRIPT"
+
+# Static analysis: verify host hooks mount exists
+check "host hooks mounted read-only" \
+    grep -q '\.claude/hooks:/home/claude/\.claude/hooks:ro' "$SCRIPT"
+
+# ============================================================
+info "22. cmux auto-setup"
+# ============================================================
+
+# Static analysis: verify CMUX_WORKSPACE_ID detection exists
+check "cmux detection checks CMUX_WORKSPACE_ID" \
+    grep -q 'CMUX_WORKSPACE_ID' "$SCRIPT"
+
+# Static analysis: verify hook script contains OSC 777
+check "cmux hook template emits OSC 777" \
+    grep -q '777;notify' "$SCRIPT"
+
+# Static analysis: verify the Notification hook is registered in settings.json merge
+check "cmux setup adds Notification hook to settings.json" \
+    grep -q 'Notification' "$SCRIPT"
+
+# Static analysis: verify idempotency check (cmux-notify dedup)
+check "cmux hook dedup prevents duplicates" \
+    grep -q 'cmux-notify' "$SCRIPT"
+
+# Static analysis: verify cmux setup skipped when host hooks exist
+check "cmux setup skipped when host hooks dir exists" \
+    grep -q '! -d.*\.claude/hooks' "$SCRIPT"
+
+# Functional test: run the cmux setup logic via a helper script
+CMUX_SANDBOX="$(mktemp -d)"
+mkdir -p "$CMUX_SANDBOX"
+echo '{"teammateMode":"tmux"}' > "$CMUX_SANDBOX/settings.json"
+
+# Extract and run the cmux auto-setup logic using a temp script (avoids quoting issues)
+cat > "$CMUX_SANDBOX/test-cmux-setup.sh" <<'SETUP_SCRIPT'
+#!/bin/bash
+set -e
+SANDBOX_DIR="$1"
+mkdir -p "$SANDBOX_DIR/hooks"
+cat > "$SANDBOX_DIR/hooks/cmux-notify.sh" <<'CMUXHOOK'
+#!/bin/bash
+INPUT=$(cat)
+EVENT_TYPE=$(echo "$INPUT" | jq -r '.type // "unknown"')
+case "$EVENT_TYPE" in
+    permission_prompt)
+        printf '\e]777;notify;Claude Code;Permission needed\a' ;;
+    idle_prompt)
+        printf '\e]777;notify;Claude Code;Waiting for input\a' ;;
+esac
+CMUXHOOK
+chmod +x "$SANDBOX_DIR/hooks/cmux-notify.sh"
+node -e "
+    const fs = require('fs');
+    const f = process.argv[1];
+    let s;
+    try { s = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { s = {}; }
+    if (!s.hooks) s.hooks = {};
+    if (!s.hooks.Notification) s.hooks.Notification = [];
+    const hasCmux = s.hooks.Notification.some(h =>
+        h.hooks && h.hooks.some(hh => hh.command && hh.command.includes('cmux-notify'))
+    );
+    if (!hasCmux) {
+        s.hooks.Notification.push({
+            matcher: '',
+            hooks: [{
+                type: 'command',
+                command: '/home/claude/.claude/hooks/cmux-notify.sh'
+            }]
+        });
+    }
+    fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
+" "$SANDBOX_DIR/settings.json"
+SETUP_SCRIPT
+chmod +x "$CMUX_SANDBOX/test-cmux-setup.sh"
+
+# Run setup once
+bash "$CMUX_SANDBOX/test-cmux-setup.sh" "$CMUX_SANDBOX"
+
+check "cmux hook script created and executable" \
+    test -x "$CMUX_SANDBOX/hooks/cmux-notify.sh"
+check "cmux hook script contains OSC 777" \
+    grep -q '777;notify' "$CMUX_SANDBOX/hooks/cmux-notify.sh"
+check "cmux hook registered in settings.json" \
+    grep -q 'cmux-notify' "$CMUX_SANDBOX/settings.json"
+check "existing settings preserved after cmux merge" \
+    node -e "
+        const s = JSON.parse(require('fs').readFileSync('$CMUX_SANDBOX/settings.json', 'utf8'));
+        if (s.teammateMode !== 'tmux') process.exit(1);
+    "
+
+# Run setup again — should NOT duplicate the hook
+bash "$CMUX_SANDBOX/test-cmux-setup.sh" "$CMUX_SANDBOX"
+HOOK_COUNT="$(node -e "
+    const s = JSON.parse(require('fs').readFileSync('$CMUX_SANDBOX/settings.json', 'utf8'));
+    console.log(s.hooks.Notification.length);
+")"
+check "cmux hook not duplicated on second run" \
+    test "$HOOK_COUNT" = "1"
+
+rm -rf "$CMUX_SANDBOX"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

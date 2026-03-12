@@ -138,3 +138,9 @@ Certain sensitive files and directories in the workspace are mounted read-only i
 **Protected directories**: `.git/hooks/`, `.claude/commands/`, `.claude/agents/`, `.vscode/`, `.idea/`
 
 These are overlaid as read-only bind mounts at container launch. The host filesystem is unaffected. Files that don't exist in the workspace are skipped (no empty placeholders created).
+
+## Terminal Notifications
+
+Sandy's inner tmux is configured with `allow-passthrough on`, which forwards OSC escape sequences (9/99/777) from Claude Code through to the outer terminal. This enables notification features in terminals like cmux and iTerm2.
+
+Host-side Claude Code hooks (`~/.claude/hooks/`) are mounted read-only into the container at `/home/claude/.claude/hooks/`. This allows hooks configured on the host (e.g., cmux notification hooks) to work inside sandy without duplication.
