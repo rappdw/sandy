@@ -1,27 +1,24 @@
-## sandy v0.5.0
+## sandy v0.6.0
 
 ### What's Changed
 
-**Protected files** — Shell configs (`.bashrc`, `.zshrc`, `.profile`, etc.), `.git/hooks/`, `.claude/commands/`, `.claude/agents/`, `.vscode/`, and `.idea/` are now mounted read-only inside the container. This prevents Claude from injecting shell configs, git hooks, or tampering with Claude command/agent definitions — the most dangerous attack vectors for an AI coding agent. The host filesystem is unaffected.
+**Terminal notification support** — Sandy's inner tmux now has `allow-passthrough on`, so OSC escape sequences (9/99/777) from Claude Code flow through to the outer terminal. This enables notification rings, desktop alerts, and sidebar badges in [cmux](https://www.cmux.dev/), iTerm2, and other notification-aware terminals.
 
-**Per-project config** — Drop a `.sandy/config` file in any project directory to set environment variables for that project. For example, `SANDY_SSH=agent` for repos that use SSH-based git remotes (Gitea, GitLab, self-hosted). The config is sourced before anything else runs.
+**cmux auto-setup** — When sandy detects it's running inside cmux (via `CMUX_WORKSPACE_ID`), it automatically installs a notification hook that emits OSC 777 sequences on Claude Code events. No manual configuration needed. Host-side Claude Code hooks (`~/.claude/hooks/`) are also mounted read-only into the container.
 
-**UID/passwd fix for macOS** — When the host UID differs from the container default (1001), sandy now overlays `/etc/passwd` and `/etc/group` with the correct UID so that git, SSH, and other tools that need username resolution work correctly. Fixes "No user exists for uid 501" errors on macOS.
+**Symlink protection** — Before launching the container, sandy scans the workspace for symlinks that point outside the project directory. If any are found, sandy warns and prompts for confirmation, preventing Claude from accessing files outside the sandbox via symlink traversal.
 
-**Container naming** — Containers are now named `sandy-<project>-<hash>` so `docker ps` shows which project each container is running against. Stale containers from unclean exits are automatically cleaned up.
+**Plugin marketplace** — The [sandy-plugins](https://github.com/rappdw/sandy-plugins) marketplace is pre-configured in every sandbox. Install plugins with `/plugin install synthkit@sandy-plugins`. The marketplace is seeded on every launch, so existing sandboxes pick it up automatically.
 
-**git-lfs support** — `git-lfs` is now included in the base image. When sandy detects `.gitattributes` with LFS filter rules, it automatically runs `git lfs install` to configure the smudge/clean filters.
+**Project name in tmux** — The tmux pane border and window title now show the project name (e.g., `sandy: my-project`) instead of a numeric index.
 
-**Cairo/Pango/GDK-Pixbuf runtime libs** — Added to the base image for PDF generation tools (synthkit, WeasyPrint, etc.) without requiring per-project Dockerfile customization.
+**Build improvements** — Claude Code version is cached at build time so the update check doesn't re-query npm on every launch. The update check has a 10-second timeout to prevent hangs on slow networks.
 
-**pip/pip3 wrapper fix** — Fixed a quoting bug where the pip wrapper scripts had variables expanded at container startup instead of at invocation time, causing `ERROR: unknown command ""` on every `pip install`.
+**Fixes:**
+- git-lfs no longer initializes in non-git directories
+- Output token limit raised from 32K to 128K (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`)
+- Fixed bash `!` escaping in `node -e` blocks that could cause SyntaxError on some systems
 
-**socat preflight check** — Sandy now checks for socat before starting when `SANDY_SSH=agent` is set on macOS, failing early with install instructions instead of silently hanging.
+**Documentation** — Added comprehensive "What's in the Box" section to README enumerating all pre-installed toolchains, system tools, libraries, and the plugin marketplace.
 
-**README improvements** — Restructured to lead with the three-line install-and-run story. Added Prerequisites section listing compatible Docker runtimes (Rancher Desktop, Docker Desktop, Colima, Lima).
-
-**Test suite expanded** — From 12 to 36 tests covering protected files, git-lfs, LFS auto-detection, UID mapping, per-project config, container naming, and pip wrapper correctness.
-
-### Research
-
-Added `claude-code` and `sandbox-runtime` as git submodules under `research/` for ongoing analysis of patterns and capabilities to adopt.
+**Test suite** — Added tests for terminal notification passthrough, cmux auto-setup (including idempotency), and symlink protection.
