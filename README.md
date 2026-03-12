@@ -125,9 +125,70 @@ curl -m 5 http://192.168.1.1
 curl -m 5 https://api.anthropic.com
 ```
 
-## Development Environments
+## What's in the Box
 
-Sandy's base image includes Python 3, Node.js 22, Go 1.24, Rust stable, C/C++ (build-essential), and [`uv`](https://docs.astral.sh/uv/) for Python version management.
+Sandy's base image is a self-contained development environment. Everything below is pre-installed and ready to use — no setup required.
+
+### Language toolchains
+
+| Toolchain | Version | Notes |
+|---|---|---|
+| Python 3 | Debian bookworm default | System Python; use `uv` for other versions |
+| Node.js | 22 LTS | Via NodeSource |
+| Go | 1.24 | |
+| Rust | stable | Via rustup |
+| C/C++ | build-essential | gcc, g++, make, libc-dev |
+
+### System tools
+
+| Tool | Purpose |
+|---|---|
+| `git` | Version control |
+| `git-lfs` | Large file storage (auto-detected, auto-configured) |
+| `gh` | GitHub CLI — PRs, issues, releases |
+| `jq` | JSON processor |
+| `ripgrep` (`rg`) | Fast code search |
+| `curl` | HTTP client |
+| `cmake` | Build system |
+| `pkg-config` | Build helper |
+| `socat` | Socket relay (SSH agent forwarding) |
+| `tmux` | Terminal multiplexer (sandy's session wrapper) |
+| `less` | Pager |
+| `openssh-client` | SSH client |
+
+### Python tools
+
+| Tool | Purpose |
+|---|---|
+| `uv` | Fast Python version & package manager |
+| `pip` / `pip3` | Package installer (auto `--user` outside venvs) |
+| `python3-venv` | Virtual environment support |
+
+### Libraries
+
+| Library | Purpose |
+|---|---|
+| `libcairo2` | 2D graphics / PDF rendering |
+| `libpango1.0-0` | Text layout / PDF rendering |
+| `libgdk-pixbuf-2.0-0` | Image loading / PDF rendering |
+| `libssl-dev` | TLS development headers |
+| `ncurses-term` | Terminal definitions |
+
+### Plugin marketplace
+
+The [sandy-plugins](https://github.com/rappdw/sandy-plugins) marketplace is pre-configured in every sandbox. Browse and install plugins with:
+
+```
+/plugin                                    # browse available plugins
+/plugin install synthkit@sandy-plugins     # install a plugin
+/plugin update                             # update installed plugins
+```
+
+Available plugins:
+
+| Plugin | Description |
+|---|---|
+| [synthkit](https://github.com/rappdw/synthkit) | Document synthesis — guided exploration, markdown to PDF/DOCX/HTML/email |
 
 ### Persistent packages
 
