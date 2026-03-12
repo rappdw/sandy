@@ -645,6 +645,25 @@ else
     info "Reusing sandbox: $SANDBOX_DIR"
 fi
 
+# Ensure plugin marketplace is configured (runs every launch, not just first creation)
+SETTINGS_FILE="$SANDBOX_DIR/settings.json"
+[ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
+if command -v node &>/dev/null; then
+    node -e '
+        const fs = require("fs");
+        const f = process.argv[1];
+        let s;
+        try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch { s = {}; }
+        if (!s.extraKnownMarketplaces || !s.extraKnownMarketplaces["claude-plugins"]) {
+            if (!s.extraKnownMarketplaces) s.extraKnownMarketplaces = {};
+            s.extraKnownMarketplaces["claude-plugins"] = {
+                source: { source: "github", repo: "rappdw/claude-plugins" }
+            };
+            fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
+        }
+    ' "$SETTINGS_FILE"
+fi
+
 # Ensure persistent package directories exist (created once, reused across sessions)
 mkdir -p "$SANDBOX_DIR/pip"                 # PYTHONUSERBASE (pip install --user)
 mkdir -p "$SANDBOX_DIR/uv"                 # uv-managed Python versions
@@ -681,28 +700,28 @@ CMUXHOOK
     SETTINGS_FILE="$SANDBOX_DIR/settings.json"
     [ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
     if command -v node &>/dev/null; then
-        node -e "
-            const fs = require('fs');
+        node -e '
+            const fs = require("fs");
             const f = process.argv[1];
             let s;
-            try { s = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { s = {}; }
+            try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch { s = {}; }
             if (!s.hooks) s.hooks = {};
             if (!s.hooks.Notification) s.hooks.Notification = [];
             // Only add if not already configured
             const hasCmux = s.hooks.Notification.some(h =>
-                h.hooks && h.hooks.some(hh => hh.command && hh.command.includes('cmux-notify'))
+                h.hooks && h.hooks.some(hh => hh.command && hh.command.includes("cmux-notify"))
             );
             if (!hasCmux) {
                 s.hooks.Notification.push({
-                    matcher: '',
+                    matcher: "",
                     hooks: [{
-                        type: 'command',
-                        command: '/home/claude/.claude/hooks/cmux-notify.sh'
+                        type: "command",
+                        command: "/home/claude/.claude/hooks/cmux-notify.sh"
                     }]
                 });
             }
-            fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
-        " "$SETTINGS_FILE"
+            fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
+        ' "$SETTINGS_FILE"
     fi
 fi
 
