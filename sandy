@@ -654,10 +654,10 @@ if command -v node &>/dev/null; then
         const f = process.argv[1];
         let s;
         try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch { s = {}; }
-        if (!s.extraKnownMarketplaces || !s.extraKnownMarketplaces["claude-plugins"]) {
+        if (!s.extraKnownMarketplaces || !s.extraKnownMarketplaces["sandy-plugins"]) {
             if (!s.extraKnownMarketplaces) s.extraKnownMarketplaces = {};
-            s.extraKnownMarketplaces["claude-plugins"] = {
-                source: { source: "github", repo: "rappdw/claude-plugins" }
+            s.extraKnownMarketplaces["sandy-plugins"] = {
+                source: { source: "github", repo: "rappdw/sandy-plugins" }
             };
             fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
         }
