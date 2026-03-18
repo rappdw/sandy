@@ -54,6 +54,7 @@ LOCAL_INSTALL=./sandy ./install.sh
 cd /path/to/your/project
 sandy                                              # interactive session
 sandy -p "Review the code in src/ for security issues"  # one-shot prompt
+sandy --remote                                     # remote-control server mode
 ```
 
 ## Configuration
@@ -89,6 +90,7 @@ Any environment variable can go here. It's sourced as a bash script before anyth
 |---|---|
 | `--new` | Start a fresh session (default: resume last) |
 | `--resume` | Open session picker |
+| `--remote` | Start in [remote-control](https://code.claude.com/docs/en/remote-control) server mode (connect from browser/phone) |
 | `--rebuild` | Force rebuild of the Docker image |
 | `--build-only` | Build images and exit (for CI) |
 | `-p "prompt"` | One-shot prompt (no interactive session) |

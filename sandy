@@ -63,6 +63,7 @@ Usage:
   sandy --new                    Start a fresh session
   sandy -p "prompt"              One-shot prompt
   sandy --resume                 Open session picker
+  sandy --remote                 Start in remote-control server mode
   sandy --help                   Show this help
 
 Environment variables:
@@ -85,6 +86,7 @@ Flags:
   --rebuild          Force rebuild of the sandbox Docker image
   --build-only       Build images and exit (for CI)
   --new              Start a fresh session (default: resume last)
+  --remote           Start in remote-control server mode
 
 All other arguments are forwarded to claude.
 EOF
@@ -95,12 +97,14 @@ fi
 SANDY_REBUILD=false
 SANDY_BUILD_ONLY=false
 SANDY_NEW_SESSION=false
+SANDY_REMOTE_CONTROL=false
 REMAINING_ARGS=()
 for arg in "$@"; do
     case "$arg" in
         --rebuild)    SANDY_REBUILD=true ;;
         --build-only) SANDY_BUILD_ONLY=true ;;
         --new)        SANDY_NEW_SESSION=true ;;
+        --remote)     SANDY_REMOTE_CONTROL=true ;;
         *)            REMAINING_ARGS+=("$arg") ;;
     esac
 done
@@ -388,35 +392,45 @@ if [ "${SANDY_SSH:-token}" = "token" ] && [ -n "${GIT_TOKEN:-}" ]; then
 fi
 
 # Build the claude command with any passed args
-CLAUDE_CMD="claude --model ${SANDY_MODEL:-claude-opus-4-6} --teammate-mode tmux"
-if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
-    CLAUDE_CMD+=" --dangerously-skip-permissions"
-fi
-
-# Auto-resume: inject --continue unless user passed --new, -p, --resume, or --continue
-# Also skip if there are no prior sessions to continue (first run in this sandbox)
-SANDY_AUTO_CONTINUE=true
-if [ "${SANDY_NEW_SESSION:-false}" = "true" ]; then
-    SANDY_AUTO_CONTINUE=false
-fi
-for arg in "$@"; do
-    case "$arg" in
-        -p|--resume|--continue) SANDY_AUTO_CONTINUE=false ;;
-    esac
-done
-if [ "$SANDY_AUTO_CONTINUE" = "true" ]; then
-    # Check if any session files exist (workspace is always /workspace in container)
-    if ls "$HOME/.claude/projects/-workspace/"*.jsonl &>/dev/null; then
-        CLAUDE_CMD+=" --continue"
+if [ "${SANDY_REMOTE_CONTROL:-false}" = "true" ]; then
+    # Remote-control server mode — no tmux wrapper, no auto-resume
+    CLAUDE_CMD="claude remote-control --name \"sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}\""
+    for arg in "$@"; do
+        CLAUDE_CMD+=" $(printf "%q" "$arg")"
+    done
+    cd "$WORKSPACE"
+    exec bash -c "$CLAUDE_CMD 2>&1"
+else
+    CLAUDE_CMD="claude --model ${SANDY_MODEL:-claude-opus-4-6} --teammate-mode tmux"
+    if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+        CLAUDE_CMD+=" --dangerously-skip-permissions"
     fi
+
+    # Auto-resume: inject --continue unless user passed --new, -p, --resume, or --continue
+    # Also skip if there are no prior sessions to continue (first run in this sandbox)
+    SANDY_AUTO_CONTINUE=true
+    if [ "${SANDY_NEW_SESSION:-false}" = "true" ]; then
+        SANDY_AUTO_CONTINUE=false
+    fi
+    for arg in "$@"; do
+        case "$arg" in
+            -p|--resume|--continue) SANDY_AUTO_CONTINUE=false ;;
+        esac
+    done
+    if [ "$SANDY_AUTO_CONTINUE" = "true" ]; then
+        # Check if any session files exist (workspace is always /workspace in container)
+        if ls "$HOME/.claude/projects/-workspace/"*.jsonl &>/dev/null; then
+            CLAUDE_CMD+=" --continue"
+        fi
+    fi
+
+    for arg in "$@"; do
+        CLAUDE_CMD+=" $(printf "%q" "$arg")"
+    done
+
+    cd "$WORKSPACE"
+    tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$CLAUDE_CMD 2>&1"
 fi
-
-for arg in "$@"; do
-    CLAUDE_CMD+=" $(printf "%q" "$arg")"
-done
-
-cd "$WORKSPACE"
-tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$CLAUDE_CMD 2>&1"
 ' -- "$@"
 ENTRYPOINT
 
@@ -1022,6 +1036,7 @@ fi
 RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
 RUN_FLAGS+=(-e "SANDY_SKIP_PERMISSIONS=${SANDY_SKIP_PERMISSIONS:-true}")
 RUN_FLAGS+=(-e "SANDY_NEW_SESSION=$SANDY_NEW_SESSION")
+RUN_FLAGS+=(-e "SANDY_REMOTE_CONTROL=$SANDY_REMOTE_CONTROL")
 # Forward git identity from host
 GIT_USER_NAME="${GIT_USER_NAME:-$(git config user.name 2>/dev/null || true)}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-$(git config user.email 2>/dev/null || true)}"
