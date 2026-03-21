@@ -940,9 +940,17 @@ except Exception:
 CRED_JSON="$(load_credentials)"
 
 # Refresh expired OAuth tokens before launching the container
+# Helper: detect if we can open a browser (headless servers cannot)
+can_open_browser() {
+    [[ "$(uname -s)" == "Darwin" ]] && return 0
+    [ -n "${DISPLAY:-}" ] && return 0
+    [ -n "${WAYLAND_DISPLAY:-}" ] && return 0
+    return 1
+}
+
 if token_needs_refresh "$CRED_JSON"; then
-    warn "OAuth token expired or expiring soon. Refreshing..."
-    if command -v claude &>/dev/null; then
+    if can_open_browser && command -v claude &>/dev/null; then
+        warn "OAuth token expired or expiring soon. Refreshing..."
         claude auth login
         CRED_JSON="$(load_credentials)"
         if token_needs_refresh "$CRED_JSON"; then
@@ -951,8 +959,7 @@ if token_needs_refresh "$CRED_JSON"; then
             info "OAuth token refreshed successfully."
         fi
     else
-        error "claude CLI not found on host. Cannot refresh token."
-        error "Run 'claude auth login' manually, then restart sandy."
+        warn "OAuth token expired. Use /login inside the session to re-authenticate."
     fi
 fi
 
