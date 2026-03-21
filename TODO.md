@@ -73,3 +73,18 @@ Analysis of [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-
 - [x] **Emphasize the "one command" story** — Projects like [cco](https://github.com/nikvdp/cco) (173 stars) and [ClaudeCage](https://github.com/PACHAKUTlQ/ClaudeCage) (134 stars) are popular partly because they're drop-in `claude` replacements. Sandy has a similar UX (`curl | bash` install + `sandy` command) but could market this more prominently. *(Done: README now leads with three-line install-and-run.)*
 
 - [x] **Document Docker Desktop alternatives for macOS** — A significant user segment wants sandboxing on macOS without Docker Desktop. Sandy just needs a Docker-compatible CLI — document alternatives like Rancher Desktop, Colima, and Lima that provide this without a Docker Desktop license. *(Done: README Prerequisites section lists Rancher Desktop, Docker Desktop, Colima, and Lima.)*
+
+## Plugin Marketplaces
+
+Sandy currently seeds the official Anthropic plugin marketplace (copied from host) and `rappdw/sandy-plugins` (added via `extraKnownMarketplaces` in settings.json). Consider seeding additional community marketplaces to give users a richer plugin catalog out of the box.
+
+- [ ] **Evaluate and seed community plugin marketplaces** — Candidates to investigate (verify repos exist, have valid `marketplace.json`, and are actively maintained before adding):
+
+  | Marketplace | Focus | Why consider |
+  |---|---|---|
+  | `claudebase/marketplace` | Full-stack dev + security (SAST, dependency scanning) | Aligns with sandy's security-conscious audience |
+  | `ahmedasmar/devops-claude-skills` | Terraform, K8s, CI/CD, GitOps, AWS | Natural fit for devs running containerized workflows |
+  | `alirezarezvani/claude-skills` | 190+ skills across 9 domains | Broadest coverage, actively maintained |
+  | `kivilaid/plugin-marketplace` | 100+ plugins, code review/testing/deployment | Good breadth |
+
+  **Note:** `obra/superpowers-marketplace` has been merged into the official Anthropic marketplace — no need to add separately. Some of the above may also migrate to official over time; check before adding.
