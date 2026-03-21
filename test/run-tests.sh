@@ -558,27 +558,13 @@ case "$EVENT_TYPE" in
 esac
 CMUXHOOK
 chmod +x "$SANDBOX_DIR/hooks/cmux-notify.sh"
-node -e "
-    const fs = require('fs');
-    const f = process.argv[1];
-    let s;
-    try { s = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { s = {}; }
-    if (!s.hooks) s.hooks = {};
-    if (!s.hooks.Notification) s.hooks.Notification = [];
-    const hasCmux = s.hooks.Notification.some(h =>
-        h.hooks && h.hooks.some(hh => hh.command && hh.command.includes('cmux-notify'))
-    );
-    if (!hasCmux) {
-        s.hooks.Notification.push({
-            matcher: '',
-            hooks: [{
-                type: 'command',
-                command: '/home/claude/.claude/hooks/cmux-notify.sh'
-            }]
-        });
-    }
-    fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
-" "$SANDBOX_DIR/settings.json"
+SETTINGS_FILE="$SANDBOX_DIR/settings.json"
+[ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
+HAS_CMUX=$(jq '[.hooks.Notification // [] | .[] | select(.hooks[]?.command? | contains("cmux-notify"))] | length' "$SETTINGS_FILE")
+if [ "$HAS_CMUX" = "0" ]; then
+    jq '.hooks //= {} | .hooks.Notification //= [] | .hooks.Notification += [{"matcher":"","hooks":[{"type":"command","command":"/home/claude/.claude/hooks/cmux-notify.sh"}]}]' "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp"
+    mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+fi
 SETUP_SCRIPT
 chmod +x "$CMUX_SANDBOX/test-cmux-setup.sh"
 
@@ -592,17 +578,11 @@ check "cmux hook script contains OSC 777" \
 check "cmux hook registered in settings.json" \
     grep -q 'cmux-notify' "$CMUX_SANDBOX/settings.json"
 check "existing settings preserved after cmux merge" \
-    node -e "
-        const s = JSON.parse(require('fs').readFileSync('$CMUX_SANDBOX/settings.json', 'utf8'));
-        if (s.teammateMode !== 'tmux') process.exit(1);
-    "
+    test "$(jq -r '.teammateMode' "$CMUX_SANDBOX/settings.json")" = "tmux"
 
 # Run setup again — should NOT duplicate the hook
 bash "$CMUX_SANDBOX/test-cmux-setup.sh" "$CMUX_SANDBOX"
-HOOK_COUNT="$(node -e "
-    const s = JSON.parse(require('fs').readFileSync('$CMUX_SANDBOX/settings.json', 'utf8'));
-    console.log(s.hooks.Notification.length);
-")"
+HOOK_COUNT="$(jq '.hooks.Notification | length' "$CMUX_SANDBOX/settings.json")"
 check "cmux hook not duplicated on second run" \
     test "$HOOK_COUNT" = "1"
 
