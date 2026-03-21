@@ -625,6 +625,12 @@ check "pids-limit is configured" \
 check "cap-drop ALL is configured" \
     grep -q 'cap-drop ALL' "$SCRIPT"
 
+# Static analysis: verify GPU passthrough support
+check "SANDY_GPU config variable supported" \
+    grep -q 'SANDY_GPU' "$SCRIPT"
+check "GPU passthrough uses --gpus flag" \
+    grep -q '\-\-gpus' "$SCRIPT"
+
 # Static analysis: verify CLAUDE_CODE_OAUTH_TOKEN is blocked
 check "CLAUDE_CODE_OAUTH_TOKEN blocked" \
     grep -q 'CLAUDE_CODE_OAUTH_TOKEN=' "$SCRIPT"

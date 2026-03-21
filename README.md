@@ -85,6 +85,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). S
 | `SANDY_ALLOW_NO_ISOLATION` | (unset) | Set to `1` to allow launch without iptables rules (Linux) |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth) |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max output tokens per response (Claude Code default is 32K) |
+| `SANDY_GPU` | (disabled) | GPU passthrough: `all` for all GPUs, or device IDs like `0` or `0,1`. Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | (unset) | Set to `1` to enable experimental agent teams |
 
 ### Flags
@@ -196,6 +197,50 @@ Available plugins:
 | [synthkit](https://github.com/rappdw/synthkit) | Document synthesis — guided exploration, markdown to PDF/DOCX/HTML/email |
 
 **Known issue — slash command autocomplete**: Plugin skills (e.g. `/boardroom`, `/md2pdf`) are lazy-loaded by Claude Code and won't appear in slash command autocomplete until invoked once — either by typing the request naturally (e.g. "run a boardroom debate about X") or via the fully qualified name (e.g. `synthkit:boardroom`). After first invocation, they appear in autocomplete for the rest of the session. This is a [known Claude Code bug](https://github.com/anthropics/claude-code/issues/18949) — the slash command resolver only indexes the legacy `commands/` system and ignores `skills/` entries (despite commands being [merged into skills](https://code.claude.com/docs/en/skills.md)).
+
+### GPU support
+
+Sandy can pass host GPUs into the container for ML/AI workloads. This requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed on the host.
+
+Enable via environment variable or `.sandy/config`:
+
+```bash
+# .sandy/config
+SANDY_GPU=all          # all GPUs
+SANDY_GPU=0            # specific GPU
+SANDY_GPU=0,1          # multiple GPUs
+```
+
+The sandy base image does not include CUDA. Use `.sandy/Dockerfile` to layer GPU tools for projects that need them (see [`examples/gpu/Dockerfile`](examples/gpu/Dockerfile) for a ready-to-copy starting point). The per-project image is cached and only rebuilds when `.sandy/Dockerfile` changes.
+
+**Example — CUDA + Python ML (works on x86_64 and arm64, including DGX Spark):**
+
+```dockerfile
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# Add NVIDIA CUDA apt repository (arch-aware — maps aarch64 to sbsa for Debian)
+RUN CUDA_ARCH="$(uname -m)"; [ "$CUDA_ARCH" = "aarch64" ] && CUDA_ARCH="sbsa"; \
+    curl -fsSL "https://developer.download.nvidia.com/compute/cuda/repos/debian12/${CUDA_ARCH}/cuda-keyring_1.1-1_all.deb" \
+        -o /tmp/cuda-keyring.deb \
+    && dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends cuda-toolkit \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+For a lighter setup that skips system CUDA and uses pre-built wheels:
+
+```dockerfile
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+RUN pip install --user torch torchvision torchaudio
+```
+
+**Platform notes:**
+- **x86_64**: Standard NVIDIA GPUs (RTX, A100, H100, etc.) — fully supported
+- **arm64 / DGX Spark**: Grace Blackwell architecture — fully supported (base image and CUDA repo are multi-arch)
+- **macOS**: Docker Desktop does not support GPU passthrough; `SANDY_GPU` has no effect
 
 ### Persistent packages
 

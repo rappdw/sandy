@@ -92,6 +92,8 @@ Environment variables:
                      rules cannot be applied (Linux only)
   SANDY_CPUS         CPU limit for container (default: auto-detected)
   SANDY_MEM          Memory limit for container (default: auto-detected)
+  SANDY_GPU          GPU passthrough: "all" for all GPUs, or device IDs
+                     like "0" or "0,1" (requires NVIDIA Container Toolkit)
   CLAUDE_CODE_MAX_OUTPUT_TOKENS  Max output tokens per response (default: 128000)
 
 Per-project config:
@@ -625,7 +627,7 @@ if [ -f "$WORK_DIR/.sandy/config" ]; then
         value="${value#\'}" ; value="${value%\'}"
         case "$key" in
             SANDY_SSH|SANDY_MODEL|SANDY_SKIP_PERMISSIONS|SANDY_ALLOW_NO_ISOLATION|\
-            SANDY_CPUS|SANDY_MEM|ANTHROPIC_API_KEY|CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
+            SANDY_CPUS|SANDY_MEM|SANDY_GPU|ANTHROPIC_API_KEY|CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
                 export "$key=$value" ;;
         esac
@@ -977,6 +979,13 @@ RUN_FLAGS+=(--read-only)
 RUN_FLAGS+=(--tmpfs /tmp:exec,size=1G)
 RUN_FLAGS+=(--tmpfs /home/claude:exec,size=2G,uid=1001,gid=1001)
 RUN_FLAGS+=(--network "$NETWORK_NAME")
+# GPU passthrough (requires NVIDIA Container Toolkit on host)
+if [ -n "${SANDY_GPU:-}" ]; then
+    case "$SANDY_GPU" in
+        all)  RUN_FLAGS+=(--gpus all) ;;
+        *)    RUN_FLAGS+=(--gpus "\"device=$SANDY_GPU\"") ;;
+    esac
+fi
 RUN_FLAGS+=(-v "$SANDBOX_DIR:/home/claude/.claude")
 if [ -n "$CRED_TMPDIR" ]; then
     RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json")
