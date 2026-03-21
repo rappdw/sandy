@@ -942,9 +942,11 @@ CRED_JSON="$(load_credentials)"
 # Refresh expired OAuth tokens before launching the container
 # Helper: detect if we can open a browser (headless servers cannot)
 can_open_browser() {
+    # macOS: `open` always works and the user is local
     [[ "$(uname -s)" == "Darwin" ]] && return 0
-    [ -n "${DISPLAY:-}" ] && return 0
-    [ -n "${WAYLAND_DISPLAY:-}" ] && return 0
+    # Linux: too many false positives (DISPLAY set by NoMachine/X server on
+    # headless servers, remote sessions via mosh/SSH). The /login flow inside
+    # the session works everywhere, so don't attempt browser auth on Linux.
     return 1
 }
 
