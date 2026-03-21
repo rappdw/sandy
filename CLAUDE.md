@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-`sandy` — Claude's isolated sibling. Born from building [Proofpoint Satori](https://www.proofpoint.com/us/products/satori), a platform that deploys AI agents to scale security operations. A self-contained command that runs Claude Code in a Docker sandbox with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes.
+`sandy` — Claude's isolated sibling. A self-contained command that runs Claude Code in a Docker sandbox with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes.
 
 ## Installation
 

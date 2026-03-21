@@ -4,7 +4,7 @@
 
 # sandy — Claude's isolated sibling
 
-Sandy was born from building [Proofpoint Satori](https://www.proofpoint.com/us/products/satori) — a platform that deploys AI agents to scale security operations. When you're giving AI agents real autonomy to write code, run tests, and modify systems, the environment needs OS-enforced boundaries, not permission prompts. Sandy is the tool we built to make that work.
+When you're giving AI agents real autonomy to write code, run tests, and modify systems, the environment needs OS-enforced boundaries, not permission prompts. Sandy is the tool we built to make that work.
 
 Install it, run it. That's it.
 
