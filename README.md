@@ -86,6 +86,11 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). S
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth) |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max output tokens per response (Claude Code default is 32K) |
 | `SANDY_GPU` | (disabled) | GPU passthrough: `all` for all GPUs, or device IDs like `0` or `0,1`. Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
+| `SANDY_CHANNELS` | (unset) | Channel plugins to enable (e.g. `plugin:telegram@claude-plugins-official`) |
+| `TELEGRAM_BOT_TOKEN` | (unset) | Telegram bot token (from BotFather). Put in `.sandy/.secrets`, not `.sandy/config` |
+| `TELEGRAM_ALLOWED_SENDERS` | (unset) | Comma-separated Telegram user IDs for allowlist (e.g. `123456,789012`) |
+| `DISCORD_BOT_TOKEN` | (unset) | Discord bot token. Put in `.sandy/.secrets`, not `.sandy/config` |
+| `DISCORD_ALLOWED_SENDERS` | (unset) | Comma-separated Discord user IDs for allowlist |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | (unset) | Set to `1` to enable experimental agent teams |
 
 ### Flags
@@ -338,6 +343,61 @@ Sandy passes through OSC escape sequences (9/99/777) from Claude Code to the out
 **Custom hooks**: If you have Claude Code hooks configured on the host (`~/.claude/hooks/`), sandy mounts them read-only into the container automatically. Host hooks take precedence over auto-setup (cmux auto-setup is skipped if `~/.claude/hooks/` exists on the host).
 
 **Clipboard**: Sandy's tmux uses OSC 52 to copy mouse selections to the system clipboard. In iTerm2, enable this under **Settings > General > Selection > "Applications in terminal may access clipboard"**. With this enabled, click-drag selections in the container are automatically copied to your Mac clipboard.
+
+## Channels (Telegram, Discord)
+
+Sandy supports [Claude Code channels](https://code.claude.com/docs/en/channels) — push messages from Telegram or Discord into your running session. Sandy auto-installs the channel plugin and seeds credentials on startup.
+
+### Quick setup (Telegram)
+
+1. Create a bot via [BotFather](https://t.me/BotFather) and copy the token
+2. Add to `.sandy/.secrets` (gitignored):
+   ```
+   TELEGRAM_BOT_TOKEN=123456789:AAH...
+   TELEGRAM_ALLOWED_SENDERS=your_telegram_user_id
+   ```
+3. Add to `.sandy/config`:
+   ```
+   SANDY_CHANNELS=plugin:telegram@claude-plugins-official
+   ```
+4. Run `sandy` — the plugin is auto-installed, credentials are seeded, and Claude starts with the channel active
+
+To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot). If `TELEGRAM_ALLOWED_SENDERS` is omitted, sandy starts in `pairing` mode — DM your bot, then run `/telegram:access pair <code>` inside the session.
+
+### Quick setup (Discord)
+
+1. Create an application at the [Discord Developer Portal](https://discord.com/developers/applications)
+2. In the **Bot** section, create a bot, reset the token, and copy it
+3. Enable **Message Content Intent** under **Privileged Gateway Intents**
+4. Use **OAuth2 > URL Generator** with the `bot` scope and these permissions: View Channels, Send Messages, Send Messages in Threads, Read Message History, Attach Files, Add Reactions. Open the generated URL to invite the bot to your server.
+5. Add to `.sandy/.secrets` (gitignored):
+   ```
+   DISCORD_BOT_TOKEN=your_discord_bot_token
+   DISCORD_ALLOWED_SENDERS=your_discord_user_id
+   ```
+6. Add to `.sandy/config`:
+   ```
+   SANDY_CHANNELS=plugin:discord@claude-plugins-official
+   ```
+7. Run `sandy` — the plugin is auto-installed, credentials are seeded, and Claude starts with the channel active
+
+If `DISCORD_ALLOWED_SENDERS` is omitted, sandy starts in `pairing` mode — DM your bot, then run `/discord:access pair <code>` inside the session.
+
+### Using both channels
+
+Set both tokens in `.sandy/.secrets` and list both plugins in `.sandy/config`:
+
+```
+SANDY_CHANNELS=plugin:telegram@claude-plugins-official plugin:discord@claude-plugins-official
+```
+
+### Per-project secrets
+
+`.sandy/.secrets` uses the same `KEY=VALUE` format as `.sandy/config` but is intended for credentials. Add it to `.gitignore`:
+
+```
+.sandy/.secrets
+```
 
 ## Security Notes
 

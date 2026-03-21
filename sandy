@@ -16,7 +16,7 @@ set -euo pipefail
 #   sandy -p "prompt"         One-shot prompt
 # =============================================================================
 
-SANDY_VERSION="0.7.0"
+SANDY_VERSION="0.7.6"
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 # Validate SANDY_HOME — reject shell metacharacters
@@ -165,6 +165,7 @@ RUN apt-get update && apt-get install -y \
         ripgrep \
         socat \
         tmux \
+        unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI
@@ -192,6 +193,9 @@ ENV CARGO_HOME=/usr/local/cargo
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --no-modify-path --default-toolchain stable \
     && chmod -R a+rX /usr/local/rustup /usr/local/cargo
+
+# Bun
+RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
 
 # uv — fast Python package/version manager
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
@@ -444,6 +448,50 @@ if [ "${SANDY_SSH:-token}" = "token" ] && [ -n "${GIT_TOKEN:-}" ]; then
     fi
 fi
 
+# Auto-install channel plugins if referenced in SANDY_CHANNELS and not yet installed
+for _chan in telegram discord; do
+    if [[ "${SANDY_CHANNELS:-}" == *"$_chan"* ]]; then
+        if ! claude plugin list 2>/dev/null | grep -q "${_chan}@claude-plugins-official"; then
+            printf "\033[0;36m● Installing %s channel plugin...\033[0m\n" "$_chan"
+            claude plugin install "${_chan}@claude-plugins-official" 2>/dev/null || true
+        fi
+    fi
+done
+
+# Seed channel config from env vars (token + allowlist per channel)
+_seed_channel() {
+    local chan="$1" token_var="$2" senders_var="$3"
+    local token="${!token_var:-}"
+    local senders="${!senders_var:-}"
+    [ -z "$token" ] && return
+    mkdir -p "$HOME/.claude/channels/$chan"
+    echo "${token_var}=$token" > "$HOME/.claude/channels/$chan/.env"
+    chmod 600 "$HOME/.claude/channels/$chan/.env"
+    [ -f "$HOME/.claude/channels/$chan/access.json" ] && return
+    if [ -n "$senders" ]; then
+        ALLOW_JSON=$(echo "$senders" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NR>1{printf ","}{printf "\"%s\"",$0}')
+        cat > "$HOME/.claude/channels/$chan/access.json" <<CHACCESS
+{
+  "dmPolicy": "allowlist",
+  "allowFrom": [$ALLOW_JSON],
+  "groups": {},
+  "pending": {}
+}
+CHACCESS
+    else
+        cat > "$HOME/.claude/channels/$chan/access.json" <<'CHACCESS'
+{
+  "dmPolicy": "pairing",
+  "allowFrom": [],
+  "groups": {},
+  "pending": {}
+}
+CHACCESS
+    fi
+}
+_seed_channel telegram TELEGRAM_BOT_TOKEN TELEGRAM_ALLOWED_SENDERS
+_seed_channel discord DISCORD_BOT_TOKEN DISCORD_ALLOWED_SENDERS
+
 # Build the claude command with any passed args
 if [ "${SANDY_REMOTE_CONTROL:-false}" = "true" ]; then
     # Remote-control server mode — no tmux wrapper, no auto-resume
@@ -457,6 +505,9 @@ else
     CLAUDE_CMD="claude --model ${SANDY_MODEL:-claude-opus-4-6} --teammate-mode tmux"
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
         CLAUDE_CMD+=" --dangerously-skip-permissions"
+    fi
+    if [ -n "${SANDY_CHANNELS:-}" ]; then
+        CLAUDE_CMD+=" --channels $SANDY_CHANNELS"
     fi
 
     # Auto-resume: inject --continue unless user passed --new, -p, --resume, or --continue
@@ -630,11 +681,28 @@ if [ -f "$WORK_DIR/.sandy/config" ]; then
         value="${value#\'}" ; value="${value%\'}"
         case "$key" in
             SANDY_SSH|SANDY_MODEL|SANDY_SKIP_PERMISSIONS|SANDY_ALLOW_NO_ISOLATION|\
-            SANDY_CPUS|SANDY_MEM|SANDY_GPU|ANTHROPIC_API_KEY|CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
+            SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|\
+            TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
+            DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
+            ANTHROPIC_API_KEY|CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
                 export "$key=$value" ;;
         esac
     done < <(grep -E '^[A-Z_]+=.+' "$WORK_DIR/.sandy/config" 2>/dev/null)
+fi
+
+# Load per-project secrets (same parser, separate file for gitignored credentials)
+if [ -f "$WORK_DIR/.sandy/.secrets" ]; then
+    while IFS='=' read -r key value; do
+        value="${value#\"}" ; value="${value%\"}"
+        value="${value#\'}" ; value="${value%\'}"
+        case "$key" in
+            TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
+            DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
+            ANTHROPIC_API_KEY)
+                export "$key=$value" ;;
+        esac
+    done < <(grep -E '^[A-Z_]+=.+' "$WORK_DIR/.sandy/.secrets" 2>/dev/null)
 fi
 
 # --- Detect available resources (after config sourcing so overrides work) ---
@@ -1104,6 +1172,21 @@ RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
 RUN_FLAGS+=(-e "SANDY_SKIP_PERMISSIONS=${SANDY_SKIP_PERMISSIONS:-true}")
 RUN_FLAGS+=(-e "SANDY_NEW_SESSION=$SANDY_NEW_SESSION")
 RUN_FLAGS+=(-e "SANDY_REMOTE_CONTROL=$SANDY_REMOTE_CONTROL")
+if [ -n "${SANDY_CHANNELS:-}" ]; then
+    RUN_FLAGS+=(-e "SANDY_CHANNELS=$SANDY_CHANNELS")
+fi
+if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+    RUN_FLAGS+=(-e "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN")
+fi
+if [ -n "${TELEGRAM_ALLOWED_SENDERS:-}" ]; then
+    RUN_FLAGS+=(-e "TELEGRAM_ALLOWED_SENDERS=$TELEGRAM_ALLOWED_SENDERS")
+fi
+if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+    RUN_FLAGS+=(-e "DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN")
+fi
+if [ -n "${DISCORD_ALLOWED_SENDERS:-}" ]; then
+    RUN_FLAGS+=(-e "DISCORD_ALLOWED_SENDERS=$DISCORD_ALLOWED_SENDERS")
+fi
 RUN_FLAGS+=(-e "CLAUDE_CODE_MAX_OUTPUT_TOKENS=${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}")
 if [ "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-0}" = "1" ]; then
     RUN_FLAGS+=(-e "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")

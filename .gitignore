@@ -11,3 +11,4 @@
 # Sandy runtime (generated in ~/.sandy/, not in repo)
 *.bak
 
+.secrets
