@@ -516,6 +516,9 @@ set -g status-right-length 10
 # to the outer terminal (cmux, iTerm2, etc.)
 set -g allow-passthrough on
 
+# Copy mouse selections to system clipboard via OSC 52
+set -g set-clipboard on
+
 # Better redraw behavior
 set -g focus-events on
 setw -g aggressive-resize on

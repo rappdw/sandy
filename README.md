@@ -101,6 +101,23 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). S
 
 All other arguments are forwarded to `claude`.
 
+### Headless / remote servers
+
+When running sandy on a headless server (e.g., DGX via SSH or mosh), OAuth token refresh can't open a browser. Sandy detects this and skips the browser-based flow — instead, use `/login` inside the session to re-authenticate.
+
+The `/login` URL is long and Claude Code wraps it with indentation, which breaks copy-paste. To work around this on macOS:
+
+1. Select the wrapped URL text in your terminal and copy it (Cmd+C)
+2. Clean and open it with: `pbpaste | tr -d ' \n\t' | xargs open`
+
+To automate this as a global keyboard shortcut (e.g., Ctrl+Cmd+U):
+
+1. Open **Automator** > File > New > **Quick Action**
+2. Set "Workflow receives" to **no input** in **any application**
+3. Add a **Run Shell Script** action with: `pbpaste | tr -d ' \n\t' | xargs open`
+4. Save as "Open Cleaned URL"
+5. Assign a shortcut in **System Settings > Keyboard > Keyboard Shortcuts > Services**
+
 ## How Network Isolation Works
 
 ### macOS (Docker Desktop)
@@ -319,6 +336,8 @@ Sandy passes through OSC escape sequences (9/99/777) from Claude Code to the out
 **cmux auto-setup**: When sandy detects it's running inside cmux (via the `CMUX_WORKSPACE_ID` environment variable), it automatically installs a notification hook that emits OSC 777 sequences on Claude Code events. No manual configuration needed — just run `sandy` in a cmux pane.
 
 **Custom hooks**: If you have Claude Code hooks configured on the host (`~/.claude/hooks/`), sandy mounts them read-only into the container automatically. Host hooks take precedence over auto-setup (cmux auto-setup is skipped if `~/.claude/hooks/` exists on the host).
+
+**Clipboard**: Sandy's tmux uses OSC 52 to copy mouse selections to the system clipboard. In iTerm2, enable this under **Settings > General > Selection > "Applications in terminal may access clipboard"**. With this enabled, click-drag selections in the container are automatically copied to your Mac clipboard.
 
 ## Security Notes
 
