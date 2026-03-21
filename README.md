@@ -181,7 +181,7 @@ Sandy's base image is a self-contained development environment. Everything below
 
 ### Plugin marketplace
 
-The [sandy-plugins](https://github.com/rappdw/sandy-plugins) marketplace is pre-configured in every sandbox. Browse and install plugins with:
+The [sandy-plugins](https://github.com/rappdw/sandy-plugins) and [claude-plugins-official](https://github.com/anthropics/claude-plugins-official) marketplaces are pre-configured in every sandbox. Browse and install plugins with:
 
 ```
 /plugin                                    # browse available plugins
@@ -194,6 +194,8 @@ Available plugins:
 | Plugin | Description |
 |---|---|
 | [synthkit](https://github.com/rappdw/synthkit) | Document synthesis — guided exploration, markdown to PDF/DOCX/HTML/email |
+
+**Known issue — slash command autocomplete**: Plugin skills (e.g. `/boardroom`, `/md2pdf`) are lazy-loaded by Claude Code and won't appear in slash command autocomplete until invoked once — either by typing the request naturally (e.g. "run a boardroom debate about X") or via the fully qualified name (e.g. `synthkit:boardroom`). After first invocation, they appear in autocomplete for the rest of the session. This is a [known Claude Code bug](https://github.com/anthropics/claude-code/issues/18949) — the slash command resolver only indexes the legacy `commands/` system and ignores `skills/` entries (despite commands being [merged into skills](https://code.claude.com/docs/en/skills.md)).
 
 ### Persistent packages
 
@@ -280,4 +282,29 @@ Sandy passes through OSC escape sequences (9/99/777) from Claude Code to the out
 - `no-new-privileges` prevents privilege escalation
 - Credentials are seeded into per-project sandboxes, not shared across projects
 - The working directory is bind-mounted read/write — Claude can modify your files there (that's the point)
-- **Protected files**: Shell configs (`.bashrc`, `.zshrc`, `.gitconfig`, `.ripgreprc`, `.mcp.json`), git files (`.git/config`, `.git/hooks/`, `.gitmodules`), and Claude/IDE dirs (`.claude/commands/`, `.claude/agents/`, `.claude/plugins/`, `.vscode/`, `.idea/`) are mounted read-only to prevent config injection and hook tampering
+### Protected files and directories
+
+The workspace is bind-mounted read/write so Claude can modify your project files. However, certain files and directories are overlaid with read-only or sandbox mounts to block the most dangerous attack vectors for an AI coding agent: shell config injection, git hook injection, and tool config tampering.
+
+**Read-only mounts** — host content is visible but cannot be modified:
+
+| Path | Why |
+|---|---|
+| `.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile` | Blocks shell config injection (e.g. aliases, PATH hijacking) |
+| `.gitconfig` | Blocks git config tampering (e.g. credential helpers, aliases) |
+| `.ripgreprc` | Blocks search config injection |
+| `.mcp.json` | Blocks MCP server config tampering |
+| `.git/config` | Blocks git remote/hook path manipulation |
+| `.gitmodules` | Blocks submodule URL hijacking |
+| `.git/hooks/` | Blocks git hook injection (pre-commit, post-checkout, etc.) |
+| `.vscode/`, `.idea/` | Blocks IDE task/launch config injection |
+
+**Sandbox-mounted directories** — overlaid with writable sandbox copies so Claude can create and modify them without touching the host:
+
+| Path | Behavior |
+|---|---|
+| `.claude/commands/` | Starts empty. Claude can create new slash commands |
+| `.claude/agents/` | Starts empty. Claude can create new agents |
+| `.claude/plugins/` | Starts empty. Managed via `/plugin install` inside the container |
+
+Files that don't exist in the workspace are skipped — no empty placeholders are created

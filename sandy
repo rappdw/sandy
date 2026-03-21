@@ -352,6 +352,30 @@ trap "printf \"\033]104;4\033\\\\\"" EXIT
 WORKSPACE="${SANDY_WORKSPACE:-/workspace}"
 mkdir -p "$WORKSPACE/.claude" 2>/dev/null || true
 
+# Ensure plugin marketplaces are configured in settings.json (idempotent)
+SETTINGS_FILE="$HOME/.claude/settings.json"
+if [ -f "$SETTINGS_FILE" ]; then
+    node -e '
+        const fs = require("fs");
+        const f = process.argv[1];
+        let s;
+        try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch { s = {}; }
+        if (!s.extraKnownMarketplaces) s.extraKnownMarketplaces = {};
+        const required = {
+            "claude-plugins-official": { source: { source: "github", repo: "anthropics/claude-plugins-official" } },
+            "sandy-plugins": { source: { source: "github", repo: "rappdw/sandy-plugins" } }
+        };
+        let changed = false;
+        for (const [name, cfg] of Object.entries(required)) {
+            if (!s.extraKnownMarketplaces[name]) {
+                s.extraKnownMarketplaces[name] = cfg;
+                changed = true;
+            }
+        }
+        if (changed) fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
+    ' "$SETTINGS_FILE"
+fi
+
 # Trust all directories (host UID differs from container UID; container is sandboxed)
 git config --global --add safe.directory "*"
 
@@ -662,22 +686,9 @@ if [ ! -d "$SANDBOX_DIR" ]; then
         cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/statsig"
         info "  Seeded statsig/"
     fi
-    # Seed plugin marketplace catalog (but not installed plugins — start clean)
-    if [ -d "$HOME/.claude/plugins/marketplaces" ]; then
-        mkdir -p "$SANDBOX_DIR/plugins"
-        cp -r "$HOME/.claude/plugins/marketplaces" "$SANDBOX_DIR/plugins/marketplaces"
-        # Seed known_marketplaces.json with container paths
-        if [ -f "$HOME/.claude/plugins/known_marketplaces.json" ] && command -v node &>/dev/null; then
-            node -e "
-                const fs = require('fs');
-                const src = process.argv[1], dst = process.argv[2];
-                let raw = fs.readFileSync(src, 'utf8');
-                raw = raw.replaceAll(process.env.HOME + '/.claude/plugins', '/home/claude/.claude/plugins');
-                fs.writeFileSync(dst, raw);
-            " "$HOME/.claude/plugins/known_marketplaces.json" "$SANDBOX_DIR/plugins/known_marketplaces.json"
-        fi
-        info "  Seeded plugin marketplace catalog"
-    fi
+    # NOTE: Plugin marketplace catalogs are NOT seeded from host — the sandy-plugins
+    # marketplace is configured via extraKnownMarketplaces in user-setup.sh (baked into
+    # the image). Claude Code fetches the catalog on first /plugin browse.
     # Write sandy-required defaults into settings.json (merge with seeded copy)
     SETTINGS_FILE="$SANDBOX_DIR/settings.json"
     [ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
@@ -699,8 +710,18 @@ if [ ! -d "$SANDBOX_DIR" ]; then
             delete s.enabledPlugins;
             fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
         " "$SETTINGS_FILE"
+    elif command -v jq &>/dev/null; then
+        # jq fallback for hosts without node
+        skip_perm="true"
+        [ "${SANDY_SKIP_PERMISSIONS:-true}" = "false" ] && skip_perm="false"
+        jq --arg skip "$skip_perm" '
+            .teammateMode //= "tmux" |
+            .spinnerTipsEnabled //= false |
+            .skipDangerousModePermissionPrompt //= ($skip == "true") |
+            del(.enabledPlugins)
+        ' "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
     else
-        # Fallback: write defaults only if file is empty/bare
+        # Last resort: write defaults only if file is empty/bare
         if [ "$(cat "$SETTINGS_FILE")" = "{}" ]; then
             skip_perm="true"
             [ "${SANDY_SKIP_PERMISSIONS:-true}" = "false" ] && skip_perm="false"
@@ -709,25 +730,6 @@ if [ ! -d "$SANDBOX_DIR" ]; then
     fi
 else
     info "Reusing sandbox: $SANDBOX_DIR"
-fi
-
-# Ensure plugin marketplace is configured (runs every launch, not just first creation)
-SETTINGS_FILE="$SANDBOX_DIR/settings.json"
-[ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
-if command -v node &>/dev/null; then
-    node -e '
-        const fs = require("fs");
-        const f = process.argv[1];
-        let s;
-        try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch { s = {}; }
-        if (!s.extraKnownMarketplaces || !s.extraKnownMarketplaces["sandy-plugins"]) {
-            if (!s.extraKnownMarketplaces) s.extraKnownMarketplaces = {};
-            s.extraKnownMarketplaces["sandy-plugins"] = {
-                source: { source: "github", repo: "rappdw/sandy-plugins" }
-            };
-            fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
-        }
-    ' "$SETTINGS_FILE"
 fi
 
 # Ensure persistent package directories exist (created once, reused across sessions)
@@ -1057,8 +1059,17 @@ done
 for _gpf in .git/config .gitmodules; do
     [ -f "$WORK_DIR/$_gpf" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_gpf:$SANDY_WORKSPACE/$_gpf:ro")
 done
-for _pd in .git/hooks .claude/commands .claude/agents .claude/plugins .vscode .idea; do
+for _pd in .git/hooks .vscode .idea; do
     [ -d "$WORK_DIR/$_pd" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_pd:$SANDY_WORKSPACE/$_pd:ro")
+done
+# Mount sandbox copies of commands, agents, and plugins over the workspace.
+# All three start empty — host content is hidden so it doesn't leak into the container.
+# Claude can create/modify these freely; changes persist in the sandbox across sessions.
+for _sd in commands agents plugins; do
+    if [ -d "$WORK_DIR/.claude/$_sd" ] || [ -d "$SANDBOX_DIR/workspace-$_sd" ]; then
+        mkdir -p "$SANDBOX_DIR/workspace-$_sd"
+        RUN_FLAGS+=(-v "$SANDBOX_DIR/workspace-$_sd:$SANDY_WORKSPACE/.claude/$_sd")
+    fi
 done
 RUN_FLAGS+=(-e "SANDY_WORKSPACE=$SANDY_WORKSPACE")
 RUN_FLAGS+=(-e "SANDY_PROJECT_NAME=$(basename "$WORK_DIR")")

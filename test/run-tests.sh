@@ -51,8 +51,15 @@ sandy_run() {
     for _gpf in .git/config .gitmodules; do
         [ -f "$TEST_PROJECT/$_gpf" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_gpf:/workspace/$_gpf:ro")
     done
-    for _pd in .git/hooks .claude/commands .claude/agents .claude/plugins .vscode .idea; do
+    for _pd in .git/hooks .vscode .idea; do
         [ -d "$TEST_PROJECT/$_pd" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_pd:/workspace/$_pd:ro")
+    done
+    # Mount sandbox copies of commands, agents, and plugins over workspace
+    for _sd in commands agents plugins; do
+        if [ -d "$TEST_PROJECT/.claude/$_sd" ] || [ -d "$SANDBOX_DIR/workspace-$_sd" ]; then
+            mkdir -p "$SANDBOX_DIR/workspace-$_sd"
+            _ro_mounts+=(-v "$SANDBOX_DIR/workspace-$_sd:/workspace/.claude/$_sd")
+        fi
     done
     docker run --rm \
         --read-only \
@@ -330,6 +337,8 @@ echo "[core]" > "$TEST_PROJECT/.git/config"
 echo "" > "$TEST_PROJECT/.gitmodules"
 mkdir -p "$TEST_PROJECT/.claude/commands"
 echo "test" > "$TEST_PROJECT/.claude/commands/test.md"
+mkdir -p "$TEST_PROJECT/.claude/agents"
+echo "test" > "$TEST_PROJECT/.claude/agents/test-agent.md"
 mkdir -p "$TEST_PROJECT/.claude/plugins"
 echo "test" > "$TEST_PROJECT/.claude/plugins/test-plugin.json"
 
@@ -343,17 +352,33 @@ check "cannot write to .zshrc" test "$WRITE_ZSHRC" = "no"
 sandy_run "echo injected > /workspace/.git/hooks/pre-commit 2>/dev/null" >/dev/null 2>&1 && WRITE_HOOK=yes || WRITE_HOOK=no
 check "cannot write to .git/hooks/" test "$WRITE_HOOK" = "no"
 
-sandy_run "echo injected > /workspace/.claude/commands/test.md 2>/dev/null" >/dev/null 2>&1 && WRITE_CMD=yes || WRITE_CMD=no
-check "cannot write to .claude/commands/" test "$WRITE_CMD" = "no"
-
 sandy_run "echo injected >> /workspace/.git/config 2>/dev/null" >/dev/null 2>&1 && WRITE_GITCFG=yes || WRITE_GITCFG=no
 check "cannot write to .git/config" test "$WRITE_GITCFG" = "no"
 
 sandy_run "echo injected >> /workspace/.gitmodules 2>/dev/null" >/dev/null 2>&1 && WRITE_GITMOD=yes || WRITE_GITMOD=no
 check "cannot write to .gitmodules" test "$WRITE_GITMOD" = "no"
 
-sandy_run "echo injected > /workspace/.claude/plugins/test-plugin.json 2>/dev/null" >/dev/null 2>&1 && WRITE_PLUGIN=yes || WRITE_PLUGIN=no
-check "cannot write to .claude/plugins/" test "$WRITE_PLUGIN" = "no"
+# Verify sandbox-mounted dirs: host content is hidden, writes succeed, host is untouched
+check "host .claude/commands/ is hidden" \
+    sandy_run "test ! -e /workspace/.claude/commands/test.md"
+check "can write to .claude/commands/" \
+    sandy_run "echo new > /workspace/.claude/commands/new-cmd.md"
+check "commands write persists in sandbox" \
+    test -f "$SANDBOX_DIR/workspace-commands/new-cmd.md"
+check "commands write does not touch host" \
+    test ! -f "$TEST_PROJECT/.claude/commands/new-cmd.md"
+
+check "host .claude/agents/ is hidden" \
+    sandy_run "test ! -e /workspace/.claude/agents/test-agent.md"
+check "can write to .claude/agents/" \
+    sandy_run "echo new > /workspace/.claude/agents/new-agent.md"
+check "agents write persists in sandbox" \
+    test -f "$SANDBOX_DIR/workspace-agents/new-agent.md"
+check "agents write does not touch host" \
+    test ! -f "$TEST_PROJECT/.claude/agents/new-agent.md"
+
+check "host .claude/plugins/ is hidden" \
+    sandy_run "test ! -e /workspace/.claude/plugins/test-plugin.json"
 
 # Verify reads still work
 check "can read protected .bashrc" \

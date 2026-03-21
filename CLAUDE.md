@@ -132,12 +132,13 @@ Per-instance Docker bridge networks are created with names keyed on PID (`sandy_
 
 ## Protected Files
 
-Certain sensitive files and directories in the workspace are mounted read-only inside the container to prevent modification by Claude Code. This blocks shell config injection, git hook injection, and Claude command/agent tampering — the most dangerous attack vectors for an AI coding agent.
+Certain sensitive files and directories in the workspace are mounted read-only inside the container to prevent modification by Claude Code. This blocks shell config injection, git hook injection, and IDE config tampering.
 
 **Protected files**: `.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile`, `.gitconfig`, `.ripgreprc`, `.mcp.json`, `.git/config`, `.gitmodules`
-**Protected directories**: `.git/hooks/`, `.claude/commands/`, `.claude/agents/`, `.claude/plugins/`, `.vscode/`, `.idea/`
+**Protected directories**: `.git/hooks/`, `.vscode/`, `.idea/`
+**Sandbox-mounted directories**: `.claude/commands/`, `.claude/agents/`, `.claude/plugins/` — these are overlaid with writable sandbox copies so Claude can create and modify commands, agents, and plugins without touching the host. All three start empty; plugins are managed via `/plugin install`.
 
-These are overlaid as read-only bind mounts at container launch. The host filesystem is unaffected. Files that don't exist in the workspace are skipped (no empty placeholders created).
+Protected files/directories are overlaid as read-only bind mounts at container launch. The host filesystem is unaffected. Files that don't exist in the workspace are skipped (no empty placeholders created).
 
 ## Terminal Notifications
 
