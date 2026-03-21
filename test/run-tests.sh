@@ -45,10 +45,13 @@ setup_project() {
 # execs our command instead of launching claude.
 sandy_run() {
     local _ro_mounts=()
-    for _pf in .bashrc .bash_profile .zshrc .zprofile .profile; do
+    for _pf in .bashrc .bash_profile .zshrc .zprofile .profile .gitconfig .ripgreprc .mcp.json; do
         [ -e "$TEST_PROJECT/$_pf" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_pf:/workspace/$_pf:ro")
     done
-    for _pd in .git/hooks .claude/commands .claude/agents .vscode .idea; do
+    for _gpf in .git/config .gitmodules; do
+        [ -f "$TEST_PROJECT/$_gpf" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_gpf:/workspace/$_gpf:ro")
+    done
+    for _pd in .git/hooks .claude/commands .claude/agents .claude/plugins .vscode .idea; do
         [ -d "$TEST_PROJECT/$_pd" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_pd:/workspace/$_pd:ro")
     done
     docker run --rm \
@@ -323,8 +326,12 @@ echo "# host bashrc" > "$TEST_PROJECT/.bashrc"
 echo "# host zshrc" > "$TEST_PROJECT/.zshrc"
 mkdir -p "$TEST_PROJECT/.git/hooks"
 echo "#!/bin/sh" > "$TEST_PROJECT/.git/hooks/pre-commit"
+echo "[core]" > "$TEST_PROJECT/.git/config"
+echo "" > "$TEST_PROJECT/.gitmodules"
 mkdir -p "$TEST_PROJECT/.claude/commands"
 echo "test" > "$TEST_PROJECT/.claude/commands/test.md"
+mkdir -p "$TEST_PROJECT/.claude/plugins"
+echo "test" > "$TEST_PROJECT/.claude/plugins/test-plugin.json"
 
 # Verify writes to protected files fail
 sandy_run "echo injected >> /workspace/.bashrc 2>/dev/null" >/dev/null 2>&1 && WRITE_BASHRC=yes || WRITE_BASHRC=no
@@ -339,6 +346,15 @@ check "cannot write to .git/hooks/" test "$WRITE_HOOK" = "no"
 sandy_run "echo injected > /workspace/.claude/commands/test.md 2>/dev/null" >/dev/null 2>&1 && WRITE_CMD=yes || WRITE_CMD=no
 check "cannot write to .claude/commands/" test "$WRITE_CMD" = "no"
 
+sandy_run "echo injected >> /workspace/.git/config 2>/dev/null" >/dev/null 2>&1 && WRITE_GITCFG=yes || WRITE_GITCFG=no
+check "cannot write to .git/config" test "$WRITE_GITCFG" = "no"
+
+sandy_run "echo injected >> /workspace/.gitmodules 2>/dev/null" >/dev/null 2>&1 && WRITE_GITMOD=yes || WRITE_GITMOD=no
+check "cannot write to .gitmodules" test "$WRITE_GITMOD" = "no"
+
+sandy_run "echo injected > /workspace/.claude/plugins/test-plugin.json 2>/dev/null" >/dev/null 2>&1 && WRITE_PLUGIN=yes || WRITE_PLUGIN=no
+check "cannot write to .claude/plugins/" test "$WRITE_PLUGIN" = "no"
+
 # Verify reads still work
 check "can read protected .bashrc" \
     sandy_run "cat /workspace/.bashrc | grep -q 'host bashrc'"
@@ -347,7 +363,7 @@ check "can read protected .bashrc" \
 check "can write to unprotected files" \
     sandy_run "echo test > /workspace/test-file.txt"
 
-rm -f "$TEST_PROJECT/.bashrc" "$TEST_PROJECT/.zshrc" "$TEST_PROJECT/test-file.txt"
+rm -f "$TEST_PROJECT/.bashrc" "$TEST_PROJECT/.zshrc" "$TEST_PROJECT/test-file.txt" "$TEST_PROJECT/.gitmodules"
 rm -rf "$TEST_PROJECT/.git" "$TEST_PROJECT/.claude"
 
 # ============================================================
@@ -390,11 +406,19 @@ check "passwd overlay for non-default UID" \
 info "17. Per-project config is sourced"
 # ============================================================
 
-# Static analysis: verify .sandy/config sourcing happens before SSH relay setup
-CONFIG_SOURCE="$(grep -n 'source.*\.sandy/config' "$SCRIPT" | head -1 | cut -d: -f1)"
+# Static analysis: verify .sandy/config loading happens before SSH relay setup
+CONFIG_SOURCE="$(grep -n '\.sandy/config' "$SCRIPT" | head -1 | cut -d: -f1)"
 SSH_RELAY="$(grep -n 'SANDY_SSH=.*token' "$SCRIPT" | tail -1 | cut -d: -f1)"
-check ".sandy/config sourced before SSH relay setup" \
+check ".sandy/config loaded before SSH relay setup" \
     test "$CONFIG_SOURCE" -lt "$SSH_RELAY"
+
+# Verify config parser does NOT use source (prevents code injection from untrusted repos)
+check "config parser does not use source" \
+    bash -c '! grep -q "source.*\.sandy/config" "$1"' -- "$SCRIPT"
+
+# Verify config parser uses allowlist
+check "config parser uses variable allowlist" \
+    grep -q 'SANDY_SSH|SANDY_MODEL' "$SCRIPT"
 
 # ============================================================
 info "18. Container naming"
@@ -583,6 +607,30 @@ check "cmux hook not duplicated on second run" \
     test "$HOOK_COUNT" = "1"
 
 rm -rf "$CMUX_SANDBOX"
+
+# ============================================================
+info "23. Container hardening flags"
+# ============================================================
+
+# Static analysis: verify pids-limit is set
+check "pids-limit is configured" \
+    grep -q 'pids-limit' "$SCRIPT"
+
+# Static analysis: verify cap-drop ALL is set
+check "cap-drop ALL is configured" \
+    grep -q 'cap-drop ALL' "$SCRIPT"
+
+# Static analysis: verify CLAUDE_CODE_OAUTH_TOKEN is blocked
+check "CLAUDE_CODE_OAUTH_TOKEN blocked" \
+    grep -q 'CLAUDE_CODE_OAUTH_TOKEN=' "$SCRIPT"
+
+# ============================================================
+info "24. CLAUDE_CODE_MAX_OUTPUT_TOKENS passed to container"
+# ============================================================
+
+# Static analysis: verify the env var is passed via docker -e
+check "MAX_OUTPUT_TOKENS in docker -e flags" \
+    grep -q 'CLAUDE_CODE_MAX_OUTPUT_TOKENS=.*128000' "$SCRIPT"
 
 # ============================================================
 # Summary

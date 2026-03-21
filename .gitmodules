@@ -4,3 +4,6 @@
 [submodule "research/sandbox-runtime"]
 	path = research/sandbox-runtime
 	url = git@github.com:anthropic-experimental/sandbox-runtime.git
+[submodule "research/OpenShell"]
+	path = research/OpenShell
+	url = https://github.com/NVIDIA/OpenShell
