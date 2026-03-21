@@ -64,13 +64,13 @@ sandy --remote                                     # remote-control server mode
 Create a `.sandy/config` file in any project to set defaults for that project:
 
 ```bash
-# .sandy/config — sourced on every sandy launch in this directory
+# .sandy/config — parsed on every sandy launch in this directory
 SANDY_SSH=agent                          # use SSH agent instead of gh token
 SANDY_MODEL=claude-sonnet-4-5-20250929   # override default model
 SANDY_SKIP_PERMISSIONS=false             # keep Claude's permission prompts
 ```
 
-Any environment variable can go here. It's sourced as a bash script before anything else runs.
+Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). See the environment variables table below for supported keys.
 
 ### Environment variables
 
@@ -80,16 +80,19 @@ Any environment variable can go here. It's sourced as a bash script before anyth
 | `SANDY_SSH` | `token` | Git auth method: `token` (gh CLI + HTTPS) or `agent` (SSH agent forwarding) |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Set to `false` to keep Claude Code's permission system active |
 | `SANDY_HOME` | `~/.sandy` | Sandy config/build/sandbox directory |
+| `SANDY_CPUS` | auto-detected | CPU limit for the container |
+| `SANDY_MEM` | auto-detected | Memory limit for the container |
 | `SANDY_ALLOW_NO_ISOLATION` | (unset) | Set to `1` to allow launch without iptables rules (Linux) |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth) |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max output tokens per response (Claude Code default is 32K) |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | (unset) | Set to `1` to enable experimental agent teams |
 
 ### Flags
 
 | Flag | Description |
 |---|---|
 | `--new` | Start a fresh session (default: resume last) |
-| `--resume` | Open session picker |
+| `--resume` | Open session picker (forwarded to claude) |
 | `--remote` | Start in [remote-control](https://code.claude.com/docs/en/remote-control) server mode (connect from browser/phone) |
 | `--rebuild` | Force rebuild of the Docker image |
 | `--build-only` | Build images and exit (for CI) |
@@ -272,9 +275,9 @@ Sandy passes through OSC escape sequences (9/99/777) from Claude Code to the out
 
 ## Security Notes
 
-- The container runs as a non-root user (`claude`, UID 1001)
+- The container runs as a non-root user (`claude`, mapped to host UID)
 - The root filesystem is read-only (`/tmp` and `/home/claude` are tmpfs)
 - `no-new-privileges` prevents privilege escalation
 - Credentials are seeded into per-project sandboxes, not shared across projects
 - The working directory is bind-mounted read/write — Claude can modify your files there (that's the point)
-- **Protected files**: Shell configs (`.bashrc`, `.zshrc`, etc.), `.git/hooks/`, `.claude/commands/`, `.claude/agents/`, `.vscode/`, and `.idea/` are mounted read-only to prevent config injection and hook tampering
+- **Protected files**: Shell configs (`.bashrc`, `.zshrc`, `.gitconfig`, `.ripgreprc`, `.mcp.json`), git files (`.git/config`, `.git/hooks/`, `.gitmodules`), and Claude/IDE dirs (`.claude/commands/`, `.claude/agents/`, `.claude/plugins/`, `.vscode/`, `.idea/`) are mounted read-only to prevent config injection and hook tampering

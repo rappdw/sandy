@@ -134,8 +134,8 @@ Per-instance Docker bridge networks are created with names keyed on PID (`sandy_
 
 Certain sensitive files and directories in the workspace are mounted read-only inside the container to prevent modification by Claude Code. This blocks shell config injection, git hook injection, and Claude command/agent tampering — the most dangerous attack vectors for an AI coding agent.
 
-**Protected files**: `.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile`
-**Protected directories**: `.git/hooks/`, `.claude/commands/`, `.claude/agents/`, `.vscode/`, `.idea/`
+**Protected files**: `.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile`, `.gitconfig`, `.ripgreprc`, `.mcp.json`, `.git/config`, `.gitmodules`
+**Protected directories**: `.git/hooks/`, `.claude/commands/`, `.claude/agents/`, `.claude/plugins/`, `.vscode/`, `.idea/`
 
 These are overlaid as read-only bind mounts at container launch. The host filesystem is unaffected. Files that don't exist in the workspace are skipped (no empty placeholders created).
 
