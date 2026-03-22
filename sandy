@@ -337,7 +337,7 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
     # Copy host SSH config/keys with correct ownership and permissions
     if [ -d "/tmp/host-ssh" ]; then
         mkdir -p /home/claude/.ssh
-        cp -a /tmp/host-ssh/. /home/claude/.ssh/
+        cp -aL /tmp/host-ssh/. /home/claude/.ssh/
         chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
         chmod 700 /home/claude/.ssh
         chmod 600 /home/claude/.ssh/* 2>/dev/null || true
