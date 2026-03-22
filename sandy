@@ -514,15 +514,32 @@ if [ "${SANDY_SSH:-token}" = "token" ] && [ -n "${GIT_TOKEN:-}" ]; then
     fi
 fi
 
+# Refresh plugin marketplaces (once per day)
+_marketplace_cache="$HOME/.claude/plugins/.marketplace_updated"
+_now=$(date +%s)
+_stale=true
+if [ -f "$_marketplace_cache" ]; then
+    _cached_time=$(cat "$_marketplace_cache" 2>/dev/null || echo 0)
+    (( _now - _cached_time < 86400 )) && _stale=false
+fi
+if [ "$_stale" = true ]; then
+    claude plugin marketplace update 2>/dev/null || true
+    echo "$_now" > "$_marketplace_cache"
+fi
+
 # Auto-install channel plugins if referenced in SANDY_CHANNELS and not yet installed
-for _chan in telegram discord; do
-    if [[ "${SANDY_CHANNELS:-}" == *"$_chan"* ]]; then
-        if ! claude plugin list 2>/dev/null | grep -q "${_chan}@claude-plugins-official"; then
-            printf "\033[0;36m● Installing %s channel plugin...\033[0m\n" "$_chan"
-            claude plugin install "${_chan}@claude-plugins-official" 2>/dev/null || true
+if [ -n "${SANDY_CHANNELS:-}" ]; then
+    for _chan in telegram discord; do
+        if [[ "$SANDY_CHANNELS" == *"$_chan"* ]]; then
+            if ! claude plugin list 2>/dev/null | grep -q "${_chan}@claude-plugins-official"; then
+                printf "\033[0;36m● Installing %s channel plugin...\033[0m\n" "$_chan"
+                if ! claude plugin install "${_chan}@claude-plugins-official" 2>&1; then
+                    printf "\033[0;31m✗ Failed to install %s channel plugin\033[0m\n" "$_chan" >&2
+                fi
+            fi
         fi
-    fi
-done
+    done
+fi
 
 # Seed channel config from env vars (token + allowlist per channel)
 _seed_channel() {
