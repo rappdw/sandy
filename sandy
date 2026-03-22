@@ -949,7 +949,7 @@ fi
 # Phase 3: Per-project image (optional — extends sandy-claude-code with project tools)
 PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"
 if [ -f "$PROJECT_DOCKERFILE" ]; then
-    PROJECT_IMAGE_NAME="sandy-project-${SANDBOX_NAME}"
+    PROJECT_IMAGE_NAME="$(echo "sandy-project-${SANDBOX_NAME}" | tr '[:upper:]' '[:lower:]')"
     PROJECT_HASH="$(cat "$PROJECT_DOCKERFILE" | sha256 | cut -d' ' -f1)"
     PROJECT_HASH_FILE="$SANDBOX_DIR/.project_build_hash"
     PROJECT_NEEDS_BUILD=false
