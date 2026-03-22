@@ -16,7 +16,7 @@ set -euo pipefail
 #   sandy -p "prompt"         One-shot prompt
 # =============================================================================
 
-SANDY_VERSION="0.7.8"
+SANDY_VERSION="0.7.9"
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 # Validate SANDY_HOME — reject shell metacharacters
@@ -149,6 +149,8 @@ Environment variables:
                      with HTTPS; "agent" forwards host SSH agent via relay
   SANDY_SKIP_PERMISSIONS  Set to "false" to keep Claude Code's permission
                      system active (default: "true" — bypasses permissions)
+  SANDY_ALLOW_LAN_HOSTS  Comma-separated IPs/CIDRs to allow through
+                     LAN isolation (e.g. "192.168.1.50,10.0.0.0/24")
   SANDY_ALLOW_NO_ISOLATION  Set to "1" to allow launch when iptables
                      rules cannot be applied (Linux only)
   SANDY_CPUS         CPU limit for container (default: auto-detected)
@@ -764,7 +766,8 @@ _load_sandy_config() {
         value="${value#\"}" ; value="${value%\"}"
         value="${value#\'}" ; value="${value%\'}"
         case "$key" in
-            SANDY_SSH|SANDY_MODEL|SANDY_SKIP_PERMISSIONS|SANDY_ALLOW_NO_ISOLATION|\
+            SANDY_SSH|SANDY_MODEL|SANDY_SKIP_PERMISSIONS|\
+            SANDY_ALLOW_NO_ISOLATION|SANDY_ALLOW_LAN_HOSTS|\
             SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|\
             CLAUDE_CODE_OAUTH_TOKEN|\
             TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
@@ -996,6 +999,16 @@ apply_network_isolation() {
         for range in "${PRIVATE_RANGES[@]}"; do
             sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d "$range" -j DROP 2>/dev/null || true
         done
+        # Allow specific LAN hosts (inserted after DROPs → evaluated before them)
+        if [ -n "${SANDY_ALLOW_LAN_HOSTS:-}" ]; then
+            IFS=',' read -ra _lan_hosts <<< "$SANDY_ALLOW_LAN_HOSTS"
+            for _host in "${_lan_hosts[@]}"; do
+                _host="$(echo "$_host" | tr -d '[:space:]')"
+                [ -z "$_host" ] && continue
+                sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d "$_host" -j ACCEPT 2>/dev/null || true
+                info "  Allowed LAN host: $_host"
+            done
+        fi
         # Inserted last → lands at top → evaluated first: allow container's own subnet
         sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d "$CONTAINER_SUBNET" -j ACCEPT 2>/dev/null || true
         info "Network isolation rules applied."
@@ -1006,6 +1019,14 @@ cleanup_network_isolation() {
     if [[ "$OS" == "Linux" ]] && [ -n "$CONTAINER_SUBNET" ]; then
         info "Cleaning up network isolation rules..."
         sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d "$CONTAINER_SUBNET" -j ACCEPT 2>/dev/null || true
+        if [ -n "${SANDY_ALLOW_LAN_HOSTS:-}" ]; then
+            IFS=',' read -ra _lan_hosts <<< "$SANDY_ALLOW_LAN_HOSTS"
+            for _host in "${_lan_hosts[@]}"; do
+                _host="$(echo "$_host" | tr -d '[:space:]')"
+                [ -z "$_host" ] && continue
+                sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d "$_host" -j ACCEPT 2>/dev/null || true
+            done
+        fi
         for range in "${PRIVATE_RANGES[@]}"; do
             sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d "$range" -j DROP 2>/dev/null || true
         done

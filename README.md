@@ -87,6 +87,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_HOME` | `~/.sandy` | Sandy config/build/sandbox directory |
 | `SANDY_CPUS` | auto-detected | CPU limit for the container |
 | `SANDY_MEM` | auto-detected | Memory limit for the container |
+| `SANDY_ALLOW_LAN_HOSTS` | (unset) | Comma-separated IPs/CIDRs to allow through LAN isolation (e.g. `192.168.1.50,10.0.0.0/24`) |
 | `SANDY_ALLOW_NO_ISOLATION` | (unset) | Set to `1` to allow launch without iptables rules (Linux) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth) |
