@@ -673,37 +673,31 @@ ensure_network
 # --- Per-project sandbox directory ---
 WORK_DIR="$(pwd)"
 
-# Load per-project config (safe key-value parser — no arbitrary code execution)
-if [ -f "$WORK_DIR/.sandy/config" ]; then
+# Safe key-value config parser (no arbitrary code execution)
+_load_sandy_config() {
+    local file="$1"
+    [ -f "$file" ] || return 0
     while IFS='=' read -r key value; do
-        # Strip surrounding quotes
         value="${value#\"}" ; value="${value%\"}"
         value="${value#\'}" ; value="${value%\'}"
         case "$key" in
             SANDY_SSH|SANDY_MODEL|SANDY_SKIP_PERMISSIONS|SANDY_ALLOW_NO_ISOLATION|\
             SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|\
+            CLAUDE_CODE_OAUTH_TOKEN|\
             TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
             DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
             ANTHROPIC_API_KEY|CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
                 export "$key=$value" ;;
         esac
-    done < <(grep -E '^[A-Z_]+=.+' "$WORK_DIR/.sandy/config" 2>/dev/null)
-fi
+    done < <(grep -E '^[A-Z_]+=.+' "$file" 2>/dev/null)
+}
 
-# Load per-project secrets (same parser, separate file for gitignored credentials)
-if [ -f "$WORK_DIR/.sandy/.secrets" ]; then
-    while IFS='=' read -r key value; do
-        value="${value#\"}" ; value="${value%\"}"
-        value="${value#\'}" ; value="${value%\'}"
-        case "$key" in
-            TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
-            DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
-            ANTHROPIC_API_KEY)
-                export "$key=$value" ;;
-        esac
-    done < <(grep -E '^[A-Z_]+=.+' "$WORK_DIR/.sandy/.secrets" 2>/dev/null)
-fi
+# Load config/secrets: user-level first, then per-project (project overrides user)
+_load_sandy_config "$SANDY_HOME/config"
+_load_sandy_config "$SANDY_HOME/.secrets"
+_load_sandy_config "$WORK_DIR/.sandy/config"
+_load_sandy_config "$WORK_DIR/.sandy/.secrets"
 
 # --- Detect available resources (after config sourcing so overrides work) ---
 AVAILABLE_CPUS="$(docker info --format '{{.NCPU}}' 2>/dev/null || echo 2)"
@@ -1008,40 +1002,47 @@ except Exception:
     fi
 }
 
-CRED_JSON="$(load_credentials)"
-
-# Refresh expired OAuth tokens before launching the container
-# Helper: detect if we can open a browser (headless servers cannot)
-can_open_browser() {
-    # macOS: `open` always works and the user is local
-    [[ "$(uname -s)" == "Darwin" ]] && return 0
-    # Linux: too many false positives (DISPLAY set by NoMachine/X server on
-    # headless servers, remote sessions via mosh/SSH). The /login flow inside
-    # the session works everywhere, so don't attempt browser auth on Linux.
-    return 1
-}
-
-if token_needs_refresh "$CRED_JSON"; then
-    if can_open_browser && command -v claude &>/dev/null; then
-        warn "OAuth token expired or expiring soon. Refreshing..."
-        claude auth login
-        CRED_JSON="$(load_credentials)"
-        if token_needs_refresh "$CRED_JSON"; then
-            error "Token still expired after login. Continuing anyway..."
-        else
-            info "OAuth token refreshed successfully."
-        fi
-    else
-        warn "OAuth token expired. Use /login inside the session to re-authenticate."
-    fi
-fi
-
+# --- Credential setup ---
+# Long-lived token (from `claude setup-token`) takes precedence over OAuth credentials.
+# When set via .sandy/config or .sandy/.secrets, skip the entire credential file flow.
 CRED_TMPDIR=""
-if [ -n "$CRED_JSON" ]; then
-    CRED_TMPDIR="$(mktemp -d)"
-    printf '%s\n' "$CRED_JSON" > "$CRED_TMPDIR/.credentials.json"
-    chmod 600 "$CRED_TMPDIR/.credentials.json"
-    info "Loaded credentials"
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    info "Using long-lived OAuth token"
+else
+    CRED_JSON="$(load_credentials)"
+
+    # Refresh expired OAuth tokens before launching the container
+    # Helper: detect if we can open a browser (headless servers cannot)
+    can_open_browser() {
+        # macOS: `open` always works and the user is local
+        [[ "$(uname -s)" == "Darwin" ]] && return 0
+        # Linux: too many false positives (DISPLAY set by NoMachine/X server on
+        # headless servers, remote sessions via mosh/SSH). The /login flow inside
+        # the session works everywhere, so don't attempt browser auth on Linux.
+        return 1
+    }
+
+    if token_needs_refresh "$CRED_JSON"; then
+        if can_open_browser && command -v claude &>/dev/null; then
+            warn "OAuth token expired or expiring soon. Refreshing..."
+            claude auth login
+            CRED_JSON="$(load_credentials)"
+            if token_needs_refresh "$CRED_JSON"; then
+                error "Token still expired after login. Continuing anyway..."
+            else
+                info "OAuth token refreshed successfully."
+            fi
+        else
+            warn "OAuth token expired. Use /login inside the session to re-authenticate."
+        fi
+    fi
+
+    if [ -n "$CRED_JSON" ]; then
+        CRED_TMPDIR="$(mktemp -d)"
+        printf '%s\n' "$CRED_JSON" > "$CRED_TMPDIR/.credentials.json"
+        chmod 600 "$CRED_TMPDIR/.credentials.json"
+        info "Loaded credentials"
+    fi
 fi
 
 # --- Build docker run flags ---
@@ -1226,8 +1227,13 @@ fi
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
 fi
-# Block CLAUDE_CODE_OAUTH_TOKEN leakage from host (sandy manages credentials via .credentials.json)
-RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=")
+# CLAUDE_CODE_OAUTH_TOKEN: pass through if explicitly configured (long-lived token from
+# `claude setup-token`), otherwise clear to prevent accidental host env leakage.
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
+else
+    RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=")
+fi
 
 # --- Git authentication ---
 # Default (SANDY_SSH=token): use GitHub CLI token with HTTPS — scoped, no SSH agent exposure.

@@ -61,16 +61,21 @@ sandy --remote                                     # remote-control server mode
 
 ### Per-project config (`.sandy/config`)
 
-Create a `.sandy/config` file in any project to set defaults for that project:
+Sandy loads config from two levels, with project overriding user:
+
+1. **User-level**: `~/.sandy/config` and `~/.sandy/.secrets` — apply to all projects on this machine
+2. **Per-project**: `.sandy/config` and `.sandy/.secrets` — override user-level for this project
 
 ```bash
-# .sandy/config — parsed on every sandy launch in this directory
+# ~/.sandy/config — user-level defaults for all projects
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-...       # long-lived token (better in ~/.sandy/.secrets)
+
+# .sandy/config — per-project overrides
 SANDY_SSH=agent                          # use SSH agent instead of gh token
 SANDY_MODEL=claude-sonnet-4-5-20250929   # override default model
-SANDY_SKIP_PERMISSIONS=false             # keep Claude's permission prompts
 ```
 
-Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). See the environment variables table below for supported keys.
+Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). Use `.secrets` files for credentials — they should not be committed. See the environment variables table below for supported keys.
 
 ### Environment variables
 
@@ -83,6 +88,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). S
 | `SANDY_CPUS` | auto-detected | CPU limit for the container |
 | `SANDY_MEM` | auto-detected | Memory limit for the container |
 | `SANDY_ALLOW_NO_ISOLATION` | (unset) | Set to `1` to allow launch without iptables rules (Linux) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth) |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max output tokens per response (Claude Code default is 32K) |
 | `SANDY_GPU` | (disabled) | GPU passthrough: `all` for all GPUs, or device IDs like `0` or `0,1`. Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
@@ -108,7 +114,16 @@ All other arguments are forwarded to `claude`.
 
 ### Headless / remote servers
 
-When running sandy on a headless server (e.g., DGX via SSH or mosh), OAuth token refresh can't open a browser. Sandy detects this and skips the browser-based flow — instead, use `/login` inside the session to re-authenticate.
+**Recommended**: Use a long-lived token (valid 1 year) to avoid OAuth expiry entirely:
+
+1. On a machine with a browser, run: `claude setup-token`
+2. Copy the token and add to `~/.sandy/.secrets` on the headless server (applies to all projects):
+   ```
+   CLAUDE_CODE_OAUTH_TOKEN=your_token_here
+   ```
+3. Run `sandy` — no browser needed, no `/login` needed
+
+**Fallback** (without a long-lived token): Sandy skips the browser-based OAuth flow on Linux and directs you to use `/login` inside the session.
 
 The `/login` URL is long and Claude Code wraps it with indentation, which breaks copy-paste. To work around this on macOS:
 
