@@ -108,6 +108,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--remote` | Start in [remote-control](https://code.claude.com/docs/en/remote-control) server mode (connect from browser/phone) |
 | `--rebuild` | Force rebuild of the Docker image |
 | `--build-only` | Build images and exit (for CI) |
+| `--upgrade` | Update sandy to the latest version from GitHub |
 | `-p "prompt"` | One-shot prompt (no interactive session) |
 
 All other arguments are forwarded to `claude`.

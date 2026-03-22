@@ -16,7 +16,7 @@ set -euo pipefail
 #   sandy -p "prompt"         One-shot prompt
 # =============================================================================
 
-SANDY_VERSION="0.7.7"
+SANDY_VERSION="0.7.8"
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 # Validate SANDY_HOME — reject shell metacharacters
@@ -44,6 +44,67 @@ info()  { echo -e "${GREEN}[sandy]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[sandy]${NC} $*"; }
 error() { echo -e "${RED}[sandy]${NC} $*" >&2; }
 sha256() { shasum -a 256 2>/dev/null || sha256sum; }
+
+SANDY_REPO_URL="https://raw.githubusercontent.com/rappdw/sandy/main/sandy"
+SANDY_API_URL="https://api.github.com/repos/rappdw/sandy/releases/latest"
+
+# Self-update: download latest sandy from GitHub and replace the running script
+sandy_self_update() {
+    local script_path
+    script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+    local tmp
+    tmp="$(mktemp)"
+    info "Downloading latest sandy..."
+    if ! curl -fsSL "$SANDY_REPO_URL" -o "$tmp"; then
+        error "Failed to download update."
+        rm -f "$tmp"
+        exit 1
+    fi
+    local new_ver
+    new_ver="$(grep -m1 '^SANDY_VERSION=' "$tmp" | cut -d'"' -f2)"
+    if [ -z "$new_ver" ]; then
+        error "Downloaded file does not look like sandy."
+        rm -f "$tmp"
+        exit 1
+    fi
+    if [ "$new_ver" = "$SANDY_VERSION" ]; then
+        info "Already on latest version ($SANDY_VERSION)."
+        rm -f "$tmp"
+        exit 0
+    fi
+    chmod +x "$tmp"
+    mv "$tmp" "$script_path"
+    info "Updated sandy: $SANDY_VERSION → $new_ver"
+    # Clear update cache
+    rm -f "$SANDY_HOME/.update_check"
+}
+
+# Check for newer version (cached, non-blocking)
+sandy_check_update() {
+    mkdir -p "$SANDY_HOME"
+    local cache="$SANDY_HOME/.update_check"
+    local now
+    now=$(date +%s)
+    if [ -f "$cache" ]; then
+        local cached_time cached_ver
+        read -r cached_time cached_ver < "$cache" 2>/dev/null || true
+        if [ -n "$cached_time" ] && (( now - cached_time < 86400 )); then
+            if [ -n "$cached_ver" ] && [ "$cached_ver" != "v$SANDY_VERSION" ]; then
+                warn "Update available: $SANDY_VERSION → ${cached_ver#v}. Run 'sandy --upgrade' to update."
+            fi
+            return
+        fi
+    fi
+    local latest
+    latest="$(curl -fsSL --max-time 3 "$SANDY_API_URL" 2>/dev/null \
+        | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)" || true
+    if [ -n "$latest" ]; then
+        echo "$now $latest" > "$cache"
+        if [ "$latest" != "v$SANDY_VERSION" ]; then
+            warn "Update available: $SANDY_VERSION → ${latest#v}. Run 'sandy --upgrade' to update."
+        fi
+    fi
+}
 
 # Merge JSON keys into a file. Usage: json_merge <file> '{"key":"value"}'
 json_merge() {
@@ -107,6 +168,7 @@ Flags:
   --new              Start a fresh session (default: resume last)
   --resume           Open session picker
   --remote           Start in remote-control server mode
+  --upgrade          Update sandy to the latest version
 
 All other arguments are forwarded to claude.
 EOF
@@ -125,10 +187,14 @@ for arg in "$@"; do
         --build-only) SANDY_BUILD_ONLY=true ;;
         --new)        SANDY_NEW_SESSION=true ;;
         --remote)     SANDY_REMOTE_CONTROL=true ;;
+        --upgrade)    sandy_self_update; exit 0 ;;
         *)            REMAINING_ARGS+=("$arg") ;;
     esac
 done
 set -- ${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}
+
+# --- Check for sandy updates (non-blocking, cached 24h) ---
+sandy_check_update
 
 # --- Preflight checks ---
 if ! command -v docker &>/dev/null; then
