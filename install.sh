@@ -45,6 +45,12 @@ mkdir -p "$INSTALL_DIR"
 if [ -n "${LOCAL_INSTALL:-}" ] && [ -f "$LOCAL_INSTALL" ]; then
     info "Installing sandy from local file: $LOCAL_INSTALL"
     cp "$LOCAL_INSTALL" "$INSTALL_DIR/sandy"
+    # Bake in git commit hash if installing from a repo checkout
+    local_dir="$(cd "$(dirname "$LOCAL_INSTALL")" && pwd)"
+    commit_hash="$(git -C "$local_dir" rev-parse --short HEAD 2>/dev/null)" || true
+    if [ -n "$commit_hash" ]; then
+        sed -i "s/^SANDY_COMMIT=\"\"/SANDY_COMMIT=\"$commit_hash\"/" "$INSTALL_DIR/sandy"
+    fi
 else
     info "Downloading sandy..."
     if command -v curl &>/dev/null; then

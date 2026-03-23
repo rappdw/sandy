@@ -16,7 +16,8 @@ set -euo pipefail
 #   sandy -p "prompt"         One-shot prompt
 # =============================================================================
 
-SANDY_VERSION="0.7.9"
+SANDY_VERSION="0.7.10-dev"
+SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 # Validate SANDY_HOME — reject shell metacharacters
@@ -120,15 +121,27 @@ json_merge() {
 }
 
 # --- Version ---
+sandy_full_version() {
+    local ver="$SANDY_VERSION"
+    local hash="${SANDY_COMMIT}"
+    if [ -z "$hash" ]; then
+        # Try to detect from git if running from a repo checkout
+        local script_dir
+        script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+        hash="$(git -C "$script_dir" rev-parse --short HEAD 2>/dev/null)" || true
+    fi
+    [ -n "$hash" ] && ver="$ver-$hash"
+    echo "$ver"
+}
 if [[ "${1:-}" == "-v" || "${1:-}" == "--version" ]]; then
-    echo "sandy $SANDY_VERSION"
+    echo "sandy $(sandy_full_version)"
     exit 0
 fi
 
 # --- Help ---
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<EOF
-sandy $SANDY_VERSION — Claude's isolated sibling
+sandy $(sandy_full_version) — Claude's isolated sibling
 
 Run Claude Code in a Docker container with filesystem isolation,
 network isolation, resource limits, and per-project credential sandboxes.

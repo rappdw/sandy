@@ -49,6 +49,17 @@ Each project directory gets its own isolated `~/.claude` sandbox under `~/.sandy
 - `sandy` — Self-contained launcher (bash script) installed to `~/.local/bin/`. On first run, generates Dockerfile.base, Dockerfile, entrypoint.sh, and tmux.conf in `~/.sandy/`, builds both Docker images, creates per-project sandbox directories, applies network isolation, and launches the container via `docker run`.
 - `install.sh` — `curl | bash` installer that downloads `sandy` to `~/.local/bin/` and checks PATH setup.
 
+## Versioning
+
+`SANDY_VERSION` in the `sandy` script follows this convention:
+
+- **Release**: `X.Y.Z` (e.g. `0.7.10`). Set this when tagging a release.
+- **Post-release**: `X.Y.(Z+1)-dev` (e.g. `0.7.11-dev`). Bump to this immediately after cutting a release.
+
+`SANDY_COMMIT` is a separate variable that holds the git short hash. It's empty in the source file — at runtime, `sandy_full_version()` detects it from git if running from a repo checkout, and `install.sh` bakes it in for local installs. The full version string displayed is e.g. `0.7.11-dev-a1b2c3d`.
+
+The update check logic compares only `SANDY_VERSION` (not the hash) against GitHub release tags.
+
 ## Auto-update
 
 On each launch, sandy checks for newer Claude Code versions by comparing the installed version against the latest release. If an update is available, the image is rebuilt with `--no-cache`. Inside the container, `DISABLE_AUTOUPDATER=1` prevents Claude Code from attempting self-updates against the read-only filesystem.
