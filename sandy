@@ -529,7 +529,7 @@ if [ "${SANDY_SSH:-token}" = "token" ] && [ -n "${GIT_TOKEN:-}" ]; then
     fi
 fi
 
-# Refresh plugin marketplaces (once per day)
+# Refresh plugin marketplaces (once per day, or forced when channels need plugins)
 _marketplace_cache="$HOME/.claude/plugins/.marketplace_updated"
 _now=$(date +%s)
 _stale=true
@@ -537,6 +537,8 @@ if [ -f "$_marketplace_cache" ]; then
     _cached_time=$(cat "$_marketplace_cache" 2>/dev/null || echo 0)
     (( _now - _cached_time < 86400 )) && _stale=false
 fi
+# Force refresh when channels are configured — plugins may need installing
+[ -n "${SANDY_CHANNELS:-}" ] && _stale=true
 if [ "$_stale" = true ]; then
     claude plugin marketplace update 2>/dev/null || true
     mkdir -p "$(dirname "$_marketplace_cache")"
