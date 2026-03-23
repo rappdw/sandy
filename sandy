@@ -1182,10 +1182,14 @@ RUN_FLAGS+=(--tmpfs /home/claude:exec,size=2G,uid=1001,gid=1001)
 RUN_FLAGS+=(--network "$NETWORK_NAME")
 # GPU passthrough (requires NVIDIA Container Toolkit on host)
 if [ -n "${SANDY_GPU:-}" ]; then
-    case "$SANDY_GPU" in
-        all)  RUN_FLAGS+=(--gpus all) ;;
-        *)    RUN_FLAGS+=(--gpus "\"device=$SANDY_GPU\"") ;;
-    esac
+    if docker info 2>/dev/null | grep -q "nvidia"; then
+        case "$SANDY_GPU" in
+            all)  RUN_FLAGS+=(--gpus all) ;;
+            *)    RUN_FLAGS+=(--gpus "\"device=$SANDY_GPU\"") ;;
+        esac
+    else
+        warn "SANDY_GPU=$SANDY_GPU but NVIDIA Container Toolkit not detected — skipping GPU passthrough"
+    fi
 fi
 RUN_FLAGS+=(-v "$SANDBOX_DIR:/home/claude/.claude")
 if [ -n "$CRED_TMPDIR" ]; then
