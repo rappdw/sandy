@@ -526,6 +526,7 @@ if [ -f "$_marketplace_cache" ]; then
 fi
 if [ "$_stale" = true ]; then
     claude plugin marketplace update 2>/dev/null || true
+    mkdir -p "$(dirname "$_marketplace_cache")"
     echo "$_now" > "$_marketplace_cache"
 fi
 
