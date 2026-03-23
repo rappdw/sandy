@@ -49,7 +49,12 @@ if [ -n "${LOCAL_INSTALL:-}" ] && [ -f "$LOCAL_INSTALL" ]; then
     local_dir="$(cd "$(dirname "$LOCAL_INSTALL")" && pwd)"
     commit_hash="$(git -C "$local_dir" rev-parse --short HEAD 2>/dev/null)" || true
     if [ -n "$commit_hash" ]; then
-        sed -i "s/^SANDY_COMMIT=\"\"/SANDY_COMMIT=\"$commit_hash\"/" "$INSTALL_DIR/sandy"
+        # BSD sed (macOS) requires -i '', GNU sed (Linux) requires -i without arg
+        if sed --version 2>/dev/null | grep -q GNU; then
+            sed -i "s/^SANDY_COMMIT=\"\"/SANDY_COMMIT=\"$commit_hash\"/" "$INSTALL_DIR/sandy"
+        else
+            sed -i '' "s/^SANDY_COMMIT=\"\"/SANDY_COMMIT=\"$commit_hash\"/" "$INSTALL_DIR/sandy"
+        fi
     fi
 else
     info "Downloading sandy..."
