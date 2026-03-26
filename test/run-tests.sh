@@ -753,71 +753,117 @@ check "Dockerfile.skills does not set USER (entrypoint handles privilege drop)" 
 rm -rf "$SKILLS_TEST_DIR"
 
 # ============================================================
-info "27. Project data migration from /workspace to new path"
+info "27. Project dir consolidation across path eras"
 # ============================================================
 
-# The migration code runs inside the entrypoint when SANDY_WORKSPACE != /workspace.
-# Test it by pre-populating the old -workspace project dir in the sandbox and running
-# the migration snippet with a different SANDY_WORKSPACE.
+# The container workspace path has changed across sandy versions:
+#   /workspace → raw host path → $HOME-relative path
+# Since each sandbox is per-project, all project dirs belong to the same project.
+# The migration merges all non-current project dirs into the current one.
+_MIGRATE_SNIPPET='
+    _cur_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr "/" "-")"
+    mkdir -p "$_cur_proj"
+    for _old_proj in "$HOME/.claude/projects"/-*/; do
+        [ -d "$_old_proj" ] || continue
+        case "$_old_proj" in "$_cur_proj"/) continue ;; esac
+        cp -an "$_old_proj". "$_cur_proj"/ 2>/dev/null || true
+        rm -rf "$_old_proj"
+    done
+    if [ -f "$HOME/.claude/history.jsonl" ]; then
+        sed -i "s|\"project\":\"[^\"]*\"|\"project\":\"$WORKSPACE\"|g" "$HOME/.claude/history.jsonl"
+    fi
+'
 
-# Test 1: old data migrated when new dir does not exist
+# Test 1: single old dir migrated to new path
 mkdir -p "$SANDBOX_DIR/projects/-workspace"
 echo "old-session" > "$SANDBOX_DIR/projects/-workspace/session.jsonl"
-sandy_run '
-    export SANDY_WORKSPACE="/home/claude/dev/myproject"
-    WORKSPACE="$SANDY_WORKSPACE"
-    _new_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr "/" "-")"
-    _old_proj="$HOME/.claude/projects/-workspace"
-    if [ -d "$_old_proj" ] && [ ! -d "$_new_proj" ] && [ "$WORKSPACE" != "/workspace" ]; then
-        mv "$_old_proj" "$_new_proj"
-    fi
-    # Verify migration happened
-    test -f "$_new_proj/session.jsonl" && ! test -d "$_old_proj"
-'
-check "old -workspace project data migrated to new path" \
+sandy_run "
+    export WORKSPACE=/home/claude/dev/myproject
+    $_MIGRATE_SNIPPET
+"
+check "old -workspace session migrated to new path" \
     test -f "$SANDBOX_DIR/projects/-home-claude-dev-myproject/session.jsonl"
-check "old -workspace dir removed after migration" \
+check "old -workspace dir removed" \
     bash -c '! test -d "$1/projects/-workspace"' -- "$SANDBOX_DIR"
-# Clean up
 rm -rf "$SANDBOX_DIR/projects/-home-claude-dev-myproject"
 
-# Test 2: migration skipped when new dir already exists (no clobber)
+# Test 2: multiple old dirs (all three eras) merged into current
 mkdir -p "$SANDBOX_DIR/projects/-workspace"
-echo "old-data" > "$SANDBOX_DIR/projects/-workspace/old.jsonl"
+echo "era1" > "$SANDBOX_DIR/projects/-workspace/era1.jsonl"
+mkdir -p "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject"
+echo "era2" > "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject/era2.jsonl"
 mkdir -p "$SANDBOX_DIR/projects/-home-claude-dev-myproject"
-echo "new-data" > "$SANDBOX_DIR/projects/-home-claude-dev-myproject/new.jsonl"
-sandy_run '
-    export SANDY_WORKSPACE="/home/claude/dev/myproject"
-    WORKSPACE="$SANDY_WORKSPACE"
-    _new_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr "/" "-")"
-    _old_proj="$HOME/.claude/projects/-workspace"
-    if [ -d "$_old_proj" ] && [ ! -d "$_new_proj" ] && [ "$WORKSPACE" != "/workspace" ]; then
-        mv "$_old_proj" "$_new_proj"
-    fi
-'
-check "existing new project dir not clobbered" \
-    test -f "$SANDBOX_DIR/projects/-home-claude-dev-myproject/new.jsonl"
-check "old -workspace dir preserved when new dir exists" \
-    test -d "$SANDBOX_DIR/projects/-workspace"
-# Clean up
+echo "era3" > "$SANDBOX_DIR/projects/-home-claude-dev-myproject/era3.jsonl"
+sandy_run "
+    export WORKSPACE=/home/claude/dev/myproject
+    $_MIGRATE_SNIPPET
+"
+check "era1 (/workspace) session merged" \
+    test -f "$SANDBOX_DIR/projects/-home-claude-dev-myproject/era1.jsonl"
+check "era2 (raw host path) session merged" \
+    test -f "$SANDBOX_DIR/projects/-home-claude-dev-myproject/era2.jsonl"
+check "era3 (current) session preserved" \
+    test -f "$SANDBOX_DIR/projects/-home-claude-dev-myproject/era3.jsonl"
+check "era1 dir removed" \
+    bash -c '! test -d "$1/projects/-workspace"' -- "$SANDBOX_DIR"
+check "era2 dir removed" \
+    bash -c '! test -d "$1/projects/-Users-rappdw-dev-myproject"' -- "$SANDBOX_DIR"
+rm -rf "$SANDBOX_DIR/projects/-home-claude-dev-myproject"
+
+# Test 3: no-clobber — existing files in current dir not overwritten
+mkdir -p "$SANDBOX_DIR/projects/-workspace"
+echo "old-version" > "$SANDBOX_DIR/projects/-workspace/same.jsonl"
+mkdir -p "$SANDBOX_DIR/projects/-home-claude-dev-myproject"
+echo "new-version" > "$SANDBOX_DIR/projects/-home-claude-dev-myproject/same.jsonl"
+sandy_run "
+    export WORKSPACE=/home/claude/dev/myproject
+    $_MIGRATE_SNIPPET
+"
+CONTENT="$(cat "$SANDBOX_DIR/projects/-home-claude-dev-myproject/same.jsonl")"
+check "existing file not overwritten by old version" \
+    test "$CONTENT" = "new-version"
 rm -rf "$SANDBOX_DIR/projects/-workspace" "$SANDBOX_DIR/projects/-home-claude-dev-myproject"
 
-# Test 3: migration skipped when WORKSPACE is /workspace (no-op)
+# Test 4: subdirectory merge (memory/ dirs with different files)
+mkdir -p "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject/memory"
+echo "old-mem" > "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject/memory/context.md"
+echo "shared" > "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject/memory/MEMORY.md"
+mkdir -p "$SANDBOX_DIR/projects/-home-claude-dev-myproject/memory"
+echo "new-mem" > "$SANDBOX_DIR/projects/-home-claude-dev-myproject/memory/MEMORY.md"
+sandy_run "
+    export WORKSPACE=/home/claude/dev/myproject
+    $_MIGRATE_SNIPPET
+"
+check "old memory file merged into subdirectory" \
+    test -f "$SANDBOX_DIR/projects/-home-claude-dev-myproject/memory/context.md"
+MEM_CONTENT="$(cat "$SANDBOX_DIR/projects/-home-claude-dev-myproject/memory/MEMORY.md")"
+check "existing memory file not overwritten" \
+    test "$MEM_CONTENT" = "new-mem"
+check "old project dir fully removed after subdir merge" \
+    bash -c '! test -d "$1/projects/-Users-rappdw-dev-myproject"' -- "$SANDBOX_DIR"
+rm -rf "$SANDBOX_DIR/projects/-home-claude-dev-myproject"
+
+# Test 5: history.jsonl project paths rewritten to current workspace
 mkdir -p "$SANDBOX_DIR/projects/-workspace"
-echo "keep-me" > "$SANDBOX_DIR/projects/-workspace/session.jsonl"
-sandy_run '
-    export SANDY_WORKSPACE="/workspace"
-    WORKSPACE="$SANDY_WORKSPACE"
-    _new_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr "/" "-")"
-    _old_proj="$HOME/.claude/projects/-workspace"
-    if [ -d "$_old_proj" ] && [ ! -d "$_new_proj" ] && [ "$WORKSPACE" != "/workspace" ]; then
-        mv "$_old_proj" "$_new_proj"
-    fi
-'
-check "no migration when WORKSPACE is /workspace" \
-    test -f "$SANDBOX_DIR/projects/-workspace/session.jsonl"
-# Clean up
-rm -rf "$SANDBOX_DIR/projects/-workspace"
+echo "era1" > "$SANDBOX_DIR/projects/-workspace/session1.jsonl"
+mkdir -p "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject"
+echo "era2" > "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject/session2.jsonl"
+cat > "$SANDBOX_DIR/history.jsonl" <<'HIST'
+{"project":"/workspace","sessionId":"sess1"}
+{"project":"/Users/rappdw/dev/myproject","sessionId":"sess2"}
+HIST
+sandy_run "
+    export WORKSPACE=/home/claude/dev/myproject
+    $_MIGRATE_SNIPPET
+"
+HIST_CONTENT="$(cat "$SANDBOX_DIR/history.jsonl")"
+check "history.jsonl era1 project path rewritten" \
+    bash -c 'echo "$1" | grep -q "\"project\":\"/home/claude/dev/myproject\".*sess1"' -- "$HIST_CONTENT"
+check "history.jsonl era2 project path rewritten" \
+    bash -c 'echo "$1" | grep -q "\"project\":\"/home/claude/dev/myproject\".*sess2"' -- "$HIST_CONTENT"
+check "history.jsonl has no stale project paths" \
+    bash -c '! echo "$1" | grep -q "\"project\":\"/workspace\""' -- "$HIST_CONTENT"
+rm -rf "$SANDBOX_DIR/projects/-home-claude-dev-myproject" "$SANDBOX_DIR/history.jsonl"
 
 # ============================================================
 # Summary

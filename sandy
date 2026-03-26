@@ -16,7 +16,7 @@ set -euo pipefail
 #   sandy -p "prompt"         One-shot prompt
 # =============================================================================
 
-SANDY_VERSION="0.7.11-dev"
+SANDY_VERSION="0.7.10"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
@@ -562,14 +562,59 @@ trap "printf \"\033]104;4\033\\\\\"" EXIT
 WORKSPACE="${SANDY_WORKSPACE:-/workspace}"
 mkdir -p "$WORKSPACE/.claude" 2>/dev/null || true
 
-# Migrate project data from old /workspace mount path to new $HOME-relative path.
-# Prior to v0.7.10, the workspace was always mounted at /workspace, so Claude Code
-# stored session data under ~/.claude/projects/-workspace/. Now the mount path
-# mirrors the host, so we move the old data to the new location (once).
-_new_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')"
-_old_proj="$HOME/.claude/projects/-workspace"
-if [ -d "$_old_proj" ] && [ ! -d "$_new_proj" ] && [ "$WORKSPACE" != "/workspace" ]; then
-    mv "$_old_proj" "$_new_proj"
+# Consolidate project dirs: the container workspace path has changed across sandy
+# versions (/workspace → raw host path → $HOME-relative path), creating multiple
+# project dirs in the same sandbox. Since each sandbox is per-project, all project
+# dirs belong to the same project — merge them into the current one.
+_cur_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')"
+_sessions_migrated=false
+mkdir -p "$_cur_proj"
+for _old_proj in "$HOME/.claude/projects"/-*/; do
+    [ -d "$_old_proj" ] || continue
+    # Normalize trailing slash for comparison
+    case "$_old_proj" in "$_cur_proj"/) continue ;; esac
+    # cp -an recursively merges subdirs (e.g. memory/) unlike mv -n which skips them
+    cp -an "$_old_proj". "$_cur_proj"/ 2>/dev/null && _sessions_migrated=true
+    rm -rf "$_old_proj"
+done
+# Rewrite stale project paths in history.jsonl so Claude Code can find migrated sessions.
+# Since each sandbox is per-project, ALL sessions belong to the current workspace.
+if [ -f "$HOME/.claude/history.jsonl" ]; then
+    sed -i "s|\"project\":\"[^\"]*\"|\"project\":\"$WORKSPACE\"|g" "$HOME/.claude/history.jsonl"
+fi
+# Consolidate .claude.json project entries under the current workspace path.
+# Claude Code stores per-project state (trust dialog, allowed tools, etc.) keyed by
+# workspace path — stale keys mean it won't recognize the project as trusted.
+CLAUDE_JSON="$HOME/.claude.json"
+if [ -f "$CLAUDE_JSON" ]; then
+    node -e '
+        const fs = require("fs");
+        const f = process.argv[1];
+        const ws = process.argv[2];
+        let d;
+        try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch { process.exit(0); }
+        const p = d.projects;
+        if (!p || typeof p !== "object") process.exit(0);
+        const keys = Object.keys(p).filter(k => k !== ws);
+        if (keys.length === 0) process.exit(0);
+        // Start with current entry if it exists, or empty object
+        let merged = p[ws] || {};
+        for (const k of keys) {
+            const old = p[k];
+            // Preserve hasTrustDialogAccepted=true from any era
+            if (old.hasTrustDialogAccepted) merged.hasTrustDialogAccepted = true;
+            if (old.hasCompletedProjectOnboarding) merged.hasCompletedProjectOnboarding = true;
+            // Merge allowedTools arrays
+            if (old.allowedTools && old.allowedTools.length) {
+                merged.allowedTools = [...new Set([...(merged.allowedTools || []), ...old.allowedTools])];
+            }
+            // If no current entry existed, use the old one as base (first old entry wins)
+            if (!p[ws]) { merged = { ...old, ...merged }; p[ws] = merged; }
+            delete p[k];
+        }
+        p[ws] = merged;
+        fs.writeFileSync(f, JSON.stringify(d, null, 2));
+    ' "$CLAUDE_JSON" "$WORKSPACE" 2>/dev/null || true
 fi
 
 # Ensure plugin marketplaces are configured in settings.json (idempotent)
@@ -759,7 +804,12 @@ else
         # Check if any session files exist (path encodes SANDY_WORKSPACE)
         SESSION_DIR="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')/"
         if ls "$SESSION_DIR"*.jsonl &>/dev/null; then
-            CLAUDE_CMD+=" --continue"
+            if [ "$_sessions_migrated" = "true" ]; then
+                # Sessions were consolidated from old path eras — let user pick
+                CLAUDE_CMD+=" --resume"
+            else
+                CLAUDE_CMD+=" --continue"
+            fi
         fi
     fi
 
