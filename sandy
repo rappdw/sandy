@@ -1206,29 +1206,19 @@ RUN_FLAGS+=(-v "$SANDBOX_DIR/uv:/home/claude/.local/share/uv")
 RUN_FLAGS+=(-v "$SANDBOX_DIR/npm-global:/home/claude/.npm-global")
 RUN_FLAGS+=(-v "$SANDBOX_DIR/go:/home/claude/go")
 RUN_FLAGS+=(-v "$SANDBOX_DIR/cargo:/home/claude/.cargo")
+# Mount the workspace at its real host path so Claude Code shows the actual
+# directory name instead of /workspace.
+SANDY_WORKSPACE="$WORK_DIR"
 # --- Git submodule support ---
-# Submodules use a .git *file* with a relative gitdir: path. Both the forward
-# path (worktree→gitdir) and reverse path (gitdir config→worktree) are relative,
-# so we must mount the workspace deep enough to preserve the path relationship.
-SANDY_WORKSPACE="/workspace"
+# Submodules use a .git *file* with a relative gitdir: path. Since we mount the
+# worktree at its real host path, we just need to also mount the gitdir at its
+# real host path so the relative references resolve correctly.
 if [ -f "$WORK_DIR/.git" ]; then
     GITDIR_REL="$(sed 's/^gitdir: //' "$WORK_DIR/.git" | tr -d '[:space:]')"
     if [ -n "$GITDIR_REL" ]; then
         GITDIR_HOST="$(cd "$WORK_DIR" && cd "$GITDIR_REL" && pwd)"
-        SUBMODULE_PATHS="$(node -e "
-            const path = require('path');
-            const rel = process.argv[1], wd = process.argv[2];
-            const ups = (rel.match(/\.\.\//g) || []).length;
-            const parts = wd.split('/').filter(Boolean);
-            const sub = parts.slice(-ups).join('/');
-            const ws = '/repo/' + sub;
-            const gd = path.resolve(ws, rel);
-            console.log(ws); console.log(gd);
-        " "$GITDIR_REL" "$WORK_DIR")"
-        SANDY_WORKSPACE="$(echo "$SUBMODULE_PATHS" | head -1)"
-        CONTAINER_GITDIR="$(echo "$SUBMODULE_PATHS" | tail -1)"
-        RUN_FLAGS+=(-v "$GITDIR_HOST:$CONTAINER_GITDIR")
-        info "  Git submodule: workspace at $SANDY_WORKSPACE"
+        RUN_FLAGS+=(-v "$GITDIR_HOST:$GITDIR_HOST")
+        info "  Git submodule: gitdir at $GITDIR_HOST"
     fi
 fi
 # Check for symlinks that escape the workspace (potential sandbox escape)
