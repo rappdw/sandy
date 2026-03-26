@@ -60,13 +60,57 @@ Each project directory gets its own isolated `~/.claude` sandbox under `~/.sandy
 
 The update check logic compares only `SANDY_VERSION` (not the hash) against GitHub release tags.
 
+## Skill Packs
+
+Optional Docker image layers that bake curated skill collections into the container. Skills are not included by default — they're built once and cached as a Docker layer.
+
+### Configuration
+
+Set `SANDY_SKILL_PACKS` in `.sandy/config` or as an environment variable:
+
+```sh
+SANDY_SKILL_PACKS=gstack
+```
+
+### Available Packs
+
+| Pack | Description | Source |
+|------|-------------|--------|
+| `gstack` | 28 Claude Code skills (QA, review, ship, browse, etc.) + headless Chromium browser engine | [rappdw/gstack](https://github.com/rappdw/gstack) (fork tracking upstream [garrytan/gstack](https://github.com/garrytan/gstack)) |
+
+### How It Works
+
+Skill packs add a build phase (Phase 2.5) between the Claude Code image and the optional per-project image. The generated `Dockerfile.skills` clones the skill pack at a pinned version, builds it, and installs dependencies (e.g. Playwright Chromium for gstack's `/browse` command). The resulting `sandy-skills-{hash}` image is cached and reused across projects that share the same skill pack configuration.
+
+At container startup, `user-setup.sh` symlinks `/opt/skills/{pack}/` into `~/.claude/skills/` so Claude Code discovers the skills automatically. Skill pack `bin/` directories are added to PATH.
+
+First build takes a few minutes (downloading + compiling). Subsequent launches are instant.
+
+### Version Resolution
+
+Skill pack versions are resolved dynamically from GitHub releases on each launch — there is no hardcoded version pin. The resolution order is:
+
+1. **GitHub releases API** — fetches the latest non-draft, non-prerelease tag matching the pack's prefix (e.g. `sandy/v*` for gstack). 5-second timeout.
+2. **Local cache** — `~/.sandy/.skill_version_{pack}` stores the last successfully resolved version.
+3. **Hardcoded fallback** — `SKILL_PACK_VERSIONS` array in the sandy script, used only on first run if GitHub is unreachable.
+
+When a new version is detected, the `Dockerfile.skills` is regenerated with the updated version. The content hash changes, which triggers a rebuild of the skill pack image automatically.
+
+### Adding New Packs
+
+Add entries to `SKILL_PACK_NAMES`, `SKILL_PACK_REPOS`, `SKILL_PACK_VERSIONS`, and `SKILL_PACK_TAG_PREFIXES` arrays in the sandy script, then add a build recipe case in `generate_skill_pack_dockerfile()`.
+
 ## Auto-update
 
 On each launch, sandy checks for newer Claude Code versions by comparing the installed version against the latest release. If an update is available, the image is rebuilt with `--no-cache`. Inside the container, `DISABLE_AUTOUPDATER=1` prevents Claude Code from attempting self-updates against the read-only filesystem.
 
+## Workspace Mount Path
+
+The workspace is mounted inside the container at a path that mirrors the host's `$HOME`-relative location. For example, if you run sandy from `~/dev/sandy`, the workspace appears at `/home/claude/dev/sandy` inside the container. If the workspace is outside `$HOME`, it falls back to mounting at the real host path. The container path is passed via the `SANDY_WORKSPACE` environment variable.
+
 ## Git Submodule Support
 
-When launched from a git submodule, sandy detects the `.git` file (vs directory), resolves the relative gitdir path, and mounts both the worktree and gitdir at the correct container paths to preserve the relative path relationship. The workspace path is passed via the `SANDY_WORKSPACE` environment variable.
+When launched from a git submodule, sandy detects the `.git` file (vs directory), resolves the relative gitdir path, and mounts both the worktree and gitdir at the correct container paths using the same `$HOME`-relative mapping to preserve the relative path relationship.
 
 ## SSH Agent Relay
 

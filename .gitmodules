@@ -7,3 +7,6 @@
 [submodule "research/OpenShell"]
 	path = research/OpenShell
 	url = https://github.com/NVIDIA/OpenShell
+[submodule "research/gstack"]
+	path = research/gstack
+	url = git@github.com:rappdw/gstack.git

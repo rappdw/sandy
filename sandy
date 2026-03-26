@@ -16,7 +16,7 @@ set -euo pipefail
 #   sandy -p "prompt"         One-shot prompt
 # =============================================================================
 
-SANDY_VERSION="0.7.10-dev"
+SANDY_VERSION="0.7.10"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
@@ -30,6 +30,99 @@ IMAGE_NAME="sandy-claude-code"
 # Per-instance network names keyed on PID to avoid concurrent iptables races
 BRIDGE_NAME="br-sdy-$$"
 NETWORK_NAME="sandy_net_$$"
+
+# --- Skill pack registry ---
+# To add a new pack: add entries to both arrays at the same index.
+# Repos must be GitHub repos (used for tarball download and release checks).
+# Versions are resolved dynamically from GitHub releases — SKILL_PACK_VERSIONS
+# is only the initial fallback if no cached or remote version is available.
+SKILL_PACK_NAMES=(gstack)
+SKILL_PACK_REPOS=("https://github.com/rappdw/gstack")
+SKILL_PACK_VERSIONS=("sandy/v0.11.19.0")
+# Release tag prefix per pack (tags matching this prefix are checked for updates)
+SKILL_PACK_TAG_PREFIXES=("sandy/v")
+
+skill_pack_lookup() {
+    local pack="$1" field="$2"
+    local i
+    for i in "${!SKILL_PACK_NAMES[@]}"; do
+        if [ "${SKILL_PACK_NAMES[$i]}" = "$pack" ]; then
+            case "$field" in
+                repo) echo "${SKILL_PACK_REPOS[$i]}" ;;
+                version) echo "${SKILL_PACK_VERSIONS[$i]}" ;;
+                tag_prefix) echo "${SKILL_PACK_TAG_PREFIXES[$i]}" ;;
+            esac
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Check GitHub for the latest release tag matching a prefix for a skill pack.
+# Returns the tag name (e.g. "sandy/v0.11.19.0") or empty string on failure.
+skill_pack_latest_release() {
+    local pack="$1"
+    local repo tag_prefix owner_repo
+    repo="$(skill_pack_lookup "$pack" repo)" || return 1
+    tag_prefix="$(skill_pack_lookup "$pack" tag_prefix)" || return 1
+    owner_repo="$(echo "$repo" | sed 's|https://github.com/||')"
+    curl -fsSL --max-time 5 \
+        "https://api.github.com/repos/${owner_repo}/releases" 2>/dev/null \
+    | node -e "
+        let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
+            try {
+                const releases = JSON.parse(d);
+                const match = releases.find(r => !r.draft && !r.prerelease && r.tag_name.startsWith('${tag_prefix}'));
+                if (match) console.log(match.tag_name);
+            } catch {}
+        })
+    " 2>/dev/null || true
+}
+
+# Resolve the effective version for a skill pack. Checks GitHub for the latest
+# release, caches the result, falls back to cache then hardcoded default.
+# Updates SKILL_PACK_VERSIONS in-place so downstream code sees the resolved version.
+skill_pack_resolve_versions() {
+    local packs="$1"
+    mkdir -p "$SANDY_HOME"
+    local pack
+    IFS=',' read -ra _sp_resolve <<< "$packs"
+    for pack in "${_sp_resolve[@]}"; do
+        pack="$(echo "$pack" | tr -d '[:space:]')"
+        local cache_file="$SANDY_HOME/.skill_version_${pack}"
+        local cached="" latest="" resolved=""
+
+        # Read cached version
+        [ -f "$cache_file" ] && cached="$(cat "$cache_file")"
+
+        # Check GitHub for latest release
+        latest="$(skill_pack_latest_release "$pack")"
+
+        if [ -n "$latest" ]; then
+            resolved="$latest"
+            if [ "$latest" != "$cached" ]; then
+                [ -n "$cached" ] && info "Skill pack update: $pack $cached → $latest"
+                echo "$latest" > "$cache_file"
+            fi
+        elif [ -n "$cached" ]; then
+            resolved="$cached"
+        else
+            # Fall back to hardcoded default
+            resolved="$(skill_pack_lookup "$pack" version)" || true
+            [ -n "$resolved" ] && echo "$resolved" > "$cache_file"
+        fi
+
+        # Update the in-memory version array
+        if [ -n "$resolved" ]; then
+            local i
+            for i in "${!SKILL_PACK_NAMES[@]}"; do
+                if [ "${SKILL_PACK_NAMES[$i]}" = "$pack" ]; then
+                    SKILL_PACK_VERSIONS[$i]="$resolved"
+                fi
+            done
+        fi
+    done
+}
 
 # --- Colors (disabled when not a terminal) ---
 if [ -t 1 ]; then
@@ -170,6 +263,7 @@ Environment variables:
   SANDY_MEM          Memory limit for container (default: auto-detected)
   SANDY_GPU          GPU passthrough: "all" for all GPUs, or device IDs
                      like "0" or "0,1" (requires NVIDIA Container Toolkit)
+  SANDY_SKILL_PACKS  Comma-separated skill packs to install (e.g. "gstack")
   CLAUDE_CODE_MAX_OUTPUT_TOKENS  Max output tokens per response (default: 128000)
 
 Per-project config:
@@ -362,7 +456,8 @@ fi
 
 # Fix ownership of persistent package mounts
 for d in /home/claude/.pip-packages /home/claude/.local/share/uv \
-         /home/claude/.npm-global /home/claude/go /home/claude/.cargo; do
+         /home/claude/.npm-global /home/claude/go /home/claude/.cargo \
+         /home/claude/.gstack; do
     chown "$RUN_UID:$RUN_GID" "$d" 2>/dev/null || true
 done
 
@@ -431,6 +526,34 @@ mkdir -p "$PYTHONUSERBASE/bin"
 # Writable bin dirs on PATH
 export PATH="$HOME/.local/bin:$PYTHONUSERBASE/bin:$NPM_CONFIG_PREFIX/bin:$GOPATH/bin:$CARGO_HOME/bin:$PATH"
 
+# Activate baked-in skill packs (installed at /opt/skills/ during image build)
+if [ -d /opt/skills ]; then
+    mkdir -p "$HOME/.claude/skills"
+    for _pack_dir in /opt/skills/*/; do
+        [ -d "$_pack_dir" ] || continue
+        _pack_name="$(basename "$_pack_dir")"
+        # Symlink the pack itself
+        ln -snf "$_pack_dir" "$HOME/.claude/skills/$_pack_name"
+        # Symlink individual skills (subdirs with SKILL.md)
+        for _skill_dir in "$_pack_dir"/*/; do
+            [ -f "$_skill_dir/SKILL.md" ] || continue
+            _skill_name="$(basename "$_skill_dir")"
+            [ "$_skill_name" = "node_modules" ] && continue
+            [ "$_skill_name" = "browse" ] && continue
+            ln -snf "gstack/$_skill_name" "$HOME/.claude/skills/$_skill_name"
+        done
+    done
+    # Add skill pack bin directories to PATH
+    for _bin_dir in /opt/skills/*/bin; do
+        [ -d "$_bin_dir" ] && export PATH="$_bin_dir:$PATH"
+    done
+fi
+
+# Playwright browser path for gstack (if installed as skill pack)
+if [ -d /opt/skills/gstack/.browsers ]; then
+    export PLAYWRIGHT_BROWSERS_PATH=/opt/skills/gstack/.browsers
+fi
+
 # Remap ANSI dark blue (color 4) to a readable bright blue
 printf "\033]4;4;rgb:61/8f/ff\033\\"
 trap "printf \"\033]104;4\033\\\\\"" EXIT
@@ -438,6 +561,16 @@ trap "printf \"\033]104;4\033\\\\\"" EXIT
 # Ensure project-level settings exist
 WORKSPACE="${SANDY_WORKSPACE:-/workspace}"
 mkdir -p "$WORKSPACE/.claude" 2>/dev/null || true
+
+# Migrate project data from old /workspace mount path to new $HOME-relative path.
+# Prior to v0.7.10, the workspace was always mounted at /workspace, so Claude Code
+# stored session data under ~/.claude/projects/-workspace/. Now the mount path
+# mirrors the host, so we move the old data to the new location (once).
+_new_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')"
+_old_proj="$HOME/.claude/projects/-workspace"
+if [ -d "$_old_proj" ] && [ ! -d "$_new_proj" ] && [ "$WORKSPACE" != "/workspace" ]; then
+    mv "$_old_proj" "$_new_proj"
+fi
 
 # Ensure plugin marketplaces are configured in settings.json (idempotent)
 SETTINGS_FILE="$HOME/.claude/settings.json"
@@ -677,6 +810,63 @@ setw -g aggressive-resize on
 TMUXCONF
 }
 
+generate_skill_pack_dockerfile() {
+    local packs="$1"
+    local outfile="$SANDY_HOME/Dockerfile.skills.new"
+
+    cat > "$outfile" <<'SKILLS_HEADER'
+FROM sandy-claude-code
+SKILLS_HEADER
+
+    local pack
+    IFS=',' read -ra _pack_list <<< "$packs"
+    for pack in "${_pack_list[@]}"; do
+        pack="$(echo "$pack" | tr -d '[:space:]')"
+        local version repo
+        version="$(skill_pack_lookup "$pack" version)" || true
+        repo="$(skill_pack_lookup "$pack" repo)" || true
+        if [ -z "$version" ] || [ -z "$repo" ]; then
+            error "Unknown skill pack: $pack"
+            exit 1
+        fi
+        case "$pack" in
+            gstack)
+                cat >> "$outfile" <<GSTACK_BLOCK
+
+# --- gstack skill pack ($version) ---
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/skills/gstack/.browsers
+
+# Download gstack at pinned version
+RUN mkdir -p /opt/skills/gstack \\
+ && curl -fsSL "${repo}/archive/refs/tags/${version}.tar.gz" \\
+    | tar -xz --strip-components=1 -C /opt/skills/gstack
+
+# Install dependencies and build (browse binary + skill docs)
+RUN cd /opt/skills/gstack \\
+ && (bun install --frozen-lockfile 2>/dev/null || bun install) \\
+ && bun run build \\
+ && echo "${version}" > browse/dist/.version \\
+ && rm -rf node_modules/.cache
+
+# Install Playwright system deps + Chromium browser
+RUN cd /opt/skills/gstack && npx playwright install-deps chromium
+RUN cd /opt/skills/gstack && bunx playwright install chromium
+
+# Make all bin/ scripts executable
+RUN chmod +x /opt/skills/gstack/bin/*
+GSTACK_BLOCK
+                ;;
+            *)
+                error "No build recipe for skill pack: $pack"
+                exit 1
+                ;;
+        esac
+    done
+
+    # No USER directive — entrypoint runs as root and drops privileges via gosu
+    echo "" >> "$outfile"
+}
+
 ensure_build_files() {
     mkdir -p "$SANDY_HOME"
     generate_dockerfile_base
@@ -695,6 +885,7 @@ ensure_build_files() {
             rm "$SANDY_HOME/$f.new"
         fi
     done
+
     if [ "$changed" = true ]; then
         info "Build files updated."
     fi
@@ -705,7 +896,7 @@ ensure_build_files
 
 # Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
 if [ "$SANDY_REBUILD" = true ]; then
-    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash"
+    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.skills_build_hash"
     info "Build cache cleared. Images will be rebuilt."
 fi
 
@@ -750,6 +941,8 @@ else
     info "Sandbox image up to date."
 fi
 
+SKILLS_REBUILT=false
+
 if [ "$SANDY_BUILD_ONLY" = true ]; then
     info "Build complete. Exiting (--build-only)."
     exit 0
@@ -782,7 +975,7 @@ _load_sandy_config() {
         value="${value#\"}" ; value="${value%\"}"
         value="${value#\'}" ; value="${value%\'}"
         case "$key" in
-            SANDY_SSH|SANDY_MODEL|SANDY_SKIP_PERMISSIONS|\
+            SANDY_SSH|SANDY_MODEL|SANDY_SKILL_PACKS|SANDY_SKIP_PERMISSIONS|\
             SANDY_ALLOW_NO_ISOLATION|SANDY_ALLOW_LAN_HOSTS|\
             SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|\
             CLAUDE_CODE_OAUTH_TOKEN|\
@@ -800,6 +993,47 @@ _load_sandy_config "$SANDY_HOME/config"
 _load_sandy_config "$SANDY_HOME/.secrets"
 _load_sandy_config "$WORK_DIR/.sandy/config"
 _load_sandy_config "$WORK_DIR/.sandy/.secrets"
+
+# --- Phase 2.5: Skill pack image (after config so SANDY_SKILL_PACKS is available) ---
+if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
+    # Resolve latest versions from GitHub (caches locally for offline fallback)
+    skill_pack_resolve_versions "$SANDY_SKILL_PACKS"
+
+    # (Re)generate the skill pack Dockerfile with resolved versions
+    generate_skill_pack_dockerfile "$SANDY_SKILL_PACKS"
+    if [ ! -f "$SANDY_HOME/Dockerfile.skills" ] || ! diff -q "$SANDY_HOME/Dockerfile.skills.new" "$SANDY_HOME/Dockerfile.skills" &>/dev/null; then
+        mv "$SANDY_HOME/Dockerfile.skills.new" "$SANDY_HOME/Dockerfile.skills"
+    else
+        rm -f "$SANDY_HOME/Dockerfile.skills.new"
+    fi
+
+    # Build a sorted, normalized name from the pack list (e.g. "sandy-skills-gstack")
+    SKILLS_IMAGE_NAME="sandy-skills-$(echo "$SANDY_SKILL_PACKS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort | tr '\n' '-' | sed 's/-$//' | tr '[:upper:]' '[:lower:]')"
+    SKILLS_BUILD_HASH="$(cat "$SANDY_HOME/Dockerfile.skills" | sha256 | cut -d' ' -f1)"
+    SKILLS_HASH_FILE="$SANDY_HOME/.skills_build_hash"
+
+    SKILLS_NEEDS_BUILD=false
+    if [ ! -f "$SKILLS_HASH_FILE" ] \
+            || [ "$(cat "$SKILLS_HASH_FILE")" != "$SKILLS_BUILD_HASH" ] \
+            || [ "$NEEDS_BUILD" = true ] \
+            || ! docker image inspect "$SKILLS_IMAGE_NAME" &>/dev/null; then
+        SKILLS_NEEDS_BUILD=true
+    fi
+
+    if [ "$SKILLS_NEEDS_BUILD" = true ]; then
+        info "Building skill pack image (${SANDY_SKILL_PACKS})..."
+        docker build --no-cache -t "$SKILLS_IMAGE_NAME" \
+            -f "$SANDY_HOME/Dockerfile.skills" "$SANDY_HOME"
+        echo "$SKILLS_BUILD_HASH" > "$SKILLS_HASH_FILE"
+        SKILLS_REBUILT=true
+    else
+        info "Skill pack image up to date."
+    fi
+    IMAGE_NAME="$SKILLS_IMAGE_NAME"
+elif [ -f "$SANDY_HOME/Dockerfile.skills" ]; then
+    # Clean up stale skill pack Dockerfile if packs were disabled
+    rm -f "$SANDY_HOME/Dockerfile.skills"
+fi
 
 # --- Detect available resources (after config sourcing so overrides work) ---
 AVAILABLE_CPUS="$(docker info --format '{{.NCPU}}' 2>/dev/null || echo 2)"
@@ -907,6 +1141,10 @@ mkdir -p "$SANDBOX_DIR/uv"                 # uv-managed Python versions
 mkdir -p "$SANDBOX_DIR/npm-global"         # npm -g installs
 mkdir -p "$SANDBOX_DIR/go"                 # GOPATH (go install)
 mkdir -p "$SANDBOX_DIR/cargo"              # cargo install
+# Skill pack persistent state directories
+case ",${SANDY_SKILL_PACKS:-}," in
+    *,gstack,*) mkdir -p "$SANDBOX_DIR/gstack" ;;  # ~/.gstack (project state, analytics)
+esac
 
 # Always refresh statsig cache (feature flags may have changed since sandbox was created)
 if [ -d "$HOME/.claude/statsig" ]; then
@@ -970,7 +1208,7 @@ if [ -f "$PROJECT_DOCKERFILE" ]; then
     PROJECT_HASH_FILE="$SANDBOX_DIR/.project_build_hash"
     PROJECT_NEEDS_BUILD=false
     if [ ! -f "$PROJECT_HASH_FILE" ] || [ "$(cat "$PROJECT_HASH_FILE")" != "$PROJECT_HASH" ] \
-            || [ "$NEEDS_BUILD" = true ] || ! docker image inspect "$PROJECT_IMAGE_NAME" &>/dev/null; then
+            || [ "$NEEDS_BUILD" = true ] || [ "$SKILLS_REBUILT" = true ] || ! docker image inspect "$PROJECT_IMAGE_NAME" &>/dev/null; then
         PROJECT_NEEDS_BUILD=true
     fi
     if [ "$PROJECT_NEEDS_BUILD" = true ]; then
@@ -1206,19 +1444,35 @@ RUN_FLAGS+=(-v "$SANDBOX_DIR/uv:/home/claude/.local/share/uv")
 RUN_FLAGS+=(-v "$SANDBOX_DIR/npm-global:/home/claude/.npm-global")
 RUN_FLAGS+=(-v "$SANDBOX_DIR/go:/home/claude/go")
 RUN_FLAGS+=(-v "$SANDBOX_DIR/cargo:/home/claude/.cargo")
-# Mount the workspace at its real host path so Claude Code shows the actual
-# directory name instead of /workspace.
-SANDY_WORKSPACE="$WORK_DIR"
+# Skill pack persistent state mounts
+case ",${SANDY_SKILL_PACKS:-}," in
+    *,gstack,*) RUN_FLAGS+=(-v "$SANDBOX_DIR/gstack:/home/claude/.gstack") ;;
+esac
+# Map the workspace into the container under /home/claude/ mirroring the host's
+# relative path from $HOME.  E.g. host ~/dev/sandy → container /home/claude/dev/sandy.
+# If the workspace is outside $HOME, fall back to mounting at the real host path.
+if [[ "$WORK_DIR" == "$HOME"/* ]]; then
+    _rel_path="${WORK_DIR#$HOME/}"
+    SANDY_WORKSPACE="/home/claude/$_rel_path"
+else
+    SANDY_WORKSPACE="$WORK_DIR"
+fi
 # --- Git submodule support ---
-# Submodules use a .git *file* with a relative gitdir: path. Since we mount the
-# worktree at its real host path, we just need to also mount the gitdir at its
-# real host path so the relative references resolve correctly.
+# Submodules use a .git *file* with a relative gitdir: path. We remap the gitdir
+# into the container using the same $HOME-relative mapping so the relative
+# references between worktree and gitdir resolve correctly.
 if [ -f "$WORK_DIR/.git" ]; then
     GITDIR_REL="$(sed 's/^gitdir: //' "$WORK_DIR/.git" | tr -d '[:space:]')"
     if [ -n "$GITDIR_REL" ]; then
         GITDIR_HOST="$(cd "$WORK_DIR" && cd "$GITDIR_REL" && pwd)"
-        RUN_FLAGS+=(-v "$GITDIR_HOST:$GITDIR_HOST")
-        info "  Git submodule: gitdir at $GITDIR_HOST"
+        if [[ "$GITDIR_HOST" == "$HOME"/* ]]; then
+            _gitdir_rel="${GITDIR_HOST#$HOME/}"
+            GITDIR_CONTAINER="/home/claude/$_gitdir_rel"
+        else
+            GITDIR_CONTAINER="$GITDIR_HOST"
+        fi
+        RUN_FLAGS+=(-v "$GITDIR_HOST:$GITDIR_CONTAINER")
+        info "  Git submodule: gitdir at $GITDIR_CONTAINER"
     fi
 fi
 # Check for symlinks that escape the workspace (potential sandbox escape)

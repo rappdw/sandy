@@ -644,6 +644,182 @@ check "MAX_OUTPUT_TOKENS in docker -e flags" \
     grep -q 'CLAUDE_CODE_MAX_OUTPUT_TOKENS=.*128000' "$SCRIPT"
 
 # ============================================================
+info "25. Skill pack infrastructure"
+# ============================================================
+
+# Static analysis: verify skill pack registry exists
+check "SKILL_PACK_NAMES array defined" \
+    grep -q 'SKILL_PACK_NAMES=' "$SCRIPT"
+check "SKILL_PACK_REPOS array defined" \
+    grep -q 'SKILL_PACK_REPOS=' "$SCRIPT"
+check "SKILL_PACK_VERSIONS array defined" \
+    grep -q 'SKILL_PACK_VERSIONS=' "$SCRIPT"
+check "SKILL_PACK_TAG_PREFIXES array defined" \
+    grep -q 'SKILL_PACK_TAG_PREFIXES=' "$SCRIPT"
+check "skill_pack_lookup function defined" \
+    grep -q 'skill_pack_lookup()' "$SCRIPT"
+check "skill_pack_latest_release function defined" \
+    grep -q 'skill_pack_latest_release()' "$SCRIPT"
+check "skill_pack_resolve_versions function defined" \
+    grep -q 'skill_pack_resolve_versions()' "$SCRIPT"
+check "gstack registered as skill pack" \
+    grep -q 'gstack' "$SCRIPT"
+check "gstack repo points to rappdw fork" \
+    grep -q 'rappdw/gstack' "$SCRIPT"
+
+# Static analysis: verify SANDY_SKILL_PACKS is in config allowlist
+check "SANDY_SKILL_PACKS in config allowlist" \
+    grep -q 'SANDY_SKILL_PACKS' "$SCRIPT"
+
+# Static analysis: verify generate_skill_pack_dockerfile function exists
+check "generate_skill_pack_dockerfile function defined" \
+    grep -q 'generate_skill_pack_dockerfile()' "$SCRIPT"
+
+# Static analysis: verify Phase 2.5 build block exists
+check "Phase 2.5 skill pack build phase exists" \
+    grep -q 'SKILLS_REBUILT' "$SCRIPT"
+
+# Static analysis: verify skill pack auto-update check exists
+check "skill pack versions resolved before Dockerfile generation" \
+    grep -q 'skill_pack_resolve_versions' "$SCRIPT"
+
+# Static analysis: verify --rebuild clears skills hash
+check "--rebuild clears skill pack hash" \
+    grep -q 'skills_build_hash' "$SCRIPT"
+
+# Static analysis: verify runtime skill activation in user-setup
+check "user-setup activates /opt/skills" \
+    grep -q '/opt/skills' "$SCRIPT"
+check "user-setup sets PLAYWRIGHT_BROWSERS_PATH" \
+    grep -q 'PLAYWRIGHT_BROWSERS_PATH' "$SCRIPT"
+
+# ============================================================
+info "26. Skill pack Dockerfile generation"
+# ============================================================
+
+# Functional: generate the Dockerfile.skills and verify contents
+SKILLS_TEST_DIR="$(mktemp -d)"
+(
+    # Source just the functions we need from the sandy script
+    SANDY_HOME="$SKILLS_TEST_DIR"
+    SKILL_PACK_NAMES=(gstack)
+    SKILL_PACK_REPOS=("https://github.com/rappdw/gstack")
+    SKILL_PACK_VERSIONS=("sandy/v0.11.19.0")
+    SKILL_PACK_TAG_PREFIXES=("sandy/v")
+    IMAGE_NAME="sandy-claude-code"
+
+    skill_pack_lookup() {
+        local pack="$1" field="$2" i
+        for i in "${!SKILL_PACK_NAMES[@]}"; do
+            if [ "${SKILL_PACK_NAMES[$i]}" = "$pack" ]; then
+                case "$field" in
+                    repo) echo "${SKILL_PACK_REPOS[$i]}" ;;
+                    version) echo "${SKILL_PACK_VERSIONS[$i]}" ;;
+                    tag_prefix) echo "${SKILL_PACK_TAG_PREFIXES[$i]}" ;;
+                esac
+                return 0
+            fi
+        done
+        return 1
+    }
+    error() { echo "ERROR: $*" >&2; }
+
+    # Extract the generator function from the script and source it
+    eval "$(sed -n '/^generate_skill_pack_dockerfile()/,/^}/p' "$SCRIPT")"
+
+    generate_skill_pack_dockerfile "gstack"
+)
+
+SKILLS_DF="$SKILLS_TEST_DIR/Dockerfile.skills.new"
+check "Dockerfile.skills generated" \
+    test -f "$SKILLS_DF"
+check "Dockerfile.skills starts FROM sandy-claude-code" \
+    grep -q '^FROM sandy-claude-code' "$SKILLS_DF"
+check "Dockerfile.skills downloads gstack tarball" \
+    grep -q 'rappdw/gstack/archive' "$SKILLS_DF"
+check "Dockerfile.skills installs to /opt/skills/gstack" \
+    grep -q '/opt/skills/gstack' "$SKILLS_DF"
+check "Dockerfile.skills runs bun build" \
+    grep -q 'bun run build' "$SKILLS_DF"
+check "Dockerfile.skills installs Playwright deps" \
+    grep -q 'playwright install-deps chromium' "$SKILLS_DF"
+check "Dockerfile.skills installs Playwright browser" \
+    grep -q 'playwright install chromium' "$SKILLS_DF"
+check "Dockerfile.skills sets PLAYWRIGHT_BROWSERS_PATH" \
+    grep -q 'PLAYWRIGHT_BROWSERS_PATH=/opt/skills/gstack/.browsers' "$SKILLS_DF"
+check "Dockerfile.skills does not set USER (entrypoint handles privilege drop)" \
+    bash -c "! grep -q '^USER' '$SKILLS_DF'"
+
+rm -rf "$SKILLS_TEST_DIR"
+
+# ============================================================
+info "27. Project data migration from /workspace to new path"
+# ============================================================
+
+# The migration code runs inside the entrypoint when SANDY_WORKSPACE != /workspace.
+# Test it by pre-populating the old -workspace project dir in the sandbox and running
+# the migration snippet with a different SANDY_WORKSPACE.
+
+# Test 1: old data migrated when new dir does not exist
+mkdir -p "$SANDBOX_DIR/projects/-workspace"
+echo "old-session" > "$SANDBOX_DIR/projects/-workspace/session.jsonl"
+sandy_run '
+    export SANDY_WORKSPACE="/home/claude/dev/myproject"
+    WORKSPACE="$SANDY_WORKSPACE"
+    _new_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr "/" "-")"
+    _old_proj="$HOME/.claude/projects/-workspace"
+    if [ -d "$_old_proj" ] && [ ! -d "$_new_proj" ] && [ "$WORKSPACE" != "/workspace" ]; then
+        mv "$_old_proj" "$_new_proj"
+    fi
+    # Verify migration happened
+    test -f "$_new_proj/session.jsonl" && ! test -d "$_old_proj"
+'
+check "old -workspace project data migrated to new path" \
+    test -f "$SANDBOX_DIR/projects/-home-claude-dev-myproject/session.jsonl"
+check "old -workspace dir removed after migration" \
+    bash -c '! test -d "$1/projects/-workspace"' -- "$SANDBOX_DIR"
+# Clean up
+rm -rf "$SANDBOX_DIR/projects/-home-claude-dev-myproject"
+
+# Test 2: migration skipped when new dir already exists (no clobber)
+mkdir -p "$SANDBOX_DIR/projects/-workspace"
+echo "old-data" > "$SANDBOX_DIR/projects/-workspace/old.jsonl"
+mkdir -p "$SANDBOX_DIR/projects/-home-claude-dev-myproject"
+echo "new-data" > "$SANDBOX_DIR/projects/-home-claude-dev-myproject/new.jsonl"
+sandy_run '
+    export SANDY_WORKSPACE="/home/claude/dev/myproject"
+    WORKSPACE="$SANDY_WORKSPACE"
+    _new_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr "/" "-")"
+    _old_proj="$HOME/.claude/projects/-workspace"
+    if [ -d "$_old_proj" ] && [ ! -d "$_new_proj" ] && [ "$WORKSPACE" != "/workspace" ]; then
+        mv "$_old_proj" "$_new_proj"
+    fi
+'
+check "existing new project dir not clobbered" \
+    test -f "$SANDBOX_DIR/projects/-home-claude-dev-myproject/new.jsonl"
+check "old -workspace dir preserved when new dir exists" \
+    test -d "$SANDBOX_DIR/projects/-workspace"
+# Clean up
+rm -rf "$SANDBOX_DIR/projects/-workspace" "$SANDBOX_DIR/projects/-home-claude-dev-myproject"
+
+# Test 3: migration skipped when WORKSPACE is /workspace (no-op)
+mkdir -p "$SANDBOX_DIR/projects/-workspace"
+echo "keep-me" > "$SANDBOX_DIR/projects/-workspace/session.jsonl"
+sandy_run '
+    export SANDY_WORKSPACE="/workspace"
+    WORKSPACE="$SANDY_WORKSPACE"
+    _new_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr "/" "-")"
+    _old_proj="$HOME/.claude/projects/-workspace"
+    if [ -d "$_old_proj" ] && [ ! -d "$_new_proj" ] && [ "$WORKSPACE" != "/workspace" ]; then
+        mv "$_old_proj" "$_new_proj"
+    fi
+'
+check "no migration when WORKSPACE is /workspace" \
+    test -f "$SANDBOX_DIR/projects/-workspace/session.jsonl"
+# Clean up
+rm -rf "$SANDBOX_DIR/projects/-workspace"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

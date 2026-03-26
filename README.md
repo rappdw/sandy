@@ -92,6 +92,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth) |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max output tokens per response (Claude Code default is 32K) |
+| `SANDY_SKILL_PACKS` | (unset) | Comma-separated skill packs to install (e.g. `gstack`). Built as a cached Docker layer |
 | `SANDY_GPU` | (disabled) | GPU passthrough: `all` for all GPUs, or device IDs like `0` or `0,1`. Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
 | `SANDY_CHANNELS` | (unset) | Channel plugins to enable (e.g. `plugin:telegram@claude-plugins-official`) |
 | `TELEGRAM_BOT_TOKEN` | (unset) | Telegram bot token (from BotFather). Put in `.sandy/.secrets`, not `.sandy/config` |
@@ -236,6 +237,23 @@ Available plugins:
 | [synthkit](https://github.com/rappdw/synthkit) | Document synthesis — guided exploration, markdown to PDF/DOCX/HTML/email |
 
 **Known issue — slash command autocomplete**: Plugin skills (e.g. `/boardroom`, `/md2pdf`) are lazy-loaded by Claude Code and won't appear in slash command autocomplete until invoked once — either by typing the request naturally (e.g. "run a boardroom debate about X") or via the fully qualified name (e.g. `synthkit:boardroom`). After first invocation, they appear in autocomplete for the rest of the session. This is a [known Claude Code bug](https://github.com/anthropics/claude-code/issues/18949) — the slash command resolver only indexes the legacy `commands/` system and ignores `skills/` entries (despite commands being [merged into skills](https://code.claude.com/docs/en/skills.md)).
+
+### Skill packs
+
+Skill packs are optional Docker image layers that bake curated skill collections into the container. They're not included by default — enable them per-project and they're built once, cached, and instantly available on subsequent launches.
+
+```bash
+# .sandy/config
+SANDY_SKILL_PACKS=gstack
+```
+
+| Pack | Description | Source |
+|------|-------------|--------|
+| `gstack` | 28 Claude Code skills (QA, review, ship, browse, etc.) + headless Chromium browser engine | [rappdw/gstack](https://github.com/rappdw/gstack) |
+
+First launch with a new skill pack takes a few minutes (downloading, compiling, installing Chromium). After that, launches are instant — everything is cached in a Docker image layer. Sandy auto-checks for newer skill pack releases on each launch and rebuilds when updates are available.
+
+Skills are automatically discovered by Claude Code at session start. Skill pack `bin/` directories are added to PATH.
 
 ### GPU support
 
