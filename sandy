@@ -278,6 +278,7 @@ Flags:
   --resume           Open session picker
   --remote           Start in remote-control server mode
   --upgrade          Update sandy to the latest version
+  --migrate          Migrate sandbox from old workspace path conventions
 
 All other arguments are forwarded to claude.
 EOF
@@ -289,6 +290,7 @@ SANDY_REBUILD=false
 SANDY_BUILD_ONLY=false
 SANDY_NEW_SESSION=false
 SANDY_REMOTE_CONTROL=false
+SANDY_MIGRATE=false
 REMAINING_ARGS=()
 for arg in "$@"; do
     case "$arg" in
@@ -297,6 +299,7 @@ for arg in "$@"; do
         --new)        SANDY_NEW_SESSION=true ;;
         --remote)     SANDY_REMOTE_CONTROL=true ;;
         --upgrade)    sandy_self_update; exit 0 ;;
+        --migrate)    SANDY_MIGRATE=true ;;
         *)            REMAINING_ARGS+=("$arg") ;;
     esac
 done
@@ -562,73 +565,9 @@ trap "printf \"\033]104;4\033\\\\\"" EXIT
 WORKSPACE="${SANDY_WORKSPACE:-/workspace}"
 mkdir -p "$WORKSPACE/.claude" 2>/dev/null || true
 
-# Consolidate project dirs: the container workspace path has changed across sandy
-# versions (/workspace → raw host path → $HOME-relative path), creating multiple
-# project dirs in the same sandbox. Since each sandbox is per-project, all project
-# dirs belong to the same project — merge them into the current one.
+# Project dir for current workspace
 _cur_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')"
-_sessions_migrated=false
 mkdir -p "$_cur_proj"
-for _old_proj in "$HOME/.claude/projects"/-*/; do
-    [ -d "$_old_proj" ] || continue
-    # Normalize trailing slash for comparison
-    case "$_old_proj" in "$_cur_proj"/) continue ;; esac
-    # cp -an: archive mode, no-clobber (existing files in destination are never overwritten).
-    # Recursively merges subdirs (e.g. memory/) unlike mv -n which skips entire dirs on conflict.
-    if cp -an "$_old_proj". "$_cur_proj"/ 2>/dev/null; then
-        _sessions_migrated=true
-    else
-        printf '\033[33m! Failed to merge project dir %s\033[0m\n' "$(basename "$_old_proj")" >&2
-    fi
-    rm -rf "$_old_proj"
-done
-# Rewrite stale project paths in history.jsonl so Claude Code can find migrated sessions.
-# Since each sandbox is per-project, ALL sessions belong to the current workspace.
-if [ -f "$HOME/.claude/history.jsonl" ]; then
-    if ! sed -i "s|\"project\":\"[^\"]*\"|\"project\":\"$WORKSPACE\"|g" "$HOME/.claude/history.jsonl" 2>/dev/null; then
-        printf '\033[33m! Failed to rewrite history.jsonl project paths\033[0m\n' >&2
-    fi
-fi
-# Consolidate .claude.json project entries under the current workspace path.
-# Claude Code stores per-project state (trust dialog, allowed tools, etc.) keyed by
-# workspace path — stale keys mean it won't recognize the project as trusted.
-CLAUDE_JSON="$HOME/.claude.json"
-if [ -f "$CLAUDE_JSON" ]; then
-    if ! node -e '
-        const fs = require("fs");
-        const f = process.argv[1];
-        const ws = process.argv[2];
-        let d;
-        try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { process.exit(0); }
-        const p = d.projects;
-        if (!p || typeof p !== "object") process.exit(0);
-        const keys = Object.keys(p).filter(k => k !== ws);
-        if (keys.length === 0) process.exit(0);
-        // Start with current entry if it exists, or empty object
-        let merged = p[ws] || {};
-        for (const k of keys) {
-            const old = p[k];
-            if (!old || typeof old !== "object") { delete p[k]; continue; }
-            // Preserve hasTrustDialogAccepted=true from any era
-            if (old.hasTrustDialogAccepted) merged.hasTrustDialogAccepted = true;
-            if (old.hasCompletedProjectOnboarding) merged.hasCompletedProjectOnboarding = true;
-            // Merge allowedTools arrays
-            if (old.allowedTools && old.allowedTools.length) {
-                merged.allowedTools = [...new Set([...(merged.allowedTools || []), ...old.allowedTools])];
-            }
-            // If no current entry existed, use the old one as base (first old entry wins)
-            if (!p[ws]) { merged = { ...old, ...merged }; p[ws] = merged; }
-            delete p[k];
-        }
-        p[ws] = merged;
-        // Atomic write: tmp file + rename prevents corruption on crash/signal
-        const tmp = f + ".tmp";
-        fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + "\n");
-        fs.renameSync(tmp, f);
-    ' "$CLAUDE_JSON" "$WORKSPACE" 2>&1; then
-        printf '\033[33m! Failed to consolidate .claude.json project entries\033[0m\n' >&2
-    fi
-fi
 
 # Ensure plugin marketplaces are configured in settings.json (idempotent)
 SETTINGS_FILE="$HOME/.claude/settings.json"
@@ -817,12 +756,7 @@ else
         # Check if any session files exist (path encodes SANDY_WORKSPACE)
         SESSION_DIR="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')/"
         if ls "$SESSION_DIR"*.jsonl &>/dev/null; then
-            if [ "$_sessions_migrated" = "true" ]; then
-                # Sessions were consolidated from old path eras — let user pick
-                CLAUDE_CMD+=" --resume"
-            else
-                CLAUDE_CMD+=" --continue"
-            fi
+            CLAUDE_CMD+=" --continue"
         fi
     fi
 
@@ -1528,6 +1462,18 @@ if [[ "$WORK_DIR" == "$HOME"/* ]]; then
 else
     SANDY_WORKSPACE="$WORK_DIR"
 fi
+
+# --- Migrate sandbox (--migrate) ---
+if [ "$SANDY_MIGRATE" = "true" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+    if [ -x "$SCRIPT_DIR/migrate-sandbox.sh" ]; then
+        exec "$SCRIPT_DIR/migrate-sandbox.sh" "$SANDBOX_DIR" "$SANDY_WORKSPACE"
+    else
+        error "migrate-sandbox.sh not found in $SCRIPT_DIR"
+        exit 1
+    fi
+fi
+
 # --- Git submodule support ---
 # Submodules use a .git *file* with a relative gitdir: path. We remap the gitdir
 # into the container using the same $HOME-relative mapping so the relative
