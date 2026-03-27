@@ -808,6 +808,9 @@ Flags:
   --migrate --list   List sandboxes that may need migration
   --migrate --from <dir>  Merge another sandbox into this project's sandbox
   --migrate --dry-run  Preview migration without making changes
+  -v                 Verbose: show startup sections, pause on exit
+  -vv                Debug: add bash trace to user-setup.sh
+  -vvv               Full trace: also trace entrypoint.sh and show docker flags
 
 All other arguments are forwarded to claude.
 EOF
@@ -823,6 +826,7 @@ SANDY_MIGRATE=false
 SANDY_DRY_RUN=false
 SANDY_MIGRATE_LIST=false
 SANDY_MIGRATE_FROM=""
+SANDY_VERBOSE="${SANDY_VERBOSE:-0}"
 REMAINING_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -835,6 +839,9 @@ while [ $# -gt 0 ]; do
         --dry-run)    SANDY_DRY_RUN=true ;;
         --list)       SANDY_MIGRATE_LIST=true ;;
         --from)       shift; SANDY_MIGRATE_FROM="${1:-}" ;;
+        -vvv)         SANDY_VERBOSE=3 ;;
+        -vv)          SANDY_VERBOSE=2 ;;
+        -v)           SANDY_VERBOSE=1 ;;
         *)            REMAINING_ARGS+=("$1") ;;
     esac
     shift
@@ -954,6 +961,9 @@ generate_entrypoint() {
     cat > "$SANDY_HOME/entrypoint.sh.new" <<'ENTRYPOINT'
 #!/bin/bash
 # --- Root-only setup (runs before dropping to user claude) ---
+if [ "${SANDY_VERBOSE:-0}" -ge 3 ]; then
+    set -x
+fi
 
 # Determine runtime UID/GID (match host user for bind-mount permissions on Linux)
 RUN_UID="${HOST_UID:-1001}"
@@ -1046,12 +1056,22 @@ generate_user_setup() {
     cat > "$SANDY_HOME/user-setup.sh.new" <<'USERSETUP'
 #!/bin/bash
 set -e
+trap 'echo "[sandy] ERROR: user-setup.sh failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+    sandy_log() { printf '\033[0;36m[sandy] ▶ %s\033[0m\n' "$1"; }
+else
+    sandy_log() { :; }
+fi
+if [ "${SANDY_VERBOSE:-0}" -ge 2 ]; then
+    set -x
+fi
 export HOME=/home/claude
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS="${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-0}"
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}"
 export DISABLE_AUTOUPDATER=1
 export ENABLE_CLAUDEAI_MCP_SERVERS=false
 
+sandy_log "Setting up language toolchains"
 # Cargo: writable registry cache + cargo-install binaries
 export CARGO_HOME="$HOME/.cargo"
 mkdir -p "$CARGO_HOME/bin"
@@ -1077,6 +1097,7 @@ mkdir -p "$PYTHONUSERBASE/bin"
 # Writable bin dirs on PATH
 export PATH="$HOME/.local/bin:$PYTHONUSERBASE/bin:$NPM_CONFIG_PREFIX/bin:$GOPATH/bin:$CARGO_HOME/bin:$PATH"
 
+sandy_log "Activating skill packs"
 # Activate baked-in skill packs (installed at /opt/skills/ during image build)
 if [ -d /opt/skills ]; then
     mkdir -p "$HOME/.claude/skills"
@@ -1109,6 +1130,7 @@ fi
 printf "\033]4;4;rgb:61/8f/ff\033\\"
 trap "printf \"\033]104;4\033\\\\\"" EXIT
 
+sandy_log "Configuring project settings"
 # Ensure project-level settings exist
 WORKSPACE="${SANDY_WORKSPACE:-/workspace}"
 mkdir -p "$WORKSPACE/.claude" 2>/dev/null || true
@@ -1141,6 +1163,7 @@ if [ -f "$SETTINGS_FILE" ]; then
     ' "$SETTINGS_FILE"
 fi
 
+sandy_log "Configuring git"
 # Trust all directories (host UID differs from container UID; container is sandboxed)
 git config --global --add safe.directory "*"
 
@@ -1152,6 +1175,7 @@ if [ -n "${GIT_USER_EMAIL:-}" ]; then
     git config --global user.email "$GIT_USER_EMAIL"
 fi
 
+sandy_log "Running dev environment checks"
 # --- Dev environment checks ---
 # Set up git-lfs filters if the workspace is a git repo using LFS (home is tmpfs, so config is lost each session)
 if [ -d "$WORKSPACE/.git" ] || [ -f "$WORKSPACE/.git" ]; then
@@ -1197,6 +1221,7 @@ if [ -d "$WORKSPACE/node_modules" ]; then
     fi
 fi
 
+sandy_log "Configuring git auth"
 # Configure git auth: GitHub token (default) or SSH agent
 if [ "${SANDY_SSH:-token}" = "token" ] && [ -n "${GIT_TOKEN:-}" ]; then
     git config --global url."https://oauth2:${GIT_TOKEN}@github.com/".insteadOf "git@github.com:"
@@ -1207,6 +1232,7 @@ if [ "${SANDY_SSH:-token}" = "token" ] && [ -n "${GIT_TOKEN:-}" ]; then
     fi
 fi
 
+sandy_log "Refreshing plugin marketplaces"
 # Refresh plugin marketplaces (once per day, or forced when channels need plugins)
 _marketplace_cache="$HOME/.claude/plugins/.marketplace_updated"
 _now=$(date +%s)
@@ -1271,6 +1297,7 @@ CHACCESS
 _seed_channel telegram TELEGRAM_BOT_TOKEN TELEGRAM_ALLOWED_SENDERS
 _seed_channel discord DISCORD_BOT_TOKEN DISCORD_ALLOWED_SENDERS
 
+sandy_log "Launching Claude Code"
 # Build the claude command with any passed args
 if [ "${SANDY_REMOTE_CONTROL:-false}" = "true" ]; then
     # Remote-control server mode — no tmux wrapper, no auto-resume
@@ -1278,6 +1305,9 @@ if [ "${SANDY_REMOTE_CONTROL:-false}" = "true" ]; then
     for arg in "$@"; do
         CLAUDE_CMD+=" $(printf "%q" "$arg")"
     done
+    if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+        CLAUDE_CMD="$CLAUDE_CMD; _exit=\$?; echo ''; echo \"[sandy] Claude Code exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+    fi
     cd "$WORKSPACE"
     exec bash -c "$CLAUDE_CMD 2>&1"
 else
@@ -1300,6 +1330,7 @@ else
             -p|--resume|--continue) SANDY_AUTO_CONTINUE=false ;;
         esac
     done
+    CLAUDE_CMD_BASE="$CLAUDE_CMD"
     if [ "$SANDY_AUTO_CONTINUE" = "true" ]; then
         # Check if any session files exist (path encodes SANDY_WORKSPACE)
         SESSION_DIR="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')/"
@@ -1310,8 +1341,17 @@ else
 
     for arg in "$@"; do
         CLAUDE_CMD+=" $(printf "%q" "$arg")"
+        CLAUDE_CMD_BASE+=" $(printf "%q" "$arg")"
     done
 
+    # Fall back to fresh session if --continue fails (stale/incompatible sessions)
+    if [ "$CLAUDE_CMD" != "$CLAUDE_CMD_BASE" ]; then
+        CLAUDE_CMD="$CLAUDE_CMD || $CLAUDE_CMD_BASE"
+    fi
+
+    if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+        CLAUDE_CMD="$CLAUDE_CMD; _exit=\$?; echo ''; echo \"[sandy] Claude Code exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+    fi
     cd "$WORKSPACE"
     tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$CLAUDE_CMD 2>&1"
 fi
@@ -1452,7 +1492,7 @@ _load_sandy_config() {
         case "$key" in
             SANDY_SSH|SANDY_MODEL|SANDY_SKILL_PACKS|SANDY_SKIP_PERMISSIONS|\
             SANDY_ALLOW_NO_ISOLATION|SANDY_ALLOW_LAN_HOSTS|\
-            SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|\
+            SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|SANDY_VERBOSE|\
             CLAUDE_CODE_OAUTH_TOKEN|\
             TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
             DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
@@ -2120,6 +2160,7 @@ RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
 RUN_FLAGS+=(-e "SANDY_SKIP_PERMISSIONS=${SANDY_SKIP_PERMISSIONS:-true}")
 RUN_FLAGS+=(-e "SANDY_NEW_SESSION=$SANDY_NEW_SESSION")
 RUN_FLAGS+=(-e "SANDY_REMOTE_CONTROL=$SANDY_REMOTE_CONTROL")
+RUN_FLAGS+=(-e "SANDY_VERBOSE=$SANDY_VERBOSE")
 if [ -n "${SANDY_CHANNELS:-}" ]; then
     RUN_FLAGS+=(-e "SANDY_CHANNELS=$SANDY_CHANNELS")
 fi
@@ -2244,4 +2285,9 @@ info "  Resources:         ${SANDY_CPUS} CPUs, ${SANDY_MEM} memory"
 info "  Network:           Public internet only (LAN blocked)"
 echo ""
 
+if [ "$SANDY_VERBOSE" -ge 3 ]; then
+    info "Docker run flags:"
+    printf '  %s\n' "${RUN_FLAGS[@]}"
+    echo ""
+fi
 docker run "${RUN_FLAGS[@]}" "$IMAGE_NAME" "$@"
