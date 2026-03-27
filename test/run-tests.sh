@@ -865,6 +865,121 @@ check "history.jsonl has no stale project paths" \
     bash -c '! echo "$1" | grep -q "\"project\":\"/workspace\""' -- "$HIST_CONTENT"
 rm -rf "$SANDBOX_DIR/projects/-home-claude-dev-myproject" "$SANDBOX_DIR/history.jsonl"
 
+# .claude.json migration snippet (runs inside container where node is available).
+# Mirrors the node script from generate_user_setup() in sandy.
+_CJ_MIGRATE_SNIPPET='
+    CLAUDE_JSON="$1"
+    WORKSPACE="$2"
+    node -e "
+        const fs = require(\"fs\");
+        const f = process.argv[1];
+        const ws = process.argv[2];
+        let d;
+        try { d = JSON.parse(fs.readFileSync(f, \"utf8\")); } catch { process.exit(0); }
+        const p = d.projects;
+        if (!p || typeof p !== \"object\") process.exit(0);
+        const keys = Object.keys(p).filter(k => k !== ws);
+        if (keys.length === 0) process.exit(0);
+        let merged = p[ws] || {};
+        for (const k of keys) {
+            const old = p[k];
+            if (old.hasTrustDialogAccepted) merged.hasTrustDialogAccepted = true;
+            if (old.hasCompletedProjectOnboarding) merged.hasCompletedProjectOnboarding = true;
+            if (old.allowedTools && old.allowedTools.length) {
+                merged.allowedTools = [...new Set([...(merged.allowedTools || []), ...old.allowedTools])];
+            }
+            if (!p[ws]) { merged = { ...old, ...merged }; p[ws] = merged; }
+            delete p[k];
+        }
+        p[ws] = merged;
+        const tmp = f + \".tmp\";
+        fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + \"\\n\");
+        fs.renameSync(tmp, f);
+    " "$CLAUDE_JSON" "$WORKSPACE"
+'
+
+# Test 6: .claude.json trust state consolidated from multiple eras
+# Reproduces the google sandbox scenario: /workspace had trust=true,
+# /Users/.../google had trust=false, current workspace has no entry.
+cat > "$SANDBOX_DIR/.claude.json.test" <<'CJ6'
+{
+  "numStartups": 5,
+  "projects": {
+    "/workspace": {
+      "allowedTools": ["Read"],
+      "hasTrustDialogAccepted": true,
+      "lastSessionId": "sess1"
+    },
+    "/Users/rappdw/dev/genai/google": {
+      "allowedTools": ["Edit"],
+      "hasTrustDialogAccepted": false,
+      "hasCompletedProjectOnboarding": true,
+      "lastSessionId": "sess2"
+    }
+  }
+}
+CJ6
+sandy_run "
+    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/claude/.claude/.claude.json.test /home/claude/dev/genai/google
+"
+CJ6_RESULT="$(cat "$SANDBOX_DIR/.claude.json.test")"
+check ".claude.json: trust=true inherited from /workspace era" \
+    bash -c 'echo "$1" | grep -q "\"hasTrustDialogAccepted\": true"' -- "$CJ6_RESULT"
+check ".claude.json: hasCompletedProjectOnboarding preserved" \
+    bash -c 'echo "$1" | grep -q "\"hasCompletedProjectOnboarding\": true"' -- "$CJ6_RESULT"
+check ".claude.json: allowedTools merged from both eras" \
+    bash -c 'echo "$1" | grep -q "\"Read\"" && echo "$1" | grep -q "\"Edit\""' -- "$CJ6_RESULT"
+check ".claude.json: old entries removed, only current workspace remains" \
+    bash -c '! echo "$1" | grep -q "/workspace"' -- "$CJ6_RESULT"
+check ".claude.json: non-project data preserved" \
+    bash -c 'echo "$1" | grep -q "\"numStartups\": 5"' -- "$CJ6_RESULT"
+rm -f "$SANDBOX_DIR/.claude.json.test"
+
+# Test 7: .claude.json no-op when only current workspace entry exists
+cat > "$SANDBOX_DIR/.claude.json.test" <<'CJ7'
+{
+  "projects": {
+    "/home/claude/dev/myproject": {
+      "hasTrustDialogAccepted": true,
+      "lastCost": 1.23
+    }
+  }
+}
+CJ7
+cp "$SANDBOX_DIR/.claude.json.test" "$SANDBOX_DIR/.claude.json.test.before"
+sandy_run "
+    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/claude/.claude/.claude.json.test /home/claude/dev/myproject
+"
+check ".claude.json: no-op when only current entry exists" \
+    diff -q "$SANDBOX_DIR/.claude.json.test" "$SANDBOX_DIR/.claude.json.test.before"
+rm -f "$SANDBOX_DIR/.claude.json.test" "$SANDBOX_DIR/.claude.json.test.before"
+
+# Test 8: .claude.json graceful with malformed JSON
+echo "not valid json" > "$SANDBOX_DIR/.claude.json.test"
+sandy_run "
+    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/claude/.claude/.claude.json.test /home/claude/dev/myproject
+"
+CJ8_CONTENT="$(cat "$SANDBOX_DIR/.claude.json.test")"
+check ".claude.json: malformed JSON not corrupted" \
+    test "$CJ8_CONTENT" = "not valid json"
+rm -f "$SANDBOX_DIR/.claude.json.test"
+
+# Test 9: .claude.json atomic write produces trailing newline
+cat > "$SANDBOX_DIR/.claude.json.test" <<'CJ9'
+{
+  "projects": {
+    "/workspace": { "hasTrustDialogAccepted": true },
+    "/old": { "hasTrustDialogAccepted": false }
+  }
+}
+CJ9
+sandy_run "
+    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/claude/.claude/.claude.json.test /home/claude/dev/myproject
+"
+check ".claude.json: file ends with newline" \
+    bash -c 'test "$(tail -c 1 "$1/.claude.json.test" | xxd -p)" = "0a"' -- "$SANDBOX_DIR"
+rm -f "$SANDBOX_DIR/.claude.json.test"
+
 # ============================================================
 # Summary
 # ============================================================

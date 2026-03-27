@@ -573,21 +573,28 @@ for _old_proj in "$HOME/.claude/projects"/-*/; do
     [ -d "$_old_proj" ] || continue
     # Normalize trailing slash for comparison
     case "$_old_proj" in "$_cur_proj"/) continue ;; esac
-    # cp -an recursively merges subdirs (e.g. memory/) unlike mv -n which skips them
-    cp -an "$_old_proj". "$_cur_proj"/ 2>/dev/null && _sessions_migrated=true
+    # cp -an: archive mode, no-clobber (existing files in destination are never overwritten).
+    # Recursively merges subdirs (e.g. memory/) unlike mv -n which skips entire dirs on conflict.
+    if cp -an "$_old_proj". "$_cur_proj"/ 2>/dev/null; then
+        _sessions_migrated=true
+    else
+        printf '\033[33m! Failed to merge project dir %s\033[0m\n' "$(basename "$_old_proj")" >&2
+    fi
     rm -rf "$_old_proj"
 done
 # Rewrite stale project paths in history.jsonl so Claude Code can find migrated sessions.
 # Since each sandbox is per-project, ALL sessions belong to the current workspace.
 if [ -f "$HOME/.claude/history.jsonl" ]; then
-    sed -i "s|\"project\":\"[^\"]*\"|\"project\":\"$WORKSPACE\"|g" "$HOME/.claude/history.jsonl"
+    if ! sed -i "s|\"project\":\"[^\"]*\"|\"project\":\"$WORKSPACE\"|g" "$HOME/.claude/history.jsonl" 2>/dev/null; then
+        printf '\033[33m! Failed to rewrite history.jsonl project paths\033[0m\n' >&2
+    fi
 fi
 # Consolidate .claude.json project entries under the current workspace path.
 # Claude Code stores per-project state (trust dialog, allowed tools, etc.) keyed by
 # workspace path — stale keys mean it won't recognize the project as trusted.
 CLAUDE_JSON="$HOME/.claude.json"
 if [ -f "$CLAUDE_JSON" ]; then
-    node -e '
+    if ! node -e '
         const fs = require("fs");
         const f = process.argv[1];
         const ws = process.argv[2];
@@ -613,8 +620,13 @@ if [ -f "$CLAUDE_JSON" ]; then
             delete p[k];
         }
         p[ws] = merged;
-        fs.writeFileSync(f, JSON.stringify(d, null, 2));
-    ' "$CLAUDE_JSON" "$WORKSPACE" 2>/dev/null || true
+        // Atomic write: tmp file + rename prevents corruption on crash/signal
+        const tmp = f + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + "\n");
+        fs.renameSync(tmp, f);
+    ' "$CLAUDE_JSON" "$WORKSPACE" 2>/dev/null; then
+        printf '\033[33m! Failed to consolidate .claude.json project entries\033[0m\n' >&2
+    fi
 fi
 
 # Ensure plugin marketplaces are configured in settings.json (idempotent)
