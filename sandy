@@ -205,7 +205,7 @@ sandy_check_update() {
 #   Era 1: /workspace → Era 2: raw host path → Era 3: $HOME-relative path
 # Each era left behind project dirs, history entries, and .claude.json keys.
 sandy_migrate() {
-    local sandbox_dir="$1" workspace="$2"
+    local sandbox_dir="$1" workspace="$2" dry_run="${3:-false}"
 
     if [ ! -d "$sandbox_dir" ]; then
         error "Sandbox dir does not exist: $sandbox_dir"
@@ -217,6 +217,10 @@ sandy_migrate() {
     local cur_key="$(echo "$workspace" | tr '/' '-')"
 
     echo ""
+    if [ "$dry_run" = "true" ]; then
+        warn "DRY RUN — no changes will be made"
+        echo ""
+    fi
     info "Sandbox:   $(basename "$sandbox_dir")"
     info "Directory: $sandbox_dir"
     info "Workspace: $workspace"
@@ -244,12 +248,16 @@ sandy_migrate() {
             local session_count=0
             session_count=$(find "$old_proj" -name "*.jsonl" -type f 2>/dev/null | wc -l)
             info "  $old_path ($session_count session files) - MIGRATE"
-            mkdir -p "$cur_proj"
-            if cp -an "$old_proj". "$cur_proj"/ 2>/dev/null; then
-                rm -rf "$old_proj"
+            if [ "$dry_run" = "true" ]; then
                 migrated=$((migrated + 1))
             else
-                warn "  Failed to merge $old_name"
+                mkdir -p "$cur_proj"
+                if cp -an "$old_proj". "$cur_proj"/ 2>/dev/null; then
+                    rm -rf "$old_proj"
+                    migrated=$((migrated + 1))
+                else
+                    warn "  Failed to merge $old_name"
+                fi
             fi
         done
         if [ "$found_any" = "false" ]; then
@@ -259,7 +267,8 @@ sandy_migrate() {
         info "  No projects/ directory in sandbox"
     fi
     if [ "$migrated" -gt 0 ]; then
-        info "  >> Merged $migrated old project dir(s) into $cur_key"
+        local verb="Merged"; [ "$dry_run" = "true" ] && verb="Would merge"
+        info "  >> $verb $migrated old project dir(s) into $cur_key"
     fi
     echo ""
 
@@ -285,8 +294,11 @@ sandy_migrate() {
         local stale_count
         stale_count=$(grep -v "\"project\":\"$workspace\"" "$history" 2>/dev/null | grep -c '"project"' 2>/dev/null || echo 0)
         if [ "$stale_count" -gt 0 ]; then
-            sed -i "s|\"project\":\"[^\"]*\"|\"project\":\"$workspace\"|g" "$history"
-            info "  >> Rewrote $stale_count entries to $workspace"
+            if [ "$dry_run" != "true" ]; then
+                sed -i "s|\"project\":\"[^\"]*\"|\"project\":\"$workspace\"|g" "$history"
+            fi
+            local verb="Rewrote"; [ "$dry_run" = "true" ] && verb="Would rewrite"
+            info "  >> $verb $stale_count entries to $workspace"
         else
             info "  >> Nothing to rewrite"
         fi
@@ -302,6 +314,7 @@ sandy_migrate() {
             const fs = require("fs");
             const f = process.argv[1];
             const ws = process.argv[2];
+            const dryRun = process.argv[3] === "true";
             let d;
             try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) {
                 console.log("  Cannot parse " + f + ", skipping");
@@ -336,14 +349,17 @@ sandy_migrate() {
                 count++;
             }
             p[ws] = merged;
-            const tmp = f + ".tmp";
-            fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + "\n");
-            fs.renameSync(tmp, f);
+            const verb = dryRun ? "Would consolidate" : "Consolidated";
             const finalTools = (merged.allowedTools || []).length;
-            console.log("  >> Consolidated " + count + " key(s) into " + ws +
+            if (!dryRun) {
+                const tmp = f + ".tmp";
+                fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + "\n");
+                fs.renameSync(tmp, f);
+            }
+            console.log("  >> " + verb + " " + count + " key(s) into " + ws +
                 " [" + (merged.hasTrustDialogAccepted ? "trusted" : "untrusted") +
                 ", " + finalTools + " tools]");
-        ' "$claude_json" "$workspace"
+        ' "$claude_json" "$workspace" "$dry_run"
     else
         info "  No .claude.json found at $claude_json"
     fi
@@ -431,6 +447,7 @@ Flags:
   --remote           Start in remote-control server mode
   --upgrade          Update sandy to the latest version
   --migrate          Migrate sandbox from old workspace path conventions
+  --dry-run          Preview migration without making changes (use with --migrate)
 
 All other arguments are forwarded to claude.
 EOF
@@ -443,6 +460,7 @@ SANDY_BUILD_ONLY=false
 SANDY_NEW_SESSION=false
 SANDY_REMOTE_CONTROL=false
 SANDY_MIGRATE=false
+SANDY_DRY_RUN=false
 REMAINING_ARGS=()
 for arg in "$@"; do
     case "$arg" in
@@ -452,6 +470,7 @@ for arg in "$@"; do
         --remote)     SANDY_REMOTE_CONTROL=true ;;
         --upgrade)    sandy_self_update; exit 0 ;;
         --migrate)    SANDY_MIGRATE=true ;;
+        --dry-run)    SANDY_DRY_RUN=true ;;
         *)            REMAINING_ARGS+=("$arg") ;;
     esac
 done
@@ -1617,7 +1636,7 @@ fi
 
 # --- Migrate sandbox (--migrate) ---
 if [ "$SANDY_MIGRATE" = "true" ]; then
-    sandy_migrate "$SANDBOX_DIR" "$SANDY_WORKSPACE"
+    sandy_migrate "$SANDBOX_DIR" "$SANDY_WORKSPACE" "$SANDY_DRY_RUN"
     exit 0
 fi
 
