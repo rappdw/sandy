@@ -1371,7 +1371,15 @@ CLAUDE_JSON="$SANDY_HOME/sandboxes/${SANDBOX_NAME}.claude.json"
 if [ ! -f "$CLAUDE_JSON" ]; then
     # Seed from host's ~/.claude.json (contains onboarding, theme, OAuth, etc.)
     if [ -f "$HOME/.claude.json" ]; then
-        cp "$HOME/.claude.json" "$CLAUDE_JSON"
+        # Seed from host, stripping project entries (host paths are meaningless in the container)
+        node -e '
+            const fs = require("fs");
+            let d;
+            try { d = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch(e) { process.exit(1); }
+            delete d.projects;
+            fs.writeFileSync(process.argv[2], JSON.stringify(d, null, 2) + "\n");
+        ' "$HOME/.claude.json" "$CLAUDE_JSON" 2>/dev/null \
+            || cp "$HOME/.claude.json" "$CLAUDE_JSON"
         info "Seeded .claude.json from host"
     else
         printf '{"tipsDisabled":true,"installMethod":"native"}\n' > "$CLAUDE_JSON"
