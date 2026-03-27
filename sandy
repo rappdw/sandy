@@ -204,6 +204,232 @@ sandy_check_update() {
 # Sandy's container workspace path changed across versions:
 #   Era 1: /workspace → Era 2: raw host path → Era 3: $HOME-relative path
 # Each era left behind project dirs, history entries, and .claude.json keys.
+# List sandboxes that may need migration.
+sandy_migrate_list() {
+    local sandboxes_dir="$SANDY_HOME/sandboxes"
+    if [ ! -d "$sandboxes_dir" ]; then
+        info "No sandboxes found."
+        return
+    fi
+
+    local found=0
+    echo ""
+    for sandbox_dir in "$sandboxes_dir"/*/; do
+        [ -d "$sandbox_dir" ] || continue
+        local name="$(basename "$sandbox_dir")"
+        local claude_json="$sandboxes_dir/${name}.claude.json"
+        local issues=""
+
+        # Check for multiple project dirs
+        if [ -d "$sandbox_dir/projects" ]; then
+            local proj_count=0
+            for _p in "$sandbox_dir/projects"/-*/; do
+                [ -d "$_p" ] && proj_count=$((proj_count + 1))
+            done
+            [ "$proj_count" -gt 1 ] && issues="${issues}${proj_count} project dirs; "
+        fi
+
+        # Check for stale .claude.json entries (host paths or /workspace)
+        if [ -f "$claude_json" ] && command -v node &>/dev/null; then
+            local stale_count
+            stale_count=$(node -e '
+                const fs = require("fs");
+                let d;
+                try { d = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch(e) { process.exit(0); }
+                const p = d.projects;
+                if (!p || typeof p !== "object") process.exit(0);
+                const keys = Object.keys(p);
+                // Stale = not /home/claude/... paths (host paths or /workspace)
+                const stale = keys.filter(k => !k.startsWith("/home/claude/"));
+                console.log(stale.length);
+            ' "$claude_json" 2>/dev/null || echo 0)
+            [ "$stale_count" -gt 0 ] && issues="${issues}${stale_count} stale .claude.json entries; "
+        fi
+
+        # Check for stale history.jsonl paths
+        if [ -f "$sandbox_dir/history.jsonl" ]; then
+            local stale_hist
+            stale_hist=$(grep -Ec '"project":"(/workspace|/Users/|/home/[^c])' "$sandbox_dir/history.jsonl" 2>/dev/null | tail -1 || true)
+            [[ "$stale_hist" =~ ^[0-9]+$ ]] || stale_hist=0
+            [ "$stale_hist" -gt 0 ] && issues="${issues}${stale_hist} stale history entries; "
+        fi
+
+        if [ -n "$issues" ]; then
+            issues="${issues%; }"  # strip trailing semicolon
+            printf "  \033[0;33m%-40s\033[0m %s\n" "$name" "$issues"
+            found=$((found + 1))
+        fi
+    done
+
+    echo ""
+    if [ "$found" -eq 0 ]; then
+        info "All sandboxes are clean — no migration needed."
+    else
+        info "$found sandbox(es) may need migration."
+        info "To migrate: cd <project-dir> && sandy --migrate --dry-run"
+    fi
+}
+
+# Merge a source sandbox into the current project's sandbox.
+sandy_migrate_from() {
+    local src_dir="$1" dst_dir="$2" workspace="$3" dry_run="${4:-false}"
+
+    if [ ! -d "$src_dir" ]; then
+        error "Source sandbox does not exist: $src_dir"
+        exit 1
+    fi
+    if [ ! -d "$dst_dir" ]; then
+        error "Destination sandbox does not exist: $dst_dir"
+        info "Run 'sandy' once in this project to create the sandbox, then retry."
+        exit 1
+    fi
+
+    local dst_json="$(dirname "$dst_dir")/$(basename "$dst_dir").claude.json"
+    local src_json=""
+    # Find source .claude.json — try sibling file first, then inside sandbox
+    for _candidate in \
+        "$(dirname "$src_dir")/$(basename "$src_dir").claude.json" \
+        "$src_dir/../$(basename "$src_dir").claude.json" \
+        "$src_dir.claude.json"; do
+        if [ -f "$_candidate" ]; then
+            src_json="$(cd "$(dirname "$_candidate")" && pwd)/$(basename "$_candidate")"
+            break
+        fi
+    done
+
+    local cur_key="$(echo "$workspace" | tr '/' '-')"
+
+    echo ""
+    if [ "$dry_run" = "true" ]; then
+        warn "DRY RUN — no changes will be made"
+        echo ""
+    fi
+    info "Source:      $(basename "$src_dir")"
+    info "  Directory: $src_dir"
+    info "Destination: $(basename "$dst_dir")"
+    info "  Directory: $dst_dir"
+    info "Workspace:   $workspace"
+    echo ""
+
+    # --- 1. Merge project dirs ---
+    info "=== Project directories ==="
+    local dst_proj="$dst_dir/projects/$cur_key"
+    local merged=0
+    if [ -d "$src_dir/projects" ]; then
+        for src_proj in "$src_dir/projects"/-*/; do
+            [ -d "$src_proj" ] || continue
+            local proj_name="$(basename "$src_proj")"
+            local session_count=0
+            session_count=$(find "$src_proj" -name "*.jsonl" -type f 2>/dev/null | wc -l)
+            info "  $proj_name ($session_count session files) → $(basename "$dst_proj")"
+            if [ "$dry_run" != "true" ]; then
+                mkdir -p "$dst_proj"
+                # cp -an: archive, no-clobber — merge without overwriting
+                cp -an "$src_proj". "$dst_proj"/ 2>/dev/null || true
+            fi
+            merged=$((merged + 1))
+        done
+    fi
+    if [ "$merged" -gt 0 ]; then
+        local verb="Merged"; [ "$dry_run" = "true" ] && verb="Would merge"
+        info "  >> $verb $merged source project dir(s) into $(basename "$dst_proj")"
+    else
+        info "  No project directories in source"
+    fi
+    echo ""
+
+    # --- 2. Merge history.jsonl ---
+    info "=== Session history ==="
+    local src_hist="$src_dir/history.jsonl"
+    local dst_hist="$dst_dir/history.jsonl"
+    if [ -f "$src_hist" ]; then
+        local entry_count
+        entry_count=$(wc -l < "$src_hist" | tr -d ' ')
+        info "  Source has $entry_count history entries"
+        if [ "$dry_run" != "true" ]; then
+            # Rewrite all project paths to current workspace, then append
+            if sed --version 2>/dev/null | grep -q GNU; then
+                sed "s|\"project\":\"[^\"]*\"|\"project\":\"$workspace\"|g" "$src_hist" >> "$dst_hist"
+            else
+                sed "s|\"project\":\"[^\"]*\"|\"project\":\"$workspace\"|g" "$src_hist" >> "$dst_hist"
+            fi
+        fi
+        local verb="Appended"; [ "$dry_run" = "true" ] && verb="Would append"
+        info "  >> $verb $entry_count entries (paths rewritten to $workspace)"
+    else
+        info "  No history.jsonl in source"
+    fi
+    echo ""
+
+    # --- 3. Merge .claude.json ---
+    info "=== .claude.json ==="
+    if [ -n "$src_json" ] && [ -f "$src_json" ]; then
+        node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const srcFile = process.argv[1];
+            const dstFile = process.argv[2];
+            const ws = process.argv[3];
+            const dryRun = process.argv[4] === "true";
+
+            let src, dst;
+            try { src = JSON.parse(fs.readFileSync(srcFile, "utf8")); } catch(e) {
+                console.log("  Cannot parse source .claude.json, skipping");
+                process.exit(0);
+            }
+            try { dst = JSON.parse(fs.readFileSync(dstFile, "utf8")); } catch(e) {
+                dst = {};
+            }
+
+            // Merge project entries from source into destination under current workspace key
+            const sp = src.projects || {};
+            if (!dst.projects) dst.projects = {};
+            const dp = dst.projects;
+            let merged = dp[ws] || {};
+            const wsBase = path.basename(ws);
+            let mergeCount = 0;
+            let skipCount = 0;
+
+            for (const [k, v] of Object.entries(sp)) {
+                if (!v || typeof v !== "object") continue;
+                // Only merge entries that look like old paths for this project
+                const isMergeable = k === ws || k === "/workspace" || path.basename(k) === wsBase;
+                if (isMergeable) {
+                    if (v.hasTrustDialogAccepted) merged.hasTrustDialogAccepted = true;
+                    if (v.hasCompletedProjectOnboarding) merged.hasCompletedProjectOnboarding = true;
+                    if (v.allowedTools && v.allowedTools.length) {
+                        merged.allowedTools = [...new Set([...(merged.allowedTools || []), ...v.allowedTools])];
+                    }
+                    console.log("    " + k + " → MERGE");
+                    mergeCount++;
+                } else {
+                    console.log("    " + k + " → SKIP (unrelated)");
+                    skipCount++;
+                }
+            }
+            dp[ws] = merged;
+
+            if (!dryRun) {
+                const tmp = dstFile + ".tmp";
+                fs.writeFileSync(tmp, JSON.stringify(dst, null, 2) + "\n");
+                fs.renameSync(tmp, dstFile);
+            }
+            const verb = dryRun ? "Would merge" : "Merged";
+            const finalTools = (merged.allowedTools || []).length;
+            console.log("  >> " + verb + " " + mergeCount + " key(s), skipped " + skipCount +
+                " → " + ws + " [" + (merged.hasTrustDialogAccepted ? "trusted" : "untrusted") +
+                ", " + finalTools + " tools]");
+        ' "$src_json" "$dst_json" "$workspace" "$dry_run"
+    else
+        info "  No source .claude.json found"
+        [ -n "$src_json" ] || info "  (looked next to source sandbox dir)"
+    fi
+
+    echo ""
+    local verb="Merge"; [ "$dry_run" = "true" ] && verb="Dry run"
+    info "$verb complete: $(basename "$src_dir") → $(basename "$dst_dir")"
+}
+
 sandy_migrate() {
     local sandbox_dir="$1" workspace="$2" dry_run="${3:-false}"
 
@@ -212,7 +438,7 @@ sandy_migrate() {
         exit 1
     fi
 
-    local claude_dir="$sandbox_dir/claude"
+    local claude_dir="$sandbox_dir"  # sandbox dir IS ~/.claude inside the container
     local claude_json="$(dirname "$sandbox_dir")/$(basename "$sandbox_dir").claude.json"
     local cur_key="$(echo "$workspace" | tr '/' '-')"
 
@@ -295,7 +521,11 @@ sandy_migrate() {
         stale_count=$(grep -v "\"project\":\"$workspace\"" "$history" 2>/dev/null | grep -c '"project"' 2>/dev/null || echo 0)
         if [ "$stale_count" -gt 0 ]; then
             if [ "$dry_run" != "true" ]; then
-                sed -i "s|\"project\":\"[^\"]*\"|\"project\":\"$workspace\"|g" "$history"
+                if sed --version 2>/dev/null | grep -q GNU; then
+                    sed -i "s|\"project\":\"[^\"]*\"|\"project\":\"$workspace\"|g" "$history"
+                else
+                    sed -i '' "s|\"project\":\"[^\"]*\"|\"project\":\"$workspace\"|g" "$history"
+                fi
             fi
             local verb="Rewrote"; [ "$dry_run" = "true" ] && verb="Would rewrite"
             info "  >> $verb $stale_count entries to $workspace"
@@ -471,7 +701,9 @@ Flags:
   --remote           Start in remote-control server mode
   --upgrade          Update sandy to the latest version
   --migrate          Migrate sandbox from old workspace path conventions
-  --dry-run          Preview migration without making changes (use with --migrate)
+  --migrate --list   List sandboxes that may need migration
+  --migrate --from <dir>  Merge another sandbox into this project's sandbox
+  --migrate --dry-run  Preview migration without making changes
 
 All other arguments are forwarded to claude.
 EOF
@@ -485,9 +717,11 @@ SANDY_NEW_SESSION=false
 SANDY_REMOTE_CONTROL=false
 SANDY_MIGRATE=false
 SANDY_DRY_RUN=false
+SANDY_MIGRATE_LIST=false
+SANDY_MIGRATE_FROM=""
 REMAINING_ARGS=()
-for arg in "$@"; do
-    case "$arg" in
+while [ $# -gt 0 ]; do
+    case "$1" in
         --rebuild)    SANDY_REBUILD=true ;;
         --build-only) SANDY_BUILD_ONLY=true ;;
         --new)        SANDY_NEW_SESSION=true ;;
@@ -495,10 +729,19 @@ for arg in "$@"; do
         --upgrade)    sandy_self_update; exit 0 ;;
         --migrate)    SANDY_MIGRATE=true ;;
         --dry-run)    SANDY_DRY_RUN=true ;;
-        *)            REMAINING_ARGS+=("$arg") ;;
+        --list)       SANDY_MIGRATE_LIST=true ;;
+        --from)       shift; SANDY_MIGRATE_FROM="${1:-}" ;;
+        *)            REMAINING_ARGS+=("$1") ;;
     esac
+    shift
 done
 set -- ${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}
+
+# --- Migrate --list (no Docker/network/sandbox needed) ---
+if [ "$SANDY_MIGRATE" = "true" ] && [ "$SANDY_MIGRATE_LIST" = "true" ]; then
+    sandy_migrate_list
+    exit 0
+fi
 
 # --- Check for sandy updates (non-blocking, cached 24h) ---
 sandy_check_update
@@ -639,10 +882,16 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
         chmod 600 /tmp/ssh-agent.sock && chown "$RUN_UID:$RUN_GID" /tmp/ssh-agent.sock
     fi
 
-    # Copy host SSH config/keys with correct ownership and permissions
+    # Copy host SSH config/keys with correct ownership and permissions.
+    # Use -L to dereference symlinks (host absolute paths break in container).
+    # Skip dangling symlinks (target doesn't exist on host).
     if [ -d "/tmp/host-ssh" ]; then
         mkdir -p /home/claude/.ssh
-        cp -aL /tmp/host-ssh/. /home/claude/.ssh/
+        for _f in /tmp/host-ssh/*  /tmp/host-ssh/.*; do
+            [ -e "$_f" ] || continue
+            case "$(basename "$_f")" in .|..) continue ;; esac
+            cp -aL "$_f" /home/claude/.ssh/ 2>/dev/null || true
+        done
         chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
         chmod 700 /home/claude/.ssh
         chmod 600 /home/claude/.ssh/* 2>/dev/null || true
@@ -1086,6 +1335,77 @@ ensure_build_files() {
 # --- Initialize ---
 ensure_build_files
 
+# --- Per-project sandbox directory (before Docker — needed for --migrate early exit) ---
+WORK_DIR="$(pwd)"
+
+# Safe key-value config parser (no arbitrary code execution)
+_load_sandy_config() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    while IFS='=' read -r key value; do
+        value="${value#\"}" ; value="${value%\"}"
+        value="${value#\'}" ; value="${value%\'}"
+        case "$key" in
+            SANDY_SSH|SANDY_MODEL|SANDY_SKILL_PACKS|SANDY_SKIP_PERMISSIONS|\
+            SANDY_ALLOW_NO_ISOLATION|SANDY_ALLOW_LAN_HOSTS|\
+            SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|\
+            CLAUDE_CODE_OAUTH_TOKEN|\
+            TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
+            DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
+            ANTHROPIC_API_KEY|CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
+            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
+                export "$key=$value" ;;
+        esac
+    done < <(grep -E '^[A-Z_]+=.+' "$file" 2>/dev/null)
+}
+
+# Load config/secrets: user-level first, then per-project (project overrides user)
+_load_sandy_config "$SANDY_HOME/config"
+_load_sandy_config "$SANDY_HOME/.secrets"
+_load_sandy_config "$WORK_DIR/.sandy/config"
+_load_sandy_config "$WORK_DIR/.sandy/.secrets"
+
+FULL_HASH="$(printf '%s' "$WORK_DIR" | sha256)"
+FULL_HASH="${FULL_HASH%% *}"
+SHORT_HASH="${FULL_HASH:0:8}"
+DIR_BASE="$(basename "$WORK_DIR" | tr -cd 'a-zA-Z0-9._-')"
+DIR_BASE="${DIR_BASE:-project}"
+SANDBOX_NAME="${DIR_BASE}-${SHORT_HASH}"
+SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
+
+# Compute container workspace path (needed for --migrate and later for docker run)
+if [[ "$WORK_DIR" == "$HOME"/* ]]; then
+    SANDY_WORKSPACE="/home/claude/${WORK_DIR#$HOME/}"
+else
+    SANDY_WORKSPACE="$WORK_DIR"
+fi
+
+# --- Migrate sandbox (--migrate) — runs on host, no Docker/network needed ---
+if [ "$SANDY_MIGRATE" = "true" ]; then
+    # Handle legacy sandbox rename first
+    LEGACY_SANDBOX="$SANDY_HOME/sandboxes/${FULL_HASH}"
+    if [ -d "$LEGACY_SANDBOX" ] && [ ! -d "$SANDBOX_DIR" ]; then
+        info "Migrating sandbox: ${FULL_HASH} → ${SANDBOX_NAME}"
+        mv "$LEGACY_SANDBOX" "$SANDBOX_DIR"
+        if [ -f "$LEGACY_SANDBOX.claude.json" ]; then
+            mv "$LEGACY_SANDBOX.claude.json" "$SANDY_HOME/sandboxes/${SANDBOX_NAME}.claude.json"
+        fi
+    fi
+    if [ -n "$SANDY_MIGRATE_FROM" ]; then
+        # Resolve to absolute path
+        if [ -d "$SANDY_MIGRATE_FROM" ]; then
+            SANDY_MIGRATE_FROM="$(cd "$SANDY_MIGRATE_FROM" && pwd)"
+        else
+            error "Source sandbox does not exist: $SANDY_MIGRATE_FROM"
+            exit 1
+        fi
+        sandy_migrate_from "$SANDY_MIGRATE_FROM" "$SANDBOX_DIR" "$SANDY_WORKSPACE" "$SANDY_DRY_RUN"
+    else
+        sandy_migrate "$SANDBOX_DIR" "$SANDY_WORKSPACE" "$SANDY_DRY_RUN"
+    fi
+    exit 0
+fi
+
 # Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
 if [ "$SANDY_REBUILD" = true ]; then
     rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.skills_build_hash"
@@ -1156,36 +1476,6 @@ ensure_network() {
 
 ensure_network
 
-# --- Per-project sandbox directory ---
-WORK_DIR="$(pwd)"
-
-# Safe key-value config parser (no arbitrary code execution)
-_load_sandy_config() {
-    local file="$1"
-    [ -f "$file" ] || return 0
-    while IFS='=' read -r key value; do
-        value="${value#\"}" ; value="${value%\"}"
-        value="${value#\'}" ; value="${value%\'}"
-        case "$key" in
-            SANDY_SSH|SANDY_MODEL|SANDY_SKILL_PACKS|SANDY_SKIP_PERMISSIONS|\
-            SANDY_ALLOW_NO_ISOLATION|SANDY_ALLOW_LAN_HOSTS|\
-            SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|\
-            CLAUDE_CODE_OAUTH_TOKEN|\
-            TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
-            DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
-            ANTHROPIC_API_KEY|CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
-                export "$key=$value" ;;
-        esac
-    done < <(grep -E '^[A-Z_]+=.+' "$file" 2>/dev/null)
-}
-
-# Load config/secrets: user-level first, then per-project (project overrides user)
-_load_sandy_config "$SANDY_HOME/config"
-_load_sandy_config "$SANDY_HOME/.secrets"
-_load_sandy_config "$WORK_DIR/.sandy/config"
-_load_sandy_config "$WORK_DIR/.sandy/.secrets"
-
 # --- Phase 2.5: Skill pack image (after config so SANDY_SKILL_PACKS is available) ---
 if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
     # Resolve latest versions from GitHub (caches locally for offline fallback)
@@ -1247,15 +1537,6 @@ if [ "${SANDY_SSH:-token}" = "agent" ] && [ "$(uname -s)" != "Linux" ]; then
         fi
     done
 fi
-
-FULL_HASH="$(printf '%s' "$WORK_DIR" | sha256)"
-FULL_HASH="${FULL_HASH%% *}"
-SHORT_HASH="${FULL_HASH:0:8}"
-# Sanitize the directory basename for use in the sandbox name
-DIR_BASE="$(basename "$WORK_DIR" | tr -cd 'a-zA-Z0-9._-')"
-DIR_BASE="${DIR_BASE:-project}"
-SANDBOX_NAME="${DIR_BASE}-${SHORT_HASH}"
-SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
 
 # Migrate legacy hash-only sandbox if it exists
 LEGACY_SANDBOX="$SANDY_HOME/sandboxes/${FULL_HASH}"
@@ -1648,21 +1929,8 @@ RUN_FLAGS+=(-v "$SANDBOX_DIR/cargo:/home/claude/.cargo")
 case ",${SANDY_SKILL_PACKS:-}," in
     *,gstack,*) RUN_FLAGS+=(-v "$SANDBOX_DIR/gstack:/home/claude/.gstack") ;;
 esac
-# Map the workspace into the container under /home/claude/ mirroring the host's
-# relative path from $HOME.  E.g. host ~/dev/sandy → container /home/claude/dev/sandy.
-# If the workspace is outside $HOME, fall back to mounting at the real host path.
-if [[ "$WORK_DIR" == "$HOME"/* ]]; then
-    _rel_path="${WORK_DIR#$HOME/}"
-    SANDY_WORKSPACE="/home/claude/$_rel_path"
-else
-    SANDY_WORKSPACE="$WORK_DIR"
-fi
-
-# --- Migrate sandbox (--migrate) ---
-if [ "$SANDY_MIGRATE" = "true" ]; then
-    sandy_migrate "$SANDBOX_DIR" "$SANDY_WORKSPACE" "$SANDY_DRY_RUN"
-    exit 0
-fi
+# SANDY_WORKSPACE was computed earlier (before Docker/network setup).
+# Map: host ~/dev/sandy → container /home/claude/dev/sandy.
 
 # --- Git submodule support ---
 # Submodules use a .git *file* with a relative gitdir: path. We remap the gitdir
