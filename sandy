@@ -425,6 +425,59 @@ sandy_migrate_from() {
         [ -n "$src_json" ] || info "  (looked next to source sandbox dir)"
     fi
 
+    # --- 4. Strip enabledPlugins from settings.json (plugins aren't installed in new sandbox) ---
+    echo ""
+    info "=== Post-migration cleanup ==="
+    local dst_settings="$dst_dir/settings.json"
+    if [ -f "$dst_settings" ] && [ "$dry_run" != "true" ]; then
+        if command -v node &>/dev/null; then
+            node -e '
+                const fs = require("fs");
+                const f = process.argv[1];
+                let s;
+                try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { process.exit(0); }
+                if (s.enabledPlugins) {
+                    delete s.enabledPlugins;
+                    fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
+                    console.log("  Stripped enabledPlugins from settings.json");
+                } else {
+                    console.log("  settings.json already clean (no enabledPlugins)");
+                }
+            ' "$dst_settings"
+        elif command -v jq &>/dev/null; then
+            if jq -e '.enabledPlugins' "$dst_settings" &>/dev/null; then
+                jq 'del(.enabledPlugins)' "$dst_settings" > "$dst_settings.tmp" && mv "$dst_settings.tmp" "$dst_settings"
+                info "  Stripped enabledPlugins from settings.json"
+            else
+                info "  settings.json already clean (no enabledPlugins)"
+            fi
+        fi
+    elif [ "$dry_run" = "true" ]; then
+        if [ -f "$dst_settings" ]; then
+            info "  Would strip enabledPlugins from settings.json (if present)"
+        fi
+    fi
+
+    # --- 5. Rewrite cwd in session files to match current workspace ---
+    local dst_proj="$dst_dir/projects/$cur_key"
+    if [ -d "$dst_proj" ] && [ "$dry_run" != "true" ]; then
+        local rewritten=0
+        for jsonl in "$dst_proj"/*.jsonl; do
+            [ -f "$jsonl" ] || continue
+            if grep -q '"cwd":' "$jsonl" 2>/dev/null; then
+                if sed --version 2>/dev/null | grep -q GNU; then
+                    sed -i "s|\"cwd\":\"[^\"]*\"|\"cwd\":\"$workspace\"|g" "$jsonl"
+                else
+                    sed -i '' "s|\"cwd\":\"[^\"]*\"|\"cwd\":\"$workspace\"|g" "$jsonl"
+                fi
+                rewritten=$((rewritten + 1))
+            fi
+        done
+        [ "$rewritten" -gt 0 ] && info "  Rewrote cwd in $rewritten session file(s) to $workspace"
+    elif [ "$dry_run" = "true" ]; then
+        info "  Would rewrite cwd in session files to $workspace"
+    fi
+
     echo ""
     local verb="Merge"; [ "$dry_run" = "true" ] && verb="Dry run"
     info "$verb complete: $(basename "$src_dir") → $(basename "$dst_dir")"
@@ -616,6 +669,57 @@ sandy_migrate() {
         ' "$claude_json" "$workspace" "$dry_run"
     else
         info "  No .claude.json found at $claude_json"
+    fi
+
+    # --- 4. Strip enabledPlugins from settings.json ---
+    echo ""
+    info "=== Post-migration cleanup ==="
+    local settings_file="$claude_dir/settings.json"
+    if [ -f "$settings_file" ] && [ "$dry_run" != "true" ]; then
+        if command -v node &>/dev/null; then
+            node -e '
+                const fs = require("fs");
+                const f = process.argv[1];
+                let s;
+                try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { process.exit(0); }
+                if (s.enabledPlugins) {
+                    delete s.enabledPlugins;
+                    fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
+                    console.log("  Stripped enabledPlugins from settings.json");
+                } else {
+                    console.log("  settings.json already clean (no enabledPlugins)");
+                }
+            ' "$settings_file"
+        elif command -v jq &>/dev/null; then
+            if jq -e '.enabledPlugins' "$settings_file" &>/dev/null; then
+                jq 'del(.enabledPlugins)' "$settings_file" > "$settings_file.tmp" && mv "$settings_file.tmp" "$settings_file"
+                info "  Stripped enabledPlugins from settings.json"
+            else
+                info "  settings.json already clean (no enabledPlugins)"
+            fi
+        fi
+    elif [ "$dry_run" = "true" ]; then
+        info "  Would strip enabledPlugins from settings.json (if present)"
+    fi
+
+    # --- 5. Rewrite cwd in session files to match current workspace ---
+    local cur_proj="$claude_dir/projects/$cur_key"
+    if [ -d "$cur_proj" ] && [ "$dry_run" != "true" ]; then
+        local rewritten=0
+        for jsonl in "$cur_proj"/*.jsonl; do
+            [ -f "$jsonl" ] || continue
+            if grep -q '"cwd":' "$jsonl" 2>/dev/null; then
+                if sed --version 2>/dev/null | grep -q GNU; then
+                    sed -i "s|\"cwd\":\"[^\"]*\"|\"cwd\":\"$workspace\"|g" "$jsonl"
+                else
+                    sed -i '' "s|\"cwd\":\"[^\"]*\"|\"cwd\":\"$workspace\"|g" "$jsonl"
+                fi
+                rewritten=$((rewritten + 1))
+            fi
+        done
+        [ "$rewritten" -gt 0 ] && info "  Rewrote cwd in $rewritten session file(s) to $workspace"
+    elif [ "$dry_run" = "true" ]; then
+        info "  Would rewrite cwd in session files to $workspace"
     fi
 
     echo ""
@@ -1109,7 +1213,7 @@ _now=$(date +%s)
 _stale=true
 if [ -f "$_marketplace_cache" ]; then
     _cached_time=$(cat "$_marketplace_cache" 2>/dev/null || echo 0)
-    (( _now - _cached_time < 86400 )) && _stale=false
+    if (( _now - _cached_time < 86400 )); then _stale=false; fi
 fi
 # Force refresh when channels are configured — plugins may need installing
 [ -n "${SANDY_CHANNELS:-}" ] && _stale=true
