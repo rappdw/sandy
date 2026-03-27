@@ -308,9 +308,14 @@ sandy_migrate() {
     echo ""
 
     # --- 3. Consolidate .claude.json project entries ---
+    # Keys are classified as:
+    #   - current: matches workspace path exactly
+    #   - merge:   plausible old path for this project (/workspace, or basename matches)
+    #   - remove:  unrelated project (seeded from host) — delete from sandbox
     info "=== .claude.json project entries ==="
     if [ -f "$claude_json" ]; then
         node -e '
+            const path = require("path");
             const fs = require("fs");
             const f = process.argv[1];
             const ws = process.argv[2];
@@ -322,23 +327,36 @@ sandy_migrate() {
             }
             const p = d.projects;
             if (!p || typeof p !== "object") { console.log("  No project entries"); process.exit(0); }
+            const wsBase = path.basename(ws);
             const allKeys = Object.keys(p);
+
+            // Classify each key
+            const isMergeable = (k) => k === "/workspace" || path.basename(k) === wsBase;
+            const mergeKeys = allKeys.filter(k => k !== ws && isMergeable(k));
+            const removeKeys = allKeys.filter(k => k !== ws && !isMergeable(k));
+
             console.log("  " + allKeys.length + " project key(s):");
             for (const k of allKeys) {
                 const v = p[k];
-                const isCurrent = k === ws;
                 const trusted = (v && v.hasTrustDialogAccepted) ? "trusted" : "untrusted";
                 const tools = (v && v.allowedTools) ? v.allowedTools.length + " tools" : "0 tools";
-                const tag = isCurrent ? " (current)" : " - CONSOLIDATE";
+                let tag;
+                if (k === ws) tag = " (current)";
+                else if (isMergeable(k)) tag = " - MERGE (old path for this project)";
+                else tag = " - REMOVE (unrelated project)";
                 console.log("    " + k + " [" + trusted + ", " + tools + "]" + tag);
             }
-            const keys = allKeys.filter(k => k !== ws);
-            if (keys.length === 0) { console.log("  >> Nothing to consolidate"); process.exit(0); }
+
+            if (mergeKeys.length === 0 && removeKeys.length === 0) {
+                console.log("  >> Nothing to do");
+                process.exit(0);
+            }
+
+            // Merge old paths for this project
             let merged = p[ws] || {};
-            let count = 0;
-            for (const k of keys) {
+            for (const k of mergeKeys) {
                 const old = p[k];
-                if (!old || typeof old !== "object") { delete p[k]; count++; continue; }
+                if (!old || typeof old !== "object") { delete p[k]; continue; }
                 if (old.hasTrustDialogAccepted) merged.hasTrustDialogAccepted = true;
                 if (old.hasCompletedProjectOnboarding) merged.hasCompletedProjectOnboarding = true;
                 if (old.allowedTools && old.allowedTools.length) {
@@ -346,18 +364,24 @@ sandy_migrate() {
                 }
                 if (!p[ws]) { merged = { ...old, ...merged }; p[ws] = merged; }
                 delete p[k];
-                count++;
             }
             p[ws] = merged;
-            const verb = dryRun ? "Would consolidate" : "Consolidated";
+
+            // Remove unrelated project entries
+            for (const k of removeKeys) { delete p[k]; }
+
             const finalTools = (merged.allowedTools || []).length;
             if (!dryRun) {
                 const tmp = f + ".tmp";
                 fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + "\n");
                 fs.renameSync(tmp, f);
             }
-            console.log("  >> " + verb + " " + count + " key(s) into " + ws +
-                " [" + (merged.hasTrustDialogAccepted ? "trusted" : "untrusted") +
+            const verb = dryRun ? "Would" : "Done:";
+            const parts = [];
+            if (mergeKeys.length > 0) parts.push("merge " + mergeKeys.length + " old path(s)");
+            if (removeKeys.length > 0) parts.push("remove " + removeKeys.length + " unrelated key(s)");
+            console.log("  >> " + verb + " " + parts.join(", ") +
+                " → " + ws + " [" + (merged.hasTrustDialogAccepted ? "trusted" : "untrusted") +
                 ", " + finalTools + " tools]");
         ' "$claude_json" "$workspace" "$dry_run"
     else
