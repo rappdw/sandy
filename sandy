@@ -200,6 +200,102 @@ sandy_check_update() {
     fi
 }
 
+# Migrate a sandbox to the current workspace path convention.
+# Sandy's container workspace path changed across versions:
+#   Era 1: /workspace → Era 2: raw host path → Era 3: $HOME-relative path
+# Each era left behind project dirs, history entries, and .claude.json keys.
+sandy_migrate() {
+    local sandbox_dir="$1" workspace="$2"
+
+    if [ ! -d "$sandbox_dir" ]; then
+        error "Sandbox dir does not exist: $sandbox_dir"
+        exit 1
+    fi
+
+    local claude_dir="$sandbox_dir/claude"
+    local claude_json="$(dirname "$sandbox_dir")/$(basename "$sandbox_dir").claude.json"
+
+    # 1. Merge old project dirs
+    local cur_proj="$claude_dir/projects/$(echo "$workspace" | tr '/' '-')"
+    local migrated=0
+    if [ -d "$claude_dir/projects" ]; then
+        mkdir -p "$cur_proj"
+        for old_proj in "$claude_dir/projects"/-*/; do
+            [ -d "$old_proj" ] || continue
+            case "$old_proj" in "$cur_proj"/) continue ;; esac
+            local old_name="$(basename "$old_proj")"
+            info "Merging project dir: $old_name"
+            if cp -an "$old_proj". "$cur_proj"/ 2>/dev/null; then
+                rm -rf "$old_proj"
+                migrated=$((migrated + 1))
+            else
+                warn "Failed to merge $old_name"
+            fi
+        done
+    fi
+    if [ "$migrated" -gt 0 ]; then
+        info "Merged $migrated old project dir(s) into $(basename "$cur_proj")"
+    else
+        info "No old project dirs to merge"
+    fi
+
+    # 2. Rewrite history.jsonl project paths
+    local history="$claude_dir/history.jsonl"
+    if [ -f "$history" ]; then
+        local stale_count
+        stale_count=$(grep -v "\"project\":\"$workspace\"" "$history" 2>/dev/null | grep -c '"project"' 2>/dev/null || echo 0)
+        if [ "$stale_count" -gt 0 ]; then
+            sed -i "s|\"project\":\"[^\"]*\"|\"project\":\"$workspace\"|g" "$history"
+            info "Rewrote $stale_count history entries to $workspace"
+        else
+            info "History entries already point to current workspace"
+        fi
+    else
+        info "No history.jsonl to migrate"
+    fi
+
+    # 3. Consolidate .claude.json project entries
+    if [ -f "$claude_json" ]; then
+        node -e '
+            const fs = require("fs");
+            const f = process.argv[1];
+            const ws = process.argv[2];
+            let d;
+            try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) {
+                console.log("Cannot parse " + f + ", skipping");
+                process.exit(0);
+            }
+            const p = d.projects;
+            if (!p || typeof p !== "object") { console.log("No project entries in .claude.json"); process.exit(0); }
+            const keys = Object.keys(p).filter(k => k !== ws);
+            if (keys.length === 0) { console.log(".claude.json entries already under current workspace"); process.exit(0); }
+            let merged = p[ws] || {};
+            let count = 0;
+            for (const k of keys) {
+                const old = p[k];
+                if (!old || typeof old !== "object") { delete p[k]; count++; continue; }
+                if (old.hasTrustDialogAccepted) merged.hasTrustDialogAccepted = true;
+                if (old.hasCompletedProjectOnboarding) merged.hasCompletedProjectOnboarding = true;
+                if (old.allowedTools && old.allowedTools.length) {
+                    merged.allowedTools = [...new Set([...(merged.allowedTools || []), ...old.allowedTools])];
+                }
+                if (!p[ws]) { merged = { ...old, ...merged }; p[ws] = merged; }
+                delete p[k];
+                count++;
+            }
+            p[ws] = merged;
+            const tmp = f + ".tmp";
+            fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + "\n");
+            fs.renameSync(tmp, f);
+            console.log("Consolidated " + count + " stale project key(s) into " + ws);
+        ' "$claude_json" "$workspace"
+    else
+        info "No .claude.json found at $claude_json"
+    fi
+
+    info "Migration complete for $(basename "$sandbox_dir")"
+}
+
 # Merge JSON keys into a file. Usage: json_merge <file> '{"key":"value"}'
 json_merge() {
     command -v node &>/dev/null || return 0
@@ -1465,13 +1561,8 @@ fi
 
 # --- Migrate sandbox (--migrate) ---
 if [ "$SANDY_MIGRATE" = "true" ]; then
-    SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-    if [ -x "$SCRIPT_DIR/migrate-sandbox.sh" ]; then
-        exec "$SCRIPT_DIR/migrate-sandbox.sh" "$SANDBOX_DIR" "$SANDY_WORKSPACE"
-    else
-        error "migrate-sandbox.sh not found in $SCRIPT_DIR"
-        exit 1
-    fi
+    sandy_migrate "$SANDBOX_DIR" "$SANDY_WORKSPACE"
+    exit 0
 fi
 
 # --- Git submodule support ---
