@@ -74,7 +74,7 @@ skill_pack_latest_release() {
                 const releases = JSON.parse(d);
                 const match = releases.find(r => !r.draft && !r.prerelease && r.tag_name.startsWith('${tag_prefix}'));
                 if (match) console.log(match.tag_name);
-            } catch {}
+            } catch(e) {}
         })
     " 2>/dev/null || true
 }
@@ -207,7 +207,7 @@ json_merge() {
         const fs=require("fs"), f=process.argv[1], m=JSON.parse(process.argv[2]);
         let s;
         try { s=JSON.parse(fs.readFileSync(f,"utf8")); }
-        catch { console.error("[sandy] WARN: could not parse "+f+", starting fresh"); s={}; }
+        catch(e) { console.error("[sandy] WARN: could not parse "+f+", starting fresh"); s={}; }
         Object.assign(s,m);
         fs.writeFileSync(f, JSON.stringify(s,null,2)+"\n");
     ' "$1" "$2"
@@ -599,7 +599,7 @@ if [ -f "$CLAUDE_JSON" ]; then
         const f = process.argv[1];
         const ws = process.argv[2];
         let d;
-        try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch { process.exit(0); }
+        try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { process.exit(0); }
         const p = d.projects;
         if (!p || typeof p !== "object") process.exit(0);
         const keys = Object.keys(p).filter(k => k !== ws);
@@ -608,6 +608,7 @@ if [ -f "$CLAUDE_JSON" ]; then
         let merged = p[ws] || {};
         for (const k of keys) {
             const old = p[k];
+            if (!old || typeof old !== "object") { delete p[k]; continue; }
             // Preserve hasTrustDialogAccepted=true from any era
             if (old.hasTrustDialogAccepted) merged.hasTrustDialogAccepted = true;
             if (old.hasCompletedProjectOnboarding) merged.hasCompletedProjectOnboarding = true;
@@ -624,7 +625,7 @@ if [ -f "$CLAUDE_JSON" ]; then
         const tmp = f + ".tmp";
         fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + "\n");
         fs.renameSync(tmp, f);
-    ' "$CLAUDE_JSON" "$WORKSPACE" 2>/dev/null; then
+    ' "$CLAUDE_JSON" "$WORKSPACE" 2>&1; then
         printf '\033[33m! Failed to consolidate .claude.json project entries\033[0m\n' >&2
     fi
 fi
@@ -636,7 +637,7 @@ if [ -f "$SETTINGS_FILE" ]; then
         const fs = require("fs");
         const f = process.argv[1];
         let s;
-        try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch { s = {}; }
+        try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { s = {}; }
         if (!s.extraKnownMarketplaces) s.extraKnownMarketplaces = {};
         const required = {
             "claude-plugins-official": { source: { source: "github", repo: "anthropics/claude-plugins-official" } },
@@ -1167,7 +1168,7 @@ if [ ! -d "$SANDBOX_DIR" ]; then
             raw = raw.replace(/,(\s*[}\]])/g, '\$1');
             raw = raw.replace(/(\"[^\"]*\")\s*\n(\s*\")/g, '\$1,\n\$2');
             let s;
-            try { s = JSON.parse(raw); } catch { s = {}; }
+            try { s = JSON.parse(raw); } catch(e) { s = {}; }
             const skip = (process.env.SANDY_SKIP_PERMISSIONS || 'true') !== 'false';
             const defaults = {teammateMode:'tmux', spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:skip};
             for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
@@ -1241,7 +1242,7 @@ CMUXHOOK
             const fs = require("fs");
             const f = process.argv[1];
             let s;
-            try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch { s = {}; }
+            try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { s = {}; }
             if (!s.hooks) s.hooks = {};
             if (!s.hooks.Notification) s.hooks.Notification = [];
             // Only add if not already configured
@@ -1401,7 +1402,7 @@ token_needs_refresh() {
                 if (!exp) process.exit(1);  // no OAuth token
                 const bufferMs = 5 * 60 * 1000;  // 5 minute buffer
                 process.exit(Date.now() + bufferMs > exp ? 0 : 1);
-            } catch { process.exit(1); }
+            } catch(e) { process.exit(1); }
         " "$creds"
     elif command -v python3 &>/dev/null; then
         python3 -c "
