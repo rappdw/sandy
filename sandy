@@ -948,6 +948,11 @@ RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/in
  && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \\
  && mv /home/claude/.local/share/claude /opt/claude-code \\
  && { /usr/local/bin/claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version || true; }
+# synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+ && rm -rf /var/lib/apt/lists/*
+RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
 COPY tmux.conf /etc/tmux.conf
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY user-setup.sh /usr/local/bin/user-setup.sh
@@ -1126,6 +1131,31 @@ if [ -d /opt/skills/gstack/.browsers ]; then
     export PLAYWRIGHT_BROWSERS_PATH=/opt/skills/gstack/.browsers
 fi
 
+# Synthkit slash commands (md2pdf, md2doc, md2html, md2email)
+if command -v synthkit &>/dev/null; then
+    mkdir -p "$HOME/.claude/commands"
+    cat > "$HOME/.claude/commands/md2pdf.md" <<'SKMD'
+Convert the specified markdown file(s) to PDF using the `md2pdf` command.
+Usage: /md2pdf <file1.md> [file2.md ...]
+Run: md2pdf $ARGUMENTS
+SKMD
+    cat > "$HOME/.claude/commands/md2doc.md" <<'SKMD'
+Convert the specified markdown file(s) to Word (.docx) using the `md2doc` command.
+Usage: /md2doc <file1.md> [file2.md ...]
+Run: md2doc $ARGUMENTS
+SKMD
+    cat > "$HOME/.claude/commands/md2html.md" <<'SKMD'
+Convert the specified markdown file(s) to HTML using the `md2html` command.
+Usage: /md2html <file1.md> [file2.md ...]
+Run: md2html $ARGUMENTS
+SKMD
+    cat > "$HOME/.claude/commands/md2email.md" <<'SKMD'
+Convert the specified markdown file to clipboard-ready email HTML using the `md2email` command.
+Usage: /md2email <file.md>
+Run: md2email $ARGUMENTS
+SKMD
+fi
+
 # Remap ANSI dark blue (color 4) to a readable bright blue
 printf "\033]4;4;rgb:61/8f/ff\033\\"
 trap "printf \"\033]104;4\033\\\\\"" EXIT
@@ -1150,9 +1180,17 @@ if [ -f "$SETTINGS_FILE" ]; then
         if (!s.extraKnownMarketplaces) s.extraKnownMarketplaces = {};
         const required = {
             "claude-plugins-official": { source: { source: "github", repo: "anthropics/claude-plugins-official" } },
-            "sandy-plugins": { source: { source: "github", repo: "rappdw/sandy-plugins" } }
+            "thinkkit": { source: { source: "github", repo: "rappdw/thinkkit" } },
+            "ait": { source: { source: "github", repo: "rappdw/ait" } }
         };
+        const deprecated = ["sandy-plugins"];
         let changed = false;
+        for (const name of deprecated) {
+            if (s.extraKnownMarketplaces[name]) {
+                delete s.extraKnownMarketplaces[name];
+                changed = true;
+            }
+        }
         for (const [name, cfg] of Object.entries(required)) {
             if (!s.extraKnownMarketplaces[name]) {
                 s.extraKnownMarketplaces[name] = cfg;
@@ -1706,8 +1744,8 @@ if [ ! -d "$SANDBOX_DIR" ]; then
         cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/statsig"
         info "  Seeded statsig/"
     fi
-    # NOTE: Plugin marketplace catalogs are NOT seeded from host — the sandy-plugins
-    # marketplace is configured via extraKnownMarketplaces in user-setup.sh (baked into
+    # NOTE: Plugin marketplace catalogs are NOT seeded from host — the thinkkit/ait
+    # marketplaces are configured via extraKnownMarketplaces in user-setup.sh (baked into
     # the image). Claude Code fetches the catalog on first /plugin browse.
     # Write sandy-required defaults into settings.json (merge with seeded copy)
     SETTINGS_FILE="$SANDBOX_DIR/settings.json"
