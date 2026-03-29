@@ -37,10 +37,10 @@ NETWORK_NAME="sandy_net_$$"
 # Versions are resolved dynamically from GitHub releases — SKILL_PACK_VERSIONS
 # is only the initial fallback if no cached or remote version is available.
 SKILL_PACK_NAMES=(gstack)
-SKILL_PACK_REPOS=("https://github.com/rappdw/gstack")
-SKILL_PACK_VERSIONS=("sandy/v0.11.19.0")
+SKILL_PACK_REPOS=("https://github.com/garrytan/gstack")
+SKILL_PACK_VERSIONS=("main")
 # Release tag prefix per pack (tags matching this prefix are checked for updates)
-SKILL_PACK_TAG_PREFIXES=("sandy/v")
+SKILL_PACK_TAG_PREFIXES=("")
 
 skill_pack_lookup() {
     local pack="$1" field="$2"
@@ -59,21 +59,43 @@ skill_pack_lookup() {
 }
 
 # Check GitHub for the latest release tag matching a prefix for a skill pack.
-# Returns the tag name (e.g. "sandy/v0.11.19.0") or empty string on failure.
+# Falls back to the latest commit SHA on the default branch if no releases exist.
+# Returns the tag name, commit SHA, or empty string on failure.
 skill_pack_latest_release() {
     local pack="$1"
     local repo tag_prefix owner_repo
     repo="$(skill_pack_lookup "$pack" repo)" || return 1
     tag_prefix="$(skill_pack_lookup "$pack" tag_prefix)" || return 1
     owner_repo="$(echo "$repo" | sed 's|https://github.com/||')"
+
+    # Try releases first (if tag prefix is set)
+    if [ -n "$tag_prefix" ]; then
+        local release_tag
+        release_tag="$(curl -fsSL --max-time 5 \
+            "https://api.github.com/repos/${owner_repo}/releases" 2>/dev/null \
+        | node -e "
+            let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
+                try {
+                    const releases = JSON.parse(d);
+                    const match = releases.find(r => !r.draft && !r.prerelease && r.tag_name.startsWith('${tag_prefix}'));
+                    if (match) console.log(match.tag_name);
+                } catch(e) {}
+            })
+        " 2>/dev/null || true)"
+        if [ -n "$release_tag" ]; then
+            echo "$release_tag"
+            return 0
+        fi
+    fi
+
+    # Fall back to latest commit SHA on default branch
     curl -fsSL --max-time 5 \
-        "https://api.github.com/repos/${owner_repo}/releases" 2>/dev/null \
+        "https://api.github.com/repos/${owner_repo}/commits?per_page=1" 2>/dev/null \
     | node -e "
         let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
             try {
-                const releases = JSON.parse(d);
-                const match = releases.find(r => !r.draft && !r.prerelease && r.tag_name.startsWith('${tag_prefix}'));
-                if (match) console.log(match.tag_name);
+                const commits = JSON.parse(d);
+                if (commits[0]) console.log(commits[0].sha.slice(0,12));
             } catch(e) {}
         })
     " 2>/dev/null || true
@@ -1433,16 +1455,62 @@ setw -g aggressive-resize on
 TMUXCONF
 }
 
-generate_skill_pack_dockerfile() {
+generate_skill_pack_dockerfiles() {
     local packs="$1"
+    local base_outfile="$SANDY_HOME/Dockerfile.skills-base.new"
     local outfile="$SANDY_HOME/Dockerfile.skills.new"
-
-    cat > "$outfile" <<'SKILLS_HEADER'
-FROM sandy-claude-code
-SKILLS_HEADER
+    local needs_base=false
 
     local pack
     IFS=',' read -ra _pack_list <<< "$packs"
+
+    # --- Generate base image (heavy deps: Playwright, Chromium, system libs) ---
+    cat > "$base_outfile" <<'SKILLS_BASE_HEADER'
+FROM sandy-claude-code
+SKILLS_BASE_HEADER
+
+    for pack in "${_pack_list[@]}"; do
+        pack="$(echo "$pack" | tr -d '[:space:]')"
+        case "$pack" in
+            gstack)
+                needs_base=true
+                cat >> "$base_outfile" <<'GSTACK_BASE_BLOCK'
+
+# --- gstack base: Playwright + Chromium (rarely changes) ---
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/skills/gstack/.browsers
+
+# Bootstrap gstack just enough to install Playwright
+RUN mkdir -p /opt/skills/gstack \
+ && cd /opt/skills/gstack \
+ && npm init -y >/dev/null 2>&1 \
+ && npm install playwright@latest --save >/dev/null 2>&1 \
+ && npx playwright install-deps chromium \
+ && npx playwright install chromium \
+ && rm -rf node_modules package.json package-lock.json
+GSTACK_BASE_BLOCK
+                ;;
+        esac
+    done
+    echo "" >> "$base_outfile"
+
+    if [ "$needs_base" != true ]; then
+        rm -f "$base_outfile"
+    fi
+
+    # --- Generate code image (gstack source, bun build — changes frequently) ---
+    local skills_base_name
+    skills_base_name="sandy-skills-base-$(echo "$packs" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort | tr '\n' '-' | sed 's/-$//' | tr '[:upper:]' '[:lower:]')"
+
+    if [ "$needs_base" = true ]; then
+        cat > "$outfile" <<SKILLS_HEADER
+FROM ${skills_base_name}
+SKILLS_HEADER
+    else
+        cat > "$outfile" <<'SKILLS_HEADER'
+FROM sandy-claude-code
+SKILLS_HEADER
+    fi
+
     for pack in "${_pack_list[@]}"; do
         pack="$(echo "$pack" | tr -d '[:space:]')"
         local version repo
@@ -1457,11 +1525,9 @@ SKILLS_HEADER
                 cat >> "$outfile" <<GSTACK_BLOCK
 
 # --- gstack skill pack ($version) ---
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/skills/gstack/.browsers
-
 # Download gstack at pinned version
 RUN mkdir -p /opt/skills/gstack \\
- && curl -fsSL "${repo}/archive/refs/tags/${version}.tar.gz" \\
+ && curl -fsSL "${repo}/archive/${version}.tar.gz" \\
     | tar -xz --strip-components=1 -C /opt/skills/gstack
 
 # Install dependencies and build (browse binary + skill docs)
@@ -1470,10 +1536,6 @@ RUN cd /opt/skills/gstack \\
  && bun run build \\
  && echo "${version}" > browse/dist/.version \\
  && rm -rf node_modules/.cache
-
-# Install Playwright system deps + Chromium browser
-RUN cd /opt/skills/gstack && npx playwright install-deps chromium
-RUN cd /opt/skills/gstack && bunx playwright install chromium
 
 # Make all bin/ scripts executable
 RUN chmod +x /opt/skills/gstack/bin/*
@@ -1663,22 +1725,56 @@ if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
     # Resolve latest versions from GitHub (caches locally for offline fallback)
     skill_pack_resolve_versions "$SANDY_SKILL_PACKS"
 
-    # (Re)generate the skill pack Dockerfile with resolved versions
-    generate_skill_pack_dockerfile "$SANDY_SKILL_PACKS"
+    # (Re)generate skill pack Dockerfiles (base + code) with resolved versions
+    generate_skill_pack_dockerfiles "$SANDY_SKILL_PACKS"
+
+    _pack_suffix="$(echo "$SANDY_SKILL_PACKS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort | tr '\n' '-' | sed 's/-$//' | tr '[:upper:]' '[:lower:]')"
+
+    # --- Phase 2.5a: Skills base image (Playwright, Chromium — rarely changes) ---
+    if [ -f "$SANDY_HOME/Dockerfile.skills-base.new" ]; then
+        SKILLS_BASE_IMAGE="sandy-skills-base-${_pack_suffix}"
+        if [ ! -f "$SANDY_HOME/Dockerfile.skills-base" ] || ! diff -q "$SANDY_HOME/Dockerfile.skills-base.new" "$SANDY_HOME/Dockerfile.skills-base" &>/dev/null; then
+            mv "$SANDY_HOME/Dockerfile.skills-base.new" "$SANDY_HOME/Dockerfile.skills-base"
+        else
+            rm -f "$SANDY_HOME/Dockerfile.skills-base.new"
+        fi
+
+        SKILLS_BASE_HASH="$(cat "$SANDY_HOME/Dockerfile.skills-base" | sha256 | cut -d' ' -f1)"
+        SKILLS_BASE_HASH_FILE="$SANDY_HOME/.skills_base_build_hash"
+
+        SKILLS_BASE_NEEDS_BUILD=false
+        if [ ! -f "$SKILLS_BASE_HASH_FILE" ] \
+                || [ "$(cat "$SKILLS_BASE_HASH_FILE")" != "$SKILLS_BASE_HASH" ] \
+                || [ "$NEEDS_BUILD" = true ] \
+                || ! docker image inspect "$SKILLS_BASE_IMAGE" &>/dev/null; then
+            SKILLS_BASE_NEEDS_BUILD=true
+        fi
+
+        if [ "$SKILLS_BASE_NEEDS_BUILD" = true ]; then
+            info "Building skill pack base image (Playwright + Chromium)..."
+            docker build -t "$SKILLS_BASE_IMAGE" \
+                -f "$SANDY_HOME/Dockerfile.skills-base" "$SANDY_HOME"
+            echo "$SKILLS_BASE_HASH" > "$SKILLS_BASE_HASH_FILE"
+        else
+            info "Skill pack base image up to date."
+        fi
+    fi
+
+    # --- Phase 2.5b: Skills code image (gstack source + build — changes frequently) ---
+    SKILLS_IMAGE_NAME="sandy-skills-${_pack_suffix}"
     if [ ! -f "$SANDY_HOME/Dockerfile.skills" ] || ! diff -q "$SANDY_HOME/Dockerfile.skills.new" "$SANDY_HOME/Dockerfile.skills" &>/dev/null; then
         mv "$SANDY_HOME/Dockerfile.skills.new" "$SANDY_HOME/Dockerfile.skills"
     else
         rm -f "$SANDY_HOME/Dockerfile.skills.new"
     fi
 
-    # Build a sorted, normalized name from the pack list (e.g. "sandy-skills-gstack")
-    SKILLS_IMAGE_NAME="sandy-skills-$(echo "$SANDY_SKILL_PACKS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort | tr '\n' '-' | sed 's/-$//' | tr '[:upper:]' '[:lower:]')"
     SKILLS_BUILD_HASH="$(cat "$SANDY_HOME/Dockerfile.skills" | sha256 | cut -d' ' -f1)"
     SKILLS_HASH_FILE="$SANDY_HOME/.skills_build_hash"
 
     SKILLS_NEEDS_BUILD=false
     if [ ! -f "$SKILLS_HASH_FILE" ] \
             || [ "$(cat "$SKILLS_HASH_FILE")" != "$SKILLS_BUILD_HASH" ] \
+            || [ "${SKILLS_BASE_NEEDS_BUILD:-false}" = true ] \
             || [ "$NEEDS_BUILD" = true ] \
             || ! docker image inspect "$SKILLS_IMAGE_NAME" &>/dev/null; then
         SKILLS_NEEDS_BUILD=true
@@ -1695,8 +1791,8 @@ if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
     fi
     IMAGE_NAME="$SKILLS_IMAGE_NAME"
 elif [ -f "$SANDY_HOME/Dockerfile.skills" ]; then
-    # Clean up stale skill pack Dockerfile if packs were disabled
-    rm -f "$SANDY_HOME/Dockerfile.skills"
+    # Clean up stale skill pack Dockerfiles if packs were disabled
+    rm -f "$SANDY_HOME/Dockerfile.skills" "$SANDY_HOME/Dockerfile.skills-base"
 fi
 
 # --- Detect available resources (after config sourcing so overrides work) ---

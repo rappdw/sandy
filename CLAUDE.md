@@ -76,25 +76,29 @@ SANDY_SKILL_PACKS=gstack
 
 | Pack | Description | Source |
 |------|-------------|--------|
-| `gstack` | 28 Claude Code skills (QA, review, ship, browse, etc.) + headless Chromium browser engine | [rappdw/gstack](https://github.com/rappdw/gstack) (fork tracking upstream [garrytan/gstack](https://github.com/garrytan/gstack)) |
+| `gstack` | 28 Claude Code skills (QA, review, ship, browse, etc.) + headless Chromium browser engine | [garrytan/gstack](https://github.com/garrytan/gstack) |
 
 ### How It Works
 
-Skill packs add a build phase (Phase 2.5) between the Claude Code image and the optional per-project image. The generated `Dockerfile.skills` clones the skill pack at a pinned version, builds it, and installs dependencies (e.g. Playwright Chromium for gstack's `/browse` command). The resulting `sandy-skills-{hash}` image is cached and reused across projects that share the same skill pack configuration.
+Skill packs add two build phases (Phase 2.5a and 2.5b) between the Claude Code image and the optional per-project image:
+
+- **Phase 2.5a — Base image** (`sandy-skills-base-{pack}`): Installs heavy, rarely-changing dependencies like Playwright and Chromium. This image is cached and only rebuilds when the base Dockerfile changes.
+- **Phase 2.5b — Code image** (`sandy-skills-{pack}`): Downloads the skill pack source at a pinned version, runs `bun install` and `bun run build`. This layer rebuilds when a new version is detected, but is fast since Chromium is already in the base.
 
 At container startup, `user-setup.sh` symlinks `/opt/skills/{pack}/` into `~/.claude/skills/` so Claude Code discovers the skills automatically. Skill pack `bin/` directories are added to PATH.
 
-First build takes a few minutes (downloading + compiling). Subsequent launches are instant.
+First build takes a few minutes (downloading Chromium). Subsequent version updates rebuild only the code layer and are much faster.
 
 ### Version Resolution
 
-Skill pack versions are resolved dynamically from GitHub releases on each launch — there is no hardcoded version pin. The resolution order is:
+Skill pack versions are resolved dynamically from GitHub on each launch — there is no hardcoded version pin. The resolution order is:
 
-1. **GitHub releases API** — fetches the latest non-draft, non-prerelease tag matching the pack's prefix (e.g. `sandy/v*` for gstack). 5-second timeout.
-2. **Local cache** — `~/.sandy/.skill_version_{pack}` stores the last successfully resolved version.
-3. **Hardcoded fallback** — `SKILL_PACK_VERSIONS` array in the sandy script, used only on first run if GitHub is unreachable.
+1. **GitHub releases API** — fetches the latest non-draft, non-prerelease tag matching the pack's tag prefix (if configured). 5-second timeout.
+2. **GitHub commits API** — if no releases exist or no tag prefix is set, fetches the latest commit SHA on the default branch.
+3. **Local cache** — `~/.sandy/.skill_version_{pack}` stores the last successfully resolved version.
+4. **Hardcoded fallback** — `SKILL_PACK_VERSIONS` array in the sandy script, used only on first run if GitHub is unreachable.
 
-When a new version is detected, the `Dockerfile.skills` is regenerated with the updated version. The content hash changes, which triggers a rebuild of the skill pack image automatically.
+When a new version is detected, `Dockerfile.skills` is regenerated with the updated version. The content hash changes, which triggers a rebuild of the code image (Phase 2.5b) automatically. The base image (Phase 2.5a) is unaffected.
 
 ### Adding New Packs
 
