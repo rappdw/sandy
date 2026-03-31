@@ -1,7 +1,7 @@
 # Sandy Specification
 
-**Version**: 0.7.11-dev
-**Date**: 2026-03-30
+**Version**: 0.8.0
+**Date**: 2026-03-31
 **Source**: ~1,850-line bash script (`sandy`), installer (`install.sh`), test suite (`test/run-tests.sh`)
 
 Sandy is a self-contained command that runs Claude Code in a Docker container with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes. One script, one command, zero configuration required.
@@ -31,6 +31,14 @@ Sandy is a self-contained command that runs Claude Code in a Docker container wi
 19. [Test Suite](#19-test-suite)
 20. [Installation](#20-installation)
 21. [File Inventory](#21-file-inventory)
+
+**Appendices (Implementation Detail)**
+
+- A. [Generated File Templates](#appendix-a-generated-file-templates)
+- B. [Runtime Parameters](#appendix-b-runtime-parameters)
+- C. [JSON Schemas](#appendix-c-json-schemas)
+- D. [Platform-Specific Behavior](#appendix-d-platform-specific-behavior)
+- E. [Container Launch Assembly](#appendix-e-container-launch-assembly)
 
 ---
 
@@ -87,7 +95,7 @@ Later files override earlier values.
 
 ### Parser
 
-The config parser does **not** use `source`. It reads plain `KEY=VALUE` lines, strips quotes, validates against an allowlist, and exports only recognized keys. Lines not matching `^[A-Z_]+=.+` are ignored.
+The config parser does **not** use `source`. It reads lines via `grep -E '^[A-Z_]+=.+'`, strips leading/trailing single and double quotes from values (in order: double then single), validates the key against an allowlist, and exports only recognized keys. Lines not matching the grep pattern are silently ignored — this includes comments (`#`), blank lines, and lowercase keys. If the config file is unreadable or missing, loading silently succeeds.
 
 ### Allowlisted Variables
 
@@ -251,7 +259,7 @@ This image rebuilds whenever a new commit is detected on the skill pack repo (fa
 **Rebuild trigger**: Content hash changes, any upstream image rebuilt
 **Build context**: `.sandy/` directory
 
-User-provided Dockerfile with `ARG BASE_IMAGE` / `FROM ${BASE_IMAGE}`. Sandy passes the appropriate base image (Phase 2, 2.5a, 2.5b, or 2 depending on configuration) as a build arg.
+User-provided Dockerfile must declare `ARG BASE_IMAGE` and use `FROM ${BASE_IMAGE}`. Sandy invokes `docker build --build-arg BASE_IMAGE=<IMAGE_NAME> -t sandy-project-<name>-<hash> .sandy/` where `<IMAGE_NAME>` is the most-derived image from the build chain (skills image if skill packs enabled, otherwise `sandy-claude-code`).
 
 ### Build Hash Caching
 
@@ -406,7 +414,7 @@ The container's own subnet is allowed. Additional hosts/CIDRs can be allowed via
 2. Allow specific LAN hosts (if `SANDY_ALLOW_LAN_HOSTS` set)
 3. DROP all private ranges
 
-**Cleanup**: Rules and network removed on exit. Stale rules from previous unclean exits cleaned up on startup.
+**Cleanup**: Rules and network removed on exit via trap handler.
 
 **Fail-closed**: If `iptables` is not available, sandy aborts unless `SANDY_ALLOW_NO_ISOLATION=1`.
 
@@ -504,7 +512,7 @@ Credentials are loaded into a temporary file, mounted into the container at `~/.
 Sandy wraps Claude Code in a tmux session:
 - **Session name**: `sandy` (fixed)
 - **Window name**: `sandy: <PROJECT_NAME>`
-- **Auto-resume**: If session files exist in `~/.claude/projects/<WORKSPACE_KEY>/` and no overriding flags (`--new`, `-p`, `--resume`, `--continue`), sandy automatically adds `--continue` to resume the last session
+- **Auto-resume**: If session files (`.jsonl`) exist in `~/.claude/projects/<WORKSPACE_KEY>/` and no overriding flags (`--new`, `-p`, `--resume`, `--continue`), sandy automatically adds `--continue` to resume the last session. `WORKSPACE_KEY` is the container workspace path with all `/` replaced by `-` (e.g., `/home/claude/dev/sandy` → `-home-claude-dev-sandy`)
 - **Fallback**: If `--continue` fails (stale session), retry without it
 
 ### Tmux Configuration
@@ -793,3 +801,893 @@ On each launch, sandy checks the installed Claude Code version (cached at `/opt/
 | `config` | User-level configuration |
 | `.secrets` | User-level credentials |
 | `sandboxes/` | Per-project sandbox directories |
+
+---
+
+## Appendix A: Generated File Templates
+
+Sandy generates all build and runtime files as heredocs embedded in the script. Each function writes one or more files to `$SANDY_HOME/`. Variable expansion is noted for each template.
+
+### A.1 Dockerfile.base (Phase 1)
+
+**Generator**: `generate_dockerfile_base()` — quoted heredoc (`<<'DOCKERFILE_BASE'`), no variable expansion.
+
+```dockerfile
+FROM debian:bookworm-slim
+
+# System tools + C/C++ toolchain
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    git \
+    git-lfs \
+    gosu \
+    jq \
+    less \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    libpango1.0-0 \
+    libssl-dev \
+    ncurses-term \
+    openssh-client \
+    pkg-config \
+    python3 \
+    python3-pip \
+    python3-venv \
+    ripgrep \
+    socat \
+    tmux \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) \
+        signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
+        https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 LTS via NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go (arch-aware)
+ARG GO_VERSION=1.24.1
+RUN ARCH="$(dpkg --print-architecture)" \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" \
+       | tar -C /usr/local -xz
+
+# Rust stable (system-wide)
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --no-modify-path --default-toolchain stable \
+    && chmod -R a+rX /usr/local/rustup /usr/local/cargo
+
+# Bun
+RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
+
+# uv — fast Python package/version manager
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
+
+# User
+RUN useradd -m -s /bin/bash -u 1001 claude
+
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV PATH="/home/claude/.local/bin:/usr/local/cargo/bin:/usr/local/go/bin:$PATH"
+```
+
+### A.2 Dockerfile (Phase 2)
+
+**Generator**: `generate_dockerfile()` — unquoted heredoc (`<<DOCKERFILE`), expands `${BASE_IMAGE_NAME}`.
+
+```dockerfile
+FROM ${BASE_IMAGE_NAME}
+
+RUN HOME=/home/claude su -s /bin/bash claude -c \
+    "curl -fsSL https://claude.ai/install.sh | bash" \
+ && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \
+ && mv /home/claude/.local/share/claude /opt/claude-code \
+ && { /usr/local/bin/claude --version 2>/dev/null \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' > /opt/claude-code/.version || true; }
+
+# synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin \
+    uv tool install --python-preference system synthkit
+
+COPY tmux.conf /etc/tmux.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY user-setup.sh /usr/local/bin/user-setup.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/user-setup.sh
+
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+```
+
+Key details:
+- Claude Code is installed as user `claude`, then relocated to `/usr/local/bin/claude` (binary) and `/opt/claude-code` (data) so it survives the tmpfs overlay on `/home/claude`.
+- `UV_TOOL_DIR=/opt/uv-tools` ensures synthkit's venv goes to an accessible location (not `/root/`).
+- Version is cached at `/opt/claude-code/.version` for update detection.
+
+### A.3 Dockerfile.skills-base (Phase 2.5a)
+
+**Generator**: `generate_skill_pack_dockerfiles()` — mixed heredocs. Header is quoted (`<<'SKILLS_BASE_HEADER'`), gstack block is quoted (`<<'GSTACK_BASE_BLOCK'`). No variable expansion.
+
+```dockerfile
+FROM sandy-claude-code
+
+# --- gstack base: Playwright + Chromium (rarely changes) ---
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/skills/gstack/.browsers
+
+RUN mkdir -p /opt/skills/gstack \
+ && cd /opt/skills/gstack \
+ && npm init -y >/dev/null 2>&1 \
+ && npm install playwright@latest --save >/dev/null 2>&1 \
+ && npx playwright install-deps chromium \
+ && npx playwright install chromium \
+ && rm -rf node_modules package.json package-lock.json
+```
+
+Only generated when a pack requires heavy base dependencies (`needs_base=true`). The temporary npm project bootstraps Playwright just enough to install Chromium, then cleans up.
+
+### A.4 Dockerfile.skills (Phase 2.5b)
+
+**Generator**: `generate_skill_pack_dockerfiles()` — header uses unquoted heredoc (`<<SKILLS_HEADER`, expands `${skills_base_name}`), gstack block uses unquoted heredoc (`<<GSTACK_BLOCK`, expands `${repo}` and `${version}`).
+
+```dockerfile
+FROM sandy-skills-base-gstack
+
+# --- gstack skill pack (${version}) ---
+RUN mkdir -p /opt/skills/gstack \
+ && curl -fsSL "${repo}/archive/${version}.tar.gz" \
+    | tar -xz --strip-components=1 -C /opt/skills/gstack
+
+RUN cd /opt/skills/gstack \
+ && (bun install --frozen-lockfile 2>/dev/null || bun install) \
+ && bun run build \
+ && echo "${version}" > browse/dist/.version \
+ && rm -rf node_modules/.cache
+
+RUN chmod +x /opt/skills/gstack/bin/*
+```
+
+Image naming convention: `sandy-skills-base-<packs>` and `sandy-skills-<packs>` where `<packs>` is the sorted, lowercased, hyphen-joined pack list (e.g., `gstack`).
+
+### A.5 entrypoint.sh
+
+**Generator**: `generate_entrypoint()` — quoted heredoc (`<<'ENTRYPOINT'`), no variable expansion. Inner heredocs (`PIPWRAP`) also quoted.
+
+The entrypoint runs as root and performs:
+
+```bash
+#!/bin/bash
+# Verbose tracing at level 3+
+if [ "${SANDY_VERBOSE:-0}" -ge 3 ]; then set -x; fi
+
+# UID/GID from host (default 1001)
+RUN_UID="${HOST_UID:-1001}"
+RUN_GID="${HOST_GID:-1001}"
+
+# 1. Fix tmpfs ownership
+chown "$RUN_UID:$RUN_GID" /home/claude
+
+# 2. Seed known_hosts
+# Copies from /tmp/host-ssh-known_hosts if present
+# Permissions: dir 700, file 644
+
+# 3. SSH agent relay (if SANDY_SSH=agent)
+#    macOS: socat UNIX-LISTEN → TCP:host.docker.internal:$SSH_RELAY_PORT
+#    Wait: 50 attempts × 0.1s = 5s timeout for socket
+#    Linux: chmod 600 + chown on mounted socket
+
+# 4. Copy host SSH config
+# From /tmp/host-ssh → ~/.ssh/ (cp -aL to dereference symlinks)
+# Permissions: dir 700, keys 600, .pub/config/known_hosts 644
+
+# 5. Fix persistent mount ownership
+# Dirs: .pip-packages, .local/share/uv, .npm-global, go, .cargo, .gstack
+
+# 6. Symlink Claude Code
+# /usr/local/bin/claude → ~/.local/bin/claude
+# /opt/claude-code → ~/.local/share/claude
+
+# 7. pip/pip3 wrappers
+# Auto-add --user when outside virtualenvs:
+#   if [ -z "$VIRTUAL_ENV" ] && [ "${1:-}" = "install" ]; then
+#       exec python3 -m pip install --user "$@"
+#   fi
+
+# 8. Drop privileges
+exec gosu "$RUN_UID:$RUN_GID" /usr/local/bin/user-setup.sh "$@"
+```
+
+### A.6 user-setup.sh
+
+**Generator**: `generate_user_setup()` — quoted heredoc (`<<'USERSETUP'`), no outer variable expansion. Inner heredocs for slash commands use quoted `<<'SKMD'`. Channel access.json uses both quoted and unquoted heredocs depending on mode.
+
+Key implementation details not covered in the main spec:
+
+**Settings.json merge (3-tier fallback)**:
+1. **Node.js**: JSON repair (trailing commas, missing commas), merge defaults, strip `enabledPlugins`
+2. **jq**: `//=` operator for defaults, `del(.enabledPlugins)`
+3. **printf**: Last resort, only if file is exactly `{}`
+
+JSON repair regexes:
+- `/,(\s*[}\]])/g` → `$1` (remove trailing commas)
+- `/(\"[^\"]*\")\s*\n(\s*\")/g` → `$1,\n$2` (add missing commas)
+
+**ANSI color remap**: `printf "\033]4;4;rgb:61/8f/ff\033\\"` (dark blue → bright blue), restored on EXIT trap.
+
+**Marketplace update cache**: Epoch timestamp written to `~/.claude/plugins/.marketplace_updated`. Stale after 86400 seconds (24 hours).
+
+**Channel credential seeding** (`_seed_channel` function):
+- Creates `~/.claude/channels/<chan>/` directory
+- Writes `.env` (chmod 600) with `TOKEN_VAR=value`
+- Writes `access.json` only if it doesn't already exist (preserves user edits)
+- Allowlist computed by splitting comma-separated senders: `tr ',' '\n'` → awk to produce JSON array
+
+**Claude Code launch**:
+- Tmux mode: `tmux new-session -s sandy -n "sandy: <project>" -- bash -c "<cmd>"`
+- Auto-continue: injects `--continue` if session files exist and no conflicting flags
+- Fallback: `$CMD_WITH_CONTINUE || $CMD_WITHOUT_CONTINUE` (retries without `--continue` on failure)
+- Remote mode: `claude remote-control --name "sandy: <project>"`
+
+### A.7 tmux.conf
+
+**Generator**: `generate_tmux_conf()` — quoted heredoc (`<<'TMUXCONF'`), no variable expansion.
+
+```
+set -g history-limit 10000
+set -g mouse on
+set -g default-terminal "tmux-256color"
+set -as terminal-features ",tmux-256color:RGB"
+set -as terminal-overrides ",*:U8=1"
+set -sg escape-time 0
+
+set -g pane-border-lines single
+set -g pane-border-style "fg=colour240"
+set -g pane-active-border-style "fg=colour51"
+set -g pane-border-status top
+set -g pane-border-format " #[fg=colour51]#{window_name}#[default] "
+
+set -g status-position bottom
+set -g status-style "bg=colour235,fg=colour248"
+set -g status-left "#[fg=colour51,bold] sandy "
+set -g status-left-length 10
+set -g status-right "#[fg=colour248] %H:%M "
+set -g status-right-length 10
+
+set -g allow-passthrough on
+set -g set-clipboard on
+set -g focus-events on
+setw -g aggressive-resize on
+```
+
+---
+
+## Appendix B: Runtime Parameters
+
+All magic numbers, thresholds, timeouts, and limits used in the sandy script.
+
+### B.1 Resource Limits
+
+| Parameter | Value | Context |
+|---|---|---|
+| Container memory | `available_GB - 1`, min 2GB | Auto-detected from `docker info --format '{{.MemTotal}}'`, converted via `/1073741824` |
+| Container CPUs | All available (from `docker info --format '{{.NCPU}}'`) | Default 2 if detection fails |
+| PID limit | 512 | `--pids-limit 512` |
+| tmpfs `/tmp` | 1 GB, exec | `--tmpfs /tmp:exec,size=1G` |
+| tmpfs `/home/claude` | 2 GB, exec | `--tmpfs /home/claude:exec,size=2G,uid=1001,gid=1001` |
+| tmux history | 10,000 lines | `set -g history-limit 10000` |
+
+### B.2 Timeouts
+
+| Operation | Timeout | Context |
+|---|---|---|
+| GitHub releases API | 5 seconds | `curl --max-time 5` in `skill_pack_latest_release()` |
+| GitHub commits API | 5 seconds | `curl --max-time 5` in `skill_pack_latest_release()` |
+| Sandy update check API | 3 seconds | `curl --max-time 3` in `sandy_check_update()` |
+| Claude Code version check | 5 seconds | `curl --max-time 5` against Google Cloud Storage |
+| SSH socket wait (macOS) | 5 seconds | 50 iterations × 0.1s sleep in entrypoint |
+| OAuth token expiry buffer | 5 minutes | 300,000 ms buffer before `expiresAt` |
+
+### B.3 Cache TTLs
+
+| Cache | TTL | File |
+|---|---|---|
+| Update check | 86,400 seconds (24 hours) | `$SANDY_HOME/.update_check` |
+| Marketplace refresh | 86,400 seconds (24 hours) | `~/.claude/plugins/.marketplace_updated` |
+| Skill pack version | Indefinite (refreshed each launch) | `$SANDY_HOME/.skill_version_<pack>` |
+
+### B.4 File Permissions
+
+| Path | Mode | Reason |
+|---|---|---|
+| `~/.ssh/` | 700 | SSH requires restrictive dir permissions |
+| `~/.ssh/*` (private keys) | 600 | SSH refuses keys with group/other access |
+| `~/.ssh/*.pub` | 644 | Public keys are non-sensitive |
+| `~/.ssh/config` | 644 | SSH config readable |
+| `~/.ssh/known_hosts` | 644 | Host fingerprints non-sensitive |
+| SSH agent socket | 600 | Only owner should access agent |
+| Channel `.env` files | 600 | Contains bot tokens |
+| `.credentials.json` (ephemeral) | 600 | Contains OAuth tokens |
+| pip/pip3 wrappers | +x | Must be executable |
+| Skill pack `bin/*` | +x | Must be executable |
+| cmux notification hook | +x | Must be executable |
+| Rust/Cargo directories | a+rX | System-wide install, readable by all |
+
+### B.5 Scan Depth Limits
+
+| Scan | Max Depth | Excludes |
+|---|---|---|
+| Symlink protection | 5 levels | `node_modules/`, `.venv/`, `.git/` |
+| Git LFS detection | 3 levels | — |
+
+### B.6 Docker Security Flags
+
+```
+--security-opt no-new-privileges:true
+--cap-drop ALL
+--cap-add SETUID
+--cap-add SETGID
+--cap-add CHOWN
+--cap-add DAC_OVERRIDE
+--cap-add FOWNER
+--read-only
+```
+
+Capabilities SETUID/SETGID are needed for `gosu` privilege drop. CHOWN/DAC_OVERRIDE/FOWNER are needed for the entrypoint to fix ownership of tmpfs and persistent mounts.
+
+### B.7 Network Ranges (Linux iptables)
+
+| CIDR | Purpose |
+|---|---|
+| `10.0.0.0/8` | Class A private (home/office LANs, VPNs) |
+| `172.16.0.0/12` | Class B private (Docker internals, some LANs) |
+| `192.168.0.0/16` | Class C private (home/office LANs) |
+| `169.254.0.0/16` | Link-local |
+| `100.64.0.0/10` | CGNAT / Tailscale |
+
+### B.8 Default Values
+
+| Variable | Default | Notes |
+|---|---|---|
+| `SANDY_MODEL` | `claude-opus-4-6` | Passed to `claude --model` |
+| `SANDY_SSH` | `token` | Git authentication mode |
+| `SANDY_SKIP_PERMISSIONS` | `true` | Skip trust dialog |
+| `SANDY_VERBOSE` | `0` | No extra output |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max tokens per response |
+| `HOST_UID` / `HOST_GID` | `1001` | Default container user if not remapped |
+| Container user | `claude` | UID 1001, shell `/bin/bash` |
+
+### B.9 Tool Versions
+
+| Tool | Version | Install Method |
+|---|---|---|
+| Go | 1.24.1 | Multi-arch binary from go.dev |
+| Node.js | 22 LTS | NodeSource `setup_22.x` |
+| Rust | stable (latest) | rustup |
+| Bun | latest | `curl https://bun.sh/install` |
+| uv | latest | `curl https://astral.sh/uv/install.sh` |
+| Python | Debian bookworm system default | `apt-get install python3` |
+
+---
+
+## Appendix C: JSON Schemas
+
+### C.1 `access.json` (Channel Configuration)
+
+Created at `~/.claude/channels/<channel>/access.json`. Two modes:
+
+**Allowlist mode** (when `<CHANNEL>_ALLOWED_SENDERS` is set):
+```json
+{
+  "dmPolicy": "allowlist",
+  "allowFrom": ["user_id_1", "user_id_2"],
+  "groups": {},
+  "pending": {}
+}
+```
+
+**Pairing mode** (when no allowlist configured):
+```json
+{
+  "dmPolicy": "pairing",
+  "allowFrom": [],
+  "groups": {},
+  "pending": {}
+}
+```
+
+`allowFrom` is computed from the comma-separated env var: split on commas, trim whitespace, wrap each in quotes, join with commas.
+
+The file is only written on first run — if it already exists, it's preserved to respect user edits.
+
+### C.2 `settings.json` (Claude Code Configuration)
+
+**Marketplace structure** (added idempotently to `extraKnownMarketplaces`):
+```json
+{
+  "extraKnownMarketplaces": {
+    "claude-plugins-official": {
+      "source": { "source": "github", "repo": "anthropics/claude-plugins-official" }
+    },
+    "thinkkit": {
+      "source": { "source": "github", "repo": "rappdw/thinkkit" }
+    },
+    "ait": {
+      "source": { "source": "github", "repo": "rappdw/ait" }
+    }
+  }
+}
+```
+
+Note the double-nested `source` — the outer key is the `extraKnownMarketplaces` schema, the inner object describes the repository.
+
+**Sandy defaults merged on seeding** (Node.js tier):
+```json
+{
+  "teammateMode": "tmux",
+  "spinnerTipsEnabled": false,
+  "skipDangerousModePermissionPrompt": true
+}
+```
+
+`enabledPlugins` is deleted from seeded settings to prevent host plugin leakage.
+
+**JSON repair** applied before parsing (handles common hand-editing errors):
+- Remove trailing commas: regex `,(\s*[}\]])` → `$1`
+- Add missing commas between keys: regex `("key")\s*\n(\s*"nextkey")` → `$1,\n$2`
+- If parsing still fails, fall back to empty object `{}`
+
+### C.3 `.claude.json` (User Setup State)
+
+Stored at `$SANDY_HOME/sandboxes/<NAME>.claude.json` (outside the sandbox dir to avoid mount conflicts). Mounted into the container at `/home/claude/.claude.json`.
+
+**Seeding from host** (Node.js):
+```javascript
+let d = JSON.parse(fs.readFileSync(hostPath));
+delete d.projects;  // strip host project paths
+fs.writeFileSync(sandboxPath, JSON.stringify(d, null, 2) + "\n");
+```
+
+Falls back to `cp` if Node.js parsing fails.
+
+**Fallback if no host copy exists**:
+```json
+{
+  "tipsDisabled": true,
+  "installMethod": "native"
+}
+```
+
+**Post-seed merge**: Always ensures `tipsDisabled: true` and `installMethod: "native"` are set.
+
+### C.4 `.credentials.json` (OAuth Credentials)
+
+Loaded ephemerally from the host, never persisted in the sandbox.
+
+**Expected structure for token expiry check**:
+```json
+{
+  "claudeAiOauth": {
+    "expiresAt": 1234567890000
+  }
+}
+```
+
+`expiresAt` is milliseconds since epoch. The refresh check uses `Date.now() + 300000 > expiresAt` (5-minute buffer).
+
+### C.5 Channel `.env` Files
+
+Plain `KEY=VALUE` format at `~/.claude/channels/<channel>/.env`:
+
+```
+TELEGRAM_BOT_TOKEN=<token>
+```
+or
+```
+DISCORD_BOT_TOKEN=<token>
+```
+
+Permissions: 600 (owner read-write only).
+
+### C.6 cmux Notification Hook
+
+Auto-generated at `~/.claude/hooks/cmux-notify.sh` when cmux is detected. Merged into `settings.json` hooks:
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/claude/.claude/hooks/cmux-notify.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The hook script emits `\033]777;notify;<title>;<body>\033\\` OSC sequences.
+
+### C.7 `.update_check` Cache
+
+Plain text file at `$SANDY_HOME/.update_check`:
+
+```
+<epoch_timestamp> <latest_version>
+```
+
+Example: `1711843200 0.8.0`. Stale after 86,400 seconds.
+
+### C.8 `.skill_version_<pack>` Cache
+
+Plain text file at `$SANDY_HOME/.skill_version_<pack>`:
+
+```
+<version_or_sha>
+```
+
+Example: `a1b2c3d4e5f6` (commit SHA) or `v1.2.3` (release tag). Updated whenever a newer version is resolved from GitHub.
+
+---
+
+## Appendix D: Platform-Specific Behavior
+
+Sandy runs on both Linux and macOS. The following sections document every point where behavior diverges.
+
+### D.1 Network Isolation
+
+| Aspect | Linux | macOS |
+|---|---|---|
+| Mechanism | iptables `DOCKER-USER` chain | Docker Desktop VM provides NAT isolation |
+| Rules applied | DROP for 5 private ranges; ACCEPT for container subnet and allowed hosts | None needed |
+| Fail-closed | Aborts if iptables unavailable (unless `SANDY_ALLOW_NO_ISOLATION=1`) | Always proceeds |
+| Cleanup | Rules and bridge network deleted on exit | Bridge network deleted on exit |
+
+**Linux iptables flow**:
+1. Test `sudo iptables -L DOCKER-USER -n` — if fails, abort (or allow with override)
+2. Insert DROP rules for each private range (inserted first = evaluated last)
+3. Insert ACCEPT for `SANDY_ALLOW_LAN_HOSTS` entries (if set)
+4. Insert ACCEPT for container's own subnet (inserted last = evaluated first)
+5. On exit: delete rules in reverse, remove Docker network
+
+### D.2 SSH Agent Relay
+
+| Aspect | Linux | macOS |
+|---|---|---|
+| Host → container | Direct Unix socket mount (`-v $SSH_AUTH_SOCK:/tmp/ssh-agent.sock`) | TCP relay via `socat` |
+| Port allocation | N/A | `python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); ..."` |
+| Host relay | N/A | `socat TCP-LISTEN:<port>,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:<SSH_AUTH_SOCK>` |
+| Container relay | N/A (direct socket) | `socat UNIX-LISTEN:/tmp/ssh-agent.sock,fork,mode=0600 TCP:host.docker.internal:<port>` |
+| Socket wait | N/A | 50 × 0.1s = 5s timeout |
+| Dependency | None extra | Requires `socat` and `python3` on host (checked, error with `brew install` suggestion) |
+
+### D.3 Credential Loading
+
+| Aspect | Linux | macOS |
+|---|---|---|
+| Primary source | `~/.claude/.credentials.json` (file) | Same file |
+| Fallback source | None | macOS Keychain: `security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w` |
+| Token refresh | Skip (no browser available on headless Linux) | `claude auth login` (can open browser) |
+| Browser detection | `can_open_browser()` always returns 1 (false) | Always returns 0 (true) |
+
+### D.4 SHA256 Hash
+
+```bash
+sha256() { shasum -a 256 2>/dev/null || sha256sum; }
+```
+
+- macOS: `shasum -a 256` (Perl-based, ships with macOS)
+- Linux: Falls through to `sha256sum` (coreutils)
+
+### D.5 UID/GID Remapping
+
+| Aspect | Linux | macOS |
+|---|---|---|
+| Host UID detection | `id -u` (typically non-root, e.g. 1000) | `id -u` (typically 501) |
+| Image default UID | 1001 | 1001 |
+| Remapping needed | Usually yes (1000 ≠ 1001) | Usually yes (501 ≠ 1001) |
+| Implementation | Custom `passwd`/`group` files mounted read-only | Same |
+
+**passwd sed pattern**: `sed "s/^claude:x:1001:1001:/claude:x:${HOST_UID}:${HOST_GID}:/"`
+**group sed pattern**: `sed "s/^claude:x:1001:/claude:x:${HOST_GID}:/"`
+
+### D.6 Error Recovery & Fallback Chains
+
+**settings.json merge** (3 tiers, tried in order):
+1. **Node.js**: JSON repair → parse → merge defaults → strip plugins → write
+2. **jq**: `jq --arg skip "$skip_perm" '.teammateMode //= "tmux" | ...'`
+3. **printf**: Only if file is exactly `{}`, writes minimal JSON
+
+**.claude.json seeding** (2 tiers):
+1. **Node.js**: Parse, delete `projects` key, write pretty-printed
+2. **cp**: Raw copy if Node.js fails (host projects key preserved — less clean but functional)
+
+**Token expiry check** (2 tiers):
+1. **Node.js**: Parse credentials JSON, check `claudeAiOauth.expiresAt` against `Date.now() + 300000`
+2. **Python 3**: Same logic via `json.loads` and `time.time() * 1000`
+3. If neither available: warn and return "needs refresh"
+
+**Skill pack version resolution** (3 tiers):
+1. **GitHub releases API**: 5s timeout, looks for tags matching prefix
+2. **GitHub commits API**: 5s timeout, gets latest commit SHA (truncated to 12 chars)
+3. **Local cache file**: `$SANDY_HOME/.skill_version_<pack>`
+4. **Hardcoded fallback**: `SKILL_PACK_VERSIONS` array entry
+
+---
+
+## Appendix E: Container Launch Assembly
+
+The `docker run` command is assembled incrementally in a `RUN_FLAGS` array. This appendix documents the complete assembly in order.
+
+### E.1 Pre-Launch
+
+**Stale container removal**: Before starting, any container with the same name is force-removed to handle unclean previous exits:
+```bash
+docker rm -f "sandy-<SANDBOX_NAME>" 2>/dev/null || true
+```
+
+### E.2 Base Flags
+
+```bash
+--rm -it
+--name sandy-<SANDBOX_NAME>
+--cpus <SANDY_CPUS>
+--memory <SANDY_MEM>
+--security-opt no-new-privileges:true
+--cap-drop ALL
+--cap-add SETUID --cap-add SETGID
+--cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER
+--pids-limit 512
+--read-only
+--tmpfs /tmp:exec,size=1G
+--tmpfs /home/claude:exec,size=2G,uid=1001,gid=1001
+--network <NETWORK_NAME>
+```
+
+### E.3 GPU Passthrough (conditional)
+
+If `SANDY_GPU` is set and Docker supports GPUs (`docker info --format '{{.Runtimes}}'` contains `nvidia` or `cdi`):
+```bash
+--gpus <SANDY_GPU>    # e.g., "all" or "device=0,1"
+```
+
+### E.4 Credential Mount (conditional)
+
+If credentials were loaded (OAuth token or credentials file):
+```bash
+-v "<CRED_TMPDIR>/.credentials.json:/home/claude/.claude/.credentials.json"
+```
+
+The temporary directory is created per-launch and cleaned up on exit.
+
+### E.5 .claude.json Mount
+
+```bash
+-v "<SANDY_HOME>/sandboxes/<NAME>.claude.json:/home/claude/.claude.json"
+```
+
+Always mounted — this file is seeded on first run and persists across sessions.
+
+### E.6 Host Hooks Mount (conditional)
+
+If `~/.claude/hooks/` exists on the host:
+```bash
+-v "$HOME/.claude/hooks:/home/claude/.claude/hooks:ro"
+```
+
+### E.7 Workspace Mount
+
+```bash
+-v "<HOST_PATH>:<CONTAINER_PATH>"
+```
+
+Where `CONTAINER_PATH` follows the workspace path mapping rules (Section 13).
+
+### E.8 Git Submodule Mount (conditional)
+
+If `.git` is a file (submodule), the gitdir is also mounted:
+```bash
+-v "<HOST_GITDIR>:<CONTAINER_GITDIR>"
+```
+
+Both paths use the same `$HOME`-relative mapping to preserve the relative relationship.
+
+### E.9 Symlink Protection Scan
+
+Before assembling mounts, sandy scans the workspace for symlinks escaping the project directory:
+```bash
+find <WORKSPACE> -maxdepth 5 \
+    -path '*/node_modules' -prune -o \
+    -path '*/.venv' -prune -o \
+    -path '*/.git' -prune -o \
+    -type l -print
+```
+
+Each symlink's real path is checked against the workspace root. If any escape, the user is prompted:
+```
+These could allow Claude to access files outside the sandbox.
+Proceed anyway? [y/N]
+```
+
+Only `y`/`Y` proceeds; anything else aborts with exit 1.
+
+### E.10 Protected File Mounts
+
+Three categories with different existence checks:
+
+**Regular files** (checked with `-e`):
+```bash
+for f in .bashrc .bash_profile .zshrc .zprofile .profile .gitconfig .ripgreprc .mcp.json; do
+    -v "<WORKSPACE>/$f:<CONTAINER_WORKSPACE>/$f:ro"
+done
+```
+
+**Git-specific files** (checked with `-f`):
+```bash
+for f in .git/config .gitmodules; do
+    -v "<WORKSPACE>/$f:<CONTAINER_WORKSPACE>/$f:ro"
+done
+```
+
+**Directories** (checked with `-d`):
+```bash
+for d in .git/hooks .vscode .idea; do
+    -v "<WORKSPACE>/$d:<CONTAINER_WORKSPACE>/$d:ro"
+done
+```
+
+Only existing paths are mounted — no empty placeholders created.
+
+### E.11 Writable Sandbox Overlays
+
+For each of `commands`, `agents`, `plugins`:
+```bash
+# Only mount if the workspace has .claude/<subdir> OR the sandbox already has data
+if [ -d "<WORKSPACE>/.claude/<subdir>" ] || [ -d "<SANDBOX>/workspace-<subdir>" ]; then
+    mkdir -p "<SANDBOX>/workspace-<subdir>"
+    -v "<SANDBOX>/workspace-<subdir>:<CONTAINER_WORKSPACE>/.claude/<subdir>"
+fi
+```
+
+This hides host content at these paths and provides a writable overlay from the sandbox.
+
+### E.12 Persistent Package Mounts
+
+```bash
+-v "<SANDBOX>/pip:<HOME>/.pip-packages"
+-v "<SANDBOX>/uv:<HOME>/.local/share/uv"
+-v "<SANDBOX>/npm-global:<HOME>/.npm-global"
+-v "<SANDBOX>/go:<HOME>/go"
+-v "<SANDBOX>/cargo:<HOME>/.cargo"
+```
+
+If skill packs are enabled:
+```bash
+-v "<SANDBOX>/gstack:<HOME>/.gstack"
+```
+
+### E.13 Sandbox Mount
+
+The sandbox directory itself becomes `~/.claude` inside the container:
+```bash
+-v "<SANDBOX_DIR>:/home/claude/.claude"
+```
+
+### E.14 SSH Mounts (conditional on `SANDY_SSH`)
+
+**Token mode** (`SANDY_SSH=token`): No SSH mounts. Git token passed via environment variable.
+
+**Agent mode** (`SANDY_SSH=agent`):
+
+Linux:
+```bash
+-v "<SSH_AUTH_SOCK>:/tmp/ssh-agent.sock"
+-e "SSH_AUTH_SOCK=/tmp/ssh-agent.sock"
+```
+
+macOS: Port passed via environment variable (relay handled by entrypoint):
+```bash
+-e "SSH_RELAY_PORT=<port>"
+```
+
+Both platforms (if `~/.ssh` exists):
+```bash
+-v "$HOME/.ssh:/tmp/host-ssh:ro"
+```
+
+If `~/.ssh/known_hosts` exists (mounted separately for token mode too):
+```bash
+-v "$HOME/.ssh/known_hosts:/tmp/host-ssh-known_hosts:ro"
+```
+
+### E.15 UID/GID Remapping (conditional)
+
+If host UID ≠ 1001:
+```bash
+-e "HOST_UID=<uid>"
+-e "HOST_GID=<gid>"
+-v "<SANDY_HOME>/passwd:/etc/passwd:ro"
+-v "<SANDY_HOME>/group:/etc/group:ro"
+```
+
+The passwd/group files are generated by sed:
+```bash
+sed "s/^claude:x:1001:1001:/claude:x:${HOST_UID}:${HOST_GID}:/" /etc/passwd > passwd
+sed "s/^claude:x:1001:/claude:x:${HOST_GID}:/" /etc/group > group
+```
+
+### E.16 Environment Variables
+
+All passed via `-e KEY=VALUE`:
+
+```bash
+# Workspace identity
+SANDY_WORKSPACE=<container_path>
+SANDY_PROJECT_NAME=<basename>
+
+# Claude Code config
+SANDY_MODEL=<model>
+SANDY_SKIP_PERMISSIONS=<true|false>
+SANDY_NEW_SESSION=<true|false>
+SANDY_REMOTE_CONTROL=<true|false>
+SANDY_VERBOSE=<0-3>
+CLAUDE_CODE_MAX_OUTPUT_TOKENS=<128000>
+
+# Channels (if configured)
+SANDY_CHANNELS=<channel_spec>
+TELEGRAM_BOT_TOKEN=<token>
+TELEGRAM_ALLOWED_SENDERS=<ids>
+DISCORD_BOT_TOKEN=<token>
+DISCORD_ALLOWED_SENDERS=<ids>
+
+# Git identity (auto-detected from host git config if not set)
+GIT_USER_NAME=<name>
+GIT_USER_EMAIL=<email>
+SANDY_SSH=<token|agent>
+GIT_TOKEN=<token>          # token mode only
+
+# Credentials (explicitly emptied if not set to prevent host env leakage)
+ANTHROPIC_API_KEY=<key>             # empty string if unset
+CLAUDE_CODE_OAUTH_TOKEN=<token>     # empty string if unset
+
+# Agent teams (if configured)
+CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=<0|1>
+
+# System
+HOST_UID=<uid>
+HOST_GID=<gid>
+DISABLE_AUTOUPDATER=1
+ENABLE_CLAUDEAI_MCP_SERVERS=false
+```
+
+Git identity fallback: if `GIT_USER_NAME`/`GIT_USER_EMAIL` are not set via config, they are read from the host's `git config user.name` and `git config user.email`.
+
+### E.17 Final Command
+
+```bash
+docker run "${RUN_FLAGS[@]}" <IMAGE_NAME> "${REMAINING_ARGS[@]}"
+```
+
+Where `<IMAGE_NAME>` is the most-derived image in the build chain:
+- `sandy-project-<name>-<hash>` if Phase 3 exists
+- `sandy-skills-<packs>` if skill packs enabled
+- `sandy-claude-code` otherwise
