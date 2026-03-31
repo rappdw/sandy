@@ -222,19 +222,13 @@ Sandy's base image is a self-contained development environment. Everything below
 
 ### Plugin marketplace
 
-The [sandy-plugins](https://github.com/rappdw/sandy-plugins) and [claude-plugins-official](https://github.com/anthropics/claude-plugins-official) marketplaces are pre-configured in every sandbox. Browse and install plugins with:
+Three plugin marketplaces are pre-configured in every sandbox: [claude-plugins-official](https://github.com/anthropics/claude-plugins-official), [thinkkit](https://github.com/rappdw/thinkkit), and [ait](https://github.com/rappdw/ait). Browse and install plugins with:
 
 ```
 /plugin                                    # browse available plugins
-/plugin install synthkit@sandy-plugins     # install a plugin
+/plugin install synthkit@thinkkit          # install a plugin
 /plugin update                             # update installed plugins
 ```
-
-Available plugins:
-
-| Plugin | Description |
-|---|---|
-| [synthkit](https://github.com/rappdw/synthkit) | Document synthesis — guided exploration, markdown to PDF/DOCX/HTML/email |
 
 **Known issue — slash command autocomplete**: Plugin skills (e.g. `/boardroom`, `/md2pdf`) are lazy-loaded by Claude Code and won't appear in slash command autocomplete until invoked once — either by typing the request naturally (e.g. "run a boardroom debate about X") or via the fully qualified name (e.g. `synthkit:boardroom`). After first invocation, they appear in autocomplete for the rest of the session. This is a [known Claude Code bug](https://github.com/anthropics/claude-code/issues/18949) — the slash command resolver only indexes the legacy `commands/` system and ignores `skills/` entries (despite commands being [merged into skills](https://code.claude.com/docs/en/skills.md)).
 
@@ -249,7 +243,7 @@ SANDY_SKILL_PACKS=gstack
 
 | Pack | Description | Source |
 |------|-------------|--------|
-| `gstack` | 28 Claude Code skills (QA, review, ship, browse, etc.) + headless Chromium browser engine | [rappdw/gstack](https://github.com/rappdw/gstack) |
+| `gstack` | 28 Claude Code skills (QA, review, ship, browse, etc.) + headless Chromium browser engine | [garrytan/gstack](https://github.com/garrytan/gstack) |
 
 First launch with a new skill pack takes a few minutes (downloading, compiling, installing Chromium). After that, launches are instant — everything is cached in a Docker image layer. Sandy auto-checks for newer skill pack releases on each launch and rebuilds when updates are available.
 
@@ -345,7 +339,7 @@ FROM ${BASE_IMAGE}
 # No USER directive needed — entrypoint handles privilege dropping
 RUN curl -LsSf https://github.com/typst/typst/releases/latest/download/typst-x86_64-unknown-linux-musl.tar.xz \
     | tar -xJ --strip-components=1 -C /usr/local/bin
-ARG QUARTO_VERSION=1.8.27
+ARG QUARTO_VERSION=1.9.36
 RUN curl -fL "https://github.com/quarto-dev/quarto-cli/releases/download/v${QUARTO_VERSION}/quarto-${QUARTO_VERSION}-linux-amd64.tar.gz" \
     | tar -xz -C /opt \
     && ln -s /opt/quarto-${QUARTO_VERSION}/bin/quarto /usr/local/bin/quarto

@@ -428,7 +428,7 @@ check "passwd overlay for non-default UID" \
     grep -q 'SANDY_PASSWD.*passwd' "$SCRIPT"
 
 # ============================================================
-info "17. Per-project config is sourced"
+info "17. Per-project config parsing"
 # ============================================================
 
 # Static analysis: verify .sandy/config loading happens before SSH relay setup
@@ -664,16 +664,16 @@ check "skill_pack_resolve_versions function defined" \
     grep -q 'skill_pack_resolve_versions()' "$SCRIPT"
 check "gstack registered as skill pack" \
     grep -q 'gstack' "$SCRIPT"
-check "gstack repo points to rappdw fork" \
-    grep -q 'rappdw/gstack' "$SCRIPT"
+check "gstack repo points to upstream garrytan" \
+    grep -q 'garrytan/gstack' "$SCRIPT"
 
 # Static analysis: verify SANDY_SKILL_PACKS is in config allowlist
 check "SANDY_SKILL_PACKS in config allowlist" \
     grep -q 'SANDY_SKILL_PACKS' "$SCRIPT"
 
-# Static analysis: verify generate_skill_pack_dockerfile function exists
-check "generate_skill_pack_dockerfile function defined" \
-    grep -q 'generate_skill_pack_dockerfile()' "$SCRIPT"
+# Static analysis: verify generate_skill_pack_dockerfiles function exists
+check "generate_skill_pack_dockerfiles function defined" \
+    grep -q 'generate_skill_pack_dockerfiles()' "$SCRIPT"
 
 # Static analysis: verify Phase 2.5 build block exists
 check "Phase 2.5 skill pack build phase exists" \
@@ -703,9 +703,9 @@ SKILLS_TEST_DIR="$(mktemp -d)"
     # Source just the functions we need from the sandy script
     SANDY_HOME="$SKILLS_TEST_DIR"
     SKILL_PACK_NAMES=(gstack)
-    SKILL_PACK_REPOS=("https://github.com/rappdw/gstack")
-    SKILL_PACK_VERSIONS=("sandy/v0.11.19.0")
-    SKILL_PACK_TAG_PREFIXES=("sandy/v")
+    SKILL_PACK_REPOS=("https://github.com/garrytan/gstack")
+    SKILL_PACK_VERSIONS=("main")
+    SKILL_PACK_TAG_PREFIXES=("")
     IMAGE_NAME="sandy-claude-code"
 
     skill_pack_lookup() {
@@ -725,30 +725,41 @@ SKILLS_TEST_DIR="$(mktemp -d)"
     error() { echo "ERROR: $*" >&2; }
 
     # Extract the generator function from the script and source it
-    eval "$(sed -n '/^generate_skill_pack_dockerfile()/,/^}/p' "$SCRIPT")"
+    eval "$(sed -n '/^generate_skill_pack_dockerfiles()/,/^}/p' "$SCRIPT")"
 
-    generate_skill_pack_dockerfile "gstack"
+    generate_skill_pack_dockerfiles "gstack"
 )
 
+SKILLS_BASE_DF="$SKILLS_TEST_DIR/Dockerfile.skills-base.new"
 SKILLS_DF="$SKILLS_TEST_DIR/Dockerfile.skills.new"
+
+# Phase 2.5a: base image (Playwright + Chromium)
+check "Dockerfile.skills-base generated" \
+    test -f "$SKILLS_BASE_DF"
+check "Dockerfile.skills-base starts FROM sandy-claude-code" \
+    grep -q '^FROM sandy-claude-code' "$SKILLS_BASE_DF"
+check "Dockerfile.skills-base installs Playwright deps" \
+    grep -q 'playwright install-deps chromium' "$SKILLS_BASE_DF"
+check "Dockerfile.skills-base installs Playwright browser" \
+    grep -q 'playwright install chromium' "$SKILLS_BASE_DF"
+check "Dockerfile.skills-base sets PLAYWRIGHT_BROWSERS_PATH" \
+    grep -q 'PLAYWRIGHT_BROWSERS_PATH=/opt/skills/gstack/.browsers' "$SKILLS_BASE_DF"
+
+# Phase 2.5b: code image (gstack source + bun build)
 check "Dockerfile.skills generated" \
     test -f "$SKILLS_DF"
-check "Dockerfile.skills starts FROM sandy-claude-code" \
-    grep -q '^FROM sandy-claude-code' "$SKILLS_DF"
+check "Dockerfile.skills starts FROM sandy-skills-base-gstack" \
+    grep -q '^FROM sandy-skills-base-gstack' "$SKILLS_DF"
 check "Dockerfile.skills downloads gstack tarball" \
-    grep -q 'rappdw/gstack/archive' "$SKILLS_DF"
+    grep -q 'garrytan/gstack/archive' "$SKILLS_DF"
 check "Dockerfile.skills installs to /opt/skills/gstack" \
     grep -q '/opt/skills/gstack' "$SKILLS_DF"
 check "Dockerfile.skills runs bun build" \
     grep -q 'bun run build' "$SKILLS_DF"
-check "Dockerfile.skills installs Playwright deps" \
-    grep -q 'playwright install-deps chromium' "$SKILLS_DF"
-check "Dockerfile.skills installs Playwright browser" \
-    grep -q 'playwright install chromium' "$SKILLS_DF"
-check "Dockerfile.skills sets PLAYWRIGHT_BROWSERS_PATH" \
-    grep -q 'PLAYWRIGHT_BROWSERS_PATH=/opt/skills/gstack/.browsers' "$SKILLS_DF"
 check "Dockerfile.skills does not set USER (entrypoint handles privilege drop)" \
     bash -c "! grep -q '^USER' '$SKILLS_DF'"
+check "Dockerfile.skills-base does not set USER" \
+    bash -c "! grep -q '^USER' '$SKILLS_BASE_DF'"
 
 rm -rf "$SKILLS_TEST_DIR"
 

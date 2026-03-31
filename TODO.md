@@ -66,7 +66,7 @@ Analysis of [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-
   > - **Auto-update**: Detects new Claude Code releases and rebuilds automatically
   > - **Git submodule support**: Correctly mounts worktree and gitdir for submodule workspaces
   >
-  > Self-contained bash script (~950 lines). Works on Linux and macOS (via Docker Desktop or Colima).
+  > Self-contained bash script (~1,850 lines). Works on Linux and macOS (via Docker Desktop or Colima).
 
   </details>
 
@@ -76,7 +76,7 @@ Analysis of [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-
 
 ## Plugin Marketplaces
 
-Sandy currently seeds the official Anthropic plugin marketplace (copied from host) and `rappdw/sandy-plugins` (added via `extraKnownMarketplaces` in settings.json). Consider seeding additional community marketplaces to give users a richer plugin catalog out of the box.
+Sandy currently seeds three plugin marketplaces via `extraKnownMarketplaces` in settings.json: `claude-plugins-official` (Anthropic), `thinkkit` (rappdw), and `ait` (rappdw). Consider seeding additional community marketplaces to give users a richer plugin catalog out of the box.
 
 - [ ] **Evaluate and seed community plugin marketplaces** — Candidates to investigate (verify repos exist, have valid `marketplace.json`, and are actively maintained before adding):
 
