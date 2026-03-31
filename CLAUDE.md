@@ -2,6 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Keeping Documentation in Sync
+
+When modifying the `sandy` script, update `SPECIFICATION.md` to reflect any changes to behavior, flags, configuration, generated files, runtime parameters, JSON schemas, or platform-specific logic. The spec has five appendices (A–E) with implementation-level detail — these must stay accurate:
+
+- **Appendix A** (Generated File Templates): Update when Dockerfile content, entrypoint.sh, user-setup.sh, or tmux.conf changes
+- **Appendix B** (Runtime Parameters): Update when timeouts, limits, permissions, default values, or tool versions change
+- **Appendix C** (JSON Schemas): Update when settings.json, access.json, .claude.json, or credentials handling changes
+- **Appendix D** (Platform-Specific Behavior): Update when Linux/macOS divergence points change
+- **Appendix E** (Container Launch Assembly): Update when docker run flags, mounts, or environment variables change
+
+Also update `README.md` and this file (`CLAUDE.md`) if user-facing behavior changes. Run `test/run-tests.sh` to verify test assertions still match.
+
 ## What This Is
 
 `sandy` — Claude's isolated sibling. A self-contained command that runs Claude Code in a Docker sandbox with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes.
