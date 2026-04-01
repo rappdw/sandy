@@ -76,7 +76,7 @@ Analysis of [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-
 
 ## Plugin Marketplaces
 
-Sandy currently seeds three plugin marketplaces via `extraKnownMarketplaces` in settings.json: `claude-plugins-official` (Anthropic), `thinkkit` (rappdw), and `ait` (rappdw). Consider seeding additional community marketplaces to give users a richer plugin catalog out of the box.
+Sandy currently seeds three plugin marketplaces via `extraKnownMarketplaces` in settings.json: `claude-plugins-official` (Anthropic), `thinkkit` (rappdw), and `pka-skills` (rappdw). Consider seeding additional community marketplaces to give users a richer plugin catalog out of the box.
 
 - [ ] **Evaluate and seed community plugin marketplaces** — Candidates to investigate (verify repos exist, have valid `marketplace.json`, and are actively maintained before adding):
 

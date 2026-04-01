@@ -553,6 +553,7 @@ export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS="${CLAUDE_CODE_EXPERIMENTAL_AGENT_TE
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}"
 export DISABLE_AUTOUPDATER=1
 export ENABLE_CLAUDEAI_MCP_SERVERS=false
+export FORCE_AUTOUPDATE_PLUGINS=true
 
 sandy_log "Setting up language toolchains"
 # Cargo: writable registry cache + cargo-install binaries
@@ -659,9 +660,9 @@ if [ -f "$SETTINGS_FILE" ]; then
         const required = {
             "claude-plugins-official": { source: { source: "github", repo: "anthropics/claude-plugins-official" } },
             "thinkkit": { source: { source: "github", repo: "rappdw/thinkkit" } },
-            "ait": { source: { source: "github", repo: "rappdw/ait" } }
+            "pka-skills": { source: { source: "github", repo: "rappdw/pka-skills" } }
         };
-        const deprecated = ["sandy-plugins"];
+        const deprecated = ["sandy-plugins", "ait"];
         let changed = false;
         for (const name of deprecated) {
             if (s.extraKnownMarketplaces[name]) {
@@ -1259,7 +1260,7 @@ if [ ! -d "$SANDBOX_DIR" ]; then
         cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/statsig"
         info "  Seeded statsig/"
     fi
-    # NOTE: Plugin marketplace catalogs are NOT seeded from host — the thinkkit/ait
+    # NOTE: Plugin marketplace catalogs are NOT seeded from host — the thinkkit/pka-skills
     # marketplaces are configured via extraKnownMarketplaces in user-setup.sh (baked into
     # the image). Claude Code fetches the catalog on first /plugin browse.
     # Write sandy-required defaults into settings.json (merge with seeded copy)

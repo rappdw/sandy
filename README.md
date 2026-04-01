@@ -222,7 +222,7 @@ Sandy's base image is a self-contained development environment. Everything below
 
 ### Plugin marketplace
 
-Three plugin marketplaces are pre-configured in every sandbox: [claude-plugins-official](https://github.com/anthropics/claude-plugins-official), [thinkkit](https://github.com/rappdw/thinkkit), and [ait](https://github.com/rappdw/ait). Browse and install plugins with:
+Three plugin marketplaces are pre-configured in every sandbox: [claude-plugins-official](https://github.com/anthropics/claude-plugins-official), [thinkkit](https://github.com/rappdw/thinkkit), and [pka-skills](https://github.com/rappdw/pka-skills). Browse and install plugins with:
 
 ```
 /plugin                                    # browse available plugins
