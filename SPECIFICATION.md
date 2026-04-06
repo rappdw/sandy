@@ -594,12 +594,11 @@ Sandy configures three plugin marketplaces in `settings.json` via `extraKnownMar
 | Name | Source |
 |---|---|
 | `claude-plugins-official` | `{ source: "github", repo: "anthropics/claude-plugins-official" }` |
-| `thinkkit` | `{ source: "github", repo: "rappdw/thinkkit" }` |
-| `pka-skills` | `{ source: "github", repo: "rappdw/pka-skills" }` |
+| `sandy-plugins` | `{ source: "github", repo: "rappdw/sandy-plugins" }` |
 
 ### Deprecated Marketplace Removal
 
-The `sandy-plugins` and `ait` marketplaces are automatically removed from `settings.json` on startup if present.
+The `thinkkit`, `ait`, and `pka-skills` marketplaces are automatically removed from `settings.json` on startup if present.
 
 ### Refresh Logic
 
@@ -1223,11 +1222,8 @@ The file is only written on first run — if it already exists, it's preserved t
     "claude-plugins-official": {
       "source": { "source": "github", "repo": "anthropics/claude-plugins-official" }
     },
-    "thinkkit": {
-      "source": { "source": "github", "repo": "rappdw/thinkkit" }
-    },
-    "pka-skills": {
-      "source": { "source": "github", "repo": "rappdw/pka-skills" }
+    "sandy-plugins": {
+      "source": { "source": "github", "repo": "rappdw/sandy-plugins" }
     }
   }
 }

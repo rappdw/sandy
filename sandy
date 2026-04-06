@@ -659,10 +659,9 @@ if [ -f "$SETTINGS_FILE" ]; then
         if (!s.extraKnownMarketplaces) s.extraKnownMarketplaces = {};
         const required = {
             "claude-plugins-official": { source: { source: "github", repo: "anthropics/claude-plugins-official" } },
-            "thinkkit": { source: { source: "github", repo: "rappdw/thinkkit" } },
-            "pka-skills": { source: { source: "github", repo: "rappdw/pka-skills" } }
+            "sandy-plugins": { source: { source: "github", repo: "rappdw/sandy-plugins" } }
         };
-        const deprecated = ["sandy-plugins", "ait"];
+        const deprecated = ["thinkkit", "ait", "pka-skills"];
         let changed = false;
         for (const name of deprecated) {
             if (s.extraKnownMarketplaces[name]) {
@@ -1260,8 +1259,8 @@ if [ ! -d "$SANDBOX_DIR" ]; then
         cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/statsig"
         info "  Seeded statsig/"
     fi
-    # NOTE: Plugin marketplace catalogs are NOT seeded from host — the thinkkit/pka-skills
-    # marketplaces are configured via extraKnownMarketplaces in user-setup.sh (baked into
+    # NOTE: Plugin marketplace catalogs are NOT seeded from host — the sandy-plugins
+    # marketplace is configured via extraKnownMarketplaces in user-setup.sh (baked into
     # the image). Claude Code fetches the catalog on first /plugin browse.
     # Write sandy-required defaults into settings.json (merge with seeded copy)
     SETTINGS_FILE="$SANDBOX_DIR/settings.json"
