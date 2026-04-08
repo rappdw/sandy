@@ -1665,6 +1665,12 @@ while IFS= read -r -d '' link; do
     target="$(readlink -f "$link" 2>/dev/null || true)"
     [ -z "$target" ] && continue
     if [[ "$target" != "$REAL_WORK_DIR"* ]]; then
+        # Skip symlinks to system paths — mounting host system binaries over
+        # the container's (e.g. /usr/bin/python3) breaks the container.
+        # Only mount targets under $HOME.
+        if [[ "$target" != "$HOME"/* ]]; then
+            continue
+        fi
         link_rel="${link#$WORK_DIR/}"
         DANGEROUS_SYMLINKS+=("$link_rel -> $target")
         SYMLINK_HOST_PATHS+=("$target")
@@ -1688,7 +1694,7 @@ while IFS= read -r -d '' link; do
     fi
 done < <(find "$WORK_DIR" -maxdepth 5 -type l \
     -not -path '*/node_modules/*' \
-    -not -path '*/.venv/*' \
+    -not -path '*/.venv*/*' \
     -not -path '*/.git/*' \
     -print0 2>/dev/null)
 
