@@ -378,9 +378,9 @@ If the host UID differs from the image default (1001), sandy generates custom `p
 
 **Channel credentials**: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
 
-**Git**: `GIT_USER_NAME`, `GIT_USER_EMAIL`, `GIT_TOKEN`, `SANDY_SSH`, `SSH_RELAY_PORT`
+**Git**: `GIT_USER_NAME`, `GIT_USER_EMAIL`, `GIT_TOKEN`, `GH_ACCOUNTS`, `SANDY_SSH`, `SSH_RELAY_PORT`
 
-**System**: `HOST_UID`, `HOST_GID`, `DISABLE_AUTOUPDATER=1`, `ENABLE_CLAUDEAI_MCP_SERVERS=false`
+**System**: `HOST_UID`, `HOST_GID`, `DISABLE_AUTOUPDATER=1`, `ENABLE_CLAUDEAI_MCP_SERVERS=false`, `FORCE_AUTOUPDATE_PLUGINS=true`
 
 ### Resource Limits
 
@@ -469,10 +469,14 @@ Duplicate targets are deduplicated by container mount path.
 
 ### Token Mode (default, `SANDY_SSH=token`)
 
-1. Query `gh auth token` on host
-2. Pass token to container via `-e GIT_TOKEN=...`
-3. In container: configure `git config --global url."https://oauth2:<TOKEN>@github.com/".insteadOf "git@github.com:"`
-4. Authenticate `gh` CLI with the token
+1. Query `gh auth token` on host for the active account's token (`GIT_TOKEN`)
+2. Enumerate all authenticated accounts via `gh auth status`, collect each account's token via `gh auth token --user <account>`
+3. Pass `GIT_TOKEN` to container (used for git URL rewriting)
+4. Pass `GH_ACCOUNTS` to container as comma-separated `user:token` pairs (e.g. `user1:tok1,user2:tok2`)
+5. In container: configure `git config --global url."https://oauth2:<TOKEN>@github.com/".insteadOf "git@github.com:"` (token mode only)
+6. In container: authenticate `gh` CLI with all accounts from `GH_ACCOUNTS` (works in both token and agent modes)
+
+Multi-account support: Users with multiple GitHub accounts (e.g. personal + enterprise) authenticated via `gh auth login` will have all accounts available inside the container. The `gh` CLI can then access repos from any authenticated account.
 
 Fallback: If `gh auth token` fails, warn that git push/pull may not work.
 
@@ -1672,6 +1676,7 @@ GIT_USER_NAME=<name>
 GIT_USER_EMAIL=<email>
 SANDY_SSH=<token|agent>
 GIT_TOKEN=<token>          # token mode only
+GH_ACCOUNTS=<user1:tok1,user2:tok2>  # all gh-authenticated accounts
 
 # Credentials (explicitly emptied if not set to prevent host env leakage)
 ANTHROPIC_API_KEY=<key>             # empty string if unset
@@ -1685,6 +1690,7 @@ HOST_UID=<uid>
 HOST_GID=<gid>
 DISABLE_AUTOUPDATER=1
 ENABLE_CLAUDEAI_MCP_SERVERS=false
+FORCE_AUTOUPDATE_PLUGINS=true
 ```
 
 Git identity fallback: if `GIT_USER_NAME`/`GIT_USER_EMAIL` are not set via config, they are read from the host's `git config user.name` and `git config user.email`.

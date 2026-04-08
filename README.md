@@ -27,6 +27,28 @@ Sandy runs Claude Code in a Docker container with `--dangerously-skip-permission
 
 No `ANTHROPIC_API_KEY` required if using a Claude paid account (Pro/Max) — credentials are seeded from the host on first run.
 
+## Why Sandy — Virtual Environments for Claude Code
+
+Claude Code stores plugins, memory, hooks, credentials, and session history in a single global `~/.claude/` directory — shared across every project on your machine. This means a plugin installed for one project is active in all of them. Credentials are shared. Memory bleeds between contexts.
+
+Sandy fixes this with **per-project sandboxes** — the same idea as Python virtual environments, but for your entire Claude Code environment:
+
+```
+~/.sandy/sandboxes/
+├── webapp-a1b2c3d4/        # project A gets its own .claude/
+│   └── .claude/
+│       ├── plugins/         # plugins installed here stay here
+│       ├── memory/          # auto-memory is project-scoped
+│       └── settings.json    # settings don't leak across projects
+└── ml-pipeline-e5f6g7h8/   # project B is completely independent
+    └── .claude/
+        └── ...
+```
+
+Each project sandbox also gets **isolated package storage** — pip, npm, go, cargo, and uv installs persist across sessions but never leak between projects. Credentials are read fresh from the host each launch and mounted ephemerally — never persisted to the sandbox.
+
+This means you can run multiple sandy sessions across different projects simultaneously, each with its own plugins, memory, context, and installed tools — just like activating different Python venvs.
+
 ## Prerequisites
 
 Sandy works with any Docker-compatible runtime:
