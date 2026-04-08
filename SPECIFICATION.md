@@ -457,6 +457,12 @@ Host content at these paths is hidden (not visible inside container). Changes pe
 
 Before container launch, sandy scans the workspace (up to 5 levels deep, skipping `node_modules/`, `.venv/`, `.git/`) for symlinks pointing outside the project directory. If found, the user is prompted to confirm before proceeding.
 
+When the user accepts, sandy automatically mounts each symlink target into the container so the symlinks resolve correctly:
+- **Absolute symlinks** (`data -> /home/user/shared/data`): Target is mounted at the raw symlink path (the literal path the OS looks up inside the container).
+- **Relative symlinks** (`data -> ../../shared/data`): Target is mounted at its `$HOME`-relative container path, which is where the relative traversal lands from the container's workspace location.
+
+Duplicate targets are deduplicated by container mount path.
+
 ---
 
 ## 10. SSH Agent Relay
@@ -1525,6 +1531,12 @@ Proceed anyway? [y/N]
 ```
 
 Only `y`/`Y` proceeds; anything else aborts with exit 1.
+
+When the user accepts, each symlink target is mounted into the container (see Section 9, Symlink Protection). Mount path depends on symlink type:
+- **Absolute**: `-v "<resolved_host_path>:<raw_symlink_value>"`
+- **Relative**: `-v "<resolved_host_path>:<HOME_relative_container_path>"`
+
+Deduplicated by container mount path.
 
 ### E.10 Protected File Mounts
 
