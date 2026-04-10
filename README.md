@@ -2,7 +2,7 @@
 [![GitHub release](https://img.shields.io/github/v/release/rappdw/sandy)](https://github.com/rappdw/sandy/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)]()
 
-# sandy — Claude's isolated sibling
+# sandy — an isolated sibling for your coding agents
 
 When you're giving AI agents real autonomy to write code, run tests, and modify systems, the environment needs OS-enforced boundaries, not permission prompts. Sandy is the tool we built to make that work.
 
@@ -14,7 +14,7 @@ cd /path/to/your/project
 sandy
 ```
 
-Sandy runs Claude Code in a Docker container with `--dangerously-skip-permissions` — so Claude works without interruption while your system stays protected:
+Sandy runs Claude Code or Gemini CLI (or both, side-by-side) in a Docker container with agent permission checks disabled — so the agent works without interruption while your system stays protected:
 
 - **Filesystem**: Read/write limited to the mounted working directory only
 - **Network**: Public internet only — all LAN/private networks blocked

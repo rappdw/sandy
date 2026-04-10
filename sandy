@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # =============================================================================
-# sandy — Claude's isolated sibling
+# sandy — an isolated sibling for your coding agents
 #
-# Runs Claude Code in a Docker container with:
+# Runs Claude Code or Gemini CLI (or both, side-by-side) in a Docker container with:
 #   - Filesystem: read/write limited to current directory only
 #   - Network: public internet only, NO LAN access
 #   - Resources: capped CPU and memory
@@ -257,10 +257,11 @@ fi
 # --- Help ---
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<EOF
-sandy $(sandy_full_version) — Claude's isolated sibling
+sandy $(sandy_full_version) — an isolated sibling for your coding agents
 
-Run Claude Code in a Docker container with filesystem isolation,
-network isolation, resource limits, and per-project credential sandboxes.
+Run Claude Code or Gemini CLI (or both, side-by-side) in a Docker container
+with filesystem isolation, network isolation, resource limits, and per-project
+credential sandboxes.
 
 Usage:
   sandy                          Resume last session (or start new)

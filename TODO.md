@@ -52,7 +52,7 @@ Analysis of [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-
 
   **Description:**
 
-  > **sandy** — Claude's isolated sibling. A single command that runs Claude Code in a fully sandboxed Docker container.
+  > **sandy** — an isolated sibling for your coding agents. A single command that runs Claude Code or Gemini CLI (or both, side-by-side) in a fully sandboxed Docker container.
   >
   > `curl | bash` install, then just run `sandy` from any project directory. No config needed.
   >

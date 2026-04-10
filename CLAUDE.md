@@ -16,7 +16,7 @@ Also update `README.md` and this file (`CLAUDE.md`) if user-facing behavior chan
 
 ## What This Is
 
-`sandy` — Claude's isolated sibling. A self-contained command that runs Claude Code in a Docker sandbox with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes.
+`sandy` — an isolated sibling for your coding agents. A self-contained command that runs Claude Code or Gemini CLI (or both, side-by-side) in a Docker sandbox with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes.
 
 ## Installation
 
