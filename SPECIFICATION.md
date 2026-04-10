@@ -1,6 +1,6 @@
 # Sandy Specification
 
-**Version**: 0.8.2-dev
+**Version**: 0.9.0
 **Date**: 2026-04-10
 **Source**: ~2,200-line bash script (`sandy`), installer (`install.sh`), test suite (`test/run-tests.sh`)
 
@@ -172,7 +172,7 @@ Each project directory gets a sandbox at `~/.sandy/sandboxes/<NAME>-<HASH>/`:
 
 ### Directory Layout
 
-As of v0.8.2, the sandbox directory contains **sibling** `claude/` and `gemini/` subdirs, one per supported agent, so both can coexist in `SANDY_AGENT=both` mode.
+As of v0.9.0, the sandbox directory contains **sibling** `claude/` and `gemini/` subdirs, one per supported agent, so both can coexist in `SANDY_AGENT=both` mode.
 
 ```
 ~/.sandy/sandboxes/<name>-<hash>/
@@ -707,7 +707,7 @@ docker exec <CONTAINER_NAME> tmux send-keys -t sandy.<PANE> "<text>" Enter
 
 Launched as a background process before `docker run`, tracked via `CHANNEL_RELAY_PID`, and killed in the cleanup trap. The target pane is `SANDY_CHANNEL_TARGET_PANE` (default `0` = Claude in dual mode, or the sole pane in gemini-only mode).
 
-**Scope**: Telegram only in v0.8.2; Discord via relay is deferred. The relay is stateless — no chat threading, no attachment support, no edit-message reactions. For rich features, use the claude plugin path.
+**Scope**: Telegram only in v0.9.0; Discord via relay is deferred. The relay is stateless — no chat threading, no attachment support, no edit-message reactions. For rich features, use the claude plugin path.
 
 ### Multiple Channels
 
