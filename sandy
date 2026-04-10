@@ -786,8 +786,10 @@ if [ -n "${SANDY_CHANNELS:-}" ]; then
                     continue
                 fi
             fi
-            # Always ensure enabled (idempotent; silent if already enabled)
-            claude plugin enable "${_chan}@claude-plugins-official" >/dev/null 2>&1 || true
+            # Always ensure enabled (idempotent; silent if already enabled).
+            # The enable command takes just the plugin name, not plugin@marketplace.
+            claude plugin enable "$_chan" >/dev/null 2>&1 || \
+                claude plugin enable "${_chan}@claude-plugins-official" >/dev/null 2>&1 || true
         fi
     done
 fi
