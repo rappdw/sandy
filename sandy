@@ -26,7 +26,8 @@ if [[ "$SANDY_HOME" =~ [\;\$\`\&\|\<\>] ]]; then
     exit 1
 fi
 BASE_IMAGE_NAME="sandy-base"
-IMAGE_NAME="sandy-claude-code"
+# IMAGE_NAME is set dynamically after config load, based on SANDY_AGENT
+IMAGE_NAME=""
 # Per-instance network names keyed on PID to avoid concurrent iptables races
 BRIDGE_NAME="br-sdy-$$"
 NETWORK_NAME="sandy_net_$$"
@@ -286,6 +287,9 @@ Environment variables:
   SANDY_GPU          GPU passthrough: "all" for all GPUs, or device IDs
                      like "0" or "0,1" (requires NVIDIA Container Toolkit)
   SANDY_SKILL_PACKS  Comma-separated skill packs to install (e.g. "gstack")
+  SANDY_AGENT        AI agent to run: "claude" (default) or "gemini"
+  GEMINI_API_KEY     Google API key for Gemini CLI (SANDY_AGENT=gemini only)
+  GEMINI_MODEL       Gemini model override (SANDY_AGENT=gemini only)
   CLAUDE_CODE_MAX_OUTPUT_TOKENS  Max output tokens per response (default: 128000)
 
 Per-project config:
@@ -304,7 +308,7 @@ Flags:
   -vv                Debug: add bash trace to user-setup.sh
   -vvv               Full trace: also trace entrypoint.sh and show docker flags
 
-All other arguments are forwarded to claude.
+All other arguments are forwarded to the agent (claude or gemini).
 EOF
     exit 0
 fi
@@ -323,6 +327,7 @@ while [ $# -gt 0 ]; do
         --new)        SANDY_NEW_SESSION=true ;;
         --remote)     SANDY_REMOTE_CONTROL=true ;;
         --upgrade)    sandy_self_update; exit 0 ;;
+        --agent)      shift; SANDY_AGENT="$1" ;;
         -vvv)         SANDY_VERBOSE=3 ;;
         -vv)          SANDY_VERBOSE=2 ;;
         -v)           SANDY_VERBOSE=1 ;;
@@ -440,6 +445,56 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 DOCKERFILE
 }
 
+generate_dockerfile_gemini() {
+    cat > "$SANDY_HOME/Dockerfile.gemini.new" <<DOCKERFILE
+FROM ${BASE_IMAGE_NAME}
+# Install Gemini CLI as a global npm package. Unlike Claude Code, no binary
+# relocation is needed — npm -g places \`gemini\` directly into PATH.
+RUN npm install -g @google/gemini-cli \\
+ && mkdir -p /opt/gemini-cli \\
+ && { npm list -g @google/gemini-cli --depth=0 2>/dev/null \\
+      | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/gemini-cli/.version || true; }
+# synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+ && rm -rf /var/lib/apt/lists/*
+RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
+COPY tmux.conf /etc/tmux.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY user-setup.sh /usr/local/bin/user-setup.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/user-setup.sh
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+DOCKERFILE
+}
+
+generate_dockerfile_both() {
+    cat > "$SANDY_HOME/Dockerfile.both.new" <<DOCKERFILE
+FROM ${BASE_IMAGE_NAME}
+# Install Claude Code natively (see generate_dockerfile for rationale).
+RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
+ && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \\
+ && mv /home/claude/.local/share/claude /opt/claude-code \\
+ && { /usr/local/bin/claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version || true; }
+# Install Gemini CLI as a global npm package alongside Claude Code.
+RUN npm install -g @google/gemini-cli \\
+ && mkdir -p /opt/gemini-cli \\
+ && { npm list -g @google/gemini-cli --depth=0 2>/dev/null \\
+      | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/gemini-cli/.version || true; }
+# synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+ && rm -rf /var/lib/apt/lists/*
+RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
+COPY tmux.conf /etc/tmux.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY user-setup.sh /usr/local/bin/user-setup.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/user-setup.sh
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+DOCKERFILE
+}
+
 generate_entrypoint() {
     cat > "$SANDY_HOME/entrypoint.sh.new" <<'ENTRYPOINT'
 #!/bin/bash
@@ -506,14 +561,18 @@ for d in /home/claude/.pip-packages /home/claude/.local/share/uv \
 done
 
 # Restore native install layout so Claude Code finds its binary and data at the
-# expected paths (the real files live outside /home/claude to survive the tmpfs overlay)
+# expected paths (the real files live outside /home/claude to survive the tmpfs overlay).
+# Gemini CLI is installed globally via npm and doesn't need this relocation.
 mkdir -p /home/claude/.local/bin /home/claude/.local/share
-ln -sf /usr/local/bin/claude /home/claude/.local/bin/claude
-ln -sf /opt/claude-code /home/claude/.local/share/claude
+if [ "${SANDY_AGENT:-claude}" = "claude" ] || [ "${SANDY_AGENT:-claude}" = "both" ]; then
+    ln -sf /usr/local/bin/claude /home/claude/.local/bin/claude
+    ln -sf /opt/claude-code /home/claude/.local/share/claude
+fi
 # chown the tmpfs dirs individually — avoid -R which would recurse into
 # the bind-mounted uv directory at .local/share/uv
 chown "$RUN_UID:$RUN_GID" /home/claude/.local /home/claude/.local/bin \
-    /home/claude/.local/share /home/claude/.local/share/claude 2>/dev/null || true
+    /home/claude/.local/share 2>/dev/null || true
+[ -L /home/claude/.local/share/claude ] && chown "$RUN_UID:$RUN_GID" /home/claude/.local/share/claude 2>/dev/null || true
 
 # Create pip/pip3 wrappers that auto-add --user for install commands when NOT
 # inside a virtualenv. Created here (root section) because the user section is
@@ -549,11 +608,16 @@ if [ "${SANDY_VERBOSE:-0}" -ge 2 ]; then
     set -x
 fi
 export HOME=/home/claude
-export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS="${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-0}"
-export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}"
-export DISABLE_AUTOUPDATER=1
-export ENABLE_CLAUDEAI_MCP_SERVERS=false
-export FORCE_AUTOUPDATE_PLUGINS=true
+# Convenience: _sandy_has_claude returns true for both 'claude' and 'both'.
+_sandy_has_claude() { [ "${SANDY_AGENT:-claude}" = "claude" ] || [ "${SANDY_AGENT:-claude}" = "both" ]; }
+_sandy_has_gemini() { [ "${SANDY_AGENT:-claude}" = "gemini" ] || [ "${SANDY_AGENT:-claude}" = "both" ]; }
+if _sandy_has_claude; then
+    export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS="${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-0}"
+    export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}"
+    export DISABLE_AUTOUPDATER=1
+    export ENABLE_CLAUDEAI_MCP_SERVERS=false
+    export FORCE_AUTOUPDATE_PLUGINS=true
+fi
 
 sandy_log "Setting up language toolchains"
 # Cargo: writable registry cache + cargo-install binaries
@@ -582,8 +646,9 @@ mkdir -p "$PYTHONUSERBASE/bin"
 export PATH="$HOME/.local/bin:$PYTHONUSERBASE/bin:$NPM_CONFIG_PREFIX/bin:$GOPATH/bin:$CARGO_HOME/bin:$PATH"
 
 sandy_log "Activating skill packs"
-# Activate baked-in skill packs (installed at /opt/skills/ during image build)
-if [ -d /opt/skills ]; then
+# Activate baked-in skill packs (installed at /opt/skills/ during image build).
+# Skill packs are Claude-specific (they populate ~/.claude/skills/).
+if _sandy_has_claude && [ -d /opt/skills ]; then
     mkdir -p "$HOME/.claude/skills"
     for _pack_dir in /opt/skills/*/; do
         [ -d "$_pack_dir" ] || continue
@@ -611,7 +676,7 @@ if [ -d /opt/skills/gstack/.browsers ]; then
 fi
 
 # Synthkit slash commands (md2pdf, md2doc, md2html, md2email)
-if command -v synthkit &>/dev/null; then
+if _sandy_has_claude && command -v synthkit &>/dev/null; then
     mkdir -p "$HOME/.claude/commands"
     cat > "$HOME/.claude/commands/md2pdf.md" <<'SKMD'
 Convert the specified markdown file(s) to PDF using the `md2pdf` command.
@@ -635,22 +700,95 @@ Run: md2email $ARGUMENTS
 SKMD
 fi
 
+# Synthkit slash commands for Gemini (TOML format)
+if _sandy_has_gemini && command -v synthkit &>/dev/null; then
+    mkdir -p "$HOME/.gemini/commands"
+    cat > "$HOME/.gemini/commands/md2pdf.toml" <<'SKTOML'
+description = "Convert markdown file(s) to PDF using md2pdf"
+prompt = """Convert these markdown files to PDF using the md2pdf command.
+Files/args: {{args}}
+
+Output of md2pdf {{args}}:
+!{md2pdf {{args}}}"""
+SKTOML
+    cat > "$HOME/.gemini/commands/md2doc.toml" <<'SKTOML'
+description = "Convert markdown file(s) to Word (.docx) using md2doc"
+prompt = """Convert these markdown files to Word using the md2doc command.
+Files/args: {{args}}
+
+Output of md2doc {{args}}:
+!{md2doc {{args}}}"""
+SKTOML
+    cat > "$HOME/.gemini/commands/md2html.toml" <<'SKTOML'
+description = "Convert markdown file(s) to HTML using md2html"
+prompt = """Convert these markdown files to HTML using the md2html command.
+Files/args: {{args}}
+
+Output of md2html {{args}}:
+!{md2html {{args}}}"""
+SKTOML
+    cat > "$HOME/.gemini/commands/md2email.toml" <<'SKTOML'
+description = "Convert a markdown file to clipboard-ready email HTML"
+prompt = """Convert this markdown file to clipboard-ready email HTML using the md2email command.
+File/args: {{args}}
+
+Output of md2email {{args}}:
+!{md2email {{args}}}"""
+SKTOML
+fi
+
+# Gemini extensions seeding (SANDY_GEMINI_EXTENSIONS)
+# Idempotent: check against the installed extension list (keyed on source URL)
+# rather than guessing the directory name from the repo basename — extensions
+# install under their declared name, which often differs (e.g. .../security
+# installs as gemini-cli-security).
+if _sandy_has_gemini && [ -n "${SANDY_GEMINI_EXTENSIONS:-}" ] && command -v gemini &>/dev/null; then
+    sandy_log "Installing Gemini extensions"
+    mkdir -p "$HOME/.gemini/extensions"
+    # Cache the installed-extensions listing once per launch.
+    _gem_installed="$(gemini extensions list 2>/dev/null || true)"
+    IFS=',' read -ra _exts <<< "$SANDY_GEMINI_EXTENSIONS"
+    for _ext in "${_exts[@]}"; do
+        _ext="$(echo "$_ext" | tr -d '[:space:]')"
+        [ -z "$_ext" ] && continue
+        # Match on the URL and on the repo basename — covers both display
+        # formats that different Gemini CLI versions use in `extensions list`.
+        _name="$(basename "$_ext" .git)"
+        if echo "$_gem_installed" | grep -qFe "$_ext" || \
+           echo "$_gem_installed" | grep -qiE "(^|[^a-z0-9-])${_name}([^a-z0-9-]|$)"; then
+            continue
+        fi
+        _install_out="$(gemini extensions install "$_ext" 2>&1)" || {
+            # "already installed" is a benign race, not a failure
+            if echo "$_install_out" | grep -qi "already installed"; then
+                :
+            else
+                echo "[sandy] WARN: Failed to install Gemini extension: $_ext" >&2
+                echo "$_install_out" >&2
+            fi
+        }
+    done
+fi
+
 # Remap ANSI dark blue (color 4) to a readable bright blue
 printf "\033]4;4;rgb:61/8f/ff\033\\"
 trap "printf \"\033]104;4\033\\\\\"" EXIT
 
 sandy_log "Configuring project settings"
-# Ensure project-level settings exist
 WORKSPACE="${SANDY_WORKSPACE:-/workspace}"
-mkdir -p "$WORKSPACE/.claude" 2>/dev/null || true
 
-# Project dir for current workspace
-_cur_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')"
-mkdir -p "$_cur_proj"
+# Ensure project-level config dirs exist (Claude only — Gemini uses .gemini/)
+if _sandy_has_claude; then
+    mkdir -p "$WORKSPACE/.claude" 2>/dev/null || true
 
-# Ensure plugin marketplaces are configured in settings.json (idempotent)
+    # Project dir for current workspace
+    _cur_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')"
+    mkdir -p "$_cur_proj"
+fi
+
+# Ensure plugin marketplaces are configured in settings.json (idempotent, Claude only)
 SETTINGS_FILE="$HOME/.claude/settings.json"
-if [ -f "$SETTINGS_FILE" ]; then
+if _sandy_has_claude && [ -f "$SETTINGS_FILE" ]; then
     node -e '
         const fs = require("fs");
         const f = process.argv[1];
@@ -738,11 +876,6 @@ if [ -d "$WORKSPACE/node_modules" ]; then
 fi
 
 sandy_log "Configuring git auth"
-# Configure git auth: GitHub token (default) or SSH agent
-if [ "${SANDY_SSH:-token}" = "token" ] && [ -n "${GIT_TOKEN:-}" ]; then
-    git config --global url."https://oauth2:${GIT_TOKEN}@github.com/".insteadOf "git@github.com:"
-    git config --global --add url."https://oauth2:${GIT_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
-fi
 # Authenticate gh CLI with all available accounts (works in both token and agent modes)
 if [ -n "${GH_ACCOUNTS:-}" ] && command -v gh &>/dev/null; then
     IFS=',' read -ra _gh_pairs <<< "$GH_ACCOUNTS"
@@ -754,9 +887,18 @@ if [ -n "${GH_ACCOUNTS:-}" ] && command -v gh &>/dev/null; then
 elif [ -n "${GIT_TOKEN:-}" ] && command -v gh &>/dev/null; then
     echo "${GIT_TOKEN}" | gh auth login --with-token 2>/dev/null || true
 fi
+# Configure git auth: in token mode, rewrite SSH URLs to HTTPS and use gh as
+# credential helper (supports multi-account — gh returns the right token per repo).
+if [ "${SANDY_SSH:-token}" = "token" ] && command -v gh &>/dev/null; then
+    git config --global url."https://github.com/".insteadOf "git@github.com:"
+    git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+    gh auth setup-git 2>/dev/null || true
+fi
 
 sandy_log "Refreshing plugin marketplaces"
-# Refresh plugin marketplaces (once per day, or forced when channels need plugins)
+# Refresh plugin marketplaces (once per day, or forced when channels need plugins).
+# Plugin marketplaces and channels are Claude-specific.
+if _sandy_has_claude; then
 _marketplace_cache="$HOME/.claude/plugins/.marketplace_updated"
 _now=$(date +%s)
 _stale=true
@@ -767,7 +909,7 @@ fi
 # Force refresh when channels are configured — plugins may need installing
 [ -n "${SANDY_CHANNELS:-}" ] && _stale=true
 if [ "$_stale" = true ]; then
-    claude plugin marketplace update 2>/dev/null || true
+    claude plugin marketplace update >/dev/null 2>&1 || true
     mkdir -p "$(dirname "$_marketplace_cache")"
     echo "$_now" > "$_marketplace_cache"
 fi
@@ -819,9 +961,87 @@ CHACCESS
 }
 _seed_channel telegram TELEGRAM_BOT_TOKEN TELEGRAM_ALLOWED_SENDERS
 _seed_channel discord DISCORD_BOT_TOKEN DISCORD_ALLOWED_SENDERS
+fi  # end Claude-only plugin/channel block
 
+# --- Agent command builders (used by single-agent and dual-pane launch modes) ---
+build_claude_cmd() {
+    local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-6} --teammate-mode tmux"
+    if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+        cmd+=" --dangerously-skip-permissions"
+    fi
+    if [ -n "${SANDY_CHANNELS:-}" ] && [ "${SANDY_AGENT:-claude}" = "claude" ]; then
+        # Native channels plugin path — only for pure-claude sessions.
+        # For 'both', channels are delivered via the host-side tmux-inject relay.
+        cmd+=" --channels $SANDY_CHANNELS"
+    fi
+    local auto_continue=true
+    if [ "${SANDY_NEW_SESSION:-false}" = "true" ]; then
+        auto_continue=false
+    fi
+    for arg in "$@"; do
+        case "$arg" in
+            -p|--resume|--continue) auto_continue=false ;;
+        esac
+    done
+    local cmd_base="$cmd"
+    if [ "$auto_continue" = "true" ]; then
+        local session_dir="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')/"
+        if ls "$session_dir"*.jsonl &>/dev/null; then
+            cmd+=" --continue"
+        fi
+    fi
+    for arg in "$@"; do
+        cmd+=" $(printf "%q" "$arg")"
+        cmd_base+=" $(printf "%q" "$arg")"
+    done
+    if [ "$cmd" != "$cmd_base" ]; then
+        cmd="$cmd || $cmd_base"
+    fi
+    if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+        cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Claude Code exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+    fi
+    printf '%s' "$cmd"
+}
+
+build_gemini_cmd() {
+    # Gemini CLI has its own per-tool sandbox; disable it since sandy provides
+    # whole-session isolation via Docker. GEMINI_SANDBOX=false is the documented
+    # way to disable Gemini's built-in sandbox (`--sandbox=none` is NOT valid).
+    export GEMINI_SANDBOX=false
+    local cmd="gemini"
+    if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+        cmd+=" --yolo"
+    fi
+    if [ -n "${GEMINI_MODEL:-}" ]; then
+        cmd+=" --model $(printf "%q" "$GEMINI_MODEL")"
+    fi
+    # Translate Claude-style flags to Gemini equivalents.
+    # -p / --print "prompt" → --prompt "prompt"  (Gemini has no -p shorthand)
+    # --continue / -c       → drop (Gemini has no headless resume flag)
+    for arg in "$@"; do
+        case "$arg" in
+            -p|--print)    cmd+=" --prompt" ;;
+            --continue|-c) : ;;
+            *)             cmd+=" $(printf "%q" "$arg")" ;;
+        esac
+    done
+    if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+        cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Gemini CLI exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+    fi
+    printf '%s' "$cmd"
+}
+
+# Detect headless / one-shot mode — bypass tmux so output reaches the parent shell.
+# Triggered by -p / --print / --prompt in the forwarded args.
+_sandy_is_headless=false
+for _arg in "$@"; do
+    case "$_arg" in
+        -p|--print|--prompt) _sandy_is_headless=true; break ;;
+    esac
+done
+
+if [ "${SANDY_AGENT:-claude}" = "claude" ]; then
 sandy_log "Launching Claude Code"
-# Build the claude command with any passed args
 if [ "${SANDY_REMOTE_CONTROL:-false}" = "true" ]; then
     # Remote-control server mode — no tmux wrapper, no auto-resume
     CLAUDE_CMD="claude remote-control --name \"sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}\""
@@ -833,50 +1053,41 @@ if [ "${SANDY_REMOTE_CONTROL:-false}" = "true" ]; then
     fi
     cd "$WORKSPACE"
     exec bash -c "$CLAUDE_CMD 2>&1"
+elif [ "$_sandy_is_headless" = "true" ]; then
+    # Headless one-shot — no tmux wrapper so output streams to parent stdout
+    CLAUDE_CMD="$(build_claude_cmd "$@")"
+    cd "$WORKSPACE"
+    exec bash -c "$CLAUDE_CMD"
 else
-    CLAUDE_CMD="claude --model ${SANDY_MODEL:-claude-opus-4-6} --teammate-mode tmux"
-    if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
-        CLAUDE_CMD+=" --dangerously-skip-permissions"
-    fi
-    if [ -n "${SANDY_CHANNELS:-}" ]; then
-        CLAUDE_CMD+=" --channels $SANDY_CHANNELS"
-    fi
-
-    # Auto-resume: inject --continue unless user passed --new, -p, --resume, or --continue
-    # Also skip if there are no prior sessions to continue (first run in this sandbox)
-    SANDY_AUTO_CONTINUE=true
-    if [ "${SANDY_NEW_SESSION:-false}" = "true" ]; then
-        SANDY_AUTO_CONTINUE=false
-    fi
-    for arg in "$@"; do
-        case "$arg" in
-            -p|--resume|--continue) SANDY_AUTO_CONTINUE=false ;;
-        esac
-    done
-    CLAUDE_CMD_BASE="$CLAUDE_CMD"
-    if [ "$SANDY_AUTO_CONTINUE" = "true" ]; then
-        # Check if any session files exist (path encodes SANDY_WORKSPACE)
-        SESSION_DIR="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')/"
-        if ls "$SESSION_DIR"*.jsonl &>/dev/null; then
-            CLAUDE_CMD+=" --continue"
-        fi
-    fi
-
-    for arg in "$@"; do
-        CLAUDE_CMD+=" $(printf "%q" "$arg")"
-        CLAUDE_CMD_BASE+=" $(printf "%q" "$arg")"
-    done
-
-    # Fall back to fresh session if --continue fails (stale/incompatible sessions)
-    if [ "$CLAUDE_CMD" != "$CLAUDE_CMD_BASE" ]; then
-        CLAUDE_CMD="$CLAUDE_CMD || $CLAUDE_CMD_BASE"
-    fi
-
-    if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
-        CLAUDE_CMD="$CLAUDE_CMD; _exit=\$?; echo ''; echo \"[sandy] Claude Code exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
-    fi
+    CLAUDE_CMD="$(build_claude_cmd "$@")"
     cd "$WORKSPACE"
     tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$CLAUDE_CMD 2>&1"
+fi
+elif [ "${SANDY_AGENT:-claude}" = "gemini" ]; then
+    sandy_log "Launching Gemini CLI"
+    GEMINI_CMD="$(build_gemini_cmd "$@")"
+    cd "$WORKSPACE"
+    if [ "$_sandy_is_headless" = "true" ]; then
+        exec bash -c "$GEMINI_CMD"
+    else
+        tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$GEMINI_CMD 2>&1"
+    fi
+elif [ "${SANDY_AGENT:-claude}" = "both" ]; then
+    if [ "$_sandy_is_headless" = "true" ]; then
+        # Headless mode with dual-agent doesn't make sense — route to Claude only.
+        sandy_log "Headless mode with SANDY_AGENT=both: routing to Claude only"
+        CLAUDE_CMD="$(build_claude_cmd "$@")"
+        cd "$WORKSPACE"
+        exec bash -c "$CLAUDE_CMD"
+    fi
+    sandy_log "Launching Claude Code + Gemini CLI (dual-pane)"
+    CLAUDE_CMD="$(build_claude_cmd "$@")"
+    GEMINI_CMD="$(build_gemini_cmd "$@")"
+    cd "$WORKSPACE"
+    tmux new-session -d -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$CLAUDE_CMD 2>&1"
+    tmux split-window -h -t sandy -- bash -c "$GEMINI_CMD 2>&1"
+    tmux select-pane -t sandy.0
+    tmux attach -t sandy
 fi
 USERSETUP
 }
@@ -916,6 +1127,93 @@ set -g set-clipboard on
 set -g focus-events on
 setw -g aggressive-resize on
 TMUXCONF
+}
+
+generate_channel_relay() {
+    cat > "$SANDY_HOME/channel-relay.sh.new" <<'RELAY'
+#!/usr/bin/env bash
+# sandy channel-relay — host-side Telegram → tmux injection bridge.
+# Long-polls the Telegram Bot API and injects messages into the container's
+# tmux session via `docker exec ... tmux send-keys`. Stateless, agent-agnostic.
+#
+# Required env: TELEGRAM_BOT_TOKEN, SANDY_CONTAINER_NAME
+# Optional:     TELEGRAM_ALLOWED_SENDERS (csv of user IDs), SANDY_CHANNEL_TARGET_PANE (default 0)
+set -u
+: "${TELEGRAM_BOT_TOKEN:?}"
+: "${SANDY_CONTAINER_NAME:?}"
+TARGET_PANE="${SANDY_CHANNEL_TARGET_PANE:-0}"
+ALLOWED="${TELEGRAM_ALLOWED_SENDERS:-}"
+API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
+OFFSET=0
+
+_is_allowed() {
+    local uid="$1"
+    [ -z "$ALLOWED" ] && return 0
+    case ",$ALLOWED," in *,"$uid",*) return 0 ;; esac
+    return 1
+}
+
+_inject() {
+    local text="$1"
+    # Wait for container tmux session to exist (up to 30s)
+    local tries=0
+    while [ $tries -lt 60 ]; do
+        if docker exec "$SANDY_CONTAINER_NAME" tmux has-session -t sandy 2>/dev/null; then
+            break
+        fi
+        sleep 0.5
+        tries=$((tries+1))
+    done
+    docker exec "$SANDY_CONTAINER_NAME" tmux send-keys -t "sandy.${TARGET_PANE}" "$text" Enter 2>/dev/null || true
+}
+
+# Drain stale updates once at startup
+_init="$(curl -sS --max-time 5 "${API}/getUpdates?timeout=0&offset=-1" 2>/dev/null || true)"
+if [ -n "$_init" ]; then
+    OFFSET="$(echo "$_init" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+    r=d.get("result",[])
+    print(r[-1]["update_id"]+1 if r else 0)
+except Exception:
+    print(0)' 2>/dev/null || echo 0)"
+fi
+
+while :; do
+    resp="$(curl -sS --max-time 60 "${API}/getUpdates?timeout=50&offset=${OFFSET}" 2>/dev/null || true)"
+    [ -z "$resp" ] && { sleep 2; continue; }
+    # Parse updates; emit: update_id\tuser_id\ttext
+    parsed="$(echo "$resp" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not d.get("ok"): sys.exit(0)
+for u in d.get("result", []):
+    uid = u.get("update_id", 0)
+    m = u.get("message") or u.get("edited_message") or {}
+    text = m.get("text") or m.get("caption") or ""
+    sender = (m.get("from") or {}).get("id", "")
+    if not text:
+        print(f"{uid}\t\t")
+        continue
+    # strip control chars; flatten newlines into spaces
+    text = text.replace("\r"," ").replace("\n"," ")
+    print(f"{uid}\t{sender}\t{text}")
+' 2>/dev/null || true)"
+    [ -z "$parsed" ] && continue
+    while IFS=$'\t' read -r uid sender text; do
+        [ -z "$uid" ] && continue
+        OFFSET=$((uid+1))
+        [ -z "$text" ] && continue
+        if _is_allowed "$sender"; then
+            _inject "$text"
+        fi
+    done <<< "$parsed"
+done
+RELAY
+    chmod +x "$SANDY_HOME/channel-relay.sh.new"
 }
 
 generate_skill_pack_dockerfiles() {
@@ -1018,14 +1316,14 @@ GSTACK_BLOCK
 ensure_build_files() {
     mkdir -p "$SANDY_HOME"
     generate_dockerfile_base
-    generate_dockerfile
     generate_entrypoint
     generate_user_setup
     generate_tmux_conf
+    generate_channel_relay
 
     # Only update on-disk files if content has changed
     local changed=false
-    for f in Dockerfile.base Dockerfile entrypoint.sh user-setup.sh tmux.conf; do
+    for f in Dockerfile.base entrypoint.sh user-setup.sh tmux.conf channel-relay.sh; do
         if [ ! -f "$SANDY_HOME/$f" ] || ! diff -q "$SANDY_HOME/$f.new" "$SANDY_HOME/$f" &>/dev/null; then
             mv "$SANDY_HOME/$f.new" "$SANDY_HOME/$f"
             changed=true
@@ -1036,6 +1334,21 @@ ensure_build_files() {
 
     if [ "$changed" = true ]; then
         info "Build files updated."
+    fi
+}
+
+# Generate the agent-specific Dockerfile after SANDY_AGENT is known.
+ensure_agent_dockerfile() {
+    local f
+    case "$SANDY_AGENT" in
+        gemini) generate_dockerfile_gemini; f="Dockerfile.gemini" ;;
+        both)   generate_dockerfile_both;   f="Dockerfile.both" ;;
+        *)      generate_dockerfile;        f="Dockerfile" ;;
+    esac
+    if [ ! -f "$SANDY_HOME/$f" ] || ! diff -q "$SANDY_HOME/$f.new" "$SANDY_HOME/$f" &>/dev/null; then
+        mv "$SANDY_HOME/$f.new" "$SANDY_HOME/$f"
+    else
+        rm "$SANDY_HOME/$f.new"
     fi
 }
 
@@ -1056,11 +1369,15 @@ _load_sandy_config() {
             SANDY_SSH|SANDY_MODEL|SANDY_SKILL_PACKS|SANDY_SKIP_PERMISSIONS|\
             SANDY_ALLOW_NO_ISOLATION|SANDY_ALLOW_LAN_HOSTS|\
             SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|SANDY_VERBOSE|\
+            SANDY_AGENT|\
             CLAUDE_CODE_OAUTH_TOKEN|\
             TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
             DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
             ANTHROPIC_API_KEY|CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
+            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|\
+            GEMINI_API_KEY|GEMINI_MODEL|SANDY_GEMINI_EXTENSIONS|SANDY_GEMINI_AUTH|\
+            GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION|GOOGLE_GENAI_USE_VERTEXAI|GOOGLE_API_KEY|\
+            SANDY_CHANNEL_TARGET_PANE)
                 export "$key=$value" ;;
         esac
     done < <(grep -E '^[A-Z_]+=.+' "$file" 2>/dev/null)
@@ -1071,6 +1388,48 @@ _load_sandy_config "$SANDY_HOME/config"
 _load_sandy_config "$SANDY_HOME/.secrets"
 _load_sandy_config "$WORK_DIR/.sandy/config"
 _load_sandy_config "$WORK_DIR/.sandy/.secrets"
+
+# --- Resolve agent ---
+SANDY_AGENT="${SANDY_AGENT:-claude}"
+case "$SANDY_AGENT" in
+    claude) IMAGE_NAME="sandy-claude-code" ;;
+    gemini) IMAGE_NAME="sandy-gemini-cli" ;;
+    both)   IMAGE_NAME="sandy-both" ;;
+    *) echo "[sandy] ERROR: Invalid SANDY_AGENT '$SANDY_AGENT' (must be 'claude', 'gemini', or 'both')" >&2; exit 1 ;;
+esac
+if [ "$SANDY_AGENT" = "gemini" ]; then
+    if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
+        echo "[sandy] ERROR: SANDY_SKILL_PACKS is not supported with SANDY_AGENT=gemini" >&2
+        exit 1
+    fi
+fi
+# Channels on non-Claude agents use the host-side tmux-inject relay. Only
+# Telegram is supported in v1.5; Discord still requires the Claude plugin path.
+if [ -n "${SANDY_CHANNELS:-}" ] && [ "$SANDY_AGENT" != "claude" ]; then
+    case ",$SANDY_CHANNELS," in
+        *,discord,*)
+            echo "[sandy] ERROR: SANDY_CHANNELS=discord is only supported with SANDY_AGENT=claude" >&2
+            exit 1 ;;
+    esac
+fi
+if [ "$SANDY_REMOTE_CONTROL" = true ] && [ "$SANDY_AGENT" != "claude" ]; then
+    echo "[sandy] ERROR: --remote is only supported with SANDY_AGENT=claude (Gemini CLI has no remote-control mode)" >&2
+    exit 1
+fi
+export SANDY_AGENT
+
+ensure_agent_dockerfile
+case "$SANDY_AGENT" in
+    gemini)
+        DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.gemini"
+        BUILD_HASH_FILE_NAME=".build_hash_gemini" ;;
+    both)
+        DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.both"
+        BUILD_HASH_FILE_NAME=".build_hash_both" ;;
+    *)
+        DOCKERFILE_PATH="$SANDY_HOME/Dockerfile"
+        BUILD_HASH_FILE_NAME=".build_hash" ;;
+esac
 
 SHORT_HASH="$(printf '%s' "$WORK_DIR" | sha256)"
 SHORT_HASH="${SHORT_HASH%% *}"
@@ -1089,7 +1448,7 @@ fi
 
 # Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
 if [ "$SANDY_REBUILD" = true ]; then
-    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.skills_build_hash"
+    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_both" "$SANDY_HOME/.skills_build_hash"
     info "Build cache cleared. Images will be rebuilt."
 fi
 
@@ -1108,27 +1467,51 @@ else
     info "Base image up to date."
 fi
 
-# Phase 2: Final image (Claude Code — rebuilds on CC updates or base change)
-BUILD_HASH="$(cat "$SANDY_HOME/Dockerfile" "$SANDY_HOME/entrypoint.sh" "$SANDY_HOME/user-setup.sh" "$SANDY_HOME/tmux.conf" | sha256 | cut -d' ' -f1)"
-HASH_FILE="$SANDY_HOME/.build_hash"
+# Phase 2: Final image (agent — rebuilds on agent updates or base change)
+BUILD_HASH="$(cat "$DOCKERFILE_PATH" "$SANDY_HOME/entrypoint.sh" "$SANDY_HOME/user-setup.sh" "$SANDY_HOME/tmux.conf" | sha256 | cut -d' ' -f1)"
+HASH_FILE="$SANDY_HOME/$BUILD_HASH_FILE_NAME"
 NEEDS_BUILD=false
 if [ ! -f "$HASH_FILE" ] || [ "$(cat "$HASH_FILE")" != "$BUILD_HASH" ] || [ "$BASE_REBUILT" = true ] || ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     NEEDS_BUILD=true
 fi
 
-# Check for newer Claude Code (skip if already rebuilding)
-if [ "$NEEDS_BUILD" = false ]; then
-    INSTALLED_VERSION="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/claude-code/.version 2>/dev/null || true)"
-    LATEST_VERSION="$(curl -fsSL --max-time 5 https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null || true)"
-    if [ -n "$LATEST_VERSION" ] && [ -n "$INSTALLED_VERSION" ] && [ "$LATEST_VERSION" != "$INSTALLED_VERSION" ]; then
-        info "Claude Code update available: $INSTALLED_VERSION → $LATEST_VERSION"
-        NEEDS_BUILD=true
+# Check for newer agent version (skip if already rebuilding)
+_check_claude_update() {
+    local inst latest
+    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/claude-code/.version 2>/dev/null || true)"
+    latest="$(curl -fsSL --max-time 5 https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null || true)"
+    if [ -n "$latest" ] && [ -n "$inst" ] && [ "$latest" != "$inst" ]; then
+        info "Claude Code update available: $inst → $latest"
+        return 0
     fi
+    return 1
+}
+_check_gemini_update() {
+    local inst latest
+    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/gemini-cli/.version 2>/dev/null || true)"
+    latest="$(curl -fsSL --max-time 5 'https://registry.npmjs.org/@google/gemini-cli/latest' 2>/dev/null \
+        | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
+        | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+    if [ -n "$latest" ] && [ -n "$inst" ] && [ "$latest" != "$inst" ]; then
+        info "Gemini CLI update available: $inst → $latest"
+        return 0
+    fi
+    return 1
+}
+if [ "$NEEDS_BUILD" = false ]; then
+    case "$SANDY_AGENT" in
+        gemini) _check_gemini_update && NEEDS_BUILD=true ;;
+        claude) _check_claude_update && NEEDS_BUILD=true ;;
+        both)
+            if _check_claude_update || _check_gemini_update; then
+                NEEDS_BUILD=true
+            fi ;;
+    esac
 fi
 
 if [ "$NEEDS_BUILD" = true ]; then
     info "Building sandbox image..."
-    docker build -q --no-cache -t "$IMAGE_NAME" -f "$SANDY_HOME/Dockerfile" "$SANDY_HOME"
+    docker build -q --no-cache -t "$IMAGE_NAME" -f "$DOCKERFILE_PATH" "$SANDY_HOME"
     echo "$BUILD_HASH" > "$HASH_FILE"
 else
     info "Sandbox image up to date."
@@ -1253,24 +1636,88 @@ if [ "${SANDY_SSH:-token}" = "agent" ] && [ "$(uname -s)" != "Linux" ]; then
     done
 fi
 
+SANDBOX_IS_NEW=false
 if [ ! -d "$SANDBOX_DIR" ]; then
     info "Creating new sandbox: $SANDBOX_DIR"
     mkdir -p "$SANDBOX_DIR"
+    SANDBOX_IS_NEW=true
+fi
+
+# Auto-migrate v1 layout → v1.5 layout: v1 used $SANDBOX_DIR itself as the
+# Claude .claude/ root. v1.5 uses $SANDBOX_DIR/claude/ and $SANDBOX_DIR/gemini/
+# as siblings so dual-agent mode can mount both. Idempotent: the sweep only
+# moves entries that are still at the top level. The allowlist covers every
+# known Claude-owned entry so partial migrations from earlier v1.5 builds get
+# cleaned up on next launch.
+_v1_claude_entries="settings.json projects plugins statsig channels hooks todos history.jsonl shell-snapshots backups cache commands file-history paste-cache plans sessions session-env tasks telemetry agents skills ide mcp-servers"
+_v1_leftovers=""
+for _e in $_v1_claude_entries; do
+    [ -e "$SANDBOX_DIR/$_e" ] && _v1_leftovers="$_v1_leftovers $_e"
+done
+if [ -n "$_v1_leftovers" ]; then
+    info "Migrating sandbox to v1.5 layout (claude/ subdir)...$_v1_leftovers"
+    mkdir -p "$SANDBOX_DIR/claude"
+    for _e in $_v1_leftovers; do
+        if [ ! -e "$SANDBOX_DIR/claude/$_e" ]; then
+            # Clean move — nothing in the way.
+            mv "$SANDBOX_DIR/$_e" "$SANDBOX_DIR/claude/" 2>/dev/null || true
+        else
+            # Conflict: claude/$_e already exists (Claude Code has been writing
+            # there since the partial migration). The top-level copy is stale —
+            # quarantine it under .v1-backup/ rather than risk a deep merge.
+            mkdir -p "$SANDBOX_DIR/.v1-backup"
+            _ts="$(date +%s)"
+            mv "$SANDBOX_DIR/$_e" "$SANDBOX_DIR/.v1-backup/${_e}.${_ts}" 2>/dev/null || true
+            info "  Stale $_e quarantined to .v1-backup/${_e}.${_ts} (claude/$_e is authoritative)"
+        fi
+    done
+fi
+
+# Ensure per-agent config dirs exist so bind mounts always land on real dirs.
+if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+    mkdir -p "$SANDBOX_DIR/claude"
+fi
+if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
+    mkdir -p "$SANDBOX_DIR/gemini"
+    # Seed settings.json from host's ~/.gemini/ if present (first run only)
+    if [ ! -f "$SANDBOX_DIR/gemini/settings.json" ]; then
+        if [ -f "$HOME/.gemini/settings.json" ]; then
+            cp "$HOME/.gemini/settings.json" "$SANDBOX_DIR/gemini/settings.json"
+            info "  Seeded .gemini/settings.json"
+        else
+            echo '{}' > "$SANDBOX_DIR/gemini/settings.json"
+        fi
+        # Merge sandy defaults: disable Gemini's own sandbox (sandy provides isolation)
+        if command -v node &>/dev/null; then
+            node -e '
+                const fs = require("fs");
+                const f = process.argv[1];
+                let s;
+                try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { s = {}; }
+                if (!s.tools) s.tools = {};
+                if (!("sandbox" in s.tools)) s.tools.sandbox = "none";
+                fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
+            ' "$SANDBOX_DIR/gemini/settings.json" 2>/dev/null || true
+        fi
+    fi
+fi
+
+if { [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; } && [ "$SANDBOX_IS_NEW" = "true" ]; then
     # Seed settings from host's ~/.claude if available
     if [ -f "$HOME/.claude/settings.json" ]; then
-        cp "$HOME/.claude/settings.json" "$SANDBOX_DIR/settings.json"
+        cp "$HOME/.claude/settings.json" "$SANDBOX_DIR/claude/settings.json"
         info "  Seeded settings.json"
     fi
     # Seed statsig cache for feature flags
     if [ -d "$HOME/.claude/statsig" ]; then
-        cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/statsig"
+        cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/claude/statsig"
         info "  Seeded statsig/"
     fi
     # NOTE: Plugin marketplace catalogs are NOT seeded from host — the sandy-plugins
     # marketplace is configured via extraKnownMarketplaces in user-setup.sh (baked into
     # the image). Claude Code fetches the catalog on first /plugin browse.
     # Write sandy-required defaults into settings.json (merge with seeded copy)
-    SETTINGS_FILE="$SANDBOX_DIR/settings.json"
+    SETTINGS_FILE="$SANDBOX_DIR/claude/settings.json"
     [ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
     # Use node to safely merge JSON (available from the host or as a fallback)
     if command -v node &>/dev/null; then
@@ -1308,7 +1755,8 @@ if [ ! -d "$SANDBOX_DIR" ]; then
             printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":%s}\n' "$skip_perm" > "$SETTINGS_FILE"
         fi
     fi
-else
+fi  # end Claude-specific new-sandbox seeding
+if [ "$SANDBOX_IS_NEW" = "false" ]; then
     info "Reusing sandbox: $SANDBOX_DIR"
 fi
 
@@ -1324,16 +1772,16 @@ case ",${SANDY_SKILL_PACKS:-}," in
 esac
 
 # Always refresh statsig cache (feature flags may have changed since sandbox was created)
-if [ -d "$HOME/.claude/statsig" ]; then
-    rm -rf "$SANDBOX_DIR/statsig"
-    cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/statsig"
+if { [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; } && [ -d "$HOME/.claude/statsig" ]; then
+    rm -rf "$SANDBOX_DIR/claude/statsig"
+    cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/claude/statsig"
 fi
 
-# cmux auto-setup: if running inside cmux, install notification hook
-if [ -n "${CMUX_WORKSPACE_ID:-}" ] && [ ! -d "$HOME/.claude/hooks" ]; then
+# cmux auto-setup: if running inside cmux, install notification hook (Claude-only)
+if { [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; } && [ -n "${CMUX_WORKSPACE_ID:-}" ] && [ ! -d "$HOME/.claude/hooks" ]; then
     info "cmux detected — installing notification hook"
-    mkdir -p "$SANDBOX_DIR/hooks"
-    cat > "$SANDBOX_DIR/hooks/cmux-notify.sh" <<'CMUXHOOK'
+    mkdir -p "$SANDBOX_DIR/claude/hooks"
+    cat > "$SANDBOX_DIR/claude/hooks/cmux-notify.sh" <<'CMUXHOOK'
 #!/bin/bash
 # Auto-generated by sandy for cmux terminal notification support.
 # Emits OSC 777 escape sequences that cmux renders as notification rings,
@@ -1347,9 +1795,9 @@ case "$EVENT_TYPE" in
         printf '\e]777;notify;Claude Code;Waiting for input\a' ;;
 esac
 CMUXHOOK
-    chmod +x "$SANDBOX_DIR/hooks/cmux-notify.sh"
+    chmod +x "$SANDBOX_DIR/claude/hooks/cmux-notify.sh"
     # Merge notification hook into settings.json
-    SETTINGS_FILE="$SANDBOX_DIR/settings.json"
+    SETTINGS_FILE="$SANDBOX_DIR/claude/settings.json"
     [ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
     if command -v node &>/dev/null; then
         node -e '
@@ -1471,8 +1919,14 @@ cleanup() {
     if [ -n "${CRED_TMPDIR:-}" ]; then
         rm -rf "$CRED_TMPDIR"
     fi
+    if [ -n "${GEMINI_CRED_TMPDIR:-}" ]; then
+        rm -rf "$GEMINI_CRED_TMPDIR"
+    fi
     if [ -n "${SSH_RELAY_PID:-}" ]; then
         kill "$SSH_RELAY_PID" 2>/dev/null || true
+    fi
+    if [ -n "${CHANNEL_RELAY_PID:-}" ]; then
+        kill "$CHANNEL_RELAY_PID" 2>/dev/null || true
     fi
 }
 
@@ -1480,9 +1934,10 @@ trap cleanup EXIT INT TERM HUP
 apply_network_isolation
 
 # --- Ensure .claude.json exists (setup state: theme, terms acceptance, etc.) ---
-# Stored outside SANDBOX_DIR to avoid overlapping Docker bind mounts
+# Stored outside SANDBOX_DIR to avoid overlapping Docker bind mounts.
+# Claude-only: Gemini stores equivalent state inside its config dir.
 CLAUDE_JSON="$SANDY_HOME/sandboxes/${SANDBOX_NAME}.claude.json"
-if [ ! -f "$CLAUDE_JSON" ]; then
+if { [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; } && [ ! -f "$CLAUDE_JSON" ]; then
     # Seed from host's ~/.claude.json (contains onboarding, theme, OAuth, etc.)
     if [ -f "$HOME/.claude.json" ]; then
         # Seed from host, stripping project entries (host paths are meaningless in the container)
@@ -1500,7 +1955,9 @@ if [ ! -f "$CLAUDE_JSON" ]; then
     fi
 fi
 # Ensure sandy-specific overrides are set (both new and existing sandboxes)
-json_merge "$CLAUDE_JSON" '{"tipsDisabled":true,"installMethod":"native"}'
+if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+    json_merge "$CLAUDE_JSON" '{"tipsDisabled":true,"installMethod":"native"}'
+fi
 
 # --- Ephemeral credential loading (fresh each launch, never persisted in sandbox) ---
 # Helper: read credentials JSON from file or macOS Keychain
@@ -1549,7 +2006,73 @@ except Exception:
 # Long-lived token (from `claude setup-token`) takes precedence over OAuth credentials.
 # When set via .sandy/config or .sandy/.secrets, skip the entire credential file flow.
 CRED_TMPDIR=""
-if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+GEMINI_CRED_TMPDIR=""
+GEMINI_ADC_MOUNT=""
+
+# Gemini credentials: priority is GEMINI_API_KEY → ephemeral OAuth tokens.json →
+# Google Application Default Credentials. OAuth and ADC are not mutually
+# exclusive — both can be mounted.
+load_gemini_credentials() {
+    local mode="${SANDY_GEMINI_AUTH:-auto}"
+    GEMINI_SELECTED_AUTH=""
+    if [ "$mode" = "api_key" ] || [ "$mode" = "auto" ]; then
+        if [ -n "${GEMINI_API_KEY:-}" ]; then
+            info "Using GEMINI_API_KEY"
+            GEMINI_SELECTED_AUTH="gemini-api-key"
+            [ "$mode" = "api_key" ] && _gemini_write_auth_type && return 0
+        fi
+    fi
+    if [ "$mode" = "oauth" ] || [ "$mode" = "auto" ]; then
+        if [ -f "$HOME/.gemini/tokens.json" ]; then
+            GEMINI_CRED_TMPDIR="$(mktemp -d)"
+            cp "$HOME/.gemini/tokens.json" "$GEMINI_CRED_TMPDIR/tokens.json"
+            chmod 600 "$GEMINI_CRED_TMPDIR/tokens.json"
+            info "Loaded Gemini OAuth tokens from host"
+            [ -z "$GEMINI_SELECTED_AUTH" ] && GEMINI_SELECTED_AUTH="oauth-personal"
+        fi
+    fi
+    if [ "$mode" = "adc" ] || [ "$mode" = "auto" ]; then
+        if [ -f "$HOME/.config/gcloud/application_default_credentials.json" ]; then
+            GEMINI_ADC_MOUNT="$HOME/.config/gcloud/application_default_credentials.json"
+            info "Loaded Google Application Default Credentials"
+            [ -z "$GEMINI_SELECTED_AUTH" ] && GEMINI_SELECTED_AUTH="vertex-ai"
+        fi
+    fi
+    if [ -z "${GEMINI_API_KEY:-}" ] && [ -z "$GEMINI_CRED_TMPDIR" ] && [ -z "$GEMINI_ADC_MOUNT" ]; then
+        warn "No Gemini credentials found. Set GEMINI_API_KEY, run 'gemini auth' on host, or run 'gcloud auth application-default login'"
+    fi
+    _gemini_write_auth_type
+}
+
+# Write selectedAuthType into the sandbox's .gemini/settings.json so Gemini CLI
+# skips its first-run auth picker. Called from load_gemini_credentials().
+_gemini_write_auth_type() {
+    [ -z "$GEMINI_SELECTED_AUTH" ] && return 0
+    local f="$SANDBOX_DIR/gemini/settings.json"
+    [ -f "$f" ] || echo '{}' > "$f"
+    if command -v node &>/dev/null; then
+        SANDY_GEMINI_AUTH_TYPE="$GEMINI_SELECTED_AUTH" node -e '
+            const fs = require("fs");
+            const f = process.argv[1];
+            let s;
+            try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { s = {}; }
+            s.selectedAuthType = process.env.SANDY_GEMINI_AUTH_TYPE;
+            // Older Gemini CLI versions also look for the type under security.auth
+            if (!s.security) s.security = {};
+            if (!s.security.auth) s.security.auth = {};
+            s.security.auth.selectedType = process.env.SANDY_GEMINI_AUTH_TYPE;
+            fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
+        ' "$f" 2>/dev/null || true
+    fi
+}
+
+if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
+    load_gemini_credentials
+fi
+
+if [ "$SANDY_AGENT" = "gemini" ]; then
+    : # Claude credential flow skipped for pure-gemini sessions
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     info "Using long-lived OAuth token"
 else
     CRED_JSON="$(load_credentials)"
@@ -1614,14 +2137,26 @@ if [ -n "${SANDY_GPU:-}" ]; then
         warn "SANDY_GPU=$SANDY_GPU but NVIDIA Container Toolkit not detected — skipping GPU passthrough"
     fi
 fi
-RUN_FLAGS+=(-v "$SANDBOX_DIR:/home/claude/.claude")
-if [ -n "$CRED_TMPDIR" ]; then
-    RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json")
+if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/claude:/home/claude/.claude")
+    if [ -n "$CRED_TMPDIR" ]; then
+        RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json")
+    fi
+    RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/claude/.claude.json")
+    # Mount host Claude Code hooks (read-only) for terminal notifications (cmux, iTerm2, etc.)
+    if [ -d "$HOME/.claude/hooks" ]; then
+        RUN_FLAGS+=(-v "$HOME/.claude/hooks:/home/claude/.claude/hooks:ro")
+    fi
 fi
-RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/claude/.claude.json")
-# Mount host Claude Code hooks (read-only) for terminal notifications (cmux, iTerm2, etc.)
-if [ -d "$HOME/.claude/hooks" ]; then
-    RUN_FLAGS+=(-v "$HOME/.claude/hooks:/home/claude/.claude/hooks:ro")
+if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/gemini:/home/claude/.gemini")
+    if [ -n "${GEMINI_CRED_TMPDIR:-}" ]; then
+        RUN_FLAGS+=(-v "$GEMINI_CRED_TMPDIR/tokens.json:/home/claude/.gemini/tokens.json")
+    fi
+    if [ -n "${GEMINI_ADC_MOUNT:-}" ]; then
+        RUN_FLAGS+=(-v "$GEMINI_ADC_MOUNT:/home/claude/.config/gcloud/application_default_credentials.json:ro")
+        RUN_FLAGS+=(-e "GOOGLE_APPLICATION_CREDENTIALS=/home/claude/.config/gcloud/application_default_credentials.json")
+    fi
 fi
 # Persistent package environment mounts
 RUN_FLAGS+=(-v "$SANDBOX_DIR/pip:/home/claude/.pip-packages")
@@ -1742,43 +2277,64 @@ done
 # Mount sandbox copies of commands, agents, and plugins over the workspace.
 # All three start empty — host content is hidden so it doesn't leak into the container.
 # Claude can create/modify these freely; changes persist in the sandbox across sessions.
-for _sd in commands agents plugins; do
-    if [ -d "$WORK_DIR/.claude/$_sd" ] || [ -d "$SANDBOX_DIR/workspace-$_sd" ]; then
-        mkdir -p "$SANDBOX_DIR/workspace-$_sd"
-        RUN_FLAGS+=(-v "$SANDBOX_DIR/workspace-$_sd:$SANDY_WORKSPACE/.claude/$_sd")
-    fi
-done
+if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+    for _sd in commands agents plugins; do
+        if [ -d "$WORK_DIR/.claude/$_sd" ] || [ -d "$SANDBOX_DIR/workspace-$_sd" ]; then
+            mkdir -p "$SANDBOX_DIR/workspace-$_sd"
+            RUN_FLAGS+=(-v "$SANDBOX_DIR/workspace-$_sd:$SANDY_WORKSPACE/.claude/$_sd")
+        fi
+    done
+fi
+if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
+    # Gemini: protect .gemini/extensions and .gemini/commands similarly
+    for _sd in extensions commands; do
+        if [ -d "$WORK_DIR/.gemini/$_sd" ] || [ -d "$SANDBOX_DIR/workspace-gemini-$_sd" ]; then
+            mkdir -p "$SANDBOX_DIR/workspace-gemini-$_sd"
+            RUN_FLAGS+=(-v "$SANDBOX_DIR/workspace-gemini-$_sd:$SANDY_WORKSPACE/.gemini/$_sd")
+        fi
+    done
+fi
 RUN_FLAGS+=(-e "SANDY_WORKSPACE=$SANDY_WORKSPACE")
 RUN_FLAGS+=(-e "SANDY_PROJECT_NAME=$(basename "$WORK_DIR")")
 # Validate SANDY_MODEL — only allow alphanumeric, hyphens, dots, underscores
-SANDY_MODEL="${SANDY_MODEL:-claude-opus-4-6}"
-if ! [[ "$SANDY_MODEL" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+    SANDY_MODEL="${SANDY_MODEL:-claude-opus-4-6}"
+else
+    SANDY_MODEL="${SANDY_MODEL:-}"
+fi
+if [ -n "$SANDY_MODEL" ] && ! [[ "$SANDY_MODEL" =~ ^[a-zA-Z0-9._-]+$ ]]; then
     error "Invalid SANDY_MODEL: $SANDY_MODEL (only alphanumeric, hyphens, dots, underscores allowed)"
     exit 1
 fi
+RUN_FLAGS+=(-e "SANDY_AGENT=$SANDY_AGENT")
 RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
 RUN_FLAGS+=(-e "SANDY_SKIP_PERMISSIONS=${SANDY_SKIP_PERMISSIONS:-true}")
 RUN_FLAGS+=(-e "SANDY_NEW_SESSION=$SANDY_NEW_SESSION")
 RUN_FLAGS+=(-e "SANDY_REMOTE_CONTROL=$SANDY_REMOTE_CONTROL")
 RUN_FLAGS+=(-e "SANDY_VERBOSE=$SANDY_VERBOSE")
-if [ -n "${SANDY_CHANNELS:-}" ]; then
-    RUN_FLAGS+=(-e "SANDY_CHANNELS=$SANDY_CHANNELS")
-fi
-if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-    RUN_FLAGS+=(-e "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN")
-fi
-if [ -n "${TELEGRAM_ALLOWED_SENDERS:-}" ]; then
-    RUN_FLAGS+=(-e "TELEGRAM_ALLOWED_SENDERS=$TELEGRAM_ALLOWED_SENDERS")
-fi
-if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
-    RUN_FLAGS+=(-e "DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN")
-fi
-if [ -n "${DISCORD_ALLOWED_SENDERS:-}" ]; then
-    RUN_FLAGS+=(-e "DISCORD_ALLOWED_SENDERS=$DISCORD_ALLOWED_SENDERS")
-fi
-RUN_FLAGS+=(-e "CLAUDE_CODE_MAX_OUTPUT_TOKENS=${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}")
-if [ "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-0}" = "1" ]; then
-    RUN_FLAGS+=(-e "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")
+if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+    # Channels env vars: for 'claude' these drive the in-container plugin path;
+    # for 'both' the host-side relay uses the host-side env vars directly, but
+    # we still forward them in case plugins are also configured.
+    if [ -n "${SANDY_CHANNELS:-}" ] && [ "$SANDY_AGENT" = "claude" ]; then
+        RUN_FLAGS+=(-e "SANDY_CHANNELS=$SANDY_CHANNELS")
+    fi
+    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+        RUN_FLAGS+=(-e "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN")
+    fi
+    if [ -n "${TELEGRAM_ALLOWED_SENDERS:-}" ]; then
+        RUN_FLAGS+=(-e "TELEGRAM_ALLOWED_SENDERS=$TELEGRAM_ALLOWED_SENDERS")
+    fi
+    if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+        RUN_FLAGS+=(-e "DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN")
+    fi
+    if [ -n "${DISCORD_ALLOWED_SENDERS:-}" ]; then
+        RUN_FLAGS+=(-e "DISCORD_ALLOWED_SENDERS=$DISCORD_ALLOWED_SENDERS")
+    fi
+    RUN_FLAGS+=(-e "CLAUDE_CODE_MAX_OUTPUT_TOKENS=${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}")
+    if [ "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-0}" = "1" ]; then
+        RUN_FLAGS+=(-e "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")
+    fi
 fi
 # Forward git identity from host
 GIT_USER_NAME="${GIT_USER_NAME:-$(git config user.name 2>/dev/null || true)}"
@@ -1812,15 +2368,38 @@ if [ "$HOST_UID" != "1001" ] || [ "$HOST_GID" != "1001" ]; then
     RUN_FLAGS+=(-v "$SANDY_PASSWD:/etc/passwd:ro")
     RUN_FLAGS+=(-v "$SANDY_GROUP:/etc/group:ro")
 fi
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+    fi
+    # CLAUDE_CODE_OAUTH_TOKEN: pass through if explicitly configured (long-lived token from
+    # `claude setup-token`), otherwise clear to prevent accidental host env leakage.
+    if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+        RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
+    else
+        RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=")
+    fi
 fi
-# CLAUDE_CODE_OAUTH_TOKEN: pass through if explicitly configured (long-lived token from
-# `claude setup-token`), otherwise clear to prevent accidental host env leakage.
-if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
-else
-    RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=")
+if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
+    # Disable Gemini's per-tool sandbox — sandy provides whole-session isolation.
+    RUN_FLAGS+=(-e "GEMINI_SANDBOX=false")
+    if [ -n "${GEMINI_API_KEY:-}" ]; then
+        RUN_FLAGS+=(-e "GEMINI_API_KEY=$GEMINI_API_KEY")
+    fi
+    if [ -n "${GEMINI_MODEL:-}" ]; then
+        RUN_FLAGS+=(-e "GEMINI_MODEL=$GEMINI_MODEL")
+    fi
+    if [ -n "${SANDY_GEMINI_EXTENSIONS:-}" ]; then
+        RUN_FLAGS+=(-e "SANDY_GEMINI_EXTENSIONS=$SANDY_GEMINI_EXTENSIONS")
+    fi
+    if [ -n "${SANDY_GEMINI_AUTH:-}" ]; then
+        RUN_FLAGS+=(-e "SANDY_GEMINI_AUTH=$SANDY_GEMINI_AUTH")
+    fi
+    # Google Cloud / Vertex AI passthrough
+    for _gv in GOOGLE_CLOUD_PROJECT GOOGLE_CLOUD_LOCATION GOOGLE_GENAI_USE_VERTEXAI GOOGLE_API_KEY; do
+        _gval="${!_gv:-}"
+        [ -n "$_gval" ] && RUN_FLAGS+=(-e "$_gv=$_gval")
+    done
 fi
 
 # --- Git authentication ---
@@ -1866,7 +2445,7 @@ else
 fi
 
 # Collect gh CLI tokens for all authenticated accounts.
-# GIT_TOKEN carries the active account's token (used for git URL rewriting in token mode).
+# GIT_TOKEN carries the active account's token (fallback for gh auth when GH_ACCOUNTS is empty).
 # GH_ACCOUNTS carries all accounts as "user:token" pairs (used for gh CLI auth).
 GIT_TOKEN=""
 GH_ACCOUNTS=""
@@ -1896,7 +2475,11 @@ fi
 [ -n "$GH_ACCOUNTS" ] && RUN_FLAGS+=(-e "GH_ACCOUNTS=$GH_ACCOUNTS")
 
 # --- Launch ---
-info "Launching Claude Code sandbox..."
+case "$SANDY_AGENT" in
+    gemini) info "Launching Gemini CLI sandbox..." ;;
+    both)   info "Launching Claude Code + Gemini CLI sandbox (dual-pane)..." ;;
+    *)      info "Launching Claude Code sandbox..." ;;
+esac
 info "  Working directory: $WORK_DIR"
 info "  Sandbox:           $SANDBOX_DIR"
 info "  Resources:         ${SANDY_CPUS} CPUs, ${SANDY_MEM} memory"
@@ -1908,4 +2491,25 @@ if [ "$SANDY_VERBOSE" -ge 3 ]; then
     printf '  %s\n' "${RUN_FLAGS[@]}"
     echo ""
 fi
+
+# Launch host-side channel relay for gemini/both (Claude uses in-container plugin path)
+CHANNEL_RELAY_PID=""
+if [ "$SANDY_AGENT" != "claude" ] && [ -n "${SANDY_CHANNELS:-}" ]; then
+    case ",$SANDY_CHANNELS," in
+        *,telegram,*)
+            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+                SANDY_CONTAINER_NAME="$CONTAINER_NAME" \
+                TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
+                TELEGRAM_ALLOWED_SENDERS="${TELEGRAM_ALLOWED_SENDERS:-}" \
+                SANDY_CHANNEL_TARGET_PANE="${SANDY_CHANNEL_TARGET_PANE:-0}" \
+                bash "$SANDY_HOME/channel-relay.sh" &
+                CHANNEL_RELAY_PID=$!
+                info "Telegram channel relay started (PID $CHANNEL_RELAY_PID → $CONTAINER_NAME pane ${SANDY_CHANNEL_TARGET_PANE:-0})"
+            else
+                warn "SANDY_CHANNELS=telegram but TELEGRAM_BOT_TOKEN is not set"
+            fi
+            ;;
+    esac
+fi
+
 docker run "${RUN_FLAGS[@]}" "$IMAGE_NAME" "$@"

@@ -103,7 +103,16 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 
 | Variable | Default | Description |
 |---|---|---|
-| `SANDY_MODEL` | `claude-opus-4-6` | Claude model to use |
+| `SANDY_AGENT` | `claude` | AI agent to run: `claude` (Claude Code), `gemini` (Gemini CLI), or `both` (dual-pane tmux with Claude on the left and Gemini on the right) |
+| `SANDY_MODEL` | `claude-opus-4-6` | Claude model to use (applies to `claude` / `both`) |
+| `GEMINI_API_KEY` | (unset) | Google API key for Gemini CLI. Put in `.sandy/.secrets` |
+| `GEMINI_MODEL` | (unset) | Gemini model override |
+| `SANDY_GEMINI_AUTH` | `auto` | Force Gemini auth path: `auto`, `api_key`, `oauth`, or `adc` |
+| `SANDY_GEMINI_EXTENSIONS` | (unset) | Comma-separated Gemini extension URLs/paths to install on first launch |
+| `GOOGLE_CLOUD_PROJECT` | (unset) | GCP project ID (Vertex AI) |
+| `GOOGLE_CLOUD_LOCATION` | (unset) | GCP region (Vertex AI) |
+| `GOOGLE_GENAI_USE_VERTEXAI` | (unset) | Set `true` to route Gemini through Vertex AI |
+| `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for Telegram relay in dual-agent mode (`0` = Claude, `1` = Gemini) |
 | `SANDY_SSH` | `token` | Git auth method: `token` (gh CLI + HTTPS) or `agent` (SSH agent forwarding) |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Set to `false` to keep Claude Code's permission system active |
 | `SANDY_HOME` | `~/.sandy` | Sandy config/build/sandbox directory |
@@ -162,6 +171,23 @@ To automate this as a global keyboard shortcut (e.g., Ctrl+Cmd+U):
 3. Add a **Run Shell Script** action with: `pbpaste | tr -d ' \n\t' | xargs open`
 4. Save as "Open Cleaned URL"
 5. Assign a shortcut in **System Settings > Keyboard > Keyboard Shortcuts > Services**
+
+### Running Gemini CLI (`SANDY_AGENT=gemini`)
+
+Sandy supports four Gemini auth paths, probed automatically unless `SANDY_GEMINI_AUTH` pins a specific one:
+
+| Path | How to set up | When to use |
+|---|---|---|
+| API key | `GEMINI_API_KEY=...` in `.sandy/.secrets` | Simplest; works on headless servers |
+| OAuth | Run `gemini auth` **on the host** once — sandy copies `~/.gemini/tokens.json` into the container ephemerally on each launch | Free-tier Gemini with browser login |
+| ADC | `gcloud auth application-default login` on the host | Google Cloud / Vertex AI workflows |
+| Vertex AI | ADC + `GOOGLE_GENAI_USE_VERTEXAI=true`, `GOOGLE_CLOUD_PROJECT=...`, `GOOGLE_CLOUD_LOCATION=...` | Enterprise / Vertex billing |
+
+`gemini auth` must be run on the host because the container is headless and cannot open a browser. `--remote` is not supported with `gemini` or `both` — Gemini CLI has no native WebSocket/daemon mode.
+
+### Dual-agent mode (`SANDY_AGENT=both`)
+
+Runs Claude Code and Gemini CLI side-by-side in a single tmux session with a horizontal split (Claude left, Gemini right). Both credentials are loaded, both share the same workspace mount, and each agent has its own config at `~/.claude` and `~/.gemini` respectively. Exiting one pane leaves the other running.
 
 ## How Network Isolation Works
 
@@ -441,6 +467,10 @@ Set both tokens in `.sandy/.secrets` and list both plugins in `.sandy/config`:
 ```
 SANDY_CHANNELS=plugin:telegram@claude-plugins-official plugin:discord@claude-plugins-official
 ```
+
+### Channels with Gemini / dual-agent mode
+
+When `SANDY_AGENT` is `gemini` or `both`, sandy uses a **host-side Telegram relay** instead of the in-container plugin — it long-polls the Telegram Bot API on the host and injects messages into the container's tmux session via `docker exec … tmux send-keys`. This is agent-agnostic but lower-fidelity: no chat threading, no edit-message updates, no attachments. Set `SANDY_CHANNEL_TARGET_PANE=1` to route messages to the Gemini pane in dual mode (default is pane 0 = Claude). Discord via relay is not supported yet — use `SANDY_AGENT=claude` for Discord.
 
 ### Per-project secrets
 

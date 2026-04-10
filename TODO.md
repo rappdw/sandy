@@ -14,6 +14,8 @@ Analysis of [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-
 
 - [x] **Symlink protection** — Scans workspace for symlinks that escape the project tree before mounting. Prompts user to confirm if dangerous symlinks are found. Skips node_modules, .venv, and .git directories. *(Implemented: interactive prompt at startup.)*
 
+- [ ] **`.env` file protection** — Mount `.env`, `.env.*`, `.env.local` files read-only inside the container. Claude Code running with `--dangerously-skip-permissions` can currently `cat .env` in the mounted project directory. Gemini CLI masks these by bind-mounting zero-permission files over them. Sandy should at minimum mount them read-only; masking entirely is also an option. Scan workspace up to 3 levels deep (excluding `node_modules/`, `.venv*/`, `.git/`) for files matching `.env*` and add them to the protected files list.
+
 ### Medium Value
 
 - [ ] **Dynamic config updates** — srt supports `--control-fd` for runtime permission changes without restarting the sandbox process. Sandy's model (one container per session) makes this less critical, but a mechanism to reload config (e.g., re-reading `.sandy/config` on signal) could be useful for long-running sessions.

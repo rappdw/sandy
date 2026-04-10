@@ -1,10 +1,18 @@
 # Sandy Specification
 
-**Version**: 0.8.0
-**Date**: 2026-03-31
-**Source**: ~1,850-line bash script (`sandy`), installer (`install.sh`), test suite (`test/run-tests.sh`)
+**Version**: 0.8.2-dev
+**Date**: 2026-04-10
+**Source**: ~2,200-line bash script (`sandy`), installer (`install.sh`), test suite (`test/run-tests.sh`)
 
-Sandy is a self-contained command that runs Claude Code in a Docker container with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes. One script, one command, zero configuration required.
+Sandy is a self-contained command that runs an AI coding agent (Claude Code or Gemini CLI, or both side-by-side) in a Docker container with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes. One script, one command, zero configuration required.
+
+### Supported Agents
+
+| `SANDY_AGENT` | Image | Description |
+|---|---|---|
+| `claude` (default) | `sandy-claude-code` | Claude Code — full feature support (channels, skill packs, synthkit, remote-control) |
+| `gemini` | `sandy-gemini-cli` | Gemini CLI — Google OAuth / ADC / Vertex AI / API key auth |
+| `both` | `sandy-both` | Claude + Gemini in a single image, launched as a dual-pane tmux session |
 
 ---
 
@@ -101,7 +109,17 @@ The config parser does **not** use `source`. It reads lines via `grep -E '^[A-Z_
 
 | Variable | Default | Description |
 |---|---|---|
+| `SANDY_AGENT` | `claude` | Agent selection: `claude`, `gemini`, or `both` |
 | `SANDY_MODEL` | `claude-opus-4-6` | Claude model to use |
+| `GEMINI_API_KEY` | unset | Gemini API key (alternative to OAuth/ADC) |
+| `GEMINI_MODEL` | unset | Gemini model override (e.g. `gemini-2.5-pro`) |
+| `SANDY_GEMINI_AUTH` | `auto` | Force auth path: `auto`, `api_key`, `oauth`, or `adc` |
+| `SANDY_GEMINI_EXTENSIONS` | unset | Comma-separated Gemini extension URLs/paths to seed |
+| `GOOGLE_CLOUD_PROJECT` | unset | GCP project (Vertex AI) |
+| `GOOGLE_CLOUD_LOCATION` | unset | GCP region (Vertex AI) |
+| `GOOGLE_GENAI_USE_VERTEXAI` | unset | Set `true` to route through Vertex AI |
+| `GOOGLE_API_KEY` | unset | Alternative Google API key |
+| `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for host-side channel relay (0=claude, 1=gemini in dual mode) |
 | `SANDY_SSH` | `token` | Git auth: `token` (gh CLI + HTTPS) or `agent` (SSH socket forward) |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Run with `--dangerously-skip-permissions` |
 | `SANDY_CPUS` | auto-detected | CPU limit for container |
@@ -154,40 +172,48 @@ Each project directory gets a sandbox at `~/.sandy/sandboxes/<NAME>-<HASH>/`:
 
 ### Directory Layout
 
-The sandbox directory **is** `~/.claude` inside the container (mounted directly).
+As of v0.8.2, the sandbox directory contains **sibling** `claude/` and `gemini/` subdirs, one per supported agent, so both can coexist in `SANDY_AGENT=both` mode.
 
-**Persistent directories** (bind-mounted into container):
+```
+~/.sandy/sandboxes/<name>-<hash>/
+├── claude/                    # → /home/claude/.claude
+│   ├── settings.json
+│   ├── projects/
+│   ├── plugins/
+│   ├── statsig/
+│   ├── channels/
+│   ├── hooks/
+│   └── history.jsonl
+├── gemini/                    # → /home/claude/.gemini
+│   ├── settings.json
+│   ├── commands/              # TOML slash commands
+│   ├── extensions/
+│   └── tmp/                   # session history
+├── pip/                       # → /home/claude/.pip-packages
+├── uv/                        # → /home/claude/.local/share/uv
+├── npm-global/                # → /home/claude/.npm-global
+├── go/                        # → /home/claude/go
+├── cargo/                     # → /home/claude/.cargo
+├── gstack/                    # → /home/claude/.gstack (if skill pack enabled)
+├── workspace-commands/        # → .claude/commands/ (writable overlay)
+├── workspace-agents/          # → .claude/agents/
+└── workspace-plugins/         # → .claude/plugins/
+```
 
-| Sandbox subdir | Container mount | Purpose |
-|---|---|---|
-| `pip/` | `~/.pip-packages` | `PYTHONUSERBASE` — pip user installs |
-| `uv/` | `~/.local/share/uv` | uv-managed Python versions |
-| `npm-global/` | `~/.npm-global` | `npm install -g` packages |
-| `go/` | `~/go` | `GOPATH` — go install binaries |
-| `cargo/` | `~/.cargo` | Cargo registry cache + installed binaries |
-| `gstack/` | `~/.gstack` | Skill pack state (if enabled) |
-| `workspace-commands/` | `.claude/commands/` | User-created slash commands (writable overlay) |
-| `workspace-agents/` | `.claude/agents/` | User-created agents (writable overlay) |
-| `workspace-plugins/` | `.claude/plugins/` | Installed plugins (writable overlay) |
+`<NAME>.claude.json` is stored at `~/.sandy/sandboxes/<NAME>.claude.json` (outside the sandbox dir) to avoid mount conflicts.
 
-**Configuration files**:
-
-| Path | Purpose |
-|---|---|
-| `settings.json` | Claude Code settings (seeded from host on first run) |
-| `statsig/` | Feature flag cache (refreshed from host each launch) |
-| `../<NAME>.claude.json` | Setup state: theme, terms, OAuth, onboarding (stored outside sandbox dir to avoid mount conflicts) |
-| `history.jsonl` | Session history |
-| `projects/<WORKSPACE_KEY>/` | Session files (`.jsonl` per session) |
+**Layout migration (v1 → v1.5)**: On each launch, sandy detects the v1 layout marker (`settings.json` at the sandbox top level with no `claude/` subdir) and moves Claude-owned entries into `claude/`. Idempotent; pre-existing pkg-persistence and workspace-* directories are untouched.
 
 ### Seeding
 
-On first run for a new sandbox:
-1. Copy host `~/.claude/settings.json` → sandbox `settings.json`
+On first run for a new sandbox (`SANDY_AGENT` in `claude`/`both`):
+1. Copy host `~/.claude/settings.json` → sandbox `claude/settings.json`
 2. Strip `enabledPlugins` from seeded settings (prevents host plugin leakage)
-3. Copy host `~/.claude/.claude.json` → sandbox `.claude.json`, stripping the `projects` key
-4. Copy host `~/.claude/statsig/` → sandbox `statsig/`
+3. Copy host `~/.claude/.claude.json` → sandbox `<NAME>.claude.json`, stripping the `projects` key
+4. Copy host `~/.claude/statsig/` → sandbox `claude/statsig/`
 5. Create all persistent subdirectories
+
+For `SANDY_AGENT` in `gemini`/`both`, sandy creates `gemini/` and its `commands/`, `extensions/`, `tmp/` subdirs. Gemini settings.json is not seeded from the host (Gemini has no direct host-settings equivalent for sandy to copy).
 
 ---
 
@@ -513,6 +539,22 @@ Credentials are loaded into a temporary file, mounted into the container at `~/.
 
 `CLAUDE_CODE_OAUTH_TOKEN` is explicitly set to empty string in the container's environment when not configured, preventing accidental leakage from the host environment.
 
+### Gemini Credentials (`SANDY_AGENT` in `gemini`/`both`)
+
+Sandy's `load_gemini_credentials()` tries the following sources, controlled by `SANDY_GEMINI_AUTH` (`auto` | `api_key` | `oauth` | `adc`):
+
+| Mode | Source | Container mount / env |
+|---|---|---|
+| `api_key` | `GEMINI_API_KEY` env var on host | Forwarded via `-e GEMINI_API_KEY=…` |
+| `oauth` | Host `~/.gemini/tokens.json` | Ephemeral copy mounted at `/home/claude/.gemini/tokens.json` |
+| `adc` | `~/.config/gcloud/application_default_credentials.json` | Mounted read-only + `GOOGLE_APPLICATION_CREDENTIALS` env var |
+
+In `auto` mode, all three are probed; a warning is emitted if none are found. OAuth tokens are copied to a tmpdir each launch and discarded on exit (same pattern as Claude credentials). Gemini's OAuth refresh is handled inside the CLI itself, so sandy does not run a refresh check.
+
+Vertex AI routing is enabled by setting `GOOGLE_GENAI_USE_VERTEXAI=true` with `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`; all three are forwarded into the container when set.
+
+**Note**: `gemini auth` (browser OAuth) must be run **on the host** — the container is headless and cannot open a browser.
+
 ---
 
 ## 12. Session Management
@@ -535,9 +577,15 @@ Sandy wraps Claude Code in a tmux session:
 - OSC 52 clipboard support for mouse selections
 - Status bar: "sandy" prefix with time display
 
+### Dual-Pane Mode (`SANDY_AGENT=both`)
+
+When `SANDY_AGENT=both`, the user-setup script creates a tmux session with two horizontally split panes — pane 0 runs `claude`, pane 1 runs `gemini` (with `GEMINI_SANDBOX=false`). The launch logic is refactored into two helper functions `build_claude_cmd()` and `build_gemini_cmd()` so both single-agent and dual-agent paths share the same command construction. Each pane is an independent process; exiting one leaves the other running.
+
 ### Remote Control Mode
 
 With `--remote`: no tmux wrapper, launches `claude remote-control --name "sandy: <PROJECT_NAME>"`. Browser/phone can connect to control the session.
+
+**Only supported with `SANDY_AGENT=claude`.** Gemini CLI has no native WebSocket/daemon mode; `--remote` with `gemini` or `both` exits with an error. Tracked as a future enhancement pending upstream support.
 
 ### Terminal Notifications
 
@@ -618,19 +666,28 @@ The `thinkkit`, `ait`, and `pka-skills` marketplaces are automatically removed f
 
 ### Built-in Slash Commands (synthkit)
 
-If synthkit is installed, `user-setup.sh` creates four slash commands in `~/.claude/commands/`:
+If synthkit is installed, `user-setup.sh` creates four slash commands in `~/.claude/commands/` (Claude, Markdown) and/or `~/.gemini/commands/` (Gemini, TOML):
 - `/md2pdf` — Convert markdown to PDF
 - `/md2doc` — Convert markdown to Word (.docx)
 - `/md2html` — Convert markdown to HTML
 - `/md2email` — Convert markdown to email HTML (clipboard)
 
+For Gemini, the TOML files use `description` and `prompt` fields; the prompt embeds `!{md2pdf {{args}}}` shell execution and `{{args}}` argument substitution per Gemini's command format.
+
+### Gemini Extensions (`SANDY_GEMINI_EXTENSIONS`)
+
+When set, `user-setup.sh` iterates comma-separated URLs/local paths and runs `gemini extensions install <url>` for each, skipping any extension that already exists in `~/.gemini/extensions/`. Extensions persist across sessions via the `gemini/extensions/` sandbox mount.
+
 ---
 
 ## 16. Channel Integration
 
-Sandy supports Claude Code channels (Telegram, Discord) with automatic plugin installation and credential seeding.
+Sandy supports Claude Code channels (Telegram, Discord) via two distinct paths:
 
-### Setup Flow
+1. **In-container plugin path** (`SANDY_AGENT=claude` only) — auto-installs the Claude channel plugin from the marketplace and seeds credentials into `~/.claude/channels/`.
+2. **Host-side tmux-inject relay** (`SANDY_AGENT` in `gemini`/`both`) — agent-agnostic, runs on the host and injects messages into the container's tmux session via `docker exec ... tmux send-keys`.
+
+### In-Container Plugin Setup (Claude)
 
 For each configured channel:
 1. Auto-install the channel plugin from the marketplace
@@ -640,12 +697,26 @@ For each configured channel:
    - `"dmPolicy": "allowlist"` + populated `allowFrom` (if `ALLOWED_SENDERS` set)
    - `"dmPolicy": "pairing"` (if no allowlist, user pairs via `/telegram:access pair <code>`)
 
+### Host-Side Channel Relay (Gemini / Both)
+
+`$SANDY_HOME/channel-relay.sh` is a generated bash script that long-polls the Telegram Bot API (`getUpdates`), filters messages by `TELEGRAM_ALLOWED_SENDERS`, and injects them into the container tmux session via:
+
+```
+docker exec <CONTAINER_NAME> tmux send-keys -t sandy.<PANE> "<text>" Enter
+```
+
+Launched as a background process before `docker run`, tracked via `CHANNEL_RELAY_PID`, and killed in the cleanup trap. The target pane is `SANDY_CHANNEL_TARGET_PANE` (default `0` = Claude in dual mode, or the sole pane in gemini-only mode).
+
+**Scope**: Telegram only in v0.8.2; Discord via relay is deferred. The relay is stateless — no chat threading, no attachment support, no edit-message reactions. For rich features, use the claude plugin path.
+
 ### Multiple Channels
 
-Both Telegram and Discord can be enabled simultaneously:
+Both Telegram and Discord can be enabled simultaneously with `SANDY_AGENT=claude`:
 ```
 SANDY_CHANNELS=plugin:telegram@claude-plugins-official plugin:discord@claude-plugins-official
 ```
+
+With `SANDY_AGENT=gemini`/`both`, only Telegram is currently supported through the relay; `SANDY_CHANNELS=discord` exits with an error.
 
 ---
 

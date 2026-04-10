@@ -49,7 +49,33 @@ SANDY_SSH=agent                          # use SSH agent forwarding
 SANDY_MODEL=claude-sonnet-4-5-20250929   # override model
 ```
 
-This file is parsed as plain `KEY=VALUE` lines (not sourced — no shell code execution). Values are validated against an allowlist of recognized variables: `SANDY_MODEL`, `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_VERBOSE`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`.
+This file is parsed as plain `KEY=VALUE` lines (not sourced — no shell code execution). Values are validated against an allowlist of recognized variables: `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`.
+
+## Agent Selection
+
+Sandy supports Claude Code (default), Gemini CLI, or **both side-by-side in a dual-pane tmux session**, selectable per-project via `SANDY_AGENT` in `.sandy/config`:
+
+```sh
+SANDY_AGENT=gemini      # or: claude (default), both
+GEMINI_API_KEY=...
+```
+
+Each mode uses its own Docker image (`sandy-claude-code`, `sandy-gemini-cli`, or `sandy-both`) sharing the common `sandy-base`. Gemini CLI is installed via `npm install -g @google/gemini-cli` and launched with `GEMINI_SANDBOX=false` (sandy provides the whole-session isolation). The sandbox directory has sibling `claude/` and `gemini/` subdirs mounted at `~/.claude` and `~/.gemini` respectively; v1 layouts with `settings.json` at the sandbox top level are auto-migrated on launch.
+
+**Gemini credentials** are probed in this order (override via `SANDY_GEMINI_AUTH=auto|api_key|oauth|adc`): `GEMINI_API_KEY` env var, host `~/.gemini/tokens.json` (copied ephemerally), host `~/.config/gcloud/application_default_credentials.json` (Google ADC / Vertex AI).
+
+**Feature support by agent**:
+
+| Feature | `claude` | `gemini` | `both` |
+|---|---|---|---|
+| Skill packs | yes | — | yes (claude pane) |
+| Synthkit slash commands | yes (Markdown) | yes (TOML, in `~/.gemini/commands/`) | yes (both) |
+| Channels (Telegram) | in-container plugin | host-side tmux relay | host-side tmux relay |
+| Channels (Discord) | yes | — | — |
+| `--remote` | yes | — | — |
+| Gemini extensions (`SANDY_GEMINI_EXTENSIONS`) | — | yes | yes |
+
+The Telegram host-side relay (`$SANDY_HOME/channel-relay.sh`) is an agent-agnostic long-polling bridge that injects messages into the container's tmux session via `docker exec ... tmux send-keys`. In dual-agent mode, `SANDY_CHANNEL_TARGET_PANE=0|1` selects which pane receives messages (default `0` = Claude).
 
 ## Per-project Sandboxes
 
