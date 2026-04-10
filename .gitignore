@@ -12,3 +12,6 @@
 *.bak
 
 .secrets
+
+# Working docs (not for the repo)
+POLISH_AND_PUBLICITY.md
