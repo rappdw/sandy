@@ -992,6 +992,180 @@ check ".claude.json: file ends with newline" \
 rm -f "$SANDBOX_DIR/.claude.json.test"
 
 # ============================================================
+info "28. Gemini CLI support — agent helpers and flag translation"
+# ============================================================
+# These tests extract helper functions directly from the sandy script via
+# sed range matches and source them into a subshell. Purely script-level —
+# no docker required. Tests will break if the function signatures in sandy
+# move or are renamed; that's the intended early-warning contract.
+
+SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+# Pull the two one-line helpers and the build_gemini_cmd function body.
+_HELPERS="$(grep -E '^_sandy_has_(claude|gemini)\(\)' "$SANDY_SCRIPT")"
+_BUILD_GEMINI="$(sed -n '/^build_gemini_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+
+if [ -z "$_HELPERS" ] || [ -z "$_BUILD_GEMINI" ]; then
+    fail "could not extract gemini helpers from sandy script (did they move?)"
+else
+    _gemini_script_test() {
+        local desc="$1"; shift
+        if bash -c "set -e; $_HELPERS
+$_BUILD_GEMINI
+$*" >/dev/null 2>&1; then
+            pass "$desc"
+        else
+            fail "$desc"
+        fi
+    }
+
+    _gemini_script_test "_sandy_has_claude true for SANDY_AGENT=claude" \
+        'SANDY_AGENT=claude _sandy_has_claude'
+    _gemini_script_test "_sandy_has_claude true for SANDY_AGENT=both" \
+        'SANDY_AGENT=both _sandy_has_claude'
+    _gemini_script_test "_sandy_has_claude false for SANDY_AGENT=gemini" \
+        '! SANDY_AGENT=gemini _sandy_has_claude'
+    _gemini_script_test "_sandy_has_gemini true for SANDY_AGENT=gemini" \
+        'SANDY_AGENT=gemini _sandy_has_gemini'
+    _gemini_script_test "_sandy_has_gemini true for SANDY_AGENT=both" \
+        'SANDY_AGENT=both _sandy_has_gemini'
+    _gemini_script_test "_sandy_has_gemini false for SANDY_AGENT=claude" \
+        '! SANDY_AGENT=claude _sandy_has_gemini'
+
+    _gemini_script_test "build_gemini_cmd translates -p to --prompt" \
+        'out=$(build_gemini_cmd -p hello); echo "$out" | grep -q -- "--prompt" && ! echo "$out" | grep -qE " -p( |$)"'
+    _gemini_script_test "build_gemini_cmd translates --print to --prompt" \
+        'out=$(build_gemini_cmd --print hello); echo "$out" | grep -q -- "--prompt"'
+    _gemini_script_test "build_gemini_cmd passes --prompt through unchanged" \
+        'out=$(build_gemini_cmd --prompt hello); echo "$out" | grep -q -- "--prompt"'
+    _gemini_script_test "build_gemini_cmd drops --continue" \
+        'out=$(build_gemini_cmd --continue); ! echo "$out" | grep -q -- "--continue"'
+    _gemini_script_test "build_gemini_cmd drops -c" \
+        'out=$(build_gemini_cmd -c); ! echo "$out" | grep -qE " -c( |$)"'
+    _gemini_script_test "build_gemini_cmd passes --yolo by default" \
+        'out=$(build_gemini_cmd); echo "$out" | grep -q -- "--yolo"'
+    _gemini_script_test "build_gemini_cmd suppresses --yolo when SANDY_SKIP_PERMISSIONS=false" \
+        'out=$(SANDY_SKIP_PERMISSIONS=false build_gemini_cmd); ! echo "$out" | grep -q -- "--yolo"'
+    _gemini_script_test "build_gemini_cmd honors GEMINI_MODEL" \
+        'out=$(GEMINI_MODEL=test-model-x build_gemini_cmd); echo "$out" | grep -q "test-model-x"'
+    _gemini_script_test "build_gemini_cmd exports GEMINI_SANDBOX=false" \
+        'build_gemini_cmd >/dev/null; [ "$GEMINI_SANDBOX" = "false" ]'
+fi
+
+# ============================================================
+info "29. v1 → v1.5 sandbox layout migration"
+# ============================================================
+# Extract the migration block from sandy and exercise it against fake
+# sandbox directories in a tempdir. The block references $SANDBOX_DIR and
+# calls info() — we provide both.
+
+_MIG_SNIPPET="$(sed -n '/^_v1_claude_entries=/,/^fi$/p' "$SANDY_SCRIPT")"
+
+if [ -z "$_MIG_SNIPPET" ]; then
+    fail "could not extract v1.5 migration block from sandy"
+else
+    _MIG_TMP="$(mktemp -d)"
+    _run_migration() {
+        # Provide stub info() (sandy uses it for user-visible log lines) and
+        # point SANDBOX_DIR at the passed-in fixture.
+        SANDBOX_DIR="$1" bash -c "
+            info() { :; }
+            $_MIG_SNIPPET
+        "
+    }
+
+    # ---- Test A: clean v1 → v1.5 migration with expanded allowlist ----
+    SB_A="$_MIG_TMP/sb_clean"
+    mkdir -p "$SB_A"
+    touch "$SB_A/settings.json"
+    mkdir -p "$SB_A/projects" "$SB_A/cache" "$SB_A/sessions" \
+             "$SB_A/plans" "$SB_A/telemetry" "$SB_A/file-history"
+    _run_migration "$SB_A"
+
+    check "migration: settings.json moved under claude/" \
+        test -f "$SB_A/claude/settings.json"
+    check "migration: projects/ moved under claude/" \
+        test -d "$SB_A/claude/projects"
+    check "migration: cache/ (expanded allowlist) moved under claude/" \
+        test -d "$SB_A/claude/cache"
+    check "migration: sessions/ moved under claude/" \
+        test -d "$SB_A/claude/sessions"
+    check "migration: plans/ (expanded allowlist) moved under claude/" \
+        test -d "$SB_A/claude/plans"
+    check "migration: telemetry/ (expanded allowlist) moved under claude/" \
+        test -d "$SB_A/claude/telemetry"
+    check "migration: file-history/ (expanded allowlist) moved under claude/" \
+        test -d "$SB_A/claude/file-history"
+    check "migration: top level cleared of claude entries" \
+        bash -c '! ls "$1" 2>/dev/null | grep -qE "^(settings\.json|projects|cache|sessions|plans|telemetry|file-history)$"' -- "$SB_A"
+
+    # ---- Test B: idempotent (second pass is a no-op) ----
+    _run_migration "$SB_A"
+    check "migration idempotent: no .v1-backup created on clean re-run" \
+        test ! -d "$SB_A/.v1-backup"
+    check "migration idempotent: claude/settings.json still present" \
+        test -f "$SB_A/claude/settings.json"
+
+    # ---- Test C: conflict quarantine (stale top-level + live claude/) ----
+    SB_C="$_MIG_TMP/sb_conflict"
+    mkdir -p "$SB_C/claude/commands"
+    echo "authoritative" > "$SB_C/claude/commands/fresh.toml"
+    mkdir -p "$SB_C/commands"
+    echo "stale" > "$SB_C/commands/old.toml"
+    _run_migration "$SB_C"
+
+    check "conflict: stale commands/ quarantined to .v1-backup/" \
+        bash -c 'ls "$1"/.v1-backup/commands.* >/dev/null 2>&1' -- "$SB_C"
+    check "conflict: authoritative claude/commands/fresh.toml preserved" \
+        test -f "$SB_C/claude/commands/fresh.toml"
+    check "conflict: authoritative claude/commands/fresh.toml content preserved" \
+        bash -c 'grep -q authoritative "$1/claude/commands/fresh.toml"' -- "$SB_C"
+    check "conflict: stale top-level commands/ removed" \
+        test ! -d "$SB_C/commands"
+    check "conflict: quarantined file content preserved" \
+        bash -c 'grep -rq stale "$1/.v1-backup/"' -- "$SB_C"
+
+    # ---- Test D: no leftovers → no-op (doesn't create empty claude/) ----
+    SB_D="$_MIG_TMP/sb_empty"
+    mkdir -p "$SB_D"
+    _run_migration "$SB_D"
+    check "no leftovers: migration does not create empty claude/ dir" \
+        test ! -d "$SB_D/claude"
+
+    rm -rf "$_MIG_TMP"
+fi
+
+# ============================================================
+info "30. Gemini CLI in-container (sandy-gemini-cli image)"
+# ============================================================
+# In-container smoke tests against the sandy-gemini-cli image. Skipped if
+# the image hasn't been built (e.g. on hosts that only use Claude).
+
+if docker image inspect sandy-gemini-cli &>/dev/null; then
+    _gemini_in_container() {
+        docker run --rm --read-only \
+            --tmpfs /tmp:exec,size=64M \
+            --tmpfs /home/claude:exec,size=64M,uid=1001,gid=1001 \
+            --user 1001:1001 \
+            -e HOME=/home/claude \
+            --entrypoint bash \
+            sandy-gemini-cli -c "$1" >/dev/null 2>&1
+    }
+
+    check "gemini binary on PATH" \
+        _gemini_in_container "command -v gemini"
+    check "gemini --version runs" \
+        _gemini_in_container "gemini --version"
+    check "node is available (required by gemini CLI)" \
+        _gemini_in_container "node --version"
+
+    # Sanity: the base Claude toolchain should still be present in the both image
+    # (we're only checking gemini-cli here; sandy-both would be a separate check).
+else
+    printf "  \033[0;33m⊘ skipped — sandy-gemini-cli image not built\033[0m\n"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
