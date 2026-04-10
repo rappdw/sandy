@@ -914,16 +914,24 @@ if [ "$_stale" = true ]; then
     echo "$_now" > "$_marketplace_cache"
 fi
 
-# Auto-install channel plugins if referenced in SANDY_CHANNELS and not yet installed
+# Auto-install and enable channel plugins referenced in SANDY_CHANNELS.
+# Installed-but-disabled is a real state (user may have toggled off); we always
+# ensure the plugin is enabled when the channel is configured.
 if [ -n "${SANDY_CHANNELS:-}" ]; then
     for _chan in telegram discord; do
         if [[ "$SANDY_CHANNELS" == *"$_chan"* ]]; then
-            if ! claude plugin list 2>/dev/null | grep -q "${_chan}@claude-plugins-official"; then
+            # Install if not present (grep -qi handles multiple output formats)
+            if ! claude plugin list 2>/dev/null | grep -qi "${_chan}"; then
                 printf "\033[0;36m● Installing %s channel plugin...\033[0m\n" "$_chan"
                 if ! claude plugin install "${_chan}@claude-plugins-official" 2>&1; then
                     printf "\033[0;31m✗ Failed to install %s channel plugin\033[0m\n" "$_chan" >&2
+                    continue
                 fi
             fi
+            # Always ensure enabled (idempotent; silent if already enabled).
+            # The enable command takes just the plugin name, not plugin@marketplace.
+            claude plugin enable "$_chan" >/dev/null 2>&1 || \
+                claude plugin enable "${_chan}@claude-plugins-official" >/dev/null 2>&1 || true
         fi
     done
 fi
