@@ -16,7 +16,7 @@ Also update `README.md` and this file (`CLAUDE.md`) if user-facing behavior chan
 
 ## What This Is
 
-`sandy` — an isolated sibling for your coding agents. A self-contained command that runs Claude Code or Gemini CLI (or both, side-by-side) in a Docker sandbox with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes.
+`sandy` — an isolated sibling for your coding agents. A self-contained command that runs Claude Code, Gemini CLI, OpenAI Codex CLI (or Claude + Gemini side-by-side) in a Docker sandbox with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes.
 
 ## Installation
 
@@ -49,31 +49,35 @@ SANDY_SSH=agent                          # use SSH agent forwarding
 SANDY_MODEL=claude-sonnet-4-5-20250929   # override model
 ```
 
-This file is parsed as plain `KEY=VALUE` lines (not sourced — no shell code execution). Values are validated against an allowlist of recognized variables: `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`.
+This file is parsed as plain `KEY=VALUE` lines (not sourced — no shell code execution). Values are validated against an allowlist of recognized variables: `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_API_KEY`, `CODEX_API_KEY`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `OPENAI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`.
 
 ## Agent Selection
 
-Sandy supports Claude Code (default), Gemini CLI, or **both side-by-side in a dual-pane tmux session**, selectable per-project via `SANDY_AGENT` in `.sandy/config`:
+Sandy supports Claude Code (default), Gemini CLI, OpenAI Codex CLI, or **Claude + Gemini side-by-side in a dual-pane tmux session**, selectable per-project via `SANDY_AGENT` in `.sandy/config`:
 
 ```sh
-SANDY_AGENT=gemini      # or: claude (default), both
+SANDY_AGENT=gemini      # or: claude (default), codex, both
 GEMINI_API_KEY=...
 ```
 
-Each mode uses its own Docker image (`sandy-claude-code`, `sandy-gemini-cli`, or `sandy-both`) sharing the common `sandy-base`. Gemini CLI is installed via `npm install -g @google/gemini-cli` and launched with `GEMINI_SANDBOX=false` (sandy provides the whole-session isolation). The sandbox directory has sibling `claude/` and `gemini/` subdirs mounted at `~/.claude` and `~/.gemini` respectively; v1 layouts with `settings.json` at the sandbox top level are auto-migrated on launch.
+Each mode uses its own Docker image (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, or `sandy-both`) sharing the common `sandy-base`. Gemini CLI and Codex CLI are installed via `npm install -g @google/gemini-cli` and `npm install -g @openai/codex` respectively. Gemini launches with `GEMINI_SANDBOX=false`; Codex launches with `--sandbox danger-full-access` plus `sandbox_mode = "danger-full-access"` in its `config.toml` (belt-and-suspenders — codex's Landlock sandbox does not nest cleanly in Docker, and sandy already provides whole-session isolation). The sandbox directory has sibling `claude/`, `gemini/`, and `codex/` subdirs mounted at `~/.claude`, `~/.gemini`, and `~/.codex` respectively; v1 layouts with `settings.json` at the sandbox top level are auto-migrated on launch.
 
 **Gemini credentials** are probed in this order (override via `SANDY_GEMINI_AUTH=auto|api_key|oauth|adc`): `GEMINI_API_KEY` env var, host `~/.gemini/tokens.json` (copied ephemerally), host `~/.config/gcloud/application_default_credentials.json` (Google ADC / Vertex AI).
 
+**Codex credentials** are probed in this order (override via `SANDY_CODEX_AUTH=auto|api_key|oauth`): `CODEX_API_KEY` env var (primary), host `~/.codex/auth.json` (copied ephemerally and mounted **read-only** — prevents token leakage back to host and prevents stale-token races). `OPENAI_API_KEY` is aliased to `CODEX_API_KEY` automatically with a warning (codex reads `CODEX_API_KEY`, not `OPENAI_API_KEY`; the latter is telemetry-only in codex-rs). Because `auth.json` is mounted read-only, in-session OAuth refresh will fail — users must re-login inside the container if the token expires. On first launch, sandy seeds `~/.codex/config.toml` with `sandbox_mode = "danger-full-access"` and a full `[notice]` block to suppress all first-run prompts; a `[projects."$SANDY_WORKSPACE"] trust_level = "trusted"` entry is appended at session start by `user-setup.sh` (it needs the container-side workspace path).
+
 **Feature support by agent**:
 
-| Feature | `claude` | `gemini` | `both` |
-|---|---|---|---|
-| Skill packs | yes | — | yes (claude pane) |
-| Synthkit slash commands | yes (Markdown) | yes (TOML, in `~/.gemini/commands/`) | yes (both) |
-| Channels (Telegram) | in-container plugin | host-side tmux relay | host-side tmux relay |
-| Channels (Discord) | yes | — | — |
-| `--remote` | yes | — | — |
-| Gemini extensions (`SANDY_GEMINI_EXTENSIONS`) | — | yes | yes |
+| Feature | `claude` | `gemini` | `codex` | `both` |
+|---|---|---|---|---|
+| Skill packs | yes | — | — | yes (claude pane) |
+| Synthkit slash commands | yes (Markdown) | yes (TOML, in `~/.gemini/commands/`) | yes (SKILL.md in `~/.codex/skills/`) | yes (both) |
+| Channels (Telegram) | in-container plugin | host-side tmux relay | host-side tmux relay | host-side tmux relay |
+| Channels (Discord) | yes | — | — | — |
+| `--remote` | yes | — | — | — |
+| Gemini extensions (`SANDY_GEMINI_EXTENSIONS`) | — | yes | — | yes |
+
+Codex headless mode (`-p` / `--print` / `--prompt`) translates to `codex exec` — the prompt is passed as a positional arg, not a flag. Codex `exec` only returns exit codes 0 or 1 (no nuanced exit codes like Claude's `--print` has). `--continue` / `-c` is silently dropped (codex has `codex resume` but no headless continuation flag). Combo values like `codex+claude` are rejected — dual-agent mode is still claude+gemini only.
 
 The Telegram host-side relay (`$SANDY_HOME/channel-relay.sh`) is an agent-agnostic long-polling bridge that injects messages into the container's tmux session via `docker exec ... tmux send-keys`. In dual-agent mode, `SANDY_CHANNEL_TARGET_PANE=0|1` selects which pane receives messages (default `0` = Claude).
 

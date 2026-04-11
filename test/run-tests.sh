@@ -10,6 +10,43 @@ SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 PASS=0
 FAIL=0
 ERRORS=()
+COMPLETED=false
+
+# Guarantee we always print a summary, even if `set -euo pipefail` aborts the
+# script mid-run (e.g. a bare pipeline with a failing grep). Without this, an
+# early-terminating test would exit silently and the user would have no idea
+# how far the suite got. The trap is overwritten by setup_sandbox to also
+# clean up temp dirs; that wrapper also calls this function.
+_emit_summary() {
+    local code=$?
+    # Reset terminal keypad to numeric mode (DECKPNM). Something in the suite
+    # — likely a `docker run` that transiently drops a tmux/claude TUI into
+    # application mode (DECKPAM, ESC =) — can leave the host terminal in a
+    # state where up-arrow sends SS3 (ESC O A) instead of CSI (ESC [ A). If
+    # zsh's ESC-timeout eats the lead byte, literal "OA" lands on the prompt
+    # and the user sees `command not found: OA` on their next keystroke.
+    # Unconditionally resetting here is cheap and safe.
+    printf '\033>' 2>/dev/null || true
+    command -v tput >/dev/null 2>&1 && tput rmkx 2>/dev/null || true
+    # Only fire the abort banner when the script died mid-suite, i.e. at
+    # least one test has already run. Legitimate early exits (preflight
+    # "image not found", --help, etc.) leave PASS+FAIL at 0 and print their
+    # own error — we must not drown them in a misleading banner.
+    if [ "$COMPLETED" = false ] && [ "$((PASS + FAIL))" -gt 0 ]; then
+        echo ""
+        printf "\033[0;31m✗ test suite aborted early (exit=%d)\033[0m\n" "$code" >&2
+        printf "\033[0;33mPartial results: %d passed, %d failed (of %d run so far)\033[0m\n" \
+            "$PASS" "$FAIL" "$((PASS + FAIL))" >&2
+        if [ "${#ERRORS[@]}" -gt 0 ]; then
+            printf "\033[0;31mRecorded failures:\033[0m\n" >&2
+            for e in "${ERRORS[@]}"; do
+                printf "  \033[0;31m- %s\033[0m\n" "$e" >&2
+            done
+        fi
+        printf "\033[0;33mHint: a command likely exited non-zero under 'set -euo pipefail'. Check just above the last printed test for an unguarded pipeline or missing '|| true'.\033[0m\n" >&2
+    fi
+}
+trap _emit_summary EXIT
 
 # --- Helpers ---
 
@@ -32,6 +69,7 @@ setup_sandbox() {
 }
 
 cleanup() {
+    _emit_summary
     rm -rf "$SANDBOX_DIR" "$TEST_PROJECT" 2>/dev/null || true
 }
 
@@ -1002,7 +1040,7 @@ info "28. Gemini CLI support — agent helpers and flag translation"
 SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
 # Pull the two one-line helpers and the build_gemini_cmd function body.
-_HELPERS="$(grep -E '^_sandy_has_(claude|gemini)\(\)' "$SANDY_SCRIPT")"
+_HELPERS="$(grep -E '^_sandy_has_(claude|gemini|codex)\(\)' "$SANDY_SCRIPT")"
 _BUILD_GEMINI="$(sed -n '/^build_gemini_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
 
 if [ -z "$_HELPERS" ] || [ -z "$_BUILD_GEMINI" ]; then
@@ -1050,6 +1088,372 @@ $*" >/dev/null 2>&1; then
         'out=$(GEMINI_MODEL=test-model-x build_gemini_cmd); echo "$out" | grep -q "test-model-x"'
     _gemini_script_test "build_gemini_cmd exports GEMINI_SANDBOX=false" \
         'build_gemini_cmd >/dev/null; [ "$GEMINI_SANDBOX" = "false" ]'
+fi
+
+# ============================================================
+info "28b. Codex CLI support — agent helpers and flag translation"
+# ============================================================
+_BUILD_CODEX="$(sed -n '/^build_codex_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+
+if [ -z "$_HELPERS" ] || [ -z "$_BUILD_CODEX" ]; then
+    fail "could not extract codex helpers from sandy script (did they move?)"
+else
+    _codex_script_test() {
+        local desc="$1"; shift
+        if bash -c "set -e; $_HELPERS
+$_BUILD_CODEX
+$*" >/dev/null 2>&1; then
+            pass "$desc"
+        else
+            fail "$desc"
+        fi
+    }
+
+    _codex_script_test "_sandy_has_codex true for SANDY_AGENT=codex" \
+        'SANDY_AGENT=codex _sandy_has_codex'
+    _codex_script_test "_sandy_has_codex false for SANDY_AGENT=claude" \
+        '! SANDY_AGENT=claude _sandy_has_codex'
+    _codex_script_test "_sandy_has_codex false for SANDY_AGENT=gemini" \
+        '! SANDY_AGENT=gemini _sandy_has_codex'
+    _codex_script_test "_sandy_has_codex false for SANDY_AGENT=both" \
+        '! SANDY_AGENT=both _sandy_has_codex'
+
+    _codex_script_test "build_codex_cmd (no args) uses interactive codex" \
+        'out=$(build_codex_cmd); echo "$out" | grep -qE "^codex --sandbox danger-full-access"'
+    _codex_script_test "build_codex_cmd -p switches to codex exec" \
+        'out=$(build_codex_cmd -p hello); echo "$out" | grep -qE "^codex exec --sandbox danger-full-access"'
+    _codex_script_test "build_codex_cmd --print switches to codex exec" \
+        'out=$(build_codex_cmd --print hello); echo "$out" | grep -qE "^codex exec "'
+    _codex_script_test "build_codex_cmd --prompt switches to codex exec" \
+        'out=$(build_codex_cmd --prompt hello); echo "$out" | grep -qE "^codex exec "'
+    _codex_script_test "build_codex_cmd drops -p flag itself (positional arg remains)" \
+        'out=$(build_codex_cmd -p hello); ! echo "$out" | grep -qE " -p( |$)" && echo "$out" | grep -q hello'
+    _codex_script_test "build_codex_cmd drops --continue" \
+        'out=$(build_codex_cmd --continue); ! echo "$out" | grep -q -- "--continue"'
+    _codex_script_test "build_codex_cmd drops -c" \
+        'out=$(build_codex_cmd -c); ! echo "$out" | grep -qE " -c( |$)"'
+    _codex_script_test "build_codex_cmd honors CODEX_MODEL" \
+        'out=$(CODEX_MODEL=gpt-5.1 build_codex_cmd); echo "$out" | grep -q "gpt-5.1"'
+    _codex_script_test "build_codex_cmd always sets --sandbox danger-full-access" \
+        'out=$(build_codex_cmd); echo "$out" | grep -q -- "--sandbox danger-full-access"'
+    _codex_script_test "build_codex_cmd verbose appends exit-code echo" \
+        'out=$(SANDY_VERBOSE=1 build_codex_cmd); echo "$out" | grep -q "Codex CLI exited"'
+fi
+
+# ============================================================
+info "28c. Codex config.toml seeding"
+# ============================================================
+_CODEX_SEED_BLOCK="$(awk '
+    /^if \[ "\$SANDY_AGENT" = "codex" \]; then$/ && !seen {seen=1; printing=1}
+    printing {print}
+    printing && /^fi$/ {exit}
+' "$SANDY_SCRIPT")"
+
+if [ -z "$_CODEX_SEED_BLOCK" ]; then
+    fail "could not extract codex sandbox seeding block from sandy"
+else
+    _CSEED_TMP="$(mktemp -d)"
+    SANDBOX_DIR="$_CSEED_TMP" bash -c "
+        info() { :; }
+        SANDY_AGENT=codex
+        $_CODEX_SEED_BLOCK
+    "
+
+    if [ -f "$_CSEED_TMP/codex/config.toml" ]; then
+        pass "codex/config.toml created on first run"
+    else
+        fail "codex/config.toml created on first run"
+    fi
+
+    if grep -q 'sandbox_mode = "danger-full-access"' "$_CSEED_TMP/codex/config.toml" 2>/dev/null; then
+        pass "codex/config.toml sets sandbox_mode = danger-full-access"
+    else
+        fail "codex/config.toml sets sandbox_mode = danger-full-access"
+    fi
+
+    _notice_count=$(grep -cE '^(hide_|"hide)' "$_CSEED_TMP/codex/config.toml" 2>/dev/null || echo 0)
+    if [ "$_notice_count" -ge 5 ]; then
+        pass "codex/config.toml seeds all 5 [notice] hide_* keys"
+    else
+        fail "codex/config.toml seeds all 5 [notice] hide_* keys (found: $_notice_count)"
+    fi
+
+    # Idempotency: re-run must not overwrite user edits
+    echo "# user edit" >> "$_CSEED_TMP/codex/config.toml"
+    SANDBOX_DIR="$_CSEED_TMP" bash -c "
+        info() { :; }
+        SANDY_AGENT=codex
+        $_CODEX_SEED_BLOCK
+    "
+    if grep -q '^# user edit$' "$_CSEED_TMP/codex/config.toml"; then
+        pass "codex/config.toml re-run preserves user edits (idempotent)"
+    else
+        fail "codex/config.toml re-run preserves user edits (idempotent)"
+    fi
+
+    rm -rf "$_CSEED_TMP"
+fi
+
+# ============================================================
+info "28d. Codex config allowlist, dispatch, alias, update regex"
+# ============================================================
+
+# Allowlist must include the codex variables (Step 1 of v0.10 plan).
+if grep -qE 'CODEX_API_KEY\|CODEX_MODEL\|SANDY_CODEX_AUTH\|CODEX_HOME\|OPENAI_API_KEY' "$SANDY_SCRIPT"; then
+    pass "config allowlist includes CODEX_API_KEY, CODEX_MODEL, SANDY_CODEX_AUTH, CODEX_HOME, OPENAI_API_KEY"
+else
+    fail "config allowlist includes codex variables"
+fi
+
+# Agent dispatch case-statement must map codex → sandy-codex.
+if grep -qE 'codex\)[[:space:]]+IMAGE_NAME="sandy-codex"' "$SANDY_SCRIPT"; then
+    pass "agent dispatch: codex → sandy-codex"
+else
+    fail "agent dispatch: codex → sandy-codex"
+fi
+
+# Invalid SANDY_AGENT values must be rejected with a clear error that lists
+# the four valid values. We match against the error string in the source
+# rather than running sandy (which would need Docker).
+if grep -qE "Invalid SANDY_AGENT.*claude.*gemini.*codex.*both" "$SANDY_SCRIPT"; then
+    pass "invalid agent error lists all four valid values"
+else
+    fail "invalid agent error lists all four valid values"
+fi
+
+# OPENAI_API_KEY alias: extract and exercise the block in isolation.
+_ALIAS_BLOCK="$(awk '
+    /^if \[ "\$SANDY_AGENT" = "codex" \] && \[ -z "\$\{CODEX_API_KEY:-\}" \] && \[ -n "\$\{OPENAI_API_KEY:-\}" \]; then$/ {printing=1}
+    printing {print}
+    printing && /^fi$/ {exit}
+' "$SANDY_SCRIPT")"
+
+if [ -z "$_ALIAS_BLOCK" ]; then
+    fail "could not extract OPENAI_API_KEY alias block"
+else
+    # Case 1: alias fires when only OPENAI_API_KEY is set.
+    _result="$(bash -c "
+        unset CODEX_API_KEY
+        SANDY_AGENT=codex
+        OPENAI_API_KEY=sk-test-alias
+        $_ALIAS_BLOCK
+        echo \"CODEX_API_KEY=\$CODEX_API_KEY\"
+    " 2>/dev/null)"
+    if echo "$_result" | grep -q "CODEX_API_KEY=sk-test-alias"; then
+        pass "OPENAI_API_KEY is aliased to CODEX_API_KEY when only OPENAI_API_KEY set"
+    else
+        fail "OPENAI_API_KEY is aliased to CODEX_API_KEY when only OPENAI_API_KEY set"
+    fi
+
+    # Case 2: CODEX_API_KEY wins if both are set.
+    _result="$(bash -c "
+        SANDY_AGENT=codex
+        CODEX_API_KEY=sk-codex
+        OPENAI_API_KEY=sk-openai
+        $_ALIAS_BLOCK
+        echo \"CODEX_API_KEY=\$CODEX_API_KEY\"
+    " 2>/dev/null)"
+    if echo "$_result" | grep -q "CODEX_API_KEY=sk-codex"; then
+        pass "CODEX_API_KEY takes precedence when both are set"
+    else
+        fail "CODEX_API_KEY takes precedence when both are set"
+    fi
+
+    # Case 3: alias does NOT fire for non-codex agents.
+    _result="$(bash -c "
+        unset CODEX_API_KEY
+        SANDY_AGENT=claude
+        OPENAI_API_KEY=sk-test-alias
+        $_ALIAS_BLOCK
+        echo \"CODEX_API_KEY=\${CODEX_API_KEY:-UNSET}\"
+    " 2>/dev/null)"
+    if echo "$_result" | grep -q "CODEX_API_KEY=UNSET"; then
+        pass "OPENAI_API_KEY alias is scoped to SANDY_AGENT=codex only"
+    else
+        fail "OPENAI_API_KEY alias is scoped to SANDY_AGENT=codex only"
+    fi
+fi
+
+# Dockerfile.codex generator: extract and run into a tempdir, verify content.
+_DOCKERFILE_CODEX_FN="$(sed -n '/^generate_dockerfile_codex()/,/^}$/p' "$SANDY_SCRIPT")"
+
+if [ -z "$_DOCKERFILE_CODEX_FN" ]; then
+    fail "could not extract generate_dockerfile_codex function"
+else
+    _DF_TMP="$(mktemp -d)"
+    bash -c "
+        SANDY_HOME='$_DF_TMP'
+        BASE_IMAGE_NAME='sandy-base'
+        $_DOCKERFILE_CODEX_FN
+        generate_dockerfile_codex
+    " 2>/dev/null
+
+    if [ -f "$_DF_TMP/Dockerfile.codex.new" ]; then
+        pass "generate_dockerfile_codex writes Dockerfile.codex.new"
+    else
+        fail "generate_dockerfile_codex writes Dockerfile.codex.new"
+    fi
+
+    if grep -q "FROM sandy-base" "$_DF_TMP/Dockerfile.codex.new" 2>/dev/null; then
+        pass "Dockerfile.codex derives from sandy-base"
+    else
+        fail "Dockerfile.codex derives from sandy-base"
+    fi
+
+    if grep -q "npm install -g @openai/codex" "$_DF_TMP/Dockerfile.codex.new" 2>/dev/null; then
+        pass "Dockerfile.codex installs @openai/codex"
+    else
+        fail "Dockerfile.codex installs @openai/codex"
+    fi
+
+    if grep -q "/opt/codex/.version" "$_DF_TMP/Dockerfile.codex.new" 2>/dev/null; then
+        pass "Dockerfile.codex caches version to /opt/codex/.version"
+    else
+        fail "Dockerfile.codex caches version to /opt/codex/.version"
+    fi
+
+    if grep -q "uv tool install.*synthkit" "$_DF_TMP/Dockerfile.codex.new" 2>/dev/null; then
+        pass "Dockerfile.codex installs synthkit"
+    else
+        fail "Dockerfile.codex installs synthkit"
+    fi
+
+    rm -rf "$_DF_TMP"
+fi
+
+# Update check sed regex: feed it sample tag_name JSON fragments and verify
+# the version is extracted correctly. This is the regex from _check_codex_update.
+# The real callsite uses `|| true` to fail-soft on pipeline failures; we do the
+# same here so empty/missing inputs don't trip `set -euo pipefail`.
+_codex_parse_tag() {
+    { echo "$1" \
+        | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' 2>/dev/null | head -1 \
+        | sed -E 's/.*"rust-v?([0-9][^"]*)"$/\1/'; } || true
+}
+
+_r="$(_codex_parse_tag '{"tag_name":"rust-v0.119.0","name":"foo"}')"
+if [ "$_r" = "0.119.0" ]; then
+    pass "update check parses rust-v0.119.0 → 0.119.0"
+else
+    fail "update check parses rust-v0.119.0 (got: $_r)"
+fi
+
+_r="$(_codex_parse_tag '{"tag_name":"rust-v1.0.0-beta.3"}')"
+if [ "$_r" = "1.0.0-beta.3" ]; then
+    pass "update check parses rust-v1.0.0-beta.3 → 1.0.0-beta.3"
+else
+    fail "update check parses rust-v1.0.0-beta.3 (got: $_r)"
+fi
+
+_r="$(_codex_parse_tag '')"
+if [ -z "$_r" ]; then
+    pass "update check returns empty on empty input (fail-soft)"
+else
+    fail "update check returns empty on empty input (got: $_r)"
+fi
+
+_r="$(_codex_parse_tag '{"message":"Not Found"}')"
+if [ -z "$_r" ]; then
+    pass "update check returns empty when tag_name absent (fail-soft)"
+else
+    fail "update check returns empty when tag_name absent (got: $_r)"
+fi
+
+# Trust entry block: idempotent append on ~/.codex/config.toml.
+_TRUST_BLOCK="$(awk '
+    /^if _sandy_has_codex; then$/ && !seen {seen=1; printing=1}
+    printing {print}
+    printing && /^fi$/ {exit}
+' "$SANDY_SCRIPT")"
+
+if [ -z "$_TRUST_BLOCK" ]; then
+    fail "could not extract codex trust-entry block"
+else
+    _TRUST_TMP="$(mktemp -d)"
+    mkdir -p "$_TRUST_TMP/.codex"
+    cat > "$_TRUST_TMP/.codex/config.toml" <<'TOML'
+sandbox_mode = "danger-full-access"
+
+[notice]
+hide_full_access_warning = true
+TOML
+
+    HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/claude/myproj" SANDY_AGENT=codex \
+        bash -c "
+            _sandy_has_codex() { [ \"\${SANDY_AGENT:-claude}\" = \"codex\" ]; }
+            $_TRUST_BLOCK
+        " 2>/dev/null
+
+    if grep -q '^\[projects\."/home/claude/myproj"\]$' "$_TRUST_TMP/.codex/config.toml"; then
+        pass "trust entry appended for SANDY_WORKSPACE"
+    else
+        fail "trust entry appended for SANDY_WORKSPACE"
+    fi
+
+    if grep -q '^trust_level = "trusted"$' "$_TRUST_TMP/.codex/config.toml"; then
+        pass "trust entry includes trust_level = trusted"
+    else
+        fail "trust entry includes trust_level = trusted"
+    fi
+
+    # Idempotency: second run must not duplicate.
+    HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/claude/myproj" SANDY_AGENT=codex \
+        bash -c "
+            _sandy_has_codex() { [ \"\${SANDY_AGENT:-claude}\" = \"codex\" ]; }
+            $_TRUST_BLOCK
+        " 2>/dev/null
+
+    _count=$(grep -c '^\[projects\."/home/claude/myproj"\]$' "$_TRUST_TMP/.codex/config.toml" 2>/dev/null || echo 0)
+    if [ "$_count" = "1" ]; then
+        pass "trust entry idempotent on repeat invocation"
+    else
+        fail "trust entry idempotent on repeat invocation (count: $_count)"
+    fi
+
+    # Non-codex agents must not touch the config.
+    echo "# marker" > "$_TRUST_TMP/.codex/config.toml"
+    HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/claude/myproj" SANDY_AGENT=claude \
+        bash -c "
+            _sandy_has_codex() { [ \"\${SANDY_AGENT:-claude}\" = \"codex\" ]; }
+            $_TRUST_BLOCK
+        " 2>/dev/null
+
+    if [ "$(cat "$_TRUST_TMP/.codex/config.toml")" = "# marker" ]; then
+        pass "trust entry block is a no-op for non-codex agents"
+    else
+        fail "trust entry block is a no-op for non-codex agents"
+    fi
+
+    rm -rf "$_TRUST_TMP"
+fi
+
+# Feature guards: the SANDY_SKILL_PACKS guard must reject SANDY_AGENT=codex.
+# Structure: `if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "codex" ]; then
+#                if [ -n "${SANDY_SKILL_PACKS:-}" ]; then ERROR ...`
+if grep -qE '"\$SANDY_AGENT" = "codex" \]; then' "$SANDY_SCRIPT" \
+   && awk '
+        /\$SANDY_AGENT" = "codex"/ {ctx=5}
+        ctx > 0 {ctx--; if (/SANDY_SKILL_PACKS/) found=1}
+        END {exit !found}
+   ' "$SANDY_SCRIPT"; then
+    pass "SANDY_SKILL_PACKS guard rejects SANDY_AGENT=codex"
+else
+    fail "SANDY_SKILL_PACKS guard rejects SANDY_AGENT=codex"
+fi
+
+# The --remote and SANDY_CHANNELS=discord guards should also catch codex.
+# These use different structures, so match by pattern in the error text.
+if grep -qE '\-\-remote is only supported with SANDY_AGENT=claude' "$SANDY_SCRIPT"; then
+    pass "--remote guard error says claude-only"
+else
+    fail "--remote guard error says claude-only"
+fi
+
+# The --remote guard condition must reject ANY non-claude agent (including codex).
+if grep -qE '"\$SANDY_REMOTE_CONTROL" = true \] && \[ "\$SANDY_AGENT" != "claude"' "$SANDY_SCRIPT"; then
+    pass "--remote guard condition is '!= claude' (catches codex)"
+else
+    fail "--remote guard condition is '!= claude' (catches codex)"
 fi
 
 # ============================================================
@@ -1168,6 +1572,7 @@ fi
 # ============================================================
 # Summary
 # ============================================================
+COMPLETED=true   # suppress the early-abort message in the EXIT trap
 echo ""
 TOTAL=$((PASS + FAIL))
 if [ "$FAIL" -eq 0 ]; then

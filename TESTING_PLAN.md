@@ -332,19 +332,90 @@ sandy -p "hi"
 
 ---
 
-## 12. Cleanup
+## 12. Codex-only mode (`SANDY_AGENT=codex`)
+
+**Prerequisites**: A real `CODEX_API_KEY` (OpenAI API key) OR a host `~/.codex/auth.json` from `codex login`.
 
 ```sh
-rm -rf ~/sandy-test-claude ~/sandy-test-gemini ~/sandy-test-both
+mkdir -p ~/sandy-test-codex && cd ~/sandy-test-codex
+mkdir -p .sandy
+cat > .sandy/config <<'EOF'
+SANDY_AGENT=codex
+EOF
+
+# Smoke test 1: image builds, codex is on PATH
+CODEX_API_KEY=sk-real sandy --rebuild -p "say hello in one word"
+# Expected: exits 0, prints a single word. No Landlock errors in stderr.
+
+# Smoke test 2: config.toml seeding (inspect after first launch)
+cat ~/.sandy/sandboxes/sandy-test-codex-*/codex/config.toml
+# Expected: contains `sandbox_mode = "danger-full-access"`, all 5 hide_ keys,
+# AND a [projects."/home/claude/sandy-test-codex"] trust_level entry.
+
+# Smoke test 3: idempotency — relaunching does not duplicate the trust entry
+CODEX_API_KEY=sk-real sandy -p "exit"
+grep -c '^\[projects\.' ~/.sandy/sandboxes/sandy-test-codex-*/codex/config.toml
+# Expected: 1
+
+# Smoke test 4: OPENAI_API_KEY alias
+unset CODEX_API_KEY
+OPENAI_API_KEY=sk-real sandy -p "say hi"
+# Expected: warn line "OPENAI_API_KEY detected; forwarding as CODEX_API_KEY",
+# then succeeds.
+
+# Smoke test 5: OAuth read-only mount (only if ~/.codex/auth.json exists)
+unset CODEX_API_KEY OPENAI_API_KEY
+sandy -p "say hi"
+# Inside session (interactive):
+#   ls -la ~/.codex/auth.json            # should show the file
+#   echo foo > ~/.codex/auth.json        # should fail: read-only file system
+
+# Smoke test 6: headless translation
+CODEX_API_KEY=sk-real sandy -p "echo test" 2>&1 | head -20
+# Expected: `codex exec` is invoked (check with ps during a longer run),
+# not interactive `codex`.
+```
+
+**Feature guards** (must all fail with clear errors):
+
+```sh
+SANDY_AGENT=codex SANDY_SKILL_PACKS=gstack sandy --help    # → error: skill packs not supported with codex
+SANDY_AGENT=codex SANDY_CHANNELS=plugin:discord@claude-plugins-official sandy --help  # → error: discord not supported
+SANDY_AGENT=codex sandy --remote                            # → error: --remote only supported with claude
+SANDY_AGENT=codex+claude sandy --help                       # → error: Invalid SANDY_AGENT
+```
+
+**Sandbox forcing** (belt-and-suspenders):
+
+```sh
+# Delete config.toml; relaunch — CLI flag should still force danger-full-access
+rm ~/.sandy/sandboxes/sandy-test-codex-*/codex/config.toml
+CODEX_API_KEY=sk-real sandy -p "hello"
+# Expected: succeeds, no Landlock errors. On next run config.toml is reseeded.
+```
+
+**Update check**:
+
+```sh
+# Poison the version file inside the image to force a rebuild detection
+docker run --rm sandy-codex cat /opt/codex/.version   # note current version
+# Next `sandy` launch should detect the upstream /releases/latest tag and
+# either agree (no rebuild) or rebuild. Check stderr for the "update available" line.
+```
+
+## 13. Cleanup
+
+```sh
+rm -rf ~/sandy-test-claude ~/sandy-test-gemini ~/sandy-test-both ~/sandy-test-codex
 rm -rf ~/.sandy/sandboxes/sandy-test-*
-docker rmi sandy-gemini-cli sandy-both 2>/dev/null
+docker rmi sandy-gemini-cli sandy-both sandy-codex 2>/dev/null
 ```
 
 ---
 
 ## What "passing" means
 
-Each numbered block is a pass/fail gate. The **must-pass** set is 1, 2, 3, 6, 9 (core behavior + the v1 bug fix + layout migration + dual-pane + guard). Sections 4, 5, 7, 8, 10, 11 are feature validation — failures there indicate bugs in specific subsystems but don't block the release if you're not using that feature.
+Each numbered block is a pass/fail gate. The **must-pass** set is 1, 2, 3, 6, 9, 12 (core behavior + the v1 bug fix + layout migration + dual-pane + guard + codex solo mode). Sections 4, 5, 7, 8, 10, 11 are feature validation — failures there indicate bugs in specific subsystems but don't block the release if you're not using that feature.
 
 ### Known failure signatures
 
@@ -357,5 +428,9 @@ Each numbered block is a pass/fail gate. The **must-pass** set is 1, 2, 3, 6, 9 
 | 6 | `.claude.json` missing for `both` | `.claude.json` seeding gate missing `both` case |
 | 9 | `--remote` launches for gemini/both | Guard placement wrong or missing |
 | 10 | Relay PID left behind after exit | `cleanup()` trap missing `CHANNEL_RELAY_PID` |
+| 12 | `Landlock: operation not permitted` | `sandbox_mode = "danger-full-access"` missing from config.toml OR `--sandbox danger-full-access` missing from CLI |
+| 12 | `Not inside a trusted directory` | Trust entry not appended — check `user-setup.sh` block runs and matches `$SANDY_WORKSPACE` |
+| 12 | Codex prompts for "first-run notice" | `[notice]` block in seeded config.toml missing or misspelled key |
+| 12 | `codex: unknown flag --print` | `build_codex_cmd` flag translation not dropping sandy's `-p`/`--print` |
 
 Report which blocks fail and the specific error — that's enough to localize the bug.

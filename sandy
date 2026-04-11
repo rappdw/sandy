@@ -16,7 +16,7 @@ set -euo pipefail
 #   sandy -p "prompt"         One-shot prompt
 # =============================================================================
 
-SANDY_VERSION="0.9.1-dev"
+SANDY_VERSION="0.10.0-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
@@ -469,6 +469,28 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 DOCKERFILE
 }
 
+generate_dockerfile_codex() {
+    cat > "$SANDY_HOME/Dockerfile.codex.new" <<DOCKERFILE
+FROM ${BASE_IMAGE_NAME}
+# Install Codex CLI as a global npm package. The @openai/codex package ships
+# a prebuilt Rust binary per platform; Node is only the installation vehicle.
+RUN npm install -g @openai/codex \\
+ && mkdir -p /opt/codex \\
+ && { codex --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/codex/.version || true; }
+# synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+ && rm -rf /var/lib/apt/lists/*
+RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
+COPY tmux.conf /etc/tmux.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY user-setup.sh /usr/local/bin/user-setup.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/user-setup.sh
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+DOCKERFILE
+}
+
 generate_dockerfile_both() {
     cat > "$SANDY_HOME/Dockerfile.both.new" <<DOCKERFILE
 FROM ${BASE_IMAGE_NAME}
@@ -612,6 +634,7 @@ export HOME=/home/claude
 # Convenience: _sandy_has_claude returns true for both 'claude' and 'both'.
 _sandy_has_claude() { [ "${SANDY_AGENT:-claude}" = "claude" ] || [ "${SANDY_AGENT:-claude}" = "both" ]; }
 _sandy_has_gemini() { [ "${SANDY_AGENT:-claude}" = "gemini" ] || [ "${SANDY_AGENT:-claude}" = "both" ]; }
+_sandy_has_codex()  { [ "${SANDY_AGENT:-claude}" = "codex" ]; }
 if _sandy_has_claude; then
     export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS="${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-0}"
     export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}"
@@ -736,6 +759,57 @@ File/args: {{args}}
 Output of md2email {{args}}:
 !{md2email {{args}}}"""
 SKTOML
+fi
+
+# Synthkit skills for Codex (Markdown with YAML frontmatter — spike 1 confirmed
+# codex loads ~/.codex/skills/<name>/SKILL.md as a drop-in directory, but
+# strictly requires the --- delimited frontmatter block).
+if _sandy_has_codex && command -v synthkit &>/dev/null; then
+    mkdir -p "$HOME/.codex/skills/md2pdf" "$HOME/.codex/skills/md2doc" \
+             "$HOME/.codex/skills/md2html" "$HOME/.codex/skills/md2email"
+    cat > "$HOME/.codex/skills/md2pdf/SKILL.md" <<'SKMD'
+---
+name: md2pdf
+description: Convert markdown file(s) to PDF using the md2pdf command on PATH.
+---
+Run: `md2pdf <file.md> [file2.md ...]`
+SKMD
+    cat > "$HOME/.codex/skills/md2doc/SKILL.md" <<'SKMD'
+---
+name: md2doc
+description: Convert markdown file(s) to Word (.docx) using the md2doc command on PATH.
+---
+Run: `md2doc <file.md> [file2.md ...]`
+SKMD
+    cat > "$HOME/.codex/skills/md2html/SKILL.md" <<'SKMD'
+---
+name: md2html
+description: Convert markdown file(s) to HTML using the md2html command on PATH.
+---
+Run: `md2html <file.md> [file2.md ...]`
+SKMD
+    cat > "$HOME/.codex/skills/md2email/SKILL.md" <<'SKMD'
+---
+name: md2email
+description: Convert a markdown file to clipboard-ready email HTML using the md2email command on PATH.
+---
+Run: `md2email <file.md>`
+SKMD
+fi
+
+# Codex trust entry: append [projects."$SANDY_WORKSPACE"] trust_level = "trusted"
+# to ~/.codex/config.toml so codex doesn't prompt about an untrusted cwd. This
+# cannot be seeded at host-time because it needs the container-side workspace
+# path. Idempotent: only appended if the section is not already present.
+if _sandy_has_codex; then
+    _codex_cfg="$HOME/.codex/config.toml"
+    if [ -f "$_codex_cfg" ] && ! grep -q "^\[projects\.\"${SANDY_WORKSPACE}\"\]" "$_codex_cfg" 2>/dev/null; then
+        {
+            echo ""
+            echo "[projects.\"${SANDY_WORKSPACE}\"]"
+            echo "trust_level = \"trusted\""
+        } >> "$_codex_cfg"
+    fi
 fi
 
 # Gemini extensions seeding (SANDY_GEMINI_EXTENSIONS)
@@ -1012,6 +1086,41 @@ build_claude_cmd() {
     printf '%s' "$cmd"
 }
 
+build_codex_cmd() {
+    # Headless: codex exec [PROMPT] (positional arg, not a flag)
+    # Interactive: codex (TUI)
+    # --sandbox danger-full-access is belt-and-suspenders alongside the
+    # sandbox_mode in ~/.codex/config.toml. Do not remove either.
+    local headless=false
+    for arg in "$@"; do
+        case "$arg" in -p|--print|--prompt) headless=true; break ;; esac
+    done
+    local cmd
+    if [ "$headless" = "true" ]; then
+        cmd="codex exec --sandbox danger-full-access"
+    else
+        cmd="codex --sandbox danger-full-access"
+    fi
+    if [ -n "${CODEX_MODEL:-}" ]; then
+        cmd+=" --model $(printf "%q" "$CODEX_MODEL")"
+    fi
+    # Flag translation: sandy's -p/--print/--prompt all mean "run this prompt".
+    # codex exec takes the prompt as a positional arg, so drop the flag itself
+    # and pass only the value. --continue/-c → drop (codex has `codex resume`
+    # but not a headless --continue flag), matching the gemini behavior.
+    for arg in "$@"; do
+        case "$arg" in
+            -p|--print|--prompt) : ;;
+            --continue|-c)       : ;;
+            *)                   cmd+=" $(printf "%q" "$arg")" ;;
+        esac
+    done
+    if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+        cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Codex CLI exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+    fi
+    printf '%s' "$cmd"
+}
+
 build_gemini_cmd() {
     # Gemini CLI has its own per-tool sandbox; disable it since sandy provides
     # whole-session isolation via Docker. GEMINI_SANDBOX=false is the documented
@@ -1080,6 +1189,15 @@ elif [ "${SANDY_AGENT:-claude}" = "gemini" ]; then
         exec bash -c "$GEMINI_CMD"
     else
         tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$GEMINI_CMD 2>&1"
+    fi
+elif [ "${SANDY_AGENT:-claude}" = "codex" ]; then
+    sandy_log "Launching Codex CLI"
+    CODEX_CMD="$(build_codex_cmd "$@")"
+    cd "$WORKSPACE"
+    if [ "$_sandy_is_headless" = "true" ]; then
+        exec bash -c "$CODEX_CMD"
+    else
+        tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$CODEX_CMD 2>&1"
     fi
 elif [ "${SANDY_AGENT:-claude}" = "both" ]; then
     if [ "$_sandy_is_headless" = "true" ]; then
@@ -1351,6 +1469,7 @@ ensure_agent_dockerfile() {
     local f
     case "$SANDY_AGENT" in
         gemini) generate_dockerfile_gemini; f="Dockerfile.gemini" ;;
+        codex)  generate_dockerfile_codex;  f="Dockerfile.codex" ;;
         both)   generate_dockerfile_both;   f="Dockerfile.both" ;;
         *)      generate_dockerfile;        f="Dockerfile" ;;
     esac
@@ -1386,6 +1505,7 @@ _load_sandy_config() {
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|\
             GEMINI_API_KEY|GEMINI_MODEL|SANDY_GEMINI_EXTENSIONS|SANDY_GEMINI_AUTH|\
             GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION|GOOGLE_GENAI_USE_VERTEXAI|GOOGLE_API_KEY|\
+            CODEX_API_KEY|CODEX_MODEL|SANDY_CODEX_AUTH|CODEX_HOME|OPENAI_API_KEY|\
             SANDY_CHANNEL_TARGET_PANE)
                 export "$key=$value" ;;
         esac
@@ -1403,17 +1523,25 @@ SANDY_AGENT="${SANDY_AGENT:-claude}"
 case "$SANDY_AGENT" in
     claude) IMAGE_NAME="sandy-claude-code" ;;
     gemini) IMAGE_NAME="sandy-gemini-cli" ;;
+    codex)  IMAGE_NAME="sandy-codex" ;;
     both)   IMAGE_NAME="sandy-both" ;;
-    *) echo "[sandy] ERROR: Invalid SANDY_AGENT '$SANDY_AGENT' (must be 'claude', 'gemini', or 'both')" >&2; exit 1 ;;
+    *) echo "[sandy] ERROR: Invalid SANDY_AGENT '$SANDY_AGENT' (must be 'claude', 'gemini', 'codex', or 'both')" >&2; exit 1 ;;
 esac
-if [ "$SANDY_AGENT" = "gemini" ]; then
+# OPENAI_API_KEY → CODEX_API_KEY convenience alias. Codex reads CODEX_API_KEY,
+# not OPENAI_API_KEY (the latter is telemetry-only in codex-rs). Users set
+# OPENAI_API_KEY out of habit; forward it transparently.
+if [ "$SANDY_AGENT" = "codex" ] && [ -z "${CODEX_API_KEY:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
+    echo "[sandy] OPENAI_API_KEY detected; forwarding as CODEX_API_KEY (codex reads CODEX_API_KEY)" >&2
+    export CODEX_API_KEY="$OPENAI_API_KEY"
+fi
+if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "codex" ]; then
     if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
-        echo "[sandy] ERROR: SANDY_SKILL_PACKS is not supported with SANDY_AGENT=gemini" >&2
+        echo "[sandy] ERROR: SANDY_SKILL_PACKS is not supported with SANDY_AGENT=$SANDY_AGENT" >&2
         exit 1
     fi
 fi
 # Channels on non-Claude agents use the host-side tmux-inject relay. Only
-# Telegram is supported in v1.5; Discord still requires the Claude plugin path.
+# Telegram is supported; Discord still requires the Claude plugin path.
 if [ -n "${SANDY_CHANNELS:-}" ] && [ "$SANDY_AGENT" != "claude" ]; then
     case ",$SANDY_CHANNELS," in
         *,discord,*)
@@ -1422,7 +1550,7 @@ if [ -n "${SANDY_CHANNELS:-}" ] && [ "$SANDY_AGENT" != "claude" ]; then
     esac
 fi
 if [ "$SANDY_REMOTE_CONTROL" = true ] && [ "$SANDY_AGENT" != "claude" ]; then
-    echo "[sandy] ERROR: --remote is only supported with SANDY_AGENT=claude (Gemini CLI has no remote-control mode)" >&2
+    echo "[sandy] ERROR: --remote is only supported with SANDY_AGENT=claude" >&2
     exit 1
 fi
 export SANDY_AGENT
@@ -1432,6 +1560,9 @@ case "$SANDY_AGENT" in
     gemini)
         DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.gemini"
         BUILD_HASH_FILE_NAME=".build_hash_gemini" ;;
+    codex)
+        DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.codex"
+        BUILD_HASH_FILE_NAME=".build_hash_codex" ;;
     both)
         DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.both"
         BUILD_HASH_FILE_NAME=".build_hash_both" ;;
@@ -1457,7 +1588,7 @@ fi
 
 # Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
 if [ "$SANDY_REBUILD" = true ]; then
-    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_both" "$SANDY_HOME/.skills_build_hash"
+    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_both" "$SANDY_HOME/.skills_build_hash"
     info "Build cache cleared. Images will be rebuilt."
 fi
 
@@ -1507,9 +1638,25 @@ _check_gemini_update() {
     fi
     return 1
 }
+_check_codex_update() {
+    local inst latest
+    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/codex/.version 2>/dev/null || true)"
+    # Use /releases/latest — upstream flags the stable release; codex ships
+    # 30+ releases/month, most marked as prereleases, and /releases/latest
+    # filters them correctly without sandy inventing its own policy.
+    latest="$(curl -fsSL --max-time 5 'https://api.github.com/repos/openai/codex/releases/latest' 2>/dev/null \
+        | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
+        | sed -E 's/.*"rust-v?([0-9][^"]*)"$/\1/' || true)"
+    if [ -n "$latest" ] && [ -n "$inst" ] && [ "$latest" != "$inst" ]; then
+        info "Codex CLI update available: $inst → $latest"
+        return 0
+    fi
+    return 1
+}
 if [ "$NEEDS_BUILD" = false ]; then
     case "$SANDY_AGENT" in
         gemini) _check_gemini_update && NEEDS_BUILD=true ;;
+        codex)  _check_codex_update  && NEEDS_BUILD=true ;;
         claude) _check_claude_update && NEEDS_BUILD=true ;;
         both)
             if _check_claude_update || _check_gemini_update; then
@@ -1686,6 +1833,34 @@ fi
 if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
     mkdir -p "$SANDBOX_DIR/claude"
 fi
+if [ "$SANDY_AGENT" = "codex" ]; then
+    mkdir -p "$SANDBOX_DIR/codex"
+    # Seed config.toml with sandy-required defaults (first run only). Without
+    # this, codex's Landlock sandbox would try to initialize inside sandy's
+    # Docker container and either fail weirdly or over-restrict the agent.
+    # sandbox_mode here plus --sandbox danger-full-access on the CLI is
+    # belt-and-suspenders. The [notice] block suppresses all first-run prompts.
+    if [ ! -f "$SANDBOX_DIR/codex/config.toml" ]; then
+        cat > "$SANDBOX_DIR/codex/config.toml" <<'CODEX_TOML'
+# Written by sandy on first launch. Safe to edit, but sandbox_mode must stay
+# "danger-full-access" — sandy provides outer isolation; codex's Landlock
+# sandbox does not nest cleanly in Docker containers.
+sandbox_mode = "danger-full-access"
+
+[notice]
+hide_full_access_warning = true
+hide_gpt5_1_migration_prompt = true
+"hide_gpt-5.1-codex-max_migration_prompt" = true
+hide_rate_limit_model_nudge = true
+hide_world_writable_warning = true
+
+# [projects."<workspace>"] trust_level = "trusted" is appended at session
+# start by user-setup.sh, where $SANDY_WORKSPACE is known.
+CODEX_TOML
+        info "  Seeded .codex/config.toml"
+    fi
+fi
+
 if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
     mkdir -p "$SANDBOX_DIR/gemini"
     # Seed settings.json from host's ~/.gemini/ if present (first run only)
@@ -1931,6 +2106,9 @@ cleanup() {
     if [ -n "${GEMINI_CRED_TMPDIR:-}" ]; then
         rm -rf "$GEMINI_CRED_TMPDIR"
     fi
+    if [ -n "${CODEX_CRED_TMPDIR:-}" ]; then
+        rm -rf "$CODEX_CRED_TMPDIR"
+    fi
     if [ -n "${SSH_RELAY_PID:-}" ]; then
         kill "$SSH_RELAY_PID" 2>/dev/null || true
     fi
@@ -2017,6 +2195,7 @@ except Exception:
 CRED_TMPDIR=""
 GEMINI_CRED_TMPDIR=""
 GEMINI_ADC_MOUNT=""
+CODEX_CRED_TMPDIR=""
 
 # Gemini credentials: priority is GEMINI_API_KEY → ephemeral OAuth tokens.json →
 # Google Application Default Credentials. OAuth and ADC are not mutually
@@ -2075,12 +2254,41 @@ _gemini_write_auth_type() {
     fi
 }
 
+# Codex credentials: CODEX_API_KEY (env var) is the primary path. Unlike Gemini,
+# codex has a single env-var name — OPENAI_API_KEY is aliased to CODEX_API_KEY
+# earlier in the agent-resolution block. OAuth path uses an ephemeral read-only
+# mount of the host's ~/.codex/auth.json; in-session token refresh will fail
+# gracefully and prompt the user to re-login inside the container.
+load_codex_credentials() {
+    local mode="${SANDY_CODEX_AUTH:-auto}"
+    if [ "$mode" = "api_key" ] || [ "$mode" = "auto" ]; then
+        if [ -n "${CODEX_API_KEY:-}" ]; then
+            info "Using CODEX_API_KEY"
+            return 0
+        fi
+    fi
+    if [ "$mode" = "oauth" ] || [ "$mode" = "auto" ]; then
+        if [ -f "$HOME/.codex/auth.json" ]; then
+            CODEX_CRED_TMPDIR="$(mktemp -d)"
+            cp "$HOME/.codex/auth.json" "$CODEX_CRED_TMPDIR/auth.json"
+            chmod 600 "$CODEX_CRED_TMPDIR/auth.json"
+            info "Loaded Codex OAuth credentials from host (read-only mount)"
+            return 0
+        fi
+    fi
+    warn "No Codex credentials found. Set CODEX_API_KEY, or run 'codex login' on host, or set OPENAI_API_KEY (sandy will alias it)."
+}
+
 if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
     load_gemini_credentials
 fi
 
-if [ "$SANDY_AGENT" = "gemini" ]; then
-    : # Claude credential flow skipped for pure-gemini sessions
+if [ "$SANDY_AGENT" = "codex" ]; then
+    load_codex_credentials
+fi
+
+if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "codex" ]; then
+    : # Claude credential flow skipped for non-claude sessions
 elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     info "Using long-lived OAuth token"
 else
@@ -2165,6 +2373,15 @@ if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
     if [ -n "${GEMINI_ADC_MOUNT:-}" ]; then
         RUN_FLAGS+=(-v "$GEMINI_ADC_MOUNT:/home/claude/.config/gcloud/application_default_credentials.json:ro")
         RUN_FLAGS+=(-e "GOOGLE_APPLICATION_CREDENTIALS=/home/claude/.config/gcloud/application_default_credentials.json")
+    fi
+fi
+if [ "$SANDY_AGENT" = "codex" ]; then
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/codex:/home/claude/.codex")
+    if [ -n "${CODEX_CRED_TMPDIR:-}" ]; then
+        # :ro — prevents token leakage back to host and prevents a
+        # stale-token-on-exit race. In-session refresh will fail; user
+        # must re-login inside the container if the token expires.
+        RUN_FLAGS+=(-v "$CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro")
     fi
 fi
 # Persistent package environment mounts
@@ -2409,6 +2626,17 @@ if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
         _gval="${!_gv:-}"
         [ -n "$_gval" ] && RUN_FLAGS+=(-e "$_gv=$_gval")
     done
+fi
+if [ "$SANDY_AGENT" = "codex" ]; then
+    if [ -n "${CODEX_API_KEY:-}" ]; then
+        RUN_FLAGS+=(-e "CODEX_API_KEY=$CODEX_API_KEY")
+    fi
+    if [ -n "${CODEX_MODEL:-}" ]; then
+        RUN_FLAGS+=(-e "CODEX_MODEL=$CODEX_MODEL")
+    fi
+    if [ -n "${SANDY_CODEX_AUTH:-}" ]; then
+        RUN_FLAGS+=(-e "SANDY_CODEX_AUTH=$SANDY_CODEX_AUTH")
+    fi
 fi
 
 # --- Git authentication ---
