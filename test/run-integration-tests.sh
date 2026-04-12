@@ -176,6 +176,30 @@ resolve_sandbox() {
     fi
 }
 
+# Ensure a sandy image is built. Uses `sandy --build-only` which builds the
+# image(s) for the given SANDY_AGENT and exits before any container runs — no
+# credentials required. Returns 0 if the image exists (either already or after
+# a successful build), 1 otherwise. Used by in-container check sections that
+# only need the image, not a running session.
+ensure_image_built() {
+    local agent="$1" image="$2"
+    if docker image inspect "$image" &>/dev/null; then
+        return 0
+    fi
+    info "  Building $image on demand (no credentials needed)..."
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    TEST_DIRS+=("$tmp_dir")
+    # --build-only exits right after docker build; run from a throwaway dir so
+    # sandy's workspace-dependent logic (sandbox creation, trust entries, etc.)
+    # doesn't touch anything real. Ignore failure — the image inspect below is
+    # the authoritative check.
+    (cd "$tmp_dir" && git init -q 2>/dev/null && \
+        SANDY_AGENT="$agent" timeout "${SANDY_INTEG_TIMEOUT:-600}" \
+        "$SANDY_SCRIPT" --build-only >/dev/null 2>&1) || true
+    docker image inspect "$image" &>/dev/null
+}
+
 # Run sandy headless and capture combined output. Returns the exit code.
 # Usage: sandy_output=$(run_sandy_headless [env vars] -- [sandy args])
 run_sandy_headless() {
@@ -517,7 +541,7 @@ fi
 info "4. Codex — in-container checks (sandy-codex image)"
 # ============================================================
 
-if docker image inspect sandy-codex &>/dev/null; then
+if ensure_image_built codex sandy-codex; then
     # Check codex is on PATH
     _ver="$(docker run --rm --entrypoint bash sandy-codex -c 'codex --version 2>/dev/null || echo MISSING')"
     if [ "$_ver" != "MISSING" ] && [ -n "$_ver" ]; then
@@ -559,7 +583,7 @@ if docker image inspect sandy-codex &>/dev/null; then
         fail "WeasyPrint functional in sandy-codex image (md2html)"
     fi
 else
-    skip "codex in-container checks (sandy-codex image not built)"
+    fail "codex in-container checks (failed to build sandy-codex image)"
 fi
 
 # ============================================================
@@ -607,7 +631,7 @@ fi
 info "6. Gemini — in-container checks (sandy-gemini-cli image)"
 # ============================================================
 
-if docker image inspect sandy-gemini-cli &>/dev/null; then
+if ensure_image_built gemini sandy-gemini-cli; then
     _ver="$(docker run --rm --entrypoint bash sandy-gemini-cli -c 'gemini --version 2>/dev/null || echo MISSING')"
     if [ "$_ver" != "MISSING" ] && [ -n "$_ver" ]; then
         pass "gemini binary on PATH in sandy-gemini-cli image"
@@ -636,7 +660,7 @@ if docker image inspect sandy-gemini-cli &>/dev/null; then
         fail "WeasyPrint functional in sandy-gemini-cli image (md2html)"
     fi
 else
-    skip "gemini in-container checks (sandy-gemini-cli image not built)"
+    fail "gemini in-container checks (failed to build sandy-gemini-cli image)"
 fi
 
 # ============================================================
@@ -698,7 +722,7 @@ fi
 info "7b. Claude — in-container checks (sandy-claude-code image)"
 # ============================================================
 
-if docker image inspect sandy-claude-code &>/dev/null; then
+if ensure_image_built claude sandy-claude-code; then
     _ver="$(docker run --rm --entrypoint bash sandy-claude-code -c 'claude --version 2>/dev/null || echo MISSING')"
     if [ "$_ver" != "MISSING" ] && [ -n "$_ver" ]; then
         pass "claude binary on PATH in sandy-claude-code image (v$_ver)"
@@ -727,7 +751,7 @@ if docker image inspect sandy-claude-code &>/dev/null; then
         fail "WeasyPrint functional in sandy-claude-code image (md2html)"
     fi
 else
-    skip "claude in-container checks (sandy-claude-code image not built)"
+    fail "claude in-container checks (failed to build sandy-claude-code image)"
 fi
 
 # ============================================================
