@@ -458,42 +458,35 @@ else
 fi
 
 # ============================================================
-info "3. Codex — OPENAI_API_KEY aliasing"
+info "3. Codex — CODEX_API_KEY → OPENAI_API_KEY aliasing"
 # ============================================================
 
-# The alias only fires when CODEX_API_KEY is empty in the sandy process.
-# Sandy re-reads ~/.sandy/.secrets internally via _load_sandy_config, so
-# env -u CODEX_API_KEY is not enough if the key is in that file. We can
-# only test this if the key is NOT persisted in .secrets files.
-_codex_in_secrets=false
-for _sf in "$HOME/.sandy/.secrets" "$HOME/.sandy/config"; do
-    grep -qE '^CODEX_API_KEY=.+' "$_sf" 2>/dev/null && _codex_in_secrets=true && break
-done
+# Sandy accepts CODEX_API_KEY as a user-friendly name and forwards it as
+# OPENAI_API_KEY (what codex CLI actually reads). §2 already tests this
+# path implicitly (it passes CODEX_API_KEY). This section verifies that
+# setting OPENAI_API_KEY directly (the native codex var) also works — no
+# alias needed, codex should just pick it up.
 
-if [ "$HAS_CODEX_API_KEY" = true ] && [ "$_codex_in_secrets" = false ]; then
+if [ "$HAS_CODEX_API_KEY" = true ]; then
     setup_project codex "integ-codex-alias"
-    # Use OPENAI_API_KEY instead of CODEX_API_KEY — must unset CODEX_API_KEY
-    # so the alias block fires (it only triggers when CODEX_API_KEY is empty).
-    _saved_codex_key="${CODEX_API_KEY:-}"
-    _out="$(env -u CODEX_API_KEY OPENAI_API_KEY="$_saved_codex_key" "$SANDY_SCRIPT" -p "reply one word: hello" 2>&1 || true)"
+    # Resolve the actual key value (might be in CODEX_API_KEY or OPENAI_API_KEY)
+    _the_key="${OPENAI_API_KEY:-${CODEX_API_KEY:-}}"
+    _out="$(env -u CODEX_API_KEY OPENAI_API_KEY="$_the_key" "$SANDY_SCRIPT" -p "reply one word: hello" 2>&1 || true)"
 
-    if echo "$_out" | grep -q "OPENAI_API_KEY detected"; then
-        pass "OPENAI_API_KEY alias warning emitted"
+    if echo "$_out" | grep -qi "Using OPENAI_API_KEY\|No Codex credentials"; then
+        if echo "$_out" | grep -qi "No Codex credentials"; then
+            fail "codex works with OPENAI_API_KEY directly"
+        else
+            pass "codex works with OPENAI_API_KEY directly"
+        fi
     else
-        fail "OPENAI_API_KEY alias warning emitted"
-    fi
-
-    if echo "$_out" | grep -qi "No Codex credentials"; then
-        fail "codex runs successfully via OPENAI_API_KEY alias"
-    else
-        pass "codex runs successfully via OPENAI_API_KEY alias"
+        # No credential message but codex ran — that's fine too
+        pass "codex works with OPENAI_API_KEY directly"
     fi
 
     resolve_sandbox
-elif [ "$HAS_CODEX_API_KEY" = true ]; then
-    skip "OPENAI_API_KEY aliasing (CODEX_API_KEY in ~/.sandy/.secrets — alias can't fire)"
 else
-    skip "OPENAI_API_KEY aliasing (no CODEX_API_KEY to alias)"
+    skip "CODEX_API_KEY aliasing (no codex API key available)"
 fi
 
 # ============================================================

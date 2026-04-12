@@ -1221,56 +1221,58 @@ else
     fail "invalid agent error lists all four valid values"
 fi
 
-# OPENAI_API_KEY alias: extract and exercise the block in isolation.
+# CODEX_API_KEY → OPENAI_API_KEY alias: extract and exercise in isolation.
+# Codex CLI reads OPENAI_API_KEY; sandy accepts CODEX_API_KEY for clarity
+# and forwards it.
 _ALIAS_BLOCK="$(awk '
-    /^if \[ "\$SANDY_AGENT" = "codex" \] && \[ -z "\$\{CODEX_API_KEY:-\}" \] && \[ -n "\$\{OPENAI_API_KEY:-\}" \]; then$/ {printing=1}
+    /^if \[ "\$SANDY_AGENT" = "codex" \] && \[ -n "\$\{CODEX_API_KEY:-\}" \] && \[ -z "\$\{OPENAI_API_KEY:-\}" \]; then$/ {printing=1}
     printing {print}
     printing && /^fi$/ {exit}
 ' "$SANDY_SCRIPT")"
 
 if [ -z "$_ALIAS_BLOCK" ]; then
-    fail "could not extract OPENAI_API_KEY alias block"
+    fail "could not extract CODEX_API_KEY alias block"
 else
-    # Case 1: alias fires when only OPENAI_API_KEY is set.
+    # Case 1: alias fires when only CODEX_API_KEY is set.
     _result="$(bash -c "
-        unset CODEX_API_KEY
         SANDY_AGENT=codex
-        OPENAI_API_KEY=sk-test-alias
+        CODEX_API_KEY=sk-test-alias
+        unset OPENAI_API_KEY
         $_ALIAS_BLOCK
-        echo \"CODEX_API_KEY=\$CODEX_API_KEY\"
+        echo \"OPENAI_API_KEY=\$OPENAI_API_KEY\"
     " 2>/dev/null)"
-    if echo "$_result" | grep -q "CODEX_API_KEY=sk-test-alias"; then
-        pass "OPENAI_API_KEY is aliased to CODEX_API_KEY when only OPENAI_API_KEY set"
+    if echo "$_result" | grep -q "OPENAI_API_KEY=sk-test-alias"; then
+        pass "CODEX_API_KEY is forwarded as OPENAI_API_KEY when OPENAI_API_KEY unset"
     else
-        fail "OPENAI_API_KEY is aliased to CODEX_API_KEY when only OPENAI_API_KEY set"
+        fail "CODEX_API_KEY is forwarded as OPENAI_API_KEY when OPENAI_API_KEY unset"
     fi
 
-    # Case 2: CODEX_API_KEY wins if both are set.
+    # Case 2: OPENAI_API_KEY wins if both are set (no overwrite).
     _result="$(bash -c "
         SANDY_AGENT=codex
         CODEX_API_KEY=sk-codex
         OPENAI_API_KEY=sk-openai
         $_ALIAS_BLOCK
-        echo \"CODEX_API_KEY=\$CODEX_API_KEY\"
+        echo \"OPENAI_API_KEY=\$OPENAI_API_KEY\"
     " 2>/dev/null)"
-    if echo "$_result" | grep -q "CODEX_API_KEY=sk-codex"; then
-        pass "CODEX_API_KEY takes precedence when both are set"
+    if echo "$_result" | grep -q "OPENAI_API_KEY=sk-openai"; then
+        pass "OPENAI_API_KEY takes precedence when both are set"
     else
-        fail "CODEX_API_KEY takes precedence when both are set"
+        fail "OPENAI_API_KEY takes precedence when both are set"
     fi
 
     # Case 3: alias does NOT fire for non-codex agents.
     _result="$(bash -c "
-        unset CODEX_API_KEY
         SANDY_AGENT=claude
-        OPENAI_API_KEY=sk-test-alias
+        CODEX_API_KEY=sk-test-alias
+        unset OPENAI_API_KEY
         $_ALIAS_BLOCK
-        echo \"CODEX_API_KEY=\${CODEX_API_KEY:-UNSET}\"
+        echo \"OPENAI_API_KEY=\${OPENAI_API_KEY:-UNSET}\"
     " 2>/dev/null)"
-    if echo "$_result" | grep -q "CODEX_API_KEY=UNSET"; then
-        pass "OPENAI_API_KEY alias is scoped to SANDY_AGENT=codex only"
+    if echo "$_result" | grep -q "OPENAI_API_KEY=UNSET"; then
+        pass "CODEX_API_KEY alias is scoped to SANDY_AGENT=codex only"
     else
-        fail "OPENAI_API_KEY alias is scoped to SANDY_AGENT=codex only"
+        fail "CODEX_API_KEY alias is scoped to SANDY_AGENT=codex only"
     fi
 fi
 
@@ -1477,9 +1479,9 @@ check "codex sandbox mounted at /home/claude/.codex" \
 check "codex auth.json mount is read-only (:ro)" \
     grep -q 'auth.json:/home/claude/.codex/auth.json:ro' "$SANDY_SCRIPT"
 
-# Env passthrough: CODEX_API_KEY forwarded to container.
-check "CODEX_API_KEY passed to container via -e" \
-    grep -q 'RUN_FLAGS+=(-e "CODEX_API_KEY=' "$SANDY_SCRIPT"
+# Env passthrough: OPENAI_API_KEY forwarded to container (codex reads this).
+check "OPENAI_API_KEY passed to container via -e" \
+    grep -q 'RUN_FLAGS+=(-e "OPENAI_API_KEY=' "$SANDY_SCRIPT"
 
 # Env passthrough: CODEX_MODEL forwarded to container.
 check "CODEX_MODEL passed to container via -e" \

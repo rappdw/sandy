@@ -1544,12 +1544,11 @@ case "$SANDY_AGENT" in
     both)   IMAGE_NAME="sandy-both" ;;
     *) echo "[sandy] ERROR: Invalid SANDY_AGENT '$SANDY_AGENT' (must be 'claude', 'gemini', 'codex', or 'both')" >&2; exit 1 ;;
 esac
-# OPENAI_API_KEY → CODEX_API_KEY convenience alias. Codex reads CODEX_API_KEY,
-# not OPENAI_API_KEY (the latter is telemetry-only in codex-rs). Users set
-# OPENAI_API_KEY out of habit; forward it transparently.
-if [ "$SANDY_AGENT" = "codex" ] && [ -z "${CODEX_API_KEY:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
-    echo "[sandy] OPENAI_API_KEY detected; forwarding as CODEX_API_KEY (codex reads CODEX_API_KEY)" >&2
-    export CODEX_API_KEY="$OPENAI_API_KEY"
+# CODEX_API_KEY → OPENAI_API_KEY convenience alias. Codex CLI reads
+# OPENAI_API_KEY. Sandy accepts CODEX_API_KEY as a clearer name for
+# per-agent config and forwards it transparently.
+if [ "$SANDY_AGENT" = "codex" ] && [ -n "${CODEX_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+    export OPENAI_API_KEY="$CODEX_API_KEY"
 fi
 if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "codex" ]; then
     if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
@@ -2279,16 +2278,17 @@ _gemini_write_auth_type() {
     fi
 }
 
-# Codex credentials: CODEX_API_KEY (env var) is the primary path. Unlike Gemini,
-# codex has a single env-var name — OPENAI_API_KEY is aliased to CODEX_API_KEY
-# earlier in the agent-resolution block. OAuth path uses an ephemeral read-only
-# mount of the host's ~/.codex/auth.json; in-session token refresh will fail
-# gracefully and prompt the user to re-login inside the container.
+# Codex credentials: OPENAI_API_KEY is what the codex CLI reads. Sandy also
+# accepts CODEX_API_KEY (aliased to OPENAI_API_KEY in the agent-resolution
+# block above) so users can use a clearer name in .sandy/config. OAuth path
+# uses an ephemeral read-only mount of the host's ~/.codex/auth.json;
+# in-session token refresh will fail gracefully and prompt the user to
+# re-login inside the container.
 load_codex_credentials() {
     local mode="${SANDY_CODEX_AUTH:-auto}"
     if [ "$mode" = "api_key" ] || [ "$mode" = "auto" ]; then
-        if [ -n "${CODEX_API_KEY:-}" ]; then
-            info "Using CODEX_API_KEY"
+        if [ -n "${OPENAI_API_KEY:-}" ]; then
+            info "Using OPENAI_API_KEY for Codex"
             return 0
         fi
     fi
@@ -2301,7 +2301,7 @@ load_codex_credentials() {
             return 0
         fi
     fi
-    warn "No Codex credentials found. Set CODEX_API_KEY, or run 'codex login' on host, or set OPENAI_API_KEY (sandy will alias it)."
+    warn "No Codex credentials found. Set CODEX_API_KEY (or OPENAI_API_KEY), or run 'codex login' on host."
 }
 
 if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
@@ -2656,8 +2656,8 @@ if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
     done
 fi
 if [ "$SANDY_AGENT" = "codex" ]; then
-    if [ -n "${CODEX_API_KEY:-}" ]; then
-        RUN_FLAGS+=(-e "CODEX_API_KEY=$CODEX_API_KEY")
+    if [ -n "${OPENAI_API_KEY:-}" ]; then
+        RUN_FLAGS+=(-e "OPENAI_API_KEY=$OPENAI_API_KEY")
     fi
     if [ -n "${CODEX_MODEL:-}" ]; then
         RUN_FLAGS+=(-e "CODEX_MODEL=$CODEX_MODEL")
