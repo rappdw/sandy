@@ -375,6 +375,41 @@ check "overlay default-on when .venv exists" \
 rm -rf "$DEFAULT_FIXTURE"
 
 # ============================================================
+info "9h. PR 1.1 regression tests — resume fallback + codex grep-F"
+# ============================================================
+
+# Guard against regression of the `cmd || cmd_base` fallback pattern in
+# build_claude_cmd. Earlier versions appended `|| $cmd_base` after the
+# command so that `claude --continue` failures (including Ctrl-C) silently
+# relaunched a fresh session. The session-detect guarantees we only add
+# --continue when a session exists, so the fallback is both unnecessary
+# and actively harmful. This test asserts it stays removed.
+_SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+BUILD_CLAUDE_BODY="$(awk '/^build_claude_cmd\(\)/,/^}$/' "$_SANDY_SCRIPT_PATH")"
+FALLBACK_PRESENT="no"
+if echo "$BUILD_CLAUDE_BODY" | grep -qE 'cmd="\$cmd \|\| \$cmd_base"'; then
+    FALLBACK_PRESENT="yes"
+fi
+check "build_claude_cmd has no cmd||cmd_base fallback (PR 1.1 blocker #1)" \
+    test "$FALLBACK_PRESENT" = "no"
+
+# Also assert that cmd_base is not referenced at all — it's the marker
+# variable for the fallback pattern, and its absence is the cleanest
+# signal that the pattern is gone.
+CMD_BASE_REFS="$(echo "$BUILD_CLAUDE_BODY" | grep -c 'cmd_base' || true)"
+check "build_claude_cmd no longer references cmd_base" \
+    test "$CMD_BASE_REFS" = "0"
+
+# Guard against regression of the codex trust-entry grep-regex injection.
+# The workspace path is interpolated into the grep pattern and contains
+# '/' and '.' characters that are regex metacharacters in BRE mode. Using
+# grep -F forces fixed-string matching. This test asserts the -F flag is
+# present and the old unsafe form is gone.
+CODEX_GREP_LINE="$(grep -n 'projects\.\\\"' "$_SANDY_SCRIPT_PATH" | grep -v '^\s*#' | grep 'grep' | head -1 || true)"
+check "codex trust-entry check uses grep -F (PR 1.1 blocker #2)" \
+    bash -c "echo '$CODEX_GREP_LINE' | grep -q 'grep -qF'"
+
+# ============================================================
 info "10. Dev environment detection — foreign native modules"
 # ============================================================
 
