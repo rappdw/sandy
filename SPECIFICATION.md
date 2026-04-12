@@ -127,6 +127,7 @@ The config parser does **not** use `source`. It reads lines via `grep -E '^[A-Z_
 | `CODEX_MODEL` | unset | Codex model override |
 | `SANDY_CODEX_AUTH` | `auto` | Force Codex auth path: `auto`, `api_key`, or `oauth` |
 | `CODEX_HOME` | unset | Override container-side codex home directory (advanced) |
+| `SANDY_VENV_OVERLAY` | `1` | Bind-mount `$SANDBOX_DIR/venv` over `$WORKSPACE/.venv` when the host has a `.venv/`. Set to `0` to disable (falls back to warn-only for broken host venvs). |
 | `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for host-side channel relay (0=claude, 1=gemini in dual mode) |
 | `SANDY_SSH` | `token` | Git auth: `token` (gh CLI + HTTPS) or `agent` (SSH socket forward) |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Run with `--dangerously-skip-permissions` |
@@ -1755,6 +1756,18 @@ If `~/.claude/hooks/` exists on the host:
 ```
 
 Where `CONTAINER_PATH` follows the workspace path mapping rules (Section 13).
+
+### E.7a Workspace `.venv` Overlay (conditional)
+
+If `$WORK_DIR/.venv` exists on the host, is not a symlink, and `SANDY_VENV_OVERLAY` is not `0`, sandy bind-mounts a sandbox-owned dir over the workspace venv path:
+
+```bash
+-v "<SANDBOX_DIR>/venv:<CONTAINER_PATH>/.venv"
+-e "SANDY_VENV_OVERLAY_ACTIVE=1"
+-e "SANDY_VENV_PYTHON_VERSION=<major.minor>"   # if parseable from pyvenv.cfg
+```
+
+Must appear **after** the workspace mount (E.7) so Docker can overlay it on top. The sandbox `venv/` dir is created on the host side before `docker run`. Inside the container, `user-setup.sh` materializes an empty venv via `uv venv --python <version>` on first launch and activates it (`VIRTUAL_ENV` + PATH prepend) on every launch. The host `.venv/` is never read or written by sandy — it is shadowed by the bind mount inside the container only.
 
 ### E.8 Git Submodule Mount (conditional)
 

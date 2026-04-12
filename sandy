@@ -944,8 +944,11 @@ WORKSPACE="${SANDY_WORKSPACE:-/workspace}"
 if _sandy_has_claude; then
     mkdir -p "$WORKSPACE/.claude" 2>/dev/null || true
 
-    # Project dir for current workspace
-    _cur_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')"
+    # Project dir for current workspace. Claude Code normalizes any
+    # non-alphanumeric char to '-', not just '/', so '_' and '.' also become
+    # '-'. Matching that transform here is essential for --continue to find
+    # the right session history.
+    _cur_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | sed 's/[^a-zA-Z0-9]/-/g')"
     mkdir -p "$_cur_proj"
 fi
 
@@ -1011,18 +1014,48 @@ if [ -f "$WORKSPACE/.python-version" ]; then
     fi
 fi
 
-# Warn if .venv exists but its python symlink is broken. Do NOT attempt to
-# auto-repair: the symlink target is a host path that does not exist inside
-# the container, and silently installing a new interpreter via uv leaves the
-# venv still broken. Subsequent `uv pip install` would then recreate .venv
-# from scratch and wipe its site-packages — the user-visible symptom is
-# "sandy destroyed my venv". Better to tell the user clearly and let them
-# recreate it inside the container.
-if [ -L "$WORKSPACE/.venv/bin/python" ] && [ ! -e "$WORKSPACE/.venv/bin/python" ]; then
+# Workspace .venv overlay. When SANDY_VENV_OVERLAY_ACTIVE=1, sandy has bind-
+# mounted a sandbox-owned dir over $WORKSPACE/.venv, shadowing the host venv.
+# First launch: the overlay dir is empty — materialize a fresh venv matching
+# the host's Python version (passed via SANDY_VENV_PYTHON_VERSION).
+# Subsequent launches: pyvenv.cfg already exists, skip straight to activation.
+if [ "${SANDY_VENV_OVERLAY_ACTIVE:-0}" = "1" ] && [ -d "$WORKSPACE/.venv" ]; then
+    if [ ! -f "$WORKSPACE/.venv/pyvenv.cfg" ]; then
+        _py_ver="${SANDY_VENV_PYTHON_VERSION:-3.12}"
+        printf "\033[0;36m● Materializing sandbox venv overlay (Python %s)...\033[0m\n" "$_py_ver"
+        if command -v uv &>/dev/null; then
+            uv python install "$_py_ver" 2>/dev/null || true
+            if uv venv --python "$_py_ver" "$WORKSPACE/.venv" >/dev/null 2>&1; then
+                printf "\033[0;36m● Sandbox venv ready. Populate with:\033[0m\n"
+                if [ -f "$WORKSPACE/pyproject.toml" ]; then
+                    printf "\033[0;36m    uv sync    # or: uv pip install -e .\033[0m\n"
+                elif [ -f "$WORKSPACE/requirements.txt" ]; then
+                    printf "\033[0;36m    uv pip install -r requirements.txt\033[0m\n"
+                else
+                    printf "\033[0;36m    uv pip install <your deps>\033[0m\n"
+                fi
+            else
+                printf "\033[0;33m⚠ uv venv failed for Python %s — run 'uv venv' manually\033[0m\n" "$_py_ver"
+            fi
+        else
+            printf "\033[0;33m⚠ uv not found; cannot create sandbox venv\033[0m\n"
+        fi
+    fi
+    # Auto-activate: set VIRTUAL_ENV and prepend bin/ to PATH so python, pip,
+    # and installed console_scripts resolve to the sandbox venv without the
+    # user having to `source .venv/bin/activate`. The pip wrapper at
+    # /home/claude/.local/bin/pip also respects VIRTUAL_ENV and skips its
+    # --user fallback when this is set.
+    if [ -f "$WORKSPACE/.venv/bin/python" ]; then
+        export VIRTUAL_ENV="$WORKSPACE/.venv"
+        export PATH="$WORKSPACE/.venv/bin:$PATH"
+    fi
+elif [ -L "$WORKSPACE/.venv/bin/python" ] && [ ! -e "$WORKSPACE/.venv/bin/python" ]; then
+    # Overlay disabled (SANDY_VENV_OVERLAY=0) — fall back to warn-only.
     VENV_TARGET="$(readlink "$WORKSPACE/.venv/bin/python")"
     printf "\033[0;33m⚠ .venv/bin/python → %s is broken inside the container.\033[0m\n" "$VENV_TARGET"
-    printf "\033[0;33m  The venv was likely created on the host or by an older sandy.\033[0m\n"
-    printf "\033[0;33m  Recreate it inside sandy:  rm -rf .venv && uv venv && uv pip install -e .\033[0m\n"
+    printf "\033[0;33m  Set SANDY_VENV_OVERLAY=1 (default) for an auto-managed container venv,\033[0m\n"
+    printf "\033[0;33m  or recreate inside sandy: rm -rf .venv && uv venv && uv pip install -e .\033[0m\n"
 fi
 
 # Warn if node_modules contains native addons built for a different platform
@@ -1170,9 +1203,18 @@ build_claude_cmd() {
     done
     local cmd_base="$cmd"
     if [ "$auto_continue" = "true" ]; then
-        local session_dir="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')/"
-        if ls "$session_dir"*.jsonl &>/dev/null; then
+        # Resume the most recent session if one exists. Claude Code stores
+        # sessions under ~/.claude/projects/<normalized-path>/*.jsonl, where
+        # any non-alphanumeric character in the workspace path is replaced
+        # with '-'. Because each sandbox is per-project, any .jsonl file
+        # under ~/.claude/projects/ must belong to this workspace — so we
+        # can fall back to a broad check if the exact path lookup misses.
+        local expected_dir="$HOME/.claude/projects/$(echo "$WORKSPACE" | sed 's/[^a-zA-Z0-9]/-/g')"
+        if ls "$expected_dir"/*.jsonl &>/dev/null; then
             cmd+=" --continue"
+        elif find "$HOME/.claude/projects" -maxdepth 2 -name '*.jsonl' -print -quit 2>/dev/null | grep -q .; then
+            # Sessions exist but not at the expected path — pick one.
+            cmd+=" --resume"
         fi
     fi
     for arg in "$@"; do
@@ -1623,7 +1665,7 @@ _load_sandy_config() {
             SANDY_SSH|SANDY_MODEL|SANDY_SKILL_PACKS|SANDY_SKIP_PERMISSIONS|\
             SANDY_ALLOW_NO_ISOLATION|SANDY_ALLOW_LAN_HOSTS|\
             SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|SANDY_VERBOSE|\
-            SANDY_AGENT|\
+            SANDY_AGENT|SANDY_VENV_OVERLAY|\
             CLAUDE_CODE_OAUTH_TOKEN|\
             TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
             DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
@@ -2142,6 +2184,36 @@ mkdir -p "$SANDBOX_DIR/uv"                 # uv-managed Python versions
 mkdir -p "$SANDBOX_DIR/npm-global"         # npm -g installs
 mkdir -p "$SANDBOX_DIR/go"                 # GOPATH (go install)
 mkdir -p "$SANDBOX_DIR/cargo"              # cargo install
+
+# Workspace .venv overlay. If the host workspace has a .venv/, we shadow it
+# with a sandbox-owned venv so (a) the host venv is never touched and
+# (b) the in-container venv uses a Linux interpreter that actually works.
+# Opt out with SANDY_VENV_OVERLAY=0. Skipped for symlinked .venv (too risky —
+# could point anywhere) and for projects with no .venv (no overlay needed).
+SANDY_VENV_OVERLAY_ACTIVE=false
+SANDY_VENV_PYTHON_VERSION=""
+if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] \
+   && [ -d "$WORK_DIR/.venv" ] \
+   && [ ! -L "$WORK_DIR/.venv" ]; then
+    SANDY_VENV_OVERLAY_ACTIVE=true
+    # Parse pyvenv.cfg to learn the host venv's Python version. Newer uv
+    # writes both `version = 3.10.16` and `version_info = 3.10.16.final.0`;
+    # either works. cut -d. -f1-2 normalizes to major.minor. Guarded with
+    # `|| true` so a malformed cfg (no version line → grep exits 1) doesn't
+    # abort sandy under set -euo pipefail.
+    if [ -f "$WORK_DIR/.venv/pyvenv.cfg" ]; then
+        SANDY_VENV_PYTHON_VERSION="$( { grep -E '^version(_info)?[[:space:]]*=' "$WORK_DIR/.venv/pyvenv.cfg" \
+            | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]'; } || true )"
+    fi
+    mkdir -p "$SANDBOX_DIR/venv"               # sandbox-owned venv overlay
+    if [ "$SANDBOX_IS_NEW" = "true" ] || [ -z "$(ls -A "$SANDBOX_DIR/venv" 2>/dev/null)" ]; then
+        if [ -n "$SANDY_VENV_PYTHON_VERSION" ]; then
+            info "Detected host .venv (Python $SANDY_VENV_PYTHON_VERSION) — will materialize sandbox overlay on launch"
+        else
+            info "Detected host .venv — will materialize sandbox overlay on launch"
+        fi
+    fi
+fi
 # Skill pack persistent state directories
 case ",${SANDY_SKILL_PACKS:-}," in
     *,gstack,*) mkdir -p "$SANDBOX_DIR/gstack" ;;  # ~/.gstack (project state, analytics)
@@ -2689,6 +2761,16 @@ if [ ${#DANGEROUS_SYMLINKS[@]} -gt 0 ]; then
 fi
 
 RUN_FLAGS+=(-v "$WORK_DIR:$SANDY_WORKSPACE")
+
+# Workspace .venv overlay (see sandbox-dir-creation block above for rationale).
+# Must come AFTER the workspace mount so Docker overlays this bind on top of it.
+if [ "$SANDY_VENV_OVERLAY_ACTIVE" = "true" ]; then
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/venv:$SANDY_WORKSPACE/.venv")
+    RUN_FLAGS+=(-e "SANDY_VENV_OVERLAY_ACTIVE=1")
+    if [ -n "$SANDY_VENV_PYTHON_VERSION" ]; then
+        RUN_FLAGS+=(-e "SANDY_VENV_PYTHON_VERSION=$SANDY_VENV_PYTHON_VERSION")
+    fi
+fi
 
 # Mount symlink targets so they resolve correctly inside the container.
 # Dedup by container path (multiple symlinks may resolve to same target).

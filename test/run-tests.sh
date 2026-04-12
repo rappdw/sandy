@@ -271,22 +271,108 @@ check ".python-version triggers uv python install" \
 rm -f "$TEST_PROJECT/.python-version"
 
 # ============================================================
-info "9. Dev environment detection — broken .venv auto-installs Python"
+info "9. Workspace .venv overlay — detection and materialization"
 # ============================================================
 
-# Create a .venv with a broken symlink pointing to a specific Python version
-mkdir -p "$TEST_PROJECT/.venv/bin"
-ln -sf /usr/local/bin/python3.10 "$TEST_PROJECT/.venv/bin/python"
-# Simulate what the entrypoint does: detect broken .venv, extract version, install
-sandy_run '
-    VENV_TARGET="$(readlink /workspace/.venv/bin/python)"
-    PY_VER="$(echo "$VENV_TARGET" | grep -oE "[0-9]+\.[0-9]+" | head -1)"
-    uv python install "$PY_VER" 2>/dev/null
-    uv python find "$PY_VER" >/dev/null 2>&1
-'
-check "broken .venv triggers install of matching Python" \
-    sandy_run "uv python find 3.10 >/dev/null 2>&1"
-rm -rf "$TEST_PROJECT/.venv"
+# 9a. Allowlist accepts SANDY_VENV_OVERLAY in .sandy/config
+TMPCFG="$(mktemp -d)"
+mkdir -p "$TMPCFG/.sandy"
+echo 'SANDY_VENV_OVERLAY=0' > "$TMPCFG/.sandy/config"
+_SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+ALLOWLIST_RESULT="$(bash -c "
+    $(sed -n '/^_load_sandy_config()/,/^}$/p' "$_SANDY_SCRIPT_PATH")
+    _load_sandy_config '$TMPCFG/.sandy/config'
+    echo \"\${SANDY_VENV_OVERLAY:-unset}\"
+")"
+check "SANDY_VENV_OVERLAY in config allowlist" \
+    test "$ALLOWLIST_RESULT" = "0"
+rm -rf "$TMPCFG"
+
+# 9b. pyvenv.cfg parsing — extract major.minor from `version = X.Y.Z`
+VENV_FIXTURE="$(mktemp -d)"
+cat > "$VENV_FIXTURE/pyvenv.cfg" <<'EOF'
+home = /Users/drapp/.local/share/uv/python/cpython-3.10.16-macos-aarch64-none/bin
+implementation = CPython
+uv = 0.5.11
+version_info = 3.10.16.final.0
+include-system-site-packages = false
+prompt = myproject
+EOF
+PARSED_VER="$(grep -E '^version(_info)?[[:space:]]*=' "$VENV_FIXTURE/pyvenv.cfg" \
+    | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]')"
+check "pyvenv.cfg version_info parsed as major.minor" \
+    test "$PARSED_VER" = "3.10"
+rm -rf "$VENV_FIXTURE"
+
+# 9c. pyvenv.cfg parsing — `version = X.Y.Z` form (older virtualenv)
+VENV_FIXTURE2="$(mktemp -d)"
+cat > "$VENV_FIXTURE2/pyvenv.cfg" <<'EOF'
+home = /usr/bin
+include-system-site-packages = false
+version = 3.11.5
+EOF
+PARSED_VER2="$(grep -E '^version(_info)?[[:space:]]*=' "$VENV_FIXTURE2/pyvenv.cfg" \
+    | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]')"
+check "pyvenv.cfg version parsed as major.minor" \
+    test "$PARSED_VER2" = "3.11"
+rm -rf "$VENV_FIXTURE2"
+
+# 9d. Malformed pyvenv.cfg → empty version (falls back to default in container)
+VENV_FIXTURE3="$(mktemp -d)"
+cat > "$VENV_FIXTURE3/pyvenv.cfg" <<'EOF'
+home = /usr/bin
+include-system-site-packages = false
+EOF
+PARSED_VER3="$( { grep -E '^version(_info)?[[:space:]]*=' "$VENV_FIXTURE3/pyvenv.cfg" \
+    | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]'; } || true )"
+check "malformed pyvenv.cfg yields empty version" \
+    test -z "$PARSED_VER3"
+rm -rf "$VENV_FIXTURE3"
+
+# 9e. Symlinked .venv is skipped (potential sandbox escape)
+SYM_FIXTURE="$(mktemp -d)"
+SYM_TARGET="$(mktemp -d)"
+mkdir -p "$SYM_TARGET/bin"
+ln -s "$SYM_TARGET" "$SYM_FIXTURE/.venv"
+# The host-side detection uses [ -d DIR ] && [ ! -L DIR ] — should skip symlinks.
+SKIP_RESULT="no"
+if [ -d "$SYM_FIXTURE/.venv" ] && [ ! -L "$SYM_FIXTURE/.venv" ]; then
+    SKIP_RESULT="no"
+else
+    SKIP_RESULT="yes"
+fi
+check "symlinked .venv is skipped by overlay detection" \
+    test "$SKIP_RESULT" = "yes"
+rm -rf "$SYM_FIXTURE" "$SYM_TARGET"
+
+# 9f. Opt-out via SANDY_VENV_OVERLAY=0 disables detection even when .venv exists
+OPTOUT_FIXTURE="$(mktemp -d)"
+mkdir -p "$OPTOUT_FIXTURE/.venv"
+OPTOUT_ACTIVE=false
+SANDY_VENV_OVERLAY=0
+if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] \
+   && [ -d "$OPTOUT_FIXTURE/.venv" ] \
+   && [ ! -L "$OPTOUT_FIXTURE/.venv" ]; then
+    OPTOUT_ACTIVE=true
+fi
+check "SANDY_VENV_OVERLAY=0 disables overlay detection" \
+    test "$OPTOUT_ACTIVE" = "false"
+unset SANDY_VENV_OVERLAY
+rm -rf "$OPTOUT_FIXTURE"
+
+# 9g. Default (unset) enables detection when .venv exists
+DEFAULT_FIXTURE="$(mktemp -d)"
+mkdir -p "$DEFAULT_FIXTURE/.venv"
+unset SANDY_VENV_OVERLAY
+DEFAULT_ACTIVE=false
+if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] \
+   && [ -d "$DEFAULT_FIXTURE/.venv" ] \
+   && [ ! -L "$DEFAULT_FIXTURE/.venv" ]; then
+    DEFAULT_ACTIVE=true
+fi
+check "overlay default-on when .venv exists" \
+    test "$DEFAULT_ACTIVE" = "true"
+rm -rf "$DEFAULT_FIXTURE"
 
 # ============================================================
 info "10. Dev environment detection — foreign native modules"
