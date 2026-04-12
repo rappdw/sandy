@@ -2,7 +2,7 @@
 
 This plan walks from the current state of `codex-support` to `1.0-rc1`. It's structured as a sequence of discrete PRs, each with a clear scope, exit criteria, and target version. **No new features** — 1.0 is a stability release. Every PR should make the existing surface more trustworthy without adding to it.
 
-Current baseline: `codex-support` @ `a0d687a`, version string `0.10.0-dev`.
+Current baseline: `main` @ v0.10.0 (tag `v0.10.0`), version string `0.10.1-dev` on `main` post-release.
 
 ## Guiding principles
 
@@ -16,29 +16,24 @@ Current baseline: `codex-support` @ `a0d687a`, version string `0.10.0-dev`.
 
 ## Milestone 1 — Blocker fixes → `0.10.1`
 
-Three bugs from the code review that would be embarrassing at 1.0 but are mergeable individually on `main`.
+Two bugs from the code review that would be embarrassing at 1.0. (A third "blocker" — session-dir name collision from aggressive normalization — was walked back during PR 1.1 execution after verifying that sandy's per-workspace sandbox isolation already prevents the collision. Each workspace gets a unique `$SANDBOX_DIR` keyed on `sha256($WORK_DIR)`, and `~/.claude/projects/` inside the container is per-sandbox, never shared. Two workspaces whose paths normalize to the same Claude Code project-dir name land in different sandboxes with completely separate session trees.)
 
-### PR 1.1 — Fix session-dir collision and resume fallback
+### PR 1.1 — Fix resume fallback and codex grep-regex injection
 
-**Scope** (all three are in `build_claude_cmd` and the sibling `_cur_proj` site):
+**Scope** (both in `build_claude_cmd` and the codex trust-entry block):
 
-1. **Session-dir collision** (sandy:948, 1212). Normalization `sed 's/[^a-zA-Z0-9]/-/g'` maps `equity_analyzer` and `equity-analyzer` to the same directory. Fix: append a short hash of the original `$WORKSPACE` — e.g. `-home-claude-dev-equity-analyzer-a1b2c3`. Use the same hash approach sandy already uses for sandbox-dir suffixes (search for the existing `sha256` / `cut -c1-8` pattern).
-   - Test: add a `run-tests.sh` fixture with two workspace paths that normalize to the same root and assert they resolve to different project dirs.
-   - Must also write a migration note: existing sandboxes created by today's HEAD have a non-hashed project dir. The new code should either (a) look for *both* the hashed and the non-hashed forms when resuming, or (b) rename the old dir on first launch. Pick (a) — it's simpler and doesn't race with other processes.
+1. **`cmd || cmd_base` fallback misfires on Ctrl-C** (sandy:1204, 1224-1226). Drop the fallback entirely. The auto-detect at 1213 already checks for session files before adding `--continue`, so the guess is never wrong. If `claude --continue` fails because the session file was deleted mid-launch, the user sees a clear error and can re-run — that's strictly better than silently spawning a fresh session on Ctrl-C.
 
-2. **`cmd || cmd_base` fallback misfires on Ctrl-C** (sandy:1224-1226). Drop the fallback entirely. The auto-detect at 1213 already checks for session files before adding `--continue`, so the guess is never wrong. If `claude --continue` fails because the session file was deleted mid-launch, the user sees a clear error and can re-run — that's strictly better than silently spawning a fresh session on Ctrl-C.
+2. **grep-regex injection in codex trust-entry check** (sandy:866). Change to `grep -qF -- "[projects.\"${SANDY_WORKSPACE}\"]"`.
 
-3. **grep-regex injection in codex trust-entry check** (sandy:866). Change to `grep -F -- "[projects.\"${SANDY_WORKSPACE}\"]"`.
-
-**Version bump**: `0.10.0-dev` → `0.10.1`. Update `SANDY_VERSION` and add a CHANGELOG entry.
+**Version bump**: `0.10.1-dev` → `0.10.1`. Update `SANDY_VERSION` and add a RELEASE_NOTES entry.
 
 **Exit criteria**:
-- `bash test/run-tests.sh` passes including the new collision test.
+- `bash test/run-tests.sh` passes.
 - `bash test/run-integration-tests.sh` passes.
 - Manual smoke test: Ctrl-C out of a resumed Claude session and confirm no second launch.
-- Manual smoke test: launch in a workspace whose path contains `_` and confirm the project dir has a hash suffix and `--continue` works.
 
-**Merge target**: `main`. Cherry-pick to `codex-support` if that branch is still active.
+**Merge target**: `main`.
 
 ---
 

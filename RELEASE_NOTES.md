@@ -42,7 +42,6 @@
 
 The following are tracked in `ROADMAP_1.0.md` as **PR 1.1** and will ship as `v0.10.1`:
 
-- **Session-dir collision**: workspaces whose paths normalize to the same string (e.g. `equity_analyzer` and `equity-analyzer`) silently share Claude session history. Fix: append a short hash of the original path.
 - **Resume fallback misfire**: the `claude --continue` fallback pattern spawns an unwanted fresh session on Ctrl-C. Fix: drop the fallback; the auto-detect already knows when sessions exist.
 - **grep-regex injection in codex trust-entry check**: `$SANDY_WORKSPACE` is interpolated into a BRE without escaping. Fix: switch to `grep -F`.
 

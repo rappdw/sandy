@@ -861,9 +861,15 @@ fi
 # to ~/.codex/config.toml so codex doesn't prompt about an untrusted cwd. This
 # cannot be seeded at host-time because it needs the container-side workspace
 # path. Idempotent: only appended if the section is not already present.
+#
+# grep -F (fixed-string) is important here: the workspace path contains '/'
+# and '.' characters that are regex metacharacters in grep's default BRE
+# mode. Without -F, a workspace like /home/claude/dev/sandy could falsely
+# match a stored entry for /home/claudeXdevYsandy and skip the append,
+# leaving codex to prompt on every launch.
 if _sandy_has_codex; then
     _codex_cfg="$HOME/.codex/config.toml"
-    if [ -f "$_codex_cfg" ] && ! grep -q "^\[projects\.\"${SANDY_WORKSPACE}\"\]" "$_codex_cfg" 2>/dev/null; then
+    if [ -f "$_codex_cfg" ] && ! grep -qF -- "[projects.\"${SANDY_WORKSPACE}\"]" "$_codex_cfg" 2>/dev/null; then
         {
             echo ""
             echo "[projects.\"${SANDY_WORKSPACE}\"]"
@@ -1201,7 +1207,6 @@ build_claude_cmd() {
             -p|--resume|--continue) auto_continue=false ;;
         esac
     done
-    local cmd_base="$cmd"
     if [ "$auto_continue" = "true" ]; then
         # Resume the most recent session if one exists. Claude Code stores
         # sessions under ~/.claude/projects/<normalized-path>/*.jsonl, where
@@ -1209,6 +1214,14 @@ build_claude_cmd() {
         # with '-'. Because each sandbox is per-project, any .jsonl file
         # under ~/.claude/projects/ must belong to this workspace — so we
         # can fall back to a broad check if the exact path lookup misses.
+        #
+        # No fallback-on-failure: earlier versions added `|| $cmd_without_continue`
+        # after the command, but that relaunched a fresh session whenever
+        # `claude --continue` exited non-zero — including on Ctrl-C, /exit, or
+        # any prompt failure — which silently clobbered the user's expectation.
+        # The session-detect above already guarantees we only add --continue
+        # when a session file exists, so the fallback is both unnecessary and
+        # actively harmful.
         local expected_dir="$HOME/.claude/projects/$(echo "$WORKSPACE" | sed 's/[^a-zA-Z0-9]/-/g')"
         if ls "$expected_dir"/*.jsonl &>/dev/null; then
             cmd+=" --continue"
@@ -1219,11 +1232,7 @@ build_claude_cmd() {
     fi
     for arg in "$@"; do
         cmd+=" $(printf "%q" "$arg")"
-        cmd_base+=" $(printf "%q" "$arg")"
     done
-    if [ "$cmd" != "$cmd_base" ]; then
-        cmd="$cmd || $cmd_base"
-    fi
     # In interactive (tmux) mode, pause on exit so the user can see output before
     # tmux closes. In headless mode, skip — there's no tmux to hold open.
     if [ "$_sandy_is_headless" != "true" ]; then
