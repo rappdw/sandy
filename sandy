@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # sandy — an isolated sibling for your coding agents
 #
-# Runs Claude Code or Gemini CLI (or both, side-by-side) in a Docker container with:
+# Runs Claude Code, Gemini CLI, or Codex CLI (or any combo, side-by-side) in a Docker container with:
 #   - Filesystem: read/write limited to current directory only
 #   - Network: public internet only, NO LAN access
 #   - Resources: capped CPU and memory
@@ -16,7 +16,7 @@ set -euo pipefail
 #   sandy -p "prompt"         One-shot prompt
 # =============================================================================
 
-SANDY_VERSION="0.9.1-dev"
+SANDY_VERSION="0.10.0-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
@@ -162,6 +162,34 @@ warn()  { echo -e "${YELLOW}[sandy]${NC} $*"; }
 error() { echo -e "${RED}[sandy]${NC} $*" >&2; }
 sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 
+# Numeric semver compare. _ver_lt A B → 0 if A < B (strips -dev/-rc suffix).
+# Portable across macOS bash 3.2 and Linux without relying on `sort -V`.
+_ver_lt() {
+    local a="${1%%-*}" b="${2%%-*}"
+    local IFS=.
+    local -a A B
+    # shellcheck disable=SC2206
+    A=($a); B=($b)
+    local i ai bi
+    for i in 0 1 2; do
+        ai="${A[i]:-0}"; bi="${B[i]:-0}"
+        # Guard against non-numeric junk
+        [[ "$ai" =~ ^[0-9]+$ ]] || ai=0
+        [[ "$bi" =~ ^[0-9]+$ ]] || bi=0
+        if [ "$ai" -lt "$bi" ]; then return 0; fi
+        if [ "$ai" -gt "$bi" ]; then return 1; fi
+    done
+    return 1
+}
+
+# Sandboxes created before this version pre-date the workspace mount path
+# change (c99eb97, v0.7.10) from /workspace → /home/claude/<rel>. Any cached
+# absolute paths inside the sandbox (venv pyvenv.cfg, .pth files, editable
+# installs, Python package caches) reference /workspace/... and break
+# silently inside the new mount layout. Bump this when introducing further
+# sandbox-incompatible changes.
+SANDY_SANDBOX_MIN_COMPAT="0.7.10"
+
 SANDY_REPO_URL="https://raw.githubusercontent.com/rappdw/sandy/main/sandy"
 SANDY_API_URL="https://api.github.com/repos/rappdw/sandy/releases/latest"
 
@@ -259,7 +287,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<EOF
 sandy $(sandy_full_version) — an isolated sibling for your coding agents
 
-Run Claude Code or Gemini CLI (or both, side-by-side) in a Docker container
+Run Claude Code, Gemini CLI, or Codex CLI (or any combo) in a Docker container
 with filesystem isolation, network isolation, resource limits, and per-project
 credential sandboxes.
 
@@ -288,9 +316,13 @@ Environment variables:
   SANDY_GPU          GPU passthrough: "all" for all GPUs, or device IDs
                      like "0" or "0,1" (requires NVIDIA Container Toolkit)
   SANDY_SKILL_PACKS  Comma-separated skill packs to install (e.g. "gstack")
-  SANDY_AGENT        AI agent to run: "claude" (default) or "gemini"
+  SANDY_AGENT        AI agent(s): "claude" (default), "gemini", "codex",
+                     or comma-separated combo (e.g. "claude,gemini,codex").
+                     Aliases: "both" = "claude,gemini", "all" = all three.
   GEMINI_API_KEY     Google API key for Gemini CLI (SANDY_AGENT=gemini only)
   GEMINI_MODEL       Gemini model override (SANDY_AGENT=gemini only)
+  OPENAI_API_KEY     OpenAI API key for Codex CLI
+  CODEX_MODEL        Codex model override (SANDY_AGENT=codex only)
   CLAUDE_CODE_MAX_OUTPUT_TOKENS  Max output tokens per response (default: 128000)
 
 Per-project config:
@@ -460,6 +492,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
  && rm -rf /var/lib/apt/lists/*
 RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
+# osv-scanner: required by the gemini-cli-security extension (pre-built binary, not go install)
+RUN curl -fsSL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 \\
+      -o /usr/local/bin/osv-scanner \\
+ && chmod +x /usr/local/bin/osv-scanner
 COPY tmux.conf /etc/tmux.conf
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY user-setup.sh /usr/local/bin/user-setup.sh
@@ -469,24 +505,55 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 DOCKERFILE
 }
 
-generate_dockerfile_both() {
-    cat > "$SANDY_HOME/Dockerfile.both.new" <<DOCKERFILE
+generate_dockerfile_codex() {
+    cat > "$SANDY_HOME/Dockerfile.codex.new" <<DOCKERFILE
 FROM ${BASE_IMAGE_NAME}
-# Install Claude Code natively (see generate_dockerfile for rationale).
-RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
- && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \\
- && mv /home/claude/.local/share/claude /opt/claude-code \\
- && { /usr/local/bin/claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version || true; }
-# Install Gemini CLI as a global npm package alongside Claude Code.
-RUN npm install -g @google/gemini-cli \\
- && mkdir -p /opt/gemini-cli \\
- && { npm list -g @google/gemini-cli --depth=0 2>/dev/null \\
-      | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/gemini-cli/.version || true; }
+# Install Codex CLI as a global npm package. The @openai/codex package ships
+# a prebuilt Rust binary per platform; Node is only the installation vehicle.
+RUN npm install -g @openai/codex \\
+ && mkdir -p /opt/codex \\
+ && { codex --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/codex/.version || true; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
  && rm -rf /var/lib/apt/lists/*
 RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
+COPY tmux.conf /etc/tmux.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY user-setup.sh /usr/local/bin/user-setup.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/user-setup.sh
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+DOCKERFILE
+}
+
+generate_dockerfile_full() {
+    cat > "$SANDY_HOME/Dockerfile.full.new" <<DOCKERFILE
+FROM ${BASE_IMAGE_NAME}
+# Install all three agents. Used for any multi-agent combo.
+# Claude Code
+RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
+ && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \\
+ && mv /home/claude/.local/share/claude /opt/claude-code \\
+ && { /usr/local/bin/claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version || true; }
+# Gemini CLI
+RUN npm install -g @google/gemini-cli \\
+ && mkdir -p /opt/gemini-cli \\
+ && { npm list -g @google/gemini-cli --depth=0 2>/dev/null \\
+      | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/gemini-cli/.version || true; }
+# Codex CLI
+RUN npm install -g @openai/codex \\
+ && mkdir -p /opt/codex \\
+ && { codex --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/codex/.version || true; }
+# synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+ && rm -rf /var/lib/apt/lists/*
+RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
+# osv-scanner: required by the gemini-cli-security extension (pre-built binary, not go install)
+RUN curl -fsSL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 \\
+      -o /usr/local/bin/osv-scanner \\
+ && chmod +x /usr/local/bin/osv-scanner
 COPY tmux.conf /etc/tmux.conf
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY user-setup.sh /usr/local/bin/user-setup.sh
@@ -565,10 +632,10 @@ done
 # expected paths (the real files live outside /home/claude to survive the tmpfs overlay).
 # Gemini CLI is installed globally via npm and doesn't need this relocation.
 mkdir -p /home/claude/.local/bin /home/claude/.local/share
-if [ "${SANDY_AGENT:-claude}" = "claude" ] || [ "${SANDY_AGENT:-claude}" = "both" ]; then
+case ",${SANDY_AGENT:-claude}," in *,claude,*)
     ln -sf /usr/local/bin/claude /home/claude/.local/bin/claude
     ln -sf /opt/claude-code /home/claude/.local/share/claude
-fi
+    ;; esac
 # chown the tmpfs dirs individually — avoid -R which would recurse into
 # the bind-mounted uv directory at .local/share/uv
 chown "$RUN_UID:$RUN_GID" /home/claude/.local /home/claude/.local/bin \
@@ -609,9 +676,15 @@ if [ "${SANDY_VERBOSE:-0}" -ge 2 ]; then
     set -x
 fi
 export HOME=/home/claude
-# Convenience: _sandy_has_claude returns true for both 'claude' and 'both'.
-_sandy_has_claude() { [ "${SANDY_AGENT:-claude}" = "claude" ] || [ "${SANDY_AGENT:-claude}" = "both" ]; }
-_sandy_has_gemini() { [ "${SANDY_AGENT:-claude}" = "gemini" ] || [ "${SANDY_AGENT:-claude}" = "both" ]; }
+# Convenience: _sandy_has_X returns true if agent X is in the comma-separated SANDY_AGENT list.
+_sandy_has_claude() { case ",${SANDY_AGENT:-claude}," in *,claude,*) return 0 ;; esac; return 1; }
+_sandy_has_gemini() { case ",${SANDY_AGENT:-claude}," in *,gemini,*) return 0 ;; esac; return 1; }
+_sandy_has_codex()  { case ",${SANDY_AGENT:-claude}," in *,codex,*)  return 0 ;; esac; return 1; }
+# Parse comma-separated agent list for multi-agent dispatch
+IFS=',' read -ra _SANDY_AGENTS <<< "${SANDY_AGENT:-claude}"
+_SANDY_AGENT_COUNT="${#_SANDY_AGENTS[@]}"
+_SANDY_IS_MULTI=false
+[ "$_SANDY_AGENT_COUNT" -gt 1 ] && _SANDY_IS_MULTI=true
 if _sandy_has_claude; then
     export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS="${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-0}"
     export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}"
@@ -645,6 +718,16 @@ mkdir -p "$PYTHONUSERBASE/bin"
 
 # Writable bin dirs on PATH
 export PATH="$HOME/.local/bin:$PYTHONUSERBASE/bin:$NPM_CONFIG_PREFIX/bin:$GOPATH/bin:$CARGO_HOME/bin:$PATH"
+
+# Stub xdg-open / open so CLIs that try to launch a browser don't crash.
+# Prints the URL to the terminal instead.
+if ! command -v xdg-open &>/dev/null; then
+    cat > "$HOME/.local/bin/xdg-open" <<'XDGSTUB'
+#!/bin/sh
+printf '\033[0;36m[sandy]\033[0m Open in browser: %s\n' "$1"
+XDGSTUB
+    chmod +x "$HOME/.local/bin/xdg-open"
+fi
 
 sandy_log "Activating skill packs"
 # Activate baked-in skill packs (installed at /opt/skills/ during image build).
@@ -738,29 +821,108 @@ Output of md2email {{args}}:
 SKTOML
 fi
 
+# Synthkit skills for Codex (Markdown with YAML frontmatter — spike 1 confirmed
+# codex loads ~/.codex/skills/<name>/SKILL.md as a drop-in directory, but
+# strictly requires the --- delimited frontmatter block).
+if _sandy_has_codex && command -v synthkit &>/dev/null; then
+    mkdir -p "$HOME/.codex/skills/md2pdf" "$HOME/.codex/skills/md2doc" \
+             "$HOME/.codex/skills/md2html" "$HOME/.codex/skills/md2email"
+    cat > "$HOME/.codex/skills/md2pdf/SKILL.md" <<'SKMD'
+---
+name: md2pdf
+description: Convert markdown file(s) to PDF using the md2pdf command on PATH.
+---
+Run: `md2pdf <file.md> [file2.md ...]`
+SKMD
+    cat > "$HOME/.codex/skills/md2doc/SKILL.md" <<'SKMD'
+---
+name: md2doc
+description: Convert markdown file(s) to Word (.docx) using the md2doc command on PATH.
+---
+Run: `md2doc <file.md> [file2.md ...]`
+SKMD
+    cat > "$HOME/.codex/skills/md2html/SKILL.md" <<'SKMD'
+---
+name: md2html
+description: Convert markdown file(s) to HTML using the md2html command on PATH.
+---
+Run: `md2html <file.md> [file2.md ...]`
+SKMD
+    cat > "$HOME/.codex/skills/md2email/SKILL.md" <<'SKMD'
+---
+name: md2email
+description: Convert a markdown file to clipboard-ready email HTML using the md2email command on PATH.
+---
+Run: `md2email <file.md>`
+SKMD
+fi
+
+# Codex trust entry: append [projects."$SANDY_WORKSPACE"] trust_level = "trusted"
+# to ~/.codex/config.toml so codex doesn't prompt about an untrusted cwd. This
+# cannot be seeded at host-time because it needs the container-side workspace
+# path. Idempotent: only appended if the section is not already present.
+if _sandy_has_codex; then
+    _codex_cfg="$HOME/.codex/config.toml"
+    if [ -f "$_codex_cfg" ] && ! grep -q "^\[projects\.\"${SANDY_WORKSPACE}\"\]" "$_codex_cfg" 2>/dev/null; then
+        {
+            echo ""
+            echo "[projects.\"${SANDY_WORKSPACE}\"]"
+            echo "trust_level = \"trusted\""
+        } >> "$_codex_cfg"
+    fi
+fi
+
+# Gemini trust entry: seed trustedFolders.json so gemini doesn't prompt
+# "Do you trust the files in this folder?" on every new workspace.
+# Needs container-side $SANDY_WORKSPACE, so it lives here not at host-time.
+if _sandy_has_gemini; then
+    _tf="$HOME/.gemini/trustedFolders.json"
+    if [ ! -f "$_tf" ] || ! grep -qF "$SANDY_WORKSPACE" "$_tf" 2>/dev/null; then
+        node -e '
+            const fs = require("fs");
+            const f = process.argv[1], w = process.argv[2];
+            let d = {};
+            try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) {}
+            d[w] = "TRUST_FOLDER";
+            fs.writeFileSync(f, JSON.stringify(d, null, 2) + "\n");
+        ' "$_tf" "$SANDY_WORKSPACE" 2>/dev/null || {
+            # Fallback without node
+            printf '{\n  "%s": "TRUST_FOLDER"\n}\n' "$SANDY_WORKSPACE" > "$_tf"
+        }
+    fi
+fi
+
 # Gemini extensions seeding (SANDY_GEMINI_EXTENSIONS)
-# Idempotent: check against the installed extension list (keyed on source URL)
-# rather than guessing the directory name from the repo basename — extensions
-# install under their declared name, which often differs (e.g. .../security
-# installs as gemini-cli-security).
+# Idempotent: check the extensions directory on disk rather than `gemini
+# extensions list` (which returns empty when run outside the TUI).
 if _sandy_has_gemini && [ -n "${SANDY_GEMINI_EXTENSIONS:-}" ] && command -v gemini &>/dev/null; then
-    sandy_log "Installing Gemini extensions"
+    # Remove integrity/credential files that become invalid across container
+    # rebuilds — gemini's extension installer refuses to run with stale ones.
+    rm -f "$HOME/.gemini/gemini-credentials.json" \
+          "$HOME/.gemini/extension_integrity.json" \
+          "$HOME/.gemini/integrity.key"
     mkdir -p "$HOME/.gemini/extensions"
-    # Cache the installed-extensions listing once per launch.
-    _gem_installed="$(gemini extensions list 2>/dev/null || true)"
     IFS=',' read -ra _exts <<< "$SANDY_GEMINI_EXTENSIONS"
     for _ext in "${_exts[@]}"; do
         _ext="$(echo "$_ext" | tr -d '[:space:]')"
         [ -z "$_ext" ] && continue
-        # Match on the URL and on the repo basename — covers both display
-        # formats that different Gemini CLI versions use in `extensions list`.
         _name="$(basename "$_ext" .git)"
-        if echo "$_gem_installed" | grep -qFe "$_ext" || \
-           echo "$_gem_installed" | grep -qiE "(^|[^a-z0-9-])${_name}([^a-z0-9-]|$)"; then
+        # Check if any directory under extensions/ matches the repo name
+        # (gemini prefixes with "gemini-cli-" sometimes, e.g. security → gemini-cli-security)
+        _found=false
+        for _d in "$HOME/.gemini/extensions"/*/; do
+            _dname="$(basename "$_d")"
+            if [ "$_dname" = "$_name" ] || echo "$_dname" | grep -qiE "(^|-)${_name}$"; then
+                _found=true
+                break
+            fi
+        done
+        if [ "$_found" = "true" ]; then
             continue
         fi
-        _install_out="$(gemini extensions install "$_ext" 2>&1)" || {
-            # "already installed" is a benign race, not a failure
+        printf '\033[0;32m[sandy]\033[0m Installing Gemini extension: %s\n' "$_name"
+        # Timeout + auto-confirm to prevent hangs from interactive prompts.
+        _install_out="$(echo Y | timeout 120 gemini extensions install "$_ext" 2>&1)" || {
             if echo "$_install_out" | grep -qi "already installed"; then
                 :
             else
@@ -782,8 +944,11 @@ WORKSPACE="${SANDY_WORKSPACE:-/workspace}"
 if _sandy_has_claude; then
     mkdir -p "$WORKSPACE/.claude" 2>/dev/null || true
 
-    # Project dir for current workspace
-    _cur_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')"
+    # Project dir for current workspace. Claude Code normalizes any
+    # non-alphanumeric char to '-', not just '/', so '_' and '.' also become
+    # '-'. Matching that transform here is essential for --continue to find
+    # the right session history.
+    _cur_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | sed 's/[^a-zA-Z0-9]/-/g')"
     mkdir -p "$_cur_proj"
 fi
 
@@ -849,21 +1014,48 @@ if [ -f "$WORKSPACE/.python-version" ]; then
     fi
 fi
 
-# If .venv exists but its python symlink is broken, auto-install the needed version
-if [ -L "$WORKSPACE/.venv/bin/python" ] && [ ! -e "$WORKSPACE/.venv/bin/python" ]; then
-    VENV_TARGET="$(readlink "$WORKSPACE/.venv/bin/python")"
-    # Extract version from symlink (e.g. /usr/bin/python3.12 → 3.12, .pyenv/versions/3.10.4/... → 3.10)
-    PY_VER="$(echo "$VENV_TARGET" | grep -oE '[0-9]+\.[0-9]+' | head -1)"
-    if [ -n "$PY_VER" ] && command -v uv &>/dev/null; then
-        printf "\033[0;36m● Installing Python %s via uv (.venv needs it)...\033[0m\n" "$PY_VER"
-        if uv python install "$PY_VER" 2>/dev/null; then
-            printf "\033[0;36m● Python %s ready\033[0m\n" "$PY_VER"
+# Workspace .venv overlay. When SANDY_VENV_OVERLAY_ACTIVE=1, sandy has bind-
+# mounted a sandbox-owned dir over $WORKSPACE/.venv, shadowing the host venv.
+# First launch: the overlay dir is empty — materialize a fresh venv matching
+# the host's Python version (passed via SANDY_VENV_PYTHON_VERSION).
+# Subsequent launches: pyvenv.cfg already exists, skip straight to activation.
+if [ "${SANDY_VENV_OVERLAY_ACTIVE:-0}" = "1" ] && [ -d "$WORKSPACE/.venv" ]; then
+    if [ ! -f "$WORKSPACE/.venv/pyvenv.cfg" ]; then
+        _py_ver="${SANDY_VENV_PYTHON_VERSION:-3.12}"
+        printf "\033[0;36m● Materializing sandbox venv overlay (Python %s)...\033[0m\n" "$_py_ver"
+        if command -v uv &>/dev/null; then
+            uv python install "$_py_ver" 2>/dev/null || true
+            if uv venv --python "$_py_ver" "$WORKSPACE/.venv" >/dev/null 2>&1; then
+                printf "\033[0;36m● Sandbox venv ready. Populate with:\033[0m\n"
+                if [ -f "$WORKSPACE/pyproject.toml" ]; then
+                    printf "\033[0;36m    uv sync    # or: uv pip install -e .\033[0m\n"
+                elif [ -f "$WORKSPACE/requirements.txt" ]; then
+                    printf "\033[0;36m    uv pip install -r requirements.txt\033[0m\n"
+                else
+                    printf "\033[0;36m    uv pip install <your deps>\033[0m\n"
+                fi
+            else
+                printf "\033[0;33m⚠ uv venv failed for Python %s — run 'uv venv' manually\033[0m\n" "$_py_ver"
+            fi
         else
-            printf "\033[0;33m⚠ .venv needs Python %s but uv could not install it\033[0m\n" "$PY_VER"
+            printf "\033[0;33m⚠ uv not found; cannot create sandbox venv\033[0m\n"
         fi
-    else
-        printf "\033[0;33m⚠ .venv/bin/python → %s (not found in container)\033[0m\n" "$VENV_TARGET"
     fi
+    # Auto-activate: set VIRTUAL_ENV and prepend bin/ to PATH so python, pip,
+    # and installed console_scripts resolve to the sandbox venv without the
+    # user having to `source .venv/bin/activate`. The pip wrapper at
+    # /home/claude/.local/bin/pip also respects VIRTUAL_ENV and skips its
+    # --user fallback when this is set.
+    if [ -f "$WORKSPACE/.venv/bin/python" ]; then
+        export VIRTUAL_ENV="$WORKSPACE/.venv"
+        export PATH="$WORKSPACE/.venv/bin:$PATH"
+    fi
+elif [ -L "$WORKSPACE/.venv/bin/python" ] && [ ! -e "$WORKSPACE/.venv/bin/python" ]; then
+    # Overlay disabled (SANDY_VENV_OVERLAY=0) — fall back to warn-only.
+    VENV_TARGET="$(readlink "$WORKSPACE/.venv/bin/python")"
+    printf "\033[0;33m⚠ .venv/bin/python → %s is broken inside the container.\033[0m\n" "$VENV_TARGET"
+    printf "\033[0;33m  Set SANDY_VENV_OVERLAY=1 (default) for an auto-managed container venv,\033[0m\n"
+    printf "\033[0;33m  or recreate inside sandy: rm -rf .venv && uv venv && uv pip install -e .\033[0m\n"
 fi
 
 # Warn if node_modules contains native addons built for a different platform
@@ -885,6 +1077,23 @@ if [ -n "${GH_ACCOUNTS:-}" ] && command -v gh &>/dev/null; then
         _tok="${_pair#*:}"
         echo "$_tok" | gh auth login --with-token 2>/dev/null || true
     done
+    # Detect the repo owner from the workspace remote URL and switch to the
+    # matching account. Without this, the last-logged-in account is active
+    # and pushes fail if it doesn't own the repo.
+    _repo_owner=""
+    if [ -d "$WORKSPACE/.git" ] || [ -f "$WORKSPACE/.git" ]; then
+        _repo_owner="$(git -C "$WORKSPACE" remote get-url origin 2>/dev/null \
+            | sed -E 's#.*(github\.com[:/])##; s#/.*##' || true)"
+    fi
+    if [ -n "$_repo_owner" ]; then
+        for _pair in "${_gh_pairs[@]}"; do
+            _user="${_pair%%:*}"
+            if [ "$_user" = "$_repo_owner" ]; then
+                gh auth switch --user "$_user" 2>/dev/null || true
+                break
+            fi
+        done
+    fi
 elif [ -n "${GIT_TOKEN:-}" ] && command -v gh &>/dev/null; then
     echo "${GIT_TOKEN}" | gh auth login --with-token 2>/dev/null || true
 fi
@@ -978,9 +1187,9 @@ build_claude_cmd() {
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
         cmd+=" --dangerously-skip-permissions"
     fi
-    if [ -n "${SANDY_CHANNELS:-}" ] && [ "${SANDY_AGENT:-claude}" = "claude" ]; then
-        # Native channels plugin path — only for pure-claude sessions.
-        # For 'both', channels are delivered via the host-side tmux-inject relay.
+    if [ -n "${SANDY_CHANNELS:-}" ] && ! [[ "${SANDY_AGENT:-claude}" == *,* ]]; then
+        # Native channels plugin path — only for single-agent claude sessions.
+        # For multi-agent, channels are delivered via the host-side tmux-inject relay.
         cmd+=" --channels $SANDY_CHANNELS"
     fi
     local auto_continue=true
@@ -994,9 +1203,18 @@ build_claude_cmd() {
     done
     local cmd_base="$cmd"
     if [ "$auto_continue" = "true" ]; then
-        local session_dir="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr '/' '-')/"
-        if ls "$session_dir"*.jsonl &>/dev/null; then
+        # Resume the most recent session if one exists. Claude Code stores
+        # sessions under ~/.claude/projects/<normalized-path>/*.jsonl, where
+        # any non-alphanumeric character in the workspace path is replaced
+        # with '-'. Because each sandbox is per-project, any .jsonl file
+        # under ~/.claude/projects/ must belong to this workspace — so we
+        # can fall back to a broad check if the exact path lookup misses.
+        local expected_dir="$HOME/.claude/projects/$(echo "$WORKSPACE" | sed 's/[^a-zA-Z0-9]/-/g')"
+        if ls "$expected_dir"/*.jsonl &>/dev/null; then
             cmd+=" --continue"
+        elif find "$HOME/.claude/projects" -maxdepth 2 -name '*.jsonl' -print -quit 2>/dev/null | grep -q .; then
+            # Sessions exist but not at the expected path — pick one.
+            cmd+=" --resume"
         fi
     fi
     for arg in "$@"; do
@@ -1006,8 +1224,53 @@ build_claude_cmd() {
     if [ "$cmd" != "$cmd_base" ]; then
         cmd="$cmd || $cmd_base"
     fi
-    if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
-        cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Claude Code exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+    # In interactive (tmux) mode, pause on exit so the user can see output before
+    # tmux closes. In headless mode, skip — there's no tmux to hold open.
+    if [ "$_sandy_is_headless" != "true" ]; then
+        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+            cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Claude Code exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+        else
+            cmd="$cmd; read -p ''"
+        fi
+    fi
+    printf '%s' "$cmd"
+}
+
+build_codex_cmd() {
+    # Headless: codex exec [PROMPT] (positional arg, not a flag)
+    # Interactive: codex (TUI)
+    # --sandbox danger-full-access is belt-and-suspenders alongside the
+    # sandbox_mode in ~/.codex/config.toml. Do not remove either.
+    local headless=false
+    for arg in "$@"; do
+        case "$arg" in -p|--print|--prompt) headless=true; break ;; esac
+    done
+    local cmd
+    if [ "$headless" = "true" ]; then
+        cmd="codex exec --sandbox danger-full-access"
+    else
+        cmd="codex --sandbox danger-full-access"
+    fi
+    if [ -n "${CODEX_MODEL:-}" ]; then
+        cmd+=" --model $(printf "%q" "$CODEX_MODEL")"
+    fi
+    # Flag translation: sandy's -p/--print/--prompt all mean "run this prompt".
+    # codex exec takes the prompt as a positional arg, so drop the flag itself
+    # and pass only the value. --continue/-c → drop (codex has `codex resume`
+    # but not a headless --continue flag), matching the gemini behavior.
+    for arg in "$@"; do
+        case "$arg" in
+            -p|--print|--prompt) : ;;
+            --continue|-c)       : ;;
+            *)                   cmd+=" $(printf "%q" "$arg")" ;;
+        esac
+    done
+    if [ "$_sandy_is_headless" != "true" ]; then
+        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+            cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Codex CLI exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+        else
+            cmd="$cmd; read -p ''"
+        fi
     fi
     printf '%s' "$cmd"
 }
@@ -1034,8 +1297,12 @@ build_gemini_cmd() {
             *)             cmd+=" $(printf "%q" "$arg")" ;;
         esac
     done
-    if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
-        cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Gemini CLI exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+    if [ "$_sandy_is_headless" != "true" ]; then
+        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+            cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Gemini CLI exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+        else
+            cmd="$cmd; read -p ''"
+        fi
     fi
     printf '%s' "$cmd"
 }
@@ -1049,52 +1316,68 @@ for _arg in "$@"; do
     esac
 done
 
-if [ "${SANDY_AGENT:-claude}" = "claude" ]; then
-sandy_log "Launching Claude Code"
-if [ "${SANDY_REMOTE_CONTROL:-false}" = "true" ]; then
-    # Remote-control server mode — no tmux wrapper, no auto-resume
-    CLAUDE_CMD="claude remote-control --name \"sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}\""
-    for arg in "$@"; do
-        CLAUDE_CMD+=" $(printf "%q" "$arg")"
-    done
-    if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
-        CLAUDE_CMD="$CLAUDE_CMD; _exit=\$?; echo ''; echo \"[sandy] Claude Code exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+# --- Build the command for a given agent ---
+_sandy_build_agent_cmd() {
+    case "$1" in
+        claude) build_claude_cmd "${@:2}" ;;
+        gemini) build_gemini_cmd "${@:2}" ;;
+        codex)  build_codex_cmd "${@:2}" ;;
+    esac
+}
+
+cd "$WORKSPACE"
+
+if [ "$_SANDY_IS_MULTI" = false ]; then
+    # --- Single-agent launch ---
+    _agent="${_SANDY_AGENTS[0]}"
+
+    # Claude remote-control is a special case (no tmux, no auto-resume)
+    if [ "$_agent" = "claude" ] && [ "${SANDY_REMOTE_CONTROL:-false}" = "true" ]; then
+        sandy_log "Launching Claude Code (remote-control)"
+        AGENT_CMD="claude remote-control --name \"sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}\""
+        for arg in "$@"; do
+            AGENT_CMD+=" $(printf "%q" "$arg")"
+        done
+        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+            AGENT_CMD="$AGENT_CMD; _exit=\$?; echo ''; echo \"[sandy] Claude Code exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+        fi
+        exec bash -c "$AGENT_CMD 2>&1"
     fi
-    cd "$WORKSPACE"
-    exec bash -c "$CLAUDE_CMD 2>&1"
-elif [ "$_sandy_is_headless" = "true" ]; then
-    # Headless one-shot — no tmux wrapper so output streams to parent stdout
-    CLAUDE_CMD="$(build_claude_cmd "$@")"
-    cd "$WORKSPACE"
-    exec bash -c "$CLAUDE_CMD"
-else
-    CLAUDE_CMD="$(build_claude_cmd "$@")"
-    cd "$WORKSPACE"
-    tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$CLAUDE_CMD 2>&1"
-fi
-elif [ "${SANDY_AGENT:-claude}" = "gemini" ]; then
-    sandy_log "Launching Gemini CLI"
-    GEMINI_CMD="$(build_gemini_cmd "$@")"
-    cd "$WORKSPACE"
+
+    sandy_log "Launching $_agent"
+    AGENT_CMD="$(_sandy_build_agent_cmd "$_agent" "$@")"
     if [ "$_sandy_is_headless" = "true" ]; then
-        exec bash -c "$GEMINI_CMD"
+        exec bash -c "$AGENT_CMD"
     else
-        tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$GEMINI_CMD 2>&1"
+        tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1"
     fi
-elif [ "${SANDY_AGENT:-claude}" = "both" ]; then
+else
+    # --- Multi-agent launch (2 or 3 panes) ---
     if [ "$_sandy_is_headless" = "true" ]; then
-        # Headless mode with dual-agent doesn't make sense — route to Claude only.
-        sandy_log "Headless mode with SANDY_AGENT=both: routing to Claude only"
-        CLAUDE_CMD="$(build_claude_cmd "$@")"
-        cd "$WORKSPACE"
-        exec bash -c "$CLAUDE_CMD"
+        # Headless mode with multi-agent: route to first agent only.
+        _first="${_SANDY_AGENTS[0]}"
+        sandy_log "Headless mode with multi-agent: routing to $_first only"
+        AGENT_CMD="$(_sandy_build_agent_cmd "$_first" "$@")"
+        exec bash -c "$AGENT_CMD"
     fi
-    sandy_log "Launching Claude Code + Gemini CLI (dual-pane)"
-    CLAUDE_CMD="$(build_claude_cmd "$@")"
-    GEMINI_CMD="$(build_gemini_cmd "$@")"
-    cd "$WORKSPACE"
-    tmux new-session -d -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$CLAUDE_CMD 2>&1"
-    tmux split-window -h -t sandy -- bash -c "$GEMINI_CMD 2>&1"
+
+    _agent_names="$(IFS=' + '; echo "${_SANDY_AGENTS[*]}")"
+    sandy_log "Launching $_agent_names (multi-pane)"
+
+    # First agent: create the tmux session
+    _cmd0="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[0]}" "$@")"
+    tmux new-session -d -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$_cmd0 2>&1"
+
+    # Second agent: split horizontally
+    _cmd1="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[1]}" "$@")"
+    tmux split-window -h -t sandy -- bash -c "$_cmd1 2>&1"
+
+    # Third agent (if present): split the right pane vertically
+    if [ "$_SANDY_AGENT_COUNT" -ge 3 ]; then
+        _cmd2="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[2]}" "$@")"
+        tmux split-window -v -t sandy.1 -- bash -c "$_cmd2 2>&1"
+    fi
+
     tmux select-pane -t sandy.0
     tmux attach -t sandy
 fi
@@ -1349,11 +1632,15 @@ ensure_build_files() {
 # Generate the agent-specific Dockerfile after SANDY_AGENT is known.
 ensure_agent_dockerfile() {
     local f
-    case "$SANDY_AGENT" in
-        gemini) generate_dockerfile_gemini; f="Dockerfile.gemini" ;;
-        both)   generate_dockerfile_both;   f="Dockerfile.both" ;;
-        *)      generate_dockerfile;        f="Dockerfile" ;;
-    esac
+    if [ "$_SANDY_IS_MULTI" = true ]; then
+        generate_dockerfile_full; f="Dockerfile.full"
+    else
+        case "$SANDY_AGENT" in
+            gemini) generate_dockerfile_gemini; f="Dockerfile.gemini" ;;
+            codex)  generate_dockerfile_codex;  f="Dockerfile.codex" ;;
+            *)      generate_dockerfile;        f="Dockerfile" ;;
+        esac
+    fi
     if [ ! -f "$SANDY_HOME/$f" ] || ! diff -q "$SANDY_HOME/$f.new" "$SANDY_HOME/$f" &>/dev/null; then
         mv "$SANDY_HOME/$f.new" "$SANDY_HOME/$f"
     else
@@ -1378,7 +1665,7 @@ _load_sandy_config() {
             SANDY_SSH|SANDY_MODEL|SANDY_SKILL_PACKS|SANDY_SKIP_PERMISSIONS|\
             SANDY_ALLOW_NO_ISOLATION|SANDY_ALLOW_LAN_HOSTS|\
             SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|SANDY_VERBOSE|\
-            SANDY_AGENT|\
+            SANDY_AGENT|SANDY_VENV_OVERLAY|\
             CLAUDE_CODE_OAUTH_TOKEN|\
             TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
             DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
@@ -1386,6 +1673,7 @@ _load_sandy_config() {
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|\
             GEMINI_API_KEY|GEMINI_MODEL|SANDY_GEMINI_EXTENSIONS|SANDY_GEMINI_AUTH|\
             GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION|GOOGLE_GENAI_USE_VERTEXAI|GOOGLE_API_KEY|\
+            OPENAI_API_KEY|CODEX_MODEL|SANDY_CODEX_AUTH|CODEX_HOME|\
             SANDY_CHANNEL_TARGET_PANE)
                 export "$key=$value" ;;
         esac
@@ -1400,45 +1688,82 @@ _load_sandy_config "$WORK_DIR/.sandy/.secrets"
 
 # --- Resolve agent ---
 SANDY_AGENT="${SANDY_AGENT:-claude}"
+# Aliases for common combos
 case "$SANDY_AGENT" in
-    claude) IMAGE_NAME="sandy-claude-code" ;;
-    gemini) IMAGE_NAME="sandy-gemini-cli" ;;
-    both)   IMAGE_NAME="sandy-both" ;;
-    *) echo "[sandy] ERROR: Invalid SANDY_AGENT '$SANDY_AGENT' (must be 'claude', 'gemini', or 'both')" >&2; exit 1 ;;
+    both) SANDY_AGENT="claude,gemini" ;;
+    all)  SANDY_AGENT="claude,gemini,codex" ;;
 esac
-if [ "$SANDY_AGENT" = "gemini" ]; then
-    if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
-        echo "[sandy] ERROR: SANDY_SKILL_PACKS is not supported with SANDY_AGENT=gemini" >&2
-        exit 1
-    fi
+# Parse comma-separated agent list and validate
+IFS=',' read -ra _SANDY_AGENTS <<< "$SANDY_AGENT"
+_SANDY_AGENT_COUNT="${#_SANDY_AGENTS[@]}"
+for _a in "${_SANDY_AGENTS[@]}"; do
+    case "$_a" in
+        claude|gemini|codex) ;;
+        *) echo "[sandy] ERROR: Invalid agent '$_a' in SANDY_AGENT='$SANDY_AGENT' (valid: claude, gemini, codex, or comma-separated combo)" >&2; exit 1 ;;
+    esac
+done
+# Detect duplicates
+if [ "$_SANDY_AGENT_COUNT" -ge 2 ]; then
+    _seen=""
+    for _a in "${_SANDY_AGENTS[@]}"; do
+        case ",$_seen," in *,"$_a",*) echo "[sandy] ERROR: Duplicate agent '$_a' in SANDY_AGENT='$SANDY_AGENT'" >&2; exit 1 ;; esac
+        _seen="$_seen,$_a"
+    done
 fi
-# Channels on non-Claude agents use the host-side tmux-inject relay. Only
-# Telegram is supported in v1.5; Discord still requires the Claude plugin path.
-if [ -n "${SANDY_CHANNELS:-}" ] && [ "$SANDY_AGENT" != "claude" ]; then
-    case ",$SANDY_CHANNELS," in
-        *,discord,*)
-            echo "[sandy] ERROR: SANDY_CHANNELS=discord is only supported with SANDY_AGENT=claude" >&2
-            exit 1 ;;
+_SANDY_IS_MULTI=false
+[ "$_SANDY_AGENT_COUNT" -gt 1 ] && _SANDY_IS_MULTI=true
+# Image selection: single agent gets its own image, multi-agent uses sandy-full
+if [ "$_SANDY_IS_MULTI" = true ]; then
+    IMAGE_NAME="sandy-full"
+else
+    case "$SANDY_AGENT" in
+        claude) IMAGE_NAME="sandy-claude-code" ;;
+        gemini) IMAGE_NAME="sandy-gemini-cli" ;;
+        codex)  IMAGE_NAME="sandy-codex" ;;
     esac
 fi
-if [ "$SANDY_REMOTE_CONTROL" = true ] && [ "$SANDY_AGENT" != "claude" ]; then
-    echo "[sandy] ERROR: --remote is only supported with SANDY_AGENT=claude (Gemini CLI has no remote-control mode)" >&2
+# Helper: check if a specific agent is in the resolved agent list
+_sandy_agent_has() { case ",$SANDY_AGENT," in *,"$1",*) return 0 ;; esac; return 1; }
+if ! _sandy_agent_has claude && [ -n "${SANDY_SKILL_PACKS:-}" ]; then
+    echo "[sandy] ERROR: SANDY_SKILL_PACKS requires claude in SANDY_AGENT (got '$SANDY_AGENT')" >&2
     exit 1
+fi
+# Channels on non-Claude agents use the host-side tmux-inject relay. Only
+# Telegram is supported; Discord still requires the Claude plugin path.
+if [ -n "${SANDY_CHANNELS:-}" ]; then
+    case ",$SANDY_CHANNELS," in
+        *,discord,*)
+            if ! _sandy_agent_has claude || [ "$_SANDY_IS_MULTI" = true ]; then
+                echo "[sandy] ERROR: SANDY_CHANNELS=discord is only supported with SANDY_AGENT=claude (solo)" >&2
+                exit 1
+            fi ;;
+    esac
+fi
+if [ "$SANDY_REMOTE_CONTROL" = true ]; then
+    if ! _sandy_agent_has claude || [ "$_SANDY_IS_MULTI" = true ]; then
+        echo "[sandy] ERROR: --remote is only supported with SANDY_AGENT=claude (solo)" >&2
+        exit 1
+    fi
 fi
 export SANDY_AGENT
 
 ensure_agent_dockerfile
-case "$SANDY_AGENT" in
-    gemini)
-        DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.gemini"
-        BUILD_HASH_FILE_NAME=".build_hash_gemini" ;;
-    both)
-        DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.both"
-        BUILD_HASH_FILE_NAME=".build_hash_both" ;;
-    *)
-        DOCKERFILE_PATH="$SANDY_HOME/Dockerfile"
-        BUILD_HASH_FILE_NAME=".build_hash" ;;
-esac
+if [ "$_SANDY_IS_MULTI" = true ]; then
+    DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.full"
+    BUILD_HASH_FILE_NAME=".build_hash_full"
+else
+    case "$SANDY_AGENT" in
+        gemini)
+            DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.gemini"
+            BUILD_HASH_FILE_NAME=".build_hash_gemini" ;;
+        codex)
+            DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.codex"
+            BUILD_HASH_FILE_NAME=".build_hash_codex" ;;
+        *)
+            DOCKERFILE_PATH="$SANDY_HOME/Dockerfile"
+            BUILD_HASH_FILE_NAME=".build_hash" ;;
+    esac
+fi
 
 SHORT_HASH="$(printf '%s' "$WORK_DIR" | sha256)"
 SHORT_HASH="${SHORT_HASH%% *}"
@@ -1457,7 +1782,7 @@ fi
 
 # Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
 if [ "$SANDY_REBUILD" = true ]; then
-    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_both" "$SANDY_HOME/.skills_build_hash"
+    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.skills_build_hash"
     info "Build cache cleared. Images will be rebuilt."
 fi
 
@@ -1468,7 +1793,7 @@ BASE_HASH="$(cat "$SANDY_HOME/Dockerfile.base" | sha256 | cut -d' ' -f1)"
 BASE_HASH_FILE="$SANDY_HOME/.base_build_hash"
 BASE_REBUILT=false
 if [ ! -f "$BASE_HASH_FILE" ] || [ "$(cat "$BASE_HASH_FILE")" != "$BASE_HASH" ] || ! docker image inspect "$BASE_IMAGE_NAME" &>/dev/null; then
-    info "Building base image (language runtimes)..."
+    info "Building base image (language runtimes) — this may take several minutes on first run..."
     docker build --no-cache -t "$BASE_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.base" "$SANDY_HOME"
     echo "$BASE_HASH" > "$BASE_HASH_FILE"
     BASE_REBUILT=true
@@ -1507,19 +1832,29 @@ _check_gemini_update() {
     fi
     return 1
 }
+_check_codex_update() {
+    local inst latest
+    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/codex/.version 2>/dev/null || true)"
+    # Use /releases/latest — upstream flags the stable release; codex ships
+    # 30+ releases/month, most marked as prereleases, and /releases/latest
+    # filters them correctly without sandy inventing its own policy.
+    latest="$(curl -fsSL --max-time 5 'https://api.github.com/repos/openai/codex/releases/latest' 2>/dev/null \
+        | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
+        | sed -E 's/.*"rust-v?([0-9][^"]*)"$/\1/' || true)"
+    if [ -n "$latest" ] && [ -n "$inst" ] && [ "$latest" != "$inst" ]; then
+        info "Codex CLI update available: $inst → $latest"
+        return 0
+    fi
+    return 1
+}
 if [ "$NEEDS_BUILD" = false ]; then
-    case "$SANDY_AGENT" in
-        gemini) _check_gemini_update && NEEDS_BUILD=true ;;
-        claude) _check_claude_update && NEEDS_BUILD=true ;;
-        both)
-            if _check_claude_update || _check_gemini_update; then
-                NEEDS_BUILD=true
-            fi ;;
-    esac
+    _sandy_agent_has claude && _check_claude_update && NEEDS_BUILD=true
+    _sandy_agent_has gemini && [ "$NEEDS_BUILD" = false ] && _check_gemini_update && NEEDS_BUILD=true
+    _sandy_agent_has codex  && [ "$NEEDS_BUILD" = false ] && _check_codex_update  && NEEDS_BUILD=true
 fi
 
 if [ "$NEEDS_BUILD" = true ]; then
-    info "Building sandbox image..."
+    info "Building sandbox image (may take a few minutes)..."
     docker build -q --no-cache -t "$IMAGE_NAME" -f "$DOCKERFILE_PATH" "$SANDY_HOME"
     echo "$BUILD_HASH" > "$HASH_FILE"
 else
@@ -1652,6 +1987,36 @@ if [ ! -d "$SANDBOX_DIR" ]; then
     SANDBOX_IS_NEW=true
 fi
 
+# Sandbox version marker. Written once on creation so future sandy launches
+# can detect sandboxes that pre-date breaking changes to the container layout.
+# .sandy_last_version is refreshed on every launch (useful for `sandy --doctor`
+# style tooling, and for telling users exactly how stale their sandbox is).
+_sandbox_created_ver_file="$SANDBOX_DIR/.sandy_created_version"
+_sandbox_last_ver_file="$SANDBOX_DIR/.sandy_last_version"
+if [ "$SANDBOX_IS_NEW" = "true" ]; then
+    echo "$SANDY_VERSION" > "$_sandbox_created_ver_file"
+elif [ ! -f "$_sandbox_created_ver_file" ]; then
+    # Existing sandbox with no marker: created by a sandy that didn't write
+    # the marker (i.e. pre-0.10.1). Treat as "unknown old" — warn against
+    # the conservative threshold below.
+    _sandbox_created_ver="unknown"
+    warn "Sandbox predates version tracking (no .sandy_created_version file)."
+    warn "  If this sandbox was created before sandy $SANDY_SANDBOX_MIN_COMPAT"
+    warn "  (workspace path changed from /workspace → /home/claude/<rel>),"
+    warn "  cached absolute paths (venv, .pth files, editable installs) may be broken."
+    warn "  Recreate with:  rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
+else
+    _sandbox_created_ver="$(head -n1 "$_sandbox_created_ver_file" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$_sandbox_created_ver" ] && _ver_lt "$_sandbox_created_ver" "$SANDY_SANDBOX_MIN_COMPAT"; then
+        warn "Sandbox was created by sandy $_sandbox_created_ver, which predates"
+        warn "  the workspace mount path change in $SANDY_SANDBOX_MIN_COMPAT."
+        warn "  Cached absolute paths (venv, .pth files, editable installs) may reference"
+        warn "  /workspace/... and break silently. Recreate with:"
+        warn "    rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
+    fi
+fi
+echo "$SANDY_VERSION" > "$_sandbox_last_ver_file"
+
 # Auto-migrate v1 layout → v1.5 layout: v1 used $SANDBOX_DIR itself as the
 # Claude .claude/ root. v1.5 uses $SANDBOX_DIR/claude/ and $SANDBOX_DIR/gemini/
 # as siblings so dual-agent mode can mount both. Idempotent: the sweep only
@@ -1683,11 +2048,55 @@ if [ -n "$_v1_leftovers" ]; then
 fi
 
 # Ensure per-agent config dirs exist so bind mounts always land on real dirs.
-if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+if _sandy_agent_has claude; then
     mkdir -p "$SANDBOX_DIR/claude"
 fi
-if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
+if _sandy_agent_has codex; then
+    mkdir -p "$SANDBOX_DIR/codex"
+    # Clean up empty auth.json left by a previous codex session. Codex creates
+    # this file on first run but leaves it empty when using API key auth. On
+    # subsequent launches, codex crashes trying to parse the empty JSON.
+    if [ -f "$SANDBOX_DIR/codex/auth.json" ] && [ ! -s "$SANDBOX_DIR/codex/auth.json" ]; then
+        rm -f "$SANDBOX_DIR/codex/auth.json"
+    fi
+    # Seed config.toml with sandy-required defaults (first run only). Without
+    # this, codex's Landlock sandbox would try to initialize inside sandy's
+    # Docker container and either fail weirdly or over-restrict the agent.
+    # sandbox_mode here plus --sandbox danger-full-access on the CLI is
+    # belt-and-suspenders. The [notice] block suppresses all first-run prompts.
+    if [ ! -f "$SANDBOX_DIR/codex/config.toml" ] || [ ! -s "$SANDBOX_DIR/codex/config.toml" ] \
+       || ! grep -q 'sandbox_mode' "$SANDBOX_DIR/codex/config.toml" 2>/dev/null; then
+        cat > "$SANDBOX_DIR/codex/config.toml" <<'CODEX_TOML'
+# Written by sandy on first launch. Safe to edit, but sandbox_mode must stay
+# "danger-full-access" — sandy provides outer isolation; codex's Landlock
+# sandbox does not nest cleanly in Docker containers.
+model = "gpt-5.4"
+sandbox_mode = "danger-full-access"
+
+[notice]
+hide_full_access_warning = true
+hide_gpt5_1_migration_prompt = true
+"hide_gpt-5.1-codex-max_migration_prompt" = true
+hide_rate_limit_model_nudge = true
+hide_world_writable_warning = true
+
+# [projects."<workspace>"] trust_level = "trusted" is appended at session
+# start by user-setup.sh, where $SANDY_WORKSPACE is known.
+CODEX_TOML
+        info "  Seeded .codex/config.toml"
+    fi
+fi
+
+if _sandy_agent_has gemini; then
     mkdir -p "$SANDBOX_DIR/gemini"
+    # Remove files that become stale/corrupted across container rebuilds.
+    # gemini-credentials.json: created by gemini without keychain access, becomes
+    #   "corrupted" on next launch. Sandy provides credentials via env vars and
+    #   ephemeral mounts, so this file is never needed.
+    # extension_integrity.json: integrity hashes tied to a specific container's
+    #   filesystem; invalid after image rebuild.
+    rm -f "$SANDBOX_DIR/gemini/gemini-credentials.json" \
+          "$SANDBOX_DIR/gemini/extension_integrity.json"
     # Seed settings.json from host's ~/.gemini/ if present (first run only)
     if [ ! -f "$SANDBOX_DIR/gemini/settings.json" ]; then
         if [ -f "$HOME/.gemini/settings.json" ]; then
@@ -1711,7 +2120,7 @@ if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
     fi
 fi
 
-if { [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; } && [ "$SANDBOX_IS_NEW" = "true" ]; then
+if _sandy_agent_has claude && [ "$SANDBOX_IS_NEW" = "true" ]; then
     # Seed settings from host's ~/.claude if available
     if [ -f "$HOME/.claude/settings.json" ]; then
         cp "$HOME/.claude/settings.json" "$SANDBOX_DIR/claude/settings.json"
@@ -1775,19 +2184,49 @@ mkdir -p "$SANDBOX_DIR/uv"                 # uv-managed Python versions
 mkdir -p "$SANDBOX_DIR/npm-global"         # npm -g installs
 mkdir -p "$SANDBOX_DIR/go"                 # GOPATH (go install)
 mkdir -p "$SANDBOX_DIR/cargo"              # cargo install
+
+# Workspace .venv overlay. If the host workspace has a .venv/, we shadow it
+# with a sandbox-owned venv so (a) the host venv is never touched and
+# (b) the in-container venv uses a Linux interpreter that actually works.
+# Opt out with SANDY_VENV_OVERLAY=0. Skipped for symlinked .venv (too risky —
+# could point anywhere) and for projects with no .venv (no overlay needed).
+SANDY_VENV_OVERLAY_ACTIVE=false
+SANDY_VENV_PYTHON_VERSION=""
+if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] \
+   && [ -d "$WORK_DIR/.venv" ] \
+   && [ ! -L "$WORK_DIR/.venv" ]; then
+    SANDY_VENV_OVERLAY_ACTIVE=true
+    # Parse pyvenv.cfg to learn the host venv's Python version. Newer uv
+    # writes both `version = 3.10.16` and `version_info = 3.10.16.final.0`;
+    # either works. cut -d. -f1-2 normalizes to major.minor. Guarded with
+    # `|| true` so a malformed cfg (no version line → grep exits 1) doesn't
+    # abort sandy under set -euo pipefail.
+    if [ -f "$WORK_DIR/.venv/pyvenv.cfg" ]; then
+        SANDY_VENV_PYTHON_VERSION="$( { grep -E '^version(_info)?[[:space:]]*=' "$WORK_DIR/.venv/pyvenv.cfg" \
+            | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]'; } || true )"
+    fi
+    mkdir -p "$SANDBOX_DIR/venv"               # sandbox-owned venv overlay
+    if [ "$SANDBOX_IS_NEW" = "true" ] || [ -z "$(ls -A "$SANDBOX_DIR/venv" 2>/dev/null)" ]; then
+        if [ -n "$SANDY_VENV_PYTHON_VERSION" ]; then
+            info "Detected host .venv (Python $SANDY_VENV_PYTHON_VERSION) — will materialize sandbox overlay on launch"
+        else
+            info "Detected host .venv — will materialize sandbox overlay on launch"
+        fi
+    fi
+fi
 # Skill pack persistent state directories
 case ",${SANDY_SKILL_PACKS:-}," in
     *,gstack,*) mkdir -p "$SANDBOX_DIR/gstack" ;;  # ~/.gstack (project state, analytics)
 esac
 
 # Always refresh statsig cache (feature flags may have changed since sandbox was created)
-if { [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; } && [ -d "$HOME/.claude/statsig" ]; then
+if _sandy_agent_has claude && [ -d "$HOME/.claude/statsig" ]; then
     rm -rf "$SANDBOX_DIR/claude/statsig"
     cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/claude/statsig"
 fi
 
 # cmux auto-setup: if running inside cmux, install notification hook (Claude-only)
-if { [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; } && [ -n "${CMUX_WORKSPACE_ID:-}" ] && [ ! -d "$HOME/.claude/hooks" ]; then
+if _sandy_agent_has claude && [ -n "${CMUX_WORKSPACE_ID:-}" ] && [ ! -d "$HOME/.claude/hooks" ]; then
     info "cmux detected — installing notification hook"
     mkdir -p "$SANDBOX_DIR/claude/hooks"
     cat > "$SANDBOX_DIR/claude/hooks/cmux-notify.sh" <<'CMUXHOOK'
@@ -1931,6 +2370,9 @@ cleanup() {
     if [ -n "${GEMINI_CRED_TMPDIR:-}" ]; then
         rm -rf "$GEMINI_CRED_TMPDIR"
     fi
+    if [ -n "${CODEX_CRED_TMPDIR:-}" ]; then
+        rm -rf "$CODEX_CRED_TMPDIR"
+    fi
     if [ -n "${SSH_RELAY_PID:-}" ]; then
         kill "$SSH_RELAY_PID" 2>/dev/null || true
     fi
@@ -1946,7 +2388,7 @@ apply_network_isolation
 # Stored outside SANDBOX_DIR to avoid overlapping Docker bind mounts.
 # Claude-only: Gemini stores equivalent state inside its config dir.
 CLAUDE_JSON="$SANDY_HOME/sandboxes/${SANDBOX_NAME}.claude.json"
-if { [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; } && [ ! -f "$CLAUDE_JSON" ]; then
+if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
     # Seed from host's ~/.claude.json (contains onboarding, theme, OAuth, etc.)
     if [ -f "$HOME/.claude.json" ]; then
         # Seed from host, stripping project entries (host paths are meaningless in the container)
@@ -1964,8 +2406,21 @@ if { [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; } && [ ! -f "
     fi
 fi
 # Ensure sandy-specific overrides are set (both new and existing sandboxes)
-if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+if _sandy_agent_has claude; then
     json_merge "$CLAUDE_JSON" '{"tipsDisabled":true,"installMethod":"native"}'
+    # Pre-trust the workspace so Claude Code doesn't show the trust dialog.
+    # Sandy provides whole-session isolation — the trust prompt is redundant.
+    node -e '
+        const fs = require("fs");
+        const f = process.argv[1], w = process.argv[2];
+        let d;
+        try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { d = {}; }
+        if (!d.projects) d.projects = {};
+        if (!d.projects[w]) d.projects[w] = {};
+        d.projects[w].hasTrustDialogAccepted = true;
+        d.projects[w].hasCompletedProjectOnboarding = true;
+        fs.writeFileSync(f, JSON.stringify(d, null, 2) + "\n");
+    ' "$CLAUDE_JSON" "$SANDY_WORKSPACE" 2>/dev/null || true
 fi
 
 # --- Ephemeral credential loading (fresh each launch, never persisted in sandbox) ---
@@ -2017,6 +2472,7 @@ except Exception:
 CRED_TMPDIR=""
 GEMINI_CRED_TMPDIR=""
 GEMINI_ADC_MOUNT=""
+CODEX_CRED_TMPDIR=""
 
 # Gemini credentials: priority is GEMINI_API_KEY → ephemeral OAuth tokens.json →
 # Google Application Default Credentials. OAuth and ADC are not mutually
@@ -2032,11 +2488,19 @@ load_gemini_credentials() {
         fi
     fi
     if [ "$mode" = "oauth" ] || [ "$mode" = "auto" ]; then
-        if [ -f "$HOME/.gemini/tokens.json" ]; then
+        # Gemini CLI ≥0.30 stores OAuth creds as oauth_creds.json;
+        # older versions used tokens.json. Check both.
+        local _gemini_oauth_file=""
+        if [ -f "$HOME/.gemini/oauth_creds.json" ]; then
+            _gemini_oauth_file="$HOME/.gemini/oauth_creds.json"
+        elif [ -f "$HOME/.gemini/tokens.json" ]; then
+            _gemini_oauth_file="$HOME/.gemini/tokens.json"
+        fi
+        if [ -n "$_gemini_oauth_file" ]; then
             GEMINI_CRED_TMPDIR="$(mktemp -d)"
-            cp "$HOME/.gemini/tokens.json" "$GEMINI_CRED_TMPDIR/tokens.json"
-            chmod 600 "$GEMINI_CRED_TMPDIR/tokens.json"
-            info "Loaded Gemini OAuth tokens from host"
+            cp "$_gemini_oauth_file" "$GEMINI_CRED_TMPDIR/$(basename "$_gemini_oauth_file")"
+            chmod 600 "$GEMINI_CRED_TMPDIR/$(basename "$_gemini_oauth_file")"
+            info "Loaded Gemini OAuth credentials from host ($(basename "$_gemini_oauth_file"))"
             [ -z "$GEMINI_SELECTED_AUTH" ] && GEMINI_SELECTED_AUTH="oauth-personal"
         fi
     fi
@@ -2075,12 +2539,40 @@ _gemini_write_auth_type() {
     fi
 }
 
-if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
+# Codex credentials: OPENAI_API_KEY is what the codex CLI reads natively.
+# OAuth path uses an ephemeral read-only mount of the host's ~/.codex/auth.json;
+# in-session token refresh will fail gracefully and prompt the user to
+# re-login inside the container.
+load_codex_credentials() {
+    local mode="${SANDY_CODEX_AUTH:-auto}"
+    if [ "$mode" = "api_key" ] || [ "$mode" = "auto" ]; then
+        if [ -n "${OPENAI_API_KEY:-}" ]; then
+            info "Using OPENAI_API_KEY for Codex"
+            return 0
+        fi
+    fi
+    if [ "$mode" = "oauth" ] || [ "$mode" = "auto" ]; then
+        if [ -f "$HOME/.codex/auth.json" ]; then
+            CODEX_CRED_TMPDIR="$(mktemp -d)"
+            cp "$HOME/.codex/auth.json" "$CODEX_CRED_TMPDIR/auth.json"
+            chmod 600 "$CODEX_CRED_TMPDIR/auth.json"
+            info "Loaded Codex OAuth credentials from host (read-only mount)"
+            return 0
+        fi
+    fi
+    warn "No Codex credentials found. Set OPENAI_API_KEY, or run 'codex login' on host."
+}
+
+if _sandy_agent_has gemini; then
     load_gemini_credentials
 fi
 
-if [ "$SANDY_AGENT" = "gemini" ]; then
-    : # Claude credential flow skipped for pure-gemini sessions
+if _sandy_agent_has codex; then
+    load_codex_credentials
+fi
+
+if ! _sandy_agent_has claude; then
+    : # Claude credential flow skipped for non-claude sessions
 elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     info "Using long-lived OAuth token"
 else
@@ -2146,7 +2638,7 @@ if [ -n "${SANDY_GPU:-}" ]; then
         warn "SANDY_GPU=$SANDY_GPU but NVIDIA Container Toolkit not detected — skipping GPU passthrough"
     fi
 fi
-if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+if _sandy_agent_has claude; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/claude:/home/claude/.claude")
     if [ -n "$CRED_TMPDIR" ]; then
         RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json")
@@ -2157,14 +2649,26 @@ if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
         RUN_FLAGS+=(-v "$HOME/.claude/hooks:/home/claude/.claude/hooks:ro")
     fi
 fi
-if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
+if _sandy_agent_has gemini; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/gemini:/home/claude/.gemini")
     if [ -n "${GEMINI_CRED_TMPDIR:-}" ]; then
-        RUN_FLAGS+=(-v "$GEMINI_CRED_TMPDIR/tokens.json:/home/claude/.gemini/tokens.json")
+        # Mount whichever OAuth file was found (oauth_creds.json or tokens.json)
+        for _oaf in "$GEMINI_CRED_TMPDIR"/oauth_creds.json "$GEMINI_CRED_TMPDIR"/tokens.json; do
+            [ -f "$_oaf" ] && RUN_FLAGS+=(-v "$_oaf:/home/claude/.gemini/$(basename "$_oaf")") && break
+        done
     fi
     if [ -n "${GEMINI_ADC_MOUNT:-}" ]; then
         RUN_FLAGS+=(-v "$GEMINI_ADC_MOUNT:/home/claude/.config/gcloud/application_default_credentials.json:ro")
         RUN_FLAGS+=(-e "GOOGLE_APPLICATION_CREDENTIALS=/home/claude/.config/gcloud/application_default_credentials.json")
+    fi
+fi
+if _sandy_agent_has codex; then
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/codex:/home/claude/.codex")
+    if [ -n "${CODEX_CRED_TMPDIR:-}" ]; then
+        # :ro — prevents token leakage back to host and prevents a
+        # stale-token-on-exit race. In-session refresh will fail; user
+        # must re-login inside the container if the token expires.
+        RUN_FLAGS+=(-v "$CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro")
     fi
 fi
 # Persistent package environment mounts
@@ -2258,6 +2762,16 @@ fi
 
 RUN_FLAGS+=(-v "$WORK_DIR:$SANDY_WORKSPACE")
 
+# Workspace .venv overlay (see sandbox-dir-creation block above for rationale).
+# Must come AFTER the workspace mount so Docker overlays this bind on top of it.
+if [ "$SANDY_VENV_OVERLAY_ACTIVE" = "true" ]; then
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/venv:$SANDY_WORKSPACE/.venv")
+    RUN_FLAGS+=(-e "SANDY_VENV_OVERLAY_ACTIVE=1")
+    if [ -n "$SANDY_VENV_PYTHON_VERSION" ]; then
+        RUN_FLAGS+=(-e "SANDY_VENV_PYTHON_VERSION=$SANDY_VENV_PYTHON_VERSION")
+    fi
+fi
+
 # Mount symlink targets so they resolve correctly inside the container.
 # Dedup by container path (multiple symlinks may resolve to same target).
 # Avoids associative arrays for bash 3.2 (macOS) compatibility.
@@ -2284,21 +2798,31 @@ for _pd in .git/hooks .vscode .idea; do
     [ -d "$WORK_DIR/$_pd" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_pd:$SANDY_WORKSPACE/$_pd:ro")
 done
 # Mount sandbox copies of commands, agents, and plugins over the workspace.
-# All three start empty — host content is hidden so it doesn't leak into the container.
-# Claude can create/modify these freely; changes persist in the sandbox across sessions.
-if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+# Seeded from host on first creation so user-authored commands/agents are available.
+# The agent can create/modify these freely; changes persist in the sandbox across sessions
+# without touching the host workspace.
+if _sandy_agent_has claude; then
     for _sd in commands agents plugins; do
         if [ -d "$WORK_DIR/.claude/$_sd" ] || [ -d "$SANDBOX_DIR/workspace-$_sd" ]; then
-            mkdir -p "$SANDBOX_DIR/workspace-$_sd"
+            if [ ! -d "$SANDBOX_DIR/workspace-$_sd" ] && [ -d "$WORK_DIR/.claude/$_sd" ]; then
+                cp -r "$WORK_DIR/.claude/$_sd" "$SANDBOX_DIR/workspace-$_sd"
+            else
+                mkdir -p "$SANDBOX_DIR/workspace-$_sd"
+            fi
             RUN_FLAGS+=(-v "$SANDBOX_DIR/workspace-$_sd:$SANDY_WORKSPACE/.claude/$_sd")
         fi
     done
 fi
-if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
-    # Gemini: protect .gemini/extensions and .gemini/commands similarly
+if _sandy_agent_has gemini; then
+    # Gemini: overlay .gemini/extensions and .gemini/commands with sandbox copies.
+    # Seed from host on first creation so user-authored commands are available.
     for _sd in extensions commands; do
         if [ -d "$WORK_DIR/.gemini/$_sd" ] || [ -d "$SANDBOX_DIR/workspace-gemini-$_sd" ]; then
-            mkdir -p "$SANDBOX_DIR/workspace-gemini-$_sd"
+            if [ ! -d "$SANDBOX_DIR/workspace-gemini-$_sd" ] && [ -d "$WORK_DIR/.gemini/$_sd" ]; then
+                cp -r "$WORK_DIR/.gemini/$_sd" "$SANDBOX_DIR/workspace-gemini-$_sd"
+            else
+                mkdir -p "$SANDBOX_DIR/workspace-gemini-$_sd"
+            fi
             RUN_FLAGS+=(-v "$SANDBOX_DIR/workspace-gemini-$_sd:$SANDY_WORKSPACE/.gemini/$_sd")
         fi
     done
@@ -2306,7 +2830,7 @@ fi
 RUN_FLAGS+=(-e "SANDY_WORKSPACE=$SANDY_WORKSPACE")
 RUN_FLAGS+=(-e "SANDY_PROJECT_NAME=$(basename "$WORK_DIR")")
 # Validate SANDY_MODEL — only allow alphanumeric, hyphens, dots, underscores
-if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+if _sandy_agent_has claude; then
     SANDY_MODEL="${SANDY_MODEL:-claude-opus-4-6}"
 else
     SANDY_MODEL="${SANDY_MODEL:-}"
@@ -2321,11 +2845,11 @@ RUN_FLAGS+=(-e "SANDY_SKIP_PERMISSIONS=${SANDY_SKIP_PERMISSIONS:-true}")
 RUN_FLAGS+=(-e "SANDY_NEW_SESSION=$SANDY_NEW_SESSION")
 RUN_FLAGS+=(-e "SANDY_REMOTE_CONTROL=$SANDY_REMOTE_CONTROL")
 RUN_FLAGS+=(-e "SANDY_VERBOSE=$SANDY_VERBOSE")
-if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
-    # Channels env vars: for 'claude' these drive the in-container plugin path;
-    # for 'both' the host-side relay uses the host-side env vars directly, but
+if _sandy_agent_has claude; then
+    # Channels env vars: for single-agent 'claude' these drive the in-container plugin path;
+    # for multi-agent the host-side relay uses the host-side env vars directly, but
     # we still forward them in case plugins are also configured.
-    if [ -n "${SANDY_CHANNELS:-}" ] && [ "$SANDY_AGENT" = "claude" ]; then
+    if [ -n "${SANDY_CHANNELS:-}" ] && [ "$_SANDY_IS_MULTI" = false ]; then
         RUN_FLAGS+=(-e "SANDY_CHANNELS=$SANDY_CHANNELS")
     fi
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
@@ -2377,7 +2901,7 @@ if [ "$HOST_UID" != "1001" ] || [ "$HOST_GID" != "1001" ]; then
     RUN_FLAGS+=(-v "$SANDY_PASSWD:/etc/passwd:ro")
     RUN_FLAGS+=(-v "$SANDY_GROUP:/etc/group:ro")
 fi
-if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
+if _sandy_agent_has claude; then
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
         RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
     fi
@@ -2389,7 +2913,7 @@ if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
         RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=")
     fi
 fi
-if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
+if _sandy_agent_has gemini; then
     # Disable Gemini's per-tool sandbox — sandy provides whole-session isolation.
     RUN_FLAGS+=(-e "GEMINI_SANDBOX=false")
     if [ -n "${GEMINI_API_KEY:-}" ]; then
@@ -2409,6 +2933,17 @@ if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
         _gval="${!_gv:-}"
         [ -n "$_gval" ] && RUN_FLAGS+=(-e "$_gv=$_gval")
     done
+fi
+if _sandy_agent_has codex; then
+    if [ -n "${OPENAI_API_KEY:-}" ]; then
+        RUN_FLAGS+=(-e "OPENAI_API_KEY=$OPENAI_API_KEY")
+    fi
+    if [ -n "${CODEX_MODEL:-}" ]; then
+        RUN_FLAGS+=(-e "CODEX_MODEL=$CODEX_MODEL")
+    fi
+    if [ -n "${SANDY_CODEX_AUTH:-}" ]; then
+        RUN_FLAGS+=(-e "SANDY_CODEX_AUTH=$SANDY_CODEX_AUTH")
+    fi
 fi
 
 # --- Git authentication ---
@@ -2484,11 +3019,16 @@ fi
 [ -n "$GH_ACCOUNTS" ] && RUN_FLAGS+=(-e "GH_ACCOUNTS=$GH_ACCOUNTS")
 
 # --- Launch ---
-case "$SANDY_AGENT" in
-    gemini) info "Launching Gemini CLI sandbox..." ;;
-    both)   info "Launching Claude Code + Gemini CLI sandbox (dual-pane)..." ;;
-    *)      info "Launching Claude Code sandbox..." ;;
-esac
+if [ "$_SANDY_IS_MULTI" = true ]; then
+    _agent_label="$(IFS=' + '; echo "${_SANDY_AGENTS[*]}")"
+    info "Launching ${_agent_label} sandbox (${_SANDY_AGENT_COUNT}-pane)..."
+else
+    case "$SANDY_AGENT" in
+        gemini) info "Launching Gemini CLI sandbox..." ;;
+        codex)  info "Launching Codex CLI sandbox..." ;;
+        *)      info "Launching Claude Code sandbox..." ;;
+    esac
+fi
 info "  Working directory: $WORK_DIR"
 info "  Sandbox:           $SANDBOX_DIR"
 info "  Resources:         ${SANDY_CPUS} CPUs, ${SANDY_MEM} memory"
@@ -2501,9 +3041,9 @@ if [ "$SANDY_VERBOSE" -ge 3 ]; then
     echo ""
 fi
 
-# Launch host-side channel relay for gemini/both (Claude uses in-container plugin path)
+# Launch host-side channel relay for non-claude or multi-agent (single claude uses in-container plugin path)
 CHANNEL_RELAY_PID=""
-if [ "$SANDY_AGENT" != "claude" ] && [ -n "${SANDY_CHANNELS:-}" ]; then
+if { [ "$_SANDY_IS_MULTI" = true ] || ! _sandy_agent_has claude; } && [ -n "${SANDY_CHANNELS:-}" ]; then
     case ",$SANDY_CHANNELS," in
         *,telegram,*)
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then

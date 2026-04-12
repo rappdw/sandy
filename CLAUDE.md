@@ -16,7 +16,7 @@ Also update `README.md` and this file (`CLAUDE.md`) if user-facing behavior chan
 
 ## What This Is
 
-`sandy` — an isolated sibling for your coding agents. A self-contained command that runs Claude Code or Gemini CLI (or both, side-by-side) in a Docker sandbox with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes.
+`sandy` — an isolated sibling for your coding agents. A self-contained command that runs Claude Code, Gemini CLI, OpenAI Codex CLI (or any combination side-by-side) in a Docker sandbox with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes.
 
 ## Installation
 
@@ -40,6 +40,19 @@ sandy -p "your prompt here"  # one-shot prompt
 
 No `ANTHROPIC_API_KEY` required if using Claude Max (OAuth) — credentials are seeded from `~/.claude/` on first run.
 
+## Testing
+
+Tests require Docker and built sandy images, so they must be run **outside** of sandy's isolation (i.e., on the host, not inside a sandy container). The test suite needs direct access to Docker to build and inspect images.
+
+```sh
+bash test/run-tests.sh              # pure-script tests (needs Docker + built images)
+bash test/run-integration-tests.sh  # headless end-to-end (needs Docker + API keys)
+```
+
+Since Claude Code running inside sandy cannot access Docker, running tests requires the user to execute them manually on the host. When making changes to the `sandy` script or tests, ask the user to run the test suite and share the results.
+
+See `TESTING_PLAN.md` for manual validation steps that require interactive TUI sessions.
+
 ## Per-project Configuration
 
 Create `.sandy/config` in any project directory to set per-project defaults:
@@ -49,37 +62,70 @@ SANDY_SSH=agent                          # use SSH agent forwarding
 SANDY_MODEL=claude-sonnet-4-5-20250929   # override model
 ```
 
-This file is parsed as plain `KEY=VALUE` lines (not sourced — no shell code execution). Values are validated against an allowlist of recognized variables: `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`.
+This file is parsed as plain `KEY=VALUE` lines (not sourced — no shell code execution). Values are validated against an allowlist of recognized variables: `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_API_KEY`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `OPENAI_API_KEY`, `SANDY_VENV_OVERLAY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`.
 
 ## Agent Selection
 
-Sandy supports Claude Code (default), Gemini CLI, or **both side-by-side in a dual-pane tmux session**, selectable per-project via `SANDY_AGENT` in `.sandy/config`:
+Sandy supports Claude Code (default), Gemini CLI, OpenAI Codex CLI, or **any combination side-by-side in multi-pane tmux**, selectable per-project via `SANDY_AGENT` in `.sandy/config`:
 
 ```sh
-SANDY_AGENT=gemini      # or: claude (default), both
-GEMINI_API_KEY=...
+SANDY_AGENT=gemini              # single agent: claude (default), gemini, codex
+SANDY_AGENT=claude,codex        # any comma-separated combo (2 or 3 agents)
+SANDY_AGENT=claude,gemini,codex # all three in a 3-pane layout
+SANDY_AGENT=both                # alias for claude,gemini
+SANDY_AGENT=all                 # alias for claude,gemini,codex
 ```
 
-Each mode uses its own Docker image (`sandy-claude-code`, `sandy-gemini-cli`, or `sandy-both`) sharing the common `sandy-base`. Gemini CLI is installed via `npm install -g @google/gemini-cli` and launched with `GEMINI_SANDBOX=false` (sandy provides the whole-session isolation). The sandbox directory has sibling `claude/` and `gemini/` subdirs mounted at `~/.claude` and `~/.gemini` respectively; v1 layouts with `settings.json` at the sandbox top level are auto-migrated on launch.
+Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`); multi-agent combos use `sandy-full` (which includes all three agents). All share the common `sandy-base`. Gemini CLI and Codex CLI are installed via `npm install -g @google/gemini-cli` and `npm install -g @openai/codex` respectively. Gemini launches with `GEMINI_SANDBOX=false`; Codex launches with `--sandbox danger-full-access` plus `sandbox_mode = "danger-full-access"` in its `config.toml` (belt-and-suspenders — codex's Landlock sandbox does not nest cleanly in Docker, and sandy already provides whole-session isolation). The sandbox directory has sibling `claude/`, `gemini/`, and `codex/` subdirs mounted at `~/.claude`, `~/.gemini`, and `~/.codex` respectively; v1 layouts with `settings.json` at the sandbox top level are auto-migrated on launch.
 
 **Gemini credentials** are probed in this order (override via `SANDY_GEMINI_AUTH=auto|api_key|oauth|adc`): `GEMINI_API_KEY` env var, host `~/.gemini/tokens.json` (copied ephemerally), host `~/.config/gcloud/application_default_credentials.json` (Google ADC / Vertex AI).
 
+**Codex credentials** are probed in this order (override via `SANDY_CODEX_AUTH=auto|api_key|oauth`): `OPENAI_API_KEY` env var (what codex CLI reads natively), host `~/.codex/auth.json` (copied ephemerally and mounted **read-only** — prevents token leakage back to host and prevents stale-token races). Because `auth.json` is mounted read-only, in-session OAuth refresh will fail — users must re-login inside the container if the token expires. On first launch, sandy seeds `~/.codex/config.toml` with `model = "gpt-5.4"`, `sandbox_mode = "danger-full-access"`, and a full `[notice]` block to suppress all first-run prompts; a `[projects."$SANDY_WORKSPACE"] trust_level = "trusted"` entry is appended at session start by `user-setup.sh` (it needs the container-side workspace path).
+
 **Feature support by agent**:
 
-| Feature | `claude` | `gemini` | `both` |
-|---|---|---|---|
-| Skill packs | yes | — | yes (claude pane) |
-| Synthkit slash commands | yes (Markdown) | yes (TOML, in `~/.gemini/commands/`) | yes (both) |
-| Channels (Telegram) | in-container plugin | host-side tmux relay | host-side tmux relay |
-| Channels (Discord) | yes | — | — |
-| `--remote` | yes | — | — |
-| Gemini extensions (`SANDY_GEMINI_EXTENSIONS`) | — | yes | yes |
+| Feature | `claude` | `gemini` | `codex` | `both` |
+|---|---|---|---|---|
+| Skill packs | yes | — | — | yes (claude pane) |
+| Synthkit commands | yes (slash commands, Markdown) | yes (slash commands, TOML in `~/.gemini/commands/`) | yes (skills context, SKILL.md in `~/.codex/skills/` — invoked via natural language, not `/`) | yes (both) |
+| Channels (Telegram) | in-container plugin | host-side tmux relay | host-side tmux relay | host-side tmux relay |
+| Channels (Discord) | yes | — | — | — |
+| `--remote` | yes | — | — | — |
+| Gemini extensions (`SANDY_GEMINI_EXTENSIONS`) | — | yes | — | yes |
+
+Codex headless mode (`-p` / `--print` / `--prompt`) translates to `codex exec` — the prompt is passed as a positional arg, not a flag. Codex `exec` only returns exit codes 0 or 1 (no nuanced exit codes like Claude's `--print` has). `--continue` / `-c` is silently dropped (codex has `codex resume` but no headless continuation flag). Multi-agent combos use comma-separated syntax (e.g., `claude,codex`); `both` is an alias for `claude,gemini` and `all` is an alias for `claude,gemini,codex`.
 
 The Telegram host-side relay (`$SANDY_HOME/channel-relay.sh`) is an agent-agnostic long-polling bridge that injects messages into the container's tmux session via `docker exec ... tmux send-keys`. In dual-agent mode, `SANDY_CHANNEL_TARGET_PANE=0|1` selects which pane receives messages (default `0` = Claude).
 
 ## Per-project Sandboxes
 
 Each project directory gets its own isolated `~/.claude` sandbox under `~/.sandy/sandboxes/`, named with a mnemonic prefix and hash (e.g. `myproject-a1b2c3d4`). On first run, `.claude.json` and `settings.json` are seeded from the host's `~/.claude/`. Credentials (`.credentials.json`) are read fresh from the host each launch and mounted ephemerally — never persisted to the sandbox.
+
+### Sandbox version tracking
+
+On creation, each sandbox gets a `.sandy_created_version` file recording the sandy version that created it; `.sandy_last_version` is refreshed on every launch. On launch, sandy compares the created-version against `SANDY_SANDBOX_MIN_COMPAT` (currently `0.7.10`) and warns if the sandbox pre-dates a known breaking change. Sandboxes with no marker file pre-date the tracking itself and are warned about conservatively.
+
+The current breaking-change threshold is the workspace mount path change (c99eb97, v0.7.10): sandy now mounts the workspace at `/home/claude/<rel>` instead of `/workspace`. Sandboxes created before that carry cached absolute paths inside venvs (`pyvenv.cfg`, `.pth` files, editable installs) and Python package caches that reference `/workspace/...` and silently break inside the new layout. Fix: `rm -rf ~/.sandy/sandboxes/<name> && sandy --rebuild`.
+
+When introducing further sandbox-incompatible changes, bump `SANDY_SANDBOX_MIN_COMPAT` in the sandy script so users get a warning on their next launch.
+
+### Workspace `.venv` overlay
+
+Projects that use `uv venv` or `python -m venv` on the host create a `.venv/` whose `bin/python` is a symlink to a host-only interpreter path (e.g. `/Users/you/.local/share/uv/python/cpython-3.10-macos-aarch64/bin/python3.10`). That symlink is broken inside sandy's Linux container, and any attempt to use the venv fails — worse, a subsequent `uv pip install` would recreate `.venv` from scratch and wipe its `site-packages`.
+
+Sandy solves this by bind-mounting a sandbox-owned overlay over `$WORKSPACE/.venv` inside the container. The host venv is shadowed (not modified); the container sees an independently-managed venv that uses a Linux interpreter matching the host's Python version.
+
+**How it works:**
+
+1. On launch, sandy checks `$WORK_DIR/.venv` on the host. If it exists and is not a symlink, sandy creates `$SANDBOX_DIR/venv/` and bind-mounts it at `$WORKSPACE/.venv` inside the container. Sandy also parses `pyvenv.cfg` to learn the host venv's Python version and passes it via `SANDY_VENV_PYTHON_VERSION`.
+2. On first launch, the overlay dir is empty. The entrypoint runs `uv python install <version>` then `uv venv --python <version> $WORKSPACE/.venv` to materialize a fresh venv. The user then runs `uv sync` / `uv pip install -e .` / `pip install -r requirements.txt` once to populate it.
+3. On subsequent launches, the overlay is already populated — the entrypoint skips materialization and goes straight to activation (`VIRTUAL_ENV` + PATH prepend). Persistence is free via the bind mount.
+
+**Opt out** with `SANDY_VENV_OVERLAY=0` in `.sandy/config`. The fallback is warn-only: sandy prints a message explaining that the host venv's interpreter isn't reachable inside the container and suggests `rm -rf .venv && uv venv && uv pip install -e .` — but that's destructive to the host venv and rarely what you want.
+
+**Non-standard venv names** (`venv/`, `.venv-py311/`, etc.) are not overlaid — only the standard `.venv/` is. The fallback warn-only path still applies to any dangling `.venv/bin/python` symlink in those layouts.
+
+**Host venv is never touched.** The overlay is a shadow — the host filesystem is untouched by sandy. After sandy exits, the host's `.venv/` is exactly as it was before.
 
 ## Architecture
 

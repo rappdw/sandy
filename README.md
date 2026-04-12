@@ -14,7 +14,7 @@ cd /path/to/your/project
 sandy
 ```
 
-Sandy runs Claude Code or Gemini CLI (or both, side-by-side) in a Docker container with agent permission checks disabled — so the agent works without interruption while your system stays protected:
+Sandy runs Claude Code, Gemini CLI, OpenAI Codex CLI, or Claude + Gemini side-by-side in a Docker container with agent permission checks disabled — so the agent works without interruption while your system stays protected:
 
 - **Filesystem**: Read/write limited to the mounted working directory only
 - **Network**: Public internet only — all LAN/private networks blocked
@@ -103,12 +103,16 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 
 | Variable | Default | Description |
 |---|---|---|
-| `SANDY_AGENT` | `claude` | AI agent to run: `claude` (Claude Code), `gemini` (Gemini CLI), or `both` (dual-pane tmux with Claude on the left and Gemini on the right) |
+| `SANDY_AGENT` | `claude` | AI agent to run: `claude` (Claude Code), `gemini` (Gemini CLI), `codex` (OpenAI Codex CLI), or `both` (dual-pane tmux with Claude on the left and Gemini on the right) |
 | `SANDY_MODEL` | `claude-opus-4-6` | Claude model to use (applies to `claude` / `both`) |
 | `GEMINI_API_KEY` | (unset) | Google API key for Gemini CLI. Put in `.sandy/.secrets` |
 | `GEMINI_MODEL` | (unset) | Gemini model override |
 | `SANDY_GEMINI_AUTH` | `auto` | Force Gemini auth path: `auto`, `api_key`, `oauth`, or `adc` |
 | `SANDY_GEMINI_EXTENSIONS` | (unset) | Comma-separated Gemini extension URLs/paths to install on first launch |
+| `CODEX_API_KEY` | (unset) | OpenAI API key for Codex CLI. Put in `.sandy/.secrets` |
+| `OPENAI_API_KEY` | (unset) | Aliased to `CODEX_API_KEY` automatically when `SANDY_AGENT=codex` |
+| `CODEX_MODEL` | (unset) | Codex model override |
+| `SANDY_CODEX_AUTH` | `auto` | Force Codex auth path: `auto`, `api_key`, or `oauth` |
 | `GOOGLE_CLOUD_PROJECT` | (unset) | GCP project ID (Vertex AI) |
 | `GOOGLE_CLOUD_LOCATION` | (unset) | GCP region (Vertex AI) |
 | `GOOGLE_GENAI_USE_VERTEXAI` | (unset) | Set `true` to route Gemini through Vertex AI |
@@ -184,6 +188,23 @@ Sandy supports four Gemini auth paths, probed automatically unless `SANDY_GEMINI
 | Vertex AI | ADC + `GOOGLE_GENAI_USE_VERTEXAI=true`, `GOOGLE_CLOUD_PROJECT=...`, `GOOGLE_CLOUD_LOCATION=...` | Enterprise / Vertex billing |
 
 `gemini auth` must be run on the host because the container is headless and cannot open a browser. `--remote` is not supported with `gemini` or `both` — Gemini CLI has no native WebSocket/daemon mode.
+
+### Running Codex CLI (`SANDY_AGENT=codex`)
+
+Sandy supports two Codex auth paths, probed automatically unless `SANDY_CODEX_AUTH` pins a specific one:
+
+| Path | How to set up | When to use |
+|---|---|---|
+| API key | `CODEX_API_KEY=sk-...` in `.sandy/.secrets` (or `OPENAI_API_KEY=sk-...`, which sandy aliases automatically) | Simplest; works on headless servers |
+| OAuth (ChatGPT) | Run `codex login` **on the host** once — sandy copies `~/.codex/auth.json` into the container as a **read-only** mount on each launch | ChatGPT Plus/Team/Enterprise accounts |
+
+Because the OAuth mount is read-only, in-session token refresh will fail — if your token expires, run `codex login` inside the sandy session (or back on the host for next launch). This is intentional: a writable mount would leak refreshed tokens back to the host and open a stale-token race on session exit.
+
+Sandy forces `sandbox_mode = "danger-full-access"` in the container's `~/.codex/config.toml` and passes `--sandbox danger-full-access` on the CLI (belt-and-suspenders). Codex's Landlock sandbox does not nest cleanly inside Docker — sandy provides the outer isolation. On first launch sandy also seeds a full `[notice]` block in `config.toml` to suppress all first-run prompts and appends a trusted-project entry for your workspace.
+
+Headless mode (`-p` / `--print` / `--prompt "..."`) translates to `codex exec` — the prompt is passed as a positional arg, not a flag. `codex exec` only returns exit codes 0 (success) or 1 (failure), with no nuanced exit codes. `--continue` / `-c` is silently dropped (codex has `codex resume`, but no headless continuation flag).
+
+Not supported with `codex`: `--remote`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS=discord`. Telegram channels work via the host-side tmux relay. Combo values like `codex+claude` are rejected — dual-agent mode is still claude+gemini only.
 
 ### Dual-agent mode (`SANDY_AGENT=both`)
 

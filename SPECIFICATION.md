@@ -4,7 +4,7 @@
 **Date**: 2026-04-10
 **Source**: ~2,200-line bash script (`sandy`), installer (`install.sh`), test suite (`test/run-tests.sh`)
 
-Sandy is a self-contained command that runs an AI coding agent (Claude Code or Gemini CLI, or both side-by-side) in a Docker container with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes. One script, one command, zero configuration required.
+Sandy is a self-contained command that runs an AI coding agent (Claude Code, Gemini CLI, OpenAI Codex CLI, or Claude+Gemini side-by-side) in a Docker container with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes. One script, one command, zero configuration required.
 
 ### Supported Agents
 
@@ -12,7 +12,11 @@ Sandy is a self-contained command that runs an AI coding agent (Claude Code or G
 |---|---|---|
 | `claude` (default) | `sandy-claude-code` | Claude Code — full feature support (channels, skill packs, synthkit, remote-control) |
 | `gemini` | `sandy-gemini-cli` | Gemini CLI — Google OAuth / ADC / Vertex AI / API key auth |
-| `both` | `sandy-both` | Claude + Gemini in a single image, launched as a dual-pane tmux session |
+| `codex` | `sandy-codex` | OpenAI Codex CLI — `OPENAI_API_KEY` env var or ChatGPT OAuth (read-only mount) |
+| `both` | `sandy-full` | Alias for `claude,gemini` — multi-agent combo in a single image |
+| `all` | `sandy-full` | Alias for `claude,gemini,codex` — all three agents in a 3-pane tmux session |
+
+Combo values involving codex (e.g. `codex+claude`) are explicitly rejected. Dual-agent mode is still claude+gemini only.
 
 ---
 
@@ -109,7 +113,7 @@ The config parser does **not** use `source`. It reads lines via `grep -E '^[A-Z_
 
 | Variable | Default | Description |
 |---|---|---|
-| `SANDY_AGENT` | `claude` | Agent selection: `claude`, `gemini`, or `both` |
+| `SANDY_AGENT` | `claude` | Agent selection: `claude`, `gemini`, `codex`, or `both` |
 | `SANDY_MODEL` | `claude-opus-4-6` | Claude model to use |
 | `GEMINI_API_KEY` | unset | Gemini API key (alternative to OAuth/ADC) |
 | `GEMINI_MODEL` | unset | Gemini model override (e.g. `gemini-2.5-pro`) |
@@ -119,6 +123,11 @@ The config parser does **not** use `source`. It reads lines via `grep -E '^[A-Z_
 | `GOOGLE_CLOUD_LOCATION` | unset | GCP region (Vertex AI) |
 | `GOOGLE_GENAI_USE_VERTEXAI` | unset | Set `true` to route through Vertex AI |
 | `GOOGLE_API_KEY` | unset | Alternative Google API key |
+| `OPENAI_API_KEY` | unset | OpenAI API key for Codex CLI (primary auth path) |
+| `CODEX_MODEL` | unset | Codex model override |
+| `SANDY_CODEX_AUTH` | `auto` | Force Codex auth path: `auto`, `api_key`, or `oauth` |
+| `CODEX_HOME` | unset | Override container-side codex home directory (advanced) |
+| `SANDY_VENV_OVERLAY` | `1` | Bind-mount `$SANDBOX_DIR/venv` over `$WORKSPACE/.venv` when the host has a `.venv/`. Set to `0` to disable (falls back to warn-only for broken host venvs). |
 | `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for host-side channel relay (0=claude, 1=gemini in dual mode) |
 | `SANDY_SSH` | `token` | Git auth: `token` (gh CLI + HTTPS) or `agent` (SSH socket forward) |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Run with `--dangerously-skip-permissions` |
@@ -172,7 +181,7 @@ Each project directory gets a sandbox at `~/.sandy/sandboxes/<NAME>-<HASH>/`:
 
 ### Directory Layout
 
-As of v0.9.0, the sandbox directory contains **sibling** `claude/` and `gemini/` subdirs, one per supported agent, so both can coexist in `SANDY_AGENT=both` mode.
+As of v0.9.0, the sandbox directory contains **sibling** `claude/` and `gemini/` subdirs, one per supported agent, so both can coexist in `SANDY_AGENT=both` mode. v0.10.0 adds a sibling `codex/` subdir for `SANDY_AGENT=codex`.
 
 ```
 ~/.sandy/sandboxes/<name>-<hash>/
@@ -189,6 +198,11 @@ As of v0.9.0, the sandbox directory contains **sibling** `claude/` and `gemini/`
 │   ├── commands/              # TOML slash commands
 │   ├── extensions/
 │   └── tmp/                   # session history
+├── codex/                     # → /home/claude/.codex
+│   ├── config.toml            # sandbox_mode + [notice] + [projects] trust
+│   ├── log/
+│   ├── memories/
+│   └── skills/                # SKILL.md files (synthkit seeds md2pdf etc.)
 ├── pip/                       # → /home/claude/.pip-packages
 ├── uv/                        # → /home/claude/.local/share/uv
 ├── npm-global/                # → /home/claude/.npm-global
@@ -214,6 +228,24 @@ On first run for a new sandbox (`SANDY_AGENT` in `claude`/`both`):
 5. Create all persistent subdirectories
 
 For `SANDY_AGENT` in `gemini`/`both`, sandy creates `gemini/` and its `commands/`, `extensions/`, `tmp/` subdirs. Gemini settings.json is not seeded from the host (Gemini has no direct host-settings equivalent for sandy to copy).
+
+For `SANDY_AGENT=codex`, sandy creates `codex/` and seeds `codex/config.toml` (first run only) with:
+
+```toml
+model = "gpt-5.4"
+sandbox_mode = "danger-full-access"
+
+[notice]
+hide_full_access_warning = true
+hide_gpt5_1_migration_prompt = true
+"hide_gpt-5.1-codex-max_migration_prompt" = true
+hide_rate_limit_model_nudge = true
+hide_world_writable_warning = true
+```
+
+The `model = "gpt-5.4"` line sets a stable default model; users can override via `CODEX_MODEL` env var. The `sandbox_mode = "danger-full-access"` line is required — codex's Landlock sandbox does not nest cleanly inside sandy's Docker container. Sandy provides the outer isolation, and the CLI is additionally invoked with `--sandbox danger-full-access` as belt-and-suspenders in `build_codex_cmd`. The `[notice]` block suppresses first-run prompts; all five documented keys are seeded even if codex adds more over time.
+
+The `[projects."<workspace>"] trust_level = "trusted"` entry is **appended at session start by `user-setup.sh`** (not at host-time) because it needs the container-side `$SANDY_WORKSPACE` path. Re-launches are idempotent: the entry is only appended if a matching line is not already present.
 
 ---
 
@@ -251,6 +283,27 @@ Contents:
 - synthkit: Installed via `UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install synthkit`
 - `COPY`: entrypoint.sh, user-setup.sh, tmux.conf
 - Claude Code version cached at `/opt/claude-code/.version`
+
+### Phase 2 (alt): Gemini CLI Image (`sandy-gemini-cli`)
+
+**Dockerfile**: `Dockerfile.gemini`
+**Rebuild trigger**: Content hash changes, base image rebuilt, or `--rebuild` flag
+
+`FROM sandy-base` + `npm install -g @google/gemini-cli` + synthkit. Used only when `SANDY_AGENT=gemini`.
+
+### Phase 2 (alt): Codex CLI Image (`sandy-codex`)
+
+**Dockerfile**: `Dockerfile.codex`
+**Rebuild trigger**: Content hash changes, base image rebuilt, Codex CLI version update detected, or `--rebuild` flag
+
+Contents:
+- `FROM sandy-base`
+- Codex CLI: `npm install -g @openai/codex` (ships a prebuilt Rust binary per platform; Node is only the install vehicle)
+- Version cached at `/opt/codex/.version`
+- synthkit deps (libpango/cairo/gdk-pixbuf) + synthkit itself (so `md2pdf`, `md2doc`, `md2html`, `md2email` are on PATH)
+- `COPY`: entrypoint.sh, user-setup.sh, tmux.conf
+
+Used only when `SANDY_AGENT=codex`. The update check hits `https://api.github.com/repos/openai/codex/releases/latest` (not `/releases`) — upstream flags stable releases there, so sandy inherits their judgment rather than inventing a prerelease filter. The tag name `rust-vX.Y.Z` is stripped with `sed -E 's/.*"rust-v?([0-9][^"]*)"$/\1/'`. On parse failure the check returns no-update (stale but working).
 
 ### Phase 2.5a: Skill Pack Base Image (`sandy-skills-base-<pack>`)
 
@@ -294,7 +347,10 @@ Each phase stores its content hash in `$SANDY_HOME/`:
 | File | Phase |
 |---|---|
 | `.base_build_hash` | Phase 1 |
-| `.build_hash` | Phase 2 |
+| `.build_hash` | Phase 2 (claude) |
+| `.build_hash_gemini` | Phase 2 (gemini) |
+| `.build_hash_codex` | Phase 2 (codex) |
+| `.build_hash_both` | Phase 2 (claude+gemini) |
 | `.skills_base_build_hash` | Phase 2.5a |
 | `.skills_build_hash` | Phase 2.5b |
 | `<sandbox>/.project_build_hash` | Phase 3 |
@@ -555,6 +611,21 @@ Vertex AI routing is enabled by setting `GOOGLE_GENAI_USE_VERTEXAI=true` with `G
 
 **Note**: `gemini auth` (browser OAuth) must be run **on the host** — the container is headless and cannot open a browser.
 
+### Codex Credentials (`SANDY_AGENT=codex`)
+
+Sandy's `load_codex_credentials()` tries the following sources, controlled by `SANDY_CODEX_AUTH` (`auto` | `api_key` | `oauth`):
+
+| Mode | Source | Container mount / env |
+|---|---|---|
+| `api_key` | `OPENAI_API_KEY` env var on host | Forwarded via `-e OPENAI_API_KEY=…` |
+| `oauth` | Host `~/.codex/auth.json` (ChatGPT login) | Ephemeral copy mounted at `/home/claude/.codex/auth.json` **read-only** |
+
+In `auto` mode (default), `OPENAI_API_KEY` wins if set; otherwise an `auth.json` ephemeral mount is used if present; otherwise a warning is emitted.
+
+**The `auth.json` mount is read-only by design.** If codex needs to refresh an expired OAuth token mid-session, the write fails and codex falls back to an in-session re-login flow. This is the safer default: it prevents refreshed tokens from leaking back to the host, and prevents stale-token-on-exit races. Users who want fresh credentials on every launch get that automatically — sandy re-copies `auth.json` from the host at each launch.
+
+**Note**: `codex login` (browser OAuth) must be run **on the host** — the container is headless and cannot open a browser.
+
 ---
 
 ## 12. Session Management
@@ -581,11 +652,19 @@ Sandy wraps Claude Code in a tmux session:
 
 When `SANDY_AGENT=both`, the user-setup script creates a tmux session with two horizontally split panes — pane 0 runs `claude`, pane 1 runs `gemini` (with `GEMINI_SANDBOX=false`). The launch logic is refactored into two helper functions `build_claude_cmd()` and `build_gemini_cmd()` so both single-agent and dual-agent paths share the same command construction. Each pane is an independent process; exiting one leaves the other running.
 
+**`both` is claude+gemini only.** Combos involving codex (e.g. `codex+claude`, `codex+gemini`, `all`) are explicitly rejected in the agent dispatch case-statement with a clear error message listing the four valid values (`claude`, `gemini`, `codex`, `both`). Dual-agent mode with codex is a v0.11+ question.
+
+### Codex Headless Translation (`SANDY_AGENT=codex`)
+
+`build_codex_cmd()` inspects the positional args for `-p`/`--print`/`--prompt`. If present, it emits `codex exec --sandbox danger-full-access <prompt>` (interactive becomes headless); otherwise `codex --sandbox danger-full-access` (TUI). The sandy `-p`/`--print`/`--prompt` flags are dropped and the remaining arg is passed as the positional prompt, because `codex exec` takes the prompt as a positional argument, not a flag. `--continue`/`-c` is silently dropped (codex has `codex resume` but no headless `--continue` equivalent — matches the gemini behavior).
+
+`codex exec` uses only exit codes 0 (success) and 1 (failure). Sandy does not attempt to emulate Claude's richer exit-code semantics (no tool-denied, no context-exhausted signals) for codex. `--sandbox danger-full-access` on the CLI is belt-and-suspenders alongside the `sandbox_mode` in `config.toml`; do not remove either.
+
 ### Remote Control Mode
 
 With `--remote`: no tmux wrapper, launches `claude remote-control --name "sandy: <PROJECT_NAME>"`. Browser/phone can connect to control the session.
 
-**Only supported with `SANDY_AGENT=claude`.** Gemini CLI has no native WebSocket/daemon mode; `--remote` with `gemini` or `both` exits with an error. Tracked as a future enhancement pending upstream support.
+**Only supported with `SANDY_AGENT=claude`.** Gemini CLI has no native WebSocket/daemon mode, and codex's `mcp-server`/`app-server` modes don't map cleanly to Claude's session-based `--remote` contract; `--remote` with `gemini`, `codex`, or `both` exits with an error. Tracked as a future enhancement pending upstream support.
 
 ### Terminal Notifications
 
@@ -666,13 +745,15 @@ The `thinkkit`, `ait`, and `pka-skills` marketplaces are automatically removed f
 
 ### Built-in Slash Commands (synthkit)
 
-If synthkit is installed, `user-setup.sh` creates four slash commands in `~/.claude/commands/` (Claude, Markdown) and/or `~/.gemini/commands/` (Gemini, TOML):
+If synthkit is installed, `user-setup.sh` creates four slash commands in `~/.claude/commands/` (Claude, Markdown), `~/.gemini/commands/` (Gemini, TOML), and/or `~/.codex/skills/<name>/SKILL.md` (Codex, Markdown with YAML frontmatter):
 - `/md2pdf` — Convert markdown to PDF
 - `/md2doc` — Convert markdown to Word (.docx)
 - `/md2html` — Convert markdown to HTML
 - `/md2email` — Convert markdown to email HTML (clipboard)
 
 For Gemini, the TOML files use `description` and `prompt` fields; the prompt embeds `!{md2pdf {{args}}}` shell execution and `{{args}}` argument substitution per Gemini's command format.
+
+For Codex, skills are drop-in directories: `~/.codex/skills/<name>/SKILL.md`. The file **requires YAML frontmatter** with `name` and `description` keys delimited by `---`, followed by the skill body. Sandy writes one directory per tool (`md2pdf/`, `md2doc/`, `md2html/`, `md2email/`). Codex discovers these on launch and exposes them via `/skills`.
 
 ### Gemini Extensions (`SANDY_GEMINI_EXTENSIONS`)
 
@@ -685,7 +766,14 @@ When set, `user-setup.sh` iterates comma-separated URLs/local paths and runs `ge
 Sandy supports Claude Code channels (Telegram, Discord) via two distinct paths:
 
 1. **In-container plugin path** (`SANDY_AGENT=claude` only) — auto-installs the Claude channel plugin from the marketplace and seeds credentials into `~/.claude/channels/`.
-2. **Host-side tmux-inject relay** (`SANDY_AGENT` in `gemini`/`both`) — agent-agnostic, runs on the host and injects messages into the container's tmux session via `docker exec ... tmux send-keys`.
+2. **Host-side tmux-inject relay** (`SANDY_AGENT` in `gemini`/`codex`/`both`) — agent-agnostic, runs on the host and injects messages into the container's tmux session via `docker exec ... tmux send-keys`.
+
+**Support matrix**:
+
+| Channel | `claude` | `gemini` | `codex` | `both` |
+|---|---|---|---|---|
+| Telegram | in-container plugin | host relay | host relay | host relay |
+| Discord | in-container plugin | — | — | — |
 
 ### In-Container Plugin Setup (Claude)
 
@@ -716,7 +804,7 @@ Both Telegram and Discord can be enabled simultaneously with `SANDY_AGENT=claude
 SANDY_CHANNELS=plugin:telegram@claude-plugins-official plugin:discord@claude-plugins-official
 ```
 
-With `SANDY_AGENT=gemini`/`both`, only Telegram is currently supported through the relay; `SANDY_CHANNELS=discord` exits with an error.
+With `SANDY_AGENT` in `gemini`/`codex`/`both`, only Telegram is currently supported through the relay; `SANDY_CHANNELS=discord` exits with an error.
 
 ---
 
@@ -725,6 +813,12 @@ With `SANDY_AGENT=gemini`/`both`, only Telegram is currently supported through t
 ### Claude Code Updates
 
 On each launch, sandy checks the installed Claude Code version (cached at `/opt/claude-code/.version`) against the latest release. If an update is available, the Phase 2 image is rebuilt with `--no-cache`. Inside the container, `DISABLE_AUTOUPDATER=1` prevents Claude Code from attempting self-updates against the read-only filesystem.
+
+### Gemini / Codex Updates
+
+For `SANDY_AGENT=gemini`, `_check_gemini_update` compares the in-image `gemini --version` against the npm registry's latest tag for `@google/gemini-cli`.
+
+For `SANDY_AGENT=codex`, `_check_codex_update` compares the in-image `/opt/codex/.version` against `https://api.github.com/repos/openai/codex/releases/latest`. The tag format is `rust-vX.Y.Z`; sandy strips the prefix with `sed -E 's/.*"rust-v?([0-9][^"]*)"$/\1/'`. The `/releases/latest` endpoint returns only the release GitHub marks as "latest" (excludes prereleases by convention), so sandy inherits upstream's stable flagging instead of inventing its own policy — important because codex ships 30+ releases/month, most as prereleases. On parse failure the check returns no-update (stale but working, logged once).
 
 ### Sandy Self-Update
 
@@ -1000,6 +1094,33 @@ Key details:
 - `UV_TOOL_DIR=/opt/uv-tools` ensures synthkit's venv goes to an accessible location (not `/root/`).
 - Version is cached at `/opt/claude-code/.version` for update detection.
 
+### A.2b Dockerfile.codex (Phase 2, alt)
+
+**Generator**: `generate_dockerfile_codex()` — unquoted heredoc (`<<DOCKERFILE`), expands `${BASE_IMAGE_NAME}`.
+
+```dockerfile
+FROM ${BASE_IMAGE_NAME}
+# Install Codex CLI as a global npm package. The @openai/codex package ships
+# a prebuilt Rust binary per platform; Node is only the installation vehicle.
+RUN npm install -g @openai/codex \
+ && mkdir -p /opt/codex \
+ && { codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' > /opt/codex/.version || true; }
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \
+ && rm -rf /var/lib/apt/lists/*
+RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
+COPY tmux.conf /etc/tmux.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY user-setup.sh /usr/local/bin/user-setup.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/user-setup.sh
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+```
+
+Key details:
+- Version is cached at `/opt/codex/.version` for update detection.
+- synthkit deps and synthkit itself are baked in so `md2pdf`/`md2doc`/`md2html`/`md2email` are on PATH regardless of whether Step 7's skill-seeding fires (e.g., if `synthkit` isn't installed at user-setup time).
+
 ### A.3 Dockerfile.skills-base (Phase 2.5a)
 
 **Generator**: `generate_skill_pack_dockerfiles()` — mixed heredocs. Header is quoted (`<<'SKILLS_BASE_HEADER'`), gstack block is quoted (`<<'GSTACK_BASE_BLOCK'`). No variable expansion.
@@ -1123,6 +1244,18 @@ JSON repair regexes:
 - Fallback: `$CMD_WITH_CONTINUE || $CMD_WITHOUT_CONTINUE` (retries without `--continue` on failure)
 - Remote mode: `claude remote-control --name "sandy: <project>"`
 
+**Codex-specific user-setup additions**:
+- Helper predicate `_sandy_has_codex() { [ "${SANDY_AGENT:-claude}" = "codex" ]; }` alongside `_sandy_has_claude` / `_sandy_has_gemini`.
+- Synthkit seeding block (conditional on `command -v synthkit`) writes `~/.codex/skills/<name>/SKILL.md` with YAML frontmatter for `md2pdf`, `md2doc`, `md2html`, `md2email`.
+- Trust-entry appending: after config.toml is in place, if `[projects."$SANDY_WORKSPACE"]` is not already present, append:
+  ```toml
+  [projects."<workspace>"]
+  trust_level = "trusted"
+  ```
+  This must happen container-side because it needs the in-container workspace path.
+- `build_codex_cmd()`: translates sandy's `-p`/`--print`/`--prompt` into `codex exec` with a positional prompt; drops `--continue`/`-c`; injects `--sandbox danger-full-access` and optional `--model`.
+- Launch dispatch branch: `codex` case between `gemini` and `both`, using `build_codex_cmd` and wrapping in tmux unless headless.
+
 ### A.7 tmux.conf
 
 **Generator**: `generate_tmux_conf()` — quoted heredoc (`<<'TMUXCONF'`), no variable expansion.
@@ -1181,6 +1314,14 @@ All magic numbers, thresholds, timeouts, and limits used in the sandy script.
 | Claude Code version check | 5 seconds | `curl --max-time 5` against Google Cloud Storage |
 | SSH socket wait (macOS) | 5 seconds | 50 iterations × 0.1s sleep in entrypoint |
 | OAuth token expiry buffer | 5 minutes | 300,000 ms buffer before `expiresAt` |
+
+### B.2a Sandbox Compatibility
+
+| Parameter | Value | Context |
+|---|---|---|
+| `SANDY_SANDBOX_MIN_COMPAT` | `0.7.10` | Minimum sandy version whose sandboxes are still layout-compatible. Sandboxes created by older sandy (pre-c99eb97 workspace mount path change) trigger a launch-time warning recommending recreation. |
+| `.sandy_created_version` | Written once on sandbox creation | Records the sandy version that created the sandbox. Missing on sandboxes created before 0.10.1. |
+| `.sandy_last_version` | Refreshed every launch | Records the most-recent sandy version that touched the sandbox. |
 
 ### B.3 Cache TTLs
 
@@ -1414,6 +1555,43 @@ Plain text file at `$SANDY_HOME/.update_check`:
 
 Example: `1711843200 0.8.0`. Stale after 86,400 seconds.
 
+### C.7b Codex `config.toml` (seeded by sandy)
+
+Written to `$SANDBOX_DIR/codex/config.toml` on first launch of a new sandbox with `SANDY_AGENT=codex`. Mounted into the container at `/home/claude/.codex/config.toml`.
+
+```toml
+# Written by sandy on first launch. Safe to edit, but sandbox_mode must stay
+# "danger-full-access" — sandy provides outer isolation; codex's Landlock
+# sandbox does not nest cleanly in Docker containers.
+model = "gpt-5.4"
+sandbox_mode = "danger-full-access"
+
+[notice]
+hide_full_access_warning = true
+hide_gpt5_1_migration_prompt = true
+"hide_gpt-5.1-codex-max_migration_prompt" = true
+hide_rate_limit_model_nudge = true
+hide_world_writable_warning = true
+
+# [projects."<workspace>"] trust_level = "trusted" appended at session start
+# by user-setup.sh, where $SANDY_WORKSPACE is known.
+```
+
+The file is created exactly once per sandbox — re-runs preserve user edits. The `[notice]` list may grow upstream; sandy seeds all five documented keys as cheap insurance. Source-of-truth reference: `codex-rs/core/src/config.rs` in the openai/codex repository.
+
+After the first session start, the file additionally contains the trust entry:
+
+```toml
+[projects."/home/claude/dev/myproject"]
+trust_level = "trusted"
+```
+
+Appended by `user-setup.sh` only if a matching `^[projects."<workspace>"]` line is not already present (idempotent).
+
+### C.7c Codex `auth.json` (ephemeral OAuth mount)
+
+If the host has `~/.codex/auth.json` and `SANDY_CODEX_AUTH` is `auto` or `oauth`, sandy copies it to a tmpdir at launch and mounts it **read-only** into the container at `/home/claude/.codex/auth.json`. The tmpdir is removed on exit (cleanup trap). Schema is opaque to sandy — the file is produced by `codex login` on the host.
+
 ### C.8 `.skill_version_<pack>` Cache
 
 Plain text file at `$SANDY_HOME/.skill_version_<pack>`:
@@ -1578,6 +1756,18 @@ If `~/.claude/hooks/` exists on the host:
 ```
 
 Where `CONTAINER_PATH` follows the workspace path mapping rules (Section 13).
+
+### E.7a Workspace `.venv` Overlay (conditional)
+
+If `$WORK_DIR/.venv` exists on the host, is not a symlink, and `SANDY_VENV_OVERLAY` is not `0`, sandy bind-mounts a sandbox-owned dir over the workspace venv path:
+
+```bash
+-v "<SANDBOX_DIR>/venv:<CONTAINER_PATH>/.venv"
+-e "SANDY_VENV_OVERLAY_ACTIVE=1"
+-e "SANDY_VENV_PYTHON_VERSION=<major.minor>"   # if parseable from pyvenv.cfg
+```
+
+Must appear **after** the workspace mount (E.7) so Docker can overlay it on top. The sandbox `venv/` dir is created on the host side before `docker run`. Inside the container, `user-setup.sh` materializes an empty venv via `uv venv --python <version>` on first launch and activates it (`VIRTUAL_ENV` + PATH prepend) on every launch. The host `.venv/` is never read or written by sandy — it is shadowed by the bind mount inside the container only.
 
 ### E.8 Git Submodule Mount (conditional)
 
@@ -1765,6 +1955,36 @@ FORCE_AUTOUPDATE_PLUGINS=true
 ```
 
 Git identity fallback: if `GIT_USER_NAME`/`GIT_USER_EMAIL` are not set via config, they are read from the host's `git config user.name` and `git config user.email`.
+
+**Gemini-specific env** (`SANDY_AGENT` in `gemini`/`both`):
+```bash
+GEMINI_API_KEY=<key>                # if set
+GEMINI_MODEL=<model>                # if set
+SANDY_GEMINI_AUTH=<auto|api_key|oauth|adc>
+GOOGLE_CLOUD_PROJECT=<proj>         # Vertex AI
+GOOGLE_CLOUD_LOCATION=<region>
+GOOGLE_GENAI_USE_VERTEXAI=<true>
+GOOGLE_API_KEY=<key>
+GOOGLE_APPLICATION_CREDENTIALS=/home/claude/.config/gcloud/application_default_credentials.json  # adc mode
+```
+
+**Codex-specific env** (`SANDY_AGENT=codex`):
+```bash
+OPENAI_API_KEY=<key>                # if set
+CODEX_MODEL=<model>                 # if set
+SANDY_CODEX_AUTH=<auto|api_key|oauth>
+```
+
+`CODEX_HOME` is intentionally **not** forwarded — sandy owns the in-container path (`/home/claude/.codex`) via the sandbox mount and overriding it would break the mount.
+
+**Codex-specific mounts** (`SANDY_AGENT=codex`):
+```bash
+-v "$SANDBOX_DIR/codex:/home/claude/.codex"
+# if OAuth path active:
+-v "$CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro"
+```
+
+The codex sandbox dir is writable (codex needs `log/`, `memories/`, session rollouts, sqlite state), but the `auth.json` file inside it is shadowed by a read-only overlay bind when OAuth is active. See §11 for the rationale of the read-only overlay.
 
 ### E.17 Final Command
 

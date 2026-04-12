@@ -1,210 +1,130 @@
-# Sandy v1.5 Manual Testing Plan (Gemini Support)
+# Sandy — Manual Testing Plan
 
-Manual validation steps for the Gemini CLI and dual-agent support added in v1.5. Run blocks in order. Each block is independent — skip any you don't care about.
-
-## 0. Prerequisites
+Tests that require interactive TUI sessions, human observation, or infrastructure not available to automated scripts. Run these after both test suites pass:
 
 ```sh
-cd ~/dev/sandy
-bash -n sandy && echo "syntax OK"
-./sandy --version   # should print 0.8.2-dev-<hash>
+bash test/run-tests.sh              # pure-script, no Docker
+bash test/run-integration-tests.sh  # headless end-to-end, needs Docker + API keys
 ```
-
-Have ready (pick at least one Gemini auth path):
-- `GEMINI_API_KEY=...` from https://aistudio.google.com/apikey, OR
-- Ran `gemini auth` on host once (produces `~/.gemini/tokens.json`), OR
-- Ran `gcloud auth application-default login`
-
-### Where to put `GEMINI_API_KEY`
-
-- **Per-project** (recommended for testing): `.sandy/.secrets` in the project dir (gitignore it)
-- **User-level**: `~/.sandy/.secrets` (applies to all projects)
-- **Ephemeral**: `export GEMINI_API_KEY=...` in the shell before running `sandy`
-
-Load order: user-config → user-secrets → project-config → project-secrets (later wins). **Do NOT** put secrets in `.sandy/config` — that file is commonly committed.
 
 ---
 
-## 1. Regression: Claude still works (`SANDY_AGENT=claude`)
+## Prerequisites
 
-```sh
-cd ~ && mkdir sandy-test-claude && cd sandy-test-claude
-git init && echo "hello" > README.md
-sandy -p "what files are in this directory?"
-```
-
-**Expect:** Claude Code runs, lists `README.md`, exits cleanly. No errors about `.claude/settings.json` paths or layout migration.
-
-```sh
-sandy   # interactive
-```
-
-**Expect:** Normal tmux session, `claude` prompt. `/help` works. Exit with Ctrl+D.
-
-**Check sandbox layout:**
-```sh
-ls ~/.sandy/sandboxes/sandy-test-claude-*/
-```
-
-**Expect:** You see `claude/`, `pip/`, `uv/`, `npm-global/`, `go/`, `cargo/` — NO `settings.json` at the top level (v1.5 layout).
+- Docker running
+- All automated tests passing
+- API keys for agents you want to test (codex, gemini, claude)
 
 ---
 
-## 2. Layout migration (v1 → v1.5)
+# 1. Codex interactive (`SANDY_AGENT=codex`)
 
-Simulate a v1-era sandbox and confirm auto-migration:
+## 1.1 OAuth read-only mount (write rejection)
 
-```sh
-# Find your test sandbox dir
-SB=$(ls -d ~/.sandy/sandboxes/sandy-test-claude-*/ | head -1)
-# Move contents back to v1 layout
-mv "$SB/claude/"* "$SB/" 2>/dev/null
-rmdir "$SB/claude"
-ls "$SB"   # should show settings.json etc. at top level (v1 state)
-
-# Re-launch
-cd ~/sandy-test-claude && sandy -p "hi"
-```
-
-**Expect:** You see `[sandy] Migrating sandbox to v1.5 layout (claude/ subdir)...` once. Session still works.
+**Only if you have `~/.codex/auth.json` from `codex login`.**
 
 ```sh
-ls "$SB"          # claude/ subdir back
-ls "$SB/claude"   # settings.json, projects/, etc.
+mkdir -p ~/sandy-test-codex && cd ~/sandy-test-codex
+mkdir -p .sandy && echo 'SANDY_AGENT=codex' > .sandy/config
+unset CODEX_API_KEY OPENAI_API_KEY
+sandy                                 # interactive launch
 ```
 
-**Expect:** Claude-owned files moved into `claude/`; `pip/`, `uv/`, etc. untouched. Re-run sandy — no second migration message (idempotent).
+Inside the TUI, open a shell pane (Ctrl-b then ") and run:
+```sh
+echo foo > ~/.codex/auth.json         # MUST fail: "Read-only file system"
+```
+
+- [x] Write to auth.json fails inside container
+
+> **Automated**: OAuth detection, tmpdir creation, and cleanup are tested in `run-integration-tests.sh` §9. This step verifies the `:ro` mount actually blocks writes from inside the TUI.
 
 ---
 
-## 3. Gemini-only mode (`SANDY_AGENT=gemini`)
+## 1.2 Synthkit skills in TUI
 
 ```sh
-cd ~ && mkdir sandy-test-gemini && cd sandy-test-gemini
+CODEX_API_KEY=sk-REDACTED sandy
+```
+
+Inside the codex TUI:
+```
+/skills
+```
+
+- [x] List includes `md2pdf`, `md2doc`, `md2html`, `md2email`
+
+Test via natural language prompt (codex skills are context, not slash commands):
+```
+convert /tmp/hi.md to PDF
+```
+
+Or test directly in a shell pane (Ctrl-b then "):
+```sh
+echo -e "# Hello\n\nThis is a test." > /tmp/hi.md
+md2pdf /tmp/hi.md
+ls /tmp/hi.pdf
+```
+
+- [x] PDF is produced
+
+> **Note**: Codex skills are NOT slash commands — they appear in `/skills` as context that codex uses when answering prompts. To trigger them, ask naturally (e.g. "convert file.md to PDF") rather than typing `/md2pdf`.
+>
+> **Automated**: synthkit binary availability and WeasyPrint functionality (via `md2html`) tested in `run-integration-tests.sh` §4. This step verifies codex's `/skills` TUI command discovers them and they produce actual output.
+
+---
+
+# 2. Gemini interactive (`SANDY_AGENT=gemini`)
+
+## 2.1 Interactive session
+
+```sh
+mkdir -p ~/sandy-test-gemini && cd ~/sandy-test-gemini
 git init && echo "test" > file.txt
 mkdir -p .sandy
-cat > .sandy/config <<EOF
-SANDY_AGENT=gemini
-EOF
-cat > .sandy/.secrets <<EOF
-GEMINI_API_KEY=your_key_here
-EOF
+echo 'SANDY_AGENT=gemini' > .sandy/config
+echo 'GEMINI_API_KEY=your_key_here' > .sandy/.secrets
 
 sandy
 ```
 
-**Expect:**
-- On first run: builds `sandy-gemini-cli` image (takes a few min — downloads Node + Gemini CLI)
-- Sandbox is created at `~/.sandy/sandboxes/sandy-test-gemini-<hash>/`
-- You see `[sandy] Using GEMINI_API_KEY` (or OAuth/ADC message if you went that route)
-- Launches into tmux, `gemini` prompt appears
-- **No error about `--sandbox=none`** (this was the v1 bug — if you see it, Step 0 didn't land)
+- [x] Launches into tmux, `gemini` prompt appears
+- [x] `what files are in this directory?` lists `file.txt`
+- [x] Exit with Ctrl+D works cleanly
 
-Ask Gemini: `what files are in this directory?`
-
-**Expect:** Lists `file.txt`. Exit Ctrl+D.
-
-**Check:**
-```sh
-ls ~/.sandy/sandboxes/sandy-test-gemini-*/
-# Should show: gemini/, pip/, uv/, npm-global/, go/, cargo/ — NO claude/ dir
-```
-
-**Test `-p` flag translation** (the bug fixed during v1.5):
-```sh
-sandy -p "say hello in one word"
-```
-
-**Expect:** Gemini runs headless, prints one word, exits. If you see `unknown flag -p` or similar, the translation is broken.
+> **Automated**: headless response and sandbox layout tested in `run-integration-tests.sh` §5. This step verifies the interactive TUI experience.
 
 ---
 
-## 4. OAuth path (only if you have host `~/.gemini/tokens.json`)
-
-```sh
-# Unset API key first
-cd ~/sandy-test-gemini
-sed -i.bak '/GEMINI_API_KEY/d' .sandy/.secrets
-ls ~/.gemini/tokens.json && sandy -p "hi"
-```
-
-**Expect:** `[sandy] Loaded Gemini OAuth tokens from host`, Gemini runs without needing API key.
-
-**Check ephemerality:**
-```sh
-# After sandy exits
-ls ~/.sandy/sandboxes/sandy-test-gemini-*/gemini/tokens.json 2>&1
-# Should NOT exist — tokens are copied to a tmpdir and cleaned up on exit
-```
-
----
-
-## 5. Gemini extensions seeding
+## 2.2 Extensions seeding
 
 ```sh
 cd ~/sandy-test-gemini
-cat >> .sandy/config <<EOF
-SANDY_GEMINI_EXTENSIONS=https://github.com/gemini-cli-extensions/security
-EOF
+echo 'SANDY_GEMINI_EXTENSIONS=https://github.com/gemini-cli-extensions/security' >> .sandy/config
 sandy -p "list your available extensions"
 ```
 
-**Expect:** First run shows `[sandy] Installing Gemini extensions` and the extension installs. Second run should be a no-op (idempotent — extension dir already exists).
-
-**Check:**
-```sh
-ls ~/.sandy/sandboxes/sandy-test-gemini-*/gemini/extensions/
-# Should show: security/
-```
+- [x] First run shows `[sandy] Installing Gemini extensions`
+- [x] Second run is a no-op (idempotent)
+- [x] `ls ~/.sandy/sandboxes/sandy-test-gemini-*/gemini/extensions/` shows `security/`
 
 ---
 
-## 6. Dual-agent mode (`SANDY_AGENT=both`)
+## 2.3 Synthkit TOML commands
 
 ```sh
-cd ~ && mkdir sandy-test-both && cd sandy-test-both
-git init && echo "dual test" > README.md
-mkdir -p .sandy
-cat > .sandy/config <<EOF
-SANDY_AGENT=both
-EOF
-cat > .sandy/.secrets <<EOF
-GEMINI_API_KEY=your_key_here
-EOF
-
 sandy
+# In the session:
+/md2pdf --help
 ```
 
-**Expect:**
-- First run builds `sandy-both` image (slowest — has both Claude Code and Gemini CLI)
-- Tmux opens with **two horizontal panes**: Claude on the left (pane 0), Gemini on the right (pane 1)
-- Each pane has its own prompt
-- Status line shows "sandy: sandy-test-both"
-
-**Interact:**
-- Type a question in the Claude pane — it responds
-- Tmux hotkey `Ctrl-B →` to switch to the Gemini pane — ask it a question — it responds
-- `Ctrl-B d` to detach, or exit both for clean shutdown
-
-**Check sandbox layout:**
-```sh
-ls ~/.sandy/sandboxes/sandy-test-both-*/
-# Should show BOTH: claude/  gemini/  (plus pip/, uv/, etc.)
-```
-
-**Check `.claude.json` seeding for `both`:**
-```sh
-cat ~/.sandy/sandboxes/sandy-test-both-*.claude.json
-# Should contain {"tipsDisabled":true,"installMethod":"native"} at minimum
-```
+- [x] Gemini recognizes `/md2pdf` and runs the `md2pdf` binary
 
 ---
 
-## 7. Workspace `.gemini/commands/` overlay
+## 2.4 Workspace `.gemini/commands/` overlay
 
-In the gemini test project:
 ```sh
-cd ~/sandy-test-gemini
 mkdir -p .gemini/commands
 cat > .gemini/commands/hello.toml <<'EOF'
 description = "say hi"
@@ -215,147 +135,160 @@ sandy
 # Inside gemini session, try: /hello
 ```
 
-**Expect:** `/hello` is NOT visible inside the session — the overlay hides host workspace content (same contract as Claude's `.claude/commands/`). If you want it visible, you'd add it through `~/.gemini/commands/` inside the container.
+- [x] `/hello` IS visible inside the session (overlay is seeded from host on first creation)
 
-Then inside the session, create a new command:
-```
-(from inside gemini) create a file at .gemini/commands/test.toml with description "test" and prompt "test prompt"
-```
+Inside the session, create a new command file, then after exit:
+- [x] New file is NOT in the host workspace dir
+- [x] New file IS in the sandbox overlay dir (`workspace-gemini-commands/`)
+- [x] Host's `hello.toml` is also in the sandbox overlay dir (seeded copy)
 
-After exit:
+Delete the overlay dir and re-launch to verify re-seeding:
 ```sh
-ls ~/sandy-test-gemini/.gemini/commands/
-# test.toml should NOT be here (host untouched)
-ls ~/.sandy/sandboxes/sandy-test-gemini-*/workspace-gemini-commands/
-# test.toml should be here (sandbox overlay)
-```
-
----
-
-## 8. Synthkit TOML commands for Gemini
-
-```sh
-cd ~/sandy-test-gemini
+rm -rf ~/.sandy/sandboxes/sandy-test-gemini-*/workspace-gemini-commands
 sandy
-# In the session:
-/md2pdf --help
-```
-
-**Expect:** Gemini recognizes `/md2pdf` (the TOML file was seeded into `~/.gemini/commands/`) and runs the `md2pdf` binary.
-
-**Check the generated file:**
-```sh
-docker exec $(docker ps --filter "name=sandy-" -q) cat /home/claude/.gemini/commands/md2pdf.toml
-# Should show: description = "Convert markdown file(s) to PDF using md2pdf"
-#              prompt = """..."""
+# /hello should be visible again (re-seeded from host)
 ```
 
 ---
 
-## 9. `--remote` guard
+## 2.5 `SANDY_GEMINI_AUTH` pinning
 
 ```sh
-cd ~/sandy-test-gemini
-sandy --remote
+sed -i.bak '/GEMINI_API_KEY/d' .sandy/.secrets
+echo 'SANDY_GEMINI_AUTH=oauth' >> .sandy/config
+sandy -p "hi"
 ```
 
-**Expect:** Exits immediately with `[sandy] ERROR: --remote is only supported with SANDY_AGENT=claude (Gemini CLI has no remote-control mode)`.
-
-Same test with `SANDY_AGENT=both`:
-```sh
-cd ~/sandy-test-both
-sandy --remote
-```
-
-**Expect:** Same error.
-
-Sanity check it still works for Claude:
-```sh
-cd ~/sandy-test-claude
-sandy --remote
-```
-
-**Expect:** Launches `claude remote-control` (you can Ctrl+C out).
+- [x] Uses only the OAuth path
+- [x] If no `~/.gemini/oauth_creds.json` (or legacy `tokens.json`) exists, shows "No Gemini credentials found" warning
 
 ---
 
-## 10. Telegram host-side relay (optional, needs bot)
+# 3. Claude interactive (`SANDY_AGENT=claude`)
 
-Prereqs: You have a Telegram bot token + your user ID.
+## 3.1 Interactive session
 
 ```sh
-cd ~/sandy-test-both   # or sandy-test-gemini
+mkdir -p ~/sandy-test-claude && cd ~/sandy-test-claude
+git init && echo "hello" > README.md
+sandy
+```
+
+- [x] Normal tmux session, `claude` prompt
+- [x] `/help` works
+- [x] Exit with Ctrl+D
+
+> **Automated**: headless response and sandbox layout tested in `run-integration-tests.sh` §7.
+
+---
+
+## 3.2 Layout migration (v1 → v1.5)
+
+```sh
+SB=$(ls -d ~/.sandy/sandboxes/sandy-test-claude-*/ | head -1)
+mv "$SB/claude/"* "$SB/" 2>/dev/null
+rmdir "$SB/claude"
+
+cd ~/sandy-test-claude && sandy -p "hi"
+```
+
+- [x] `[sandy] Migrating sandbox to v1.5 layout (claude/ subdir)...` appears once
+- [x] Re-running sandy produces no second migration message (idempotent)
+
+> **Automated**: migration logic tested in `run-tests.sh` §29 (4 scenarios). This verifies the live migration with a real sandbox.
+
+---
+
+## 3.3 `--remote`
+
+```sh
+sandy --remote
+```
+
+- [x] Launches `claude remote-control` (requires full OAuth; long-lived tokens are rejected by Claude Code with a clear error)
+
+---
+
+# 4. Dual-agent mode (`SANDY_AGENT=both`)
+
+## 4.1 Dual-pane launch
+
+```sh
+mkdir -p ~/sandy-test-both && cd ~/sandy-test-both
+git init && echo "dual test" > README.md
+mkdir -p .sandy
+echo 'SANDY_AGENT=both' > .sandy/config
+echo 'GEMINI_API_KEY=your_key_here' > .sandy/.secrets
+
+sandy
+```
+
+- [x] Tmux opens with **two horizontal panes**: Claude (pane 0), Gemini (pane 1)
+- [x] Each pane has its own prompt
+- [x] Type a question in Claude pane — it responds
+- [x] `Ctrl-B →` to Gemini pane — ask a question — it responds
+
+## 4.2 Arbitrary combos and triple-pane
+
+```sh
+# Test claude,codex combo
+echo 'SANDY_AGENT=claude,codex' > .sandy/config
+sandy
+```
+
+- [x] Two horizontal panes: Claude (pane 0), Codex (pane 1)
+
+```sh
+# Test all three agents
+echo 'SANDY_AGENT=all' > .sandy/config
+sandy
+```
+
+- [x] Three panes: Claude (pane 0, left), Gemini (pane 1, top-right), Codex (pane 2, bottom-right)
+- [x] Each pane has its own prompt and responds independently
+
+---
+
+# 5. Telegram relay (optional)
+
+Prereqs: Telegram bot token + your user ID.
+
+```sh
+cd ~/sandy-test-both   # or any agent project
 cat >> .sandy/.secrets <<EOF
 TELEGRAM_BOT_TOKEN=123:ABC...
 TELEGRAM_ALLOWED_SENDERS=your_user_id
 EOF
-cat >> .sandy/config <<EOF
-SANDY_CHANNELS=telegram
-SANDY_CHANNEL_TARGET_PANE=0
-EOF
+echo 'SANDY_CHANNELS=telegram' >> .sandy/config
 
 sandy
 ```
 
-**Expect:**
-- `[sandy] Telegram channel relay started (PID ... → sandy-... pane 0)`
-- Tmux opens normally
-
-**From your phone:** DM the bot with `hello there, what is 2+2?`
-
-**Expect:** The message appears as literal keystrokes in pane 0 (Claude side if `both`). The agent responds in the pane (not in Telegram — the relay is write-only by design).
-
-**Test allowlist:** Ask someone *not* in `TELEGRAM_ALLOWED_SENDERS` to message the bot — their messages should be silently dropped.
-
-**After exit:**
-```sh
-ps aux | grep channel-relay
-# Should NOT find the process — it's killed by the cleanup trap
-```
+- [ ] `[sandy] Telegram channel relay started` appears
+- [ ] DM the bot — message appears as keystrokes in the session
+- [ ] Messages from unauthorized users are silently dropped
+- [ ] After exit: `ps aux | grep channel-relay` finds nothing (cleanup worked)
 
 ---
 
-## 11. `SANDY_GEMINI_AUTH` pinning
+# Cleanup
 
 ```sh
-cd ~/sandy-test-gemini
-# Force OAuth only, unset API key
-sed -i.bak '/GEMINI_API_KEY/d' .sandy/.secrets
-cat >> .sandy/config <<EOF
-SANDY_GEMINI_AUTH=oauth
-EOF
-
-sandy -p "hi"
-```
-
-**Expect:** Uses only the OAuth path. If no `~/.gemini/tokens.json` exists, you get the "No Gemini credentials found" warning.
-
----
-
-## 12. Cleanup
-
-```sh
-rm -rf ~/sandy-test-claude ~/sandy-test-gemini ~/sandy-test-both
+rm -rf ~/sandy-test-claude ~/sandy-test-gemini ~/sandy-test-both ~/sandy-test-codex
 rm -rf ~/.sandy/sandboxes/sandy-test-*
-docker rmi sandy-gemini-cli sandy-both 2>/dev/null
+docker rmi sandy-gemini-cli sandy-both sandy-codex 2>/dev/null || true
 ```
 
 ---
 
-## What "passing" means
+# Known failure signatures
 
-Each numbered block is a pass/fail gate. The **must-pass** set is 1, 2, 3, 6, 9 (core behavior + the v1 bug fix + layout migration + dual-pane + guard). Sections 4, 5, 7, 8, 10, 11 are feature validation — failures there indicate bugs in specific subsystems but don't block the release if you're not using that feature.
-
-### Known failure signatures
-
-| Block | Failure signature | Root cause |
+| Section | Failure signature | Root cause |
 |---|---|---|
-| 3 | `gemini: unknown flag --sandbox=none` | Step 0 fix didn't reach generated user-setup.sh |
-| 3 | `unknown flag -p` | `build_gemini_cmd` flag translation broken |
-| 2 | Migration runs every launch | Migration guard (v1 marker check) broken |
-| 6 | Single tmux pane, not split | `build_both` launch block structural bug |
-| 6 | `.claude.json` missing for `both` | `.claude.json` seeding gate missing `both` case |
-| 9 | `--remote` launches for gemini/both | Guard placement wrong or missing |
-| 10 | Relay PID left behind after exit | `cleanup()` trap missing `CHANNEL_RELAY_PID` |
-
-Report which blocks fail and the specific error — that's enough to localize the bug.
+| 1.1 | Write to auth.json succeeds | Mount is not `:ro` |
+| 1.2 | `/skills` empty | YAML frontmatter missing or `_sandy_has_codex` block didn't fire |
+| 2.1 | `unknown flag --sandbox=none` | Gemini sandbox env var not set correctly |
+| 2.4 | Host file visible in overlay | Overlay mount not applied |
+| 3.2 | Migration runs every launch | Migration guard broken |
+| 4.1 | Single tmux pane | `build_both` launch block structural bug |
+| 5 | Relay PID left behind after exit | `cleanup()` trap missing `CHANNEL_RELAY_PID` |

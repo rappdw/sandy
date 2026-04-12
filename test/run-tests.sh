@@ -10,6 +10,43 @@ SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 PASS=0
 FAIL=0
 ERRORS=()
+COMPLETED=false
+
+# Guarantee we always print a summary, even if `set -euo pipefail` aborts the
+# script mid-run (e.g. a bare pipeline with a failing grep). Without this, an
+# early-terminating test would exit silently and the user would have no idea
+# how far the suite got. The trap is overwritten by setup_sandbox to also
+# clean up temp dirs; that wrapper also calls this function.
+_emit_summary() {
+    local code=$?
+    # Reset terminal keypad to numeric mode (DECKPNM). Something in the suite
+    # — likely a `docker run` that transiently drops a tmux/claude TUI into
+    # application mode (DECKPAM, ESC =) — can leave the host terminal in a
+    # state where up-arrow sends SS3 (ESC O A) instead of CSI (ESC [ A). If
+    # zsh's ESC-timeout eats the lead byte, literal "OA" lands on the prompt
+    # and the user sees `command not found: OA` on their next keystroke.
+    # Unconditionally resetting here is cheap and safe.
+    printf '\033>' 2>/dev/null || true
+    command -v tput >/dev/null 2>&1 && tput rmkx 2>/dev/null || true
+    # Only fire the abort banner when the script died mid-suite, i.e. at
+    # least one test has already run. Legitimate early exits (preflight
+    # "image not found", --help, etc.) leave PASS+FAIL at 0 and print their
+    # own error — we must not drown them in a misleading banner.
+    if [ "$COMPLETED" = false ] && [ "$((PASS + FAIL))" -gt 0 ]; then
+        echo ""
+        printf "\033[0;31m✗ test suite aborted early (exit=%d)\033[0m\n" "$code" >&2
+        printf "\033[0;33mPartial results: %d passed, %d failed (of %d run so far)\033[0m\n" \
+            "$PASS" "$FAIL" "$((PASS + FAIL))" >&2
+        if [ "${#ERRORS[@]}" -gt 0 ]; then
+            printf "\033[0;31mRecorded failures:\033[0m\n" >&2
+            for e in "${ERRORS[@]}"; do
+                printf "  \033[0;31m- %s\033[0m\n" "$e" >&2
+            done
+        fi
+        printf "\033[0;33mHint: a command likely exited non-zero under 'set -euo pipefail'. Check just above the last printed test for an unguarded pipeline or missing '|| true'.\033[0m\n" >&2
+    fi
+}
+trap _emit_summary EXIT
 
 # --- Helpers ---
 
@@ -32,6 +69,7 @@ setup_sandbox() {
 }
 
 cleanup() {
+    _emit_summary
     rm -rf "$SANDBOX_DIR" "$TEST_PROJECT" 2>/dev/null || true
 }
 
@@ -233,22 +271,108 @@ check ".python-version triggers uv python install" \
 rm -f "$TEST_PROJECT/.python-version"
 
 # ============================================================
-info "9. Dev environment detection — broken .venv auto-installs Python"
+info "9. Workspace .venv overlay — detection and materialization"
 # ============================================================
 
-# Create a .venv with a broken symlink pointing to a specific Python version
-mkdir -p "$TEST_PROJECT/.venv/bin"
-ln -sf /usr/local/bin/python3.10 "$TEST_PROJECT/.venv/bin/python"
-# Simulate what the entrypoint does: detect broken .venv, extract version, install
-sandy_run '
-    VENV_TARGET="$(readlink /workspace/.venv/bin/python)"
-    PY_VER="$(echo "$VENV_TARGET" | grep -oE "[0-9]+\.[0-9]+" | head -1)"
-    uv python install "$PY_VER" 2>/dev/null
-    uv python find "$PY_VER" >/dev/null 2>&1
-'
-check "broken .venv triggers install of matching Python" \
-    sandy_run "uv python find 3.10 >/dev/null 2>&1"
-rm -rf "$TEST_PROJECT/.venv"
+# 9a. Allowlist accepts SANDY_VENV_OVERLAY in .sandy/config
+TMPCFG="$(mktemp -d)"
+mkdir -p "$TMPCFG/.sandy"
+echo 'SANDY_VENV_OVERLAY=0' > "$TMPCFG/.sandy/config"
+_SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+ALLOWLIST_RESULT="$(bash -c "
+    $(sed -n '/^_load_sandy_config()/,/^}$/p' "$_SANDY_SCRIPT_PATH")
+    _load_sandy_config '$TMPCFG/.sandy/config'
+    echo \"\${SANDY_VENV_OVERLAY:-unset}\"
+")"
+check "SANDY_VENV_OVERLAY in config allowlist" \
+    test "$ALLOWLIST_RESULT" = "0"
+rm -rf "$TMPCFG"
+
+# 9b. pyvenv.cfg parsing — extract major.minor from `version = X.Y.Z`
+VENV_FIXTURE="$(mktemp -d)"
+cat > "$VENV_FIXTURE/pyvenv.cfg" <<'EOF'
+home = /Users/drapp/.local/share/uv/python/cpython-3.10.16-macos-aarch64-none/bin
+implementation = CPython
+uv = 0.5.11
+version_info = 3.10.16.final.0
+include-system-site-packages = false
+prompt = myproject
+EOF
+PARSED_VER="$(grep -E '^version(_info)?[[:space:]]*=' "$VENV_FIXTURE/pyvenv.cfg" \
+    | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]')"
+check "pyvenv.cfg version_info parsed as major.minor" \
+    test "$PARSED_VER" = "3.10"
+rm -rf "$VENV_FIXTURE"
+
+# 9c. pyvenv.cfg parsing — `version = X.Y.Z` form (older virtualenv)
+VENV_FIXTURE2="$(mktemp -d)"
+cat > "$VENV_FIXTURE2/pyvenv.cfg" <<'EOF'
+home = /usr/bin
+include-system-site-packages = false
+version = 3.11.5
+EOF
+PARSED_VER2="$(grep -E '^version(_info)?[[:space:]]*=' "$VENV_FIXTURE2/pyvenv.cfg" \
+    | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]')"
+check "pyvenv.cfg version parsed as major.minor" \
+    test "$PARSED_VER2" = "3.11"
+rm -rf "$VENV_FIXTURE2"
+
+# 9d. Malformed pyvenv.cfg → empty version (falls back to default in container)
+VENV_FIXTURE3="$(mktemp -d)"
+cat > "$VENV_FIXTURE3/pyvenv.cfg" <<'EOF'
+home = /usr/bin
+include-system-site-packages = false
+EOF
+PARSED_VER3="$( { grep -E '^version(_info)?[[:space:]]*=' "$VENV_FIXTURE3/pyvenv.cfg" \
+    | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]'; } || true )"
+check "malformed pyvenv.cfg yields empty version" \
+    test -z "$PARSED_VER3"
+rm -rf "$VENV_FIXTURE3"
+
+# 9e. Symlinked .venv is skipped (potential sandbox escape)
+SYM_FIXTURE="$(mktemp -d)"
+SYM_TARGET="$(mktemp -d)"
+mkdir -p "$SYM_TARGET/bin"
+ln -s "$SYM_TARGET" "$SYM_FIXTURE/.venv"
+# The host-side detection uses [ -d DIR ] && [ ! -L DIR ] — should skip symlinks.
+SKIP_RESULT="no"
+if [ -d "$SYM_FIXTURE/.venv" ] && [ ! -L "$SYM_FIXTURE/.venv" ]; then
+    SKIP_RESULT="no"
+else
+    SKIP_RESULT="yes"
+fi
+check "symlinked .venv is skipped by overlay detection" \
+    test "$SKIP_RESULT" = "yes"
+rm -rf "$SYM_FIXTURE" "$SYM_TARGET"
+
+# 9f. Opt-out via SANDY_VENV_OVERLAY=0 disables detection even when .venv exists
+OPTOUT_FIXTURE="$(mktemp -d)"
+mkdir -p "$OPTOUT_FIXTURE/.venv"
+OPTOUT_ACTIVE=false
+SANDY_VENV_OVERLAY=0
+if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] \
+   && [ -d "$OPTOUT_FIXTURE/.venv" ] \
+   && [ ! -L "$OPTOUT_FIXTURE/.venv" ]; then
+    OPTOUT_ACTIVE=true
+fi
+check "SANDY_VENV_OVERLAY=0 disables overlay detection" \
+    test "$OPTOUT_ACTIVE" = "false"
+unset SANDY_VENV_OVERLAY
+rm -rf "$OPTOUT_FIXTURE"
+
+# 9g. Default (unset) enables detection when .venv exists
+DEFAULT_FIXTURE="$(mktemp -d)"
+mkdir -p "$DEFAULT_FIXTURE/.venv"
+unset SANDY_VENV_OVERLAY
+DEFAULT_ACTIVE=false
+if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] \
+   && [ -d "$DEFAULT_FIXTURE/.venv" ] \
+   && [ ! -L "$DEFAULT_FIXTURE/.venv" ]; then
+    DEFAULT_ACTIVE=true
+fi
+check "overlay default-on when .venv exists" \
+    test "$DEFAULT_ACTIVE" = "true"
+rm -rf "$DEFAULT_FIXTURE"
 
 # ============================================================
 info "10. Dev environment detection — foreign native modules"
@@ -1002,7 +1126,7 @@ info "28. Gemini CLI support — agent helpers and flag translation"
 SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
 # Pull the two one-line helpers and the build_gemini_cmd function body.
-_HELPERS="$(grep -E '^_sandy_has_(claude|gemini)\(\)' "$SANDY_SCRIPT")"
+_HELPERS="$(grep -E '^_sandy_has_(claude|gemini|codex)\(\)' "$SANDY_SCRIPT")"
 _BUILD_GEMINI="$(sed -n '/^build_gemini_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
 
 if [ -z "$_HELPERS" ] || [ -z "$_BUILD_GEMINI" ]; then
@@ -1021,19 +1145,21 @@ $*" >/dev/null 2>&1; then
 
     _gemini_script_test "_sandy_has_claude true for SANDY_AGENT=claude" \
         'SANDY_AGENT=claude _sandy_has_claude'
-    _gemini_script_test "_sandy_has_claude true for SANDY_AGENT=both" \
-        'SANDY_AGENT=both _sandy_has_claude'
+    _gemini_script_test "_sandy_has_claude true for SANDY_AGENT=claude,gemini" \
+        'SANDY_AGENT=claude,gemini _sandy_has_claude'
     _gemini_script_test "_sandy_has_claude false for SANDY_AGENT=gemini" \
         '! SANDY_AGENT=gemini _sandy_has_claude'
     _gemini_script_test "_sandy_has_gemini true for SANDY_AGENT=gemini" \
         'SANDY_AGENT=gemini _sandy_has_gemini'
-    _gemini_script_test "_sandy_has_gemini true for SANDY_AGENT=both" \
-        'SANDY_AGENT=both _sandy_has_gemini'
+    _gemini_script_test "_sandy_has_gemini true for SANDY_AGENT=claude,gemini" \
+        'SANDY_AGENT=claude,gemini _sandy_has_gemini'
     _gemini_script_test "_sandy_has_gemini false for SANDY_AGENT=claude" \
         '! SANDY_AGENT=claude _sandy_has_gemini'
+    _gemini_script_test "_sandy_has_gemini true for SANDY_AGENT=gemini,codex" \
+        'SANDY_AGENT=gemini,codex _sandy_has_gemini'
 
     _gemini_script_test "build_gemini_cmd translates -p to --prompt" \
-        'out=$(build_gemini_cmd -p hello); echo "$out" | grep -q -- "--prompt" && ! echo "$out" | grep -qE " -p( |$)"'
+        'out=$(build_gemini_cmd -p hello); echo "$out" | grep -q -- "--prompt" && ! echo "${out%%;*}" | grep -qE " -p( |$)"'
     _gemini_script_test "build_gemini_cmd translates --print to --prompt" \
         'out=$(build_gemini_cmd --print hello); echo "$out" | grep -q -- "--prompt"'
     _gemini_script_test "build_gemini_cmd passes --prompt through unchanged" \
@@ -1050,6 +1176,400 @@ $*" >/dev/null 2>&1; then
         'out=$(GEMINI_MODEL=test-model-x build_gemini_cmd); echo "$out" | grep -q "test-model-x"'
     _gemini_script_test "build_gemini_cmd exports GEMINI_SANDBOX=false" \
         'build_gemini_cmd >/dev/null; [ "$GEMINI_SANDBOX" = "false" ]'
+fi
+
+# ============================================================
+info "28b. Codex CLI support — agent helpers and flag translation"
+# ============================================================
+_BUILD_CODEX="$(sed -n '/^build_codex_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+
+if [ -z "$_HELPERS" ] || [ -z "$_BUILD_CODEX" ]; then
+    fail "could not extract codex helpers from sandy script (did they move?)"
+else
+    _codex_script_test() {
+        local desc="$1"; shift
+        if bash -c "set -e; $_HELPERS
+$_BUILD_CODEX
+$*" >/dev/null 2>&1; then
+            pass "$desc"
+        else
+            fail "$desc"
+        fi
+    }
+
+    _codex_script_test "_sandy_has_codex true for SANDY_AGENT=codex" \
+        'SANDY_AGENT=codex _sandy_has_codex'
+    _codex_script_test "_sandy_has_codex false for SANDY_AGENT=claude" \
+        '! SANDY_AGENT=claude _sandy_has_codex'
+    _codex_script_test "_sandy_has_codex false for SANDY_AGENT=gemini" \
+        '! SANDY_AGENT=gemini _sandy_has_codex'
+    _codex_script_test "_sandy_has_codex false for SANDY_AGENT=claude,gemini" \
+        '! SANDY_AGENT=claude,gemini _sandy_has_codex'
+    _codex_script_test "_sandy_has_codex true for SANDY_AGENT=claude,codex" \
+        'SANDY_AGENT=claude,codex _sandy_has_codex'
+    _codex_script_test "_sandy_has_codex true for SANDY_AGENT=claude,gemini,codex" \
+        'SANDY_AGENT=claude,gemini,codex _sandy_has_codex'
+
+    _codex_script_test "build_codex_cmd (no args) uses interactive codex" \
+        'out=$(build_codex_cmd); echo "$out" | grep -qE "^codex --sandbox danger-full-access"'
+    _codex_script_test "build_codex_cmd -p switches to codex exec" \
+        'out=$(build_codex_cmd -p hello); echo "$out" | grep -qE "^codex exec --sandbox danger-full-access"'
+    _codex_script_test "build_codex_cmd --print switches to codex exec" \
+        'out=$(build_codex_cmd --print hello); echo "$out" | grep -qE "^codex exec "'
+    _codex_script_test "build_codex_cmd --prompt switches to codex exec" \
+        'out=$(build_codex_cmd --prompt hello); echo "$out" | grep -qE "^codex exec "'
+    _codex_script_test "build_codex_cmd drops -p flag itself (positional arg remains)" \
+        'out=$(build_codex_cmd -p hello); ! echo "${out%%;*}" | grep -qE " -p( |$)" && echo "$out" | grep -q hello'
+    _codex_script_test "build_codex_cmd drops --continue" \
+        'out=$(build_codex_cmd --continue); ! echo "$out" | grep -q -- "--continue"'
+    _codex_script_test "build_codex_cmd drops -c" \
+        'out=$(build_codex_cmd -c); ! echo "$out" | grep -qE " -c( |$)"'
+    _codex_script_test "build_codex_cmd honors CODEX_MODEL" \
+        'out=$(CODEX_MODEL=gpt-5.1 build_codex_cmd); echo "$out" | grep -q "gpt-5.1"'
+    _codex_script_test "build_codex_cmd always sets --sandbox danger-full-access" \
+        'out=$(build_codex_cmd); echo "$out" | grep -q -- "--sandbox danger-full-access"'
+    _codex_script_test "build_codex_cmd verbose appends exit-code echo" \
+        'out=$(SANDY_VERBOSE=1 build_codex_cmd); echo "$out" | grep -q "Codex CLI exited"'
+fi
+
+# ============================================================
+info "28c. Codex config.toml seeding"
+# ============================================================
+_CODEX_SEED_BLOCK="$(awk '
+    /^if _sandy_agent_has codex; then$/ && !seen {seen=1; printing=1}
+    printing {print}
+    printing && /^fi$/ {exit}
+' "$SANDY_SCRIPT")"
+
+if [ -z "$_CODEX_SEED_BLOCK" ]; then
+    fail "could not extract codex sandbox seeding block from sandy"
+else
+    _CSEED_TMP="$(mktemp -d)"
+    SANDBOX_DIR="$_CSEED_TMP" bash -c "
+        info() { :; }
+        _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
+        SANDY_AGENT=codex
+        $_CODEX_SEED_BLOCK
+    "
+
+    if [ -f "$_CSEED_TMP/codex/config.toml" ]; then
+        pass "codex/config.toml created on first run"
+    else
+        fail "codex/config.toml created on first run"
+    fi
+
+    if grep -q 'sandbox_mode = "danger-full-access"' "$_CSEED_TMP/codex/config.toml" 2>/dev/null; then
+        pass "codex/config.toml sets sandbox_mode = danger-full-access"
+    else
+        fail "codex/config.toml sets sandbox_mode = danger-full-access"
+    fi
+
+    if grep -q 'model = "gpt-5.4"' "$_CSEED_TMP/codex/config.toml" 2>/dev/null; then
+        pass "codex/config.toml sets default model = gpt-5.4"
+    else
+        fail "codex/config.toml sets default model = gpt-5.4"
+    fi
+
+    _notice_count=$(grep -cE '^(hide_|"hide)' "$_CSEED_TMP/codex/config.toml" 2>/dev/null || echo 0)
+    if [ "$_notice_count" -ge 5 ]; then
+        pass "codex/config.toml seeds all 5 [notice] hide_* keys"
+    else
+        fail "codex/config.toml seeds all 5 [notice] hide_* keys (found: $_notice_count)"
+    fi
+
+    # Idempotency: re-run must not overwrite user edits
+    echo "# user edit" >> "$_CSEED_TMP/codex/config.toml"
+    SANDBOX_DIR="$_CSEED_TMP" bash -c "
+        info() { :; }
+        _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
+        SANDY_AGENT=codex
+        $_CODEX_SEED_BLOCK
+    "
+    if grep -q '^# user edit$' "$_CSEED_TMP/codex/config.toml"; then
+        pass "codex/config.toml re-run preserves user edits (idempotent)"
+    else
+        fail "codex/config.toml re-run preserves user edits (idempotent)"
+    fi
+
+    rm -rf "$_CSEED_TMP"
+fi
+
+# ============================================================
+info "28d. Codex config allowlist, dispatch, alias, update regex"
+# ============================================================
+
+# Allowlist must include the codex variables (Step 1 of v0.10 plan).
+if grep -qE 'OPENAI_API_KEY\|CODEX_MODEL\|SANDY_CODEX_AUTH\|CODEX_HOME' "$SANDY_SCRIPT"; then
+    pass "config allowlist includes OPENAI_API_KEY, CODEX_MODEL, SANDY_CODEX_AUTH, CODEX_HOME"
+else
+    fail "config allowlist includes codex variables"
+fi
+
+# Agent dispatch case-statement must map codex → sandy-codex.
+if grep -qE 'codex\)[[:space:]]+IMAGE_NAME="sandy-codex"' "$SANDY_SCRIPT"; then
+    pass "agent dispatch: codex → sandy-codex"
+else
+    fail "agent dispatch: codex → sandy-codex"
+fi
+
+# Invalid SANDY_AGENT values must be rejected with a clear error that lists
+# the valid agent names. We match against the error string in the source
+# rather than running sandy (which would need Docker).
+if grep -qE "Invalid agent.*valid: claude.*gemini.*codex" "$SANDY_SCRIPT"; then
+    pass "invalid agent error lists valid agent names"
+else
+    fail "invalid agent error lists valid agent names"
+fi
+
+# Dockerfile.codex generator: extract and run into a tempdir, verify content.
+_DOCKERFILE_CODEX_FN="$(sed -n '/^generate_dockerfile_codex()/,/^}$/p' "$SANDY_SCRIPT")"
+
+if [ -z "$_DOCKERFILE_CODEX_FN" ]; then
+    fail "could not extract generate_dockerfile_codex function"
+else
+    _DF_TMP="$(mktemp -d)"
+    bash -c "
+        SANDY_HOME='$_DF_TMP'
+        BASE_IMAGE_NAME='sandy-base'
+        $_DOCKERFILE_CODEX_FN
+        generate_dockerfile_codex
+    " 2>/dev/null
+
+    if [ -f "$_DF_TMP/Dockerfile.codex.new" ]; then
+        pass "generate_dockerfile_codex writes Dockerfile.codex.new"
+    else
+        fail "generate_dockerfile_codex writes Dockerfile.codex.new"
+    fi
+
+    if grep -q "FROM sandy-base" "$_DF_TMP/Dockerfile.codex.new" 2>/dev/null; then
+        pass "Dockerfile.codex derives from sandy-base"
+    else
+        fail "Dockerfile.codex derives from sandy-base"
+    fi
+
+    if grep -q "npm install -g @openai/codex" "$_DF_TMP/Dockerfile.codex.new" 2>/dev/null; then
+        pass "Dockerfile.codex installs @openai/codex"
+    else
+        fail "Dockerfile.codex installs @openai/codex"
+    fi
+
+    if grep -q "/opt/codex/.version" "$_DF_TMP/Dockerfile.codex.new" 2>/dev/null; then
+        pass "Dockerfile.codex caches version to /opt/codex/.version"
+    else
+        fail "Dockerfile.codex caches version to /opt/codex/.version"
+    fi
+
+    if grep -q "uv tool install.*synthkit" "$_DF_TMP/Dockerfile.codex.new" 2>/dev/null; then
+        pass "Dockerfile.codex installs synthkit"
+    else
+        fail "Dockerfile.codex installs synthkit"
+    fi
+
+    rm -rf "$_DF_TMP"
+fi
+
+# Update check sed regex: feed it sample tag_name JSON fragments and verify
+# the version is extracted correctly. This is the regex from _check_codex_update.
+# The real callsite uses `|| true` to fail-soft on pipeline failures; we do the
+# same here so empty/missing inputs don't trip `set -euo pipefail`.
+_codex_parse_tag() {
+    { echo "$1" \
+        | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' 2>/dev/null | head -1 \
+        | sed -E 's/.*"rust-v?([0-9][^"]*)"$/\1/'; } || true
+}
+
+_r="$(_codex_parse_tag '{"tag_name":"rust-v0.119.0","name":"foo"}')"
+if [ "$_r" = "0.119.0" ]; then
+    pass "update check parses rust-v0.119.0 → 0.119.0"
+else
+    fail "update check parses rust-v0.119.0 (got: $_r)"
+fi
+
+_r="$(_codex_parse_tag '{"tag_name":"rust-v1.0.0-beta.3"}')"
+if [ "$_r" = "1.0.0-beta.3" ]; then
+    pass "update check parses rust-v1.0.0-beta.3 → 1.0.0-beta.3"
+else
+    fail "update check parses rust-v1.0.0-beta.3 (got: $_r)"
+fi
+
+_r="$(_codex_parse_tag '')"
+if [ -z "$_r" ]; then
+    pass "update check returns empty on empty input (fail-soft)"
+else
+    fail "update check returns empty on empty input (got: $_r)"
+fi
+
+_r="$(_codex_parse_tag '{"message":"Not Found"}')"
+if [ -z "$_r" ]; then
+    pass "update check returns empty when tag_name absent (fail-soft)"
+else
+    fail "update check returns empty when tag_name absent (got: $_r)"
+fi
+
+# Trust entry block: idempotent append on ~/.codex/config.toml.
+_TRUST_BLOCK="$(awk '
+    /^if _sandy_has_codex; then$/ && !seen {seen=1; printing=1}
+    printing {print}
+    printing && /^fi$/ {exit}
+' "$SANDY_SCRIPT")"
+
+if [ -z "$_TRUST_BLOCK" ]; then
+    fail "could not extract codex trust-entry block"
+else
+    _TRUST_TMP="$(mktemp -d)"
+    mkdir -p "$_TRUST_TMP/.codex"
+    cat > "$_TRUST_TMP/.codex/config.toml" <<'TOML'
+model = "gpt-5.4"
+sandbox_mode = "danger-full-access"
+
+[notice]
+hide_full_access_warning = true
+TOML
+
+    HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/claude/myproj" SANDY_AGENT=codex \
+        bash -c "
+            _sandy_has_codex() { case \",\${SANDY_AGENT:-claude},\" in *,codex,*) return 0 ;; esac; return 1; }
+            $_TRUST_BLOCK
+        " 2>/dev/null
+
+    if grep -q '^\[projects\."/home/claude/myproj"\]$' "$_TRUST_TMP/.codex/config.toml"; then
+        pass "trust entry appended for SANDY_WORKSPACE"
+    else
+        fail "trust entry appended for SANDY_WORKSPACE"
+    fi
+
+    if grep -q '^trust_level = "trusted"$' "$_TRUST_TMP/.codex/config.toml"; then
+        pass "trust entry includes trust_level = trusted"
+    else
+        fail "trust entry includes trust_level = trusted"
+    fi
+
+    # Idempotency: second run must not duplicate.
+    HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/claude/myproj" SANDY_AGENT=codex \
+        bash -c "
+            _sandy_has_codex() { case \",\${SANDY_AGENT:-claude},\" in *,codex,*) return 0 ;; esac; return 1; }
+            $_TRUST_BLOCK
+        " 2>/dev/null
+
+    _count=$(grep -c '^\[projects\."/home/claude/myproj"\]$' "$_TRUST_TMP/.codex/config.toml" 2>/dev/null || echo 0)
+    if [ "$_count" = "1" ]; then
+        pass "trust entry idempotent on repeat invocation"
+    else
+        fail "trust entry idempotent on repeat invocation (count: $_count)"
+    fi
+
+    # Non-codex agents must not touch the config.
+    echo "# marker" > "$_TRUST_TMP/.codex/config.toml"
+    HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/claude/myproj" SANDY_AGENT=claude \
+        bash -c "
+            _sandy_has_codex() { case \",\${SANDY_AGENT:-claude},\" in *,codex,*) return 0 ;; esac; return 1; }
+            $_TRUST_BLOCK
+        " 2>/dev/null
+
+    if [ "$(cat "$_TRUST_TMP/.codex/config.toml")" = "# marker" ]; then
+        pass "trust entry block is a no-op for non-codex agents"
+    else
+        fail "trust entry block is a no-op for non-codex agents"
+    fi
+
+    rm -rf "$_TRUST_TMP"
+fi
+
+# Feature guards: the SANDY_SKILL_PACKS guard must reject non-claude agents.
+# Structure: `if ! _sandy_agent_has claude && [ -n "${SANDY_SKILL_PACKS:-}" ]; then ERROR ...`
+check "SANDY_SKILL_PACKS guard rejects non-claude agents" \
+    grep -q '! _sandy_agent_has claude.*SANDY_SKILL_PACKS' "$SANDY_SCRIPT"
+
+# The --remote and SANDY_CHANNELS=discord guards should also catch codex.
+# These use different structures, so match by pattern in the error text.
+if grep -qE '\-\-remote is only supported with SANDY_AGENT=claude' "$SANDY_SCRIPT"; then
+    pass "--remote guard error says claude-only"
+else
+    fail "--remote guard error says claude-only"
+fi
+
+# The --remote guard condition must reject ANY non-claude agent (including codex).
+# Uses `! _sandy_agent_has claude || [ "$_SANDY_IS_MULTI" = true ]`.
+check "--remote guard condition rejects non-claude and multi-agent" \
+    grep -q '! _sandy_agent_has claude.*_SANDY_IS_MULTI.*true' "$SANDY_SCRIPT"
+
+# Discord guard must reject non-claude agents (covers codex, gemini).
+# The guard uses `$SANDY_AGENT != "claude"` with a case match on *,discord,*.
+check "discord channel guard rejects non-claude agents" \
+    grep -q 'SANDY_CHANNELS=discord is only supported with SANDY_AGENT=claude' "$SANDY_SCRIPT"
+
+# ============================================================
+info "28e. Codex infrastructure — mounts, env, credentials, cleanup"
+# ============================================================
+
+# Sandbox dir creation: codex block must create codex/ subdir.
+check "sandbox layout creates codex/ subdir for SANDY_AGENT=codex" \
+    grep -q 'mkdir -p "$SANDBOX_DIR/codex"' "$SANDY_SCRIPT"
+
+# Mount block: codex sandbox mounted at ~/.codex.
+check "codex sandbox mounted at /home/claude/.codex" \
+    grep -q 'SANDBOX_DIR/codex:/home/claude/.codex' "$SANDY_SCRIPT"
+
+# Auth.json mounted read-only.
+check "codex auth.json mount is read-only (:ro)" \
+    grep -q 'auth.json:/home/claude/.codex/auth.json:ro' "$SANDY_SCRIPT"
+
+# Env passthrough: OPENAI_API_KEY forwarded to container (codex reads this).
+check "OPENAI_API_KEY passed to container via -e" \
+    grep -q 'RUN_FLAGS+=(-e "OPENAI_API_KEY=' "$SANDY_SCRIPT"
+
+# Env passthrough: CODEX_MODEL forwarded to container.
+check "CODEX_MODEL passed to container via -e" \
+    grep -q 'RUN_FLAGS+=(-e "CODEX_MODEL=' "$SANDY_SCRIPT"
+
+# Cleanup trap must clean CODEX_CRED_TMPDIR.
+check "cleanup trap removes CODEX_CRED_TMPDIR" \
+    grep -q 'rm -rf "$CODEX_CRED_TMPDIR"' "$SANDY_SCRIPT"
+
+# Credential loader: load_codex_credentials function exists.
+check "load_codex_credentials function exists" \
+    grep -q '^load_codex_credentials()' "$SANDY_SCRIPT"
+
+# Dockerfile path dispatch: codex maps to Dockerfile.codex.
+check "DOCKERFILE_PATH dispatch includes codex → Dockerfile.codex" \
+    grep -q 'DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.codex"' "$SANDY_SCRIPT"
+
+# Build hash file: codex gets its own .build_hash_codex.
+check "BUILD_HASH_FILE_NAME dispatch includes codex → .build_hash_codex" \
+    grep -q '.build_hash_codex' "$SANDY_SCRIPT"
+
+# .claude.json seeding gate uses _sandy_agent_has (covers multi-agent combos).
+check ".claude.json seeding gate uses _sandy_agent_has claude" \
+    grep -q '_sandy_agent_has claude && .*CLAUDE_JSON' "$SANDY_SCRIPT"
+
+# SANDY_GEMINI_AUTH is in the config allowlist.
+check "config allowlist includes SANDY_GEMINI_AUTH" \
+    grep -q 'SANDY_GEMINI_AUTH' "$SANDY_SCRIPT"
+
+# Synthkit skills block for codex: creates SKILL.md files with YAML frontmatter.
+check "codex synthkit seeds ~/.codex/skills/ with SKILL.md files" \
+    grep -q '\.codex/skills/md2pdf/SKILL.md' "$SANDY_SCRIPT"
+
+# ============================================================
+info "28f. Script syntax and version"
+# ============================================================
+
+check "sandy script passes bash -n syntax check" \
+    bash -n "$SANDY_SCRIPT"
+
+# Version string is defined exactly once.
+_ver_count="$(grep -c '^SANDY_VERSION=' "$SANDY_SCRIPT" || true)"
+if [ "$_ver_count" = "1" ]; then
+    pass "SANDY_VERSION defined exactly once"
+else
+    fail "SANDY_VERSION defined exactly once (found: $_ver_count)"
+fi
+
+# Version string contains expected major.minor.
+if grep -q '^SANDY_VERSION="0\.10\.' "$SANDY_SCRIPT"; then
+    pass "SANDY_VERSION is 0.10.x"
+else
+    fail "SANDY_VERSION is 0.10.x"
 fi
 
 # ============================================================
@@ -1159,8 +1679,8 @@ if docker image inspect sandy-gemini-cli &>/dev/null; then
     check "node is available (required by gemini CLI)" \
         _gemini_in_container "node --version"
 
-    # Sanity: the base Claude toolchain should still be present in the both image
-    # (we're only checking gemini-cli here; sandy-both would be a separate check).
+    # Sanity: the base Claude toolchain should still be present in the multi-agent image
+    # (we're only checking gemini-cli here; sandy-full would be a separate check).
 else
     printf "  \033[0;33m⊘ skipped — sandy-gemini-cli image not built\033[0m\n"
 fi
@@ -1168,6 +1688,7 @@ fi
 # ============================================================
 # Summary
 # ============================================================
+COMPLETED=true   # suppress the early-abort message in the EXIT trap
 echo ""
 TOTAL=$((PASS + FAIL))
 if [ "$FAIL" -eq 0 ]; then
