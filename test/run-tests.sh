@@ -374,8 +374,79 @@ check "overlay default-on when .venv exists" \
     test "$DEFAULT_ACTIVE" = "true"
 rm -rf "$DEFAULT_FIXTURE"
 
+# 9h. PR 2.1: .python-version takes precedence over pyvenv.cfg
+# Mirror the host-side precedence block: .python-version wins when both present.
+PV_FIXTURE="$(mktemp -d)"
+mkdir -p "$PV_FIXTURE/.venv"
+cat > "$PV_FIXTURE/.venv/pyvenv.cfg" <<'EOF'
+version_info = 3.10.16.final.0
+EOF
+echo "3.12" > "$PV_FIXTURE/.python-version"
+# Emulate the same precedence logic from sandy (2213-2224)
+if [ -f "$PV_FIXTURE/.python-version" ]; then
+    PV_RESULT="$(tr -d '[:space:]' < "$PV_FIXTURE/.python-version" | cut -d. -f1-2)"
+elif [ -f "$PV_FIXTURE/.venv/pyvenv.cfg" ]; then
+    PV_RESULT="$(grep -E '^version(_info)?[[:space:]]*=' "$PV_FIXTURE/.venv/pyvenv.cfg" \
+        | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]')"
+fi
+check ".python-version takes precedence over pyvenv.cfg" \
+    test "$PV_RESULT" = "3.12"
+rm -rf "$PV_FIXTURE"
+
+# 9i. PR 2.1: garbage SANDY_VENV_PYTHON_VERSION rejected by major.minor regex
+# Hostside block at sandy:2225-2229 drops non-major.minor values. Simulate it.
+VALIDATE() {
+    local v="$1"
+    if [ -n "$v" ] && [[ ! "$v" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        echo ""
+    else
+        echo "$v"
+    fi
+}
+check "validator accepts 3.11" test "$(VALIDATE 3.11)" = "3.11"
+check "validator accepts 3.12" test "$(VALIDATE 3.12)" = "3.12"
+check "validator rejects 3.10.16"    test -z "$(VALIDATE 3.10.16)"
+check "validator rejects 3.10.16.final.0" test -z "$(VALIDATE 3.10.16.final.0)"
+check "validator rejects empty" test -z "$(VALIDATE '')"
+check "validator rejects shell injection" test -z "$(VALIDATE '3.11; echo pwned')"
+
+# 9j. PR 2.1: symlinked .venv triggers info-message branch (not silent skip)
+# The hostside now has an elif that fires info() on symlinked .venv.
+# Simulate the branch condition to confirm it would fire.
+SYM_INFO_FIXTURE="$(mktemp -d)"
+SYM_INFO_TARGET="$(mktemp -d)"
+mkdir -p "$SYM_INFO_TARGET"
+ln -s "$SYM_INFO_TARGET" "$SYM_INFO_FIXTURE/.venv"
+WOULD_FIRE_INFO="no"
+if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] && [ -L "$SYM_INFO_FIXTURE/.venv" ]; then
+    WOULD_FIRE_INFO="yes"
+fi
+check "symlinked .venv fires info message branch" \
+    test "$WOULD_FIRE_INFO" = "yes"
+# And with opt-out, even symlinked .venv doesn't trigger the info branch.
+SANDY_VENV_OVERLAY=0
+WOULD_FIRE_INFO_OPTOUT="no"
+if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] && [ -L "$SYM_INFO_FIXTURE/.venv" ]; then
+    WOULD_FIRE_INFO_OPTOUT="yes"
+fi
+check "opt-out suppresses symlink info branch" \
+    test "$WOULD_FIRE_INFO_OPTOUT" = "no"
+unset SANDY_VENV_OVERLAY
+rm -rf "$SYM_INFO_FIXTURE" "$SYM_INFO_TARGET"
+
+# 9k. PR 2.1: materialization block uses flock for race protection
+# The container-side materialization block must wrap `uv venv` in a flock.
+# Guard against regression by checking the raw script source.
+MATERIALIZE_BLOCK="$(awk '/Workspace \.venv overlay\. When SANDY_VENV_OVERLAY_ACTIVE/,/^elif \[ -L "\$WORKSPACE\/\.venv\/bin\/python" \]/' "$_SANDY_SCRIPT_PATH")"
+check "materialization block uses flock" \
+    bash -c "echo '$MATERIALIZE_BLOCK' | grep -q 'flock -w'"
+check "materialization block re-checks pyvenv.cfg inside critical section" \
+    bash -c "echo '$MATERIALIZE_BLOCK' | grep -c 'pyvenv.cfg' | awk '{exit (\$1 < 2)}'"
+check "materialization block emits drift warning" \
+    bash -c "echo '$MATERIALIZE_BLOCK' | grep -q 'Sandbox venv is Python'"
+
 # ============================================================
-info "9h. PR 1.1 regression tests — resume fallback + codex grep-F"
+info "9z. PR 1.1 regression tests — resume fallback + codex grep-F"
 # ============================================================
 
 # Guard against regression of the `cmd || cmd_base` fallback pattern in

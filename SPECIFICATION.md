@@ -1767,7 +1767,23 @@ If `$WORK_DIR/.venv` exists on the host, is not a symlink, and `SANDY_VENV_OVERL
 -e "SANDY_VENV_PYTHON_VERSION=<major.minor>"   # if parseable from pyvenv.cfg
 ```
 
-Must appear **after** the workspace mount (E.7) so Docker can overlay it on top. The sandbox `venv/` dir is created on the host side before `docker run`. Inside the container, `user-setup.sh` materializes an empty venv via `uv venv --python <version>` on first launch and activates it (`VIRTUAL_ENV` + PATH prepend) on every launch. The host `.venv/` is never read or written by sandy — it is shadowed by the bind mount inside the container only.
+Must appear **after** the workspace mount (E.7) so Docker can overlay it on top. The sandbox `venv/` dir is created on the host side before `docker run`.
+
+**Python version resolution (host side)**, in order:
+1. `$WORK_DIR/.python-version` — authoritative, user-maintained.
+2. `$WORK_DIR/.venv/pyvenv.cfg` `version` / `version_info` line — fallback.
+
+The result is normalized to `major.minor` (`cut -d. -f1-2`) and validated against `^[0-9]+\.[0-9]+$`. Values that don't match are discarded and `SANDY_VENV_PYTHON_VERSION` is left unset — the container then defaults to `3.12` in `user-setup.sh`.
+
+**Symlinked `.venv/`** is explicitly skipped on the host side; an info message fires instead of silently proceeding. Rationale: the symlink target may be a path outside `$WORK_DIR` and overlaying it would shadow unpredictable host state.
+
+Inside the container, `user-setup.sh`:
+1. Takes `flock -w 30` on `$WORKSPACE/.venv/.sandy.lock` before any write, serializing concurrent launches in the same workspace. The lock file lives inside the bind mount, which is a single host filesystem across containers, so kernel flock coordinates correctly even across PID namespaces.
+2. Re-checks for `pyvenv.cfg` inside the critical section (another sandy may have finished while we waited) and materializes via `uv venv --python <version>` only if still missing.
+3. After materialization (or on subsequent launches), compares the overlay's actual `pyvenv.cfg` version against `SANDY_VENV_PYTHON_VERSION`. Mismatch → prints a drift warning with the recreate command. No auto-recreate (would silently nuke installed packages).
+4. Activates unconditionally if `$WORKSPACE/.venv/bin/python` exists (`VIRTUAL_ENV` + PATH prepend).
+
+The host `.venv/` is never read or written by sandy — it is shadowed by the bind mount inside the container only.
 
 ### E.8 Git Submodule Mount (conditional)
 
