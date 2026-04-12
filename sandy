@@ -1851,6 +1851,12 @@ if [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; then
 fi
 if [ "$SANDY_AGENT" = "codex" ]; then
     mkdir -p "$SANDBOX_DIR/codex"
+    # Clean up empty auth.json left by a previous codex session. Codex creates
+    # this file on first run but leaves it empty when using API key auth. On
+    # subsequent launches, codex crashes trying to parse the empty JSON.
+    if [ -f "$SANDBOX_DIR/codex/auth.json" ] && [ ! -s "$SANDBOX_DIR/codex/auth.json" ]; then
+        rm -f "$SANDBOX_DIR/codex/auth.json"
+    fi
     # Seed config.toml with sandy-required defaults (first run only). Without
     # this, codex's Landlock sandbox would try to initialize inside sandy's
     # Docker container and either fail weirdly or over-restrict the agent.
