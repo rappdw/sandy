@@ -2211,11 +2211,19 @@ load_gemini_credentials() {
         fi
     fi
     if [ "$mode" = "oauth" ] || [ "$mode" = "auto" ]; then
-        if [ -f "$HOME/.gemini/tokens.json" ]; then
+        # Gemini CLI ≥0.30 stores OAuth creds as oauth_creds.json;
+        # older versions used tokens.json. Check both.
+        local _gemini_oauth_file=""
+        if [ -f "$HOME/.gemini/oauth_creds.json" ]; then
+            _gemini_oauth_file="$HOME/.gemini/oauth_creds.json"
+        elif [ -f "$HOME/.gemini/tokens.json" ]; then
+            _gemini_oauth_file="$HOME/.gemini/tokens.json"
+        fi
+        if [ -n "$_gemini_oauth_file" ]; then
             GEMINI_CRED_TMPDIR="$(mktemp -d)"
-            cp "$HOME/.gemini/tokens.json" "$GEMINI_CRED_TMPDIR/tokens.json"
-            chmod 600 "$GEMINI_CRED_TMPDIR/tokens.json"
-            info "Loaded Gemini OAuth tokens from host"
+            cp "$_gemini_oauth_file" "$GEMINI_CRED_TMPDIR/$(basename "$_gemini_oauth_file")"
+            chmod 600 "$GEMINI_CRED_TMPDIR/$(basename "$_gemini_oauth_file")"
+            info "Loaded Gemini OAuth credentials from host ($(basename "$_gemini_oauth_file"))"
             [ -z "$GEMINI_SELECTED_AUTH" ] && GEMINI_SELECTED_AUTH="oauth-personal"
         fi
     fi
@@ -2368,7 +2376,10 @@ fi
 if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "both" ]; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/gemini:/home/claude/.gemini")
     if [ -n "${GEMINI_CRED_TMPDIR:-}" ]; then
-        RUN_FLAGS+=(-v "$GEMINI_CRED_TMPDIR/tokens.json:/home/claude/.gemini/tokens.json")
+        # Mount whichever OAuth file was found (oauth_creds.json or tokens.json)
+        for _oaf in "$GEMINI_CRED_TMPDIR"/oauth_creds.json "$GEMINI_CRED_TMPDIR"/tokens.json; do
+            [ -f "$_oaf" ] && RUN_FLAGS+=(-v "$_oaf:/home/claude/.gemini/$(basename "$_oaf")") && break
+        done
     fi
     if [ -n "${GEMINI_ADC_MOUNT:-}" ]; then
         RUN_FLAGS+=(-v "$GEMINI_ADC_MOUNT:/home/claude/.config/gcloud/application_default_credentials.json:ro")

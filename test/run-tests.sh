@@ -1456,6 +1456,86 @@ else
     fail "--remote guard condition is '!= claude' (catches codex)"
 fi
 
+# Discord guard must reject non-claude agents (covers codex, gemini).
+# The guard uses `$SANDY_AGENT != "claude"` with a case match on *,discord,*.
+check "discord channel guard rejects non-claude agents" \
+    grep -q 'SANDY_CHANNELS=discord is only supported with SANDY_AGENT=claude' "$SANDY_SCRIPT"
+
+# ============================================================
+info "28e. Codex infrastructure — mounts, env, credentials, cleanup"
+# ============================================================
+
+# Sandbox dir creation: codex block must create codex/ subdir.
+check "sandbox layout creates codex/ subdir for SANDY_AGENT=codex" \
+    grep -q 'mkdir -p "$SANDBOX_DIR/codex"' "$SANDY_SCRIPT"
+
+# Mount block: codex sandbox mounted at ~/.codex.
+check "codex sandbox mounted at /home/claude/.codex" \
+    grep -q 'SANDBOX_DIR/codex:/home/claude/.codex' "$SANDY_SCRIPT"
+
+# Auth.json mounted read-only.
+check "codex auth.json mount is read-only (:ro)" \
+    grep -q 'auth.json:/home/claude/.codex/auth.json:ro' "$SANDY_SCRIPT"
+
+# Env passthrough: CODEX_API_KEY forwarded to container.
+check "CODEX_API_KEY passed to container via -e" \
+    grep -q 'RUN_FLAGS+=(-e "CODEX_API_KEY=' "$SANDY_SCRIPT"
+
+# Env passthrough: CODEX_MODEL forwarded to container.
+check "CODEX_MODEL passed to container via -e" \
+    grep -q 'RUN_FLAGS+=(-e "CODEX_MODEL=' "$SANDY_SCRIPT"
+
+# Cleanup trap must clean CODEX_CRED_TMPDIR.
+check "cleanup trap removes CODEX_CRED_TMPDIR" \
+    grep -q 'rm -rf "$CODEX_CRED_TMPDIR"' "$SANDY_SCRIPT"
+
+# Credential loader: load_codex_credentials function exists.
+check "load_codex_credentials function exists" \
+    grep -q '^load_codex_credentials()' "$SANDY_SCRIPT"
+
+# Dockerfile path dispatch: codex maps to Dockerfile.codex.
+check "DOCKERFILE_PATH dispatch includes codex → Dockerfile.codex" \
+    grep -q 'DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.codex"' "$SANDY_SCRIPT"
+
+# Build hash file: codex gets its own .build_hash_codex.
+check "BUILD_HASH_FILE_NAME dispatch includes codex → .build_hash_codex" \
+    grep -q '.build_hash_codex' "$SANDY_SCRIPT"
+
+# .claude.json seeding gate covers both (not just claude).
+# The source line is: if { [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; } && [ ! -f "$CLAUDE_JSON" ]; then
+check ".claude.json seeding gate includes SANDY_AGENT=both" \
+    grep -q 'SANDY_AGENT" = "both".*CLAUDE_JSON' "$SANDY_SCRIPT"
+
+# SANDY_GEMINI_AUTH is in the config allowlist.
+check "config allowlist includes SANDY_GEMINI_AUTH" \
+    grep -q 'SANDY_GEMINI_AUTH' "$SANDY_SCRIPT"
+
+# Synthkit skills block for codex: creates SKILL.md files with YAML frontmatter.
+check "codex synthkit seeds ~/.codex/skills/ with SKILL.md files" \
+    grep -q '\.codex/skills/md2pdf/SKILL.md' "$SANDY_SCRIPT"
+
+# ============================================================
+info "28f. Script syntax and version"
+# ============================================================
+
+check "sandy script passes bash -n syntax check" \
+    bash -n "$SANDY_SCRIPT"
+
+# Version string is defined exactly once.
+_ver_count="$(grep -c '^SANDY_VERSION=' "$SANDY_SCRIPT" || true)"
+if [ "$_ver_count" = "1" ]; then
+    pass "SANDY_VERSION defined exactly once"
+else
+    fail "SANDY_VERSION defined exactly once (found: $_ver_count)"
+fi
+
+# Version string contains expected major.minor.
+if grep -q '^SANDY_VERSION="0\.10\.' "$SANDY_SCRIPT"; then
+    pass "SANDY_VERSION is 0.10.x"
+else
+    fail "SANDY_VERSION is 0.10.x"
+fi
+
 # ============================================================
 info "29. v1 → v1.5 sandbox layout migration"
 # ============================================================
