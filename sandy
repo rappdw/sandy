@@ -1856,7 +1856,8 @@ if [ "$SANDY_AGENT" = "codex" ]; then
     # Docker container and either fail weirdly or over-restrict the agent.
     # sandbox_mode here plus --sandbox danger-full-access on the CLI is
     # belt-and-suspenders. The [notice] block suppresses all first-run prompts.
-    if [ ! -f "$SANDBOX_DIR/codex/config.toml" ]; then
+    if [ ! -f "$SANDBOX_DIR/codex/config.toml" ] || [ ! -s "$SANDBOX_DIR/codex/config.toml" ] \
+       || ! grep -q 'sandbox_mode' "$SANDBOX_DIR/codex/config.toml" 2>/dev/null; then
         cat > "$SANDBOX_DIR/codex/config.toml" <<'CODEX_TOML'
 # Written by sandy on first launch. Safe to edit, but sandbox_mode must stay
 # "danger-full-access" — sandy provides outer isolation; codex's Landlock
