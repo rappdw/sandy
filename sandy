@@ -1112,11 +1112,14 @@ build_codex_cmd() {
     for arg in "$@"; do
         case "$arg" in -p|--print|--prompt) headless=true; break ;; esac
     done
+    # --skip-git-repo-check: the workspace may not be a git repo (new projects).
+    #   Sandy provides whole-session isolation so the git-repo trust check is
+    #   redundant. Without this, codex refuses to run in non-git directories.
     local cmd
     if [ "$headless" = "true" ]; then
-        cmd="codex exec --sandbox danger-full-access"
+        cmd="codex exec --sandbox danger-full-access --skip-git-repo-check"
     else
-        cmd="codex --sandbox danger-full-access"
+        cmd="codex --sandbox danger-full-access --skip-git-repo-check"
     fi
     if [ -n "${CODEX_MODEL:-}" ]; then
         cmd+=" --model $(printf "%q" "$CODEX_MODEL")"
