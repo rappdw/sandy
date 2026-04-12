@@ -1059,19 +1059,21 @@ $*" >/dev/null 2>&1; then
 
     _gemini_script_test "_sandy_has_claude true for SANDY_AGENT=claude" \
         'SANDY_AGENT=claude _sandy_has_claude'
-    _gemini_script_test "_sandy_has_claude true for SANDY_AGENT=both" \
-        'SANDY_AGENT=both _sandy_has_claude'
+    _gemini_script_test "_sandy_has_claude true for SANDY_AGENT=claude,gemini" \
+        'SANDY_AGENT=claude,gemini _sandy_has_claude'
     _gemini_script_test "_sandy_has_claude false for SANDY_AGENT=gemini" \
         '! SANDY_AGENT=gemini _sandy_has_claude'
     _gemini_script_test "_sandy_has_gemini true for SANDY_AGENT=gemini" \
         'SANDY_AGENT=gemini _sandy_has_gemini'
-    _gemini_script_test "_sandy_has_gemini true for SANDY_AGENT=both" \
-        'SANDY_AGENT=both _sandy_has_gemini'
+    _gemini_script_test "_sandy_has_gemini true for SANDY_AGENT=claude,gemini" \
+        'SANDY_AGENT=claude,gemini _sandy_has_gemini'
     _gemini_script_test "_sandy_has_gemini false for SANDY_AGENT=claude" \
         '! SANDY_AGENT=claude _sandy_has_gemini'
+    _gemini_script_test "_sandy_has_gemini true for SANDY_AGENT=gemini,codex" \
+        'SANDY_AGENT=gemini,codex _sandy_has_gemini'
 
     _gemini_script_test "build_gemini_cmd translates -p to --prompt" \
-        'out=$(build_gemini_cmd -p hello); echo "$out" | grep -q -- "--prompt" && ! echo "$out" | grep -qE " -p( |$)"'
+        'out=$(build_gemini_cmd -p hello); echo "$out" | grep -q -- "--prompt" && ! echo "${out%%;*}" | grep -qE " -p( |$)"'
     _gemini_script_test "build_gemini_cmd translates --print to --prompt" \
         'out=$(build_gemini_cmd --print hello); echo "$out" | grep -q -- "--prompt"'
     _gemini_script_test "build_gemini_cmd passes --prompt through unchanged" \
@@ -1115,8 +1117,12 @@ $*" >/dev/null 2>&1; then
         '! SANDY_AGENT=claude _sandy_has_codex'
     _codex_script_test "_sandy_has_codex false for SANDY_AGENT=gemini" \
         '! SANDY_AGENT=gemini _sandy_has_codex'
-    _codex_script_test "_sandy_has_codex false for SANDY_AGENT=both" \
-        '! SANDY_AGENT=both _sandy_has_codex'
+    _codex_script_test "_sandy_has_codex false for SANDY_AGENT=claude,gemini" \
+        '! SANDY_AGENT=claude,gemini _sandy_has_codex'
+    _codex_script_test "_sandy_has_codex true for SANDY_AGENT=claude,codex" \
+        'SANDY_AGENT=claude,codex _sandy_has_codex'
+    _codex_script_test "_sandy_has_codex true for SANDY_AGENT=claude,gemini,codex" \
+        'SANDY_AGENT=claude,gemini,codex _sandy_has_codex'
 
     _codex_script_test "build_codex_cmd (no args) uses interactive codex" \
         'out=$(build_codex_cmd); echo "$out" | grep -qE "^codex --sandbox danger-full-access"'
@@ -1127,7 +1133,7 @@ $*" >/dev/null 2>&1; then
     _codex_script_test "build_codex_cmd --prompt switches to codex exec" \
         'out=$(build_codex_cmd --prompt hello); echo "$out" | grep -qE "^codex exec "'
     _codex_script_test "build_codex_cmd drops -p flag itself (positional arg remains)" \
-        'out=$(build_codex_cmd -p hello); ! echo "$out" | grep -qE " -p( |$)" && echo "$out" | grep -q hello'
+        'out=$(build_codex_cmd -p hello); ! echo "${out%%;*}" | grep -qE " -p( |$)" && echo "$out" | grep -q hello'
     _codex_script_test "build_codex_cmd drops --continue" \
         'out=$(build_codex_cmd --continue); ! echo "$out" | grep -q -- "--continue"'
     _codex_script_test "build_codex_cmd drops -c" \
@@ -1144,7 +1150,7 @@ fi
 info "28c. Codex config.toml seeding"
 # ============================================================
 _CODEX_SEED_BLOCK="$(awk '
-    /^if \[ "\$SANDY_AGENT" = "codex" \]; then$/ && !seen {seen=1; printing=1}
+    /^if _sandy_agent_has codex; then$/ && !seen {seen=1; printing=1}
     printing {print}
     printing && /^fi$/ {exit}
 ' "$SANDY_SCRIPT")"
@@ -1155,6 +1161,7 @@ else
     _CSEED_TMP="$(mktemp -d)"
     SANDBOX_DIR="$_CSEED_TMP" bash -c "
         info() { :; }
+        _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
         SANDY_AGENT=codex
         $_CODEX_SEED_BLOCK
     "
@@ -1171,6 +1178,12 @@ else
         fail "codex/config.toml sets sandbox_mode = danger-full-access"
     fi
 
+    if grep -q 'model = "gpt-5.4"' "$_CSEED_TMP/codex/config.toml" 2>/dev/null; then
+        pass "codex/config.toml sets default model = gpt-5.4"
+    else
+        fail "codex/config.toml sets default model = gpt-5.4"
+    fi
+
     _notice_count=$(grep -cE '^(hide_|"hide)' "$_CSEED_TMP/codex/config.toml" 2>/dev/null || echo 0)
     if [ "$_notice_count" -ge 5 ]; then
         pass "codex/config.toml seeds all 5 [notice] hide_* keys"
@@ -1182,6 +1195,7 @@ else
     echo "# user edit" >> "$_CSEED_TMP/codex/config.toml"
     SANDBOX_DIR="$_CSEED_TMP" bash -c "
         info() { :; }
+        _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
         SANDY_AGENT=codex
         $_CODEX_SEED_BLOCK
     "
@@ -1199,8 +1213,8 @@ info "28d. Codex config allowlist, dispatch, alias, update regex"
 # ============================================================
 
 # Allowlist must include the codex variables (Step 1 of v0.10 plan).
-if grep -qE 'CODEX_API_KEY\|CODEX_MODEL\|SANDY_CODEX_AUTH\|CODEX_HOME\|OPENAI_API_KEY' "$SANDY_SCRIPT"; then
-    pass "config allowlist includes CODEX_API_KEY, CODEX_MODEL, SANDY_CODEX_AUTH, CODEX_HOME, OPENAI_API_KEY"
+if grep -qE 'OPENAI_API_KEY\|CODEX_MODEL\|SANDY_CODEX_AUTH\|CODEX_HOME' "$SANDY_SCRIPT"; then
+    pass "config allowlist includes OPENAI_API_KEY, CODEX_MODEL, SANDY_CODEX_AUTH, CODEX_HOME"
 else
     fail "config allowlist includes codex variables"
 fi
@@ -1213,67 +1227,12 @@ else
 fi
 
 # Invalid SANDY_AGENT values must be rejected with a clear error that lists
-# the four valid values. We match against the error string in the source
+# the valid agent names. We match against the error string in the source
 # rather than running sandy (which would need Docker).
-if grep -qE "Invalid SANDY_AGENT.*claude.*gemini.*codex.*both" "$SANDY_SCRIPT"; then
-    pass "invalid agent error lists all four valid values"
+if grep -qE "Invalid agent.*valid: claude.*gemini.*codex" "$SANDY_SCRIPT"; then
+    pass "invalid agent error lists valid agent names"
 else
-    fail "invalid agent error lists all four valid values"
-fi
-
-# CODEX_API_KEY → OPENAI_API_KEY alias: extract and exercise in isolation.
-# Codex CLI reads OPENAI_API_KEY; sandy accepts CODEX_API_KEY for clarity
-# and forwards it.
-_ALIAS_BLOCK="$(awk '
-    /^if \[ "\$SANDY_AGENT" = "codex" \] && \[ -n "\$\{CODEX_API_KEY:-\}" \] && \[ -z "\$\{OPENAI_API_KEY:-\}" \]; then$/ {printing=1}
-    printing {print}
-    printing && /^fi$/ {exit}
-' "$SANDY_SCRIPT")"
-
-if [ -z "$_ALIAS_BLOCK" ]; then
-    fail "could not extract CODEX_API_KEY alias block"
-else
-    # Case 1: alias fires when only CODEX_API_KEY is set.
-    _result="$(bash -c "
-        SANDY_AGENT=codex
-        CODEX_API_KEY=sk-test-alias
-        unset OPENAI_API_KEY
-        $_ALIAS_BLOCK
-        echo \"OPENAI_API_KEY=\$OPENAI_API_KEY\"
-    " 2>/dev/null)"
-    if echo "$_result" | grep -q "OPENAI_API_KEY=sk-test-alias"; then
-        pass "CODEX_API_KEY is forwarded as OPENAI_API_KEY when OPENAI_API_KEY unset"
-    else
-        fail "CODEX_API_KEY is forwarded as OPENAI_API_KEY when OPENAI_API_KEY unset"
-    fi
-
-    # Case 2: OPENAI_API_KEY wins if both are set (no overwrite).
-    _result="$(bash -c "
-        SANDY_AGENT=codex
-        CODEX_API_KEY=sk-codex
-        OPENAI_API_KEY=sk-openai
-        $_ALIAS_BLOCK
-        echo \"OPENAI_API_KEY=\$OPENAI_API_KEY\"
-    " 2>/dev/null)"
-    if echo "$_result" | grep -q "OPENAI_API_KEY=sk-openai"; then
-        pass "OPENAI_API_KEY takes precedence when both are set"
-    else
-        fail "OPENAI_API_KEY takes precedence when both are set"
-    fi
-
-    # Case 3: alias does NOT fire for non-codex agents.
-    _result="$(bash -c "
-        SANDY_AGENT=claude
-        CODEX_API_KEY=sk-test-alias
-        unset OPENAI_API_KEY
-        $_ALIAS_BLOCK
-        echo \"OPENAI_API_KEY=\${OPENAI_API_KEY:-UNSET}\"
-    " 2>/dev/null)"
-    if echo "$_result" | grep -q "OPENAI_API_KEY=UNSET"; then
-        pass "CODEX_API_KEY alias is scoped to SANDY_AGENT=codex only"
-    else
-        fail "CODEX_API_KEY alias is scoped to SANDY_AGENT=codex only"
-    fi
+    fail "invalid agent error lists valid agent names"
 fi
 
 # Dockerfile.codex generator: extract and run into a tempdir, verify content.
@@ -1374,6 +1333,7 @@ else
     _TRUST_TMP="$(mktemp -d)"
     mkdir -p "$_TRUST_TMP/.codex"
     cat > "$_TRUST_TMP/.codex/config.toml" <<'TOML'
+model = "gpt-5.4"
 sandbox_mode = "danger-full-access"
 
 [notice]
@@ -1382,7 +1342,7 @@ TOML
 
     HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/claude/myproj" SANDY_AGENT=codex \
         bash -c "
-            _sandy_has_codex() { [ \"\${SANDY_AGENT:-claude}\" = \"codex\" ]; }
+            _sandy_has_codex() { case \",\${SANDY_AGENT:-claude},\" in *,codex,*) return 0 ;; esac; return 1; }
             $_TRUST_BLOCK
         " 2>/dev/null
 
@@ -1401,7 +1361,7 @@ TOML
     # Idempotency: second run must not duplicate.
     HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/claude/myproj" SANDY_AGENT=codex \
         bash -c "
-            _sandy_has_codex() { [ \"\${SANDY_AGENT:-claude}\" = \"codex\" ]; }
+            _sandy_has_codex() { case \",\${SANDY_AGENT:-claude},\" in *,codex,*) return 0 ;; esac; return 1; }
             $_TRUST_BLOCK
         " 2>/dev/null
 
@@ -1416,7 +1376,7 @@ TOML
     echo "# marker" > "$_TRUST_TMP/.codex/config.toml"
     HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/claude/myproj" SANDY_AGENT=claude \
         bash -c "
-            _sandy_has_codex() { [ \"\${SANDY_AGENT:-claude}\" = \"codex\" ]; }
+            _sandy_has_codex() { case \",\${SANDY_AGENT:-claude},\" in *,codex,*) return 0 ;; esac; return 1; }
             $_TRUST_BLOCK
         " 2>/dev/null
 
@@ -1429,19 +1389,10 @@ TOML
     rm -rf "$_TRUST_TMP"
 fi
 
-# Feature guards: the SANDY_SKILL_PACKS guard must reject SANDY_AGENT=codex.
-# Structure: `if [ "$SANDY_AGENT" = "gemini" ] || [ "$SANDY_AGENT" = "codex" ]; then
-#                if [ -n "${SANDY_SKILL_PACKS:-}" ]; then ERROR ...`
-if grep -qE '"\$SANDY_AGENT" = "codex" \]; then' "$SANDY_SCRIPT" \
-   && awk '
-        /\$SANDY_AGENT" = "codex"/ {ctx=5}
-        ctx > 0 {ctx--; if (/SANDY_SKILL_PACKS/) found=1}
-        END {exit !found}
-   ' "$SANDY_SCRIPT"; then
-    pass "SANDY_SKILL_PACKS guard rejects SANDY_AGENT=codex"
-else
-    fail "SANDY_SKILL_PACKS guard rejects SANDY_AGENT=codex"
-fi
+# Feature guards: the SANDY_SKILL_PACKS guard must reject non-claude agents.
+# Structure: `if ! _sandy_agent_has claude && [ -n "${SANDY_SKILL_PACKS:-}" ]; then ERROR ...`
+check "SANDY_SKILL_PACKS guard rejects non-claude agents" \
+    grep -q '! _sandy_agent_has claude.*SANDY_SKILL_PACKS' "$SANDY_SCRIPT"
 
 # The --remote and SANDY_CHANNELS=discord guards should also catch codex.
 # These use different structures, so match by pattern in the error text.
@@ -1452,11 +1403,9 @@ else
 fi
 
 # The --remote guard condition must reject ANY non-claude agent (including codex).
-if grep -qE '"\$SANDY_REMOTE_CONTROL" = true \] && \[ "\$SANDY_AGENT" != "claude"' "$SANDY_SCRIPT"; then
-    pass "--remote guard condition is '!= claude' (catches codex)"
-else
-    fail "--remote guard condition is '!= claude' (catches codex)"
-fi
+# Uses `! _sandy_agent_has claude || [ "$_SANDY_IS_MULTI" = true ]`.
+check "--remote guard condition rejects non-claude and multi-agent" \
+    grep -q '! _sandy_agent_has claude.*_SANDY_IS_MULTI.*true' "$SANDY_SCRIPT"
 
 # Discord guard must reject non-claude agents (covers codex, gemini).
 # The guard uses `$SANDY_AGENT != "claude"` with a case match on *,discord,*.
@@ -1503,10 +1452,9 @@ check "DOCKERFILE_PATH dispatch includes codex → Dockerfile.codex" \
 check "BUILD_HASH_FILE_NAME dispatch includes codex → .build_hash_codex" \
     grep -q '.build_hash_codex' "$SANDY_SCRIPT"
 
-# .claude.json seeding gate covers both (not just claude).
-# The source line is: if { [ "$SANDY_AGENT" = "claude" ] || [ "$SANDY_AGENT" = "both" ]; } && [ ! -f "$CLAUDE_JSON" ]; then
-check ".claude.json seeding gate includes SANDY_AGENT=both" \
-    grep -q 'SANDY_AGENT" = "both".*CLAUDE_JSON' "$SANDY_SCRIPT"
+# .claude.json seeding gate uses _sandy_agent_has (covers multi-agent combos).
+check ".claude.json seeding gate uses _sandy_agent_has claude" \
+    grep -q '_sandy_agent_has claude && .*CLAUDE_JSON' "$SANDY_SCRIPT"
 
 # SANDY_GEMINI_AUTH is in the config allowlist.
 check "config allowlist includes SANDY_GEMINI_AUTH" \
@@ -1645,8 +1593,8 @@ if docker image inspect sandy-gemini-cli &>/dev/null; then
     check "node is available (required by gemini CLI)" \
         _gemini_in_container "node --version"
 
-    # Sanity: the base Claude toolchain should still be present in the both image
-    # (we're only checking gemini-cli here; sandy-both would be a separate check).
+    # Sanity: the base Claude toolchain should still be present in the multi-agent image
+    # (we're only checking gemini-cli here; sandy-full would be a separate check).
 else
     printf "  \033[0;33m⊘ skipped — sandy-gemini-cli image not built\033[0m\n"
 fi

@@ -18,7 +18,7 @@
 #      here are auto-detected by these tests too):
 #
 #      CODEX (OpenAI Codex CLI):
-#        • export CODEX_API_KEY="sk-..."          ← OpenAI API key
+#        • export OPENAI_API_KEY="sk-..."          ← OpenAI API key
 #          OR
 #        • Run `codex login` on the host           ← creates ~/.codex/auth.json
 #          (OAuth path tested separately; API key covers most tests)
@@ -44,7 +44,7 @@
 #   Credentials provided    │ Tests that run
 #   ────────────────────────┼──────────────────────────────────────────
 #   (none)                  │ Feature guards only (§1)
-#   CODEX_API_KEY           │ §1-4: guards, codex build/headless/seeding/alias/container
+#   OPENAI_API_KEY           │ §1-4: guards, codex build/headless/seeding/container
 #   + ~/.codex/auth.json    │ + §9: OAuth read-only mount detection
 #   GEMINI_API_KEY          │ §5-6: gemini build/headless/container
 #   + ~/.gemini/tokens.json │ + §10: OAuth detection
@@ -58,6 +58,14 @@
 #   • API calls are minimal — each headless test sends one short prompt.
 #   • Tests never write credentials to disk or commit anything.
 #
+# ── Flags ─────────────────────────────────────────────────────────────
+#
+#   -v      Pass SANDY_VERBOSE=1 to sandy (info messages)
+#   -vv     Pass SANDY_VERBOSE=2 to sandy (+ set -x)
+#   -vvv    Pass SANDY_VERBOSE=3 to sandy (+ docker run flags dump)
+#
+#   SANDY_INTEG_TIMEOUT=600  Override per-test timeout (default 300s)
+#
 set -euo pipefail
 
 SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
@@ -69,6 +77,24 @@ ERRORS=()
 COMPLETED=false
 TEST_DIRS=()
 SANDBOX_DIRS=()
+
+# macOS doesn't have GNU timeout; use perl fallback
+if ! command -v timeout &>/dev/null; then
+    timeout() {
+        local secs="$1"; shift
+        perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+    }
+fi
+
+# Verbosity: -v, -vv, -vvv (passed through to sandy)
+VERBOSE=0
+for _arg in "$@"; do
+    case "$_arg" in
+        -vvv) VERBOSE=3 ;;
+        -vv)  VERBOSE=2 ;;
+        -v)   VERBOSE=1 ;;
+    esac
+done
 
 # --- Helpers ---
 
@@ -97,10 +123,10 @@ _emit_summary() {
 
 cleanup() {
     _emit_summary
-    for d in "${TEST_DIRS[@]}"; do
+    for d in "${TEST_DIRS[@]+"${TEST_DIRS[@]}"}"; do
         rm -rf "$d" 2>/dev/null || true
     done
-    for d in "${SANDBOX_DIRS[@]}"; do
+    for d in "${SANDBOX_DIRS[@]+"${SANDBOX_DIRS[@]}"}"; do
         rm -rf "$d" 2>/dev/null || true
     done
 }
@@ -125,16 +151,25 @@ setup_project() {
 # Adds the resolved dir to SANDBOX_DIRS for cleanup on exit.
 # Uses the same naming scheme as sandy: <basename>-<8char-sha256-of-path>
 resolve_sandbox() {
-    local base short_hash
-    base="$(basename "$PROJECT_DIR" | tr -cd 'a-zA-Z0-9._-')"
+    # Sandy uses $(pwd) which resolves symlinks on macOS (/var → /private/var).
+    # Use pwd -P from the project dir to match.
+    local phys_dir base short_hash
+    phys_dir="$(cd "$PROJECT_DIR" && pwd -P)"
+    base="$(basename "$phys_dir" | tr -cd 'a-zA-Z0-9._-')"
     base="${base:-project}"
-    short_hash="$(printf '%s' "$PROJECT_DIR" | shasum -a 256 2>/dev/null || printf '%s' "$PROJECT_DIR" | sha256sum)"
+    short_hash="$(printf '%s' "$phys_dir" | shasum -a 256 2>/dev/null || printf '%s' "$phys_dir" | sha256sum)"
     short_hash="${short_hash%% *}"
     short_hash="${short_hash:0:8}"
     SANDBOX_DIR="$SANDY_HOME/sandboxes/${base}-${short_hash}"
     if [ ! -d "$SANDBOX_DIR" ]; then
-        # Fallback: try ls match in case basename was sanitized differently.
-        SANDBOX_DIR="$(ls -dt "$SANDY_HOME/sandboxes/${base}-"* 2>/dev/null | head -1 || true)"
+        # Fallback: find an actual directory matching the prefix (not the
+        # sibling <name>.claude.json sidecar file that lives next to it).
+        SANDBOX_DIR=""
+        for _d in "$SANDY_HOME/sandboxes/${base}-"*/; do
+            [ -d "$_d" ] || continue
+            SANDBOX_DIR="${_d%/}"
+            break
+        done
     fi
     if [ -n "$SANDBOX_DIR" ] && [ -d "$SANDBOX_DIR" ]; then
         SANDBOX_DIRS+=("$SANDBOX_DIR")
@@ -161,10 +196,29 @@ run_sandy_headless() {
     if [ "${SANDY_INTEG_REBUILD:-}" = "1" ]; then
         rebuild_flag="--rebuild"
     fi
-    if [ "${#env_args[@]}" -gt 0 ]; then
-        env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag "${sandy_args[@]}" 2>&1 || true
+    local verbose_flag=""
+    case "$VERBOSE" in
+        3) verbose_flag="-vvv" ;;
+        2) verbose_flag="-vv" ;;
+        1) verbose_flag="-v" ;;
+    esac
+    # Timeout: headless sandy should complete within 5 minutes.
+    # Image builds can be slow on first run, so this is generous.
+    local timeout_sec="${SANDY_INTEG_TIMEOUT:-300}"
+    # When verbose, tee output to stderr so it's visible even when the caller
+    # captures stdout into a variable (e.g. _out="$(run_sandy_headless ...)").
+    if [ "$VERBOSE" -gt 0 ]; then
+        if [ "${#env_args[@]}" -gt 0 ]; then
+            timeout "$timeout_sec" env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 | tee /dev/stderr || true
+        else
+            timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 | tee /dev/stderr || true
+        fi
     else
-        "$SANDY_SCRIPT" $rebuild_flag "${sandy_args[@]}" 2>&1 || true
+        if [ "${#env_args[@]}" -gt 0 ]; then
+            timeout "$timeout_sec" env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 || true
+        else
+            timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 || true
+        fi
     fi
 }
 
@@ -186,7 +240,7 @@ fi
 # .sandy/.secrets as KEY=VALUE pairs — we do the same here so integration
 # tests see whatever the user has configured without requiring them to
 # also export to the shell environment.
-HAS_CODEX_API_KEY=false
+HAS_OPENAI_API_KEY=false
 HAS_CODEX_OAUTH=false
 HAS_GEMINI_API_KEY=false
 HAS_GEMINI_OAUTH=false
@@ -202,7 +256,6 @@ if [ -f "$HOME/.sandy/.secrets" ]; then
         _val="$(echo "$_val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
         [ -z "$_key" ] || [[ "$_key" == \#* ]] && continue
         case "$_key" in
-            CODEX_API_KEY)             [ -z "${CODEX_API_KEY:-}" ]             && export CODEX_API_KEY="$_val" ;;
             OPENAI_API_KEY)            [ -z "${OPENAI_API_KEY:-}" ]            && export OPENAI_API_KEY="$_val" ;;
             GEMINI_API_KEY)            [ -z "${GEMINI_API_KEY:-}" ]            && export GEMINI_API_KEY="$_val" ;;
             ANTHROPIC_API_KEY)         [ -z "${ANTHROPIC_API_KEY:-}" ]         && export ANTHROPIC_API_KEY="$_val" ;;
@@ -211,7 +264,7 @@ if [ -f "$HOME/.sandy/.secrets" ]; then
     done < "$HOME/.sandy/.secrets"
 fi
 
-[ -n "${CODEX_API_KEY:-}" ] && HAS_CODEX_API_KEY=true
+[ -n "${OPENAI_API_KEY:-}" ] && HAS_OPENAI_API_KEY=true
 [ -f "$HOME/.codex/auth.json" ] && HAS_CODEX_OAUTH=true
 [ -n "${GEMINI_API_KEY:-}" ] && HAS_GEMINI_API_KEY=true
 # Gemini OAuth: check oauth_creds.json (≥0.30) and legacy tokens.json.
@@ -233,7 +286,7 @@ info "Sandy Integration Tests"
 # For test gating, each agent is available if ANY of its auth methods works.
 HAS_CODEX=false
 HAS_GEMINI=false
-[ "$HAS_CODEX_API_KEY" = true ] || [ "$HAS_CODEX_OAUTH" = true ] && HAS_CODEX=true
+[ "$HAS_OPENAI_API_KEY" = true ] || [ "$HAS_CODEX_OAUTH" = true ] && HAS_CODEX=true
 [ "$HAS_GEMINI_API_KEY" = true ] || [ "$HAS_GEMINI_OAUTH" = true ] || [ "$HAS_GEMINI_ADC" = true ] && HAS_GEMINI=true
 
 _label() { if [ "$1" = true ]; then printf "\033[0;32m✓\033[0m"; else printf "\033[0;31m✗\033[0m"; fi; }
@@ -250,7 +303,7 @@ _auth_detail() {
     fi
 }
 
-echo "  Codex:   $(_label $HAS_CODEX)  $(_auth_detail "api-key=$HAS_CODEX_API_KEY" "oauth=$HAS_CODEX_OAUTH")"
+echo "  Codex:   $(_label $HAS_CODEX)  $(_auth_detail "api-key=$HAS_OPENAI_API_KEY" "oauth=$HAS_CODEX_OAUTH")"
 echo "  Gemini:  $(_label $HAS_GEMINI)  $(_auth_detail "api-key=$HAS_GEMINI_API_KEY" "oauth=$HAS_GEMINI_OAUTH" "adc=$HAS_GEMINI_ADC")"
 echo "  Claude:  $(_label $HAS_CLAUDE)  $(_auth_detail "api-key=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" "oauth-token=$([ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo true || echo false)" "credentials-file=$([ -f "$HOME/.claude/.credentials.json" ] && echo true || echo false)")"
 echo ""
@@ -271,7 +324,7 @@ if [ "$_all_true" = false ]; then
         echo ""
         if [ "$HAS_CODEX" = false ]; then
             echo "  CODEX (need at least one):"
-            echo "    export CODEX_API_KEY=\"sk-...\"       # https://platform.openai.com/api-keys"
+            echo "    export OPENAI_API_KEY=\"sk-...\"       # https://platform.openai.com/api-keys"
             echo "    codex login                          # creates ~/.codex/auth.json"
             echo ""
         fi
@@ -290,7 +343,7 @@ if [ "$_all_true" = false ]; then
             echo ""
         fi
         echo "  To persist credentials, add them to ~/.sandy/.secrets (one per line):"
-        echo "    CODEX_API_KEY=sk-..."
+        echo "    OPENAI_API_KEY=sk-..."
         echo "    GEMINI_API_KEY=AI..."
         echo "    CLAUDE_CODE_OAUTH_TOKEN=..."
         echo "  This file is auto-read by both sandy and these tests."
@@ -311,7 +364,7 @@ info "1. Feature guards (no credentials needed)"
 # fire and exit before any Docker operations.
 
 _out="$(SANDY_AGENT=codex SANDY_SKILL_PACKS=gstack "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
-if echo "$_out" | grep -qi "skill.packs.*not supported\|not supported.*skill.packs"; then
+if echo "$_out" | grep -qi "SANDY_SKILL_PACKS requires claude\|skill.packs.*not supported"; then
     pass "SANDY_SKILL_PACKS + codex rejected"
 else
     fail "SANDY_SKILL_PACKS + codex rejected"
@@ -339,17 +392,18 @@ else
 fi
 
 _out="$(SANDY_AGENT=codex+claude "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
-if echo "$_out" | grep -q "Invalid SANDY_AGENT"; then
+if echo "$_out" | grep -q "Invalid agent"; then
     pass "SANDY_AGENT=codex+claude rejected"
 else
     fail "SANDY_AGENT=codex+claude rejected"
 fi
 
-_out="$(SANDY_AGENT=all "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
-if echo "$_out" | grep -q "Invalid SANDY_AGENT"; then
-    pass "SANDY_AGENT=all rejected"
+# SANDY_AGENT=all is now a valid alias for claude,gemini,codex — verify it's accepted.
+_out="$(SANDY_AGENT=all "$SANDY_SCRIPT" --help 2>&1 || true)"
+if ! echo "$_out" | grep -q "Invalid agent"; then
+    pass "SANDY_AGENT=all accepted as alias"
 else
-    fail "SANDY_AGENT=all rejected"
+    fail "SANDY_AGENT=all accepted as alias"
 fi
 
 _out="$(SANDY_AGENT=codex SANDY_CHANNELS=discord "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
@@ -363,10 +417,10 @@ fi
 info "2. Codex — image build and headless response"
 # ============================================================
 
-if [ "$HAS_CODEX_API_KEY" = true ]; then
+if [ "$HAS_OPENAI_API_KEY" = true ]; then
     setup_project codex "integ-codex"
 
-    _out="$(run_sandy_headless "CODEX_API_KEY=$CODEX_API_KEY" -- -p "reply with exactly one word: pineapple")"
+    _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" -- -p "reply with exactly one word: pineapple")"
     _exit=$?
 
     # Image should exist after first run
@@ -422,7 +476,7 @@ if [ "$HAS_CODEX_API_KEY" = true ]; then
         fi
 
         # Idempotency: run again and check trust entry isn't duplicated
-        run_sandy_headless "CODEX_API_KEY=$CODEX_API_KEY" -- -p "reply one word: test" >/dev/null 2>&1
+        run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" -- -p "reply one word: test" >/dev/null 2>&1
         _proj_count="$(grep -c '^\[projects\.' "$_cfg" 2>/dev/null || echo 0)"
         if [ "$_proj_count" -eq 1 ]; then
             pass "trust entry idempotent on relaunch (count=$_proj_count)"
@@ -432,7 +486,7 @@ if [ "$HAS_CODEX_API_KEY" = true ]; then
 
         # Sandbox forcing: delete config.toml, relaunch, verify it's re-seeded
         rm -f "$_cfg"
-        _out="$(run_sandy_headless "CODEX_API_KEY=$CODEX_API_KEY" -- -p "reply one word: test")"
+        _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" -- -p "reply one word: test")"
         if [ -f "$_cfg" ]; then
             pass "config.toml re-seeded after deletion"
         else
@@ -454,40 +508,10 @@ if [ "$HAS_CODEX_API_KEY" = true ]; then
         fail "sandbox directory exists for codex project"
     fi
 else
-    skip "codex image build and headless (no CODEX_API_KEY)"
+    skip "codex image build and headless (no OPENAI_API_KEY)"
 fi
 
-# ============================================================
-info "3. Codex — CODEX_API_KEY → OPENAI_API_KEY aliasing"
-# ============================================================
-
-# Sandy accepts CODEX_API_KEY as a user-friendly name and forwards it as
-# OPENAI_API_KEY (what codex CLI actually reads). §2 already tests this
-# path implicitly (it passes CODEX_API_KEY). This section verifies that
-# setting OPENAI_API_KEY directly (the native codex var) also works — no
-# alias needed, codex should just pick it up.
-
-if [ "$HAS_CODEX_API_KEY" = true ]; then
-    setup_project codex "integ-codex-alias"
-    # Resolve the actual key value (might be in CODEX_API_KEY or OPENAI_API_KEY)
-    _the_key="${OPENAI_API_KEY:-${CODEX_API_KEY:-}}"
-    _out="$(env -u CODEX_API_KEY OPENAI_API_KEY="$_the_key" "$SANDY_SCRIPT" -p "reply one word: hello" 2>&1 || true)"
-
-    if echo "$_out" | grep -qi "Using OPENAI_API_KEY\|No Codex credentials"; then
-        if echo "$_out" | grep -qi "No Codex credentials"; then
-            fail "codex works with OPENAI_API_KEY directly"
-        else
-            pass "codex works with OPENAI_API_KEY directly"
-        fi
-    else
-        # No credential message but codex ran — that's fine too
-        pass "codex works with OPENAI_API_KEY directly"
-    fi
-
-    resolve_sandbox
-else
-    skip "CODEX_API_KEY aliasing (no codex API key available)"
-fi
+# (Section 3 removed — CODEX_API_KEY aliasing was dropped; codex uses OPENAI_API_KEY natively)
 
 # ============================================================
 info "4. Codex — in-container checks (sandy-codex image)"
@@ -712,11 +736,11 @@ info "8. Cross-agent regression"
 
 # If we have both claude and codex keys, verify switching agents
 # on the same project dir works without cross-contamination.
-if [ "$HAS_CLAUDE" = true ] && [ "$HAS_CODEX_API_KEY" = true ]; then
+if [ "$HAS_CLAUDE" = true ] && [ "$HAS_OPENAI_API_KEY" = true ]; then
     setup_project codex "integ-switch"
 
     # Start as codex
-    _out="$(run_sandy_headless "CODEX_API_KEY=$CODEX_API_KEY" -- -p "reply one word: first")"
+    _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" -- -p "reply one word: first")"
     if ! echo "$_out" | grep -qi "error\|landlock"; then
         pass "codex session works in switch test"
     else
@@ -765,7 +789,7 @@ info "9. Codex — OAuth read-only mount"
 if [ "$HAS_CODEX_OAUTH" = true ]; then
     setup_project codex "integ-codex-oauth"
     # Unset API key env vars so OAuth path is used
-    _out="$(env -u CODEX_API_KEY -u OPENAI_API_KEY "$SANDY_SCRIPT" -p "reply one word: test" 2>&1 || true)"
+    _out="$(run_sandy_headless "OPENAI_API_KEY=" -- -p "reply one word: test")"
 
     if echo "$_out" | grep -qi "Loaded Codex OAuth\|read-only mount"; then
         pass "codex OAuth credentials detected from host"
@@ -789,7 +813,7 @@ info "10. Gemini — OAuth path"
 
 if [ "$HAS_GEMINI_OAUTH" = true ] && [ -z "${GEMINI_API_KEY:-}" ]; then
     setup_project gemini "integ-gemini-oauth"
-    _out="$(env -u GEMINI_API_KEY "$SANDY_SCRIPT" -p "reply one word: test" 2>&1 || true)"
+    _out="$(run_sandy_headless "GEMINI_API_KEY=" -- -p "reply one word: test")"
 
     if echo "$_out" | grep -q "Loaded Gemini OAuth"; then
         pass "gemini OAuth credentials detected from host"

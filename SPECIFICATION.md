@@ -12,8 +12,9 @@ Sandy is a self-contained command that runs an AI coding agent (Claude Code, Gem
 |---|---|---|
 | `claude` (default) | `sandy-claude-code` | Claude Code — full feature support (channels, skill packs, synthkit, remote-control) |
 | `gemini` | `sandy-gemini-cli` | Gemini CLI — Google OAuth / ADC / Vertex AI / API key auth |
-| `codex` | `sandy-codex` | OpenAI Codex CLI — `CODEX_API_KEY` env var or ChatGPT OAuth (read-only mount) |
-| `both` | `sandy-both` | Claude + Gemini in a single image, launched as a dual-pane tmux session |
+| `codex` | `sandy-codex` | OpenAI Codex CLI — `OPENAI_API_KEY` env var or ChatGPT OAuth (read-only mount) |
+| `both` | `sandy-full` | Alias for `claude,gemini` — multi-agent combo in a single image |
+| `all` | `sandy-full` | Alias for `claude,gemini,codex` — all three agents in a 3-pane tmux session |
 
 Combo values involving codex (e.g. `codex+claude`) are explicitly rejected. Dual-agent mode is still claude+gemini only.
 
@@ -122,8 +123,7 @@ The config parser does **not** use `source`. It reads lines via `grep -E '^[A-Z_
 | `GOOGLE_CLOUD_LOCATION` | unset | GCP region (Vertex AI) |
 | `GOOGLE_GENAI_USE_VERTEXAI` | unset | Set `true` to route through Vertex AI |
 | `GOOGLE_API_KEY` | unset | Alternative Google API key |
-| `CODEX_API_KEY` | unset | OpenAI API key for Codex CLI (primary auth path) |
-| `OPENAI_API_KEY` | unset | Aliased to `CODEX_API_KEY` automatically when `SANDY_AGENT=codex` |
+| `OPENAI_API_KEY` | unset | OpenAI API key for Codex CLI (primary auth path) |
 | `CODEX_MODEL` | unset | Codex model override |
 | `SANDY_CODEX_AUTH` | `auto` | Force Codex auth path: `auto`, `api_key`, or `oauth` |
 | `CODEX_HOME` | unset | Override container-side codex home directory (advanced) |
@@ -231,6 +231,7 @@ For `SANDY_AGENT` in `gemini`/`both`, sandy creates `gemini/` and its `commands/
 For `SANDY_AGENT=codex`, sandy creates `codex/` and seeds `codex/config.toml` (first run only) with:
 
 ```toml
+model = "gpt-5.4"
 sandbox_mode = "danger-full-access"
 
 [notice]
@@ -241,7 +242,7 @@ hide_rate_limit_model_nudge = true
 hide_world_writable_warning = true
 ```
 
-The `sandbox_mode = "danger-full-access"` line is required — codex's Landlock sandbox does not nest cleanly inside sandy's Docker container. Sandy provides the outer isolation, and the CLI is additionally invoked with `--sandbox danger-full-access` as belt-and-suspenders in `build_codex_cmd`. The `[notice]` block suppresses first-run prompts; all five documented keys are seeded even if codex adds more over time.
+The `model = "gpt-5.4"` line sets a stable default model; users can override via `CODEX_MODEL` env var. The `sandbox_mode = "danger-full-access"` line is required — codex's Landlock sandbox does not nest cleanly inside sandy's Docker container. Sandy provides the outer isolation, and the CLI is additionally invoked with `--sandbox danger-full-access` as belt-and-suspenders in `build_codex_cmd`. The `[notice]` block suppresses first-run prompts; all five documented keys are seeded even if codex adds more over time.
 
 The `[projects."<workspace>"] trust_level = "trusted"` entry is **appended at session start by `user-setup.sh`** (not at host-time) because it needs the container-side `$SANDY_WORKSPACE` path. Re-launches are idempotent: the entry is only appended if a matching line is not already present.
 
@@ -615,10 +616,10 @@ Sandy's `load_codex_credentials()` tries the following sources, controlled by `S
 
 | Mode | Source | Container mount / env |
 |---|---|---|
-| `api_key` | `CODEX_API_KEY` env var on host | Forwarded via `-e CODEX_API_KEY=…` |
+| `api_key` | `OPENAI_API_KEY` env var on host | Forwarded via `-e OPENAI_API_KEY=…` |
 | `oauth` | Host `~/.codex/auth.json` (ChatGPT login) | Ephemeral copy mounted at `/home/claude/.codex/auth.json` **read-only** |
 
-In `auto` mode (default), `CODEX_API_KEY` wins if set; otherwise an `auth.json` ephemeral mount is used if present; otherwise a warning is emitted. As a convenience, when `SANDY_AGENT=codex` and `CODEX_API_KEY` is unset, `OPENAI_API_KEY` is aliased to `CODEX_API_KEY` with a warn line (codex's own auth reader ignores `OPENAI_API_KEY` entirely — it's telemetry-only in codex-rs, so sandy must perform the alias).
+In `auto` mode (default), `OPENAI_API_KEY` wins if set; otherwise an `auth.json` ephemeral mount is used if present; otherwise a warning is emitted.
 
 **The `auth.json` mount is read-only by design.** If codex needs to refresh an expired OAuth token mid-session, the write fails and codex falls back to an in-session re-login flow. This is the safer default: it prevents refreshed tokens from leaking back to the host, and prevents stale-token-on-exit races. Users who want fresh credentials on every launch get that automatically — sandy re-copies `auth.json` from the host at each launch.
 
@@ -1313,6 +1314,14 @@ All magic numbers, thresholds, timeouts, and limits used in the sandy script.
 | SSH socket wait (macOS) | 5 seconds | 50 iterations × 0.1s sleep in entrypoint |
 | OAuth token expiry buffer | 5 minutes | 300,000 ms buffer before `expiresAt` |
 
+### B.2a Sandbox Compatibility
+
+| Parameter | Value | Context |
+|---|---|---|
+| `SANDY_SANDBOX_MIN_COMPAT` | `0.7.10` | Minimum sandy version whose sandboxes are still layout-compatible. Sandboxes created by older sandy (pre-c99eb97 workspace mount path change) trigger a launch-time warning recommending recreation. |
+| `.sandy_created_version` | Written once on sandbox creation | Records the sandy version that created the sandbox. Missing on sandboxes created before 0.10.1. |
+| `.sandy_last_version` | Refreshed every launch | Records the most-recent sandy version that touched the sandbox. |
+
 ### B.3 Cache TTLs
 
 | Cache | TTL | File |
@@ -1553,6 +1562,7 @@ Written to `$SANDBOX_DIR/codex/config.toml` on first launch of a new sandbox wit
 # Written by sandy on first launch. Safe to edit, but sandbox_mode must stay
 # "danger-full-access" — sandy provides outer isolation; codex's Landlock
 # sandbox does not nest cleanly in Docker containers.
+model = "gpt-5.4"
 sandbox_mode = "danger-full-access"
 
 [notice]
@@ -1947,7 +1957,7 @@ GOOGLE_APPLICATION_CREDENTIALS=/home/claude/.config/gcloud/application_default_c
 
 **Codex-specific env** (`SANDY_AGENT=codex`):
 ```bash
-CODEX_API_KEY=<key>                 # if set (OPENAI_API_KEY is aliased to this pre-launch)
+OPENAI_API_KEY=<key>                # if set
 CODEX_MODEL=<model>                 # if set
 SANDY_CODEX_AUTH=<auto|api_key|oauth>
 ```

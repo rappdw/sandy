@@ -35,7 +35,7 @@ Inside the TUI, open a shell pane (Ctrl-b then ") and run:
 echo foo > ~/.codex/auth.json         # MUST fail: "Read-only file system"
 ```
 
-- [ ] Write to auth.json fails inside container
+- [x] Write to auth.json fails inside container
 
 > **Automated**: OAuth detection, tmpdir creation, and cleanup are tested in `run-integration-tests.sh` §9. This step verifies the `:ro` mount actually blocks writes from inside the TUI.
 
@@ -52,17 +52,24 @@ Inside the codex TUI:
 /skills
 ```
 
-- [ ] List includes `md2pdf`, `md2doc`, `md2html`, `md2email`
+- [x] List includes `md2pdf`, `md2doc`, `md2html`, `md2email`
 
-Test end-to-end (in a shell pane):
+Test via natural language prompt (codex skills are context, not slash commands):
+```
+convert /tmp/hi.md to PDF
+```
+
+Or test directly in a shell pane (Ctrl-b then "):
 ```sh
 echo -e "# Hello\n\nThis is a test." > /tmp/hi.md
 md2pdf /tmp/hi.md
 ls /tmp/hi.pdf
 ```
 
-- [ ] PDF is produced
+- [x] PDF is produced
 
+> **Note**: Codex skills are NOT slash commands — they appear in `/skills` as context that codex uses when answering prompts. To trigger them, ask naturally (e.g. "convert file.md to PDF") rather than typing `/md2pdf`.
+>
 > **Automated**: synthkit binary availability and WeasyPrint functionality (via `md2html`) tested in `run-integration-tests.sh` §4. This step verifies codex's `/skills` TUI command discovers them and they produce actual output.
 
 ---
@@ -81,9 +88,9 @@ echo 'GEMINI_API_KEY=your_key_here' > .sandy/.secrets
 sandy
 ```
 
-- [ ] Launches into tmux, `gemini` prompt appears
-- [ ] `what files are in this directory?` lists `file.txt`
-- [ ] Exit with Ctrl+D works cleanly
+- [x] Launches into tmux, `gemini` prompt appears
+- [x] `what files are in this directory?` lists `file.txt`
+- [x] Exit with Ctrl+D works cleanly
 
 > **Automated**: headless response and sandbox layout tested in `run-integration-tests.sh` §5. This step verifies the interactive TUI experience.
 
@@ -97,9 +104,9 @@ echo 'SANDY_GEMINI_EXTENSIONS=https://github.com/gemini-cli-extensions/security'
 sandy -p "list your available extensions"
 ```
 
-- [ ] First run shows `[sandy] Installing Gemini extensions`
-- [ ] Second run is a no-op (idempotent)
-- [ ] `ls ~/.sandy/sandboxes/sandy-test-gemini-*/gemini/extensions/` shows `security/`
+- [x] First run shows `[sandy] Installing Gemini extensions`
+- [x] Second run is a no-op (idempotent)
+- [x] `ls ~/.sandy/sandboxes/sandy-test-gemini-*/gemini/extensions/` shows `security/`
 
 ---
 
@@ -111,7 +118,7 @@ sandy
 /md2pdf --help
 ```
 
-- [ ] Gemini recognizes `/md2pdf` and runs the `md2pdf` binary
+- [x] Gemini recognizes `/md2pdf` and runs the `md2pdf` binary
 
 ---
 
@@ -128,11 +135,19 @@ sandy
 # Inside gemini session, try: /hello
 ```
 
-- [ ] `/hello` is NOT visible inside the session (overlay hides host content)
+- [x] `/hello` IS visible inside the session (overlay is seeded from host on first creation)
 
-Inside the session, create a command file, then after exit:
-- [ ] File is NOT in the host workspace dir
-- [ ] File IS in the sandbox overlay dir (`workspace-gemini-commands/`)
+Inside the session, create a new command file, then after exit:
+- [x] New file is NOT in the host workspace dir
+- [x] New file IS in the sandbox overlay dir (`workspace-gemini-commands/`)
+- [x] Host's `hello.toml` is also in the sandbox overlay dir (seeded copy)
+
+Delete the overlay dir and re-launch to verify re-seeding:
+```sh
+rm -rf ~/.sandy/sandboxes/sandy-test-gemini-*/workspace-gemini-commands
+sandy
+# /hello should be visible again (re-seeded from host)
+```
 
 ---
 
@@ -144,8 +159,8 @@ echo 'SANDY_GEMINI_AUTH=oauth' >> .sandy/config
 sandy -p "hi"
 ```
 
-- [ ] Uses only the OAuth path
-- [ ] If no `~/.gemini/oauth_creds.json` (or legacy `tokens.json`) exists, shows "No Gemini credentials found" warning
+- [x] Uses only the OAuth path
+- [x] If no `~/.gemini/oauth_creds.json` (or legacy `tokens.json`) exists, shows "No Gemini credentials found" warning
 
 ---
 
@@ -159,9 +174,9 @@ git init && echo "hello" > README.md
 sandy
 ```
 
-- [ ] Normal tmux session, `claude` prompt
-- [ ] `/help` works
-- [ ] Exit with Ctrl+D
+- [x] Normal tmux session, `claude` prompt
+- [x] `/help` works
+- [x] Exit with Ctrl+D
 
 > **Automated**: headless response and sandbox layout tested in `run-integration-tests.sh` §7.
 
@@ -177,8 +192,8 @@ rmdir "$SB/claude"
 cd ~/sandy-test-claude && sandy -p "hi"
 ```
 
-- [ ] `[sandy] Migrating sandbox to v1.5 layout (claude/ subdir)...` appears once
-- [ ] Re-running sandy produces no second migration message (idempotent)
+- [x] `[sandy] Migrating sandbox to v1.5 layout (claude/ subdir)...` appears once
+- [x] Re-running sandy produces no second migration message (idempotent)
 
 > **Automated**: migration logic tested in `run-tests.sh` §29 (4 scenarios). This verifies the live migration with a real sandbox.
 
@@ -190,7 +205,7 @@ cd ~/sandy-test-claude && sandy -p "hi"
 sandy --remote
 ```
 
-- [ ] Launches `claude remote-control` (Ctrl+C out)
+- [x] Launches `claude remote-control` (requires full OAuth; long-lived tokens are rejected by Claude Code with a clear error)
 
 ---
 
@@ -208,10 +223,29 @@ echo 'GEMINI_API_KEY=your_key_here' > .sandy/.secrets
 sandy
 ```
 
-- [ ] Tmux opens with **two horizontal panes**: Claude (pane 0), Gemini (pane 1)
-- [ ] Each pane has its own prompt
-- [ ] Type a question in Claude pane — it responds
-- [ ] `Ctrl-B →` to Gemini pane — ask a question — it responds
+- [x] Tmux opens with **two horizontal panes**: Claude (pane 0), Gemini (pane 1)
+- [x] Each pane has its own prompt
+- [x] Type a question in Claude pane — it responds
+- [x] `Ctrl-B →` to Gemini pane — ask a question — it responds
+
+## 4.2 Arbitrary combos and triple-pane
+
+```sh
+# Test claude,codex combo
+echo 'SANDY_AGENT=claude,codex' > .sandy/config
+sandy
+```
+
+- [x] Two horizontal panes: Claude (pane 0), Codex (pane 1)
+
+```sh
+# Test all three agents
+echo 'SANDY_AGENT=all' > .sandy/config
+sandy
+```
+
+- [x] Three panes: Claude (pane 0, left), Gemini (pane 1, top-right), Codex (pane 2, bottom-right)
+- [x] Each pane has its own prompt and responds independently
 
 ---
 
