@@ -1,3 +1,21 @@
+## sandy v0.10.1
+
+M1 blocker fixes from the code review on the `codex-support` branch, on the road to 1.0-rc1.
+
+### Bug Fixes
+
+**Resume fallback misfires on Ctrl-C** — `build_claude_cmd` appended a `|| $cmd_base` fallback after `claude --continue` so a missing-session-file race would re-launch without `--continue`. In practice, **any** non-zero exit triggered the fallback — Ctrl-C, `/exit`, a failed headless prompt — so users would see an unexpected fresh Claude session appear after exiting a resumed one. Dropped the fallback entirely; the session-detect check at sandy:1213 already guarantees `--continue` is only added when a session file exists.
+
+**grep-regex injection in codex trust-entry check** — The idempotency check for the `[projects."..."]` block in `~/.codex/config.toml` was `grep -q "^\[projects\.\"${SANDY_WORKSPACE}\"\]"`, interpolating the workspace path into a grep BRE unescaped. The `/` and `.` characters in the path are regex metacharacters, so two workspaces differing only in those positions could falsely appear identical and skip the append. Switched to `grep -qF --` (fixed-string match).
+
+### Tests
+
+**In-container checks build images on demand** — `run-integration-tests.sh` sections 4/6/7b (codex/gemini/claude in-container image checks — PATH, version file, synthkit, WeasyPrint) were gated on `docker image inspect` and silently skipped when the image wasn't pre-built. They don't actually need credentials — only the image — so a developer without e.g. `OPENAI_API_KEY` would never exercise the sandy-codex image at all. Added an `ensure_image_built` helper that invokes `sandy --build-only` from a throwaway workspace; skip branches replaced with `fail` so a broken build is loud.
+
+**Regression guards in `run-tests.sh` §9h** — Assert that `build_claude_cmd` has no `cmd || cmd_base` fallback pattern, that `cmd_base` is not referenced, and that the codex trust-entry check uses `grep -qF`.
+
+---
+
 ## sandy v0.10.0
 
 ### New Features
