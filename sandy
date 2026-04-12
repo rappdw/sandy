@@ -959,6 +959,23 @@ if [ -n "${GH_ACCOUNTS:-}" ] && command -v gh &>/dev/null; then
         _tok="${_pair#*:}"
         echo "$_tok" | gh auth login --with-token 2>/dev/null || true
     done
+    # Detect the repo owner from the workspace remote URL and switch to the
+    # matching account. Without this, the last-logged-in account is active
+    # and pushes fail if it doesn't own the repo.
+    _repo_owner=""
+    if [ -d "$WORKSPACE/.git" ] || [ -f "$WORKSPACE/.git" ]; then
+        _repo_owner="$(git -C "$WORKSPACE" remote get-url origin 2>/dev/null \
+            | sed -E 's#.*(github\.com[:/])##; s#/.*##' || true)"
+    fi
+    if [ -n "$_repo_owner" ]; then
+        for _pair in "${_gh_pairs[@]}"; do
+            _user="${_pair%%:*}"
+            if [ "$_user" = "$_repo_owner" ]; then
+                gh auth switch --user "$_user" 2>/dev/null || true
+                break
+            fi
+        done
+    fi
 elif [ -n "${GIT_TOKEN:-}" ] && command -v gh &>/dev/null; then
     echo "${GIT_TOKEN}" | gh auth login --with-token 2>/dev/null || true
 fi
