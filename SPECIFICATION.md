@@ -1693,6 +1693,24 @@ sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 
 The `docker run` command is assembled incrementally in a `RUN_FLAGS` array. This appendix documents the complete assembly in order.
 
+### E.0 Workspace Mutex
+
+Only one sandy may run against a given workspace at a time. Early in launch (after config loading, before sandbox seeding), sandy takes a per-workspace mutex:
+
+```bash
+mkdir -p "$SANDY_HOME/sandboxes"
+SANDY_WORKSPACE_LOCK="$SANDY_HOME/sandboxes/.${SANDBOX_NAME}.lock"
+if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
+    # error: another sandy is already running in this workspace (pid <holder>)
+    exit 1
+fi
+echo "$$" > "$SANDY_WORKSPACE_LOCK/pid"
+```
+
+`mkdir` is used as the lock primitive because it is atomic on every POSIX filesystem and requires no external dependency (unlike `flock(1)`, which is not shipped on macOS by default). The lock dir is released by the cleanup trap (`trap cleanup EXIT INT TERM HUP`) on normal exit, Ctrl-C, or sandy crash. A SIGKILL (OOM, `kill -9`) leaves the lock dir behind — the error message on the next launch names the holding pid and the clear command (`rm -rf $SANDY_WORKSPACE_LOCK`).
+
+Rationale: two agents editing the same codebase would step on each other's edits, and the sandbox-seeding / venv-materialization code paths assume exclusive ownership. Deliberate parallelism should use separate workspaces.
+
 ### E.1 Pre-Launch
 
 **Stale container removal**: Before starting, any container with the same name is force-removed to handle unclean previous exits:
@@ -1778,10 +1796,9 @@ The result is normalized to `major.minor` (`cut -d. -f1-2`) and validated agains
 **Symlinked `.venv/`** is explicitly skipped on the host side; an info message fires instead of silently proceeding. Rationale: the symlink target may be a path outside `$WORK_DIR` and overlaying it would shadow unpredictable host state.
 
 Inside the container, `user-setup.sh`:
-1. Takes `flock -w 30` on `$HOME/.local/share/uv/.sandy-venv.lock` before any write, serializing concurrent launches in the same workspace. The lock file lives in the persistent uv sandbox mount (per-workspace on the host filesystem), so kernel flock coordinates correctly across concurrent containers (different PID ns, same host inode). The lock file is deliberately **not** placed inside `$WORKSPACE/.venv` itself: `uv venv` refuses to create a venv into a non-empty directory, and an in-place lock file would make materialization fail with "refusing to remove non-virtualenv".
-2. Re-checks for `pyvenv.cfg` inside the critical section (another sandy may have finished while we waited) and materializes via `uv venv --python <version>` only if still missing.
-3. After materialization (or on subsequent launches), compares the overlay's actual `pyvenv.cfg` version against `SANDY_VENV_PYTHON_VERSION`. Mismatch → prints a drift warning with the recreate command. No auto-recreate (would silently nuke installed packages).
-4. Activates unconditionally if `$WORKSPACE/.venv/bin/python` exists (`VIRTUAL_ENV` + PATH prepend).
+1. If `$WORKSPACE/.venv/pyvenv.cfg` does not exist, materializes a fresh venv via `uv venv --clear --python <version> $WORKSPACE/.venv`. The `--clear` flag is required: the overlay bind-mount target always exists as a directory, and `uv venv` otherwise refuses with "A directory already exists at: .venv". No in-container locking is needed — the host-side workspace mutex (§E.0) guarantees exclusive access.
+2. After materialization (or on subsequent launches), compares the overlay's actual `pyvenv.cfg` version against `SANDY_VENV_PYTHON_VERSION`. Mismatch → prints a drift warning with the recreate command. No auto-recreate (would silently nuke installed packages).
+3. Activates unconditionally if `$WORKSPACE/.venv/bin/python` exists (`VIRTUAL_ENV` + PATH prepend).
 
 The host `.venv/` is never read or written by sandy — it is shadowed by the bind mount inside the container only.
 

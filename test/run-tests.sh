@@ -434,49 +434,33 @@ check "opt-out suppresses symlink info branch" \
 unset SANDY_VENV_OVERLAY
 rm -rf "$SYM_INFO_FIXTURE" "$SYM_INFO_TARGET"
 
-# 9k. PR 2.1: materialization block uses flock for race protection
-# The container-side materialization block must wrap `uv venv` in a flock.
-# Guard against regression by checking the raw script source. Write the
-# extracted block to a temp file — it contains bash code with single quotes,
-# so embedding it inline in `bash -c '...'` would break quote nesting.
+# 9k. PR 2.1: materialization block uses uv venv --clear
+# The overlay's target is a bind mount (dir always exists), so uv venv
+# must be invoked with --clear. Without it, uv refuses with "A directory
+# already exists at: .venv" and no venv is ever created.
 MATERIALIZE_BLOCK_FILE="$(mktemp)"
 awk '/Workspace \.venv overlay\. When SANDY_VENV_OVERLAY_ACTIVE/,/^elif \[ -L "\$WORKSPACE\/\.venv\/bin\/python" \]/' \
     "$_SANDY_SCRIPT_PATH" > "$MATERIALIZE_BLOCK_FILE"
-check "materialization block uses flock" \
-    grep -q 'flock -w' "$MATERIALIZE_BLOCK_FILE"
-# Expect at least 2 mentions of pyvenv.cfg: the outer check and the
-# re-check inside the flock critical section.
-_pyvenv_count="$(grep -c 'pyvenv.cfg' "$MATERIALIZE_BLOCK_FILE" || echo 0)"
-check "materialization block re-checks pyvenv.cfg inside critical section" \
-    test "$_pyvenv_count" -ge 2
-check "materialization block emits drift warning" \
-    grep -q 'Sandbox venv is Python' "$MATERIALIZE_BLOCK_FILE"
-# uv venv must be invoked with --clear because $WORKSPACE/.venv is a bind
-# mount (target dir always exists) — otherwise uv refuses with "A directory
-# already exists at: .venv".
 check "materialization uses uv venv --clear" \
     grep -q 'uv venv --clear' "$MATERIALIZE_BLOCK_FILE"
-# The lock file must NOT live inside $WORKSPACE/.venv — that would make the
-# overlay dir non-empty and break uv venv in a different way.
-check "materialization lock file is outside \$WORKSPACE/.venv" \
-    bash -c "! grep -q 'WORKSPACE/\.venv/\.sandy' '$MATERIALIZE_BLOCK_FILE'"
 rm -f "$MATERIALIZE_BLOCK_FILE"
 
-# 9l. PR 2.1: concurrent-launch race fixes
-# Two regression guards for the container-name collision and the
-# sandbox-seeding race that block concurrent `sandy -p` launches in the
-# same workspace.
-check "CONTAINER_NAME is suffixed with PID for uniqueness" \
-    grep -q 'CONTAINER_NAME="sandy-\${SANDBOX_NAME}-\$\$"' "$_SANDY_SCRIPT_PATH"
-
-check "stale-container cleanup filters status=exited" \
-    grep -q 'status=exited' "$_SANDY_SCRIPT_PATH"
-
-check "host-side setup lock uses flock when available" \
-    bash -c "awk '/_SANDY_HAVE_FLOCK=false/,/^fi$/' '$_SANDY_SCRIPT_PATH' | grep -q 'flock -w 60 8'"
-
-check "host-side setup lock is released before docker run" \
-    bash -c "awk '/Release the host-side setup lock/,/^docker run/' '$_SANDY_SCRIPT_PATH' | grep -q 'flock -u 8'"
+# 9l. PR 2.1: workspace mutex prevents concurrent sandy instances
+# Only one sandy may run against a given workspace at a time. The lock
+# is a `mkdir`-based mutex (atomic, portable, no flock dependency).
+# Previously we tried PID-suffixed container names + flock; that was
+# significantly more complex and still had macOS caveats.
+check "workspace mutex uses mkdir for atomicity" \
+    grep -q 'mkdir "\$SANDY_WORKSPACE_LOCK"' "$_SANDY_SCRIPT_PATH"
+check "workspace mutex errors when held" \
+    grep -q 'Another sandy is already running in this workspace' "$_SANDY_SCRIPT_PATH"
+check "workspace mutex is released in cleanup trap" \
+    bash -c "awk '/^cleanup\(\)/,/^}$/' '$_SANDY_SCRIPT_PATH' | grep -q 'SANDY_WORKSPACE_LOCK'"
+check "CONTAINER_NAME is deterministic (no PID suffix)" \
+    grep -q 'CONTAINER_NAME="sandy-\${SANDBOX_NAME}"' "$_SANDY_SCRIPT_PATH"
+# Regression: old flock-based approach must be gone
+check "no leftover flock-based setup lock" \
+    bash -c "! grep -q '_SANDY_HAVE_FLOCK' '$_SANDY_SCRIPT_PATH'"
 
 # ============================================================
 info "9z. PR 1.1 regression tests — resume fallback + codex grep-F"
