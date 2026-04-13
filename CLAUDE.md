@@ -117,15 +117,17 @@ Sandy solves this by bind-mounting a sandbox-owned overlay over `$WORKSPACE/.ven
 
 **How it works:**
 
-1. On launch, sandy checks `$WORK_DIR/.venv` on the host. If it exists and is not a symlink, sandy creates `$SANDBOX_DIR/venv/` and bind-mounts it at `$WORKSPACE/.venv` inside the container. Sandy also parses `pyvenv.cfg` to learn the host venv's Python version and passes it via `SANDY_VENV_PYTHON_VERSION`.
-2. On first launch, the overlay dir is empty. The entrypoint runs `uv python install <version>` then `uv venv --python <version> $WORKSPACE/.venv` to materialize a fresh venv. The user then runs `uv sync` / `uv pip install -e .` / `pip install -r requirements.txt` once to populate it.
-3. On subsequent launches, the overlay is already populated — the entrypoint skips materialization and goes straight to activation (`VIRTUAL_ENV` + PATH prepend). Persistence is free via the bind mount.
+1. On launch, sandy checks `$WORK_DIR/.venv` on the host. If it exists and is not a symlink, sandy creates `$SANDBOX_DIR/venv/` and bind-mounts it at `$WORKSPACE/.venv` inside the container. Sandy learns the host's wanted Python version from `.python-version` if present (authoritative — user-maintained), falling back to parsing `pyvenv.cfg` if not, and passes the result via `SANDY_VENV_PYTHON_VERSION`. The parsed value must match `^[0-9]+\.[0-9]+$` — garbage is dropped and the container falls back to its default. A symlinked `.venv/` is skipped with an explicit info message (symlinks can point anywhere and overlaying them is too risky).
+2. On first launch, the overlay dir is empty. The entrypoint runs `uv python install <version>` and `uv venv --clear --python <version> $WORKSPACE/.venv` to materialize a fresh venv. (`--clear` is required because the bind-mount target always exists, and uv venv otherwise refuses with "A directory already exists at: .venv".) The user then runs `uv sync` / `uv pip install -e .` / `pip install -r requirements.txt` once to populate it. No in-container locking is needed — the host-side workspace mutex (see "Concurrent launches" below) guarantees exclusive access.
+3. On subsequent launches, the overlay is already populated — the entrypoint skips materialization and goes straight to activation (`VIRTUAL_ENV` + PATH prepend). Persistence is free via the bind mount. Before activation, the entrypoint compares the overlay's actual `pyvenv.cfg` version against `SANDY_VENV_PYTHON_VERSION`; on mismatch (e.g. the user bumped `.python-version` after the overlay was built), sandy prints a drift warning with the recreate command. Auto-recreate is deliberately not done — it would silently nuke installed packages.
 
 **Opt out** with `SANDY_VENV_OVERLAY=0` in `.sandy/config`. The fallback is warn-only: sandy prints a message explaining that the host venv's interpreter isn't reachable inside the container and suggests `rm -rf .venv && uv venv && uv pip install -e .` — but that's destructive to the host venv and rarely what you want.
 
 **Non-standard venv names** (`venv/`, `.venv-py311/`, etc.) are not overlaid — only the standard `.venv/` is. The fallback warn-only path still applies to any dangling `.venv/bin/python` symlink in those layouts.
 
 **Host venv is never touched.** The overlay is a shadow — the host filesystem is untouched by sandy. After sandy exits, the host's `.venv/` is exactly as it was before.
+
+**Concurrent launches.** Only one sandy may run against a given workspace at a time. On launch, sandy takes a workspace mutex (`mkdir` on `$SANDY_HOME/sandboxes/.<name>.lock`, which is atomic on every POSIX filesystem and needs no external dependency). A second launch against the same workspace fails fast with a clear error naming the holding pid and the command to clear a stale lock (e.g. after a `kill -9`). Two agents editing the same codebase would step on each other's edits anyway — use separate workspaces for parallel work.
 
 ## Architecture
 

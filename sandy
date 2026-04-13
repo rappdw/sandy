@@ -16,7 +16,7 @@ set -euo pipefail
 #   sandy -p "prompt"         One-shot prompt
 # =============================================================================
 
-SANDY_VERSION="0.10.2-dev"
+SANDY_VERSION="0.11.0"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
@@ -1026,12 +1026,20 @@ fi
 # the host's Python version (passed via SANDY_VENV_PYTHON_VERSION).
 # Subsequent launches: pyvenv.cfg already exists, skip straight to activation.
 if [ "${SANDY_VENV_OVERLAY_ACTIVE:-0}" = "1" ] && [ -d "$WORKSPACE/.venv" ]; then
+    # The host-side workspace mutex guarantees exclusive access, so no
+    # in-container lock is needed around materialization.
     if [ ! -f "$WORKSPACE/.venv/pyvenv.cfg" ]; then
         _py_ver="${SANDY_VENV_PYTHON_VERSION:-3.12}"
         printf "\033[0;36m● Materializing sandbox venv overlay (Python %s)...\033[0m\n" "$_py_ver"
         if command -v uv &>/dev/null; then
             uv python install "$_py_ver" 2>/dev/null || true
-            if uv venv --python "$_py_ver" "$WORKSPACE/.venv" >/dev/null 2>&1; then
+            _uv_err="$(mktemp)"
+            # --clear is required: $WORKSPACE/.venv is a bind mount, so the
+            # target directory always exists (even when empty) and uv venv
+            # otherwise refuses with "A directory already exists at: .venv".
+            # --clear wipes contents in place without trying to rmdir the
+            # mount point itself.
+            if uv venv --clear --python "$_py_ver" "$WORKSPACE/.venv" >/dev/null 2>"$_uv_err"; then
                 printf "\033[0;36m● Sandbox venv ready. Populate with:\033[0m\n"
                 if [ -f "$WORKSPACE/pyproject.toml" ]; then
                     printf "\033[0;36m    uv sync    # or: uv pip install -e .\033[0m\n"
@@ -1041,10 +1049,27 @@ if [ "${SANDY_VENV_OVERLAY_ACTIVE:-0}" = "1" ] && [ -d "$WORKSPACE/.venv" ]; the
                     printf "\033[0;36m    uv pip install <your deps>\033[0m\n"
                 fi
             else
-                printf "\033[0;33m⚠ uv venv failed for Python %s — run 'uv venv' manually\033[0m\n" "$_py_ver"
+                printf "\033[0;33m⚠ uv venv failed for Python %s:\033[0m\n" "$_py_ver"
+                sed 's/^/  /' "$_uv_err" >&2 || true
+                printf "\033[0;33m  Run 'uv venv' manually inside the container to retry.\033[0m\n"
             fi
+            rm -f "$_uv_err"
         else
             printf "\033[0;33m⚠ uv not found; cannot create sandbox venv\033[0m\n"
+        fi
+    fi
+    # Drift check: compare the overlay's actual Python (major.minor) against
+    # what the host wanted. If they disagree, the sandbox venv predates a host
+    # version bump and the user's installed packages may be wrong for the new
+    # interpreter. Warn with the fix command — we don't auto-recreate because
+    # that would silently nuke the user's installed packages.
+    if [ -n "${SANDY_VENV_PYTHON_VERSION:-}" ] && [ -f "$WORKSPACE/.venv/pyvenv.cfg" ]; then
+        _overlay_ver="$( { grep -E '^version(_info)?[[:space:]]*=' "$WORKSPACE/.venv/pyvenv.cfg" \
+            | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]'; } || true )"
+        if [ -n "$_overlay_ver" ] && [ "$_overlay_ver" != "$SANDY_VENV_PYTHON_VERSION" ]; then
+            printf "\033[0;33m⚠ Sandbox venv is Python %s but host wants %s.\033[0m\n" \
+                "$_overlay_ver" "$SANDY_VENV_PYTHON_VERSION"
+            printf "\033[0;33m  Recreate inside the container: rm -rf .venv/* && exit (then relaunch sandy)\033[0m\n"
         fi
     fi
     # Auto-activate: set VIRTUAL_ENV and prepend bin/ to PATH so python, pip,
@@ -1989,6 +2014,27 @@ if [ "${SANDY_SSH:-token}" = "agent" ] && [ "$(uname -s)" != "Linux" ]; then
     done
 fi
 
+# Workspace mutex. Only one sandy may run against a given workspace at a
+# time — two concurrent agents editing the same codebase would step on each
+# other's edits, and the sandbox-seeding / venv-materialization code paths
+# assume exclusive ownership. `mkdir` is used as the lock primitive because
+# it's atomic on every POSIX filesystem and needs no external dependency
+# (unlike flock, which macOS doesn't ship by default). The lock is released
+# by the cleanup trap on normal exit, Ctrl-C, or sandy crash. A SIGKILL
+# (OOM, `kill -9`) leaves the lock dir behind — the error message on the
+# next launch tells the user how to clear it.
+mkdir -p "$SANDY_HOME/sandboxes"
+SANDY_WORKSPACE_LOCK="$SANDY_HOME/sandboxes/.${SANDBOX_NAME}.lock"
+if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
+    _holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || echo unknown)"
+    error "Another sandy is already running in this workspace (pid $_holder_pid)"
+    error "  Workspace: $WORK_DIR"
+    error "  If that process is dead, remove the stale lock:"
+    error "    rm -rf '$SANDY_WORKSPACE_LOCK'"
+    exit 1
+fi
+echo "$$" > "$SANDY_WORKSPACE_LOCK/pid"
+
 SANDBOX_IS_NEW=false
 if [ ! -d "$SANDBOX_DIR" ]; then
     info "Creating new sandbox: $SANDBOX_DIR"
@@ -2205,14 +2251,28 @@ if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] \
    && [ -d "$WORK_DIR/.venv" ] \
    && [ ! -L "$WORK_DIR/.venv" ]; then
     SANDY_VENV_OVERLAY_ACTIVE=true
-    # Parse pyvenv.cfg to learn the host venv's Python version. Newer uv
-    # writes both `version = 3.10.16` and `version_info = 3.10.16.final.0`;
-    # either works. cut -d. -f1-2 normalizes to major.minor. Guarded with
-    # `|| true` so a malformed cfg (no version line → grep exits 1) doesn't
-    # abort sandy under set -euo pipefail.
-    if [ -f "$WORK_DIR/.venv/pyvenv.cfg" ]; then
+    # Learn the host's wanted Python version. Precedence:
+    #   1. .python-version (explicit, user-maintained)
+    #   2. .venv/pyvenv.cfg (what uv actually used when the host venv was built)
+    # If both are present, .python-version wins — it's the authoritative source
+    # the user edits; pyvenv.cfg is a by-product of whichever uv run happened to
+    # create the venv and can drift if the user changed .python-version afterward.
+    if [ -f "$WORK_DIR/.python-version" ]; then
+        SANDY_VENV_PYTHON_VERSION="$(tr -d '[:space:]' < "$WORK_DIR/.python-version" | cut -d. -f1-2)"
+    elif [ -f "$WORK_DIR/.venv/pyvenv.cfg" ]; then
+        # Newer uv writes both `version = 3.10.16` and `version_info = 3.10.16.final.0`;
+        # either works. cut -d. -f1-2 normalizes to major.minor. Guarded with
+        # `|| true` so a malformed cfg (no version line → grep exits 1) doesn't
+        # abort sandy under set -euo pipefail.
         SANDY_VENV_PYTHON_VERSION="$( { grep -E '^version(_info)?[[:space:]]*=' "$WORK_DIR/.venv/pyvenv.cfg" \
             | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]'; } || true )"
+    fi
+    # Validate: if what we parsed doesn't look like major.minor, drop it and let
+    # the container fall back to its default. Prevents garbage like "3.10.16.final.0"
+    # or a stray shell fragment from reaching `uv venv --python`.
+    if [ -n "$SANDY_VENV_PYTHON_VERSION" ] && [[ ! "$SANDY_VENV_PYTHON_VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        warn "Ignoring unparseable Python version '$SANDY_VENV_PYTHON_VERSION' — using container default"
+        SANDY_VENV_PYTHON_VERSION=""
     fi
     mkdir -p "$SANDBOX_DIR/venv"               # sandbox-owned venv overlay
     if [ "$SANDBOX_IS_NEW" = "true" ] || [ -z "$(ls -A "$SANDBOX_DIR/venv" 2>/dev/null)" ]; then
@@ -2222,6 +2282,12 @@ if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] \
             info "Detected host .venv — will materialize sandbox overlay on launch"
         fi
     fi
+elif [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] && [ -L "$WORK_DIR/.venv" ]; then
+    # Symlinked .venv (e.g. pointing into a monorepo-shared venv or a workdir
+    # above $WORK_DIR). Too risky to overlay — the symlink target may be a real
+    # host path that our bind mount would shadow unpredictably. User sees a
+    # clear signal instead of silently wondering why the overlay didn't engage.
+    info "Skipping .venv overlay — $WORK_DIR/.venv is a symlink"
 fi
 # Skill pack persistent state directories
 case ",${SANDY_SKILL_PACKS:-}," in
@@ -2387,6 +2453,9 @@ cleanup() {
     fi
     if [ -n "${CHANNEL_RELAY_PID:-}" ]; then
         kill "$CHANNEL_RELAY_PID" 2>/dev/null || true
+    fi
+    if [ -n "${SANDY_WORKSPACE_LOCK:-}" ] && [ -d "$SANDY_WORKSPACE_LOCK" ]; then
+        rm -rf "$SANDY_WORKSPACE_LOCK" 2>/dev/null || true
     fi
 }
 
@@ -2622,9 +2691,13 @@ else
 fi
 
 # --- Build docker run flags ---
+# Container name is deterministic per workspace. The workspace mutex taken
+# above guarantees only one sandy runs against a given workspace at a time,
+# so there's no risk of `docker run --name` colliding with a sibling launch.
+# Still clean up any stale container from a previous crashed run (--rm
+# handles normal exits; a SIGKILL leaves the container behind).
 CONTAINER_NAME="sandy-${SANDBOX_NAME}"
-# Remove stale container from a previous unclean exit (--rm handles normal exits)
-docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 RUN_FLAGS=(--rm -it --name "$CONTAINER_NAME")
 RUN_FLAGS+=(--cpus "$SANDY_CPUS" --memory "$SANDY_MEM")
 RUN_FLAGS+=(--security-opt no-new-privileges:true)

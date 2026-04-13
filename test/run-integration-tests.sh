@@ -123,11 +123,31 @@ _emit_summary() {
 
 cleanup() {
     _emit_summary
+    # For every test workspace, also nuke sandy's per-workspace sandbox dir
+    # and the sibling `<name>-<hash>.claude.json` sidecar file in
+    # $SANDY_HOME/sandboxes/. Derive the sandbox name using the same formula
+    # sandy uses at launch (basename + first 8 chars of sha256(phys_dir)).
+    # This catches workspaces registered via setup_project AND throwaway
+    # workspaces created by ensure_image_built that never called resolve_sandbox.
     for d in "${TEST_DIRS[@]+"${TEST_DIRS[@]}"}"; do
+        if [ -n "$d" ] && [ -d "$d" ]; then
+            local _phys _base _hash _sbname
+            _phys="$(cd "$d" && pwd -P 2>/dev/null)" || _phys="$d"
+            _base="$(basename "$_phys" | tr -cd 'a-zA-Z0-9._-')"
+            _base="${_base:-project}"
+            _hash="$(printf '%s' "$_phys" | shasum -a 256 2>/dev/null || printf '%s' "$_phys" | sha256sum)"
+            _hash="${_hash%% *}"
+            _sbname="${_base}-${_hash:0:8}"
+            rm -rf "$SANDY_HOME/sandboxes/$_sbname" 2>/dev/null || true
+            rm -f  "$SANDY_HOME/sandboxes/$_sbname.claude.json" 2>/dev/null || true
+            rm -rf "$SANDY_HOME/sandboxes/.$_sbname.lock" 2>/dev/null || true
+        fi
         rm -rf "$d" 2>/dev/null || true
     done
     for d in "${SANDBOX_DIRS[@]+"${SANDBOX_DIRS[@]}"}"; do
         rm -rf "$d" 2>/dev/null || true
+        rm -f "$d.claude.json" 2>/dev/null || true
+        rm -rf "$(dirname "$d")/.$(basename "$d").lock" 2>/dev/null || true
     done
 }
 trap cleanup EXIT INT TERM HUP

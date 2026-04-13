@@ -1693,6 +1693,24 @@ sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 
 The `docker run` command is assembled incrementally in a `RUN_FLAGS` array. This appendix documents the complete assembly in order.
 
+### E.0 Workspace Mutex
+
+Only one sandy may run against a given workspace at a time. Early in launch (after config loading, before sandbox seeding), sandy takes a per-workspace mutex:
+
+```bash
+mkdir -p "$SANDY_HOME/sandboxes"
+SANDY_WORKSPACE_LOCK="$SANDY_HOME/sandboxes/.${SANDBOX_NAME}.lock"
+if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
+    # error: another sandy is already running in this workspace (pid <holder>)
+    exit 1
+fi
+echo "$$" > "$SANDY_WORKSPACE_LOCK/pid"
+```
+
+`mkdir` is used as the lock primitive because it is atomic on every POSIX filesystem and requires no external dependency (unlike `flock(1)`, which is not shipped on macOS by default). The lock dir is released by the cleanup trap (`trap cleanup EXIT INT TERM HUP`) on normal exit, Ctrl-C, or sandy crash. A SIGKILL (OOM, `kill -9`) leaves the lock dir behind — the error message on the next launch names the holding pid and the clear command (`rm -rf $SANDY_WORKSPACE_LOCK`).
+
+Rationale: two agents editing the same codebase would step on each other's edits, and the sandbox-seeding / venv-materialization code paths assume exclusive ownership. Deliberate parallelism should use separate workspaces.
+
 ### E.1 Pre-Launch
 
 **Stale container removal**: Before starting, any container with the same name is force-removed to handle unclean previous exits:
@@ -1767,7 +1785,22 @@ If `$WORK_DIR/.venv` exists on the host, is not a symlink, and `SANDY_VENV_OVERL
 -e "SANDY_VENV_PYTHON_VERSION=<major.minor>"   # if parseable from pyvenv.cfg
 ```
 
-Must appear **after** the workspace mount (E.7) so Docker can overlay it on top. The sandbox `venv/` dir is created on the host side before `docker run`. Inside the container, `user-setup.sh` materializes an empty venv via `uv venv --python <version>` on first launch and activates it (`VIRTUAL_ENV` + PATH prepend) on every launch. The host `.venv/` is never read or written by sandy — it is shadowed by the bind mount inside the container only.
+Must appear **after** the workspace mount (E.7) so Docker can overlay it on top. The sandbox `venv/` dir is created on the host side before `docker run`.
+
+**Python version resolution (host side)**, in order:
+1. `$WORK_DIR/.python-version` — authoritative, user-maintained.
+2. `$WORK_DIR/.venv/pyvenv.cfg` `version` / `version_info` line — fallback.
+
+The result is normalized to `major.minor` (`cut -d. -f1-2`) and validated against `^[0-9]+\.[0-9]+$`. Values that don't match are discarded and `SANDY_VENV_PYTHON_VERSION` is left unset — the container then defaults to `3.12` in `user-setup.sh`.
+
+**Symlinked `.venv/`** is explicitly skipped on the host side; an info message fires instead of silently proceeding. Rationale: the symlink target may be a path outside `$WORK_DIR` and overlaying it would shadow unpredictable host state.
+
+Inside the container, `user-setup.sh`:
+1. If `$WORKSPACE/.venv/pyvenv.cfg` does not exist, materializes a fresh venv via `uv venv --clear --python <version> $WORKSPACE/.venv`. The `--clear` flag is required: the overlay bind-mount target always exists as a directory, and `uv venv` otherwise refuses with "A directory already exists at: .venv". No in-container locking is needed — the host-side workspace mutex (§E.0) guarantees exclusive access.
+2. After materialization (or on subsequent launches), compares the overlay's actual `pyvenv.cfg` version against `SANDY_VENV_PYTHON_VERSION`. Mismatch → prints a drift warning with the recreate command. No auto-recreate (would silently nuke installed packages).
+3. Activates unconditionally if `$WORKSPACE/.venv/bin/python` exists (`VIRTUAL_ENV` + PATH prepend).
+
+The host `.venv/` is never read or written by sandy — it is shadowed by the bind mount inside the container only.
 
 ### E.8 Git Submodule Mount (conditional)
 
