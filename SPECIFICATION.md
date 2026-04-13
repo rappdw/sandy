@@ -1,10 +1,10 @@
 # Sandy Specification
 
-**Version**: 0.9.0
-**Date**: 2026-04-10
-**Source**: ~2,200-line bash script (`sandy`), installer (`install.sh`), test suite (`test/run-tests.sh`)
+**Version**: 0.11.1-dev
+**Date**: 2026-04-13
+**Source**: ~3,150-line bash script (`sandy`), installer (`install.sh`), test suite (`test/run-tests.sh`)
 
-Sandy is a self-contained command that runs an AI coding agent (Claude Code, Gemini CLI, OpenAI Codex CLI, or Claude+Gemini side-by-side) in a Docker container with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes. One script, one command, zero configuration required.
+Sandy is a self-contained command that runs an AI coding agent (Claude Code, Gemini CLI, OpenAI Codex CLI, or any comma-separated multi-agent combo) in a Docker container with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes. One script, one command, zero configuration required.
 
 ### Supported Agents
 
@@ -13,10 +13,10 @@ Sandy is a self-contained command that runs an AI coding agent (Claude Code, Gem
 | `claude` (default) | `sandy-claude-code` | Claude Code — full feature support (channels, skill packs, synthkit, remote-control) |
 | `gemini` | `sandy-gemini-cli` | Gemini CLI — Google OAuth / ADC / Vertex AI / API key auth |
 | `codex` | `sandy-codex` | OpenAI Codex CLI — `OPENAI_API_KEY` env var or ChatGPT OAuth (read-only mount) |
-| `both` | `sandy-full` | Alias for `claude,gemini` — multi-agent combo in a single image |
+| `<a>,<b>[,<c>]` (e.g. `claude,gemini`, `claude,codex`, `claude,gemini,codex`) | `sandy-full` | Multi-agent combo — one tmux pane per agent, in the order listed |
 | `all` | `sandy-full` | Alias for `claude,gemini,codex` — all three agents in a 3-pane tmux session |
 
-Combo values involving codex (e.g. `codex+claude`) are explicitly rejected. Dual-agent mode is still claude+gemini only.
+The previous `both` alias (= `claude,gemini`) was removed in `v0.12`. Using it now exits with an error pointing at the comma-separated syntax.
 
 ---
 
@@ -113,7 +113,7 @@ The config parser does **not** use `source`. It reads lines via `grep -E '^[A-Z_
 
 | Variable | Default | Description |
 |---|---|---|
-| `SANDY_AGENT` | `claude` | Agent selection: `claude`, `gemini`, `codex`, or `both` |
+| `SANDY_AGENT` | `claude` | Agent selection: `claude`, `gemini`, `codex`, a comma-separated combo (e.g. `claude,gemini`), or `all` (= `claude,gemini,codex`) |
 | `SANDY_MODEL` | `claude-opus-4-6` | Claude model to use |
 | `GEMINI_API_KEY` | unset | Gemini API key (alternative to OAuth/ADC) |
 | `GEMINI_MODEL` | unset | Gemini model override (e.g. `gemini-2.5-pro`) |
@@ -181,7 +181,7 @@ Each project directory gets a sandbox at `~/.sandy/sandboxes/<NAME>-<HASH>/`:
 
 ### Directory Layout
 
-As of v0.9.0, the sandbox directory contains **sibling** `claude/` and `gemini/` subdirs, one per supported agent, so both can coexist in `SANDY_AGENT=both` mode. v0.10.0 adds a sibling `codex/` subdir for `SANDY_AGENT=codex`.
+As of v0.9.0, the sandbox directory contains **sibling** per-agent subdirs (`claude/`, `gemini/`, and `codex/` — the last added in v0.10.0) so any multi-agent combo can coexist in the same sandbox. Each subdir is mounted at `~/.claude`, `~/.gemini`, and `~/.codex` inside the container respectively.
 
 ```
 ~/.sandy/sandboxes/<name>-<hash>/
@@ -220,14 +220,14 @@ As of v0.9.0, the sandbox directory contains **sibling** `claude/` and `gemini/`
 
 ### Seeding
 
-On first run for a new sandbox (`SANDY_AGENT` in `claude`/`both`):
+On first run for a new sandbox (whenever `claude` is in `SANDY_AGENT`):
 1. Copy host `~/.claude/settings.json` → sandbox `claude/settings.json`
 2. Strip `enabledPlugins` from seeded settings (prevents host plugin leakage)
 3. Copy host `~/.claude/.claude.json` → sandbox `<NAME>.claude.json`, stripping the `projects` key
 4. Copy host `~/.claude/statsig/` → sandbox `claude/statsig/`
 5. Create all persistent subdirectories
 
-For `SANDY_AGENT` in `gemini`/`both`, sandy creates `gemini/` and its `commands/`, `extensions/`, `tmp/` subdirs. Gemini settings.json is not seeded from the host (Gemini has no direct host-settings equivalent for sandy to copy).
+Whenever `gemini` is in `SANDY_AGENT`, sandy creates `gemini/` and its `commands/`, `extensions/`, `tmp/` subdirs. Gemini settings.json is not seeded from the host (Gemini has no direct host-settings equivalent for sandy to copy).
 
 For `SANDY_AGENT=codex`, sandy creates `codex/` and seeds `codex/config.toml` (first run only) with:
 
@@ -595,7 +595,7 @@ Credentials are loaded into a temporary file, mounted into the container at `~/.
 
 `CLAUDE_CODE_OAUTH_TOKEN` is explicitly set to empty string in the container's environment when not configured, preventing accidental leakage from the host environment.
 
-### Gemini Credentials (`SANDY_AGENT` in `gemini`/`both`)
+### Gemini Credentials (whenever `gemini` is in `SANDY_AGENT`)
 
 Sandy's `load_gemini_credentials()` tries the following sources, controlled by `SANDY_GEMINI_AUTH` (`auto` | `api_key` | `oauth` | `adc`):
 
@@ -648,11 +648,11 @@ Sandy wraps Claude Code in a tmux session:
 - OSC 52 clipboard support for mouse selections
 - Status bar: "sandy" prefix with time display
 
-### Dual-Pane Mode (`SANDY_AGENT=both`)
+### Multi-Agent Mode (comma-separated `SANDY_AGENT`)
 
-When `SANDY_AGENT=both`, the user-setup script creates a tmux session with two horizontally split panes — pane 0 runs `claude`, pane 1 runs `gemini` (with `GEMINI_SANDBOX=false`). The launch logic is refactored into two helper functions `build_claude_cmd()` and `build_gemini_cmd()` so both single-agent and dual-agent paths share the same command construction. Each pane is an independent process; exiting one leaves the other running.
+When `SANDY_AGENT` contains more than one agent (e.g. `claude,gemini`, `claude,codex`, `claude,gemini,codex`, or the alias `all`), the user-setup script creates a tmux session with one horizontally split pane per agent, in the order listed. The launch logic is factored into per-agent helpers (`build_claude_cmd()`, `build_gemini_cmd()`, `build_codex_cmd()`) so single-agent and multi-agent paths share the same command construction. Each pane is an independent process; exiting one leaves the others running.
 
-**`both` is claude+gemini only.** Combos involving codex (e.g. `codex+claude`, `codex+gemini`, `all`) are explicitly rejected in the agent dispatch case-statement with a clear error message listing the four valid values (`claude`, `gemini`, `codex`, `both`). Dual-agent mode with codex is a v0.11+ question.
+The previous `both` alias (= `claude,gemini`) was removed in `v0.12` once the comma-separated syntax supported every combination. Using it now exits early with an error message pointing at the new syntax.
 
 ### Codex Headless Translation (`SANDY_AGENT=codex`)
 
@@ -664,7 +664,7 @@ When `SANDY_AGENT=both`, the user-setup script creates a tmux session with two h
 
 With `--remote`: no tmux wrapper, launches `claude remote-control --name "sandy: <PROJECT_NAME>"`. Browser/phone can connect to control the session.
 
-**Only supported with `SANDY_AGENT=claude`.** Gemini CLI has no native WebSocket/daemon mode, and codex's `mcp-server`/`app-server` modes don't map cleanly to Claude's session-based `--remote` contract; `--remote` with `gemini`, `codex`, or `both` exits with an error. Tracked as a future enhancement pending upstream support.
+**Only supported with `SANDY_AGENT=claude`.** Gemini CLI has no native WebSocket/daemon mode, and codex's `mcp-server`/`app-server` modes don't map cleanly to Claude's session-based `--remote` contract; `--remote` with any other value — `gemini`, `codex`, or any multi-agent combo — exits with an error. Tracked as a future enhancement pending upstream support.
 
 ### Terminal Notifications
 
@@ -766,11 +766,11 @@ When set, `user-setup.sh` iterates comma-separated URLs/local paths and runs `ge
 Sandy supports Claude Code channels (Telegram, Discord) via two distinct paths:
 
 1. **In-container plugin path** (`SANDY_AGENT=claude` only) — auto-installs the Claude channel plugin from the marketplace and seeds credentials into `~/.claude/channels/`.
-2. **Host-side tmux-inject relay** (`SANDY_AGENT` in `gemini`/`codex`/`both`) — agent-agnostic, runs on the host and injects messages into the container's tmux session via `docker exec ... tmux send-keys`.
+2. **Host-side tmux-inject relay** (any other `SANDY_AGENT` value — single `gemini`/`codex` or any multi-agent combo) — agent-agnostic, runs on the host and injects messages into the container's tmux session via `docker exec ... tmux send-keys`.
 
 **Support matrix**:
 
-| Channel | `claude` | `gemini` | `codex` | `both` |
+| Channel | `claude` | `gemini` | `codex` | multi-agent |
 |---|---|---|---|---|
 | Telegram | in-container plugin | host relay | host relay | host relay |
 | Discord | in-container plugin | — | — | — |
@@ -785,7 +785,7 @@ For each configured channel:
    - `"dmPolicy": "allowlist"` + populated `allowFrom` (if `ALLOWED_SENDERS` set)
    - `"dmPolicy": "pairing"` (if no allowlist, user pairs via `/telegram:access pair <code>`)
 
-### Host-Side Channel Relay (Gemini / Both)
+### Host-Side Channel Relay (Gemini / Codex / Multi-agent)
 
 `$SANDY_HOME/channel-relay.sh` is a generated bash script that long-polls the Telegram Bot API (`getUpdates`), filters messages by `TELEGRAM_ALLOWED_SENDERS`, and injects them into the container tmux session via:
 
@@ -793,7 +793,7 @@ For each configured channel:
 docker exec <CONTAINER_NAME> tmux send-keys -t sandy.<PANE> "<text>" Enter
 ```
 
-Launched as a background process before `docker run`, tracked via `CHANNEL_RELAY_PID`, and killed in the cleanup trap. The target pane is `SANDY_CHANNEL_TARGET_PANE` (default `0` = Claude in dual mode, or the sole pane in gemini-only mode).
+Launched as a background process before `docker run`, tracked via `CHANNEL_RELAY_PID`, and killed in the cleanup trap. The target pane is `SANDY_CHANNEL_TARGET_PANE` (default `0` = the first agent listed in `SANDY_AGENT`, or the sole pane in single-agent mode).
 
 **Scope**: Telegram only in v0.9.0; Discord via relay is deferred. The relay is stateless — no chat threading, no attachment support, no edit-message reactions. For rich features, use the claude plugin path.
 
@@ -804,7 +804,7 @@ Both Telegram and Discord can be enabled simultaneously with `SANDY_AGENT=claude
 SANDY_CHANNELS=plugin:telegram@claude-plugins-official plugin:discord@claude-plugins-official
 ```
 
-With `SANDY_AGENT` in `gemini`/`codex`/`both`, only Telegram is currently supported through the relay; `SANDY_CHANNELS=discord` exits with an error.
+With any non-`claude` value (single `gemini`/`codex` or any multi-agent combo), only Telegram is currently supported through the relay; `SANDY_CHANNELS=discord` exits with an error.
 
 ---
 
@@ -1254,7 +1254,7 @@ JSON repair regexes:
   ```
   This must happen container-side because it needs the in-container workspace path.
 - `build_codex_cmd()`: translates sandy's `-p`/`--print`/`--prompt` into `codex exec` with a positional prompt; drops `--continue`/`-c`; injects `--sandbox danger-full-access` and optional `--model`.
-- Launch dispatch branch: `codex` case between `gemini` and `both`, using `build_codex_cmd` and wrapping in tmux unless headless.
+- Launch dispatch: the `codex` case sits alongside `claude` and `gemini` in the per-agent dispatch; multi-agent combos iterate over the parsed `_SANDY_AGENTS` array and call each `build_*_cmd` in pane order.
 
 ### A.7 tmux.conf
 
@@ -1989,7 +1989,7 @@ FORCE_AUTOUPDATE_PLUGINS=true
 
 Git identity fallback: if `GIT_USER_NAME`/`GIT_USER_EMAIL` are not set via config, they are read from the host's `git config user.name` and `git config user.email`.
 
-**Gemini-specific env** (`SANDY_AGENT` in `gemini`/`both`):
+**Gemini-specific env** (whenever `gemini` is in `SANDY_AGENT`):
 ```bash
 GEMINI_API_KEY=<key>                # if set
 GEMINI_MODEL=<model>                # if set

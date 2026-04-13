@@ -1,8 +1,16 @@
 # Roadmap to 1.0-rc1
 
-This plan walks from the current state of `codex-support` to `1.0-rc1`. It's structured as a sequence of discrete PRs, each with a clear scope, exit criteria, and target version. **No new features** — 1.0 is a stability release. Every PR should make the existing surface more trustworthy without adding to it.
+This plan walks from the current state of `main` to `1.0-rc1`. It's structured as a sequence of discrete PRs, each with a clear scope, exit criteria, and target version. **No new features** — 1.0 is a stability release. Every PR should make the existing surface more trustworthy without adding to it.
 
-Current baseline: `main` @ v0.10.0 (tag `v0.10.0`), version string `0.10.1-dev` on `main` post-release.
+## Current state (2026-04-13)
+
+- **Released**: `v0.10.0`, `v0.10.1`, `v0.11.0`
+- **On main**: `0.11.1-dev` (post-release bump after `v0.11.0`)
+- **M1 — shipped** as `v0.10.1`: PR 1.1 resume-fallback + codex grep-F + integration test image gating.
+- **M2 — shipped** as `v0.11.0`: PR 2.1 venv overlay hardening (`uv venv --clear`, Python version precedence, symlink skip, drift warning, workspace mutex).
+- **M2.3 — in progress**: 7-day soak on `v0.11.0` as daily driver. Gate for starting M3.
+- **M3 — not started**: scope below. Adds a new mini-soak gate (PR 3.1.5) after the heredoc extraction.
+- **M4, M5 — not started**.
 
 ## Guiding principles
 
@@ -18,7 +26,7 @@ Current baseline: `main` @ v0.10.0 (tag `v0.10.0`), version string `0.10.1-dev` 
 
 Two bugs from the code review that would be embarrassing at 1.0. (A third "blocker" — session-dir name collision from aggressive normalization — was walked back during PR 1.1 execution after verifying that sandy's per-workspace sandbox isolation already prevents the collision. Each workspace gets a unique `$SANDBOX_DIR` keyed on `sha256($WORK_DIR)`, and `~/.claude/projects/` inside the container is per-sandbox, never shared. Two workspaces whose paths normalize to the same Claude Code project-dir name land in different sandboxes with completely separate session trees.)
 
-### PR 1.1 — Fix resume fallback and codex grep-regex injection
+### PR 1.1 — Fix resume fallback and codex grep-regex injection ✓ shipped as `v0.10.1`
 
 **Scope** (both in `build_claude_cmd` and the codex trust-entry block):
 
@@ -41,7 +49,9 @@ Two bugs from the code review that would be embarrassing at 1.0. (A third "block
 
 The venv overlay is load-bearing but fresh. This milestone takes it from "works for the happy path" to "ready to be a 1.0 promise."
 
-### PR 2.1 — Venv overlay race + validation
+### PR 2.1 — Venv overlay race + validation ✓ shipped as `v0.11.0`
+
+> **Execution note**: the materialization race fix landed differently than originally planned. The original scope proposed a host-side `flock` on `$SANDBOX_DIR/venv/.lock` plus a container-side fallback. During implementation this grew into a tangle (host flock + PID-suffixed container names + `status=exited` sweep + container-side venv flock), so the approach was simplified to a single `mkdir`-based workspace mutex at `$SANDY_HOME/sandboxes/.<sandbox>.lock` taken before any sandbox setup and released in the cleanup trap. One sandy per workspace at a time, no concurrent venv materialization, no in-container locking. Net `-128/+96` lines vs. the flock approach. Everything else in the scope below shipped as planned. The `uv venv` call also picked up `--clear` since the bind-mount target always pre-exists.
 
 **Scope** (all in sandy around 1022-1059 and 2193-2216):
 
@@ -69,23 +79,17 @@ The venv overlay is load-bearing but fresh. This milestone takes it from "works 
 - Manual: two concurrent `sandy -p "import sys; print(sys.prefix)"` in the same empty-venv workspace — both succeed, no corrupt venv.
 - Manual: flip host Python version with `uv python install 3.11 && uv venv --python 3.11`, relaunch sandy, drift warning fires.
 
-### PR 2.2 — Sandbox version marker validation + version bump
+### PR 2.2 — Sandbox version marker validation + version bump — partially shipped
 
-**Scope**:
+- **Version bump** shipped as part of `v0.11.0` release work (`0.10.1` → `0.11.0-dev` → `0.11.0` → `0.11.1-dev`).
+- **`.sandy_created_version` regex validation** was *not* done — deferred to **M4 PR 4.1** (allowlist/surface audit), where the validator fits naturally alongside the other surface-stability work. Tracked there.
+- **CHANGELOG / RELEASE_NOTES**: shipped with `v0.11.0`.
 
-1. **Validate `.sandy_created_version` content** (sandy:2009). Regex-check `^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9]+)?$`. On failure, fall through to the "unknown" branch rather than displaying garbage in the warning.
+### PR 2.3 — Soak baseline (no code, just time) — **in progress**
 
-2. **Version bump**: `0.10.1` → `0.11.0-dev`, then `0.11.0` for the actual release.
+**This is not a PR, it's a gate.** `v0.11.0` is tagged and released; this gate now soaks the released build rather than `-dev`. Use `v0.11.0` as daily driver for **at least 7 consecutive days** across regular projects (at minimum: sandy itself, one equity_analyzer-style Python project, one multi-agent session). Log any surprises in a scratchpad. Issues found become hotfix PRs (`0.11.1`) and restart the clock; Milestone 3 doesn't start until this gate clears.
 
-3. **CHANGELOG**: venv hardening + session fixes from 0.10.1.
-
-**Exit criteria**: test suite green, version displayed correctly.
-
-### PR 2.3 — Soak baseline (no code, just time)
-
-**This is not a PR, it's a gate.** Before tagging `0.11.0`, use `0.11.0-dev` as your daily driver for **at least 7 consecutive days** across your regular projects (at minimum: sandy itself, one equity_analyzer-style Python project, one multi-agent session). Log any surprises in a scratchpad. Issues found become PRs in Milestone 3.
-
-**Exit criteria**: 7-day diary with no unexpected behavior. If any surprises appear, fix and restart the 7-day clock.
+**Exit criteria**: 7-day diary with no unexpected behavior. If any surprises appear, fix, ship as `0.11.1`, and restart the 7-day clock against the fixed build.
 
 ---
 
@@ -115,6 +119,16 @@ With the behavioral fixes soaked, pay down the structural debt that the review s
 - `install.sh` correctly ships the template — test a fresh install into a clean `$HOME`.
 
 **Risk**: this is the most invasive PR on the roadmap. Budget extra review time. Do not bundle it with any other change.
+
+### PR 3.1.5 — Post-extraction mini-soak (3 days, no code)
+
+**Not a PR, a gate.** After PR 3.1 merges, daily-drive `main` (`0.11.x-dev` post-extraction) for **3 consecutive days** before starting PR 3.2.
+
+**Why**: PR 3.1 is the highest-risk change on the whole roadmap — 700 lines of container-side bash moving from a heredoc into a real template, with sed-substitution added in the middle. Byte-for-byte diffing at build time catches gross errors, but subtle container-runtime regressions (env var expansion timing, shell escaping edge cases, first-launch vs. resume paths) only surface during real use. Stacking PR 3.2's `build_*_cmd` unification on top of an un-soaked PR 3.1 means that if something breaks, bisection has to untangle two large refactors at once.
+
+The mini-soak costs three days and buys clean attribution. If PR 3.1 goes perfectly, those three days are spent as a daily-driver user — not wasted. If it doesn't, the three days save weeks of wrong-direction bisection later.
+
+**Exit criteria**: 3 days of daily use with no template-related surprises. Any regression restarts the clock after the fix ships.
 
 ### PR 3.2 — Unify `build_*_cmd` functions
 
@@ -276,38 +290,47 @@ If any of these feel necessary, write them down in a `POST_1.0_IDEAS.md` scratch
 ## Dependency graph
 
 ```
-PR 1.1 (blockers)
+PR 1.1 (blockers) ✓ ──▶ tag 0.10.1 ✓
     │
     ▼
-PR 2.1 (venv hardening) ─┐
-PR 2.2 (version bump)    ├──▶ PR 2.3 (soak) ──▶ tag 0.11.0
-                         │
-PR 3.1 (user-setup.sh extract)   ← blocks on 0.11.0 soak being clean
-PR 3.2 (build_*_cmd unify)       ← can run parallel with 3.1
+PR 2.1 (venv hardening) ✓ ──▶ tag 0.11.0 ✓
+    │
+    ▼
+PR 2.3 (7-day soak on 0.11.0) ← in progress; gates M3
+    │
+    ▼
+PR 3.1 (user-setup.sh extract)   ← must land alone
+    │
+    ▼
+PR 3.1.5 (3-day mini-soak)       ← gates PR 3.2
+    │
+    ▼
+PR 3.2 (build_*_cmd unify)
 PR 3.3 (version bump)            ← blocks on 3.1, 3.2 ──▶ tag 0.12.0
-                         │
-PR 4.1 (allowlist audit)         ← parallel
-PR 4.2 (compat story)            ← parallel
-PR 4.3 (multi-agent matrix)      ← parallel
-PR 4.4 (failure-mode tests)      ← parallel
+    │
+    ▼
+PR 4.1 (allowlist audit + sandbox-marker validator)  ← parallel
+PR 4.2 (compat story)                                ← parallel
+PR 4.3 (multi-agent matrix)                          ← parallel
+PR 4.4 (failure-mode tests)                          ← parallel
 PR 4.5 (version bump)            ← blocks on 4.1-4.4 ──▶ tag 0.13.0
-                         │
-                         ▼
-                   PR 5.1 (14-day soak gate)
-                         │
-                         ▼
-                   PR 5.2 (1.0.0-rc1 tag)
+    │
+    ▼
+PR 5.1 (14-day soak gate on 0.13.0)
+    │
+    ▼
+PR 5.2 (1.0.0-rc1 tag)
 ```
 
 ## Checkpoints
 
 Treat each tag as a commitment: do not proceed to the next milestone until the previous tag's exit criteria are fully met. Tags are cheap; regrets at 1.0 are not.
 
-| Tag | Gates | What it proves |
-|---|---|---|
-| `0.10.1` | Blocker PRs merged + tests green | Review blockers are addressed |
-| `0.11.0` | Venv hardening + 7-day soak | The two newest features are solid |
-| `0.12.0` | Architecture cleanup | 1.0 surface is reviewable |
-| `0.13.0` | Surface locked | Stability promises are explicit |
-| `1.0.0-rc1` | 14-day soak clean | Ready for users to form habits on |
-| `1.0.0` | rc soak clean | Stability over time |
+| Tag | Status | Gates | What it proves |
+|---|---|---|---|
+| `0.10.1` | ✓ released | Blocker PRs merged + tests green | Review blockers are addressed |
+| `0.11.0` | ✓ released | Venv hardening shipped; 7-day soak in progress | The two newest features are solid |
+| `0.12.0` | pending | Architecture cleanup + 3-day mini-soak after PR 3.1 | 1.0 surface is reviewable |
+| `0.13.0` | pending | Surface locked | Stability promises are explicit |
+| `1.0.0-rc1` | pending | 14-day soak clean | Ready for users to form habits on |
+| `1.0.0` | pending | rc soak clean | Stability over time |

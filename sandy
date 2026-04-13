@@ -318,7 +318,7 @@ Environment variables:
   SANDY_SKILL_PACKS  Comma-separated skill packs to install (e.g. "gstack")
   SANDY_AGENT        AI agent(s): "claude" (default), "gemini", "codex",
                      or comma-separated combo (e.g. "claude,gemini,codex").
-                     Aliases: "both" = "claude,gemini", "all" = all three.
+                     Alias: "all" = "claude,gemini,codex".
   GEMINI_API_KEY     Google API key for Gemini CLI (SANDY_AGENT=gemini only)
   GEMINI_MODEL       Gemini model override (SANDY_AGENT=gemini only)
   OPENAI_API_KEY     OpenAI API key for Codex CLI
@@ -1212,7 +1212,7 @@ _seed_channel telegram TELEGRAM_BOT_TOKEN TELEGRAM_ALLOWED_SENDERS
 _seed_channel discord DISCORD_BOT_TOKEN DISCORD_ALLOWED_SENDERS
 fi  # end Claude-only plugin/channel block
 
-# --- Agent command builders (used by single-agent and dual-pane launch modes) ---
+# --- Agent command builders (used by single-agent and multi-pane launch modes) ---
 build_claude_cmd() {
     local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-6} --teammate-mode tmux"
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
@@ -1724,8 +1724,12 @@ _load_sandy_config "$WORK_DIR/.sandy/.secrets"
 SANDY_AGENT="${SANDY_AGENT:-claude}"
 # Aliases for common combos
 case "$SANDY_AGENT" in
-    both) SANDY_AGENT="claude,gemini" ;;
     all)  SANDY_AGENT="claude,gemini,codex" ;;
+    both)
+        error "SANDY_AGENT=both is no longer supported."
+        error "  Use SANDY_AGENT=claude,gemini (or any comma-separated combo) instead."
+        exit 1
+        ;;
 esac
 # Parse comma-separated agent list and validate
 IFS=',' read -ra _SANDY_AGENTS <<< "$SANDY_AGENT"
@@ -2074,7 +2078,7 @@ echo "$SANDY_VERSION" > "$_sandbox_last_ver_file"
 
 # Auto-migrate v1 layout → v1.5 layout: v1 used $SANDBOX_DIR itself as the
 # Claude .claude/ root. v1.5 uses $SANDBOX_DIR/claude/ and $SANDBOX_DIR/gemini/
-# as siblings so dual-agent mode can mount both. Idempotent: the sweep only
+# as siblings so multi-agent mode can mount both. Idempotent: the sweep only
 # moves entries that are still at the top level. The allowlist covers every
 # known Claude-owned entry so partial migrations from earlier v1.5 builds get
 # cleaned up on next launch.

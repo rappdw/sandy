@@ -428,11 +428,20 @@ else
     fail "--remote + gemini rejected"
 fi
 
-_out="$(SANDY_AGENT=both "$SANDY_SCRIPT" --remote 2>&1 || true)"
+_out="$(SANDY_AGENT=claude,gemini "$SANDY_SCRIPT" --remote 2>&1 || true)"
 if echo "$_out" | grep -q "only supported with SANDY_AGENT=claude"; then
-    pass "--remote + both rejected"
+    pass "--remote + claude,gemini rejected"
 else
-    fail "--remote + both rejected"
+    fail "--remote + claude,gemini rejected"
+fi
+
+# The old `both` alias was removed in v0.12 — using it must error out with
+# a pointer to the comma-separated syntax, not silently map to claude,gemini.
+_out="$(SANDY_AGENT=both "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
+if echo "$_out" | grep -q "SANDY_AGENT=both is no longer supported"; then
+    pass "SANDY_AGENT=both errors with migration hint"
+else
+    fail "SANDY_AGENT=both errors with migration hint"
 fi
 
 _out="$(SANDY_AGENT=codex+claude "$SANDY_SCRIPT" -p "test" 2>&1 || true)"

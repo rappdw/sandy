@@ -209,15 +209,15 @@ sandy --remote
 
 ---
 
-# 4. Dual-agent mode (`SANDY_AGENT=both`)
+# 4. Multi-agent mode (comma-separated `SANDY_AGENT`)
 
-## 4.1 Dual-pane launch
+## 4.1 Dual-pane launch (claude + gemini)
 
 ```sh
-mkdir -p ~/sandy-test-both && cd ~/sandy-test-both
-git init && echo "dual test" > README.md
+mkdir -p ~/sandy-test-multi && cd ~/sandy-test-multi
+git init && echo "multi test" > README.md
 mkdir -p .sandy
-echo 'SANDY_AGENT=both' > .sandy/config
+echo 'SANDY_AGENT=claude,gemini' > .sandy/config
 echo 'GEMINI_API_KEY=your_key_here' > .sandy/.secrets
 
 sandy

@@ -72,7 +72,6 @@ Sandy supports Claude Code (default), Gemini CLI, OpenAI Codex CLI, or **any com
 SANDY_AGENT=gemini              # single agent: claude (default), gemini, codex
 SANDY_AGENT=claude,codex        # any comma-separated combo (2 or 3 agents)
 SANDY_AGENT=claude,gemini,codex # all three in a 3-pane layout
-SANDY_AGENT=both                # alias for claude,gemini
 SANDY_AGENT=all                 # alias for claude,gemini,codex
 ```
 
@@ -84,18 +83,18 @@ Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemi
 
 **Feature support by agent**:
 
-| Feature | `claude` | `gemini` | `codex` | `both` |
+| Feature | `claude` | `gemini` | `codex` | multi-agent |
 |---|---|---|---|---|
-| Skill packs | yes | — | — | yes (claude pane) |
-| Synthkit commands | yes (slash commands, Markdown) | yes (slash commands, TOML in `~/.gemini/commands/`) | yes (skills context, SKILL.md in `~/.codex/skills/` — invoked via natural language, not `/`) | yes (both) |
+| Skill packs | yes | — | — | yes (claude pane only) |
+| Synthkit commands | yes (slash commands, Markdown) | yes (slash commands, TOML in `~/.gemini/commands/`) | yes (skills context, SKILL.md in `~/.codex/skills/` — invoked via natural language, not `/`) | per agent |
 | Channels (Telegram) | in-container plugin | host-side tmux relay | host-side tmux relay | host-side tmux relay |
 | Channels (Discord) | yes | — | — | — |
 | `--remote` | yes | — | — | — |
-| Gemini extensions (`SANDY_GEMINI_EXTENSIONS`) | — | yes | — | yes |
+| Gemini extensions (`SANDY_GEMINI_EXTENSIONS`) | — | yes | — | yes (when gemini is in the combo) |
 
-Codex headless mode (`-p` / `--print` / `--prompt`) translates to `codex exec` — the prompt is passed as a positional arg, not a flag. Codex `exec` only returns exit codes 0 or 1 (no nuanced exit codes like Claude's `--print` has). `--continue` / `-c` is silently dropped (codex has `codex resume` but no headless continuation flag). Multi-agent combos use comma-separated syntax (e.g., `claude,codex`); `both` is an alias for `claude,gemini` and `all` is an alias for `claude,gemini,codex`.
+Codex headless mode (`-p` / `--print` / `--prompt`) translates to `codex exec` — the prompt is passed as a positional arg, not a flag. Codex `exec` only returns exit codes 0 or 1 (no nuanced exit codes like Claude's `--print` has). `--continue` / `-c` is silently dropped (codex has `codex resume` but no headless continuation flag). Multi-agent combos use comma-separated syntax (e.g., `claude,codex`); `all` is an alias for `claude,gemini,codex`. The old `both` alias was removed in `v0.12` — sandy now errors out with a pointer to the comma-separated syntax.
 
-The Telegram host-side relay (`$SANDY_HOME/channel-relay.sh`) is an agent-agnostic long-polling bridge that injects messages into the container's tmux session via `docker exec ... tmux send-keys`. In dual-agent mode, `SANDY_CHANNEL_TARGET_PANE=0|1` selects which pane receives messages (default `0` = Claude).
+The Telegram host-side relay (`$SANDY_HOME/channel-relay.sh`) is an agent-agnostic long-polling bridge that injects messages into the container's tmux session via `docker exec ... tmux send-keys`. In multi-agent mode, `SANDY_CHANNEL_TARGET_PANE=0|1|2` selects which pane receives messages (default `0` = first pane in `SANDY_AGENT`).
 
 ## Per-project Sandboxes
 
