@@ -60,6 +60,12 @@ Sandy works with any Docker-compatible runtime:
 - [Colima](https://github.com/abiosoft/colima)
 - [Lima](https://github.com/lima-vm/lima)
 
+Not sure whether your machine is ready? Run the doctor script — it checks the host for everything sandy needs (Docker daemon reachable, git, curl, `gh` CLI for default token auth, Claude credentials, `$HOME/.local/bin` on PATH) and prints copy-pasteable install commands for anything missing. It never installs or modifies anything itself.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/doctor.sh | bash
+```
+
 ## Installation
 
 ```bash
