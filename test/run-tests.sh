@@ -1689,10 +1689,10 @@ else
 fi
 
 # Version string contains expected major.minor.
-if grep -q '^SANDY_VERSION="0\.10\.' "$SANDY_SCRIPT"; then
-    pass "SANDY_VERSION is 0.10.x"
+if grep -q '^SANDY_VERSION="0\.11\.' "$SANDY_SCRIPT"; then
+    pass "SANDY_VERSION is 0.11.x"
 else
-    fail "SANDY_VERSION is 0.10.x"
+    fail "SANDY_VERSION is 0.11.x"
 fi
 
 # ============================================================
