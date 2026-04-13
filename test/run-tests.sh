@@ -436,14 +436,22 @@ rm -rf "$SYM_INFO_FIXTURE" "$SYM_INFO_TARGET"
 
 # 9k. PR 2.1: materialization block uses flock for race protection
 # The container-side materialization block must wrap `uv venv` in a flock.
-# Guard against regression by checking the raw script source.
-MATERIALIZE_BLOCK="$(awk '/Workspace \.venv overlay\. When SANDY_VENV_OVERLAY_ACTIVE/,/^elif \[ -L "\$WORKSPACE\/\.venv\/bin\/python" \]/' "$_SANDY_SCRIPT_PATH")"
+# Guard against regression by checking the raw script source. Write the
+# extracted block to a temp file — it contains bash code with single quotes,
+# so embedding it inline in `bash -c '...'` would break quote nesting.
+MATERIALIZE_BLOCK_FILE="$(mktemp)"
+awk '/Workspace \.venv overlay\. When SANDY_VENV_OVERLAY_ACTIVE/,/^elif \[ -L "\$WORKSPACE\/\.venv\/bin\/python" \]/' \
+    "$_SANDY_SCRIPT_PATH" > "$MATERIALIZE_BLOCK_FILE"
 check "materialization block uses flock" \
-    bash -c "echo '$MATERIALIZE_BLOCK' | grep -q 'flock -w'"
+    grep -q 'flock -w' "$MATERIALIZE_BLOCK_FILE"
+# Expect at least 2 mentions of pyvenv.cfg: the outer check and the
+# re-check inside the flock critical section.
+_pyvenv_count="$(grep -c 'pyvenv.cfg' "$MATERIALIZE_BLOCK_FILE" || echo 0)"
 check "materialization block re-checks pyvenv.cfg inside critical section" \
-    bash -c "echo '$MATERIALIZE_BLOCK' | grep -c 'pyvenv.cfg' | awk '{exit (\$1 < 2)}'"
+    test "$_pyvenv_count" -ge 2
 check "materialization block emits drift warning" \
-    bash -c "echo '$MATERIALIZE_BLOCK' | grep -q 'Sandbox venv is Python'"
+    grep -q 'Sandbox venv is Python' "$MATERIALIZE_BLOCK_FILE"
+rm -f "$MATERIALIZE_BLOCK_FILE"
 
 # ============================================================
 info "9z. PR 1.1 regression tests — resume fallback + codex grep-F"
