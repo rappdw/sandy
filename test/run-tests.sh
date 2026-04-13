@@ -451,6 +451,15 @@ check "materialization block re-checks pyvenv.cfg inside critical section" \
     test "$_pyvenv_count" -ge 2
 check "materialization block emits drift warning" \
     grep -q 'Sandbox venv is Python' "$MATERIALIZE_BLOCK_FILE"
+# uv venv must be invoked with --clear because $WORKSPACE/.venv is a bind
+# mount (target dir always exists) — otherwise uv refuses with "A directory
+# already exists at: .venv".
+check "materialization uses uv venv --clear" \
+    grep -q 'uv venv --clear' "$MATERIALIZE_BLOCK_FILE"
+# The lock file must NOT live inside $WORKSPACE/.venv — that would make the
+# overlay dir non-empty and break uv venv in a different way.
+check "materialization lock file is outside \$WORKSPACE/.venv" \
+    bash -c "! grep -q 'WORKSPACE/\.venv/\.sandy' '$MATERIALIZE_BLOCK_FILE'"
 rm -f "$MATERIALIZE_BLOCK_FILE"
 
 # 9l. PR 2.1: concurrent-launch race fixes

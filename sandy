@@ -1030,10 +1030,14 @@ if [ "${SANDY_VENV_OVERLAY_ACTIVE:-0}" = "1" ] && [ -d "$WORKSPACE/.venv" ]; the
         # Materialization is racy: two concurrent sandy launches in the same
         # workspace both see no pyvenv.cfg and both start `uv venv`, one of
         # which clobbers the other mid-write. Serialize with flock on a file
-        # inside the overlay bind mount (same filesystem across launches —
-        # kernel file locking works because it's one host filesystem, even
-        # across different container PID namespaces).
-        _lock="$WORKSPACE/.venv/.sandy.lock"
+        # in the persistent uv mount ($HOME/.local/share/uv) — that's a per-
+        # sandbox bind mount on the host filesystem, so flock is correctly
+        # shared across concurrent container launches (different PID ns, same
+        # host inode). The lock file must NOT live inside $WORKSPACE/.venv
+        # itself, because uv venv refuses to create a venv into a non-empty
+        # directory — the lock file would make the dir non-empty and `uv venv`
+        # would fail with "refusing to remove non-virtualenv".
+        _lock="$HOME/.local/share/uv/.sandy-venv.lock"
         exec 9>"$_lock"
         if flock -w 30 9; then
             # Re-check inside the critical section — another process may have
@@ -1044,7 +1048,13 @@ if [ "${SANDY_VENV_OVERLAY_ACTIVE:-0}" = "1" ] && [ -d "$WORKSPACE/.venv" ]; the
                 printf "\033[0;36m● Materializing sandbox venv overlay (Python %s)...\033[0m\n" "$_py_ver"
                 if command -v uv &>/dev/null; then
                     uv python install "$_py_ver" 2>/dev/null || true
-                    if uv venv --python "$_py_ver" "$WORKSPACE/.venv" >/dev/null 2>&1; then
+                    _uv_err="$(mktemp)"
+                    # --clear is required: $WORKSPACE/.venv is a bind mount,
+                    # so the target directory always exists (even when empty)
+                    # and uv venv otherwise refuses with "A directory already
+                    # exists at: .venv". --clear wipes contents in place
+                    # without trying to rmdir the mount point itself.
+                    if uv venv --clear --python "$_py_ver" "$WORKSPACE/.venv" >/dev/null 2>"$_uv_err"; then
                         printf "\033[0;36m● Sandbox venv ready. Populate with:\033[0m\n"
                         if [ -f "$WORKSPACE/pyproject.toml" ]; then
                             printf "\033[0;36m    uv sync    # or: uv pip install -e .\033[0m\n"
@@ -1054,8 +1064,11 @@ if [ "${SANDY_VENV_OVERLAY_ACTIVE:-0}" = "1" ] && [ -d "$WORKSPACE/.venv" ]; the
                             printf "\033[0;36m    uv pip install <your deps>\033[0m\n"
                         fi
                     else
-                        printf "\033[0;33m⚠ uv venv failed for Python %s — run 'uv venv' manually\033[0m\n" "$_py_ver"
+                        printf "\033[0;33m⚠ uv venv failed for Python %s:\033[0m\n" "$_py_ver"
+                        sed 's/^/  /' "$_uv_err" >&2 || true
+                        printf "\033[0;33m  Run 'uv venv' manually inside the container to retry.\033[0m\n"
                     fi
+                    rm -f "$_uv_err"
                 else
                     printf "\033[0;33m⚠ uv not found; cannot create sandbox venv\033[0m\n"
                 fi
