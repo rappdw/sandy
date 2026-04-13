@@ -2033,7 +2033,7 @@ if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
     error "    rm -rf '$SANDY_WORKSPACE_LOCK'"
     exit 1
 fi
-echo "$" > "$SANDY_WORKSPACE_LOCK/pid"
+echo "$$" > "$SANDY_WORKSPACE_LOCK/pid"
 
 SANDBOX_IS_NEW=false
 if [ ! -d "$SANDBOX_DIR" ]; then
