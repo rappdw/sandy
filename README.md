@@ -154,6 +154,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--rebuild` | Force rebuild of the Docker image |
 | `--build-only` | Build images and exit (for CI) |
 | `--upgrade` | Update sandy to the latest version from GitHub |
+| `--agent <list>` | Agent(s) to launch — overrides `SANDY_AGENT` and `.sandy/config` (e.g. `--agent claude,gemini`) |
 | `-p "prompt"` | One-shot prompt (no interactive session) |
 
 All other arguments are forwarded to `claude`.

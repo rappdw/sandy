@@ -11,9 +11,10 @@ set -euo pipefail
 #   - Per-project sandbox: isolated ~/.claude per working directory
 #
 # Usage:
-#   sandy                     Resume last session (or start new)
-#   sandy --new               Start a fresh session
-#   sandy -p "prompt"         One-shot prompt
+#   sandy                         Resume last session (or start new)
+#   sandy --new                   Start a fresh session
+#   sandy -p "prompt"             One-shot prompt
+#   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
 SANDY_VERSION="0.11.1-dev"
@@ -297,6 +298,7 @@ Usage:
   sandy -p "prompt"              One-shot prompt
   sandy --resume                 Open session picker
   sandy --remote                 Start in remote-control server mode
+  sandy --agent claude,gemini    Launch specific agent(s) for this run
   sandy --help                   Show this help
 
 Environment variables:
@@ -337,6 +339,9 @@ Flags:
   --resume           Open session picker
   --remote           Start in remote-control server mode
   --upgrade          Update sandy to the latest version
+  --agent <list>     Agent(s) to launch (overrides SANDY_AGENT and
+                     .sandy/config). Comma-separated for multi-agent,
+                     e.g. --agent claude,gemini or --agent=claude,codex
   -v                 Verbose: show startup sections, pause on exit
   -vv                Debug: add bash trace to user-setup.sh
   -vvv               Full trace: also trace entrypoint.sh and show docker flags
@@ -352,6 +357,11 @@ SANDY_BUILD_ONLY=false
 SANDY_NEW_SESSION=false
 SANDY_REMOTE_CONTROL=false
 SANDY_VERBOSE="${SANDY_VERBOSE:-0}"
+# --agent's value is stashed here rather than assigned directly to SANDY_AGENT,
+# because SANDY_AGENT is also set by _load_sandy_config() further down and we
+# want the CLI flag to win over per-project and user config. The override is
+# applied just before agent resolution.
+SANDY_AGENT_OVERRIDE=""
 REMAINING_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -360,7 +370,15 @@ while [ $# -gt 0 ]; do
         --new)        SANDY_NEW_SESSION=true ;;
         --remote)     SANDY_REMOTE_CONTROL=true ;;
         --upgrade)    sandy_self_update; exit 0 ;;
-        --agent)      shift; SANDY_AGENT="$1" ;;
+        --agent)
+            if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
+                echo "[sandy] ERROR: --agent requires a value (e.g. --agent claude,gemini)" >&2
+                exit 1
+            fi
+            shift
+            SANDY_AGENT_OVERRIDE="$1"
+            ;;
+        --agent=*)    SANDY_AGENT_OVERRIDE="${1#--agent=}" ;;
         -vvv)         SANDY_VERBOSE=3 ;;
         -vv)          SANDY_VERBOSE=2 ;;
         -v)           SANDY_VERBOSE=1 ;;
@@ -1721,6 +1739,8 @@ _load_sandy_config "$WORK_DIR/.sandy/config"
 _load_sandy_config "$WORK_DIR/.sandy/.secrets"
 
 # --- Resolve agent ---
+# CLI --agent flag wins over all config sources (per-project, user, env)
+[ -n "$SANDY_AGENT_OVERRIDE" ] && SANDY_AGENT="$SANDY_AGENT_OVERRIDE"
 SANDY_AGENT="${SANDY_AGENT:-claude}"
 # Aliases for common combos
 case "$SANDY_AGENT" in
