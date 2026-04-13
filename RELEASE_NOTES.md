@@ -1,3 +1,35 @@
+## sandy v0.11.0
+
+PR 2.1 — venv overlay hardening. Fixes the `.venv` overlay that shipped in v0.10.0 so it actually materializes cleanly and handles concurrent launches without corrupting sandbox state.
+
+### Bug Fixes
+
+**`.venv` overlay never materialized** — The overlay dir is a bind mount, so the target `$WORKSPACE/.venv` always exists as a directory. `uv venv` refuses to create a venv into any existing directory with "A directory already exists at: .venv", so the first-launch materialization silently failed and every session fell back to the system Python. Fixed by invoking `uv venv --clear` (wipes contents in place without rmdir-ing the mount point). The `--clear` flag is now a regression-guarded invariant in `run-tests.sh` §9k. Also: `uv venv` stderr was being suppressed, so the actual error was invisible to users — it's now captured and printed on failure.
+
+**Python version precedence** — Sandy was parsing `pyvenv.cfg` for the host Python version, but `.python-version` (if present) is the authoritative user-maintained pin and should win. `.python-version` is now checked first, `pyvenv.cfg` is the fallback. The parsed value is validated against `^[0-9]+\.[0-9]+$`; garbage is dropped and the container defaults to `3.12`.
+
+**Symlinked `.venv/`** — Overlay detection now explicitly skips symlinked `.venv/` with an info message. Overlaying a symlink would shadow whatever the target happens to point at — too risky to do silently.
+
+**Version drift warning** — On relaunch, sandy now compares the overlay's actual `pyvenv.cfg` version against the host's wanted version (from `.python-version` / host `pyvenv.cfg`). A mismatch (e.g. the user bumped `.python-version` after the overlay was built) prints a warning with the recreate command. Auto-recreate is deliberately not done — it would silently nuke installed packages.
+
+### New Features
+
+**Workspace mutex** — Only one sandy may run against a given workspace at a time. On launch, sandy takes a per-workspace lock (`mkdir` on `$SANDY_HOME/sandboxes/.<name>.lock` — atomic on every POSIX filesystem, no external dependency). A second launch fails fast with a clear error naming the holding pid and the command to clear a stale lock (e.g. after `kill -9`). The lock is released by the cleanup trap on normal exit, Ctrl-C, or crash. Two agents editing the same codebase would step on each other's edits anyway; deliberate parallelism should use separate workspaces.
+
+### Tests
+
+**Integration test image-build gating** — `run-integration-tests.sh` sections 4/6/7b (in-container PATH/version/synthkit/WeasyPrint checks for codex/gemini/claude) were gated on `docker image inspect` and silently skipped when the image wasn't pre-built. They don't actually need credentials — only the image — so a developer without e.g. `OPENAI_API_KEY` would never exercise the sandy-codex image at all. Added an `ensure_image_built` helper that invokes `sandy --build-only` from a throwaway workspace; skip branches are now `fail` so a broken build is loud.
+
+**§9k/§9l regression guards** — `uv venv --clear` is asserted present; the workspace mutex is asserted to use `mkdir` (not flock) and release in the cleanup trap; `CONTAINER_NAME` is asserted deterministic (no PID suffix); the previous `_SANDY_HAVE_FLOCK` gating is asserted removed.
+
+### Documentation
+
+**CLAUDE.md** — "Workspace `.venv` overlay" section rewritten to describe the new materialization flow (`uv venv --clear`, no in-container locking, drift check). New "Concurrent launches" paragraph documenting the mutex.
+
+**SPECIFICATION.md** — New Appendix E.0 (Workspace Mutex). Appendix E.7a updated for the simplified `user-setup.sh` flow.
+
+---
+
 ## sandy v0.10.1
 
 M1 blocker fixes from the code review on the `codex-support` branch, on the road to 1.0-rc1.
