@@ -2022,6 +2022,27 @@ if [ "${SANDY_SSH:-token}" = "agent" ] && [ "$(uname -s)" != "Linux" ]; then
     done
 fi
 
+# Host-side lock around sandbox creation and seeding. Two concurrent sandy
+# launches in the same workspace (e.g. parallel `sandy -p ...` invocations)
+# both see an empty sandbox and both try to seed concurrently — clobbering
+# settings.json merges, creating half-populated .claude/ dirs, etc. Serialize
+# the setup block with a host-side flock; release it before `docker run` so
+# the actual sessions still run in parallel. The lock file lives outside the
+# sandbox itself (in $SANDY_HOME/sandboxes/) because the sandbox dir may not
+# yet exist when we take the lock. macOS doesn't ship flock(1) (it's in
+# util-linux); there, the lock is a no-op and the narrow first-launch
+# seeding race is unprotected. `brew install util-linux` adds flock.
+mkdir -p "$SANDY_HOME/sandboxes"
+_SANDY_SETUP_LOCK="$SANDY_HOME/sandboxes/.${SANDBOX_NAME}.setup.lock"
+_SANDY_HAVE_FLOCK=false
+if command -v flock &>/dev/null; then
+    _SANDY_HAVE_FLOCK=true
+    exec 8>"$_SANDY_SETUP_LOCK"
+    if ! flock -w 60 8; then
+        warn "Timed out waiting for concurrent sandy setup — proceeding anyway"
+    fi
+fi
+
 SANDBOX_IS_NEW=false
 if [ ! -d "$SANDBOX_DIR" ]; then
     info "Creating new sandbox: $SANDBOX_DIR"
@@ -2675,9 +2696,20 @@ else
 fi
 
 # --- Build docker run flags ---
-CONTAINER_NAME="sandy-${SANDBOX_NAME}"
-# Remove stale container from a previous unclean exit (--rm handles normal exits)
-docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+# Container name is suffixed with the shell PID so two concurrent sandy
+# launches in the same workspace (e.g. parallel `sandy -p ...` invocations)
+# don't collide on the `docker run --name` call. Without this, the second
+# launch fails immediately with "container name already in use" before any
+# of our in-container coordination (venv flock, etc.) gets a chance to run.
+CONTAINER_NAME="sandy-${SANDBOX_NAME}-$$"
+# Clean up stale containers from crashed previous runs of the same sandbox
+# (--rm handles normal exits; a crashed sandy leaves an exited container
+# behind). Filter status=exited so we don't nuke a running sibling launch
+# in the same workspace.
+_stale_prefix="sandy-${SANDBOX_NAME}-"
+while IFS= read -r _stale; do
+    [ -n "$_stale" ] && docker rm -f "$_stale" >/dev/null 2>&1 || true
+done < <(docker ps -a --filter "name=^${_stale_prefix}" --filter "status=exited" --format '{{.Names}}' 2>/dev/null)
 RUN_FLAGS=(--rm -it --name "$CONTAINER_NAME")
 RUN_FLAGS+=(--cpus "$SANDY_CPUS" --memory "$SANDY_MEM")
 RUN_FLAGS+=(--security-opt no-new-privileges:true)
@@ -3121,6 +3153,14 @@ if { [ "$_SANDY_IS_MULTI" = true ] || ! _sandy_agent_has claude; } && [ -n "${SA
             fi
             ;;
     esac
+fi
+
+# Release the host-side setup lock before `docker run`. Sandbox creation,
+# seeding, credential copies, and mount assembly are all done — from here
+# on, concurrent sandy launches in the same workspace can run in parallel.
+if [ "$_SANDY_HAVE_FLOCK" = "true" ]; then
+    flock -u 8 2>/dev/null || true
+    exec 8>&-
 fi
 
 docker run "${RUN_FLAGS[@]}" "$IMAGE_NAME" "$@"

@@ -127,6 +127,8 @@ Sandy solves this by bind-mounting a sandbox-owned overlay over `$WORKSPACE/.ven
 
 **Host venv is never touched.** The overlay is a shadow — the host filesystem is untouched by sandy. After sandy exits, the host's `.venv/` is exactly as it was before.
 
+**Concurrent launches.** Two `sandy` invocations in the same workspace (e.g. parallel `sandy -p ...` calls) are supported. Container names are suffixed with the shell PID so Docker doesn't reject the second launch, and a host-side `flock` on `$SANDY_HOME/sandboxes/.<name>.setup.lock` serializes sandbox creation and seeding (released before `docker run`, so the sessions themselves run in parallel). On macOS, `flock(1)` isn't installed by default; the setup lock silently no-ops and the narrow first-launch seeding race is unprotected — install with `brew install util-linux` if you need it, or warm up the sandbox with one launch before going concurrent.
+
 ## Architecture
 
 - **Three-phase Docker build**: A `sandy-base` image contains the OS, toolchains (Node.js 22, Go 1.24, Rust stable, Python 3, C/C++), and system tools. A `sandy-claude-code` image layers Claude Code on top. An optional per-project image (from `.sandy/Dockerfile`) layers project-specific tools on top of that. Each phase only rebuilds when its inputs change.

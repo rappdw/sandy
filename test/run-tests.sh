@@ -453,6 +453,22 @@ check "materialization block emits drift warning" \
     grep -q 'Sandbox venv is Python' "$MATERIALIZE_BLOCK_FILE"
 rm -f "$MATERIALIZE_BLOCK_FILE"
 
+# 9l. PR 2.1: concurrent-launch race fixes
+# Two regression guards for the container-name collision and the
+# sandbox-seeding race that block concurrent `sandy -p` launches in the
+# same workspace.
+check "CONTAINER_NAME is suffixed with PID for uniqueness" \
+    grep -q 'CONTAINER_NAME="sandy-\${SANDBOX_NAME}-\$\$"' "$_SANDY_SCRIPT_PATH"
+
+check "stale-container cleanup filters status=exited" \
+    grep -q 'status=exited' "$_SANDY_SCRIPT_PATH"
+
+check "host-side setup lock uses flock when available" \
+    bash -c "awk '/_SANDY_HAVE_FLOCK=false/,/^fi$/' '$_SANDY_SCRIPT_PATH' | grep -q 'flock -w 60 8'"
+
+check "host-side setup lock is released before docker run" \
+    bash -c "awk '/Release the host-side setup lock/,/^docker run/' '$_SANDY_SCRIPT_PATH' | grep -q 'flock -u 8'"
+
 # ============================================================
 info "9z. PR 1.1 regression tests — resume fallback + codex grep-F"
 # ============================================================
