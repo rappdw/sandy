@@ -3231,22 +3231,57 @@ for i in "${!SYMLINK_HOST_PATHS[@]}"; do
 done
 RUN_FLAGS+=(-w "$SANDY_WORKSPACE")
 
+# --- One-shot stub cleanup warning ---
+# An earlier version of sandy's protected-files mount used an always-mount
+# policy that caused Docker to create 0-byte stub files on the host for every
+# non-existent protected file. We now existence-gate files (see the loop below),
+# but users upgrading from the buggy version may have accumulated stubs in
+# their workspace (visible in `git status`, breaks direnv, etc.). Detect and
+# warn — don't auto-remove: we can't distinguish our stubs from a user's
+# intentionally-empty file with 100% certainty.
+_stale_stubs=()
+while IFS= read -r _pf; do
+    [ -z "$_pf" ] && continue
+    _path="$WORK_DIR/$_pf"
+    # Must exist, be a regular file, and be exactly 0 bytes.
+    [ -f "$_path" ] || continue
+    [ ! -s "$_path" ] || continue
+    # If git tracks it, leave alone — user put it there.
+    if (cd "$WORK_DIR" && git ls-files --error-unmatch "$_pf" >/dev/null 2>&1); then
+        continue
+    fi
+    _stale_stubs+=("$_pf")
+done < <(_sandy_protected_files)
+if [ ${#_stale_stubs[@]} -gt 0 ]; then
+    warn "Detected ${#_stale_stubs[@]} empty protected-file stub(s) in this workspace"
+    warn "  that were likely created by an earlier sandy build."
+    warn "  These can break direnv (.envrc), clutter \`git status\`, and confuse tooling."
+    warn "  To clean up (safe — these are 0-byte, untracked files we created):"
+    _rm_cmd="rm"
+    for _s in "${_stale_stubs[@]}"; do _rm_cmd+=" $_s"; done
+    warn "    (cd \"$WORK_DIR\" && $_rm_cmd)"
+fi
+
 # Protect sensitive files/dirs from modification inside the container by overlaying
 # read-only bind mounts. Prevents shell config injection, git hook injection, git
 # filter-driver injection, IDE-config tampering, and CI-workflow tampering. Does
 # not affect the host filesystem.
 #
-# Always-mount policy: if the host path doesn't exist, overlay an empty-ro
-# fixture so the agent cannot create the path from inside the container (closes
-# existence-gated protection bypass). Fixtures live at $SANDY_HOME/.empty-ro-*
-# (S1.0).
+# Files: existence-gated. Docker creates the mount target on the host when the
+# target path doesn't exist yet (even under a :ro bind), and the target ends up
+# inside the rw workspace bind. Always-mounting an empty fixture over a missing
+# .bashrc/.envrc/etc. therefore creates 0-byte stub files on the host — which
+# breaks direnv (blocks on empty .envrc), pollutes `git status`, and trips any
+# tool that checks for file presence. We accept the residual F3 gap (agent can
+# create these files in-session; the stubs show up in `git status` for review
+# on the host, which is the detection path).
+#
+# Dirs: always-mounted with an empty-dir fixture. Empty directories are benign
+# — git doesn't track them, no tool reacts to their mere presence, and the ro
+# overlay still blocks the agent from creating files under them.
 while IFS= read -r _pf; do
     [ -z "$_pf" ] && continue
-    if [ -e "$WORK_DIR/$_pf" ]; then
-        RUN_FLAGS+=(-v "$WORK_DIR/$_pf:$SANDY_WORKSPACE/$_pf:ro")
-    else
-        RUN_FLAGS+=(-v "$SANDY_HOME/.empty-ro-file:$SANDY_WORKSPACE/$_pf:ro")
-    fi
+    [ -e "$WORK_DIR/$_pf" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_pf:$SANDY_WORKSPACE/$_pf:ro")
 done < <(_sandy_protected_files)
 # .git/ files use -f gating (must be regular files; no empty fallback — the
 # container's own git operations legitimately inspect these if they exist).

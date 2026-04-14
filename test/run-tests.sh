@@ -108,17 +108,14 @@ sandy_run() {
     # (--print-protected-paths), so the test harness never drifts from the
     # real launcher.
     #
-    # Why we pre-create missing fixtures in $TEST_PROJECT instead of pointing
-    # the ro mount at a shared fixture in $SANDBOX_DIR:
-    #   Docker creates a missing bind-mount target path on the host. Because
-    #   /workspace is itself a bind of $TEST_PROJECT, a mount at
-    #   /workspace/.python-version materializes $TEST_PROJECT/.python-version
-    #   on the host — and Docker creates it as root. A subsequent host-side
-    #   write (e.g. test 8 writes "3.11" into .python-version) then fails
-    #   with EPERM and `set -e` aborts the run. Pre-creating the fixture in
-    #   $TEST_PROJECT as the test user avoids the problem: the file exists
-    #   before sandy_run, self-mounts as :ro inside the container, and stays
-    #   host-writable for the test harness.
+    # File mounts are existence-gated — matching sandy's production behavior.
+    # An earlier always-mount-with-empty-fixture policy caused Docker to create
+    # 0-byte stubs on the host for every missing protected file (Docker auto-
+    # creates bind-mount targets, and the target lives inside the rw workspace
+    # bind). That broke direnv and polluted `git status`; see the comment block
+    # in sandy where the protected-files loop runs. Tests assert the agent can
+    # still write absent files — the mitigation is host-side visibility in
+    # `git status`, not prevention.
     local _ro_mounts=()
     local _sandy_bin
     _sandy_bin="$(cd "$(dirname "$0")/.." && pwd)/sandy"
@@ -127,11 +124,8 @@ sandy_run() {
         local _kind="${_line%%:*}" _p="${_line#*:}"
         case "$_kind" in
             file)
-                if [ ! -e "$TEST_PROJECT/$_p" ]; then
-                    mkdir -p "$(dirname "$TEST_PROJECT/$_p")"
-                    : > "$TEST_PROJECT/$_p"
-                fi
-                _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
+                # Existence-gated in production sandy; same here — no pre-create.
+                [ -e "$TEST_PROJECT/$_p" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
                 ;;
             gitfile)
                 # Existence-gated in production sandy; same here — no pre-create.
@@ -1918,12 +1912,21 @@ else
 fi
 
 # ============================================================
-info "31. Sprint 1 — Absent protected paths blocked by empty-ro fixtures"
+info "31. Sprint 1 — Absent protected dirs blocked by empty-ro fixtures"
 # ============================================================
-# F3 remediation: protected dirs/files were previously mounted only if they
-# already existed on the host. The agent could create .vscode/, .idea/, or
-# dotfiles that had no host counterpart. Sandy now overlays empty-ro fixtures
-# at those container paths regardless.
+# F3 remediation (dirs): protected directories are always-mounted. If the host
+# has no .vscode/, .idea/, .github/workflows/, etc., sandy overlays an empty
+# read-only directory at that container path, so the agent cannot create files
+# under those paths from inside the container. Empty dirs on the host are
+# benign — git doesn't track them and no tool reacts to their mere presence.
+#
+# NOTE: Protected FILES are existence-gated, not always-mounted. See the
+# comment block in sandy where the protected-files loop runs: Docker auto-
+# creates bind-mount targets on the host inside the rw workspace bind, which
+# stubbed .bashrc/.envrc/etc. as 0-byte files in every workspace — breaking
+# direnv and polluting `git status`. The residual F3 gap for files is an
+# agent creating them in-session; the new file then shows up in `git status`
+# on the host, which is the review path.
 
 # Clean slate — no host-side copies of any protected path.
 rm -rf "$TEST_PROJECT/.bashrc" "$TEST_PROJECT/.vscode" "$TEST_PROJECT/.idea" \
@@ -1942,23 +1945,6 @@ check "cannot create files under absent .idea/" test "$MK_IDEA" = "no"
 sandy_run "mkdir -p /workspace/.github/workflows 2>/dev/null && touch /workspace/.github/workflows/ci.yml 2>/dev/null" \
     >/dev/null 2>&1 && MK_WORKFLOWS=yes || MK_WORKFLOWS=no
 check "cannot create files under absent .github/workflows/" test "$MK_WORKFLOWS" = "no"
-
-# Files that didn't exist on host appear as empty read-only fixtures
-sandy_run "echo evil > /workspace/.envrc 2>/dev/null" \
-    >/dev/null 2>&1 && WR_ENVRC=yes || WR_ENVRC=no
-check "cannot write absent .envrc" test "$WR_ENVRC" = "no"
-
-sandy_run "echo evil > /workspace/.npmrc 2>/dev/null" \
-    >/dev/null 2>&1 && WR_NPMRC=yes || WR_NPMRC=no
-check "cannot write absent .npmrc" test "$WR_NPMRC" = "no"
-
-sandy_run "echo evil > /workspace/.bashrc 2>/dev/null" \
-    >/dev/null 2>&1 && WR_BASHRC_ABSENT=yes || WR_BASHRC_ABSENT=no
-check "cannot write absent .bashrc" test "$WR_BASHRC_ABSENT" = "no"
-
-# .envrc appears as an empty file to in-container cat
-check ".envrc is an empty file inside container" \
-    sandy_run "test -f /workspace/.envrc && test ! -s /workspace/.envrc"
 
 # ============================================================
 info "32. Sprint 1 — Expanded protected-files list"
