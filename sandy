@@ -1761,6 +1761,13 @@ WORK_DIR="$(pwd)"
 # SANDY_SSH, and API keys/tokens are dropped with a warning when loaded from
 # a passive source — a compromised session must not be able to weaken sandy's
 # own isolation on the next launch by writing to workspace config.
+# Accumulator for privileged keys encountered in passive (workspace) sources.
+# These are not exported immediately — they are resolved against a persistent
+# per-workspace approval list after all config files have been loaded. See
+# _resolve_passive_privileged_approval() below.
+_PASSIVE_PRIVILEGED_PENDING=()
+_PASSIVE_PRIVILEGED_SOURCES=()
+
 _load_sandy_config() {
     local file="$1"
     local tier="${2:-privileged}"
@@ -1790,15 +1797,16 @@ _load_sandy_config() {
                 esac
                 ;;
             passive)
-                # Privileged keys from passive sources: warn and drop
+                # Privileged keys from passive sources: collect for later
+                # approval prompt. Do NOT export yet.
                 case "$key" in
                     SANDY_SSH|SANDY_SKIP_PERMISSIONS|SANDY_ALLOW_NO_ISOLATION|\
                     SANDY_ALLOW_LAN_HOSTS|\
                     ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|\
                     GEMINI_API_KEY|OPENAI_API_KEY|GOOGLE_API_KEY|\
                     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
-                        warn "ignoring privileged key '$key' from workspace config ($file)"
-                        warn "  → set it in \$HOME/.sandy/config or export it in your shell instead"
+                        _PASSIVE_PRIVILEGED_PENDING+=("$key=$value")
+                        _PASSIVE_PRIVILEGED_SOURCES+=("$file")
                         ;;
                     # Passive (workspace-settable) keys — allow
                     SANDY_MODEL|SANDY_SKILL_PACKS|\
@@ -1827,6 +1835,97 @@ _load_sandy_config "$SANDY_HOME/config"            privileged
 _load_sandy_config "$SANDY_HOME/.secrets"          privileged
 _load_sandy_config "$WORK_DIR/.sandy/config"       passive
 _load_sandy_config "$WORK_DIR/.sandy/.secrets"     passive
+
+# Resolve any privileged keys collected from workspace (passive) config sources
+# against a per-workspace approval list. First encounter → interactive prompt;
+# subsequent launches with the same set → silent; changed set → re-prompt;
+# headless mode → drop with a pointer to "launch interactively to approve".
+#
+# Approval is keyed on the absolute workspace path AND the exact KEY=VALUE set,
+# so editing .sandy/config always re-triggers the prompt.
+_resolve_passive_privileged_approval() {
+    [ ${#_PASSIVE_PRIVILEGED_PENDING[@]} -eq 0 ] && return 0
+
+    # Sort + dedupe the KEY=VALUE set for deterministic hashing.
+    local sorted
+    sorted="$(printf '%s\n' "${_PASSIVE_PRIVILEGED_PENDING[@]}" | sort -u)"
+
+    local set_hash wd_hash
+    set_hash="$(printf '%s' "$sorted" | sha256 | awk '{print $1}')"
+    wd_hash="$(printf '%s' "$WORK_DIR" | sha256 | awk '{print $1}' | cut -c1-16)"
+
+    local approvals_dir="$SANDY_HOME/approvals"
+    local approval_file="$approvals_dir/passive-$wd_hash.list"
+    mkdir -p "$approvals_dir"
+
+    # Already approved? First line of the file is the hash.
+    if [ -f "$approval_file" ]; then
+        local stored
+        stored="$(head -n1 "$approval_file" 2>/dev/null)"
+        if [ "$stored" = "$set_hash" ]; then
+            while IFS= read -r _kv; do
+                [ -z "$_kv" ] && continue
+                export "$_kv"
+            done <<< "$sorted"
+            return 0
+        fi
+    fi
+
+    # Not approved (or set changed) — surface the request.
+    local _src
+    _src="$(printf '%s\n' "${_PASSIVE_PRIVILEGED_SOURCES[@]}" | sort -u | head -n1)"
+    echo "[sandy]" >&2
+    echo "[sandy] Workspace config ($_src) wants to set privileged keys:" >&2
+    while IFS= read -r _kv; do
+        [ -z "$_kv" ] && continue
+        echo "[sandy]   $_kv" >&2
+    done <<< "$sorted"
+    echo "[sandy]" >&2
+    echo "[sandy] These affect security boundaries (SSH agent forwarding, permission" >&2
+    echo "[sandy] prompts, LAN allowlist, credentials). Sandy refuses to honor them" >&2
+    echo "[sandy] from workspace config by default because a committed .sandy/config" >&2
+    echo "[sandy] from a cloned repo could exploit them to escape isolation or" >&2
+    echo "[sandy] exfiltrate credentials." >&2
+    echo "[sandy]" >&2
+    echo "[sandy] If this is your own workspace and you trust this config, you can" >&2
+    echo "[sandy] approve it once for $WORK_DIR." >&2
+    echo "[sandy] The approval is tied to the exact set above — any edit re-prompts." >&2
+    echo "[sandy]" >&2
+
+    # Headless / non-interactive: fail closed.
+    if [ "${_sandy_is_headless:-false}" = "true" ] || [ ! -t 0 ]; then
+        echo "[sandy] Non-interactive session — dropping these keys." >&2
+        echo "[sandy] Launch sandy interactively once from this directory to approve." >&2
+        echo "[sandy]" >&2
+        return 0
+    fi
+
+    local _ans
+    printf '[sandy] Approve these keys for this workspace? [y/N] ' >&2
+    IFS= read -r _ans </dev/tty || _ans=""
+    case "$_ans" in
+        y|Y|yes|YES|Yes)
+            {
+                printf '%s\n' "$set_hash"
+                printf '# workspace: %s\n' "$WORK_DIR"
+                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
+                printf '%s\n' "$sorted"
+            } > "$approval_file"
+            chmod 600 "$approval_file" 2>/dev/null || true
+            while IFS= read -r _kv; do
+                [ -z "$_kv" ] && continue
+                export "$_kv"
+            done <<< "$sorted"
+            echo "[sandy] Approved. Future launches from this directory will proceed silently" >&2
+            echo "[sandy] unless you edit the set. Revoke via: rm $approval_file" >&2
+            ;;
+        *)
+            echo "[sandy] Not approved — dropping these keys for this launch." >&2
+            echo "[sandy] (Edit $_src and relaunch to re-prompt.)" >&2
+            ;;
+    esac
+}
+_resolve_passive_privileged_approval
 
 # Sanity: reject world-open SANDY_ALLOW_LAN_HOSTS values. Even from a
 # privileged source, "0.0.0.0/0" negates the whole point of LAN isolation and
