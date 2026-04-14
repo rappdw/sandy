@@ -283,6 +283,71 @@ if [[ "${1:-}" == "-v" || "${1:-}" == "--version" ]]; then
     exit 0
 fi
 
+# --- Protected path lists (single source of truth) ---
+# Files that host tools source or execute on cd/install/scan lookup belong
+# here. Package manifests (package.json, pyproject.toml, Cargo.toml, Makefile)
+# are intentionally NOT protected — the agent has legitimate reason to edit
+# them. Called by the RUN_FLAGS construction loop (below) and by the test
+# harness via `sandy --print-protected-paths`.
+_sandy_protected_files() {
+    cat <<'EOF'
+.bashrc
+.bash_profile
+.zshrc
+.zprofile
+.profile
+.gitconfig
+.ripgreprc
+.mcp.json
+.envrc
+.tool-versions
+.mise.toml
+.nvmrc
+.node-version
+.python-version
+.ruby-version
+.npmrc
+.yarnrc
+.yarnrc.yml
+.pypirc
+.netrc
+.pre-commit-config.yaml
+EOF
+}
+# Top-level .git files that can trigger host-side code execution if tampered.
+# Separate list because gated on -f instead of -e.
+_sandy_protected_git_files() {
+    cat <<'EOF'
+.git/config
+.gitmodules
+.git/HEAD
+.git/packed-refs
+EOF
+}
+# Protected directories. .github/workflows is included by default; opt out via
+# SANDY_ALLOW_WORKFLOW_EDIT=1 in .sandy/config (passive tier).
+_sandy_protected_dirs() {
+    cat <<'EOF'
+.git/hooks
+.git/info
+.vscode
+.idea
+.circleci
+.devcontainer
+EOF
+    [ "${SANDY_ALLOW_WORKFLOW_EDIT:-0}" = "1" ] || echo ".github/workflows"
+}
+
+# Debug flag for test harness — print the three protected-path lists and exit.
+# Format: one path per line, prefixed by "file:", "gitfile:", or "dir:".
+# Reads SANDY_ALLOW_WORKFLOW_EDIT from the environment (not from .sandy/config).
+if [[ "${1:-}" == "--print-protected-paths" ]]; then
+    while IFS= read -r _p; do [ -n "$_p" ] && echo "file:$_p"; done < <(_sandy_protected_files)
+    while IFS= read -r _p; do [ -n "$_p" ] && echo "gitfile:$_p"; done < <(_sandy_protected_git_files)
+    while IFS= read -r _p; do [ -n "$_p" ] && echo "dir:$_p"; done < <(_sandy_protected_dirs)
+    exit 0
+fi
+
 # --- Help ---
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<EOF
@@ -1676,6 +1741,15 @@ ensure_build_files() {
         fi
     done
 
+    # Empty fixtures for bind-mount-as-ro fallback targets (S1.0).
+    # When a protected host path is absent, we still want to overlay an empty
+    # ro fixture at that container path — blocks in-container creation and
+    # closes the existence-gated protection bypass. --tmpfs X:ro is not
+    # reliably honored across Docker versions, so we use bind-mount of a known
+    # empty host path instead. Idempotent, created once.
+    [ -f "$SANDY_HOME/.empty-ro-file" ] || : > "$SANDY_HOME/.empty-ro-file"
+    [ -d "$SANDY_HOME/.empty-ro-dir" ]  || mkdir -p "$SANDY_HOME/.empty-ro-dir"
+
     if [ "$changed" = true ]; then
         info "Build files updated."
     fi
@@ -1706,37 +1780,97 @@ ensure_build_files
 # --- Per-project sandbox directory ---
 WORK_DIR="$(pwd)"
 
-# Safe key-value config parser (no arbitrary code execution)
+# Safe key-value config parser (no arbitrary code execution).
+#
+# tier is either "privileged" (host-level ~/.sandy/{config,.secrets}) or
+# "passive" (workspace-level .sandy/{config,.secrets}). Privileged keys like
+# SANDY_SKIP_PERMISSIONS, SANDY_ALLOW_NO_ISOLATION, SANDY_ALLOW_LAN_HOSTS,
+# SANDY_SSH, and API keys/tokens are dropped with a warning when loaded from
+# a passive source — a compromised session must not be able to weaken sandy's
+# own isolation on the next launch by writing to workspace config.
 _load_sandy_config() {
     local file="$1"
+    local tier="${2:-privileged}"
     [ -f "$file" ] || return 0
     while IFS='=' read -r key value; do
         value="${value#\"}" ; value="${value%\"}"
         value="${value#\'}" ; value="${value%\'}"
-        case "$key" in
-            SANDY_SSH|SANDY_MODEL|SANDY_SKILL_PACKS|SANDY_SKIP_PERMISSIONS|\
-            SANDY_ALLOW_NO_ISOLATION|SANDY_ALLOW_LAN_HOSTS|\
-            SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|SANDY_VERBOSE|\
-            SANDY_AGENT|SANDY_VENV_OVERLAY|\
-            CLAUDE_CODE_OAUTH_TOKEN|\
-            TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
-            DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
-            ANTHROPIC_API_KEY|CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|\
-            GEMINI_API_KEY|GEMINI_MODEL|SANDY_GEMINI_EXTENSIONS|SANDY_GEMINI_AUTH|\
-            GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION|GOOGLE_GENAI_USE_VERTEXAI|GOOGLE_API_KEY|\
-            OPENAI_API_KEY|CODEX_MODEL|SANDY_CODEX_AUTH|CODEX_HOME|\
-            SANDY_CHANNEL_TARGET_PANE)
-                export "$key=$value" ;;
+        case "$tier" in
+            privileged)
+                # Full allowlist — all keys permitted
+                case "$key" in
+                    SANDY_SSH|SANDY_MODEL|SANDY_SKILL_PACKS|SANDY_SKIP_PERMISSIONS|\
+                    SANDY_ALLOW_NO_ISOLATION|SANDY_ALLOW_LAN_HOSTS|\
+                    SANDY_ALLOW_WORKFLOW_EDIT|\
+                    SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|SANDY_VERBOSE|\
+                    SANDY_AGENT|SANDY_VENV_OVERLAY|\
+                    CLAUDE_CODE_OAUTH_TOKEN|\
+                    TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
+                    DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
+                    ANTHROPIC_API_KEY|CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
+                    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|\
+                    GEMINI_API_KEY|GEMINI_MODEL|SANDY_GEMINI_EXTENSIONS|SANDY_GEMINI_AUTH|\
+                    GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION|GOOGLE_GENAI_USE_VERTEXAI|GOOGLE_API_KEY|\
+                    OPENAI_API_KEY|CODEX_MODEL|SANDY_CODEX_AUTH|CODEX_HOME|\
+                    SANDY_CHANNEL_TARGET_PANE)
+                        export "$key=$value" ;;
+                esac
+                ;;
+            passive)
+                # Privileged keys from passive sources: warn and drop
+                case "$key" in
+                    SANDY_SSH|SANDY_SKIP_PERMISSIONS|SANDY_ALLOW_NO_ISOLATION|\
+                    SANDY_ALLOW_LAN_HOSTS|\
+                    ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|\
+                    GEMINI_API_KEY|OPENAI_API_KEY|GOOGLE_API_KEY|\
+                    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
+                        warn "ignoring privileged key '$key' from workspace config ($file)"
+                        warn "  → set it in \$HOME/.sandy/config or export it in your shell instead"
+                        ;;
+                    # Passive (workspace-settable) keys — allow
+                    SANDY_MODEL|SANDY_SKILL_PACKS|\
+                    SANDY_ALLOW_WORKFLOW_EDIT|\
+                    SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|SANDY_VERBOSE|\
+                    SANDY_AGENT|SANDY_VENV_OVERLAY|\
+                    TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
+                    DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
+                    CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
+                    GEMINI_MODEL|SANDY_GEMINI_EXTENSIONS|SANDY_GEMINI_AUTH|\
+                    GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION|GOOGLE_GENAI_USE_VERTEXAI|\
+                    CODEX_MODEL|SANDY_CODEX_AUTH|CODEX_HOME|\
+                    SANDY_CHANNEL_TARGET_PANE)
+                        export "$key=$value" ;;
+                esac
+                ;;
         esac
     done < <(grep -E '^[A-Z_]+=.+' "$file" 2>/dev/null)
 }
 
-# Load config/secrets: user-level first, then per-project (project overrides user)
-_load_sandy_config "$SANDY_HOME/config"
-_load_sandy_config "$SANDY_HOME/.secrets"
-_load_sandy_config "$WORK_DIR/.sandy/config"
-_load_sandy_config "$WORK_DIR/.sandy/.secrets"
+# Load config/secrets: host-level is privileged, workspace-level is passive.
+# Passive sources are parsed by a tampering container between sessions, so
+# privileged keys (API keys, SANDY_SSH, isolation toggles) must not be honored
+# from them.
+_load_sandy_config "$SANDY_HOME/config"            privileged
+_load_sandy_config "$SANDY_HOME/.secrets"          privileged
+_load_sandy_config "$WORK_DIR/.sandy/config"       passive
+_load_sandy_config "$WORK_DIR/.sandy/.secrets"     passive
+
+# Sanity: reject world-open SANDY_ALLOW_LAN_HOSTS values. Even from a
+# privileged source, "0.0.0.0/0" negates the whole point of LAN isolation and
+# is almost certainly a mistake, not a feature request.
+if [ -n "${SANDY_ALLOW_LAN_HOSTS:-}" ]; then
+    IFS=',' read -ra _sanity_hosts <<< "$SANDY_ALLOW_LAN_HOSTS"
+    for _h in "${_sanity_hosts[@]}"; do
+        _h="$(echo "$_h" | tr -d '[:space:]')"
+        [ -z "$_h" ] && continue
+        case "$_h" in
+            0.0.0.0/0|::/0)
+                echo "[sandy] ERROR: SANDY_ALLOW_LAN_HOSTS contains a world-open entry: $_h" >&2
+                echo "[sandy]   This would negate sandy's LAN isolation. Refusing to start." >&2
+                exit 1 ;;
+        esac
+    done
+fi
 
 # --- Resolve agent ---
 # CLI --agent flag wins over all config sources (per-project, user, env)
@@ -2438,6 +2572,20 @@ apply_network_isolation() {
         # Inserted last → lands at top → evaluated first: allow container's own subnet
         sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d "$CONTAINER_SUBNET" -j ACCEPT 2>/dev/null || true
         info "Network isolation rules applied."
+    else
+        # Non-Linux (macOS, etc.): iptables is unreachable — the rules above
+        # cannot be applied, and Docker Desktop's VM does NOT filter LAN
+        # traffic. The container can reach host.docker.internal, host
+        # localhost services, and any device on the physical LAN. This is a
+        # known gap scheduled for a real fix in sandy 1.1 (egress proxy
+        # sidecar). Until then, warn loudly so users understand the posture.
+        warn "═══════════════════════════════════════════════════════════════"
+        warn " Network isolation is NOT active on $OS."
+        warn " sandy cannot block LAN access from the container on this OS."
+        warn " The container can reach your host's localhost services,"
+        warn " host.docker.internal, and any device on your physical LAN."
+        warn " Real fix (egress proxy sidecar) is scheduled for sandy 1.1."
+        warn "═══════════════════════════════════════════════════════════════"
     fi
 }
 
@@ -2483,7 +2631,7 @@ cleanup() {
     fi
 }
 
-trap cleanup EXIT INT TERM HUP
+trap cleanup EXIT INT TERM HUP QUIT ABRT
 apply_network_isolation
 
 # --- Ensure .claude.json exists (setup state: theme, terms acceptance, etc.) ---
@@ -2733,6 +2881,22 @@ RUN_FLAGS+=(--read-only)
 RUN_FLAGS+=(--tmpfs /tmp:exec,size=1G)
 RUN_FLAGS+=(--tmpfs /home/claude:exec,size=2G,uid=1001,gid=1001)
 RUN_FLAGS+=(--network "$NETWORK_NAME")
+# On non-Linux (macOS), nullify Docker Desktop "magic" hostnames that point
+# at the host gateway. Does not stop raw-IP access (that's Sprint 3), but
+# removes the easiest default-hostname path and anything calling by name.
+if [[ "$OS" != "Linux" ]]; then
+    RUN_FLAGS+=(--add-host "gateway.docker.internal:127.0.0.1")
+    RUN_FLAGS+=(--add-host "metadata.google.internal:127.0.0.1")
+    # host.docker.internal is trickier — sandy's own in-container SSH agent
+    # relay uses it to reach the host-side socat. Only nullify when SSH agent
+    # mode is NOT active.
+    if [[ "${SANDY_SSH:-token}" != "agent" ]]; then
+        RUN_FLAGS+=(--add-host "host.docker.internal:127.0.0.1")
+    else
+        warn "SSH agent mode active — host.docker.internal not nullified on $OS"
+        warn "  (sandy's own agent relay depends on this hostname reaching the host)"
+    fi
+fi
 # GPU passthrough (requires NVIDIA Container Toolkit on host)
 if [ -n "${SANDY_GPU:-}" ]; then
     if docker info 2>/dev/null | grep -q "nvidia"; then
@@ -2747,7 +2911,11 @@ fi
 if _sandy_agent_has claude; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/claude:/home/claude/.claude")
     if [ -n "$CRED_TMPDIR" ]; then
-        RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json")
+        # :ro — matches the rationale on the Codex creds mount below. Prevents
+        # token leakage back to the host tmpfile via a compromised session and
+        # prevents stale-token races on exit. Claude Code refreshes tokens via
+        # the remote endpoint, not by writing to this file.
+        RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json:ro")
     fi
     RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/claude/.claude.json")
     # Mount host Claude Code hooks (read-only) for terminal notifications (cmux, iTerm2, etc.)
@@ -2759,8 +2927,9 @@ if _sandy_agent_has gemini; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/gemini:/home/claude/.gemini")
     if [ -n "${GEMINI_CRED_TMPDIR:-}" ]; then
         # Mount whichever OAuth file was found (oauth_creds.json or tokens.json)
+        # :ro — same rationale as the Claude/Codex creds mounts above/below.
         for _oaf in "$GEMINI_CRED_TMPDIR"/oauth_creds.json "$GEMINI_CRED_TMPDIR"/tokens.json; do
-            [ -f "$_oaf" ] && RUN_FLAGS+=(-v "$_oaf:/home/claude/.gemini/$(basename "$_oaf")") && break
+            [ -f "$_oaf" ] && RUN_FLAGS+=(-v "$_oaf:/home/claude/.gemini/$(basename "$_oaf"):ro") && break
         done
     fi
     if [ -n "${GEMINI_ADC_MOUNT:-}" ]; then
@@ -2846,7 +3015,7 @@ while IFS= read -r -d '' link; do
             fi
         fi
     fi
-done < <(find "$WORK_DIR" -maxdepth 5 -type l \
+done < <(find "$WORK_DIR" -maxdepth 8 -type l \
     -not -path '*/node_modules/*' \
     -not -path '*/.venv*/*' \
     -not -path '*/.git/*' \
@@ -2892,17 +3061,69 @@ done
 RUN_FLAGS+=(-w "$SANDY_WORKSPACE")
 
 # Protect sensitive files/dirs from modification inside the container by overlaying
-# read-only bind mounts. Prevents shell config injection, git hook injection, and
-# Claude command/agent directory tampering. Does not affect the host filesystem.
-for _pf in .bashrc .bash_profile .zshrc .zprofile .profile .gitconfig .ripgreprc .mcp.json; do
-    [ -e "$WORK_DIR/$_pf" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_pf:$SANDY_WORKSPACE/$_pf:ro")
-done
-for _gpf in .git/config .gitmodules; do
+# read-only bind mounts. Prevents shell config injection, git hook injection, git
+# filter-driver injection, IDE-config tampering, and CI-workflow tampering. Does
+# not affect the host filesystem.
+#
+# Always-mount policy: if the host path doesn't exist, overlay an empty-ro
+# fixture so the agent cannot create the path from inside the container (closes
+# existence-gated protection bypass). Fixtures live at $SANDY_HOME/.empty-ro-*
+# (S1.0).
+while IFS= read -r _pf; do
+    [ -z "$_pf" ] && continue
+    if [ -e "$WORK_DIR/$_pf" ]; then
+        RUN_FLAGS+=(-v "$WORK_DIR/$_pf:$SANDY_WORKSPACE/$_pf:ro")
+    else
+        RUN_FLAGS+=(-v "$SANDY_HOME/.empty-ro-file:$SANDY_WORKSPACE/$_pf:ro")
+    fi
+done < <(_sandy_protected_files)
+# .git/ files use -f gating (must be regular files; no empty fallback — the
+# container's own git operations legitimately inspect these if they exist).
+while IFS= read -r _gpf; do
+    [ -z "$_gpf" ] && continue
     [ -f "$WORK_DIR/$_gpf" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_gpf:$SANDY_WORKSPACE/$_gpf:ro")
-done
-for _pd in .git/hooks .vscode .idea; do
-    [ -d "$WORK_DIR/$_pd" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_pd:$SANDY_WORKSPACE/$_pd:ro")
-done
+done < <(_sandy_protected_git_files)
+while IFS= read -r _pd; do
+    [ -z "$_pd" ] && continue
+    if [ -d "$WORK_DIR/$_pd" ]; then
+        RUN_FLAGS+=(-v "$WORK_DIR/$_pd:$SANDY_WORKSPACE/$_pd:ro")
+    else
+        RUN_FLAGS+=(-v "$SANDY_HOME/.empty-ro-dir:$SANDY_WORKSPACE/$_pd:ro")
+    fi
+done < <(_sandy_protected_dirs)
+
+# --- Submodule gitdir protection (S1.1) ---
+# git stores each submodule's real gitdir under .git/modules/<path>/ (or under
+# $GITDIR_HOST/modules/<path>/ for --separate-git-dir / submodule-worktree
+# layouts). Each subdir has its own config + hooks — the same host-escape
+# vectors as the top-level .git/. Walk all such gitdirs and overlay their
+# config/hooks/info read-only. Portable find (no GNU -printf).
+_protect_submodule_gitdirs() {
+    local root_host="$1"       # filesystem path on host to walk
+    local root_container="$2"  # container-side path that corresponds to root_host
+    [ -d "$root_host" ] || return 0
+    local _cfg _sub_dir _rel
+    while IFS= read -r -d '' _cfg; do
+        _sub_dir="$(dirname "$_cfg")"
+        _rel="${_sub_dir#$root_host}"  # e.g. "/research/claude-code"
+        RUN_FLAGS+=(-v "$_sub_dir/config:$root_container${_rel}/config:ro")
+        if [ -d "$_sub_dir/hooks" ]; then
+            RUN_FLAGS+=(-v "$_sub_dir/hooks:$root_container${_rel}/hooks:ro")
+        else
+            RUN_FLAGS+=(-v "$SANDY_HOME/.empty-ro-dir:$root_container${_rel}/hooks:ro")
+        fi
+        if [ -d "$_sub_dir/info" ]; then
+            RUN_FLAGS+=(-v "$_sub_dir/info:$root_container${_rel}/info:ro")
+        fi
+    done < <(find "$root_host" -mindepth 1 -maxdepth 6 -type f -name config -print0 2>/dev/null)
+}
+# Regular repo: .git/modules lives under the workspace bind mount.
+_protect_submodule_gitdirs "$WORK_DIR/.git/modules" "$SANDY_WORKSPACE/.git/modules"
+# Separate-gitdir / submodule-worktree: modules live under $GITDIR_HOST, which
+# is separately bind-mounted at $GITDIR_CONTAINER (earlier submodule block).
+if [ -n "${GITDIR_HOST:-}" ] && [ -n "${GITDIR_CONTAINER:-}" ] && [ -d "$GITDIR_HOST/modules" ]; then
+    _protect_submodule_gitdirs "$GITDIR_HOST/modules" "$GITDIR_CONTAINER/modules"
+fi
 # Mount sandbox copies of commands, agents, and plugins over the workspace.
 # Seeded from host on first creation so user-authored commands/agents are available.
 # The agent can create/modify these freely; changes persist in the sandbox across sessions

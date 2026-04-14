@@ -98,16 +98,30 @@ Flags are parsed with a `while [ $# -gt 0 ]` loop with `shift`. Sandy's flags ar
 
 ### Load Order
 
-1. `$SANDY_HOME/config` — user-level defaults (typically `~/.sandy/config`)
-2. `$SANDY_HOME/.secrets` — user-level credentials
-3. `.sandy/config` — per-project overrides
-4. `.sandy/.secrets` — per-project credentials
+1. `$SANDY_HOME/config` — user-level defaults (typically `~/.sandy/config`) — **privileged tier**
+2. `$SANDY_HOME/.secrets` — user-level credentials — **privileged tier**
+3. `.sandy/config` — per-project overrides — **passive tier**
+4. `.sandy/.secrets` — per-project credentials — **passive tier**
 
-Later files override earlier values.
+Later files override earlier values, subject to tier restrictions below.
 
 ### Parser
 
-The config parser does **not** use `source`. It reads lines via `grep -E '^[A-Z_]+=.+'`, strips leading/trailing single and double quotes from values (in order: double then single), validates the key against an allowlist, and exports only recognized keys. Lines not matching the grep pattern are silently ignored — this includes comments (`#`), blank lines, and lowercase keys. If the config file is unreadable or missing, loading silently succeeds.
+The config parser does **not** use `source`. It reads lines via `grep -E '^[A-Z_]+=.+'`, strips leading/trailing single and double quotes from values (in order: double then single), validates the key against a tier-specific allowlist, and exports only recognized keys. Lines not matching the grep pattern are silently ignored — this includes comments (`#`), blank lines, and lowercase keys. If the config file is unreadable or missing, loading silently succeeds.
+
+### Config Tiers (1.0-rc1)
+
+Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `passive`). Privileged-tier sources may set any recognized key. Passive-tier sources (the two workspace files) may set only the **passive-safe** subset — any attempt to set a privileged-only key from a workspace source emits a `warn()` line ("ignoring privileged key '<NAME>' from workspace config") and drops the value. This prevents a malicious `.sandy/config` committed to a repo from disabling isolation, forwarding an SSH agent, or exfiltrating credentials.
+
+**Privileged-only keys** (allowed only from `$SANDY_HOME/config` and `$SANDY_HOME/.secrets`):
+`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`.
+
+**Passive-safe keys** (allowed from any source):
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`.
+
+### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
+
+After all config sources are loaded, `SANDY_ALLOW_LAN_HOSTS` (if set) is split on `,` and each entry is validated. Any entry matching `0.0.0.0/0` or `::/0` causes a hard error (`exit 1`) with a clear message. This check runs even against privileged-tier values — a user-level config with a world-open allowlist is almost always a mistake, and the launch refusal prevents silent negation of LAN isolation.
 
 ### Allowlisted Variables
 
@@ -135,8 +149,9 @@ The config parser does **not** use `source`. It reads lines via `grep -E '^[A-Z_
 | `SANDY_MEM` | auto-detected | Memory limit (`available - 1GB`, min 2GB) |
 | `SANDY_GPU` | disabled | GPU passthrough: `all`, or device IDs like `0,1` |
 | `SANDY_SKILL_PACKS` | unset | Comma-separated skill packs (e.g. `gstack`) |
-| `SANDY_ALLOW_LAN_HOSTS` | unset | Comma-separated IPs/CIDRs to allow through isolation |
-| `SANDY_ALLOW_NO_ISOLATION` | unset | Set to `1` to skip iptables (Linux only) |
+| `SANDY_ALLOW_LAN_HOSTS` | unset | Comma-separated IPs/CIDRs to allow through isolation. Rejects world-open entries (`0.0.0.0/0`, `::/0`) with a hard error at launch. **Privileged-only.** |
+| `SANDY_ALLOW_NO_ISOLATION` | unset | Set to `1` to skip iptables (Linux only). **Privileged-only.** |
+| `SANDY_ALLOW_WORKFLOW_EDIT` | `0` | Set to `1` to remove `.github/workflows/` from the protected read-only mount list for this project. Passive-safe. |
 | `SANDY_CHANNELS` | unset | Channel plugins (e.g. `plugin:telegram@claude-plugins-official`) |
 | `SANDY_VERBOSE` | `0` | Verbosity level (0-3) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | unset | Long-lived OAuth token (1-year validity) |
@@ -502,28 +517,82 @@ The container's own subnet is allowed. Additional hosts/CIDRs can be allowed via
 
 ### macOS
 
-Docker Desktop runs containers in a lightweight Linux VM. Containers cannot directly access the Mac's LAN — Docker's NAT provides isolation out of the box. No iptables rules needed.
+**Network isolation is NOT active on macOS in 1.0-rc1.** Docker Desktop's VM does *not* provide LAN isolation. Containers can reach `host.docker.internal` (→ host gateway), the host's `localhost` services, and any device on the user's physical LAN (`192.168.x.x`, home router, NAS, printers, internal dashboards). Linux iptables DROP rules do not apply and cannot be applied from macOS. (Stress test April 2026 opened a live TCP connection to host SSHD and read its banner — see `ISOLATION_STRESS.md` finding F2.)
+
+**Launch warning**: On non-Linux hosts, `apply_network_isolation` prints a warning banner informing the user that network isolation is not active and that the container can reach the host's LAN.
+
+**Defense-in-depth (`--add-host`)**: sandy appends the following flags to `RUN_FLAGS` on macOS to nullify Docker Desktop's magic hostnames:
+
+| Hostname | Mapped to | Condition |
+|---|---|---|
+| `gateway.docker.internal` | `127.0.0.1` | always |
+| `metadata.google.internal` | `127.0.0.1` | always |
+| `host.docker.internal` | `127.0.0.1` | only when `SANDY_SSH != agent` |
+
+When `SANDY_SSH=agent`, `host.docker.internal` is *not* nullified because sandy's own in-container SSH agent relay (`socat … TCP:host.docker.internal:$SSH_RELAY_PORT`) depends on that hostname reaching the host. In that mode, sandy emits an extra warn line noting the exception.
+
+This is defense-in-depth, not a fix — raw-IP access (`curl http://192.168.1.1`) is unaffected. The real fix is scheduled for sandy 1.1 as an egress proxy sidecar (HTTP CONNECT + SOCKS5 + DNS allowlist).
 
 ---
 
 ## 9. Protected Files
 
-Certain files and directories in the workspace are overlaid at container launch to prevent modification.
+Certain files and directories in the workspace are overlaid at container launch to prevent modification. The lists of protected paths are emitted by three helper functions defined at the top of the `sandy` script (`_sandy_protected_files`, `_sandy_protected_git_files`, `_sandy_protected_dirs`). The test harness reads the same lists via `sandy --print-protected-paths` — single source of truth.
 
 ### Read-Only Bind Mounts
+
+**Files (always mounted — empty fixture if absent on host):**
 
 | Path | Threat mitigated |
 |---|---|
 | `.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile` | Shell config injection (aliases, PATH hijacking, env poisoning) |
 | `.gitconfig` | Credential helper injection, alias hijacking |
-| `.git/config` | Remote path manipulation, `core.fsmonitor` injection |
-| `.gitmodules` | Submodule URL hijacking |
-| `.git/hooks/` | Pre-commit, post-checkout, push hook injection |
 | `.ripgreprc` | Search config injection |
 | `.mcp.json` | MCP server config tampering |
-| `.vscode/`, `.idea/` | IDE task/launch config injection |
+| `.envrc` | `direnv` auto-sourcing on `cd` |
+| `.tool-versions` | asdf toolchain version hijacking |
+| `.mise.toml` | mise toolchain hijacking |
+| `.nvmrc`, `.node-version` | Node version manager hijacking |
+| `.python-version` | pyenv / uv auto-install hijacking |
+| `.ruby-version` | rbenv/chruby hijacking |
+| `.npmrc`, `.yarnrc`, `.yarnrc.yml` | npm/yarn registry hijacking, auth-token exfiltration |
+| `.pypirc` | Python package index auth-token exfiltration |
+| `.netrc` | HTTP credential exfiltration (curl/git/wget) |
+| `.pre-commit-config.yaml` | pre-commit hook injection |
 
-Files that don't exist in the workspace are skipped (no empty placeholders created).
+**Git-tree files (existence-gated — only mounted when present on host):**
+
+| Path | Threat mitigated |
+|---|---|
+| `.git/config` | Remote path manipulation, `core.fsmonitor` injection, `core.hooksPath` redirect |
+| `.gitmodules` | Submodule URL hijacking |
+| `.git/HEAD` | Ref spoofing |
+| `.git/packed-refs` | Ref spoofing |
+
+**Directories (always mounted — empty fixture if absent on host):**
+
+| Path | Threat mitigated |
+|---|---|
+| `.git/hooks/` | Pre-commit, post-checkout, push hook injection |
+| `.git/info/` | `.git/info/attributes` filter-driver injection (arbitrary-command on checkout/add) |
+| `.vscode/`, `.idea/` | IDE task/launch config injection |
+| `.circleci/` | CircleCI pipeline escape |
+| `.devcontainer/` | Devcontainer auto-open escape |
+| `.github/workflows/` | GitHub Actions pipeline escape on `git push`. Omitted from the list when `SANDY_ALLOW_WORKFLOW_EDIT=1`. |
+
+**Submodule gitdirs (recursive walk):**
+
+`_protect_submodule_gitdirs` walks `$WORK_DIR/.git/modules/` (plus, for `--separate-git-dir` / worktree-of-submodule layouts, `$GITDIR_HOST/modules/`) up to `maxdepth 6`, matches `-type f -name config`, and for each submodule directory mounts:
+
+- `<submodule>/config` → read-only
+- `<submodule>/hooks/` → read-only (empty fixture if absent)
+- `<submodule>/info/` → read-only (only if present on host)
+
+This uses `while read -r -d ''` and shell-side `dirname` to avoid GNU-only `find -printf '%h\0'` — portable across macOS/BSD and GNU `find`.
+
+**Always-mount pattern (1.0-rc1)**: for the files and directories groups above, sandy always mounts *something* at each protected path — either the host file/directory if it exists, or an empty zero-byte file (`$SANDY_HOME/.empty-ro-file`) / empty directory (`$SANDY_HOME/.empty-ro-dir`) if it doesn't. This closes the pre-1.0 gap where absent protected paths could be created inside the container and silently sourced by host tools on first read. Git-tree files are excluded from always-mount because they are meaningless without a real git repo. The empty fixtures are seeded idempotently by `ensure_build_files()` on every launch.
+
+**Intentionally excluded** from the protected list: package manifests (`Makefile`, `justfile`, `package.json`, `pyproject.toml`, `setup.py`, `Cargo.toml`, `build.rs`). The agent legitimately edits these as project source, and they are invoked explicitly by name rather than sourced on `cd` or filesystem scan.
 
 ### Writable Sandbox Overlays
 
@@ -537,7 +606,7 @@ Host content at these paths is hidden (not visible inside container). Changes pe
 
 ### Symlink Protection
 
-Before container launch, sandy scans the workspace (up to 5 levels deep, skipping `node_modules/`, `.venv/`, `.git/`) for symlinks pointing outside the project directory. If found, the user is prompted to confirm before proceeding.
+Before container launch, sandy scans the workspace (up to 8 levels deep, skipping `node_modules/`, `.venv*/`, `.git/`) for symlinks pointing outside the project directory. If found, the user is prompted to confirm before proceeding.
 
 When the user accepts, sandy automatically mounts each symlink target into the container so the symlinks resolve correctly:
 - **Absolute symlinks** (`data -> /home/user/shared/data`): Target is mounted at the raw symlink path (the literal path the OS looks up inside the container).
@@ -602,7 +671,7 @@ Sandy's `load_gemini_credentials()` tries the following sources, controlled by `
 | Mode | Source | Container mount / env |
 |---|---|---|
 | `api_key` | `GEMINI_API_KEY` env var on host | Forwarded via `-e GEMINI_API_KEY=…` |
-| `oauth` | Host `~/.gemini/tokens.json` | Ephemeral copy mounted at `/home/claude/.gemini/tokens.json` |
+| `oauth` | Host `~/.gemini/tokens.json` | Ephemeral copy mounted at `/home/claude/.gemini/tokens.json` **read-only** (1.0-rc1) |
 | `adc` | `~/.config/gcloud/application_default_credentials.json` | Mounted read-only + `GOOGLE_APPLICATION_CREDENTIALS` env var |
 
 In `auto` mode, all three are probed; a warning is emitted if none are found. OAuth tokens are copied to a tmpdir each launch and discarded on exit (same pattern as Claude credentials). Gemini's OAuth refresh is handled inside the CLI itself, so sandy does not run a refresh check.
@@ -1352,7 +1421,8 @@ All magic numbers, thresholds, timeouts, and limits used in the sandy script.
 
 | Scan | Max Depth | Excludes |
 |---|---|---|
-| Symlink protection | 5 levels | `node_modules/`, `.venv/`, `.git/` |
+| Symlink protection | 8 levels | `node_modules/`, `.venv*/`, `.git/` |
+| Submodule gitdir walk | 6 levels | — |
 | Git LFS detection | 3 levels | — |
 
 ### B.6 Docker Security Flags
@@ -1612,10 +1682,15 @@ Sandy runs on both Linux and macOS. The following sections document every point 
 
 | Aspect | Linux | macOS |
 |---|---|---|
-| Mechanism | iptables `DOCKER-USER` chain | Docker Desktop VM provides NAT isolation |
-| Rules applied | DROP for 5 private ranges; ACCEPT for container subnet and allowed hosts | None needed |
-| Fail-closed | Aborts if iptables unavailable (unless `SANDY_ALLOW_NO_ISOLATION=1`) | Always proceeds |
+| Mechanism | iptables `DOCKER-USER` chain | **None active in 1.0-rc1** (Docker Desktop does *not* provide LAN isolation) |
+| Rules applied | DROP for 5 private ranges; ACCEPT for container subnet and allowed hosts | None — LAN, `host.docker.internal`, and host `localhost` are all reachable |
+| Fail-closed | Aborts if iptables unavailable (unless `SANDY_ALLOW_NO_ISOLATION=1`) | Prints loud launch warning banner; proceeds without isolation |
+| Defense-in-depth | n/a | `--add-host gateway.docker.internal:127.0.0.1`, `--add-host metadata.google.internal:127.0.0.1`, and (conditionally) `--add-host host.docker.internal:127.0.0.1` |
 | Cleanup | Rules and bridge network deleted on exit | Bridge network deleted on exit |
+
+**macOS `--add-host` condition:** `host.docker.internal` is only nullified when `SANDY_SSH != agent`. In agent mode, sandy's in-container SSH agent relay uses that hostname to reach the host-side socat relay (see §10); nullifying it would break SSH. An additional warn line is emitted in that case.
+
+**Real fix scheduled for sandy 1.1**: an egress proxy sidecar (HTTP CONNECT + SOCKS5 + DNS allowlist) that implements uniform outbound allowlisting on both platforms. See `ISOLATION_STRESS.md` finding F2 and the Sprint 3 section of the rc1 remediation plan.
 
 **Linux iptables flow**:
 1. Test `sudo iptables -L DOCKER-USER -n` — if fails, abort (or allow with override)
@@ -1747,10 +1822,14 @@ If `SANDY_GPU` is set and Docker supports GPUs (`docker info --format '{{.Runtim
 
 If credentials were loaded (OAuth token or credentials file):
 ```bash
--v "<CRED_TMPDIR>/.credentials.json:/home/claude/.claude/.credentials.json"
+-v "<CRED_TMPDIR>/.credentials.json:/home/claude/.claude/.credentials.json:ro"
 ```
 
-The temporary directory is created per-launch and cleaned up on exit.
+The temporary directory is created per-launch and cleaned up on exit. The mount is **read-only** (1.0-rc1) — this prevents token leakage from a compromised in-container session back to the host tmpfile, matches the Codex `auth.json` mount, and eliminates stale-token races on exit. In-session OAuth refresh uses the Anthropic refresh endpoint and does not require writing back to the creds file.
+
+The Gemini OAuth file mount (`~/.gemini/oauth_creds.json` or equivalent) is also `:ro` under the same rationale. See §11 for credential loading rules per agent.
+
+**Cleanup trap**: the `cleanup` function that removes `*_CRED_TMPDIR` directories is registered on `EXIT INT TERM HUP QUIT ABRT`. `SIGKILL` cannot be trapped, so a residual cleanup window exists in that case alone.
 
 ### E.5 .claude.json Mount
 
@@ -1815,9 +1894,9 @@ Both paths use the same `$HOME`-relative mapping to preserve the relative relati
 
 Before assembling mounts, sandy scans the workspace for symlinks escaping the project directory:
 ```bash
-find <WORKSPACE> -maxdepth 5 \
+find <WORKSPACE> -maxdepth 8 \
     -path '*/node_modules' -prune -o \
-    -path '*/.venv' -prune -o \
+    -path '*/.venv*' -prune -o \
     -path '*/.git' -prune -o \
     -type l -print
 ```
@@ -1838,30 +1917,48 @@ Deduplicated by container mount path.
 
 ### E.10 Protected File Mounts
 
-Three categories with different existence checks:
+Three categories, sourced from the single-source-of-truth helpers in `sandy` (`_sandy_protected_files`, `_sandy_protected_git_files`, `_sandy_protected_dirs`). The same three helpers are exposed to the test harness via `sandy --print-protected-paths`, which emits `file:<path>`, `gitfile:<path>`, and `dir:<path>` lines. See §9 for the full path list and threat model.
 
-**Regular files** (checked with `-e`):
+**Regular files — always mounted (1.0-rc1)**:
 ```bash
-for f in .bashrc .bash_profile .zshrc .zprofile .profile .gitconfig .ripgreprc .mcp.json; do
-    -v "<WORKSPACE>/$f:<CONTAINER_WORKSPACE>/$f:ro"
-done
+while IFS= read -r f; do
+    if [ -e "<WORKSPACE>/$f" ]; then
+        -v "<WORKSPACE>/$f:<CONTAINER_WORKSPACE>/$f:ro"
+    else
+        -v "<SANDY_HOME>/.empty-ro-file:<CONTAINER_WORKSPACE>/$f:ro"
+    fi
+done < <(_sandy_protected_files)
 ```
 
-**Git-specific files** (checked with `-f`):
+**Git-tree files — existence-gated** (meaningless without a real git repo):
 ```bash
-for f in .git/config .gitmodules; do
-    -v "<WORKSPACE>/$f:<CONTAINER_WORKSPACE>/$f:ro"
-done
+while IFS= read -r f; do
+    [ -f "<WORKSPACE>/$f" ] && -v "<WORKSPACE>/$f:<CONTAINER_WORKSPACE>/$f:ro"
+done < <(_sandy_protected_git_files)
 ```
 
-**Directories** (checked with `-d`):
+**Directories — always mounted (1.0-rc1)**:
 ```bash
-for d in .git/hooks .vscode .idea; do
-    -v "<WORKSPACE>/$d:<CONTAINER_WORKSPACE>/$d:ro"
-done
+while IFS= read -r d; do
+    if [ -d "<WORKSPACE>/$d" ]; then
+        -v "<WORKSPACE>/$d:<CONTAINER_WORKSPACE>/$d:ro"
+    else
+        -v "<SANDY_HOME>/.empty-ro-dir:<CONTAINER_WORKSPACE>/$d:ro"
+    fi
+done < <(_sandy_protected_dirs)
 ```
 
-Only existing paths are mounted — no empty placeholders created.
+**Submodule gitdir walk** — after the above loops:
+```bash
+_protect_submodule_gitdirs "<WORK_DIR>/.git/modules" "<CONTAINER_WORKSPACE>/.git/modules"
+# When .git is a file (submodule worktree / --separate-git-dir):
+[ -d "<GITDIR_HOST>/modules" ] && \
+    _protect_submodule_gitdirs "<GITDIR_HOST>/modules" "<GITDIR_CONTAINER>/modules"
+```
+
+For each `config` sentinel file found under the root (up to `maxdepth 6`), the helper emits three mounts: `config:ro`, `hooks:ro` (empty fixture if absent), and `info:ro` (only if present). Uses `-print0` and shell-side `dirname` for macOS/BSD portability.
+
+**`$SANDY_HOME/.empty-ro-file`** (zero-byte) and **`$SANDY_HOME/.empty-ro-dir/`** (empty) are created idempotently by `ensure_build_files()` on every launch and live alongside the generated Dockerfiles.
 
 ### E.11 Writable Sandbox Overlays
 

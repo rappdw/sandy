@@ -232,8 +232,13 @@ Panes appear in the order listed. Each agent has its own config at `~/.claude`, 
 
 ## How Network Isolation Works
 
-### macOS (Docker Desktop)
-Docker Desktop runs containers inside a lightweight Linux VM. Containers **cannot directly access your Mac's LAN** by default — they can only reach the internet through Docker's NAT. This gives you LAN isolation out of the box.
+### macOS (Docker Desktop) — not isolated in 1.0-rc1
+
+**Warning:** Docker Desktop does *not* provide LAN isolation. Contrary to earlier documentation, the container *can* reach `host.docker.internal` (→ your Mac's gateway), your host's `localhost` services, and any device on your physical LAN — your home router at `192.168.1.1`, a NAS, a printer, an internal dashboard, your SSH daemon. A stress test in April 2026 opened a live TCP connection from inside the container to the host's SSHD and read its banner (see `ISOLATION_STRESS.md`, finding F2).
+
+As defense-in-depth, sandy nullifies the Docker Desktop magic hostnames (`gateway.docker.internal`, `metadata.google.internal`, and — when `SANDY_SSH != agent` — `host.docker.internal`) via `--add-host`, and prints a launch-time warning banner on macOS. But **raw-IP access is unaffected**, and the banner is a warning, not a fix.
+
+**Real fix:** an egress proxy sidecar (HTTP CONNECT + SOCKS5 + DNS allowlist) is scheduled for sandy 1.1. Until then, treat macOS sandy as "process and filesystem isolation only; no network isolation." If that matters for your threat model, run sandy on a Linux host where iptables-based isolation does apply.
 
 ### Linux
 Sandy automatically inserts `iptables` rules into the `DOCKER-USER` chain that block all RFC 1918 traffic from the container's bridge interface:
@@ -547,10 +552,17 @@ The workspace is bind-mounted read/write so Claude can modify your project files
 | `.gitconfig` | Blocks git config tampering (e.g. credential helpers, aliases) |
 | `.ripgreprc` | Blocks search config injection |
 | `.mcp.json` | Blocks MCP server config tampering |
-| `.git/config` | Blocks git remote/hook path manipulation |
-| `.gitmodules` | Blocks submodule URL hijacking |
+| `.envrc` | Blocks `direnv` auto-sourcing (executes on `cd`) |
+| `.tool-versions`, `.mise.toml`, `.nvmrc`, `.node-version`, `.python-version`, `.ruby-version` | Blocks asdf/mise/nvm/pyenv/rbenv toolchain hijacking |
+| `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `.pypirc`, `.netrc` | Blocks registry hijacking and credential exfiltration |
+| `.pre-commit-config.yaml` | Blocks pre-commit hook injection |
+| `.git/config`, `.gitmodules`, `.git/HEAD`, `.git/packed-refs` | Blocks git remote/hook path manipulation and ref spoofing |
 | `.git/hooks/` | Blocks git hook injection (pre-commit, post-checkout, etc.) |
+| `.git/info/` | Blocks `.git/info/attributes` filter-driver injection |
+| `.git/modules/<sub>/{config,hooks,info}` | Same, for every submodule gitdir (walked recursively) |
 | `.vscode/`, `.idea/` | Blocks IDE task/launch config injection |
+| `.github/workflows/` | Blocks CI pipeline escape (opt-out via `SANDY_ALLOW_WORKFLOW_EDIT=1`) |
+| `.circleci/`, `.devcontainer/` | Blocks CircleCI and devcontainer escape |
 
 **Sandbox-mounted directories** — overlaid with writable sandbox copies so Claude can create and modify them without touching the host:
 
@@ -560,4 +572,4 @@ The workspace is bind-mounted read/write so Claude can modify your project files
 | `.claude/agents/` | Starts empty. Claude can create new agents |
 | `.claude/plugins/` | Starts empty. Managed via `/plugin install` inside the container |
 
-Files that don't exist in the workspace are skipped — no empty placeholders are created
+**Always-mount pattern (1.0-rc1).** Since 1.0-rc1, protected files and directories are *always* mounted — if the host has no corresponding file, sandy overlays an empty zero-byte file or empty directory read-only at that path instead. This closes the pre-1.0 gap where absent protected files could be created inside the container and silently loaded back on the host on first read. The one exception is the git-file set (`.git/config`, `.gitmodules`, `.git/HEAD`, `.git/packed-refs`), which is still gated on existence — those files are meaningless without a real git repo.

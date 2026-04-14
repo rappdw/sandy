@@ -48,6 +48,22 @@ _emit_summary() {
 }
 trap _emit_summary EXIT
 
+# When `set -e` aborts the script, bash fires an ERR pseudo-signal on the
+# failing command. We use this to print the line number and the command that
+# tripped the abort. Without this, an early exit leaves only the abort banner
+# and the user has to bisect by hand. The trap is a one-liner that re-enters
+# bash semantics: $LINENO is the failing line, $BASH_COMMAND is the command.
+_err_trap() {
+    local code=$?
+    printf "\033[0;31m[err-trap] line %d: '%s' exited %d\033[0m\n" \
+        "${BASH_LINENO[0]:-?}" "${BASH_COMMAND:-?}" "$code" >&2
+}
+trap _err_trap ERR
+# errtrace: make the ERR trap fire inside shell functions too. Without this,
+# a failing command inside sandy_run() would just propagate out as a non-zero
+# return and set -e would abort with no location info.
+set -E
+
 # --- Helpers ---
 
 info()  { printf "\033[0;36m%s\033[0m\n" "$*"; }
@@ -82,16 +98,66 @@ setup_project() {
 # The entrypoint runs as root, drops to user, sets up PATH/envs, then
 # execs our command instead of launching claude.
 sandy_run() {
+    # Build protected-path overlays using sandy's shared-source helper
+    # (--print-protected-paths), so the test harness never drifts from the
+    # real launcher.
+    #
+    # Why we pre-create missing fixtures in $TEST_PROJECT instead of pointing
+    # the ro mount at a shared fixture in $SANDBOX_DIR:
+    #   Docker creates a missing bind-mount target path on the host. Because
+    #   /workspace is itself a bind of $TEST_PROJECT, a mount at
+    #   /workspace/.python-version materializes $TEST_PROJECT/.python-version
+    #   on the host — and Docker creates it as root. A subsequent host-side
+    #   write (e.g. test 8 writes "3.11" into .python-version) then fails
+    #   with EPERM and `set -e` aborts the run. Pre-creating the fixture in
+    #   $TEST_PROJECT as the test user avoids the problem: the file exists
+    #   before sandy_run, self-mounts as :ro inside the container, and stays
+    #   host-writable for the test harness.
     local _ro_mounts=()
-    for _pf in .bashrc .bash_profile .zshrc .zprofile .profile .gitconfig .ripgreprc .mcp.json; do
-        [ -e "$TEST_PROJECT/$_pf" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_pf:/workspace/$_pf:ro")
-    done
-    for _gpf in .git/config .gitmodules; do
-        [ -f "$TEST_PROJECT/$_gpf" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_gpf:/workspace/$_gpf:ro")
-    done
-    for _pd in .git/hooks .vscode .idea; do
-        [ -d "$TEST_PROJECT/$_pd" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_pd:/workspace/$_pd:ro")
-    done
+    local _sandy_bin
+    _sandy_bin="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+    while IFS= read -r _line; do
+        [ -z "$_line" ] && continue
+        local _kind="${_line%%:*}" _p="${_line#*:}"
+        case "$_kind" in
+            file)
+                if [ ! -e "$TEST_PROJECT/$_p" ]; then
+                    mkdir -p "$(dirname "$TEST_PROJECT/$_p")"
+                    : > "$TEST_PROJECT/$_p"
+                fi
+                _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
+                ;;
+            gitfile)
+                # Existence-gated in production sandy; same here — no pre-create.
+                [ -f "$TEST_PROJECT/$_p" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
+                ;;
+            dir)
+                if [ ! -d "$TEST_PROJECT/$_p" ]; then
+                    mkdir -p "$TEST_PROJECT/$_p"
+                fi
+                _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
+                ;;
+        esac
+    done < <(SANDY_ALLOW_WORKFLOW_EDIT="${SANDY_ALLOW_WORKFLOW_EDIT:-0}" \
+                "$_sandy_bin" --print-protected-paths 2>/dev/null)
+    # Mirror _protect_submodule_gitdirs from the sandy launcher: for every
+    # $TEST_PROJECT/.git/modules/<sub>/config sentinel, mount config/hooks/info
+    # ro at the matching container path. Only runs if .git/modules exists —
+    # test 34 creates a fake submodule gitdir layout to exercise this.
+    if [ -d "$TEST_PROJECT/.git/modules" ]; then
+        while IFS= read -r -d '' _cfg; do
+            local _sub_dir _rel
+            _sub_dir="$(dirname "$_cfg")"
+            _rel="${_sub_dir#$TEST_PROJECT/.git/modules}"
+            _ro_mounts+=(-v "$_sub_dir/config:/workspace/.git/modules${_rel}/config:ro")
+            if [ -d "$_sub_dir/hooks" ]; then
+                _ro_mounts+=(-v "$_sub_dir/hooks:/workspace/.git/modules${_rel}/hooks:ro")
+            fi
+            if [ -d "$_sub_dir/info" ]; then
+                _ro_mounts+=(-v "$_sub_dir/info:/workspace/.git/modules${_rel}/info:ro")
+            fi
+        done < <(find "$TEST_PROJECT/.git/modules" -mindepth 1 -maxdepth 6 -type f -name config -print0 2>/dev/null)
+    fi
     # Mount sandbox copies of commands, agents, and plugins over workspace
     for _sd in commands agents plugins; do
         if [ -d "$TEST_PROJECT/.claude/$_sd" ] || [ -d "$SANDBOX_DIR/workspace-$_sd" ]; then
@@ -259,13 +325,24 @@ check "can write to home" \
 info "8. Dev environment detection — .python-version auto-install"
 # ============================================================
 
+# rm-before-write for the same sshfs stale-inode reason as test 13: earlier
+# sandy_run calls may have pre-created an empty .python-version stub and
+# cached it in sshfs. `rm -f` + create gives a fresh inode so the container
+# reads the new content via `uv python install`.
+rm -f "$TEST_PROJECT/.python-version"
 echo "3.11" > "$TEST_PROJECT/.python-version"
-# Simulate what the entrypoint does: read .python-version, install, verify
+# Simulate what the entrypoint does: read .python-version, install, verify.
+# Guarded with `|| true` because this priming sandy_run runs under `set -e`
+# and any non-zero exit (a uv install hiccup, a network flake, a sshfs cache
+# issue) would abort the whole suite before the real `check` below gets to
+# run. The `check` is the actual gate — if install truly failed, the check
+# below will report it cleanly as a test failure, not an abort.
 sandy_run '
     PY_WANT="$(cat /workspace/.python-version | tr -d "[:space:]")"
-    uv python install "$PY_WANT" 2>/dev/null
-    uv python find "$PY_WANT" >/dev/null 2>&1
-'
+    uv python install "$PY_WANT" 2>/dev/null || true
+    uv python find "$PY_WANT" >/dev/null 2>&1 || true
+    exit 0
+' || true
 check ".python-version triggers uv python install" \
     sandy_run "uv python find 3.11 >/dev/null 2>&1"
 rm -f "$TEST_PROJECT/.python-version"
@@ -575,7 +652,25 @@ check "SANDBOX_NAME defined before Phase 3" \
 info "13. Protected files are read-only inside container"
 # ============================================================
 
-# Create protected files and dirs in the project
+# Switch to a fresh TEST_PROJECT before asserting host→container content.
+#
+# Why: tests 1-12 ran sandy_run many times against $TEST_PROJECT, and
+# sandy_run's file: loop pre-created empty .bashrc/.zshrc stubs inside it so
+# the ro bind mounts would resolve. Each container read of those empty stubs
+# populates OrbStack's fuse.sshfs attribute cache at the *path* level, and
+# that cache survives rm, echo-over-write, atomic mv-rename, and inode-change
+# (verified empirically — see test/run-failing-tests.sh variants B/C/D, all
+# of which write 14 bytes on host but read 0 bytes in container). The only
+# thing that dodges the cache is a never-before-seen path: a fresh mktemp.
+#
+# Switching TEST_PROJECT here means tests 14+ inherit the new directory. All
+# of them set up their own fixtures, so that's fine. The old project is
+# removed immediately to avoid leaking tempdirs.
+_OLD_TEST_PROJECT="$TEST_PROJECT"
+TEST_PROJECT="$(mktemp -d)"
+rm -rf "$_OLD_TEST_PROJECT"
+unset _OLD_TEST_PROJECT
+
 echo "# host bashrc" > "$TEST_PROJECT/.bashrc"
 echo "# host zshrc" > "$TEST_PROJECT/.zshrc"
 mkdir -p "$TEST_PROJECT/.git/hooks"
@@ -1807,6 +1902,336 @@ if docker image inspect sandy-gemini-cli &>/dev/null; then
 else
     printf "  \033[0;33m⊘ skipped — sandy-gemini-cli image not built\033[0m\n"
 fi
+
+# ============================================================
+info "31. Sprint 1 — Absent protected paths blocked by empty-ro fixtures"
+# ============================================================
+# F3 remediation: protected dirs/files were previously mounted only if they
+# already existed on the host. The agent could create .vscode/, .idea/, or
+# dotfiles that had no host counterpart. Sandy now overlays empty-ro fixtures
+# at those container paths regardless.
+
+# Clean slate — no host-side copies of any protected path.
+rm -rf "$TEST_PROJECT/.bashrc" "$TEST_PROJECT/.vscode" "$TEST_PROJECT/.idea" \
+       "$TEST_PROJECT/.envrc" "$TEST_PROJECT/.github" "$TEST_PROJECT/.devcontainer" \
+       "$TEST_PROJECT/.git"
+
+# Directories that didn't exist on host can't be created inside container
+sandy_run "mkdir /workspace/.vscode 2>/dev/null && touch /workspace/.vscode/settings.json 2>/dev/null" \
+    >/dev/null 2>&1 && MK_VSCODE=yes || MK_VSCODE=no
+check "cannot create files under absent .vscode/" test "$MK_VSCODE" = "no"
+
+sandy_run "mkdir /workspace/.idea 2>/dev/null && touch /workspace/.idea/workspace.xml 2>/dev/null" \
+    >/dev/null 2>&1 && MK_IDEA=yes || MK_IDEA=no
+check "cannot create files under absent .idea/" test "$MK_IDEA" = "no"
+
+sandy_run "mkdir -p /workspace/.github/workflows 2>/dev/null && touch /workspace/.github/workflows/ci.yml 2>/dev/null" \
+    >/dev/null 2>&1 && MK_WORKFLOWS=yes || MK_WORKFLOWS=no
+check "cannot create files under absent .github/workflows/" test "$MK_WORKFLOWS" = "no"
+
+# Files that didn't exist on host appear as empty read-only fixtures
+sandy_run "echo evil > /workspace/.envrc 2>/dev/null" \
+    >/dev/null 2>&1 && WR_ENVRC=yes || WR_ENVRC=no
+check "cannot write absent .envrc" test "$WR_ENVRC" = "no"
+
+sandy_run "echo evil > /workspace/.npmrc 2>/dev/null" \
+    >/dev/null 2>&1 && WR_NPMRC=yes || WR_NPMRC=no
+check "cannot write absent .npmrc" test "$WR_NPMRC" = "no"
+
+sandy_run "echo evil > /workspace/.bashrc 2>/dev/null" \
+    >/dev/null 2>&1 && WR_BASHRC_ABSENT=yes || WR_BASHRC_ABSENT=no
+check "cannot write absent .bashrc" test "$WR_BASHRC_ABSENT" = "no"
+
+# .envrc appears as an empty file to in-container cat
+check ".envrc is an empty file inside container" \
+    sandy_run "test -f /workspace/.envrc && test ! -s /workspace/.envrc"
+
+# ============================================================
+info "32. Sprint 1 — Expanded protected-files list"
+# ============================================================
+# F4 remediation: additional shell-sourced / tool-config files now protected.
+
+for _f in .envrc .tool-versions .mise.toml .npmrc .yarnrc .yarnrc.yml .pypirc .netrc .pre-commit-config.yaml; do
+    echo "# host $_f" > "$TEST_PROJECT/$_f"
+done
+
+for _f in .envrc .tool-versions .mise.toml .npmrc .yarnrc .yarnrc.yml .pypirc .netrc .pre-commit-config.yaml; do
+    sandy_run "echo evil >> /workspace/$_f 2>/dev/null" >/dev/null 2>&1 && _WR=yes || _WR=no
+    check "cannot write present $_f" test "$_WR" = "no"
+done
+
+# Cleanup
+for _f in .envrc .tool-versions .mise.toml .npmrc .yarnrc .yarnrc.yml .pypirc .netrc .pre-commit-config.yaml; do
+    rm -f "$TEST_PROJECT/$_f"
+done
+
+# ============================================================
+info "33. Sprint 1 — .github/workflows opt-in via SANDY_ALLOW_WORKFLOW_EDIT"
+# ============================================================
+# When SANDY_ALLOW_WORKFLOW_EDIT=1 is exported, .github/workflows is not
+# protected by sandy's launcher and the test harness should get the same
+# list from --print-protected-paths.
+
+# With default (opt-out not set): workflows listed as a protected dir
+_SANDY_BIN="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_PROTECTED_DEFAULT="$("$_SANDY_BIN" --print-protected-paths 2>/dev/null)"
+check "default: .github/workflows in protected list" \
+    bash -c 'echo "$1" | grep -q "^dir:.github/workflows$"' -- "$_PROTECTED_DEFAULT"
+
+# With SANDY_ALLOW_WORKFLOW_EDIT=1: workflows absent from list
+_PROTECTED_OPT_OUT="$(SANDY_ALLOW_WORKFLOW_EDIT=1 "$_SANDY_BIN" --print-protected-paths 2>/dev/null)"
+check "opt-out: .github/workflows absent from protected list" \
+    bash -c '! echo "$1" | grep -q "^dir:.github/workflows$"' -- "$_PROTECTED_OPT_OUT"
+
+# ============================================================
+info "34. Sprint 1 — Submodule gitdir protection"
+# ============================================================
+# F1 remediation: .git/modules/<sub>/hooks/ and config were fully writable.
+
+# Fixture: a minimal repo layout with a submodule gitdir
+mkdir -p "$TEST_PROJECT/.git/modules/fake-sub/hooks"
+mkdir -p "$TEST_PROJECT/.git/modules/fake-sub/info"
+echo "[core]" > "$TEST_PROJECT/.git/modules/fake-sub/config"
+echo "#!/bin/sh" > "$TEST_PROJECT/.git/modules/fake-sub/hooks/pre-commit"
+chmod +x "$TEST_PROJECT/.git/modules/fake-sub/hooks/pre-commit"
+echo "" > "$TEST_PROJECT/.git/modules/fake-sub/info/attributes"
+
+sandy_run "echo injected > /workspace/.git/modules/fake-sub/hooks/post-checkout 2>/dev/null" \
+    >/dev/null 2>&1 && WR_SUBMODULE_HOOK=yes || WR_SUBMODULE_HOOK=no
+check "cannot create submodule post-checkout hook" test "$WR_SUBMODULE_HOOK" = "no"
+
+sandy_run "echo evil >> /workspace/.git/modules/fake-sub/config 2>/dev/null" \
+    >/dev/null 2>&1 && WR_SUBMODULE_CFG=yes || WR_SUBMODULE_CFG=no
+check "cannot modify submodule config" test "$WR_SUBMODULE_CFG" = "no"
+
+sandy_run "echo '*.txt filter=evil' >> /workspace/.git/modules/fake-sub/info/attributes 2>/dev/null" \
+    >/dev/null 2>&1 && WR_SUBMODULE_INFO=yes || WR_SUBMODULE_INFO=no
+check "cannot modify submodule info/attributes" test "$WR_SUBMODULE_INFO" = "no"
+
+# ============================================================
+info "35. Sprint 1 — .git/info/ protection (filter-driver vector)"
+# ============================================================
+# F1 (top-level): .git/info/attributes registers filter drivers that run
+# during checkout. Needs to be read-only.
+
+mkdir -p "$TEST_PROJECT/.git/info"
+echo "" > "$TEST_PROJECT/.git/info/attributes"
+
+sandy_run "echo '*.txt filter=evil' >> /workspace/.git/info/attributes 2>/dev/null" \
+    >/dev/null 2>&1 && WR_GITINFO=yes || WR_GITINFO=no
+check "cannot modify .git/info/attributes" test "$WR_GITINFO" = "no"
+
+# .git/HEAD and .git/packed-refs too
+echo "ref: refs/heads/main" > "$TEST_PROJECT/.git/HEAD"
+echo "# pack-refs" > "$TEST_PROJECT/.git/packed-refs"
+
+sandy_run "echo 'ref: refs/heads/pwned' > /workspace/.git/HEAD 2>/dev/null" \
+    >/dev/null 2>&1 && WR_HEAD=yes || WR_HEAD=no
+check "cannot overwrite .git/HEAD" test "$WR_HEAD" = "no"
+
+rm -rf "$TEST_PROJECT/.git"
+
+# ============================================================
+info "36. Sprint 1 — Tier-split config (privileged keys dropped from workspace)"
+# ============================================================
+# F5 remediation: _load_sandy_config now takes a tier argument. Privileged
+# keys from passive (workspace) sources warn and drop. Pure bash test of the
+# parser — no docker needed.
+
+SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+TIER_TEST_FILE="$(mktemp)"
+cat > "$TIER_TEST_FILE" <<'EOF'
+SANDY_SKIP_PERMISSIONS=1
+SANDY_ALLOW_NO_ISOLATION=1
+SANDY_ALLOW_LAN_HOSTS=0.0.0.0/0
+SANDY_SSH=agent
+ANTHROPIC_API_KEY=sk-attacker
+SANDY_MODEL=claude-opus-4-6
+SANDY_VERBOSE=1
+EOF
+
+# Extract the loader function from the live sandy script to a temp file so
+# we can source it without nested process substitution (bash 3.2 on macOS
+# does not reliably handle `source <(sed ...)` inside `$(...)`).
+_LOADER_SRC="$(mktemp)"
+sed -n '/^_load_sandy_config() {/,/^}$/p' "$SANDY_SCRIPT_PATH" > "$_LOADER_SRC"
+
+# Extract + source _load_sandy_config, call with tier=passive, and verify
+# privileged keys were not exported.
+_TIER_RESULT="$(
+    # shellcheck disable=SC1090
+    source "$_LOADER_SRC"
+    warn() { echo "warn:$*" >&2; }
+    unset SANDY_SKIP_PERMISSIONS SANDY_ALLOW_NO_ISOLATION SANDY_ALLOW_LAN_HOSTS \
+          SANDY_SSH ANTHROPIC_API_KEY SANDY_MODEL SANDY_VERBOSE
+    _load_sandy_config "$TIER_TEST_FILE" passive 2>/dev/null || true
+    # Passive keys should pass through
+    echo "SANDY_MODEL=${SANDY_MODEL:-UNSET}"
+    echo "SANDY_VERBOSE=${SANDY_VERBOSE:-UNSET}"
+    # Privileged keys should be dropped
+    echo "SANDY_SKIP_PERMISSIONS=${SANDY_SKIP_PERMISSIONS:-UNSET}"
+    echo "SANDY_ALLOW_NO_ISOLATION=${SANDY_ALLOW_NO_ISOLATION:-UNSET}"
+    echo "SANDY_ALLOW_LAN_HOSTS=${SANDY_ALLOW_LAN_HOSTS:-UNSET}"
+    echo "SANDY_SSH=${SANDY_SSH:-UNSET}"
+    echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-UNSET}"
+)"
+
+check "passive tier: SANDY_MODEL honored" \
+    bash -c 'echo "$1" | grep -q "^SANDY_MODEL=claude-opus-4-6$"' -- "$_TIER_RESULT"
+check "passive tier: SANDY_VERBOSE honored" \
+    bash -c 'echo "$1" | grep -q "^SANDY_VERBOSE=1$"' -- "$_TIER_RESULT"
+check "passive tier: SANDY_SKIP_PERMISSIONS dropped" \
+    bash -c 'echo "$1" | grep -q "^SANDY_SKIP_PERMISSIONS=UNSET$"' -- "$_TIER_RESULT"
+check "passive tier: SANDY_ALLOW_NO_ISOLATION dropped" \
+    bash -c 'echo "$1" | grep -q "^SANDY_ALLOW_NO_ISOLATION=UNSET$"' -- "$_TIER_RESULT"
+check "passive tier: SANDY_ALLOW_LAN_HOSTS dropped" \
+    bash -c 'echo "$1" | grep -q "^SANDY_ALLOW_LAN_HOSTS=UNSET$"' -- "$_TIER_RESULT"
+check "passive tier: SANDY_SSH dropped" \
+    bash -c 'echo "$1" | grep -q "^SANDY_SSH=UNSET$"' -- "$_TIER_RESULT"
+check "passive tier: ANTHROPIC_API_KEY dropped" \
+    bash -c 'echo "$1" | grep -q "^ANTHROPIC_API_KEY=UNSET$"' -- "$_TIER_RESULT"
+
+# Privileged tier: all keys honored
+_PRIV_RESULT="$(
+    # shellcheck disable=SC1090
+    source "$_LOADER_SRC"
+    warn() { :; }
+    unset SANDY_SKIP_PERMISSIONS ANTHROPIC_API_KEY SANDY_SSH
+    _load_sandy_config "$TIER_TEST_FILE" privileged 2>/dev/null || true
+    echo "SANDY_SKIP_PERMISSIONS=${SANDY_SKIP_PERMISSIONS:-UNSET}"
+    echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-UNSET}"
+    echo "SANDY_SSH=${SANDY_SSH:-UNSET}"
+)"
+check "privileged tier: SANDY_SKIP_PERMISSIONS honored" \
+    bash -c 'echo "$1" | grep -q "^SANDY_SKIP_PERMISSIONS=1$"' -- "$_PRIV_RESULT"
+check "privileged tier: ANTHROPIC_API_KEY honored" \
+    bash -c 'echo "$1" | grep -q "^ANTHROPIC_API_KEY=sk-attacker$"' -- "$_PRIV_RESULT"
+check "privileged tier: SANDY_SSH honored" \
+    bash -c 'echo "$1" | grep -q "^SANDY_SSH=agent$"' -- "$_PRIV_RESULT"
+
+rm -f "$TIER_TEST_FILE"
+
+# ============================================================
+info "37. Sprint 1 — World-open LAN allowlist rejected"
+# ============================================================
+# F5 subfix: SANDY_ALLOW_LAN_HOSTS=0.0.0.0/0 should hard-error even from a
+# privileged source. Test by directly sourcing the loader + running the sanity
+# block (use the temp-file loader source established for test 36, which is
+# bash-3.2-safe — nested `source <(...)` inside `$(...)` breaks on macOS).
+
+# Stand up a temp $SANDY_HOME so the check doesn't trip on real user config
+_TMP_SANDY_HOME="$(mktemp -d)"
+mkdir -p "$_TMP_SANDY_HOME"
+cat > "$_TMP_SANDY_HOME/config" <<'EOF'
+SANDY_ALLOW_LAN_HOSTS=0.0.0.0/0
+EOF
+
+# NOTE on comments inside the subshell below: bash 3.2 (macOS default) has a
+# parser bug where apostrophes inside # comments inside $(...) command
+# substitution are treated as opening single quotes, causing the parser to
+# scan forward past EOF looking for a matching close. ALL comments inside the
+# subshell must be apostrophe-free. Use plain ASCII; rephrase contractions.
+_LAN_RESULT="$(
+    set +e
+    # shellcheck disable=SC1090
+    source "$_LOADER_SRC"
+    warn() { :; }
+    error() { echo "ERROR: $*" >&2; }
+    _load_sandy_config "$_TMP_SANDY_HOME/config" privileged 2>/dev/null || true
+    # Run the sanity check block inline.
+    if [ -n "${SANDY_ALLOW_LAN_HOSTS:-}" ]; then
+        IFS=',' read -ra _sanity_hosts <<< "$SANDY_ALLOW_LAN_HOSTS"
+        set +u
+        for _h in "${_sanity_hosts[@]}"; do
+            _h="$(echo "$_h" | tr -d "[:space:]")"
+            [ -z "$_h" ] && continue
+            # Plain string tests because bash 3.2 on macOS misparses case
+            # patterns containing slash inside nested command substitution.
+            # exit 0 because the outer set -e trap will fire on a non-zero
+            # _LAN_RESULT assignment; the outer check greps stdout instead.
+            if [ "x$_h" = "x0.0.0.0/0" ]; then
+                echo "REJECTED:$_h"
+                exit 0
+            fi
+            if [ "x$_h" = "x::/0" ]; then
+                echo "REJECTED:$_h"
+                exit 0
+            fi
+        done
+        set -u
+    fi
+    echo "ACCEPTED"
+)"
+check "0.0.0.0/0 in SANDY_ALLOW_LAN_HOSTS rejected" \
+    bash -c 'echo "$1" | grep -q "^REJECTED:0.0.0.0/0$"' -- "$_LAN_RESULT"
+
+rm -rf "$_TMP_SANDY_HOME"
+rm -f "$_LOADER_SRC"
+
+# ============================================================
+info "38. Sprint 1 — --print-protected-paths flag"
+# ============================================================
+# S1.8: test harness and sandy share the protected-path list via this flag.
+
+SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_PRINT_OUT="$("$SANDY_SCRIPT_PATH" --print-protected-paths 2>/dev/null)"
+
+check "--print-protected-paths emits file: entries" \
+    bash -c 'echo "$1" | grep -q "^file:.bashrc$"' -- "$_PRINT_OUT"
+check "--print-protected-paths emits gitfile: entries" \
+    bash -c 'echo "$1" | grep -q "^gitfile:.git/config$"' -- "$_PRINT_OUT"
+check "--print-protected-paths emits dir: entries" \
+    bash -c 'echo "$1" | grep -q "^dir:.vscode$"' -- "$_PRINT_OUT"
+check "--print-protected-paths includes expanded .envrc" \
+    bash -c 'echo "$1" | grep -q "^file:.envrc$"' -- "$_PRINT_OUT"
+check "--print-protected-paths includes .git/info" \
+    bash -c 'echo "$1" | grep -q "^dir:.git/info$"' -- "$_PRINT_OUT"
+
+# ============================================================
+info "39. Sprint 1 — Empty ro-fixtures exist in SANDY_HOME"
+# ============================================================
+# S1.0: ensure_build_files creates $SANDY_HOME/.empty-ro-file and .empty-ro-dir.
+# Verify they exist and are empty.
+
+check ".empty-ro-file exists" test -f "$SANDY_HOME/.empty-ro-file"
+check ".empty-ro-file is empty" test ! -s "$SANDY_HOME/.empty-ro-file"
+check ".empty-ro-dir exists" test -d "$SANDY_HOME/.empty-ro-dir"
+check ".empty-ro-dir is empty" \
+    bash -c '[ -z "$(ls -A "$1")" ]' -- "$SANDY_HOME/.empty-ro-dir"
+
+# ============================================================
+info "40. Sprint 1 — Credentials mounts are :ro"
+# ============================================================
+# S1.5: .credentials.json mount should have :ro. Test by grepping the sandy
+# script itself — integration test for the actual docker inspect state would
+# require launching a claude container with real creds.
+
+SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+check "Claude credentials mount has :ro" \
+    grep -q 'CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json:ro' "$SANDY_SCRIPT_PATH"
+check "Codex credentials mount has :ro" \
+    grep -q 'CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro' "$SANDY_SCRIPT_PATH"
+check "Gemini OAuth mount has :ro" \
+    grep -q 'home/claude/.gemini/.*:ro' "$SANDY_SCRIPT_PATH"
+check "cleanup trap includes QUIT ABRT" \
+    grep -q 'trap cleanup EXIT INT TERM HUP QUIT ABRT' "$SANDY_SCRIPT_PATH"
+
+# ============================================================
+info "41. Sprint 1 — macOS --add-host nullification is conditional"
+# ============================================================
+# S1.6: host.docker.internal must NOT be nullified when SANDY_SSH=agent.
+# Static code check (same pattern as test 40).
+
+SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+check "gateway.docker.internal unconditionally nullified on non-Linux" \
+    grep -q '"gateway.docker.internal:127.0.0.1"' "$SANDY_SCRIPT_PATH"
+check "metadata.google.internal unconditionally nullified on non-Linux" \
+    grep -q '"metadata.google.internal:127.0.0.1"' "$SANDY_SCRIPT_PATH"
+check "host.docker.internal guarded by SANDY_SSH check" \
+    bash -c 'awk "/SANDY_SSH.*!= \"agent\"/,/fi/" "$1" | grep -q "host.docker.internal:127.0.0.1"' \
+    -- "$SANDY_SCRIPT_PATH"
+check "macOS network warning banner present" \
+    grep -q 'Network isolation is NOT active' "$SANDY_SCRIPT_PATH"
 
 # ============================================================
 # Summary

@@ -62,7 +62,16 @@ SANDY_SSH=agent                          # use SSH agent forwarding
 SANDY_MODEL=claude-sonnet-4-5-20250929   # override model
 ```
 
-This file is parsed as plain `KEY=VALUE` lines (not sourced — no shell code execution). Values are validated against an allowlist of recognized variables: `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_API_KEY`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `OPENAI_API_KEY`, `SANDY_VENV_OVERLAY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`.
+This file is parsed as plain `KEY=VALUE` lines (not sourced — no shell code execution). Values are validated against an allowlist of recognized variables.
+
+### Config tiers (1.0-rc1)
+
+Sandy loads configuration from four sources in order: `$HOME/.sandy/config`, `$HOME/.sandy/.secrets`, `$WORK_DIR/.sandy/config`, `$WORK_DIR/.sandy/.secrets`. The first two are **privileged** sources — they can set any recognized key. The last two are **passive** sources (workspace-local, committable to version control) — they can only set a restricted subset of keys that are safe for a repo author to pin, and sandy warns-and-drops any attempt to set privileged keys from a workspace.
+
+- **Privileged-only keys** (dropped from workspace sources with a warning): `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`. These would let a malicious `.sandy/config` committed to a repo disable isolation or exfiltrate credentials.
+- **Passive-safe keys** (allowed from any source): `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`.
+
+Additionally, `SANDY_ALLOW_LAN_HOSTS` is validated at use-site to reject world-open entries (`0.0.0.0/0`, `::/0`) with a hard error at launch — even when set from a privileged source.
 
 ## Agent Selection
 
@@ -272,17 +281,29 @@ On every session start, the entrypoint checks the workspace for common issues:
 
 ## Network Isolation Details
 
-Per-instance Docker bridge networks are created with names keyed on PID (`sandy_net_$$`) to avoid races between concurrent sessions. On Linux, iptables DROP rules block RFC 1918 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`), and CGNAT/Tailscale (`100.64.0.0/10`), while allowing the container's own subnet. On macOS, Docker Desktop's VM provides LAN isolation by default. Rules are cleaned up on script exit.
+Per-instance Docker bridge networks are created with names keyed on PID (`sandy_net_$$`) to avoid races between concurrent sessions. On Linux, iptables DROP rules block RFC 1918 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local (`169.254.0.0/16`), and CGNAT/Tailscale (`100.64.0.0/10`), while allowing the container's own subnet. Rules are cleaned up on script exit.
+
+**macOS limitation (1.0-rc1).** Docker Desktop's VM does *not* provide LAN isolation. Containers can reach `host.docker.internal` (→ host gateway), the host's `localhost` services, and any device on the user's physical LAN (`192.168.x.x`, home router, NAS, printers, internal dashboards). Linux iptables DROP rules are not applied and cannot be applied from macOS. As defense-in-depth, sandy nullifies the Docker Desktop magic hostnames (`gateway.docker.internal`, `metadata.google.internal`, and — when `SANDY_SSH!=agent` — `host.docker.internal`) via `--add-host … :127.0.0.1`, but raw-IP access is unaffected. Sandy prints a launch warning banner on macOS announcing that network isolation is not active. A full fix — an egress proxy sidecar that implements HTTP CONNECT + SOCKS5 + DNS allowlist — is scheduled for sandy 1.1. Until then, treat macOS sandy as "process and filesystem isolation only; no network isolation."
 
 ## Protected Files
 
-Certain sensitive files and directories in the workspace are mounted read-only inside the container to prevent modification by Claude Code. This blocks shell config injection, git hook injection, and IDE config tampering.
+Certain sensitive files and directories in the workspace are mounted read-only inside the container to prevent modification by the agent. This blocks shell config injection, git hook injection, IDE config tampering, language-toolchain hijacking, CI pipeline escapes, and git filter-driver injection.
 
-**Protected files**: `.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile`, `.gitconfig`, `.ripgreprc`, `.mcp.json`, `.git/config`, `.gitmodules`
-**Protected directories**: `.git/hooks/`, `.vscode/`, `.idea/`
+**Protected files**: `.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile`, `.gitconfig`, `.ripgreprc`, `.mcp.json`, `.envrc`, `.tool-versions`, `.mise.toml`, `.nvmrc`, `.node-version`, `.python-version`, `.ruby-version`, `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `.pypirc`, `.netrc`, `.pre-commit-config.yaml`
+
+**Protected git files** (only mounted when present on host): `.git/config`, `.gitmodules`, `.git/HEAD`, `.git/packed-refs`
+
+**Protected directories**: `.git/hooks/`, `.git/info/`, `.vscode/`, `.idea/`, `.github/workflows/`, `.circleci/`, `.devcontainer/`
+
+**Submodule gitdirs**: sandy walks `.git/modules/` (and the gitdir-side `modules/` for `--separate-git-dir` / worktree-of-submodule layouts) and mounts each submodule's `config`, `hooks/`, and `info/` read-only. Without this, a planted `post-checkout` hook in `.git/modules/<sub>/hooks/` would execute on the host the next time `git submodule update` or `git pull --recurse-submodules` ran (Critical escape, F1 in ISOLATION_STRESS.md).
+
 **Sandbox-mounted directories**: `.claude/commands/`, `.claude/agents/`, `.claude/plugins/` — these are overlaid with writable sandbox copies so Claude can create and modify commands, agents, and plugins without touching the host. All three start empty; plugins are managed via `/plugin install`.
 
-Protected files/directories are overlaid as read-only bind mounts at container launch. The host filesystem is unaffected. Files that don't exist in the workspace are skipped (no empty placeholders created).
+**Always-mount pattern (1.0-rc1).** All protected files and directories (except the git-file set) are *always* mounted — if the host has no corresponding file, sandy mounts an empty zero-byte file (`$SANDY_HOME/.empty-ro-file`) or an empty directory (`$SANDY_HOME/.empty-ro-dir`) read-only at that path instead. This closes the pre-1.0 gap where "file absent on host" meant "agent can create it in the container and have it be ignored by host tools on first read." With the always-mount overlay, the agent can't create the file in the first place. Intentionally excluded from always-mount: package manifests (`Makefile`, `package.json`, `pyproject.toml`, `Cargo.toml`, etc.) — the agent legitimately edits these, and they are invoked explicitly by name rather than sourced on `cd` or filesystem scan.
+
+**`SANDY_ALLOW_WORKFLOW_EDIT`** (passive-safe): set to `1` in `.sandy/config` to remove `.github/workflows/` from the protection list for that project. Useful when the agent is doing legitimate CI work. Default is off — workflows are dangerous because the escape fires on `git push`, long after the session ends.
+
+Protected files/directories are overlaid as read-only bind mounts at container launch. The host filesystem is unaffected.
 
 ## Terminal Notifications
 
