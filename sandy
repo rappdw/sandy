@@ -26,6 +26,13 @@ if [[ "$SANDY_HOME" =~ [\;\$\`\&\|\<\>] ]]; then
     echo "[sandy] ERROR: Invalid SANDY_HOME: contains shell metacharacters" >&2
     exit 1
 fi
+# Empty fixtures for bind-mount-as-ro fallback targets (S1.0). Created eagerly
+# here — before any fast-path flag handlers (--print-protected-paths, --help,
+# --version) return — so that every sandy invocation guarantees the invariant.
+# Idempotent; zero cost if already present.
+mkdir -p "$SANDY_HOME"
+[ -f "$SANDY_HOME/.empty-ro-file" ] || : > "$SANDY_HOME/.empty-ro-file"
+[ -d "$SANDY_HOME/.empty-ro-dir" ]  || mkdir -p "$SANDY_HOME/.empty-ro-dir"
 BASE_IMAGE_NAME="sandy-base"
 # IMAGE_NAME is set dynamically after config load, based on SANDY_AGENT
 IMAGE_NAME=""
