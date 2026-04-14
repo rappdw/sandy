@@ -842,25 +842,50 @@ if [ -d /opt/skills/gstack/.browsers ]; then
     export PLAYWRIGHT_BROWSERS_PATH=/opt/skills/gstack/.browsers
 fi
 
+# Resilient file writer. Works around an intermittent Docker Desktop macOS
+# bug where `mkdir -p` returns 0 but a subsequent `cat > file` in the same
+# new directory fails with "No such file or directory" — the directory
+# metadata isn't yet visible to the next open() across the tmpfs/bind-mount
+# boundary (VirtioFS dcache coherency). Fix: buffer stdin to /tmp (which is
+# a plain tmpfs — no bind-mount coherency issue), then retry mkdir+mv until
+# the destination directory is visible.
+_sandy_write_file() {
+    local _dst="$1" _dir _n _tmp
+    _dir="$(dirname "$_dst")"
+    _tmp="$(mktemp)"
+    cat > "$_tmp"
+    for _n in 1 2 3 4 5 6 7 8; do
+        mkdir -p "$_dir" 2>/dev/null || true
+        if [ -d "$_dir" ] && cp "$_tmp" "$_dst" 2>/dev/null; then
+            rm -f "$_tmp"
+            return 0
+        fi
+        sleep 0.1
+    done
+    # Last-ditch attempt — let the error surface to the caller naturally.
+    mkdir -p "$_dir"
+    cp "$_tmp" "$_dst"
+    rm -f "$_tmp"
+}
+
 # Synthkit slash commands (md2pdf, md2doc, md2html, md2email)
 if _sandy_has_claude && command -v synthkit &>/dev/null; then
-    mkdir -p "$HOME/.claude/commands"
-    cat > "$HOME/.claude/commands/md2pdf.md" <<'SKMD'
+    _sandy_write_file "$HOME/.claude/commands/md2pdf.md" <<'SKMD'
 Convert the specified markdown file(s) to PDF using the `md2pdf` command.
 Usage: /md2pdf <file1.md> [file2.md ...]
 Run: md2pdf $ARGUMENTS
 SKMD
-    cat > "$HOME/.claude/commands/md2doc.md" <<'SKMD'
+    _sandy_write_file "$HOME/.claude/commands/md2doc.md" <<'SKMD'
 Convert the specified markdown file(s) to Word (.docx) using the `md2doc` command.
 Usage: /md2doc <file1.md> [file2.md ...]
 Run: md2doc $ARGUMENTS
 SKMD
-    cat > "$HOME/.claude/commands/md2html.md" <<'SKMD'
+    _sandy_write_file "$HOME/.claude/commands/md2html.md" <<'SKMD'
 Convert the specified markdown file(s) to HTML using the `md2html` command.
 Usage: /md2html <file1.md> [file2.md ...]
 Run: md2html $ARGUMENTS
 SKMD
-    cat > "$HOME/.claude/commands/md2email.md" <<'SKMD'
+    _sandy_write_file "$HOME/.claude/commands/md2email.md" <<'SKMD'
 Convert the specified markdown file to clipboard-ready email HTML using the `md2email` command.
 Usage: /md2email <file.md>
 Run: md2email $ARGUMENTS
@@ -869,8 +894,7 @@ fi
 
 # Synthkit slash commands for Gemini (TOML format)
 if _sandy_has_gemini && command -v synthkit &>/dev/null; then
-    mkdir -p "$HOME/.gemini/commands"
-    cat > "$HOME/.gemini/commands/md2pdf.toml" <<'SKTOML'
+    _sandy_write_file "$HOME/.gemini/commands/md2pdf.toml" <<'SKTOML'
 description = "Convert markdown file(s) to PDF using md2pdf"
 prompt = """Convert these markdown files to PDF using the md2pdf command.
 Files/args: {{args}}
@@ -878,7 +902,7 @@ Files/args: {{args}}
 Output of md2pdf {{args}}:
 !{md2pdf {{args}}}"""
 SKTOML
-    cat > "$HOME/.gemini/commands/md2doc.toml" <<'SKTOML'
+    _sandy_write_file "$HOME/.gemini/commands/md2doc.toml" <<'SKTOML'
 description = "Convert markdown file(s) to Word (.docx) using md2doc"
 prompt = """Convert these markdown files to Word using the md2doc command.
 Files/args: {{args}}
@@ -886,7 +910,7 @@ Files/args: {{args}}
 Output of md2doc {{args}}:
 !{md2doc {{args}}}"""
 SKTOML
-    cat > "$HOME/.gemini/commands/md2html.toml" <<'SKTOML'
+    _sandy_write_file "$HOME/.gemini/commands/md2html.toml" <<'SKTOML'
 description = "Convert markdown file(s) to HTML using md2html"
 prompt = """Convert these markdown files to HTML using the md2html command.
 Files/args: {{args}}
@@ -894,7 +918,7 @@ Files/args: {{args}}
 Output of md2html {{args}}:
 !{md2html {{args}}}"""
 SKTOML
-    cat > "$HOME/.gemini/commands/md2email.toml" <<'SKTOML'
+    _sandy_write_file "$HOME/.gemini/commands/md2email.toml" <<'SKTOML'
 description = "Convert a markdown file to clipboard-ready email HTML"
 prompt = """Convert this markdown file to clipboard-ready email HTML using the md2email command.
 File/args: {{args}}
@@ -908,30 +932,28 @@ fi
 # codex loads ~/.codex/skills/<name>/SKILL.md as a drop-in directory, but
 # strictly requires the --- delimited frontmatter block).
 if _sandy_has_codex && command -v synthkit &>/dev/null; then
-    mkdir -p "$HOME/.codex/skills/md2pdf" "$HOME/.codex/skills/md2doc" \
-             "$HOME/.codex/skills/md2html" "$HOME/.codex/skills/md2email"
-    cat > "$HOME/.codex/skills/md2pdf/SKILL.md" <<'SKMD'
+    _sandy_write_file "$HOME/.codex/skills/md2pdf/SKILL.md" <<'SKMD'
 ---
 name: md2pdf
 description: Convert markdown file(s) to PDF using the md2pdf command on PATH.
 ---
 Run: `md2pdf <file.md> [file2.md ...]`
 SKMD
-    cat > "$HOME/.codex/skills/md2doc/SKILL.md" <<'SKMD'
+    _sandy_write_file "$HOME/.codex/skills/md2doc/SKILL.md" <<'SKMD'
 ---
 name: md2doc
 description: Convert markdown file(s) to Word (.docx) using the md2doc command on PATH.
 ---
 Run: `md2doc <file.md> [file2.md ...]`
 SKMD
-    cat > "$HOME/.codex/skills/md2html/SKILL.md" <<'SKMD'
+    _sandy_write_file "$HOME/.codex/skills/md2html/SKILL.md" <<'SKMD'
 ---
 name: md2html
 description: Convert markdown file(s) to HTML using the md2html command on PATH.
 ---
 Run: `md2html <file.md> [file2.md ...]`
 SKMD
-    cat > "$HOME/.codex/skills/md2email/SKILL.md" <<'SKMD'
+    _sandy_write_file "$HOME/.codex/skills/md2email/SKILL.md" <<'SKMD'
 ---
 name: md2email
 description: Convert a markdown file to clipboard-ready email HTML using the md2email command on PATH.
@@ -2418,45 +2440,60 @@ if _sandy_agent_has gemini; then
     fi
 fi
 
-# Seed Claude settings.json into a sidecar that gets mounted :ro onto
-# ~/.claude/settings.json in the container (S2.1). Regenerated on every launch
-# so: (a) host changes are picked up next run; (b) in-container writes are
-# dropped (EROFS) — the agent cannot quietly tamper with its own settings and
-# have them survive across sessions. The rw $SANDBOX_DIR/claude mount still
-# covers everything else under ~/.claude (history, projects, plugins, etc.).
-# Docker applies child-path mounts after parent mounts, so the :ro overlay on
-# settings.json shadows whatever would otherwise be at $SANDBOX_DIR/claude/settings.json
-# (that file becomes dead state on migration — still present, just invisible
-# inside the container).
+# Seed Claude settings.json directly into $SANDBOX_DIR/claude/settings.json
+# (rw via the parent $SANDBOX_DIR/claude mount — no :ro overlay). Regenerated
+# on every launch with merge-preserving semantics:
+#
+#   - Sandy-managed keys are re-derived from host settings.json + defaults
+#     every launch (so host changes propagate, and deprecated marketplaces
+#     are scrubbed). This partially mitigates F6: if the agent tampers with
+#     these keys mid-session, the next launch resets them.
+#   - Agent-owned keys like `enabledPlugins` are preserved across launches
+#     so `/plugin install` persists. These are read from the previous
+#     sandbox settings.json if present.
+#
+# The settings.json mount is rw so Claude Code can write to it at runtime
+# (e.g. during `/plugin install`). The trade-off vs a strict :ro overlay is
+# that the agent *can* modify its own settings within a session, but those
+# modifications are partially overwritten on the next launch. Full
+# reset-on-launch is not feasible without breaking plugin installs.
 if _sandy_agent_has claude; then
-    SEED_SETTINGS="$SANDBOX_DIR/.seed-settings.json"
-    # Start from host copy if available, else an empty object
+    SEED_SETTINGS="$SANDBOX_DIR/claude/settings.json"
+    # Clean up the stale pre-0.11.3 sidecar if it exists. Pre-0.11.3 sandy wrote
+    # a :ro sidecar at $SANDBOX_DIR/.seed-settings.json; 0.11.3+ writes directly
+    # to the rw sandbox settings.json. The old sidecar is dead state.
+    [ -f "$SANDBOX_DIR/.seed-settings.json" ] && rm -f "$SANDBOX_DIR/.seed-settings.json"
+    SEED_HOST_SRC=""
     if [ -f "$HOME/.claude/settings.json" ]; then
-        cp "$HOME/.claude/settings.json" "$SEED_SETTINGS"
-    else
-        echo '{}' > "$SEED_SETTINGS"
+        SEED_HOST_SRC="$HOME/.claude/settings.json"
     fi
-    # Merge sandy-required defaults into the seed (idempotent, runs every launch).
-    # extraKnownMarketplaces must be merged here rather than inside user-setup.sh
-    # because the settings.json mount is :ro under S2.1 — any in-container write
-    # would fail with EROFS. The host-side seed sidecar is rw, then bind-mounted
-    # :ro after this block.
+    # Merge sandy-required defaults into settings.json (idempotent, runs every
+    # launch). Base = host settings.json (re-read every launch so host edits
+    # propagate). Overlay = `enabledPlugins` preserved from previous sandbox
+    # settings.json (so plugin installs survive across launches).
     if command -v node &>/dev/null; then
-        node -e "
+        SEED_HOST_SRC="$SEED_HOST_SRC" node -e "
             const fs = require('fs');
-            const f = process.argv[1];
-            let raw = fs.readFileSync(f, 'utf8');
-            // Fix common JSON issues: trailing commas, missing commas before keys
-            raw = raw.replace(/,(\s*[}\]])/g, '\$1');
-            raw = raw.replace(/(\"[^\"]*\")\s*\n(\s*\")/g, '\$1,\n\$2');
-            let s;
-            try { s = JSON.parse(raw); } catch(e) { s = {}; }
+            const dst = process.argv[1];
+            const hostSrc = process.env.SEED_HOST_SRC || '';
+            function readJson(path) {
+                if (!path) return {};
+                try {
+                    let raw = fs.readFileSync(path, 'utf8');
+                    raw = raw.replace(/,(\s*[}\]])/g, '\$1');
+                    raw = raw.replace(/(\"[^\"]*\")\s*\n(\s*\")/g, '\$1,\n\$2');
+                    return JSON.parse(raw);
+                } catch (e) { return {}; }
+            }
+            // Base: fresh host snapshot every launch.
+            let s = readJson(hostSrc);
+            // Preserve agent-owned keys from the previous sandbox settings.json.
+            const prev = readJson(dst);
+            if (prev.enabledPlugins) s.enabledPlugins = prev.enabledPlugins;
             const skip = (process.env.SANDY_SKIP_PERMISSIONS || 'true') !== 'false';
             const defaults = {teammateMode:'tmux', spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:skip};
             for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
-            // Strip enabledPlugins — no plugins installed in fresh sandbox
-            delete s.enabledPlugins;
-            // Configure plugin marketplaces (idempotent); drop deprecated ones
+            // Configure plugin marketplaces (idempotent); drop deprecated ones.
             if (!s.extraKnownMarketplaces) s.extraKnownMarketplaces = {};
             const required = {
                 'claude-plugins-official': { source: { source: 'github', repo: 'anthropics/claude-plugins-official' } },
@@ -2467,36 +2504,39 @@ if _sandy_agent_has claude; then
             for (const [name, cfg] of Object.entries(required)) {
                 if (!s.extraKnownMarketplaces[name]) s.extraKnownMarketplaces[name] = cfg;
             }
-            fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
+            fs.writeFileSync(dst, JSON.stringify(s, null, 2) + '\n');
         " "$SEED_SETTINGS"
     elif command -v jq &>/dev/null; then
-        # jq fallback for hosts without node
+        # jq fallback: preserve enabledPlugins from existing sandbox settings
+        # (if any), overlay onto fresh host snapshot.
         skip_perm="true"
         [ "${SANDY_SKIP_PERMISSIONS:-true}" = "false" ] && skip_perm="false"
-        jq --arg skip "$skip_perm" '
+        _prev_plugins='null'
+        if [ -f "$SEED_SETTINGS" ]; then
+            _prev_plugins="$(jq -c '.enabledPlugins // null' "$SEED_SETTINGS" 2>/dev/null || echo 'null')"
+        fi
+        _base_src="$SEED_HOST_SRC"
+        [ -z "$_base_src" ] && _base_src=/dev/null
+        jq --arg skip "$skip_perm" --argjson prev "$_prev_plugins" '
+            (if . == null then {} else . end) |
             .teammateMode //= "tmux" |
             .spinnerTipsEnabled //= false |
             .skipDangerousModePermissionPrompt //= ($skip == "true") |
-            del(.enabledPlugins) |
+            (if $prev != null then .enabledPlugins = $prev else . end) |
             del(.extraKnownMarketplaces.thinkkit) |
             del(.extraKnownMarketplaces.ait) |
             del(.extraKnownMarketplaces["pka-skills"]) |
             .extraKnownMarketplaces["claude-plugins-official"] //= {"source":{"source":"github","repo":"anthropics/claude-plugins-official"}} |
             .extraKnownMarketplaces["sandy-plugins"] //= {"source":{"source":"github","repo":"rappdw/sandy-plugins"}}
-        ' "$SEED_SETTINGS" > "$SEED_SETTINGS.tmp" && mv "$SEED_SETTINGS.tmp" "$SEED_SETTINGS"
+        ' "$_base_src" > "$SEED_SETTINGS.tmp" 2>/dev/null && mv "$SEED_SETTINGS.tmp" "$SEED_SETTINGS"
     else
-        # Last resort: write defaults only if file is empty/bare
-        if [ "$(cat "$SEED_SETTINGS")" = "{}" ]; then
+        # Last resort: write defaults only if no file exists yet.
+        if [ ! -f "$SEED_SETTINGS" ]; then
             skip_perm="true"
             [ "${SANDY_SKIP_PERMISSIONS:-true}" = "false" ] && skip_perm="false"
             printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":%s}\n' "$skip_perm" > "$SEED_SETTINGS"
         fi
     fi
-    # Ensure the mount target exists inside $SANDBOX_DIR/claude/ — Docker will
-    # bind-mount the seed sidecar over this path. Without a target file, some
-    # Docker versions auto-create it as root-owned, which can confuse the rw
-    # parent mount. Touch it ourselves to keep ownership consistent.
-    [ -f "$SANDBOX_DIR/claude/settings.json" ] || : > "$SANDBOX_DIR/claude/settings.json"
     if [ "$SANDBOX_IS_NEW" = "true" ]; then
         [ -f "$HOME/.claude/settings.json" ] && info "  Seeded settings.json"
         # Seed statsig cache for feature flags on first run (refreshed every launch below)
@@ -2599,11 +2639,9 @@ case "$EVENT_TYPE" in
 esac
 CMUXHOOK
     chmod +x "$SANDBOX_DIR/claude/hooks/cmux-notify.sh"
-    # Merge notification hook into the seed settings sidecar (S2.1). The in-sandbox
-    # settings.json is shadowed by $SEED_SETTINGS via a :ro child mount, so writing
-    # to the dead $SANDBOX_DIR/claude/settings.json would be invisible inside the
-    # container. The seed is regenerated every launch, so this merge is idempotent
-    # and also runs every launch.
+    # Merge notification hook into the sandbox settings.json (now rw). The seed
+    # block above is idempotent, and this runs every launch so the hook is
+    # always registered if cmux is detected.
     if [ -f "$SEED_SETTINGS" ] && command -v node &>/dev/null; then
         node -e '
             const fs = require("fs");
@@ -3034,13 +3072,9 @@ if [ -n "${SANDY_GPU:-}" ]; then
 fi
 if _sandy_agent_has claude; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/claude:/home/claude/.claude")
-    # Shadow settings.json with the regenerated seed sidecar (S2.1). Must come
-    # AFTER the rw parent mount above so Docker overlays this :ro child on top.
-    # Closes F6 — in-container writes cannot modify the agent's effective
-    # settings, and host changes are picked up on the next launch.
-    if [ -f "$SEED_SETTINGS" ]; then
-        RUN_FLAGS+=(-v "$SEED_SETTINGS:/home/claude/.claude/settings.json:ro")
-    fi
+    # settings.json lives inside the rw sandbox mount above — no separate child
+    # overlay. The seed block regenerated it from host defaults this launch
+    # (preserving enabledPlugins from the previous session).
     if [ -n "$CRED_TMPDIR" ]; then
         # :ro — matches the rationale on the Codex creds mount below. Prevents
         # token leakage back to the host tmpfile via a compromised session and

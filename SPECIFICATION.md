@@ -237,21 +237,20 @@ As of v0.9.0, the sandbox directory contains **sibling** per-agent subdirs (`cla
 
 ### Seeding
 
-Whenever `claude` is in `SANDY_AGENT`, sandy regenerates a seed settings sidecar at `<NAME>/.seed-settings.json` **on every launch** (not just first run), then bind-mounts it `:ro` over `~/.claude/settings.json` inside the container. The steps are:
+Whenever `claude` is in `SANDY_AGENT`, sandy regenerates `<NAME>/claude/settings.json` **on every launch** (not just first run). As of 0.11.3 this is a plain rw file inside the sandbox mount — the pre-0.11.3 `:ro` sidecar overlay was reverted because it broke `/plugin install` with EROFS. The steps are:
 
-1. Copy host `~/.claude/settings.json` → sandbox `<NAME>/.seed-settings.json` (or write `{}` if the host has no settings file)
-2. Merge sandy-required defaults into the sidecar (`teammateMode`, `spinnerTipsEnabled`, `skipDangerousModePermissionPrompt`)
-3. Strip `enabledPlugins` from the sidecar (prevents host plugin leakage)
-4. (First run only) Copy host `~/.claude/.claude.json` → sandbox `<NAME>.claude.json`, stripping the `projects` key
-5. (First run only) Copy host `~/.claude/statsig/` → sandbox `claude/statsig/` (refreshed on every launch from a separate "always-refresh statsig" block)
-6. (First run only) Create all persistent subdirectories
-7. Touch `<NAME>/claude/settings.json` as an empty mountpoint if absent — Docker requires the target to exist for the `:ro` child mount to resolve cleanly
+1. Base: read host `~/.claude/settings.json` (or start from `{}` if absent).
+2. Overlay: read the previous sandbox `<NAME>/claude/settings.json` (if it exists) and preserve `enabledPlugins` from it onto the base, so plugin installs survive across launches.
+3. Merge sandy-required defaults (`teammateMode`, `spinnerTipsEnabled`, `skipDangerousModePermissionPrompt`) if not already present.
+4. Merge `extraKnownMarketplaces` entries for `claude-plugins-official` and `sandy-plugins`; scrub deprecated entries (`thinkkit`, `ait`, `pka-skills`).
+5. Write the merged result back to `<NAME>/claude/settings.json`.
+6. (First run only) Copy host `~/.claude/.claude.json` → sandbox `<NAME>.claude.json`, stripping the `projects` key.
+7. (First run only) Copy host `~/.claude/statsig/` → sandbox `claude/statsig/` (refreshed on every launch from a separate "always-refresh statsig" block).
+8. (First run only) Create all persistent subdirectories.
 
-At container launch, RUN_FLAGS order ensures the `:ro` child overlays correctly:
-1. Parent mount (rw): `-v "$SANDBOX_DIR/claude:/home/claude/.claude"`
-2. Child mount (ro): `-v "$SANDBOX_DIR/.seed-settings.json:/home/claude/.claude/settings.json:ro"`
+At container launch, `<NAME>/claude` is bind-mounted rw at `/home/claude/.claude` — there is no child `:ro` overlay on `settings.json`. The agent can write to it (required for `/plugin install`), but sandy-managed keys are re-overwritten on the next launch.
 
-**Consequence:** the agent cannot modify its own settings.json persistently — in-container writes fail with EROFS, and the effective settings are re-derived from the host file on every launch. Host-side edits to `~/.claude/settings.json` are picked up automatically on the next sandy launch. The pre-S2.1 `<NAME>/claude/settings.json` file (from sandboxes created before 1.0-rc1) becomes dead state on migration — present but invisible inside the container, and not cleaned up (to avoid forensic loss).
+**Consequence:** host-side edits to `~/.claude/settings.json` are picked up automatically on the next sandy launch, and the sandy-managed keys are always re-derived. Agent-owned state (`enabledPlugins`) is preserved across launches. The trade-off vs a strict reset: the agent can modify its own settings mid-session, and those modifications (to keys sandy doesn't manage) persist into the next session as well — the merge overlays rather than wipes.
 
 Whenever `gemini` is in `SANDY_AGENT`, sandy creates `gemini/` and its `commands/`, `extensions/`, `tmp/` subdirs. Gemini settings.json is not seeded from the host (Gemini has no direct host-settings equivalent for sandy to copy).
 
@@ -819,11 +818,11 @@ Sandy configures three plugin marketplaces in `settings.json` via `extraKnownMar
 | `claude-plugins-official` | `{ source: "github", repo: "anthropics/claude-plugins-official" }` |
 | `sandy-plugins` | `{ source: "github", repo: "rappdw/sandy-plugins" }` |
 
-The marketplace entries are merged into the seed sidecar (`$SANDBOX_DIR/.seed-settings.json`) host-side on every launch, next to the other sandy defaults (see §4 Seeding and §C.2). The merge happens before the sidecar is bind-mounted `:ro` over `~/.claude/settings.json` — any in-container write would fail with EROFS under S2.1, so the marketplace merge cannot live inside `user-setup.sh`.
+The marketplace entries are merged into `$SANDBOX_DIR/claude/settings.json` host-side on every launch, next to the other sandy defaults (see §4 Seeding and §C.2). The merge happens before the container launches — as of 0.11.3 the settings file is rw inside the container (the pre-0.11.3 `:ro` sidecar broke `/plugin install`), so the marketplace merge could in principle live in `user-setup.sh`, but keeping it host-side avoids duplicating the node/jq/fallback triple across entrypoints.
 
 ### Deprecated Marketplace Removal
 
-The `thinkkit`, `ait`, and `pka-skills` marketplaces are automatically removed from the seed sidecar on startup if present (same host-side merge block).
+The `thinkkit`, `ait`, and `pka-skills` marketplaces are automatically removed on startup if present (same host-side merge block).
 
 ### Refresh Logic
 
@@ -1526,7 +1525,7 @@ The file is only written on first run — if it already exists, it's preserved t
 
 ### C.2 `settings.json` (Claude Code Configuration)
 
-**Destination.** As of 1.0-rc1 (S2.1), the seeded settings file lives in a sidecar path at `$SANDBOX_DIR/.seed-settings.json` (not inside `$SANDBOX_DIR/claude/`). The sidecar is regenerated from the host on every launch, and mounted `:ro` over `/home/claude/.claude/settings.json` inside the container as a child of the rw `~/.claude` mount (child mounts apply after parent mounts, so the overlay wins). See §4 Seeding for the full flow.
+**Destination.** As of 0.11.3, the seeded settings file lives at `$SANDBOX_DIR/claude/settings.json` — inside the rw sandbox mount, no `:ro` overlay. It is regenerated from the host on every launch with merge-preserving semantics (agent-owned `enabledPlugins` is carried over from the previous sandbox session). The pre-0.11.3 approach used a `:ro` sidecar at `$SANDBOX_DIR/.seed-settings.json`, but that blocked `/plugin install` with EROFS and was reverted. See §4 Seeding for the full flow.
 
 **Marketplace structure** (added idempotently to `extraKnownMarketplaces`):
 ```json
@@ -1614,7 +1613,7 @@ Permissions: 600 (owner read-write only).
 
 ### C.6 cmux Notification Hook
 
-Auto-generated at `~/.claude/hooks/cmux-notify.sh` when cmux is detected. Merged into the seed sidecar (`$SANDBOX_DIR/.seed-settings.json`, see §C.2) before the settings file is mounted `:ro`:
+Auto-generated at `~/.claude/hooks/cmux-notify.sh` when cmux is detected. Merged into `$SANDBOX_DIR/claude/settings.json` host-side during the seed regeneration (see §C.2):
 
 ```json
 {
@@ -1763,10 +1762,10 @@ sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 
 ### D.6 Error Recovery & Fallback Chains
 
-**settings.json merge** (3 tiers, tried in order — target is the seed sidecar `$SANDBOX_DIR/.seed-settings.json`, rebuilt every launch):
-1. **Node.js**: JSON repair → parse → merge defaults → strip plugins → write
-2. **jq**: `jq --arg skip "$skip_perm" '.teammateMode //= "tmux" | ...'`
-3. **printf**: Only if file is exactly `{}`, writes minimal JSON
+**settings.json merge** (3 tiers, tried in order — target is `$SANDBOX_DIR/claude/settings.json`, rebuilt every launch with merge-preserving semantics):
+1. **Node.js**: JSON repair → parse host → read previous sandbox → preserve `enabledPlugins` from previous → merge defaults → merge marketplaces → scrub deprecated → write
+2. **jq**: Same shape via `--argjson prev "$_prev_plugins"` read from the previous sandbox settings
+3. **printf**: Only if no file exists yet, writes minimal JSON
 
 **.claude.json seeding** (2 tiers):
 1. **Node.js**: Parse, delete `projects` key, write pretty-printed
@@ -2018,14 +2017,11 @@ The sandbox directory itself becomes `~/.claude` inside the container:
 -v "<SANDBOX_DIR>:/home/claude/.claude"
 ```
 
-### E.13a Seed `settings.json` Overlay (conditional on `claude` agent)
+### E.13a Seed `settings.json` (conditional on `claude` agent)
 
-Immediately after E.13, if `claude` is in `SANDY_AGENT`, sandy overlays the seed sidecar read-only over `~/.claude/settings.json`:
-```bash
--v "<SANDBOX_DIR>/.seed-settings.json:/home/claude/.claude/settings.json:ro"
-```
+As of 0.11.3, there is no child overlay on `settings.json`. The file lives at `<SANDBOX_DIR>/claude/settings.json` inside the rw sandbox mount (E.13) and is regenerated host-side by the pre-launch seed step (§4 Seeding) every launch. The regeneration re-reads the host `~/.claude/settings.json`, overlays sandy defaults and marketplaces, and preserves `enabledPlugins` from the previous sandbox session. No additional mount flag is emitted.
 
-Must appear **after** the sandbox mount (E.13) so Docker overlays this child path on top of the rw parent. The sidecar is regenerated by the pre-launch seed step (§4 Seeding) on every launch, so the file reflects the current host `~/.claude/settings.json` plus sandy's merged defaults. Read-only enforcement prevents in-container mutation (F6 mitigation, S2.1).
+Rationale: the pre-0.11.3 approach used a `:ro` child overlay (`<SANDBOX_DIR>/.seed-settings.json → /home/claude/.claude/settings.json:ro`), but that caused `/plugin install` to fail with EROFS because Claude Code writes the plugin list to `settings.json` at install time. The merge-preserving rw approach trades strict F6 reset-on-launch for functional plugin installs, while still guaranteeing sandy-managed keys are re-overwritten every launch.
 
 ### E.14 SSH Mounts (conditional on `SANDY_SSH`)
 
