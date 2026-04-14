@@ -2333,24 +2333,25 @@ if _sandy_agent_has gemini; then
     fi
 fi
 
-if _sandy_agent_has claude && [ "$SANDBOX_IS_NEW" = "true" ]; then
-    # Seed settings from host's ~/.claude if available
+# Seed Claude settings.json into a sidecar that gets mounted :ro onto
+# ~/.claude/settings.json in the container (S2.1). Regenerated on every launch
+# so: (a) host changes are picked up next run; (b) in-container writes are
+# dropped (EROFS) — the agent cannot quietly tamper with its own settings and
+# have them survive across sessions. The rw $SANDBOX_DIR/claude mount still
+# covers everything else under ~/.claude (history, projects, plugins, etc.).
+# Docker applies child-path mounts after parent mounts, so the :ro overlay on
+# settings.json shadows whatever would otherwise be at $SANDBOX_DIR/claude/settings.json
+# (that file becomes dead state on migration — still present, just invisible
+# inside the container).
+if _sandy_agent_has claude; then
+    SEED_SETTINGS="$SANDBOX_DIR/.seed-settings.json"
+    # Start from host copy if available, else an empty object
     if [ -f "$HOME/.claude/settings.json" ]; then
-        cp "$HOME/.claude/settings.json" "$SANDBOX_DIR/claude/settings.json"
-        info "  Seeded settings.json"
+        cp "$HOME/.claude/settings.json" "$SEED_SETTINGS"
+    else
+        echo '{}' > "$SEED_SETTINGS"
     fi
-    # Seed statsig cache for feature flags
-    if [ -d "$HOME/.claude/statsig" ]; then
-        cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/claude/statsig"
-        info "  Seeded statsig/"
-    fi
-    # NOTE: Plugin marketplace catalogs are NOT seeded from host — the sandy-plugins
-    # marketplace is configured via extraKnownMarketplaces in user-setup.sh (baked into
-    # the image). Claude Code fetches the catalog on first /plugin browse.
-    # Write sandy-required defaults into settings.json (merge with seeded copy)
-    SETTINGS_FILE="$SANDBOX_DIR/claude/settings.json"
-    [ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
-    # Use node to safely merge JSON (available from the host or as a fallback)
+    # Merge sandy-required defaults into the seed (idempotent, runs every launch)
     if command -v node &>/dev/null; then
         node -e "
             const fs = require('fs');
@@ -2367,7 +2368,7 @@ if _sandy_agent_has claude && [ "$SANDBOX_IS_NEW" = "true" ]; then
             // Strip enabledPlugins — no plugins installed in fresh sandbox
             delete s.enabledPlugins;
             fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
-        " "$SETTINGS_FILE"
+        " "$SEED_SETTINGS"
     elif command -v jq &>/dev/null; then
         # jq fallback for hosts without node
         skip_perm="true"
@@ -2377,16 +2378,32 @@ if _sandy_agent_has claude && [ "$SANDBOX_IS_NEW" = "true" ]; then
             .spinnerTipsEnabled //= false |
             .skipDangerousModePermissionPrompt //= ($skip == "true") |
             del(.enabledPlugins)
-        ' "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+        ' "$SEED_SETTINGS" > "$SEED_SETTINGS.tmp" && mv "$SEED_SETTINGS.tmp" "$SEED_SETTINGS"
     else
         # Last resort: write defaults only if file is empty/bare
-        if [ "$(cat "$SETTINGS_FILE")" = "{}" ]; then
+        if [ "$(cat "$SEED_SETTINGS")" = "{}" ]; then
             skip_perm="true"
             [ "${SANDY_SKIP_PERMISSIONS:-true}" = "false" ] && skip_perm="false"
-            printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":%s}\n' "$skip_perm" > "$SETTINGS_FILE"
+            printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":%s}\n' "$skip_perm" > "$SEED_SETTINGS"
         fi
     fi
-fi  # end Claude-specific new-sandbox seeding
+    # Ensure the mount target exists inside $SANDBOX_DIR/claude/ — Docker will
+    # bind-mount the seed sidecar over this path. Without a target file, some
+    # Docker versions auto-create it as root-owned, which can confuse the rw
+    # parent mount. Touch it ourselves to keep ownership consistent.
+    [ -f "$SANDBOX_DIR/claude/settings.json" ] || : > "$SANDBOX_DIR/claude/settings.json"
+    if [ "$SANDBOX_IS_NEW" = "true" ]; then
+        [ -f "$HOME/.claude/settings.json" ] && info "  Seeded settings.json"
+        # Seed statsig cache for feature flags on first run (refreshed every launch below)
+        if [ -d "$HOME/.claude/statsig" ]; then
+            cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/claude/statsig"
+            info "  Seeded statsig/"
+        fi
+        # NOTE: Plugin marketplace catalogs are NOT seeded from host — the sandy-plugins
+        # marketplace is configured via extraKnownMarketplaces in user-setup.sh (baked into
+        # the image). Claude Code fetches the catalog on first /plugin browse.
+    fi
+fi  # end Claude settings seeding
 if [ "$SANDBOX_IS_NEW" = "false" ]; then
     info "Reusing sandbox: $SANDBOX_DIR"
 fi
@@ -2477,10 +2494,12 @@ case "$EVENT_TYPE" in
 esac
 CMUXHOOK
     chmod +x "$SANDBOX_DIR/claude/hooks/cmux-notify.sh"
-    # Merge notification hook into settings.json
-    SETTINGS_FILE="$SANDBOX_DIR/claude/settings.json"
-    [ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
-    if command -v node &>/dev/null; then
+    # Merge notification hook into the seed settings sidecar (S2.1). The in-sandbox
+    # settings.json is shadowed by $SEED_SETTINGS via a :ro child mount, so writing
+    # to the dead $SANDBOX_DIR/claude/settings.json would be invisible inside the
+    # container. The seed is regenerated every launch, so this merge is idempotent
+    # and also runs every launch.
+    if [ -f "$SEED_SETTINGS" ] && command -v node &>/dev/null; then
         node -e '
             const fs = require("fs");
             const f = process.argv[1];
@@ -2502,7 +2521,7 @@ CMUXHOOK
                 });
             }
             fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
-        ' "$SETTINGS_FILE"
+        ' "$SEED_SETTINGS"
     fi
 fi
 
@@ -2910,6 +2929,13 @@ if [ -n "${SANDY_GPU:-}" ]; then
 fi
 if _sandy_agent_has claude; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/claude:/home/claude/.claude")
+    # Shadow settings.json with the regenerated seed sidecar (S2.1). Must come
+    # AFTER the rw parent mount above so Docker overlays this :ro child on top.
+    # Closes F6 — in-container writes cannot modify the agent's effective
+    # settings, and host changes are picked up on the next launch.
+    if [ -f "$SEED_SETTINGS" ]; then
+        RUN_FLAGS+=(-v "$SEED_SETTINGS:/home/claude/.claude/settings.json:ro")
+    fi
     if [ -n "$CRED_TMPDIR" ]; then
         # :ro — matches the rationale on the Codex creds mount below. Prevents
         # token leakage back to the host tmpfile via a compromised session and
@@ -3022,17 +3048,57 @@ done < <(find "$WORK_DIR" -maxdepth 8 -type l \
     -print0 2>/dev/null)
 
 if [ ${#DANGEROUS_SYMLINKS[@]} -gt 0 ]; then
-    warn "Symlinks that point outside the workspace:"
-    for s in "${DANGEROUS_SYMLINKS[@]}"; do
-        warn "  $s"
-    done
-    printf "\033[0;33m[sandy] These could allow Claude to access files outside the sandbox.\033[0m\n"
-    printf "\033[0;33m[sandy] Proceed anyway? [y/N] \033[0m"
-    read -r REPLY
-    if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
-        error "Aborting. Remove dangerous symlinks and try again."
-        exit 1
+    # Persistent symlink approval (S2.2). Once the user has approved a specific
+    # set of dangerous symlinks for this sandbox, future launches proceed
+    # silently as long as the set is unchanged. A new entry that wasn't
+    # previously approved is a HARD ERROR (not a re-prompt) — a y/N prompt can
+    # be trained past; an explicit user action to re-approve cannot. Removed
+    # entries are pruned silently (a deleted symlink is always benign).
+    _approved_list="$SANDBOX_DIR/.sandy-approved-symlinks.list"
+    _current_tmp="$(mktemp)"
+    printf '%s\n' "${DANGEROUS_SYMLINKS[@]}" | sort -u > "$_current_tmp"
+    if [ -f "$_approved_list" ]; then
+        # Compute "new" entries: in current set but not in persisted approved.
+        _approved_tmp="$(mktemp)"
+        sort -u "$_approved_list" > "$_approved_tmp"
+        _new_tmp="$(mktemp)"
+        comm -23 "$_current_tmp" "$_approved_tmp" > "$_new_tmp"
+        if [ -s "$_new_tmp" ]; then
+            error "Symlink escape detected that wasn't present at previous approval:"
+            while IFS= read -r _new; do
+                error "  $_new"
+            done < "$_new_tmp"
+            error ""
+            error "This would expose files outside the workspace to sandy."
+            error "If this is legitimate, delete the symlink, relaunch sandy, re-create it,"
+            error "and re-approve from the symlink warning — or clear the approval list:"
+            error "  rm '$_approved_list'"
+            rm -f "$_current_tmp" "$_approved_tmp" "$_new_tmp"
+            exit 1
+        fi
+        rm -f "$_new_tmp" "$_approved_tmp"
+        # Refresh the persisted list — prunes removed entries silently.
+        cp "$_current_tmp" "$_approved_list"
+    else
+        # First encounter for this sandbox — prompt the user (existing ceremony).
+        warn "Symlinks that point outside the workspace:"
+        for s in "${DANGEROUS_SYMLINKS[@]}"; do
+            warn "  $s"
+        done
+        printf "\033[0;33m[sandy] These could allow Claude to access files outside the sandbox.\033[0m\n"
+        printf "\033[0;33m[sandy] Proceed anyway? [y/N] \033[0m"
+        read -r REPLY
+        if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+            error "Aborting. Remove dangerous symlinks and try again."
+            rm -f "$_current_tmp"
+            exit 1
+        fi
+        # Persist the approved set — subsequent launches won't re-prompt
+        # unless a NEW entry appears (which hard-errors, above).
+        cp "$_current_tmp" "$_approved_list"
+        info "  Persisted ${#DANGEROUS_SYMLINKS[@]} approved symlink(s) to $(basename "$_approved_list")"
     fi
+    rm -f "$_current_tmp"
 fi
 
 RUN_FLAGS+=(-v "$WORK_DIR:$SANDY_WORKSPACE")

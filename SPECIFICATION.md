@@ -235,12 +235,21 @@ As of v0.9.0, the sandbox directory contains **sibling** per-agent subdirs (`cla
 
 ### Seeding
 
-On first run for a new sandbox (whenever `claude` is in `SANDY_AGENT`):
-1. Copy host `~/.claude/settings.json` → sandbox `claude/settings.json`
-2. Strip `enabledPlugins` from seeded settings (prevents host plugin leakage)
-3. Copy host `~/.claude/.claude.json` → sandbox `<NAME>.claude.json`, stripping the `projects` key
-4. Copy host `~/.claude/statsig/` → sandbox `claude/statsig/`
-5. Create all persistent subdirectories
+Whenever `claude` is in `SANDY_AGENT`, sandy regenerates a seed settings sidecar at `<NAME>/.seed-settings.json` **on every launch** (not just first run), then bind-mounts it `:ro` over `~/.claude/settings.json` inside the container. The steps are:
+
+1. Copy host `~/.claude/settings.json` → sandbox `<NAME>/.seed-settings.json` (or write `{}` if the host has no settings file)
+2. Merge sandy-required defaults into the sidecar (`teammateMode`, `spinnerTipsEnabled`, `skipDangerousModePermissionPrompt`)
+3. Strip `enabledPlugins` from the sidecar (prevents host plugin leakage)
+4. (First run only) Copy host `~/.claude/.claude.json` → sandbox `<NAME>.claude.json`, stripping the `projects` key
+5. (First run only) Copy host `~/.claude/statsig/` → sandbox `claude/statsig/` (refreshed on every launch from a separate "always-refresh statsig" block)
+6. (First run only) Create all persistent subdirectories
+7. Touch `<NAME>/claude/settings.json` as an empty mountpoint if absent — Docker requires the target to exist for the `:ro` child mount to resolve cleanly
+
+At container launch, RUN_FLAGS order ensures the `:ro` child overlays correctly:
+1. Parent mount (rw): `-v "$SANDBOX_DIR/claude:/home/claude/.claude"`
+2. Child mount (ro): `-v "$SANDBOX_DIR/.seed-settings.json:/home/claude/.claude/settings.json:ro"`
+
+**Consequence:** the agent cannot modify its own settings.json persistently — in-container writes fail with EROFS, and the effective settings are re-derived from the host file on every launch. Host-side edits to `~/.claude/settings.json` are picked up automatically on the next sandy launch. The pre-S2.1 `<NAME>/claude/settings.json` file (from sandboxes created before 1.0-rc1) becomes dead state on migration — present but invisible inside the container, and not cleaned up (to avoid forensic loss).
 
 Whenever `gemini` is in `SANDY_AGENT`, sandy creates `gemini/` and its `commands/`, `extensions/`, `tmp/` subdirs. Gemini settings.json is not seeded from the host (Gemini has no direct host-settings equivalent for sandy to copy).
 
@@ -606,7 +615,11 @@ Host content at these paths is hidden (not visible inside container). Changes pe
 
 ### Symlink Protection
 
-Before container launch, sandy scans the workspace (up to 8 levels deep, skipping `node_modules/`, `.venv*/`, `.git/`) for symlinks pointing outside the project directory. If found, the user is prompted to confirm before proceeding.
+Before container launch, sandy scans the workspace (up to 8 levels deep, skipping `node_modules/`, `.venv*/`, `.git/`) for symlinks pointing outside the project directory. If any are found, sandy consults the persisted approval list at `<NAME>/.sandy-approved-symlinks.list` before proceeding:
+
+- **First launch (no approval list):** the user is prompted (`Proceed anyway? [y/N]`). On `y`, sandy writes the current set to `.sandy-approved-symlinks.list` and proceeds. On anything else, sandy aborts.
+- **Identical or reduced set:** proceed silently. Removed entries are pruned from the list silently (deletion of a symlink is always benign).
+- **New entry present:** hard error. Sandy names the new symlink in the error message and refuses to start. There is no second-chance prompt — the rationale is that a y/N prompt can be trained past ("I'll click yes again"), but a hard error forces an explicit user action to reapprove (delete the symlink and relaunch, or `rm <NAME>/.sandy-approved-symlinks.list` to clear the persisted set and re-prompt).
 
 When the user accepts, sandy automatically mounts each symlink target into the container so the symlinks resolve correctly:
 - **Absolute symlinks** (`data -> /home/user/shared/data`): Target is mounted at the raw symlink path (the literal path the OS looks up inside the container).
@@ -1507,6 +1520,8 @@ The file is only written on first run — if it already exists, it's preserved t
 
 ### C.2 `settings.json` (Claude Code Configuration)
 
+**Destination.** As of 1.0-rc1 (S2.1), the seeded settings file lives in a sidecar path at `$SANDBOX_DIR/.seed-settings.json` (not inside `$SANDBOX_DIR/claude/`). The sidecar is regenerated from the host on every launch, and mounted `:ro` over `/home/claude/.claude/settings.json` inside the container as a child of the rw `~/.claude` mount (child mounts apply after parent mounts, so the overlay wins). See §4 Seeding for the full flow.
+
 **Marketplace structure** (added idempotently to `extraKnownMarketplaces`):
 ```json
 {
@@ -1523,7 +1538,7 @@ The file is only written on first run — if it already exists, it's preserved t
 
 Note the double-nested `source` — the outer key is the `extraKnownMarketplaces` schema, the inner object describes the repository.
 
-**Sandy defaults merged on seeding** (Node.js tier):
+**Sandy defaults merged on every launch** (Node.js tier):
 ```json
 {
   "teammateMode": "tmux",
@@ -1532,7 +1547,7 @@ Note the double-nested `source` — the outer key is the `extraKnownMarketplaces
 }
 ```
 
-`enabledPlugins` is deleted from seeded settings to prevent host plugin leakage.
+`enabledPlugins` is deleted from the merged settings to prevent host plugin leakage. Because the sidecar is rebuilt each launch and mounted read-only, any in-container mutation fails with `EROFS` and host-side edits to `~/.claude/settings.json` are picked up on the next launch automatically.
 
 **JSON repair** applied before parsing (handles common hand-editing errors):
 - Remove trailing commas: regex `,(\s*[}\]])` → `$1`
@@ -1593,7 +1608,7 @@ Permissions: 600 (owner read-write only).
 
 ### C.6 cmux Notification Hook
 
-Auto-generated at `~/.claude/hooks/cmux-notify.sh` when cmux is detected. Merged into `settings.json` hooks:
+Auto-generated at `~/.claude/hooks/cmux-notify.sh` when cmux is detected. Merged into the seed sidecar (`$SANDBOX_DIR/.seed-settings.json`, see §C.2) before the settings file is mounted `:ro`:
 
 ```json
 {
@@ -1742,7 +1757,7 @@ sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 
 ### D.6 Error Recovery & Fallback Chains
 
-**settings.json merge** (3 tiers, tried in order):
+**settings.json merge** (3 tiers, tried in order — target is the seed sidecar `$SANDBOX_DIR/.seed-settings.json`, rebuilt every launch):
 1. **Node.js**: JSON repair → parse → merge defaults → strip plugins → write
 2. **jq**: `jq --arg skip "$skip_perm" '.teammateMode //= "tmux" | ...'`
 3. **printf**: Only if file is exactly `{}`, writes minimal JSON
@@ -1901,13 +1916,18 @@ find <WORKSPACE> -maxdepth 8 \
     -type l -print
 ```
 
-Each symlink's real path is checked against the workspace root. If any escape, the user is prompted:
-```
-These could allow Claude to access files outside the sandbox.
-Proceed anyway? [y/N]
-```
+Each symlink's real path is checked against the workspace root. If any escape, sandy consults the persisted approval list `<SANDBOX_DIR>/.sandy-approved-symlinks.list` (one `<link>\t<target>` per line). The handling is one of three paths:
 
-Only `y`/`Y` proceeds; anything else aborts with exit 1.
+1. **No approval list yet (first launch):** prompt the user with
+   ```
+   These could allow Claude to access files outside the sandbox.
+   Proceed anyway? [y/N]
+   ```
+   On `y`/`Y`, sandy writes the current set to the approval list and proceeds. Anything else aborts with exit 1.
+
+2. **Current set is a subset of the approved list:** proceed silently. Sandy rewrites the list to drop entries the user has deleted (symlink removal is benign).
+
+3. **Current set contains an entry not in the approved list:** **hard error**, naming the new symlink(s), with no re-prompt. Rationale: a y/N that fires every session can be trained past; a hard error forces a deliberate user action. Remediation is `rm` the offending link (restoring the approved state), or `rm <SANDBOX_DIR>/.sandy-approved-symlinks.list` to clear the persisted approval and get a fresh prompt on the next launch.
 
 When the user accepts, each symlink target is mounted into the container (see Section 9, Symlink Protection). Mount path depends on symlink type:
 - **Absolute**: `-v "<resolved_host_path>:<raw_symlink_value>"`
@@ -1994,6 +2014,15 @@ The sandbox directory itself becomes `~/.claude` inside the container:
 ```bash
 -v "<SANDBOX_DIR>:/home/claude/.claude"
 ```
+
+### E.13a Seed `settings.json` Overlay (conditional on `claude` agent)
+
+Immediately after E.13, if `claude` is in `SANDY_AGENT`, sandy overlays the seed sidecar read-only over `~/.claude/settings.json`:
+```bash
+-v "<SANDBOX_DIR>/.seed-settings.json:/home/claude/.claude/settings.json:ro"
+```
+
+Must appear **after** the sandbox mount (E.13) so Docker overlays this child path on top of the rw parent. The sidecar is regenerated by the pre-launch seed step (§4 Seeding) on every launch, so the file reflects the current host `~/.claude/settings.json` plus sandy's merged defaults. Read-only enforcement prevents in-container mutation (F6 mitigation, S2.1).
 
 ### E.14 SSH Mounts (conditional on `SANDY_SSH`)
 

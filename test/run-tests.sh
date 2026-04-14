@@ -2234,6 +2234,163 @@ check "macOS network warning banner present" \
     grep -q 'Network isolation is NOT active' "$SANDY_SCRIPT_PATH"
 
 # ============================================================
+info "42. Sprint 2 — settings.json re-seed every launch (S2.1)"
+# ============================================================
+# F6 fix: the Claude settings.json seed is regenerated on every launch and
+# bind-mounted :ro onto /home/claude/.claude/settings.json inside the container.
+# The agent cannot quietly modify its own settings and have them survive.
+# Host-side edits to $HOME/.claude/settings.json are picked up next launch.
+
+SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+check "SEED_SETTINGS sidecar variable declared" \
+    grep -q 'SEED_SETTINGS="\$SANDBOX_DIR/\.seed-settings\.json"' "$SANDY_SCRIPT_PATH"
+
+# Seed block must NOT be gated on SANDBOX_IS_NEW=true. Verify by finding the
+# SEED_SETTINGS declaration line and the most recent preceding
+# `if ... SANDBOX_IS_NEW = "true"` gate — they must not bracket each other.
+# We do this by checking that the line `if _sandy_agent_has claude; then` that
+# opens the seed block does NOT contain SANDBOX_IS_NEW.
+_SEED_OPEN_LINE="$(grep -nB0 'SEED_SETTINGS="\$SANDBOX_DIR/\.seed-settings\.json"' "$SANDY_SCRIPT_PATH" | head -1 | cut -d: -f1)"
+_SEED_GATE_LINE="$(awk -v n="$_SEED_OPEN_LINE" 'NR<n && /if _sandy_agent_has claude/ {last=NR} END {print last}' "$SANDY_SCRIPT_PATH")"
+check "seed block opener does not gate on SANDBOX_IS_NEW" \
+    bash -c 'sed -n "${2}p" "$1" | grep -qv SANDBOX_IS_NEW' \
+    -- "$SANDY_SCRIPT_PATH" "$_SEED_GATE_LINE"
+
+check "seed :ro child mount added in claude RUN_FLAGS block" \
+    grep -q 'SEED_SETTINGS:/home/claude/\.claude/settings\.json:ro' "$SANDY_SCRIPT_PATH"
+
+# cmux hook merge must target $SEED_SETTINGS (not the dead $SANDBOX_DIR/claude/settings.json).
+# Verify by checking the cmux block — 50 lines centered on cmux-notify/hook merge
+# must reference SEED_SETTINGS and must NOT reference the old SETTINGS_FILE var.
+_CMUX_BLOCK="$(grep -A 50 'Merge notification hook into the seed' "$SANDY_SCRIPT_PATH" || true)"
+check "cmux merge block references SEED_SETTINGS" \
+    bash -c 'echo "$1" | grep -q "SEED_SETTINGS"' -- "$_CMUX_BLOCK"
+check "cmux merge block has no dead SETTINGS_FILE ref" \
+    bash -c '! echo "$1" | grep -q "SETTINGS_FILE="' -- "$_CMUX_BLOCK"
+
+# Functional test: simulate seed regeneration across two "launches" with
+# different host content. The in-sandbox settings file should reflect the
+# latest host version — that is, the seed is a one-way flow from host to
+# sidecar, not a persistent sandbox artifact.
+_S2_SANDBOX="$(mktemp -d)"
+mkdir -p "$_S2_SANDBOX/claude"
+_S2_HOST="$(mktemp)"
+
+# Launch 1: host settings = {"flavor":"A"}
+echo '{"flavor":"A"}' > "$_S2_HOST"
+cp "$_S2_HOST" "$_S2_SANDBOX/.seed-settings.json"
+_S2_FIRST="$(jq -r '.flavor' "$_S2_SANDBOX/.seed-settings.json" 2>/dev/null)"
+
+# Launch 2: host settings changed to {"flavor":"B"} — seed must pick this up
+echo '{"flavor":"B"}' > "$_S2_HOST"
+cp "$_S2_HOST" "$_S2_SANDBOX/.seed-settings.json"
+_S2_SECOND="$(jq -r '.flavor' "$_S2_SANDBOX/.seed-settings.json" 2>/dev/null)"
+
+check "seed regeneration picks up host changes" \
+    bash -c 'test "$1" = "A" && test "$2" = "B"' -- "$_S2_FIRST" "$_S2_SECOND"
+
+# Functional test: verify the :ro mount semantics inside a real container.
+# Build the S2.1 mount layout by hand (parent rw claude dir + child :ro on
+# settings.json) and attempt to write from inside — expect EROFS.
+mkdir -p "$_S2_SANDBOX/pip" "$_S2_SANDBOX/uv" "$_S2_SANDBOX/npm-global" \
+         "$_S2_SANDBOX/go" "$_S2_SANDBOX/cargo"
+echo '{"source":"seed"}' > "$_S2_SANDBOX/.seed-settings.json"
+: > "$_S2_SANDBOX/claude/settings.json"
+
+_S2_WRITE_RESULT="$(
+    docker run --rm \
+        --read-only \
+        --tmpfs /tmp:exec,size=64M \
+        --tmpfs /home/claude:exec,size=64M,uid=1001,gid=1001 \
+        -v "$_S2_SANDBOX/claude:/home/claude/.claude" \
+        -v "$_S2_SANDBOX/.seed-settings.json:/home/claude/.claude/settings.json:ro" \
+        -v "$_S2_SANDBOX/pip:/home/claude/.pip-packages" \
+        -v "$_S2_SANDBOX/uv:/home/claude/.local/share/uv" \
+        -v "$_S2_SANDBOX/npm-global:/home/claude/.npm-global" \
+        -v "$_S2_SANDBOX/go:/home/claude/go" \
+        -v "$_S2_SANDBOX/cargo:/home/claude/.cargo" \
+        -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+        --entrypoint bash "$IMAGE_NAME" -c '
+            RUN_UID=${HOST_UID:-1001}
+            RUN_GID=${HOST_GID:-1001}
+            chown "$RUN_UID:$RUN_GID" /home/claude 2>/dev/null || true
+            exec gosu "$RUN_UID:$RUN_GID" bash -c "
+                # Read should work and return the seed content
+                cat /home/claude/.claude/settings.json
+                # Write should fail with EROFS
+                if echo mutated > /home/claude/.claude/settings.json 2>/dev/null; then
+                    echo WRITE=ok
+                else
+                    echo WRITE=erofs
+                fi
+            "
+        ' 2>&1
+)"
+
+check "seed mount reports the seed content to the container" \
+    bash -c 'echo "$1" | grep -q "source.*seed"' -- "$_S2_WRITE_RESULT"
+check "in-container write to settings.json fails (EROFS)" \
+    bash -c 'echo "$1" | grep -q "WRITE=erofs"' -- "$_S2_WRITE_RESULT"
+
+# Verify the host seed file was NOT modified by the (failed) in-container write
+check "host seed file unchanged after failed in-container write" \
+    bash -c 'grep -q "source.*seed" "$1"' -- "$_S2_SANDBOX/.seed-settings.json"
+
+rm -rf "$_S2_SANDBOX"
+rm -f "$_S2_HOST"
+
+# ============================================================
+info "43. Sprint 2 — Persistent symlink approval (S2.2)"
+# ============================================================
+# F8 fix: the set of "approved" dangerous symlinks is persisted to the sandbox.
+# A new entry that wasn't in the approved set hard-errors the launch — no
+# re-prompt, no "oops I'll click y again" trainability. Removed entries are
+# pruned silently.
+
+SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+check "persisted symlink approval list path declared" \
+    grep -q '\.sandy-approved-symlinks\.list' "$SANDY_SCRIPT_PATH"
+check "symlink approval uses comm -23 for new-entry detection" \
+    grep -q 'comm -23.*_current_tmp.*_approved_tmp' "$SANDY_SCRIPT_PATH"
+check "new symlink hard-errors with specific message" \
+    grep -q "Symlink escape detected that wasn't present at previous approval" "$SANDY_SCRIPT_PATH"
+check "persisted list refreshed to prune removed entries" \
+    grep -q 'cp "\$_current_tmp" "\$_approved_list"' "$SANDY_SCRIPT_PATH"
+
+# Functional test: exercise the core comm-based comparison logic with fixture
+# files. Scenarios: identical → empty diff; added → listed as new; removed →
+# empty diff (silently pruned).
+_S2_APPROVED_TMP="$(mktemp)"
+_S2_CURRENT_TMP="$(mktemp)"
+_S2_NEW_TMP="$(mktemp)"
+
+# Seed the approved list
+printf 'link1 -> /Users/drapp/.ssh\nlink2 -> /tmp/foo\n' | sort -u > "$_S2_APPROVED_TMP"
+
+# Scenario 1: current set identical to approved → no new entries
+printf 'link1 -> /Users/drapp/.ssh\nlink2 -> /tmp/foo\n' | sort -u > "$_S2_CURRENT_TMP"
+comm -23 "$_S2_CURRENT_TMP" "$_S2_APPROVED_TMP" > "$_S2_NEW_TMP"
+check "identical symlink set → empty new-entry diff (silent proceed)" \
+    test ! -s "$_S2_NEW_TMP"
+
+# Scenario 2: new entry added → detected
+printf 'link1 -> /Users/drapp/.ssh\nlink2 -> /tmp/foo\nevil-link -> /etc/shadow\n' \
+    | sort -u > "$_S2_CURRENT_TMP"
+comm -23 "$_S2_CURRENT_TMP" "$_S2_APPROVED_TMP" > "$_S2_NEW_TMP"
+check "new symlink entry detected as unapproved" \
+    bash -c 'grep -q "evil-link -> /etc/shadow" "$1"' -- "$_S2_NEW_TMP"
+
+# Scenario 3: entry removed → no new entries (silent prune)
+printf 'link1 -> /Users/drapp/.ssh\n' | sort -u > "$_S2_CURRENT_TMP"
+comm -23 "$_S2_CURRENT_TMP" "$_S2_APPROVED_TMP" > "$_S2_NEW_TMP"
+check "removed symlink entries yield empty new-entry diff (silent prune)" \
+    test ! -s "$_S2_NEW_TMP"
+
+rm -f "$_S2_APPROVED_TMP" "$_S2_CURRENT_TMP" "$_S2_NEW_TMP"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

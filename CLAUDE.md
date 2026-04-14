@@ -107,7 +107,7 @@ The Telegram host-side relay (`$SANDY_HOME/channel-relay.sh`) is an agent-agnost
 
 ## Per-project Sandboxes
 
-Each project directory gets its own isolated `~/.claude` sandbox under `~/.sandy/sandboxes/`, named with a mnemonic prefix and hash (e.g. `myproject-a1b2c3d4`). On first run, `.claude.json` and `settings.json` are seeded from the host's `~/.claude/`. Credentials (`.credentials.json`) are read fresh from the host each launch and mounted ephemerally — never persisted to the sandbox.
+Each project directory gets its own isolated `~/.claude` sandbox under `~/.sandy/sandboxes/`, named with a mnemonic prefix and hash (e.g. `myproject-a1b2c3d4`). `.claude.json` is seeded from the host's `~/.claude/` on first run. `settings.json` is regenerated on **every launch** from the host's copy into a sidecar (`$SANDBOX_DIR/.seed-settings.json`) and mounted read-only over `~/.claude/settings.json` inside the container, so host-side settings edits are always picked up and the agent cannot mutate its own settings persistently (F6 mitigation, 1.0-rc1). Credentials (`.credentials.json`) are read fresh from the host each launch and mounted ephemerally — never persisted to the sandbox.
 
 ### Sandbox version tracking
 
@@ -304,6 +304,15 @@ Certain sensitive files and directories in the workspace are mounted read-only i
 **`SANDY_ALLOW_WORKFLOW_EDIT`** (passive-safe): set to `1` in `.sandy/config` to remove `.github/workflows/` from the protection list for that project. Useful when the agent is doing legitimate CI work. Default is off — workflows are dangerous because the escape fires on `git push`, long after the session ends.
 
 Protected files/directories are overlaid as read-only bind mounts at container launch. The host filesystem is unaffected.
+
+### Persistent symlink approval (1.0-rc1)
+
+Dangerous symlinks (absolute links, or relative links that escape the workspace via `..`) are surfaced to the user at launch. On first encounter sandy prints a y/N prompt listing each link and its target; on approval the set is persisted to `$SANDBOX_DIR/.sandy-approved-symlinks.list` (one `link<TAB>target` per line).
+
+On subsequent launches:
+
+- **Identical or reduced set** → proceed silently (symlink deletions update the list).
+- **New escape present** → **hard error at launch**, naming the offending link(s), with remediation (`rm` the link, relaunch, re-approve). Sandy refuses to re-prompt — a y/N that fires every session can be trained past, whereas a hard error forces a deliberate action.
 
 ## Terminal Notifications
 
