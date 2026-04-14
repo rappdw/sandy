@@ -3507,8 +3507,14 @@ if [[ "$SANDY_SSH" == "agent" ]]; then
             python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()" > "$SSH_RELAY_PORTFILE"
             SSH_RELAY_PORT="$(cat "$SSH_RELAY_PORTFILE")"
             rm -f "$SSH_RELAY_PORTFILE"
+            # Silence socat's stderr — on cleanup we send SIGTERM and it
+            # otherwise prints "socat[...] W exiting on signal 15" to the
+            # parent shell after the sandy session exits. Errors that matter
+            # (relay failing to start, SSH handshake issues) surface inside
+            # the container via SSH itself, so dropping host-side stderr is
+            # safe.
             socat TCP-LISTEN:"$SSH_RELAY_PORT",bind=127.0.0.1,fork,reuseaddr \
-                  UNIX-CONNECT:"$SSH_AUTH_SOCK" &
+                  UNIX-CONNECT:"$SSH_AUTH_SOCK" 2>/dev/null &
             SSH_RELAY_PID=$!
             RUN_FLAGS+=(-e "SSH_RELAY_PORT=$SSH_RELAY_PORT")
             info "SSH agent relay on localhost:$SSH_RELAY_PORT (PID $SSH_RELAY_PID)"
