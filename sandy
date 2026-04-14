@@ -1858,6 +1858,19 @@ _resolve_passive_privileged_approval() {
     local approval_file="$approvals_dir/passive-$wd_hash.list"
     mkdir -p "$approvals_dir"
 
+    # Escape hatch for CI / test harnesses: SANDY_AUTO_APPROVE_PRIVILEGED=1
+    # bypasses the prompt and exports the collected keys without writing an
+    # approval file. This is intentionally an env-only knob — the config
+    # loader's passive allowlist does not include it, so a committed
+    # .sandy/config cannot set it. Only a trusted shell or test harness can.
+    if [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ]; then
+        while IFS= read -r _kv; do
+            [ -z "$_kv" ] && continue
+            export "$_kv"
+        done <<< "$sorted"
+        return 0
+    fi
+
     # Already approved? First line of the file is the hash.
     if [ -f "$approval_file" ]; then
         local stored

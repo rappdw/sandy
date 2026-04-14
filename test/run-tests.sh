@@ -5,6 +5,12 @@
 # Usage: ./test/run-tests.sh
 set -euo pipefail
 
+# Auto-approve passive privileged keys (e.g. a workspace .sandy/.secrets
+# with GEMINI_API_KEY) so the per-workspace approval prompt doesn't block
+# non-interactive test runs. Env-only knob — a committed .sandy/config
+# cannot set it. See _resolve_passive_privileged_approval() in sandy.
+export SANDY_AUTO_APPROVE_PRIVILEGED=1
+
 IMAGE_NAME="sandy-claude-code"
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 PASS=0

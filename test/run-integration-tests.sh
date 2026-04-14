@@ -68,6 +68,14 @@
 #
 set -euo pipefail
 
+# The integration test harness runs sandy from directories that may legitimately
+# carry privileged-tier keys in workspace .sandy/config (e.g. this repo's own
+# ~/dev/sandy/.sandy/.secrets with GEMINI_API_KEY). Auto-approve them in-memory
+# so the per-workspace prompt in _resolve_passive_privileged_approval() doesn't
+# block the non-interactive test run. This env var is intentionally not on the
+# passive config allowlist — a committed .sandy/config cannot set it.
+export SANDY_AUTO_APPROVE_PRIVILEGED=1
+
 SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 PASS=0
