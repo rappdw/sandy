@@ -111,7 +111,9 @@ The config parser does **not** use `source`. It reads lines via `grep -E '^[A-Z_
 
 ### Config Tiers (1.0-rc1)
 
-Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `passive`). Privileged-tier sources may set any recognized key. Passive-tier sources (the two workspace files) may set only the **passive-safe** subset — any attempt to set a privileged-only key from a workspace source emits a `warn()` line ("ignoring privileged key '<NAME>' from workspace config") and drops the value. This prevents a malicious `.sandy/config` committed to a repo from disabling isolation, forwarding an SSH agent, or exfiltrating credentials.
+Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `passive`). Privileged-tier sources may set any recognized key immediately. Passive-tier sources (the two workspace files) may set **passive-safe** keys immediately; any privileged-only key found in a passive source is **collected** into `_PASSIVE_PRIVILEGED_PENDING` rather than exported. After both passive sources load, `_resolve_passive_privileged_approval()` runs: it hashes the sorted `KEY=VALUE` set, checks `$SANDY_HOME/approvals/passive-<wd-hash>.list` (first line is the sha256 of the approved set), and either (a) silently exports if the hash matches, (b) prompts `y/N` on `/dev/tty` the first time with the exact KEY=VALUE list plus a rationale about repo-committed configs, or (c) fails closed in non-interactive mode (`_sandy_is_headless=true` or non-TTY stdin) with a pointer to "launch sandy interactively from this directory to approve." On approval, the file is written with the hash, a `# workspace:` comment, a `# approved:` timestamp, and the sorted KEY=VALUE lines, mode 600. Any edit to the workspace config that adds, removes, or changes a privileged key invalidates the hash and re-prompts on the next launch. Revocation is `rm` of the approval file. This prevents a malicious `.sandy/config` committed to a repo from disabling isolation, forwarding an SSH agent, or exfiltrating credentials without a deliberate, workspace-scoped user opt-in.
+
+**CI / test-harness escape hatch**: `SANDY_AUTO_APPROVE_PRIVILEGED=1` in the process environment bypasses the prompt and exports the pending keys in-memory without writing an approval file. This is intentionally env-only — `SANDY_AUTO_APPROVE_PRIVILEGED` is not in the passive allowlist, so a committed `.sandy/config` cannot set it. Sandy's own `test/run-tests.sh` and `test/run-integration-tests.sh` set this flag at the top of each harness so the suites can run from the sandy repo directory (which carries a real `GEMINI_API_KEY` in `.sandy/.secrets` for integration testing) without blocking on stdin.
 
 **Privileged-only keys** (allowed only from `$SANDY_HOME/config` and `$SANDY_HOME/.secrets`):
 `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`.
@@ -550,7 +552,7 @@ Certain files and directories in the workspace are overlaid at container launch 
 
 ### Read-Only Bind Mounts
 
-**Files (always mounted — empty fixture if absent on host):**
+**Files (existence-gated — only mounted when present on host):**
 
 | Path | Threat mitigated |
 |---|---|
@@ -599,7 +601,9 @@ Certain files and directories in the workspace are overlaid at container launch 
 
 This uses `while read -r -d ''` and shell-side `dirname` to avoid GNU-only `find -printf '%h\0'` — portable across macOS/BSD and GNU `find`.
 
-**Always-mount pattern (1.0-rc1)**: for the files and directories groups above, sandy always mounts *something* at each protected path — either the host file/directory if it exists, or an empty zero-byte file (`$SANDY_HOME/.empty-ro-file`) / empty directory (`$SANDY_HOME/.empty-ro-dir`) if it doesn't. This closes the pre-1.0 gap where absent protected paths could be created inside the container and silently sourced by host tools on first read. Git-tree files are excluded from always-mount because they are meaningless without a real git repo. The empty fixtures are seeded idempotently by `ensure_build_files()` on every launch.
+**Mount policy (1.0-rc1, revised in 0.11.2)**: directories are always-mounted — if the host has no corresponding directory, sandy overlays an empty read-only directory (`$SANDY_HOME/.empty-ro-dir`) at the container path, blocking the agent from creating files there. Empty directories are benign on the host: git doesn't track them and no tooling reacts to mere presence. Files are existence-gated — if the host has no `.bashrc`/`.envrc`/etc., sandy adds no mount for that path. The original 1.0-rc1 plan called for always-mounting files too (with `$SANDY_HOME/.empty-ro-file` as the fallback), but Docker's bind-mount target auto-creation semantics cause 0-byte stub files to materialize on the host workspace whenever a mount target doesn't exist under an rw bind — polluting `git status` and breaking tools like direnv that react to file presence. The residual F3 gap for files (an agent can create `.bashrc`/`.envrc` in-session if the host didn't have one) is mitigated by the newly-created file showing up in host-side `git status` for user review. Git-tree files are also existence-gated because they are meaningless without a real git repo. The empty-dir fixture is seeded idempotently by `ensure_build_files()` on every launch; the empty-file fixture is also seeded (still used by `_sandy_protected_files` in the test harness's older flow, and kept for future use) but is not currently mounted by the production path.
+
+**Stub cleanup preflight**: sandy scans the workspace on launch for 0-byte files matching the protected-files list that are untracked by git. If any are found (typically leftover stubs from a workspace that ran a pre-0.11.2 always-mount build), sandy prints a one-shot `rm` remediation command. Stubs are not auto-removed — a 0-byte file could be intentional, and the git-untracked heuristic is only a best-effort safety check.
 
 **Intentionally excluded** from the protected list: package manifests (`Makefile`, `justfile`, `package.json`, `pyproject.toml`, `setup.py`, `Cargo.toml`, `build.rs`). The agent legitimately edits these as project source, and they are invoked explicitly by name rather than sourced on `cd` or filesystem scan.
 
@@ -1941,16 +1945,13 @@ Deduplicated by container mount path.
 
 Three categories, sourced from the single-source-of-truth helpers in `sandy` (`_sandy_protected_files`, `_sandy_protected_git_files`, `_sandy_protected_dirs`). The same three helpers are exposed to the test harness via `sandy --print-protected-paths`, which emits `file:<path>`, `gitfile:<path>`, and `dir:<path>` lines. See §9 for the full path list and threat model.
 
-**Regular files — always mounted (1.0-rc1)**:
+**Regular files — existence-gated (0.11.2)**:
 ```bash
 while IFS= read -r f; do
-    if [ -e "<WORKSPACE>/$f" ]; then
-        -v "<WORKSPACE>/$f:<CONTAINER_WORKSPACE>/$f:ro"
-    else
-        -v "<SANDY_HOME>/.empty-ro-file:<CONTAINER_WORKSPACE>/$f:ro"
-    fi
+    [ -e "<WORKSPACE>/$f" ] && -v "<WORKSPACE>/$f:<CONTAINER_WORKSPACE>/$f:ro"
 done < <(_sandy_protected_files)
 ```
+The always-mount-with-empty-fixture pattern was reverted for files in 0.11.2 because Docker creates mount targets on the host inside the rw workspace bind, causing 0-byte stub files to appear in the user's workspace (breaking direnv and polluting `git status`). See §9 for the residual F3 gap and its host-side detection mitigation.
 
 **Git-tree files — existence-gated** (meaningless without a real git repo):
 ```bash
