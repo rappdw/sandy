@@ -236,8 +236,16 @@ sandy_run_persist() {
 # --- Preflight ---
 
 if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
-    echo "Error: $IMAGE_NAME image not found. Run sandy once to build it."
-    exit 1
+    _sandy_bin="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+    echo "Info: $IMAGE_NAME image not found. Building via '$_sandy_bin --build-only'..."
+    if ! "$_sandy_bin" --build-only; then
+        echo "Error: failed to build $IMAGE_NAME. Run '$_sandy_bin --rebuild' manually to diagnose."
+        exit 1
+    fi
+    if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+        echo "Error: $IMAGE_NAME still missing after build. Check '$_sandy_bin --build-only' output."
+        exit 1
+    fi
 fi
 
 setup_sandbox

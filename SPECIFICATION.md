@@ -815,9 +815,11 @@ Sandy configures three plugin marketplaces in `settings.json` via `extraKnownMar
 | `claude-plugins-official` | `{ source: "github", repo: "anthropics/claude-plugins-official" }` |
 | `sandy-plugins` | `{ source: "github", repo: "rappdw/sandy-plugins" }` |
 
+The marketplace entries are merged into the seed sidecar (`$SANDBOX_DIR/.seed-settings.json`) host-side on every launch, next to the other sandy defaults (see §4 Seeding and §C.2). The merge happens before the sidecar is bind-mounted `:ro` over `~/.claude/settings.json` — any in-container write would fail with EROFS under S2.1, so the marketplace merge cannot live inside `user-setup.sh`.
+
 ### Deprecated Marketplace Removal
 
-The `thinkkit`, `ait`, and `pka-skills` marketplaces are automatically removed from `settings.json` on startup if present.
+The `thinkkit`, `ait`, and `pka-skills` marketplaces are automatically removed from the seed sidecar on startup if present (same host-side merge block).
 
 ### Refresh Logic
 

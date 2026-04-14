@@ -1041,36 +1041,9 @@ if _sandy_has_claude; then
     mkdir -p "$_cur_proj"
 fi
 
-# Ensure plugin marketplaces are configured in settings.json (idempotent, Claude only)
-SETTINGS_FILE="$HOME/.claude/settings.json"
-if _sandy_has_claude && [ -f "$SETTINGS_FILE" ]; then
-    node -e '
-        const fs = require("fs");
-        const f = process.argv[1];
-        let s;
-        try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { s = {}; }
-        if (!s.extraKnownMarketplaces) s.extraKnownMarketplaces = {};
-        const required = {
-            "claude-plugins-official": { source: { source: "github", repo: "anthropics/claude-plugins-official" } },
-            "sandy-plugins": { source: { source: "github", repo: "rappdw/sandy-plugins" } }
-        };
-        const deprecated = ["thinkkit", "ait", "pka-skills"];
-        let changed = false;
-        for (const name of deprecated) {
-            if (s.extraKnownMarketplaces[name]) {
-                delete s.extraKnownMarketplaces[name];
-                changed = true;
-            }
-        }
-        for (const [name, cfg] of Object.entries(required)) {
-            if (!s.extraKnownMarketplaces[name]) {
-                s.extraKnownMarketplaces[name] = cfg;
-                changed = true;
-            }
-        }
-        if (changed) fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
-    ' "$SETTINGS_FILE"
-fi
+# Plugin marketplace configuration is merged into the seed sidecar at host-side
+# (see S2.1 block in the main sandy script). Any in-container write to
+# ~/.claude/settings.json would fail with EROFS under the :ro overlay.
 
 sandy_log "Configuring git"
 # Trust all directories (host UID differs from container UID; container is sandboxed)
@@ -2351,7 +2324,11 @@ if _sandy_agent_has claude; then
     else
         echo '{}' > "$SEED_SETTINGS"
     fi
-    # Merge sandy-required defaults into the seed (idempotent, runs every launch)
+    # Merge sandy-required defaults into the seed (idempotent, runs every launch).
+    # extraKnownMarketplaces must be merged here rather than inside user-setup.sh
+    # because the settings.json mount is :ro under S2.1 — any in-container write
+    # would fail with EROFS. The host-side seed sidecar is rw, then bind-mounted
+    # :ro after this block.
     if command -v node &>/dev/null; then
         node -e "
             const fs = require('fs');
@@ -2367,6 +2344,17 @@ if _sandy_agent_has claude; then
             for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
             // Strip enabledPlugins — no plugins installed in fresh sandbox
             delete s.enabledPlugins;
+            // Configure plugin marketplaces (idempotent); drop deprecated ones
+            if (!s.extraKnownMarketplaces) s.extraKnownMarketplaces = {};
+            const required = {
+                'claude-plugins-official': { source: { source: 'github', repo: 'anthropics/claude-plugins-official' } },
+                'sandy-plugins': { source: { source: 'github', repo: 'rappdw/sandy-plugins' } }
+            };
+            const deprecated = ['thinkkit', 'ait', 'pka-skills'];
+            for (const name of deprecated) { delete s.extraKnownMarketplaces[name]; }
+            for (const [name, cfg] of Object.entries(required)) {
+                if (!s.extraKnownMarketplaces[name]) s.extraKnownMarketplaces[name] = cfg;
+            }
             fs.writeFileSync(f, JSON.stringify(s, null, 2) + '\n');
         " "$SEED_SETTINGS"
     elif command -v jq &>/dev/null; then
@@ -2377,7 +2365,12 @@ if _sandy_agent_has claude; then
             .teammateMode //= "tmux" |
             .spinnerTipsEnabled //= false |
             .skipDangerousModePermissionPrompt //= ($skip == "true") |
-            del(.enabledPlugins)
+            del(.enabledPlugins) |
+            del(.extraKnownMarketplaces.thinkkit) |
+            del(.extraKnownMarketplaces.ait) |
+            del(.extraKnownMarketplaces["pka-skills"]) |
+            .extraKnownMarketplaces["claude-plugins-official"] //= {"source":{"source":"github","repo":"anthropics/claude-plugins-official"}} |
+            .extraKnownMarketplaces["sandy-plugins"] //= {"source":{"source":"github","repo":"rappdw/sandy-plugins"}}
         ' "$SEED_SETTINGS" > "$SEED_SETTINGS.tmp" && mv "$SEED_SETTINGS.tmp" "$SEED_SETTINGS"
     else
         # Last resort: write defaults only if file is empty/bare
