@@ -1,3 +1,113 @@
+## sandy v0.11.3
+
+Stabilizes the isolation hardening that shipped in v0.11.1/v0.11.2. Two bug fixes that surfaced during daily-driver use of v0.11.2. This is the target for the M2.3 7-day soak before work on M3 (user-setup.sh heredoc extraction) or the Sprint 3 egress proxy sidecar begins.
+
+### Bug Fixes
+
+**Empty-ro fixtures missing on fast-path launches** — `ensure_build_files()` creates `$SANDY_HOME/.empty-ro-file` and `$SANDY_HOME/.empty-ro-dir/` for the protected-path overlay mounts added in v0.11.1. When sandy hit the cached-image fast path, the fixture-creation block ran *after* the fast-path exit, so brand-new `$SANDY_HOME` directories (fresh installs, `rm -rf ~/.sandy` recovery) would launch with the fixtures missing and `docker run` would fail on the first ro-overlay mount. Moved fixture creation before every fast-path exit so it runs unconditionally.
+
+**`/plugin install` EROFS crash and user-setup.sh ENOENT race** — The v0.11.1 S2.1 implementation mounted a sidecar `:ro` at `~/.claude/settings.json` inside the container so sandy could re-seed it every launch without giving the agent write access. This broke `/plugin install` (and any in-session `claude plugin marketplace add`) because Claude Code writes the updated `enabledPlugins` list back to `settings.json` — EROFS on a read-only mount. Walked back the strict `:ro` sidecar: the file is now rw inside the container, sandy re-reads the host copy every launch and re-overwrites the sandy-managed keys (`extraKnownMarketplaces`, `teammateMode`, `spinnerTipsEnabled`, `skipDangerousModePermissionPrompt`, cmux hooks) while preserving `enabledPlugins` from the previous sandbox session so `/plugin install` survives relaunches. Also fixed a related ENOENT race where `user-setup.sh` could run its settings-merge block before the sandbox `claude/` dir existed on a first launch.
+
+**`/ultrareview` and cloud features fail with 404 inside sandy** — Three issues combined to break Claude Code's cloud features (like `/ultrareview`) inside sandy:
+
+1. **`ENABLE_CLAUDEAI_MCP_SERVERS=false`** (primary cause) — sandy's entrypoint disabled Anthropic's cloud MCP servers with the rationale that "cloud MCP connectors can't work in the sandboxed network." That rationale was wrong: sandy blocks LAN, not internet; Anthropic's servers are fully reachable. `/ultrareview` coordinates parallel review agents server-side via this infrastructure. Fixed: removed the flag entirely. **This change requires an image rebuild** (`sandy --rebuild`).
+
+2. When `CLAUDE_CODE_OAUTH_TOKEN` was set, sandy skipped the credential file flow entirely — no `.credentials.json` was mounted. Cloud features need the full OAuth object (refresh token, scopes, subscription info) that the env var alone doesn't carry. Fixed: sandy now always loads and mounts the credential file alongside the env var.
+
+3. The v0.11.1 S1.5 change mounted `.credentials.json` read-only, which would block token refresh/scoping writes. Fixed: reverted to rw. The tmpdir is ephemeral (fresh each launch, `rm -rf` on exit), so in-session writes don't persist to the host. Codex and Gemini credential mounts remain `:ro`.
+
+### Documentation
+
+**CLAUDE.md** — "Per-project Sandboxes" and "Protected Files" sections updated to describe the current (walked-back) settings.json semantics and the 0-byte stub detection helper.
+
+---
+
+## sandy v0.11.2
+
+Refinements to the v0.11.1 isolation hardening: a protected-files regression walk-back, a more user-friendly passive-config approval flow, and a test-harness escape hatch.
+
+### Bug Fixes
+
+**Protected-files always-mount created 0-byte host stubs** — The v0.11.1 S1.2 pattern tried to mount `$SANDY_HOME/.empty-ro-file` over missing `.bashrc`/`.envrc`/etc. so the agent couldn't create them in-session. Under Docker's bind-mount target auto-creation semantics, the missing target materialized as a real 0-byte file on the host workspace whenever the ro mount was applied beneath the rw workspace bind. That broke direnv (which blocks on empty `.envrc`), polluted `git status`, and tripped every tool that checks for file presence as a meaningful signal. Reverted to existence-gating for protected **files**; protected **directories** keep the always-mount behavior from v0.11.1 because empty dirs are benign on the host (git doesn't track them and no tool reacts to their mere presence).
+
+Residual F3 gap: an agent can still create `.bashrc`/`.envrc`/etc. in-session if the host didn't have one. The mitigation is that the newly-created file shows up in `git status` on the host for review, which is the detection path. Sandy now also detects leftover 0-byte stub files from earlier buggy builds (untracked by git and matching the protected-files list) and prints a one-shot `rm` command to clean them up. Stubs are not auto-removed — a 0-byte file could be intentional.
+
+**Silent socat stderr on SSH relay shutdown** — The macOS SSH-agent TCP relay helper was printing "socat[pid] E Connection reset by peer" on every normal container exit because the in-container `socat` closes the forwarded socket before the host-side helper sees EOF. Pure noise. Piped the helper's stderr through a filter that drops the expected shutdown message while preserving real errors.
+
+### New Features
+
+**Per-workspace passive-key approval prompt** — v0.11.1's config tier-split silently *dropped* any privileged key set from a workspace `.sandy/config` (e.g. `SANDY_SSH=agent` committed to a repo). That was too strict: users with legitimate reasons to set `SANDY_SSH=agent` at workspace scope had no way to opt in without moving the key to `$HOME/.sandy/config` (which is wrong — it's per-workspace state). Replaced the silent-drop with an interactive approval prompt the first time sandy sees a privileged key from a passive source. The exact `KEY=VALUE` set is printed and the user approves explicitly. Approvals are persisted to `$SANDY_HOME/approvals/passive-<workspace-hash>.list` (first line is a sha256 of the sorted `KEY=VALUE` set). Subsequent launches with the same set are silent; any edit to `.sandy/config` that changes a privileged key re-prompts. Revoke with `rm $SANDY_HOME/approvals/passive-<hash>.list`. Headless mode (`-p`/`--print`/`--prompt`) and non-TTY stdin fail closed — the keys are dropped with a pointer to "launch sandy interactively once from this directory to approve."
+
+**`SANDY_AUTO_APPROVE_PRIVILEGED` escape hatch** — CI / test harnesses that run headless can't hit the interactive prompt, and sandy's own `test/run-tests.sh` and `test/run-integration-tests.sh` run from the sandy repo directory which has a committed `.sandy/.secrets` with `GEMINI_API_KEY`. Added an env-only escape hatch (`SANDY_AUTO_APPROVE_PRIVILEGED=1`) that bypasses the prompt and exports all collected passive privileged keys in-memory. Intentionally env-only — the passive config allowlist does not include this key, so a committed `.sandy/config` cannot set it. Only a trusted shell or test harness can.
+
+### Documentation
+
+**SPECIFICATION.md** — Sync of the protected-files revert and the new approval flow across Appendices C.2, D, and E.
+
+---
+
+## sandy v0.11.1
+
+**1.0-rc1 isolation hardening.** Closes the Critical/High findings from the ISOLATION_STRESS.md audit (Sprints 1 and 2 of the remediation plan). Seven findings are fully closed; one (F2 macOS network) is mitigated and documented honestly, with a full fix scheduled for a new Sprint 3 egress-proxy sidecar that's now in scope for rc1.
+
+### Isolation hardening — Sprint 1
+
+**Submodule gitdir protection (F1, Critical)** — `.git/modules/<sub>/hooks/`, `.git/modules/<sub>/config`, and `.git/modules/<sub>/info/` were fully writable in v0.11.0. A planted `post-checkout` hook under a submodule's gitdir would have run on the host the next time the user ran `git submodule update` or `git pull --recurse-submodules` — a clean host RCE. Sandy now walks `$WORK_DIR/.git/modules` (and the gitdir-side `modules/` for `--separate-git-dir` / worktree-of-submodule layouts) at launch and mounts each submodule's `config`, `hooks/`, and `info/` read-only. Handles nested submodules up to maxdepth 6.
+
+**Top-level `.git/` protection extended** — Added `.git/HEAD`, `.git/packed-refs`, and `.git/info/` to the ro-overlay set. `.git/info/attributes` is a known filter-driver injection vector; closing it was the specific reason for adding `.git/info/`.
+
+**Always-mount protected directories (F3, High)** — Protected **directories** (`.git/hooks`, `.vscode`, `.idea`, `.github/workflows`, `.circleci`, `.devcontainer`) are now mounted read-only unconditionally. When the host has no corresponding directory, sandy mounts a zero-byte `$SANDY_HOME/.empty-ro-dir` as an empty ro stand-in. This closes the bypass where an agent could create `.vscode/` (or any other missing protected dir) inside the container, leaving a config file that would execute the next time the host IDE opened the workspace. (See v0.11.2 for the walk-back on the corresponding file-level always-mount.)
+
+**Expanded protected files list (F4, High)** — Added `.envrc`, `.tool-versions`, `.mise.toml`, `.nvmrc`, `.node-version`, `.python-version`, `.ruby-version`, `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `.pypirc`, `.netrc`, `.pre-commit-config.yaml`. Added `.github/workflows/`, `.circleci/`, `.devcontainer/` as protected directories. `.github/workflows/` is particularly dangerous because the escape fires on `git push` — long after the session ends; set `SANDY_ALLOW_WORKFLOW_EDIT=1` in `.sandy/config` to opt in to editing workflows when the agent is doing legitimate CI work.
+
+**Config tier-split (F5, High)** — `_load_sandy_config()` now takes a `tier` argument: `privileged` for `$HOME/.sandy/config` and `$HOME/.sandy/.secrets`, `passive` for `$WORK_DIR/.sandy/config` and `$WORK_DIR/.sandy/.secrets`. Privileged-only keys (`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, credential env vars, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`) are dropped when encountered in a passive source. Workspace `.sandy/config` committed to a repo can no longer disable isolation, extract credentials, or enable agent-teams for the next launch. (v0.11.2 softens the silent-drop into an interactive approval prompt.)
+
+**`SANDY_ALLOW_LAN_HOSTS` use-site validation** — Rejects world-open CIDRs (`0.0.0.0/0`, `::/0`) with a hard error at launch, regardless of source. Even a privileged user writing that in their host config is almost certainly a mistake.
+
+**Credential mount `:ro` symmetry (F7, Medium)** — `~/.claude/.credentials.json` and `~/.gemini/oauth_creds.json` are now mounted `:ro` inside the container, matching the existing Codex `auth.json` treatment. Prevents token leakage back to the host tmpfile via a compromised session and prevents stale-token races on exit. In-session token refresh still works — Claude Code's retry logic hits the remote refresh endpoint, not the creds file.
+
+**Cleanup trap expanded** — `trap cleanup EXIT INT TERM HUP QUIT ABRT`. `QUIT` and `ABRT` are the main signals that previously bypassed the cleanup block; `SIGKILL` still can't be trapped but the residual window is now minimal.
+
+**Symlink scan depth** — Bumped from maxdepth 5 to maxdepth 8. The walker already excludes `node_modules/`, `.venv*/`, and `.git/`, so the extra depth is cheap and covers modern monorepo layouts.
+
+### Isolation hardening — Sprint 2
+
+**Persistent symlink approval (F8, Medium)** — Dangerous symlinks (absolute links, or relative links that escape the workspace via `..`) are surfaced at launch. On first encounter sandy prints a y/N prompt listing each link and its target; on approval the set is persisted to `$SANDBOX_DIR/.sandy-approved-symlinks.list`. Subsequent launches with the same-or-reduced set proceed silently. A **new** escape (e.g. `ln -s /etc/shadow new-link` created after initial approval) causes a **hard error** at the next launch — sandy refuses to re-prompt, because a y/N that fires every session can be trained past, whereas a hard error forces a deliberate action.
+
+**Settings.json re-seeding** — `~/.claude/settings.json` is now regenerated from the host copy on every launch with merge-preserving semantics: sandy-managed keys (`extraKnownMarketplaces`, `teammateMode`, `spinnerTipsEnabled`, `skipDangerousModePermissionPrompt`, cmux hooks) are re-overwritten, host-side edits to other keys propagate, and `enabledPlugins` is preserved from the previous sandbox session. The original Sprint 2 plan mounted this `:ro` to prevent in-session mutation entirely, but see v0.11.3 for why that got walked back.
+
+### macOS network honesty (F2, Critical — documented + mitigated, full fix deferred)
+
+**Launch warning banner** — On macOS sandy now prints a loud warning at every launch announcing that network isolation is not active (Docker Desktop's VM does not isolate the container from the host LAN or `host.docker.internal`; Linux iptables DROP rules cannot be applied from macOS). This replaces the previous SPECIFICATION.md claim that "Docker Desktop's VM provides LAN isolation by default" which the stress test disproved.
+
+**Magic-hostname nullification** — On macOS, sandy adds `--add-host gateway.docker.internal:127.0.0.1` and `--add-host metadata.google.internal:127.0.0.1` to every container. When `SANDY_SSH!=agent`, sandy also nullifies `host.docker.internal:127.0.0.1` (but not in SSH agent mode, because sandy's own TCP agent relay uses that hostname). This is defense-in-depth — raw-IP access to the host LAN is unaffected — but it removes the easiest default-hostname path and anything that calls by name.
+
+**Full fix is Sprint 3, now in scope for 1.0-rc1.** An egress proxy sidecar implementing HTTP CONNECT + DNS allowlist will land as part of the rc1 cut. Until Sprint 3 ships, treat macOS sandy as "process and filesystem isolation only; no network isolation."
+
+### New Features (unrelated to isolation)
+
+**`--agent` CLI flag** — Overrides `SANDY_AGENT` for a single invocation without editing `.sandy/config`. Accepts the same comma-separated syntax: `sandy --agent claude,codex`. Takes precedence over both `.sandy/config` and the environment.
+
+**`doctor.sh`** — New host readiness check script at `doctor.sh`. Inspects Docker availability, image store, sandy installation, credential sources, and known problem patterns on the current host. Intended as the first thing to run when something doesn't work; exits non-zero if anything blocking is found.
+
+### Breaking Changes
+
+**`SANDY_AGENT=both` alias removed** — The `both` alias was removed in favor of the comma-separated syntax (`claude,gemini`). Sandy now errors out on `both` with a pointer to the new form. If you have `SANDY_AGENT=both` in a `.sandy/config`, update it to `SANDY_AGENT=claude,gemini`.
+
+### Tests
+
+Eighteen new isolation regression tests (T14–T31) in `test/run-tests.sh` covering: submodule gitdir hook/config readonly-ness, `.git/info/` protection, `.vscode/` blocking when absent on host, `.envrc` blocking, `.github/workflows` protection + `SANDY_ALLOW_WORKFLOW_EDIT` opt-out, privileged-key drops from passive sources, `SANDY_ALLOW_LAN_HOSTS=0.0.0.0/0` hard error, Claude credentials `:ro`, macOS launch banner presence, conditional `host.docker.internal` nullification under SSH agent mode, and persisted symlink approval + new-escape hard error.
+
+### Documentation
+
+**ISOLATION_STRESS.md** — Preserved as-is for historical reference; findings status tracked in the new Sprint 3 section of ROADMAP_1.0.md.
+
+**SPECIFICATION.md** — Major rewrite of Appendices C.2 (settings.json), D.1 (macOS vs Linux), E.4 (run flags), E.9 (mounts), E.10 (creds), and E.11 (network).
+
+**CLAUDE.md** — New sections on config tiers, protected files, submodule gitdir protection, macOS network limitation, and persistent symlink approval.
+
+---
+
 ## sandy v0.11.0
 
 PR 2.1 — venv overlay hardening. Fixes the `.venv` overlay that shipped in v0.10.0 so it actually materializes cleanly and handles concurrent launches without corrupting sandbox state.

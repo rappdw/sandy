@@ -2,15 +2,41 @@
 
 This plan walks from the current state of `main` to `1.0-rc1`. It's structured as a sequence of discrete PRs, each with a clear scope, exit criteria, and target version. **No new features** — 1.0 is a stability release. Every PR should make the existing surface more trustworthy without adding to it.
 
-## Current state (2026-04-13)
+## Current state (2026-04-15)
 
-- **Released**: `v0.10.0`, `v0.10.1`, `v0.11.0`
-- **On main**: `0.11.1-dev` (post-release bump after `v0.11.0`)
+- **Released**: `v0.10.0`, `v0.10.1`, `v0.11.0`, `v0.11.1`, `v0.11.2`
+- **On main**: `0.11.3` (not yet tagged — cut pending)
 - **M1 — shipped** as `v0.10.1`: PR 1.1 resume-fallback + codex grep-F + integration test image gating.
 - **M2 — shipped** as `v0.11.0`: PR 2.1 venv overlay hardening (`uv venv --clear`, Python version precedence, symlink skip, drift warning, workspace mutex).
-- **M2.3 — in progress**: 7-day soak on `v0.11.0` as daily driver. Gate for starting M3.
-- **M3 — not started**: scope below. Adds a new mini-soak gate (PR 3.1.5) after the heredoc extraction.
+- **M2.5 — shipped** as `v0.11.1` / `v0.11.2` / `v0.11.3` (new milestone, inserted after ISOLATION_STRESS.md surfaced 10 findings during what was supposed to be M2.3 soak): Sprints 1 and 2 of the isolation hardening plan. Closes F1 (submodule gitdir RCE), F3 (protected-dir always-mount), F4 (expanded protected-file list), F5 (config tier-split), F7 (credential mount ro), F8 (persistent symlink approval) fully. F6 closed with an in-session-mutable compromise. F2 mitigated on macOS (launch warning + magic-hostname nullification); **full fix pulled into scope as Sprint 3**, see M2.7 below. F9 and F10 still open.
+- **M2.3 — restart pending**: 7-day soak on `v0.11.3` as daily driver. Gate for starting M3. (The previous M2.3 clock on `v0.11.0` was interrupted by M2.5.)
+- **M2.7 — not started**: new milestone. Sprint 3 egress proxy sidecar. The original plan deferred this to 1.1; pulled into rc1 because shipping 1.0 with a known Critical (F2 macOS) documented in its own spec is a credibility problem. See section below for scope and ordering.
+- **M3 — not started**: user-setup.sh heredoc extract + `build_*_cmd` unify. Scope unchanged.
 - **M4, M5 — not started**.
+
+### Revised milestone ordering
+
+M2.5 and the Sprint 3 decision shifted the downstream ordering. The new sequence:
+
+```
+M2.5 ✓ (isolation hardening Sprints 1+2) → tag 0.11.3
+    ↓
+M2.3 (restart 7-day soak on 0.11.3)          ← currently active
+    ↓
+M3 (heredoc extract + build_*_cmd unify)     → tag 0.12.0
+    ↓
+M2.7 (Sprint 3 egress proxy sidecar)         → tag 0.12.1 or 0.13.0-pre
+    ↓
+M2.7 soak (7-day)                            ← new gate, Sprint 3 is architecturally big
+    ↓
+M4 (surface stabilization)                   → tag 0.13.0
+    ↓
+M5 (14-day pre-RC soak)
+    ↓
+1.0.0-rc1
+```
+
+**Why M3 before M2.7 and not the reverse:** M3's user-setup.sh extraction is the highest-risk refactor on the roadmap (700 lines of container-side bash moving from a heredoc into a real template). M2.7 is the biggest additive change (~500 LOC Go binary, new Docker image, new sidecar network topology). Stacking them into one soak window destroys bisection when something regresses. Landing M3 first, soaking it, then landing M2.7 on a clean M3 base gives each change its own attribution window and keeps the total wall-clock roughly the same.
 
 ## Guiding principles
 
@@ -85,11 +111,146 @@ The venv overlay is load-bearing but fresh. This milestone takes it from "works 
 - **`.sandy_created_version` regex validation** was *not* done — deferred to **M4 PR 4.1** (allowlist/surface audit), where the validator fits naturally alongside the other surface-stability work. Tracked there.
 - **CHANGELOG / RELEASE_NOTES**: shipped with `v0.11.0`.
 
-### PR 2.3 — Soak baseline (no code, just time) — **in progress**
+### PR 2.3 — Soak baseline (no code, just time) — **restart pending on 0.11.3**
 
-**This is not a PR, it's a gate.** `v0.11.0` is tagged and released; this gate now soaks the released build rather than `-dev`. Use `v0.11.0` as daily driver for **at least 7 consecutive days** across regular projects (at minimum: sandy itself, one equity_analyzer-style Python project, one multi-agent session). Log any surprises in a scratchpad. Issues found become hotfix PRs (`0.11.1`) and restart the clock; Milestone 3 doesn't start until this gate clears.
+**This is not a PR, it's a gate.** The original M2.3 clock was set against `v0.11.0` and was interrupted when ISOLATION_STRESS.md surfaced ten findings mid-soak. Those findings became M2.5. The clock is now restarting against `v0.11.3` — the stable target that consolidates the Sprint 1/2 isolation hardening and its two follow-up bug fixes.
 
-**Exit criteria**: 7-day diary with no unexpected behavior. If any surprises appear, fix, ship as `0.11.1`, and restart the 7-day clock against the fixed build.
+Use `v0.11.3` as daily driver for **at least 7 consecutive days** across regular projects (at minimum: sandy itself, one Python project with a venv, one multi-agent session). Log any surprises in a scratchpad. Issues found become hotfix PRs (`0.11.4`) and restart the clock; **M3 does not start until this gate clears**.
+
+**Exit criteria**: 7-day diary with no unexpected behavior. If any surprises appear, fix, ship as `0.11.4`, and restart the 7-day clock against the fixed build.
+
+---
+
+## Milestone 2.5 — Isolation hardening → `0.11.1`, `0.11.2`, `0.11.3` ✓ shipped
+
+This milestone didn't exist in the original roadmap. It was inserted after the 2026-04-13 ISOLATION_STRESS.md audit (run from inside a sandy container against its own source tree) surfaced 10 findings, two of them Critical host-escape / network-bypass paths. The findings made it clear that M2.3's 7-day soak on `v0.11.0` should not culminate in "that's it, move on to M3" — the hardening layer needed real work before soaking.
+
+**Planning artifact**: `/home/claude/.claude/plans/enumerated-singing-steele.md` (Sprint 1, Sprint 2, and the original Sprint 3 carve-out). Three sprints, each with its own scope and exit criteria. Sprint 3 has since been re-scoped and pulled forward — see M2.7 below.
+
+### Sprint 1 — rc1-blocker isolation fixes ✓ shipped as `v0.11.1`
+
+Single commit on main (`4ca4251`). Closes F1, F3 (directory half), F4, F5, F7 from ISOLATION_STRESS.md. Also closes the smaller F2 mitigation half (launch warning + magic-hostname nullification).
+
+**Nine sub-commits squashed:**
+
+- **S1.0** — Empty-ro fixture foundation (`$SANDY_HOME/.empty-ro-file`, `$SANDY_HOME/.empty-ro-dir/`). Idempotent fixture creation in `ensure_build_files()`.
+- **S1.1** — Submodule gitdir protection (F1). Walks `$WORK_DIR/.git/modules` and the gitdir-side `modules/` for `--separate-git-dir` layouts, mounts each submodule's `config`, `hooks/`, and `info/` ro. Nested submodules up to maxdepth 6. Also extended top-level `.git/` protection with `.git/HEAD`, `.git/packed-refs`, `.git/info/`.
+- **S1.2** — Always-mount protected paths (F3). Directories get the empty-ro-dir fallback when host-absent. Files got the empty-ro-file fallback in the original commit, which **was walked back in Sprint 1.5** (see `91e6009`) because Docker's bind-mount auto-creation semantics materialized 0-byte stubs on the host workspace. Files are now existence-gated again; directories stay always-mount.
+- **S1.3** — Expanded protected list (F4). Added `.envrc`, `.tool-versions`, `.mise.toml`, `.nvmrc`, `.node-version`, `.python-version`, `.ruby-version`, `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `.pypirc`, `.netrc`, `.pre-commit-config.yaml` to the file list. Added `.github/workflows/`, `.circleci/`, `.devcontainer/` to the dir list. New `SANDY_ALLOW_WORKFLOW_EDIT` passive-safe opt-out for legitimate CI editing.
+- **S1.4** — Config tier-split (F5). `_load_sandy_config()` takes a `tier` arg; privileged-only keys from passive sources were *silently dropped* in the first cut, then **softened to an interactive approval prompt in v0.11.2** (see `8192058`) after feedback that silent-drop was too aggressive for legitimate per-workspace `SANDY_SSH=agent` use. Also: `SANDY_ALLOW_LAN_HOSTS` use-site validation rejecting world-open CIDRs regardless of source.
+- **S1.5** — Credential mount `:ro` symmetry (F7). Claude and Gemini creds now `:ro`. `trap cleanup EXIT INT TERM HUP QUIT ABRT`.
+- **S1.6** — macOS network honesty (F2, mitigation only). Launch warning banner + `--add-host` nullification for `gateway.docker.internal`, `metadata.google.internal`, and (when `SANDY_SSH!=agent`) `host.docker.internal`. **Full fix pulled into M2.7** — was originally deferred to 1.1.
+- **S1.7** — Symlink scan depth 5 → 8.
+- **S1.8** — Single source of truth for protected path list via `_sandy_protected_files()` / `_sandy_protected_dirs()` helpers.
+- **S1.9** — 18 new isolation regression tests in `test/run-tests.sh` (T14–T31).
+
+### Sprint 2 — Settings re-seed + symlink approval ✓ shipped as `v0.11.1` / `v0.11.2` / `v0.11.3`
+
+Single commit on main (`64a3018`), then two rounds of follow-up fixes.
+
+- **S2.1** — Settings.json re-seeding (F6). Originally designed to mount a `:ro` sidecar at `~/.claude/settings.json` preventing any in-session mutation. **Walked back** in `v0.11.3` (`c6ae6c5`) after the strict `:ro` mount broke `/plugin install` with EROFS. Current semantics: rw inside the container, sandy re-reads the host copy every launch, preserves `enabledPlugins` from the previous sandbox session, re-overwrites sandy-managed keys. The agent *can* mutate its own settings mid-session; sandy-managed keys are the only invariants.
+- **S2.2** — Persistent symlink approval (F8). First-encounter y/N prompt writes `$SANDBOX_DIR/.sandy-approved-symlinks.list`. Same-or-reduced set on relaunch proceeds silently; new escape causes a hard error at launch. No re-prompting on new escapes — a prompt can be trained past, a hard error forces a deliberate action.
+- **S2.3** — 4 new tests (T31–T34).
+
+### Post-sprint stabilization
+
+Three follow-up patches shipped in `v0.11.2` and `v0.11.3`:
+
+- **`91e6009`** — S1.2 file half revert (0-byte stubs on host).
+- **`8192058`** — Passive-key silent-drop → interactive approval prompt.
+- **`443c4f6`** — `SANDY_AUTO_APPROVE_PRIVILEGED=1` env-only test harness escape hatch.
+- **`4ab70df`** — Silence socat stderr on SSH agent relay shutdown (macOS noise cleanup).
+- **`7af29f8`** — SPECIFICATION.md sync for the protected-files revert and approval flow.
+- **`b4c5849`** — Create empty-ro fixtures before fast-path exits (fresh-install launch bug).
+- **`c6ae6c5`** — Plugin install EROFS walk-back + user-setup.sh ENOENT race fix.
+- **`8670d57`** — S2.1 EROFS fix in `user-setup.sh` settings merge.
+
+### Residual findings open at end of M2.5
+
+| # | Finding | Severity | Status |
+|---|---|---|---|
+| F2 | macOS host/LAN reachable | Critical | mitigated + documented; **full fix is M2.7** |
+| F3 (files half) | Agent can create `.bashrc`/`.envrc` in-session if host absent | High → **Medium** after mitigation | walked back from always-mount; detection via `git status`; 0-byte stub remediation helper added |
+| F6 (in-session) | Agent can mutate `settings.json` within a session | High → **Medium** | sandy-managed keys re-overwritten every launch; in-session mutation window remains; the strict `:ro` sidecar approach broke plugins |
+| F9 | DNS exfil via embedded resolver | Medium | deferred — naturally subsumed by M2.7 DNS allowlist |
+| F10 | Fork bomb within pids-limit | Low | skipped (no urgency per original plan) |
+
+---
+
+## Milestone 2.7 — Egress proxy sidecar (Sprint 3) → `0.12.1` or `0.13.0-pre`
+
+**New milestone, not in the original roadmap.** Pulled from 1.1 into rc1 because shipping 1.0 with a known Critical (F2 macOS network) documented in its own spec is a credibility problem. The launch warning is honest but not protective; users click through warnings and the current `--add-host` nullification is cosmetic against raw-IP LAN access.
+
+**Ordering:** M2.7 lands *after* M3, not before or concurrent. M3 is the highest-risk *refactor* on the roadmap (heredoc extract); M2.7 is the biggest *architectural addition*. Stacking them into one soak means regression bisection has to untangle two huge changes. Landing M3 first, mini-soaking it, then landing M2.7 on a clean M3 base gives each change clean attribution.
+
+### Scope discipline (tightened from the original Sprint 3 plan)
+
+The original Sprint 3 plan scoped HTTP CONNECT + SOCKS5 + DNS allowlist with a full default allowlist. rc1 pulls this tighter:
+
+- **rc1 ships HTTP CONNECT + DNS allowlist only.** SOCKS5 slips to `1.0.1` if it's not trivially in the box. Most tooling hits CONNECT first; SOCKS5 is a nice-to-have, not a blocker.
+- **Permissive-first allowlist; tighten in 1.0.1+.** The rc1 allowlist covers the obvious set (Anthropic, OpenAI, Google APIs, npm, PyPI, GitHub, crates, Go proxy, GHCR). Users will hit edge cases (JFrog, private registries, HuggingFace, corp mirrors) during the M5 soak. Those become `SANDY_ALLOW_HOSTS` tuning reports, not blockers. **Do not try to get the list right on first try** — that's a recipe for the soak restarting every week when someone hits a missing host.
+- **No MITM / cert injection / traffic logging / retries / caching.** Every one of those is tempting, every one is a rabbit hole. rc1's proxy is dumb: accept CONNECT, resolve DNS against allowlist, forward bytes. If that's ≤500 LOC of Go, great. If it's growing past 1000, stop and re-scope.
+- **Linux iptables stays.** The proxy is **additive** on Linux, **replacement** only on macOS. Keep iptables as a belt-and-suspenders floor — zero cost, and it guards against bugs in the proxy itself.
+- **Opt-in first, flip to default before rc1 cut.** Ship as `SANDY_EGRESS_PROXY=1` passive-safe key. First 3–4 days of the M2.7 soak, opt in manually. Catch obvious breakage without risking every launch. Then flip the default to on and soak the remaining 3–4 days against the real rc1 surface.
+
+### Architecture
+
+Two-network design per sandy container:
+
+1. **Sidecar network** (`sandy_sidecar_<pid>`, bridge) — container can reach the proxy only.
+2. **Proxy network** (`sandy_proxy_<pid>`, bridge) — proxy can reach the internet.
+
+Container attaches only to the sidecar network with `--network sandy_sidecar_<pid>` plus `--dns <proxy-ip>` so all DNS queries go through the proxy. Proxy attaches to both networks.
+
+**Not using `--internal`:** it breaks Docker's embedded DNS resolver for external lookups, and the proxy is providing its own DNS implementation anyway — the container never needs the Docker embedded resolver.
+
+### PR 2.7.1 — Proxy binary (Go source + unit tests)
+
+**Scope**: ~500 LOC of Go under `proxy/` implementing:
+- HTTP CONNECT listener (port 3128)
+- DNS listener (UDP 53) with allowlist matching (supports `*.example.com` wildcards)
+- Allowlist loaded from `/etc/sandy-proxy.json` at startup
+- Static binary, no runtime dependencies
+
+**Tests**: unit tests for each protocol, allowlist matching edge cases, `NXDOMAIN` for non-allowlisted hosts.
+
+**Exit criteria**: `go test ./proxy/...` passes. Proxy binary is ≤500 LOC (hard limit — if it's growing, re-scope).
+
+### PR 2.7.2 — `sandy-proxy` Docker image
+
+**Scope**: new `Dockerfile.proxy` in `$SANDY_HOME/` (generated template, same pattern as the other Dockerfiles). Phased between `sandy-base` and the agent images. Build once, cache aggressively — the proxy is stable code.
+
+Hash-based rebuild logic consistent with the rest of the build pipeline (`.proxy_build_hash`).
+
+### PR 2.7.3 — Launcher wiring
+
+**Scope**: sandy creates the two networks per-launch (PID-keyed), starts the proxy container, injects `SANDY_EGRESS_PROXY=1` gate, tears everything down in the cleanup trap.
+
+**`SANDY_EGRESS_PROXY` passive-safe key** — add to the passive allowlist in `_load_sandy_config()`. Default: `0` for the first week of M2.7 soak, then flipped to `1`.
+
+**`SANDY_ALLOW_HOSTS` privileged-tier key** — comma-separated list of additional hosts to append to the allowlist. Privileged because user-added hosts expand the attack surface; must not be workspace-settable without the approval prompt.
+
+### PR 2.7.4 — Remove macOS launch warning (problem now fixed)
+
+**Scope**: one-line revert of the S1.6 warning banner. Keep the `--add-host` nullification as defense-in-depth.
+
+### PR 2.7.5 — Integration tests
+
+**Scope**: new tests in `test/run-integration-tests.sh`:
+- Allowlisted host (e.g. `api.anthropic.com`) reaches its target from inside a sandy container
+- Non-allowlisted host (e.g. `evil.example.com`) fails cleanly with `NXDOMAIN`
+- Raw-IP to RFC 1918 address fails (verify on both macOS and Linux)
+- Proxy survives container restart
+- `SANDY_ALLOW_HOSTS=foo.bar.com` tunes the allowlist successfully
+- Opt-out via `SANDY_EGRESS_PROXY=0` in an `.sandy/config` (passive source) works
+
+### PR 2.7.6 — 7-day soak
+
+**Gate, not a PR.** Opt-in for 3–4 days, flip default to on for 3–4 days, log surprises. Any new network failure = fix + restart 3–4-day window for that phase.
+
+### Total budget
+
+Plan for **2 weeks of focused work** on the binary + integration + test harness work, then **7 days of soak**. Plus the "`SANDY_ALLOW_HOSTS` kept hitting unexpected misses, let me cut 1.0.1 to tune it" possibility. rc1 is ~4–5 weeks of wall-clock from the start of M3.
 
 ---
 
@@ -296,7 +457,10 @@ PR 1.1 (blockers) ✓ ──▶ tag 0.10.1 ✓
 PR 2.1 (venv hardening) ✓ ──▶ tag 0.11.0 ✓
     │
     ▼
-PR 2.3 (7-day soak on 0.11.0) ← in progress; gates M3
+M2.5 Sprint 1 + Sprint 2 + stabilization ✓ ──▶ tag 0.11.1 ✓, 0.11.2 ✓, 0.11.3 ← cut pending
+    │
+    ▼
+PR 2.3 (7-day soak on 0.11.3)    ← restart pending; gates M3
     │
     ▼
 PR 3.1 (user-setup.sh extract)   ← must land alone
@@ -307,6 +471,17 @@ PR 3.1.5 (3-day mini-soak)       ← gates PR 3.2
     ▼
 PR 3.2 (build_*_cmd unify)
 PR 3.3 (version bump)            ← blocks on 3.1, 3.2 ──▶ tag 0.12.0
+    │
+    ▼
+M2.7 PR 2.7.1 (proxy Go binary + unit tests)
+M2.7 PR 2.7.2 (sandy-proxy Dockerfile + phased build)
+M2.7 PR 2.7.3 (launcher wiring + SANDY_EGRESS_PROXY opt-in)
+M2.7 PR 2.7.4 (remove macOS launch warning)
+M2.7 PR 2.7.5 (integration tests)
+                                 ──▶ tag 0.12.1 or 0.13.0-pre
+    │
+    ▼
+M2.7 PR 2.7.6 (7-day soak: 3-4d opt-in, 3-4d default-on)
     │
     ▼
 PR 4.1 (allowlist audit + sandbox-marker validator)  ← parallel
@@ -329,8 +504,12 @@ Treat each tag as a commitment: do not proceed to the next milestone until the p
 | Tag | Status | Gates | What it proves |
 |---|---|---|---|
 | `0.10.1` | ✓ released | Blocker PRs merged + tests green | Review blockers are addressed |
-| `0.11.0` | ✓ released | Venv hardening shipped; 7-day soak in progress | The two newest features are solid |
-| `0.12.0` | pending | Architecture cleanup + 3-day mini-soak after PR 3.1 | 1.0 surface is reviewable |
-| `0.13.0` | pending | Surface locked | Stability promises are explicit |
-| `1.0.0-rc1` | pending | 14-day soak clean | Ready for users to form habits on |
+| `0.11.0` | ✓ released | Venv hardening shipped; 7-day soak started | The two newest features are solid |
+| `0.11.1` | ✓ released | M2.5 Sprint 1 shipped | Critical/High isolation gaps closed |
+| `0.11.2` | ✓ released | M2.5 refinements (approval prompt, stub revert) | Sprint 1 fallout stabilized |
+| `0.11.3` | cut pending | M2.5 stabilization fixes (plugin install, fast-path fixtures) | Stable target for restarted M2.3 soak |
+| `0.12.0` | pending | M3 (heredoc extract + build unification) + 3-day mini-soak | 1.0 surface is reviewable |
+| `0.12.1` or `0.13.0-pre` | pending | M2.7 (egress proxy sidecar) + 7-day soak | F2 macOS Critical finally closed |
+| `0.13.0` | pending | M4 surface locked | Stability promises are explicit |
+| `1.0.0-rc1` | pending | M5 14-day soak clean | Ready for users to form habits on |
 | `1.0.0` | pending | rc soak clean | Stability over time |

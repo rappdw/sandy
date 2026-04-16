@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="0.11.3-dev"
+SANDY_VERSION="0.11.3"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
@@ -779,7 +779,6 @@ if _sandy_has_claude; then
     export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS="${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-0}"
     export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}"
     export DISABLE_AUTOUPDATER=1
-    export ENABLE_CLAUDEAI_MCP_SERVERS=false
     export FORCE_AUTOUPDATE_PLUGINS=true
 fi
 
@@ -2995,34 +2994,40 @@ fi
 
 if ! _sandy_agent_has claude; then
     : # Claude credential flow skipped for non-claude sessions
-elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    info "Using long-lived OAuth token"
 else
     CRED_JSON="$(load_credentials)"
 
-    # Refresh expired OAuth tokens before launching the container
-    # Helper: detect if we can open a browser (headless servers cannot)
-    can_open_browser() {
-        # macOS: `open` always works and the user is local
-        [[ "$(uname -s)" == "Darwin" ]] && return 0
-        # Linux: too many false positives (DISPLAY set by NoMachine/X server on
-        # headless servers, remote sessions via mosh/SSH). The /login flow inside
-        # the session works everywhere, so don't attempt browser auth on Linux.
-        return 1
-    }
+    if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+        # Long-lived token handles regular API calls. Still mount the credential
+        # file if available — cloud features (/ultrareview) need the full OAuth
+        # object (refresh token, scopes, subscription info) that the env var alone
+        # doesn't carry. Skip the token-refresh flow since the env var is primary.
+        info "Using long-lived OAuth token"
+    else
+        # Refresh expired OAuth tokens before launching the container
+        # Helper: detect if we can open a browser (headless servers cannot)
+        can_open_browser() {
+            # macOS: `open` always works and the user is local
+            [[ "$(uname -s)" == "Darwin" ]] && return 0
+            # Linux: too many false positives (DISPLAY set by NoMachine/X server on
+            # headless servers, remote sessions via mosh/SSH). The /login flow inside
+            # the session works everywhere, so don't attempt browser auth on Linux.
+            return 1
+        }
 
-    if token_needs_refresh "$CRED_JSON"; then
-        if can_open_browser && command -v claude &>/dev/null; then
-            warn "OAuth token expired or expiring soon. Refreshing..."
-            claude auth login
-            CRED_JSON="$(load_credentials)"
-            if token_needs_refresh "$CRED_JSON"; then
-                error "Token still expired after login. Continuing anyway..."
+        if token_needs_refresh "$CRED_JSON"; then
+            if can_open_browser && command -v claude &>/dev/null; then
+                warn "OAuth token expired or expiring soon. Refreshing..."
+                claude auth login
+                CRED_JSON="$(load_credentials)"
+                if token_needs_refresh "$CRED_JSON"; then
+                    error "Token still expired after login. Continuing anyway..."
+                else
+                    info "OAuth token refreshed successfully."
+                fi
             else
-                info "OAuth token refreshed successfully."
+                warn "OAuth token expired. Use /login inside the session to re-authenticate."
             fi
-        else
-            warn "OAuth token expired. Use /login inside the session to re-authenticate."
         fi
     fi
 
@@ -3086,11 +3091,10 @@ if _sandy_agent_has claude; then
     # overlay. The seed block regenerated it from host defaults this launch
     # (preserving enabledPlugins from the previous session).
     if [ -n "$CRED_TMPDIR" ]; then
-        # :ro — matches the rationale on the Codex creds mount below. Prevents
-        # token leakage back to the host tmpfile via a compromised session and
-        # prevents stale-token races on exit. Claude Code refreshes tokens via
-        # the remote endpoint, not by writing to this file.
-        RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json:ro")
+        # rw — Claude Code needs to write refreshed/scoped tokens during cloud
+        # features like /ultrareview. The tmpdir is ephemeral (fresh each launch,
+        # rm -rf on exit) so in-session writes don't persist to the host.
+        RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json")
     fi
     RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/claude/.claude.json")
     # Mount host Claude Code hooks (read-only) for terminal notifications (cmux, iTerm2, etc.)
