@@ -2200,15 +2200,14 @@ check ".empty-ro-dir is empty" \
     bash -c '[ -z "$(ls -A "$1")" ]' -- "$SANDY_HOME/.empty-ro-dir"
 
 # ============================================================
-info "40. Sprint 1 — Credentials mounts are :ro"
+info "40. Sprint 1 — Credentials mounts"
 # ============================================================
-# S1.5: .credentials.json mount should have :ro. Test by grepping the sandy
-# script itself — integration test for the actual docker inspect state would
-# require launching a claude container with real creds.
+# Claude credentials are rw (needed for /ultrareview token refresh); Codex/Gemini
+# stay :ro. All three use ephemeral tmpdirs cleaned up on exit.
 
 SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-check "Claude credentials mount has :ro" \
-    grep -q 'CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json:ro' "$SANDY_SCRIPT_PATH"
+check "Claude credentials mount is rw (no :ro suffix)" \
+    bash -c 'grep -q "CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json\")" "$1" && ! grep -q "CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json:ro" "$1"' -- "$SANDY_SCRIPT_PATH"
 check "Codex credentials mount has :ro" \
     grep -q 'CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro' "$SANDY_SCRIPT_PATH"
 check "Gemini OAuth mount has :ro" \

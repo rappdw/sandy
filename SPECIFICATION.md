@@ -487,7 +487,7 @@ If the host UID differs from the image default (1001), sandy generates custom `p
 
 **Git**: `GIT_USER_NAME`, `GIT_USER_EMAIL`, `GIT_TOKEN`, `GH_ACCOUNTS`, `SANDY_SSH`, `SSH_RELAY_PORT`
 
-**System**: `HOST_UID`, `HOST_GID`, `DISABLE_AUTOUPDATER=1`, `ENABLE_CLAUDEAI_MCP_SERVERS=false`, `FORCE_AUTOUPDATE_PLUGINS=true`
+**System**: `HOST_UID`, `HOST_GID`, `DISABLE_AUTOUPDATER=1`, `FORCE_AUTOUPDATE_PLUGINS=true`
 
 ### Resource Limits
 
@@ -664,7 +664,7 @@ Fallback: If `gh auth token` fails, warn that git push/pull may not work.
 
 ### Priority Order
 
-1. **Long-lived token** (`CLAUDE_CODE_OAUTH_TOKEN`): Valid 1 year, generated via `claude setup-token`. Recommended for headless servers.
+1. **Long-lived token** (`CLAUDE_CODE_OAUTH_TOKEN`): Valid 1 year, generated via `claude setup-token`. Recommended for headless servers. When set, this handles regular API calls; the credential file is still loaded alongside it (without token-refresh logic) so that cloud features like `/ultrareview` have access to the full OAuth credential object.
 2. **OAuth credentials**: From host `~/.claude/.credentials.json` (or macOS Keychain). Token expiry checked; refresh attempted on macOS via `claude auth login`.
 3. **Fallback**: Skip credential setup; user directed to `/login` inside session.
 
@@ -1842,12 +1842,10 @@ If `SANDY_GPU` is set and Docker supports GPUs (`docker info --format '{{.Runtim
 
 If credentials were loaded (OAuth token or credentials file):
 ```bash
--v "<CRED_TMPDIR>/.credentials.json:/home/claude/.claude/.credentials.json:ro"
+-v "<CRED_TMPDIR>/.credentials.json:/home/claude/.claude/.credentials.json"
 ```
 
-The temporary directory is created per-launch and cleaned up on exit. The mount is **read-only** (1.0-rc1) — this prevents token leakage from a compromised in-container session back to the host tmpfile, matches the Codex `auth.json` mount, and eliminates stale-token races on exit. In-session OAuth refresh uses the Anthropic refresh endpoint and does not require writing back to the creds file.
-
-The Gemini OAuth file mount (`~/.gemini/oauth_creds.json` or equivalent) is also `:ro` under the same rationale. See §11 for credential loading rules per agent.
+The temporary directory is created per-launch and cleaned up on exit. The mount is **read-write** — Claude Code cloud features (e.g., `/ultrareview`) need to write refreshed or scoped tokens back to the credentials file during a session. The tmpdir is ephemeral (fresh each launch, `rm -rf` on exit), so in-session writes do not persist to the host. Codex `auth.json` and Gemini OAuth mounts remain `:ro` (these agents don't have equivalent cloud features that require token write-back). See §11 for credential loading rules per agent.
 
 **Cleanup trap**: the `cleanup` function that removes `*_CRED_TMPDIR` directories is registered on `EXIT INT TERM HUP QUIT ABRT`. `SIGKILL` cannot be trapped, so a residual cleanup window exists in that case alone.
 
@@ -2108,7 +2106,6 @@ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=<0|1>
 HOST_UID=<uid>
 HOST_GID=<gid>
 DISABLE_AUTOUPDATER=1
-ENABLE_CLAUDEAI_MCP_SERVERS=false
 FORCE_AUTOUPDATE_PLUGINS=true
 ```
 
