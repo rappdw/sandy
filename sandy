@@ -374,7 +374,7 @@ Usage:
   sandy --help                   Show this help
 
 Environment variables:
-  SANDY_MODEL        Model to use (default: claude-opus-4-6)
+  SANDY_MODEL        Model to use (default: claude-opus-4-7)
   ANTHROPIC_API_KEY  API key (not needed with Claude Max / OAuth)
   SANDY_HOME         Sandy config directory (default: ~/.sandy)
   SANDY_SSH          Git SSH method: "token" (default) uses gh CLI token
@@ -1299,7 +1299,7 @@ fi  # end Claude-only plugin/channel block
 
 # --- Agent command builders (used by single-agent and multi-pane launch modes) ---
 build_claude_cmd() {
-    local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-6} --teammate-mode tmux"
+    local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-7} --teammate-mode tmux"
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
         cmd+=" --dangerously-skip-permissions"
     fi
@@ -1702,12 +1702,15 @@ RUN mkdir -p /opt/skills/gstack \\
  && curl -fsSL "${repo}/archive/${version}.tar.gz" \\
     | tar -xz --strip-components=1 -C /opt/skills/gstack
 
-# Install dependencies and build (browse binary + skill docs)
+# Install dependencies and build (browse binary + skill docs).
+# gstack's build script runs git rev-parse HEAD to write .version files,
+# but we download a tarball (no .git). Seed a stub repo so it succeeds.
 RUN cd /opt/skills/gstack \\
+ && git init -q && git -c user.name=sandy -c user.email=sandy@build add -A && git -c user.name=sandy -c user.email=sandy@build commit -q -m "${version}" \\
  && (bun install --frozen-lockfile 2>/dev/null || bun install) \\
  && bun run build \\
  && echo "${version}" > browse/dist/.version \\
- && rm -rf node_modules/.cache
+ && rm -rf .git node_modules/.cache
 
 # Make all bin/ scripts executable
 RUN chmod +x /opt/skills/gstack/bin/*
@@ -3405,7 +3408,7 @@ RUN_FLAGS+=(-e "SANDY_WORKSPACE=$SANDY_WORKSPACE")
 RUN_FLAGS+=(-e "SANDY_PROJECT_NAME=$(basename "$WORK_DIR")")
 # Validate SANDY_MODEL — only allow alphanumeric, hyphens, dots, underscores
 if _sandy_agent_has claude; then
-    SANDY_MODEL="${SANDY_MODEL:-claude-opus-4-6}"
+    SANDY_MODEL="${SANDY_MODEL:-claude-opus-4-7}"
 else
     SANDY_MODEL="${SANDY_MODEL:-}"
 fi
