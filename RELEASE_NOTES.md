@@ -1,3 +1,25 @@
+## sandy v0.11.4
+
+Finishes the v0.11.2 protected-directories walk-back by removing the empty-stub debris those mounts leave on the host workspace. v0.11.2 accepted that "empty directories are benign on the host" as justification for always-mounting protected dirs with an empty-ro fixture; in practice the leftover `.vscode/`, `.idea/`, `.circleci/`, `.devcontainer/`, `.github/workflows/`, `.git/hooks/`, `.git/info/`, and `.claude/` stubs accumulated in every workspace sandy touched, cluttered `ls`, and misled tooling that treats directory presence as a signal.
+
+### Bug Fixes
+
+**Empty stub directories left behind on the host workspace** — Docker's bind-mount target auto-creation creates the host-side mountpoint for every `:ro` overlay sandy applies beneath the rw workspace bind. When the workspace had no `.vscode/` (etc.) before launch, sandy's ro overlay caused Docker to materialize an empty dir at that path, and nothing ever removed it. Added two cleanup mechanisms:
+
+1. **Session-scoped cleanup.** Every stub sandy creates this session is appended to `$SANDBOX_DIR/.session-created-stubs`. The `cleanup()` EXIT trap reads the list and `rmdir`s each entry (plus walks the parent chain up to — but not including — `$WORK_DIR`, to catch cases like `.github/` after `.github/workflows/` was removed). `rmdir` no-ops on populated dirs, so legitimate in-session writes survive. Moved to the top of `cleanup()` so nothing earlier in the trap can short-circuit it. Covers the protected-dirs loop, submodule-gitdir `hooks/` fallback, the `.claude/{commands,agents,plugins}` and `.gemini/{extensions,commands}` sandbox overlays, and `.claude/` itself (which `user-setup.sh` unconditionally `mkdir -p`s inside the container).
+
+2. **Pre-existing debris cleanup.** Workspaces touched by earlier sandy versions are already littered. On launch, sandy walks the protected-dirs list and `rmdir`s any that are empty and, in a git repo, untracked. Initial design gated this on "is a git repo" — relaxed because a workspace whose only `.git/` content is empty stubs of `.git/hooks` and `.git/info` isn't detected as a repo by `git rev-parse`, so debris in those workspaces persisted forever. Name-match against the small protected-dirs list + empty check is a sufficient safety bar on its own.
+
+3. **Empty host dirs at the sandbox-overlay boundary.** The `.claude/{commands,agents,plugins}` and `.gemini/{extensions,commands}` overlay loops previously treated any existing host subdir as "user content", so prior-session debris took the `cp -r` seeding path and was never recorded as a stub. They now treat empty host dirs as debris — still overlaid, but recorded for cleanup.
+
+**Debug flag for investigating cleanup failures** — `SANDY_DEBUG_CLEANUP=1` prints the stub count processed on exit plus any `rmdir` failures with their errno messages, and distinguishes "no stubs file" from "file present but empty" from "file populated but rmdir refused". Zero overhead when unset.
+
+### Documentation
+
+**CLAUDE.md, SPECIFICATION.md** — Mount policy section replaces the pre-0.11.4 "empty directories are benign" rationale with the new session-stub tracking + pre-existing-debris auto-clean behavior. Spec version header resynced (was stuck at 0.11.1-dev).
+
+---
+
 ## sandy v0.11.3
 
 Stabilizes the isolation hardening that shipped in v0.11.1/v0.11.2. Two bug fixes that surfaced during daily-driver use of v0.11.2. This is the target for the M2.3 7-day soak before work on M3 (user-setup.sh heredoc extraction) or the Sprint 3 egress proxy sidecar begins.

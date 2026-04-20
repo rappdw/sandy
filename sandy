@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="0.11.3"
+SANDY_VERSION="0.11.4"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
@@ -2779,6 +2779,52 @@ cleanup_network_isolation() {
 }
 
 cleanup() {
+    # Remove empty stub dirs sandy created this session via Docker's
+    # bind-mount target auto-creation. Run this FIRST so nothing else in
+    # cleanup() can short-circuit it if an earlier command fails.
+    # rmdir no-ops on populated dirs, so this is safe even if the agent
+    # wrote into a stub during the session.
+    if [ -n "${SANDBOX_DIR:-}" ] && [ -f "$SANDBOX_DIR/.session-created-stubs" ]; then
+        _stub_failures=()
+        _stub_count=0
+        while IFS= read -r _stub; do
+            [ -z "$_stub" ] && continue
+            _stub_count=$((_stub_count + 1))
+            if [ -d "$_stub" ]; then
+                if [ -z "$(ls -A "$_stub" 2>/dev/null)" ]; then
+                    if ! rmdir "$_stub" 2>/dev/null; then
+                        _err="$(rmdir "$_stub" 2>&1 || true)"
+                        _stub_failures+=("$_stub: $_err")
+                    fi
+                else
+                    _stub_failures+=("$_stub: not empty")
+                fi
+            fi
+            # Walk parents up to (but not including) WORK_DIR, rmdir if empty.
+            # Handles cases like .github/workflows/ where removing the child
+            # should also remove an empty .github/ parent that sandy created.
+            _parent="$(dirname "$_stub")"
+            while [ -n "${WORK_DIR:-}" ] && [ "$_parent" != "$WORK_DIR" ] && [ "$_parent" != "/" ] && [ "$_parent" != "." ]; do
+                if [ -d "$_parent" ] && [ -z "$(ls -A "$_parent" 2>/dev/null)" ]; then
+                    rmdir "$_parent" 2>/dev/null || break
+                    _parent="$(dirname "$_parent")"
+                else
+                    break
+                fi
+            done
+        done < "$SANDBOX_DIR/.session-created-stubs"
+        rm -f "$SANDBOX_DIR/.session-created-stubs"
+        if [ ${#_stub_failures[@]} -gt 0 ]; then
+            echo "sandy: warning: could not remove ${#_stub_failures[@]} empty stub(s):" >&2
+            for _f in "${_stub_failures[@]}"; do
+                echo "  - $_f" >&2
+            done
+        fi
+        [ "${SANDY_DEBUG_CLEANUP:-0}" = "1" ] && \
+            echo "sandy: [debug] processed $_stub_count recorded stub(s)" >&2
+    elif [ "${SANDY_DEBUG_CLEANUP:-0}" = "1" ]; then
+        echo "sandy: [debug] no .session-created-stubs file at \"${SANDBOX_DIR:-<unset>}/.session-created-stubs\"" >&2
+    fi
     cleanup_network_isolation
     # Remove per-instance Docker network
     docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
@@ -3324,9 +3370,12 @@ fi
 # create these files in-session; the stubs show up in `git status` for review
 # on the host, which is the detection path).
 #
-# Dirs: always-mounted with an empty-dir fixture. Empty directories are benign
-# — git doesn't track them, no tool reacts to their mere presence, and the ro
-# overlay still blocks the agent from creating files under them.
+# Dirs: always-mounted with an empty-dir fixture. Docker auto-creates the
+# mount target on the host when it doesn't exist, which leaves empty stub
+# dirs (.vscode/, .idea/, etc.) behind on the host workspace. We record each
+# such stub in $SANDBOX_DIR/.session-created-stubs and rmdir them in the
+# cleanup trap on exit (rmdir no-ops if the user or agent populated the dir
+# legitimately during the session).
 while IFS= read -r _pf; do
     [ -z "$_pf" ] && continue
     [ -e "$WORK_DIR/$_pf" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_pf:$SANDY_WORKSPACE/$_pf:ro")
@@ -3337,12 +3386,58 @@ while IFS= read -r _gpf; do
     [ -z "$_gpf" ] && continue
     [ -f "$WORK_DIR/$_gpf" ] && RUN_FLAGS+=(-v "$WORK_DIR/$_gpf:$SANDY_WORKSPACE/$_gpf:ro")
 done < <(_sandy_protected_git_files)
+
+# Pre-existing-debris auto-cleanup: previous sandy versions left empty stub
+# dirs on the host that persist across sessions. Auto-remove them at launch
+# if the dir matches the protected-dirs list exactly, is empty, and (when
+# the workspace is a git repo) isn't git-tracked. The name-match + empty
+# gate is sufficient on its own — removing a 0-byte empty dir whose name
+# is one of the small protected-dirs list is low-risk and reversible.
+_sandy_is_git_repo=false
+if (cd "$WORK_DIR" && git rev-parse --git-dir >/dev/null 2>&1); then
+    _sandy_is_git_repo=true
+fi
+_cleaned_debris=()
+while IFS= read -r _pd; do
+    [ -z "$_pd" ] && continue
+    _p="$WORK_DIR/$_pd"
+    [ -d "$_p" ] || continue
+    # Empty check (no regular files, no subdirs, no dotfiles).
+    [ -z "$(ls -A "$_p" 2>/dev/null)" ] || continue
+    # Not git-tracked (if workspace is a git repo).
+    if [ "$_sandy_is_git_repo" = "true" ]; then
+        if (cd "$WORK_DIR" && git ls-files --error-unmatch "$_pd" >/dev/null 2>&1); then
+            continue
+        fi
+    fi
+    if rmdir "$_p" 2>/dev/null; then
+        _cleaned_debris+=("$_pd")
+        # Also try parent if it was newly emptied (.github from .github/workflows).
+        _parent="$(dirname "$_pd")"
+        if [ "$_parent" != "." ] && [ "$_parent" != "/" ]; then
+            _pp="$WORK_DIR/$_parent"
+            if [ -d "$_pp" ] && [ -z "$(ls -A "$_pp" 2>/dev/null)" ]; then
+                if [ "$_sandy_is_git_repo" != "true" ] || \
+                   ! (cd "$WORK_DIR" && git ls-files --error-unmatch "$_parent" >/dev/null 2>&1); then
+                    rmdir "$_pp" 2>/dev/null && _cleaned_debris+=("$_parent")
+                fi
+            fi
+        fi
+    fi
+done < <(_sandy_protected_dirs)
+if [ ${#_cleaned_debris[@]} -gt 0 ]; then
+    info "Cleaned up ${#_cleaned_debris[@]} empty stub dir(s) from previous sandy session: ${_cleaned_debris[*]}"
+fi
+
+# Record session-created stubs so cleanup() can rmdir them on exit.
+: > "$SANDBOX_DIR/.session-created-stubs"
 while IFS= read -r _pd; do
     [ -z "$_pd" ] && continue
     if [ -d "$WORK_DIR/$_pd" ]; then
         RUN_FLAGS+=(-v "$WORK_DIR/$_pd:$SANDY_WORKSPACE/$_pd:ro")
     else
         RUN_FLAGS+=(-v "$SANDY_HOME/.empty-ro-dir:$SANDY_WORKSPACE/$_pd:ro")
+        echo "$WORK_DIR/$_pd" >> "$SANDBOX_DIR/.session-created-stubs"
     fi
 done < <(_sandy_protected_dirs)
 
@@ -3365,6 +3460,7 @@ _protect_submodule_gitdirs() {
             RUN_FLAGS+=(-v "$_sub_dir/hooks:$root_container${_rel}/hooks:ro")
         else
             RUN_FLAGS+=(-v "$SANDY_HOME/.empty-ro-dir:$root_container${_rel}/hooks:ro")
+            echo "$_sub_dir/hooks" >> "$SANDBOX_DIR/.session-created-stubs"
         fi
         if [ -d "$_sub_dir/info" ]; then
             RUN_FLAGS+=(-v "$_sub_dir/info:$root_container${_rel}/info:ro")
@@ -3383,14 +3479,33 @@ fi
 # The agent can create/modify these freely; changes persist in the sandbox across sessions
 # without touching the host workspace.
 if _sandy_agent_has claude; then
+    # user-setup.sh unconditionally runs `mkdir -p $WORKSPACE/.claude` inside
+    # the container, which creates `.claude/` on the host via the rw workspace
+    # bind mount. Record `.claude/` itself as a session stub if it's absent
+    # or empty pre-launch — cleanup()'s parent walk can't rmdir it otherwise
+    # when no children are bind-mounted (fresh sandbox case).
+    if [ ! -d "$WORK_DIR/.claude" ] || [ -z "$(ls -A "$WORK_DIR/.claude" 2>/dev/null)" ]; then
+        echo "$WORK_DIR/.claude" >> "$SANDBOX_DIR/.session-created-stubs"
+    fi
     for _sd in commands agents plugins; do
+        # Treat an empty host dir as debris from a prior run (not user content).
+        # Record it as a session stub so cleanup() removes it on exit.
+        _host_empty_stub=0
+        if [ -d "$WORK_DIR/.claude/$_sd" ] && [ -z "$(ls -A "$WORK_DIR/.claude/$_sd" 2>/dev/null)" ]; then
+            _host_empty_stub=1
+        fi
         if [ -d "$WORK_DIR/.claude/$_sd" ] || [ -d "$SANDBOX_DIR/workspace-$_sd" ]; then
-            if [ ! -d "$SANDBOX_DIR/workspace-$_sd" ] && [ -d "$WORK_DIR/.claude/$_sd" ]; then
+            _host_had_sub=0
+            [ -d "$WORK_DIR/.claude/$_sd" ] && [ "$_host_empty_stub" = "0" ] && _host_had_sub=1
+            if [ ! -d "$SANDBOX_DIR/workspace-$_sd" ] && [ "$_host_had_sub" = "1" ]; then
                 cp -r "$WORK_DIR/.claude/$_sd" "$SANDBOX_DIR/workspace-$_sd"
             else
                 mkdir -p "$SANDBOX_DIR/workspace-$_sd"
             fi
             RUN_FLAGS+=(-v "$SANDBOX_DIR/workspace-$_sd:$SANDY_WORKSPACE/.claude/$_sd")
+            # Record as session stub when the host didn't have a populated dir
+            # (either absent, or empty debris from a prior run).
+            [ "$_host_had_sub" = "0" ] && echo "$WORK_DIR/.claude/$_sd" >> "$SANDBOX_DIR/.session-created-stubs"
         fi
     done
 fi
@@ -3398,13 +3513,20 @@ if _sandy_agent_has gemini; then
     # Gemini: overlay .gemini/extensions and .gemini/commands with sandbox copies.
     # Seed from host on first creation so user-authored commands are available.
     for _sd in extensions commands; do
+        _host_empty_stub=0
+        if [ -d "$WORK_DIR/.gemini/$_sd" ] && [ -z "$(ls -A "$WORK_DIR/.gemini/$_sd" 2>/dev/null)" ]; then
+            _host_empty_stub=1
+        fi
         if [ -d "$WORK_DIR/.gemini/$_sd" ] || [ -d "$SANDBOX_DIR/workspace-gemini-$_sd" ]; then
-            if [ ! -d "$SANDBOX_DIR/workspace-gemini-$_sd" ] && [ -d "$WORK_DIR/.gemini/$_sd" ]; then
+            _host_had_sub=0
+            [ -d "$WORK_DIR/.gemini/$_sd" ] && [ "$_host_empty_stub" = "0" ] && _host_had_sub=1
+            if [ ! -d "$SANDBOX_DIR/workspace-gemini-$_sd" ] && [ "$_host_had_sub" = "1" ]; then
                 cp -r "$WORK_DIR/.gemini/$_sd" "$SANDBOX_DIR/workspace-gemini-$_sd"
             else
                 mkdir -p "$SANDBOX_DIR/workspace-gemini-$_sd"
             fi
             RUN_FLAGS+=(-v "$SANDBOX_DIR/workspace-gemini-$_sd:$SANDY_WORKSPACE/.gemini/$_sd")
+            [ "$_host_had_sub" = "0" ] && echo "$WORK_DIR/.gemini/$_sd" >> "$SANDBOX_DIR/.session-created-stubs"
         fi
     done
 fi

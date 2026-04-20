@@ -2374,6 +2374,129 @@ check "removed symlink entries yield empty new-entry diff (silent prune)" \
 rm -f "$_S2_APPROVED_TMP" "$_S2_CURRENT_TMP" "$_S2_NEW_TMP"
 
 # ============================================================
+info "44. Empty stub dir cleanup (post-session + pre-existing debris)"
+# ============================================================
+# Docker's bind-mount target auto-creation leaves empty stub dirs (.vscode/,
+# .idea/, etc.) on the host when sandy mounts .empty-ro-dir over a missing
+# protected path. Two cleanup mechanisms:
+#   (a) Session-scoped: sandy records each stub it creates in
+#       $SANDBOX_DIR/.session-created-stubs and rmdirs them in cleanup().
+#       rmdir no-ops on populated dirs so legitimate writes survive.
+#   (b) Pre-existing debris from prior sandy versions: auto-removed at
+#       launch under a 4-condition safety gate (git repo + name match +
+#       empty + not git-tracked).
+
+SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+check "session-created-stubs file path declared" \
+    grep -q '\.session-created-stubs' "$SANDY_SCRIPT_PATH"
+check "stub recorded when empty-ro-dir fallback mount is used (dirs loop)" \
+    bash -c 'awk "/Record session-created stubs/,/done < <\\(_sandy_protected_dirs\\)/" "$1" | grep -q "\\.session-created-stubs"' \
+    -- "$SANDY_SCRIPT_PATH"
+check "stub recorded when empty-ro-dir fallback mount is used (submodule hooks)" \
+    bash -c 'awk "/_protect_submodule_gitdirs\\(\\)/,/^}/" "$1" | grep -q "\\.session-created-stubs"' \
+    -- "$SANDY_SCRIPT_PATH"
+check "cleanup() reads session-created-stubs and rmdirs entries" \
+    bash -c 'awk "/^cleanup\\(\\) \\{/,/^}/" "$1" | grep -q "\\.session-created-stubs" \
+             && awk "/^cleanup\\(\\) \\{/,/^}/" "$1" | grep -q "rmdir"' \
+    -- "$SANDY_SCRIPT_PATH"
+check "pre-existing cleanup uses rmdir (never rm -rf)" \
+    bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "rmdir" \
+             && ! awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -qE "rm[[:space:]]+-rf"' \
+    -- "$SANDY_SCRIPT_PATH"
+check "pre-existing cleanup gated on git repo" \
+    bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "git rev-parse"' \
+    -- "$SANDY_SCRIPT_PATH"
+check "pre-existing cleanup gated on untracked (git ls-files)" \
+    bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "git ls-files --error-unmatch"' \
+    -- "$SANDY_SCRIPT_PATH"
+check "pre-existing cleanup gated on emptiness (ls -A)" \
+    bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "ls -A"' \
+    -- "$SANDY_SCRIPT_PATH"
+
+# --- Functional tests: exercise the cleanup logic against fixture trees ---
+_S44_TMP="$(mktemp -d)"
+
+# Scenario A: session cleanup rmdirs an empty recorded stub.
+mkdir -p "$_S44_TMP/a/.vscode"
+printf '%s\n' "$_S44_TMP/a/.vscode" > "$_S44_TMP/a.stubs"
+while IFS= read -r _stub; do
+    [ -z "$_stub" ] && continue
+    [ -d "$_stub" ] && [ -z "$(ls -A "$_stub" 2>/dev/null)" ] && rmdir "$_stub" 2>/dev/null || true
+done < "$_S44_TMP/a.stubs"
+check "A: session cleanup rmdirs empty recorded stub" \
+    bash -c '[ ! -d "$1" ]' -- "$_S44_TMP/a/.vscode"
+
+# Scenario B: session cleanup preserves a populated recorded stub.
+mkdir -p "$_S44_TMP/b/.vscode"
+echo '{}' > "$_S44_TMP/b/.vscode/settings.json"
+printf '%s\n' "$_S44_TMP/b/.vscode" > "$_S44_TMP/b.stubs"
+while IFS= read -r _stub; do
+    [ -z "$_stub" ] && continue
+    [ -d "$_stub" ] && [ -z "$(ls -A "$_stub" 2>/dev/null)" ] && rmdir "$_stub" 2>/dev/null || true
+done < "$_S44_TMP/b.stubs"
+check "B: session cleanup preserves populated dir (content intact)" \
+    bash -c '[ -f "$1/settings.json" ]' -- "$_S44_TMP/b/.vscode"
+
+# Scenario C: pre-existing cleanup auto-removes empty protected dirs in git repo.
+mkdir -p "$_S44_TMP/c"
+(cd "$_S44_TMP/c" && git init -q && git config user.email t@t && git config user.name t \
+ && echo README > README.md && git add README.md && git commit -q -m init)
+mkdir -p "$_S44_TMP/c/.vscode" "$_S44_TMP/c/.idea" "$_S44_TMP/c/.devcontainer"
+# Simulate sandy's pre-existing cleanup loop against a fixed protected-dirs list.
+_C_DIRS=(".vscode" ".idea" ".circleci" ".devcontainer" ".github/workflows")
+if (cd "$_S44_TMP/c" && git rev-parse --git-dir >/dev/null 2>&1); then
+    for _pd in "${_C_DIRS[@]}"; do
+        _p="$_S44_TMP/c/$_pd"
+        [ -d "$_p" ] || continue
+        [ -z "$(ls -A "$_p" 2>/dev/null)" ] || continue
+        if (cd "$_S44_TMP/c" && git ls-files --error-unmatch "$_pd" >/dev/null 2>&1); then continue; fi
+        rmdir "$_p" 2>/dev/null || true
+    done
+fi
+check "C: pre-existing cleanup removes empty .vscode in git repo" \
+    bash -c '[ ! -d "$1" ]' -- "$_S44_TMP/c/.vscode"
+check "C: pre-existing cleanup removes empty .idea in git repo" \
+    bash -c '[ ! -d "$1" ]' -- "$_S44_TMP/c/.idea"
+check "C: pre-existing cleanup removes empty .devcontainer in git repo" \
+    bash -c '[ ! -d "$1" ]' -- "$_S44_TMP/c/.devcontainer"
+
+# Scenario D: pre-existing cleanup preserves non-empty dir (safety: emptiness check).
+mkdir -p "$_S44_TMP/d"
+(cd "$_S44_TMP/d" && git init -q && git config user.email t@t && git config user.name t \
+ && echo R > R.md && git add R.md && git commit -q -m init)
+mkdir -p "$_S44_TMP/d/.vscode"
+echo "keep" > "$_S44_TMP/d/.vscode/settings.json"
+if (cd "$_S44_TMP/d" && git rev-parse --git-dir >/dev/null 2>&1); then
+    for _pd in "${_C_DIRS[@]}"; do
+        _p="$_S44_TMP/d/$_pd"
+        [ -d "$_p" ] || continue
+        [ -z "$(ls -A "$_p" 2>/dev/null)" ] || continue
+        if (cd "$_S44_TMP/d" && git ls-files --error-unmatch "$_pd" >/dev/null 2>&1); then continue; fi
+        rmdir "$_p" 2>/dev/null || true
+    done
+fi
+check "D: pre-existing cleanup preserves non-empty .vscode (content intact)" \
+    bash -c '[ -f "$1/settings.json" ]' -- "$_S44_TMP/d/.vscode"
+
+# Scenario E: pre-existing cleanup skips non-git workspace (safety: git repo check).
+mkdir -p "$_S44_TMP/e/.vscode"
+# Intentionally no git init
+if (cd "$_S44_TMP/e" && git rev-parse --git-dir >/dev/null 2>&1); then
+    for _pd in "${_C_DIRS[@]}"; do
+        _p="$_S44_TMP/e/$_pd"
+        [ -d "$_p" ] || continue
+        [ -z "$(ls -A "$_p" 2>/dev/null)" ] || continue
+        if (cd "$_S44_TMP/e" && git ls-files --error-unmatch "$_pd" >/dev/null 2>&1); then continue; fi
+        rmdir "$_p" 2>/dev/null || true
+    done
+fi
+check "E: pre-existing cleanup skips non-git workspace" \
+    bash -c '[ -d "$1" ]' -- "$_S44_TMP/e/.vscode"
+
+rm -rf "$_S44_TMP"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
