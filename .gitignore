@@ -15,3 +15,6 @@
 
 # Working docs (not for the repo)
 POLISH_AND_PUBLICITY.md
+
+# Audit output (from test/audit/audit-stress-test.sh)
+sandy-audit-*.log
