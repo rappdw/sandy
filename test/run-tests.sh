@@ -359,12 +359,15 @@ rm -f "$TEST_PROJECT/.python-version"
 info "9. Workspace .venv overlay — detection and materialization"
 # ============================================================
 
-# 9a. Allowlist accepts SANDY_VENV_OVERLAY in .sandy/config
+# 9a. Allowlist accepts SANDY_VENV_OVERLAY in .sandy/config.
+# v0.12+: the loader depends on SANDY_{PRIVILEGED,PASSIVE,ENV_ONLY}_KEYS arrays
+# plus _key_in_list() — source all of them together before invoking the loader.
 TMPCFG="$(mktemp -d)"
 mkdir -p "$TMPCFG/.sandy"
 echo 'SANDY_VENV_OVERLAY=0' > "$TMPCFG/.sandy/config"
 _SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 ALLOWLIST_RESULT="$(bash -c "
+    $(sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^}$/p' "$_SANDY_SCRIPT_PATH")
     $(sed -n '/^_load_sandy_config()/,/^}$/p' "$_SANDY_SCRIPT_PATH")
     _load_sandy_config '$TMPCFG/.sandy/config'
     echo \"\${SANDY_VENV_OVERLAY:-unset}\"
@@ -791,9 +794,19 @@ check ".sandy/config loaded before SSH relay setup" \
 check "config parser does not use source" \
     bash -c '! grep -q "source.*\.sandy/config" "$1"' -- "$SCRIPT"
 
-# Verify config parser uses allowlist
-check "config parser uses variable allowlist" \
-    grep -q 'SANDY_SSH|SANDY_MODEL' "$SCRIPT"
+# Verify config parser uses allowlist. v0.12+: keys live in named arrays
+# (SANDY_PRIVILEGED_KEYS, SANDY_PASSIVE_KEYS) instead of inline case-statement
+# pipe-delimited patterns.
+check "config parser uses variable allowlist (privileged array)" \
+    grep -qE '^SANDY_PRIVILEGED_KEYS=\(' "$SCRIPT"
+check "config parser uses variable allowlist (passive array)" \
+    grep -qE '^SANDY_PASSIVE_KEYS=\(' "$SCRIPT"
+check "privileged array contains SANDY_SSH" \
+    bash -c 'awk "/^SANDY_PRIVILEGED_KEYS=\(/,/^\)$/" "$1" | grep -qE "^[[:space:]]+SANDY_SSH$"' \
+    -- "$SCRIPT"
+check "passive array contains SANDY_MODEL" \
+    bash -c 'awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)$/" "$1" | grep -qE "^[[:space:]]+SANDY_MODEL$"' \
+    -- "$SCRIPT"
 
 # ============================================================
 info "18. Container naming"
@@ -1524,12 +1537,22 @@ fi
 info "28d. Codex config allowlist, dispatch, alias, update regex"
 # ============================================================
 
-# Allowlist must include the codex variables (Step 1 of v0.10 plan).
-if grep -qE 'OPENAI_API_KEY\|CODEX_MODEL\|SANDY_CODEX_AUTH\|CODEX_HOME' "$SANDY_SCRIPT"; then
+# Allowlist must include the codex variables. v0.12+: these now live in the
+# SANDY_PRIVILEGED_KEYS / SANDY_PASSIVE_KEYS arrays rather than an inline
+# pipe-delimited case pattern, so check each key independently.
+_CODEX_VARS_MISSING=""
+for _k in OPENAI_API_KEY CODEX_MODEL SANDY_CODEX_AUTH CODEX_HOME; do
+    if ! awk '/^SANDY_(PRIVILEGED|PASSIVE)_KEYS=\(/,/^\)$/' "$SANDY_SCRIPT" \
+         | grep -qE "^[[:space:]]+${_k}$"; then
+        _CODEX_VARS_MISSING="${_CODEX_VARS_MISSING} ${_k}"
+    fi
+done
+if [ -z "$_CODEX_VARS_MISSING" ]; then
     pass "config allowlist includes OPENAI_API_KEY, CODEX_MODEL, SANDY_CODEX_AUTH, CODEX_HOME"
 else
-    fail "config allowlist includes codex variables"
+    fail "config allowlist missing codex variables:${_CODEX_VARS_MISSING}"
 fi
+unset _CODEX_VARS_MISSING _k
 
 # Agent dispatch case-statement must map codex → sandy-codex.
 if grep -qE 'codex\)[[:space:]]+IMAGE_NAME="sandy-codex"' "$SANDY_SCRIPT"; then
@@ -1792,10 +1815,10 @@ else
 fi
 
 # Version string contains expected major.minor.
-if grep -q '^SANDY_VERSION="0\.11\.' "$SANDY_SCRIPT"; then
-    pass "SANDY_VERSION is 0.11.x"
+if grep -q '^SANDY_VERSION="0\.12\.' "$SANDY_SCRIPT"; then
+    pass "SANDY_VERSION is 0.12.x"
 else
-    fail "SANDY_VERSION is 0.11.x"
+    fail "SANDY_VERSION is 0.12.x"
 fi
 
 # ============================================================
@@ -2053,8 +2076,16 @@ EOF
 # Extract the loader function from the live sandy script to a temp file so
 # we can source it without nested process substitution (bash 3.2 on macOS
 # does not reliably handle `source <(sed ...)` inside `$(...)`).
+#
+# v0.12+: the loader uses the SANDY_{PRIVILEGED,PASSIVE,ENV_ONLY}_KEYS arrays
+# and the _key_in_list() helper — all defined at the top of the sandy script
+# before the loader. Extract both blocks into the single source file.
 _LOADER_SRC="$(mktemp)"
-sed -n '/^_load_sandy_config() {/,/^}$/p' "$SANDY_SCRIPT_PATH" > "$_LOADER_SRC"
+# Arrays + _key_in_list() — range ends at the first bare `}` (closing
+# _key_in_list), which is also the last `}` before the loader definition.
+sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^}$/p' "$SANDY_SCRIPT_PATH" > "$_LOADER_SRC"
+printf '\n' >> "$_LOADER_SRC"
+sed -n '/^_load_sandy_config() {/,/^}$/p' "$SANDY_SCRIPT_PATH" >> "$_LOADER_SRC"
 
 # Extract + source _load_sandy_config, call with tier=passive, and verify
 # privileged keys were not exported.
@@ -2495,6 +2526,242 @@ check "E: pre-existing cleanup skips non-git workspace" \
     bash -c '[ -d "$1" ]' -- "$_S44_TMP/e/.vscode"
 
 rm -rf "$_S44_TMP"
+
+# ============================================================
+# SECTION 45: Introspection surface (SPEC_INTROSPECTION.md)
+# ============================================================
+# Purpose: lock down the JSON introspection flags --print-schema,
+# --print-state, --validate-config. These are fast-path handlers
+# that run without Docker, so they're cheap to exercise in CI.
+info ""
+info "=== Introspection surface ==="
+
+SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+_INTRO_TMP="$(mktemp -d)"
+_SCHEMA_JSON="$_INTRO_TMP/schema.json"
+_STATE_JSON="$_INTRO_TMP/state.json"
+
+# --- --print-schema ---
+_SCHEMA_RC=0
+bash "$SANDY_SCRIPT_PATH" --print-schema > "$_SCHEMA_JSON" 2>/dev/null || _SCHEMA_RC=$?
+check "--print-schema exits 0" test "$_SCHEMA_RC" -eq 0
+check "--print-schema output is valid JSON" \
+    python3 -m json.tool < "$_SCHEMA_JSON"
+check "schema has schema_version=1" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d[\"schema_version\"]==1" "$1"' \
+    -- "$_SCHEMA_JSON"
+check "schema has sandy.version" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d[\"sandy\"][\"version\"]" "$1"' \
+    -- "$_SCHEMA_JSON"
+check "schema lists privileged_keys (non-empty)" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert len(d[\"config\"][\"privileged_keys\"])>0" "$1"' \
+    -- "$_SCHEMA_JSON"
+check "schema lists passive_keys (non-empty)" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert len(d[\"config\"][\"passive_keys\"])>0" "$1"' \
+    -- "$_SCHEMA_JSON"
+check "schema flags SANDY_SSH as privileged" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+names=[k[\"name\"] for k in d[\"config\"][\"privileged_keys\"]]
+assert \"SANDY_SSH\" in names
+" "$1"' -- "$_SCHEMA_JSON"
+check "schema flags SANDY_MODEL as passive" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+names=[k[\"name\"] for k in d[\"config\"][\"passive_keys\"]]
+assert \"SANDY_MODEL\" in names
+" "$1"' -- "$_SCHEMA_JSON"
+check "schema flags privileged keys with passive_approval_required" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+for k in d[\"config\"][\"privileged_keys\"]:
+    assert k.get(\"passive_approval_required\") is True, k[\"name\"]
+" "$1"' -- "$_SCHEMA_JSON"
+check "schema lists all three agents (claude,gemini,codex)" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+names=[a[\"name\"] for a in d[\"agents\"]]
+assert set(names)=={\"claude\",\"gemini\",\"codex\"}
+" "$1"' -- "$_SCHEMA_JSON"
+check "schema cli_flags includes --print-schema" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+names=[f[\"name\"] for f in d[\"cli_flags\"]]
+assert \"--print-schema\" in names
+" "$1"' -- "$_SCHEMA_JSON"
+check "schema protected_paths.files includes .envrc (S1.3 expansion)" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert \".envrc\" in d[\"protected_paths\"][\"files\"]
+" "$1"' -- "$_SCHEMA_JSON"
+check "schema compatibility.supported_schema_versions contains 1" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert 1 in d[\"compatibility\"][\"supported_schema_versions\"]
+" "$1"' -- "$_SCHEMA_JSON"
+
+# --- --print-state ---
+# Capture stderr to a file so we can surface the ERR-trap diagnostic (see
+# _sandy_introspect_err_trap in sandy) when the command fails. Without this,
+# a `set -euo pipefail` abort inside _sandy_emit_state would just produce
+# non-zero exit with silent partial stdout, giving no signal for debugging.
+_STATE_RC=0
+_STATE_ERR="$_INTRO_TMP/state.err"
+bash "$SANDY_SCRIPT_PATH" --print-state > "$_STATE_JSON" 2>"$_STATE_ERR" || _STATE_RC=$?
+if [ "$_STATE_RC" -ne 0 ] || [ ! -s "$_STATE_JSON" ]; then
+    echo "  --- sandy --print-state diagnostic ---" >&2
+    echo "  exit code: $_STATE_RC" >&2
+    echo "  stdout bytes: $(wc -c < "$_STATE_JSON" 2>/dev/null || echo 0)" >&2
+    if [ -s "$_STATE_ERR" ]; then
+        sed 's/^/  stderr: /' "$_STATE_ERR" >&2
+    else
+        echo "  stderr: (empty)" >&2
+    fi
+    echo "  -------------------------------------" >&2
+fi
+check "--print-state exits 0 (even without docker)" test "$_STATE_RC" -eq 0
+check "--print-state output is valid JSON" \
+    python3 -m json.tool < "$_STATE_JSON"
+check "state has schema_version" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert \"schema_version\" in d" "$1"' \
+    -- "$_STATE_JSON"
+check "state has sandy_home" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert \"sandy_home\" in d" "$1"' \
+    -- "$_STATE_JSON"
+check "state has sandboxes array" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert isinstance(d[\"sandboxes\"],list)" "$1"' \
+    -- "$_STATE_JSON"
+check "state has docker_reachable bool" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert isinstance(d[\"docker_reachable\"],bool)" "$1"' \
+    -- "$_STATE_JSON"
+
+# --- --validate-config ---
+# `set -euo pipefail` is active — a command substitution whose child exits
+# non-zero aborts the assignment unless guarded by `||`. Use
+# `_VAR="$(cmd)" || _RC=$?` to capture both the output and the exit code.
+# Case 1: passive-safe config — no errors, no pending approval.
+cat > "$_INTRO_TMP/passive-ok.config" <<'EOF'
+SANDY_MODEL=claude-opus-4-7
+SANDY_VERBOSE=1
+EOF
+_VAL_RC=0
+_VAL_OUT="$(bash "$SANDY_SCRIPT_PATH" --validate-config "$_INTRO_TMP/passive-ok.config" 2>/dev/null)" || _VAL_RC=$?
+check "validate-config passive-safe exits 0" test "$_VAL_RC" -eq 0
+check "validate-config passive-safe is valid JSON" \
+    bash -c 'echo "$1" | python3 -m json.tool' -- "$_VAL_OUT"
+check "validate-config passive-safe reports approval_status=none_required" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+assert d[\"approval_status\"]==\"none_required\", d[\"approval_status\"]
+" "$1"' -- "$_VAL_OUT"
+check "validate-config passive-safe has no unknown_keys" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+assert d[\"unknown_keys\"]==[], d[\"unknown_keys\"]
+" "$1"' -- "$_VAL_OUT"
+check "validate-config detects source_tier=passive outside SANDY_HOME" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+assert d[\"source_tier\"]==\"passive\", d[\"source_tier\"]
+" "$1"' -- "$_VAL_OUT"
+
+# Case 2: passive config with a privileged key — reports pending approval.
+cat > "$_INTRO_TMP/passive-bad.config" <<'EOF'
+SANDY_SSH=agent
+SANDY_SKIP_PERMISSIONS=1
+BOGUS_KEY=yes
+EOF
+_VAL_RC2=0
+_VAL_OUT2="$(bash "$SANDY_SCRIPT_PATH" --validate-config "$_INTRO_TMP/passive-bad.config" 2>/dev/null)" || _VAL_RC2=$?
+check "validate-config passive-privileged exits 0 (pending is not an error)" test "$_VAL_RC2" -eq 0
+check "validate-config passive-privileged reports approval_status=pending" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+assert d[\"approval_status\"]==\"pending\", d[\"approval_status\"]
+" "$1"' -- "$_VAL_OUT2"
+check "validate-config passive-privileged lists SANDY_SSH in privileged_keys_requiring_approval" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+assert \"SANDY_SSH\" in d[\"privileged_keys_requiring_approval\"], d[\"privileged_keys_requiring_approval\"]
+" "$1"' -- "$_VAL_OUT2"
+check "validate-config passive-privileged lists BOGUS_KEY in unknown_keys" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+assert \"BOGUS_KEY\" in d[\"unknown_keys\"], d[\"unknown_keys\"]
+" "$1"' -- "$_VAL_OUT2"
+check "validate-config passive-privileged warns on each privileged key" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+keys=[w[\"key\"] for w in d[\"warnings\"]]
+assert \"SANDY_SSH\" in keys and \"SANDY_SKIP_PERMISSIONS\" in keys, keys
+" "$1"' -- "$_VAL_OUT2"
+check "validate-config passive-privileged emits approval_file_path" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+assert d[\"approval_file_path\"] and \"approvals/passive-\" in d[\"approval_file_path\"], d[\"approval_file_path\"]
+" "$1"' -- "$_VAL_OUT2"
+
+# Case 3: non-existent file (expected exit 1 — `|| _VAL_RC3=$?` absorbs set -e).
+# `trap - ERR` inside the subshell stops the harness-level ERR trap from
+# printing a spurious red line when the intentionally-failing bash exits 1.
+# `set -E` (errtrace) makes the trap inherit into command substitutions, so
+# it would otherwise fire in the subshell before the outer `||` absorbs the
+# exit code. The outer `||` still captures the exit code into _VAL_RC3.
+_VAL_RC3=0
+_VAL_OUT3="$(trap - ERR; bash "$SANDY_SCRIPT_PATH" --validate-config "$_INTRO_TMP/does-not-exist.config" 2>/dev/null)" || _VAL_RC3=$?
+check "validate-config missing-file exits 1" test "$_VAL_RC3" -eq 1
+check "validate-config missing-file reports file-does-not-exist error" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+assert any(\"does not exist\" in e for e in d[\"errors\"]), d[\"errors\"]
+" "$1"' -- "$_VAL_OUT3"
+
+# Case 4: no path argument (expected exit 1).
+_VAL_RC4=0
+bash "$SANDY_SCRIPT_PATH" --validate-config >/dev/null 2>&1 || _VAL_RC4=$?
+check "validate-config with no argument exits 1" test "$_VAL_RC4" -eq 1
+
+# Case 5: privileged source (under SANDY_HOME) has no approval prompt.
+_FAKE_HOME="$_INTRO_TMP/fake-sandy-home"
+mkdir -p "$_FAKE_HOME"
+cat > "$_FAKE_HOME/config" <<'EOF'
+SANDY_SSH=agent
+SANDY_MODEL=claude-opus-4-7
+EOF
+_VAL_RC5=0
+_VAL_OUT5="$(SANDY_HOME="$_FAKE_HOME" bash "$SANDY_SCRIPT_PATH" --validate-config "$_FAKE_HOME/config" 2>/dev/null)" || _VAL_RC5=$?
+check "validate-config SANDY_HOME source exits 0" test "$_VAL_RC5" -eq 0
+check "validate-config under SANDY_HOME is classified as privileged" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+assert d[\"source_tier\"]==\"privileged\", d[\"source_tier\"]
+" "$1"' -- "$_VAL_OUT5"
+check "validate-config privileged source reports approval_status=none_required" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+assert d[\"approval_status\"]==\"none_required\", d[\"approval_status\"]
+" "$1"' -- "$_VAL_OUT5"
+
+rm -rf "$_INTRO_TMP"
 
 # ============================================================
 # Summary

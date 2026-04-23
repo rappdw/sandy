@@ -53,6 +53,16 @@ Since Claude Code running inside sandy cannot access Docker, running tests requi
 
 See `TESTING_PLAN.md` for manual validation steps that require interactive TUI sessions.
 
+## Introspection Surface
+
+Sandy exposes three machine-readable JSON flags that run as **fast-path handlers** — they exit before Docker, image builds, and workspace mutex acquisition, so they're cheap to call from UI frontends, CI, and non-interactive contexts:
+
+- `--print-schema` — static schema: sandy version, config keys by tier (with type, default, description), CLI flags, agents + credential probe orders, protected path lists, skill packs, schema compatibility declaration (`schema_version: 1`).
+- `--print-state` — runtime state: installed images, per-sandbox metadata, approval files, `docker_reachable`, running sandy containers (filtered by image name prefix). Gracefully reports `docker_reachable: false` when docker is absent.
+- `--validate-config PATH` — parses a config file, classifies it by path as privileged (`$SANDY_HOME/…`) or passive (anywhere else), and reports errors, unknown keys, privileged-from-passive keys that require approval, and the target approval file path. Exit 0 on success (including "approval pending"), 1 only for file-not-found or missing-argument.
+
+See `SPEC_INTROSPECTION.md` for the stability contract and field-by-field JSON schema. When adding a new config key to `SANDY_PRIVILEGED_KEYS`, `SANDY_PASSIVE_KEYS`, or `SANDY_ENV_ONLY_KEYS` in the sandy script, also add a row to the `_sandy_key_metadata` heredoc (pipe-separated `key|type|default|pattern|description`) so it appears in `--print-schema` output.
+
 ## Per-project Configuration
 
 Create `.sandy/config` in any project directory to set per-project defaults:

@@ -76,6 +76,18 @@ sandy --remote                 # Remote-control server mode (headless)
 | `--version` | Print version string (e.g. `0.7.11-dev-a1b2c3d`) |
 | `--help` | Show help text |
 
+### Introspection Flags (machine-readable JSON)
+
+All introspection flags are **fast-path handlers**: they run before image builds, sandbox setup, mutex acquisition, and docker availability checks, and exit immediately without side effects. This makes them safe to call from non-privileged UI processes, CI tooling, and headless contexts. Output is single-line JSON on stdout with `schema_version: 1`.
+
+| Flag | Behavior |
+|---|---|
+| `--print-schema` | Emit the static sandy schema: version, config keys (by tier with type/default/description), CLI flags, agents and their credential probe orders, protected path lists, skill packs, schema compatibility declaration. Always exits 0. |
+| `--print-state` | Emit runtime state: `sandy_home`, installed sandy images, per-sandbox metadata (`.sandy_created_version`, `.sandy_last_version`, size if cheaply obtainable), approval files (one per workspace hash), `docker_reachable` (bool), and running sandy containers (filtered by image name prefix). When Docker is unreachable, `docker_reachable: false` and `running_containers: null`. Always exits 0. |
+| `--validate-config PATH` | Parse a config file, classify it as privileged (path under `$SANDY_HOME/`) or passive (anywhere else), and emit `{schema_version, path, source_tier, errors[], warnings[], unknown_keys[], privileged_keys_requiring_approval[], approval_status, approval_file_path}`. Exits 1 if the file does not exist or the flag was called with no argument; exits 0 otherwise (a "pending" approval is not an error — it's the normal state before first interactive approval). |
+
+See `SPEC_INTROSPECTION.md` for field-by-field documentation and the stability contract (additive changes within schema_version=1, breaking changes bump the version).
+
 ### Verbosity Flags
 
 | Flag | Effect |

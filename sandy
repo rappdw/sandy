@@ -17,8 +17,78 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="0.11.5-dev"
+SANDY_VERSION="0.12.0-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
+
+# Schema contract version for --print-schema / --print-state / --validate-config.
+# Bumped when existing fields change semantics; additive changes do not bump.
+# See SPEC_INTROSPECTION.md in the repo for the contract.
+SANDY_SCHEMA_VERSION=1
+
+# --- Config tier lists (single source of truth for _load_sandy_config,
+# --- --validate-config, and --print-schema) ---
+#
+# SANDY_PRIVILEGED_KEYS: settable only from $SANDY_HOME/{config,.secrets} or
+#   the environment. From a workspace .sandy/config they are quarantined and
+#   require explicit per-workspace approval (see _resolve_passive_privileged_approval).
+SANDY_PRIVILEGED_KEYS=(
+    SANDY_SSH
+    SANDY_SKIP_PERMISSIONS
+    SANDY_ALLOW_NO_ISOLATION
+    SANDY_ALLOW_LAN_HOSTS
+    ANTHROPIC_API_KEY
+    CLAUDE_CODE_OAUTH_TOKEN
+    GEMINI_API_KEY
+    OPENAI_API_KEY
+    GOOGLE_API_KEY
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
+)
+
+# SANDY_PASSIVE_KEYS: allowed from every tier, including a workspace
+#   .sandy/config checked into version control. No security-boundary impact.
+SANDY_PASSIVE_KEYS=(
+    SANDY_AGENT
+    SANDY_MODEL
+    SANDY_CPUS
+    SANDY_MEM
+    SANDY_GPU
+    SANDY_SKILL_PACKS
+    SANDY_CHANNELS
+    SANDY_CHANNEL_TARGET_PANE
+    SANDY_VERBOSE
+    SANDY_VENV_OVERLAY
+    SANDY_ALLOW_WORKFLOW_EDIT
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS
+    GEMINI_MODEL
+    SANDY_GEMINI_AUTH
+    SANDY_GEMINI_EXTENSIONS
+    GOOGLE_CLOUD_PROJECT
+    GOOGLE_CLOUD_LOCATION
+    GOOGLE_GENAI_USE_VERTEXAI
+    CODEX_MODEL
+    SANDY_CODEX_AUTH
+    CODEX_HOME
+    TELEGRAM_BOT_TOKEN
+    TELEGRAM_ALLOWED_SENDERS
+    DISCORD_BOT_TOKEN
+    DISCORD_ALLOWED_SENDERS
+)
+
+# SANDY_ENV_ONLY_KEYS: honored only when set in the process environment.
+#   NOT readable from any config file — these are CI / debug escape hatches
+#   that a committed .sandy/config must never be able to flip on.
+SANDY_ENV_ONLY_KEYS=(
+    SANDY_AUTO_APPROVE_PRIVILEGED
+    SANDY_DEBUG_CLEANUP
+)
+
+# Return 0 if $1 equals any of the remaining positional args.
+_key_in_list() {
+    local target="$1"; shift
+    local k
+    for k in "$@"; do [ "$k" = "$target" ] && return 0; done
+    return 1
+}
 
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 # Validate SANDY_HOME — reject shell metacharacters
@@ -29,10 +99,14 @@ fi
 # Empty fixtures for bind-mount-as-ro fallback targets (S1.0). Created eagerly
 # here — before any fast-path flag handlers (--print-protected-paths, --help,
 # --version) return — so that every sandy invocation guarantees the invariant.
-# Idempotent; zero cost if already present.
-mkdir -p "$SANDY_HOME"
-[ -f "$SANDY_HOME/.empty-ro-file" ] || : > "$SANDY_HOME/.empty-ro-file"
-[ -d "$SANDY_HOME/.empty-ro-dir" ]  || mkdir -p "$SANDY_HOME/.empty-ro-dir"
+# Idempotent; zero cost if already present. Suppressed under `|| true` because
+# the fixtures are only needed for the real-launch path; introspection
+# handlers (--print-schema / --print-state / --validate-config) don't mount
+# anything and must not abort just because the home dir is read-only
+# (e.g. a CI environment inspecting an installed sandy).
+mkdir -p "$SANDY_HOME" 2>/dev/null || true
+[ -f "$SANDY_HOME/.empty-ro-file" ] || : > "$SANDY_HOME/.empty-ro-file" 2>/dev/null || true
+[ -d "$SANDY_HOME/.empty-ro-dir" ]  || mkdir -p "$SANDY_HOME/.empty-ro-dir" 2>/dev/null || true
 BASE_IMAGE_NAME="sandy-base"
 # IMAGE_NAME is set dynamically after config load, based on SANDY_AGENT
 IMAGE_NAME=""
@@ -355,6 +429,632 @@ if [[ "${1:-}" == "--print-protected-paths" ]]; then
     exit 0
 fi
 
+# --- Introspection: machine-readable schema / state / validation ---
+# Emits JSON on stdout. All three flags are non-interactive and exit before
+# Docker or network checks. The schema contract is SPEC_INTROSPECTION.md.
+
+# Pipe-separated metadata table: key|type|default|pattern|description.
+# Types: string | int | bool | secret | enum:v1,v2 | agent_combo.
+# Empty fields are allowed (e.g. no default, no pattern).
+_sandy_key_metadata() {
+    cat <<'EOF'
+SANDY_SSH|enum:token,agent|token||SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent.
+SANDY_SKIP_PERMISSIONS|bool|true||Skip Claude Code's in-session permission prompts (default: true).
+SANDY_ALLOW_NO_ISOLATION|bool|0||Allow launch when iptables rules cannot be applied (Linux only).
+SANDY_ALLOW_LAN_HOSTS|string|||Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
+ANTHROPIC_API_KEY|secret|||Anthropic API key for Claude Code. Not required when using Claude Max OAuth.
+CLAUDE_CODE_OAUTH_TOKEN|secret|||Claude Code OAuth token (alternative to ANTHROPIC_API_KEY).
+GEMINI_API_KEY|secret|||Google API key for Gemini CLI.
+OPENAI_API_KEY|secret|||OpenAI API key for Codex CLI.
+GOOGLE_API_KEY|secret|||Google API key for Vertex AI / ADC.
+CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||Enable Claude Code experimental agent-teams feature.
+SANDY_AGENT|agent_combo|claude||Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex'.
+SANDY_MODEL|string|claude-opus-4-7|^[a-zA-Z0-9._-]+$|Model ID for the Claude agent.
+SANDY_CPUS|int|||CPU limit for container (default: auto-detected).
+SANDY_MEM|string|||Memory limit for container (e.g. '8g'; default: auto-detected).
+SANDY_GPU|string|||GPU passthrough: 'all', or device IDs like '0' / '0,1'.
+SANDY_SKILL_PACKS|string|||Comma-separated skill pack names (e.g. 'gstack').
+SANDY_CHANNELS|string|||Comma-separated channel names (e.g. 'telegram,discord').
+SANDY_CHANNEL_TARGET_PANE|int|0||Which tmux pane in multi-agent mode receives channel messages.
+SANDY_VERBOSE|int|0||Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace).
+SANDY_VENV_OVERLAY|bool|1||Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container.
+SANDY_ALLOW_WORKFLOW_EDIT|bool|0||Remove .github/workflows from the read-only protection list.
+CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||Max output tokens per Claude response.
+GEMINI_MODEL|string|||Gemini model override.
+SANDY_GEMINI_AUTH|enum:auto,api_key,oauth,adc|auto||Gemini credential probe strategy.
+SANDY_GEMINI_EXTENSIONS|string|||Comma-separated Gemini extensions to enable.
+GOOGLE_CLOUD_PROJECT|string|||Google Cloud project for Vertex AI.
+GOOGLE_CLOUD_LOCATION|string|||Google Cloud location for Vertex AI.
+GOOGLE_GENAI_USE_VERTEXAI|bool|||Use Vertex AI backend for Gemini.
+CODEX_MODEL|string|||Codex model override.
+SANDY_CODEX_AUTH|enum:auto,api_key,oauth|auto||Codex credential probe strategy.
+CODEX_HOME|string|||Override CODEX_HOME inside the container.
+TELEGRAM_BOT_TOKEN|secret|||Telegram bot token for the channel relay.
+TELEGRAM_ALLOWED_SENDERS|string|||Comma-separated Telegram user IDs allowed to send messages.
+DISCORD_BOT_TOKEN|secret|||Discord bot token for the channel relay.
+DISCORD_ALLOWED_SENDERS|string|||Comma-separated Discord user IDs allowed to send messages.
+SANDY_AUTO_APPROVE_PRIVILEGED|bool|||Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
+SANDY_DEBUG_CLEANUP|bool|||Print session-stub cleanup diagnostics on exit.
+EOF
+}
+
+# Look up a metadata field (type|default|pattern|description) for a key.
+# Usage: _sandy_key_meta_field SANDY_MODEL type → "string"
+_sandy_key_meta_field() {
+    local key="$1" field="$2"
+    local line
+    line="$(_sandy_key_metadata | awk -F'|' -v k="$key" '$1==k {print; exit}')"
+    [ -z "$line" ] && return 0
+    case "$field" in
+        type)        echo "$line" | awk -F'|' '{print $2}' ;;
+        default)     echo "$line" | awk -F'|' '{print $3}' ;;
+        pattern)     echo "$line" | awk -F'|' '{print $4}' ;;
+        description) echo "$line" | awk -F'|' '{print $5}' ;;
+    esac
+}
+
+# Escape a string for JSON: backslash, quote, newline, carriage return, tab,
+# plus wrapping double quotes. No external deps.
+_json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '"%s"' "$s"
+}
+
+# Emit a `"key": <value>` pair (value already JSON-formatted — caller's job
+# to wrap strings via _json_escape and pass booleans/nulls literally).
+_json_kv() { printf '"%s":%s' "$1" "$2"; }
+
+# Emit a JSON array from lines on stdin (each line = one string element).
+# Empty input → "[]". Used for string-list fields (choices, sources, etc.).
+_json_str_array() {
+    local first=1
+    printf '['
+    while IFS= read -r _line; do
+        [ -z "$_line" ] && continue
+        [ $first -eq 0 ] && printf ','
+        first=0
+        _json_escape "$_line"
+    done
+    printf ']'
+}
+
+# Emit a JSON string array from comma-separated input.
+# "a,b,c" → ["a","b","c"]. Empty input → [].
+_json_csv_array() {
+    local csv="$1"
+    [ -z "$csv" ] && { printf '[]'; return; }
+    printf '['
+    local first=1 _item
+    IFS=',' read -ra _items <<< "$csv"
+    for _item in "${_items[@]}"; do
+        _item="${_item# }"; _item="${_item% }"
+        [ $first -eq 0 ] && printf ','
+        first=0
+        _json_escape "$_item"
+    done
+    printf ']'
+}
+
+# Build the JSON object for one config key. Output goes to stdout with no
+# trailing comma — caller handles separation.
+# Args: $1=key  $2=tier (privileged|passive|env_only)
+_emit_key_object() {
+    local key="$1" tier="$2"
+    local type default pattern description
+    type="$(_sandy_key_meta_field "$key" type)"
+    default="$(_sandy_key_meta_field "$key" default)"
+    pattern="$(_sandy_key_meta_field "$key" pattern)"
+    description="$(_sandy_key_meta_field "$key" description)"
+    [ -z "$type" ] && type="string"
+
+    printf '{'
+    _json_kv name "$(_json_escape "$key")"
+
+    # type + choices: split enum:v1,v2 into separate fields
+    case "$type" in
+        enum:*)
+            printf ','; _json_kv type '"enum"'
+            printf ','; _json_kv choices "$(_json_csv_array "${type#enum:}")"
+            ;;
+        *)
+            printf ','; _json_kv type "$(_json_escape "$type")"
+            ;;
+    esac
+
+    [ -n "$default"     ] && { printf ','; _json_kv default     "$(_json_escape "$default")"; }
+    [ -n "$pattern"     ] && { printf ','; _json_kv pattern     "$(_json_escape "$pattern")"; }
+    [ -n "$description" ] && { printf ','; _json_kv description "$(_json_escape "$description")"; }
+
+    # Sources by tier. Privileged keys read from home_config, home_secrets,
+    # env and require approval if seen in workspace. Passive keys read from
+    # any source. Env-only keys read only from the environment.
+    printf ','
+    case "$tier" in
+        privileged)
+            _json_kv sources '["home_config","home_secrets","env"]'
+            printf ','; _json_kv passive_approval_required 'true'
+            ;;
+        passive)
+            _json_kv sources '["home_config","workspace_config","env"]'
+            ;;
+        env_only)
+            _json_kv sources '["env"]'
+            ;;
+    esac
+
+    printf '}'
+}
+
+# Emit the static schema JSON.
+_sandy_emit_schema() {
+    local commit
+    commit="$(sandy_full_version)"
+    commit="${commit##*-}"
+    [ "$commit" = "$SANDY_VERSION" ] && commit=""
+
+    printf '{'
+    _json_kv schema_version "$SANDY_SCHEMA_VERSION"
+
+    printf ',"sandy":{'
+    _json_kv version "$(_json_escape "$SANDY_VERSION")"
+    printf ','; _json_kv commit "$(_json_escape "$commit")"
+    printf ','; _json_kv sandbox_min_compat "$(_json_escape "$SANDY_SANDBOX_MIN_COMPAT")"
+    printf '}'
+
+    # config {privileged_keys, passive_keys, env_only_keys}
+    printf ',"config":{'
+    local first=1 k
+    printf '"privileged_keys":['
+    first=1
+    for k in "${SANDY_PRIVILEGED_KEYS[@]}"; do
+        [ $first -eq 0 ] && printf ','
+        first=0
+        _emit_key_object "$k" privileged
+    done
+    printf ']'
+
+    printf ',"passive_keys":['
+    first=1
+    for k in "${SANDY_PASSIVE_KEYS[@]}"; do
+        [ $first -eq 0 ] && printf ','
+        first=0
+        _emit_key_object "$k" passive
+    done
+    printf ']'
+
+    printf ',"env_only_keys":['
+    first=1
+    for k in "${SANDY_ENV_ONLY_KEYS[@]}"; do
+        [ $first -eq 0 ] && printf ','
+        first=0
+        _emit_key_object "$k" env_only
+    done
+    printf ']'
+    printf '}'
+
+    # cli_flags — hand-curated; intentionally limited to the user-visible set.
+    printf ',"cli_flags":['
+    printf '{'; _json_kv name '"--rebuild"';      printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Force rebuild of sandy images."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--build-only"';   printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Build images and exit (for CI)."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--new"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Start a fresh session (default: resume last)."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--resume"';       printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Open session picker."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--remote"';       printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Run as a remote-controlled Claude session."';     printf ','; _json_kv agents '["claude"]'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--upgrade"';      printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Self-update sandy to the latest release."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--agent"';        printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"LIST"'; printf ','; _json_kv description '"Agent(s) for this run (overrides SANDY_AGENT)."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--help"';         printf ','; _json_kv short '"-h"';    printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Show help."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--version"';      printf ','; _json_kv short '"-v"';    printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Show version."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--print-schema"'; printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Emit the static introspection schema as JSON."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--print-state"';  printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Emit runtime state (sandboxes, approvals, containers) as JSON."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--validate-config"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Validate a config file against the schema; emit JSON."'; printf '}'
+    printf ']'
+
+    # agents — each with image, features, credential probe order
+    printf ',"agents":['
+    printf '{'
+    _json_kv name '"claude"'; printf ','; _json_kv image '"sandy-claude-code"'
+    printf ','; _json_kv features '["skills","channels_telegram","channels_discord","remote","synthkit"]'
+    printf ','; _json_kv credentials '{"probe_order":["CLAUDE_CODE_OAUTH_TOKEN","ANTHROPIC_API_KEY","host_credentials_file"]}'
+    printf '}'
+    printf ','
+    printf '{'
+    _json_kv name '"gemini"'; printf ','; _json_kv image '"sandy-gemini-cli"'
+    printf ','; _json_kv features '["synthkit_toml","extensions"]'
+    printf ','; _json_kv credentials '{"probe_order":["GEMINI_API_KEY","host_tokens_json","host_adc"]}'
+    printf '}'
+    printf ','
+    printf '{'
+    _json_kv name '"codex"'; printf ','; _json_kv image '"sandy-codex"'
+    printf ','; _json_kv features '["skills_context"]'
+    printf ','; _json_kv credentials '{"probe_order":["OPENAI_API_KEY","host_auth_json"]}'
+    printf '}'
+    printf ']'
+
+    # protected_paths — sourced from the heredocs to stay in lockstep with
+    # the RUN_FLAGS construction. Reads SANDY_ALLOW_WORKFLOW_EDIT from the
+    # env (not from config — introspection is pre-config-load).
+    printf ',"protected_paths":{'
+    printf '"files":';     _sandy_protected_files     | _json_str_array
+    printf ',"git_files":'; _sandy_protected_git_files | _json_str_array
+    printf ',"dirs_always_mount":'; _sandy_protected_dirs | _json_str_array
+    printf ',"dirs_workflow_edit_conditional":[".github/workflows"]'
+    printf '}'
+
+    # skill_packs — read from the SKILL_PACK_* arrays at the top of sandy.
+    printf ',"skill_packs":['
+    first=1
+    local i
+    for i in "${!SKILL_PACK_NAMES[@]}"; do
+        [ $first -eq 0 ] && printf ','
+        first=0
+        printf '{'
+        _json_kv name "$(_json_escape "${SKILL_PACK_NAMES[$i]}")"
+        printf ','; _json_kv repo "$(_json_escape "${SKILL_PACK_REPOS[$i]}")"
+        printf '}'
+    done
+    printf ']'
+
+    # compatibility — schema versioning declarations.
+    printf ',"compatibility":{'
+    _json_kv current_schema_version "$SANDY_SCHEMA_VERSION"
+    printf ','; _json_kv supported_schema_versions "[$SANDY_SCHEMA_VERSION]"
+    printf ','; _json_kv deprecated_schema_versions '[]'
+    printf '}'
+
+    printf '}\n'
+}
+
+# Emit runtime state JSON: sandboxes, approvals, running containers.
+_sandy_emit_state() {
+    # Detect which stat flavor we have once. GNU stat (Linux) takes -c;
+    # BSD stat (macOS) takes -f. We can't rely on either failing cleanly on
+    # the wrong OS — GNU's `stat -f` is a valid different command (filesystem
+    # info) rather than a usage error — so probe `stat -c` first.
+    # File-mtime helper. Must ALWAYS exit 0 (even for a missing file) because
+    # under `set -euo pipefail` a non-zero exit from a command substitution
+    # (`x="$(_stat_mtime_iso ...)"`) aborts the caller and trips the ERR trap.
+    # Sandboxes frequently have .sandy_created_version but no .sandy_last_version
+    # (first launch), so stat failure for one field is a normal expected case.
+    local _stat_mtime_iso
+    if stat -c '%y' / >/dev/null 2>&1; then
+        # GNU stat: %y is "2006-01-02 15:04:05.000000000 -0700"; take date/time and append Z.
+        _stat_mtime_iso() { [ -e "$1" ] || return 0; stat -c '%y' "$1" 2>/dev/null | awk '{print $1"T"$2"Z"}' || true; }
+    elif stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' / >/dev/null 2>&1; then
+        _stat_mtime_iso() { [ -e "$1" ] || return 0; stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
+    else
+        _stat_mtime_iso() { return 0; }
+    fi
+
+    printf '{'
+    _json_kv schema_version "$SANDY_SCHEMA_VERSION"
+    printf ','; _json_kv sandy_home "$(_json_escape "$SANDY_HOME")"
+
+    # installed_images: sandy-{base,claude-code,gemini-cli,codex,full}.
+    printf ',"installed_images":['
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        local first=1 img line
+        for img in sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-full; do
+            line="$(docker image inspect "$img" --format '{{.Id}}|{{.Created}}' 2>/dev/null)" || continue
+            [ -z "$line" ] && continue
+            [ $first -eq 0 ] && printf ','
+            first=0
+            local img_id img_created
+            img_id="${line%%|*}"
+            img_created="${line#*|}"
+            printf '{'
+            _json_kv name    "$(_json_escape "$img")"
+            printf ','; _json_kv id      "$(_json_escape "$img_id")"
+            printf ','; _json_kv created "$(_json_escape "$img_created")"
+            printf '}'
+        done
+    fi
+    printf ']'
+
+    # sandboxes: walk $SANDY_HOME/sandboxes/*/. Locks live at
+    # $SANDY_HOME/sandboxes/.<name>.lock (the mkdir-mutex from per-project concurrency guard).
+    printf ',"sandboxes":['
+    local first=1 sb
+    if [ -d "$SANDY_HOME/sandboxes" ]; then
+        for sb in "$SANDY_HOME/sandboxes"/*/; do
+            [ -d "$sb" ] || continue
+            sb="${sb%/}"
+            local sb_name sb_created_ver sb_last_ver sb_created_at sb_last_at sb_lock_dir sb_lock_pid
+            sb_name="$(basename "$sb")"
+            sb_created_ver="$(cat "$sb/.sandy_created_version" 2>/dev/null || true)"
+            sb_last_ver="$(cat "$sb/.sandy_last_version" 2>/dev/null || true)"
+            sb_created_at="$(_stat_mtime_iso "$sb/.sandy_created_version")"
+            sb_last_at="$(_stat_mtime_iso "$sb/.sandy_last_version")"
+            sb_lock_dir="$SANDY_HOME/sandboxes/.${sb_name}.lock"
+            sb_lock_pid=""
+            if [ -d "$sb_lock_dir" ]; then
+                sb_lock_pid="$(cat "$sb_lock_dir/pid" 2>/dev/null || true)"
+            fi
+
+            [ $first -eq 0 ] && printf ','
+            first=0
+            printf '{'
+            _json_kv name "$(_json_escape "$sb_name")"
+            printf ','; _json_kv path "$(_json_escape "$sb")"
+            printf ','; _json_kv created_version   "$(_json_escape "$sb_created_ver")"
+            printf ','; _json_kv last_used_version "$(_json_escape "$sb_last_ver")"
+            printf ','; _json_kv created_at        "$(_json_escape "$sb_created_at")"
+            printf ','; _json_kv last_used_at      "$(_json_escape "$sb_last_at")"
+            if [ -d "$sb_lock_dir" ]; then
+                printf ','; _json_kv lock_held 'true'
+                printf ','; _json_kv lock_holder_pid "$(_json_escape "$sb_lock_pid")"
+            else
+                printf ','; _json_kv lock_held 'false'
+                printf ','; _json_kv lock_holder_pid 'null'
+            fi
+            printf '}'
+        done
+    fi
+    printf ']'
+
+    # approvals: parse $SANDY_HOME/approvals/passive-*.list. First line is the
+    # sha256 of the sorted KEY=VALUE set. `# workspace:` and `# approved:` are
+    # added by the approval writer.
+    printf ',"approvals":['
+    first=1
+    local app
+    if [ -d "$SANDY_HOME/approvals" ]; then
+        for app in "$SANDY_HOME/approvals"/passive-*.list; do
+            [ -f "$app" ] || continue
+            local app_hash app_workspace app_time app_wd_hash
+            app_hash="$(head -n1 "$app" 2>/dev/null || true)"
+            # grep | sed under `set -eo pipefail`: a non-matching grep exits 1, pipefail
+            # propagates, and the command substitution fails. `|| true` inside the subshell
+            # absorbs that without masking real errors in the caller.
+            app_workspace="$(grep -m1 '^# workspace:' "$app" 2>/dev/null | sed 's/^# workspace:[[:space:]]*//' || true)"
+            app_time="$(grep -m1 '^# approved:' "$app" 2>/dev/null | sed 's/^# approved:[[:space:]]*//' || true)"
+            app_wd_hash="$(basename "$app")"
+            app_wd_hash="${app_wd_hash#passive-}"
+            app_wd_hash="${app_wd_hash%.list}"
+
+            [ $first -eq 0 ] && printf ','
+            first=0
+            printf '{'
+            _json_kv workspace_hash       "$(_json_escape "$app_wd_hash")"
+            printf ','; _json_kv workspace_path_hint  "$(_json_escape "$app_workspace")"
+            printf ','; _json_kv approved_keys_sha256 "$(_json_escape "$app_hash")"
+            printf ','; _json_kv approved_at          "$(_json_escape "$app_time")"
+            printf '}'
+        done
+    fi
+    printf ']'
+
+    # running_containers: silently skip if docker is unreachable.
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        printf ',"docker_reachable":true'
+        printf ',"running_containers":['
+        first=1
+        # Use labels for sandy-launched containers. Sandy doesn't label all its
+        # containers today — best-effort filter by image name.
+        while IFS= read -r _cline; do
+            [ -z "$_cline" ] && continue
+            # line format: id|name|image|started
+            local _cid _cname _cimg _cstarted
+            _cid="$(echo "$_cline"     | awk -F'|' '{print $1}')"
+            _cname="$(echo "$_cline"   | awk -F'|' '{print $2}')"
+            _cimg="$(echo "$_cline"    | awk -F'|' '{print $3}')"
+            _cstarted="$(echo "$_cline" | awk -F'|' '{print $4}')"
+            [ $first -eq 0 ] && printf ','
+            first=0
+            printf '{'
+            _json_kv id         "$(_json_escape "$_cid")"
+            printf ','; _json_kv name       "$(_json_escape "$_cname")"
+            printf ','; _json_kv image      "$(_json_escape "$_cimg")"
+            printf ','; _json_kv started_at "$(_json_escape "$_cstarted")"
+            printf '}'
+        done < <(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}' 2>/dev/null \
+                 | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)
+        printf ']'
+    else
+        printf ',"docker_reachable":false'
+        printf ',"running_containers":null'
+    fi
+
+    printf '}\n'
+}
+
+# Validate a config file against the schema. Emits JSON with errors, warnings,
+# unknown keys, and (for passive sources with privileged keys) approval status.
+_sandy_validate_config() {
+    local path="$1"
+    if [ -z "$path" ]; then
+        echo "[sandy] ERROR: --validate-config requires a path argument" >&2
+        exit 1
+    fi
+
+    # Determine source tier from the path. Anything under $SANDY_HOME (home
+    # config/secrets) is privileged; anything else is treated as passive
+    # (workspace config).
+    local abs_path tier workspace=""
+    abs_path="$(cd "$(dirname "$path")" 2>/dev/null && pwd)/$(basename "$path")" || abs_path="$path"
+    case "$abs_path" in
+        "$SANDY_HOME"/config|"$SANDY_HOME"/.secrets)
+            tier="privileged" ;;
+        *)
+            tier="passive"
+            # workspace is the parent of the .sandy/ directory containing this file
+            local parent
+            parent="$(dirname "$abs_path")"
+            if [ "$(basename "$parent")" = ".sandy" ]; then
+                workspace="$(dirname "$parent")"
+            else
+                workspace="$parent"
+            fi
+            ;;
+    esac
+
+    local errors=() warnings=() unknown=() privileged_keys=() env_only_keys=()
+    local fatal=0
+
+    if [ ! -f "$abs_path" ]; then
+        errors+=("file does not exist: $abs_path")
+        fatal=1
+    else
+        local key value
+        while IFS='=' read -r key value; do
+            value="${value#\"}" ; value="${value%\"}"
+            value="${value#\'}" ; value="${value%\'}"
+            if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}"; then
+                privileged_keys+=("$key")
+                if [ "$tier" = "passive" ]; then
+                    warnings+=("$key|privileged key set from workspace — requires explicit approval|warning")
+                fi
+            elif _key_in_list "$key" "${SANDY_PASSIVE_KEYS[@]}"; then
+                :  # allowed in any tier
+            elif _key_in_list "$key" "${SANDY_ENV_ONLY_KEYS[@]}"; then
+                env_only_keys+=("$key")
+                warnings+=("$key|env-only key set in a config file — ignored at load time|warning")
+            else
+                unknown+=("$key")
+            fi
+        done < <(grep -E '^[A-Z_]+=.+' "$abs_path" 2>/dev/null)
+    fi
+
+    # For passive sources with privileged keys, compute the same approval
+    # hash and file path that _resolve_passive_privileged_approval uses.
+    local approval_status="none_required" approval_file_path="null"
+    if [ $fatal -eq 0 ] && [ "$tier" = "passive" ] && [ ${#privileged_keys[@]} -gt 0 ]; then
+        local kv_set sorted set_hash wd_hash
+        kv_set=""
+        while IFS='=' read -r key value; do
+            if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}"; then
+                value="${value#\"}" ; value="${value%\"}"
+                value="${value#\'}" ; value="${value%\'}"
+                kv_set+="$key=$value"$'\n'
+            fi
+        done < <(grep -E '^[A-Z_]+=.+' "$abs_path" 2>/dev/null)
+        sorted="$(printf '%s' "$kv_set" | sort -u)"
+        if command -v sha256sum >/dev/null 2>&1; then
+            set_hash="$(printf '%s' "$sorted" | sha256sum | awk '{print $1}')"
+            wd_hash="$(printf '%s' "$workspace" | sha256sum | awk '{print $1}' | cut -c1-16)"
+        elif command -v shasum >/dev/null 2>&1; then
+            set_hash="$(printf '%s' "$sorted" | shasum -a 256 | awk '{print $1}')"
+            wd_hash="$(printf '%s' "$workspace" | shasum -a 256 | awk '{print $1}' | cut -c1-16)"
+        else
+            set_hash=""
+            wd_hash=""
+        fi
+        local app_file="$SANDY_HOME/approvals/passive-$wd_hash.list"
+        approval_file_path="$(_json_escape "$app_file")"
+        if [ -f "$app_file" ] && [ "$(head -n1 "$app_file" 2>/dev/null)" = "$set_hash" ]; then
+            approval_status="approved"
+        else
+            approval_status="pending"
+        fi
+    fi
+
+    # Emit JSON.
+    printf '{'
+    _json_kv schema_version "$SANDY_SCHEMA_VERSION"
+    printf ','; _json_kv path "$(_json_escape "$abs_path")"
+    printf ','; _json_kv source_tier "$(_json_escape "$tier")"
+
+    printf ',"errors":['
+    local first=1 e
+    for e in "${errors[@]+"${errors[@]}"}"; do
+        [ $first -eq 0 ] && printf ','
+        first=0
+        _json_escape "$e"
+    done
+    printf ']'
+
+    printf ',"warnings":['
+    first=1
+    local w k m s
+    for w in "${warnings[@]+"${warnings[@]}"}"; do
+        [ $first -eq 0 ] && printf ','
+        first=0
+        k="$(echo "$w" | awk -F'|' '{print $1}')"
+        m="$(echo "$w" | awk -F'|' '{print $2}')"
+        s="$(echo "$w" | awk -F'|' '{print $3}')"
+        printf '{'
+        _json_kv key      "$(_json_escape "$k")"
+        printf ','; _json_kv message  "$(_json_escape "$m")"
+        printf ','; _json_kv severity "$(_json_escape "$s")"
+        printf '}'
+    done
+    printf ']'
+
+    printf ',"unknown_keys":['
+    first=1
+    local u
+    for u in "${unknown[@]+"${unknown[@]}"}"; do
+        [ $first -eq 0 ] && printf ','
+        first=0
+        _json_escape "$u"
+    done
+    printf ']'
+
+    printf ',"privileged_keys_requiring_approval":['
+    first=1
+    local p
+    for p in "${privileged_keys[@]+"${privileged_keys[@]}"}"; do
+        [ "$tier" = "passive" ] || continue
+        [ $first -eq 0 ] && printf ','
+        first=0
+        _json_escape "$p"
+    done
+    printf ']'
+
+    printf ',"approval_status":%s' "$(_json_escape "$approval_status")"
+    printf ',"approval_file_path":%s' "$approval_file_path"
+
+    printf '}\n'
+
+    # Publish the exit code via a global so the caller can propagate it
+    # without tripping the ERR trap (a `return 1` at the end of the function
+    # would abort the set -E-scoped trap installed by the fast-path handler).
+    _SANDY_VALIDATE_RC=$fatal
+}
+
+# Introspection fast-path handlers. Each is wrapped in an ERR trap so that
+# if `set -euo pipefail` trips a subtle failure inside the emit function
+# (which would otherwise produce silent partial output and a non-zero exit),
+# the user sees the failing line number and command on stderr. This is the
+# diagnostic surface we'd otherwise need to infer from 2>/dev/null output.
+_sandy_introspect_err_trap() {
+    local code=$?
+    echo "[sandy] ERROR: introspection handler failed (exit $code)" >&2
+    echo "[sandy]        line ${BASH_LINENO[0]:-?}: ${BASH_COMMAND:-?}" >&2
+    echo "[sandy]        Report this at https://github.com/rappdw/sandy/issues" >&2
+}
+
+if [[ "${1:-}" == "--print-schema" ]]; then
+    set -E; trap _sandy_introspect_err_trap ERR
+    _sandy_emit_schema
+    exit 0
+fi
+if [[ "${1:-}" == "--print-state" ]]; then
+    set -E; trap _sandy_introspect_err_trap ERR
+    _sandy_emit_state
+    exit 0
+fi
+if [[ "${1:-}" == "--validate-config" ]]; then
+    set -E; trap _sandy_introspect_err_trap ERR
+    _SANDY_VALIDATE_RC=0
+    _sandy_validate_config "${2:-}"
+    exit "$_SANDY_VALIDATE_RC"
+fi
+
 # --- Help ---
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<EOF
@@ -417,6 +1117,14 @@ Flags:
   -v                 Verbose: show startup sections, pause on exit
   -vv                Debug: add bash trace to user-setup.sh
   -vvv               Full trace: also trace entrypoint.sh and show docker flags
+
+Introspection (machine-readable JSON; no Docker required):
+  --print-schema          Emit the static schema (config keys, flags, agents,
+                          protected paths). See SPEC_INTROSPECTION.md.
+  --print-state           Emit runtime state (sandboxes, approvals, running
+                          containers). docker_reachable=false if docker absent.
+  --validate-config PATH  Validate a config file against the schema; emit JSON
+                          with errors, unknowns, and passive-approval status.
 
 All other arguments are forwarded to the agent (claude or gemini).
 EOF
@@ -1808,51 +2516,19 @@ _load_sandy_config() {
         value="${value#\'}" ; value="${value%\'}"
         case "$tier" in
             privileged)
-                # Full allowlist — all keys permitted
-                case "$key" in
-                    SANDY_SSH|SANDY_MODEL|SANDY_SKILL_PACKS|SANDY_SKIP_PERMISSIONS|\
-                    SANDY_ALLOW_NO_ISOLATION|SANDY_ALLOW_LAN_HOSTS|\
-                    SANDY_ALLOW_WORKFLOW_EDIT|\
-                    SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|SANDY_VERBOSE|\
-                    SANDY_AGENT|SANDY_VENV_OVERLAY|\
-                    CLAUDE_CODE_OAUTH_TOKEN|\
-                    TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
-                    DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
-                    ANTHROPIC_API_KEY|CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
-                    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|\
-                    GEMINI_API_KEY|GEMINI_MODEL|SANDY_GEMINI_EXTENSIONS|SANDY_GEMINI_AUTH|\
-                    GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION|GOOGLE_GENAI_USE_VERTEXAI|GOOGLE_API_KEY|\
-                    OPENAI_API_KEY|CODEX_MODEL|SANDY_CODEX_AUTH|CODEX_HOME|\
-                    SANDY_CHANNEL_TARGET_PANE)
-                        export "$key=$value" ;;
-                esac
+                # Full allowlist — privileged + passive keys permitted
+                if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; then
+                    export "$key=$value"
+                fi
                 ;;
             passive)
-                # Privileged keys from passive sources: collect for later
-                # approval prompt. Do NOT export yet.
-                case "$key" in
-                    SANDY_SSH|SANDY_SKIP_PERMISSIONS|SANDY_ALLOW_NO_ISOLATION|\
-                    SANDY_ALLOW_LAN_HOSTS|\
-                    ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|\
-                    GEMINI_API_KEY|OPENAI_API_KEY|GOOGLE_API_KEY|\
-                    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)
-                        _PASSIVE_PRIVILEGED_PENDING+=("$key=$value")
-                        _PASSIVE_PRIVILEGED_SOURCES+=("$file")
-                        ;;
-                    # Passive (workspace-settable) keys — allow
-                    SANDY_MODEL|SANDY_SKILL_PACKS|\
-                    SANDY_ALLOW_WORKFLOW_EDIT|\
-                    SANDY_CPUS|SANDY_MEM|SANDY_GPU|SANDY_CHANNELS|SANDY_VERBOSE|\
-                    SANDY_AGENT|SANDY_VENV_OVERLAY|\
-                    TELEGRAM_BOT_TOKEN|TELEGRAM_ALLOWED_SENDERS|\
-                    DISCORD_BOT_TOKEN|DISCORD_ALLOWED_SENDERS|\
-                    CLAUDE_CODE_MAX_OUTPUT_TOKENS|\
-                    GEMINI_MODEL|SANDY_GEMINI_EXTENSIONS|SANDY_GEMINI_AUTH|\
-                    GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION|GOOGLE_GENAI_USE_VERTEXAI|\
-                    CODEX_MODEL|SANDY_CODEX_AUTH|CODEX_HOME|\
-                    SANDY_CHANNEL_TARGET_PANE)
-                        export "$key=$value" ;;
-                esac
+                # Privileged keys from passive sources: collect for approval
+                if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}"; then
+                    _PASSIVE_PRIVILEGED_PENDING+=("$key=$value")
+                    _PASSIVE_PRIVILEGED_SOURCES+=("$file")
+                elif _key_in_list "$key" "${SANDY_PASSIVE_KEYS[@]}"; then
+                    export "$key=$value"
+                fi
                 ;;
         esac
     done < <(grep -E '^[A-Z_]+=.+' "$file" 2>/dev/null)
