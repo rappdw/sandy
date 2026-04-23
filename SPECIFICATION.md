@@ -128,10 +128,14 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 **CI / test-harness escape hatch**: `SANDY_AUTO_APPROVE_PRIVILEGED=1` in the process environment bypasses the prompt and exports the pending keys in-memory without writing an approval file. This is intentionally env-only — `SANDY_AUTO_APPROVE_PRIVILEGED` is not in the passive allowlist, so a committed `.sandy/config` cannot set it. Sandy's own `test/run-tests.sh` and `test/run-integration-tests.sh` set this flag at the top of each harness so the suites can run from the sandy repo directory (which carries a real `GEMINI_API_KEY` in `.sandy/.secrets` for integration testing) without blocking on stdin.
 
 **Privileged-only keys** (allowed only from `$SANDY_HOME/config` and `$SANDY_HOME/.secrets`):
-`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`.
+<!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
+`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
+<!-- END AUTOGEN:privileged-key-list -->
 
 **Passive-safe keys** (allowed from any source):
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`.
+<!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+<!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
 
@@ -139,43 +143,49 @@ After all config sources are loaded, `SANDY_ALLOW_LAN_HOSTS` (if set) is split o
 
 ### Allowlisted Variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `SANDY_AGENT` | `claude` | Agent selection: `claude`, `gemini`, `codex`, a comma-separated combo (e.g. `claude,gemini`), or `all` (= `claude,gemini,codex`) |
-| `SANDY_MODEL` | `claude-opus-4-6` | Claude model to use |
-| `GEMINI_API_KEY` | unset | Gemini API key (alternative to OAuth/ADC) |
-| `GEMINI_MODEL` | unset | Gemini model override (e.g. `gemini-2.5-pro`) |
-| `SANDY_GEMINI_AUTH` | `auto` | Force auth path: `auto`, `api_key`, `oauth`, or `adc` |
-| `SANDY_GEMINI_EXTENSIONS` | unset | Comma-separated Gemini extension URLs/paths to seed |
-| `GOOGLE_CLOUD_PROJECT` | unset | GCP project (Vertex AI) |
-| `GOOGLE_CLOUD_LOCATION` | unset | GCP region (Vertex AI) |
-| `GOOGLE_GENAI_USE_VERTEXAI` | unset | Set `true` to route through Vertex AI |
-| `GOOGLE_API_KEY` | unset | Alternative Google API key |
-| `OPENAI_API_KEY` | unset | OpenAI API key for Codex CLI (primary auth path) |
-| `CODEX_MODEL` | unset | Codex model override |
-| `SANDY_CODEX_AUTH` | `auto` | Force Codex auth path: `auto`, `api_key`, or `oauth` |
-| `CODEX_HOME` | unset | Override container-side codex home directory (advanced) |
-| `SANDY_VENV_OVERLAY` | `1` | Bind-mount `$SANDBOX_DIR/venv` over `$WORKSPACE/.venv` when the host has a `.venv/`. Set to `0` to disable (falls back to warn-only for broken host venvs). |
-| `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for host-side channel relay (0=claude, 1=gemini in dual mode) |
-| `SANDY_SSH` | `token` | Git auth: `token` (gh CLI + HTTPS) or `agent` (SSH socket forward) |
-| `SANDY_SKIP_PERMISSIONS` | `true` | Run with `--dangerously-skip-permissions` |
-| `SANDY_CPUS` | auto-detected | CPU limit for container |
-| `SANDY_MEM` | auto-detected | Memory limit (`available - 1GB`, min 2GB) |
-| `SANDY_GPU` | disabled | GPU passthrough: `all`, or device IDs like `0,1` |
-| `SANDY_SKILL_PACKS` | unset | Comma-separated skill packs (e.g. `gstack`) |
-| `SANDY_ALLOW_LAN_HOSTS` | unset | Comma-separated IPs/CIDRs to allow through isolation. Rejects world-open entries (`0.0.0.0/0`, `::/0`) with a hard error at launch. **Privileged-only.** |
-| `SANDY_ALLOW_NO_ISOLATION` | unset | Set to `1` to skip iptables (Linux only). **Privileged-only.** |
-| `SANDY_ALLOW_WORKFLOW_EDIT` | `0` | Set to `1` to remove `.github/workflows/` from the protected read-only mount list for this project. Passive-safe. |
-| `SANDY_CHANNELS` | unset | Channel plugins (e.g. `plugin:telegram@claude-plugins-official`) |
-| `SANDY_VERBOSE` | `0` | Verbosity level (0-3) |
-| `CLAUDE_CODE_OAUTH_TOKEN` | unset | Long-lived OAuth token (1-year validity) |
-| `ANTHROPIC_API_KEY` | unset | API key (not needed with Claude Pro/Max) |
-| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max output tokens per response |
-| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | unset | Set to `1` to enable agent teams |
-| `TELEGRAM_BOT_TOKEN` | unset | Telegram bot token |
-| `TELEGRAM_ALLOWED_SENDERS` | unset | Comma-separated Telegram user IDs |
-| `DISCORD_BOT_TOKEN` | unset | Discord bot token |
-| `DISCORD_ALLOWED_SENDERS` | unset | Comma-separated Discord user IDs |
+The table below is generated from `sandy --print-schema` (the `_sandy_key_metadata` heredoc in the sandy script is the source of truth). Run `test/regen-config-docs.sh` after editing, adding, or retiering a key — `test/run-tests.sh` asserts the blocks are in sync.
+
+<!-- BEGIN AUTOGEN:config-keys-table Run `test/regen-config-docs.sh` to update. -->
+| Variable | Tier | Default | Description |
+|---|---|---|---|
+| `SANDY_SSH` | privileged | `token` | SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent. |
+| `SANDY_SKIP_PERMISSIONS` | privileged | `true` | Skip Claude Code's in-session permission prompts (default: true). |
+| `SANDY_ALLOW_NO_ISOLATION` | privileged | `0` | Allow launch when iptables rules cannot be applied (Linux only). |
+| `SANDY_ALLOW_LAN_HOSTS` | privileged | unset | Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected. |
+| `ANTHROPIC_API_KEY` | privileged | unset | Anthropic API key for Claude Code. Not required when using Claude Max OAuth. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | privileged | unset | Claude Code OAuth token (alternative to ANTHROPIC_API_KEY). |
+| `GEMINI_API_KEY` | privileged | unset | Google API key for Gemini CLI. |
+| `OPENAI_API_KEY` | privileged | unset | OpenAI API key for Codex CLI. |
+| `GOOGLE_API_KEY` | privileged | unset | Google API key for Vertex AI / ADC. |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | privileged | unset | Enable Claude Code experimental agent-teams feature. |
+| `SANDY_AGENT` | passive | `claude` | Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex'. |
+| `SANDY_MODEL` | passive | `claude-opus-4-7` | Model ID for the Claude agent. |
+| `SANDY_CPUS` | passive | unset | CPU limit for container (default: auto-detected). |
+| `SANDY_MEM` | passive | unset | Memory limit for container (e.g. '8g'; default: auto-detected). |
+| `SANDY_GPU` | passive | unset | GPU passthrough: 'all', or device IDs like '0' / '0,1'. |
+| `SANDY_SKILL_PACKS` | passive | unset | Comma-separated skill pack names (e.g. 'gstack'). |
+| `SANDY_CHANNELS` | passive | unset | Comma-separated channel names (e.g. 'telegram,discord'). |
+| `SANDY_CHANNEL_TARGET_PANE` | passive | `0` | Which tmux pane in multi-agent mode receives channel messages. |
+| `SANDY_VERBOSE` | passive | `0` | Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace). |
+| `SANDY_VENV_OVERLAY` | passive | `1` | Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container. |
+| `SANDY_ALLOW_WORKFLOW_EDIT` | passive | `0` | Remove .github/workflows from the read-only protection list. |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | passive | `128000` | Max output tokens per Claude response. |
+| `GEMINI_MODEL` | passive | unset | Gemini model override. |
+| `SANDY_GEMINI_AUTH` | passive | `auto` | Gemini credential probe strategy. |
+| `SANDY_GEMINI_EXTENSIONS` | passive | unset | Comma-separated Gemini extensions to enable. |
+| `GOOGLE_CLOUD_PROJECT` | passive | unset | Google Cloud project for Vertex AI. |
+| `GOOGLE_CLOUD_LOCATION` | passive | unset | Google Cloud location for Vertex AI. |
+| `GOOGLE_GENAI_USE_VERTEXAI` | passive | unset | Use Vertex AI backend for Gemini. |
+| `CODEX_MODEL` | passive | unset | Codex model override. |
+| `SANDY_CODEX_AUTH` | passive | `auto` | Codex credential probe strategy. |
+| `CODEX_HOME` | passive | unset | Override CODEX_HOME inside the container. |
+| `TELEGRAM_BOT_TOKEN` | passive | unset | Telegram bot token for the channel relay. |
+| `TELEGRAM_ALLOWED_SENDERS` | passive | unset | Comma-separated Telegram user IDs allowed to send messages. |
+| `DISCORD_BOT_TOKEN` | passive | unset | Discord bot token for the channel relay. |
+| `DISCORD_ALLOWED_SENDERS` | passive | unset | Comma-separated Discord user IDs allowed to send messages. |
+| `SANDY_AUTO_APPROVE_PRIVILEGED` | env-only | unset | Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only. |
+| `SANDY_DEBUG_CLEANUP` | env-only | unset | Print session-stub cleanup diagnostics on exit. |
+<!-- END AUTOGEN:config-keys-table -->
 
 ### Model Validation
 

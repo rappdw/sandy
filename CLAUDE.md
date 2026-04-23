@@ -14,6 +14,17 @@ When modifying the `sandy` script, update `SPECIFICATION.md` to reflect any chan
 
 Also update `README.md` and this file (`CLAUDE.md`) if user-facing behavior changes. Run `test/run-tests.sh` to verify test assertions still match.
 
+### Auto-generated config tables
+
+The privileged/passive key lists and the Allowlisted Variables table in `CLAUDE.md` and `SPECIFICATION.md` are generated from `sandy --print-schema` — their source of truth is the `_sandy_key_metadata` heredoc in the sandy script. When you add, remove, or retier a config key, run:
+
+```sh
+test/regen-config-docs.sh        # rewrite the autogen blocks in place
+test/regen-config-docs.sh --check # verify no drift (used by test/run-tests.sh)
+```
+
+Sentinels `<!-- BEGIN AUTOGEN:<name> -->` / `<!-- END AUTOGEN:<name> -->` mark the rewritten regions. Anything outside the sentinels is hand-maintained prose — edit that directly. `test/run-tests.sh` runs `--check` and fails if the committed blocks don't match the current schema.
+
 ## What This Is
 
 `sandy` — an isolated sibling for your coding agents. A self-contained command that runs Claude Code, Gemini CLI, OpenAI Codex CLI (or any combination side-by-side) in a Docker sandbox with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes.
@@ -61,7 +72,7 @@ Sandy exposes three machine-readable JSON flags that run as **fast-path handlers
 - `--print-state` — runtime state: installed images, per-sandbox metadata, approval files, `docker_reachable`, running sandy containers (filtered by image name prefix). Gracefully reports `docker_reachable: false` when docker is absent.
 - `--validate-config PATH` — parses a config file, classifies it by path as privileged (`$SANDY_HOME/…`) or passive (anywhere else), and reports errors, unknown keys, privileged-from-passive keys that require approval, and the target approval file path. Exit 0 on success (including "approval pending"), 1 only for file-not-found or missing-argument.
 
-See `SPEC_INTROSPECTION.md` for the stability contract and field-by-field JSON schema. When adding a new config key to `SANDY_PRIVILEGED_KEYS`, `SANDY_PASSIVE_KEYS`, or `SANDY_ENV_ONLY_KEYS` in the sandy script, also add a row to the `_sandy_key_metadata` heredoc (pipe-separated `key|type|default|pattern|description`) so it appears in `--print-schema` output.
+See `SPEC_INTROSPECTION.md` for the stability contract and field-by-field JSON schema. When adding a new config key to `SANDY_PRIVILEGED_KEYS`, `SANDY_PASSIVE_KEYS`, or `SANDY_ENV_ONLY_KEYS` in the sandy script, also add a row to the `_sandy_key_metadata` heredoc (pipe-separated `key|type|default|pattern|description`) so it appears in `--print-schema` output, then run `test/regen-config-docs.sh` to propagate the change into the `SPECIFICATION.md` and `CLAUDE.md` config tables.
 
 ## Per-project Configuration
 
@@ -78,10 +89,19 @@ This file is parsed as plain `KEY=VALUE` lines (not sourced — no shell code ex
 
 Sandy loads configuration from four sources in order: `$HOME/.sandy/config`, `$HOME/.sandy/.secrets`, `$WORK_DIR/.sandy/config`, `$WORK_DIR/.sandy/.secrets`. The first two are **privileged** sources — they can set any recognized key. The last two are **passive** sources (workspace-local, committable to version control) — they can only set a restricted subset of keys freely; any attempt to set a **privileged-only** key from a workspace triggers an interactive approval prompt the first time and is remembered per workspace.
 
-- **Privileged-only keys** (require per-workspace approval when set from a passive source): `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`. These would let a malicious `.sandy/config` committed to a repo disable isolation or exfiltrate credentials, so sandy collects them, prints the exact `KEY=VALUE` set, and asks for explicit approval before honoring them. Approvals are persisted to `$SANDY_HOME/approvals/passive-<workspace-hash>.list` (first line is a sha256 of the sorted `KEY=VALUE` set). Subsequent launches with the same set are silent; any edit to `.sandy/config` that changes a privileged key re-prompts. Revoke with `rm $SANDY_HOME/approvals/passive-<hash>.list`. Headless mode (`-p`/`--print`/`--prompt`) and non-TTY stdin fail closed — the keys are dropped with a pointer to "launch sandy interactively once from this directory to approve."
+- **Privileged-only keys** (require per-workspace approval when set from a passive source):
+  <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
+  `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
+  <!-- END AUTOGEN:privileged-key-list -->
 
-**CI / test harness escape hatch:** set `SANDY_AUTO_APPROVE_PRIVILEGED=1` in the environment (not in any config file) to bypass the prompt entirely and export all collected passive privileged keys in-memory. This is intentionally env-only — the passive config allowlist does not include `SANDY_AUTO_APPROVE_PRIVILEGED`, so a committed `.sandy/config` cannot set it. Only a trusted shell or test harness can. Sandy's own `test/run-tests.sh` and `test/run-integration-tests.sh` set this because they run from the sandy repo directory, which has its own `.sandy/.secrets` with `GEMINI_API_KEY`.
-- **Passive-safe keys** (allowed from any source): `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`.
+  These would let a malicious `.sandy/config` committed to a repo disable isolation or exfiltrate credentials, so sandy collects them, prints the exact `KEY=VALUE` set, and asks for explicit approval before honoring them. Approvals are persisted to `$SANDY_HOME/approvals/passive-<workspace-hash>.list` (first line is a sha256 of the sorted `KEY=VALUE` set). Subsequent launches with the same set are silent; any edit to `.sandy/config` that changes a privileged key re-prompts. Revoke with `rm $SANDY_HOME/approvals/passive-<hash>.list`. Headless mode (`-p`/`--print`/`--prompt`) and non-TTY stdin fail closed — the keys are dropped with a pointer to "launch sandy interactively once from this directory to approve."
+
+  **CI / test harness escape hatch:** set `SANDY_AUTO_APPROVE_PRIVILEGED=1` in the environment (not in any config file) to bypass the prompt entirely and export all collected passive privileged keys in-memory. This is intentionally env-only — the passive config allowlist does not include `SANDY_AUTO_APPROVE_PRIVILEGED`, so a committed `.sandy/config` cannot set it. Only a trusted shell or test harness can. Sandy's own `test/run-tests.sh` and `test/run-integration-tests.sh` set this because they run from the sandy repo directory, which has its own `.sandy/.secrets` with `GEMINI_API_KEY`.
+
+- **Passive-safe keys** (allowed from any source):
+  <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
+  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+  <!-- END AUTOGEN:passive-key-list -->
 
 Additionally, `SANDY_ALLOW_LAN_HOSTS` is validated at use-site to reject world-open entries (`0.0.0.0/0`, `::/0`) with a hard error at launch — even when set from a privileged source.
 

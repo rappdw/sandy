@@ -2764,6 +2764,22 @@ assert d[\"approval_status\"]==\"none_required\", d[\"approval_status\"]
 rm -rf "$_INTRO_TMP"
 
 # ============================================================
+# SECTION 46: Docs drift — regen-config-docs.sh --check
+# ============================================================
+# CLAUDE.md and SPECIFICATION.md carry config-key tables that used to drift
+# from the sandy script. They now have sentinel-delimited autogen blocks
+# that `test/regen-config-docs.sh` rewrites from `sandy --print-schema`.
+# Run --check so the next edit of the `_sandy_key_metadata` heredoc fails
+# the suite until the docs are regenerated.
+info "46. Documentation drift check (regen-config-docs.sh)"
+_DRIFT_OUT="$(bash "$(dirname "$0")/regen-config-docs.sh" --check 2>&1)" && _DRIFT_RC=0 || _DRIFT_RC=$?
+if [ "$_DRIFT_RC" -ne 0 ]; then
+    printf "  \033[0;33m%s\033[0m\n" "$_DRIFT_OUT"
+fi
+check "config-key tables in CLAUDE.md/SPECIFICATION.md match sandy --print-schema" \
+    test "$_DRIFT_RC" -eq 0
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
