@@ -247,7 +247,8 @@ As of v0.9.0, the sandbox directory contains **sibling** per-agent subdirs (`cla
 ├── npm-global/                # → /home/claude/.npm-global
 ├── go/                        # → /home/claude/go
 ├── cargo/                     # → /home/claude/.cargo
-├── gstack/                    # → /home/claude/.gstack (if skill pack enabled)
+├── gstack/                    # legacy gstack state location; renamed to gstack.migrated/ on first 0.12+ launch
+├── gstack.migrated/           # post-migration breadcrumb — safe to delete after verifying $WORK_DIR/.gstack/ works
 ├── workspace-commands/        # → .claude/commands/ (writable overlay)
 ├── workspace-agents/          # → .claude/agents/
 └── workspace-plugins/         # → .claude/plugins/
@@ -279,7 +280,7 @@ Whenever `gemini` is in `SANDY_AGENT`, sandy creates `gemini/` and its `commands
 For `SANDY_AGENT=codex`, sandy creates `codex/` and seeds `codex/config.toml` (first run only) with:
 
 ```toml
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox_mode = "danger-full-access"
 
 [notice]
@@ -290,7 +291,9 @@ hide_rate_limit_model_nudge = true
 hide_world_writable_warning = true
 ```
 
-The `model = "gpt-5.4"` line sets a stable default model; users can override via `CODEX_MODEL` env var. The `sandbox_mode = "danger-full-access"` line is required — codex's Landlock sandbox does not nest cleanly inside sandy's Docker container. Sandy provides the outer isolation, and the CLI is additionally invoked with `--sandbox danger-full-access` as belt-and-suspenders in `build_codex_cmd`. The `[notice]` block suppresses first-run prompts; all five documented keys are seeded even if codex adds more over time.
+The `model = "gpt-5.5"` line sets a stable default model; users can override via `CODEX_MODEL` env var. The `sandbox_mode = "danger-full-access"` line is required — codex's Landlock sandbox does not nest cleanly inside sandy's Docker container. Sandy provides the outer isolation, and the CLI is additionally invoked with `--sandbox danger-full-access` as belt-and-suspenders in `build_codex_cmd`. The `[notice]` block suppresses first-run prompts; all five documented keys are seeded even if codex adds more over time.
+
+**One-shot model migration**: existing sandboxes seeded with the old default (`model = "gpt-5.4"`) are auto-bumped to `gpt-5.5` on next launch. The migration matches the exact previous default line — any user-customized model (anything other than `"gpt-5.4"`) is preserved untouched.
 
 The `[projects."<workspace>"] trust_level = "trusted"` entry is **appended at session start by `user-setup.sh`** (not at host-time) because it needs the container-side `$SANDY_WORKSPACE` path. Re-launches are idempotent: the entry is only appended if a matching line is not already present.
 
@@ -438,6 +441,14 @@ At container startup, `user-setup.sh`:
 3. Adds `/opt/skills/<pack>/bin` to PATH
 4. Sets `PLAYWRIGHT_BROWSERS_PATH=/opt/skills/gstack/.browsers`
 
+### Workspace State (gstack)
+
+When `gstack` is enabled, `~/.gstack/` inside the container is bind-mounted from `<workspace>/.gstack/` on the host (auto-created if missing). This makes gstack state workspace-scoped — visible alongside `.git/` and `.venv/`, persisted independently of the sandbox identity.
+
+A one-shot migration runs on the first 0.12+ launch: if `$SANDBOX_DIR/gstack/` (the legacy location) has content but `<workspace>/.gstack/` is absent, sandy `cp -a`'s the contents to the workspace and renames the legacy dir to `gstack.migrated/` (left in place; manual cleanup after verification).
+
+A launch-time nudge prints a warning when the workspace is a git repo and `.gstack/` is not gitignored. Detection prefers `git check-ignore` (so it honors `.git/info/exclude` and parent `.gitignore`s); falls back to a literal grep of the workspace's `.gitignore` when git is unavailable. The warning is informational only — sandy launches normally either way.
+
 ### Adding New Packs
 
 Add entries to all four arrays (`SKILL_PACK_NAMES`, `SKILL_PACK_REPOS`, `SKILL_PACK_VERSIONS`, `SKILL_PACK_TAG_PREFIXES`) and add a build recipe case in `generate_skill_pack_dockerfiles()`.
@@ -473,7 +484,7 @@ Optional: `--gpus <SANDY_GPU>` if GPU passthrough is enabled.
 2. Seed `~/.ssh/known_hosts` from host mount
 3. SSH agent relay setup (macOS: socat TCP→Unix relay; Linux: socket permissions fix)
 4. Copy host SSH config from `/tmp/host-ssh` to `~/.ssh/` (dereferences symlinks, sets correct permissions)
-5. Fix ownership of all persistent mount directories (pip, uv, npm, go, cargo, gstack)
+5. Fix ownership of sandbox-backed persistent mount directories (pip, uv, npm, go, cargo). `~/.gstack/` is intentionally **not** chowned here — it's a workspace bind, so chown'ing inside the container would write through to the host workspace's ownership.
 6. Symlink Claude Code binary and data dir into home
 7. Create pip/pip3 wrapper scripts (auto-add `--user` when outside virtualenvs)
 8. Drop privileges: `exec gosu $RUN_UID:$RUN_GID /usr/local/bin/user-setup.sh "$@"`
@@ -1681,7 +1692,7 @@ Written to `$SANDBOX_DIR/codex/config.toml` on first launch of a new sandbox wit
 # Written by sandy on first launch. Safe to edit, but sandbox_mode must stay
 # "danger-full-access" — sandy provides outer isolation; codex's Landlock
 # sandbox does not nest cleanly in Docker containers.
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox_mode = "danger-full-access"
 
 [notice]
@@ -2031,10 +2042,11 @@ This hides host content at these paths and provides a writable overlay from the 
 -v "<SANDBOX>/cargo:<HOME>/.cargo"
 ```
 
-If skill packs are enabled:
+If `gstack` is in `SANDY_SKILL_PACKS`:
 ```bash
--v "<SANDBOX>/gstack:<HOME>/.gstack"
+-v "<WORKSPACE>/.gstack:<HOME>/.gstack"
 ```
+Note: gstack mounts from the **workspace**, not the sandbox — see §6 "Workspace State (gstack)" for rationale and the one-shot migration from the legacy `<SANDBOX>/gstack/` location.
 
 ### E.13 Sandbox Mount
 

@@ -1503,10 +1503,10 @@ else
         fail "codex/config.toml sets sandbox_mode = danger-full-access"
     fi
 
-    if grep -q 'model = "gpt-5.4"' "$_CSEED_TMP/codex/config.toml" 2>/dev/null; then
-        pass "codex/config.toml sets default model = gpt-5.4"
+    if grep -q 'model = "gpt-5.5"' "$_CSEED_TMP/codex/config.toml" 2>/dev/null; then
+        pass "codex/config.toml sets default model = gpt-5.5"
     else
-        fail "codex/config.toml sets default model = gpt-5.4"
+        fail "codex/config.toml sets default model = gpt-5.5"
     fi
 
     _notice_count=$(grep -cE '^(hide_|"hide)' "$_CSEED_TMP/codex/config.toml" 2>/dev/null || echo 0)
@@ -1668,7 +1668,7 @@ else
     _TRUST_TMP="$(mktemp -d)"
     mkdir -p "$_TRUST_TMP/.codex"
     cat > "$_TRUST_TMP/.codex/config.toml" <<'TOML'
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox_mode = "danger-full-access"
 
 [notice]

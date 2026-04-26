@@ -120,7 +120,7 @@ Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemi
 
 **Gemini credentials** are probed in this order (override via `SANDY_GEMINI_AUTH=auto|api_key|oauth|adc`): `GEMINI_API_KEY` env var, host `~/.gemini/tokens.json` (copied ephemerally), host `~/.config/gcloud/application_default_credentials.json` (Google ADC / Vertex AI).
 
-**Codex credentials** are probed in this order (override via `SANDY_CODEX_AUTH=auto|api_key|oauth`): `OPENAI_API_KEY` env var (what codex CLI reads natively), host `~/.codex/auth.json` (copied ephemerally and mounted **read-only** — prevents token leakage back to host and prevents stale-token races). Because `auth.json` is mounted read-only, in-session OAuth refresh will fail — users must re-login inside the container if the token expires. On first launch, sandy seeds `~/.codex/config.toml` with `model = "gpt-5.4"`, `sandbox_mode = "danger-full-access"`, and a full `[notice]` block to suppress all first-run prompts; a `[projects."$SANDY_WORKSPACE"] trust_level = "trusted"` entry is appended at session start by `user-setup.sh` (it needs the container-side workspace path).
+**Codex credentials** are probed in this order (override via `SANDY_CODEX_AUTH=auto|api_key|oauth`): `OPENAI_API_KEY` env var (what codex CLI reads natively), host `~/.codex/auth.json` (copied ephemerally and mounted **read-only** — prevents token leakage back to host and prevents stale-token races). Because `auth.json` is mounted read-only, in-session OAuth refresh will fail — users must re-login inside the container if the token expires. On first launch, sandy seeds `~/.codex/config.toml` with `model = "gpt-5.5"`, `sandbox_mode = "danger-full-access"`, and a full `[notice]` block to suppress all first-run prompts; a `[projects."$SANDY_WORKSPACE"] trust_level = "trusted"` entry is appended at session start by `user-setup.sh` (it needs the container-side workspace path).
 
 **Feature support by agent**:
 
@@ -214,6 +214,14 @@ Skill packs add two build phases (Phase 2.5a and 2.5b) between the Claude Code i
 At container startup, `user-setup.sh` symlinks `/opt/skills/{pack}/` into `~/.claude/skills/` so Claude Code discovers the skills automatically. Skill pack `bin/` directories are added to PATH.
 
 First build takes a few minutes (downloading Chromium). Subsequent version updates rebuild only the code layer and are much faster.
+
+### Persistent state (gstack)
+
+`gstack` writes per-project state to `~/.gstack/` inside the container. Sandy bind-mounts this from `<workspace>/.gstack/` on the host so state is workspace-scoped (visible alongside `.git/` and `.venv/`) rather than tied to the sandbox identity. The directory is auto-created on launch if missing.
+
+If the workspace isn't yet gitignoring `.gstack/`, sandy prints a one-line warning at launch — `git check-ignore` is consulted when git is available, with a literal `.gitignore` grep as fallback. Add `.gstack/` to `.gitignore` (or `.git/info/exclude` if you don't want to commit the gitignore change) to suppress.
+
+Pre-0.12 sandy mounted `~/.gstack` from `$SANDBOX_DIR/gstack/` instead. On the first launch after upgrading, sandy migrates the state in one shot: if `$SANDBOX_DIR/gstack/` has content but `<workspace>/.gstack/` doesn't, the contents are `cp -a`'d over and the legacy dir is renamed to `gstack.migrated/`. The `.migrated/` dir is left in place — manual cleanup (`rm -rf $SANDBOX_DIR/gstack.migrated`) is fine once you've confirmed the new location works.
 
 ### Version Resolution
 

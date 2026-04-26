@@ -1419,10 +1419,12 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
     fi
 fi
 
-# Fix ownership of persistent package mounts
+# Fix ownership of persistent package mounts. Note: .gstack is intentionally
+# omitted — it's bind-mounted from the workspace (not from $SANDBOX_DIR), so
+# chown'ing it here would write through to the host workspace's ownership,
+# which we don't want to touch.
 for d in /home/claude/.pip-packages /home/claude/.local/share/uv \
-         /home/claude/.npm-global /home/claude/go /home/claude/.cargo \
-         /home/claude/.gstack; do
+         /home/claude/.npm-global /home/claude/go /home/claude/.cargo; do
     chown "$RUN_UID:$RUN_GID" "$d" 2>/dev/null || true
 done
 
@@ -3075,7 +3077,7 @@ if _sandy_agent_has codex; then
 # Written by sandy on first launch. Safe to edit, but sandbox_mode must stay
 # "danger-full-access" — sandy provides outer isolation; codex's Landlock
 # sandbox does not nest cleanly in Docker containers.
-model = "gpt-5.4"
+model = "gpt-5.5"
 sandbox_mode = "danger-full-access"
 
 [notice]
@@ -3089,6 +3091,18 @@ hide_world_writable_warning = true
 # start by user-setup.sh, where $SANDY_WORKSPACE is known.
 CODEX_TOML
         info "  Seeded .codex/config.toml"
+    fi
+    # One-shot model migration: bump existing sandboxes from the old default
+    # (gpt-5.4) to the current default (gpt-5.5). Only updates the exact
+    # previous default string — any user-customized model is left alone.
+    # Portable in-place edit (no `sed -i` — BSD/GNU diverge on the syntax).
+    if [ -f "$SANDBOX_DIR/codex/config.toml" ] \
+       && grep -qx 'model = "gpt-5.4"' "$SANDBOX_DIR/codex/config.toml" 2>/dev/null; then
+        info "  Migrating codex model: gpt-5.4 -> gpt-5.5"
+        sed 's/^model = "gpt-5\.4"$/model = "gpt-5.5"/' \
+            "$SANDBOX_DIR/codex/config.toml" \
+            > "$SANDBOX_DIR/codex/config.toml.new" \
+            && mv "$SANDBOX_DIR/codex/config.toml.new" "$SANDBOX_DIR/codex/config.toml"
     fi
 fi
 
@@ -3294,9 +3308,52 @@ elif [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] && [ -L "$WORK_DIR/.venv" ]; then
     # clear signal instead of silently wondering why the overlay didn't engage.
     info "Skipping .venv overlay — $WORK_DIR/.venv is a symlink"
 fi
-# Skill pack persistent state directories
+# Skill pack persistent state.
+#
+# gstack stores per-project state in ~/.gstack inside the container. Source
+# of truth: the workspace ($WORK_DIR/.gstack/), not $SANDBOX_DIR. This makes
+# state visible on the host alongside .git/ and .venv/, and keeps it tied to
+# the project rather than the sandbox identity (which can change if the
+# sandbox dir is rebuilt).
+#
+# One-shot migration: if the legacy $SANDBOX_DIR/gstack/ has content but the
+# new workspace location hasn't been touched, copy it over. The legacy dir
+# is renamed to .migrated rather than deleted in case the cp -a was partial
+# and the user wants to recover.
 case ",${SANDY_SKILL_PACKS:-}," in
-    *,gstack,*) mkdir -p "$SANDBOX_DIR/gstack" ;;  # ~/.gstack (project state, analytics)
+    *,gstack,*)
+        if [ -d "$SANDBOX_DIR/gstack" ] && [ ! -d "$WORK_DIR/.gstack" ]; then
+            if [ -n "$(ls -A "$SANDBOX_DIR/gstack" 2>/dev/null)" ]; then
+                info "migrating gstack state: $SANDBOX_DIR/gstack -> $WORK_DIR/.gstack"
+                mkdir -p "$WORK_DIR/.gstack"
+                cp -a "$SANDBOX_DIR/gstack/." "$WORK_DIR/.gstack/" 2>/dev/null || true
+                mv "$SANDBOX_DIR/gstack" "$SANDBOX_DIR/gstack.migrated" 2>/dev/null || true
+            fi
+        fi
+        # Ensure the bind-mount target exists. Docker would auto-create it
+        # as root otherwise; we want it owned by the workspace user instead.
+        mkdir -p "$WORK_DIR/.gstack"
+        # Nudge the user toward gitignoring it. Only nag in a git workspace,
+        # and only when not already ignored. Use `git check-ignore` if
+        # available so we honor patterns from any source (.gitignore,
+        # .git/info/exclude, parent .gitignores); fall back to a literal
+        # grep when git isn't around.
+        if [ -d "$WORK_DIR/.git" ] || [ -f "$WORK_DIR/.git" ]; then
+            _gstack_ignored=0
+            if command -v git >/dev/null 2>&1; then
+                if (cd "$WORK_DIR" && git check-ignore -q .gstack 2>/dev/null); then
+                    _gstack_ignored=1
+                fi
+            elif grep -qE '^\.gstack/?$' "$WORK_DIR/.gitignore" 2>/dev/null; then
+                _gstack_ignored=1
+            fi
+            if [ "$_gstack_ignored" -eq 0 ]; then
+                warn ".gstack/ is not gitignored in $WORK_DIR — gstack state will appear in git status."
+                warn "  Add '.gstack/' to .gitignore to suppress."
+            fi
+            unset _gstack_ignored
+        fi
+        ;;
 esac
 
 # Always refresh statsig cache (feature flags may have changed since sandbox was created)
@@ -3853,9 +3910,11 @@ RUN_FLAGS+=(-v "$SANDBOX_DIR/uv:/home/claude/.local/share/uv")
 RUN_FLAGS+=(-v "$SANDBOX_DIR/npm-global:/home/claude/.npm-global")
 RUN_FLAGS+=(-v "$SANDBOX_DIR/go:/home/claude/go")
 RUN_FLAGS+=(-v "$SANDBOX_DIR/cargo:/home/claude/.cargo")
-# Skill pack persistent state mounts
+# Skill pack persistent state mounts. gstack mounts from the workspace (not
+# the sandbox) — see the migration block above where $WORK_DIR/.gstack is
+# ensured to exist.
 case ",${SANDY_SKILL_PACKS:-}," in
-    *,gstack,*) RUN_FLAGS+=(-v "$SANDBOX_DIR/gstack:/home/claude/.gstack") ;;
+    *,gstack,*) RUN_FLAGS+=(-v "$WORK_DIR/.gstack:/home/claude/.gstack") ;;
 esac
 # SANDY_WORKSPACE was computed earlier (before Docker/network setup).
 # Map: host ~/dev/sandy → container /home/claude/dev/sandy.
