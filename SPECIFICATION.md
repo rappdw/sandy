@@ -264,7 +264,7 @@ Whenever `claude` is in `SANDY_AGENT`, sandy regenerates `<NAME>/claude/settings
 
 1. Base: read host `~/.claude/settings.json` (or start from `{}` if absent).
 2. Overlay: read the previous sandbox `<NAME>/claude/settings.json` (if it exists) and preserve `enabledPlugins` from it onto the base, so plugin installs survive across launches.
-3. Merge sandy-required defaults (`teammateMode`, `spinnerTipsEnabled`, `skipDangerousModePermissionPrompt`) if not already present.
+3. Merge sandy-required defaults (`teammateMode`, `spinnerTipsEnabled`, `skipDangerousModePermissionPrompt`) if not already present. When `SANDY_SKIP_PERMISSIONS=true` (the default), also set `permissions.defaultMode = "bypassPermissions"` (overwrite, not merge — toggling `SANDY_SKIP_PERMISSIONS` between launches reliably propagates). When `SANDY_SKIP_PERMISSIONS=false`, the key is removed if previously sandy-set. `permissions.disableBypassPermissionsMode` (host policy) is left alone.
 4. Merge `extraKnownMarketplaces` entries for `claude-plugins-official` and `sandy-plugins`; scrub deprecated entries (`thinkkit`, `ait`, `pka-skills`).
 5. Write the merged result back to `<NAME>/claude/settings.json`.
 6. (First run only) Copy host `~/.claude/.claude.json` → sandbox `<NAME>.claude.json`, stripping the `projects` key.

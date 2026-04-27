@@ -2010,7 +2010,13 @@ fi  # end Claude-only plugin/channel block
 build_claude_cmd() {
     local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-7} --teammate-mode tmux"
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
-        cmd+=" --dangerously-skip-permissions"
+        # Use --permission-mode (the documented modern flag) instead of the
+        # legacy --dangerously-skip-permissions. Claude 2.1.x added runtime
+        # gates around the legacy alias that can silently downgrade to
+        # default mode; --permission-mode sets the session mode directly.
+        # We also seed permissions.defaultMode in settings.json (see the
+        # settings.json seed block) so /status reflects the same mode.
+        cmd+=" --permission-mode bypassPermissions"
     fi
     if [ -n "${SANDY_CHANNELS:-}" ] && ! [[ "${SANDY_AGENT:-claude}" == *,* ]]; then
         # Native channels plugin path — only for single-agent claude sessions.
@@ -3192,6 +3198,18 @@ if _sandy_agent_has claude; then
             const skip = (process.env.SANDY_SKIP_PERMISSIONS || 'true') !== 'false';
             const defaults = {teammateMode:'tmux', spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:skip};
             for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
+            // Set permissions.defaultMode = bypassPermissions when SANDY_SKIP_PERMISSIONS=true.
+            // Claude 2.1.x runtime gates make the CLI flag insufficient; the settings.json
+            // value is the definitive source. We always set it (not //=) so toggling the
+            // env var between launches reliably propagates. permissions.disableBypassPermissionsMode
+            // is left alone — that's a host policy the user may have set deliberately.
+            if (skip) {
+                if (!s.permissions || typeof s.permissions !== 'object') s.permissions = {};
+                s.permissions.defaultMode = 'bypassPermissions';
+            } else if (s.permissions && s.permissions.defaultMode === 'bypassPermissions') {
+                // SANDY_SKIP_PERMISSIONS was flipped to false — clear the mode we set.
+                delete s.permissions.defaultMode;
+            }
             // Configure plugin marketplaces (idempotent); drop deprecated ones.
             if (!s.extraKnownMarketplaces) s.extraKnownMarketplaces = {};
             const required = {
@@ -3221,6 +3239,12 @@ if _sandy_agent_has claude; then
             .teammateMode //= "tmux" |
             .spinnerTipsEnabled //= false |
             .skipDangerousModePermissionPrompt //= ($skip == "true") |
+            (if $skip == "true"
+                then .permissions = ((.permissions // {}) | .defaultMode = "bypassPermissions")
+                elif (.permissions.defaultMode? // "") == "bypassPermissions"
+                    then del(.permissions.defaultMode)
+                else .
+                end) |
             (if $prev != null then .enabledPlugins = $prev else . end) |
             del(.extraKnownMarketplaces.thinkkit) |
             del(.extraKnownMarketplaces.ait) |
@@ -3233,7 +3257,11 @@ if _sandy_agent_has claude; then
         if [ ! -f "$SEED_SETTINGS" ]; then
             skip_perm="true"
             [ "${SANDY_SKIP_PERMISSIONS:-true}" = "false" ] && skip_perm="false"
-            printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":%s}\n' "$skip_perm" > "$SEED_SETTINGS"
+            if [ "$skip_perm" = "true" ]; then
+                printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$SEED_SETTINGS"
+            else
+                printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false}\n' > "$SEED_SETTINGS"
+            fi
         fi
     fi
     if [ "$SANDBOX_IS_NEW" = "true" ]; then
