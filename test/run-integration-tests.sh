@@ -824,7 +824,14 @@ elif [ "$HAS_CLAUDE" = true ] && [ "$HAS_GEMINI" = true ]; then
     _gemini_env=()
     [ -n "${GEMINI_API_KEY:-}" ] && _gemini_env+=("GEMINI_API_KEY=$GEMINI_API_KEY")
     _out="$(run_sandy_headless "${_gemini_env[@]+"${_gemini_env[@]}"}" -- -p "reply one word: first")"
-    if ! echo "$_out" | grep -qi "unknown flag\|error"; then
+    # Positive check: model must have responded with the requested word.
+    # Negative check: only sandy-level/flag-level failures, NOT bare "error" —
+    # gemini-cli logs an _ApiError stack trace on transient 503s before its
+    # own retry-with-backoff succeeds, and matching that as "error" here is a
+    # false positive (the session as a whole still works).
+    if [ -n "$_out" ] \
+       && echo "$_out" | grep -qi "first" \
+       && ! echo "$_out" | grep -qi "unknown flag"; then
         pass "gemini session works in switch test"
     else
         fail "gemini session works in switch test"

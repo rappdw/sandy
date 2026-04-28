@@ -2140,6 +2140,67 @@ check "privileged tier: ANTHROPIC_API_KEY honored" \
 check "privileged tier: SANDY_SSH honored" \
     bash -c 'echo "$1" | grep -q "^SANDY_SSH=agent$"' -- "$_PRIV_RESULT"
 
+# ============================================================
+# Env-var precedence: env vars set before any config load must win over
+# both privileged (host) and passive (workspace) config. Without this, a
+# `KEY=value sandy ...` prefix or shell-level export gets silently
+# overridden by config files — the integration test harness relies on
+# env-var precedence to inject SANDY_AGENT=codex over a user's
+# ~/.sandy/config that sets SANDY_AGENT=claude.
+# ============================================================
+_ENV_PREC_RESULT="$(
+    # shellcheck disable=SC1090
+    source "$_LOADER_SRC"
+    warn() { :; }
+    # Pretend the user invoked sandy with `SANDY_AGENT=codex sandy ...`.
+    # The snapshot must capture the env-set keys before the loader runs,
+    # so we re-run the snapshot here in the subshell with the env in place.
+    export SANDY_AGENT=codex
+    _SANDY_ENV_SET_KEYS=()
+    for _k in "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; do
+        if [ -n "${!_k:-}" ]; then
+            _SANDY_ENV_SET_KEYS+=("$_k")
+        fi
+    done
+    # Build a fixture with SANDY_AGENT=claude (privileged tier) and
+    # SANDY_AGENT=gemini (passive tier). Env (codex) should beat both.
+    _PRIV_FILE="$(mktemp)"
+    _PASS_FILE="$(mktemp)"
+    echo "SANDY_AGENT=claude" > "$_PRIV_FILE"
+    echo "SANDY_AGENT=gemini" > "$_PASS_FILE"
+    _load_sandy_config "$_PRIV_FILE" privileged
+    _load_sandy_config "$_PASS_FILE" passive
+    rm -f "$_PRIV_FILE" "$_PASS_FILE"
+    echo "SANDY_AGENT=$SANDY_AGENT"
+)"
+check "env precedence: env SANDY_AGENT beats host + workspace config" \
+    bash -c 'echo "$1" | grep -q "^SANDY_AGENT=codex$"' -- "$_ENV_PREC_RESULT"
+
+# Conversely: when env doesn't set SANDY_AGENT, workspace passive must
+# still beat host privileged (the per-project override still works).
+_ENV_PREC_RESULT2="$(
+    # shellcheck disable=SC1090
+    source "$_LOADER_SRC"
+    warn() { :; }
+    unset SANDY_AGENT
+    _SANDY_ENV_SET_KEYS=()
+    for _k in "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; do
+        if [ -n "${!_k:-}" ]; then
+            _SANDY_ENV_SET_KEYS+=("$_k")
+        fi
+    done
+    _PRIV_FILE="$(mktemp)"
+    _PASS_FILE="$(mktemp)"
+    echo "SANDY_AGENT=claude" > "$_PRIV_FILE"
+    echo "SANDY_AGENT=gemini" > "$_PASS_FILE"
+    _load_sandy_config "$_PRIV_FILE" privileged
+    _load_sandy_config "$_PASS_FILE" passive
+    rm -f "$_PRIV_FILE" "$_PASS_FILE"
+    echo "SANDY_AGENT=$SANDY_AGENT"
+)"
+check "env precedence: workspace passive still overrides host when env unset" \
+    bash -c 'echo "$1" | grep -q "^SANDY_AGENT=gemini$"' -- "$_ENV_PREC_RESULT2"
+
 rm -f "$TIER_TEST_FILE"
 
 # ============================================================
