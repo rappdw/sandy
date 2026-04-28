@@ -797,9 +797,23 @@ _sandy_emit_state() {
             if [ -d "$sb_lock_dir" ]; then
                 printf ','; _json_kv lock_held 'true'
                 printf ','; _json_kv lock_holder_pid "$(_json_escape "$sb_lock_pid")"
+                # lock_holder_alive: distinguishes "real lock" from "stale
+                # lock waiting to be cleared on next launch". true/false when
+                # we have a numeric PID; null when the file is missing or
+                # corrupt (and thus liveness is unknowable).
+                local sb_lock_alive='null'
+                if [ -n "$sb_lock_pid" ] && [ "$sb_lock_pid" -eq "$sb_lock_pid" ] 2>/dev/null; then
+                    if kill -0 "$sb_lock_pid" 2>/dev/null; then
+                        sb_lock_alive='true'
+                    else
+                        sb_lock_alive='false'
+                    fi
+                fi
+                printf ','; _json_kv lock_holder_alive "$sb_lock_alive"
             else
                 printf ','; _json_kv lock_held 'false'
                 printf ','; _json_kv lock_holder_pid 'null'
+                printf ','; _json_kv lock_holder_alive 'null'
             fi
             printf '}'
         done
@@ -2498,7 +2512,16 @@ ensure_agent_dockerfile() {
 ensure_build_files
 
 # --- Per-project sandbox directory ---
-WORK_DIR="$(pwd)"
+# Use `pwd -P` to canonicalize: resolves symlinks AND folds case-collisions
+# on case-insensitive filesystems (default macOS APFS). Without -P, `cd et`
+# and `cd ET` from the same parent directory would hash to different sandbox
+# names even though they point at the same physical workspace.
+#
+# WORK_DIR_LOGICAL captures the user-typed (logical) path so we can record it
+# in WORKSPACE.json when it differs — useful forensic detail for diagnosing
+# case/symlink mismatches later.
+WORK_DIR_LOGICAL="$(pwd)"
+WORK_DIR="$(pwd -P)"
 
 # Safe key-value config parser (no arbitrary code execution).
 #
@@ -2515,11 +2538,39 @@ WORK_DIR="$(pwd)"
 _PASSIVE_PRIVILEGED_PENDING=()
 _PASSIVE_PRIVILEGED_SOURCES=()
 
+# Snapshot which keys were already set in the process environment before any
+# config file was read. Subsequent _load_sandy_config calls skip these — env
+# vars take precedence over both host and workspace config files. This is the
+# canonical Unix tool semantic: explicit user input on the command line
+# (`KEY=value sandy ...` or shell-level export) wins over file-based config.
+#
+# Without the snapshot, the first call to _load_sandy_config would export
+# values that the second call would then see as "already set" — there'd be
+# no way to distinguish env-set from loader-set, so workspace config could
+# never override host config. The snapshot captures the original state once
+# and is consulted by every load.
+_SANDY_ENV_SET_KEYS=()
+_sandy_snapshot_env_keys() {
+    local _k
+    for _k in "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; do
+        if [ -n "${!_k:-}" ]; then
+            _SANDY_ENV_SET_KEYS+=("$_k")
+        fi
+    done
+}
+_sandy_snapshot_env_keys
+
 _load_sandy_config() {
     local file="$1"
     local tier="${2:-privileged}"
     [ -f "$file" ] || return 0
     while IFS='=' read -r key value; do
+        # Env wins: skip keys that were already set in the process env before
+        # any config loading. Honors `SANDY_AGENT=foo sandy ...`, `export …`
+        # in user shellrc, and CI/test harnesses that override via env.
+        if _key_in_list "$key" "${_SANDY_ENV_SET_KEYS[@]+"${_SANDY_ENV_SET_KEYS[@]}"}"; then
+            continue
+        fi
         value="${value#\"}" ; value="${value%\"}"
         value="${value#\'}" ; value="${value%\'}"
         case "$tier" in
@@ -2765,6 +2816,60 @@ DIR_BASE="${DIR_BASE:-project}"
 SANDBOX_NAME="${DIR_BASE}-${SHORT_HASH}"
 SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
 
+# Detect sibling sandboxes that point at the same workspace. The most common
+# cause is a pre-canonicalization (pre-pwd -P) launch from a different-case
+# `cd` on a case-insensitive filesystem; sandy now hashes the canonical path,
+# but pre-existing duplicates remain until the user removes them. We do NOT
+# auto-merge — sandbox state can be substantial (settings, plugins, package
+# caches) and the user is the right judge of which copy to keep.
+#
+# Detection has two paths:
+#   1. Modern: read each sibling's WORKSPACE.json marker (written below
+#      every launch) and compare its workspace_path against $WORK_DIR.
+#   2. Legacy: marker file is missing (sandbox predates this code), fall
+#      back to a heuristic — same case-insensitive basename prefix, different
+#      hash suffix. Almost always a case-collision.
+_sandy_siblings=()
+if [ -d "$SANDY_HOME/sandboxes" ]; then
+    for _sib in "$SANDY_HOME/sandboxes"/*/; do
+        [ -d "$_sib" ] || continue
+        _sib="${_sib%/}"
+        _sib_name="$(basename "$_sib")"
+        [ "$_sib_name" = "$SANDBOX_NAME" ] && continue
+        if [ -f "$_sib/WORKSPACE.json" ]; then
+            # Lightweight extract — avoid jq dependency. The writer is sandy,
+            # so the format is predictable: one "workspace_path": "..." line.
+            _sib_ws="$(grep -m1 '"workspace_path"' "$_sib/WORKSPACE.json" 2>/dev/null \
+                       | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//')"
+            if [ "$_sib_ws" = "$WORK_DIR" ]; then
+                _sandy_siblings+=("$_sib_name")
+            fi
+        else
+            # Legacy heuristic: pre-marker sandbox. Compare basename prefix
+            # case-insensitively against our DIR_BASE; require a different
+            # hash suffix.
+            _sib_base="${_sib_name%-*}"
+            _sib_hash="${_sib_name##*-}"
+            if [ "$(printf '%s' "$_sib_base" | tr '[:upper:]' '[:lower:]')" \
+                 = "$(printf '%s' "$DIR_BASE" | tr '[:upper:]' '[:lower:]')" ] \
+               && [ "$_sib_hash" != "$SHORT_HASH" ]; then
+                _sandy_siblings+=("$_sib_name (legacy — no WORKSPACE.json; likely case-collision)")
+            fi
+        fi
+    done
+fi
+if [ ${#_sandy_siblings[@]} -gt 0 ]; then
+    warn "Found ${#_sandy_siblings[@]} sandbox(es) that appear to point at this workspace:"
+    for _s in "${_sandy_siblings[@]}"; do
+        warn "  - $_s"
+    done
+    warn "  Sandy now canonicalizes the workspace path (pwd -P) to fold case-collisions"
+    warn "  on case-insensitive filesystems, but pre-existing duplicates won't auto-merge."
+    warn "  Keep the sandbox you've been using and remove the other(s):"
+    warn "    rm -rf $SANDY_HOME/sandboxes/<loser> $SANDY_HOME/sandboxes/.<loser>.lock"
+fi
+unset _sandy_siblings _sib _sib_name _sib_ws _sib_base _sib_hash _s
+
 # Compute container workspace path
 if [[ "$WORK_DIR" == "$HOME"/* ]]; then
     SANDY_WORKSPACE="/home/claude/${WORK_DIR#$HOME/}"
@@ -2979,17 +3084,41 @@ fi
 # it's atomic on every POSIX filesystem and needs no external dependency
 # (unlike flock, which macOS doesn't ship by default). The lock is released
 # by the cleanup trap on normal exit, Ctrl-C, or sandy crash. A SIGKILL
-# (OOM, `kill -9`) leaves the lock dir behind — the error message on the
-# next launch tells the user how to clear it.
+# (OOM, `kill -9`) leaves the lock dir behind — we recover from that here
+# by checking whether the recorded PID is still alive.
 mkdir -p "$SANDY_HOME/sandboxes"
 SANDY_WORKSPACE_LOCK="$SANDY_HOME/sandboxes/.${SANDBOX_NAME}.lock"
 if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
-    _holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || echo unknown)"
-    error "Another sandy is already running in this workspace (pid $_holder_pid)"
-    error "  Workspace: $WORK_DIR"
-    error "  If that process is dead, remove the stale lock:"
-    error "    rm -rf '$SANDY_WORKSPACE_LOCK'"
-    exit 1
+    _holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || true)"
+    # Auto-recover from stale locks: if we have a numeric PID and `kill -0`
+    # confirms it's not running, clear the lock and retry once. PID reuse is
+    # a theoretical concern (the OS could have recycled the PID to an
+    # unrelated process), but `kill -0` returning true on the recycled PID
+    # is the conservative outcome — we don't clear, fall through to the
+    # "another sandy is running" error, and the user fixes manually. False
+    # negative there is safer than a false positive that clobbers an active
+    # session. A non-numeric or empty PID file means the lock is corrupt
+    # (sandy died mid-write); leave it for the user to inspect manually.
+    if [ -n "$_holder_pid" ] && [ "$_holder_pid" -eq "$_holder_pid" ] 2>/dev/null \
+       && ! kill -0 "$_holder_pid" 2>/dev/null; then
+        info "Stale lock detected (pid $_holder_pid not running) — clearing."
+        rm -rf "$SANDY_WORKSPACE_LOCK"
+        if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
+            # Race: another sandy launched concurrently and grabbed the lock
+            # between our rm and mkdir. Treat as truly held.
+            _holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || echo unknown)"
+            error "Another sandy concurrently acquired the lock (pid $_holder_pid)"
+            error "  Workspace: $WORK_DIR"
+            exit 1
+        fi
+    else
+        _holder_display="${_holder_pid:-unknown}"
+        error "Another sandy is already running in this workspace (pid $_holder_display)"
+        error "  Workspace: $WORK_DIR"
+        error "  If that process is dead, remove the stale lock:"
+        error "    rm -rf '$SANDY_WORKSPACE_LOCK'"
+        exit 1
+    fi
 fi
 echo "$$" > "$SANDY_WORKSPACE_LOCK/pid"
 
@@ -3029,6 +3158,49 @@ else
     fi
 fi
 echo "$SANDY_VERSION" > "$_sandbox_last_ver_file"
+# WORKSPACE.json: human-readable forensic record of which workspace this
+# sandbox belongs to. Non-hidden (visible in plain `ls`) so it's obvious when
+# inspecting ~/.sandy/sandboxes/. Used by the sibling-detection block above
+# to identify duplicates. Refreshed every launch (last_seen_at, sandy_version
+# bumped) but first_seen_at is preserved across launches.
+#
+# Fields:
+#   schema_version    — bumped on incompatible changes to this file's shape
+#   sandbox_name      — the directory name, for sanity-check on rename
+#   workspace_path    — canonical path (output of pwd -P)
+#   workspace_path_uncanonicalized — present only when the user's typed path
+#                                    differs (case-collision or symlink)
+#   first_seen_at     — ISO-8601 UTC timestamp of first launch that wrote it
+#   last_seen_at      — ISO-8601 UTC timestamp of this launch
+#   sandy_version_first / sandy_version_last — bookends of which sandy
+#                       versions have ever launched against this sandbox
+_now="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
+_first_seen_at=""
+_first_sandy_version=""
+if [ -f "$SANDBOX_DIR/WORKSPACE.json" ]; then
+    _first_seen_at="$(grep -m1 '"first_seen_at"' "$SANDBOX_DIR/WORKSPACE.json" 2>/dev/null \
+                      | sed 's/.*"first_seen_at"[[:space:]]*:[[:space:]]*"//; s/".*//')"
+    _first_sandy_version="$(grep -m1 '"sandy_version_first"' "$SANDBOX_DIR/WORKSPACE.json" 2>/dev/null \
+                            | sed 's/.*"sandy_version_first"[[:space:]]*:[[:space:]]*"//; s/".*//')"
+fi
+[ -z "$_first_seen_at" ] && _first_seen_at="$_now"
+[ -z "$_first_sandy_version" ] && _first_sandy_version="$SANDY_VERSION"
+
+{
+    printf '{\n'
+    printf '  "schema_version": 1,\n'
+    printf '  "sandbox_name": %s,\n'   "$(_json_escape "$SANDBOX_NAME")"
+    printf '  "workspace_path": %s'    "$(_json_escape "$WORK_DIR")"
+    if [ -n "${WORK_DIR_LOGICAL:-}" ] && [ "$WORK_DIR_LOGICAL" != "$WORK_DIR" ]; then
+        printf ',\n  "workspace_path_uncanonicalized": %s' "$(_json_escape "$WORK_DIR_LOGICAL")"
+    fi
+    printf ',\n  "first_seen_at": %s,\n'        "$(_json_escape "$_first_seen_at")"
+    printf '  "last_seen_at": %s,\n'            "$(_json_escape "$_now")"
+    printf '  "sandy_version_first": %s,\n'     "$(_json_escape "$_first_sandy_version")"
+    printf '  "sandy_version_last": %s\n'       "$(_json_escape "$SANDY_VERSION")"
+    printf '}\n'
+} > "$SANDBOX_DIR/WORKSPACE.json"
+unset _now _first_seen_at _first_sandy_version
 
 # Auto-migrate v1 layout → v1.5 layout: v1 used $SANDBOX_DIR itself as the
 # Claude .claude/ root. v1.5 uses $SANDBOX_DIR/claude/ and $SANDBOX_DIR/gemini/

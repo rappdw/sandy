@@ -225,6 +225,7 @@ All three:
       "size_bytes": 123456789,
       "lock_held": false,
       "lock_holder_pid": null,
+      "lock_holder_alive": null,
       "compat_warning": null
     }
   ],

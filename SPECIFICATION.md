@@ -121,6 +121,8 @@ Later files override earlier values, subject to tier restrictions below.
 
 The config parser does **not** use `source`. It reads lines via `grep -E '^[A-Z_]+=.+'`, strips leading/trailing single and double quotes from values (in order: double then single), validates the key against a tier-specific allowlist, and exports only recognized keys. Lines not matching the grep pattern are silently ignored — this includes comments (`#`), blank lines, and lowercase keys. If the config file is unreadable or missing, loading silently succeeds.
 
+**Env-var precedence.** Before any `_load_sandy_config` call, sandy snapshots which keys are already set in the process environment (`_sandy_snapshot_env_keys` populates `_SANDY_ENV_SET_KEYS`). The loader checks every key against the snapshot and skips the export if the key was env-set. This guarantees env-var precedence: `SANDY_AGENT=codex sandy ...` and shell-level `export` win over both privileged (host) and passive (workspace) config files. Without the snapshot the first config load would export values that the second load would see as "already set," collapsing the workspace-overrides-host semantic. Final precedence: `--agent` CLI flag > env var > workspace passive > host privileged > sandy default.
+
 ### Config Tiers (1.0-rc1)
 
 Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `passive`). Privileged-tier sources may set any recognized key immediately. Passive-tier sources (the two workspace files) may set **passive-safe** keys immediately; any privileged-only key found in a passive source is **collected** into `_PASSIVE_PRIVILEGED_PENDING` rather than exported. After both passive sources load, `_resolve_passive_privileged_approval()` runs: it hashes the sorted `KEY=VALUE` set, checks `$SANDY_HOME/approvals/passive-<wd-hash>.list` (first line is the sha256 of the approved set), and either (a) silently exports if the hash matches, (b) prompts `y/N` on `/dev/tty` the first time with the exact KEY=VALUE list plus a rationale about repo-committed configs, or (c) fails closed in non-interactive mode (`_sandy_is_headless=true` or non-TTY stdin) with a pointer to "launch sandy interactively from this directory to approve." On approval, the file is written with the hash, a `# workspace:` comment, a `# approved:` timestamp, and the sorted KEY=VALUE lines, mode 600. Any edit to the workspace config that adds, removes, or changes a privileged key invalidates the hash and re-prompts on the next launch. Revocation is `rm` of the approval file. This prevents a malicious `.sandy/config` committed to a repo from disabling isolation, forwarding an SSH agent, or exfiltrating credentials without a deliberate, workspace-scoped user opt-in.
@@ -216,7 +218,26 @@ Compares only `SANDY_VERSION` (not hash) against GitHub release tags via `https:
 
 Each project directory gets a sandbox at `~/.sandy/sandboxes/<NAME>-<HASH>/`:
 - `<NAME>`: Sanitized `basename` of project directory (alphanumeric, dots, hyphens)
-- `<HASH>`: First 8 characters of SHA256 of the full project path
+- `<HASH>`: First 8 characters of SHA256 of the **canonicalized** project path (via `pwd -P` — resolves symlinks and folds case-collisions on case-insensitive filesystems)
+
+Each launch also writes `$SANDBOX_DIR/WORKSPACE.json` (non-hidden) — a structured forensic record of which workspace the sandbox belongs to. Fields:
+
+```json
+{
+  "schema_version": 1,
+  "sandbox_name": "myproject-a1b2c3d4",
+  "workspace_path": "/Users/dan/dev/myproject",
+  "workspace_path_uncanonicalized": "/Users/dan/dev/MyProject",  // optional
+  "first_seen_at": "2026-04-26T17:33:01Z",
+  "last_seen_at": "2026-04-27T09:14:22Z",
+  "sandy_version_first": "0.11.5-dev",
+  "sandy_version_last": "0.12.0-dev"
+}
+```
+
+`workspace_path_uncanonicalized` is present only when the user's typed `pwd` differs from the canonical `pwd -P` (a case-collision or symlinked alias) — useful when diagnosing why two sandboxes ended up with overlapping state. `first_seen_at` is preserved across launches; the `_last` fields refresh on every launch.
+
+On launch, sandy scans sibling sandbox directories: any whose `workspace_path` field matches the current `WORK_DIR` is reported as a likely duplicate via `warn`. For legacy sandboxes lacking `WORKSPACE.json` entirely, sandy falls back to a heuristic: case-insensitive `<NAME>` match with a different `<HASH>`. Detection is read-only — sandy never auto-merges sandbox state, since accumulated settings/plugins/package caches make manual review the right call.
 
 ### Directory Layout
 
@@ -1835,13 +1856,20 @@ Only one sandy may run against a given workspace at a time. Early in launch (aft
 mkdir -p "$SANDY_HOME/sandboxes"
 SANDY_WORKSPACE_LOCK="$SANDY_HOME/sandboxes/.${SANDBOX_NAME}.lock"
 if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
-    # error: another sandy is already running in this workspace (pid <holder>)
-    exit 1
+    holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || true)"
+    if numeric_and_dead "$holder_pid"; then
+        # Auto-clear stale lock; rm -rf + retry mkdir
+    else
+        # error: another sandy is already running in this workspace (pid <holder>)
+        exit 1
+    fi
 fi
 echo "$$" > "$SANDY_WORKSPACE_LOCK/pid"
 ```
 
-`mkdir` is used as the lock primitive because it is atomic on every POSIX filesystem and requires no external dependency (unlike `flock(1)`, which is not shipped on macOS by default). The lock dir is released by the cleanup trap (`trap cleanup EXIT INT TERM HUP`) on normal exit, Ctrl-C, or sandy crash. A SIGKILL (OOM, `kill -9`) leaves the lock dir behind — the error message on the next launch names the holding pid and the clear command (`rm -rf $SANDY_WORKSPACE_LOCK`).
+`mkdir` is used as the lock primitive because it is atomic on every POSIX filesystem and requires no external dependency (unlike `flock(1)`, which is not shipped on macOS by default). The lock dir is released by the cleanup trap (`trap cleanup EXIT INT TERM HUP`) on normal exit, Ctrl-C, or sandy crash. A SIGKILL (OOM, `kill -9`) leaves the lock dir behind, but sandy's next launch reads `$LOCK/pid`, probes liveness via `kill -0 <pid>`, and auto-clears the lock when the holder is gone (and reacquires via a second `mkdir`). PID reuse is a theoretical concern — if the OS recycled the holder's PID to an unrelated process, `kill -0` returns true and sandy errors out (false-positive "still held"); the user clears manually. The conservative default is preferred over a false negative that would clobber an active session.
+
+A non-numeric or empty `$LOCK/pid` (corrupt — sandy died mid-write) is left for the user to inspect; auto-clear refuses to act on it.
 
 Rationale: two agents editing the same codebase would step on each other's edits, and the sandbox-seeding / venv-materialization code paths assume exclusive ownership. Deliberate parallelism should use separate workspaces.
 
