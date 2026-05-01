@@ -1142,8 +1142,9 @@ Flags:
   --remote           Start in remote-control server mode
   --upgrade          Update sandy to the latest version
   --agent <list>     Agent(s) to launch (overrides SANDY_AGENT and
-                     .sandy/config). Comma-separated for multi-agent,
-                     e.g. --agent claude,gemini or --agent=claude,codex
+                     .sandy/config). One of: claude, gemini, codex,
+                     opencode. Comma-separated for multi-agent,
+                     e.g. --agent claude,gemini or --agent=claude,opencode
   -v                 Verbose: show startup sections, pause on exit
   -vv                Debug: add bash trace to user-setup.sh
   -vvv               Full trace: also trace entrypoint.sh and show docker flags
