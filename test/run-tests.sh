@@ -2947,12 +2947,12 @@ d=json.load(open(sys.argv[1]))
 for k in d[\"config\"][\"privileged_keys\"]:
     assert k.get(\"passive_approval_required\") is True, k[\"name\"]
 " "$1"' -- "$_SCHEMA_JSON"
-check "schema lists all three agents (claude,gemini,codex)" \
+check "schema lists all four agents (claude,gemini,codex,opencode)" \
     bash -c 'python3 -c "
 import json,sys
 d=json.load(open(sys.argv[1]))
 names=[a[\"name\"] for a in d[\"agents\"]]
-assert set(names)=={\"claude\",\"gemini\",\"codex\"}
+assert set(names)=={\"claude\",\"gemini\",\"codex\",\"opencode\"}
 " "$1"' -- "$_SCHEMA_JSON"
 check "schema cli_flags includes --print-schema" \
     bash -c 'python3 -c "
