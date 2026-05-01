@@ -10,3 +10,6 @@
 [submodule "research/gstack"]
 	path = research/gstack
 	url = git@github.com:rappdw/gstack.git
+[submodule "research/alice"]
+	path = research/alice
+	url = git@github.com:jcronq/alice.git
