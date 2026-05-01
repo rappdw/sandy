@@ -3418,6 +3418,21 @@ if _sandy_agent_has gemini; then
     fi
 fi
 
+if _sandy_agent_has opencode; then
+    # OpenCode straddles two XDG paths: ~/.config/opencode (config) and
+    # ~/.local/share/opencode (auth + state). Mount both as siblings under
+    # one parent dir, preserving the "one subdir per agent" invariant.
+    mkdir -p "$SANDBOX_DIR/opencode/config" "$SANDBOX_DIR/opencode/share"
+    # Seed opencode.json from host's ~/.config/opencode/ if present (first run
+    # only). The config carries provider/model preferences and any local-LLM
+    # baseURL the user wired up on the host.
+    if [ ! -f "$SANDBOX_DIR/opencode/config/opencode.json" ] \
+       && [ -f "$HOME/.config/opencode/opencode.json" ]; then
+        cp "$HOME/.config/opencode/opencode.json" "$SANDBOX_DIR/opencode/config/opencode.json"
+        info "  Seeded .config/opencode/opencode.json"
+    fi
+fi
+
 # Seed Claude settings.json directly into $SANDBOX_DIR/claude/settings.json
 # (rw via the parent $SANDBOX_DIR/claude mount — no :ro overlay). Regenerated
 # on every launch with merge-preserving semantics:
@@ -3871,6 +3886,9 @@ cleanup() {
     if [ -n "${CODEX_CRED_TMPDIR:-}" ]; then
         rm -rf "$CODEX_CRED_TMPDIR"
     fi
+    if [ -n "${OPENCODE_CRED_TMPDIR:-}" ]; then
+        rm -rf "$OPENCODE_CRED_TMPDIR"
+    fi
     if [ -n "${SSH_RELAY_PID:-}" ]; then
         kill "$SSH_RELAY_PID" 2>/dev/null || true
     fi
@@ -3972,6 +3990,7 @@ except Exception:
 # When set via .sandy/config or .sandy/.secrets, skip the entire credential file flow.
 CRED_TMPDIR=""
 GEMINI_CRED_TMPDIR=""
+OPENCODE_CRED_TMPDIR=""
 GEMINI_ADC_MOUNT=""
 CODEX_CRED_TMPDIR=""
 
@@ -4064,12 +4083,46 @@ load_codex_credentials() {
     warn "No Codex credentials found. Set OPENAI_API_KEY, or run 'codex login' on host."
 }
 
+# OpenCode credential probe. Unlike claude/gemini/codex which each have one
+# canonical credential file, OpenCode is provider-agnostic — the user picks
+# a provider in opencode.json and supplies that provider's API key via env
+# var (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc., already exported by sandy's
+# config loader). This loader's only job is the OAuth path: mount the
+# host's ~/.local/share/opencode/auth.json read-only if present.
+load_opencode_credentials() {
+    local mode="${SANDY_OPENCODE_AUTH:-auto}"
+    if [ "$mode" = "api_key" ] || [ "$mode" = "auto" ]; then
+        # Any of the common provider keys is sufficient. Don't enumerate —
+        # just acknowledge that opencode picks them up from the env directly.
+        if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] \
+           || [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GROQ_API_KEY:-}" ]; then
+            info "Using provider API key from env for OpenCode"
+            # Don't return — the host auth.json may also be present and useful.
+        fi
+    fi
+    if [ "$mode" = "oauth" ] || [ "$mode" = "auto" ]; then
+        if [ -f "$HOME/.local/share/opencode/auth.json" ]; then
+            OPENCODE_CRED_TMPDIR="$(mktemp -d)"
+            cp "$HOME/.local/share/opencode/auth.json" "$OPENCODE_CRED_TMPDIR/auth.json"
+            chmod 600 "$OPENCODE_CRED_TMPDIR/auth.json"
+            info "Loaded OpenCode auth.json from host (read-only mount)"
+            return 0
+        fi
+    fi
+    # No warning — env-var-only auth is fully supported and very common
+    # (e.g. ANTHROPIC_API_KEY pointing opencode at Claude).
+}
+
 if _sandy_agent_has gemini; then
     load_gemini_credentials
 fi
 
 if _sandy_agent_has codex; then
     load_codex_credentials
+fi
+
+if _sandy_agent_has opencode; then
+    load_opencode_credentials
 fi
 
 if ! _sandy_agent_has claude; then
@@ -4203,6 +4256,15 @@ if _sandy_agent_has codex; then
         # stale-token-on-exit race. In-session refresh will fail; user
         # must re-login inside the container if the token expires.
         RUN_FLAGS+=(-v "$CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro")
+    fi
+fi
+if _sandy_agent_has opencode; then
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/opencode/config:/home/claude/.config/opencode")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/opencode/share:/home/claude/.local/share/opencode")
+    if [ -n "${OPENCODE_CRED_TMPDIR:-}" ]; then
+        # :ro — same rationale as codex/gemini OAuth mounts: prevents
+        # token leakage back to host and stale-token-on-exit races.
+        RUN_FLAGS+=(-v "$OPENCODE_CRED_TMPDIR/auth.json:/home/claude/.local/share/opencode/auth.json:ro")
     fi
 fi
 # Persistent package environment mounts
@@ -4682,6 +4744,27 @@ if _sandy_agent_has codex; then
     fi
     if [ -n "${SANDY_CODEX_AUTH:-}" ]; then
         RUN_FLAGS+=(-e "SANDY_CODEX_AUTH=$SANDY_CODEX_AUTH")
+    fi
+fi
+if _sandy_agent_has opencode; then
+    # Provider API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY)
+    # are already forwarded by the per-agent blocks above when the matching
+    # agent is also active. For opencode-solo sessions, forward any provider
+    # keys the user has set so they reach the agent.
+    if ! _sandy_agent_has claude && [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+    fi
+    if ! _sandy_agent_has codex && [ -n "${OPENAI_API_KEY:-}" ]; then
+        RUN_FLAGS+=(-e "OPENAI_API_KEY=$OPENAI_API_KEY")
+    fi
+    if ! _sandy_agent_has gemini && [ -n "${GEMINI_API_KEY:-}" ]; then
+        RUN_FLAGS+=(-e "GEMINI_API_KEY=$GEMINI_API_KEY")
+    fi
+    if [ -n "${OPENCODE_MODEL:-}" ]; then
+        RUN_FLAGS+=(-e "OPENCODE_MODEL=$OPENCODE_MODEL")
+    fi
+    if [ -n "${SANDY_OPENCODE_AUTH:-}" ]; then
+        RUN_FLAGS+=(-e "SANDY_OPENCODE_AUTH=$SANDY_OPENCODE_AUTH")
     fi
 fi
 
