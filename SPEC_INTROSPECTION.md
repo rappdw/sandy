@@ -107,7 +107,7 @@ All three:
         "name": "SANDY_AGENT",
         "type": "agent_combo",
         "default": "claude",
-        "description": "Comma-separated agent list. 'all' is an alias for 'claude,gemini,codex'.",
+        "description": "Comma-separated agent list. 'all' is an alias for 'claude,gemini,codex,opencode'.",
         "sources": ["home_config", "workspace_config", "env"]
       }
     ],
@@ -178,6 +178,14 @@ All three:
       "features": ["skills_context"],
       "credentials": {
         "probe_order": ["OPENAI_API_KEY", "host_auth_json"]
+      }
+    },
+    {
+      "name": "opencode",
+      "image": "sandy-opencode",
+      "features": ["local_llm_passthrough", "provider_choice"],
+      "credentials": {
+        "probe_order": ["provider_env_keys", "host_auth_json"]
       }
     }
   ],

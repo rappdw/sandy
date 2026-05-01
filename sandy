@@ -2284,7 +2284,7 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
         tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1"
     fi
 else
-    # --- Multi-agent launch (2 or 3 panes) ---
+    # --- Multi-agent launch (2-4 panes) ---
     if [ "$_sandy_is_headless" = "true" ]; then
         # Headless mode with multi-agent: route to first agent only.
         _first="${_SANDY_AGENTS[0]}"
@@ -2308,6 +2308,13 @@ else
     if [ "$_SANDY_AGENT_COUNT" -ge 3 ]; then
         _cmd2="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[2]}" "$@")"
         tmux split-window -v -t sandy.1 -- bash -c "$_cmd2 2>&1"
+    fi
+
+    # Fourth agent (if present): split the left pane vertically → 2x2 grid.
+    # Layout: 0 top-left, 1 top-right, 2 bottom-right, 3 bottom-left.
+    if [ "$_SANDY_AGENT_COUNT" -ge 4 ]; then
+        _cmd3="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[3]}" "$@")"
+        tmux split-window -v -t sandy.0 -- bash -c "$_cmd3 2>&1"
     fi
 
     tmux select-pane -t sandy.0

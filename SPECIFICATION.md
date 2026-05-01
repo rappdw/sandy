@@ -245,7 +245,7 @@ On launch, sandy scans sibling sandbox directories: any whose `workspace_path` f
 
 ### Directory Layout
 
-As of v0.9.0, the sandbox directory contains **sibling** per-agent subdirs (`claude/`, `gemini/`, and `codex/` — the last added in v0.10.0) so any multi-agent combo can coexist in the same sandbox. Each subdir is mounted at `~/.claude`, `~/.gemini`, and `~/.codex` inside the container respectively.
+As of v0.9.0, the sandbox directory contains **sibling** per-agent subdirs (`claude/`, `gemini/`, `codex/` — the last added in v0.10.0 — and `opencode/` — added in v0.13.0) so any multi-agent combo can coexist in the same sandbox. The first three are mounted at `~/.claude`, `~/.gemini`, and `~/.codex` inside the container; OpenCode straddles two XDG paths and uses sibling `opencode/config/` and `opencode/share/` subdirs mounted at `~/.config/opencode` and `~/.local/share/opencode` respectively.
 
 ```
 ~/.sandy/sandboxes/<name>-<hash>/
@@ -833,7 +833,7 @@ Sandy wraps Claude Code in a tmux session:
 
 ### Multi-Agent Mode (comma-separated `SANDY_AGENT`)
 
-When `SANDY_AGENT` contains more than one agent (e.g. `claude,gemini`, `claude,codex`, `claude,gemini,codex`, or the alias `all`), the user-setup script creates a tmux session with one horizontally split pane per agent, in the order listed. The launch logic is factored into per-agent helpers (`build_claude_cmd()`, `build_gemini_cmd()`, `build_codex_cmd()`) so single-agent and multi-agent paths share the same command construction. Each pane is an independent process; exiting one leaves the others running.
+When `SANDY_AGENT` contains more than one agent (e.g. `claude,gemini`, `claude,codex`, `claude,gemini,codex,opencode`, or the alias `all`), the user-setup script creates a tmux session with one pane per agent, in the order listed. Layouts: 2 agents → side-by-side; 3 agents → left half + top-right + bottom-right; 4 agents → 2×2 grid (top-left, top-right, bottom-right, bottom-left in pane-index order). The launch logic is factored into per-agent helpers (`build_claude_cmd()`, `build_gemini_cmd()`, `build_codex_cmd()`, `build_opencode_cmd()`) so single-agent and multi-agent paths share the same command construction. Each pane is an independent process; exiting one leaves the others running.
 
 The previous `both` alias (= `claude,gemini`) was removed in `v0.12` once the comma-separated syntax supported every combination. Using it now exits early with an error message pointing at the new syntax.
 
@@ -847,7 +847,7 @@ The previous `both` alias (= `claude,gemini`) was removed in `v0.12` once the co
 
 With `--remote`: no tmux wrapper, launches `claude remote-control --name "sandy: <PROJECT_NAME>"`. Browser/phone can connect to control the session.
 
-**Only supported with `SANDY_AGENT=claude`.** Gemini CLI has no native WebSocket/daemon mode, and codex's `mcp-server`/`app-server` modes don't map cleanly to Claude's session-based `--remote` contract; `--remote` with any other value — `gemini`, `codex`, or any multi-agent combo — exits with an error. Tracked as a future enhancement pending upstream support.
+**Only supported with `SANDY_AGENT=claude`.** Gemini CLI has no native WebSocket/daemon mode, codex's `mcp-server`/`app-server` modes don't map cleanly to Claude's session-based `--remote` contract, and OpenCode has no equivalent yet; `--remote` with any other value — `gemini`, `codex`, `opencode`, or any multi-agent combo — exits with an error. Tracked as a future enhancement pending upstream support.
 
 ### Terminal Notifications
 
@@ -930,7 +930,7 @@ The `thinkkit`, `ait`, and `pka-skills` marketplaces are automatically removed o
 
 ### Built-in Slash Commands (synthkit)
 
-If synthkit is installed, `user-setup.sh` creates four slash commands in `~/.claude/commands/` (Claude, Markdown), `~/.gemini/commands/` (Gemini, TOML), and/or `~/.codex/skills/<name>/SKILL.md` (Codex, Markdown with YAML frontmatter):
+If synthkit is installed, `user-setup.sh` creates four slash commands in `~/.claude/commands/` (Claude, Markdown), `~/.gemini/commands/` (Gemini, TOML), and/or `~/.codex/skills/<name>/SKILL.md` (Codex, Markdown with YAML frontmatter). OpenCode does not yet have synthkit auto-discovery in v0.13 — `md2pdf`/`md2doc`/`md2html`/`md2email` are still on `PATH` inside the `sandy-opencode` image, but no commands or skill files are created for OpenCode automatically.
 - `/md2pdf` — Convert markdown to PDF
 - `/md2doc` — Convert markdown to Word (.docx)
 - `/md2html` — Convert markdown to HTML
@@ -955,10 +955,10 @@ Sandy supports Claude Code channels (Telegram, Discord) via two distinct paths:
 
 **Support matrix**:
 
-| Channel | `claude` | `gemini` | `codex` | multi-agent |
-|---|---|---|---|---|
-| Telegram | in-container plugin | host relay | host relay | host relay |
-| Discord | in-container plugin | — | — | — |
+| Channel | `claude` | `gemini` | `codex` | `opencode` | multi-agent |
+|---|---|---|---|---|---|
+| Telegram | in-container plugin | host relay | host relay | host relay (untested in v0.13) | host relay |
+| Discord | in-container plugin | — | — | — | — |
 
 ### In-Container Plugin Setup (Claude)
 
@@ -970,7 +970,7 @@ For each configured channel:
    - `"dmPolicy": "allowlist"` + populated `allowFrom` (if `ALLOWED_SENDERS` set)
    - `"dmPolicy": "pairing"` (if no allowlist, user pairs via `/telegram:access pair <code>`)
 
-### Host-Side Channel Relay (Gemini / Codex / Multi-agent)
+### Host-Side Channel Relay (Gemini / Codex / OpenCode / Multi-agent)
 
 `$SANDY_HOME/channel-relay.sh` is a generated bash script that long-polls the Telegram Bot API (`getUpdates`), filters messages by `TELEGRAM_ALLOWED_SENDERS`, and injects them into the container tmux session via:
 
@@ -989,7 +989,7 @@ Both Telegram and Discord can be enabled simultaneously with `SANDY_AGENT=claude
 SANDY_CHANNELS=plugin:telegram@claude-plugins-official plugin:discord@claude-plugins-official
 ```
 
-With any non-`claude` value (single `gemini`/`codex` or any multi-agent combo), only Telegram is currently supported through the relay; `SANDY_CHANNELS=discord` exits with an error.
+With any non-`claude` value (single `gemini`/`codex`/`opencode` or any multi-agent combo), only Telegram is currently supported through the relay; `SANDY_CHANNELS=discord` exits with an error.
 
 ---
 

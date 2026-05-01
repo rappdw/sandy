@@ -13,7 +13,7 @@ bash test/run-integration-tests.sh  # headless end-to-end, needs Docker + API ke
 
 - Docker running
 - All automated tests passing
-- API keys for agents you want to test (codex, gemini, claude)
+- API keys for agents you want to test (codex, gemini, claude, opencode)
 
 ---
 
@@ -240,12 +240,60 @@ sandy
 
 ```sh
 # Test all three agents
-echo 'SANDY_AGENT=all' > .sandy/config
+echo 'SANDY_AGENT=claude,gemini,codex' > .sandy/config
 sandy
 ```
 
 - [x] Three panes: Claude (pane 0, left), Gemini (pane 1, top-right), Codex (pane 2, bottom-right)
 - [x] Each pane has its own prompt and responds independently
+
+```sh
+# Test all four agents (claude + gemini + codex + opencode in 2x2 grid)
+echo 'SANDY_AGENT=all' > .sandy/config
+sandy
+```
+
+- [ ] Four panes in a 2×2 grid: Claude (top-left, pane 0), Gemini (top-right, pane 1), Codex (bottom-right, pane 2), OpenCode (bottom-left, pane 3)
+- [ ] Each pane has its own prompt and responds independently
+
+---
+
+# 4b. OpenCode interactive (`SANDY_AGENT=opencode`)
+
+## 4b.1 Provider via env var
+
+```sh
+mkdir -p ~/sandy-test-opencode && cd ~/sandy-test-opencode
+git init -q
+mkdir -p .sandy && echo 'SANDY_AGENT=opencode' > .sandy/config
+# Use whichever provider key you have:
+#   ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY
+sandy
+```
+
+- [ ] OpenCode TUI launches without an auth prompt
+- [ ] A simple "say hi" prompt returns a response
+- [ ] `~/.config/opencode/opencode.json` exists in the sandbox
+
+## 4b.2 Local LLM passthrough (Linux + Ollama)
+
+**Prereq**: Ollama running on host port 11434 with at least one model pulled (e.g. `ollama pull gemma2:2b`).
+
+```sh
+cd ~/sandy-test-opencode
+cat > .sandy/config <<EOF
+SANDY_AGENT=opencode
+SANDY_LOCAL_LLM_HOST=127.0.0.1:11434
+EOF
+sandy
+```
+
+Inside the session, edit `~/.config/opencode/opencode.json` to add an Ollama provider with `baseURL: "http://host.docker.internal:11434/v1"`.
+
+- [ ] `[sandy] Allowed local LLM: <gw>:11434 (host.docker.internal mapped)` appears at launch
+- [ ] `curl http://host.docker.internal:11434/api/tags` succeeds inside the container
+- [ ] `curl http://192.168.1.1` still fails (LAN block intact)
+- [ ] OpenCode answers a prompt using the local model
 
 ---
 
@@ -274,9 +322,9 @@ sandy
 # Cleanup
 
 ```sh
-rm -rf ~/sandy-test-claude ~/sandy-test-gemini ~/sandy-test-both ~/sandy-test-codex
+rm -rf ~/sandy-test-claude ~/sandy-test-gemini ~/sandy-test-both ~/sandy-test-codex ~/sandy-test-opencode
 rm -rf ~/.sandy/sandboxes/sandy-test-*
-docker rmi sandy-gemini-cli sandy-both sandy-codex 2>/dev/null || true
+docker rmi sandy-gemini-cli sandy-both sandy-codex sandy-opencode 2>/dev/null || true
 ```
 
 ---
