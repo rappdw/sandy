@@ -2807,6 +2807,30 @@ if [ -n "${SANDY_ALLOW_LAN_HOSTS:-}" ]; then
     done
 fi
 
+# Validate SANDY_LOCAL_LLM_HOST (host:port). Same world-open guard, plus a
+# format check so a misconfigured value fails fast rather than producing a
+# malformed iptables rule. Splits into _SANDY_LLM_HOST and _SANDY_LLM_PORT
+# for downstream use in apply/cleanup_network_isolation.
+_SANDY_LLM_HOST=""
+_SANDY_LLM_PORT=""
+if [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
+    if [[ ! "$SANDY_LOCAL_LLM_HOST" =~ ^[^[:space:]]+:[0-9]+$ ]]; then
+        echo "[sandy] ERROR: SANDY_LOCAL_LLM_HOST='$SANDY_LOCAL_LLM_HOST' is not in host:port format" >&2
+        exit 1
+    fi
+    _SANDY_LLM_HOST="${SANDY_LOCAL_LLM_HOST%:*}"
+    _SANDY_LLM_PORT="${SANDY_LOCAL_LLM_HOST##*:}"
+    case "$_SANDY_LLM_HOST" in
+        0.0.0.0|::|"")
+            echo "[sandy] ERROR: SANDY_LOCAL_LLM_HOST host portion is world-open or empty: '$_SANDY_LLM_HOST'" >&2
+            exit 1 ;;
+    esac
+    if [ "$_SANDY_LLM_PORT" -lt 1 ] || [ "$_SANDY_LLM_PORT" -gt 65535 ]; then
+        echo "[sandy] ERROR: SANDY_LOCAL_LLM_HOST port out of range: $_SANDY_LLM_PORT" >&2
+        exit 1
+    fi
+fi
+
 # --- Resolve agent ---
 # CLI --agent flag wins over all config sources (per-project, user, env)
 [ -n "$SANDY_AGENT_OVERRIDE" ] && SANDY_AGENT="$SANDY_AGENT_OVERRIDE"
@@ -3068,6 +3092,7 @@ fi
 
 # --- Ensure the per-instance isolated network exists ---
 CONTAINER_SUBNET=""
+CONTAINER_GATEWAY=""
 ensure_network() {
     info "Creating isolated network..."
     docker network create \
@@ -3075,8 +3100,9 @@ ensure_network() {
         --ipv6=false \
         -o com.docker.network.bridge.name="$BRIDGE_NAME" \
         "$NETWORK_NAME" >/dev/null
-    # Query the dynamically-assigned subnet and bridge name
+    # Query the dynamically-assigned subnet, gateway, and bridge name
     CONTAINER_SUBNET="$(docker network inspect "$NETWORK_NAME" --format '{{(index .IPAM.Config 0).Subnet}}')"
+    CONTAINER_GATEWAY="$(docker network inspect "$NETWORK_NAME" --format '{{(index .IPAM.Config 0).Gateway}}')"
     BRIDGE_NAME="$(docker network inspect "$NETWORK_NAME" --format '{{index .Options "com.docker.network.bridge.name"}}')"
 }
 
@@ -3789,6 +3815,13 @@ apply_network_isolation() {
                 info "  Allowed LAN host: $_host"
             done
         fi
+        # Local LLM hole: allow tcp to host gateway IP at the configured port
+        # only. Belt-and-suspenders alongside the CONTAINER_SUBNET ACCEPT below
+        # — explicit and narrow, so the rule is auditable in isolation.
+        if [ -n "${SANDY_LOCAL_LLM_HOST:-}" ] && [ -n "$CONTAINER_GATEWAY" ]; then
+            sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -p tcp -d "$CONTAINER_GATEWAY" --dport "$_SANDY_LLM_PORT" -j ACCEPT 2>/dev/null || true
+            info "  Allowed local LLM: ${CONTAINER_GATEWAY}:${_SANDY_LLM_PORT} (host.docker.internal mapped)"
+        fi
         # Inserted last → lands at top → evaluated first: allow container's own subnet
         sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d "$CONTAINER_SUBNET" -j ACCEPT 2>/dev/null || true
         info "Network isolation rules applied."
@@ -3813,6 +3846,9 @@ cleanup_network_isolation() {
     if [[ "$OS" == "Linux" ]] && [ -n "$CONTAINER_SUBNET" ]; then
         info "Cleaning up network isolation rules..."
         sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -d "$CONTAINER_SUBNET" -j ACCEPT 2>/dev/null || true
+        if [ -n "${SANDY_LOCAL_LLM_HOST:-}" ] && [ -n "$CONTAINER_GATEWAY" ]; then
+            sudo iptables -D DOCKER-USER -i "$BRIDGE_NAME" -p tcp -d "$CONTAINER_GATEWAY" --dport "$_SANDY_LLM_PORT" -j ACCEPT 2>/dev/null || true
+        fi
         if [ -n "${SANDY_ALLOW_LAN_HOSTS:-}" ]; then
             IFS=',' read -ra _lan_hosts <<< "$SANDY_ALLOW_LAN_HOSTS"
             for _host in "${_lan_hosts[@]}"; do
@@ -4198,14 +4234,22 @@ if [[ "$OS" != "Linux" ]]; then
     RUN_FLAGS+=(--add-host "gateway.docker.internal:127.0.0.1")
     RUN_FLAGS+=(--add-host "metadata.google.internal:127.0.0.1")
     # host.docker.internal is trickier — sandy's own in-container SSH agent
-    # relay uses it to reach the host-side socat. Only nullify when SSH agent
-    # mode is NOT active.
-    if [[ "${SANDY_SSH:-token}" != "agent" ]]; then
+    # relay uses it to reach the host-side socat. Also leave it alone when
+    # SANDY_LOCAL_LLM_HOST is set (the user explicitly wants it to resolve).
+    # On macOS, Docker Desktop sets host.docker.internal automatically, so
+    # no --add-host is needed to ENABLE it — only to nullify it.
+    if [[ "${SANDY_SSH:-token}" != "agent" ]] && [ -z "${SANDY_LOCAL_LLM_HOST:-}" ]; then
         RUN_FLAGS+=(--add-host "host.docker.internal:127.0.0.1")
-    else
+    elif [[ "${SANDY_SSH:-token}" == "agent" ]]; then
         warn "SSH agent mode active — host.docker.internal not nullified on $OS"
         warn "  (sandy's own agent relay depends on this hostname reaching the host)"
     fi
+elif [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
+    # Linux Docker does NOT auto-resolve host.docker.internal — it requires
+    # an explicit --add-host. Map it to host-gateway (the bridge gateway IP)
+    # so opencode and friends can reach a local LLM listening on the gateway
+    # (or, with appropriate user-side configuration, the host's localhost).
+    RUN_FLAGS+=(--add-host "host.docker.internal:host-gateway")
 fi
 # GPU passthrough (requires NVIDIA Container Toolkit on host)
 if [ -n "${SANDY_GPU:-}" ]; then
@@ -4765,6 +4809,9 @@ if _sandy_agent_has opencode; then
     fi
     if [ -n "${SANDY_OPENCODE_AUTH:-}" ]; then
         RUN_FLAGS+=(-e "SANDY_OPENCODE_AUTH=$SANDY_OPENCODE_AUTH")
+    fi
+    if [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
+        RUN_FLAGS+=(-e "SANDY_LOCAL_LLM_HOST=$SANDY_LOCAL_LLM_HOST")
     fi
 fi
 
