@@ -109,33 +109,39 @@ Additionally, `SANDY_ALLOW_LAN_HOSTS` is validated at use-site to reject world-o
 
 ## Agent Selection
 
-Sandy supports Claude Code (default), Gemini CLI, OpenAI Codex CLI, or **any combination side-by-side in multi-pane tmux**, selectable per-project via `SANDY_AGENT` in `.sandy/config`:
+Sandy supports Claude Code (default), Gemini CLI, OpenAI Codex CLI, OpenCode (sst/opencode), or **any combination side-by-side in multi-pane tmux**, selectable per-project via `SANDY_AGENT` in `.sandy/config`:
 
 ```sh
-SANDY_AGENT=gemini              # single agent: claude (default), gemini, codex
-SANDY_AGENT=claude,codex        # any comma-separated combo (2 or 3 agents)
-SANDY_AGENT=claude,gemini,codex # all three in a 3-pane layout
-SANDY_AGENT=all                 # alias for claude,gemini,codex
+SANDY_AGENT=gemini                      # single agent: claude (default), gemini, codex, opencode
+SANDY_AGENT=claude,codex                # any comma-separated combo (2–4 agents)
+SANDY_AGENT=claude,gemini,codex,opencode # all four in a 4-pane layout
+SANDY_AGENT=all                         # alias for claude,gemini,codex,opencode
 ```
 
-Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`); multi-agent combos use `sandy-full` (which includes all three agents). All share the common `sandy-base`. Gemini CLI and Codex CLI are installed via `npm install -g @google/gemini-cli` and `npm install -g @openai/codex` respectively. Gemini launches with `GEMINI_SANDBOX=false`; Codex launches with `--sandbox danger-full-access` plus `sandbox_mode = "danger-full-access"` in its `config.toml` (belt-and-suspenders — codex's Landlock sandbox does not nest cleanly in Docker, and sandy already provides whole-session isolation). The sandbox directory has sibling `claude/`, `gemini/`, and `codex/` subdirs mounted at `~/.claude`, `~/.gemini`, and `~/.codex` respectively; v1 layouts with `settings.json` at the sandbox top level are auto-migrated on launch.
+Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, `sandy-opencode`); multi-agent combos use `sandy-full` (which includes all four agents). All share the common `sandy-base`. Gemini CLI, Codex CLI, and OpenCode are installed via `npm install -g @google/gemini-cli`, `npm install -g @openai/codex`, and `npm install -g opencode-ai` respectively. Gemini launches with `GEMINI_SANDBOX=false`; Codex launches with `--sandbox danger-full-access` plus `sandbox_mode = "danger-full-access"` in its `config.toml` (belt-and-suspenders — codex's Landlock sandbox does not nest cleanly in Docker, and sandy already provides whole-session isolation). The sandbox directory has sibling `claude/`, `gemini/`, `codex/`, and `opencode/` subdirs. The first three mount at `~/.claude`, `~/.gemini`, and `~/.codex`; OpenCode straddles two XDG paths and uses `opencode/{config,share}` mounting at `~/.config/opencode` and `~/.local/share/opencode` respectively. v1 layouts with `settings.json` at the sandbox top level are auto-migrated on launch.
 
 **Gemini credentials** are probed in this order (override via `SANDY_GEMINI_AUTH=auto|api_key|oauth|adc`): `GEMINI_API_KEY` env var, host `~/.gemini/tokens.json` (copied ephemerally), host `~/.config/gcloud/application_default_credentials.json` (Google ADC / Vertex AI).
 
 **Codex credentials** are probed in this order (override via `SANDY_CODEX_AUTH=auto|api_key|oauth`): `OPENAI_API_KEY` env var (what codex CLI reads natively), host `~/.codex/auth.json` (copied ephemerally and mounted **read-only** — prevents token leakage back to host and prevents stale-token races). Because `auth.json` is mounted read-only, in-session OAuth refresh will fail — users must re-login inside the container if the token expires. On first launch, sandy seeds `~/.codex/config.toml` with `model = "gpt-5.5"`, `sandbox_mode = "danger-full-access"`, and a full `[notice]` block to suppress all first-run prompts; a `[projects."$SANDY_WORKSPACE"] trust_level = "trusted"` entry is appended at session start by `user-setup.sh` (it needs the container-side workspace path).
 
+**OpenCode credentials** are provider-agnostic — opencode reads `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, etc. natively from the env, and sandy forwards whichever the user has set. The OAuth path mounts host `~/.local/share/opencode/auth.json` read-only when present (override the probe with `SANDY_OPENCODE_AUTH=auto|api_key|oauth`). Provider/model selection lives in `~/.config/opencode/opencode.json`, which sandy seeds from the host's copy on first run; subsequent in-container edits persist via the bind mount. OpenCode's flexibility is what makes the **local-LLM passthrough** below useful — point the config at a local Ollama/vLLM endpoint and pair with `SANDY_LOCAL_LLM_HOST`.
+
+**Local-LLM passthrough.** Sandy normally blocks all RFC 1918 (LAN) traffic. To let an in-container agent (typically OpenCode) reach a local LLM server on the Docker host without disabling that posture, set `SANDY_LOCAL_LLM_HOST=<ip>:<port>` (e.g. `127.0.0.1:11434` for Ollama). Sandy validates the format, rejects world-open IPs (`0.0.0.0`, `::`) and out-of-range ports, then inserts a single `iptables ACCEPT` rule limited to that exact `host:port` against the Docker bridge gateway. On Linux it also adds `--add-host=host.docker.internal:host-gateway` so the hostname resolves (Docker Desktop does this automatically on macOS, but Linux daemons require explicit mapping). Tweak the user's `~/.config/opencode/opencode.json` to set the provider's `baseURL` to `http://host.docker.internal:<port>/v1`. Macros and `SANDY_ALLOW_LAN_HOSTS` remain orthogonal — `SANDY_LOCAL_LLM_HOST` is a single narrow opening for the localhost LLM use-case, not a general LAN unblock.
+
 **Feature support by agent**:
 
-| Feature | `claude` | `gemini` | `codex` | multi-agent |
-|---|---|---|---|---|
-| Skill packs | yes | — | — | yes (claude pane only) |
-| Synthkit commands | yes (slash commands, Markdown) | yes (slash commands, TOML in `~/.gemini/commands/`) | yes (skills context, SKILL.md in `~/.codex/skills/` — invoked via natural language, not `/`) | per agent |
-| Channels (Telegram) | in-container plugin | host-side tmux relay | host-side tmux relay | host-side tmux relay |
-| Channels (Discord) | yes | — | — | — |
-| `--remote` | yes | — | — | — |
-| Gemini extensions (`SANDY_GEMINI_EXTENSIONS`) | — | yes | — | yes (when gemini is in the combo) |
+| Feature | `claude` | `gemini` | `codex` | `opencode` | multi-agent |
+|---|---|---|---|---|---|
+| Skill packs | yes | — | — | — | yes (claude pane only) |
+| Synthkit commands | yes (slash commands, Markdown) | yes (slash commands, TOML in `~/.gemini/commands/`) | yes (skills context, SKILL.md in `~/.codex/skills/`) | — (v0) | per agent |
+| Channels (Telegram) | in-container plugin | host-side tmux relay | host-side tmux relay | host-side tmux relay (untested in v0) | host-side tmux relay |
+| Channels (Discord) | yes | — | — | — | — |
+| `--remote` | yes | — | — | — | — |
+| Gemini extensions (`SANDY_GEMINI_EXTENSIONS`) | — | yes | — | — | yes (when gemini is in the combo) |
+| Local-LLM passthrough (`SANDY_LOCAL_LLM_HOST`) | — | — | — | yes | yes (when opencode is in the combo) |
+| Provider choice via own config | — | — | — | yes | — |
 
-Codex headless mode (`-p` / `--print` / `--prompt`) translates to `codex exec` — the prompt is passed as a positional arg, not a flag. Codex `exec` only returns exit codes 0 or 1 (no nuanced exit codes like Claude's `--print` has). `--continue` / `-c` is silently dropped (codex has `codex resume` but no headless continuation flag). Multi-agent combos use comma-separated syntax (e.g., `claude,codex`); `all` is an alias for `claude,gemini,codex`. The old `both` alias was removed in `v0.12` — sandy now errors out with a pointer to the comma-separated syntax.
+Codex headless mode (`-p` / `--print` / `--prompt`) translates to `codex exec` — the prompt is passed as a positional arg, not a flag. OpenCode headless mirrors that pattern: `opencode run <prompt>`. Both `exec` and `run` only support `0`/`1` exit codes (no nuanced codes like Claude's `--print`). `--continue` / `-c` is silently dropped for both (neither has a headless continuation flag). Multi-agent combos use comma-separated syntax (e.g., `claude,codex`); `all` is an alias for `claude,gemini,codex,opencode`. The old `both` alias was removed in `v0.12` — sandy now errors out with a pointer to the comma-separated syntax.
 
 The Telegram host-side relay (`$SANDY_HOME/channel-relay.sh`) is an agent-agnostic long-polling bridge that injects messages into the container's tmux session via `docker exec ... tmux send-keys`. In multi-agent mode, `SANDY_CHANNEL_TARGET_PANE=0|1|2` selects which pane receives messages (default `0` = first pane in `SANDY_AGENT`).
 

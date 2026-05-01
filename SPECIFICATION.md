@@ -4,7 +4,7 @@
 **Date**: 2026-04-20
 **Source**: ~3,150-line bash script (`sandy`), installer (`install.sh`), test suite (`test/run-tests.sh`)
 
-Sandy is a self-contained command that runs an AI coding agent (Claude Code, Gemini CLI, OpenAI Codex CLI, or any comma-separated multi-agent combo) in a Docker container with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes. One script, one command, zero configuration required.
+Sandy is a self-contained command that runs an AI coding agent (Claude Code, Gemini CLI, OpenAI Codex CLI, OpenCode, or any comma-separated multi-agent combo) in a Docker container with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes. One script, one command, zero configuration required.
 
 ### Supported Agents
 
@@ -13,8 +13,9 @@ Sandy is a self-contained command that runs an AI coding agent (Claude Code, Gem
 | `claude` (default) | `sandy-claude-code` | Claude Code — full feature support (channels, skill packs, synthkit, remote-control) |
 | `gemini` | `sandy-gemini-cli` | Gemini CLI — Google OAuth / ADC / Vertex AI / API key auth |
 | `codex` | `sandy-codex` | OpenAI Codex CLI — `OPENAI_API_KEY` env var or ChatGPT OAuth (read-only mount) |
-| `<a>,<b>[,<c>]` (e.g. `claude,gemini`, `claude,codex`, `claude,gemini,codex`) | `sandy-full` | Multi-agent combo — one tmux pane per agent, in the order listed |
-| `all` | `sandy-full` | Alias for `claude,gemini,codex` — all three agents in a 3-pane tmux session |
+| `opencode` | `sandy-opencode` | OpenCode (sst/opencode) — provider-agnostic; reads `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` natively, plus optional OAuth from `~/.local/share/opencode/auth.json`. Local-LLM passthrough via `SANDY_LOCAL_LLM_HOST`. |
+| `<a>,<b>[,<c>[,<d>]]` (e.g. `claude,gemini`, `claude,codex`, `claude,gemini,codex,opencode`) | `sandy-full` | Multi-agent combo — one tmux pane per agent, in the order listed |
+| `all` | `sandy-full` | Alias for `claude,gemini,codex,opencode` — all four agents in a 4-pane tmux session |
 
 The previous `both` alias (= `claude,gemini`) was removed in `v0.12`. Using it now exits with an error pointing at the comma-separated syntax.
 
@@ -131,12 +132,12 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Privileged-only keys** (allowed only from `$SANDY_HOME/config` and `$SANDY_HOME/.secrets`):
 <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
+`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
 <!-- END AUTOGEN:privileged-key-list -->
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -154,13 +155,14 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_SKIP_PERMISSIONS` | privileged | `true` | Skip Claude Code's in-session permission prompts (default: true). |
 | `SANDY_ALLOW_NO_ISOLATION` | privileged | `0` | Allow launch when iptables rules cannot be applied (Linux only). |
 | `SANDY_ALLOW_LAN_HOSTS` | privileged | unset | Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected. |
+| `SANDY_LOCAL_LLM_HOST` | privileged | unset | Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal. |
 | `ANTHROPIC_API_KEY` | privileged | unset | Anthropic API key for Claude Code. Not required when using Claude Max OAuth. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | privileged | unset | Claude Code OAuth token (alternative to ANTHROPIC_API_KEY). |
 | `GEMINI_API_KEY` | privileged | unset | Google API key for Gemini CLI. |
 | `OPENAI_API_KEY` | privileged | unset | OpenAI API key for Codex CLI. |
 | `GOOGLE_API_KEY` | privileged | unset | Google API key for Vertex AI / ADC. |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | privileged | unset | Enable Claude Code experimental agent-teams feature. |
-| `SANDY_AGENT` | passive | `claude` | Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex'. |
+| `SANDY_AGENT` | passive | `claude` | Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'. |
 | `SANDY_MODEL` | passive | `claude-opus-4-7` | Model ID for the Claude agent. |
 | `SANDY_CPUS` | passive | unset | CPU limit for container (default: auto-detected). |
 | `SANDY_MEM` | passive | unset | Memory limit for container (e.g. '8g'; default: auto-detected). |
@@ -181,6 +183,8 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `CODEX_MODEL` | passive | unset | Codex model override. |
 | `SANDY_CODEX_AUTH` | passive | `auto` | Codex credential probe strategy. |
 | `CODEX_HOME` | passive | unset | Override CODEX_HOME inside the container. |
+| `OPENCODE_MODEL` | passive | unset | OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4'). |
+| `SANDY_OPENCODE_AUTH` | passive | `auto` | OpenCode credential probe strategy. |
 | `TELEGRAM_BOT_TOKEN` | passive | unset | Telegram bot token for the channel relay. |
 | `TELEGRAM_ALLOWED_SENDERS` | passive | unset | Comma-separated Telegram user IDs allowed to send messages. |
 | `DISCORD_BOT_TOKEN` | passive | unset | Discord bot token for the channel relay. |
@@ -376,6 +380,20 @@ Contents:
 
 Used only when `SANDY_AGENT=codex`. The update check hits `https://api.github.com/repos/openai/codex/releases/latest` (not `/releases`) — upstream flags stable releases there, so sandy inherits their judgment rather than inventing a prerelease filter. The tag name `rust-vX.Y.Z` is stripped with `sed -E 's/.*"rust-v?([0-9][^"]*)"$/\1/'`. On parse failure the check returns no-update (stale but working).
 
+### Phase 2 (alt): OpenCode Image (`sandy-opencode`)
+
+**Dockerfile**: `Dockerfile.opencode`
+**Rebuild trigger**: Content hash changes, base image rebuilt, OpenCode version update detected, or `--rebuild` flag
+
+Contents:
+- `FROM sandy-base`
+- OpenCode: `npm install -g opencode-ai` (the `opencode-ai` package ships per-platform binaries via `optionalDependencies` plus a postinstall script that selects the right one)
+- Version cached at `/opt/opencode/.version`
+- synthkit deps (libpango/cairo/gdk-pixbuf) + synthkit itself (so `md2pdf`, `md2doc`, `md2html`, `md2email` are on PATH; OpenCode does not yet auto-discover skills, but synthkit is useful as a general-purpose toolkit in the session)
+- `COPY`: entrypoint.sh, user-setup.sh, tmux.conf
+
+Used only when `SANDY_AGENT=opencode`. The update check hits `https://registry.npmjs.org/opencode-ai/latest` and parses `"version":"X.Y.Z"` with the same `sed -E 's/.*"([^"]+)"$/\1/'` shape as the gemini check.
+
 ### Phase 2.5a: Skill Pack Base Image (`sandy-skills-base-<pack>`)
 
 **Dockerfile**: `Dockerfile.skills-base`
@@ -568,16 +586,36 @@ Per-instance Docker bridge networks are created with names keyed on PID (`sandy_
 | `169.254.0.0/16` | Link-local |
 | `100.64.0.0/10` | CGNAT, Tailscale |
 
-The container's own subnet is allowed. Additional hosts/CIDRs can be allowed via `SANDY_ALLOW_LAN_HOSTS`.
+The container's own subnet is allowed. Additional hosts/CIDRs can be allowed via `SANDY_ALLOW_LAN_HOSTS`. A single host:port to a local LLM listening on the Docker host can be allowed via `SANDY_LOCAL_LLM_HOST` (see below).
 
 **Rule insertion order** (rules evaluated top-to-bottom):
 1. Allow container's own subnet (inserted last, evaluated first)
-2. Allow specific LAN hosts (if `SANDY_ALLOW_LAN_HOSTS` set)
-3. DROP all private ranges
+2. Allow `host.docker.internal:<port>` for `SANDY_LOCAL_LLM_HOST` (tcp, dst = bridge gateway, dport = configured port)
+3. Allow specific LAN hosts (if `SANDY_ALLOW_LAN_HOSTS` set)
+4. DROP all private ranges
 
 **Cleanup**: Rules and network removed on exit via trap handler.
 
 **Fail-closed**: If `iptables` is not available, sandy aborts unless `SANDY_ALLOW_NO_ISOLATION=1`.
+
+### `SANDY_LOCAL_LLM_HOST` — local LLM passthrough
+
+`SANDY_LOCAL_LLM_HOST=<ip>:<port>` (e.g. `127.0.0.1:11434` for Ollama) lets an in-container agent reach a local LLM server running on the Docker host without disabling sandy's broader LAN-isolation posture.
+
+**Validation** (post-config-load, before agent resolve):
+- Format: `^[^[:space:]]+:[0-9]+$` — must be `host:port`. Bare IPs are rejected.
+- Host portion: `0.0.0.0`, `::`, and empty rejected (world-open).
+- Port: integer in `1..65535`.
+
+**Linux behavior**:
+- `ensure_network` captures `CONTAINER_GATEWAY` (the bridge gateway IP, equivalent to `host.docker.internal`) from `docker network inspect`.
+- `apply_network_isolation` inserts a single `iptables -I DOCKER-USER -i $BRIDGE -p tcp -d $CONTAINER_GATEWAY --dport $PORT -j ACCEPT` rule. The destination is the gateway IP — opencode (or the user's CLI) connects to `host.docker.internal:<port>`, which Linux Docker resolves to the gateway.
+- `RUN_FLAGS` adds `--add-host=host.docker.internal:host-gateway` (Linux Docker does NOT auto-resolve this hostname; without the explicit map, the container can't reach the gateway by name).
+- `cleanup_network_isolation` removes the rule on exit.
+
+**macOS behavior**: Docker Desktop already auto-resolves `host.docker.internal`. Sandy normally nullifies the hostname (mapping to `127.0.0.1`) when `SANDY_SSH != agent`; setting `SANDY_LOCAL_LLM_HOST` suppresses that nullification. Macros LAN isolation is not active on macOS regardless (see below), so no iptables rule is added.
+
+**Container-side**: `SANDY_LOCAL_LLM_HOST` is forwarded into the container via `-e` so the agent / user shell can introspect the configured target.
 
 ### macOS
 
