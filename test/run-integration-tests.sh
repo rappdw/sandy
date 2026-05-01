@@ -297,6 +297,7 @@ HAS_CODEX_OAUTH=false
 HAS_GEMINI_API_KEY=false
 HAS_GEMINI_OAUTH=false
 HAS_CLAUDE=false
+HAS_OPENCODE_OAUTH=false
 
 # Source credentials from ~/.sandy/.secrets if it exists (same file sandy reads).
 # This is a safe KEY=VALUE file (no shell code) — sandy validates it against an
@@ -318,6 +319,7 @@ fi
 
 [ -n "${OPENAI_API_KEY:-}" ] && HAS_OPENAI_API_KEY=true
 [ -f "$HOME/.codex/auth.json" ] && HAS_CODEX_OAUTH=true
+[ -f "$HOME/.local/share/opencode/auth.json" ] && HAS_OPENCODE_OAUTH=true
 [ -n "${GEMINI_API_KEY:-}" ] && HAS_GEMINI_API_KEY=true
 # Gemini OAuth: check oauth_creds.json (≥0.30) and legacy tokens.json.
 HAS_GEMINI_OAUTH=false
@@ -338,8 +340,12 @@ info "Sandy Integration Tests"
 # For test gating, each agent is available if ANY of its auth methods works.
 HAS_CODEX=false
 HAS_GEMINI=false
+HAS_OPENCODE=false
 [ "$HAS_OPENAI_API_KEY" = true ] || [ "$HAS_CODEX_OAUTH" = true ] && HAS_CODEX=true
 [ "$HAS_GEMINI_API_KEY" = true ] || [ "$HAS_GEMINI_OAUTH" = true ] || [ "$HAS_GEMINI_ADC" = true ] && HAS_GEMINI=true
+# OpenCode auth: either the OAuth file, or any provider API key the user has set
+# (opencode reads ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY natively).
+[ "$HAS_OPENCODE_OAUTH" = true ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] || [ -n "${GEMINI_API_KEY:-}" ] && HAS_OPENCODE=true
 
 _label() { if [ "$1" = true ]; then printf "\033[0;32m✓\033[0m"; else printf "\033[0;31m✗\033[0m"; fi; }
 _auth_detail() {
@@ -355,13 +361,14 @@ _auth_detail() {
     fi
 }
 
-echo "  Codex:   $(_label $HAS_CODEX)  $(_auth_detail "api-key=$HAS_OPENAI_API_KEY" "oauth=$HAS_CODEX_OAUTH")"
-echo "  Gemini:  $(_label $HAS_GEMINI)  $(_auth_detail "api-key=$HAS_GEMINI_API_KEY" "oauth=$HAS_GEMINI_OAUTH" "adc=$HAS_GEMINI_ADC")"
-echo "  Claude:  $(_label $HAS_CLAUDE)  $(_auth_detail "api-key=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" "oauth-token=$([ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo true || echo false)" "credentials-file=$([ -f "$HOME/.claude/.credentials.json" ] && echo true || echo false)")"
+echo "  Codex:    $(_label $HAS_CODEX)  $(_auth_detail "api-key=$HAS_OPENAI_API_KEY" "oauth=$HAS_CODEX_OAUTH")"
+echo "  Gemini:   $(_label $HAS_GEMINI)  $(_auth_detail "api-key=$HAS_GEMINI_API_KEY" "oauth=$HAS_GEMINI_OAUTH" "adc=$HAS_GEMINI_ADC")"
+echo "  Claude:   $(_label $HAS_CLAUDE)  $(_auth_detail "api-key=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" "oauth-token=$([ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo true || echo false)" "credentials-file=$([ -f "$HOME/.claude/.credentials.json" ] && echo true || echo false)")"
+echo "  OpenCode: $(_label $HAS_OPENCODE)  $(_auth_detail "anthropic-key=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" "openai-key=$HAS_OPENAI_API_KEY" "gemini-key=$HAS_GEMINI_API_KEY" "oauth=$HAS_OPENCODE_OAUTH")"
 echo ""
 
 _all_true=true
-for _v in $HAS_CODEX $HAS_GEMINI $HAS_CLAUDE; do
+for _v in $HAS_CODEX $HAS_GEMINI $HAS_CLAUDE $HAS_OPENCODE; do
     [ "$_v" = true ] || _all_true=false
 done
 
@@ -392,6 +399,14 @@ if [ "$_all_true" = false ]; then
             echo "    export ANTHROPIC_API_KEY=\"sk-ant-...\"  # Anthropic API key"
             echo "    export CLAUDE_CODE_OAUTH_TOKEN=\"...\"   # long-lived OAuth token"
             echo "    claude                                  # interactive login → ~/.claude/.credentials.json"
+            echo ""
+        fi
+        if [ "$HAS_OPENCODE" = false ]; then
+            echo "  OPENCODE (provider-agnostic — any of these works):"
+            echo "    export ANTHROPIC_API_KEY=\"sk-ant-...\"   # opencode reads natively"
+            echo "    export OPENAI_API_KEY=\"sk-...\""
+            echo "    export GEMINI_API_KEY=\"AI...\""
+            echo "    opencode auth login                     # OAuth → ~/.local/share/opencode/auth.json"
             echo ""
         fi
         echo "  To persist credentials, add them to ~/.sandy/.secrets (one per line):"
@@ -472,6 +487,40 @@ if echo "$_out" | grep -qi "discord.*only supported\|only supported.*claude"; th
     pass "discord channel + codex rejected"
 else
     fail "discord channel + codex rejected"
+fi
+
+# OpenCode-specific guards (mirror codex)
+_out="$(SANDY_AGENT=opencode SANDY_SKILL_PACKS=gstack "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
+if echo "$_out" | grep -qi "SANDY_SKILL_PACKS requires claude"; then
+    pass "SANDY_SKILL_PACKS + opencode rejected"
+else
+    fail "SANDY_SKILL_PACKS + opencode rejected"
+fi
+_out="$(SANDY_AGENT=opencode "$SANDY_SCRIPT" --remote 2>&1 || true)"
+if echo "$_out" | grep -q "only supported with SANDY_AGENT=claude"; then
+    pass "--remote + opencode rejected"
+else
+    fail "--remote + opencode rejected"
+fi
+_out="$(SANDY_AGENT=opencode SANDY_CHANNELS=discord "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
+if echo "$_out" | grep -qi "discord.*only supported\|only supported.*claude"; then
+    pass "discord channel + opencode rejected"
+else
+    fail "discord channel + opencode rejected"
+fi
+
+# SANDY_LOCAL_LLM_HOST validation: world-open / malformed values rejected.
+_out="$(SANDY_LOCAL_LLM_HOST=0.0.0.0:11434 "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
+if echo "$_out" | grep -q "world-open or empty"; then
+    pass "SANDY_LOCAL_LLM_HOST=0.0.0.0:port rejected"
+else
+    fail "SANDY_LOCAL_LLM_HOST=0.0.0.0:port rejected"
+fi
+_out="$(SANDY_LOCAL_LLM_HOST=127.0.0.1 "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
+if echo "$_out" | grep -q "not in host:port format"; then
+    pass "SANDY_LOCAL_LLM_HOST=bare-IP rejected"
+else
+    fail "SANDY_LOCAL_LLM_HOST=bare-IP rejected"
 fi
 
 # ============================================================
@@ -898,6 +947,95 @@ elif [ "$HAS_GEMINI_OAUTH" = true ]; then
     skip "gemini OAuth (GEMINI_API_KEY is set, would shadow OAuth; unset it to test)"
 else
     skip "gemini OAuth (no ~/.gemini/oauth_creds.json or tokens.json)"
+fi
+
+# ============================================================
+info "11. OpenCode — image build and headless response"
+# ============================================================
+
+if [ "$HAS_OPENCODE" = true ]; then
+    setup_project opencode "integ-opencode"
+
+    # Forward whichever provider keys the user has — opencode picks one up.
+    _env_args=()
+    [ -n "${ANTHROPIC_API_KEY:-}" ] && _env_args+=("ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+    [ -n "${OPENAI_API_KEY:-}" ]    && _env_args+=("OPENAI_API_KEY=$OPENAI_API_KEY")
+    [ -n "${GEMINI_API_KEY:-}" ]    && _env_args+=("GEMINI_API_KEY=$GEMINI_API_KEY")
+    _out="$(run_sandy_headless "${_env_args[@]}" -- -p "reply with exactly one word: pineapple")"
+
+    if docker image inspect sandy-opencode &>/dev/null; then
+        pass "sandy-opencode image exists after build"
+    else
+        fail "sandy-opencode image exists after build"
+    fi
+
+    if [ -n "$_out" ] && ! echo "$_out" | grep -qi "error.*credential\|no provider configured"; then
+        pass "opencode headless responds without errors"
+    else
+        fail "opencode headless responds without errors"
+    fi
+
+    resolve_sandbox
+
+    if [ -n "$SANDBOX_DIR" ] && [ -d "$SANDBOX_DIR" ]; then
+        # Sandbox layout: config + share subdirs under opencode/
+        if [ -d "$SANDBOX_DIR/opencode/config" ]; then
+            pass "opencode/config dir exists in sandbox"
+        else
+            fail "opencode/config dir exists in sandbox"
+        fi
+        if [ -d "$SANDBOX_DIR/opencode/share" ]; then
+            pass "opencode/share dir exists in sandbox"
+        else
+            fail "opencode/share dir exists in sandbox"
+        fi
+        # No cross-agent contamination
+        if [ ! -d "$SANDBOX_DIR/claude" ] && [ ! -d "$SANDBOX_DIR/codex" ] && [ ! -d "$SANDBOX_DIR/gemini" ]; then
+            pass "opencode sandbox has no claude/, codex/, or gemini/ subdirs"
+        else
+            fail "opencode sandbox has no claude/, codex/, or gemini/ subdirs"
+        fi
+    else
+        fail "sandbox directory exists for opencode project"
+    fi
+else
+    skip "opencode image build and headless (no provider key or OAuth file)"
+fi
+
+# ============================================================
+info "12. OpenCode — in-container checks (sandy-opencode image)"
+# ============================================================
+
+if ensure_image_built opencode sandy-opencode; then
+    _ver="$(docker run --rm --entrypoint bash sandy-opencode -c 'opencode --version 2>/dev/null || echo MISSING')"
+    if [ "$_ver" != "MISSING" ] && [ -n "$_ver" ]; then
+        pass "opencode binary on PATH in sandy-opencode image (v$_ver)"
+    else
+        fail "opencode binary on PATH in sandy-opencode image"
+    fi
+
+    _vfile="$(docker run --rm --entrypoint cat sandy-opencode /opt/opencode/.version 2>/dev/null || true)"
+    if [ -n "$_vfile" ]; then
+        pass "/opt/opencode/.version populated ($_vfile)"
+    else
+        fail "/opt/opencode/.version populated"
+    fi
+
+    _node="$(docker run --rm --entrypoint bash sandy-opencode -c 'node --version 2>/dev/null || echo MISSING')"
+    if [ "$_node" != "MISSING" ]; then
+        pass "node available in sandy-opencode image ($_node)"
+    else
+        fail "node available in sandy-opencode image"
+    fi
+
+    _sk="$(docker run --rm --entrypoint bash sandy-opencode -c 'command -v md2pdf && echo OK || echo MISSING')"
+    if echo "$_sk" | grep -q OK; then
+        pass "synthkit (md2pdf) available in sandy-opencode image"
+    else
+        fail "synthkit (md2pdf) available in sandy-opencode image"
+    fi
+else
+    fail "opencode in-container checks (failed to build sandy-opencode image)"
 fi
 
 # ============================================================

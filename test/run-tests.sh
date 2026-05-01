@@ -1365,7 +1365,7 @@ info "28. Gemini CLI support — agent helpers and flag translation"
 SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
 # Pull the two one-line helpers and the build_gemini_cmd function body.
-_HELPERS="$(grep -E '^_sandy_has_(claude|gemini|codex)\(\)' "$SANDY_SCRIPT")"
+_HELPERS="$(grep -E '^_sandy_has_(claude|gemini|codex|opencode)\(\)' "$SANDY_SCRIPT")"
 _BUILD_GEMINI="$(sed -n '/^build_gemini_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
 
 if [ -z "$_HELPERS" ] || [ -z "$_BUILD_GEMINI" ]; then
@@ -1798,6 +1798,312 @@ check "config allowlist includes SANDY_GEMINI_AUTH" \
 # Synthkit skills block for codex: creates SKILL.md files with YAML frontmatter.
 check "codex synthkit seeds ~/.codex/skills/ with SKILL.md files" \
     grep -q '\.codex/skills/md2pdf/SKILL.md' "$SANDY_SCRIPT"
+
+# ============================================================
+info "28g. OpenCode CLI support — agent helpers and flag translation"
+# ============================================================
+_BUILD_OPENCODE="$(sed -n '/^build_opencode_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+
+if [ -z "$_HELPERS" ] || [ -z "$_BUILD_OPENCODE" ]; then
+    fail "could not extract opencode helpers from sandy script (did they move?)"
+else
+    _opencode_script_test() {
+        local desc="$1"; shift
+        if bash -c "set -e; $_HELPERS
+$_BUILD_OPENCODE
+$*" >/dev/null 2>&1; then
+            pass "$desc"
+        else
+            fail "$desc"
+        fi
+    }
+
+    _opencode_script_test "_sandy_has_opencode true for SANDY_AGENT=opencode" \
+        'SANDY_AGENT=opencode _sandy_has_opencode'
+    _opencode_script_test "_sandy_has_opencode false for SANDY_AGENT=claude" \
+        '! SANDY_AGENT=claude _sandy_has_opencode'
+    _opencode_script_test "_sandy_has_opencode false for SANDY_AGENT=codex" \
+        '! SANDY_AGENT=codex _sandy_has_opencode'
+    _opencode_script_test "_sandy_has_opencode false for SANDY_AGENT=claude,gemini" \
+        '! SANDY_AGENT=claude,gemini _sandy_has_opencode'
+    _opencode_script_test "_sandy_has_opencode true for SANDY_AGENT=claude,opencode" \
+        'SANDY_AGENT=claude,opencode _sandy_has_opencode'
+    _opencode_script_test "_sandy_has_opencode true for SANDY_AGENT=claude,gemini,codex,opencode" \
+        'SANDY_AGENT=claude,gemini,codex,opencode _sandy_has_opencode'
+
+    _opencode_script_test "build_opencode_cmd (no args) uses interactive opencode" \
+        'out=$(build_opencode_cmd); echo "$out" | grep -qE "^opencode( |;|$)"'
+    _opencode_script_test "build_opencode_cmd -p switches to opencode run" \
+        'out=$(build_opencode_cmd -p hello); echo "$out" | grep -qE "^opencode run "'
+    _opencode_script_test "build_opencode_cmd --print switches to opencode run" \
+        'out=$(build_opencode_cmd --print hello); echo "$out" | grep -qE "^opencode run "'
+    _opencode_script_test "build_opencode_cmd --prompt switches to opencode run" \
+        'out=$(build_opencode_cmd --prompt hello); echo "$out" | grep -qE "^opencode run "'
+    _opencode_script_test "build_opencode_cmd drops -p flag itself (positional arg remains)" \
+        'out=$(build_opencode_cmd -p hello); ! echo "${out%%;*}" | grep -qE " -p( |$)" && echo "$out" | grep -q hello'
+    _opencode_script_test "build_opencode_cmd drops --continue" \
+        'out=$(build_opencode_cmd --continue); ! echo "$out" | grep -q -- "--continue"'
+    _opencode_script_test "build_opencode_cmd drops -c" \
+        'out=$(build_opencode_cmd -c); ! echo "$out" | grep -qE " -c( |$)"'
+    _opencode_script_test "build_opencode_cmd honors OPENCODE_MODEL" \
+        'out=$(OPENCODE_MODEL=anthropic/claude-sonnet-4 build_opencode_cmd); echo "$out" | grep -q "anthropic/claude-sonnet-4"'
+    _opencode_script_test "build_opencode_cmd verbose appends exit-code echo" \
+        'out=$(SANDY_VERBOSE=1 build_opencode_cmd); echo "$out" | grep -q "OpenCode exited"'
+fi
+
+# ============================================================
+info "28h. OpenCode sandbox layout, config seeding"
+# ============================================================
+_OPENCODE_SEED_BLOCK="$(awk '
+    /^if _sandy_agent_has opencode; then$/ && !seen {seen=1; printing=1}
+    printing {print}
+    printing && /^fi$/ {exit}
+' "$SANDY_SCRIPT")"
+
+if [ -z "$_OPENCODE_SEED_BLOCK" ]; then
+    fail "could not extract opencode sandbox seeding block from sandy"
+else
+    _OSEED_TMP="$(mktemp -d)"
+    HOME="$_OSEED_TMP/home" SANDBOX_DIR="$_OSEED_TMP/sb" bash -c "
+        info() { :; }
+        _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
+        SANDY_AGENT=opencode
+        $_OPENCODE_SEED_BLOCK
+    "
+
+    if [ -d "$_OSEED_TMP/sb/opencode/config" ]; then
+        pass "opencode/config dir created on first run"
+    else
+        fail "opencode/config dir created on first run"
+    fi
+    if [ -d "$_OSEED_TMP/sb/opencode/share" ]; then
+        pass "opencode/share dir created on first run"
+    else
+        fail "opencode/share dir created on first run"
+    fi
+
+    # Now seed a host opencode.json and verify it's copied
+    rm -rf "$_OSEED_TMP/sb"
+    mkdir -p "$_OSEED_TMP/home/.config/opencode"
+    echo '{"provider":"anthropic"}' > "$_OSEED_TMP/home/.config/opencode/opencode.json"
+    HOME="$_OSEED_TMP/home" SANDBOX_DIR="$_OSEED_TMP/sb" bash -c "
+        info() { :; }
+        _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
+        SANDY_AGENT=opencode
+        $_OPENCODE_SEED_BLOCK
+    "
+    if grep -q 'anthropic' "$_OSEED_TMP/sb/opencode/config/opencode.json" 2>/dev/null; then
+        pass "host opencode.json seeded into sandbox on first run"
+    else
+        fail "host opencode.json seeded into sandbox on first run"
+    fi
+
+    # Idempotency: second run preserves user edits to the sandbox copy
+    echo '{"user_edited":true}' > "$_OSEED_TMP/sb/opencode/config/opencode.json"
+    HOME="$_OSEED_TMP/home" SANDBOX_DIR="$_OSEED_TMP/sb" bash -c "
+        info() { :; }
+        _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
+        SANDY_AGENT=opencode
+        $_OPENCODE_SEED_BLOCK
+    "
+    if grep -q 'user_edited' "$_OSEED_TMP/sb/opencode/config/opencode.json"; then
+        pass "opencode.json re-run preserves user edits (idempotent)"
+    else
+        fail "opencode.json re-run preserves user edits (idempotent)"
+    fi
+
+    rm -rf "$_OSEED_TMP"
+fi
+
+# ============================================================
+info "28i. OpenCode config allowlist, dispatch, alias, update regex"
+# ============================================================
+
+_OPENCODE_VARS_MISSING=""
+for _k in OPENCODE_MODEL SANDY_OPENCODE_AUTH SANDY_LOCAL_LLM_HOST; do
+    if ! awk '/^SANDY_(PRIVILEGED|PASSIVE)_KEYS=\(/,/^\)$/' "$SANDY_SCRIPT" \
+         | grep -qE "^[[:space:]]+${_k}$"; then
+        _OPENCODE_VARS_MISSING="${_OPENCODE_VARS_MISSING} ${_k}"
+    fi
+done
+if [ -z "$_OPENCODE_VARS_MISSING" ]; then
+    pass "config allowlist includes OPENCODE_MODEL, SANDY_OPENCODE_AUTH, SANDY_LOCAL_LLM_HOST"
+else
+    fail "config allowlist missing opencode variables:${_OPENCODE_VARS_MISSING}"
+fi
+unset _OPENCODE_VARS_MISSING _k
+
+# Agent dispatch case-statement must map opencode → sandy-opencode.
+if grep -qE 'opencode\)[[:space:]]+IMAGE_NAME="sandy-opencode"' "$SANDY_SCRIPT"; then
+    pass "agent dispatch: opencode → sandy-opencode"
+else
+    fail "agent dispatch: opencode → sandy-opencode"
+fi
+
+# Invalid SANDY_AGENT values list opencode in the error.
+if grep -qE "Invalid agent.*valid: claude.*gemini.*codex.*opencode" "$SANDY_SCRIPT"; then
+    pass "invalid agent error lists opencode"
+else
+    fail "invalid agent error lists opencode"
+fi
+
+# 'all' alias expands to four agents.
+if grep -qE 'all\)[[:space:]]+SANDY_AGENT="claude,gemini,codex,opencode"' "$SANDY_SCRIPT"; then
+    pass "'all' alias expands to claude,gemini,codex,opencode"
+else
+    fail "'all' alias expands to claude,gemini,codex,opencode"
+fi
+
+# Dockerfile.opencode generator: extract and run, verify content.
+_DOCKERFILE_OPENCODE_FN="$(sed -n '/^generate_dockerfile_opencode()/,/^}$/p' "$SANDY_SCRIPT")"
+if [ -z "$_DOCKERFILE_OPENCODE_FN" ]; then
+    fail "could not extract generate_dockerfile_opencode function"
+else
+    _DF_TMP="$(mktemp -d)"
+    bash -c "
+        SANDY_HOME='$_DF_TMP'
+        BASE_IMAGE_NAME='sandy-base'
+        $_DOCKERFILE_OPENCODE_FN
+        generate_dockerfile_opencode
+    " 2>/dev/null
+
+    if [ -f "$_DF_TMP/Dockerfile.opencode.new" ]; then
+        pass "generate_dockerfile_opencode writes Dockerfile.opencode.new"
+    else
+        fail "generate_dockerfile_opencode writes Dockerfile.opencode.new"
+    fi
+    if grep -q "FROM sandy-base" "$_DF_TMP/Dockerfile.opencode.new" 2>/dev/null; then
+        pass "Dockerfile.opencode derives from sandy-base"
+    else
+        fail "Dockerfile.opencode derives from sandy-base"
+    fi
+    if grep -q "npm install -g opencode-ai" "$_DF_TMP/Dockerfile.opencode.new" 2>/dev/null; then
+        pass "Dockerfile.opencode installs opencode-ai"
+    else
+        fail "Dockerfile.opencode installs opencode-ai"
+    fi
+    if grep -q "/opt/opencode/.version" "$_DF_TMP/Dockerfile.opencode.new" 2>/dev/null; then
+        pass "Dockerfile.opencode caches version to /opt/opencode/.version"
+    else
+        fail "Dockerfile.opencode caches version to /opt/opencode/.version"
+    fi
+    rm -rf "$_DF_TMP"
+fi
+
+# Update check parses npm registry "version":"x.y.z" JSON.
+_opencode_parse_version() {
+    { echo "$1" \
+        | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' 2>/dev/null | head -1 \
+        | sed -E 's/.*"([^"]+)"$/\1/'; } || true
+}
+_r="$(_opencode_parse_version '{"version":"1.14.31","name":"opencode-ai"}')"
+if [ "$_r" = "1.14.31" ]; then
+    pass "update check parses npm version → 1.14.31"
+else
+    fail "update check parses npm version → 1.14.31 (got: $_r)"
+fi
+_r="$(_opencode_parse_version '')"
+if [ -z "$_r" ]; then
+    pass "update check returns empty on empty input (fail-soft)"
+else
+    fail "update check returns empty on empty input (got: $_r)"
+fi
+
+# SANDY_LOCAL_LLM_HOST format validation: extract block and exercise it.
+_LLM_VALIDATOR="$(awk '
+    /^_SANDY_LLM_HOST=""/ {printing=1}
+    printing {print}
+    printing && /^fi$/ && /SANDY_LOCAL_LLM_HOST.*port out of range/ {exit}
+' "$SANDY_SCRIPT")"
+# The above awk is fragile — simpler: extract lines from _SANDY_LLM_HOST="" through next blank-or-comment block.
+_LLM_VALIDATOR="$(sed -n '/^_SANDY_LLM_HOST=""$/,/^# --- Resolve agent ---/p' "$SANDY_SCRIPT" | sed '$d')"
+if [ -z "$_LLM_VALIDATOR" ]; then
+    fail "could not extract SANDY_LOCAL_LLM_HOST validator"
+else
+    # Valid input
+    if SANDY_LOCAL_LLM_HOST=127.0.0.1:11434 bash -c "$_LLM_VALIDATOR; echo OK" 2>/dev/null | grep -q OK; then
+        pass "SANDY_LOCAL_LLM_HOST validator accepts 127.0.0.1:11434"
+    else
+        fail "SANDY_LOCAL_LLM_HOST validator accepts 127.0.0.1:11434"
+    fi
+    # Bare IP rejected
+    if ! SANDY_LOCAL_LLM_HOST=127.0.0.1 bash -c "$_LLM_VALIDATOR" 2>/dev/null; then
+        pass "SANDY_LOCAL_LLM_HOST validator rejects bare IP (no port)"
+    else
+        fail "SANDY_LOCAL_LLM_HOST validator rejects bare IP (no port)"
+    fi
+    # World-open IP rejected
+    if ! SANDY_LOCAL_LLM_HOST=0.0.0.0:11434 bash -c "$_LLM_VALIDATOR" 2>/dev/null; then
+        pass "SANDY_LOCAL_LLM_HOST validator rejects 0.0.0.0:11434"
+    else
+        fail "SANDY_LOCAL_LLM_HOST validator rejects 0.0.0.0:11434"
+    fi
+    # Port out of range rejected
+    if ! SANDY_LOCAL_LLM_HOST=127.0.0.1:99999 bash -c "$_LLM_VALIDATOR" 2>/dev/null; then
+        pass "SANDY_LOCAL_LLM_HOST validator rejects out-of-range port"
+    else
+        fail "SANDY_LOCAL_LLM_HOST validator rejects out-of-range port"
+    fi
+fi
+
+# ============================================================
+info "28j. OpenCode infrastructure — mounts, env, credentials, cleanup"
+# ============================================================
+
+# Sandbox dir creation: opencode block must create config + share subdirs.
+check "sandbox layout creates opencode/config and opencode/share for SANDY_AGENT=opencode" \
+    grep -q 'mkdir -p "$SANDBOX_DIR/opencode/config" "$SANDBOX_DIR/opencode/share"' "$SANDY_SCRIPT"
+
+# Mount blocks: both XDG paths bind-mounted at expected container paths.
+check "opencode config mounted at /home/claude/.config/opencode" \
+    grep -q 'SANDBOX_DIR/opencode/config:/home/claude/.config/opencode' "$SANDY_SCRIPT"
+check "opencode share mounted at /home/claude/.local/share/opencode" \
+    grep -q 'SANDBOX_DIR/opencode/share:/home/claude/.local/share/opencode' "$SANDY_SCRIPT"
+
+# Auth.json mounted read-only when present.
+check "opencode auth.json mount is read-only (:ro)" \
+    grep -q 'auth.json:/home/claude/.local/share/opencode/auth.json:ro' "$SANDY_SCRIPT"
+
+# Env passthrough: OPENCODE_MODEL forwarded.
+check "OPENCODE_MODEL passed to container via -e" \
+    grep -q 'RUN_FLAGS+=(-e "OPENCODE_MODEL=' "$SANDY_SCRIPT"
+
+# Env passthrough: SANDY_LOCAL_LLM_HOST forwarded.
+check "SANDY_LOCAL_LLM_HOST passed to container via -e" \
+    grep -q 'RUN_FLAGS+=(-e "SANDY_LOCAL_LLM_HOST=' "$SANDY_SCRIPT"
+
+# Cleanup trap must clean OPENCODE_CRED_TMPDIR.
+check "cleanup trap removes OPENCODE_CRED_TMPDIR" \
+    grep -q 'rm -rf "$OPENCODE_CRED_TMPDIR"' "$SANDY_SCRIPT"
+
+# Credential loader: load_opencode_credentials function exists.
+check "load_opencode_credentials function exists" \
+    grep -q '^load_opencode_credentials()' "$SANDY_SCRIPT"
+
+# Dockerfile path dispatch: opencode maps to Dockerfile.opencode.
+check "DOCKERFILE_PATH dispatch includes opencode → Dockerfile.opencode" \
+    grep -q 'DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.opencode"' "$SANDY_SCRIPT"
+
+# Build hash file: opencode gets its own .build_hash_opencode.
+check "BUILD_HASH_FILE_NAME dispatch includes opencode → .build_hash_opencode" \
+    grep -q '\.build_hash_opencode' "$SANDY_SCRIPT"
+
+# Linux-only: --add-host=host.docker.internal:host-gateway when SANDY_LOCAL_LLM_HOST set.
+check "Linux: SANDY_LOCAL_LLM_HOST adds host.docker.internal:host-gateway" \
+    grep -q 'host.docker.internal:host-gateway' "$SANDY_SCRIPT"
+
+# iptables rule shape: tcp dst gateway --dport port -j ACCEPT.
+check "iptables rule for local LLM uses tcp dport ACCEPT" \
+    grep -qE '\-p tcp -d "\$CONTAINER_GATEWAY" --dport "\$_SANDY_LLM_PORT" -j ACCEPT' "$SANDY_SCRIPT"
+
+# CONTAINER_GATEWAY captured from docker network inspect.
+check "ensure_network captures CONTAINER_GATEWAY" \
+    grep -q 'CONTAINER_GATEWAY="\$(docker network inspect' "$SANDY_SCRIPT"
+
+# sandy-full Dockerfile installs opencode-ai (4-agent superset).
+check "sandy-full Dockerfile installs opencode-ai" \
+    awk '/^generate_dockerfile_full\(\)/,/^}$/' "$SANDY_SCRIPT" \
+        | grep -q 'npm install -g opencode-ai'
 
 # ============================================================
 info "28f. Script syntax and version"
