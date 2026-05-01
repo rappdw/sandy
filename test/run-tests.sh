@@ -2102,8 +2102,7 @@ check "ensure_network captures CONTAINER_GATEWAY" \
 
 # sandy-full Dockerfile installs opencode-ai (4-agent superset).
 check "sandy-full Dockerfile installs opencode-ai" \
-    awk '/^generate_dockerfile_full\(\)/,/^}$/' "$SANDY_SCRIPT" \
-        | grep -q 'npm install -g opencode-ai'
+    bash -c "awk '/^generate_dockerfile_full\(\)/,/^}$/' '$SANDY_SCRIPT' | grep -q 'npm install -g opencode-ai'"
 
 # ============================================================
 info "28f. Script syntax and version"
