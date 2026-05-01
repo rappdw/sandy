@@ -36,6 +36,7 @@ SANDY_PRIVILEGED_KEYS=(
     SANDY_SKIP_PERMISSIONS
     SANDY_ALLOW_NO_ISOLATION
     SANDY_ALLOW_LAN_HOSTS
+    SANDY_LOCAL_LLM_HOST
     ANTHROPIC_API_KEY
     CLAUDE_CODE_OAUTH_TOKEN
     GEMINI_API_KEY
@@ -68,6 +69,8 @@ SANDY_PASSIVE_KEYS=(
     CODEX_MODEL
     SANDY_CODEX_AUTH
     CODEX_HOME
+    OPENCODE_MODEL
+    SANDY_OPENCODE_AUTH
     TELEGRAM_BOT_TOKEN
     TELEGRAM_ALLOWED_SENDERS
     DISCORD_BOT_TOKEN
@@ -442,13 +445,14 @@ SANDY_SSH|enum:token,agent|token||SSH auth mode: 'token' uses gh CLI (HTTPS); 'a
 SANDY_SKIP_PERMISSIONS|bool|true||Skip Claude Code's in-session permission prompts (default: true).
 SANDY_ALLOW_NO_ISOLATION|bool|0||Allow launch when iptables rules cannot be applied (Linux only).
 SANDY_ALLOW_LAN_HOSTS|string|||Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
+SANDY_LOCAL_LLM_HOST|string||^[^[:space:]]+:[0-9]+$|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal.
 ANTHROPIC_API_KEY|secret|||Anthropic API key for Claude Code. Not required when using Claude Max OAuth.
 CLAUDE_CODE_OAUTH_TOKEN|secret|||Claude Code OAuth token (alternative to ANTHROPIC_API_KEY).
 GEMINI_API_KEY|secret|||Google API key for Gemini CLI.
 OPENAI_API_KEY|secret|||OpenAI API key for Codex CLI.
 GOOGLE_API_KEY|secret|||Google API key for Vertex AI / ADC.
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||Enable Claude Code experimental agent-teams feature.
-SANDY_AGENT|agent_combo|claude||Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex'.
+SANDY_AGENT|agent_combo|claude||Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
 SANDY_MODEL|string|claude-opus-4-7|^[a-zA-Z0-9._-]+$|Model ID for the Claude agent.
 SANDY_CPUS|int|||CPU limit for container (default: auto-detected).
 SANDY_MEM|string|||Memory limit for container (e.g. '8g'; default: auto-detected).
@@ -469,6 +473,8 @@ GOOGLE_GENAI_USE_VERTEXAI|bool|||Use Vertex AI backend for Gemini.
 CODEX_MODEL|string|||Codex model override.
 SANDY_CODEX_AUTH|enum:auto,api_key,oauth|auto||Codex credential probe strategy.
 CODEX_HOME|string|||Override CODEX_HOME inside the container.
+OPENCODE_MODEL|string|||OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4').
+SANDY_OPENCODE_AUTH|enum:auto,api_key,oauth|auto||OpenCode credential probe strategy.
 TELEGRAM_BOT_TOKEN|secret|||Telegram bot token for the channel relay.
 TELEGRAM_ALLOWED_SENDERS|string|||Comma-separated Telegram user IDs allowed to send messages.
 DISCORD_BOT_TOKEN|secret|||Discord bot token for the channel relay.
@@ -683,6 +689,12 @@ _sandy_emit_schema() {
     printf ','; _json_kv features '["skills_context"]'
     printf ','; _json_kv credentials '{"probe_order":["OPENAI_API_KEY","host_auth_json"]}'
     printf '}'
+    printf ','
+    printf '{'
+    _json_kv name '"opencode"'; printf ','; _json_kv image '"sandy-opencode"'
+    printf ','; _json_kv features '["local_llm_passthrough","provider_choice"]'
+    printf ','; _json_kv credentials '{"probe_order":["provider_env_keys","host_auth_json"]}'
+    printf '}'
     printf ']'
 
     # protected_paths — sourced from the heredocs to stay in lockstep with
@@ -744,11 +756,11 @@ _sandy_emit_state() {
     _json_kv schema_version "$SANDY_SCHEMA_VERSION"
     printf ','; _json_kv sandy_home "$(_json_escape "$SANDY_HOME")"
 
-    # installed_images: sandy-{base,claude-code,gemini-cli,codex,full}.
+    # installed_images: sandy-{base,claude-code,gemini-cli,codex,opencode,full}.
     printf ',"installed_images":['
     if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         local first=1 img line
-        for img in sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-full; do
+        for img in sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-opencode sandy-full; do
             line="$(docker image inspect "$img" --format '{{.Id}}|{{.Created}}' 2>/dev/null)" || continue
             [ -z "$line" ] && continue
             [ $first -eq 0 ] && printf ','
@@ -1105,12 +1117,16 @@ Environment variables:
                      like "0" or "0,1" (requires NVIDIA Container Toolkit)
   SANDY_SKILL_PACKS  Comma-separated skill packs to install (e.g. "gstack")
   SANDY_AGENT        AI agent(s): "claude" (default), "gemini", "codex",
-                     or comma-separated combo (e.g. "claude,gemini,codex").
-                     Alias: "all" = "claude,gemini,codex".
+                     "opencode", or comma-separated combo
+                     (e.g. "claude,gemini,codex"). Alias: "all" = all four.
   GEMINI_API_KEY     Google API key for Gemini CLI (SANDY_AGENT=gemini only)
   GEMINI_MODEL       Gemini model override (SANDY_AGENT=gemini only)
   OPENAI_API_KEY     OpenAI API key for Codex CLI
   CODEX_MODEL        Codex model override (SANDY_AGENT=codex only)
+  OPENCODE_MODEL     OpenCode model override (provider/model format)
+  SANDY_LOCAL_LLM_HOST  host:port to allow through LAN isolation, e.g.
+                     "127.0.0.1:11434" for local Ollama. Inserts a single
+                     iptables ACCEPT and (Linux) maps host.docker.internal.
   CLAUDE_CODE_MAX_OUTPUT_TOKENS  Max output tokens per response (default: 128000)
 
 Per-project config:
@@ -1339,10 +1355,32 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 DOCKERFILE
 }
 
+generate_dockerfile_opencode() {
+    cat > "$SANDY_HOME/Dockerfile.opencode.new" <<DOCKERFILE
+FROM ${BASE_IMAGE_NAME}
+# Install OpenCode as a global npm package. The opencode-ai package selects
+# a prebuilt platform binary via optionalDependencies + postinstall.
+RUN npm install -g opencode-ai \\
+ && mkdir -p /opt/opencode \\
+ && { opencode --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/opencode/.version || true; }
+# synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+ && rm -rf /var/lib/apt/lists/*
+RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
+COPY tmux.conf /etc/tmux.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY user-setup.sh /usr/local/bin/user-setup.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/user-setup.sh
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+DOCKERFILE
+}
+
 generate_dockerfile_full() {
     cat > "$SANDY_HOME/Dockerfile.full.new" <<DOCKERFILE
 FROM ${BASE_IMAGE_NAME}
-# Install all three agents. Used for any multi-agent combo.
+# Install all four agents. Used for any multi-agent combo.
 # Claude Code
 RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
  && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \\
@@ -1357,6 +1395,10 @@ RUN npm install -g @google/gemini-cli \\
 RUN npm install -g @openai/codex \\
  && mkdir -p /opt/codex \\
  && { codex --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/codex/.version || true; }
+# OpenCode
+RUN npm install -g opencode-ai \\
+ && mkdir -p /opt/opencode \\
+ && { opencode --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/opencode/.version || true; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
@@ -1491,9 +1533,10 @@ if [ "${SANDY_VERBOSE:-0}" -ge 2 ]; then
 fi
 export HOME=/home/claude
 # Convenience: _sandy_has_X returns true if agent X is in the comma-separated SANDY_AGENT list.
-_sandy_has_claude() { case ",${SANDY_AGENT:-claude}," in *,claude,*) return 0 ;; esac; return 1; }
-_sandy_has_gemini() { case ",${SANDY_AGENT:-claude}," in *,gemini,*) return 0 ;; esac; return 1; }
-_sandy_has_codex()  { case ",${SANDY_AGENT:-claude}," in *,codex,*)  return 0 ;; esac; return 1; }
+_sandy_has_claude()   { case ",${SANDY_AGENT:-claude}," in *,claude,*)   return 0 ;; esac; return 1; }
+_sandy_has_gemini()   { case ",${SANDY_AGENT:-claude}," in *,gemini,*)   return 0 ;; esac; return 1; }
+_sandy_has_codex()    { case ",${SANDY_AGENT:-claude}," in *,codex,*)    return 0 ;; esac; return 1; }
+_sandy_has_opencode() { case ",${SANDY_AGENT:-claude}," in *,opencode,*) return 0 ;; esac; return 1; }
 # Parse comma-separated agent list for multi-agent dispatch
 IFS=',' read -ra _SANDY_AGENTS <<< "${SANDY_AGENT:-claude}"
 _SANDY_AGENT_COUNT="${#_SANDY_AGENTS[@]}"
@@ -2123,6 +2166,45 @@ build_codex_cmd() {
     printf '%s' "$cmd"
 }
 
+build_opencode_cmd() {
+    # Headless: opencode run [PROMPT] (positional arg, not a flag)
+    # Interactive: opencode (TUI)
+    # The LLM provider/model is governed by ~/.config/opencode/opencode.json or
+    # by --model provider/model on the CLI; sandy plumbs OPENCODE_MODEL through.
+    local headless=false
+    for arg in "$@"; do
+        case "$arg" in -p|--print|--prompt) headless=true; break ;; esac
+    done
+    local cmd
+    if [ "$headless" = "true" ]; then
+        cmd="opencode run"
+    else
+        cmd="opencode"
+    fi
+    if [ -n "${OPENCODE_MODEL:-}" ]; then
+        cmd+=" --model $(printf "%q" "$OPENCODE_MODEL")"
+    fi
+    # Flag translation: sandy's -p/--print/--prompt all mean "run this prompt".
+    # opencode run takes the prompt as a positional arg, so drop the flag itself
+    # and pass only the value. --continue/-c → drop (opencode has no headless
+    # resume flag), matching the codex/gemini behavior.
+    for arg in "$@"; do
+        case "$arg" in
+            -p|--print|--prompt) : ;;
+            --continue|-c)       : ;;
+            *)                   cmd+=" $(printf "%q" "$arg")" ;;
+        esac
+    done
+    if [ "$_sandy_is_headless" != "true" ]; then
+        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+            cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] OpenCode exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+        else
+            cmd="$cmd; read -p ''"
+        fi
+    fi
+    printf '%s' "$cmd"
+}
+
 build_gemini_cmd() {
     # Gemini CLI has its own per-tool sandbox; disable it since sandy provides
     # whole-session isolation via Docker. GEMINI_SANDBOX=false is the documented
@@ -2167,9 +2249,10 @@ done
 # --- Build the command for a given agent ---
 _sandy_build_agent_cmd() {
     case "$1" in
-        claude) build_claude_cmd "${@:2}" ;;
-        gemini) build_gemini_cmd "${@:2}" ;;
-        codex)  build_codex_cmd "${@:2}" ;;
+        claude)   build_claude_cmd   "${@:2}" ;;
+        gemini)   build_gemini_cmd   "${@:2}" ;;
+        codex)    build_codex_cmd    "${@:2}" ;;
+        opencode) build_opencode_cmd "${@:2}" ;;
     esac
 }
 
@@ -2496,9 +2579,10 @@ ensure_agent_dockerfile() {
         generate_dockerfile_full; f="Dockerfile.full"
     else
         case "$SANDY_AGENT" in
-            gemini) generate_dockerfile_gemini; f="Dockerfile.gemini" ;;
-            codex)  generate_dockerfile_codex;  f="Dockerfile.codex" ;;
-            *)      generate_dockerfile;        f="Dockerfile" ;;
+            gemini)   generate_dockerfile_gemini;   f="Dockerfile.gemini"   ;;
+            codex)    generate_dockerfile_codex;    f="Dockerfile.codex"    ;;
+            opencode) generate_dockerfile_opencode; f="Dockerfile.opencode" ;;
+            *)        generate_dockerfile;          f="Dockerfile"          ;;
         esac
     fi
     if [ ! -f "$SANDY_HOME/$f" ] || ! diff -q "$SANDY_HOME/$f.new" "$SANDY_HOME/$f" &>/dev/null; then
@@ -2729,7 +2813,7 @@ fi
 SANDY_AGENT="${SANDY_AGENT:-claude}"
 # Aliases for common combos
 case "$SANDY_AGENT" in
-    all)  SANDY_AGENT="claude,gemini,codex" ;;
+    all)  SANDY_AGENT="claude,gemini,codex,opencode" ;;
     both)
         error "SANDY_AGENT=both is no longer supported."
         error "  Use SANDY_AGENT=claude,gemini (or any comma-separated combo) instead."
@@ -2741,8 +2825,8 @@ IFS=',' read -ra _SANDY_AGENTS <<< "$SANDY_AGENT"
 _SANDY_AGENT_COUNT="${#_SANDY_AGENTS[@]}"
 for _a in "${_SANDY_AGENTS[@]}"; do
     case "$_a" in
-        claude|gemini|codex) ;;
-        *) echo "[sandy] ERROR: Invalid agent '$_a' in SANDY_AGENT='$SANDY_AGENT' (valid: claude, gemini, codex, or comma-separated combo)" >&2; exit 1 ;;
+        claude|gemini|codex|opencode) ;;
+        *) echo "[sandy] ERROR: Invalid agent '$_a' in SANDY_AGENT='$SANDY_AGENT' (valid: claude, gemini, codex, opencode, or comma-separated combo)" >&2; exit 1 ;;
     esac
 done
 # Detect duplicates
@@ -2760,9 +2844,10 @@ if [ "$_SANDY_IS_MULTI" = true ]; then
     IMAGE_NAME="sandy-full"
 else
     case "$SANDY_AGENT" in
-        claude) IMAGE_NAME="sandy-claude-code" ;;
-        gemini) IMAGE_NAME="sandy-gemini-cli" ;;
-        codex)  IMAGE_NAME="sandy-codex" ;;
+        claude)   IMAGE_NAME="sandy-claude-code" ;;
+        gemini)   IMAGE_NAME="sandy-gemini-cli" ;;
+        codex)    IMAGE_NAME="sandy-codex" ;;
+        opencode) IMAGE_NAME="sandy-opencode" ;;
     esac
 fi
 # Helper: check if a specific agent is in the resolved agent list
@@ -2802,6 +2887,9 @@ else
         codex)
             DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.codex"
             BUILD_HASH_FILE_NAME=".build_hash_codex" ;;
+        opencode)
+            DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.opencode"
+            BUILD_HASH_FILE_NAME=".build_hash_opencode" ;;
         *)
             DOCKERFILE_PATH="$SANDY_HOME/Dockerfile"
             BUILD_HASH_FILE_NAME=".build_hash" ;;
@@ -2879,7 +2967,7 @@ fi
 
 # Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
 if [ "$SANDY_REBUILD" = true ]; then
-    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.skills_build_hash"
+    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_opencode" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.skills_build_hash"
     info "Build cache cleared. Images will be rebuilt."
 fi
 
@@ -2944,10 +3032,23 @@ _check_codex_update() {
     fi
     return 1
 }
+_check_opencode_update() {
+    local inst latest
+    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/opencode/.version 2>/dev/null || true)"
+    latest="$(curl -fsSL --max-time 5 'https://registry.npmjs.org/opencode-ai/latest' 2>/dev/null \
+        | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
+        | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+    if [ -n "$latest" ] && [ -n "$inst" ] && [ "$latest" != "$inst" ]; then
+        info "OpenCode update available: $inst → $latest"
+        return 0
+    fi
+    return 1
+}
 if [ "$NEEDS_BUILD" = false ]; then
-    _sandy_agent_has claude && _check_claude_update && NEEDS_BUILD=true
-    _sandy_agent_has gemini && [ "$NEEDS_BUILD" = false ] && _check_gemini_update && NEEDS_BUILD=true
-    _sandy_agent_has codex  && [ "$NEEDS_BUILD" = false ] && _check_codex_update  && NEEDS_BUILD=true
+    _sandy_agent_has claude   && _check_claude_update   && NEEDS_BUILD=true
+    _sandy_agent_has gemini   && [ "$NEEDS_BUILD" = false ] && _check_gemini_update   && NEEDS_BUILD=true
+    _sandy_agent_has codex    && [ "$NEEDS_BUILD" = false ] && _check_codex_update    && NEEDS_BUILD=true
+    _sandy_agent_has opencode && [ "$NEEDS_BUILD" = false ] && _check_opencode_update && NEEDS_BUILD=true
 fi
 
 if [ "$NEEDS_BUILD" = true ]; then
@@ -4668,9 +4769,10 @@ if [ "$_SANDY_IS_MULTI" = true ]; then
     info "Launching ${_agent_label} sandbox (${_SANDY_AGENT_COUNT}-pane)..."
 else
     case "$SANDY_AGENT" in
-        gemini) info "Launching Gemini CLI sandbox..." ;;
-        codex)  info "Launching Codex CLI sandbox..." ;;
-        *)      info "Launching Claude Code sandbox..." ;;
+        gemini)   info "Launching Gemini CLI sandbox..." ;;
+        codex)    info "Launching Codex CLI sandbox..." ;;
+        opencode) info "Launching OpenCode sandbox..." ;;
+        *)        info "Launching Claude Code sandbox..." ;;
     esac
 fi
 info "  Working directory: $WORK_DIR"
