@@ -83,9 +83,15 @@ BLOCKS = {
 # Everything between BEGIN and END is replaced verbatim. The BEGIN line can
 # carry a free-form hint (e.g. "Run test/regen-config-docs.sh to update.")
 # which is preserved by the replacement (we match-and-keep group 1).
+#
+# Indent capture: when the block sits inside a markdown list (CLAUDE.md), the
+# BEGIN/END markers and body are indented (typically 2 spaces) so the body
+# renders as part of the list item. Group 2 captures the indent on the END
+# line, and we re-apply it to each line of the new body to preserve list
+# formatting. SPECIFICATION.md uses no indent — group 2 is empty there.
 SENTINEL_RE = lambda name: re.compile(
     r"(<!-- BEGIN AUTOGEN:" + re.escape(name) + r"(?:[^>]*)-->)"
-    r"\n[\s\S]*?\n"
+    r"\n[\s\S]*?\n([ \t]*)"
     r"(<!-- END AUTOGEN:" + re.escape(name) + r" -->)"
 )
 
@@ -104,7 +110,12 @@ for fn in FILES:
             # in SPECIFICATION.md, for example). Only flag missing sentinels
             # when the user's edit clearly expected the block to be there.
             continue
-        text = pat.sub(lambda m, b=body: f"{m.group(1)}\n{b}\n{m.group(2)}", text)
+        def _sub(m, b=body):
+            indent = m.group(2)
+            indented_body = "\n".join(f"{indent}{line}" if line else line
+                                      for line in b.split("\n"))
+            return f"{m.group(1)}\n{indented_body}\n{indent}{m.group(3)}"
+        text = pat.sub(_sub, text)
     if text != original:
         if mode == "check":
             drift.append(fn)

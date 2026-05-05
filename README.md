@@ -144,6 +144,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max output tokens per response (Claude Code default is 32K) |
 | `SANDY_SKILL_PACKS` | (unset) | Comma-separated skill packs to install (e.g. `gstack`). Built as a cached Docker layer |
 | `SANDY_GPU` | (disabled) | GPU passthrough: `all` for all GPUs, or device IDs like `0` or `0,1`. Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
+| `SANDY_SCREENSHOT_DIR` | (unset) | Host directory of screenshots to mount into the container (read-only at `/home/claude/screenshots`). When set, sandy generates a `/ss` slash command for Claude/Gemini and a screenshot skill for Codex — type `/ss huh` to have the agent describe your latest screenshot, `/ss 3 explain` for the last three, etc. See "Screenshot skill" below |
 | `SANDY_CHANNELS` | (unset) | Channel plugins to enable (e.g. `plugin:telegram@claude-plugins-official`) |
 | `TELEGRAM_BOT_TOKEN` | (unset) | Telegram bot token (from BotFather). Put in `.sandy/.secrets`, not `.sandy/config` |
 | `TELEGRAM_ALLOWED_SENDERS` | (unset) | Comma-separated Telegram user IDs for allowlist (e.g. `123456,789012`) |
@@ -256,6 +257,35 @@ SANDY_AGENT=all                        # alias for claude,gemini,codex,opencode
 Panes appear in the order listed. Each agent has its own config dir(s): `~/.claude`, `~/.gemini`, `~/.codex`, and `~/.config/opencode` + `~/.local/share/opencode`. All panes share the same workspace mount. Exiting one pane leaves the others running. Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, `sandy-opencode`); any multi-agent combo uses the `sandy-full` image, which bundles all four CLIs.
 
 **Feature support in multi-agent mode**: skill packs apply to the Claude pane only. Telegram channels use the host-side relay and are routed to pane 0 by default — override with `SANDY_CHANNEL_TARGET_PANE=0|1|2|3`. `--remote` is not supported in any multi-agent combo. `SANDY_LOCAL_LLM_HOST` works in any combo that includes opencode (or any agent that wants to reach a host-side service over the gateway).
+
+### Screenshot skill (`/ss`)
+
+Set `SANDY_SCREENSHOT_DIR=<host-path>` in `~/.sandy/config` (or per-workspace `.sandy/config`) to give the agent **eyes**: sandy mounts the folder read-only into the container and generates a per-agent `/ss` skill that finds the newest screenshots and feeds them to the model.
+
+```sh
+# in ~/.sandy/config
+SANDY_SCREENSHOT_DIR=/Users/you/Desktop/organized-screenshots
+```
+
+Usage inside a session:
+
+```
+/ss              # newest screenshot, no instruction → agent describes it
+/ss huh          # newest screenshot + "huh" → agent explains
+/ss 3 explain    # 3 newest screenshots, agent explains the set
+/ss fix          # newest is an error message → agent diagnoses + fixes
+/ss do this      # newest is a technique you saw → agent applies it
+/ss make infographic  # newest N → agent synthesizes one
+```
+
+| Agent | How to invoke |
+|---|---|
+| Claude | `/ss [N] [action]` slash command |
+| Gemini | `/ss [N] [action]` slash command |
+| Codex  | "look at my recent screenshot" — codex matches by description |
+| OpenCode | manual: `opencode "explain $(sandy-ss-paths 1)"` (no slash-command surface in v0) |
+
+No default — leaving `SANDY_SCREENSHOT_DIR` unset disables the feature entirely. macOS users typically point at `~/Desktop` (the macOS default for `Cmd+Shift+4` captures) or a custom folder configured via `defaults write com.apple.screencapture location <path>`. The mount is read-only by design; the agent should never modify your screenshot folder.
 
 ## How Network Isolation Works
 

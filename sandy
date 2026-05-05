@@ -59,6 +59,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_VERBOSE
     SANDY_VENV_OVERLAY
     SANDY_ALLOW_WORKFLOW_EDIT
+    SANDY_SCREENSHOT_DIR
     CLAUDE_CODE_MAX_OUTPUT_TOKENS
     GEMINI_MODEL
     SANDY_GEMINI_AUTH
@@ -463,6 +464,7 @@ SANDY_CHANNEL_TARGET_PANE|int|0||Which tmux pane in multi-agent mode receives ch
 SANDY_VERBOSE|int|0||Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace).
 SANDY_VENV_OVERLAY|bool|1||Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container.
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||Remove .github/workflows from the read-only protection list.
+SANDY_SCREENSHOT_DIR|path|||Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
 CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||Max output tokens per Claude response.
 GEMINI_MODEL|string|||Gemini model override.
 SANDY_GEMINI_AUTH|enum:auto,api_key,oauth,adc|auto||Gemini credential probe strategy.
@@ -1272,6 +1274,42 @@ RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
 # uv — fast Python package/version manager
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
 
+# sandy-ss-paths: agent-agnostic helper for the /ss screenshot skill.
+# Lists newest N image paths from $SANDY_SCREENSHOTS_PATH (default 1). Used
+# internally by the per-agent /ss skill files; also a manual escape hatch
+# for opencode (which has no slash-command surface in v0).
+RUN cat > /usr/local/bin/sandy-ss-paths <<'SS_HELPER' \
+    && chmod +x /usr/local/bin/sandy-ss-paths
+#!/bin/bash
+# Usage: sandy-ss-paths [N]   (default N=1)
+# Emits one absolute image path per line, newest first.
+set -uo pipefail
+N="${1:-1}"
+case "$N" in
+    ''|*[!0-9]*) echo "usage: sandy-ss-paths [N]   (N must be a positive integer)" >&2; exit 2 ;;
+esac
+DIR="${SANDY_SCREENSHOTS_PATH:-}"
+if [ -z "$DIR" ] || [ ! -d "$DIR" ]; then
+    echo "sandy-ss-paths: screenshot directory not configured." >&2
+    echo "  Set SANDY_SCREENSHOT_DIR=<host-path> in ~/.sandy/config and relaunch sandy." >&2
+    exit 1
+fi
+# Glob all common screenshot/image extensions, case-insensitive. Skip dotfiles.
+shopt -s nullglob nocaseglob
+files=( "$DIR"/*.png "$DIR"/*.jpg "$DIR"/*.jpeg "$DIR"/*.webp "$DIR"/*.heic "$DIR"/*.gif )
+shopt -u nullglob nocaseglob
+if [ "${#files[@]}" -eq 0 ]; then
+    echo "sandy-ss-paths: no images found in $DIR" >&2
+    exit 1
+fi
+# Sort by mtime newest-first, take N. printf %T@ then strip the timestamp.
+printf '%s\0' "${files[@]}" \
+    | xargs -0 stat -c '%Y %n' \
+    | sort -rn \
+    | head -n "$N" \
+    | cut -d' ' -f2-
+SS_HELPER
+
 # User
 RUN useradd -m -s /bin/bash -u 1001 claude
 
@@ -1734,6 +1772,65 @@ description: Convert a markdown file to clipboard-ready email HTML using the md2
 ---
 Run: `md2email <file.md>`
 SKMD
+fi
+
+# /ss screenshot skill — generated only when sandy mounted a screenshot dir
+# (SANDY_SCREENSHOTS_PATH set inside the container by sandy when
+# SANDY_SCREENSHOT_DIR is set on the host). Each agent gets its native format;
+# all three call /usr/local/bin/sandy-ss-paths internally so behavior stays
+# consistent across agents. Opencode has no slash-command surface in v0; users
+# can still call sandy-ss-paths from a prompt manually.
+if [ -n "${SANDY_SCREENSHOTS_PATH:-}" ]; then
+    if _sandy_has_claude; then
+        _sandy_write_file "$HOME/.claude/commands/ss.md" <<'SSMD'
+---
+description: Look at recent screenshot(s) from the host
+allowed-tools: Bash, Read
+argument-hint: "[N] [action]"
+---
+
+!`set -- $ARGUMENTS; if [ $# -ge 1 ] && expr "$1" : '^[0-9][0-9]*$' >/dev/null; then sandy-ss-paths "$1"; else sandy-ss-paths 1; fi`
+
+User action: $ARGUMENTS
+
+Read each image listed above (use the Read tool on each path). The first arg
+to /ss may be a count of screenshots to grab — strip it from the user action
+if so. Then respond to whatever the user asked: "huh"/"explain" → describe
+what you see; "fix" → diagnose the error/bug shown and edit the relevant
+code; "do this" → identify the technique and apply it to our work; "make
+infographic" → synthesize the screenshots into one. Use the screenshots as
+the user's visual input to you.
+SSMD
+    fi
+    if _sandy_has_gemini; then
+        _sandy_write_file "$HOME/.gemini/commands/ss.toml" <<'SSTOML'
+description = "Look at recent screenshot(s) from the host"
+prompt = """Recent screenshot(s) (newest first):
+!{ if echo "{{args}}" | awk '{exit !($1 ~ /^[0-9]+$/)}'; then sandy-ss-paths $(echo "{{args}}" | awk '{print $1}'); else sandy-ss-paths 1; fi }
+
+User action: {{args}}
+
+Read each image path listed above. The first arg may be a count — strip it
+from the user action if so. Respond to what the user asked: explain, fix
+the visible error, do/remix the technique shown, make an infographic, etc.
+"""
+SSTOML
+    fi
+    if _sandy_has_codex; then
+        _sandy_write_file "$HOME/.codex/skills/screenshot/SKILL.md" <<'SSCODEX'
+---
+name: screenshot
+description: View recent screenshots from the user's host. Invoke when the user asks you to look at, see, view, explain, or act on a screenshot they've taken — including phrasings like "huh", "fix this", "do this", "make an infographic from these". Run `sandy-ss-paths [N]` (default 1) to list the newest images, then read each path as an image.
+---
+
+When the user wants you to look at a screenshot:
+
+1. Run `sandy-ss-paths [N]` where N is the number of screenshots they want (default 1).
+2. The command outputs one image path per line, newest first.
+3. View each path as an image (codex supports image input directly).
+4. Respond to the user's action ("explain", "fix", "make infographic", "do this", etc.).
+SSCODEX
+    fi
 fi
 
 # Codex trust entry: append [projects."$SANDY_WORKSPACE"] trust_level = "trusted"
@@ -2837,6 +2934,32 @@ if [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
         echo "[sandy] ERROR: SANDY_LOCAL_LLM_HOST port out of range: $_SANDY_LLM_PORT" >&2
         exit 1
     fi
+fi
+
+# Validate SANDY_SCREENSHOT_DIR. Reject shell metas, missing dir, and a few
+# obviously-too-broad targets ($HOME, /). Missing-dir is warn-and-skip rather
+# than hard-error: Docker would silently auto-create an empty host dir at
+# bind-mount time, which is the bad outcome we want to avoid.
+if [ -n "${SANDY_SCREENSHOT_DIR:-}" ]; then
+    if [[ "$SANDY_SCREENSHOT_DIR" =~ [\;\$\`\&\|\<\>] ]]; then
+        echo "[sandy] ERROR: SANDY_SCREENSHOT_DIR contains shell metacharacters" >&2
+        exit 1
+    fi
+    # Canonicalize once for comparison; tolerate non-existent path during compare.
+    _ssd_real="$(cd "$SANDY_SCREENSHOT_DIR" 2>/dev/null && pwd -P || echo "$SANDY_SCREENSHOT_DIR")"
+    case "$_ssd_real" in
+        "$HOME"|/|"")
+            echo "[sandy] ERROR: SANDY_SCREENSHOT_DIR='$SANDY_SCREENSHOT_DIR' is too broad (resolves to '$_ssd_real'). Pick a specific subdirectory." >&2
+            exit 1
+            ;;
+    esac
+    if [ ! -d "$SANDY_SCREENSHOT_DIR" ]; then
+        echo "[sandy] WARNING: SANDY_SCREENSHOT_DIR='$SANDY_SCREENSHOT_DIR' does not exist or is not a directory; /ss skill will not be wired up." >&2
+        SANDY_SCREENSHOT_DIR=""
+    else
+        SANDY_SCREENSHOT_DIR="$_ssd_real"
+    fi
+    unset _ssd_real
 fi
 
 # --- Resolve agent ---
@@ -4765,6 +4888,14 @@ if _sandy_agent_has claude; then
     else
         RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=")
     fi
+fi
+
+# Screenshot dir bind-mount (agent-agnostic). Read-only — the agent should never
+# write into the user's screenshot folder. The container-side path is fixed so
+# the /ss skill files and sandy-ss-paths helper can hardcode it.
+if [ -n "${SANDY_SCREENSHOT_DIR:-}" ]; then
+    RUN_FLAGS+=(-v "$SANDY_SCREENSHOT_DIR:/home/claude/screenshots:ro")
+    RUN_FLAGS+=(-e "SANDY_SCREENSHOTS_PATH=/home/claude/screenshots")
 fi
 if _sandy_agent_has gemini; then
     # Disable Gemini's per-tool sandbox — sandy provides whole-session isolation.

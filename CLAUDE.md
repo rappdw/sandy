@@ -93,7 +93,7 @@ Sandy loads configuration from four sources in order: `$HOME/.sandy/config`, `$H
 
 - **Privileged-only keys** (require per-workspace approval when set from a passive source):
   <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-  `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
+  `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
   <!-- END AUTOGEN:privileged-key-list -->
 
   These would let a malicious `.sandy/config` committed to a repo disable isolation or exfiltrate credentials, so sandy collects them, prints the exact `KEY=VALUE` set, and asks for explicit approval before honoring them. Approvals are persisted to `$SANDY_HOME/approvals/passive-<workspace-hash>.list` (first line is a sha256 of the sorted `KEY=VALUE` set). Subsequent launches with the same set are silent; any edit to `.sandy/config` that changes a privileged key re-prompts. Revoke with `rm $SANDY_HOME/approvals/passive-<hash>.list`. Headless mode (`-p`/`--print`/`--prompt`) and non-TTY stdin fail closed — the keys are dropped with a pointer to "launch sandy interactively once from this directory to approve."
@@ -102,7 +102,7 @@ Sandy loads configuration from four sources in order: `$HOME/.sandy/config`, `$H
 
 - **Passive-safe keys** (allowed from any source):
   <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `SANDY_SCREENSHOT_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
   <!-- END AUTOGEN:passive-key-list -->
 
 Additionally, `SANDY_ALLOW_LAN_HOSTS` is validated at use-site to reject world-open entries (`0.0.0.0/0`, `::/0`) with a hard error at launch — even when set from a privileged source.
@@ -249,6 +249,25 @@ Add entries to `SKILL_PACK_NAMES`, `SKILL_PACK_REPOS`, `SKILL_PACK_VERSIONS`, an
 ## Auto-update
 
 On each launch, sandy checks for newer Claude Code versions by comparing the installed version against the latest release. If an update is available, the image is rebuilt with `--no-cache`. Inside the container, `DISABLE_AUTOUPDATER=1` prevents Claude Code from attempting self-updates against the read-only filesystem.
+
+## Screenshots / `/ss` skill
+
+Set `SANDY_SCREENSHOT_DIR=<host-path>` (passive-safe, set in `~/.sandy/config` or per-workspace `.sandy/config`) to mount a host folder of screenshots into the container at `/home/claude/screenshots` (read-only). Sandy exposes the in-container path as `$SANDY_SCREENSHOTS_PATH`. When set, sandy generates a per-agent `/ss` skill at sandbox setup so the agent can "see" what the user just captured.
+
+Validation at launch: rejects shell metacharacters and overly-broad targets (literal `$HOME` or `/`). A non-existent directory is a warn-and-skip — sandy intentionally won't let Docker auto-create an empty stub on the host.
+
+`SANDY_SCREENSHOT_DIR` has no default — leaving it unset disables the feature entirely (no mount, no env var, no skill files generated). macOS users typically set it to `~/Desktop` (default capture location, configurable via `defaults read com.apple.screencapture location`); Linux users to wherever their capture tool drops files (e.g. `~/Pictures/Screenshots`).
+
+**Per-agent UX:**
+
+| Agent | Invocation | Format |
+|---|---|---|
+| `claude` | `/ss [N] [action]` | slash command (`~/.claude/commands/ss.md`) |
+| `gemini` | `/ss [N] [action]` | slash command (`~/.gemini/commands/ss.toml`) |
+| `codex` | "look at my recent screenshot" (description-matched) | skill (`~/.codex/skills/screenshot/SKILL.md`) |
+| `opencode` | manual: `opencode "explain $(sandy-ss-paths 1)"` | no slash-command surface in v0 |
+
+All four are powered by `/usr/local/bin/sandy-ss-paths` (baked into the base image), which lists newest N image paths from `$SANDY_SCREENSHOTS_PATH` (default 1) and is callable from any agent's bash escape hatch.
 
 ## Workspace Mount Path
 

@@ -137,7 +137,7 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `SANDY_SCREENSHOT_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -173,6 +173,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_VERBOSE` | passive | `0` | Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace). |
 | `SANDY_VENV_OVERLAY` | passive | `1` | Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container. |
 | `SANDY_ALLOW_WORKFLOW_EDIT` | passive | `0` | Remove .github/workflows from the read-only protection list. |
+| `SANDY_SCREENSHOT_DIR` | passive | unset | Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents. |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | passive | `128000` | Max output tokens per Claude response. |
 | `GEMINI_MODEL` | passive | unset | Gemini model override. |
 | `SANDY_GEMINI_AUTH` | passive | `auto` | Gemini credential probe strategy. |
@@ -536,6 +537,7 @@ Optional: `--gpus <SANDY_GPU>` if GPU passthrough is enabled.
 2. Symlink system Rust toolchain binaries into `~/.cargo/bin`
 3. Activate skill packs (symlink into `~/.claude/skills/`)
 4. Create synthkit slash commands (`/md2pdf`, `/md2doc`, `/md2html`, `/md2email`)
+4a. Create `/ss` screenshot skill files when `SANDY_SCREENSHOTS_PATH` is set (claude `~/.claude/commands/ss.md`, gemini `~/.gemini/commands/ss.toml`, codex `~/.codex/skills/screenshot/SKILL.md`). All call `/usr/local/bin/sandy-ss-paths` internally. Opencode has no slash-command surface in v0; the helper is on PATH for manual invocation. See Appendix E.11a for the host-side mount + env-var pipeline.
 5. Remap ANSI color 4 (dark blue → bright blue) for readability
 6. Configure `settings.json` (merge defaults, set teammateMode, spinnerTips, permissions)
 7. Configure git (safe.directory, user name/email)
@@ -1235,6 +1237,14 @@ RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
 # uv — fast Python package/version manager
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL=/usr/local/bin sh
 
+# sandy-ss-paths: agent-agnostic helper for the /ss screenshot skill.
+# Lists newest N image paths from $SANDY_SCREENSHOTS_PATH (default 1).
+RUN cat > /usr/local/bin/sandy-ss-paths <<'SS_HELPER' \
+    && chmod +x /usr/local/bin/sandy-ss-paths
+#!/bin/bash
+# (body — see Appendix E.11a for the host-side mount that defines $SANDY_SCREENSHOTS_PATH)
+SS_HELPER
+
 # User
 RUN useradd -m -s /bin/bash -u 1001 claude
 
@@ -1440,6 +1450,15 @@ JSON repair regexes:
   This must happen container-side because it needs the in-container workspace path.
 - `build_codex_cmd()`: translates sandy's `-p`/`--print`/`--prompt` into `codex exec` with a positional prompt; drops `--continue`/`-c`; injects `--sandbox danger-full-access` and optional `--model`.
 - Launch dispatch: the `codex` case sits alongside `claude` and `gemini` in the per-agent dispatch; multi-agent combos iterate over the parsed `_SANDY_AGENTS` array and call each `build_*_cmd` in pane order.
+
+**`/ss` screenshot-skill seeding**:
+- Gated on `[ -n "${SANDY_SCREENSHOTS_PATH:-}" ]` — sandy only sets that env var when `SANDY_SCREENSHOT_DIR` was provided on the host and passed validation.
+- For each enabled agent, writes the native skill format:
+  - `_sandy_has_claude`: `~/.claude/commands/ss.md` (markdown frontmatter, `$ARGUMENTS` parsed inside `!\`bash\`` for an optional leading count).
+  - `_sandy_has_gemini`: `~/.gemini/commands/ss.toml` (TOML, `{{args}}` parsed inside `!{bash}`).
+  - `_sandy_has_codex`: `~/.codex/skills/screenshot/SKILL.md` (YAML frontmatter; codex matches by description).
+- All three call `/usr/local/bin/sandy-ss-paths` (baked into Phase 1 base image — see Appendix A.1) to list newest N image paths.
+- Opencode has no slash-command/skill surface in v0; the helper is on PATH for manual invocation in a prompt (e.g. `opencode "explain $(sandy-ss-paths 1)"`).
 
 ### A.7 tmux.conf
 
@@ -2097,6 +2116,23 @@ fi
 ```
 
 This hides host content at these paths and provides a writable overlay from the sandbox.
+
+### E.11a Screenshot Mount (conditional)
+
+If `SANDY_SCREENSHOT_DIR` is set on the host (and passes validation):
+```bash
+-v "<SANDY_SCREENSHOT_DIR>:/home/claude/screenshots:ro"
+-e "SANDY_SCREENSHOTS_PATH=/home/claude/screenshots"
+```
+
+Read-only by design — the agent must never mutate the host's screenshot folder. The container-side path is fixed (`/home/claude/screenshots`) so the `/ss` slash command files generated by `user-setup.sh` and the `sandy-ss-paths` helper baked into the base image can hardcode it.
+
+Validation (run at launch, before any `docker run`):
+- Reject shell metacharacters (`; $ \` & | < >`).
+- Reject literal `$HOME` and `/` after canonicalization (`pwd -P`).
+- Missing directory → warn-and-skip (clear `SANDY_SCREENSHOT_DIR`, no mount). Hard-erroring would be noisy; auto-creating the host dir would silently materialize an empty folder where the user expected content.
+
+`SANDY_SCREENSHOT_DIR` has no default. Unset = no mount, no env var, no skill files generated. See §7 step 4a (`user-setup.sh`) for the per-agent skill file generation that runs container-side once the mount is in place.
 
 ### E.12 Persistent Package Mounts
 

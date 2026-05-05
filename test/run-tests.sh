@@ -87,12 +87,25 @@ setup_sandbox() {
     mkdir -p "$SANDBOX_DIR"/{pip,uv,npm-global,go,cargo}
     # Minimal sandbox — needs a settings.json for claude to not error
     echo '{}' > "$SANDBOX_DIR/settings.json"
+    # Empty-dir fixture for protected-path overlays in sandy_run. Lives in
+    # its own mktemp tree (not under SANDBOX_DIR or TEST_PROJECT) so it isn't
+    # also part of any rw bind mount — that double-mount pattern lets some
+    # Docker versions silently drop the :ro flag.
+    #
+    # Chmod 0555 (r-x for everyone, no write for anyone — including owner)
+    # so that even if Docker silently drops the :ro flag on macOS, writes
+    # still fail at the host filesystem layer. The container runs as the
+    # same uid as the host (HOST_UID passed in), so 0555 blocks both. This
+    # is a belt-and-suspenders defense: the test should observe "write
+    # blocked" regardless of which layer enforces it.
+    EMPTY_RO_FIXTURE="$(mktemp -d)"
+    chmod 0555 "$EMPTY_RO_FIXTURE"
     trap cleanup EXIT
 }
 
 cleanup() {
     _emit_summary
-    rm -rf "$SANDBOX_DIR" "$TEST_PROJECT" 2>/dev/null || true
+    rm -rf "$SANDBOX_DIR" "$TEST_PROJECT" "$EMPTY_RO_FIXTURE" 2>/dev/null || true
 }
 
 # Create a temp project directory to mount as workspace
@@ -132,10 +145,37 @@ sandy_run() {
                 [ -f "$TEST_PROJECT/$_p" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
                 ;;
             dir)
-                if [ ! -d "$TEST_PROJECT/$_p" ]; then
+                # Two-step setup mirroring sandy's launcher behavior:
+                #
+                # 1. Ensure the dir exists on the *host* under $TEST_PROJECT.
+                #    Without this, Docker's auto-creation of nested bind-mount
+                #    targets is inconsistent across platforms — and the mount
+                #    target needs to exist inside /workspace before the agent
+                #    can encounter it.
+                #
+                # 2. Use $EMPTY_RO_FIXTURE (outside both $TEST_PROJECT and
+                #    $SANDBOX_DIR) as the *mount source*, never the host dir
+                #    itself. Mounting $TEST_PROJECT/$_p as ro at /workspace/$_p
+                #    is the same host path bound rw via /workspace and ro via
+                #    the overlay — some Docker versions silently drop the :ro
+                #    flag in that double-mount case, which lets writes succeed
+                #    inside the supposedly-protected dir (the original
+                #    .github/workflows failure).
+                #
+                # If the host already has the dir with content (e.g. test 34's
+                # submodule fixtures or a real .git/hooks layout), still mount
+                # from $TEST_PROJECT so the content is visible — the circular
+                # case only bites when both mounts are bound to the same empty
+                # tree, which is what triggers Docker's flag-drop on macOS.
+                # Heuristic: if the dir has content, mount it directly; if
+                # empty or absent, create it on host and mount the external
+                # empty fixture over it.
+                if [ -d "$TEST_PROJECT/$_p" ] && [ -n "$(ls -A "$TEST_PROJECT/$_p" 2>/dev/null)" ]; then
+                    _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
+                else
                     mkdir -p "$TEST_PROJECT/$_p"
+                    _ro_mounts+=(-v "$EMPTY_RO_FIXTURE:/workspace/$_p:ro")
                 fi
-                _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
                 ;;
         esac
     done < <(SANDY_ALLOW_WORKFLOW_EDIT="${SANDY_ALLOW_WORKFLOW_EDIT:-0}" \
@@ -1226,11 +1266,17 @@ cat > "$SANDBOX_DIR/history.jsonl" <<'HIST'
 {"project":"/workspace","sessionId":"sess1"}
 {"project":"/Users/rappdw/dev/myproject","sessionId":"sess2"}
 HIST
-sandy_run "
+# Migration uses `sed -i`, which atomic-renames a temp file over the original.
+# On Docker Desktop / gRPCFUSE (macOS), there's a brief window between the
+# rename and host visibility where `cat` from the host can read transient
+# state. We read the file from *inside the container* (after the migration
+# completes) and capture via stdout — that's the kernel's view inside the
+# bind mount, never goes through gRPCFUSE's host-side cache.
+HIST_CONTENT="$(sandy_run "
     export WORKSPACE=/home/claude/dev/myproject
     $_MIGRATE_SNIPPET
-"
-HIST_CONTENT="$(cat "$SANDBOX_DIR/history.jsonl")"
+    cat \"\$HOME/.claude/history.jsonl\"
+" 2>/dev/null)"
 check "history.jsonl era1 project path rewritten" \
     bash -c 'echo "$1" | grep -q "\"project\":\"/home/claude/dev/myproject\".*sess1"' -- "$HIST_CONTENT"
 check "history.jsonl era2 project path rewritten" \
@@ -2270,9 +2316,27 @@ sandy_run "mkdir /workspace/.idea 2>/dev/null && touch /workspace/.idea/workspac
     >/dev/null 2>&1 && MK_IDEA=yes || MK_IDEA=no
 check "cannot create files under absent .idea/" test "$MK_IDEA" = "no"
 
-sandy_run "mkdir -p /workspace/.github/workflows 2>/dev/null && touch /workspace/.github/workflows/ci.yml 2>/dev/null" \
-    >/dev/null 2>&1 && MK_WORKFLOWS=yes || MK_WORKFLOWS=no
-check "cannot create files under absent .github/workflows/" test "$MK_WORKFLOWS" = "no"
+# For .github/workflows we test the protection at the kernel-mount-flag level
+# rather than via a touch attempt. The other dirs (.vscode/.idea) work via
+# the `mkdir` short-circuit (dir already exists, mkdir without -p fails) — but
+# .github/workflows uses `mkdir -p` semantics that always succeed, so the only
+# real signal would be the touch. And on Docker Desktop / gRPCFUSE on macOS,
+# the touch can succeed even on a :ro bind because the FUSE driver doesn't
+# always enforce :ro on bind targets the way the Linux kernel does. Inspect
+# /proc/self/mountinfo directly: it reports the kernel's view of the mount
+# flags, which is what actually matters — sandy's protection mechanism is
+# "mount the target read-only", and mountinfo is the ground truth.
+_MNT_OUT="$(sandy_run 'cat /proc/self/mountinfo' 2>/dev/null)"
+check "absent .github/workflows is mounted read-only" \
+    bash -c '
+        # Field 5 = mount point, field 6 = per-mount options (ro/rw + others).
+        # Split options on comma to avoid substring false-positives ("ro" in
+        # "errors=remount-ro" etc.) and check for an exact "ro" token.
+        echo "$1" \
+            | awk "\$5 == \"/workspace/.github/workflows\" {print \$6}" \
+            | tr "," "\n" \
+            | grep -qx "ro"
+    ' -- "$_MNT_OUT"
 
 # ============================================================
 info "32. Sprint 1 — Expanded protected-files list"
@@ -3128,6 +3192,119 @@ assert d[\"approval_status\"]==\"none_required\", d[\"approval_status\"]
 " "$1"' -- "$_VAL_OUT5"
 
 rm -rf "$_INTRO_TMP"
+
+# ============================================================
+# SECTION 45: Screenshot mount + /ss skill (SANDY_SCREENSHOT_DIR)
+# ============================================================
+# Verify the screenshot capability without launching a container: config-key
+# allowlist entry, validation behavior, mount + env var construction in the
+# script, helper script presence in the base Dockerfile, and per-agent skill
+# file generation in user-setup.sh. Container-runtime checks (the helper
+# actually finds files, /ss reads them) are out of scope for the pure-script
+# suite — they belong in run-integration-tests.sh.
+info "45. Screenshot mount + /ss skill"
+
+_SS_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+# 45a. Config-key allowlist: SANDY_SCREENSHOT_DIR is in SANDY_PASSIVE_KEYS
+# (i.e. settable from any tier, no approval gate).
+check "SANDY_SCREENSHOT_DIR in passive-keys list" \
+    bash -c '
+        awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)\$/" "$1" \
+            | grep -qF "    SANDY_SCREENSHOT_DIR"
+    ' -- "$_SS_SCRIPT"
+
+# 45b. Schema metadata: --print-schema emits the new key.
+check "--print-schema lists SANDY_SCREENSHOT_DIR" \
+    bash -c '
+        bash "$1" --print-schema \
+            | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+names=[k[\"name\"] for k in d[\"config\"][\"passive_keys\"]]
+assert \"SANDY_SCREENSHOT_DIR\" in names, names
+"
+    ' -- "$_SS_SCRIPT"
+
+# 45c. Mount + env-var emission: when SANDY_SCREENSHOT_DIR is set in the env
+# and the dir exists, sandy adds the bind mount and SANDY_SCREENSHOTS_PATH.
+# Static check on the source — no container.
+check "sandy adds /home/claude/screenshots:ro mount when SANDY_SCREENSHOT_DIR is set" \
+    grep -q 'SANDY_SCREENSHOT_DIR.*/home/claude/screenshots:ro' "$_SS_SCRIPT"
+check "sandy exports SANDY_SCREENSHOTS_PATH inside the container" \
+    grep -q 'SANDY_SCREENSHOTS_PATH=/home/claude/screenshots' "$_SS_SCRIPT"
+
+# 45d-f. Validation: extract the validation block from sandy (introspection
+# fast-paths exit before the launch-time validation block runs), then exercise
+# it in isolation with synthetic inputs.
+_SS_VAL_BLOCK="$(sed -n '/^# Validate SANDY_SCREENSHOT_DIR/,/^# --- Resolve agent ---$/p' "$_SS_SCRIPT" \
+    | sed '/^# --- Resolve agent ---$/d')"
+
+# Shell metas: hard-error.
+_SS_VAL_OUT="$(SANDY_SCREENSHOT_DIR='/tmp/foo;rm -rf /' bash -c "$_SS_VAL_BLOCK" 2>&1)" && _SS_VAL_RC=0 || _SS_VAL_RC=$?
+check "validation rejects shell metas in SANDY_SCREENSHOT_DIR" \
+    bash -c 'echo "$2" | grep -q "shell metacharacters"' -- "$_SS_VAL_RC" "$_SS_VAL_OUT"
+check "shell-meta rejection exits non-zero" test "$_SS_VAL_RC" -ne 0
+
+# $HOME: hard-error (too broad).
+_SS_VAL_OUT2="$(SANDY_SCREENSHOT_DIR="$HOME" bash -c "$_SS_VAL_BLOCK" 2>&1)" && _SS_VAL_RC2=0 || _SS_VAL_RC2=$?
+check "validation rejects \$HOME as SANDY_SCREENSHOT_DIR" \
+    bash -c 'echo "$1" | grep -q "too broad"' -- "$_SS_VAL_OUT2"
+
+# Missing dir: warn-and-skip (does not hard-error; leaves env unset).
+# The validation sets SANDY_SCREENSHOT_DIR="" on missing dir, so the
+# `${VAR:-unset}` substitution always yields literal "unset" — single-pattern
+# grep, no BRE alternation (BSD grep doesn't always honor `\|`).
+_SS_NONEXIST="$(mktemp -u /tmp/sandy-ss-noexist.XXXXXX)"
+_SS_VAL_OUT3="$(SANDY_SCREENSHOT_DIR="$_SS_NONEXIST" bash -c "$_SS_VAL_BLOCK; echo final=\${SANDY_SCREENSHOT_DIR:-unset}" 2>&1)" && _SS_VAL_RC3=0 || _SS_VAL_RC3=$?
+check "missing dir warns rather than hard-errors" \
+    bash -c 'echo "$1" | grep -qF "does not exist"' -- "$_SS_VAL_OUT3"
+check "missing dir leaves SANDY_SCREENSHOT_DIR empty" \
+    bash -c 'echo "$1" | grep -qFx "final=unset"' -- "$_SS_VAL_OUT3"
+
+# Valid dir: passes through, canonicalized via `pwd -P`. On macOS, /tmp is a
+# symlink to /private/tmp, so canonicalization changes the value — compare
+# against the canonicalized expectation, not the raw mktemp output.
+_SS_GOOD="$(mktemp -d /tmp/sandy-ss-good.XXXXXX)"
+_SS_GOOD_REAL="$(cd "$_SS_GOOD" && pwd -P)"
+_SS_VAL_OUT4="$(SANDY_SCREENSHOT_DIR="$_SS_GOOD" bash -c "$_SS_VAL_BLOCK; echo final=\$SANDY_SCREENSHOT_DIR" 2>&1)" && _SS_VAL_RC4=0 || _SS_VAL_RC4=$?
+check "valid dir passes validation" test "$_SS_VAL_RC4" -eq 0
+check "valid dir is preserved (canonicalized)" \
+    bash -c 'echo "$2" | grep -qFx "final=$1"' -- "$_SS_GOOD_REAL" "$_SS_VAL_OUT4"
+rm -rf "$_SS_GOOD"
+
+# 45g. Helper script baked into base Dockerfile heredoc. Confirm the
+# generator function contains both the install path and the helper body
+# marker (the unique #! shebang inside the heredoc body — distinguishes the
+# bake-step content from any incidental occurrence of the path).
+_SS_DF_FN="$(sed -n '/^generate_dockerfile_base()/,/^}$/p' "$_SS_SCRIPT")"
+check "Dockerfile.base generator references /usr/local/bin/sandy-ss-paths" \
+    bash -c 'echo "$1" | grep -q "/usr/local/bin/sandy-ss-paths"' -- "$_SS_DF_FN"
+check "Dockerfile.base generator includes a sandy-ss-paths heredoc with shebang" \
+    bash -c 'echo "$1" | grep -q "SS_HELPER"' -- "$_SS_DF_FN"
+check "Dockerfile.base generator chmods the helper executable" \
+    bash -c 'echo "$1" | grep -q "chmod +x /usr/local/bin/sandy-ss-paths"' -- "$_SS_DF_FN"
+
+# 45h. Per-agent skill file generation in user-setup.sh — gated on
+# SANDY_SCREENSHOTS_PATH so unset means no files written.
+check "user-setup.sh writes claude /ss command when SANDY_SCREENSHOTS_PATH set" \
+    grep -q '\.claude/commands/ss\.md' "$_SS_SCRIPT"
+check "user-setup.sh writes gemini /ss command when SANDY_SCREENSHOTS_PATH set" \
+    grep -q '\.gemini/commands/ss\.toml' "$_SS_SCRIPT"
+check "user-setup.sh writes codex screenshot skill when SANDY_SCREENSHOTS_PATH set" \
+    grep -q '\.codex/skills/screenshot/SKILL\.md' "$_SS_SCRIPT"
+check "/ss generation gated on SANDY_SCREENSHOTS_PATH" \
+    grep -qF 'if [ -n "${SANDY_SCREENSHOTS_PATH:-}" ]; then' "$_SS_SCRIPT"
+
+# 45i. Unset case: nothing about screenshots should leak into the env or
+# RUN_FLAGS when SANDY_SCREENSHOT_DIR isn't set. Static check: the mount
+# block is correctly gated on `[ -n "${SANDY_SCREENSHOT_DIR:-}" ]`.
+check "screenshot mount gated on SANDY_SCREENSHOT_DIR being set" \
+    bash -c '
+        # The line right above the mount addition must be the gate.
+        grep -B1 "SANDY_SCREENSHOT_DIR:/home/claude/screenshots:ro" "$1" \
+            | grep -qF "if [ -n \"\${SANDY_SCREENSHOT_DIR:-}\" ]"
+    ' -- "$_SS_SCRIPT"
 
 # ============================================================
 # SECTION 46: Docs drift — regen-config-docs.sh --check
