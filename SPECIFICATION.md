@@ -132,7 +132,7 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Privileged-only keys** (allowed only from `$SANDY_HOME/config` and `$SANDY_HOME/.secrets`):
 <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
+`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_EXTRA_ENV`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
 <!-- END AUTOGEN:privileged-key-list -->
 
 **Passive-safe keys** (allowed from any source):
@@ -156,6 +156,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_ALLOW_NO_ISOLATION` | privileged | `0` | Allow launch when iptables rules cannot be applied (Linux only). |
 | `SANDY_ALLOW_LAN_HOSTS` | privileged | unset | Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected. |
 | `SANDY_LOCAL_LLM_HOST` | privileged | unset | Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal. |
+| `SANDY_EXTRA_ENV` | privileged | unset | Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values come from the host env, ~/.sandy/.secrets, or ~/.sandy/config — workspace sources never supply values. Privileged tier so workspace config requires approval. |
 | `ANTHROPIC_API_KEY` | privileged | unset | Anthropic API key for Claude Code. Not required when using Claude Max OAuth. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | privileged | unset | Claude Code OAuth token (alternative to ANTHROPIC_API_KEY). |
 | `GEMINI_API_KEY` | privileged | unset | Google API key for Gemini CLI. |
@@ -2133,6 +2134,31 @@ Validation (run at launch, before any `docker run`):
 - Missing directory → warn-and-skip (clear `SANDY_SCREENSHOT_DIR`, no mount). Hard-erroring would be noisy; auto-creating the host dir would silently materialize an empty folder where the user expected content.
 
 `SANDY_SCREENSHOT_DIR` has no default. Unset = no mount, no env var, no skill files generated. See §7 step 4a (`user-setup.sh`) for the per-agent skill file generation that runs container-side once the mount is in place.
+
+### E.11b User-defined Env Passthrough (conditional)
+
+If `SANDY_EXTRA_ENV` is set (privileged tier; comma-separated env-var names):
+
+```bash
+# For each name listed:
+-e "<NAME>=<VALUE>"
+```
+
+Source resolution for each `<VALUE>` (env wins absolutely; among files, last-match-wins iteration in standard precedence order):
+
+```
+env  >  $WORK_DIR/.sandy/.secrets  >  $WORK_DIR/.sandy/config
+      >  $SANDY_HOME/.secrets        >  $SANDY_HOME/config
+```
+
+Workspace sources are consulted for values, matching the standard `_load_sandy_config` precedence (workspace overrides host). The security boundary lives on the *names*: `SANDY_EXTRA_ENV` is privileged-tier, so a workspace setting it triggers the passive-privileged approval prompt. Once a name is approved, the value can come from any of the four files (or env).
+
+Validation rules:
+- Names must match `^[A-Z_][A-Z0-9_]*$` (POSIX env-var convention) — invalid names are skipped with a warning.
+- Names that collide with `SANDY_PRIVILEGED_KEYS` or `SANDY_PASSIVE_KEYS` are skipped (those have their own typed path).
+- A listed name with no value anywhere produces a launch-time warning, not a failure (the user may have intended a per-host or shell-defined value that's currently absent on this machine).
+
+Use case: tokens for user-installed MCP servers / agent tooling that sandy doesn't know about (Home Assistant API, internal corp APIs, etc.). Without this, users would have to hardcode tokens in `<workspace>/.mcp.json` (less secret-management-friendly) or fork the sandy script.
 
 ### E.12 Persistent Package Mounts
 

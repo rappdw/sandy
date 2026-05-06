@@ -93,7 +93,7 @@ Sandy loads configuration from four sources in order: `$HOME/.sandy/config`, `$H
 
 - **Privileged-only keys** (require per-workspace approval when set from a passive source):
   <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-  `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
+  `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_EXTRA_ENV`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
   <!-- END AUTOGEN:privileged-key-list -->
 
   These would let a malicious `.sandy/config` committed to a repo disable isolation or exfiltrate credentials, so sandy collects them, prints the exact `KEY=VALUE` set, and asks for explicit approval before honoring them. Approvals are persisted to `$SANDY_HOME/approvals/passive-<workspace-hash>.list` (first line is a sha256 of the sorted `KEY=VALUE` set). Subsequent launches with the same set are silent; any edit to `.sandy/config` that changes a privileged key re-prompts. Revoke with `rm $SANDY_HOME/approvals/passive-<hash>.list`. Headless mode (`-p`/`--print`/`--prompt`) and non-TTY stdin fail closed — the keys are dropped with a pointer to "launch sandy interactively once from this directory to approve."
@@ -268,6 +268,38 @@ Validation at launch: rejects shell metacharacters and overly-broad targets (lit
 | `opencode` | manual: `opencode "explain $(sandy-ss-paths 1)"` | no slash-command surface in v0 |
 
 All four are powered by `/usr/local/bin/sandy-ss-paths` (baked into the base image), which lists newest N image paths from `$SANDY_SCREENSHOTS_PATH` (default 1) and is callable from any agent's bash escape hatch.
+
+## Forwarding user-defined env vars (`SANDY_EXTRA_ENV`)
+
+Sandy normally only forwards env vars it knows about (model selection, agent credentials, channel tokens, etc.). For tokens consumed by user-installed MCP servers or other in-container tooling that sandy has no opinion on, set `SANDY_EXTRA_ENV` to a comma-separated list of env-var names to forward.
+
+```sh
+# in ~/.sandy/config (privileged, host-only)
+SANDY_EXTRA_ENV=HA_TOKEN,LINEAR_API_KEY
+```
+
+Then put the values either in your shell environment (`export HA_TOKEN=...`) or in `~/.sandy/.secrets`:
+
+```sh
+# in ~/.sandy/.secrets
+HA_TOKEN=ey...
+LINEAR_API_KEY=lin_...
+```
+
+**Source resolution order** for the forwarded values:
+
+```
+env  >  workspace/.sandy/.secrets  >  workspace/.sandy/config
+      >  ~/.sandy/.secrets          >  ~/.sandy/config
+```
+
+Env wins absolutely. Among files, workspace overrides host (matches sandy's standard config-loader precedence: workspace passive beats host privileged for keys both sources set). Within each tier, `.secrets` beats `config` (last-match-wins iteration order).
+
+Per-workspace tokens (different value per project — common with HA, CI tokens, etc.) belong in `<workspace>/.sandy/.secrets`. User-wide tokens belong in `~/.sandy/.secrets`. Either works.
+
+**Security boundary lives on the names, not the values.** `SANDY_EXTRA_ENV` is privileged-tier — a workspace setting it triggers the standard passive-privileged approval prompt. Once you've approved `HA_TOKEN`, the value can come from anywhere. The original threat (a committed `.sandy/config` setting `SANDY_EXTRA_ENV=AWS_SECRET_KEY` to exfiltrate your host env) is gated by the prompt the user sees before any value is forwarded.
+
+**Validation:** each name must match `[A-Z_][A-Z0-9_]*` (POSIX env-var convention) — invalid names are skipped with a warning. Names that already match a sandy-recognized key (e.g. `ANTHROPIC_API_KEY`) are also skipped — those go through their own typed path. A listed name with no value anywhere produces a launch-time warning ("`HA_TOKEN` has no value") but doesn't fail the launch.
 
 ## Workspace Mount Path
 

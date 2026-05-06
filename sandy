@@ -37,6 +37,7 @@ SANDY_PRIVILEGED_KEYS=(
     SANDY_ALLOW_NO_ISOLATION
     SANDY_ALLOW_LAN_HOSTS
     SANDY_LOCAL_LLM_HOST
+    SANDY_EXTRA_ENV
     ANTHROPIC_API_KEY
     CLAUDE_CODE_OAUTH_TOKEN
     GEMINI_API_KEY
@@ -447,6 +448,7 @@ SANDY_SKIP_PERMISSIONS|bool|true||Skip Claude Code's in-session permission promp
 SANDY_ALLOW_NO_ISOLATION|bool|0||Allow launch when iptables rules cannot be applied (Linux only).
 SANDY_ALLOW_LAN_HOSTS|string|||Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
 SANDY_LOCAL_LLM_HOST|string||^[^[:space:]]+:[0-9]+$|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal.
+SANDY_EXTRA_ENV|string|||Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values come from the host env, ~/.sandy/.secrets, or ~/.sandy/config — workspace sources never supply values. Privileged tier so workspace config requires approval.
 ANTHROPIC_API_KEY|secret|||Anthropic API key for Claude Code. Not required when using Claude Max OAuth.
 CLAUDE_CODE_OAUTH_TOKEN|secret|||Claude Code OAuth token (alternative to ANTHROPIC_API_KEY).
 GEMINI_API_KEY|secret|||Google API key for Gemini CLI.
@@ -2791,6 +2793,79 @@ _load_sandy_config "$SANDY_HOME/.secrets"          privileged
 _load_sandy_config "$WORK_DIR/.sandy/config"       passive
 _load_sandy_config "$WORK_DIR/.sandy/.secrets"     passive
 
+# SANDY_EXTRA_ENV: user-defined passthrough of arbitrary env-var names into
+# the container (e.g. tokens for MCP servers sandy doesn't know about).
+#
+# Source resolution: env wins absolutely. Among files, workspace overrides
+# host (matching the standard loader's precedence: workspace passive beats
+# host privileged for keys both sources set). Within each tier, .secrets
+# beats config (last-match-wins iteration order):
+#
+#   env  >  workspace/.sandy/.secrets  >  workspace/.sandy/config
+#         >  ~/.sandy/.secrets          >  ~/.sandy/config
+#
+# The security boundary lives on the NAMES, not the values: SANDY_EXTRA_ENV
+# itself is privileged-tier, so a workspace setting it triggers the standard
+# passive-privileged approval prompt. Once the user has approved HA_TOKEN,
+# the value can come from wherever they normally put secrets (workspace-
+# specific tokens belong in workspace .secrets; user-wide tokens belong in
+# host .secrets). The original threat — a malicious workspace exfiltrating
+# host env vars by listing AWS_SECRET_KEY — is gated by the approval prompt
+# the user sees before any value is forwarded.
+_SANDY_EXTRA_ENV_NAMES=()
+_load_sandy_extra_env() {
+    [ -z "${SANDY_EXTRA_ENV:-}" ] && return 0
+    local _raw _name _file _key _value
+    IFS=',' read -ra _raw <<< "$SANDY_EXTRA_ENV"
+    for _name in "${_raw[@]}"; do
+        # Trim whitespace.
+        _name="${_name#"${_name%%[![:space:]]*}"}"
+        _name="${_name%"${_name##*[![:space:]]}"}"
+        [ -z "$_name" ] && continue
+        # Reject anything that isn't a valid POSIX env-var name. Letting a
+        # malformed name through could produce a bogus `docker -e =value`
+        # flag or otherwise cause hard-to-debug failures.
+        if ! [[ "$_name" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then
+            warn "SANDY_EXTRA_ENV: skipping invalid env-var name '$_name'"
+            continue
+        fi
+        # Don't reforward sandy's own keys — they go through the standard
+        # path and double-forwarding just clutters the docker command.
+        if _key_in_list "$_name" "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; then
+            warn "SANDY_EXTRA_ENV: '$_name' is already a sandy-recognized key — drop it from SANDY_EXTRA_ENV"
+            continue
+        fi
+        _SANDY_EXTRA_ENV_NAMES+=("$_name")
+        # If the var is already set in the host env, leave it. `+set`
+        # distinguishes "set to empty" from "unset" — we honor an explicit
+        # empty just like the standard loader does.
+        [ -n "${!_name+set}" ] && continue
+        # Walk all four config sources in standard precedence order and
+        # take the LAST matching value (later overrides earlier). This
+        # matches how the standard _load_sandy_config establishes
+        # workspace > host for keys both sources set.
+        for _file in \
+                "$SANDY_HOME/config" \
+                "$SANDY_HOME/.secrets" \
+                "$WORK_DIR/.sandy/config" \
+                "$WORK_DIR/.sandy/.secrets"; do
+            [ -f "$_file" ] || continue
+            while IFS='=' read -r _key _value; do
+                if [ "$_key" = "$_name" ]; then
+                    _value="${_value#\"}" ; _value="${_value%\"}"
+                    _value="${_value#\'}" ; _value="${_value%\'}"
+                    export "$_name=$_value"
+                fi
+            done < <(grep -E '^[A-Z_]+=.+' "$_file" 2>/dev/null)
+        done
+    done
+}
+# Note: _load_sandy_extra_env runs *after* _resolve_passive_privileged_approval,
+# not here. SANDY_EXTRA_ENV from a workspace source is in
+# _PASSIVE_PRIVILEGED_PENDING at this point — not yet exported — so the loader
+# would short-circuit on the empty-check and miss it. See the call site below
+# the approval block.
+
 # Resolve any privileged keys collected from workspace (passive) config sources
 # against a per-workspace approval list. First encounter → interactive prompt;
 # subsequent launches with the same set → silent; changed set → re-prompt;
@@ -2894,6 +2969,10 @@ _resolve_passive_privileged_approval() {
     esac
 }
 _resolve_passive_privileged_approval
+
+# Run the extra-env loader now that any workspace-sourced SANDY_EXTRA_ENV
+# has been resolved through approval and exported (or dropped on rejection).
+_load_sandy_extra_env
 
 # Sanity: reject world-open SANDY_ALLOW_LAN_HOSTS values. Even from a
 # privileged source, "0.0.0.0/0" negates the whole point of LAN isolation and
@@ -4896,6 +4975,27 @@ fi
 if [ -n "${SANDY_SCREENSHOT_DIR:-}" ]; then
     RUN_FLAGS+=(-v "$SANDY_SCREENSHOT_DIR:/home/claude/screenshots:ro")
     RUN_FLAGS+=(-e "SANDY_SCREENSHOTS_PATH=/home/claude/screenshots")
+fi
+
+# SANDY_EXTRA_ENV passthrough: forward each user-listed env-var into the
+# container. Names were validated and resolved by _load_sandy_extra_env above.
+# A name listed but never set in env or host config is warned about (probably
+# a typo or a missing entry in ~/.sandy/.secrets) but doesn't fail the launch.
+#
+# Also forward SANDY_EXTRA_ENV itself — it's not strictly needed for any
+# in-container behavior, but it's the only way the user can verify their
+# approval went through end-to-end from inside the container. Without this,
+# `echo $SANDY_EXTRA_ENV` in the agent always shows empty even on a fully
+# working setup, which is a confusing diagnostic.
+if [ ${#_SANDY_EXTRA_ENV_NAMES[@]} -gt 0 ]; then
+    RUN_FLAGS+=(-e "SANDY_EXTRA_ENV=$SANDY_EXTRA_ENV")
+    for _name in "${_SANDY_EXTRA_ENV_NAMES[@]}"; do
+        if [ -n "${!_name+set}" ]; then
+            RUN_FLAGS+=(-e "$_name=${!_name}")
+        else
+            warn "SANDY_EXTRA_ENV: '$_name' has no value (set it in env or ~/.sandy/.secrets)"
+        fi
+    done
 fi
 if _sandy_agent_has gemini; then
     # Disable Gemini's per-tool sandbox — sandy provides whole-session isolation.

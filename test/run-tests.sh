@@ -3307,6 +3307,193 @@ check "screenshot mount gated on SANDY_SCREENSHOT_DIR being set" \
     ' -- "$_SS_SCRIPT"
 
 # ============================================================
+# SECTION 47: User-defined env passthrough (SANDY_EXTRA_ENV)
+# ============================================================
+# Forward arbitrary env-var names from host into the container, so users can
+# wire up their own MCP servers / tooling without patching sandy. Privileged
+# tier — workspace-source approval prompt applies. Values come from host env
+# (env wins), then ~/.sandy/.secrets, then ~/.sandy/config; workspace sources
+# never supply values (security boundary).
+info "47. User-defined env passthrough (SANDY_EXTRA_ENV)"
+
+_EE_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+# 47a. Schema/allowlist: SANDY_EXTRA_ENV is a privileged key.
+check "SANDY_EXTRA_ENV in privileged-keys list" \
+    bash -c '
+        awk "/^SANDY_PRIVILEGED_KEYS=\(/,/^\)\$/" "$1" \
+            | grep -qF "    SANDY_EXTRA_ENV"
+    ' -- "$_EE_SCRIPT"
+check "--print-schema lists SANDY_EXTRA_ENV under privileged" \
+    bash -c '
+        bash "$1" --print-schema \
+            | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+names=[k[\"name\"] for k in d[\"config\"][\"privileged_keys\"]]
+assert \"SANDY_EXTRA_ENV\" in names, names
+"
+    ' -- "$_EE_SCRIPT"
+
+# 47b. Loader behavior — extract the function and exercise it standalone.
+# A live launch would need real config files in $SANDY_HOME plus a Docker
+# container; the loader is pure shell so we can test it in isolation.
+_EE_BLOCK='
+_key_in_list() {
+    local target="$1"; shift
+    local k
+    for k in "$@"; do [ "$k" = "$target" ] && return 0; done
+    return 1
+}
+warn() { echo "[warn] $*" >&2; }
+SANDY_PRIVILEGED_KEYS=(SANDY_SSH SANDY_EXTRA_ENV ANTHROPIC_API_KEY)
+SANDY_PASSIVE_KEYS=(SANDY_MODEL)
+'
+_EE_BLOCK="$_EE_BLOCK"$'\n'"$(sed -n '/^_SANDY_EXTRA_ENV_NAMES=()$/,/^_load_sandy_extra_env$/p' "$_EE_SCRIPT")"
+
+# 47c. Whitespace + invalid-name handling.
+# The unset prelude is essential: bash -c inherits env from the test runner,
+# which on a real user's machine may already have HA_TOKEN/ANOTHER_TOKEN
+# exported (the loader honors env-wins, so a leftover host value would mask
+# the file-loading code path we're trying to test here).
+_EE_TMP="$(mktemp -d)"
+cat > "$_EE_TMP/.secrets" <<'EOF'
+HA_TOKEN=tok-from-secrets
+ANOTHER_TOKEN=other-tok
+EOF
+_EE_UNSET='unset HA_TOKEN ANOTHER_TOKEN MISSING_TOKEN'
+_EE_OUT="$(SANDY_HOME="$_EE_TMP" SANDY_EXTRA_ENV="HA_TOKEN, ANOTHER_TOKEN ,  ,bad name,SANDY_SSH" \
+    bash -c "$_EE_UNSET
+        $_EE_BLOCK
+        echo names=\${_SANDY_EXTRA_ENV_NAMES[*]}
+        echo ha=\$HA_TOKEN
+        echo another=\$ANOTHER_TOKEN
+    " 2>&1)"
+check "loader trims whitespace and skips empty entries" \
+    bash -c 'echo "$1" | grep -qFx "names=HA_TOKEN ANOTHER_TOKEN"' -- "$_EE_OUT"
+check "loader rejects invalid env-var names" \
+    bash -c 'echo "$1" | grep -qF "skipping invalid env-var name"' -- "$_EE_OUT"
+check "loader rejects names already in sandy allowlist" \
+    bash -c 'echo "$1" | grep -qF "already a sandy-recognized key"' -- "$_EE_OUT"
+check "loader pulls value from .secrets" \
+    bash -c 'echo "$1" | grep -qFx "ha=tok-from-secrets"' -- "$_EE_OUT"
+
+# 47d. env wins over file. (Explicit HA_TOKEN=from-env on the bash invocation
+# is the env-set value we're testing — no unset prelude here.)
+_EE_OUT2="$(SANDY_HOME="$_EE_TMP" SANDY_EXTRA_ENV="HA_TOKEN" HA_TOKEN="from-env" \
+    bash -c "$_EE_BLOCK
+        echo final=\$HA_TOKEN
+    " 2>&1)"
+check "loader honors env-wins precedence" \
+    bash -c 'echo "$1" | grep -qFx "final=from-env"' -- "$_EE_OUT2"
+
+# 47e. Loader honors explicit empty in env (the +set test, distinguishing
+# unset from set-to-empty — match the standard loader's semantics).
+_EE_OUT3="$(SANDY_HOME="$_EE_TMP" SANDY_EXTRA_ENV="HA_TOKEN" HA_TOKEN="" \
+    bash -c "$_EE_BLOCK
+        echo \"final=[\${HA_TOKEN}]\"
+    " 2>&1)"
+check "loader preserves explicit empty in env" \
+    bash -c 'echo "$1" | grep -qFx "final=[]"' -- "$_EE_OUT3"
+
+# 47f. Listed name with no value anywhere → captured but unset. Need to clear
+# any inherited MISSING_TOKEN from the test runner's env (unlikely but cheap).
+_EE_OUT4="$(SANDY_HOME="$_EE_TMP" SANDY_EXTRA_ENV="MISSING_TOKEN" \
+    bash -c "$_EE_UNSET
+        $_EE_BLOCK
+        if [ -z \"\${MISSING_TOKEN+set}\" ]; then echo unset; else echo set; fi
+        echo names=\${_SANDY_EXTRA_ENV_NAMES[*]}
+    " 2>&1)"
+check "loader leaves unresolved name unset (warn-not-fatal)" \
+    bash -c 'echo "$1" | grep -qFx "unset"' -- "$_EE_OUT4"
+check "loader still records the name for downstream warning" \
+    bash -c 'echo "$1" | grep -qFx "names=MISSING_TOKEN"' -- "$_EE_OUT4"
+
+# 47g. Workspace .secrets supplies the value (per-workspace token).
+# This is the common case: SANDY_EXTRA_ENV=HA_TOKEN in workspace/.sandy/config
+# (approved on first launch), value lives in workspace/.sandy/.secrets.
+_EE_WS="$(mktemp -d)"
+mkdir -p "$_EE_WS/.sandy"
+cat > "$_EE_WS/.sandy/.secrets" <<'EOF'
+HA_TOKEN=workspace-secret-value
+EOF
+_EE_OUT5="$(SANDY_HOME="$_EE_TMP" WORK_DIR="$_EE_WS" SANDY_EXTRA_ENV="HA_TOKEN" \
+    bash -c "$_EE_UNSET
+        $_EE_BLOCK
+        echo final=\$HA_TOKEN
+    " 2>&1)"
+check "loader pulls value from workspace .sandy/.secrets" \
+    bash -c 'echo "$1" | grep -qFx "final=workspace-secret-value"' -- "$_EE_OUT5"
+rm -rf "$_EE_WS"
+
+# 47h. Workspace overrides host (matches standard config-loader precedence).
+# Both files set HA_TOKEN; workspace wins.
+_EE_WS2="$(mktemp -d)"
+mkdir -p "$_EE_WS2/.sandy"
+cat > "$_EE_WS2/.sandy/.secrets" <<'EOF'
+HA_TOKEN=workspace-wins
+EOF
+# Host has HA_TOKEN=tok-from-secrets in $_EE_TMP/.secrets from earlier setup.
+_EE_OUT6="$(SANDY_HOME="$_EE_TMP" WORK_DIR="$_EE_WS2" SANDY_EXTRA_ENV="HA_TOKEN" \
+    bash -c "$_EE_UNSET
+        $_EE_BLOCK
+        echo final=\$HA_TOKEN
+    " 2>&1)"
+check "loader: workspace .secrets overrides host .secrets" \
+    bash -c 'echo "$1" | grep -qFx "final=workspace-wins"' -- "$_EE_OUT6"
+rm -rf "$_EE_WS2"
+
+rm -rf "$_EE_TMP"
+
+# 47i. Ordering invariant: _load_sandy_extra_env must run *after*
+# _resolve_passive_privileged_approval. If a workspace `.sandy/config` sets
+# SANDY_EXTRA_ENV (privileged-from-passive), it's queued in
+# _PASSIVE_PRIVILEGED_PENDING and only exported once the user approves —
+# so calling the loader before the approval gate would short-circuit on
+# the empty-check and miss the workspace value entirely. Static check on
+# the source: the bare-call line for the loader must come *after* the
+# bare-call line for the approval resolver.
+_EE_LOADER_LINE="$(grep -nE '^_load_sandy_extra_env$' "$_EE_SCRIPT" | head -1 | cut -d: -f1)"
+_EE_APPROVAL_LINE="$(grep -nE '^_resolve_passive_privileged_approval$' "$_EE_SCRIPT" | head -1 | cut -d: -f1)"
+check "_load_sandy_extra_env runs after _resolve_passive_privileged_approval" \
+    test "$_EE_LOADER_LINE" -gt "$_EE_APPROVAL_LINE"
+
+# 47j. Container also receives SANDY_EXTRA_ENV itself (in addition to the
+# named keys), so users can verify their approval / loading chain
+# end-to-end with `echo $SANDY_EXTRA_ENV` from inside the agent. Without
+# this, every working setup looks identical to a broken one when the user
+# tests the canonical config var rather than a name they may have spelled
+# differently.
+check "RUN_FLAGS forwards SANDY_EXTRA_ENV itself for in-container visibility" \
+    bash -c '
+        # -A20 spans the doc-comment block plus the conditional gate before
+        # the actual forward line; the SANDY_EXTRA_ENV passthrough section
+        # is short, so casting a wide net here is safe.
+        grep -A20 "SANDY_EXTRA_ENV passthrough" "$1" \
+            | grep -qF "RUN_FLAGS+=(-e \"SANDY_EXTRA_ENV=\$SANDY_EXTRA_ENV\")"
+    ' -- "$_EE_SCRIPT"
+
+# 47g. RUN_FLAGS passthrough wiring exists and is gated correctly.
+# Use a wide -A range (matches 47j below) — the comment block ahead of the
+# actual code grew when SANDY_EXTRA_ENV-self-forwarding was added, and tight
+# ranges silently missed the targets even though the code is present.
+check "RUN_FLAGS passthrough loops over _SANDY_EXTRA_ENV_NAMES" \
+    bash -c '
+        grep -A20 "SANDY_EXTRA_ENV passthrough" "$1" \
+            | grep -qF "for _name in \"\${_SANDY_EXTRA_ENV_NAMES[@]}\""
+    ' -- "$_EE_SCRIPT"
+check "RUN_FLAGS passthrough emits -e KEY=value" \
+    bash -c '
+        grep -A20 "SANDY_EXTRA_ENV passthrough" "$1" \
+            | grep -qF "RUN_FLAGS+=(-e \"\$_name=\${!_name}\")"
+    ' -- "$_EE_SCRIPT"
+check "RUN_FLAGS passthrough warns on listed-but-unset" \
+    bash -c '
+        grep -A20 "SANDY_EXTRA_ENV passthrough" "$1" \
+            | grep -qF "no value (set it in env or"
+    ' -- "$_EE_SCRIPT"
+
+# ============================================================
 # SECTION 46: Docs drift — regen-config-docs.sh --check
 # ============================================================
 # CLAUDE.md and SPECIFICATION.md carry config-key tables that used to drift
