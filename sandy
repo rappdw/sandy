@@ -1217,6 +1217,11 @@ generate_dockerfile_base() {
     cat > "$SANDY_HOME/Dockerfile.base.new" <<'DOCKERFILE_BASE'
 FROM debian:bookworm-slim
 
+# Some Docker Desktop versions prevent the _apt user from reading the
+# temp files apt stages for gpgv, producing spurious "invalid signature"
+# errors on apt-get update. Run gpgv as root to sidestep the sandbox.
+RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/99-no-sandbox
+
 # System tools + C/C++ toolchain
 RUN apt-get update && apt-get install -y \
         build-essential \
@@ -3659,13 +3664,92 @@ if _sandy_agent_has opencode; then
     # ~/.local/share/opencode (auth + state). Mount both as siblings under
     # one parent dir, preserving the "one subdir per agent" invariant.
     mkdir -p "$SANDBOX_DIR/opencode/config" "$SANDBOX_DIR/opencode/share"
-    # Seed opencode.json from host's ~/.config/opencode/ if present (first run
-    # only). The config carries provider/model preferences and any local-LLM
-    # baseURL the user wired up on the host.
-    if [ ! -f "$SANDBOX_DIR/opencode/config/opencode.json" ] \
-       && [ -f "$HOME/.config/opencode/opencode.json" ]; then
-        cp "$HOME/.config/opencode/opencode.json" "$SANDBOX_DIR/opencode/config/opencode.json"
-        info "  Seeded .config/opencode/opencode.json"
+    # Sandbox-level opencode.json. Three input states map to three behaviors:
+    #
+    #   1. Host has $HOME/.config/opencode/opencode.json — seed it (the user
+    #      has explicit provider/model preferences; sandy just plumbs them in).
+    #   2. No host config but SANDY_LOCAL_LLM_HOST is set — auto-generate a
+    #      starter config pointing at the local LLM via host.docker.internal.
+    #      Probes the LLM's /v1/models endpoint to learn the served model id.
+    #      The user can later materialize this to $HOME/.config/opencode/ to
+    #      customize (next sandbox creation will then prefer the host file).
+    #   3. Neither — opencode would silently fall back to its built-in default
+    #      model (currently gemini-3-pro-preview), which fails confusingly
+    #      without GOOGLE_GENERATIVE_AI_API_KEY. Warn loudly so the user knows.
+    if [ ! -f "$SANDBOX_DIR/opencode/config/opencode.json" ]; then
+        if [ -f "$HOME/.config/opencode/opencode.json" ]; then
+            cp "$HOME/.config/opencode/opencode.json" "$SANDBOX_DIR/opencode/config/opencode.json"
+            info "  Seeded .config/opencode/opencode.json"
+        elif [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
+            # Probe the LLM's /v1/models for the first served model id. Run
+            # on the host — same reachability as the eventual container, since
+            # SANDY_LOCAL_LLM_HOST is a single host:port the user has already
+            # made reachable from the host (typically via SSH tunnel or a
+            # localhost listener).
+            _llm_url="http://${SANDY_LOCAL_LLM_HOST}/v1/models"
+            _llm_response="$(curl -fsS --max-time 3 "$_llm_url" 2>/dev/null || true)"
+            _llm_first_model=""
+            if [ -n "$_llm_response" ]; then
+                if command -v jq >/dev/null 2>&1; then
+                    _llm_first_model="$(printf '%s' "$_llm_response" \
+                        | jq -r '.data[0].id // empty' 2>/dev/null || true)"
+                fi
+                # Fallback parser when jq is missing — extracts the first
+                # "id":"..." from the JSON. OpenAI /v1/models always orders
+                # the served model first in `data`, so this is reliable.
+                if [ -z "$_llm_first_model" ]; then
+                    _llm_first_model="$(printf '%s' "$_llm_response" \
+                        | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' \
+                        | head -1 \
+                        | sed 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')"
+                fi
+            fi
+            if [ -n "$_llm_first_model" ]; then
+                # Auto-generate. Note: the model id may contain slashes
+                # (e.g. "RedHatAI/gemma-4-31B-it-FP8-block"); opencode parses
+                # provider/model on the FIRST slash, so "local/<model-id>"
+                # works even when the id itself has slashes.
+                _llm_port="${SANDY_LOCAL_LLM_HOST##*:}"
+                cat > "$SANDBOX_DIR/opencode/config/opencode.json" <<JSON
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local LLM (SANDY_LOCAL_LLM_HOST)",
+      "options": {
+        "baseURL": "http://host.docker.internal:${_llm_port}/v1"
+      },
+      "models": {
+        "${_llm_first_model}": {
+          "name": "${_llm_first_model}"
+        }
+      }
+    }
+  },
+  "model": "local/${_llm_first_model}"
+}
+JSON
+                info "  Auto-generated opencode.json for SANDY_LOCAL_LLM_HOST"
+                info "    provider=local  model=${_llm_first_model}"
+                info "    To customize, copy to \$HOME/.config/opencode/opencode.json"
+            else
+                warn "SANDY_LOCAL_LLM_HOST=${SANDY_LOCAL_LLM_HOST} but the LLM didn't respond"
+                warn "  to a model-list probe at $_llm_url."
+                warn "  opencode will fall back to its built-in default and likely fail."
+                warn "  Verify the LLM is up, or write \$HOME/.config/opencode/opencode.json"
+                warn "  manually — see https://opencode.ai/docs."
+            fi
+            unset _llm_url _llm_response _llm_first_model _llm_port
+        else
+            warn "SANDY_AGENT includes opencode but neither \$HOME/.config/opencode/opencode.json"
+            warn "  exists nor SANDY_LOCAL_LLM_HOST is set."
+            warn "  opencode will use its built-in default model (currently gemini-3-pro-preview),"
+            warn "  which requires GOOGLE_GENERATIVE_AI_API_KEY. To get a working session, either:"
+            warn "    - export an API key opencode's default provider accepts, or"
+            warn "    - write \$HOME/.config/opencode/opencode.json (https://opencode.ai/docs), or"
+            warn "    - set SANDY_LOCAL_LLM_HOST=<host:port> for sandy to auto-generate one."
+        fi
     fi
 fi
 

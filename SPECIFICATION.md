@@ -324,6 +324,18 @@ The `model = "gpt-5.5"` line sets a stable default model; users can override via
 
 The `[projects."<workspace>"] trust_level = "trusted"` entry is **appended at session start by `user-setup.sh`** (not at host-time) because it needs the container-side `$SANDY_WORKSPACE` path. Re-launches are idempotent: the entry is only appended if a matching line is not already present.
 
+### OpenCode Config Seeding
+
+When `opencode` is in `SANDY_AGENT`, sandy creates `opencode/config/` and `opencode/share/` (mounted at `~/.config/opencode` and `~/.local/share/opencode` inside the container respectively). The seed logic for `opencode/config/opencode.json` runs whenever that file is missing in the sandbox and resolves three input states:
+
+1. **Host config exists** at `$HOME/.config/opencode/opencode.json` → `cp` it into the sandbox. Preferred path; the user's explicit provider/model preferences win.
+
+2. **No host config but `SANDY_LOCAL_LLM_HOST` is set** → auto-generate. Sandy probes `http://${SANDY_LOCAL_LLM_HOST}/v1/models` (3-second timeout, host-side `curl`) for the served model id, prefers `jq` for JSON parsing and falls back to a `grep`/`sed` regex extracting the first `"id":"…"`. If the probe yields a model id, sandy writes a single-provider, single-model `opencode.json` using the `@ai-sdk/openai-compatible` SDK package, with `baseURL` set to `http://host.docker.internal:<port>/v1`, the model id registered, and `"model": "local/<model-id>"` pinned as the default. The model id may contain slashes (e.g. `RedHatAI/gemma-4-31B-it-FP8-block`); opencode parses `provider/model` on the first slash, so `local/<model-id>` works regardless. If the probe fails, sandy emits a warning and proceeds without writing a config.
+
+3. **Neither** → opencode would silently fall back to its built-in default model (currently `gemini-3-pro-preview`), which fails on first request without `GOOGLE_GENERATIVE_AI_API_KEY`. Sandy emits a `warn`-level banner enumerating the three resolutions: export an API key, write the host config, or set `SANDY_LOCAL_LLM_HOST`. Launch proceeds — the user may have an out-of-band auth path the warning didn't anticipate.
+
+The auto-generated config is sandbox-scoped only — sandy never writes to `$HOME/.config/opencode/`. To customize, the user copies the generated file to `$HOME/.config/opencode/opencode.json`, after which the next sandbox creation will prefer state 1.
+
 ---
 
 ## 5. Docker Image Build Pipeline
@@ -1176,6 +1188,11 @@ Sandy generates all build and runtime files as heredocs embedded in the script. 
 
 ```dockerfile
 FROM debian:bookworm-slim
+
+# Some Docker Desktop versions prevent the _apt user from reading the
+# temp files apt stages for gpgv, producing spurious "invalid signature"
+# errors on apt-get update. Run gpgv as root to sidestep the sandbox.
+RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/99-no-sandbox
 
 # System tools + C/C++ toolchain
 RUN apt-get update && apt-get install -y \
