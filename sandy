@@ -3829,6 +3829,17 @@ if _sandy_agent_has claude; then
             for (const [name, cfg] of Object.entries(required)) {
                 if (!s.extraKnownMarketplaces[name]) s.extraKnownMarketplaces[name] = cfg;
             }
+            // Drop deprecated plugin enablements. synthkit was previously
+            // distributed as a Claude plugin via the sandy-plugins marketplace
+            // (and earlier, the thinkkit marketplace). It is now a regular CLI
+            // tool baked into the base image, so any leftover enablement only
+            // produces a confusing 'failed to load' error in /plugin.
+            if (s.enabledPlugins && typeof s.enabledPlugins === 'object') {
+                const deprecatedPluginKeys = [
+                    'synthkit', 'synthkit@sandy-plugins', 'synthkit@thinkkit'
+                ];
+                for (const key of deprecatedPluginKeys) { delete s.enabledPlugins[key]; }
+            }
             fs.writeFileSync(dst, JSON.stringify(s, null, 2) + '\n');
         " "$SEED_SETTINGS"
     elif command -v jq &>/dev/null; then
@@ -3858,7 +3869,12 @@ if _sandy_agent_has claude; then
             del(.extraKnownMarketplaces.ait) |
             del(.extraKnownMarketplaces["pka-skills"]) |
             .extraKnownMarketplaces["claude-plugins-official"] //= {"source":{"source":"github","repo":"anthropics/claude-plugins-official"}} |
-            .extraKnownMarketplaces["sandy-plugins"] //= {"source":{"source":"github","repo":"rappdw/sandy-plugins"}}
+            .extraKnownMarketplaces["sandy-plugins"] //= {"source":{"source":"github","repo":"rappdw/sandy-plugins"}} |
+            # synthkit is no longer a plugin — see deprecatedPluginKeys in the
+            # node branch above for the rationale.
+            (if (.enabledPlugins | type) == "object"
+                then .enabledPlugins |= (del(.synthkit) | del(."synthkit@sandy-plugins") | del(."synthkit@thinkkit"))
+                else . end)
         ' "$_base_src" > "$SEED_SETTINGS.tmp" 2>/dev/null && mv "$SEED_SETTINGS.tmp" "$SEED_SETTINGS"
     else
         # Last resort: write defaults only if no file exists yet.
