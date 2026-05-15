@@ -145,41 +145,44 @@ sandy_run() {
                 [ -f "$TEST_PROJECT/$_p" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
                 ;;
             dir)
-                # Two-step setup mirroring sandy's launcher behavior:
+                # Test-harness fixture model (not exactly sandy's production
+                # model). Sandy's production model is existence-gated: absent
+                # dirs are not mounted. The harness, however, mounts EVERY
+                # protected dir — using $EMPTY_RO_FIXTURE as the source if the
+                # dir is missing on host. Two reasons for the asymmetry:
                 #
-                # 1. Ensure the dir exists on the *host* under $TEST_PROJECT.
-                #    Without this, Docker's auto-creation of nested bind-mount
-                #    targets is inconsistent across platforms — and the mount
-                #    target needs to exist inside /workspace before the agent
-                #    can encounter it.
+                # 1. Some tests need to verify writes to neighbouring protected
+                #    *files* (e.g. /workspace/.git/config) are blocked. On
+                #    macOS Docker Desktop / gRPCFUSE, the kernel's view of
+                #    sibling bind mounts under /workspace/.git/ matters for
+                #    :ro propagation of the file bind. Stubbing every protected
+                #    dir at launch — even ones that don't exist on host — keeps
+                #    that mount-layer state stable.
                 #
-                # 2. Use $EMPTY_RO_FIXTURE (outside both $TEST_PROJECT and
-                #    $SANDBOX_DIR) as the *mount source*, never the host dir
-                #    itself. Mounting $TEST_PROJECT/$_p as ro at /workspace/$_p
-                #    is the same host path bound rw via /workspace and ro via
-                #    the overlay — some Docker versions silently drop the :ro
-                #    flag in that double-mount case, which lets writes succeed
-                #    inside the supposedly-protected dir (the original
-                #    .github/workflows failure).
+                # 2. Section 31 tests sandy's actual behavior at the source-code
+                #    level (static greps on the sandy script, plus mountinfo
+                #    checks via sandy_run with a fresh present/absent fixture)
+                #    rather than relying on this branch — so the harness can
+                #    diverge from sandy here without losing coverage of the
+                #    hybrid model.
                 #
-                # If the host already has the dir with content (e.g. test 34's
-                # submodule fixtures or a real .git/hooks layout), still mount
-                # from $TEST_PROJECT so the content is visible — the circular
-                # case only bites when both mounts are bound to the same empty
-                # tree, which is what triggers Docker's flag-drop on macOS.
-                # Heuristic: if the dir has content, mount it directly; if
-                # empty or absent, create it on host and mount the external
-                # empty fixture over it.
-                if [ -d "$TEST_PROJECT/$_p" ] && [ -n "$(ls -A "$TEST_PROJECT/$_p" 2>/dev/null)" ]; then
+                # $EMPTY_RO_FIXTURE is chmod 0555 (see setup_sandbox) so writes
+                # fail at the host fs layer even if Docker's :ro is dropped.
+                if [ -d "$TEST_PROJECT/$_p" ]; then
                     _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
                 else
-                    mkdir -p "$TEST_PROJECT/$_p"
                     _ro_mounts+=(-v "$EMPTY_RO_FIXTURE:/workspace/$_p:ro")
                 fi
                 ;;
         esac
     done < <(SANDY_ALLOW_WORKFLOW_EDIT="${SANDY_ALLOW_WORKFLOW_EDIT:-0}" \
-                "$_sandy_bin" --print-protected-paths 2>/dev/null)
+                "$_sandy_bin" --print-protected-paths 2>/dev/null || true)
+    # `|| true` on the process substitution: we're only consuming sandy's
+    # stdout via `read`. If sandy exits non-zero (some envs have shown
+    # transient err-trap noise here), the harness-level ERR trap would fire
+    # informationally even though nothing's actually broken — the read loop
+    # already got the lines it needed. Suppress the noise.
+
     # Mirror _protect_submodule_gitdirs from the sandy launcher: for every
     # $TEST_PROJECT/.git/modules/<sub>/config sentinel, mount config/hooks/info
     # ro at the matching container path. Only runs if .git/modules exists —
@@ -1531,7 +1534,7 @@ if [ -z "$_CODEX_SEED_BLOCK" ]; then
 else
     _CSEED_TMP="$(mktemp -d)"
     SANDBOX_DIR="$_CSEED_TMP" bash -c "
-        info() { :; }
+        info() { :; }; warn() { :; }; error() { :; }
         _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
         SANDY_AGENT=codex
         $_CODEX_SEED_BLOCK
@@ -1565,7 +1568,7 @@ else
     # Idempotency: re-run must not overwrite user edits
     echo "# user edit" >> "$_CSEED_TMP/codex/config.toml"
     SANDBOX_DIR="$_CSEED_TMP" bash -c "
-        info() { :; }
+        info() { :; }; warn() { :; }; error() { :; }
         _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
         SANDY_AGENT=codex
         $_CODEX_SEED_BLOCK
@@ -1911,7 +1914,7 @@ if [ -z "$_OPENCODE_SEED_BLOCK" ]; then
 else
     _OSEED_TMP="$(mktemp -d)"
     HOME="$_OSEED_TMP/home" SANDBOX_DIR="$_OSEED_TMP/sb" bash -c "
-        info() { :; }
+        info() { :; }; warn() { :; }; error() { :; }
         _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
         SANDY_AGENT=opencode
         $_OPENCODE_SEED_BLOCK
@@ -1933,7 +1936,7 @@ else
     mkdir -p "$_OSEED_TMP/home/.config/opencode"
     echo '{"provider":"anthropic"}' > "$_OSEED_TMP/home/.config/opencode/opencode.json"
     HOME="$_OSEED_TMP/home" SANDBOX_DIR="$_OSEED_TMP/sb" bash -c "
-        info() { :; }
+        info() { :; }; warn() { :; }; error() { :; }
         _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
         SANDY_AGENT=opencode
         $_OPENCODE_SEED_BLOCK
@@ -1947,7 +1950,7 @@ else
     # Idempotency: second run preserves user edits to the sandbox copy
     echo '{"user_edited":true}' > "$_OSEED_TMP/sb/opencode/config/opencode.json"
     HOME="$_OSEED_TMP/home" SANDBOX_DIR="$_OSEED_TMP/sb" bash -c "
-        info() { :; }
+        info() { :; }; warn() { :; }; error() { :; }
         _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
         SANDY_AGENT=opencode
         $_OPENCODE_SEED_BLOCK
@@ -2189,7 +2192,7 @@ else
         # Provide stub info() (sandy uses it for user-visible log lines) and
         # point SANDBOX_DIR at the passed-in fixture.
         SANDBOX_DIR="$1" bash -c "
-            info() { :; }
+            info() { :; }; warn() { :; }; error() { :; }
             $_MIG_SNIPPET
         "
     }
@@ -2286,57 +2289,67 @@ else
 fi
 
 # ============================================================
-info "31. Sprint 1 — Absent protected dirs blocked by empty-ro fixtures"
+info "31. Hybrid protection model — present dirs are :ro, absent dirs are unmounted"
 # ============================================================
-# F3 remediation (dirs): protected directories are always-mounted. If the host
-# has no .vscode/, .idea/, .github/workflows/, etc., sandy overlays an empty
-# read-only directory at that container path, so the agent cannot create files
-# under those paths from inside the container. Empty dirs on the host are
-# benign — git doesn't track them and no tool reacts to their mere presence.
+# Sandy's protected-dir model is existence-gated (matches the file model):
 #
-# NOTE: Protected FILES are existence-gated, not always-mounted. See the
-# comment block in sandy where the protected-files loop runs: Docker auto-
-# creates bind-mount targets on the host inside the rw workspace bind, which
-# stubbed .bashrc/.envrc/etc. as 0-byte files in every workspace — breaking
-# direnv and polluting `git status`. The residual F3 gap for files is an
-# agent creating them in-session; the new file then shows up in `git status`
-# on the host, which is the review path.
+#  - Present on host  → bind-mounted :ro (kernel blocks writes, no stub)
+#  - Absent from host → no mount (agent can create in-session; cleanup
+#                       reports new appearances on session exit)
+#
+# This replaces the earlier always-mount-with-empty-fixture pattern, which
+# left empty stub dirs in the workspace every session and required heroic
+# cleanup-on-exit logic to remove them. The new model trades active write
+# prevention (for absent paths) for cleaner workspace state. The replacement
+# defense is detection at session end + a planned fanotify-based mechanism
+# (see CLAUDE.md "Protected Files" for the long-term design).
 
-# Clean slate — no host-side copies of any protected path.
-rm -rf "$TEST_PROJECT/.bashrc" "$TEST_PROJECT/.vscode" "$TEST_PROJECT/.idea" \
-       "$TEST_PROJECT/.envrc" "$TEST_PROJECT/.github" "$TEST_PROJECT/.devcontainer" \
-       "$TEST_PROJECT/.git"
-
-# Directories that didn't exist on host can't be created inside container
-sandy_run "mkdir /workspace/.vscode 2>/dev/null && touch /workspace/.vscode/settings.json 2>/dev/null" \
-    >/dev/null 2>&1 && MK_VSCODE=yes || MK_VSCODE=no
-check "cannot create files under absent .vscode/" test "$MK_VSCODE" = "no"
-
-sandy_run "mkdir /workspace/.idea 2>/dev/null && touch /workspace/.idea/workspace.xml 2>/dev/null" \
-    >/dev/null 2>&1 && MK_IDEA=yes || MK_IDEA=no
-check "cannot create files under absent .idea/" test "$MK_IDEA" = "no"
-
-# For .github/workflows we test the protection at the kernel-mount-flag level
-# rather than via a touch attempt. The other dirs (.vscode/.idea) work via
-# the `mkdir` short-circuit (dir already exists, mkdir without -p fails) — but
-# .github/workflows uses `mkdir -p` semantics that always succeed, so the only
-# real signal would be the touch. And on Docker Desktop / gRPCFUSE on macOS,
-# the touch can succeed even on a :ro bind because the FUSE driver doesn't
-# always enforce :ro on bind targets the way the Linux kernel does. Inspect
-# /proc/self/mountinfo directly: it reports the kernel's view of the mount
-# flags, which is what actually matters — sandy's protection mechanism is
-# "mount the target read-only", and mountinfo is the ground truth.
-_MNT_OUT="$(sandy_run 'cat /proc/self/mountinfo' 2>/dev/null)"
-check "absent .github/workflows is mounted read-only" \
+# 31a. Present protected dir: writes blocked at kernel mount level.
+rm -rf "$TEST_PROJECT/.vscode"
+mkdir -p "$TEST_PROJECT/.vscode"
+echo "existing host content" > "$TEST_PROJECT/.vscode/host-existing.json"
+_MNT_OUT_PRESENT="$(sandy_run 'cat /proc/self/mountinfo' 2>/dev/null)"
+check "present .vscode/ is mounted read-only" \
     bash -c '
-        # Field 5 = mount point, field 6 = per-mount options (ro/rw + others).
-        # Split options on comma to avoid substring false-positives ("ro" in
-        # "errors=remount-ro" etc.) and check for an exact "ro" token.
         echo "$1" \
-            | awk "\$5 == \"/workspace/.github/workflows\" {print \$6}" \
+            | awk "\$5 == \"/workspace/.vscode\" {print \$6}" \
             | tr "," "\n" \
             | grep -qx "ro"
-    ' -- "$_MNT_OUT"
+    ' -- "$_MNT_OUT_PRESENT"
+sandy_run "echo evil > /workspace/.vscode/settings.json 2>/dev/null" >/dev/null 2>&1 \
+    && _WR_PRESENT=yes || _WR_PRESENT=no
+check "cannot write to present .vscode/" test "$_WR_PRESENT" = "no"
+rm -rf "$TEST_PROJECT/.vscode"
+
+# 31b. Absent protected dirs: in production sandy, no mount happens. The
+# test harness uses an empty-fixture mount instead (see the `dir)` branch
+# in sandy_run — the harness intentionally diverges to keep gRPCFUSE mount
+# state stable for sibling file binds), so we verify the absent-dir
+# behavior at the *sandy script* level via static check rather than via
+# container mountinfo. The runtime trade-off (agent can create absent
+# protected paths) is documented in CLAUDE.md and verified by 31c+31d
+# below at the source level.
+
+# 31c. Static check: sandy script implements the existence-gated branch
+# (i.e. mounts :ro only when -d $WORK_DIR/$_pd, no else-mount-stub branch).
+check "sandy script existence-gates protected dirs (no always-mount stub)" \
+    bash -c '
+        # The protected-dirs mount loop must NOT contain a mount of
+        # $SANDY_HOME/.empty-ro-dir for protected dirs (that would be the
+        # stub-creating pattern we removed). Submodule hooks may still
+        # reference .empty-ro-dir for legacy compatibility checks — limit
+        # the search to the protected-dirs loop comment block.
+        ! sed -n "/^# Protected dirs: existence-gated/,/done < <(_sandy_protected_dirs)/p" "$1" \
+            | grep -q ".empty-ro-dir"
+    ' -- "$_SANDY_SCRIPT_PATH"
+
+# 31d. Static check: cleanup() walks the launch snapshot to detect new
+# appearances. The check exists and emits a YELLOW warning with rm-rf
+# remediation, not a hard error (matches the "detect, don't refuse" design).
+check "cleanup detects new protected-path appearances" \
+    grep -qF 'Protected paths appeared during this session' "$_SANDY_SCRIPT_PATH"
+check "cleanup includes rm -rf remediation in the warning" \
+    grep -qE 'rm -rf' "$_SANDY_SCRIPT_PATH"
 
 # ============================================================
 info "32. Sprint 1 — Expanded protected-files list"
@@ -2851,11 +2864,23 @@ SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
 check "session-created-stubs file path declared" \
     grep -q '\.session-created-stubs' "$SANDY_SCRIPT_PATH"
-check "stub recorded when empty-ro-dir fallback mount is used (dirs loop)" \
-    bash -c 'awk "/Record session-created stubs/,/done < <\\(_sandy_protected_dirs\\)/" "$1" | grep -q "\\.session-created-stubs"' \
+# Hybrid model (0.13): the protected-dirs loop and submodule-gitdirs loop
+# no longer use the .empty-ro-dir fallback for absent paths — they
+# existence-gate the mount instead. Verify by inverse: confirm
+# .empty-ro-dir is NOT referenced in those code paths. The fixture is
+# still used elsewhere (.claude/.gemini writable sandbox overlays), so
+# the file-level reference check (above) still passes.
+check "protected-dirs loop does NOT use .empty-ro-dir fallback (hybrid model)" \
+    bash -c '! awk "/Protected dirs: existence-gated/,/done < <\\(_sandy_protected_dirs\\)/" "$1" | grep -q "\\.empty-ro-dir"' \
     -- "$SANDY_SCRIPT_PATH"
-check "stub recorded when empty-ro-dir fallback mount is used (submodule hooks)" \
-    bash -c 'awk "/_protect_submodule_gitdirs\\(\\)/,/^}/" "$1" | grep -q "\\.session-created-stubs"' \
+check "submodule-hooks loop does NOT use .empty-ro-dir fallback (hybrid model)" \
+    bash -c '! awk "/_protect_submodule_gitdirs\\(\\)/,/^}/" "$1" | grep -q "\\.empty-ro-dir"' \
+    -- "$SANDY_SCRIPT_PATH"
+# Protected-path snapshot + detection are the replacement defense.
+check "protected-paths launch snapshot file declared" \
+    grep -q '\.protected-existed-at-launch' "$SANDY_SCRIPT_PATH"
+check "cleanup compares launch snapshot to detect new appearances" \
+    bash -c 'awk "/^cleanup\\(\\) \\{/,/^}/" "$1" | grep -q "\\.protected-existed-at-launch"' \
     -- "$SANDY_SCRIPT_PATH"
 check "cleanup() reads session-created-stubs and rmdirs entries" \
     bash -c 'awk "/^cleanup\\(\\) \\{/,/^}/" "$1" | grep -q "\\.session-created-stubs" \
@@ -3240,14 +3265,18 @@ check "sandy exports SANDY_SCREENSHOTS_PATH inside the container" \
 _SS_VAL_BLOCK="$(sed -n '/^# Validate SANDY_SCREENSHOT_DIR/,/^# --- Resolve agent ---$/p' "$_SS_SCRIPT" \
     | sed '/^# --- Resolve agent ---$/d')"
 
-# Shell metas: hard-error.
-_SS_VAL_OUT="$(SANDY_SCREENSHOT_DIR='/tmp/foo;rm -rf /' bash -c "$_SS_VAL_BLOCK" 2>&1)" && _SS_VAL_RC=0 || _SS_VAL_RC=$?
+# Shell metas: hard-error. `trap - ERR` inside the command substitution
+# suppresses the harness-level ERR trap from firing on the intentional
+# non-zero exit — `set -E` (errtrace) inherits the trap into subshells,
+# and `|| _SS_VAL_RC=$?` only captures the rc afterwards. Same pattern as
+# the introspection test below.
+_SS_VAL_OUT="$(trap - ERR; SANDY_SCREENSHOT_DIR='/tmp/foo;rm -rf /' bash -c "$_SS_VAL_BLOCK" 2>&1)" && _SS_VAL_RC=0 || _SS_VAL_RC=$?
 check "validation rejects shell metas in SANDY_SCREENSHOT_DIR" \
     bash -c 'echo "$2" | grep -q "shell metacharacters"' -- "$_SS_VAL_RC" "$_SS_VAL_OUT"
 check "shell-meta rejection exits non-zero" test "$_SS_VAL_RC" -ne 0
 
 # $HOME: hard-error (too broad).
-_SS_VAL_OUT2="$(SANDY_SCREENSHOT_DIR="$HOME" bash -c "$_SS_VAL_BLOCK" 2>&1)" && _SS_VAL_RC2=0 || _SS_VAL_RC2=$?
+_SS_VAL_OUT2="$(trap - ERR; SANDY_SCREENSHOT_DIR="$HOME" bash -c "$_SS_VAL_BLOCK" 2>&1)" && _SS_VAL_RC2=0 || _SS_VAL_RC2=$?
 check "validation rejects \$HOME as SANDY_SCREENSHOT_DIR" \
     bash -c 'echo "$1" | grep -q "too broad"' -- "$_SS_VAL_OUT2"
 

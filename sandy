@@ -4220,6 +4220,47 @@ cleanup() {
     elif [ "${SANDY_DEBUG_CLEANUP:-0}" = "1" ]; then
         echo "sandy: [debug] no .session-created-stubs file at \"${SANDBOX_DIR:-<unset>}/.session-created-stubs\"" >&2
     fi
+    # Detect protected-path appearances: with the hybrid mount model, an
+    # absent protected dir gets no in-session protection — an agent can
+    # `mkdir .vscode/` and write into it, and the writes land on the host
+    # workspace. We took a snapshot of which protected dirs existed at
+    # launch in $SANDBOX_DIR/.protected-existed-at-launch; now we compare
+    # against the current state. Anything that newly appeared (with
+    # content) is reported to the user with one-line remediation.
+    #
+    # No automatic cleanup here — we don't know if the agent's write was
+    # legitimate ("set up .vscode/settings.json for this project") or a
+    # prompt injection. Surface the change, let the user decide.
+    if [ -n "${SANDBOX_DIR:-}" ] \
+            && [ -f "$SANDBOX_DIR/.protected-existed-at-launch" ] \
+            && [ -n "${WORK_DIR:-}" ]; then
+        _new_protected=()
+        while IFS= read -r _pd; do
+            [ -z "$_pd" ] && continue
+            # Only flag dirs that DIDN'T exist at launch but DO now (with content).
+            grep -qFx "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null && continue
+            if [ -d "$WORK_DIR/$_pd" ] && [ -n "$(ls -A "$WORK_DIR/$_pd" 2>/dev/null)" ]; then
+                _new_protected+=("$_pd")
+            fi
+        done < <(_sandy_protected_dirs)
+        if [ ${#_new_protected[@]} -gt 0 ]; then
+            printf "\n${YELLOW}[sandy]${NC} Protected paths appeared during this session:\n" >&2
+            for _p in "${_new_protected[@]}"; do
+                printf "${YELLOW}[sandy]${NC}   %s/%s/\n" "$WORK_DIR" "$_p" >&2
+            done
+            printf "${YELLOW}[sandy]${NC}\n" >&2
+            printf "${YELLOW}[sandy]${NC} These paths are normally read-only inside sandy because they auto-execute\n" >&2
+            printf "${YELLOW}[sandy]${NC} code under common operations (git hooks fire on \`git pull\`/checkout, CI\n" >&2
+            printf "${YELLOW}[sandy]${NC} workflows on \`git push\`, IDE configs on project open). Review the content\n" >&2
+            printf "${YELLOW}[sandy]${NC} before any of those operations. To remove:\n" >&2
+            _rm_args=""
+            for _p in "${_new_protected[@]}"; do
+                _rm_args="$_rm_args $_p/"
+            done
+            printf "${YELLOW}[sandy]${NC}   (cd %q && rm -rf%s)\n\n" "$WORK_DIR" "$_rm_args" >&2
+        fi
+        rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
+    fi
     cleanup_network_isolation
     # Remove per-instance Docker network
     docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
@@ -4881,15 +4922,30 @@ if [ ${#_cleaned_debris[@]} -gt 0 ]; then
     info "Cleaned up ${#_cleaned_debris[@]} empty stub dir(s) from previous sandy session: ${_cleaned_debris[*]}"
 fi
 
-# Record session-created stubs so cleanup() can rmdir them on exit.
+# Protected dirs: existence-gated. If the host has the dir, bind-mount :ro
+# (kernel-level write prevention, no stub created — Docker has nothing to
+# auto-create). If the host doesn't have the dir, skip the mount entirely —
+# the previous always-mount-with-empty-fixture approach left empty stub dirs
+# all over the user's workspace, which was the dominant complaint.
+#
+# The trade-off: an agent CAN create files in absent protected paths during a
+# session. Detection runs at session end (see _detect_new_protected_paths
+# in cleanup()) and warns the user with remediation. This matches the
+# symmetric file-level behavior we already shipped (files were already
+# existence-gated for the same reason — Docker's bind-mount target auto-
+# creation made the always-mount approach worse than the disease).
+#
+# Longer term, fanotify FAN_OPEN_PERM is the right answer: kernel-level deny
+# with no host artifact, even for absent paths. See CLAUDE.md "Protected
+# Files" for the design sketch. Until then, detection + reporting is the
+# best you can get without rebuilding the workspace mount model.
 : > "$SANDBOX_DIR/.session-created-stubs"
+: > "$SANDBOX_DIR/.protected-existed-at-launch"
 while IFS= read -r _pd; do
     [ -z "$_pd" ] && continue
     if [ -d "$WORK_DIR/$_pd" ]; then
         RUN_FLAGS+=(-v "$WORK_DIR/$_pd:$SANDY_WORKSPACE/$_pd:ro")
-    else
-        RUN_FLAGS+=(-v "$SANDY_HOME/.empty-ro-dir:$SANDY_WORKSPACE/$_pd:ro")
-        echo "$WORK_DIR/$_pd" >> "$SANDBOX_DIR/.session-created-stubs"
+        echo "$_pd" >> "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
 done < <(_sandy_protected_dirs)
 
@@ -4908,11 +4964,11 @@ _protect_submodule_gitdirs() {
         _sub_dir="$(dirname "$_cfg")"
         _rel="${_sub_dir#$root_host}"  # e.g. "/research/claude-code"
         RUN_FLAGS+=(-v "$_sub_dir/config:$root_container${_rel}/config:ro")
+        # Submodule hooks/info: existence-gated, same as the top-level
+        # protected-dirs loop above. Absent → no mount, no stub. Agent's
+        # writes are caught by the session-end detection sweep.
         if [ -d "$_sub_dir/hooks" ]; then
             RUN_FLAGS+=(-v "$_sub_dir/hooks:$root_container${_rel}/hooks:ro")
-        else
-            RUN_FLAGS+=(-v "$SANDY_HOME/.empty-ro-dir:$root_container${_rel}/hooks:ro")
-            echo "$_sub_dir/hooks" >> "$SANDBOX_DIR/.session-created-stubs"
         fi
         if [ -d "$_sub_dir/info" ]; then
             RUN_FLAGS+=(-v "$_sub_dir/info:$root_container${_rel}/info:ro")
