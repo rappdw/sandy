@@ -1,3 +1,95 @@
+## sandy v0.12.0
+
+A re-baseline cut. Between `v0.11.4` (2026-04-15) and this tag (2026-05-16), the "no new features until 1.0" rule from `ROADMAP_1.0.md` quietly stopped holding — useful work landed but it cumulatively reset the stability soak that 1.0 was meant to gate on. Rather than continue and pretend the roadmap was intact, `v0.12.0` formalizes a new feature-freeze point. Every milestone downstream of here (M3 heredoc extract → M2.7 egress proxy sidecar → M4 surface stabilization → M5 14-day pre-RC soak → `1.0.0-rc1`) now targets the version one minor higher than the original plan, and the 7-day M2.3 soak clock restarts against this tag. See the updated `ROADMAP_1.0.md` "Re-baseline (2026-05-16)" section for full context.
+
+The work itself is solid — most of it has been daily-driven for weeks. The reset is about process honesty, not code quality.
+
+### New: 4th agent (OpenCode)
+
+`SANDY_AGENT=opencode` (single-agent) or `claude,opencode` / `all` (multi-agent combos) now works. New `sandy-opencode` image layers `opencode-ai` on top of `sandy-base`; multi-agent combos use the existing `sandy-full` image (now bundling all four CLIs). Tmux layout extended to 4 panes when all four agents are selected. Per-agent infrastructure:
+
+- **Config keys**: `OPENCODE_MODEL` (provider/model format like `anthropic/claude-sonnet-4`), `SANDY_OPENCODE_AUTH` (auto/api_key/oauth), `CODEX_HOME` (override for `$CODEX_HOME` inside container).
+- **Credential probe order**: env-provider keys first (since opencode reads `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GEMINI_API_KEY`/etc. natively), then host `~/.local/share/opencode/auth.json` mounted `:ro`.
+- **Sandbox layout**: opencode uses two XDG paths (`~/.config/opencode` and `~/.local/share/opencode`), so the sandbox dir has `opencode/{config,share}/` subdirs that mount accordingly.
+- **Headless mode**: `-p`/`--print`/`--prompt` translate to `opencode run <prompt>`. `--continue`/`-c` silently dropped (no headless continuation in upstream opencode).
+- **`SANDY_AGENT=both` alias removed** (had been deprecated). Use comma-separated combos; `all` is the alias for `claude,gemini,codex,opencode`.
+
+### New: local-LLM passthrough (`SANDY_LOCAL_LLM_HOST`)
+
+Set `SANDY_LOCAL_LLM_HOST=127.0.0.1:11434` (or any `host:port`) to open a single narrow iptables ACCEPT rule for that exact host+port against the Docker bridge gateway, allowing an in-container agent (typically OpenCode) to reach a local LLM server (Ollama, vLLM, etc.) without disabling LAN isolation entirely. Validates format, rejects world-open IPs (`0.0.0.0`, `::`) and out-of-range ports, and on Linux adds `--add-host=host.docker.internal:host-gateway` so the hostname resolves (Docker Desktop already does this on macOS).
+
+Companion: when `SANDY_LOCAL_LLM_HOST` is set and the host has no `~/.config/opencode/opencode.json`, sandy now auto-generates one from a `curl http://host:port/v1/models` probe. Defines a `local` provider via `@ai-sdk/openai-compatible` pointing at `http://host.docker.internal:<port>/v1`, registers the served model id, and pins it as default. To customize, copy the generated config to `~/.config/opencode/opencode.json` and sandy will prefer the host file thereafter.
+
+### New: `/ss` screenshot skill (cross-agent)
+
+Set `SANDY_SCREENSHOT_DIR=<host-path>` (passive-safe, in `~/.sandy/config` or per-workspace `.sandy/config`) to mount a host folder of screenshots into the container at `/home/claude/screenshots` (read-only). When set, sandy generates a per-agent `/ss` skill at sandbox setup so the agent can "see" what the user just captured:
+
+| Agent | Invocation | Format |
+|---|---|---|
+| `claude` | `/ss [N] [action]` | slash command |
+| `gemini` | `/ss [N] [action]` | slash command (TOML) |
+| `codex` | "look at my recent screenshot" | description-matched skill |
+| `opencode` | manual: `opencode "explain $(sandy-ss-paths 1)"` | no slash-command surface in v0 |
+
+Powered by `/usr/local/bin/sandy-ss-paths` (baked into the base image), which lists newest N image paths from `$SANDY_SCREENSHOTS_PATH`. Validation rejects shell metacharacters, literal `$HOME` or `/`; a non-existent directory warns and skips rather than letting Docker auto-create a stub on the host.
+
+### New: user-defined env passthrough (`SANDY_EXTRA_ENV`)
+
+Forward arbitrary env-var names from the host into the container, for tokens consumed by user-installed MCP servers or other in-container tooling that sandy has no opinion on. Set `SANDY_EXTRA_ENV=HA_TOKEN,LINEAR_API_KEY` in `~/.sandy/config` (privileged tier) or env, put the values in `~/.sandy/.secrets` (or `<workspace>/.sandy/.secrets`, or env), and they propagate. Source resolution order: env > workspace `.sandy/.secrets` > workspace `.sandy/config` > `~/.sandy/.secrets` > `~/.sandy/config`. Security boundary lives on the names (privileged tier triggers passive-privileged approval prompt from workspace sources); values can come from anywhere once the name is approved.
+
+### New: introspection surface
+
+Three machine-readable JSON commands for UI frontends, CI, and shell completions:
+
+- `sandy --print-schema` — static schema: sandy version, config keys by tier (with type/default/description), CLI flags, agents + credential probe orders, protected path lists, skill packs, `schema_version: 1`.
+- `sandy --print-state` — runtime state: installed images, per-sandbox metadata, approval files, `docker_reachable`, running sandy containers (filtered by image name prefix).
+- `sandy --validate-config PATH` — parses a config file, classifies as privileged or passive by path, reports errors / unknown keys / privileged-from-passive keys requiring approval / target approval file path.
+
+All three are fast-path handlers that exit before Docker, image builds, and workspace mutex acquisition — cheap to call from non-interactive contexts. Stability contract documented in the new `SPEC_INTROSPECTION.md`. Companion: `CLAUDE.md` and `SPECIFICATION.md` now embed config-key tables generated from `--print-schema` (regenerate with `test/regen-config-docs.sh`); test suite asserts no drift.
+
+### Behavior change: hybrid protected-dirs model
+
+The v0.11.1 S1.2 "always-mount with empty-fixture for absent protected directories" pattern is reverted. Both files and directories are now symmetrically existence-gated:
+
+- Path exists on host → bind-mount `:ro` (kernel-level write prevention, no host artifact).
+- Path absent → no mount. Agent CAN create files there during the session.
+
+The replacement defense is **session-end detection**: sandy snapshots which protected dirs existed at launch in `$SANDBOX_DIR/.protected-existed-at-launch`, and on session exit walks the same paths looking for new appearances. Anything with content that didn't exist at launch produces a yellow warning naming the path with `rm -rf` remediation. No automatic deletion — we don't know whether the agent's write was legitimate ("set up `.vscode/settings.json` for this project") or a prompt injection.
+
+Trade-off: weaker protection for paths the host doesn't have. The threat window is "between session end and the user's next operation that auto-executes that path" (`git pull` for hooks, `git push` for CI, IDE open for `.vscode`). For the realistic threat model — agent occasionally wrong via prompt injection or skill bug, not actively adversarial — detection at session end is sufficient.
+
+Long-term direction (documented in `CLAUDE.md` "Protected Files" → "Long-term: `fanotify` FAN_OPEN_PERM"): kernel-level interception of write attempts via `fanotify` permission events. True prevention with no host artifact even for absent paths, honest `-EPERM` to the agent. On the roadmap, unscoped pending evidence the detection model is insufficient.
+
+The legacy pre-existing-debris auto-cleanup at launch is unchanged — workspaces touched by older sandy versions get their empty stubs `rmdir`d under the 4-condition safety gate.
+
+### Behavior change: workspace canonicalization + lock probing + env precedence
+
+Workspace paths are now canonicalized via `pwd -P` for sandbox-name hashing — resolves symlinks and folds case-collisions on case-insensitive filesystems (default macOS APFS). So `cd ~/dev/myproject` and `cd ~/Dev/myproject` from the same physical directory now produce the same sandbox. Each sandbox writes `WORKSPACE.json` (non-hidden, visible in plain `ls`) recording the canonical path, the user-typed path (when different), and first/last launch timestamps + sandy versions. On launch sandy scans sibling sandboxes for matching `workspace_path` and warns when duplicates are found — manual cleanup only, no auto-merge.
+
+Workspace mutex (`mkdir`-based lock on `$SANDY_HOME/sandboxes/.<name>.lock`) now records the holder PID and on second-launch contention probes liveness via `kill -0`. Stale locks (process died with `kill -9` or OOM) auto-clear; live locks fail fast with a clear error naming the pid. Theoretical PID-reuse case (OS recycled holder's PID to an unrelated process) prefers the false-positive error over a false-negative clobber.
+
+Env var snapshot fix (`_SANDY_ENV_SET_KEYS`): before loading any config file, sandy snapshots which allowlisted keys are already in the process env, and subsequent file-load passes skip those keys. Lets `KEY=value sandy ...` and shell-level `export` cleanly override both host and workspace config. Previous behavior had a subtle bug where the first config-load pass exported values that later passes treated as "already set" — workspace config could never override host config.
+
+### Bug Fixes
+
+**Synthkit no longer treated as a plugin** — Earlier sandy installs recommended `/plugin install synthkit@sandy-plugins`; synthkit has since moved to a regular CLI tool (`uv tool install synthkit`) baked into the base image. The settings.json seed now strips deprecated `synthkit`, `synthkit@sandy-plugins`, and `synthkit@thinkkit` entries from `enabledPlugins` on every launch, silencing the confusing "✗ failed to load · 1 error" in `/plugin` for users carrying over old enablements. Idempotent and silent — no-op when those keys aren't present.
+
+**Gstack state now per-workspace** — `~/.gstack/` inside the container is bind-mounted from `<workspace>/.gstack/` (host) rather than `$SANDBOX_DIR/gstack/`. Visible alongside `.git/` and `.venv/` and properly per-workspace (was per-sandbox-identity before, which collided with case-collision sandbox shares). One-shot migration on first launch after upgrade: existing `$SANDBOX_DIR/gstack/` content is `cp -a`'d to the new location and the legacy dir is renamed `gstack.migrated/` for manual cleanup. `git check-ignore` is consulted at launch (with `.gitignore` grep fallback) to warn if the workspace isn't yet gitignoring `.gstack/`.
+
+**Codex default model bumped to `gpt-5.5`** — was `o4-mini`. New `~/.codex/config.toml` seeding writes `model = "gpt-5.5"` plus a full `[notice]` block suppressing first-run prompts. Existing `config.toml` files preserved (idempotent merge).
+
+**Claude bypass-permissions on Claude Code 2.1.x** — Claude Code 2.1.x added a runtime gate that made the `--bypass-permissions` CLI flag insufficient on its own. Sandy now also sets `permissions.defaultMode = "bypassPermissions"` in `settings.json` when `SANDY_SKIP_PERMISSIONS=true` (and clears it on toggle to false). The settings value is the definitive source; CLI flag alone no longer suffices.
+
+### Documentation
+
+- **`CLAUDE.md`**: new sections for OpenCode (agent table, credential probe order, sandbox layout), `SANDY_LOCAL_LLM_HOST` (LAN-isolation interaction, opencode auto-config flow), `/ss` screenshot skill (per-agent UX table), `SANDY_EXTRA_ENV` (source-resolution order, security boundary), hybrid protected-files model (current + fanotify long-term direction). Existing sections updated to four-agent reality.
+- **`SPECIFICATION.md`**: new Appendix E.11a (screenshot mount), E.11b (extra-env passthrough); §7 `user-setup.sh` step 4a for `/ss` skill seeding; agent and Dockerfile sections expanded for opencode; protected-files mount policy section rewritten for the hybrid model.
+- **`README.md`**: env-var table additions (`SANDY_LOCAL_LLM_HOST`, `SANDY_SCREENSHOT_DIR`, `SANDY_EXTRA_ENV`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`), new "Screenshot skill (`/ss`)" subsection, OpenCode agent section, plugin-marketplace section rewritten to clarify synthkit-is-no-longer-a-plugin.
+- **`SPEC_INTROSPECTION.md`**: new file documenting the stability contract for `--print-schema` / `--print-state` / `--validate-config` JSON output.
+- **`ROADMAP_1.0.md`**: re-baseline section added documenting the 8 off-roadmap features that shipped between `v0.11.4` and `v0.12.0`, with all downstream milestones shifted one minor version.
+
+---
+
 ## sandy v0.11.4
 
 Finishes the v0.11.2 protected-directories walk-back by removing the empty-stub debris those mounts leave on the host workspace. v0.11.2 accepted that "empty directories are benign on the host" as justification for always-mounting protected dirs with an empty-ro fixture; in practice the leftover `.vscode/`, `.idea/`, `.circleci/`, `.devcontainer/`, `.github/workflows/`, `.git/hooks/`, `.git/info/`, and `.claude/` stubs accumulated in every workspace sandy touched, cluttered `ls`, and misled tooling that treats directory presence as a signal.

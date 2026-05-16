@@ -14,6 +14,77 @@ This plan walks from the current state of `main` to `1.0-rc1`. It's structured a
 - **M3 — not started**: user-setup.sh heredoc extract + `build_*_cmd` unify. Scope unchanged.
 - **M4, M5 — not started**.
 
+---
+
+## Re-baseline (2026-05-16)
+
+Honest update: between 2026-04-15 and 2026-05-16, the "no new features until 1.0" rule didn't hold. Useful work happened, but it pushed the roadmap off course. Rather than pretend the drift didn't happen, this section re-baselines on what `main` actually is and shifts every downstream milestone by one minor version.
+
+### What shipped off-roadmap
+
+`v0.11.4` cut as a hotfix on top of `v0.11.3` to remove empty-stub debris from the protected-dir overlays — that was roadmap-adjacent (M2.5 stabilization tail) and stayed in scope.
+
+After `v0.11.4` (on `main`, version `0.12.0-dev`), the following landed as **new features** rather than stability work:
+
+1. **Introspection surface** (`c9bf58b`, `0dfe5d4`): `--print-schema`, `--print-state`, `--validate-config` JSON commands. Generated config-key tables for `CLAUDE.md` and `SPECIFICATION.md`. New `SPEC_INTROSPECTION.md` stability contract.
+2. **Workspace canonicalization + stale-lock recovery + env-var precedence** (`81dcddd`, `6a26899`): `pwd -P` normalization for sandbox naming, lock-holder PID liveness probe, `_SANDY_ENV_SET_KEYS` snapshot so env vars beat config files cleanly.
+3. **OpenCode as 4th agent** (`59d2680`, `69a8276`, `42e2806`, `d61d90f`, `50042cc`, `a813312`, `200ed5a`, `b2ef82d`, `e29f5b1`): 8 phases. New `sandy-opencode` image, 4-pane tmux layout, credential probe order, `OPENCODE_MODEL` / `SANDY_OPENCODE_AUTH` / `CODEX_HOME` config keys.
+4. **`SANDY_LOCAL_LLM_HOST`** (`42e2806`, `6745b56`): single-host iptables ACCEPT for local-LLM passthrough, `host.docker.internal` mapping on Linux, opencode.json auto-generation.
+5. **`/ss` screenshot skill** (`085088e`): `SANDY_SCREENSHOT_DIR`, helper bake into base image, per-agent skill files for claude/gemini/codex.
+6. **`SANDY_EXTRA_ENV`** (`8a39956`): user-defined env-var passthrough for MCP-server tokens.
+7. **Synthkit deprecated-plugin cleanup** (`4497802`): settings.json seed drops `synthkit@sandy-plugins` from `enabledPlugins`.
+8. **Hybrid protected-dirs model** (`4158024`): reverts S1.2's always-mount + empty-fixture for absent dirs. Replaces with existence-gated mounts + post-session detection of newly-appeared protected paths. Adds documentation for fanotify FAN_OPEN_PERM as the long-term direction.
+
+That's ~3 net new config keys (`SANDY_LOCAL_LLM_HOST`, `SANDY_SCREENSHOT_DIR`, `SANDY_EXTRA_ENV`, plus a few opencode-specific), one new agent, one new skill subsystem, and one non-trivial security-model rewrite. All useful. None of it was on the path to a stability freeze.
+
+### Decision: re-baseline at `0.12.0`
+
+Rather than continue adding features and pretending the roadmap is intact, **cut `0.12.0` from current `main` as the new feature-freeze point** and restart the soak clock there. Every downstream milestone shifts by one minor version. The work to do (M3, M2.7, M4, M5) is unchanged; only the version labels move.
+
+| Original target | Re-baselined target |
+|---|---|
+| `0.12.0` = M3 (heredoc extract) | `0.13.0` = M3 |
+| `0.12.1` / `0.13.0-pre` = M2.7 (egress proxy) | `0.13.1` / `0.14.0-pre` = M2.7 |
+| `0.13.0` = M4 (surface stabilization) | `0.14.0` = M4 |
+| `1.0.0-rc1` after M5 14-day soak | unchanged — `1.0.0-rc1` after M5 14-day soak |
+
+The 14-day pre-RC soak is the only gate that doesn't move; it's an absolute commitment to "this is the surface 1.0 ships with," and it locks at whatever version M4 produces.
+
+### Why now
+
+The hybrid protection model (commit `4158024`) is the natural cut point. It closes an architectural debt that was actively producing user complaints (empty stubs in workspaces) and it's the last "big shape change" on `main`. Everything after this should be either:
+
+- Refactors that preserve behavior (M3).
+- Additive plumbing that's opt-in until soaked (M2.7's `SANDY_EGRESS_PROXY=1` gate).
+- Surface lockdown (M4).
+- Time (M2.3, M3.5, M2.7.6, M5).
+
+If a "new feature" idea surfaces during M2.3 onward, it goes into `POST_1.0_IDEAS.md` and waits.
+
+### Updated current state
+
+- **On main**: `0.12.0-dev` (commit `4158024`).
+- **Next action**: cut `v0.12.0` from current `main`. No code changes — just `SANDY_VERSION` bump + RELEASE_NOTES summary of items 1-8 above + tag + push.
+- **M2.3 soak**: restarts on `v0.12.0`. 7 days of daily use across at least: sandy itself, one Python project with a venv, one multi-agent session. Any surprise → fix → ship as `0.12.x` → restart clock.
+- **M3, M2.7, M4, M5**: unchanged scope, shifted version labels per the table above.
+
+### Residual findings tracker (carried forward)
+
+| # | Finding | Severity | Status as of 2026-05-16 |
+|---|---|---|---|
+| F2 | macOS host/LAN reachable | Critical | mitigated + documented; full fix still in M2.7 |
+| F3 (dirs half) | Always-mount-with-empty-fixture pollution | n/a | **closed** by `4158024` hybrid revert |
+| F3 (files half) | Agent can create `.bashrc`/`.envrc` in-session if host absent | Medium | unchanged — detection only |
+| F6 (in-session) | Agent can mutate `settings.json` mid-session | Medium | unchanged — sandy-managed keys re-overwritten on next launch |
+| F9 | DNS exfil via embedded resolver | Medium | unchanged — subsumed by M2.7 DNS allowlist |
+| F10 | Fork bomb within pids-limit | Low | unchanged — skipped per original plan |
+
+---
+
+## Pre-2026-05-16 status (historical)
+
+The section below preserves the original 2026-04-15 plan structure. It's no longer the source of truth for *when* things happen, but the milestone scope sections are still accurate. Read this section as "what each milestone contains"; read the re-baseline section above for "what version it targets and when."
+
 ### Revised milestone ordering
 
 M2.5 and the Sprint 3 decision shifted the downstream ordering. The new sequence:
@@ -111,13 +182,17 @@ The venv overlay is load-bearing but fresh. This milestone takes it from "works 
 - **`.sandy_created_version` regex validation** was *not* done — deferred to **M4 PR 4.1** (allowlist/surface audit), where the validator fits naturally alongside the other surface-stability work. Tracked there.
 - **CHANGELOG / RELEASE_NOTES**: shipped with `v0.11.0`.
 
-### PR 2.3 — Soak baseline (no code, just time) — **restart pending on 0.11.3**
+### PR 2.3 — Soak baseline (no code, just time) — **restart pending on 0.12.0** (re-baselined 2026-05-16)
 
-**This is not a PR, it's a gate.** The original M2.3 clock was set against `v0.11.0` and was interrupted when ISOLATION_STRESS.md surfaced ten findings mid-soak. Those findings became M2.5. The clock is now restarting against `v0.11.3` — the stable target that consolidates the Sprint 1/2 isolation hardening and its two follow-up bug fixes.
+**This is not a PR, it's a gate.** The history of this gate:
 
-Use `v0.11.3` as daily driver for **at least 7 consecutive days** across regular projects (at minimum: sandy itself, one Python project with a venv, one multi-agent session). Log any surprises in a scratchpad. Issues found become hotfix PRs (`0.11.4`) and restart the clock; **M3 does not start until this gate clears**.
+- Original clock set against `v0.11.0`, interrupted by ISOLATION_STRESS.md → M2.5.
+- Restart clock set against `v0.11.3`, never formally started; `main` drifted ~10 features past it through April-May 2026 (see Re-baseline section).
+- **Current clock**: restarts against `v0.12.0` once that tag is cut from current `main`.
 
-**Exit criteria**: 7-day diary with no unexpected behavior. If any surprises appear, fix, ship as `0.11.4`, and restart the 7-day clock against the fixed build.
+Use `v0.12.0` as daily driver for **at least 7 consecutive days** across regular projects (at minimum: sandy itself, one Python project with a venv, one multi-agent session, one workspace with `SANDY_SCREENSHOT_DIR` configured, one workspace using `SANDY_EXTRA_ENV`). Log any surprises in a scratchpad. Issues found become hotfix PRs (`0.12.x`) and restart the clock; **M3 does not start until this gate clears**.
+
+**Exit criteria**: 7-day diary with no unexpected behavior. If any surprises appear, fix, ship as `0.12.x`, and restart the 7-day clock against the fixed build.
 
 ---
 
@@ -435,16 +510,17 @@ This is the most important gate on the roadmap. Everything before it is "the rev
 
 ## Out of scope (explicitly)
 
-Things that will be tempting to slip in and must not be:
+Things that will be tempting to slip in and must not be. **This list got broken between 2026-04-15 and 2026-05-16** — see the Re-baseline section for what shipped off-roadmap. The list is restated here as the rule going forward from `v0.12.0`:
 
-- **New agents.** If someone proposes integrating a fourth CLI, it's 1.1 territory.
-- **New config keys.** If a bug fix seems to require one, it's the wrong fix.
+- **New agents.** A fourth CLI (opencode) already happened; a fifth is 1.1 territory.
+- **New config keys.** `SANDY_LOCAL_LLM_HOST`, `SANDY_SCREENSHOT_DIR`, `SANDY_EXTRA_ENV`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `CODEX_HOME` all shipped post-`0.11.4`. No more between now and `1.0.0`. If a bug fix seems to require one, it's the wrong fix.
+- **New skill subsystems.** `/ss` shipped; nothing else.
 - **Refactors beyond what's listed.** The `user-setup.sh` extraction is the one big structural change; everything else stays where it is.
 - **Rebuilding the test harness.** Tests get *added*, not *restructured*.
 - **Changing the Docker base image.** Stability, not modernization.
 - **Adding Windows support, or anything that expands the platform surface.**
 
-If any of these feel necessary, write them down in a `POST_1.0_IDEAS.md` scratch file and move on.
+If any of these feel necessary, write them down in a `POST_1.0_IDEAS.md` scratch file and move on. The whole point of re-baselining at `0.12.0` is to make this constraint actually hold this time.
 
 ---
 
@@ -457,10 +533,18 @@ PR 1.1 (blockers) ✓ ──▶ tag 0.10.1 ✓
 PR 2.1 (venv hardening) ✓ ──▶ tag 0.11.0 ✓
     │
     ▼
-M2.5 Sprint 1 + Sprint 2 + stabilization ✓ ──▶ tag 0.11.1 ✓, 0.11.2 ✓, 0.11.3 ← cut pending
+M2.5 Sprint 1 + Sprint 2 + stabilization ✓ ──▶ tag 0.11.1 ✓, 0.11.2 ✓, 0.11.3 ✓, 0.11.4 ✓
     │
     ▼
-PR 2.3 (7-day soak on 0.11.3)    ← restart pending; gates M3
+Off-roadmap feature drift (2026-04-15 → 2026-05-16)
+    introspection, opencode, /ss, SANDY_EXTRA_ENV,
+    SANDY_LOCAL_LLM_HOST, hybrid protected-dirs
+    │
+    ▼
+0.12.0 cut ← re-baseline; restart M2.3 clock here
+    │
+    ▼
+PR 2.3 (7-day soak on 0.12.0)    ← gates M3
     │
     ▼
 PR 3.1 (user-setup.sh extract)   ← must land alone
@@ -470,7 +554,7 @@ PR 3.1.5 (3-day mini-soak)       ← gates PR 3.2
     │
     ▼
 PR 3.2 (build_*_cmd unify)
-PR 3.3 (version bump)            ← blocks on 3.1, 3.2 ──▶ tag 0.12.0
+PR 3.3 (version bump)            ← blocks on 3.1, 3.2 ──▶ tag 0.13.0
     │
     ▼
 M2.7 PR 2.7.1 (proxy Go binary + unit tests)
@@ -478,7 +562,7 @@ M2.7 PR 2.7.2 (sandy-proxy Dockerfile + phased build)
 M2.7 PR 2.7.3 (launcher wiring + SANDY_EGRESS_PROXY opt-in)
 M2.7 PR 2.7.4 (remove macOS launch warning)
 M2.7 PR 2.7.5 (integration tests)
-                                 ──▶ tag 0.12.1 or 0.13.0-pre
+                                 ──▶ tag 0.13.1 or 0.14.0-pre
     │
     ▼
 M2.7 PR 2.7.6 (7-day soak: 3-4d opt-in, 3-4d default-on)
@@ -488,10 +572,10 @@ PR 4.1 (allowlist audit + sandbox-marker validator)  ← parallel
 PR 4.2 (compat story)                                ← parallel
 PR 4.3 (multi-agent matrix)                          ← parallel
 PR 4.4 (failure-mode tests)                          ← parallel
-PR 4.5 (version bump)            ← blocks on 4.1-4.4 ──▶ tag 0.13.0
+PR 4.5 (version bump)            ← blocks on 4.1-4.4 ──▶ tag 0.14.0
     │
     ▼
-PR 5.1 (14-day soak gate on 0.13.0)
+PR 5.1 (14-day soak gate on 0.14.0)
     │
     ▼
 PR 5.2 (1.0.0-rc1 tag)
@@ -507,9 +591,11 @@ Treat each tag as a commitment: do not proceed to the next milestone until the p
 | `0.11.0` | ✓ released | Venv hardening shipped; 7-day soak started | The two newest features are solid |
 | `0.11.1` | ✓ released | M2.5 Sprint 1 shipped | Critical/High isolation gaps closed |
 | `0.11.2` | ✓ released | M2.5 refinements (approval prompt, stub revert) | Sprint 1 fallout stabilized |
-| `0.11.3` | cut pending | M2.5 stabilization fixes (plugin install, fast-path fixtures) | Stable target for restarted M2.3 soak |
-| `0.12.0` | pending | M3 (heredoc extract + build unification) + 3-day mini-soak | 1.0 surface is reviewable |
-| `0.12.1` or `0.13.0-pre` | pending | M2.7 (egress proxy sidecar) + 7-day soak | F2 macOS Critical finally closed |
-| `0.13.0` | pending | M4 surface locked | Stability promises are explicit |
+| `0.11.3` | ✓ released | M2.5 stabilization fixes (plugin install, fast-path fixtures) | Stable target for restarted M2.3 soak (never restarted) |
+| `0.11.4` | ✓ released | Empty-stub-debris cleanup hotfix | M2.5 tail closed |
+| `0.12.0` | **pending — cut now** | Re-baseline at current `main` (introspection, opencode, /ss, SANDY_EXTRA_ENV, hybrid protected-dirs) | Feature freeze restarts here |
+| `0.13.0` | pending | M3 (heredoc extract + build unification) + 3-day mini-soak | 1.0 surface is reviewable |
+| `0.13.1` or `0.14.0-pre` | pending | M2.7 (egress proxy sidecar) + 7-day soak | F2 macOS Critical finally closed |
+| `0.14.0` | pending | M4 surface locked | Stability promises are explicit |
 | `1.0.0-rc1` | pending | M5 14-day soak clean | Ready for users to form habits on |
 | `1.0.0` | pending | rc soak clean | Stability over time |
