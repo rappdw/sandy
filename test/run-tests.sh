@@ -3551,6 +3551,39 @@ check "config-key tables in CLAUDE.md/SPECIFICATION.md match sandy --print-schem
     test "$_DRIFT_RC" -eq 0
 
 # ============================================================
+# SECTION 48: user-setup.sh template drift + shellcheck (M3 PR 3.1)
+# ============================================================
+# The `generate_user_setup()` heredoc body in sandy is the source of truth for
+# the user-setup.sh script that runs inside the container. M3 mirrored that
+# body verbatim to templates/user-setup.sh.tmpl so shellcheck can lint it as a
+# real file (the heredoc-as-string-literal form is unshellcheckable).
+#
+# Two gates:
+#   48a. test/regen-template.sh --check — heredoc body must match template.
+#        Diverging means someone edited the heredoc in sandy without
+#        running test/regen-template.sh to sync the template file.
+#   48b. shellcheck templates/user-setup.sh.tmpl with zero-warning enforcement.
+#        Skipped (not failed) if shellcheck isn't installed on the test host.
+info "48. user-setup.sh template drift + shellcheck"
+_TMPL_DRIFT_OUT="$(bash "$(dirname "$0")/regen-template.sh" --check 2>&1)" && _TMPL_DRIFT_RC=0 || _TMPL_DRIFT_RC=$?
+if [ "$_TMPL_DRIFT_RC" -ne 0 ]; then
+    printf "  \033[0;33m%s\033[0m\n" "$_TMPL_DRIFT_OUT"
+fi
+check "templates/user-setup.sh.tmpl matches sandy's generate_user_setup() heredoc" \
+    test "$_TMPL_DRIFT_RC" -eq 0
+
+if command -v shellcheck >/dev/null 2>&1; then
+    _SC_OUT="$(shellcheck "$(dirname "$0")/../templates/user-setup.sh.tmpl" 2>&1)" && _SC_RC=0 || _SC_RC=$?
+    if [ "$_SC_RC" -ne 0 ]; then
+        printf "  \033[0;33m%s\033[0m\n" "$_SC_OUT"
+    fi
+    check "shellcheck templates/user-setup.sh.tmpl is clean" \
+        test "$_SC_RC" -eq 0
+else
+    printf "  \033[0;33m⊘ skipped — shellcheck not installed (apt-get install shellcheck / brew install shellcheck)\033[0m\n"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

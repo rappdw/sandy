@@ -1936,8 +1936,9 @@ if _sandy_has_claude; then
     # Project dir for current workspace. Claude Code normalizes any
     # non-alphanumeric char to '-', not just '/', so '_' and '.' also become
     # '-'. Matching that transform here is essential for --continue to find
-    # the right session history.
-    _cur_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | sed 's/[^a-zA-Z0-9]/-/g')"
+    # the right session history. Bash parameter expansion (bash 4+, which we
+    # require) avoids the echo|sed subshell — see ${var//pattern/replacement}.
+    _cur_proj="$HOME/.claude/projects/${WORKSPACE//[!a-zA-Z0-9]/-}"
     mkdir -p "$_cur_proj"
 fi
 
@@ -1968,11 +1969,15 @@ fi
 
 # Auto-install Python version if .python-version exists (uv is idempotent & fast)
 if [ -f "$WORKSPACE/.python-version" ]; then
-    PY_WANT="$(cat "$WORKSPACE/.python-version" | tr -d "[:space:]")"
+    PY_WANT="$(tr -d "[:space:]" < "$WORKSPACE/.python-version")"
     if [ -n "$PY_WANT" ] && command -v uv &>/dev/null; then
         printf "\033[0;36m● Installing Python %s via uv...\033[0m\n" "$PY_WANT"
-        uv python install "$PY_WANT" 2>/dev/null && \
-            printf "\033[0;36m● Python %s ready\033[0m\n" "$PY_WANT" || true
+        # `if uv ...; then` (not `A && B || true`) — the chained form would
+        # silently swallow a printf failure as if it were the install failing,
+        # plus `if` avoids triggering `set -e` on a normal install hiccup.
+        if uv python install "$PY_WANT" 2>/dev/null; then
+            printf "\033[0;36m● Python %s ready\033[0m\n" "$PY_WANT"
+        fi
     fi
 fi
 
@@ -2209,7 +2214,8 @@ build_claude_cmd() {
         # The session-detect above already guarantees we only add --continue
         # when a session file exists, so the fallback is both unnecessary and
         # actively harmful.
-        local expected_dir="$HOME/.claude/projects/$(echo "$WORKSPACE" | sed 's/[^a-zA-Z0-9]/-/g')"
+        local expected_dir
+        expected_dir="$HOME/.claude/projects/${WORKSPACE//[!a-zA-Z0-9]/-}"
         if ls "$expected_dir"/*.jsonl &>/dev/null; then
             cmd+=" --continue"
         elif find "$HOME/.claude/projects" -maxdepth 2 -name '*.jsonl' -print -quit 2>/dev/null | grep -q .; then
