@@ -168,7 +168,19 @@ sandy_run() {
                 #
                 # $EMPTY_RO_FIXTURE is chmod 0555 (see setup_sandbox) so writes
                 # fail at the host fs layer even if Docker's :ro is dropped.
-                if [ -d "$TEST_PROJECT/$_p" ]; then
+                #
+                # Pre-mkdir the host target *before* docker run. On Linux,
+                # Docker daemon runs as root, so if it has to auto-create the
+                # bind-mount target inside the rw workspace bind, the stub
+                # ends up root-owned — and a later `rm -rf $TEST_PROJECT` as
+                # the runner user fails with EPERM. macOS Docker Desktop
+                # avoids this because gRPCFUSE remaps UIDs, but Linux runners
+                # (GitHub Actions) hit it hard. Doing the mkdir here, as the
+                # runner user, keeps the stub host-side runner-owned.
+                if [ ! -d "$TEST_PROJECT/$_p" ]; then
+                    mkdir -p "$TEST_PROJECT/$_p"
+                fi
+                if [ -n "$(ls -A "$TEST_PROJECT/$_p" 2>/dev/null)" ]; then
                     _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
                 else
                     _ro_mounts+=(-v "$EMPTY_RO_FIXTURE:/workspace/$_p:ro")
