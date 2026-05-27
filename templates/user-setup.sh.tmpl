@@ -606,6 +606,82 @@ _seed_channel discord DISCORD_BOT_TOKEN DISCORD_ALLOWED_SENDERS
 fi  # end Claude-only plugin/channel block
 
 # --- Agent command builders (used by single-agent and multi-pane launch modes) ---
+# --- Shared helpers for build_*_cmd (M3 PR 3.2) ---
+#
+# _sandy_translate_args: per-agent arg-list translation.
+#
+# Each CLI sandy wraps takes a slightly different surface — claude is the
+# native shape (-p / --continue both work directly), gemini accepts --prompt
+# instead of -p (and has no headless resume), codex/opencode take the prompt
+# as a positional arg with no flag (and have no headless resume either).
+#
+# Returns the translated args printf %q'd and space-separated (leading space
+# included so callers can `cmd+="$(...)"` cleanly). Pre-PR-3.2 each agent
+# duplicated this loop with slightly diverging logic; the test sections 28,
+# 28b, 28g lock in the expected per-agent translations.
+_sandy_translate_args() {
+    local agent="$1"; shift
+    local out=""
+    local arg
+    for arg in "$@"; do
+        case "$agent" in
+            claude)
+                # Native shape — pass everything through verbatim. Claude
+                # understands -p / --continue / etc. directly.
+                out+=" $(printf '%q' "$arg")"
+                ;;
+            gemini)
+                # -p / --print → --prompt; --continue / -c dropped.
+                case "$arg" in
+                    -p|--print)    out+=" --prompt" ;;
+                    --continue|-c) : ;;
+                    *)             out+=" $(printf '%q' "$arg")" ;;
+                esac
+                ;;
+            codex|opencode)
+                # Headless mode is a subcommand (`codex exec` / `opencode run`)
+                # with the prompt as a positional arg, so the -p flag itself
+                # is dropped (its value remains as a regular positional arg).
+                # No headless resume → --continue / -c dropped.
+                case "$arg" in
+                    -p|--print|--prompt) : ;;
+                    --continue|-c)       : ;;
+                    *)                   out+=" $(printf '%q' "$arg")" ;;
+                esac
+                ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+# _sandy_wrap_cmd_exit_pause: append the tmux-interactive exit-pause suffix.
+#
+# When the session is interactive (tmux), the pane closes the moment the
+# agent exits, swallowing whatever final output it printed. The pause holds
+# the pane open until the user presses Enter. In headless / one-shot mode
+# (`-p`/`--print`/`--prompt`), there's no tmux to hold open — output streams
+# directly to the parent shell — so the trailer is omitted.
+#
+# Under SANDY_VERBOSE>=1, the trailer also reports the exit code so the user
+# can spot non-zero exits before they're hidden by the pause prompt.
+#
+# The `\$?` / `\$_exit` / `\"` escapes are deliberate: they're literal in the
+# returned string and only expand when bash evaluates it later (in the tmux
+# pane via user-setup.sh). The pre-PR-3.2 functions used the same escapes;
+# moving them into one place is the whole point of this helper.
+_sandy_wrap_cmd_exit_pause() {
+    local label="$1" cmd="$2"
+    if [ "$_sandy_is_headless" = "true" ]; then
+        printf '%s' "$cmd"
+        return 0
+    fi
+    if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+        printf '%s' "${cmd}; _exit=\$?; echo ''; echo \"[sandy] ${label} exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+    else
+        printf '%s' "${cmd}; read -p ''"
+    fi
+}
+
 build_claude_cmd() {
     local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-7} --teammate-mode tmux"
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
@@ -655,19 +731,8 @@ build_claude_cmd() {
             cmd+=" --resume"
         fi
     fi
-    for arg in "$@"; do
-        cmd+=" $(printf "%q" "$arg")"
-    done
-    # In interactive (tmux) mode, pause on exit so the user can see output before
-    # tmux closes. In headless mode, skip — there's no tmux to hold open.
-    if [ "$_sandy_is_headless" != "true" ]; then
-        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
-            cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Claude Code exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
-        else
-            cmd="$cmd; read -p ''"
-        fi
-    fi
-    printf '%s' "$cmd"
+    cmd+="$(_sandy_translate_args claude "$@")"
+    _sandy_wrap_cmd_exit_pause "Claude Code" "$cmd"
 }
 
 build_codex_cmd() {
@@ -688,25 +753,8 @@ build_codex_cmd() {
     if [ -n "${CODEX_MODEL:-}" ]; then
         cmd+=" --model $(printf "%q" "$CODEX_MODEL")"
     fi
-    # Flag translation: sandy's -p/--print/--prompt all mean "run this prompt".
-    # codex exec takes the prompt as a positional arg, so drop the flag itself
-    # and pass only the value. --continue/-c → drop (codex has `codex resume`
-    # but not a headless --continue flag), matching the gemini behavior.
-    for arg in "$@"; do
-        case "$arg" in
-            -p|--print|--prompt) : ;;
-            --continue|-c)       : ;;
-            *)                   cmd+=" $(printf "%q" "$arg")" ;;
-        esac
-    done
-    if [ "$_sandy_is_headless" != "true" ]; then
-        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
-            cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Codex CLI exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
-        else
-            cmd="$cmd; read -p ''"
-        fi
-    fi
-    printf '%s' "$cmd"
+    cmd+="$(_sandy_translate_args codex "$@")"
+    _sandy_wrap_cmd_exit_pause "Codex CLI" "$cmd"
 }
 
 build_opencode_cmd() {
@@ -727,25 +775,8 @@ build_opencode_cmd() {
     if [ -n "${OPENCODE_MODEL:-}" ]; then
         cmd+=" --model $(printf "%q" "$OPENCODE_MODEL")"
     fi
-    # Flag translation: sandy's -p/--print/--prompt all mean "run this prompt".
-    # opencode run takes the prompt as a positional arg, so drop the flag itself
-    # and pass only the value. --continue/-c → drop (opencode has no headless
-    # resume flag), matching the codex/gemini behavior.
-    for arg in "$@"; do
-        case "$arg" in
-            -p|--print|--prompt) : ;;
-            --continue|-c)       : ;;
-            *)                   cmd+=" $(printf "%q" "$arg")" ;;
-        esac
-    done
-    if [ "$_sandy_is_headless" != "true" ]; then
-        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
-            cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] OpenCode exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
-        else
-            cmd="$cmd; read -p ''"
-        fi
-    fi
-    printf '%s' "$cmd"
+    cmd+="$(_sandy_translate_args opencode "$@")"
+    _sandy_wrap_cmd_exit_pause "OpenCode" "$cmd"
 }
 
 build_gemini_cmd() {
@@ -760,24 +791,8 @@ build_gemini_cmd() {
     if [ -n "${GEMINI_MODEL:-}" ]; then
         cmd+=" --model $(printf "%q" "$GEMINI_MODEL")"
     fi
-    # Translate Claude-style flags to Gemini equivalents.
-    # -p / --print "prompt" → --prompt "prompt"  (Gemini has no -p shorthand)
-    # --continue / -c       → drop (Gemini has no headless resume flag)
-    for arg in "$@"; do
-        case "$arg" in
-            -p|--print)    cmd+=" --prompt" ;;
-            --continue|-c) : ;;
-            *)             cmd+=" $(printf "%q" "$arg")" ;;
-        esac
-    done
-    if [ "$_sandy_is_headless" != "true" ]; then
-        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
-            cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Gemini CLI exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
-        else
-            cmd="$cmd; read -p ''"
-        fi
-    fi
-    printf '%s' "$cmd"
+    cmd+="$(_sandy_translate_args gemini "$@")"
+    _sandy_wrap_cmd_exit_pause "Gemini CLI" "$cmd"
 }
 
 # Detect headless / one-shot mode — bypass tmux so output reaches the parent shell.

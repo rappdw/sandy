@@ -1426,15 +1426,19 @@ info "28. Gemini CLI support — agent helpers and flag translation"
 SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
 # Pull the two one-line helpers and the build_gemini_cmd function body.
+# Since M3 PR 3.2, build_*_cmd functions call shared helpers — extract them too.
 _HELPERS="$(grep -E '^_sandy_has_(claude|gemini|codex|opencode)\(\)' "$SANDY_SCRIPT")"
+_BUILD_SHARED="$(sed -n '/^_sandy_translate_args()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_wrap_cmd_exit_pause()/,/^}$/p' "$SANDY_SCRIPT")"
 _BUILD_GEMINI="$(sed -n '/^build_gemini_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
 
-if [ -z "$_HELPERS" ] || [ -z "$_BUILD_GEMINI" ]; then
+if [ -z "$_HELPERS" ] || [ -z "$_BUILD_GEMINI" ] || [ -z "$_BUILD_SHARED" ]; then
     fail "could not extract gemini helpers from sandy script (did they move?)"
 else
     _gemini_script_test() {
         local desc="$1"; shift
         if bash -c "set -e; $_HELPERS
+$_BUILD_SHARED
 $_BUILD_GEMINI
 $*" >/dev/null 2>&1; then
             pass "$desc"
@@ -1479,16 +1483,67 @@ $*" >/dev/null 2>&1; then
 fi
 
 # ============================================================
+info "28a. Shared build_*_cmd helpers (M3 PR 3.2)"
+# ============================================================
+# Two helpers extracted from the four build_*_cmd functions to consolidate
+# the per-agent arg-translation loop and the tmux-interactive exit-pause
+# wrapping. Each agent's surface-specific behavior (which flags translate
+# to what, what label appears in the exit-pause message) is now in one
+# place per concern instead of duplicated four ways.
+_helper_script_test() {
+    local desc="$1"; shift
+    if bash -c "set -e; $_BUILD_SHARED
+$*" >/dev/null 2>&1; then
+        pass "$desc"
+    else
+        fail "$desc"
+    fi
+}
+
+# Translate-args contract per agent
+_helper_script_test "_sandy_translate_args claude passes -p through verbatim" \
+    'out=$(_sandy_translate_args claude -p hello); echo "$out" | grep -qE " -p( |$)"'
+_helper_script_test "_sandy_translate_args claude passes --continue through verbatim" \
+    'out=$(_sandy_translate_args claude --continue); echo "$out" | grep -q -- "--continue"'
+_helper_script_test "_sandy_translate_args gemini translates -p to --prompt" \
+    'out=$(_sandy_translate_args gemini -p hello); echo "$out" | grep -q -- "--prompt" && ! echo "$out" | grep -qE " -p( |$)"'
+_helper_script_test "_sandy_translate_args gemini translates --print to --prompt" \
+    'out=$(_sandy_translate_args gemini --print hello); echo "$out" | grep -q -- "--prompt"'
+_helper_script_test "_sandy_translate_args gemini drops --continue" \
+    'out=$(_sandy_translate_args gemini --continue); ! echo "$out" | grep -q -- "--continue"'
+_helper_script_test "_sandy_translate_args codex drops -p (positional-prompt mode)" \
+    'out=$(_sandy_translate_args codex -p hello); ! echo "$out" | grep -qE "(^| )-p( |$)"'
+_helper_script_test "_sandy_translate_args codex drops --continue" \
+    'out=$(_sandy_translate_args codex --continue); ! echo "$out" | grep -q -- "--continue"'
+_helper_script_test "_sandy_translate_args opencode drops -p (positional-prompt mode)" \
+    'out=$(_sandy_translate_args opencode -p hello); ! echo "$out" | grep -qE "(^| )-p( |$)"'
+_helper_script_test "_sandy_translate_args opencode drops --continue" \
+    'out=$(_sandy_translate_args opencode --continue); ! echo "$out" | grep -q -- "--continue"'
+_helper_script_test "_sandy_translate_args printf-quotes positional args with spaces" \
+    'out=$(_sandy_translate_args claude "hello world"); echo "$out" | grep -qE "hello.+world"'
+
+# Exit-pause contract
+_helper_script_test "_sandy_wrap_cmd_exit_pause headless mode appends nothing" \
+    '_sandy_is_headless=true out=$(_sandy_wrap_cmd_exit_pause Foo "claude --x"); [ "$out" = "claude --x" ]'
+_helper_script_test "_sandy_wrap_cmd_exit_pause interactive quiet adds read -p" \
+    '_sandy_is_headless=false SANDY_VERBOSE=0 out=$(_sandy_wrap_cmd_exit_pause Foo "claude --x"); echo "$out" | grep -q "read -p"'
+_helper_script_test "_sandy_wrap_cmd_exit_pause interactive verbose includes agent label" \
+    '_sandy_is_headless=false SANDY_VERBOSE=1 out=$(_sandy_wrap_cmd_exit_pause "OpenCode" "opencode"); echo "$out" | grep -q "OpenCode exited"'
+_helper_script_test "_sandy_wrap_cmd_exit_pause interactive verbose escapes \$_exit for later eval" \
+    '_sandy_is_headless=false SANDY_VERBOSE=1 out=$(_sandy_wrap_cmd_exit_pause Foo "claude"); echo "$out" | grep -qF "\$_exit"'
+
+# ============================================================
 info "28b. Codex CLI support — agent helpers and flag translation"
 # ============================================================
 _BUILD_CODEX="$(sed -n '/^build_codex_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
 
-if [ -z "$_HELPERS" ] || [ -z "$_BUILD_CODEX" ]; then
+if [ -z "$_HELPERS" ] || [ -z "$_BUILD_CODEX" ] || [ -z "$_BUILD_SHARED" ]; then
     fail "could not extract codex helpers from sandy script (did they move?)"
 else
     _codex_script_test() {
         local desc="$1"; shift
         if bash -c "set -e; $_HELPERS
+$_BUILD_SHARED
 $_BUILD_CODEX
 $*" >/dev/null 2>&1; then
             pass "$desc"
@@ -1865,12 +1920,13 @@ info "28g. OpenCode CLI support — agent helpers and flag translation"
 # ============================================================
 _BUILD_OPENCODE="$(sed -n '/^build_opencode_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
 
-if [ -z "$_HELPERS" ] || [ -z "$_BUILD_OPENCODE" ]; then
+if [ -z "$_HELPERS" ] || [ -z "$_BUILD_OPENCODE" ] || [ -z "$_BUILD_SHARED" ]; then
     fail "could not extract opencode helpers from sandy script (did they move?)"
 else
     _opencode_script_test() {
         local desc="$1"; shift
         if bash -c "set -e; $_HELPERS
+$_BUILD_SHARED
 $_BUILD_OPENCODE
 $*" >/dev/null 2>&1; then
             pass "$desc"
