@@ -25,6 +25,17 @@ test/regen-config-docs.sh --check # verify no drift (used by test/run-tests.sh)
 
 Sentinels `<!-- BEGIN AUTOGEN:<name> -->` / `<!-- END AUTOGEN:<name> -->` mark the rewritten regions. Anything outside the sentinels is hand-maintained prose — edit that directly. `test/run-tests.sh` runs `--check` and fails if the committed blocks don't match the current schema.
 
+### user-setup.sh template mirror
+
+The `generate_user_setup()` heredoc body in the sandy script is the source of truth for the container-side `user-setup.sh`. It's mirrored to `templates/user-setup.sh.tmpl` so `shellcheck` can lint it as a real file (a heredoc string literal is unshellcheckable). When you edit the heredoc body, run:
+
+```sh
+test/regen-template.sh         # rewrite templates/user-setup.sh.tmpl from the heredoc
+test/regen-template.sh --check # verify no drift (used by test/run-tests.sh)
+```
+
+`test/run-tests.sh` runs both `--check` and `shellcheck` against the template; the suite fails if the heredoc and template diverge or if any shellcheck warning is introduced. The sandy script itself remains single-file and `sandy --upgrade`-compatible — the template file is a derivative used only for review and lint, not shipped to users.
+
 ## What This Is
 
 `sandy` — an isolated sibling for your coding agents. A self-contained command that runs Claude Code, Gemini CLI, OpenAI Codex CLI (or any combination side-by-side) in a Docker sandbox with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes.

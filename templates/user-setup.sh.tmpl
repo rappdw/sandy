@@ -1,0 +1,864 @@
+#!/bin/bash
+set -e
+trap 'echo "[sandy] ERROR: user-setup.sh failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+    sandy_log() { printf '\033[0;36m[sandy] ▶ %s\033[0m\n' "$1"; }
+else
+    sandy_log() { :; }
+fi
+if [ "${SANDY_VERBOSE:-0}" -ge 2 ]; then
+    set -x
+fi
+export HOME=/home/claude
+# Convenience: _sandy_has_X returns true if agent X is in the comma-separated SANDY_AGENT list.
+_sandy_has_claude()   { case ",${SANDY_AGENT:-claude}," in *,claude,*)   return 0 ;; esac; return 1; }
+_sandy_has_gemini()   { case ",${SANDY_AGENT:-claude}," in *,gemini,*)   return 0 ;; esac; return 1; }
+_sandy_has_codex()    { case ",${SANDY_AGENT:-claude}," in *,codex,*)    return 0 ;; esac; return 1; }
+_sandy_has_opencode() { case ",${SANDY_AGENT:-claude}," in *,opencode,*) return 0 ;; esac; return 1; }
+# Parse comma-separated agent list for multi-agent dispatch
+IFS=',' read -ra _SANDY_AGENTS <<< "${SANDY_AGENT:-claude}"
+_SANDY_AGENT_COUNT="${#_SANDY_AGENTS[@]}"
+_SANDY_IS_MULTI=false
+[ "$_SANDY_AGENT_COUNT" -gt 1 ] && _SANDY_IS_MULTI=true
+if _sandy_has_claude; then
+    export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS="${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-0}"
+    export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}"
+    export DISABLE_AUTOUPDATER=1
+    export FORCE_AUTOUPDATE_PLUGINS=true
+fi
+
+sandy_log "Setting up language toolchains"
+# Cargo: writable registry cache + cargo-install binaries
+export CARGO_HOME="$HOME/.cargo"
+mkdir -p "$CARGO_HOME/bin"
+for bin in /usr/local/cargo/bin/*; do
+    ln -sf "$bin" "$CARGO_HOME/bin/$(basename "$bin")"
+done
+
+# Go: writable GOPATH
+export GOPATH="$HOME/go"
+mkdir -p "$GOPATH/bin"
+
+# npm: global installs to writable location
+export NPM_CONFIG_PREFIX="$HOME/.npm-global"
+mkdir -p "$NPM_CONFIG_PREFIX/bin"
+
+# Python: persistent user-scoped pip installs via PYTHONUSERBASE
+# pip/pip3 wrapper scripts are created in the root section above (heredoc
+# quoting breaks inside bash -c single quotes).
+export PIP_BREAK_SYSTEM_PACKAGES=1
+export PYTHONUSERBASE="$HOME/.pip-packages"
+mkdir -p "$PYTHONUSERBASE/bin"
+
+# Writable bin dirs on PATH
+export PATH="$HOME/.local/bin:$PYTHONUSERBASE/bin:$NPM_CONFIG_PREFIX/bin:$GOPATH/bin:$CARGO_HOME/bin:$PATH"
+
+# Stub xdg-open / open so CLIs that try to launch a browser don't crash.
+# Prints the URL to the terminal instead.
+if ! command -v xdg-open &>/dev/null; then
+    cat > "$HOME/.local/bin/xdg-open" <<'XDGSTUB'
+#!/bin/sh
+printf '\033[0;36m[sandy]\033[0m Open in browser: %s\n' "$1"
+XDGSTUB
+    chmod +x "$HOME/.local/bin/xdg-open"
+fi
+
+sandy_log "Activating skill packs"
+# Activate baked-in skill packs (installed at /opt/skills/ during image build).
+# Skill packs are Claude-specific (they populate ~/.claude/skills/).
+if _sandy_has_claude && [ -d /opt/skills ]; then
+    mkdir -p "$HOME/.claude/skills"
+    for _pack_dir in /opt/skills/*/; do
+        [ -d "$_pack_dir" ] || continue
+        _pack_name="$(basename "$_pack_dir")"
+        # Symlink the pack itself
+        ln -snf "$_pack_dir" "$HOME/.claude/skills/$_pack_name"
+        # Symlink individual skills (subdirs with SKILL.md)
+        for _skill_dir in "$_pack_dir"/*/; do
+            [ -f "$_skill_dir/SKILL.md" ] || continue
+            _skill_name="$(basename "$_skill_dir")"
+            [ "$_skill_name" = "node_modules" ] && continue
+            [ "$_skill_name" = "browse" ] && continue
+            ln -snf "gstack/$_skill_name" "$HOME/.claude/skills/$_skill_name"
+        done
+    done
+    # Add skill pack bin directories to PATH
+    for _bin_dir in /opt/skills/*/bin; do
+        [ -d "$_bin_dir" ] && export PATH="$_bin_dir:$PATH"
+    done
+fi
+
+# Playwright browser path for gstack (if installed as skill pack)
+if [ -d /opt/skills/gstack/.browsers ]; then
+    export PLAYWRIGHT_BROWSERS_PATH=/opt/skills/gstack/.browsers
+fi
+
+# Resilient file writer. Works around an intermittent Docker Desktop macOS
+# bug where `mkdir -p` returns 0 but a subsequent `cat > file` in the same
+# new directory fails with "No such file or directory" — the directory
+# metadata isn't yet visible to the next open() across the tmpfs/bind-mount
+# boundary (VirtioFS dcache coherency). Fix: buffer stdin to /tmp (which is
+# a plain tmpfs — no bind-mount coherency issue), then retry mkdir+mv until
+# the destination directory is visible.
+_sandy_write_file() {
+    local _dst="$1" _dir _n _tmp
+    _dir="$(dirname "$_dst")"
+    _tmp="$(mktemp)"
+    cat > "$_tmp"
+    for _n in 1 2 3 4 5 6 7 8; do
+        mkdir -p "$_dir" 2>/dev/null || true
+        if [ -d "$_dir" ] && cp "$_tmp" "$_dst" 2>/dev/null; then
+            rm -f "$_tmp"
+            return 0
+        fi
+        sleep 0.1
+    done
+    # Last-ditch attempt — let the error surface to the caller naturally.
+    mkdir -p "$_dir"
+    cp "$_tmp" "$_dst"
+    rm -f "$_tmp"
+}
+
+# Synthkit slash commands (md2pdf, md2doc, md2html, md2email)
+if _sandy_has_claude && command -v synthkit &>/dev/null; then
+    _sandy_write_file "$HOME/.claude/commands/md2pdf.md" <<'SKMD'
+Convert the specified markdown file(s) to PDF using the `md2pdf` command.
+Usage: /md2pdf <file1.md> [file2.md ...]
+Run: md2pdf $ARGUMENTS
+SKMD
+    _sandy_write_file "$HOME/.claude/commands/md2doc.md" <<'SKMD'
+Convert the specified markdown file(s) to Word (.docx) using the `md2doc` command.
+Usage: /md2doc <file1.md> [file2.md ...]
+Run: md2doc $ARGUMENTS
+SKMD
+    _sandy_write_file "$HOME/.claude/commands/md2html.md" <<'SKMD'
+Convert the specified markdown file(s) to HTML using the `md2html` command.
+Usage: /md2html <file1.md> [file2.md ...]
+Run: md2html $ARGUMENTS
+SKMD
+    _sandy_write_file "$HOME/.claude/commands/md2email.md" <<'SKMD'
+Convert the specified markdown file to clipboard-ready email HTML using the `md2email` command.
+Usage: /md2email <file.md>
+Run: md2email $ARGUMENTS
+SKMD
+fi
+
+# Synthkit slash commands for Gemini (TOML format)
+if _sandy_has_gemini && command -v synthkit &>/dev/null; then
+    _sandy_write_file "$HOME/.gemini/commands/md2pdf.toml" <<'SKTOML'
+description = "Convert markdown file(s) to PDF using md2pdf"
+prompt = """Convert these markdown files to PDF using the md2pdf command.
+Files/args: {{args}}
+
+Output of md2pdf {{args}}:
+!{md2pdf {{args}}}"""
+SKTOML
+    _sandy_write_file "$HOME/.gemini/commands/md2doc.toml" <<'SKTOML'
+description = "Convert markdown file(s) to Word (.docx) using md2doc"
+prompt = """Convert these markdown files to Word using the md2doc command.
+Files/args: {{args}}
+
+Output of md2doc {{args}}:
+!{md2doc {{args}}}"""
+SKTOML
+    _sandy_write_file "$HOME/.gemini/commands/md2html.toml" <<'SKTOML'
+description = "Convert markdown file(s) to HTML using md2html"
+prompt = """Convert these markdown files to HTML using the md2html command.
+Files/args: {{args}}
+
+Output of md2html {{args}}:
+!{md2html {{args}}}"""
+SKTOML
+    _sandy_write_file "$HOME/.gemini/commands/md2email.toml" <<'SKTOML'
+description = "Convert a markdown file to clipboard-ready email HTML"
+prompt = """Convert this markdown file to clipboard-ready email HTML using the md2email command.
+File/args: {{args}}
+
+Output of md2email {{args}}:
+!{md2email {{args}}}"""
+SKTOML
+fi
+
+# Synthkit skills for Codex (Markdown with YAML frontmatter — spike 1 confirmed
+# codex loads ~/.codex/skills/<name>/SKILL.md as a drop-in directory, but
+# strictly requires the --- delimited frontmatter block).
+if _sandy_has_codex && command -v synthkit &>/dev/null; then
+    _sandy_write_file "$HOME/.codex/skills/md2pdf/SKILL.md" <<'SKMD'
+---
+name: md2pdf
+description: Convert markdown file(s) to PDF using the md2pdf command on PATH.
+---
+Run: `md2pdf <file.md> [file2.md ...]`
+SKMD
+    _sandy_write_file "$HOME/.codex/skills/md2doc/SKILL.md" <<'SKMD'
+---
+name: md2doc
+description: Convert markdown file(s) to Word (.docx) using the md2doc command on PATH.
+---
+Run: `md2doc <file.md> [file2.md ...]`
+SKMD
+    _sandy_write_file "$HOME/.codex/skills/md2html/SKILL.md" <<'SKMD'
+---
+name: md2html
+description: Convert markdown file(s) to HTML using the md2html command on PATH.
+---
+Run: `md2html <file.md> [file2.md ...]`
+SKMD
+    _sandy_write_file "$HOME/.codex/skills/md2email/SKILL.md" <<'SKMD'
+---
+name: md2email
+description: Convert a markdown file to clipboard-ready email HTML using the md2email command on PATH.
+---
+Run: `md2email <file.md>`
+SKMD
+fi
+
+# /ss screenshot skill — generated only when sandy mounted a screenshot dir
+# (SANDY_SCREENSHOTS_PATH set inside the container by sandy when
+# SANDY_SCREENSHOT_DIR is set on the host). Each agent gets its native format;
+# all three call /usr/local/bin/sandy-ss-paths internally so behavior stays
+# consistent across agents. Opencode has no slash-command surface in v0; users
+# can still call sandy-ss-paths from a prompt manually.
+if [ -n "${SANDY_SCREENSHOTS_PATH:-}" ]; then
+    if _sandy_has_claude; then
+        _sandy_write_file "$HOME/.claude/commands/ss.md" <<'SSMD'
+---
+description: Look at recent screenshot(s) from the host
+allowed-tools: Bash, Read
+argument-hint: "[N] [action]"
+---
+
+!`set -- $ARGUMENTS; if [ $# -ge 1 ] && expr "$1" : '^[0-9][0-9]*$' >/dev/null; then sandy-ss-paths "$1"; else sandy-ss-paths 1; fi`
+
+User action: $ARGUMENTS
+
+Read each image listed above (use the Read tool on each path). The first arg
+to /ss may be a count of screenshots to grab — strip it from the user action
+if so. Then respond to whatever the user asked: "huh"/"explain" → describe
+what you see; "fix" → diagnose the error/bug shown and edit the relevant
+code; "do this" → identify the technique and apply it to our work; "make
+infographic" → synthesize the screenshots into one. Use the screenshots as
+the user's visual input to you.
+SSMD
+    fi
+    if _sandy_has_gemini; then
+        _sandy_write_file "$HOME/.gemini/commands/ss.toml" <<'SSTOML'
+description = "Look at recent screenshot(s) from the host"
+prompt = """Recent screenshot(s) (newest first):
+!{ if echo "{{args}}" | awk '{exit !($1 ~ /^[0-9]+$/)}'; then sandy-ss-paths $(echo "{{args}}" | awk '{print $1}'); else sandy-ss-paths 1; fi }
+
+User action: {{args}}
+
+Read each image path listed above. The first arg may be a count — strip it
+from the user action if so. Respond to what the user asked: explain, fix
+the visible error, do/remix the technique shown, make an infographic, etc.
+"""
+SSTOML
+    fi
+    if _sandy_has_codex; then
+        _sandy_write_file "$HOME/.codex/skills/screenshot/SKILL.md" <<'SSCODEX'
+---
+name: screenshot
+description: View recent screenshots from the user's host. Invoke when the user asks you to look at, see, view, explain, or act on a screenshot they've taken — including phrasings like "huh", "fix this", "do this", "make an infographic from these". Run `sandy-ss-paths [N]` (default 1) to list the newest images, then read each path as an image.
+---
+
+When the user wants you to look at a screenshot:
+
+1. Run `sandy-ss-paths [N]` where N is the number of screenshots they want (default 1).
+2. The command outputs one image path per line, newest first.
+3. View each path as an image (codex supports image input directly).
+4. Respond to the user's action ("explain", "fix", "make infographic", "do this", etc.).
+SSCODEX
+    fi
+fi
+
+# Codex trust entry: append [projects."$SANDY_WORKSPACE"] trust_level = "trusted"
+# to ~/.codex/config.toml so codex doesn't prompt about an untrusted cwd. This
+# cannot be seeded at host-time because it needs the container-side workspace
+# path. Idempotent: only appended if the section is not already present.
+#
+# grep -F (fixed-string) is important here: the workspace path contains '/'
+# and '.' characters that are regex metacharacters in grep's default BRE
+# mode. Without -F, a workspace like /home/claude/dev/sandy could falsely
+# match a stored entry for /home/claudeXdevYsandy and skip the append,
+# leaving codex to prompt on every launch.
+if _sandy_has_codex; then
+    _codex_cfg="$HOME/.codex/config.toml"
+    if [ -f "$_codex_cfg" ] && ! grep -qF -- "[projects.\"${SANDY_WORKSPACE}\"]" "$_codex_cfg" 2>/dev/null; then
+        {
+            echo ""
+            echo "[projects.\"${SANDY_WORKSPACE}\"]"
+            echo "trust_level = \"trusted\""
+        } >> "$_codex_cfg"
+    fi
+fi
+
+# Gemini trust entry: seed trustedFolders.json so gemini doesn't prompt
+# "Do you trust the files in this folder?" on every new workspace.
+# Needs container-side $SANDY_WORKSPACE, so it lives here not at host-time.
+if _sandy_has_gemini; then
+    _tf="$HOME/.gemini/trustedFolders.json"
+    if [ ! -f "$_tf" ] || ! grep -qF "$SANDY_WORKSPACE" "$_tf" 2>/dev/null; then
+        node -e '
+            const fs = require("fs");
+            const f = process.argv[1], w = process.argv[2];
+            let d = {};
+            try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) {}
+            d[w] = "TRUST_FOLDER";
+            fs.writeFileSync(f, JSON.stringify(d, null, 2) + "\n");
+        ' "$_tf" "$SANDY_WORKSPACE" 2>/dev/null || {
+            # Fallback without node
+            printf '{\n  "%s": "TRUST_FOLDER"\n}\n' "$SANDY_WORKSPACE" > "$_tf"
+        }
+    fi
+fi
+
+# Gemini extensions seeding (SANDY_GEMINI_EXTENSIONS)
+# Idempotent: check the extensions directory on disk rather than `gemini
+# extensions list` (which returns empty when run outside the TUI).
+if _sandy_has_gemini && [ -n "${SANDY_GEMINI_EXTENSIONS:-}" ] && command -v gemini &>/dev/null; then
+    # Remove integrity/credential files that become invalid across container
+    # rebuilds — gemini's extension installer refuses to run with stale ones.
+    rm -f "$HOME/.gemini/gemini-credentials.json" \
+          "$HOME/.gemini/extension_integrity.json" \
+          "$HOME/.gemini/integrity.key"
+    mkdir -p "$HOME/.gemini/extensions"
+    IFS=',' read -ra _exts <<< "$SANDY_GEMINI_EXTENSIONS"
+    for _ext in "${_exts[@]}"; do
+        _ext="$(echo "$_ext" | tr -d '[:space:]')"
+        [ -z "$_ext" ] && continue
+        _name="$(basename "$_ext" .git)"
+        # Check if any directory under extensions/ matches the repo name
+        # (gemini prefixes with "gemini-cli-" sometimes, e.g. security → gemini-cli-security)
+        _found=false
+        for _d in "$HOME/.gemini/extensions"/*/; do
+            _dname="$(basename "$_d")"
+            if [ "$_dname" = "$_name" ] || echo "$_dname" | grep -qiE "(^|-)${_name}$"; then
+                _found=true
+                break
+            fi
+        done
+        if [ "$_found" = "true" ]; then
+            continue
+        fi
+        printf '\033[0;32m[sandy]\033[0m Installing Gemini extension: %s\n' "$_name"
+        # Timeout + auto-confirm to prevent hangs from interactive prompts.
+        _install_out="$(echo Y | timeout 120 gemini extensions install "$_ext" 2>&1)" || {
+            if echo "$_install_out" | grep -qi "already installed"; then
+                :
+            else
+                echo "[sandy] WARN: Failed to install Gemini extension: $_ext" >&2
+                echo "$_install_out" >&2
+            fi
+        }
+    done
+fi
+
+# Remap ANSI dark blue (color 4) to a readable bright blue
+printf "\033]4;4;rgb:61/8f/ff\033\\"
+trap "printf \"\033]104;4\033\\\\\"" EXIT
+
+sandy_log "Configuring project settings"
+WORKSPACE="${SANDY_WORKSPACE:-/workspace}"
+
+# Ensure project-level config dirs exist (Claude only — Gemini uses .gemini/)
+if _sandy_has_claude; then
+    mkdir -p "$WORKSPACE/.claude" 2>/dev/null || true
+
+    # Project dir for current workspace. Claude Code normalizes any
+    # non-alphanumeric char to '-', not just '/', so '_' and '.' also become
+    # '-'. Matching that transform here is essential for --continue to find
+    # the right session history. Bash parameter expansion (bash 4+, which we
+    # require) avoids the echo|sed subshell — see ${var//pattern/replacement}.
+    _cur_proj="$HOME/.claude/projects/${WORKSPACE//[!a-zA-Z0-9]/-}"
+    mkdir -p "$_cur_proj"
+fi
+
+# Plugin marketplace configuration is merged into the seed sidecar at host-side
+# (see S2.1 block in the main sandy script). Any in-container write to
+# ~/.claude/settings.json would fail with EROFS under the :ro overlay.
+
+sandy_log "Configuring git"
+# Trust all directories (host UID differs from container UID; container is sandboxed)
+git config --global --add safe.directory "*"
+
+# Set git identity from host
+if [ -n "${GIT_USER_NAME:-}" ]; then
+    git config --global user.name "$GIT_USER_NAME"
+fi
+if [ -n "${GIT_USER_EMAIL:-}" ]; then
+    git config --global user.email "$GIT_USER_EMAIL"
+fi
+
+sandy_log "Running dev environment checks"
+# --- Dev environment checks ---
+# Set up git-lfs filters if the workspace is a git repo using LFS (home is tmpfs, so config is lost each session)
+if [ -d "$WORKSPACE/.git" ] || [ -f "$WORKSPACE/.git" ]; then
+    if find "$WORKSPACE" -name .gitattributes -maxdepth 3 -exec grep -ql "filter=lfs" {} + 2>/dev/null; then
+        git lfs install 2>/dev/null || true
+    fi
+fi
+
+# Auto-install Python version if .python-version exists (uv is idempotent & fast)
+if [ -f "$WORKSPACE/.python-version" ]; then
+    PY_WANT="$(tr -d "[:space:]" < "$WORKSPACE/.python-version")"
+    if [ -n "$PY_WANT" ] && command -v uv &>/dev/null; then
+        printf "\033[0;36m● Installing Python %s via uv...\033[0m\n" "$PY_WANT"
+        # `if uv ...; then` (not `A && B || true`) — the chained form would
+        # silently swallow a printf failure as if it were the install failing,
+        # plus `if` avoids triggering `set -e` on a normal install hiccup.
+        if uv python install "$PY_WANT" 2>/dev/null; then
+            printf "\033[0;36m● Python %s ready\033[0m\n" "$PY_WANT"
+        fi
+    fi
+fi
+
+# Workspace .venv overlay. When SANDY_VENV_OVERLAY_ACTIVE=1, sandy has bind-
+# mounted a sandbox-owned dir over $WORKSPACE/.venv, shadowing the host venv.
+# First launch: the overlay dir is empty — materialize a fresh venv matching
+# the host's Python version (passed via SANDY_VENV_PYTHON_VERSION).
+# Subsequent launches: pyvenv.cfg already exists, skip straight to activation.
+if [ "${SANDY_VENV_OVERLAY_ACTIVE:-0}" = "1" ] && [ -d "$WORKSPACE/.venv" ]; then
+    # The host-side workspace mutex guarantees exclusive access, so no
+    # in-container lock is needed around materialization.
+    if [ ! -f "$WORKSPACE/.venv/pyvenv.cfg" ]; then
+        _py_ver="${SANDY_VENV_PYTHON_VERSION:-3.12}"
+        printf "\033[0;36m● Materializing sandbox venv overlay (Python %s)...\033[0m\n" "$_py_ver"
+        if command -v uv &>/dev/null; then
+            uv python install "$_py_ver" 2>/dev/null || true
+            _uv_err="$(mktemp)"
+            # --clear is required: $WORKSPACE/.venv is a bind mount, so the
+            # target directory always exists (even when empty) and uv venv
+            # otherwise refuses with "A directory already exists at: .venv".
+            # --clear wipes contents in place without trying to rmdir the
+            # mount point itself.
+            if uv venv --clear --python "$_py_ver" "$WORKSPACE/.venv" >/dev/null 2>"$_uv_err"; then
+                printf "\033[0;36m● Sandbox venv ready. Populate with:\033[0m\n"
+                if [ -f "$WORKSPACE/pyproject.toml" ]; then
+                    printf "\033[0;36m    uv sync    # or: uv pip install -e .\033[0m\n"
+                elif [ -f "$WORKSPACE/requirements.txt" ]; then
+                    printf "\033[0;36m    uv pip install -r requirements.txt\033[0m\n"
+                else
+                    printf "\033[0;36m    uv pip install <your deps>\033[0m\n"
+                fi
+            else
+                printf "\033[0;33m⚠ uv venv failed for Python %s:\033[0m\n" "$_py_ver"
+                sed 's/^/  /' "$_uv_err" >&2 || true
+                printf "\033[0;33m  Run 'uv venv' manually inside the container to retry.\033[0m\n"
+            fi
+            rm -f "$_uv_err"
+        else
+            printf "\033[0;33m⚠ uv not found; cannot create sandbox venv\033[0m\n"
+        fi
+    fi
+    # Drift check: compare the overlay's actual Python (major.minor) against
+    # what the host wanted. If they disagree, the sandbox venv predates a host
+    # version bump and the user's installed packages may be wrong for the new
+    # interpreter. Warn with the fix command — we don't auto-recreate because
+    # that would silently nuke the user's installed packages.
+    if [ -n "${SANDY_VENV_PYTHON_VERSION:-}" ] && [ -f "$WORKSPACE/.venv/pyvenv.cfg" ]; then
+        _overlay_ver="$( { grep -E '^version(_info)?[[:space:]]*=' "$WORKSPACE/.venv/pyvenv.cfg" \
+            | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]'; } || true )"
+        if [ -n "$_overlay_ver" ] && [ "$_overlay_ver" != "$SANDY_VENV_PYTHON_VERSION" ]; then
+            printf "\033[0;33m⚠ Sandbox venv is Python %s but host wants %s.\033[0m\n" \
+                "$_overlay_ver" "$SANDY_VENV_PYTHON_VERSION"
+            printf "\033[0;33m  Recreate inside the container: rm -rf .venv/* && exit (then relaunch sandy)\033[0m\n"
+        fi
+    fi
+    # Auto-activate: set VIRTUAL_ENV and prepend bin/ to PATH so python, pip,
+    # and installed console_scripts resolve to the sandbox venv without the
+    # user having to `source .venv/bin/activate`. The pip wrapper at
+    # /home/claude/.local/bin/pip also respects VIRTUAL_ENV and skips its
+    # --user fallback when this is set.
+    if [ -f "$WORKSPACE/.venv/bin/python" ]; then
+        export VIRTUAL_ENV="$WORKSPACE/.venv"
+        export PATH="$WORKSPACE/.venv/bin:$PATH"
+    fi
+elif [ -L "$WORKSPACE/.venv/bin/python" ] && [ ! -e "$WORKSPACE/.venv/bin/python" ]; then
+    # Overlay disabled (SANDY_VENV_OVERLAY=0) — fall back to warn-only.
+    VENV_TARGET="$(readlink "$WORKSPACE/.venv/bin/python")"
+    printf "\033[0;33m⚠ .venv/bin/python → %s is broken inside the container.\033[0m\n" "$VENV_TARGET"
+    printf "\033[0;33m  Set SANDY_VENV_OVERLAY=1 (default) for an auto-managed container venv,\033[0m\n"
+    printf "\033[0;33m  or recreate inside sandy: rm -rf .venv && uv venv && uv pip install -e .\033[0m\n"
+fi
+
+# Warn if node_modules contains native addons built for a different platform
+if [ -d "$WORKSPACE/node_modules" ]; then
+    # Check for .node files — if any exist, verify they are Linux ELF binaries
+    BAD_NATIVE="$(find "$WORKSPACE/node_modules" -name "*.node" -type f 2>/dev/null | head -1)"
+    if [ -n "$BAD_NATIVE" ] && ! file "$BAD_NATIVE" 2>/dev/null | grep -q "ELF"; then
+        printf "\033[0;33m⚠ node_modules/ contains native addons built for a different platform\033[0m\n"
+        printf "\033[0;33m  Fix: npm rebuild\033[0m\n"
+    fi
+fi
+
+sandy_log "Configuring git auth"
+# Authenticate gh CLI with all available accounts (works in both token and agent modes)
+if [ -n "${GH_ACCOUNTS:-}" ] && command -v gh &>/dev/null; then
+    IFS=',' read -ra _gh_pairs <<< "$GH_ACCOUNTS"
+    for _pair in "${_gh_pairs[@]}"; do
+        _user="${_pair%%:*}"
+        _tok="${_pair#*:}"
+        echo "$_tok" | gh auth login --with-token 2>/dev/null || true
+    done
+    # Detect the repo owner from the workspace remote URL and switch to the
+    # matching account. Without this, the last-logged-in account is active
+    # and pushes fail if it doesn't own the repo.
+    _repo_owner=""
+    if [ -d "$WORKSPACE/.git" ] || [ -f "$WORKSPACE/.git" ]; then
+        _repo_owner="$(git -C "$WORKSPACE" remote get-url origin 2>/dev/null \
+            | sed -E 's#.*(github\.com[:/])##; s#/.*##' || true)"
+    fi
+    if [ -n "$_repo_owner" ]; then
+        for _pair in "${_gh_pairs[@]}"; do
+            _user="${_pair%%:*}"
+            if [ "$_user" = "$_repo_owner" ]; then
+                gh auth switch --user "$_user" 2>/dev/null || true
+                break
+            fi
+        done
+    fi
+elif [ -n "${GIT_TOKEN:-}" ] && command -v gh &>/dev/null; then
+    echo "${GIT_TOKEN}" | gh auth login --with-token 2>/dev/null || true
+fi
+# Configure git auth: in token mode, rewrite SSH URLs to HTTPS and use gh as
+# credential helper (supports multi-account — gh returns the right token per repo).
+if [ "${SANDY_SSH:-token}" = "token" ] && command -v gh &>/dev/null; then
+    git config --global url."https://github.com/".insteadOf "git@github.com:"
+    git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+    gh auth setup-git 2>/dev/null || true
+fi
+
+sandy_log "Refreshing plugin marketplaces"
+# Refresh plugin marketplaces (once per day, or forced when channels need plugins).
+# Plugin marketplaces and channels are Claude-specific.
+if _sandy_has_claude; then
+_marketplace_cache="$HOME/.claude/plugins/.marketplace_updated"
+_now=$(date +%s)
+_stale=true
+if [ -f "$_marketplace_cache" ]; then
+    _cached_time=$(cat "$_marketplace_cache" 2>/dev/null || echo 0)
+    if (( _now - _cached_time < 86400 )); then _stale=false; fi
+fi
+# Force refresh when channels are configured — plugins may need installing
+[ -n "${SANDY_CHANNELS:-}" ] && _stale=true
+if [ "$_stale" = true ]; then
+    claude plugin marketplace update >/dev/null 2>&1 || true
+    mkdir -p "$(dirname "$_marketplace_cache")"
+    echo "$_now" > "$_marketplace_cache"
+fi
+
+# Auto-install and enable channel plugins referenced in SANDY_CHANNELS.
+# Installed-but-disabled is a real state (user may have toggled off); we always
+# ensure the plugin is enabled when the channel is configured.
+if [ -n "${SANDY_CHANNELS:-}" ]; then
+    for _chan in telegram discord; do
+        if [[ "$SANDY_CHANNELS" == *"$_chan"* ]]; then
+            # Install if not present (grep -qi handles multiple output formats)
+            if ! claude plugin list 2>/dev/null | grep -qi "${_chan}"; then
+                printf "\033[0;36m● Installing %s channel plugin...\033[0m\n" "$_chan"
+                if ! claude plugin install "${_chan}@claude-plugins-official" 2>&1; then
+                    printf "\033[0;31m✗ Failed to install %s channel plugin\033[0m\n" "$_chan" >&2
+                    continue
+                fi
+            fi
+            # Always ensure enabled (idempotent; silent if already enabled).
+            # The enable command takes just the plugin name, not plugin@marketplace.
+            claude plugin enable "$_chan" >/dev/null 2>&1 || \
+                claude plugin enable "${_chan}@claude-plugins-official" >/dev/null 2>&1 || true
+        fi
+    done
+fi
+
+# Seed channel config from env vars (token + allowlist per channel)
+_seed_channel() {
+    local chan="$1" token_var="$2" senders_var="$3"
+    local token="${!token_var:-}"
+    local senders="${!senders_var:-}"
+    [ -z "$token" ] && return
+    mkdir -p "$HOME/.claude/channels/$chan"
+    echo "${token_var}=$token" > "$HOME/.claude/channels/$chan/.env"
+    chmod 600 "$HOME/.claude/channels/$chan/.env"
+    [ -f "$HOME/.claude/channels/$chan/access.json" ] && return
+    if [ -n "$senders" ]; then
+        ALLOW_JSON=$(echo "$senders" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NR>1{printf ","}{printf "\"%s\"",$0}')
+        cat > "$HOME/.claude/channels/$chan/access.json" <<CHACCESS
+{
+  "dmPolicy": "allowlist",
+  "allowFrom": [$ALLOW_JSON],
+  "groups": {},
+  "pending": {}
+}
+CHACCESS
+    else
+        cat > "$HOME/.claude/channels/$chan/access.json" <<'CHACCESS'
+{
+  "dmPolicy": "pairing",
+  "allowFrom": [],
+  "groups": {},
+  "pending": {}
+}
+CHACCESS
+    fi
+}
+_seed_channel telegram TELEGRAM_BOT_TOKEN TELEGRAM_ALLOWED_SENDERS
+_seed_channel discord DISCORD_BOT_TOKEN DISCORD_ALLOWED_SENDERS
+fi  # end Claude-only plugin/channel block
+
+# --- Agent command builders (used by single-agent and multi-pane launch modes) ---
+build_claude_cmd() {
+    local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-7} --teammate-mode tmux"
+    if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+        # Use --permission-mode (the documented modern flag) instead of the
+        # legacy --dangerously-skip-permissions. Claude 2.1.x added runtime
+        # gates around the legacy alias that can silently downgrade to
+        # default mode; --permission-mode sets the session mode directly.
+        # We also seed permissions.defaultMode in settings.json (see the
+        # settings.json seed block) so /status reflects the same mode.
+        cmd+=" --permission-mode bypassPermissions"
+    fi
+    if [ -n "${SANDY_CHANNELS:-}" ] && ! [[ "${SANDY_AGENT:-claude}" == *,* ]]; then
+        # Native channels plugin path — only for single-agent claude sessions.
+        # For multi-agent, channels are delivered via the host-side tmux-inject relay.
+        cmd+=" --channels $SANDY_CHANNELS"
+    fi
+    local auto_continue=true
+    if [ "${SANDY_NEW_SESSION:-false}" = "true" ]; then
+        auto_continue=false
+    fi
+    for arg in "$@"; do
+        case "$arg" in
+            -p|--resume|--continue) auto_continue=false ;;
+        esac
+    done
+    if [ "$auto_continue" = "true" ]; then
+        # Resume the most recent session if one exists. Claude Code stores
+        # sessions under ~/.claude/projects/<normalized-path>/*.jsonl, where
+        # any non-alphanumeric character in the workspace path is replaced
+        # with '-'. Because each sandbox is per-project, any .jsonl file
+        # under ~/.claude/projects/ must belong to this workspace — so we
+        # can fall back to a broad check if the exact path lookup misses.
+        #
+        # No fallback-on-failure: earlier versions added `|| $cmd_without_continue`
+        # after the command, but that relaunched a fresh session whenever
+        # `claude --continue` exited non-zero — including on Ctrl-C, /exit, or
+        # any prompt failure — which silently clobbered the user's expectation.
+        # The session-detect above already guarantees we only add --continue
+        # when a session file exists, so the fallback is both unnecessary and
+        # actively harmful.
+        local expected_dir
+        expected_dir="$HOME/.claude/projects/${WORKSPACE//[!a-zA-Z0-9]/-}"
+        if ls "$expected_dir"/*.jsonl &>/dev/null; then
+            cmd+=" --continue"
+        elif find "$HOME/.claude/projects" -maxdepth 2 -name '*.jsonl' -print -quit 2>/dev/null | grep -q .; then
+            # Sessions exist but not at the expected path — pick one.
+            cmd+=" --resume"
+        fi
+    fi
+    for arg in "$@"; do
+        cmd+=" $(printf "%q" "$arg")"
+    done
+    # In interactive (tmux) mode, pause on exit so the user can see output before
+    # tmux closes. In headless mode, skip — there's no tmux to hold open.
+    if [ "$_sandy_is_headless" != "true" ]; then
+        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+            cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Claude Code exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+        else
+            cmd="$cmd; read -p ''"
+        fi
+    fi
+    printf '%s' "$cmd"
+}
+
+build_codex_cmd() {
+    # Headless: codex exec [PROMPT] (positional arg, not a flag)
+    # Interactive: codex (TUI)
+    # --sandbox danger-full-access is belt-and-suspenders alongside the
+    # sandbox_mode in ~/.codex/config.toml. Do not remove either.
+    local headless=false
+    for arg in "$@"; do
+        case "$arg" in -p|--print|--prompt) headless=true; break ;; esac
+    done
+    local cmd
+    if [ "$headless" = "true" ]; then
+        cmd="codex exec --sandbox danger-full-access"
+    else
+        cmd="codex --sandbox danger-full-access"
+    fi
+    if [ -n "${CODEX_MODEL:-}" ]; then
+        cmd+=" --model $(printf "%q" "$CODEX_MODEL")"
+    fi
+    # Flag translation: sandy's -p/--print/--prompt all mean "run this prompt".
+    # codex exec takes the prompt as a positional arg, so drop the flag itself
+    # and pass only the value. --continue/-c → drop (codex has `codex resume`
+    # but not a headless --continue flag), matching the gemini behavior.
+    for arg in "$@"; do
+        case "$arg" in
+            -p|--print|--prompt) : ;;
+            --continue|-c)       : ;;
+            *)                   cmd+=" $(printf "%q" "$arg")" ;;
+        esac
+    done
+    if [ "$_sandy_is_headless" != "true" ]; then
+        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+            cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Codex CLI exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+        else
+            cmd="$cmd; read -p ''"
+        fi
+    fi
+    printf '%s' "$cmd"
+}
+
+build_opencode_cmd() {
+    # Headless: opencode run [PROMPT] (positional arg, not a flag)
+    # Interactive: opencode (TUI)
+    # The LLM provider/model is governed by ~/.config/opencode/opencode.json or
+    # by --model provider/model on the CLI; sandy plumbs OPENCODE_MODEL through.
+    local headless=false
+    for arg in "$@"; do
+        case "$arg" in -p|--print|--prompt) headless=true; break ;; esac
+    done
+    local cmd
+    if [ "$headless" = "true" ]; then
+        cmd="opencode run"
+    else
+        cmd="opencode"
+    fi
+    if [ -n "${OPENCODE_MODEL:-}" ]; then
+        cmd+=" --model $(printf "%q" "$OPENCODE_MODEL")"
+    fi
+    # Flag translation: sandy's -p/--print/--prompt all mean "run this prompt".
+    # opencode run takes the prompt as a positional arg, so drop the flag itself
+    # and pass only the value. --continue/-c → drop (opencode has no headless
+    # resume flag), matching the codex/gemini behavior.
+    for arg in "$@"; do
+        case "$arg" in
+            -p|--print|--prompt) : ;;
+            --continue|-c)       : ;;
+            *)                   cmd+=" $(printf "%q" "$arg")" ;;
+        esac
+    done
+    if [ "$_sandy_is_headless" != "true" ]; then
+        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+            cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] OpenCode exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+        else
+            cmd="$cmd; read -p ''"
+        fi
+    fi
+    printf '%s' "$cmd"
+}
+
+build_gemini_cmd() {
+    # Gemini CLI has its own per-tool sandbox; disable it since sandy provides
+    # whole-session isolation via Docker. GEMINI_SANDBOX=false is the documented
+    # way to disable Gemini's built-in sandbox (`--sandbox=none` is NOT valid).
+    export GEMINI_SANDBOX=false
+    local cmd="gemini"
+    if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+        cmd+=" --yolo"
+    fi
+    if [ -n "${GEMINI_MODEL:-}" ]; then
+        cmd+=" --model $(printf "%q" "$GEMINI_MODEL")"
+    fi
+    # Translate Claude-style flags to Gemini equivalents.
+    # -p / --print "prompt" → --prompt "prompt"  (Gemini has no -p shorthand)
+    # --continue / -c       → drop (Gemini has no headless resume flag)
+    for arg in "$@"; do
+        case "$arg" in
+            -p|--print)    cmd+=" --prompt" ;;
+            --continue|-c) : ;;
+            *)             cmd+=" $(printf "%q" "$arg")" ;;
+        esac
+    done
+    if [ "$_sandy_is_headless" != "true" ]; then
+        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+            cmd="$cmd; _exit=\$?; echo ''; echo \"[sandy] Gemini CLI exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+        else
+            cmd="$cmd; read -p ''"
+        fi
+    fi
+    printf '%s' "$cmd"
+}
+
+# Detect headless / one-shot mode — bypass tmux so output reaches the parent shell.
+# Triggered by -p / --print / --prompt in the forwarded args.
+_sandy_is_headless=false
+for _arg in "$@"; do
+    case "$_arg" in
+        -p|--print|--prompt) _sandy_is_headless=true; break ;;
+    esac
+done
+
+# --- Build the command for a given agent ---
+_sandy_build_agent_cmd() {
+    case "$1" in
+        claude)   build_claude_cmd   "${@:2}" ;;
+        gemini)   build_gemini_cmd   "${@:2}" ;;
+        codex)    build_codex_cmd    "${@:2}" ;;
+        opencode) build_opencode_cmd "${@:2}" ;;
+    esac
+}
+
+cd "$WORKSPACE"
+
+if [ "$_SANDY_IS_MULTI" = false ]; then
+    # --- Single-agent launch ---
+    _agent="${_SANDY_AGENTS[0]}"
+
+    # Claude remote-control is a special case (no tmux, no auto-resume)
+    if [ "$_agent" = "claude" ] && [ "${SANDY_REMOTE_CONTROL:-false}" = "true" ]; then
+        sandy_log "Launching Claude Code (remote-control)"
+        AGENT_CMD="claude remote-control --name \"sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}\""
+        for arg in "$@"; do
+            AGENT_CMD+=" $(printf "%q" "$arg")"
+        done
+        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+            AGENT_CMD="$AGENT_CMD; _exit=\$?; echo ''; echo \"[sandy] Claude Code exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
+        fi
+        exec bash -c "$AGENT_CMD 2>&1"
+    fi
+
+    sandy_log "Launching $_agent"
+    AGENT_CMD="$(_sandy_build_agent_cmd "$_agent" "$@")"
+    if [ "$_sandy_is_headless" = "true" ]; then
+        exec bash -c "$AGENT_CMD"
+    else
+        tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1"
+    fi
+else
+    # --- Multi-agent launch (2-4 panes) ---
+    if [ "$_sandy_is_headless" = "true" ]; then
+        # Headless mode with multi-agent: route to first agent only.
+        _first="${_SANDY_AGENTS[0]}"
+        sandy_log "Headless mode with multi-agent: routing to $_first only"
+        AGENT_CMD="$(_sandy_build_agent_cmd "$_first" "$@")"
+        exec bash -c "$AGENT_CMD"
+    fi
+
+    _agent_names="$(IFS=' + '; echo "${_SANDY_AGENTS[*]}")"
+    sandy_log "Launching $_agent_names (multi-pane)"
+
+    # First agent: create the tmux session
+    _cmd0="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[0]}" "$@")"
+    tmux new-session -d -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$_cmd0 2>&1"
+
+    # Second agent: split horizontally
+    _cmd1="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[1]}" "$@")"
+    tmux split-window -h -t sandy -- bash -c "$_cmd1 2>&1"
+
+    # Third agent (if present): split the right pane vertically
+    if [ "$_SANDY_AGENT_COUNT" -ge 3 ]; then
+        _cmd2="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[2]}" "$@")"
+        tmux split-window -v -t sandy.1 -- bash -c "$_cmd2 2>&1"
+    fi
+
+    # Fourth agent (if present): split the left pane vertically → 2x2 grid.
+    # Layout: 0 top-left, 1 top-right, 2 bottom-right, 3 bottom-left.
+    if [ "$_SANDY_AGENT_COUNT" -ge 4 ]; then
+        _cmd3="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[3]}" "$@")"
+        tmux split-window -v -t sandy.0 -- bash -c "$_cmd3 2>&1"
+    fi
+
+    tmux select-pane -t sandy.0
+    tmux attach -t sandy
+fi
