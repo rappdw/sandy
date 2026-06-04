@@ -255,80 +255,124 @@ Three follow-up patches shipped in `v0.11.2` and `v0.11.3`:
 
 ## Milestone 2.7 — Egress proxy sidecar (Sprint 3) → `0.13.1` or `0.14.0-pre`
 
-> **Re-baseline note (2026-05-16):** original target was `0.12.1`/`0.13.0-pre`. After the `v0.12.0` re-baseline, the version label shifts up one minor — actual target is `0.13.1` or `0.14.0-pre`. Scope below is unchanged.
+> **Re-baseline note (2026-05-16):** original target was `0.12.1`/`0.13.0-pre`. After the `v0.12.0` re-baseline, the version label shifts up one minor — actual target is `0.13.1` or `0.14.0-pre`.
+
+> **Replan note (2026-06-04):** the architecture section was reviewed and revised after a critique found that the original "not using `--internal`" decision would have made the proxy security theater on macOS (the very platform M2.7 exists to fix). The `--internal` decision is flipped, a mandatory day-1 spike is added (PR 2.7.0), the CONNECT-vs-transparent-SNI choice is left to the spike, and several integration gaps (tool compatibility under `--internal`, `SANDY_LOCAL_LLM_HOST` collision, no macOS CI) are now called out explicitly. The original text is preserved in git history (pre-`m2.7-replan`).
 
 **New milestone, not in the original roadmap.** Pulled from 1.1 into rc1 because shipping 1.0 with a known Critical (F2 macOS network) documented in its own spec is a credibility problem. The launch warning is honest but not protective; users click through warnings and the current `--add-host` nullification is cosmetic against raw-IP LAN access.
 
 **Ordering:** M2.7 lands *after* M3, not before or concurrent. M3 is the highest-risk *refactor* on the roadmap (heredoc extract); M2.7 is the biggest *architectural addition*. Stacking them into one soak means regression bisection has to untangle two huge changes. Landing M3 first, mini-soaking it, then landing M2.7 on a clean M3 base gives each change clean attribution.
 
-### Scope discipline (tightened from the original Sprint 3 plan)
+### The load-bearing primitive: `--internal` (corrected 2026-06-04)
 
-The original Sprint 3 plan scoped HTTP CONNECT + SOCKS5 + DNS allowlist with a full default allowlist. rc1 pulls this tighter:
+The single most important decision in this milestone is whether the container's network is `--internal`. **It must be.**
 
-- **rc1 ships HTTP CONNECT + DNS allowlist only.** SOCKS5 slips to `1.0.1` if it's not trivially in the box. Most tooling hits CONNECT first; SOCKS5 is a nice-to-have, not a blocker.
-- **Permissive-first allowlist; tighten in 1.0.1+.** The rc1 allowlist covers the obvious set (Anthropic, OpenAI, Google APIs, npm, PyPI, GitHub, crates, Go proxy, GHCR). Users will hit edge cases (JFrog, private registries, HuggingFace, corp mirrors) during the M5 soak. Those become `SANDY_ALLOW_HOSTS` tuning reports, not blockers. **Do not try to get the list right on first try** — that's a recipe for the soak restarting every week when someone hits a missing host.
-- **No MITM / cert injection / traffic logging / retries / caching.** Every one of those is tempting, every one is a rabbit hole. rc1's proxy is dumb: accept CONNECT, resolve DNS against allowlist, forward bytes. If that's ≤500 LOC of Go, great. If it's growing past 1000, stop and re-scope.
-- **Linux iptables stays.** The proxy is **additive** on Linux, **replacement** only on macOS. Keep iptables as a belt-and-suspenders floor — zero cost, and it guards against bugs in the proxy itself.
-- **Opt-in first, flip to default before rc1 cut.** Ship as `SANDY_EGRESS_PROXY=1` passive-safe key. First 3–4 days of the M2.7 soak, opt in manually. Catch obvious breakage without risking every launch. Then flip the default to on and soak the remaining 3–4 days against the real rc1 surface.
+Why this is the whole ballgame: F2 exists because the container's default route points at its bridge gateway, which lives in Docker Desktop's VM, which NATs onto the host LAN. Putting the container on a two-network setup does **not** change that — if the network the container sits on is a normal (non-internal) bridge, the VM still installs a MASQUERADE rule for it and the container can still `curl http://192.168.1.1` straight to the home router. Nothing forces traffic through the proxy; a malicious/injected agent simply doesn't use it. Raw-IP LAN access — exactly what F2 demonstrated by reading the host SSH banner — sails right past. The proxy becomes decorative.
+
+A Docker `--internal` bridge is precisely what removes the MASQUERADE rule and severs that off-bridge route. It is the actual isolation mechanism. The proxy is what gives *controlled* egress back; `--internal` is what takes *uncontrolled* egress away.
+
+The original plan's stated reason to avoid `--internal` ("it breaks Docker's embedded DNS resolver for external lookups") is correct but irrelevant: the design already passes `--dns <proxy-ip>`, replacing the embedded resolver entirely. We *want* the embedded resolver gone. `--internal` does not break container→proxy (intra-bridge L2) or proxy→internet (the proxy's second, non-internal network). It only breaks the thing we're deliberately replacing.
+
+**Corollary the original plan under-weighted:** once `--internal` is correct, the proxy is the *only* way off the bridge. The failure mode is no longer just "a host is missing from the allowlist" — it's "any tool that doesn't route through the proxy is completely broken." That reframes the tool-compatibility question from a footnote into a primary design constraint (see "Transport model" below).
+
+### PR 2.7.0 — macOS `--internal` spike (MANDATORY, do first) — `test/spike/macos-internal-network-spike.sh`
+
+**Not a build PR — a go/no-go gate.** Everything downstream rests on assumptions about Docker Desktop's macOS networking that **cannot be tested in CI** (GitHub Actions is Linux-only; the platform being fixed has zero automated coverage). Prove them by hand, once, in ~1 hour, before committing the ~2 weeks:
+
+1. An `--internal` bridge network blocks raw-IP LAN egress (`curl http://<lan-ip>` fails where it succeeds on a normal bridge).
+2. A dual-homed sidecar on `(--internal, normal)` is reachable by a container on the internal net (intra-bridge L2 works despite `--internal`).
+3. That sidecar can reach the internet via its non-internal leg.
+4. `--dns <sidecar-ip>` propagates into a container on the `--internal` network.
+
+The spike script (`test/spike/macos-internal-network-spike.sh`) automates all four with a PASS/FAIL gate; it also confirms the baseline F2 exposure reproduces (so "blocked" results mean something) and flags the `host.docker.internal` reachability that drives the `SANDY_LOCAL_LLM_HOST` decision below. It cleans up all networks/containers on exit and needs no sudo.
+
+**Exit criteria:** all-PASS on a real Docker Desktop (macOS). If any assumption fails, **stop** — the topology needs a rethink and you've spent an hour, not three weeks. A Linux run passes too but explicitly does not satisfy the gate.
+
+### Transport model — decide on the spike, not in advance
+
+The original plan committed to **HTTP CONNECT + DNS allowlist**. Under the (now mandatory) `--internal` boundary, that's not obviously the best choice, because CONNECT requires every tool to honor `HTTP_PROXY`/`HTTPS_PROXY`. Two candidates, to be compared during the spike:
+
+- **HTTP CONNECT proxy** (port 3128). Container gets `HTTP_PROXY`/`HTTPS_PROXY` env. Covers `curl`, `pip`, `npm`, `uv`, most HTTP libraries. Breaks anything that ignores the proxy env (raw sockets, some static Go binaries, **git-over-SSH** when `SANDY_SSH=agent`). DNS allowlist is mostly secondary defense here (it makes non-proxy tools fail at resolve-time and closes F9 DNS-exfil), since CONNECT-aware tools hand the hostname to the proxy and never resolve directly.
+
+- **Transparent SNI/Host proxy.** The bundled resolver answers allowlisted names with the *proxy's own IP* (NXDOMAIN otherwise); the container connects to what it thinks is the real host; the proxy reads TLS SNI (:443) or HTTP Host (:80), checks the allowlist, and forwards. **No `HTTP_PROXY` env needed** — anything doing DNS+TLS works transparently, including git-over-HTTPS. The resolver gets *simpler* (returns a constant IP for allowed names; no upstream forwarding). Downsides: SNI inspection has its own edge cases (TLS 1.3 ECH blinds it; no-SNI clients), and it's still HTTP(S)-centric (raw non-TLS TCP uncovered — but so is CONNECT-only).
+
+Neither covers arbitrary raw TCP; that's the deferred SOCKS5 story. The point is: because `--internal` forces *all* egress through the proxy, the transparent model breaks **fewer** tools for similar LOC, so it deserves a real head-to-head rather than defaulting to CONNECT. Pick the winner on spike evidence and record the rationale.
+
+### Scope discipline (carried forward, with corrections)
+
+- **rc1 ships ONE transport (CONNECT or transparent-SNI, per the spike) + DNS allowlist.** SOCKS5 / arbitrary-TCP slips to `1.0.1`. **But** be honest that under `--internal`, tools that don't speak the chosen transport hard-fail (no network), they don't silently reach the internet — so the tool-compat surface must be enumerated up front, not discovered in the soak. Minimum it must cover: the agent CLIs' own API calls, `git` clone/fetch/push (the default `SANDY_SSH=token` HTTPS path), `pip`/`uv`/`npm`/`cargo`/`go`.
+- **Permissive-first allowlist; tighten in 1.0.1+.** rc1 covers the obvious set (Anthropic, OpenAI, Google APIs, npm, PyPI, GitHub, crates, Go proxy, GHCR). Edge cases (JFrog, private registries, HuggingFace, corp mirrors) become `SANDY_ALLOW_HOSTS` reports, not soak-restarts. **Do not try to get the list right on the first try.**
+- **No MITM / cert injection / traffic logging / retries / caching.** rc1's proxy is dumb: match host against allowlist, forward bytes. Target ≤500 LOC of Go; if it passes ~1000, stop and re-scope. **One dependency is allowed if needed** (`miekg/dns`) — hand-rolling DNS packet parsing on stdlib to preserve a "zero deps" badge is false economy. (The transparent-SNI model largely moots this — its resolver is trivial.)
+- **Linux: `--internal` makes the existing iptables DROP rules redundant** (a container that can't route off the bridge can't reach RFC1918 regardless). Keep the iptables path as a cheap belt-and-suspenders, but don't pretend it's load-bearing once `--internal` lands.
+- **Opt-in first, flip to default before rc1 cut.** Ship as `SANDY_EGRESS_PROXY=1` passive-safe key. First 3–4 days of the soak, opt in manually; then flip the default on for the remaining 3–4 days.
 
 ### Architecture
 
-Two-network design per sandy container:
+Two networks per sandy launch (PID-keyed):
 
-1. **Sidecar network** (`sandy_sidecar_<pid>`, bridge) — container can reach the proxy only.
-2. **Proxy network** (`sandy_proxy_<pid>`, bridge) — proxy can reach the internet.
+1. **Sidecar network** (`sandy_sidecar_<pid>`, **bridge `--internal`**) — the container and the proxy live here. No route off-bridge: this is what closes F2.
+2. **Egress network** (`sandy_egress_<pid>`, normal bridge) — only the proxy attaches here; this is the proxy's path to the internet.
 
-Container attaches only to the sidecar network with `--network sandy_sidecar_<pid>` plus `--dns <proxy-ip>` so all DNS queries go through the proxy. Proxy attaches to both networks.
+The container attaches **only** to the sidecar network, with `--dns <proxy-sidecar-ip>` (and, if the CONNECT model wins, `HTTP_PROXY`/`HTTPS_PROXY=http://<proxy-sidecar-ip>:3128`). The proxy is dual-homed (sidecar + egress).
 
-**Not using `--internal`:** it breaks Docker's embedded DNS resolver for external lookups, and the proxy is providing its own DNS implementation anyway — the container never needs the Docker embedded resolver.
+### `SANDY_LOCAL_LLM_HOST` × `--internal` (new — must be resolved)
+
+Today `SANDY_LOCAL_LLM_HOST` pokes an iptables hole so the container can reach `host.docker.internal:port`. Under `--internal`, `host.docker.internal` is off-bridge and unreachable by construction (the spike confirms this). Two options for rc1, pick one explicitly:
+
+- **(a)** The proxy forwards to `host.docker.internal:port` when that host:port is on the allowlist — i.e. the allowlist supports `host:port` literals, and the proxy resolves `host.docker.internal` on its egress leg. Cleaner UX, slightly more proxy code.
+- **(b)** Document that `SANDY_LOCAL_LLM_HOST` and `SANDY_EGRESS_PROXY` are mutually exclusive in rc1 (setting both is a hard error with a clear message), and revisit in 1.0.1.
+
+Default recommendation: **(b)** for rc1 (smaller surface, the two features have a small overlapping user base), **(a)** as a fast-follow if anyone actually hits it.
 
 ### PR 2.7.1 — Proxy binary (Go source + unit tests)
 
-**Scope**: ~500 LOC of Go under `proxy/` implementing:
-- HTTP CONNECT listener (port 3128)
-- DNS listener (UDP 53) with allowlist matching (supports `*.example.com` wildcards)
-- Allowlist loaded from `/etc/sandy-proxy.json` at startup
-- Static binary, no runtime dependencies
+**Scope**: Go under `proxy/` implementing the spike-chosen transport + a DNS responder + allowlist matching (`*.example.com` wildcards), allowlist loaded from `/etc/sandy-proxy.json` at startup. Static binary; at most one dependency (`miekg/dns`).
 
-**Tests**: unit tests for each protocol, allowlist matching edge cases, `NXDOMAIN` for non-allowlisted hosts.
+**Tests**: unit tests for the transport, allowlist matching edge cases (wildcard, exact, `host:port`), `NXDOMAIN` / refuse for non-allowlisted hosts, and (if transparent) SNI/Host extraction including the no-SNI and oversized-record cases.
 
-**Exit criteria**: `go test ./proxy/...` passes. Proxy binary is ≤500 LOC (hard limit — if it's growing, re-scope).
+**Exit criteria**: `go test ./proxy/...` passes; binary ≤500 LOC excluding the one allowed dep (soft ceiling 1000 — if approaching it, re-scope).
 
 ### PR 2.7.2 — `sandy-proxy` Docker image
 
-**Scope**: new `Dockerfile.proxy` in `$SANDY_HOME/` (generated template, same pattern as the other Dockerfiles). Phased between `sandy-base` and the agent images. Build once, cache aggressively — the proxy is stable code.
-
-Hash-based rebuild logic consistent with the rest of the build pipeline (`.proxy_build_hash`).
+**Scope**: new generated `Dockerfile.proxy` in `$SANDY_HOME/`, phased between `sandy-base` and the agent images, hash-rebuild via `.proxy_build_hash`. Build once, cache aggressively.
 
 ### PR 2.7.3 — Launcher wiring
 
-**Scope**: sandy creates the two networks per-launch (PID-keyed), starts the proxy container, injects `SANDY_EGRESS_PROXY=1` gate, tears everything down in the cleanup trap.
+**Scope**: sandy creates the two networks per-launch (sidecar `--internal`, egress normal), starts the dual-homed proxy container, sets `--network sidecar` + `--dns proxy-ip` (+ proxy env if CONNECT), gates on `SANDY_EGRESS_PROXY`, and tears everything down in the cleanup trap (the trap already handles per-instance networks; extend it for the second network + proxy container).
 
-**`SANDY_EGRESS_PROXY` passive-safe key** — add to the passive allowlist in `_load_sandy_config()`. Default: `0` for the first week of M2.7 soak, then flipped to `1`.
+**`SANDY_EGRESS_PROXY` passive-safe key** — passive allowlist in `_load_sandy_config()`. Default `0` for the first soak week, then flip to `1`.
 
-**`SANDY_ALLOW_HOSTS` privileged-tier key** — comma-separated list of additional hosts to append to the allowlist. Privileged because user-added hosts expand the attack surface; must not be workspace-settable without the approval prompt.
+**`SANDY_ALLOW_HOSTS` privileged-tier key** — comma-separated additions to the allowlist. Privileged: user-added hosts expand the attack surface and must not be workspace-settable without the approval prompt.
+
+**Interaction guardrails**: enforce the `SANDY_LOCAL_LLM_HOST` decision above; confirm `cleanup()` removes both networks + the proxy container on all trapped signals (EXIT INT TERM HUP QUIT ABRT), including the SIGKILL-leak caveat already documented for the main container.
 
 ### PR 2.7.4 — Remove macOS launch warning (problem now fixed)
 
-**Scope**: one-line revert of the S1.6 warning banner. Keep the `--add-host` nullification as defense-in-depth.
+**Scope**: revert the S1.6 macOS warning banner — **but only behind `SANDY_EGRESS_PROXY` being on**. If the proxy is off (opt-out, or a build without it), the warning must still fire: the honest-warning posture is correct whenever the real isolation isn't active. Keep the `--add-host` nullification as defense-in-depth regardless.
 
-### PR 2.7.5 — Integration tests
+### PR 2.7.5 — Integration tests + manual macOS checklist
 
-**Scope**: new tests in `test/run-integration-tests.sh`:
-- Allowlisted host (e.g. `api.anthropic.com`) reaches its target from inside a sandy container
-- Non-allowlisted host (e.g. `evil.example.com`) fails cleanly with `NXDOMAIN`
-- Raw-IP to RFC 1918 address fails (verify on both macOS and Linux)
-- Proxy survives container restart
-- `SANDY_ALLOW_HOSTS=foo.bar.com` tunes the allowlist successfully
-- Opt-out via `SANDY_EGRESS_PROXY=0` in an `.sandy/config` (passive source) works
+**Automated (Linux CI)** in `test/run-integration-tests.sh`:
+- Allowlisted host (`api.anthropic.com`) reachable from inside a sandy container with the proxy on.
+- Non-allowlisted host (`evil.example.com`) refused / `NXDOMAIN`.
+- `SANDY_ALLOW_HOSTS=foo.bar.com` tunes the allowlist.
+- Opt-out via `SANDY_EGRESS_PROXY=0` in a passive `.sandy/config` works.
+- Proxy survives container restart; cleanup removes both networks.
+- Tool-compat smoke: `git clone` (HTTPS), `pip install`, `npm install` all succeed through the proxy.
+
+**Manual macOS checklist (gates the rc1 cut — there is no macOS CI)**, documented in `TESTING_PLAN.md`:
+- Re-run `test/spike/macos-internal-network-spike.sh` → all-PASS on the current Docker Desktop.
+- Raw-IP to an RFC1918 LAN address fails with the proxy on.
+- `host.docker.internal:22` (host SSHD) unreachable with the proxy on (the F2 repro).
+- The same tool-compat smoke as CI, run by hand on macOS.
 
 ### PR 2.7.6 — 7-day soak
 
-**Gate, not a PR.** Opt-in for 3–4 days, flip default to on for 3–4 days, log surprises. Any new network failure = fix + restart 3–4-day window for that phase.
+**Gate.** Opt-in for 3–4 days, flip default on for 3–4 days, log surprises. Any new network failure = fix + restart that phase's window.
 
 ### Total budget
 
-Plan for **2 weeks of focused work** on the binary + integration + test harness work, then **7 days of soak**. Plus the "`SANDY_ALLOW_HOSTS` kept hitting unexpected misses, let me cut 1.0.1 to tune it" possibility. rc1 is ~4–5 weeks of wall-clock from the start of M3.
+**~1 hour** for the PR 2.7.0 spike (do this before anything else — it can kill or green-light the whole milestone). Then **~2 weeks** of build/test/harness work, then **7 days** of soak. Plus the "`SANDY_ALLOW_HOSTS` kept missing hosts → cut 1.0.1 to tune" possibility. rc1 is ~4–5 weeks of wall-clock from the start of M3 — **conditional on the spike passing**; if it fails, M2.7 slips back to 1.1 and 1.0 ships with the honest warning (a documented limitation beats a non-functional security feature).
 
 ---
 
@@ -564,11 +608,14 @@ PR 3.2 (build_*_cmd unify) ✓ (#5 merged 68b2ee1)
 PR 3.3 (version bump) ✓          ──▶ tag 0.13.0 ✓ (2026-05-30)
     │
     ▼
-M2.7 PR 2.7.1 (proxy Go binary + unit tests)  ← next
+M2.7 PR 2.7.0 (macOS --internal spike)  ← NEXT — go/no-go gate, ~1hr
+    │  (all-PASS → proceed; any FAIL → M2.7 slips to 1.1)
+    ▼
+M2.7 PR 2.7.1 (proxy Go binary + unit tests; transport chosen by spike)
 M2.7 PR 2.7.2 (sandy-proxy Dockerfile + phased build)
-M2.7 PR 2.7.3 (launcher wiring + SANDY_EGRESS_PROXY opt-in)
-M2.7 PR 2.7.4 (remove macOS launch warning)
-M2.7 PR 2.7.5 (integration tests)
+M2.7 PR 2.7.3 (launcher wiring: sidecar --internal + egress net + proxy)
+M2.7 PR 2.7.4 (remove macOS warning — only when proxy is on)
+M2.7 PR 2.7.5 (integration tests + manual macOS checklist)
                                  ──▶ tag 0.13.1 or 0.14.0-pre
     │
     ▼
