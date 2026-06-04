@@ -1,3 +1,24 @@
+## sandy v0.13.0
+
+M3 milestone — architectural cleanup. Two refactors that pay down structural debt the 1.0 code review surfaced, plus a default-model bump. No new features, no new config keys; the only user-visible change is the default Claude model.
+
+### Architectural cleanup (M3)
+
+**PR 3.1 — `user-setup.sh` heredoc mirrored to a lintable template.** The ~860-line bash heredoc inside `generate_user_setup()` (the script that runs container-side after Docker hands off) was unshellcheckable as a string literal — 860 lines of container-side bash no static analyzer had ever seen. It's now mirrored verbatim to `templates/user-setup.sh.tmpl`, which `shellcheck` lints as a real file with zero-warning enforcement in CI. The sandy script's embedded heredoc remains the source of truth, so single-file install and `sandy --upgrade` are unaffected — the template is a derivative used only for review and lint, kept in sync by a `test/regen-template.sh` drift check. shellcheck found and fixed 4 latent issues on first run (3 style, 1 SC2155 return-value masking); all behaviorally verified equivalent.
+
+**PR 3.2 — `build_*_cmd` functions unified.** The four per-agent command builders (`build_claude_cmd`, `build_codex_cmd`, `build_opencode_cmd`, `build_gemini_cmd`) duplicated two concerns: a per-agent arg-translation loop (`-p`/`--print`/`--prompt`/`--continue` handling, which differs per agent) and an identical tmux-interactive exit-pause trailer (differing only in the agent label). Both extracted into shared helpers — `_sandy_translate_args` and `_sandy_wrap_cmd_exit_pause` — so the four agents stay in lockstep when new flags are added. Verified byte-identical output across all 80 input combinations (4 agents × 2 headless × 2 verbose × 5 arg patterns); no behavior change.
+
+### Default model: `claude-opus-4-7` → `claude-opus-4-8`
+
+The out-of-box default Claude model is now `claude-opus-4-8` (was `claude-opus-4-7`). This is an undated stable alias, so it auto-rolls forward to the latest 4.8 snapshot as Anthropic ships them; a future 4.9 will need another bump. Override per-user in `~/.sandy/config`, per-workspace in `.sandy/config`, or per-launch via `SANDY_MODEL=...` / `--model`. (README's table was also corrected — it had drifted to showing `claude-opus-4-6`.)
+
+### Documentation
+
+- **`CLAUDE.md`**: "user-setup.sh template mirror" subsection documenting the `test/regen-template.sh` workflow.
+- **`SPECIFICATION.md`** / **`SPEC_INTROSPECTION.md`**: config-key default updated to `claude-opus-4-8`.
+
+---
+
 ## sandy v0.12.0
 
 A re-baseline cut. Between `v0.11.4` (2026-04-15) and this tag (2026-05-16), the "no new features until 1.0" rule from `ROADMAP_1.0.md` quietly stopped holding — useful work landed but it cumulatively reset the stability soak that 1.0 was meant to gate on. Rather than continue and pretend the roadmap was intact, `v0.12.0` formalizes a new feature-freeze point. Every milestone downstream of here (M3 heredoc extract → M2.7 egress proxy sidecar → M4 surface stabilization → M5 14-day pre-RC soak → `1.0.0-rc1`) now targets the version one minor higher than the original plan, and the 7-day M2.3 soak clock restarts against this tag. See the updated `ROADMAP_1.0.md` "Re-baseline (2026-05-16)" section for full context.

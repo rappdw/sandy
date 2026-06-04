@@ -2236,11 +2236,15 @@ else
     fail "SANDY_VERSION defined exactly once (found: $_ver_count)"
 fi
 
-# Version string contains expected major.minor.
-if grep -q '^SANDY_VERSION="0\.12\.' "$SANDY_SCRIPT"; then
-    pass "SANDY_VERSION is 0.12.x"
+# Version string is well-formed semver (X.Y.Z, optionally with a -dev/-rc
+# suffix). Deliberately NOT pinned to a specific minor — pinning meant the
+# assertion broke on every release bump (it was stuck at 0.12.x while the
+# script moved to 0.13.0). Format-checking catches the real failure mode
+# (a malformed or accidentally-cleared version) without the maintenance tax.
+if grep -qE '^SANDY_VERSION="[0-9]+\.[0-9]+\.[0-9]+(-(dev|rc[0-9]*))?"' "$SANDY_SCRIPT"; then
+    pass "SANDY_VERSION is well-formed semver"
 else
-    fail "SANDY_VERSION is 0.12.x"
+    fail "SANDY_VERSION is well-formed semver"
 fi
 
 # ============================================================

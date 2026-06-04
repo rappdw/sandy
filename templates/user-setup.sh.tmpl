@@ -683,7 +683,7 @@ _sandy_wrap_cmd_exit_pause() {
 }
 
 build_claude_cmd() {
-    local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-7} --teammate-mode tmux"
+    local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-8} --teammate-mode tmux"
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
         # Use --permission-mode (the documented modern flag) instead of the
         # legacy --dangerously-skip-permissions. Claude 2.1.x added runtime
