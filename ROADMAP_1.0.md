@@ -61,12 +61,13 @@ The hybrid protection model (commit `4158024`) is the natural cut point. It clos
 
 If a "new feature" idea surfaces during M2.3 onward, it goes into `POST_1.0_IDEAS.md` and waits.
 
-### Updated current state
+### Updated current state (refreshed 2026-05-30)
 
-- **Released**: `v0.12.0` (2026-05-16).
-- **On main**: `0.12.1-dev` (post-release bump, commit `430711b`).
-- **M2.3 soak**: **active** on `v0.12.0` (clock started 2026-05-16). 7 days of daily use across at least: sandy itself, one Python project with a venv, one multi-agent session, one workspace with `SANDY_SCREENSHOT_DIR` configured, one workspace using `SANDY_EXTRA_ENV`. Any surprise → fix → ship as `0.12.x` → restart clock.
-- **M3, M2.7, M4, M5**: unchanged scope, shifted version labels per the table above. M3 starts when M2.3 soak clears.
+- **Released**: `v0.12.0` (2026-05-16), `v0.13.0` (2026-05-30).
+- **On main**: `0.13.1-dev` (post-release bump).
+- **M2.3 soak**: ✓ cleared on `v0.12.0`. M3 followed.
+- **M3**: ✓ shipped as `v0.13.0`. PR 3.1 (heredoc extract, #4), PR 3.1.5 (3-day mini-soak), PR 3.2 (build_*_cmd unify, #5), PR 3.3 (version bump + default model → opus 4.8). 1.0 surface is now reviewable — the unshellcheckable container-side bash is linted, the four agent command-builders are unified.
+- **M2.7, M4, M5**: unchanged scope, shifted version labels per the table above. **M2.7 (egress proxy sidecar) is next** — targets `0.13.1` / `0.14.0-pre`, closes the F2 macOS Critical.
 
 ### Residual findings tracker (carried forward)
 
@@ -553,17 +554,17 @@ Off-roadmap feature drift (2026-04-15 → 2026-05-16)
 PR 2.3 (7-day soak on 0.12.0)    ← active; gates M3
     │
     ▼
-PR 3.1 (user-setup.sh extract)   ← must land alone
+PR 3.1 (user-setup.sh extract) ✓ (#4 merged 9178698)
     │
     ▼
-PR 3.1.5 (3-day mini-soak)       ← gates PR 3.2
+PR 3.1.5 (3-day mini-soak) ✓     ← cleared 2026-05-30
     │
     ▼
-PR 3.2 (build_*_cmd unify)
-PR 3.3 (version bump)            ← blocks on 3.1, 3.2 ──▶ tag 0.13.0
+PR 3.2 (build_*_cmd unify) ✓ (#5 merged 68b2ee1)
+PR 3.3 (version bump) ✓          ──▶ tag 0.13.0 ✓ (2026-05-30)
     │
     ▼
-M2.7 PR 2.7.1 (proxy Go binary + unit tests)
+M2.7 PR 2.7.1 (proxy Go binary + unit tests)  ← next
 M2.7 PR 2.7.2 (sandy-proxy Dockerfile + phased build)
 M2.7 PR 2.7.3 (launcher wiring + SANDY_EGRESS_PROXY opt-in)
 M2.7 PR 2.7.4 (remove macOS launch warning)
@@ -600,7 +601,7 @@ Treat each tag as a commitment: do not proceed to the next milestone until the p
 | `0.11.3` | ✓ released | M2.5 stabilization fixes (plugin install, fast-path fixtures) | Stable target for restarted M2.3 soak (never restarted) |
 | `0.11.4` | ✓ released | Empty-stub-debris cleanup hotfix | M2.5 tail closed |
 | `0.12.0` | ✓ released 2026-05-16 | Re-baseline at current `main` (introspection, opencode, /ss, SANDY_EXTRA_ENV, hybrid protected-dirs) | Feature freeze restarts here |
-| `0.13.0` | pending | M3 (heredoc extract + build unification) + 3-day mini-soak | 1.0 surface is reviewable |
+| `0.13.0` | ✓ released 2026-05-30 | M3 (heredoc extract + build unification) + 3-day mini-soak; default model → opus 4.8 | 1.0 surface is reviewable |
 | `0.13.1` or `0.14.0-pre` | pending | M2.7 (egress proxy sidecar) + 7-day soak | F2 macOS Critical finally closed |
 | `0.14.0` | pending | M4 surface locked | Stability promises are explicit |
 | `1.0.0-rc1` | pending | M5 14-day soak clean | Ready for users to form habits on |
