@@ -43,3 +43,36 @@ jobs:
 
       - name: Run tests
         run: ./test/run-tests.sh
+
+  # Egress proxy (M2.7) Go unit + loopback tests. Separate job: pure Go, no
+  # Docker, so it gives fast feedback in parallel with the image-build job above.
+  proxy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: proxy/go.mod
+          cache-dependency-path: proxy/go.sum
+
+      - name: gofmt
+        working-directory: proxy
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted files:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        working-directory: proxy
+        run: go vet ./...
+
+      - name: go test -race
+        working-directory: proxy
+        run: go test -race ./...
+
+      - name: static build
+        working-directory: proxy
+        run: CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /tmp/sandy-proxy .
