@@ -52,6 +52,10 @@ func (l *connectListener) handle(client net.Conn) {
 		return
 	}
 	if !l.allow.AllowedHostPort(host, port) {
+		// CONNECT can return a real 403 (unlike the transparent path), so the
+		// agent can distinguish a policy block from a network failure. Also log
+		// it for the launcher's exit-time "to allow, add ..." aggregation.
+		logf("sandy-proxy: deny CONNECT %s:%d (not in allowlist)", host, port)
 		writeStatus(client, http.StatusForbidden)
 		client.Close()
 		return

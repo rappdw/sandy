@@ -61,4 +61,26 @@ go test -race ./...
 CGO_ENABLED=0 go build -ldflags='-s -w' .   # static binary (as the image builds it)
 ```
 
-Single dependency: `github.com/miekg/dns`. ~620 code lines.
+Single dependency: `github.com/miekg/dns`. ~700 code lines.
+
+## Allowlist hardening
+
+Every host is run through `normalizeHost` before matching (see `allowlist.go`),
+informed by bugs `anthropic-experimental/sandbox-runtime` already paid for:
+
+- Rejects control chars, whitespace, CRLF, null bytes, and overlong hosts (the
+  classic smuggling vectors).
+- Canonicalizes IP literals (`[::1]` → `::1`, etc.).
+- Rejects alternate IP encodings — inet_aton decimal (`167772165`), hex
+  (`0x7f.0.0.1`), and short (`127.1`) forms — which `getaddrinfo()` would dial
+  but which cannot be legitimate hostnames.
+- The name path (DNS / transparent SNI/Host) **never** authorizes a raw IP; IPs
+  are reachable only via an explicit `host:port` allowlist entry, canonicalized
+  on both sides. So an agent can't reach an arbitrary address by stuffing it
+  into SNI.
+
+Denied connections are logged (host + port + reason). CONNECT denials also
+return a real `403` so the agent can tell a policy block from a network failure;
+the transparent path can only close the connection (raw byte stream). The
+launcher (PR 2.7.3) aggregates these logs into an exit-time "to allow, add
+`SANDY_ALLOW_HOSTS=…`" hint.

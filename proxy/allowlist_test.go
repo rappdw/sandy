@@ -89,3 +89,76 @@ func TestIsHostPort(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeHost_RejectsBypassVectors(t *testing.T) {
+	// All of these must be rejected (ok=false) — they are malformed hosts or
+	// alternate IP encodings that getaddrinfo would dial but which can't be a
+	// legitimate allowlisted hostname.
+	reject := []string{
+		"167772165",                     // inet_aton decimal for 10.0.0.5
+		"0x7f.0.0.1",                    // hex octet
+		"0177.0.0.1",                    // octal-ish: last label "1" numeric -> rejected
+		"127.1",                         // short form
+		"example.com\x00.evil.com",      // embedded null
+		"example.com\r\nHost: evil.com", // CRLF smuggling
+		"exa mple.com",                  // space
+		"example.com.",                  // trailing dot
+		".example.com",                  // leading dot
+		"under_score.com",               // underscore (stricter than DNS, intentional)
+		"",                              // empty
+		"999",                           // all-numeric label
+	}
+	for _, h := range reject {
+		if _, _, ok := normalizeHost(h); ok {
+			t.Errorf("normalizeHost(%q) ok=true, want rejected", h)
+		}
+	}
+}
+
+func TestNormalizeHost_CanonicalizesIP(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"127.0.0.1", "127.0.0.1"},
+		{"10.0.0.5", "10.0.0.5"},
+		{"[::1]", "::1"}, // bracketed IPv6 -> canonical
+		{"::1", "::1"},
+		{"2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::1"}, // canonicalized
+	}
+	for _, c := range cases {
+		h, isIP, ok := normalizeHost(c.in)
+		if !ok || !isIP || h != c.want {
+			t.Errorf("normalizeHost(%q) = (%q, ip=%v, ok=%v), want (%q, ip=true, ok=true)", c.in, h, isIP, ok, c.want)
+		}
+	}
+}
+
+func TestAllowedName_RejectsRawIPAndEncodings(t *testing.T) {
+	// A name allowlist must never authorize a raw IP via SNI/Host, even if the
+	// IP happens to be reachable, and must reject encoded forms.
+	a := NewAllowlist([]string{"api.anthropic.com", "*.example.com"})
+	for _, h := range []string{"127.0.0.1", "10.0.0.5", "167772165", "0x7f.0.0.1", "[::1]"} {
+		if a.AllowedName(h) {
+			t.Errorf("AllowedName(%q) = true, want false (raw/encoded IP on name path)", h)
+		}
+	}
+}
+
+func TestAllowedHostPort_IPLiteralOnlyViaExplicitEntry(t *testing.T) {
+	// An IP CONNECT target is allowed ONLY if that exact IP:port was allowlisted,
+	// and only in canonical form — encodings of the same IP must not match.
+	a := NewAllowlist([]string{"10.0.0.5:8443"})
+	if !a.AllowedHostPort("10.0.0.5", 8443) {
+		t.Error("AllowedHostPort(10.0.0.5,8443) = false, want true (explicit entry)")
+	}
+	if a.AllowedHostPort("167772165", 8443) {
+		t.Error("AllowedHostPort(167772165,8443) = true, want false (encoded form must not match)")
+	}
+	if a.AllowedHostPort("10.0.0.5", 22) {
+		t.Error("AllowedHostPort(10.0.0.5,22) = true, want false (wrong port)")
+	}
+	if a.AllowedHostPort("10.0.0.6", 8443) {
+		t.Error("AllowedHostPort(10.0.0.6,8443) = true, want false (different IP)")
+	}
+}

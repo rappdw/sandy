@@ -52,8 +52,13 @@ func (l *transparentListener) handle(client net.Conn) {
 		return
 	}
 	if !l.allow.AllowedName(host) {
-		// Denied: drop. (No error body — the client just sees a closed conn,
-		// same as an unreachable host. Failing closed is the point.)
+		// Denied: drop. (No error body possible — this is a raw TLS/HTTP byte
+		// stream, not a place we can return a 403; the client just sees a
+		// closed conn, same as an unreachable host. Failing closed is the
+		// point.) Log the denial so the user/launcher can see what the agent
+		// tried to reach and offer a "to allow, add SANDY_ALLOW_HOSTS=..." hint
+		// at exit (the launcher aggregates these — PR 2.7.3).
+		logf("sandy-proxy: deny :%d %s (not in allowlist)", l.port, host)
 		client.Close()
 		return
 	}
