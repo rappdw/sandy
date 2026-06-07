@@ -3644,6 +3644,70 @@ else
 fi
 
 # ============================================================
+# SECTION 49: egress proxy image generator (M2.7 PR 2.7.2)
+# ============================================================
+# Static + function-level checks for generate_dockerfile_proxy and the ref
+# resolver. The actual image build (and the launcher wiring that uses it) need
+# Docker + the macOS topology, covered by the manual checklist in PR 2.7.5; here
+# we lock in the generator shape and the version-tag pinning.
+info "49. Egress proxy image generator (M2.7)"
+
+_PX_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+# Pull just the two functions and exercise them in isolation.
+_PX_FNS="$(sed -n '/^_sandy_proxy_ref()/,/^}$/p' "$_PX_SCRIPT")
+$(sed -n '/^generate_dockerfile_proxy()/,/^}$/p' "$_PX_SCRIPT")"
+
+# Ref resolution: release -> version tag; -dev -> main; override wins.
+_px_ref() {
+    local ver="$1" override="$2"
+    SANDY_VERSION="$ver" SANDY_PROXY_REF="$override" bash -c "$_PX_FNS
+_sandy_proxy_ref"
+}
+check "proxy ref: release version pins to vX.Y.Z tag" \
+    bash -c '[ "$(SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" bash -c "$1
+_sandy_proxy_ref")" = "v0.13.1" ]' -- "$_PX_FNS"
+check "proxy ref: -dev tracks main" \
+    bash -c '[ "$(SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" bash -c "$1
+_sandy_proxy_ref")" = "main" ]' -- "$_PX_FNS"
+check "proxy ref: -rc tracks main" \
+    bash -c '[ "$(SANDY_VERSION=1.0.0-rc1 SANDY_PROXY_REF="" bash -c "$1
+_sandy_proxy_ref")" = "main" ]' -- "$_PX_FNS"
+check "proxy ref: SANDY_PROXY_REF override wins" \
+    bash -c '[ "$(SANDY_VERSION=0.13.1 SANDY_PROXY_REF=abc123 bash -c "$1
+_sandy_proxy_ref")" = "abc123" ]' -- "$_PX_FNS"
+
+# Generator shape: multi-stage golang -> scratch, clones at the build-arg ref,
+# static build, correct entrypoint.
+_PX_TMP="$(mktemp -d)"
+SANDY_HOME="$_PX_TMP" SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" \
+    bash -c "$_PX_FNS
+generate_dockerfile_proxy" 2>/dev/null
+_PX_DF="$_PX_TMP/Dockerfile.proxy.new"
+check "proxy Dockerfile: golang build stage" \
+    grep -qE '^FROM golang:[0-9.]+-bookworm AS build' "$_PX_DF"
+check "proxy Dockerfile: scratch runtime stage" \
+    grep -qx 'FROM scratch' "$_PX_DF"
+check "proxy Dockerfile: pins ref via build-arg default to the version tag" \
+    grep -qx 'ARG SANDY_PROXY_REF=v0.13.1' "$_PX_DF"
+check "proxy Dockerfile: clones sandy repo and checks out the ref" \
+    bash -c 'grep -q "git clone https://github.com/rappdw/sandy /src" "$1" && grep -q "git -C /src checkout" "$1"' -- "$_PX_DF"
+check "proxy Dockerfile: builds proxy/ statically (CGO_ENABLED=0)" \
+    bash -c 'grep -q "cd /src/proxy" "$1" && grep -q "CGO_ENABLED=0 go build" "$1"' -- "$_PX_DF"
+check "proxy Dockerfile: entrypoint is the proxy binary" \
+    grep -qF 'ENTRYPOINT ["/usr/local/bin/sandy-proxy"]' "$_PX_DF"
+rm -rf "$_PX_TMP"
+
+# Build phase: gated on SANDY_EGRESS_PROXY, uses .build_hash_proxy, cleared by --rebuild.
+check "proxy build phase gated on SANDY_EGRESS_PROXY" \
+    grep -qF 'if [ "${SANDY_EGRESS_PROXY:-0}" = "1" ]; then' "$_PX_SCRIPT"
+check "proxy build uses .build_hash_proxy" \
+    grep -qF '.build_hash_proxy' "$_PX_SCRIPT"
+check "--rebuild clears .build_hash_proxy" \
+    bash -c 'grep -E "rm -f .*\.base_build_hash" "$1" | grep -q "\.build_hash_proxy"' -- "$_PX_SCRIPT"
+check "proxy image named sandy-proxy" \
+    grep -qF 'PROXY_IMAGE_NAME="sandy-proxy"' "$_PX_SCRIPT"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

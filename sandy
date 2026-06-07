@@ -1463,6 +1463,55 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 DOCKERFILE
 }
 
+# Resolve which ref of the proxy module to build into the sandy-proxy image.
+# Precedence: explicit SANDY_PROXY_REF override > the sandy release tag (when
+# running a tagged release) > "main" (for -dev/-rc builds, which track main).
+#
+# The proxy lives in the sandy repo under proxy/ as a nested Go module. Rather
+# than maintain a separate proxy/vX.Y.Z tag at every release, the image build
+# `git clone`s the sandy repo at this ref and `go build`s proxy/ from the tree —
+# so the existing root vX.Y.Z tag is the pin, exactly as requested.
+#
+# Dev note: before the M2.7 proxy work merges to main, set
+#   SANDY_PROXY_REF=<branch-or-commit>
+# (e.g. the m2.7-proxy branch) so the image can build from unreleased source.
+_sandy_proxy_ref() {
+    if [ -n "${SANDY_PROXY_REF:-}" ]; then
+        printf '%s' "$SANDY_PROXY_REF"
+        return
+    fi
+    case "$SANDY_VERSION" in
+        *-dev|*-rc*) printf 'main' ;;
+        *)           printf 'v%s' "$SANDY_VERSION" ;;
+    esac
+}
+
+# sandy-proxy egress-proxy image (M2.7). Multi-stage: a golang build stage that
+# clones the sandy repo at the resolved ref and statically compiles proxy/, then
+# a `scratch` runtime holding just the binary. The proxy never terminates TLS
+# and resolves upstreams with Go's pure resolver, so it needs no CA bundle and
+# no libc — scratch is the smallest, hardest-to-attack base for a security
+# component. The git ref is a build-arg so the build hash (and thus rebuilds)
+# track the pinned version.
+generate_dockerfile_proxy() {
+    local ref
+    ref="$(_sandy_proxy_ref)"
+    cat > "$SANDY_HOME/Dockerfile.proxy.new" <<DOCKERFILE
+# syntax pinned implicitly by the golang base tag
+FROM golang:1.24-bookworm AS build
+ARG SANDY_PROXY_REF=${ref}
+RUN git clone https://github.com/rappdw/sandy /src \\
+ && git -C /src checkout "\${SANDY_PROXY_REF}" \\
+ && cd /src/proxy \\
+ && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /sandy-proxy .
+
+FROM scratch
+COPY --from=build /sandy-proxy /usr/local/bin/sandy-proxy
+# Config is bind-mounted at /etc/sandy-proxy.json by the launcher (PR 2.7.3).
+ENTRYPOINT ["/usr/local/bin/sandy-proxy"]
+DOCKERFILE
+}
+
 generate_entrypoint() {
     cat > "$SANDY_HOME/entrypoint.sh.new" <<'ENTRYPOINT'
 #!/bin/bash
@@ -3227,7 +3276,7 @@ fi
 
 # Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
 if [ "$SANDY_REBUILD" = true ]; then
-    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_opencode" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.skills_build_hash"
+    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_opencode" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.build_hash_proxy" "$SANDY_HOME/.skills_build_hash"
     info "Build cache cleared. Images will be rebuilt."
 fi
 
@@ -3244,6 +3293,32 @@ if [ ! -f "$BASE_HASH_FILE" ] || [ "$(cat "$BASE_HASH_FILE")" != "$BASE_HASH" ] 
     BASE_REBUILT=true
 else
     info "Base image up to date."
+fi
+
+# Phase 1.5: egress proxy image (M2.7) — built only when SANDY_EGRESS_PROXY=1.
+# Independent of sandy-base (it's golang -> scratch), so it can build right
+# after the base phase. The launcher wiring that actually routes the agent
+# through it (two networks, --dns, ssh ProxyCommand, allowlist assembly) lands
+# in PR 2.7.3; here we just make the image exist and stay fresh. --no-cache so a
+# triggered rebuild always re-clones at the pinned ref (mirrors the base/agent
+# build policy and avoids a stale git-clone layer).
+PROXY_IMAGE_NAME="sandy-proxy"
+if [ "${SANDY_EGRESS_PROXY:-0}" = "1" ]; then
+    generate_dockerfile_proxy
+    if [ ! -f "$SANDY_HOME/Dockerfile.proxy" ] || ! diff -q "$SANDY_HOME/Dockerfile.proxy.new" "$SANDY_HOME/Dockerfile.proxy" &>/dev/null; then
+        mv "$SANDY_HOME/Dockerfile.proxy.new" "$SANDY_HOME/Dockerfile.proxy"
+    else
+        rm "$SANDY_HOME/Dockerfile.proxy.new"
+    fi
+    PROXY_HASH="$(sha256 < "$SANDY_HOME/Dockerfile.proxy" | cut -d' ' -f1)"
+    PROXY_HASH_FILE="$SANDY_HOME/.build_hash_proxy"
+    if [ ! -f "$PROXY_HASH_FILE" ] || [ "$(cat "$PROXY_HASH_FILE")" != "$PROXY_HASH" ] || ! docker image inspect "$PROXY_IMAGE_NAME" &>/dev/null; then
+        info "Building egress proxy image (sandy-proxy, ref=$(_sandy_proxy_ref))..."
+        docker build -q --no-cache -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$SANDY_HOME"
+        echo "$PROXY_HASH" > "$PROXY_HASH_FILE"
+    else
+        info "Egress proxy image up to date."
+    fi
 fi
 
 # Phase 2: Final image (agent — rebuilds on agent updates or base change)
