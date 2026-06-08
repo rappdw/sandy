@@ -120,6 +120,9 @@ IMAGE_NAME=""
 # Per-instance network names keyed on PID to avoid concurrent iptables races
 BRIDGE_NAME="br-sdy-$$"
 NETWORK_NAME="sandy_net_$$"
+# Platform — detected up-front so early functions (e.g. the egress-proxy network
+# setup, which runs well before the legacy isolation block) can branch on it.
+OS="$(uname -s)"
 
 # --- Skill pack registry ---
 # To add a new pack: add entries to both arrays at the same index.
@@ -4406,8 +4409,7 @@ if [ -f "$PROJECT_DOCKERFILE" ]; then
     IMAGE_NAME="$PROJECT_IMAGE_NAME"
 fi
 
-# --- Detect platform ---
-OS="$(uname -s)"
+# --- Platform already detected near the top (OS="$(uname -s)") ---
 
 # --- Apply LAN-blocking iptables rules (Linux only) ---
 PRIVATE_RANGES=(
