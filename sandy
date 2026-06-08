@@ -3649,6 +3649,24 @@ start_proxy_sidecar() {
         docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
         exit 1
     fi
+
+    # Debug probe: stand up a throwaway container with the agent's exact network
+    # view (sidecar + same --dns) and report what it resolves and reaches. This
+    # isolates the proxy path from the agent: `remote_ip` in the curl line is the
+    # tell — if it's the proxy IP, DNS redirect + transparent intercept work; if
+    # it's a public Anthropic IP, the agent is bypassing the proxy (DNS not
+    # redirecting) and dying on --internal's missing route.
+    if [ "${SANDY_DEBUG_PROXY:-0}" = "1" ]; then
+        echo "sandy: [debug] probing the agent resolver view on the sidecar..." >&2
+        docker run --rm --network "$SIDECAR_NETWORK" --dns "$PROXY_IP" \
+            --entrypoint bash "$IMAGE_NAME" -c '
+                echo "[resolv.conf]"; cat /etc/resolv.conf
+                echo "[getent hosts api.anthropic.com]"; getent hosts api.anthropic.com || echo "(resolve failed)"
+                echo "[curl https://api.anthropic.com]"
+                curl -sS -m 6 -o /dev/null -w "  http_code=%{http_code} remote_ip=%{remote_ip}\n" \
+                    https://api.anthropic.com 2>&1 || echo "  (curl failed: $?)"
+            ' 2>&1 | sed 's/^/    /' >&2 || true
+    fi
 }
 
 ensure_network
