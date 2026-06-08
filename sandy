@@ -3669,7 +3669,11 @@ start_proxy_sidecar() {
     fi
 }
 
-ensure_network
+# NOTE: ensure_network is intentionally NOT called here. It creates Docker
+# networks (and, in proxy mode, the proxy container) — state that must be torn
+# down on exit. It is called *after* the cleanup trap is installed, below, so a
+# failure during network/proxy setup can't leak networks (which would exhaust
+# Docker's address pool across repeated failed launches).
 
 # --- Phase 2.5: Skill pack image (after config so SANDY_SKILL_PACKS is available) ---
 if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
@@ -4653,6 +4657,13 @@ cleanup() {
 }
 
 trap cleanup EXIT INT TERM HUP QUIT ABRT
+
+# Create the per-instance network(s) now that the cleanup trap is armed — in
+# proxy mode this also starts the dual-homed proxy container. Doing it post-trap
+# guarantees teardown even if setup fails partway (no leaked networks/pool
+# exhaustion). apply_network_isolation (below) consumes the vars it sets.
+ensure_network
+
 # In egress-proxy mode the --internal sidecar IS the isolation (no route off the
 # bridge), and on the egress side iptables RFC1918 DROPs would also break the
 # proxy's own local-LLM forward to host.docker.internal — so we skip iptables
