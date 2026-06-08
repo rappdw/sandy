@@ -18,16 +18,16 @@ import (
 // the listen port: 443 or 80).
 type transparentListener struct {
 	port    int
-	allow   *Allowlist
+	policy  *Policy
 	extract func([]byte) (string, error)
 }
 
-func newTransparentTLS(allow *Allowlist) *transparentListener {
-	return &transparentListener{port: 443, allow: allow, extract: extractSNI}
+func newTransparentTLS(p *Policy) *transparentListener {
+	return &transparentListener{port: 443, policy: p, extract: extractSNI}
 }
 
-func newTransparentHTTP(allow *Allowlist) *transparentListener {
-	return &transparentListener{port: 80, allow: allow, extract: extractHTTPHost}
+func newTransparentHTTP(p *Policy) *transparentListener {
+	return &transparentListener{port: 80, policy: p, extract: extractHTTPHost}
 }
 
 func (l *transparentListener) addr() string { return ":" + itoa(l.port) }
@@ -51,19 +51,14 @@ func (l *transparentListener) handle(client net.Conn) {
 		client.Close()
 		return
 	}
-	if !l.allow.AllowedName(host) {
+	up, deny := l.policy.Egress(host, l.port)
+	if deny != "" {
 		// Denied: drop. (No error body possible — this is a raw TLS/HTTP byte
 		// stream, not a place we can return a 403; the client just sees a
 		// closed conn, same as an unreachable host. Failing closed is the
-		// point.) Log the denial so the user/launcher can see what the agent
-		// tried to reach and offer a "to allow, add SANDY_ALLOW_HOSTS=..." hint
-		// at exit (the launcher aggregates these — PR 2.7.3).
-		logf("sandy-proxy: deny :%d %s (not in allowlist)", l.port, host)
-		client.Close()
-		return
-	}
-	up, err := dialUpstream(host, l.port)
-	if err != nil {
+		// point.) Log so the user/launcher can see what the agent tried to
+		// reach and offer a "to allow, add SANDY_ALLOW_HOSTS=..." hint at exit.
+		logf("sandy-proxy: deny :%d %s (%s)", l.port, host, deny)
 		client.Close()
 		return
 	}

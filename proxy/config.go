@@ -35,8 +35,19 @@ import (
 // Config is the on-disk proxy configuration, written by the sandy launcher to
 // /etc/sandy-proxy.json and mounted into the proxy container.
 type Config struct {
+	// Mode is the egress policy (maps to SANDY_EGRESS_PROXY=1/2):
+	//   "permissive" — block only private/LAN/link-local/CGNAT/metadata
+	//                  destinations; allow all internet. Closes F2 (macOS host/
+	//                  LAN reach) with ~zero tool friction. `allow` is the
+	//                  LAN-exception list here.
+	//   "strict"     — deny everything except `allow`-listed hosts. Closes F2
+	//                  AND exfil-to-internet, at the cost of failing closed on
+	//                  any un-listed host.
+	// Defaults to "strict" if absent — fail closed, never silently permissive.
+	Mode string `json:"mode"`
+
 	// ProxyIP is the proxy's own address on the sidecar (internal) network.
-	// The DNS responder answers allowlisted A queries with this address so the
+	// The DNS responder answers permitted A queries with this address so the
 	// agent's traffic is redirected to the proxy for SNI/Host demux.
 	ProxyIP string `json:"proxy_ip"`
 
@@ -70,6 +81,14 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if c.ProxyIP == "" {
 		return nil, fmt.Errorf("config %s: proxy_ip is required", path)
+	}
+	switch c.Mode {
+	case "", modeStrict:
+		c.Mode = modeStrict // fail closed if unspecified
+	case modePermissive:
+		// ok
+	default:
+		return nil, fmt.Errorf("config %s: invalid mode %q (want %q or %q)", path, c.Mode, modePermissive, modeStrict)
 	}
 	if c.LocalLLMTarget == "" {
 		c.LocalLLMTarget = "host.docker.internal"

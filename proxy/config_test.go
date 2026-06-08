@@ -58,3 +58,32 @@ func TestLoadConfig_Missing(t *testing.T) {
 		t.Error("expected error for missing file")
 	}
 }
+
+func TestLoadConfig_ModeDefaultsStrict(t *testing.T) {
+	p := writeTemp(t, `{"proxy_ip":"1.2.3.4","allow":["x.com"]}`)
+	c, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Mode != modeStrict {
+		t.Errorf("Mode = %q, want %q (fail-closed default)", c.Mode, modeStrict)
+	}
+}
+
+func TestLoadConfig_ModePermissive(t *testing.T) {
+	p := writeTemp(t, `{"proxy_ip":"1.2.3.4","mode":"permissive"}`)
+	c, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Mode != modePermissive {
+		t.Errorf("Mode = %q, want permissive", c.Mode)
+	}
+}
+
+func TestLoadConfig_ModeInvalid(t *testing.T) {
+	p := writeTemp(t, `{"proxy_ip":"1.2.3.4","mode":"yolo"}`)
+	if _, err := LoadConfig(p); err == nil {
+		t.Error("expected error for invalid mode")
+	}
+}

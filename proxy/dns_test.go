@@ -30,8 +30,7 @@ func ask(h *dnsHandler, name string, qtype uint16) *dns.Msg {
 }
 
 func newTestHandler() *dnsHandler {
-	a := NewAllowlist([]string{"api.anthropic.com", "*.githubusercontent.com"})
-	return newDNSHandler(a, "192.168.229.2")
+	return newDNSHandler(testPolicy(modeStrict, "api.anthropic.com", "*.githubusercontent.com"))
 }
 
 func TestDNS_AllowedA(t *testing.T) {

@@ -43,14 +43,14 @@ func echoServer(t *testing.T, banner string) (string, int) {
 }
 
 // startConnect runs the CONNECT listener on a random port and returns its addr.
-func startConnect(t *testing.T, allow *Allowlist) string {
+func startConnect(t *testing.T, p *Policy) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	cl := newConnectListener(allow)
+	cl := newConnectListener(p)
 	go cl.serve(ln)
 	return ln.Addr().String()
 }
@@ -58,8 +58,8 @@ func startConnect(t *testing.T, allow *Allowlist) string {
 func TestConnect_Allowed(t *testing.T) {
 	upHost, upPort := echoServer(t, "SSH-2.0-test\r\n")
 	// Allow the echo server's exact host:port.
-	allow := NewAllowlist([]string{fmt.Sprintf("%s:%d", upHost, upPort)})
-	proxyAddr := startConnect(t, allow)
+	p := testPolicy(modeStrict, fmt.Sprintf("%s:%d", upHost, upPort))
+	proxyAddr := startConnect(t, p)
 
 	c, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
 	if err != nil {
@@ -83,8 +83,8 @@ func TestConnect_Allowed(t *testing.T) {
 }
 
 func TestConnect_Denied(t *testing.T) {
-	allow := NewAllowlist([]string{"github.com:22"}) // not our echo server
-	proxyAddr := startConnect(t, allow)
+	p := testPolicy(modeStrict, "github.com:22") // not our echo server
+	proxyAddr := startConnect(t, p)
 
 	c, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
 	if err != nil {
@@ -101,8 +101,8 @@ func TestConnect_Denied(t *testing.T) {
 }
 
 func TestConnect_NonConnectMethod(t *testing.T) {
-	allow := NewAllowlist([]string{"example.com:443"})
-	proxyAddr := startConnect(t, allow)
+	p := testPolicy(modeStrict, "example.com:443")
+	proxyAddr := startConnect(t, p)
 	c, _ := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
@@ -123,7 +123,7 @@ func TestConnect_NonConnectMethod(t *testing.T) {
 // forwards the peeked bytes to an upstream it dials. We verify allow/deny here
 // and rely on the echo server for the byte path through CONNECT above.
 func TestTransparentHTTP_DeniedCloses(t *testing.T) {
-	allow := NewAllowlist([]string{"allowed.example.com"})
+	p := testPolicy(modeStrict, "allowed.example.com")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestTransparentHTTP_DeniedCloses(t *testing.T) {
 	t.Cleanup(func() { ln.Close() })
 	// Override the dial port to a closed/unused upstream isn't needed: denied
 	// hosts are dropped before any dial.
-	l := &transparentListener{port: 80, allow: allow, extract: extractHTTPHost}
+	l := &transparentListener{port: 80, policy: p, extract: extractHTTPHost}
 	go l.serve(ln)
 
 	c, _ := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
@@ -147,13 +147,13 @@ func TestTransparentHTTP_DeniedCloses(t *testing.T) {
 }
 
 func TestTransparentTLS_DeniedCloses(t *testing.T) {
-	allow := NewAllowlist([]string{"allowed.example.com"})
+	p := testPolicy(modeStrict, "allowed.example.com")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	l := &transparentListener{port: 443, allow: allow, extract: extractSNI}
+	l := &transparentListener{port: 443, policy: p, extract: extractSNI}
 	go l.serve(ln)
 
 	// A real TLS client sending SNI=evil.example.com; the dial will be refused.

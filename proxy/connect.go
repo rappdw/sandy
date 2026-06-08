@@ -16,10 +16,10 @@ import (
 // a manual escape hatch for any proxy-aware tool. Only the CONNECT method is
 // supported; anything else gets 405.
 type connectListener struct {
-	allow *Allowlist
+	policy *Policy
 }
 
-func newConnectListener(allow *Allowlist) *connectListener { return &connectListener{allow: allow} }
+func newConnectListener(p *Policy) *connectListener { return &connectListener{policy: p} }
 
 func (l *connectListener) addr() string { return ":3128" }
 
@@ -51,18 +51,13 @@ func (l *connectListener) handle(client net.Conn) {
 		client.Close()
 		return
 	}
-	if !l.allow.AllowedHostPort(host, port) {
+	up, deny := l.policy.Egress(host, port)
+	if deny != "" {
 		// CONNECT can return a real 403 (unlike the transparent path), so the
 		// agent can distinguish a policy block from a network failure. Also log
 		// it for the launcher's exit-time "to allow, add ..." aggregation.
-		logf("sandy-proxy: deny CONNECT %s:%d (not in allowlist)", host, port)
+		logf("sandy-proxy: deny CONNECT %s:%d (%s)", host, port, deny)
 		writeStatus(client, http.StatusForbidden)
-		client.Close()
-		return
-	}
-	up, err := dialUpstream(host, port)
-	if err != nil {
-		writeStatus(client, http.StatusBadGateway)
 		client.Close()
 		return
 	}

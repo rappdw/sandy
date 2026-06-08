@@ -30,8 +30,26 @@ chokepoint and enforces an allowlist.
 | 3128 | HTTP CONNECT. Used by the agent's ssh `ProxyCommand` so git-over-SSH works under `--internal`; also a manual escape hatch. Allowlist is host:port (authorizes odd ports like `:22`). |
 | (local-LLM port) | Optional fixed-port forward to `host.docker.internal:port` for `SANDY_LOCAL_LLM_HOST`. |
 
-The proxy never terminates TLS, logs payload, caches, or retries. It matches a
-hostname against the allowlist and splices bytes.
+## Modes
+
+The proxy runs in one of two policies (set by the launcher from
+`SANDY_EGRESS_PROXY`):
+
+- **permissive** (`SANDY_EGRESS_PROXY=1`) — block only private/LAN/link-local/
+  CGNAT/metadata destinations; allow all internet. DNS answers any well-formed
+  name with the proxy IP; the forward path resolves the real address and refuses
+  it only if it's private (resolving-then-checking also defeats DNS rebinding).
+  `allow` is a LAN-**exception** list (e.g. a local registry, or
+  `host.docker.internal:port` for a local LLM). Closes F2 (macOS host/LAN reach)
+  with ~zero tool friction. Does NOT stop exfil to an arbitrary internet host.
+- **strict** (`SANDY_EGRESS_PROXY=2`) — deny everything except `allow`-listed
+  hosts. Closes F2 AND exfil-to-internet, at the cost of failing closed on any
+  un-listed host. `allow` is the full allowlist.
+
+Mode defaults to strict if the config omits it (fail closed).
+
+The proxy never terminates TLS, logs payload, caches, or retries. It applies the
+mode policy to a hostname/destination and splices bytes.
 
 ## Config
 

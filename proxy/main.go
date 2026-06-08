@@ -23,13 +23,13 @@ func main() {
 		panicExit(err)
 	}
 
-	allow := NewAllowlist(cfg.Allow)
+	policy := newPolicy(cfg)
 
 	// DNS (UDP 53): the redirect + denial brain.
 	dnsSrv := &dns.Server{
 		Addr:    ":53",
 		Net:     "udp",
-		Handler: newDNSHandler(allow, cfg.ProxyIP),
+		Handler: newDNSHandler(policy),
 	}
 	go func() {
 		logf("sandy-proxy: DNS listening on :53")
@@ -39,18 +39,16 @@ func main() {
 	}()
 
 	// Transparent HTTPS (:443) and HTTP (:80).
-	startTCP(newTransparentTLS(allow).addr(), func(ln net.Listener) {
-		newTransparentTLS(allow).serve(ln)
-	})
-	startTCP(newTransparentHTTP(allow).addr(), func(ln net.Listener) {
-		newTransparentHTTP(allow).serve(ln)
-	})
+	tls := newTransparentTLS(policy)
+	startTCP(tls.addr(), tls.serve)
+	http := newTransparentHTTP(policy)
+	startTCP(http.addr(), http.serve)
 
 	// CONNECT (:3128) for git-over-SSH via ssh ProxyCommand.
-	cl := newConnectListener(allow)
+	cl := newConnectListener(policy)
 	startTCP(cl.addr(), cl.serve)
 
-	// Optional local-LLM forward.
+	// Optional local-LLM forward (mode-independent fixed forward).
 	fl, err := newForwardListener(cfg)
 	if err != nil {
 		logf("sandy-proxy: invalid local_llm config: %v", err)
@@ -58,7 +56,7 @@ func main() {
 		startTCP(fl.addr(), fl.serve)
 	}
 
-	logf("sandy-proxy: ready (proxy_ip=%s, %d allowlist entries)", cfg.ProxyIP, len(cfg.Allow))
+	logf("sandy-proxy: ready (mode=%s, proxy_ip=%s, %d allow entries)", cfg.Mode, cfg.ProxyIP, len(cfg.Allow))
 	select {} // block forever; listeners run in goroutines
 }
 
