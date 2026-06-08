@@ -1572,6 +1572,27 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
         chmod 644 /home/claude/.ssh/known_hosts 2>/dev/null || true
         chmod 644 /home/claude/.ssh/config 2>/dev/null || true
     fi
+
+    # Egress-proxy mode: the agent is on the --internal sidecar, so a direct
+    # TCP to github.com:22 is impossible — git-over-SSH must tunnel through the
+    # proxy's CONNECT listener (:3128). socat's PROXY address speaks HTTP
+    # CONNECT; ssh substitutes %h/%p with the real target. We prepend a Host *
+    # block so it applies to every ssh target (ssh uses the first ProxyCommand
+    # it obtains for a host). The proxy allowlist-checks github.com:22 (in the
+    # default set) before splicing.
+    if [ -n "${SANDY_PROXY_IP:-}" ]; then
+        mkdir -p /home/claude/.ssh
+        _sshcfg=/home/claude/.ssh/config
+        _sshtmp="$(mktemp)"
+        {
+            printf 'Host *\n    ProxyCommand socat - PROXY:%s:%%h:%%p,proxyport=3128\n\n' "$SANDY_PROXY_IP"
+            [ -f "$_sshcfg" ] && cat "$_sshcfg"
+        } > "$_sshtmp"
+        mv "$_sshtmp" "$_sshcfg"
+        chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
+        chmod 700 /home/claude/.ssh
+        chmod 644 "$_sshcfg"
+    fi
 fi
 
 # Fix ownership of persistent package mounts. Note: .gstack is intentionally
@@ -3585,25 +3606,30 @@ start_proxy_sidecar() {
         "$_SANDY_PROXY_MODE" "$PROXY_IP" "$allow_json" "$llm_field" \
         > "$PROXY_CONFIG_FILE"
 
+    # Assemble the proxy run as one array so an optional flag can be appended
+    # without an empty-array expansion (unsafe under `set -u` on bash 3.2/macOS).
+    local proxy_run=(
+        docker run -d
+        --name "$PROXY_CONTAINER"
+        --network "$SIDECAR_NETWORK"
+        --ip "$PROXY_IP"
+        --restart no
+        --read-only
+        --cap-drop ALL
+    )
     # On Linux the proxy must be told how to reach the host for the local-LLM
     # forward (Docker Desktop auto-provides host.docker.internal; the Linux
-    # daemon does not). Harmless when no LLM is configured.
-    local proxy_addhost=()
+    # daemon does not). Harmless/omitted when no LLM is configured.
     if [[ "$OS" == "Linux" ]] && [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
-        proxy_addhost=(--add-host "host.docker.internal:host-gateway")
+        proxy_run+=(--add-host "host.docker.internal:host-gateway")
     fi
+    proxy_run+=(
+        -v "$PROXY_CONFIG_FILE":/etc/sandy-proxy.json:ro
+        "$PROXY_IMAGE_NAME"
+    )
 
     info "Starting egress proxy sidecar ($PROXY_CONTAINER @ $PROXY_IP)..."
-    docker run -d \
-        --name "$PROXY_CONTAINER" \
-        --network "$SIDECAR_NETWORK" \
-        --ip "$PROXY_IP" \
-        --restart no \
-        --read-only \
-        --cap-drop ALL \
-        "${proxy_addhost[@]}" \
-        -v "$PROXY_CONFIG_FILE":/etc/sandy-proxy.json:ro \
-        "$PROXY_IMAGE_NAME" >/dev/null
+    "${proxy_run[@]}" >/dev/null
     # Give the proxy its internet leg.
     docker network connect "$EGRESS_NETWORK" "$PROXY_CONTAINER" >/dev/null
 
@@ -4441,7 +4467,8 @@ apply_network_isolation() {
         warn " sandy cannot block LAN access from the container on this OS."
         warn " The container can reach your host's localhost services,"
         warn " host.docker.internal, and any device on your physical LAN."
-        warn " Real fix (egress proxy sidecar) is scheduled for sandy 1.1."
+        warn " Fix: set SANDY_EGRESS_PROXY=1 (proxy sidecar, blocks LAN/host"
+        warn " but allows internet) or =2 (strict allowlist). Works on $OS."
         warn "═══════════════════════════════════════════════════════════════"
     fi
 }
@@ -4898,6 +4925,19 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
     # local-LLM forward, which the proxy answers as its own IP). This single
     # mechanism supersedes the per-OS magic-hostname juggling below.
     RUN_FLAGS+=(--dns "$PROXY_IP")
+    RUN_FLAGS+=(-e "SANDY_PROXY_IP=$PROXY_IP")
+    # SSH-agent forwarding under --internal: on Linux the agent socket is a
+    # direct bind mount (no network), so it keeps working. On macOS it relies on
+    # a TCP relay to host.docker.internal, which the --internal sidecar blocks —
+    # git-over-SSH still works (it tunnels through the proxy CONNECT via the
+    # ProxyCommand injected in the entrypoint), but agent-backed *signing* can't
+    # reach the host. Warn so the user isn't surprised by auth failures.
+    if [[ "${SANDY_SSH:-token}" == "agent" ]] && [[ "$OS" != "Linux" ]]; then
+        warn "SANDY_SSH=agent + egress proxy on $OS: the SSH-agent socket relay"
+        warn "  cannot cross the --internal sidecar. git-over-SSH still works via"
+        warn "  the proxy, but host-agent key signing is unavailable. Use"
+        warn "  SANDY_SSH=token (HTTPS) for a fully-supported path under the proxy."
+    fi
 # On non-Linux (macOS), nullify Docker Desktop "magic" hostnames that point
 # at the host gateway. Does not stop raw-IP access (that's Sprint 3), but
 # removes the easiest default-hostname path and anything calling by name.

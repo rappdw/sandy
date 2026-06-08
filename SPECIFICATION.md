@@ -636,9 +636,9 @@ The container's own subnet is allowed. Additional hosts/CIDRs can be allowed via
 
 ### macOS
 
-**Network isolation is NOT active on macOS in 1.0-rc1.** Docker Desktop's VM does *not* provide LAN isolation. Containers can reach `host.docker.internal` (→ host gateway), the host's `localhost` services, and any device on the user's physical LAN (`192.168.x.x`, home router, NAS, printers, internal dashboards). Linux iptables DROP rules do not apply and cannot be applied from macOS. (Stress test April 2026 opened a live TCP connection to host SSHD and read its banner — see `ISOLATION_STRESS.md` finding F2.)
+**Network isolation is NOT active on macOS when the egress proxy is off (`SANDY_EGRESS_PROXY=0`, the default).** Docker Desktop's VM does *not* provide LAN isolation. Containers can reach `host.docker.internal` (→ host gateway), the host's `localhost` services, and any device on the user's physical LAN (`192.168.x.x`, home router, NAS, printers, internal dashboards). Linux iptables DROP rules do not apply and cannot be applied from macOS. (Stress test April 2026 opened a live TCP connection to host SSHD and read its banner — see `ISOLATION_STRESS.md` finding F2.) **Setting `SANDY_EGRESS_PROXY=1` (or `=2`) applies real isolation on macOS** — see "Egress Proxy" below.
 
-**Launch warning**: On non-Linux hosts, `apply_network_isolation` prints a warning banner informing the user that network isolation is not active and that the container can reach the host's LAN.
+**Launch warning**: On non-Linux hosts with the proxy off, `apply_network_isolation` prints a warning banner informing the user that network isolation is not active and pointing at `SANDY_EGRESS_PROXY=1`. In proxy mode `apply_network_isolation` is not called (the `--internal` topology is the isolation), so no banner fires.
 
 **Defense-in-depth (`--add-host`)**: sandy appends the following flags to `RUN_FLAGS` on macOS to nullify Docker Desktop's magic hostnames:
 
@@ -650,7 +650,33 @@ The container's own subnet is allowed. Additional hosts/CIDRs can be allowed via
 
 When `SANDY_SSH=agent`, `host.docker.internal` is *not* nullified because sandy's own in-container SSH agent relay (`socat … TCP:host.docker.internal:$SSH_RELAY_PORT`) depends on that hostname reaching the host. In that mode, sandy emits an extra warn line noting the exception.
 
-This is defense-in-depth, not a fix — raw-IP access (`curl http://192.168.1.1`) is unaffected. The real fix is scheduled for sandy 1.1 as an egress proxy sidecar (HTTP CONNECT + SOCKS5 + DNS allowlist).
+This is defense-in-depth, not a fix — with the proxy off, raw-IP access (`curl http://192.168.1.1`) is unaffected. The fix is `SANDY_EGRESS_PROXY` (below), which applies uniform isolation on both platforms.
+
+### Egress Proxy (`SANDY_EGRESS_PROXY`, M2.7)
+
+A tri-state passive-tier key that routes the agent through a `sandy-proxy` sidecar on a Docker `--internal` network. Because it relies on `--internal` routing rather than iptables, it is the **only** network isolation that works on macOS, and behaves identically on both platforms.
+
+| Value | Mode (`mode` field in proxy config) | Egress policy |
+|---|---|---|
+| `0` (default) | — (proxy off) | Linux: legacy iptables. macOS: none. |
+| `1` | `permissive` | Block private/LAN/link-local/CGNAT/`169.254.169.254` metadata; allow all internet. Resolve-then-check also defeats DNS rebinding. |
+| `2` | `strict` | Deny all except the built-in default allowlist + `SANDY_ALLOW_HOSTS`; fail closed. |
+
+The launcher normalizes the value once into `_SANDY_PROXY_ON` (bool) and `_SANDY_PROXY_MODE` (`permissive`/`strict`).
+
+**Topology** (`ensure_proxy_networks` / `start_proxy_sidecar`):
+- Two per-session networks: `sandy_sidecar_$$` (`--internal`, agent + proxy) and `sandy_egress_$$` (normal bridge, proxy only). The agent's `NETWORK_NAME` is the sidecar.
+- The sidecar is created with an explicit `--subnet`/`--gateway` (first non-overlapping `/24` from `10.200.0.0/24`, `10.201.0.0/24`, `172.31.250.0/24`, `192.168.231.0/24`) so the proxy can be pinned to a fixed `--ip` (`<subnet>.2`). All candidates overlapping is a hard launch error.
+- The proxy runs `--read-only --cap-drop ALL`, with `/etc/sandy-proxy.json` bind-mounted read-only from `$SANDBOX_DIR/sandy-proxy.json`. After start, it is connected to the egress network. Sandy fails fast (dumping `docker logs`) if the container isn't `Running`.
+- Config JSON: `{"mode", "proxy_ip", "allow":[…], "local_llm"?}`. `allow` = built-in defaults + validated `SANDY_ALLOW_HOSTS` (+ `host.docker.internal` when a local LLM is set).
+- Agent `RUN_FLAGS`: `--network <sidecar>` + `--dns <proxy_ip>` + `-e SANDY_PROXY_IP=<ip>`. The per-OS magic-hostname `--add-host` block is bypassed in proxy mode (all resolution goes through the proxy DNS). `apply_network_isolation` (iptables) is skipped.
+- `cleanup()` removes the proxy container, then the egress network, then the sidecar.
+
+**Default allowlist**: `api.anthropic.com`/`*.anthropic.com`, `api.openai.com`/`*.openai.com`, `*.googleapis.com`/`accounts.google.com`/`oauth2.googleapis.com`, GitHub (`github.com`, `github.com:22`, `api.github.com`, `codeload.github.com`, `*.githubusercontent.com`, `ssh.github.com:22`), npm (`registry.npmjs.org`, `*.npmjs.org`), PyPI (`pypi.org`, `files.pythonhosted.org`), crates (`crates.io`, `static.crates.io`, `index.crates.io`), Go (`proxy.golang.org`, `sum.golang.org`, `*.golang.org`), Debian (`deb.debian.org`, `security.debian.org`).
+
+**ssh `ProxyCommand`**: in proxy mode the entrypoint prepends `Host *\n  ProxyCommand socat - PROXY:<proxy-ip>:%h:%p,proxyport=3128` to `~/.ssh/config`, tunneling git-over-SSH through the proxy CONNECT listener. On Linux the SSH-agent socket is a direct bind mount and signing works; on macOS the agent socket relay can't cross `--internal`, so signing is unavailable under the proxy (git-over-SSH still works) — sandy warns and recommends `SANDY_SSH=token`.
+
+**Local LLM**: `SANDY_LOCAL_LLM_HOST` is served by the proxy's forward listener (the `local_llm` config field), not an iptables hole. The proxy is given `--add-host host.docker.internal:host-gateway` on Linux.
 
 ---
 
@@ -1859,7 +1885,7 @@ Sandy runs on both Linux and macOS. The following sections document every point 
 
 **macOS `--add-host` condition:** `host.docker.internal` is only nullified when `SANDY_SSH != agent`. In agent mode, sandy's in-container SSH agent relay uses that hostname to reach the host-side socat relay (see §10); nullifying it would break SSH. An additional warn line is emitted in that case.
 
-**Real fix scheduled for sandy 1.1**: an egress proxy sidecar (HTTP CONNECT + SOCKS5 + DNS allowlist) that implements uniform outbound allowlisting on both platforms. See `ISOLATION_STRESS.md` finding F2 and the Sprint 3 section of the rc1 remediation plan.
+**Cross-platform fix — `SANDY_EGRESS_PROXY` (M2.7):** the egress proxy sidecar (transparent SNI/Host + CONNECT + DNS) implements uniform outbound isolation on both platforms via a Docker `--internal` network. `1`=permissive (block LAN/host, allow internet — intended 1.0 default-on), `2`=strict (allowlist only). When on, this table's "macOS: none" row no longer applies. See the "Egress Proxy" section above, `ISOLATION_STRESS.md` finding F2, and `proxy/` for the implementation.
 
 **Linux iptables flow**:
 1. Test `sudo iptables -L DOCKER-USER -n` — if fails, abort (or allow with override)

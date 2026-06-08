@@ -3697,15 +3697,91 @@ check "proxy Dockerfile: entrypoint is the proxy binary" \
     grep -qF 'ENTRYPOINT ["/usr/local/bin/sandy-proxy"]' "$_PX_DF"
 rm -rf "$_PX_TMP"
 
-# Build phase: gated on SANDY_EGRESS_PROXY, uses .build_hash_proxy, cleared by --rebuild.
-check "proxy build phase gated on SANDY_EGRESS_PROXY" \
-    grep -qF 'if [ "${SANDY_EGRESS_PROXY:-0}" = "1" ]; then' "$_PX_SCRIPT"
+# Build phase: gated on the normalized proxy predicate, uses .build_hash_proxy,
+# cleared by --rebuild.
+check "proxy build phase gated on _SANDY_PROXY_ON" \
+    grep -qF 'if [ "$_SANDY_PROXY_ON" = true ]; then' "$_PX_SCRIPT"
 check "proxy build uses .build_hash_proxy" \
     grep -qF '.build_hash_proxy' "$_PX_SCRIPT"
 check "--rebuild clears .build_hash_proxy" \
     bash -c 'grep -E "rm -f .*\.base_build_hash" "$1" | grep -q "\.build_hash_proxy"' -- "$_PX_SCRIPT"
 check "proxy image named sandy-proxy" \
     grep -qF 'PROXY_IMAGE_NAME="sandy-proxy"' "$_PX_SCRIPT"
+
+# ------------------------------------------------------------
+# 50. Egress proxy launcher wiring (M2.7 tri-state) — static checks.
+# Docker + the macOS topology are out of scope for the pure-script suite; the
+# end-to-end behavior is in the manual checklist. Here we lock the tri-state
+# config surface, the default allowlist, the config-JSON shape, and the network
+# topology / ssh ProxyCommand seams so a refactor can't silently drop them.
+# ------------------------------------------------------------
+info "50. Egress proxy launcher wiring (M2.7 tri-state)"
+
+# Config tiers: SANDY_EGRESS_PROXY is passive (per-project opt-in); the
+# allowlist expander SANDY_ALLOW_HOSTS is privileged (it widens reach).
+check "SANDY_EGRESS_PROXY is passive-tier" \
+    bash -c 'bash "$1" --print-schema | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+names=[k[\"name\"] for k in d[\"config\"][\"passive_keys\"]]
+assert \"SANDY_EGRESS_PROXY\" in names, names
+"' -- "$_PX_SCRIPT"
+check "SANDY_ALLOW_HOSTS is privileged-tier" \
+    bash -c 'bash "$1" --print-schema | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+names=[k[\"name\"] for k in d[\"config\"][\"privileged_keys\"]]
+assert \"SANDY_ALLOW_HOSTS\" in names, names
+"' -- "$_PX_SCRIPT"
+check "SANDY_EGRESS_PROXY schema is enum with choices 0/1/2" \
+    bash -c 'bash "$1" --print-schema | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+k=[x for x in d[\"config\"][\"passive_keys\"] if x[\"name\"]==\"SANDY_EGRESS_PROXY\"][0]
+assert k[\"type\"]==\"enum\", k[\"type\"]
+assert k[\"choices\"]==[\"0\",\"1\",\"2\"], k[\"choices\"]
+"' -- "$_PX_SCRIPT"
+
+# Tri-state normalization: 1->permissive, 2->strict, garbage->hard error.
+_PX_NORM="$(sed -n '/^_SANDY_PROXY_ON=false/,/^esac/p' "$_PX_SCRIPT")"
+check "tri-state: 1 maps to permissive" \
+    bash -c 'out="$(SANDY_EGRESS_PROXY=1 bash -c "$1; echo \$_SANDY_PROXY_ON \$_SANDY_PROXY_MODE")"; [ "$out" = "true permissive" ]' -- "$_PX_NORM"
+check "tri-state: 2 maps to strict" \
+    bash -c 'out="$(SANDY_EGRESS_PROXY=2 bash -c "$1; echo \$_SANDY_PROXY_ON \$_SANDY_PROXY_MODE")"; [ "$out" = "true strict" ]' -- "$_PX_NORM"
+check "tri-state: 0 maps to off" \
+    bash -c 'out="$(SANDY_EGRESS_PROXY=0 bash -c "$1; echo \$_SANDY_PROXY_ON")"; [ "$out" = "false" ]' -- "$_PX_NORM"
+check "tri-state: invalid value is a hard error" \
+    bash -c '! SANDY_EGRESS_PROXY=3 bash -c "$1" 2>/dev/null' -- "$_PX_NORM"
+
+# Default allowlist: the providers + git + registries an agent needs.
+check "default allowlist includes Anthropic + GitHub SSH + PyPI" \
+    bash -c 'grep -q "\"api.anthropic.com\"" "$1" && grep -q "\"github.com:22\"" "$1" && grep -q "\"files.pythonhosted.org\"" "$1"' -- "$_PX_SCRIPT"
+
+# Config-JSON assembly: mode + proxy_ip + allow[] (+ optional local_llm).
+check "proxy config JSON carries mode, proxy_ip, allow" \
+    bash -c 'grep -q "{\"mode\":\"%s\",\"proxy_ip\":\"%s\",\"allow\":\[%s\]" "$1"' -- "$_PX_SCRIPT"
+check "proxy config local_llm field is conditional" \
+    grep -qF 'llm_field=",\"local_llm\":\"$SANDY_LOCAL_LLM_HOST\""' "$_PX_SCRIPT"
+
+# Two-network topology + lifecycle seams.
+check "sidecar network is --internal" \
+    bash -c 'grep -q -- "--internal --driver bridge" "$1"' -- "$_PX_SCRIPT"
+check "proxy gets a fixed --ip on the sidecar" \
+    bash -c 'grep -q -- "--ip \"\$PROXY_IP\"" "$1"' -- "$_PX_SCRIPT"
+check "proxy joins the egress network for internet" \
+    bash -c 'grep -q "docker network connect \"\$EGRESS_NETWORK\" \"\$PROXY_CONTAINER\"" "$1"' -- "$_PX_SCRIPT"
+check "proxy runs hardened (--read-only --cap-drop ALL)" \
+    bash -c 'grep -q -- "--cap-drop ALL" "$1"' -- "$_PX_SCRIPT"
+check "cleanup removes proxy container before networks" \
+    bash -c 'grep -q "docker rm -f \"\$PROXY_CONTAINER\"" "$1" && grep -q "docker network rm \"\$EGRESS_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
+
+# Agent routing: --dns at the proxy, iptables skipped, ProxyCommand for SSH.
+check "agent resolver points at the proxy (--dns)" \
+    bash -c 'grep -q -- "RUN_FLAGS+=(--dns \"\$PROXY_IP\")" "$1"' -- "$_PX_SCRIPT"
+check "iptables isolation skipped when proxy on" \
+    bash -c 'grep -q "if \[ \"\$_SANDY_PROXY_ON\" != true \]; then" "$1" && grep -q "    apply_network_isolation" "$1"' -- "$_PX_SCRIPT"
+check "entrypoint injects ssh ProxyCommand via CONNECT :3128" \
+    bash -c 'grep -q "ProxyCommand socat - PROXY:%s:%%h:%%p,proxyport=3128" "$1"' -- "$_PX_SCRIPT"
 
 # ============================================================
 # Summary

@@ -351,15 +351,17 @@ Static binary; at most one dependency (`miekg/dns`), though stdlib likely suffic
 
 **Scope**: new generated `Dockerfile.proxy` in `$SANDY_HOME/`, phased between `sandy-base` and the agent images, hash-rebuild via `.proxy_build_hash`. Build once, cache aggressively.
 
-### PR 2.7.3 — Launcher wiring
+### PR 2.7.3 — Launcher wiring — ✓ DONE 2026-06-08
 
-**Scope**: sandy creates the two networks per-launch (sidecar `--internal`, egress normal), starts the dual-homed proxy container, attaches the agent container with `--network sidecar` + `--dns proxy-ip`, gates on `SANDY_EGRESS_PROXY`, and tears everything down in the cleanup trap (the trap already handles per-instance networks; extend it for the second network + proxy container).
+> **Tri-state pivot (2026-06-08).** `SANDY_EGRESS_PROXY` shipped as a **tri-state**, not a binary: `0`=off, `1`=permissive (block private/LAN/host/metadata, allow all internet), `2`=strict (default allowlist + `SANDY_ALLOW_HOSTS` only). Permissive (1) closes F2 — the whole point of M2.7 — with ~zero friction (no allowlist to maintain, any public host just works) and is the **intended default-on posture for 1.0**. Strict (2) additionally blocks exfil-to-arbitrary-internet but fails closed. The proxy config consumes a `"mode"` field ("permissive"/"strict"); the proxy code (PR 2.7.1) was extended with a mode-aware `Policy` (commit on `m2.7-proxy`). This supersedes the original "default 0, flip to 1" plan — the flip target is now mode 1 specifically, and mode 2 is the opt-in hardened tier.
 
-**ssh `ProxyCommand` injection** — when the proxy is on, `user-setup.sh` writes an ssh config entry routing git-host SSH through the proxy's CONNECT endpoint (`ProxyCommand` using `nc`/openssh's `-o ProxyUseFdpass` or a small connect helper baked into the image). This is what makes `SANDY_SSH=agent` work under `--internal`. The allowlist must include the git host on `:22` (github.com:22 etc. in the default set).
+**Scope** (done): sandy creates the two networks per-launch (sidecar `--internal`, egress normal), starts the dual-homed `--read-only --cap-drop ALL` proxy container at a fixed sidecar IP (first non-overlapping `/24` from a candidate list, so `--ip` works), attaches the agent with `--network sidecar` + `--dns proxy-ip`, gates on the normalized `_SANDY_PROXY_ON` predicate, skips iptables in proxy mode, and tears down both networks + the proxy container in `cleanup()`.
 
-**`SANDY_EGRESS_PROXY` passive-safe key** — passive allowlist in `_load_sandy_config()`. Default `0` for the first soak week, then flip to `1`.
+**ssh `ProxyCommand` injection** (done) — when the proxy is on, the entrypoint prepends `Host * ProxyCommand socat - PROXY:<proxy-ip>:%h:%p,proxyport=3128` to `~/.ssh/config`, routing git-over-SSH through the proxy's CONNECT listener (`:3128`). `github.com:22` is in the default allowlist. macOS caveat: the SSH-*agent* socket relay can't cross `--internal`, so host-agent key signing is unavailable under the proxy on macOS (git-over-SSH still works); sandy warns and recommends `SANDY_SSH=token`.
 
-**`SANDY_ALLOW_HOSTS` privileged-tier key** — comma-separated additions to the allowlist. Privileged: user-added hosts expand the attack surface and must not be workspace-settable without the approval prompt.
+**`SANDY_EGRESS_PROXY` passive-safe key** (done) — passive tier (per-project opt-in). Normalized once into `_SANDY_PROXY_ON` + `_SANDY_PROXY_MODE`.
+
+**`SANDY_ALLOW_HOSTS` privileged-tier key** (done) — comma-separated additions to the allowlist. Privileged: user-added hosts expand the attack surface and must not be workspace-settable without the approval prompt.
 
 **Allowlist assembly** — sandy composes `/etc/sandy-proxy.json` from the built-in default set + `SANDY_ALLOW_HOSTS` + (when set) the `SANDY_LOCAL_LLM_HOST` `host:port` literal, and mounts it into the proxy container.
 
@@ -634,12 +636,12 @@ PR 3.3 (version bump) ✓          ──▶ tag 0.13.0 ✓ (2026-05-30)
 M2.7 PR 2.7.0 (macOS --internal spike) ✓ PASSED 14/14 (2026-06-04)
     │  greenlit → architecture sound; transport = hybrid; local-LLM in-scope
     ▼
-M2.7 PR 2.7.1 (proxy Go binary: transparent HTTPS + CONNECT-for-SSH  ← NEXT
-              + DNS allowlist + local-LLM forward; ≤700 LOC)
-M2.7 PR 2.7.2 (sandy-proxy Dockerfile + phased build)
-M2.7 PR 2.7.3 (launcher wiring: sidecar --internal + egress net + proxy
-              + ssh ProxyCommand injection + allowlist assembly)
-M2.7 PR 2.7.4 (remove macOS warning — only when proxy is on)
+M2.7 PR 2.7.1 (proxy Go binary: transparent HTTPS + CONNECT-for-SSH  ✓ done
+              + DNS allowlist + local-LLM forward; + mode-aware Policy)
+M2.7 PR 2.7.2 (sandy-proxy Dockerfile + phased build)               ✓ done
+M2.7 PR 2.7.3 (launcher wiring: sidecar --internal + egress net +   ✓ done
+              proxy + ssh ProxyCommand + tri-state 0/1/2 + tests)
+M2.7 PR 2.7.4 (remove macOS warning — only when proxy is on)        ← NEXT
 M2.7 PR 2.7.5 (integration tests + manual macOS checklist)
                                  ──▶ tag 0.13.1 or 0.14.0-pre
     │
