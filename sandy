@@ -3611,11 +3611,17 @@ start_proxy_sidecar() {
 
     # Assemble the proxy run as one array so an optional flag can be appended
     # without an empty-array expansion (unsafe under `set -u` on bash 3.2/macOS).
+    #
+    # The proxy boots on the EGRESS network (not the sidecar). A container's
+    # default route comes from its *primary* network; the sidecar is `--internal`
+    # and has no gateway, so booting on it would leave the proxy with no route to
+    # the internet (upstream dials fail → the agent sees ECONNRESET). Booting on
+    # egress gives a real default route + NAT; the sidecar is attached second
+    # with the fixed IP the DNS responder hands out.
     local proxy_run=(
         docker run -d
         --name "$PROXY_CONTAINER"
-        --network "$SIDECAR_NETWORK"
-        --ip "$PROXY_IP"
+        --network "$EGRESS_NETWORK"
         --restart no
         --read-only
         --cap-drop ALL
@@ -3633,8 +3639,9 @@ start_proxy_sidecar() {
 
     info "Starting egress proxy sidecar ($PROXY_CONTAINER @ $PROXY_IP)..."
     "${proxy_run[@]}" >/dev/null
-    # Give the proxy its internet leg.
-    docker network connect "$EGRESS_NETWORK" "$PROXY_CONTAINER" >/dev/null
+    # Attach the internal sidecar leg with the fixed IP the agent's DNS resolves
+    # to. (`--ip` works because the sidecar was created with an explicit subnet.)
+    docker network connect --ip "$PROXY_IP" "$SIDECAR_NETWORK" "$PROXY_CONTAINER" >/dev/null
 
     # Fail fast if the proxy died on a bad config (e.g. it exits non-zero).
     if [ "$(docker inspect -f '{{.State.Running}}' "$PROXY_CONTAINER" 2>/dev/null)" != "true" ]; then
@@ -4589,6 +4596,13 @@ cleanup() {
     # sidecar and egress networks (a network can't be removed while a container
     # is attached, so the proxy must go first).
     if [ -n "${PROXY_CONTAINER:-}" ]; then
+        # The proxy is a scratch image (no shell → no `docker exec` to poke it),
+        # and we're about to destroy it, so `docker logs` is the only diagnostic
+        # window. Dump it on demand before teardown.
+        if [ "${SANDY_DEBUG_PROXY:-0}" = "1" ]; then
+            echo "sandy: [debug] egress proxy logs ($PROXY_CONTAINER):" >&2
+            docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+        fi
         docker rm -f "$PROXY_CONTAINER" >/dev/null 2>&1 || true
     fi
     if [ -n "${EGRESS_NETWORK:-}" ]; then
