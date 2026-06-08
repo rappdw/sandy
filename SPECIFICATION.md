@@ -132,12 +132,12 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Privileged-only keys** (allowed only from `$SANDY_HOME/config` and `$SANDY_HOME/.secrets`):
 <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_EXTRA_ENV`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
+`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
 <!-- END AUTOGEN:privileged-key-list -->
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `SANDY_SCREENSHOT_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `SANDY_SCREENSHOT_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -156,6 +156,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_ALLOW_NO_ISOLATION` | privileged | `0` | Allow launch when iptables rules cannot be applied (Linux only). |
 | `SANDY_ALLOW_LAN_HOSTS` | privileged | unset | Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected. |
 | `SANDY_LOCAL_LLM_HOST` | privileged | unset | Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal. |
+| `SANDY_ALLOW_HOSTS` | privileged | unset | Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval. |
 | `SANDY_EXTRA_ENV` | privileged | unset | Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values come from the host env, ~/.sandy/.secrets, or ~/.sandy/config — workspace sources never supply values. Privileged tier so workspace config requires approval. |
 | `ANTHROPIC_API_KEY` | privileged | unset | Anthropic API key for Claude Code. Not required when using Claude Max OAuth. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | privileged | unset | Claude Code OAuth token (alternative to ANTHROPIC_API_KEY). |
@@ -173,6 +174,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_CHANNEL_TARGET_PANE` | passive | `0` | Which tmux pane in multi-agent mode receives channel messages. |
 | `SANDY_VERBOSE` | passive | `0` | Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace). |
 | `SANDY_VENV_OVERLAY` | passive | `1` | Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container. |
+| `SANDY_EGRESS_PROXY` | passive | `0` | Egress-proxy network isolation (closes macOS F2). 0=off (legacy iptables-only on Linux, no isolation on macOS). 1=permissive (proxy sidecar blocks private/LAN/metadata but allows all internet). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 1 and 2 work identically on macOS and Linux. |
 | `SANDY_ALLOW_WORKFLOW_EDIT` | passive | `0` | Remove .github/workflows from the read-only protection list. |
 | `SANDY_SCREENSHOT_DIR` | passive | unset | Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents. |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | passive | `128000` | Max output tokens per Claude response. |
