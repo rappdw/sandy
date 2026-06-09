@@ -1,3 +1,33 @@
+## sandy v0.14.0
+
+**Cross-platform network isolation — the egress proxy (M2.7).** sandy now routes the agent through an `--internal` proxy sidecar, giving real network isolation on **both macOS and Linux** for the first time. Previously, macOS Docker Desktop provided no LAN isolation at all — an agent could reach your router, NAS, localhost services, and cloud-metadata endpoints. This release closes that gap (finding F2 from the isolation stress test).
+
+### `SANDY_EGRESS_PROXY` — tri-state, default-on
+
+| Value | Mode | Behavior |
+|---|---|---|
+| `1` (new default) | permissive | Blocks private/LAN/host/cloud-metadata destinations; allows all public internet. |
+| `2` | strict | Allows only a built-in default allowlist (model providers, GitHub incl. SSH, npm/PyPI/crates/Go/Debian) + `SANDY_ALLOW_HOSTS`. |
+| `0` | off | Legacy behavior: Linux iptables only; macOS has no isolation (warns at launch). |
+
+The agent runs on a Docker `--internal` network with no route off it except through a dual-homed `sandy-proxy` sidecar — a tiny Go binary (`golang`→`scratch`, `--read-only --cap-drop ALL`). The proxy does DNS-redirect + transparent SNI/Host demux (TLS is **never** terminated — no MITM, no cert surgery) + CONNECT for git-over-SSH. Because it relies on `--internal` routing rather than iptables, it behaves identically on macOS and Linux.
+
+- **macOS:** real network isolation by default, where there was none before.
+- **Linux:** a security upgrade over the iptables path — closes DNS exfil and host-gateway reach, a single auditable chokepoint, no `sudo` required. The iptables path remains available as `SANDY_EGRESS_PROXY=0`.
+
+**Extending reach:** `SANDY_ALLOW_HOSTS` (comma-separated `host`, `*.suffix`, or `host:port`) adds hosts to the allowlist beyond the defaults.
+
+**Caveat worth knowing:** the permissive proxy carries HTTP/HTTPS, git-over-SSH, DNS, and the local-LLM forward — not arbitrary ports. A public host on a non-standard port (e.g. `:5432`, `:8443`) that worked under the old iptables path now needs `SANDY_ALLOW_HOSTS` (or `SANDY_EGRESS_PROXY=0`). On macOS, host-agent SSH key *signing* is unavailable under the proxy (git-over-SSH still works) — use `SANDY_SSH=token` for a fully-supported path.
+
+### Also in this release
+
+- **Headless agents no longer allocate a pseudo-TTY**, and stdin is attached only when actually piped. This fixes a Gemini busy-loop and a `codex exec` stdin block in `-p` mode — the long-standing cause of headless/CI hangs across agents.
+- **Local-LLM passthrough** (`SANDY_LOCAL_LLM_HOST`) is forwarded through the proxy, no iptables hole needed.
+
+See `CLAUDE.md` → "Egress Proxy", `SPECIFICATION.md` → "Egress Proxy (M2.7)" for the full design, and `TESTING_PLAN.md` §6 for the manual macOS validation checklist.
+
+---
+
 ## sandy v0.13.0
 
 M3 milestone — architectural cleanup. Two refactors that pay down structural debt the 1.0 code review surfaced, plus a default-model bump. No new features, no new config keys; the only user-visible change is the default Claude model.

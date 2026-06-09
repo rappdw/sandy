@@ -562,9 +562,9 @@ Each test should assert both the exit code and a specific substring of the error
 
 **Exit criteria**: all six tests land and pass.
 
-### PR 4.5 — Version bump to `0.14.0`
+### PR 4.5 — Version bump to `0.15.0`
 
-Standalone version bump + CHANGELOG. (Re-baselined: was `0.13.0` in the original plan.)
+Standalone version bump + CHANGELOG. (Re-sequenced 2026-06-09: M2.7 shipped early as `0.14.0`, so the 4.x hardening cluster now lands in `0.15.0`. Was `0.13.0` in the original plan, `0.14.0` after the 2026-05-16 re-baseline.)
 
 ---
 
@@ -667,17 +667,19 @@ M2.7 PR 2.7.5 (integration tests + manual macOS checklist)          ◑ written,
                                  ──▶ tag 0.13.1 or 0.14.0-pre
     │
     ▼
-M2.7 PR 2.7.6 (7-day soak: 3-4d opt-in, 3-4d default-on)
-    │
+M2.7 (egress proxy)  ✓ MERGED + cut as tag 0.14.0 (2026-06-09)
+    │   Shipped ahead of the planned post-soak tag — the release IS the
+    │   broad-soak vehicle. PR 2.7.6's 7-day soak now runs against 0.14.0
+    │   in the wild (watch item: non-web-port gap → SANDY_ALLOW_HOSTS).
     ▼
-PR 4.1 (allowlist audit + sandbox-marker validator)  ← parallel
+PR 4.1 (allowlist audit + sandbox-marker validator)  ← parallel  ← NEXT
 PR 4.2 (compat story)                                ← parallel
 PR 4.3 (multi-agent matrix)                          ← parallel
 PR 4.4 (failure-mode tests)                          ← parallel
-PR 4.5 (version bump)            ← blocks on 4.1-4.4 ──▶ tag 0.14.0
+PR 4.5 (version bump)            ← blocks on 4.1-4.4 ──▶ tag 0.15.0
     │
     ▼
-PR 5.1 (14-day soak gate on 0.14.0)
+PR 5.1 (14-day soak gate on 0.15.0)
     │
     ▼
 PR 5.2 (1.0.0-rc1 tag)
