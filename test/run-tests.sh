@@ -3787,6 +3787,15 @@ check "iptables isolation skipped when proxy on" \
 check "entrypoint injects ssh ProxyCommand via CONNECT :3128" \
     bash -c 'grep -q "ProxyCommand socat - PROXY:%s:%%h:%%p,proxyport=3128" "$1"' -- "$_PX_SCRIPT"
 
+# 2.7.4: the launch-summary network line is derived from the real mode/platform,
+# not the old hardcoded "LAN blocked" string (which lied on macOS proxy-off).
+check "launch summary network line is mode-aware" \
+    bash -c 'grep -q "Egress proxy (strict)" "$1" && grep -q "Egress proxy (permissive)" "$1" && grep -q "NO isolation on \$OS" "$1"' -- "$_PX_SCRIPT"
+# The macOS no-isolation warning banner only fires when the proxy is off (in
+# proxy mode apply_network_isolation, which holds the banner, isn't called).
+check "macOS no-isolation banner gated behind proxy-off" \
+    bash -c 'grep -q "Network isolation is NOT active on \$OS" "$1"' -- "$_PX_SCRIPT"
+
 # ============================================================
 # Summary
 # ============================================================

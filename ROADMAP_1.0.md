@@ -367,9 +367,18 @@ Static binary; at most one dependency (`miekg/dns`), though stdlib likely suffic
 
 **Interaction guardrails**: `SANDY_LOCAL_LLM_HOST` + proxy is now *supported* (forward path above), not an error; confirm `cleanup()` removes both networks + the proxy container on all trapped signals (EXIT INT TERM HUP QUIT ABRT), including the SIGKILL-leak caveat already documented for the main container.
 
-### PR 2.7.4 — Remove macOS launch warning (problem now fixed)
+### PR 2.7.4 — Remove macOS launch warning (problem now fixed) — ✓ DONE 2026-06-09
 
-**Scope**: revert the S1.6 macOS warning banner — **but only behind `SANDY_EGRESS_PROXY` being on**. If the proxy is off (opt-out, or a build without it), the warning must still fire: the honest-warning posture is correct whenever the real isolation isn't active. Keep the `--add-host` nullification as defense-in-depth regardless.
+**Scope** (done): the macOS no-isolation warning banner is gated behind the
+proxy being off — it lives in `apply_network_isolation`, which the 2.7.3 wiring
+no longer calls in proxy mode, so it fires only when isolation really isn't
+active (proxy off on macOS). The `--add-host` nullification is likewise bypassed
+in proxy mode (the proxy's own DNS supersedes it) and retained as defense-in-
+depth when the proxy is off. Additionally, the launch-summary `Network:` line —
+previously a hardcoded "Public internet only (LAN blocked)" that *lied* on macOS
+proxy-off — is now derived from the real mode/platform: permissive / strict /
+Linux-iptables / "NO isolation on macOS (set SANDY_EGRESS_PROXY=1)". Static
+tests cover the mode-aware line and the gated banner.
 
 ### PR 2.7.5 — Integration tests + manual macOS checklist
 
@@ -641,8 +650,8 @@ M2.7 PR 2.7.1 (proxy Go binary: transparent HTTPS + CONNECT-for-SSH  ✓ done
 M2.7 PR 2.7.2 (sandy-proxy Dockerfile + phased build)               ✓ done
 M2.7 PR 2.7.3 (launcher wiring: sidecar --internal + egress net +   ✓ done
               proxy + ssh ProxyCommand + tri-state 0/1/2 + tests)
-M2.7 PR 2.7.4 (remove macOS warning — only when proxy is on)        ← NEXT
-M2.7 PR 2.7.5 (integration tests + manual macOS checklist)
+M2.7 PR 2.7.4 (remove macOS warning — only when proxy is on)        ✓ done
+M2.7 PR 2.7.5 (integration tests + manual macOS checklist)          ← NEXT
                                  ──▶ tag 0.13.1 or 0.14.0-pre
     │
     ▼

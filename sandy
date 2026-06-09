@@ -5708,7 +5708,20 @@ fi
 info "  Working directory: $WORK_DIR"
 info "  Sandbox:           $SANDBOX_DIR"
 info "  Resources:         ${SANDY_CPUS} CPUs, ${SANDY_MEM} memory"
-info "  Network:           Public internet only (LAN blocked)"
+# Network posture line — honest about what isolation is actually active. The
+# old hardcoded "LAN blocked" lied on macOS with the proxy off (the F2 gap), so
+# it's now derived from the real mode + platform.
+if [ "$_SANDY_PROXY_ON" = true ]; then
+    if [ "$_SANDY_PROXY_MODE" = strict ]; then
+        info "  Network:           Egress proxy (strict): allowlist + SANDY_ALLOW_HOSTS only; LAN/host blocked"
+    else
+        info "  Network:           Egress proxy (permissive): public internet allowed; LAN/host/metadata blocked"
+    fi
+elif [[ "$OS" == "Linux" ]]; then
+    info "  Network:           Public internet only (LAN blocked via iptables)"
+else
+    info "  Network:           Internet + LAN reachable — NO isolation on $OS (set SANDY_EGRESS_PROXY=1)"
+fi
 echo ""
 
 if [ "$SANDY_VERBOSE" -ge 3 ]; then
