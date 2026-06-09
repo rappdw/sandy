@@ -76,6 +76,16 @@ set -euo pipefail
 # passive config allowlist — a committed .sandy/config cannot set it.
 export SANDY_AUTO_APPROVE_PRIVILEGED=1
 
+# As of 1.0 the egress proxy is the default (SANDY_EGRESS_PROXY=1). The
+# agent-functionality sections (§1-12) test builds / headless / credentials and
+# must NOT be coupled to proxy correctness (a proxy bug would otherwise hang or
+# fail every section, masking what they actually verify) — and they'd pay a
+# proxy build + sidecar startup per launch. Pin them to legacy/no-proxy here;
+# §13 sets SANDY_EGRESS_PROXY=1 explicitly to exercise the proxy end-to-end.
+# Respect an explicit override so a maintainer can force the whole suite onto
+# the proxy if they want.
+export SANDY_EGRESS_PROXY="${SANDY_EGRESS_PROXY:-0}"
+
 SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 PASS=0
@@ -259,19 +269,38 @@ run_sandy_headless() {
     local timeout_sec="${SANDY_INTEG_TIMEOUT:-300}"
     # When verbose, tee output to stderr so it's visible even when the caller
     # captures stdout into a variable (e.g. _out="$(run_sandy_headless ...)").
+    # Feed sandy /dev/null on stdin: these are headless prompt-as-arg runs, and
+    # an agent that reads stdin (codex exec) must see EOF, not block on an
+    # inherited terminal. Makes the run identical from a terminal or in CI.
     if [ "$VERBOSE" -gt 0 ]; then
         if [ "${#env_args[@]}" -gt 0 ]; then
-            timeout "$timeout_sec" env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 | tee /dev/stderr || true
+            timeout "$timeout_sec" env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" </dev/null 2>&1 | tee /dev/stderr || true
         else
-            timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 | tee /dev/stderr || true
+            timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" </dev/null 2>&1 | tee /dev/stderr || true
         fi
     else
         if [ "${#env_args[@]}" -gt 0 ]; then
-            timeout "$timeout_sec" env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 || true
+            timeout "$timeout_sec" env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" </dev/null 2>&1 || true
         else
-            timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 || true
+            timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" </dev/null 2>&1 || true
         fi
     fi
+    # When `timeout` fires it SIGTERMs sandy, but sandy is blocked in its
+    # foreground `docker run`, which doesn't receive the signal — so sandy's
+    # cleanup trap can't run and the agent container is orphaned (a wedged
+    # headless agent keeps running and pegs a CPU). Reap our test containers
+    # (all named sandy-tmp.* — setup_project uses mktemp dirs). Force-removing
+    # the container also makes the orphaned `docker run` exit, which unblocks
+    # sandy so its own trap finally runs and tears down networks/sandboxes.
+    reap_test_containers
+}
+
+# Force-remove any leftover sandy test containers (named sandy-tmp.*). Safe:
+# the harness runs sections sequentially and owns every sandy-tmp.* container.
+reap_test_containers() {
+    local ids
+    ids="$(docker ps -aq --filter 'name=sandy-tmp' 2>/dev/null)"
+    [ -n "$ids" ] && docker rm -f $ids >/dev/null 2>&1 || true
 }
 
 # --- Preflight ---
@@ -1036,6 +1065,56 @@ if ensure_image_built opencode sandy-opencode; then
     fi
 else
     fail "opencode in-container checks (failed to build sandy-opencode image)"
+fi
+
+# ============================================================
+info "13. Egress proxy (M2.7) — end-to-end through the sidecar"
+# ============================================================
+# Proves the agent reaches the model API THROUGH the proxy on the --internal
+# two-network topology (the macOS F2 fix; identical on Linux). Requires Claude
+# credentials. Until M2.7 merges to main, the proxy image builds from the
+# current branch, so pin SANDY_PROXY_REF to it (a release pins its version tag).
+# NOTE: the macOS-specific LAN-block behavior is covered by the manual checklist
+# in TESTING_PLAN.md §6 (CI can't reach Docker Desktop's VM networking).
+if [ "$HAS_CLAUDE" = true ]; then
+    _PX_REF="$(git -C "$(dirname "$SANDY_SCRIPT")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+    setup_project claude "integ-proxy"
+
+    # Permissive (=1): the agent must reach api.anthropic.com via the proxy.
+    _out="$(run_sandy_headless "SANDY_EGRESS_PROXY=1" "SANDY_PROXY_REF=$_PX_REF" -- -p "reply with exactly one word: proxied")"
+
+    if echo "$_out" | grep -q "Creating egress-proxy networks (mode=permissive)"; then
+        pass "proxy mode 1 stands up the egress-proxy networks + sidecar"
+    else
+        fail "proxy mode 1 stands up the egress-proxy networks + sidecar"
+        echo "    (output: $(echo "$_out" | head -6 | tr '\n' ' '))" >&2
+    fi
+
+    if echo "$_out" | grep -qi "proxied" && ! echo "$_out" | grep -qi "ECONNRESET\|Unable to connect to API"; then
+        pass "agent reaches the model API through the proxy (no ECONNRESET)"
+    else
+        fail "agent reaches the model API through the proxy"
+        echo "    (output: $(echo "$_out" | tail -6 | tr '\n' ' '))" >&2
+    fi
+
+    # Networks must be torn down on exit — a leak exhausts Docker's address pool.
+    if [ -z "$(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' || true)" ]; then
+        pass "proxy networks cleaned up after exit (no address-pool leak)"
+    else
+        fail "proxy networks cleaned up after exit (no address-pool leak)"
+        echo "    (leaked: $(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' | tr '\n' ' '))" >&2
+    fi
+
+    # Opt-out (=0): no proxy path; the agent still works (legacy isolation).
+    _out0="$(run_sandy_headless "SANDY_EGRESS_PROXY=0" -- -p "reply with exactly one word: direct")"
+    if echo "$_out0" | grep -qi "direct" && ! echo "$_out0" | grep -q "egress-proxy networks"; then
+        pass "SANDY_EGRESS_PROXY=0 opts out of the proxy path"
+    else
+        fail "SANDY_EGRESS_PROXY=0 opts out of the proxy path"
+        echo "    (output: $(echo "$_out0" | tail -4 | tr '\n' ' '))" >&2
+    fi
+else
+    skip "egress proxy end-to-end (no Claude credentials)"
 fi
 
 # ============================================================

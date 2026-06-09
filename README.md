@@ -138,6 +138,8 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_CPUS` | auto-detected | CPU limit for the container |
 | `SANDY_MEM` | auto-detected | Memory limit for the container |
 | `SANDY_ALLOW_LAN_HOSTS` | (unset) | Comma-separated IPs/CIDRs to allow through LAN isolation (e.g. `192.168.1.50,10.0.0.0/24`) |
+| `SANDY_EGRESS_PROXY` | `0` | Cross-platform egress isolation. `0`=off, `1`=permissive (block LAN/host, allow internet), `2`=strict (allowlist only). The only network isolation that works on macOS — see "How Network Isolation Works" |
+| `SANDY_ALLOW_HOSTS` | (unset) | Comma-separated extra egress-proxy allowlist entries (`host`, `*.suffix`, or `host:port`), appended to the built-in default set. Privileged tier |
 | `SANDY_ALLOW_NO_ISOLATION` | (unset) | Set to `1` to allow launch without iptables rules (Linux) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth) |
@@ -290,13 +292,29 @@ No default — leaving `SANDY_SCREENSHOT_DIR` unset disables the feature entirel
 
 ## How Network Isolation Works
 
-### macOS (Docker Desktop) — not isolated in 1.0-rc1
+### Egress proxy (`SANDY_EGRESS_PROXY`) — cross-platform isolation
 
-**Warning:** Docker Desktop does *not* provide LAN isolation. Contrary to earlier documentation, the container *can* reach `host.docker.internal` (→ your Mac's gateway), your host's `localhost` services, and any device on your physical LAN — your home router at `192.168.1.1`, a NAS, a printer, an internal dashboard, your SSH daemon. A stress test in April 2026 opened a live TCP connection from inside the container to the host's SSHD and read its banner (see `ISOLATION_STRESS.md`, finding F2).
+The egress proxy is the recommended isolation mechanism and the **only** one that works on macOS. It routes the agent through a small proxy sidecar on a Docker `--internal` network (no route off the bridge except through the proxy), so it behaves identically on macOS and Linux. It's a tri-state:
+
+| Value | Mode | Behavior |
+|---|---|---|
+| `0` (default) | off | Linux iptables only; macOS has no network isolation (see below). |
+| `1` | permissive | Blocks private/LAN/host/cloud-metadata destinations, allows all internet. Closes the macOS LAN gap with ~zero friction — recommended. |
+| `2` | strict | Allows only a built-in default allowlist (model providers, GitHub incl. SSH, npm/PyPI/crates/Go/Debian) plus `SANDY_ALLOW_HOSTS`. Fails closed on everything else. |
+
+```sh
+SANDY_EGRESS_PROXY=1   # in ~/.sandy/config or a workspace .sandy/config
+```
+
+Add extra reachable hosts with `SANDY_ALLOW_HOSTS` (privileged; comma-separated `host`, `*.suffix`, or `host:port`). git-over-SSH (`SANDY_SSH=agent`) is tunneled through the proxy automatically on both platforms; on macOS, host-agent *key signing* is unavailable under the proxy (use `SANDY_SSH=token` for a fully-supported HTTPS path). A local LLM (`SANDY_LOCAL_LLM_HOST`) is forwarded through the proxy rather than an iptables hole. See `CLAUDE.md` → "Egress Proxy" for the full topology.
+
+### macOS (Docker Desktop) — not isolated when the proxy is off
+
+**Warning:** with `SANDY_EGRESS_PROXY=0` (the default), Docker Desktop does *not* provide LAN isolation. The container *can* reach `host.docker.internal` (→ your Mac's gateway), your host's `localhost` services, and any device on your physical LAN — your home router at `192.168.1.1`, a NAS, a printer, an internal dashboard, your SSH daemon. A stress test in April 2026 opened a live TCP connection from inside the container to the host's SSHD and read its banner (see `ISOLATION_STRESS.md`, finding F2).
 
 As defense-in-depth, sandy nullifies the Docker Desktop magic hostnames (`gateway.docker.internal`, `metadata.google.internal`, and — when `SANDY_SSH != agent` — `host.docker.internal`) via `--add-host`, and prints a launch-time warning banner on macOS. But **raw-IP access is unaffected**, and the banner is a warning, not a fix.
 
-**Real fix:** an egress proxy sidecar (HTTP CONNECT + SOCKS5 + DNS allowlist) is scheduled for sandy 1.1. Until then, treat macOS sandy as "process and filesystem isolation only; no network isolation." If that matters for your threat model, run sandy on a Linux host where iptables-based isolation does apply.
+**Fix:** set `SANDY_EGRESS_PROXY=1` (or `=2`), which applies real isolation on macOS. Otherwise treat proxy-off macOS sandy as "process and filesystem isolation only; no network isolation."
 
 ### Linux
 Sandy automatically inserts `iptables` rules into the `DOCKER-USER` chain that block all RFC 1918 traffic from the container's bridge interface:

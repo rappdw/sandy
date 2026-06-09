@@ -871,6 +871,17 @@ info "18. Container naming"
 check "container name includes sandbox name" \
     grep -q -- '--name "$CONTAINER_NAME"' "$SCRIPT"
 
+# Headless (-p) must NOT allocate a TTY: a pseudo-TTY makes Ink/React CLIs
+# (gemini) busy-loop a render instead of one-shot output. Interactive keeps -it
+# (tmux needs it); headless uses -i only.
+# Three branches: interactive (-it), headless+terminal-stdin (no -i/-t, so
+# stdin-reading agents like codex exec see EOF instead of blocking), and
+# headless+piped-stdin (-i, forward the pipe).
+check "headless never allocates a TTY; interactive keeps -it" \
+    bash -c 'grep -q -- "RUN_FLAGS=(--rm --name" "$1" && grep -q -- "RUN_FLAGS=(--rm -i --name" "$1" && grep -q -- "RUN_FLAGS=(--rm -it --name" "$1"' -- "$SCRIPT"
+check "headless stdin is gated on whether it is a terminal (-t 0)" \
+    bash -c 'grep -B8 -- "RUN_FLAGS=(--rm --name" "$1" | grep -q "_sandy_headless_run=true" && grep -B2 -- "RUN_FLAGS=(--rm --name" "$1" | grep -q -- "-t 0"' -- "$SCRIPT"
+
 # ============================================================
 info "19. pip wrapper created in root section (not inside bash -c)"
 # ============================================================
@@ -3642,6 +3653,171 @@ if command -v shellcheck >/dev/null 2>&1; then
 else
     printf "  \033[0;33m⊘ skipped — shellcheck not installed (apt-get install shellcheck / brew install shellcheck)\033[0m\n"
 fi
+
+# ============================================================
+# SECTION 49: egress proxy image generator (M2.7 PR 2.7.2)
+# ============================================================
+# Static + function-level checks for generate_dockerfile_proxy and the ref
+# resolver. The actual image build (and the launcher wiring that uses it) need
+# Docker + the macOS topology, covered by the manual checklist in PR 2.7.5; here
+# we lock in the generator shape and the version-tag pinning.
+info "49. Egress proxy image generator (M2.7)"
+
+_PX_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+# Pull just the two functions and exercise them in isolation.
+_PX_FNS="$(sed -n '/^_sandy_proxy_ref()/,/^}$/p' "$_PX_SCRIPT")
+$(sed -n '/^generate_dockerfile_proxy()/,/^}$/p' "$_PX_SCRIPT")"
+
+# Ref resolution: release -> version tag; -dev -> main; override wins.
+_px_ref() {
+    local ver="$1" override="$2"
+    SANDY_VERSION="$ver" SANDY_PROXY_REF="$override" bash -c "$_PX_FNS
+_sandy_proxy_ref"
+}
+# GITHUB_HEAD_REF is unset in these so the version/branch logic is what's
+# asserted (it would otherwise be set when the suite itself runs in PR CI).
+check "proxy ref: release version pins to vX.Y.Z tag" \
+    bash -c '[ "$(SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" GITHUB_HEAD_REF= bash -c "$1
+_sandy_proxy_ref")" = "v0.13.1" ]' -- "$_PX_FNS"
+# -dev/-rc build the proxy from source. From a git checkout the ref is the
+# current branch; outside one it falls back to main. Run from a non-git tmp dir
+# so the deterministic fallback is what's asserted.
+check "proxy ref: -dev falls back to main outside a git checkout" \
+    bash -c 'cd "$(mktemp -d)" && [ "$(SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" GITHUB_HEAD_REF= bash -c "$1
+_sandy_proxy_ref")" = "main" ]' -- "$_PX_FNS"
+check "proxy ref: -rc falls back to main outside a git checkout" \
+    bash -c 'cd "$(mktemp -d)" && [ "$(SANDY_VERSION=1.0.0-rc1 SANDY_PROXY_REF="" GITHUB_HEAD_REF= bash -c "$1
+_sandy_proxy_ref")" = "main" ]' -- "$_PX_FNS"
+check "proxy ref: SANDY_PROXY_REF override wins" \
+    bash -c '[ "$(SANDY_VERSION=0.13.1 SANDY_PROXY_REF=abc123 bash -c "$1
+_sandy_proxy_ref")" = "abc123" ]' -- "$_PX_FNS"
+# CI PR builds: GITHUB_HEAD_REF (the PR source branch, which has proxy/) is used
+# instead of the detached-HEAD fallback to main. Override still beats it.
+check "proxy ref: GITHUB_HEAD_REF used in CI PR context" \
+    bash -c '[ "$(SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" GITHUB_HEAD_REF=my-pr-branch bash -c "$1
+_sandy_proxy_ref")" = "my-pr-branch" ]' -- "$_PX_FNS"
+
+# Generator shape: multi-stage golang -> scratch, clones at the build-arg ref,
+# static build, correct entrypoint. GITHUB_HEAD_REF= so the release-version ref
+# (v0.13.1) is what's generated — otherwise PR CI's ambient GITHUB_HEAD_REF would
+# make _sandy_proxy_ref emit the branch name instead.
+_PX_TMP="$(mktemp -d)"
+SANDY_HOME="$_PX_TMP" SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" GITHUB_HEAD_REF= \
+    bash -c "$_PX_FNS
+generate_dockerfile_proxy" 2>/dev/null
+_PX_DF="$_PX_TMP/Dockerfile.proxy.new"
+check "proxy Dockerfile: golang build stage" \
+    grep -qE '^FROM golang:[0-9.]+-bookworm AS build' "$_PX_DF"
+check "proxy Dockerfile: scratch runtime stage" \
+    grep -qx 'FROM scratch' "$_PX_DF"
+check "proxy Dockerfile: pins ref via build-arg default to the version tag" \
+    grep -qx 'ARG SANDY_PROXY_REF=v0.13.1' "$_PX_DF"
+check "proxy Dockerfile: clones sandy repo and checks out the ref" \
+    bash -c 'grep -q "git clone https://github.com/rappdw/sandy /src" "$1" && grep -q "git -C /src checkout" "$1"' -- "$_PX_DF"
+check "proxy Dockerfile: builds proxy/ statically (CGO_ENABLED=0)" \
+    bash -c 'grep -q "cd /src/proxy" "$1" && grep -q "CGO_ENABLED=0 go build" "$1"' -- "$_PX_DF"
+check "proxy Dockerfile: entrypoint is the proxy binary" \
+    grep -qF 'ENTRYPOINT ["/usr/local/bin/sandy-proxy"]' "$_PX_DF"
+rm -rf "$_PX_TMP"
+
+# Build phase: gated on the normalized proxy predicate, uses .build_hash_proxy,
+# cleared by --rebuild.
+check "proxy build phase gated on _SANDY_PROXY_ON" \
+    grep -qF 'if [ "$_SANDY_PROXY_ON" = true ]; then' "$_PX_SCRIPT"
+check "proxy build uses .build_hash_proxy" \
+    grep -qF '.build_hash_proxy' "$_PX_SCRIPT"
+check "--rebuild clears .build_hash_proxy" \
+    bash -c 'grep -E "rm -f .*\.base_build_hash" "$1" | grep -q "\.build_hash_proxy"' -- "$_PX_SCRIPT"
+check "proxy image named sandy-proxy" \
+    grep -qF 'PROXY_IMAGE_NAME="sandy-proxy"' "$_PX_SCRIPT"
+
+# ------------------------------------------------------------
+# 50. Egress proxy launcher wiring (M2.7 tri-state) — static checks.
+# Docker + the macOS topology are out of scope for the pure-script suite; the
+# end-to-end behavior is in the manual checklist. Here we lock the tri-state
+# config surface, the default allowlist, the config-JSON shape, and the network
+# topology / ssh ProxyCommand seams so a refactor can't silently drop them.
+# ------------------------------------------------------------
+info "50. Egress proxy launcher wiring (M2.7 tri-state)"
+
+# Config tiers: SANDY_EGRESS_PROXY is passive (per-project opt-in); the
+# allowlist expander SANDY_ALLOW_HOSTS is privileged (it widens reach).
+check "SANDY_EGRESS_PROXY is passive-tier" \
+    bash -c 'bash "$1" --print-schema | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+names=[k[\"name\"] for k in d[\"config\"][\"passive_keys\"]]
+assert \"SANDY_EGRESS_PROXY\" in names, names
+"' -- "$_PX_SCRIPT"
+check "SANDY_ALLOW_HOSTS is privileged-tier" \
+    bash -c 'bash "$1" --print-schema | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+names=[k[\"name\"] for k in d[\"config\"][\"privileged_keys\"]]
+assert \"SANDY_ALLOW_HOSTS\" in names, names
+"' -- "$_PX_SCRIPT"
+check "SANDY_EGRESS_PROXY schema is enum with choices 0/1/2" \
+    bash -c 'bash "$1" --print-schema | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+k=[x for x in d[\"config\"][\"passive_keys\"] if x[\"name\"]==\"SANDY_EGRESS_PROXY\"][0]
+assert k[\"type\"]==\"enum\", k[\"type\"]
+assert k[\"choices\"]==[\"0\",\"1\",\"2\"], k[\"choices\"]
+"' -- "$_PX_SCRIPT"
+
+# Tri-state normalization: 1->permissive, 2->strict, garbage->hard error.
+_PX_NORM="$(sed -n '/^_SANDY_PROXY_ON=false/,/^esac/p' "$_PX_SCRIPT")"
+check "tri-state: 1 maps to permissive" \
+    bash -c 'out="$(SANDY_EGRESS_PROXY=1 bash -c "$1; echo \$_SANDY_PROXY_ON \$_SANDY_PROXY_MODE")"; [ "$out" = "true permissive" ]' -- "$_PX_NORM"
+check "tri-state: 2 maps to strict" \
+    bash -c 'out="$(SANDY_EGRESS_PROXY=2 bash -c "$1; echo \$_SANDY_PROXY_ON \$_SANDY_PROXY_MODE")"; [ "$out" = "true strict" ]' -- "$_PX_NORM"
+check "tri-state: 0 maps to off" \
+    bash -c 'out="$(SANDY_EGRESS_PROXY=0 bash -c "$1; echo \$_SANDY_PROXY_ON")"; [ "$out" = "false" ]' -- "$_PX_NORM"
+check "tri-state: invalid value is a hard error" \
+    bash -c '! SANDY_EGRESS_PROXY=3 bash -c "$1" 2>/dev/null' -- "$_PX_NORM"
+
+# Default allowlist: the providers + git + registries an agent needs.
+check "default allowlist includes Anthropic + GitHub SSH + PyPI" \
+    bash -c 'grep -q "\"api.anthropic.com\"" "$1" && grep -q "\"github.com:22\"" "$1" && grep -q "\"files.pythonhosted.org\"" "$1"' -- "$_PX_SCRIPT"
+
+# Config-JSON assembly: mode + proxy_ip + allow[] (+ optional local_llm).
+check "proxy config JSON carries mode, proxy_ip, allow" \
+    bash -c 'grep -q "{\"mode\":\"%s\",\"proxy_ip\":\"%s\",\"allow\":\[%s\]" "$1"' -- "$_PX_SCRIPT"
+check "proxy config local_llm field is conditional" \
+    grep -qF 'llm_field=",\"local_llm\":\"$SANDY_LOCAL_LLM_HOST\""' "$_PX_SCRIPT"
+
+# Two-network topology + lifecycle seams.
+check "sidecar network is --internal" \
+    bash -c 'grep -q -- "--internal --driver bridge" "$1"' -- "$_PX_SCRIPT"
+# The proxy boots on the egress network (so its primary route reaches the
+# internet) and the --internal sidecar is attached second with the fixed IP the
+# DNS responder hands out. Booting on the sidecar instead would leave the proxy
+# with no default route (verified on macOS: it caused upstream dials to fail).
+check "proxy boots on the egress network for internet" \
+    bash -c 'grep -q -- "--network \"\$EGRESS_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
+check "proxy attaches the sidecar with a fixed --ip" \
+    bash -c 'grep -q "docker network connect --ip \"\$PROXY_IP\" \"\$SIDECAR_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
+check "proxy runs hardened (--read-only --cap-drop ALL)" \
+    bash -c 'grep -q -- "--cap-drop ALL" "$1"' -- "$_PX_SCRIPT"
+check "cleanup removes proxy container before networks" \
+    bash -c 'grep -q "docker rm -f \"\$PROXY_CONTAINER\"" "$1" && grep -q "docker network rm \"\$EGRESS_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
+
+# Agent routing: --dns at the proxy, iptables skipped, ProxyCommand for SSH.
+check "agent resolver points at the proxy (--dns)" \
+    bash -c 'grep -q -- "RUN_FLAGS+=(--dns \"\$PROXY_IP\")" "$1"' -- "$_PX_SCRIPT"
+check "iptables isolation skipped when proxy on" \
+    bash -c 'grep -q "if \[ \"\$_SANDY_PROXY_ON\" != true \]; then" "$1" && grep -q "    apply_network_isolation" "$1"' -- "$_PX_SCRIPT"
+check "entrypoint injects ssh ProxyCommand via CONNECT :3128" \
+    bash -c 'grep -q "ProxyCommand socat - PROXY:%s:%%h:%%p,proxyport=3128" "$1"' -- "$_PX_SCRIPT"
+
+# 2.7.4: the launch-summary network line is derived from the real mode/platform,
+# not the old hardcoded "LAN blocked" string (which lied on macOS proxy-off).
+check "launch summary network line is mode-aware" \
+    bash -c 'grep -q "Egress proxy (strict)" "$1" && grep -q "Egress proxy (permissive)" "$1" && grep -q "NO isolation on \$OS" "$1"' -- "$_PX_SCRIPT"
+# The macOS no-isolation warning banner only fires when the proxy is off (in
+# proxy mode apply_network_isolation, which holds the banner, isn't called).
+check "macOS no-isolation banner gated behind proxy-off" \
+    bash -c 'grep -q "Network isolation is NOT active on \$OS" "$1"' -- "$_PX_SCRIPT"
 
 # ============================================================
 # Summary

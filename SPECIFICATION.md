@@ -132,12 +132,12 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Privileged-only keys** (allowed only from `$SANDY_HOME/config` and `$SANDY_HOME/.secrets`):
 <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_EXTRA_ENV`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
+`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
 <!-- END AUTOGEN:privileged-key-list -->
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `SANDY_SCREENSHOT_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `SANDY_SCREENSHOT_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -156,6 +156,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_ALLOW_NO_ISOLATION` | privileged | `0` | Allow launch when iptables rules cannot be applied (Linux only). |
 | `SANDY_ALLOW_LAN_HOSTS` | privileged | unset | Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected. |
 | `SANDY_LOCAL_LLM_HOST` | privileged | unset | Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal. |
+| `SANDY_ALLOW_HOSTS` | privileged | unset | Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval. |
 | `SANDY_EXTRA_ENV` | privileged | unset | Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values come from the host env, ~/.sandy/.secrets, or ~/.sandy/config — workspace sources never supply values. Privileged tier so workspace config requires approval. |
 | `ANTHROPIC_API_KEY` | privileged | unset | Anthropic API key for Claude Code. Not required when using Claude Max OAuth. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | privileged | unset | Claude Code OAuth token (alternative to ANTHROPIC_API_KEY). |
@@ -173,6 +174,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_CHANNEL_TARGET_PANE` | passive | `0` | Which tmux pane in multi-agent mode receives channel messages. |
 | `SANDY_VERBOSE` | passive | `0` | Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace). |
 | `SANDY_VENV_OVERLAY` | passive | `1` | Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container. |
+| `SANDY_EGRESS_PROXY` | passive | `1` | Egress-proxy network isolation (closes macOS F2). 1=permissive (default; proxy sidecar blocks private/LAN/metadata but allows all internet — works identically on macOS and Linux). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 0=off (legacy iptables-only on Linux, no isolation on macOS). |
 | `SANDY_ALLOW_WORKFLOW_EDIT` | passive | `0` | Remove .github/workflows from the read-only protection list. |
 | `SANDY_SCREENSHOT_DIR` | passive | unset | Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents. |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | passive | `128000` | Max output tokens per Claude response. |
@@ -634,9 +636,9 @@ The container's own subnet is allowed. Additional hosts/CIDRs can be allowed via
 
 ### macOS
 
-**Network isolation is NOT active on macOS in 1.0-rc1.** Docker Desktop's VM does *not* provide LAN isolation. Containers can reach `host.docker.internal` (→ host gateway), the host's `localhost` services, and any device on the user's physical LAN (`192.168.x.x`, home router, NAS, printers, internal dashboards). Linux iptables DROP rules do not apply and cannot be applied from macOS. (Stress test April 2026 opened a live TCP connection to host SSHD and read its banner — see `ISOLATION_STRESS.md` finding F2.)
+**Network isolation is NOT active on macOS when the egress proxy is off (`SANDY_EGRESS_PROXY=0`, the default).** Docker Desktop's VM does *not* provide LAN isolation. Containers can reach `host.docker.internal` (→ host gateway), the host's `localhost` services, and any device on the user's physical LAN (`192.168.x.x`, home router, NAS, printers, internal dashboards). Linux iptables DROP rules do not apply and cannot be applied from macOS. (Stress test April 2026 opened a live TCP connection to host SSHD and read its banner — see `ISOLATION_STRESS.md` finding F2.) **Setting `SANDY_EGRESS_PROXY=1` (or `=2`) applies real isolation on macOS** — see "Egress Proxy" below.
 
-**Launch warning**: On non-Linux hosts, `apply_network_isolation` prints a warning banner informing the user that network isolation is not active and that the container can reach the host's LAN.
+**Launch warning**: On non-Linux hosts with the proxy off, `apply_network_isolation` prints a warning banner informing the user that network isolation is not active and pointing at `SANDY_EGRESS_PROXY=1`. In proxy mode `apply_network_isolation` is not called (the `--internal` topology is the isolation), so no banner fires.
 
 **Defense-in-depth (`--add-host`)**: sandy appends the following flags to `RUN_FLAGS` on macOS to nullify Docker Desktop's magic hostnames:
 
@@ -648,7 +650,33 @@ The container's own subnet is allowed. Additional hosts/CIDRs can be allowed via
 
 When `SANDY_SSH=agent`, `host.docker.internal` is *not* nullified because sandy's own in-container SSH agent relay (`socat … TCP:host.docker.internal:$SSH_RELAY_PORT`) depends on that hostname reaching the host. In that mode, sandy emits an extra warn line noting the exception.
 
-This is defense-in-depth, not a fix — raw-IP access (`curl http://192.168.1.1`) is unaffected. The real fix is scheduled for sandy 1.1 as an egress proxy sidecar (HTTP CONNECT + SOCKS5 + DNS allowlist).
+This is defense-in-depth, not a fix — with the proxy off, raw-IP access (`curl http://192.168.1.1`) is unaffected. The fix is `SANDY_EGRESS_PROXY` (below), which applies uniform isolation on both platforms.
+
+### Egress Proxy (`SANDY_EGRESS_PROXY`, M2.7)
+
+A tri-state passive-tier key that routes the agent through a `sandy-proxy` sidecar on a Docker `--internal` network. Because it relies on `--internal` routing rather than iptables, it is the **only** network isolation that works on macOS, and behaves identically on both platforms.
+
+| Value | Mode (`mode` field in proxy config) | Egress policy |
+|---|---|---|
+| `0` (default) | — (proxy off) | Linux: legacy iptables. macOS: none. |
+| `1` | `permissive` | Block private/LAN/link-local/CGNAT/`169.254.169.254` metadata; allow all internet. Resolve-then-check also defeats DNS rebinding. |
+| `2` | `strict` | Deny all except the built-in default allowlist + `SANDY_ALLOW_HOSTS`; fail closed. |
+
+The launcher normalizes the value once into `_SANDY_PROXY_ON` (bool) and `_SANDY_PROXY_MODE` (`permissive`/`strict`).
+
+**Topology** (`ensure_proxy_networks` / `start_proxy_sidecar`):
+- Two per-session networks: `sandy_sidecar_$$` (`--internal`, agent + proxy) and `sandy_egress_$$` (normal bridge, proxy only). The agent's `NETWORK_NAME` is the sidecar.
+- The sidecar is created with an explicit `--subnet`/`--gateway` (first non-overlapping `/24` from `10.200.0.0/24`, `10.201.0.0/24`, `172.31.250.0/24`, `192.168.231.0/24`) so the proxy can be pinned to a fixed `--ip` (`<subnet>.2`). All candidates overlapping is a hard launch error.
+- The proxy runs `--read-only --cap-drop ALL`, with `/etc/sandy-proxy.json` bind-mounted read-only from `$SANDBOX_DIR/sandy-proxy.json`. After start, it is connected to the egress network. Sandy fails fast (dumping `docker logs`) if the container isn't `Running`.
+- Config JSON: `{"mode", "proxy_ip", "allow":[…], "local_llm"?}`. `allow` = built-in defaults + validated `SANDY_ALLOW_HOSTS` (+ `host.docker.internal` when a local LLM is set).
+- Agent `RUN_FLAGS`: `--network <sidecar>` + `--dns <proxy_ip>` + `-e SANDY_PROXY_IP=<ip>`. The per-OS magic-hostname `--add-host` block is bypassed in proxy mode (all resolution goes through the proxy DNS). `apply_network_isolation` (iptables) is skipped.
+- `cleanup()` removes the proxy container, then the egress network, then the sidecar.
+
+**Default allowlist**: `api.anthropic.com`/`*.anthropic.com`, `api.openai.com`/`*.openai.com`, `*.googleapis.com`/`accounts.google.com`/`oauth2.googleapis.com`, GitHub (`github.com`, `github.com:22`, `api.github.com`, `codeload.github.com`, `*.githubusercontent.com`, `ssh.github.com:22`), npm (`registry.npmjs.org`, `*.npmjs.org`), PyPI (`pypi.org`, `files.pythonhosted.org`), crates (`crates.io`, `static.crates.io`, `index.crates.io`), Go (`proxy.golang.org`, `sum.golang.org`, `*.golang.org`), Debian (`deb.debian.org`, `security.debian.org`).
+
+**ssh `ProxyCommand`**: in proxy mode the entrypoint prepends `Host *\n  ProxyCommand socat - PROXY:<proxy-ip>:%h:%p,proxyport=3128` to `~/.ssh/config`, tunneling git-over-SSH through the proxy CONNECT listener. On Linux the SSH-agent socket is a direct bind mount and signing works; on macOS the agent socket relay can't cross `--internal`, so signing is unavailable under the proxy (git-over-SSH still works) — sandy warns and recommends `SANDY_SSH=token`.
+
+**Local LLM**: `SANDY_LOCAL_LLM_HOST` is served by the proxy's forward listener (the `local_llm` config field), not an iptables hole. The proxy is given `--add-host host.docker.internal:host-gateway` on Linux.
 
 ---
 
@@ -1857,7 +1885,7 @@ Sandy runs on both Linux and macOS. The following sections document every point 
 
 **macOS `--add-host` condition:** `host.docker.internal` is only nullified when `SANDY_SSH != agent`. In agent mode, sandy's in-container SSH agent relay uses that hostname to reach the host-side socat relay (see §10); nullifying it would break SSH. An additional warn line is emitted in that case.
 
-**Real fix scheduled for sandy 1.1**: an egress proxy sidecar (HTTP CONNECT + SOCKS5 + DNS allowlist) that implements uniform outbound allowlisting on both platforms. See `ISOLATION_STRESS.md` finding F2 and the Sprint 3 section of the rc1 remediation plan.
+**Cross-platform fix — `SANDY_EGRESS_PROXY` (M2.7):** the egress proxy sidecar (transparent SNI/Host + CONNECT + DNS) implements uniform outbound isolation on both platforms via a Docker `--internal` network. `1`=permissive (block LAN/host, allow internet — intended 1.0 default-on), `2`=strict (allowlist only). When on, this table's "macOS: none" row no longer applies. See the "Egress Proxy" section above, `ISOLATION_STRESS.md` finding F2, and `proxy/` for the implementation.
 
 **Linux iptables flow**:
 1. Test `sudo iptables -L DOCKER-USER -n` — if fails, abort (or allow with override)

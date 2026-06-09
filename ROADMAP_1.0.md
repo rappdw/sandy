@@ -351,25 +351,48 @@ Static binary; at most one dependency (`miekg/dns`), though stdlib likely suffic
 
 **Scope**: new generated `Dockerfile.proxy` in `$SANDY_HOME/`, phased between `sandy-base` and the agent images, hash-rebuild via `.proxy_build_hash`. Build once, cache aggressively.
 
-### PR 2.7.3 — Launcher wiring
+### PR 2.7.3 — Launcher wiring — ✓ DONE 2026-06-08
 
-**Scope**: sandy creates the two networks per-launch (sidecar `--internal`, egress normal), starts the dual-homed proxy container, attaches the agent container with `--network sidecar` + `--dns proxy-ip`, gates on `SANDY_EGRESS_PROXY`, and tears everything down in the cleanup trap (the trap already handles per-instance networks; extend it for the second network + proxy container).
+> **Tri-state pivot (2026-06-08).** `SANDY_EGRESS_PROXY` shipped as a **tri-state**, not a binary: `0`=off, `1`=permissive (block private/LAN/host/metadata, allow all internet), `2`=strict (default allowlist + `SANDY_ALLOW_HOSTS` only). Permissive (1) closes F2 — the whole point of M2.7 — with ~zero friction (no allowlist to maintain, any public host just works) and is the **intended default-on posture for 1.0**. Strict (2) additionally blocks exfil-to-arbitrary-internet but fails closed. The proxy config consumes a `"mode"` field ("permissive"/"strict"); the proxy code (PR 2.7.1) was extended with a mode-aware `Policy` (commit on `m2.7-proxy`). This supersedes the original "default 0, flip to 1" plan — the flip target is now mode 1 specifically, and mode 2 is the opt-in hardened tier.
 
-**ssh `ProxyCommand` injection** — when the proxy is on, `user-setup.sh` writes an ssh config entry routing git-host SSH through the proxy's CONNECT endpoint (`ProxyCommand` using `nc`/openssh's `-o ProxyUseFdpass` or a small connect helper baked into the image). This is what makes `SANDY_SSH=agent` work under `--internal`. The allowlist must include the git host on `:22` (github.com:22 etc. in the default set).
+**Scope** (done): sandy creates the two networks per-launch (sidecar `--internal`, egress normal), starts the dual-homed `--read-only --cap-drop ALL` proxy container at a fixed sidecar IP (first non-overlapping `/24` from a candidate list, so `--ip` works), attaches the agent with `--network sidecar` + `--dns proxy-ip`, gates on the normalized `_SANDY_PROXY_ON` predicate, skips iptables in proxy mode, and tears down both networks + the proxy container in `cleanup()`.
 
-**`SANDY_EGRESS_PROXY` passive-safe key** — passive allowlist in `_load_sandy_config()`. Default `0` for the first soak week, then flip to `1`.
+**ssh `ProxyCommand` injection** (done) — when the proxy is on, the entrypoint prepends `Host * ProxyCommand socat - PROXY:<proxy-ip>:%h:%p,proxyport=3128` to `~/.ssh/config`, routing git-over-SSH through the proxy's CONNECT listener (`:3128`). `github.com:22` is in the default allowlist. macOS caveat: the SSH-*agent* socket relay can't cross `--internal`, so host-agent key signing is unavailable under the proxy on macOS (git-over-SSH still works); sandy warns and recommends `SANDY_SSH=token`.
 
-**`SANDY_ALLOW_HOSTS` privileged-tier key** — comma-separated additions to the allowlist. Privileged: user-added hosts expand the attack surface and must not be workspace-settable without the approval prompt.
+**`SANDY_EGRESS_PROXY` passive-safe key** (done) — passive tier (per-project opt-in). Normalized once into `_SANDY_PROXY_ON` + `_SANDY_PROXY_MODE`.
+
+**`SANDY_ALLOW_HOSTS` privileged-tier key** (done) — comma-separated additions to the allowlist. Privileged: user-added hosts expand the attack surface and must not be workspace-settable without the approval prompt.
 
 **Allowlist assembly** — sandy composes `/etc/sandy-proxy.json` from the built-in default set + `SANDY_ALLOW_HOSTS` + (when set) the `SANDY_LOCAL_LLM_HOST` `host:port` literal, and mounts it into the proxy container.
 
 **Interaction guardrails**: `SANDY_LOCAL_LLM_HOST` + proxy is now *supported* (forward path above), not an error; confirm `cleanup()` removes both networks + the proxy container on all trapped signals (EXIT INT TERM HUP QUIT ABRT), including the SIGKILL-leak caveat already documented for the main container.
 
-### PR 2.7.4 — Remove macOS launch warning (problem now fixed)
+### PR 2.7.4 — Remove macOS launch warning (problem now fixed) — ✓ DONE 2026-06-09
 
-**Scope**: revert the S1.6 macOS warning banner — **but only behind `SANDY_EGRESS_PROXY` being on**. If the proxy is off (opt-out, or a build without it), the warning must still fire: the honest-warning posture is correct whenever the real isolation isn't active. Keep the `--add-host` nullification as defense-in-depth regardless.
+**Scope** (done): the macOS no-isolation warning banner is gated behind the
+proxy being off — it lives in `apply_network_isolation`, which the 2.7.3 wiring
+no longer calls in proxy mode, so it fires only when isolation really isn't
+active (proxy off on macOS). The `--add-host` nullification is likewise bypassed
+in proxy mode (the proxy's own DNS supersedes it) and retained as defense-in-
+depth when the proxy is off. Additionally, the launch-summary `Network:` line —
+previously a hardcoded "Public internet only (LAN blocked)" that *lied* on macOS
+proxy-off — is now derived from the real mode/platform: permissive / strict /
+Linux-iptables / "NO isolation on macOS (set SANDY_EGRESS_PROXY=1)". Static
+tests cover the mode-aware line and the gated banner.
 
-### PR 2.7.5 — Integration tests + manual macOS checklist
+### PR 2.7.5 — Integration tests + manual macOS checklist — ◑ IN PROGRESS
+
+> **Status (2026-06-09).** Artifacts written: a Linux integration section
+> (`run-integration-tests.sh` §13 — proxy stands up, agent reaches the API
+> through it, networks clean up, `=0` opt-out) and the manual macOS checklist
+> (`TESTING_PLAN.md` §6, including the failure signatures for every bug the live
+> bring-up surfaced). **Validated live:** §6.1 permissive on real Docker Desktop
+> — F2 closed (GitHub reachable, `192.168.1.1` blocked), Claude Code runs, no
+> leaks. **Still to run:** the §13 Linux integration pass (needs Linux + Docker +
+> Claude creds), and macOS §6.2 (strict), §6.3 (off-warning), §6.4 (SSH-agent).
+> The aspirational automated list below is broader than §13 ships today (no ECH/
+> tool-compat/local-LLM integration assertions yet — those are post-merge or
+> manual); trimmed to keep the rc honest.
 
 **Automated (Linux CI)** in `test/run-integration-tests.sh`:
 - Allowlisted host (`api.anthropic.com`) reachable from inside a sandy container with the proxy on (transparent HTTPS path).
@@ -634,13 +657,13 @@ PR 3.3 (version bump) ✓          ──▶ tag 0.13.0 ✓ (2026-05-30)
 M2.7 PR 2.7.0 (macOS --internal spike) ✓ PASSED 14/14 (2026-06-04)
     │  greenlit → architecture sound; transport = hybrid; local-LLM in-scope
     ▼
-M2.7 PR 2.7.1 (proxy Go binary: transparent HTTPS + CONNECT-for-SSH  ← NEXT
-              + DNS allowlist + local-LLM forward; ≤700 LOC)
-M2.7 PR 2.7.2 (sandy-proxy Dockerfile + phased build)
-M2.7 PR 2.7.3 (launcher wiring: sidecar --internal + egress net + proxy
-              + ssh ProxyCommand injection + allowlist assembly)
-M2.7 PR 2.7.4 (remove macOS warning — only when proxy is on)
-M2.7 PR 2.7.5 (integration tests + manual macOS checklist)
+M2.7 PR 2.7.1 (proxy Go binary: transparent HTTPS + CONNECT-for-SSH  ✓ done
+              + DNS allowlist + local-LLM forward; + mode-aware Policy)
+M2.7 PR 2.7.2 (sandy-proxy Dockerfile + phased build)               ✓ done
+M2.7 PR 2.7.3 (launcher wiring: sidecar --internal + egress net +   ✓ done
+              proxy + ssh ProxyCommand + tri-state 0/1/2 + tests)
+M2.7 PR 2.7.4 (remove macOS warning — only when proxy is on)        ✓ done
+M2.7 PR 2.7.5 (integration tests + manual macOS checklist)          ◑ written, needs run
                                  ──▶ tag 0.13.1 or 0.14.0-pre
     │
     ▼

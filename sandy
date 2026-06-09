@@ -37,6 +37,7 @@ SANDY_PRIVILEGED_KEYS=(
     SANDY_ALLOW_NO_ISOLATION
     SANDY_ALLOW_LAN_HOSTS
     SANDY_LOCAL_LLM_HOST
+    SANDY_ALLOW_HOSTS
     SANDY_EXTRA_ENV
     ANTHROPIC_API_KEY
     CLAUDE_CODE_OAUTH_TOKEN
@@ -59,6 +60,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_CHANNEL_TARGET_PANE
     SANDY_VERBOSE
     SANDY_VENV_OVERLAY
+    SANDY_EGRESS_PROXY
     SANDY_ALLOW_WORKFLOW_EDIT
     SANDY_SCREENSHOT_DIR
     CLAUDE_CODE_MAX_OUTPUT_TOKENS
@@ -118,6 +120,9 @@ IMAGE_NAME=""
 # Per-instance network names keyed on PID to avoid concurrent iptables races
 BRIDGE_NAME="br-sdy-$$"
 NETWORK_NAME="sandy_net_$$"
+# Platform — detected up-front so early functions (e.g. the egress-proxy network
+# setup, which runs well before the legacy isolation block) can branch on it.
+OS="$(uname -s)"
 
 # --- Skill pack registry ---
 # To add a new pack: add entries to both arrays at the same index.
@@ -448,6 +453,7 @@ SANDY_SKIP_PERMISSIONS|bool|true||Skip Claude Code's in-session permission promp
 SANDY_ALLOW_NO_ISOLATION|bool|0||Allow launch when iptables rules cannot be applied (Linux only).
 SANDY_ALLOW_LAN_HOSTS|string|||Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
 SANDY_LOCAL_LLM_HOST|string||^[^[:space:]]+:[0-9]+$|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal.
+SANDY_ALLOW_HOSTS|string|||Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval.
 SANDY_EXTRA_ENV|string|||Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values come from the host env, ~/.sandy/.secrets, or ~/.sandy/config — workspace sources never supply values. Privileged tier so workspace config requires approval.
 ANTHROPIC_API_KEY|secret|||Anthropic API key for Claude Code. Not required when using Claude Max OAuth.
 CLAUDE_CODE_OAUTH_TOKEN|secret|||Claude Code OAuth token (alternative to ANTHROPIC_API_KEY).
@@ -465,6 +471,7 @@ SANDY_CHANNELS|string|||Comma-separated channel names (e.g. 'telegram,discord').
 SANDY_CHANNEL_TARGET_PANE|int|0||Which tmux pane in multi-agent mode receives channel messages.
 SANDY_VERBOSE|int|0||Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace).
 SANDY_VENV_OVERLAY|bool|1||Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container.
+SANDY_EGRESS_PROXY|enum:0,1,2|1||Egress-proxy network isolation (closes macOS F2). 1=permissive (default; proxy sidecar blocks private/LAN/metadata but allows all internet — works identically on macOS and Linux). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 0=off (legacy iptables-only on Linux, no isolation on macOS).
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||Remove .github/workflows from the read-only protection list.
 SANDY_SCREENSHOT_DIR|path|||Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
 CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||Max output tokens per Claude response.
@@ -1463,6 +1470,78 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 DOCKERFILE
 }
 
+# Resolve which ref of the proxy module to build into the sandy-proxy image.
+# Precedence: explicit SANDY_PROXY_REF override > the sandy release tag (when
+# running a tagged release) > "main" (for -dev/-rc builds, which track main).
+#
+# The proxy lives in the sandy repo under proxy/ as a nested Go module. Rather
+# than maintain a separate proxy/vX.Y.Z tag at every release, the image build
+# `git clone`s the sandy repo at this ref and `go build`s proxy/ from the tree —
+# so the existing root vX.Y.Z tag is the pin, exactly as requested.
+#
+# Dev note: before the M2.7 proxy work merges to main, set
+#   SANDY_PROXY_REF=<branch-or-commit>
+# (e.g. the m2.7-proxy branch) so the image can build from unreleased source.
+_sandy_proxy_ref() {
+    if [ -n "${SANDY_PROXY_REF:-}" ]; then
+        printf '%s' "$SANDY_PROXY_REF"
+        return
+    fi
+    # GitHub Actions PR builds check out a detached merge ref, so the branch
+    # detection below would wrongly fall back to main — which has no proxy/ until
+    # this very PR merges. GITHUB_HEAD_REF is the PR's source branch (which does
+    # carry proxy/), so build from it. It's unset for push-to-main / release CI,
+    # where the version/branch logic below is the correct path.
+    if [ -n "${GITHUB_HEAD_REF:-}" ]; then
+        printf '%s' "$GITHUB_HEAD_REF"
+        return
+    fi
+    case "$SANDY_VERSION" in
+        *-dev|*-rc*)
+            # Pre-release: build the proxy from source. From a git checkout, use
+            # the current branch (it carries proxy/ — so `./sandy` works on a
+            # feature branch before it merges); otherwise fall back to main
+            # (installed copies, detached HEAD). Once M2.7 is on main, main has
+            # proxy/ and the fallback is correct for everyone.
+            local _d _b
+            _d="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _d="."
+            _b="$(git -C "$_d" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+            if [ -n "$_b" ] && [ "$_b" != "HEAD" ]; then
+                printf '%s' "$_b"
+            else
+                printf 'main'
+            fi
+            ;;
+        *)           printf 'v%s' "$SANDY_VERSION" ;;
+    esac
+}
+
+# sandy-proxy egress-proxy image (M2.7). Multi-stage: a golang build stage that
+# clones the sandy repo at the resolved ref and statically compiles proxy/, then
+# a `scratch` runtime holding just the binary. The proxy never terminates TLS
+# and resolves upstreams with Go's pure resolver, so it needs no CA bundle and
+# no libc — scratch is the smallest, hardest-to-attack base for a security
+# component. The git ref is a build-arg so the build hash (and thus rebuilds)
+# track the pinned version.
+generate_dockerfile_proxy() {
+    local ref
+    ref="$(_sandy_proxy_ref)"
+    cat > "$SANDY_HOME/Dockerfile.proxy.new" <<DOCKERFILE
+# syntax pinned implicitly by the golang base tag
+FROM golang:1.24-bookworm AS build
+ARG SANDY_PROXY_REF=${ref}
+RUN git clone https://github.com/rappdw/sandy /src \\
+ && git -C /src checkout "\${SANDY_PROXY_REF}" \\
+ && cd /src/proxy \\
+ && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /sandy-proxy .
+
+FROM scratch
+COPY --from=build /sandy-proxy /usr/local/bin/sandy-proxy
+# Config is bind-mounted at /etc/sandy-proxy.json by the launcher (PR 2.7.3).
+ENTRYPOINT ["/usr/local/bin/sandy-proxy"]
+DOCKERFILE
+}
+
 generate_entrypoint() {
     cat > "$SANDY_HOME/entrypoint.sh.new" <<'ENTRYPOINT'
 #!/bin/bash
@@ -1518,6 +1597,27 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
         chmod 644 /home/claude/.ssh/*.pub 2>/dev/null || true
         chmod 644 /home/claude/.ssh/known_hosts 2>/dev/null || true
         chmod 644 /home/claude/.ssh/config 2>/dev/null || true
+    fi
+
+    # Egress-proxy mode: the agent is on the --internal sidecar, so a direct
+    # TCP to github.com:22 is impossible — git-over-SSH must tunnel through the
+    # proxy's CONNECT listener (:3128). socat's PROXY address speaks HTTP
+    # CONNECT; ssh substitutes %h/%p with the real target. We prepend a Host *
+    # block so it applies to every ssh target (ssh uses the first ProxyCommand
+    # it obtains for a host). The proxy allowlist-checks github.com:22 (in the
+    # default set) before splicing.
+    if [ -n "${SANDY_PROXY_IP:-}" ]; then
+        mkdir -p /home/claude/.ssh
+        _sshcfg=/home/claude/.ssh/config
+        _sshtmp="$(mktemp)"
+        {
+            printf 'Host *\n    ProxyCommand socat - PROXY:%s:%%h:%%p,proxyport=3128\n\n' "$SANDY_PROXY_IP"
+            [ -f "$_sshcfg" ] && cat "$_sshcfg"
+        } > "$_sshtmp"
+        mv "$_sshtmp" "$_sshcfg"
+        chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
+        chmod 700 /home/claude/.ssh
+        chmod 644 "$_sshcfg"
     fi
 fi
 
@@ -3041,6 +3141,97 @@ if [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
     fi
 fi
 
+# --- Egress proxy (M2.7) tri-state normalization ---------------------------
+# SANDY_EGRESS_PROXY: 0=off, 1=permissive (block private/LAN, allow internet),
+# 2=strict (default allowlist + SANDY_ALLOW_HOSTS only). 1 and 2 route the agent
+# through the sandy-proxy sidecar on an --internal network — the only thing that
+# actually closes F2 on macOS, where iptables is unreachable. _SANDY_PROXY_ON is
+# the single predicate the rest of the launcher branches on; _SANDY_PROXY_MODE
+# is the string the proxy config consumes.
+_SANDY_PROXY_ON=false
+_SANDY_PROXY_MODE=""
+# Default-on (permissive) as of 1.0: the egress proxy is the cross-platform
+# isolation posture. Set SANDY_EGRESS_PROXY=0 to fall back to legacy behavior
+# (Linux iptables; no isolation on macOS).
+case "${SANDY_EGRESS_PROXY:-1}" in
+    0) : ;;
+    1) _SANDY_PROXY_ON=true; _SANDY_PROXY_MODE="permissive" ;;
+    2) _SANDY_PROXY_ON=true; _SANDY_PROXY_MODE="strict" ;;
+    *)
+        echo "[sandy] ERROR: SANDY_EGRESS_PROXY='$SANDY_EGRESS_PROXY' invalid (want 0, 1, or 2)" >&2
+        exit 1 ;;
+esac
+
+# Default egress allowlist — the hosts an agent needs for normal coding work:
+# the model providers, GitHub (HTTPS + SSH), and the language package registries.
+# In strict mode (=2) this is the entire reachable set beyond SANDY_ALLOW_HOSTS;
+# in permissive mode (=1) it is unused for ALLOW decisions (all internet is
+# reachable) but still seeds DNS redirection so SNI-demux logging stays useful.
+# Entries: exact host, "*.suffix" wildcard, or "host:port" (CONNECT/SSH).
+SANDY_DEFAULT_ALLOW_HOSTS=(
+    # Anthropic / Claude
+    "api.anthropic.com"
+    "*.anthropic.com"
+    "statsig.anthropic.com"
+    # OpenAI / Codex
+    "api.openai.com"
+    "*.openai.com"
+    # Google / Gemini / Vertex
+    "generativelanguage.googleapis.com"
+    "*.googleapis.com"
+    "oauth2.googleapis.com"
+    "accounts.google.com"
+    # GitHub (HTTPS API + git, raw content, and SSH for git@github.com)
+    "github.com"
+    "github.com:22"
+    "api.github.com"
+    "codeload.github.com"
+    "*.githubusercontent.com"
+    "ssh.github.com:22"
+    # npm
+    "registry.npmjs.org"
+    "*.npmjs.org"
+    # PyPI
+    "pypi.org"
+    "files.pythonhosted.org"
+    # Rust crates
+    "crates.io"
+    "static.crates.io"
+    "index.crates.io"
+    # Go modules
+    "proxy.golang.org"
+    "sum.golang.org"
+    "*.golang.org"
+    # Debian (apt, for in-session package needs the agent may hit)
+    "deb.debian.org"
+    "security.debian.org"
+)
+
+# Collect the effective allowlist (defaults + user SANDY_ALLOW_HOSTS). Each
+# user entry is lightly validated: an exact host, a "*.suffix" wildcard, or a
+# "host:port" literal. Garbage is dropped with a warning rather than failing
+# the launch (one typo shouldn't block a session).
+_SANDY_ALLOW_EFFECTIVE=("${SANDY_DEFAULT_ALLOW_HOSTS[@]}")
+if [ -n "${SANDY_ALLOW_HOSTS:-}" ]; then
+    IFS=',' read -ra _extra_hosts <<< "$SANDY_ALLOW_HOSTS"
+    for _h in "${_extra_hosts[@]}"; do
+        _h="$(echo "$_h" | tr -d '[:space:]')"
+        [ -z "$_h" ] && continue
+        if [[ "$_h" =~ ^(\*\.)?[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+            _SANDY_ALLOW_EFFECTIVE+=("$_h")
+        else
+            warn "SANDY_ALLOW_HOSTS: skipping malformed entry '$_h'"
+        fi
+    done
+fi
+# When a local LLM is configured in proxy mode, the agent reaches it by name
+# (host.docker.internal) which the proxy DNS redirects to itself; the dedicated
+# forward listener then relays to the real host. In strict mode that name must
+# be allowlisted for the DNS responder to answer it.
+if [ "$_SANDY_PROXY_ON" = true ] && [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
+    _SANDY_ALLOW_EFFECTIVE+=("host.docker.internal")
+fi
+
 # Validate SANDY_SCREENSHOT_DIR. Reject shell metas, missing dir, and a few
 # obviously-too-broad targets ($HOME, /). Missing-dir is warn-and-skip rather
 # than hard-error: Docker would silently auto-create an empty host dir at
@@ -3227,7 +3418,7 @@ fi
 
 # Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
 if [ "$SANDY_REBUILD" = true ]; then
-    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_opencode" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.skills_build_hash"
+    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_opencode" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.build_hash_proxy" "$SANDY_HOME/.skills_build_hash"
     info "Build cache cleared. Images will be rebuilt."
 fi
 
@@ -3244,6 +3435,31 @@ if [ ! -f "$BASE_HASH_FILE" ] || [ "$(cat "$BASE_HASH_FILE")" != "$BASE_HASH" ] 
     BASE_REBUILT=true
 else
     info "Base image up to date."
+fi
+
+# Phase 1.5: egress proxy image (M2.7) — built whenever the proxy is on
+# (SANDY_EGRESS_PROXY=1 or 2; both modes share one image, mode is a runtime
+# config field). Independent of sandy-base (it's golang -> scratch), so it can
+# build right after the base phase. --no-cache so a triggered rebuild always
+# re-clones at the pinned ref (mirrors the base/agent build policy and avoids a
+# stale git-clone layer).
+PROXY_IMAGE_NAME="sandy-proxy"
+if [ "$_SANDY_PROXY_ON" = true ]; then
+    generate_dockerfile_proxy
+    if [ ! -f "$SANDY_HOME/Dockerfile.proxy" ] || ! diff -q "$SANDY_HOME/Dockerfile.proxy.new" "$SANDY_HOME/Dockerfile.proxy" &>/dev/null; then
+        mv "$SANDY_HOME/Dockerfile.proxy.new" "$SANDY_HOME/Dockerfile.proxy"
+    else
+        rm "$SANDY_HOME/Dockerfile.proxy.new"
+    fi
+    PROXY_HASH="$(sha256 < "$SANDY_HOME/Dockerfile.proxy" | cut -d' ' -f1)"
+    PROXY_HASH_FILE="$SANDY_HOME/.build_hash_proxy"
+    if [ ! -f "$PROXY_HASH_FILE" ] || [ "$(cat "$PROXY_HASH_FILE")" != "$PROXY_HASH" ] || ! docker image inspect "$PROXY_IMAGE_NAME" &>/dev/null; then
+        info "Building egress proxy image (sandy-proxy, ref=$(_sandy_proxy_ref))..."
+        docker build -q --no-cache -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$SANDY_HOME"
+        echo "$PROXY_HASH" > "$PROXY_HASH_FILE"
+    else
+        info "Egress proxy image up to date."
+    fi
 fi
 
 # Phase 2: Final image (agent — rebuilds on agent updates or base change)
@@ -3329,7 +3545,18 @@ fi
 # --- Ensure the per-instance isolated network exists ---
 CONTAINER_SUBNET=""
 CONTAINER_GATEWAY=""
+# Egress-proxy topology globals (set by ensure_network when proxy is on).
+SIDECAR_NETWORK=""        # --internal bridge: agent + proxy, no route off-bridge
+EGRESS_NETWORK=""         # normal bridge: proxy's internet leg
+PROXY_CONTAINER=""        # the running sandy-proxy sidecar container name
+PROXY_IP=""               # the proxy's fixed IP on SIDECAR_NETWORK
+PROXY_CONFIG_FILE=""      # host path of the generated /etc/sandy-proxy.json
+
 ensure_network() {
+    if [ "$_SANDY_PROXY_ON" = true ]; then
+        ensure_proxy_networks
+        return
+    fi
     info "Creating isolated network..."
     docker network create \
         --driver bridge \
@@ -3342,7 +3569,137 @@ ensure_network() {
     BRIDGE_NAME="$(docker network inspect "$NETWORK_NAME" --format '{{index .Options "com.docker.network.bridge.name"}}')"
 }
 
-ensure_network
+# Two-network topology for egress-proxy mode (M2.7). The agent runs on an
+# --internal "sidecar" bridge with NO route off it — the only thing reachable is
+# the dual-homed proxy, which is also connected to a normal "egress" bridge that
+# can reach the internet. This is what closes F2 (macOS LAN/host reach) and it
+# works identically on Linux and macOS because it relies on Docker's --internal
+# routing, not on iptables.
+#
+# The proxy needs a fixed, known IP on the sidecar so its DNS responder can hand
+# that address out (redirecting allowlisted names to itself) — which requires a
+# user-configured subnet (Docker only honors `--ip` then). We try a short list
+# of uncommon /24s and take the first that doesn't overlap an existing network.
+ensure_proxy_networks() {
+    SIDECAR_NETWORK="sandy_sidecar_$$"
+    EGRESS_NETWORK="sandy_egress_$$"
+    NETWORK_NAME="$SIDECAR_NETWORK"   # the agent container joins the sidecar
+
+    info "Creating egress-proxy networks (mode=$_SANDY_PROXY_MODE)..."
+    local candidates=(
+        "10.200.0.0/24" "10.201.0.0/24" "172.31.250.0/24" "192.168.231.0/24"
+    )
+    local created=false c
+    for c in "${candidates[@]}"; do
+        if docker network create \
+            --internal --driver bridge --ipv6=false \
+            --subnet "$c" --gateway "${c%.0/24}.1" \
+            "$SIDECAR_NETWORK" >/dev/null 2>&1; then
+            PROXY_IP="${c%.0/24}.2"
+            created=true
+            break
+        fi
+    done
+    if [ "$created" != true ]; then
+        error "Could not create the egress-proxy sidecar network — all candidate"
+        error "subnets (${candidates[*]}) overlap existing Docker networks."
+        error "Free one with 'docker network prune' or set SANDY_EGRESS_PROXY=0."
+        exit 1
+    fi
+
+    # The egress leg: a normal bridge with internet access (proxy only).
+    docker network create --driver bridge --ipv6=false "$EGRESS_NETWORK" >/dev/null
+
+    start_proxy_sidecar
+}
+
+# Generate the proxy config and start the dual-homed sidecar container. The
+# config is written to a sandbox-owned host file and bind-mounted read-only into
+# the proxy at /etc/sandy-proxy.json.
+start_proxy_sidecar() {
+    PROXY_CONTAINER="sandy-proxy-$$"
+    PROXY_CONFIG_FILE="$SANDBOX_DIR/sandy-proxy.json"
+
+    # Build the JSON allowlist array from the effective host list.
+    local allow_json="" h
+    for h in "${_SANDY_ALLOW_EFFECTIVE[@]}"; do
+        allow_json="${allow_json:+$allow_json,}\"$h\""
+    done
+    # local_llm: in proxy mode the LLM is reached via the proxy's forward
+    # listener (not an iptables hole), so pass host:port through to the config.
+    local llm_field=""
+    if [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
+        llm_field=",\"local_llm\":\"$SANDY_LOCAL_LLM_HOST\""
+    fi
+    printf '{"mode":"%s","proxy_ip":"%s","allow":[%s]%s}\n' \
+        "$_SANDY_PROXY_MODE" "$PROXY_IP" "$allow_json" "$llm_field" \
+        > "$PROXY_CONFIG_FILE"
+
+    # Assemble the proxy run as one array so an optional flag can be appended
+    # without an empty-array expansion (unsafe under `set -u` on bash 3.2/macOS).
+    #
+    # The proxy boots on the EGRESS network (not the sidecar). A container's
+    # default route comes from its *primary* network; the sidecar is `--internal`
+    # and has no gateway, so booting on it would leave the proxy with no route to
+    # the internet (upstream dials fail → the agent sees ECONNRESET). Booting on
+    # egress gives a real default route + NAT; the sidecar is attached second
+    # with the fixed IP the DNS responder hands out.
+    local proxy_run=(
+        docker run -d
+        --name "$PROXY_CONTAINER"
+        --network "$EGRESS_NETWORK"
+        --restart no
+        --read-only
+        --cap-drop ALL
+    )
+    # On Linux the proxy must be told how to reach the host for the local-LLM
+    # forward (Docker Desktop auto-provides host.docker.internal; the Linux
+    # daemon does not). Harmless/omitted when no LLM is configured.
+    if [[ "$OS" == "Linux" ]] && [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
+        proxy_run+=(--add-host "host.docker.internal:host-gateway")
+    fi
+    proxy_run+=(
+        -v "$PROXY_CONFIG_FILE":/etc/sandy-proxy.json:ro
+        "$PROXY_IMAGE_NAME"
+    )
+
+    info "Starting egress proxy sidecar ($PROXY_CONTAINER @ $PROXY_IP)..."
+    "${proxy_run[@]}" >/dev/null
+    # Attach the internal sidecar leg with the fixed IP the agent's DNS resolves
+    # to. (`--ip` works because the sidecar was created with an explicit subnet.)
+    docker network connect --ip "$PROXY_IP" "$SIDECAR_NETWORK" "$PROXY_CONTAINER" >/dev/null
+
+    # Fail fast if the proxy died on a bad config (e.g. it exits non-zero).
+    if [ "$(docker inspect -f '{{.State.Running}}' "$PROXY_CONTAINER" 2>/dev/null)" != "true" ]; then
+        error "Egress proxy failed to start. Logs:"
+        docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+        exit 1
+    fi
+
+    # Debug probe: stand up a throwaway container with the agent's exact network
+    # view (sidecar + same --dns) and report what it resolves and reaches. This
+    # isolates the proxy path from the agent: `remote_ip` in the curl line is the
+    # tell — if it's the proxy IP, DNS redirect + transparent intercept work; if
+    # it's a public Anthropic IP, the agent is bypassing the proxy (DNS not
+    # redirecting) and dying on --internal's missing route.
+    if [ "${SANDY_DEBUG_PROXY:-0}" = "1" ]; then
+        echo "sandy: [debug] probing the agent resolver view on the sidecar..." >&2
+        docker run --rm --network "$SIDECAR_NETWORK" --dns "$PROXY_IP" \
+            --entrypoint bash "$IMAGE_NAME" -c '
+                echo "[resolv.conf]"; cat /etc/resolv.conf
+                echo "[getent hosts api.anthropic.com]"; getent hosts api.anthropic.com || echo "(resolve failed)"
+                echo "[curl https://api.anthropic.com]"
+                curl -sS -m 6 -o /dev/null -w "  http_code=%{http_code} remote_ip=%{remote_ip}\n" \
+                    https://api.anthropic.com 2>&1 || echo "  (curl failed: $?)"
+            ' 2>&1 | sed 's/^/    /' >&2 || true
+    fi
+}
+
+# NOTE: ensure_network is intentionally NOT called here. It creates Docker
+# networks (and, in proxy mode, the proxy container) — state that must be torn
+# down on exit. It is called *after* the cleanup trap is installed, below, so a
+# failure during network/proxy setup can't leak networks (which would exhaust
+# Docker's address pool across repeated failed launches).
 
 # --- Phase 2.5: Skill pack image (after config so SANDY_SKILL_PACKS is available) ---
 if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
@@ -4107,8 +4464,7 @@ if [ -f "$PROJECT_DOCKERFILE" ]; then
     IMAGE_NAME="$PROJECT_IMAGE_NAME"
 fi
 
-# --- Detect platform ---
-OS="$(uname -s)"
+# --- Platform already detected near the top (OS="$(uname -s)") ---
 
 # --- Apply LAN-blocking iptables rules (Linux only) ---
 PRIVATE_RANGES=(
@@ -4168,7 +4524,8 @@ apply_network_isolation() {
         warn " sandy cannot block LAN access from the container on this OS."
         warn " The container can reach your host's localhost services,"
         warn " host.docker.internal, and any device on your physical LAN."
-        warn " Real fix (egress proxy sidecar) is scheduled for sandy 1.1."
+        warn " Fix: set SANDY_EGRESS_PROXY=1 (proxy sidecar, blocks LAN/host"
+        warn " but allows internet) or =2 (strict allowlist). Works on $OS."
         warn "═══════════════════════════════════════════════════════════════"
     fi
 }
@@ -4283,7 +4640,24 @@ cleanup() {
         rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
     cleanup_network_isolation
-    # Remove per-instance Docker network
+    # Egress-proxy teardown: stop the sidecar container and remove both the
+    # sidecar and egress networks (a network can't be removed while a container
+    # is attached, so the proxy must go first).
+    if [ -n "${PROXY_CONTAINER:-}" ]; then
+        # The proxy is a scratch image (no shell → no `docker exec` to poke it),
+        # and we're about to destroy it, so `docker logs` is the only diagnostic
+        # window. Dump it on demand before teardown.
+        if [ "${SANDY_DEBUG_PROXY:-0}" = "1" ]; then
+            echo "sandy: [debug] egress proxy logs ($PROXY_CONTAINER):" >&2
+            docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+        fi
+        docker rm -f "$PROXY_CONTAINER" >/dev/null 2>&1 || true
+    fi
+    if [ -n "${EGRESS_NETWORK:-}" ]; then
+        docker network rm "$EGRESS_NETWORK" >/dev/null 2>&1 || true
+    fi
+    # Remove per-instance Docker network (sidecar in proxy mode, else the
+    # single isolated net — NETWORK_NAME points at whichever applies).
     docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
     if [ -n "${CRED_TMPDIR:-}" ]; then
         rm -rf "$CRED_TMPDIR"
@@ -4309,7 +4683,21 @@ cleanup() {
 }
 
 trap cleanup EXIT INT TERM HUP QUIT ABRT
-apply_network_isolation
+
+# Create the per-instance network(s) now that the cleanup trap is armed — in
+# proxy mode this also starts the dual-homed proxy container. Doing it post-trap
+# guarantees teardown even if setup fails partway (no leaked networks/pool
+# exhaustion). apply_network_isolation (below) consumes the vars it sets.
+ensure_network
+
+# In egress-proxy mode the --internal sidecar IS the isolation (no route off the
+# bridge), and on the egress side iptables RFC1918 DROPs would also break the
+# proxy's own local-LLM forward to host.docker.internal — so we skip iptables
+# entirely and rely on the topology. apply_network_isolation still runs the
+# macOS warning banner suppression implicitly by not being called.
+if [ "$_SANDY_PROXY_ON" != true ]; then
+    apply_network_isolation
+fi
 
 # --- Ensure .claude.json exists (setup state: theme, terms acceptance, etc.) ---
 # Stored outside SANDBOX_DIR to avoid overlapping Docker bind mounts.
@@ -4588,7 +4976,34 @@ fi
 # handles normal exits; a SIGKILL leaves the container behind).
 CONTAINER_NAME="sandy-${SANDBOX_NAME}"
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-RUN_FLAGS=(--rm -it --name "$CONTAINER_NAME")
+# TTY/stdin handling differs by mode:
+#   - Interactive: -it. tmux requires a TTY.
+#   - Headless (-p): NO -t — a pseudo-TTY makes Ink/React CLIs (gemini) think
+#     they're interactive and busy-loop a render instead of one-shot output.
+#     Attach stdin (-i) ONLY when it's actually piped/redirected (not a
+#     terminal): the prompt is passed as an arg, and agents like `codex exec`
+#     read stdin when it's an open non-TTY fd — handed a terminal they block
+#     forever ("Reading additional input from stdin..."). With a terminal
+#     stdin we attach nothing, so the agent sees EOF and runs the prompt arg;
+#     with a real pipe (echo ... | sandy -p) we forward it.
+#
+# Compute headlessness here from the forwarded args rather than reusing the
+# earlier $_sandy_is_headless: that detection runs inside the launch path, which
+# executes AFTER this RUN_FLAGS assembly, so the var isn't bound yet (set -u).
+# $@ still holds the agent args at this point (they're passed to docker run).
+_sandy_headless_run=false
+for _a in "$@"; do
+    case "$_a" in -p|--print|--prompt) _sandy_headless_run=true; break ;; esac
+done
+if [ "$_sandy_headless_run" = "true" ]; then
+    if [ -t 0 ]; then
+        RUN_FLAGS=(--rm --name "$CONTAINER_NAME")        # terminal stdin: don't attach it
+    else
+        RUN_FLAGS=(--rm -i --name "$CONTAINER_NAME")     # piped/redirected stdin: forward it
+    fi
+else
+    RUN_FLAGS=(--rm -it --name "$CONTAINER_NAME")
+fi
 RUN_FLAGS+=(--cpus "$SANDY_CPUS" --memory "$SANDY_MEM")
 RUN_FLAGS+=(--security-opt no-new-privileges:true)
 RUN_FLAGS+=(--cap-drop ALL)
@@ -4599,10 +5014,32 @@ RUN_FLAGS+=(--read-only)
 RUN_FLAGS+=(--tmpfs /tmp:exec,size=1G)
 RUN_FLAGS+=(--tmpfs /home/claude:exec,size=2G,uid=1001,gid=1001)
 RUN_FLAGS+=(--network "$NETWORK_NAME")
+if [ "$_SANDY_PROXY_ON" = true ]; then
+    # Egress-proxy mode: the agent is on the --internal sidecar with no route
+    # off it. Point its resolver at the proxy's DNS responder, which redirects
+    # permitted names to the proxy IP (so traffic funnels through the transparent
+    # listeners) and NXDOMAINs/denies the rest. No host.docker.internal
+    # --add-host: name resolution must go through the proxy (including the
+    # local-LLM forward, which the proxy answers as its own IP). This single
+    # mechanism supersedes the per-OS magic-hostname juggling below.
+    RUN_FLAGS+=(--dns "$PROXY_IP")
+    RUN_FLAGS+=(-e "SANDY_PROXY_IP=$PROXY_IP")
+    # SSH-agent forwarding under --internal: on Linux the agent socket is a
+    # direct bind mount (no network), so it keeps working. On macOS it relies on
+    # a TCP relay to host.docker.internal, which the --internal sidecar blocks —
+    # git-over-SSH still works (it tunnels through the proxy CONNECT via the
+    # ProxyCommand injected in the entrypoint), but agent-backed *signing* can't
+    # reach the host. Warn so the user isn't surprised by auth failures.
+    if [[ "${SANDY_SSH:-token}" == "agent" ]] && [[ "$OS" != "Linux" ]]; then
+        warn "SANDY_SSH=agent + egress proxy on $OS: the SSH-agent socket relay"
+        warn "  cannot cross the --internal sidecar. git-over-SSH still works via"
+        warn "  the proxy, but host-agent key signing is unavailable. Use"
+        warn "  SANDY_SSH=token (HTTPS) for a fully-supported path under the proxy."
+    fi
 # On non-Linux (macOS), nullify Docker Desktop "magic" hostnames that point
 # at the host gateway. Does not stop raw-IP access (that's Sprint 3), but
 # removes the easiest default-hostname path and anything calling by name.
-if [[ "$OS" != "Linux" ]]; then
+elif [[ "$OS" != "Linux" ]]; then
     RUN_FLAGS+=(--add-host "gateway.docker.internal:127.0.0.1")
     RUN_FLAGS+=(--add-host "metadata.google.internal:127.0.0.1")
     # host.docker.internal is trickier — sandy's own in-container SSH agent
@@ -5324,7 +5761,20 @@ fi
 info "  Working directory: $WORK_DIR"
 info "  Sandbox:           $SANDBOX_DIR"
 info "  Resources:         ${SANDY_CPUS} CPUs, ${SANDY_MEM} memory"
-info "  Network:           Public internet only (LAN blocked)"
+# Network posture line — honest about what isolation is actually active. The
+# old hardcoded "LAN blocked" lied on macOS with the proxy off (the F2 gap), so
+# it's now derived from the real mode + platform.
+if [ "$_SANDY_PROXY_ON" = true ]; then
+    if [ "$_SANDY_PROXY_MODE" = strict ]; then
+        info "  Network:           Egress proxy (strict): allowlist + SANDY_ALLOW_HOSTS only; LAN/host blocked"
+    else
+        info "  Network:           Egress proxy (permissive): public internet allowed; LAN/host/metadata blocked"
+    fi
+elif [[ "$OS" == "Linux" ]]; then
+    info "  Network:           Public internet only (LAN blocked via iptables)"
+else
+    info "  Network:           Internet + LAN reachable — NO isolation on $OS (set SANDY_EGRESS_PROXY=1)"
+fi
 echo ""
 
 if [ "$SANDY_VERBOSE" -ge 3 ]; then
