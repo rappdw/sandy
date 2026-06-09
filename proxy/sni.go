@@ -145,11 +145,20 @@ func parseServerName(body []byte) (string, error) {
 func extractHTTPHost(data []byte) (string, error) {
 	s := string(data)
 	end := strings.Index(s, "\r\n\r\n")
+	terminated := end >= 0
 	headerBlock := s
-	if end >= 0 {
+	if terminated {
 		headerBlock = s[:end]
 	}
-	for _, line := range strings.Split(headerBlock, "\r\n") {
+	lines := strings.Split(headerBlock, "\r\n")
+	for idx, line := range lines {
+		// When the header block isn't terminated yet, the final segment is a
+		// partial line whose closing \r\n we haven't seen — don't trust it (its
+		// value could still be growing, e.g. "Host: 1" → "Host: 127.0.0.1").
+		// Break and ask for more bytes rather than returning a truncated host.
+		if !terminated && idx == len(lines)-1 {
+			break
+		}
 		// Case-insensitive "Host:" prefix.
 		if len(line) >= 5 && strings.EqualFold(line[:5], "host:") {
 			host := strings.TrimSpace(line[5:])

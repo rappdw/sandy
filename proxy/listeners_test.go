@@ -167,6 +167,54 @@ func TestTransparentTLS_DeniedCloses(t *testing.T) {
 	}
 }
 
+// TestTransparentHTTP_ForwardsOnce is the regression test for the double-send
+// bug: peekHost peeks (does NOT consume), so the request stays buffered in br
+// and must reach the upstream exactly once via the splice — never also written
+// out explicitly. The old code did both, so the upstream received the request
+// twice and a real TLS server rejected the duplicated ClientHello with a
+// "protocol version" alert. We drive the :80 path against a loopback echo
+// server (constructing the listener with the echo server's port so its
+// same-port dial lands there) and assert the echoed bytes equal the request
+// exactly — not a doubled copy.
+func TestTransparentHTTP_ForwardsOnce(t *testing.T) {
+	upHost, upPort := echoServer(t, "") // pure echo, no banner
+	p := testPolicy(modePermissive, fmt.Sprintf("%s:%d", upHost, upPort))
+	l := &transparentListener{port: upPort, policy: p, extract: extractHTTPHost}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go l.serve(ln)
+
+	c, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+
+	req := fmt.Sprintf("GET /uniq HTTP/1.1\r\nHost: %s\r\nX-Tag: ONCE\r\n\r\n", upHost)
+	if _, err := c.Write([]byte(req)); err != nil {
+		t.Fatal(err)
+	}
+	// The echo server returns exactly what it received; with the bug it would be
+	// the request doubled. Read len(req) bytes and confirm they equal req.
+	got := make([]byte, len(req))
+	if _, err := io.ReadFull(c, got); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if string(got) != req {
+		t.Fatalf("upstream echoed %q, want %q (request not forwarded verbatim)", got, req)
+	}
+	// A duplicated send would leave a second copy waiting; assert none arrives.
+	_ = c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if n, _ := c.Read(make([]byte, 1)); n > 0 {
+		t.Fatal("extra bytes echoed back — request was forwarded more than once")
+	}
+}
+
 func TestForward_PipesToTarget(t *testing.T) {
 	upHost, upPort := echoServer(t, "OLLAMA\n")
 	cfg := &Config{

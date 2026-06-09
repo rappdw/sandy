@@ -43,10 +43,13 @@ func (l *transparentListener) serve(ln net.Listener) {
 }
 
 func (l *transparentListener) handle(client net.Conn) {
-	// Peek into a buffered reader so the bytes we consume to find the hostname
-	// can be replayed to the upstream untouched.
+	// Peek (not read) into a buffered reader to find the hostname. Peeking does
+	// NOT consume, so the ClientHello / HTTP request stays in br and is replayed
+	// to the upstream naturally by the splice below — we must NOT also write it
+	// out explicitly, or the upstream would receive the handshake twice and
+	// reject it (a TLS "protocol version" alert).
 	br := bufio.NewReaderSize(client, peekLimit)
-	host, prefix, err := peekHost(br, l.extract)
+	host, err := peekHost(br, l.extract)
 	if err != nil {
 		client.Close()
 		return
@@ -62,45 +65,37 @@ func (l *transparentListener) handle(client net.Conn) {
 		client.Close()
 		return
 	}
-	// Replay the peeked bytes to the upstream, then hand off to the splicer.
-	if _, err := up.Write(prefix); err != nil {
-		client.Close()
-		up.Close()
-		return
-	}
-	// Wrap the client so the splicer reads any bytes still buffered in br plus
-	// the live connection.
+	// Splice through prefixConn so the splicer reads the still-buffered peeked
+	// bytes (the ClientHello / request line) first, then the live connection —
+	// the full client stream reaches the upstream exactly once.
 	splice(&prefixConn{Conn: client, r: br}, up)
 }
 
-// peekHost grows a buffer from br until extract yields a hostname (or a hard
-// error). It returns the host and the exact bytes consumed so far, so they can
-// be replayed upstream.
-func peekHost(br *bufio.Reader, extract func([]byte) (string, error)) (host string, prefix []byte, err error) {
+// peekHost grows a peek window over br until extract yields a hostname (or a
+// hard error). It only peeks — br is never advanced — so the caller's splice
+// replays the bytes to the upstream untouched.
+func peekHost(br *bufio.Reader, extract func([]byte) (string, error)) (host string, err error) {
 	for n := 1; n <= peekLimit; n++ {
 		buf, perr := br.Peek(n)
 		if len(buf) < n {
 			// Couldn't get n bytes: try to extract from whatever we have; if
 			// that still wants more, we're out of input.
-			host, e := extract(buf)
-			if e == nil {
-				return host, append([]byte(nil), buf...), nil
+			if h, e := extract(buf); e == nil {
+				return h, nil
 			}
 			if perr != nil {
-				return "", nil, perr
+				return "", perr
 			}
-			return "", nil, errShortRead
+			return "", errShortRead
 		}
-		host, e := extract(buf)
-		if e == nil {
-			return host, append([]byte(nil), buf...), nil
-		}
-		if !errors.Is(e, errShortRead) {
-			return "", nil, e // a real parse error: not TLS/HTTP, no Host, etc.
+		if h, e := extract(buf); e == nil {
+			return h, nil
+		} else if !errors.Is(e, errShortRead) {
+			return "", e // a real parse error: not TLS/HTTP, no Host, etc.
 		}
 		// errShortRead -> grow and retry.
 	}
-	return "", nil, errors.New("hostname not found within peek limit")
+	return "", errors.New("hostname not found within peek limit")
 }
 
 // prefixConn lets the splicer read through the bufio.Reader (which holds the
