@@ -4972,7 +4972,16 @@ docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 # think they're interactive and busy-loop a render instead of doing one-shot
 # output (observed: gemini --prompt pegging a core indefinitely). Keep stdin
 # (-i) either way; drop -t when headless.
-if [ "$_sandy_is_headless" = "true" ]; then
+#
+# Compute headlessness here from the forwarded args rather than reusing the
+# earlier $_sandy_is_headless: that detection runs inside the launch path, which
+# executes AFTER this RUN_FLAGS assembly, so the var isn't bound yet (set -u).
+# $@ still holds the agent args at this point (they're passed to docker run).
+_sandy_headless_run=false
+for _a in "$@"; do
+    case "$_a" in -p|--print|--prompt) _sandy_headless_run=true; break ;; esac
+done
+if [ "$_sandy_headless_run" = "true" ]; then
     RUN_FLAGS=(--rm -i --name "$CONTAINER_NAME")
 else
     RUN_FLAGS=(--rm -it --name "$CONTAINER_NAME")

@@ -876,8 +876,8 @@ check "container name includes sandbox name" \
 # (tmux needs it); headless uses -i only.
 check "headless drops the TTY (-i), interactive keeps -it" \
     bash -c 'grep -q -- "RUN_FLAGS=(--rm -i --name" "$1" && grep -q -- "RUN_FLAGS=(--rm -it --name" "$1"' -- "$SCRIPT"
-check "the -it/-i choice is gated on _sandy_is_headless" \
-    bash -c 'grep -B2 -- "RUN_FLAGS=(--rm -i --name" "$1" | grep -q "_sandy_is_headless"' -- "$SCRIPT"
+check "the -it/-i choice is gated on a headless check from the forwarded args" \
+    bash -c 'grep -B8 -- "RUN_FLAGS=(--rm -i --name" "$1" | grep -q "_sandy_headless_run=true"' -- "$SCRIPT"
 
 # ============================================================
 info "19. pip wrapper created in root section (not inside bash -c)"
