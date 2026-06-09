@@ -188,3 +188,48 @@ Small once gated: delete the iptables functions + the `_SANDY_PROXY_ON != true`
 branches that call them, make `_SANDY_PROXY_ON` always-true (or drop the
 tri-state's `0`), update `--print-schema`/docs/tests. The closing-the-gap option
 (if needed) is the larger piece and would be its own entry.
+
+---
+
+## Codex CLI v0.138+ auth — env-var path no longer works in the sandbox
+
+**Target: TBD (codex-version-driven).** Filed 2026-06-09.
+
+### What / the symptom
+
+On codex v0.138 inside sandy, neither auth path produces a working session:
+
+- **OAuth** (read-only `~/.codex/auth.json` mount): ChatGPT uses single-use,
+  rotating refresh tokens. The first in-container refresh consumes the host's
+  refresh token but can't persist the new one (read-only mount) → every later
+  session gets `refresh_token_reused` (401) and codex **retries in a tight loop**
+  (looks like a 99%-CPU spin).
+- **API key** (`OPENAI_API_KEY`): sandy forwards it correctly
+  (`-e OPENAI_API_KEY=…`, confirmed), and codex's env shows it — but codex v0.138
+  sends **no Authorization header** to the Responses API (`wss://api.openai.com/
+  v1/responses` → 401 "Missing bearer or basic authentication"). So v0.138 seems
+  to no longer read `OPENAI_API_KEY` from the env for the Responses path.
+
+CLAUDE.md still says "`OPENAI_API_KEY` env var (what codex CLI reads natively)" —
+that's stale for v0.138.
+
+### Likely fix (needs verification against the installed codex version)
+
+Stop relying on the env var. At entrypoint, write the key into codex's expected
+location — either run `codex login --api-key "$OPENAI_API_KEY"` (writes
+`auth.json`) or seed the key into `~/.codex/config.toml` under the openai
+provider — whichever v0.138 actually honors. For OAuth, consider a writable
+*ephemeral* `auth.json` copy (tmpfs, not bind-mounted back to host) so in-session
+refresh persists for that session — but note this does NOT fix the host's
+consumed refresh token across sessions, so re-login on the host is still needed
+once. Investigate codex's current auth precedence (env vs auth.json vs config)
+before choosing.
+
+### Why deferred
+
+Codex-CLI-version churn, not a sandy architecture issue, and codex is the
+least-critical agent. It blocked nothing in M2.7 (the integration suite §1-12 is
+pinned to no-proxy and codex sections are creds-dependent). Worth its own small
+PR once the right v0.138 mechanism is confirmed. Workaround today: use a current
+codex version whose env-var auth works, or pin codex auth via whatever method
+the installed version documents.
