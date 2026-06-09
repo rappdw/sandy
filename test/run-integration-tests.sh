@@ -1039,6 +1039,56 @@ else
 fi
 
 # ============================================================
+info "13. Egress proxy (M2.7) — end-to-end through the sidecar"
+# ============================================================
+# Proves the agent reaches the model API THROUGH the proxy on the --internal
+# two-network topology (the macOS F2 fix; identical on Linux). Requires Claude
+# credentials. Until M2.7 merges to main, the proxy image builds from the
+# current branch, so pin SANDY_PROXY_REF to it (a release pins its version tag).
+# NOTE: the macOS-specific LAN-block behavior is covered by the manual checklist
+# in TESTING_PLAN.md §6 (CI can't reach Docker Desktop's VM networking).
+if [ "$HAS_CLAUDE" = true ]; then
+    _PX_REF="$(git -C "$(dirname "$SANDY_SCRIPT")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+    setup_project claude "integ-proxy"
+
+    # Permissive (=1): the agent must reach api.anthropic.com via the proxy.
+    _out="$(run_sandy_headless "SANDY_EGRESS_PROXY=1" "SANDY_PROXY_REF=$_PX_REF" -- -p "reply with exactly one word: proxied")"
+
+    if echo "$_out" | grep -q "Creating egress-proxy networks (mode=permissive)"; then
+        pass "proxy mode 1 stands up the egress-proxy networks + sidecar"
+    else
+        fail "proxy mode 1 stands up the egress-proxy networks + sidecar"
+        echo "    (output: $(echo "$_out" | head -6 | tr '\n' ' '))" >&2
+    fi
+
+    if echo "$_out" | grep -qi "proxied" && ! echo "$_out" | grep -qi "ECONNRESET\|Unable to connect to API"; then
+        pass "agent reaches the model API through the proxy (no ECONNRESET)"
+    else
+        fail "agent reaches the model API through the proxy"
+        echo "    (output: $(echo "$_out" | tail -6 | tr '\n' ' '))" >&2
+    fi
+
+    # Networks must be torn down on exit — a leak exhausts Docker's address pool.
+    if [ -z "$(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' || true)" ]; then
+        pass "proxy networks cleaned up after exit (no address-pool leak)"
+    else
+        fail "proxy networks cleaned up after exit (no address-pool leak)"
+        echo "    (leaked: $(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' | tr '\n' ' '))" >&2
+    fi
+
+    # Opt-out (=0): no proxy path; the agent still works (legacy isolation).
+    _out0="$(run_sandy_headless "SANDY_EGRESS_PROXY=0" -- -p "reply with exactly one word: direct")"
+    if echo "$_out0" | grep -qi "direct" && ! echo "$_out0" | grep -q "egress-proxy networks"; then
+        pass "SANDY_EGRESS_PROXY=0 opts out of the proxy path"
+    else
+        fail "SANDY_EGRESS_PROXY=0 opts out of the proxy path"
+        echo "    (output: $(echo "$_out0" | tail -4 | tr '\n' ' '))" >&2
+    fi
+else
+    skip "egress proxy end-to-end (no Claude credentials)"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true

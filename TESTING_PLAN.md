@@ -319,6 +319,88 @@ sandy
 
 ---
 
+# 6. Egress proxy (`SANDY_EGRESS_PROXY`) — macOS
+
+The egress proxy is the one feature CI **cannot** cover: GitHub Actions is
+Linux-only, and the whole point of M2.7 is to fix macOS network isolation
+(finding F2), where iptables is unreachable. This section is the manual macOS
+gate. Run it on real Docker Desktop whenever the proxy code, the launcher
+network wiring, or Docker Desktop itself changes.
+
+Prereqs: macOS + Docker Desktop, working Claude (OAuth or `ANTHROPIC_API_KEY`).
+Until M2.7 merges to `main`, the proxy image is built from the branch, so set
+`SANDY_PROXY_REF` to the M2.7 branch. After merge, drop it (a release pins its
+version tag).
+
+## 6.0 Re-run the topology spike (do this first when Docker Desktop updated)
+
+```sh
+bash test/spike/macos-internal-network-spike.sh
+```
+
+- [ ] Ends with `GATE: PASSED on macOS.` (all assertions). If it fails, the
+      `--internal` two-network assumptions no longer hold on this Docker Desktop
+      version — stop and investigate before trusting the proxy.
+
+## 6.1 Permissive mode (`=1`) — closes F2 with zero friction
+
+```sh
+cd ~/some-project
+SANDY_EGRESS_PROXY=1 SANDY_PROXY_REF=<m2.7-branch> SANDY_DEBUG_PROXY=1 \
+  sandy -p "run: curl -sS -m 8 https://api.github.com/zen; echo ---; curl -sS -m 5 http://192.168.1.1 || echo LAN-blocked"
+```
+
+- [ ] `Creating egress-proxy networks (mode=permissive)` then `Starting egress
+      proxy sidecar (… @ <ip>)`
+- [ ] Launch summary: `Network: Egress proxy (permissive): public internet
+      allowed; LAN/host/metadata blocked`
+- [ ] The `[debug] probing the agent resolver view` block shows
+      `getent … api.anthropic.com → <proxy-ip>` and `curl … http_code=404
+      remote_ip=<proxy-ip>` (a real 404 from the API **through** the proxy)
+- [ ] The agent runs: the `zen` quote prints (HTTPS through the proxy works
+      end-to-end — no `ECONNRESET`)
+- [ ] `http://192.168.1.1` fails fast → `LAN-blocked` (**F2 closed**)
+- [ ] On exit, no leaked networks: `docker network ls | grep sandy_` is empty
+
+## 6.2 Strict mode (`=2`) — allowlist only
+
+```sh
+SANDY_EGRESS_PROXY=2 SANDY_PROXY_REF=<m2.7-branch> \
+  sandy -p "run: curl -sS -m 8 https://api.github.com/zen; echo ---; curl -sS -m 6 https://example.com || echo example-blocked"
+```
+
+- [ ] Launch summary: `Network: Egress proxy (strict): allowlist + …`
+- [ ] `api.github.com` (in the default allowlist) reachable → `zen` quote prints
+- [ ] `example.com` (not allowlisted) blocked → `example-blocked`
+- [ ] Add it back: `SANDY_ALLOW_HOSTS=example.com SANDY_EGRESS_PROXY=2 …` →
+      `example.com` now reachable (approve the passive-privileged prompt if run
+      from a workspace `.sandy/config`)
+
+## 6.3 Off (`=0`, default) — honest warning still fires
+
+```sh
+sandy -p "echo hi"
+```
+
+- [ ] The macOS no-isolation warning banner prints (`Network isolation is NOT
+      active on Darwin … set SANDY_EGRESS_PROXY=1`)
+- [ ] Launch summary: `Network: Internet + LAN reachable — NO isolation on
+      Darwin …`
+
+## 6.4 SSH-agent interaction (if you use `SANDY_SSH=agent`)
+
+```sh
+SANDY_SSH=agent SANDY_EGRESS_PROXY=1 SANDY_PROXY_REF=<m2.7-branch> \
+  sandy -p "run: ssh -o StrictHostKeyChecking=accept-new -T git@github.com 2>&1 | head -1"
+```
+
+- [ ] A warning notes host-agent signing is unavailable on macOS under the proxy
+- [ ] git-over-SSH still tunnels: the `git@github.com` line returns GitHub's
+      `Hi <user>! You've successfully authenticated…` **or** a permission line
+      (proves the CONNECT tunnel reached github.com:22), not a connection error
+
+---
+
 # Cleanup
 
 ```sh
@@ -339,4 +421,9 @@ docker rmi sandy-gemini-cli sandy-both sandy-codex sandy-opencode 2>/dev/null ||
 | 2.4 | Host file visible in overlay | Overlay mount not applied |
 | 3.2 | Migration runs every launch | Migration guard broken |
 | 4.1 | Single tmux pane | `build_both` launch block structural bug |
+| 6.1 | `ECONNRESET` / `tlsv1 alert protocol version` | Transparent path double-sends the ClientHello (`up.Write(prefix)` not removed) |
+| 6.1 | probe `remote_ip` is a public IP, not the proxy | DNS redirect not taking effect (agent not on sidecar, or `--dns` not applied) |
+| 6.1 | upstream dials time out (slow fail) | Proxy booted on the `--internal` sidecar instead of egress (no default route) |
+| 6.1 | leaked `sandy_*` networks after exit | `ensure_network` runs before the cleanup trap is armed |
+| 6.3 | no warning banner with proxy off on macOS | `apply_network_isolation` wrongly skipped, or banner removed unconditionally |
 | 5 | Relay PID left behind after exit | `cleanup()` trap missing `CHANNEL_RELAY_PID` |

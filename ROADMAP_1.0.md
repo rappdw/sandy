@@ -380,7 +380,19 @@ proxy-off — is now derived from the real mode/platform: permissive / strict /
 Linux-iptables / "NO isolation on macOS (set SANDY_EGRESS_PROXY=1)". Static
 tests cover the mode-aware line and the gated banner.
 
-### PR 2.7.5 — Integration tests + manual macOS checklist
+### PR 2.7.5 — Integration tests + manual macOS checklist — ◑ IN PROGRESS
+
+> **Status (2026-06-09).** Artifacts written: a Linux integration section
+> (`run-integration-tests.sh` §13 — proxy stands up, agent reaches the API
+> through it, networks clean up, `=0` opt-out) and the manual macOS checklist
+> (`TESTING_PLAN.md` §6, including the failure signatures for every bug the live
+> bring-up surfaced). **Validated live:** §6.1 permissive on real Docker Desktop
+> — F2 closed (GitHub reachable, `192.168.1.1` blocked), Claude Code runs, no
+> leaks. **Still to run:** the §13 Linux integration pass (needs Linux + Docker +
+> Claude creds), and macOS §6.2 (strict), §6.3 (off-warning), §6.4 (SSH-agent).
+> The aspirational automated list below is broader than §13 ships today (no ECH/
+> tool-compat/local-LLM integration assertions yet — those are post-merge or
+> manual); trimmed to keep the rc honest.
 
 **Automated (Linux CI)** in `test/run-integration-tests.sh`:
 - Allowlisted host (`api.anthropic.com`) reachable from inside a sandy container with the proxy on (transparent HTTPS path).
@@ -651,7 +663,7 @@ M2.7 PR 2.7.2 (sandy-proxy Dockerfile + phased build)               ✓ done
 M2.7 PR 2.7.3 (launcher wiring: sidecar --internal + egress net +   ✓ done
               proxy + ssh ProxyCommand + tri-state 0/1/2 + tests)
 M2.7 PR 2.7.4 (remove macOS warning — only when proxy is on)        ✓ done
-M2.7 PR 2.7.5 (integration tests + manual macOS checklist)          ← NEXT
+M2.7 PR 2.7.5 (integration tests + manual macOS checklist)          ◑ written, needs run
                                  ──▶ tag 0.13.1 or 0.14.0-pre
     │
     ▼
