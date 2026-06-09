@@ -3698,9 +3698,11 @@ check "proxy ref: GITHUB_HEAD_REF used in CI PR context" \
 _sandy_proxy_ref")" = "my-pr-branch" ]' -- "$_PX_FNS"
 
 # Generator shape: multi-stage golang -> scratch, clones at the build-arg ref,
-# static build, correct entrypoint.
+# static build, correct entrypoint. GITHUB_HEAD_REF= so the release-version ref
+# (v0.13.1) is what's generated — otherwise PR CI's ambient GITHUB_HEAD_REF would
+# make _sandy_proxy_ref emit the branch name instead.
 _PX_TMP="$(mktemp -d)"
-SANDY_HOME="$_PX_TMP" SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" \
+SANDY_HOME="$_PX_TMP" SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" GITHUB_HEAD_REF= \
     bash -c "$_PX_FNS
 generate_dockerfile_proxy" 2>/dev/null
 _PX_DF="$_PX_TMP/Dockerfile.proxy.new"
