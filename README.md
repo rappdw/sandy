@@ -116,7 +116,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | Variable | Default | Description |
 |---|---|---|
 | `SANDY_AGENT` | `claude` | AI agent(s) to run. Single: `claude`, `gemini`, `codex`, `opencode`. Multi (comma-separated, 2–4 panes in tmux): e.g. `claude,gemini` or `claude,gemini,codex,opencode`. Alias: `all` = `claude,gemini,codex,opencode` |
-| `SANDY_MODEL` | `claude-opus-4-8` | Claude model to use (applies whenever `claude` is in `SANDY_AGENT`) |
+| `SANDY_MODEL` | `claude-fable-5` | Claude model to use (applies whenever `claude` is in `SANDY_AGENT`) |
 | `GEMINI_API_KEY` | (unset) | Google API key for Gemini CLI. Put in `.sandy/.secrets` |
 | `GEMINI_MODEL` | (unset) | Gemini model override |
 | `SANDY_GEMINI_AUTH` | `auto` | Force Gemini auth path: `auto`, `api_key`, `oauth`, or `adc` |
