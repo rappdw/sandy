@@ -76,6 +76,16 @@ set -euo pipefail
 # passive config allowlist — a committed .sandy/config cannot set it.
 export SANDY_AUTO_APPROVE_PRIVILEGED=1
 
+# As of 1.0 the egress proxy is the default (SANDY_EGRESS_PROXY=1). The
+# agent-functionality sections (§1-12) test builds / headless / credentials and
+# must NOT be coupled to proxy correctness (a proxy bug would otherwise hang or
+# fail every section, masking what they actually verify) — and they'd pay a
+# proxy build + sidecar startup per launch. Pin them to legacy/no-proxy here;
+# §13 sets SANDY_EGRESS_PROXY=1 explicitly to exercise the proxy end-to-end.
+# Respect an explicit override so a maintainer can force the whole suite onto
+# the proxy if they want.
+export SANDY_EGRESS_PROXY="${SANDY_EGRESS_PROXY:-0}"
+
 SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 PASS=0
