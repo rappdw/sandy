@@ -233,3 +233,122 @@ pinned to no-proxy and codex sections are creds-dependent). Worth its own small
 PR once the right v0.138 mechanism is confirmed. Workaround today: use a current
 codex version whose env-var auth works, or pin codex auth via whatever method
 the installed version documents.
+
+---
+
+## Host-side credential broker (agent never sees the token)
+
+**Target: 1.0.1+ (highest-value strategic item).** Filed 2026-06-07 from the
+`research/` cross-cutting review (see `research/CROSS-CUTTING-SYNTHESIS-2026-06.md`).
+
+### What
+
+Today sandy forwards `ANTHROPIC_API_KEY`, the `gh` token, and `SANDY_EXTRA_ENV`
+values **into the container env**, where a prompt-injected or compromised agent
+can read and exfiltrate them. The two most sandy-like research projects both
+close this the same way: keep credentials strictly host-side and let the agent
+make *unauthenticated* calls that a host-side broker authenticates.
+
+- **agentbox** (`research/agentbox/packages/sandbox-docker/scripts/git-shim`,
+  `docs/host-relay.md`): a PATH-shadowing `git` shim intercepts only the four
+  network ops (push/pull/fetch/clone) with a strict per-op flag whitelist and
+  RPCs a tiny host process that runs the real `git` with the user's creds in the
+  host worktree. Non-network git falls straight through. Pairs with per-action
+  host-side confirm prompts (push/PR-write show the exact argv before running) +
+  an auditable auto-approve event log.
+- **OpenShell** (`research/OpenShell/architecture/sandbox.md:48`): the egress
+  proxy MITMs `api.github.com` with an ephemeral CA and injects the token into
+  the request — the credential never enters the container at all.
+
+### Why deferred
+
+A host-side daemon/relay is a real architectural addition for a single-file bash
+tool. It's the opposite of "no runtime host channel" (cf. the `SANDY_AUTO_UPGRADE`
+agent-request analysis above). But it's the single highest-value non-trivial idea
+from the whole review: it closes sandy's clearest remaining weakness and composes
+with M2.7's egress allowlist into real defense-in-depth (allowlist limits where a
+leaked cred can go; the broker stops the leak).
+
+### Shape that fits sandy
+
+Don't build OpenShell's MITM-CA path (heavy, CA-trust dance). The agentbox git-shim
+model is closer to sandy's grain: a PATH-shadowing `git`/`gh` wrapper in the
+container that pipes the four network ops over a **bind-mounted Unix socket** to a
+small host-side helper sandy starts at launch and tears down in the cleanup trap
+(sandy already manages per-launch helpers — the channel relay, the macOS SSH
+relay). Start with `git push/pull/fetch/clone` + `gh` auth; the proxy's CONNECT
+path (M2.7) already handles the transport, so this is "who holds the token,"
+not "how does traffic egress." Per-action host confirm is the confused-deputy
+guard. Keep it opt-in at first.
+
+### Effort
+
+L. New host-side socket helper + container-side shim + approval UX. Sequence it
+*after* M2.7 (it builds on the proxy + the launcher's helper/cleanup machinery).
+
+---
+
+## Version / freshness hygiene cluster
+
+**Target: 1.0.1 (cheap, S-effort, bundle).** Filed 2026-06-07 from the `research/`
+review. Several projects independently address "which version is actually
+running / is this download what I think it is," which sandy's self-mutating
+single-file model makes genuinely confusing.
+
+- **`script_sha` startup stamp** — alice logs `sha256sum "$0" | head -c12` in its
+  banner (`research/alice/sandbox/host-claude-watcher/alice-host-claude-watcher.sh:59`).
+  Sandy's `SANDY_COMMIT` is empty for curl-installed-then-hand-edited binaries,
+  and users routinely have a second copy ahead on `PATH` or a clone checkout.
+  Add the script's own sha to the `--version` line and `--print-state` so "which
+  sandy is live" is answerable in one glance, independent of git.
+- **Checksum-verify the downloaded script** in `install.sh` and on
+  `sandy --upgrade` — supply-chain win (`research/OpenShell/install.sh:605`).
+- **Breaking-upgrade ack gate** — OpenShell refuses to clobber incompatible prior
+  state without an explicit ack env var (`install.sh:311`), a cleaner "hard stop
+  + escape hatch" than a warning that can be ignored. Sandy already prefers this
+  shape (symlink approval chose hard-error over trainable y/N); apply it to
+  `SANDY_SANDBOX_MIN_COMPAT`.
+- **Optional `SANDY_CLAUDE_VERSION` pin** — claude-code ships
+  `requiredMinimumVersion`/`requiredMaximumVersion`
+  (`research/claude-code/CHANGELOG.md:236`); sandy always rebuilds on a newer
+  Claude release with no escape hatch when an upstream release regresses inside
+  the sandbox. A pin gives users a way out.
+
+All independent S-effort items; group them so they share one release + doc pass.
+
+---
+
+## Atomic tempfile+rename on state writes
+
+**Target: 1.0.1 (S-effort; pairs with the .claude.json torn-read fix in
+HANDOFF_TO_SANDY.md).** Filed 2026-06-07.
+
+alice writes *every* state file as `tmp.write(); tmp.replace(dst)` (~30 sites;
+`research/alice/sandbox/entrypoint.sh`). The handoff's torn-read idea covered the
+**read** side of `.claude.json`; the **write** side is unprotected in sandy:
+`WORKSPACE.json` is written via `} > "$SANDBOX_DIR/WORKSPACE.json"` (`sandy:~3565`)
+and `settings.json` is regenerated each launch. A redirect-truncate is non-atomic —
+a `kill -9` mid-write, or a concurrent `--print-state` read from a UI frontend
+(no lock on that path), leaves a truncated/corrupt file the next launch silently
+mis-parses. Fix: write to `.tmp` then `mv` (atomic on same filesystem). Same
+`tmp+rename` primitive as the read-side fix; do them together.
+
+---
+
+## Pack-independent browser capability
+
+**Target: 1.0.1+ (L-effort; flagship potential).** Filed 2026-06-07.
+
+Today the headless Chromium engine is welded to the gstack skill pack. The
+`browse` daemon design is independently excellent and already isolation-shaped
+(`research/gstack/ARCHITECTURE.md`, `BROWSER.md`): compiled binary, localhost-only
+bind, bearer-token auth, random per-workspace port, 30-min idle shutdown, zero
+MCP token overhead (plain text in/out), state in `<workspace>/.gstack/` (sandy
+already bind-mounts it). Promote it to a first-class, pack-independent sandy
+capability so *any* agent gets a real browser via a CLI with no gstack skills.
+Combine with agentbox's lazy-Chromium resolver
+(`research/agentbox/scripts/chromium-resolver`): reuse the project's *pinned*
+Playwright Chromium instead of baking one that goes stale when a project pins a
+different Playwright. Adopt only the headless, lazy-resolved path — both projects
+also have host-Chrome / cookie-import modes that are the opposite of sandy's
+isolation.

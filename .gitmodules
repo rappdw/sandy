@@ -13,3 +13,9 @@
 [submodule "research/alice"]
 	path = research/alice
 	url = git@github.com:jcronq/alice.git
+[submodule "research/agentbox"]
+	path = research/agentbox
+	url = git@github.com:madarco/agentbox.git
+[submodule "research/hyperlight"]
+	path = research/hyperlight
+	url = git@github.com:hyperlight-dev/hyperlight.git
