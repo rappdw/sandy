@@ -139,3 +139,52 @@ Explicitly rejected alternatives:
 Effort on top of the host-side `SANDY_AUTO_UPGRADE`: the marker check in the
 exit path (~10 lines), the second privileged key, the host confirm prompt, and
 a docs note. Reuses the same `sandy_self_update` + re-exec plumbing.
+
+---
+
+## Retire the Linux iptables isolation path — single-mechanism egress proxy
+
+**Target: 1.1 (data-gated on the M2.7 soak).** Filed 2026-06-09.
+
+### What
+
+Once `SANDY_EGRESS_PROXY=1` is the soaked default on both platforms, remove the
+legacy Linux-only iptables isolation (`apply_network_isolation`'s DROP rules,
+`cleanup_network_isolation`, `PRIVATE_RANGES`, the `SANDY_ALLOW_LAN_HOSTS` /
+`SANDY_LOCAL_LLM_HOST` iptables holes) and make the proxy the *sole* isolation
+mechanism. Collapses two code paths to one: identical behavior on macOS and
+Linux, one posture to document and audit, no `sudo`/host-iptables dependency.
+
+### Why it's deferred (not done in M2.7)
+
+The proxy is brand new — its live bring-up (2026-06-09) surfaced four bugs
+(OS-ordering, sidecar-boot routing, network-leak/trap ordering, transparent
+double-send) that no static test or the topology spike caught. Making it the
+*only* mechanism before its own 7-day soak inverts the risk: if the soak finds
+a proxy issue, there'd be no soaked fallback. iptables is proven, zero-overhead,
+and costs ~nothing to keep as the `=0` escape hatch. So: default to the proxy
+now (parity + a security upgrade for Linux), but keep iptables until the soak
+proves the proxy can stand alone.
+
+### The gate (preserve this — it's the real blocker)
+
+The permissive proxy is *stricter* than iptables in a way that can regress some
+Linux workflows: iptables allows **any protocol/port to a public IP**, but the
+proxy only carries what its listeners handle — HTTP `:80`, HTTPS `:443`,
+git-over-SSH via CONNECT `:3128`, DNS, and the local-LLM forward. A tool hitting
+a public host on a non-standard port (`:5432`, `:8443`, raw TCP/UDP) works under
+iptables and **fails through the proxy** (nothing listening on that port at the
+proxy IP; the agent has no route off `--internal`).
+
+Retiring iptables is therefore gated on the soak answering: *does the non-web-
+port gap bite in practice?* If it never does → retire iptables, single mechanism.
+If it does → first close the gap (a catch-all CONNECT for arbitrary ports, or a
+generic raw-TCP forward keyed on an allowlist), then retire. Either way it's a
+data-informed 1.1 decision, not a pre-soak bet.
+
+### Effort
+
+Small once gated: delete the iptables functions + the `_SANDY_PROXY_ON != true`
+branches that call them, make `_SANDY_PROXY_ON` always-true (or drop the
+tri-state's `0`), update `--print-schema`/docs/tests. The closing-the-gap option
+(if needed) is the larger piece and would be its own entry.

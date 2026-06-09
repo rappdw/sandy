@@ -3666,11 +3666,14 @@ _sandy_proxy_ref"
 check "proxy ref: release version pins to vX.Y.Z tag" \
     bash -c '[ "$(SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" bash -c "$1
 _sandy_proxy_ref")" = "v0.13.1" ]' -- "$_PX_FNS"
-check "proxy ref: -dev tracks main" \
-    bash -c '[ "$(SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" bash -c "$1
+# -dev/-rc build the proxy from source. From a git checkout the ref is the
+# current branch; outside one it falls back to main. Run from a non-git tmp dir
+# so the deterministic fallback is what's asserted.
+check "proxy ref: -dev falls back to main outside a git checkout" \
+    bash -c 'cd "$(mktemp -d)" && [ "$(SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" bash -c "$1
 _sandy_proxy_ref")" = "main" ]' -- "$_PX_FNS"
-check "proxy ref: -rc tracks main" \
-    bash -c '[ "$(SANDY_VERSION=1.0.0-rc1 SANDY_PROXY_REF="" bash -c "$1
+check "proxy ref: -rc falls back to main outside a git checkout" \
+    bash -c 'cd "$(mktemp -d)" && [ "$(SANDY_VERSION=1.0.0-rc1 SANDY_PROXY_REF="" bash -c "$1
 _sandy_proxy_ref")" = "main" ]' -- "$_PX_FNS"
 check "proxy ref: SANDY_PROXY_REF override wins" \
     bash -c '[ "$(SANDY_VERSION=0.13.1 SANDY_PROXY_REF=abc123 bash -c "$1

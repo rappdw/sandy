@@ -471,7 +471,7 @@ SANDY_CHANNELS|string|||Comma-separated channel names (e.g. 'telegram,discord').
 SANDY_CHANNEL_TARGET_PANE|int|0||Which tmux pane in multi-agent mode receives channel messages.
 SANDY_VERBOSE|int|0||Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace).
 SANDY_VENV_OVERLAY|bool|1||Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container.
-SANDY_EGRESS_PROXY|enum:0,1,2|0||Egress-proxy network isolation (closes macOS F2). 0=off (legacy iptables-only on Linux, no isolation on macOS). 1=permissive (proxy sidecar blocks private/LAN/metadata but allows all internet). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 1 and 2 work identically on macOS and Linux.
+SANDY_EGRESS_PROXY|enum:0,1,2|1||Egress-proxy network isolation (closes macOS F2). 1=permissive (default; proxy sidecar blocks private/LAN/metadata but allows all internet — works identically on macOS and Linux). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 0=off (legacy iptables-only on Linux, no isolation on macOS).
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||Remove .github/workflows from the read-only protection list.
 SANDY_SCREENSHOT_DIR|path|||Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
 CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||Max output tokens per Claude response.
@@ -1488,7 +1488,21 @@ _sandy_proxy_ref() {
         return
     fi
     case "$SANDY_VERSION" in
-        *-dev|*-rc*) printf 'main' ;;
+        *-dev|*-rc*)
+            # Pre-release: build the proxy from source. From a git checkout, use
+            # the current branch (it carries proxy/ — so `./sandy` works on a
+            # feature branch before it merges); otherwise fall back to main
+            # (installed copies, detached HEAD). Once M2.7 is on main, main has
+            # proxy/ and the fallback is correct for everyone.
+            local _d _b
+            _d="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _d="."
+            _b="$(git -C "$_d" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+            if [ -n "$_b" ] && [ "$_b" != "HEAD" ]; then
+                printf '%s' "$_b"
+            else
+                printf 'main'
+            fi
+            ;;
         *)           printf 'v%s' "$SANDY_VERSION" ;;
     esac
 }
@@ -3127,8 +3141,11 @@ fi
 # is the string the proxy config consumes.
 _SANDY_PROXY_ON=false
 _SANDY_PROXY_MODE=""
-case "${SANDY_EGRESS_PROXY:-0}" in
-    0|"") : ;;
+# Default-on (permissive) as of 1.0: the egress proxy is the cross-platform
+# isolation posture. Set SANDY_EGRESS_PROXY=0 to fall back to legacy behavior
+# (Linux iptables; no isolation on macOS).
+case "${SANDY_EGRESS_PROXY:-1}" in
+    0) : ;;
     1) _SANDY_PROXY_ON=true; _SANDY_PROXY_MODE="permissive" ;;
     2) _SANDY_PROXY_ON=true; _SANDY_PROXY_MODE="strict" ;;
     *)

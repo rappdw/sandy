@@ -174,7 +174,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_CHANNEL_TARGET_PANE` | passive | `0` | Which tmux pane in multi-agent mode receives channel messages. |
 | `SANDY_VERBOSE` | passive | `0` | Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace). |
 | `SANDY_VENV_OVERLAY` | passive | `1` | Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container. |
-| `SANDY_EGRESS_PROXY` | passive | `0` | Egress-proxy network isolation (closes macOS F2). 0=off (legacy iptables-only on Linux, no isolation on macOS). 1=permissive (proxy sidecar blocks private/LAN/metadata but allows all internet). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 1 and 2 work identically on macOS and Linux. |
+| `SANDY_EGRESS_PROXY` | passive | `1` | Egress-proxy network isolation (closes macOS F2). 1=permissive (default; proxy sidecar blocks private/LAN/metadata but allows all internet — works identically on macOS and Linux). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 0=off (legacy iptables-only on Linux, no isolation on macOS). |
 | `SANDY_ALLOW_WORKFLOW_EDIT` | passive | `0` | Remove .github/workflows from the read-only protection list. |
 | `SANDY_SCREENSHOT_DIR` | passive | unset | Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents. |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | passive | `128000` | Max output tokens per Claude response. |
