@@ -282,6 +282,22 @@ run_sandy_headless() {
             timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 || true
         fi
     fi
+    # When `timeout` fires it SIGTERMs sandy, but sandy is blocked in its
+    # foreground `docker run`, which doesn't receive the signal — so sandy's
+    # cleanup trap can't run and the agent container is orphaned (a wedged
+    # headless agent keeps running and pegs a CPU). Reap our test containers
+    # (all named sandy-tmp.* — setup_project uses mktemp dirs). Force-removing
+    # the container also makes the orphaned `docker run` exit, which unblocks
+    # sandy so its own trap finally runs and tears down networks/sandboxes.
+    reap_test_containers
+}
+
+# Force-remove any leftover sandy test containers (named sandy-tmp.*). Safe:
+# the harness runs sections sequentially and owns every sandy-tmp.* container.
+reap_test_containers() {
+    local ids
+    ids="$(docker ps -aq --filter 'name=sandy-tmp' 2>/dev/null)"
+    [ -n "$ids" ] && docker rm -f $ids >/dev/null 2>&1 || true
 }
 
 # --- Preflight ---

@@ -4967,7 +4967,16 @@ fi
 # handles normal exits; a SIGKILL leaves the container behind).
 CONTAINER_NAME="sandy-${SANDBOX_NAME}"
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-RUN_FLAGS=(--rm -it --name "$CONTAINER_NAME")
+# Interactive sessions need a TTY (tmux requires it). Headless runs (-p) must
+# NOT get one: a pseudo-TTY makes Ink/React-based CLIs (Gemini especially)
+# think they're interactive and busy-loop a render instead of doing one-shot
+# output (observed: gemini --prompt pegging a core indefinitely). Keep stdin
+# (-i) either way; drop -t when headless.
+if [ "$_sandy_is_headless" = "true" ]; then
+    RUN_FLAGS=(--rm -i --name "$CONTAINER_NAME")
+else
+    RUN_FLAGS=(--rm -it --name "$CONTAINER_NAME")
+fi
 RUN_FLAGS+=(--cpus "$SANDY_CPUS" --memory "$SANDY_MEM")
 RUN_FLAGS+=(--security-opt no-new-privileges:true)
 RUN_FLAGS+=(--cap-drop ALL)

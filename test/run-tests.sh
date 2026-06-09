@@ -871,6 +871,14 @@ info "18. Container naming"
 check "container name includes sandbox name" \
     grep -q -- '--name "$CONTAINER_NAME"' "$SCRIPT"
 
+# Headless (-p) must NOT allocate a TTY: a pseudo-TTY makes Ink/React CLIs
+# (gemini) busy-loop a render instead of one-shot output. Interactive keeps -it
+# (tmux needs it); headless uses -i only.
+check "headless drops the TTY (-i), interactive keeps -it" \
+    bash -c 'grep -q -- "RUN_FLAGS=(--rm -i --name" "$1" && grep -q -- "RUN_FLAGS=(--rm -it --name" "$1"' -- "$SCRIPT"
+check "the -it/-i choice is gated on _sandy_is_headless" \
+    bash -c 'grep -B2 -- "RUN_FLAGS=(--rm -i --name" "$1" | grep -q "_sandy_is_headless"' -- "$SCRIPT"
+
 # ============================================================
 info "19. pip wrapper created in root section (not inside bash -c)"
 # ============================================================
