@@ -3674,21 +3674,28 @@ _px_ref() {
     SANDY_VERSION="$ver" SANDY_PROXY_REF="$override" bash -c "$_PX_FNS
 _sandy_proxy_ref"
 }
+# GITHUB_HEAD_REF is unset in these so the version/branch logic is what's
+# asserted (it would otherwise be set when the suite itself runs in PR CI).
 check "proxy ref: release version pins to vX.Y.Z tag" \
-    bash -c '[ "$(SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" bash -c "$1
+    bash -c '[ "$(SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" GITHUB_HEAD_REF= bash -c "$1
 _sandy_proxy_ref")" = "v0.13.1" ]' -- "$_PX_FNS"
 # -dev/-rc build the proxy from source. From a git checkout the ref is the
 # current branch; outside one it falls back to main. Run from a non-git tmp dir
 # so the deterministic fallback is what's asserted.
 check "proxy ref: -dev falls back to main outside a git checkout" \
-    bash -c 'cd "$(mktemp -d)" && [ "$(SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" bash -c "$1
+    bash -c 'cd "$(mktemp -d)" && [ "$(SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" GITHUB_HEAD_REF= bash -c "$1
 _sandy_proxy_ref")" = "main" ]' -- "$_PX_FNS"
 check "proxy ref: -rc falls back to main outside a git checkout" \
-    bash -c 'cd "$(mktemp -d)" && [ "$(SANDY_VERSION=1.0.0-rc1 SANDY_PROXY_REF="" bash -c "$1
+    bash -c 'cd "$(mktemp -d)" && [ "$(SANDY_VERSION=1.0.0-rc1 SANDY_PROXY_REF="" GITHUB_HEAD_REF= bash -c "$1
 _sandy_proxy_ref")" = "main" ]' -- "$_PX_FNS"
 check "proxy ref: SANDY_PROXY_REF override wins" \
     bash -c '[ "$(SANDY_VERSION=0.13.1 SANDY_PROXY_REF=abc123 bash -c "$1
 _sandy_proxy_ref")" = "abc123" ]' -- "$_PX_FNS"
+# CI PR builds: GITHUB_HEAD_REF (the PR source branch, which has proxy/) is used
+# instead of the detached-HEAD fallback to main. Override still beats it.
+check "proxy ref: GITHUB_HEAD_REF used in CI PR context" \
+    bash -c '[ "$(SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" GITHUB_HEAD_REF=my-pr-branch bash -c "$1
+_sandy_proxy_ref")" = "my-pr-branch" ]' -- "$_PX_FNS"
 
 # Generator shape: multi-stage golang -> scratch, clones at the build-arg ref,
 # static build, correct entrypoint.

@@ -1487,6 +1487,15 @@ _sandy_proxy_ref() {
         printf '%s' "$SANDY_PROXY_REF"
         return
     fi
+    # GitHub Actions PR builds check out a detached merge ref, so the branch
+    # detection below would wrongly fall back to main — which has no proxy/ until
+    # this very PR merges. GITHUB_HEAD_REF is the PR's source branch (which does
+    # carry proxy/), so build from it. It's unset for push-to-main / release CI,
+    # where the version/branch logic below is the correct path.
+    if [ -n "${GITHUB_HEAD_REF:-}" ]; then
+        printf '%s' "$GITHUB_HEAD_REF"
+        return
+    fi
     case "$SANDY_VERSION" in
         *-dev|*-rc*)
             # Pre-release: build the proxy from source. From a git checkout, use
