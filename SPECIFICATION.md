@@ -165,7 +165,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `GOOGLE_API_KEY` | privileged | unset | Google API key for Vertex AI / ADC. |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | privileged | unset | Enable Claude Code experimental agent-teams feature. |
 | `SANDY_AGENT` | passive | `claude` | Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'. |
-| `SANDY_MODEL` | passive | `claude-fable-5` | Model ID for the Claude agent. |
+| `SANDY_MODEL` | passive | `claude-opus-4-8` | Model ID for the Claude agent. |
 | `SANDY_CPUS` | passive | unset | CPU limit for container (default: auto-detected). |
 | `SANDY_MEM` | passive | unset | Memory limit for container (e.g. '8g'; default: auto-detected). |
 | `SANDY_GPU` | passive | unset | GPU passthrough: 'all', or device IDs like '0' / '0,1'. |

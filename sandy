@@ -462,7 +462,7 @@ OPENAI_API_KEY|secret|||OpenAI API key for Codex CLI.
 GOOGLE_API_KEY|secret|||Google API key for Vertex AI / ADC.
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||Enable Claude Code experimental agent-teams feature.
 SANDY_AGENT|agent_combo|claude||Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
-SANDY_MODEL|string|claude-fable-5|^[a-zA-Z0-9._-]+$|Model ID for the Claude agent.
+SANDY_MODEL|string|claude-opus-4-8|^[a-zA-Z0-9._-]+$|Model ID for the Claude agent.
 SANDY_CPUS|int|||CPU limit for container (default: auto-detected).
 SANDY_MEM|string|||Memory limit for container (e.g. '8g'; default: auto-detected).
 SANDY_GPU|string|||GPU passthrough: 'all', or device IDs like '0' / '0,1'.
@@ -1111,7 +1111,7 @@ Usage:
   sandy --help                   Show this help
 
 Environment variables:
-  SANDY_MODEL        Model to use (default: claude-fable-5)
+  SANDY_MODEL        Model to use (default: claude-opus-4-8)
   ANTHROPIC_API_KEY  API key (not needed with Claude Max / OAuth)
   SANDY_HOME         Sandy config directory (default: ~/.sandy)
   SANDY_SSH          Git SSH method: "token" (default) uses gh CLI token
@@ -2342,7 +2342,7 @@ _sandy_wrap_cmd_exit_pause() {
 }
 
 build_claude_cmd() {
-    local cmd="claude --model ${SANDY_MODEL:-claude-fable-5} --teammate-mode tmux"
+    local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-8} --teammate-mode tmux"
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
         # Use --permission-mode (the documented modern flag) instead of the
         # legacy --dangerously-skip-permissions. Claude 2.1.x added runtime
@@ -5491,7 +5491,7 @@ RUN_FLAGS+=(-e "SANDY_WORKSPACE=$SANDY_WORKSPACE")
 RUN_FLAGS+=(-e "SANDY_PROJECT_NAME=$(basename "$WORK_DIR")")
 # Validate SANDY_MODEL — only allow alphanumeric, hyphens, dots, underscores
 if _sandy_agent_has claude; then
-    SANDY_MODEL="${SANDY_MODEL:-claude-fable-5}"
+    SANDY_MODEL="${SANDY_MODEL:-claude-opus-4-8}"
 else
     SANDY_MODEL="${SANDY_MODEL:-}"
 fi
