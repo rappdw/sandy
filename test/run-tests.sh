@@ -3766,10 +3766,14 @@ check "proxy config local_llm field is conditional" \
 # Two-network topology + lifecycle seams.
 check "sidecar network is --internal" \
     bash -c 'grep -q -- "--internal --driver bridge" "$1"' -- "$_PX_SCRIPT"
-check "proxy gets a fixed --ip on the sidecar" \
-    bash -c 'grep -q -- "--ip \"\$PROXY_IP\"" "$1"' -- "$_PX_SCRIPT"
-check "proxy joins the egress network for internet" \
-    bash -c 'grep -q "docker network connect \"\$EGRESS_NETWORK\" \"\$PROXY_CONTAINER\"" "$1"' -- "$_PX_SCRIPT"
+# The proxy boots on the egress network (so its primary route reaches the
+# internet) and the --internal sidecar is attached second with the fixed IP the
+# DNS responder hands out. Booting on the sidecar instead would leave the proxy
+# with no default route (verified on macOS: it caused upstream dials to fail).
+check "proxy boots on the egress network for internet" \
+    bash -c 'grep -q -- "--network \"\$EGRESS_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
+check "proxy attaches the sidecar with a fixed --ip" \
+    bash -c 'grep -q "docker network connect --ip \"\$PROXY_IP\" \"\$SIDECAR_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
 check "proxy runs hardened (--read-only --cap-drop ALL)" \
     bash -c 'grep -q -- "--cap-drop ALL" "$1"' -- "$_PX_SCRIPT"
 check "cleanup removes proxy container before networks" \
