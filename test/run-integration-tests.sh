@@ -269,17 +269,20 @@ run_sandy_headless() {
     local timeout_sec="${SANDY_INTEG_TIMEOUT:-300}"
     # When verbose, tee output to stderr so it's visible even when the caller
     # captures stdout into a variable (e.g. _out="$(run_sandy_headless ...)").
+    # Feed sandy /dev/null on stdin: these are headless prompt-as-arg runs, and
+    # an agent that reads stdin (codex exec) must see EOF, not block on an
+    # inherited terminal. Makes the run identical from a terminal or in CI.
     if [ "$VERBOSE" -gt 0 ]; then
         if [ "${#env_args[@]}" -gt 0 ]; then
-            timeout "$timeout_sec" env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 | tee /dev/stderr || true
+            timeout "$timeout_sec" env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" </dev/null 2>&1 | tee /dev/stderr || true
         else
-            timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 | tee /dev/stderr || true
+            timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" </dev/null 2>&1 | tee /dev/stderr || true
         fi
     else
         if [ "${#env_args[@]}" -gt 0 ]; then
-            timeout "$timeout_sec" env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 || true
+            timeout "$timeout_sec" env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" </dev/null 2>&1 || true
         else
-            timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" 2>&1 || true
+            timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" </dev/null 2>&1 || true
         fi
     fi
     # When `timeout` fires it SIGTERMs sandy, but sandy is blocked in its

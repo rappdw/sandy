@@ -874,10 +874,13 @@ check "container name includes sandbox name" \
 # Headless (-p) must NOT allocate a TTY: a pseudo-TTY makes Ink/React CLIs
 # (gemini) busy-loop a render instead of one-shot output. Interactive keeps -it
 # (tmux needs it); headless uses -i only.
-check "headless drops the TTY (-i), interactive keeps -it" \
-    bash -c 'grep -q -- "RUN_FLAGS=(--rm -i --name" "$1" && grep -q -- "RUN_FLAGS=(--rm -it --name" "$1"' -- "$SCRIPT"
-check "the -it/-i choice is gated on a headless check from the forwarded args" \
-    bash -c 'grep -B8 -- "RUN_FLAGS=(--rm -i --name" "$1" | grep -q "_sandy_headless_run=true"' -- "$SCRIPT"
+# Three branches: interactive (-it), headless+terminal-stdin (no -i/-t, so
+# stdin-reading agents like codex exec see EOF instead of blocking), and
+# headless+piped-stdin (-i, forward the pipe).
+check "headless never allocates a TTY; interactive keeps -it" \
+    bash -c 'grep -q -- "RUN_FLAGS=(--rm --name" "$1" && grep -q -- "RUN_FLAGS=(--rm -i --name" "$1" && grep -q -- "RUN_FLAGS=(--rm -it --name" "$1"' -- "$SCRIPT"
+check "headless stdin is gated on whether it is a terminal (-t 0)" \
+    bash -c 'grep -B8 -- "RUN_FLAGS=(--rm --name" "$1" | grep -q "_sandy_headless_run=true" && grep -B2 -- "RUN_FLAGS=(--rm --name" "$1" | grep -q -- "-t 0"' -- "$SCRIPT"
 
 # ============================================================
 info "19. pip wrapper created in root section (not inside bash -c)"

@@ -4967,11 +4967,16 @@ fi
 # handles normal exits; a SIGKILL leaves the container behind).
 CONTAINER_NAME="sandy-${SANDBOX_NAME}"
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-# Interactive sessions need a TTY (tmux requires it). Headless runs (-p) must
-# NOT get one: a pseudo-TTY makes Ink/React-based CLIs (Gemini especially)
-# think they're interactive and busy-loop a render instead of doing one-shot
-# output (observed: gemini --prompt pegging a core indefinitely). Keep stdin
-# (-i) either way; drop -t when headless.
+# TTY/stdin handling differs by mode:
+#   - Interactive: -it. tmux requires a TTY.
+#   - Headless (-p): NO -t — a pseudo-TTY makes Ink/React CLIs (gemini) think
+#     they're interactive and busy-loop a render instead of one-shot output.
+#     Attach stdin (-i) ONLY when it's actually piped/redirected (not a
+#     terminal): the prompt is passed as an arg, and agents like `codex exec`
+#     read stdin when it's an open non-TTY fd — handed a terminal they block
+#     forever ("Reading additional input from stdin..."). With a terminal
+#     stdin we attach nothing, so the agent sees EOF and runs the prompt arg;
+#     with a real pipe (echo ... | sandy -p) we forward it.
 #
 # Compute headlessness here from the forwarded args rather than reusing the
 # earlier $_sandy_is_headless: that detection runs inside the launch path, which
@@ -4982,7 +4987,11 @@ for _a in "$@"; do
     case "$_a" in -p|--print|--prompt) _sandy_headless_run=true; break ;; esac
 done
 if [ "$_sandy_headless_run" = "true" ]; then
-    RUN_FLAGS=(--rm -i --name "$CONTAINER_NAME")
+    if [ -t 0 ]; then
+        RUN_FLAGS=(--rm --name "$CONTAINER_NAME")        # terminal stdin: don't attach it
+    else
+        RUN_FLAGS=(--rm -i --name "$CONTAINER_NAME")     # piped/redirected stdin: forward it
+    fi
 else
     RUN_FLAGS=(--rm -it --name "$CONTAINER_NAME")
 fi
