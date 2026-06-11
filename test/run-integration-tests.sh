@@ -301,6 +301,25 @@ reap_test_containers() {
     local ids
     ids="$(docker ps -aq --filter 'name=sandy-tmp' 2>/dev/null)"
     [ -n "$ids" ] && docker rm -f $ids >/dev/null 2>&1 || true
+    # Also reap leaked egress-proxy sidecars (sandy-proxy-<pid>). When `timeout`
+    # SIGTERMs sandy mid `docker run`, removing the agent container unblocks
+    # sandy's trap — but if the proxy sidecar is still attached, sandy's own
+    # `docker network rm` can't complete. Detaching the proxy here lets sandy
+    # finish tearing down ITS networks. We deliberately do NOT remove the
+    # networks ourselves — §13 must verify sandy's own teardown, not the reaper's.
+    local pids
+    pids="$(docker ps -aq --filter 'name=sandy-proxy-' 2>/dev/null)"
+    [ -n "$pids" ] && docker rm -f $pids >/dev/null 2>&1 || true
+}
+
+# Remove any leaked sandy per-instance networks (sandy_{net,sidecar,egress}_<pid>).
+# Called once before §13 so a leftover from an EARLIER suite run / timed-out
+# section can't pre-fail §13's leak assertion. Not used to satisfy the assertion
+# itself — that polls for sandy's own teardown.
+sweep_leaked_sandy_networks() {
+    local nets
+    nets="$(docker network ls --format '{{.Name}}' 2>/dev/null | grep -E '^sandy_(net|sidecar|egress)_' || true)"
+    [ -n "$nets" ] && docker network rm $nets >/dev/null 2>&1 || true
 }
 
 # --- Preflight ---
@@ -913,6 +932,17 @@ elif [ "$HAS_CLAUDE" = true ] && [ "$HAS_GEMINI" = true ]; then
         pass "gemini session works in switch test"
     else
         fail "gemini session works in switch test"
+        # Diagnostic — distinguish a real break from a transient gemini API blip
+        # (503/quota → retry, model phrasing) so the cause is visible next run.
+        if [ -z "$_out" ]; then
+            echo "    (empty output — gemini produced nothing; likely API/credential issue)" >&2
+        elif echo "$_out" | grep -qi "unknown flag"; then
+            echo "    (flag-translation error: $(echo "$_out" | grep -i 'unknown flag' | head -1))" >&2
+        elif echo "$_out" | grep -qiE '503|RESOURCE_EXHAUSTED|quota|UNAVAILABLE'; then
+            echo "    (transient gemini API error — not a sandy fault: $(echo "$_out" | grep -iE '503|RESOURCE_EXHAUSTED|quota|UNAVAILABLE' | head -1))" >&2
+        else
+            echo "    (responded but without the word 'first': $(echo "$_out" | tail -4 | tr '\n' ' '))" >&2
+        fi
     fi
 
     echo "SANDY_AGENT=claude" > "$PROJECT_DIR/.sandy/config"
@@ -1080,6 +1110,11 @@ if [ "$HAS_CLAUDE" = true ]; then
     _PX_REF="$(git -C "$(dirname "$SANDY_SCRIPT")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
     setup_project claude "integ-proxy"
 
+    # Clear any networks leaked by an earlier section / a previous suite run that
+    # was SIGKILLed — otherwise the leak assertion below trips on someone else's
+    # leftover, not this run's. (This is a clean-slate sweep, not the assertion.)
+    sweep_leaked_sandy_networks
+
     # Permissive (=1): the agent must reach api.anthropic.com via the proxy.
     _out="$(run_sandy_headless "SANDY_EGRESS_PROXY=1" "SANDY_PROXY_REF=$_PX_REF" -- -p "reply with exactly one word: proxied")"
 
@@ -1098,11 +1133,22 @@ if [ "$HAS_CLAUDE" = true ]; then
     fi
 
     # Networks must be torn down on exit — a leak exhausts Docker's address pool.
-    if [ -z "$(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' || true)" ]; then
+    # Poll for up to ~5s: when the run is SIGTERM'd by `timeout`, the agent
+    # container reap (in run_sandy_headless) unblocks sandy's cleanup trap, which
+    # then removes the networks — but that teardown can lag the check by a beat.
+    # Polling verifies SANDY's own teardown (not the reaper's) without racing it.
+    _nets_cleared=false
+    for _i in $(seq 1 10); do
+        if [ -z "$(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' || true)" ]; then
+            _nets_cleared=true; break
+        fi
+        sleep 0.5
+    done
+    if [ "$_nets_cleared" = true ]; then
         pass "proxy networks cleaned up after exit (no address-pool leak)"
     else
         fail "proxy networks cleaned up after exit (no address-pool leak)"
-        echo "    (leaked: $(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' | tr '\n' ' '))" >&2
+        echo "    (still leaked after ~5s: $(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' | tr '\n' ' '))" >&2
     fi
 
     # Opt-out (=0): no proxy path; the agent still works (legacy isolation).
