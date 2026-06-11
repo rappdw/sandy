@@ -1666,18 +1666,26 @@ info "28d. Codex config allowlist, dispatch, alias, update regex"
 
 # Allowlist must include the codex variables. v0.12+: these now live in the
 # SANDY_PRIVILEGED_KEYS / SANDY_PASSIVE_KEYS arrays rather than an inline
-# pipe-delimited case pattern, so check each key independently.
+# pipe-delimited case pattern, so check each key independently. (CODEX_HOME was
+# removed in M4 PR 4.1 — it was declared but never consumed; sandy owns the
+# in-container CODEX_HOME and never forwards it.)
 _CODEX_VARS_MISSING=""
-for _k in OPENAI_API_KEY CODEX_MODEL SANDY_CODEX_AUTH CODEX_HOME; do
+for _k in OPENAI_API_KEY CODEX_MODEL SANDY_CODEX_AUTH; do
     if ! awk '/^SANDY_(PRIVILEGED|PASSIVE)_KEYS=\(/,/^\)$/' "$SANDY_SCRIPT" \
          | grep -qE "^[[:space:]]+${_k}$"; then
         _CODEX_VARS_MISSING="${_CODEX_VARS_MISSING} ${_k}"
     fi
 done
 if [ -z "$_CODEX_VARS_MISSING" ]; then
-    pass "config allowlist includes OPENAI_API_KEY, CODEX_MODEL, SANDY_CODEX_AUTH, CODEX_HOME"
+    pass "config allowlist includes OPENAI_API_KEY, CODEX_MODEL, SANDY_CODEX_AUTH"
 else
     fail "config allowlist missing codex variables:${_CODEX_VARS_MISSING}"
+fi
+# CODEX_HOME must NOT be in the allowlist (removed as dead key, PR 4.1).
+if awk '/^SANDY_(PRIVILEGED|PASSIVE)_KEYS=\(/,/^\)$/' "$SANDY_SCRIPT" | grep -qE '^[[:space:]]+CODEX_HOME$'; then
+    fail "CODEX_HOME removed from config allowlist (dead key)"
+else
+    pass "CODEX_HOME removed from config allowlist (dead key)"
 fi
 unset _CODEX_VARS_MISSING _k
 
@@ -3321,7 +3329,10 @@ _PWN="$_INTRO_TMP/PWNED"
 } > "$_INTRO_TMP/inject.config"
 _VAL_RC6=0
 _VAL_OUT6="$(bash "$SANDY_SCRIPT_PATH" --validate-config "$_INTRO_TMP/inject.config" 2>/dev/null)" || _VAL_RC6=$?
-_PWN_COUNT=$(ls -1 "$_INTRO_TMP"/PWNED* 2>/dev/null | wc -l | tr -d ' ')
+# Use find (returns 0 even with no matches) not `ls PWNED*` — under set -o
+# pipefail an empty glob makes ls exit 1 and aborts the suite on the 0-marker
+# case, which is exactly the success case we're asserting.
+_PWN_COUNT=$(find "$_INTRO_TMP" -maxdepth 1 -name 'PWNED*' 2>/dev/null | wc -l | tr -d ' ')
 check "validate-config inject PoC: parser never executes values (0 markers)" \
     test "$_PWN_COUNT" -eq 0
 check "validate-config inject PoC exits 0 (pending is not an error)" test "$_VAL_RC6" -eq 0
