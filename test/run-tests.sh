@@ -1303,6 +1303,17 @@ HIST_CONTENT="$(sandy_run "
     $_MIGRATE_SNIPPET
     cat \"\$HOME/.claude/history.jsonl\"
 " 2>/dev/null)"
+# Retry-on-empty: on macOS Docker Desktop / gRPCFUSE the container-stdout capture
+# can come back empty/truncated even though the migration completed and the file
+# on the bind mount is correct (the sed -i atomic-rename + IO timing). Migration
+# is idempotent on already-migrated state, so re-reading the file is safe and
+# does NOT mask a real bug — we only retry when the capture has no "project" line
+# at all. A genuinely wrong rewrite (non-empty but stale) is not retried.
+for _hist_try in 1 2 3; do
+    echo "$HIST_CONTENT" | grep -q '"project"' && break
+    sleep 0.5
+    HIST_CONTENT="$(sandy_run "cat \"\$HOME/.claude/history.jsonl\" 2>/dev/null" 2>/dev/null)"
+done
 check "history.jsonl era1 project path rewritten" \
     bash -c 'echo "$1" | grep -q "\"project\":\"/home/claude/dev/myproject\".*sess1"' -- "$HIST_CONTENT"
 check "history.jsonl era2 project path rewritten" \
