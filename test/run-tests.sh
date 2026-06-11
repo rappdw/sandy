@@ -1595,6 +1595,10 @@ $*" >/dev/null 2>&1; then
         'out=$(build_codex_cmd --print hello); echo "$out" | grep -qE "^codex exec "'
     _codex_script_test "build_codex_cmd --prompt switches to codex exec" \
         'out=$(build_codex_cmd --prompt hello); echo "$out" | grep -qE "^codex exec "'
+    _codex_script_test "build_codex_cmd headless adds --skip-git-repo-check (codex 0.139+ trust gate)" \
+        'out=$(build_codex_cmd -p hello); echo "$out" | grep -q -- "--skip-git-repo-check"'
+    _codex_script_test "build_codex_cmd interactive omits --skip-git-repo-check" \
+        'out=$(build_codex_cmd); ! echo "$out" | grep -q -- "--skip-git-repo-check"'
     _codex_script_test "build_codex_cmd drops -p flag itself (positional arg remains)" \
         'out=$(build_codex_cmd -p hello); ! echo "${out%%;*}" | grep -qE " -p( |$)" && echo "$out" | grep -q hello'
     _codex_script_test "build_codex_cmd drops --continue" \

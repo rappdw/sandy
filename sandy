@@ -2436,7 +2436,12 @@ build_codex_cmd() {
     done
     local cmd
     if [ "$headless" = "true" ]; then
-        cmd="codex exec --sandbox danger-full-access"
+        # --skip-git-repo-check: codex 0.139+ refuses `exec` outside a trusted
+        # directory / git repo ("Not inside a trusted directory and
+        # --skip-git-repo-check was not specified"). Sandy provides the outer
+        # isolation, so the gate is redundant here and would break headless
+        # runs from non-git workspaces.
+        cmd="codex exec --sandbox danger-full-access --skip-git-repo-check"
     else
         cmd="codex --sandbox danger-full-access"
     fi

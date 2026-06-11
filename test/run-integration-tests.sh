@@ -608,11 +608,29 @@ if [ "$HAS_OPENAI_API_KEY" = true ]; then
         fail "sandy-codex image exists after build"
     fi
 
-    # Should have gotten a response (non-empty output, exit 0)
-    if [ -n "$_out" ] && ! echo "$_out" | grep -qi "error\|landlock\|permission"; then
+    # Positive check first: codex must have produced the requested word.
+    # codex 0.139+ logs retryable ERROR lines on stderr — its experimental
+    # Responses-websocket transport can 401 with a plain API key before
+    # falling back to HTTPS and succeeding (openai/codex#19821, #15492) — so
+    # matching bare "error" is a false positive when the session as a whole
+    # works. Mirror the gemini treatment (§8): pass on the answer; a codex
+    # *API* error (401/403/429/quota) means sandy did its job — it launched
+    # codex and codex reached the API — so SKIP rather than FAIL. Empty
+    # output or anything else is still sandy's responsibility → FAIL.
+    # (strip the echoed prompt line — codex exec prints the prompt in its
+    # transcript, which would otherwise satisfy the positive check)
+    if [ -n "$_out" ] && echo "$_out" | grep -vi "reply with exactly one word" | grep -qi "pineapple"; then
         pass "codex headless responds without errors"
+    elif [ -n "$_out" ] \
+         && echo "$_out" | grep -qiE 'HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota'; then
+        skip "codex headless responds without errors — codex API error, not a sandy fault ($(echo "$_out" | grep -oiE 'HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota' | head -1))"
     else
         fail "codex headless responds without errors"
+        if [ -z "$_out" ]; then
+            echo "    (empty output — codex produced nothing; sandy launch/credential issue)" >&2
+        else
+            echo "    (no 'pineapple' in output and no recognizable API error; tail: $(echo "$_out" | tail -4 | tr '\n' ' '))" >&2
+        fi
     fi
 
     # Check for Landlock specifically
@@ -917,12 +935,23 @@ info "8. Cross-agent regression"
 if [ "$HAS_CLAUDE" = true ] && [ "$HAS_OPENAI_API_KEY" = true ]; then
     setup_project codex "integ-switch"
 
-    # Start as codex
+    # Start as codex. Same positive-check-first logic as §2: codex 0.139+
+    # logs retryable websocket-401 ERROR lines before its HTTPS fallback
+    # succeeds, so bare "error" matching is a false positive; a real codex
+    # API error is skipped (not sandy's fault), anything else fails.
     _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" -- -p "reply one word: first")"
-    if ! echo "$_out" | grep -qi "error\|landlock"; then
+    if [ -n "$_out" ] && echo "$_out" | grep -vi "reply one word" | grep -qi "first"; then
         pass "codex session works in switch test"
+    elif [ -n "$_out" ] \
+         && echo "$_out" | grep -qiE 'HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota'; then
+        skip "codex session works in switch test — codex API error, not a sandy fault ($(echo "$_out" | grep -oiE 'HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota' | head -1))"
     else
         fail "codex session works in switch test"
+        if [ -z "$_out" ]; then
+            echo "    (empty output — codex produced nothing; sandy launch/credential issue)" >&2
+        else
+            echo "    (no 'first' in output and no recognizable API error; tail: $(echo "$_out" | tail -4 | tr '\n' ' '))" >&2
+        fi
     fi
 
     # Switch to claude

@@ -895,7 +895,7 @@ The previous `both` alias (= `claude,gemini`) was removed in `v0.12` once the co
 
 ### Codex Headless Translation (`SANDY_AGENT=codex`)
 
-`build_codex_cmd()` inspects the positional args for `-p`/`--print`/`--prompt`. If present, it emits `codex exec --sandbox danger-full-access <prompt>` (interactive becomes headless); otherwise `codex --sandbox danger-full-access` (TUI). The sandy `-p`/`--print`/`--prompt` flags are dropped and the remaining arg is passed as the positional prompt, because `codex exec` takes the prompt as a positional argument, not a flag. `--continue`/`-c` is silently dropped (codex has `codex resume` but no headless `--continue` equivalent — matches the gemini behavior).
+`build_codex_cmd()` inspects the positional args for `-p`/`--print`/`--prompt`. If present, it emits `codex exec --sandbox danger-full-access --skip-git-repo-check <prompt>` (interactive becomes headless); otherwise `codex --sandbox danger-full-access` (TUI). `--skip-git-repo-check` is required because codex 0.139+ refuses `exec` outside a trusted directory / git repo ("Not inside a trusted directory and --skip-git-repo-check was not specified"); sandy provides the outer isolation, so the gate is redundant and would break headless runs from non-git workspaces. Interactive mode omits the flag — the `[projects."…"] trust_level = "trusted"` entry in `config.toml` covers the TUI path. The sandy `-p`/`--print`/`--prompt` flags are dropped and the remaining arg is passed as the positional prompt, because `codex exec` takes the prompt as a positional argument, not a flag. `--continue`/`-c` is silently dropped (codex has `codex resume` but no headless `--continue` equivalent — matches the gemini behavior).
 
 `codex exec` uses only exit codes 0 (success) and 1 (failure). Sandy does not attempt to emulate Claude's richer exit-code semantics (no tool-denied, no context-exhausted signals) for codex. `--sandbox danger-full-access` on the CLI is belt-and-suspenders alongside the `sandbox_mode` in `config.toml`; do not remove either.
 
@@ -1507,7 +1507,7 @@ JSON repair regexes:
   trust_level = "trusted"
   ```
   This must happen container-side because it needs the in-container workspace path.
-- `build_codex_cmd()`: translates sandy's `-p`/`--print`/`--prompt` into `codex exec` with a positional prompt; drops `--continue`/`-c`; injects `--sandbox danger-full-access` and optional `--model`.
+- `build_codex_cmd()`: translates sandy's `-p`/`--print`/`--prompt` into `codex exec` with a positional prompt; drops `--continue`/`-c`; injects `--sandbox danger-full-access`, `--skip-git-repo-check` (headless only), and optional `--model`.
 - Launch dispatch: the `codex` case sits alongside `claude` and `gemini` in the per-agent dispatch; multi-agent combos iterate over the parsed `_SANDY_AGENTS` array and call each `build_*_cmd` in pane order.
 
 **`/ss` screenshot-skill seeding**:
