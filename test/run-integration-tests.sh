@@ -1118,6 +1118,28 @@ else
 fi
 
 # ============================================================
+info "13b. Egress proxy — non-TCP egress backstop (--internal drops UDP/QUIC)"
+# ============================================================
+# The proxy is TCP-only by design; --internal must drop all non-TCP egress (an L3
+# FORWARD drop), or UDP/QUIC/HTTP-3 would bypass the SNI proxy and DNS could
+# tunnel out. This is deterministic and needs no agent/creds — a throwaway alpine
+# container on a fresh --internal network must NOT get a UDP DNS reply from a
+# public resolver. (Linux coverage; the macOS spike covers Docker Desktop.)
+_NTNET="sandy_nontcp_test_$$"
+if docker network create --internal --driver bridge --ipv6=false "$_NTNET" >/dev/null 2>&1; then
+    # nslookup uses UDP/53; a reply means UDP escaped the --internal bridge.
+    if docker run --rm --network "$_NTNET" alpine:3.20 \
+            sh -c "timeout 5 nslookup example.com 8.8.8.8 >/dev/null 2>&1"; then
+        fail "non-TCP backstop: --internal allowed UDP DNS to 8.8.8.8 (egress leak)"
+    else
+        pass "non-TCP backstop: --internal blocks UDP egress (DNS to 8.8.8.8 failed)"
+    fi
+    docker network rm "$_NTNET" >/dev/null 2>&1 || true
+else
+    skip "non-TCP backstop (could not create --internal test network)"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true

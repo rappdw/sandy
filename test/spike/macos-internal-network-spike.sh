@@ -140,6 +140,22 @@ else
     _ok "A1c: host.docker.internal unreachable from --internal (confirms local-LLM needs proxy forwarding)"
 fi
 
+# A1d — non-TCP egress. The proxy is TCP-only by design; --internal must be the
+# protocol-agnostic backstop (an L3 FORWARD drop), or UDP/QUIC/HTTP-3 would
+# bypass the SNI-reading TCP proxy and DNS could tunnel out. Test UDP egress with
+# a real DNS query straight to a public resolver (nslookup uses UDP/53); a reply
+# means UDP escaped. Also confirm there's no IPv6 default route.
+if _client "$INT_NET" "timeout 5 nslookup example.com 8.8.8.8 >/dev/null 2>&1"; then
+    _no "A1d: --internal allowed UDP DNS to 8.8.8.8 — NON-TCP EGRESS LEAK (QUIC / DNS-tunnel bypass)"
+else
+    _ok "A1d: --internal blocks UDP egress (DNS to 8.8.8.8 failed) — TCP-only proxy backstop holds ✦"
+fi
+if _client "$INT_NET" "ip -6 route show default 2>/dev/null | grep -q ."; then
+    _warn "A1d-v6: an IPv6 default route exists on --internal — confirm it can't egress"
+else
+    _ok "A1d-v6: no IPv6 default route on --internal (v4-only policy is complete)"
+fi
+
 # =============================================================================
 # Assumption 2 — a sidecar on the --internal network is still reachable by the
 # client (intra-bridge L2), and the sidecar can reach the internet via a SECOND

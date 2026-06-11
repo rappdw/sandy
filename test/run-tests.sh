@@ -3805,6 +3805,10 @@ check "cleanup removes proxy container before networks" \
 # Agent routing: --dns at the proxy, iptables skipped, ProxyCommand for SSH.
 check "agent resolver points at the proxy (--dns)" \
     bash -c 'grep -q -- "RUN_FLAGS+=(--dns \"\$PROXY_IP\")" "$1"' -- "$_PX_SCRIPT"
+# The resolved egress posture is forwarded into the container so in-container
+# tooling/tests can read their own isolation level (off/permissive/strict).
+check "SANDY_EGRESS_MODE forwarded into the container with the resolved posture" \
+    bash -c 'grep -q -- "RUN_FLAGS+=(-e \"SANDY_EGRESS_MODE=\$_SANDY_PROXY_MODE\")" "$1" && grep -q -- "RUN_FLAGS+=(-e \"SANDY_EGRESS_MODE=off\")" "$1"' -- "$_PX_SCRIPT"
 check "iptables isolation skipped when proxy on" \
     bash -c 'grep -q "if \[ \"\$_SANDY_PROXY_ON\" != true \]; then" "$1" && grep -q "    apply_network_isolation" "$1"' -- "$_PX_SCRIPT"
 check "entrypoint injects ssh ProxyCommand via CONNECT :3128" \
