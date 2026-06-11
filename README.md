@@ -294,8 +294,8 @@ No default — leaving `SANDY_SCREENSHOT_DIR` unset disables the feature entirel
 
 > Network egress is one of sandy's isolation layers. For the full picture —
 > the assumed adversary, every layer, and the honest residual risks — see
-> [`THREAT_MODEL.md`](THREAT_MODEL.md). Empirical bypass attempts are in
-> [`ISOLATION_STRESS.md`](ISOLATION_STRESS.md).
+> [`THREAT_MODEL.md`](docs/security/THREAT_MODEL.md). Empirical bypass attempts are in
+> [`ISOLATION_STRESS.md`](docs/security/ISOLATION_STRESS.md).
 
 ### Egress proxy (`SANDY_EGRESS_PROXY`) — cross-platform isolation
 
