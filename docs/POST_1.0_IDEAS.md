@@ -447,3 +447,38 @@ Small *launcher* change (validate + detect + one `--runtime` flag) + the
 privileged-key metadata + docs. The real work is **compatibility soak**, not code
 — hence opt-in, Linux-first, and clearly labeled "strong-isolation tier, expect
 some workloads to need `runc`."
+
+---
+
+## Lessons from Anthropic's sandbox-runtime (srt) — carried over from TODO.md
+
+**Target: assorted (1.1+).** Consolidated 2026-06-11 from the old root `TODO.md`
+(an analysis of [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime)).
+One item already **shipped**, the rest are parked here; the deeper analysis lives
+under `research/`.
+
+- **Domain-based network filtering — ✅ SHIPPED** as the M2.7 egress proxy
+  (`SANDY_EGRESS_PROXY` permissive/strict + `SANDY_ALLOW_HOSTS`). This was the
+  headline srt lesson; it's done.
+- **`.env` / secret-file protection (highest-value remaining).** `.env`,
+  `.env.*`, `.env.local` are **not** in the protected-paths list, so a
+  prompt-injected agent can `cat` a project's secrets and (in permissive mode)
+  exfiltrate them. srt and Gemini CLI both address this — Gemini bind-mounts
+  zero-permission files over them (masking). Fix: scan the workspace ≤3 levels
+  (excluding `node_modules/`, `.venv*/`, `.git/`) for `.env*` and add them to the
+  protected list — read-only at minimum, **masked** ideally (reading is the real
+  risk, and RO only stops writes). See also `docs/security/THREAT_MODEL.md` R2.
+- **Violation logging.** sandy blocks silently; srt logs blocked connections /
+  write attempts in real time. At minimum, log denied egress (the proxy already
+  has a deny log behind `SANDY_DEBUG_PROXY`) and protected-path write attempts to
+  `~/.sandy/sandboxes/<project>/violations.log` for debuggability + trust.
+- **macOS native sandbox fallback.** For users without Docker, `sandbox-exec`
+  (Seatbelt) as a lighter-weight alternative — broadens reach, large effort.
+- **Per-command sandboxing.** srt can sandbox individual commands, not just whole
+  sessions. A significant architectural change; finer-grained but heavy.
+- **Dynamic config reload** (srt's `--control-fd`) and **MITM/inspection-proxy
+  support** (corporate CA, traffic visibility — composes with strict mode and the
+  POST_1.0 host-relay broker) — both lower priority.
+
+(Dropped from the old TODO as not-isolation/marketing: awesome-claude-code
+listing, community plugin marketplaces, a web-UI dashboard.)

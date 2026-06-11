@@ -55,6 +55,18 @@ Each project sandbox also gets **isolated package storage** — pip, npm, go, ca
 
 This means you can run multiple sandy sessions across different projects simultaneously, each with its own plugins, memory, context, and installed tools — just like activating different Python venvs.
 
+## Isolation layers
+
+Sandy wraps the agent in seven layers of OS-enforced isolation. For the assumed adversary and the honest residual risks, see [`docs/security/THREAT_MODEL.md`](docs/security/THREAT_MODEL.md).
+
+1. **Network egress.** The agent runs on a Docker `--internal` network with no route off it except a TCP-only proxy sidecar. *Permissive* (default) blocks LAN/host/cloud-metadata and allows the public internet; *strict* allows only an allowlist (model providers, GitHub, package registries) plus `SANDY_ALLOW_HOSTS`. Non-TCP traffic (UDP/QUIC/ICMP/IPv6) is dropped by the topology itself. See [How Network Isolation Works](#how-network-isolation-works).
+2. **Filesystem.** Read-only root filesystem; ephemeral `tmpfs` for `/tmp` and the home directory (lost on exit); **only the working directory** is bind-mounted from the host. ~25 sensitive paths inside it (shell configs, `.git/config`, `.git/hooks/`, `.github/workflows/`, `.vscode/`, `.devcontainer/`, …) are mounted **read-only**.
+3. **Credentials.** Each project gets its own credential sandbox. The session's `.credentials.json` is mounted **ephemerally and never persisted**; codex/gemini OAuth files are mounted read-only. One project's credentials never leak to another.
+4. **Process & privilege.** Non-root user, `--cap-drop ALL`, `--security-opt no-new-privileges`, Docker's default seccomp + AppArmor profiles, and **no Docker socket** — so the agent can't escalate or reach the daemon.
+5. **Resources.** Capped CPU, memory, PID count, and `tmpfs` sizes (auto-detected from the host).
+6. **Config trust-tier.** A committed `.sandy/config` is **parsed as `KEY=VALUE`, never sourced** (no shell execution), and can only set non-privileged keys; isolation toggles and credential variables require an explicit per-workspace approval prompt.
+7. **Per-instance.** Per-session Docker networks, a per-workspace mutex (one sandy per workspace), and per-project sandboxes keep concurrent sessions and different projects fully independent.
+
 ## Prerequisites
 
 Sandy works with any Docker-compatible runtime:
@@ -294,8 +306,8 @@ No default — leaving `SANDY_SCREENSHOT_DIR` unset disables the feature entirel
 
 > Network egress is one of sandy's isolation layers. For the full picture —
 > the assumed adversary, every layer, and the honest residual risks — see
-> [`THREAT_MODEL.md`](THREAT_MODEL.md). Empirical bypass attempts are in
-> [`ISOLATION_STRESS.md`](ISOLATION_STRESS.md).
+> [`THREAT_MODEL.md`](docs/security/THREAT_MODEL.md). Empirical bypass attempts are in
+> [`ISOLATION_STRESS.md`](docs/security/ISOLATION_STRESS.md).
 
 ### Egress proxy (`SANDY_EGRESS_PROXY`) — cross-platform isolation
 
