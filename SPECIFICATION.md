@@ -1869,6 +1869,35 @@ Plain text file at `$SANDY_HOME/.skill_version_<pack>`:
 
 Example: `a1b2c3d4e5f6` (commit SHA) or `v1.2.3` (release tag). Updated whenever a newer version is resolved from GitHub.
 
+### C.9 `sandy-session.json` (Self-Attestation Marker)
+
+Written to `$SANDBOX_DIR/sandy-session.json` on every launch and bind-mounted read-only at `/etc/sandy-session.json` (see Appendix E.16a). The single authoritative in-container proof that the agent is inside sandy:
+
+```json
+{
+  "schema": 1,
+  "sandy_version": "0.14.1-dev-a1b2c3d",
+  "egress_mode": "off",
+  "workspace": "/home/claude/dev/myproject",
+  "host_uid": 501,
+  "host_gid": 20,
+  "launched_at": "2026-06-11T12:00:00Z",
+  "session_nonce": "3f1c…"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `schema` | Marker schema version (currently `1`). |
+| `sandy_version` | Full version incl. git short hash (`sandy_full_version()`). |
+| `egress_mode` | Resolved posture: `off` \| `permissive` \| `strict`. |
+| `workspace` | Container-side workspace path (matches `SANDY_WORKSPACE`). |
+| `host_uid` / `host_gid` | Host identity sandy mapped the container to. |
+| `launched_at` | UTC ISO-8601 launch timestamp (host clock). |
+| `session_nonce` | Per-launch random hex; printed host-side under `SANDY_VERBOSE!=0` so an external verifier can match the file to a specific launch. Not exported as an env var. |
+
+Because the file is a `:ro` bind mount, a committed workspace `.sandy/config` cannot forge it. In-container tooling (the `sandy-isolation-test` kit, CI) should assert on this file rather than on env vars or uid/cap heuristics.
+
 ---
 
 ## Appendix D: Platform-Specific Behavior
@@ -2367,6 +2396,19 @@ SANDY_CODEX_AUTH=<auto|api_key|oauth>
 ```
 
 The codex sandbox dir is writable (codex needs `log/`, `memories/`, session rollouts, sqlite state), but the `auth.json` file inside it is shadowed by a read-only overlay bind when OAuth is active. See §11 for the rationale of the read-only overlay.
+
+### E.16a Self-Attestation Marker (all modes)
+
+Immediately after forwarding `SANDY_EGRESS_MODE`, sandy writes a marker file and mounts it read-only:
+
+```bash
+_sandy_egress_mode=<off|permissive|strict>        # captured once, reused for the env var + marker
+_sandy_session_nonce=$(openssl rand -hex 16 || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+printf '{...}' > "$SANDBOX_DIR/sandy-session.json"  # schema in Appendix C.9
+RUN_FLAGS+=(-v "$SANDBOX_DIR/sandy-session.json:/etc/sandy-session.json:ro)
+```
+
+The nonce is printed host-side only under `SANDY_VERBOSE!=0` and is **not** exported as an env var — the read-only file is the trust root. This is the one authoritative in-container signal of "running inside sandy, at egress mode X." Rationale in `CLAUDE.md` → *Self-Attestation Marker*.
 
 ### E.17 Final Command
 

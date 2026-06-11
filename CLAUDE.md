@@ -85,6 +85,20 @@ Sandy exposes three machine-readable JSON flags that run as **fast-path handlers
 
 See `SPEC_INTROSPECTION.md` for the stability contract and field-by-field JSON schema. When adding a new config key to `SANDY_PRIVILEGED_KEYS`, `SANDY_PASSIVE_KEYS`, or `SANDY_ENV_ONLY_KEYS` in the sandy script, also add a row to the `_sandy_key_metadata` heredoc (pipe-separated `key|type|default|pattern|description`) so it appears in `--print-schema` output, then run `test/regen-config-docs.sh` to propagate the change into the `SPECIFICATION.md` and `CLAUDE.md` config tables.
 
+## Self-Attestation Marker
+
+On every launch (all egress modes), sandy writes `$SANDBOX_DIR/sandy-session.json` and bind-mounts it **read-only** at `/etc/sandy-session.json` inside the container. It is the single authoritative, in-container signal that the agent is genuinely running inside sandy and at what isolation level:
+
+```json
+{ "schema": 1, "sandy_version": "...", "egress_mode": "off|permissive|strict",
+  "workspace": "...", "host_uid": 501, "host_gid": 20,
+  "launched_at": "2026-06-11T12:00:00Z", "session_nonce": "<hex>" }
+```
+
+**Why it exists.** Env vars (`SANDY_EGRESS_MODE`, `SANDY_WORKSPACE`) are spoofable and the *absence* of a path proves nothing, so an in-container probe that distrusts env vars otherwise cannot tell a sandy container apart from the bare host VM — the `sandy-isolation-test` red-team hit exactly this, running in sandy `=0` on macOS/OrbStack but concluding it was not in sandy at all (uid `501`, OrbStack `mac` virtiofs mounts, and `CapBnd` retaining sandy's documented `--cap-add` set all read as "ordinary VM" without an anchor). Because the marker is a `:ro` bind mount, a committed workspace config cannot forge it.
+
+**Tamper-evidence.** `session_nonce` is freshly generated each launch (`openssl rand`, falling back to `/dev/urandom`) and forwarded out-of-band: it is printed host-side under `SANDY_VERBOSE=1` so an external verifier (a test harness, CI) can confirm the file's nonce matches the launch it expects. The nonce is deliberately **not** exported as an env var — the read-only file is the trust root, env is not. In-container tooling should assert on this file, not on uid/caps/env heuristics (which is what misfired in the red-team run). The launcher writes the file at the same point it forwards `SANDY_EGRESS_MODE` (Appendix E); the JSON schema is in Appendix C.
+
 ## Per-project Configuration
 
 Create `.sandy/config` in any project directory to set per-project defaults:

@@ -5519,10 +5519,32 @@ RUN_FLAGS+=(-e "SANDY_VERBOSE=$SANDY_VERBOSE")
 # isolation is already applied by the network topology at launch; setting this
 # inside the container changes nothing. ("off" | "permissive" | "strict".)
 if [ "$_SANDY_PROXY_ON" = true ]; then
-    RUN_FLAGS+=(-e "SANDY_EGRESS_MODE=$_SANDY_PROXY_MODE")
+    _sandy_egress_mode="$_SANDY_PROXY_MODE"
 else
-    RUN_FLAGS+=(-e "SANDY_EGRESS_MODE=off")
+    _sandy_egress_mode="off"
 fi
+RUN_FLAGS+=(-e "SANDY_EGRESS_MODE=$_sandy_egress_mode")
+
+# --- Self-attestation marker (written in EVERY mode) ----------------------
+# A read-only marker the in-container agent / test harness / CI can read to
+# *positively* confirm it is inside sandy and at what isolation level. Env vars
+# alone are spoofable and absent paths prove nothing, so a careful in-container
+# probe otherwise cannot distinguish a sandy container from the bare host VM —
+# this is the false-negative that the sandy-isolation-test red-team hit (it ran
+# in sandy =0 on macOS/OrbStack but concluded it was not in sandy at all). The
+# file is bind-mounted :ro exactly like /etc/sandy-proxy.json, so a committed
+# workspace config cannot forge it. The session nonce is also printed host-side
+# below so an external verifier can match the file's nonce to the launch.
+_sandy_session_nonce="$( (openssl rand -hex 16 2>/dev/null) \
+    || (head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
+    || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
+_sandy_session_file="$SANDBOX_DIR/sandy-session.json"
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s"\n}\n' \
+    "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" \
+    "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" \
+    > "$_sandy_session_file"
+RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
+[ "${SANDY_VERBOSE:-0}" != "0" ] && info "Session marker /etc/sandy-session.json nonce=${_sandy_session_nonce} egress=${_sandy_egress_mode}"
 if _sandy_agent_has claude; then
     # Channels env vars: for single-agent 'claude' these drive the in-container plugin path;
     # for multi-agent the host-side relay uses the host-side env vars directly, but
