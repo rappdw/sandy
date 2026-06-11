@@ -167,6 +167,11 @@ cleanup() {
         rm -f "$d.claude.json" 2>/dev/null || true
         rm -rf "$(dirname "$d")/.$(basename "$d").lock" 2>/dev/null || true
     done
+    # Tear down any leaked egress-proxy sidecars + per-instance networks so the
+    # suite never leaves Docker state behind. With default egress=permissive,
+    # every section that launches sandy creates these, and a SIGKILLed run leaks
+    # them. (Function is defined later in the file but resolved at EXIT time.)
+    sweep_leaked_sandy_networks 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM HUP
 
@@ -312,14 +317,29 @@ reap_test_containers() {
     [ -n "$pids" ] && docker rm -f $pids >/dev/null 2>&1 || true
 }
 
-# Remove any leaked sandy per-instance networks (sandy_{net,sidecar,egress}_<pid>).
-# Called once before §13 so a leftover from an EARLIER suite run / timed-out
-# section can't pre-fail §13's leak assertion. Not used to satisfy the assertion
-# itself — that polls for sandy's own teardown.
+# Remove any leaked sandy per-instance networks (sandy_{net,sidecar,egress}_<pid>)
+# AND the detached proxy sidecars that hold them open. Called before §13 (so a
+# leftover from an earlier suite run can't pre-fail the leak assertion) and from
+# the EXIT trap (so this suite never leaves leaks behind). NOT used to satisfy
+# §13's assertion — that polls for sandy's own teardown.
+#
+# The egress proxy is launched with `docker run -d` (detached), so after a
+# SIGKILLed run the sandy-proxy-<pid> container keeps RUNNING and stays attached
+# to its sidecar network — `docker network rm` then fails with "active endpoints"
+# until the container is gone. So: kill the proxy containers first, then
+# force-disconnect any lingering endpoints, then remove the networks. (Avoid
+# `xargs -r` — the -r/--no-run-if-empty flag is GNU-only, absent on macOS.)
 sweep_leaked_sandy_networks() {
-    local nets
-    nets="$(docker network ls --format '{{.Name}}' 2>/dev/null | grep -E '^sandy_(net|sidecar|egress)_' || true)"
-    [ -n "$nets" ] && docker network rm $nets >/dev/null 2>&1 || true
+    local pids
+    pids="$(docker ps -aq --filter 'name=sandy-proxy-' 2>/dev/null)"
+    [ -n "$pids" ] && docker rm -f $pids >/dev/null 2>&1 || true
+    local net cid
+    for net in $(docker network ls --format '{{.Name}}' 2>/dev/null | grep -E '^sandy_(net|sidecar|egress)_' || true); do
+        for cid in $(docker network inspect "$net" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null || true); do
+            docker network disconnect -f "$net" "$cid" >/dev/null 2>&1 || true
+        done
+        docker network rm "$net" >/dev/null 2>&1 || true
+    done
 }
 
 # --- Preflight ---
@@ -926,22 +946,28 @@ elif [ "$HAS_CLAUDE" = true ] && [ "$HAS_GEMINI" = true ]; then
     # gemini-cli logs an _ApiError stack trace on transient 503s before its
     # own retry-with-backoff succeeds, and matching that as "error" here is a
     # false positive (the session as a whole still works).
+    # A gemini *API* error (4xx/5xx, "critical error", 503/quota) means sandy did
+    # its job — it launched gemini and gemini reached the API — and gemini's own
+    # backend failed. That's not a sandy regression, so SKIP rather than FAIL
+    # (a red suite on a transient Google API blip is a false alarm). A sandy-level
+    # failure (empty output = didn't launch, or a flag-translation error) still
+    # FAILS, because those are sandy's responsibility.
     if [ -n "$_out" ] \
        && echo "$_out" | grep -qi "first" \
        && ! echo "$_out" | grep -qi "unknown flag"; then
         pass "gemini session works in switch test"
+    elif [ -n "$_out" ] \
+         && ! echo "$_out" | grep -qi "unknown flag" \
+         && echo "$_out" | grep -qiE 'status: *[45][0-9][0-9]|critical error|503|500|RESOURCE_EXHAUSTED|quota|UNAVAILABLE|rate.?limit'; then
+        skip "gemini session works in switch test — gemini API error, not a sandy fault ($(echo "$_out" | grep -oiE 'status: *[0-9]+|critical error|RESOURCE_EXHAUSTED|quota|UNAVAILABLE|rate.?limit' | head -1))"
     else
         fail "gemini session works in switch test"
-        # Diagnostic — distinguish a real break from a transient gemini API blip
-        # (503/quota → retry, model phrasing) so the cause is visible next run.
         if [ -z "$_out" ]; then
-            echo "    (empty output — gemini produced nothing; likely API/credential issue)" >&2
+            echo "    (empty output — gemini produced nothing; sandy launch/credential issue)" >&2
         elif echo "$_out" | grep -qi "unknown flag"; then
-            echo "    (flag-translation error: $(echo "$_out" | grep -i 'unknown flag' | head -1))" >&2
-        elif echo "$_out" | grep -qiE '503|RESOURCE_EXHAUSTED|quota|UNAVAILABLE'; then
-            echo "    (transient gemini API error — not a sandy fault: $(echo "$_out" | grep -iE '503|RESOURCE_EXHAUSTED|quota|UNAVAILABLE' | head -1))" >&2
+            echo "    (flag-translation error — real sandy bug: $(echo "$_out" | grep -i 'unknown flag' | head -1))" >&2
         else
-            echo "    (responded but without the word 'first': $(echo "$_out" | tail -4 | tr '\n' ' '))" >&2
+            echo "    (responded but without 'first' and no recognizable API error: $(echo "$_out" | tail -4 | tr '\n' ' '))" >&2
         fi
     fi
 
