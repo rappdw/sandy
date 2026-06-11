@@ -5514,6 +5514,15 @@ RUN_FLAGS+=(-e "SANDY_SKIP_PERMISSIONS=${SANDY_SKIP_PERMISSIONS:-true}")
 RUN_FLAGS+=(-e "SANDY_NEW_SESSION=$SANDY_NEW_SESSION")
 RUN_FLAGS+=(-e "SANDY_REMOTE_CONTROL=$SANDY_REMOTE_CONTROL")
 RUN_FLAGS+=(-e "SANDY_VERBOSE=$SANDY_VERBOSE")
+# Expose the resolved egress posture so in-container tooling, tests, and the
+# agent itself can see their own isolation level. Informational only — the
+# isolation is already applied by the network topology at launch; setting this
+# inside the container changes nothing. ("off" | "permissive" | "strict".)
+if [ "$_SANDY_PROXY_ON" = true ]; then
+    RUN_FLAGS+=(-e "SANDY_EGRESS_MODE=$_SANDY_PROXY_MODE")
+else
+    RUN_FLAGS+=(-e "SANDY_EGRESS_MODE=off")
+fi
 if _sandy_agent_has claude; then
     # Channels env vars: for single-agent 'claude' these drive the in-container plugin path;
     # for multi-agent the host-side relay uses the host-side env vars directly, but
