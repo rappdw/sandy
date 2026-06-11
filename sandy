@@ -4922,7 +4922,18 @@ load_codex_credentials() {
     local mode="${SANDY_CODEX_AUTH:-auto}"
     if [ "$mode" = "api_key" ] || [ "$mode" = "auto" ]; then
         if [ -n "${OPENAI_API_KEY:-}" ]; then
-            info "Using OPENAI_API_KEY for Codex"
+            # codex 0.139+ no longer reads OPENAI_API_KEY from the environment
+            # for first-party auth — requests go out with no Authorization
+            # header at all ("Missing bearer or basic authentication in
+            # header" 401). Materialize the key as an ephemeral auth.json
+            # (what `codex login --with-api-key` writes) and reuse the OAuth
+            # path's read-only mount. Never persisted to the sandbox.
+            local _k="${OPENAI_API_KEY//\\/\\\\}"
+            _k="${_k//\"/\\\"}"
+            CODEX_CRED_TMPDIR="$(mktemp -d)"
+            printf '{"OPENAI_API_KEY":"%s"}\n' "$_k" > "$CODEX_CRED_TMPDIR/auth.json"
+            chmod 600 "$CODEX_CRED_TMPDIR/auth.json"
+            info "Using OPENAI_API_KEY for Codex (ephemeral auth.json, read-only mount)"
             return 0
         fi
     fi

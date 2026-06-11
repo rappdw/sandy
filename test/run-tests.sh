@@ -1929,6 +1929,25 @@ check "cleanup trap removes CODEX_CRED_TMPDIR" \
 check "load_codex_credentials function exists" \
     grep -q '^load_codex_credentials()' "$SANDY_SCRIPT"
 
+# api_key path must materialize an ephemeral auth.json — codex 0.139+ no
+# longer reads OPENAI_API_KEY from the environment for first-party auth
+# (requests go out with no Authorization header at all), so env passthrough
+# alone silently 401s.
+_CODEX_CRED_FN="$(awk '/^load_codex_credentials\(\)/,/^}/' "$SANDY_SCRIPT")"
+_CCRED_OUT="$(bash -c "
+    info() { :; }; warn() { :; }
+    $_CODEX_CRED_FN
+    export OPENAI_API_KEY='sk-test-12345' SANDY_CODEX_AUTH=api_key
+    load_codex_credentials
+    cat \"\$CODEX_CRED_TMPDIR/auth.json\"
+    rm -rf \"\$CODEX_CRED_TMPDIR\"
+" 2>/dev/null)"
+if printf '%s' "$_CCRED_OUT" | grep -q '"OPENAI_API_KEY":"sk-test-12345"'; then
+    pass "load_codex_credentials api_key path materializes ephemeral auth.json"
+else
+    fail "load_codex_credentials api_key path materializes ephemeral auth.json"
+fi
+
 # Dockerfile path dispatch: codex maps to Dockerfile.codex.
 check "DOCKERFILE_PATH dispatch includes codex → Dockerfile.codex" \
     grep -q 'DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.codex"' "$SANDY_SCRIPT"

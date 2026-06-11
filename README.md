@@ -133,8 +133,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `GEMINI_MODEL` | (unset) | Gemini model override |
 | `SANDY_GEMINI_AUTH` | `auto` | Force Gemini auth path: `auto`, `api_key`, `oauth`, or `adc` |
 | `SANDY_GEMINI_EXTENSIONS` | (unset) | Comma-separated Gemini extension URLs/paths to install on first launch |
-| `CODEX_API_KEY` | (unset) | OpenAI API key for Codex CLI. Put in `.sandy/.secrets` |
-| `OPENAI_API_KEY` | (unset) | Aliased to `CODEX_API_KEY` automatically when `SANDY_AGENT=codex` |
+| `OPENAI_API_KEY` | (unset) | OpenAI API key for Codex CLI. Put in `.sandy/.secrets` — sandy materializes it as an ephemeral read-only `auth.json` for codex (codex 0.139+ no longer reads the env var for auth) |
 | `CODEX_MODEL` | (unset) | Codex model override |
 | `SANDY_CODEX_AUTH` | `auto` | Force Codex auth path: `auto`, `api_key`, or `oauth` |
 | `OPENCODE_MODEL` | (unset) | OpenCode model override (`provider/model` format, e.g. `anthropic/claude-sonnet-4`) |
@@ -227,7 +226,7 @@ Sandy supports two Codex auth paths, probed automatically unless `SANDY_CODEX_AU
 
 | Path | How to set up | When to use |
 |---|---|---|
-| API key | `CODEX_API_KEY=sk-...` in `.sandy/.secrets` (or `OPENAI_API_KEY=sk-...`, which sandy aliases automatically) | Simplest; works on headless servers |
+| API key | `OPENAI_API_KEY=sk-...` in `.sandy/.secrets` — sandy writes it into an ephemeral `auth.json` (what `codex login --with-api-key` would create) and mounts it **read-only**; codex 0.139+ ignores the bare env var for auth | Simplest; works on headless servers |
 | OAuth (ChatGPT) | Run `codex login` **on the host** once — sandy copies `~/.codex/auth.json` into the container as a **read-only** mount on each launch | ChatGPT Plus/Team/Enterprise accounts |
 
 Because the OAuth mount is read-only, in-session token refresh will fail — if your token expires, run `codex login` inside the sandy session (or back on the host for next launch). This is intentional: a writable mount would leak refreshed tokens back to the host and open a stale-token race on session exit.

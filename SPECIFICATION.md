@@ -12,7 +12,7 @@ Sandy is a self-contained command that runs an AI coding agent (Claude Code, Gem
 |---|---|---|
 | `claude` (default) | `sandy-claude-code` | Claude Code — full feature support (channels, skill packs, synthkit, remote-control) |
 | `gemini` | `sandy-gemini-cli` | Gemini CLI — Google OAuth / ADC / Vertex AI / API key auth |
-| `codex` | `sandy-codex` | OpenAI Codex CLI — `OPENAI_API_KEY` env var or ChatGPT OAuth (read-only mount) |
+| `codex` | `sandy-codex` | OpenAI Codex CLI — `OPENAI_API_KEY` (materialized as ephemeral `auth.json`) or ChatGPT OAuth; both as read-only mounts |
 | `opencode` | `sandy-opencode` | OpenCode (sst/opencode) — provider-agnostic; reads `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` natively, plus optional OAuth from `~/.local/share/opencode/auth.json`. Local-LLM passthrough via `SANDY_LOCAL_LLM_HOST`. |
 | `<a>,<b>[,<c>[,<d>]]` (e.g. `claude,gemini`, `claude,codex`, `claude,gemini,codex,opencode`) | `sandy-full` | Multi-agent combo — one tmux pane per agent, in the order listed |
 | `all` | `sandy-full` | Alias for `claude,gemini,codex,opencode` — all four agents in a 4-pane tmux session |
@@ -856,10 +856,10 @@ Sandy's `load_codex_credentials()` tries the following sources, controlled by `S
 
 | Mode | Source | Container mount / env |
 |---|---|---|
-| `api_key` | `OPENAI_API_KEY` env var on host | Forwarded via `-e OPENAI_API_KEY=…` |
+| `api_key` | `OPENAI_API_KEY` env var on host | Materialized as an ephemeral `auth.json` (`{"OPENAI_API_KEY":"…"}` — what `codex login --with-api-key` writes) mounted at `/home/claude/.codex/auth.json` **read-only**; the env var is also forwarded via `-e OPENAI_API_KEY=…` for other in-container tooling |
 | `oauth` | Host `~/.codex/auth.json` (ChatGPT login) | Ephemeral copy mounted at `/home/claude/.codex/auth.json` **read-only** |
 
-In `auto` mode (default), `OPENAI_API_KEY` wins if set; otherwise an `auth.json` ephemeral mount is used if present; otherwise a warning is emitted.
+In `auto` mode (default), `OPENAI_API_KEY` wins if set; otherwise an `auth.json` ephemeral mount is used if present; otherwise a warning is emitted. The api_key path materializes a file (rather than relying on env passthrough) because codex 0.139+ no longer reads `OPENAI_API_KEY` from the environment for first-party auth — requests go out with no Authorization header at all and fail with 401 "Missing bearer or basic authentication in header".
 
 **The `auth.json` mount is read-only by design.** If codex needs to refresh an expired OAuth token mid-session, the write fails and codex falls back to an in-session re-login flow. This is the safer default: it prevents refreshed tokens from leaking back to the host, and prevents stale-token-on-exit races. Users who want fresh credentials on every launch get that automatically — sandy re-copies `auth.json` from the host at each launch.
 
@@ -1854,9 +1854,12 @@ trust_level = "trusted"
 
 Appended by `user-setup.sh` only if a matching `^[projects."<workspace>"]` line is not already present (idempotent).
 
-### C.7c Codex `auth.json` (ephemeral OAuth mount)
+### C.7c Codex `auth.json` (ephemeral mount, both auth paths)
 
-If the host has `~/.codex/auth.json` and `SANDY_CODEX_AUTH` is `auto` or `oauth`, sandy copies it to a tmpdir at launch and mounts it **read-only** into the container at `/home/claude/.codex/auth.json`. The tmpdir is removed on exit (cleanup trap). Schema is opaque to sandy — the file is produced by `codex login` on the host.
+Both codex auth paths produce an ephemeral `auth.json` mounted **read-only** into the container at `/home/claude/.codex/auth.json`; the tmpdir is removed on exit (cleanup trap):
+
+- **api_key** (`OPENAI_API_KEY` set, `SANDY_CODEX_AUTH` is `auto` or `api_key`): sandy generates the file itself as `{"OPENAI_API_KEY":"<key>"}` (with `"` and `\` JSON-escaped) — the same shape `codex login --with-api-key` writes. Required because codex 0.139+ no longer reads the env var for first-party auth.
+- **oauth** (host has `~/.codex/auth.json`, mode `auto` or `oauth`): sandy copies the host file to the tmpdir. Schema is opaque to sandy — the file is produced by `codex login` on the host.
 
 ### C.8 `.skill_version_<pack>` Cache
 
@@ -2396,7 +2399,7 @@ SANDY_CODEX_AUTH=<auto|api_key|oauth>
 -v "$CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro"
 ```
 
-The codex sandbox dir is writable (codex needs `log/`, `memories/`, session rollouts, sqlite state), but the `auth.json` file inside it is shadowed by a read-only overlay bind when OAuth is active. See §11 for the rationale of the read-only overlay.
+The codex sandbox dir is writable (codex needs `log/`, `memories/`, session rollouts, sqlite state), but the `auth.json` file inside it is shadowed by a read-only overlay bind when either auth path is active (OAuth copy or api-key materialization — see C.7c). See §11 for the rationale of the read-only overlay.
 
 ### E.16a Self-Attestation Marker (all modes)
 
