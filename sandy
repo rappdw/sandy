@@ -4621,19 +4621,37 @@ cleanup() {
                 _new_protected+=("$_pd")
             fi
         done < <(_sandy_protected_dirs)
+        # Same for protected FILES absent at launch (e.g. .npmrc, .envrc,
+        # .pre-commit-config.yaml) — existence-gated, so a newly-created one
+        # persists to the host workspace and otherwise goes unreported.
+        while IFS= read -r _pf; do
+            [ -z "$_pf" ] && continue
+            grep -qFx "$_pf" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null && continue
+            if [ -f "$WORK_DIR/$_pf" ]; then
+                _new_protected+=("$_pf")
+            fi
+        done < <(_sandy_protected_files)
         if [ ${#_new_protected[@]} -gt 0 ]; then
             printf "\n${YELLOW}[sandy]${NC} Protected paths appeared during this session:\n" >&2
             for _p in "${_new_protected[@]}"; do
-                printf "${YELLOW}[sandy]${NC}   %s/%s/\n" "$WORK_DIR" "$_p" >&2
+                if [ -d "$WORK_DIR/$_p" ]; then
+                    printf "${YELLOW}[sandy]${NC}   %s/%s/\n" "$WORK_DIR" "$_p" >&2
+                else
+                    printf "${YELLOW}[sandy]${NC}   %s/%s\n" "$WORK_DIR" "$_p" >&2
+                fi
             done
             printf "${YELLOW}[sandy]${NC}\n" >&2
             printf "${YELLOW}[sandy]${NC} These paths are normally read-only inside sandy because they auto-execute\n" >&2
             printf "${YELLOW}[sandy]${NC} code under common operations (git hooks fire on \`git pull\`/checkout, CI\n" >&2
-            printf "${YELLOW}[sandy]${NC} workflows on \`git push\`, IDE configs on project open). Review the content\n" >&2
-            printf "${YELLOW}[sandy]${NC} before any of those operations. To remove:\n" >&2
+            printf "${YELLOW}[sandy]${NC} workflows on \`git push\`, IDE/shell/tool configs on project open or next use).\n" >&2
+            printf "${YELLOW}[sandy]${NC} Review the content before any of those operations. To remove:\n" >&2
             _rm_args=""
             for _p in "${_new_protected[@]}"; do
-                _rm_args="$_rm_args $_p/"
+                if [ -d "$WORK_DIR/$_p" ]; then
+                    _rm_args="$_rm_args $_p/"
+                else
+                    _rm_args="$_rm_args $_p"
+                fi
             done
             printf "${YELLOW}[sandy]${NC}   (cd %q && rm -rf%s)\n\n" "$WORK_DIR" "$_rm_args" >&2
         fi
@@ -5406,6 +5424,15 @@ while IFS= read -r _pd; do
         echo "$_pd" >> "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
 done < <(_sandy_protected_dirs)
+# Also snapshot protected FILES that existed at launch. Absent protected files
+# are existence-gated (no :ro mount), so an agent can create e.g. .npmrc or
+# .pre-commit-config.yaml in-session and it persists to the host workspace. The
+# session-end detector (see cleanup) flags newly-appeared protected files the
+# same way it flags dirs — recording what existed now lets it tell new from old.
+while IFS= read -r _pf; do
+    [ -z "$_pf" ] && continue
+    [ -e "$WORK_DIR/$_pf" ] && echo "$_pf" >> "$SANDBOX_DIR/.protected-existed-at-launch"
+done < <(_sandy_protected_files)
 
 # --- Submodule gitdir protection (S1.1) ---
 # git stores each submodule's real gitdir under .git/modules/<path>/ (or under
@@ -5705,8 +5732,11 @@ fi
 SANDY_SSH="${SANDY_SSH:-token}"
 SSH_RELAY_PID=""
 
-# Mount ~/.ssh/known_hosts for either mode (needed for SSH host verification)
-if [ -f "$HOME/.ssh/known_hosts" ]; then
+# Mount ~/.ssh/known_hosts only in agent (SSH) mode. Token mode authenticates
+# git over HTTPS and never needs it; mounting it there needlessly exposes the
+# host's known internal hosts/IPs to the container (info disclosure surfaced by
+# the isolation-test Layer 3 review).
+if [ "$SANDY_SSH" = "agent" ] && [ -f "$HOME/.ssh/known_hosts" ]; then
     RUN_FLAGS+=(-v "$HOME/.ssh/known_hosts:/tmp/host-ssh-known_hosts:ro")
 fi
 
@@ -5776,6 +5806,16 @@ else
     fi
 fi
 [ -n "$GH_ACCOUNTS" ] && RUN_FLAGS+=(-e "GH_ACCOUNTS=$GH_ACCOUNTS")
+
+# Awareness note: a durable, broadly-scoped GitHub token is being forwarded into
+# a container whose egress posture allows the public internet (permissive — the
+# default). A compromised/prompt-injected agent could exfiltrate it to any public
+# host. Strict mode (SANDY_EGRESS_PROXY=2) limits egress to the default allowlist
+# and closes arbitrary-internet exfil. See THREAT_MODEL residual R3.
+if [ -n "$GIT_TOKEN" ] && [ "${_sandy_egress_mode:-off}" = "permissive" ]; then
+    info "Note: a GitHub token is reachable in-container under permissive egress;"
+    info "      use SANDY_EGRESS_PROXY=2 (strict) for token-sensitive work."
+fi
 
 # --- Launch ---
 if [ "$_SANDY_IS_MULTI" = true ]; then

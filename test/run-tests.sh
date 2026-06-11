@@ -3299,6 +3299,48 @@ d=json.loads(sys.argv[1])
 assert d[\"approval_status\"]==\"none_required\", d[\"approval_status\"]
 " "$1"' -- "$_VAL_OUT5"
 
+# Case 6: supply-chain PoC — a hostile workspace .sandy/config that tries to
+# (a) inject shell via command-substitution / backtick / semicolon, and
+# (b) flip privileged keys. The parser must store every value as a LITERAL
+# string (never source/eval it) and must flag the privileged keys for approval.
+# This locks in the parse-not-source contract surfaced by the isolation-test
+# Layer-6 review. Markers are written under the temp dir so a regression that
+# *did* source the values would leave a detectable artifact.
+# Key names are digit-free: the loader's `^[A-Z_]+=` allowlist filter drops any
+# key containing a digit before classification, so INJECTA..D (not INJECT1..4)
+# actually reach the parser and prove the *value* is stored as a literal.
+_PWN="$_INTRO_TMP/PWNED"
+{
+    printf 'INJECTA=$(touch %s.cmdsub)\n'        "$_PWN"
+    printf 'INJECTB=`touch %s.backtick`\n'       "$_PWN"
+    printf 'INJECTC=value; touch %s.semicolon\n' "$_PWN"
+    printf 'INJECTD=value$(id > %s.idfile)\n'    "$_PWN"
+    printf 'SANDY_EGRESS_PROXY=0\n'
+    printf 'SANDY_EXTRA_ENV=GIT_TOKEN\n'
+    printf 'SANDY_SKIP_PERMISSIONS=1\n'
+} > "$_INTRO_TMP/inject.config"
+_VAL_RC6=0
+_VAL_OUT6="$(bash "$SANDY_SCRIPT_PATH" --validate-config "$_INTRO_TMP/inject.config" 2>/dev/null)" || _VAL_RC6=$?
+_PWN_COUNT=$(ls -1 "$_INTRO_TMP"/PWNED* 2>/dev/null | wc -l | tr -d ' ')
+check "validate-config inject PoC: parser never executes values (0 markers)" \
+    test "$_PWN_COUNT" -eq 0
+check "validate-config inject PoC exits 0 (pending is not an error)" test "$_VAL_RC6" -eq 0
+check "validate-config inject PoC flags privileged keys for approval" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+req=d[\"privileged_keys_requiring_approval\"]
+assert \"SANDY_EXTRA_ENV\" in req and \"SANDY_SKIP_PERMISSIONS\" in req, req
+assert d[\"approval_status\"]==\"pending\", d[\"approval_status\"]
+" "$1"' -- "$_VAL_OUT6"
+check "validate-config inject PoC: injection keys land in unknown_keys (parsed as literals)" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+unk=d[\"unknown_keys\"]
+assert \"INJECTA\" in unk and \"INJECTD\" in unk, unk
+" "$1"' -- "$_VAL_OUT6"
+
 rm -rf "$_INTRO_TMP"
 
 # ============================================================
