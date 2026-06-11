@@ -292,6 +292,11 @@ No default — leaving `SANDY_SCREENSHOT_DIR` unset disables the feature entirel
 
 ## How Network Isolation Works
 
+> Network egress is one of sandy's isolation layers. For the full picture —
+> the assumed adversary, every layer, and the honest residual risks — see
+> [`THREAT_MODEL.md`](THREAT_MODEL.md). Empirical bypass attempts are in
+> [`ISOLATION_STRESS.md`](ISOLATION_STRESS.md).
+
 ### Egress proxy (`SANDY_EGRESS_PROXY`) — cross-platform isolation
 
 The egress proxy is the recommended isolation mechanism and the **only** one that works on macOS. It routes the agent through a small proxy sidecar on a Docker `--internal` network (no route off the bridge except through the proxy), so it behaves identically on macOS and Linux. It's a tri-state:

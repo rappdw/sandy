@@ -352,3 +352,98 @@ Playwright Chromium instead of baking one that goes stale when a project pins a
 different Playwright. Adopt only the headless, lazy-resolved path — both projects
 also have host-Chrome / cookie-import modes that are the opposite of sandy's
 isolation.
+
+---
+
+## Optional gVisor runtime — `SANDY_RUNTIME` (strong-isolation tier)
+
+**Target: 1.1+ (defense-in-depth; opt-in).** Filed 2026-06-11. Closes/strongly
+mitigates residual **R1** (shared host kernel) in `THREAT_MODEL.md` — the one
+boundary that matters against a *determined/jailbroken* agent rather than a
+wrong-but-not-evil one.
+
+### What
+
+Let the maintainer run the container under a stronger runtime — primarily
+**gVisor** (`runsc`), a user-space kernel that intercepts the container's syscalls
+and services them itself, so the container never touches the host kernel directly.
+A container escape then has to break *gVisor's* sandbox, not just Linux
+namespaces. Exposed as a passive-looking but **privileged-tier** config key:
+
+```sh
+SANDY_RUNTIME=runc    # default — standard runtime (today's behavior)
+SANDY_RUNTIME=runsc   # gVisor — user-space kernel, strong isolation
+# (kata-runtime / a VM runtime could be a third value later)
+```
+
+### Why privileged-tier
+
+A *committed workspace* `.sandy/config` must not be able to **downgrade** the
+runtime (e.g. force `runc` when the maintainer wanted `runsc`, or point at an
+attacker-named runtime). So `SANDY_RUNTIME` goes in `SANDY_PRIVILEGED_KEYS` and
+needs the per-workspace approval prompt, like the other isolation toggles.
+Validate the value against an allowlist (`runc`/`runsc`/`kata-runtime`) — never
+pass an arbitrary string to `docker run --runtime`.
+
+### Launcher sketch
+
+```sh
+# after config load, near the other RUN_FLAGS:
+_runtime="${SANDY_RUNTIME:-runc}"
+case "$_runtime" in runc|runsc|kata-runtime) : ;; *) error "invalid SANDY_RUNTIME"; exit 1 ;; esac
+if [ "$_runtime" != runc ]; then
+    # fail closed if the runtime the maintainer asked for isn't installed —
+    # silently falling back to runc would defeat the security intent.
+    if ! docker info 2>/dev/null | grep -qiE "Runtimes:.*\b$_runtime\b"; then
+        error "SANDY_RUNTIME=$_runtime but Docker has no '$_runtime' runtime registered."
+        error "Install gVisor (https://gvisor.dev) and 'runsc install', or set SANDY_RUNTIME=runc."
+        exit 1
+    fi
+    RUN_FLAGS+=(--runtime "$_runtime")
+fi
+```
+Everything else — the egress proxy, mounts, `--cap-drop`, `no-new-privileges`,
+read-only root — stays exactly the same and composes *on top of* the stronger
+runtime. gVisor is orthogonal to all of it.
+
+### Platform reality (the catch)
+
+- **Linux native: the real use case.** Install gVisor in the host's Docker
+  (`runsc install`), then `SANDY_RUNTIME=runsc`. This is where R1 (escape =
+  host root) is sharpest, so this is where gVisor earns its keep.
+- **macOS Docker Desktop: largely N/A.** Docker Desktop doesn't ship `runsc`, and
+  there's no supported way to register it inside its VM. macOS already has the VM
+  boundary between the container and the Mac, so the marginal value is lower.
+  Behavior: the install check above just hard-errors, which is correct — don't
+  pretend.
+
+### Compatibility caveats (the real cost — must be soak-tested)
+
+gVisor re-implements the kernel surface; not every syscall/feature is supported,
+and there's overhead. Things to verify with the `sandy-isolation-test` kit *and*
+normal agent work under `runsc` before recommending it:
+- **Networking** — gVisor has its own netstack; confirm the `--internal` bridge +
+  the proxy DNS/transparent/CONNECT path all still work (this is the load-bearing
+  check — if the proxy breaks under runsc, the feature is moot).
+- **Toolchains** — heavy builds, `node`/`go`/`rust`, FUSE, `ptrace`-based tools,
+  and anything doing exotic syscalls can break or slow down. Playwright/Chromium
+  (gstack) is a known stress case.
+- **Bind mounts / overlay** behavior under gofer.
+- **Performance** — measurable syscall overhead; fine for agent work, painful for
+  IO-heavy builds.
+
+### Test plan
+
+1. `sandy --runtime`-style smoke: launch under `runsc`, run the network/fs/priv
+   probes — isolation should still HELD, and gVisor should *narrow* the escape
+   surface (R1) without breaking R-anything.
+2. Run the existing integration suite with `SANDY_RUNTIME=runsc` on a gVisor host
+   and diff failures vs `runc` — that delta is the compatibility cost.
+3. Document the supported/unsupported matrix in `SPECIFICATION.md` Appendix D.
+
+### Effort
+
+Small *launcher* change (validate + detect + one `--runtime` flag) + the
+privileged-key metadata + docs. The real work is **compatibility soak**, not code
+— hence opt-in, Linux-first, and clearly labeled "strong-isolation tier, expect
+some workloads to need `runc`."
