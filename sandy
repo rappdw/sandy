@@ -72,7 +72,6 @@ SANDY_PASSIVE_KEYS=(
     GOOGLE_GENAI_USE_VERTEXAI
     CODEX_MODEL
     SANDY_CODEX_AUTH
-    CODEX_HOME
     OPENCODE_MODEL
     SANDY_OPENCODE_AUTH
     TELEGRAM_BOT_TOKEN
@@ -483,7 +482,6 @@ GOOGLE_CLOUD_LOCATION|string|||Google Cloud location for Vertex AI.
 GOOGLE_GENAI_USE_VERTEXAI|bool|||Use Vertex AI backend for Gemini.
 CODEX_MODEL|string|||Codex model override.
 SANDY_CODEX_AUTH|enum:auto,api_key,oauth|auto||Codex credential probe strategy.
-CODEX_HOME|string|||Override CODEX_HOME inside the container.
 OPENCODE_MODEL|string|||OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4').
 SANDY_OPENCODE_AUTH|enum:auto,api_key,oauth|auto||OpenCode credential probe strategy.
 TELEGRAM_BOT_TOKEN|secret|||Telegram bot token for the channel relay.
@@ -3869,7 +3867,20 @@ elif [ ! -f "$_sandbox_created_ver_file" ]; then
     warn "  Recreate with:  rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
 else
     _sandbox_created_ver="$(head -n1 "$_sandbox_created_ver_file" 2>/dev/null | tr -d '[:space:]')"
-    if [ -n "$_sandbox_created_ver" ] && _ver_lt "$_sandbox_created_ver" "$SANDY_SANDBOX_MIN_COMPAT"; then
+    # Validate the marker is a real version (X.Y.Z, optional -suffix/hash) before
+    # using it. A corrupt or copied-in sandbox could carry garbage; without this
+    # _ver_lt would still run (it zero-fills non-numeric parts) but the warning
+    # would echo the garbage as "created by sandy <garbage>". Treat invalid as
+    # the same "unknown old" case as a missing marker.
+    if [ -n "$_sandbox_created_ver" ] && \
+            ! [[ "$_sandbox_created_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.].*)?$ ]]; then
+        warn "Sandbox version marker is unreadable (.sandy_created_version = '$_sandbox_created_ver')."
+        warn "  Treating as pre-$SANDY_SANDBOX_MIN_COMPAT; recreate if you hit path issues:"
+        warn "    rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
+        _sandbox_created_ver="unknown"
+    fi
+    if [ -n "$_sandbox_created_ver" ] && [ "$_sandbox_created_ver" != "unknown" ] \
+            && _ver_lt "$_sandbox_created_ver" "$SANDY_SANDBOX_MIN_COMPAT"; then
         warn "Sandbox was created by sandy $_sandbox_created_ver, which predates"
         warn "  the workspace mount path change in $SANDY_SANDBOX_MIN_COMPAT."
         warn "  Cached absolute paths (venv, .pth files, editable installs) may reference"

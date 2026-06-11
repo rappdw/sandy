@@ -137,7 +137,7 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `SANDY_SCREENSHOT_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `CODEX_HOME`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `SANDY_SCREENSHOT_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -186,7 +186,6 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `GOOGLE_GENAI_USE_VERTEXAI` | passive | unset | Use Vertex AI backend for Gemini. |
 | `CODEX_MODEL` | passive | unset | Codex model override. |
 | `SANDY_CODEX_AUTH` | passive | `auto` | Codex credential probe strategy. |
-| `CODEX_HOME` | passive | unset | Override CODEX_HOME inside the container. |
 | `OPENCODE_MODEL` | passive | unset | OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4'). |
 | `SANDY_OPENCODE_AUTH` | passive | `auto` | OpenCode credential probe strategy. |
 | `TELEGRAM_BOT_TOKEN` | passive | unset | Telegram bot token for the channel relay. |
@@ -2386,7 +2385,7 @@ CODEX_MODEL=<model>                 # if set
 SANDY_CODEX_AUTH=<auto|api_key|oauth>
 ```
 
-`CODEX_HOME` is intentionally **not** forwarded — sandy owns the in-container path (`/home/claude/.codex`) via the sandbox mount and overriding it would break the mount.
+`CODEX_HOME` is **not** a sandy config key and is never forwarded — sandy owns the in-container path (`/home/claude/.codex`) via the sandbox mount, and overriding it would break the mount. (Removed from the passive allowlist in the PR 4.1 surface audit, where it was found declared-but-never-consumed.)
 
 **Codex-specific mounts** (`SANDY_AGENT=codex`):
 ```bash
