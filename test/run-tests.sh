@@ -2773,7 +2773,18 @@ info "38. Sprint 1 — --print-protected-paths flag"
 # S1.8: test harness and sandy share the protected-path list via this flag.
 
 SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-_PRINT_OUT="$("$SANDY_SCRIPT_PATH" --print-protected-paths 2>/dev/null)"
+# Capture set-e-safely with retry-on-empty. --print-protected-paths is a pure
+# fast-path (heredoc + exit 0), so a non-zero/empty result is a TRANSIENT early
+# subprocess hiccup (e.g. a fork hitting EAGAIN under heavy system load — common
+# on macOS Docker Desktop with lots of leftover container/network state), not a
+# real failure. Without the guard, `set -euo pipefail` turns that one hiccup into
+# a whole-suite abort; with it, a genuine break still fails the checks below.
+_PRINT_OUT=""
+for _pp_try in 1 2 3; do
+    _PRINT_OUT="$("$SANDY_SCRIPT_PATH" --print-protected-paths 2>/dev/null)" || _PRINT_OUT=""
+    [ -n "$_PRINT_OUT" ] && break
+    sleep 0.5
+done
 
 check "--print-protected-paths emits file: entries" \
     bash -c 'echo "$1" | grep -q "^file:.bashrc$"' -- "$_PRINT_OUT"
