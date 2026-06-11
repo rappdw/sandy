@@ -1140,6 +1140,55 @@ else
 fi
 
 # ============================================================
+info "14. Sandbox compatibility floor (M4 PR 4.2) — hard refuse below floor"
+# ============================================================
+# The 1.x forward-compat promise: a sandbox created below SANDY_SANDBOX_MIN_COMPAT
+# is refused at launch (the launcher exits before docker run). Exercise the real
+# launch path: create a sandbox, downgrade its marker below the floor, and assert
+# sandy refuses; then restore an above-floor marker and assert it proceeds. The
+# pure classifier is unit-tested in run-tests.sh §51; this covers the wiring.
+if [ "$HAS_CLAUDE" = true ]; then
+    setup_project claude "integ-compat"
+    # First launch creates the sandbox authentically.
+    run_sandy_headless -- -p "reply with exactly one word: floor" >/dev/null 2>&1
+    resolve_sandbox
+    if [ -n "$SANDBOX_DIR" ] && [ -d "$SANDBOX_DIR" ]; then
+        _marker="$SANDBOX_DIR/.sandy_created_version"
+        _orig_ver="$(cat "$_marker" 2>/dev/null || true)"
+
+        # (a) Below-floor marker → sandy must refuse with the recreation hint.
+        echo "0.5.0" > "$_marker"
+        _out="$(run_sandy_headless -- -p "should not run")"
+        if echo "$_out" | grep -q "below the" && echo "$_out" | grep -q "refuses to launch against it"; then
+            pass "below-floor sandbox is hard-refused at launch"
+        else
+            fail "below-floor sandbox is hard-refused at launch"
+            echo "    (output: $(echo "$_out" | head -4 | tr '\n' ' '))" >&2
+        fi
+        # The refusal must NOT have reached the container launch banner.
+        if echo "$_out" | grep -qi "Launching .*sandbox"; then
+            fail "below-floor refusal happens before container launch"
+        else
+            pass "below-floor refusal happens before container launch"
+        fi
+
+        # (b) Restore an above-floor marker → sandy proceeds (no refuse message).
+        echo "${_orig_ver:-$("$SANDY_SCRIPT" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)}" > "$_marker"
+        _out2="$(run_sandy_headless -- -p "reply with exactly one word: ok")"
+        if echo "$_out2" | grep -q "refuses to launch against it"; then
+            fail "above-floor sandbox launches without the floor refusal"
+            echo "    (output: $(echo "$_out2" | head -4 | tr '\n' ' '))" >&2
+        else
+            pass "above-floor sandbox launches without the floor refusal"
+        fi
+    else
+        fail "compat floor: sandbox dir resolved after first launch"
+    fi
+else
+    skip "sandbox compatibility floor (needs Claude credentials)"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true

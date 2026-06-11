@@ -1582,7 +1582,7 @@ All magic numbers, thresholds, timeouts, and limits used in the sandy script.
 
 | Parameter | Value | Context |
 |---|---|---|
-| `SANDY_SANDBOX_MIN_COMPAT` | `0.7.10` | Minimum sandy version whose sandboxes are still layout-compatible. Sandboxes created by older sandy (pre-c99eb97 workspace mount path change) trigger a launch-time warning recommending recreation. |
+| `SANDY_SANDBOX_MIN_COMPAT` | `0.7.10` | **Hard floor** on sandbox layout compatibility. A sandbox whose `.sandy_created_version` is *known and below* this is **refused at launch** (error + recreation command; sandy exits before `docker run`). Unknown/unreadable markers warn but launch. Classified by `_sandbox_compat_classify()`. **1.x forward-compat promise:** this must never advance above `1.0.0` within the `1.x` series (a breaking layout change is a `2.0` change). |
 | `.sandy_created_version` | Written once on sandbox creation | Records the sandy version that created the sandbox. Missing on sandboxes created before 0.10.1. |
 | `.sandy_last_version` | Refreshed every launch | Records the most-recent sandy version that touched the sandbox. |
 

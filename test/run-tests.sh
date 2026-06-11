@@ -3866,6 +3866,38 @@ check "macOS no-isolation banner gated behind proxy-off" \
     bash -c 'grep -q "Network isolation is NOT active on \$OS" "$1"' -- "$_PX_SCRIPT"
 
 # ============================================================
+info "51. Sandbox compatibility floor (M4 PR 4.2)"
+# ============================================================
+# The 1.x forward-compat promise is enforced by _sandbox_compat_classify:
+# below-floor → hard refuse to launch; unknown/invalid → warn; ok → silent.
+# Unit-test the pure classifier here (the launch path that consumes it needs
+# Docker — see run-integration-tests.sh §14). Extract _ver_lt + the classifier
+# from source and pin the floor so the test is independent of the live value.
+_SBX_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_sbx_classify() {
+    bash -c "
+        $(sed -n '/^_ver_lt()/,/^}$/p' "$_SBX_SCRIPT")
+        $(sed -n '/^_sandbox_compat_classify()/,/^}$/p' "$_SBX_SCRIPT")
+        SANDY_SANDBOX_MIN_COMPAT=0.7.10
+        _sandbox_compat_classify \"\$1\"
+    " _ "$1"
+}
+check "compat classify: 0.5.0 (old) → below-floor"          test "$(_sbx_classify 0.5.0)"             = below-floor
+check "compat classify: 0.7.9 (just under floor) → below-floor" test "$(_sbx_classify 0.7.9)"          = below-floor
+check "compat classify: 0.7.10 (== floor) → ok"             test "$(_sbx_classify 0.7.10)"            = ok
+check "compat classify: 0.14.0 → ok"                        test "$(_sbx_classify 0.14.0)"            = ok
+check "compat classify: 1.0.0 → ok"                         test "$(_sbx_classify 1.0.0)"             = ok
+check "compat classify: 0.14.1-dev-abc123 → ok"             test "$(_sbx_classify 0.14.1-dev-abc123)" = ok
+check "compat classify: 'unknown' → unknown"                test "$(_sbx_classify unknown)"           = unknown
+check "compat classify: empty → unknown"                    test "$(_sbx_classify '')"                = unknown
+check "compat classify: garbage → invalid"                  test "$(_sbx_classify garbage)"           = invalid
+# The launch path must hard-refuse a below-floor sandbox (error message + exit 1).
+check "launch hard-refuses below-floor sandbox (unique error string)" \
+    bash -c 'grep -q "sandy refuses to launch against it" "$1"' -- "$_SBX_SCRIPT"
+check "below-floor branch exits non-zero" \
+    bash -c 'awk "/below-floor\\)/{f=1} f&&/exit 1/{print; exit}" "$1" | grep -q "exit 1"' -- "$_SBX_SCRIPT"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

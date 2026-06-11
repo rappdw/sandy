@@ -182,11 +182,23 @@ Each project directory gets its own isolated `~/.claude` sandbox under `~/.sandy
 
 ### Sandbox version tracking
 
-On creation, each sandbox gets a `.sandy_created_version` file recording the sandy version that created it; `.sandy_last_version` is refreshed on every launch. On launch, sandy compares the created-version against `SANDY_SANDBOX_MIN_COMPAT` (currently `0.7.10`) and warns if the sandbox pre-dates a known breaking change. Sandboxes with no marker file pre-date the tracking itself and are warned about conservatively.
+On creation, each sandbox gets a `.sandy_created_version` file recording the sandy version that created it; `.sandy_last_version` is refreshed on every launch. On launch, sandy reads the created-version and classifies it against `SANDY_SANDBOX_MIN_COMPAT` (currently `0.7.10`) via the pure `_sandbox_compat_classify()` helper:
+
+- **below the floor** → **hard error; sandy refuses to launch** and prints the recreation command. (See "Sandbox compatibility (1.x forward-compat promise)" below.)
+- **unknown / invalid** (no marker — pre-0.10.1 — or an unreadable one) → warn only. We can't prove it's below the floor, so we don't refuse.
+- **at/after the floor** → silent.
 
 The current breaking-change threshold is the workspace mount path change (c99eb97, v0.7.10): sandy now mounts the workspace at `/home/claude/<rel>` instead of `/workspace`. Sandboxes created before that carry cached absolute paths inside venvs (`pyvenv.cfg`, `.pth` files, editable installs) and Python package caches that reference `/workspace/...` and silently break inside the new layout. Fix: `rm -rf ~/.sandy/sandboxes/<name> && sandy --rebuild`.
 
-When introducing further sandbox-incompatible changes, bump `SANDY_SANDBOX_MIN_COMPAT` in the sandy script so users get a warning on their next launch.
+When introducing further sandbox-incompatible changes, bump `SANDY_SANDBOX_MIN_COMPAT` in the sandy script — but see the forward-compat promise below for the 1.x constraint on moving it.
+
+### Sandbox compatibility (1.x forward-compat promise)
+
+From 1.0, sandy makes a **forward-compatibility promise**: *a sandbox created by any `1.x` sandy works with any later `1.x` sandy.* The mechanism is `SANDY_SANDBOX_MIN_COMPAT` as a **hard floor** — below it sandy refuses to launch (rather than the pre-1.0 warn-and-limp, which let an incompatible sandbox run into silently-broken cached paths). The promise constrains the floor: **within `1.x`, `SANDY_SANDBOX_MIN_COMPAT` must never advance above `1.0.0`.** A layout change that would break `1.x` sandboxes is a `2.0` change, not a `1.x` one.
+
+The floor is enforced only when the created-version is *known and provably below it* — unknown/unreadable markers warn but launch (fail-open on uncertainty, fail-closed on proof). A non-destructive **sandbox migration utility** (rewrite cached paths in place instead of `rm -rf` + recreate) is tracked in `docs/POST_1.0_IDEAS.md`; until it exists, the remediation is recreation.
+
+Tests: `run-tests.sh §51` unit-tests `_sandbox_compat_classify` (below-floor/ok/unknown/invalid); `run-integration-tests.sh §14` exercises the real launch path (downgrade a sandbox's marker → assert refuse; restore → assert proceed). At the 1.0-rc1 cut (roadmap PR 5.2), a frozen sandbox snapshot fixture is added so every later release proves it still resumes that snapshot.
 
 ### Workspace `.venv` overlay
 

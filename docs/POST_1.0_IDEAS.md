@@ -335,6 +335,44 @@ mis-parses. Fix: write to `.tmp` then `mv` (atomic on same filesystem). Same
 
 ---
 
+## Sandbox migration utility (`sandy --migrate-sandbox`)
+
+**Target: 1.0.x / 1.1 (M-effort).** Filed 2026-06-11, out of M4 PR 4.2.
+
+PR 4.2 made `SANDY_SANDBOX_MIN_COMPAT` a **hard floor**: a sandbox created below it
+is *refused* at launch (the 1.x forward-compat promise — see `SPECIFICATION.md`
+"Sandbox version tracking"). Today the only remedy is destructive: `rm -rf
+~/.sandy/sandboxes/<name> && sandy --rebuild`, which discards the sandbox's
+installed packages (pip/npm/go/cargo), `uv`-managed Pythons, `.claude` plugins/
+commands, and the workspace `.venv` overlay — the user re-installs everything.
+
+A **non-destructive migration** would rewrite the stale cached absolute paths in
+place instead of nuking the sandbox. The known break is the `/workspace` →
+`/home/claude/<rel>` mount move (`SANDY_SANDBOX_MIN_COMPAT=0.7.10`): the fix is a
+targeted rewrite of `/workspace/...` references in the overlay venv's
+`pyvenv.cfg`, `.pth` files, editable-install `*.egg-link`/`direct_url.json`, and
+console-script shebangs, then stamp `.sandy_created_version` to the current
+version. Sketch:
+
+```
+sandy --migrate-sandbox            # migrate the current workspace's sandbox
+sandy --migrate-sandbox --all      # sweep every sandbox under ~/.sandy/sandboxes
+```
+
+Scope/cautions:
+- **Back up first** (`cp -a` the sandbox to `<name>.premigrate` so a failed
+  rewrite is recoverable) — migration touches package metadata.
+- **Path-rewrite only, not a rebuild.** If a future floor bump is about toolchain
+  ABI rather than paths, migration may not be expressible as a sed — detect and
+  fall back to "recreate" with a clear message.
+- Pairs naturally with a `sandy --doctor` that reports each sandbox's
+  classification (`_sandbox_compat_classify`) and offers migrate-or-recreate.
+
+Until this lands, the hard floor's UX is "refuse + recreate," which is correct
+but lossy; the migration utility turns it into "refuse + one-command fix."
+
+---
+
 ## Pack-independent browser capability
 
 **Target: 1.0.1+ (L-effort; flagship potential).** Filed 2026-06-07.

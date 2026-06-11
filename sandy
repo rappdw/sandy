@@ -281,6 +281,23 @@ _ver_lt() {
 # sandbox-incompatible changes.
 SANDY_SANDBOX_MIN_COMPAT="0.7.10"
 
+# Classify a sandbox's recorded .sandy_created_version against the compat floor.
+# Pure (no side effects, no exit) so it can be unit-tested directly. Echoes one of:
+#   ok          — created at/after the floor; safe to use
+#   below-floor — created before the floor; the current layout would break it
+#   unknown     — no marker / empty (pre-0.10.1 sandbox, version untracked)
+#   invalid     — marker present but not a parseable version (corrupt/copied-in)
+# The 1.x forward-compat promise is enforced by the caller: 'below-floor' is a
+# hard refuse-to-launch; 'unknown'/'invalid' warn (we can't prove they're below
+# the floor); 'ok' is silent. The floor (SANDY_SANDBOX_MIN_COMPAT) is read from
+# the global so the launch path and the tests share one source of truth.
+_sandbox_compat_classify() {
+    local ver="$1"
+    if [ -z "$ver" ] || [ "$ver" = "unknown" ]; then echo "unknown"; return; fi
+    if ! [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.].*)?$ ]]; then echo "invalid"; return; fi
+    if _ver_lt "$ver" "$SANDY_SANDBOX_MIN_COMPAT"; then echo "below-floor"; else echo "ok"; fi
+}
+
 SANDY_REPO_URL="https://raw.githubusercontent.com/rappdw/sandy/main/sandy"
 SANDY_API_URL="https://api.github.com/repos/rappdw/sandy/releases/latest"
 
@@ -3862,38 +3879,39 @@ _sandbox_created_ver_file="$SANDBOX_DIR/.sandy_created_version"
 _sandbox_last_ver_file="$SANDBOX_DIR/.sandy_last_version"
 if [ "$SANDBOX_IS_NEW" = "true" ]; then
     echo "$SANDY_VERSION" > "$_sandbox_created_ver_file"
-elif [ ! -f "$_sandbox_created_ver_file" ]; then
-    # Existing sandbox with no marker: created by a sandy that didn't write
-    # the marker (i.e. pre-0.10.1). Treat as "unknown old" — warn against
-    # the conservative threshold below.
-    _sandbox_created_ver="unknown"
-    warn "Sandbox predates version tracking (no .sandy_created_version file)."
-    warn "  If this sandbox was created before sandy $SANDY_SANDBOX_MIN_COMPAT"
-    warn "  (workspace path changed from /workspace → /home/claude/<rel>),"
-    warn "  cached absolute paths (venv, .pth files, editable installs) may be broken."
-    warn "  Recreate with:  rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
 else
-    _sandbox_created_ver="$(head -n1 "$_sandbox_created_ver_file" 2>/dev/null | tr -d '[:space:]')"
-    # Validate the marker is a real version (X.Y.Z, optional -suffix/hash) before
-    # using it. A corrupt or copied-in sandbox could carry garbage; without this
-    # _ver_lt would still run (it zero-fills non-numeric parts) but the warning
-    # would echo the garbage as "created by sandy <garbage>". Treat invalid as
-    # the same "unknown old" case as a missing marker.
-    if [ -n "$_sandbox_created_ver" ] && \
-            ! [[ "$_sandbox_created_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.].*)?$ ]]; then
-        warn "Sandbox version marker is unreadable (.sandy_created_version = '$_sandbox_created_ver')."
-        warn "  Treating as pre-$SANDY_SANDBOX_MIN_COMPAT; recreate if you hit path issues:"
-        warn "    rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
+    if [ -f "$_sandbox_created_ver_file" ]; then
+        _sandbox_created_ver="$(head -n1 "$_sandbox_created_ver_file" 2>/dev/null | tr -d '[:space:]')"
+    else
         _sandbox_created_ver="unknown"
     fi
-    if [ -n "$_sandbox_created_ver" ] && [ "$_sandbox_created_ver" != "unknown" ] \
-            && _ver_lt "$_sandbox_created_ver" "$SANDY_SANDBOX_MIN_COMPAT"; then
-        warn "Sandbox was created by sandy $_sandbox_created_ver, which predates"
-        warn "  the workspace mount path change in $SANDY_SANDBOX_MIN_COMPAT."
-        warn "  Cached absolute paths (venv, .pth files, editable installs) may reference"
-        warn "  /workspace/... and break silently. Recreate with:"
-        warn "    rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
-    fi
+    case "$(_sandbox_compat_classify "$_sandbox_created_ver")" in
+        below-floor)
+            # Forward-compat promise (1.x): a sandbox below the compat floor cannot
+            # be honored in the current container layout — its cached absolute paths
+            # (venv pyvenv.cfg, .pth files, editable installs) reference the old
+            # /workspace layout and break silently. We refuse to launch rather than
+            # limp into a half-broken sandbox. (A non-destructive migration utility
+            # is POST_1.0; for now, recreate. See SPECIFICATION "Sandbox version
+            # tracking" and "Sandbox compatibility (1.x forward-compat promise)".)
+            error "Sandbox was created by sandy $_sandbox_created_ver, which is below the"
+            error "  compatibility floor (sandy $SANDY_SANDBOX_MIN_COMPAT). Its cached absolute"
+            error "  paths (venv, .pth files, editable installs) reference the old /workspace"
+            error "  layout and would break silently. sandy refuses to launch against it."
+            error "  Recreate the sandbox (host-side, one-time):"
+            error "    rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
+            exit 1
+            ;;
+        unknown|invalid)
+            # No marker (pre-0.10.1) or an unreadable one. We can't prove it's below
+            # the floor, so warn rather than refuse.
+            warn "Sandbox version is unknown (.sandy_created_version missing or unreadable)."
+            warn "  If it was created before sandy $SANDY_SANDBOX_MIN_COMPAT (the /workspace →"
+            warn "  /home/claude/<rel> mount change), cached paths may be broken. If you hit"
+            warn "  path issues, recreate:  rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
+            ;;
+        ok) : ;;  # created at/after the floor — silent
+    esac
 fi
 echo "$SANDY_VERSION" > "$_sandbox_last_ver_file"
 # WORKSPACE.json: human-readable forensic record of which workspace this
