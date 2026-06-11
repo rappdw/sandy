@@ -149,51 +149,51 @@ After all config sources are loaded, `SANDY_ALLOW_LAN_HOSTS` (if set) is split o
 The table below is generated from `sandy --print-schema` (the `_sandy_key_metadata` heredoc in the sandy script is the source of truth). Run `test/regen-config-docs.sh` after editing, adding, or retiering a key — `test/run-tests.sh` asserts the blocks are in sync.
 
 <!-- BEGIN AUTOGEN:config-keys-table Run `test/regen-config-docs.sh` to update. -->
-| Variable | Tier | Default | Description |
-|---|---|---|---|
-| `SANDY_SSH` | privileged | `token` | SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent. |
-| `SANDY_SKIP_PERMISSIONS` | privileged | `true` | Skip Claude Code's in-session permission prompts (default: true). |
-| `SANDY_ALLOW_NO_ISOLATION` | privileged | `0` | Allow launch when iptables rules cannot be applied (Linux only). |
-| `SANDY_ALLOW_LAN_HOSTS` | privileged | unset | Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected. |
-| `SANDY_LOCAL_LLM_HOST` | privileged | unset | Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal. |
-| `SANDY_ALLOW_HOSTS` | privileged | unset | Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval. |
-| `SANDY_EXTRA_ENV` | privileged | unset | Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values come from the host env, ~/.sandy/.secrets, or ~/.sandy/config — workspace sources never supply values. Privileged tier so workspace config requires approval. |
-| `ANTHROPIC_API_KEY` | privileged | unset | Anthropic API key for Claude Code. Not required when using Claude Max OAuth. |
-| `CLAUDE_CODE_OAUTH_TOKEN` | privileged | unset | Claude Code OAuth token (alternative to ANTHROPIC_API_KEY). |
-| `GEMINI_API_KEY` | privileged | unset | Google API key for Gemini CLI. |
-| `OPENAI_API_KEY` | privileged | unset | OpenAI API key for Codex CLI. |
-| `GOOGLE_API_KEY` | privileged | unset | Google API key for Vertex AI / ADC. |
-| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | privileged | unset | Enable Claude Code experimental agent-teams feature. |
-| `SANDY_AGENT` | passive | `claude` | Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'. |
-| `SANDY_MODEL` | passive | `claude-opus-4-8` | Model ID for the Claude agent. |
-| `SANDY_CPUS` | passive | unset | CPU limit for container (default: auto-detected). |
-| `SANDY_MEM` | passive | unset | Memory limit for container (e.g. '8g'; default: auto-detected). |
-| `SANDY_GPU` | passive | unset | GPU passthrough: 'all', or device IDs like '0' / '0,1'. |
-| `SANDY_SKILL_PACKS` | passive | unset | Comma-separated skill pack names (e.g. 'gstack'). |
-| `SANDY_CHANNELS` | passive | unset | Comma-separated channel names (e.g. 'telegram,discord'). |
-| `SANDY_CHANNEL_TARGET_PANE` | passive | `0` | Which tmux pane in multi-agent mode receives channel messages. |
-| `SANDY_VERBOSE` | passive | `0` | Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace). |
-| `SANDY_VENV_OVERLAY` | passive | `1` | Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container. |
-| `SANDY_EGRESS_PROXY` | passive | `1` | Egress-proxy network isolation (closes macOS F2). 1=permissive (default; proxy sidecar blocks private/LAN/metadata but allows all internet — works identically on macOS and Linux). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 0=off (legacy iptables-only on Linux, no isolation on macOS). |
-| `SANDY_ALLOW_WORKFLOW_EDIT` | passive | `0` | Remove .github/workflows from the read-only protection list. |
-| `SANDY_SCREENSHOT_DIR` | passive | unset | Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents. |
-| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | passive | `128000` | Max output tokens per Claude response. |
-| `GEMINI_MODEL` | passive | unset | Gemini model override. |
-| `SANDY_GEMINI_AUTH` | passive | `auto` | Gemini credential probe strategy. |
-| `SANDY_GEMINI_EXTENSIONS` | passive | unset | Comma-separated Gemini extensions to enable. |
-| `GOOGLE_CLOUD_PROJECT` | passive | unset | Google Cloud project for Vertex AI. |
-| `GOOGLE_CLOUD_LOCATION` | passive | unset | Google Cloud location for Vertex AI. |
-| `GOOGLE_GENAI_USE_VERTEXAI` | passive | unset | Use Vertex AI backend for Gemini. |
-| `CODEX_MODEL` | passive | unset | Codex model override. |
-| `SANDY_CODEX_AUTH` | passive | `auto` | Codex credential probe strategy. |
-| `OPENCODE_MODEL` | passive | unset | OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4'). |
-| `SANDY_OPENCODE_AUTH` | passive | `auto` | OpenCode credential probe strategy. |
-| `TELEGRAM_BOT_TOKEN` | passive | unset | Telegram bot token for the channel relay. |
-| `TELEGRAM_ALLOWED_SENDERS` | passive | unset | Comma-separated Telegram user IDs allowed to send messages. |
-| `DISCORD_BOT_TOKEN` | passive | unset | Discord bot token for the channel relay. |
-| `DISCORD_ALLOWED_SENDERS` | passive | unset | Comma-separated Discord user IDs allowed to send messages. |
-| `SANDY_AUTO_APPROVE_PRIVILEGED` | env-only | unset | Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only. |
-| `SANDY_DEBUG_CLEANUP` | env-only | unset | Print session-stub cleanup diagnostics on exit. |
+| Variable | Tier | Default | Since | Stability | Description |
+|---|---|---|---|---|---|
+| `SANDY_SSH` | privileged | `token` | 0.1.0 | stable | SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent. |
+| `SANDY_SKIP_PERMISSIONS` | privileged | `true` | 0.1.0 | stable | Skip Claude Code's in-session permission prompts (default: true). |
+| `SANDY_ALLOW_NO_ISOLATION` | privileged | `0` | 0.1.0 | stable | Allow launch when iptables rules cannot be applied (Linux only). |
+| `SANDY_ALLOW_LAN_HOSTS` | privileged | unset | 0.7.9 | stable | Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected. |
+| `SANDY_LOCAL_LLM_HOST` | privileged | unset | 0.12.0 | stable | Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal. |
+| `SANDY_ALLOW_HOSTS` | privileged | unset | 0.14.0 | stable | Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval. |
+| `SANDY_EXTRA_ENV` | privileged | unset | 0.12.0 | stable | Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values come from the host env, ~/.sandy/.secrets, or ~/.sandy/config — workspace sources never supply values. Privileged tier so workspace config requires approval. |
+| `ANTHROPIC_API_KEY` | privileged | unset | 0.1.0 | stable | Anthropic API key for Claude Code. Not required when using Claude Max OAuth. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | privileged | unset | 0.7.0 | stable | Claude Code OAuth token (alternative to ANTHROPIC_API_KEY). |
+| `GEMINI_API_KEY` | privileged | unset | 0.9.0 | stable | Google API key for Gemini CLI. |
+| `OPENAI_API_KEY` | privileged | unset | 0.10.0 | stable | OpenAI API key for Codex CLI. |
+| `GOOGLE_API_KEY` | privileged | unset | 0.9.0 | stable | Google API key for Vertex AI / ADC. |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | privileged | unset | 0.1.0 | experimental | Enable Claude Code experimental agent-teams feature. |
+| `SANDY_AGENT` | passive | `claude` | 0.9.0 | stable | Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'. |
+| `SANDY_MODEL` | passive | `claude-opus-4-8` | 0.1.0 | stable | Model ID for the Claude agent. |
+| `SANDY_CPUS` | passive | unset | 0.1.0 | stable | CPU limit for container (default: auto-detected). |
+| `SANDY_MEM` | passive | unset | 0.1.0 | stable | Memory limit for container (e.g. '8g'; default: auto-detected). |
+| `SANDY_GPU` | passive | unset | 0.7.5 | stable | GPU passthrough: 'all', or device IDs like '0' / '0,1'. |
+| `SANDY_SKILL_PACKS` | passive | unset | 0.7.10 | stable | Comma-separated skill pack names (e.g. 'gstack'). |
+| `SANDY_CHANNELS` | passive | unset | 0.7.6 | stable | Comma-separated channel names (e.g. 'telegram,discord'). |
+| `SANDY_CHANNEL_TARGET_PANE` | passive | `0` | 0.9.0 | stable | Which tmux pane in multi-agent mode receives channel messages. |
+| `SANDY_VERBOSE` | passive | `0` | 0.8.0 | stable | Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace). |
+| `SANDY_VENV_OVERLAY` | passive | `1` | 0.10.0 | stable | Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container. |
+| `SANDY_EGRESS_PROXY` | passive | `1` | 0.14.0 | stable | Egress-proxy network isolation (closes macOS F2). 1=permissive (default; proxy sidecar blocks private/LAN/metadata but allows all internet — works identically on macOS and Linux). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 0=off (legacy iptables-only on Linux, no isolation on macOS). |
+| `SANDY_ALLOW_WORKFLOW_EDIT` | passive | `0` | 0.11.1 | stable | Remove .github/workflows from the read-only protection list. |
+| `SANDY_SCREENSHOT_DIR` | passive | unset | 0.12.0 | stable | Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents. |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | passive | `128000` | 0.6.0 | stable | Max output tokens per Claude response. |
+| `GEMINI_MODEL` | passive | unset | 0.9.0 | stable | Gemini model override. |
+| `SANDY_GEMINI_AUTH` | passive | `auto` | 0.9.0 | stable | Gemini credential probe strategy. |
+| `SANDY_GEMINI_EXTENSIONS` | passive | unset | 0.9.0 | stable | Comma-separated Gemini extensions to enable. |
+| `GOOGLE_CLOUD_PROJECT` | passive | unset | 0.9.0 | stable | Google Cloud project for Vertex AI. |
+| `GOOGLE_CLOUD_LOCATION` | passive | unset | 0.9.0 | stable | Google Cloud location for Vertex AI. |
+| `GOOGLE_GENAI_USE_VERTEXAI` | passive | unset | 0.9.0 | stable | Use Vertex AI backend for Gemini. |
+| `CODEX_MODEL` | passive | unset | 0.10.0 | stable | Codex model override. |
+| `SANDY_CODEX_AUTH` | passive | `auto` | 0.10.0 | stable | Codex credential probe strategy. |
+| `OPENCODE_MODEL` | passive | unset | 0.12.0 | stable | OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4'). |
+| `SANDY_OPENCODE_AUTH` | passive | `auto` | 0.12.0 | stable | OpenCode credential probe strategy. |
+| `TELEGRAM_BOT_TOKEN` | passive | unset | 0.7.6 | stable | Telegram bot token for the channel relay. |
+| `TELEGRAM_ALLOWED_SENDERS` | passive | unset | 0.7.6 | stable | Comma-separated Telegram user IDs allowed to send messages. |
+| `DISCORD_BOT_TOKEN` | passive | unset | 0.7.6 | stable | Discord bot token for the channel relay. |
+| `DISCORD_ALLOWED_SENDERS` | passive | unset | 0.7.6 | stable | Comma-separated Discord user IDs allowed to send messages. |
+| `SANDY_AUTO_APPROVE_PRIVILEGED` | env-only | unset | 0.11.2 | internal | Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only. |
+| `SANDY_DEBUG_CLEANUP` | env-only | unset | 0.11.4 | internal | Print session-stub cleanup diagnostics on exit. |
 <!-- END AUTOGEN:config-keys-table -->
 
 ### Model Validation
@@ -635,7 +635,7 @@ The container's own subnet is allowed. Additional hosts/CIDRs can be allowed via
 
 ### macOS
 
-**Network isolation is NOT active on macOS when the egress proxy is off (`SANDY_EGRESS_PROXY=0`, the default).** Docker Desktop's VM does *not* provide LAN isolation. Containers can reach `host.docker.internal` (→ host gateway), the host's `localhost` services, and any device on the user's physical LAN (`192.168.x.x`, home router, NAS, printers, internal dashboards). Linux iptables DROP rules do not apply and cannot be applied from macOS. (Stress test April 2026 opened a live TCP connection to host SSHD and read its banner — see `ISOLATION_STRESS.md` finding F2.) **Setting `SANDY_EGRESS_PROXY=1` (or `=2`) applies real isolation on macOS** — see "Egress Proxy" below.
+**Network isolation is NOT active on macOS when the egress proxy is explicitly turned off (`SANDY_EGRESS_PROXY=0`).** (The default is `1` — permissive — so this applies only when a user opts out.) Docker Desktop's VM does *not* provide LAN isolation. Containers can reach `host.docker.internal` (→ host gateway), the host's `localhost` services, and any device on the user's physical LAN (`192.168.x.x`, home router, NAS, printers, internal dashboards). Linux iptables DROP rules do not apply and cannot be applied from macOS. (Stress test April 2026 opened a live TCP connection to host SSHD and read its banner — see `ISOLATION_STRESS.md` finding F2.) **Setting `SANDY_EGRESS_PROXY=1` (or `=2`) applies real isolation on macOS** — see "Egress Proxy" below.
 
 **Launch warning**: On non-Linux hosts with the proxy off, `apply_network_isolation` prints a warning banner informing the user that network isolation is not active and pointing at `SANDY_EGRESS_PROXY=1`. In proxy mode `apply_network_isolation` is not called (the `--internal` topology is the isolation), so no banner fires.
 
@@ -1905,9 +1905,11 @@ Sandy runs on both Linux and macOS. The following sections document every point 
 
 ### D.1 Network Isolation
 
+> **Scope:** this table describes the **legacy `SANDY_EGRESS_PROXY=0`** path. The **default is `1` (permissive)**, under which the egress proxy provides uniform isolation on *both* platforms (see the "Cross-platform fix" note below and the "Egress Proxy" section) — so this table applies only when a user explicitly opts out of the proxy.
+
 | Aspect | Linux | macOS |
 |---|---|---|
-| Mechanism | iptables `DOCKER-USER` chain | **None active in 1.0-rc1** (Docker Desktop does *not* provide LAN isolation) |
+| Mechanism | iptables `DOCKER-USER` chain | **None** (only under opt-out `=0`; Docker Desktop does *not* provide LAN isolation) |
 | Rules applied | DROP for 5 private ranges; ACCEPT for container subnet and allowed hosts | None — LAN, `host.docker.internal`, and host `localhost` are all reachable |
 | Fail-closed | Aborts if iptables unavailable (unless `SANDY_ALLOW_NO_ISOLATION=1`) | Prints loud launch warning banner; proceeds without isolation |
 | Defense-in-depth | n/a | `--add-host gateway.docker.internal:127.0.0.1`, `--add-host metadata.google.internal:127.0.0.1`, and (conditionally) `--add-host host.docker.internal:127.0.0.1` |
@@ -1915,7 +1917,7 @@ Sandy runs on both Linux and macOS. The following sections document every point 
 
 **macOS `--add-host` condition:** `host.docker.internal` is only nullified when `SANDY_SSH != agent`. In agent mode, sandy's in-container SSH agent relay uses that hostname to reach the host-side socat relay (see §10); nullifying it would break SSH. An additional warn line is emitted in that case.
 
-**Cross-platform fix — `SANDY_EGRESS_PROXY` (M2.7):** the egress proxy sidecar (transparent SNI/Host + CONNECT + DNS) implements uniform outbound isolation on both platforms via a Docker `--internal` network. `1`=permissive (block LAN/host, allow internet — intended 1.0 default-on), `2`=strict (allowlist only). When on, this table's "macOS: none" row no longer applies. See the "Egress Proxy" section above, `ISOLATION_STRESS.md` finding F2, and `proxy/` for the implementation.
+**Cross-platform fix — `SANDY_EGRESS_PROXY` (M2.7):** the egress proxy sidecar (transparent SNI/Host + CONNECT + DNS) implements uniform outbound isolation on both platforms via a Docker `--internal` network. `1`=permissive (block LAN/host, allow internet — **the default**), `2`=strict (allowlist only). Since the proxy is **on by default**, this entire table describes only the opt-out `=0` path. See the "Egress Proxy" section above, `ISOLATION_STRESS.md` finding F2, and `proxy/` for the implementation.
 
 **Linux iptables flow**:
 1. Test `sudo iptables -L DOCKER-USER -n` — if fails, abort (or allow with override)

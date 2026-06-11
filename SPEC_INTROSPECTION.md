@@ -75,6 +75,8 @@ All three:
         "type": "enum",
         "choices": ["token", "agent"],
         "default": "token",
+        "since": "0.1.0",
+        "stability": "stable",
         "description": "SSH authentication mode for git. 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent into the container.",
         "sources": ["home_config", "home_secrets", "env"],
         "passive_approval_required": true
@@ -286,6 +288,7 @@ Exit code: `0` on schemas that load cleanly (even with warnings), `1` on fatal e
 ## Schema versioning
 
 - Current: `schema_version: 1`
+- **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal`), `description`, `sources`, and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
 - **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. Clients ignore unknown fields.
 - **Deprecations** (existing key changes semantics): bump to `schema_version: 2`. Sandy publishes both versions in parallel via `--print-schema --schema-version 1` for one minor release, then drops v1 with a release-note callout.
 - **Compatibility range**: each sandy version declares `supported_schema_versions` and `deprecated_schema_versions` so clients can decide to warn/refuse.

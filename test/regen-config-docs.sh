@@ -58,14 +58,16 @@ def fmt_desc(k):
 
 
 def config_table():
-    rows = ["| Variable | Tier | Default | Description |",
-            "|---|---|---|---|"]
+    rows = ["| Variable | Tier | Default | Since | Stability | Description |",
+            "|---|---|---|---|---|---|"]
     for tier_label, keys in (("privileged", PRIV),
                              ("passive",    PASS),
                              ("env-only",   ENV)):
         for k in keys:
+            since = k.get("since") or "—"
+            stability = k.get("stability") or "stable"
             rows.append(
-                f"| `{k['name']}` | {tier_label} | {fmt_default(k)} | {fmt_desc(k)} |"
+                f"| `{k['name']}` | {tier_label} | {fmt_default(k)} | {since} | {stability} | {fmt_desc(k)} |"
             )
     return "\n".join(rows)
 

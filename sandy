@@ -447,49 +447,49 @@ fi
 # Empty fields are allowed (e.g. no default, no pattern).
 _sandy_key_metadata() {
     cat <<'EOF'
-SANDY_SSH|enum:token,agent|token||SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent.
-SANDY_SKIP_PERMISSIONS|bool|true||Skip Claude Code's in-session permission prompts (default: true).
-SANDY_ALLOW_NO_ISOLATION|bool|0||Allow launch when iptables rules cannot be applied (Linux only).
-SANDY_ALLOW_LAN_HOSTS|string|||Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
-SANDY_LOCAL_LLM_HOST|string||^[^[:space:]]+:[0-9]+$|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal.
-SANDY_ALLOW_HOSTS|string|||Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval.
-SANDY_EXTRA_ENV|string|||Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values come from the host env, ~/.sandy/.secrets, or ~/.sandy/config — workspace sources never supply values. Privileged tier so workspace config requires approval.
-ANTHROPIC_API_KEY|secret|||Anthropic API key for Claude Code. Not required when using Claude Max OAuth.
-CLAUDE_CODE_OAUTH_TOKEN|secret|||Claude Code OAuth token (alternative to ANTHROPIC_API_KEY).
-GEMINI_API_KEY|secret|||Google API key for Gemini CLI.
-OPENAI_API_KEY|secret|||OpenAI API key for Codex CLI.
-GOOGLE_API_KEY|secret|||Google API key for Vertex AI / ADC.
-CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||Enable Claude Code experimental agent-teams feature.
-SANDY_AGENT|agent_combo|claude||Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
-SANDY_MODEL|string|claude-opus-4-8|^[a-zA-Z0-9._-]+$|Model ID for the Claude agent.
-SANDY_CPUS|int|||CPU limit for container (default: auto-detected).
-SANDY_MEM|string|||Memory limit for container (e.g. '8g'; default: auto-detected).
-SANDY_GPU|string|||GPU passthrough: 'all', or device IDs like '0' / '0,1'.
-SANDY_SKILL_PACKS|string|||Comma-separated skill pack names (e.g. 'gstack').
-SANDY_CHANNELS|string|||Comma-separated channel names (e.g. 'telegram,discord').
-SANDY_CHANNEL_TARGET_PANE|int|0||Which tmux pane in multi-agent mode receives channel messages.
-SANDY_VERBOSE|int|0||Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace).
-SANDY_VENV_OVERLAY|bool|1||Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container.
-SANDY_EGRESS_PROXY|enum:0,1,2|1||Egress-proxy network isolation (closes macOS F2). 1=permissive (default; proxy sidecar blocks private/LAN/metadata but allows all internet — works identically on macOS and Linux). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 0=off (legacy iptables-only on Linux, no isolation on macOS).
-SANDY_ALLOW_WORKFLOW_EDIT|bool|0||Remove .github/workflows from the read-only protection list.
-SANDY_SCREENSHOT_DIR|path|||Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
-CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||Max output tokens per Claude response.
-GEMINI_MODEL|string|||Gemini model override.
-SANDY_GEMINI_AUTH|enum:auto,api_key,oauth,adc|auto||Gemini credential probe strategy.
-SANDY_GEMINI_EXTENSIONS|string|||Comma-separated Gemini extensions to enable.
-GOOGLE_CLOUD_PROJECT|string|||Google Cloud project for Vertex AI.
-GOOGLE_CLOUD_LOCATION|string|||Google Cloud location for Vertex AI.
-GOOGLE_GENAI_USE_VERTEXAI|bool|||Use Vertex AI backend for Gemini.
-CODEX_MODEL|string|||Codex model override.
-SANDY_CODEX_AUTH|enum:auto,api_key,oauth|auto||Codex credential probe strategy.
-OPENCODE_MODEL|string|||OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4').
-SANDY_OPENCODE_AUTH|enum:auto,api_key,oauth|auto||OpenCode credential probe strategy.
-TELEGRAM_BOT_TOKEN|secret|||Telegram bot token for the channel relay.
-TELEGRAM_ALLOWED_SENDERS|string|||Comma-separated Telegram user IDs allowed to send messages.
-DISCORD_BOT_TOKEN|secret|||Discord bot token for the channel relay.
-DISCORD_ALLOWED_SENDERS|string|||Comma-separated Discord user IDs allowed to send messages.
-SANDY_AUTO_APPROVE_PRIVILEGED|bool|||Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
-SANDY_DEBUG_CLEANUP|bool|||Print session-stub cleanup diagnostics on exit.
+SANDY_SSH|enum:token,agent|token||0.1.0|stable|SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent.
+SANDY_SKIP_PERMISSIONS|bool|true||0.1.0|stable|Skip Claude Code's in-session permission prompts (default: true).
+SANDY_ALLOW_NO_ISOLATION|bool|0||0.1.0|stable|Allow launch when iptables rules cannot be applied (Linux only).
+SANDY_ALLOW_LAN_HOSTS|string|||0.7.9|stable|Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
+SANDY_LOCAL_LLM_HOST|string||^[^[:space:]]+:[0-9]+$|0.12.0|stable|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal.
+SANDY_ALLOW_HOSTS|string|||0.14.0|stable|Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval.
+SANDY_EXTRA_ENV|string|||0.12.0|stable|Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values come from the host env, ~/.sandy/.secrets, or ~/.sandy/config — workspace sources never supply values. Privileged tier so workspace config requires approval.
+ANTHROPIC_API_KEY|secret|||0.1.0|stable|Anthropic API key for Claude Code. Not required when using Claude Max OAuth.
+CLAUDE_CODE_OAUTH_TOKEN|secret|||0.7.0|stable|Claude Code OAuth token (alternative to ANTHROPIC_API_KEY).
+GEMINI_API_KEY|secret|||0.9.0|stable|Google API key for Gemini CLI.
+OPENAI_API_KEY|secret|||0.10.0|stable|OpenAI API key for Codex CLI.
+GOOGLE_API_KEY|secret|||0.9.0|stable|Google API key for Vertex AI / ADC.
+CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Code experimental agent-teams feature.
+SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
+SANDY_MODEL|string|claude-opus-4-8|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
+SANDY_CPUS|int|||0.1.0|stable|CPU limit for container (default: auto-detected).
+SANDY_MEM|string|||0.1.0|stable|Memory limit for container (e.g. '8g'; default: auto-detected).
+SANDY_GPU|string|||0.7.5|stable|GPU passthrough: 'all', or device IDs like '0' / '0,1'.
+SANDY_SKILL_PACKS|string|||0.7.10|stable|Comma-separated skill pack names (e.g. 'gstack').
+SANDY_CHANNELS|string|||0.7.6|stable|Comma-separated channel names (e.g. 'telegram,discord').
+SANDY_CHANNEL_TARGET_PANE|int|0||0.9.0|stable|Which tmux pane in multi-agent mode receives channel messages.
+SANDY_VERBOSE|int|0||0.8.0|stable|Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace).
+SANDY_VENV_OVERLAY|bool|1||0.10.0|stable|Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container.
+SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|Egress-proxy network isolation (closes macOS F2). 1=permissive (default; proxy sidecar blocks private/LAN/metadata but allows all internet — works identically on macOS and Linux). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 0=off (legacy iptables-only on Linux, no isolation on macOS).
+SANDY_ALLOW_WORKFLOW_EDIT|bool|0||0.11.1|stable|Remove .github/workflows from the read-only protection list.
+SANDY_SCREENSHOT_DIR|path|||0.12.0|stable|Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
+CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||0.6.0|stable|Max output tokens per Claude response.
+GEMINI_MODEL|string|||0.9.0|stable|Gemini model override.
+SANDY_GEMINI_AUTH|enum:auto,api_key,oauth,adc|auto||0.9.0|stable|Gemini credential probe strategy.
+SANDY_GEMINI_EXTENSIONS|string|||0.9.0|stable|Comma-separated Gemini extensions to enable.
+GOOGLE_CLOUD_PROJECT|string|||0.9.0|stable|Google Cloud project for Vertex AI.
+GOOGLE_CLOUD_LOCATION|string|||0.9.0|stable|Google Cloud location for Vertex AI.
+GOOGLE_GENAI_USE_VERTEXAI|bool|||0.9.0|stable|Use Vertex AI backend for Gemini.
+CODEX_MODEL|string|||0.10.0|stable|Codex model override.
+SANDY_CODEX_AUTH|enum:auto,api_key,oauth|auto||0.10.0|stable|Codex credential probe strategy.
+OPENCODE_MODEL|string|||0.12.0|stable|OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4').
+SANDY_OPENCODE_AUTH|enum:auto,api_key,oauth|auto||0.12.0|stable|OpenCode credential probe strategy.
+TELEGRAM_BOT_TOKEN|secret|||0.7.6|stable|Telegram bot token for the channel relay.
+TELEGRAM_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Telegram user IDs allowed to send messages.
+DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
+DISCORD_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Discord user IDs allowed to send messages.
+SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
+SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
 EOF
 }
 
@@ -504,7 +504,9 @@ _sandy_key_meta_field() {
         type)        echo "$line" | awk -F'|' '{print $2}' ;;
         default)     echo "$line" | awk -F'|' '{print $3}' ;;
         pattern)     echo "$line" | awk -F'|' '{print $4}' ;;
-        description) echo "$line" | awk -F'|' '{print $5}' ;;
+        since)       echo "$line" | awk -F'|' '{print $5}' ;;
+        stability)   echo "$line" | awk -F'|' '{print $6}' ;;
+        description) echo "$line" | awk -F'|' '{print $7}' ;;
     esac
 }
 
@@ -560,12 +562,15 @@ _json_csv_array() {
 # Args: $1=key  $2=tier (privileged|passive|env_only)
 _emit_key_object() {
     local key="$1" tier="$2"
-    local type default pattern description
+    local type default pattern since stability description
     type="$(_sandy_key_meta_field "$key" type)"
     default="$(_sandy_key_meta_field "$key" default)"
     pattern="$(_sandy_key_meta_field "$key" pattern)"
+    since="$(_sandy_key_meta_field "$key" since)"
+    stability="$(_sandy_key_meta_field "$key" stability)"
     description="$(_sandy_key_meta_field "$key" description)"
     [ -z "$type" ] && type="string"
+    [ -z "$stability" ] && stability="stable"
 
     printf '{'
     _json_kv name "$(_json_escape "$key")"
@@ -583,6 +588,8 @@ _emit_key_object() {
 
     [ -n "$default"     ] && { printf ','; _json_kv default     "$(_json_escape "$default")"; }
     [ -n "$pattern"     ] && { printf ','; _json_kv pattern     "$(_json_escape "$pattern")"; }
+    [ -n "$since"       ] && { printf ','; _json_kv since       "$(_json_escape "$since")"; }
+    printf ','; _json_kv stability "$(_json_escape "$stability")"
     [ -n "$description" ] && { printf ','; _json_kv description "$(_json_escape "$description")"; }
 
     # Sources by tier. Privileged keys read from home_config, home_secrets,
