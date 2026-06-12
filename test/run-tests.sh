@@ -3924,6 +3924,31 @@ check "launch summary network line is mode-aware" \
 check "macOS no-isolation banner gated behind proxy-off" \
     bash -c 'grep -q "Network isolation is NOT active on \$OS" "$1"' -- "$_PX_SCRIPT"
 
+# 50b. Proxy sidecar subnet pool — large candidate set (was a hardcoded 4, which
+# capped concurrent proxy sessions at 4). The generator must yield 512 /24s from
+# 10.200.0.0/16 + 10.201.0.0/16 plus 2 legacy /24s, all unique + well-formed.
+_PROXY_CANDS="$(bash -c "$(sed -n '/^_sandy_proxy_subnet_candidates()/,/^}$/p' "$_PX_SCRIPT"); _sandy_proxy_subnet_candidates")"
+check "proxy subnet pool yields >500 candidates (was 4)" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -gt 500 ]' -- "$_PROXY_CANDS"
+check "proxy subnet candidates are all unique" \
+    bash -c 'c=$(printf "%s\n" "$1" | grep -c .); u=$(printf "%s\n" "$1" | sort -u | grep -c .); [ "$c" = "$u" ]' -- "$_PROXY_CANDS"
+check "proxy subnet candidates are all X.Y.Z.0/24" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -vcE "^[0-9]+\.[0-9]+\.[0-9]+\.0/24$")" = 0 ]' -- "$_PROXY_CANDS"
+check "proxy subnet pool spans both 10.200 and 10.201 /16s" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^10.200.0.0/24$" && printf "%s\n" "$1" | grep -q "^10.201.255.0/24$"' -- "$_PROXY_CANDS"
+# Self-heal + exhaustion handling and the orphan-reaper must be present.
+check "proxy network exhaustion reaps orphans then retries" \
+    bash -c 'grep -q "_sandy_reap_orphan_proxy_networks && _sandy_try_create_sidecar" "$1"' -- "$_PX_SCRIPT"
+check "orphan reaper only removes networks with no attached container" \
+    bash -c 'grep -q "if \[ -z \"\$attached\" \]; then" "$1"' -- "$_PX_SCRIPT"
+
+# 50c. Proxy container name is tied to the workspace sandbox (sandy-proxy-<name>),
+# mirroring the agent container, with stale-orphan cleanup before (re)launch.
+check "proxy container name derives from SANDBOX_NAME (workspace-tied)" \
+    bash -c 'grep -q "PROXY_CONTAINER=\"sandy-proxy-\${SANDBOX_NAME}\"" "$1"' -- "$_PX_SCRIPT"
+check "stale proxy container removed before relaunch" \
+    bash -c 'grep -A1 "PROXY_CONTAINER=\"sandy-proxy-\${SANDBOX_NAME}\"" "$1" | grep -q "docker rm -f \"\$PROXY_CONTAINER\""' -- "$_PX_SCRIPT"
+
 # ============================================================
 info "51. Sandbox compatibility floor (M4 PR 4.2)"
 # ============================================================

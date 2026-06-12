@@ -3605,33 +3605,83 @@ ensure_network() {
 #
 # The proxy needs a fixed, known IP on the sidecar so its DNS responder can hand
 # that address out (redirecting allowlisted names to itself) — which requires a
-# user-configured subnet (Docker only honors `--ip` then). We try a short list
-# of uncommon /24s and take the first that doesn't overlap an existing network.
+# user-configured subnet (Docker only honors `--ip` then). We take the first /24
+# that doesn't overlap an existing network from a large pool of uncommon ranges.
+#
+# Candidate pool: every /24 in 10.200.0.0/16 and 10.201.0.0/16 (512 subnets),
+# i.e. 10.200.0.0/24 .. 10.200.255.0/24 then 10.201.0.0/24 .. 10.201.255.0/24,
+# followed by two legacy single-/24s kept for continuity. This sets the practical
+# ceiling on concurrent proxy-mode sessions to the hundreds (was 4 — a hardcoded
+# 4-entry list that capped you at four simultaneous sessions). Emitted lazily so
+# we stop at the first that works rather than materializing 512 strings.
+_sandy_proxy_subnet_candidates() {
+    local base third
+    for base in 10.200 10.201; do
+        for third in $(seq 0 255); do
+            echo "${base}.${third}.0/24"
+        done
+    done
+    echo "172.31.250.0/24"
+    echo "192.168.231.0/24"
+}
+
+# Try to create the sidecar network on the first non-overlapping candidate /24.
+# Sets SIDECAR_NETWORK + PROXY_IP on success; returns 0 if created, 1 if every
+# candidate overlapped an existing network.
+_sandy_try_create_sidecar() {
+    local c
+    while IFS= read -r c; do
+        if docker network create \
+            --internal --driver bridge --ipv6=false \
+            --subnet "$c" --gateway "${c%.0/24}.1" \
+            "$SIDECAR_NETWORK" >/dev/null 2>&1; then
+            PROXY_IP="${c%.0/24}.2"
+            return 0
+        fi
+    done < <(_sandy_proxy_subnet_candidates)
+    return 1
+}
+
+# Self-heal: reap sandy's OWN orphaned proxy networks — a sandy_sidecar_*/
+# sandy_egress_* whose owning session is gone (no attached container, or its
+# sandy-proxy-<pid> sidecar has exited). A SIGKILL'd / OOM'd / closed-terminal
+# sandy can't run its cleanup trap, leaving the network (and its subnet) behind;
+# without this, a few such orphans permanently consume candidate subnets. We only
+# touch networks with NO live container attached, so an active session is never
+# disturbed. Returns 0 if it freed at least one, 1 otherwise.
+_sandy_reap_orphan_proxy_networks() {
+    local freed=1 net attached
+    for net in $(docker network ls --format '{{.Name}}' 2>/dev/null \
+            | grep -E '^sandy_(sidecar|egress)_' || true); do
+        # Containers still attached to this network? If any, it's live — skip.
+        attached="$(docker network inspect "$net" \
+            --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | tr -d '[:space:]')"
+        if [ -z "$attached" ]; then
+            docker network rm "$net" >/dev/null 2>&1 && freed=0
+        fi
+    done
+    return $freed
+}
+
 ensure_proxy_networks() {
     SIDECAR_NETWORK="sandy_sidecar_$$"
     EGRESS_NETWORK="sandy_egress_$$"
     NETWORK_NAME="$SIDECAR_NETWORK"   # the agent container joins the sidecar
 
     info "Creating egress-proxy networks (mode=$_SANDY_PROXY_MODE)..."
-    local candidates=(
-        "10.200.0.0/24" "10.201.0.0/24" "172.31.250.0/24" "192.168.231.0/24"
-    )
-    local created=false c
-    for c in "${candidates[@]}"; do
-        if docker network create \
-            --internal --driver bridge --ipv6=false \
-            --subnet "$c" --gateway "${c%.0/24}.1" \
-            "$SIDECAR_NETWORK" >/dev/null 2>&1; then
-            PROXY_IP="${c%.0/24}.2"
-            created=true
-            break
+    if ! _sandy_try_create_sidecar; then
+        # Every candidate overlapped. Before giving up, reap our own orphaned
+        # proxy networks (dead sessions) and retry once.
+        if _sandy_reap_orphan_proxy_networks && _sandy_try_create_sidecar; then
+            info "Reclaimed an orphaned proxy subnet from a dead session."
+        else
+            error "Could not create the egress-proxy sidecar network — every candidate"
+            error "subnet (10.200.0.0/16, 10.201.0.0/16, +2 legacy /24s) overlaps an"
+            error "existing network. This usually means many concurrent proxy sessions"
+            error "or orphaned networks. Free some with 'docker network prune', stop"
+            error "unused sandy sessions, or set SANDY_EGRESS_PROXY=0 for this launch."
+            exit 1
         fi
-    done
-    if [ "$created" != true ]; then
-        error "Could not create the egress-proxy sidecar network — all candidate"
-        error "subnets (${candidates[*]}) overlap existing Docker networks."
-        error "Free one with 'docker network prune' or set SANDY_EGRESS_PROXY=0."
-        exit 1
     fi
 
     # The egress leg: a normal bridge with internet access (proxy only).
@@ -3644,7 +3694,16 @@ ensure_proxy_networks() {
 # config is written to a sandbox-owned host file and bind-mounted read-only into
 # the proxy at /etc/sandy-proxy.json.
 start_proxy_sidecar() {
-    PROXY_CONTAINER="sandy-proxy-$$"
+    # Name the proxy after the workspace's sandbox (mirrors the agent container
+    # CONTAINER_NAME="sandy-${SANDBOX_NAME}"), so `docker ps` shows
+    # sandy-proxy-<project>-<hash> right next to its sandy-<project>-<hash> agent
+    # — making an orphan instantly traceable to its session. The workspace mutex
+    # guarantees one session per workspace, so this name is unique among live
+    # sessions; clear any stale same-named proxy from a crashed run first (same
+    # pattern the agent container uses), since a fixed name can otherwise collide
+    # with a SIGKILL'd orphan on relaunch.
+    PROXY_CONTAINER="sandy-proxy-${SANDBOX_NAME}"
+    docker rm -f "$PROXY_CONTAINER" >/dev/null 2>&1 || true
     PROXY_CONFIG_FILE="$SANDBOX_DIR/sandy-proxy.json"
 
     # Build the JSON allowlist array from the effective host list.
