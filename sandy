@@ -5057,10 +5057,19 @@ else
 
     if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
         # Long-lived token handles regular API calls. Still mount the credential
-        # file if available — cloud features (/ultrareview) need the full OAuth
-        # object (refresh token, scopes, subscription info) that the env var alone
-        # doesn't carry. Skip the token-refresh flow since the env var is primary.
-        info "Using long-lived OAuth token"
+        # file if available and fresh — cloud features (/ultrareview) need the
+        # full OAuth object (refresh token, scopes, subscription info) that the
+        # env var alone doesn't carry. Skip the token-refresh flow since the
+        # env var is primary.
+        # If the credential file is expired, clear it — mounting it would cause
+        # Claude Code to prompt for login (defeating the setup-token auth), and
+        # an expired file is useless for cloud features anyway.
+        if token_needs_refresh "$CRED_JSON"; then
+            info "Using long-lived OAuth token (host OAuth credentials are expired; skipping credential mount)"
+            CRED_JSON=""
+        else
+            info "Using long-lived OAuth token"
+        fi
     else
         # Refresh expired OAuth tokens before launching the container
         # Helper: detect if we can open a browser (headless servers cannot)

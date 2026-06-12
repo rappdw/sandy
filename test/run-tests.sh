@@ -3982,6 +3982,42 @@ check "below-floor branch exits non-zero" \
     bash -c 'awk "/below-floor\\)/{f=1} f&&/exit 1/{print; exit}" "$1" | grep -q "exit 1"' -- "$_SBX_SCRIPT"
 
 # ============================================================
+info "52. Long-lived OAuth token (claude setup-token) auth"
+# ============================================================
+# Regression for: CLAUDE_CODE_OAUTH_TOKEN set (from ~/.sandy/.secrets) but sandy
+# still prompts for login. Cause: an EXPIRED host ~/.claude/.credentials.json was
+# mounted and in-container Claude read it instead of the env-var token. Fix: when
+# the env token is present AND the credential file is expired, clear CRED_JSON so
+# the expired file isn't mounted (env token is the sole, valid auth).
+_OAUTH_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+# (a) token_needs_refresh classifies correctly (the predicate driving the clear).
+_oauth_classify() {
+    bash -c "
+        warn() { :; }
+        $(sed -n '/^token_needs_refresh()/,/^}$/p' "$_OAUTH_SCRIPT")
+        token_needs_refresh \"\$1\" && echo refresh || echo keep
+    " _ "$1"
+}
+_now_ms=$(( $(date +%s) * 1000 ))
+check "token_needs_refresh: expired creds → refresh (drives the clear)" \
+    test "$(_oauth_classify "{\"claudeAiOauth\":{\"expiresAt\":$((_now_ms - 3600000))}}")" = refresh
+check "token_needs_refresh: fresh creds → keep (mounted for cloud features)" \
+    test "$(_oauth_classify "{\"claudeAiOauth\":{\"expiresAt\":$((_now_ms + 86400000))}}")" = keep
+check "token_needs_refresh: empty → keep (no host creds, nothing to mount)" \
+    test "$(_oauth_classify "")" = keep
+
+# (b) the env-token branch clears CRED_JSON when the file is expired.
+check "OAuth-token branch clears CRED_JSON on expired credential file" \
+    bash -c 'awk "/-n \"\\\$\{CLAUDE_CODE_OAUTH_TOKEN:-\}\"/{f=1} f&&/token_needs_refresh \"\\\$CRED_JSON\"/{g=1} g&&/CRED_JSON=\"\"/{print; exit}" "$1" | grep -q "CRED_JSON="' -- "$_OAUTH_SCRIPT"
+# (c) an empty CRED_JSON skips the credential mount (so the expired file is gone).
+check "empty CRED_JSON skips the credential mount" \
+    bash -c 'grep -q "if \[ -n \"\$CRED_JSON\" \]; then" "$1"' -- "$_OAUTH_SCRIPT"
+# (d) the env token is forwarded into the container regardless.
+check "CLAUDE_CODE_OAUTH_TOKEN forwarded to container when set" \
+    bash -c 'grep -q "RUN_FLAGS+=(-e \"CLAUDE_CODE_OAUTH_TOKEN=\$CLAUDE_CODE_OAUTH_TOKEN\")" "$1"' -- "$_OAUTH_SCRIPT"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
