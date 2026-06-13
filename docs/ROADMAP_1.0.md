@@ -562,6 +562,15 @@ Each test should assert both the exit code and a specific substring of the error
 
 **Exit criteria**: all six tests land and pass.
 
+> **Status (◑ done bar host run):** the audit found this was *not* "just add tests" — three modes didn't fail cleanly, so PR 4.4 added the guards first:
+> - **Docker daemon down** — preflight only checked `command -v docker`; added a `docker info` check (kept distinct from "not installed"). ✓
+> - **Corrupt credentials** — `load_credentials` just `cat`'d the file; added `_creds_is_valid_json` + a re-login error (token path drops the file and continues). ✓
+> - **Read-only `$SANDY_HOME`** — no check existed; added a write-probe + `chmod` hint. ✓
+> - **Partial sandbox** / **missing image** — already self-handle (unconditional `mkdir -p claude`; build gate). Verified, no change. ✓
+> - **Network unreachable** — in-container agent behavior; covered by the agent's own offline messaging, not a sandy guard.
+>
+> Tests: `run-tests.sh §53` (validator unit test + source-level message lock-in — runs in CI, no Docker) and `run-integration-tests.sh §15` (read-only `SANDY_HOME` + corrupt-creds exercise the real launch path; daemon-down is a manual check — can't stop the host daemon in CI). SPEC §E.1 documents the guard table. Pending: host run of both suites.
+
 ### PR 4.5 — Version bump to `0.15.0`
 
 Standalone version bump + CHANGELOG. (Re-sequenced 2026-06-09: M2.7 shipped early as `0.14.0`, so the 4.x hardening cluster now lands in `0.15.0`. Was `0.13.0` in the original plan, `0.14.0` after the 2026-05-16 re-baseline.)

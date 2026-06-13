@@ -1290,6 +1290,52 @@ else
 fi
 
 # ============================================================
+info "15. Failure-mode guards (M4 PR 4.4) — fail cleanly, not cryptically"
+# ============================================================
+# Sandy must exit non-zero with a SPECIFIC, actionable message on the common
+# launch failures. Pure-script coverage (the credential validator + source-level
+# message lock-in) is run-tests.sh §53; here we exercise the real launch path.
+# Note: "Docker daemon down" can't be automated (we won't stop the host daemon) —
+# it's a manual check; "missing image → rebuild" is covered by the build-on-demand
+# behavior in §2/§5/§7/§11. (set -euo pipefail is active → capture rc with
+# `&& rc=0 || rc=$?`.)
+
+# 15a. Read-only SANDY_HOME → clean "not writable" error, exits before any
+# container (fires at preflight; needs only a running daemon, which §0 confirmed).
+_ro_home="$(mktemp -d)"
+chmod 0555 "$_ro_home"
+_fm_out="$(SANDY_HOME="$_ro_home" timeout 90 "$SANDY_SCRIPT" -p "noop" 2>&1)" && _fm_rc=0 || _fm_rc=$?
+chmod 0755 "$_ro_home" 2>/dev/null || true; rm -rf "$_ro_home"
+if [ "${_fm_rc:-0}" -ne 0 ] && echo "$_fm_out" | grep -q "is not writable"; then
+    pass "read-only SANDY_HOME → clean error + non-zero exit"
+else
+    fail "read-only SANDY_HOME → clean error + non-zero exit"
+    echo "    (rc=$_fm_rc; tail: $(echo "$_fm_out" | tail -3 | tr '\n' ' '))" >&2
+fi
+
+# 15b. Corrupt ~/.claude/.credentials.json with no token → clean re-login error.
+# Override HOME to a throwaway dir holding a corrupt creds file; gate on a built
+# claude image (the guard fires after the cached build). CLAUDE_CODE_OAUTH_TOKEN
+# emptied so the hard-error branch (not the token-fallback branch) is exercised.
+if [ "$HAS_CLAUDE" = true ]; then
+    _bad_home="$(mktemp -d)"; mkdir -p "$_bad_home/.claude"
+    printf '{ this is not valid json' > "$_bad_home/.claude/.credentials.json"
+    _bad_sbx="$(mktemp -d)"
+    setup_project claude "integ-corrupt-creds"
+    _fm_out2="$(HOME="$_bad_home" SANDY_HOME="$_bad_sbx" CLAUDE_CODE_OAUTH_TOKEN="" \
+        timeout 300 "$SANDY_SCRIPT" -p "noop" 2>&1)" && _fm_rc2=0 || _fm_rc2=$?
+    rm -rf "$_bad_home" "$_bad_sbx"
+    if [ "${_fm_rc2:-0}" -ne 0 ] && echo "$_fm_out2" | grep -q "credentials are corrupt"; then
+        pass "corrupt credentials (no token) → clean re-login error + non-zero exit"
+    else
+        fail "corrupt credentials (no token) → clean re-login error + non-zero exit"
+        echo "    (rc=$_fm_rc2; tail: $(echo "$_fm_out2" | tail -4 | tr '\n' ' '))" >&2
+    fi
+else
+    skip "corrupt-credentials guard (needs Claude image built)"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true

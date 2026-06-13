@@ -2026,6 +2026,17 @@ Rationale: two agents editing the same codebase would step on each other's edits
 
 ### E.1 Pre-Launch
 
+**Preflight failure-mode guards (M4 PR 4.4).** After the no-Docker-needed fast paths (`--version`/`--help`/`--upgrade`/`--print-*`/`--validate-config`) have exited, the launch path fails fast with a *specific, actionable* message (non-zero exit) rather than dying later with a raw error:
+
+| Condition | Check | Message (substring) |
+|---|---|---|
+| Docker client absent | `command -v docker` | "Docker is not installed or not in PATH." |
+| Docker **daemon down** | `docker info` (after the binary check, so "not installed" vs "daemon down" stay distinct) | "Docker is installed but the daemon isn't responding." |
+| `$SANDY_HOME` not writable | write-probe (`: > "$SANDY_HOME/.sandy-write-test"`) | "SANDY_HOME (…) is not writable" + `chmod u+rwx` hint |
+| Corrupt host `~/.claude/.credentials.json` (claude path) | `_creds_is_valid_json` before the OAuth-token branch — empty is valid (absent creds is a legitimate env-var-auth state); skipped if no host JSON parser | with a token: warn + drop the file + use the token; without: "credentials are corrupt … Re-authenticate on the host" + exit |
+
+Each message is asserted by `run-tests.sh §53` (validator unit test + source-level message lock-in) and `run-integration-tests.sh §15` (read-only `SANDY_HOME` and corrupt-creds exercise the real launch path). Already-clean modes: a **partial sandbox** self-repairs (`mkdir -p "$SANDBOX_DIR/claude"` runs unconditionally), and a **missing image** rebuilds via the build gate.
+
 **Stale container removal**: Before starting, any container with the same name is force-removed to handle unclean previous exits:
 ```bash
 docker rm -f "sandy-<SANDBOX_NAME>" 2>/dev/null || true

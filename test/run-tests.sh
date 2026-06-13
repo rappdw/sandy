@@ -4018,6 +4018,45 @@ check "CLAUDE_CODE_OAUTH_TOKEN forwarded to container when set" \
     bash -c 'grep -q "RUN_FLAGS+=(-e \"CLAUDE_CODE_OAUTH_TOKEN=\$CLAUDE_CODE_OAUTH_TOKEN\")" "$1"' -- "$_OAUTH_SCRIPT"
 
 # ============================================================
+info "53. Failure-mode guards (M4 PR 4.4)"
+# ============================================================
+# Sandy must fail CLEANLY (specific message + non-zero exit) on the common ways a
+# launch can go wrong, so a future refactor can't silently degrade the error text.
+# Behavioral end-to-end coverage (read-only SANDY_HOME, corrupt creds) is in
+# run-integration-tests.sh §15; here we unit-test the credential validator and
+# lock in the three guard messages at the source level.
+_FM_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+# (a) _creds_is_valid_json: valid → ok, corrupt → reject, empty → ok (absent
+# creds is a legitimate state). The predicate behind the corrupt-creds guard.
+_fm_creds_valid() {
+    bash -c "$(sed -n '/^_creds_is_valid_json()/,/^}$/p' "$_FM_SCRIPT"); _creds_is_valid_json \"\$1\" && echo valid || echo invalid" _ "$1"
+}
+check "creds validator: well-formed JSON → valid" \
+    test "$(_fm_creds_valid '{"claudeAiOauth":{"accessToken":"x"}}')" = valid
+check "creds validator: corrupt JSON → invalid" \
+    test "$(_fm_creds_valid '{not valid json')" = invalid
+check "creds validator: empty (absent creds) → valid (not corrupt)" \
+    test "$(_fm_creds_valid '')" = valid
+
+# (b) Docker-daemon guard: a `docker info` check with a specific message, AFTER
+# the binary-presence check (so "not installed" and "daemon down" stay distinct).
+check "docker-daemon guard present (docker info + message)" \
+    bash -c 'grep -q "if ! docker info >/dev/null 2>&1; then" "$1" && grep -q "daemon isn.t responding" "$1"' -- "$_FM_SCRIPT"
+check "docker-daemon check comes after the binary-presence check" \
+    bash -c 'i=$(grep -n "Docker is not installed or not in PATH" "$1" | head -1 | cut -d: -f1); d=$(grep -n "daemon isn.t responding" "$1" | head -1 | cut -d: -f1); [ -n "$i" ] && [ -n "$d" ] && [ "$i" -lt "$d" ]' -- "$_FM_SCRIPT"
+
+# (c) SANDY_HOME-writable guard: a write-probe + a chmod-suggesting message.
+check "SANDY_HOME-writable guard present (write-probe + chmod hint)" \
+    bash -c 'grep -q "is not writable (or could not be created)" "$1" && grep -q "chmod u+rwx" "$1"' -- "$_FM_SCRIPT"
+
+# (d) Corrupt-creds guard: re-login hint when no token; token path drops the file.
+check "corrupt-creds guard present (re-login hint)" \
+    bash -c 'grep -q "credentials are corrupt" "$1" && grep -q "Re-authenticate on the host" "$1"' -- "$_FM_SCRIPT"
+check "corrupt-creds guard uses _creds_is_valid_json before the OAuth branch" \
+    bash -c 'awk "/CRED_JSON=\"\\\$\(load_credentials\)\"/{f=1} f&&/_creds_is_valid_json/{print;exit}" "$1" | grep -q "_creds_is_valid_json"' -- "$_FM_SCRIPT"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

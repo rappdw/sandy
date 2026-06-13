@@ -1240,6 +1240,26 @@ if ! command -v docker &>/dev/null; then
     error "Docker is not installed or not in PATH."
     exit 1
 fi
+# `command -v` only proves the client binary exists. If the daemon isn't running,
+# sandy would otherwise slip past here and die later with a raw Docker error mid-
+# launch. Fail fast with a clear, actionable message. (Fast-path handlers —
+# --version/--help/--upgrade/--print-*/--validate-config — have already exited
+# above, so this never blocks the no-Docker-needed paths.)
+if ! docker info >/dev/null 2>&1; then
+    error "Docker is installed but the daemon isn't responding."
+    error "  Start Docker (Docker Desktop, or 'sudo systemctl start docker') and retry."
+    exit 1
+fi
+# SANDY_HOME must be writable from here on — sandy writes sandbox state, generated
+# build files, and proxy/session configs there. The introspection fast-paths above
+# tolerate a read-only home (they write nothing) and have already exited.
+if ! ( : > "$SANDY_HOME/.sandy-write-test" ) 2>/dev/null; then
+    error "SANDY_HOME ($SANDY_HOME) is not writable (or could not be created)."
+    error "  Sandy must write sandbox state and build files there. Fix with:"
+    error "    chmod u+rwx \"$SANDY_HOME\"   — or set SANDY_HOME to a writable path."
+    exit 1
+fi
+rm -f "$SANDY_HOME/.sandy-write-test" 2>/dev/null || true
 
 # --- Build file generators ---
 generate_dockerfile_base() {
@@ -4866,6 +4886,23 @@ load_credentials() {
     fi
 }
 
+# Helper: is the credential blob well-formed JSON? Empty is treated as valid —
+# absent credentials is a legitimate state (env-var/token auth). Used to catch a
+# corrupt host credentials file BEFORE it's mounted (mounting garbage makes Claude
+# Code fail confusingly). If no JSON parser is on the host, skip the check rather
+# than block (don't fail a launch just because we couldn't validate).
+_creds_is_valid_json() {
+    local creds="$1"
+    [ -z "$creds" ] && return 0
+    if command -v node >/dev/null 2>&1; then
+        printf '%s' "$creds" | node -e 'try{JSON.parse(require("fs").readFileSync(0,"utf8"));process.exit(0)}catch(e){process.exit(1)}'
+    elif command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$creds" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null
+    else
+        return 0
+    fi
+}
+
 # Helper: check if OAuth token is expired or expiring within 5 minutes
 token_needs_refresh() {
     local creds="$1"
@@ -5054,6 +5091,21 @@ if ! _sandy_agent_has claude; then
     : # Claude credential flow skipped for non-claude sessions
 else
     CRED_JSON="$(load_credentials)"
+
+    # Corrupt credential file: present but not valid JSON. Mounting it makes Claude
+    # Code fail confusingly inside the container. If a long-lived token is present,
+    # drop the bad file and rely on the token; otherwise stop with a clean re-login
+    # hint rather than launching into a broken auth state.
+    if [ -n "$CRED_JSON" ] && ! _creds_is_valid_json "$CRED_JSON"; then
+        if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+            warn "Host Claude credentials file is corrupt; ignoring it and using the long-lived token."
+            CRED_JSON=""
+        else
+            error "Your Claude credentials are corrupt: ~/.claude/.credentials.json is not valid JSON."
+            error "  Re-authenticate on the host — run 'claude' and complete login — then relaunch."
+            exit 1
+        fi
+    fi
 
     if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
         # Long-lived token handles regular API calls. Still mount the credential
