@@ -1042,23 +1042,27 @@ fi
 info "10. Gemini — OAuth path"
 # ============================================================
 
-if [ "$HAS_GEMINI_OAUTH" = true ] && [ -z "${GEMINI_API_KEY:-}" ]; then
+if [ "$HAS_GEMINI_OAUTH" = true ]; then
     setup_project gemini "integ-gemini-oauth"
-    _out="$(run_sandy_headless "GEMINI_API_KEY=" -- -p "reply one word: test")"
+    # Verify the OAuth path even when GEMINI_API_KEY is set in the harness env
+    # (§5/§6 rely on it). Force the OAuth probe with SANDY_GEMINI_AUTH=oauth — which
+    # makes load_gemini_credentials skip the api-key branch entirely — and empty the
+    # key for this one invocation so it can't shadow OAuth in-container. This lets
+    # BOTH gemini auth modes be verified in a single suite run.
+    _out="$(run_sandy_headless "GEMINI_API_KEY=" "SANDY_GEMINI_AUTH=oauth" -- -p "reply one word: test")"
 
     if echo "$_out" | grep -q "Loaded Gemini OAuth"; then
-        pass "gemini OAuth credentials detected from host"
+        pass "gemini OAuth credentials detected from host (forced via SANDY_GEMINI_AUTH=oauth)"
     else
         if ! echo "$_out" | grep -qi "No Gemini credentials"; then
             pass "gemini session works with OAuth (no credential warning)"
         else
             fail "gemini OAuth credentials detected from host"
+            echo "    (tail: $(echo "$_out" | tail -3 | tr '\n' ' '))" >&2
         fi
     fi
 
     resolve_sandbox
-elif [ "$HAS_GEMINI_OAUTH" = true ]; then
-    skip "gemini OAuth (GEMINI_API_KEY is set, would shadow OAuth; unset it to test)"
 else
     skip "gemini OAuth (no ~/.gemini/oauth_creds.json or tokens.json)"
 fi
