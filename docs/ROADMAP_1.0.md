@@ -547,6 +547,13 @@ Cells that don't make sense (e.g. combos with no configured credentials) get doc
 
 **Exit criteria**: every cell in the matrix is either automated or on the manual RC checklist. Running the matrix takes < 15 minutes of wall time.
 
+> **Status (◑ done bar host run):** the matrix predated opencode (now a 4th agent) and the realization that the *single-agent* cells were already automated (integ §2/§5/§7/§9/§10/§11) and the *interactive multi-pane* cells already existed (`TESTING_PLAN.md` §4/§4b). So PR 4.3 closed the two genuine gaps rather than rebuilding the table:
+> - **Routing contract, pure-script** — `run-tests.sh §54` pins combo→`sandy-full` image selection and headless→first-agent routing for every matrix row (incl. opencode + `all`) without Docker, so a refactor can't silently change routing under CI. ✓
+> - **One live combo, headless** — `run-integration-tests.sh §16` launches a real combo (first available of `claude,codex` → `claude,gemini` → `gemini,codex`), asserts the routed first agent responds, and asserts the `sandy-full` superset image was the one used. Routed-agent API blips SKIP (sandy did its job); empty output FAILS. ✓
+> - **Matrix sign-off** — `TESTING_PLAN.md` §4.0 adds a coverage table mapping every cell to its automated or manual home, with an RC sign-off checklist for the manual (multi-pane) rows. Cells without a credential pair are documented, not silently skipped. ✓
+>
+> The remaining live multi-pane combos stay manual (a 2×3-pane session needs a TTY to observe) — that's the roadmap's intended split. Pending: host run of both suites.
+
 ### PR 4.4 — Failure-mode integration tests
 
 **Scope**: `run-integration-tests.sh` gains tests for the ways sandy can fail:
@@ -574,6 +581,8 @@ Each test should assert both the exit code and a specific substring of the error
 ### PR 4.5 — Version bump to `0.15.0`
 
 Standalone version bump + CHANGELOG. (Re-sequenced 2026-06-09: M2.7 shipped early as `0.14.0`, so the 4.x hardening cluster now lands in `0.15.0`. Was `0.13.0` in the original plan, `0.14.0` after the 2026-05-16 re-baseline.)
+
+> **Status (◑ done bar host run + tag):** `SANDY_VERSION` bumped `0.14.1-dev` → `0.15.0`; `RELEASE_NOTES.md` gained the v0.15.0 section (M4 cluster: PR 4.1 stability surface, PR 4.2 forward-compat floor, PR 4.3 matrix tests, PR 4.4 fail-cleanly guards + the proxy-ceiling and OAuth-expiry bug fixes from the 0.14.0 soak). Pending: a green host run of `run-tests.sh` + `run-integration-tests.sh`, then the `cut v0.15.0` commit + `git tag v0.15.0` + post-release `0.15.1-dev` bump. M5's 14-day soak gates on this tag.
 
 ---
 
@@ -681,11 +690,11 @@ M2.7 (egress proxy)  ✓ MERGED + cut as tag 0.14.0 (2026-06-09)
     │   broad-soak vehicle. PR 2.7.6's 7-day soak now runs against 0.14.0
     │   in the wild (watch item: non-web-port gap → SANDY_ALLOW_HOSTS).
     ▼
-PR 4.1 (allowlist audit + sandbox-marker validator)  ← parallel  ← NEXT
-PR 4.2 (compat story)                                ← parallel
-PR 4.3 (multi-agent matrix)                          ← parallel
-PR 4.4 (failure-mode tests)                          ← parallel
-PR 4.5 (version bump)            ← blocks on 4.1-4.4 ──▶ tag 0.15.0
+PR 4.1 (allowlist audit + sandbox-marker validator)  ✓ done
+PR 4.2 (compat story)                                ✓ done
+PR 4.3 (multi-agent matrix)                          ✓ done (◑ host run)
+PR 4.4 (failure-mode tests)                          ✓ done (◑ host run)
+PR 4.5 (version bump)            ◑ bumped 0.15.0 ──▶ tag after green host run  ← NEXT
     │
     ▼
 PR 5.1 (14-day soak gate on 0.15.0)

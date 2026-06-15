@@ -1340,6 +1340,69 @@ else
 fi
 
 # ============================================================
+info "16. Multi-agent combo (M4 PR 4.3) — sandy-full + headless routes to first agent"
+# ============================================================
+# §8 covers *sequential* single-agent switching; this covers a genuine
+# multi-agent *combo* session: SANDY_AGENT=<a>,<b> selects the sandy-full
+# superset image and, in headless (-p) mode, routes the prompt to the FIRST
+# agent only (sandy/2561). We pick a combo whose first agent we have creds for
+# so the routed agent is the one we verify; the other agent only needs to be
+# installed in the image (no creds, since its pane isn't created headless).
+# Asserting sandy-full exists after the run proves the superset image — not a
+# single-agent image — was the one built/used.
+#
+# Matrix cells NOT auto-tested here (documented per roadmap, not silently
+# skipped): the multi-PANE interactive experience (claude+gemini dual-pane,
+# the 3-/4-agent grids, per-pane channel routing) is manual-only — it requires
+# a TTY to observe the panes — and lives in docs/TESTING_PLAN.md §4 / §4b.
+_combo=""; _routed=""
+if [ "$HAS_CLAUDE" = true ] && [ "$HAS_CODEX" = true ]; then
+    _combo="claude,codex"; _routed="claude"
+elif [ "$HAS_CLAUDE" = true ] && [ "$HAS_GEMINI" = true ]; then
+    _combo="claude,gemini"; _routed="claude"
+elif [ "$HAS_GEMINI" = true ] && [ "$HAS_CODEX" = true ]; then
+    _combo="gemini,codex"; _routed="gemini"
+fi
+
+if [ -n "$_combo" ]; then
+    setup_project "$_combo" "integ-combo"
+    _combo_env=()
+    [ -n "${GEMINI_API_KEY:-}" ] && _combo_env+=("GEMINI_API_KEY=$GEMINI_API_KEY")
+    [ -n "${OPENAI_API_KEY:-}" ] && _combo_env+=("OPENAI_API_KEY=$OPENAI_API_KEY")
+    _out="$(run_sandy_headless "${_combo_env[@]+"${_combo_env[@]}"}" -- -p "reply one word: alpha")"
+
+    # Positive-first, matching §8: the routed agent must have answered. A routed
+    # agent's own API blip (gemini 5xx, codex 401-then-fallback) is sandy doing
+    # its job → SKIP, not FAIL; empty output (didn't launch) still FAILS.
+    if [ -n "$_out" ] && echo "$_out" | grep -vi "reply one word" | grep -qi "alpha"; then
+        pass "combo $_combo → headless routes to $_routed, which responds"
+    elif [ -n "$_out" ] \
+         && echo "$_out" | grep -qiE 'status: *[45][0-9][0-9]|critical error|503|500|RESOURCE_EXHAUSTED|quota|UNAVAILABLE|rate.?limit|HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|insufficient.?quota'; then
+        skip "combo $_combo → routed $_routed reached API but it errored, not a sandy fault ($(echo "$_out" | grep -oiE 'status: *[0-9]+|critical error|RESOURCE_EXHAUSTED|quota|HTTP error: [45][0-9][0-9]|[45][0-9][0-9] [A-Za-z]+' | head -1))"
+    else
+        fail "combo $_combo → headless routes to $_routed, which responds"
+        if [ -z "$_out" ]; then
+            echo "    (empty output — combo didn't launch; sandy multi-agent launch/credential issue)" >&2
+        else
+            echo "    (no 'alpha' and no recognizable API error; tail: $(echo "$_out" | tail -4 | tr '\n' ' '))" >&2
+        fi
+    fi
+
+    # The combo must have built/used the sandy-full superset image, not a
+    # single-agent one. (Build-on-demand in run_sandy_headless creates it.)
+    if docker image inspect sandy-full >/dev/null 2>&1; then
+        pass "combo $_combo uses the sandy-full superset image"
+    else
+        fail "combo $_combo uses the sandy-full superset image"
+        echo "    (sandy-full not present after a multi-agent launch — image selection regressed)" >&2
+    fi
+
+    resolve_sandbox
+else
+    skip "multi-agent combo (need 2 of claude/gemini/codex credentials)"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true

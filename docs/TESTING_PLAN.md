@@ -211,6 +211,42 @@ sandy --remote
 
 # 4. Multi-agent mode (comma-separated `SANDY_AGENT`)
 
+## 4.0 Matrix coverage sign-off (M4 PR 4.3)
+
+The agent matrix below tracks **every** viable combination. Each cell is either
+**automated** (runs unattended in `run-integration-tests.sh` / `run-tests.sh`) or
+**manual** (walk through the linked checklist before each RC). Cells with no
+configured credential are documented as "requires X", not silently skipped.
+
+| Combo | Headless route | Automated coverage | Interactive (manual) |
+|---|---|---|---|
+| `claude` | claude | integ §7 (api_key/oauth) | §3 |
+| `gemini` | gemini | integ §5/§10 (api_key/oauth/adc) | §2 |
+| `codex` | codex | integ §2/§9 (api_key/oauth) | §1 |
+| `opencode` | opencode | integ §11 (provider key) | §4b |
+| `claude,gemini` | claude | integ §16 (if creds) + run-tests §54 routing | §4.1 |
+| `claude,codex` | claude | integ §16 (if creds) + run-tests §54 routing | §4.2 |
+| `gemini,codex` | gemini | integ §16 (fallback) + run-tests §54 routing | §4.2 |
+| `claude,gemini,codex` | claude | run-tests §54 routing (live = §4.2 manual) | §4.2 |
+| `all` (4 agents) | claude | run-tests §54 routing + alias-expand | §4.2 (2×2 grid) |
+
+Notes:
+- **Headless** multi-agent routes the `-p` prompt to the **first** agent only
+  (no panes); `run-tests.sh §54` pins image-selection (`sandy-full`) and the
+  first-agent routing for every row above without needing Docker.
+- **integ §16** runs one *live* combo (first available of `claude,codex` →
+  `claude,gemini` → `gemini,codex`) end-to-end and asserts the `sandy-full`
+  superset image was used. The remaining live combos are covered by the manual
+  multi-pane checklists below — a multi-pane session needs a TTY to observe.
+- A combo with no two-agent credential pair → integ §16 prints
+  `skip "multi-agent combo (need 2 of claude/gemini/codex credentials)"`.
+
+Sign-off (tick when the manual rows have been walked this RC):
+
+- [ ] §4.1 dual-pane (claude + gemini)
+- [ ] §4.2 `claude,codex` / triple / 4-agent grid
+- [ ] §4b OpenCode single-agent
+
 ## 4.1 Dual-pane launch (claude + gemini)
 
 ```sh

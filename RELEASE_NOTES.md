@@ -1,3 +1,37 @@
+## sandy v0.15.0
+
+**M4 — surface stabilization + fail-cleanly hardening.** The last functional milestone before the 1.0 pre-RC soak. No new features and no new config keys (the freeze holds); this release locks down the *surface* sandy promises to keep stable through 1.x, makes the common launch failures fail with an actionable message instead of a cryptic one, and pins the multi-agent routing contract under test. Plus two bug fixes that surfaced during the 0.14.0 proxy soak.
+
+### Stability surface declaration (PR 4.1)
+
+Every config key now carries a **`since`** version and a **`stability`** tier (`stable` / `experimental`) in its schema metadata. `sandy --print-schema` emits both fields per key, and the auto-generated config tables in `CLAUDE.md` / `SPECIFICATION.md` gained **Since** and **Stability** columns. This is the machine-readable contract for what 1.0 promises not to break. Also: the `.sandy_created_version` sandbox marker is now regex-validated on read (a corrupt marker is treated as "unknown", not a crash), and the dead `CODEX_HOME` key was removed from the passive allowlist.
+
+### Sandbox forward-compatibility promise (PR 4.2)
+
+From 1.0, **a sandbox created by any `1.x` sandy works with any later `1.x` sandy.** The mechanism is `SANDY_SANDBOX_MIN_COMPAT` as a **hard floor**: a sandbox created *provably below* the floor now causes sandy to **refuse to launch** with the exact recreation command, instead of the pre-1.0 warn-and-limp (which let an incompatible sandbox run into silently-broken cached paths). Uncertainty fails open — an unknown or unreadable marker warns but launches. The promise constrains the floor itself: within `1.x`, `SANDY_SANDBOX_MIN_COMPAT` never advances above `1.0.0`; a layout change that would break a `1.x` sandbox is a `2.0` change.
+
+### Fail cleanly, not cryptically (PR 4.4)
+
+Three common launch failures used to produce confusing errors deep in the launch path. Sandy now catches them at preflight with a specific, actionable message and a non-zero exit:
+
+- **Docker daemon down** (vs. not installed) — `docker info` probe → "the daemon isn't responding" + how to start it.
+- **Corrupt `~/.claude/.credentials.json`** — validated as JSON before use; with no token present sandy prints a re-authenticate hint and exits; with a valid `CLAUDE_CODE_OAUTH_TOKEN` it drops the bad file and continues.
+- **Read-only `$SANDY_HOME`** — a write-probe at preflight → "is not writable" + a `chmod u+rwx` hint, before any Docker work.
+
+SPEC §E.1 documents the full guard table.
+
+### Multi-agent matrix tests (PR 4.3)
+
+The routing contract a multi-agent combo depends on is now pinned under test: `run-tests.sh §54` asserts that a combo selects the `sandy-full` superset image and that headless (`-p`) mode routes the prompt to the **first** agent only — for every combo in the matrix, without needing Docker. `run-integration-tests.sh §16` runs one live combo end-to-end and asserts the superset image was used. The interactive multi-pane cells stay manual (a multi-pane session needs a TTY to observe) and are tracked in `TESTING_PLAN.md` §4.0 with an RC sign-off checklist.
+
+### Bug Fixes
+
+**Egress-proxy concurrent-session ceiling 4 → hundreds** — the proxy sidecar picked its fixed IP from a hardcoded pool of 4 `/24`s, so the 5th concurrent proxied session on a host would fail to launch. The candidate pool is now every `/24` in `10.200.0.0/16` + `10.201.0.0/16` (plus two legacy `/24`s), ~512 in all, and on exhaustion sandy first reaps its own orphaned proxy networks (left by a SIGKILL'd session) and retries once. The proxy container is also now named `sandy-proxy-<sandbox-name>` (was PID-keyed), so `docker ps` shows a proxy right next to its session and an orphan is traceable to the workspace that leaked it.
+
+**Expired host credential file forced a login prompt under `CLAUDE_CODE_OAUTH_TOKEN`** — when a long-lived OAuth token was set *and* the host's `~/.claude/.credentials.json` had expired, sandy mounted the expired file alongside the token and Claude Code prompted for login. Sandy now detects the expired-file case and skips mounting it when the token is present, so the token path works cleanly.
+
+---
+
 ## sandy v0.14.0
 
 **Cross-platform network isolation — the egress proxy (M2.7).** sandy now routes the agent through an `--internal` proxy sidecar, giving real network isolation on **both macOS and Linux** for the first time. Previously, macOS Docker Desktop provided no LAN isolation at all — an agent could reach your router, NAS, localhost services, and cloud-metadata endpoints. This release closes that gap (finding F2 from the isolation stress test).

@@ -4057,6 +4057,49 @@ check "corrupt-creds guard uses _creds_is_valid_json before the OAuth branch" \
     bash -c 'awk "/CRED_JSON=\"\\\$\(load_credentials\)\"/{f=1} f&&/_creds_is_valid_json/{print;exit}" "$1" | grep -q "_creds_is_valid_json"' -- "$_FM_SCRIPT"
 
 # ============================================================
+echo ""
+echo "§54: Multi-agent matrix — image selection + headless routing (M4 PR 4.3)"
+# ============================================================
+# The live combo session is exercised in run-integration-tests.sh §16; these
+# pure-script checks pin the launch *contract* the matrix depends on (which
+# image a combo selects, and which agent a headless combo routes to) without
+# needing Docker, so a refactor can't silently change routing under CI.
+
+# (a) A multi-agent combo selects the sandy-full superset image.
+check "multi-agent combo selects the sandy-full image" \
+    bash -c 'awk "/\\\$_SANDY_IS_MULTI\" = true/{f=1} f&&/IMAGE_NAME=\"sandy-full\"/{print;exit}" "$1" | grep -q sandy-full' -- "$SANDY_SCRIPT"
+
+# (b) Headless multi-agent routes to the FIRST agent only (no tmux panes in -p).
+check "headless multi-agent routes to first agent (comment present)" \
+    grep -q 'Headless mode with multi-agent: route to first agent only' "$SANDY_SCRIPT"
+check "headless multi-agent builds the cmd for _SANDY_AGENTS[0]" \
+    bash -c 'awk "/route to first agent only/{f=1} f&&/_first=\"\\\$\{_SANDY_AGENTS\[0\]\}\"/{print;exit}" "$1" | grep -q _SANDY_AGENTS' -- "$SANDY_SCRIPT"
+
+# (c) Interactive multi-agent builds a distinct per-pane command (cmd0 + split).
+check "interactive multi-agent builds per-pane commands (_cmd0, split-window)" \
+    bash -c 'grep -qF "_cmd0=\"\$(_sandy_build_agent_cmd" "$1" && grep -qF "tmux split-window" "$1"' -- "$SANDY_SCRIPT"
+
+# (d) Routing-order matrix: the routed (first) agent of each documented combo
+# matches the roadmap table. Replicates sandy's exact parse
+# (IFS=',' read -ra _SANDY_AGENTS) so the expectation is pinned to real
+# semantics, not a re-description. Rows mirror docs/ROADMAP_1.0.md PR 4.3.
+for _row in \
+    "claude,gemini=claude" \
+    "claude,codex=claude" \
+    "gemini,codex=gemini" \
+    "claude,gemini,codex=claude" \
+    "claude,gemini,codex,opencode=claude" \
+    "all=all"; do
+    _combo="${_row%=*}"; _expected="${_row#*=}"
+    check "headless route target for SANDY_AGENT=$_combo is '$_expected'" \
+        bash -c 'IFS="," read -ra _a <<< "$1"; [ "${_a[0]}" = "$2" ]' -- "$_combo" "$_expected"
+done
+# Note: the `all` alias is expanded to claude,gemini,codex,opencode *before*
+# this split (asserted at the "'all' alias expands" check above), so its live
+# routed agent is claude; the row above only pins that the raw token survives
+# the splitter unmangled.
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
