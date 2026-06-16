@@ -4194,6 +4194,25 @@ else
 fi
 
 # ============================================================
+echo ""
+echo "§59: integration harness reaps only TEST resources (never a real session)"
+# ============================================================
+# Footgun guard: `docker --filter name=` is a SUBSTRING match, so reaping
+# `name=sandy-proxy-` would force-remove a developer's REAL concurrent session
+# proxy (sandy-proxy-<project>-<hash>), stranding its agent. The harness MUST
+# scope proxy reaping to the throwaway test names (sandy-proxy-tmp). Verify the
+# bare-substring filter never returns and the scoped one is present.
+_INTEG_SCRIPT="$(dirname "$SANDY_SCRIPT")/test/run-integration-tests.sh"
+check "integration harness has no bare 'name=sandy-proxy-' reap filter" \
+    bash -c "! grep -qF \"name=sandy-proxy-'\" \"\$1\"" -- "$_INTEG_SCRIPT"
+check "integration harness scopes proxy reaping to test names (sandy-proxy-tmp)" \
+    grep -qF "name=sandy-proxy-tmp" "$_INTEG_SCRIPT"
+check "network sweep skips networks a real (non-test) session is attached to" \
+    grep -qF 'sandy-proxy-tmp.*) : ;;' "$_INTEG_SCRIPT"
+check "§13 network-leak check is baseline-scoped (ignores a real session's nets)" \
+    bash -c 'grep -q "_pre_nets=" "$1" && grep -qF "grep -vxF \"\$_pre_nets\"" "$1"' -- "$_INTEG_SCRIPT"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

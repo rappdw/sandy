@@ -306,14 +306,17 @@ reap_test_containers() {
     local ids
     ids="$(docker ps -aq --filter 'name=sandy-tmp' 2>/dev/null)"
     [ -n "$ids" ] && docker rm -f $ids >/dev/null 2>&1 || true
-    # Also reap leaked egress-proxy sidecars (sandy-proxy-<pid>). When `timeout`
-    # SIGTERMs sandy mid `docker run`, removing the agent container unblocks
-    # sandy's trap — but if the proxy sidecar is still attached, sandy's own
-    # `docker network rm` can't complete. Detaching the proxy here lets sandy
-    # finish tearing down ITS networks. We deliberately do NOT remove the
-    # networks ourselves — §13 must verify sandy's own teardown, not the reaper's.
+    # Also reap leaked egress-proxy sidecars — but ONLY the test ones. The filter
+    # MUST be scoped to `sandy-proxy-tmp` (test sandboxes use mktemp dirs named
+    # tmp.*), NOT a bare `sandy-proxy-` substring. `docker --filter name=` is a
+    # SUBSTRING match, so `sandy-proxy-` would also force-remove a developer's
+    # REAL concurrent session proxy (`sandy-proxy-<project>-<hash>`), stranding
+    # its agent on a routeless sidecar — every request FailedToOpenSocket until
+    # that session is restarted. (This bug is exactly what made a real proxy
+    # "disappear" while the suite ran; the agent's --restart policy can't save it
+    # because the container is *removed*, not just stopped.)
     local pids
-    pids="$(docker ps -aq --filter 'name=sandy-proxy-' 2>/dev/null)"
+    pids="$(docker ps -aq --filter 'name=sandy-proxy-tmp' 2>/dev/null)"
     [ -n "$pids" ] && docker rm -f $pids >/dev/null 2>&1 || true
 }
 
@@ -330,12 +333,28 @@ reap_test_containers() {
 # force-disconnect any lingering endpoints, then remove the networks. (Avoid
 # `xargs -r` — the -r/--no-run-if-empty flag is GNU-only, absent on macOS.)
 sweep_leaked_sandy_networks() {
+    # Scoped to test proxies only (sandy-proxy-tmp) — see reap_test_containers for
+    # why a bare `sandy-proxy-` substring would nuke a real concurrent session.
     local pids
-    pids="$(docker ps -aq --filter 'name=sandy-proxy-' 2>/dev/null)"
+    pids="$(docker ps -aq --filter 'name=sandy-proxy-tmp' 2>/dev/null)"
     [ -n "$pids" ] && docker rm -f $pids >/dev/null 2>&1 || true
-    local net cid
+    local net cid attached real
     for net in $(docker network ls --format '{{.Name}}' 2>/dev/null | grep -E '^sandy_(net|sidecar|egress)_' || true); do
-        for cid in $(docker network inspect "$net" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null || true); do
+        # Network names are PID-keyed and indistinguishable from a real session's,
+        # so gate on the ATTACHED containers: if anything other than a test
+        # container (sandy-tmp.* / sandy-proxy-tmp.*) is attached, this network
+        # belongs to a real session — hands off (don't disconnect, don't remove).
+        attached="$(docker network inspect "$net" --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null || true)"
+        real=0
+        for cid in $attached; do
+            case "$cid" in
+                sandy-tmp.*|sandy-proxy-tmp.*) : ;;
+                *) real=1 ;;
+            esac
+        done
+        [ "$real" = 1 ] && continue
+        # No real session attached (leaked or test-only): detach leftovers, remove.
+        for cid in $attached; do
             docker network disconnect -f "$net" "$cid" >/dev/null 2>&1 || true
         done
         docker network rm "$net" >/dev/null 2>&1 || true
@@ -1174,6 +1193,14 @@ if [ "$HAS_CLAUDE" = true ]; then
     # leftover, not this run's. (This is a clean-slate sweep, not the assertion.)
     sweep_leaked_sandy_networks
 
+    # Snapshot the sandy networks that already exist (e.g. a developer's live
+    # concurrent session, whose proxy/networks we must NOT disturb) so the leak
+    # check below flags only networks THIS run created and failed to tear down —
+    # not someone else's in-use session networks. Without this, running the suite
+    # with a real session open false-fails: the global grep at the assertion sees
+    # that session's sandy_* networks and reports them as "leaked".
+    _pre_nets="$(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' || true)"
+
     # Permissive (=1): the agent must reach api.anthropic.com via the proxy.
     _out="$(run_sandy_headless "SANDY_EGRESS_PROXY=1" "SANDY_PROXY_REF=$_PX_REF" -- -p "reply with exactly one word: proxied")"
 
@@ -1197,8 +1224,12 @@ if [ "$HAS_CLAUDE" = true ]; then
     # then removes the networks — but that teardown can lag the check by a beat.
     # Polling verifies SANDY's own teardown (not the reaper's) without racing it.
     _nets_cleared=false
+    _leaked_nets=""
     for _i in $(seq 1 10); do
-        if [ -z "$(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' || true)" ]; then
+        # Leak = sandy networks present now that were NOT in the pre-run baseline
+        # (so a concurrent real session's networks never count as this run's leak).
+        _leaked_nets="$(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' | grep -vxF "$_pre_nets" | grep -E '^sandy_' || true)"
+        if [ -z "$_leaked_nets" ]; then
             _nets_cleared=true; break
         fi
         sleep 0.5
@@ -1207,7 +1238,7 @@ if [ "$HAS_CLAUDE" = true ]; then
         pass "proxy networks cleaned up after exit (no address-pool leak)"
     else
         fail "proxy networks cleaned up after exit (no address-pool leak)"
-        echo "    (still leaked after ~5s: $(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' | tr '\n' ' '))" >&2
+        echo "    (still leaked after ~5s: $(echo "$_leaked_nets" | tr '\n' ' '))" >&2
     fi
 
     # Opt-out (=0): no proxy path; the agent still works (legacy isolation).
