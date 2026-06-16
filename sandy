@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="0.15.1-dev"
+SANDY_VERSION="0.15.1"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.

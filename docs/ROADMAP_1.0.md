@@ -598,6 +598,8 @@ Standalone version bump + CHANGELOG. (Re-sequenced 2026-06-09: M2.7 shipped earl
 
 This is the most important gate on the roadmap. Everything before it is "the review says it's ready"; this is "you've proven it's ready by living on it."
 
+> **Soak log:** the soak runs on the latest `0.15.x`, not a frozen `0.15.0`. The `0.15.0` soak surfaced the **stranded-agent** failure (agent `Up`, proxy gone, every request `FailedToOpenSocket`) — root-caused to three independent mechanisms (killed-session orphan, proxy dying under a live agent, a panic crashing the whole proxy) plus a test-harness footgun that force-removed real sessions' proxies. All fixed in **`0.15.1`** (2026-06-16). Per the rule below, the 14-day clock **restarts on `0.15.1`**.
+
 **Exit criteria**: 14 days of clean use, no surprises, no fixes applied during the window.
 
 ### PR 5.2 — 1.0-rc1 cut

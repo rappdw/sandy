@@ -1,3 +1,25 @@
+## sandy v0.15.1
+
+**Egress-proxy resilience + diagnosability.** A patch release hardening the egress proxy against the failure that surfaced during the 0.15.0 soak: the agent getting stranded with every request failing `FailedToOpenSocket`. No new features, no new config keys.
+
+### The stranded-agent failure, fixed three ways
+
+The proxy is the agent's only route off the `--internal` sidecar, so anything that removes or kills it strands the agent until the next launch. Three independent mechanisms could cause that, each now addressed:
+
+- **Killed session left the agent running.** The agent runs `docker run --rm` in the foreground, but the container's lifetime belongs to the daemon — so a killed `docker run` client (closed terminal, dropped SSH, SIGHUP) left the agent running while `cleanup()` tore down its proxy. `cleanup()` now removes the **agent container first**, making agent + proxy teardown atomic.
+- **Proxy died under a live agent.** The proxy launched with no restart policy, so a crash/OOM/reap was fatal for the rest of the session. It now runs with **`--restart on-failure:5`**; because the sidecar leg is pinned with a fixed `--ip`, the daemon resurrects it on the **same address** and the agent self-heals without a restart. The readiness gate now polls (rather than taking one instantaneous snapshot), catching a start-then-die proxy.
+- **A panicking connection crashed the whole proxy.** The proxy runs one goroutine per connection over untrusted wire bytes (TLS ClientHello / HTTP Host), and an unrecovered panic in any goroutine crashes the entire Go process. Each per-connection handler is now wrapped in a panic-recovering `guard()` that recovers, logs the panic + stack, and drops just that connection — mirroring `net/http`'s Server.
+
+### Diagnosing a proxy death
+
+Proxy logs were ephemeral (wiped by the `docker rm -f` in `cleanup()`). Sandy now **streams the proxy's logs to `$SANDBOX_DIR/proxy.log`** (surviving teardown) and appends the container's final exit state, so an OOM (`oom=true`, exit 137) is distinguishable from a panic (non-zero exit + a `guard()` stack in the log) or an external kill.
+
+### Test-harness safety
+
+The integration suite assumed no concurrent real session existed. Running it alongside a live sandy session could **force-remove that session's proxy** (a substring `name=sandy-proxy-` filter), and its address-pool-leak assertion false-failed on the real session's networks. The harness now scopes all reaping/sweeping to throwaway `tmp.*` test resources and diffs the leak check against a pre-run baseline — so the suite never disturbs or false-fails on a real session.
+
+---
+
 ## sandy v0.15.0
 
 **M4 — surface stabilization + fail-cleanly hardening.** The last functional milestone before the 1.0 pre-RC soak. No new features and no new config keys (the freeze holds); this release locks down the *surface* sandy promises to keep stable through 1.x, makes the common launch failures fail with an actionable message instead of a cryptic one, and pins the multi-agent routing contract under test. Plus two bug fixes that surfaced during the 0.14.0 proxy soak.
