@@ -1309,9 +1309,14 @@ HIST_CONTENT="$(sandy_run "
 # is idempotent on already-migrated state, so re-reading the file is safe and
 # does NOT mask a real bug — we only retry when the capture has no "project" line
 # at all. A genuinely wrong rewrite (non-empty but stale) is not retried.
-for _hist_try in 1 2 3; do
+for _hist_try in 1 2 3 4 5 6; do
     echo "$HIST_CONTENT" | grep -q '"project"' && break
-    sleep 0.5
+    # On a loaded macOS Docker Desktop host the container-stdout capture can flake
+    # empty several times in a row; a flat 3×0.5s wasn't enough. 6 tries, and each
+    # sandy_run spin-up already adds ~1-2s, so this spans ~15-20s of real retry.
+    # Idempotent re-read; only retries on a missing "project" line, so a real
+    # wrong-rewrite (non-empty but stale) is never retried and can't be masked.
+    sleep 1
     HIST_CONTENT="$(sandy_run "cat \"\$HOME/.claude/history.jsonl\" 2>/dev/null" 2>/dev/null)"
 done
 check "history.jsonl era1 project path rewritten" \
