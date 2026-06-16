@@ -4128,6 +4128,72 @@ check "agent removal precedes the sidecar network rm in cleanup" \
     ' -- "$SANDY_SCRIPT"
 
 # ============================================================
+echo ""
+echo "§56: proxy self-heals on death (restart policy + polling readiness gate)"
+# ============================================================
+# The proxy is the agent's ONLY route off the --internal sidecar, so if it dies
+# mid-session (crash/OOM/reap) the agent is stranded until the next launch. The
+# proxy must launch with an auto-restart policy (it comes back on the same fixed
+# --ip, so the agent self-heals), and the readiness gate must poll rather than
+# take a single instantaneous snapshot (which misses a start-then-die proxy).
+check "proxy launches with an auto-restart policy (self-heal on death)" \
+    grep -qF -- '--restart on-failure:5' "$SANDY_SCRIPT"
+check "proxy no longer uses a no-restart policy (which made a proxy death fatal)" \
+    bash -c '! grep -qF -- "--restart no" "$1"' -- "$SANDY_SCRIPT"
+check "proxy readiness gate polls for Running (not a single instantaneous check)" \
+    grep -qF '_proxy_up=false' "$SANDY_SCRIPT"
+
+# ============================================================
+echo ""
+echo "§57: proxy death is diagnosable (persistent log + panic recovery)"
+# ============================================================
+# Two halves of "figure out why the proxy died". (A) Sandy streams the proxy's
+# logs to a host file that survives cleanup's `docker rm -f` (which erases
+# `docker logs`), and appends the container's final exit state so an OOM is
+# distinguishable from a crash. (B) The proxy Go binary wraps each per-connection
+# goroutine in a panic-recovering `guard()` — an unrecovered panic in any
+# goroutine crashes the whole process, so without this one malformed connection
+# would kill the proxy (and the recovered panic+stack is what tells us why).
+_PROXY_DIR="$(dirname "$SANDY_SCRIPT")/proxy"
+
+# (A) persistent log + final-state capture + streamer reap
+check "proxy logs streamed to a persistent host file (survives docker rm)" \
+    grep -qF 'docker logs -f "$PROXY_CONTAINER"' "$SANDY_SCRIPT"
+check "persistent proxy log path is \$SANDBOX_DIR/proxy.log" \
+    grep -qF 'PROXY_LOG_FILE="$SANDBOX_DIR/proxy.log"' "$SANDY_SCRIPT"
+check "cleanup records the proxy's final exit state (OOM vs crash)" \
+    grep -q 'proxy final state at teardown' "$SANDY_SCRIPT"
+check "cleanup reaps the background log streamer (\$PROXY_LOG_PID)" \
+    grep -qF 'kill "$PROXY_LOG_PID"' "$SANDY_SCRIPT"
+
+# (B) panic recovery in the proxy
+check "proxy has a panic-recovering guard() helper" \
+    bash -c 'test -f "$1/guard.go" && grep -q "func guard(" "$1/guard.go" && grep -q "recover()" "$1/guard.go"' -- "$_PROXY_DIR"
+check "every per-connection goroutine is wrapped in guard()" \
+    bash -c 'for f in transparent connect forward; do grep -q "go guard(" "$1/$f.go" || exit 1; done' -- "$_PROXY_DIR"
+check "no per-connection goroutine spawns a bare unguarded handle()" \
+    bash -c '! grep -REq "go l\.handle\(c\)" "$1"/transparent.go "$1"/connect.go "$1"/forward.go' -- "$_PROXY_DIR"
+
+# ============================================================
+echo ""
+echo "§58: proxy Go unit tests (panic recovery, policy, SNI, DNS, …)"
+# ============================================================
+# The proxy ships Go tests (guard_test.go, policy_test.go, sni_test.go, …) that
+# weren't previously run by this suite. Run them here when go is available; a
+# Go-less host (these suites run on the host, which may not have a toolchain)
+# skips with a note — the tests still run in the build/CI environment.
+if command -v go >/dev/null 2>&1; then
+    if ( cd "$_PROXY_DIR" && go test ./... >/dev/null 2>&1 ); then
+        pass "proxy: go test ./... passes"
+    else
+        fail "proxy: go test ./... passes"
+        ( cd "$_PROXY_DIR" && go test ./... 2>&1 | tail -20 | sed 's/^/    /' ) >&2 || true
+    fi
+else
+    echo "  (skipped: go not installed on host — proxy Go tests run in the build/CI env)"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

@@ -29,7 +29,7 @@ func (l *connectListener) serve(ln net.Listener) {
 		if err != nil {
 			return
 		}
-		go l.handle(c)
+		go guard("connect", func() { l.handle(c) })
 	}
 }
 

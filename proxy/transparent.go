@@ -38,7 +38,7 @@ func (l *transparentListener) serve(ln net.Listener) {
 		if err != nil {
 			return
 		}
-		go l.handle(c)
+		go guard("transparent:"+itoa(l.port), func() { l.handle(c) })
 	}
 }
 

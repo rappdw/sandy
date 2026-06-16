@@ -44,7 +44,7 @@ func (l *forwardListener) serve(ln net.Listener) {
 		if err != nil {
 			return
 		}
-		go l.handle(c)
+		go guard("forward", func() { l.handle(c) })
 	}
 }
 

@@ -3598,6 +3598,8 @@ EGRESS_NETWORK=""         # normal bridge: proxy's internet leg
 PROXY_CONTAINER=""        # the running sandy-proxy sidecar container name
 PROXY_IP=""               # the proxy's fixed IP on SIDECAR_NETWORK
 PROXY_CONFIG_FILE=""      # host path of the generated /etc/sandy-proxy.json
+PROXY_LOG_FILE=""         # host path of the persisted proxy log (survives cleanup)
+PROXY_LOG_PID=""          # PID of the background `docker logs -f` streamer
 
 ensure_network() {
     if [ "$_SANDY_PROXY_ON" = true ]; then
@@ -3750,11 +3752,23 @@ start_proxy_sidecar() {
     # the internet (upstream dials fail → the agent sees ECONNRESET). Booting on
     # egress gives a real default route + NAT; the sidecar is attached second
     # with the fixed IP the DNS responder hands out.
+    # --restart on-failure: the proxy is the agent's ONLY route off the
+    # --internal sidecar, so if it dies mid-session (crash, OOM, a Docker/OrbStack
+    # reap) the agent is stranded with no recovery until the next launch — every
+    # request failing FailedToOpenSocket. A restart policy lets the daemon
+    # resurrect it automatically: because the sidecar leg is pinned with a fixed
+    # --ip (attached below), the restarted container comes back on the SAME
+    # address, so the agent's --dns/route stay valid and it self-heals without a
+    # session restart. Bounded to 5 so a genuinely broken proxy (bad config that
+    # crash-loops) still gives up and is caught by the readiness gate rather than
+    # looping forever. cleanup() force-removes it regardless of policy, so there's
+    # no zombie on exit. (Previously the proxy used a no-restart policy, which made
+    # any proxy death fatal for the rest of the session.)
     local proxy_run=(
         docker run -d
         --name "$PROXY_CONTAINER"
         --network "$EGRESS_NETWORK"
-        --restart no
+        --restart on-failure:5
         --read-only
         --cap-drop ALL
     )
@@ -3775,11 +3789,48 @@ start_proxy_sidecar() {
     # to. (`--ip` works because the sidecar was created with an explicit subnet.)
     docker network connect --ip "$PROXY_IP" "$SIDECAR_NETWORK" "$PROXY_CONTAINER" >/dev/null
 
-    # Fail fast if the proxy died on a bad config (e.g. it exits non-zero).
-    if [ "$(docker inspect -f '{{.State.Running}}' "$PROXY_CONTAINER" 2>/dev/null)" != "true" ]; then
+    # Readiness gate. The agent is about to launch into a network whose ONLY
+    # route is this proxy, so it must be up first. A single instantaneous check
+    # can miss a proxy that starts then dies a moment later (bad config, listener
+    # bind failure) and — now that the proxy has --restart on-failure — can also
+    # momentarily read not-Running mid-restart. Poll briefly instead of once.
+    _proxy_up=false
+    for _ptry in 1 2 3 4 5; do
+        if [ "$(docker inspect -f '{{.State.Running}}' "$PROXY_CONTAINER" 2>/dev/null)" = "true" ]; then
+            _proxy_up=true
+            break
+        fi
+        sleep 0.5
+    done
+    if [ "$_proxy_up" != true ]; then
         error "Egress proxy failed to start. Logs:"
         docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
         exit 1
+    fi
+    # Running but already restarted ⇒ it crashed at least once and the restart
+    # policy revived it. It's up now (so we proceed), but the crash is a real
+    # signal worth surfacing — a clean proxy never exits (it blocks forever).
+    if [ "$(docker inspect -f '{{.RestartCount}}' "$PROXY_CONTAINER" 2>/dev/null)" != "0" ]; then
+        warn "Egress proxy restarted during startup (crash-loop?) — recent logs:"
+        docker logs --tail 20 "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+    fi
+
+    # Persist the proxy's logs to a host file so a post-mortem survives cleanup's
+    # `docker rm -f` (which erases `docker logs`). This is the durable "why did
+    # the proxy die" record: a guard() panic stack trace, deny lines, and
+    # --restart boundaries all land here. `docker logs -f` dumps existing history
+    # then follows live (across on-failure restarts); the PID is reaped in
+    # cleanup(), which also appends the container's final exit state (so an OOM is
+    # distinguishable from a panic). Truncated each launch — it's a per-session
+    # post-mortem, not an append-forever log.
+    if [ -n "${SANDBOX_DIR:-}" ]; then
+        PROXY_LOG_FILE="$SANDBOX_DIR/proxy.log"
+        : > "$PROXY_LOG_FILE" 2>/dev/null || true
+        docker logs -f "$PROXY_CONTAINER" >> "$PROXY_LOG_FILE" 2>&1 &
+        PROXY_LOG_PID=$!
+        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+            info "Proxy logs → $PROXY_LOG_FILE"
+        fi
     fi
 
     # Debug probe: stand up a throwaway container with the agent's exact network
@@ -4799,6 +4850,14 @@ cleanup() {
     # sidecar and egress networks (a network can't be removed while a container
     # is attached, so the proxy must go first).
     if [ -n "${PROXY_CONTAINER:-}" ]; then
+        # Record the proxy's final exit state into the persisted log BEFORE we
+        # destroy it, so a post-mortem can tell an OOM (oom=true, exit=137) from a
+        # crash/panic (non-zero exit + a guard() stack already in the log) from an
+        # external kill. This is the durable answer to "why did the proxy die".
+        _proxy_final_state="$(docker inspect -f 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}} restarts={{.RestartCount}} status={{.State.Status}} finished={{.State.FinishedAt}}' "$PROXY_CONTAINER" 2>/dev/null || true)"
+        if [ -n "$_proxy_final_state" ] && [ -n "${PROXY_LOG_FILE:-}" ]; then
+            echo "sandy: proxy final state at teardown: $_proxy_final_state" >> "$PROXY_LOG_FILE" 2>/dev/null || true
+        fi
         # The proxy is a scratch image (no shell → no `docker exec` to poke it),
         # and we're about to destroy it, so `docker logs` is the only diagnostic
         # window. Dump it on demand before teardown.
@@ -4807,6 +4866,11 @@ cleanup() {
             docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
         fi
         docker rm -f "$PROXY_CONTAINER" >/dev/null 2>&1 || true
+    fi
+    # Reap the background `docker logs -f` streamer (it also exits on its own when
+    # the container above is removed; killing it here avoids a lingering process).
+    if [ -n "${PROXY_LOG_PID:-}" ]; then
+        kill "$PROXY_LOG_PID" 2>/dev/null || true
     fi
     if [ -n "${EGRESS_NETWORK:-}" ]; then
         docker network rm "$EGRESS_NETWORK" >/dev/null 2>&1 || true
