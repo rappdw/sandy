@@ -4100,6 +4100,29 @@ done
 # the splitter unmangled.
 
 # ============================================================
+echo ""
+echo "§55: cleanup removes the agent container (no stranded orphan)"
+# ============================================================
+# Regression for the stranded-agent bug: the agent runs `docker run --rm` in the
+# FOREGROUND, but the container's lifetime belongs to the daemon, not the client.
+# If the `docker run` client is killed without the container stopping (closed
+# terminal / killed session / dropped SSH / SIGHUP), the daemon keeps the agent
+# running while the cleanup trap tears down its proxy + egress route — stranding
+# it on a routeless --internal sidecar (every request -> FailedToOpenSocket until
+# the next launch). The trap MUST force-remove the agent container too, and
+# BEFORE the sidecar network rm (else that rm fails on the attached orphan and
+# leaks the subnet).
+check "cleanup force-removes the agent container (\$CONTAINER_NAME)" \
+    bash -c 'awk "/^cleanup\(\)/,/^}/" "$1" | grep -qF "docker rm -f \"\$CONTAINER_NAME\""' -- "$SANDY_SCRIPT"
+check "agent removal precedes the sidecar network rm in cleanup" \
+    bash -c '
+        c="$(awk "/^cleanup\(\)/,/^}/" "$1")"
+        a=$(printf "%s\n" "$c" | grep -nF "docker rm -f \"\$CONTAINER_NAME\"" | head -1 | cut -d: -f1)
+        n=$(printf "%s\n" "$c" | grep -nF "docker network rm \"\$NETWORK_NAME\"" | head -1 | cut -d: -f1)
+        [ -n "$a" ] && [ -n "$n" ] && [ "$a" -lt "$n" ]
+    ' -- "$SANDY_SCRIPT"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

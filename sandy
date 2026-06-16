@@ -4778,6 +4778,23 @@ cleanup() {
         rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
     cleanup_network_isolation
+    # Force-remove the agent container FIRST, so it can never outlive this
+    # session's proxy + networks. The agent runs `docker run --rm` in the
+    # foreground (below), so on a normal exit the container is already gone and
+    # this is a harmless no-op. But the container's lifetime belongs to the
+    # daemon, not the `docker run` *client*: if that client is killed without the
+    # container stopping (closed terminal, killed session, dropped SSH, SIGHUP),
+    # the daemon keeps the agent running — and the rest of this trap then tears
+    # down its proxy (docker rm -f below) and egress route, stranding the agent on
+    # a routeless --internal sidecar where every request fails with
+    # FailedToOpenSocket until the next launch. Removing it here makes agent +
+    # proxy teardown atomic, and lets the sidecar `network rm` below actually
+    # succeed instead of failing on a still-attached orphan (which leaks the
+    # subnet). Guarded with :- because the trap is armed before CONTAINER_NAME is
+    # assigned; at that point the agent doesn't exist yet, so this is a no-op.
+    if [ -n "${CONTAINER_NAME:-}" ]; then
+        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
     # Egress-proxy teardown: stop the sidecar container and remove both the
     # sidecar and egress networks (a network can't be removed while a container
     # is attached, so the proxy must go first).
