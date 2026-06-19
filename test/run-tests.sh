@@ -4021,6 +4021,20 @@ check "empty CRED_JSON skips the credential mount" \
 # (d) the env token is forwarded into the container regardless.
 check "CLAUDE_CODE_OAUTH_TOKEN forwarded to container when set" \
     bash -c 'grep -q "RUN_FLAGS+=(-e \"CLAUDE_CODE_OAUTH_TOKEN=\$CLAUDE_CODE_OAUTH_TOKEN\")" "$1"' -- "$_OAUTH_SCRIPT"
+# (e) OAuth-first: when the token is set we must NOT forward ANTHROPIC_API_KEY —
+# Claude Code resolves the API key AHEAD of the token, so forwarding both would
+# silently bill per-use, bypassing the subscription. The API-key forward must sit
+# in the no-token `else` branch, and a warning fires when both are present.
+check "OAuth-first: ANTHROPIC_API_KEY suppressed when CLAUDE_CODE_OAUTH_TOKEN set (warning present)" \
+    grep -qF 'not forwarding ANTHROPIC_API_KEY' "$_OAUTH_SCRIPT"
+check "OAuth-first: claude ANTHROPIC_API_KEY forward sits in the no-OAuth-token else" \
+    bash -c '
+        blk="$(awk "/Claude Code.s OWN auth precedence/{f=1} f{print} f&&/^fi$/{exit}" "$1")"
+        o=$(printf "%s\n" "$blk" | grep -n "CLAUDE_CODE_OAUTH_TOKEN:-" | head -1 | cut -d: -f1)
+        e=$(printf "%s\n" "$blk" | grep -nx "    else" | head -1 | cut -d: -f1)
+        a=$(printf "%s\n" "$blk" | grep -nF "ANTHROPIC_API_KEY=\$ANTHROPIC_API_KEY" | head -1 | cut -d: -f1)
+        [ -n "$o" ] && [ -n "$e" ] && [ -n "$a" ] && [ "$o" -lt "$e" ] && [ "$e" -lt "$a" ]
+    ' -- "$_OAUTH_SCRIPT"
 
 # ============================================================
 info "53. Failure-mode guards (M4 PR 4.4)"

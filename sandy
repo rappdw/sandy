@@ -5882,14 +5882,23 @@ if [ "$HOST_UID" != "1001" ] || [ "$HOST_GID" != "1001" ]; then
     RUN_FLAGS+=(-v "$SANDY_GROUP:/etc/group:ro")
 fi
 if _sandy_agent_has claude; then
-    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-        RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
-    fi
-    # CLAUDE_CODE_OAUTH_TOKEN: pass through if explicitly configured (long-lived token from
-    # `claude setup-token`), otherwise clear to prevent accidental host env leakage.
+    # Claude Code's OWN auth precedence resolves ANTHROPIC_API_KEY *ahead of*
+    # CLAUDE_CODE_OAUTH_TOKEN — so if both reach the container the API key silently
+    # wins and bills per-use, bypassing the OAuth/subscription path. Sandy's
+    # documented preference is OAuth-first (see the claude credential probe order in
+    # --print-schema), so when a long-lived OAuth token (`claude setup-token`) is
+    # explicitly configured we forward ONLY the token and suppress ANTHROPIC_API_KEY.
     if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+        if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            warn "CLAUDE_CODE_OAUTH_TOKEN is set; not forwarding ANTHROPIC_API_KEY (it would take precedence in Claude Code and bill per-use). Unset the token to use the API key instead."
+        fi
         RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
     else
+        # No OAuth token configured: forward the API key if present, and clear the
+        # OAuth var so a stray host value can't leak into the container.
+        if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+        fi
         RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=")
     fi
 fi

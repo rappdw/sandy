@@ -1434,6 +1434,49 @@ else
 fi
 
 # ============================================================
+info "17. Claude auth — OAuth-first suppresses ANTHROPIC_API_KEY when both are set"
+# ============================================================
+# Billing-correctness invariant: Claude Code resolves ANTHROPIC_API_KEY AHEAD of
+# CLAUDE_CODE_OAUTH_TOKEN, so if sandy forwarded both, the API key would silently
+# win and bill per-use — bypassing the OAuth/subscription path. With both set,
+# sandy must (a) warn, and (b) forward ONLY the token. We exercise the real launch
+# path with throwaway fake creds (the agent fails auth, but the forwarding decision
+# is made + printed before that) and assert on the runtime warning + the -vvv
+# RUN_FLAGS. Source-level structure is guarded by run-tests.sh §52(e).
+#
+# Needs only a built claude image (no real key) — gated on HAS_CLAUDE like §15b.
+if [ "$HAS_CLAUDE" = true ] || docker image inspect sandy-claude-code &>/dev/null; then
+    setup_project claude "integ-oauth-first"
+    _OF_OUT="$(run_sandy_headless \
+        "ANTHROPIC_API_KEY=sk-fake-test-key-do-not-use" \
+        "CLAUDE_CODE_OAUTH_TOKEN=fake-oauth-token-do-not-use" \
+        -- -vvv -p "noop")"
+
+    # (a) the runtime suppression warning fires (proves the both-set branch ran).
+    if echo "$_OF_OUT" | grep -q "not forwarding ANTHROPIC_API_KEY"; then
+        pass "both creds set → OAuth-first suppression warning fires at launch"
+    else
+        fail "both creds set → OAuth-first suppression warning fires at launch"
+        echo "    (tail: $(echo "$_OF_OUT" | tail -5 | tr '\n' ' '))" >&2
+    fi
+
+    # (b) the actual forwarded env (RUN_FLAGS, printed under -vvv): token present,
+    # API key ABSENT. This is the definitive "the container won't get the key" check.
+    _OF_FLAGS="$(echo "$_OF_OUT" | sed -n '/Docker run flags:/,/^$/p')"
+    if echo "$_OF_FLAGS" | grep -q "CLAUDE_CODE_OAUTH_TOKEN=fake-oauth-token-do-not-use" \
+       && ! echo "$_OF_FLAGS" | grep -q "ANTHROPIC_API_KEY=sk-fake-test-key-do-not-use"; then
+        pass "RUN_FLAGS forward the OAuth token but NOT ANTHROPIC_API_KEY"
+    else
+        fail "RUN_FLAGS forward the OAuth token but NOT ANTHROPIC_API_KEY"
+        echo "    (flags seen: $(echo "$_OF_FLAGS" | tr '\n' ' ' | head -c 300))" >&2
+    fi
+
+    resolve_sandbox
+else
+    skip "OAuth-first credential suppression (needs the sandy-claude-code image)"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true

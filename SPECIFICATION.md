@@ -569,7 +569,7 @@ If the host UID differs from the image default (1001), sandy generates custom `p
 
 **Claude Code config**: `SANDY_WORKSPACE`, `SANDY_PROJECT_NAME`, `SANDY_MODEL`, `SANDY_SKIP_PERMISSIONS`, `SANDY_NEW_SESSION`, `SANDY_REMOTE_CONTROL`, `SANDY_VERBOSE`, `SANDY_CHANNELS`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
 
-**Credentials**: `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` (explicitly emptied if not set, to prevent host env leakage)
+**Credentials**: `CLAUDE_CODE_OAUTH_TOKEN` (explicitly emptied if not set, to prevent host env leakage) and `ANTHROPIC_API_KEY` — but **at most one Claude key reaches the container**. Claude Code's own auth precedence resolves `ANTHROPIC_API_KEY` *ahead of* `CLAUDE_CODE_OAUTH_TOKEN`, so forwarding both would silently route to per-use API billing and bypass the OAuth/subscription path. To honor sandy's documented OAuth-first preference, when an OAuth token is configured sandy **suppresses `ANTHROPIC_API_KEY`** (forwarding only the token, with a launch warning); the API key is forwarded only when no OAuth token is set.
 
 **Channel credentials**: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
 
@@ -820,7 +820,7 @@ Fallback: If `gh auth token` fails, warn that git push/pull may not work.
 
 ### Priority Order
 
-1. **Long-lived token** (`CLAUDE_CODE_OAUTH_TOKEN`): Valid 1 year, generated via `claude setup-token`. Recommended for headless servers. When set, this handles regular API calls; the credential file is still loaded alongside it (without token-refresh logic) so that cloud features like `/ultrareview` have access to the full OAuth credential object.
+1. **Long-lived token** (`CLAUDE_CODE_OAUTH_TOKEN`): Valid 1 year, generated via `claude setup-token`. Recommended for headless servers. When set, this handles regular API calls; the credential file is still loaded alongside it (without token-refresh logic) so that cloud features like `/ultrareview` have access to the full OAuth credential object. **When the token is set, sandy does not forward `ANTHROPIC_API_KEY`** (Claude Code would resolve the API key ahead of the token and bill per-use) — a warning fires if both are configured.
 2. **OAuth credentials**: From host `~/.claude/.credentials.json` (or macOS Keychain). Token expiry checked; refresh attempted on macOS via `claude auth login`.
 3. **Fallback**: Skip credential setup; user directed to `/login` inside session.
 
