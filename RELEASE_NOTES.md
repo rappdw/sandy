@@ -1,3 +1,19 @@
+## sandy v0.15.2
+
+**Claude auth: honor the OAuth-first preference.** A small but billing-relevant correctness fix. No new features, no new config keys.
+
+Claude Code's own auth precedence resolves `ANTHROPIC_API_KEY` **ahead of** `CLAUDE_CODE_OAUTH_TOKEN`. So if you had *both* set (e.g. in `~/.sandy/.secrets`), sandy forwarded both and the **API key silently won** — routing you to per-use API billing and bypassing your OAuth/subscription path, even though sandy's documented probe order advertises OAuth-first.
+
+Now, when a long-lived OAuth token (`claude setup-token`) is configured, sandy forwards **only the token** and **suppresses `ANTHROPIC_API_KEY`**, with a launch warning:
+
+> `CLAUDE_CODE_OAUTH_TOKEN is set; not forwarding ANTHROPIC_API_KEY (it would take precedence in Claude Code and bill per-use). Unset the token to use the API key instead.`
+
+The API key is still forwarded when no OAuth token is set, and `CLAUDE_CODE_OAUTH_TOKEN=` is still emptied to block host-env leakage. The opencode provider-key path (non-claude agents reading `ANTHROPIC_API_KEY`) is unaffected. Sandy's `--print-schema` probe order is now accurate in practice.
+
+Guarded by `run-tests.sh §52(e)` (source structure + warning) and `run-integration-tests.sh §17` (runtime: the warning fires and the forwarded `RUN_FLAGS` carry the token but not the key).
+
+---
+
 ## sandy v0.15.1
 
 **Egress-proxy resilience + diagnosability.** A patch release hardening the egress proxy against the failure that surfaced during the 0.15.0 soak: the agent getting stranded with every request failing `FailedToOpenSocket`. No new features, no new config keys.

@@ -598,7 +598,9 @@ Standalone version bump + CHANGELOG. (Re-sequenced 2026-06-09: M2.7 shipped earl
 
 This is the most important gate on the roadmap. Everything before it is "the review says it's ready"; this is "you've proven it's ready by living on it."
 
-> **Soak log:** the soak runs on the latest `0.15.x`, not a frozen `0.15.0`. The `0.15.0` soak surfaced the **stranded-agent** failure (agent `Up`, proxy gone, every request `FailedToOpenSocket`) — root-caused to three independent mechanisms (killed-session orphan, proxy dying under a live agent, a panic crashing the whole proxy) plus a test-harness footgun that force-removed real sessions' proxies. All fixed in **`0.15.1`** (2026-06-16). Per the rule below, the 14-day clock **restarts on `0.15.1`**.
+> **Soak log:** the soak runs on the latest `0.15.x`, not a frozen `0.15.0`. The `0.15.0` soak surfaced the **stranded-agent** failure (agent `Up`, proxy gone, every request `FailedToOpenSocket`) — root-caused to three independent mechanisms (killed-session orphan, proxy dying under a live agent, a panic crashing the whole proxy) plus a test-harness footgun that force-removed real sessions' proxies. All fixed in **`0.15.1`** (2026-06-16). Per the rule below, the 14-day clock restarted on `0.15.1`.
+>
+> Then a billing-correctness fix landed: Claude Code resolves `ANTHROPIC_API_KEY` ahead of `CLAUDE_CODE_OAUTH_TOKEN`, so with both set sandy was silently routing to per-use API billing; sandy now suppresses the API key when an OAuth token is configured. Shipped as **`0.15.2`** (cut 2026-06-25). The soak baseline is `0.15.2`, but the 14-day clock counts from **`2026-06-19`** — the date that fix was committed and the maintainer began daily-driving this exact codebase locally (no changes since), not the later tag date. So the clock runs **2026-06-19 → ~2026-07-03**; `0.15.2` just tags the code already being soaked. Any new surprise/fix restarts it from that point.
 
 **Exit criteria**: 14 days of clean use, no surprises, no fixes applied during the window.
 
