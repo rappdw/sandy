@@ -1,3 +1,132 @@
+## sandy v1.0.0-rc1
+
+**The release candidate.** After 4½ months and 30 releases, sandy's surface is
+frozen and this tag opens the RC window. 1.0 is a *stability promise*, not a
+feature drop — nothing new ships here; what changes is what we commit to.
+
+### What 1.0 promises
+
+- **Sandbox forward-compatibility.** A sandbox created by any `1.x` sandy works
+  with every later `1.x` sandy. Mechanically: `SANDY_SANDBOX_MIN_COMPAT` never
+  advances above `1.0.0` within `1.x` — a layout change that would break a `1.x`
+  sandbox is a `2.0` change. This release adds a frozen sandbox snapshot fixture
+  (`test/fixtures/frozen-sandbox-1.0/`, guarded by `run-tests.sh §60`) so every
+  future release mechanically proves it still accepts a 1.0-era sandbox.
+- **Introspection schema stability.** `--print-schema` / `--print-state` /
+  `--validate-config` keep `schema_version: 1` semantics; fields are added, not
+  renamed or removed (see SPEC_INTROSPECTION.md for the contract).
+- **Config surface stability.** The privileged/passive key tiers and their
+  approval semantics are locked; keys can be added but not retiered silently.
+
+### The road here (consolidated, 0.13 → rc1)
+
+- **0.13.0** — M3: heredoc extraction, three-phase build unification; the 1.0
+  surface became reviewable.
+- **0.14.0** — M2.7: the egress proxy sidecar, default-on permissive. Closed
+  the long-standing macOS LAN-isolation gap (F2) with one cross-platform
+  mechanism; strict mode adds an allowlist posture.
+- **0.15.0** — M4: surface stabilization. Per-key `since`/`stability` metadata,
+  the sandbox compat floor + forward-compat promise, multi-agent matrix tests,
+  fail-cleanly guards.
+- **0.15.1** — proxy resilience: atomic agent+proxy teardown (no more stranded
+  agents), `--restart on-failure:5` self-heal, per-connection panic recovery,
+  persistent `proxy.log` diagnostics.
+- **0.15.2** — billing correctness: OAuth-first credential forwarding
+  (`CLAUDE_CODE_OAUTH_TOKEN` suppresses `ANTHROPIC_API_KEY`).
+
+### Soak status (the honest ledger)
+
+The M5 gate asked for 14 consecutive clean days daily-driving this exact code.
+The clock ran 2026-06-19 → 2026-07-02: **13 clean days — called one day early**,
+a conscious decision (first public announcement timing), recorded rather than
+hidden. The rc window itself is the remaining gate: **no feature additions;
+issues fast-track to `1.0.0-rc2`; when an rc soaks clean for a week, it tags as
+`1.0.0`.**
+
+### Changes in this cut
+
+A pre-cut adversarial code sweep (four independent reviewers) surfaced a batch
+of confirmed fixes, all folded in here. No new features; correctness/security
+hardening only.
+
+**Version-string handling (the `1.0.0-rc1` string is the first non-`X.Y.Z[-dev]`
+version, so every parser met new input):**
+
+- **Proxy built from `main`, not the rc tag.** `_sandy_proxy_ref()` lumped a
+  *published* `-rc` tag in with `-dev` trees, so an installed rc user's
+  (default-on, security-critical) egress proxy was built from whatever `main`
+  HEAD was — and `Dockerfile.proxy`'s hash never moved rc→rc, so a proxy fix in
+  a later rc would never rebuild. Now pins the `vX.Y.Z-rcN` tag.
+- **Update-check precedence.** `sandy_check_update` used a string `!=`, nagging
+  any version *differing* from the latest stable tag — including a *newer* rc,
+  a downgrade prompt. Replaced with a precedence-aware `_ver_should_update`
+  that (a) never nags a downgrade and (b) *does* nag an rc about its own final
+  (equal cores, pre-release → final), so rc soaks converge on `1.0.0`. The four
+  agent-version checks had the same `!=` class → now `_ver_lt`. Guarded by
+  `run-tests.sh §61`.
+- **`--print-schema` emitted `"commit": "rc1"`** for curl-installed rc users
+  (no baked hash): the derivation split on the last `-`, yielding the version's
+  own suffix. Now strips the version prefix — empty or a real hash, never a
+  suffix. (`lore` and other introspection consumers depend on this field.)
+
+**Security / robustness:**
+
+- **JSON injection via `SANDY_LOCAL_LLM_HOST`** (found independently by two
+  reviewers): the `host:port` validator allowed JSON metacharacters, and the
+  value is interpolated unescaped into the proxy config JSON — a crafted value
+  could inject sibling keys and silently downgrade `strict`→`permissive`.
+  Regex tightened to reject them.
+- **`-vvv` redacts secret values.** The verbose `docker run` flags dump printed
+  API keys/tokens in cleartext — exactly what gets pasted into bug reports.
+  Credential-shaped values are now `<redacted>`.
+- **Channel allowlist escaping.** `TELEGRAM_/DISCORD_ALLOWED_SENDERS` (passive
+  tier) were written into the bot's `access.json` unescaped — a `"` could
+  inject DM-allowlist entries. Now escaped.
+
+**Config parser correctness:**
+
+- CRLF line endings are stripped (a Windows-edited `.sandy/config` no longer
+  mis-parses — e.g. `SANDY_EGRESS_PROXY=1\r` failing its case match).
+- `SANDY_VERBOSE` set in a config file is now honored (it was pre-defaulted
+  before the env snapshot, which made the loader always skip it).
+- `SANDY_EXTRA_ENV` names containing digits (e.g. `OAUTH2_TOKEN`) now resolve
+  values from config files, not just the process env.
+
+Regression guards: `run-tests.sh §61` (update-check precedence matrix) and
+`§62` (the rest of the sweep). Deferred, tracked as issues: secrets visible in
+`docker run -e` args to co-tenant users (needs an `--env-file` rework), the
+stale-lock/​signal-trap lifecycle hardening (belongs in the rc soak, not the
+cut), and several lower-severity items.
+
+- Fixed stale "always-mount (1.0-rc1)" descriptions in README/SPECIFICATION —
+  the shipped model is existence-gated mounts + session-end detection (the
+  always-mount pattern was reverted pre-0.13; the docs described a design that
+  never shipped in this form).
+- SPEC_INTROSPECTION.md: documented that the `dirs_always_mount` field *name*
+  is historical (kept for `schema_version` 1 stability); semantics are
+  existence-gated.
+- Added the frozen sandbox snapshot fixture + `run-tests.sh §60` (the 1.x
+  forward-compat guard: fails any future change that would refuse a 1.0-era
+  sandbox or move the compat floor above `1.0.0`).
+
+### rc-specific notes
+
+- The GitHub release is marked **pre-release**, so existing `0.15.x` installs
+  are *not* nagged to upgrade (the update check follows `releases/latest`,
+  which skips pre-releases). Opt in with a fresh install from the tag.
+- **rc1 users:** when `1.0.0` final ships, the update check will *not* nag you
+  (`1.0.0-rc1` compares equal to `1.0.0` after suffix-strip) — run
+  `sandy --upgrade` manually at that point.
+
+### Out of scope (deliberately)
+
+Everything in `docs/POST_1.0_IDEAS.md` — headline items: the host-side
+credential broker (agent never sees tokens), `SANDY_AUTO_UPGRADE`, the sandbox
+migration utility, optional gVisor runtime, `.env` masking. 1.0 is the floor
+those build on, not the ceiling.
+
+---
+
 ## sandy v0.15.2
 
 **Claude auth: honor the OAuth-first preference.** A small but billing-relevant correctness fix. No new features, no new config keys.

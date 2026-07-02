@@ -281,6 +281,33 @@ path (M2.7) already handles the transport, so this is "who holds the token,"
 not "how does traffic egress." Per-action host confirm is the confused-deputy
 guard. Keep it opt-in at first.
 
+### Approval design notes (added 2026-06-29, from Mitko Vasilev's YubiKey/broker post)
+
+Two upgrades to the per-action confirm, both cheap once the broker exists:
+
+- **Content-bind the approval, don't just display argv.** "Approve pushing
+  `main`?" bound only to the action *description* is a TOCTOU hole: user
+  approves, agent amends the commit underneath, approval still "matches." Bind
+  each approval to a hash over the exact action content — argv + repo + branch +
+  commit hash + **diff hash** — plus a short **TTL**, so what was approved is
+  pinned to what ships and expires if unused. Sandy already uses exactly this
+  pattern at the config tier: the passive-privileged approval file is a sha256
+  over the sorted `KEY=VALUE` set, and any change re-prompts. Same mechanism,
+  per-action.
+- **Optional hardware user-presence, with tooling users already have.** No
+  WebAuthn stack needed: `ssh-keygen -Y sign` with a FIDO2 `-sk` key is a
+  touch-gated approval primitive. The confirm step becomes: helper displays the
+  action summary → user touches the key → the signature over the action-hash
+  *is* the approval, and doubles as a signed, auditable approval log. Upgrades
+  the confirm from "anything that can write to the TTY can approve" to "only a
+  physically present human can." Strictly opt-in, and reserved for the dangerous
+  verbs (push, PR-write, deploy) — prompt-per-command trains reflexive approval
+  (the "airport security" trap); sandy's existing tiering philosophy applies.
+
+Related observation (no broker needed): `SANDY_SSH=agent` is *already* a
+capability-based signing oracle — see the doc-note entry below about
+documenting the touch-gated-push story.
+
 ### Effort
 
 L. New host-side socket helper + container-side shim + approval UX. Sequence it
@@ -485,6 +512,73 @@ Small *launcher* change (validate + detect + one `--runtime` flag) + the
 privileged-key metadata + docs. The real work is **compatibility soak**, not code
 — hence opt-in, Linux-first, and clearly labeled "strong-isolation tier, expect
 some workloads to need `runc`."
+
+---
+
+## Doc note: `SANDY_SSH=agent` + FIDO2 key = touch-gated push, today
+
+**Target: 1.0.1 (doc-only).** Filed 2026-06-29, from the same exchange as the
+broker approval-design notes above.
+
+### What
+
+A short README addition (SSH agent relay section) making an existing property
+visible: SSH agent forwarding is **capability-based by construction** — the
+container gets *signatures* from the host agent, never the key material. If the
+user's SSH key is hardware-backed (`ed25519-sk` / FIDO2 resident key), every
+git-over-SSH operation out of the sandbox therefore requires a **physical touch
+on the host** — a hardware root of trust for agent pushes with zero sandy
+changes and no broker. Nobody discovers this on their own because it's emergent
+from the agent protocol, not a sandy feature flag; one paragraph makes it a
+selling point.
+
+Caveat to include: in egress-proxy mode on macOS, agent *signing* is unavailable
+(the sidecar blocks the host TCP relay — see the SSH-agent interaction note in
+CLAUDE.md), so the touch-gated story currently holds on Linux, and on macOS only
+with `SANDY_EGRESS_PROXY=0`. Worth stating precisely rather than overclaiming.
+
+### Why deferred
+
+Doc-only; parked mid-M5-soak alongside the cmux caveat below. Apply post-rc1.
+
+---
+
+## Doc note: cmux notification hook doesn't protect against orphan-on-close
+
+**Target: 1.0.1 (doc-only).** Filed 2026-06-29.
+
+### What
+
+A one-paragraph caveat to add to the cmux notification docs (`README.md` §terminal
+notifications, `SPECIFICATION.md` §C.6). The cmux auto-setup (`sandy:4566–4607`,
+gated on `CMUX_WORKSPACE_ID`) installs `cmux-notify.sh` so Claude Code events render
+as cmux notification rings/badges. That integration is *correct and worth keeping* —
+but it should note what it does **not** cover: cmux has no live detach/reattach
+(closing the cmux app ends sessions; its "session restore" replays layout/scrollback,
+not live processes). So closing a cmux window **kills the foreground `docker run`
+client and orphans the sandy session** — the exact `FailedToOpenSocket` failure the
+0.15.1 stranded-agent work addressed from the proxy side. The notification hook is
+orthogonal to that and provides no protection against it.
+
+### Why it's deferred (not done now)
+
+Surfaced 2026-06-29 from a terminal-options research pass while sandy was ~10 days
+into the M5 14-day pre-rc1 soak (06-19 → ~07-03). Editing prose mid-soak is harmless
+to the *binary* but the discipline is "no changes until rc1 is cut," so it's parked.
+Pure doc tweak, no code, no soak impact when applied post-rc1.
+
+### Note worth preserving
+
+The research compared tmux / cmux / Ghostty / Supacode / VS Code+sandy-ui as outer
+hosts for sandy. Key finding: because sandy multiplexes agents via its *inner* tmux,
+the outer host's only load-bearing job is **keeping the `docker run` client alive
+across a closed window**. On that axis: tmux ✅, Supacode (bundles `zmx` for real PTY
+persistence) ✅, **cmux ❌**, bare terminal ❌. So the doc caveat isn't cmux-bashing —
+it's the single property that distinguishes the safe outer hosts. Adjacent idea, also
+post-1.0: if the orphan-on-close case proves common, a host-side wrapper could trap
+the terminal-close signal and run sandy's teardown explicitly (sandy-ui already does
+this via `SIGINT→SIGTERM→SIGKILL` on tab close — a CLI equivalent for non-persistent
+terminals would generalize it).
 
 ---
 

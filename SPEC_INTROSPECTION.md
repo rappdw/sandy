@@ -212,6 +212,13 @@ All three:
 }
 ```
 
+> **Field-name note:** `protected_paths.dirs_always_mount` is a historical
+> *name* kept for schema stability (`schema_version` 1). Semantics since 0.13:
+> these directories are **existence-gated** — bind-mounted `:ro` only when
+> present on the host, with session-end detection covering absent paths. Only
+> the name is stale; a rename would be a breaking schema change and waits for
+> `schema_version` 2.
+
 ### `--print-state`
 
 ```json

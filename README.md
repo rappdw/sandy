@@ -138,18 +138,18 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_CODEX_AUTH` | `auto` | Force Codex auth path: `auto`, `api_key`, or `oauth` |
 | `OPENCODE_MODEL` | (unset) | OpenCode model override (`provider/model` format, e.g. `anthropic/claude-sonnet-4`) |
 | `SANDY_OPENCODE_AUTH` | `auto` | Force OpenCode auth path: `auto`, `api_key`, or `oauth` |
-| `SANDY_LOCAL_LLM_HOST` | (unset) | `host:port` to allow through LAN isolation, typically for a local LLM (e.g. `127.0.0.1:11434` for Ollama). Inserts a single iptables ACCEPT rule and (Linux) maps `host.docker.internal` to the bridge gateway |
+| `SANDY_LOCAL_LLM_HOST` | (unset) | `host:port` to allow through LAN isolation, typically for a local LLM (e.g. `127.0.0.1:11434` for Ollama). With the egress proxy on (default), the proxy's forward listener relays `host.docker.internal:<port>` to the host; with the proxy off (`0`, Linux), inserts a single iptables ACCEPT rule and maps `host.docker.internal` |
 | `GOOGLE_CLOUD_PROJECT` | (unset) | GCP project ID (Vertex AI) |
 | `GOOGLE_CLOUD_LOCATION` | (unset) | GCP region (Vertex AI) |
 | `GOOGLE_GENAI_USE_VERTEXAI` | (unset) | Set `true` to route Gemini through Vertex AI |
-| `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for Telegram relay in multi-agent mode. `0` = first agent in `SANDY_AGENT`, `1` = second, `2` = third |
+| `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for Telegram relay in multi-agent mode. `0` = first agent in `SANDY_AGENT`, `1` = second, `2` = third, `3` = fourth |
 | `SANDY_SSH` | `token` | Git auth method: `token` (gh CLI + HTTPS) or `agent` (SSH agent forwarding) |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Set to `false` to keep Claude Code's permission system active |
 | `SANDY_HOME` | `~/.sandy` | Sandy config/build/sandbox directory |
 | `SANDY_CPUS` | auto-detected | CPU limit for the container |
 | `SANDY_MEM` | auto-detected | Memory limit for the container |
 | `SANDY_ALLOW_LAN_HOSTS` | (unset) | Comma-separated IPs/CIDRs to allow through LAN isolation (e.g. `192.168.1.50,10.0.0.0/24`) |
-| `SANDY_EGRESS_PROXY` | `0` | Cross-platform egress isolation. `0`=off, `1`=permissive (block LAN/host, allow internet), `2`=strict (allowlist only). The only network isolation that works on macOS — see "How Network Isolation Works" |
+| `SANDY_EGRESS_PROXY` | `1` | Cross-platform egress isolation. `0`=off, `1`=permissive (block LAN/host, allow internet), `2`=strict (allowlist only). The only network isolation that works on macOS — see "How Network Isolation Works" |
 | `SANDY_ALLOW_HOSTS` | (unset) | Comma-separated extra egress-proxy allowlist entries (`host`, `*.suffix`, or `host:port`), appended to the built-in default set. Privileged tier |
 | `SANDY_ALLOW_NO_ISOLATION` | (unset) | Set to `1` to allow launch without iptables rules (Linux) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
@@ -214,7 +214,7 @@ Sandy supports four Gemini auth paths, probed automatically unless `SANDY_GEMINI
 | Path | How to set up | When to use |
 |---|---|---|
 | API key | `GEMINI_API_KEY=...` in `.sandy/.secrets` | Simplest; works on headless servers |
-| OAuth | Run `gemini auth` **on the host** once — sandy copies `~/.gemini/tokens.json` into the container ephemerally on each launch | Free-tier Gemini with browser login |
+| OAuth | Run `gemini auth` **on the host** once — sandy copies `~/.gemini/oauth_creds.json` (Gemini CLI ≥0.30; falls back to legacy `tokens.json`) into the container ephemerally on each launch | Free-tier Gemini with browser login |
 | ADC | `gcloud auth application-default login` on the host | Google Cloud / Vertex AI workflows |
 | Vertex AI | ADC + `GOOGLE_GENAI_USE_VERTEXAI=true`, `GOOGLE_CLOUD_PROJECT=...`, `GOOGLE_CLOUD_LOCATION=...` | Enterprise / Vertex billing |
 
@@ -250,7 +250,7 @@ OpenCode (sst/opencode) is a provider-agnostic agent — sandy doesn't bind it t
 
 Sandy seeds `~/.config/opencode/opencode.json` from the host's copy on first launch — point it at any provider OpenCode supports, including a local LLM.
 
-**Local LLM passthrough.** Pair OpenCode with `SANDY_LOCAL_LLM_HOST=<ip>:<port>` (e.g. `127.0.0.1:11434` for Ollama, `localhost:8000` for vLLM, etc.) to allow the container to reach a local LLM running on the Docker host. Sandy inserts a single narrow `iptables ACCEPT` for that exact `host:port` (Linux), maps `host.docker.internal` to the bridge gateway (Linux Docker doesn't auto-resolve it), and rejects world-open IPs (`0.0.0.0`) and bare IPs without ports. Edit `~/.config/opencode/opencode.json` to set the provider's `baseURL` to `http://host.docker.internal:<port>/v1`. The rule is removed on session exit. The rest of LAN remains blocked.
+**Local LLM passthrough.** Pair OpenCode with `SANDY_LOCAL_LLM_HOST=<ip>:<port>` (e.g. `127.0.0.1:11434` for Ollama, `localhost:8000` for vLLM, etc.) to allow the container to reach a local LLM running on the Docker host. With the egress proxy on (default), the proxy's dedicated forward listener relays `host.docker.internal:<port>` to the real host; with the proxy off (`SANDY_EGRESS_PROXY=0`, Linux) sandy instead inserts a single narrow `iptables ACCEPT` for that exact `host:port` and maps `host.docker.internal` to the bridge gateway (Linux Docker doesn't auto-resolve it). Either way sandy rejects world-open IPs (`0.0.0.0`) and bare IPs without ports. Edit `~/.config/opencode/opencode.json` to set the provider's `baseURL` to `http://host.docker.internal:<port>/v1`. The rule is removed on session exit. The rest of LAN remains blocked.
 
 Headless mode (`-p` / `--print` / `--prompt "..."`) translates to `opencode run` — the prompt is positional. `--continue` / `-c` is silently dropped (no headless resume flag yet).
 
@@ -314,8 +314,8 @@ The egress proxy is the recommended isolation mechanism and the **only** one tha
 
 | Value | Mode | Behavior |
 |---|---|---|
-| `0` (default) | off | Linux iptables only; macOS has no network isolation (see below). |
-| `1` | permissive | Blocks private/LAN/host/cloud-metadata destinations, allows all internet. Closes the macOS LAN gap with ~zero friction — recommended. |
+| `0` | off | Linux iptables only; macOS has no network isolation (see below). |
+| `1` (default) | permissive | Blocks private/LAN/host/cloud-metadata destinations, allows all internet. Closes the macOS LAN gap with ~zero friction. |
 | `2` | strict | Allows only a built-in default allowlist (model providers, GitHub incl. SSH, npm/PyPI/crates/Go/Debian) plus `SANDY_ALLOW_HOSTS`. Fails closed on everything else. |
 
 ```sh
@@ -666,4 +666,4 @@ The workspace is bind-mounted read/write so Claude can modify your project files
 | `.claude/agents/` | Starts empty. Claude can create new agents |
 | `.claude/plugins/` | Starts empty. Managed via `/plugin install` inside the container |
 
-**Always-mount pattern (1.0-rc1).** Since 1.0-rc1, protected files and directories are *always* mounted — if the host has no corresponding file, sandy overlays an empty zero-byte file or empty directory read-only at that path instead. This closes the pre-1.0 gap where absent protected files could be created inside the container and silently loaded back on the host on first read. The one exception is the git-file set (`.git/config`, `.gitmodules`, `.git/HEAD`, `.git/packed-refs`), which is still gated on existence — those files are meaningless without a real git repo.
+**Mount policy (existence-gated).** Protected files and directories are mounted read-only only when they exist on the host — a path the host doesn't have gets no mount (an always-mount-with-empty-stubs approach was tried and reverted: the stubs polluted `git status`, broke `direnv`, and confused IDE scanners). The trade-off is covered by **session-end detection**: sandy records which protected paths existed at launch, and on exit warns about any protected file or directory that newly appeared (e.g. an agent-written `.git/hooks/post-checkout` or `.github/workflows/ci.yml`), with the remediation command — so you can review it before the next `git pull`/`push`/IDE-open would fire it.

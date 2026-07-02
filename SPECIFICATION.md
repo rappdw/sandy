@@ -1,8 +1,8 @@
 # Sandy Specification
 
-**Version**: 0.11.4
-**Date**: 2026-04-20
-**Source**: ~3,150-line bash script (`sandy`), installer (`install.sh`), test suite (`test/run-tests.sh`)
+**Version**: 1.0.0-rc1
+**Date**: 2026-07-02
+**Source**: ~6,100-line bash script (`sandy`), installer (`install.sh`), egress proxy (`proxy/`, Go), test suites (`test/run-tests.sh`, `test/run-integration-tests.sh`)
 
 Sandy is a self-contained command that runs an AI coding agent (Claude Code, Gemini CLI, OpenAI Codex CLI, OpenCode, or any comma-separated multi-agent combo) in a Docker container with filesystem isolation, network isolation, resource limits, and per-project credential sandboxes. One script, one command, zero configuration required.
 
@@ -71,11 +71,13 @@ sandy --remote                 # Remote-control server mode (headless)
 
 | Flag | Behavior |
 |---|---|
+| `--agent A[,B,…]` | Select agent(s) for this launch (`claude`, `gemini`, `codex`, `opencode`, comma-combos, or `all`). Highest-precedence source for `SANDY_AGENT` — beats env var and both config tiers |
 | `--rebuild` | Force rebuild all Docker images |
 | `--build-only` | Build images and exit (for CI/prewarming) |
 | `--upgrade` | Self-update sandy from GitHub |
-| `--version` | Print version string (e.g. `0.7.11-dev-a1b2c3d`) |
+| `--version` | Print version string (e.g. `1.0.1-dev-a1b2c3d`) |
 | `--help` | Show help text |
+| `--print-protected-paths` | List protected files/dirs as `file:`/`dir:` lines (test-harness surface; see §9) |
 
 ### Introspection Flags (machine-readable JSON)
 
@@ -155,9 +157,9 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_SKIP_PERMISSIONS` | privileged | `true` | 0.1.0 | stable | Skip Claude Code's in-session permission prompts (default: true). |
 | `SANDY_ALLOW_NO_ISOLATION` | privileged | `0` | 0.1.0 | stable | Allow launch when iptables rules cannot be applied (Linux only). |
 | `SANDY_ALLOW_LAN_HOSTS` | privileged | unset | 0.7.9 | stable | Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected. |
-| `SANDY_LOCAL_LLM_HOST` | privileged | unset | 0.12.0 | stable | Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal. |
+| `SANDY_LOCAL_LLM_HOST` | privileged | unset | 0.12.0 | stable | Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. With the egress proxy on (default) the proxy's forward listener relays host.docker.internal:<port> to the host; with the proxy off (=0, Linux) it inserts one iptables ACCEPT and maps host.docker.internal. |
 | `SANDY_ALLOW_HOSTS` | privileged | unset | 0.14.0 | stable | Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval. |
-| `SANDY_EXTRA_ENV` | privileged | unset | 0.12.0 | stable | Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values come from the host env, ~/.sandy/.secrets, or ~/.sandy/config — workspace sources never supply values. Privileged tier so workspace config requires approval. |
+| `SANDY_EXTRA_ENV` | privileged | unset | 0.12.0 | stable | Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values resolve env > workspace .sandy/.secrets > workspace .sandy/config > ~/.sandy/.secrets > ~/.sandy/config. The privileged tier gates the NAME list (workspace config setting SANDY_EXTRA_ENV itself requires approval); once approved, values may come from any source. |
 | `ANTHROPIC_API_KEY` | privileged | unset | 0.1.0 | stable | Anthropic API key for Claude Code. Not required when using Claude Max OAuth. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | privileged | unset | 0.7.0 | stable | Claude Code OAuth token (alternative to ANTHROPIC_API_KEY). |
 | `GEMINI_API_KEY` | privileged | unset | 0.9.0 | stable | Google API key for Gemini CLI. |
@@ -553,7 +555,7 @@ Optional: `--gpus <SANDY_GPU>` if GPU passthrough is enabled.
 4. Create synthkit slash commands (`/md2pdf`, `/md2doc`, `/md2html`, `/md2email`)
 4a. Create `/ss` screenshot skill files when `SANDY_SCREENSHOTS_PATH` is set (claude `~/.claude/commands/ss.md`, gemini `~/.gemini/commands/ss.toml`, codex `~/.codex/skills/screenshot/SKILL.md`). All call `/usr/local/bin/sandy-ss-paths` internally. Opencode has no slash-command surface in v0; the helper is on PATH for manual invocation. See Appendix E.11a for the host-side mount + env-var pipeline.
 5. Remap ANSI color 4 (dark blue → bright blue) for readability
-6. Configure `settings.json` (merge defaults, set teammateMode, spinnerTips, permissions)
+6. Ensure the Claude projects dir for the workspace exists (`settings.json` itself is seeded/merged **host-side** before `docker run` — see §4 Seeding; moved out of user-setup in 0.11.3)
 7. Configure git (safe.directory, user name/email)
 8. Environment detection (.python-version, broken .venv, foreign native modules, git-lfs)
 9. Git auth setup (token mode: URL rewriting + gh auth; agent mode: SSH config)
@@ -657,8 +659,8 @@ A tri-state passive-tier key that routes the agent through a `sandy-proxy` sidec
 
 | Value | Mode (`mode` field in proxy config) | Egress policy |
 |---|---|---|
-| `0` (default) | — (proxy off) | Linux: legacy iptables. macOS: none. |
-| `1` | `permissive` | Block private/LAN/link-local/CGNAT/`169.254.169.254` metadata; allow all internet. Resolve-then-check also defeats DNS rebinding. |
+| `0` | — (proxy off) | Linux: legacy iptables. macOS: none. Opt-in only. |
+| `1` (default) | `permissive` | Block private/LAN/link-local/CGNAT/`169.254.169.254` metadata; allow all internet. Resolve-then-check also defeats DNS rebinding. |
 | `2` | `strict` | Deny all except the built-in default allowlist + `SANDY_ALLOW_HOSTS`; fail closed. |
 
 The launcher normalizes the value once into `_SANDY_PROXY_ON` (bool) and `_SANDY_PROXY_MODE` (`permissive`/`strict`).
@@ -670,7 +672,7 @@ The launcher normalizes the value once into `_SANDY_PROXY_ON` (bool) and `_SANDY
 - The proxy runs `--read-only --cap-drop ALL --restart on-failure:5`, with `/etc/sandy-proxy.json` bind-mounted read-only from `$SANDBOX_DIR/sandy-proxy.json`. After start, it is connected to the egress network with the fixed sidecar `--ip`. **Restart policy:** the proxy is the agent's only route off the `--internal` sidecar, so a mid-session proxy death (crash/OOM/reap) would otherwise strand the agent (every request `FailedToOpenSocket`) until the next launch. `--restart on-failure:5` lets the daemon resurrect it on the **same fixed `--ip`**, so the agent self-heals without a session restart; bounded to 5 so a genuinely broken proxy still gives up. `cleanup()` force-removes it regardless of policy (no zombie). **Readiness gate:** sandy polls `.State.Running` (5 × 0.5 s) rather than taking one instantaneous snapshot — this catches a start-then-die proxy and tolerates a transient mid-restart read — and fails fast (dumping `docker logs`) if it never comes up. A non-zero `.RestartCount` after startup is surfaced as a warning (a clean proxy never exits). Regression: `run-tests.sh §56`.
 - **Death diagnostics.** Two mechanisms make a proxy death root-causable. (1) **Persistent log:** after the readiness gate, sandy streams `docker logs -f "$PROXY_CONTAINER"` to `$SANDBOX_DIR/proxy.log` in the background (PID `PROXY_LOG_PID`, reaped in `cleanup()`), truncated per launch. This survives the `docker rm -f` that erases `docker logs`, so a guard() panic stack, deny lines, and restart boundaries persist; `cleanup()` appends the container's final `docker inspect` state (`exit`/`oom`/`restarts`/`status`/`finished`) so an OOM (`oom=true`, exit 137) is distinguishable from a panic (non-zero exit + stack) or an external kill. (2) **Panic recovery in the proxy binary:** an unrecovered panic in any goroutine crashes the whole Go process, and the proxy runs one goroutine per connection over untrusted wire bytes (TLS ClientHello / HTTP Host). Each per-connection handler (`transparent`, `connect`, `forward`) is wrapped in `guard()` (`proxy/guard.go`), which `recover()`s and logs the panic value + `debug.Stack()` instead of letting one malformed connection take down the agent's only egress route. Regression: `run-tests.sh §57` + `proxy/guard_test.go`.
 - Config JSON: `{"mode", "proxy_ip", "allow":[…], "local_llm"?}`. `allow` = built-in defaults + validated `SANDY_ALLOW_HOSTS` (+ `host.docker.internal` when a local LLM is set).
-- Agent `RUN_FLAGS`: `--network <sidecar>` + `--dns <proxy_ip>` + `-e SANDY_PROXY_IP=<ip>` + `-e SANDY_EGRESS_MODE=<off|permissive|strict>` (the resolved posture, forwarded for in-container introspection — informational only). The per-OS magic-hostname `--add-host` block is bypassed in proxy mode (all resolution goes through the proxy DNS). `apply_network_isolation` (iptables) is skipped.
+- Agent `RUN_FLAGS`: `--network <sidecar>` + `--dns <proxy_ip>` + `-e SANDY_PROXY_IP=<ip>` + `-e SANDY_EGRESS_MODE=<off|permissive|strict>` (the resolved posture, forwarded for in-container introspection — informational only; note `SANDY_EGRESS_MODE` is forwarded in **all** modes including `off`, not just proxy mode — see E.16). The per-OS magic-hostname `--add-host` block is bypassed in proxy mode (all resolution goes through the proxy DNS). `apply_network_isolation` (iptables) is skipped.
 - `cleanup()` removes the **agent container first** (`docker rm -f "$CONTAINER_NAME"`), then the proxy container, then the egress network, then the sidecar. Removing the agent first is load-bearing in proxy mode: the agent runs `docker run --rm` in the foreground, but the container's lifetime belongs to the daemon, not the `docker run` client — so if that client is killed without the container stopping (closed terminal, killed session, dropped SSH, SIGHUP), the daemon keeps the agent running. Without the explicit agent removal, the rest of `cleanup()` would tear down the proxy and egress route, **stranding the agent** on a routeless `--internal` sidecar (every API request fails `FailedToOpenSocket` until the next launch). It also lets the sidecar `network rm` succeed instead of failing on the still-attached orphan (which would leak the subnet). Guarded with `${CONTAINER_NAME:-}` because the trap is armed before that var is assigned. Regression: `run-tests.sh §55`.
 
 **Non-TCP backstop (proxy is TCP-only by design).** The proxy speaks only TCP; it does not proxy UDP/QUIC/ICMP. The `--internal` network is the protocol-agnostic backstop — an L3 `FORWARD` drop with no `MASQUERADE` — so *all* non-TCP egress off the sidecar is dropped before reaching the proxy: raw UDP, QUIC/HTTP-3 over UDP/443 (which would otherwise bypass SNI inspection; it fails closed and clients fall back to TCP-through-proxy), ICMP, and IPv6 (networks are `--ipv6=false`, no v6 route). Verified on macOS Docker Desktop 2026-06-11 and guarded by `test/spike/macos-internal-network-spike.sh` (A1d) and `run-integration-tests.sh` §13b (Linux). **Invariant:** if the proxy ever becomes the *only* egress mechanism (e.g. retiring iptables), a non-TCP block must be re-added or this protection regresses.
@@ -717,7 +719,7 @@ Certain files and directories in the workspace are overlaid at container launch 
 | `.git/HEAD` | Ref spoofing |
 | `.git/packed-refs` | Ref spoofing |
 
-**Directories (always mounted — empty fixture if absent on host):**
+**Directories (existence-gated — mounted read-only when present on host):**
 
 | Path | Threat mitigated |
 |---|---|
@@ -843,7 +845,7 @@ Sandy's `load_gemini_credentials()` tries the following sources, controlled by `
 | Mode | Source | Container mount / env |
 |---|---|---|
 | `api_key` | `GEMINI_API_KEY` env var on host | Forwarded via `-e GEMINI_API_KEY=…` |
-| `oauth` | Host `~/.gemini/tokens.json` | Ephemeral copy mounted at `/home/claude/.gemini/tokens.json` **read-only** (1.0-rc1) |
+| `oauth` | Host `~/.gemini/oauth_creds.json` (Gemini CLI ≥0.30), falling back to legacy `~/.gemini/tokens.json` | Ephemeral copy of whichever was found, mounted at the same filename under `/home/claude/.gemini/` **read-only** (1.0-rc1) |
 | `adc` | `~/.config/gcloud/application_default_credentials.json` | Mounted read-only + `GOOGLE_APPLICATION_CREDENTIALS` env var |
 
 In `auto` mode, all three are probed; a warning is emitted if none are found. OAuth tokens are copied to a tmpdir each launch and discarded on exit (same pattern as Claude credentials). Gemini's OAuth refresh is handled inside the CLI itself, so sandy does not run a refresh check.
@@ -1088,11 +1090,11 @@ For `SANDY_AGENT=codex`, `_check_codex_update` compares the in-image `/opt/codex
 | Threat | Mitigation |
 |---|---|
 | File access outside workspace | Read-only root, bind-mount only workspace |
-| LAN/internal network access | iptables DROP rules (Linux), Docker VM NAT (macOS) |
+| LAN/internal network access | Egress proxy on an `--internal` network (default, both platforms); legacy iptables DROP rules when the proxy is off (`SANDY_EGRESS_PROXY=0`, Linux only — macOS has no isolation with the proxy off) |
 | Shell config injection | `.bashrc`, `.zshrc`, etc. mounted read-only |
 | Git hook injection | `.git/hooks/` mounted read-only |
 | IDE config tampering | `.vscode/`, `.idea/` mounted read-only |
-| Plugin leakage from host | Sandbox overlay for `.claude/plugins/`, `enabledPlugins` stripped from settings |
+| Plugin state pollution of host | Sandbox overlay for `.claude/plugins/`; sandbox-local `settings.json` (host copy never written; `enabledPlugins` preserved per-sandbox since 0.11.3) |
 | Symlink escape | Pre-launch scan with interactive prompt |
 | OAuth token leakage | Ephemeral credentials, explicit env var blocking |
 | Fork bomb | PID limit of 512 |
@@ -1100,18 +1102,20 @@ For `SANDY_AGENT=codex`, `_check_codex_update` compares the in-image `/opt/codex
 
 ### Not Mitigated
 
-- **DNS/outbound exfiltration**: Public internet is intentionally available. No domain filtering.
+- **DNS/outbound exfiltration**: In the default permissive mode (`SANDY_EGRESS_PROXY=1`), public internet is intentionally available — exfil to arbitrary public hosts is not blocked. Strict mode (`=2`) narrows egress to the default allowlist + `SANDY_ALLOW_HOSTS` (domain filtering), but does not stop exfil to an *allowlisted* host (host-relay broker is POST_1.0).
 - **Data exfiltration via workspace files**: Workspace is read-write (by design).
 
 ---
 
 ## 19. Test Suite
 
-**Location**: `test/run-tests.sh` (~1,000 lines)
-**Prerequisites**: Docker, sandy images already built
+**Location**: `test/run-tests.sh` (~4,300 lines, sections §1–§60) plus `test/run-integration-tests.sh` (~1,500 lines, headless end-to-end, needs Docker + API keys) and `proxy/*_test.go` (Go unit tests, run by §58)
+**Prerequisites**: Docker, sandy images already built (run on the host, not inside sandy)
 **Framework**: Custom bash test harness with `check`, `pass`, `fail` helpers
 
-### Test Categories
+The category list below covers the founding sections and is not exhaustive — later sections (numbered through §60) are documented next to the features they guard (config tiers §, egress proxy §49–50 and §55–59, sandbox compat floor §51 and §60, OAuth-first auth §52, failure-mode guards §53, multi-agent matrix §54). The regen scripts (`test/regen-config-docs.sh --check`, `test/regen-template.sh --check`) run as part of the suite.
+
+### Test Categories (founding sections)
 
 **Toolchain availability** (8 tests): python3, node, go, rustc, cargo, uv, gcc, git
 
@@ -1182,20 +1186,28 @@ For `SANDY_AGENT=codex`, `_check_codex_update` compares the in-image `/opt/codex
 
 ### Repository Files
 
-| File | Lines | Purpose |
+| File | Lines (at 1.0.0-rc1) | Purpose |
 |---|---|---|
-| `sandy` | ~1,850 | Main launcher script |
-| `install.sh` | 95 | Installer |
-| `CLAUDE.md` | 207 | Claude Code agent guidance |
-| `README.md` | 469 | User documentation |
-| `RELEASE_NOTES.md` | 113 | Version history (v0.6.0–v0.7.5) |
-| `TODO.md` | 91 | Roadmap and community checklist |
+| `sandy` | ~6,100 | Main launcher script |
+| `install.sh` | ~95 | Installer |
+| `doctor.sh` | ~280 | Environment preflight / diagnosis |
+| `CLAUDE.md` | ~515 | Claude Code agent guidance |
+| `README.md` | ~670 | User documentation |
+| `RELEASE_NOTES.md` | ~635 | Version history (v0.6.0–v1.0.0-rc1) |
 | `SPECIFICATION.md` | this file | Technical specification |
-| `test/run-tests.sh` | ~1,000 | Integration test suite |
+| `SPEC_INTROSPECTION.md` | — | Introspection JSON stability contract |
+| `proxy/` | — | Egress proxy (Go: listeners, policy, DNS, guard + unit tests) |
+| `templates/user-setup.sh.tmpl` | — | Shellcheck-lintable mirror of the user-setup heredoc |
+| `test/run-tests.sh` | ~4,300 | Pure-script test suite (§1–§60) |
+| `test/run-integration-tests.sh` | ~1,500 | Headless end-to-end suite (needs Docker + keys) |
+| `test/fixtures/frozen-sandbox-1.0/` | — | Frozen 1.0 sandbox snapshot (forward-compat guard, §60) |
+| `docs/` | — | Roadmap, post-1.0 ideas, testing plan, security docs |
 | `examples/gpu/Dockerfile` | 40 | Per-project GPU Dockerfile example |
 | `examples/quarto-typst/.sandy/Dockerfile` | 16 | Per-project Quarto+Typst example |
 | `analysis/` | — | Security and architecture audit documents |
 | `research/` | — | Feature analysis and design sketches |
+
+Line counts are indicative, refreshed at release cuts — not maintained per-commit.
 
 ### Runtime-Generated Files (`$SANDY_HOME/`)
 
@@ -1215,6 +1227,10 @@ For `SANDY_AGENT=codex`, `_check_codex_update` compares the in-image `/opt/codex
 | `.skills_build_hash` | Phase 2.5b content hash |
 | `.update_check` | Cached update check result (24-hour TTL) |
 | `.skill_version_<pack>` | Cached skill pack version |
+| `Dockerfile.gemini` / `.codex` / `.opencode` / `.full` | Per-agent / multi-agent image definitions |
+| `Dockerfile.proxy` | Egress proxy image definition |
+| `channel-relay.sh` | Host-side Telegram relay (agent-agnostic tmux injection) |
+| `approvals/` | Per-workspace passive-privileged-key approval files |
 | `config` | User-level configuration |
 | `.secrets` | User-level credentials |
 | `sandboxes/` | Per-project sandbox directories |
@@ -1475,14 +1491,7 @@ exec gosu "$RUN_UID:$RUN_GID" /usr/local/bin/user-setup.sh "$@"
 
 Key implementation details not covered in the main spec:
 
-**Settings.json merge (3-tier fallback)**:
-1. **Node.js**: JSON repair (trailing commas, missing commas), merge defaults, strip `enabledPlugins`
-2. **jq**: `//=` operator for defaults, `del(.enabledPlugins)`
-3. **printf**: Last resort, only if file is exactly `{}`
-
-JSON repair regexes:
-- `/,(\s*[}\]])/g` → `$1` (remove trailing commas)
-- `/(\"[^\"]*\")\s*\n(\s*\")/g` → `$1,\n$2` (add missing commas)
+**Settings.json**: user-setup.sh no longer merges `settings.json` — since 0.11.3 the merge-preserving regeneration happens **host-side** every launch (see §4 Seeding and Appendix C.2: host copy re-read, sandy-managed keys re-overwritten, `enabledPlugins` preserved from the previous session). Container-side, user-setup only ensures the Claude projects directory for the workspace exists (path-slug transform, required for `--continue` session lookup).
 
 **ANSI color remap**: `printf "\033]4;4;rgb:61/8f/ff\033\\"` (dark blue → bright blue), restored on EXIT trap.
 
@@ -1562,7 +1571,7 @@ All magic numbers, thresholds, timeouts, and limits used in the sandy script.
 
 | Parameter | Value | Context |
 |---|---|---|
-| Container memory | `available_GB - 1`, min 2GB | Auto-detected from `docker info --format '{{.MemTotal}}'`, converted via `/1073741824` |
+| Container memory | `available_GB - 1`, min 2GB | Auto-detected from `docker info --format '{{.MemTotal}}'`, converted via `/1073741824`; falls back to `3g` if detection fails (4GB assumed − 1) |
 | Container CPUs | All available (from `docker info --format '{{.NCPU}}'`) | Default 2 if detection fails |
 | PID limit | 512 | `--pids-limit 512` |
 | tmpfs `/tmp` | 1 GB, exec | `--tmpfs /tmp:exec,size=1G` |
@@ -1650,7 +1659,7 @@ Capabilities SETUID/SETGID are needed for `gosu` privilege drop. CHOWN/DAC_OVERR
 
 | Variable | Default | Notes |
 |---|---|---|
-| `SANDY_MODEL` | `claude-opus-4-6` | Passed to `claude --model` |
+| `SANDY_MODEL` | `claude-opus-4-8` | Passed to `claude --model` |
 | `SANDY_SSH` | `token` | Git authentication mode |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Skip trust dialog |
 | `SANDY_VERBOSE` | `0` | No extra output |
@@ -1730,7 +1739,7 @@ Note the double-nested `source` — the outer key is the `extraKnownMarketplaces
 }
 ```
 
-`enabledPlugins` is deleted from the merged settings to prevent host plugin leakage. Because the sidecar is rebuilt each launch and mounted read-only, any in-container mutation fails with `EROFS` and host-side edits to `~/.claude/settings.json` are picked up on the next launch automatically.
+`enabledPlugins` is **preserved** from the previous sandbox session (and inherited from the host copy on first launch) so `/plugin install` survives relaunches. The file is read-write inside the container — the pre-0.11.3 read-only sidecar was reverted because it broke `/plugin install` with `EROFS`. Host-side edits to `~/.claude/settings.json` still propagate on the next launch (sandy re-reads the host copy every launch), and the sandy-managed keys are re-overwritten every launch regardless of in-session mutations.
 
 **JSON repair** applied before parsing (handles common hand-editing errors):
 - Remove trailing commas: regex `,(\s*[}\]])` → `$1`
@@ -1986,7 +1995,7 @@ sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 **Token expiry check** (2 tiers):
 1. **Node.js**: Parse credentials JSON, check `claudeAiOauth.expiresAt` against `Date.now() + 300000`
 2. **Python 3**: Same logic via `json.loads` and `time.time() * 1000`
-3. If neither available: warn and return "needs refresh"
+3. If neither available: warn and return "no refresh needed" (fail-open — the existing credentials are used as-is rather than forcing a re-login)
 
 **Skill pack version resolution** (3 tiers):
 1. **GitHub releases API**: 5s timeout, looks for tags matching prefix
@@ -2187,16 +2196,13 @@ while IFS= read -r f; do
 done < <(_sandy_protected_git_files)
 ```
 
-**Directories — always mounted (1.0-rc1)**:
+**Directories — existence-gated** (same model as files; absent dirs are covered by session-end detection, §9):
 ```bash
 while IFS= read -r d; do
-    if [ -d "<WORKSPACE>/$d" ]; then
-        -v "<WORKSPACE>/$d:<CONTAINER_WORKSPACE>/$d:ro"
-    else
-        -v "<SANDY_HOME>/.empty-ro-dir:<CONTAINER_WORKSPACE>/$d:ro"
-    fi
+    [ -d "<WORKSPACE>/$d" ] && -v "<WORKSPACE>/$d:<CONTAINER_WORKSPACE>/$d:ro"
 done < <(_sandy_protected_dirs)
 ```
+(The `--print-schema` JSON field listing these dirs is still named `dirs_always_mount` — the name is historical, kept for introspection-schema stability; see SPEC_INTROSPECTION.md.)
 
 **Submodule gitdir walk** — after the above loops:
 ```bash
@@ -2368,9 +2374,12 @@ SANDY_SSH=<token|agent>
 GIT_TOKEN=<token>          # token mode only
 GH_ACCOUNTS=<user1:tok1,user2:tok2>  # all gh-authenticated accounts
 
-# Credentials (explicitly emptied if not set to prevent host env leakage)
-ANTHROPIC_API_KEY=<key>             # empty string if unset
-CLAUDE_CODE_OAUTH_TOKEN=<token>     # empty string if unset
+# Claude credentials (OAuth-first since 0.15.2; block gated on claude ∈ agent set):
+#   CLAUDE_CODE_OAUTH_TOKEN set → forward ONLY the token; ANTHROPIC_API_KEY is
+#                                 suppressed entirely (launch warning if both set)
+#   no OAuth token              → forward ANTHROPIC_API_KEY only if non-empty, plus
+#                                 CLAUDE_CODE_OAUTH_TOKEN= (emptied vs host-env leak)
+CLAUDE_CODE_OAUTH_TOKEN=<token>     # or ANTHROPIC_API_KEY=<key> — never both
 
 # Agent teams (if configured)
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=<0|1>
@@ -2378,9 +2387,11 @@ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=<0|1>
 # System
 HOST_UID=<uid>
 HOST_GID=<gid>
-DISABLE_AUTOUPDATER=1
-FORCE_AUTOUPDATE_PLUGINS=true
+SANDY_AGENT=<agent[,agent…]>        # resolved agent selection (drives entrypoint pane layout)
+SANDY_EGRESS_MODE=<off|permissive|strict>  # posture introspection — forwarded in ALL modes (informational)
 ```
+
+`DISABLE_AUTOUPDATER=1` and `FORCE_AUTOUPDATE_PLUGINS=true` are exported by the **entrypoint** inside the container, not passed via docker `-e`.
 
 Git identity fallback: if `GIT_USER_NAME`/`GIT_USER_EMAIL` are not set via config, they are read from the host's `git config user.name` and `git config user.email`.
 
@@ -2389,6 +2400,7 @@ Git identity fallback: if `GIT_USER_NAME`/`GIT_USER_EMAIL` are not set via confi
 GEMINI_API_KEY=<key>                # if set
 GEMINI_MODEL=<model>                # if set
 SANDY_GEMINI_AUTH=<auto|api_key|oauth|adc>
+GEMINI_SANDBOX=false                # gemini's own sandbox off — sandy provides isolation
 GOOGLE_CLOUD_PROJECT=<proj>         # Vertex AI
 GOOGLE_CLOUD_LOCATION=<region>
 GOOGLE_GENAI_USE_VERTEXAI=<true>
@@ -2413,6 +2425,18 @@ SANDY_CODEX_AUTH=<auto|api_key|oauth>
 ```
 
 The codex sandbox dir is writable (codex needs `log/`, `memories/`, session rollouts, sqlite state), but the `auth.json` file inside it is shadowed by a read-only overlay bind when either auth path is active (OAuth copy or api-key materialization — see C.7c). See §11 for the rationale of the read-only overlay.
+
+**OpenCode-specific env** (whenever `opencode` is in `SANDY_AGENT`):
+```bash
+OPENCODE_MODEL=<model>              # if set
+SANDY_OPENCODE_AUTH=<auto|api_key|oauth>
+SANDY_LOCAL_LLM_HOST=<host:port>    # if set (local-LLM passthrough — proxy forward listener / iptables hole)
+# Provider keys forwarded natively for opencode's provider-agnostic auth (each only if set):
+ANTHROPIC_API_KEY=<key>
+OPENAI_API_KEY=<key>
+GEMINI_API_KEY=<key>
+```
+OpenCode mounts: `$SANDBOX_DIR/opencode/config` → `~/.config/opencode` and `$SANDBOX_DIR/opencode/share` → `~/.local/share/opencode`; the OAuth path additionally mounts host `~/.local/share/opencode/auth.json` read-only when present.
 
 ### E.16a Self-Attestation Marker (all modes)
 

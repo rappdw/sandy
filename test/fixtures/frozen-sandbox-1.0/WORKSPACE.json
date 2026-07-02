@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "sandbox_name": "frozen-sandbox-1.0",
+  "workspace_path": "/home/user/dev/frozen-fixture",
+  "first_seen_at": "2026-07-02T00:00:00Z",
+  "last_seen_at": "2026-07-02T00:00:00Z",
+  "sandy_version_first": "1.0.0-rc1",
+  "sandy_version_last": "1.0.0-rc1"
+}

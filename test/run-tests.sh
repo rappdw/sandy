@@ -743,6 +743,14 @@ mkdir -p "$TEST_PROJECT/.git/hooks"
 echo "#!/bin/sh" > "$TEST_PROJECT/.git/hooks/pre-commit"
 echo "[core]" > "$TEST_PROJECT/.git/config"
 echo "" > "$TEST_PROJECT/.gitmodules"
+# 0444 backstop for the write-blocked checks below: macOS Docker/OrbStack can
+# transiently drop :ro enforcement on binds whose source lives inside the rw
+# workspace bind (see the comment in test 32 and $EMPTY_RO_FIXTURE's 0555 in
+# setup_sandbox). Container writes run as HOST_UID, so host perms still block
+# them. rm -f/-rf cleanup below is unaffected (unlink needs dir perms only).
+chmod 0444 "$TEST_PROJECT/.bashrc" "$TEST_PROJECT/.zshrc" \
+    "$TEST_PROJECT/.git/hooks/pre-commit" "$TEST_PROJECT/.git/config" \
+    "$TEST_PROJECT/.gitmodules"
 mkdir -p "$TEST_PROJECT/.claude/commands"
 echo "test" > "$TEST_PROJECT/.claude/commands/test.md"
 mkdir -p "$TEST_PROJECT/.claude/agents"
@@ -2438,6 +2446,12 @@ info "31. Hybrid protection model — present dirs are :ro, absent dirs are unmo
 rm -rf "$TEST_PROJECT/.vscode"
 mkdir -p "$TEST_PROJECT/.vscode"
 echo "existing host content" > "$TEST_PROJECT/.vscode/host-existing.json"
+# 0555 backstop (dir analogue of the 0444 one at the top of this file): macOS
+# Docker/OrbStack can transiently drop the :ro flag on a single bind mount, so
+# the write is blocked at the host-permission layer too — a container write runs
+# as non-root HOST_UID, which can't write into an r-x dir it owns. Restored to
+# 0755 before cleanup so `rm -rf` can unlink the existing file inside.
+chmod 0555 "$TEST_PROJECT/.vscode"
 _MNT_OUT_PRESENT="$(sandy_run 'cat /proc/self/mountinfo' 2>/dev/null)"
 check "present .vscode/ is mounted read-only" \
     bash -c '
@@ -2449,6 +2463,7 @@ check "present .vscode/ is mounted read-only" \
 sandy_run "echo evil > /workspace/.vscode/settings.json 2>/dev/null" >/dev/null 2>&1 \
     && _WR_PRESENT=yes || _WR_PRESENT=no
 check "cannot write to present .vscode/" test "$_WR_PRESENT" = "no"
+chmod 0755 "$TEST_PROJECT/.vscode"
 rm -rf "$TEST_PROJECT/.vscode"
 
 # 31b. Absent protected dirs: in production sandy, no mount happens. The
@@ -2485,9 +2500,21 @@ check "cleanup includes rm -rf remediation in the warning" \
 info "32. Sprint 1 — Expanded protected-files list"
 # ============================================================
 # F4 remediation: additional shell-sourced / tool-config files now protected.
+#
+# Fixtures are chmod 0444 — belt-and-suspenders, same rationale as
+# $EMPTY_RO_FIXTURE's 0555 in setup_sandbox. These single-file :ro binds
+# unavoidably source from inside the rw workspace bind (the real file must
+# live in the workspace), and on macOS Docker/OrbStack that double-mount
+# pattern has been observed to transiently drop :ro enforcement for a single
+# docker run (one "cannot write present .npmrc" failure in an otherwise
+# clean 573-test run at v1.0.0-rc1; see also the OrbStack fuse attr-cache
+# note above test 13). The container runs as HOST_UID (non-root), so 0444
+# blocks the write at the host-fs layer even when the mount flag is dropped:
+# the check asserts "write blocked" regardless of which layer enforces it.
 
 for _f in .envrc .tool-versions .mise.toml .npmrc .yarnrc .yarnrc.yml .pypirc .netrc .pre-commit-config.yaml; do
     echo "# host $_f" > "$TEST_PROJECT/$_f"
+    chmod 0444 "$TEST_PROJECT/$_f"
 done
 
 for _f in .envrc .tool-versions .mise.toml .npmrc .yarnrc .yarnrc.yml .pypirc .netrc .pre-commit-config.yaml; do
@@ -2530,6 +2557,12 @@ echo "[core]" > "$TEST_PROJECT/.git/modules/fake-sub/config"
 echo "#!/bin/sh" > "$TEST_PROJECT/.git/modules/fake-sub/hooks/pre-commit"
 chmod +x "$TEST_PROJECT/.git/modules/fake-sub/hooks/pre-commit"
 echo "" > "$TEST_PROJECT/.git/modules/fake-sub/info/attributes"
+# 0444 backstop against transient :ro-drop on macOS (see test 32 comment).
+# Note: the hook-CREATION check below can't be perms-hardened this way (it
+# targets a new path inside the hooks dir bind, and a 0555 dir would break
+# the non-root rm -rf cleanup), so it still relies on the :ro mount alone.
+chmod 0444 "$TEST_PROJECT/.git/modules/fake-sub/config" \
+    "$TEST_PROJECT/.git/modules/fake-sub/info/attributes"
 
 sandy_run "echo injected > /workspace/.git/modules/fake-sub/hooks/post-checkout 2>/dev/null" \
     >/dev/null 2>&1 && WR_SUBMODULE_HOOK=yes || WR_SUBMODULE_HOOK=no
@@ -2551,6 +2584,7 @@ info "35. Sprint 1 — .git/info/ protection (filter-driver vector)"
 
 mkdir -p "$TEST_PROJECT/.git/info"
 echo "" > "$TEST_PROJECT/.git/info/attributes"
+chmod 0444 "$TEST_PROJECT/.git/info/attributes"  # :ro-drop backstop, see test 32
 
 sandy_run "echo '*.txt filter=evil' >> /workspace/.git/info/attributes 2>/dev/null" \
     >/dev/null 2>&1 && WR_GITINFO=yes || WR_GITINFO=no
@@ -2559,6 +2593,7 @@ check "cannot modify .git/info/attributes" test "$WR_GITINFO" = "no"
 # .git/HEAD and .git/packed-refs too
 echo "ref: refs/heads/main" > "$TEST_PROJECT/.git/HEAD"
 echo "# pack-refs" > "$TEST_PROJECT/.git/packed-refs"
+chmod 0444 "$TEST_PROJECT/.git/HEAD" "$TEST_PROJECT/.git/packed-refs"  # :ro-drop backstop
 
 sandy_run "echo 'ref: refs/heads/pwned' > /workspace/.git/HEAD 2>/dev/null" \
     >/dev/null 2>&1 && WR_HEAD=yes || WR_HEAD=no
@@ -3782,15 +3817,19 @@ _sandy_proxy_ref"
 check "proxy ref: release version pins to vX.Y.Z tag" \
     bash -c '[ "$(SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" GITHUB_HEAD_REF= bash -c "$1
 _sandy_proxy_ref")" = "v0.13.1" ]' -- "$_PX_FNS"
-# -dev/-rc build the proxy from source. From a git checkout the ref is the
-# current branch; outside one it falls back to main. Run from a non-git tmp dir
-# so the deterministic fallback is what's asserted.
+# -dev and -rc differ OUTSIDE a git checkout (installed copies, detached HEAD):
+#   -dev  → main   (a dev tree has no tag to pin; build from main's proxy/)
+#   -rc   → vX.Y.Z-rcN   (a PUBLISHED rc HAS a tag; installed rc users must get
+#          the tagged proxy, and the changing ref is what moves Dockerfile.proxy's
+#          hash so a later rc's proxy fix actually rebuilds — see F1/issue history)
+# From a git checkout BOTH use the current branch (pre-tag cutting case). Run
+# from a non-git tmp dir so the deterministic fallback is what's asserted.
 check "proxy ref: -dev falls back to main outside a git checkout" \
     bash -c 'cd "$(mktemp -d)" && [ "$(SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" GITHUB_HEAD_REF= bash -c "$1
 _sandy_proxy_ref")" = "main" ]' -- "$_PX_FNS"
-check "proxy ref: -rc falls back to main outside a git checkout" \
+check "proxy ref: published -rc pins its vX.Y.Z-rcN tag outside a git checkout" \
     bash -c 'cd "$(mktemp -d)" && [ "$(SANDY_VERSION=1.0.0-rc1 SANDY_PROXY_REF="" GITHUB_HEAD_REF= bash -c "$1
-_sandy_proxy_ref")" = "main" ]' -- "$_PX_FNS"
+_sandy_proxy_ref")" = "v1.0.0-rc1" ]' -- "$_PX_FNS"
 check "proxy ref: SANDY_PROXY_REF override wins" \
     bash -c '[ "$(SANDY_VERSION=0.13.1 SANDY_PROXY_REF=abc123 bash -c "$1
 _sandy_proxy_ref")" = "abc123" ]' -- "$_PX_FNS"
@@ -4225,6 +4264,118 @@ check "network sweep skips networks a real (non-test) session is attached to" \
     grep -qF 'sandy-proxy-tmp.*) : ;;' "$_INTEG_SCRIPT"
 check "§13 network-leak check is baseline-scoped (ignores a real session's nets)" \
     bash -c 'grep -q "_pre_nets=" "$1" && grep -qF "grep -vxF \"\$_pre_nets\"" "$1"' -- "$_INTEG_SCRIPT"
+
+# ============================================================
+echo ""
+echo "§60: frozen 1.0 sandbox snapshot — the 1.x forward-compat guard (PR 5.2)"
+# ============================================================
+# The 1.x promise: a sandbox created by ANY 1.x sandy works with every later
+# 1.x sandy. Enforced two ways, both against the LIVE script values (unlike
+# §51, which pins the floor — here drift is exactly what must fail):
+#   (a) the frozen fixture (test/fixtures/frozen-sandbox-1.0/, created at the
+#       1.0.0-rc1 cut and never updated) still classifies `ok`;
+#   (b) SANDY_SANDBOX_MIN_COMPAT itself has not moved above 1.0.0.
+# If either check fails, the change on your branch is 2.0.0 territory — see
+# CLAUDE.md §Sandbox compatibility and the fixture README before "fixing" the
+# test.
+_FROZEN_FIXTURE="$(cd "$(dirname "$0")" && pwd)/fixtures/frozen-sandbox-1.0"
+_sbx_classify_live() {
+    bash -c "
+        $(sed -n '/^_ver_lt()/,/^}$/p' "$_SBX_SCRIPT")
+        $(sed -n '/^_sandbox_compat_classify()/,/^}$/p' "$_SBX_SCRIPT")
+        $(grep '^SANDY_SANDBOX_MIN_COMPAT=' "$_SBX_SCRIPT")
+        _sandbox_compat_classify \"\$1\"
+    " _ "$1"
+}
+check "frozen fixture exists with a created-version marker" \
+    test -s "$_FROZEN_FIXTURE/.sandy_created_version"
+_FROZEN_VER="$(cat "$_FROZEN_FIXTURE/.sandy_created_version" 2>/dev/null | tr -d '[:space:]')"
+check "frozen fixture created-version classifies ok against the LIVE floor" \
+    test "$(_sbx_classify_live "$_FROZEN_VER")" = ok
+check "a plain 1.0.0 sandbox classifies ok against the LIVE floor" \
+    test "$(_sbx_classify_live 1.0.0)" = ok
+check "compat floor has not moved above 1.0.0 (the 1.x promise)" \
+    bash -c "
+        $(sed -n '/^_ver_lt()/,/^}$/p' "$_SBX_SCRIPT")
+        $(grep '^SANDY_SANDBOX_MIN_COMPAT=' "$_SBX_SCRIPT")
+        ! _ver_lt 1.0.0 \"\$SANDY_SANDBOX_MIN_COMPAT\"
+    "
+check "frozen WORKSPACE.json declares schema_version 1" \
+    grep -q '"schema_version": 1' "$_FROZEN_FIXTURE/WORKSPACE.json"
+check "frozen WORKSPACE.json has the workspace_path key (sibling-scan contract)" \
+    grep -q '"workspace_path"' "$_FROZEN_FIXTURE/WORKSPACE.json"
+
+# ============================================================
+echo ""
+echo "§61: update-check nags on precedence, not string equality (no downgrade nag; rc→final converges)"
+# ============================================================
+# sandy_check_update must use _ver_should_update (precedence-aware), never a
+# string !=. A plain != nags any version DIFFERING from the latest stable tag,
+# including a NEWER rc/-dev tree (a downgrade prompt shown to every rc user,
+# since releases/latest skips prereleases). And a naive _ver_lt (suffix-strip)
+# would never tell an rc about its own final (equal cores). _ver_should_update
+# handles both. Guard the source wiring + the pure function's behavior.
+check "update check has no string-inequality nag (cached or fresh branch)" \
+    bash -c '! grep -q "!= \"v\$SANDY_VERSION\"" "$1"' -- "$_SBX_SCRIPT"
+check "sandy_check_update uses _ver_should_update in both branches" \
+    bash -c 'sed -n "/^sandy_check_update()/,/^}$/p" "$1" | grep -c "_ver_should_update \"\$SANDY_VERSION\"" | grep -qx 2' -- "$_SBX_SCRIPT"
+# Behavioral matrix on the pure function — echoes "nag"/"quiet" (a subshell with
+# the two functions inlined, so it needs no exported state).
+_su() {
+    bash -c "
+        $(sed -n '/^_ver_lt()/,/^}$/p' "$_SBX_SCRIPT")
+        $(sed -n '/^_ver_should_update()/,/^}$/p' "$_SBX_SCRIPT")
+        if _ver_should_update \"\$1\" \"\$2\"; then echo nag; else echo quiet; fi
+    " _ "$1" "$2"
+}
+check "rc newer than latest stable → quiet (1.0.0-rc1 vs 0.15.2, the downgrade guard)" \
+    test "$(_su 1.0.0-rc1 0.15.2)" = quiet
+check "rc → its own final → NAGS (1.0.0-rc1 vs 1.0.0, the convergence fix)" \
+    test "$(_su 1.0.0-rc1 1.0.0)" = nag
+check "rc → later rc → nags (1.0.0-rc1 vs 1.0.0-rc2)" \
+    test "$(_su 1.0.0-rc1 1.0.0-rc2)" = nag
+check "final → equal final → quiet (1.0.0 vs 1.0.0)" \
+    test "$(_su 1.0.0 1.0.0)" = quiet
+check "final → its own earlier rc → quiet (1.0.0 vs 1.0.0-rc1)" \
+    test "$(_su 1.0.0 1.0.0-rc1)" = quiet
+check "older stable → newer stable → nags (0.15.2 vs 1.0.0)" \
+    test "$(_su 0.15.2 1.0.0)" = nag
+check "dev tree ahead of latest stable → quiet (1.0.1-dev vs 1.0.0)" \
+    test "$(_su 1.0.1-dev 1.0.0)" = quiet
+
+# ============================================================
+echo ""
+echo "§62: rc1 hardening sweep — regression guards for the confirmed fixes"
+# ============================================================
+# SANDY_LOCAL_LLM_HOST regex must reject JSON metacharacters (it's interpolated
+# unescaped into the proxy config JSON's local_llm field).
+_llm_re="$(grep -m1 'SANDY_LOCAL_LLM_HOST" =~' "$_SBX_SCRIPT" | sed -E 's/.*=~ (\^[^ ]+).*/\1/')"
+check "local-llm regex rejects a JSON-injection payload" \
+    bash -c '[[ ! "host\",\"x\":\"y:11434" =~ '"$_llm_re"' ]]'
+check "local-llm regex accepts a normal host:port" \
+    bash -c '[[ "127.0.0.1:11434" =~ '"$_llm_re"' ]]'
+check "local-llm regex accepts a hostname:port" \
+    bash -c '[[ "host.docker.internal:11434" =~ '"$_llm_re"' ]]'
+# --print-schema commit derivation strips the version PREFIX (never yields a
+# version suffix like "rc1" as a bogus commit).
+check "schema commit derivation strips version prefix, not last dash-field" \
+    bash -c 'SANDY_VERSION=1.0.0-rc1; full=1.0.0-rc1; c="${full#"$SANDY_VERSION"}"; c="${c#-}"; [ -z "$c" ]'
+check "schema commit derivation keeps a real hash" \
+    bash -c 'SANDY_VERSION=1.0.0-rc1; full=1.0.0-rc1-abc1234; c="${full#"$SANDY_VERSION"}"; c="${c#-}"; [ "$c" = abc1234 ]'
+# All four agent update checks use ordered compare, not string !=.
+check "no agent update check uses string != (downgrade-nag class)" \
+    bash -c '! grep -q "\[ \"\$latest\" != \"\$inst\" \]" "$1"' -- "$_SBX_SCRIPT"
+check "agent update checks use _ver_lt (4 sites)" \
+    bash -c '[ "$(grep -c "_ver_lt \"\$inst\" \"\$latest\"" "$1")" = 4 ]' -- "$_SBX_SCRIPT"
+# -vvv dump redacts secret values.
+check "-vvv RUN_FLAGS print redacts credential-shaped values" \
+    grep -qF 'printf '"'"'  %s=<redacted>' "$_SBX_SCRIPT"
+# Config parser strips trailing CR (CRLF-edited config robustness).
+check "config parser strips trailing CR from values" \
+    bash -c 'grep -q "value=\"\\\${value%\\\$'"'"'\\\\r'"'"'}\"" "$1"' -- "$_SBX_SCRIPT"
+# Channel allowlist senders are escaped before JSON emission.
+check "channel access.json escapes sender values (gsub)" \
+    grep -qF 'gsub(/"/,"\\\"")' "$_SBX_SCRIPT"
 
 # ============================================================
 # Summary

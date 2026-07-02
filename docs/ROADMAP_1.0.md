@@ -601,8 +601,10 @@ This is the most important gate on the roadmap. Everything before it is "the rev
 > **Soak log:** the soak runs on the latest `0.15.x`, not a frozen `0.15.0`. The `0.15.0` soak surfaced the **stranded-agent** failure (agent `Up`, proxy gone, every request `FailedToOpenSocket`) — root-caused to three independent mechanisms (killed-session orphan, proxy dying under a live agent, a panic crashing the whole proxy) plus a test-harness footgun that force-removed real sessions' proxies. All fixed in **`0.15.1`** (2026-06-16). Per the rule below, the 14-day clock restarted on `0.15.1`.
 >
 > Then a billing-correctness fix landed: Claude Code resolves `ANTHROPIC_API_KEY` ahead of `CLAUDE_CODE_OAUTH_TOKEN`, so with both set sandy was silently routing to per-use API billing; sandy now suppresses the API key when an OAuth token is configured. Shipped as **`0.15.2`** (cut 2026-06-25). The soak baseline is `0.15.2`, but the 14-day clock counts from **`2026-06-19`** — the date that fix was committed and the maintainer began daily-driving this exact codebase locally (no changes since), not the later tag date. So the clock runs **2026-06-19 → ~2026-07-03**; `0.15.2` just tags the code already being soaked. Any new surprise/fix restarts it from that point.
+>
+> **Soak closed 2026-07-02 at 13/14 clean days — called one day early, consciously.** Zero surprises during the window. Reason for the early call: sandy's first public announcement was timed for the rc1 tag, and the rc window itself (below) still gates `1.0.0` — an rc must soak clean for a week before it graduates, so the 14th solo day is dominated by real-user feedback the announcement brings in. Recorded here rather than silently rounding up.
 
-**Exit criteria**: 14 days of clean use, no surprises, no fixes applied during the window.
+**Exit criteria**: 14 days of clean use, no surprises, no fixes applied during the window. *(Met at 13/14 — see the soak-log closure above for the recorded exception.)*
 
 ### PR 5.2 — 1.0-rc1 cut
 
@@ -723,5 +725,5 @@ Treat each tag as a commitment: do not proceed to the next milestone until the p
 | `0.13.0` | ✓ released 2026-05-30 | M3 (heredoc extract + build unification) + 3-day mini-soak; default model → opus 4.8 | 1.0 surface is reviewable |
 | `0.13.1` or `0.14.0-pre` | pending | M2.7 (egress proxy sidecar) + 7-day soak | F2 macOS Critical finally closed |
 | `0.14.0` | pending | M4 surface locked | Stability promises are explicit |
-| `1.0.0-rc1` | pending | M5 14-day soak clean | Ready for users to form habits on |
-| `1.0.0` | pending | rc soak clean | Stability over time |
+| `1.0.0-rc1` | ⏳ cut in flight (2026-07-02) | M5 soak closed at 13/14 clean days (recorded exception) | Ready for users to form habits on |
+| `1.0.0` | pending | rc soak clean (1 week) | Stability over time |

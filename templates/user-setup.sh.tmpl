@@ -374,9 +374,10 @@ if _sandy_has_claude; then
     mkdir -p "$_cur_proj"
 fi
 
-# Plugin marketplace configuration is merged into the seed sidecar at host-side
-# (see S2.1 block in the main sandy script). Any in-container write to
-# ~/.claude/settings.json would fail with EROFS under the :ro overlay.
+# Plugin marketplace configuration is merged into settings.json host-side at
+# seed time (see S2.1 block in the main sandy script). The file is rw in the
+# container (the :ro sidecar was reverted in 0.11.3 — it broke /plugin install);
+# sandy-managed keys are re-overwritten on every launch regardless.
 
 sandy_log "Configuring git"
 # Trust all directories (host UID differs from container UID; container is sandboxed)
@@ -581,7 +582,11 @@ _seed_channel() {
     chmod 600 "$HOME/.claude/channels/$chan/.env"
     [ -f "$HOME/.claude/channels/$chan/access.json" ] && return
     if [ -n "$senders" ]; then
-        ALLOW_JSON=$(echo "$senders" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NR>1{printf ","}{printf "\"%s\"",$0}')
+        # gsub escapes \ and " in each sender before quoting — TELEGRAM_/
+        # DISCORD_ALLOWED_SENDERS are passive-tier (no approval prompt), so a
+        # committed workspace value containing " could otherwise inject entries
+        # into the bot's DM allowlist (who may drive the agent).
+        ALLOW_JSON=$(echo "$senders" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NR>1{printf ","}{gsub(/\\/,"\\\\");gsub(/"/,"\\\"");printf "\"%s\"",$0}')
         cat > "$HOME/.claude/channels/$chan/access.json" <<CHACCESS
 {
   "dmPolicy": "allowlist",

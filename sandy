@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="0.15.3-dev"
+SANDY_VERSION="1.0.0-rc1"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -273,6 +273,28 @@ _ver_lt() {
     return 1
 }
 
+# Should `cur` be nagged to update to `latest`? True when `latest` has higher
+# release precedence: a greater numeric core (via _ver_lt), OR an equal core
+# where `cur` is a pre-release (-rcN/-dev) and `latest` is either the final
+# (no suffix) or a higher pre-release. Mirrors semver: 1.0.0-rc1 < 1.0.0 and
+# 1.0.0-rc1 < 1.0.0-rc2. Without this, an rc/-dev build is never told about
+# its own final release (equal cores → _ver_lt is false), so rc soaks never
+# converge on the final.
+_ver_should_update() {
+    local cur="$1" latest="$2"
+    if _ver_lt "$cur" "$latest"; then return 0; fi
+    if _ver_lt "$latest" "$cur"; then return 1; fi
+    # Equal numeric cores — compare pre-release suffixes.
+    local cs ls
+    cs="${cur#*-}";    [ "$cs" = "$cur" ]    && cs=""   # suffix after first '-' ('' if none)
+    ls="${latest#*-}"; [ "$ls" = "$latest" ] && ls=""
+    if [ -z "$cs" ]; then return 1; fi          # cur is final; equal-core latest is never newer
+    if [ -z "$ls" ]; then return 0; fi          # cur pre-release, latest final → nag
+    # Both pre-release, same core: nag only if latest's suffix sorts after cur's
+    # (lexical — fine for rc1..rc9; rcN≥10 is not a realistic sandy cadence).
+    [ "$ls" != "$cs" ] && [[ "$ls" > "$cs" ]]
+}
+
 # Sandboxes created before this version pre-date the workspace mount path
 # change (c99eb97, v0.7.10) from /workspace → /home/claude/<rel>. Any cached
 # absolute paths inside the sandbox (venv pyvenv.cfg, .pth files, editable
@@ -342,7 +364,7 @@ sandy_check_update() {
         local cached_time cached_ver
         read -r cached_time cached_ver < "$cache" 2>/dev/null || true
         if [ -n "$cached_time" ] && (( now - cached_time < 86400 )); then
-            if [ -n "$cached_ver" ] && [ "$cached_ver" != "v$SANDY_VERSION" ]; then
+            if [ -n "$cached_ver" ] && _ver_should_update "$SANDY_VERSION" "${cached_ver#v}"; then
                 warn "Update available: $SANDY_VERSION → ${cached_ver#v}. Run 'sandy --upgrade' to update."
             fi
             return
@@ -353,7 +375,12 @@ sandy_check_update() {
         | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)" || true
     if [ -n "$latest" ]; then
         echo "$now $latest" > "$cache"
-        if [ "$latest" != "v$SANDY_VERSION" ]; then
+        # _ver_should_update, not string inequality: a plain != would nag
+        # NEWER-than-latest versions (an rc/-dev tree vs the latest stable
+        # release) to "update" — a downgrade prompt. _ver_should_update is
+        # precedence-aware: it stays silent on a downgrade but DOES nag an rc
+        # about its own final (equal cores, cur pre-release, latest final).
+        if _ver_should_update "$SANDY_VERSION" "${latest#v}"; then
             warn "Update available: $SANDY_VERSION → ${latest#v}. Run 'sandy --upgrade' to update."
         fi
     fi
@@ -468,9 +495,9 @@ SANDY_SSH|enum:token,agent|token||0.1.0|stable|SSH auth mode: 'token' uses gh CL
 SANDY_SKIP_PERMISSIONS|bool|true||0.1.0|stable|Skip Claude Code's in-session permission prompts (default: true).
 SANDY_ALLOW_NO_ISOLATION|bool|0||0.1.0|stable|Allow launch when iptables rules cannot be applied (Linux only).
 SANDY_ALLOW_LAN_HOSTS|string|||0.7.9|stable|Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
-SANDY_LOCAL_LLM_HOST|string||^[^[:space:]]+:[0-9]+$|0.12.0|stable|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. Inserts one iptables ACCEPT and (Linux) maps host.docker.internal.
+SANDY_LOCAL_LLM_HOST|string||^[^[:space:]]+:[0-9]+$|0.12.0|stable|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. With the egress proxy on (default) the proxy's forward listener relays host.docker.internal:<port> to the host; with the proxy off (=0, Linux) it inserts one iptables ACCEPT and maps host.docker.internal.
 SANDY_ALLOW_HOSTS|string|||0.14.0|stable|Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval.
-SANDY_EXTRA_ENV|string|||0.12.0|stable|Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values come from the host env, ~/.sandy/.secrets, or ~/.sandy/config — workspace sources never supply values. Privileged tier so workspace config requires approval.
+SANDY_EXTRA_ENV|string|||0.12.0|stable|Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values resolve env > workspace .sandy/.secrets > workspace .sandy/config > ~/.sandy/.secrets > ~/.sandy/config. The privileged tier gates the NAME list (workspace config setting SANDY_EXTRA_ENV itself requires approval); once approved, values may come from any source.
 ANTHROPIC_API_KEY|secret|||0.1.0|stable|Anthropic API key for Claude Code. Not required when using Claude Max OAuth.
 CLAUDE_CODE_OAUTH_TOKEN|secret|||0.7.0|stable|Claude Code OAuth token (alternative to ANTHROPIC_API_KEY).
 GEMINI_API_KEY|secret|||0.9.0|stable|Google API key for Gemini CLI.
@@ -632,9 +659,13 @@ _emit_key_object() {
 # Emit the static schema JSON.
 _sandy_emit_schema() {
     local commit
+    # sandy_full_version() is "<SANDY_VERSION>-<shorthash>" when a hash is known,
+    # else just "<SANDY_VERSION>". Strip the version PREFIX to isolate the hash —
+    # NOT `##*-`, which for a suffixed version with no hash (e.g. "1.0.0-rc1")
+    # would yield the version's own suffix ("rc1") and report it as a commit.
     commit="$(sandy_full_version)"
-    commit="${commit##*-}"
-    [ "$commit" = "$SANDY_VERSION" ] && commit=""
+    commit="${commit#"$SANDY_VERSION"}"   # "" when no hash, "-<hash>" otherwise
+    commit="${commit#-}"                  # drop the leading separator
 
     printf '{'
     _json_kv schema_version "$SANDY_SCHEMA_VERSION"
@@ -1200,6 +1231,12 @@ SANDY_REBUILD=false
 SANDY_BUILD_ONLY=false
 SANDY_NEW_SESSION=false
 SANDY_REMOTE_CONTROL=false
+# Capture whether SANDY_VERBOSE came from the real env BEFORE defaulting it: the
+# env snapshot below can't otherwise distinguish a defaulted 0 from an env-set 0,
+# so it would mark SANDY_VERBOSE "env-set" and skip a value set in a config file
+# (it's a documented passive key). CLI -v/-vv/-vvv also set this flag, so env and
+# CLI both correctly win over config; neither → the config value is honored.
+_SANDY_VERBOSE_EXPLICIT=0; [ -n "${SANDY_VERBOSE+x}" ] && _SANDY_VERBOSE_EXPLICIT=1
 SANDY_VERBOSE="${SANDY_VERBOSE:-0}"
 # --agent's value is stashed here rather than assigned directly to SANDY_AGENT,
 # because SANDY_AGENT is also set by _load_sandy_config() further down and we
@@ -1223,9 +1260,9 @@ while [ $# -gt 0 ]; do
             SANDY_AGENT_OVERRIDE="$1"
             ;;
         --agent=*)    SANDY_AGENT_OVERRIDE="${1#--agent=}" ;;
-        -vvv)         SANDY_VERBOSE=3 ;;
-        -vv)          SANDY_VERBOSE=2 ;;
-        -v)           SANDY_VERBOSE=1 ;;
+        -vvv)         SANDY_VERBOSE=3; _SANDY_VERBOSE_EXPLICIT=1 ;;
+        -vv)          SANDY_VERBOSE=2; _SANDY_VERBOSE_EXPLICIT=1 ;;
+        -v)           SANDY_VERBOSE=1; _SANDY_VERBOSE_EXPLICIT=1 ;;
         *)            REMAINING_ARGS+=("$1") ;;
     esac
     shift
@@ -1539,12 +1576,11 @@ _sandy_proxy_ref() {
         return
     fi
     case "$SANDY_VERSION" in
-        *-dev|*-rc*)
-            # Pre-release: build the proxy from source. From a git checkout, use
+        *-dev)
+            # Dev tree: build the proxy from source. From a git checkout, use
             # the current branch (it carries proxy/ — so `./sandy` works on a
             # feature branch before it merges); otherwise fall back to main
-            # (installed copies, detached HEAD). Once M2.7 is on main, main has
-            # proxy/ and the fallback is correct for everyone.
+            # (installed copies, detached HEAD).
             local _d _b
             _d="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _d="."
             _b="$(git -C "$_d" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
@@ -1552,6 +1588,22 @@ _sandy_proxy_ref() {
                 printf '%s' "$_b"
             else
                 printf 'main'
+            fi
+            ;;
+        *-rc*)
+            # Published release candidate: a vX.Y.Z-rcN tag exists, so pin to
+            # it exactly like a stable release — installed rc users must get
+            # the tagged proxy, and the ref string changing rc1→rc2 is what
+            # makes Dockerfile.proxy's hash move so proxy fixes in later rcs
+            # actually rebuild. From a pre-tag git checkout (cutting the rc
+            # itself), prefer the branch so the tag needn't exist yet.
+            local _d _b
+            _d="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _d="."
+            _b="$(git -C "$_d" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+            if [ -n "$_b" ] && [ "$_b" != "HEAD" ]; then
+                printf '%s' "$_b"
+            else
+                printf 'v%s' "$SANDY_VERSION"
             fi
             ;;
         *)           printf 'v%s' "$SANDY_VERSION" ;;
@@ -2084,9 +2136,10 @@ if _sandy_has_claude; then
     mkdir -p "$_cur_proj"
 fi
 
-# Plugin marketplace configuration is merged into the seed sidecar at host-side
-# (see S2.1 block in the main sandy script). Any in-container write to
-# ~/.claude/settings.json would fail with EROFS under the :ro overlay.
+# Plugin marketplace configuration is merged into settings.json host-side at
+# seed time (see S2.1 block in the main sandy script). The file is rw in the
+# container (the :ro sidecar was reverted in 0.11.3 — it broke /plugin install);
+# sandy-managed keys are re-overwritten on every launch regardless.
 
 sandy_log "Configuring git"
 # Trust all directories (host UID differs from container UID; container is sandboxed)
@@ -2291,7 +2344,11 @@ _seed_channel() {
     chmod 600 "$HOME/.claude/channels/$chan/.env"
     [ -f "$HOME/.claude/channels/$chan/access.json" ] && return
     if [ -n "$senders" ]; then
-        ALLOW_JSON=$(echo "$senders" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NR>1{printf ","}{printf "\"%s\"",$0}')
+        # gsub escapes \ and " in each sender before quoting — TELEGRAM_/
+        # DISCORD_ALLOWED_SENDERS are passive-tier (no approval prompt), so a
+        # committed workspace value containing " could otherwise inject entries
+        # into the bot's DM allowlist (who may drive the agent).
+        ALLOW_JSON=$(echo "$senders" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NR>1{printf ","}{gsub(/\\/,"\\\\");gsub(/"/,"\\\"");printf "\"%s\"",$0}')
         cat > "$HOME/.claude/channels/$chan/access.json" <<CHACCESS
 {
   "dmPolicy": "allowlist",
@@ -2917,6 +2974,13 @@ _SANDY_ENV_SET_KEYS=()
 _sandy_snapshot_env_keys() {
     local _k
     for _k in "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; do
+        if [ "$_k" = SANDY_VERBOSE ]; then
+            # SANDY_VERBOSE was defaulted to 0 before this runs, so `${!_k:-}`
+            # is always non-empty — consult the explicit-source flag (env or
+            # CLI) instead, so a config-file value is honored when neither set it.
+            [ "${_SANDY_VERBOSE_EXPLICIT:-0}" = 1 ] && _SANDY_ENV_SET_KEYS+=("$_k")
+            continue
+        fi
         if [ -n "${!_k:-}" ]; then
             _SANDY_ENV_SET_KEYS+=("$_k")
         fi
@@ -2935,6 +2999,11 @@ _load_sandy_config() {
         if _key_in_list "$key" "${_SANDY_ENV_SET_KEYS[@]+"${_SANDY_ENV_SET_KEYS[@]}"}"; then
             continue
         fi
+        # Strip a trailing CR so a Windows/CRLF-edited config isn't silently
+        # mis-parsed (e.g. SANDY_EGRESS_PROXY=1<CR> failing the case match, or a
+        # privileged value carrying a hidden CR through approval into every
+        # downstream string compare).
+        value="${value%$'\r'}"
         value="${value#\"}" ; value="${value%\"}"
         value="${value#\'}" ; value="${value%\'}"
         case "$tier" in
@@ -3024,12 +3093,14 @@ _load_sandy_extra_env() {
                 "$WORK_DIR/.sandy/.secrets"; do
             [ -f "$_file" ] || continue
             while IFS='=' read -r _key _value; do
+                _key="${_key%$'\r'}"
                 if [ "$_key" = "$_name" ]; then
+                    _value="${_value%$'\r'}"
                     _value="${_value#\"}" ; _value="${_value%\"}"
                     _value="${_value#\'}" ; _value="${_value%\'}"
                     export "$_name=$_value"
                 fi
-            done < <(grep -E '^[A-Z_]+=.+' "$_file" 2>/dev/null)
+            done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=.+' "$_file" 2>/dev/null)
         done
     done
 }
@@ -3171,8 +3242,13 @@ fi
 _SANDY_LLM_HOST=""
 _SANDY_LLM_PORT=""
 if [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
-    if [[ ! "$SANDY_LOCAL_LLM_HOST" =~ ^[^[:space:]]+:[0-9]+$ ]]; then
-        echo "[sandy] ERROR: SANDY_LOCAL_LLM_HOST='$SANDY_LOCAL_LLM_HOST' is not in host:port format" >&2
+    # Charset is deliberately narrow (hostname / IPv4 + port): it must reject
+    # JSON metacharacters (" , :) because the raw value is interpolated
+    # unescaped into the proxy config JSON's "local_llm" field below. A looser
+    # pattern (e.g. [^space]+) let a crafted value inject sibling JSON keys
+    # such as an attacker-controlled forward target.
+    if [[ ! "$SANDY_LOCAL_LLM_HOST" =~ ^[A-Za-z0-9._-]+:[0-9]+$ ]]; then
+        echo "[sandy] ERROR: SANDY_LOCAL_LLM_HOST='$SANDY_LOCAL_LLM_HOST' is not in host:port format (allowed: letters, digits, . _ - then :port)" >&2
         exit 1
     fi
     _SANDY_LLM_HOST="${SANDY_LOCAL_LLM_HOST%:*}"
@@ -3522,7 +3598,7 @@ _check_claude_update() {
     local inst latest
     inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/claude-code/.version 2>/dev/null || true)"
     latest="$(curl -fsSL --max-time 5 https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null || true)"
-    if [ -n "$latest" ] && [ -n "$inst" ] && [ "$latest" != "$inst" ]; then
+    if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Claude Code update available: $inst → $latest"
         return 0
     fi
@@ -3534,7 +3610,7 @@ _check_gemini_update() {
     latest="$(curl -fsSL --max-time 5 'https://registry.npmjs.org/@google/gemini-cli/latest' 2>/dev/null \
         | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
         | sed -E 's/.*"([^"]+)"$/\1/' || true)"
-    if [ -n "$latest" ] && [ -n "$inst" ] && [ "$latest" != "$inst" ]; then
+    if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Gemini CLI update available: $inst → $latest"
         return 0
     fi
@@ -3549,7 +3625,7 @@ _check_codex_update() {
     latest="$(curl -fsSL --max-time 5 'https://api.github.com/repos/openai/codex/releases/latest' 2>/dev/null \
         | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
         | sed -E 's/.*"rust-v?([0-9][^"]*)"$/\1/' || true)"
-    if [ -n "$latest" ] && [ -n "$inst" ] && [ "$latest" != "$inst" ]; then
+    if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Codex CLI update available: $inst → $latest"
         return 0
     fi
@@ -3561,7 +3637,7 @@ _check_opencode_update() {
     latest="$(curl -fsSL --max-time 5 'https://registry.npmjs.org/opencode-ai/latest' 2>/dev/null \
         | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
         | sed -E 's/.*"([^"]+)"$/\1/' || true)"
-    if [ -n "$latest" ] && [ -n "$inst" ] && [ "$latest" != "$inst" ]; then
+    if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "OpenCode update available: $inst → $latest"
         return 0
     fi
@@ -3998,6 +4074,15 @@ if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
     fi
 fi
 echo "$$" > "$SANDY_WORKSPACE_LOCK/pid"
+
+# Minimal lock-release until the full cleanup trap is armed further down. Without
+# this, a *designed* early exit in the gap — notably the sandbox-compat hard
+# refusal below — would exit still holding the lock, leaving a stale lock dir the
+# next launch has to reap (and mis-reporting the refusal as a "crash"). The full
+# `trap cleanup EXIT …` later supersedes this and releases the lock itself, so
+# there's no double-free. (Covers normal/`exit` paths in the gap; a bare signal
+# there is the larger trap-restructure tracked for post-rc1.)
+trap 'rm -rf "$SANDY_WORKSPACE_LOCK" 2>/dev/null || true' EXIT
 
 SANDBOX_IS_NEW=false
 if [ ! -d "$SANDBOX_DIR" ]; then
@@ -4878,17 +4963,21 @@ cleanup() {
     # Remove per-instance Docker network (sidecar in proxy mode, else the
     # single isolated net — NETWORK_NAME points at whichever applies).
     docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+    # `|| true` on each: these are the only unguarded commands in cleanup(), and
+    # set -e is still active inside the trap — a single rm failure (EPERM, fs
+    # hiccup) would abort the rest of teardown, leaking the SSH-agent relay
+    # (a live localhost→host-agent bridge) and the workspace lock below.
     if [ -n "${CRED_TMPDIR:-}" ]; then
-        rm -rf "$CRED_TMPDIR"
+        rm -rf "$CRED_TMPDIR" || true
     fi
     if [ -n "${GEMINI_CRED_TMPDIR:-}" ]; then
-        rm -rf "$GEMINI_CRED_TMPDIR"
+        rm -rf "$GEMINI_CRED_TMPDIR" || true
     fi
     if [ -n "${CODEX_CRED_TMPDIR:-}" ]; then
-        rm -rf "$CODEX_CRED_TMPDIR"
+        rm -rf "$CODEX_CRED_TMPDIR" || true
     fi
     if [ -n "${OPENCODE_CRED_TMPDIR:-}" ]; then
-        rm -rf "$OPENCODE_CRED_TMPDIR"
+        rm -rf "$OPENCODE_CRED_TMPDIR" || true
     fi
     if [ -n "${SSH_RELAY_PID:-}" ]; then
         kill "$SSH_RELAY_PID" 2>/dev/null || true
@@ -6112,7 +6201,21 @@ echo ""
 
 if [ "$SANDY_VERBOSE" -ge 3 ]; then
     info "Docker run flags:"
-    printf '  %s\n' "${RUN_FLAGS[@]}"
+    # Redact secret VALUES — a -vvv trace is exactly what users paste into bug
+    # reports/CI logs. RUN_FLAGS holds `-e` and `NAME=value` as separate
+    # elements; redact the value of any element whose NAME matches a
+    # credential-shaped suffix (covers ANTHROPIC_API_KEY, *_TOKEN, GH_ACCOUNTS,
+    # etc.). Empty values (e.g. the emptied CLAUDE_CODE_OAUTH_TOKEN=) print
+    # as-is. Residual gap: a SANDY_EXTRA_ENV var with a non-credential-shaped
+    # name isn't caught — names are user-chosen and unknowable here.
+    for _rf in "${RUN_FLAGS[@]}"; do
+        case "$_rf" in
+            *_TOKEN=?*|*_KEY=?*|*_SECRET=?*|*_PASSWORD=?*|GH_ACCOUNTS=?*)
+                printf '  %s=<redacted>\n' "${_rf%%=*}" ;;
+            *)  printf '  %s\n' "$_rf" ;;
+        esac
+    done
+    unset _rf
     echo ""
 fi
 

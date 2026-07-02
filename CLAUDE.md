@@ -198,7 +198,7 @@ From 1.0, sandy makes a **forward-compatibility promise**: *a sandbox created by
 
 The floor is enforced only when the created-version is *known and provably below it* — unknown/unreadable markers warn but launch (fail-open on uncertainty, fail-closed on proof). A non-destructive **sandbox migration utility** (rewrite cached paths in place instead of `rm -rf` + recreate) is tracked in `docs/POST_1.0_IDEAS.md`; until it exists, the remediation is recreation.
 
-Tests: `run-tests.sh §51` unit-tests `_sandbox_compat_classify` (below-floor/ok/unknown/invalid); `run-integration-tests.sh §14` exercises the real launch path (downgrade a sandbox's marker → assert refuse; restore → assert proceed). At the 1.0-rc1 cut (roadmap PR 5.2), a frozen sandbox snapshot fixture is added so every later release proves it still resumes that snapshot.
+Tests: `run-tests.sh §51` unit-tests `_sandbox_compat_classify` (below-floor/ok/unknown/invalid); `run-integration-tests.sh §14` exercises the real launch path (downgrade a sandbox's marker → assert refuse; restore → assert proceed). The frozen sandbox snapshot fixture (`test/fixtures/frozen-sandbox-1.0/`, created at the 1.0.0-rc1 cut and deliberately never updated) plus `run-tests.sh §60` prove on every later release that a 1.0-era sandbox still classifies `ok` against the *live* floor and that the floor itself hasn't moved above `1.0.0`. If §60 fails, the change is `2.0.0` territory — read the fixture README before "fixing" the test.
 
 ### Workspace `.venv` overlay
 
@@ -230,12 +230,15 @@ Sandy solves this by bind-mounting a sandbox-owned overlay over `$WORKSPACE/.ven
 
 `SANDY_VERSION` in the `sandy` script follows this convention:
 
-- **Release**: `X.Y.Z` (e.g. `0.7.10`). Set this when tagging a release.
-- **Post-release**: `X.Y.(Z+1)-dev` (e.g. `0.7.11-dev`). Bump to this immediately after cutting a release.
+- **Release**: `X.Y.Z` (e.g. `1.0.0`). Set this when tagging a release.
+- **Release candidate**: `X.Y.Z-rcN` (e.g. `1.0.0-rc1`). Tagged and GitHub-released as a **pre-release**. During an rc window: no feature additions; fixes fast-track to `-rc(N+1)`; an rc that soaks clean for a week tags as the final `X.Y.Z`.
+- **Post-release**: `X.Y.(Z+1)-dev` (e.g. `1.0.1-dev`). Bump to this immediately after cutting a final release. After cutting an **rc**, bump to `X.Y.Z-rc(N+1)-dev` instead (e.g. `1.0.0-rc2-dev`) — the final version number stays reserved until an rc graduates.
 
-`SANDY_COMMIT` is a separate variable that holds the git short hash. It's empty in the source file — at runtime, `sandy_full_version()` detects it from git if running from a repo checkout, and `install.sh` bakes it in for local installs. The full version string displayed is e.g. `0.7.11-dev-a1b2c3d`.
+`SANDY_COMMIT` is a separate variable that holds the git short hash. It's empty in the source file — at runtime, `sandy_full_version()` detects it from git if running from a repo checkout, and `install.sh` bakes it in for local installs. The full version string displayed is e.g. `1.0.1-dev-a1b2c3d`.
 
-The update check logic compares only `SANDY_VERSION` (not the hash) against GitHub release tags.
+The update check logic compares only `SANDY_VERSION` (not the hash) against GitHub release tags, via `_ver_lt()`, which **strips everything after the first `-`** (so `-dev` and `-rcN` builds compare as their base `X.Y.Z`). Two consequences: the update check uses `releases/latest`, which skips pre-releases, so stable users are never nagged toward an rc; and rc users are *not* nagged when the same-numbered final ships (`1.0.0-rc1` ≡ `1.0.0` after the strip) — rc users upgrade with an explicit `sandy --upgrade`.
+
+**1.x semver discipline**: within `1.x`, `X.Y.(Z+1)` = fixes only, `X.(Y+1).0` = additive (new keys/flags allowed, no retiering or renames), `2.0.0` = anything that breaks the sandbox forward-compat promise, the introspection `schema_version: 1` contract, or config-key tier semantics. See "Sandbox compatibility (1.x forward-compat promise)" above for the compat-floor rule (`SANDY_SANDBOX_MIN_COMPAT` never moves above `1.0.0` within `1.x`; guarded by `run-tests.sh §60`).
 
 ## Skill Packs
 

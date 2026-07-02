@@ -1460,15 +1460,26 @@ if [ "$HAS_CLAUDE" = true ] || docker image inspect sandy-claude-code &>/dev/nul
         echo "    (tail: $(echo "$_OF_OUT" | tail -5 | tr '\n' ' '))" >&2
     fi
 
-    # (b) the actual forwarded env (RUN_FLAGS, printed under -vvv): token present,
-    # API key ABSENT. This is the definitive "the container won't get the key" check.
+    # (b) the actual forwarded env (RUN_FLAGS, printed under -vvv): the OAuth
+    # token flag is present, the ANTHROPIC_API_KEY flag is ABSENT ENTIRELY
+    # (suppression drops the -e flag, so no ANTHROPIC_API_KEY= line at all).
+    # Secret VALUES are redacted in the -vvv dump (they must never land in a
+    # pasted trace), so assert on the key name, not the fake value — which is
+    # also the definitive "the container won't get the key" check.
     _OF_FLAGS="$(echo "$_OF_OUT" | sed -n '/Docker run flags:/,/^$/p')"
-    if echo "$_OF_FLAGS" | grep -q "CLAUDE_CODE_OAUTH_TOKEN=fake-oauth-token-do-not-use" \
-       && ! echo "$_OF_FLAGS" | grep -q "ANTHROPIC_API_KEY=sk-fake-test-key-do-not-use"; then
+    if echo "$_OF_FLAGS" | grep -q "CLAUDE_CODE_OAUTH_TOKEN=<redacted>" \
+       && ! echo "$_OF_FLAGS" | grep -q "ANTHROPIC_API_KEY="; then
         pass "RUN_FLAGS forward the OAuth token but NOT ANTHROPIC_API_KEY"
     else
         fail "RUN_FLAGS forward the OAuth token but NOT ANTHROPIC_API_KEY"
         echo "    (flags seen: $(echo "$_OF_FLAGS" | tr '\n' ' ' | head -c 300))" >&2
+    fi
+    # And the raw fake secret values must NOT appear anywhere in the -vvv output.
+    if echo "$_OF_OUT" | grep -q "fake-oauth-token-do-not-use\|sk-fake-test-key-do-not-use"; then
+        fail "secret values redacted from -vvv trace"
+        echo "    (a raw fake credential leaked into -vvv output)" >&2
+    else
+        pass "secret values redacted from -vvv trace"
     fi
 
     resolve_sandbox
