@@ -18,3 +18,5 @@ POLISH_AND_PUBLICITY.md
 
 # Audit output (from test/audit/audit-stress-test.sh)
 sandy-audit-*.log
+
+__pycache__
