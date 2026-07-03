@@ -44,7 +44,7 @@ credential/platform). Detail lives in each section below.
 **Multi-agent & OpenCode**
 - [x] 4.1 Dual-pane (claude + gemini)
 - [x] 4.2 Arbitrary combos / triple / 4-agent grid
-- [x] 4b.1 OpenCode — provider via env var
+- [x] 4b.1 OpenCode — provider selection (verified via Path A: key + `OPENCODE_MODEL`)
 - [s] 4b.2 OpenCode — local-LLM passthrough — skipped (no Linux+Ollama host; validation is unit-tested, live forward path unexercised for rc1)
 
 **Channels & network**
@@ -359,20 +359,54 @@ sandy
 
 # 4b. OpenCode interactive (`SANDY_AGENT=opencode`)
 
-## 4b.1 Provider via env var
+## 4b.1 Provider selection
+
+> **A provider key alone is NOT enough.** OpenCode's built-in default model is a
+> Google/Gemini one, so with only e.g. `ANTHROPIC_API_KEY` set it ignores your
+> key, falls back to that default, and fails on the first prompt asking for
+> `GOOGLE_GENERATIVE_AI_API_KEY` (a *different* var from `GEMINI_API_KEY`). You
+> must also tell OpenCode which model to use. Sandy warns about this at launch
+> (the "state 3" warning). Tracked: issue #24. Two working paths below.
+
+### Path A — env key + explicit model (`OPENCODE_MODEL`)
 
 ```sh
 mkdir -p ~/sandy-test-opencode && cd ~/sandy-test-opencode
 git init -q
-mkdir -p .sandy && echo 'SANDY_AGENT=opencode' > .sandy/config
-# Use whichever provider key you have:
-#   ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY
+mkdir -p .sandy
+cat > .sandy/config <<'EOF'
+SANDY_AGENT=opencode
+OPENCODE_MODEL=anthropic/claude-sonnet-4-5   # match the key you set below
+EOF
+# put the matching provider key in .sandy/.secrets (or your shell env):
+#   ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY
 sandy
 ```
 
-- [x] OpenCode TUI launches without an auth prompt
-- [x] A simple "say hi" prompt returns a response
-- [x] `~/.config/opencode/opencode.json` exists in the sandbox
+- [ ] OpenCode TUI launches without an auth prompt
+- [ ] A simple "say hi" prompt returns a response (using the model you named)
+- [ ] **Not** expected here: `opencode.json` is *not* created by this path — the
+      model came from the `--model` flag, not a config file (see Path B for that)
+
+### Path B — host config (`opencode.json`, sandy "state 1")
+
+```sh
+# on the HOST, write a real opencode config selecting a provider/model:
+mkdir -p ~/.config/opencode
+cat > ~/.config/opencode/opencode.json <<'EOF'
+{ "$schema": "https://opencode.ai/config.json", "model": "anthropic/claude-sonnet-4-5" }
+EOF
+cd ~/sandy-test-opencode && sandy
+```
+
+- [ ] Launch shows `[sandy]   Seeded .config/opencode/opencode.json`
+- [ ] `~/.config/opencode/opencode.json` exists in the sandbox
+      (`~/.sandy/sandboxes/sandy-test-opencode-*/opencode/config/opencode.json`)
+- [ ] A simple "say hi" prompt returns a response
+
+> Use `opencode models` inside a session (or the OpenCode docs) for exact current
+> model IDs. `SANDY_LOCAL_LLM_HOST` (§4b.2) is a third path ("state 2" — sandy
+> auto-generates the config).
 
 ## 4b.2 Local LLM passthrough (Linux + Ollama)
 
