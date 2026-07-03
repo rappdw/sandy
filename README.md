@@ -6,6 +6,8 @@
 
 When you're giving AI agents real autonomy to write code, run tests, and modify systems, the environment needs OS-enforced boundaries, not permission prompts. Sandy is the tool we built to make that work.
 
+Sandy is **two things at once**: a **security sandbox** that keeps a rogue or prompt-injected agent off your machine, and a **per-project virtual environment** that keeps each project's agent state — plugins, memory, credentials, installed packages — from bleeding into the others. It's the same `venv` mental model you already use for Python, applied to your whole coding-agent setup — and the second half is useful even if you completely trust the agent.
+
 Install it, run it. That's it.
 
 ```bash
@@ -14,24 +16,24 @@ cd /path/to/your/project
 sandy
 ```
 
-Sandy runs Claude Code, Gemini CLI, OpenAI Codex CLI, OpenCode (provider-agnostic), or any combination of them side-by-side in a Docker container with agent permission checks disabled — so the agent works without interruption while your system stays protected:
+Sandy runs Claude Code, Gemini CLI, OpenAI Codex CLI, OpenCode (provider-agnostic), or any combination of them side-by-side in a Docker container with agent permission checks disabled — so the agent works without interruption while your system stays protected and each project stays cleanly isolated:
 
+- **Per-project sandboxes**: Isolated `~/.claude` (and `~/.gemini` / `~/.codex` / OpenCode), credentials, memory, and package storage per project — no bleed between projects (the "venv" model, [detailed below](#virtual-environments-for-your-coding-agents))
 - **Filesystem**: Read/write limited to the mounted working directory only
 - **Network**: Public internet only — all LAN/private networks blocked
 - **Resources**: Capped CPU and memory (auto-detected from host)
 - **Security**: Non-root user, read-only root filesystem, no privilege escalation
 - **Protected files**: Shell configs, git hooks, and Claude commands mounted read-only
-- **Per-project sandboxes**: Isolated `~/.claude`, credentials, and package storage per project
 - **Dev environments**: Python, Node.js, Go, Rust, and C/C++ with persistent package installs
 - **Terminal notifications**: OSC passthrough enabled — works with [cmux](https://www.cmux.dev/), iTerm2, and other notification-aware terminals
 
 No `ANTHROPIC_API_KEY` required if using a Claude paid account (Pro/Max) — credentials are seeded from the host on first run.
 
-## Why Sandy — Virtual Environments for Claude Code
+## Virtual Environments for Your Coding Agents
 
-Claude Code stores plugins, memory, hooks, credentials, and session history in a single global `~/.claude/` directory — shared across every project on your machine. This means a plugin installed for one project is active in all of them. Credentials are shared. Memory bleeds between contexts.
+Coding agents like Claude Code store plugins, memory, hooks, credentials, and session history in a single global directory (`~/.claude/`, and the equivalent for Gemini / Codex / OpenCode) — shared across every project on your machine. This means a plugin installed for one project is active in all of them. Credentials are shared. Memory bleeds between contexts.
 
-Sandy fixes this with **per-project sandboxes** — the same idea as Python virtual environments, but for your entire Claude Code environment:
+Sandy fixes this with **per-project sandboxes** — the same idea as Python virtual environments, but for your entire coding-agent environment:
 
 ```
 ~/.sandy/sandboxes/
