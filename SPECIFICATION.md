@@ -850,6 +850,8 @@ Sandy's `load_gemini_credentials()` tries the following sources, controlled by `
 
 In `auto` mode, all three are probed; a warning is emitted if none are found. OAuth tokens are copied to a tmpdir each launch and discarded on exit (same pattern as Claude credentials). Gemini's OAuth refresh is handled inside the CLI itself, so sandy does not run a refresh check.
 
+> **`oauth` free-tier is deprecated upstream (issue #21).** Google retired the free-tier `gemini-cli` OAuth login ("Gemini Code Assist for individuals") in mid-2026; a session using it fails at Google's tier check with `IneligibleTierError` regardless of sandy (sandy loads/forwards the creds correctly — the CLI's own `:ro`-mount refresh-write also EROFS-errors, but the tier error is fatal first). The `oauth` path remains wired for any still-valid refreshing tier, but `api_key` / `adc` (Vertex) are the recommended paths. See also the deferred rw-ephemeral-copy idea in `docs/POST_1.0_IDEAS.md`.
+
 Vertex AI routing is enabled by setting `GOOGLE_GENAI_USE_VERTEXAI=true` with `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`; all three are forwarded into the container when set.
 
 **Note**: `gemini auth` (browser OAuth) must be run **on the host** — the container is headless and cannot open a browser.

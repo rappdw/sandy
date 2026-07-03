@@ -213,10 +213,18 @@ Sandy supports four Gemini auth paths, probed automatically unless `SANDY_GEMINI
 
 | Path | How to set up | When to use |
 |---|---|---|
-| API key | `GEMINI_API_KEY=...` in `.sandy/.secrets` | Simplest; works on headless servers |
-| OAuth | Run `gemini auth` **on the host** once — sandy copies `~/.gemini/oauth_creds.json` (Gemini CLI ≥0.30; falls back to legacy `tokens.json`) into the container ephemerally on each launch | Free-tier Gemini with browser login |
+| **API key** (recommended) | `GEMINI_API_KEY=...` in `.sandy/.secrets` | Simplest; works on headless servers |
 | ADC | `gcloud auth application-default login` on the host | Google Cloud / Vertex AI workflows |
 | Vertex AI | ADC + `GOOGLE_GENAI_USE_VERTEXAI=true`, `GOOGLE_CLOUD_PROJECT=...`, `GOOGLE_CLOUD_LOCATION=...` | Enterprise / Vertex billing |
+| OAuth (browser login) | Run `gemini auth` **on the host** once — sandy copies `~/.gemini/oauth_creds.json` (Gemini CLI ≥0.30; falls back to legacy `tokens.json`) into the container ephemerally on each launch | ⚠️ **See note below — free-tier OAuth is deprecated upstream** |
+
+> ⚠️ **Gemini free-tier OAuth is deprecated by Google.** As of mid-2026, Google
+> retired the free-tier `gemini-cli` OAuth login ("Gemini Code Assist for
+> individuals") — a session using it fails with `IneligibleTierError` (redirect
+> to the Antigravity product suite). This is **upstream**, not a sandy issue:
+> sandy loads and forwards the credentials correctly; Google rejects them at the
+> tier check, and the same happens running `gemini-cli` directly. **Use the API
+> key or Vertex/ADC path instead.** (Tracked: issue #21.)
 
 `gemini auth` must be run on the host because the container is headless and cannot open a browser. `--remote` is not supported in any multi-agent combo — only `SANDY_AGENT=claude` (single) works with `--remote`.
 
