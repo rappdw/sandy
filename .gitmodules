@@ -19,3 +19,6 @@
 [submodule "research/hyperlight"]
 	path = research/hyperlight
 	url = git@github.com:hyperlight-dev/hyperlight.git
+[submodule "research/bulkhead"]
+	path = research/bulkhead
+	url = https://github.com/pmembrey/bulkhead
