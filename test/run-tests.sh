@@ -4516,21 +4516,23 @@ check "classifier frees an ordinary passive key"           test "$(_pvp SANDY_MO
 
 # (b) End-to-end through the real loader via --validate-config on a workspace file.
 _EG_WS="$(mktemp -d)"; mkdir -p "$_EG_WS/.sandy"
-_eg_gated() { # $1=config line → 0 if that key is reported approval-required
+# Echo "gated"/"free" so `check … test "$(…)" = …` works with the function in
+# THIS shell (a bash -c subshell wouldn't see it — the trap that bit §61).
+_eg_status() { # $1=config line → "gated" if that key is reported approval-required
     printf '%s\n' "$1" > "$_EG_WS/.sandy/config"
-    bash "$_SBX_SCRIPT" --validate-config "$_EG_WS/.sandy/config" 2>/dev/null \
-        | grep -q '"privileged_keys_requiring_approval":\[[^]]'
+    if bash "$_SBX_SCRIPT" --validate-config "$_EG_WS/.sandy/config" 2>/dev/null \
+        | grep -q '"privileged_keys_requiring_approval":\[[^]]'; then echo gated; else echo free; fi
 }
 check "validate-config: workspace NO_ISOLATION=1 requires approval (attack closed)" \
-    bash -c '_eg_gated "SANDY_EGRESS_NO_ISOLATION=1"' 2>/dev/null || _eg_gated "SANDY_EGRESS_NO_ISOLATION=1"
+    test "$(_eg_status 'SANDY_EGRESS_NO_ISOLATION=1')" = gated
 check "validate-config: legacy workspace EGRESS_PROXY=0 requires approval" \
-    _eg_gated "SANDY_EGRESS_PROXY=0"
+    test "$(_eg_status 'SANDY_EGRESS_PROXY=0')" = gated
 check "validate-config: workspace STRICT=0 (downgrade) requires approval" \
-    _eg_gated "SANDY_EGRESS_STRICT=0"
+    test "$(_eg_status 'SANDY_EGRESS_STRICT=0')" = gated
 check "validate-config: workspace STRICT=1 (strengthen) does NOT require approval" \
-    bash -c '! _eg_gated "SANDY_EGRESS_STRICT=1"'
+    test "$(_eg_status 'SANDY_EGRESS_STRICT=1')" = free
 check "validate-config: workspace EGRESS_PROXY=2 (strict) does NOT require approval" \
-    bash -c '! _eg_gated "SANDY_EGRESS_PROXY=2"'
+    test "$(_eg_status 'SANDY_EGRESS_PROXY=2')" = free
 rm -rf "$_EG_WS"
 
 # (c) Resolution: legacy alias mapping + mutual-exclusion + validation.
@@ -4545,8 +4547,8 @@ check "resolve: legacy =0 → proxy off"               test "$(_eg_resolve 0 '' 
 check "resolve: legacy =2 → strict"                  test "$(_eg_resolve 2 '' '')" = "true:strict"
 check "resolve: NO_ISOLATION=1 → proxy off"          test "$(_eg_resolve '' 1 '')" = "false:"
 check "resolve: STRICT=1 → strict"                   test "$(_eg_resolve '' '' 1)" = "true:strict"
-check "resolve: NO_ISOLATION=1 + STRICT=1 → error (mutually exclusive)" \
-    bash -c '! _eg_resolve "" 1 1 >/dev/null 2>&1 || [ -z "$(_eg_resolve "" 1 1)" ]'
+check "resolve: NO_ISOLATION=1 + STRICT=1 → error, no posture emitted (mutually exclusive)" \
+    test "$(_eg_resolve '' 1 1)" = ""
 
 # (d) The old "no security-boundary impact" blanket claim must be gone.
 check "passive-keys comment no longer claims blanket 'No security-boundary impact'" \
