@@ -4518,10 +4518,12 @@ check "classifier frees an ordinary passive key"           test "$(_pvp SANDY_MO
 _EG_WS="$(mktemp -d)"; mkdir -p "$_EG_WS/.sandy"
 # Echo "gated"/"free" so `check … test "$(…)" = …` works with the function in
 # THIS shell (a bash -c subshell wouldn't see it — the trap that bit §61).
+# Parse the JSON with python3 (used elsewhere in this suite) rather than a grep
+# BRE, to sidestep any GNU-vs-BSD-grep bracket-expression portability quirk.
 _eg_status() { # $1=config line → "gated" if that key is reported approval-required
     printf '%s\n' "$1" > "$_EG_WS/.sandy/config"
-    if bash "$_SBX_SCRIPT" --validate-config "$_EG_WS/.sandy/config" 2>/dev/null \
-        | grep -q '"privileged_keys_requiring_approval":\[[^]]'; then echo gated; else echo free; fi
+    bash "$_SBX_SCRIPT" --validate-config "$_EG_WS/.sandy/config" 2>/dev/null \
+        | python3 -c 'import json,sys; print("gated" if json.load(sys.stdin)["privileged_keys_requiring_approval"] else "free")'
 }
 check "validate-config: workspace NO_ISOLATION=1 requires approval (attack closed)" \
     test "$(_eg_status 'SANDY_EGRESS_NO_ISOLATION=1')" = gated
