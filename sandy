@@ -47,8 +47,16 @@ SANDY_PRIVILEGED_KEYS=(
     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
 )
 
-# SANDY_PASSIVE_KEYS: allowed from every tier, including a workspace
-#   .sandy/config checked into version control. No security-boundary impact.
+# SANDY_PASSIVE_KEYS: allowed from a workspace .sandy/config (checked into
+#   version control) as well as host config and the environment. MOST have no
+#   security-boundary impact. The exceptions are VALUE-AWARE (see
+#   _sandy_passive_value_privileged below): a few keys are passive for values
+#   that STRENGTHEN — or leave unchanged — the sandbox's isolation, but a value
+#   that WEAKENS it (turning the egress proxy off, downgrading strict, dropping
+#   workflow protection) is quarantined to the per-workspace approval path just
+#   like a privileged key. This stops a committed .sandy/config from silently
+#   lowering isolation (threat-model adversary #2) while keeping "a repo may make
+#   the sandbox tighter, never looser" frictionless.
 SANDY_PASSIVE_KEYS=(
     SANDY_AGENT
     SANDY_MODEL
@@ -61,6 +69,8 @@ SANDY_PASSIVE_KEYS=(
     SANDY_VERBOSE
     SANDY_VENV_OVERLAY
     SANDY_EGRESS_PROXY
+    SANDY_EGRESS_NO_ISOLATION
+    SANDY_EGRESS_STRICT
     SANDY_ALLOW_WORKFLOW_EDIT
     SANDY_SCREENSHOT_DIR
     CLAUDE_CODE_MAX_OUTPUT_TOKENS
@@ -87,6 +97,25 @@ SANDY_ENV_ONLY_KEYS=(
     SANDY_AUTO_APPROVE_PRIVILEGED
     SANDY_DEBUG_CLEANUP
 )
+
+# Value-aware privileged classification. A handful of passive keys are safe to
+# set from a workspace .sandy/config for values that STRENGTHEN or don't change
+# isolation, but must go through the per-workspace approval gate for a value
+# that WEAKENS it — otherwise a committed config could silently lower the
+# sandbox's protection with no prompt (threat-model adversary #2), which is
+# exactly what the privileged tier exists to prevent. Returns 0 (treat as
+# privileged, i.e. approval-gated) when key=value is a weakening from a passive
+# source; 1 otherwise. Consulted ONLY for the passive (workspace) tier — host
+# config and env are trusted and set these directly.
+_sandy_passive_value_privileged() {
+    case "$1" in
+        SANDY_EGRESS_NO_ISOLATION) [ "$2" = "1" ] && return 0 ;;  # proxy OFF
+        SANDY_EGRESS_STRICT)       [ "$2" = "0" ] && return 0 ;;  # strict -> permissive downgrade
+        SANDY_EGRESS_PROXY)        [ "$2" = "0" ] && return 0 ;;  # deprecated alias: =0 == proxy off
+        SANDY_ALLOW_WORKFLOW_EDIT) [ "$2" = "1" ] && return 0 ;;  # drops .github/workflows protection
+    esac
+    return 1
+}
 
 # Return 0 if $1 equals any of the remaining positional args.
 _key_in_list() {
@@ -514,7 +543,9 @@ SANDY_CHANNELS|string|||0.7.6|stable|Comma-separated channel names (e.g. 'telegr
 SANDY_CHANNEL_TARGET_PANE|int|0||0.9.0|stable|Which tmux pane in multi-agent mode receives channel messages.
 SANDY_VERBOSE|int|0||0.8.0|stable|Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace).
 SANDY_VENV_OVERLAY|bool|1||0.10.0|stable|Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container.
-SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|Egress-proxy network isolation (closes macOS F2). 1=permissive (default; proxy sidecar blocks private/LAN/metadata but allows all internet — works identically on macOS and Linux). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 0=off (legacy iptables-only on Linux, no isolation on macOS).
+SANDY_EGRESS_NO_ISOLATION|bool|0||1.0.0|stable|Turn the egress proxy OFF — legacy path (Linux iptables-only; NO network isolation on macOS). WEAKENS isolation, so from a workspace .sandy/config it is quarantined to the per-workspace approval prompt (a committed config cannot silently disable isolation). Mutually exclusive with SANDY_EGRESS_STRICT. Default 0 (proxy on).
+SANDY_EGRESS_STRICT|bool|0||1.0.0|stable|Run the egress proxy in strict mode (allow only the built-in default allowlist + SANDY_ALLOW_HOSTS; deny all other internet). STRENGTHENS isolation, so =1 is passive-safe from any source; =0 (downgrading a host-configured strict) is approval-gated from a workspace source. Mutually exclusive with SANDY_EGRESS_NO_ISOLATION. Default 0 (permissive).
+SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|DEPRECATED — use SANDY_EGRESS_NO_ISOLATION / SANDY_EGRESS_STRICT. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 is approval-gated (weakening), matching the new keys.
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||0.11.1|stable|Remove .github/workflows from the read-only protection list.
 SANDY_SCREENSHOT_DIR|path|||0.12.0|stable|Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
 CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||0.6.0|stable|Max output tokens per Claude response.
@@ -1055,10 +1086,11 @@ _sandy_validate_config() {
         while IFS='=' read -r key value; do
             value="${value#\"}" ; value="${value%\"}"
             value="${value#\'}" ; value="${value%\'}"
-            if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}"; then
+            if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}" \
+               || { [ "$tier" = "passive" ] && _sandy_passive_value_privileged "$key" "$value"; }; then
                 privileged_keys+=("$key")
                 if [ "$tier" = "passive" ]; then
-                    warnings+=("$key|privileged key set from workspace — requires explicit approval|warning")
+                    warnings+=("$key|weakens isolation / privileged key set from workspace — requires explicit approval|warning")
                 fi
             elif _key_in_list "$key" "${SANDY_PASSIVE_KEYS[@]}"; then
                 :  # allowed in any tier
@@ -1078,9 +1110,10 @@ _sandy_validate_config() {
         local kv_set sorted set_hash wd_hash
         kv_set=""
         while IFS='=' read -r key value; do
-            if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}"; then
-                value="${value#\"}" ; value="${value%\"}"
-                value="${value#\'}" ; value="${value%\'}"
+            value="${value#\"}" ; value="${value%\"}"
+            value="${value#\'}" ; value="${value%\'}"
+            if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}" \
+               || _sandy_passive_value_privileged "$key" "$value"; then
                 kv_set+="$key=$value"$'\n'
             fi
         done < <(grep -E '^[A-Z_]+=.+' "$abs_path" 2>/dev/null)
@@ -3069,8 +3102,12 @@ _load_sandy_config() {
                 fi
                 ;;
             passive)
-                # Privileged keys from passive sources: collect for approval
-                if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}"; then
+                # Privileged keys — and passive keys whose VALUE weakens
+                # isolation (_sandy_passive_value_privileged) — from a workspace
+                # source: collect for per-workspace approval rather than honoring
+                # them silently.
+                if _sandy_passive_value_privileged "$key" "$value" \
+                   || _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}"; then
                     _PASSIVE_PRIVILEGED_PENDING+=("$key=$value")
                     _PASSIVE_PRIVILEGED_SOURCES+=("$file")
                 elif _key_in_list "$key" "${SANDY_PASSIVE_KEYS[@]}"; then
@@ -3328,17 +3365,40 @@ fi
 # is the string the proxy config consumes.
 _SANDY_PROXY_ON=false
 _SANDY_PROXY_MODE=""
-# Default-on (permissive) as of 1.0: the egress proxy is the cross-platform
-# isolation posture. Set SANDY_EGRESS_PROXY=0 to fall back to legacy behavior
-# (Linux iptables; no isolation on macOS).
-case "${SANDY_EGRESS_PROXY:-1}" in
-    0) : ;;
-    1) _SANDY_PROXY_ON=true; _SANDY_PROXY_MODE="permissive" ;;
-    2) _SANDY_PROXY_ON=true; _SANDY_PROXY_MODE="strict" ;;
-    *)
-        echo "[sandy] ERROR: SANDY_EGRESS_PROXY='$SANDY_EGRESS_PROXY' invalid (want 0, 1, or 2)" >&2
-        exit 1 ;;
-esac
+# Egress posture is set by two boolean knobs (default permissive, i.e. both 0):
+#   SANDY_EGRESS_NO_ISOLATION=1 → proxy OFF (legacy; weakening — approval-gated
+#                                 from a workspace source)
+#   SANDY_EGRESS_STRICT=1       → strict allowlist (strengthening — passive-safe)
+# The old tri-state SANDY_EGRESS_PROXY is a DEPRECATED alias, mapped here.
+if [ -n "${SANDY_EGRESS_PROXY:-}" ]; then
+    case "$SANDY_EGRESS_PROXY" in
+        0) SANDY_EGRESS_NO_ISOLATION=1 ;;
+        1) : ;;   # permissive (default)
+        2) SANDY_EGRESS_STRICT=1 ;;
+        *) echo "[sandy] ERROR: SANDY_EGRESS_PROXY='$SANDY_EGRESS_PROXY' invalid (want 0, 1, or 2)" >&2; exit 1 ;;
+    esac
+    warn "SANDY_EGRESS_PROXY is deprecated — use SANDY_EGRESS_NO_ISOLATION=1 (off) or SANDY_EGRESS_STRICT=1 (strict)."
+fi
+# Validate the boolean knobs (reject typos rather than silently fail-open).
+for _ek in SANDY_EGRESS_NO_ISOLATION SANDY_EGRESS_STRICT; do
+    case "${!_ek:-0}" in
+        0|1) ;;
+        *) echo "[sandy] ERROR: $_ek='${!_ek}' invalid (want 0 or 1)" >&2; exit 1 ;;
+    esac
+done
+unset _ek
+# Off and strict are contradictory — fail loud rather than silently pick one.
+if [ "${SANDY_EGRESS_NO_ISOLATION:-0}" = 1 ] && [ "${SANDY_EGRESS_STRICT:-0}" = 1 ]; then
+    echo "[sandy] ERROR: SANDY_EGRESS_NO_ISOLATION and SANDY_EGRESS_STRICT are mutually exclusive." >&2
+    exit 1
+fi
+if [ "${SANDY_EGRESS_NO_ISOLATION:-0}" = 1 ]; then
+    : # proxy off — legacy path (iptables on Linux, no isolation on macOS)
+elif [ "${SANDY_EGRESS_STRICT:-0}" = 1 ]; then
+    _SANDY_PROXY_ON=true; _SANDY_PROXY_MODE="strict"
+else
+    _SANDY_PROXY_ON=true; _SANDY_PROXY_MODE="permissive"   # default-on
+fi
 
 # Default egress allowlist — the hosts an agent needs for normal coding work:
 # the model providers, GitHub (HTTPS + SSH), and the language package registries.

@@ -4484,6 +4484,70 @@ check "reaper skips a network whose owning PID is still alive (kill -0 gate)" \
     bash -c 'sed -n "/^_sandy_reap_orphan_networks()/,/^}$/p" "$1" | grep -q "kill -0 \"\$net_pid\""' -- "$_SBX_SCRIPT"
 
 # ============================================================
+echo ""
+echo "§65: value-aware egress tiering — a committed .sandy/config can't weaken isolation"
+# ============================================================
+# The hole: SANDY_EGRESS_PROXY was a plain passive key, so a committed workspace
+# .sandy/config could ship SANDY_EGRESS_PROXY=0 and silently disable network
+# isolation with no approval prompt (threat-model adversary #2; total isolation
+# loss on macOS). Fix: split into SANDY_EGRESS_NO_ISOLATION / SANDY_EGRESS_STRICT
+# with VALUE-AWARE tiering — a passive source may strengthen freely, but any
+# weakening value is approval-gated. Legacy SANDY_EGRESS_PROXY kept as a secured
+# alias.
+
+# (a) The pure classifier: weakening → 0 (privileged/gated), else → 1.
+_pvp() {
+    bash -c "$(sed -n '/^_sandy_passive_value_privileged()/,/^}$/p' "$_SBX_SCRIPT")
+    if _sandy_passive_value_privileged \"\$1\" \"\$2\"; then echo gated; else echo free; fi" _ "$1" "$2"
+}
+check "classifier gates NO_ISOLATION=1 (proxy off)"        test "$(_pvp SANDY_EGRESS_NO_ISOLATION 1)" = gated
+check "classifier frees NO_ISOLATION=0 (neutral)"          test "$(_pvp SANDY_EGRESS_NO_ISOLATION 0)" = free
+check "classifier gates STRICT=0 (downgrade)"              test "$(_pvp SANDY_EGRESS_STRICT 0)" = gated
+check "classifier frees STRICT=1 (strengthen)"             test "$(_pvp SANDY_EGRESS_STRICT 1)" = free
+check "classifier gates legacy EGRESS_PROXY=0"             test "$(_pvp SANDY_EGRESS_PROXY 0)" = gated
+check "classifier frees legacy EGRESS_PROXY=2 (strict)"    test "$(_pvp SANDY_EGRESS_PROXY 2)" = free
+check "classifier gates ALLOW_WORKFLOW_EDIT=1"             test "$(_pvp SANDY_ALLOW_WORKFLOW_EDIT 1)" = gated
+check "classifier frees an ordinary passive key"           test "$(_pvp SANDY_MODEL anything)" = free
+
+# (b) End-to-end through the real loader via --validate-config on a workspace file.
+_EG_WS="$(mktemp -d)"; mkdir -p "$_EG_WS/.sandy"
+_eg_gated() { # $1=config line → 0 if that key is reported approval-required
+    printf '%s\n' "$1" > "$_EG_WS/.sandy/config"
+    bash "$_SBX_SCRIPT" --validate-config "$_EG_WS/.sandy/config" 2>/dev/null \
+        | grep -q '"privileged_keys_requiring_approval":\[[^]]'
+}
+check "validate-config: workspace NO_ISOLATION=1 requires approval (attack closed)" \
+    bash -c '_eg_gated "SANDY_EGRESS_NO_ISOLATION=1"' 2>/dev/null || _eg_gated "SANDY_EGRESS_NO_ISOLATION=1"
+check "validate-config: legacy workspace EGRESS_PROXY=0 requires approval" \
+    _eg_gated "SANDY_EGRESS_PROXY=0"
+check "validate-config: workspace STRICT=0 (downgrade) requires approval" \
+    _eg_gated "SANDY_EGRESS_STRICT=0"
+check "validate-config: workspace STRICT=1 (strengthen) does NOT require approval" \
+    bash -c '! _eg_gated "SANDY_EGRESS_STRICT=1"'
+check "validate-config: workspace EGRESS_PROXY=2 (strict) does NOT require approval" \
+    bash -c '! _eg_gated "SANDY_EGRESS_PROXY=2"'
+rm -rf "$_EG_WS"
+
+# (c) Resolution: legacy alias mapping + mutual-exclusion + validation.
+_EG_BLOCK="$(awk '/^_SANDY_PROXY_ON=false$/{f=1} f{print} f&&/permissive.*default-on/{print "fi"; exit}' "$_SBX_SCRIPT")"
+_eg_resolve() { # env: $1 EGRESS_PROXY, $2 NO_ISOLATION, $3 STRICT
+    env -u SANDY_EGRESS_PROXY -u SANDY_EGRESS_NO_ISOLATION -u SANDY_EGRESS_STRICT \
+        ${1:+SANDY_EGRESS_PROXY=$1} ${2:+SANDY_EGRESS_NO_ISOLATION=$2} ${3:+SANDY_EGRESS_STRICT=$3} \
+        bash -c 'warn(){ :; }; '"$_EG_BLOCK"'; echo "$_SANDY_PROXY_ON:$_SANDY_PROXY_MODE"' 2>/dev/null
+}
+check "resolve: default → proxy on, permissive"      test "$(_eg_resolve '' '' '')" = "true:permissive"
+check "resolve: legacy =0 → proxy off"               test "$(_eg_resolve 0 '' '')" = "false:"
+check "resolve: legacy =2 → strict"                  test "$(_eg_resolve 2 '' '')" = "true:strict"
+check "resolve: NO_ISOLATION=1 → proxy off"          test "$(_eg_resolve '' 1 '')" = "false:"
+check "resolve: STRICT=1 → strict"                   test "$(_eg_resolve '' '' 1)" = "true:strict"
+check "resolve: NO_ISOLATION=1 + STRICT=1 → error (mutually exclusive)" \
+    bash -c '! _eg_resolve "" 1 1 >/dev/null 2>&1 || [ -z "$(_eg_resolve "" 1 1)" ]'
+
+# (d) The old "no security-boundary impact" blanket claim must be gone.
+check "passive-keys comment no longer claims blanket 'No security-boundary impact'" \
+    bash -c '! grep -q "No security-boundary impact" "$1"' -- "$_SBX_SCRIPT"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

@@ -149,7 +149,8 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_CPUS` | auto-detected | CPU limit for the container |
 | `SANDY_MEM` | auto-detected | Memory limit for the container |
 | `SANDY_ALLOW_LAN_HOSTS` | (unset) | Comma-separated IPs/CIDRs to allow through LAN isolation (e.g. `192.168.1.50,10.0.0.0/24`) |
-| `SANDY_EGRESS_PROXY` | `1` | Cross-platform egress isolation. `0`=off, `1`=permissive (block LAN/host, allow internet), `2`=strict (allowlist only). The only network isolation that works on macOS — see "How Network Isolation Works" |
+| `SANDY_EGRESS_STRICT` | `0` | `1` = strict egress (allowlist only). Strengthens isolation — safe to commit in a workspace `.sandy/config`. The only network isolation that works on macOS — see "How Network Isolation Works" |
+| `SANDY_EGRESS_NO_ISOLATION` | `0` | `1` = turn the egress proxy **off** (legacy: iptables-only on Linux, no isolation on macOS). Weakens isolation, so a workspace `.sandy/config` setting it triggers an approval prompt |
 | `SANDY_ALLOW_HOSTS` | (unset) | Comma-separated extra egress-proxy allowlist entries (`host`, `*.suffix`, or `host:port`), appended to the built-in default set. Privileged tier |
 | `SANDY_ALLOW_NO_ISOLATION` | (unset) | Set to `1` to allow launch without iptables rules (Linux) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
@@ -316,19 +317,21 @@ No default — leaving `SANDY_SCREENSHOT_DIR` unset disables the feature entirel
 > [`THREAT_MODEL.md`](docs/security/THREAT_MODEL.md). Empirical bypass attempts are in
 > [`ISOLATION_STRESS.md`](docs/security/ISOLATION_STRESS.md).
 
-### Egress proxy (`SANDY_EGRESS_PROXY`) — cross-platform isolation
+### Egress proxy — cross-platform isolation
 
-The egress proxy is the recommended isolation mechanism and the **only** one that works on macOS. It routes the agent through a small proxy sidecar on a Docker `--internal` network (no route off the bridge except through the proxy), so it behaves identically on macOS and Linux. It's a tri-state:
+The egress proxy is the recommended isolation mechanism and the **only** one that works on macOS. It routes the agent through a small proxy sidecar on a Docker `--internal` network (no route off the bridge except through the proxy), so it behaves identically on macOS and Linux. The posture is set by two mutually-exclusive boolean knobs (default **permissive**):
 
-| Value | Mode | Behavior |
+| Setting | Mode | Behavior |
 |---|---|---|
-| `0` | off | Linux iptables only; macOS has no network isolation (see below). |
-| `1` (default) | permissive | Blocks private/LAN/host/cloud-metadata destinations, allows all internet. Closes the macOS LAN gap with ~zero friction. |
-| `2` | strict | Allows only a built-in default allowlist (model providers, GitHub incl. SSH, npm/PyPI/crates/Go/Debian) plus `SANDY_ALLOW_HOSTS`. Fails closed on everything else. |
+| *(neither set)* | permissive (default) | Blocks private/LAN/host/cloud-metadata destinations, allows all internet. Closes the macOS LAN gap with ~zero friction. |
+| `SANDY_EGRESS_STRICT=1` | strict | Allows only a built-in default allowlist (model providers, GitHub incl. SSH, npm/PyPI/crates/Go/Debian) plus `SANDY_ALLOW_HOSTS`. Fails closed on everything else. **Strengthens isolation — safe to commit in a workspace config.** |
+| `SANDY_EGRESS_NO_ISOLATION=1` | off | Linux iptables only; macOS has no network isolation (see below). **Weakens isolation — a workspace `.sandy/config` setting it triggers an approval prompt** so a cloned repo can't silently disable your sandbox. |
 
 ```sh
-SANDY_EGRESS_PROXY=1   # in ~/.sandy/config or a workspace .sandy/config
+SANDY_EGRESS_STRICT=1   # in ~/.sandy/config or a workspace .sandy/config
 ```
+
+> The older `SANDY_EGRESS_PROXY=0|1|2` still works as a **deprecated alias** (`0`→off, `1`→permissive, `2`→strict) with a migration warning; its `=0` is approval-gated from a workspace config just like `SANDY_EGRESS_NO_ISOLATION=1`.
 
 Add extra reachable hosts with `SANDY_ALLOW_HOSTS` (privileged; comma-separated `host`, `*.suffix`, or `host:port`). git-over-SSH (`SANDY_SSH=agent`) is tunneled through the proxy automatically on both platforms; on macOS, host-agent *key signing* is unavailable under the proxy (use `SANDY_SSH=token` for a fully-supported HTTPS path). A local LLM (`SANDY_LOCAL_LLM_HOST`) is forwarded through the proxy rather than an iptables hole. See `CLAUDE.md` → "Egress Proxy" for the full topology.
 

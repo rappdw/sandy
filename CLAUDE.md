@@ -127,8 +127,10 @@ Sandy loads configuration from four sources in order: `$HOME/.sandy/config`, `$H
 
 - **Passive-safe keys** (allowed from any source):
   <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `SANDY_SCREENSHOT_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_ALLOW_WORKFLOW_EDIT`, `SANDY_SCREENSHOT_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
   <!-- END AUTOGEN:passive-key-list -->
+
+- **Value-aware exceptions** (passive for values that *strengthen* isolation, approval-gated for values that *weaken* it): a few passive keys are not uniformly safe from a committed `.sandy/config` because one of their values lowers the sandbox's protection. `_sandy_passive_value_privileged()` routes those weakening values through the same per-workspace approval prompt as a privileged key, while leaving the strengthening/neutral values frictionless — *"a repo may make the sandbox tighter, never looser."* The gated values are: `SANDY_EGRESS_NO_ISOLATION=1` (proxy off), `SANDY_EGRESS_STRICT=0` (downgrade a host-set strict), `SANDY_EGRESS_PROXY=0` (deprecated alias for proxy-off), and `SANDY_ALLOW_WORKFLOW_EDIT=1` (drops `.github/workflows/` protection). This closes the hole where a committed workspace config could silently disable network isolation (threat-model adversary #2) — on macOS with the proxy off that is *total* loss of network isolation. Guarded by `run-tests.sh §65`.
 
 Additionally, `SANDY_ALLOW_LAN_HOSTS` is validated at use-site to reject world-open entries (`0.0.0.0/0`, `::/0`) with a hard error at launch — even when set from a privileged source.
 
@@ -430,11 +432,21 @@ Per-instance Docker bridge networks are created with names keyed on PID (`sandy_
 
 **macOS limitation when the egress proxy is explicitly turned off (`SANDY_EGRESS_PROXY=0`).** (The default is `1` — permissive — so this applies only when a user opts out of the proxy.) Docker Desktop's VM does *not* provide LAN isolation. Containers can reach `host.docker.internal` (→ host gateway), the host's `localhost` services, and any device on the user's physical LAN (`192.168.x.x`, home router, NAS, printers, internal dashboards). Linux iptables DROP rules are not applied and cannot be applied from macOS. As defense-in-depth, sandy nullifies the Docker Desktop magic hostnames (`gateway.docker.internal`, `metadata.google.internal`, and — when `SANDY_SSH!=agent` — `host.docker.internal`) via `--add-host … :127.0.0.1`, but raw-IP access is unaffected. Sandy prints a launch warning banner on macOS announcing that network isolation is not active, and points at `SANDY_EGRESS_PROXY=1`. With the proxy off, treat macOS sandy as "process and filesystem isolation only; no network isolation."
 
-## Egress Proxy (`SANDY_EGRESS_PROXY`)
+## Egress Proxy (`SANDY_EGRESS_NO_ISOLATION` / `SANDY_EGRESS_STRICT`)
 
-The egress proxy (milestone M2.7) is the cross-platform network-isolation mechanism that closes the macOS LAN/host-reach gap (finding F2) and works **identically on Linux and macOS** because it relies on Docker's `--internal` network routing, not on iptables. It is a passive-tier tri-state:
+The egress proxy (milestone M2.7) is the cross-platform network-isolation mechanism that closes the macOS LAN/host-reach gap (finding F2) and works **identically on Linux and macOS** because it relies on Docker's `--internal` network routing, not on iptables.
 
-- `0` — **off**. Legacy behavior: Linux uses iptables RFC1918 DROPs; macOS has no network isolation (warning banner above). Opt-in only — a user must explicitly set `SANDY_EGRESS_PROXY=0`.
+**Two boolean knobs** set the posture (default **permissive**, i.e. both `0`); they are mutually exclusive:
+
+- `SANDY_EGRESS_NO_ISOLATION=1` — **off** (below). **Weakening**, so from a workspace `.sandy/config` it is approval-gated (a committed repo config can't silently disable isolation).
+- `SANDY_EGRESS_STRICT=1` — **strict** (below). **Strengthening**, so passive-safe from any source. Setting it `=0` to downgrade a host-configured strict is approval-gated from a workspace source.
+- neither set → **permissive** (default).
+
+**`SANDY_EGRESS_PROXY` is a deprecated back-compat alias** (`0`→`NO_ISOLATION=1`, `1`→permissive, `2`→`STRICT=1`); it emits a deprecation warning and its `=0` is approval-gated from a workspace source exactly like the new keys. (Pre-1.0 this single tri-state was a plain passive key — a committed `SANDY_EGRESS_PROXY=0` could disable isolation with no prompt; see the value-aware config-tier note above.)
+
+The three postures:
+
+- **off** (`SANDY_EGRESS_NO_ISOLATION=1`). Legacy behavior: Linux uses iptables RFC1918 DROPs; macOS has no network isolation (warning banner above). Opt-in only.
 - `1` — **permissive** (**default**). The agent routes through a proxy sidecar that blocks only private/LAN/link-local/CGNAT/cloud-metadata destinations and allows all internet. Closes F2 with ~zero tool friction (any public host an agent needs just works). This is the **default-on posture for 1.0** — it gives Linux-parity LAN isolation on macOS without an allowlist to maintain.
 - `2` — **strict**. The proxy denies everything except a built-in default allowlist (model providers, GitHub incl. SSH, npm/PyPI/crates/Go/Debian) plus `SANDY_ALLOW_HOSTS`. Closes F2 *and* exfil-to-arbitrary-internet, at the cost of failing closed on any un-listed host. (Strict does not stop exfil to an *allowlisted* host — a broker-style host-relay is POST_1.0.)
 

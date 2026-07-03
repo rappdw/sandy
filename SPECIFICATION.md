@@ -139,7 +139,7 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_ALLOW_WORKFLOW_EDIT`, `SANDY_SCREENSHOT_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_ALLOW_WORKFLOW_EDIT`, `SANDY_SCREENSHOT_DIR`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `SANDY_GEMINI_EXTENSIONS`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -176,7 +176,9 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_CHANNEL_TARGET_PANE` | passive | `0` | 0.9.0 | stable | Which tmux pane in multi-agent mode receives channel messages. |
 | `SANDY_VERBOSE` | passive | `0` | 0.8.0 | stable | Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace). |
 | `SANDY_VENV_OVERLAY` | passive | `1` | 0.10.0 | stable | Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container. |
-| `SANDY_EGRESS_PROXY` | passive | `1` | 0.14.0 | stable | Egress-proxy network isolation (closes macOS F2). 1=permissive (default; proxy sidecar blocks private/LAN/metadata but allows all internet — works identically on macOS and Linux). 2=strict (proxy sidecar allows only the default allowlist + SANDY_ALLOW_HOSTS). 0=off (legacy iptables-only on Linux, no isolation on macOS). |
+| `SANDY_EGRESS_PROXY` | passive | `1` | 0.14.0 | stable | DEPRECATED — use SANDY_EGRESS_NO_ISOLATION / SANDY_EGRESS_STRICT. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 is approval-gated (weakening), matching the new keys. |
+| `SANDY_EGRESS_NO_ISOLATION` | passive | `0` | 1.0.0 | stable | Turn the egress proxy OFF — legacy path (Linux iptables-only; NO network isolation on macOS). WEAKENS isolation, so from a workspace .sandy/config it is quarantined to the per-workspace approval prompt (a committed config cannot silently disable isolation). Mutually exclusive with SANDY_EGRESS_STRICT. Default 0 (proxy on). |
+| `SANDY_EGRESS_STRICT` | passive | `0` | 1.0.0 | stable | Run the egress proxy in strict mode (allow only the built-in default allowlist + SANDY_ALLOW_HOSTS; deny all other internet). STRENGTHENS isolation, so =1 is passive-safe from any source; =0 (downgrading a host-configured strict) is approval-gated from a workspace source. Mutually exclusive with SANDY_EGRESS_NO_ISOLATION. Default 0 (permissive). |
 | `SANDY_ALLOW_WORKFLOW_EDIT` | passive | `0` | 0.11.1 | stable | Remove .github/workflows from the read-only protection list. |
 | `SANDY_SCREENSHOT_DIR` | passive | unset | 0.12.0 | stable | Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents. |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | passive | `128000` | 0.6.0 | stable | Max output tokens per Claude response. |
@@ -653,15 +655,17 @@ When `SANDY_SSH=agent`, `host.docker.internal` is *not* nullified because sandy'
 
 This is defense-in-depth, not a fix — with the proxy off, raw-IP access (`curl http://192.168.1.1`) is unaffected. The fix is `SANDY_EGRESS_PROXY` (below), which applies uniform isolation on both platforms.
 
-### Egress Proxy (`SANDY_EGRESS_PROXY`, M2.7)
+### Egress Proxy (`SANDY_EGRESS_NO_ISOLATION` / `SANDY_EGRESS_STRICT`, M2.7)
 
-A tri-state passive-tier key that routes the agent through a `sandy-proxy` sidecar on a Docker `--internal` network. Because it relies on `--internal` routing rather than iptables, it is the **only** network isolation that works on macOS, and behaves identically on both platforms.
+Two mutually-exclusive boolean keys route the agent through a `sandy-proxy` sidecar on a Docker `--internal` network. Because it relies on `--internal` routing rather than iptables, it is the **only** network isolation that works on macOS, and behaves identically on both platforms. **Value-aware tiering**: from a workspace source, a *strengthening* value is passive-safe but a *weakening* value is quarantined to the per-workspace approval prompt (`_sandy_passive_value_privileged`), so a committed `.sandy/config` cannot silently disable isolation.
 
-| Value | Mode (`mode` field in proxy config) | Egress policy |
-|---|---|---|
-| `0` | — (proxy off) | Linux: legacy iptables. macOS: none. Opt-in only. |
-| `1` (default) | `permissive` | Block private/LAN/link-local/CGNAT/`169.254.169.254` metadata; allow all internet. Resolve-then-check also defeats DNS rebinding. |
-| `2` | `strict` | Deny all except the built-in default allowlist + `SANDY_ALLOW_HOSTS`; fail closed. |
+| Setting | Mode (`mode` field in proxy config) | Egress policy | Workspace-config tiering |
+|---|---|---|---|
+| *(neither)* | `permissive` (default) | Block private/LAN/link-local/CGNAT/`169.254.169.254` metadata; allow all internet. Resolve-then-check also defeats DNS rebinding. | n/a |
+| `SANDY_EGRESS_STRICT=1` | `strict` | Deny all except the built-in default allowlist + `SANDY_ALLOW_HOSTS`; fail closed. | passive-safe (strengthens); `=0` downgrade is approval-gated |
+| `SANDY_EGRESS_NO_ISOLATION=1` | — (proxy off) | Linux: legacy iptables. macOS: none. | approval-gated (weakens) |
+
+**Deprecated alias `SANDY_EGRESS_PROXY`** (`0`→off, `1`→permissive, `2`→strict) is still honored with a migration warning; from a workspace source its `=0` is approval-gated identically. Pre-1.0 this key was a plain passive tri-state — a committed `SANDY_EGRESS_PROXY=0` could disable isolation with no prompt (fixed in the 1.0 rc window; guarded by `run-tests.sh §65`).
 
 The launcher normalizes the value once into `_SANDY_PROXY_ON` (bool) and `_SANDY_PROXY_MODE` (`permissive`/`strict`).
 
