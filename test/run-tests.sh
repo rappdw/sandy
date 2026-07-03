@@ -4540,9 +4540,12 @@ rm -rf "$_EG_WS"
 # (c) Resolution: legacy alias mapping + mutual-exclusion + validation.
 _EG_BLOCK="$(awk '/^_SANDY_PROXY_ON=false$/{f=1} f{print} f&&/permissive.*default-on/{print "fi"; exit}' "$_SBX_SCRIPT")"
 _eg_resolve() { # env: $1 EGRESS_PROXY, $2 NO_ISOLATION, $3 STRICT
+    # `|| true`: the mutual-exclusion / invalid cases intentionally `exit 1`
+    # inside the block (we assert on the empty stdout). Absorb that here so the
+    # harness ERR trap doesn't log the *expected* failure as red noise.
     env -u SANDY_EGRESS_PROXY -u SANDY_EGRESS_NO_ISOLATION -u SANDY_EGRESS_STRICT \
         ${1:+SANDY_EGRESS_PROXY=$1} ${2:+SANDY_EGRESS_NO_ISOLATION=$2} ${3:+SANDY_EGRESS_STRICT=$3} \
-        bash -c 'warn(){ :; }; '"$_EG_BLOCK"'; echo "$_SANDY_PROXY_ON:$_SANDY_PROXY_MODE"' 2>/dev/null
+        bash -c 'warn(){ :; }; '"$_EG_BLOCK"'; echo "$_SANDY_PROXY_ON:$_SANDY_PROXY_MODE"' 2>/dev/null || true
 }
 check "resolve: default → proxy on, permissive"      test "$(_eg_resolve '' '' '')" = "true:permissive"
 check "resolve: legacy =0 → proxy off"               test "$(_eg_resolve 0 '' '')" = "false:"
