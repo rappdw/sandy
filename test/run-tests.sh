@@ -423,6 +423,7 @@ echo 'SANDY_VENV_OVERLAY=0' > "$TMPCFG/.sandy/config"
 _SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 ALLOWLIST_RESULT="$(bash -c "
     $(sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^}$/p' "$_SANDY_SCRIPT_PATH")
+    $(sed -n '/^_key_in_list()/,/^}$/p' "$_SANDY_SCRIPT_PATH")
     $(sed -n '/^_load_sandy_config()/,/^}$/p' "$_SANDY_SCRIPT_PATH")
     _load_sandy_config '$TMPCFG/.sandy/config'
     echo \"\${SANDY_VENV_OVERLAY:-unset}\"
@@ -2307,7 +2308,7 @@ fi
 # assertion broke on every release bump (it was stuck at 0.12.x while the
 # script moved to 0.13.0). Format-checking catches the real failure mode
 # (a malformed or accidentally-cleared version) without the maintenance tax.
-if grep -qE '^SANDY_VERSION="[0-9]+\.[0-9]+\.[0-9]+(-(dev|rc[0-9]*))?"' "$SANDY_SCRIPT"; then
+if grep -qE '^SANDY_VERSION="[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?(-dev)?"' "$SANDY_SCRIPT"; then
     pass "SANDY_VERSION is well-formed semver"
 else
     fail "SANDY_VERSION is well-formed semver"
@@ -2625,12 +2626,16 @@ EOF
 # does not reliably handle `source <(sed ...)` inside `$(...)`).
 #
 # v0.12+: the loader uses the SANDY_{PRIVILEGED,PASSIVE,ENV_ONLY}_KEYS arrays
-# and the _key_in_list() helper — all defined at the top of the sandy script
-# before the loader. Extract both blocks into the single source file.
+# and the _key_in_list() + _sandy_passive_value_privileged() helpers — all
+# defined at the top of the sandy script before the loader. Extract each block.
 _LOADER_SRC="$(mktemp)"
-# Arrays + _key_in_list() — range ends at the first bare `}` (closing
-# _key_in_list), which is also the last `}` before the loader definition.
+# The arrays range ends at the FIRST bare `}` — which is now
+# _sandy_passive_value_privileged()'s close (it sits between the arrays and
+# _key_in_list). So that first range captures the arrays + the value-aware
+# classifier; _key_in_list() is then pulled in explicitly (it comes after).
 sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^}$/p' "$SANDY_SCRIPT_PATH" > "$_LOADER_SRC"
+printf '\n' >> "$_LOADER_SRC"
+sed -n '/^_key_in_list()/,/^}$/p' "$SANDY_SCRIPT_PATH" >> "$_LOADER_SRC"
 printf '\n' >> "$_LOADER_SRC"
 sed -n '/^_load_sandy_config() {/,/^}$/p' "$SANDY_SCRIPT_PATH" >> "$_LOADER_SRC"
 
