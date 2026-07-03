@@ -1,3 +1,78 @@
+## sandy v1.0.0-rc2
+
+**A security fix + the sandy-ui daily-driver bundle.** rc2 resets the RC soak
+clock — it carries a real isolation-boundary fix plus quality-of-life work
+surfaced during the rc1 soak and `sandy-ui` dogfooding. Still a *stability*
+release: no new agent features, and the default behavior is unchanged for
+anyone not using the affected config keys.
+
+### Security — committed `.sandy/config` could disable isolation (#27)
+
+**The hole:** `SANDY_EGRESS_PROXY` was a plain **passive** config key, so a
+repository could commit a workspace `.sandy/config` with `SANDY_EGRESS_PROXY=0`
+and, on the next launch in that repo, **silently disable the egress-proxy
+network isolation with no approval prompt**. Config precedence is env >
+workspace > host, so it even overrode a defender's `=1` in `~/.sandy/config`.
+On macOS (no iptables fallback) that is *total* loss of network isolation —
+LAN, host `localhost`, and cloud metadata all reachable. It walked straight
+around the privileged-tier approval prompt that exists precisely for
+threat-model adversary #2 ("a cloned repo ships a hostile `.sandy/config`").
+
+**The fix — value-aware tiering.** The tri-state key is split into two boolean
+knobs with a *ratchet*: a workspace config may make the sandbox **tighter**
+freely, but **never looser** without approval.
+
+- `SANDY_EGRESS_STRICT=1` — strict allowlist. Strengthens isolation → passive-safe from any source.
+- `SANDY_EGRESS_NO_ISOLATION=1` — proxy off. Weakens isolation → **approval-gated** from a workspace source.
+- default (neither) → permissive; the two are mutually exclusive.
+- `SANDY_ALLOW_WORKFLOW_EDIT=1` (drops `.github/workflows/` protection) is gated the same way.
+- **`SANDY_EGRESS_PROXY` still works as a deprecated alias** (`0`→off, `1`→permissive, `2`→strict) with a migration warning; its `=0` is approval-gated identically, so there's **no silent downgrade on upgrade** for existing `=2`/`=1` users.
+
+The mechanism (`_sandy_passive_value_privileged`) routes only *weakening* values
+through the per-workspace approval gate. Guarded by `run-tests.sh §65`. A
+follow-up re-audit of the remaining passive keys (`SANDY_GEMINI_EXTENSIONS`,
+`SANDY_SCREENSHOT_DIR`, channel tokens) is tracked as #28 for 1.0.1.
+
+### `--print-state` for pollers / sandy-ui (#18, #19)
+
+- **Light mode** — `sandy --print-state light` makes **one** docker spawn
+  instead of nine (skips `installed_images`, derives `docker_reachable` from a
+  single `docker ps`). Fixes a CPU spike from `sandy-ui`'s tree polling.
+  Forward-compatible: any arg other than `light` (incl. none) → full mode, so a
+  consumer can pass it unconditionally. The default full-mode path is
+  byte-for-byte unchanged.
+- **`workspace_path` per sandbox** — `--print-state` now emits the field the
+  introspection contract already documented (read from the `WORKSPACE.json`
+  marker), so consumers can key their UI on it without a client-side bridge.
+
+### Network cleanup (#20)
+
+The orphaned-network reaper is generalized to `sandy_net_*` (the isolated
+bridge, the original leak class — was proxy-only) and now runs **eagerly at
+every launch** with a PID-liveness gate that keeps it concurrent-safe. Fixes
+the "all predefined address pools have been fully subnetted" launch failure
+that accumulates across crash / Cmd-Q / SIGKILL cycles.
+
+### Docs (#21)
+
+Gemini free-tier OAuth is deprecated upstream by Google (`IneligibleTierError`);
+the docs now steer to the API-key / Vertex paths.
+
+### Upgrading
+
+Existing `SANDY_EGRESS_PROXY=1|2` in host config keeps working (with a
+deprecation nudge); migrate to `SANDY_EGRESS_STRICT=1` (strict) or leave unset
+(permissive). If you relied on `SANDY_EGRESS_PROXY=0`, use
+`SANDY_EGRESS_NO_ISOLATION=1` — and note that from a *workspace* config it now
+requires a one-time approval, by design.
+
+Deferred to `1.0.1` / `1.1` (tracked in `docs/POST_1.0_IDEAS.md` + issues):
+full-mode `--print-state` optimization (#25), the `--prune-orphans` flag (#26),
+the passive-key re-audit (#28), lifecycle trap hardening (#14), and the larger
+sandy-ui features (#16 teleport, #17 daemon mode).
+
+---
+
 ## sandy v1.0.0-rc1
 
 **The release candidate.** After 4½ months and 30 releases, sandy's surface is
