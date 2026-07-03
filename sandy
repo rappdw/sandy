@@ -797,6 +797,14 @@ _sandy_emit_schema() {
 
 # Emit runtime state JSON: sandboxes, approvals, running containers.
 _sandy_emit_state() {
+    # Mode: "full" (default) or "light". Light mode (#18) makes exactly ONE
+    # docker spawn instead of nine, so pollers (e.g. sandy-ui) don't spike CPU:
+    # it skips installed_images (which has no consumer) and derives
+    # docker_reachable from a single `docker ps`'s exit status instead of the
+    # two docker-info gates. Any arg other than "light" (incl. none) selects
+    # full mode, whose output/logic is unchanged — so a consumer can pass
+    # "light" unconditionally and older/other sandy just ignores it.
+    local _mode="${1:-full}"
     # Detect which stat flavor we have once. GNU stat (Linux) takes -c;
     # BSD stat (macOS) takes -f. We can't rely on either failing cleanly on
     # the wrong OS — GNU's `stat -f` is a valid different command (filesystem
@@ -821,8 +829,10 @@ _sandy_emit_state() {
     printf ','; _json_kv sandy_home "$(_json_escape "$SANDY_HOME")"
 
     # installed_images: sandy-{base,claude-code,gemini-cli,codex,opencode,full}.
+    # Skipped in light mode (no consumer; costs 6 of the 9 docker spawns). The
+    # key stays present (empty array) so the schema shape is identical.
     printf ',"installed_images":['
-    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    if [ "$_mode" != "light" ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         local first=1 img line
         for img in sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-opencode sandy-full; do
             line="$(docker image inspect "$img" --format '{{.Id}}|{{.Created}}' 2>/dev/null)" || continue
@@ -849,10 +859,17 @@ _sandy_emit_state() {
         for sb in "$SANDY_HOME/sandboxes"/*/; do
             [ -d "$sb" ] || continue
             sb="${sb%/}"
-            local sb_name sb_created_ver sb_last_ver sb_created_at sb_last_at sb_lock_dir sb_lock_pid
+            local sb_name sb_created_ver sb_last_ver sb_created_at sb_last_at sb_lock_dir sb_lock_pid sb_ws_path
             sb_name="$(basename "$sb")"
             sb_created_ver="$(cat "$sb/.sandy_created_version" 2>/dev/null || true)"
             sb_last_ver="$(cat "$sb/.sandy_last_version" 2>/dev/null || true)"
+            # workspace_path: read the WORKSPACE.json marker sandy writes into
+            # every sandbox on launch (same lightweight parse the sibling-scan
+            # uses). Empty string for a legacy sandbox with no marker. Fulfills
+            # the SPEC_INTROSPECTION contract that each sandbox carries a stable
+            # workspace_path (consumers like sandy-ui key their tree on it).
+            sb_ws_path="$(grep -m1 '"workspace_path"' "$sb/WORKSPACE.json" 2>/dev/null \
+                          | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//' || true)"
             sb_created_at="$(_stat_mtime_iso "$sb/.sandy_created_version")"
             sb_last_at="$(_stat_mtime_iso "$sb/.sandy_last_version")"
             sb_lock_dir="$SANDY_HOME/sandboxes/.${sb_name}.lock"
@@ -866,6 +883,7 @@ _sandy_emit_state() {
             printf '{'
             _json_kv name "$(_json_escape "$sb_name")"
             printf ','; _json_kv path "$(_json_escape "$sb")"
+            printf ','; _json_kv workspace_path "$(_json_escape "$sb_ws_path")"
             printf ','; _json_kv created_version   "$(_json_escape "$sb_created_ver")"
             printf ','; _json_kv last_used_version "$(_json_escape "$sb_last_ver")"
             printf ','; _json_kv created_at        "$(_json_escape "$sb_created_at")"
@@ -928,8 +946,42 @@ _sandy_emit_state() {
     fi
     printf ']'
 
-    # running_containers: silently skip if docker is unreachable.
-    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    # running_containers + docker_reachable.
+    # Light mode: a single `docker ps` — its exit status IS the reachability
+    # signal (fails when the CLI is missing or the daemon is down), replacing
+    # the two docker-info gates. Combined with the installed_images skip above,
+    # that's exactly one docker spawn per light invocation. The full-mode
+    # elif/else below are byte-for-byte the pre-#18 code path (unchanged, for
+    # the soak).
+    if [ "$_mode" = "light" ]; then
+        local _ps_out=""
+        if command -v docker >/dev/null 2>&1 \
+           && _ps_out="$(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}' 2>/dev/null)"; then
+            printf ',"docker_reachable":true'
+            printf ',"running_containers":['
+            first=1
+            while IFS= read -r _cline; do
+                [ -z "$_cline" ] && continue
+                local _cid _cname _cimg _cstarted
+                _cid="$(echo "$_cline"      | awk -F'|' '{print $1}')"
+                _cname="$(echo "$_cline"    | awk -F'|' '{print $2}')"
+                _cimg="$(echo "$_cline"     | awk -F'|' '{print $3}')"
+                _cstarted="$(echo "$_cline" | awk -F'|' '{print $4}')"
+                [ $first -eq 0 ] && printf ','
+                first=0
+                printf '{'
+                _json_kv id         "$(_json_escape "$_cid")"
+                printf ','; _json_kv name       "$(_json_escape "$_cname")"
+                printf ','; _json_kv image      "$(_json_escape "$_cimg")"
+                printf ','; _json_kv started_at "$(_json_escape "$_cstarted")"
+                printf '}'
+            done < <(printf '%s\n' "$_ps_out" | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)
+            printf ']'
+        else
+            printf ',"docker_reachable":false'
+            printf ',"running_containers":null'
+        fi
+    elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         printf ',"docker_reachable":true'
         printf ',"running_containers":['
         first=1
@@ -1135,7 +1187,10 @@ if [[ "${1:-}" == "--print-schema" ]]; then
 fi
 if [[ "${1:-}" == "--print-state" ]]; then
     set -E; trap _sandy_introspect_err_trap ERR
-    _sandy_emit_state
+    # $2 selects the mode: "light" for the cheap single-spawn path (#18),
+    # anything else (incl. absent) → full. Forward-compatible: a consumer can
+    # pass "light" unconditionally; an older sandy ignored $2 entirely.
+    _sandy_emit_state "${2:-}"
     exit 0
 fi
 if [[ "${1:-}" == "--validate-config" ]]; then

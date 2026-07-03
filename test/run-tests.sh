@@ -4378,6 +4378,75 @@ check "channel access.json escapes sender values (gsub)" \
     grep -qF 'gsub(/"/,"\\\"")' "$_SBX_SCRIPT"
 
 # ============================================================
+echo ""
+echo "§63: --print-state workspace_path (#19) + light mode (#18)"
+# ============================================================
+# Uses a throwaway SANDY_HOME fixture (a real sandbox with a WORKSPACE.json
+# marker + a legacy one without) and a PATH docker-shim that COUNTS spawns —
+# so the light-mode "one docker spawn, not nine" claim is asserted directly.
+_PS_HOME="$(mktemp -d)"
+mkdir -p "$_PS_HOME/sandboxes/demo-abc12345"
+echo "1.0.0-rc2-dev" > "$_PS_HOME/sandboxes/demo-abc12345/.sandy_created_version"
+printf '{ "schema_version": 1, "sandbox_name": "demo-abc12345", "workspace_path": "/ws/demo" }\n' \
+    > "$_PS_HOME/sandboxes/demo-abc12345/WORKSPACE.json"
+mkdir -p "$_PS_HOME/sandboxes/legacy-99999999"
+echo "0.14.0" > "$_PS_HOME/sandboxes/legacy-99999999/.sandy_created_version"
+# Counting docker shim: logs one line per invocation, returns benign output.
+_PS_BIN="$(mktemp -d)"
+cat > "$_PS_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+echo "$@" >> "$DOCKER_CALL_LOG"
+case "$1" in
+    info) exit 0 ;;              # reachability gate: OK
+    ps) exit 0 ;;                # empty container list
+    image) exit 1 ;;             # `image inspect` miss → loop `continue`s
+    *) exit 0 ;;
+esac
+DOCKERSHIM
+chmod +x "$_PS_BIN/docker"
+_ps_run() { # $1=mode(""|light) → emits JSON on stdout, spawn log to $DOCKER_CALL_LOG
+    DOCKER_CALL_LOG="$(mktemp)"; export DOCKER_CALL_LOG
+    PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" bash "$_SBX_SCRIPT" --print-state ${1:+$1} 2>/dev/null
+}
+
+# #19: workspace_path present + correct in full mode; empty for legacy sandbox.
+_ps_full="$(PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$(mktemp)" bash "$_SBX_SCRIPT" --print-state 2>/dev/null)"
+check "print-state emits workspace_path from WORKSPACE.json (#19)" \
+    bash -c 'echo "$1" | grep -q "\"workspace_path\":\"/ws/demo\""' -- "$_ps_full"
+check "print-state emits empty workspace_path for a legacy (no-marker) sandbox" \
+    bash -c 'echo "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); assert any(s[\"name\"].startswith(\"legacy\") and s[\"workspace_path\"]==\"\" for s in d[\"sandboxes\"])"' -- "$_ps_full"
+
+# #18: light mode → installed_images empty, workspace_path still present.
+_ps_light="$(PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$(mktemp)" bash "$_SBX_SCRIPT" --print-state light 2>/dev/null)"
+check "light mode emits installed_images:[] (skipped)" \
+    bash -c 'echo "$1" | python3 -c "import json,sys; assert json.load(sys.stdin)[\"installed_images\"]==[]"' -- "$_ps_light"
+check "light mode keeps the same top-level schema keys as full" \
+    bash -c '
+        f=$(echo "$1" | python3 -c "import json,sys; print(\",\".join(sorted(json.load(sys.stdin))))")
+        l=$(echo "$2" | python3 -c "import json,sys; print(\",\".join(sorted(json.load(sys.stdin))))")
+        [ "$f" = "$l" ]' -- "$_ps_full" "$_ps_light"
+check "light mode still emits workspace_path (#19 holds in light)" \
+    bash -c 'echo "$1" | grep -q "\"workspace_path\":\"/ws/demo\""' -- "$_ps_light"
+
+# #18 the load-bearing claim: exactly ONE docker spawn in light, many in full.
+_LOG_LIGHT="$(mktemp)"
+PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$_LOG_LIGHT" bash "$_SBX_SCRIPT" --print-state light >/dev/null 2>&1
+check "light mode makes exactly ONE docker spawn" \
+    test "$(wc -l < "$_LOG_LIGHT" | tr -d ' ')" = "1"
+_LOG_FULL="$(mktemp)"
+PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$_LOG_FULL" bash "$_SBX_SCRIPT" --print-state >/dev/null 2>&1
+check "full mode makes more docker spawns than light (default path unchanged)" \
+    bash -c '[ "$(wc -l < "$1" | tr -d " ")" -gt 1 ]' -- "$_LOG_FULL"
+
+# Forward-compat: an unknown arg falls back to full mode.
+_LOG_UNK="$(mktemp)"
+PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$_LOG_UNK" bash "$_SBX_SCRIPT" --print-state bogusarg >/dev/null 2>&1
+check "unknown --print-state arg falls back to full mode (forward-compat)" \
+    bash -c '[ "$(wc -l < "$1" | tr -d " ")" -gt 1 ]' -- "$_LOG_UNK"
+
+rm -rf "$_PS_HOME" "$_PS_BIN" "$_LOG_LIGHT" "$_LOG_FULL" "$_LOG_UNK" 2>/dev/null || true
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

@@ -266,6 +266,22 @@ All three:
 }
 ```
 
+> **`workspace_path`** (per sandbox) is read from the `WORKSPACE.json` marker
+> sandy writes into each sandbox on launch; it is an empty string for a legacy
+> sandbox that predates the marker. It is a stable field of the contract — a
+> consumer (e.g. sandy-ui) may key its UI on it.
+
+> **Light mode — `sandy --print-state light`.** A second positional arg selects
+> a cheap variant for pollers: it makes **exactly one** docker invocation (vs.
+> ~nine) by (a) skipping `installed_images` — the key stays present as `[]` —
+> and (b) deriving `docker_reachable`/`running_containers` from a single
+> `docker ps` (its exit status is the reachability signal) instead of the
+> `docker info` gates. All non-docker fields (`sandboxes`, `approvals`,
+> `workspace_path`, locks) are identical to full mode. The arg is
+> **forward-compatible**: any value other than `light` (including none, and an
+> older sandy that ignored `$2`) yields full mode, so a consumer may pass
+> `light` unconditionally. No `schema_version` bump — the shape is unchanged.
+
 ### `--validate-config`
 
 Takes a path to a `.sandy/config`-style file. Emits:
