@@ -1,0 +1,142 @@
+# Prompt: Deep Competitive & Positioning Analysis of sandy (July 2026)
+
+> **How to run this**: open a fresh Claude Code session at the sandy repo root (host or inside sandy — both work; see *Environment caveats*), set maximum effort/thinking, and paste or reference this file as the task. **Pre-flight (host-side, once):** `git submodule update --init research/sandbox-runtime research/hyperlight` — these two are currently unfetched; everything else is readable via `git show` even with empty worktrees. This is a multi-hour, research-grade job: prefer completeness and verification over speed. If subagent / multi-agent orchestration is available, use it as suggested in *Method*; otherwise run the phases sequentially. The deliverable is a **report**, not code changes.
+
+---
+
+## Role and mission
+
+You are a strategic technical analyst embedded in the `sandy` repository. Your mission has three parts:
+
+1. **Comparative deep-dive**: analyze sandy against every related project checked out under `research/`, grounded in their actual code and docs (not reputation).
+2. **Landscape expansion**: find repos/products *not yet* in `research/` that belong in sandy's competitive or inspiration set, and recommend which (if any) to add as submodules.
+3. **Strategic synthesis**: deliver an evidence-based verdict on whether sandy occupies a unique, defensible position; which observed improvements from other projects sandy should adopt (scored and prioritized); and what sandy should explicitly *not* build.
+
+You are writing for the maintainer (a single developer who runs this as a disciplined solo project with release engineering, a spec, and a large test suite). Be direct, evidence-first, and willing to deliver uncomfortable conclusions — a finding of "this niche is closing" is more valuable than reassurance.
+
+## What sandy is (baseline — verify, then take as given)
+
+Sandy is *"an isolated sibling for your coding agents"*: a **single-file bash launcher** (~6,200 lines; check `SANDY_VERSION` and `git log -5` for the state at analysis time) plus a small **Go egress proxy** (`proxy/`, ~2,200 lines) that runs Claude Code, Gemini CLI, OpenAI Codex CLI, and OpenCode — alone or side-by-side in multi-pane tmux — inside a hardened Docker container. Core properties (details in `SPECIFICATION.md`, `CLAUDE.md`, `README.md`):
+
+- **Per-project sandboxes**: each workspace gets its own `~/.sandy/sandboxes/<name>-<hash>` holding agent state, per-project package caches (pip/npm/go/cargo/uv), and a `.venv` overlay. "A venv for your coding agent" is the historical framing.
+- **Credential ephemerality**: credentials are read from the host per-launch and mounted read-only/ephemerally; never persisted into sandbox state. Per-agent probe orders (API key vs OAuth), incl. materialized ephemeral `auth.json` for codex.
+- **Egress proxy, default-on** (v0.14.0, "M2.7"): `--internal` Docker network + dual-homed Go proxy sidecar; permissive mode blocks LAN/host/metadata everywhere (closing the macOS Docker Desktop gap); strict mode = allowlist-only. DNS redirection, SNI demux on 443, CONNECT for SSH, TCP-only by design (non-TCP fails closed at the network layer).
+- **Container hardening**: read-only root, cap-drops, resource limits, tmpfs home, protected host files/dirs mounted `:ro` (shell rc, git hooks/config, CI workflows, IDE dirs), submodule-gitdir protection, symlink-escape approval persistence, session-end detection for newly-appeared protected paths.
+- **Config tiers**: privileged vs passive keys with per-workspace approval for privileged keys set from committable config — a threat model most competitors don't even acknowledge (malicious `.sandy/config` in a cloned repo).
+- **Introspection & attestation**: `--print-schema` / `--print-state` / `--validate-config` (stable `schema_version: 1`), plus a read-only in-container marker `/etc/sandy-session.json` with a per-launch nonce.
+- **1.x promises**: sandbox forward-compat floor never moves above 1.0.0; introspection schema v1 stable; config-key tier semantics stable. Release discipline: rc soak, spec appendices kept in sync, `test/run-tests.sh` (~60 sections) + integration suite.
+- **Philosophy** (treat as evaluation criteria, not dogma — flag if the evidence says a pillar should bend): single file, `curl | bash` install, no host dependencies beyond Docker + POSIX userland, secure-by-default, fail-closed on proof / fail-open on uncertainty, "resist platform-ification; the single file is the point" (CROSS-CUTTING-SYNTHESIS-2026-06).
+
+**Working hypothesis about the target user** (test it, don't assume it): an individual developer running one or more coding agents with real credentials against real projects, who wants strong isolation without ceremony, on macOS or Linux. Not a platform team; not a CI fleet; not a SaaS.
+
+Anchor dates: 1.0.0-rc1 cut 2026-07-02; repo is now on `1.0.0-rc2-dev`. Today's landscape moves fast — **date-stamp every claim**.
+
+## Prior work — read first; build on it, don't redo it
+
+`research/` already contains a body of analysis. Read these before anything else, in this order, and treat them as your baseline. Your job is the **July-2026 delta**: verify which of their claims still hold, cover what they couldn't (projects added after; upstream changes since), and reconcile your recommendations with their open threads.
+
+| Doc | Date | What it settled |
+|---|---|---|
+| `CROSS-CUTTING-SYNTHESIS-2026-06.md` | 2026-06-07 | The most recent synthesis across 8 subprojects. Six themes: convergent egress proxies (validates M2.7 + bug-tax checklist), credential exfiltration as the biggest un-addressed gap, sandy's container hardening as best-in-class, version-introspection cheap wins, fail-closed discipline, pack-independent browser. Verdict: "Sandy is on exactly the right track… resist platform-ification." |
+| `per-project-isolation-landscape.md` | 2026-04-08 | Survey vs ~20 OSS competitors. Conclusion: Claude Code has **no native per-project isolation** — sandy's core differentiator. Names closest competitors (streamingfast/sbox, RchGrav/claudebox, aldrin/claude-sandbox) and 6 "learn-from" features never actioned. Flags Docker Sandboxes (Docker Inc.) as the emerging platform play. |
+| `FEATURE-ADOPTION-ANALYSIS.md` + `ADOPTION-CHECKLIST.md` | 2026-03-20 | CC `/sandbox` (srt-powered, Oct 2025) vs OpenShell vs sandy. Made domain-filtering "urgent" → later shipped as the M2.7 proxy. Verdicts: adopt domain filtering + violation logging + config validation; skip per-command sandboxing, L7, MITM, TUI, K8s. Explicitly rejected `dangerouslyDisableSandbox`-style escape hatches. Partially **superseded** — reconcile against what actually shipped. |
+| `IMPLEMENTATION-SKETCHES.md` | 2026-03-21 | Node.js proxy + SOCKS5 + YAML-policy sketches. **Historical**: the shipped proxy is Go/SNI-demux, YAML policies were never adopted. Useful as a record of roads not taken. |
+| `sandbox-comparison-gemini-cli.md` | 2026-04-10 | Sandy vs Gemini CLI sandboxing: sandy wins on hardening/LAN isolation/credentials/per-project isolation. Three unadopted ideas: `.env` masking, env-var sanitization, secret-file discovery scan. |
+| `HANDOFF_TO_SANDY.md` / `HANDOFF_TO_ALICE.md` | 2026-06-11 | Bidirectional pattern exchange with alice (jcronq/alice): torn-read fix (P1), event log, `sandy send`, credential dir-mount — inbound; egress isolation, protected files, symlink approval, introspection JSON, workspace mutex — outbound. |
+| `feature_implementation_voice.md` | 2026-04-10 | Voice input feasibility; recommends unbuilt "Approach D" host-side voice proxy (`SANDY_VOICE`). |
+| `plugin-skills-analysis.md` | 2026-03-20 | "0 skills" plugin display is a CC loader quirk, not a sandy bug. Open: is it fixed in current CC? |
+| `docs/POST_1.0_IDEAS.md` | live | The parking lot your recommendations must merge into — read it in full; every idea has status/target. |
+| `docs/ROADMAP_1.0.md` | 2026-07-02 | The 1.0 stability discipline and residual accepted risks (F3/F6 detection-only, F10 skipped). |
+
+### Open threads you must reconcile (from the docs above — verify each, then advance it)
+
+1. `.env`/secret-file protection in the workspace — repeatedly flagged "highest-value remaining", still unshipped (R2: any workspace secret is readable by the agent).
+2. Host-side credential broker (agentbox's git-shim relay as reference design) — "highest-value strategic item", POST_1.0.
+3. Violation/deny logging as a first-class surface (proxy deny-visibility currently partial).
+4. Torn-read retry + atomic tempfile-rename writes on shared JSON state.
+5. Voice input via host-side proxy (`SANDY_VOICE`) — unbuilt design.
+6. Retiring Linux iptables in favor of the proxy as single mechanism (gated on soak data).
+7. Codex auth version-churn (0.139 handled via ephemeral `auth.json` — check for newer breakage).
+8. YAML policies / richer config validation — effectively rejected; does new evidence reopen it?
+9. Never-actioned "learn-from" features: dev profiles (claudebox), `SANDY_GIT_COMMIT_POLICY` (aldrin), microVM/gVisor backend (`SANDY_RUNTIME` idea), devcontainer.json generation (trailofbits), API-request logging (nezhar).
+10. gstack: pin to release tag; generate skills for non-Claude panes.
+11. Plugin "0 skills" display — fixed upstream?
+12. Cheap convergent wins: `SANDY_FAIL_IF_NO_ISOLATION=1`, version-hygiene cluster (script_sha, checksum-verified upgrade, breaking-upgrade ack), `~/.ssh` copy audit.
+13. Doc-only queue: FIDO2 touch-gated push recipe; cmux orphan-on-close caveat.
+
+## Part 1 — Local comparator deep-dives (`research/` checkouts)
+
+For **each** repo below: characterize it from its actual code (cite paths), assess upstream trajectory (check the live GitHub repo — local pins lag upstream; note pin date vs upstream tip date), then answer its focus questions. One subagent per repo if you can parallelize.
+
+**Checkout-state warning (verified 2026-07-03):** most submodule *working trees are empty* — read content via `git -C research/<x> show HEAD:<path>` (and `git -C research/<x> ls-tree -r HEAD --name-only` to enumerate). `sandbox-runtime` and `hyperlight` have **no fetched objects at all**: either ask the maintainer to run `git submodule update --init research/sandbox-runtime research/hyperlight` on the host first, or analyze those two from upstream GitHub over the web. `claude-code-sandboxing` is not a repo — it's a one-line bookmark (`approach.md`) to the official docs at code.claude.com/docs/en/sandboxing; treat that URL as required reading and fold it into the claude-code dive.
+
+- **`alice` (jcronq/alice)** — sibling project with an active handoff protocol; **very active** (600+ commits, tip ~2026-07-01). It is a *persistent* personal agent runtime: one long-lived container (`docker exec` access, `restart: unless-stopped`), Signal as primary transport, an Obsidian-style git-backed memory vault with sleep-mode synthesis, a two-hemisphere Speaking/Thinking design with a constitutional boundary, and a label-driven autonomous idea→PR state machine. Notably it has **no egress control and publishes ports** — nearly the opposite lifecycle and network posture to sandy. Focus: (a) the division of labor — alice = autonomous-agent lifecycle, sandy = per-session isolation substrate; is that framing stable, and could sandy serve as alice's isolation layer (alice-in-sandy)? (b) which HANDOFF_TO_SANDY items (torn-read fix, event log, `sandy send`, cred dir-mount) actually shipped in sandy since June; (c) what alice built since June that creates *new* inbound candidates (e.g. the label-driven state machine as a pattern for long-running sandy sessions; event-log design); (d) convergence risk, honestly assessed; (e) draft the contents of the next HANDOFF pair, both directions.
+- **`bulkhead` (pmembrey/bulkhead)** — **newly added submodule; no prior synthesis covers it.** Rust CLI wrapping the Dev Container CLI; early (~34 commits, self-described unstable) but with three ideas worth stealing-or-rejecting explicitly: (a) **namespace-flag guard** — config-supplied `run_args` rejected if they contain `--pid/--network/--ipc/--uts/--userns` (same threat class as sandy's passive-privileged tiering; compare mechanisms); (b) **supply-chain container defaults** — `NPM_CONFIG_IGNORE_SCRIPTS=true`, `NPM_CONFIG_MINIMUM_RELEASE_AGE=1440` (no npm packages younger than a day), `PYTHONDONTWRITEBYTECODE`; cheap hardening sandy's images could adopt; (c) **clone mode** — the agent works in a physically separate clone (git metadata isolated by construction, worktrees allowed inside) vs sandy's `:ro`-mount approach to `.git` internals; compare guarantees and UX. Also note what sandy does better (egress on by default — bulkhead ships firewall tooling but "network access is not blocked by default"; per-project credential sandboxes; multi-agent). Verdict on whether bulkhead's devcontainer-native approach threatens or validates sandy's hand-rolled `docker run`.
+- **`agentbox` (madarco/agentbox)** — **very active** (680+ commits, v0.21.x, tip ~2026-06-30). Reference design for the credential-broker thread: git credentials stay on the local machine with **per-push permission requests**. Focus: (a) extract the broker mechanism precisely enough to sketch sandy's version (the "highest-value strategic item"); (b) its **live snapshot/checkpoint** system (sub-second box resume, auto-pause) — is checkpointing meaningful for sandy's per-session model or strictly a lifecycle feature; (c) cloud teleport (Hetzner/Vercel/Daytona/e2b) — reaffirm or revise the June "ignore multi-cloud/DinD" verdict; (d) its multi-agent dashboard vs sandy's tmux panes.
+- **`sandbox-runtime` (anthropic-experimental, srt) + `claude-code` (anthropics/claude-code) + the sandboxing docs bookmark** — the **existential trio**. The claude-code submodule is the public docs/changelog/plugins repo (CC itself is closed-source), and it already contains the key artifacts — go straight at them: `examples/settings/settings-bash-sandbox.json` (native `sandbox` schema: `enabled`, `autoAllowBashIfSandboxed`, `allowUnsandboxedCommands`, `excludedCommands`, and a `network` block with `allowedDomains`, `httpProxyPort`, `socksProxyPort`, `allowLocalBinding`, `allowUnixSockets`, `enableWeakerNestedSandbox`); CHANGELOG entries for **`sandbox.credentials`** (blocking sandboxed commands from reading credential files/secret env — a direct move onto sandy's credential-protection turf), per-session remembered network allows, git-worktree write-allowlist scoping, macOS `allowAppleEvents`; and `.devcontainer/` with its `init-firewall.sh` NET_ADMIN pattern (Anthropic's own reference container firewall). Focus: (a) trajectory — plot the sandbox-related changelog over time; at current velocity, when does CC-native cover per-project isolation and credential scoping, the two axes sandy leads on? (b) what remains durable for sandy (cross-agent uniformity, whole-session isolation incl. MCP servers and arbitrary tools vs bash-only sandboxing, untrusted-repo protected files, multi-agent, attestation) — stress-test each; (c) composition: does CC's native sandbox work *inside* sandy's container today (nested sandboxing, `enableWeakerNestedSandbox`), and should sandy enable, disable, or embrace it? (d) srt's mechanism (bubblewrap/seatbelt + proxy) vs sandy's container+proxy — where each is stronger.
+- **`OpenShell` (NVIDIA)** — **do not rubber-stamp the June "ignore" verdict: this is now the most active repo in the set** (900+ commits, tip ~2026-07-02, alpha on PyPI). It has become a direct competitor: sandboxed execution via Docker/Podman/**MicroVM**, **deny-first egress by default**, a hot-reloadable **L7 gateway enforcing HTTP method+path policy** (finer than sandy's host-level allowlist), declarative YAML policies, multi-agent (claude/opencode/codex/copilot), agent-first policy-authoring skills. Focus: (a) is the June "ignore the control-plane/K8s ambitions" verdict still right for the *core* runtime, or has OpenShell crossed into sandy's individual-developer niche? (b) L7 method/path policy and policy hot-reload: what would each cost sandy, and does the threat model justify them (POST-to-exfil vs GET-to-read distinctions)? (c) their deny-first default vs sandy's permissive default — argue both sides with evidence; (d) NVIDIA's institutional weight: does it change adoption dynamics?
+- **`hyperlight` (hyperlight-dev, CNCF)** — unfetched; analyze from upstream. Micro-VM library (µs-scale, no guest OS) — not a drop-in alternative. Prior verdict: ignore. Keep the dive short but connect it to the open `SANDY_RUNTIME` (gVisor) idea, OpenShell's MicroVM backend, and Docker Sandboxes' microVM play: across all of these, is there a *cheap, opt-in* path to a stronger-than-shared-kernel boundary for sandy (e.g. `--runtime=runsc` passthrough), and what would it actually buy against sandy's threat model?
+- **`gstack` (rappdw fork of garrytan/gstack)** — the maintainer's own skill pack, already integrated; local pin ~3 months stale. Not a sandbox — keep it brief: the two open threads (pin skill packs to release tags rather than moving branches; generating equivalent skills for non-Claude panes), upstream activity check, and whether skill packs remain a differentiator or a maintenance liability.
+
+For each: end with a **"sandy should take / sandy should ignore / sandy already does it better"** triple, each item with evidence.
+
+## Part 2 — Landscape expansion (find what's missing)
+
+Search beyond `research/`. The prior surveys already considered the following — treat as the **exclusion baseline** (re-mention one only if something material changed since its survey date):
+
+> Gemini CLI; alice; agentbox; streamingfast/sbox; RchGrav/claudebox; aldrin/claude-sandbox; trailofbits/claude-code-devcontainer; nezhar/claude-container; nikvdp/cco; nkrefman/claude-sandbox; Z7Lab/claude-code-sandbox; todd-working/claude-code-container; tintinweb/claude-code-container; koogle/claudebox; boxlite-ai/claudebox; webcoyote/clodpod; webcoyote/sandvault; textcortex/spritz; Anthropic srt + CC `/sandbox`; OpenShell; Docker Sandboxes (Docker Inc.); kubernetes-sigs/agent-sandbox; alibaba/OpenSandbox; Cloudflare Sandbox SDK; gVisor; Kata; hyperlight; bulkhead; gstack.
+
+Sweep these **categories**, each with multiple search modalities (GitHub topic/code search; awesome-lists e.g. awesome-claude-code; HN/lobste.rs archives; vendor docs/blogs; recent "agent sandboxing" writeups):
+
+1. **Container-based agent sandboxes / launchers** (sandy's direct genre) — e.g. queries: `claude code docker sandbox`, `AI coding agent container isolation`, `gemini cli sandbox wrapper`, `codex sandbox docker`.
+2. **Vendor-native sandboxing** — Claude Code (`sandbox.*` settings incl. `allowedDomains` and `sandbox.credentials` — see Part 1), Codex (Landlock/seatbelt), Gemini CLI, OpenCode, Cursor/Windsurf CLI agents, GitHub Copilot CLI: what does each now ship natively, and what's the trajectory? Track specifically: network allowlisting, credential/secret shielding, and per-project scoping — the three axes that decide whether the uniform-external-sandbox niche holds. This feeds the existential analysis directly.
+3. **Agent session/fleet managers with isolation features** — container-use (Dagger), conductor, vibe-kanban, cmux, sculptor, crystal, and similar: they approach from UX and add isolation later — are any becoming "sandy plus a GUI"?
+4. **Cloud/microVM execution sandboxes** — e2b, Daytona, Modal, microsandbox, Arrakis, Firecracker-based runners: different niche (SaaS/ephemeral compute), but note any local-first moves.
+5. **Egress-control / agent-firewall layers** — standalone proxies or LSM/eBPF tools purpose-built for agent traffic (e.g. Coder Boundary-class tools, squid/mitmproxy-based agent gateways, LLM-firewall projects): compare against sandy's proxy on mechanism and policy surface.
+6. **Secret-brokering for agents** — anything implementing the "credentials never enter the sandbox" pattern (relates to open thread #2).
+
+**Quality bar for the watchlist**: active within ~6 months, real adoption signal (stars trajectory, releases, named users) *or* a genuinely novel mechanism worth studying even if small. For each candidate: name, URL, category, mechanism (container/microVM/LSM/proxy/policy/manager/broker), last activity, 2-3 sentences on why it matters to sandy, and a verdict: **add-submodule / watch / noted-and-dismissed**. Recommend at most ~5 submodule additions — the bar is "will reward code-level study", not "is relevant".
+
+## Part 3 — Positioning verdict
+
+Answer explicitly, with evidence, in this order:
+
+1. **The field, mapped**: a taxonomy of the space (the six categories above collapse into 3-4 strategic groups) and a comparison matrix. Suggested axes: isolation boundary (fs / network / kernel / credentials); per-project isolation; multi-agent support; credential model (env-passthrough / ephemeral-file / broker / none); egress granularity (none / LAN-block / allowlist / L7); workspace-secret protection; untrusted-repo protections; attestation/introspection surface; install footprint & host deps; platform coverage (Linux/macOS/Windows); agent coverage; session UX; maintenance health (activity, tests, release discipline). Sandy's row must cite script/spec evidence, not aspiration.
+2. **Unique position**: state sandy's positioning in one paragraph a stranger could repeat. Then the top ~3 genuine differentiators, each with (a) evidence, (b) nearest substitute and why it falls short, (c) how durable the advantage is (what it would take a competitor to replicate). Current candidates to stress-test, not to rubber-stamp: per-project credential/agent-state sandboxes; multi-agent side-by-side in one hardened container; egress-proxy-by-default closing the macOS gap; config-tier defense against malicious committed config; single-file auditability + spec/test discipline; self-attestation marker.
+3. **Where sandy is structurally behind** — and whether it matters for the target user: kernel-grade boundaries (microVM/gVisor); Windows; GUI/fleet UX; ecosystem velocity of vendor-native solutions; anything Part 1/2 surfaced. Distinguish "behind and must respond", "behind and fine (different niche)", "behind and should say so honestly in docs".
+4. **Existential scenarios** (rate likelihood × impact, with reasoning): (a) CC native sandboxing gains per-project isolation + credential scoping; (b) Docker Sandboxes (or an OS vendor) makes hardened agent containers a checkbox; (c) every agent vendor ships good-enough built-in sandboxing, fragmenting the "uniform layer" value; (d) the multi-agent pattern itself fades (or explodes). For each: sandy's best response, and what early signal to watch.
+5. **Target user, revisited**: does the evidence support the working hypothesis? Is there an adjacent user (small teams? security-conscious enterprises running local agents? CI?) that sandy serves *almost* for free — and should it?
+6. **The anti-roadmap**: what sandy should explicitly not build, reaffirming or revising every prior "ignore/skip" verdict with current evidence.
+
+## Part 4 — Feature adoption recommendations
+
+Mine Parts 1-2 for features/designs with **observed value** (shipped, used, praised, or battle-tested elsewhere — not merely present). For each candidate, score 1-5 on:
+
+- **Impact** for sandy's target user;
+- **Evidence** that it earns its keep in the source project (releases/issues/docs signal — cite);
+- **Fit** with sandy's constraints: single-file bash + small Go proxy; no new host deps beyond Docker; secure-by-default; must not break 1.x promises (sandbox floor, `schema_version: 1`, key-tier semantics) or the rc discipline; solo-maintainer test + spec + doc burden (every change touches SPECIFICATION appendices and `run-tests.sh` per `CLAUDE.md`);
+- **Cost** (inverse; implementation + new attack surface + ongoing maintenance).
+
+Verdict tiers: **adopt-1.0.x** (post-rc patch-scale) / **adopt-1.1** (additive minor) / **2.0-candidate** (breaks a promise; batch for the next major) / **watch** (re-evaluate on a named trigger) / **reject** (with the sentence you'd put in POST_1.0_IDEAS to prevent relitigating). Reconcile every verdict against the 13 open threads and against `docs/POST_1.0_IDEAS.md` — your output should *merge into* that file, not compete with it.
+
+For the **top 5**, add implementation sketches at the "experienced maintainer could start tomorrow" level: mechanism, config-key tier (privileged/passive/env-only), failure modes, test sections to add, spec appendices touched.
+
+Include a **security-benchmark sub-section**: an honest table of sandy's accepted risks (shared kernel; workspace `.env` readable; detection-only protected-file appearance; permissive-mode internet exfil; strict-mode exfil-to-allowlisted-host) versus which comparators solved each and at what cost — this grounds the adoption scores in threat-model reality rather than feature envy.
+
+## Method, verification, and honesty rules
+
+- **Phase 0**: read the prior-work table + `SPECIFICATION.md` + skim the sandy script's table of contents; record `SANDY_VERSION`, HEAD commit, and today's date into the report header.
+- **Phase 1**: local deep-dives (parallel subagents; one per repo). Ground every claim in a file path.
+- **Phase 2**: web sweep (parallel by category). Exclusion list applied; verify each candidate's activity on GitHub before it enters the watchlist.
+- **Phase 3**: **adversarial verification pass** on your own draft findings: for every "sandy lacks X" — grep the sandy script + SPECIFICATION first (absence of evidence must be labeled "not found in", not "does not exist"); for every "project Y does X" — open Y's code or official docs (two independent sources for web-only claims). Kill or downgrade anything that fails.
+- **Phase 4**: scoring + synthesis + report.
+- **Environment caveats** (verified 2026-07-03): (a) `git status` at the repo root may `fatal:` on submodule gitdir internals when run inside a sandy container — use `--ignore-submodules=all`; (b) most submodule **working trees are empty** — enumerate with `git -C research/<x> ls-tree -r HEAD --name-only` and read with `git -C research/<x> show HEAD:<path>`; (c) `sandbox-runtime` and `hyperlight` have **no objects** — host-side `git submodule update --init` or web fallback (their `.gitmodules` URLs are SSH, which won't fetch from inside the container); (d) submodule pins are snapshots (gstack is ~3 months stale) — always check upstream tip via the GitHub web/API and analyze the *upstream*, using the pin only to know what sandy's prior analyses saw; (e) if running inside sandy, egress is permissive — public web and GitHub API work.
+- **Honesty rules**: date-stamp claims; mark confidence (High/Med/Low) on every non-trivial finding; keep observation, inference, and recommendation visually distinct; when prior docs and current reality disagree, say so explicitly (that delta is the product); no grade inflation on sandy — the maintainer wants the truth, not a pep talk.
+
+## Deliverables
+
+1. **`research/POSITIONING-DEEP-DIVE-2026-07.md`** — the report. Structure: (0) header with version/date/method note; (1) executive summary ≤1 page **leading with the positioning verdict**; (2) the field, mapped (taxonomy + matrix); (3) per-comparator deep-dives (Part 1 order); (4) landscape watchlist (Part 2 table); (5) positioning analysis (Part 3, incl. existential scenarios and anti-roadmap); (6) feature adoption table + top-5 sketches + security benchmark (Part 4); (7) reconciliation table for the 13 open threads (each: verdict, changed-priority?, evidence); (8) questions only the maintainer can answer (e.g. growth ambition vs personal tool, appetite for a 2.0, alice collaboration intent, willingness to add a second distributed binary); (9) appendix: sources, per-claim confidence notes, method log.
+2. **A proposed-deltas block for `docs/POST_1.0_IDEAS.md`** (new entries + status changes), included at the end of the report as a ready-to-paste section. Do **not** edit POST_1.0_IDEAS.md or any other repo file directly.
+3. **Watchlist actions**: the ≤5 recommended submodule additions with exact `git submodule add` commands — as recommendations in the report only.
+
+Constraints: read-only analysis — no code changes, no submodule additions, no commits. Tables for enumerable facts, prose for judgment. The report must stand alone: a reader who never saw this prompt should be able to follow it end to end.
