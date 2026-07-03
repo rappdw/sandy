@@ -3982,7 +3982,7 @@ check "proxy subnet pool spans both 10.200 and 10.201 /16s" \
     bash -c 'printf "%s\n" "$1" | grep -q "^10.200.0.0/24$" && printf "%s\n" "$1" | grep -q "^10.201.255.0/24$"' -- "$_PROXY_CANDS"
 # Self-heal + exhaustion handling and the orphan-reaper must be present.
 check "proxy network exhaustion reaps orphans then retries" \
-    bash -c 'grep -q "_sandy_reap_orphan_proxy_networks && _sandy_try_create_sidecar" "$1"' -- "$_PX_SCRIPT"
+    bash -c 'grep -q "_sandy_reap_orphan_networks && _sandy_try_create_sidecar" "$1"' -- "$_PX_SCRIPT"
 check "orphan reaper only removes networks with no attached container" \
     bash -c 'grep -q "if \[ -z \"\$attached\" \]; then" "$1"' -- "$_PX_SCRIPT"
 
@@ -4445,6 +4445,43 @@ check "unknown --print-state arg falls back to full mode (forward-compat)" \
     bash -c '[ "$(wc -l < "$1" | tr -d " ")" -gt 1 ]' -- "$_LOG_UNK"
 
 rm -rf "$_PS_HOME" "$_PS_BIN" "$_LOG_LIGHT" "$_LOG_FULL" "$_LOG_UNK" 2>/dev/null || true
+
+# ============================================================
+echo ""
+echo "§64: orphan-network reaper — generalized to sandy_net_* + PID-safe + eager (#20)"
+# ============================================================
+# Exercise the pure reaper logic with a `docker` shell-function shim: a mix of a
+# live-PID net (this shell's own $$), a dead-PID orphan, a dead-PID net WITH an
+# attached container, and a non-sandy net. Only the dead-PID no-container one
+# may be removed.
+check "reaper removes only dead-PID, no-container sandy networks" \
+    bash -c '
+        RM_LOG=$(mktemp)
+        docker() {
+            case "$1 $2" in
+                "network ls") printf "%s\n" "sandy_net_$$" sandy_net_2147483646 sandy_egress_2147483645 othernet_123 ;;
+                "network inspect") case "$3" in sandy_egress_2147483645) echo "livecontainer" ;; *) echo "" ;; esac ;;
+                "network rm") echo "$3" >> "$RM_LOG" ;;
+            esac
+        }
+        '"$(sed -n '/^_sandy_reap_orphan_networks()/,/^}$/p' "$_SBX_SCRIPT")"'
+        _sandy_reap_orphan_networks || true
+        grep -q "^sandy_net_2147483646$" "$RM_LOG" \
+            && ! grep -q "sandy_net_$$" "$RM_LOG" \
+            && ! grep -q "sandy_egress_2147483645" "$RM_LOG" \
+            && ! grep -q "othernet" "$RM_LOG"
+    '
+# The reaper must match the isolated-bridge class too (the original leak), not
+# just the proxy nets.
+check "reaper grep covers sandy_net_ (isolated bridge), not just proxy nets" \
+    grep -qE "grep -E .\^sandy_\(sidecar\|egress\|net\)_" "$_SBX_SCRIPT"
+# It must run EAGERLY at launch (inside ensure_network), not only on the
+# proxy-allocation-failure retry.
+check "ensure_network calls the reaper eagerly (before allocating)" \
+    bash -c 'sed -n "/^ensure_network()/,/^}$/p" "$1" | grep -q "_sandy_reap_orphan_networks"' -- "$_SBX_SCRIPT"
+# PID-liveness gate present (what makes eager reaping concurrent-safe).
+check "reaper skips a network whose owning PID is still alive (kill -0 gate)" \
+    bash -c 'sed -n "/^_sandy_reap_orphan_networks()/,/^}$/p" "$1" | grep -q "kill -0 \"\$net_pid\""' -- "$_SBX_SCRIPT"
 
 # ============================================================
 # Summary

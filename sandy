@@ -3733,6 +3733,16 @@ PROXY_LOG_FILE=""         # host path of the persisted proxy log (survives clean
 PROXY_LOG_PID=""          # PID of the background `docker logs -f` streamer
 
 ensure_network() {
+    # Eagerly reclaim our own orphaned networks (dead sessions that couldn't run
+    # their cleanup trap) BEFORE allocating — this is the fix for the "all
+    # predefined address pools have been fully subnetted" failure that
+    # accumulates across crash / Cmd-Q / SIGKILL cycles. Safe by construction:
+    # the reaper only removes networks whose owning PID is dead and that have no
+    # container attached, so a live or mid-setup concurrent launch is untouched
+    # (#20). Covers both proxy (sidecar/egress) and non-proxy (net) topologies.
+    if command -v docker >/dev/null 2>&1; then
+        _sandy_reap_orphan_networks || true
+    fi
     if [ "$_SANDY_PROXY_ON" = true ]; then
         ensure_proxy_networks
         return
@@ -3795,18 +3805,38 @@ _sandy_try_create_sidecar() {
     return 1
 }
 
-# Self-heal: reap sandy's OWN orphaned proxy networks — a sandy_sidecar_*/
-# sandy_egress_* whose owning session is gone (no attached container, or its
-# sandy-proxy-<pid> sidecar has exited). A SIGKILL'd / OOM'd / closed-terminal
-# sandy can't run its cleanup trap, leaving the network (and its subnet) behind;
-# without this, a few such orphans permanently consume candidate subnets. We only
-# touch networks with NO live container attached, so an active session is never
-# disturbed. Returns 0 if it freed at least one, 1 otherwise.
-_sandy_reap_orphan_proxy_networks() {
-    local freed=1 net attached
+# Self-heal: reap sandy's OWN orphaned Docker networks — a sandy_net_* (the
+# isolated bridge in non-proxy mode), or a sandy_sidecar_* / sandy_egress_*
+# (the proxy topology) — whose owning session is gone. A SIGKILL'd / OOM'd /
+# closed-terminal sandy can't run its cleanup trap, leaving the network (and its
+# subnet) behind; enough orphans exhaust the candidate pools and new launches
+# fail with "all predefined address pools have been fully subnetted". This
+# accumulates fast under repeated launch/close/relaunch cycles (e.g. sandy-ui).
+#
+# A network is removed ONLY when BOTH hold, so a live OR mid-setup concurrent
+# session is never disturbed:
+#   1. its owning PID (the trailing field of sandy_<kind>_<pid>) is not alive, and
+#   2. it has no container attached.
+# The PID check is what makes EAGER reaping (on every launch) concurrent-safe: a
+# launch that just created its network but hasn't attached its container yet
+# still has a live PID, so it's skipped. PID reuse (recycled to a live unrelated
+# process) yields a conservative false-negative — we don't reclaim that subnet;
+# the user can `docker network prune` — same tradeoff as the workspace lock.
+# Returns 0 if it freed at least one network, 1 otherwise.
+_sandy_reap_orphan_networks() {
+    local freed=1 net net_pid attached
     for net in $(docker network ls --format '{{.Name}}' 2>/dev/null \
-            | grep -E '^sandy_(sidecar|egress)_' || true); do
-        # Containers still attached to this network? If any, it's live — skip.
+            | grep -E '^sandy_(sidecar|egress|net)_' || true); do
+        net_pid="${net##*_}"   # trailing field: sandy_<kind>_<pid> → <pid>
+        # Owner still alive? numeric PID + kill -0. If so, skip — never touch a
+        # live/mid-setup session's network. Non-numeric → fall through to the
+        # container check (can't prove liveness).
+        if [ -n "$net_pid" ] && [ "$net_pid" -eq "$net_pid" ] 2>/dev/null \
+           && kill -0 "$net_pid" 2>/dev/null; then
+            continue
+        fi
+        # Any container still attached? If so it's live — skip (and `network rm`
+        # would refuse anyway).
         attached="$(docker network inspect "$net" \
             --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | tr -d '[:space:]')"
         if [ -z "$attached" ]; then
@@ -3824,8 +3854,9 @@ ensure_proxy_networks() {
     info "Creating egress-proxy networks (mode=$_SANDY_PROXY_MODE)..."
     if ! _sandy_try_create_sidecar; then
         # Every candidate overlapped. Before giving up, reap our own orphaned
-        # proxy networks (dead sessions) and retry once.
-        if _sandy_reap_orphan_proxy_networks && _sandy_try_create_sidecar; then
+        # networks (dead sessions) and retry once. (The eager reap in
+        # ensure_network already ran, but a session may have died in between.)
+        if _sandy_reap_orphan_networks && _sandy_try_create_sidecar; then
             info "Reclaimed an orphaned proxy subnet from a dead session."
         else
             error "Could not create the egress-proxy sidecar network — every candidate"
