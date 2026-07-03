@@ -515,6 +515,46 @@ some workloads to need `runc`."
 
 ---
 
+## rw ephemeral credential copies (fix in-session OAuth-refresh EROFS)
+
+**Target: 1.1+.** Filed 2026-07-03, from the v1.0.0-rc1 manual test plan (§2.5).
+
+### What
+
+Sandy mounts the ephemeral OAuth credential copies **read-only** for Gemini
+(`oauth_creds.json`/`tokens.json`) and Codex (`auth.json`) — the copy lives in a
+0700 `mktemp -d`, is bind-mounted `:ro`, and is discarded on exit. The `:ro`
+prevents token-refresh races and any write-back to the host creds. The
+side-effect: when the agent CLI tries to **cache a refreshed token** mid-session,
+it hits `EROFS: read-only file system` (Gemini surfaces this as a loud
+`CRITICAL: Unhandled Promise Rejection`; Codex is documented to require a manual
+re-login when the token expires).
+
+The idea: mount the **ephemeral copy read-WRITE** instead of `:ro`. Because it's
+a throwaway `mktemp` copy (never the host file), the CLI could cache/refresh into
+it freely, the refreshed token would live only for the session, and the host
+credentials would still never be written. This keeps the security property that
+matters (no write-back to host, no cross-session token leakage) while removing
+the EROFS crash and enabling in-session refresh.
+
+### Why deferred
+
+It relaxes a deliberate `:ro` invariant that predates 1.0 (April; commit
+`56c61bb3` for Gemini), so it wants its own soak and a clear-eyed check that
+"rw on the ephemeral copy" truly can't leak to the host on any agent's write
+path (e.g. an agent that follows a symlink, or writes a sibling file). Not a
+correctness bug today — just UX noise — so post-1.0.
+
+### Notes
+
+- Moot for the case that surfaced it (Gemini free-tier OAuth is now dead
+  upstream — see issue #21), but applies to any still-valid refreshing auth
+  path (Vertex/ADC, Codex OAuth, a future restored Gemini tier).
+- If adopted, revisit the Codex "re-login when the token expires" doc note and
+  the Gemini `:ro` rationale comment (`sandy` ~5455) together.
+
+---
+
 ## Doc note: `SANDY_SSH=agent` + FIDO2 key = touch-gated push, today
 
 **Target: 1.0.1 (doc-only).** Filed 2026-06-29, from the same exchange as the
