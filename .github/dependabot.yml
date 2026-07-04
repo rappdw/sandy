@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Egress proxy (Go module). The proxy is the network chokepoint, so keeping its
+  # dependencies patched is a security concern, not just hygiene.
+  - package-ecosystem: gomod
+    directory: /proxy
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(proxy)"
+
+  # GitHub Actions used by the CI workflows (checkout, cache, setup-go, codeql).
+  # Catches upstream action versions with known issues and keeps SHAs current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(actions)"
