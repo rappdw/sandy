@@ -1,0 +1,12 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/rappdw/sandy/security/advisories/new
+    about: >-
+      Do NOT open a public issue for security bugs. Open a private GitHub
+      security advisory, or email rappdw@gmail.com. See SECURITY.md.
+  - name: Question or discussion
+    url: https://github.com/rappdw/sandy/discussions
+    about: >-
+      For usage questions, "is this supposed to work?", and general ideas, use
+      Discussions. Check the README and run doctor.sh first.
