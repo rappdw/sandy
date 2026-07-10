@@ -622,6 +622,204 @@ terminals would generalize it).
 
 ---
 
+## Role-based multi-session orchestration (`SANDY_ROLE`) — plan/implement/verify
+
+**Target: 1.1 (prototype on a branch sooner).** Filed 2026-07-07. **Full design
+doc: `docs/ROLES_DESIGN.md`** — decisions are settled there; this is just the
+pointer.
+
+One-paragraph version: run plan → implement → verify as three *independent
+long-lived interactive sandy sessions* in tmux panes (subscription-friendly —
+headless `-p` loops were explicitly rejected on commercial-model grounds), each
+with a role-appropriate personality, model, and even agent product (planner on
+codex, implementer on claude — mixed-vendor verification is the strongest
+adversarial configuration). Handoff via `handoff/*.md` files in the shared
+workspace; turns passed by a dumb host-side orchestrator reusing the channel-relay
+`tmux send-keys` mechanism. The enabling sandy change is small: `SANDY_ROLE=<name>`
+suffixes the sandbox identity + workspace lock so concurrent same-workspace
+sessions become possible, each with its own isolated per-role sandbox
+(personality home, own history, zero context bleed). Additive passive key →
+clean 1.1 material.
+
+---
+
+## Warn on env-vs-config credential conflict (silent env-wins override)
+
+**Target: 1.0.1 (fast-follow).** Filed 2026-07-08, from a real debugging session
+(cost a `/proc` forensic to diagnose — the failure was completely silent).
+
+### What
+
+When a recognized key — especially a **credential** (`CLAUDE_CODE_OAUTH_TOKEN`,
+`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, …) — is set in **both**
+the ambient process environment **and** a sandy config source
+(`~/.sandy/{config,.secrets}` or workspace `.sandy/*`) with a **different
+value**, sandy silently uses the env value and drops the config one. Emit a
+one-line warning naming the key and which source won, e.g.:
+
+> `CLAUDE_CODE_OAUTH_TOKEN is set in your environment; using that and ignoring the different value in ~/.sandy/.secrets (env wins over config).`
+
+### Why (the motivating real-world case)
+
+A user set `CLAUDE_CODE_OAUTH_TOKEN` in `~/.sandy/.secrets` **and** had a token
+exported into the shell via `~/.secrets/env.sh` (a *different* secrets file —
+nasty naming collision: `~/.secrets/env.sh` vs `~/.sandy/.secrets`). Sandy's
+env-snapshot (`sandy:3072`) records the ambient token as authoritative and
+`_load_sandy_config` (`sandy:3087`) silently skips the `.secrets` value. The
+session then *appeared* to run as the wrong (personal) account, and a long
+multi-step diagnosis followed — requiring a read of the agent process's real
+env from `/proc` (Claude Code scrubs the token from Bash-subprocess env, so
+`echo $CLAUDE_CODE_OAUTH_TOKEN` in-container is misleading) before the truth
+emerged: **auth was actually the enterprise token all along; the "wrong
+account" was the stale seeded `oauthAccount` display** (see below). The
+diagnosis was only settled by a capability oracle (a gated-tier model working
+at all proves which account is live).
+
+Two lessons, one per bug: (a) with **two config sources silently in play**,
+nobody — user or tooling — could say *which* token was active without
+forensics; the conflict warning makes the winner explicit at launch. (b) The
+**display bug did the actual damage** here: `/status`-level identity said
+"personal" while auth was corp, which is what sent the debugging down the
+wrong path (and for an enterprise user, a security tool misreporting the
+active org is trust-corroding in itself).
+
+### Design notes
+
+- The precedence itself stays (env-wins is correct Unix semantics and CI/test
+  harnesses rely on it — `SANDY_AUTO_APPROVE_PRIVILEGED`, etc.). **Only add the
+  warning**; do not change who wins.
+- The env-snapshot already knows exactly which keys were env-set at startup
+  (`_SANDY_ENV_SET_KEYS`, `sandy:3061-3077`). The warning is: for each key in
+  that set that *also* appears in a loaded config file with a different value,
+  warn once. Cheapest hook is inside `_load_sandy_config`'s skip branch
+  (`sandy:3087-3089`) — when skipping a key because it's env-set, compare the
+  file value to the live env value and warn on mismatch.
+- Consider surfacing the same conflict in `--validate-config` output so a
+  frontend/CI can see it without launching.
+- Related, and in the motivating case the bug that **actually bit**: sandy
+  copies the host's `oauthAccount` block into the sandbox `.claude.json` and
+  never reconciles it with an explicitly-set token (`grep oauthAccount sandy`
+  → 0 hits; seed-once at `sandy:5159-5172`), so the session reports the wrong
+  account/org even when auth is correct — misleading the user AND any
+  debugging that trusts it. Fix: strip `oauthAccount` when
+  `CLAUDE_CODE_OAUTH_TOKEN` is configured (one `jq 'del(.oauthAccount)'` at
+  seed time, plus on-launch for existing sandboxes). "Cosmetic" undersells it:
+  for enterprise-token users, misreported org identity is a trust bug. Treat
+  both fixes as a pair in 1.0.1.
+
+---
+
+## Trustworthy "which org am I running as?" — problem statement (design TBD)
+
+**Target: needs a design before it can be scheduled (problem is 1.0.1-adjacent —
+same incident as the env-vs-config warning and `oauthAccount` fixes above).**
+Filed 2026-07-08; original design backed out 2026-07-10.
+
+### The problem
+
+A session's locally-visible account identity can be **wrong**: `oauthAccount`
+in `.claude.json` is seed-once fossil metadata that Claude Code never
+reconciles against the actually-active credential, and the credential itself
+may come from the ambient env rather than any file. Real incident: a session
+authenticated (and billed) as an **enterprise org** while every local surface —
+`/status`-level identity, `oauthAccount`, the seeded sandbox state — claimed
+the **personal** account. Diagnosing required manual forensics. Sandy
+self-attests *isolation* identity (`/etc/sandy-session.json`) but has **no
+trustworthy account-identity surface** — "which org is this session billing
+against" is unanswerable in-container without tricks.
+
+### Why the original design was backed out (important)
+
+The field diagnostic that solved the incident — read `CLAUDE_CODE_OAUTH_TOKEN`
+out of `/proc/1/environ`, POST it to `api.anthropic.com` with an invalid model,
+read the `anthropic-organization-id` response header — **works, but is
+structurally indistinguishable from credential exfiltration**: an agent
+harvesting a credential from another process's environment and transmitting it
+over the network is exactly the behavior security monitoring (and sandy's own
+threat model) exists to catch. An independent Claude session reviewing the
+approach flagged it as an exfil attempt — correctly. That verdict stands: the
+technique must not ship, and this stub deliberately records only the *problem*,
+not that solution. The fact that our own tooling would (and should) flag the
+diagnostic is itself the strongest argument against baking it into a command.
+
+### What an acceptable design must NOT do
+
+- **Never harvest a credential from another process** (`/proc/<pid>/environ`,
+  the keychain, another session's files). That is the exfil signature
+  regardless of intent, and it should keep tripping monitoring — including
+  sandy's own.
+- **Never read-a-token-then-POST-it** from inside the container. A token
+  reaching the network from a place that shouldn't have minted it is precisely
+  the attack sandy exists to contain.
+
+### Directions that stay clean (for whoever designs this)
+
+- **Make the fossil honest (ships first, cheapest):** the paired
+  `oauthAccount`-strip/reconcile fix above removes the *lie* without any probe,
+  so local surfaces stop asserting the wrong org. Likely enough for most of the
+  pain on its own.
+- **Attest at launch, host-side:** sandy already holds the credential it
+  forwards *at launch, on the host* — the legitimate point to resolve the org
+  once and record it into `/etc/sandy-session.json` (the existing isolation
+  attestation marker), so the in-container answer becomes a read of a trusted
+  read-only file, not a network probe. Open question: resolving an org from an
+  opaque token without an API round-trip.
+- **Push it upstream:** Claude Code knows its own active org (it authenticated);
+  the durable fix is a first-party identity surface that reflects the *live*
+  credential rather than seed-once metadata. Worth a claude-code issue.
+
+Immediate mitigation regardless of design: the `oauthAccount` strip above.
+
+---
+
+## Scoped overlay/VPN egress via the proxy sidecar (`SANDY_ALLOW_HOSTS` → tunnel)
+
+**Target: unscoped (1.1+).** Filed 2026-07-08, from a design question asked on
+LinkedIn ("how do you reach resources on private networks that require VPN / an
+overlay network?").
+
+### What
+
+Let an agent reach a **scoped, allowlisted** set of private-network resources
+(corporate VPN subnet, Tailscale/WireGuard host, internal registry/git) that the
+host can reach via an overlay but the container currently cannot.
+
+### The tension (why it's not just "allow it")
+
+Sandy **deliberately** drops RFC1918 + link-local + CGNAT/Tailscale
+(`100.64.0.0/10`) — "the agent can't pivot into internal infrastructure" is a
+core isolation property. So the goal is emphatically **not** "put the agent on
+the VPN." It's "reach a named set of private hosts without handing the agent the
+whole overlay."
+
+### First-blush design
+
+Terminate the tunnel in the **egress-proxy sidecar, not the agent**. The proxy
+is already the single mediated route off the agent's `--internal` network and is
+dual-homed, so it's the natural chokepoint:
+
+- Run the VPN/Tailscale/WireGuard client **inside the proxy container**.
+- The proxy forwards **only allowlisted private destinations** through it —
+  extend the existing `SANDY_ALLOW_HOSTS` model ("these named hosts are reachable
+  despite the private-IP block") to also mean "route these via the proxy's
+  tunnel."
+- The agent stays off the overlay (no broad pivot); a named set of internal
+  hosts becomes reachable through the mediated proxy. Isolation property
+  preserved: scoped access, not membership.
+
+### Open questions
+
+- Credential/state handling for the in-proxy VPN client (Tailscale auth key,
+  WireGuard conf) — privileged-tier, ephemeral mount like other creds.
+- Split-tunnel routing inside the proxy (only allowlisted subnets via the
+  tunnel, everything else via the normal egress leg).
+- Interaction with strict mode (allowlist entries already gate egress; the
+  tunnel is just the transport for the private ones).
+- macOS parity (the proxy topology is cross-platform, so this should Just Work
+  the same on Docker Desktop/OrbStack, unlike the iptables path).
+
+---
+
 ## Lessons from Anthropic's sandbox-runtime (srt) — carried over from TODO.md
 
 **Target: assorted (1.1+).** Consolidated 2026-06-11 from the old root `TODO.md`
@@ -632,14 +830,21 @@ under `research/`.
 - **Domain-based network filtering — ✅ SHIPPED** as the M2.7 egress proxy
   (`SANDY_EGRESS_PROXY` permissive/strict + `SANDY_ALLOW_HOSTS`). This was the
   headline srt lesson; it's done.
-- **`.env` / secret-file protection (highest-value remaining).** `.env`,
-  `.env.*`, `.env.local` are **not** in the protected-paths list, so a
+- **`.env` / secret-file protection — PRIORITIZED, jumped the queue (2026-07-08).**
+  `.env`, `.env.*`, `.env.local` are **not** in the protected-paths list, so a
   prompt-injected agent can `cat` a project's secrets and (in permissive mode)
   exfiltrate them. srt and Gemini CLI both address this — Gemini bind-mounts
   zero-permission files over them (masking). Fix: scan the workspace ≤3 levels
   (excluding `node_modules/`, `.venv*/`, `.git/`) for `.env*` and add them to the
   protected list — read-only at minimum, **masked** ideally (reading is the real
-  risk, and RO only stops writes). See also `docs/security/THREAT_MODEL.md` R2.
+  risk, and RO only stops writes). See also `docs/security/THREAT_MODEL.md` R2b.
+  **Why it jumped:** a public hostile-LLM-provider demonstration (2026-07 —
+  a deliberately malicious model endpoint injecting tool calls the model never
+  made) shows this isn't only a permissive-mode problem — when the *model
+  endpoint itself* is adversarial, the secret exfils back over the trusted
+  model connection, which no egress mode (permissive *or* strict) can inspect.
+  Masking the read is the only lever left, which makes this the highest-value
+  remaining filesystem item, not a someday-nice-to-have.
 - **Violation logging.** sandy blocks silently; srt logs blocked connections /
   write attempts in real time. At minimum, log denied egress (the proxy already
   has a deny log behind `SANDY_DEBUG_PROXY`) and protected-path write attempts to
