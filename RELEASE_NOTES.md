@@ -1,3 +1,30 @@
+## sandy v1.0.0
+
+**First stable release.** sandy graduates from `v1.0.0-rc2`, which soaked clean
+for a week (2026-07-03 → 2026-07-10) of daily driving with no code changes — so
+**1.0.0 is functionally identical to rc2** (the only change is the version
+string), now stable. The substantive changes that make up 1.0 are in the rc1
+and rc2 sections below.
+
+What 1.0 means going forward:
+
+- **Sandbox forward-compatibility promise.** Any sandbox created by a `1.x` sandy
+  works with any later `1.x` sandy. `SANDY_SANDBOX_MIN_COMPAT` is a hard floor
+  that never advances above `1.0.0` within the `1.x` line (guarded by
+  `run-tests.sh §60` against a frozen 1.0 sandbox fixture). A layout change that
+  would break `1.x` sandboxes is a `2.0`, not a `1.x`.
+- **Introspection stability.** `--print-schema` / `--print-state` /
+  `--validate-config` carry `schema_version: 1` as a stability contract.
+- **Semver discipline.** Within `1.x`: `X.Y.(Z+1)` = fixes, `X.(Y+1).0` =
+  additive (new keys/flags, no retiering or renames), `2.0.0` = anything that
+  breaks the sandbox promise, the `schema_version: 1` contract, or config-key
+  tier semantics.
+
+No behavioral change from rc2 — an rc2 user running `sandy --upgrade` moves to
+1.0.0 with no functional difference.
+
+---
+
 ## sandy v1.0.0-rc2
 
 **A security fix + the sandy-ui daily-driver bundle.** rc2 resets the RC soak
