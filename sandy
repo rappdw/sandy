@@ -4176,6 +4176,16 @@ if [ "${SANDY_SSH:-token}" = "agent" ] && [ "$(uname -s)" != "Linux" ]; then
     done
 fi
 
+# Release the workspace lock only if we still own it ($$ in pid file). Prevents a
+# resumed/re-entrant session from removing a *different* session's same-named
+# lock (issue #14). Used by both the interim EXIT trap and cleanup().
+_sandy_release_lock() {
+    [ -n "${SANDY_WORKSPACE_LOCK:-}" ] || return 0
+    [ "$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null)" = "$$" ] || return 0
+    rm -rf "$SANDY_WORKSPACE_LOCK" 2>/dev/null || true
+    return 0
+}
+
 # Workspace mutex. Only one sandy may run against a given workspace at a
 # time — two concurrent agents editing the same codebase would step on each
 # other's edits, and the sandbox-seeding / venv-materialization code paths
@@ -4201,10 +4211,18 @@ if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
     if [ -n "$_holder_pid" ] && [ "$_holder_pid" -eq "$_holder_pid" ] 2>/dev/null \
        && ! kill -0 "$_holder_pid" 2>/dev/null; then
         info "Stale lock detected (pid $_holder_pid not running) — clearing."
-        rm -rf "$SANDY_WORKSPACE_LOCK"
-        if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
-            # Race: another sandy launched concurrently and grabbed the lock
-            # between our rm and mkdir. Treat as truly held.
+        # Atomic takeover: only one concurrent reaper can win the rename. A racer
+        # whose mv fails (source already moved) errors out instead of clobbering.
+        _lock_reap="$SANDY_WORKSPACE_LOCK.reap.$$"
+        if mv "$SANDY_WORKSPACE_LOCK" "$_lock_reap" 2>/dev/null; then
+            rm -rf "$_lock_reap"
+            if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
+                _holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || echo unknown)"
+                error "Another sandy concurrently acquired the lock (pid $_holder_pid)"
+                error "  Workspace: $WORK_DIR"
+                exit 1
+            fi
+        else
             _holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || echo unknown)"
             error "Another sandy concurrently acquired the lock (pid $_holder_pid)"
             error "  Workspace: $WORK_DIR"
@@ -4228,7 +4246,7 @@ echo "$$" > "$SANDY_WORKSPACE_LOCK/pid"
 # `trap cleanup EXIT …` later supersedes this and releases the lock itself, so
 # there's no double-free. (Covers normal/`exit` paths in the gap; a bare signal
 # there is the larger trap-restructure tracked for post-rc1.)
-trap 'rm -rf "$SANDY_WORKSPACE_LOCK" 2>/dev/null || true' EXIT
+trap '_sandy_release_lock' EXIT
 
 SANDBOX_IS_NEW=false
 if [ ! -d "$SANDBOX_DIR" ]; then
@@ -4954,6 +4972,11 @@ cleanup_network_isolation() {
 }
 
 cleanup() {
+    # Idempotent: split signal traps below can invoke cleanup, then the EXIT
+    # trap fires too. Guard so teardown runs exactly once.
+    [ -n "${_SANDY_CLEANED:-}" ] && return 0
+    _SANDY_CLEANED=1
+
     # Remove empty stub dirs sandy created this session via Docker's
     # bind-mount target auto-creation. Run this FIRST so nothing else in
     # cleanup() can short-circuit it if an earlier command fails.
@@ -5131,12 +5154,27 @@ cleanup() {
     if [ -n "${CHANNEL_RELAY_PID:-}" ]; then
         kill "$CHANNEL_RELAY_PID" 2>/dev/null || true
     fi
-    if [ -n "${SANDY_WORKSPACE_LOCK:-}" ] && [ -d "$SANDY_WORKSPACE_LOCK" ]; then
-        rm -rf "$SANDY_WORKSPACE_LOCK" 2>/dev/null || true
-    fi
+    _sandy_release_lock
 }
 
-trap cleanup EXIT INT TERM HUP QUIT ABRT
+# EXIT preserves the real exit status; signal traps run cleanup, disarm EXIT so
+# it can't double-run, and exit 128+signum. The re-entrancy guard in cleanup is
+# the backstop. This fixes the old bug where cleanup never exited, so bash
+# resumed the script in a torn-down state after a signal (issue #14).
+_sandy_on_signal() { cleanup; trap - EXIT; exit "$1"; }
+trap 'rc=$?; cleanup; exit $rc' EXIT
+trap '_sandy_on_signal 130' INT
+trap '_sandy_on_signal 143' TERM
+trap '_sandy_on_signal 129' HUP
+trap '_sandy_on_signal 131' QUIT
+trap '_sandy_on_signal 134' ABRT
+
+# A SIGKILL'd prior session never ran cleanup, so its snapshot files persist.
+# Remove them now, before this session writes its own snapshot (~line 5906): if
+# we exit in the gap, cleanup's existence-guarded blocks skip (no false
+# "protected paths appeared" warnings). SANDBOX_DIR is set (line 3594); the agent
+# does not start until docker run (well after 5906), so nothing is missed.
+rm -f "$SANDBOX_DIR/.session-created-stubs" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null || true
 
 # Create the per-instance network(s) now that the cleanup trap is armed — in
 # proxy mode this also starts the dual-homed proxy container. Doing it post-trap
