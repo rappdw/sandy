@@ -3457,11 +3457,13 @@ info "45. Screenshot mount + /ss skill"
 
 _SS_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
-# 45a. Config-key allowlist: SANDY_SCREENSHOT_DIR is in SANDY_PASSIVE_KEYS
-# (i.e. settable from any tier, no approval gate).
-check "SANDY_SCREENSHOT_DIR in passive-keys list" \
+# 45a. Config-key allowlist: SANDY_SCREENSHOT_DIR is in SANDY_PRIVILEGED_KEYS
+# (retiered by #28 — a committed workspace config could bind-mount arbitrary
+# host directories read-only into the sandbox, so a workspace source now
+# requires per-workspace approval; host config/env remain frictionless).
+check "SANDY_SCREENSHOT_DIR in privileged-keys list" \
     bash -c '
-        awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)\$/" "$1" \
+        awk "/^SANDY_PRIVILEGED_KEYS=\(/,/^\)\$/" "$1" \
             | grep -qF "    SANDY_SCREENSHOT_DIR"
     ' -- "$_SS_SCRIPT"
 
@@ -3472,7 +3474,7 @@ check "--print-schema lists SANDY_SCREENSHOT_DIR" \
             | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
-names=[k[\"name\"] for k in d[\"config\"][\"passive_keys\"]]
+names=[k[\"name\"] for k in d[\"config\"][\"privileged_keys\"]]
 assert \"SANDY_SCREENSHOT_DIR\" in names, names
 "
     ' -- "$_SS_SCRIPT"
@@ -4558,6 +4560,33 @@ check "resolve: NO_ISOLATION=1 + STRICT=1 → error, no posture emitted (mutuall
 # (d) The old "no security-boundary impact" blanket claim must be gone.
 check "passive-keys comment no longer claims blanket 'No security-boundary impact'" \
     bash -c '! grep -q "No security-boundary impact" "$1"' -- "$_SBX_SCRIPT"
+
+# ============================================================
+echo ""
+echo "§66: passive-key security re-audit — 6 boundary-crossing keys retiered (#28)"
+# ============================================================
+# #28: SANDY_SCREENSHOT_DIR, SANDY_GEMINI_EXTENSIONS, TELEGRAM_BOT_TOKEN,
+# TELEGRAM_ALLOWED_SENDERS, DISCORD_BOT_TOKEN, DISCORD_ALLOWED_SENDERS were
+# plain passive keys, so a committed workspace .sandy/config could bind-mount
+# arbitrary host paths read-only (screenshot dir), install extensions from a
+# config-controlled URL (gemini), or plant a channel token/allowlist letting
+# the repo author's bot remote-drive the agent (telegram/discord) — all with
+# no approval prompt. Fix: move all six to SANDY_PRIVILEGED_KEYS. SANDY_CHANNELS
+# stays passive (inert without a now-privileged token/senders) — guard against
+# over-correction sweeping it in too.
+_SBX_PRIV_KEYS="$(awk '/^SANDY_PRIVILEGED_KEYS=\(/,/^\)$/' "$_SBX_SCRIPT")"
+_SBX_PASS_KEYS="$(awk '/^SANDY_PASSIVE_KEYS=\(/,/^\)$/' "$_SBX_SCRIPT")"
+for _k in SANDY_SCREENSHOT_DIR SANDY_GEMINI_EXTENSIONS TELEGRAM_BOT_TOKEN \
+          TELEGRAM_ALLOWED_SENDERS DISCORD_BOT_TOKEN DISCORD_ALLOWED_SENDERS; do
+    check "$_k is in SANDY_PRIVILEGED_KEYS" \
+        bash -c 'echo "$1" | grep -qE "^[[:space:]]+$2\$"' -- "$_SBX_PRIV_KEYS" "$_k"
+    check "$_k is NOT in SANDY_PASSIVE_KEYS" \
+        bash -c '! echo "$1" | grep -qE "^[[:space:]]+$2\$"' -- "$_SBX_PASS_KEYS" "$_k"
+done
+check "SANDY_CHANNELS remains in SANDY_PASSIVE_KEYS (no over-correction)" \
+    bash -c 'echo "$1" | grep -qE "^[[:space:]]+SANDY_CHANNELS\$"' -- "$_SBX_PASS_KEYS"
+check "SANDY_CHANNELS is NOT in SANDY_PRIVILEGED_KEYS" \
+    bash -c '! echo "$1" | grep -qE "^[[:space:]]+SANDY_CHANNELS\$"' -- "$_SBX_PRIV_KEYS"
 
 # ============================================================
 # Summary
