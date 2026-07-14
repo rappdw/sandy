@@ -126,6 +126,19 @@ func (a *Allowlist) AllowedHostPort(host string, port int) bool {
 	return false
 }
 
+// AllowedExactHostPort reports whether host:port matched an explicit host:port
+// allowlist entry (a deliberate LAN-exception), as opposed to a bare-name/
+// wildcard entry. Used by strict-mode egress to decide whether to re-check the
+// resolved IP against the private/metadata filter.
+func (a *Allowlist) AllowedExactHostPort(host string, port int) bool {
+	h, _, ok := normalizeHost(host)
+	if !ok {
+		return false
+	}
+	_, ok = a.hostPort[h+":"+strconv.Itoa(port)]
+	return ok
+}
+
 // normalizeHost validates and canonicalizes a host string before matching.
 // Returns (canonicalHost, isIP, ok). ok=false means the host is rejected
 // (malformed, encoded-IP attempt, or not a plausible hostname). For a valid IP

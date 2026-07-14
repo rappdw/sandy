@@ -26,6 +26,10 @@ type Policy struct {
 	// hard call to net.DefaultResolver) so tests can inject a fake resolver to
 	// exercise the permissive private-IP / rebinding logic deterministically.
 	lookupIP func(host string) ([]net.IP, error)
+	// dial opens the final TCP connection to an already-screened resolved IP
+	// (strict-mode re-check path below). A field (mirrors lookupIP) so tests
+	// can substitute a local listener instead of exercising a live socket.
+	dial func(network, address string) (net.Conn, error)
 }
 
 func newPolicy(cfg *Config) *Policy {
@@ -35,6 +39,9 @@ func newPolicy(cfg *Config) *Policy {
 		proxyIP: net.ParseIP(cfg.ProxyIP).To4(),
 		lookupIP: func(host string) ([]net.IP, error) {
 			return net.DefaultResolver.LookupIP(context.Background(), "ip", host)
+		},
+		dial: func(network, address string) (net.Conn, error) {
+			return net.DialTimeout(network, address, dialTimeout)
 		},
 	}
 }
@@ -69,7 +76,26 @@ func (p *Policy) Egress(host string, port int) (net.Conn, string) {
 		if !p.allow.AllowedHostPort(h, port) {
 			return nil, "not in allowlist"
 		}
-		return dialOrDeny(h, port)
+		// A raw-IP target or an explicit host:port entry is a deliberate
+		// LAN-exception — dial as-is. But a bare-name/wildcard match must still
+		// have its RESOLVED address screened, so a poisoned allowlisted domain
+		// (or DNS rebinding) can't reach 169.254.169.254 / an RFC1918 host.
+		if isIP || p.allow.AllowedExactHostPort(h, port) {
+			return dialOrDeny(h, port)
+		}
+		r, err := p.lookupIP(h)
+		if err != nil {
+			return nil, "resolve failed: " + err.Error()
+		}
+		chosen, ok := selectEgressIP(r)
+		if !ok {
+			return nil, "allowlisted name resolved to private/LAN address; refused"
+		}
+		c, err := p.dial("tcp", net.JoinHostPort(chosen.String(), itoa(port)))
+		if err != nil {
+			return nil, "dial failed: " + err.Error()
+		}
+		return c, ""
 	}
 
 	// Permissive: an explicit allowlist entry is a LAN-exception — allow it

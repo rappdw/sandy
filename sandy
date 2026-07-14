@@ -1058,7 +1058,7 @@ _sandy_validate_config() {
     # config/secrets) is privileged; anything else is treated as passive
     # (workspace config).
     local abs_path tier workspace=""
-    abs_path="$(cd "$(dirname "$path")" 2>/dev/null && pwd)/$(basename "$path")" || abs_path="$path"
+    abs_path="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)/$(basename "$path")" || abs_path="$path"
     case "$abs_path" in
         "$SANDY_HOME"/config|"$SANDY_HOME"/.secrets)
             tier="privileged" ;;
@@ -4013,9 +4013,14 @@ start_proxy_sidecar() {
 
     # Readiness gate. The agent is about to launch into a network whose ONLY
     # route is this proxy, so it must be up first. A single instantaneous check
-    # can miss a proxy that starts then dies a moment later (bad config, listener
-    # bind failure) and — now that the proxy has --restart on-failure — can also
-    # momentarily read not-Running mid-restart. Poll briefly instead of once.
+    # can miss a proxy that starts then dies a moment later (bad config, crash)
+    # and — now that the proxy has --restart on-failure — can also momentarily
+    # read not-Running mid-restart. Poll briefly instead of once. NOTE: this
+    # polls `.State.Running`, which only tells us the proxy PROCESS is alive —
+    # it flips true before net.Listen binds, so it catches process exit /
+    # crash-restart, NOT a listener-bind failure (see #15 for the follow-up:
+    # a real bind-readiness probe needs proxy HEALTHCHECK plumbing, deferred
+    # to 1.1).
     _proxy_up=false
     for _ptry in 1 2 3 4 5; do
         if [ "$(docker inspect -f '{{.State.Running}}' "$PROXY_CONTAINER" 2>/dev/null)" = "true" ]; then
@@ -6306,6 +6311,9 @@ if [[ "$SANDY_SSH" == "agent" ]]; then
             RUN_FLAGS+=(-e "SSH_AUTH_SOCK=/tmp/ssh-agent.sock")
         else
             # macOS: start a TCP relay on the host, container connects back via host.docker.internal
+            # SECURITY: unauthenticated — bound to 127.0.0.1, but any local process on
+            # this Mac can connect and sign with the host agent's keys for the session's
+            # lifetime (see README "Egress proxy" section: macOS SSH-agent relay exposure).
             SSH_RELAY_PORTFILE="$(mktemp)"
             python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()" > "$SSH_RELAY_PORTFILE"
             SSH_RELAY_PORT="$(cat "$SSH_RELAY_PORTFILE")"

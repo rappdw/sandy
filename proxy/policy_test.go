@@ -131,3 +131,66 @@ func TestEgress_PermissiveExceptionAllowsPrivate(t *testing.T) {
 	}
 	conn.Close()
 }
+
+// TestEgress_StrictResolvedIPRecheck covers #15.2: in strict mode, a bare-name/
+// wildcard allowlist match must have its RESOLVED address re-screened against
+// the private/metadata filter (so a poisoned allowlisted domain, or DNS
+// rebinding, can't reach 169.254.169.254 / an RFC1918 host), while a raw-IP
+// target or an explicit host:port entry is a deliberate LAN-exception and
+// bypasses the re-check.
+func TestEgress_StrictResolvedIPRecheck(t *testing.T) {
+	t.Run("allowlisted name resolving to cloud metadata is refused", func(t *testing.T) {
+		p := testPolicy(modeStrict, "internal.example.com")
+		p.lookupIP = func(string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("169.254.169.254")}, nil
+		}
+		if _, deny := p.Egress("internal.example.com", 443); deny == "" {
+			t.Error("strict Egress allowed an allowlisted name resolving to the cloud-metadata address")
+		}
+	})
+
+	t.Run("allowlisted name resolving to RFC1918 is refused", func(t *testing.T) {
+		p := testPolicy(modeStrict, "internal.example.com")
+		p.lookupIP = func(string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("10.0.0.5")}, nil
+		}
+		if _, deny := p.Egress("internal.example.com", 443); deny == "" {
+			t.Error("strict Egress allowed an allowlisted name resolving to a private RFC1918 address")
+		}
+	})
+
+	t.Run("allowlisted name resolving to a public IP is allowed", func(t *testing.T) {
+		p := testPolicy(modeStrict, "internal.example.com")
+		p.lookupIP = func(string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("8.8.8.8")}, nil
+		}
+		var dialedAddr string
+		p.dial = func(network, address string) (net.Conn, error) {
+			dialedAddr = address
+			return nil, nil
+		}
+		_, deny := p.Egress("internal.example.com", 443)
+		if deny != "" {
+			t.Fatalf("strict Egress denied an allowlisted name resolving to a public IP: %q", deny)
+		}
+		if dialedAddr != "8.8.8.8:443" {
+			t.Errorf("dialed %q, want 8.8.8.8:443", dialedAddr)
+		}
+	})
+
+	t.Run("explicit host:port LAN-exception bypasses the re-check", func(t *testing.T) {
+		_, upPort := echoServer(t, "EXC\n")
+		p := testPolicy(modeStrict, "localhost:"+itoa(upPort))
+		// If AllowedExactHostPort's bypass were missing, this lookupIP stub
+		// would cause a wrongful "private/LAN" denial instead of reaching the
+		// real echo server below — a red flag that the bypass regressed.
+		p.lookupIP = func(string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("169.254.169.254")}, nil
+		}
+		conn, deny := p.Egress("localhost", upPort)
+		if deny != "" {
+			t.Fatalf("strict Egress denied an explicit host:port LAN-exception: %q", deny)
+		}
+		conn.Close()
+	})
+}
