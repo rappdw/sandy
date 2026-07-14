@@ -257,26 +257,70 @@ All three:
   "running_containers": [
     {
       "id": "abc123",
-      "name": "sandy_zork-3dfda686_12345",
-      "sandbox": "zork-3dfda686",
+      "name": "sandy-zork-3dfda686",
+      "image": "sandy-full",
       "started_at": "2026-04-20T14:00:00Z",
-      "agent": "claude"
+      "sandbox": "zork-3dfda686",
+      "daemon": true,
+      "attached_clients": 1
+    },
+    {
+      "id": "def456",
+      "name": "sandy-quux-99999999",
+      "image": "sandy-claude-code",
+      "started_at": "2026-04-20T13:00:00Z",
+      "sandbox": "quux-99999999",
+      "daemon": false,
+      "attached_clients": null
     }
-  ]
+  ],
+  "orphan_networks": 0
 }
 ```
+
+> **`sandbox` / `daemon` / `attached_clients`** (per `running_containers[]` entry,
+> added additively in 1.1.0, #17 — no `schema_version` bump). `sandbox` is the
+> join key to `sandboxes[].name`: derived from the container's `sandy.session`
+> label when present (daemon sessions), else a best-effort strip of the
+> `sandy-proxy-`/`sandy-` prefix from the container name. `daemon` is a JSON
+> bool from the `sandy.daemon=true` label — `true` for an attachable `sandy
+> --start` session, `false` for a bare/foreign container. `attached_clients` is
+> a JSON int (tmux's `#{session_attached}` count) for daemon containers, or
+> JSON `null` for non-daemon entries — lets a consumer distinguish an attached
+> vs. detached daemon session. Both `--print-state` and `--print-state light`
+> emit all three fields identically; a client on the pre-1.1.0 shape still
+> parses (unknown fields ignored) since `id`/`name`/`image`/`started_at` are
+> unchanged.
 
 > **`workspace_path`** (per sandbox) is read from the `WORKSPACE.json` marker
 > sandy writes into each sandbox on launch; it is an empty string for a legacy
 > sandbox that predates the marker. It is a stable field of the contract — a
 > consumer (e.g. sandy-ui) may key its UI on it.
 
+> **`orphan_networks`** (top-level, added additively in `1.1.0`, #26 — no
+> `schema_version` bump). Integer count of `sandy_(sidecar|egress|net)_<pid>`
+> networks that are reap-eligible right now: the owning `<pid>` is dead (or
+> non-numeric) **and** no container is attached — the exact gate
+> `_sandy_reap_orphan_networks` already applies, so a live session's network,
+> and a container-still-attached network (including a D9 reboot-resurrected
+> daemon container whose supervisor pid is gone), are never counted. `null`
+> when `docker_reachable` is `false` (matches the `running_containers: null`
+> convention). Present identically in both `--print-state` and `--print-state
+> light`. A UI can call `--prune-orphans` and then re-read this field to
+> confirm the count dropped.
+
 > **Light mode — `sandy --print-state light`.** A second positional arg selects
-> a cheap variant for pollers: it makes **exactly one** docker invocation (vs.
-> ~nine) by (a) skipping `installed_images` — the key stays present as `[]` —
-> and (b) deriving `docker_reachable`/`running_containers` from a single
-> `docker ps` (its exit status is the reachability signal) instead of the
-> `docker info` gates. All non-docker fields (`sandboxes`, `approvals`,
+> a cheap variant for pollers: its steady-state budget is **exactly two** docker
+> invocations (vs. ~nine) by (a) skipping `installed_images` — the key stays
+> present as `[]` — and (b) deriving `docker_reachable`/`running_containers`
+> from a single `docker ps` (its exit status is the reachability signal)
+> instead of the `docker info` gates; the second invocation is the `docker
+> network ls` behind `orphan_networks` (added in `1.1.0`, #26 — light mode was
+> exactly one invocation before that). Two bounded extras apply only when the
+> corresponding state exists: one `docker exec … tmux display` per **daemon**
+> container (for `attached_clients`, #17) and one `docker network inspect` per
+> dead-owner orphan **candidate** (#26) — both zero on a host with no daemon
+> sessions and no orphans. All non-docker fields (`sandboxes`, `approvals`,
 > `workspace_path`, locks) are identical to full mode. The arg is
 > **forward-compatible**: any value other than `light` (including none, and an
 > older sandy that ignored `$2`) yields full mode, so a consumer may pass
@@ -312,7 +356,7 @@ Exit code: `0` on schemas that load cleanly (even with warnings), `1` on fatal e
 
 - Current: `schema_version: 1`
 - **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal`), `description`, `sources`, and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
-- **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. Clients ignore unknown fields.
+- **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. Clients ignore unknown fields. Three additive changes shipped this way: `since`/`stability` on config-key objects (`0.15.0`, PR 4.1, above); in `1.1.0` (#17), three new `cli_flags` entries (`--start`, `--attach`, `--stop` — daemon-mode flags) plus three new `running_containers[]` fields (`sandbox`, `daemon`, `attached_clients` — see `--print-state` below); and, also in `1.1.0` (#26), one more `cli_flags` entry (`--prune-orphans` — reap orphaned sandy networks and exit) plus one new top-level `--print-state` field (`orphan_networks` — see above).
 - **Deprecations** (existing key changes semantics): bump to `schema_version: 2`. Sandy publishes both versions in parallel via `--print-schema --schema-version 1` for one minor release, then drops v1 with a release-note callout.
 - **Compatibility range**: each sandy version declares `supported_schema_versions` and `deprecated_schema_versions` so clients can decide to warn/refuse.
 

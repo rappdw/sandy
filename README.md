@@ -105,6 +105,35 @@ sandy -p "Review the code in src/ for security issues"  # one-shot prompt
 sandy --remote                                     # remote-control server mode
 ```
 
+### Daemon mode
+
+By default a sandy session lives and dies with the terminal that launched it.
+**Daemon mode decouples the two** — start a session detached, attach and detach
+interactive clients whenever you like, and stop it explicitly when you're done:
+
+```bash
+sandy --start      # launch a detached session for this workspace; returns once attachable
+sandy --attach     # attach an interactive client (last-attach-wins; a second attach
+                   # cleanly displaces the first — no screen mirroring)
+sandy --stop       # tear the session down completely (container, networks, lock)
+```
+
+The container runs with `--restart unless-stopped`, so a daemon session
+**survives a host reboot or Docker restart** — close your laptop, come back
+tomorrow, and `sandy --attach` picks up where you left off. `--start` is
+idempotent (a second `--start` is a no-op), and running bare `sandy` in a
+workspace that already has a daemon session errors with a hint to `--attach` or
+`--stop` rather than clobbering it. `--start` is interactive-only (it rejects
+`-p`/`--print`).
+
+**Exit codes** — `--attach`: `0` = the session ended while you were attached,
+`3` = you detached cleanly and the session is still running, `4` = no such
+session, `5` = attach failed. `--stop`: `0` = stopped, `4` = no such session,
+`5` = teardown failed.
+
+This is what [`sandy-ui`](https://github.com/rappdw/sandy-ui) uses to keep a
+session alive across a VSCode quit/relaunch.
+
 ## Configuration
 
 ### Per-project config (`.sandy/config`)
@@ -183,6 +212,10 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--upgrade` | Update sandy to the latest version from GitHub |
 | `--agent <list>` | Agent(s) to launch — overrides `SANDY_AGENT` and `.sandy/config` (e.g. `--agent claude,gemini`) |
 | `-p "prompt"` | One-shot prompt (no interactive session) |
+| `--start` | Start a detached [daemon session](#daemon-mode) and return once attachable |
+| `--attach` | Attach an interactive client to a running daemon session |
+| `--stop` | Stop a running daemon session (full teardown) |
+| `--prune-orphans` | Reap orphaned `sandy_*` Docker networks and exit |
 
 All other arguments are forwarded to `claude`.
 

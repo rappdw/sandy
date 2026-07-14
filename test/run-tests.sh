@@ -767,10 +767,13 @@ info "12. Variable ordering — WORK_DIR defined before Phase 3"
 
 # Phase 3 (per-project Dockerfile) references WORK_DIR and SANDBOX_NAME.
 # Regression test: these must be defined before their first use.
+# WORK_DIR= may be indented (since 1.1.0 it's assigned inside the --workspace
+# if/else), so match leading whitespace; `|| true` so a grep miss surfaces as
+# a FAILed check below instead of aborting the suite under set -euo pipefail.
 SCRIPT="$(dirname "$0")/../sandy"
-WORK_DIR_DEF="$(grep -n '^WORK_DIR=' "$SCRIPT" | head -1 | cut -d: -f1)"
-SANDBOX_NAME_DEF="$(grep -n '^SANDBOX_NAME=' "$SCRIPT" | head -1 | cut -d: -f1)"
-PHASE3_USE="$(grep -n 'Phase 3.*Per-project image' "$SCRIPT" | head -1 | cut -d: -f1)"
+WORK_DIR_DEF="$(grep -nE '^[[:space:]]*WORK_DIR=' "$SCRIPT" | head -1 | cut -d: -f1 || true)"
+SANDBOX_NAME_DEF="$(grep -nE '^[[:space:]]*SANDBOX_NAME=' "$SCRIPT" | head -1 | cut -d: -f1 || true)"
+PHASE3_USE="$(grep -n 'Phase 3.*Per-project image' "$SCRIPT" | head -1 | cut -d: -f1 || true)"
 check "WORK_DIR defined before Phase 3" \
     test "$WORK_DIR_DEF" -lt "$PHASE3_USE"
 check "SANDBOX_NAME defined before Phase 3" \
@@ -949,8 +952,12 @@ check "container name includes sandbox name" \
 # headless+piped-stdin (-i, forward the pipe).
 check "headless never allocates a TTY; interactive keeps -it" \
     bash -c 'grep -q -- "RUN_FLAGS=(--rm --name" "$1" && grep -q -- "RUN_FLAGS=(--rm -i --name" "$1" && grep -q -- "RUN_FLAGS=(--rm -it --name" "$1"' -- "$SCRIPT"
+# (1.1.0: the daemon-mode RUN_FLAGS branch inserted its label block between the
+# _sandy_headless_run=true assignment and this line, so the old -B8 window no
+# longer reaches the assignment — assert the `elif` guard instead, which is the
+# line that actually selects the headless stdin branch.)
 check "headless stdin is gated on whether it is a terminal (-t 0)" \
-    bash -c 'grep -B8 -- "RUN_FLAGS=(--rm --name" "$1" | grep -q "_sandy_headless_run=true" && grep -B2 -- "RUN_FLAGS=(--rm --name" "$1" | grep -q -- "-t 0"' -- "$SCRIPT"
+    bash -c 'grep -B4 -- "RUN_FLAGS=(--rm --name" "$1" | grep -q "_sandy_headless_run" && grep -B2 -- "RUN_FLAGS=(--rm --name" "$1" | grep -q -- "-t 0"' -- "$SCRIPT"
 
 # ============================================================
 info "19. pip wrapper created in root section (not inside bash -c)"
@@ -4092,8 +4099,11 @@ check "proxy subnet pool spans both 10.200 and 10.201 /16s" \
 # Self-heal + exhaustion handling and the orphan-reaper must be present.
 check "proxy network exhaustion reaps orphans then retries" \
     bash -c 'grep -q "_sandy_reap_orphan_networks && _sandy_try_create_sidecar" "$1"' -- "$_PX_SCRIPT"
+# (1.1.0 #26 DEC-4b: the attached-container gate moved from the reaper's inline
+# `if [ -z "$attached" ]; then` into the shared _sandy_orphan_networks_list
+# lister as `[ -z "$attached" ] && printf` — assert the gate in its new home.)
 check "orphan reaper only removes networks with no attached container" \
-    bash -c 'grep -q "if \[ -z \"\$attached\" \]; then" "$1"' -- "$_PX_SCRIPT"
+    bash -c 'sed -n "/^_sandy_orphan_networks_list()/,/^}$/p" "$1" | grep -q "\[ -z \"\$attached\" \] && printf"' -- "$_PX_SCRIPT"
 
 # 50c. Proxy container name is tied to the workspace sandbox (sandy-proxy-<name>),
 # mirroring the agent container, with stale-orphan cleanup before (re)launch.
@@ -4538,21 +4548,28 @@ check "light mode keeps the same top-level schema keys as full" \
 check "light mode still emits workspace_path (#19 holds in light)" \
     bash -c 'echo "$1" | grep -q "\"workspace_path\":\"/ws/demo\""' -- "$_ps_light"
 
-# #18 the load-bearing claim: exactly ONE docker spawn in light, many in full.
+# #18 the load-bearing claim: the light path stays spawn-frugal for pollers.
+# Originally exactly ONE spawn (`docker ps`); #26 (1.1.0) added exactly one
+# `docker network ls` for orphan_networks, so the steady-state budget is TWO —
+# asserted by exact call content (not just a count), so an unexpected extra
+# spawn OR a dropped one fails loudly. (attached_clients `docker exec`s and
+# orphan `network inspect`s are per-daemon-container / per-dead-pid-candidate,
+# both zero in this fixture.)
 _LOG_LIGHT="$(mktemp)"
 PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$_LOG_LIGHT" bash "$_SBX_SCRIPT" --print-state light >/dev/null 2>&1
-check "light mode makes exactly ONE docker spawn" \
-    test "$(wc -l < "$_LOG_LIGHT" | tr -d ' ')" = "1"
+check "light mode makes exactly TWO docker spawns (ps + network ls, #18/#26)" \
+    bash -c '[ "$(wc -l < "$1" | tr -d " ")" = "2" ] \
+        && grep -q "^ps " "$1" && grep -q "^network ls " "$1"' -- "$_LOG_LIGHT"
 _LOG_FULL="$(mktemp)"
 PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$_LOG_FULL" bash "$_SBX_SCRIPT" --print-state >/dev/null 2>&1
 check "full mode makes more docker spawns than light (default path unchanged)" \
-    bash -c '[ "$(wc -l < "$1" | tr -d " ")" -gt 1 ]' -- "$_LOG_FULL"
+    bash -c '[ "$(wc -l < "$1" | tr -d " ")" -gt 2 ]' -- "$_LOG_FULL"
 
 # Forward-compat: an unknown arg falls back to full mode.
 _LOG_UNK="$(mktemp)"
 PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$_LOG_UNK" bash "$_SBX_SCRIPT" --print-state bogusarg >/dev/null 2>&1
 check "unknown --print-state arg falls back to full mode (forward-compat)" \
-    bash -c '[ "$(wc -l < "$1" | tr -d " ")" -gt 1 ]' -- "$_LOG_UNK"
+    bash -c '[ "$(wc -l < "$1" | tr -d " ")" -gt 2 ]' -- "$_LOG_UNK"
 
 rm -rf "$_PS_HOME" "$_PS_BIN" "$_LOG_LIGHT" "$_LOG_FULL" "$_LOG_UNK" 2>/dev/null || true
 
@@ -4574,6 +4591,7 @@ check "reaper removes only dead-PID, no-container sandy networks" \
                 "network rm") echo "$3" >> "$RM_LOG" ;;
             esac
         }
+        '"$(sed -n '/^_sandy_orphan_networks_list()/,/^}$/p' "$_SBX_SCRIPT")"'
         '"$(sed -n '/^_sandy_reap_orphan_networks()/,/^}$/p' "$_SBX_SCRIPT")"'
         _sandy_reap_orphan_networks || true
         grep -q "^sandy_net_2147483646$" "$RM_LOG" \
@@ -4589,9 +4607,16 @@ check "reaper grep covers sandy_net_ (isolated bridge), not just proxy nets" \
 # proxy-allocation-failure retry.
 check "ensure_network calls the reaper eagerly (before allocating)" \
     bash -c 'sed -n "/^ensure_network()/,/^}$/p" "$1" | grep -q "_sandy_reap_orphan_networks"' -- "$_SBX_SCRIPT"
-# PID-liveness gate present (what makes eager reaping concurrent-safe).
-check "reaper skips a network whose owning PID is still alive (kill -0 gate)" \
-    bash -c 'sed -n "/^_sandy_reap_orphan_networks()/,/^}$/p" "$1" | grep -q "kill -0 \"\$net_pid\""' -- "$_SBX_SCRIPT"
+# PID-liveness gate present (what makes eager reaping concurrent-safe). #26
+# Batch 4 (DEC-4b) extracted this gate out of the reaper into the shared
+# _sandy_orphan_networks_list lister — check there now, not in the reaper.
+check "orphan lister skips a network whose owning PID is still alive (kill -0 gate)" \
+    bash -c 'sed -n "/^_sandy_orphan_networks_list()/,/^}$/p" "$1" | grep -q "kill -0 \"\$net_pid\""' -- "$_SBX_SCRIPT"
+# #26 DEC-4b — the reaper must delegate to the shared lister (one source of
+# truth for print-state's orphan_networks, --prune-orphans, and the reaper),
+# not re-inline the gate logic a second time.
+check "reaper delegates to the shared _sandy_orphan_networks_list (DEC-4b, #26)" \
+    bash -c 'sed -n "/^_sandy_reap_orphan_networks()/,/^}$/p" "$1" | grep -q "_sandy_orphan_networks_list"' -- "$_SBX_SCRIPT"
 
 # ============================================================
 echo ""
@@ -4725,6 +4750,260 @@ check "info: only exclude → inert (suppress)" \
 check "info: exclude + attributes → NOT inert (warn)" \
     test "$(_ig_status "$_IG_ROOT/case4" .git/info)" = warn
 rm -rf "$_IG_ROOT"
+
+# ============================================================
+echo ""
+echo "§68: --print-state running_containers[] daemon fields (#17) — sandbox/daemon/attached_clients"
+# ============================================================
+# Fixture docker shim: `docker ps --format ...` returns three rows — a healthy
+# daemon container (probe answers "2"), a BROKEN daemon container whose
+# `docker exec ... tmux display` FAILS (mid-startup / session gone — the exact
+# shape a hung --start leaves behind), and a bare container (no labels).
+# Verifies the additive fields land correctly (join key, bool, int|null) in
+# BOTH --print-state modes, that the pre-existing id/name/image/started_at
+# fields are untouched, and — the host-found regression — that ONE broken
+# daemon container yields attached_clients:null WITHOUT killing the whole
+# emission via the set -eE introspection ERR trap.
+_DF_BIN="$(mktemp -d)"
+cat > "$_DF_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+case "$1" in
+    ps)
+        printf 'daemon123|sandy-bar-def456|sandy-full|2026-07-14T10:00:00Z|true|bar-def456\n'
+        printf 'broken789|sandy-baz-fee789|sandy-full|2026-07-14T11:00:00Z|true|baz-fee789\n'
+        printf 'bare456|sandy-foo-abc123|sandy-claude-code|2026-07-14T09:00:00Z||\n'
+        exit 0
+        ;;
+    exec)
+        # args may include -u <uid>; key off the container id anywhere in argv
+        case "$*" in
+            *broken789*) exit 1 ;;   # probe fails: no tmux session in this one
+            *) echo "2"; exit 0 ;;
+        esac
+        ;;
+    info) exit 0 ;;
+    image) exit 1 ;;
+    *) exit 0 ;;
+esac
+DOCKERSHIM
+chmod +x "$_DF_BIN/docker"
+
+_df_assert() { # $1=mode ("" or "light")
+    local _json _rc=0
+    _json="$(PATH="$_DF_BIN:$PATH" bash "$_SBX_SCRIPT" --print-state ${1:+$1} 2>/dev/null)" || _rc=$?
+    [ "$_rc" -eq 0 ] || return 1
+    python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+rc = d['running_containers']
+assert rc is not None, 'running_containers is null'
+assert len(rc) == 3, rc
+daemon = next(c for c in rc if c.get('sandbox') == 'bar-def456')
+broken = next(c for c in rc if c.get('sandbox') == 'baz-fee789')
+bare = next(c for c in rc if c.get('sandbox') == 'foo-abc123')
+for c in rc:
+    for f in ('id', 'name', 'image', 'started_at'):
+        assert f in c, f + ' missing: ' + repr(c)
+assert daemon['daemon'] is True and bare['daemon'] is False, (daemon, bare)
+assert daemon['attached_clients'] == 2, daemon
+assert isinstance(daemon['attached_clients'], int), daemon
+assert broken['daemon'] is True, broken
+assert broken['attached_clients'] is None, broken
+assert bare['attached_clients'] is None, bare
+" "$_json"
+}
+check "full mode: daemon fields correct; a failing attach-probe yields null, not a dead emission" \
+    _df_assert
+check "light mode: same daemon-field contract holds (incl. failing-probe null)" \
+    _df_assert light
+
+rm -rf "$_DF_BIN"
+
+# ============================================================
+echo ""
+echo "§69: network-orphan extras — orphan_networks + --prune-orphans (#26)"
+# ============================================================
+# End-to-end (real script invocation, not a function-extraction shim, since
+# _sandy_orphan_networks_list is called from --print-state's FAST PATH — a
+# handler that can dispatch and exit before the script ever reaches the
+# reaper's own definition further down. If the lister were only defined down
+# there (as a naive reading of "just above the reaper" might suggest), this
+# call would fail with "command not found": bash resolves a function call
+# against whatever has been DEFINED so far in the script's linear top-to-
+# bottom execution, not against anything defined later in the file — a
+# mutation that moved/duplicated the lister back down next to the reaper
+# would make every check below fail loudly (JSON parse error / non-JSON
+# stderr), not silently pass. That is what makes this genuinely end-to-end
+# rather than tautological.
+#
+# Fixture: three sandy_* networks behind a stateful `docker` shim on PATH:
+#   - sandy_net_<DEAD_PID>       dead PID, no container   → orphan (reap it)
+#   - sandy_egress_<LIVE_PID>    LIVE PID (this test's own $$)  → NOT an orphan
+#   - sandy_sidecar_<DEAD_PID2>  dead PID, but a container IS attached (the D9
+#                                reboot-resurrected-daemon shape)  → NOT an orphan
+# Exactly one of the three may ever be counted or removed. A mutation that
+# reaps/counts the live-PID net or the container-attached net must fail these
+# checks; a mutation that skips the true orphan must also fail them.
+_ON_BIN="$(mktemp -d)"
+_ON_LIVE_PID=$$
+_ON_DEAD_PID=2147483646
+_ON_DEAD_PID2=2147483647
+_ON_RM_LOG="$(mktemp)"
+: > "$_ON_RM_LOG"
+export _ON_LIVE_PID _ON_DEAD_PID _ON_DEAD_PID2 _ON_RM_LOG
+cat > "$_ON_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+# Stateful shim: `network rm` records into $_ON_RM_LOG, and `network ls`
+# excludes anything already recorded there — so a caller that lists, reaps,
+# then lists again (the --prune-orphans before/after count) observes the
+# removal, exactly like a real docker daemon would.
+case "$1" in
+    network)
+        case "$2" in
+            ls)
+                printf '%s\n' \
+                    "sandy_net_${_ON_DEAD_PID}" \
+                    "sandy_egress_${_ON_LIVE_PID}" \
+                    "sandy_sidecar_${_ON_DEAD_PID2}" \
+                | { [ -s "$_ON_RM_LOG" ] && grep -vxFf "$_ON_RM_LOG" || cat; }
+                ;;
+            inspect)
+                case "$3" in
+                    sandy_sidecar_*) echo "livecontainer" ;;
+                    *) echo "" ;;
+                esac
+                ;;
+            rm)
+                echo "$3" >> "$_ON_RM_LOG"
+                ;;
+        esac
+        ;;
+    ps) exit 0 ;;
+    *) exit 0 ;;
+esac
+DOCKERSHIM
+chmod +x "$_ON_BIN/docker"
+
+_ON_JSON_FULL="$(PATH="$_ON_BIN:$PATH" bash "$_SBX_SCRIPT" --print-state 2>/dev/null)"
+check "print-state (full): orphan_networks counts only the dead+unattached net" \
+    bash -c 'python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+assert d[\"orphan_networks\"] == 1, d[\"orphan_networks\"]
+" "$1"' -- "$_ON_JSON_FULL"
+
+_ON_JSON_LIGHT="$(PATH="$_ON_BIN:$PATH" bash "$_SBX_SCRIPT" --print-state light 2>/dev/null)"
+check "print-state (light): same orphan_networks contract holds" \
+    bash -c 'python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+assert d[\"orphan_networks\"] == 1, d[\"orphan_networks\"]
+" "$1"' -- "$_ON_JSON_LIGHT"
+
+_ON_PRUNE_OUT="$(PATH="$_ON_BIN:$PATH" bash "$_SBX_SCRIPT" --prune-orphans 2>&1)"
+_ON_PRUNE_RC=$?
+check "--prune-orphans exits 0" \
+    test "$_ON_PRUNE_RC" -eq 0
+check "--prune-orphans reports exactly 1 reaped" \
+    bash -c 'printf "%s" "$1" | grep -qE "^Reaped 1 orphaned sandy network\(s\)\.$"' -- "$_ON_PRUNE_OUT"
+check "--prune-orphans's docker network rm was called for the dead-PID net ONLY (not live, not D9-attached)" \
+    test "$(cat "$_ON_RM_LOG")" = "sandy_net_${_ON_DEAD_PID}"
+
+rm -rf "$_ON_BIN"
+
+# Docker-absent case: overlay every PATH-reachable executable EXCEPT `docker`
+# into one dir (rather than dropping whole PATH directories, which risks
+# also dropping bash/grep/etc. if they happen to share a directory with
+# docker, e.g. /usr/bin on many Linux distros) so `command -v docker` fails
+# while every other tool sandy needs stays resolvable.
+_ON_NODOCKER_BIN="$(mktemp -d)"
+_ON_SAVE_IFS="$IFS"; IFS=':'
+for _ON_D in $PATH; do
+    IFS="$_ON_SAVE_IFS"
+    [ -d "$_ON_D" ] || continue
+    for _ON_F in "$_ON_D"/*; do
+        [ -x "$_ON_F" ] && [ -f "$_ON_F" ] || continue
+        _ON_BASE="${_ON_F##*/}"
+        [ "$_ON_BASE" = "docker" ] && continue
+        [ -e "$_ON_NODOCKER_BIN/$_ON_BASE" ] || ln -s "$_ON_F" "$_ON_NODOCKER_BIN/$_ON_BASE" 2>/dev/null
+    done
+    IFS=':'
+done
+IFS="$_ON_SAVE_IFS"
+
+_ON_JSON_NODOCKER="$(PATH="$_ON_NODOCKER_BIN" bash "$_SBX_SCRIPT" --print-state 2>/dev/null)"
+check "print-state (docker absent): orphan_networks is null" \
+    bash -c 'python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+assert d[\"orphan_networks\"] is None, d[\"orphan_networks\"]
+" "$1"' -- "$_ON_JSON_NODOCKER"
+
+PATH="$_ON_NODOCKER_BIN" bash "$_SBX_SCRIPT" --prune-orphans >/dev/null 2>&1 \
+    && _ON_PRUNE_NODOCKER_RC=0 || _ON_PRUNE_NODOCKER_RC=$?
+check "--prune-orphans exits 1 when docker is unreachable" \
+    test "$_ON_PRUNE_NODOCKER_RC" -eq 1
+
+rm -rf "$_ON_NODOCKER_BIN" "$_ON_RM_LOG"
+
+# ============================================================
+echo "§70: daemon dispatchers execute under a present docker (#17) — set -u smoke"
+# ============================================================
+# Regression guard for the class of bug where a daemon-dispatcher code path is
+# only REACHABLE when docker is present: with docker absent, the preflight
+# exits first, so docker-less static checks can never execute those lines and
+# an `set -u` unbound variable (or similar runtime fault) hides until the
+# first real host run. Shipped example: the --start dispatcher's H3 check read
+# $_sandy_is_headless, which was defined only inside the container-side
+# USERSETUP heredoc — `sandy --start` died with "unbound variable" on any
+# docker host. This section runs the dispatchers for real behind a stubbed
+# docker (preflight passes; `ps -q` label queries return empty = no daemon
+# session) in an isolated SANDY_HOME, and asserts on the EXPECTED message +
+# exit code — not just "non-zero" — so a crash can't impersonate a pass.
+_DD_BIN="$(mktemp -d)"
+_DD_HOME="$(mktemp -d)"
+_DD_WS="$(mktemp -d)"
+cat > "$_DD_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+# Preflight-satisfying stub: info/ps succeed; every query returns empty
+# (no containers, no networks), so dispatchers take their "nothing running"
+# branches. Never launches anything.
+exit 0
+DOCKERSHIM
+chmod +x "$_DD_BIN/docker"
+
+# Expected-nonzero invocations go to a temp file, NOT $(...) substitution: the
+# subshell inside a substitution inherits the suite's ERR trap (set -E) and
+# prints spurious "[err-trap] ... exited 1/4" noise for exits that are the
+# very thing being asserted. A direct guarded command (like §69's) is silent.
+_DD_OUT="$(mktemp)"
+PATH="$_DD_BIN:$PATH" SANDY_HOME="$_DD_HOME" \
+    bash "$_SBX_SCRIPT" --start --workspace "$_DD_WS" -p "hi" >"$_DD_OUT" 2>&1 && _DD_H3_RC=0 || _DD_H3_RC=$?
+check "--start -p reaches the H3 reject (exit 1, its own message — not a crash)" \
+    bash -c '[ "$1" -eq 1 ] && grep -q "incompatible with -p/--print/--prompt" "$2"' -- "$_DD_H3_RC" "$_DD_OUT"
+check "--start -p produced no unbound-variable / bash runtime error" \
+    bash -c '! grep -qE "unbound variable|syntax error|command not found" "$1"' -- "$_DD_OUT"
+
+PATH="$_DD_BIN:$PATH" SANDY_HOME="$_DD_HOME" \
+    bash "$_SBX_SCRIPT" --attach --workspace "$_DD_WS" >"$_DD_OUT" 2>&1 && _DD_ATTACH_RC=0 || _DD_ATTACH_RC=$?
+check "--attach with no daemon session exits 4 (DEC-C), no runtime error" \
+    bash -c '[ "$1" -eq 4 ] && ! grep -qE "unbound variable|syntax error" "$2"' -- "$_DD_ATTACH_RC" "$_DD_OUT"
+
+PATH="$_DD_BIN:$PATH" SANDY_HOME="$_DD_HOME" \
+    bash "$_SBX_SCRIPT" --stop --workspace "$_DD_WS" >"$_DD_OUT" 2>&1 && _DD_STOP_RC=0 || _DD_STOP_RC=$?
+check "--stop with no daemon session exits 4 (DEC-C), no runtime error" \
+    bash -c '[ "$1" -eq 4 ] && ! grep -qE "unbound variable|syntax error" "$2"' -- "$_DD_STOP_RC" "$_DD_OUT"
+rm -f "$_DD_OUT"
+
+# Portability lint: `sleep infinity` is a GNU coreutils extension — BSD sleep
+# (macOS, daemon-mode's primary platform) dies instantly with a usage error,
+# which made the supervisor fall through its EXIT trap and tear the fresh
+# daemon container right back down. The supervisor must use the bounded-sleep
+# loop instead. (Regression shipped once; caught only on a real macOS host.)
+check "no GNU-only 'sleep infinity' anywhere in sandy (BSD sleep lacks it)" \
+    bash -c '! grep -q "sleep infinity" "$1"' -- "$_SBX_SCRIPT"
+
+rm -rf "$_DD_BIN" "$_DD_HOME" "$_DD_WS"
 
 # ============================================================
 # Summary

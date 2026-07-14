@@ -862,6 +862,19 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
     AGENT_CMD="$(_sandy_build_agent_cmd "$_agent" "$@")"
     if [ "$_sandy_is_headless" = "true" ]; then
         exec bash -c "$AGENT_CMD"
+    elif [ "${SANDY_DAEMON:-0}" = "1" ]; then
+        # Daemon mode: the container IS the daemon (host-side supervisor owns
+        # the lock/lifecycle — see sandy's --start dispatcher). Create the
+        # session detached and keep PID 1 alive without attaching; a client
+        # attaches later via `docker exec ... tmux attach` (--attach, Batch 2).
+        # On failure, exit loudly: a dead PID 1 puts the error in `docker
+        # logs` (where --start's failure path surfaces it) instead of leaving
+        # a session-less container that hangs the readiness gate.
+        tmux new-session -d -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1" || {
+            echo "[sandy] FATAL: tmux new-session failed in daemon mode" >&2
+            exit 1
+        }
+        exec tail -f /dev/null
     else
         tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1"
     fi
@@ -900,5 +913,12 @@ else
     fi
 
     tmux select-pane -t sandy.0
-    tmux attach -t sandy
+    if [ "${SANDY_DAEMON:-0}" = "1" ]; then
+        # Daemon mode: session already created detached above (-d); keep
+        # PID 1 alive without attaching. See the single-agent branch above
+        # for the full explanation.
+        exec tail -f /dev/null
+    else
+        tmux attach -t sandy
+    fi
 fi

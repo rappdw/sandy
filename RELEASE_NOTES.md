@@ -1,3 +1,101 @@
+## sandy v1.1.0
+
+**Daemon mode** — a sandy session's lifetime is no longer tied to the terminal
+that launched it. Start a session detached, attach and detach interactive clients
+at will (including from a UI), close your laptop and reattach tomorrow, and stop
+it explicitly when you're done. This is the headline of 1.1.0 and the contract
+that `sandy-ui` 0.6.0 builds against. Additive and backward-compatible: bare
+`sandy` is byte-unchanged, the sandbox forward-compat promise holds, and the
+introspection `schema_version` stays `1`.
+
+### Daemon mode (#17) — `--start` / `--attach` / `--stop`
+
+- **`sandy --start`** launches a detached daemon session for the workspace and
+  returns once it's attachable. A lightweight host-side *supervisor* owns the
+  workspace lock, the helper processes (SSH/channel relays, the egress proxy and
+  its log streamer), and the teardown trap; the container itself runs detached
+  with `--restart unless-stopped`, so the session **survives a host reboot or
+  Docker restart** (it comes back on the same fixed proxy IP, so a reattach just
+  works). `--start` is idempotent — a second `--start` on a workspace that already
+  has a running daemon session is a no-op that prints the session name.
+- **`sandy --attach`** connects an interactive client to a running daemon session.
+  A fresh attach is a full repaint. **Concurrent attach is last-wins** (`tmux
+  attach -d`): a second client detaches the first cleanly (no screen-mirroring or
+  size-fights); the displaced client sees its session is still alive and exits
+  with **code 3** (clean detach). If you detach normally and the session keeps
+  running you also get **3**; if the session ends while you're attached (the agent
+  exits, or someone runs `--stop` elsewhere) you get **0**.
+- **`sandy --stop`** tears a session down completely — container, networks, and
+  lock all gone. If the supervisor is alive it's signalled so its own trap runs
+  the normal cleanup (the lock is only ever released by its owner); if the
+  supervisor is gone (e.g. a reboot-resurrected container) `--stop` tears the
+  container/network down directly and reaps the now-stale lock.
+- **Exit codes** (new; the CLI previously only used `0`/`1`/`128+signal`):
+
+  | code | `--attach` | `--stop` |
+  |---|---|---|
+  | 0 | session ended while attached | stopped successfully |
+  | 3 | clean detach, session still running | — |
+  | 4 | no such daemon session | no such daemon session |
+  | 5 | attach failed unexpectedly | teardown failed |
+
+- **Bare `sandy` over an existing daemon session errors with a hint** (exit `1`):
+  *"A daemon session is already running for this workspace. Attach with `sandy
+  --attach`, or end it with `sandy --stop`."* — rather than clobbering it. The
+  check keys off the running labeled **container** (durable truth), so a
+  supervisor-less rebooted session is respected too.
+- **`--start` refuses headless** (`-p`/`--print`/`--prompt`): a persistent
+  interactive session is incompatible with a one-shot run, and `--restart
+  unless-stopped` would restart-loop it. Use bare `sandy -p …` for headless.
+- **State lives in container labels**, not a state file — `sandy.daemon`,
+  `sandy.workspace_path`, `sandy.session`, `sandy.started_at`, `sandy.daemon_pid`
+  — so it survives sandy upgrades and can't drift from what Docker actually holds.
+
+### Introspection additions (#17, additive — `schema_version` stays 1)
+
+- `--print-schema` `cli_flags` gains `--start`, `--attach`, `--stop`, and
+  `--prune-orphans`.
+- Each `--print-state` `running_containers[]` entry gains **`sandbox`** (the
+  `sandboxes[].name` join key — previously there was no reliable
+  container↔sandbox join), **`daemon`** (bool — tells an attachable sandy session
+  from a foreign container), and **`attached_clients`** (int|null — live tmux
+  client count for daemon sessions). Consumers feature-detect on these; an older
+  client ignores the new fields.
+
+### Network-orphan cleanup (#26, additive)
+
+Builds on the 1.0-line orphan-network reaper (which fixed the *"all predefined
+address pools have been fully subnetted"* leak under repeated launch/close
+cycles):
+
+- **`sandy --prune-orphans`** — an explicit "reap every orphaned `sandy_*`
+  network now and exit" maintenance command. A true fast-path (it runs before the
+  preflight, config load, mutex, and any image build), so a UI can call it as a
+  cheap cleanup action. Exit `0` on success (including "found none"); exit `1`
+  only when Docker is unreachable.
+- **`orphan_networks`** — a new top-level `--print-state` field (int count, or
+  `null` when Docker is unreachable) so a UI can surface the orphan count and
+  offer cleanup. A UI cleans by calling `--prune-orphans`, then re-reading the
+  field.
+- **Prune-on-startup** — every launch now sweeps provably-dead orphan networks
+  (not just proxy-mode launches), covering non-proxy sessions that previously
+  leaked `sandy_net_*`. An orphan is only ever a network whose owning PID is dead
+  **and** that has no attached container, so a live or mid-setup session — and a
+  reboot-resurrected daemon session — is never disturbed.
+
+### Verifying the lifecycle
+
+Daemon mode is a Docker-runtime feature; sandy's automated suite covers its
+static, structural, and introspection contract, but the actual container
+lifecycle (survival across an abrupt client kill, helper reparenting, `--stop`
+teardown) is only exercisable against a real Docker daemon. A turnkey acceptance
+harness — `test/acceptance-daemon.sh` — runs the full scenario (`--start` →
+attach → kill the client abruptly → verify the container/supervisor/session
+survive → reattach with state intact → `--stop` → everything gone) and is the
+recommended release-readiness gate on the host.
+
+---
+
 ## sandy v1.0.1
 
 First patch on the 1.x line. A security-and-hardening batch — no new user-facing

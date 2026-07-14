@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.0.2-dev"
+SANDY_VERSION="1.1.0"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -789,6 +789,14 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--print-state"';  printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Emit runtime state (sandboxes, approvals, containers) as JSON."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--validate-config"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Validate a config file against the schema; emit JSON."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--start"';         printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Start a detached daemon session for the workspace and return once attachable."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--attach"';        printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Attach an interactive client to a running daemon session."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--stop"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Stop a running daemon session (full teardown)."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--prune-orphans"'; printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Reap orphaned sandy_* networks (dead-owner, no attached container) and exit."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -852,15 +860,126 @@ _sandy_emit_schema() {
     printf '}\n'
 }
 
+# Emit the `sandbox`/`daemon`/`attached_clients` fields for one
+# running_containers[] entry (#17 DEC-3b). Args: container id, container
+# name, "sandy.daemon" label value, "sandy.session" label value. Callable
+# from both --print-state modes so they stay in sync.
+_sandy_emit_container_daemon_fields() {
+    local _cid="$1" _cname="$2" _cdaemon="$3" _csession="$4"
+    local _sandbox _isdaemon _ac
+
+    # sandbox: the sandy.session label when present (daemon containers),
+    # else a best-effort strip of the sandy-proxy-/sandy- prefix from the
+    # container name so bare/proxy containers still join to sandboxes[].
+    if [ -n "$_csession" ]; then
+        _sandbox="$_csession"
+    else
+        _sandbox="${_cname#sandy-proxy-}"
+        _sandbox="${_sandbox#sandy-}"
+    fi
+
+    if [ "$_cdaemon" = "true" ]; then
+        _isdaemon="true"
+        # -u: docker exec defaults to the IMAGE's user (root — no USER
+        # directive; the entrypoint drops to the host uid via gosu), and a
+        # root tmux client looks in /tmp/tmux-0 while the server's socket is
+        # /tmp/tmux-<host-uid> — so an un-`-u`'d probe can never see the
+        # session. The host user running --print-state is the one who ran
+        # --start, so `id -u` here matches the forwarded HOST_UID.
+        # `|| _ac=""`: the probe legitimately fails (container mid-startup,
+        # session gone, foreign labeled container) — without the guard that
+        # non-zero status hits the introspection ERR trap under set -eE and
+        # kills the whole emission (host regression: one broken daemon
+        # container failed every --print-state consumer).
+        _ac="$(docker exec -u "$(id -u)" "$_cid" tmux display -p -t sandy '#{session_attached}' 2>/dev/null)" || _ac=""
+        if ! [[ "$_ac" =~ ^[0-9]+$ ]]; then
+            _ac="null"
+        fi
+    else
+        _isdaemon="false"
+        _ac="null"
+    fi
+
+    printf ','; _json_kv sandbox "$(_json_escape "$_sandbox")"
+    printf ','; printf '"daemon":%s' "$_isdaemon"
+    printf ','; printf '"attached_clients":%s' "$_ac"
+}
+
+# #26 (milestone 1.1.0, Batch 4) — pure lister: emits the names (one per line)
+# of orphaned sandy_(sidecar|egress|net)_<pid> networks — the exact gate logic
+# _sandy_reap_orphan_networks uses, extracted so print-state, --prune-orphans,
+# and the reaper itself share ONE source of truth (DEC-4b) instead of three
+# copies of the gate drifting apart. "Orphan" means: the trailing <pid> in the
+# network name is dead (numeric + `! kill -0`) OR non-numeric, AND no
+# container is currently attached. A live-PID network (incl. a launch that's
+# mid-setup) or a container-attached network (incl. a D9 reboot-resurrected
+# daemon session whose supervisor pid is gone but whose container is still
+# running) is NOT an orphan and is never listed here.
+#
+# NOTE: defined here (well before the reaper at ~3216) rather than "just
+# above the reaper" because --print-state is a FAST-PATH handler that can
+# dispatch (and exit) before the script ever reaches line ~3216 in its linear
+# top-to-bottom execution — a bash function called before its own `name() {`
+# statement has executed is "command not found" (forward references don't
+# work; only text further down in the file that RUNS later can see a function
+# defined further up). Placed next to _sandy_emit_state, its only fast-path
+# caller, so both fast-path consumers (print-state) and the later-defined
+# reaper/`--prune-orphans` dispatcher can call it identically.
+_sandy_orphan_networks_list() {
+    local net net_pid attached
+    for net in $(docker network ls --format '{{.Name}}' 2>/dev/null \
+            | grep -E '^sandy_(sidecar|egress|net)_' || true); do
+        net_pid="${net##*_}"   # trailing field: sandy_<kind>_<pid> → <pid>
+        # Owner still alive? numeric PID + kill -0. If so, skip — never touch a
+        # live/mid-setup session's network. Non-numeric → fall through to the
+        # container check (can't prove liveness).
+        if [ -n "$net_pid" ] && [ "$net_pid" -eq "$net_pid" ] 2>/dev/null \
+           && kill -0 "$net_pid" 2>/dev/null; then
+            continue
+        fi
+        # Any container still attached? If so it's live (incl. D9) — skip.
+        attached="$(docker network inspect "$net" \
+            --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | tr -d '[:space:]')"
+        [ -z "$attached" ] && printf '%s\n' "$net"
+    done
+}
+
+# _sandy_reap_orphan_networks — remove every orphan network the lister reports.
+#
+# Self-heal for sandy's OWN orphaned Docker networks: a sandy_net_* (the isolated
+# bridge in non-proxy mode) or sandy_sidecar_*/sandy_egress_* (the proxy topology)
+# whose owning session is gone. A SIGKILL'd / OOM'd / closed-terminal sandy can't
+# run its cleanup trap, leaking the network (and its subnet); enough orphans
+# exhaust the candidate pools and new launches fail with "all predefined address
+# pools have been fully subnetted" (accumulates fast under launch/close/relaunch,
+# e.g. sandy-ui). The removal predicate lives in _sandy_orphan_networks_list()
+# (DEC-4b single source of truth — the reaper, print-state's `orphan_networks`
+# count, and `--prune-orphans` all consume it, so the gate can't drift): a net is
+# reaped ONLY when its owning PID is dead AND no container is attached, so a live
+# or mid-setup concurrent session is never disturbed (the PID gate is what makes
+# eager per-launch reaping concurrent-safe). Defined here beside the lister so
+# every consumer resolves it — including the positional `--prune-orphans`
+# fast-path (which exits before the preflight) and the `--stop` / startup-prune
+# dispatchers below. Returns 0 if it freed at least one network, 1 otherwise.
+_sandy_reap_orphan_networks() {
+    local net freed=1
+    for net in $(_sandy_orphan_networks_list); do
+        docker network rm "$net" >/dev/null 2>&1 && freed=0
+    done
+    return $freed
+}
+
 # Emit runtime state JSON: sandboxes, approvals, running containers.
 _sandy_emit_state() {
-    # Mode: "full" (default) or "light". Light mode (#18) makes exactly ONE
-    # docker spawn instead of nine, so pollers (e.g. sandy-ui) don't spike CPU:
-    # it skips installed_images (which has no consumer) and derives
+    # Mode: "full" (default) or "light". Light mode (#18) makes exactly TWO
+    # docker spawns instead of nine, so pollers (e.g. sandy-ui) don't spike
+    # CPU: it skips installed_images (which has no consumer) and derives
     # docker_reachable from a single `docker ps`'s exit status instead of the
-    # two docker-info gates. Any arg other than "light" (incl. none) selects
-    # full mode, whose output/logic is unchanged — so a consumer can pass
-    # "light" unconditionally and older/other sandy just ignores it.
+    # two docker-info gates; the second spawn is the `docker network ls`
+    # behind orphan_networks (#26 — light was ONE spawn before 1.1.0). Any
+    # arg other than "light" (incl. none) selects full mode, whose
+    # output/logic is unchanged — so a consumer can pass "light"
+    # unconditionally and older/other sandy just ignores it.
     local _mode="${1:-full}"
     # Detect which stat flavor we have once. GNU stat (Linux) takes -c;
     # BSD stat (macOS) takes -f. We can't rely on either failing cleanly on
@@ -1017,23 +1136,31 @@ _sandy_emit_state() {
     # Light mode: a single `docker ps` — its exit status IS the reachability
     # signal (fails when the CLI is missing or the daemon is down), replacing
     # the two docker-info gates. Combined with the installed_images skip above,
-    # that's exactly one docker spawn per light invocation. The full-mode
-    # elif/else below are byte-for-byte the pre-#18 code path (unchanged, for
-    # the soak).
+    # the steady-state light budget is two docker spawns: this `docker ps`
+    # plus the `docker network ls` behind orphan_networks (#26, below). The
+    # `sandbox`/`daemon` fields ride the ps call for free; two bounded extras
+    # apply only when the corresponding state exists — one `docker exec ...
+    # tmux display` per DAEMON container (`attached_clients`) and one
+    # `docker network inspect` per dead-owner orphan candidate — zero of
+    # either on a host with no daemon sessions and no orphans. The full-mode
+    # elif/else below follows the same per-entry logic; both stay in sync
+    # because a light-mode poller needs these fields too (#17).
     if [ "$_mode" = "light" ]; then
         local _ps_out=""
         if command -v docker >/dev/null 2>&1 \
-           && _ps_out="$(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}' 2>/dev/null)"; then
+           && _ps_out="$(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}|{{.Label "sandy.daemon"}}|{{.Label "sandy.session"}}' 2>/dev/null)"; then
             printf ',"docker_reachable":true'
             printf ',"running_containers":['
             first=1
             while IFS= read -r _cline; do
                 [ -z "$_cline" ] && continue
-                local _cid _cname _cimg _cstarted
+                local _cid _cname _cimg _cstarted _cdaemon _csession
                 _cid="$(echo "$_cline"      | awk -F'|' '{print $1}')"
                 _cname="$(echo "$_cline"    | awk -F'|' '{print $2}')"
                 _cimg="$(echo "$_cline"     | awk -F'|' '{print $3}')"
                 _cstarted="$(echo "$_cline" | awk -F'|' '{print $4}')"
+                _cdaemon="$(echo "$_cline"  | awk -F'|' '{print $5}')"
+                _csession="$(echo "$_cline" | awk -F'|' '{print $6}')"
                 [ $first -eq 0 ] && printf ','
                 first=0
                 printf '{'
@@ -1041,17 +1168,28 @@ _sandy_emit_state() {
                 printf ','; _json_kv name       "$(_json_escape "$_cname")"
                 printf ','; _json_kv image      "$(_json_escape "$_cimg")"
                 printf ','; _json_kv started_at "$(_json_escape "$_cstarted")"
+                _sandy_emit_container_daemon_fields "$_cid" "$_cname" "$_cdaemon" "$_csession"
                 printf '}'
             done < <(printf '%s\n' "$_ps_out" | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)
             printf ']'
+            # #26 DEC-4c — orphan_networks: reap-eligible sandy_(sidecar|egress|
+            # net)_* network count, via the SAME lister the reaper/--prune-orphans
+            # use (DEC-4b). Cost: one extra `docker network ls` always, plus one
+            # `docker network inspect` per dead/non-numeric-PID candidate ONLY —
+            # the kill -0 short-circuit means a healthy all-live-PID host pays
+            # zero extra inspects, so this stays cheap for the #25 poll-friendly
+            # light path in the common case.
+            local _orphans; _orphans="$(_sandy_orphan_networks_list | grep -c . || true)"
+            printf ',"orphan_networks":%s' "${_orphans:-0}"
         else
             printf ',"docker_reachable":false'
             printf ',"running_containers":null'
+            printf ',"orphan_networks":null'
         fi
     else   # full mode
         local _ps_out
         if command -v docker >/dev/null 2>&1 \
-           && _ps_out="$(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}' 2>/dev/null)"; then
+           && _ps_out="$(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}|{{.Label "sandy.daemon"}}|{{.Label "sandy.session"}}' 2>/dev/null)"; then
             printf ',"docker_reachable":true'
             printf ',"running_containers":['
             first=1
@@ -1059,12 +1197,14 @@ _sandy_emit_state() {
             # containers today — best-effort filter by image name.
             while IFS= read -r _cline; do
                 [ -z "$_cline" ] && continue
-                # line format: id|name|image|started
-                local _cid _cname _cimg _cstarted
+                # line format: id|name|image|started|daemon-label|session-label
+                local _cid _cname _cimg _cstarted _cdaemon _csession
                 _cid="$(echo "$_cline"     | awk -F'|' '{print $1}')"
                 _cname="$(echo "$_cline"   | awk -F'|' '{print $2}')"
                 _cimg="$(echo "$_cline"    | awk -F'|' '{print $3}')"
                 _cstarted="$(echo "$_cline" | awk -F'|' '{print $4}')"
+                _cdaemon="$(echo "$_cline"  | awk -F'|' '{print $5}')"
+                _csession="$(echo "$_cline" | awk -F'|' '{print $6}')"
                 [ $first -eq 0 ] && printf ','
                 first=0
                 printf '{'
@@ -1072,12 +1212,17 @@ _sandy_emit_state() {
                 printf ','; _json_kv name       "$(_json_escape "$_cname")"
                 printf ','; _json_kv image      "$(_json_escape "$_cimg")"
                 printf ','; _json_kv started_at "$(_json_escape "$_cstarted")"
+                _sandy_emit_container_daemon_fields "$_cid" "$_cname" "$_cdaemon" "$_csession"
                 printf '}'
             done < <(printf '%s\n' "$_ps_out" | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)
             printf ']'
+            # #26 DEC-4c — see the light-mode branch above for the cost note.
+            local _orphans; _orphans="$(_sandy_orphan_networks_list | grep -c . || true)"
+            printf ',"orphan_networks":%s' "${_orphans:-0}"
         else
             printf ',"docker_reachable":false'
             printf ',"running_containers":null'
+            printf ',"orphan_networks":null'
         fi
     fi
 
@@ -1276,6 +1421,35 @@ if [[ "${1:-}" == "--validate-config" ]]; then
     _sandy_validate_config "${2:-}"
     exit "$_SANDY_VALIDATE_RC"
 fi
+if [[ "${1:-}" == "--prune-orphans" ]]; then
+    # DEC-4d (#26) — maintenance fast-path: reap orphaned sandy_* networks and
+    # exit, in the same pre-preflight family as --print-state. It's a global,
+    # workspace-independent op, so it deliberately runs BEFORE the docker-info /
+    # SANDY_HOME-writable / update-check preflight below and before any config
+    # load, mutex, or image build: it needs neither a writable SANDY_HOME nor the
+    # update check, only a reachable Docker daemon. Human-readable stdout (an
+    # action verb, symmetric with --rebuild/--build-only — not introspection
+    # JSON). Exit 0 on success (including "found none"); exit 1 only when docker
+    # itself is unreachable (nothing to prune without it).
+    if ! command -v docker >/dev/null 2>&1 || ! docker ps >/dev/null 2>&1; then
+        error "--prune-orphans requires a reachable Docker daemon."
+        exit 1
+    fi
+    _sandy_prune_before="$(_sandy_orphan_networks_list | grep -c . || true)"
+    _sandy_prune_before="${_sandy_prune_before:-0}"
+    if [ "$_sandy_prune_before" -eq 0 ]; then
+        echo "No orphaned sandy networks found."
+        exit 0
+    fi
+    _sandy_reap_orphan_networks || true
+    # Re-count after reap (rather than trusting the attempt count) so the reported
+    # number is what actually freed — a network that raced back to life (e.g. a
+    # concurrent launch claimed it) between the list and the rm isn't claimed.
+    _sandy_prune_after="$(_sandy_orphan_networks_list | grep -c . || true)"
+    _sandy_prune_after="${_sandy_prune_after:-0}"
+    echo "Reaped $((_sandy_prune_before - _sandy_prune_after)) orphaned sandy network(s)."
+    exit 0
+fi
 
 # --- Help ---
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -1363,6 +1537,16 @@ SANDY_REBUILD=false
 SANDY_BUILD_ONLY=false
 SANDY_NEW_SESSION=false
 SANDY_REMOTE_CONTROL=false
+# Daemon-mode (milestone 1.1.0, #17). SANDY_START=true, SANDY_ATTACH=true, and
+# SANDY_STOP=true are set by their respective flags below; --workspace is
+# shared across all three (and bare `sandy`). SANDY_DAEMON_SUPERVISOR is NOT a
+# CLI flag — it's an internal env var the --start dispatcher sets when it
+# re-execs "$0" as the detached supervisor (see the dispatcher block near
+# WORK_DIR resolution).
+SANDY_START=false
+SANDY_ATTACH=false
+SANDY_STOP=false
+SANDY_WORKSPACE_ARG=""
 # Capture whether SANDY_VERBOSE came from the real env BEFORE defaulting it: the
 # env snapshot below can't otherwise distinguish a defaulted 0 from an env-set 0,
 # so it would mark SANDY_VERBOSE "env-set" and skip a value set in a config file
@@ -1382,6 +1566,18 @@ while [ $# -gt 0 ]; do
         --build-only) SANDY_BUILD_ONLY=true ;;
         --new)        SANDY_NEW_SESSION=true ;;
         --remote)     SANDY_REMOTE_CONTROL=true ;;
+        --start)      SANDY_START=true ;;
+        --workspace)
+            if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
+                echo "[sandy] ERROR: --workspace requires a value (e.g. --workspace /path/to/project)" >&2
+                exit 1
+            fi
+            shift
+            SANDY_WORKSPACE_ARG="$1"
+            ;;
+        --workspace=*) SANDY_WORKSPACE_ARG="${1#--workspace=}" ;;
+        --attach)     SANDY_ATTACH=true ;;
+        --stop)       SANDY_STOP=true ;;
         --upgrade)    sandy_self_update; exit 0 ;;
         --agent)
             if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
@@ -1400,6 +1596,22 @@ while [ $# -gt 0 ]; do
     shift
 done
 set -- ${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}
+
+# Host-side headless detection — -p/--print/--prompt among the forwarded args.
+# Consumed by the --start dispatcher's H3 reject (a one-shot under --restart
+# unless-stopped would restart-loop) and the passive-approval fail-closed
+# check. The container-side launch script (USERSETUP heredoc) does its own
+# identical scan for its own purposes — this host-side copy is what makes
+# $_sandy_is_headless defined under `set -u` in the host process. (Regression
+# note: without it, `sandy --start` died with "unbound variable" — but only on
+# hosts with docker present, because the docker preflight exits first when
+# docker is absent, which is why docker-less static checks couldn't catch it.)
+_sandy_is_headless=false
+for _sandy_headless_arg in "$@"; do
+    case "$_sandy_headless_arg" in
+        -p|--print|--prompt) _sandy_is_headless=true; break ;;
+    esac
+done
 
 # --- Check for sandy updates (non-blocking, cached 24h) ---
 sandy_check_update
@@ -2756,6 +2968,19 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
     AGENT_CMD="$(_sandy_build_agent_cmd "$_agent" "$@")"
     if [ "$_sandy_is_headless" = "true" ]; then
         exec bash -c "$AGENT_CMD"
+    elif [ "${SANDY_DAEMON:-0}" = "1" ]; then
+        # Daemon mode: the container IS the daemon (host-side supervisor owns
+        # the lock/lifecycle — see sandy's --start dispatcher). Create the
+        # session detached and keep PID 1 alive without attaching; a client
+        # attaches later via `docker exec ... tmux attach` (--attach, Batch 2).
+        # On failure, exit loudly: a dead PID 1 puts the error in `docker
+        # logs` (where --start's failure path surfaces it) instead of leaving
+        # a session-less container that hangs the readiness gate.
+        tmux new-session -d -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1" || {
+            echo "[sandy] FATAL: tmux new-session failed in daemon mode" >&2
+            exit 1
+        }
+        exec tail -f /dev/null
     else
         tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1"
     fi
@@ -2794,7 +3019,14 @@ else
     fi
 
     tmux select-pane -t sandy.0
-    tmux attach -t sandy
+    if [ "${SANDY_DAEMON:-0}" = "1" ]; then
+        # Daemon mode: session already created detached above (-d); keep
+        # PID 1 alive without attaching. See the single-agent branch above
+        # for the full explanation.
+        exec tail -f /dev/null
+    else
+        tmux attach -t sandy
+    fi
 fi
 USERSETUP
 }
@@ -3088,8 +3320,320 @@ ensure_build_files
 # WORK_DIR_LOGICAL captures the user-typed (logical) path so we can record it
 # in WORKSPACE.json when it differs — useful forensic detail for diagnosing
 # case/symlink mismatches later.
-WORK_DIR_LOGICAL="$(pwd)"
-WORK_DIR="$(pwd -P)"
+if [ -n "$SANDY_WORKSPACE_ARG" ]; then
+    if [ ! -d "$SANDY_WORKSPACE_ARG" ]; then
+        error "--workspace path does not exist or is not a directory: $SANDY_WORKSPACE_ARG"
+        exit 1
+    fi
+    WORK_DIR_LOGICAL="$(cd "$SANDY_WORKSPACE_ARG" && pwd)"
+    WORK_DIR="$(cd "$SANDY_WORKSPACE_ARG" && pwd -P)"
+else
+    WORK_DIR_LOGICAL="$(pwd)"
+    WORK_DIR="$(pwd -P)"
+fi
+
+# --- Daemon-mode dispatcher (--start only; milestone 1.1.0, #17 Batch 1) ---
+# Gated entirely on SANDY_START — when it's false (the default, i.e. every
+# bare `sandy` / `sandy -p ...` / `sandy --agent ...` invocation) this whole
+# block is skipped and execution falls straight through to the unchanged
+# interactive flow below. SANDY_DAEMON_SUPERVISOR is never set by a user; it's
+# the internal marker this dispatcher sets when it re-execs "$0" as the
+# detached supervisor, so the *second* pass through this exact point (running
+# as the supervisor) also skips the block and falls through to the normal
+# launch tail — which itself branches on SANDY_DAEMON_SUPERVISOR further down
+# (RUN_FLAGS assembly, and the block-and-wait launch tail) to run detached.
+if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; then
+    # H3 — --start launches a PERSISTENT INTERACTIVE daemon session; a headless
+    # one-shot (-p/--print/--prompt) is incompatible: the agent would run once and
+    # exit, and `--restart unless-stopped` (D3a) would then restart it forever — a
+    # loop. Reject the combination with a pointer to the bare-sandy headless path.
+    if [ "$_sandy_is_headless" = "true" ]; then
+        error "--start launches a persistent interactive session; it is incompatible with -p/--print/--prompt (one-shot headless)."
+        error "  For a headless run, use bare 'sandy -p ...' (no --start)."
+        exit 1
+    fi
+
+    # D6 — idempotency keys off a running, labeled daemon CONTAINER for this
+    # workspace, not lock/supervisor liveness (D9): a reboot-resurrected
+    # container (whose supervisor is gone) is still correctly "already
+    # running" and must not be double-started.
+    _sandy_daemon_filter=(--filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$WORK_DIR")
+    _sandy_daemon_existing="$(docker ps -q "${_sandy_daemon_filter[@]}" 2>/dev/null | head -1)" || true
+    if [ -n "$_sandy_daemon_existing" ]; then
+        _sandy_daemon_name="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$_sandy_daemon_existing" 2>/dev/null || true)"
+        info "Daemon session already running for $WORK_DIR: ${_sandy_daemon_name:-$_sandy_daemon_existing} (container ${_sandy_daemon_existing:0:12})"
+        exit 0
+    fi
+
+    # D1 — normalize the currently-parsed flags back into an argv for the
+    # supervisor re-exec. $@ at this point is REMAINING_ARGS (whatever the
+    # parse loop above didn't recognize as a sandy flag — e.g. forwarded
+    # agent args) since the loop already consumed --rebuild/--agent/etc. into
+    # variables. --workspace is passed explicitly so the supervisor (a fresh
+    # process) resolves the identical WORK_DIR regardless of its own cwd.
+    _sandy_reexec_args=(--start --workspace "$WORK_DIR")
+    [ "$SANDY_REBUILD" = "true" ] && _sandy_reexec_args+=(--rebuild)
+    [ "$SANDY_BUILD_ONLY" = "true" ] && _sandy_reexec_args+=(--build-only)
+    [ "$SANDY_NEW_SESSION" = "true" ] && _sandy_reexec_args+=(--new)
+    [ "$SANDY_REMOTE_CONTROL" = "true" ] && _sandy_reexec_args+=(--remote)
+    [ -n "$SANDY_AGENT_OVERRIDE" ] && _sandy_reexec_args+=(--agent "$SANDY_AGENT_OVERRIDE")
+    case "$SANDY_VERBOSE" in
+        3) _sandy_reexec_args+=(-vvv) ;;
+        2) _sandy_reexec_args+=(-vv) ;;
+        1) _sandy_reexec_args+=(-v) ;;
+    esac
+    _sandy_reexec_args+=("$@")
+
+    mkdir -p "$SANDY_HOME/sandboxes"
+    _sandy_daemon_log="$SANDY_HOME/sandboxes/.daemon-start-$$.log"
+    : > "$_sandy_daemon_log"
+
+    # D1 — daemonize the supervisor with `nohup … & disown`, deliberately NOT
+    # setsid: setsid ships with util-linux and is ABSENT on macOS, which is
+    # daemon-mode's primary platform (sandy-ui), and failing-clean there isn't
+    # good enough. nohup is portable (macOS + Linux) and sufficient here:
+    #   - nohup makes the supervisor SIGHUP-immune, so a PTY/tab close (node-pty
+    #     hangup) can't kill it;
+    #   - `& disown` + the `</dev/null >>log 2>&1` redirect detaches its stdio
+    #     from the client PTY, so `--start` returns cleanly and the supervisor
+    #     holds no PTY fd;
+    #   - once `--start` exits, the supervisor reparents to init/launchd —
+    #     effectively daemonized.
+    # setsid's session-leader/process-group property is NOT needed: helper
+    # teardown is trap-by-PID in cleanup() (SSH_RELAY_PID/CHANNEL_RELAY_PID/
+    # PROXY_LOG_PID), and --stop (Batch 2) signals the supervisor by the
+    # sandy.daemon_pid label — neither uses process-group signaling.
+    #
+    # D7 — headless approvals: SANDY_AUTO_APPROVE_PRIVILEGED (if the caller
+    # exported it) reaches the supervisor via ordinary env inheritance —
+    # `env` only ADDS the two vars named below, it doesn't clear the rest of
+    # this process's exported environment.
+    nohup env SANDY_DAEMON_SUPERVISOR=1 "SANDY_DAEMON_LOG=$_sandy_daemon_log" \
+        "$0" "${_sandy_reexec_args[@]}" </dev/null >>"$_sandy_daemon_log" 2>&1 &
+    disown 2>/dev/null || true
+
+    info "Starting daemon session for $WORK_DIR..."
+
+    # D8 — startup contract: stream the supervisor's log to stdout/stderr
+    # while it builds/launches (first run can spend minutes in image build /
+    # credential seeding), and exit 0 ONLY once the inner tmux session is
+    # actually attachable. Non-zero + a useful last log line on timeout.
+    _sandy_tail_pid=""
+    tail -n +1 -f "$_sandy_daemon_log" &
+    _sandy_tail_pid=$!
+
+    _sandy_ready=false
+    _sandy_timeout_s=600
+    _sandy_waited=0
+    _sandy_restarts=0
+    _sandy_daemon_container=""
+    while [ "$_sandy_waited" -lt "$_sandy_timeout_s" ]; do
+        _sandy_daemon_container="$(docker ps -q "${_sandy_daemon_filter[@]}" 2>/dev/null | head -1)" || true
+        # -u: docker exec defaults to the image's user (root — no USER
+        # directive), but the tmux server runs as the host uid the entrypoint
+        # gosu-dropped to, with its socket in /tmp/tmux-<uid>. A root client
+        # looks in /tmp/tmux-0 and can NEVER see the session — the first
+        # macOS acceptance run hung the full 600s against a perfectly
+        # healthy container because of exactly this.
+        if [ -n "$_sandy_daemon_container" ] \
+           && docker exec -u "$(id -u)" "$_sandy_daemon_container" tmux has-session -t sandy >/dev/null 2>&1; then
+            _sandy_ready=true
+            break
+        fi
+        # Fail fast on a crash-looping container instead of burning the full
+        # timeout: under --restart unless-stopped a container whose entrypoint
+        # keeps dying flaps forever; RestartCount is the tell.
+        if [ -n "$_sandy_daemon_container" ]; then
+            _sandy_restarts="$(docker inspect -f '{{.RestartCount}}' "$_sandy_daemon_container" 2>/dev/null || echo 0)"
+            if [ "${_sandy_restarts:-0}" -ge 3 ] 2>/dev/null; then
+                break
+            fi
+        fi
+        sleep 1
+        _sandy_waited=$((_sandy_waited + 1))
+    done
+
+    if [ -n "$_sandy_tail_pid" ]; then
+        kill "$_sandy_tail_pid" 2>/dev/null || true
+        wait "$_sandy_tail_pid" 2>/dev/null || true
+    fi
+
+    if [ "$_sandy_ready" = "true" ]; then
+        _sandy_daemon_name="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$_sandy_daemon_container" 2>/dev/null || true)"
+        info "Daemon session ready: ${_sandy_daemon_name:-$_sandy_daemon_container} (container ${_sandy_daemon_container:0:12})"
+        rm -f "$_sandy_daemon_log" 2>/dev/null || true
+        exit 0
+    else
+        if [ "${_sandy_restarts:-0}" -ge 3 ] 2>/dev/null; then
+            error "Daemon container is crash-looping (RestartCount=$_sandy_restarts) — giving up."
+        else
+            error "Daemon session failed to become attachable within ${_sandy_timeout_s}s."
+        fi
+        # The container-side story is usually the useful one (why the inner
+        # tmux session never appeared) — dump it alongside the supervisor log.
+        if [ -n "$_sandy_daemon_container" ]; then
+            error "Container log tail (docker logs $_sandy_daemon_container):"
+            docker logs --tail 30 "$_sandy_daemon_container" 2>&1 | sed 's/^/[sandy]   /' >&2 || true
+        fi
+        error "Supervisor log tail ($_sandy_daemon_log):"
+        tail -n 20 "$_sandy_daemon_log" >&2 2>/dev/null || true
+        exit 1
+    fi
+fi
+
+# --- Daemon-mode dispatcher (--attach; milestone 1.1.0, #17 Batch 2) ---
+# Runs immediately after WORK_DIR resolution — same as --start — so an
+# `--attach` call never falls through into config loading / SSH-tooling
+# preflight / resource detection, none of which it needs and some of which
+# (e.g. the socat/python3 SSH-agent preflight) could spuriously fail an
+# attach that has nothing to do with SSH mode. Filters strictly on
+# label=sandy.daemon=true, so a bare (unlabeled) interactive container for
+# this workspace is invisible to it — it can never attach into someone else's
+# non-daemon session.
+if [ "$SANDY_ATTACH" = "true" ]; then
+    _sandy_daemon_filter=(--filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$WORK_DIR")
+    _sandy_attach_container="$(docker ps -q "${_sandy_daemon_filter[@]}" 2>/dev/null | head -1)" || true
+    if [ -z "$_sandy_attach_container" ]; then
+        error "No daemon session running for $WORK_DIR."
+        error "  Start one with 'sandy --start'."
+        exit 4
+    fi
+
+    # DEC-A — concurrent attach is LAST-WINS: `tmux attach -d` forces any prior
+    # client to detach. The prior client's own (now-returned) `tmux attach`
+    # then sees the session is still alive and exits 3 below — no silent
+    # screen-mirroring / size-fighting between two attached clients.
+    # A fresh `docker exec -it` is a brand-new tmux client/PTY, so tmux's
+    # native attach redraw is already a full repaint — no SIGWINCH toggle
+    # needed here (that's sandy-ui's fallback for its own in-host reattach).
+    # -u: exec as the host uid (the entrypoint gosu-drops to it; the image has
+    # no USER directive, so a bare exec would run as root and look for the tmux
+    # socket in /tmp/tmux-0 instead of /tmp/tmux-<uid> — never finding the
+    # session). `|| rc=$?` (not a bare `$?` capture): tmux attach exits
+    # non-zero when the session dies under the client, and an unguarded
+    # failure would trip set -e before the DEC-C exit-code decision below.
+    _sandy_attach_rc=0
+    docker exec -it -u "$(id -u)" "$_sandy_attach_container" tmux attach -d -t sandy || _sandy_attach_rc=$?
+    [ "$SANDY_VERBOSE" -ge 2 ] && info "  (tmux attach exited rc=$_sandy_attach_rc)"
+
+    # DEC-C exit-code decision (made AFTER attach returns, not from its rc):
+    #   - session still up (has-session succeeds)      → 3, clean detach
+    #   - container is gone/stopped (e.g. --stop ran
+    #     elsewhere while we were attached)             → 0, session ended
+    #   - container still up but the has-session probe
+    #     itself failed for some other reason           → 5, unexpected failure
+    if docker exec -u "$(id -u)" "$_sandy_attach_container" tmux has-session -t sandy >/dev/null 2>&1; then
+        exit 3
+    fi
+    _sandy_attach_still_running="$(docker inspect -f '{{.State.Running}}' "$_sandy_attach_container" 2>/dev/null || echo false)"
+    if [ "$_sandy_attach_still_running" != "true" ]; then
+        exit 0
+    fi
+    error "Attach ended unexpectedly (container still running, but tmux session probe failed)."
+    exit 5
+fi
+
+# --- Daemon-mode dispatcher (--stop; milestone 1.1.0, #17 Batch 2) ---
+# Same early placement as --attach, for the same reason (skip config-loading/
+# preflight side effects entirely). Filters on label=sandy.daemon=true, so a
+# bare interactive container is untouched by --stop.
+if [ "$SANDY_STOP" = "true" ]; then
+    _sandy_daemon_filter=(--filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$WORK_DIR")
+    _sandy_stop_container="$(docker ps -q "${_sandy_daemon_filter[@]}" 2>/dev/null | head -1)" || true
+    if [ -z "$_sandy_stop_container" ]; then
+        error "No daemon session running for $WORK_DIR."
+        exit 4
+    fi
+
+    _sandy_stop_pid="$(docker inspect -f '{{ index .Config.Labels "sandy.daemon_pid" }}' "$_sandy_stop_container" 2>/dev/null || true)"
+
+    if [ -n "$_sandy_stop_pid" ] && [ "$_sandy_stop_pid" -eq "$_sandy_stop_pid" ] 2>/dev/null \
+       && kill -0 "$_sandy_stop_pid" 2>/dev/null; then
+        # Live supervisor (the common case): SIGNAL it — its own TERM trap
+        # (_sandy_on_signal 143, installed near the lock) runs the SAME
+        # cleanup() every interactive session uses (docker rm -f, proxy +
+        # network teardown, _sandy_release_lock). We NEVER remove the #14 lock
+        # directly from here: the lock is owned by the supervisor's pid, #14
+        # guards a lock's removal to its own owning pid, and only the
+        # supervisor's own trap — running AS that pid — may release it.
+        info "Stopping daemon session (signaling supervisor pid $_sandy_stop_pid)..."
+        kill -TERM "$_sandy_stop_pid" 2>/dev/null || true
+        _sandy_stop_waited=0
+        _sandy_stop_timeout_s=15
+        _sandy_stop_still=""
+        while [ "$_sandy_stop_waited" -lt "$_sandy_stop_timeout_s" ]; do
+            _sandy_stop_still="$(docker ps -q "${_sandy_daemon_filter[@]}" 2>/dev/null | head -1)" || true
+            [ -z "$_sandy_stop_still" ] && break
+            sleep 1
+            _sandy_stop_waited=$((_sandy_stop_waited + 1))
+        done
+        if [ -n "$_sandy_stop_still" ]; then
+            error "Daemon session did not stop within ${_sandy_stop_timeout_s}s (supervisor pid $_sandy_stop_pid)."
+            exit 5
+        fi
+        info "Daemon session stopped."
+        exit 0
+    else
+        # D9 — supervisor-less (host rebooted / dockerd restarted and resurrected
+        # the container via --restart unless-stopped, but the old supervisor pid
+        # is gone): there's no process to signal, so tear down DIRECTLY. This is
+        # the one unavoidable duplication of cleanup()'s logic, bounded to the
+        # three things a supervisor-less session still has: container, networks,
+        # and (maybe) a now-stale #14 lock.
+        info "Stopping daemon session (no live supervisor — direct teardown)..."
+        _sandy_stop_ok=true
+        # docker stop (not just rm -f) first: it marks the container
+        # intentionally-stopped, which is what defeats `--restart
+        # unless-stopped` (an rm -f alone races the restart policy).
+        docker stop "$_sandy_stop_container" >/dev/null 2>&1 || _sandy_stop_ok=false
+        docker rm -f "$_sandy_stop_container" >/dev/null 2>&1 || _sandy_stop_ok=false
+        # Best-effort: reaps this session's now-orphaned sandy_{net,sidecar,egress}_*
+        # networks (their owning pid — the dead supervisor's — is gone, so
+        # _sandy_reap_orphan_networks's liveness gate lets them go). Coordinates
+        # with the broader orphan-network work in #26 (Batch 4).
+        _sandy_reap_orphan_networks || true
+        # Reap the stale #14 lock, but ONLY if we can prove its holder pid is
+        # dead — reusing the exact liveness test the lock-acquisition stale-lock
+        # path (#14) uses. A non-numeric/empty pid file is left alone (matches
+        # #14: that means the lock is corrupt, not provably stale, and is left
+        # for the user to inspect manually) — this is best-effort, so leaving a
+        # residual lock here doesn't fail the --stop itself.
+        _sandy_stop_session="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$_sandy_stop_container" 2>/dev/null || true)"
+        if [ -n "$_sandy_stop_session" ]; then
+            _sandy_stop_lock="$SANDY_HOME/sandboxes/.${_sandy_stop_session}.lock"
+            if [ -d "$_sandy_stop_lock" ]; then
+                _sandy_lock_pid="$(cat "$_sandy_stop_lock/pid" 2>/dev/null || true)"
+                if [ -n "$_sandy_lock_pid" ] && [ "$_sandy_lock_pid" -eq "$_sandy_lock_pid" ] 2>/dev/null \
+                   && ! kill -0 "$_sandy_lock_pid" 2>/dev/null; then
+                    rm -rf "$_sandy_stop_lock" 2>/dev/null || true
+                fi
+            fi
+        fi
+        if [ "$_sandy_stop_ok" = "true" ]; then
+            info "Daemon session stopped."
+            exit 0
+        else
+            error "Failed to fully tear down the daemon session (container ${_sandy_stop_container:0:12})."
+            exit 5
+        fi
+    fi
+fi
+
+# #26 DEC-4e — broad prune-on-startup: remove provably-dead orphan networks on
+# every launch (covers non-proxy launches that never enter ensure_network, so
+# never hit ITS eager reap — that one stays, this is the broader policy on
+# top of it). PID-gated helper (same one --prune-orphans and print-state use)
+# → never touches a live/mid-setup session's network, so this can't disturb a
+# concurrently-launching sibling. One `docker network ls`; `docker network
+# inspect` only for dead/non-numeric-PID candidates. Placed here — after the
+# --start/--attach/--stop fast-path dispatchers (all of which `exit` above,
+# so they never reach this line) and before config loading — so it runs
+# exactly once for every path that continues past this point: a bare
+# interactive/headless launch, AND the re-exec'd --start supervisor pass
+# (whose SANDY_DAEMON_SUPERVISOR=1 guard made the --start dispatcher above
+# fall through instead of exiting). Does NOT change bare-sandy session
+# semantics — it only removes leftovers nothing live owns.
+command -v docker >/dev/null 2>&1 && _sandy_reap_orphan_networks || true
 
 # Safe key-value config parser (no arbitrary code execution).
 #
@@ -3924,47 +4468,6 @@ _sandy_try_create_sidecar() {
     return 1
 }
 
-# Self-heal: reap sandy's OWN orphaned Docker networks — a sandy_net_* (the
-# isolated bridge in non-proxy mode), or a sandy_sidecar_* / sandy_egress_*
-# (the proxy topology) — whose owning session is gone. A SIGKILL'd / OOM'd /
-# closed-terminal sandy can't run its cleanup trap, leaving the network (and its
-# subnet) behind; enough orphans exhaust the candidate pools and new launches
-# fail with "all predefined address pools have been fully subnetted". This
-# accumulates fast under repeated launch/close/relaunch cycles (e.g. sandy-ui).
-#
-# A network is removed ONLY when BOTH hold, so a live OR mid-setup concurrent
-# session is never disturbed:
-#   1. its owning PID (the trailing field of sandy_<kind>_<pid>) is not alive, and
-#   2. it has no container attached.
-# The PID check is what makes EAGER reaping (on every launch) concurrent-safe: a
-# launch that just created its network but hasn't attached its container yet
-# still has a live PID, so it's skipped. PID reuse (recycled to a live unrelated
-# process) yields a conservative false-negative — we don't reclaim that subnet;
-# the user can `docker network prune` — same tradeoff as the workspace lock.
-# Returns 0 if it freed at least one network, 1 otherwise.
-_sandy_reap_orphan_networks() {
-    local freed=1 net net_pid attached
-    for net in $(docker network ls --format '{{.Name}}' 2>/dev/null \
-            | grep -E '^sandy_(sidecar|egress|net)_' || true); do
-        net_pid="${net##*_}"   # trailing field: sandy_<kind>_<pid> → <pid>
-        # Owner still alive? numeric PID + kill -0. If so, skip — never touch a
-        # live/mid-setup session's network. Non-numeric → fall through to the
-        # container check (can't prove liveness).
-        if [ -n "$net_pid" ] && [ "$net_pid" -eq "$net_pid" ] 2>/dev/null \
-           && kill -0 "$net_pid" 2>/dev/null; then
-            continue
-        fi
-        # Any container still attached? If so it's live — skip (and `network rm`
-        # would refuse anyway).
-        attached="$(docker network inspect "$net" \
-            --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | tr -d '[:space:]')"
-        if [ -z "$attached" ]; then
-            docker network rm "$net" >/dev/null 2>&1 && freed=0
-        fi
-    done
-    return $freed
-}
-
 ensure_proxy_networks() {
     SIDECAR_NETWORK="sandy_sidecar_$$"
     EGRESS_NETWORK="sandy_egress_$$"
@@ -4249,6 +4752,30 @@ _sandy_release_lock() {
     rm -rf "$SANDY_WORKSPACE_LOCK" 2>/dev/null || true
     return 0
 }
+
+# --- Bare-sandy-when-daemon-exists gate (DEC-B; milestone 1.1.0, #17 Batch 2) ---
+# A daemon session's #14 lock is held by its supervisor (or, post-reboot, by
+# nothing at all — D9: the CONTAINER is the truth, not the lock). A naive bare
+# `sandy` launch against a workspace that already has a daemon session would
+# either collide on the #14 lock (supervisor alive) or, worse, silently reap a
+# supervisor-less container's stale lock and launch a second interactive
+# session over the same workspace (supervisor dead). Error with a hint instead.
+#
+# Gated OFF for --start/--attach/--stop (each already has its own
+# container-aware path above, before config loading) and for the daemon
+# supervisor's own re-exec pass (SANDY_DAEMON_SUPERVISOR=1) — so this block is
+# a STRICT NO-OP for every invocation this milestone didn't touch. In
+# particular: bare `sandy` with NO daemon session for this workspace hits the
+# `docker ps` below, gets nothing back, and falls straight through into the
+# unchanged interactive flow — byte-for-byte the same as before this batch.
+if [ "$SANDY_START" != "true" ] && [ "$SANDY_ATTACH" != "true" ] && [ "$SANDY_STOP" != "true" ] \
+   && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; then
+    _sandy_bare_existing="$(docker ps -q --filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$WORK_DIR" 2>/dev/null | head -1)" || true
+    if [ -n "$_sandy_bare_existing" ]; then
+        error "A daemon session is already running for this workspace. Attach with 'sandy --attach', or end it with 'sandy --stop'."
+        exit 1
+    fi
+fi
 
 # Workspace mutex. Only one sandy may run against a given workspace at a
 # time — two concurrent agents editing the same codebase would step on each
@@ -5268,6 +5795,18 @@ trap '_sandy_on_signal 129' HUP
 trap '_sandy_on_signal 131' QUIT
 trap '_sandy_on_signal 134' ABRT
 
+# H2 — SIGHUP by design (daemon/supervisor mode only). The re-exec'd supervisor
+# inherited nohup's SIG_IGN for HUP, but the `trap '_sandy_on_signal 129' HUP`
+# just installed above OVERRODE it — so a controlling-terminal/PTY close (the
+# exact event a daemon must survive: sandy-ui's node-pty hangup on tab close /
+# VSCode quit) would tear the daemon down, defeating the whole point. Re-ignore
+# HUP here so the daemon explicitly survives it. --stop (Batch 2) uses SIGTERM,
+# which still hits the TERM→cleanup trap above, so stopping the daemon works.
+# Bare `sandy` never sets SANDY_DAEMON_SUPERVISOR, so its HUP trap is untouched.
+if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
+    trap '' HUP
+fi
+
 # A SIGKILL'd prior session never ran cleanup, so its snapshot files persist.
 # Remove them now, before this session writes its own snapshot (~line 5906): if
 # we exit in the gap, cleanup's existence-guarded blocks skip (no false
@@ -5653,7 +6192,30 @@ _sandy_headless_run=false
 for _a in "$@"; do
     case "$_a" in -p|--print|--prompt) _sandy_headless_run=true; break ;; esac
 done
-if [ "$_sandy_headless_run" = "true" ]; then
+if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
+    # D3 — daemon mode: detached + auto-restart, NO --rm. `docker run --rm
+    # --restart` is rejected outright by docker ("Conflicting options: --restart
+    # and --rm"), so removal here is instead done by cleanup()'s existing
+    # `docker rm -f "$CONTAINER_NAME"` (fired on --stop, Batch 2) rather than
+    # Docker's own --rm auto-removal. That's intentional: the container must
+    # survive a plain process exit, and --restart unless-stopped needs it to
+    # survive a host reboot / docker-daemon restart too (D3a) — an explicit
+    # `docker stop` (i.e. --stop) is the only thing that ends it for good.
+    RUN_FLAGS=(-d --restart unless-stopped --name "$CONTAINER_NAME")
+    # D4 — state = container labels: survive sandy upgrades, can't drift from
+    # docker reality (no sidecar state file to go stale). sandy.daemon_pid is
+    # THIS process's pid — it's the supervisor (D5: supervisor owns the #14
+    # lock too, via the same "$$" already written at lock-acquisition below).
+    RUN_FLAGS+=(--label "sandy.daemon=true")
+    RUN_FLAGS+=(--label "sandy.workspace_path=$WORK_DIR")
+    RUN_FLAGS+=(--label "sandy.started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+    RUN_FLAGS+=(--label "sandy.session=$SANDBOX_NAME")
+    RUN_FLAGS+=(--label "sandy.daemon_pid=$$")
+    # D2 — forwarded so the container-side launch script (user-setup.sh) can
+    # create the inner tmux session detached and keep PID 1 alive with
+    # `exec tail -f /dev/null` instead of attaching.
+    RUN_FLAGS+=(-e "SANDY_DAEMON=1")
+elif [ "$_sandy_headless_run" = "true" ]; then
     if [ -t 0 ]; then
         RUN_FLAGS=(--rm --name "$CONTAINER_NAME")        # terminal stdin: don't attach it
     else
@@ -6553,4 +7115,60 @@ fi
 
 [ "$_sandy_secret_env_count" -gt 0 ] && RUN_FLAGS+=(--env-file "$SECRET_ENV_FILE")
 
-docker run "${RUN_FLAGS[@]}" "$IMAGE_NAME" "$@"
+# Capture the run status. Interactive mode blocks here in the foreground until
+# the agent exits (rc is the agent's exit code); daemon mode's `docker run -d`
+# returns immediately (rc reflects whether the container LAUNCHED). set -e is
+# active in this host flow (`set -euo pipefail` at the top), so the bare
+# `docker run` would abort the script on any non-zero — the `|| _run_rc=$?`
+# suppresses that so we can inspect the status explicitly for the H1 guard
+# below. The final `exit "$_run_rc"` at end-of-script preserves the pre-H1
+# behavior where the interactive path exited with docker run's status (it was
+# the last command, so the EXIT trap's `rc=$?` carried the agent's code).
+_run_rc=0
+docker run "${RUN_FLAGS[@]}" "$IMAGE_NAME" "$@" || _run_rc=$?
+
+if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
+    # H1 — never enter the block-and-wait below if the detached launch failed.
+    # `docker run -d` returning non-zero means no container was created (bad
+    # image, name clash, resource denial, …); waiting forever would strand the
+    # supervisor holding the #14 lock with nothing to supervise, and the
+    # `--start` client would only discover it at the 600s readiness timeout.
+    # Exit with the run's status so the EXIT trap runs cleanup() — releasing
+    # the lock and tearing down any partial networks/proxy — right now.
+    if [ "$_run_rc" -ne 0 ]; then
+        error "docker run (detached) failed with status $_run_rc — daemon not started."
+        exit "$_run_rc"
+    fi
+    # D1 — the container (just started detached by `docker run -d` above) is
+    # the daemon; this supervisor process's remaining job is to hold the #14
+    # workspace lock and stay the parent of the helper processes (SSH-agent
+    # relay, channel relay, proxy log streamer — already spawned above, in
+    # the same launch tail every mode runs) until signaled. Without this
+    # block the script would fall off the end here, and the unconditional
+    # `trap 'rc=$?; cleanup; exit $rc' EXIT` installed earlier would fire
+    # immediately and tear the just-started daemon container right back down.
+    # `--stop` (Batch 2) ends this by SIGTERM-ing this pid (the
+    # sandy.daemon_pid label) — `_sandy_on_signal` (already installed)
+    # converts that into `cleanup; exit 143`, same as today's Ctrl-C path.
+    info "Daemon supervisor running (pid $$) — container detached, holding workspace lock."
+    # Block forever — but portably: BSD sleep (macOS, daemon-mode's primary
+    # platform) has no "infinity" (GNU coreutils extension; BSD dies instantly
+    # with a usage error, which made the supervisor fall through to its EXIT
+    # trap and tear the just-started daemon right back down). Loop bounded
+    # sleeps instead. --stop's SIGTERM interrupts `wait` and runs
+    # _sandy_on_signal → cleanup → exit 143, exactly as one blocking wait
+    # would; the loop only respawns the sleeper when a 5-minute nap expires
+    # normally. `|| true` so a sleeper killed by anything other than our own
+    # traps (stray kill, OOM) respawns instead of tripping set -e into a
+    # surprise teardown of a healthy session.
+    while :; do
+        sleep 300 &
+        wait "$!" || true
+    done
+fi
+
+# Preserve the interactive path's exit-status semantics (see the capture note
+# above). In supervisor mode this is only reached if `wait` returns without a
+# signal (unusual — --stop's SIGTERM exits via the signal trap); exiting with
+# the launch status is a harmless fallback there.
+exit "$_run_rc"
