@@ -701,7 +701,22 @@ build_claude_cmd() {
     if [ -n "${SANDY_CHANNELS:-}" ] && ! [[ "${SANDY_AGENT:-claude}" == *,* ]]; then
         # Native channels plugin path — only for single-agent claude sessions.
         # For multi-agent, channels are delivered via the host-side tmux-inject relay.
-        cmd+=" --channels $SANDY_CHANNELS"
+        # Canonical SANDY_CHANNELS is bare + comma-separated (telegram,discord) — the
+        # form the relay and install-loop already use, so one value works in every
+        # mode (#30). Claude's --channels wants space-separated fully-qualified plugin
+        # specs, so translate here. The legacy plugin:<name>@<marketplace> form (and
+        # space separators) are still accepted with a deprecation notice — never break
+        # an existing config.
+        local _ch_specs="" _ch_tok _ch_dep=0
+        for _ch_tok in ${SANDY_CHANNELS//,/ }; do
+            [ -z "$_ch_tok" ] && continue
+            case "$_ch_tok" in
+                plugin:*@*) _ch_specs+=" $_ch_tok"; _ch_dep=1 ;;
+                *)          _ch_specs+=" plugin:${_ch_tok}@claude-plugins-official" ;;
+            esac
+        done
+        [ "$_ch_dep" = 1 ] && echo "[sandy] WARN: SANDY_CHANNELS: the plugin:<name>@<marketplace> form is deprecated; use bare comma-separated names (e.g. 'telegram,discord'). Accepted for now." >&2
+        cmd+=" --channels${_ch_specs}"
     fi
     local auto_continue=true
     if [ "${SANDY_NEW_SESSION:-false}" = "true" ]; then

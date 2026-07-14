@@ -632,6 +632,66 @@ CMD_BASE_REFS="$(echo "$BUILD_CLAUDE_BODY" | grep -c 'cmd_base' || true)"
 check "build_claude_cmd no longer references cmd_base" \
     test "$CMD_BASE_REFS" = "0"
 
+# ============================================================
+info "9z1. #30 — SANDY_CHANNELS expansion for build_claude_cmd"
+# ============================================================
+# Canonical SANDY_CHANNELS is bare + comma-separated (telegram,discord) — the
+# form the relay and install-loop already use. build_claude_cmd must expand
+# it to claude's space-separated plugin:<name>@<marketplace> --channels spec,
+# while still accepting the legacy plugin:<name>@<marketplace> form (with a
+# deprecation warning) for back-compat. Extract the real function + its two
+# helper deps and exercise it standalone — same pattern as the gemini tests
+# in section 28.
+_CH_HELPERS="$(sed -n '/^_sandy_translate_args()/,/^}$/p' "$_SANDY_SCRIPT_PATH")
+$(sed -n '/^_sandy_wrap_cmd_exit_pause()/,/^}$/p' "$_SANDY_SCRIPT_PATH")"
+
+if [ -z "$BUILD_CLAUDE_BODY" ] || [ -z "$_CH_HELPERS" ]; then
+    fail "could not extract build_claude_cmd / helpers for channel expansion tests (#30)"
+else
+    # _sandy_is_headless=false + SANDY_VERBOSE=0 pins _sandy_wrap_cmd_exit_pause
+    # to its plain "cmd; read -p ''" suffix form, so the --channels flag is
+    # always immediately followed by a literal ';' — deterministic for the
+    # substring matches below regardless of what the caller's env exports.
+    _claude_channels_test() {
+        local desc="$1" chans="$2" expect_re="$3"
+        local out
+        out="$(bash -c "set -e; HOME=/tmp/nonexistent-sandy-test-home; WORKSPACE=/tmp/nonexistent-sandy-test-ws; _sandy_is_headless=false; SANDY_VERBOSE=0; SANDY_CHANNELS='$chans'
+$_CH_HELPERS
+$BUILD_CLAUDE_BODY
+build_claude_cmd" 2>/dev/null)"
+        if echo "$out" | grep -qE -- "$expect_re"; then
+            pass "$desc"
+        else
+            fail "$desc (got: $out)"
+        fi
+    }
+
+    _claude_channels_test "bare comma list expands to space-separated plugin specs" \
+        "telegram,discord" \
+        "--channels plugin:telegram@claude-plugins-official plugin:discord@claude-plugins-official;"
+    _claude_channels_test "single bare name expands to exactly one plugin spec" \
+        "telegram" \
+        "--channels plugin:telegram@claude-plugins-official;"
+    _claude_channels_test "legacy plugin:<name>@<marketplace> form passes through unchanged" \
+        "plugin:telegram@claude-plugins-official" \
+        "--channels plugin:telegram@claude-plugins-official;"
+
+    # Deprecation notice: only the legacy plugin:...@... form should trip it.
+    _CH_DEP_OUT="$(bash -c "set -e; HOME=/tmp/nonexistent-sandy-test-home; WORKSPACE=/tmp/nonexistent-sandy-test-ws; _sandy_is_headless=false; SANDY_VERBOSE=0; SANDY_CHANNELS='plugin:telegram@claude-plugins-official'
+$_CH_HELPERS
+$BUILD_CLAUDE_BODY
+build_claude_cmd" 2>&1 >/dev/null)"
+    check "legacy plugin: form emits a deprecation warning" \
+        bash -c 'echo "$1" | grep -q "SANDY_CHANNELS.*deprecated"' -- "$_CH_DEP_OUT"
+
+    _CH_NODEP_OUT="$(bash -c "set -e; HOME=/tmp/nonexistent-sandy-test-home; WORKSPACE=/tmp/nonexistent-sandy-test-ws; _sandy_is_headless=false; SANDY_VERBOSE=0; SANDY_CHANNELS='telegram,discord'
+$_CH_HELPERS
+$BUILD_CLAUDE_BODY
+build_claude_cmd" 2>&1 >/dev/null)"
+    check "bare comma form does NOT emit a deprecation warning" \
+        bash -c '! echo "$1" | grep -q "deprecated"' -- "$_CH_NODEP_OUT"
+fi
+
 # Guard against regression of the codex trust-entry grep-regex injection.
 # The workspace path is interpolated into the grep pattern and contains
 # '/' and '.' characters that are regex metacharacters in BRE mode. Using
