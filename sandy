@@ -5148,6 +5148,9 @@ cleanup() {
     if [ -n "${OPENCODE_CRED_TMPDIR:-}" ]; then
         rm -rf "$OPENCODE_CRED_TMPDIR" || true
     fi
+    if [ -n "${SECRET_ENV_TMPDIR:-}" ]; then
+        rm -rf "$SECRET_ENV_TMPDIR" || true
+    fi
     if [ -n "${SSH_RELAY_PID:-}" ]; then
         kill "$SSH_RELAY_PID" 2>/dev/null || true
     fi
@@ -5298,6 +5301,21 @@ GEMINI_CRED_TMPDIR=""
 OPENCODE_CRED_TMPDIR=""
 GEMINI_ADC_MOUNT=""
 CODEX_CRED_TMPDIR=""
+SECRET_ENV_TMPDIR=""
+SECRET_ENV_FILE=""
+_sandy_secret_env_count=0
+# Append NAME=VALUE to a 0600 env-file (lazily created in a 0700 tmpdir) so the
+# value is passed via `docker run --env-file` instead of a world-readable `-e`
+# argv entry (#13). docker --env-file reads NAME=VALUE literally to EOL.
+_sandy_add_secret_env() {
+    if [ -z "$SECRET_ENV_FILE" ]; then
+        SECRET_ENV_TMPDIR="$(mktemp -d)"; chmod 700 "$SECRET_ENV_TMPDIR"
+        SECRET_ENV_FILE="$SECRET_ENV_TMPDIR/env"
+        : > "$SECRET_ENV_FILE"; chmod 600 "$SECRET_ENV_FILE"
+    fi
+    printf '%s=%s\n' "$1" "$2" >> "$SECRET_ENV_FILE"
+    _sandy_secret_env_count=$((_sandy_secret_env_count + 1))
+}
 
 # Gemini credentials: priority is GEMINI_API_KEY → ephemeral OAuth tokens.json →
 # Google Application Default Credentials. OAuth and ADC are not mutually
@@ -6106,13 +6124,13 @@ if _sandy_agent_has claude; then
         RUN_FLAGS+=(-e "SANDY_CHANNELS=$SANDY_CHANNELS")
     fi
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-        RUN_FLAGS+=(-e "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN")
+        _sandy_add_secret_env TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
     fi
     if [ -n "${TELEGRAM_ALLOWED_SENDERS:-}" ]; then
         RUN_FLAGS+=(-e "TELEGRAM_ALLOWED_SENDERS=$TELEGRAM_ALLOWED_SENDERS")
     fi
     if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
-        RUN_FLAGS+=(-e "DISCORD_BOT_TOKEN=$DISCORD_BOT_TOKEN")
+        _sandy_add_secret_env DISCORD_BOT_TOKEN "$DISCORD_BOT_TOKEN"
     fi
     if [ -n "${DISCORD_ALLOWED_SENDERS:-}" ]; then
         RUN_FLAGS+=(-e "DISCORD_ALLOWED_SENDERS=$DISCORD_ALLOWED_SENDERS")
@@ -6165,12 +6183,12 @@ if _sandy_agent_has claude; then
         if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
             warn "CLAUDE_CODE_OAUTH_TOKEN is set; not forwarding ANTHROPIC_API_KEY (it would take precedence in Claude Code and bill per-use). Unset the token to use the API key instead."
         fi
-        RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
+        _sandy_add_secret_env CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
     else
         # No OAuth token configured: forward the API key if present, and clear the
         # OAuth var so a stray host value can't leak into the container.
         if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-            RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+            _sandy_add_secret_env ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
         fi
         RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=")
     fi
@@ -6198,7 +6216,7 @@ if [ ${#_SANDY_EXTRA_ENV_NAMES[@]} -gt 0 ]; then
     RUN_FLAGS+=(-e "SANDY_EXTRA_ENV=$SANDY_EXTRA_ENV")
     for _name in "${_SANDY_EXTRA_ENV_NAMES[@]}"; do
         if [ -n "${!_name+set}" ]; then
-            RUN_FLAGS+=(-e "$_name=${!_name}")
+            _sandy_add_secret_env "$_name" "${!_name}"
         else
             warn "SANDY_EXTRA_ENV: '$_name' has no value (set it in env or ~/.sandy/.secrets)"
         fi
@@ -6208,7 +6226,7 @@ if _sandy_agent_has gemini; then
     # Disable Gemini's per-tool sandbox — sandy provides whole-session isolation.
     RUN_FLAGS+=(-e "GEMINI_SANDBOX=false")
     if [ -n "${GEMINI_API_KEY:-}" ]; then
-        RUN_FLAGS+=(-e "GEMINI_API_KEY=$GEMINI_API_KEY")
+        _sandy_add_secret_env GEMINI_API_KEY "$GEMINI_API_KEY"
     fi
     if [ -n "${GEMINI_MODEL:-}" ]; then
         RUN_FLAGS+=(-e "GEMINI_MODEL=$GEMINI_MODEL")
@@ -6222,12 +6240,12 @@ if _sandy_agent_has gemini; then
     # Google Cloud / Vertex AI passthrough
     for _gv in GOOGLE_CLOUD_PROJECT GOOGLE_CLOUD_LOCATION GOOGLE_GENAI_USE_VERTEXAI GOOGLE_API_KEY; do
         _gval="${!_gv:-}"
-        [ -n "$_gval" ] && RUN_FLAGS+=(-e "$_gv=$_gval")
+        [ -n "$_gval" ] && _sandy_add_secret_env "$_gv" "$_gval"
     done
 fi
 if _sandy_agent_has codex; then
     if [ -n "${OPENAI_API_KEY:-}" ]; then
-        RUN_FLAGS+=(-e "OPENAI_API_KEY=$OPENAI_API_KEY")
+        _sandy_add_secret_env OPENAI_API_KEY "$OPENAI_API_KEY"
     fi
     if [ -n "${CODEX_MODEL:-}" ]; then
         RUN_FLAGS+=(-e "CODEX_MODEL=$CODEX_MODEL")
@@ -6242,13 +6260,13 @@ if _sandy_agent_has opencode; then
     # agent is also active. For opencode-solo sessions, forward any provider
     # keys the user has set so they reach the agent.
     if ! _sandy_agent_has claude && [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-        RUN_FLAGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+        _sandy_add_secret_env ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
     fi
     if ! _sandy_agent_has codex && [ -n "${OPENAI_API_KEY:-}" ]; then
-        RUN_FLAGS+=(-e "OPENAI_API_KEY=$OPENAI_API_KEY")
+        _sandy_add_secret_env OPENAI_API_KEY "$OPENAI_API_KEY"
     fi
     if ! _sandy_agent_has gemini && [ -n "${GEMINI_API_KEY:-}" ]; then
-        RUN_FLAGS+=(-e "GEMINI_API_KEY=$GEMINI_API_KEY")
+        _sandy_add_secret_env GEMINI_API_KEY "$GEMINI_API_KEY"
     fi
     if [ -n "${OPENCODE_MODEL:-}" ]; then
         RUN_FLAGS+=(-e "OPENCODE_MODEL=$OPENCODE_MODEL")
@@ -6330,7 +6348,7 @@ if command -v gh &>/dev/null; then
     done < <(gh auth status 2>&1 | grep 'account ' | sed 's/.*account //;s/ .*//')
 fi
 if [ -n "$GIT_TOKEN" ]; then
-    RUN_FLAGS+=(-e "GIT_TOKEN=$GIT_TOKEN")
+    _sandy_add_secret_env GIT_TOKEN "$GIT_TOKEN"
     if [[ "$SANDY_SSH" != "agent" ]]; then
         info "Git auth: GitHub token via gh CLI (HTTPS)"
     fi
@@ -6340,7 +6358,7 @@ else
         warn "Install gh (https://cli.github.com) and run 'gh auth login', or use SANDY_SSH=agent."
     fi
 fi
-[ -n "$GH_ACCOUNTS" ] && RUN_FLAGS+=(-e "GH_ACCOUNTS=$GH_ACCOUNTS")
+[ -n "$GH_ACCOUNTS" ] && _sandy_add_secret_env GH_ACCOUNTS "$GH_ACCOUNTS"
 
 # Awareness note: a durable, broadly-scoped GitHub token is being forwarded into
 # a container whose egress posture allows the public internet (permissive — the
@@ -6422,5 +6440,7 @@ if { [ "$_SANDY_IS_MULTI" = true ] || ! _sandy_agent_has claude; } && [ -n "${SA
             ;;
     esac
 fi
+
+[ "$_sandy_secret_env_count" -gt 0 ] && RUN_FLAGS+=(--env-file "$SECRET_ENV_FILE")
 
 docker run "${RUN_FLAGS[@]}" "$IMAGE_NAME" "$@"
