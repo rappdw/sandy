@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.0.1-dev"
+SANDY_VERSION="1.0.1"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -1098,8 +1098,13 @@ _sandy_validate_config() {
     # (workspace config).
     local abs_path tier workspace=""
     abs_path="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)/$(basename "$path")" || abs_path="$path"
+    # Compare against a pwd -P-canonicalized SANDY_HOME so a symlinked SANDY_HOME
+    # (or /tmp→/private/tmp on macOS) still matches the now-canonical abs_path —
+    # regression from the #15.4 pwd -P change, which only canonicalized abs_path.
+    local _sh_canon
+    _sh_canon="$(cd "$SANDY_HOME" 2>/dev/null && pwd -P || printf '%s' "$SANDY_HOME")"
     case "$abs_path" in
-        "$SANDY_HOME"/config|"$SANDY_HOME"/.secrets)
+        "$_sh_canon"/config|"$_sh_canon"/.secrets)
             tier="privileged" ;;
         *)
             tier="passive"
@@ -6512,6 +6517,17 @@ if [ "$SANDY_VERBOSE" -ge 3 ]; then
         esac
     done
     unset _rf
+    # #13 routes secret VALUES via --env-file, so they no longer appear in the
+    # RUN_FLAGS dump above. Surface their NAMES here (values always redacted) so
+    # a -vvv trace still shows which credentials are forwarded — restoring the
+    # observability the pre-#13 `-e NAME=<redacted>` lines gave.
+    if [ -n "${SECRET_ENV_FILE:-}" ] && [ -f "$SECRET_ENV_FILE" ]; then
+        printf '  (secret values forwarded via --env-file; names below, values redacted)\n'
+        while IFS='=' read -r _ef_name _; do
+            [ -n "$_ef_name" ] && printf '  %s=<redacted>\n' "$_ef_name"
+        done < "$SECRET_ENV_FILE"
+        unset _ef_name
+    fi
     echo ""
 fi
 

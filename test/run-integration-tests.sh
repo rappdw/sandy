@@ -1488,6 +1488,31 @@ else
 fi
 
 # ============================================================
+info "18. Introspection — --print-state full-mode docker-spawn budget (#25)"
+# ============================================================
+# #25 cut full-mode --print-state from ~9 docker spawns to ~2 (batched image
+# inspect + one `docker ps`). Guard against silent regression with a counting
+# shim. Docker is a hard precondition of this suite (checked at preflight), so
+# it is reachable here — no per-section gate needed.
+_sc_shim="$(mktemp -d)"; _sc_log="$(mktemp)"; TEST_DIRS+=("$_sc_shim")
+_sc_real="$(command -v docker)"
+cat > "$_sc_shim/docker" <<SH
+#!/bin/sh
+printf '%s\n' "\$*" >> "$_sc_log"
+exec "$_sc_real" "\$@"
+SH
+chmod +x "$_sc_shim/docker"
+PATH="$_sc_shim:$PATH" "$SANDY_SCRIPT" --print-state >/dev/null 2>&1 || true
+_sc_n="$(grep -c . "$_sc_log" 2>/dev/null || echo 99)"
+if [ "$_sc_n" -le 2 ]; then
+    pass "full --print-state makes <= 2 docker invocations [got $_sc_n]"
+else
+    fail "full --print-state makes <= 2 docker invocations [got $_sc_n]"
+    sed 's/^/      /' "$_sc_log" >&2
+fi
+rm -f "$_sc_log"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true

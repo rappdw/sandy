@@ -1,3 +1,90 @@
+## sandy v1.0.1
+
+First patch on the 1.x line. A security-and-hardening batch — no new user-facing
+features, no config-key renames or removals, and the sandbox forward-compat
+promise plus the `schema_version: 1` introspection contract are unchanged. One
+tier reclassification (below) is the single behavioral change, and it only adds
+an approval prompt for *workspace* configs.
+
+### Lifecycle hardening (#14) — the foundation fix
+
+Sandy's teardown runs on every session, so this was cut first and reviewed
+hardest. Three latent bugs in signal/lock lifecycle are closed:
+
+- **Signal traps now `exit`.** Previously `cleanup` never called `exit`, so after
+  a signal bash *resumed the script* in a torn-down state (proxy/networks removed,
+  lock released) — which, combined with the lock race below, could let a resumed
+  session clobber a *newer* session's container/lock. Traps are now split
+  (`EXIT` preserves the real status; signal traps run cleanup, disarm `EXIT`, and
+  exit 128+signum) with a re-entrancy guard so teardown runs exactly once.
+- **Atomic stale-lock takeover.** The old `kill -0` → `rm -rf` → `mkdir` recovery
+  let two launches both reap the same stale lock and both "win." Takeover is now a
+  single atomic `mv` (only one racer wins); the loser errors out instead of
+  clobbering.
+- **PID-owned lock release.** `cleanup` only removes the workspace lock if the pid
+  file still holds its own `$$`, so a resumed/re-entrant session can't delete a
+  different session's same-named lock.
+- **No false "protected paths appeared" warnings** after a prior `SIGKILL` — stale
+  snapshot files are cleared at trap-arm.
+
+### Credential & isolation hardening
+
+- **Secret values off `docker run` argv (#13).** Every forwarded credential
+  (API keys, OAuth token, `GIT_TOKEN`, `GH_ACCOUNTS`, channel bot tokens, all
+  `SANDY_EXTRA_ENV` values) now travels via `docker run --env-file` (a 0600 file
+  in a 0700 tmpdir, cleaned up like the credential files) instead of a
+  world-readable `-e NAME=value` argument. Closes a credential disclosure on
+  multi-user / co-tenant hosts (`ps auxww`, `/proc/<pid>/cmdline`). Names may
+  still appear on argv; values do not.
+- **Passive-key security re-audit (#28).** Six keys that a committed workspace
+  `.sandy/config` could abuse were reclassified **passive → privileged**:
+  `SANDY_SCREENSHOT_DIR` (could bind-mount `~/.ssh` read-only into the sandbox),
+  `SANDY_GEMINI_EXTENSIONS` (installs code from a config-controlled URL), and the
+  channel control keys `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ALLOWED_SENDERS` /
+  `DISCORD_BOT_TOKEN` / `DISCORD_ALLOWED_SENDERS` (a committed token+sender could
+  let a repo author remote-drive the agent). Your own `~/.sandy/{config,.secrets}`
+  are privileged sources, so host-level settings stay frictionless — only a
+  *workspace* config setting these now prompts for approval. `SANDY_CHANNELS`
+  stays passive (inert without the now-privileged keys).
+- **Strict-mode resolved-IP re-check (#15).** In strict egress, an allowlisted
+  *name* whose DNS is poisoned to resolve to `169.254.169.254` or an RFC1918
+  address is now refused — the proxy screens the resolved IP for name/wildcard
+  matches (explicit `host:port` LAN-exceptions still bypass, by design), matching
+  the DNS-rebinding defense permissive mode already had.
+
+### Fixes & polish
+
+- **`--validate-config` uses `pwd -P` (#15)** so a symlinked workspace's reported
+  `approval_file_path` matches the file the loader actually consults.
+- **Session-end warning suppresses inert git scaffolding (#12).** A routine
+  `git init`/`clone` no longer false-warns on `.git/hooks/` (only `*.sample`) or
+  `.git/info/` (only the default `exclude`). Any real/executable hook, or a
+  `.git/info/attributes` filter-driver, still warns — narrowly and by construction.
+- **Provider-key-aware OpenCode warning (#24).** When exactly one recognized
+  provider key is set but no model/config, the warning now names it and prints the
+  exact `OPENCODE_MODEL=<provider>/<model>` line to add, and no longer hardcodes a
+  drifting default-model name.
+- **`--print-state` full mode is cheaper (#25).** ~9 docker spawns → ~2 (batched
+  image-inspect + a single `docker ps` reachability probe), output byte-for-byte
+  unchanged. Light mode (the sandy-ui contract) is untouched.
+- **`SANDY_CHANNELS` unified (#30).** One canonical form — bare, comma-separated
+  (`telegram,discord`) — now works in every mode; sandy translates it to the
+  space-separated `plugin:<name>@claude-plugins-official` spec Claude's
+  `--channels` wants. The legacy `plugin:…@…` form is still accepted with a
+  deprecation notice, so no existing config breaks.
+
+### Deferred (not in 1.0.1)
+
+- **#23** (Kitty-graphics probe prefills the Claude pane in multi-agent + graphics
+  terminals) → **1.1**: the preferred fix needs bisecting the emitting agent on a
+  host with a graphics terminal. Cosmetic (`Ctrl-U` clears it).
+- **Proxy readiness listener-bind probe** (the remaining slice of #15) → **1.1**
+  (#37): a correct probe needs proxy-healthcheck plumbing, disproportionate for a
+  low-impact transient in a patch. The misleading readiness-gate comment was
+  corrected.
+
+---
+
 ## sandy v1.0.0
 
 **First stable release.** sandy graduates from `v1.0.0-rc2`, which soaked clean

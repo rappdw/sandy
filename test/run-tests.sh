@@ -599,7 +599,8 @@ check "workspace mutex uses mkdir for atomicity" \
 check "workspace mutex errors when held" \
     grep -q 'Another sandy is already running in this workspace' "$_SANDY_SCRIPT_PATH"
 check "workspace mutex is released in cleanup trap" \
-    bash -c "awk '/^cleanup\(\)/,/^}$/' '$_SANDY_SCRIPT_PATH' | grep -q 'SANDY_WORKSPACE_LOCK'"
+    bash -c "awk '/^cleanup\(\)/,/^}$/' '$_SANDY_SCRIPT_PATH' | grep -q '_sandy_release_lock' \
+        && awk '/^_sandy_release_lock\(\)/,/^}$/' '$_SANDY_SCRIPT_PATH' | grep -q 'rm -rf \"\$SANDY_WORKSPACE_LOCK\"'"
 check "CONTAINER_NAME is deterministic (no PID suffix)" \
     grep -q 'CONTAINER_NAME="sandy-\${SANDBOX_NAME}"' "$_SANDY_SCRIPT_PATH"
 # Regression: old flock-based approach must be gone
@@ -1987,9 +1988,14 @@ check "codex sandbox mounted at /home/claude/.codex" \
 check "codex auth.json mount is read-only (:ro)" \
     grep -q 'auth.json:/home/claude/.codex/auth.json:ro' "$SANDY_SCRIPT"
 
-# Env passthrough: OPENAI_API_KEY forwarded to container (codex reads this).
-check "OPENAI_API_KEY passed to container via -e" \
-    grep -q 'RUN_FLAGS+=(-e "OPENAI_API_KEY=' "$SANDY_SCRIPT"
+# Env passthrough: OPENAI_API_KEY forwarded to container (codex reads this),
+# via the secret env-file helper (#13) rather than argv -e.
+check "OPENAI_API_KEY forwarded via secret env-file" \
+    grep -q '_sandy_add_secret_env OPENAI_API_KEY' "$SANDY_SCRIPT"
+# STRENGTHEN: prove #13's property — the key is no longer on -e argv (which
+# would leak it via `docker inspect`/`ps` on the host).
+check "OPENAI_API_KEY no longer forwarded via -e argv" \
+    bash -c '! grep -q "RUN_FLAGS+=(-e \"OPENAI_API_KEY=" "$1"' -- "$SANDY_SCRIPT"
 
 # Env passthrough: CODEX_MODEL forwarded to container.
 check "CODEX_MODEL passed to container via -e" \
@@ -2928,7 +2934,11 @@ check "Codex credentials mount has :ro" \
 check "Gemini OAuth mount has :ro" \
     grep -q 'home/claude/.gemini/.*:ro' "$SANDY_SCRIPT_PATH"
 check "cleanup trap includes QUIT ABRT" \
-    grep -q 'trap cleanup EXIT INT TERM HUP QUIT ABRT' "$SANDY_SCRIPT_PATH"
+    bash -c '
+        grep -qF "trap '"'"'_sandy_on_signal 131'"'"' QUIT" "$1" \
+            && grep -qF "trap '"'"'_sandy_on_signal 134'"'"' ABRT" "$1" \
+            && grep -qF "trap '"'"'rc=\$?; cleanup; exit \$rc'"'"' EXIT" "$1"
+    ' -- "$SANDY_SCRIPT_PATH"
 
 # ============================================================
 info "41. Sprint 1 — macOS --add-host nullification is conditional"
@@ -3338,6 +3348,38 @@ check "state has sandboxes array" \
 check "state has docker_reachable bool" \
     bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert isinstance(d[\"docker_reachable\"],bool)" "$1"' \
     -- "$_STATE_JSON"
+
+# Per-sandbox field contract: an empty SANDY_HOME (the checks above) can't reveal
+# a dropped per-entry field. Run against a FIXTURE sandbox so workspace_path
+# (a documented stable contract field, SPEC_INTROSPECTION.md; added in #19) and
+# the rest are actually exercised. No docker needed (fast-path, sandboxes list).
+_PS_FIX="$_INTRO_TMP/ps-fixture-home"
+mkdir -p "$_PS_FIX/sandboxes/zork-3dfda686"
+printf '{\n  "workspace_path": "/home/u/dev/zork"\n}\n' > "$_PS_FIX/sandboxes/zork-3dfda686/WORKSPACE.json"
+echo "1.0.0" > "$_PS_FIX/sandboxes/zork-3dfda686/.sandy_created_version"
+echo "1.0.1" > "$_PS_FIX/sandboxes/zork-3dfda686/.sandy_last_version"
+_PS_FIX_JSON="$_INTRO_TMP/ps-fixture.json"
+SANDY_HOME="$_PS_FIX" bash "$SANDY_SCRIPT_PATH" --print-state > "$_PS_FIX_JSON" 2>/dev/null || true
+
+check "--print-state sandbox entry carries all documented per-sandbox fields" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+sb=[s for s in d[\"sandboxes\"] if s.get(\"name\")==\"zork-3dfda686\"]
+assert sb, \"fixture sandbox missing from --print-state output\"
+s=sb[0]
+req={\"name\",\"path\",\"workspace_path\",\"created_version\",\"last_used_version\",\"created_at\",\"last_used_at\",\"lock_held\",\"lock_holder_pid\",\"lock_holder_alive\"}
+missing=req-set(s)
+assert not missing, \"missing per-sandbox fields: \"+repr(sorted(missing))
+" "$1"' -- "$_PS_FIX_JSON"
+
+check "--print-state emits workspace_path from WORKSPACE.json (stable field, #19)" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+s=[x for x in d[\"sandboxes\"] if x.get(\"name\")==\"zork-3dfda686\"][0]
+assert s[\"workspace_path\"]==\"/home/u/dev/zork\", repr(s[\"workspace_path\"])
+" "$1"' -- "$_PS_FIX_JSON"
 
 # --- --validate-config ---
 # `set -euo pipefail` is active — a command substitution whose child exits
@@ -3799,10 +3841,10 @@ check "RUN_FLAGS passthrough loops over _SANDY_EXTRA_ENV_NAMES" \
         grep -A20 "SANDY_EXTRA_ENV passthrough" "$1" \
             | grep -qF "for _name in \"\${_SANDY_EXTRA_ENV_NAMES[@]}\""
     ' -- "$_EE_SCRIPT"
-check "RUN_FLAGS passthrough emits -e KEY=value" \
+check "RUN_FLAGS passthrough forwards passthrough values via secret env-file" \
     bash -c '
         grep -A20 "SANDY_EXTRA_ENV passthrough" "$1" \
-            | grep -qF "RUN_FLAGS+=(-e \"\$_name=\${!_name}\")"
+            | grep -qF "_sandy_add_secret_env \"\$_name\" \"\${!_name}\""
     ' -- "$_EE_SCRIPT"
 check "RUN_FLAGS passthrough warns on listed-but-unset" \
     bash -c '
@@ -4124,9 +4166,10 @@ check "OAuth-token branch clears CRED_JSON on expired credential file" \
 # (c) an empty CRED_JSON skips the credential mount (so the expired file is gone).
 check "empty CRED_JSON skips the credential mount" \
     bash -c 'grep -q "if \[ -n \"\$CRED_JSON\" \]; then" "$1"' -- "$_OAUTH_SCRIPT"
-# (d) the env token is forwarded into the container regardless.
+# (d) the env token is forwarded into the container regardless, via the
+# secret env-file helper (#13) rather than argv -e.
 check "CLAUDE_CODE_OAUTH_TOKEN forwarded to container when set" \
-    bash -c 'grep -q "RUN_FLAGS+=(-e \"CLAUDE_CODE_OAUTH_TOKEN=\$CLAUDE_CODE_OAUTH_TOKEN\")" "$1"' -- "$_OAUTH_SCRIPT"
+    bash -c 'grep -qF "_sandy_add_secret_env CLAUDE_CODE_OAUTH_TOKEN \"\$CLAUDE_CODE_OAUTH_TOKEN\"" "$1"' -- "$_OAUTH_SCRIPT"
 # (e) OAuth-first: when the token is set we must NOT forward ANTHROPIC_API_KEY —
 # Claude Code resolves the API key AHEAD of the token, so forwarding both would
 # silently bill per-use, bypassing the subscription. The API-key forward must sit
@@ -4138,7 +4181,7 @@ check "OAuth-first: claude ANTHROPIC_API_KEY forward sits in the no-OAuth-token 
         blk="$(awk "/Claude Code.s OWN auth precedence/{f=1} f{print} f&&/^fi$/{exit}" "$1")"
         o=$(printf "%s\n" "$blk" | grep -n "CLAUDE_CODE_OAUTH_TOKEN:-" | head -1 | cut -d: -f1)
         e=$(printf "%s\n" "$blk" | grep -nx "    else" | head -1 | cut -d: -f1)
-        a=$(printf "%s\n" "$blk" | grep -nF "ANTHROPIC_API_KEY=\$ANTHROPIC_API_KEY" | head -1 | cut -d: -f1)
+        a=$(printf "%s\n" "$blk" | grep -nF "_sandy_add_secret_env ANTHROPIC_API_KEY" | head -1 | cut -d: -f1)
         [ -n "$o" ] && [ -n "$e" ] && [ -n "$a" ] && [ "$o" -lt "$e" ] && [ "$e" -lt "$a" ]
     ' -- "$_OAUTH_SCRIPT"
 
