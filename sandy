@@ -501,6 +501,32 @@ EOF
     [ "${SANDY_ALLOW_WORKFLOW_EDIT:-0}" = "1" ] || echo ".github/workflows"
 }
 
+# True (0) only for git scaffolding that is INERT by construction, so the
+# session-end warning can suppress it (#12). Narrow + enumerated on purpose —
+# this is a suppression path in a security feature. Operates on a workspace-
+# relative protected-dir path ($1) under $WORK_DIR.
+#   .git/hooks (and submodule hooks/): inert IFF every entry ends in `.sample`
+#     (git never executes a `.sample` hook). A real/executable hook → NOT inert.
+#   .git/info: inert IFF its ONLY entry is `exclude` (gitignore-syntax template).
+#     `attributes` present → NOT inert (filter-driver injection vector).
+_sandy_dir_is_inert_git() {
+    local rel="$1" full="$WORK_DIR/$1" e had=1
+    case "$rel" in
+        .git/hooks|*/hooks)
+            for e in "$full"/* "$full"/.*; do
+                [ -e "$e" ] || continue
+                case "${e##*/}" in .|..) continue ;; esac
+                had=0
+                case "$e" in *.sample) ;; *) return 1 ;; esac
+            done
+            return $had ;;   # 0 only if there was ≥1 entry and all were *.sample
+        .git/info)
+            [ "$(ls -A "$full" 2>/dev/null)" = "exclude" ] && return 0
+            return 1 ;;
+    esac
+    return 1
+}
+
 # Debug flag for test harness — print the three protected-path lists and exit.
 # Format: one path per line, prefixed by "file:", "gitfile:", or "dir:".
 # Reads SANDY_ALLOW_WORKFLOW_EDIT from the environment (not from .sandy/config).
@@ -5048,6 +5074,11 @@ cleanup() {
             # Only flag dirs that DIDN'T exist at launch but DO now (with content).
             grep -qFx "$_pd" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null && continue
             if [ -d "$WORK_DIR/$_pd" ] && [ -n "$(ls -A "$WORK_DIR/$_pd" 2>/dev/null)" ]; then
+                if _sandy_dir_is_inert_git "$_pd"; then
+                    [ "${SANDY_VERBOSE:-0}" = "1" ] && \
+                        info "  (protected path appeared but looks inert git scaffolding: $_pd)"
+                    continue
+                fi
                 _new_protected+=("$_pd")
             fi
         done < <(_sandy_protected_dirs)

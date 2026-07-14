@@ -4589,6 +4589,41 @@ check "SANDY_CHANNELS is NOT in SANDY_PRIVILEGED_KEYS" \
     bash -c '! echo "$1" | grep -qE "^[[:space:]]+SANDY_CHANNELS\$"' -- "$_SBX_PRIV_KEYS"
 
 # ============================================================
+echo ""
+echo "§67: inert git-scaffolding suppression (#12) — _sandy_dir_is_inert_git"
+# ============================================================
+# The session-end protected-dir warning previously flagged ANY appearance of
+# .git/hooks or .git/info with content — including a routine git init/clone's
+# inert-by-construction *.sample hooks and default `exclude` file, training
+# users to ignore the warning. Fix: a narrow, enumerated classifier that
+# suppresses only provably-inert git scaffolding; anything else still warns.
+_IG_FN="$(sed -n '/^_sandy_dir_is_inert_git()/,/^}$/p' "$_SBX_SCRIPT")"
+_ig_status() { # $1=fixture root (becomes WORK_DIR), $2=relative dir path
+    bash -c "$_IG_FN"'
+WORK_DIR="$1"
+if _sandy_dir_is_inert_git "$2"; then echo inert; else echo warn; fi' _ "$1" "$2"
+}
+_IG_ROOT="$(mktemp -d)"
+mkdir -p "$_IG_ROOT/case1/.git/hooks" "$_IG_ROOT/case2/.git/hooks" \
+         "$_IG_ROOT/case3/.git/info" "$_IG_ROOT/case4/.git/info"
+: > "$_IG_ROOT/case1/.git/hooks/pre-commit.sample"
+: > "$_IG_ROOT/case1/.git/hooks/commit-msg.sample"
+: > "$_IG_ROOT/case2/.git/hooks/pre-commit.sample"
+: > "$_IG_ROOT/case2/.git/hooks/pre-commit"
+: > "$_IG_ROOT/case3/.git/info/exclude"
+: > "$_IG_ROOT/case4/.git/info/exclude"
+: > "$_IG_ROOT/case4/.git/info/attributes"
+check "hooks: all *.sample → inert (suppress)" \
+    test "$(_ig_status "$_IG_ROOT/case1" .git/hooks)" = inert
+check "hooks: real pre-commit present → NOT inert (warn)" \
+    test "$(_ig_status "$_IG_ROOT/case2" .git/hooks)" = warn
+check "info: only exclude → inert (suppress)" \
+    test "$(_ig_status "$_IG_ROOT/case3" .git/info)" = inert
+check "info: exclude + attributes → NOT inert (warn)" \
+    test "$(_ig_status "$_IG_ROOT/case4" .git/info)" = warn
+rm -rf "$_IG_ROOT"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
