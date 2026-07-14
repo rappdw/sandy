@@ -4503,8 +4503,9 @@ if _sandy_agent_has opencode; then
     #      The user can later materialize this to $HOME/.config/opencode/ to
     #      customize (next sandbox creation will then prefer the host file).
     #   3. Neither — opencode would silently fall back to its built-in default
-    #      model (currently gemini-3-pro-preview), which fails confusingly
-    #      without GOOGLE_GENERATIVE_AI_API_KEY. Warn loudly so the user knows.
+    #      model (a Google model; the exact name changes upstream), which
+    #      fails confusingly without GOOGLE_GENERATIVE_AI_API_KEY. Warn loudly
+    #      so the user knows.
     if [ ! -f "$SANDBOX_DIR/opencode/config/opencode.json" ]; then
         if [ -f "$HOME/.config/opencode/opencode.json" ]; then
             cp "$HOME/.config/opencode/opencode.json" "$SANDBOX_DIR/opencode/config/opencode.json"
@@ -4571,13 +4572,39 @@ JSON
             fi
             unset _llm_url _llm_response _llm_first_model _llm_port
         else
+            # Count recognized provider keys already present so the warning can
+            # give an exact fix when there's no ambiguity (#24). GEMINI_API_KEY
+            # is a special case — opencode's built-in Google default reads
+            # GOOGLE_GENERATIVE_AI_API_KEY, a DIFFERENT var, so having
+            # GEMINI_API_KEY set doesn't actually satisfy the default provider.
+            _oc_keys=()
+            [ -n "${ANTHROPIC_API_KEY:-}" ] && _oc_keys+=(ANTHROPIC_API_KEY)
+            [ -n "${OPENAI_API_KEY:-}" ] && _oc_keys+=(OPENAI_API_KEY)
+            [ -n "${GEMINI_API_KEY:-}" ] && _oc_keys+=(GEMINI_API_KEY)
             warn "SANDY_AGENT includes opencode but neither \$HOME/.config/opencode/opencode.json"
             warn "  exists nor SANDY_LOCAL_LLM_HOST is set."
-            warn "  opencode will use its built-in default model (currently gemini-3-pro-preview),"
-            warn "  which requires GOOGLE_GENERATIVE_AI_API_KEY. To get a working session, either:"
-            warn "    - export an API key opencode's default provider accepts, or"
-            warn "    - write \$HOME/.config/opencode/opencode.json (https://opencode.ai/docs), or"
-            warn "    - set SANDY_LOCAL_LLM_HOST=<host:port> for sandy to auto-generate one."
+            warn "  opencode will use a built-in default model (a Google model; the exact"
+            warn "  name changes upstream), which requires GOOGLE_GENERATIVE_AI_API_KEY."
+            if [ "${#_oc_keys[@]}" -eq 1 ]; then
+                case "${_oc_keys[0]}" in
+                    ANTHROPIC_API_KEY)
+                        warn "  ANTHROPIC_API_KEY is set — point opencode at it instead:"
+                        warn "    Add: OPENCODE_MODEL=anthropic/claude-sonnet-4-5" ;;
+                    OPENAI_API_KEY)
+                        warn "  OPENAI_API_KEY is set — point opencode at it instead:"
+                        warn "    Add: OPENCODE_MODEL=openai/gpt-5.5" ;;
+                    GEMINI_API_KEY)
+                        warn "  GEMINI_API_KEY is set, but opencode's Google default expects a"
+                        warn "  DIFFERENT var: GOOGLE_GENERATIVE_AI_API_KEY. Either set that, or"
+                        warn "  pick a non-Google model via OPENCODE_MODEL." ;;
+                esac
+            else
+                warn "  To get a working session, either:"
+                warn "    - export an API key opencode's default provider accepts, or"
+                warn "    - write \$HOME/.config/opencode/opencode.json (https://opencode.ai/docs), or"
+                warn "    - set SANDY_LOCAL_LLM_HOST=<host:port> for sandy to auto-generate one."
+            fi
+            unset _oc_keys
         fi
     fi
 fi
