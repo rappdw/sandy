@@ -889,16 +889,26 @@ _sandy_emit_state() {
     # Skipped in light mode (no consumer; costs 6 of the 9 docker spawns). The
     # key stays present (empty array) so the schema shape is identical.
     printf ',"installed_images":['
-    if [ "$_mode" != "light" ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-        local first=1 img line
+    if [ "$_mode" != "light" ] && command -v docker >/dev/null 2>&1; then
+        local first=1 img _ii_line _ii_tag _ii_rest
+        # One batched inspect (was 6 + a docker-info gate). RepoTags[0] maps each
+        # result back to its name; missing images produce no line (docker skips
+        # them), same as the old per-image `|| continue`. Iterating the known
+        # names below in original order keeps output byte-identical.
+        local _ii_map=""   # newline-joined "name|id|created"
+        _ii_map="$(docker image inspect \
+            sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-opencode sandy-full \
+            --format '{{index .RepoTags 0}}|{{.Id}}|{{.Created}}' 2>/dev/null || true)"
         for img in sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-opencode sandy-full; do
-            line="$(docker image inspect "$img" --format '{{.Id}}|{{.Created}}' 2>/dev/null)" || continue
-            [ -z "$line" ] && continue
+            # find the map line whose tag is "<img>:..." (strip the :tag)
+            _ii_line="$(printf '%s\n' "$_ii_map" | awk -F'|' -v n="$img" \
+                '{t=$1; sub(/:[^:]*$/,"",t)} t==n {print $2"|"$3; exit}')"
+            [ -z "$_ii_line" ] && continue
+            local img_id img_created
+            img_id="${_ii_line%%|*}"
+            img_created="${_ii_line#*|}"
             [ $first -eq 0 ] && printf ','
             first=0
-            local img_id img_created
-            img_id="${line%%|*}"
-            img_created="${line#*|}"
             printf '{'
             _json_kv name    "$(_json_escape "$img")"
             printf ','; _json_kv id      "$(_json_escape "$img_id")"
@@ -1038,34 +1048,37 @@ _sandy_emit_state() {
             printf ',"docker_reachable":false'
             printf ',"running_containers":null'
         fi
-    elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-        printf ',"docker_reachable":true'
-        printf ',"running_containers":['
-        first=1
-        # Use labels for sandy-launched containers. Sandy doesn't label all its
-        # containers today — best-effort filter by image name.
-        while IFS= read -r _cline; do
-            [ -z "$_cline" ] && continue
-            # line format: id|name|image|started
-            local _cid _cname _cimg _cstarted
-            _cid="$(echo "$_cline"     | awk -F'|' '{print $1}')"
-            _cname="$(echo "$_cline"   | awk -F'|' '{print $2}')"
-            _cimg="$(echo "$_cline"    | awk -F'|' '{print $3}')"
-            _cstarted="$(echo "$_cline" | awk -F'|' '{print $4}')"
-            [ $first -eq 0 ] && printf ','
-            first=0
-            printf '{'
-            _json_kv id         "$(_json_escape "$_cid")"
-            printf ','; _json_kv name       "$(_json_escape "$_cname")"
-            printf ','; _json_kv image      "$(_json_escape "$_cimg")"
-            printf ','; _json_kv started_at "$(_json_escape "$_cstarted")"
-            printf '}'
-        done < <(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}' 2>/dev/null \
-                 | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)
-        printf ']'
-    else
-        printf ',"docker_reachable":false'
-        printf ',"running_containers":null'
+    else   # full mode
+        local _ps_out
+        if command -v docker >/dev/null 2>&1 \
+           && _ps_out="$(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}' 2>/dev/null)"; then
+            printf ',"docker_reachable":true'
+            printf ',"running_containers":['
+            first=1
+            # Use labels for sandy-launched containers. Sandy doesn't label all its
+            # containers today — best-effort filter by image name.
+            while IFS= read -r _cline; do
+                [ -z "$_cline" ] && continue
+                # line format: id|name|image|started
+                local _cid _cname _cimg _cstarted
+                _cid="$(echo "$_cline"     | awk -F'|' '{print $1}')"
+                _cname="$(echo "$_cline"   | awk -F'|' '{print $2}')"
+                _cimg="$(echo "$_cline"    | awk -F'|' '{print $3}')"
+                _cstarted="$(echo "$_cline" | awk -F'|' '{print $4}')"
+                [ $first -eq 0 ] && printf ','
+                first=0
+                printf '{'
+                _json_kv id         "$(_json_escape "$_cid")"
+                printf ','; _json_kv name       "$(_json_escape "$_cname")"
+                printf ','; _json_kv image      "$(_json_escape "$_cimg")"
+                printf ','; _json_kv started_at "$(_json_escape "$_cstarted")"
+                printf '}'
+            done < <(printf '%s\n' "$_ps_out" | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)
+            printf ']'
+        else
+            printf ',"docker_reachable":false'
+            printf ',"running_containers":null'
+        fi
     fi
 
     printf '}\n'
