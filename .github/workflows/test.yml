@@ -22,7 +22,7 @@ jobs:
       # Cache key is based on the sandy script hash (Dockerfiles are inline).
       - name: Cache Docker image
         id: cache-image
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/sandy-images
           key: sandy-image-${{ hashFiles('sandy') }}
