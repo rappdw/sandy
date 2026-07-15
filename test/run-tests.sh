@@ -5003,6 +5003,21 @@ rm -f "$_DD_OUT"
 check "no GNU-only 'sleep infinity' anywhere in sandy (BSD sleep lacks it)" \
     bash -c '! grep -q "sleep infinity" "$1"' -- "$_SBX_SCRIPT"
 
+# Project-image staleness must chain the PARENT image identity, not just the
+# .sandy/Dockerfile content: a project image built on a pre-upgrade base kept
+# serving its stale baked-in user-setup.sh ("Project image up to date" against
+# a base that no longer exists) — post-1.1.0 that meant a pre-daemon script
+# crash-looping "open terminal failed" inside a detached daemon container.
+check "project-image hash chains the parent image ID (stale-base rebuild trigger)" \
+    bash -c 'grep -q "PROJECT_PARENT_ID=" "$1" && grep -q "PROJECT_PARENT_ID" <<<"$(grep "PROJECT_HASH=" "$1")"' -- "$_SBX_SCRIPT"
+
+# A failed --start must tear the wreckage down (a crash-looping container under
+# --restart unless-stopped otherwise restarts forever with the supervisor
+# holding the lock): the failure branch signals the supervisor / removes the
+# container, mirroring --stop.
+check "--start failure path tears down the failed session (no eternal crash-loop)" \
+    bash -c 'grep -q "Tearing down the failed session" "$1"' -- "$_SBX_SCRIPT"
+
 rm -rf "$_DD_BIN" "$_DD_HOME" "$_DD_WS"
 
 # ============================================================

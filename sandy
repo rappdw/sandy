@@ -3477,6 +3477,24 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         fi
         error "Supervisor log tail ($_sandy_daemon_log):"
         tail -n 20 "$_sandy_daemon_log" >&2 2>/dev/null || true
+        # A failed start must not leave the wreckage running: under
+        # --restart unless-stopped a crash-looping container restarts FOREVER
+        # (observed post-1.1.0: a stale project image looped "open terminal
+        # failed" indefinitely after the client gave up), with the supervisor
+        # holding the workspace lock. Tear it down the same way --stop would:
+        # signal a live supervisor so its own trap runs cleanup (container,
+        # networks, lock); if the supervisor is already gone, remove the
+        # container directly (networks/lock are reaped by the next launch's
+        # orphan sweep + stale-lock takeover).
+        if [ -n "$_sandy_daemon_container" ]; then
+            _sandy_fail_pid="$(docker inspect -f '{{ index .Config.Labels "sandy.daemon_pid" }}' "$_sandy_daemon_container" 2>/dev/null)" || _sandy_fail_pid=""
+            error "Tearing down the failed session..."
+            if [ -n "$_sandy_fail_pid" ] && kill -0 "$_sandy_fail_pid" 2>/dev/null; then
+                kill -TERM "$_sandy_fail_pid" 2>/dev/null || true
+            else
+                docker rm -f "$_sandy_daemon_container" >/dev/null 2>&1 || true
+            fi
+        fi
         exit 1
     fi
 fi
@@ -5482,7 +5500,20 @@ fi
 PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"
 if [ -f "$PROJECT_DOCKERFILE" ]; then
     PROJECT_IMAGE_NAME="$(echo "sandy-project-${SANDBOX_NAME}" | tr '[:upper:]' '[:lower:]')"
-    PROJECT_HASH="$(cat "$PROJECT_DOCKERFILE" | sha256 | cut -d' ' -f1)"
+    # Chain the PARENT image identity into the staleness hash. Hashing only the
+    # Dockerfile content leaves a hole: when the underlying agent/skills image
+    # is rebuilt in a LATER launch than the one that built the project image
+    # (the NEEDS_BUILD flag only covers a rebuild in THIS launch), the project
+    # image keeps serving its stale baked-in entrypoint/user-setup.sh forever —
+    # "Project image up to date" really means "up to date with a base that no
+    # longer exists". Observed after the 1.1.0 upgrade: a project image built
+    # on a pre-daemon base ran the interactive tmux branch inside a detached
+    # daemon container ("open terminal failed: not a terminal") and
+    # crash-looped. Including the parent ID forces a one-time rebuild whenever
+    # the base actually changed; pre-fix hash files no longer match the new
+    # format, which migrates every existing project image on first launch.
+    PROJECT_PARENT_ID="$(docker image inspect -f '{{.Id}}' "$IMAGE_NAME" 2>/dev/null || echo unknown)"
+    PROJECT_HASH="$(printf '%s|%s\n' "$(cat "$PROJECT_DOCKERFILE" | sha256 | cut -d' ' -f1)" "$PROJECT_PARENT_ID" | sha256 | cut -d' ' -f1)"
     PROJECT_HASH_FILE="$SANDBOX_DIR/.project_build_hash"
     PROJECT_NEEDS_BUILD=false
     if [ ! -f "$PROJECT_HASH_FILE" ] || [ "$(cat "$PROJECT_HASH_FILE")" != "$PROJECT_HASH" ] \
