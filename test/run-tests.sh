@@ -5021,6 +5021,253 @@ check "--start failure path tears down the failed session (no eternal crash-loop
 rm -rf "$_DD_BIN" "$_DD_HOME" "$_DD_WS"
 
 # ============================================================
+echo ""
+echo "§71: sandy --update-sessions — fleet image refresh + rolling restart (#41, milestone 1.2.0)"
+# ============================================================
+# 71.1 — structural, non-tautological static checks.
+check "cli_flags includes --update-sessions (mutation: remove the cli_flags entry -> fails)" \
+    bash -c '
+        names="$(bash "$1" --print-schema | python3 -c "import json,sys; print(chr(10).join(f[\"name\"] for f in json.load(sys.stdin)[\"cli_flags\"]))")"
+        printf "%s\n" "$names" | grep -qxF -- "--update-sessions"
+    ' -- "$_SBX_SCRIPT"
+check "sandy.updated_at RUN_FLAGS label is gated on SANDY_UPDATE_RESTART (DEC-U3) (mutation: make the label unconditional, or gate it on a different var -> fails)" \
+    bash -c 'grep -B3 -- "--label \"sandy.updated_at=" "$1" | grep -q "SANDY_UPDATE_RESTART"' -- "$_SBX_SCRIPT"
+
+# 71.2 — --idle-for validation: garbage value is a clear error, exit 1. (No
+# docker needed — the check runs during CLI parsing, before the docker
+# preflight, so this works identically with or without docker installed.)
+_U71_IDLE_OUT="$(mktemp)"
+bash "$_SBX_SCRIPT" --update-sessions --idle-for banana >"$_U71_IDLE_OUT" 2>&1 && _U71_IDLE_RC=0 || _U71_IDLE_RC=$?
+check "--idle-for banana: exit 1 with a clear 'positive integer' error (mutation: drop the regex validation -> banana reaches docker preflight instead, wrong message/rc)" \
+    bash -c '[ "$1" -eq 1 ] && grep -q "requires a positive integer" "$2"' -- "$_U71_IDLE_RC" "$_U71_IDLE_OUT"
+rm -f "$_U71_IDLE_OUT"
+
+# 71.3 — image_stale (DEC-U6): extends the §68-style running_containers[]
+# fixture with image-ID answers. "stalecid" runs an image id that differs
+# from its image name's current id (stale); "currcid" matches (current).
+# Asserts FULL mode emits image_stale true/false correctly per entry, LIGHT
+# mode omits the key entirely (the #25 spawn-budget boundary), and both
+# emissions stay valid JSON with schema_version 1.
+_U71_IS_BIN="$(mktemp -d)"
+cat > "$_U71_IS_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+case "$1" in
+    ps)
+        printf 'stalecid|sandy-stale-aaa111|sandy-full|2026-07-14T10:00:00Z|true|stale-aaa111\n'
+        printf 'currcid|sandy-curr-bbb222|sandy-claude-code|2026-07-14T11:00:00Z|true|curr-bbb222\n'
+        exit 0
+        ;;
+    exec) echo "1"; exit 0 ;;
+    info) exit 0 ;;
+    inspect)
+        shift
+        fmt="" tgt=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -f) shift; fmt="$1" ;;
+                *) tgt="$1" ;;
+            esac
+            shift
+        done
+        case "$fmt" in
+            '{{.Image}}')
+                case "$tgt" in
+                    stalecid) echo "sha256:old" ;;
+                    currcid)  echo "sha256:cur-sandy-claude-code" ;;
+                esac
+                ;;
+        esac
+        exit 0
+        ;;
+    image)
+        case "$2" in
+            inspect)
+                shift 2
+                fmt="" name=""
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -f) shift; fmt="$1" ;;
+                        *) name="$1" ;;
+                    esac
+                    shift
+                done
+                # Current id is deterministically "cur-<name>" — matches
+                # currcid's running id (sandy-claude-code) and deliberately
+                # does NOT match stalecid's (sandy-full's current would be
+                # "cur-sandy-full", but stalecid's running id is "old").
+                [ -n "$fmt" ] && echo "sha256:cur-$name"
+                exit 0
+                ;;
+            *) exit 0 ;;
+        esac
+        ;;
+    network) case "$2" in ls) exit 0 ;; *) exit 0 ;; esac ;;
+    *) exit 0 ;;
+esac
+DOCKERSHIM
+chmod +x "$_U71_IS_BIN/docker"
+
+_U71_IS_FULL="$(PATH="$_U71_IS_BIN:$PATH" bash "$_SBX_SCRIPT" --print-state 2>/dev/null)"
+check "image_stale (full mode): true for the stale container, false for the current one; schema_version 1 (mutation: swap the comparison, or compare the wrong ids -> true/false flip or both null)" \
+    bash -c 'python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+assert d[\"schema_version\"] == 1, d[\"schema_version\"]
+rc = d[\"running_containers\"]
+stale = next(c for c in rc if c[\"sandbox\"] == \"stale-aaa111\")
+curr  = next(c for c in rc if c[\"sandbox\"] == \"curr-bbb222\")
+assert stale[\"image_stale\"] is True, stale
+assert curr[\"image_stale\"] is False, curr
+" "$1"' -- "$_U71_IS_FULL"
+
+_U71_IS_LIGHT="$(PATH="$_U71_IS_BIN:$PATH" bash "$_SBX_SCRIPT" --print-state light 2>/dev/null)"
+check "image_stale is ABSENT in light mode (DEC-U6 spawn-budget boundary) (mutation: emit image_stale in light mode too -> this fails, and §63's light-mode spawn-count guard would also catch the extra docker calls)" \
+    bash -c 'python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+rc = d[\"running_containers\"]
+for c in rc:
+    assert \"image_stale\" not in c, c
+" "$1"' -- "$_U71_IS_LIGHT"
+
+rm -rf "$_U71_IS_BIN"
+
+# 71.4/71.5 — end-to-end dispatcher exercise behind a stubbed docker (the §70
+# pattern): two fixture daemon sessions (workspace A stale, workspace B
+# current), real `"$0" --build-only` children spawned by the real
+# --update-sessions dispatcher (NOT a hand-seeded hash file — this is the
+# "make the child viable" path from the plan, verified to work: `docker
+# build`/`docker image inspect`/`docker run` are stubbed cheaply enough that
+# a real child run completes in well under a second once primed). Egress
+# proxy is turned off (SANDY_EGRESS_NO_ISOLATION=1, env-set so it never
+# touches the passive-approval prompt) purely to keep the fixture's docker
+# shim small — the proxy image build/staleness path is unrelated to what
+# --update-sessions itself is being tested for.
+_U71_BIN="$(mktemp -d)"
+_U71_HOME="$(mktemp -d)"
+_U71_WSA="$(mktemp -d)"
+_U71_WSB="$(mktemp -d)"
+_U71_CALLLOG="$(mktemp)"
+: > "$_U71_CALLLOG"
+export _U71_WSA _U71_WSB _U71_CALLLOG
+cat > "$_U71_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+# Stateful-ish shim: logs every invocation's args (subcommand first) to
+# $_U71_CALLLOG so the dry-run test can assert NO teardown/relaunch occurred
+# — asserting on the stub's own call log rather than trying to observe the
+# child sandy processes directly (the parent stub can't see into what a
+# child "$0" --stop/--start invocation does; the call log is shared state
+# every docker invocation — parent or child — writes into).
+echo "$@" >> "$_U71_CALLLOG"
+case "$1" in
+    info) exit 0 ;;
+    ps)
+        # Two daemon sessions: A's running image id will differ from its
+        # image name's current id (stale, restart candidate); B's matches
+        # (current, skip). `.Image` is the tag docker ps reports — matches
+        # what _sandy_image_stale expects as its second arg.
+        printf 'containerA111|wsA-session|%s|sandy-claude-code\n' "$_U71_WSA"
+        printf 'containerB222|wsB-session|%s|sandy-claude-code\n' "$_U71_WSB"
+        exit 0
+        ;;
+    inspect)
+        shift
+        fmt="" tgt=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -f) shift; fmt="$1" ;;
+                *) tgt="$1" ;;
+            esac
+            shift
+        done
+        case "$fmt" in
+            '{{.Image}}')
+                case "$tgt" in
+                    containerA111) echo "sha256:old" ;;
+                    containerB222) echo "sha256:current-sandy-claude-code" ;;
+                esac
+                ;;
+        esac
+        exit 0
+        ;;
+    image)
+        case "$2" in
+            inspect)
+                shift 2
+                fmt="" name=""
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -f) shift; fmt="$1" ;;
+                        *) name="$1" ;;
+                    esac
+                    shift
+                done
+                # Existence check (no -f, used by the build-hash gate): exit 0.
+                # Staleness check (-f '{{.Id}}'): "current-<name>" — matches
+                # containerB222's running id, differs from containerA111's.
+                [ -n "$fmt" ] && echo "sha256:current-$name"
+                exit 0
+                ;;
+            *) exit 0 ;;
+        esac
+        ;;
+    build) exit 0 ;;
+    run) exit 1 ;;   # _check_claude_update's version probe: fail -> inst="" -> no spurious rebuild
+    network) case "$2" in ls) exit 0 ;; *) exit 0 ;; esac ;;
+    *) exit 0 ;;
+esac
+DOCKERSHIM
+chmod +x "$_U71_BIN/docker"
+# curl stubbed to always fail: makes the per-agent update-version-check
+# functions (_check_claude_update et al) deterministic and network-free —
+# without this, a host with real internet access could occasionally see
+# NEEDS_BUILD flip true from an actual upstream version bump, breaking the
+# "up to date, no-op" assumption the fixture's speed depends on.
+cat > "$_U71_BIN/curl" <<'CURLSHIM'
+#!/usr/bin/env bash
+exit 1
+CURLSHIM
+chmod +x "$_U71_BIN/curl"
+
+# Prime the shared hash files (base image + claude-code image) with ONE real
+# --build-only pass so the two per-session children below both take the
+# "up to date" fast path instead of a (stubbed but still work-doing) build.
+_U71_PRIME_LOG="$(mktemp)"
+(cd "$_U71_WSA" && PATH="$_U71_BIN:$PATH" SANDY_HOME="$_U71_HOME" SANDY_EGRESS_NO_ISOLATION=1 \
+    SANDY_AUTO_APPROVE_PRIVILEGED=1 bash "$_SBX_SCRIPT" --build-only) >"$_U71_PRIME_LOG" 2>&1
+_U71_PRIME_RC=$?
+check "fixture setup: priming --build-only succeeds" test "$_U71_PRIME_RC" -eq 0
+: > "$_U71_CALLLOG"   # priming's own calls aren't part of what dry-run is asserting on
+
+_U71_DRY_OUT="$(mktemp)"
+PATH="$_U71_BIN:$PATH" SANDY_HOME="$_U71_HOME" SANDY_EGRESS_NO_ISOLATION=1 SANDY_AUTO_APPROVE_PRIVILEGED=1 \
+    bash "$_SBX_SCRIPT" --update-sessions --dry-run >"$_U71_DRY_OUT" 2>&1
+_U71_DRY_RC=$?
+check "--update-sessions --dry-run exits 0" test "$_U71_DRY_RC" -eq 0
+check "--dry-run plan lists the stale session (A) as a restart candidate (mutation: flip the stale comparison -> A shows skip instead)" \
+    bash -c 'grep "wsA-session" "$1" | grep -q "restart"' -- "$_U71_DRY_OUT"
+check "--dry-run plan lists the current session (B) as skip (mutation: flip the stale comparison -> B shows restart instead)" \
+    bash -c 'grep "wsB-session" "$1" | grep -q "skip"' -- "$_U71_DRY_OUT"
+check "DEC-U4: --dry-run still refreshes images (the build child ran, and step 3 saw its real result) — plan reflects the real comparison, not a guess (mutation: skip step 2 under dry-run -> stale/current classification breaks since nothing was ever built to compare against)" \
+    bash -c 'grep -q "Refreshing images for wsA-session" "$1" && grep -q "Refreshing images for wsB-session" "$1"' -- "$_U71_DRY_OUT"
+check "--dry-run performs NO teardown ('docker rm' never called) (mutation: remove the dry-run early-return -> falls through to step 6 -> a 'docker rm' entry appears in the call log)" \
+    bash -c '! grep -qE "^rm\b" "$1"' -- "$_U71_CALLLOG"
+check "--dry-run performs NO container (re)launch ('docker run -d ...' never called — the version-probe 'docker run --rm --entrypoint cat ...' has no -d and is expected) (defense-in-depth alongside the 'docker rm' check above; verified non-tautological against the same dry-run-removed+forced-yes mutation, which reached step 6's --stop child and tripped the 'docker rm' assertion — this fixture's --start child doesn't get far enough to emit its own 'docker run -d' before failing on the minimal stub, so this specific check's own trip wire is exercised by a fuller mutation, not this harness run)" \
+    bash -c '! grep -qE "^run\b.*-d\b" "$1"' -- "$_U71_CALLLOG"
+
+_U71_YES_OUT="$(mktemp)"
+PATH="$_U71_BIN:$PATH" SANDY_HOME="$_U71_HOME" SANDY_EGRESS_NO_ISOLATION=1 SANDY_AUTO_APPROVE_PRIVILEGED=1 \
+    bash "$_SBX_SCRIPT" --update-sessions </dev/null >"$_U71_YES_OUT" 2>&1
+_U71_YES_RC=$?
+check "non-TTY without --yes: exit 1 (cron must opt in explicitly)" \
+    test "$_U71_YES_RC" -eq 1
+check "non-TTY without --yes: prints the 'pass --yes' guidance (mutation: drop the [ -t 0 ] non-interactive gate -> hangs on stdin, or wrong exit/message)" \
+    bash -c 'grep -q "pass --yes" "$1"' -- "$_U71_YES_OUT"
+
+rm -rf "$_U71_BIN" "$_U71_HOME" "$_U71_WSA" "$_U71_WSB"
+rm -f "$_U71_CALLLOG" "$_U71_PRIME_LOG" "$_U71_DRY_OUT" "$_U71_YES_OUT"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

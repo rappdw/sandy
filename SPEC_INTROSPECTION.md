@@ -262,7 +262,8 @@ All three:
       "started_at": "2026-04-20T14:00:00Z",
       "sandbox": "zork-3dfda686",
       "daemon": true,
-      "attached_clients": 1
+      "attached_clients": 1,
+      "image_stale": false
     },
     {
       "id": "def456",
@@ -271,7 +272,8 @@ All three:
       "started_at": "2026-04-20T13:00:00Z",
       "sandbox": "quux-99999999",
       "daemon": false,
-      "attached_clients": null
+      "attached_clients": null,
+      "image_stale": true
     }
   ],
   "orphan_networks": 0
@@ -291,6 +293,21 @@ All three:
 > emit all three fields identically; a client on the pre-1.1.0 shape still
 > parses (unknown fields ignored) since `id`/`name`/`image`/`started_at` are
 > unchanged.
+
+> **`image_stale`** (per `running_containers[]` entry, **FULL MODE ONLY**,
+> added additively in `1.2.0`, #41 — no `schema_version` bump; powers `sandy
+> --update-sessions`'s staleness check). Tri-state: `true` when the
+> container's running image id (`docker inspect -f '{{.Image}}' <cid>`)
+> differs from its image name's CURRENT id (`docker image inspect -f
+> '{{.Id}}' <image>`) — a rebuild has landed since this container launched.
+> `false` when they match. `null` when it can't be computed (the image name
+> no longer resolves, or either `docker inspect` failed). Absent entirely
+> from `--print-state light` entries — computing it costs one `docker
+> inspect <cid>` per container plus one `docker image inspect` per unique
+> image name (deduplicated across containers sharing an image), which is
+> over the light-mode two-spawn budget (see "Light mode" below). A consumer
+> that wants a staleness badge on a light-mode poll fetches full mode
+> on demand.
 
 > **`workspace_path`** (per sandbox) is read from the `WORKSPACE.json` marker
 > sandy writes into each sandbox on launch; it is an empty string for a legacy
@@ -356,7 +373,7 @@ Exit code: `0` on schemas that load cleanly (even with warnings), `1` on fatal e
 
 - Current: `schema_version: 1`
 - **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal`), `description`, `sources`, and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
-- **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. Clients ignore unknown fields. Three additive changes shipped this way: `since`/`stability` on config-key objects (`0.15.0`, PR 4.1, above); in `1.1.0` (#17), three new `cli_flags` entries (`--start`, `--attach`, `--stop` — daemon-mode flags) plus three new `running_containers[]` fields (`sandbox`, `daemon`, `attached_clients` — see `--print-state` below); and, also in `1.1.0` (#26), one more `cli_flags` entry (`--prune-orphans` — reap orphaned sandy networks and exit) plus one new top-level `--print-state` field (`orphan_networks` — see above).
+- **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. Clients ignore unknown fields. Three additive changes shipped this way: `since`/`stability` on config-key objects (`0.15.0`, PR 4.1, above); in `1.1.0` (#17), three new `cli_flags` entries (`--start`, `--attach`, `--stop` — daemon-mode flags) plus three new `running_containers[]` fields (`sandbox`, `daemon`, `attached_clients` — see `--print-state` below); and, also in `1.1.0` (#26), one more `cli_flags` entry (`--prune-orphans` — reap orphaned sandy networks and exit) plus one new top-level `--print-state` field (`orphan_networks` — see above). In `1.2.0` (#41), one more `cli_flags` entry (`--update-sessions` — fleet image refresh + rolling restart across every daemon session on the host) plus one new `running_containers[]` field, `image_stale` (FULL MODE ONLY — see above).
 - **Deprecations** (existing key changes semantics): bump to `schema_version: 2`. Sandy publishes both versions in parallel via `--print-schema --schema-version 1` for one minor release, then drops v1 with a release-note callout.
 - **Compatibility range**: each sandy version declares `supported_schema_versions` and `deprecated_schema_versions` so clients can decide to warn/refuse.
 

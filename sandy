@@ -797,6 +797,8 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--stop"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Stop a running daemon session (full teardown)."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--prune-orphans"'; printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Reap orphaned sandy_* networks (dead-owner, no attached container) and exit."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--update-sessions"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Fleet image refresh + rolling restart across every daemon session on the host. Sub-options: --dry-run, --yes, --idle-for <minutes>, --rebuild."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -903,6 +905,57 @@ _sandy_emit_container_daemon_fields() {
     printf ','; _json_kv sandbox "$(_json_escape "$_sandbox")"
     printf ','; printf '"daemon":%s' "$_isdaemon"
     printf ','; printf '"attached_clients":%s' "$_ac"
+}
+
+# #41 (milestone 1.2.0) — tri-state image-staleness check, shared by
+# --print-state FULL mode (DEC-U6, `_sandy_emit_state`'s full-mode branch
+# below) and `sandy --update-sessions`'s step-3 staleness check (dispatcher
+# near --stop, much further down the file). Placed HERE — immediately after
+# _sandy_emit_container_daemon_fields, well before the --print-schema/
+# --print-state FAST-PATH dispatch (~line 1420) — for the exact reason
+# _sandy_orphan_networks_list sits here too (see the comment just below):
+# --print-state can dispatch and exit before the script's linear execution
+# ever reaches a definition placed "near --update-sessions" further down, and
+# bash only resolves a function call against whatever has already been
+# DEFINED (executed as a top-level `name() { ... }` statement) earlier in the
+# file — not against anything defined later. A mutation that moved this
+# def down next to --update-sessions would make every full-mode
+# `image_stale` assertion fail loudly (docker calls returning nothing /
+# "command not found"), not silently pass.
+#
+# Args: container id, image name (as docker ps/inspect reports it — a tag,
+# not necessarily a sha). Prints "true" (stale — running image id differs
+# from the image name's current id), "false" (current), or "null" (can't be
+# computed: image name no longer resolves, or either inspect failed) to
+# stdout. Caches the CURRENT id per unique image name in the global
+# _SANDY_IMAGE_ID_CACHE (newline "name|id" pairs) so a caller checking many
+# containers that share one image name (the common case — several daemon
+# sessions all running sandy-claude-code) pays one `docker image inspect`
+# per unique name, not per container (DEC-U6's stated cost model). A caller
+# that only checks a single container (the --update-sessions per-session
+# loop) gets the same function for free; the cache is a harmless no-op for
+# it. Never caches a failed (empty) lookup, so a genuinely-missing image
+# name is retried per call rather than permanently poisoning the cache.
+_sandy_image_stale() {
+    local _cid="$1" _img="$2" _running_id _current_id
+    _running_id="$(docker inspect -f '{{.Image}}' "$_cid" 2>/dev/null)" || _running_id=""
+    _current_id="$(printf '%s\n' "${_SANDY_IMAGE_ID_CACHE:-}" | awk -F'|' -v n="$_img" '$1==n{print $2; exit}')"
+    if [ -z "$_current_id" ]; then
+        _current_id="$(docker image inspect -f '{{.Id}}' "$_img" 2>/dev/null)" || _current_id=""
+        if [ -n "$_current_id" ]; then
+            _SANDY_IMAGE_ID_CACHE="${_SANDY_IMAGE_ID_CACHE:-}
+$_img|$_current_id"
+        fi
+    fi
+    if [ -z "$_running_id" ] || [ -z "$_current_id" ]; then
+        printf 'null'
+        return 0
+    fi
+    if [ "$_running_id" = "$_current_id" ]; then
+        printf 'false'
+    else
+        printf 'true'
+    fi
 }
 
 # #26 (milestone 1.1.0, Batch 4) — pure lister: emits the names (one per line)
@@ -1188,6 +1241,14 @@ _sandy_emit_state() {
         fi
     else   # full mode
         local _ps_out
+        # #41 DEC-U6 — image_stale is FULL MODE ONLY (reset per-call so a
+        # process that emits both light and full doesn't leak a stale cache
+        # across modes/invocations): one `docker inspect <cid>` per container
+        # plus one `docker image inspect` per UNIQUE image name (cached by
+        # _sandy_image_stale, see its definition up near
+        # _sandy_emit_container_daemon_fields) — over the #25 light-mode
+        # spawn budget, which is why light mode never touches this.
+        _SANDY_IMAGE_ID_CACHE=""
         if command -v docker >/dev/null 2>&1 \
            && _ps_out="$(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}|{{.Label "sandy.daemon"}}|{{.Label "sandy.session"}}' 2>/dev/null)"; then
             printf ',"docker_reachable":true'
@@ -1213,6 +1274,7 @@ _sandy_emit_state() {
                 printf ','; _json_kv image      "$(_json_escape "$_cimg")"
                 printf ','; _json_kv started_at "$(_json_escape "$_cstarted")"
                 _sandy_emit_container_daemon_fields "$_cid" "$_cname" "$_cdaemon" "$_csession"
+                printf ','; printf '"image_stale":%s' "$(_sandy_image_stale "$_cid" "$_cimg")"
                 printf '}'
             done < <(printf '%s\n' "$_ps_out" | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)
             printf ']'
@@ -1547,6 +1609,14 @@ SANDY_START=false
 SANDY_ATTACH=false
 SANDY_STOP=false
 SANDY_WORKSPACE_ARG=""
+# Fleet updates (milestone 1.2.0, #41). SANDY_UPDATE_SESSIONS=true plus its
+# sub-option vars are set by their respective flags below. Global command —
+# does NOT use SANDY_WORKSPACE_ARG (it ignores cwd and operates on every
+# daemon session on the host; see the dispatcher block near --stop).
+SANDY_UPDATE_SESSIONS=false
+SANDY_UPDATE_DRY_RUN=false
+SANDY_UPDATE_YES=false
+SANDY_UPDATE_IDLE_FOR=""
 # Capture whether SANDY_VERBOSE came from the real env BEFORE defaulting it: the
 # env snapshot below can't otherwise distinguish a defaulted 0 from an env-set 0,
 # so it would mark SANDY_VERBOSE "env-set" and skip a value set in a config file
@@ -1578,6 +1648,28 @@ while [ $# -gt 0 ]; do
         --workspace=*) SANDY_WORKSPACE_ARG="${1#--workspace=}" ;;
         --attach)     SANDY_ATTACH=true ;;
         --stop)       SANDY_STOP=true ;;
+        --update-sessions) SANDY_UPDATE_SESSIONS=true ;;
+        --dry-run)    SANDY_UPDATE_DRY_RUN=true ;;
+        --yes)        SANDY_UPDATE_YES=true ;;
+        --idle-for)
+            if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
+                echo "[sandy] ERROR: --idle-for requires a value in minutes (e.g. --idle-for 30)" >&2
+                exit 1
+            fi
+            shift
+            if ! [[ "$1" =~ ^[0-9]+$ ]] || [ "$1" -eq 0 ]; then
+                echo "[sandy] ERROR: --idle-for requires a positive integer number of minutes, got: $1" >&2
+                exit 1
+            fi
+            SANDY_UPDATE_IDLE_FOR="$1"
+            ;;
+        --idle-for=*)
+            SANDY_UPDATE_IDLE_FOR="${1#--idle-for=}"
+            if ! [[ "$SANDY_UPDATE_IDLE_FOR" =~ ^[0-9]+$ ]] || [ "$SANDY_UPDATE_IDLE_FOR" -eq 0 ]; then
+                echo "[sandy] ERROR: --idle-for requires a positive integer number of minutes, got: $SANDY_UPDATE_IDLE_FOR" >&2
+                exit 1
+            fi
+            ;;
         --upgrade)    sandy_self_update; exit 0 ;;
         --agent)
             if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
@@ -3635,6 +3727,263 @@ if [ "$SANDY_STOP" = "true" ]; then
             exit 5
         fi
     fi
+fi
+
+# --- Fleet updates (--update-sessions; milestone 1.2.0, #41) ---
+# Helper functions used only by the dispatcher immediately below. They do NOT
+# need to be defined earlier (unlike _sandy_image_stale, which lives up near
+# _sandy_emit_container_daemon_fields because --print-state is a FAST-PATH
+# handler that can dispatch before the script's linear execution reaches this
+# point) — --update-sessions is not a fast-path command, it runs post-
+# preflight in the --start/--attach/--stop family, so "defined immediately
+# before its dispatcher" already satisfies the forward-reference discipline.
+
+# Enumerate every daemon session on the host in one `docker ps` call (DEC-U7:
+# global, cwd-independent — filters on label=sandy.daemon=true only, no
+# workspace filter). One line per container: cid|session|workspace_path|image.
+# `.Image` is the tag/name docker ps reports (matches what _sandy_image_stale
+# expects as its second arg — same convention _sandy_emit_state already uses).
+_sandy_update_enum_sessions() {
+    docker ps --filter "label=sandy.daemon=true" \
+        --format '{{.ID}}|{{.Label "sandy.session"}}|{{.Label "sandy.workspace_path"}}|{{.Image}}' \
+        2>/dev/null || true
+}
+
+# Idle age in whole seconds since the inner tmux session's last activity.
+# Prints nothing and returns 1 on any probe failure (mid-restart container,
+# session gone, docker exec error) — the caller treats that as ACTIVE
+# (fail-safe: never restart a session we can't positively prove is idle,
+# same philosophy as the print-state attached_clients null-on-failure path).
+# ALWAYS `-u "$(id -u)"`: docker exec defaults to the image's user (root — no
+# USER directive), but the tmux server runs as the host uid the entrypoint
+# gosu-dropped to, with its socket in /tmp/tmux-<uid>. A root client can never
+# see the session (the 1.1.0 lesson, repeated here because it's exactly the
+# kind of thing a copy-paste-without-thinking would drop).
+_sandy_update_idle_age_seconds() {
+    local _cid="$1" _activity _now
+    _activity="$(docker exec -u "$(id -u)" "$_cid" tmux display -p -t sandy '#{window_activity}' 2>/dev/null)" || _activity=""
+    if ! [[ "$_activity" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+    _now="$(date +%s)" || return 1
+    printf '%s' "$((_now - _activity))"
+}
+
+if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
+    # DEC-U7 — global maintenance command: does NOT resolve WORK_DIR (it's
+    # already resolved above as an unconditional side effect of reaching this
+    # point in the file, but this dispatcher never reads it) and takes no
+    # workspace mutex of its own — every mutation goes through a resolved-
+    # self "$0" --stop / --start child process, which manages its own lock
+    # exactly as it does for a normal interactive invocation.
+    #
+    # Resolve $0 to an absolute, cwd-independent path BEFORE any `cd` below
+    # (step 2 does `cd "$workspace" && "$_sandy_self" --build-only` per
+    # session). A bare command name (no slash — the common installed case,
+    # `sandy` found via PATH) is left as-is: every bash observed sets $0 to
+    # the already-resolved absolute path in that case. An already-absolute
+    # $0 is also left as-is. The one case that needs fixing is a literal
+    # relative invocation WITH a slash (`./sandy`, `../bin/sandy` — common
+    # when running from a dev checkout, exactly this repo's own workflow):
+    # left unresolved, a later `cd` into some OTHER workspace would make
+    # "./sandy" resolve to nothing there and every per-session build would
+    # fail with "no such file". No `readlink -f` (GNU-only, absent on BSD/
+    # macOS readlink) — cd+pwd+basename is portable to both platforms.
+    _sandy_self="$0"
+    case "$_sandy_self" in
+        /*) : ;;
+        */*)
+            _sandy_self_dir="$(cd "$(dirname "$_sandy_self")" 2>/dev/null && pwd)" || _sandy_self_dir=""
+            [ -n "$_sandy_self_dir" ] && _sandy_self="$_sandy_self_dir/$(basename "$_sandy_self")"
+            ;;
+        *) : ;;
+    esac
+
+    _sandy_upd_raw="$(_sandy_update_enum_sessions)"
+    if [ -z "$_sandy_upd_raw" ]; then
+        info "No daemon sessions found on this host."
+        exit 0
+    fi
+
+    _upd_cids=() _upd_sessions=() _upd_wspaths=() _upd_images=()
+    while IFS='|' read -r _upd_c _upd_s _upd_w _upd_i; do
+        [ -z "$_upd_c" ] && continue
+        _upd_cids+=("$_upd_c")
+        _upd_sessions+=("$_upd_s")
+        _upd_wspaths+=("$_upd_w")
+        _upd_images+=("$_upd_i")
+    done <<< "$_sandy_upd_raw"
+    _upd_n="${#_upd_cids[@]}"
+    info "Found $_upd_n daemon session(s)."
+
+    # Step 2 (DEC-U1) — per-workspace child build. Each session's own
+    # `"$0" --build-only` resolves that workspace's image stack (agent
+    # selection, skills, project image) from ITS OWN .sandy/config; the
+    # orchestrator never guesses the union. Cheap when fresh (hash checks +
+    # one curl per agent). DEC-U4: this ALWAYS runs, even under --dry-run —
+    # builds are side-effect-free for a running session (they don't touch the
+    # running container), so dry-run output reflects the real plan rather
+    # than a stale guess. Distinct workspaces sharing an image converge via
+    # the on-disk hash files: the first child to reach a given image builds
+    # it, the rest see "up to date" and no-op.
+    _upd_build_failed=()
+    for ((_upd_i = 0; _upd_i < _upd_n; _upd_i++)); do
+        _upd_ws="${_upd_wspaths[$_upd_i]}"
+        _upd_sess="${_upd_sessions[$_upd_i]:-${_upd_cids[$_upd_i]:0:12}}"
+        if [ -z "$_upd_ws" ] || [ ! -d "$_upd_ws" ]; then
+            warn "  $_upd_sess: workspace path missing/unreadable (${_upd_ws:-<empty>}) — skipping image refresh."
+            _upd_build_failed[$_upd_i]=1
+            continue
+        fi
+        info "Refreshing images for $_upd_sess ($_upd_ws)..."
+        _upd_build_args=(--build-only)
+        [ "$SANDY_REBUILD" = "true" ] && _upd_build_args+=(--rebuild)
+        _upd_build_log="$(mktemp)"
+        if ! (cd "$_upd_ws" && "$_sandy_self" "${_upd_build_args[@]}") >"$_upd_build_log" 2>&1; then
+            error "  Build failed for $_upd_sess — tail of output:"
+            tail -n 20 "$_upd_build_log" | sed 's/^/[sandy]   /' >&2
+            _upd_build_failed[$_upd_i]=1
+        fi
+        rm -f "$_upd_build_log" 2>/dev/null || true
+    done
+
+    # Steps 3+4 — staleness check, then (only when --idle-for was given) the
+    # idle gate. DEC-U5: with no --idle-for, every stale session is a restart
+    # candidate — no activity heuristic is applied by default.
+    _upd_stale=() _upd_idle_age=() _upd_action=() _upd_reason=()
+    for ((_upd_i = 0; _upd_i < _upd_n; _upd_i++)); do
+        if [ "${_upd_build_failed[$_upd_i]:-0}" = "1" ]; then
+            _upd_action[$_upd_i]="skip"
+            _upd_reason[$_upd_i]="build failed"
+            continue
+        fi
+        _upd_stale[$_upd_i]="$(_sandy_image_stale "${_upd_cids[$_upd_i]}" "${_upd_images[$_upd_i]}")"
+        case "${_upd_stale[$_upd_i]}" in
+            true) : ;;
+            null)
+                _upd_action[$_upd_i]="skip"
+                _upd_reason[$_upd_i]="staleness unknown"
+                continue
+                ;;
+            *)
+                _upd_action[$_upd_i]="skip"
+                _upd_reason[$_upd_i]="current"
+                continue
+                ;;
+        esac
+        if [ -n "$SANDY_UPDATE_IDLE_FOR" ]; then
+            if ! _upd_age="$(_sandy_update_idle_age_seconds "${_upd_cids[$_upd_i]}")"; then
+                _upd_action[$_upd_i]="skip"
+                _upd_reason[$_upd_i]="active (idle probe failed)"
+                continue
+            fi
+            _upd_idle_age[$_upd_i]="$_upd_age"
+            _upd_age_min=$((_upd_age / 60))
+            if [ "$_upd_age_min" -lt "$SANDY_UPDATE_IDLE_FOR" ]; then
+                _upd_action[$_upd_i]="skip"
+                _upd_reason[$_upd_i]="active (idle ${_upd_age_min}m < ${SANDY_UPDATE_IDLE_FOR}m)"
+                continue
+            fi
+        fi
+        _upd_action[$_upd_i]="restart"
+        _upd_reason[$_upd_i]="stale"
+    done
+
+    # Step 5 — plan table (human-readable, like --prune-orphans — this is an
+    # action command, not an introspection JSON handler).
+    printf '\n'
+    printf '%-28s %-36s %-8s %-10s %s\n' "SESSION" "WORKSPACE" "STALE" "IDLE(m)" "ACTION"
+    _upd_restart_count=0
+    for ((_upd_i = 0; _upd_i < _upd_n; _upd_i++)); do
+        _upd_idle_disp="-"
+        [ -n "${_upd_idle_age[$_upd_i]:-}" ] && _upd_idle_disp=$((_upd_idle_age[$_upd_i] / 60))
+        printf '%-28s %-36s %-8s %-10s %s (%s)\n' \
+            "${_upd_sessions[$_upd_i]:-${_upd_cids[$_upd_i]:0:12}}" \
+            "${_upd_wspaths[$_upd_i]:-?}" \
+            "${_upd_stale[$_upd_i]:-?}" \
+            "$_upd_idle_disp" \
+            "${_upd_action[$_upd_i]}" \
+            "${_upd_reason[$_upd_i]}"
+        [ "${_upd_action[$_upd_i]}" = "restart" ] && _upd_restart_count=$((_upd_restart_count + 1))
+    done
+    printf '\n'
+
+    if [ "$SANDY_UPDATE_DRY_RUN" = "true" ]; then
+        info "--dry-run: no sessions restarted ($_upd_restart_count restart candidate(s))."
+        exit 0
+    fi
+
+    if [ "$_upd_restart_count" -eq 0 ]; then
+        info "Nothing to restart."
+        exit 0
+    fi
+
+    if [ "$SANDY_UPDATE_YES" != "true" ]; then
+        if [ -t 0 ]; then
+            _upd_confirm=""
+            printf '[sandy] Restart %s session(s)? [y/N] ' "$_upd_restart_count" >&2
+            IFS= read -r _upd_confirm </dev/tty || _upd_confirm=""
+            case "$_upd_confirm" in
+                y|Y|yes|YES|Yes) : ;;
+                *) info "Aborted — no sessions restarted."; exit 0 ;;
+            esac
+        else
+            error "Non-interactive; pass --yes to restart sessions without a prompt."
+            exit 1
+        fi
+    fi
+
+    # Step 6 — rolling restart (serial), DEC-U2: compose the hardened
+    # primitives verbatim, DEC-U3: SANDY_UPDATE_RESTART tells the --start
+    # child's supervisor to stamp sandy.updated_at. DEC-U8: rely on the
+    # child's own exit code — no duplicate readiness polling here.
+    _upd_restarted=() _upd_failed=()
+    for ((_upd_i = 0; _upd_i < _upd_n; _upd_i++)); do
+        [ "${_upd_action[$_upd_i]}" = "restart" ] || continue
+        _upd_sess="${_upd_sessions[$_upd_i]:-${_upd_cids[$_upd_i]:0:12}}"
+        _upd_ws="${_upd_wspaths[$_upd_i]}"
+        info "Restarting $_upd_sess..."
+        _upd_t0="$(date +%s)"
+        _upd_ok=true
+        if ! "$_sandy_self" --stop --workspace "$_upd_ws" >/dev/null 2>&1; then
+            error "  --stop failed for $_upd_sess"
+            _upd_ok=false
+        fi
+        if [ "$_upd_ok" = "true" ] \
+           && ! SANDY_UPDATE_RESTART=1 "$_sandy_self" --start --workspace "$_upd_ws" >/dev/null 2>&1; then
+            error "  --start failed for $_upd_sess"
+            _upd_ok=false
+        fi
+        _upd_t1="$(date +%s)"
+        _upd_elapsed=$((_upd_t1 - _upd_t0))
+        if [ "$_upd_ok" = "true" ]; then
+            info "  $_upd_sess restarted in ${_upd_elapsed}s."
+            _upd_restarted+=("$_upd_sess (${_upd_elapsed}s)")
+        else
+            _upd_failed+=("$_upd_sess")
+        fi
+    done
+
+    # Step 7 — summary. Exit 0 = all clean/nothing to do; 1 = any failure.
+    printf '\n--- Summary ---\n'
+    printf 'Restarted: %d\n' "${#_upd_restarted[@]}"
+    for _upd_r in ${_upd_restarted[@]+"${_upd_restarted[@]}"}; do
+        printf '  %s\n' "$_upd_r"
+    done
+    _upd_skip_count=0
+    for ((_upd_i = 0; _upd_i < _upd_n; _upd_i++)); do
+        [ "${_upd_action[$_upd_i]}" = "skip" ] && _upd_skip_count=$((_upd_skip_count + 1))
+    done
+    printf 'Skipped: %d\n' "$_upd_skip_count"
+    printf 'Failed: %d\n' "${#_upd_failed[@]}"
+    for _upd_f in ${_upd_failed[@]+"${_upd_failed[@]}"}; do
+        printf '  %s\n' "$_upd_f"
+    done
+
+    if [ "${#_upd_failed[@]}" -gt 0 ]; then
+        exit 1
+    fi
+    exit 0
 fi
 
 # #26 DEC-4e — broad prune-on-startup: remove provably-dead orphan networks on
@@ -6242,6 +6591,21 @@ if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
     RUN_FLAGS+=(--label "sandy.started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
     RUN_FLAGS+=(--label "sandy.session=$SANDBOX_NAME")
     RUN_FLAGS+=(--label "sandy.daemon_pid=$$")
+    # DEC-U3 (#41, milestone 1.2.0) — SANDY_UPDATE_RESTART is an internal
+    # env-only signal, NOT a config key (no _sandy_key_metadata row, no
+    # allowlist entry — mirrors SANDY_DAEMON_SUPERVISOR): the
+    # `sandy --update-sessions` orchestrator exports it for the `"$0" --start`
+    # child it spawns after a `--stop` during a rolling restart, and it rides
+    # ordinary env inheritance through the nohup re-exec into this same
+    # supervisor code path (same mechanism SANDY_AUTO_APPROVE_PRIVILEGED
+    # already relies on — env only ADDS the two vars named at the nohup call,
+    # it doesn't clear the rest of the process's exported environment).
+    # sandy-ui and other --print-state consumers use the presence of
+    # sandy.updated_at to distinguish "restarted for an image update" from
+    # "user manually stopped and started it" (which never sets this label).
+    if [ "${SANDY_UPDATE_RESTART:-0}" = "1" ]; then
+        RUN_FLAGS+=(--label "sandy.updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+    fi
     # D2 — forwarded so the container-side launch script (user-setup.sh) can
     # create the inner tmux session detached and keep PID 1 alive with
     # `exec tail -f /dev/null` instead of attaching.
