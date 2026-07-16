@@ -2759,6 +2759,23 @@ if [ "${SANDY_SSH:-token}" = "token" ] && command -v gh &>/dev/null; then
     git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
     gh auth setup-git 2>/dev/null || true
 fi
+# Guaranteed-baseline git credential helper, independent of gh. The gh path
+# above (`gh auth login --with-token` earlier + `gh auth setup-git` here)
+# validates the token over the network against api.github.com and swallows all
+# errors (2>/dev/null || true) — so a transient api.github.com failure (observed:
+# authenticated api.github.com calls returning 503 while github.com itself is
+# fine) silently leaves the container with NO working credential helper and git
+# push/pull fails, even though a valid GIT_TOKEN was forwarded. Append a direct
+# helper: git tries credential helpers in order, so gh's multi-account helper
+# still wins when it's healthy, and this is the fallback. It supplies the
+# forwarded token for github.com with NO network round-trip and reads
+# $GIT_TOKEN from the container env at call time (the literal ${GIT_TOKEN} is
+# stored in .gitconfig, not the value). Always emits creds (git ignores helper
+# output on store/erase), sidestepping the inline-helper $1-operation gotcha.
+if [ "${SANDY_SSH:-token}" = "token" ] && [ -n "${GIT_TOKEN:-}" ]; then
+    git config --global --add credential."https://github.com".helper \
+        '!f() { echo username=x-access-token; echo "password=${GIT_TOKEN}"; }; f'
+fi
 
 sandy_log "Refreshing plugin marketplaces"
 # Refresh plugin marketplaces (once per day, or forced when channels need plugins).
