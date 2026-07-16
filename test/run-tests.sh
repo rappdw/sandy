@@ -5254,16 +5254,21 @@ chmod +x "$_U71_BIN/curl"
 # --build-only pass so the two per-session children below both take the
 # "up to date" fast path instead of a (stubbed but still work-doing) build.
 _U71_PRIME_LOG="$(mktemp)"
+# Inline `&& rc=0 || rc=$?` (NOT a bare command + separate `rc=$?`): under the
+# suite's `set -euo pipefail` + ERR trap, a bare command that exits non-zero
+# aborts the whole run BEFORE the next-line `$?` capture — the non-TTY check
+# below legitimately exits 1, and this same guard shape is required for every
+# expected-nonzero (or could-fail) invocation. Same lesson as §70.
 (cd "$_U71_WSA" && PATH="$_U71_BIN:$PATH" SANDY_HOME="$_U71_HOME" SANDY_EGRESS_NO_ISOLATION=1 \
-    SANDY_AUTO_APPROVE_PRIVILEGED=1 bash "$_SBX_SCRIPT" --build-only) >"$_U71_PRIME_LOG" 2>&1
-_U71_PRIME_RC=$?
+    SANDY_AUTO_APPROVE_PRIVILEGED=1 bash "$_SBX_SCRIPT" --build-only) >"$_U71_PRIME_LOG" 2>&1 \
+    && _U71_PRIME_RC=0 || _U71_PRIME_RC=$?
 check "fixture setup: priming --build-only succeeds" test "$_U71_PRIME_RC" -eq 0
 : > "$_U71_CALLLOG"   # priming's own calls aren't part of what dry-run is asserting on
 
 _U71_DRY_OUT="$(mktemp)"
 PATH="$_U71_BIN:$PATH" SANDY_HOME="$_U71_HOME" SANDY_EGRESS_NO_ISOLATION=1 SANDY_AUTO_APPROVE_PRIVILEGED=1 \
-    bash "$_SBX_SCRIPT" --update-sessions --dry-run >"$_U71_DRY_OUT" 2>&1
-_U71_DRY_RC=$?
+    bash "$_SBX_SCRIPT" --update-sessions --dry-run >"$_U71_DRY_OUT" 2>&1 \
+    && _U71_DRY_RC=0 || _U71_DRY_RC=$?
 check "--update-sessions --dry-run exits 0" test "$_U71_DRY_RC" -eq 0
 check "--dry-run plan lists the stale session (A) as a restart candidate (mutation: flip the stale comparison -> A shows skip instead)" \
     bash -c 'grep "wsA-session" "$1" | grep -q "restart"' -- "$_U71_DRY_OUT"
@@ -5278,8 +5283,8 @@ check "--dry-run performs NO container (re)launch ('docker run -d ...' never cal
 
 _U71_YES_OUT="$(mktemp)"
 PATH="$_U71_BIN:$PATH" SANDY_HOME="$_U71_HOME" SANDY_EGRESS_NO_ISOLATION=1 SANDY_AUTO_APPROVE_PRIVILEGED=1 \
-    bash "$_SBX_SCRIPT" --update-sessions </dev/null >"$_U71_YES_OUT" 2>&1
-_U71_YES_RC=$?
+    bash "$_SBX_SCRIPT" --update-sessions </dev/null >"$_U71_YES_OUT" 2>&1 \
+    && _U71_YES_RC=0 || _U71_YES_RC=$?
 check "non-TTY without --yes: exit 1 (cron must opt in explicitly)" \
     test "$_U71_YES_RC" -eq 1
 check "non-TTY without --yes: prints the 'pass --yes' guidance (mutation: drop the [ -t 0 ] non-interactive gate -> hangs on stdin, or wrong exit/message)" \
@@ -5295,8 +5300,8 @@ check "non-TTY without --yes: prints the 'pass --yes' guidance (mutation: drop t
 # enum loop -> B appears in the plan and the count says 2.)
 _U71_SCOPE_OUT="$(mktemp)"
 PATH="$_U71_BIN:$PATH" SANDY_HOME="$_U71_HOME" SANDY_EGRESS_NO_ISOLATION=1 SANDY_AUTO_APPROVE_PRIVILEGED=1 \
-    bash "$_SBX_SCRIPT" --update-sessions --dry-run --workspace "$_U71_WSA" >"$_U71_SCOPE_OUT" 2>&1
-_U71_SCOPE_RC=$?
+    bash "$_SBX_SCRIPT" --update-sessions --dry-run --workspace "$_U71_WSA" >"$_U71_SCOPE_OUT" 2>&1 \
+    && _U71_SCOPE_RC=0 || _U71_SCOPE_RC=$?
 check "--workspace scope: exit 0, scoped to exactly one session" \
     bash -c '[ "$1" -eq 0 ] && grep -q "Found 1 daemon session(s) (scoped to" "$2"' -- "$_U71_SCOPE_RC" "$_U71_SCOPE_OUT"
 check "--workspace scope: plan lists ONLY the scoped session (A present, B absent)" \
