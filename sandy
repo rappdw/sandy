@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.2.1-dev"
+SANDY_VERSION="1.2.0"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -4272,9 +4272,14 @@ _resolve_passive_privileged_approval() {
     _src="$(printf '%s\n' "${_PASSIVE_PRIVILEGED_SOURCES[@]}" | sort -u | head -n1)"
     echo "[sandy]" >&2
     echo "[sandy] Workspace config ($_src) wants to set privileged keys:" >&2
+    # Print KEY NAMES ONLY — never the values. These are credentials
+    # (CLAUDE_CODE_OAUTH_TOKEN, API keys, …) and this prompt goes to stderr,
+    # which in daemon mode is the supervisor log on disk. `${_kv%%=*}` strips
+    # =VALUE. (The set_hash above still encodes the values, so any value edit
+    # still re-prompts.)
     while IFS= read -r _kv; do
         [ -z "$_kv" ] && continue
-        echo "[sandy]   $_kv" >&2
+        echo "[sandy]   ${_kv%%=*}" >&2
     done <<< "$sorted"
     echo "[sandy]" >&2
     echo "[sandy] These affect security boundaries (SSH agent forwarding, permission" >&2
@@ -4301,11 +4306,19 @@ _resolve_passive_privileged_approval() {
     IFS= read -r _ans </dev/tty || _ans=""
     case "$_ans" in
         y|Y|yes|YES|Yes)
+            # Store KEY NAMES ONLY, never values — line 1 (the set_hash) is the
+            # only thing ever read back (for change-detection); the name list
+            # below is human-audit only, so persisting the secret VALUES to this
+            # file would be a needless plaintext credential store. `${_kv%%=*}`
+            # strips =VALUE.
             {
                 printf '%s\n' "$set_hash"
                 printf '# workspace: %s\n' "$WORK_DIR"
                 printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
-                printf '%s\n' "$sorted"
+                while IFS= read -r _kv; do
+                    [ -z "$_kv" ] && continue
+                    printf '%s\n' "${_kv%%=*}"
+                done <<< "$sorted"
             } > "$approval_file"
             chmod 600 "$approval_file" 2>/dev/null || true
             while IFS= read -r _kv; do
