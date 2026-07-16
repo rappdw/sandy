@@ -1,3 +1,39 @@
+## sandy v1.2.0
+
+**Fleet updates for daemon sessions.** Daemon sessions can stay up for days, running an ever-staler image — nothing at launch refreshes them once launches become rare. `sandy --update-sessions` closes that: one command refreshes every daemon session's images and rolling-restarts the ones that came out stale, conversations resuming automatically. Additive and backward-compatible: bare `sandy` and the `--start`/`--attach`/`--stop` lifecycle are unchanged, and the introspection `schema_version` stays `1`.
+
+### `sandy --update-sessions` (#41)
+
+A **global** maintenance command (ignores cwd — it operates on every daemon session on the host, or scope it to one with `--workspace PATH`):
+
+```bash
+sandy --update-sessions --dry-run             # show the plan, refresh images, restart nothing
+sandy --update-sessions --yes                 # restart every stale session, no prompt
+sandy --update-sessions --idle-for 30 --yes   # only restart sessions idle 30+ min (cron-friendly)
+sandy --update-sessions --rebuild --yes       # force a rebuild before checking staleness
+sandy --update-sessions --yes --workspace ~/p # scope to one session (per-session update)
+```
+
+For each session it runs that workspace's own `--build-only` (so image selection, skills, and any per-project Dockerfile resolve exactly as a normal launch would), compares the running container's image ID against the freshly-built one, and — for anything stale — does `sandy --stop` then `sandy --start`. `--dry-run` still refreshes images (so the printed plan reflects reality) but never restarts. Without `--idle-for`, every stale session is a candidate; a TTY without `--yes` gets a y/N prompt, a non-interactive run without `--yes` refuses with exit `1` (so cron must opt in). Exit `0` = all clean (including nothing to do); `1` = a failure or the non-interactive refusal. A nightly quiet-hours recipe:
+
+```cron
+0 3 * * * /path/to/sandy --update-sessions --idle-for 30 --yes >> ~/.sandy/update-sessions.log 2>&1
+```
+
+### Introspection additions (additive — `schema_version` stays 1)
+
+- **`image_stale`** (per `running_containers[]` entry, **full mode only**): `true`/`false`/`null` — whether a container is running an image older than the current build. Full mode only because it costs a `docker inspect` per container; the light-mode poll budget is unchanged. Staleness is read from the container's `.Config.Image` (the reference it was created with), not `docker ps`, so it stays correct even after a tag has been reassigned by an earlier rebuild.
+- **`updated_at`** (both modes): the `sandy.updated_at` label (ISO-8601 string, or `null`) that `--update-sessions` stamps on a container it restarted — lets a consumer (e.g. `sandy-ui`) tell a restarted-for-updates session from one the user stopped and started. Rides the existing `docker ps` read; no extra spawn.
+- `--print-schema` `cli_flags` gains `--update-sessions`.
+
+### Fixes rolled in
+
+- **Stale project image after a base upgrade** no longer serves a pre-upgrade `user-setup.sh`: the per-project image's staleness check now chains the parent image ID, so any base change triggers a one-time project rebuild. (Previously a project image built on a pre-daemon base ran the interactive tmux path inside a detached daemon container and crash-looped.)
+- **A failed `--start` tears down its own wreckage** (container + networks + lock) instead of leaving a crash-looping container running under `--restart unless-stopped`.
+- Numerous **portability and test-robustness** fixes surfaced by real macOS Docker runs: portable supervisor wait (BSD `sleep` has no `infinity`), `docker exec` daemon tmux probes run as the host uid (root can't see the gosu-dropped user's tmux socket), and the daemon + fleet-update **acceptance harnesses now run as `run-integration-tests.sh` §19/§20**, so a full integration run exercises the real container lifecycle.
+
+---
+
 ## sandy v1.1.0
 
 **Daemon mode** — a sandy session's lifetime is no longer tied to the terminal
