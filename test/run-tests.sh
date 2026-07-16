@@ -402,7 +402,14 @@ echo "3.11" > "$TEST_PROJECT/.python-version"
 # below will report it cleanly as a test failure, not an abort.
 sandy_run '
     PY_WANT="$(cat /workspace/.python-version | tr -d "[:space:]")"
-    uv python install "$PY_WANT" 2>/dev/null || true
+    # Bound the download: sandy_run does not mount the persistent uv cache, so
+    # this fetches Python fresh from astral.sh every run, and a slow/stalled
+    # CDN would otherwise hang the WHOLE suite here (no timeout, and the outer
+    # `|| true` only catches non-zero, not a wedge). `timeout` is GNU coreutils
+    # — this runs INSIDE the Debian container, so it is available (unlike on a
+    # BSD/macOS host). On timeout the install is simply incomplete and the
+    # `check` below reports a clean FAIL instead of the run freezing.
+    timeout 300 uv python install "$PY_WANT" 2>/dev/null || true
     uv python find "$PY_WANT" >/dev/null 2>&1 || true
     exit 0
 ' || true
