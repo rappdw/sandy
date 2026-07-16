@@ -297,9 +297,12 @@ All three:
 > **`image_stale`** (per `running_containers[]` entry, **FULL MODE ONLY**,
 > added additively in `1.2.0`, #41 — no `schema_version` bump; powers `sandy
 > --update-sessions`'s staleness check). Tri-state: `true` when the
-> container's running image id (`docker inspect -f '{{.Image}}' <cid>`)
-> differs from its image name's CURRENT id (`docker image inspect -f
-> '{{.Id}}' <image>`) — a rebuild has landed since this container launched.
+> container's running image id differs from the CURRENT id of the image
+> REFERENCE it was created with — a rebuild has landed since this container
+> launched. The reference is read from the container's own `.Config.Image`
+> (the name passed at `docker run`), NOT from `docker ps` (which reports a
+> raw sha once a tag has been reassigned, which would make a stale container
+> read as current).
 > `false` when they match. `null` when it can't be computed (the image name
 > no longer resolves, or either `docker inspect` failed). Absent entirely
 > from `--print-state light` entries — computing it costs one `docker

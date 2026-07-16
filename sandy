@@ -923,31 +923,50 @@ _sandy_emit_container_daemon_fields() {
 # `image_stale` assertion fail loudly (docker calls returning nothing /
 # "command not found"), not silently pass.
 #
-# Args: container id, image name (as docker ps/inspect reports it — a tag,
-# not necessarily a sha). Prints "true" (stale — running image id differs
-# from the image name's current id), "false" (current), or "null" (can't be
-# computed: image name no longer resolves, or either inspect failed) to
-# stdout. Caches the CURRENT id per unique image name in the global
-# _SANDY_IMAGE_ID_CACHE (newline "name|id" pairs) so a caller checking many
-# containers that share one image name (the common case — several daemon
-# sessions all running sandy-claude-code) pays one `docker image inspect`
-# per unique name, not per container (DEC-U6's stated cost model). A caller
-# that only checks a single container (the --update-sessions per-session
-# loop) gets the same function for free; the cache is a harmless no-op for
-# it. Never caches a failed (empty) lookup, so a genuinely-missing image
-# name is retried per call rather than permanently poisoning the cache.
+# Arg: container id. Prints "true" (stale — the running image id differs from
+# the current id of the image REFERENCE the container was created with),
+# "false" (current), or "null" (can't be computed: reference no longer
+# resolves, or an inspect failed) to stdout.
+#
+# The image reference is read from the container's own `.Config.Image` (the
+# name/tag passed to `docker run`, stored at create time), NOT from
+# `docker ps --format '{{.Image}}'`. This is load-bearing: once a rebuild
+# reassigns a tag (sandy-claude-code: ID_old -> ID_new), `docker ps` reports
+# a container still running ID_old by its raw SHA instead of the now-moved
+# tag — so `docker image inspect <that-sha>` returns the same sha and the
+# comparison becomes tautologically "current" for exactly the containers
+# that ARE stale. `.Config.Image` keeps naming "sandy-claude-code", which
+# resolves to the current tag, so a stale container is detected even after
+# something else already moved the tag (the per-session `--update-sessions
+# --workspace` path, and any UI polling `image_stale`, both hit this — a
+# single unscoped fleet run masks it only because it enumerates before it
+# builds). Found by test/acceptance-update-sessions.sh §3b (organic
+# staleness across two scoped runs).
+#
+# `.Image` (running sha) and `.Config.Image` (reference) come from ONE
+# `docker inspect`. Caches the CURRENT id per unique reference in the global
+# _SANDY_IMAGE_ID_CACHE (newline "ref|id" pairs) so a caller checking many
+# containers sharing one image (several daemon sessions on sandy-claude-code)
+# pays one `docker image inspect` per unique reference, not per container
+# (DEC-U6's cost model). Never caches a failed (empty) lookup.
 _sandy_image_stale() {
-    local _cid="$1" _img="$2" _running_id _current_id
-    _running_id="$(docker inspect -f '{{.Image}}' "$_cid" 2>/dev/null)" || _running_id=""
-    _current_id="$(printf '%s\n' "${_SANDY_IMAGE_ID_CACHE:-}" | awk -F'|' -v n="$_img" '$1==n{print $2; exit}')"
+    local _cid="$1" _pair _running_id _img_ref _current_id
+    _pair="$(docker inspect -f '{{.Image}}|{{.Config.Image}}' "$_cid" 2>/dev/null)" || _pair=""
+    _running_id="${_pair%%|*}"
+    _img_ref="${_pair#*|}"
+    if [ -z "$_pair" ] || [ -z "$_running_id" ] || [ -z "$_img_ref" ]; then
+        printf 'null'
+        return 0
+    fi
+    _current_id="$(printf '%s\n' "${_SANDY_IMAGE_ID_CACHE:-}" | awk -F'|' -v n="$_img_ref" '$1==n{print $2; exit}')"
     if [ -z "$_current_id" ]; then
-        _current_id="$(docker image inspect -f '{{.Id}}' "$_img" 2>/dev/null)" || _current_id=""
+        _current_id="$(docker image inspect -f '{{.Id}}' "$_img_ref" 2>/dev/null)" || _current_id=""
         if [ -n "$_current_id" ]; then
             _SANDY_IMAGE_ID_CACHE="${_SANDY_IMAGE_ID_CACHE:-}
-$_img|$_current_id"
+$_img_ref|$_current_id"
         fi
     fi
-    if [ -z "$_running_id" ] || [ -z "$_current_id" ]; then
+    if [ -z "$_current_id" ]; then
         printf 'null'
         return 0
     fi
@@ -1274,7 +1293,7 @@ _sandy_emit_state() {
                 printf ','; _json_kv image      "$(_json_escape "$_cimg")"
                 printf ','; _json_kv started_at "$(_json_escape "$_cstarted")"
                 _sandy_emit_container_daemon_fields "$_cid" "$_cname" "$_cdaemon" "$_csession"
-                printf ','; printf '"image_stale":%s' "$(_sandy_image_stale "$_cid" "$_cimg")"
+                printf ','; printf '"image_stale":%s' "$(_sandy_image_stale "$_cid")"
                 printf '}'
             done < <(printf '%s\n' "$_ps_out" | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)
             printf ']'
@@ -3872,7 +3891,7 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
             _upd_reason[$_upd_i]="build failed"
             continue
         fi
-        _upd_stale[$_upd_i]="$(_sandy_image_stale "${_upd_cids[$_upd_i]}" "${_upd_images[$_upd_i]}")"
+        _upd_stale[$_upd_i]="$(_sandy_image_stale "${_upd_cids[$_upd_i]}")"
         case "${_upd_stale[$_upd_i]}" in
             true) : ;;
             null)

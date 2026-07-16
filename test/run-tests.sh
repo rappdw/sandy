@@ -5070,10 +5070,15 @@ case "$1" in
             shift
         done
         case "$fmt" in
-            '{{.Image}}')
+            # _sandy_image_stale reads BOTH the running sha AND the create-time
+            # image REFERENCE (.Config.Image) in one inspect — the ref is what
+            # makes staleness robust to a moved tag (docker ps would report a
+            # sha for the stale one). Both fixtures reference sandy-claude-code;
+            # only the running sha differs (stale vs current).
+            '{{.Image}}|{{.Config.Image}}')
                 case "$tgt" in
-                    stalecid) echo "sha256:old" ;;
-                    currcid)  echo "sha256:cur-sandy-claude-code" ;;
+                    stalecid) echo "sha256:old|sandy-claude-code" ;;
+                    currcid)  echo "sha256:cur-sandy-claude-code|sandy-claude-code" ;;
                 esac
                 ;;
         esac
@@ -5091,10 +5096,9 @@ case "$1" in
                     esac
                     shift
                 done
-                # Current id is deterministically "cur-<name>" — matches
-                # currcid's running id (sandy-claude-code) and deliberately
-                # does NOT match stalecid's (sandy-full's current would be
-                # "cur-sandy-full", but stalecid's running id is "old").
+                # Current id is deterministically "cur-<name>" → for
+                # sandy-claude-code that's "cur-sandy-claude-code", matching
+                # currcid's running id (current) and NOT stalecid's ("old").
                 [ -n "$fmt" ] && echo "sha256:cur-$name"
                 exit 0
                 ;;
@@ -5188,10 +5192,13 @@ case "$1" in
             shift
         done
         case "$fmt" in
-            '{{.Image}}')
+            # Running sha + create-time reference in one inspect (see 71.3).
+            # Both sessions reference sandy-claude-code; A runs the old sha
+            # (stale), B runs the current one.
+            '{{.Image}}|{{.Config.Image}}')
                 case "$tgt" in
-                    containerA111) echo "sha256:old" ;;
-                    containerB222) echo "sha256:current-sandy-claude-code" ;;
+                    containerA111) echo "sha256:old|sandy-claude-code" ;;
+                    containerB222) echo "sha256:current-sandy-claude-code|sandy-claude-code" ;;
                 esac
                 ;;
         esac
