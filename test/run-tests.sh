@@ -5147,6 +5147,13 @@ _U71_BIN="$(mktemp -d)"
 _U71_HOME="$(mktemp -d)"
 _U71_WSA="$(mktemp -d)"
 _U71_WSB="$(mktemp -d)"
+# Canonicalize (pwd -P) — the scope test below compares these against
+# WORK_DIR, which sandy always canonicalizes; on macOS mktemp returns
+# /var/... while pwd -P yields /private/var/..., and an uncanonicalized
+# fixture path would make the --workspace scope filter (and nothing else)
+# silently miss. Same lesson as the acceptance harnesses.
+_U71_WSA="$(cd "$_U71_WSA" && pwd -P)"
+_U71_WSB="$(cd "$_U71_WSB" && pwd -P)"
 _U71_CALLLOG="$(mktemp)"
 : > "$_U71_CALLLOG"
 export _U71_WSA _U71_WSB _U71_CALLLOG
@@ -5263,6 +5270,24 @@ check "non-TTY without --yes: exit 1 (cron must opt in explicitly)" \
     test "$_U71_YES_RC" -eq 1
 check "non-TTY without --yes: prints the 'pass --yes' guidance (mutation: drop the [ -t 0 ] non-interactive gate -> hangs on stdin, or wrong exit/message)" \
     bash -c 'grep -q "pass --yes" "$1"' -- "$_U71_YES_OUT"
+
+# 71.6 — --workspace scope: limits the fleet operation to ONE workspace's
+# session. Found the hard way: the acceptance harness ran --update-sessions
+# unscoped on a real host and enumerated the operator's 7 production daemon
+# sessions alongside its 2 scratch ones — a --rebuild --yes step would have
+# force-rebuilt and rolling-restarted all of them. Scoped dry-run against the
+# same two-session fixture must list ONLY workspace A's session, say
+# "(scoped to", and never mention B. (Mutation: drop the scope filter in the
+# enum loop -> B appears in the plan and the count says 2.)
+_U71_SCOPE_OUT="$(mktemp)"
+PATH="$_U71_BIN:$PATH" SANDY_HOME="$_U71_HOME" SANDY_EGRESS_NO_ISOLATION=1 SANDY_AUTO_APPROVE_PRIVILEGED=1 \
+    bash "$_SBX_SCRIPT" --update-sessions --dry-run --workspace "$_U71_WSA" >"$_U71_SCOPE_OUT" 2>&1
+_U71_SCOPE_RC=$?
+check "--workspace scope: exit 0, scoped to exactly one session" \
+    bash -c '[ "$1" -eq 0 ] && grep -q "Found 1 daemon session(s) (scoped to" "$2"' -- "$_U71_SCOPE_RC" "$_U71_SCOPE_OUT"
+check "--workspace scope: plan lists ONLY the scoped session (A present, B absent)" \
+    bash -c 'grep -q "wsA-session" "$1" && ! grep -q "wsB-session" "$1"' -- "$_U71_SCOPE_OUT"
+rm -f "$_U71_SCOPE_OUT"
 
 rm -rf "$_U71_BIN" "$_U71_HOME" "$_U71_WSA" "$_U71_WSB"
 rm -f "$_U71_CALLLOG" "$_U71_PRIME_LOG" "$_U71_DRY_OUT" "$_U71_YES_OUT"

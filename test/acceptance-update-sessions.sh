@@ -49,11 +49,23 @@ ck "session 2 container is running" "[ -n \"$C2\" ]"
 ck "session 1 inner tmux session exists" "docker exec -u \"$(id -u)\" \"$C1\" tmux has-session -t sandy"
 ck "session 2 inner tmux session exists" "docker exec -u \"$(id -u)\" \"$C2\" tmux has-session -t sandy"
 
-echo "== 2. sandy --update-sessions --dry-run — both current, no restarts =="
+# ⚠️ EVERY --update-sessions call below is SCOPED with --workspace. Unscoped,
+# the command operates on EVERY daemon session on the host (that's its job) —
+# an early version of this harness ran it unscoped and would have force-
+# rebuilt and rolling-restarted the operator's real production sessions in
+# step 3. Output is tee'd, not swallowed: per-workspace image refresh can
+# legitimately take minutes (e.g. a project-image migration rebuild), and
+# silence reads as a hang.
+echo "== 2. scoped --update-sessions --dry-run per workspace — both current, no restarts =="
 DRY_OUT="$(mktemp)"
-"$SANDY" --update-sessions --dry-run >"$DRY_OUT" 2>&1; DRY_RC=$?
-ck "--dry-run exits 0" "[ $DRY_RC -eq 0 ]"
-ck "--dry-run reports no restart candidates (both sessions just built, current)" \
+"$SANDY" --update-sessions --dry-run --workspace "$WS1" 2>&1 | tee "$DRY_OUT"; DRY_RC=${PIPESTATUS[0]}
+ck "ws1 --dry-run exits 0" "[ $DRY_RC -eq 0 ]"
+ck "ws1 --dry-run scoped to exactly ONE session" "grep -q 'Found 1 daemon session(s) (scoped to' '$DRY_OUT'"
+ck "ws1 --dry-run reports no restart candidates (just built, current)" \
+    "grep -q 'no sessions restarted (0 restart candidate' '$DRY_OUT'"
+"$SANDY" --update-sessions --dry-run --workspace "$WS2" 2>&1 | tee "$DRY_OUT"; DRY_RC=${PIPESTATUS[0]}
+ck "ws2 --dry-run exits 0" "[ $DRY_RC -eq 0 ]"
+ck "ws2 --dry-run reports no restart candidates" \
     "grep -q 'no sessions restarted (0 restart candidate' '$DRY_OUT'"
 C1_AFTER_DRY="$(cid_for "$WS1")"
 C2_AFTER_DRY="$(cid_for "$WS2")"
@@ -61,18 +73,28 @@ ck "session 1 container UNCHANGED by dry-run" "[ \"$C1\" = \"$C1_AFTER_DRY\" ]"
 ck "session 2 container UNCHANGED by dry-run" "[ \"$C2\" = \"$C2_AFTER_DRY\" ]"
 rm -f "$DRY_OUT"
 
-echo "== 3. sandy --update-sessions --rebuild --yes — forces both stale, both restart =="
+echo "== 3. ws1: --rebuild --yes (forced staleness) → restart =="
 UPD_OUT="$(mktemp)"
 T0=$(date +%s)
-"$SANDY" --update-sessions --rebuild --yes >"$UPD_OUT" 2>&1; UPD_RC=$?
+"$SANDY" --update-sessions --rebuild --yes --workspace "$WS1" 2>&1 | tee "$UPD_OUT"; UPD_RC=${PIPESTATUS[0]}
 T1=$(date +%s)
-ck "--rebuild --yes exits 0" "[ $UPD_RC -eq 0 ]"
-ck "plan showed both sessions as restart candidates (--rebuild forces staleness)" \
-    "[ \$(grep -c 'restart (stale)' '$UPD_OUT') -eq 2 ]"
-ck "summary reports 2 restarted, 0 failed" \
-    "grep -q '^Restarted: 2$' '$UPD_OUT' && grep -q '^Failed: 0$' '$UPD_OUT'"
-echo "  (rolling restart of 2 sessions took $((T1 - T0))s total — see per-session lines below)"
-grep -E 'restarted in [0-9]+s\.$' "$UPD_OUT" | sed 's/^/  /'
+ck "ws1 --rebuild --yes exits 0" "[ $UPD_RC -eq 0 ]"
+ck "ws1 plan showed it as a restart candidate (--rebuild forces staleness)" \
+    "grep -q 'restart (stale)' '$UPD_OUT'"
+ck "ws1 summary reports 1 restarted, 0 failed" \
+    "grep -q '^Restarted: 1$' '$UPD_OUT' && grep -q '^Failed: 0$' '$UPD_OUT'"
+echo "  (ws1 rebuild+restart took $((T1 - T0))s total)"
+
+echo "== 3b. ws2: --yes with NO --rebuild — ORGANIC staleness (image moved under it in step 3) =="
+T0=$(date +%s)
+"$SANDY" --update-sessions --yes --workspace "$WS2" 2>&1 | tee "$UPD_OUT"; UPD_RC=${PIPESTATUS[0]}
+T1=$(date +%s)
+ck "ws2 --yes exits 0" "[ $UPD_RC -eq 0 ]"
+ck "ws2 detected ORGANIC staleness (container predates ws1's rebuild of the shared image)" \
+    "grep -q 'restart (stale)' '$UPD_OUT'"
+ck "ws2 summary reports 1 restarted, 0 failed" \
+    "grep -q '^Restarted: 1$' '$UPD_OUT' && grep -q '^Failed: 0$' '$UPD_OUT'"
+echo "  (ws2 restart took $((T1 - T0))s total)"
 
 C1_NEW="$(cid_for "$WS1")"
 C2_NEW="$(cid_for "$WS2")"
@@ -83,7 +105,7 @@ ck "session 1 inner tmux session is up post-restart (exec -u)" \
 ck "session 2 inner tmux session is up post-restart (exec -u)" \
     "docker exec -u \"$(id -u)\" \"$C2_NEW\" tmux has-session -t sandy"
 
-echo "== 3b. DEC-U3 — sandy.updated_at label present on both restarted containers =="
+echo "== 3c. DEC-U3 — sandy.updated_at label present on both restarted containers =="
 L1="$(docker inspect -f '{{ index .Config.Labels "sandy.updated_at" }}' "$C1_NEW" 2>/dev/null)"
 L2="$(docker inspect -f '{{ index .Config.Labels "sandy.updated_at" }}' "$C2_NEW" 2>/dev/null)"
 ck "session 1 carries a non-empty sandy.updated_at label ($L1)" "[ -n \"$L1\" ]"

@@ -798,7 +798,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--prune-orphans"'; printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Reap orphaned sandy_* networks (dead-owner, no attached container) and exit."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--update-sessions"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Fleet image refresh + rolling restart across every daemon session on the host. Sub-options: --dry-run, --yes, --idle-for <minutes>, --rebuild."'; printf '}'
+    printf '{'; _json_kv name '"--update-sessions"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Fleet image refresh + rolling restart across every daemon session on the host; scope to one session with --workspace PATH. Sub-options: --dry-run, --yes, --idle-for <minutes>, --rebuild, --workspace."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -3805,16 +3805,31 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         exit 0
     fi
 
+    # Optional scope: `--update-sessions --workspace PATH` limits the fleet
+    # operation to that one workspace's session. Two consumers need this:
+    # sandy-ui's per-session "Update & restart" action, and the acceptance
+    # harness — which found the hard way that an UNscoped run on a real host
+    # enumerates every production daemon session too (a --rebuild --yes
+    # acceptance run would have force-rebuilt and bounced 7 live sessions).
+    # WORK_DIR is already the canonical (pwd -P) form of --workspace here, so
+    # this compares canonically against the sandy.workspace_path label.
     _upd_cids=() _upd_sessions=() _upd_wspaths=() _upd_images=()
     while IFS='|' read -r _upd_c _upd_s _upd_w _upd_i; do
         [ -z "$_upd_c" ] && continue
+        if [ -n "$SANDY_WORKSPACE_ARG" ] && [ "$_upd_w" != "$WORK_DIR" ]; then
+            continue
+        fi
         _upd_cids+=("$_upd_c")
         _upd_sessions+=("$_upd_s")
         _upd_wspaths+=("$_upd_w")
         _upd_images+=("$_upd_i")
     done <<< "$_sandy_upd_raw"
     _upd_n="${#_upd_cids[@]}"
-    info "Found $_upd_n daemon session(s)."
+    if [ "$_upd_n" -eq 0 ]; then
+        info "No daemon session for $WORK_DIR."
+        exit 0
+    fi
+    info "Found $_upd_n daemon session(s)$( [ -n "$SANDY_WORKSPACE_ARG" ] && printf ' (scoped to %s)' "$WORK_DIR" )."
 
     # Step 2 (DEC-U1) — per-workspace child build. Each session's own
     # `"$0" --build-only` resolves that workspace's image stack (agent

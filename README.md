@@ -143,6 +143,7 @@ sandy --update-sessions --dry-run           # show the plan, refresh images, res
 sandy --update-sessions --yes               # restart every stale session, no confirmation prompt
 sandy --update-sessions --idle-for 30 --yes # only restart sessions idle 30+ minutes (cron-friendly)
 sandy --update-sessions --rebuild --yes     # force a rebuild before checking staleness
+sandy --update-sessions --yes --workspace ~/dev/myproj   # scope to ONE session (per-session update)
 ```
 
 For each session it runs that workspace's own `sandy --build-only` (so image selection, skills, and any per-project Dockerfile are resolved the same way a normal launch would resolve them), compares the running container's image ID against the freshly-built one, and — for anything stale — does `sandy --stop` followed by `sandy --start` for you. `--dry-run` still refreshes images (so the printed plan reflects reality) but never stops or starts anything. Without `--idle-for`, every stale session is a restart candidate; a TTY without `--yes` gets a y/N confirmation, and a non-interactive run without `--yes` refuses with exit `1` — pass `--yes` explicitly for cron/launchd. Exit `0` means everything is clean (including "nothing to do"); exit `1` means something failed or the non-interactive prompt was refused.
@@ -237,7 +238,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--attach` | Attach an interactive client to a running daemon session |
 | `--stop` | Stop a running daemon session (full teardown) |
 | `--prune-orphans` | Reap orphaned `sandy_*` Docker networks and exit |
-| `--update-sessions` | Fleet image refresh + rolling restart across every daemon session on the host. See "Fleet updates" above. Sub-options: `--dry-run`, `--yes`, `--idle-for <minutes>`, `--rebuild` |
+| `--update-sessions` | Fleet image refresh + rolling restart across every daemon session on the host (scope to one with `--workspace PATH`). See "Fleet updates" above. Sub-options: `--dry-run`, `--yes`, `--idle-for <minutes>`, `--rebuild`, `--workspace` |
 
 All other arguments are forwarded to `claude`.
 
