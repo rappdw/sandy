@@ -867,7 +867,7 @@ _sandy_emit_schema() {
 # name, "sandy.daemon" label value, "sandy.session" label value. Callable
 # from both --print-state modes so they stay in sync.
 _sandy_emit_container_daemon_fields() {
-    local _cid="$1" _cname="$2" _cdaemon="$3" _csession="$4"
+    local _cid="$1" _cname="$2" _cdaemon="$3" _csession="$4" _cupdated="${5:-}"
     local _sandbox _isdaemon _ac
 
     # sandbox: the sandy.session label when present (daemon containers),
@@ -905,6 +905,17 @@ _sandy_emit_container_daemon_fields() {
     printf ','; _json_kv sandbox "$(_json_escape "$_sandbox")"
     printf ','; printf '"daemon":%s' "$_isdaemon"
     printf ','; printf '"attached_clients":%s' "$_ac"
+    # updated_at (#44): the sandy.updated_at label, stamped by --update-sessions
+    # on a container it restarted (DEC-U3). Present only on update-restarted
+    # containers; a normally-started daemon session has no such label → null.
+    # Rides the existing `docker ps` label read — no extra docker spawn. Lets a
+    # consumer (sandy-ui reconnect) tell "restarted for updates" from a session
+    # the user stopped/started themselves.
+    if [ -n "$_cupdated" ]; then
+        printf ','; _json_kv updated_at "$(_json_escape "$_cupdated")"
+    else
+        printf ',"updated_at":null'
+    fi
 }
 
 # #41 (milestone 1.2.0) — tri-state image-staleness check, shared by
@@ -1220,19 +1231,20 @@ _sandy_emit_state() {
     if [ "$_mode" = "light" ]; then
         local _ps_out=""
         if command -v docker >/dev/null 2>&1 \
-           && _ps_out="$(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}|{{.Label "sandy.daemon"}}|{{.Label "sandy.session"}}' 2>/dev/null)"; then
+           && _ps_out="$(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}|{{.Label "sandy.daemon"}}|{{.Label "sandy.session"}}|{{.Label "sandy.updated_at"}}' 2>/dev/null)"; then
             printf ',"docker_reachable":true'
             printf ',"running_containers":['
             first=1
             while IFS= read -r _cline; do
                 [ -z "$_cline" ] && continue
-                local _cid _cname _cimg _cstarted _cdaemon _csession
+                local _cid _cname _cimg _cstarted _cdaemon _csession _cupdated
                 _cid="$(echo "$_cline"      | awk -F'|' '{print $1}')"
                 _cname="$(echo "$_cline"    | awk -F'|' '{print $2}')"
                 _cimg="$(echo "$_cline"     | awk -F'|' '{print $3}')"
                 _cstarted="$(echo "$_cline" | awk -F'|' '{print $4}')"
                 _cdaemon="$(echo "$_cline"  | awk -F'|' '{print $5}')"
                 _csession="$(echo "$_cline" | awk -F'|' '{print $6}')"
+                _cupdated="$(echo "$_cline"  | awk -F'|' '{print $7}')"
                 [ $first -eq 0 ] && printf ','
                 first=0
                 printf '{'
@@ -1240,7 +1252,7 @@ _sandy_emit_state() {
                 printf ','; _json_kv name       "$(_json_escape "$_cname")"
                 printf ','; _json_kv image      "$(_json_escape "$_cimg")"
                 printf ','; _json_kv started_at "$(_json_escape "$_cstarted")"
-                _sandy_emit_container_daemon_fields "$_cid" "$_cname" "$_cdaemon" "$_csession"
+                _sandy_emit_container_daemon_fields "$_cid" "$_cname" "$_cdaemon" "$_csession" "$_cupdated"
                 printf '}'
             done < <(printf '%s\n' "$_ps_out" | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)
             printf ']'
@@ -1269,7 +1281,7 @@ _sandy_emit_state() {
         # spawn budget, which is why light mode never touches this.
         _SANDY_IMAGE_ID_CACHE=""
         if command -v docker >/dev/null 2>&1 \
-           && _ps_out="$(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}|{{.Label "sandy.daemon"}}|{{.Label "sandy.session"}}' 2>/dev/null)"; then
+           && _ps_out="$(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}|{{.Label "sandy.daemon"}}|{{.Label "sandy.session"}}|{{.Label "sandy.updated_at"}}' 2>/dev/null)"; then
             printf ',"docker_reachable":true'
             printf ',"running_containers":['
             first=1
@@ -1278,13 +1290,14 @@ _sandy_emit_state() {
             while IFS= read -r _cline; do
                 [ -z "$_cline" ] && continue
                 # line format: id|name|image|started|daemon-label|session-label
-                local _cid _cname _cimg _cstarted _cdaemon _csession
+                local _cid _cname _cimg _cstarted _cdaemon _csession _cupdated
                 _cid="$(echo "$_cline"     | awk -F'|' '{print $1}')"
                 _cname="$(echo "$_cline"   | awk -F'|' '{print $2}')"
                 _cimg="$(echo "$_cline"    | awk -F'|' '{print $3}')"
                 _cstarted="$(echo "$_cline" | awk -F'|' '{print $4}')"
                 _cdaemon="$(echo "$_cline"  | awk -F'|' '{print $5}')"
                 _csession="$(echo "$_cline" | awk -F'|' '{print $6}')"
+                _cupdated="$(echo "$_cline"  | awk -F'|' '{print $7}')"
                 [ $first -eq 0 ] && printf ','
                 first=0
                 printf '{'
@@ -1292,7 +1305,7 @@ _sandy_emit_state() {
                 printf ','; _json_kv name       "$(_json_escape "$_cname")"
                 printf ','; _json_kv image      "$(_json_escape "$_cimg")"
                 printf ','; _json_kv started_at "$(_json_escape "$_cstarted")"
-                _sandy_emit_container_daemon_fields "$_cid" "$_cname" "$_cdaemon" "$_csession"
+                _sandy_emit_container_daemon_fields "$_cid" "$_cname" "$_cdaemon" "$_csession" "$_cupdated"
                 printf ','; printf '"image_stale":%s' "$(_sandy_image_stale "$_cid")"
                 printf '}'
             done < <(printf '%s\n' "$_ps_out" | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)

@@ -4766,19 +4766,22 @@ echo "§68: --print-state running_containers[] daemon fields (#17) — sandbox/d
 # daemon container (probe answers "2"), a BROKEN daemon container whose
 # `docker exec ... tmux display` FAILS (mid-startup / session gone — the exact
 # shape a hung --start leaves behind), and a bare container (no labels).
-# Verifies the additive fields land correctly (join key, bool, int|null) in
-# BOTH --print-state modes, that the pre-existing id/name/image/started_at
-# fields are untouched, and — the host-found regression — that ONE broken
-# daemon container yields attached_clients:null WITHOUT killing the whole
-# emission via the set -eE introspection ERR trap.
+# Verifies the additive fields land correctly (join key, bool, int|null,
+# updated_at string|null #44) in BOTH --print-state modes, that the pre-existing
+# id/name/image/started_at fields are untouched, and — the host-found
+# regression — that ONE broken daemon container yields attached_clients:null
+# WITHOUT killing the whole emission via the set -eE introspection ERR trap.
 _DF_BIN="$(mktemp -d)"
 cat > "$_DF_BIN/docker" <<'DOCKERSHIM'
 #!/usr/bin/env bash
 case "$1" in
     ps)
-        printf 'daemon123|sandy-bar-def456|sandy-full|2026-07-14T10:00:00Z|true|bar-def456\n'
-        printf 'broken789|sandy-baz-fee789|sandy-full|2026-07-14T11:00:00Z|true|baz-fee789\n'
-        printf 'bare456|sandy-foo-abc123|sandy-claude-code|2026-07-14T09:00:00Z||\n'
+        # id|name|image|created|daemon|session|updated_at — the healthy daemon
+        # carries a sandy.updated_at label (update-restarted, #44); the broken
+        # and bare ones do not (→ updated_at null).
+        printf 'daemon123|sandy-bar-def456|sandy-full|2026-07-14T10:00:00Z|true|bar-def456|2026-07-14T12:00:00Z\n'
+        printf 'broken789|sandy-baz-fee789|sandy-full|2026-07-14T11:00:00Z|true|baz-fee789|\n'
+        printf 'bare456|sandy-foo-abc123|sandy-claude-code|2026-07-14T09:00:00Z|||\n'
         exit 0
         ;;
     exec)
@@ -4817,6 +4820,12 @@ assert isinstance(daemon['attached_clients'], int), daemon
 assert broken['daemon'] is True, broken
 assert broken['attached_clients'] is None, broken
 assert bare['attached_clients'] is None, bare
+# updated_at (#44): the label-bearing daemon carries the ISO timestamp; the
+# others are null (mutation: drop the sandy.updated_at label from the ps format
+# or the emit -> daemon['updated_at'] becomes null and this flips to FAIL).
+assert daemon['updated_at'] == '2026-07-14T12:00:00Z', daemon
+assert broken['updated_at'] is None, broken
+assert bare['updated_at'] is None, bare
 " "$_json"
 }
 check "full mode: daemon fields correct; a failing attach-probe yields null, not a dead emission" \
