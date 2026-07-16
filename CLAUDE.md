@@ -241,7 +241,7 @@ Decouples a session's lifetime from the launching client, so a session survives 
 
 **Introspection:** `--print-schema` `cli_flags` includes `--start`/`--attach`/`--stop` (a consumer feature-detects daemon support on their presence). Each `--print-state` `running_containers[]` entry carries `sandbox` (the `sandboxes[].name` join key), `daemon` (bool), and `attached_clients` (int|null tmux client count). All additive — `schema_version` stays `1`.
 
-**Verification reality:** daemon-mode is a Docker-runtime feature; the automated suite covers static/structural/introspection contract only. The end-to-end container lifecycle (survival across abrupt client kill, helper reparenting, `--stop` teardown) is a host gate — `test/acceptance-daemon.sh` runs the full scenario and must pass on a real Docker host before release.
+**Verification reality:** daemon-mode is a Docker-runtime feature; `run-tests.sh` covers static/structural/introspection contract only. The end-to-end container lifecycle (survival across abrupt client kill, helper reparenting, `--stop` teardown) lives in `test/acceptance-daemon.sh`, which is both independently runnable (the release gate) **and invoked as `run-integration-tests.sh` §19**, so a full integration run on a real Docker host always exercises it.
 
 ## Fleet updates (`sandy --update-sessions`, milestone 1.2.0, #41)
 
@@ -261,7 +261,7 @@ Daemon mode makes launches rare — a session can sit up for days, running an ev
 
 **Introspection:** `--print-schema` `cli_flags` includes `--update-sessions`. `--print-state` **full mode only** carries `image_stale` (true/false/null tri-state) per `running_containers[]` entry — **DEC-U6**: costs one `docker inspect <cid>` per container plus one `docker image inspect` per unique image name, over the `#25` light-mode two-spawn budget, so light mode omits the key entirely. All additive — `schema_version` stays `1`.
 
-**Verification reality:** like daemon mode, this is a Docker-runtime feature — `run-tests.sh §71` covers structure/contract behind a stubbed docker (including a real child `--build-only` run against the stub, primed once so it takes the "up to date" fast path). The real rolling restart (new container IDs, `sandy.updated_at` landing, both sessions attachable post-restart) is a host gate — `test/acceptance-update-sessions.sh`.
+**Verification reality:** like daemon mode, this is a Docker-runtime feature — `run-tests.sh §71` covers structure/contract behind a stubbed docker (including a real child `--build-only` run against the stub, primed once so it takes the "up to date" fast path). The real rolling restart (new container IDs, `sandy.updated_at` landing, both sessions attachable post-restart) lives in `test/acceptance-update-sessions.sh`, independently runnable and **invoked as `run-integration-tests.sh` §20**. Every `--update-sessions` call in that harness is `--workspace`-scoped, so it only touches its own scratch sessions — but its `--rebuild` step rebuilds the shared agent image, which correctly marks any other daemon sessions on the host as stale afterward.
 
 ## Architecture
 

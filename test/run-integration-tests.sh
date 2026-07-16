@@ -1542,6 +1542,64 @@ fi
 rm -f "$_sc_log"
 
 # ============================================================
+info "19. Daemon-mode lifecycle acceptance (#17) — test/acceptance-daemon.sh"
+# ============================================================
+# The daemon lifecycle (start → attach in a real PTY → abrupt kill -9 of the
+# client → container/supervisor/agent-process survive → reattach with state
+# intact → --stop full teardown) is a real-Docker end-to-end scenario. It lives
+# in a standalone harness so it stays independently runnable as the release
+# gate; invoked here so a full integration run always covers it. The harness
+# self-cleans (its own EXIT trap + scratch workspaces), so it needs nothing
+# from this suite's cleanup. SANDY is pinned to this suite's sandy; the harness
+# inherits this suite's credential/auto-approve env for its --start.
+_acc_daemon="$(dirname "$0")/acceptance-daemon.sh"
+if [ -f "$_acc_daemon" ]; then
+    _acc_out="$(mktemp)"
+    set +e   # a failing harness exits non-zero; don't let set -e abort the suite
+    SANDY="$SANDY_SCRIPT" bash "$_acc_daemon" 2>&1 | tee "$_acc_out"
+    _acc_rc=${PIPESTATUS[0]}
+    set -e
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1)"
+    if [ "$_acc_rc" -eq 0 ]; then
+        pass "daemon-mode acceptance (${_acc_res:-all assertions passed})"
+    else
+        fail "daemon-mode acceptance (${_acc_res:-exited $_acc_rc}) — see harness output above"
+    fi
+    rm -f "$_acc_out"
+else
+    skip "daemon-mode acceptance (acceptance-daemon.sh not found)"
+fi
+
+# ============================================================
+info "20. Fleet-update acceptance (#41) — test/acceptance-update-sessions.sh"
+# ============================================================
+# Two real daemon sessions → --update-sessions --dry-run (no-op) → forced
+# (--rebuild) and organic staleness → scoped rolling restart with new container
+# ids + sandy.updated_at labels → image_stale:false after → --stop. Every
+# --update-sessions call in the harness is --workspace-scoped, so it only ever
+# touches its own scratch sessions — but note the harness's --rebuild step
+# rebuilds the SHARED agent image, which will (correctly) mark any OTHER daemon
+# sessions on this host as stale afterward; that is inherent to what it tests,
+# not a side effect of running it here. Same invocation contract as §19.
+_acc_upd="$(dirname "$0")/acceptance-update-sessions.sh"
+if [ -f "$_acc_upd" ]; then
+    _acc_out="$(mktemp)"
+    set +e
+    SANDY="$SANDY_SCRIPT" bash "$_acc_upd" 2>&1 | tee "$_acc_out"
+    _acc_rc=${PIPESTATUS[0]}
+    set -e
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1)"
+    if [ "$_acc_rc" -eq 0 ]; then
+        pass "fleet-update acceptance (${_acc_res:-all assertions passed})"
+    else
+        fail "fleet-update acceptance (${_acc_res:-exited $_acc_rc}) — see harness output above"
+    fi
+    rm -f "$_acc_out"
+else
+    skip "fleet-update acceptance (acceptance-update-sessions.sh not found)"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true
