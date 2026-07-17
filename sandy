@@ -2773,6 +2773,11 @@ fi
 # stored in .gitconfig, not the value). Always emits creds (git ignores helper
 # output on store/erase), sidestepping the inline-helper $1-operation gotcha.
 if [ "${SANDY_SSH:-token}" = "token" ] && [ -n "${GIT_TOKEN:-}" ]; then
+    # ${GIT_TOKEN} is INTENTIONALLY left literal in the helper string — it is
+    # stored verbatim in .gitconfig and expanded by the helper's own shell at
+    # git-call time (so the token value never lands in the config file). That
+    # is exactly the pattern SC2016 warns about, so silence it here.
+    # shellcheck disable=SC2016
     git config --global --add credential."https://github.com".helper \
         '!f() { echo username=x-access-token; echo "password=${GIT_TOKEN}"; }; f'
 fi
