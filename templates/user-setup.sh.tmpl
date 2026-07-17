@@ -228,30 +228,32 @@ allowed-tools: Bash, Read
 argument-hint: "[N] [action]"
 ---
 
-!`set -- $ARGUMENTS; if [ $# -ge 1 ] && expr "$1" : '^[0-9][0-9]*$' >/dev/null; then sandy-ss-paths "$1"; else sandy-ss-paths 1; fi`
+!`sandy-ss-paths 5 2>&1 || true`
 
 User action: $ARGUMENTS
 
-Read each image listed above (use the Read tool on each path). The first arg
-to /ss may be a count of screenshots to grab — strip it from the user action
-if so. Then respond to whatever the user asked: "huh"/"explain" → describe
-what you see; "fix" → diagnose the error/bug shown and edit the relevant
-code; "do this" → identify the technique and apply it to our work; "make
-infographic" → synthesize the screenshots into one. Use the screenshots as
-the user's visual input to you.
+The list above shows up to the 5 newest screenshots (newest first). If the
+user's action begins with a number N, that's how many they want — read only
+the first N paths (default 1 when there's no leading number). Use the Read
+tool on each chosen path. Then respond to whatever the user asked:
+"huh"/"explain" → describe what you see; "fix" → diagnose the error/bug shown
+and edit the relevant code; "do this" → identify the technique and apply it
+to our work; "make infographic" → synthesize the screenshots into one. Use
+the screenshots as the user's visual input to you.
 SSMD
     fi
     if _sandy_has_gemini; then
         _sandy_write_file "$HOME/.gemini/commands/ss.toml" <<'SSTOML'
 description = "Look at recent screenshot(s) from the host"
-prompt = """Recent screenshot(s) (newest first):
-!{ if echo "{{args}}" | awk '{exit !($1 ~ /^[0-9]+$/)}'; then sandy-ss-paths $(echo "{{args}}" | awk '{print $1}'); else sandy-ss-paths 1; fi }
+prompt = """Recent screenshot(s), up to the 5 newest (newest first):
+!{ sandy-ss-paths 5 2>&1 || true }
 
 User action: {{args}}
 
-Read each image path listed above. The first arg may be a count — strip it
-from the user action if so. Respond to what the user asked: explain, fix
-the visible error, do/remix the technique shown, make an infographic, etc.
+If the user's action begins with a number N, read only the first N paths
+above (default 1 when there's no leading number). Read each chosen image
+path. Respond to what the user asked: explain, fix the visible error,
+do/remix the technique shown, make an infographic, etc.
 """
 SSTOML
     fi

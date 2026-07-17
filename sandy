@@ -2458,30 +2458,32 @@ allowed-tools: Bash, Read
 argument-hint: "[N] [action]"
 ---
 
-!`set -- $ARGUMENTS; if [ $# -ge 1 ] && expr "$1" : '^[0-9][0-9]*$' >/dev/null; then sandy-ss-paths "$1"; else sandy-ss-paths 1; fi`
+!`sandy-ss-paths 5 2>&1 || true`
 
 User action: $ARGUMENTS
 
-Read each image listed above (use the Read tool on each path). The first arg
-to /ss may be a count of screenshots to grab — strip it from the user action
-if so. Then respond to whatever the user asked: "huh"/"explain" → describe
-what you see; "fix" → diagnose the error/bug shown and edit the relevant
-code; "do this" → identify the technique and apply it to our work; "make
-infographic" → synthesize the screenshots into one. Use the screenshots as
-the user's visual input to you.
+The list above shows up to the 5 newest screenshots (newest first). If the
+user's action begins with a number N, that's how many they want — read only
+the first N paths (default 1 when there's no leading number). Use the Read
+tool on each chosen path. Then respond to whatever the user asked:
+"huh"/"explain" → describe what you see; "fix" → diagnose the error/bug shown
+and edit the relevant code; "do this" → identify the technique and apply it
+to our work; "make infographic" → synthesize the screenshots into one. Use
+the screenshots as the user's visual input to you.
 SSMD
     fi
     if _sandy_has_gemini; then
         _sandy_write_file "$HOME/.gemini/commands/ss.toml" <<'SSTOML'
 description = "Look at recent screenshot(s) from the host"
-prompt = """Recent screenshot(s) (newest first):
-!{ if echo "{{args}}" | awk '{exit !($1 ~ /^[0-9]+$/)}'; then sandy-ss-paths $(echo "{{args}}" | awk '{print $1}'); else sandy-ss-paths 1; fi }
+prompt = """Recent screenshot(s), up to the 5 newest (newest first):
+!{ sandy-ss-paths 5 2>&1 || true }
 
 User action: {{args}}
 
-Read each image path listed above. The first arg may be a count — strip it
-from the user action if so. Respond to what the user asked: explain, fix
-the visible error, do/remix the technique shown, make an infographic, etc.
+If the user's action begins with a number N, read only the first N paths
+above (default 1 when there's no leading number). Read each chosen image
+path. Respond to what the user asked: explain, fix the visible error,
+do/remix the technique shown, make an infographic, etc.
 """
 SSTOML
     fi
@@ -3243,13 +3245,13 @@ _inject() {
     # Wait for container tmux session to exist (up to 30s)
     local tries=0
     while [ $tries -lt 60 ]; do
-        if docker exec "$SANDY_CONTAINER_NAME" tmux has-session -t sandy 2>/dev/null; then
+        if docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux has-session -t sandy 2>/dev/null; then
             break
         fi
         sleep 0.5
         tries=$((tries+1))
     done
-    docker exec "$SANDY_CONTAINER_NAME" tmux send-keys -t "sandy.${TARGET_PANE}" "$text" Enter 2>/dev/null || true
+    docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux send-keys -t "sandy.${TARGET_PANE}" "$text" Enter 2>/dev/null || true
 }
 
 # Drain stale updates once at startup
@@ -3701,8 +3703,10 @@ if [ "$SANDY_ATTACH" = "true" ]; then
     #   - session still up (has-session succeeds)      → 3, clean detach
     #   - container is gone/stopped (e.g. --stop ran
     #     elsewhere while we were attached)             → 0, session ended
-    #   - container still up but the has-session probe
-    #     itself failed for some other reason           → 5, unexpected failure
+    #   - container still up but the session is gone    → 0, session ended
+    #     (the agent exited; the #47 supervisor watch-
+    #     loop is about to tear the container down —
+    #     that is a normal end, not an "attach failed")
     if docker exec -u "$(id -u)" "$_sandy_attach_container" tmux has-session -t sandy >/dev/null 2>&1; then
         exit 3
     fi
@@ -3710,8 +3714,18 @@ if [ "$SANDY_ATTACH" = "true" ]; then
     if [ "$_sandy_attach_still_running" != "true" ]; then
         exit 0
     fi
-    error "Attach ended unexpectedly (container still running, but tmux session probe failed)."
-    exit 5
+    # Container is briefly still up but our session probe failed. Re-probe once
+    # after a short settle to rule out a transient `docker exec` hiccup that would
+    # otherwise misreport a live session as ended (→ spurious sticky-reconnect loss).
+    sleep 1
+    if docker exec -u "$(id -u)" "$_sandy_attach_container" tmux has-session -t sandy >/dev/null 2>&1; then
+        exit 3
+    fi
+    # Session is genuinely gone while the daemon container is on its way down.
+    # This is the normal "agent exited while a client was attached" path — report
+    # it as ended (0), not "attach failed" (5), so sandy-ui stops reconnecting it.
+    info "Session ended (agent exited); the daemon is shutting down."
+    exit 0
 fi
 
 # --- Daemon-mode dispatcher (--stop; milestone 1.1.0, #17 Batch 2) ---

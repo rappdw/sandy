@@ -3679,6 +3679,36 @@ check "screenshot mount gated on SANDY_SCREENSHOT_DIR being set" \
             | grep -qF "if [ -n \"\${SANDY_SCREENSHOT_DIR:-}\" ]"
     ' -- "$_SS_SCRIPT"
 
+# 45j. /ss injection hardening (#43). The shell-exec lines in the generated
+# /ss commands must run a FIXED `sandy-ss-paths` with NO user-argument splicing
+# — the count argument is now handled in model prose. A quoted path in
+# $ARGUMENTS / {{args}} textually spliced into the `!`…`` (claude) or `!{ }`
+# (gemini) shell line would break the parse or inject a command.
+check "claude /ss shell line runs a fixed sandy-ss-paths (no \$ARGUMENTS splice)" \
+    grep -qF '!`sandy-ss-paths 5 2>&1 || true`' "$_SS_SCRIPT"
+check "gemini /ss shell block runs a fixed sandy-ss-paths (no {{args}} splice)" \
+    grep -qF '!{ sandy-ss-paths 5 2>&1 || true }' "$_SS_SCRIPT"
+check "no user-arg splicing into a /ss shell-exec line" \
+    bash -c '! grep -qF "set -- \$ARGUMENTS" "$1"' -- "$_SS_SCRIPT"
+
+# ============================================================
+# SECTION 46: Channel relay (host-side tmux inject)
+# ============================================================
+# The agent-agnostic host-side relay (gemini/codex/opencode channels) injects
+# messages via `docker exec … tmux`. docker exec defaults to the image user
+# (root — sandy sets no USER), but the in-container tmux server runs as the
+# gosu-dropped host uid, so its socket lives at /tmp/tmux-<uid>/. Without
+# `-u "$(id -u)"` root can't see that socket and both has-session and send-keys
+# silently fail — the relay never delivers (#48).
+info "46. Channel relay uid-scoping (#48)"
+_CR_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+check "channel-relay has-session exec is uid-scoped" \
+    grep -qF 'docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux has-session' "$_CR_SCRIPT"
+check "channel-relay send-keys exec is uid-scoped" \
+    grep -qF 'docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux send-keys' "$_CR_SCRIPT"
+check "no bare (root) channel-relay tmux exec remains" \
+    bash -c '! grep -qF '\''docker exec "$SANDY_CONTAINER_NAME" tmux'\'' "$1"' -- "$_CR_SCRIPT"
+
 # ============================================================
 # SECTION 47: User-defined env passthrough (SANDY_EXTRA_ENV)
 # ============================================================

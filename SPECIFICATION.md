@@ -1041,8 +1041,10 @@ For each configured channel:
 `$SANDY_HOME/channel-relay.sh` is a generated bash script that long-polls the Telegram Bot API (`getUpdates`), filters messages by `TELEGRAM_ALLOWED_SENDERS`, and injects them into the container tmux session via:
 
 ```
-docker exec <CONTAINER_NAME> tmux send-keys -t sandy.<PANE> "<text>" Enter
+docker exec -u <host-uid> <CONTAINER_NAME> tmux send-keys -t sandy.<PANE> "<text>" Enter
 ```
+
+The `-u "$(id -u)"` is required: `docker exec` defaults to the image user (root, since sandy sets no `USER`), but the in-container tmux server runs as the gosu-dropped host uid, so its socket lives at `/tmp/tmux-<uid>/`. Without `-u`, root can't see that socket and both `has-session` and `send-keys` silently fail — the host-side relay (gemini/codex/opencode channels) never delivers. (Claude channels use an in-container plugin and are unaffected.)
 
 Launched as a background process before `docker run`, tracked via `CHANNEL_RELAY_PID`, and killed in the cleanup trap. The target pane is `SANDY_CHANNEL_TARGET_PANE` (default `0` = the first agent listed in `SANDY_AGENT`, or the sole pane in single-agent mode).
 
