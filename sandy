@@ -3529,6 +3529,23 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     _sandy_daemon_log="$SANDY_HOME/sandboxes/.daemon-start-$$.log"
     : > "$_sandy_daemon_log"
 
+    # Fix B — grant any passive-privileged approval with the CLIENT's TTY BEFORE
+    # forking the non-TTY supervisor. The supervisor's stdin is /dev/null (the
+    # nohup redirect below), so its own approval resolution can only fail
+    # closed — silently dropping workspace-config privileged keys, including
+    # credentials in a workspace .sandy/.secrets (the CLAUDE_CODE_OAUTH_TOKEN
+    # drop reported against daemon-mode). Reuse the full config-load + approval
+    # flow via a synchronous subprocess from the workspace in SANDY_APPROVE_ONLY
+    # mode: it prompts on our terminal and persists the approval file (and
+    # nothing else — it exits before mutex/build/launch), which the supervisor
+    # then honors. Only when we actually have a TTY; a non-TTY client (sandy-ui
+    # / scripted) still can't prompt, so there approval must be pre-granted
+    # (run `sandy --start` once from a terminal) or SANDY_AUTO_APPROVE_PRIVILEGED
+    # set.
+    if [ -t 0 ] && [ -t 2 ]; then
+        ( cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$0" ) </dev/tty >/dev/tty 2>&1 || true
+    fi
+
     # D1 — daemonize the supervisor with `nohup … & disown`, deliberately NOT
     # setsid: setsid ships with util-linux and is ABSENT on macOS, which is
     # daemon-mode's primary platform (sandy-ui), and failing-clean there isn't
@@ -4356,6 +4373,20 @@ _resolve_passive_privileged_approval
 # Run the extra-env loader now that any workspace-sourced SANDY_EXTRA_ENV
 # has been resolved through approval and exported (or dropped on rejection).
 _load_sandy_extra_env
+
+# Fix B — SANDY_APPROVE_ONLY: the internal mode the `--start` client runs as a
+# synchronous TTY subprocess (before forking the non-TTY supervisor) purely to
+# grant + PERSIST any passive-privileged approval interactively. Everything it
+# needs (config load + _resolve_passive_privileged_approval) has run just above,
+# and this exits BEFORE the workspace mutex, the bare-sandy busy-gate, image
+# builds, and launch — so the subprocess touches nothing on disk but the
+# approval file, then exits. The real supervisor re-loads config and honors
+# that persisted approval. Env-only internal flag (like SANDY_DAEMON_SUPERVISOR
+# / SANDY_APPROVE_ONLY is never a config key), so a committed config can't set
+# it.
+if [ "${SANDY_APPROVE_ONLY:-0}" = "1" ]; then
+    exit 0
+fi
 
 # Sanity: reject world-open SANDY_ALLOW_LAN_HOSTS values. Even from a
 # privileged source, "0.0.0.0/0" negates the whole point of LAN isolation and
