@@ -101,6 +101,28 @@ echo "== 6. idempotent second --start =="
 "$SANDY" --start --workspace "$WS"; ck "second --start is a no-op, exit 0" "[ $? -eq 0 ]"
 ck "still exactly one daemon container" "[ \$(docker ps -q --filter label=sandy.daemon=true --filter label=sandy.workspace_path=$WS | wc -l | tr -d ' ') -eq 1 ]"
 
+echo "== 6.5 zombie recovery: --start reaps a session-less container, restarts fresh =="
+# Reproduce the observed failure: the agent exits but the container stays up
+# (supervisor missed it, or a restart raced the #47 teardown window) → a zombie
+# (container alive, inner session dead). A restart must NOT read it as "already
+# running" and block — it must probe the session, find it dead, reap the
+# container, and start a fresh one.
+Z="$(cid)"
+docker exec -u "$(id -u)" "$Z" tmux kill-server >/dev/null 2>&1 || true
+sleep 1
+ck "zombie: container still up but session gone" \
+   "[ -n \"$Z\" ] && [ \"\$(cid)\" = \"$Z\" ] && ! docker exec -u \"$(id -u)\" \"$Z\" tmux has-session -t sandy 2>/dev/null"
+"$SANDY" --start --workspace "$WS"; RCZ=$?
+ck "--start over a zombie exits 0 (recovered, not blocked)" "[ $RCZ -eq 0 ]"
+Z2="$(cid)"
+ck "a FRESH container replaced the zombie (different id)" "[ -n \"$Z2\" ] && [ \"$Z2\" != \"$Z\" ]"
+ck "the fresh session is live" "docker exec -u \"$(id -u)\" \"$Z2\" tmux has-session -t sandy"
+# Re-point the teardown markers at the fresh session so §7 stops the NEW one.
+C="$Z2"
+DPID="$(docker inspect -f '{{index .Config.Labels "sandy.daemon_pid"}}' "$C" 2>/dev/null)"
+SESS="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C" 2>/dev/null)"
+LOCK="$SANDY_HOME_DIR/sandboxes/.$SESS.lock"
+
 echo "== 7. sandy --stop — full teardown =="
 "$SANDY" --stop --workspace "$WS"; ck "--stop exits 0" "[ $? -eq 0 ]"
 sleep 2

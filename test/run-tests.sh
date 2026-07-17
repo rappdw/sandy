@@ -5436,6 +5436,27 @@ check "base build is quieted under the daemon supervisor, bash-3.2-safe (#51)" \
         && grep -qF "docker build \${_BASE_BUILD_Q[@]+" "$1"' -- "$_S72"
 
 # ============================================================
+echo ""
+echo "§73: daemon zombie recovery — restart over a session-less container reaps + restarts"
+# ============================================================
+# A daemon container that is up but whose agent session has exited (a zombie:
+# the #47 supervisor died, or a restart raced the teardown window) must NOT read
+# as "already running" and block a restart. Both the --start idempotency check
+# and the bare-sandy DEC-B check must probe the INNER session (tmux has-session),
+# not just container existence, and reap a dead-session zombie via `$0 --stop`.
+# Behavioral end-to-end coverage is test/acceptance-daemon.sh §6.5 (real docker);
+# these are structural guards so a revert fails CI too.
+_S73="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+check "--start verifies inner-session liveness before 'already running' (#47/D6)" \
+    grep -q '_sandy_session_live' "$_S73"
+check "bare sandy verifies inner-session liveness before the DEC-B block" \
+    grep -q '_sandy_bare_live' "$_S73"
+check "restart probes the session with a mid-startup retry (not a one-shot)" \
+    bash -c 'grep -A6 "_sandy_session_live=0" "$1" | grep -q "tmux has-session -t sandy"' -- "$_S73"
+check "a dead-session daemon zombie is reaped via \$0 --stop (both --start + bare)" \
+    bash -c '[ "$(grep -c "\"\$0\" --stop --workspace \"\$WORK_DIR\" >/dev/null 2>&1 || true" "$1")" -ge 2 ]' -- "$_S73"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

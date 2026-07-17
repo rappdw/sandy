@@ -3567,8 +3567,28 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     _sandy_daemon_existing="$(docker ps -q "${_sandy_daemon_filter[@]}" 2>/dev/null | head -1)" || true
     if [ -n "$_sandy_daemon_existing" ]; then
         _sandy_daemon_name="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$_sandy_daemon_existing" 2>/dev/null || true)"
-        info "Daemon session already running for $WORK_DIR: ${_sandy_daemon_name:-$_sandy_daemon_existing} (container ${_sandy_daemon_existing:0:12})"
-        exit 0
+        # D6 refinement: "container-as-truth" must mean a container with a LIVE
+        # inner session. A container that is up but whose agent session has
+        # exited (a zombie — the #47 supervisor died, or the agent exited and a
+        # restart raced the teardown-detection window) must NOT read as "already
+        # running" and block the restart. Probe the session, retrying briefly so
+        # a container that is merely mid-startup (session not created yet) is not
+        # misread as a zombie and reaped out from under a concurrent start.
+        _sandy_session_live=0
+        for _sandy_probe in 1 2 3 4 5; do
+            if docker exec -u "$(id -u)" "$_sandy_daemon_existing" tmux has-session -t sandy >/dev/null 2>&1; then
+                _sandy_session_live=1
+                break
+            fi
+            sleep 1
+        done
+        if [ "$_sandy_session_live" = 1 ]; then
+            info "Daemon session already running for $WORK_DIR: ${_sandy_daemon_name:-$_sandy_daemon_existing} (container ${_sandy_daemon_existing:0:12})"
+            exit 0
+        fi
+        warn "Found a daemon container with no live session for $WORK_DIR (agent exited; container ${_sandy_daemon_existing:0:12}) — reaping it and starting fresh."
+        "$0" --stop --workspace "$WORK_DIR" >/dev/null 2>&1 || true
+        # fall through to a fresh --start below
     fi
 
     # D1 — normalize the currently-parsed flags back into an argv for the
@@ -5352,8 +5372,24 @@ if [ "$SANDY_START" != "true" ] && [ "$SANDY_ATTACH" != "true" ] && [ "$SANDY_ST
    && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; then
     _sandy_bare_existing="$(docker ps -q --filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$WORK_DIR" 2>/dev/null | head -1)" || true
     if [ -n "$_sandy_bare_existing" ]; then
-        error "A daemon session is already running for this workspace. Attach with 'sandy --attach', or end it with 'sandy --stop'."
-        exit 1
+        # Only a LIVE daemon session blocks a bare interactive launch (DEC-B). A
+        # container that is up but whose agent session has exited (a zombie) must
+        # not wedge the user out — reap it and fall through to the interactive
+        # flow. Same session-liveness probe (with mid-startup retry) as --start.
+        _sandy_bare_live=0
+        for _sandy_probe in 1 2 3 4 5; do
+            if docker exec -u "$(id -u)" "$_sandy_bare_existing" tmux has-session -t sandy >/dev/null 2>&1; then
+                _sandy_bare_live=1
+                break
+            fi
+            sleep 1
+        done
+        if [ "$_sandy_bare_live" = 1 ]; then
+            error "A daemon session is already running for this workspace. Attach with 'sandy --attach', or end it with 'sandy --stop'."
+            exit 1
+        fi
+        warn "Found a daemon container with no live session for this workspace (agent exited) — reaping it before starting."
+        "$0" --stop --workspace "$WORK_DIR" >/dev/null 2>&1 || true
     fi
 fi
 
