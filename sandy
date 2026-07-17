@@ -7664,14 +7664,43 @@ if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
     # normally. `|| true` so a sleeper killed by anything other than our own
     # traps (stray kill, OOM) respawns instead of tripping set -e into a
     # surprise teardown of a healthy session.
+    # #47 — also WATCH the inner tmux session and tear the daemon down when the
+    # AGENT exits (ctrl-d / /exit / crash), rather than leaving a zombie
+    # container that PID 1's `tail -f /dev/null` keeps alive forever (holding
+    # the proxy, networks, and the workspace lock, and making every later
+    # --attach return the confusing exit-5). --stop's SIGTERM still interrupts
+    # `wait` and runs the same teardown via the trap; this poll handles the
+    # OTHER end of a session's life. Guard against a transient `docker exec`
+    # hiccup: only break when has-session fails on TWO consecutive polls AND
+    # the container is still running (if the container itself is already gone,
+    # break immediately — cleanup reaps residual networks/lock). Falling out of
+    # the loop hits `exit "$_run_rc"` below → the EXIT trap → cleanup()'s
+    # `docker rm -f`, which removes the container outright so `--restart
+    # unless-stopped` does NOT resurrect it. Reboot survival (D9) is unaffected:
+    # a rebooted container has no supervisor watching it and is handled by
+    # --stop/--attach via container-as-truth.
+    _sandy_session_gone=0
     while :; do
-        sleep 300 &
+        sleep 30 &
         wait "$!" || true
+        if docker exec -u "$(id -u)" "$CONTAINER_NAME" tmux has-session -t sandy >/dev/null 2>&1; then
+            _sandy_session_gone=0            # session healthy — reset the counter
+            continue
+        fi
+        if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" != "true" ]; then
+            info "Daemon container is no longer running — supervisor tearing down."
+            break
+        fi
+        _sandy_session_gone=$((_sandy_session_gone + 1))
+        if [ "$_sandy_session_gone" -ge 2 ]; then
+            info "Agent session ended — stopping the daemon session."
+            break
+        fi
     done
 fi
 
-# Preserve the interactive path's exit-status semantics (see the capture note
-# above). In supervisor mode this is only reached if `wait` returns without a
-# signal (unusual — --stop's SIGTERM exits via the signal trap); exiting with
-# the launch status is a harmless fallback there.
+# Reached in supervisor mode when the watch loop above breaks (the agent
+# session ended or the container vanished) — exiting fires the EXIT trap →
+# cleanup() (docker rm -f + networks + lock release), the same teardown --stop
+# performs. In the interactive path this preserves docker run's exit status.
 exit "$_run_rc"
