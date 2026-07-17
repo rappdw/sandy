@@ -4846,7 +4846,7 @@ BASE_REBUILT=false
 if [ ! -f "$BASE_HASH_FILE" ] || [ "$(cat "$BASE_HASH_FILE")" != "$BASE_HASH" ] || ! docker image inspect "$BASE_IMAGE_NAME" &>/dev/null; then
     info "Building base image (language runtimes) — this may take several minutes on first run..."
     _old_base_id="$(docker image inspect -f '{{.Id}}' "$BASE_IMAGE_NAME" 2>/dev/null || true)"
-    docker build "${_BASE_BUILD_Q[@]}" --no-cache -t "$BASE_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.base" "$SANDY_HOME"
+    docker build ${_BASE_BUILD_Q[@]+"${_BASE_BUILD_Q[@]}"} --no-cache -t "$BASE_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.base" "$SANDY_HOME"
     echo "$BASE_HASH" > "$BASE_HASH_FILE"
     BASE_REBUILT=true
     _sandy_prune_old_image "$_old_base_id" "$BASE_IMAGE_NAME"
