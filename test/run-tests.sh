@@ -5457,6 +5457,70 @@ check "a dead-session daemon zombie is reaped via \$0 --stop (both --start + bar
     bash -c '[ "$(grep -c "\"\$0\" --stop --workspace \"\$WORK_DIR\" >/dev/null 2>&1 || true" "$1")" -ge 2 ]' -- "$_S73"
 
 # ============================================================
+echo ""
+echo "§74: ensure_build_files tolerates a race-consumed .new (fleet-update, §20)"
+# ============================================================
+# The *.new build files live in the SHARED $SANDY_HOME, so a concurrent sandy
+# (a daemon supervisor's launch build, or --update-sessions refreshing a sibling
+# session) can consume one before this process's mv/rm. Generated content is
+# deterministic, so the race is benign — but a BARE `rm "$SANDY_HOME/$f.new"`
+# aborts the build under set -e (the fleet-update §20 failure). The loop must
+# guard existence and use tolerant rm -f / mv -f.
+_S74="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+check "ensure_build_files guards .new existence before mv/rm (no set -e abort)" \
+    bash -c 'sed -n "/^ensure_build_files()/,/^}\$/p" "$1" | grep -qF "[ -e \"\$SANDY_HOME/\$f.new\" ] || continue"' -- "$_S74"
+check "ensure_build_files uses tolerant rm -f / mv -f for the shared .new files" \
+    bash -c '_f="$(sed -n "/^ensure_build_files()/,/^}\$/p" "$1")"
+        printf "%s" "$_f" | grep -qF "rm -f \"\$SANDY_HOME/\$f.new\"" \
+            && printf "%s" "$_f" | grep -qF "mv -f \"\$SANDY_HOME/\$f.new\""' -- "$_S74"
+check "no bare (abort-prone) rm of a shared build .new remains" \
+    bash -c '! sed -n "/^ensure_build_files()/,/^}\$/p" "$1" | grep -qF "rm \"\$SANDY_HOME/\$f.new\""' -- "$_S74"
+
+# ============================================================
+echo ""
+echo "§75: dangerous-symlink approval fails closed under a non-interactive --start"
+# ============================================================
+# The symlink first-encounter prompt is a `read` deep in the launch flow, which
+# under `sandy --start` runs in the non-TTY daemon supervisor (stdin /dev/null).
+# A bare read there consumes EOF and aborts with misleading guidance, and the
+# --start client burns the full readiness timeout (the reported hang). The prompt
+# must gate on an interactive stdin, fail closed with the correct "approve
+# interactively" guidance, drop a fatal marker, and the --start client must
+# fast-fail on that marker instead of waiting out the timeout.
+_S75="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+check "symlink read is gated behind a non-tty check (no bare daemon prompt)" \
+    bash -c 'sed -n "/First encounter for this sandbox/,/read -r REPLY/p" "$1" | grep -qF "if [ ! -t 0 ]; then"' -- "$_S75"
+check "symlink approval fails closed with interactive-approval guidance" \
+    grep -qF 'Dangerous symlinks need interactive approval' "$_S75"
+check "symlink fail-close drops a fatal marker for the --start client" \
+    grep -qF ': > "${SANDY_DAEMON_LOG}.fatal"' "$_S75"
+check "--start readiness loop fast-fails on the supervisor fatal marker" \
+    bash -c 'grep -qF "if [ -f \"\$_sandy_fatal_marker\" ]; then" "$1"' -- "$_S75"
+
+# ============================================================
+echo ""
+echo "§76: --update-sessions refresh emits a progress heartbeat (no silent multi-minute build)"
+# ============================================================
+# Each session's --build-only output is captured (surfaced only on failure) and
+# image builds run -q, so a long --no-cache rebuild would print nothing and look
+# hung. The refresh must background the child, poll a done-marker (not kill -0,
+# which reads a reaped child as alive), and emit an elapsed heartbeat.
+_S76="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+check "refresh runs the child build in the background with a done-marker" \
+    bash -c 'grep -qF "echo \"\$?\" > \"\$_upd_done\"" "$1"' -- "$_S76"
+check "refresh polls the done-marker (not kill -0 on a reap-prone child)" \
+    bash -c 'grep -qF "while [ ! -f \"\$_upd_done\" ]; do" "$1"' -- "$_S76"
+check "refresh emits an elapsed-time progress heartbeat" \
+    grep -qF 'still refreshing $_upd_sess' "$_S76"
+# The child MUST read /dev/null: a workspace whose config sets privileged keys
+# (or has un-approved dangerous symlinks) triggers an interactive approval read
+# in the child. With an inherited-TTY stdin it prints the [y/N] into the captured
+# log and blocks forever (the "--update-sessions hangs on one session" bug). With
+# /dev/null the approval fails closed and the refresh proceeds.
+check "refresh child runs non-interactively (</dev/null) so an approval fails closed, not hangs" \
+    grep -qF ') </dev/null >"$_upd_build_log"' "$_S76"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

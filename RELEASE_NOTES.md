@@ -1,3 +1,37 @@
+## sandy v1.2.1
+
+A **bug-fix and hardening** patch — no new features, no config-key or introspection changes (`schema_version` stays `1`), and the sandbox forward-compat promise holds. Most of these surfaced running 1.2.0 in real daemon-mode / `sandy-ui` use.
+
+### Daemon-mode robustness
+
+- **A session that ends no longer leaves a zombie.** When the agent exits, the supervisor watches the inner session and tears the container down — no more `sandy-<name>` / `sandy-proxy-<name>` left holding networks, the workspace lock, and a stale forwarded token. (#47)
+- **Restart recovers from a leftover container.** If a daemon container is still up but its agent session has exited (e.g. you `Ctrl-D`'d out and relaunched inside the ~60s teardown window), `sandy --start` and bare `sandy` now probe the inner session and reap the dead-session container instead of reporting "already running" and wedging you out.
+- **`sandy --attach` exit codes are honest at session-end.** A container-up-but-session-gone state exits `0` (session ended), not `5` (attach failed) — so a UI stops sticky-reconnecting a session on its way down. Exit `5` is reserved for a genuine failure to *establish* the attach.
+- **`sandy --start` grants passive-privileged approval on the client TTY** before forking the non-TTY supervisor, so workspace `.sandy/.secrets` keys aren't silently dropped from an interactive `--start`.
+- **A first-encounter dangerous-symlink prompt no longer hangs `--start`.** That approval is a `read` the non-TTY daemon supervisor can't answer; it now fails closed with the correct "approve interactively once, then retry" guidance and a marker so the `--start` client gives up in ~1s instead of burning the readiness timeout (workaround unchanged: run `sandy` once interactively to approve the set, then `--start` proceeds silently).
+- **Cleaner daemon log.** The `--start` supervisor log renders in color and no longer dumps the verbose base-image build (both gated on supervisor mode; the interactive experience is byte-unchanged). (#51)
+
+### Git / credentials
+
+- **Guaranteed git credential helper, independent of `gh`.** Container git auth no longer depends on `gh auth setup-git` succeeding — a direct helper supplies the forwarded token for `github.com` with no network round-trip, so a transient `api.github.com` failure at startup can't leave you with no working helper.
+- **Secret values are redacted** in the passive-privileged approval prompt and the persisted approval file (names only) — they were previously printed, which could leak into the daemon supervisor log.
+
+### Other fixes
+
+- **`/ss` screenshot command** no longer breaks on quotes in its arguments — the shell line runs a fixed `sandy-ss-paths` and the count is handled in prose (which also removes a shell-injection vector). (#43)
+- **Host-side channel relay** (Telegram/Discord for gemini/codex/opencode) execs tmux as the container's user (`-u`), so message injection actually reaches the session. (#48)
+- **`--print-state` full mode is cheaper on busy hosts** — the per-container `image_stale` inspect and the per-candidate `orphan_networks` inspect are each batched into a single `docker` call (46 spawns on a 7-session host → a handful). (#52)
+- **Rebuilds no longer leak dangling images** — after a successful base/proxy/agent rebuild the now-untagged predecessor is reclaimed (the Claude auto-update rebuild was the main continuous leak). (#36)
+- **`sandy --update-sessions` no longer hangs on a session whose config needs approval, and shows a progress heartbeat.** Two fixes to the per-session image refresh: (1) the child build now runs with `stdin` from `/dev/null`, so a workspace whose `.sandy` config sets privileged keys (or has un-approved dangerous symlinks) fails the approval *closed* instead of blocking forever on a `[y/N]` prompt written into the captured (invisible) build log — that was the real "hangs on one session" bug; (2) since each session's build output is captured and image builds run `-q`, a long `--no-cache` rebuild used to print nothing for minutes and look hung, so it now emits an elapsed-time line with the current phase every ~20s.
+
+### Portability / tests
+
+- **macOS bash 3.2** empty-array-under-`set -u` fix that had regressed `--build-only`.
+- **`sandy --update-sessions` no longer aborts a refresh on a benign build-file race.** The generated `Dockerfile.base`/`entrypoint.sh`/etc. staging files live in the shared `$SANDY_HOME`, so a concurrent sandy (a sibling session's launch build) could consume one before `--build-only`'s `rm`/`mv`, aborting under `set -e`. The staging is now idempotent (deterministic content, tolerant `rm -f`/`mv -f`).
+- The daemon and fleet-update **acceptance harnesses now actually run** in a full `run-integration-tests.sh` — they were silently skipping when invoked from the workspace root (a `$(dirname "$0")` that resolved after a `cd`).
+
+---
+
 ## sandy v1.2.0
 
 **Fleet updates for daemon sessions.** Daemon sessions can stay up for days, running an ever-staler image — nothing at launch refreshes them once launches become rare. `sandy --update-sessions` closes that: one command refreshes every daemon session's images and rolling-restarts the ones that came out stale, conversations resuming automatically. Additive and backward-compatible: bare `sandy` and the `--start`/`--attach`/`--stop` lifecycle are unchanged, and the introspection `schema_version` stays `1`.
