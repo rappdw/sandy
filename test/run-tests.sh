@@ -5428,8 +5428,12 @@ check "base/proxy/agent rebuilds capture + prune the predecessor image (#36)" \
 # --- #51: daemon-log polish (color forced + base build quieted under supervisor) ---
 check "colors are forced under the daemon supervisor (#51)" \
     grep -qF '[ -t 1 ] || [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]' "$_S72"
-check "base build is quieted under the daemon supervisor (#51)" \
-    bash -c 'grep -qF "_BASE_BUILD_Q=(-q)" "$1" && grep -qF "docker build \"\${_BASE_BUILD_Q[@]}\"" "$1"' -- "$_S72"
+# The build must use the array via the bash-3.2-safe `${arr[@]+"${arr[@]}"}`
+# idiom — a bare "${arr[@]}" is an unbound-variable error for an EMPTY array
+# under `set -u` on macOS bash 3.2 (regressed --build-only; see sandy:1780).
+check "base build is quieted under the daemon supervisor, bash-3.2-safe (#51)" \
+    bash -c 'grep -qF "_BASE_BUILD_Q=(-q)" "$1" \
+        && grep -qF "docker build \${_BASE_BUILD_Q[@]+" "$1"' -- "$_S72"
 
 # ============================================================
 # Summary

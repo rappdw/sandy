@@ -87,6 +87,11 @@ export SANDY_AUTO_APPROVE_PRIVILEGED=1
 export SANDY_EGRESS_PROXY="${SANDY_EGRESS_PROXY:-0}"
 
 SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+# Absolute path to THIS suite's own directory, resolved ONCE before any `cd`.
+# The §19/§20 acceptance harnesses live beside this script; resolving them via a
+# bare `$(dirname "$0")` at use-site broke because the suite `cd`s into scratch
+# workspaces first (relative $0 → wrong dir → silently skipped).
+_INT_SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 PASS=0
 FAIL=0
@@ -1552,7 +1557,7 @@ info "19. Daemon-mode lifecycle acceptance (#17) — test/acceptance-daemon.sh"
 # self-cleans (its own EXIT trap + scratch workspaces), so it needs nothing
 # from this suite's cleanup. SANDY is pinned to this suite's sandy; the harness
 # inherits this suite's credential/auto-approve env for its --start.
-_acc_daemon="$(dirname "$0")/acceptance-daemon.sh"
+_acc_daemon="$_INT_SELF_DIR/acceptance-daemon.sh"
 if [ -f "$_acc_daemon" ]; then
     _acc_out="$(mktemp)"
     set +e   # a failing harness exits non-zero; don't let set -e abort the suite
@@ -1581,7 +1586,7 @@ info "20. Fleet-update acceptance (#41) — test/acceptance-update-sessions.sh"
 # rebuilds the SHARED agent image, which will (correctly) mark any OTHER daemon
 # sessions on this host as stale afterward; that is inherent to what it tests,
 # not a side effect of running it here. Same invocation contract as §19.
-_acc_upd="$(dirname "$0")/acceptance-update-sessions.sh"
+_acc_upd="$_INT_SELF_DIR/acceptance-update-sessions.sh"
 if [ -f "$_acc_upd" ]; then
     _acc_out="$(mktemp)"
     set +e
