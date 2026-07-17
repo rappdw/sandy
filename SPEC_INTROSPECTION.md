@@ -318,10 +318,11 @@ All three:
 > read as current).
 > `false` when they match. `null` when it can't be computed (the image name
 > no longer resolves, or either `docker inspect` failed). Absent entirely
-> from `--print-state light` entries — computing it costs one `docker
-> inspect <cid>` per container plus one `docker image inspect` per unique
-> image name (deduplicated across containers sharing an image), which is
-> over the light-mode two-spawn budget (see "Light mode" below). A consumer
+> from `--print-state light` entries — computing it costs one **batched**
+> `docker inspect` for ALL sandy containers (#52 — was one per container)
+> plus one `docker image inspect` per unique image name (deduplicated across
+> containers sharing an image), which is still over the light-mode two-spawn
+> budget (see "Light mode" below). A consumer
 > that wants a staleness badge on a light-mode poll fetches full mode
 > on demand.
 

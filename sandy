@@ -268,7 +268,10 @@ skill_pack_resolve_versions() {
 }
 
 # --- Colors (disabled when not a terminal) ---
-if [ -t 1 ]; then
+# The daemon supervisor (SANDY_DAEMON_SUPERVISOR=1) runs under nohup with no
+# TTY, but its streamed log IS shown to the --start client — so force colors on
+# there too, otherwise every [sandy] line renders white in the daemon log (#51).
+if [ -t 1 ] || [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
     YELLOW='\033[1;33m'
@@ -962,7 +965,17 @@ _sandy_emit_container_daemon_fields() {
 # (DEC-U6's cost model). Never caches a failed (empty) lookup.
 _sandy_image_stale() {
     local _cid="$1" _pair _running_id _img_ref _current_id
-    _pair="$(docker inspect -f '{{.Image}}|{{.Config.Image}}' "$_cid" 2>/dev/null)" || _pair=""
+    # #52: prefer the batched prefetch cache (one `docker inspect` for ALL sandy
+    # containers, populated by _sandy_prefetch_container_inspect before the
+    # full-mode loop). The cache key is the full `.Id`; the `docker ps` short id
+    # passed here is a prefix of it. A miss (e.g. the update-sessions caller,
+    # which never prefetches) falls back to the original per-cid inspect, so
+    # behavior is unchanged for non-prefetched callers.
+    _pair="$(printf '%s\n' "${_SANDY_CINSPECT_CACHE:-}" \
+        | awk -F'|' -v c="$_cid" 'c!="" && index($1,c)==1{print $2"|"$3; exit}')" || _pair=""
+    if [ -z "$_pair" ]; then
+        _pair="$(docker inspect -f '{{.Image}}|{{.Config.Image}}' "$_cid" 2>/dev/null)" || _pair=""
+    fi
     _running_id="${_pair%%|*}"
     _img_ref="${_pair#*|}"
     if [ -z "$_pair" ] || [ -z "$_running_id" ] || [ -z "$_img_ref" ]; then
@@ -988,6 +1001,24 @@ $_img_ref|$_current_id"
     fi
 }
 
+# #52 — batch-prefetch the (running-image-id, image-ref) pair for many
+# containers in ONE `docker inspect`, collapsing image_stale's per-container
+# inspect (was N docker spawns on an N-session host) to a single call. Populates
+# the global _SANDY_CINSPECT_CACHE (newline "fullid|running_id|img_ref"); each
+# output line self-identifies by `.Id`, so a container that vanishes mid-call
+# (error to stderr, no stdout line) simply drops out rather than misaligning the
+# rest. _sandy_image_stale consults this cache first. Guarded so an empty arg
+# list is a no-op (bash 3.2 + set -u would choke on an empty "$@" expansion).
+_sandy_prefetch_container_inspect() {
+    [ "$#" -gt 0 ] || return 0
+    local _line
+    while IFS= read -r _line; do
+        [ -n "$_line" ] || continue
+        _SANDY_CINSPECT_CACHE="${_SANDY_CINSPECT_CACHE:-}
+$_line"
+    done < <(docker inspect -f '{{.Id}}|{{.Image}}|{{.Config.Image}}' "$@" 2>/dev/null || true)
+}
+
 # #26 (milestone 1.1.0, Batch 4) — pure lister: emits the names (one per line)
 # of orphaned sandy_(sidecar|egress|net)_<pid> networks — the exact gate logic
 # _sandy_reap_orphan_networks uses, extracted so print-state, --prune-orphans,
@@ -1009,7 +1040,8 @@ $_img_ref|$_current_id"
 # caller, so both fast-path consumers (print-state) and the later-defined
 # reaper/`--prune-orphans` dispatcher can call it identically.
 _sandy_orphan_networks_list() {
-    local net net_pid attached
+    local net net_pid _out _n attached
+    local _candidates=()
     for net in $(docker network ls --format '{{.Name}}' 2>/dev/null \
             | grep -E '^sandy_(sidecar|egress|net)_' || true); do
         net_pid="${net##*_}"   # trailing field: sandy_<kind>_<pid> → <pid>
@@ -1020,11 +1052,26 @@ _sandy_orphan_networks_list() {
            && kill -0 "$net_pid" 2>/dev/null; then
             continue
         fi
-        # Any container still attached? If so it's live (incl. D9) — skip.
-        attached="$(docker network inspect "$net" \
-            --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null | tr -d '[:space:]')"
-        [ -z "$attached" ] && printf '%s\n' "$net"
+        _candidates+=("$net")
     done
+    # #52 — batch the "any container still attached?" probe for all dead-owner
+    # candidates into ONE `docker network inspect net1 net2 …` (was one spawn per
+    # candidate). The kill -0 short-circuit above already means a healthy
+    # all-live-PID host reaches here with zero candidates and makes no inspect
+    # call at all. The template self-identifies each net by name, so a candidate
+    # that vanishes mid-call just drops out. A network with no attached container
+    # is an orphan (incl. a D9 reboot-resurrected session → has a container →
+    # not listed). Guard the empty case (bash 3.2 + set -u empty "$@").
+    [ "${#_candidates[@]}" -gt 0 ] || return 0
+    _out="$(docker network inspect \
+        -f '{{.Name}}|{{range .Containers}}{{.Name}} {{end}}' \
+        "${_candidates[@]}" 2>/dev/null || true)"
+    while IFS='|' read -r _n attached; do
+        [ -n "$_n" ] || continue
+        attached="$(printf '%s' "$attached" | tr -d '[:space:]')"
+        [ -z "$attached" ] && printf '%s\n' "$_n"
+    done <<< "$_out"
+    return 0
 }
 
 # _sandy_reap_orphan_networks — remove every orphan network the lister reports.
@@ -1272,17 +1319,28 @@ _sandy_emit_state() {
         fi
     else   # full mode
         local _ps_out
-        # #41 DEC-U6 — image_stale is FULL MODE ONLY (reset per-call so a
-        # process that emits both light and full doesn't leak a stale cache
-        # across modes/invocations): one `docker inspect <cid>` per container
-        # plus one `docker image inspect` per UNIQUE image name (cached by
-        # _sandy_image_stale, see its definition up near
-        # _sandy_emit_container_daemon_fields) — over the #25 light-mode
-        # spawn budget, which is why light mode never touches this.
+        # #41 DEC-U6 — image_stale is FULL MODE ONLY (over the #25 light-mode
+        # spawn budget, which is why light mode never touches this). #52: the
+        # per-container inspect is now BATCHED — one `docker inspect` for ALL
+        # sandy containers (via _sandy_prefetch_container_inspect below) instead
+        # of one per container, plus one `docker image inspect` per UNIQUE image
+        # name (cached in _SANDY_IMAGE_ID_CACHE). Both caches are reset per-call
+        # so a process emitting both light and full doesn't leak stale ids.
         _SANDY_IMAGE_ID_CACHE=""
+        _SANDY_CINSPECT_CACHE=""
         if command -v docker >/dev/null 2>&1 \
            && _ps_out="$(docker ps --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.CreatedAt}}|{{.Label "sandy.daemon"}}|{{.Label "sandy.session"}}|{{.Label "sandy.updated_at"}}' 2>/dev/null)"; then
             printf ',"docker_reachable":true'
+            # #52 — pre-pass: collect the filtered sandy container ids and
+            # prefetch all their image inspects in ONE docker call, so each
+            # per-entry image_stale below is a cache hit. The grep mirrors the
+            # loop's own filter; the cost here is a grep/awk (no docker), and the
+            # array guard keeps the empty case a no-op on bash 3.2 + set -u.
+            local _pf_cids=()
+            while IFS= read -r _pfl; do
+                [ -n "$_pfl" ] && _pf_cids+=("$(printf '%s' "$_pfl" | awk -F'|' '{print $1}')")
+            done < <(printf '%s\n' "$_ps_out" | grep -E '(^|[|])sandy[_-]|[|]sandy-' || true)
+            [ "${#_pf_cids[@]}" -gt 0 ] && _sandy_prefetch_container_inspect "${_pf_cids[@]}"
             printf ',"running_containers":['
             first=1
             # Use labels for sandy-launched containers. Sandy doesn't label all its
@@ -4759,15 +4817,39 @@ fi
 
 # --- Build images (two-phase: base + final) ---
 
+# Reclaim the predecessor image after a successful same-tag rebuild (#36). When
+# `docker build -t IMG` re-tags IMG onto a new image id, the old id is left
+# untagged (<none>:<none>) — dangling forever. The Claude auto-update path
+# rebuilds the agent image with --no-cache on a regular cadence, so these
+# accumulate. Capture the id BEFORE a rebuild, then best-effort `docker rmi` it
+# after: no -f, so it silently no-ops when the old id is still referenced by a
+# child image (e.g. the old base under an as-yet-unrebuilt agent) or a running
+# container — those get reclaimed on a later launch once nothing references them.
+_sandy_prune_old_image() {
+    local _old="$1" _name="$2" _new
+    [ -n "$_old" ] || return 0
+    _new="$(docker image inspect -f '{{.Id}}' "$_name" 2>/dev/null || true)"
+    [ -n "$_new" ] && [ "$_old" != "$_new" ] || return 0
+    docker rmi "$_old" >/dev/null 2>&1 || true
+}
+
+# The base build stays verbose interactively (progress on the long first build)
+# but goes -q under the daemon supervisor (#51) so its hundreds of apt lines
+# don't flood the streamed daemon log.
+_BASE_BUILD_Q=()
+[ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ] && _BASE_BUILD_Q=(-q)
+
 # Phase 1: Base image (language runtimes — rebuilds rarely)
 BASE_HASH="$(cat "$SANDY_HOME/Dockerfile.base" | sha256 | cut -d' ' -f1)"
 BASE_HASH_FILE="$SANDY_HOME/.base_build_hash"
 BASE_REBUILT=false
 if [ ! -f "$BASE_HASH_FILE" ] || [ "$(cat "$BASE_HASH_FILE")" != "$BASE_HASH" ] || ! docker image inspect "$BASE_IMAGE_NAME" &>/dev/null; then
     info "Building base image (language runtimes) — this may take several minutes on first run..."
-    docker build --no-cache -t "$BASE_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.base" "$SANDY_HOME"
+    _old_base_id="$(docker image inspect -f '{{.Id}}' "$BASE_IMAGE_NAME" 2>/dev/null || true)"
+    docker build "${_BASE_BUILD_Q[@]}" --no-cache -t "$BASE_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.base" "$SANDY_HOME"
     echo "$BASE_HASH" > "$BASE_HASH_FILE"
     BASE_REBUILT=true
+    _sandy_prune_old_image "$_old_base_id" "$BASE_IMAGE_NAME"
 else
     info "Base image up to date."
 fi
@@ -4790,8 +4872,10 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
     PROXY_HASH_FILE="$SANDY_HOME/.build_hash_proxy"
     if [ ! -f "$PROXY_HASH_FILE" ] || [ "$(cat "$PROXY_HASH_FILE")" != "$PROXY_HASH" ] || ! docker image inspect "$PROXY_IMAGE_NAME" &>/dev/null; then
         info "Building egress proxy image (sandy-proxy, ref=$(_sandy_proxy_ref))..."
+        _old_proxy_id="$(docker image inspect -f '{{.Id}}' "$PROXY_IMAGE_NAME" 2>/dev/null || true)"
         docker build -q --no-cache -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$SANDY_HOME"
         echo "$PROXY_HASH" > "$PROXY_HASH_FILE"
+        _sandy_prune_old_image "$_old_proxy_id" "$PROXY_IMAGE_NAME"
     else
         info "Egress proxy image up to date."
     fi
@@ -4864,8 +4948,10 @@ fi
 
 if [ "$NEEDS_BUILD" = true ]; then
     info "Building sandbox image (may take a few minutes)..."
+    _old_agent_id="$(docker image inspect -f '{{.Id}}' "$IMAGE_NAME" 2>/dev/null || true)"
     docker build -q --no-cache -t "$IMAGE_NAME" -f "$DOCKERFILE_PATH" "$SANDY_HOME"
     echo "$BUILD_HASH" > "$HASH_FILE"
+    _sandy_prune_old_image "$_old_agent_id" "$IMAGE_NAME"
 else
     info "Sandbox image up to date."
 fi

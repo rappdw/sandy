@@ -4624,7 +4624,16 @@ check "reaper removes only dead-PID, no-container sandy networks" \
         docker() {
             case "$1 $2" in
                 "network ls") printf "%s\n" "sandy_net_$$" sandy_net_2147483646 sandy_egress_2147483645 othernet_123 ;;
-                "network inspect") case "$3" in sandy_egress_2147483645) echo "livecontainer" ;; *) echo "" ;; esac ;;
+                # #52 — batched: `network inspect -f TEMPLATE net1 net2 …`. Emit
+                # one `name|<attached>` line per net arg (skip network/inspect/-f/
+                # template by matching only sandy_* names), matching the lister parse.
+                "network inspect")
+                    for _net in "$@"; do
+                        case "$_net" in
+                            sandy_egress_2147483645) echo "$_net|livecontainer" ;;
+                            sandy_*) echo "$_net|" ;;
+                        esac
+                    done ;;
                 "network rm") echo "$3" >> "$RM_LOG" ;;
             esac
         }
@@ -4914,10 +4923,15 @@ case "$1" in
                 | { [ -s "$_ON_RM_LOG" ] && grep -vxFf "$_ON_RM_LOG" || cat; }
                 ;;
             inspect)
-                case "$3" in
-                    sandy_sidecar_*) echo "livecontainer" ;;
-                    *) echo "" ;;
-                esac
+                # #52 — batched: `network inspect -f TEMPLATE net1 net2 …`.
+                # Emit one `name|<attached>` line per net arg (match only
+                # sandy_* names so network/inspect/-f/TEMPLATE are skipped).
+                for _net in "$@"; do
+                    case "$_net" in
+                        sandy_sidecar_*) echo "$_net|livecontainer" ;;
+                        sandy_*) echo "$_net|" ;;
+                    esac
+                done
                 ;;
             rm)
                 echo "$3" >> "$_ON_RM_LOG"
@@ -5349,6 +5363,73 @@ rm -f "$_U71_SCOPE_OUT"
 
 rm -rf "$_U71_BIN" "$_U71_HOME" "$_U71_WSA" "$_U71_WSB"
 rm -f "$_U71_CALLLOG" "$_U71_PRIME_LOG" "$_U71_DRY_OUT" "$_U71_YES_OUT"
+
+# ============================================================
+echo ""
+echo "§72: 1.2.1 follow-ups — image-inspect batching (#52), image GC (#36), daemon-log polish (#51)"
+# ============================================================
+_S72="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+# --- #52: image_stale prefetch batches N per-container inspects into ONE ---
+# Two running sandy containers behind a stub docker. Full-mode print-state must
+# (a) make exactly ONE batched `docker inspect -f {{.Id}}|{{.Image}}|{{.Config.Image}}`,
+# (b) make ZERO per-container fallback `docker inspect -f {{.Image}}|{{.Config.Image}}`,
+# (c) still compute image_stale correctly (running==current → false, else true).
+_S72_BIN="$(mktemp -d)"; _S72_HOME="$(mktemp -d)"; _S72_LOG="$(mktemp)"; export _S72_LOG
+cat > "$_S72_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+echo "$@" >> "$_S72_LOG"
+case "$1" in
+  info) exit 0 ;;
+  ps) printf '%s\n' \
+        "c1short|sandy-a|sandy-claude-code|2026-01-01 00:00:00|||" \
+        "c2short|sandy-b|sandy-full|2026-01-01 00:00:00|||" ; exit 0 ;;
+  inspect)
+    if [ "$3" = '{{.Id}}|{{.Image}}|{{.Config.Image}}' ]; then
+      shift 3
+      for _id in "$@"; do case "$_id" in
+        c1short) echo "c1short0000000000|sha256:RUN1|sandy-claude-code" ;;
+        c2short) echo "c2short0000000000|sha256:OLD2|sandy-full" ;;
+      esac; done
+    fi ;;
+  image)
+    if [ "$3" = "-f" ]; then case "$5" in
+        sandy-claude-code) echo "sha256:RUN1" ;;   # == running → false
+        sandy-full)        echo "sha256:NEW2" ;;   # != OLD2   → true
+      esac
+    else exit 0 ; fi ;;
+  *) exit 0 ;;
+esac
+DOCKERSHIM
+chmod +x "$_S72_BIN/docker"
+_S72_JSON="$(PATH="$_S72_BIN:$PATH" SANDY_HOME="$_S72_HOME" bash "$_S72" --print-state 2>/dev/null)"
+check "print-state batches image inspects into ONE docker call (#52)" \
+    bash -c '[ "$(grep -cF "inspect -f {{.Id}}|{{.Image}}|{{.Config.Image}}" "$1")" = "1" ]' -- "$_S72_LOG"
+check "print-state makes ZERO per-container fallback inspects (#52)" \
+    bash -c '[ "$(grep -cF "inspect -f {{.Image}}|{{.Config.Image}}" "$1" || true)" = "0" ]' -- "$_S72_LOG"
+check "print-state image_stale stays correct under batching (#52)" \
+    bash -c 'printf "%s" "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); m={c[\"name\"]:c[\"image_stale\"] for c in d[\"running_containers\"]}; assert m=={\"sandy-a\":False,\"sandy-b\":True}, m"' -- "$_S72_JSON"
+rm -rf "$_S72_BIN" "$_S72_HOME" "$_S72_LOG"
+
+# --- #52: orphan lister batches its per-candidate network inspects into one ---
+# The `"${_candidates[@]}"` array arg passed to a single `docker network inspect`
+# IS the batching (was one inspect per candidate) — assert both live in the lister.
+check "orphan lister batches network inspect over all candidates (#52)" \
+    bash -c '_f="$(sed -n "/^_sandy_orphan_networks_list()/,/^}\$/p" "$1")"
+        printf "%s" "$_f" | grep -qF "docker network inspect" \
+            && printf "%s" "$_f" | grep -qF "\"\${_candidates[@]}\""' -- "$_S72"
+
+# --- #36: predecessor-image GC after a successful same-tag rebuild ---
+check "predecessor-image prune helper exists (#36)" \
+    grep -q '^_sandy_prune_old_image()' "$_S72"
+check "base/proxy/agent rebuilds capture + prune the predecessor image (#36)" \
+    bash -c '[ "$(grep -c "_sandy_prune_old_image \"\$_old_" "$1")" -ge 3 ]' -- "$_S72"
+
+# --- #51: daemon-log polish (color forced + base build quieted under supervisor) ---
+check "colors are forced under the daemon supervisor (#51)" \
+    grep -qF '[ -t 1 ] || [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]' "$_S72"
+check "base build is quieted under the daemon supervisor (#51)" \
+    bash -c 'grep -qF "_BASE_BUILD_Q=(-q)" "$1" && grep -qF "docker build \"\${_BASE_BUILD_Q[@]}\"" "$1"' -- "$_S72"
 
 # ============================================================
 # Summary
