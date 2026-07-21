@@ -118,7 +118,7 @@ Sandy loads configuration from four sources in order: `$HOME/.sandy/config`, `$H
 
 - **Privileged-only keys** (require per-workspace approval when set from a passive source):
   <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-  `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+  `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
   <!-- END AUTOGEN:privileged-key-list -->
 
   These would let a malicious `.sandy/config` committed to a repo disable isolation or exfiltrate credentials, so sandy collects them, prints the exact `KEY=VALUE` set, and asks for explicit approval before honoring them. Approvals are persisted to `$SANDY_HOME/approvals/passive-<workspace-hash>.list` (first line is a sha256 of the sorted `KEY=VALUE` set). Subsequent launches with the same set are silent; any edit to `.sandy/config` that changes a privileged key re-prompts. Revoke with `rm $SANDY_HOME/approvals/passive-<hash>.list`. Headless mode (`-p`/`--print`/`--prompt`) and non-TTY stdin fail closed — the keys are dropped with a pointer to "launch sandy interactively once from this directory to approve."
@@ -395,6 +395,20 @@ Per-workspace tokens (different value per project — common with HA, CI tokens,
 **Security boundary lives on the names, not the values.** `SANDY_EXTRA_ENV` is privileged-tier — a workspace setting it triggers the standard passive-privileged approval prompt. Once you've approved `HA_TOKEN`, the value can come from anywhere. The original threat (a committed `.sandy/config` setting `SANDY_EXTRA_ENV=AWS_SECRET_KEY` to exfiltrate your host env) is gated by the prompt the user sees before any value is forwarded.
 
 **Validation:** each name must match `[A-Z_][A-Z0-9_]*` (POSIX env-var convention) — invalid names are skipped with a warning. Names that already match a sandy-recognized key (e.g. `ANTHROPIC_API_KEY`) are also skipped — those go through their own typed path. A listed name with no value anywhere produces a launch-time warning ("`HA_TOKEN` has no value") but doesn't fail the launch.
+
+## Persistent agent args (`SANDY_AGENT_ARGS`)
+
+Some projects need a fixed set of extra CLI flags on the underlying agent (`claude`/`codex`/`gemini`/`opencode`) on **every** launch — e.g. a non-default `--mcp-config <path>`, or an agent's experimental flags. Passing them as command-line args to `sandy` works but doesn't persist, and — critically — **a shell wrapper can't cover non-CLI launchers**: `sandy-ui` (and any programmatic caller) invoke `sandy` directly. `SANDY_AGENT_ARGS` declares them in config so they apply uniformly to bare `sandy`, headless `-p`, the `--start` daemon, and sandy-ui:
+
+```sh
+# in <workspace>/.sandy/config (or ~/.sandy/config)
+SANDY_AGENT_ARGS=--mcp-config .mcp.custom.json --some-experimental-flag value
+```
+
+- **Where it applies.** The value is prepended to the same forwarded-args channel that command-line pass-through args ride, so it reaches whichever agent(s) launch. The final agent command line is `sandy's own flags → SANDY_AGENT_ARGS → command-line pass-through args`, so an explicit CLI arg still wins.
+- **Parsing (v1).** The value is **whitespace-split** into argv (`read -ra`), never `eval`'d, then each token is `printf %q`-quoted downstream like any pass-through arg. **Embedded spaces / quoted args are not supported in v1** — `SANDY_AGENT_ARGS=--msg "hello world"` becomes three tokens, not two. A quoting scheme and per-agent variants (`SANDY_CLAUDE_ARGS`, …) are possible follow-ups. In a multi-agent combo the same args go to every pane.
+- **Home.** Workspace `.sandy/config` is the intended home (these args are usually project-specific); host `~/.sandy/config` works too for user-global defaults, though a global home is the wrong scope for project-specific relative-path args.
+- **Security tier.** Privileged — set freely from host `~/.sandy/config`, but from a **workspace** `.sandy/config` it triggers the standard per-workspace approval prompt (arbitrary agent flags from a committed config are a real attack surface: `--dangerously-skip-permissions`, a hostile `--mcp-config`, `--add-dir`-style escapes). Headless/non-TTY drops it, same as `SANDY_EXTRA_ENV`. Headless-mode flags (`-p`/`--print`/`--prompt`) are **dropped with a warning** — host-side headless detection runs before this injection, so a `-p` here would make the host launch interactive while the container went headless (a broken session); put those on the command line. Other mode flags (`--continue`, `--new`) still influence launch mode, so avoid them here too.
 
 ## Workspace Mount Path
 

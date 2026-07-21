@@ -1,3 +1,19 @@
+## sandy v1.3.0 (unreleased)
+
+Additive feature work. `schema_version` stays `1`; the sandbox forward-compat promise holds.
+
+### `SANDY_AGENT_ARGS` — persistent extra agent args from config (#59)
+
+Declare a fixed set of extra CLI flags for the underlying agent (`claude`/`codex`/`gemini`/`opencode`) that apply on **every** launch — bare `sandy`, headless `-p`, the `--start` daemon, and **sandy-ui** (where a shell wrapper can't reach). Set it in `.sandy/config`:
+
+```sh
+SANDY_AGENT_ARGS=--mcp-config .mcp.custom.json --some-experimental-flag value
+```
+
+The value is prepended to the same forwarded-args channel as command-line pass-through args (final order: sandy's own flags → `SANDY_AGENT_ARGS` → CLI args, so an explicit CLI arg still wins). It's **privileged-tier** — free from host `~/.sandy/config`, approval-gated from a workspace `.sandy/config` (same model as `SANDY_EXTRA_ENV`; headless/non-TTY drops it). v1 parses the value by **whitespace split** (never `eval`'d); embedded-space/quoted args and per-agent variants (`SANDY_CLAUDE_ARGS`, …) are follow-ups.
+
+---
+
 ## sandy v1.2.1
 
 A **bug-fix and hardening** patch — no new features, no config-key or introspection changes (`schema_version` stays `1`), and the sandbox forward-compat promise holds. Most of these surfaced running 1.2.0 in real daemon-mode / `sandy-ui` use.

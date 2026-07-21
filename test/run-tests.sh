@@ -5521,6 +5521,84 @@ check "refresh child runs non-interactively (</dev/null) so an approval fails cl
     grep -qF ') </dev/null >"$_upd_build_log"' "$_S76"
 
 # ============================================================
+echo ""
+echo "§77: SANDY_AGENT_ARGS — persistent per-workspace agent args from config (#59)"
+# ============================================================
+_S77="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+# (a) Registered privileged-tier, NOT passive/env-only. Table-driven: this one
+# membership wires the approval gate + env-precedence snapshot + schema.
+check "SANDY_AGENT_ARGS is in SANDY_PRIVILEGED_KEYS (#59)" \
+    bash -c 'awk "/^SANDY_PRIVILEGED_KEYS=\(/,/^\)\$/" "$1" | grep -qE "^[[:space:]]+SANDY_AGENT_ARGS\$"' -- "$_S77"
+check "SANDY_AGENT_ARGS is NOT in SANDY_PASSIVE_KEYS" \
+    bash -c '! awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)\$/" "$1" | grep -qE "^[[:space:]]+SANDY_AGENT_ARGS\$"' -- "$_S77"
+check "SANDY_AGENT_ARGS is NOT in SANDY_ENV_ONLY_KEYS" \
+    bash -c '! awk "/^SANDY_ENV_ONLY_KEYS=\(/,/^\)\$/" "$1" | grep -qE "^[[:space:]]+SANDY_AGENT_ARGS\$"' -- "$_S77"
+
+# (b) --print-schema exposes it as privileged + approval-required.
+check "--print-schema lists SANDY_AGENT_ARGS as privileged + passive_approval_required" \
+    bash -c '"$1" --print-schema 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+m=[k for k in d[\"config\"][\"privileged_keys\"] if k[\"name\"]==\"SANDY_AGENT_ARGS\"]
+assert m, \"not in privileged_keys\"
+assert m[0].get(\"passive_approval_required\") is True, m[0]"' -- "$_S77"
+
+# (c) Value → argv rule (LOCKED v1): whitespace split, runs collapse, NO embedded
+# spaces (quotes are literal). Reproduces the injection's `read -ra` exactly.
+check "value split: 4 plain tokens" \
+    bash -c 'a=(); read -ra a <<< "$1"; [ "${#a[@]}" -eq 4 ] && [ "${a[0]}" = "--mcp-config" ]' -- "--mcp-config .mcp.custom.json --foo bar"
+check "value split: runs of whitespace collapse to 2 tokens" \
+    bash -c 'a=(); read -ra a <<< "$1"; [ "${#a[@]}" -eq 2 ] && [ "${a[1]}" = "value" ]' -- "--flag     value"
+check "value split: quoted arg NOT merged — spaces still split (edge: 3 tokens, no embedded spaces v1)" \
+    bash -c 'a=(); read -ra a <<< "$1"; [ "${#a[@]}" -eq 3 ] && [ "${a[0]}" = "--msg" ]' -- '--msg "hello world"'
+
+# (d) Injection: prepends config args before CLI $@, runs AFTER approval, NEVER
+# eval, and is NOT added to the --start re-exec argv (would double-apply).
+check "injection prepends config args before command-line \$@" \
+    grep -qF 'set -- "${_sandy_agent_args_argv[@]}" "$@"' "$_S77"
+check "injection whitespace-splits with read -ra and never evals the value" \
+    bash -c 'grep -qF "read -ra _sandy_agent_args_raw <<< \"\$SANDY_AGENT_ARGS\"" "$1" && ! grep -q "eval[^a-z].*SANDY_AGENT_ARGS" "$1"' -- "$_S77"
+check "injection runs after the approval/extra-env loader (unapproved workspace value → empty → no-op)" \
+    bash -c 'awk "/^_load_sandy_extra_env\$/{seen=1} seen&&/SANDY_AGENT_ARGS:-/{found=1} END{exit !found}" "$1"' -- "$_S77"
+check "SANDY_AGENT_ARGS is NOT added to the --start re-exec argv (no double-apply)" \
+    bash -c '! grep -q "_sandy_reexec_args+=.*SANDY_AGENT_ARGS" "$1"' -- "$_S77"
+check "injection strips headless-mode flags (-p/--print/--prompt) that host-side detection can't see" \
+    grep -qF -- '-p|--print|--prompt)' "$_S77"
+
+# (d2) Behavioral: run the injection logic under set -euo pipefail with empty /
+# all-whitespace / normal / mode-flag values — guards the bash-3.2 empty-array
+# class that regressed --build-only this session, plus the prepend + strip.
+check "injection block is bash-3.2/set-u safe: prepends, collapses empty, strips -p (behavioral)" \
+    bash -c '
+        set -euo pipefail
+        _inject() {
+            if [ -n "${SANDY_AGENT_ARGS:-}" ]; then
+                local raw=() argv=() a
+                read -ra raw <<< "$SANDY_AGENT_ARGS" || true
+                for a in ${raw[@]+"${raw[@]}"}; do
+                    case "$a" in -p|--print|--prompt) ;; *) argv+=("$a") ;; esac
+                done
+                [ "${#argv[@]}" -gt 0 ] && set -- "${argv[@]}" "$@"
+            fi
+            printf "%s" "$#"
+        }
+        [ "$(SANDY_AGENT_ARGS="" _inject)" = "0" ] &&          # empty, 0 CLI args → no crash, count 0
+        [ "$(SANDY_AGENT_ARGS="   " _inject)" = "0" ] &&       # all-whitespace → no tokens
+        [ "$(SANDY_AGENT_ARGS="--a b" _inject x y)" = "4" ] && # prepended before CLI args
+        [ "$(SANDY_AGENT_ARGS="-p --a" _inject)" = "1" ]       # -p stripped, --a kept
+    '
+
+# (e) Forwarded verbatim through per-agent translation for all four agents.
+_S77_TA="$(sed -n '/^_sandy_translate_args()/,/^}$/p' "$_S77")"
+for _s77_ag in claude codex gemini opencode; do
+    check "SANDY_AGENT_ARGS token forwarded through _sandy_translate_args ($_s77_ag)" \
+        bash -c "$_S77_TA
+out=\$(_sandy_translate_args $_s77_ag --mcp-config .mcp.custom.json)
+echo \"\$out\" | grep -q -- '--mcp-config' && echo \"\$out\" | grep -q '.mcp.custom.json'"
+done
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
