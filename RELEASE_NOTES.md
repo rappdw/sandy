@@ -16,6 +16,22 @@ The value is prepended to the same forwarded-args channel as command-line pass-t
 
 The proxy launch gate now waits for the proxy's listeners to actually **bind**, not just for its process to start. The proxy image bakes a Docker `HEALTHCHECK` that re-invokes the binary as `sandy-proxy -healthcheck` (a scratch image has no shell, so the binary is its own probe); it dials the `:443`/`:80`/`:3128` listeners and issues one DNS query on `:53`. The launcher polls `.State.Health.Status` and proceeds only on `healthy`. This closes a transient "connection refused" window where the agent's very first request could race a not-yet-bound listener (the old gate polled bare `.State.Running`, which flips true before `net.Listen`). Older HEALTHCHECK-less cached proxy images still launch via a legacy `.State.Running` fallback, and a crash-looping proxy still short-circuits the poll. This is the last slice of the #15 readiness follow-up, deferred out of 1.0.1.
 
+### `sandy --gc` — unified resource reclaim (#36)
+
+`sandy --gc [--dry-run] [--yes]` is a one-shot global maintenance command that reclaims every kind of leaked sandy-owned Docker resource in a single pass, in the same pre-preflight fast-path family as `--print-state`/`--prune-orphans` (needs only a reachable Docker daemon — no config load, mutex, or image build):
+
+- **Dead-owner containers** — any `sandy-*`/`sandy-proxy-*` container nothing live still owns.
+- **Orphaned networks** — delegates to the existing `--prune-orphans` lister/reaper unchanged, so the two can never drift; `--prune-orphans` stays as a documented subset of `--gc`, not deprecated.
+- **Orphaned per-project images** (`sandy-project-<x>`) — no sandbox directory still references them.
+- **Orphaned skill-pack images** (`sandy-skills(-base)?-<x>`) — no sandbox's workspace still configures that pack set.
+- **Dangling sandy images** — `<none>:<none>` images left over from a rebuild, scoped to sandy's own images via a new `sandy.managed=1` build label stamped on all six `docker build` sites (base, proxy, agent, skills-base, skills, per-project). **Retroactive caveat:** images built by a pre-1.3.0 sandy lack this label and are invisible to the dangling-image sweep — it only prevents new dangling images from accumulating going forward.
+
+**Container-liveness safety guarantee (D9).** The container-liveness check reuses daemon mode's hard-won rule verbatim: *the container is truth only with a LIVE inner tmux session.* A running daemon-labeled container is reaped only if `tmux has-session` actually fails (a genuine zombie); a live session is **never touched — regardless of `sandy.daemon_pid` liveness**, so a host reboot that resurrects a `--restart unless-stopped` container on a dead supervisor pid is correctly left alone rather than force-removed out from under a healthy session.
+
+**Flow:** prints a plan up front ("Would remove ..."), then: nothing to reclaim exits 0 immediately; `--dry-run` prints the plan and exits 0 before any confirmation; otherwise `--yes` skips the prompt, a TTY without it gets an interactive y/N, and a non-interactive caller without it errors and exits 1 (same non-TTY-fails-closed contract as the rest of sandy's approval-gated surfaces). Reap order is containers → networks → project images → skills images → dangling images last. A before/after re-count (not the attempt count) drives the final summary, so a resource that raced back to life between the plan and the reap isn't falsely claimed.
+
+**New `--print-state` fields:** `dangling_images` and `orphaned_containers`, **full mode only** (both `null` in light mode, mirroring `image_stale`'s convention, to stay within the light-mode two-spawn poll budget) — so a UI can display live reclaim-candidate counts and confirm they drop after a `sandy --gc --yes`.
+
 ---
 
 ## sandy v1.2.1

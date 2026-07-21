@@ -278,7 +278,9 @@ All three:
       "updated_at": null
     }
   ],
-  "orphan_networks": 0
+  "orphan_networks": 0,
+  "dangling_images": 1,
+  "orphaned_containers": 0
 }
 ```
 
@@ -343,6 +345,23 @@ All three:
 > light`. A UI can call `--prune-orphans` and then re-read this field to
 > confirm the count dropped.
 
+> **`dangling_images` / `orphaned_containers`** (top-level, added additively in
+> `1.3.0`, #36 — no `schema_version` bump; powers `sandy --gc`). **FULL MODE
+> ONLY** — same reasoning as `image_stale`: both cost extra docker spawns
+> (`dangling_images` a `docker images -f dangling=true -f label=sandy.managed=1`
+> call; `orphaned_containers` a `docker ps -a` plus a bounded `docker exec …
+> tmux has-session` probe per running daemon-labeled container), so `--print-
+> state light` always reports both as `null` — even when real orphans exist —
+> to stay within its two-spawn poll-friendly budget. `dangling_images` is the
+> count of `<none>:<none>` images carrying the `sandy.managed=1` build label
+> (§1 of the #36 provenance-label change); `orphaned_containers` is the count
+> of `sandy-*`/`sandy-proxy-*` containers `sandy --gc`'s container-liveness
+> predicate would reap (the same D6/D9 "truth only with a live inner tmux
+> session" rule daemon mode uses — a running daemon-labeled container with a
+> live session is never counted, regardless of `sandy.daemon_pid` liveness).
+> Both are `null` when `docker_reachable` is `false`. A UI can call `sandy --gc
+> --yes` and then re-read these fields to confirm the counts dropped.
+
 > **Light mode — `sandy --print-state light`.** A second positional arg selects
 > a cheap variant for pollers: its steady-state budget is **exactly two** docker
 > invocations (vs. ~nine) by (a) skipping `installed_images` — the key stays
@@ -390,7 +409,7 @@ Exit code: `0` on schemas that load cleanly (even with warnings), `1` on fatal e
 
 - Current: `schema_version: 1`
 - **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal`), `description`, `sources`, and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
-- **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. Clients ignore unknown fields. Three additive changes shipped this way: `since`/`stability` on config-key objects (`0.15.0`, PR 4.1, above); in `1.1.0` (#17), three new `cli_flags` entries (`--start`, `--attach`, `--stop` — daemon-mode flags) plus three new `running_containers[]` fields (`sandbox`, `daemon`, `attached_clients` — see `--print-state` below); and, also in `1.1.0` (#26), one more `cli_flags` entry (`--prune-orphans` — reap orphaned sandy networks and exit) plus one new top-level `--print-state` field (`orphan_networks` — see above). In `1.2.0`, one more `cli_flags` entry (`--update-sessions` — fleet image refresh + rolling restart across every daemon session on the host, scopeable to a single session with `--workspace PATH`, #41) plus two new `running_containers[]` fields: `image_stale` (FULL MODE ONLY, #41 — see above) and `updated_at` (both modes, #44 — see above).
+- **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. Clients ignore unknown fields. Three additive changes shipped this way: `since`/`stability` on config-key objects (`0.15.0`, PR 4.1, above); in `1.1.0` (#17), three new `cli_flags` entries (`--start`, `--attach`, `--stop` — daemon-mode flags) plus three new `running_containers[]` fields (`sandbox`, `daemon`, `attached_clients` — see `--print-state` below); and, also in `1.1.0` (#26), one more `cli_flags` entry (`--prune-orphans` — reap orphaned sandy networks and exit) plus one new top-level `--print-state` field (`orphan_networks` — see above). In `1.2.0`, one more `cli_flags` entry (`--update-sessions` — fleet image refresh + rolling restart across every daemon session on the host, scopeable to a single session with `--workspace PATH`, #41) plus two new `running_containers[]` fields: `image_stale` (FULL MODE ONLY, #41 — see above) and `updated_at` (both modes, #44 — see above). In `1.3.0`, one more `cli_flags` entry (`--gc` — unified reclaim of dead-owner containers, orphaned networks, orphaned per-project/skill images, and dangling sandy images, with `--dry-run`/`--yes` sub-options, #36) plus two new top-level `--print-state` fields: `dangling_images` and `orphaned_containers` (both FULL MODE ONLY — see above).
 - **Deprecations** (existing key changes semantics): bump to `schema_version: 2`. Sandy publishes both versions in parallel via `--print-schema --schema-version 1` for one minor release, then drops v1 with a release-note callout.
 - **Compatibility range**: each sandy version declares `supported_schema_versions` and `deprecated_schema_versions` so clients can decide to warn/refuse.
 

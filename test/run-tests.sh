@@ -1237,7 +1237,10 @@ SKILLS_TEST_DIR="$(mktemp -d)"
     }
     error() { echo "ERROR: $*" >&2; }
 
-    # Extract the generator function from the script and source it
+    # Extract the generator function from the script and source it. It calls the
+    # shared _sandy_skill_pack_suffix helper (#36 refactor), so extract that too —
+    # this subshell is isolated and only has what we eval into it.
+    eval "$(sed -n '/^_sandy_skill_pack_suffix()/,/^}/p' "$SCRIPT")"
     eval "$(sed -n '/^generate_skill_pack_dockerfiles()/,/^}/p' "$SCRIPT")"
 
     generate_skill_pack_dockerfiles "gstack"
@@ -5630,6 +5633,476 @@ check "readiness gate keeps a legacy .State.Running fallback (none case)" \
     bash -c 'awk "/_proxy_up=false/,/_proxy_up != true/" "$1" | grep -q "State.Running"' -- "$_S78"
 check "readiness gate retains the RestartCount crash-loop fast-fail" \
     bash -c 'awk "/_proxy_up=false/,/_proxy_up != true/" "$1" | grep -q "RestartCount"' -- "$_S78"
+
+# ============================================================
+echo ""
+echo "§79: sandy --gc — unified Docker-resource reclaim (#36)"
+# ============================================================
+_S79="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+# --- (a) Structural checks ---
+
+check "all five new listers + four reapers + the suffix helper exist (#36)" \
+    bash -c 'for f in _sandy_dangling_images_list _sandy_orphaned_project_images_list _sandy_orphaned_skills_images_list _sandy_dead_owner_containers_list _sandy_gc_reap_containers _sandy_gc_reap_project_images _sandy_gc_reap_skills_images _sandy_gc_reap_dangling_images _sandy_skill_pack_suffix; do
+        grep -q "^${f}()" "$1" || { echo "missing $f"; exit 1; }
+    done' -- "$_S79"
+
+# All five must be DEFINED before _sandy_emit_state (fast-path forward-
+# reference discipline — see the #26 orphan-network lister precedent).
+check "new listers/reapers are defined before _sandy_emit_state (fast-path forward-ref)" \
+    bash -c '
+        emit_line=$(grep -n "^_sandy_emit_state()" "$1" | head -1 | cut -d: -f1)
+        for f in _sandy_dangling_images_list _sandy_orphaned_project_images_list _sandy_orphaned_skills_images_list _sandy_dead_owner_containers_list _sandy_gc_reap_containers _sandy_gc_reap_project_images _sandy_gc_reap_skills_images _sandy_gc_reap_dangling_images; do
+            def_line=$(grep -n "^${f}()" "$1" | head -1 | cut -d: -f1)
+            [ -n "$def_line" ] && [ "$def_line" -lt "$emit_line" ] || { echo "$f defined at $def_line, not before $emit_line"; exit 1; }
+        done' -- "$_S79"
+
+check "the --gc dispatcher exists as its own fast-path block" \
+    grep -q 'if \[\[ "${1:-}" == "--gc" \]\]; then' "$_S79"
+
+check "all 6 docker build sites carry --label sandy.managed=1 (#36 provenance label)" \
+    bash -c '[ "$(grep -c "docker build" "$1")" -ge 6 ] && [ "$(grep -c -- "--label sandy.managed=1" "$1")" -ge 6 ]' -- "$_S79"
+
+check "_sandy_dangling_images_list filters on BOTH dangling=true and label=sandy.managed=1" \
+    bash -c '_f="$(sed -n "/^_sandy_dangling_images_list()/,/^}\$/p" "$1")"
+        printf "%s" "$_f" | grep -qF "dangling=true" && printf "%s" "$_f" | grep -qF "label=sandy.managed=1"' -- "$_S79"
+
+check "the container-liveness gate never reads/queries the sandy.daemon_pid label (D9 defense)" \
+    bash -c '_f="$(sed -n "/^_sandy_dead_owner_containers_list()/,/^}\$/p" "$1")"
+        ! printf "%s" "$_f" | grep -q "sandy\.daemon_pid"' -- "$_S79"
+
+check "--gc parses its OWN --dry-run/--yes into distinct locals, not SANDY_UPDATE_*" \
+    bash -c '_f="$(awk "/^if \[\[ \"\\\${1:-}\" == \"--gc\" \]\]; then/,/^fi\$/" "$1")"
+        printf "%s" "$_f" | grep -qF "_sandy_gc_dry_run" \
+            && printf "%s" "$_f" | grep -qF "_sandy_gc_yes" \
+            && ! printf "%s" "$_f" | grep -qE "SANDY_UPDATE_(DRY_RUN|YES)="' -- "$_S79"
+
+check "agent container RUN_FLAGS and proxy_run both carry the future-proofing sandy.managed=true label" \
+    bash -c '[ "$(grep -c -- "--label \"sandy.managed=true\"" "$1")" -ge 2 ]' -- "$_S79"
+
+check "--print-schema declares --gc as a cli_flag" \
+    grep -qF '_json_kv name '"'"'"--gc"'"'"'' "$_S79"
+
+check "--print-state emits dangling_images/orphaned_containers in all four branches" \
+    bash -c '[ "$(grep -c "\"dangling_images\"" "$1")" -ge 4 ] && [ "$(grep -c "\"orphaned_containers\"" "$1")" -ge 4 ]' -- "$_S79"
+
+# --- (a2) Post-verify-pass structural checks (B1/B2/Major-3 fixes) ---
+
+check "_sandy_gc_probe_has_session exists and its retry branch uses the 5x/sleep-1 pattern" \
+    bash -c '_f="$(sed -n "/^_sandy_gc_probe_has_session()/,/^}\$/p" "$1")"
+        printf "%s" "$_f" | grep -qE "for _i in 1 2 3 4 5" \
+            && printf "%s" "$_f" | grep -qF "sleep 1"' -- "$_S79"
+
+check "the container reaper invokes the lister with the retrying 'reap' mode" \
+    bash -c '_f="$(sed -n "/^_sandy_gc_reap_containers()/,/^}\$/p" "$1")"
+        printf "%s" "$_f" | grep -qF "_sandy_dead_owner_containers_list reap"' -- "$_S79"
+
+check "the --gc dispatcher's plan step also uses 'reap' mode (plan matches what actually happens)" \
+    bash -c '_f="$(awk "/^if \[\[ \"\\\${1:-}\" == \"--gc\" \]\]; then/,/^fi\$/" "$1")"
+        printf "%s" "$_f" | grep -qF "_sandy_dead_owner_containers_list reap"' -- "$_S79"
+
+check "the container-liveness gate discriminates agent-vs-proxy by IMAGE, not name prefix (B1/B2 fix)" \
+    bash -c '_f="$(sed -n "/^_sandy_dead_owner_containers_list()/,/^}\$/p" "$1")"
+        # Must branch on the image being exactly sandy-proxy, and must NOT
+        # strip a "sandy-proxy-" prefix off an agent container name anymore
+        # (that name-prefix test is exactly the B1/B2 regression).
+        printf "%s" "$_f" | grep -qF "\"\$_img_base\" = \"sandy-proxy\"" \
+            && ! printf "%s" "$_f" | grep -qF "sandy-proxy-*) _sbname="' -- "$_S79"
+
+check "proxy liveness is decided by the paired agent's KEPT-set membership, not the proxy's own lock" \
+    bash -c '_f="$(sed -n "/^_sandy_dead_owner_containers_list()/,/^}\$/p" "$1")"
+        printf "%s" "$_f" | grep -qF "_kept_agents"' -- "$_S79"
+
+check "the skills in-use set also consults host \$SANDY_HOME/config and the environment (M4 fix)" \
+    bash -c '_f="$(sed -n "/^_sandy_orphaned_skills_images_list()/,/^}\$/p" "$1")"
+        printf "%s" "$_f" | grep -qF "SANDY_HOME/config" \
+            && printf "%s" "$_f" | grep -qF "\${SANDY_SKILL_PACKS:-}"' -- "$_S79"
+
+# --- (b) Behavioral: end-to-end against a stateful stubbed `docker` ---
+#
+# Fixture (container predicate, §3 of the plan):
+#   sandy-fg-live      running, no daemon label, LIVE lock pid ($$)     -> survives
+#   sandy-fg-dead      exited,  no daemon label                        -> reaped (dead)
+#   sandy-fg-deadlock  running, no daemon label, DEAD lock pid          -> reaped (dead-owner)
+#   sandy-daemon-exited exited, daemon label                            -> reaped (dead)
+#   sandy-daemon-zombie running, daemon label, has-session FAILS        -> reaped (zombie)
+#   sandy-daemon-alive  running, daemon label, has-session SUCCEEDS     -> SURVIVES (D9 top assertion:
+#                        the lister never consults sandy.daemon_pid, only the live tmux probe)
+#   unrelated           running, non-sandy image                       -> excluded (image gate)
+#
+# Post-verify-pass additions (B1/B2 regressions — image sandy-proxy is what
+# makes a row a "proxy", never the sandy-proxy- name prefix):
+#   sandy-proxy-daemon-alive   image sandy-proxy, paired agent "daemon-alive"
+#                              (KEPT above) -> SURVIVES (B1 top assertion: a
+#                              daemon's proxy must never be judged by its OWN
+#                              lock file — that lock holds the SUPERVISOR's
+#                              pid, which the #47 zombie-supervisor case can
+#                              kill out from under a perfectly live session).
+#   sandy-proxy-bphash          image sandy-claude-code (an AGENT, despite the
+#                              proxy-shaped NAME — a workspace whose sanitized
+#                              basename is "proxy"), running, LIVE lock pid at
+#                              .proxy-bphash.lock -> SURVIVES (B2: agent-vs-
+#                              proxy must be decided by image, not name).
+#   sandy-proxy-proxy-bphash    image sandy-proxy, paired agent name (stripped
+#                              "sandy-proxy-") is "proxy-bphash", which IS the
+#                              row above and is KEPT -> SURVIVES (B2, proxy side).
+#   sandy-proxy-orphanx         image sandy-proxy, paired agent "orphanx" does
+#                              not exist in this fixture at all -> REAPED
+#                              (paired agent absent-or-reaped).
+#
+# Fixture (images):
+#   sandy-project-live-abc123  (sandbox dir "live-abc123" exists)       -> survives
+#   sandy-project-gone-def456  (no matching sandbox dir)                -> reaped
+#   dangling-labeled-1   (dangling=true, HAS sandy.managed=1)           -> reaped
+#   dangling-unlabeled-1 (dangling=true, NO sandy.managed=1 — only
+#                         returned by the shim if the real invocation
+#                         drops the label filter, which would be a
+#                         regression)                                  -> NEVER touched
+#
+# Stateful: `stop`/`rm -f`/`rmi`/`network rm` are logged AND recorded into
+# removal-tracking files so a subsequent `ps -a`/`images` re-query (the
+# --gc dispatcher's before/after re-count) reflects the actual removal —
+# same pattern as §69's stateful network shim.
+_S79_BIN="$(mktemp -d)"
+_S79_HOME="$(mktemp -d)"
+_S79_WS="$(mktemp -d)"
+_S79_ACTIONS="$(mktemp)"
+_S79_RM_CONTAINERS="$(mktemp)"; : > "$_S79_RM_CONTAINERS"
+_S79_RM_IMAGES="$(mktemp)"; : > "$_S79_RM_IMAGES"
+: > "$_S79_ACTIONS"
+export _S79_ACTIONS _S79_RM_CONTAINERS _S79_RM_IMAGES
+
+mkdir -p "$_S79_HOME/sandboxes/live-abc123"
+mkdir -p "$_S79_HOME/sandboxes/fg-live-hash" "$_S79_HOME/sandboxes/.fg-live-hash.lock"
+echo $$ > "$_S79_HOME/sandboxes/.fg-live-hash.lock/pid"
+mkdir -p "$_S79_HOME/sandboxes/fg-deadlock-hash" "$_S79_HOME/sandboxes/.fg-deadlock-hash.lock"
+_S79_DEAD_PID=2147483646
+echo "$_S79_DEAD_PID" > "$_S79_HOME/sandboxes/.fg-deadlock-hash.lock/pid"
+export _S79_DEAD_PID
+# B2 fixture: a workspace whose sanitized basename is "proxy" -> SANDBOX_NAME
+# "proxy-bphash", agent container "sandy-proxy-bphash", LIVE lock pid ($$).
+mkdir -p "$_S79_HOME/sandboxes/proxy-bphash" "$_S79_HOME/sandboxes/.proxy-bphash.lock"
+echo $$ > "$_S79_HOME/sandboxes/.proxy-bphash.lock/pid"
+
+cat > "$_S79_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+echo "CALL: $*" >> "$_S79_ACTIONS"
+case "$1" in
+    ps)
+        if [ "$2" = "-a" ]; then
+            printf '%s\n' \
+                "cfgl|sandy-fg-live-hash|running||sandy-claude-code" \
+                "cfgd|sandy-fg-dead|exited||sandy-claude-code" \
+                "cfgdl|sandy-fg-deadlock-hash|running||sandy-claude-code" \
+                "cdex|sandy-daemon-exited|exited|true|sandy-claude-code" \
+                "czomb|sandy-daemon-zombie|running|true|sandy-claude-code" \
+                "calive|sandy-daemon-alive|running|true|sandy-claude-code" \
+                "cunrel|unrelated|running||someother-image" \
+                "cbp|sandy-proxy-bphash|running||sandy-claude-code" \
+                "cpalive|sandy-proxy-daemon-alive|running||sandy-proxy" \
+                "cpbp|sandy-proxy-proxy-bphash|running||sandy-proxy" \
+                "cporphan|sandy-proxy-orphanx|running||sandy-proxy" \
+                | { [ -s "$_S79_RM_CONTAINERS" ] && grep -vxFf "$_S79_RM_CONTAINERS" || cat; }
+            exit 0
+        fi
+        exit 0
+        ;;
+    exec)
+        # docker exec -u <uid> <cid> tmux has-session -t sandy
+        case "$4" in
+            czomb)  exit 1 ;;   # zombie: has-session fails
+            calive) exit 0 ;;   # ALIVE: has-session succeeds (D9)
+            *)      exit 1 ;;
+        esac
+        ;;
+    stop) exit 0 ;;
+    rm)
+        # docker rm -f <name>
+        [ "$2" = "-f" ] && echo "$3" >> "$_S79_RM_CONTAINERS"
+        exit 0
+        ;;
+    network)
+        case "$2" in
+            ls) exit 0 ;;       # no sandy_* networks in this fixture
+            inspect) exit 0 ;;
+            rm) exit 0 ;;
+        esac
+        ;;
+    images)
+        _args="$*"
+        if [[ "$_args" == *"dangling=true"* ]]; then
+            if [[ "$_args" == *"label=sandy.managed=1"* ]]; then
+                # Correct invocation: server-side label filtering means only
+                # the labeled dangling image is ever returned.
+                printf '%s\n' "dangling-labeled-1" \
+                    | { [ -s "$_S79_RM_IMAGES" ] && grep -vxFf "$_S79_RM_IMAGES" || cat; }
+            else
+                # Regression case: dropping the label filter would surface
+                # the unlabeled dangling image too.
+                printf '%s\n' "dangling-labeled-1" "dangling-unlabeled-1" \
+                    | { [ -s "$_S79_RM_IMAGES" ] && grep -vxFf "$_S79_RM_IMAGES" || cat; }
+            fi
+            exit 0
+        fi
+        if [[ "$_args" == *"label=sandy.managed=1"* ]]; then
+            printf '%s\n' "sandy-project-live-abc123" "sandy-project-gone-def456" \
+                | { [ -s "$_S79_RM_IMAGES" ] && grep -vxFf "$_S79_RM_IMAGES" || cat; }
+            exit 0
+        fi
+        exit 0
+        ;;
+    rmi)
+        echo "$2" >> "$_S79_RM_IMAGES"
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
+DOCKERSHIM
+chmod +x "$_S79_BIN/docker"
+
+# --dry-run: plan is printed, nothing logged as an rm/rmi/stop action, exit 0.
+: > "$_S79_ACTIONS"
+_S79_DRY_OUT="$(PATH="$_S79_BIN:$PATH" SANDY_HOME="$_S79_HOME" bash "$_S79" --gc --dry-run 2>&1)"
+_S79_DRY_RC=$?
+check "--gc --dry-run exits 0" test "$_S79_DRY_RC" -eq 0
+check "--gc --dry-run reports the --dry-run message" \
+    bash -c 'printf "%s" "$1" | grep -qF "no resources removed"' -- "$_S79_DRY_OUT"
+check "--gc --dry-run performs NO stop/rm/rmi actions" \
+    bash -c '! grep -qE "^CALL: (stop|rm -f|rmi)" "$1"' -- "$_S79_ACTIONS"
+check "--gc --dry-run's plan lists the D9-survivor as NOT removed (sandy-daemon-alive absent)" \
+    bash -c '! printf "%s" "$1" | grep -q "sandy-daemon-alive"' -- "$_S79_DRY_OUT"
+check "--gc --dry-run's plan includes the expected dead-owner containers" \
+    bash -c 'printf "%s" "$1" | grep -q "sandy-fg-dead" \
+        && printf "%s" "$1" | grep -q "sandy-fg-deadlock-hash" \
+        && printf "%s" "$1" | grep -q "sandy-daemon-exited" \
+        && printf "%s" "$1" | grep -q "sandy-daemon-zombie" \
+        && ! printf "%s" "$1" | grep -q "sandy-fg-live-hash" \
+        && ! printf "%s" "$1" | grep -q "unrelated"' -- "$_S79_DRY_OUT"
+check "--gc --dry-run's plan: a daemon's proxy with a DEAD supervisor lock still SURVIVES (B1 top assertion)" \
+    bash -c '! printf "%s" "$1" | grep -q "sandy-proxy-daemon-alive"' -- "$_S79_DRY_OUT"
+check "--gc --dry-run's plan: a proxy-shaped-NAME agent with a live lock SURVIVES (B2 agent side)" \
+    bash -c '! printf "%s" "$1" | grep -qx "  - sandy-proxy-bphash"' -- "$_S79_DRY_OUT"
+check "--gc --dry-run's plan: that agent's paired proxy SURVIVES too (B2 proxy side)" \
+    bash -c '! printf "%s" "$1" | grep -q "sandy-proxy-proxy-bphash"' -- "$_S79_DRY_OUT"
+check "--gc --dry-run's plan: a proxy with NO paired agent at all is listed for removal" \
+    bash -c 'printf "%s" "$1" | grep -q "sandy-proxy-orphanx"' -- "$_S79_DRY_OUT"
+
+# Non-TTY without --yes: refuses, exits 1, nothing logged. Guard the expected-
+# nonzero invocation with `|| rc=$?` so it doesn't trip the suite's set -e / ERR
+# trap (a bare command exiting 1 aborts before the next line captures $?).
+: > "$_S79_ACTIONS"
+_S79_NOYES_RC=0
+PATH="$_S79_BIN:$PATH" SANDY_HOME="$_S79_HOME" bash "$_S79" --gc </dev/null >/dev/null 2>&1 || _S79_NOYES_RC=$?
+check "--gc with something to reclaim, non-TTY, no --yes exits 1" test "$_S79_NOYES_RC" -eq 1
+check "--gc non-TTY refusal performs NO stop/rm/rmi actions" \
+    bash -c '! grep -qE "^CALL: (stop|rm -f|rmi)" "$1"' -- "$_S79_ACTIONS"
+
+# --yes under non-TTY: proceeds without a prompt, exit 0, and reaps in the
+# documented order (containers -> networks -> project images -> skills
+# images -> dangling images last). Guarded like the calls above so a stray
+# non-zero fails the assertion cleanly instead of aborting the suite.
+: > "$_S79_ACTIONS"
+_S79_YES_RC=0
+PATH="$_S79_BIN:$PATH" SANDY_HOME="$_S79_HOME" bash "$_S79" --gc --yes </dev/null >/dev/null 2>&1 || _S79_YES_RC=$?
+check "--gc --yes (non-TTY) exits 0" test "$_S79_YES_RC" -eq 0
+check "--gc --yes reaped exactly the 5 expected dead-owner containers (4 base + 1 orphaned proxy)" \
+    bash -c 'sort -u "$1" | wc -l | grep -qx 5' -- "$_S79_RM_CONTAINERS"
+check "--gc --yes never touched the D9-alive daemon container" \
+    bash -c '! grep -qx "sandy-daemon-alive" "$1"' -- "$_S79_RM_CONTAINERS"
+check "--gc --yes never touched the live-lock foreground container" \
+    bash -c '! grep -qx "sandy-fg-live-hash" "$1"' -- "$_S79_RM_CONTAINERS"
+check "--gc --yes never touched the D9-alive daemon's paired proxy (B1 regression)" \
+    bash -c '! grep -qx "sandy-proxy-daemon-alive" "$1"' -- "$_S79_RM_CONTAINERS"
+check "--gc --yes never touched the proxy-shaped-NAME live agent (B2 agent side)" \
+    bash -c '! grep -qx "sandy-proxy-bphash" "$1"' -- "$_S79_RM_CONTAINERS"
+check "--gc --yes never touched that agent's paired proxy (B2 proxy side)" \
+    bash -c '! grep -qx "sandy-proxy-proxy-bphash" "$1"' -- "$_S79_RM_CONTAINERS"
+check "--gc --yes reaped the proxy whose paired agent is entirely absent" \
+    bash -c 'grep -qx "sandy-proxy-orphanx" "$1"' -- "$_S79_RM_CONTAINERS"
+check "--gc --yes reaped the orphaned project image but kept the in-use one" \
+    bash -c 'grep -qx "sandy-project-gone-def456" "$1" && ! grep -qx "sandy-project-live-abc123" "$1"' -- "$_S79_RM_IMAGES"
+check "--gc --yes reaped the LABELED dangling image but never the unlabeled one (key safety assertion)" \
+    bash -c 'grep -qx "dangling-labeled-1" "$1" && ! grep -qx "dangling-unlabeled-1" "$1"' -- "$_S79_RM_IMAGES"
+check "--gc --yes orders container removal BEFORE image removal in the action log" \
+    bash -c '
+        _first_container=$(grep -nE "^CALL: (stop |rm -f )" "$1" | head -1 | cut -d: -f1)
+        _first_image=$(grep -nE "^CALL: rmi " "$1" | head -1 | cut -d: -f1)
+        [ -n "$_first_container" ] && [ -n "$_first_image" ] && [ "$_first_container" -lt "$_first_image" ]' -- "$_S79_ACTIONS"
+
+# Nothing-to-reclaim path: fresh empty fixture, message + exit 0.
+_S79_EMPTY_BIN="$(mktemp -d)"
+cat > "$_S79_EMPTY_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+case "$1" in
+    ps) exit 0 ;;
+    network) [ "$2" = "ls" ] && exit 0; exit 0 ;;
+    images) exit 0 ;;
+    *) exit 0 ;;
+esac
+DOCKERSHIM
+chmod +x "$_S79_EMPTY_BIN/docker"
+_S79_EMPTY_HOME="$(mktemp -d)"
+_S79_EMPTY_OUT="$(PATH="$_S79_EMPTY_BIN:$PATH" SANDY_HOME="$_S79_EMPTY_HOME" bash "$_S79" --gc 2>&1)"
+_S79_EMPTY_RC=$?
+check "--gc with nothing to reclaim exits 0" test "$_S79_EMPTY_RC" -eq 0
+check "--gc with nothing to reclaim prints the expected message" \
+    bash -c 'printf "%s" "$1" | grep -qF "Nothing to reclaim."' -- "$_S79_EMPTY_OUT"
+
+# --gc with an unrecognized trailing argument errors and exits 1.
+_S79_BOGUS_RC=0
+PATH="$_S79_EMPTY_BIN:$PATH" SANDY_HOME="$_S79_EMPTY_HOME" bash "$_S79" --gc --bogus >/dev/null 2>&1 || _S79_BOGUS_RC=$?
+check "--gc rejects an unrecognized trailing argument (exit 1)" test "$_S79_BOGUS_RC" -eq 1
+
+# docker-absent: overlay every PATH-reachable executable EXCEPT docker (same
+# technique as §69's docker-absent case) so `command -v docker` fails.
+_S79_NODOCKER_BIN="$(mktemp -d)"
+_S79_SAVE_IFS="$IFS"; IFS=':'
+for _S79_D in $PATH; do
+    IFS="$_S79_SAVE_IFS"
+    [ -d "$_S79_D" ] || continue
+    for _S79_F in "$_S79_D"/*; do
+        [ -x "$_S79_F" ] && [ -f "$_S79_F" ] || continue
+        _S79_BASE="${_S79_F##*/}"
+        [ "$_S79_BASE" = "docker" ] && continue
+        [ -e "$_S79_NODOCKER_BIN/$_S79_BASE" ] || ln -s "$_S79_F" "$_S79_NODOCKER_BIN/$_S79_BASE" 2>/dev/null
+    done
+    IFS=':'
+done
+IFS="$_S79_SAVE_IFS"
+_S79_NODOCKER_RC=0
+PATH="$_S79_NODOCKER_BIN" bash "$_S79" --gc >/dev/null 2>&1 || _S79_NODOCKER_RC=$?
+check "--gc exits 1 when docker is unreachable" test "$_S79_NODOCKER_RC" -eq 1
+
+# print-state: full mode reports the right counts; light mode stays null,null
+# even with real orphans present. Reuses _S79_HOME (which still has the
+# fg-live-hash/fg-deadlock-hash/proxy-bphash lock fixtures) rather than a
+# fresh dir, and resets the RM-tracking logs so the counts reflect the
+# pre-reap fixture — same 5 dead-owner containers (4 base + 1 orphaned
+# proxy) / 1 dangling image the --gc assertions above proved. print-state's
+# count path uses the default (single-probe) mode, but that's fixture-
+# equivalent here since czomb/calive's has-session responses are static
+# (not counter-based), so the classification is identical either way.
+: > "$_S79_RM_CONTAINERS"; : > "$_S79_RM_IMAGES"
+_S79_PS_FULL="$(PATH="$_S79_BIN:$PATH" SANDY_HOME="$_S79_HOME" bash "$_S79" --print-state 2>/dev/null)"
+check "print-state (full): dangling_images/orphaned_containers report real counts" \
+    bash -c 'python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+assert d[\"dangling_images\"] == 1, d[\"dangling_images\"]
+assert d[\"orphaned_containers\"] == 5, d[\"orphaned_containers\"]
+" "$1"' -- "$_S79_PS_FULL"
+_S79_PS_LIGHT="$(PATH="$_S79_BIN:$PATH" SANDY_HOME="$_S79_HOME" bash "$_S79" --print-state light 2>/dev/null)"
+check "print-state (light): dangling_images/orphaned_containers stay null even with orphans present" \
+    bash -c 'python3 -c "
+import json, sys
+d = json.loads(sys.argv[1])
+assert d[\"dangling_images\"] is None, d[\"dangling_images\"]
+assert d[\"orphaned_containers\"] is None, d[\"orphaned_containers\"]
+" "$1"' -- "$_S79_PS_LIGHT"
+
+rm -rf "$_S79_BIN" "$_S79_HOME" "$_S79_WS" "$_S79_ACTIONS" "$_S79_RM_CONTAINERS" "$_S79_RM_IMAGES" \
+       "$_S79_EMPTY_BIN" "$_S79_EMPTY_HOME" "$_S79_NODOCKER_BIN" 2>/dev/null || true
+
+# --- (c) M4 regression: skills in-use set must also consult host
+# ~/.sandy/config (and the environment), not just per-workspace configs ---
+#
+# Fixture: two skills pack suffixes, both carrying sandy.managed=1:
+#   gstack     — NO per-workspace sandbox override, but host $SANDY_HOME/config
+#                sets SANDY_SKILL_PACKS=gstack (the common "set it once,
+#                globally" case) -> sandy-skills-gstack / sandy-skills-base-
+#                gstack must SURVIVE.
+#   orphanpack — configured nowhere at all -> sandy-skills-orphanpack /
+#                sandy-skills-base-orphanpack must be REAPED.
+_S79M4_BIN="$(mktemp -d)"
+_S79M4_HOME="$(mktemp -d)"
+mkdir -p "$_S79M4_HOME/sandboxes"
+echo "SANDY_SKILL_PACKS=gstack" > "$_S79M4_HOME/config"
+cat > "$_S79M4_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+case "$1" in
+    ps) exit 0 ;;
+    network) [ "$2" = "ls" ] && exit 0; exit 0 ;;
+    images)
+        _args="$*"
+        if [[ "$_args" == *"dangling=true"* ]]; then exit 0; fi
+        if [[ "$_args" == *"label=sandy.managed=1"* ]]; then
+            printf '%s\n' "sandy-skills-gstack" "sandy-skills-base-gstack" \
+                "sandy-skills-orphanpack" "sandy-skills-base-orphanpack"
+            exit 0
+        fi
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
+DOCKERSHIM
+chmod +x "$_S79M4_BIN/docker"
+_S79M4_OUT="$(PATH="$_S79M4_BIN:$PATH" SANDY_HOME="$_S79M4_HOME" bash "$_S79" --gc --dry-run 2>&1)"
+check "M4: host ~/.sandy/config SANDY_SKILL_PACKS keeps the in-use skills images out of the plan" \
+    bash -c '! printf "%s" "$1" | grep -q "sandy-skills-gstack" \
+        && ! printf "%s" "$1" | grep -q "sandy-skills-base-gstack"' -- "$_S79M4_OUT"
+check "M4: a pack configured nowhere is still correctly listed as orphaned" \
+    bash -c 'printf "%s" "$1" | grep -q "sandy-skills-orphanpack" \
+        && printf "%s" "$1" | grep -q "sandy-skills-base-orphanpack"' -- "$_S79M4_OUT"
+# Env-var precedence: same fixture, no host config at all, SANDY_SKILL_PACKS
+# set directly in the environment sandy --gc runs under.
+rm -f "$_S79M4_HOME/config"
+_S79M4_ENV_OUT="$(SANDY_SKILL_PACKS=gstack PATH="$_S79M4_BIN:$PATH" SANDY_HOME="$_S79M4_HOME" bash "$_S79" --gc --dry-run 2>&1)"
+check "M4: SANDY_SKILL_PACKS already in the environment also protects the in-use skills images" \
+    bash -c '! printf "%s" "$1" | grep -q "sandy-skills-gstack" \
+        && ! printf "%s" "$1" | grep -q "sandy-skills-base-gstack" \
+        && printf "%s" "$1" | grep -q "sandy-skills-orphanpack"' -- "$_S79M4_ENV_OUT"
+rm -rf "$_S79M4_BIN" "$_S79M4_HOME" 2>/dev/null || true
+
+# --- (d) Major-3 regression: a mid-startup daemon must survive the reap,
+# not just the plan (a single has-session probe would misread a container
+# whose supervisor hasn't created the tmux session yet as a zombie) ---
+#
+# Counter-based shim: `tmux has-session` fails the first two probes and
+# succeeds on the third — simulating a supervisor that's still mid-startup.
+# Only the retrying "reap" mode (5x/sleep-1) can observe the eventual
+# success; a single-probe caller would misread this as a zombie.
+_S79R_BIN="$(mktemp -d)"
+_S79R_HOME="$(mktemp -d)"
+mkdir -p "$_S79R_HOME/sandboxes"
+_S79R_COUNTER="$(mktemp)"; echo 0 > "$_S79R_COUNTER"
+export _S79R_COUNTER
+cat > "$_S79R_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+case "$1" in
+    ps)
+        if [ "$2" = "-a" ]; then
+            printf '%s\n' "d1|sandy-midstart|running|true|sandy-claude-code"
+            exit 0
+        fi
+        exit 0
+        ;;
+    exec)
+        _n="$(cat "$_S79R_COUNTER")"
+        _n=$((_n + 1))
+        echo "$_n" > "$_S79R_COUNTER"
+        [ "$_n" -ge 3 ] && exit 0
+        exit 1
+        ;;
+    network) [ "$2" = "ls" ] && exit 0; exit 0 ;;
+    images) exit 0 ;;
+    *) exit 0 ;;
+esac
+DOCKERSHIM
+chmod +x "$_S79R_BIN/docker"
+echo 0 > "$_S79R_COUNTER"
+_S79R_OUT="$(PATH="$_S79R_BIN:$PATH" SANDY_HOME="$_S79R_HOME" bash "$_S79" --gc --dry-run 2>&1)"
+check "Major-3: a mid-startup daemon (has-session fails twice, then succeeds) is NOT reaped" \
+    bash -c 'printf "%s" "$1" | grep -qF "Nothing to reclaim."' -- "$_S79R_OUT"
+check "Major-3: the retry actually ran multiple probes before succeeding" \
+    bash -c '[ "$(cat "$1")" -ge 3 ]' -- "$_S79R_COUNTER"
+rm -rf "$_S79R_BIN" "$_S79R_HOME" "$_S79R_COUNTER" 2>/dev/null || true
+
+# NOTE: real reclaim against a live Docker daemon (actual container/image
+# removal, timing/races under a concurrent launch, the orphaned-skills-image
+# lister's WORKSPACE.json + .sandy/config walk against a real filesystem) is
+# NOT exercised here — it's deferred to a maintainer-run acceptance script,
+# mirroring test/acceptance-daemon.sh and test/acceptance-update-sessions.sh
+# for the other Docker-runtime features (#36).
 
 # ============================================================
 # Summary

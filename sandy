@@ -632,6 +632,22 @@ _json_escape() {
 # to wrap strings via _json_escape and pass booleans/nulls literally).
 _json_kv() { printf '"%s":%s' "$1" "$2"; }
 
+# Shared suffix pipeline for skill-pack image names (sandy-skills-base-<suffix>,
+# sandy-skills-<suffix>): comma-separated pack list -> sorted, trimmed,
+# hyphen-joined, lowercased suffix. Extracted (#36) from two build-path call
+# sites (generate_skill_pack_dockerfiles's skills-base name, and the Phase 2.5
+# SANDY_SKILL_PACKS build block) plus the orphaned-skills-image lister below,
+# so all three compute the IDENTICAL suffix from the same pack list — DEC-4b
+# single source of truth. Drift here would make the lister's in-use set
+# silently diverge from what a real launch actually names an image. Defined
+# early (well before both build call sites and the --gc listers) so every
+# consumer — including --print-state's fast-path dispatch, which can exit
+# before the script's linear execution reaches either build site — resolves
+# it.
+_sandy_skill_pack_suffix() {
+    printf '%s' "$1" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort | tr '\n' '-' | sed 's/-$//' | tr '[:upper:]' '[:lower:]'
+}
+
 # Emit a JSON array from lines on stdin (each line = one string element).
 # Empty input → "[]". Used for string-list fields (choices, sources, etc.).
 _json_str_array() {
@@ -802,6 +818,8 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--stop"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Stop a running daemon session (full teardown)."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--prune-orphans"'; printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Reap orphaned sandy_* networks (dead-owner, no attached container) and exit."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--gc"';            printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"One-shot global reclaim: dead-owner containers, orphaned sandy_* networks, orphaned per-project/skill images, and dangling sandy images. Sub-options: --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--update-sessions"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Fleet image refresh + rolling restart across every daemon session on the host; scope to one session with --workspace PATH. Sub-options: --dry-run, --yes, --idle-for <minutes>, --rebuild, --workspace."'; printf '}'
     printf ']'
@@ -1101,6 +1119,360 @@ _sandy_reap_orphan_networks() {
     return $freed
 }
 
+# --- sandy --gc (#36) — unified Docker-resource reclaim: pure listers +
+# reapers. Placed here — immediately after _sandy_reap_orphan_networks, before
+# _sandy_emit_state — for the SAME forward-reference reason the network
+# lister sits here: --print-state is a FAST-PATH handler that can dispatch
+# and exit before the script's linear execution ever reaches a definition
+# placed further down (e.g. "near --gc's own dispatcher"), and bash only
+# resolves a function call against whatever has already been DEFINED earlier
+# in the file. DEC-4b single source of truth: the same listers back
+# --print-state's new `dangling_images`/`orphaned_containers` counts, the
+# `--gc` dispatcher's plan+reap, and (for networks) the pre-existing
+# --prune-orphans path — one gate per resource kind, never three copies of it
+# drifting apart.
+
+# 2a — dangling (<none>:<none>) images carrying sandy's provenance label
+# (§1: sandy.managed=1, stamped on every `docker build` sandy runs). Scoped
+# to the label so a rebuild-orphaned image from some OTHER tool's build churn
+# is never touched — the label is the only thing that tells a sandy dangling
+# image apart from anyone else's. One spawn; no PID/liveness gate needed (a
+# dangling image is referenced by no tag and is never "live" the way a
+# network/container can be) — `docker rmi` without -f is itself the safety
+# net for anything still referenced by a child image.
+#
+# NOTE (retroactive gap): images built by a pre-1.3.0 sandy never got this
+# label, so a dangling image left over from a rebuild done before this
+# feature shipped is invisible here. Those fall back to whatever manual
+# cleanup already existed; the label only prevents new dangling images from
+# accumulating going forward.
+_sandy_dangling_images_list() {
+    docker images -f dangling=true -f label=sandy.managed=1 --format '{{.ID}}' 2>/dev/null || true
+}
+
+# 2b — sandy-project-<x> images (per-.sandy/Dockerfile project layers) whose
+# owning sandbox directory no longer exists. Candidates come from the same
+# sandy.managed=1 label; the in-use set is a pure filesystem walk of
+# $SANDY_HOME/sandboxes/*/ recomputing "sandy-project-<basename>" lowercased
+# — the IDENTICAL transform the build path (PROJECT_IMAGE_NAME) applies, so
+# this can never drift from what a launch actually names an image. No
+# docker/config parsing beyond the one `docker images` spawn.
+_sandy_orphaned_project_images_list() {
+    local _candidates _inuse _cand _sb _base
+    _candidates="$(docker images -f label=sandy.managed=1 --format '{{.Repository}}' 2>/dev/null \
+        | grep -E '^sandy-project-' || true)"
+    [ -n "$_candidates" ] || return 0
+    _inuse=""
+    if [ -d "$SANDY_HOME/sandboxes" ]; then
+        for _sb in "$SANDY_HOME/sandboxes"/*/; do
+            [ -d "$_sb" ] || continue
+            _base="$(basename "${_sb%/}")"
+            _inuse="${_inuse}
+$(printf '%s' "sandy-project-${_base}" | tr '[:upper:]' '[:lower:]')"
+        done
+    fi
+    while IFS= read -r _cand; do
+        [ -n "$_cand" ] || continue
+        printf '%s\n' "$_inuse" | grep -qxF "$_cand" || printf '%s\n' "$_cand"
+    done <<< "$_candidates"
+    return 0
+}
+
+# 2c — sandy-skills(-base)?-<suffix> images whose pack set is no longer
+# configured by any sandbox whose workspace still exists, AND isn't the
+# host-global default. Candidates from the sandy.managed=1 label; the in-use
+# set is built from THREE sources (M4 fix — the first two are workspace-
+# independent, since SANDY_SKILL_PACKS is passive-safe and commonly set ONCE
+# globally rather than per-workspace):
+#   1. SANDY_SKILL_PACKS already in THIS process's environment (env wins
+#      over config, same precedence the config loader documents elsewhere).
+#   2. Host $SANDY_HOME/config (~/.sandy/config) — the common "set it once,
+#      globally" home for this passive-safe key. Last matching line wins
+#      (mirrors the config loader's own last-match-wins iteration order).
+#   3. Each sandbox's WORKSPACE.json -> still-existing workspace_path ->
+#      that workspace's own .sandy/config SANDY_SKILL_PACKS= (the same
+#      minimal inline idiom _sandy_validate_config uses — NOT
+#      _load_sandy_config, which isn't defined yet at this point in the file
+#      and has side effects this lister must avoid).
+# All three recompute the suffix via the shared _sandy_skill_pack_suffix()
+# helper (same one both build call sites use — DEC-4b, prevents drift) and
+# are added to the SAME in-use set unconditionally — sources 1/2 aren't tied
+# to any one sandbox, so they only WIDEN what counts as in-use, never narrow
+# it. Without sources 1/2, a host-global `SANDY_SKILL_PACKS=gstack` with no
+# per-workspace override would see an EMPTY in-use set and `docker rmi` the
+# actively-used sandy-skills-gstack/sandy-skills-base-gstack on every
+# `--gc` run — not data loss (a running container's image is still
+# referenced, so a plain `rmi` no-ops), but it silently forces a full
+# skills-base rebuild (Chromium + bun) on the next launch that needs it.
+#
+# Known imprecision (documented, not a bug): a workspace that's temporarily
+# unmounted (removable drive, unmounted NFS share), whose .sandy/config was
+# edited AFTER the image was built, or a host config sandy can't read for
+# some other reason, under-detects as orphaned. A read/parse failure on
+# either the host or a per-workspace config just contributes nothing to the
+# in-use set (matches "when uncertain, keep" — it never actively marks an
+# image as reap-safe, it can only fail to protect one) rather than crashing
+# the lister. This residual imprecision is safe because skills/project
+# images are reproducible artifacts — a false-positive reap costs a full
+# skills-base (Chromium/bun) rebuild on the next launch that needs it, not
+# data loss.
+_sandy_orphaned_skills_images_list() {
+    local _candidates _inuse _cand _sb _ws_path _packs _suffix
+    _candidates="$(docker images -f label=sandy.managed=1 --format '{{.Repository}}' 2>/dev/null \
+        | grep -E '^sandy-skills(-base)?-' || true)"
+    [ -n "$_candidates" ] || return 0
+    _inuse=""
+
+    # Source 1: env var already set in this process's environment.
+    if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
+        _suffix="$(_sandy_skill_pack_suffix "$SANDY_SKILL_PACKS")"
+        if [ -n "$_suffix" ]; then
+            _inuse="${_inuse}
+sandy-skills-base-${_suffix}
+sandy-skills-${_suffix}"
+        fi
+    fi
+
+    # Source 2: host-global ~/.sandy/config. Not gated to any one sandbox —
+    # this is the common "set it once, globally" home for this key.
+    if [ -r "$SANDY_HOME/config" ]; then
+        _packs="$(grep -E '^SANDY_SKILL_PACKS=' "$SANDY_HOME/config" 2>/dev/null | tail -n1 \
+            | sed 's/^SANDY_SKILL_PACKS=//')"
+        if [ -n "$_packs" ]; then
+            _suffix="$(_sandy_skill_pack_suffix "$_packs")"
+            if [ -n "$_suffix" ]; then
+                _inuse="${_inuse}
+sandy-skills-base-${_suffix}
+sandy-skills-${_suffix}"
+            fi
+        fi
+    fi
+
+    # Source 3: per-workspace overrides, keyed off each sandbox's own
+    # WORKSPACE.json -> .sandy/config.
+    if [ -d "$SANDY_HOME/sandboxes" ]; then
+        for _sb in "$SANDY_HOME/sandboxes"/*/; do
+            [ -d "$_sb" ] || continue
+            [ -f "${_sb}WORKSPACE.json" ] || continue
+            _ws_path="$(grep -m1 '"workspace_path"' "${_sb}WORKSPACE.json" 2>/dev/null \
+                | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//')"
+            [ -n "$_ws_path" ] && [ -d "$_ws_path" ] || continue
+            _packs="$(grep -m1 '^SANDY_SKILL_PACKS=' "$_ws_path/.sandy/config" 2>/dev/null \
+                | sed 's/^SANDY_SKILL_PACKS=//')"
+            [ -n "$_packs" ] || continue
+            _suffix="$(_sandy_skill_pack_suffix "$_packs")"
+            [ -n "$_suffix" ] || continue
+            _inuse="${_inuse}
+sandy-skills-base-${_suffix}
+sandy-skills-${_suffix}"
+        done
+    fi
+    while IFS= read -r _cand; do
+        [ -n "$_cand" ] || continue
+        printf '%s\n' "$_inuse" | grep -qxF "$_cand" || printf '%s\n' "$_cand"
+    done <<< "$_candidates"
+    return 0
+}
+
+# Probe an inner tmux session's liveness for the container-liveness gate
+# below. Arg 2 selects the mode: "reap" retries the SAME 5x/sleep-1 pattern
+# --start's D6 idempotency check (~"_sandy_session_live=0") and bare-sandy's
+# DEC-B check use, so a container that's merely mid-startup (the supervisor
+# hasn't created the tmux session yet) is never misread as a zombie and
+# reaped out from under a concurrent `sandy --start`. Any other mode (the
+# --print-state COUNT path, where a momentarily-stale read is merely
+# informational) is a single probe — --print-state must stay cheap, and a
+# 5-second stall per mid-startup container would defeat that. Gating the
+# retry to the destructive path only is deliberate: the expensive check is
+# paid exactly where a wrong answer is irreversible.
+_sandy_gc_probe_has_session() {
+    local _cid="$1" _mode="$2" _i
+    if [ "$_mode" = "reap" ]; then
+        for _i in 1 2 3 4 5; do
+            docker exec -u "$(id -u)" "$_cid" tmux has-session -t sandy >/dev/null 2>&1 && return 0
+            sleep 1
+        done
+        return 1
+    fi
+    docker exec -u "$(id -u)" "$_cid" tmux has-session -t sandy >/dev/null 2>&1
+}
+
+# 2d — dead-owner sandy_* container NAMES (one per line). Reuses the D6/D9
+# "the container is truth only with a LIVE inner tmux session" rule from
+# --start/--stop — NEVER trusts sandy.daemon_pid liveness (the D9 lesson: a
+# reboot can resurrect a --restart unless-stopped container on a dead
+# supervisor pid, and that container is still a legitimate live session).
+#
+# Arg 1 (optional): passed straight through to _sandy_gc_probe_has_session as
+# its mode — pass "reap" from the destructive reaper (_sandy_gc_reap_containers)
+# so a mid-startup daemon gets the 5x/sleep-1 retry before being judged a
+# zombie; leave unset for the --print-state COUNT path, which wants a single
+# cheap probe.
+#
+# One `docker ps -a` enumerates every candidate; classification is a TWO-PASS
+# walk over the captured output (not the live command), because a proxy
+# sidecar's liveness is a function of its PAIRED AGENT's liveness, which is
+# only known once every agent row has been classified:
+#
+#   Pass 1 — every AGENT container (image != sandy-proxy: sandy-base,
+#   sandy-claude-code, sandy-gemini-cli, sandy-codex, sandy-opencode,
+#   sandy-full, sandy-project-*, sandy-skills*). Any sandy-proxy-imaged row is
+#   stashed for pass 2 instead of classified here. Agent-vs-proxy is decided
+#   by IMAGE, never by name prefix — a workspace whose sanitized basename
+#   happens to be "proxy" produces a container literally named
+#   "sandy-proxy-<hash>" running a real agent image, and a name-prefix test
+#   would misclassify it as a proxy sidecar (the fixed #36 regression, "B2").
+#   Per agent row:
+#     1. Image-name gate (best-effort, mirrors print-state's existing filter):
+#        skip rows already excluded by the case above. This gate is scoped by
+#        container NAMING (matched against `docker ps -a --filter
+#        name=^/sandy-`), deliberately NOT the sandy.managed label — the label
+#        is only stamped on images (§1), so this predicate stays operative
+#        (retroactive) even for containers a pre-1.3.0 sandy started.
+#     2. Daemon-labeled (sandy.daemon=true):
+#          not running -> dead, reap
+#          running      -> probe tmux has-session (mode-gated retry above):
+#                             success -> ALIVE, KEPT — never touch, regardless
+#                                        of daemon_pid liveness (the D9 defense)
+#                             failure -> zombie, reap
+#     3. Not daemon-labeled (foreground/interactive agent): SANDBOX_NAME is
+#        derived by stripping ONLY the "sandy-" prefix (never "sandy-proxy-"
+#        — that branch is for images, this is always a real agent image) —
+#        this alone fixes B2, since the "proxy"-named workspace's agent
+#        strips to the correct "proxy-<hash>" sandbox name, not an empty
+#        string. Check $SANDY_HOME/sandboxes/.<name>.lock/pid:
+#          missing/non-numeric/dead -> dead-owner, reap
+#          live pid                  -> KEPT, skip
+#        (Reuses the exact lock_holder_alive liveness test #14/--print-state
+#        already use.)
+#     Every KEPT agent's sandbox name is recorded in a set for pass 2.
+#
+#   Pass 2 — every PROXY container (image == sandy-proxy, sandy-proxy-<name>).
+#   A proxy's own running state and any lock file are IGNORED — proxy
+#   liveness is entirely a function of its paired agent (sandy-<name>):
+#     paired agent's sandbox name is in the pass-1 KEPT set -> KEPT, skip
+#     otherwise (paired agent absent, dead, or reaped)      -> reap
+#   This closes the other #36 regression ("B1"): a daemon session's proxy is
+#   never sandy.daemon-labeled, so a naive single-branch reading of its own
+#   lock file (which holds the SUPERVISOR's pid) would misjudge it dead the
+#   moment a live session's supervisor is SIGKILL/OOM-killed (the #47 zombie-
+#   supervisor case) even though the agent container (and its tmux session)
+#   is still perfectly healthy — reaping the proxy would then strand that
+#   live agent on a routeless --internal sidecar (the exact failure the
+#   atomic agent+proxy teardown in cleanup() exists to prevent).
+#
+# The dedicated reaper (_sandy_gc_reap_containers) re-invokes THIS lister
+# (with "reap" mode) at call time (not a cached earlier list) immediately
+# before each destructive `docker rm -f` — its own authoritative re-probe,
+# since the op is destructive. This lister is also used by --print-state's
+# `orphaned_containers` COUNT (default mode, single probe), where a
+# momentarily-stale read is merely informational.
+_sandy_dead_owner_containers_list() {
+    local _mode="${1:-}"
+    local _ps_out
+    _ps_out="$(docker ps -a --filter 'name=^/sandy-' \
+        --format '{{.ID}}|{{.Names}}|{{.State}}|{{.Label "sandy.daemon"}}|{{.Image}}' 2>/dev/null)" || _ps_out=""
+    [ -n "$_ps_out" ] || return 0
+
+    local _cid _cname _cstate _cdaemon _cimg _img_base _sbname _lock _lpid
+    local _kept_agents="" _proxy_rows=""
+
+    # Pass 1: agents.
+    while IFS='|' read -r _cid _cname _cstate _cdaemon _cimg; do
+        [ -n "$_cid" ] || continue
+        _img_base="${_cimg%%:*}"
+        if [ "$_img_base" = "sandy-proxy" ]; then
+            _proxy_rows="${_proxy_rows}
+${_cname}"
+            continue
+        fi
+        case "$_img_base" in
+            sandy-base|sandy-claude-code|sandy-gemini-cli|sandy-codex|sandy-opencode|sandy-full|sandy-project-*|sandy-skills*) : ;;
+            *) continue ;;
+        esac
+        _sbname="${_cname#sandy-}"
+        if [ "$_cdaemon" = "true" ]; then
+            if [ "$_cstate" != "running" ]; then
+                printf '%s\n' "$_cname"
+                continue
+            fi
+            if _sandy_gc_probe_has_session "$_cid" "$_mode"; then
+                _kept_agents="${_kept_agents}
+${_sbname}"
+                continue   # ALIVE — never touch, regardless of daemon_pid (D9)
+            fi
+            printf '%s\n' "$_cname"
+            continue
+        fi
+        # Not daemon-labeled: foreground/interactive agent container.
+        if [ "$_cstate" != "running" ]; then
+            printf '%s\n' "$_cname"
+            continue
+        fi
+        _lock="$SANDY_HOME/sandboxes/.${_sbname}.lock"
+        _lpid=""
+        [ -d "$_lock" ] && _lpid="$(cat "$_lock/pid" 2>/dev/null || true)"
+        if [ -n "$_lpid" ] && [ "$_lpid" -eq "$_lpid" ] 2>/dev/null && kill -0 "$_lpid" 2>/dev/null; then
+            _kept_agents="${_kept_agents}
+${_sbname}"
+            continue   # live lock owner — skip
+        fi
+        printf '%s\n' "$_cname"
+    done <<< "$_ps_out"
+
+    # Pass 2: proxies, judged solely by their paired agent's KEPT status.
+    while IFS= read -r _cname; do
+        [ -n "$_cname" ] || continue
+        _sbname="${_cname#sandy-proxy-}"
+        printf '%s\n' "$_kept_agents" | grep -qxF "$_sbname" && continue   # paired agent KEPT — skip
+        printf '%s\n' "$_cname"
+    done <<< "$_proxy_rows"
+
+    return 0
+}
+
+# 2e — thin reapers: `for x in $(_list); do docker action; done`, mirroring
+# _sandy_reap_orphan_networks. Each re-invokes its lister at CALL time (not a
+# cached snapshot from an earlier plan step), so the --gc dispatcher's
+# plan -> confirm -> reap flow always acts on a fresh read — closing the same
+# TOCTOU window _sandy_reap_orphan_networks already tolerates for networks (a
+# candidate that raced back to life between plan and reap is simply not
+# caught by the NEXT list either, so nothing is force-removed out from under
+# a legitimately-revived resource).
+_sandy_gc_reap_containers() {
+    local _cname
+    # "reap" mode: retries the mid-startup has-session probe (5x/sleep-1)
+    # before judging a running daemon container a zombie — this destructive
+    # path is exactly where a wrong answer is irreversible.
+    for _cname in $(_sandy_dead_owner_containers_list reap); do
+        # docker stop (graceful) then rm -f — mirrors --stop's own teardown
+        # sequence for a dead-session daemon zombie.
+        docker stop "$_cname" >/dev/null 2>&1 || true
+        docker rm -f "$_cname" >/dev/null 2>&1 || true
+    done
+}
+
+_sandy_gc_reap_project_images() {
+    local _img
+    for _img in $(_sandy_orphaned_project_images_list); do
+        docker rmi "$_img" >/dev/null 2>&1 || true
+    done
+}
+
+_sandy_gc_reap_skills_images() {
+    local _img
+    for _img in $(_sandy_orphaned_skills_images_list); do
+        docker rmi "$_img" >/dev/null 2>&1 || true
+    done
+}
+
+_sandy_gc_reap_dangling_images() {
+    local _id
+    for _id in $(_sandy_dangling_images_list); do
+        docker rmi "$_id" >/dev/null 2>&1 || true
+    done
+}
+
 # Emit runtime state JSON: sandboxes, approvals, running containers.
 _sandy_emit_state() {
     # Mode: "full" (default) or "light". Light mode (#18) makes exactly TWO
@@ -1314,10 +1686,18 @@ _sandy_emit_state() {
             # light path in the common case.
             local _orphans; _orphans="$(_sandy_orphan_networks_list | grep -c . || true)"
             printf ',"orphan_networks":%s' "${_orphans:-0}"
+            # #36 DEC-U6-style — dangling_images/orphaned_containers are FULL
+            # MODE ONLY (see the full-mode branch below for the real counts);
+            # light mode always reports null,null to stay within the #25
+            # two-spawn poll-friendly budget.
+            printf ',"dangling_images":null'
+            printf ',"orphaned_containers":null'
         else
             printf ',"docker_reachable":false'
             printf ',"running_containers":null'
             printf ',"orphan_networks":null'
+            printf ',"dangling_images":null'
+            printf ',"orphaned_containers":null'
         fi
     else   # full mode
         local _ps_out
@@ -1373,10 +1753,23 @@ _sandy_emit_state() {
             # #26 DEC-4c — see the light-mode branch above for the cost note.
             local _orphans; _orphans="$(_sandy_orphan_networks_list | grep -c . || true)"
             printf ',"orphan_networks":%s' "${_orphans:-0}"
+            # #36 — dangling_images/orphaned_containers, FULL MODE ONLY (same
+            # DEC-U6-style budget reasoning as image_stale): one extra
+            # `docker images` spawn (dangling_images) and one extra
+            # `docker ps -a` + bounded `docker exec ... tmux has-session`
+            # probes, ONE per running daemon-labeled container ONLY
+            # (orphaned_containers — mirrors orphan_networks's "extra spawns
+            # only for candidates that need them" cost model).
+            local _dangling; _dangling="$(_sandy_dangling_images_list | grep -c . || true)"
+            printf ',"dangling_images":%s' "${_dangling:-0}"
+            local _orphan_containers; _orphan_containers="$(_sandy_dead_owner_containers_list | grep -c . || true)"
+            printf ',"orphaned_containers":%s' "${_orphan_containers:-0}"
         else
             printf ',"docker_reachable":false'
             printf ',"running_containers":null'
             printf ',"orphan_networks":null'
+            printf ',"dangling_images":null'
+            printf ',"orphaned_containers":null'
         fi
     fi
 
@@ -1605,6 +1998,150 @@ if [[ "${1:-}" == "--prune-orphans" ]]; then
     exit 0
 fi
 
+if [[ "${1:-}" == "--gc" ]]; then
+    # #36 — unified maintenance fast-path: one-shot global reclaim of
+    # dead-owner sandy_* containers, orphaned sandy_* networks (reusing
+    # _sandy_reap_orphan_networks UNCHANGED — DEC-4b, so this can never drift
+    # from --prune-orphans, which stays as a documented subset), orphaned
+    # per-project/skill images, and dangling sandy images. Same
+    # pre-preflight family as --print-state/--prune-orphans: global,
+    # workspace-independent, runs BEFORE config load, mutex, or image build
+    # — needs only a reachable Docker daemon.
+    #
+    # CRITICAL: --dry-run/--yes are normally parsed by the MAIN flag-parsing
+    # loop, but that loop runs AFTER this fast-path dispatch (same reason
+    # --prune-orphans never takes sub-flags through it either) — so --gc
+    # parses its OWN trailing args right here, into separate locals
+    # (deliberately NOT SANDY_UPDATE_DRY_RUN/SANDY_UPDATE_YES, which belong to
+    # the unrelated --update-sessions dispatcher and are populated by the
+    # main loop long after this fast path would already have exited).
+    _sandy_gc_dry_run=false
+    _sandy_gc_yes=false
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dry-run) _sandy_gc_dry_run=true ;;
+            --yes)     _sandy_gc_yes=true ;;
+            *)
+                error "--gc: unrecognized argument: $1"
+                exit 1
+                ;;
+        esac
+        shift
+    done
+
+    if ! command -v docker >/dev/null 2>&1 || ! docker ps >/dev/null 2>&1; then
+        error "--gc requires a reachable Docker daemon."
+        exit 1
+    fi
+
+    # Compute all five lists up front so the printed plan and the confirm
+    # prompt reflect exactly what's about to be removed. Containers use
+    # "reap" mode here too (not just inside the reaper itself) so the plan
+    # matches what will actually happen — --gc is an occasional, user-invoked
+    # command, not a poll path, so paying the mid-startup retry twice (once
+    # for the plan, once for the reap's own authoritative re-probe) is a
+    # non-issue.
+    _sandy_gc_containers="$(_sandy_dead_owner_containers_list reap)"
+    _sandy_gc_networks="$(_sandy_orphan_networks_list)"
+    _sandy_gc_proj_images="$(_sandy_orphaned_project_images_list)"
+    _sandy_gc_skills_images="$(_sandy_orphaned_skills_images_list)"
+    _sandy_gc_dangling_images="$(_sandy_dangling_images_list)"
+
+    _sandy_gc_n_containers="$(printf '%s\n' "$_sandy_gc_containers" | grep -c . || true)"
+    _sandy_gc_n_containers="${_sandy_gc_n_containers:-0}"
+    _sandy_gc_n_networks="$(printf '%s\n' "$_sandy_gc_networks" | grep -c . || true)"
+    _sandy_gc_n_networks="${_sandy_gc_n_networks:-0}"
+    _sandy_gc_n_proj="$(printf '%s\n' "$_sandy_gc_proj_images" | grep -c . || true)"
+    _sandy_gc_n_proj="${_sandy_gc_n_proj:-0}"
+    _sandy_gc_n_skills="$(printf '%s\n' "$_sandy_gc_skills_images" | grep -c . || true)"
+    _sandy_gc_n_skills="${_sandy_gc_n_skills:-0}"
+    _sandy_gc_n_dangling="$(printf '%s\n' "$_sandy_gc_dangling_images" | grep -c . || true)"
+    _sandy_gc_n_dangling="${_sandy_gc_n_dangling:-0}"
+
+    _sandy_gc_total=$((_sandy_gc_n_containers + _sandy_gc_n_networks + _sandy_gc_n_proj + _sandy_gc_n_skills + _sandy_gc_n_dangling))
+
+    printf '\n'
+    printf 'sandy --gc: reclaim plan\n'
+    if [ "$_sandy_gc_n_containers" -gt 0 ]; then
+        printf 'Would remove %d dead-owner container(s):\n' "$_sandy_gc_n_containers"
+        printf '%s\n' "$_sandy_gc_containers" | grep . | sed 's/^/  - /'
+    fi
+    if [ "$_sandy_gc_n_networks" -gt 0 ]; then
+        printf 'Would remove %d orphaned network(s):\n' "$_sandy_gc_n_networks"
+        printf '%s\n' "$_sandy_gc_networks" | grep . | sed 's/^/  - /'
+    fi
+    if [ "$_sandy_gc_n_proj" -gt 0 ]; then
+        printf 'Would remove %d orphaned project image(s):\n' "$_sandy_gc_n_proj"
+        printf '%s\n' "$_sandy_gc_proj_images" | grep . | sed 's/^/  - /'
+    fi
+    if [ "$_sandy_gc_n_skills" -gt 0 ]; then
+        printf 'Would remove %d orphaned skills image(s):\n' "$_sandy_gc_n_skills"
+        printf '%s\n' "$_sandy_gc_skills_images" | grep . | sed 's/^/  - /'
+    fi
+    if [ "$_sandy_gc_n_dangling" -gt 0 ]; then
+        printf 'Would remove %d dangling sandy image(s):\n' "$_sandy_gc_n_dangling"
+        printf '%s\n' "$_sandy_gc_dangling_images" | grep . | sed 's/^/  - /'
+    fi
+    printf '\n'
+
+    if [ "$_sandy_gc_total" -eq 0 ]; then
+        info "Nothing to reclaim."
+        exit 0
+    fi
+
+    if [ "$_sandy_gc_dry_run" = "true" ]; then
+        info "--dry-run: no resources removed."
+        exit 0
+    fi
+
+    if [ "$_sandy_gc_yes" != "true" ]; then
+        if [ -t 0 ]; then
+            _sandy_gc_confirm=""
+            printf '[sandy] Reclaim %d resource(s)? [y/N] ' "$_sandy_gc_total" >&2
+            IFS= read -r _sandy_gc_confirm </dev/tty || _sandy_gc_confirm=""
+            case "$_sandy_gc_confirm" in
+                y|Y|yes|YES|Yes) : ;;
+                *) info "Aborted — nothing removed."; exit 0 ;;
+            esac
+        else
+            error "Non-interactive; pass --yes to reclaim without a prompt."
+            exit 1
+        fi
+    fi
+
+    # Reap order: containers -> networks -> project images -> skills images ->
+    # dangling images LAST. `docker rmi` without -f no-ops on anything still
+    # referenced by a child image or a running container, so containers go
+    # first (freeing any container reference), then networks (no image
+    # dependency either way, but matches the --prune-orphans ordering
+    # convention), then the more-specific image tiers, with plain dangling
+    # images last since they're the least likely to be referenced by
+    # anything else and the safest to clear unconditionally.
+    _sandy_gc_reap_containers
+    _sandy_reap_orphan_networks || true
+    _sandy_gc_reap_project_images
+    _sandy_gc_reap_skills_images
+    _sandy_gc_reap_dangling_images
+
+    # Before/after re-count discipline (mirrors --prune-orphans): report what
+    # actually freed, not the attempt count — a candidate that raced back to
+    # life between the plan and the reap isn't falsely claimed.
+    _sandy_gc_after_containers="$(_sandy_dead_owner_containers_list | grep -c . || true)"
+    _sandy_gc_after_containers="${_sandy_gc_after_containers:-0}"
+    _sandy_gc_after_networks="$(_sandy_orphan_networks_list | grep -c . || true)"
+    _sandy_gc_after_networks="${_sandy_gc_after_networks:-0}"
+    _sandy_gc_after_proj="$(_sandy_orphaned_project_images_list | grep -c . || true)"
+    _sandy_gc_after_proj="${_sandy_gc_after_proj:-0}"
+    _sandy_gc_after_skills="$(_sandy_orphaned_skills_images_list | grep -c . || true)"
+    _sandy_gc_after_skills="${_sandy_gc_after_skills:-0}"
+    _sandy_gc_after_dangling="$(_sandy_dangling_images_list | grep -c . || true)"
+    _sandy_gc_after_dangling="${_sandy_gc_after_dangling:-0}"
+
+    info "Reclaimed: $((_sandy_gc_n_containers - _sandy_gc_after_containers)) container(s), $((_sandy_gc_n_networks - _sandy_gc_after_networks)) network(s), $((_sandy_gc_n_proj - _sandy_gc_after_proj)) project image(s), $((_sandy_gc_n_skills - _sandy_gc_after_skills)) skills image(s), $((_sandy_gc_n_dangling - _sandy_gc_after_dangling)) dangling image(s)."
+    exit 0
+fi
+
 # --- Help ---
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<EOF
@@ -1672,6 +2209,13 @@ Flags:
   -v                 Verbose: show startup sections, pause on exit
   -vv                Debug: add bash trace to user-setup.sh
   -vvv               Full trace: also trace entrypoint.sh and show docker flags
+
+Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
+  --prune-orphans    Reap orphaned sandy_* networks (dead-owner, no attached
+                     container) and exit
+  --gc               One-shot global reclaim: dead-owner containers, orphaned
+                     sandy_* networks, orphaned per-project/skill images, and
+                     dangling sandy images. Sub-options: --dry-run, --yes
 
 Introspection (machine-readable JSON; no Docker required):
   --print-schema          Emit the static schema (config keys, flags, agents,
@@ -3413,7 +3957,7 @@ GSTACK_BASE_BLOCK
 
     # --- Generate code image (gstack source, bun build — changes frequently) ---
     local skills_base_name
-    skills_base_name="sandy-skills-base-$(echo "$packs" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort | tr '\n' '-' | sed 's/-$//' | tr '[:upper:]' '[:lower:]')"
+    skills_base_name="sandy-skills-base-$(_sandy_skill_pack_suffix "$packs")"
 
     if [ "$needs_base" = true ]; then
         cat > "$outfile" <<SKILLS_HEADER
@@ -4963,7 +5507,7 @@ BASE_REBUILT=false
 if [ ! -f "$BASE_HASH_FILE" ] || [ "$(cat "$BASE_HASH_FILE")" != "$BASE_HASH" ] || ! docker image inspect "$BASE_IMAGE_NAME" &>/dev/null; then
     info "Building base image (language runtimes) — this may take several minutes on first run..."
     _old_base_id="$(docker image inspect -f '{{.Id}}' "$BASE_IMAGE_NAME" 2>/dev/null || true)"
-    docker build ${_BASE_BUILD_Q[@]+"${_BASE_BUILD_Q[@]}"} --no-cache -t "$BASE_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.base" "$SANDY_HOME"
+    docker build ${_BASE_BUILD_Q[@]+"${_BASE_BUILD_Q[@]}"} --no-cache --label sandy.managed=1 -t "$BASE_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.base" "$SANDY_HOME"
     echo "$BASE_HASH" > "$BASE_HASH_FILE"
     BASE_REBUILT=true
     _sandy_prune_old_image "$_old_base_id" "$BASE_IMAGE_NAME"
@@ -4990,7 +5534,7 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
     if [ ! -f "$PROXY_HASH_FILE" ] || [ "$(cat "$PROXY_HASH_FILE")" != "$PROXY_HASH" ] || ! docker image inspect "$PROXY_IMAGE_NAME" &>/dev/null; then
         info "Building egress proxy image (sandy-proxy, ref=$(_sandy_proxy_ref))..."
         _old_proxy_id="$(docker image inspect -f '{{.Id}}' "$PROXY_IMAGE_NAME" 2>/dev/null || true)"
-        docker build -q --no-cache -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$SANDY_HOME"
+        docker build -q --no-cache --label sandy.managed=1 -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$SANDY_HOME"
         echo "$PROXY_HASH" > "$PROXY_HASH_FILE"
         _sandy_prune_old_image "$_old_proxy_id" "$PROXY_IMAGE_NAME"
     else
@@ -5066,7 +5610,7 @@ fi
 if [ "$NEEDS_BUILD" = true ]; then
     info "Building sandbox image (may take a few minutes)..."
     _old_agent_id="$(docker image inspect -f '{{.Id}}' "$IMAGE_NAME" 2>/dev/null || true)"
-    docker build -q --no-cache -t "$IMAGE_NAME" -f "$DOCKERFILE_PATH" "$SANDY_HOME"
+    docker build -q --no-cache --label sandy.managed=1 -t "$IMAGE_NAME" -f "$DOCKERFILE_PATH" "$SANDY_HOME"
     echo "$BUILD_HASH" > "$HASH_FILE"
     _sandy_prune_old_image "$_old_agent_id" "$IMAGE_NAME"
 else
@@ -5252,6 +5796,7 @@ start_proxy_sidecar() {
         --restart on-failure:5
         --read-only
         --cap-drop ALL
+        --label "sandy.managed=true"
     )
     # On Linux the proxy must be told how to reach the host for the local-LLM
     # forward (Docker Desktop auto-provides host.docker.internal; the Linux
@@ -5377,7 +5922,7 @@ if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
     # (Re)generate skill pack Dockerfiles (base + code) with resolved versions
     generate_skill_pack_dockerfiles "$SANDY_SKILL_PACKS"
 
-    _pack_suffix="$(echo "$SANDY_SKILL_PACKS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort | tr '\n' '-' | sed 's/-$//' | tr '[:upper:]' '[:lower:]')"
+    _pack_suffix="$(_sandy_skill_pack_suffix "$SANDY_SKILL_PACKS")"
 
     # --- Phase 2.5a: Skills base image (Playwright, Chromium — rarely changes) ---
     if [ -f "$SANDY_HOME/Dockerfile.skills-base.new" ]; then
@@ -5401,7 +5946,7 @@ if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
 
         if [ "$SKILLS_BASE_NEEDS_BUILD" = true ]; then
             info "Building skill pack base image (Playwright + Chromium)..."
-            docker build -t "$SKILLS_BASE_IMAGE" \
+            docker build --label sandy.managed=1 -t "$SKILLS_BASE_IMAGE" \
                 -f "$SANDY_HOME/Dockerfile.skills-base" "$SANDY_HOME"
             echo "$SKILLS_BASE_HASH" > "$SKILLS_BASE_HASH_FILE"
         else
@@ -5431,7 +5976,7 @@ if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
 
     if [ "$SKILLS_NEEDS_BUILD" = true ]; then
         info "Building skill pack image (${SANDY_SKILL_PACKS})..."
-        docker build --no-cache -t "$SKILLS_IMAGE_NAME" \
+        docker build --no-cache --label sandy.managed=1 -t "$SKILLS_IMAGE_NAME" \
             -f "$SANDY_HOME/Dockerfile.skills" "$SANDY_HOME"
         echo "$SKILLS_BUILD_HASH" > "$SKILLS_HASH_FILE"
         SKILLS_REBUILT=true
@@ -6243,6 +6788,7 @@ if [ -f "$PROJECT_DOCKERFILE" ]; then
     if [ "$PROJECT_NEEDS_BUILD" = true ]; then
         info "Building project image from .sandy/Dockerfile..."
         docker build -q --no-cache \
+            --label sandy.managed=1 \
             --build-arg BASE_IMAGE="$IMAGE_NAME" \
             -t "$PROJECT_IMAGE_NAME" \
             -f "$PROJECT_DOCKERFILE" "$WORK_DIR/.sandy"
@@ -6990,6 +7536,13 @@ elif [ "$_sandy_headless_run" = "true" ]; then
 else
     RUN_FLAGS=(--rm -it --name "$CONTAINER_NAME")
 fi
+# #36 — provenance label, additive future-proofing alongside the existing
+# sandy.daemon/sandy.session labels above. NOT the operative predicate for
+# --gc's container-liveness gate (that stays image-name-based so it works
+# retroactively against containers a pre-1.3.0 sandy started) — this is here
+# so a FUTURE sandy release can switch to a label-based filter once every
+# live container has had a chance to be recreated under it.
+RUN_FLAGS+=(--label "sandy.managed=true")
 RUN_FLAGS+=(--cpus "$SANDY_CPUS" --memory "$SANDY_MEM")
 RUN_FLAGS+=(--security-opt no-new-privileges:true)
 RUN_FLAGS+=(--cap-drop ALL)
