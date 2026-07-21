@@ -12,6 +12,10 @@ SANDY_AGENT_ARGS=--mcp-config .mcp.custom.json --some-experimental-flag value
 
 The value is prepended to the same forwarded-args channel as command-line pass-through args (final order: sandy's own flags → `SANDY_AGENT_ARGS` → CLI args, so an explicit CLI arg still wins). It's **privileged-tier** — free from host `~/.sandy/config`, approval-gated from a workspace `.sandy/config` (same model as `SANDY_EXTRA_ENV`; headless/non-TTY drops it). v1 parses the value by **whitespace split** (never `eval`'d); embedded-space/quoted args and per-agent variants (`SANDY_CLAUDE_ARGS`, …) are follow-ups.
 
+### Egress-proxy readiness via `HEALTHCHECK` (#37)
+
+The proxy launch gate now waits for the proxy's listeners to actually **bind**, not just for its process to start. The proxy image bakes a Docker `HEALTHCHECK` that re-invokes the binary as `sandy-proxy -healthcheck` (a scratch image has no shell, so the binary is its own probe); it dials the `:443`/`:80`/`:3128` listeners and issues one DNS query on `:53`. The launcher polls `.State.Health.Status` and proceeds only on `healthy`. This closes a transient "connection refused" window where the agent's very first request could race a not-yet-bound listener (the old gate polled bare `.State.Running`, which flips true before `net.Listen`). Older HEALTHCHECK-less cached proxy images still launch via a legacy `.State.Running` fallback, and a crash-looping proxy still short-circuits the poll. This is the last slice of the #15 readiness follow-up, deferred out of 1.0.1.
+
 ---
 
 ## sandy v1.2.1
@@ -262,10 +266,10 @@ hardest. Three latent bugs in signal/lock lifecycle are closed:
 - **#23** (Kitty-graphics probe prefills the Claude pane in multi-agent + graphics
   terminals) → **1.1**: the preferred fix needs bisecting the emitting agent on a
   host with a graphics terminal. Cosmetic (`Ctrl-U` clears it).
-- **Proxy readiness listener-bind probe** (the remaining slice of #15) → **1.1**
-  (#37): a correct probe needs proxy-healthcheck plumbing, disproportionate for a
-  low-impact transient in a patch. The misleading readiness-gate comment was
-  corrected.
+- **Proxy readiness listener-bind probe** (the remaining slice of #15) → **1.3.0**
+  (#37, shipped): a correct probe needs proxy-healthcheck plumbing, disproportionate
+  for a low-impact transient in a patch. The misleading readiness-gate comment was
+  corrected in 1.0.1; the real HEALTHCHECK-based gate landed in 1.3.0.
 
 ---
 

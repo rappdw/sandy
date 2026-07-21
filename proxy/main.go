@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"net"
+	"os"
 
 	"github.com/miekg/dns"
 )
@@ -13,7 +14,20 @@ const defaultConfigPath = "/etc/sandy-proxy.json"
 
 func main() {
 	cfgPath := flag.String("config", defaultConfigPath, "path to sandy-proxy.json")
+	healthcheck := flag.Bool("healthcheck", false, "probe own listeners and exit 0 if healthy (for Docker HEALTHCHECK)")
 	flag.Parse()
+
+	// Docker HEALTHCHECK mode (#37): probe the listeners and exit, so readiness
+	// reflects an actual bind, not just process start. Runs before LoadConfig —
+	// the probe is self-contained and must stay fast. scratch has no shell, so
+	// the healthcheck IS this binary re-invoked with -healthcheck.
+	if *healthcheck {
+		if err := runHealthcheck(); err != nil {
+			logf("sandy-proxy: healthcheck failed: %v", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	cfg, err := LoadConfig(*cfgPath)
 	if err != nil {

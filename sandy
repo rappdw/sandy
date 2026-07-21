@@ -2160,6 +2160,12 @@ RUN git clone https://github.com/rappdw/sandy /src \\
 FROM scratch
 COPY --from=build /sandy-proxy /usr/local/bin/sandy-proxy
 # Config is bind-mounted at /etc/sandy-proxy.json by the launcher (PR 2.7.3).
+# Readiness (#37): scratch has no shell, so the healthcheck IS the binary
+# re-invoked with -healthcheck, probing its own listeners. The container reports
+# `healthy` only once the listeners actually bind, not merely when the process
+# starts — closing the transient "connection refused" window on the first
+# request. Exec form (no shell); the launcher's gate polls .State.Health.Status.
+HEALTHCHECK --interval=1s --start-period=0s --timeout=2s --retries=3 CMD ["/usr/local/bin/sandy-proxy", "-healthcheck"]
 ENTRYPOINT ["/usr/local/bin/sandy-proxy"]
 DOCKERFILE
 }
@@ -5268,22 +5274,47 @@ start_proxy_sidecar() {
     # route is this proxy, so it must be up first. A single instantaneous check
     # can miss a proxy that starts then dies a moment later (bad config, crash)
     # and — now that the proxy has --restart on-failure — can also momentarily
-    # read not-Running mid-restart. Poll briefly instead of once. NOTE: this
-    # polls `.State.Running`, which only tells us the proxy PROCESS is alive —
-    # it flips true before net.Listen binds, so it catches process exit /
-    # crash-restart, NOT a listener-bind failure (see #15 for the follow-up:
-    # a real bind-readiness probe needs proxy HEALTHCHECK plumbing, deferred
-    # to 1.1).
+    # read not-Running mid-restart. Poll instead of once.
+    #
+    # #37: gate on the container's HEALTHCHECK (`.State.Health.Status == healthy`)
+    # rather than bare `.State.Running`. `.State.Running` flips true when the
+    # PROCESS starts, BEFORE net.Listen binds — so the agent's first request
+    # could race a not-yet-bound listener ("connection refused"). The proxy image
+    # now bakes a HEALTHCHECK that re-invokes the binary as `-healthcheck` to
+    # probe its own listeners, so `healthy` means the binds actually completed.
+    # Health walks starting→healthy ~1-2s in (--interval=1s --start-period=0s),
+    # so widen the poll budget to ~15s; the RestartCount fast-fail below still
+    # bounds a crash-looping proxy. Fall back to the legacy `.State.Running` gate
+    # when `.State.Health` is absent — an older HEALTHCHECK-less cached proxy
+    # image still launches (template renders "none"). The probe is loopback, so
+    # it's valid before the sidecar --ip attach; a mid-restart read is `starting`
+    # (neither healthy nor none), which we tolerate by looping.
     _proxy_up=false
-    for _ptry in 1 2 3 4 5; do
-        if [ "$(docker inspect -f '{{.State.Running}}' "$PROXY_CONTAINER" 2>/dev/null)" = "true" ]; then
-            _proxy_up=true
+    for (( _ptry = 0; _ptry < 30; _ptry++ )); do
+        _phealth="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$PROXY_CONTAINER" 2>/dev/null || echo "")"
+        case "$_phealth" in
+            healthy)
+                _proxy_up=true
+                break
+                ;;
+            none)
+                # No HEALTHCHECK baked in (older cached image) — legacy PROCESS gate.
+                if [ "$(docker inspect -f '{{.State.Running}}' "$PROXY_CONTAINER" 2>/dev/null)" = "true" ]; then
+                    _proxy_up=true
+                    break
+                fi
+                ;;
+        esac
+        # Crash-loop fast-fail: --restart on-failure:5 keeps reviving a broken
+        # proxy that will never reach `healthy` — bail rather than wait out the
+        # full budget (the post-loop RestartCount check reports the crash).
+        if [ "$(docker inspect -f '{{.RestartCount}}' "$PROXY_CONTAINER" 2>/dev/null || echo 0)" -ge 3 ] 2>/dev/null; then
             break
         fi
         sleep 0.5
     done
     if [ "$_proxy_up" != true ]; then
-        error "Egress proxy failed to start. Logs:"
+        error "Egress proxy failed to become ready. Logs:"
         docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
         exit 1
     fi

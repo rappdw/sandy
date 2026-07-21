@@ -5599,6 +5599,39 @@ echo \"\$out\" | grep -q -- '--mcp-config' && echo \"\$out\" | grep -q '.mcp.cus
 done
 
 # ============================================================
+echo "§78: Egress-proxy readiness via HEALTHCHECK (#37)"
+# ============================================================
+_S78="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S78_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# (a) Proxy binary: the -healthcheck flag, its branch, and the probe helpers.
+check "proxy main.go registers a -healthcheck flag (#37)" \
+    grep -q 'flag.Bool("healthcheck"' "$_S78_ROOT/proxy/main.go"
+check "proxy main.go runs runHealthcheck() and exits before LoadConfig" \
+    bash -c 'awk "/if \*healthcheck {/,/^\t}\$/" "$1" | grep -q "runHealthcheck()"' -- "$_S78_ROOT/proxy/main.go"
+check "proxy healthcheck.go defines healthProbe + runHealthcheck" \
+    bash -c 'grep -q "func healthProbe(" "$1" && grep -q "func runHealthcheck(" "$1"' -- "$_S78_ROOT/proxy/healthcheck.go"
+check "healthProbe probes all three always-on TCP ports (443/80/3128)" \
+    bash -c 'grep -qE "healthTCPPorts = \[\]int\{443, 80, 3128\}" "$1"' -- "$_S78_ROOT/proxy/healthcheck.go"
+check "healthProbe issues a DNS query (UDP listener has no Accept)" \
+    grep -q 'cl.Exchange(m, dnsAddr)' "$_S78_ROOT/proxy/healthcheck.go"
+check "healthcheck_test.go covers AllUp/TCPDown/DNSDown" \
+    bash -c 'grep -q "TestHealthProbe_AllUp" "$1" && grep -q "TestHealthProbe_TCPDown" "$1" && grep -q "TestHealthProbe_DNSDown" "$1"' -- "$_S78_ROOT/proxy/healthcheck_test.go"
+
+# (b) Dockerfile: HEALTHCHECK bakes the -healthcheck probe into the image.
+check "generate_dockerfile_proxy emits a HEALTHCHECK using -healthcheck (#37)" \
+    bash -c 'awk "/^generate_dockerfile_proxy\(\)/,/^}/" "$1" | grep -qE "HEALTHCHECK .*-healthcheck"' -- "$_S78"
+
+# (c) Readiness gate: gates on .State.Health.Status, with a legacy .State.Running
+# fallback for a HEALTHCHECK-less cached image, plus the crash-loop fast-fail.
+check "readiness gate polls .State.Health.Status (#37)" \
+    grep -q 'State.Health.Status' "$_S78"
+check "readiness gate keeps a legacy .State.Running fallback (none case)" \
+    bash -c 'awk "/_proxy_up=false/,/_proxy_up != true/" "$1" | grep -q "State.Running"' -- "$_S78"
+check "readiness gate retains the RestartCount crash-loop fast-fail" \
+    bash -c 'awk "/_proxy_up=false/,/_proxy_up != true/" "$1" | grep -q "RestartCount"' -- "$_S78"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
