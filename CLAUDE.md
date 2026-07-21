@@ -566,6 +566,8 @@ On subsequent launches:
 - **Identical or reduced set** → proceed silently (symlink deletions update the list).
 - **New escape present** → **hard error at launch**, naming the offending link(s), with remediation (`rm` the link, relaunch, re-approve). Sandy refuses to re-prompt — a y/N that fires every session can be trained past, whereas a hard error forces a deliberate action.
 
+**Non-interactive fail-close (daemon `--start`).** The first-encounter y/N is a `read` deep in the launch flow — but under `sandy --start` that flow runs in the non-TTY supervisor (stdin `/dev/null`), where a bare read consumes EOF, aborts with misleading "remove the symlinks" guidance, and leaves the `--start` client burning its full readiness timeout (a reported hang). So the prompt is gated on an interactive stdin (`[ -t 0 ]`): non-interactive → **fail closed** with the correct guidance ("launch `sandy` interactively once in this workspace to approve, then retry"), and the supervisor drops a `"$SANDY_DAEMON_LOG.fatal"` marker so the `--start` client fast-fails in ~1s instead of waiting out the timeout (its EXIT trap has already torn down the proxy/networks/lock). Same class as the passive-privileged approval's non-TTY fail-close. Guarded by `run-tests.sh §75`.
+
 ## Terminal Notifications
 
 Sandy's inner tmux is configured with `allow-passthrough on`, which forwards OSC escape sequences (9/99/777) from Claude Code through to the outer terminal. This enables notification features in terminals like cmux and iTerm2.

@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.2.0"
+SANDY_VERSION="1.2.2-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -3469,14 +3469,22 @@ ensure_build_files() {
     generate_tmux_conf
     generate_channel_relay
 
-    # Only update on-disk files if content has changed
+    # Only update on-disk files if content has changed. The .new files live in
+    # the SHARED $SANDY_HOME, so a concurrent sandy (a daemon supervisor's own
+    # launch build, or `--update-sessions` refreshing a sibling session) may have
+    # already consumed this .new. The generated content is deterministic, so
+    # whichever process won left identical files — a missing .new here is benign
+    # and must NOT abort the build under `set -e` (bare `rm`/`mv` on a
+    # race-consumed .new was the fleet-update failure caught by
+    # run-integration-tests §20). Guard existence, and use -f + tolerate a lost
+    # race on the mv.
     local changed=false
     for f in Dockerfile.base entrypoint.sh user-setup.sh tmux.conf channel-relay.sh; do
+        [ -e "$SANDY_HOME/$f.new" ] || continue
         if [ ! -f "$SANDY_HOME/$f" ] || ! diff -q "$SANDY_HOME/$f.new" "$SANDY_HOME/$f" &>/dev/null; then
-            mv "$SANDY_HOME/$f.new" "$SANDY_HOME/$f"
-            changed=true
+            mv -f "$SANDY_HOME/$f.new" "$SANDY_HOME/$f" 2>/dev/null && changed=true || true
         else
-            rm "$SANDY_HOME/$f.new"
+            rm -f "$SANDY_HOME/$f.new"
         fi
     done
 
@@ -3655,6 +3663,14 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         "$0" "${_sandy_reexec_args[@]}" </dev/null >>"$_sandy_daemon_log" 2>&1 &
     disown 2>/dev/null || true
 
+    # Fast-fail signal: the supervisor writes "$_sandy_daemon_log.fatal" if it
+    # hits an unanswerable approval (e.g. a first-encounter dangerous-symlink
+    # prompt it can't answer under /dev/null) so the readiness loop below stops
+    # immediately instead of burning the full timeout. It has already torn its
+    # own wreckage down via its EXIT trap by the time it writes this.
+    _sandy_fatal_marker="${_sandy_daemon_log}.fatal"
+    rm -f "$_sandy_fatal_marker" 2>/dev/null || true
+
     info "Starting daemon session for $WORK_DIR..."
 
     # D8 — startup contract: stream the supervisor's log to stdout/stderr
@@ -3670,7 +3686,14 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     _sandy_waited=0
     _sandy_restarts=0
     _sandy_daemon_container=""
+    _sandy_sup_fatal=false
     while [ "$_sandy_waited" -lt "$_sandy_timeout_s" ]; do
+        # Supervisor reported an unrecoverable startup refusal (it already cleaned
+        # up) — give up now instead of waiting out the timeout.
+        if [ -f "$_sandy_fatal_marker" ]; then
+            _sandy_sup_fatal=true
+            break
+        fi
         _sandy_daemon_container="$(docker ps -q "${_sandy_daemon_filter[@]}" 2>/dev/null | head -1)" || true
         # -u: docker exec defaults to the image's user (root — no USER
         # directive), but the tmux server runs as the host uid the entrypoint
@@ -3701,13 +3724,16 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         wait "$_sandy_tail_pid" 2>/dev/null || true
     fi
 
+    rm -f "$_sandy_fatal_marker" 2>/dev/null || true
     if [ "$_sandy_ready" = "true" ]; then
         _sandy_daemon_name="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$_sandy_daemon_container" 2>/dev/null || true)"
         info "Daemon session ready: ${_sandy_daemon_name:-$_sandy_daemon_container} (container ${_sandy_daemon_container:0:12})"
         rm -f "$_sandy_daemon_log" 2>/dev/null || true
         exit 0
     else
-        if [ "${_sandy_restarts:-0}" -ge 3 ] 2>/dev/null; then
+        if [ "$_sandy_sup_fatal" = "true" ]; then
+            error "Daemon startup was refused before it could launch (see the guidance above)."
+        elif [ "${_sandy_restarts:-0}" -ge 3 ] 2>/dev/null; then
             error "Daemon container is crash-looping (RestartCount=$_sandy_restarts) — giving up."
         else
             error "Daemon session failed to become attachable within ${_sandy_timeout_s}s."
@@ -4017,12 +4043,42 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
         _upd_build_args=(--build-only)
         [ "$SANDY_REBUILD" = "true" ] && _upd_build_args+=(--rebuild)
         _upd_build_log="$(mktemp)"
-        if ! (cd "$_upd_ws" && "$_sandy_self" "${_upd_build_args[@]}") >"$_upd_build_log" 2>&1; then
+        _upd_done="$_upd_build_log.done"   # unique, absent until the child finishes
+        # Run the child build in the background and emit a progress heartbeat. The
+        # child's output is captured to the log (surfaced only on failure) and its
+        # agent/project image builds run -q, so a long --no-cache rebuild would
+        # otherwise print nothing for minutes and look hung. We poll a done-marker
+        # (never `kill -0`, which reads a reaped/zombie child as alive) and every
+        # ~20s echo elapsed time + the child's current phase (its last log line).
+        #
+        # `</dev/null` is REQUIRED, not cosmetic: a workspace whose .sandy config
+        # sets privileged keys (or has un-approved dangerous symlinks) triggers an
+        # interactive approval `read` in the child. Without redirecting stdin the
+        # child inherits our terminal (a TTY), so it prints the [y/N] prompt into
+        # the CAPTURED log (invisible) and blocks forever on the read — the real
+        # "--update-sessions hangs on one session" bug. With /dev/null the child's
+        # stdin is non-interactive, so the approval fails closed (drops the keys,
+        # which the build doesn't need) and the refresh proceeds.
+        { ( cd "$_upd_ws" && "$_sandy_self" "${_upd_build_args[@]}" ) </dev/null >"$_upd_build_log" 2>&1
+          echo "$?" > "$_upd_done"; } &
+        _upd_build_pid=$!
+        _upd_hb=0
+        while [ ! -f "$_upd_done" ]; do
+            sleep 1
+            [ -f "$_upd_done" ] && break
+            _upd_hb=$((_upd_hb + 1))
+            if [ $((_upd_hb % 20)) -eq 0 ]; then
+                _upd_phase="$(tail -n 1 "$_upd_build_log" 2>/dev/null | sed -E 's/^\[sandy\] +//; s/\.\.\.[[:space:]]*$//')"
+                info "  ...still refreshing $_upd_sess (${_upd_hb}s${_upd_phase:+: $_upd_phase})"
+            fi
+        done
+        wait "$_upd_build_pid" 2>/dev/null || true
+        if [ "$(cat "$_upd_done" 2>/dev/null || echo 1)" != "0" ]; then
             error "  Build failed for $_upd_sess — tail of output:"
             tail -n 20 "$_upd_build_log" | sed 's/^/[sandy]   /' >&2
             _upd_build_failed[$_upd_i]=1
         fi
-        rm -f "$_upd_build_log" 2>/dev/null || true
+        rm -f "$_upd_build_log" "$_upd_done" 2>/dev/null || true
     done
 
     # Steps 3+4 — staleness check, then (only when --idle-for was given) the
@@ -7100,6 +7156,23 @@ if [ ${#DANGEROUS_SYMLINKS[@]} -gt 0 ]; then
             warn "  $s"
         done
         printf "\033[0;33m[sandy] These could allow Claude to access files outside the sandbox.\033[0m\n"
+        # No interactive stdin to answer y/N — the `sandy --start` supervisor runs
+        # the launch under /dev/null (a headless/piped run has no terminal either).
+        # A bare `read` here consumes EOF and "aborts" with misleading "remove the
+        # symlinks" guidance, and under --start leaves the client polling out the
+        # full readiness timeout (the reported hang). Fail CLOSED with the correct
+        # fix, and drop a marker beside the streamed daemon log so the --start
+        # client stops waiting immediately rather than burning the timeout. The
+        # EXIT trap installed above already tears down the proxy/networks/lock.
+        if [ ! -t 0 ]; then
+            error "Dangerous symlinks need interactive approval, but stdin is not a terminal."
+            error "Approve them once by launching sandy interactively in this workspace:"
+            error "  cd '$WORK_DIR' && sandy      # answer y at the prompt, then exit"
+            error "then retry (e.g. 'sandy --start'). Or clear the list: rm '$_approved_list'"
+            [ -n "${SANDY_DAEMON_LOG:-}" ] && : > "${SANDY_DAEMON_LOG}.fatal"
+            rm -f "$_current_tmp"
+            exit 1
+        fi
         printf "\033[0;33m[sandy] Proceed anyway? [y/N] \033[0m"
         read -r REPLY
         if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
