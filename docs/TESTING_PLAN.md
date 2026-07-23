@@ -279,16 +279,30 @@ else is informational.
 | `gemini` | integ §5/§10 | §2 (you're walking it) | — |
 | `codex` | integ §2/§9 | §1 (you're walking it) | — |
 | `opencode` | integ §11 (provider key) | — | **§4b.1 / §4b.2** |
-| `claude,gemini` | run-tests §54 routing | integ §16 if creds | **§4.1** (multi-pane) |
-| `claude,codex` | run-tests §54 routing | integ §16 if creds | **§4.2** (multi-pane) |
+| `claude,gemini` | run-tests §54 routing + **integ §21** (topology+identity) | integ §16 if creds | **§4.1** (live response) |
+| `claude,codex` | run-tests §54 routing + **integ §21** (topology+identity) | integ §16 if creds | **§4.2** (live response) |
 | `gemini,codex` | run-tests §54 routing | integ §16 fallback | covered by §4.2 |
-| `claude,gemini,codex` | run-tests §54 routing | — | **§4.2** (triple-pane) |
-| `all` (4 agents) | run-tests §54 + alias-expand | — | **§4.2** (2×2 grid) |
+| `claude,gemini,codex` | run-tests §54 routing + **integ §21** (topology+identity) | — | **§4.2** (live response) |
+| `all` (4 agents) | run-tests §54 + alias-expand + **integ §21** (topology+identity) | — | **§4.2** (live response) |
 
 **Bottom line — the manual multi-agent work for this RC is exactly:**
 walk **§4.1**, **§4.2**, and **§4b** below. That's the whole "You run this RC"
 column, collapsed (the single-agent rows are done in §1–§3, which you're already
 doing). The three sign-off boxes track these.
+
+**Pane count / geometry / agent-order are automated, not manual (#22).**
+`test/acceptance-pane-topology.sh` (invoked as `run-integration-tests.sh` §21)
+launches each combo above via `--start`, then inspects the *real* tmux session
+with `list-panes` and `capture-pane`: it asserts the pane COUNT matches the
+combo's arity, the GEOMETRY forms the documented layout (dual horizontal /
+left+2-right / 2×2 grid — as relationships between pane coordinates, never
+absolute sizes), and the IDENTITY of each pane (which agent is actually
+running there, proven via an env-gated `[sandy:pane-agent] <name>` stdout
+marker — see `SANDY_TEST_PANE_TAGS` in CLAUDE.md) matches the documented
+on-screen position. §4.1/§4.2 below no longer ask you to eyeball any of that —
+what's left for a human is exactly what a script can't drive: does a **real**
+agent TUI render correctly and respond to a **real** prompt typed into its
+pane.
 
 Why the rest needs no action:
 - **Headless** multi-agent routes the `-p` prompt to the **first** agent only
@@ -296,13 +310,17 @@ Why the rest needs no action:
   first-agent routing for every row above, unattended, no Docker.
 - **integ §16** runs one *live* combo (first available of `claude,codex` →
   `claude,gemini` → `gemini,codex`) end-to-end and asserts the `sandy-full`
-  image was used — so one live multi-pane combo is already exercised in CI. The
-  reason §4.1/§4.2 still need you: **a multi-pane tmux layout can only be
-  eyeballed in a real TTY** (do the panes actually split? does each respond?) —
-  that's what CI can't see and you're signing off.
+  image was used — so one live multi-pane combo is already exercised in CI.
+- **integ §21** (above) covers topology/geometry/identity for all four combo
+  shapes end-to-end against real Docker + tmux. The reason §4.1/§4.2 still
+  need you: **whether an agent TUI actually renders and responds to a typed
+  prompt can only be eyeballed in a real TTY** — that's what no script can see
+  and you're signing off.
 - A combo with no two-agent credential pair → integ §16 prints
   `skip "multi-agent combo (need 2 of claude/gemini/codex credentials)"` — so if
   you lack a pair, note §4.1/§4.2 skipped, same as any other credential gap.
+  §21 itself needs no credentials (the agent doesn't need to authenticate for
+  its pane to exist and print its marker) so it always runs on a Docker host.
 
 Sign-off (tick when the manual rows have been walked this RC):
 
@@ -322,7 +340,11 @@ echo 'GEMINI_API_KEY=your_key_here' > .sandy/.secrets
 sandy
 ```
 
-- [x] Tmux opens with **two horizontal panes**: Claude (pane 0), Gemini (pane 1)
+> Pane count, geometry, and which agent runs where are verified automatically
+> by `test/acceptance-pane-topology.sh` (`run-integration-tests.sh` §21) — see
+> the coverage-matrix note above. Nothing to eyeball here beyond the live
+> responses below.
+
 - [x] Each pane has its own prompt
 - [x] Type a question in Claude pane — it responds
 - [x] `Ctrl-B →` to Gemini pane — ask a question — it responds
@@ -335,7 +357,10 @@ echo 'SANDY_AGENT=claude,codex' > .sandy/config
 sandy
 ```
 
-- [x] Two horizontal panes: Claude (pane 0), Codex (pane 1)
+> As in §4.1, pane count/geometry/identity are covered by the automated
+> harness (§21), for every combo below — nothing to eyeball there.
+
+- [x] Each pane has its own prompt and responds independently
 
 ```sh
 # Test all three agents
@@ -343,7 +368,6 @@ echo 'SANDY_AGENT=claude,gemini,codex' > .sandy/config
 sandy
 ```
 
-- [x] Three panes: Claude (pane 0, left), Gemini (pane 1, top-right), Codex (pane 2, bottom-right)
 - [x] Each pane has its own prompt and responds independently
 
 ```sh
@@ -352,7 +376,6 @@ echo 'SANDY_AGENT=all' > .sandy/config
 sandy
 ```
 
-- [x] Four panes in a 2×2 grid: Claude (top-left, pane 0), Gemini (top-right, pane 1), Codex (bottom-right, pane 2), OpenCode (bottom-left, pane 3)
 - [x] Each pane has its own prompt and responds independently
 
 ---

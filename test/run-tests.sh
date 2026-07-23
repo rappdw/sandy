@@ -6105,6 +6105,68 @@ rm -rf "$_S79R_BIN" "$_S79R_HOME" "$_S79R_COUNTER" 2>/dev/null || true
 # for the other Docker-runtime features (#36).
 
 # ============================================================
+echo ""
+echo "§80: Multi-agent pane-topology acceptance harness (#22)"
+# ============================================================
+_S80="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S80_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+_S80_TOPO="$_S80_ROOT/test/acceptance-pane-topology.sh"
+_S80_INTEG="$_S80_ROOT/test/run-integration-tests.sh"
+
+# --- (a) the harness itself exists, is executable, and references the right
+# real-Docker primitives (this is pure-script — the actual end-to-end lives
+# in the harness, run only by a maintainer with Docker, same as §19/§20). ---
+
+check "test/acceptance-pane-topology.sh exists and is executable" \
+    test -x "$_S80_TOPO"
+check "the harness launches via --start (daemon mode, same as §19/§20)" \
+    grep -q -- '--start' "$_S80_TOPO"
+check "the harness inspects real tmux pane geometry via list-panes" \
+    grep -q 'list-panes' "$_S80_TOPO"
+check "the harness gates the pane marker via SANDY_TEST_PANE_TAGS" \
+    grep -q 'SANDY_TEST_PANE_TAGS' "$_S80_TOPO"
+check "the harness verifies pane identity via capture-pane" \
+    grep -q 'capture-pane' "$_S80_TOPO"
+check "the harness tears down via --stop between combos" \
+    grep -q -- '--stop' "$_S80_TOPO"
+
+# --- (b) run-integration-tests.sh wires it in as §21, same contract as §19/§20. ---
+
+check "run-integration-tests.sh invokes acceptance-pane-topology.sh (§21)" \
+    grep -q 'acceptance-pane-topology.sh' "$_S80_INTEG"
+check "§21 follows the RESULT: grep + PIPESTATUS contract used by §19/§20" \
+    bash -c '_f="$(awk "/21\\. Multi-agent pane-topology/,/^fi\$/" "$1")"
+        printf "%s" "$_f" | grep -qF "PIPESTATUS" && printf "%s" "$_f" | grep -qF "RESULT:"' -- "$_S80_INTEG"
+
+# --- (c) sandy's multi-agent branch: the marker is env-gated and additive. ---
+
+check "the multi-agent branch gates the pane marker on SANDY_TEST_PANE_TAGS" \
+    bash -c 'awk "/--- Multi-agent launch \(2-4 panes\) ---/,/^USERSETUP\$/" "$1" | grep -q "SANDY_TEST_PANE_TAGS"' -- "$_S80"
+check "the marker text is [sandy:pane-agent]" \
+    bash -c 'awk "/--- Multi-agent launch \(2-4 panes\) ---/,/^USERSETUP\$/" "$1" | grep -q "\[sandy:pane-agent\]"' -- "$_S80"
+check "all four pane slots (_cmd0.._cmd3) are marker-gated (4 gates in the block)" \
+    bash -c '_f="$(awk "/--- Multi-agent launch \(2-4 panes\) ---/,/^USERSETUP\$/" "$1")"
+        n="$(printf "%s" "$_f" | grep -c "SANDY_TEST_PANE_TAGS")"
+        [ "$n" -ge 4 ]' -- "$_S80"
+check "SANDY_TEST_PANE_TAGS is forwarded to the container only when set (no unconditional -e)" \
+    grep -q 'SANDY_TEST_PANE_TAGS=1' "$_S80"
+
+# --- (d) negative assertions: SANDY_TEST_PANE_TAGS is an internal env-only
+# test hook, like SANDY_AUTO_APPROVE_PRIVILEGED — it must NEVER be settable
+# from a config file (host or workspace), so it must not appear in any of the
+# three key-tier arrays, and must have NO _sandy_key_metadata row (that row is
+# what makes a key show up in --print-schema and the regenerated config docs).
+
+check "SANDY_TEST_PANE_TAGS is NOT in SANDY_PRIVILEGED_KEYS" \
+    bash -c '! awk "/^SANDY_PRIVILEGED_KEYS=\(/,/^\)\$/" "$1" | grep -q "SANDY_TEST_PANE_TAGS"' -- "$_S80"
+check "SANDY_TEST_PANE_TAGS is NOT in SANDY_PASSIVE_KEYS" \
+    bash -c '! awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)\$/" "$1" | grep -q "SANDY_TEST_PANE_TAGS"' -- "$_S80"
+check "SANDY_TEST_PANE_TAGS is NOT in SANDY_ENV_ONLY_KEYS" \
+    bash -c '! awk "/^SANDY_ENV_ONLY_KEYS=\(/,/^\)\$/" "$1" | grep -q "SANDY_TEST_PANE_TAGS"' -- "$_S80"
+check "SANDY_TEST_PANE_TAGS has NO _sandy_key_metadata row (never in --print-schema)" \
+    bash -c '! awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -q "SANDY_TEST_PANE_TAGS"' -- "$_S80"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

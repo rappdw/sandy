@@ -32,6 +32,14 @@ The proxy launch gate now waits for the proxy's listeners to actually **bind**, 
 
 **New `--print-state` fields:** `dangling_images` and `orphaned_containers`, **full mode only** (both `null` in light mode, mirroring `image_stale`'s convention, to stay within the light-mode two-spawn poll budget) — so a UI can display live reclaim-candidate counts and confirm they drop after a `sandy --gc --yes`.
 
+### Automated multi-agent pane-topology verification (#22)
+
+`test/acceptance-pane-topology.sh` (invoked as `run-integration-tests.sh` §21) is a new Docker-runtime acceptance harness that proves a multi-agent `sandy --start` launch actually forms the documented split-pane tmux layout — dual horizontal, left+2-right (triple), and the 2×2 grid (all four agents) — instead of relying solely on a human eyeballing a real TTY (`docs/TESTING_PLAN.md` §4.1/§4.2, now trimmed to just the genuinely-manual "does a real agent respond to a real prompt" checks). For each combo it launches via `--start`, then inspects the live tmux session with `list-panes` (pane count + geometry, asserted as relationships between pane coordinates, never absolute sizes) and `capture-pane` (which agent is actually rendering in which on-screen position).
+
+Identity is proven via a new env-gated marker: with `SANDY_TEST_PANE_TAGS=1`, sandy's multi-agent branch prepends a `printf '[sandy:pane-agent] <agent>\n'` ahead of each pane's real agent command — a plain-text stdout marker in tmux scrollback that survives an agent TUI's own OSC-2 title sequence, unlike `select-pane -T`. `SANDY_TEST_PANE_TAGS` is an internal env-only test hook (like `SANDY_AUTO_APPROVE_PRIVILEGED`) — not in any config-key tier, no `_sandy_key_metadata` row, never settable from a committed `.sandy/config`. Guarded structurally by `run-tests.sh §80`.
+
+Building the harness also surfaced (and the harness now documents/works around) a real tmux nuance: `pane_index` does not track spawn order once a later split re-splits an earlier pane, which is exactly what the 4-agent 2×2-grid split sequence does — so in that combo `sandy.1`/`sandy.2`/`sandy.3` do not hold the 2nd/3rd/4th spawned agent the way a naive read of the split code would suggest, even though each agent still lands in its correct documented on-screen quadrant. See the "Verification reality (#22)" note in `CLAUDE.md` for the detail; this is a documentation/indexing nuance, not a behavior change, and it is out of scope for this harness to fix `SANDY_CHANNEL_TARGET_PANE`'s reliance on raw pane index for 4-agent combos (tracked separately).
+
 ---
 
 ## sandy v1.2.1

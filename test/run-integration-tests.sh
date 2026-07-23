@@ -1605,6 +1605,36 @@ else
 fi
 
 # ============================================================
+info "21. Multi-agent pane-topology acceptance (#22) — test/acceptance-pane-topology.sh"
+# ============================================================
+# Four combos (claude,gemini / claude,codex / claude,gemini,codex / all) each
+# launched via --start with SANDY_TEST_PANE_TAGS=1, then the real tmux session
+# is inspected via list-panes + capture-pane: pane COUNT, GEOMETRY
+# (relationship-based, never absolute sizes — the detached session has no
+# client size), and IDENTITY (each pane's stdout marker names the agent
+# actually running there) are all asserted against the documented split-pane
+# layout. Same invocation contract as §19/§20 — self-cleaning harness, SANDY
+# pinned to this suite's sandy, run sequentially (one live container at a
+# time) inside the harness itself.
+_acc_topo="$_INT_SELF_DIR/acceptance-pane-topology.sh"
+if [ -f "$_acc_topo" ]; then
+    _acc_out="$(mktemp)"
+    set +e   # a failing harness exits non-zero; don't let set -e abort the suite
+    SANDY="$SANDY_SCRIPT" bash "$_acc_topo" 2>&1 | tee "$_acc_out"
+    _acc_rc=${PIPESTATUS[0]}
+    set -e
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1)"
+    if [ "$_acc_rc" -eq 0 ]; then
+        pass "multi-agent pane-topology acceptance (${_acc_res:-all assertions passed})"
+    else
+        fail "multi-agent pane-topology acceptance (${_acc_res:-exited $_acc_rc}) — see harness output above"
+    fi
+    rm -f "$_acc_out"
+else
+    skip "multi-agent pane-topology acceptance (acceptance-pane-topology.sh not found)"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true
