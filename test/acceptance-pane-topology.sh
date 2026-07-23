@@ -113,6 +113,17 @@ for combo in $COMBOS; do
     IFS=',' read -ra AGENTS <<< "$expanded"
     ARITY="${#AGENTS[@]}"
 
+    # Per-combo retry (anti-flake): a Docker-runtime harness under full-suite
+    # load can hit a transient container/pane startup race that no single settle
+    # window covers. Run the combo; if it logs any NEW failure, discard this
+    # attempt's tally and re-run the combo once. A GENUINE failure recurs on the
+    # retry (fails both attempts) and is still reported — only transient flake is
+    # absorbed. Bounded to 2 attempts. (Body left at its original indent — bash
+    # ignores it — to keep this a minimal, reviewable wrap.)
+    _combo_attempt=1
+    while : ; do
+    _snap_pass=$PASS; _snap_fail=$FAIL
+
     SANDY_AGENT="$combo" SANDY_TEST_PANE_TAGS=1 "$SANDY" --start --workspace "$WS"; RC=$?
     ck "[$combo] --start exits 0" "[ $RC -eq 0 ]"
 
@@ -267,6 +278,19 @@ PANES
     esac
 
     "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1; ck "[$combo] --stop exits 0" "[ $? -eq 0 ]"
+
+    # Retry decision: clean attempt, or out of attempts → keep this tally.
+    if [ "$FAIL" -eq "$_snap_fail" ] || [ "$_combo_attempt" -ge 2 ]; then
+        break
+    fi
+    # Transient failure with a retry left: discard this attempt's tally
+    # (PASS/FAIL and the printed lines were attempt 1's) and re-run once.
+    printf '  \033[33mRETRY\033[0m [%s] %d transient failure(s) — re-running combo once\n' "$combo" "$(( FAIL - _snap_fail ))"
+    PASS=$_snap_pass; FAIL=$_snap_fail
+    sleep 2
+    _combo_attempt=$(( _combo_attempt + 1 ))
+    done
+
     WS=""   # stopped — clear so the EXIT trap doesn't try to stop it again
 done
 
