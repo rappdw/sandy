@@ -142,34 +142,31 @@ for combo in $COMBOS; do
         "docker exec -u \"$(id -u)\" \"$C\" tmux show-options -t sandy remain-on-exit | grep -q on\$"
 
     # Settle gate (anti-flake): `--start`'s readiness only waits for
-    # `tmux has-session`, but the panes are created by the entrypoint
-    # sequentially and each pane's bash prints its `[sandy:pane-agent]` marker
-    # before exec'ing the agent. Inspecting immediately can race a late-split
-    # pane (esp. the 4-agent grid) or a not-yet-rendered marker, producing an
-    # intermittent identity/count failure that passes on re-run. Poll until all
-    # ARITY panes exist AND every one has rendered its marker (bounded ~15s), so
-    # geometry + identity below read a settled session.
+    # `tmux has-session`, but panes are created sequentially and each pane's bash
+    # sets its @sandy_pane_agent tmux PANE OPTION (SANDY_TEST_PANE_TAGS) before
+    # exec'ing the agent. Poll until all ARITY panes exist AND every one has a
+    # non-empty @sandy_pane_agent, so geometry + identity below read a settled
+    # session. Identity uses the pane OPTION rather than a scrollback marker
+    # because a real credentialed agent redraws/clears its (small 2x2) pane,
+    # wiping stdout text — a pane option can't be touched by the agent, so it's
+    # race-free. Bounded ~20s.
     _settle=0
-    while [ "$_settle" -lt 30 ]; do
+    while [ "$_settle" -lt 40 ]; do
         _pc="$(docker exec -u "$(id -u)" "$C" tmux list-panes -t sandy:0 -F x 2>/dev/null | grep -c x || true)"
         if [ "${_pc:-0}" -eq "$ARITY" ]; then
-            _allmark=1
-            for _pidx in $(docker exec -u "$(id -u)" "$C" tmux list-panes -t sandy:0 -F '#{pane_index}' 2>/dev/null); do
-                docker exec -u "$(id -u)" "$C" tmux capture-pane -p -t "sandy.$_pidx" -S - 2>/dev/null \
-                    | grep -q '\[sandy:pane-agent\]' || { _allmark=0; break; }
-            done
-            [ "$_allmark" -eq 1 ] && break
+            _mc="$(docker exec -u "$(id -u)" "$C" tmux list-panes -t sandy:0 -F '#{@sandy_pane_agent}' 2>/dev/null | grep -c '[a-zA-Z]' || true)"
+            [ "${_mc:-0}" -eq "$ARITY" ] && break
         fi
         sleep 0.5
         _settle=$((_settle + 1))
     done
 
-    PANES_RAW="$(docker exec -u "$(id -u)" "$C" tmux list-panes -t sandy:0 -F '#{pane_index} #{pane_left} #{pane_top} #{pane_width} #{pane_height} #{pane_dead}' 2>/dev/null)"
+    PANES_RAW="$(docker exec -u "$(id -u)" "$C" tmux list-panes -t sandy:0 -F '#{pane_index} #{pane_left} #{pane_top} #{pane_width} #{pane_height} #{pane_dead} #{@sandy_pane_agent}' 2>/dev/null)"
 
-    IDX=(); LEFT=(); TOP=(); WIDTH=(); HEIGHT=(); DEAD=()
-    while read -r p_idx p_left p_top p_width p_height p_dead; do
+    IDX=(); LEFT=(); TOP=(); WIDTH=(); HEIGHT=(); DEAD=(); PMARK=()
+    while read -r p_idx p_left p_top p_width p_height p_dead p_agent; do
         [ -z "$p_idx" ] && continue
-        IDX+=("$p_idx"); LEFT+=("$p_left"); TOP+=("$p_top"); WIDTH+=("$p_width"); HEIGHT+=("$p_height"); DEAD+=("$p_dead")
+        IDX+=("$p_idx"); LEFT+=("$p_left"); TOP+=("$p_top"); WIDTH+=("$p_width"); HEIGHT+=("$p_height"); DEAD+=("$p_dead"); PMARK+=("$p_agent")
     done <<PANES
 $PANES_RAW
 PANES
@@ -183,15 +180,22 @@ PANES
     done
     ck "[$combo] no pane reports dead (#{pane_dead})" "[ -z \"$alldead\" ]"
 
-    # Marker capture per actual tmux pane index (NOT assumed == local array
-    # position, though they happen to coincide since we just enumerated them
-    # in list-panes' own order).
+    # Identity marker: primary source is the @sandy_pane_agent tmux PANE OPTION
+    # (set by sandy under SANDY_TEST_PANE_TAGS), captured alongside geometry above
+    # so PMARK[i] aligns with IDX[i]. A pane option is immune to the agent
+    # redrawing/clearing its screen, unlike a stdout scrollback marker which a
+    # real credentialed agent wipes — that was the flaky identity failure this
+    # replaces. Fall back to the scrollback marker for an image predating the
+    # option (also keeps a capture-pane reference for the §80 structural guard).
     MARK=()
     i=0
     while [ "$i" -lt "$N" ]; do
-        pidx="${IDX[$i]}"
-        content="$(docker exec -u "$(id -u)" "$C" tmux capture-pane -p -t "sandy.$pidx" -S - 2>/dev/null)"
-        agent="$(printf '%s\n' "$content" | grep -oE '\[sandy:pane-agent\] [a-zA-Z0-9_-]+' | head -1 | awk '{print $2}')"
+        agent="${PMARK[$i]:-}"
+        if [ -z "$agent" ]; then
+            pidx="${IDX[$i]}"
+            content="$(docker exec -u "$(id -u)" "$C" tmux capture-pane -p -t "sandy.$pidx" -S - 2>/dev/null)"
+            agent="$(printf '%s\n' "$content" | grep -oE '\[sandy:pane-agent\] [a-zA-Z0-9_-]+' | head -1 | awk '{print $2}')"
+        fi
         MARK+=("$agent")
         i=$((i + 1))
     done

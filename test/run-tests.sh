@@ -6127,6 +6127,12 @@ check "the harness gates the pane marker via SANDY_TEST_PANE_TAGS" \
     grep -q 'SANDY_TEST_PANE_TAGS' "$_S80_TOPO"
 check "the harness verifies pane identity via capture-pane" \
     grep -q 'capture-pane' "$_S80_TOPO"
+# Primary identity is now the @sandy_pane_agent tmux PANE OPTION (agent-proof;
+# a scrollback marker is wiped when a real credentialed agent redraws its pane).
+check "sandy sets the @sandy_pane_agent pane option (agent-proof identity)" \
+    bash -c '[ "$(grep -c "set-option -p @sandy_pane_agent" "$1")" -ge 4 ]' -- "$_S80"
+check "the harness reads pane identity from the @sandy_pane_agent option" \
+    grep -q '@sandy_pane_agent' "$_S80_TOPO"
 check "the harness tears down via --stop between combos" \
     grep -q -- '--stop' "$_S80_TOPO"
 

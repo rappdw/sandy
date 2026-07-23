@@ -3786,14 +3786,14 @@ else
     # First agent: create the tmux session
     _cmd0="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[0]}" "$@")"
     if [ "${SANDY_TEST_PANE_TAGS:-0}" = "1" ]; then
-        _cmd0="printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[0]}'; $_cmd0"
+        _cmd0="tmux set-option -p @sandy_pane_agent '${_SANDY_AGENTS[0]}' 2>/dev/null; printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[0]}'; $_cmd0"
     fi
     tmux new-session -d -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$_cmd0 2>&1"
 
     # Second agent: split horizontally
     _cmd1="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[1]}" "$@")"
     if [ "${SANDY_TEST_PANE_TAGS:-0}" = "1" ]; then
-        _cmd1="printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[1]}'; $_cmd1"
+        _cmd1="tmux set-option -p @sandy_pane_agent '${_SANDY_AGENTS[1]}' 2>/dev/null; printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[1]}'; $_cmd1"
     fi
     tmux split-window -h -t sandy -- bash -c "$_cmd1 2>&1"
 
@@ -3801,7 +3801,7 @@ else
     if [ "$_SANDY_AGENT_COUNT" -ge 3 ]; then
         _cmd2="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[2]}" "$@")"
         if [ "${SANDY_TEST_PANE_TAGS:-0}" = "1" ]; then
-            _cmd2="printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[2]}'; $_cmd2"
+            _cmd2="tmux set-option -p @sandy_pane_agent '${_SANDY_AGENTS[2]}' 2>/dev/null; printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[2]}'; $_cmd2"
         fi
         tmux split-window -v -t sandy.1 -- bash -c "$_cmd2 2>&1"
     fi
@@ -3811,7 +3811,7 @@ else
     if [ "$_SANDY_AGENT_COUNT" -ge 4 ]; then
         _cmd3="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[3]}" "$@")"
         if [ "${SANDY_TEST_PANE_TAGS:-0}" = "1" ]; then
-            _cmd3="printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[3]}'; $_cmd3"
+            _cmd3="tmux set-option -p @sandy_pane_agent '${_SANDY_AGENTS[3]}' 2>/dev/null; printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[3]}'; $_cmd3"
         fi
         tmux split-window -v -t sandy.0 -- bash -c "$_cmd3 2>&1"
     fi
