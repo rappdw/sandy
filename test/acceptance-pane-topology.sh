@@ -130,6 +130,29 @@ for combo in $COMBOS; do
     ck "[$combo] remain-on-exit set (defense-in-depth)" \
         "docker exec -u \"$(id -u)\" \"$C\" tmux show-options -t sandy remain-on-exit | grep -q on\$"
 
+    # Settle gate (anti-flake): `--start`'s readiness only waits for
+    # `tmux has-session`, but the panes are created by the entrypoint
+    # sequentially and each pane's bash prints its `[sandy:pane-agent]` marker
+    # before exec'ing the agent. Inspecting immediately can race a late-split
+    # pane (esp. the 4-agent grid) or a not-yet-rendered marker, producing an
+    # intermittent identity/count failure that passes on re-run. Poll until all
+    # ARITY panes exist AND every one has rendered its marker (bounded ~15s), so
+    # geometry + identity below read a settled session.
+    _settle=0
+    while [ "$_settle" -lt 30 ]; do
+        _pc="$(docker exec -u "$(id -u)" "$C" tmux list-panes -t sandy:0 -F x 2>/dev/null | grep -c x || true)"
+        if [ "${_pc:-0}" -eq "$ARITY" ]; then
+            _allmark=1
+            for _pidx in $(docker exec -u "$(id -u)" "$C" tmux list-panes -t sandy:0 -F '#{pane_index}' 2>/dev/null); do
+                docker exec -u "$(id -u)" "$C" tmux capture-pane -p -t "sandy.$_pidx" -S - 2>/dev/null \
+                    | grep -q '\[sandy:pane-agent\]' || { _allmark=0; break; }
+            done
+            [ "$_allmark" -eq 1 ] && break
+        fi
+        sleep 0.5
+        _settle=$((_settle + 1))
+    done
+
     PANES_RAW="$(docker exec -u "$(id -u)" "$C" tmux list-panes -t sandy:0 -F '#{pane_index} #{pane_left} #{pane_top} #{pane_width} #{pane_height} #{pane_dead}' 2>/dev/null)"
 
     IDX=(); LEFT=(); TOP=(); WIDTH=(); HEIGHT=(); DEAD=()
