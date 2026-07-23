@@ -2475,6 +2475,34 @@ printf '%s\0' "${files[@]}" \
     | cut -d' ' -f2-
 SS_HELPER
 
+# sandy-claude-statusline: Claude Code native statusLine command (#67). Reads
+# the statusLine JSON payload Claude Code feeds on stdin and emits one line.
+# jq is already installed in the base image above.
+RUN cat > /usr/local/bin/sandy-claude-statusline <<'STATUSLINE_HELPER' \
+    && chmod +x /usr/local/bin/sandy-claude-statusline
+#!/bin/bash
+# sandy-claude-statusline — model · effort · context% for Claude Code's native
+# statusLine. The effort segment is omitted when .effort.level is absent/null
+# (not every model supports effort). Never errors the TUI: empty/whitespace/
+# malformed/wrong-shape stdin all fall back to a bare "sandy" line.
+set -uo pipefail
+_in="$(cat 2>/dev/null || true)"
+_out="$(printf '%s' "$_in" | jq -r '
+    (.model.display_name // "sandy") as $model
+    | .effort.level as $effort
+    | ((.context_window.used_percentage // 0) | floor) as $pct
+    | if ($effort != null and $effort != "")
+      then "\($model)  ·  effort: \($effort)  ·  \($pct)% ctx"
+      else "\($model)  ·  \($pct)% ctx"
+      end
+' 2>/dev/null)"
+if [ -z "$_out" ]; then
+    printf 'sandy\n'
+else
+    printf '%s\n' "$_out"
+fi
+STATUSLINE_HELPER
+
 # User
 RUN useradd -m -s /bin/bash -u 1001 claude
 
@@ -3817,13 +3845,20 @@ set -g pane-active-border-style "fg=colour51"
 set -g pane-border-status top
 set -g pane-border-format " #[fg=colour51]#{window_name}#[default] "
 
-# Status bar
+# Status bar — reads runtime env (SANDY_EGRESS_MODE/SANDY_AGENT/
+# SANDY_PROJECT_NAME/SANDY_DAEMON) via #{E:}; egress posture is
+# color-coded: green=strict, cyan=permissive, orange=no-net-iso warning.
 set -g status-position bottom
 set -g status-style "bg=colour235,fg=colour248"
-set -g status-left "#[fg=colour51,bold] sandy "
-set -g status-left-length 10
-set -g status-right "#[fg=colour248] %H:%M "
-set -g status-right-length 10
+set -g status-left "#[fg=colour51,bold] sandy #[default]#[fg=colour248]·#[default] #{?#{==:#{E:SANDY_EGRESS_MODE},strict},#[fg=colour2]★ strict#[default],#{?#{==:#{E:SANDY_EGRESS_MODE},off},#[fg=colour208]★ no-net-iso#[default],#[fg=colour51]★ permissive#[default]}} #[fg=colour248]·#[default] #[fg=colour250]#{E:SANDY_AGENT}#[default] "
+set -g status-left-length 70
+set -g status-right "#[fg=colour250]#{E:SANDY_PROJECT_NAME}#[default] #[fg=colour248]·#[default] #[fg=colour250]#{session_attached} #{?#{==:#{session_attached},1},client,clients}#[default] #[fg=colour248]·#[default] #{?#{E:SANDY_DAEMON},#[fg=colour214]daemon#[default],#[fg=colour248]session#[default]} #[fg=colour248]·#[default] #[fg=colour248]%H:%M#[default] "
+set -g status-right-length 80
+set -g window-status-format ""
+set -g window-status-current-format ""
+set -g window-status-separator ""
+set -g window-status-style "bg=colour235,fg=colour235"
+set -g window-status-current-style "bg=colour235,fg=colour235"
 
 # Allow OSC escape sequences (notifications, hyperlinks) to pass through
 # to the outer terminal (cmux, iTerm2, etc.)
@@ -6515,7 +6550,7 @@ if _sandy_agent_has claude; then
             const prev = readJson(dst);
             if (prev.enabledPlugins) s.enabledPlugins = prev.enabledPlugins;
             const skip = (process.env.SANDY_SKIP_PERMISSIONS || 'true') !== 'false';
-            const defaults = {teammateMode:'tmux', spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:skip};
+            const defaults = {teammateMode:'tmux', spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:skip, statusLine:{ type:'command', command:'/usr/local/bin/sandy-claude-statusline', padding:0 }};
             for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
             // Set permissions.defaultMode = bypassPermissions when SANDY_SKIP_PERMISSIONS=true.
             // Claude 2.1.x runtime gates make the CLI flag insufficient; the settings.json
@@ -6569,6 +6604,7 @@ if _sandy_agent_has claude; then
             .teammateMode //= "tmux" |
             .spinnerTipsEnabled //= false |
             .skipDangerousModePermissionPrompt //= ($skip == "true") |
+            .statusLine //= {"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0} |
             (if $skip == "true"
                 then .permissions = ((.permissions // {}) | .defaultMode = "bypassPermissions")
                 elif (.permissions.defaultMode? // "") == "bypassPermissions"
@@ -6593,9 +6629,9 @@ if _sandy_agent_has claude; then
             skip_perm="true"
             [ "${SANDY_SKIP_PERMISSIONS:-true}" = "false" ] && skip_perm="false"
             if [ "$skip_perm" = "true" ]; then
-                printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$SEED_SETTINGS"
+                printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$SEED_SETTINGS"
             else
-                printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false}\n' > "$SEED_SETTINGS"
+                printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' > "$SEED_SETTINGS"
             fi
         fi
     fi

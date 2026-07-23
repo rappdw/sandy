@@ -6167,6 +6167,88 @@ check "SANDY_TEST_PANE_TAGS has NO _sandy_key_metadata row (never in --print-sch
     bash -c '! awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -q "SANDY_TEST_PANE_TAGS"' -- "$_S80"
 
 # ============================================================
+echo "§81: Status lines — outer tmux bar (#42) + Claude Code statusLine (#67)"
+# ============================================================
+_S81="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+# --- (a) tmux status bar: reads runtime env via #{E:}, all three egress
+# postures color-coded, and the window-status blanking lines are present. ---
+
+_S81_TMUXCONF="$(awk '/^generate_tmux_conf\(\)/,/^}$/' "$_S81")"
+
+check "status bar reads SANDY_EGRESS_MODE via #{E:}" \
+    bash -c 'printf "%s" "$1" | grep -q "E:SANDY_EGRESS_MODE"' -- "$_S81_TMUXCONF"
+check "status bar handles the strict posture" \
+    bash -c 'printf "%s" "$1" | grep -q "strict"' -- "$_S81_TMUXCONF"
+check "status bar handles the off/no-net-iso posture" \
+    bash -c 'printf "%s" "$1" | grep -q "no-net-iso"' -- "$_S81_TMUXCONF"
+check "status bar handles the permissive posture" \
+    bash -c 'printf "%s" "$1" | grep -q "permissive"' -- "$_S81_TMUXCONF"
+check "status bar reads SANDY_AGENT via #{E:}" \
+    bash -c 'printf "%s" "$1" | grep -q "E:SANDY_AGENT"' -- "$_S81_TMUXCONF"
+check "status bar reads SANDY_PROJECT_NAME via #{E:}" \
+    bash -c 'printf "%s" "$1" | grep -q "E:SANDY_PROJECT_NAME"' -- "$_S81_TMUXCONF"
+check "status bar shows attached-client count via session_attached" \
+    bash -c 'printf "%s" "$1" | grep -q "session_attached" && printf "%s" "$1" | grep -q "clients"' -- "$_S81_TMUXCONF"
+check "status bar reads SANDY_DAEMON via #{E:}" \
+    bash -c 'printf "%s" "$1" | grep -q "E:SANDY_DAEMON"' -- "$_S81_TMUXCONF"
+check "window-status-format is blanked" \
+    bash -c 'printf "%s" "$1" | grep -qF "window-status-format \"\""' -- "$_S81_TMUXCONF"
+check "window-status-current-format is blanked" \
+    bash -c 'printf "%s" "$1" | grep -qF "window-status-current-format \"\""' -- "$_S81_TMUXCONF"
+
+# --- (b) Dockerfile.base bakes the sandy-claude-statusline helper. ---
+
+_S81_DFBASE="$(awk '/^generate_dockerfile_base\(\)/,/^}$/' "$_S81")"
+
+check "Dockerfile.base bakes /usr/local/bin/sandy-claude-statusline" \
+    bash -c 'printf "%s" "$1" | grep -q "/usr/local/bin/sandy-claude-statusline"' -- "$_S81_DFBASE"
+check "Dockerfile.base chmod +x's sandy-claude-statusline" \
+    bash -c 'printf "%s" "$1" | grep -q "chmod +x /usr/local/bin/sandy-claude-statusline"' -- "$_S81_DFBASE"
+
+# --- (c) extract the baked jq expression and run it standalone against the
+# documented sample payloads (no docker needed — jq is pure data). ---
+
+_S81_JQ="$(awk '
+  /^_out="\$\(printf/ { infound=1 }
+  infound && /jq -r '"'"'/ { sub(/.*jq -r '"'"'/, ""); print; next }
+  infound && /^'"'"' 2>\/dev\/null\)"$/ { infound=0; next }
+  infound { print }
+' "$_S81")"
+
+check "extracted jq expression: no-effort payload -> 'Sonnet  ·  8% ctx'" \
+    bash -c '
+        out="$(echo "{\"model\":{\"display_name\":\"Sonnet\"},\"context_window\":{\"used_percentage\":8.2}}" | jq -r "$1")"
+        [ "$out" = "Sonnet  ·  8% ctx" ]
+    ' -- "$_S81_JQ"
+check "extracted jq expression: effort payload -> 'Opus  ·  effort: high  ·  42% ctx'" \
+    bash -c '
+        out="$(echo "{\"model\":{\"display_name\":\"Opus\"},\"effort\":{\"level\":\"high\"},\"context_window\":{\"used_percentage\":42.7}}" | jq -r "$1")"
+        [ "$out" = "Opus  ·  effort: high  ·  42% ctx" ]
+    ' -- "$_S81_JQ"
+
+# --- (d) all three settings.json branches add statusLine, only-if-absent. ---
+
+_S81_SETTINGS="$(awk '/SEED_SETTINGS="\$SANDBOX_DIR\/claude\/settings.json"/,/Seeded settings.json/' "$_S81")"
+
+check "node branch: defaults object includes statusLine -> sandy-claude-statusline" \
+    bash -c 'printf "%s" "$1" | grep -q "const defaults = " && printf "%s" "$1" | grep "const defaults = " | grep -q "statusLine" && printf "%s" "$1" | grep "const defaults = " | grep -q "sandy-claude-statusline"' -- "$_S81_SETTINGS"
+check "node branch: statusLine goes through the (!(k in s)) only-if-absent loop" \
+    bash -c 'printf "%s" "$1" | grep -q "for (const \[k,v\] of Object.entries(defaults))"' -- "$_S81_SETTINGS"
+check "jq branch: statusLine uses //= (only-if-absent) and points at sandy-claude-statusline" \
+    bash -c 'printf "%s" "$1" | grep -q "\.statusLine //= " && printf "%s" "$1" | grep "\.statusLine //= " | grep -q "sandy-claude-statusline"' -- "$_S81_SETTINGS"
+check "last-resort branch: skip-permissions printf JSON includes statusLine" \
+    bash -c 'printf "%s" "$1" | grep "skipDangerousModePermissionPrompt.:true" | grep -q "sandy-claude-statusline"' -- "$_S81_SETTINGS"
+check "last-resort branch: non-skip printf JSON includes statusLine" \
+    bash -c 'printf "%s" "$1" | grep "skipDangerousModePermissionPrompt.:false" | grep -q "sandy-claude-statusline"' -- "$_S81_SETTINGS"
+
+# --- (e) negative: no STATUSLINE-family key was added to _sandy_key_metadata
+# (this feature is not a new config key — statusLine is always-on seeding). ---
+
+check "no STATUSLINE key was added to _sandy_key_metadata" \
+    bash -c '! awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -qi "STATUSLINE"' -- "$_S81"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

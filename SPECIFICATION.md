@@ -930,7 +930,7 @@ Sandy wraps Claude Code in a tmux session:
 - Escape time: 0ms
 - OSC passthrough: `allow-passthrough on` (enables terminal notifications and clipboard)
 - OSC 52 clipboard support for mouse selections
-- Status bar: "sandy" prefix with time display
+- Status bar: launch/session-scoped info bar — egress posture (color-coded), agent, workspace, attached-client count, daemon marker, clock (see Appendix A.7 for the exact `#{E:}` env-driven format; see also "Status Lines" in CLAUDE.md for the split with Claude Code's own live statusLine)
 
 ### Multi-Agent Mode (comma-separated `SANDY_AGENT`)
 
@@ -1365,6 +1365,14 @@ RUN cat > /usr/local/bin/sandy-ss-paths <<'SS_HELPER' \
 # (body — see Appendix E.11a for the host-side mount that defines $SANDY_SCREENSHOTS_PATH)
 SS_HELPER
 
+# sandy-claude-statusline: Claude Code native statusLine command (#67).
+# Reads the statusLine JSON payload on stdin, emits model/effort/context%.
+RUN cat > /usr/local/bin/sandy-claude-statusline <<'STATUSLINE_HELPER' \
+    && chmod +x /usr/local/bin/sandy-claude-statusline
+#!/bin/bash
+# (body — see Appendix C.2 for the seeding side and the output format)
+STATUSLINE_HELPER
+
 # User
 RUN useradd -m -s /bin/bash -u 1001 claude
 
@@ -1593,16 +1601,36 @@ set -g pane-border-format " #[fg=colour51]#{window_name}#[default] "
 
 set -g status-position bottom
 set -g status-style "bg=colour235,fg=colour248"
-set -g status-left "#[fg=colour51,bold] sandy "
-set -g status-left-length 10
-set -g status-right "#[fg=colour248] %H:%M "
-set -g status-right-length 10
+set -g status-left "#[fg=colour51,bold] sandy #[default]#[fg=colour248]·#[default] #{?#{==:#{E:SANDY_EGRESS_MODE},strict},#[fg=colour2]★ strict#[default],#{?#{==:#{E:SANDY_EGRESS_MODE},off},#[fg=colour208]★ no-net-iso#[default],#[fg=colour51]★ permissive#[default]}} #[fg=colour248]·#[default] #[fg=colour250]#{E:SANDY_AGENT}#[default] "
+set -g status-left-length 70
+set -g status-right "#[fg=colour250]#{E:SANDY_PROJECT_NAME}#[default] #[fg=colour248]·#[default] #[fg=colour250]#{session_attached} #{?#{==:#{session_attached},1},client,clients}#[default] #[fg=colour248]·#[default] #{?#{E:SANDY_DAEMON},#[fg=colour214]daemon#[default],#[fg=colour248]session#[default]} #[fg=colour248]·#[default] #[fg=colour248]%H:%M#[default] "
+set -g status-right-length 80
+set -g window-status-format ""
+set -g window-status-current-format ""
+set -g window-status-separator ""
+set -g window-status-style "bg=colour235,fg=colour235"
+set -g window-status-current-style "bg=colour235,fg=colour235"
 
 set -g allow-passthrough on
 set -g set-clipboard on
 set -g focus-events on
 setw -g aggressive-resize on
 ```
+
+The status-left/status-right fields read runtime env at *display* time via
+tmux's `#{E:VAR}` interpolation (not baked in at heredoc-generation time —
+the heredoc is quoted, so nothing is substituted when the file is written).
+`SANDY_EGRESS_MODE` drives the egress-posture segment, color-coded:
+green (`colour2`) = strict, cyan (`colour51`) = permissive, orange
+(`colour208`) = off/no-net-iso (a deliberate warning color — this posture
+means no network isolation on macOS). `SANDY_AGENT`, `SANDY_PROJECT_NAME`,
+and `SANDY_DAEMON` are forwarded container-side env vars (Appendix E);
+`session_attached` is tmux's own built-in format variable, not env-derived.
+The window-status lines are blanked (`""`) because sandy's tmux sessions are
+single- or multi-pane within one window, not multi-window — a window list
+in the status bar would be dead chrome. See CLAUDE.md "Status Lines" for how
+this outer bar (launch/session-scoped) complements Claude Code's own native
+`statusLine` (Appendix C.2, live per-request model/effort/context%).
 
 ---
 
@@ -1778,11 +1806,14 @@ Note the double-nested `source` — the outer key is the `extraKnownMarketplaces
 {
   "teammateMode": "tmux",
   "spinnerTipsEnabled": false,
-  "skipDangerousModePermissionPrompt": true
+  "skipDangerousModePermissionPrompt": true,
+  "statusLine": { "type": "command", "command": "/usr/local/bin/sandy-claude-statusline", "padding": 0 }
 }
 ```
 
 `enabledPlugins` is **preserved** from the previous sandbox session (and inherited from the host copy on first launch) so `/plugin install` survives relaunches. The file is read-write inside the container — the pre-0.11.3 read-only sidecar was reverted because it broke `/plugin install` with `EROFS`. Host-side edits to `~/.claude/settings.json` still propagate on the next launch (sandy re-reads the host copy every launch), and the sandy-managed keys are re-overwritten every launch regardless of in-session mutations.
+
+**`statusLine` (#67)** is set **only if absent** — all three seeding branches (Node `if (!(k in s))`, jq `//=`, and the last-resort `printf` literals) use an only-if-absent guard, so a user's own `statusLine` in `~/.claude/settings.json` is never overwritten. When absent, sandy points it at `/usr/local/bin/sandy-claude-statusline` (baked into the base image, Appendix A.1-adjacent — see the Dockerfile.base `RUN cat > ... STATUSLINE_HELPER` block), a small script that reads Claude Code's statusLine JSON payload from stdin and emits `<model>  ·  [effort: <level>  ·  ]<context%>% ctx`, falling back to a bare `sandy` line on any empty/malformed/wrong-shape input so the TUI never shows an error. This is a live, per-request complement to the tmux status bar (Appendix A.7), which is launch/session-scoped and structurally cannot show per-request model/effort/context — see CLAUDE.md "Status Lines".
 
 **JSON repair** applied before parsing (handles common hand-editing errors):
 - Remove trailing commas: regex `,(\s*[}\]])` → `$1`

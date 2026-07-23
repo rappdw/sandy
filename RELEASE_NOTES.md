@@ -40,6 +40,15 @@ Identity is proven via a new env-gated marker: with `SANDY_TEST_PANE_TAGS=1`, sa
 
 Building the harness also surfaced (and the harness now documents/works around) a real tmux nuance: `pane_index` does not track spawn order once a later split re-splits an earlier pane, which is exactly what the 4-agent 2×2-grid split sequence does — so in that combo `sandy.1`/`sandy.2`/`sandy.3` do not hold the 2nd/3rd/4th spawned agent the way a naive read of the split code would suggest, even though each agent still lands in its correct documented on-screen quadrant. See the "Verification reality (#22)" note in `CLAUDE.md` for the detail; this is a documentation/indexing nuance, not a behavior change, and it is out of scope for this harness to fix `SANDY_CHANNEL_TARGET_PANE`'s reliance on raw pane index for 4-agent combos (tracked separately).
 
+### Richer status lines — outer tmux bar + Claude Code native `statusLine` (#42, #67)
+
+Two independent status-line upgrades, both purely additive (no new config keys):
+
+- **Outer tmux status bar (#42).** Previously just a bare " sandy " prefix and a clock. Now shows, left-to-right: `sandy` · egress posture (color-coded — green `★ strict`, cyan `★ permissive`, orange `★ no-net-iso` as a warning) · agent(s); and on the right: workspace/project name · attached-client count · a `daemon`/`session` marker · the clock. Everything is read live via tmux's `#{E:VAR}` interpolation against already-forwarded env (`SANDY_EGRESS_MODE`/`SANDY_AGENT`/`SANDY_PROJECT_NAME`/`SANDY_DAEMON`), so it reflects the actual running session, not a snapshot baked in at container build time. Window-status (tab) rendering is now blanked — sandy sessions are single/multi-*pane*, not multi-window, so the tab list was dead chrome.
+- **Claude Code native `statusLine` (#67).** A new `/usr/local/bin/sandy-claude-statusline` helper is baked into the base image and seeded into `settings.json` (only if the user hasn't already set their own `statusLine` — all three seeding paths use an only-if-absent guard). It reads Claude Code's statusLine JSON payload from stdin on every render and prints `<model>  ·  [effort: <level>  ·  ]<context%>% ctx`, e.g. `Opus 4.8  ·  effort: high  ·  42% ctx` — live, per-request information the outer tmux bar structurally can't show. Falls back to a bare `sandy` line on any empty/malformed/wrong-shape input, so a stdin hiccup never surfaces as a TUI error.
+
+See "Status Lines" in `CLAUDE.md` for the full split-of-responsibility rationale. Guarded by `run-tests.sh §81`.
+
 ---
 
 ## sandy v1.2.1
