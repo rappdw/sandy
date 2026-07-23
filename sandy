@@ -2734,7 +2734,7 @@ COPY --from=build /sandy-proxy /usr/local/bin/sandy-proxy
 # Config is bind-mounted at /etc/sandy-proxy.json by the launcher (PR 2.7.3).
 # Readiness (#37): scratch has no shell, so the healthcheck IS the binary
 # re-invoked with -healthcheck, probing its own listeners. The container reports
-# `healthy` only once the listeners actually bind, not merely when the process
+# healthy only once the listeners actually bind, not merely when the process
 # starts — closing the transient "connection refused" window on the first
 # request. Exec form (no shell); the launcher's gate polls .State.Health.Status.
 HEALTHCHECK --interval=1s --start-period=0s --timeout=2s --retries=3 CMD ["/usr/local/bin/sandy-proxy", "-healthcheck"]

@@ -4016,6 +4016,15 @@ check "proxy Dockerfile: builds proxy/ statically (CGO_ENABLED=0)" \
     bash -c 'grep -q "cd /src/proxy" "$1" && grep -q "CGO_ENABLED=0 go build" "$1"' -- "$_PX_DF"
 check "proxy Dockerfile: entrypoint is the proxy binary" \
     grep -qF 'ENTRYPOINT ["/usr/local/bin/sandy-proxy"]' "$_PX_DF"
+# Regression (real launch bug, 2026-07-23): the Dockerfile.proxy heredoc is
+# UNQUOTED (it needs ${ref} expanded), so any backtick / $( ) / unescaped ${ }
+# in its body is executed by the SHELL at generation time — a stray `word` in a
+# comment ran `word` and printed "word: command not found" on every launch (the
+# generation call above swallows stderr with 2>/dev/null, which is why CI never
+# caught it). Assert the generator emits NOTHING on stderr.
+check "proxy Dockerfile generation emits no stderr (no unescaped shell-specials in the heredoc)" \
+    bash -c '_h="$(mktemp -d)"; _e="$(SANDY_HOME="$_h" SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" GITHUB_HEAD_REF= bash -c "$1
+generate_dockerfile_proxy" 2>&1 >/dev/null)"; rm -rf "$_h"; [ -z "$_e" ]' -- "$_PX_FNS"
 rm -rf "$_PX_TMP"
 
 # Build phase: gated on the normalized proxy predicate, uses .build_hash_proxy,
