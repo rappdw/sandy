@@ -126,6 +126,20 @@ pass()  { PASS=$((PASS + 1)); printf "  \033[0;32m✓ %s\033[0m\n" "$*"; }
 fail()  { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "  \033[0;31m✗ %s\033[0m\n" "$*"; }
 skip()  { SKIP=$((SKIP + 1)); printf "  \033[0;33m⊘ %s (skipped)\033[0m\n" "$*"; }
 
+# Print a one-line run-provenance footer: UTC timestamp, short commit + describe,
+# and clean/dirty (tracked changes vs HEAD — untracked scratch files don't count).
+# This suite is long-running; the footer says which build a scrolled-back result
+# came from. macOS/BSD-portable: `date -u` fmt, `git describe`, `git diff --quiet`.
+_run_provenance() {
+    local repo ts sha desc tree
+    repo="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+    ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '?')"
+    sha="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    desc="$(git -C "$repo" describe --tags --always 2>/dev/null || echo '?')"
+    if git -C "$repo" diff --quiet HEAD 2>/dev/null; then tree="clean"; else tree="dirty"; fi
+    printf "\033[0;36m── run finished %s · commit %s (%s) · tree: %s\033[0m\n" "$ts" "$sha" "$desc" "$tree"
+}
+
 _emit_summary() {
     local code=$?
     printf '\033>' 2>/dev/null || true
@@ -1654,5 +1668,6 @@ else
     if [ "$SKIP" -gt 0 ]; then
         printf "\033[0;33m(%d tests skipped — missing credentials)\033[0m\n" "$SKIP"
     fi
-    exit 1
 fi
+_run_provenance
+[ "$FAIL" -eq 0 ] || exit 1

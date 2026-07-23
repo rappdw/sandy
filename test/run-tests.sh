@@ -81,6 +81,19 @@ check() {
     if "$@" >/dev/null 2>&1; then pass "$desc"; else fail "$desc"; fi
 }
 
+# Print a one-line run-provenance footer: UTC timestamp, short commit + describe,
+# and clean/dirty (tracked changes vs HEAD — untracked scratch files don't count).
+# macOS/BSD-portable: `date -u` fmt, `git describe`, `git diff --quiet HEAD`.
+_run_provenance() {
+    local repo ts sha desc tree
+    repo="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+    ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '?')"
+    sha="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    desc="$(git -C "$repo" describe --tags --always 2>/dev/null || echo '?')"
+    if git -C "$repo" diff --quiet HEAD 2>/dev/null; then tree="clean"; else tree="dirty"; fi
+    printf "\033[0;36m── run finished %s · commit %s (%s) · tree: %s\033[0m\n" "$ts" "$sha" "$desc" "$tree"
+}
+
 # Create a temp sandbox with persistent mount dirs
 setup_sandbox() {
     SANDBOX_DIR="$(mktemp -d)"
@@ -6276,5 +6289,7 @@ else
     for e in "${ERRORS[@]}"; do
         printf "  \033[0;31m- %s\033[0m\n" "$e"
     done
-    exit 1
 fi
+_run_provenance   # timestamp + commit + tree state, so a result you scroll back
+                  # to after a context switch says which build produced it.
+[ "$FAIL" -eq 0 ] || exit 1
