@@ -915,27 +915,48 @@ else
     _agent_names="$(IFS=' + '; echo "${_SANDY_AGENTS[*]}")"
     sandy_log "Launching $_agent_names (multi-pane)"
 
-    # First agent: create the tmux session
+    # First agent: create the tmux session.
+    #
+    # Test identity (#22, SANDY_TEST_PANE_TAGS): set each pane's @sandy_pane_agent
+    # option from the LAUNCHER, targeting the pane by its unique id captured via
+    # `-P -F '#{pane_id}'` at creation. An earlier approach had the pane's OWN
+    # command run `tmux set-option -p` — but that self-set (resolved via
+    # $TMUX_PANE / active pane) RACED the subsequent re-split of pane 0 and
+    # misfired on the left column (claude's tag lost, opencode's landed on the
+    # wrong pane). Setting by pane-id from the launcher is race-free: the id is
+    # stable and the option is written synchronously right after the pane exists.
+    # The printf marker is kept as a log line + a capture-pane fallback for the
+    # harness against an image predating this. Normal launches (var unset) take
+    # the else branch and are byte-identical to before.
     _cmd0="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[0]}" "$@")"
     if [ "${SANDY_TEST_PANE_TAGS:-0}" = "1" ]; then
-        _cmd0="tmux set-option -p @sandy_pane_agent '${_SANDY_AGENTS[0]}' 2>/dev/null; printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[0]}'; $_cmd0"
+        _cmd0="printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[0]}'; $_cmd0"
+        _p_id="$(tmux new-session -d -P -F '#{pane_id}' -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$_cmd0 2>&1")"
+        tmux set-option -p -t "$_p_id" @sandy_pane_agent "${_SANDY_AGENTS[0]}" 2>/dev/null
+    else
+        tmux new-session -d -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$_cmd0 2>&1"
     fi
-    tmux new-session -d -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$_cmd0 2>&1"
 
     # Second agent: split horizontally
     _cmd1="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[1]}" "$@")"
     if [ "${SANDY_TEST_PANE_TAGS:-0}" = "1" ]; then
-        _cmd1="tmux set-option -p @sandy_pane_agent '${_SANDY_AGENTS[1]}' 2>/dev/null; printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[1]}'; $_cmd1"
+        _cmd1="printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[1]}'; $_cmd1"
+        _p_id="$(tmux split-window -h -P -F '#{pane_id}' -t sandy -- bash -c "$_cmd1 2>&1")"
+        tmux set-option -p -t "$_p_id" @sandy_pane_agent "${_SANDY_AGENTS[1]}" 2>/dev/null
+    else
+        tmux split-window -h -t sandy -- bash -c "$_cmd1 2>&1"
     fi
-    tmux split-window -h -t sandy -- bash -c "$_cmd1 2>&1"
 
     # Third agent (if present): split the right pane vertically
     if [ "$_SANDY_AGENT_COUNT" -ge 3 ]; then
         _cmd2="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[2]}" "$@")"
         if [ "${SANDY_TEST_PANE_TAGS:-0}" = "1" ]; then
-            _cmd2="tmux set-option -p @sandy_pane_agent '${_SANDY_AGENTS[2]}' 2>/dev/null; printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[2]}'; $_cmd2"
+            _cmd2="printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[2]}'; $_cmd2"
+            _p_id="$(tmux split-window -v -P -F '#{pane_id}' -t sandy.1 -- bash -c "$_cmd2 2>&1")"
+            tmux set-option -p -t "$_p_id" @sandy_pane_agent "${_SANDY_AGENTS[2]}" 2>/dev/null
+        else
+            tmux split-window -v -t sandy.1 -- bash -c "$_cmd2 2>&1"
         fi
-        tmux split-window -v -t sandy.1 -- bash -c "$_cmd2 2>&1"
     fi
 
     # Fourth agent (if present): split the left pane vertically → 2x2 grid.
@@ -943,9 +964,12 @@ else
     if [ "$_SANDY_AGENT_COUNT" -ge 4 ]; then
         _cmd3="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[3]}" "$@")"
         if [ "${SANDY_TEST_PANE_TAGS:-0}" = "1" ]; then
-            _cmd3="tmux set-option -p @sandy_pane_agent '${_SANDY_AGENTS[3]}' 2>/dev/null; printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[3]}'; $_cmd3"
+            _cmd3="printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[3]}'; $_cmd3"
+            _p_id="$(tmux split-window -v -P -F '#{pane_id}' -t sandy.0 -- bash -c "$_cmd3 2>&1")"
+            tmux set-option -p -t "$_p_id" @sandy_pane_agent "${_SANDY_AGENTS[3]}" 2>/dev/null
+        else
+            tmux split-window -v -t sandy.0 -- bash -c "$_cmd3 2>&1"
         fi
-        tmux split-window -v -t sandy.0 -- bash -c "$_cmd3 2>&1"
     fi
 
     tmux select-pane -t sandy.0
