@@ -5672,7 +5672,7 @@ check "the container-liveness gate never reads/queries the sandy.daemon_pid labe
         ! printf "%s" "$_f" | grep -q "sandy\.daemon_pid"' -- "$_S79"
 
 check "--gc parses its OWN --dry-run/--yes into distinct locals, not SANDY_UPDATE_*" \
-    bash -c '_f="$(awk "/^if \[\[ \"\\\${1:-}\" == \"--gc\" \]\]; then/,/^fi\$/" "$1")"
+    bash -c '_f="$(awk "/^if .*--gc/,/^fi\$/" "$1")"
         printf "%s" "$_f" | grep -qF "_sandy_gc_dry_run" \
             && printf "%s" "$_f" | grep -qF "_sandy_gc_yes" \
             && ! printf "%s" "$_f" | grep -qE "SANDY_UPDATE_(DRY_RUN|YES)="' -- "$_S79"
@@ -5698,7 +5698,7 @@ check "the container reaper invokes the lister with the retrying 'reap' mode" \
         printf "%s" "$_f" | grep -qF "_sandy_dead_owner_containers_list reap"' -- "$_S79"
 
 check "the --gc dispatcher's plan step also uses 'reap' mode (plan matches what actually happens)" \
-    bash -c '_f="$(awk "/^if \[\[ \"\\\${1:-}\" == \"--gc\" \]\]; then/,/^fi\$/" "$1")"
+    bash -c '_f="$(awk "/^if .*--gc/,/^fi\$/" "$1")"
         printf "%s" "$_f" | grep -qF "_sandy_dead_owner_containers_list reap"' -- "$_S79"
 
 check "the container-liveness gate discriminates agent-vs-proxy by IMAGE, not name prefix (B1/B2 fix)" \
@@ -5906,7 +5906,7 @@ _S79_YES_RC=0
 PATH="$_S79_BIN:$PATH" SANDY_HOME="$_S79_HOME" bash "$_S79" --gc --yes </dev/null >/dev/null 2>&1 || _S79_YES_RC=$?
 check "--gc --yes (non-TTY) exits 0" test "$_S79_YES_RC" -eq 0
 check "--gc --yes reaped exactly the 5 expected dead-owner containers (4 base + 1 orphaned proxy)" \
-    bash -c 'sort -u "$1" | wc -l | grep -qx 5' -- "$_S79_RM_CONTAINERS"
+    bash -c '[ "$(sort -u "$1" | wc -l | tr -d " ")" = 5 ]' -- "$_S79_RM_CONTAINERS"
 check "--gc --yes never touched the D9-alive daemon container" \
     bash -c '! grep -qx "sandy-daemon-alive" "$1"' -- "$_S79_RM_CONTAINERS"
 check "--gc --yes never touched the live-lock foreground container" \
