@@ -479,6 +479,8 @@ _sandy_protected_files() {
 .pypirc
 .netrc
 .pre-commit-config.yaml
+.claude/settings.json
+.claude/settings.local.json
 EOF
 }
 # Top-level .git files that can trigger host-side code execution if tampered.
@@ -501,6 +503,7 @@ _sandy_protected_dirs() {
 .idea
 .circleci
 .devcontainer
+.claude/hooks
 EOF
     [ "${SANDY_ALLOW_WORKFLOW_EDIT:-0}" = "1" ] || echo ".github/workflows"
 }
