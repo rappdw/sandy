@@ -1,6 +1,14 @@
-## sandy v1.3.0 (unreleased)
+## sandy v1.3.0
 
-Additive feature work. `schema_version` stays `1`; the sandbox forward-compat promise holds.
+Six additive features — **observability, reclaim, and readiness**. `schema_version` stays `1` and the 1.x sandbox forward-compat promise holds, so any 1.x sandbox keeps working.
+
+- **Two status lines** — the outer tmux bar now shows color-coded egress posture, agent(s), workspace, client count, and daemon/session state; the Claude pane gets a native status line with live model · effort · context. (#42, #67)
+- **`sandy --gc`** — one-pass reclaim of leaked Docker resources (dead-owner containers, orphan networks, orphaned per-project/skill images, dangling images), reboot-safe by design. (#36)
+- **Egress-proxy readiness** — the launch gate waits for the proxy's listeners to actually bind via a Docker `HEALTHCHECK`, closing a first-request "connection refused" race. (#37)
+- **`SANDY_AGENT_ARGS`** — persistent extra agent flags from `.sandy/config`, applied on every launch including sandy-ui. (#59)
+- **Automated multi-agent pane-topology verification** — a Docker-runtime harness proves the documented split-pane layouts. (#22)
+
+Per-feature detail below. (#52 and #23 moved to 1.3.1.)
 
 ### `SANDY_AGENT_ARGS` — persistent extra agent args from config (#59)
 
