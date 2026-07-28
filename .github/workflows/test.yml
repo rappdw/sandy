@@ -73,6 +73,29 @@ jobs:
         working-directory: proxy
         run: go test -race ./...
 
+      # HF-incident Issue 1: the proxy parses attacker-influenced wire bytes, so
+      # prove the parsers never panic under adversarial input — a short fuzz pass
+      # per target (seed corpus + fuzzing). Any crasher fails the build.
+      - name: go fuzz (short)
+        working-directory: proxy
+        run: |
+          for t in FuzzExtractSNI FuzzParseServerName FuzzExtractHTTPHost; do
+            echo "== fuzz $t =="
+            go test -run='^$' -fuzz="^${t}$" -fuzztime=30s .
+          done
+
+      # HF-incident Issue 1: surface known vulnerabilities in the proxy's own
+      # dependency + stdlib call paths. Advisory (continue-on-error): stdlib patch
+      # latency is remediated by the proxy image's monthly golang-base refresh
+      # (Issue 3) and miekg/dns bumps by Dependabot, so a new stdlib CVE surfaces
+      # here without hard-breaking every unrelated proxy PR.
+      - name: govulncheck (advisory)
+        continue-on-error: true
+        working-directory: proxy
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
       - name: static build
         working-directory: proxy
         run: CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /tmp/sandy-proxy .
