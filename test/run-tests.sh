@@ -4290,6 +4290,15 @@ check "proxy attaches the sidecar with a fixed --ip" \
     bash -c 'grep -q "docker network connect --ip \"\$PROXY_IP\" \"\$SIDECAR_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
 check "proxy runs hardened (--read-only --cap-drop ALL)" \
     bash -c 'grep -q -- "--cap-drop ALL" "$1"' -- "$_PX_SCRIPT"
+# HF-incident Issue 2: the proxy is the dual-homed bridge whose compromise
+# reproduces the incident, so it carries no-new-privileges + resource caps that
+# bound a connection storm (backstop to the in-proxy connection semaphore).
+check "proxy hardened with no-new-privileges (Issue 2)" \
+    bash -c 'grep -q -- "--security-opt no-new-privileges:true" "$1"' -- "$_PX_SCRIPT"
+check "proxy carries a --pids-limit (Issue 2)" \
+    bash -c 'grep -qE -- "--pids-limit [0-9]+" "$1"' -- "$_PX_SCRIPT"
+check "proxy carries a --memory cap (Issue 2)" \
+    bash -c 'grep -qE -- "--memory [0-9]+m" "$1"' -- "$_PX_SCRIPT"
 check "cleanup removes proxy container before networks" \
     bash -c 'grep -q "docker rm -f \"\$PROXY_CONTAINER\"" "$1" && grep -q "docker network rm \"\$EGRESS_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
 
@@ -4575,8 +4584,8 @@ check "cleanup reaps the background log streamer (\$PROXY_LOG_PID)" \
 # (B) panic recovery in the proxy
 check "proxy has a panic-recovering guard() helper" \
     bash -c 'test -f "$1/guard.go" && grep -q "func guard(" "$1/guard.go" && grep -q "recover()" "$1/guard.go"' -- "$_PROXY_DIR"
-check "every per-connection goroutine is wrapped in guard()" \
-    bash -c 'for f in transparent connect forward; do grep -q "go guard(" "$1/$f.go" || exit 1; done' -- "$_PROXY_DIR"
+check "every per-connection goroutine is wrapped in guard() (via the shared acceptLoop)" \
+    bash -c 'grep -q "go guard(" "$1/accept.go" && for f in transparent connect forward; do grep -q "acceptLoop(" "$1/$f.go" || exit 1; done' -- "$_PROXY_DIR"
 check "no per-connection goroutine spawns a bare unguarded handle()" \
     bash -c '! grep -REq "go l\.handle\(c\)" "$1"/transparent.go "$1"/connect.go "$1"/forward.go' -- "$_PROXY_DIR"
 

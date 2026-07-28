@@ -5967,6 +5967,18 @@ start_proxy_sidecar() {
         --restart on-failure:5
         --read-only
         --cap-drop ALL
+        # HF-incident Issue 2: the proxy is the dual-homed bridge whose compromise
+        # reproduces the incident, so it must be hardened at least as much as the
+        # agent it protects. no-new-privileges matches the agent; --pids-limit and
+        # --memory bound a connection-storm (self-inflicted or injected) so it can't
+        # OOM the daemon — a backstop to the in-proxy connection semaphore. Not
+        # --user: the binary binds :53/:80/:443 (privileged ports), which under a
+        # non-root uid would need CAP_NET_BIND_SERVICE re-added or an unprivileged-
+        # port sysctl — reopening a capability on an otherwise cap-dropped, read-only,
+        # single-static-binary scratch image for marginal gain. Evaluated, declined.
+        --security-opt no-new-privileges:true
+        --pids-limit 128
+        --memory 256m
         --label "sandy.managed=true"
     )
     # On Linux the proxy must be told how to reach the host for the local-LLM
