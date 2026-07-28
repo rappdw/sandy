@@ -4575,8 +4575,8 @@ check "cleanup reaps the background log streamer (\$PROXY_LOG_PID)" \
 # (B) panic recovery in the proxy
 check "proxy has a panic-recovering guard() helper" \
     bash -c 'test -f "$1/guard.go" && grep -q "func guard(" "$1/guard.go" && grep -q "recover()" "$1/guard.go"' -- "$_PROXY_DIR"
-check "every per-connection goroutine is wrapped in guard()" \
-    bash -c 'for f in transparent connect forward; do grep -q "go guard(" "$1/$f.go" || exit 1; done' -- "$_PROXY_DIR"
+check "every per-connection goroutine is wrapped in guard() (via the shared acceptLoop)" \
+    bash -c 'grep -q "go guard(" "$1/accept.go" && for f in transparent connect forward; do grep -q "acceptLoop(" "$1/$f.go" || exit 1; done' -- "$_PROXY_DIR"
 check "no per-connection goroutine spawns a bare unguarded handle()" \
     bash -c '! grep -REq "go l\.handle\(c\)" "$1"/transparent.go "$1"/connect.go "$1"/forward.go' -- "$_PROXY_DIR"
 
