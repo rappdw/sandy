@@ -528,6 +528,32 @@ EOF
 # rw workspace — an agent could then `rm .githooks && mkdir .githooks && write a
 # hook`, redirecting host git into a fresh unprotected dir. Locking the
 # configured path makes it a :ro mount point the agent can't swap.
+# Companion to _sandy_extra_hooks_dir for the session-end sweep (sandbox-escape
+# Issue F). That function resolves a core.hooksPath dir that ALREADY EXISTS, for
+# the :ro mount. This one returns the configured hooksPath as a workspace-relative
+# path *existence-independently*, so the exit-time detector can flag a hooks dir
+# the agent CREATED during the session (absent at launch → no :ro mount → the one
+# core.hooksPath gap the mount can't cover). Same safety rules: inside the
+# workspace, not the root, not `.git/hooks`, no `..` escape, not an already-listed
+# protected dir. Detection-only, so it does best-effort prefix containment for an
+# absolute value rather than requiring the dir to exist for a pwd -P canonicalize.
+_sandy_configured_hooks_rel() {
+    local wd="$1" hp rel wd_real pd
+    command -v git >/dev/null 2>&1 || return 0
+    hp="$(git -C "$wd" config --path --get core.hooksPath 2>/dev/null)" || return 0
+    [ -n "$hp" ] || return 0
+    wd_real="$(cd "$wd" 2>/dev/null && pwd -P || echo "$wd")"
+    case "$hp" in
+        /*) case "$hp/" in "$wd_real"/*) rel="${hp#"$wd_real"/}" ;; *) return 0 ;; esac ;;
+        *)  rel="${hp#./}"; rel="${rel%/}" ;;
+    esac
+    [ -n "$rel" ] && [ "$rel" != ".git/hooks" ] || return 0
+    case "$rel" in .|..|../*|*/..|*/../*|/*) return 0 ;; esac   # root / escape / absolute
+    while IFS= read -r pd; do [ "$rel" = "$pd" ] && return 0; done < <(_sandy_protected_dirs)
+    printf '%s\n' "$rel"
+    return 0
+}
+
 _sandy_extra_hooks_dir() {
     local wd="$1" hp hp_abs hp_real wd_real rel pd
     command -v git >/dev/null 2>&1 || return 0
@@ -7218,6 +7244,17 @@ cleanup() {
                 _new_protected+=("$_pf")
             fi
         done < <(_sandy_protected_files)
+        # Issue F: a core.hooksPath target the agent CREATED during the session.
+        # An existing one was :ro-mounted at launch (and recorded in the snapshot,
+        # so it's skipped here); an absent-at-launch one escapes the mount, so
+        # flag it if it now exists with content. git hooks fire on the user's next
+        # host git operation, so this belongs in the same warning.
+        _cfg_hooks="$(_sandy_configured_hooks_rel "$WORK_DIR")"
+        if [ -n "$_cfg_hooks" ] \
+                && ! grep -qFx "$_cfg_hooks" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null \
+                && [ -d "$WORK_DIR/$_cfg_hooks" ] && [ -n "$(ls -A "$WORK_DIR/$_cfg_hooks" 2>/dev/null)" ]; then
+            _new_protected+=("$_cfg_hooks")
+        fi
         if [ ${#_new_protected[@]} -gt 0 ]; then
             printf "\n${YELLOW}[sandy]${NC} Protected paths appeared during this session:\n" >&2
             for _p in "${_new_protected[@]}"; do
@@ -8207,13 +8244,17 @@ done < <(_sandy_protected_dirs)
 # core.hooksPath redirect: protect a non-default effective hooks directory that
 # lives inside the workspace (see _sandy_extra_hooks_dir). Existence-gated :ro
 # mount only — the dynamic hooksPath is not in the static _sandy_protected_dirs
-# list, so the session-end detector does not walk it; the create-fresh case
-# (hooksPath set but the dir absent at launch) is a detection-only gap deferred
-# to the generalized auto-exec sweep (Issue F).
+# list. The create-fresh case (hooksPath set but the dir absent at launch) is
+# covered by the session-end sweep below (Issue F): the configured path is
+# snapshotted here only if it existed, so the detector treats a hooks dir the
+# agent creates in-session as newly-appeared and flags it.
 _extra_hooks="$(_sandy_extra_hooks_dir "$WORK_DIR")"
 if [ -n "$_extra_hooks" ] && [ -d "$WORK_DIR/$_extra_hooks" ]; then
     RUN_FLAGS+=(-v "$WORK_DIR/$_extra_hooks:$SANDY_WORKSPACE/$_extra_hooks:ro")
 fi
+_cfg_hooks_snap="$(_sandy_configured_hooks_rel "$WORK_DIR")"
+[ -n "$_cfg_hooks_snap" ] && [ -e "$WORK_DIR/$_cfg_hooks_snap" ] \
+    && echo "$_cfg_hooks_snap" >> "$SANDBOX_DIR/.protected-existed-at-launch"
 # Also snapshot protected FILES that existed at launch. Absent protected files
 # are existence-gated (no :ro mount), so an agent can create e.g. .npmrc or
 # .pre-commit-config.yaml in-session and it persists to the host workspace. The

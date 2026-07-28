@@ -3004,6 +3004,42 @@ check "core.hooksPath at an already-protected dir -> nothing (no duplicate mount
 rm -rf "$_EH1" "$_EH2" "$_EH3" "$_EH4" "$_EH5" "$_EH6" "$_EH7" "$_EH8"
 
 # ============================================================
+info "38d. core.hooksPath session-end detection resolver (_sandy_configured_hooks_rel, Issue F)"
+# ============================================================
+# Unlike _sandy_extra_hooks_dir (existence-gated, for the :ro mount), this one
+# resolves the configured hooksPath rel-path EVEN WHEN THE DIR IS ABSENT, so the
+# session-end sweep can flag a hooks dir the agent creates in-session (the one
+# core.hooksPath gap the mount can't cover). Same containment rules otherwise.
+_CH_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_CH_FN="$(awk '/^_sandy_protected_dirs\(\)/,/^}/' "$_CH_SCRIPT"; echo; awk '/^_sandy_configured_hooks_rel\(\)/,/^}/' "$_CH_SCRIPT")"
+_ch() { bash -c "$_CH_FN"$'\n''_sandy_configured_hooks_rel "$1"' _ "$1" 2>/dev/null; }
+_CH1="$(mktemp -d)"; ( cd "$_CH1" && git init -q && git config core.hooksPath .githooks )   # dir ABSENT
+check "core.hooksPath=.githooks with dir ABSENT -> still resolves (the F gap)" \
+    test "$(_ch "$_CH1")" = ".githooks"
+_CH2="$(mktemp -d)"; ( cd "$_CH2" && git init -q && git config core.hooksPath .githooks && mkdir .githooks )
+check "core.hooksPath=.githooks present -> resolves" \
+    test "$(_ch "$_CH2")" = ".githooks"
+_CH3="$(mktemp -d)"; ( cd "$_CH3" && git init -q )
+check "no core.hooksPath -> nothing" \
+    test -z "$(_ch "$_CH3")"
+_CH4="$(mktemp -d)"; ( cd "$_CH4" && git init -q && git config core.hooksPath /tmp )
+check "absolute core.hooksPath outside workspace -> nothing" \
+    test -z "$(_ch "$_CH4")"
+_CH5="$(mktemp -d)"; ( cd "$_CH5" && git init -q && git config core.hooksPath .git/hooks )
+check "core.hooksPath=.git/hooks -> nothing (already protected)" \
+    test -z "$(_ch "$_CH5")"
+_CH6="$(mktemp -d)"; ( cd "$_CH6" && git init -q && git config core.hooksPath . )
+check "core.hooksPath=. (workspace root) -> nothing" \
+    test -z "$(_ch "$_CH6")"
+_CH7="$(mktemp -d)"; ( cd "$_CH7" && git init -q && git config core.hooksPath ../evil )
+check "core.hooksPath escaping via .. -> nothing" \
+    test -z "$(_ch "$_CH7")"
+_CH8="$(mktemp -d)"; ( cd "$_CH8" && git init -q && git config core.hooksPath .vscode )
+check "core.hooksPath at an already-protected dir -> nothing" \
+    test -z "$(_ch "$_CH8")"
+rm -rf "$_CH1" "$_CH2" "$_CH3" "$_CH4" "$_CH5" "$_CH6" "$_CH7" "$_CH8"
+
+# ============================================================
 info "38c. .sandy/Dockerfile build approval gate (_sandy_project_dockerfile_approved)"
 # ============================================================
 # HF-incident Issue 7: building .sandy/Dockerfile runs host-daemon code with
