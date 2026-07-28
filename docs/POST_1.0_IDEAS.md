@@ -856,6 +856,14 @@ under `research/`.
 - **Dynamic config reload** (srt's `--control-fd`) and **MITM/inspection-proxy
   support** (corporate CA, traffic visibility — composes with strict mode and the
   POST_1.0 host-relay broker) — both lower priority.
+- **Wrapped-agent min-version floor** (sandbox-escape eval Issue E follow-up). A
+  `SANDY_<AGENT>_MIN_VERSION` config key (per agent) that refuses to launch an
+  agent whose installed `/opt/<agent>/.version` is below the floor, enforced
+  container-side where the version is known, plus surfacing those versions in
+  `--print-state` for auditability. Floating-latest already auto-patches (see
+  CLAUDE.md "Wrapped-agent security / CVE watch"), so this is a niche
+  pin-away-from-a-bad-release control — four new keys + version-compare
+  enforcement, deferred as disproportionate to the finding's Low severity.
 
 (Dropped from the old TODO as not-isolation/marketing: awesome-claude-code
 listing, community plugin marketplaces, a web-UI dashboard.)
