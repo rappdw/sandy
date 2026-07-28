@@ -59,6 +59,7 @@ func (l *transparentListener) handle(client net.Conn) {
 		client.Close()
 		return
 	}
+	egressLog.note(l.port, host) // HF Issue 4: record the allowed destination
 	// Splice through prefixConn so the splicer reads the still-buffered peeked
 	// bytes (the ClientHello / request line) first, then the live connection —
 	// the full client stream reaches the upstream exactly once.

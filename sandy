@@ -78,6 +78,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_EGRESS_PROXY
     SANDY_EGRESS_NO_ISOLATION
     SANDY_EGRESS_STRICT
+    SANDY_EGRESS_LOG
     SANDY_ALLOW_WORKFLOW_EDIT
     CLAUDE_CODE_MAX_OUTPUT_TOKENS
     GEMINI_MODEL
@@ -650,6 +651,7 @@ SANDY_VENV_OVERLAY|bool|1||0.10.0|stable|Bind-mount a sandbox-owned .venv over t
 SANDY_EGRESS_NO_ISOLATION|bool|0||1.0.0|stable|Turn the egress proxy OFF — legacy path (Linux iptables-only; NO network isolation on macOS). WEAKENS isolation, so from a workspace .sandy/config it is quarantined to the per-workspace approval prompt (a committed config cannot silently disable isolation). Mutually exclusive with SANDY_EGRESS_STRICT. Default 0 (proxy on).
 SANDY_EGRESS_STRICT|bool|0||1.0.0|stable|Run the egress proxy in strict mode (allow only the built-in default allowlist + SANDY_ALLOW_HOSTS; deny all other internet). STRENGTHENS isolation, so =1 is passive-safe from any source; =0 (downgrading a host-configured strict) is approval-gated from a workspace source. Mutually exclusive with SANDY_EGRESS_NO_ISOLATION. Default 0 (permissive).
 SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|DEPRECATED — use SANDY_EGRESS_NO_ISOLATION / SANDY_EGRESS_STRICT. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 is approval-gated (weakening), matching the new keys.
+SANDY_EGRESS_LOG|enum:0,1,summary|0||1.4.0|stable|Log which hosts the agent's egress actually reached (HF-incident Issue 4). The proxy logs each DISTINCT allowed host:port once (deduped) to proxy.log; at session end sandy prints an egress summary (distinct hosts reached + denial count). 0=off (deny-only, the pre-1.4 behavior); 1=per-connection allow lines + session-end summary; summary=session-end summary only (the proxy still records allows to build it). Passive-safe: it only ADDS visibility. Hostnames only — TLS is never terminated, no payload; the log stays in $SANDBOX_DIR.
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||0.11.1|stable|Remove .github/workflows from the read-only protection list.
 SANDY_SCREENSHOT_DIR|path|||0.12.0|stable|Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
 CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||0.6.0|stable|Max output tokens per Claude response.
@@ -5935,8 +5937,15 @@ start_proxy_sidecar() {
     if [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
         llm_field=",\"local_llm\":\"$SANDY_LOCAL_LLM_HOST\""
     fi
-    printf '{"mode":"%s","proxy_ip":"%s","allow":[%s]%s}\n' \
-        "$_SANDY_PROXY_MODE" "$PROXY_IP" "$allow_json" "$llm_field" \
+    # HF-incident Issue 4: turn on allowed-egress logging in the proxy when the
+    # user asked for it (1 or summary — both need the proxy to record allows so
+    # the session-end summary has data). Off by default (deny-only, pre-1.4).
+    local egresslog_field=""
+    case "${SANDY_EGRESS_LOG:-0}" in
+        1|summary) egresslog_field=',"egress_log":true' ;;
+    esac
+    printf '{"mode":"%s","proxy_ip":"%s","allow":[%s]%s%s}\n' \
+        "$_SANDY_PROXY_MODE" "$PROXY_IP" "$allow_json" "$llm_field" "$egresslog_field" \
         > "$PROXY_CONFIG_FILE"
 
     # Assemble the proxy run as one array so an optional flag can be appended
@@ -7308,6 +7317,26 @@ cleanup() {
         fi
         rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
+    # HF-incident Issue 4: session-end egress summary. When allowed-egress logging
+    # is on, roll up proxy.log into "what hosts did the agent actually reach" — the
+    # first question after a suspected prompt injection or a leaked-token scare.
+    case "${SANDY_EGRESS_LOG:-0}" in
+        1|summary)
+            if [ -n "${PROXY_LOG_FILE:-}" ] && [ -s "$PROXY_LOG_FILE" ]; then
+                local _eg_hosts _eg_nhosts _eg_ndeny _eg_h
+                _eg_hosts="$(grep -F 'sandy-proxy: allow ' "$PROXY_LOG_FILE" 2>/dev/null | awk '{print $NF}' | sort -u)"
+                _eg_nhosts="$(printf '%s\n' "$_eg_hosts" | grep -c . || true)"
+                _eg_ndeny="$(grep -cF 'sandy-proxy: deny ' "$PROXY_LOG_FILE" 2>/dev/null || true)"
+                if [ "${_eg_nhosts:-0}" -gt 0 ] || [ "${_eg_ndeny:-0}" -gt 0 ]; then
+                    printf "\n${GREEN}[sandy]${NC} Egress this session — %s distinct host(s) reached, %s denial(s):\n" "${_eg_nhosts:-0}" "${_eg_ndeny:-0}" >&2
+                    printf '%s\n' "$_eg_hosts" | while IFS= read -r _eg_h; do
+                        [ -n "$_eg_h" ] && printf "${GREEN}[sandy]${NC}   → %s\n" "$_eg_h" >&2
+                    done
+                    printf "${GREEN}[sandy]${NC} Full detail: %s\n\n" "$PROXY_LOG_FILE" >&2
+                fi
+            fi
+            ;;
+    esac
     cleanup_network_isolation
     # Force-remove the agent container FIRST, so it can never outlive this
     # session's proxy + networks. The agent runs `docker run --rm` in the

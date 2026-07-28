@@ -60,6 +60,7 @@ func (l *connectListener) handle(client net.Conn) {
 		up.Close()
 		return
 	}
+	egressLog.note(port, host) // HF Issue 4: record the allowed CONNECT destination
 	// Any bytes the client pipelined after the CONNECT line are buffered in br;
 	// route reads through it.
 	splice(&prefixConn{Conn: client, r: br}, up)
