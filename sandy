@@ -508,6 +508,35 @@ EOF
     [ "${SANDY_ALLOW_WORKFLOW_EDIT:-0}" = "1" ] || echo ".github/workflows"
 }
 
+# core.hooksPath redirect protection (Pillar "Week of Sandbox Escapes" #4
+# variant). A repo (or the user's global git config) can point hooks at a
+# directory OTHER than .git/hooks — e.g. `core.hooksPath = .githooks`, a common
+# convention. That directory is NOT in the static protected-dirs list, so an
+# agent-written hook there would fire on the user's next HOST-side git op, even
+# though .git/hooks itself is protected. Resolve the effective hooksPath for
+# workspace $1 and echo the workspace-RELATIVE directory that needs :ro
+# protection, or nothing when hooks live at the default .git/hooks, aren't set,
+# don't exist, or resolve OUTSIDE the workspace (an out-of-workspace hooksPath
+# is unreachable to the agent — only the workspace is rw-mounted — so it needs
+# no protection). Canonicalizes both paths (pwd -P) so a symlinked hooksPath or
+# `..` traversal can't slip a write target past the containment check.
+_sandy_extra_hooks_dir() {
+    local wd="$1" hp hp_abs hp_real wd_real rel
+    command -v git >/dev/null 2>&1 || return 0
+    hp="$(git -C "$wd" config --get core.hooksPath 2>/dev/null)" || return 0
+    [ -n "$hp" ] || return 0
+    case "$hp" in /*) hp_abs="$hp" ;; *) hp_abs="$wd/$hp" ;; esac
+    hp_real="$(cd "$hp_abs" 2>/dev/null && pwd -P)" || return 0
+    [ -n "$hp_real" ] && [ -d "$hp_real" ] || return 0
+    wd_real="$(cd "$wd" 2>/dev/null && pwd -P || echo "$wd")"
+    case "$hp_real/" in
+        "$wd_real"/*)
+            rel="${hp_real#"$wd_real"/}"
+            [ "$rel" != ".git/hooks" ] && printf '%s\n' "$rel" ;;
+    esac
+    return 0
+}
+
 # True (0) only for git scaffolding that is INERT by construction, so the
 # session-end warning can suppress it (#12). Narrow + enumerated on purpose —
 # this is a suppression path in a security feature. Operates on a workspace-
@@ -8037,6 +8066,16 @@ while IFS= read -r _pd; do
         echo "$_pd" >> "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
 done < <(_sandy_protected_dirs)
+# core.hooksPath redirect: protect a non-default effective hooks directory that
+# lives inside the workspace (see _sandy_extra_hooks_dir). Existence-gated :ro
+# mount + launch snapshot, same profile as the static protected dirs. The
+# create-fresh case (hooksPath set but the dir absent at launch) remains a
+# detection-only gap, deferred to the generalized session-end auto-exec sweep.
+_extra_hooks="$(_sandy_extra_hooks_dir "$WORK_DIR")"
+if [ -n "$_extra_hooks" ]; then
+    RUN_FLAGS+=(-v "$WORK_DIR/$_extra_hooks:$SANDY_WORKSPACE/$_extra_hooks:ro")
+    echo "$_extra_hooks" >> "$SANDBOX_DIR/.protected-existed-at-launch"
+fi
 # Also snapshot protected FILES that existed at launch. Absent protected files
 # are existence-gated (no :ro mount), so an agent can create e.g. .npmrc or
 # .pre-commit-config.yaml in-session and it persists to the host workspace. The

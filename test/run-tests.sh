@@ -2947,6 +2947,32 @@ check "--print-protected-paths includes .claude/hooks" \
     bash -c 'echo "$1" | grep -q "^dir:.claude/hooks$"' -- "$_PRINT_OUT"
 
 # ============================================================
+info "38b. core.hooksPath redirect protection (_sandy_extra_hooks_dir)"
+# ============================================================
+# A non-default core.hooksPath pointing inside the workspace must be resolved and
+# returned for :ro protection (Pillar "Week of Sandbox Escapes" #4 variant);
+# unset / default / outside-workspace / absent-dir must resolve to nothing.
+_EH_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_EH_FN="$(awk '/^_sandy_extra_hooks_dir\(\)/,/^}/' "$_EH_SCRIPT")"
+_eh() { bash -c "$_EH_FN"$'\n''_sandy_extra_hooks_dir "$1"' _ "$1" 2>/dev/null; }
+_EH1="$(mktemp -d)"; ( cd "$_EH1" && git init -q && git config core.hooksPath .githooks && mkdir -p .githooks )
+check "core.hooksPath=.githooks (present) -> protects .githooks" \
+    test "$(_eh "$_EH1")" = ".githooks"
+_EH2="$(mktemp -d)"; ( cd "$_EH2" && git init -q )
+check "no core.hooksPath -> nothing to add" \
+    test -z "$(_eh "$_EH2")"
+_EH3="$(mktemp -d)"; ( cd "$_EH3" && git init -q && git config core.hooksPath /tmp )
+check "core.hooksPath outside workspace -> nothing" \
+    test -z "$(_eh "$_EH3")"
+_EH4="$(mktemp -d)"; ( cd "$_EH4" && git init -q && git config core.hooksPath .githooks )
+check "core.hooksPath set but dir absent -> nothing (existence-gated)" \
+    test -z "$(_eh "$_EH4")"
+_EH5="$(mktemp -d)"; ( cd "$_EH5" && git init -q && git config core.hooksPath .git/hooks )
+check "core.hooksPath = .git/hooks -> nothing (already protected)" \
+    test -z "$(_eh "$_EH5")"
+rm -rf "$_EH1" "$_EH2" "$_EH3" "$_EH4" "$_EH5"
+
+# ============================================================
 info "39. Sprint 1 — Empty ro-fixtures exist in SANDY_HOME"
 # ============================================================
 # S1.0: ensure_build_files creates $SANDY_HOME/.empty-ro-file and .empty-ro-dir.
