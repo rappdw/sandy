@@ -6347,7 +6347,7 @@ SANDY_HOME="$_RSB_FH2" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS2
 check "--reset-sandbox --keep-approvals preserves the approval list" test -f "$_RSB_SB2/.sandy-approved-symlinks.list"
 # live lock -> refuse (exit 1)
 mkdir -p "$_RSB_SB2/pip" "$_RSB_FH2/sandboxes/.${_RSB_NAME2}.lock"; echo $$ > "$_RSB_FH2/sandboxes/.${_RSB_NAME2}.lock/pid"
-SANDY_HOME="$_RSB_FH2" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS2" --yes >/dev/null 2>&1; _RSB_LOCK_RC=$?
+SANDY_HOME="$_RSB_FH2" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS2" --yes >/dev/null 2>&1 && _RSB_LOCK_RC=0 || _RSB_LOCK_RC=$?
 check "--reset-sandbox refuses under a live workspace lock (exit 1)" test "$_RSB_LOCK_RC" -eq 1
 check "--reset-sandbox under a live lock removes nothing (pip survives)" test -d "$_RSB_SB2/pip"
 rm -rf "$_RSB_FH2" "$_RSB_WS2"
