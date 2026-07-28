@@ -4316,6 +4316,13 @@ check "iptables isolation skipped when proxy on" \
     bash -c 'grep -q "if \[ \"\$_SANDY_PROXY_ON\" != true \]; then" "$1" && grep -q "    apply_network_isolation" "$1"' -- "$_PX_SCRIPT"
 check "entrypoint injects ssh ProxyCommand via CONNECT :3128" \
     bash -c 'grep -q "ProxyCommand socat - PROXY:%s:%%h:%%p,proxyport=3128" "$1"' -- "$_PX_SCRIPT"
+# HF-incident Issue 4: allowed-egress logging. The proxy config gains egress_log
+# only when SANDY_EGRESS_LOG is 1|summary; session-end rolls proxy.log into a
+# distinct-hosts summary. (The proxy-side dedup logic is in proxy/egresslog_test.go.)
+check "proxy config sets egress_log only for SANDY_EGRESS_LOG=1|summary (Issue 4)" \
+    bash -c 'grep -q "1|summary) egresslog_field=.*egress_log.:true" "$1"' -- "$_PX_SCRIPT"
+check "session-end egress summary rolls up allow/deny from proxy.log (Issue 4)" \
+    bash -c 'grep -q "Egress this session" "$1" && grep -q "sandy-proxy: allow " "$1" && grep -q "sandy-proxy: deny " "$1"' -- "$_PX_SCRIPT"
 
 # 2.7.4: the launch-summary network line is derived from the real mode/platform,
 # not the old hardcoded "LAN blocked" string (which lied on macOS proxy-off).
@@ -6500,6 +6507,25 @@ check "last-resort branch: non-skip printf JSON includes statusLine" \
 
 check "no STATUSLINE key was added to _sandy_key_metadata" \
     bash -c '! awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -qi "STATUSLINE"' -- "$_S81"
+
+# ============================================================
+echo "§82: Tool-use audit hook (SANDY_TOOL_AUDIT, HF-incident Issue 6)"
+# ============================================================
+# Reuses §81's _S81 / _S81_DFBASE / _S81_SETTINGS extractions. Seeds a PreToolUse
+# audit hook ONLY when SANDY_TOOL_AUDIT=1, only-if-absent so a user's own hook is
+# never clobbered; the baked helper writes {ts,tool,args} JSONL.
+check "Dockerfile.base bakes /usr/local/bin/sandy-tool-audit" \
+    bash -c 'printf "%s" "$1" | grep -q "chmod +x /usr/local/bin/sandy-tool-audit"' -- "$_S81_DFBASE"
+check "node seeding gates the PreToolUse hook on SANDY_TOOL_AUDIT=1" \
+    bash -c 'printf "%s" "$1" | grep -q "process.env.SANDY_TOOL_AUDIT" && printf "%s" "$1" | grep -q "sandy-tool-audit"' -- "$_S81_SETTINGS"
+check "node seeding only-if-absent guards the user's own PreToolUse hook" \
+    bash -c 'printf "%s" "$1" | grep -q "if (!s.hooks.PreToolUse)"' -- "$_S81_SETTINGS"
+check "node invocation forwards SANDY_TOOL_AUDIT into the seeder env" \
+    bash -c 'printf "%s" "$1" | grep -qF "SANDY_TOOL_AUDIT=\"\${SANDY_TOOL_AUDIT:-0}\" node -e"' -- "$_S81_SETTINGS"
+check "session-end points at the tool-audit trail" \
+    bash -c 'grep -q "Tool-use audit trail" "$1"' -- "$_S81"
+check "SANDY_TOOL_AUDIT IS a real config key (has a _sandy_key_metadata row)" \
+    bash -c 'awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -q "^SANDY_TOOL_AUDIT|"' -- "$_S81"
 
 # ============================================================
 # Summary

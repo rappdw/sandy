@@ -67,6 +67,12 @@ type Config struct {
 	// network. Defaults to "host.docker.internal" when empty; overridable for
 	// tests.
 	LocalLLMTarget string `json:"local_llm_target,omitempty"`
+
+	// EgressLog, when true, makes the proxy log each DISTINCT allowed (host,port)
+	// once (HF-incident Issue 4 — deny-only logging can't answer "what did the
+	// agent reach"). Set by the sandy launcher from SANDY_EGRESS_LOG. Off by
+	// default; hostnames only, no payload.
+	EgressLog bool `json:"egress_log,omitempty"`
 }
 
 // LoadConfig reads and validates the proxy config from path.
