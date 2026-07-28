@@ -4245,6 +4245,15 @@ check "proxy attaches the sidecar with a fixed --ip" \
     bash -c 'grep -q "docker network connect --ip \"\$PROXY_IP\" \"\$SIDECAR_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
 check "proxy runs hardened (--read-only --cap-drop ALL)" \
     bash -c 'grep -q -- "--cap-drop ALL" "$1"' -- "$_PX_SCRIPT"
+# HF-incident Issue 2: the proxy is the dual-homed bridge whose compromise
+# reproduces the incident, so it carries no-new-privileges + resource caps that
+# bound a connection storm (backstop to the in-proxy connection semaphore).
+check "proxy hardened with no-new-privileges (Issue 2)" \
+    bash -c 'grep -q -- "--security-opt no-new-privileges:true" "$1"' -- "$_PX_SCRIPT"
+check "proxy carries a --pids-limit (Issue 2)" \
+    bash -c 'grep -qE -- "--pids-limit [0-9]+" "$1"' -- "$_PX_SCRIPT"
+check "proxy carries a --memory cap (Issue 2)" \
+    bash -c 'grep -qE -- "--memory [0-9]+m" "$1"' -- "$_PX_SCRIPT"
 check "cleanup removes proxy container before networks" \
     bash -c 'grep -q "docker rm -f \"\$PROXY_CONTAINER\"" "$1" && grep -q "docker network rm \"\$EGRESS_NETWORK\"" "$1"' -- "$_PX_SCRIPT"
 

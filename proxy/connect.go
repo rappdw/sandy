@@ -24,13 +24,7 @@ func newConnectListener(p *Policy) *connectListener { return &connectListener{po
 func (l *connectListener) addr() string { return ":3128" }
 
 func (l *connectListener) serve(ln net.Listener) {
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go guard("connect", func() { l.handle(c) })
-	}
+	acceptLoop(ln, "connect", l.handle)
 }
 
 func (l *connectListener) handle(client net.Conn) {
