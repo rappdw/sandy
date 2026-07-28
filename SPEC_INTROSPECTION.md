@@ -280,7 +280,8 @@ All three:
   ],
   "orphan_networks": 0,
   "dangling_images": 1,
-  "orphaned_containers": 0
+  "orphaned_containers": 0,
+  "proxy_image_created": "2026-07-28T12:00:00Z"
 }
 ```
 
@@ -361,6 +362,16 @@ All three:
 > live session is never counted, regardless of `sandy.daemon_pid` liveness).
 > Both are `null` when `docker_reachable` is `false`. A UI can call `sandy --gc
 > --yes` and then re-read these fields to confirm the counts dropped.
+
+> **`proxy_image_created`** (top-level, added additively in `1.4.0`, HF-incident
+> Issue 3 — no `schema_version` bump). **FULL MODE ONLY** (one extra `docker
+> image inspect -f '{{.Created}}' sandy-proxy`, over the light-mode two-spawn
+> budget), so `--print-state light` always reports it `null`. It's the RFC 3339
+> build timestamp of the local `sandy-proxy` image, or `null` if the image
+> doesn't exist or `docker_reachable` is `false`. Surfaces proxy staleness for
+> `sandy-ui` and the user — the proxy now auto-rebuilds ~monthly (a freshness
+> epoch in `Dockerfile.proxy` + `--pull`, so the golang base + Go stdlib get
+> security fixes between sandy releases), and this date makes that visible.
 
 > **Light mode — `sandy --print-state light`.** A second positional arg selects
 > a cheap variant for pollers: its steady-state budget is **exactly two** docker

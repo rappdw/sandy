@@ -1765,12 +1765,14 @@ _sandy_emit_state() {
             # two-spawn poll-friendly budget.
             printf ',"dangling_images":null'
             printf ',"orphaned_containers":null'
+            printf ',"proxy_image_created":null'
         else
             printf ',"docker_reachable":false'
             printf ',"running_containers":null'
             printf ',"orphan_networks":null'
             printf ',"dangling_images":null'
             printf ',"orphaned_containers":null'
+            printf ',"proxy_image_created":null'
         fi
     else   # full mode
         local _ps_out
@@ -1837,12 +1839,23 @@ _sandy_emit_state() {
             printf ',"dangling_images":%s' "${_dangling:-0}"
             local _orphan_containers; _orphan_containers="$(_sandy_dead_owner_containers_list | grep -c . || true)"
             printf ',"orphaned_containers":%s' "${_orphan_containers:-0}"
+            # HF-incident Issue 3: proxy image build date, so sandy-ui / the user
+            # can see proxy staleness at a glance (the proxy now auto-refreshes
+            # ~monthly, but the date makes it auditable). FULL MODE ONLY — one
+            # extra `docker image inspect`, over the light-mode two-spawn budget.
+            local _proxy_created; _proxy_created="$(docker image inspect -f '{{.Created}}' sandy-proxy 2>/dev/null || true)"
+            if [ -n "$_proxy_created" ]; then
+                printf ',"proxy_image_created":"%s"' "$_proxy_created"
+            else
+                printf ',"proxy_image_created":null'
+            fi
         else
             printf ',"docker_reachable":false'
             printf ',"running_containers":null'
             printf ',"orphan_networks":null'
             printf ',"dangling_images":null'
             printf ',"orphaned_containers":null'
+            printf ',"proxy_image_created":null'
         fi
     fi
 
@@ -2791,10 +2804,20 @@ _sandy_proxy_ref() {
 # component. The git ref is a build-arg so the build hash (and thus rebuilds)
 # track the pinned version.
 generate_dockerfile_proxy() {
-    local ref
+    local ref epoch
     ref="$(_sandy_proxy_ref)"
+    # HF-incident Issue 3: the proxy image otherwise only rebuilds when the ref
+    # (SANDY_VERSION) changes, so its golang base + Go stdlib — the TLS/HTTP/CONNECT
+    # I/O of the security-critical component — freeze between sandy releases while
+    # the agent binary next to it self-updates weekly. A monthly freshness epoch
+    # moves the Dockerfile hash once a month, triggering a rebuild without a sandy
+    # release; paired with --pull on the build (below), that rebuild re-resolves
+    # golang:1.24-bookworm to the current digest and picks up Go stdlib / Debian
+    # security fixes. Bound to one refresh/month so it's not per-launch churn.
+    epoch="$(date -u +%Y-%m 2>/dev/null || echo static)"
     cat > "$SANDY_HOME/Dockerfile.proxy.new" <<DOCKERFILE
 # syntax pinned implicitly by the golang base tag
+# freshness-epoch: ${epoch} (monthly proxy base/stdlib refresh — HF-incident Issue 3)
 FROM golang:1.24-bookworm AS build
 ARG SANDY_PROXY_REF=${ref}
 RUN git clone https://github.com/rappdw/sandy /src \\
@@ -5678,7 +5701,11 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
     if [ ! -f "$PROXY_HASH_FILE" ] || [ "$(cat "$PROXY_HASH_FILE")" != "$PROXY_HASH" ] || ! docker image inspect "$PROXY_IMAGE_NAME" &>/dev/null; then
         info "Building egress proxy image (sandy-proxy, ref=$(_sandy_proxy_ref))..."
         _old_proxy_id="$(docker image inspect -f '{{.Id}}' "$PROXY_IMAGE_NAME" 2>/dev/null || true)"
-        docker build -q --no-cache --label sandy.managed=1 -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$SANDY_HOME"
+        # --pull: re-resolve golang:1.24-bookworm to the current digest on every
+        # proxy (re)build so the base + Go stdlib get security updates — the
+        # monthly freshness epoch (HF-incident Issue 3) makes this fire ~monthly
+        # without a sandy release. --no-cache already rebuilds the binary itself.
+        docker build -q --no-cache --pull --label sandy.managed=1 -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$SANDY_HOME"
         echo "$PROXY_HASH" > "$PROXY_HASH_FILE"
         _sandy_prune_old_image "$_old_proxy_id" "$PROXY_IMAGE_NAME"
     else

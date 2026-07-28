@@ -4191,6 +4191,15 @@ check "proxy Dockerfile: builds proxy/ statically (CGO_ENABLED=0)" \
     bash -c 'grep -q "cd /src/proxy" "$1" && grep -q "CGO_ENABLED=0 go build" "$1"' -- "$_PX_DF"
 check "proxy Dockerfile: entrypoint is the proxy binary" \
     grep -qF 'ENTRYPOINT ["/usr/local/bin/sandy-proxy"]' "$_PX_DF"
+# HF-incident Issue 3: a monthly freshness epoch in the generated Dockerfile
+# moves its content hash once a month so the proxy rebuilds (with --pull) without
+# a sandy release, refreshing the golang base + Go stdlib.
+check "proxy Dockerfile: carries a YYYY-MM freshness epoch (Issue 3)" \
+    grep -qE '^# freshness-epoch: [0-9]{4}-[0-9]{2} ' "$_PX_DF"
+check "proxy build uses --pull to refresh the golang base (Issue 3)" \
+    bash -c 'grep -qE "docker build -q --no-cache --pull" "$1"' -- "$_PX_SCRIPT"
+check "--print-state carries proxy_image_created (Issue 3)" \
+    bash -c 'grep -q "proxy_image_created" "$1"' -- "$_PX_SCRIPT"
 # Regression (real launch bug, 2026-07-23): the Dockerfile.proxy heredoc is
 # UNQUOTED (it needs ${ref} expanded), so any backtick / $( ) / unescaped ${ }
 # in its body is executed by the SHELL at generation time — a stray `word` in a
