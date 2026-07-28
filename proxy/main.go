@@ -38,6 +38,7 @@ func main() {
 	}
 
 	policy := newPolicy(cfg)
+	egressLog = newEgressLogger(cfg.EgressLog) // HF Issue 4: allowed-egress logging
 
 	// DNS (UDP 53): the redirect + denial brain.
 	dnsSrv := &dns.Server{

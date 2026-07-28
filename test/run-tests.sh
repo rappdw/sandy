@@ -4307,6 +4307,13 @@ check "iptables isolation skipped when proxy on" \
     bash -c 'grep -q "if \[ \"\$_SANDY_PROXY_ON\" != true \]; then" "$1" && grep -q "    apply_network_isolation" "$1"' -- "$_PX_SCRIPT"
 check "entrypoint injects ssh ProxyCommand via CONNECT :3128" \
     bash -c 'grep -q "ProxyCommand socat - PROXY:%s:%%h:%%p,proxyport=3128" "$1"' -- "$_PX_SCRIPT"
+# HF-incident Issue 4: allowed-egress logging. The proxy config gains egress_log
+# only when SANDY_EGRESS_LOG is 1|summary; session-end rolls proxy.log into a
+# distinct-hosts summary. (The proxy-side dedup logic is in proxy/egresslog_test.go.)
+check "proxy config sets egress_log only for SANDY_EGRESS_LOG=1|summary (Issue 4)" \
+    bash -c 'grep -q "1|summary) egresslog_field=.*egress_log.:true" "$1"' -- "$_PX_SCRIPT"
+check "session-end egress summary rolls up allow/deny from proxy.log (Issue 4)" \
+    bash -c 'grep -q "Egress this session" "$1" && grep -q "sandy-proxy: allow " "$1" && grep -q "sandy-proxy: deny " "$1"' -- "$_PX_SCRIPT"
 
 # 2.7.4: the launch-summary network line is derived from the real mode/platform,
 # not the old hardcoded "LAN blocked" string (which lied on macOS proxy-off).
