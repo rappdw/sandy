@@ -89,6 +89,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_CODEX_AUTH
     OPENCODE_MODEL
     SANDY_OPENCODE_AUTH
+    SANDY_TOOL_AUDIT
 )
 
 # SANDY_ENV_ONLY_KEYS: honored only when set in the process environment.
@@ -667,6 +668,7 @@ TELEGRAM_BOT_TOKEN|secret|||0.7.6|stable|Telegram bot token for the channel rela
 TELEGRAM_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Telegram user IDs allowed to send messages.
 DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
 DISCORD_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Discord user IDs allowed to send messages.
+SANDY_TOOL_AUDIT|bool|0||1.4.0|stable|Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off).
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
 EOF
@@ -2588,6 +2590,27 @@ else
     printf '%s\n' "$_out"
 fi
 STATUSLINE_HELPER
+
+# sandy-tool-audit: PreToolUse audit hook (HF-incident Issue 6). Seeded into
+# settings.json only when SANDY_TOOL_AUDIT=1. Gives per-session tool-use
+# telemetry — the "instrument the agent harness itself, not just the box" the
+# post-mortem asks for. jq is already installed above.
+RUN cat > /usr/local/bin/sandy-tool-audit <<'TOOL_AUDIT_HELPER' \
+    && chmod +x /usr/local/bin/sandy-tool-audit
+#!/bin/bash
+# sandy-tool-audit — reads Claude Code's PreToolUse JSON on stdin and appends one
+# JSONL line {ts, tool, args} to ~/.claude/tool-audit.jsonl (which persists to
+# the host sandbox). MUST always exit 0: a non-zero PreToolUse hook would BLOCK
+# the tool call, so any read/parse/write failure is swallowed. args is truncated
+# to 200 chars so the log stays a trail, not a payload dump. Not tamper-proof
+# against a determined agent (it runs in-box) — telemetry for the primary
+# wrong-but-not-evil adversary, by design.
+set -uo pipefail
+_in="$(cat 2>/dev/null || true)"
+_line="$(printf '%s' "$_in" | jq -c '{ts:(now|todateiso8601), tool:(.tool_name // "?"), args:((.tool_input // {})|tostring|.[0:200])}' 2>/dev/null || true)"
+[ -n "$_line" ] && printf '%s\n' "$_line" >> "$HOME/.claude/tool-audit.jsonl" 2>/dev/null || true
+exit 0
+TOOL_AUDIT_HELPER
 
 # User
 RUN useradd -m -s /bin/bash -u 1001 claude
@@ -6667,7 +6690,7 @@ if _sandy_agent_has claude; then
     # propagate). Overlay = `enabledPlugins` preserved from previous sandbox
     # settings.json (so plugin installs survive across launches).
     if command -v node &>/dev/null; then
-        SEED_HOST_SRC="$SEED_HOST_SRC" node -e "
+        SEED_HOST_SRC="$SEED_HOST_SRC" SANDY_TOOL_AUDIT="${SANDY_TOOL_AUDIT:-0}" node -e "
             const fs = require('fs');
             const dst = process.argv[1];
             const hostSrc = process.env.SEED_HOST_SRC || '';
@@ -6721,6 +6744,16 @@ if _sandy_agent_has claude; then
                     'synthkit', 'synthkit@sandy-plugins', 'synthkit@thinkkit'
                 ];
                 for (const key of deprecatedPluginKeys) { delete s.enabledPlugins[key]; }
+            }
+            // SANDY_TOOL_AUDIT (HF-incident Issue 6): seed a PreToolUse audit hook,
+            // but ONLY if the user has no PreToolUse hook of their own (same
+            // only-if-absent guard as the statusLine default above, so a user's
+            // hooks are never clobbered).
+            if ((process.env.SANDY_TOOL_AUDIT || '0') === '1') {
+                if (!s.hooks || typeof s.hooks !== 'object') s.hooks = {};
+                if (!s.hooks.PreToolUse) {
+                    s.hooks.PreToolUse = [{ matcher: '*', hooks: [{ type: 'command', command: '/usr/local/bin/sandy-tool-audit' }] }];
+                }
             }
             fs.writeFileSync(dst, JSON.stringify(s, null, 2) + '\n');
         " "$SEED_SETTINGS"
@@ -7232,6 +7265,14 @@ cleanup() {
             echo "sandy: [debug] processed $_stub_count recorded stub(s)" >&2
     elif [ "${SANDY_DEBUG_CLEANUP:-0}" = "1" ]; then
         echo "sandy: [debug] no .session-created-stubs file at \"${SANDBOX_DIR:-<unset>}/.session-created-stubs\"" >&2
+    fi
+    # HF-incident Issue 6: point the user at the tool-use audit trail if one was
+    # written this session (SANDY_TOOL_AUDIT=1 seeds the PreToolUse hook).
+    if [ "${SANDY_TOOL_AUDIT:-0}" = "1" ] && [ -n "${SANDBOX_DIR:-}" ] \
+            && [ -s "$SANDBOX_DIR/claude/tool-audit.jsonl" ]; then
+        printf "\n${GREEN}[sandy]${NC} Tool-use audit trail: %s (%s call(s))\n" \
+            "$SANDBOX_DIR/claude/tool-audit.jsonl" \
+            "$(grep -c . "$SANDBOX_DIR/claude/tool-audit.jsonl" 2>/dev/null || echo '?')" >&2
     fi
     # Detect protected-path appearances: with the hybrid mount model, an
     # absent protected dir gets no in-session protection — an agent can

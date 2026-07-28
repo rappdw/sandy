@@ -6460,6 +6460,25 @@ check "no STATUSLINE key was added to _sandy_key_metadata" \
     bash -c '! awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -qi "STATUSLINE"' -- "$_S81"
 
 # ============================================================
+echo "§82: Tool-use audit hook (SANDY_TOOL_AUDIT, HF-incident Issue 6)"
+# ============================================================
+# Reuses §81's _S81 / _S81_DFBASE / _S81_SETTINGS extractions. Seeds a PreToolUse
+# audit hook ONLY when SANDY_TOOL_AUDIT=1, only-if-absent so a user's own hook is
+# never clobbered; the baked helper writes {ts,tool,args} JSONL.
+check "Dockerfile.base bakes /usr/local/bin/sandy-tool-audit" \
+    bash -c 'printf "%s" "$1" | grep -q "chmod +x /usr/local/bin/sandy-tool-audit"' -- "$_S81_DFBASE"
+check "node seeding gates the PreToolUse hook on SANDY_TOOL_AUDIT=1" \
+    bash -c 'printf "%s" "$1" | grep -q "process.env.SANDY_TOOL_AUDIT" && printf "%s" "$1" | grep -q "sandy-tool-audit"' -- "$_S81_SETTINGS"
+check "node seeding only-if-absent guards the user's own PreToolUse hook" \
+    bash -c 'printf "%s" "$1" | grep -q "if (!s.hooks.PreToolUse)"' -- "$_S81_SETTINGS"
+check "node invocation forwards SANDY_TOOL_AUDIT into the seeder env" \
+    bash -c 'printf "%s" "$1" | grep -qF "SANDY_TOOL_AUDIT=\"\${SANDY_TOOL_AUDIT:-0}\" node -e"' -- "$_S81_SETTINGS"
+check "session-end points at the tool-audit trail" \
+    bash -c 'grep -q "Tool-use audit trail" "$1"' -- "$_S81"
+check "SANDY_TOOL_AUDIT IS a real config key (has a _sandy_key_metadata row)" \
+    bash -c 'awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -q "^SANDY_TOOL_AUDIT|"' -- "$_S81"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
