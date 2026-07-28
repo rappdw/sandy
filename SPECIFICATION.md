@@ -781,6 +781,8 @@ Certain files and directories in the workspace are overlaid at container launch 
 
 This uses `while read -r -d ''` and shell-side `dirname` to avoid GNU-only `find -printf '%h\0'` — portable across macOS/BSD and GNU `find`.
 
+**Non-default git hooks (`core.hooksPath`).** `.git/hooks/` is protected, but a repo (or the user's global git config) can redirect hooks elsewhere via `core.hooksPath` (e.g. `core.hooksPath = .githooks`). `_sandy_extra_hooks_dir` resolves the effective value at launch (`git -C "$WORK_DIR" config --path --get core.hooksPath`, so git's own tilde-expansion applies) and, when it resolves to a directory **inside the workspace** that is neither the default `.git/hooks` nor the workspace root, mounts it `:ro` (existence-gated at the call site). It canonicalizes (`pwd -P`) *only* to run the containment check — a hooks dir resolving outside the workspace, or the workspace root itself, is rejected — but mounts the path git actually **consults** (the configured value for a relative hooksPath), not the resolved target. Mounting the target would `:ro` the real directory while leaving a *symlinked* hooksPath (`.githooks -> real`) writable in the rw workspace: an agent could `rm .githooks && mkdir .githooks && write a hook`, redirecting host git into a fresh unprotected dir. Locking the configured path instead makes it a `:ro` mount point the agent cannot swap. A hooksPath that resolves onto a directory already in the static protected-dirs list is skipped (a duplicate `-v` would make Docker refuse to launch). This complements the `.git/config` `:ro` mount, which blocks *injecting* a new `core.hooksPath`; this handles a *pre-existing* one (Pillar "Week of Sandbox Escapes" #4 variant). **Residual:** the create-fresh case (hooksPath set but its directory absent at launch) is existence-gated to no mount and is not in the session-end detector's static walk — a detection-only gap deferred to a generalized auto-execution-config sweep. Standing rule this reinforces: never gate a trust decision on a filename/path pattern without a symlink/indirection check (also applies to a symlinked `.git` or an external `GIT_DIR`).
+
 **Mount policy (hybrid, existence-gated symmetric model)**: both files and directories are existence-gated. If the host has the path, sandy bind-mounts it `:ro` (kernel-level write prevention, no host-side artifact because Docker is mounting over an existing target). If the host doesn't have the path, sandy adds no mount — the agent can write there during the session, and detection runs on session exit.
 
 The earlier "always-mount with empty fixture" pattern for directories left empty stub dirs on the host workspace every session, required heroic cleanup-on-exit and pre-existing-debris preflight logic, and produced user-visible weirdness (file managers, IDE scanners, `ls`, ripgrep all saw the stubs during sessions). For files the same approach was strictly worse — 0-byte stubs broke direnv, polluted `git status`, and tripped every tool that checks for file presence. The 0.13 cleanup unifies both behaviors on the existence-gated model.
@@ -2255,7 +2257,7 @@ Deduplicated by container mount path.
 
 ### E.10 Protected File Mounts
 
-Three categories, sourced from the single-source-of-truth helpers in `sandy` (`_sandy_protected_files`, `_sandy_protected_git_files`, `_sandy_protected_dirs`). The same three helpers are exposed to the test harness via `sandy --print-protected-paths`, which emits `file:<path>`, `gitfile:<path>`, and `dir:<path>` lines. See §9 for the full path list and threat model.
+Three *static* categories, sourced from the single-source-of-truth helpers in `sandy` (`_sandy_protected_files`, `_sandy_protected_git_files`, `_sandy_protected_dirs`) and exposed to the test harness via `sandy --print-protected-paths`, which emits `file:<path>`, `gitfile:<path>`, and `dir:<path>` lines — **plus one dynamic mount** (a redirected `core.hooksPath`, resolved per-workspace at launch) that is *not* part of `--print-protected-paths`, because it depends on the workspace's git config, which the pure pre-workspace fast-path handler can't see. See §9 for the full path list and threat model.
 
 **Regular files — existence-gated (0.11.2)**:
 ```bash
@@ -2279,6 +2281,14 @@ while IFS= read -r d; do
 done < <(_sandy_protected_dirs)
 ```
 (The `--print-schema` JSON field listing these dirs is still named `dirs_always_mount` — the name is historical, kept for introspection-schema stability; see SPEC_INTROSPECTION.md.)
+
+**Dynamic — redirected `core.hooksPath`** (per-workspace, resolved at launch; see §9):
+```bash
+_extra_hooks="$(_sandy_extra_hooks_dir "<WORK_DIR>")"
+[ -n "$_extra_hooks" ] && [ -d "<WORK_DIR>/$_extra_hooks" ] && \
+    -v "<WORK_DIR>/$_extra_hooks:<CONTAINER_WORKSPACE>/$_extra_hooks:ro"
+```
+Mounts the git-consulted hooks directory — the *configured* path, not its canonical target, so a symlinked hooksPath can't be swapped — when it resolves inside the workspace and is neither `.git/hooks`, the workspace root, nor an already-static-protected dir. Not emitted by `--print-protected-paths` (workspace-git-config dependent).
 
 **Submodule gitdir walk** — after the above loops:
 ```bash
