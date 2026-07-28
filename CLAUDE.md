@@ -567,6 +567,8 @@ Certain sensitive files and directories in the workspace are mounted read-only i
 
 **Protected git files** (only mounted when present on host): `.git/config`, `.gitmodules`, `.git/HEAD`, `.git/packed-refs`
 
+If `core.hooksPath` redirects git hooks to a non-default directory *inside* the workspace (e.g. `.githooks/`), sandy resolves it (`_sandy_extra_hooks_dir`) and mounts the **configured** hooks path `:ro` — it canonicalizes (`pwd -P`) only to verify containment, but locks the path git actually consults (not the resolved target) so a *symlinked* hooksPath can't be swapped for a fresh writable dir. Closes the gap where `.git/hooks/` is protected but hooks run from elsewhere. A `core.hooksPath` pointing outside the workspace, at the workspace root, or at an already-protected dir is left alone.
+
 **Protected directories**: `.git/hooks/`, `.git/info/`, `.vscode/`, `.idea/`, `.github/workflows/`, `.circleci/`, `.devcontainer/`, `.claude/hooks/`
 
 **Submodule gitdirs**: sandy walks `.git/modules/` (and the gitdir-side `modules/` for `--separate-git-dir` / worktree-of-submodule layouts) and mounts each submodule's `config`, `hooks/`, and `info/` read-only. Without this, a planted `post-checkout` hook in `.git/modules/<sub>/hooks/` would execute on the host the next time `git submodule update` or `git pull --recurse-submodules` ran (Critical escape, F1 in ISOLATION_STRESS.md).
