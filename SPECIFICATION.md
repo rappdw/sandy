@@ -148,7 +148,7 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `SANDY_TOOL_AUDIT`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -207,6 +207,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_CODEX_AUTH` | passive | `auto` | 0.10.0 | stable | Codex credential probe strategy. |
 | `OPENCODE_MODEL` | passive | unset | 0.12.0 | stable | OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4'). |
 | `SANDY_OPENCODE_AUTH` | passive | `auto` | 0.12.0 | stable | OpenCode credential probe strategy. |
+| `SANDY_TOOL_AUDIT` | passive | `0` | 1.4.0 | stable | Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off). |
 | `SANDY_AUTO_APPROVE_PRIVILEGED` | env-only | unset | 0.11.2 | internal | Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only. |
 | `SANDY_DEBUG_CLEANUP` | env-only | unset | 0.11.4 | internal | Print session-stub cleanup diagnostics on exit. |
 <!-- END AUTOGEN:config-keys-table -->
@@ -1380,6 +1381,16 @@ RUN cat > /usr/local/bin/sandy-claude-statusline <<'STATUSLINE_HELPER' \
 #!/bin/bash
 # (body — see Appendix C.2 for the seeding side and the output format)
 STATUSLINE_HELPER
+
+# sandy-tool-audit: PreToolUse audit hook (HF-incident Issue 6). Seeded into
+# settings.json only when SANDY_TOOL_AUDIT=1; reads Claude Code's PreToolUse JSON
+# on stdin and appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl. Always
+# exits 0 (a non-zero PreToolUse hook would block the tool call).
+RUN cat > /usr/local/bin/sandy-tool-audit <<'TOOL_AUDIT_HELPER' \
+    && chmod +x /usr/local/bin/sandy-tool-audit
+#!/bin/bash
+# (body — jq-extracts tool_name + truncated tool_input, appends one JSONL line)
+TOOL_AUDIT_HELPER
 
 # User
 RUN useradd -m -s /bin/bash -u 1001 claude
