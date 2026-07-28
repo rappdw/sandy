@@ -6777,6 +6777,20 @@ elif [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] && [ -L "$WORK_DIR/.venv" ]; then
     # host path that our bind mount would shadow unpredictably. User sees a
     # clear signal instead of silently wondering why the overlay didn't engage.
     info "Skipping .venv overlay — $WORK_DIR/.venv is a symlink"
+    # Issue C (sandbox-escape eval): with no overlay, the host .venv (the symlink
+    # target) is directly on the rw workspace mount, so an agent can modify its
+    # interpreter — which a host IDE Python extension may execute during discovery.
+    warn "  .venv is host-reachable (not shadowed): an agent can alter its interpreter,"
+    warn "  which a host Python extension may run. Avoid opening this project's Python"
+    warn "  tooling on the host during an untrusted session."
+elif [ "${SANDY_VENV_OVERLAY:-1}" = "0" ] && { [ -d "$WORK_DIR/.venv" ] || [ -L "$WORK_DIR/.venv" ]; }; then
+    # Issue C: overlay explicitly disabled but a venv is present — same residual
+    # as the symlink case. The venv sits on the rw workspace mount unshadowed.
+    warn "SANDY_VENV_OVERLAY=0 with a .venv present: the venv is on the rw workspace"
+    warn "  mount and NOT shadowed. An agent can modify its interpreter, which a host"
+    warn "  IDE Python extension may execute during discovery. Re-enable the overlay"
+    warn "  (SANDY_VENV_OVERLAY=1, the default) to shadow it, or keep the host's Python"
+    warn "  tooling closed on this workspace during an untrusted session."
 fi
 # Skill pack persistent state.
 #
