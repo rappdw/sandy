@@ -33,13 +33,7 @@ func newTransparentHTTP(p *Policy) *transparentListener {
 func (l *transparentListener) addr() string { return ":" + itoa(l.port) }
 
 func (l *transparentListener) serve(ln net.Listener) {
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go guard("transparent:"+itoa(l.port), func() { l.handle(c) })
-	}
+	acceptLoop(ln, "transparent:"+itoa(l.port), l.handle)
 }
 
 func (l *transparentListener) handle(client net.Conn) {
