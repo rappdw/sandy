@@ -39,13 +39,7 @@ func newForwardListener(cfg *Config) (*forwardListener, error) {
 func (l *forwardListener) addr() string { return ":" + itoa(l.listenPort) }
 
 func (l *forwardListener) serve(ln net.Listener) {
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go guard("forward", func() { l.handle(c) })
-	}
+	acceptLoop(ln, "forward", l.handle)
 }
 
 func (l *forwardListener) handle(client net.Conn) {
