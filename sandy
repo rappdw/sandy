@@ -504,6 +504,7 @@ _sandy_protected_dirs() {
 .circleci
 .devcontainer
 .claude/hooks
+.sandy
 EOF
     [ "${SANDY_ALLOW_WORKFLOW_EDIT:-0}" = "1" ] || echo ".github/workflows"
 }
@@ -6880,8 +6881,102 @@ CMUXHOOK
 fi
 
 # Phase 3: Per-project image (optional — extends sandy-claude-code with project tools)
+# Deterministic hash of the entire .sandy/ build context — every file `docker
+# build` could COPY/ADD/RUN, not just the Dockerfile text. Hashing only the
+# Dockerfile would leave the payload-in-a-helper hole: a Dockerfile that
+# `COPY setup.sh` + `RUN /tmp/setup.sh` is approved once, then a later edit to
+# setup.sh (Dockerfile unchanged) would rebuild and execute it on the host
+# unattended with the stored approval still matching. config/.secrets are
+# sandy's own control files (not build inputs), so they're excluded — routine
+# credential/model edits must not re-trigger the build prompt. Path is made
+# location-independent (relative to the context dir) so it's stable across
+# equivalent workspaces. Output is a single hex hash.
+_sandy_context_hash() {
+    local dir="$1" f h out=""
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        h="$(sha256 < "$f" | awk '{print $1}')"
+        out="$out$h  ${f#"$dir"/}
+"
+    done < <(find "$dir" -type f ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
+    printf '%s' "$out" | sha256 | awk '{print $1}'
+}
+
+# Gate a per-project .sandy/Dockerfile build behind explicit per-workspace
+# approval (HF-incident Issue 7). Building it runs arbitrary RUN commands on the
+# HOST docker daemon with UNFILTERED network (build-time is NOT behind the egress
+# proxy) and takes all of .sandy/ as build context — so an agent that writes
+# $WORKSPACE/.sandy/Dockerfile in one session would get host code-execution on
+# the next launch. Approval is content-hash based over the WHOLE build context
+# (not just the Dockerfile — see _sandy_context_hash), persists per workspace
+# (same machinery as the passive-privileged config gate), re-prompts on any edit
+# to any context file, and fails closed when non-interactive (skips the build,
+# uses the base image).
+# Returns 0 = approved (build/use), 1 = declined or unapproved-headless (skip).
+_sandy_project_dockerfile_approved() {
+    local dockerfile="$1" df_hash wd_hash approval_file stored _ans _line _ctx _other
+    _ctx="$(dirname "$dockerfile")"
+    df_hash="$(_sandy_context_hash "$_ctx")"
+    wd_hash="$(printf '%s' "$WORK_DIR" | sha256 | awk '{print $1}' | cut -c1-16)"
+    approval_file="$SANDY_HOME/approvals/dockerfile-$wd_hash.list"
+    mkdir -p "$SANDY_HOME/approvals"
+    # CI / test-harness escape hatch — env-only, same as the passive gate.
+    [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ] && return 0
+    # Already approved and unchanged? (first line of the file is the hash)
+    if [ -f "$approval_file" ]; then
+        stored="$(head -n1 "$approval_file" 2>/dev/null)"
+        [ "$stored" = "$df_hash" ] && return 0
+    fi
+    echo "[sandy]" >&2
+    echo "[sandy] This project ships a .sandy/Dockerfile:  $dockerfile" >&2
+    echo "[sandy] Building it runs its RUN commands on your HOST docker daemon with" >&2
+    echo "[sandy] UNFILTERED network (build-time is NOT behind the egress proxy), and the" >&2
+    echo "[sandy] whole .sandy/ dir is the build context. A committed or agent-written" >&2
+    echo "[sandy] Dockerfile could run host code or exfiltrate here. Review it:" >&2
+    echo "[sandy]" >&2
+    # Strip control chars (incl. ESC) per line — the Dockerfile is untrusted and
+    # raw terminal escapes could spoof what the reviewer sees vs. what's approved.
+    sed -n '1,200p' "$dockerfile" | while IFS= read -r _line; do
+        printf '[sandy]   | %s\n' "$(printf '%s' "$_line" | LC_ALL=C tr -d '[:cntrl:]')" >&2
+    done
+    [ "$(wc -l < "$dockerfile" 2>/dev/null || echo 0)" -gt 200 ] && echo "[sandy]   | ... (truncated — review the full file)" >&2
+    # The approval covers the WHOLE build context, not just the Dockerfile above.
+    # Any COPY/ADD/RUN-able sibling is hashed too, so name them — their contents
+    # aren't shown but a change to any of them re-triggers this prompt.
+    while IFS= read -r _other; do
+        [ -n "$_other" ] || continue
+        echo "[sandy]   + build-context file (contents not shown): ${_other#"$_ctx"/}" >&2
+    done < <(find "$_ctx" -type f ! -name Dockerfile ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
+    echo "[sandy]" >&2
+    # Headless / non-interactive: fail closed.
+    if [ "${_sandy_is_headless:-false}" = "true" ] || [ ! -t 0 ]; then
+        echo "[sandy] Non-interactive session — NOT building the project image; using the" >&2
+        echo "[sandy] base agent image. Launch sandy interactively once from this directory" >&2
+        echo "[sandy] to review and approve the .sandy/Dockerfile." >&2
+        echo "[sandy]" >&2
+        return 1
+    fi
+    printf '[sandy] Build this .sandy/Dockerfile for %s? [y/N] ' "$WORK_DIR" >&2
+    IFS= read -r _ans </dev/tty || _ans=""
+    case "$_ans" in
+        y|Y|yes|YES|Yes)
+            {
+                printf '%s\n' "$df_hash"
+                printf '# workspace: %s\n' "$WORK_DIR"
+                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
+            } > "$approval_file"
+            chmod 600 "$approval_file" 2>/dev/null || true
+            echo "[sandy] Approved. Future launches build it silently until the Dockerfile" >&2
+            echo "[sandy] changes. Revoke via: rm $approval_file" >&2
+            return 0 ;;
+        *)
+            echo "[sandy] Not approved — using the base agent image for this launch." >&2
+            return 1 ;;
+    esac
+}
+
 PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"
-if [ -f "$PROJECT_DOCKERFILE" ]; then
+if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_DOCKERFILE"; then
     PROJECT_IMAGE_NAME="$(echo "sandy-project-${SANDBOX_NAME}" | tr '[:upper:]' '[:lower:]')"
     # Chain the PARENT image identity into the staleness hash. Hashing only the
     # Dockerfile content leaves a hole: when the underlying agent/skills image
@@ -6896,7 +6991,10 @@ if [ -f "$PROJECT_DOCKERFILE" ]; then
     # the base actually changed; pre-fix hash files no longer match the new
     # format, which migrates every existing project image on first launch.
     PROJECT_PARENT_ID="$(docker image inspect -f '{{.Id}}' "$IMAGE_NAME" 2>/dev/null || echo unknown)"
-    PROJECT_HASH="$(printf '%s|%s\n' "$(cat "$PROJECT_DOCKERFILE" | sha256 | cut -d' ' -f1)" "$PROJECT_PARENT_ID" | sha256 | cut -d' ' -f1)"
+    # Staleness hash covers the whole .sandy/ build context (via _sandy_context_hash),
+    # not just the Dockerfile — a changed COPY'd helper must trigger a rebuild, and
+    # this keeps the staleness key aligned with the approval key above.
+    PROJECT_HASH="$(printf '%s|%s\n' "$(_sandy_context_hash "$WORK_DIR/.sandy")" "$PROJECT_PARENT_ID" | sha256 | cut -d' ' -f1)"
     PROJECT_HASH_FILE="$SANDBOX_DIR/.project_build_hash"
     PROJECT_NEEDS_BUILD=false
     if [ ! -f "$PROJECT_HASH_FILE" ] || [ "$(cat "$PROJECT_HASH_FILE")" != "$PROJECT_HASH" ] \
