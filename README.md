@@ -237,6 +237,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--start` | Start a detached [daemon session](#daemon-mode) and return once attachable |
 | `--attach` | Attach an interactive client to a running daemon session |
 | `--stop` | Stop a running daemon session (full teardown) |
+| `--stop-all` | **Fleet emergency stop** — stop every daemon session on the host via the hardened per-session teardown. Sub-options: `--dry-run`, `--yes` |
 | `--prune-orphans` | Reap orphaned `sandy_*` Docker networks and exit |
 | `--update-sessions` | Fleet image refresh + rolling restart across every daemon session on the host (scope to one with `--workspace PATH`). See "Fleet updates" above. Sub-options: `--dry-run`, `--yes`, `--idle-for <minutes>`, `--rebuild`, `--workspace` |
 

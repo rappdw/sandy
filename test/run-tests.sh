@@ -5571,6 +5571,46 @@ rm -f "$_U71_CALLLOG" "$_U71_PRIME_LOG" "$_U71_DRY_OUT" "$_U71_YES_OUT"
 
 # ============================================================
 echo ""
+echo "§71b: sandy --stop-all — fleet emergency stop (HF Issue 8)"
+# ============================================================
+# Structural + behavioral (behind a stubbed docker, mirroring §71). Enumerates
+# every sandy.daemon=true container and composes the per-session --stop verbatim.
+_SA_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+# docker stub: bare `docker ps` (reachability) succeeds; the label-filtered enum
+# prints two fake sessions unless SA_EMPTY=1.
+_SA_BIN="$(mktemp -d)"
+cat > "$_SA_BIN/docker" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *--filter*sandy.daemon=true*) [ "${SA_EMPTY:-0}" = "1" ] || printf 'sess-a|/ws/a\nsess-b|/ws/b\n' ;;
+  ps) exit 0 ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$_SA_BIN/docker"
+# dry-run: lists both, stops nothing
+_SA_DRY="$(PATH="$_SA_BIN:$PATH" bash "$_SA_SANDY" --stop-all --dry-run 2>&1)"
+check "--stop-all --dry-run lists the daemon sessions" \
+    bash -c 'printf "%s" "$1" | grep -q "sess-a" && printf "%s" "$1" | grep -q "sess-b"' -- "$_SA_DRY"
+check "--stop-all --dry-run stops nothing (no 'Stopping' line)" \
+    bash -c '! printf "%s" "$1" | grep -q "Stopping "' -- "$_SA_DRY"
+# non-TTY without --yes: refuse, exit 1
+PATH="$_SA_BIN:$PATH" bash "$_SA_SANDY" --stop-all </dev/null >/dev/null 2>&1; _SA_NOYES_RC=$?
+check "--stop-all non-TTY without --yes exits 1" test "$_SA_NOYES_RC" -eq 1
+# empty fleet: exit 0 with the no-sessions message
+_SA_EMPTY_OUT="$(SA_EMPTY=1 PATH="$_SA_BIN:$PATH" bash "$_SA_SANDY" --stop-all --yes 2>&1)"; _SA_EMPTY_RC=$?
+check "--stop-all with no daemon sessions exits 0" test "$_SA_EMPTY_RC" -eq 0
+check "--stop-all with no daemon sessions says so" \
+    bash -c 'printf "%s" "$1" | grep -q "No daemon sessions"' -- "$_SA_EMPTY_OUT"
+# structural: composes the per-session --stop verbatim (DEC-U2) + cli_flags
+check "--stop-all composes \"\$0\" --stop --workspace per session" \
+    grep -qF '"$0" --stop --workspace "${_sa_ws[$_sa_i]}"' "$_SA_SANDY"
+check "--print-schema cli_flags includes --stop-all" \
+    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"--stop-all\""' -- "$_SA_SANDY"
+rm -rf "$_SA_BIN"
+
+# ============================================================
+echo ""
 echo "§72: 1.2.1 follow-ups — image-inspect batching (#52), image GC (#36), daemon-log polish (#51)"
 # ============================================================
 _S72="$(cd "$(dirname "$0")/.." && pwd)/sandy"

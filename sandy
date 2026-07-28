@@ -892,6 +892,8 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--prune-orphans"'; printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Reap orphaned sandy_* networks (dead-owner, no attached container) and exit."'; printf '}'
     printf ','
+    printf '{'; _json_kv name '"--stop-all"';      printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Fleet emergency stop: enumerate every daemon session on the host and stop each via the hardened per-session teardown. Sub-options: --dry-run, --yes."'; printf '}'
+    printf ','
     printf '{'; _json_kv name '"--gc"';            printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"One-shot global reclaim: dead-owner containers, orphaned sandy_* networks, orphaned per-project/skill images, and dangling sandy images. Sub-options: --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--update-sessions"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Fleet image refresh + rolling restart across every daemon session on the host; scope to one session with --workspace PATH. Sub-options: --dry-run, --yes, --idle-for <minutes>, --rebuild, --workspace."'; printf '}'
@@ -2084,6 +2086,75 @@ if [[ "${1:-}" == "--prune-orphans" ]]; then
     exit 0
 fi
 
+# --- sandy --stop-all (HF-incident Issue 8) — fleet emergency stop. The post-
+# mortem's executive guidance: every agent needs an owner "with the pre-authorized
+# authority to shut it down immediately," and its summary asks for "a tested
+# shutdown path." Sandy has a clean PER-SESSION one (sandy --stop), but under
+# daemon mode a user can accumulate many long-lived sessions and the only way to
+# stop them all was to enumerate by hand (or reach for docker directly, skipping
+# sandy's lock/network cleanup and leaking orphans --gc must later reap). This is
+# the stop verb over the same enumeration --update-sessions uses. Same maintenance
+# family as --gc: parses its own sub-flags, exits before config/mutex; composes
+# the hardened per-session teardown ("$0" --stop --workspace) verbatim (DEC-U2).
+if [[ "${1:-}" == "--stop-all" ]]; then
+    _sa_dry_run=false; _sa_yes=false
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dry-run) _sa_dry_run=true ;;
+            --yes)     _sa_yes=true ;;
+            *) error "--stop-all: unrecognized argument: $1"; exit 1 ;;
+        esac
+        shift
+    done
+    if ! command -v docker >/dev/null 2>&1 || ! docker ps >/dev/null 2>&1; then
+        error "--stop-all requires a reachable Docker daemon."; exit 1
+    fi
+    # Enumerate every daemon session in one docker ps (the same label filter
+    # --update-sessions / _sandy_update_enum_sessions use). Inlined here because
+    # that helper is defined far later in the file, past this fast-path.
+    _sa_raw="$(docker ps --filter "label=sandy.daemon=true" \
+        --format '{{.Label "sandy.session"}}|{{.Label "sandy.workspace_path"}}' 2>/dev/null || true)"
+    if [ -z "$_sa_raw" ]; then info "No daemon sessions to stop."; exit 0; fi
+    _sa_sess=(); _sa_ws=()
+    while IFS='|' read -r _sa_s _sa_w; do
+        [ -z "$_sa_w" ] && continue
+        _sa_sess+=("$_sa_s"); _sa_ws+=("$_sa_w")
+    done <<< "$_sa_raw"
+
+    printf '\nsandy --stop-all: %d daemon session(s)\n' "${#_sa_ws[@]}"
+    for _sa_i in "${!_sa_ws[@]}"; do
+        printf '  - %-30s %s\n' "${_sa_sess[$_sa_i]:-?}" "${_sa_ws[$_sa_i]}"
+    done
+    printf '\n'
+
+    [ "$_sa_dry_run" = "true" ] && { info "--dry-run: nothing stopped."; exit 0; }
+    if [ "$_sa_yes" != "true" ]; then
+        if [ -t 0 ]; then
+            printf '[sandy] Stop all %d daemon session(s)? [y/N] ' "${#_sa_ws[@]}" >&2
+            IFS= read -r _sa_c </dev/tty || _sa_c=""
+            case "$_sa_c" in y|Y|yes|YES|Yes) : ;; *) info "Aborted — nothing stopped."; exit 0 ;; esac
+        else
+            error "Non-interactive; pass --yes to stop all sessions."; exit 1
+        fi
+    fi
+    # Serial teardown: reuse the hardened per-session --stop verbatim (its own
+    # lock release, atomic agent+proxy+network teardown). A failed stop is
+    # reported and the loop continues with the rest.
+    _sa_stopped=0; _sa_failed=0
+    for _sa_i in "${!_sa_ws[@]}"; do
+        info "Stopping ${_sa_sess[$_sa_i]:-?} (${_sa_ws[$_sa_i]})..."
+        if "$0" --stop --workspace "${_sa_ws[$_sa_i]}" >/dev/null 2>&1; then
+            _sa_stopped=$((_sa_stopped + 1))
+        else
+            warn "  failed to stop ${_sa_sess[$_sa_i]:-?}"; _sa_failed=$((_sa_failed + 1))
+        fi
+    done
+    info "Stopped $_sa_stopped session(s), $_sa_failed failure(s)."
+    [ "$_sa_failed" -gt 0 ] && exit 1
+    exit 0
+fi
+
 if [[ "${1:-}" == "--gc" ]]; then
     # #36 — unified maintenance fast-path: one-shot global reclaim of
     # dead-owner sandy_* containers, orphaned sandy_* networks (reusing
@@ -2297,6 +2368,9 @@ Flags:
   -vvv               Full trace: also trace entrypoint.sh and show docker flags
 
 Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
+  --stop-all         Fleet emergency stop: enumerate every daemon session on the
+                     host and stop each via the hardened per-session teardown.
+                     Sub-options: --dry-run, --yes
   --prune-orphans    Reap orphaned sandy_* networks (dead-owner, no attached
                      container) and exit
   --gc               One-shot global reclaim: dead-owner containers, orphaned
