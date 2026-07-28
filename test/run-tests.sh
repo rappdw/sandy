@@ -6315,6 +6315,48 @@ rm -rf "$_S79R_BIN" "$_S79R_HOME" "$_S79R_COUNTER" 2>/dev/null || true
 
 # ============================================================
 echo ""
+echo "§79b: sandy --reset-sandbox — rebuild one project's sandbox (HF Issue 5)"
+# ============================================================
+# Filesystem-only (no Docker): destroy a sandbox's persistent state, preserve
+# WORKSPACE.json (+ approvals with --keep-approvals), refuse under a live lock.
+_RSB_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_rsb_setup() { # $1 = fake SANDY_HOME dir; echoes the sandbox dir path
+    local fh="$1" ws sb hash base
+    ws="$(mktemp -d)"; ws="$(cd "$ws" && pwd -P)"
+    hash="$(printf '%s' "$ws" | { shasum -a 256 2>/dev/null || sha256sum; })"; hash="${hash%% *}"; hash="${hash:0:8}"
+    base="$(basename "$ws" | tr -cd 'a-zA-Z0-9._-')"; base="${base:-project}"
+    sb="$fh/sandboxes/${base}-${hash}"
+    mkdir -p "$sb/pip" "$sb/claude/plugins"
+    printf '{"workspace_path":"%s"}\n' "$ws" > "$sb/WORKSPACE.json"
+    printf 'link\t/etc/passwd\n' > "$sb/.sandy-approved-symlinks.list"
+    printf '%s\n%s\n%s' "$ws" "$sb" "${base}-${hash}"
+}
+# dry-run: plan printed, nothing removed
+_RSB_FH="$(mktemp -d)"; { read -r _RSB_WS; read -r _RSB_SB; read -r _RSB_NAME; } <<<"$(_rsb_setup "$_RSB_FH")"
+SANDY_HOME="$_RSB_FH" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS" --dry-run >/dev/null 2>&1
+check "--reset-sandbox --dry-run mutates nothing (pip survives)" test -d "$_RSB_SB/pip"
+# real reset: persistent dirs gone, WORKSPACE.json preserved
+SANDY_HOME="$_RSB_FH" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS" --yes >/dev/null 2>&1
+check "--reset-sandbox --yes removes persistent state (pip gone)" test ! -d "$_RSB_SB/pip"
+check "--reset-sandbox preserves WORKSPACE.json lineage" test -f "$_RSB_SB/WORKSPACE.json"
+check "--reset-sandbox (no --keep-approvals) removes the approval list" test ! -f "$_RSB_SB/.sandy-approved-symlinks.list"
+rm -rf "$_RSB_FH" "$_RSB_WS"
+# --keep-approvals preserves the approval list
+_RSB_FH2="$(mktemp -d)"; { read -r _RSB_WS2; read -r _RSB_SB2; read -r _RSB_NAME2; } <<<"$(_rsb_setup "$_RSB_FH2")"
+SANDY_HOME="$_RSB_FH2" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS2" --keep-approvals --yes >/dev/null 2>&1
+check "--reset-sandbox --keep-approvals preserves the approval list" test -f "$_RSB_SB2/.sandy-approved-symlinks.list"
+# live lock -> refuse (exit 1)
+mkdir -p "$_RSB_SB2/pip" "$_RSB_FH2/sandboxes/.${_RSB_NAME2}.lock"; echo $$ > "$_RSB_FH2/sandboxes/.${_RSB_NAME2}.lock/pid"
+SANDY_HOME="$_RSB_FH2" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS2" --yes >/dev/null 2>&1 && _RSB_LOCK_RC=0 || _RSB_LOCK_RC=$?
+check "--reset-sandbox refuses under a live workspace lock (exit 1)" test "$_RSB_LOCK_RC" -eq 1
+check "--reset-sandbox under a live lock removes nothing (pip survives)" test -d "$_RSB_SB2/pip"
+rm -rf "$_RSB_FH2" "$_RSB_WS2"
+# cli_flags advertises it
+check "--print-schema cli_flags includes --reset-sandbox" \
+    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"--reset-sandbox\""' -- "$_RSB_SANDY"
+
+# ============================================================
+echo ""
 echo "§80: Multi-agent pane-topology acceptance harness (#22)"
 # ============================================================
 _S80="$(cd "$(dirname "$0")/.." && pwd)/sandy"

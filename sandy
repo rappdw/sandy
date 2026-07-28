@@ -899,6 +899,8 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--gc"';            printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"One-shot global reclaim: dead-owner containers, orphaned sandy_* networks, orphaned per-project/skill images, and dangling sandy images. Sub-options: --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--update-sessions"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Fleet image refresh + rolling restart across every daemon session on the host; scope to one session with --workspace PATH. Sub-options: --dry-run, --yes, --idle-for <minutes>, --rebuild, --workspace."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --keep-approvals, --dry-run, --yes."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -2232,6 +2234,93 @@ if [[ "${1:-}" == "--gc" ]]; then
     exit 0
 fi
 
+# --- sandy --reset-sandbox (HF-incident Issue 5) — rebuild ONE project's sandbox
+# from a known-good skeleton. The post-mortem's remediation lesson: "surgically
+# cleaning a runtime environment is a losing battle against fast-moving attack
+# agents — architect services to be destroyed and redeployed from known-good
+# images." Sandy's CONTAINER is already immutable-ish (--read-only, tmpfs home,
+# images rebuilt on hash change), but its SANDBOX is not: pip/uv/npm/go/cargo bins
+# on PATH and .claude/plugins are persistent RW state a compromised session could
+# poison for the next one (THREAT_MODEL R5). Recovery was a manual `rm -rf` against
+# a hashed dir name the user had to look up; this makes "when in doubt, rebuild"
+# one command. Same maintenance family as --gc: parses its own trailing sub-flags,
+# exits before config load / mutex / image build. Workspace-scoped (default cwd).
+if [[ "${1:-}" == "--reset-sandbox" ]]; then
+    _rs_workspace=""; _rs_keep_approvals=false; _rs_dry_run=false; _rs_yes=false
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workspace)      shift; _rs_workspace="${1:-}"
+                              [ -z "$_rs_workspace" ] && { error "--reset-sandbox: --workspace needs a PATH"; exit 1; } ;;
+            --keep-approvals) _rs_keep_approvals=true ;;
+            --dry-run)        _rs_dry_run=true ;;
+            --yes)            _rs_yes=true ;;
+            *) error "--reset-sandbox: unrecognized argument: $1"; exit 1 ;;
+        esac
+        shift
+    done
+
+    # Resolve + canonicalize the target workspace exactly like the launch path so
+    # the sandbox hash matches (pwd -P: resolves symlinks / folds case-collisions).
+    _rs_wd="${_rs_workspace:-$PWD}"
+    [ -d "$_rs_wd" ] || { error "--reset-sandbox: workspace not found: $_rs_wd"; exit 1; }
+    _rs_wd="$(cd "$_rs_wd" 2>/dev/null && pwd -P)" || { error "--reset-sandbox: cannot resolve workspace"; exit 1; }
+    _rs_hash="$(printf '%s' "$_rs_wd" | sha256)"; _rs_hash="${_rs_hash%% *}"; _rs_hash="${_rs_hash:0:8}"
+    _rs_base="$(basename "$_rs_wd" | tr -cd 'a-zA-Z0-9._-')"; _rs_base="${_rs_base:-project}"
+    _rs_name="${_rs_base}-${_rs_hash}"
+    _rs_dir="$SANDY_HOME/sandboxes/${_rs_name}"
+    [ -d "$_rs_dir" ] || { error "--reset-sandbox: no sandbox for $_rs_wd (expected $_rs_dir)."; exit 1; }
+
+    # Refuse while a LIVE session holds the workspace mutex — resetting under a
+    # running session would corrupt its state (same lock the #14 guard / --print-
+    # state use: $SANDY_HOME/sandboxes/.<name>.lock/pid + kill -0 liveness).
+    _rs_lockpid=""
+    [ -f "$SANDY_HOME/sandboxes/.${_rs_name}.lock/pid" ] && \
+        _rs_lockpid="$(cat "$SANDY_HOME/sandboxes/.${_rs_name}.lock/pid" 2>/dev/null || true)"
+    if [ -n "$_rs_lockpid" ] && [ "$_rs_lockpid" -eq "$_rs_lockpid" ] 2>/dev/null && kill -0 "$_rs_lockpid" 2>/dev/null; then
+        error "--reset-sandbox: a live sandy session (pid $_rs_lockpid) holds this workspace."
+        error "Stop it first (sandy --stop) or wait for it to exit."
+        exit 1
+    fi
+
+    # Everything in the sandbox dir is destroyed EXCEPT WORKSPACE.json (lineage)
+    # and, with --keep-approvals, the approved-symlinks list. The next launch
+    # re-materializes pip/uv/npm/go/cargo + agent state from scratch.
+    _rs_keep() { case "$1" in WORKSPACE.json) return 0 ;; .sandy-approved-symlinks.list) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
+    printf '\nsandy --reset-sandbox: %s\n' "$_rs_name"
+    printf 'Workspace: %s\n' "$_rs_wd"
+    printf 'Will destroy (next launch re-materializes them):\n'
+    _rs_n=0
+    for _rs_e in "$_rs_dir"/* "$_rs_dir"/.[!.]*; do
+        [ -e "$_rs_e" ] || continue
+        _rs_bn="$(basename "$_rs_e")"
+        _rs_keep "$_rs_bn" && continue
+        _rs_sz="$(du -sh "$_rs_e" 2>/dev/null | cut -f1 || echo '?')"
+        printf '  - %-30s %s\n' "$_rs_bn" "$_rs_sz"
+        _rs_n=$((_rs_n + 1))
+    done
+    printf 'Preserved: WORKSPACE.json (lineage)%s\n\n' "$([ "$_rs_keep_approvals" = "true" ] && printf ', approval list')"
+
+    [ "$_rs_n" -eq 0 ] && { info "Sandbox already minimal — nothing to reset."; exit 0; }
+    [ "$_rs_dry_run" = "true" ] && { info "--dry-run: nothing removed."; exit 0; }
+    if [ "$_rs_yes" != "true" ]; then
+        if [ -t 0 ]; then
+            printf '[sandy] Reset this sandbox (%d item(s))? [y/N] ' "$_rs_n" >&2
+            IFS= read -r _rs_c </dev/tty || _rs_c=""
+            case "$_rs_c" in y|Y|yes|YES|Yes) : ;; *) info "Aborted — nothing removed."; exit 0 ;; esac
+        else
+            error "Non-interactive; pass --yes to reset without a prompt."; exit 1
+        fi
+    fi
+    for _rs_e in "$_rs_dir"/* "$_rs_dir"/.[!.]*; do
+        [ -e "$_rs_e" ] || continue
+        _rs_keep "$(basename "$_rs_e")" && continue
+        rm -rf "$_rs_e"
+    done
+    info "Sandbox $_rs_name reset — next launch re-materializes it from scratch."
+    exit 0
+fi
+
 # --- Help ---
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<EOF
@@ -2306,6 +2395,11 @@ Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
   --gc               One-shot global reclaim: dead-owner containers, orphaned
                      sandy_* networks, orphaned per-project/skill images, and
                      dangling sandy images. Sub-options: --dry-run, --yes
+  --reset-sandbox    Rebuild ONE project's sandbox from a known-good skeleton:
+                     destroy its persistent package/agent state (preserving
+                     WORKSPACE.json lineage), refusing while a live session holds
+                     it. Filesystem-only (no Docker). Sub-options: --workspace
+                     PATH (default cwd), --keep-approvals, --dry-run, --yes
 
 Introspection (machine-readable JSON; no Docker required):
   --print-schema          Emit the static schema (config keys, flags, agents,
