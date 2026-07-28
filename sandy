@@ -516,24 +516,38 @@ EOF
 # though .git/hooks itself is protected. Resolve the effective hooksPath for
 # workspace $1 and echo the workspace-RELATIVE directory that needs :ro
 # protection, or nothing when hooks live at the default .git/hooks, aren't set,
-# don't exist, or resolve OUTSIDE the workspace (an out-of-workspace hooksPath
-# is unreachable to the agent — only the workspace is rw-mounted — so it needs
-# no protection). Canonicalizes both paths (pwd -P) so a symlinked hooksPath or
-# `..` traversal can't slip a write target past the containment check.
+# don't exist, resolve to the workspace root, or resolve OUTSIDE the workspace
+# (an out-of-workspace hooksPath is unreachable to the agent — only the
+# workspace is rw-mounted — so it needs no protection).
+#
+# Key subtlety: canonicalize (pwd -P) ONLY for the containment check, then emit
+# the path git actually CONSULTS (the configured value for a relative hooksPath,
+# not the resolved target). Emitting the resolved target would :ro the real dir
+# but leave a *symlinked* hooksPath (e.g. `.githooks -> real`) writable in the
+# rw workspace — an agent could then `rm .githooks && mkdir .githooks && write a
+# hook`, redirecting host git into a fresh unprotected dir. Locking the
+# configured path makes it a :ro mount point the agent can't swap.
 _sandy_extra_hooks_dir() {
-    local wd="$1" hp hp_abs hp_real wd_real rel
+    local wd="$1" hp hp_abs hp_real wd_real rel pd
     command -v git >/dev/null 2>&1 || return 0
-    hp="$(git -C "$wd" config --get core.hooksPath 2>/dev/null)" || return 0
+    # --path: core.hooksPath is a path-type value; git tilde-expands it, so match that.
+    hp="$(git -C "$wd" config --path --get core.hooksPath 2>/dev/null)" || return 0
     [ -n "$hp" ] || return 0
     case "$hp" in /*) hp_abs="$hp" ;; *) hp_abs="$wd/$hp" ;; esac
     hp_real="$(cd "$hp_abs" 2>/dev/null && pwd -P)" || return 0
     [ -n "$hp_real" ] && [ -d "$hp_real" ] || return 0
     wd_real="$(cd "$wd" 2>/dev/null && pwd -P || echo "$wd")"
-    case "$hp_real/" in
-        "$wd_real"/*)
-            rel="${hp_real#"$wd_real"/}"
-            [ "$rel" != ".git/hooks" ] && printf '%s\n' "$rel" ;;
+    [ "$hp_real" = "$wd_real" ] && return 0        # workspace root: never :ro the whole tree
+    case "$hp_real/" in "$wd_real"/*) ;; *) return 0 ;; esac
+    case "$hp" in
+        /*) rel="${hp_real#"$wd_real"/}" ;;         # absolute-in-workspace: canonical position
+        *)  rel="${hp#./}"; rel="${rel%/}" ;;       # relative: the path git consults, verbatim
     esac
+    [ -n "$rel" ] && [ "$rel" != ".git/hooks" ] || return 0
+    # Skip a hooksPath already covered by the static list (a duplicate -v would
+    # make docker refuse to launch).
+    while IFS= read -r pd; do [ "$rel" = "$pd" ] && return 0; done < <(_sandy_protected_dirs)
+    printf '%s\n' "$rel"
     return 0
 }
 
@@ -8068,13 +8082,13 @@ while IFS= read -r _pd; do
 done < <(_sandy_protected_dirs)
 # core.hooksPath redirect: protect a non-default effective hooks directory that
 # lives inside the workspace (see _sandy_extra_hooks_dir). Existence-gated :ro
-# mount + launch snapshot, same profile as the static protected dirs. The
-# create-fresh case (hooksPath set but the dir absent at launch) remains a
-# detection-only gap, deferred to the generalized session-end auto-exec sweep.
+# mount only — the dynamic hooksPath is not in the static _sandy_protected_dirs
+# list, so the session-end detector does not walk it; the create-fresh case
+# (hooksPath set but the dir absent at launch) is a detection-only gap deferred
+# to the generalized auto-exec sweep (Issue F).
 _extra_hooks="$(_sandy_extra_hooks_dir "$WORK_DIR")"
-if [ -n "$_extra_hooks" ]; then
+if [ -n "$_extra_hooks" ] && [ -d "$WORK_DIR/$_extra_hooks" ]; then
     RUN_FLAGS+=(-v "$WORK_DIR/$_extra_hooks:$SANDY_WORKSPACE/$_extra_hooks:ro")
-    echo "$_extra_hooks" >> "$SANDBOX_DIR/.protected-existed-at-launch"
 fi
 # Also snapshot protected FILES that existed at launch. Absent protected files
 # are existence-gated (no :ro mount), so an agent can create e.g. .npmrc or

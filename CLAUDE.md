@@ -567,7 +567,7 @@ Certain sensitive files and directories in the workspace are mounted read-only i
 
 **Protected git files** (only mounted when present on host): `.git/config`, `.gitmodules`, `.git/HEAD`, `.git/packed-refs`
 
-If `core.hooksPath` redirects git hooks to a non-default directory *inside* the workspace (e.g. `.githooks/`), sandy resolves and mounts that directory `:ro` too (`_sandy_extra_hooks_dir`), canonicalizing the path (`pwd -P`) so a symlink or `..` can't escape the check — closing the gap where `.git/hooks/` is protected but hooks actually run from elsewhere. A `core.hooksPath` pointing outside the workspace is left alone (the agent can't write there).
+If `core.hooksPath` redirects git hooks to a non-default directory *inside* the workspace (e.g. `.githooks/`), sandy resolves it (`_sandy_extra_hooks_dir`) and mounts the **configured** hooks path `:ro` — it canonicalizes (`pwd -P`) only to verify containment, but locks the path git actually consults (not the resolved target) so a *symlinked* hooksPath can't be swapped for a fresh writable dir. Closes the gap where `.git/hooks/` is protected but hooks run from elsewhere. A `core.hooksPath` pointing outside the workspace, at the workspace root, or at an already-protected dir is left alone.
 
 **Protected directories**: `.git/hooks/`, `.git/info/`, `.vscode/`, `.idea/`, `.github/workflows/`, `.circleci/`, `.devcontainer/`, `.claude/hooks/`
 

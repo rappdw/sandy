@@ -2953,7 +2953,8 @@ info "38b. core.hooksPath redirect protection (_sandy_extra_hooks_dir)"
 # returned for :ro protection (Pillar "Week of Sandbox Escapes" #4 variant);
 # unset / default / outside-workspace / absent-dir must resolve to nothing.
 _EH_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-_EH_FN="$(awk '/^_sandy_extra_hooks_dir\(\)/,/^}/' "$_EH_SCRIPT")"
+# Extract BOTH helpers — _sandy_extra_hooks_dir dedups against _sandy_protected_dirs.
+_EH_FN="$(awk '/^_sandy_protected_dirs\(\)/,/^}/' "$_EH_SCRIPT"; echo; awk '/^_sandy_extra_hooks_dir\(\)/,/^}/' "$_EH_SCRIPT")"
 _eh() { bash -c "$_EH_FN"$'\n''_sandy_extra_hooks_dir "$1"' _ "$1" 2>/dev/null; }
 _EH1="$(mktemp -d)"; ( cd "$_EH1" && git init -q && git config core.hooksPath .githooks && mkdir -p .githooks )
 check "core.hooksPath=.githooks (present) -> protects .githooks" \
@@ -2970,7 +2971,22 @@ check "core.hooksPath set but dir absent -> nothing (existence-gated)" \
 _EH5="$(mktemp -d)"; ( cd "$_EH5" && git init -q && git config core.hooksPath .git/hooks )
 check "core.hooksPath = .git/hooks -> nothing (already protected)" \
     test -z "$(_eh "$_EH5")"
-rm -rf "$_EH1" "$_EH2" "$_EH3" "$_EH4" "$_EH5"
+# Regression: a *symlinked* hooksPath must protect the configured path (the
+# indirection an agent could swap), NOT the resolved target.
+_EH6="$(mktemp -d)"; ( cd "$_EH6" && git init -q && mkdir real && ln -s real .githooks && git config core.hooksPath .githooks )
+check "symlinked core.hooksPath -> protects the configured .githooks, not the target" \
+    test "$(_eh "$_EH6")" = ".githooks"
+# Regression: core.hooksPath = . resolves to the workspace root -> nothing
+# (never :ro the whole tree; also avoids emitting an absolute path).
+_EH7="$(mktemp -d)"; ( cd "$_EH7" && git init -q && git config core.hooksPath . )
+check "core.hooksPath = . (workspace root) -> nothing" \
+    test -z "$(_eh "$_EH7")"
+# Regression: hooksPath at an already-protected dir -> nothing (a duplicate -v
+# would make docker refuse to launch).
+_EH8="$(mktemp -d)"; ( cd "$_EH8" && git init -q && mkdir .vscode && git config core.hooksPath .vscode )
+check "core.hooksPath at an already-protected dir -> nothing (no duplicate mount)" \
+    test -z "$(_eh "$_EH8")"
+rm -rf "$_EH1" "$_EH2" "$_EH3" "$_EH4" "$_EH5" "$_EH6" "$_EH7" "$_EH8"
 
 # ============================================================
 info "39. Sprint 1 — Empty ro-fixtures exist in SANDY_HOME"
