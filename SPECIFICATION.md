@@ -148,7 +148,7 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `SANDY_TOOL_AUDIT`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -195,6 +195,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_EGRESS_PROXY` | passive | `1` | 0.14.0 | stable | DEPRECATED — use SANDY_EGRESS_NO_ISOLATION / SANDY_EGRESS_STRICT. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 is approval-gated (weakening), matching the new keys. |
 | `SANDY_EGRESS_NO_ISOLATION` | passive | `0` | 1.0.0 | stable | Turn the egress proxy OFF — legacy path (Linux iptables-only; NO network isolation on macOS). WEAKENS isolation, so from a workspace .sandy/config it is quarantined to the per-workspace approval prompt (a committed config cannot silently disable isolation). Mutually exclusive with SANDY_EGRESS_STRICT. Default 0 (proxy on). |
 | `SANDY_EGRESS_STRICT` | passive | `0` | 1.0.0 | stable | Run the egress proxy in strict mode (allow only the built-in default allowlist + SANDY_ALLOW_HOSTS; deny all other internet). STRENGTHENS isolation, so =1 is passive-safe from any source; =0 (downgrading a host-configured strict) is approval-gated from a workspace source. Mutually exclusive with SANDY_EGRESS_NO_ISOLATION. Default 0 (permissive). |
+| `SANDY_EGRESS_LOG` | passive | `0` | 1.4.0 | stable | Log which hosts the agent's egress actually reached (HF-incident Issue 4). The proxy logs each DISTINCT allowed host:port once (deduped) to proxy.log; at session end sandy prints an egress summary (distinct hosts reached + denial count). 0=off (deny-only, the pre-1.4 behavior); 1=per-connection allow lines + session-end summary; summary=session-end summary only (the proxy still records allows to build it). Passive-safe: it only ADDS visibility. Hostnames only — TLS is never terminated, no payload; the log stays in $SANDBOX_DIR. |
 | `SANDY_ALLOW_WORKFLOW_EDIT` | passive | `0` | 0.11.1 | stable | Remove .github/workflows from the read-only protection list. |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | passive | `128000` | 0.6.0 | stable | Max output tokens per Claude response. |
 | `GEMINI_MODEL` | passive | unset | 0.9.0 | stable | Gemini model override. |
@@ -206,6 +207,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_CODEX_AUTH` | passive | `auto` | 0.10.0 | stable | Codex credential probe strategy. |
 | `OPENCODE_MODEL` | passive | unset | 0.12.0 | stable | OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4'). |
 | `SANDY_OPENCODE_AUTH` | passive | `auto` | 0.12.0 | stable | OpenCode credential probe strategy. |
+| `SANDY_TOOL_AUDIT` | passive | `0` | 1.4.0 | stable | Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off). |
 | `SANDY_AUTO_APPROVE_PRIVILEGED` | env-only | unset | 0.11.2 | internal | Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only. |
 | `SANDY_DEBUG_CLEANUP` | env-only | unset | 0.11.4 | internal | Print session-stub cleanup diagnostics on exit. |
 <!-- END AUTOGEN:config-keys-table -->
@@ -1379,6 +1381,16 @@ RUN cat > /usr/local/bin/sandy-claude-statusline <<'STATUSLINE_HELPER' \
 #!/bin/bash
 # (body — see Appendix C.2 for the seeding side and the output format)
 STATUSLINE_HELPER
+
+# sandy-tool-audit: PreToolUse audit hook (HF-incident Issue 6). Seeded into
+# settings.json only when SANDY_TOOL_AUDIT=1; reads Claude Code's PreToolUse JSON
+# on stdin and appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl. Always
+# exits 0 (a non-zero PreToolUse hook would block the tool call).
+RUN cat > /usr/local/bin/sandy-tool-audit <<'TOOL_AUDIT_HELPER' \
+    && chmod +x /usr/local/bin/sandy-tool-audit
+#!/bin/bash
+# (body — jq-extracts tool_name + truncated tool_input, appends one JSONL line)
+TOOL_AUDIT_HELPER
 
 # User
 RUN useradd -m -s /bin/bash -u 1001 claude
