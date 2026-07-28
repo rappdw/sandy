@@ -734,6 +734,10 @@ The workspace is bind-mounted read/write so Claude can modify your project files
 | `.vscode/`, `.idea/` | Blocks IDE task/launch config injection |
 | `.github/workflows/` | Blocks CI pipeline escape (opt-out via `SANDY_ALLOW_WORKFLOW_EDIT=1`) |
 | `.circleci/`, `.devcontainer/` | Blocks CircleCI and devcontainer escape |
+| `.claude/settings.json`, `.claude/settings.local.json`, `.claude/hooks/` | Blocks agent→host Claude Code hook injection (a host `claude` run in the same dir would otherwise execute an agent-written hook) |
+| `.sandy/` | Blocks tampering with sandy's own build inputs; a per-project `.sandy/Dockerfile` build is additionally approval-gated |
+
+A redirected `core.hooksPath` (e.g. `.githooks/`) is resolved at launch and its target directory is mounted read-only too, so the protection follows git's actual hook path rather than only the default `.git/hooks/`.
 
 **Sandbox-mounted directories** — overlaid with writable sandbox copies so Claude can create and modify them without touching the host:
 
@@ -744,3 +748,5 @@ The workspace is bind-mounted read/write so Claude can modify your project files
 | `.claude/plugins/` | Starts empty. Managed via `/plugin install` inside the container |
 
 **Mount policy (existence-gated).** Protected files and directories are mounted read-only only when they exist on the host — a path the host doesn't have gets no mount (an always-mount-with-empty-stubs approach was tried and reverted: the stubs polluted `git status`, broke `direnv`, and confused IDE scanners). The trade-off is covered by **session-end detection**: sandy records which protected paths existed at launch, and on exit warns about any protected file or directory that newly appeared (e.g. an agent-written `.git/hooks/post-checkout` or `.github/workflows/ci.yml`), with the remediation command — so you can review it before the next `git pull`/`push`/IDE-open would fire it.
+
+**Caveat — a host IDE on the shared workspace.** Sandy's protection assumes the *host* isn't independently reading the workspace while the agent runs. A common setup breaks that assumption: the same project directory open in a host IDE (VS Code, Cursor, JetBrains) at the same time as the sandy session. The workspace is bind-mounted read/write, so an auto-execution config the agent writes into it — `.vscode/tasks.json`, a `.githooks/` script, a `.devcontainer/`, a `.claude/settings.json` hook — can be run by that host IDE, entirely outside sandy's boundary. Sandy blocks the common vectors *when they exist at launch* (the read-only mounts above) and warns at session end about newly-appeared ones, but this is existence-gated **detection, not prevention**: an absent `.vscode/` is unprotected in-session, and the end-of-session warning can be missed before the IDE auto-runs the file. When working an untrusted repository, don't leave the same workspace open in a host IDE during the session — read sandy's session-end report first.
