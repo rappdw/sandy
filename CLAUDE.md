@@ -75,6 +75,20 @@ Since Claude Code running inside sandy cannot access Docker, running tests requi
 
 See `TESTING_PLAN.md` for manual validation steps that require interactive TUI sessions.
 
+## Git branch work inside sandy (`.git/HEAD` is read-only)
+
+sandy bind-mounts `.git/HEAD`, `.git/config`, and `.git/packed-refs` **read-only** (the protected-git-files anti-ref-spoofing defense — see "Protected Files"). One consequence for an agent working *inside* a sandy container: **you cannot switch branches.** `git commit` and `git reset` work (they update `refs/heads/<branch>`, a writable loose ref), but `git checkout <branch>` / `git switch` / `git checkout -b` fail with `error: unable to write symref for HEAD: Device or resource busy` — they rewrite the `.git/HEAD` symref, and you can't rename over a read-only bind-mounted file. Ref ops that rewrite `.git/packed-refs` (some branch deletes, `git gc`) fail the same way. This is the protection working as intended, not a bug (tracked as a known limitation / enhancement in issue #80).
+
+**The HEAD-preserving pattern** — how to do feature-branch / PR work from inside sandy without switching HEAD:
+
+1. Make edits and `git commit` on the current branch (usually `main`).
+2. `git branch <feature> HEAD` (or `git branch -f <feature> HEAD` to reuse an existing ref) — labels a loose ref at that commit, never touches HEAD.
+3. `git push origin <feature>`.
+4. `git reset --hard origin/main` to move the current branch back (preserve any uncommitted `.gitignore`/untracked working changes across the reset).
+5. `gh pr create --head <feature> --base main`.
+
+Note `main` is protected by a branch ruleset (required status checks), so every change lands via a PR + CI, never a direct push to `main`.
+
 ## Introspection Surface
 
 Sandy exposes three machine-readable JSON flags that run as **fast-path handlers** — they exit before Docker, image builds, and workspace mutex acquisition, so they're cheap to call from UI frontends, CI, and non-interactive contexts:
