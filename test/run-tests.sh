@@ -2937,6 +2937,14 @@ check "--print-protected-paths includes expanded .envrc" \
     bash -c 'echo "$1" | grep -q "^file:.envrc$"' -- "$_PRINT_OUT"
 check "--print-protected-paths includes .git/info" \
     bash -c 'echo "$1" | grep -q "^dir:.git/info$"' -- "$_PRINT_OUT"
+# Claude-config trust-handoff protection (agent-written .claude hooks/settings
+# later executed by a host-side Claude Code run; cf. Cursor CVE-2026-48124).
+check "--print-protected-paths includes .claude/settings.json" \
+    bash -c 'echo "$1" | grep -q "^file:.claude/settings.json$"' -- "$_PRINT_OUT"
+check "--print-protected-paths includes .claude/settings.local.json" \
+    bash -c 'echo "$1" | grep -q "^file:.claude/settings.local.json$"' -- "$_PRINT_OUT"
+check "--print-protected-paths includes .claude/hooks" \
+    bash -c 'echo "$1" | grep -q "^dir:.claude/hooks$"' -- "$_PRINT_OUT"
 
 # ============================================================
 info "39. Sprint 1 — Empty ro-fixtures exist in SANDY_HOME"

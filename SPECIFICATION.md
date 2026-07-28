@@ -748,6 +748,7 @@ Certain files and directories in the workspace are overlaid at container launch 
 | `.pypirc` | Python package index auth-token exfiltration |
 | `.netrc` | HTTP credential exfiltration (curl/git/wget) |
 | `.pre-commit-config.yaml` | pre-commit hook injection |
+| `.claude/settings.json`, `.claude/settings.local.json` | Claude Code project-settings `hooks` injection later executed by a **host-side** Claude Code run on the same workspace (trust-handoff; cf. Cursor CVE-2026-48124). `settings.local.json` is normally writable — `:ro` here means in-session edits to a pre-existing one won't persist. |
 
 **Git-tree files (existence-gated — only mounted when present on host):**
 
@@ -767,6 +768,7 @@ Certain files and directories in the workspace are overlaid at container launch 
 | `.vscode/`, `.idea/` | IDE task/launch config injection |
 | `.circleci/` | CircleCI pipeline escape |
 | `.devcontainer/` | Devcontainer auto-open escape |
+| `.claude/hooks/` | Claude Code hook-script injection later executed by a **host-side** Claude Code run on the same workspace (trust-handoff). Distinct from the `commands/agents/plugins` overlay, which is writable-in-sandbox by design. |
 | `.github/workflows/` | GitHub Actions pipeline escape on `git push`. Omitted from the list when `SANDY_ALLOW_WORKFLOW_EDIT=1`. |
 
 **Submodule gitdirs (recursive walk):**
