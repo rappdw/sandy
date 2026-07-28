@@ -127,6 +127,22 @@ Judged against the **primary** adversary, these are mostly accepted; against the
   exercise across all seven layers, run with the proxy on/off and across models.
   The residuals above (especially R1–R5) are testable hypotheses; let the
   red-team confirm which are real on a given platform before investing.
+- **The egress proxy is itself an in-scope attack surface, not just a control.**
+  The Hugging Face incident (2026-07) broke containment via a zero-day *in the
+  sandbox's egress proxy* — the one component that is simultaneously mandatory to
+  trust, directly reachable by the contained agent, and parsing attacker-influenced
+  wire bytes (TLS ClientHello, HTTP `Host`, DNS). Sandy's proxy is in that same
+  position, so it is treated as a **tier-3 target**: Go's memory safety removes
+  the class the incident's zero-day most likely came from, its wire accessors
+  return `ok=false` rather than panicking, `guard()` recovers per-connection
+  panics, and its SNI/server-name/HTTP-Host parsers are fuzz-tested
+  (`proxy/fuzz_test.go`) with `govulncheck` watching its dependency + stdlib
+  call paths. The proxy's
+  base image also auto-refreshes ~monthly so its Go stdlib doesn't freeze between
+  releases (see SPECIFICATION.md / CLAUDE.md, HF-incident Issues 1–3). The
+  `sandy-isolation-test` kit gaining an explicit "attack the proxy" scenario
+  (malformed handshakes, oversized SNI, header smuggling, DNS abuse, connection
+  exhaustion) is tracked there, in that repo.
 
 **Bottom line:** against a wrong-but-not-evil agent and committed-config supply
 chain, sandy's isolation is strong and the layers compose well. Against a
