@@ -491,6 +491,17 @@ PARSED_VER3="$( { grep -E '^version(_info)?[[:space:]]*=' "$VENV_FIXTURE3/pyvenv
     | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]'; } || true )"
 check "malformed pyvenv.cfg yields empty version" \
     test -z "$PARSED_VER3"
+
+# 9e. Issue C (sandbox-escape eval) — overlay-off / symlinked .venv warns that
+# the interpreter is host-reachable (a host Python extension could run an
+# agent-modified interpreter). Host-side launch logic (needs the full flow to
+# fire), so assert structurally that both fallback branches exist and warn.
+check "overlay-off branch (SANDY_VENV_OVERLAY=0 + present .venv) exists" \
+    grep -qF '"${SANDY_VENV_OVERLAY:-1}" = "0" ] && { [ -d "$WORK_DIR/.venv" ]' "$_SANDY_SCRIPT_PATH"
+check "overlay-off warns the venv is NOT shadowed" \
+    grep -qF 'mount and NOT shadowed' "$_SANDY_SCRIPT_PATH"
+check "symlinked .venv warns it is host-reachable" \
+    grep -qF '.venv is host-reachable (not shadowed)' "$_SANDY_SCRIPT_PATH"
 rm -rf "$VENV_FIXTURE3"
 
 # 9e. Symlinked .venv is skipped (potential sandbox escape)
