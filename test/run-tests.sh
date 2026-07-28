@@ -5602,7 +5602,7 @@ check "--stop-all --dry-run lists the daemon sessions" \
 check "--stop-all --dry-run stops nothing (no 'Stopping' line)" \
     bash -c '! printf "%s" "$1" | grep -q "Stopping "' -- "$_SA_DRY"
 # non-TTY without --yes: refuse, exit 1
-PATH="$_SA_BIN:$PATH" bash "$_SA_SANDY" --stop-all </dev/null >/dev/null 2>&1; _SA_NOYES_RC=$?
+PATH="$_SA_BIN:$PATH" bash "$_SA_SANDY" --stop-all </dev/null >/dev/null 2>&1 && _SA_NOYES_RC=0 || _SA_NOYES_RC=$?
 check "--stop-all non-TTY without --yes exits 1" test "$_SA_NOYES_RC" -eq 1
 # empty fleet: exit 0 with the no-sessions message
 _SA_EMPTY_OUT="$(SA_EMPTY=1 PATH="$_SA_BIN:$PATH" bash "$_SA_SANDY" --stop-all --yes 2>&1)"; _SA_EMPTY_RC=$?
