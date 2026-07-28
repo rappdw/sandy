@@ -285,7 +285,7 @@ Daemon mode makes launches rare — a session can sit up for days, running an ev
 
 ## Architecture
 
-- **Three-phase Docker build**: A `sandy-base` image contains the OS, toolchains (Node.js 22, Go 1.24, Rust stable, Python 3, C/C++), and system tools. A `sandy-claude-code` image layers Claude Code on top. An optional per-project image (from `.sandy/Dockerfile`) layers project-specific tools on top of that. Each phase only rebuilds when its inputs change.
+- **Three-phase Docker build**: A `sandy-base` image contains the OS, toolchains (Node.js 22, Go 1.24, Rust stable, Python 3, C/C++), and system tools. A `sandy-claude-code` image layers Claude Code on top. An optional per-project image (from `.sandy/Dockerfile`) layers project-specific tools on top of that. Each phase only rebuilds when its inputs change. The per-project `.sandy/Dockerfile` build is **approval-gated** (`_sandy_project_dockerfile_approved`): its `RUN` commands execute on the host daemon with unfiltered network, so an unapproved/edited Dockerfile prompts on an interactive TTY and **fails closed** (skips the build, uses the base image) when non-interactive — a committed or agent-written Dockerfile can't build unattended. Approval is a per-workspace sha256 in `$SANDY_HOME/approvals/dockerfile-<hash>.list`; `.sandy/` is also in the protected-dirs list so an existing one is `:ro` in-session (HF-incident Issue 7).
 - `sandy` — Self-contained launcher (bash script) installed to `~/.local/bin/`. On first run, generates Dockerfile.base, Dockerfile, entrypoint.sh, and tmux.conf in `~/.sandy/`, builds both Docker images, creates per-project sandbox directories, applies network isolation, and launches the container via `docker run`.
 - `install.sh` — `curl | bash` installer that downloads `sandy` to `~/.local/bin/` and checks PATH setup.
 
@@ -583,7 +583,7 @@ Certain sensitive files and directories in the workspace are mounted read-only i
 
 If `core.hooksPath` redirects git hooks to a non-default directory *inside* the workspace (e.g. `.githooks/`), sandy resolves it (`_sandy_extra_hooks_dir`) and mounts the **configured** hooks path `:ro` — it canonicalizes (`pwd -P`) only to verify containment, but locks the path git actually consults (not the resolved target) so a *symlinked* hooksPath can't be swapped for a fresh writable dir. Closes the gap where `.git/hooks/` is protected but hooks run from elsewhere. A `core.hooksPath` pointing outside the workspace, at the workspace root, or at an already-protected dir is left alone.
 
-**Protected directories**: `.git/hooks/`, `.git/info/`, `.vscode/`, `.idea/`, `.github/workflows/`, `.circleci/`, `.devcontainer/`, `.claude/hooks/`
+**Protected directories**: `.git/hooks/`, `.git/info/`, `.vscode/`, `.idea/`, `.github/workflows/`, `.circleci/`, `.devcontainer/`, `.claude/hooks/`, `.sandy/`
 
 **Submodule gitdirs**: sandy walks `.git/modules/` (and the gitdir-side `modules/` for `--separate-git-dir` / worktree-of-submodule layouts) and mounts each submodule's `config`, `hooks/`, and `info/` read-only. Without this, a planted `post-checkout` hook in `.git/modules/<sub>/hooks/` would execute on the host the next time `git submodule update` or `git pull --recurse-submodules` ran (Critical escape, F1 in ISOLATION_STRESS.md).
 

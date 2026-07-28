@@ -2945,6 +2945,10 @@ check "--print-protected-paths includes .claude/settings.local.json" \
     bash -c 'echo "$1" | grep -q "^file:.claude/settings.local.json$"' -- "$_PRINT_OUT"
 check "--print-protected-paths includes .claude/hooks" \
     bash -c 'echo "$1" | grep -q "^dir:.claude/hooks$"' -- "$_PRINT_OUT"
+# .sandy/ (sandy's own control dir: Dockerfile/config/.secrets) protected :ro
+# so the agent can't modify the build inputs mid-session (HF-incident Issue 7).
+check "--print-protected-paths includes .sandy" \
+    bash -c 'echo "$1" | grep -q "^dir:.sandy$"' -- "$_PRINT_OUT"
 
 # ============================================================
 info "38b. core.hooksPath redirect protection (_sandy_extra_hooks_dir)"
@@ -2987,6 +2991,67 @@ _EH8="$(mktemp -d)"; ( cd "$_EH8" && git init -q && mkdir .vscode && git config 
 check "core.hooksPath at an already-protected dir -> nothing (no duplicate mount)" \
     test -z "$(_eh "$_EH8")"
 rm -rf "$_EH1" "$_EH2" "$_EH3" "$_EH4" "$_EH5" "$_EH6" "$_EH7" "$_EH8"
+
+# ============================================================
+info "38c. .sandy/Dockerfile build approval gate (_sandy_project_dockerfile_approved)"
+# ============================================================
+# HF-incident Issue 7: building .sandy/Dockerfile runs host-daemon code with
+# unfiltered network, so the build is gated behind per-workspace approval.
+# Non-interactive paths (CI bypass / headless fail-closed / pre-approved) are
+# unit-testable; the interactive y/N prompt needs a tty and is not. The approval
+# hash covers the WHOLE .sandy/ build context (via _sandy_context_hash), not just
+# the Dockerfile — so a payload hidden in a COPY'd sibling re-triggers approval.
+_PA_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+# Extract sha256 (one-liner) + both multi-line helpers the gate depends on.
+_PA_FN="$(awk '
+    /^sha256\(\)/ {print; next}
+    /^_sandy_context_hash\(\)/,/^}/ {print; next}
+    /^_sandy_project_dockerfile_approved\(\)/,/^}/ {print; next}
+' "$_PA_SCRIPT")"
+# Compute the context hash exactly as sandy does (drift-proof — calls the real fn).
+_pa_ctxhash() { bash -c "$_PA_FN"$'\n'"_sandy_context_hash '$1'"; }
+# rc: run the helper against a temp workspace, echo its return code.
+# NB: this harness exports SANDY_AUTO_APPROVE_PRIVILEGED=1 globally (line 12),
+# which the gate honors as its CI bypass — so every invocation that must
+# exercise the REAL logic pins SANDY_AUTO_APPROVE_PRIVILEGED=0. The CI-bypass
+# test re-enables it via its own $1 (which runs after the ';').
+_pa() { # $1 = extra env/eval prepended
+  local WD SH; WD="$(mktemp -d)"; SH="$(mktemp -d)"; mkdir -p "$WD/.sandy"
+  printf 'FROM x\nRUN echo hi\n' > "$WD/.sandy/Dockerfile"
+  bash -c "$_PA_FN"$'\n'"WORK_DIR='$WD' SANDY_HOME='$SH' SANDY_AUTO_APPROVE_PRIVILEGED=0; $1"$'\n''_sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile"; printf %s "$?"' 2>/dev/null
+  rm -rf "$WD" "$SH"
+}
+check "AUTO_APPROVE_PRIVILEGED=1 bypasses the gate (rc 0)" \
+    test "$(_pa 'export SANDY_AUTO_APPROVE_PRIVILEGED=1')" = "0"
+check "headless + unapproved fails closed (rc 1)" \
+    test "$(_pa '_sandy_is_headless=true')" = "1"
+# pre-approved: seed the approval file with the CONTEXT hash → rc 0 even headless
+_pa_approved() {
+  local WD SH df wh; WD="$(mktemp -d)"; SH="$(mktemp -d)"; mkdir -p "$WD/.sandy" "$SH/approvals"
+  printf 'FROM x\nRUN echo hi\n' > "$WD/.sandy/Dockerfile"
+  df="$(_pa_ctxhash "$WD/.sandy")"
+  wh="$(printf '%s' "$WD" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16)"
+  printf '%s\n' "$df" > "$SH/approvals/dockerfile-$wh.list"
+  bash -c "$_PA_FN"$'\n'"WORK_DIR='$WD' SANDY_HOME='$SH' _sandy_is_headless=true SANDY_AUTO_APPROVE_PRIVILEGED=0"$'\n''_sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile"; printf %s "$?"' 2>/dev/null
+  rm -rf "$WD" "$SH"
+}
+check "pre-approved (context hash matches) proceeds even headless (rc 0)" \
+    test "$(_pa_approved)" = "0"
+# build-context gap (the Fix): approve the Dockerfile, then a payload sibling
+# appears with the Dockerfile UNCHANGED → context hash changes → must re-prompt,
+# which headless means rc 1 (skip the build). A Dockerfile-only hash would rc 0.
+_pa_companion_changed() {
+  local WD SH df wh; WD="$(mktemp -d)"; SH="$(mktemp -d)"; mkdir -p "$WD/.sandy" "$SH/approvals"
+  printf 'FROM x\nRUN echo hi\n' > "$WD/.sandy/Dockerfile"
+  df="$(_pa_ctxhash "$WD/.sandy")"
+  wh="$(printf '%s' "$WD" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16)"
+  printf '%s\n' "$df" > "$SH/approvals/dockerfile-$wh.list"
+  printf 'evil\n' > "$WD/.sandy/setup.sh"   # payload sibling, Dockerfile untouched
+  bash -c "$_PA_FN"$'\n'"WORK_DIR='$WD' SANDY_HOME='$SH' _sandy_is_headless=true SANDY_AUTO_APPROVE_PRIVILEGED=0"$'\n''_sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile"; printf %s "$?"' 2>/dev/null
+  rm -rf "$WD" "$SH"
+}
+check "companion-file change (Dockerfile unchanged) re-triggers approval → headless rc 1" \
+    test "$(_pa_companion_changed)" = "1"
 
 # ============================================================
 info "39. Sprint 1 — Empty ro-fixtures exist in SANDY_HOME"

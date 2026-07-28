@@ -458,6 +458,8 @@ This image rebuilds whenever a new commit is detected on the skill pack repo (fa
 
 User-provided Dockerfile must declare `ARG BASE_IMAGE` and use `FROM ${BASE_IMAGE}`. Sandy invokes `docker build --build-arg BASE_IMAGE=<IMAGE_NAME> -t sandy-project-<name>-<hash> .sandy/` where `<IMAGE_NAME>` is the most-derived image from the build chain (skills image if skill packs enabled, otherwise `sandy-claude-code`).
 
+**Per-workspace approval gate (`_sandy_project_dockerfile_approved`, HF-incident Issue 7).** Building `.sandy/Dockerfile` runs its `RUN` commands on the **host** docker daemon with **unfiltered network** (the build predates and bypasses the egress proxy) and takes all of `.sandy/` as context — so an agent that writes `$WORKSPACE/.sandy/Dockerfile` in one session would get host code-execution on the next launch. Before building, sandy gates on explicit per-workspace approval: a sha256 of the Dockerfile content is checked against `$SANDY_HOME/approvals/dockerfile-<workspace-hash>.list` (same machinery/format as the passive-privileged config gate). An unchanged, already-approved Dockerfile proceeds silently; a **new or edited** one prints the Dockerfile and a warning and prompts `y/N` on an interactive TTY. **Fail-closed when non-interactive** (`_sandy_is_headless` or no tty): sandy skips the project build entirely and runs the **base** agent image, with a pointer to approve interactively — so a committed/agent-written Dockerfile can never build unattended (in CI, `--start`, or sandy-ui). `SANDY_AUTO_APPROVE_PRIVILEGED=1` (env-only, same as the config gate) bypasses the prompt for trusted test harnesses. Approval persists per workspace; any Dockerfile edit re-prompts; revoke with `rm` of the approval file. The `.sandy/` directory is additionally in the protected-dirs list (§9), so an existing one is `:ro` in-session.
+
 ### Build Hash Caching
 
 Each phase stores its content hash in `$SANDY_HOME/`:
@@ -768,6 +770,7 @@ Certain files and directories in the workspace are overlaid at container launch 
 | `.vscode/`, `.idea/` | IDE task/launch config injection |
 | `.circleci/` | CircleCI pipeline escape |
 | `.devcontainer/` | Devcontainer auto-open escape |
+| `.sandy/` | sandy's own control dir (`Dockerfile`, `config`, `.secrets`) — `:ro` so the agent can't modify build inputs mid-session (HF-incident Issue 7; pairs with the `.sandy/Dockerfile` build approval gate, §5 Phase 3) |
 | `.claude/hooks/` | Claude Code hook-script injection later executed by a **host-side** Claude Code run on the same workspace (trust-handoff). Distinct from the `commands/agents/plugins` overlay, which is writable-in-sandbox by design. |
 | `.github/workflows/` | GitHub Actions pipeline escape on `git push`. Omitted from the list when `SANDY_ALLOW_WORKFLOW_EDIT=1`. |
 
