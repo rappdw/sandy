@@ -764,8 +764,9 @@ Certain files and directories in the workspace are overlaid at container launch 
 |---|---|
 | `.git/config` | Remote path manipulation, `core.fsmonitor` injection, `core.hooksPath` redirect |
 | `.gitmodules` | Submodule URL hijacking |
-| `.git/HEAD` | Ref spoofing |
-| `.git/packed-refs` | Ref spoofing |
+| `.git/packed-refs` | Bulk ref spoofing / `git gc` repack |
+
+`.git/HEAD` is intentionally left read-write as of 1.5.0 (#80) so `git switch`/`checkout`/`checkout -b` work inside the container — a symref is not a host-code-execution vector. A HEAD left on an unexpected branch at session end is surfaced by a yellow notice (detection-not-prevention, mirroring the protected-dirs hybrid).
 
 **Directories (existence-gated — mounted read-only when present on host):**
 
