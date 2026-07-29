@@ -6481,6 +6481,16 @@ check "the @sandy_pane_agent option is set from the launcher by pane-id, not a \
         && ! grep -qE "_cmd[0-9]=.tmux set-option" "$1"' -- "$_S80"
 check "the harness reads pane identity from the @sandy_pane_agent option" \
     grep -q '@sandy_pane_agent' "$_S80_TOPO"
+# #64: the pane-border label. The option is set unconditionally (the set-option
+# lines above are NOT nested under a SANDY_TEST_PANE_TAGS `if`), and the tmux
+# pane-border-format renders it (falling back to window_name when unset).
+check "the pane-border-format renders the agent name from @sandy_pane_agent (#64)" \
+    grep -qE 'pane-border-format.*@sandy_pane_agent' "$_S80"
+check "every multi-agent pane is created with -P -F pane_id, so all are tagged unconditionally (#64)" \
+    bash -c '_b="$(awk "/--- Multi-agent launch \(2-4 panes\) ---/,/^USERSETUP\$/" "$1")"; \
+        _all="$(printf "%s" "$_b" | grep -cE "tmux (new-session|split-window)")"; \
+        _tagged="$(printf "%s" "$_b" | grep -cE "tmux (new-session|split-window).* -P -F")"; \
+        [ "$_all" -ge 4 ] && [ "$_all" -eq "$_tagged" ]' -- "$_S80"
 check "the harness tears down via --stop between combos" \
     grep -q -- '--stop' "$_S80_TOPO"
 
