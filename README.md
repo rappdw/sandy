@@ -742,7 +742,7 @@ The workspace is bind-mounted read/write so Claude can modify your project files
 | `.tool-versions`, `.mise.toml`, `.nvmrc`, `.node-version`, `.python-version`, `.ruby-version` | Blocks asdf/mise/nvm/pyenv/rbenv toolchain hijacking |
 | `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `.pypirc`, `.netrc` | Blocks registry hijacking and credential exfiltration |
 | `.pre-commit-config.yaml` | Blocks pre-commit hook injection |
-| `.git/config`, `.gitmodules`, `.git/HEAD`, `.git/packed-refs` | Blocks git remote/hook path manipulation and ref spoofing |
+| `.git/config`, `.gitmodules`, `.git/packed-refs` | Blocks git remote/hook path manipulation and ref spoofing (`.git/HEAD` is left writable so `git switch` works in-container — #80) |
 | `.git/hooks/` | Blocks git hook injection (pre-commit, post-checkout, etc.) |
 | `.git/info/` | Blocks `.git/info/attributes` filter-driver injection |
 | `.git/modules/<sub>/{config,hooks,info}` | Same, for every submodule gitdir (walked recursively) |

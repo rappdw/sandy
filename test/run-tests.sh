@@ -2741,14 +2741,20 @@ sandy_run "echo '*.txt filter=evil' >> /workspace/.git/info/attributes 2>/dev/nu
     >/dev/null 2>&1 && WR_GITINFO=yes || WR_GITINFO=no
 check "cannot modify .git/info/attributes" test "$WR_GITINFO" = "no"
 
-# .git/HEAD and .git/packed-refs too
+# .git/HEAD is now WRITABLE (#80 — enables `git switch`/`checkout` in-session);
+# .git/packed-refs STAYS :ro (bulk ref-spoofing / gc protection).
 echo "ref: refs/heads/main" > "$TEST_PROJECT/.git/HEAD"
 echo "# pack-refs" > "$TEST_PROJECT/.git/packed-refs"
-chmod 0444 "$TEST_PROJECT/.git/HEAD" "$TEST_PROJECT/.git/packed-refs"  # :ro-drop backstop
+chmod 0644 "$TEST_PROJECT/.git/HEAD"            # rw — the container uid owns it
+chmod 0444 "$TEST_PROJECT/.git/packed-refs"     # :ro-drop backstop
 
-sandy_run "echo 'ref: refs/heads/pwned' > /workspace/.git/HEAD 2>/dev/null" \
+sandy_run "echo 'ref: refs/heads/feature' > /workspace/.git/HEAD 2>/dev/null" \
     >/dev/null 2>&1 && WR_HEAD=yes || WR_HEAD=no
-check "cannot overwrite .git/HEAD" test "$WR_HEAD" = "no"
+check ".git/HEAD is writable in-session (git switch works, #80)" test "$WR_HEAD" = "yes"
+
+sandy_run "echo 'deadbeef refs/heads/x' >> /workspace/.git/packed-refs 2>/dev/null" \
+    >/dev/null 2>&1 && WR_PACKED=yes || WR_PACKED=no
+check "cannot overwrite .git/packed-refs (stays :ro)" test "$WR_PACKED" = "no"
 
 rm -rf "$TEST_PROJECT/.git"
 
@@ -6630,6 +6636,34 @@ check "session-end points at the tool-audit trail" \
     bash -c 'grep -q "Tool-use audit trail" "$1"' -- "$_S81"
 check "SANDY_TOOL_AUDIT IS a real config key (has a _sandy_key_metadata row)" \
     bash -c 'awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -q "^SANDY_TOOL_AUDIT|"' -- "$_S81"
+
+# ============================================================
+echo ""
+echo "§83: git HEAD rw for in-session switch (#80) — HEAD not :ro, packed-refs stays"
+# ============================================================
+# .git/HEAD is deliberately NOT in the protected :ro git-file list (#80): a symref
+# isn't an RCE vector, so leaving it rw restores in-container `git switch`. The
+# real host-code vectors (config/packed-refs/hooks/info/modules/workflows) stay
+# :ro. A session-end notice flags a HEAD left on an unexpected branch. The actual
+# rw-mount behavior is proven by the "cannot overwrite" Docker block (test 35);
+# these are the static structural guards + a pure-fn unit test.
+_S83="$SANDY_SCRIPT"
+check ".git/HEAD is NOT in the protected git-file :ro list (#80)" \
+    bash -c '! awk "/^_sandy_protected_git_files\(\)/,/^}/" "$1" | grep -qx ".git/HEAD"' -- "$_S83"
+check ".git/packed-refs STAYS in the protected git-file list (ref-spoofing/gc)" \
+    bash -c 'awk "/^_sandy_protected_git_files\(\)/,/^}/" "$1" | grep -qx ".git/packed-refs"' -- "$_S83"
+check ".git/config STAYS in the protected git-file list (hooks/filter-drivers)" \
+    bash -c 'awk "/^_sandy_protected_git_files\(\)/,/^}/" "$1" | grep -qx ".git/config"' -- "$_S83"
+check "launch snapshots HEAD to .head-at-launch" \
+    grep -q '\.head-at-launch' "$_S83"
+check "session-end notice compares HEAD (symbolic-ref) + surfaces the change" \
+    bash -c 'grep -q "_sandy_head_display" "$1" && grep -q "git HEAD was left on" "$1"' -- "$_S83"
+check ".head-at-launch is cleaned up unconditionally at session end" \
+    bash -c 'grep -q "rm -f .*\.head-at-launch" "$1"' -- "$_S83"
+# _sandy_head_display behavioral unit test (pure fn, no docker)
+_hd_out="$(bash -c 'source <(sed -n "/^_sandy_head_display()/,/^}/p" "$1"); _sandy_head_display refs/heads/feature/x; printf "|"; _sandy_head_display detached:abc1234' -- "$_S83")"
+check "_sandy_head_display: refs/heads/<b>→<b>; detached:<sha>→detached HEAD (<sha>)" \
+    test "$_hd_out" = "feature/x|detached HEAD (abc1234)"
 
 # ============================================================
 # Summary

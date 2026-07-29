@@ -491,12 +491,30 @@ EOF
 # Top-level .git files that can trigger host-side code execution if tampered.
 # Separate list because gated on -f instead of -e.
 _sandy_protected_git_files() {
+    # NOTE: .git/HEAD is DELIBERATELY absent (#80). It is a symref whose only
+    # power is "which branch is checked out" — not an RCE vector (the host-code
+    # paths are .git/config filter-drivers/hooks, .git/info attributes,
+    # .git/hooks, .git/modules/*, .github/workflows — all still :ro). Leaving
+    # HEAD rw restores in-container `git switch`/`checkout`/`checkout -b`; a
+    # switch left on an unexpected branch is caught by the session-end notice
+    # (detection-not-prevention, mirroring the protected-dirs hybrid model).
+    # packed-refs STAYS :ro (bulk ref-spoofing / gc), so branch deletes of a
+    # packed ref and `git gc` still fail — an accepted, narrow limitation.
     cat <<'EOF'
 .git/config
 .gitmodules
-.git/HEAD
 .git/packed-refs
 EOF
+}
+
+# #80: pretty-print a snapshotted HEAD value for the session-end notice.
+#   refs/heads/<b> -> <b>;  detached:<sha> -> "detached HEAD (<sha>)".
+_sandy_head_display() {
+    case "$1" in
+        refs/heads/*) printf '%s' "${1#refs/heads/}" ;;
+        detached:*)   printf 'detached HEAD (%s)' "${1#detached:}" ;;
+        *)            printf '%s' "$1" ;;
+    esac
 }
 # Protected directories. .github/workflows is included by default; opt out via
 # SANDY_ALLOW_WORKFLOW_EDIT=1 in .sandy/config (passive tier).
@@ -7620,6 +7638,25 @@ cleanup() {
         fi
         rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
+    # #80: .git/HEAD is rw in-container, so `git switch` works — but a switch that
+    # left HEAD on a different (or detached) branch means a host git/IDE now sees a
+    # checkout the user didn't choose. Surface it. Informational, NOT a security
+    # alarm: the RCE vectors (.git/config, hooks, info, packed-refs, .github/
+    # workflows) all stay :ro, so this is a surprise to correct, not an escape.
+    if [ -n "${SANDBOX_DIR:-}" ] && [ -f "$SANDBOX_DIR/.head-at-launch" ] \
+            && [ -n "${WORK_DIR:-}" ] && git -C "$WORK_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+        _head_launch="$(cat "$SANDBOX_DIR/.head-at-launch" 2>/dev/null)"
+        if _head_now="$(git -C "$WORK_DIR" symbolic-ref -q HEAD 2>/dev/null)"; then :; else
+            _head_now="detached:$(git -C "$WORK_DIR" rev-parse --short HEAD 2>/dev/null)"
+        fi
+        if [ -n "$_head_launch" ] && [ -n "$_head_now" ] && [ "$_head_now" != "$_head_launch" ]; then
+            printf "\n${YELLOW}[sandy]${NC} git HEAD was left on %s (launched on %s).\n" \
+                "$(_sandy_head_display "$_head_now")" "$(_sandy_head_display "$_head_launch")" >&2
+            printf "${YELLOW}[sandy]${NC} A host git/IDE will see that checkout — run \`git switch %s\` on the host to restore.\n" \
+                "$(_sandy_head_display "$_head_launch")" >&2
+        fi
+        rm -f "$SANDBOX_DIR/.head-at-launch"
+    fi
     # HF-incident Issue 4: session-end egress summary. When allowed-egress logging
     # is on, roll up proxy.log into "what hosts did the agent actually reach" — the
     # first question after a suspected prompt injection or a leaked-token scare.
@@ -7747,7 +7784,7 @@ fi
 # we exit in the gap, cleanup's existence-guarded blocks skip (no false
 # "protected paths appeared" warnings). SANDBOX_DIR is set (line 3594); the agent
 # does not start until docker run (well after 5906), so nothing is missed.
-rm -f "$SANDBOX_DIR/.session-created-stubs" "$SANDBOX_DIR/.protected-existed-at-launch" 2>/dev/null || true
+rm -f "$SANDBOX_DIR/.session-created-stubs" "$SANDBOX_DIR/.protected-existed-at-launch" "$SANDBOX_DIR/.head-at-launch" 2>/dev/null || true
 
 # Create the per-instance network(s) now that the cleanup trap is armed — in
 # proxy mode this also starts the dual-homed proxy container. Doing it post-trap
@@ -8629,6 +8666,17 @@ while IFS= read -r _pf; do
     [ -z "$_pf" ] && continue
     [ -e "$WORK_DIR/$_pf" ] && echo "$_pf" >> "$SANDBOX_DIR/.protected-existed-at-launch"
 done < <(_sandy_protected_files)
+
+# #80: .git/HEAD is rw in-container (git switch/checkout work). Snapshot the
+# launch branch so the session-end sweep can flag if HEAD was left elsewhere —
+# a host git/IDE would otherwise silently see a different checkout. Records the
+# symref (refs/heads/<branch>) or a detached marker. Skipped for non-git dirs.
+if git -C "$WORK_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    if _head_snap="$(git -C "$WORK_DIR" symbolic-ref -q HEAD 2>/dev/null)"; then :; else
+        _head_snap="detached:$(git -C "$WORK_DIR" rev-parse --short HEAD 2>/dev/null)"
+    fi
+    [ -n "$_head_snap" ] && printf '%s\n' "$_head_snap" > "$SANDBOX_DIR/.head-at-launch"
+fi
 
 # --- Submodule gitdir protection (S1.1) ---
 # git stores each submodule's real gitdir under .git/modules/<path>/ (or under

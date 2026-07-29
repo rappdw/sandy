@@ -75,19 +75,25 @@ Since Claude Code running inside sandy cannot access Docker, running tests requi
 
 See `TESTING_PLAN.md` for manual validation steps that require interactive TUI sessions.
 
-## Git branch work inside sandy (`.git/HEAD` is read-only)
+## Git branch work inside sandy (`.git/HEAD` is writable as of 1.5.0, #80)
 
-sandy bind-mounts `.git/HEAD`, `.git/config`, and `.git/packed-refs` **read-only** (the protected-git-files anti-ref-spoofing defense — see "Protected Files"). One consequence for an agent working *inside* a sandy container: **you cannot switch branches.** `git commit` and `git reset` work (they update `refs/heads/<branch>`, a writable loose ref), but `git checkout <branch>` / `git switch` / `git checkout -b` fail with `error: unable to write symref for HEAD: Device or resource busy` — they rewrite the `.git/HEAD` symref, and you can't rename over a read-only bind-mounted file. Ref ops that rewrite `.git/packed-refs` (some branch deletes, `git gc`) fail the same way. This is the protection working as intended, not a bug (tracked as a known limitation / enhancement in issue #80).
+As of 1.5.0 (#80) sandy leaves `.git/HEAD` **read-write**, so `git switch <branch>` / `git checkout <branch>` / `git checkout -b` **work inside the container** — HEAD is a symref (which branch is checked out), not a host-code-execution vector. What stays bind-mounted **read-only** (the anti-ref-spoofing / hook-injection defense — see "Protected Files"): `.git/config`, `.gitmodules`, `.git/packed-refs`, `.git/hooks`, `.git/info`, and submodule gitdirs. Consequences of *those* staying `:ro`:
 
-**The HEAD-preserving pattern** — how to do feature-branch / PR work from inside sandy without switching HEAD:
+- `git commit`, `git reset`, `git switch`, `git checkout -b` — **work** (HEAD + loose refs are writable).
+- Repo-local `git config` writes (`.git/config`) — **fail** (`:ro`).
+- Deleting a **packed** branch ref, `git pack-refs`, `git gc` (repacking refs) — **fail** with `error: ... .git/packed-refs: Device or resource busy` (`:ro`). Loose-ref deletes still work.
 
-1. Make edits and `git commit` on the current branch (usually `main`).
-2. `git branch <feature> HEAD` (or `git branch -f <feature> HEAD` to reuse an existing ref) — labels a loose ref at that commit, never touches HEAD.
+**Session-end notice.** Because HEAD is writable, sandy snapshots the launch branch and, at session end, prints a yellow notice if HEAD was left on a different (or detached) branch — a host `git`/IDE would otherwise silently see a checkout you didn't choose. It's informational (the RCE vectors above stay `:ro`), and names the `git switch <launch-branch>` to restore.
+
+**The HEAD-preserving pattern** is still the way to land a PR from inside sandy — `main` is protected by a required-status-checks ruleset, so every change goes via PR + CI, never a direct push, and this flow keeps HEAD on `main` (and works even where `git gc`/packed-ref ops don't):
+
+1. Make edits and `git commit` on the current branch.
+2. `git branch -f <feature> HEAD` — labels a loose ref at that commit.
 3. `git push origin <feature>`.
-4. `git reset --hard origin/main` to move the current branch back (preserve any uncommitted `.gitignore`/untracked working changes across the reset).
+4. `git reset --hard origin/main` to move the branch back (preserve any uncommitted `.gitignore`/untracked changes across the reset).
 5. `gh pr create --head <feature> --base main`.
 
-Note `main` is protected by a branch ruleset (required status checks), so every change lands via a PR + CI, never a direct push to `main`.
+You can now also `git switch -c <feature>` and work on it directly; just note the session-end notice if you leave HEAD off `main`.
 
 ## Introspection Surface
 
@@ -614,7 +620,7 @@ Certain sensitive files and directories in the workspace are mounted read-only i
 
 **Protected files**: `.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile`, `.gitconfig`, `.ripgreprc`, `.mcp.json`, `.envrc`, `.tool-versions`, `.mise.toml`, `.nvmrc`, `.node-version`, `.python-version`, `.ruby-version`, `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `.pypirc`, `.netrc`, `.pre-commit-config.yaml`, `.claude/settings.json`, `.claude/settings.local.json`
 
-**Protected git files** (only mounted when present on host): `.git/config`, `.gitmodules`, `.git/HEAD`, `.git/packed-refs`
+**Protected git files** (only mounted when present on host): `.git/config`, `.gitmodules`, `.git/packed-refs`. (`.git/HEAD` is deliberately **not** here as of 1.5.0 (#80) — it's left read-write so `git switch`/`checkout` work in-container; a symref is not an RCE vector, and a HEAD left on an unexpected branch is caught by the session-end notice.)
 
 If `core.hooksPath` redirects git hooks to a non-default directory *inside* the workspace (e.g. `.githooks/`), sandy resolves it (`_sandy_extra_hooks_dir`) and mounts the **configured** hooks path `:ro` — it canonicalizes (`pwd -P`) only to verify containment, but locks the path git actually consults (not the resolved target) so a *symlinked* hooksPath can't be swapped for a fresh writable dir. Closes the gap where `.git/hooks/` is protected but hooks run from elsewhere. A `core.hooksPath` pointing outside the workspace, at the workspace root, or at an already-protected dir is left alone.
 
