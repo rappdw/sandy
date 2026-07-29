@@ -2881,15 +2881,19 @@ DOCKERFILE
 generate_dockerfile_grok() {
     cat > "$SANDY_HOME/Dockerfile.grok.new" <<DOCKERFILE
 FROM ${BASE_IMAGE_NAME}
-# Install the Grok Build CLI (xAI). The installer drops a prebuilt grok binary
-# somewhere on PATH; relocate it to /usr/local/bin because /home/claude is a
-# tmpfs at runtime, so a home-dir install would vanish. The build has network.
+# Install the Grok Build CLI (xAI). The installer downloads the real binary to
+# ~/.grok/downloads/grok-<platform> and leaves only SYMLINKS (grok, agent) in
+# ~/.grok/bin — all under the home dir, which is a tmpfs at runtime, so nothing
+# there survives. Resolve the symlink to the real binary and relocate THAT to
+# /usr/local/bin (a plain find -type f -name grok misses it: the symlink isn't
+# -type f and the real file is named grok-<platform>). The build has network.
 RUN set -eu; \\
+    export HOME=/root; \\
     curl -fsSL https://x.ai/cli/install.sh | bash; \\
-    _gb="\$(command -v grok || true)"; \\
-    [ -n "\$_gb" ] || _gb="\$(find /root /usr/local /opt /home -maxdepth 5 -type f -name grok 2>/dev/null | head -1)"; \\
-    [ -n "\$_gb" ] || { echo 'sandy: grok binary not found after install' >&2; exit 1; }; \\
-    [ "\$_gb" = /usr/local/bin/grok ] || install -m 0755 "\$_gb" /usr/local/bin/grok; \\
+    _real="\$(readlink -f "\$HOME/.grok/bin/grok" 2>/dev/null || true)"; \\
+    { [ -n "\$_real" ] && [ -f "\$_real" ]; } || _real="\$(find "\$HOME/.grok/downloads" -maxdepth 1 -type f -name 'grok-*' 2>/dev/null | head -1)"; \\
+    { [ -n "\$_real" ] && [ -f "\$_real" ]; } || { echo 'sandy: grok binary not found after install' >&2; exit 1; }; \\
+    install -m 0755 "\$_real" /usr/local/bin/grok; \\
     mkdir -p /opt/grok; \\
     grok --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/grok/.version || true
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
@@ -2950,13 +2954,15 @@ RUN npm install -g @openai/codex \\
 RUN npm install -g opencode-ai \\
  && mkdir -p /opt/opencode \\
  && { opencode --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/opencode/.version || true; }
-# Grok Build (xAI) — installer drops a binary on PATH; relocate off the tmpfs home.
+# Grok Build (xAI) — installer downloads the real binary to ~/.grok/downloads and
+# leaves only symlinks in ~/.grok/bin (tmpfs home at runtime); resolve + relocate.
 RUN set -eu; \\
+    export HOME=/root; \\
     curl -fsSL https://x.ai/cli/install.sh | bash; \\
-    _gb="\$(command -v grok || true)"; \\
-    [ -n "\$_gb" ] || _gb="\$(find /root /usr/local /opt /home -maxdepth 5 -type f -name grok 2>/dev/null | head -1)"; \\
-    [ -n "\$_gb" ] || { echo 'sandy: grok binary not found after install' >&2; exit 1; }; \\
-    [ "\$_gb" = /usr/local/bin/grok ] || install -m 0755 "\$_gb" /usr/local/bin/grok; \\
+    _real="\$(readlink -f "\$HOME/.grok/bin/grok" 2>/dev/null || true)"; \\
+    { [ -n "\$_real" ] && [ -f "\$_real" ]; } || _real="\$(find "\$HOME/.grok/downloads" -maxdepth 1 -type f -name 'grok-*' 2>/dev/null | head -1)"; \\
+    { [ -n "\$_real" ] && [ -f "\$_real" ]; } || { echo 'sandy: grok binary not found after install' >&2; exit 1; }; \\
+    install -m 0755 "\$_real" /usr/local/bin/grok; \\
     mkdir -p /opt/grok; \\
     grok --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/grok/.version || true
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
