@@ -5076,6 +5076,11 @@ case "$1" in
         printf 'daemon123|sandy-bar-def456|sandy-full|2026-07-14T10:00:00Z|true|bar-def456|2026-07-14T12:00:00Z\n'
         printf 'broken789|sandy-baz-fee789|sandy-full|2026-07-14T11:00:00Z|true|baz-fee789|\n'
         printf 'bare456|sandy-foo-abc123|sandy-claude-code|2026-07-14T09:00:00Z|||\n'
+        # Regression: a proxy sidecar for a workspace literally named `sandy`
+        # (sandbox sandy-<hash> → container sandy-proxy-sandy-<hash>). No labels,
+        # so it takes the name-strip path; the fix must strip ONLY `sandy-proxy-`,
+        # never also the sandbox's own `sandy-` (which used to yield the bare hash).
+        printf 'proxy999|sandy-proxy-sandy-92aa9f98|sandy-proxy|2026-07-14T13:00:00Z|||\n'
         exit 0
         ;;
     exec)
@@ -5101,10 +5106,11 @@ import json, sys
 d = json.loads(sys.argv[1])
 rc = d['running_containers']
 assert rc is not None, 'running_containers is null'
-assert len(rc) == 3, rc
+assert len(rc) == 4, rc
 daemon = next(c for c in rc if c.get('sandbox') == 'bar-def456')
 broken = next(c for c in rc if c.get('sandbox') == 'baz-fee789')
 bare = next(c for c in rc if c.get('sandbox') == 'foo-abc123')
+proxy = next(c for c in rc if c.get('name') == 'sandy-proxy-sandy-92aa9f98')
 for c in rc:
     for f in ('id', 'name', 'image', 'started_at'):
         assert f in c, f + ' missing: ' + repr(c)
@@ -5114,6 +5120,11 @@ assert isinstance(daemon['attached_clients'], int), daemon
 assert broken['daemon'] is True, broken
 assert broken['attached_clients'] is None, broken
 assert bare['attached_clients'] is None, bare
+# Regression: the proxy of a `sandy`-named workspace must join to sandy-92aa9f98,
+# NOT the double-stripped bare hash '92aa9f98'. A proxy is not a daemon session.
+assert proxy['sandbox'] == 'sandy-92aa9f98', proxy
+assert proxy['daemon'] is False, proxy
+assert proxy['attached_clients'] is None, proxy
 # updated_at (#44): the label-bearing daemon carries the ISO timestamp; the
 # others are null (mutation: drop the sandy.updated_at label from the ps format
 # or the emit -> daemon['updated_at'] becomes null and this flips to FAIL).

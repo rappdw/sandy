@@ -992,8 +992,19 @@ _sandy_emit_container_daemon_fields() {
     if [ -n "$_csession" ]; then
         _sandbox="$_csession"
     else
-        _sandbox="${_cname#sandy-proxy-}"
-        _sandbox="${_sandbox#sandy-}"
+        # `sandy-proxy-<sandbox>` and `sandy-<sandbox>` are MUTUALLY EXCLUSIVE
+        # forms — strip exactly ONE, not both in sequence. Stripping both let a
+        # proxy whose sandbox name itself begins with `sandy-` double-strip to the
+        # bare hash: a workspace literally named `sandy` → sandbox `sandy-<hash>`
+        # → proxy container `sandy-proxy-sandy-<hash>`, which the old
+        # `#sandy-proxy-` then `#sandy-` sequence collapsed to `<hash>` (dropping
+        # the sandbox's own `sandy-`). Test the proxy form FIRST — a proxy name
+        # also matches `sandy-*`. Mirrors the --gc lister's single-strip (#36).
+        case "$_cname" in
+            sandy-proxy-*) _sandbox="${_cname#sandy-proxy-}" ;;
+            sandy-*)       _sandbox="${_cname#sandy-}" ;;
+            *)             _sandbox="$_cname" ;;
+        esac
     fi
 
     if [ "$_cdaemon" = "true" ]; then
