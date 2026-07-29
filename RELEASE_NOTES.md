@@ -1,3 +1,45 @@
+## sandy v1.5.0
+
+Three additive features — **a new agent, clearer multi-agent panes, and in-container branch switching**. `schema_version` stays `1` and the 1.x sandbox forward-compat promise holds (`SANDY_SANDBOX_MIN_COMPAT` unchanged), so any 1.x sandbox keeps working.
+
+- **Grok Build agent** — `SANDY_AGENT=grok` runs xAI's `grok` CLI as a fifth first-class agent, solo or in any multi-agent combo. (#99)
+- **Multi-agent pane labels** — each pane's top border now shows which agent it's running, so a 2×2 grid is legible at a glance. (#64)
+- **In-container `git switch`** — `.git/HEAD` is now writable, so `git switch`/`checkout`/`checkout -b` work inside a sandy session; a session-end notice flags a HEAD left on an unexpected branch. (#80)
+
+Per-feature detail below.
+
+### Grok Build (xAI) as a selectable agent (#99)
+
+`SANDY_AGENT=grok` adds xAI's Grok Build CLI alongside claude / gemini / codex / opencode — solo (`sandy-grok` image) or in any comma-separated combo (`claude,grok`, up to the 4-pane grid; a 5th agent hard-errors). Grok is installed from the prebuilt binary at `x.ai/cli/install.sh` (not npm) and relocated onto `PATH`. Auth is headless-native via `XAI_API_KEY` (privileged tier); model via `GROK_MODEL` (default `grok-4.5`); probe override via `SANDY_GROK_AUTH`. Headless (`-p`) maps to grok's print flag plus `--no-auto-update`; its config/session persist in the `grok/` sandbox subdir mounted at `~/.grok`. `all` stays the four-agent alias — grok is opt-in.
+
+Integration coverage lands with it: `run-integration-tests.sh §12b/§12c` build the `sandy-grok` image and exercise a headless response, with §12c a credentials-free check that the prebuilt-binary install path actually resolves a working binary.
+
+### Multi-agent pane border labels (#64)
+
+In a multi-agent combo, each pane's top border now renders **its agent name** (claude / gemini / codex / opencode / grok) instead of the shared window name — so the 2×2 grid tells you at a glance which agent is where. Mechanism: the `@sandy_pane_agent` tmux pane option (previously set only under the test-harness hook) is now set on every pane unconditionally by the launcher, and `pane-border-format` renders it with a `window_name` fallback, so single-agent sessions are unchanged. This also collapsed the per-pane launch branches into one path (a net code reduction) and made the pane-topology acceptance harness slightly more robust.
+
+### In-container `git switch` — `.git/HEAD` writable + session-end notice (#80)
+
+Working inside a sandy container, `git switch` / `checkout` / `checkout -b` used to fail (`unable to write symref for HEAD: Device or resource busy`) because `.git/HEAD` was bind-mounted read-only. As of 1.5.0 `.git/HEAD` is left **read-write**, so branch switching works in-session.
+
+This is a deliberate, narrow relaxation: `.git/HEAD` is a symref — *which branch is checked out* — **not** a host-code-execution vector. Every real RCE path stays read-only: `.git/config` (filter-drivers, `core.hooksPath`, remotes), `.git/hooks`, `.git/info` (`attributes` filter-drivers), `.git/modules/*`, `.github/workflows`, and **`.git/packed-refs`** (so packed-ref deletes and `git gc` repacks still fail — an accepted, narrow limitation). Following sandy's detection-not-prevention model for protected dirs, sandy snapshots the launch branch and prints a yellow session-end notice if HEAD was left on a different or detached branch — a host `git`/IDE would otherwise silently see a checkout you didn't choose — naming the `git switch <branch>` to restore. `--print-schema`'s `protected_paths.git_files` no longer lists `.git/HEAD` (`schema_version` stays `1`).
+
+### Notes
+
+- **Additive minor** per the CLAUDE.md semver rule: one new agent (`grok`) with new keys (`XAI_API_KEY` privileged; `GROK_MODEL`, `SANDY_GROK_AUTH` passive), plus a relaxed-but-detected protection. No config-key retiering or renames; introspection `schema_version` stays `1`.
+- **Sandbox forward-compat unchanged** — `SANDY_SANDBOX_MIN_COMPAT` stays `0.7.10`; any 1.x sandbox keeps working.
+- Includes the grok install-path fix (#109) — resolve the installer's symlink to the real binary — so `sandy --agent grok --rebuild` produces a working `grok` on `PATH`.
+
+## sandy v1.4.0
+
+HF-incident hardening + sandbox-escape follow-ups — 11 findings from the "Week of Sandbox Escapes" review and the Hugging Face CISO incident post-mortem (PRs #84–#94, plus #83 in 1.3.x). Additive: new passive-safe keys and flags; `schema_version` stays `1`; `SANDY_SANDBOX_MIN_COMPAT` unchanged.
+
+- **`SANDY_EGRESS_LOG`** — record which hosts the agent's egress actually reached (deduped, with an end-of-session summary). (Issue 4)
+- **`SANDY_TOOL_AUDIT`** — a per-tool-call JSONL audit trail via a `PreToolUse` hook (Claude-only). (Issue 6)
+- **`sandy --reset-sandbox`** — rebuild one project's sandbox from known-good, preserving `WORKSPACE.json` lineage, refusing under a live session. (Issue 5)
+- **`sandy --stop-all`** — fleet emergency stop: stop every daemon session via the hardened per-session teardown. (Issue 8)
+- Proxy hardening + connection bound (Issue 2), a monthly-freshness proxy-image rebuild (Issue 3), the `.sandy/Dockerfile` build-approval gate (#83), and the sandbox-escape follow-ups #84–#87.
+
 ## sandy v1.3.0
 
 Six additive features — **observability, reclaim, and readiness**. `schema_version` stays `1` and the 1.x sandbox forward-compat promise holds, so any 1.x sandbox keeps working.
