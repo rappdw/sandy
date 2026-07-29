@@ -1620,7 +1620,7 @@ set -g pane-border-lines single
 set -g pane-border-style "fg=colour240"
 set -g pane-active-border-style "fg=colour51"
 set -g pane-border-status top
-set -g pane-border-format " #[fg=colour51]#{window_name}#[default] "
+set -g pane-border-format " #[fg=colour51]#{?@sandy_pane_agent,#{@sandy_pane_agent},#{window_name}}#[default] "
 
 set -g status-position bottom
 set -g status-style "bg=colour235,fg=colour248"
