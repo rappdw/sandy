@@ -132,7 +132,7 @@ Sandy loads configuration from four sources in order: `$HOME/.sandy/config`, `$H
 
 - **Privileged-only keys** (require per-workspace approval when set from a passive source):
   <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-  `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+  `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
   <!-- END AUTOGEN:privileged-key-list -->
 
   These would let a malicious `.sandy/config` committed to a repo disable isolation or exfiltrate credentials, so sandy collects them, prints the exact `KEY=VALUE` set, and asks for explicit approval before honoring them. Approvals are persisted to `$SANDY_HOME/approvals/passive-<workspace-hash>.list` (first line is a sha256 of the sorted `KEY=VALUE` set). Subsequent launches with the same set are silent; any edit to `.sandy/config` that changes a privileged key re-prompts. Revoke with `rm $SANDY_HOME/approvals/passive-<hash>.list`. Headless mode (`-p`/`--print`/`--prompt`) and non-TTY stdin fail closed — the keys are dropped with a pointer to "launch sandy interactively once from this directory to approve."
@@ -141,7 +141,7 @@ Sandy loads configuration from four sources in order: `$HOME/.sandy/config`, `$H
 
 - **Passive-safe keys** (allowed from any source):
   <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `SANDY_TOOL_AUDIT`
+  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_TOOL_AUDIT`
   <!-- END AUTOGEN:passive-key-list -->
 
 - **Value-aware exceptions** (passive for values that *strengthen* isolation, approval-gated for values that *weaken* it): a few passive keys are not uniformly safe from a committed `.sandy/config` because one of their values lowers the sandbox's protection. `_sandy_passive_value_privileged()` routes those weakening values through the same per-workspace approval prompt as a privileged key, while leaving the strengthening/neutral values frictionless — *"a repo may make the sandbox tighter, never looser."* The gated values are: `SANDY_EGRESS_NO_ISOLATION=1` (proxy off), `SANDY_EGRESS_STRICT=0` (downgrade a host-set strict), `SANDY_EGRESS_PROXY=0` (deprecated alias for proxy-off), and `SANDY_ALLOW_WORKFLOW_EDIT=1` (drops `.github/workflows/` protection). This closes the hole where a committed workspace config could silently disable network isolation (threat-model adversary #2) — on macOS with the proxy off that is *total* loss of network isolation. Guarded by `run-tests.sh §65`.
@@ -150,20 +150,22 @@ Additionally, `SANDY_ALLOW_LAN_HOSTS` is validated at use-site to reject world-o
 
 ## Agent Selection
 
-Sandy supports Claude Code (default), Gemini CLI, OpenAI Codex CLI, OpenCode (sst/opencode), or **any combination side-by-side in multi-pane tmux**, selectable per-project via `SANDY_AGENT` in `.sandy/config`:
+Sandy supports Claude Code (default), Gemini CLI, OpenAI Codex CLI, OpenCode (sst/opencode), Grok Build (xAI), or **any combination side-by-side in multi-pane tmux**, selectable per-project via `SANDY_AGENT` in `.sandy/config`:
 
 ```sh
-SANDY_AGENT=gemini                      # single agent: claude (default), gemini, codex, opencode
-SANDY_AGENT=claude,codex                # any comma-separated combo (2–4 agents)
-SANDY_AGENT=claude,gemini,codex,opencode # all four in a 4-pane layout
-SANDY_AGENT=all                         # alias for claude,gemini,codex,opencode
+SANDY_AGENT=grok                        # single agent: claude (default), gemini, codex, opencode, grok
+SANDY_AGENT=claude,codex                # any comma-separated combo (2–4 agents; hard cap of 4 — the layout is a 2x2 grid)
+SANDY_AGENT=claude,gemini,codex,opencode # four in a 2x2 layout
+SANDY_AGENT=all                         # alias for claude,gemini,codex,opencode (unchanged; grok is opt-in, not in `all`, so the default stays a 4-pane grid)
 ```
 
-Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, `sandy-opencode`); multi-agent combos use `sandy-full` (which includes all four agents). All share the common `sandy-base`. Gemini CLI, Codex CLI, and OpenCode are installed via `npm install -g @google/gemini-cli`, `npm install -g @openai/codex`, and `npm install -g opencode-ai` respectively. Gemini launches with `GEMINI_SANDBOX=false`; Codex launches with `--sandbox danger-full-access` plus `sandbox_mode = "danger-full-access"` in its `config.toml` (belt-and-suspenders — codex's Landlock sandbox does not nest cleanly in Docker, and sandy already provides whole-session isolation). The sandbox directory has sibling `claude/`, `gemini/`, `codex/`, and `opencode/` subdirs. The first three mount at `~/.claude`, `~/.gemini`, and `~/.codex`; OpenCode straddles two XDG paths and uses `opencode/{config,share}` mounting at `~/.config/opencode` and `~/.local/share/opencode` respectively. v1 layouts with `settings.json` at the sandbox top level are auto-migrated on launch.
+Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, `sandy-opencode`, `sandy-grok`); multi-agent combos use `sandy-full` (which includes all five agents). With five selectable agents but a 2x2-grid layout, sandy hard-errors on a 5+ combo. Grok Build is installed via `curl -fsSL https://x.ai/cli/install.sh | bash` (a prebuilt binary, not npm — sandy relocates it to `/usr/local/bin/grok` since `/home/claude` is a tmpfs); its config/session lives in the `grok/` sandbox subdir mounted at `~/.grok`. All share the common `sandy-base`. Gemini CLI, Codex CLI, and OpenCode are installed via `npm install -g @google/gemini-cli`, `npm install -g @openai/codex`, and `npm install -g opencode-ai` respectively. Gemini launches with `GEMINI_SANDBOX=false`; Codex launches with `--sandbox danger-full-access` plus `sandbox_mode = "danger-full-access"` in its `config.toml` (belt-and-suspenders — codex's Landlock sandbox does not nest cleanly in Docker, and sandy already provides whole-session isolation). The sandbox directory has sibling `claude/`, `gemini/`, `codex/`, and `opencode/` subdirs. The first three mount at `~/.claude`, `~/.gemini`, and `~/.codex`; OpenCode straddles two XDG paths and uses `opencode/{config,share}` mounting at `~/.config/opencode` and `~/.local/share/opencode` respectively. v1 layouts with `settings.json` at the sandbox top level are auto-migrated on launch.
 
 **Gemini credentials** are probed in this order (override via `SANDY_GEMINI_AUTH=auto|api_key|oauth|adc`): `GEMINI_API_KEY` env var, host `~/.gemini/tokens.json` (copied ephemerally), host `~/.config/gcloud/application_default_credentials.json` (Google ADC / Vertex AI).
 
 **Codex credentials** are probed in this order (override via `SANDY_CODEX_AUTH=auto|api_key|oauth`): `OPENAI_API_KEY` env var (materialized as an ephemeral `auth.json` mounted **read-only** — codex 0.139+ no longer reads the env var for first-party auth, so sandy writes what `codex login --with-api-key` would write), host `~/.codex/auth.json` (copied ephemerally and mounted **read-only** — prevents token leakage back to host and prevents stale-token races). Because `auth.json` is mounted read-only, in-session OAuth refresh will fail — users must re-login inside the container if the token expires. On first launch, sandy seeds `~/.codex/config.toml` with `model = "gpt-5.5"`, `sandbox_mode = "danger-full-access"`, and a full `[notice]` block to suppress all first-run prompts; a `[projects."$SANDY_WORKSPACE"] trust_level = "trusted"` entry is appended at session start by `user-setup.sh` (it needs the container-side workspace path).
+
+**Grok credentials** — Grok Build authenticates fully headless from **`XAI_API_KEY`** (docs.x.ai; resolution order `model.api_key > env_key > active session token > XAI_API_KEY`), so — unlike codex — sandy has **no auth file to materialize**: it just forwards the env var (privileged tier, like the other agent keys). The alternative is an interactive `grok login` OAuth session, which persists in the rw `~/.grok` mount across launches (host `~/.grok` OAuth-session seeding is a possible follow-up, deliberately kept out of the persisted mount for now). Model via `GROK_MODEL` (passed as `-m`; default `grok-4.5`); probe override via `SANDY_GROK_AUTH=auto|api_key|oauth`. Headless (`-p`) adds `--no-auto-update` (grok can't self-update against the read-only rootfs anyway; docs.x.ai headless-scripting). Auto-update *detection* isn't wired (grok installs via `install.sh` with no version API) — `sandy --rebuild` re-fetches latest; a monthly-freshness rebuild trigger (like the proxy image) is a candidate follow-up.
 
 **OpenCode credentials** are provider-agnostic — opencode reads `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, etc. natively from the env, and sandy forwards whichever the user has set. The OAuth path mounts host `~/.local/share/opencode/auth.json` read-only when present (override the probe with `SANDY_OPENCODE_AUTH=auto|api_key|oauth`). OpenCode's flexibility is what makes the **local-LLM passthrough** below useful — point the config at a local Ollama/vLLM endpoint and pair with `SANDY_LOCAL_LLM_HOST`.
 
@@ -177,18 +179,18 @@ Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemi
 
 **Feature support by agent**:
 
-| Feature | `claude` | `gemini` | `codex` | `opencode` | multi-agent |
-|---|---|---|---|---|---|
-| Skill packs | yes | — | — | — | yes (claude pane only) |
-| Synthkit commands | yes (slash commands, Markdown) | yes (slash commands, TOML in `~/.gemini/commands/`) | yes (skills context, SKILL.md in `~/.codex/skills/`) | — (v0) | per agent |
-| Channels (Telegram) | in-container plugin | host-side tmux relay | host-side tmux relay | host-side tmux relay (untested in v0) | host-side tmux relay |
-| Channels (Discord) | yes | — | — | — | — |
-| `--remote` | yes | — | — | — | — |
-| Gemini extensions (`SANDY_GEMINI_EXTENSIONS`) | — | yes | — | — | yes (when gemini is in the combo) |
-| Local-LLM passthrough (`SANDY_LOCAL_LLM_HOST`) | — | — | — | yes | yes (when opencode is in the combo) |
-| Provider choice via own config | — | — | — | yes | — |
+| Feature | `claude` | `gemini` | `codex` | `opencode` | `grok` | multi-agent |
+|---|---|---|---|---|---|---|
+| Skill packs | yes | — | — | — | — | yes (claude pane only) |
+| Synthkit commands | yes (slash commands, Markdown) | yes (slash commands, TOML in `~/.gemini/commands/`) | yes (skills context, SKILL.md in `~/.codex/skills/`) | — (v0) | — (v0; tool binaries on PATH) | per agent |
+| Channels (Telegram) | in-container plugin | host-side tmux relay | host-side tmux relay | host-side tmux relay (untested in v0) | host-side tmux relay (untested in v0) | host-side tmux relay |
+| Channels (Discord) | yes | — | — | — | — | — |
+| `--remote` | yes | — | — | — | — | — |
+| Gemini extensions (`SANDY_GEMINI_EXTENSIONS`) | — | yes | — | — | — | yes (when gemini is in the combo) |
+| Local-LLM passthrough (`SANDY_LOCAL_LLM_HOST`) | — | — | — | yes | — | yes (when opencode is in the combo) |
+| Provider choice via own config | — | — | — | yes | — | — |
 
-Codex headless mode (`-p` / `--print` / `--prompt`) translates to `codex exec --skip-git-repo-check` — the prompt is passed as a positional arg, not a flag, and the trust/git-repo gate is skipped (codex 0.139+ refuses `exec` outside a trusted dir or git repo; sandy provides the outer isolation). OpenCode headless mirrors that pattern: `opencode run <prompt>`. Both `exec` and `run` only support `0`/`1` exit codes (no nuanced codes like Claude's `--print`). `--continue` / `-c` is silently dropped for both (neither has a headless continuation flag). Multi-agent combos use comma-separated syntax (e.g., `claude,codex`); `all` is an alias for `claude,gemini,codex,opencode`. The old `both` alias was removed in `v0.12` — sandy now errors out with a pointer to the comma-separated syntax.
+Codex headless mode (`-p` / `--print` / `--prompt`) translates to `codex exec --skip-git-repo-check` — the prompt is passed as a positional arg, not a flag, and the trust/git-repo gate is skipped (codex 0.139+ refuses `exec` outside a trusted dir or git repo; sandy provides the outer isolation). OpenCode headless mirrors that pattern: `opencode run <prompt>`. Both `exec` and `run` only support `0`/`1` exit codes (no nuanced codes like Claude's `--print`). `--continue` / `-c` is silently dropped for both (neither has a headless continuation flag). **Grok** headless is Claude-shaped instead: `-p`/`--print`/`--prompt` map to grok's `-p` print flag (the prompt stays a positional arg, not a subcommand like `exec`/`run`), plus `--no-auto-update`; `--continue`/`-c` dropped. Multi-agent combos use comma-separated syntax (e.g., `claude,codex`); `all` is an alias for `claude,gemini,codex,opencode`. With grok there are now **five** selectable agents but the layout is a 2x2 grid, so sandy hard-errors on a 5+ combo (`all` deliberately stays 4). The old `both` alias was removed in `v0.12` — sandy now errors out with a pointer to the comma-separated syntax.
 
 The Telegram host-side relay (`$SANDY_HOME/channel-relay.sh`) is an agent-agnostic long-polling bridge that injects messages into the container's tmux session via `docker exec ... tmux send-keys`. In multi-agent mode, `SANDY_CHANNEL_TARGET_PANE=0|1|2` selects which pane receives messages (default `0` = first pane in `SANDY_AGENT`).
 

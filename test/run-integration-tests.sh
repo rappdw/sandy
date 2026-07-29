@@ -49,6 +49,7 @@
 #   GEMINI_API_KEY          │ §5-6: gemini build/headless/container
 #   + ~/.gemini/tokens.json │ + §10: OAuth detection
 #   ANTHROPIC_API_KEY       │ §7: claude headless regression
+#   XAI_API_KEY             │ §12b: grok build/headless (§12c builds w/o creds)
 #   Any two of the above    │ + §8: cross-agent switching regression
 #
 # ── Notes ──────────────────────────────────────────────────────────────
@@ -404,6 +405,7 @@ HAS_GEMINI_API_KEY=false
 HAS_GEMINI_OAUTH=false
 HAS_CLAUDE=false
 HAS_OPENCODE_OAUTH=false
+HAS_XAI_API_KEY=false
 
 # Source credentials from ~/.sandy/.secrets if it exists (same file sandy reads).
 # This is a safe KEY=VALUE file (no shell code) — sandy validates it against an
@@ -419,11 +421,13 @@ if [ -f "$HOME/.sandy/.secrets" ]; then
             GEMINI_API_KEY)            [ -z "${GEMINI_API_KEY:-}" ]            && export GEMINI_API_KEY="$_val" ;;
             ANTHROPIC_API_KEY)         [ -z "${ANTHROPIC_API_KEY:-}" ]         && export ANTHROPIC_API_KEY="$_val" ;;
             CLAUDE_CODE_OAUTH_TOKEN)   [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]   && export CLAUDE_CODE_OAUTH_TOKEN="$_val" ;;
+            XAI_API_KEY)               [ -z "${XAI_API_KEY:-}" ]               && export XAI_API_KEY="$_val" ;;
         esac
     done < "$HOME/.sandy/.secrets"
 fi
 
 [ -n "${OPENAI_API_KEY:-}" ] && HAS_OPENAI_API_KEY=true
+[ -n "${XAI_API_KEY:-}" ] && HAS_XAI_API_KEY=true
 [ -f "$HOME/.codex/auth.json" ] && HAS_CODEX_OAUTH=true
 [ -f "$HOME/.local/share/opencode/auth.json" ] && HAS_OPENCODE_OAUTH=true
 [ -n "${GEMINI_API_KEY:-}" ] && HAS_GEMINI_API_KEY=true
@@ -447,11 +451,15 @@ info "Sandy Integration Tests"
 HAS_CODEX=false
 HAS_GEMINI=false
 HAS_OPENCODE=false
+HAS_GROK=false
 [ "$HAS_OPENAI_API_KEY" = true ] || [ "$HAS_CODEX_OAUTH" = true ] && HAS_CODEX=true
 [ "$HAS_GEMINI_API_KEY" = true ] || [ "$HAS_GEMINI_OAUTH" = true ] || [ "$HAS_GEMINI_ADC" = true ] && HAS_GEMINI=true
 # OpenCode auth: either the OAuth file, or any provider API key the user has set
 # (opencode reads ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY natively).
 [ "$HAS_OPENCODE_OAUTH" = true ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] || [ -n "${GEMINI_API_KEY:-}" ] && HAS_OPENCODE=true
+# Grok auth: XAI_API_KEY (grok's headless-native path; host ~/.grok OAuth seeding
+# is deferred, so the env/secrets key is the only gated auth for these tests).
+[ "$HAS_XAI_API_KEY" = true ] && HAS_GROK=true
 
 _label() { if [ "$1" = true ]; then printf "\033[0;32m✓\033[0m"; else printf "\033[0;31m✗\033[0m"; fi; }
 _auth_detail() {
@@ -471,10 +479,11 @@ echo "  Codex:    $(_label $HAS_CODEX)  $(_auth_detail "api-key=$HAS_OPENAI_API_
 echo "  Gemini:   $(_label $HAS_GEMINI)  $(_auth_detail "api-key=$HAS_GEMINI_API_KEY" "oauth=$HAS_GEMINI_OAUTH" "adc=$HAS_GEMINI_ADC")"
 echo "  Claude:   $(_label $HAS_CLAUDE)  $(_auth_detail "api-key=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" "oauth-token=$([ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo true || echo false)" "credentials-file=$([ -f "$HOME/.claude/.credentials.json" ] && echo true || echo false)")"
 echo "  OpenCode: $(_label $HAS_OPENCODE)  $(_auth_detail "anthropic-key=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" "openai-key=$HAS_OPENAI_API_KEY" "gemini-key=$HAS_GEMINI_API_KEY" "oauth=$HAS_OPENCODE_OAUTH")"
+echo "  Grok:     $(_label $HAS_GROK)  $(_auth_detail "api-key=$HAS_XAI_API_KEY")"
 echo ""
 
 _all_true=true
-for _v in $HAS_CODEX $HAS_GEMINI $HAS_CLAUDE $HAS_OPENCODE; do
+for _v in $HAS_CODEX $HAS_GEMINI $HAS_CLAUDE $HAS_OPENCODE $HAS_GROK; do
     [ "$_v" = true ] || _all_true=false
 done
 
@@ -513,6 +522,11 @@ if [ "$_all_true" = false ]; then
             echo "    export OPENAI_API_KEY=\"sk-...\""
             echo "    export GEMINI_API_KEY=\"AI...\""
             echo "    opencode auth login                     # OAuth → ~/.local/share/opencode/auth.json"
+            echo ""
+        fi
+        if [ "$HAS_GROK" = false ]; then
+            echo "  GROK (xAI Grok Build):"
+            echo "    export XAI_API_KEY=\"xai-...\"           # https://console.x.ai"
             echo ""
         fi
         echo "  To persist credentials, add them to ~/.sandy/.secrets (one per line):"
@@ -1192,6 +1206,90 @@ if ensure_image_built opencode sandy-opencode; then
     fi
 else
     fail "opencode in-container checks (failed to build sandy-opencode image)"
+fi
+
+# ============================================================
+info "12b. Grok — image build and headless response"
+# ============================================================
+
+if [ "$HAS_GROK" = true ]; then
+    setup_project grok "integ-grok"
+
+    # grok's headless-native auth is XAI_API_KEY, forwarded by the launcher.
+    _out="$(run_sandy_headless "XAI_API_KEY=$XAI_API_KEY" -- -p "reply with exactly one word: pineapple")"
+
+    if docker image inspect sandy-grok &>/dev/null; then
+        pass "sandy-grok image exists after build"
+    else
+        fail "sandy-grok image exists after build"
+    fi
+
+    if [ -n "$_out" ] && ! echo "$_out" | grep -qi "error.*api.key\|unauthorized\|no.*credential\|XAI_API_KEY.*not"; then
+        pass "grok headless responds without auth errors"
+    else
+        fail "grok headless responds without auth errors"
+        echo "    (output: $(echo "$_out" | head -6 | tr '\n' ' '))" >&2
+    fi
+
+    resolve_sandbox
+
+    if [ -n "$SANDBOX_DIR" ] && [ -d "$SANDBOX_DIR" ]; then
+        # Sandbox layout: a grok/ subdir mounting at ~/.grok
+        if [ -d "$SANDBOX_DIR/grok" ]; then
+            pass "grok/ dir exists in sandbox"
+        else
+            fail "grok/ dir exists in sandbox"
+        fi
+        # No cross-agent contamination
+        if [ ! -d "$SANDBOX_DIR/claude" ] && [ ! -d "$SANDBOX_DIR/codex" ] && [ ! -d "$SANDBOX_DIR/gemini" ] && [ ! -d "$SANDBOX_DIR/opencode" ]; then
+            pass "grok sandbox has no claude/, codex/, gemini/, or opencode/ subdirs"
+        else
+            fail "grok sandbox has no claude/, codex/, gemini/, or opencode/ subdirs"
+        fi
+    else
+        fail "sandbox directory exists for grok project"
+    fi
+else
+    skip "grok image build and headless (no XAI_API_KEY)"
+fi
+
+# ============================================================
+info "12c. Grok — in-container checks (sandy-grok image)"
+# ============================================================
+# Credentials-free: this is the authoritative check that grok's prebuilt-binary
+# install path (curl https://x.ai/cli/install.sh | bash, NOT npm) actually
+# resolves and lands a grok binary — the one link the static suite can't verify.
+
+if ensure_image_built grok sandy-grok; then
+    _ver="$(docker run --rm --entrypoint bash sandy-grok -c 'grok --version 2>/dev/null || echo MISSING')"
+    if [ "$_ver" != "MISSING" ] && [ -n "$_ver" ]; then
+        pass "grok binary on PATH in sandy-grok image (v$_ver)"
+    else
+        fail "grok binary on PATH in sandy-grok image"
+    fi
+
+    _vfile="$(docker run --rm --entrypoint cat sandy-grok /opt/grok/.version 2>/dev/null || true)"
+    if [ -n "$_vfile" ]; then
+        pass "/opt/grok/.version populated ($_vfile)"
+    else
+        fail "/opt/grok/.version populated"
+    fi
+
+    _node="$(docker run --rm --entrypoint bash sandy-grok -c 'node --version 2>/dev/null || echo MISSING')"
+    if [ "$_node" != "MISSING" ]; then
+        pass "node available in sandy-grok image ($_node)"
+    else
+        fail "node available in sandy-grok image"
+    fi
+
+    _sk="$(docker run --rm --entrypoint bash sandy-grok -c 'command -v md2pdf && echo OK || echo MISSING')"
+    if echo "$_sk" | grep -q OK; then
+        pass "synthkit (md2pdf) available in sandy-grok image"
+    else
+        fail "synthkit (md2pdf) available in sandy-grok image"
+    fi
+else
+    fail "grok in-container checks (failed to build sandy-grok image)"
 fi
 
 # ============================================================

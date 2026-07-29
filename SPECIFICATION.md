@@ -14,6 +14,7 @@ Sandy is a self-contained command that runs an AI coding agent (Claude Code, Gem
 | `gemini` | `sandy-gemini-cli` | Gemini CLI — Google OAuth / ADC / Vertex AI / API key auth |
 | `codex` | `sandy-codex` | OpenAI Codex CLI — `OPENAI_API_KEY` (materialized as ephemeral `auth.json`) or ChatGPT OAuth; both as read-only mounts |
 | `opencode` | `sandy-opencode` | OpenCode (sst/opencode) — provider-agnostic; reads `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` natively, plus optional OAuth from `~/.local/share/opencode/auth.json`. Local-LLM passthrough via `SANDY_LOCAL_LLM_HOST`. |
+| `grok` | `sandy-grok` | Grok Build (xAI) — installed from `x.ai/cli/install.sh` (prebuilt binary, relocated to `/usr/local/bin`); authenticates headless from `XAI_API_KEY` (or an in-container `grok login` OAuth session in `~/.grok`). Model via `GROK_MODEL` (`-m`, default `grok-4.5`). Not in the `all` alias. |
 | `<a>,<b>[,<c>[,<d>]]` (e.g. `claude,gemini`, `claude,codex`, `claude,gemini,codex,opencode`) | `sandy-full` | Multi-agent combo — one tmux pane per agent, in the order listed |
 | `all` | `sandy-full` | Alias for `claude,gemini,codex,opencode` — all four agents in a 4-pane tmux session |
 
@@ -143,12 +144,12 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Privileged-only keys** (allowed only from `$SANDY_HOME/config` and `$SANDY_HOME/.secrets`):
 <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
+`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
 <!-- END AUTOGEN:privileged-key-list -->
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `SANDY_TOOL_AUDIT`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_TOOL_AUDIT`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -174,6 +175,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `CLAUDE_CODE_OAUTH_TOKEN` | privileged | unset | 0.7.0 | stable | Claude Code OAuth token (alternative to ANTHROPIC_API_KEY). |
 | `GEMINI_API_KEY` | privileged | unset | 0.9.0 | stable | Google API key for Gemini CLI. |
 | `OPENAI_API_KEY` | privileged | unset | 0.10.0 | stable | OpenAI API key for Codex CLI. |
+| `XAI_API_KEY` | privileged | unset | 1.5.0 | stable | xAI API key for Grok Build (docs.x.ai). Enables fully-headless auth (resolution: model.api_key > env_key > session token > XAI_API_KEY); alternative is an interactive 'grok login' OAuth session inside the container. |
 | `GOOGLE_API_KEY` | privileged | unset | 0.9.0 | stable | Google API key for Vertex AI / ADC. |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | privileged | unset | 0.1.0 | experimental | Enable Claude Code experimental agent-teams feature. |
 | `SANDY_SCREENSHOT_DIR` | privileged | unset | 0.12.0 | stable | Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents. |
@@ -207,6 +209,8 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_CODEX_AUTH` | passive | `auto` | 0.10.0 | stable | Codex credential probe strategy. |
 | `OPENCODE_MODEL` | passive | unset | 0.12.0 | stable | OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4'). |
 | `SANDY_OPENCODE_AUTH` | passive | `auto` | 0.12.0 | stable | OpenCode credential probe strategy. |
+| `GROK_MODEL` | passive | unset | 1.5.0 | stable | Grok Build model override (passed as -m; default grok-4.5). |
+| `SANDY_GROK_AUTH` | passive | `auto` | 1.5.0 | stable | Grok Build credential probe strategy. |
 | `SANDY_TOOL_AUDIT` | passive | `0` | 1.4.0 | stable | Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off). |
 | `SANDY_AUTO_APPROVE_PRIVILEGED` | env-only | unset | 0.11.2 | internal | Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only. |
 | `SANDY_DEBUG_CLEANUP` | env-only | unset | 0.11.4 | internal | Print session-stub cleanup diagnostics on exit. |
@@ -485,7 +489,7 @@ A phase rebuilds if: hash differs from stored, upstream phase was rebuilt, Docke
 
 **Container-liveness predicate.** `--gc`'s dead-owner-container lister (`_sandy_dead_owner_containers_list`) reuses the daemon-mode D6/D9 rule verbatim: *the container is truth only with a LIVE inner tmux session.* One `docker ps -a --filter 'name=^/sandy-'` enumerates every candidate; classification is a **two-pass** walk over the captured output, because a proxy sidecar's liveness is a function of its *paired agent's* liveness, which is only known once every agent has been classified. Agent-vs-proxy is decided by **image**, never by name prefix — a workspace whose sanitized basename happens to be `proxy` produces a container literally named `sandy-proxy-<hash>` running a real agent image, and a name-prefix test would misclassify it as a proxy sidecar (a real pre-release regression, fixed before 1.3.0 shipped).
 
-**Pass 1 — every AGENT container** (any recognized sandy image other than `sandy-proxy`: `sandy-base`, `sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, `sandy-opencode`, `sandy-full`, `sandy-project-*`, `sandy-skills*`; the image-name gate is best-effort and deliberately name-based rather than label-based so it works retroactively against containers a pre-1.3.0 sandy started):
+**Pass 1 — every AGENT container** (any recognized sandy image other than `sandy-proxy`: `sandy-base`, `sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, `sandy-opencode`, `sandy-grok`, `sandy-full`, `sandy-project-*`, `sandy-skills*`; the image-name gate is best-effort and deliberately name-based rather than label-based so it works retroactively against containers a pre-1.3.0 sandy started):
 
 1. **`sandy.daemon=true` labeled**: not running → dead, reap. Running → probe `docker exec -u "$(id -u)" <cid> tmux has-session -t sandy`, retried **5x with a 1s sleep** between attempts (mirroring `--start`'s own D6 idempotency retry) so a container whose supervisor hasn't created the tmux session yet isn't misread as a zombie mid-startup: success → **ALIVE, KEPT — never touch, regardless of `sandy.daemon_pid` liveness** (the D9 defense: a rebooted host can resurrect a `--restart unless-stopped` container on a dead supervisor pid while the session itself is healthy); failure (all 5 attempts) → zombie, reap. The retry is gated to the destructive reap path only (`_sandy_dead_owner_containers_list reap`) — `--print-state`'s `orphaned_containers` COUNT uses a single probe, since a momentarily-stale count is informational and a 5s stall per mid-startup container would defeat its cheap-poll budget.
 2. **Not daemon-labeled** (a foreground/interactive agent container): SANDBOX_NAME is derived by stripping *only* the `sandy-` prefix (never `sandy-proxy-` — this branch only ever sees a real agent image). Not running → dead, reap. Running → check `$SANDY_HOME/sandboxes/.<name>.lock/pid`: missing/non-numeric/dead → dead-owner, reap; live pid → KEPT, skip. (Reuses the same `lock_holder_alive` liveness test `--print-state`/the #14 workspace mutex use.)
@@ -943,7 +947,7 @@ Sandy wraps Claude Code in a tmux session:
 
 ### Multi-Agent Mode (comma-separated `SANDY_AGENT`)
 
-When `SANDY_AGENT` contains more than one agent (e.g. `claude,gemini`, `claude,codex`, `claude,gemini,codex,opencode`, or the alias `all`), the user-setup script creates a tmux session with one pane per agent, in the order listed. Layouts: 2 agents → side-by-side; 3 agents → left half + top-right + bottom-right; 4 agents → 2×2 grid (top-left, top-right, bottom-right, bottom-left in pane-index order). The launch logic is factored into per-agent helpers (`build_claude_cmd()`, `build_gemini_cmd()`, `build_codex_cmd()`, `build_opencode_cmd()`) so single-agent and multi-agent paths share the same command construction. Each pane is an independent process; exiting one leaves the others running.
+When `SANDY_AGENT` contains more than one agent (e.g. `claude,gemini`, `claude,codex`, `claude,gemini,codex,opencode`, or the alias `all`), the user-setup script creates a tmux session with one pane per agent, in the order listed. Layouts: 2 agents → side-by-side; 3 agents → left half + top-right + bottom-right; 4 agents → 2×2 grid (top-left, top-right, bottom-right, bottom-left in pane-index order). The launch logic is factored into per-agent helpers (`build_claude_cmd()`, `build_gemini_cmd()`, `build_codex_cmd()`, `build_opencode_cmd()`, `build_grok_cmd()`) so single-agent and multi-agent paths share the same command construction. Each pane is an independent process; exiting one leaves the others running.
 
 The previous `both` alias (= `claude,gemini`) was removed in `v0.12` once the comma-separated syntax supported every combination. Using it now exits early with an error message pointing at the new syntax.
 
