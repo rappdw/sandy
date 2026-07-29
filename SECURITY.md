@@ -76,6 +76,28 @@ both platforms. Reports that this specific documented, opt-in configuration is
 unisolated aren't new findings — but reports that the **default** posture leaks,
 or that the proxy itself can be bypassed, very much are.
 
+### Known provenance artifact (not a compromise)
+
+Two commits in the `v1.4.0` history — `bc1dc28` (`#93`, `--reset-sandbox`) and
+`868b7da` (`#94`, `--stop-all`) — carry a `Co-authored-by: x <x@x>` trailer that
+surfaces as a phantom contributor in the GitHub graph. **It is benign.** `x <x@x>`
+is not a person and holds nothing: it was the *unconfigured git identity* on a
+branch-sync **merge commit** (`Merge origin/main into tmp-<PR>-fix`) created in an
+ephemeral CI container that lacked a real `user.name`/`user.email` and used the
+placeholder `x`/`x@x` to satisfy git. GitHub's squash-merge then aggregated every
+commit author — including that merge commit's — into the squash's
+`Co-authored-by:` trailers.
+
+- **No access, no signing key, no code authorship.** The *git author* of both
+  commits is the maintainer; the `x <x@x>` account is deleted (GitHub renders it
+  as the anonymized "ghost" user). A co-author trailer is metadata only.
+- **History was deliberately not rewritten.** The commits are inside the released
+  `v1.4.0` tag; force-pushing over a published release to scrub a cosmetic trailer
+  is a worse provenance signal than documenting it here.
+- **Prevented going forward** by updating PR branches with rebase/reset (no
+  foreign-authored merge commit for GitHub to aggregate) and pinning a real git
+  identity in every environment that commits.
+
 ## Out of scope
 
 Consistent with the threat model:
