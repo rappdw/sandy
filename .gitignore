@@ -20,3 +20,9 @@ POLISH_AND_PUBLICITY.md
 sandy-audit-*.log
 
 __pycache__
+.cachet/
+
+# Local session artifacts (not for the repo)
+.mcp.json
+connector-reference
+.sandy/
