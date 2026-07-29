@@ -678,6 +678,16 @@ _sandy_translate_args() {
                     *)                   out+=" $(printf '%q' "$arg")" ;;
                 esac
                 ;;
+            grok)
+                # grok's headless is a print flag + positional prompt (like
+                # Claude, not a subcommand): -p / --print / --prompt → grok's -p.
+                # --continue / -c dropped (headless-resume support unknown).
+                case "$arg" in
+                    -p|--print|--prompt) out+=" -p" ;;
+                    --continue|-c)       : ;;
+                    *)                   out+=" $(printf '%q' "$arg")" ;;
+                esac
+                ;;
         esac
     done
     printf '%s' "$out"
@@ -828,6 +838,20 @@ build_opencode_cmd() {
     _sandy_wrap_cmd_exit_pause "OpenCode" "$cmd"
 }
 
+build_grok_cmd() {
+    # Headless: `grok -p "PROMPT"` (a print flag + positional prompt, like Claude —
+    # not a subcommand like codex/opencode). Interactive: `grok` (TUI).
+    # --no-auto-update: the rootfs is read-only so grok can't self-update anyway;
+    # this skips its background update check (docs.x.ai headless-scripting). Model
+    # via -m (default grok-4.5); auth from XAI_API_KEY (forwarded by the launcher).
+    local cmd="grok --no-auto-update"
+    if [ -n "${GROK_MODEL:-}" ]; then
+        cmd+=" -m $(printf "%q" "$GROK_MODEL")"
+    fi
+    cmd+="$(_sandy_translate_args grok "$@")"
+    _sandy_wrap_cmd_exit_pause "Grok" "$cmd"
+}
+
 build_gemini_cmd() {
     # Gemini CLI has its own per-tool sandbox; disable it since sandy provides
     # whole-session isolation via Docker. GEMINI_SANDBOX=false is the documented
@@ -860,6 +884,7 @@ _sandy_build_agent_cmd() {
         gemini)   build_gemini_cmd   "${@:2}" ;;
         codex)    build_codex_cmd    "${@:2}" ;;
         opencode) build_opencode_cmd "${@:2}" ;;
+        grok)     build_grok_cmd     "${@:2}" ;;
     esac
 }
 

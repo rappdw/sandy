@@ -1657,6 +1657,12 @@ _helper_script_test "_sandy_translate_args opencode drops -p (positional-prompt 
     'out=$(_sandy_translate_args opencode -p hello); ! echo "$out" | grep -qE "(^| )-p( |$)"'
 _helper_script_test "_sandy_translate_args opencode drops --continue" \
     'out=$(_sandy_translate_args opencode --continue); ! echo "$out" | grep -q -- "--continue"'
+_helper_script_test "_sandy_translate_args grok maps -p to grok's -p print flag (Claude-shaped, not dropped)" \
+    'out=$(_sandy_translate_args grok -p hello); echo "$out" | grep -qE "(^| )-p( |\$)"'
+_helper_script_test "_sandy_translate_args grok maps --print/--prompt to -p" \
+    'out=$(_sandy_translate_args grok --print hello); echo "$out" | grep -qE "(^| )-p( |\$)"'
+_helper_script_test "_sandy_translate_args grok drops --continue" \
+    'out=$(_sandy_translate_args grok --continue); ! echo "$out" | grep -q -- "--continue"'
 _helper_script_test "_sandy_translate_args printf-quotes positional args with spaces" \
     'out=$(_sandy_translate_args claude "hello world"); echo "$out" | grep -qE "hello.+world"'
 
@@ -1669,6 +1675,43 @@ _helper_script_test "_sandy_wrap_cmd_exit_pause interactive verbose includes age
     '_sandy_is_headless=false SANDY_VERBOSE=1 out=$(_sandy_wrap_cmd_exit_pause "OpenCode" "opencode"); echo "$out" | grep -q "OpenCode exited"'
 _helper_script_test "_sandy_wrap_cmd_exit_pause interactive verbose escapes \$_exit for later eval" \
     '_sandy_is_headless=false SANDY_VERBOSE=1 out=$(_sandy_wrap_cmd_exit_pause Foo "claude"); echo "$out" | grep -qF "\$_exit"'
+
+# ============================================================
+info "28a2. Grok Build support — selection, image, credentials, headless (#99)"
+# ============================================================
+_GROK_S="$SANDY_SCRIPT"
+check "grok is a valid agent (validation case)" \
+    grep -q 'claude|gemini|codex|opencode|grok)' "$_GROK_S"
+check "invalid-agent error lists grok" \
+    grep -q "valid: claude, gemini, codex, opencode, grok" "$_GROK_S"
+check "grok maps to the sandy-grok image" \
+    grep -q 'grok)     IMAGE_NAME="sandy-grok"' "$_GROK_S"
+check "DOCKERFILE_PATH case has grok" \
+    grep -qF 'DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.grok"' "$_GROK_S"
+check "generate_dockerfile_grok exists + installs via x.ai install.sh + relocates the binary" \
+    bash -c 'grep -q "^generate_dockerfile_grok()" "$1" && grep -q "x.ai/cli/install.sh" "$1" && grep -q "install -m 0755" "$1"' -- "$_GROK_S"
+check "sandy-full installs grok too" \
+    bash -c 'awk "/^generate_dockerfile_full\(\)/,/^}\$/" "$1" | grep -q "x.ai/cli/install.sh"' -- "$_GROK_S"
+check "build_grok_cmd exists + uses --no-auto-update" \
+    bash -c 'grep -q "^build_grok_cmd()" "$1" && grep -q "grok --no-auto-update" "$1"' -- "$_GROK_S"
+check "dispatch calls build_grok_cmd for grok" \
+    grep -q 'grok)     build_grok_cmd' "$_GROK_S"
+check "XAI_API_KEY forwarded for grok" \
+    grep -q '_sandy_add_secret_env XAI_API_KEY' "$_GROK_S"
+check "grok config dir mounts at ~/.grok" \
+    grep -qF 'SANDBOX_DIR/grok:/home/claude/.grok' "$_GROK_S"
+check "sandy-grok in the image-name lists (GC + rebuild loop)" \
+    bash -c 'grep -q "sandy-opencode|sandy-grok|sandy-full" "$1" && grep -q "sandy-opencode sandy-grok sandy-full" "$1"' -- "$_GROK_S"
+check ".build_hash_grok cleared on --rebuild" \
+    grep -q '.build_hash_grok' "$_GROK_S"
+check "max-4 agent guard present" \
+    grep -q 'at most 4 agents per session' "$_GROK_S"
+check "XAI_API_KEY is a privileged key" \
+    bash -c 'sed -n "/^SANDY_PRIVILEGED_KEYS=(/,/^)/p" "$1" | grep -qx "    XAI_API_KEY"' -- "$_GROK_S"
+check "GROK_MODEL + SANDY_GROK_AUTH are passive keys" \
+    bash -c 'b="$(sed -n "/^SANDY_PASSIVE_KEYS=(/,/^)/p" "$1")"; echo "$b" | grep -qx "    GROK_MODEL" && echo "$b" | grep -qx "    SANDY_GROK_AUTH"' -- "$_GROK_S"
+check "--print-schema agents[] includes grok (sandy-grok)" \
+    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"sandy-grok\""' -- "$_GROK_S"
 
 # ============================================================
 info "28b. Codex CLI support — agent helpers and flag translation"

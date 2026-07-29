@@ -44,6 +44,7 @@ SANDY_PRIVILEGED_KEYS=(
     CLAUDE_CODE_OAUTH_TOKEN
     GEMINI_API_KEY
     OPENAI_API_KEY
+    XAI_API_KEY
     GOOGLE_API_KEY
     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
     SANDY_SCREENSHOT_DIR
@@ -90,6 +91,8 @@ SANDY_PASSIVE_KEYS=(
     SANDY_CODEX_AUTH
     OPENCODE_MODEL
     SANDY_OPENCODE_AUTH
+    GROK_MODEL
+    SANDY_GROK_AUTH
     SANDY_TOOL_AUDIT
 )
 
@@ -637,6 +640,7 @@ ANTHROPIC_API_KEY|secret|||0.1.0|stable|Anthropic API key for Claude Code. Not r
 CLAUDE_CODE_OAUTH_TOKEN|secret|||0.7.0|stable|Claude Code OAuth token (alternative to ANTHROPIC_API_KEY).
 GEMINI_API_KEY|secret|||0.9.0|stable|Google API key for Gemini CLI.
 OPENAI_API_KEY|secret|||0.10.0|stable|OpenAI API key for Codex CLI.
+XAI_API_KEY|secret|||1.5.0|stable|xAI API key for Grok Build (docs.x.ai). Enables fully-headless auth (resolution: model.api_key > env_key > session token > XAI_API_KEY); alternative is an interactive 'grok login' OAuth session inside the container.
 GOOGLE_API_KEY|secret|||0.9.0|stable|Google API key for Vertex AI / ADC.
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Code experimental agent-teams feature.
 SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
@@ -666,6 +670,8 @@ CODEX_MODEL|string|||0.10.0|stable|Codex model override.
 SANDY_CODEX_AUTH|enum:auto,api_key,oauth|auto||0.10.0|stable|Codex credential probe strategy.
 OPENCODE_MODEL|string|||0.12.0|stable|OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4').
 SANDY_OPENCODE_AUTH|enum:auto,api_key,oauth|auto||0.12.0|stable|OpenCode credential probe strategy.
+GROK_MODEL|string|||1.5.0|stable|Grok Build model override (passed as -m; default grok-4.5).
+SANDY_GROK_AUTH|enum:auto,api_key,oauth|auto||1.5.0|stable|Grok Build credential probe strategy.
 TELEGRAM_BOT_TOKEN|secret|||0.7.6|stable|Telegram bot token for the channel relay.
 TELEGRAM_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Telegram user IDs allowed to send messages.
 DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
@@ -929,6 +935,12 @@ _sandy_emit_schema() {
     _json_kv name '"opencode"'; printf ','; _json_kv image '"sandy-opencode"'
     printf ','; _json_kv features '["local_llm_passthrough","provider_choice"]'
     printf ','; _json_kv credentials '{"probe_order":["provider_env_keys","host_auth_json"]}'
+    printf '}'
+    printf ','
+    printf '{'
+    _json_kv name '"grok"'; printf ','; _json_kv image '"sandy-grok"'
+    printf ','; _json_kv features '[]'
+    printf ','; _json_kv credentials '{"probe_order":["XAI_API_KEY","host_grok_session"]}'
     printf '}'
     printf ']'
 
@@ -1468,7 +1480,7 @@ ${_cname}"
             continue
         fi
         case "$_img_base" in
-            sandy-base|sandy-claude-code|sandy-gemini-cli|sandy-codex|sandy-opencode|sandy-full|sandy-project-*|sandy-skills*) : ;;
+            sandy-base|sandy-claude-code|sandy-gemini-cli|sandy-codex|sandy-opencode|sandy-grok|sandy-full|sandy-project-*|sandy-skills*) : ;;
             *) continue ;;
         esac
         _sbname="${_cname#sandy-}"
@@ -1601,9 +1613,9 @@ _sandy_emit_state() {
         # names below in original order keeps output byte-identical.
         local _ii_map=""   # newline-joined "name|id|created"
         _ii_map="$(docker image inspect \
-            sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-opencode sandy-full \
+            sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-opencode sandy-grok sandy-full \
             --format '{{index .RepoTags 0}}|{{.Id}}|{{.Created}}' 2>/dev/null || true)"
-        for img in sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-opencode sandy-full; do
+        for img in sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-opencode sandy-grok sandy-full; do
             # find the map line whose tag is "<img>:..." (strip the :tag)
             _ii_line="$(printf '%s\n' "$_ii_map" | awk -F'|' -v n="$img" \
                 '{t=$1; sub(/:[^:]*$/,"",t)} t==n {print $2"|"$3; exit}')"
@@ -2428,7 +2440,7 @@ Environment variables:
                      like "0" or "0,1" (requires NVIDIA Container Toolkit)
   SANDY_SKILL_PACKS  Comma-separated skill packs to install (e.g. "gstack")
   SANDY_AGENT        AI agent(s): "claude" (default), "gemini", "codex",
-                     "opencode", or comma-separated combo
+                     "opencode", "grok", or comma-separated combo (max 4)
                      (e.g. "claude,gemini,codex"). Alias: "all" = all four.
   GEMINI_API_KEY     Google API key for Gemini CLI (SANDY_AGENT=gemini only)
   GEMINI_MODEL       Gemini model override (SANDY_AGENT=gemini only)
@@ -2866,6 +2878,34 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 DOCKERFILE
 }
 
+generate_dockerfile_grok() {
+    cat > "$SANDY_HOME/Dockerfile.grok.new" <<DOCKERFILE
+FROM ${BASE_IMAGE_NAME}
+# Install the Grok Build CLI (xAI). The installer drops a prebuilt grok binary
+# somewhere on PATH; relocate it to /usr/local/bin because /home/claude is a
+# tmpfs at runtime, so a home-dir install would vanish. The build has network.
+RUN set -eu; \\
+    curl -fsSL https://x.ai/cli/install.sh | bash; \\
+    _gb="\$(command -v grok || true)"; \\
+    [ -n "\$_gb" ] || _gb="\$(find /root /usr/local /opt /home -maxdepth 5 -type f -name grok 2>/dev/null | head -1)"; \\
+    [ -n "\$_gb" ] || { echo 'sandy: grok binary not found after install' >&2; exit 1; }; \\
+    [ "\$_gb" = /usr/local/bin/grok ] || install -m 0755 "\$_gb" /usr/local/bin/grok; \\
+    mkdir -p /opt/grok; \\
+    grok --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/grok/.version || true
+# synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+ && rm -rf /var/lib/apt/lists/*
+RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
+COPY tmux.conf /etc/tmux.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY user-setup.sh /usr/local/bin/user-setup.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/user-setup.sh
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+DOCKERFILE
+}
+
 generate_dockerfile_opencode() {
     cat > "$SANDY_HOME/Dockerfile.opencode.new" <<DOCKERFILE
 FROM ${BASE_IMAGE_NAME}
@@ -2891,7 +2931,7 @@ DOCKERFILE
 generate_dockerfile_full() {
     cat > "$SANDY_HOME/Dockerfile.full.new" <<DOCKERFILE
 FROM ${BASE_IMAGE_NAME}
-# Install all four agents. Used for any multi-agent combo.
+# Install all five agents. Used for any multi-agent combo.
 # Claude Code
 RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
  && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \\
@@ -2910,6 +2950,15 @@ RUN npm install -g @openai/codex \\
 RUN npm install -g opencode-ai \\
  && mkdir -p /opt/opencode \\
  && { opencode --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/opencode/.version || true; }
+# Grok Build (xAI) — installer drops a binary on PATH; relocate off the tmpfs home.
+RUN set -eu; \\
+    curl -fsSL https://x.ai/cli/install.sh | bash; \\
+    _gb="\$(command -v grok || true)"; \\
+    [ -n "\$_gb" ] || _gb="\$(find /root /usr/local /opt /home -maxdepth 5 -type f -name grok 2>/dev/null | head -1)"; \\
+    [ -n "\$_gb" ] || { echo 'sandy: grok binary not found after install' >&2; exit 1; }; \\
+    [ "\$_gb" = /usr/local/bin/grok ] || install -m 0755 "\$_gb" /usr/local/bin/grok; \\
+    mkdir -p /opt/grok; \\
+    grok --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/grok/.version || true
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
@@ -3835,6 +3884,16 @@ _sandy_translate_args() {
                     *)                   out+=" $(printf '%q' "$arg")" ;;
                 esac
                 ;;
+            grok)
+                # grok's headless is a print flag + positional prompt (like
+                # Claude, not a subcommand): -p / --print / --prompt → grok's -p.
+                # --continue / -c dropped (headless-resume support unknown).
+                case "$arg" in
+                    -p|--print|--prompt) out+=" -p" ;;
+                    --continue|-c)       : ;;
+                    *)                   out+=" $(printf '%q' "$arg")" ;;
+                esac
+                ;;
         esac
     done
     printf '%s' "$out"
@@ -3985,6 +4044,20 @@ build_opencode_cmd() {
     _sandy_wrap_cmd_exit_pause "OpenCode" "$cmd"
 }
 
+build_grok_cmd() {
+    # Headless: `grok -p "PROMPT"` (a print flag + positional prompt, like Claude —
+    # not a subcommand like codex/opencode). Interactive: `grok` (TUI).
+    # --no-auto-update: the rootfs is read-only so grok can't self-update anyway;
+    # this skips its background update check (docs.x.ai headless-scripting). Model
+    # via -m (default grok-4.5); auth from XAI_API_KEY (forwarded by the launcher).
+    local cmd="grok --no-auto-update"
+    if [ -n "${GROK_MODEL:-}" ]; then
+        cmd+=" -m $(printf "%q" "$GROK_MODEL")"
+    fi
+    cmd+="$(_sandy_translate_args grok "$@")"
+    _sandy_wrap_cmd_exit_pause "Grok" "$cmd"
+}
+
 build_gemini_cmd() {
     # Gemini CLI has its own per-tool sandbox; disable it since sandy provides
     # whole-session isolation via Docker. GEMINI_SANDBOX=false is the documented
@@ -4017,6 +4090,7 @@ _sandy_build_agent_cmd() {
         gemini)   build_gemini_cmd   "${@:2}" ;;
         codex)    build_codex_cmd    "${@:2}" ;;
         opencode) build_opencode_cmd "${@:2}" ;;
+        grok)     build_grok_cmd     "${@:2}" ;;
     esac
 }
 
@@ -4424,6 +4498,7 @@ ensure_agent_dockerfile() {
             gemini)   generate_dockerfile_gemini;   f="Dockerfile.gemini"   ;;
             codex)    generate_dockerfile_codex;    f="Dockerfile.codex"    ;;
             opencode) generate_dockerfile_opencode; f="Dockerfile.opencode" ;;
+            grok)     generate_dockerfile_grok;     f="Dockerfile.grok"     ;;
             *)        generate_dockerfile;          f="Dockerfile"          ;;
         esac
     fi
@@ -5690,8 +5765,8 @@ IFS=',' read -ra _SANDY_AGENTS <<< "$SANDY_AGENT"
 _SANDY_AGENT_COUNT="${#_SANDY_AGENTS[@]}"
 for _a in "${_SANDY_AGENTS[@]}"; do
     case "$_a" in
-        claude|gemini|codex|opencode) ;;
-        *) echo "[sandy] ERROR: Invalid agent '$_a' in SANDY_AGENT='$SANDY_AGENT' (valid: claude, gemini, codex, opencode, or comma-separated combo)" >&2; exit 1 ;;
+        claude|gemini|codex|opencode|grok) ;;
+        *) echo "[sandy] ERROR: Invalid agent '$_a' in SANDY_AGENT='$SANDY_AGENT' (valid: claude, gemini, codex, opencode, grok, or comma-separated combo)" >&2; exit 1 ;;
     esac
 done
 # Detect duplicates
@@ -5701,6 +5776,13 @@ if [ "$_SANDY_AGENT_COUNT" -ge 2 ]; then
         case ",$_seen," in *,"$_a",*) echo "[sandy] ERROR: Duplicate agent '$_a' in SANDY_AGENT='$SANDY_AGENT'" >&2; exit 1 ;; esac
         _seen="$_seen,$_a"
     done
+fi
+# Cap at 4: the multi-agent tmux layout tops out at a 2x2 grid (agents 2/3/4 are
+# splits of the first pane). With five selectable agents now (grok added), reject
+# a 5+ combo up front rather than silently dropping the extra agents' panes.
+if [ "$_SANDY_AGENT_COUNT" -gt 4 ]; then
+    echo "[sandy] ERROR: at most 4 agents per session (the multi-agent layout is a 2x2 grid); got $_SANDY_AGENT_COUNT in SANDY_AGENT='$SANDY_AGENT'" >&2
+    exit 1
 fi
 _SANDY_IS_MULTI=false
 [ "$_SANDY_AGENT_COUNT" -gt 1 ] && _SANDY_IS_MULTI=true
@@ -5713,6 +5795,7 @@ else
         gemini)   IMAGE_NAME="sandy-gemini-cli" ;;
         codex)    IMAGE_NAME="sandy-codex" ;;
         opencode) IMAGE_NAME="sandy-opencode" ;;
+        grok)     IMAGE_NAME="sandy-grok" ;;
     esac
 fi
 # Helper: check if a specific agent is in the resolved agent list
@@ -5755,6 +5838,9 @@ else
         opencode)
             DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.opencode"
             BUILD_HASH_FILE_NAME=".build_hash_opencode" ;;
+        grok)
+            DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.grok"
+            BUILD_HASH_FILE_NAME=".build_hash_grok" ;;
         *)
             DOCKERFILE_PATH="$SANDY_HOME/Dockerfile"
             BUILD_HASH_FILE_NAME=".build_hash" ;;
@@ -5832,7 +5918,7 @@ fi
 
 # Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
 if [ "$SANDY_REBUILD" = true ]; then
-    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_opencode" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.build_hash_proxy" "$SANDY_HOME/.skills_build_hash"
+    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_opencode" "$SANDY_HOME/.build_hash_grok" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.build_hash_proxy" "$SANDY_HOME/.skills_build_hash"
     info "Build cache cleared. Images will be rebuilt."
 fi
 
@@ -6632,6 +6718,12 @@ fi
 # Ensure per-agent config dirs exist so bind mounts always land on real dirs.
 if _sandy_agent_has claude; then
     mkdir -p "$SANDBOX_DIR/claude"
+fi
+if _sandy_agent_has grok; then
+    # Sandbox dir for grok's ~/.grok (config.toml + any `grok login` session).
+    # Auth normally rides XAI_API_KEY (env); host ~/.grok OAuth-session seeding is
+    # a possible follow-up (kept out of the persisted mount for now).
+    mkdir -p "$SANDBOX_DIR/grok"
 fi
 if _sandy_agent_has codex; then
     mkdir -p "$SANDBOX_DIR/codex"
@@ -8194,6 +8286,12 @@ if _sandy_agent_has codex; then
         RUN_FLAGS+=(-v "$CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro")
     fi
 fi
+if _sandy_agent_has grok; then
+    # grok stores config.toml (+ any `grok login` session) under ~/.grok; the
+    # sandbox mount persists it rw across launches. Auth itself rides XAI_API_KEY
+    # (env, forwarded above) so — unlike codex — no ephemeral :ro auth mount.
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/grok:/home/claude/.grok")
+fi
 if _sandy_agent_has opencode; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/opencode/config:/home/claude/.config/opencode")
     RUN_FLAGS+=(-v "$SANDBOX_DIR/opencode/share:/home/claude/.local/share/opencode")
@@ -8834,6 +8932,22 @@ if _sandy_agent_has opencode; then
     fi
     if [ -n "${SANDY_LOCAL_LLM_HOST:-}" ]; then
         RUN_FLAGS+=(-e "SANDY_LOCAL_LLM_HOST=$SANDY_LOCAL_LLM_HOST")
+    fi
+fi
+if _sandy_agent_has grok; then
+    # Grok Build authenticates fully headless from XAI_API_KEY (docs.x.ai:
+    # resolution is model.api_key > model.env_key > session token > XAI_API_KEY),
+    # so — unlike codex — there's no auth.json to materialize; just forward the
+    # env var. An interactive `grok login` OAuth session persists in the ~/.grok
+    # sandbox mount (below). GROK_MODEL feeds the `-m` flag; default is grok-4.5.
+    if [ -n "${XAI_API_KEY:-}" ]; then
+        _sandy_add_secret_env XAI_API_KEY "$XAI_API_KEY"
+    fi
+    if [ -n "${GROK_MODEL:-}" ]; then
+        RUN_FLAGS+=(-e "GROK_MODEL=$GROK_MODEL")
+    fi
+    if [ -n "${SANDY_GROK_AUTH:-}" ]; then
+        RUN_FLAGS+=(-e "SANDY_GROK_AUTH=$SANDY_GROK_AUTH")
     fi
 fi
 
