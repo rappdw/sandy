@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.5.1-dev"
+SANDY_VERSION="1.6.0-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -68,6 +68,7 @@ SANDY_PRIVILEGED_KEYS=(
 SANDY_PASSIVE_KEYS=(
     SANDY_AGENT
     SANDY_MODEL
+    SANDY_EFFORT
     SANDY_CPUS
     SANDY_MEM
     SANDY_GPU
@@ -663,6 +664,7 @@ GOOGLE_API_KEY|secret|||0.9.0|stable|Google API key for Vertex AI / ADC.
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Code experimental agent-teams feature.
 SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
 SANDY_MODEL|string|claude-opus-4-8|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
+SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for the Claude agent (claude only), applied as 'claude --effort <level>'. Empty leaves Claude Code's own default (currently 'high'). Levels are model-dependent; an unsupported level falls back to the highest supported at or below it. Passive-safe (effort does not affect isolation). Recorded in sandy-session.json.
 SANDY_CPUS|int|||0.1.0|stable|CPU limit for container (default: auto-detected).
 SANDY_MEM|string|||0.1.0|stable|Memory limit for container (e.g. '8g'; default: auto-detected).
 SANDY_GPU|string|||0.7.5|stable|GPU passthrough: 'all', or device IDs like '0' / '0,1'.
@@ -2453,6 +2455,8 @@ Usage:
 
 Environment variables:
   SANDY_MODEL        Model to use (default: claude-opus-4-8)
+  SANDY_EFFORT       Reasoning effort for claude: low|medium|high|xhigh|max
+                     (default: Claude Code's own, currently high)
   ANTHROPIC_API_KEY  API key (not needed with Claude Max / OAuth)
   SANDY_HOME         Sandy config directory (default: ~/.sandy)
   SANDY_SSH          Git SSH method: "token" (default) uses gh CLI token
@@ -3964,6 +3968,10 @@ _sandy_wrap_cmd_exit_pause() {
 
 build_claude_cmd() {
     local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-8} --teammate-mode tmux"
+    # SANDY_EFFORT (#effort): pin Claude Code's reasoning effort so a run isn't
+    # silently at the model default. Validated host-side; a separate axis from
+    # --model. Empty → omit the flag → Claude Code's own default applies.
+    [ -n "${SANDY_EFFORT:-}" ] && cmd+=" --effort ${SANDY_EFFORT}"
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
         # Use --permission-mode (the documented modern flag) instead of the
         # legacy --dangerously-skip-permissions. Claude 2.1.x added runtime
@@ -8779,8 +8787,24 @@ if [ -n "$SANDY_MODEL" ] && ! [[ "$SANDY_MODEL" =~ ^[a-zA-Z0-9._-]+$ ]]; then
     error "Invalid SANDY_MODEL: $SANDY_MODEL (only alphanumeric, hyphens, dots, underscores allowed)"
     exit 1
 fi
+# Validate SANDY_EFFORT — Claude Code reasoning effort (claude only), applied as
+# `claude --effort <level>` in build_claude_cmd. Empty = Claude Code's own default
+# (currently 'high'). Cleared when claude isn't in the agent set so it's never a
+# meaningless forward. An invalid level fails loud rather than silently running at
+# default — the whole point is a provable, pinned effort.
+if _sandy_agent_has claude; then
+    if [ -n "${SANDY_EFFORT:-}" ]; then
+        case "$SANDY_EFFORT" in
+            low|medium|high|xhigh|max) ;;
+            *) error "Invalid SANDY_EFFORT: $SANDY_EFFORT (allowed: low, medium, high, xhigh, max)"; exit 1 ;;
+        esac
+    fi
+else
+    SANDY_EFFORT=""
+fi
 RUN_FLAGS+=(-e "SANDY_AGENT=$SANDY_AGENT")
 RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
+RUN_FLAGS+=(-e "SANDY_EFFORT=${SANDY_EFFORT:-}")
 RUN_FLAGS+=(-e "SANDY_SKIP_PERMISSIONS=${SANDY_SKIP_PERMISSIONS:-true}")
 RUN_FLAGS+=(-e "SANDY_NEW_SESSION=$SANDY_NEW_SESSION")
 RUN_FLAGS+=(-e "SANDY_REMOTE_CONTROL=$SANDY_REMOTE_CONTROL")
@@ -8816,9 +8840,14 @@ _sandy_session_nonce="$( (openssl rand -hex 16 2>/dev/null) \
     || (head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
     || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
 _sandy_session_file="$SANDBOX_DIR/sandy-session.json"
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s"\n}\n' \
+# effort (#effort): the reasoning effort sandy PINNED for this run, so it's
+# provable after the fact rather than inferred from a live statusline. A JSON
+# string when set; null when sandy did not pin it (the agent ran at Claude
+# Code's own default). Only meaningful for the claude agent.
+_sandy_effort_json="null"; [ -n "${SANDY_EFFORT:-}" ] && _sandy_effort_json="\"$SANDY_EFFORT\""
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" \
-    "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" \
+    "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
 [ "${SANDY_VERBOSE:-0}" != "0" ] && info "Session marker /etc/sandy-session.json nonce=${_sandy_session_nonce} egress=${_sandy_egress_mode}"
