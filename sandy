@@ -8836,9 +8836,24 @@ RUN_FLAGS+=(-e "SANDY_EGRESS_MODE=$_sandy_egress_mode")
 # file is bind-mounted :ro exactly like /etc/sandy-proxy.json, so a committed
 # workspace config cannot forge it. The session nonce is also printed host-side
 # below so an external verifier can match the file's nonce to the launch.
-_sandy_session_nonce="$( (openssl rand -hex 16 2>/dev/null) \
-    || (head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
-    || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
+# An operator may PIN the nonce via SANDY_SESSION_NONCE so an external harness
+# can verify out-of-band that a run is the one it launched (the value lands in
+# the :ro marker the in-container agent can read but not forge). It is read from
+# the host env only — deliberately NOT a config key (a committed .sandy/config
+# must not be able to pin it) and never forwarded as a container env var (the
+# read-only file stays the sole trust root). Validated charset: an invalid value
+# warns and falls back to a fresh random nonce — never fail the launch, never
+# inject an unvalidated value into the marker JSON / logs. The charset excludes
+# quotes/backslash/control chars (can't break the JSON) and `/` (no path use
+# today, but future-proofs any filename derived from it).
+if [ -n "${SANDY_SESSION_NONCE:-}" ] && [[ "$SANDY_SESSION_NONCE" =~ ^[A-Za-z0-9._-]{8,128}$ ]]; then
+    _sandy_session_nonce="$SANDY_SESSION_NONCE"
+else
+    [ -n "${SANDY_SESSION_NONCE:-}" ] && warn "Ignoring invalid SANDY_SESSION_NONCE (must match ^[A-Za-z0-9._-]{8,128}\$); using a random nonce."
+    _sandy_session_nonce="$( (openssl rand -hex 16 2>/dev/null) \
+        || (head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
+        || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
+fi
 _sandy_session_file="$SANDBOX_DIR/sandy-session.json"
 # effort (#effort): the reasoning effort sandy PINNED for this run, so it's
 # provable after the fact rather than inferred from a live statusline. A JSON
