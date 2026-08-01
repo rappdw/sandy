@@ -112,8 +112,11 @@ On every launch (all egress modes), sandy writes `$SANDBOX_DIR/sandy-session.jso
 ```json
 { "schema": 1, "sandy_version": "...", "egress_mode": "off|permissive|strict",
   "workspace": "...", "host_uid": 501, "host_gid": 20,
-  "launched_at": "2026-06-11T12:00:00Z", "session_nonce": "<hex>" }
+  "launched_at": "2026-06-11T12:00:00Z", "session_nonce": "<hex>",
+  "effort": "high" }
 ```
+
+The `effort` field records the reasoning effort sandy **pinned** for the claude agent via `SANDY_EFFORT` (a JSON string like `"high"`), or `null` when sandy did not pin it (the agent ran at Claude Code's own default — currently `high`). This makes a run's effort provable after the fact rather than inferred from the ephemeral live statusline — the gap that let a red-team run silently at default effort. `schema` stays `1` (additive field).
 
 **Why it exists.** Env vars (`SANDY_EGRESS_MODE`, `SANDY_WORKSPACE`) are spoofable and the *absence* of a path proves nothing, so an in-container probe that distrusts env vars otherwise cannot tell a sandy container apart from the bare host VM — the `sandy-isolation-test` red-team hit exactly this, running in sandy `=0` on macOS/OrbStack but concluding it was not in sandy at all (uid `501`, OrbStack `mac` virtiofs mounts, and `CapBnd` retaining sandy's documented `--cap-add` set all read as "ordinary VM" without an anchor). Because the marker is a `:ro` bind mount, a committed workspace config cannot forge it.
 
@@ -147,7 +150,7 @@ Sandy loads configuration from four sources in order: `$HOME/.sandy/config`, `$H
 
 - **Passive-safe keys** (allowed from any source):
   <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_TOOL_AUDIT`
+  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_TOOL_AUDIT`
   <!-- END AUTOGEN:passive-key-list -->
 
 - **Value-aware exceptions** (passive for values that *strengthen* isolation, approval-gated for values that *weaken* it): a few passive keys are not uniformly safe from a committed `.sandy/config` because one of their values lowers the sandbox's protection. `_sandy_passive_value_privileged()` routes those weakening values through the same per-workspace approval prompt as a privileged key, while leaving the strengthening/neutral values frictionless — *"a repo may make the sandbox tighter, never looser."* The gated values are: `SANDY_EGRESS_NO_ISOLATION=1` (proxy off), `SANDY_EGRESS_STRICT=0` (downgrade a host-set strict), `SANDY_EGRESS_PROXY=0` (deprecated alias for proxy-off), and `SANDY_ALLOW_WORKFLOW_EDIT=1` (drops `.github/workflows/` protection). This closes the hole where a committed workspace config could silently disable network isolation (threat-model adversary #2) — on macOS with the proxy off that is *total* loss of network isolation. Guarded by `run-tests.sh §65`.

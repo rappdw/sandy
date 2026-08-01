@@ -723,6 +723,10 @@ _sandy_wrap_cmd_exit_pause() {
 
 build_claude_cmd() {
     local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-8} --teammate-mode tmux"
+    # SANDY_EFFORT (#effort): pin Claude Code's reasoning effort so a run isn't
+    # silently at the model default. Validated host-side; a separate axis from
+    # --model. Empty → omit the flag → Claude Code's own default applies.
+    [ -n "${SANDY_EFFORT:-}" ] && cmd+=" --effort ${SANDY_EFFORT}"
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
         # Use --permission-mode (the documented modern flag) instead of the
         # legacy --dangerously-skip-permissions. Claude 2.1.x added runtime

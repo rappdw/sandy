@@ -6666,6 +6666,39 @@ check "_sandy_head_display: refs/heads/<b>→<b>; detached:<sha>→detached HEAD
     test "$_hd_out" = "feature/x|detached HEAD (abc1234)"
 
 # ============================================================
+echo ""
+echo "§84: SANDY_EFFORT — pin Claude Code reasoning effort + record it (#effort)"
+# ============================================================
+# Plumbs a reasoning-effort knob to the inner claude (mirrors SANDY_MODEL):
+# passive key, validated host-side, applied as `claude --effort <level>`, and
+# recorded in sandy-session.json so a run's effort is provable after the fact.
+_S84="$SANDY_SCRIPT"
+check "SANDY_EFFORT is a passive-safe key (schema)" \
+    bash -c 'awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)/" "$1" | grep -qx "    SANDY_EFFORT"' -- "$_S84"
+check "SANDY_EFFORT has a _sandy_key_metadata row (enum type)" \
+    bash -c 'awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -q "^SANDY_EFFORT|enum:low,medium,high,xhigh,max|"' -- "$_S84"
+check "build_claude_cmd applies --effort, gated on SANDY_EFFORT" \
+    bash -c 'awk "/^build_claude_cmd\(\)/,/^}/" "$1" | grep -q "SANDY_EFFORT.*cmd+=.* --effort "' -- "$_S84"
+check "SANDY_EFFORT validated to low|medium|high|xhigh|max (fails loud on invalid)" \
+    bash -c 'grep -q "low|medium|high|xhigh|max)" "$1" && grep -q "Invalid SANDY_EFFORT" "$1"' -- "$_S84"
+check "SANDY_EFFORT forwarded into the container" \
+    grep -q 'RUN_FLAGS+=(-e "SANDY_EFFORT=' "$_S84"
+check "sandy-session.json records the pinned effort" \
+    bash -c 'grep -q "\"effort\": %s" "$1" && grep -q "_sandy_effort_json" "$1"' -- "$_S84"
+check "--help documents SANDY_EFFORT" \
+    bash -c 'grep -q "SANDY_EFFORT" "$1"' -- "$_S84"
+# --print-schema exposes it as a passive enum key
+check "--print-schema lists SANDY_EFFORT as a passive enum key" \
+    bash -c '"$1" --print-schema 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); e=[k for k in d[\"config\"][\"passive_keys\"] if k[\"name\"]==\"SANDY_EFFORT\"]; assert e and e[0][\"type\"]==\"enum\", e"' -- "$_S84"
+# marker effort field: string when set, null when unset (behavioral, no docker)
+_eff_mk() { local SANDY_EFFORT="$1" j="null"; [ -n "${SANDY_EFFORT:-}" ] && j="\"$SANDY_EFFORT\""; printf '{"effort":%s}\n' "$j"; }
+check "marker effort field: set→JSON string, unset→null" \
+    bash -c '
+      set="$(SANDY_EFFORT=high; j="null"; [ -n "${SANDY_EFFORT:-}" ] && j="\"$SANDY_EFFORT\""; printf "%s" "$j")"
+      unset="$(j="null"; printf "%s" "$j")"
+      [ "$set" = "\"high\"" ] && [ "$unset" = "null" ]'
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
