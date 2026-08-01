@@ -6699,6 +6699,42 @@ check "marker effort field: set→JSON string, unset→null" \
       [ "$set" = "\"high\"" ] && [ "$unset" = "null" ]'
 
 # ============================================================
+echo ""
+echo "§85: SANDY_SESSION_NONCE — operator-pinned marker nonce (out-of-band run verification)"
+# ============================================================
+# An operator can pin the :ro-marker session_nonce so an external harness
+# (sandy-isolation-test's run.sh/adjudicate.sh) proves a run is the one it
+# launched. Validated charset; invalid → warn + auto-mint (never fail, never
+# inject). Env-only — a committed .sandy/config must not be able to pin it.
+_S85="$SANDY_SCRIPT"
+check "SANDY_SESSION_NONCE gated on the validated charset ^[A-Za-z0-9._-]{8,128}\$" \
+    bash -c 'grep -q "SANDY_SESSION_NONCE.*=~.*\[A-Za-z0-9._-\]{8,128}" "$1"' -- "$_S85"
+check "valid SANDY_SESSION_NONCE used verbatim as the nonce" \
+    bash -c 'grep -q "_sandy_session_nonce=\"\$SANDY_SESSION_NONCE\"" "$1"' -- "$_S85"
+check "invalid SANDY_SESSION_NONCE warns and falls back (never fails the launch)" \
+    bash -c 'grep -q "Ignoring invalid SANDY_SESSION_NONCE" "$1"' -- "$_S85"
+# Env-only, like SANDY_TEST_PANE_TAGS: NOT a recognized config key, so a
+# committed workspace config can never pin the nonce.
+check "SANDY_SESSION_NONCE is NOT in any config key list" \
+    bash -c '! awk "/^SANDY_(PRIVILEGED|PASSIVE|ENV_ONLY)_KEYS=\(/,/^\)/" "$1" | grep -q "SANDY_SESSION_NONCE"' -- "$_S85"
+check "SANDY_SESSION_NONCE has NO _sandy_key_metadata row" \
+    bash -c '! awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -q "SANDY_SESSION_NONCE"' -- "$_S85"
+check "SANDY_SESSION_NONCE is NOT forwarded into the container as an env var" \
+    bash -c '! grep -q "RUN_FLAGS.*SANDY_SESSION_NONCE" "$1"' -- "$_S85"
+# Behavioral: the selection logic (pure, no docker) — valid→verbatim, invalid→fallback.
+check "nonce selection: valid→verbatim, invalid/short/slash→fallback, unset→random" \
+    bash -c '
+      sel() { local v="$1"; if [ -n "${v:-}" ] && [[ "$v" =~ ^[A-Za-z0-9._-]{8,128}$ ]]; then printf "verbatim"; elif [ -n "${v:-}" ]; then printf "fallback"; else printf "random"; fi; }
+      [ "$(sel a1b2c3d4-mybase-off)" = verbatim ] \
+        && [ "$(sel "bad;value")" = fallback ] \
+        && [ "$(sel "sh")" = fallback ] \
+        && [ "$(sel "../etc/x")" = fallback ] \
+        && [ "$(sel "")" = random ]'
+# Marker JSON stays valid with a pinned nonce (charset excludes JSON-breaking chars).
+check "marker JSON valid + carries the pinned nonce" \
+    bash -c 'printf "{\"session_nonce\": \"%s\"}" "a1b2c3d4-mybase-off" | python3 -c "import json,sys; assert json.load(sys.stdin)[\"session_nonce\"]==\"a1b2c3d4-mybase-off\""'
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
