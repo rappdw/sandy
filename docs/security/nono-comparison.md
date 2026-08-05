@@ -67,7 +67,7 @@ One honest data point: nono's zero-daemon / no-container / cross-platform model 
 
 ## 6. Better-together
 
-Because the two occupy **different, non-overlapping layers**, there's a clean complementary story: **container/namespace perimeter (sandy) + per-open capability & broker-not-mount credentials (nono)**. A cross-recommendation ("sandy for the container boundary; nono inside for fine-grained capability/credential control — and nono itself recommends a container/VM perimeter, which sandy provides") is technically accurate and mutually reinforcing, not marketing spin. See the tracking issue for next steps.
+Because the two occupy **different, non-overlapping layers**, there's a clean complementary story: **container/namespace perimeter (sandy) + per-open capability & broker-not-mount credentials (nono)**. A cross-recommendation ("sandy for the container boundary; nono inside for fine-grained capability/credential control — and nono itself recommends a container/VM perimeter, which sandy provides") is technically accurate and mutually reinforcing, not marketing spin — **but gated on validating that nono actually runs inside a sandy container** (`--read-only`, cap-dropped, `no-new-privileges`, under Docker's seccomp profile), which is not a given. See [`nono-roadmap.md`](nono-roadmap.md) for the sequenced plan (validation spike → positioning → longer-horizon borrows) and the tracking issue for the credential-proxy borrow.
 
 ## Sources
 - https://github.com/nolabs-ai/nono
