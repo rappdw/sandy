@@ -78,6 +78,7 @@ That last point is the opportunity hiding in plain sight. **Today sandy mounts t
 5. **Docs/threat-model** — record the new credential trust boundary, the CA-key-host-side rule, and the issuer-cooperation reality (why raw API keys can't be short-lived without A2). (small)
 
 ## Cross-references
+- [`nono-comparison.md`](nono-comparison.md) — [`nolabs-ai/nono`](https://github.com/nolabs-ai/nono) is a **shipped reference implementation** of this design (broker-not-mount, phantom tokens, L7 endpoint scoping, `cmd://` host-side OAuth capture, SPIFFE). It confirms the A2 trade-off here — injecting at the proxy requires terminating TLS — and its `cmd://` lazy-capture is a concrete blueprint for A1. Complementary to sandy (nono itself recommends a container/VM perimeter, which sandy provides).
 - [`research/credential-broker-cb4a.md`](../../research/credential-broker-cb4a.md) — the source CB4A research; defines every CB4A term used here and carries the primary sources (IETF draft, Posta/Hartman blogs, NIST 800-207, RFC 9449).
 - HF defender-side lessons (internal analysis, unpublished): "keep roots-of-trust out of the sandbox" (A1 implements it) and "externalized per-identity audit log" (A1's per-sandbox identity is its prerequisite).
 - `CLAUDE.md` "Egress Proxy" / `proxy/config.go` (the no-MITM invariant A2 would fork), "Agent Selection" credential-probe orders (the per-agent secrets A1/A2 must cover: claude/gemini/codex/opencode/grok).
