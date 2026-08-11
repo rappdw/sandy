@@ -1040,7 +1040,14 @@ _sandy_emit_container_daemon_fields() {
         # non-zero status hits the introspection ERR trap under set -eE and
         # kills the whole emission (host regression: one broken daemon
         # container failed every --print-state consumer).
-        _ac="$(docker exec -u "$(id -u)" "$_cid" tmux display -p -t sandy '#{session_attached}' 2>/dev/null)" || _ac=""
+        # `|| true` INSIDE the substitution, not `|| _ac=""` outside it: with
+        # `set -E` the introspection ERR trap is inherited by the subshell, and
+        # bash 3.2 (macOS /bin/bash) fires it for the failing `docker exec` even
+        # though the outer `||` handles the status — printing a spurious
+        # "introspection handler failed / Report this at ..." on every
+        # --print-state with an unreachable probe. bash 4+ exempts it; macOS does
+        # not. Absorbing the failure inside the subshell silences it on both.
+        _ac="$(docker exec -u "$(id -u)" "$_cid" tmux display -p -t sandy '#{session_attached}' 2>/dev/null || true)"
         if ! [[ "$_ac" =~ ^[0-9]+$ ]]; then
             _ac="null"
         fi
