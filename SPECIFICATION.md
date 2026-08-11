@@ -373,8 +373,8 @@ Contents:
 - **OS**: Debian bookworm-slim
 - **System tools**: build-essential, git, git-lfs, jq, ripgrep, socat, tmux, curl, cmake, openssh-client, less, pkg-config, gosu
 - **GitHub CLI**: `gh`
-- **Node.js 22 LTS**: Via NodeSource
-- **Go 1.24**: Multi-arch binary from go.dev
+- **Node.js 24 LTS**: Via NodeSource
+- **Go 1.26**: Multi-arch binary from go.dev (latest 1.26.x resolved at build time)
 - **Rust stable**: Via rustup (installed to `/usr/local/rustup` and `/usr/local/cargo`)
 - **Bun**: Via `curl https://bun.sh/install`
 - **uv**: Via `curl https://astral.sh/uv/install.sh` (installed to `/usr/local/bin`)
@@ -1348,15 +1348,25 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get update && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 LTS via NodeSource
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+# Node.js 24 LTS via NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Go (arch-aware)
-ARG GO_VERSION=1.24.1
+# Go (arch-aware). GO_VERSION pins the minor line and is the offline fallback;
+# each rebuild resolves the newest patch on that line from go.dev so base
+# rebuilds pick up Go security fixes (same build-time-latest semantics as the
+# Node/Rust/Bun/uv installs above). When this line leaves Go's 2-release
+# support window, dl/?mode=json stops listing it and the fallback pin is used --
+# bump GO_VERSION to the new supported minor at that point.
+ARG GO_VERSION=1.26.5
 RUN ARCH="$(dpkg --print-architecture)" \
-    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" \
+    && GO_LATEST="$(curl -fsSL --max-time 10 'https://go.dev/dl/?mode=json' \
+        | jq -r --arg m "go${GO_VERSION%.*}." \
+            '.[].version | select(startswith($m))' \
+        | sed 's/^go//' | sort -rV | head -1)" \
+    && case "$GO_LATEST" in ''|*[!0-9.]*) GO_LATEST="" ;; esac \
+    && curl -fsSL "https://go.dev/dl/go${GO_LATEST:-$GO_VERSION}.linux-${ARCH}.tar.gz" \
        | tar -C /usr/local -xz
 
 # Rust stable (system-wide)
@@ -1767,8 +1777,8 @@ Capabilities SETUID/SETGID are needed for `gosu` privilege drop. CHOWN/DAC_OVERR
 
 | Tool | Version | Install Method |
 |---|---|---|
-| Go | 1.24.1 | Multi-arch binary from go.dev |
-| Node.js | 22 LTS | NodeSource `setup_22.x` |
+| Go | 1.26 (latest patch at build; fallback pin 1.26.5) | Multi-arch binary from go.dev |
+| Node.js | 24 LTS | NodeSource `setup_24.x` |
 | Rust | stable (latest) | rustup |
 | Bun | latest | `curl https://bun.sh/install` |
 | uv | latest | `curl https://astral.sh/uv/install.sh` |

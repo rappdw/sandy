@@ -455,8 +455,8 @@ Sandy's base image is a self-contained development environment. Everything below
 | Toolchain | Version | Notes |
 |---|---|---|
 | Python 3 | Debian bookworm default | System Python; use `uv` for other versions |
-| Node.js | 22 LTS | Via NodeSource |
-| Go | 1.24 | |
+| Node.js | 24 LTS | Via NodeSource |
+| Go | 1.26 | Latest 1.26.x patch resolved at image build |
 | Rust | stable | Via rustup |
 | C/C++ | build-essential | gcc, g++, make, libc-dev |
 
