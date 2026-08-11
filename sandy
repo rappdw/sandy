@@ -2676,7 +2676,7 @@ rm -f "$SANDY_HOME/.sandy-write-test" 2>/dev/null || true
 # --- Build file generators ---
 generate_dockerfile_base() {
     cat > "$SANDY_HOME/Dockerfile.base.new" <<'DOCKERFILE_BASE'
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Some Docker Desktop versions prevent the _apt user from reading the
 # temp files apt stages for gpgv, producing spurious "invalid signature"
@@ -2696,7 +2696,7 @@ RUN apt-get update && apt-get install -y \
         less \
         libcairo2 \
         libgdk-pixbuf-2.0-0 \
-        libpango1.0-0 \
+        libpango-1.0-0 \
         libssl-dev \
         ncurses-term \
         openssh-client \
@@ -2860,7 +2860,7 @@ RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/in
  && { /usr/local/bin/claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version || true; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
-    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
  && rm -rf /var/lib/apt/lists/*
 RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
 COPY tmux.conf /etc/tmux.conf
@@ -2883,7 +2883,7 @@ RUN npm install -g @google/gemini-cli \\
       | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/gemini-cli/.version || true; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
-    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
  && rm -rf /var/lib/apt/lists/*
 RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
 # osv-scanner: required by the gemini-cli-security extension (pre-built binary, not go install)
@@ -2909,7 +2909,7 @@ RUN npm install -g @openai/codex \\
  && { codex --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/codex/.version || true; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
-    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
  && rm -rf /var/lib/apt/lists/*
 RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
 COPY tmux.conf /etc/tmux.conf
@@ -2941,7 +2941,7 @@ RUN set -eu; \\
     grok --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/grok/.version || true
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
-    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
  && rm -rf /var/lib/apt/lists/*
 RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
 COPY tmux.conf /etc/tmux.conf
@@ -2963,7 +2963,7 @@ RUN npm install -g opencode-ai \\
  && { opencode --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/opencode/.version || true; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
-    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
  && rm -rf /var/lib/apt/lists/*
 RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
 COPY tmux.conf /etc/tmux.conf
@@ -3010,7 +3010,7 @@ RUN set -eu; \\
     grok --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/grok/.version || true
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
-    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
  && rm -rf /var/lib/apt/lists/*
 RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
 # osv-scanner: required by the gemini-cli-security extension (pre-built binary, not go install)
@@ -3748,6 +3748,21 @@ if [ -d "$WORKSPACE/node_modules" ]; then
         printf "\033[0;33m⚠ node_modules/ contains native addons built for a different platform\033[0m\n"
         printf "\033[0;33m  Fix: npm rebuild\033[0m\n"
     fi
+fi
+
+# Orphaned pip user-site detection: PYTHONUSERBASE stores packages under
+# lib/python3.<minor>; a base-image Python bump (3.11 -> 3.13 with trixie)
+# leaves the old tree invisible to the new interpreter. Warn-only.
+_sys_py="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+if [ -n "$_sys_py" ] && [ -d "$PYTHONUSERBASE/lib" ]; then
+    for _d in "$PYTHONUSERBASE"/lib/python3.*; do
+        [ -d "$_d" ] || continue
+        _v="${_d##*/python}"
+        if [ "$_v" != "$_sys_py" ]; then
+            printf "\033[0;33m⚠ Persistent pip packages for Python %s found (%s); system Python is now %s.\033[0m\n" "$_v" "$_d" "$_sys_py"
+            printf "\033[0;33m  Reinstall what you need (pip install --user ...), then: rm -rf %s\033[0m\n" "$_d"
+        fi
+    done
 fi
 
 sandy_log "Configuring git auth"
@@ -5991,7 +6006,7 @@ BASE_REBUILT=false
 if [ ! -f "$BASE_HASH_FILE" ] || [ "$(cat "$BASE_HASH_FILE")" != "$BASE_HASH" ] || ! docker image inspect "$BASE_IMAGE_NAME" &>/dev/null; then
     info "Building base image (language runtimes) — this may take several minutes on first run..."
     _old_base_id="$(docker image inspect -f '{{.Id}}' "$BASE_IMAGE_NAME" 2>/dev/null || true)"
-    docker build ${_BASE_BUILD_Q[@]+"${_BASE_BUILD_Q[@]}"} --no-cache --label sandy.managed=1 -t "$BASE_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.base" "$SANDY_HOME"
+    docker build ${_BASE_BUILD_Q[@]+"${_BASE_BUILD_Q[@]}"} --no-cache --pull --label sandy.managed=1 -t "$BASE_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.base" "$SANDY_HOME"
     echo "$BASE_HASH" > "$BASE_HASH_FILE"
     BASE_REBUILT=true
     _sandy_prune_old_image "$_old_base_id" "$BASE_IMAGE_NAME"

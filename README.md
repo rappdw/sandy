@@ -454,7 +454,7 @@ Sandy's base image is a self-contained development environment. Everything below
 
 | Toolchain | Version | Notes |
 |---|---|---|
-| Python 3 | Debian bookworm default | System Python; use `uv` for other versions |
+| Python 3 | Debian trixie default (3.13) | System Python; use `uv` for other versions |
 | Node.js | 24 LTS | Via NodeSource |
 | Go | 1.26 | Latest 1.26.x patch resolved at image build |
 | Rust | stable | Via rustup |
@@ -585,7 +585,7 @@ These are per-project — packages installed in one project don't leak to anothe
 
 ### Python version management
 
-The base image ships one system Python (Debian bookworm's default). If your project needs a specific version, use `uv`:
+The base image ships one system Python (Debian trixie's default, 3.13). If your project needs a specific version, use `uv`:
 
 ```bash
 uv python install 3.11        # downloads once, persists across sessions
@@ -646,6 +646,7 @@ Sandy checks your project on startup and handles common issues:
 - **`.python-version`** — if present, sandy auto-installs that Python version via `uv` (persists across sessions)
 - **Host `.venv/`** — shadowed with a sandbox-owned overlay (see above). The host venv is never modified; the container gets its own materialized venv matching the host's Python version, auto-activated via `VIRTUAL_ENV` + `PATH`. Drift between the overlay and `.python-version` triggers a warning on relaunch
 - **Foreign native modules** — if `node_modules/` contains native addons compiled for a different platform (e.g. macOS), sandy warns with `npm rebuild` as the fix
+- **Orphaned pip user-site** — if persistent `pip install --user` packages were installed under a different Python minor version than the image now ships (e.g. after a base-image Python bump), sandy warns with the old path and a reinstall/cleanup pointer
 
 These checks run on every session start and add negligible overhead.
 
