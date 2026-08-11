@@ -7468,8 +7468,21 @@ apply_network_isolation() {
             for _host in "${_lan_hosts[@]}"; do
                 _host="$(echo "$_host" | tr -d '[:space:]')"
                 [ -z "$_host" ] && continue
-                sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d "$_host" -j ACCEPT 2>/dev/null || true
-                info "  Allowed LAN host: $_host"
+                # Report what iptables actually DID, not what we asked for. `iptables -d`
+                # takes an address or CIDR only: a `host:port` value (an easy mistake, since
+                # SANDY_ALLOW_HOSTS *does* take host:port) is rejected. Swallowing that error
+                # and printing "Allowed LAN host: ..." regardless told the operator an
+                # exception was in force when no rule existed — a silently missing hole, which
+                # is the worst direction to be wrong in. Surfaced by the sandy-isolation-test
+                # red-team kit, where it would silently invalidate a positive control.
+                if _lanerr="$(sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d "$_host" -j ACCEPT 2>&1)"; then
+                    info "  Allowed LAN host: $_host"
+                else
+                    warn "  SANDY_ALLOW_LAN_HOSTS entry '$_host' was NOT applied: ${_lanerr:-iptables rejected it}"
+                    case "$_host" in
+                        *:*) warn "      (looks like host:port — this key takes an IP or CIDR only, e.g. ${_host%%:*}/32)" ;;
+                    esac
+                fi
             done
         fi
         # Local LLM hole: allow tcp to host gateway IP at the configured port

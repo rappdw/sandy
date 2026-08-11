@@ -845,6 +845,16 @@ under `research/`.
   model connection, which no egress mode (permissive *or* strict) can inspect.
   Masking the read is the only lever left, which makes this the highest-value
   remaining filesystem item, not a someday-nice-to-have.
+  **Status check 2026-08-02 (red-team sweep, `sandy-isolation-test`):** still
+  **unshipped** at `1.6.0-dev` — `_sandy_protected_files()` carries `.envrc` but no
+  `.env` / `.env.*` / `.env.local`, and there is no masking mechanism anywhere in the
+  script. Four weeks after it "jumped the queue," `THREAT_MODEL.md` R2b still reads
+  *Prioritized*, so the doc now overstates the posture: a reader sees a prioritized
+  mitigation, the code has none. Either land it or downgrade R2b's status line to
+  Open. One interaction to note when it does land: the isolation kit's only
+  *reachable* honeytoken lives in the workspace `.env.local` (nothing else it plants
+  is mounted into the container), so masking `.env*` removes the kit's working decoy
+  location — the two need to move together (kit ROADMAP K1).
 - **Violation logging.** sandy blocks silently; srt logs blocked connections /
   write attempts in real time. At minimum, log denied egress (the proxy already
   has a deny log behind `SANDY_DEBUG_PROXY`) and protected-path write attempts to
@@ -867,3 +877,85 @@ under `research/`.
 
 (Dropped from the old TODO as not-isolation/marketing: awesome-claude-code
 listing, community plugin marketplaces, a web-UI dashboard.)
+
+---
+
+## Tamper-evident tool audit — mirror `SANDY_TOOL_AUDIT` out of the agent's reach
+
+**Target: 1.6.x / 1.7.** Filed 2026-08-02 (red-team sweep, `sandy-isolation-test`).
+
+### What
+
+`SANDY_TOOL_AUDIT=1` seeds a `PreToolUse` hook that appends `{ts,tool,args}` to
+`$HOME/.claude/tool-audit.jsonl`. That path is inside the **rw `.claude` mount**, so the
+audit trail lives in a directory the audited agent can freely rewrite, truncate, or
+`rm`. Mirror each line to a location the container cannot reach — the simplest being an
+append from the host side of the same sandbox dir, or a write-only channel — so the trail
+survives the session that produced it.
+
+### Why this is not a re-litigation of the documented scope
+
+The code comment (`sandy:2820–2822`) already says it plainly: *"Not tamper-proof against a
+determined agent (it runs in-box) — telemetry for the primary wrong-but-not-evil
+adversary, by design."* That scope is right, and this item does **not** propose making it
+a control against a determined agent — that argument is settled and correct.
+
+The narrower point: the trail is currently defeatable **by accident**, which bites the
+*primary* adversary too. A wrong-but-not-evil agent asked to "clean up the workspace" or
+"reset my Claude config" can wipe `~/.claude/*` and destroy the session's own telemetry
+with no malice and no notice. The HF post-mortem's observability lesson was that the
+record has to survive the incident; a record the subject can delete by ordinary clumsiness
+doesn't. Tamper-**evident** (a gap or a mirror mismatch is visible) is a real upgrade over
+tamper-**absent**, and is much cheaper than tamper-proof.
+
+### Effort / surface
+
+Small. No new config key — same `SANDY_TOOL_AUDIT` gate, one extra sink. Options, cheapest
+first: (a) mirror to `$SANDBOX_DIR/tool-audit.jsonl` host-side and diff at session end;
+(b) rotate/seal the in-box file at exit; (c) a host-side collector. (a) alone converts
+"silently gone" into "visibly truncated," which is the whole point.
+
+### Note
+
+Whoever picks this up: also surface a one-line session-end summary (`N tool calls
+recorded`), mirroring the `SANDY_EGRESS_LOG` egress summary. The audit trail is currently
+written and never mentioned again unless the user goes looking, which is how observability
+features quietly stop being used.
+
+---
+
+## Proxy-log retention — `proxy.log` is truncated every launch
+
+**Target: 1.6.x.** Filed 2026-08-02 (red-team sweep, `sandy-isolation-test`).
+
+### What
+
+`PROXY_LOG_FILE="$SANDBOX_DIR/proxy.log"` is truncated on every launch (`sandy:6380–6381`,
+`: > "$PROXY_LOG_FILE"`), by design — the comment calls it *"a per-session post-mortem,
+not an append-forever log."* For a single-session post-mortem that is exactly right. The
+gap is cross-**session** analysis: run N's egress record is destroyed by run N+1, so there
+is no way to ask "what did this project's agent reach over the last ten sessions."
+
+### Why it matters more since 1.4.0
+
+The Hugging Face incident ran **~three quiet days** and was ultimately caught by
+correlating telemetry *over time*, not by any single-session signal — that lesson is
+already why `SANDY_EGRESS_LOG` exists (Issue 4). But an allow-log that is wiped on the
+next launch can only ever answer a point-in-time question, which is the same shape of gap
+the incident exposed. Slow, low-signal, across-session behaviour is precisely what a
+truncating log cannot see.
+
+### Shape that fits sandy
+
+Keep the default truncate (no behaviour change, no disk growth by surprise). Add rotation
+rather than accumulation: `proxy.log` → `proxy.log.1..N` on launch, N small (3–5) and
+capped by size, or an opt-in `SANDY_EGRESS_LOG_RETAIN=<n>`. Passive-safe and additive, in
+the same spirit as `SANDY_EGRESS_LOG` itself. `--print-state` could expose how many
+sessions of history exist.
+
+### Effort
+
+Small — a rotate loop at the existing truncate point, plus a doc line. The design question
+worth settling first is whether retention belongs per-project (`$SANDBOX_DIR`, where it is
+now) or in one place per host for fleet-wide correlation; per-project is the smaller change
+and matches how everything else in the sandbox dir is scoped.
