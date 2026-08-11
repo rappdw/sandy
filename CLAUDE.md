@@ -73,6 +73,8 @@ bash test/run-integration-tests.sh  # headless end-to-end (needs Docker + API ke
 
 Since Claude Code running inside sandy cannot access Docker, running tests requires the user to execute them manually on the host. When making changes to the `sandy` script or tests, ask the user to run the test suite and share the results.
 
+`test/run-integration-tests.sh` also supports three tuning knobs: `SANDY_INTEG_ONLY=7,13` / `SANDY_INTEG_SKIP=19,20,21` to run or skip a comma-separated subset of sections by id (exact-token match; SKIP wins when a section is in both), and `SANDY_INTEG_NO_MODEL_PIN=1` to disable the default Haiku model pin used for claude smoke launches and run every claude launch at sandy's own default model instead.
+
 See `TESTING_PLAN.md` for manual validation steps that require interactive TUI sessions.
 
 ## Git branch work inside sandy (`.git/HEAD` is writable as of 1.5.0, #80)
