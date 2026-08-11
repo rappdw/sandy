@@ -15,7 +15,7 @@ The whole "better together" claim rests on this, and it is **not** obvious it wo
 **Open technical questions to answer:**
 1. **seccomp-notify** — nono's supervisor installs a seccomp filter with `SECCOMP_FILTER_FLAG_NEW_LISTENER`. Installing a filter needs *either* `CAP_SYS_ADMIN` *or* `no_new_privs=1`; sandy sets `no_new_privs=1`, so a filter *should* install without caps — **but** obtaining the user-notification listener fd can be gated (kernel/config-dependent, sometimes `CAP_SYS_ADMIN`). Does it work in sandy's cap-dropped container? **This is the single highest-risk unknown.**
 2. **Landlock** — needs no privileges (kernel 5.13+), but Docker's default **seccomp profile must allow `landlock_create_ruleset` / `landlock_add_rule` / `landlock_restrict_self`**, and the **host kernel** (the container shares it) must have Landlock enabled. Verify both.
-3. **Install path** — nono is a Rust binary; does it install/run on the sandy base image (Debian bookworm, `/home` tmpfs, no root), or does it need baking into the image?
+3. **Install path** — nono is a Rust binary; does it install/run on the sandy base image (Debian trixie, `/home` tmpfs, no root), or does it need baking into the image?
 
 **Deliverable:** a one-page spike report — *runs / doesn't run inside sandy*, and if not, the **exact blocker** plus whether a **narrow** sandy change unblocks it (e.g. a seccomp-profile allowance) **without weakening sandy's posture**. I'll write the test script; a maintainer runs it on a real Docker host.
 

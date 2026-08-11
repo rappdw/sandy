@@ -495,6 +495,21 @@ if [ -d "$WORKSPACE/node_modules" ]; then
     fi
 fi
 
+# Orphaned pip user-site detection: PYTHONUSERBASE stores packages under
+# lib/python3.<minor>; a base-image Python bump (3.11 -> 3.13 with trixie)
+# leaves the old tree invisible to the new interpreter. Warn-only.
+_sys_py="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+if [ -n "$_sys_py" ] && [ -d "$PYTHONUSERBASE/lib" ]; then
+    for _d in "$PYTHONUSERBASE"/lib/python3.*; do
+        [ -d "$_d" ] || continue
+        _v="${_d##*/python}"
+        if [ "$_v" != "$_sys_py" ]; then
+            printf "\033[0;33m⚠ Persistent pip packages for Python %s found (%s); system Python is now %s.\033[0m\n" "$_v" "$_d" "$_sys_py"
+            printf "\033[0;33m  Reinstall what you need (pip install --user ...), then: rm -rf %s\033[0m\n" "$_d"
+        fi
+    done
+fi
+
 sandy_log "Configuring git auth"
 # Authenticate gh CLI with all available accounts (works in both token and agent modes)
 if [ -n "${GH_ACCOUNTS:-}" ] && command -v gh &>/dev/null; then

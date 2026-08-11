@@ -370,7 +370,7 @@ Sandy generates all Dockerfiles, entrypoint scripts, and config files at runtime
 **Rebuild trigger**: Content hash of Dockerfile.base changes, or `--rebuild` flag
 
 Contents:
-- **OS**: Debian bookworm-slim
+- **OS**: Debian trixie-slim
 - **System tools**: build-essential, git, git-lfs, jq, ripgrep, socat, tmux, curl, cmake, openssh-client, less, pkg-config, gosu
 - **GitHub CLI**: `gh`
 - **Node.js 24 LTS**: Via NodeSource
@@ -379,7 +379,7 @@ Contents:
 - **Bun**: Via `curl https://bun.sh/install`
 - **uv**: Via `curl https://astral.sh/uv/install.sh` (installed to `/usr/local/bin`)
 - **Python 3**: Debian system Python + python3-venv
-- **Libraries**: libcairo2, libgdk-pixbuf-2.0-0, libpango1.0-0, libssl-dev, ncurses-term
+- **Libraries**: libcairo2, libgdk-pixbuf-2.0-0, libpango-1.0-0, libssl-dev, ncurses-term
 - **User**: `claude` (UID 1001, shell `/bin/bash`)
 
 ### Phase 2: Claude Code Image (`sandy-claude-code`)
@@ -390,7 +390,7 @@ Contents:
 Contents:
 - `FROM sandy-base`
 - Claude Code: Native binary installed via `curl https://claude.ai/install.sh`, relocated to `/usr/local/bin/claude` and `/opt/claude-code`
-- synthkit dependencies: libpango1.0-dev, libcairo2-dev, libgdk-pixbuf2.0-dev (WeasyPrint needs these)
+- synthkit dependencies: libpango1.0-dev, libcairo2-dev, libgdk-pixbuf-2.0-dev (WeasyPrint needs these)
 - synthkit: Installed via `UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install synthkit`
 - `COPY`: entrypoint.sh, user-setup.sh, tmux.conf
 - Claude Code version cached at `/opt/claude-code/.version`
@@ -1015,6 +1015,10 @@ If `.venv/bin/python` is a broken symlink (host/container Python version mismatc
 
 Scans `node_modules/` for `.node` files. If they're not ELF binaries (e.g., Mach-O from macOS host), warns with `npm rebuild` as the fix.
 
+### Orphaned pip user-site
+
+`PYTHONUSERBASE` (the persistent `pip/` sandbox mount, `~/.pip-packages`) stores `pip install --user` packages under `lib/python3.<minor>/site-packages`. A base-image system-Python bump (e.g. 3.11 → 3.13 with the trixie move) leaves an older `lib/python3.<minor>/` tree on disk but invisible to the new interpreter. Warn-only: for each `lib/python3.*` dir under `$PYTHONUSERBASE` whose minor version doesn't match the running `python3`'s, prints the stale path and a reinstall/`rm -rf` pointer. Never fails the session.
+
 ### Git LFS
 
 If workspace is a git repo and `.gitattributes` contains `filter=lfs` (checked up to 3 levels deep), runs `git lfs install` (idempotent).
@@ -1304,7 +1308,7 @@ Sandy generates all build and runtime files as heredocs embedded in the script. 
 **Generator**: `generate_dockerfile_base()` — quoted heredoc (`<<'DOCKERFILE_BASE'`), no variable expansion.
 
 ```dockerfile
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Some Docker Desktop versions prevent the _apt user from reading the
 # temp files apt stages for gpgv, producing spurious "invalid signature"
@@ -1324,7 +1328,7 @@ RUN apt-get update && apt-get install -y \
     less \
     libcairo2 \
     libgdk-pixbuf-2.0-0 \
-    libpango1.0-0 \
+    libpango-1.0-0 \
     libssl-dev \
     ncurses-term \
     openssh-client \
@@ -1432,7 +1436,7 @@ RUN HOME=/home/claude su -s /bin/bash claude -c \
 
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \
  && rm -rf /var/lib/apt/lists/*
 
 RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin \
@@ -1464,7 +1468,7 @@ RUN npm install -g @openai/codex \
  && mkdir -p /opt/codex \
  && { codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' > /opt/codex/.version || true; }
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \
  && rm -rf /var/lib/apt/lists/*
 RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
 COPY tmux.conf /etc/tmux.conf
@@ -1782,7 +1786,7 @@ Capabilities SETUID/SETGID are needed for `gosu` privilege drop. CHOWN/DAC_OVERR
 | Rust | stable (latest) | rustup |
 | Bun | latest | `curl https://bun.sh/install` |
 | uv | latest | `curl https://astral.sh/uv/install.sh` |
-| Python | Debian bookworm system default | `apt-get install python3` |
+| Python | Debian trixie system default (3.13) | `apt-get install python3` |
 
 ---
 

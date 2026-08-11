@@ -508,7 +508,7 @@ Two modes controlled by `SANDY_SSH`:
 
 ## Language Environments
 
-The base image ships with fixed versions of each toolchain: Python 3 (Debian bookworm's default), Node.js 24, Go 1.26, Rust stable, and C/C++ (build-essential). `uv` is also pre-installed for Python version management.
+The base image ships with fixed versions of each toolchain: Python 3.13 (Debian trixie's default), Node.js 24, Go 1.26, Rust stable, and C/C++ (build-essential). `uv` is also pre-installed for Python version management.
 
 ### Persistent Package Installs
 
@@ -526,7 +526,7 @@ These are per-project — packages installed in one project sandbox don't leak t
 
 ### Python Version Management
 
-The base image includes a single system Python (whatever Debian bookworm ships). For projects that need a specific Python version, use `uv`:
+The base image includes a single system Python (whatever Debian trixie ships — currently 3.13). For projects that need a specific Python version, use `uv`:
 
 ```sh
 uv python install 3.11
@@ -558,6 +558,7 @@ On every session start, the entrypoint checks the workspace for common issues:
 - **`.python-version`**: Auto-installs the specified Python version via `uv python install` (idempotent, persists).
 - **Broken `.venv`**: If `.venv/bin/python` is a dead symlink (host/container Python mismatch), warns with the fix command.
 - **Foreign native modules**: If `node_modules/` contains `.node` files compiled for a different platform (e.g. macOS → Linux), warns with `npm rebuild` as the fix.
+- **Orphaned pip user-site**: If `PYTHONUSERBASE`'s `lib/python3.<minor>/` doesn't match the running system Python's minor version (e.g. after a base-image Python bump), warns with the old path and a reinstall/cleanup pointer.
 
 ### Gotchas
 
