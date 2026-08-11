@@ -5124,7 +5124,15 @@ _df_assert() { # $1=mode ("" or "light")
     local _json _rc=0
     _json="$(PATH="$_DF_BIN:$PATH" bash "$_SBX_SCRIPT" --print-state ${1:+$1} 2>/dev/null)" || _rc=$?
     [ "$_rc" -eq 0 ] || return 1
-    python3 -c "
+    # QUOTED heredoc, NOT `python3 -c "..."`: in a double-quoted string bash
+    # expands backticks/$( ) inside what looks like a Python comment. The word
+    # `sandy` in the regression note below was command substitution — on a host
+    # with sandy on PATH the suite RAN it and spliced its multi-line output into
+    # this script, corrupting it into a SyntaxError and failing both checks.
+    # Invisible on CI (no sandy on PATH -> empty expansion). Same class as the
+    # Dockerfile.proxy backtick bug guarded above. `python3 - ARG` keeps
+    # sys.argv[1] == the JSON, so the assertions are unchanged.
+    python3 - "$_json" <<'DFPY'
 import json, sys
 d = json.loads(sys.argv[1])
 rc = d['running_containers']
@@ -5143,7 +5151,7 @@ assert isinstance(daemon['attached_clients'], int), daemon
 assert broken['daemon'] is True, broken
 assert broken['attached_clients'] is None, broken
 assert bare['attached_clients'] is None, bare
-# Regression: the proxy of a `sandy`-named workspace must join to sandy-92aa9f98,
+# Regression: the proxy of a "sandy"-named workspace must join to sandy-92aa9f98,
 # NOT the double-stripped bare hash '92aa9f98'. A proxy is not a daemon session.
 assert proxy['sandbox'] == 'sandy-92aa9f98', proxy
 assert proxy['daemon'] is False, proxy
@@ -5154,7 +5162,7 @@ assert proxy['attached_clients'] is None, proxy
 assert daemon['updated_at'] == '2026-07-14T12:00:00Z', daemon
 assert broken['updated_at'] is None, broken
 assert bare['updated_at'] is None, bare
-" "$_json"
+DFPY
 }
 check "full mode: daemon fields correct; a failing attach-probe yields null, not a dead emission" \
     _df_assert
@@ -6678,7 +6686,14 @@ check "session-end notice compares HEAD (symbolic-ref) + surfaces the change" \
 check ".head-at-launch is cleaned up unconditionally at session end" \
     bash -c 'grep -q "rm -f .*\.head-at-launch" "$1"' -- "$_S83"
 # _sandy_head_display behavioral unit test (pure fn, no docker)
-_hd_out="$(bash -c 'source <(sed -n "/^_sandy_head_display()/,/^}/p" "$1"); _sandy_head_display refs/heads/feature/x; printf "|"; _sandy_head_display detached:abc1234' -- "$_S83")"
+# Extract-then-eval, NOT `source <(sed ...)` inside `$(...)`: bash 3.2 (macOS)
+# does not reliably handle nested process substitution there — it yields an
+# empty source and `command not found` (exit 127), which under `set -euo
+# pipefail` aborts the whole suite. Same trap already called out at the top of
+# this file; CI (Ubuntu/bash 5) cannot catch it.
+_hd_fn="$(sed -n '/^_sandy_head_display()/,/^}/p' "$_S83")"
+_hd_out="$(bash -c "$_hd_fn
+_sandy_head_display refs/heads/feature/x; printf '|'; _sandy_head_display detached:abc1234")"
 check "_sandy_head_display: refs/heads/<b>→<b>; detached:<sha>→detached HEAD (<sha>)" \
     test "$_hd_out" = "feature/x|detached HEAD (abc1234)"
 
