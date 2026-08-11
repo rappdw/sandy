@@ -2718,15 +2718,25 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get update && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 LTS via NodeSource
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+# Node.js 24 LTS via NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Go (arch-aware)
-ARG GO_VERSION=1.24.1
+# Go (arch-aware). GO_VERSION pins the minor line and is the offline fallback;
+# each rebuild resolves the newest patch on that line from go.dev so base
+# rebuilds pick up Go security fixes (same build-time-latest semantics as the
+# Node/Rust/Bun/uv installs above). When this line leaves Go's 2-release
+# support window, dl/?mode=json stops listing it and the fallback pin is used --
+# bump GO_VERSION to the new supported minor at that point.
+ARG GO_VERSION=1.26.5
 RUN ARCH="$(dpkg --print-architecture)" \
-    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" \
+    && GO_LATEST="$(curl -fsSL --max-time 10 'https://go.dev/dl/?mode=json' \
+        | jq -r --arg m "go${GO_VERSION%.*}." \
+            '.[].version | select(startswith($m))' \
+        | sed 's/^go//' | sort -rV | head -1)" \
+    && case "$GO_LATEST" in ''|*[!0-9.]*) GO_LATEST="" ;; esac \
+    && curl -fsSL "https://go.dev/dl/go${GO_LATEST:-$GO_VERSION}.linux-${ARCH}.tar.gz" \
        | tar -C /usr/local -xz
 
 # Rust stable (system-wide)
@@ -3093,13 +3103,13 @@ generate_dockerfile_proxy() {
     # the agent binary next to it self-updates weekly. A monthly freshness epoch
     # moves the Dockerfile hash once a month, triggering a rebuild without a sandy
     # release; paired with --pull on the build (below), that rebuild re-resolves
-    # golang:1.24-bookworm to the current digest and picks up Go stdlib / Debian
+    # golang:1.26-trixie to the current digest and picks up Go stdlib / Debian
     # security fixes. Bound to one refresh/month so it's not per-launch churn.
     epoch="$(date -u +%Y-%m 2>/dev/null || echo static)"
     cat > "$SANDY_HOME/Dockerfile.proxy.new" <<DOCKERFILE
 # syntax pinned implicitly by the golang base tag
 # freshness-epoch: ${epoch} (monthly proxy base/stdlib refresh — HF-incident Issue 3)
-FROM golang:1.24-bookworm AS build
+FROM golang:1.26-trixie AS build
 ARG SANDY_PROXY_REF=${ref}
 RUN git clone https://github.com/rappdw/sandy /src \\
  && git -C /src checkout "\${SANDY_PROXY_REF}" \\
@@ -6008,7 +6018,7 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
     if [ ! -f "$PROXY_HASH_FILE" ] || [ "$(cat "$PROXY_HASH_FILE")" != "$PROXY_HASH" ] || ! docker image inspect "$PROXY_IMAGE_NAME" &>/dev/null; then
         info "Building egress proxy image (sandy-proxy, ref=$(_sandy_proxy_ref))..."
         _old_proxy_id="$(docker image inspect -f '{{.Id}}' "$PROXY_IMAGE_NAME" 2>/dev/null || true)"
-        # --pull: re-resolve golang:1.24-bookworm to the current digest on every
+        # --pull: re-resolve golang:1.26-trixie to the current digest on every
         # proxy (re)build so the base + Go stdlib get security updates — the
         # monthly freshness epoch (HF-incident Issue 3) makes this fire ~monthly
         # without a sandy release. --no-cache already rebuilds the binary itself.

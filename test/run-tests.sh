@@ -4229,7 +4229,7 @@ SANDY_HOME="$_PX_TMP" SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" GITHUB_HEAD_REF= \
 generate_dockerfile_proxy" 2>/dev/null
 _PX_DF="$_PX_TMP/Dockerfile.proxy.new"
 check "proxy Dockerfile: golang build stage" \
-    grep -qE '^FROM golang:[0-9.]+-bookworm AS build' "$_PX_DF"
+    grep -qE '^FROM golang:[0-9.]+-trixie AS build' "$_PX_DF"
 check "proxy Dockerfile: scratch runtime stage" \
     grep -qx 'FROM scratch' "$_PX_DF"
 check "proxy Dockerfile: pins ref via build-arg default to the version tag" \
@@ -4259,6 +4259,23 @@ check "proxy Dockerfile generation emits no stderr (no unescaped shell-specials 
     bash -c '_h="$(mktemp -d)"; _e="$(SANDY_HOME="$_h" SANDY_VERSION=0.13.1 SANDY_PROXY_REF="" GITHUB_HEAD_REF= bash -c "$1
 generate_dockerfile_proxy" 2>&1 >/dev/null)"; rm -rf "$_h"; [ -z "$_e" ]' -- "$_PX_FNS"
 rm -rf "$_PX_TMP"
+
+# Base-image Go pin: the tarball URL needs a full x.y.z, so the base resolves the
+# newest patch on the pinned MINOR line at build time (go.dev/dl/?mode=json) with
+# the ARG as offline fallback. Guard the three properties that make that safe --
+# without them the build either freezes on a stale patch (the 1.24.1 rot: pinned
+# 2026-02, untouched for 16 months across 20+ releases) or hard-fails offline.
+_GO_DFB="$(sed -n '/^generate_dockerfile_base()/,/^}$/p' "$_PX_SCRIPT")"
+check "base Dockerfile: Go pin is a supported minor line (not EOL)" \
+    bash -c 'printf "%s" "$1" | grep -qE "^ARG GO_VERSION=1\.(2[5-9]|[3-9][0-9])\."' -- "$_GO_DFB"
+check "base Dockerfile: Go patch resolved at build time from go.dev" \
+    bash -c 'printf "%s" "$1" | grep -qF "go.dev/dl/?mode=json"' -- "$_GO_DFB"
+check "base Dockerfile: Go resolver falls back to the ARG pin when go.dev is unreachable" \
+    bash -c 'printf "%s" "$1" | grep -qF "${GO_LATEST:-$GO_VERSION}"' -- "$_GO_DFB"
+check "base Dockerfile: Go resolver picks the max patch, not array order" \
+    bash -c 'printf "%s" "$1" | grep -qF "sort -rV"' -- "$_GO_DFB"
+check "base Dockerfile: Go resolver rejects a non-numeric resolved value" \
+    bash -c 'printf "%s" "$1" | grep -qF "*[!0-9.]*"' -- "$_GO_DFB"
 
 # Build phase: gated on the normalized proxy predicate, uses .build_hash_proxy,
 # cleared by --rebuild.
