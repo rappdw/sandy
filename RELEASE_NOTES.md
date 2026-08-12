@@ -1,3 +1,72 @@
+## sandy v1.6.0
+
+**Base-image modernization** — Debian 13 (trixie), Python 3.13, Node 24, Go 1.26 — plus two additive features and a LAN-allowlist fix. Every pinned toolchain was on an unsupported or maintenance-only release; all four move to current. `schema_version` stays `1` and the 1.x sandbox forward-compat promise holds (`SANDY_SANDBOX_MIN_COMPAT` unchanged), so **existing sandboxes keep working and need no recreation**.
+
+- **Debian bookworm → trixie, Python 3.11 → 3.13** — bookworm's regular security support ended 2026-07-12. (#133)
+- **Go 1.24 → 1.26, Node 22 → 24** — Go 1.24 left its support window entirely; Node 22 is Maintenance LTS. (#131)
+- **`SANDY_EFFORT`** — pin Claude Code's reasoning effort and record it in the session marker, so a run's effort is provable after the fact. (#115)
+- **`SANDY_SESSION_NONCE`** — let an operator pin the attestation nonce, so a harness can prove a run is the one it launched. (#118)
+- **`SANDY_ALLOW_LAN_HOSTS` silent failure fixed** — a rejected iptables rule no longer reports success. (#119)
+
+**Read the upgrade notes below before your first launch** — a base-image change has four user-visible consequences.
+
+## Upgrade notes (read this first)
+
+1. **Your first launch rebuilds every image.** The base Dockerfile changed, so base, proxy, and agent images all rebuild with `--no-cache --pull`. This takes several minutes and is not a hang.
+2. **Persistent `pip install --user` packages will look like they vanished.** `PYTHONUSERBASE` stores under `lib/python3.<minor>/site-packages`, so a Python 3.11 tree is invisible to 3.13. Sandy now **detects this at session start** and prints the stale path plus the cleanup command — reinstall what you need, then remove the old tree. Your sandbox itself is fine; nothing needs recreating.
+3. **Native Node addons may need `npm rebuild`.** Node 22 → 24 changes the addon ABI for anything compiled into a workspace `node_modules/` or the persistent `npm-global/` mount.
+4. **Binaries built *inside* sandy now link glibc 2.41** (was 2.36). If you copy a dynamically-linked binary out of a session and run it on an older Linux host, it may fail — rebuild host-side. The host → container direction is unaffected.
+
+`.venv` overlays are **not** affected: they use uv-managed interpreters, independent of the container's system Python.
+
+### Base image: Debian trixie + Python 3.13 (#133)
+
+Debian 12 (bookworm) left regular security support on 2026-07-12 and is now community-LTS only; trixie is current stable. For a tool whose entire premise is a hardened boundary, sitting on oldstable-LTS is the wrong posture.
+
+Two apt packages were **renamed** in trixie and would have failed the build outright: `libpango1.0-0` → `libpango-1.0-0` (base image) and `libgdk-pixbuf2.0-dev` → `libgdk-pixbuf-2.0-dev` (all six agent image generators). The rename is **not** uniform — `libpango1.0-dev` and `libcairo2-dev` keep their old-style names — so all 26 apt-installed packages across the base and agent images were verified against Debian's package DB rather than assumed.
+
+The base image build now also passes `--pull`, so `debian:trixie-slim` re-resolves to the current digest on rebuild — the same freshness rationale the proxy build already used. It is deliberately **not** added to the agent, skills, or per-project builds: those build `FROM sandy-base`, a local image, and `--pull` would attempt a registry fetch and fail.
+
+### Toolchains: Go 1.26 + Node 24 (#131)
+
+Go supports only its two newest majors, so **1.24 was receiving no security fixes at all** — and the pin was `1.24.1`, a March-2025 patch that had gone untouched for 16 months across 20+ releases.
+
+The base image no longer freezes a full patch version. `ARG GO_VERSION` now pins the **minor line** and doubles as an offline fallback, while each build resolves the newest patch on that line from `go.dev` — the same build-time-latest semantics NodeSource, rustup, Bun and uv already use in this image. Go was the odd one out only because its tarball URL requires a full `x.y.z`. The resolver picks the maximum patch explicitly (not whatever order the API returns) and falls back to the pin on any non-numeric or unreachable result, so a network failure degrades to today's behavior rather than breaking the build.
+
+**The egress proxy's freshness mechanism was quietly not working.** The proxy pinned `golang:1.24-bookworm` — a floating *minor* tag, so it genuinely delivered 12 patch releases through Go 1.24.13 (pushed 2026-02-04). But once 1.24 left the support window there were no further pushes, so from ~February the documented monthly `--pull` rebuild re-resolved to an **unchanged digest**, refreshing only the Debian layer — not the Go stdlib that implements the proxy's TLS/HTTP/CONNECT I/O. Moving to `golang:1.26-trixie` restores actual stdlib patch delivery. Keeping the pin on a *supported* Go minor is what makes that mechanism work at all.
+
+`proxy/go.mod` also said `go 1.24.1`, and CI consumes it via `go-version-file` — so the proxy's vet/race/fuzz/govulncheck jobs had been running against an EOL toolchain too. Node 22 (Maintenance LTS, EOL April 2027) moves to 24 (Active LTS, April 2028); NodeSource's `node_24.x` ships a distro-agnostic suite, so it is independent of the trixie migration.
+
+New `run-tests.sh` guards cover the base Go block, which previously had **no** test coverage: the pin is asserted to be a supported minor — a regression back to 1.24 now fails the suite — plus build-time resolution, offline fallback, max-patch selection, and the non-numeric guard.
+
+### `SANDY_EFFORT` — pin and record Claude Code reasoning effort (#115)
+
+Sandy can now pin the agent's reasoning effort, and records what it pinned in the session marker (`sandy-session.json`'s `effort` field — a JSON string, or `null` when sandy did not pin it and the agent ran at its own default). This makes a run's effort **provable after the fact** rather than inferred from an ephemeral live statusline — the gap that let a red-team run silently execute at default effort. `schema` stays `1` (additive field).
+
+### `SANDY_SESSION_NONCE` — operator-pinned attestation nonce (#118)
+
+The self-attestation marker's `session_nonce` is normally minted fresh each launch. An operator can now **pin** it (validated `^[A-Za-z0-9._-]{8,128}$`; an invalid value warns and falls back to auto-mint, never failing the launch), so a harness that chose the value host-side can prove a run is the one it launched and has not been substituted. It is **env-only** — not a recognized config key and never forwarded into the container — so a committed workspace `.sandy/config` cannot pin it, and the read-only marker file stays the sole trust root.
+
+### `SANDY_ALLOW_LAN_HOSTS` silent failure (#119)
+
+`iptables -d` accepts an address or CIDR only, so a `host:port` value — an easy mistake, since `SANDY_ALLOW_HOSTS` *does* take `host:port` — was rejected. Sandy swallowed the error and printed "Allowed LAN host: …" regardless, telling the operator an exception was in force when **no rule existed**: a silently missing hole, which is the worst direction to be wrong in. Sandy now reports what iptables actually did, and names the likely `host:port` mistake.
+
+### Test-suite work (#134, #135)
+
+Three macOS-only failures that CI (Ubuntu, bash 5) structurally cannot see (#134):
+
+- **§68 was executing `sandy` itself.** A backtick inside a double-quoted `python3 -c "…"` string — within what *looked* like a Python comment — is command substitution to bash. On a host with `sandy` on `PATH` the suite ran it and spliced its output into the script, corrupting it into a `SyntaxError`. Beyond the false failure, a test suite silently invoking the tool under test is its own bug.
+- **§83 aborted the entire run** on bash 3.2 (nested `source <(…)` inside `$(…)` yields nothing → exit 127), so every later section never executed.
+- **A spurious `introspection handler failed / Report this at…`** on every macOS `--print-state` with an unreachable tmux probe: the `|| _ac=""` guard handled the status, but `set -E` inherits the ERR trap into the substitution subshell and bash 3.2 fires it anyway. Users were being told to file bugs for entirely normal behavior.
+
+The integration suite gains per-section timing, section selection (`SANDY_INTEG_ONLY` / `SANDY_INTEG_SKIP`), a fast-model pin for claude smoke runs, and an image warm-up preflight (#135). The warm-up matters here specifically: cold builds inside a 300s per-test timeout are what made this very migration produce three unrelated-looking failures.
+
+### Notes
+
+- **Additive minor** per the CLAUDE.md semver rule: new keys (`SANDY_EFFORT` passive; `SANDY_SESSION_NONCE` env-only), a base-image migration, and fixes. No config-key retiering or renames; introspection `schema_version` stays `1`.
+- **Sandbox forward-compat unchanged** — `SANDY_SANDBOX_MIN_COMPAT` stays `0.7.10`. The Python bump changes where `pip --user` packages live, but the sandbox itself still works, so this is not a compat-floor event and no sandbox needs recreating.
+- **Not covered by CI:** the `gstack` skill-pack image is not built in CI, so Playwright's `install-deps` on trixie is verified by maintainer build only.
+
 ## sandy v1.5.0
 
 Three additive features — **a new agent, clearer multi-agent panes, and in-container branch switching**. `schema_version` stays `1` and the 1.x sandbox forward-compat promise holds (`SANDY_SANDBOX_MIN_COMPAT` unchanged), so any 1.x sandbox keeps working.
