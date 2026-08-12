@@ -67,6 +67,15 @@
 #
 #   SANDY_INTEG_TIMEOUT=600  Override per-test timeout (default 300s)
 #
+#   SANDY_INTEG_ONLY=7,13         Run only the listed sections (comma-separated
+#                                 ids, exact-token match — e.g. ONLY=1 does not
+#                                 also select 12/12b/13). Deselected sections
+#                                 print a header + "deselected" note but do not run.
+#   SANDY_INTEG_SKIP=19,20,21     Skip the listed sections (comma-separated ids).
+#                                 SKIP wins over ONLY when a section is in both.
+#   SANDY_INTEG_NO_MODEL_PIN=1    Disable the Haiku model pin (§2a) and run every
+#                                 claude launch at sandy's own default model.
+#
 set -euo pipefail
 
 # The integration test harness runs sandy from directories that may legitimately
@@ -86,6 +95,29 @@ export SANDY_AUTO_APPROVE_PRIVILEGED=1
 # Respect an explicit override so a maintainer can force the whole suite onto
 # the proxy if they want.
 export SANDY_EGRESS_PROXY="${SANDY_EGRESS_PROXY:-0}"
+
+# Pin a fast/cheap Claude model for smoke runs. Nearly every assertion in this
+# suite is about sandy's PLUMBING (launch, mounts, proxy allow/deny, creds,
+# sandbox layout) — not model quality — so claude runs use Haiku instead of the
+# slow/expensive default. Env-tier beats config-tier in sandy's precedence, so
+# this single export reaches every launch, including the acceptance harnesses
+# (env inheritance, same route as SANDY_AUTO_APPROVE_PRIVILEGED).
+#   - Escape hatch: SANDY_INTEG_NO_MODEL_PIN=1 runs the suite exactly as before.
+#   - A maintainer-set SANDY_MODEL always wins (the pin only fills an empty slot).
+#   - Section 7 deliberately opts back out so exactly one canonical test still
+#     proves the DEFAULT-model path end to end.
+#   - gemini/codex/opencode/grok are NOT pinned: no fast-model id for them is
+#     documented anywhere in this repo, and inventing one would fail the suite.
+_MODEL_PIN_ACTIVE=false
+if [ "${SANDY_INTEG_NO_MODEL_PIN:-0}" != "1" ] && [ -z "${SANDY_MODEL:-}" ]; then
+    export SANDY_MODEL="claude-haiku-4-5-20251001"
+    _MODEL_PIN_ACTIVE=true
+fi
+# Per-test opt-out: splice into a run_sandy_headless env-args position to run
+# that one launch at sandy's own default model. Empty when the pin is off, so a
+# maintainer's explicit SANDY_MODEL is never overridden.
+_DEFAULT_MODEL_ENV=()
+[ "$_MODEL_PIN_ACTIVE" = true ] && _DEFAULT_MODEL_ENV=("SANDY_MODEL=")
 
 SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Absolute path to THIS suite's own directory, resolved ONCE before any `cd`.
@@ -127,6 +159,95 @@ pass()  { PASS=$((PASS + 1)); printf "  \033[0;32m✓ %s\033[0m\n" "$*"; }
 fail()  { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "  \033[0;31m✗ %s\033[0m\n" "$*"; }
 skip()  { SKIP=$((SKIP + 1)); printf "  \033[0;33m⊘ %s (skipped)\033[0m\n" "$*"; }
 
+# --- Section timing + selection (SANDY_INTEG_ONLY / SANDY_INTEG_SKIP) ---
+# Clock: bash's builtin SECONDS (integer). BSD date has no %N and bash 3.2 has
+# no EPOCHREALTIME, so SECONDS is the only portable choice. State: parallel
+# indexed arrays + a scalar count (no associative arrays on bash 3.2; the scalar
+# count avoids the ${#arr[@]}-on-empty-array edge under set -u).
+_SEC_COUNT=0
+_SEC_IDS=()
+_SEC_TITLES=()
+_SEC_TIMES=()
+_SEC_STATES=()          # run | deselected
+_CUR_SECTION_ID=""
+_CUR_SECTION_TITLE=""
+_CUR_SECTION_START=0
+_CUR_SECTION_STATE="run"
+_SECTION_ON=true
+
+# True when "$1" appears as a comma-separated token of "$2" (exact-token match,
+# so ONLY=1 does not select 12/12b/13...).
+_section_in_list() {
+    # Whitespace is stripped from the list first: a natural `ONLY=7, 13` would
+    # otherwise tokenize as `7` and ` 13`, and ` 13` never matches `13` — the
+    # section would be silently deselected and the run would do nothing.
+    local _list
+    _list="$(printf '%s' "$2" | tr -d '[:space:]')"
+    case ",$_list," in
+        *",$1,"*) return 0 ;;
+    esac
+    return 1
+}
+
+_section_enabled() {
+    if [ -n "${SANDY_INTEG_ONLY:-}" ] && ! _section_in_list "$1" "$SANDY_INTEG_ONLY"; then
+        return 1
+    fi
+    if [ -n "${SANDY_INTEG_SKIP:-}" ] && _section_in_list "$1" "$SANDY_INTEG_SKIP"; then
+        return 1
+    fi
+    return 0
+}
+
+# Close the previous section's timer (no-op before the first section).
+_section_close() {
+    [ -n "$_CUR_SECTION_ID" ] || return 0
+    local _dur=$(( SECONDS - _CUR_SECTION_START ))
+    _SEC_IDS[_SEC_COUNT]="$_CUR_SECTION_ID"
+    _SEC_TITLES[_SEC_COUNT]="$_CUR_SECTION_TITLE"
+    _SEC_TIMES[_SEC_COUNT]="$_dur"
+    _SEC_STATES[_SEC_COUNT]="$_CUR_SECTION_STATE"
+    _SEC_COUNT=$(( _SEC_COUNT + 1 ))
+    if [ "$_CUR_SECTION_STATE" = "run" ]; then
+        printf "  \033[0;90m(section %s took %ds)\033[0m\n" "$_CUR_SECTION_ID" "$_dur"
+    fi
+    _CUR_SECTION_ID=""
+}
+
+# section "N. Title..." — drop-in replacement for the old `info "N. Title..."`
+# header lines. Same visible output; additionally closes the previous section's
+# timer and decides whether the body runs. Body is wrapped in
+#   if [ "$_SECTION_ON" = true ]; then ... fi
+section() {
+    _section_close
+    _CUR_SECTION_ID="${1%%.*}"
+    _CUR_SECTION_TITLE="$1"
+    _CUR_SECTION_START=$SECONDS
+    info "$1"
+    if _section_enabled "$_CUR_SECTION_ID"; then
+        _SECTION_ON=true
+        _CUR_SECTION_STATE="run"
+    else
+        _SECTION_ON=false
+        _CUR_SECTION_STATE="deselected"
+        printf "  \033[0;33mo section %s deselected (SANDY_INTEG_ONLY/SANDY_INTEG_SKIP)\033[0m\n" "$_CUR_SECTION_ID"
+    fi
+}
+
+_print_timing_table() {
+    [ "$_SEC_COUNT" -gt 0 ] || return 0
+    echo ""
+    info "Per-section timing (slowest first, seconds):"
+    local _i=0
+    while [ "$_i" -lt "$_SEC_COUNT" ]; do
+        if [ "${_SEC_STATES[$_i]}" = "run" ]; then
+            printf '%6d  %s\n' "${_SEC_TIMES[$_i]}" "${_SEC_TITLES[$_i]}"
+        fi
+        _i=$(( _i + 1 ))
+    done | sort -rn
+    printf "\033[0;36mTotal wall-clock: %ds\033[0m\n" "$SECONDS"
+}
+
 # Print a one-line run-provenance footer: UTC timestamp, short commit + describe,
 # and clean/dirty (tracked changes vs HEAD — untracked scratch files don't count).
 # This suite is long-running; the footer says which build a scrolled-back result
@@ -156,6 +277,8 @@ _emit_summary() {
                 printf "  \033[0;31m- %s\033[0m\n" "$e" >&2
             done
         fi
+        _section_close 2>/dev/null || true
+        _print_timing_table >&2 2>/dev/null || true
     fi
 }
 
@@ -393,6 +516,12 @@ if ! docker info &>/dev/null 2>&1; then
     exit 1
 fi
 
+if [ -n "${SANDY_INTEG_ONLY:-}" ] || [ -n "${SANDY_INTEG_SKIP:-}" ]; then
+    info "Section selection active: ONLY='${SANDY_INTEG_ONLY:-}' SKIP='${SANDY_INTEG_SKIP:-}'"
+    info "  (subset runs assume images are already built — a cold image build"
+    info "   inside a selected section counts against SANDY_INTEG_TIMEOUT)"
+fi
+
 # Detect available credentials.
 # Check env vars, well-known credential files, AND ~/.sandy/.secrets (the
 # user-level secrets file that sandy itself reads at launch). Sandy loads
@@ -542,8 +671,74 @@ if [ "$_all_true" = false ]; then
 fi
 
 # ============================================================
-info "1. Feature guards (no credentials needed)"
 # ============================================================
+# Image warm-up — hoist cold `docker build` out of the timed tests.
+# ============================================================
+# The per-test timeout (SANDY_INTEG_TIMEOUT, default 300s) exists to bound an
+# agent TURN, not a multi-minute image build. Any change to the base Dockerfile
+# invalidates EVERY image, so the next run would otherwise rebuild the whole
+# stack inside whichever test happened to trigger it first. That is exactly how
+# the bookworm->trixie migration produced three unrelated-looking failures:
+# section 15b died with SIGALRM mid `apt-get install` on the base image, and the
+# codex launch blew its 300s budget building base+proxy+codex before codex ever
+# ran (so: no answer -> test failed, and no sandbox dir yet -> a second test
+# failed). None of it was an agent bug.
+#
+# Building up front under a generous timeout means per-test timeouts only ever
+# cover the agent turn, and the timing table separates build cost from test
+# cost. ensure_image_built short-circuits when the image already exists, so on a
+# warm host this whole phase is a no-op costing a few `docker image inspect`s.
+#   Skip with SANDY_INTEG_NO_WARM=1; timeout via SANDY_INTEG_BUILD_TIMEOUT.
+if [ "${SANDY_INTEG_NO_WARM:-0}" != "1" ]; then
+    _warm_start=$SECONDS
+    _warm_built=0
+    info "Warming agent images (cold builds hoisted out of timed tests)..."
+    # Generous build timeout for this phase only; restored afterwards so the
+    # per-test budget is untouched.
+    _warm_old_timeout="${SANDY_INTEG_TIMEOUT:-}"
+    export SANDY_INTEG_TIMEOUT="${SANDY_INTEG_BUILD_TIMEOUT:-1800}"
+    _warm_one() { # $1=flag $2=agent $3=image
+        [ "$1" = true ] || return 0
+        if docker image inspect "$3" >/dev/null 2>&1; then return 0; fi
+        info "  building $3 (cold) ..."
+        ensure_image_built "$2" "$3" || warn "  warm-up: $3 did not build; its tests will build it inline"
+        _warm_built=$(( _warm_built + 1 ))
+    }
+    _warm_one "$HAS_CLAUDE"   claude   sandy-claude-code
+    _warm_one "$HAS_CODEX"    codex    sandy-codex
+    _warm_one "$HAS_GEMINI"   gemini   sandy-gemini-cli
+    _warm_one "$HAS_OPENCODE" opencode sandy-opencode
+    _warm_one "$HAS_GROK"     grok     sandy-grok
+    # sandy-full (the multi-agent superset) is only exercised by the combo
+    # section, which needs two credentialed agents to be meaningful.
+    _warm_n=0
+    for _f in "$HAS_CLAUDE" "$HAS_CODEX" "$HAS_GEMINI" "$HAS_OPENCODE" "$HAS_GROK"; do
+        [ "$_f" = true ] && _warm_n=$(( _warm_n + 1 ))
+    done
+    [ "$_warm_n" -ge 2 ] && _warm_one true claude,gemini sandy-full
+    if [ -n "$_warm_old_timeout" ]; then
+        export SANDY_INTEG_TIMEOUT="$_warm_old_timeout"
+    else
+        unset SANDY_INTEG_TIMEOUT
+    fi
+    _warm_dur=$(( SECONDS - _warm_start ))
+    if [ "$_warm_built" -gt 0 ]; then
+        info "  warm-up built $_warm_built image(s) in ${_warm_dur}s"
+    else
+        info "  all images already present (${_warm_dur}s)"
+    fi
+    # Record as a pseudo-section so build cost shows in the timing table without
+    # being selectable (a deselected warm-up would defeat the purpose).
+    _SEC_IDS[_SEC_COUNT]="0"
+    _SEC_TITLES[_SEC_COUNT]="0. Image warm-up (${_warm_built} built)"
+    _SEC_TIMES[_SEC_COUNT]="$_warm_dur"
+    _SEC_STATES[_SEC_COUNT]="run"
+    _SEC_COUNT=$(( _SEC_COUNT + 1 ))
+fi
+
+section "1. Feature guards (no credentials needed)"
+# ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 # These just need the sandy script; they exit at the guard before Docker.
 # --help and --version exit before config loading, so we pass -p "test"
@@ -643,9 +838,11 @@ else
     fail "SANDY_LOCAL_LLM_HOST=bare-IP rejected"
 fi
 
+fi  # section 1
 # ============================================================
-info "2. Codex — image build and headless response"
+section "2. Codex — image build and headless response"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 if [ "$HAS_OPENAI_API_KEY" = true ]; then
     setup_project codex "integ-codex"
@@ -761,9 +958,11 @@ fi
 
 # (Section 3 removed — CODEX_API_KEY aliasing was dropped; codex uses OPENAI_API_KEY natively)
 
+fi  # section 2
 # ============================================================
-info "4. Codex — in-container checks (sandy-codex image)"
+section "4. Codex — in-container checks (sandy-codex image)"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 if ensure_image_built codex sandy-codex; then
     # Check codex is on PATH
@@ -810,9 +1009,11 @@ else
     fail "codex in-container checks (failed to build sandy-codex image)"
 fi
 
+fi  # section 4
 # ============================================================
-info "5. Gemini — image build and headless response"
+section "5. Gemini — image build and headless response"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 if [ "$HAS_GEMINI" = true ]; then
     setup_project gemini "integ-gemini"
@@ -851,9 +1052,11 @@ else
     skip "gemini image build and headless (no Gemini credentials)"
 fi
 
+fi  # section 5
 # ============================================================
-info "6. Gemini — in-container checks (sandy-gemini-cli image)"
+section "6. Gemini — in-container checks (sandy-gemini-cli image)"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 if ensure_image_built gemini sandy-gemini-cli; then
     _ver="$(docker run --rm --entrypoint bash sandy-gemini-cli -c 'gemini --version 2>/dev/null || echo MISSING')"
@@ -887,14 +1090,19 @@ else
     fail "gemini in-container checks (failed to build sandy-gemini-cli image)"
 fi
 
+fi  # section 6
 # ============================================================
-info "7. Claude — headless regression"
+section "7. Claude — headless regression"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 if [ "$HAS_CLAUDE" = true ]; then
     setup_project claude "integ-claude"
 
-    _out="$(run_sandy_headless -- -p "reply with exactly one word: cherry")"
+    # Canonical default-model test: the ONE launch in this suite that
+    # deliberately opts OUT of the Haiku pin above, so the DEFAULT Claude
+    # model path is still exercised end to end.
+    _out="$(run_sandy_headless ${_DEFAULT_MODEL_ENV[@]+"${_DEFAULT_MODEL_ENV[@]}"} -- -p "reply with exactly one word: cherry")"
 
     # Image should exist after first run
     if docker image inspect sandy-claude-code &>/dev/null; then
@@ -942,9 +1150,11 @@ else
     skip "claude headless regression (no Anthropic credentials)"
 fi
 
+fi  # section 7
 # ============================================================
-info "7b. Claude — in-container checks (sandy-claude-code image)"
+section "7b. Claude — in-container checks (sandy-claude-code image)"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 if ensure_image_built claude sandy-claude-code; then
     _ver="$(docker run --rm --entrypoint bash sandy-claude-code -c 'claude --version 2>/dev/null || echo MISSING')"
@@ -978,9 +1188,11 @@ else
     fail "claude in-container checks (failed to build sandy-claude-code image)"
 fi
 
+fi  # section 7b
 # ============================================================
-info "8. Cross-agent regression"
+section "8. Cross-agent regression"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 # If we have both claude and codex keys, verify switching agents
 # on the same project dir works without cross-contamination.
@@ -1065,9 +1277,11 @@ else
     skip "cross-agent regression (need at least 2 sets of credentials)"
 fi
 
+fi  # section 8
 # ============================================================
-info "9. Codex — OAuth read-only mount"
+section "9. Codex — OAuth read-only mount"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 if [ "$HAS_CODEX_OAUTH" = true ]; then
     setup_project codex "integ-codex-oauth"
@@ -1090,9 +1304,11 @@ else
     skip "codex OAuth read-only mount (no ~/.codex/auth.json)"
 fi
 
+fi  # section 9
 # ============================================================
-info "10. Gemini — OAuth path"
+section "10. Gemini — OAuth path"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 if [ "$HAS_GEMINI_OAUTH" = true ]; then
     setup_project gemini "integ-gemini-oauth"
@@ -1119,9 +1335,11 @@ else
     skip "gemini OAuth (no ~/.gemini/oauth_creds.json or tokens.json)"
 fi
 
+fi  # section 10
 # ============================================================
-info "11. OpenCode — image build and headless response"
+section "11. OpenCode — image build and headless response"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 if [ "$HAS_OPENCODE" = true ]; then
     setup_project opencode "integ-opencode"
@@ -1172,9 +1390,11 @@ else
     skip "opencode image build and headless (no provider key or OAuth file)"
 fi
 
+fi  # section 11
 # ============================================================
-info "12. OpenCode — in-container checks (sandy-opencode image)"
+section "12. OpenCode — in-container checks (sandy-opencode image)"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 if ensure_image_built opencode sandy-opencode; then
     _ver="$(docker run --rm --entrypoint bash sandy-opencode -c 'opencode --version 2>/dev/null || echo MISSING')"
@@ -1208,9 +1428,11 @@ else
     fail "opencode in-container checks (failed to build sandy-opencode image)"
 fi
 
+fi  # section 12
 # ============================================================
-info "12b. Grok — image build and headless response"
+section "12b. Grok — image build and headless response"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 
 if [ "$HAS_GROK" = true ]; then
     setup_project grok "integ-grok"
@@ -1253,9 +1475,11 @@ else
     skip "grok image build and headless (no XAI_API_KEY)"
 fi
 
+fi  # section 12b
 # ============================================================
-info "12c. Grok — in-container checks (sandy-grok image)"
+section "12c. Grok — in-container checks (sandy-grok image)"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 # Credentials-free: this is the authoritative check that grok's prebuilt-binary
 # install path (curl https://x.ai/cli/install.sh | bash, NOT npm) actually
 # resolves and lands a grok binary — the one link the static suite can't verify.
@@ -1292,9 +1516,11 @@ else
     fail "grok in-container checks (failed to build sandy-grok image)"
 fi
 
+fi  # section 12c
 # ============================================================
-info "13. Egress proxy (M2.7) — end-to-end through the sidecar"
+section "13. Egress proxy (M2.7) — end-to-end through the sidecar"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 # Proves the agent reaches the model API THROUGH the proxy on the --internal
 # two-network topology (the macOS F2 fix; identical on Linux). Requires Claude
 # credentials. Until M2.7 merges to main, the proxy image builds from the
@@ -1370,9 +1596,11 @@ else
     skip "egress proxy end-to-end (no Claude credentials)"
 fi
 
+fi  # section 13
 # ============================================================
-info "13b. Egress proxy — non-TCP egress backstop (--internal drops UDP/QUIC)"
+section "13b. Egress proxy — non-TCP egress backstop (--internal drops UDP/QUIC)"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 # The proxy is TCP-only by design; --internal must drop all non-TCP egress (an L3
 # FORWARD drop), or UDP/QUIC/HTTP-3 would bypass the SNI proxy and DNS could
 # tunnel out. This is deterministic and needs no agent/creds — a throwaway alpine
@@ -1392,9 +1620,11 @@ else
     skip "non-TCP backstop (could not create --internal test network)"
 fi
 
+fi  # section 13b
 # ============================================================
-info "14. Sandbox compatibility floor (M4 PR 4.2) — hard refuse below floor"
+section "14. Sandbox compatibility floor (M4 PR 4.2) — hard refuse below floor"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 # The 1.x forward-compat promise: a sandbox created below SANDY_SANDBOX_MIN_COMPAT
 # is refused at launch (the launcher exits before docker run). Exercise the real
 # launch path: create a sandbox, downgrade its marker below the floor, and assert
@@ -1441,9 +1671,11 @@ else
     skip "sandbox compatibility floor (needs Claude credentials)"
 fi
 
+fi  # section 14
 # ============================================================
-info "15. Failure-mode guards (M4 PR 4.4) — fail cleanly, not cryptically"
+section "15. Failure-mode guards (M4 PR 4.4) — fail cleanly, not cryptically"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 # Sandy must exit non-zero with a SPECIFIC, actionable message on the common
 # launch failures. Pure-script coverage (the credential validator + source-level
 # message lock-in) is run-tests.sh §53; here we exercise the real launch path.
@@ -1473,6 +1705,18 @@ if [ "$HAS_CLAUDE" = true ]; then
     _bad_home="$(mktemp -d)"; mkdir -p "$_bad_home/.claude"
     printf '{ this is not valid json' > "$_bad_home/.claude/.credentials.json"
     _bad_sbx="$(mktemp -d)"
+    # Seed the throwaway SANDY_HOME with the real one's generated Dockerfiles
+    # and build-hash files. Without this, sandy sees no .base_build_hash
+    # (sandy:6013) and rebuilds the base image with --no-cache --pull (6016)
+    # BEFORE it ever reaches the credential check (~2000 lines later, 8136) —
+    # so this test blew its timeout and died with SIGALRM mid `apt-get install`
+    # instead of asserting anything. Seeding makes the hash match and the image
+    # inspect succeed, so every build is skipped and the test exercises what it
+    # is actually about: the corrupt-credentials error path.
+    _real_sandy_home="${SANDY_HOME:-$HOME/.sandy}"
+    cp -a "$_real_sandy_home"/Dockerfile* "$_bad_sbx"/ 2>/dev/null || true
+    cp -a "$_real_sandy_home"/.base_build_hash "$_real_sandy_home"/.build_hash* \
+          "$_real_sandy_home"/.skills_build_hash "$_bad_sbx"/ 2>/dev/null || true
     setup_project claude "integ-corrupt-creds"
     _fm_out2="$(HOME="$_bad_home" SANDY_HOME="$_bad_sbx" CLAUDE_CODE_OAUTH_TOKEN="" \
         timeout 300 "$SANDY_SCRIPT" -p "noop" 2>&1)" && _fm_rc2=0 || _fm_rc2=$?
@@ -1487,9 +1731,11 @@ else
     skip "corrupt-credentials guard (needs Claude image built)"
 fi
 
+fi  # section 15
 # ============================================================
-info "16. Multi-agent combo (M4 PR 4.3) — sandy-full + headless routes to first agent"
+section "16. Multi-agent combo (M4 PR 4.3) — sandy-full + headless routes to first agent"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 # §8 covers *sequential* single-agent switching; this covers a genuine
 # multi-agent *combo* session: SANDY_AGENT=<a>,<b> selects the sandy-full
 # superset image and, in headless (-p) mode, routes the prompt to the FIRST
@@ -1550,9 +1796,11 @@ else
     skip "multi-agent combo (need 2 of claude/gemini/codex credentials)"
 fi
 
+fi  # section 16
 # ============================================================
-info "17. Claude auth — OAuth-first suppresses ANTHROPIC_API_KEY when both are set"
+section "17. Claude auth — OAuth-first suppresses ANTHROPIC_API_KEY when both are set"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 # Billing-correctness invariant: Claude Code resolves ANTHROPIC_API_KEY AHEAD of
 # CLAUDE_CODE_OAUTH_TOKEN, so if sandy forwarded both, the API key would silently
 # win and bill per-use — bypassing the OAuth/subscription path. With both set,
@@ -1604,9 +1852,11 @@ else
     skip "OAuth-first credential suppression (needs the sandy-claude-code image)"
 fi
 
+fi  # section 17
 # ============================================================
-info "18. Introspection — --print-state full-mode docker-spawn budget (#25)"
+section "18. Introspection — --print-state full-mode docker-spawn budget (#25)"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 # #25 cut full-mode --print-state's FIXED cost from ~9 spawns to ~3 (ONE
 # batched `docker image inspect` for the whole image inventory + one
 # `docker ps` + one `docker network ls`). On top of that fixed cost, full mode
@@ -1658,9 +1908,11 @@ else
 fi
 rm -f "$_sc_log"
 
+fi  # section 18
 # ============================================================
-info "19. Daemon-mode lifecycle acceptance (#17) — test/acceptance-daemon.sh"
+section "19. Daemon-mode lifecycle acceptance (#17) — test/acceptance-daemon.sh"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 # The daemon lifecycle (start → attach in a real PTY → abrupt kill -9 of the
 # client → container/supervisor/agent-process survive → reattach with state
 # intact → --stop full teardown) is a real-Docker end-to-end scenario. It lives
@@ -1687,9 +1939,11 @@ else
     skip "daemon-mode acceptance (acceptance-daemon.sh not found)"
 fi
 
+fi  # section 19
 # ============================================================
-info "20. Fleet-update acceptance (#41) — test/acceptance-update-sessions.sh"
+section "20. Fleet-update acceptance (#41) — test/acceptance-update-sessions.sh"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 # Two real daemon sessions → --update-sessions --dry-run (no-op) → forced
 # (--rebuild) and organic staleness → scoped rolling restart with new container
 # ids + sandy.updated_at labels → image_stale:false after → --stop. Every
@@ -1716,9 +1970,11 @@ else
     skip "fleet-update acceptance (acceptance-update-sessions.sh not found)"
 fi
 
+fi  # section 20
 # ============================================================
-info "21. Multi-agent pane-topology acceptance (#22) — test/acceptance-pane-topology.sh"
+section "21. Multi-agent pane-topology acceptance (#22) — test/acceptance-pane-topology.sh"
 # ============================================================
+if [ "$_SECTION_ON" = true ]; then
 # Four combos (claude,gemini / claude,codex / claude,gemini,codex / all) each
 # launched via --start with SANDY_TEST_PANE_TAGS=1, then the real tmux session
 # is inspected via list-panes + capture-pane: pane COUNT, GEOMETRY
@@ -1746,9 +2002,11 @@ else
     skip "multi-agent pane-topology acceptance (acceptance-pane-topology.sh not found)"
 fi
 
+fi  # section 21
 # ============================================================
 # Summary
 # ============================================================
+_section_close
 COMPLETED=true
 echo ""
 TOTAL=$((PASS + FAIL + SKIP))
@@ -1767,5 +2025,25 @@ else
         printf "\033[0;33m(%d tests skipped — missing credentials)\033[0m\n" "$SKIP"
     fi
 fi
+_print_timing_table
+
+# Warn about any SANDY_INTEG_ONLY token that matched no known section id —
+# catches typos that would otherwise silently run nothing.
+if [ -n "${SANDY_INTEG_ONLY:-}" ]; then
+    for _tok in $(printf '%s' "$SANDY_INTEG_ONLY" | tr ',' ' '); do
+        [ -n "$_tok" ] || continue
+        _tok_matched=false
+        for _sid in ${_SEC_IDS[@]+"${_SEC_IDS[@]}"}; do
+            if [ "$_sid" = "$_tok" ]; then
+                _tok_matched=true
+                break
+            fi
+        done
+        if [ "$_tok_matched" = false ]; then
+            printf "\033[0;33mWarning: SANDY_INTEG_ONLY token '%s' matched no section (typo?)\033[0m\n" "$_tok"
+        fi
+    done
+fi
+
 _run_provenance
 [ "$FAIL" -eq 0 ] || exit 1
