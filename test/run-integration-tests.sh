@@ -2003,6 +2003,127 @@ else
 fi
 
 fi  # section 21
+
+# ============================================================
+section "22. Toolchain freshness — pinned Go minors still upstream-supported"
+# ============================================================
+if [ "$_SECTION_ON" = true ]; then
+# This catches ROT, not regression — a distinction that cost real security
+# coverage. run-tests.sh asserts the base image's Go pin is not an *ancient*
+# minor, but that is a STATIC floor: it keeps passing a pin that was supported
+# when written and has since aged out. That is precisely what happened before
+# 1.6.0 — the egress proxy pinned `golang:1.24-bookworm`, a floating minor tag
+# that genuinely delivered 12 patch releases while 1.24 was supported, then went
+# silent for ~6 months once Go dropped it. The documented monthly --pull refresh
+# kept running and kept refreshing the Debian layer, but no longer the Go stdlib
+# that implements the proxy's TLS/HTTP/CONNECT I/O. Nothing failed; the
+# mechanism just went quiet, and no test could see it.
+#
+# Only a LIVE check can see that, so it lives here: this suite has network,
+# run-tests.sh deliberately does not. Go supports exactly its two newest majors
+# and go.dev/dl/?mode=json lists only those, so membership in that set IS the
+# support question — no hardcoded version list to rot in its own right.
+#
+# Unreachable go.dev => SKIP, never fail: a flaky fetch must not red a suite
+# that is otherwise about sandy's own behavior.
+_GO_SUPPORTED="$(curl -fsSL --max-time 20 'https://go.dev/dl/?mode=json' 2>/dev/null \
+    | grep -oE '"version": *"go[0-9]+\.[0-9]+' | sed 's/.*go//' | sort -u | tr '\n' ' ')"
+if [ -z "$_GO_SUPPORTED" ]; then
+    skip "Go pins still upstream-supported (go.dev unreachable)"
+else
+    info "  Go upstream currently supports: $_GO_SUPPORTED"
+    _go_pin_check() { # $1=human label  $2=pinned minor (e.g. 1.26)
+        case " $_GO_SUPPORTED " in
+            *" $2 "*)
+                pass "$1: Go $2 is still upstream-supported"
+                ;;
+            *)
+                fail "$1: Go $2 is NO LONGER SUPPORTED (upstream: $_GO_SUPPORTED)"
+                echo "    Go has stopped patching this line, so the monthly image refresh is" >&2
+                echo "    silently a no-op for the Go stdlib — the exact rot 1.6.0 fixed." >&2
+                echo "    Fix: bump the pin in sandy's generate_dockerfile_* to a supported minor." >&2
+                ;;
+        esac
+    }
+    _GO_PROXY_PIN="$(grep -oE 'FROM golang:[0-9]+\.[0-9]+' "$SANDY_SCRIPT" | head -1 | sed 's/.*golang://')"
+    _GO_BASE_PIN="$(grep -oE 'ARG GO_VERSION=[0-9]+\.[0-9]+' "$SANDY_SCRIPT" | head -1 | sed 's/.*=//')"
+    # The proxy is the security-critical one: it parses untrusted wire bytes
+    # (TLS ClientHello, HTTP Host) at the isolation boundary.
+    if [ -n "$_GO_PROXY_PIN" ]; then
+        _go_pin_check "egress proxy image" "$_GO_PROXY_PIN"
+    else
+        fail "could not extract the proxy Go pin from $SANDY_SCRIPT (FROM golang:X.Y)"
+    fi
+    if [ -n "$_GO_BASE_PIN" ]; then
+        _go_pin_check "base image" "$_GO_BASE_PIN"
+    else
+        fail "could not extract the base Go pin from $SANDY_SCRIPT (ARG GO_VERSION=X.Y)"
+    fi
+fi
+
+# --- Node + Debian: tiered support, so WARN on degraded, FAIL on EOL ---------
+# Go is binary (in the supported set or not). Node and Debian instead DEGRADE:
+# Node goes Active LTS -> Maintenance -> EOL, Debian goes regular -> LTS -> EOL,
+# and the middle tier still receives security fixes. So a pin entering the
+# middle tier is a "plan the bump" signal (warn), and only EOL is a failure.
+#
+# Python is deliberately NOT checked separately: sandy does not pin it: it is
+# whatever the Debian base ships, so Debian's clock IS Python's clock here.
+# Rust/Bun/uv/the npm agent CLIs/grok all resolve at build time and cannot rot.
+_TODAY="$(date -u +%Y-%m-%d)"
+
+# Node: the authoritative release schedule, straight from nodejs/Release.
+_NODE_PIN="$(grep -oE 'setup_[0-9]+\.x' "$SANDY_SCRIPT" | head -1 | sed 's/setup_//; s/\.x//')"
+_NODE_SCHED="$(curl -fsSL --max-time 20 'https://raw.githubusercontent.com/nodejs/Release/main/schedule.json' 2>/dev/null)"
+if [ -z "$_NODE_PIN" ]; then
+    fail "could not extract the Node major from $SANDY_SCRIPT (setup_NN.x)"
+elif [ -z "$_NODE_SCHED" ]; then
+    skip "Node $_NODE_PIN still supported (nodejs release schedule unreachable)"
+else
+    _NODE_DATES="$(printf '%s' "$_NODE_SCHED" | python3 -c 'import json,sys; e=json.load(sys.stdin).get("v"+sys.argv[1],{}); print(e.get("maintenance",""), e.get("end",""))' "$_NODE_PIN" 2>/dev/null)"
+    _NODE_MAINT="${_NODE_DATES%% *}"; _NODE_END="${_NODE_DATES##* }"
+    if [ -z "$_NODE_END" ]; then
+        fail "Node $_NODE_PIN is not in the upstream release schedule at all"
+    elif [[ "$_TODAY" > "$_NODE_END" ]]; then
+        fail "Node $_NODE_PIN reached END OF LIFE on $_NODE_END — no more security fixes"
+        echo "    Fix: bump setup_NN.x in sandy's generate_dockerfile_base to a supported major." >&2
+    elif [ -n "$_NODE_MAINT" ] && [[ "$_TODAY" > "$_NODE_MAINT" ]]; then
+        pass "Node $_NODE_PIN is supported (EOL $_NODE_END)"
+        printf "  \033[0;33m! Node %s entered Maintenance LTS on %s — critical fixes only; plan the bump\033[0m\n" "$_NODE_PIN" "$_NODE_MAINT"
+    else
+        pass "Node $_NODE_PIN is Active LTS (maintenance $_NODE_MAINT, EOL $_NODE_END)"
+    fi
+fi
+
+# Debian: endoflife.date carries both the regular-support end and the LTS end.
+_DEB_PIN="$(grep -oE 'FROM debian:[a-z]+-slim' "$SANDY_SCRIPT" | head -1 | sed 's/FROM debian://; s/-slim//')"
+_DEB_JSON="$(curl -fsSL --max-time 20 'https://endoflife.date/api/debian.json' 2>/dev/null)"
+if [ -z "$_DEB_PIN" ]; then
+    fail "could not extract the Debian suite from $SANDY_SCRIPT (FROM debian:<suite>-slim)"
+elif [ -z "$_DEB_JSON" ]; then
+    skip "Debian $_DEB_PIN still supported (endoflife.date unreachable)"
+else
+    _DEB_DATES="$(printf '%s' "$_DEB_JSON" | python3 -c 'import json,sys
+want = sys.argv[1].lower()
+for r in json.load(sys.stdin):
+    if str(r.get("codename","")).lower() == want:
+        print(r.get("eol",""), r.get("extendedSupport",""))
+        break' "$_DEB_PIN" 2>/dev/null)"
+    _DEB_EOL="${_DEB_DATES%% *}"; _DEB_LTS="${_DEB_DATES##* }"
+    if [ -z "$_DEB_EOL" ]; then
+        fail "Debian '$_DEB_PIN' not found upstream — is the suite name right?"
+    elif [ "$_DEB_LTS" != "True" ] && [ -n "$_DEB_LTS" ] && [[ "$_TODAY" > "$_DEB_LTS" ]]; then
+        fail "Debian $_DEB_PIN is fully EOL (LTS ended $_DEB_LTS) — no security fixes at all"
+        echo "    Fix: bump FROM debian:<suite>-slim in generate_dockerfile_base." >&2
+    elif [[ "$_TODAY" > "$_DEB_EOL" ]]; then
+        pass "Debian $_DEB_PIN still receives LTS security support (until $_DEB_LTS)"
+        printf "  \033[0;33m! Debian %s left REGULAR support on %s — community LTS only (narrower package/arch coverage); plan the bump\033[0m\n" "$_DEB_PIN" "$_DEB_EOL"
+    else
+        pass "Debian $_DEB_PIN is in regular security support (until $_DEB_EOL)"
+    fi
+fi
+fi  # section 22
+
 # ============================================================
 # Summary
 # ============================================================
