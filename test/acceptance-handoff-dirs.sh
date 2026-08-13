@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# End-to-end handoff-mailbox acceptance (#132 slice 1: dirs + mounts only).
+# End-to-end handoff-handoff directories acceptance (#132 slice 1: dirs + mounts only).
 #
 # ⚠️ RUN ON A HOST WITH DOCKER. This cannot run inside sandy (no Docker). It
 # proves the real container-level behavior that the static run-tests.sh §86
 # checks cannot: the actual bind-mount modes (outbox rw / inbox :ro), that
 # EROFS wins even for files the container-uid already owns, and that the
-# whole mailbox is a true zero-diff when the key is unset.
+# whole handoff directories is a true zero-diff when the key is unset.
 #
 # This slice ships directory/mount substrate ONLY — no relay, no helper, no
 # skills, no turn initiation, no peers, no manifest, no archive/ (its mode is
 # unsettled in #132). Nothing here ever moves a file between workspaces.
 #
-#   Usage:  bash test/acceptance-handoff-mailbox.sh          # uses ./sandy
-#           SANDY=/path/to/sandy bash test/acceptance-handoff-mailbox.sh
+#   Usage:  bash test/acceptance-handoff-dirs.sh          # uses ./sandy
+#           SANDY=/path/to/sandy bash test/acceptance-handoff-dirs.sh
 #
 # Phases:
 #   A. Negative/zero-diff — key unset: no "handoff" anywhere in `docker
 #      inspect` (Mounts + Env in one grep), no sandbox handoff/ dir, no
-#      in-container ~/handoff path.
+#      in-container ~/.handoff path.
 #   B. Positive — key set via the WORKSPACE's .sandy/config (proves the
 #      passive tier end-to-end: no approval prompt, works under the
 #      non-interactive --start supervisor): host dirs exist, mount RW flags
@@ -61,8 +61,8 @@ ck "session label resolved" "[ -n \"$SESS\" ]"
 ck "docker inspect has NO mention of handoff anywhere (mounts, env, labels)" \
    "! docker inspect \"$C\" | grep -qi handoff"
 ck "sandbox handoff/ dir does NOT exist" "[ ! -e \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff\" ]"
-ck "in-container ~/handoff does NOT exist" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" test -e /home/claude/handoff"
+ck "in-container ~/.handoff does NOT exist" \
+   "! docker exec -u \"\$(id -u)\" \"$C\" test -e /home/claude/.handoff"
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase A) exits 0" "[ $? -eq 0 ]"
 
 echo "== B. positive (SANDY_HANDOFF_DIRS=1 via workspace .sandy/config) =="
@@ -80,7 +80,7 @@ echo "== B. positive (SANDY_HANDOFF_DIRS=1 via workspace .sandy/config) =="
 mkdir -p "$WS/.sandy"
 echo "SANDY_HANDOFF_DIRS=1" >> "$WS/.sandy/config"
 env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS"; RC=$?
-ck "--start exits 0 with the mailbox enabled" "[ $RC -eq 0 ]"
+ck "--start exits 0 with the handoff directories enabled" "[ $RC -eq 0 ]"
 C="$(cid)"
 ck "daemon container is running" "[ -n \"$C\" ]"
 SESS="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C" 2>/dev/null)"
@@ -91,16 +91,16 @@ ck "host inbox dir exists" "[ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/inbox
 _mounts="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C" 2>/dev/null)"
 echo "  mounts:"; printf '%s\n' "$_mounts" | grep -i handoff | sed 's/^/    /'
 ck "outbox mount is RW=true" \
-   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/claude/handoff/outbox true\$'"
+   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/claude/.handoff/outbox true\$'"
 ck "inbox mount is RW=false" \
-   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/claude/handoff/inbox false\$'"
+   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/claude/.handoff/inbox false\$'"
 
 ck "write to outbox SUCCEEDS from inside the container" \
-   "docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/claude/handoff/outbox/probe.txt'"
+   "docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/claude/.handoff/outbox/probe.txt'"
 ck "write to inbox FAILS from inside the container" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/claude/handoff/inbox/probe.txt' 2>/dev/null"
+   "! docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/claude/.handoff/inbox/probe.txt' 2>/dev/null"
 ck "chmod u+w on the inbox dir itself FAILS (EROFS, not a mode problem)" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/claude/handoff/inbox 2>/dev/null"
+   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/claude/.handoff/inbox 2>/dev/null"
 
 # The EROFS-beats-ownership assertion — the entire point of the :ro mount
 # flag. A file placed by the HOST into inbox is owned by the agent's
@@ -109,26 +109,26 @@ ck "chmod u+w on the inbox dir itself FAILS (EROFS, not a mode problem)" \
 # flag is what actually stops it.
 echo "host-placed-in-inbox" > "$SANDY_HOME_DIR/sandboxes/$SESS/handoff/inbox/from-host.txt"
 ck "cat of the host-placed inbox file SUCCEEDS (read is fine)" \
-   "docker exec -u \"\$(id -u)\" \"$C\" cat /home/claude/handoff/inbox/from-host.txt"
+   "docker exec -u \"\$(id -u)\" \"$C\" cat /home/claude/.handoff/inbox/from-host.txt"
 # Prove the ownership premise BEFORE asserting chmod fails. Without this the
 # chmod check passes for the wrong reason if the file is not actually owned by
 # the agent uid — it would be testing permissions, not the mount flag.
 ck "host-placed inbox file IS owned by the agent uid (the premise)" \
-   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C\" stat -c '%u' /home/claude/handoff/inbox/from-host.txt 2>/dev/null)\" = \"\$(id -u)\" ]"
+   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C\" stat -c '%u' /home/claude/.handoff/inbox/from-host.txt 2>/dev/null)\" = \"\$(id -u)\" ]"
 ck "chmod u+w on the agent-OWNED host-placed inbox file STILL FAILS" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/claude/handoff/inbox/from-host.txt 2>/dev/null"
+   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/claude/.handoff/inbox/from-host.txt 2>/dev/null"
 
 # Informational only — not asserted, since the parent's on-host ownership
 # depends on how the harness itself was invoked (sudo, CI runner uid, etc.).
-_parent_stat="$(docker exec -u "$(id -u)" "$C" sh -c 'stat -c "%U:%G %a" /home/claude/handoff 2>/dev/null || stat -f "%Su:%Sg %Lp" /home/claude/handoff 2>/dev/null')" || _parent_stat="(stat unavailable)"
-echo "  info: /home/claude/handoff parent ownership/mode: $_parent_stat"
+_parent_stat="$(docker exec -u "$(id -u)" "$C" sh -c 'stat -c "%U:%G %a" /home/claude/.handoff 2>/dev/null || stat -f "%Su:%Sg %Lp" /home/claude/.handoff 2>/dev/null')" || _parent_stat="(stat unavailable)"
+echo "  info: /home/claude/.handoff parent ownership/mode: $_parent_stat"
 
 echo "== C. persistence across --stop / --start =="
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase B) exits 0" "[ $? -eq 0 ]"
 "$SANDY" --start --workspace "$WS"; ck "--start (phase C) exits 0" "[ $? -eq 0 ]"
 C="$(cid)"
 ck "outbox file from phase B still present after restart" \
-   "docker exec -u \"\$(id -u)\" \"$C\" test -f /home/claude/handoff/outbox/probe.txt"
+   "docker exec -u \"\$(id -u)\" \"$C\" test -f /home/claude/.handoff/outbox/probe.txt"
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase C, final) exits 0" "[ $? -eq 0 ]"
 
 echo

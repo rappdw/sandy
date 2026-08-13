@@ -698,7 +698,7 @@ TELEGRAM_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Telegram user IDs
 DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
 DISCORD_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Discord user IDs allowed to send messages.
 SANDY_TOOL_AUDIT|bool|0||1.4.0|stable|Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off).
-SANDY_HANDOFF_DIRS|bool|0||1.7.0|experimental|Create and mount the per-sandbox cross-workspace handoff mailbox (#132 substrate): $SANDBOX_DIR/handoff/outbox rw at ~/handoff/outbox, $SANDBOX_DIR/handoff/inbox READ-ONLY at ~/handoff/inbox. Substrate only — NOTHING moves files: no relay, no helper, no skills, no turn initiation; those are #132 follow-ups gated by separate privileged keys (SANDY_HANDOFF_PEERS, unshipped). Passive-safe: nothing sandy ships today moves files into or out of these directories — the future relay that will is gated on SANDY_HANDOFF_PEERS (privileged, unshipped), where the trust edge lives. Residual: the outbox persists across sessions, so a repo can stage content before an operator ever approves peers; sandy --reset-sandbox clears it. Default 0 (off — no dirs created, no mounts, zero launch diff).
+SANDY_HANDOFF_DIRS|bool|0||1.7.0|experimental|Create and mount the per-sandbox cross-workspace handoff directories (#132 substrate): $SANDBOX_DIR/handoff/outbox rw at ~/.handoff/outbox, $SANDBOX_DIR/handoff/inbox READ-ONLY at ~/.handoff/inbox. Substrate only — NOTHING moves files: no relay, no helper, no skills, no turn initiation; those are #132 follow-ups gated by separate privileged keys (SANDY_HANDOFF_PEERS, unshipped). Passive-safe: nothing sandy ships today moves files into or out of these directories — the future relay that will is gated on SANDY_HANDOFF_PEERS (privileged, unshipped), where the trust edge lives. Residual: the outbox persists across sessions, so a repo can stage content before an operator ever approves peers; sandy --reset-sandbox clears it. Default 0 (off — no dirs created, no mounts, zero launch diff).
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
 EOF
@@ -7158,17 +7158,17 @@ mkdir -p "$SANDBOX_DIR/npm-global"         # npm -g installs
 mkdir -p "$SANDBOX_DIR/go"                 # GOPATH (go install)
 mkdir -p "$SANDBOX_DIR/cargo"              # cargo install
 
-# BEGIN handoff mailbox substrate (#132 slice 1: dirs + mounts ONLY — no relay,
+# BEGIN handoff directories (#132 slice 1: dirs + mounts ONLY — no relay,
 # no helper, no skills, no turn initiation; nothing ever moves these files).
-# Collision guard: a workspace at ~/handoff (or below it) maps to
-# /home/claude/handoff in-container, so the mailbox mounts would nest inside
+# Collision guard: a workspace at ~/.handoff (or below it) maps to
+# /home/claude/.handoff in-container, so the handoff mounts would nest inside
 # the workspace bind and Docker would create outbox/ and inbox/ dirs in the
 # HOST workspace (pollution) / shadow workspace content. Warn-and-skip, same
 # shape as SANDY_SCREENSHOT_DIR's missing-dir handling.
 if [ "${SANDY_HANDOFF_DIRS:-0}" = "1" ]; then
     case "$SANDY_WORKSPACE" in
-        /home/claude/handoff|/home/claude/handoff/*)
-            warn "SANDY_HANDOFF_DIRS=1 but the workspace maps to $SANDY_WORKSPACE — the ~/handoff mailbox would collide with the workspace mount. Mailbox disabled for this session."
+        /home/claude/.handoff|/home/claude/.handoff/*)
+            warn "SANDY_HANDOFF_DIRS=1 but the workspace maps to $SANDY_WORKSPACE — the ~/.handoff directories would collide with the workspace mount. Handoff dirs disabled for this session."
             SANDY_HANDOFF_DIRS=0
             ;;
         *)
@@ -7176,7 +7176,7 @@ if [ "${SANDY_HANDOFF_DIRS:-0}" = "1" ]; then
             ;;
     esac
 fi
-# END handoff mailbox substrate
+# END handoff directories
 
 # Workspace .venv overlay. If the host workspace has a .venv/, we shadow it
 # with a sandbox-owned venv so (a) the host venv is never touched and
@@ -8421,13 +8421,13 @@ RUN_FLAGS+=(-v "$SANDBOX_DIR/uv:/home/claude/.local/share/uv")
 RUN_FLAGS+=(-v "$SANDBOX_DIR/npm-global:/home/claude/.npm-global")
 RUN_FLAGS+=(-v "$SANDBOX_DIR/go:/home/claude/go")
 RUN_FLAGS+=(-v "$SANDBOX_DIR/cargo:/home/claude/.cargo")
-# Handoff mailbox mounts (#132 substrate). Gated — unset/0 ⇒ zero RUN_FLAGS
+# Handoff directories mounts (#132 substrate). Gated — unset/0 ⇒ zero RUN_FLAGS
 # diff. outbox rw (agent stages files); inbox :ro (only the host may write).
 # The :ro MOUNT FLAG is the boundary, not file modes: the agent runs as the
 # host uid and owns these dirs, so chmod/chown would succeed were this rw.
 if [ "${SANDY_HANDOFF_DIRS:-0}" = "1" ]; then
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/outbox:/home/claude/handoff/outbox")
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/inbox:/home/claude/handoff/inbox:ro")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/outbox:/home/claude/.handoff/outbox")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/inbox:/home/claude/.handoff/inbox:ro")
 fi
 # Skill pack persistent state mounts. gstack mounts from the workspace (not
 # the sandbox) — see the migration block above where $WORK_DIR/.gstack is
