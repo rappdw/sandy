@@ -77,6 +77,26 @@ Since Claude Code running inside sandy cannot access Docker, running tests requi
 
 See `TESTING_PLAN.md` for manual validation steps that require interactive TUI sessions.
 
+### bash-3.2 / BSD portability lint (`test/lint-bash32.sh`)
+
+CI is Ubuntu + bash 5 + GNU userland; the maintainer's machine is macOS + bash 3.2 + BSD. Three constructs parse or expand **differently** there, so `bash -n` in CI passes and the break surfaces only on one machine — and each fails in a way that doesn't announce itself:
+
+| Code | Construct | How it failed here |
+|---|---|---|
+| `SRCSUB` | nested `source <(...)` inside `$( )` | bash 3.2 sources nothing → exit 127 → ERR trap aborted the run (§83) |
+| `PYBACK` | backtick or `$(` inside a **double-quoted** `python3 -c "..."` body | bash expands it regardless of Python comment syntax — a `` `sandy` `` in a comment made the suite **execute the real sandy binary** (§68) |
+| `APOSCS` | apostrophe in a comment inside a multi-line `$( )` | bash 3.2 doesn't skip comments when scanning a command substitution → unterminated quote → **parse abort**, while the summary still printed "945 passed, 0 failed" (§86) |
+
+```sh
+bash test/lint-bash32.sh              # lint the repo's shell scripts
+bash test/lint-bash32.sh --self-test  # prove the detectors still detect
+bash test/lint-bash32.sh --list       # the target set, for coverage assertions
+```
+
+`run-tests.sh §89` runs it and asserts both that the tree is clean **and** that the detectors fire on known-bad fixtures — a linter whose patterns quietly stopped matching would otherwise report success forever. Validated by replay against this repo's own history: pointed at the commits *before* each fix, it flags all three original defects at their exact lines. Deliberately **not** checked: `set -E` ERR traps firing in command-substitution subshells (real — see `sandy:1043` — but not reliably detectable statically, and a false positive is worse than a miss here).
+
+Fixes: `SRCSUB` → extract-then-`eval`; `PYBACK` → a **quoted** heredoc (`python3 - arg <<'PY'`); `APOSCS` → reword the comment.
+
 ## Git branch work inside sandy (`.git/HEAD` is writable as of 1.5.0, #80)
 
 As of 1.5.0 (#80) sandy leaves `.git/HEAD` **read-write**, so `git switch <branch>` / `git checkout <branch>` / `git checkout -b` **work inside the container** — HEAD is a symref (which branch is checked out), not a host-code-execution vector. What stays bind-mounted **read-only** (the anti-ref-spoofing / hook-injection defense — see "Protected Files"): `.git/config`, `.gitmodules`, `.git/packed-refs`, `.git/hooks`, `.git/info`, and submodule gitdirs. Consequences of *those* staying `:ro`:
