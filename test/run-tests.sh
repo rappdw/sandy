@@ -6943,6 +6943,37 @@ check "--reset-sandbox scopes to the sandbox dir, not the sibling .claude.json" 
              && ! printf "%s" "$_f" | grep -q "claude.json"' -- "$_S87"
 
 # ============================================================
+echo ""
+echo "§88: self-path resolution — a relative \$0 must survive a cd (Fix B regression)"
+# ============================================================
+# sandy re-invokes itself as a child in two places that FIRST cd elsewhere: the
+# --start approval pre-pass (Fix B) and --update-sessions step 2. With a
+# relative $0 (./sandy — a dev checkout, and what the acceptance scripts use)
+# the child resolves to nothing after the cd. Fix B swallows that with
+# `|| true`, so the failure is silent and the passive-privileged approval it
+# exists to perform never happens — reviving the very CLAUDE_CODE_OAUTH_TOKEN
+# drop it was written to fix. Found by acceptance-handoff-dirs.sh printing
+# "./sandy: No such file or directory".
+_S88="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_s88_fn="$(sed -n '/^_sandy_self_path()/,/^}$/p' "$_S88")"
+
+check "_sandy_self_path exists" bash -c '[ -n "$1" ]' -- "$_s88_fn"
+check "_sandy_self_path makes a relative path absolute" \
+    bash -c 'cd /home/claude 2>/dev/null || cd /tmp; r="$(eval "$1"; _sandy_self_path ./sandy)"; case "$r" in /*/sandy) exit 0 ;; *) exit 1 ;; esac' -- "$_s88_fn"
+check "_sandy_self_path leaves an absolute path unchanged" \
+    bash -c 'r="$(eval "$1"; _sandy_self_path /opt/x/sandy)"; [ "$r" = "/opt/x/sandy" ]' -- "$_s88_fn"
+check "_sandy_self_path leaves a bare PATH name unchanged" \
+    bash -c 'r="$(eval "$1"; _sandy_self_path sandy)"; [ "$r" = "sandy" ]' -- "$_s88_fn"
+check "resolved path still resolves after a cd (the actual bug)" \
+    bash -c 'cd "$(dirname "$2")"; r="$(eval "$1"; _sandy_self_path ./sandy)"; cd /tmp; [ -f "$r" ]' -- "$_s88_fn" "$_S88"
+
+# Both cd-then-reinvoke sites must use the helper, never a bare "$0".
+check "Fix B (--start approval pre-pass) uses the resolved self path" \
+    bash -c 'grep -q "cd \"\$WORK_DIR\" 2>/dev/null && SANDY_APPROVE_ONLY=1 \"\$(_sandy_self_path)\"" "$1"' -- "$_S88"
+check "no cd-then-reinvoke site uses a bare \$0" \
+    bash -c '! grep -nE "cd [^&;]*(&&|;)[^&;]*\"\\\$0\"" "$1"' -- "$_S88"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
