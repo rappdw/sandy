@@ -386,9 +386,9 @@ Usage inside a session:
 
 No default — leaving `SANDY_SCREENSHOT_DIR` unset disables the feature entirely. macOS users typically point at `~/Desktop` (the macOS default for `Cmd+Shift+4` captures) or a custom folder configured via `defaults write com.apple.screencapture location <path>`. The mount is read-only by design; the agent should never modify your screenshot folder.
 
-### Handoff mailbox (`SANDY_HANDOFF_DIRS`)
+### Handoff directories (`SANDY_HANDOFF_DIRS`)
 
-Set `SANDY_HANDOFF_DIRS=1` (passive-safe, default `0`) to create a per-sandbox mailbox: `~/handoff/outbox` (read-write, for the agent to stage outgoing files) and `~/handoff/inbox` (**read-only** — only the host can place files there). This is directory/mount substrate only — there's no relay, helper, skill, or peer mechanism yet to actually move files between workspaces, so today the mailbox stays empty until you use it yourself. See `CLAUDE.md` for the full rationale.
+Set `SANDY_HANDOFF_DIRS=1` (passive-safe, default `0`) to create per-sandbox handoff directories: `~/.handoff/outbox` (read-write, for the agent to stage outgoing files) and `~/.handoff/inbox` (**read-only** — only the host can place files there). This is directory/mount substrate only — there's no relay, helper, skill, or peer mechanism yet to actually move files between workspaces, so today they stay empty until you put something in them yourself. See `CLAUDE.md` for the full rationale.
 
 ## How Network Isolation Works
 

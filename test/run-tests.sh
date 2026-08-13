@@ -6768,7 +6768,7 @@ check "marker JSON valid + carries the pinned nonce" \
 
 # ============================================================
 echo ""
-echo "§86: Handoff mailbox substrate (SANDY_HANDOFF_DIRS, #132 slice 1: dirs + mounts only)"
+echo "§86: Handoff directories (SANDY_HANDOFF_DIRS, #132 slice 1: dirs + mounts only)"
 # ============================================================
 # Directory/mount substrate ONLY — no relay, no helper, no skills, no turn
 # initiation, no peers, no manifest, no archive/ (mode unsettled in #132).
@@ -6791,20 +6791,20 @@ check "SANDY_HANDOFF_DIRS has a _sandy_key_metadata row (bool, default 0)" \
 check "--print-schema lists SANDY_HANDOFF_DIRS as a passive bool key" \
     bash -c '"$1" --print-schema 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); e=[k for k in d[\"config\"][\"passive_keys\"] if k[\"name\"]==\"SANDY_HANDOFF_DIRS\"]; assert e and e[0][\"type\"]==\"bool\", e"' -- "$_S86"
 # Mount emission
-check "RUN_FLAGS mounts outbox rw at ~/handoff/outbox" \
-    bash -c 'grep -qF "handoff/outbox:/home/claude/handoff/outbox" "$1"' -- "$_S86"
-check "RUN_FLAGS mounts inbox :ro at ~/handoff/inbox" \
-    bash -c 'grep -qF "handoff/inbox:/home/claude/handoff/inbox:ro" "$1"' -- "$_S86"
+check "RUN_FLAGS mounts outbox rw at ~/.handoff/outbox" \
+    bash -c 'grep -qF "handoff/outbox:/home/claude/.handoff/outbox" "$1"' -- "$_S86"
+check "RUN_FLAGS mounts inbox :ro at ~/.handoff/inbox" \
+    bash -c 'grep -qF "handoff/inbox:/home/claude/.handoff/inbox:ro" "$1"' -- "$_S86"
 # Mode negative controls (load-bearing): outbox must NOT be :ro; inbox path
 # appears exactly once and that occurrence carries :ro.
 check "outbox mount is NOT :ro" \
-    bash -c '! grep -q "handoff/outbox:/home/claude/handoff/outbox:ro" "$1"' -- "$_S86"
+    bash -c '! grep -q "handoff/outbox:/home/claude/.handoff/outbox:ro" "$1"' -- "$_S86"
 check "inbox path appears exactly once, and it is :ro" \
-    bash -c '[ "$(grep -c "handoff/inbox:/home/claude/handoff/inbox" "$1")" -eq 1 ] && grep -q "handoff/inbox:/home/claude/handoff/inbox:ro" "$1"' -- "$_S86"
+    bash -c '[ "$(grep -c "handoff/inbox:/home/claude/.handoff/inbox" "$1")" -eq 1 ] && grep -q "handoff/inbox:/home/claude/.handoff/inbox:ro" "$1"' -- "$_S86"
 # Gating: the mount block lives inside the SANDY_HANDOFF_DIRS=1 guard, and
 # there is no stray emission outside it (exactly 2 RUN_FLAGS handoff lines).
 check "mount emission is gated on SANDY_HANDOFF_DIRS=1" \
-    bash -c 'awk "/Handoff mailbox mounts \(#132 substrate\)/,/^fi\$/" "$1" | grep -q "SANDY_HANDOFF_DIRS:-0.*= \"1\""' -- "$_S86"
+    bash -c 'awk "/Handoff directories mounts \(#132 substrate\)/,/^fi\$/" "$1" | grep -q "SANDY_HANDOFF_DIRS:-0.*= \"1\""' -- "$_S86"
 check "exactly 2 RUN_FLAGS handoff lines (no stray emission outside the gate)" \
     bash -c '[ "$(grep -c "RUN_FLAGS.*handoff" "$1")" -eq 2 ]' -- "$_S86"
 # mkdir is gated, not unconditional: extract the BEGIN/END block and assert
@@ -6812,15 +6812,15 @@ check "exactly 2 RUN_FLAGS handoff lines (no stray emission outside the gate)" \
 # above it must not mention handoff.
 check "mkdir -p targets are inside the BEGIN/END handoff substrate block" \
     bash -c '
-      blk="$(awk "/^# BEGIN handoff mailbox substrate/,/^# END handoff mailbox substrate\$/" "$1")"
+      blk="$(awk "/^# BEGIN handoff directories/,/^# END handoff directories\$/" "$1")"
       printf "%s" "$blk" | grep -q "mkdir -p \"\$SANDBOX_DIR/handoff/outbox\" \"\$SANDBOX_DIR/handoff/inbox\""' -- "$_S86"
 check "unconditional persistent-package mkdir block does NOT mention handoff" \
-    bash -c 'awk "/Ensure persistent package directories exist/,/^# BEGIN handoff mailbox substrate/" "$1" | grep -v "^# BEGIN handoff mailbox substrate" | grep -qi handoff && exit 1 || exit 0' -- "$_S86"
+    bash -c 'awk "/Ensure persistent package directories exist/,/^# BEGIN handoff directories/" "$1" | grep -v "^# BEGIN handoff directories" | grep -qi handoff && exit 1 || exit 0' -- "$_S86"
 
 # Behavioral collision guard (pure bash, extract-and-exercise). Stubs warn()
 # so we can observe it fired, and uses a scratch SANDBOX_DIR so dir-creation
 # assertions are real filesystem checks, not string matches.
-_hb_blk="$(sed -n '/^# BEGIN handoff mailbox substrate/,/^# END handoff mailbox substrate$/p' "$_S86")"
+_hb_blk="$(sed -n '/^# BEGIN handoff directories/,/^# END handoff directories$/p' "$_S86")"
 _hb_run() {
     # args: SANDY_WORKSPACE, SANDY_HANDOFF_DIRS (may be unset -> pass "")
     local ws="$1" key="$2" dir out
@@ -6840,11 +6840,11 @@ _hb_run() {
     rm -rf "$dir"
     printf '%s' "$out"
 }
-_hb_a="$(_hb_run "/home/claude/handoff" "1")"
-check "collision guard (a): workspace == ~/handoff -> var forced 0, no dirs, warning" \
+_hb_a="$(_hb_run "/home/claude/.handoff" "1")"
+check "collision guard (a): workspace == ~/.handoff -> var forced 0, no dirs, warning" \
     bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"OUTBOX:no"* && "$1" == *"INBOX:no"* && "$1" == *"WARN:"* ]]' -- "$_hb_a"
-_hb_b="$(_hb_run "/home/claude/handoff/sub" "1")"
-check "collision guard (b): workspace under ~/handoff/ -> var forced 0, no dirs, warning" \
+_hb_b="$(_hb_run "/home/claude/.handoff/sub" "1")"
+check "collision guard (b): workspace under ~/.handoff/ -> var forced 0, no dirs, warning" \
     bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"OUTBOX:no"* && "$1" == *"INBOX:no"* && "$1" == *"WARN:"* ]]' -- "$_hb_b"
 _hb_c="$(_hb_run "/home/claude/dev/proj" "1")"
 check "collision guard (c): unrelated workspace -> both dirs created, no warning" \
