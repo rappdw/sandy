@@ -149,7 +149,7 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_TOOL_AUDIT`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_TOOL_AUDIT`, `SANDY_HANDOFF_DIRS`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -213,6 +213,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `GROK_MODEL` | passive | unset | 1.5.0 | stable | Grok Build model override (passed as -m; default grok-4.5). |
 | `SANDY_GROK_AUTH` | passive | `auto` | 1.5.0 | stable | Grok Build credential probe strategy. |
 | `SANDY_TOOL_AUDIT` | passive | `0` | 1.4.0 | stable | Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off). |
+| `SANDY_HANDOFF_DIRS` | passive | `0` | 1.7.0 | experimental | Create and mount the per-sandbox cross-workspace handoff mailbox (#132 substrate): $SANDBOX_DIR/handoff/outbox rw at ~/handoff/outbox, $SANDBOX_DIR/handoff/inbox READ-ONLY at ~/handoff/inbox. Substrate only — NOTHING moves files: no relay, no helper, no skills, no turn initiation; those are #132 follow-ups gated by separate privileged keys (SANDY_HANDOFF_PEERS, unshipped). Passive-safe: nothing sandy ships today moves files into or out of these directories — the future relay that will is gated on SANDY_HANDOFF_PEERS (privileged, unshipped), where the trust edge lives. Residual: the outbox persists across sessions, so a repo can stage content before an operator ever approves peers; sandy --reset-sandbox clears it. Default 0 (off — no dirs created, no mounts, zero launch diff). |
 | `SANDY_AUTO_APPROVE_PRIVILEGED` | env-only | unset | 0.11.2 | internal | Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only. |
 | `SANDY_DEBUG_CLEANUP` | env-only | unset | 0.11.4 | internal | Print session-stub cleanup diagnostics on exit. |
 <!-- END AUTOGEN:config-keys-table -->
@@ -296,6 +297,9 @@ As of v0.9.0, the sandbox directory contains **sibling** per-agent subdirs (`cla
 ├── npm-global/                # → /home/claude/.npm-global
 ├── go/                        # → /home/claude/go
 ├── cargo/                     # → /home/claude/.cargo
+├── handoff/                   # only when SANDY_HANDOFF_DIRS=1
+│   ├── outbox/                # → /home/claude/handoff/outbox (rw)
+│   └── inbox/                 # → /home/claude/handoff/inbox (:ro)
 ├── gstack/                    # legacy gstack state location; renamed to gstack.migrated/ on first 0.12+ launch
 ├── gstack.migrated/           # post-migration breadcrumb — safe to delete after verifying $WORK_DIR/.gstack/ works
 ├── workspace-commands/        # → .claude/commands/ (writable overlay)
@@ -2411,6 +2415,51 @@ If `gstack` is in `SANDY_SKILL_PACKS`:
 -v "<WORKSPACE>/.gstack:<HOME>/.gstack"
 ```
 Note: gstack mounts from the **workspace**, not the sandbox — see §6 "Workspace State (gstack)" for rationale and the one-shot migration from the legacy `<SANDBOX>/gstack/` location.
+
+### E.12a Handoff Mailbox Mounts (conditional on SANDY_HANDOFF_DIRS=1)
+
+```bash
+-v "<SANDBOX>/handoff/outbox:/home/claude/handoff/outbox"
+-v "<SANDBOX>/handoff/inbox:/home/claude/handoff/inbox:ro"
+```
+
+`SANDY_HANDOFF_DIRS` (passive, default `0`) creates and mounts a per-sandbox
+cross-workspace handoff mailbox — the directory/mount substrate for #132,
+nothing more. When unset (or `0`), neither `outbox/` nor `inbox/` is created
+on the host and neither `-v` flag is emitted: zero `RUN_FLAGS` diff and zero
+container-env diff versus a launch without the key.
+
+`outbox` is mounted read-write (the agent stages files there); `inbox` is
+mounted **read-only**. The `:ro` mount flag is the actual boundary, not a
+file-mode — the containerized process runs as the host uid and owns both
+directories, so an in-container `chmod`/`chown` on `inbox` would otherwise
+succeed. It's the read-only bind mount itself (EROFS at the kernel level)
+that prevents writes, including to files the agent already owns.
+
+**Out of scope for this slice** (deliberately not shipped): no relay process,
+no host-side or in-container helper, no skill/slash-command surface, no turn
+initiation, no `SANDY_HANDOFF_PEERS` (the unshipped privileged key that would
+gate actually moving files between workspaces), no manifest format, and no
+`archive/` subdirectory — its ownership/mode is unsettled pending #132's
+relay design (whoever archives a delivered message determines whether it
+needs to be writable by the agent or the relay, so shipping a mode now would
+be guessing). This mount just creates two empty directories; nothing in
+sandy today reads or writes through them.
+
+**Collision guard.** A workspace mounted at `/home/claude/handoff` or below
+it (i.e. the host workspace itself resolves under `~/handoff`) would nest the
+mailbox mounts inside the workspace bind, so Docker would materialize
+`outbox/`/`inbox/` as real directories inside the host workspace tree —
+polluting it and potentially shadowing existing workspace content. Sandy
+detects this via `SANDY_WORKSPACE` before creating any mailbox directories
+and warns-and-disables the mailbox for that session (the same shape as
+`SANDY_SCREENSHOT_DIR`'s missing-directory handling) rather than mounting
+into the workspace.
+
+Host-side, `<SANDBOX>/handoff/inbox` is an ordinary user-owned directory —
+`chmod`/`chown` from the host work exactly as on any other sandbox
+subdirectory. The `:ro` constraint applies only to the container's view via
+the bind mount; it is not a host-side permission change.
 
 ### E.13 Sandbox Mount
 
