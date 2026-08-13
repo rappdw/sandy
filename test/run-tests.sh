@@ -6967,11 +6967,27 @@ check "_sandy_self_path leaves a bare PATH name unchanged" \
 check "resolved path still resolves after a cd (the actual bug)" \
     bash -c 'cd "$(dirname "$2")"; r="$(eval "$1"; _sandy_self_path ./sandy)"; cd /tmp; [ -f "$r" ]' -- "$_s88_fn" "$_S88"
 
-# Both cd-then-reinvoke sites must use the helper, never a bare "$0".
-check "Fix B (--start approval pre-pass) uses the resolved self path" \
-    bash -c 'grep -q "cd \"\$WORK_DIR\" 2>/dev/null && SANDY_APPROVE_ONLY=1 \"\$(_sandy_self_path)\"" "$1"' -- "$_S88"
+# The value must be resolved ONCE at script top, while the cwd is still the
+# user's. The first attempt at this fix called the helper AT the call site —
+# inside `cd "$WORK_DIR" && ... "$(_sandy_self_path)"` — which is too late:
+# command substitution in the second half of an && list is expanded AFTER the
+# cd, so a relative $0 resolved against the WORKSPACE and the child died with
+# "<workspace>/sandy: No such file or directory". Same bug, moved later. So it
+# is not enough to assert the helper is used; assert WHERE it is evaluated.
+check "SANDY_SELF is resolved once at script top" \
+    bash -c 'grep -q "^SANDY_SELF=\"\$(_sandy_self_path)\"" "$1"' -- "$_S88"
+check "SANDY_SELF is assigned before any cd in the script (resolution order)" \
+    bash -c '_a="$(grep -n "^SANDY_SELF=" "$1" | head -1 | cut -d: -f1)";
+             _c="$(grep -nE "^[[:space:]]*\(?[[:space:]]*cd " "$1" | head -1 | cut -d: -f1)";
+             [ -n "$_a" ] && [ -n "$_c" ] && [ "$_a" -lt "$_c" ]' -- "$_S88"
+check "Fix B (--start approval pre-pass) uses the pre-resolved value" \
+    bash -c 'grep -q "cd \"\$WORK_DIR\" 2>/dev/null && SANDY_APPROVE_ONLY=1 \"\$SANDY_SELF\"" "$1"' -- "$_S88"
 check "no cd-then-reinvoke site uses a bare \$0" \
     bash -c '! grep -nE "cd [^&;]*(&&|;)[^&;]*\"\\\$0\"" "$1"' -- "$_S88"
+# The late-expansion trap itself: the helper must never be CALLED inside a cd
+# chain, however correct the helper is.
+check "no cd-then-reinvoke site expands \$(_sandy_self_path) late" \
+    bash -c '! grep -nE "cd [^&;]*(&&|;)[^&;]*_sandy_self_path" "$1"' -- "$_S88"
 
 # ============================================================
 # Summary
