@@ -8424,7 +8424,12 @@ RUN_FLAGS+=(-v "$SANDBOX_DIR/cargo:/home/claude/.cargo")
 # Handoff directories mounts (#132 substrate). Gated — unset/0 ⇒ zero RUN_FLAGS
 # diff. outbox rw (agent stages files); inbox :ro (only the host may write).
 # The :ro MOUNT FLAG is the boundary, not file modes: the agent runs as the
-# host uid and owns these dirs, so chmod/chown would succeed were this rw.
+# host uid and OWNS these dirs, so against a plain rw mount its chmod would
+# succeed. Under :ro the chmod itself returns EROFS — the mount flag is checked
+# above the permission check, which is what makes host-written content in inbox
+# un-forgeable from inside. (chown to another uid would fail either way: the
+# agent is unprivileged with an empty effective capability set, so that half is
+# not load-bearing here.)
 if [ "${SANDY_HANDOFF_DIRS:-0}" = "1" ]; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/outbox:/home/claude/.handoff/outbox")
     RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/inbox:/home/claude/.handoff/inbox:ro")

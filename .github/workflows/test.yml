@@ -76,12 +76,26 @@ jobs:
       # HF-incident Issue 1: the proxy parses attacker-influenced wire bytes, so
       # prove the parsers never panic under adversarial input — a short fuzz pass
       # per target (seed corpus + fuzzing). Any crasher fails the build.
+      #
+      # Budget is ITERATIONS (1000000x), not wall-clock. A duration budget makes
+      # the fuzzing coordinator derive a context deadline from it, and when that
+      # deadline fires while workers are still finishing, `go test` reports
+      # "--- FAIL: <target> ... context deadline exceeded" with NO crasher found
+      # and nothing written to testdata/ — a pure shutdown artifact that reds the
+      # build. It was already flaking main intermittently (FuzzExtractHTTPHost is
+      # the third and therefore most scheduling-pressured target). An iteration
+      # budget carries no deadline, so that failure mode cannot occur.
+      #
+      # 1000000x preserves the coverage the 30s budget was buying — CI was
+      # reaching ~1.45-1.65M execs per target in 30s — and is DETERMINISTIC:
+      # every runner now does the same work, instead of fast runners fuzzing more
+      # than slow ones. A real crasher still fails the build, which is the point.
       - name: go fuzz (short)
         working-directory: proxy
         run: |
           for t in FuzzExtractSNI FuzzParseServerName FuzzExtractHTTPHost; do
             echo "== fuzz $t =="
-            go test -run='^$' -fuzz="^${t}$" -fuzztime=30s .
+            go test -run='^$' -fuzz="^${t}$" -fuzztime=1000000x .
           done
 
       # HF-incident Issue 1: surface known vulnerabilities in the proxy's own
