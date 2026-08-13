@@ -6859,6 +6859,90 @@ check "collision guard (d): key unset -> no dirs, no warning" \
     bash -c '[[ "$1" == *"OUTBOX:no"* && "$1" == *"INBOX:no"* && "$1" != *"WARN:"* ]]' -- "$_hb_d"
 
 # ============================================================
+echo ""
+echo "§87: .claude.json — sandy must never write mcpServers (user-scope MCP contract)"
+# ============================================================
+# Operators provision MCP servers fleet-wide by writing a top-level mcpServers
+# block into the per-sandbox sibling $SANDY_HOME/sandboxes/<slug>.claude.json.
+# That loads as USER scope with no approval prompt, which is the only route that
+# works for daemon starts (project-scope servers land as "Pending approval" and
+# a cloned repo cannot approve its own).
+#
+# Today that works only because sandy happens not to touch mcpServers — the
+# ABSENCE of behavior, which nothing guarded. These checks turn it into a
+# contract: sandy has two writers of that file (json_merge of two fixed keys,
+# and the trust-entry node block), and neither may disturb an operator block.
+# NOTE: no apostrophes in comments inside any $( ) below — bash 3.2 parses
+# command substitutions without skipping comments (see §86).
+_S87="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+# (a) Source-level: sandy never references mcpServers at all.
+check "sandy never references mcpServers" \
+    bash -c '! grep -q "mcpServers" "$1"' -- "$_S87"
+
+# (b) The seed is gated on the file being ABSENT, so a pre-written operator file
+#     is never overwritten. This gate is the deliberate half of the contract.
+check ".claude.json seed is gated on the file not existing" \
+    bash -c 'grep -qF "[ ! -f \"\$CLAUDE_JSON\" ]" "$1"' -- "$_S87"
+
+# (c) The payload sandy merges must be exactly the two sandy-owned keys. A
+#     future key added here is fine; mcpServers appearing would clobber via
+#     Object.assign and is what this catches.
+check "json_merge payload for .claude.json carries no mcpServers" \
+    bash -c 'grep -F "json_merge \"\$CLAUDE_JSON\"" "$1" | grep -qv mcpServers' -- "$_S87"
+
+# (d)+(e) Behavioral: run BOTH real writers against a fixture holding an
+#     operator mcpServers block and assert it survives byte-identical while the
+#     sandy-owned keys still land. Extracted from the script, so a change to
+#     either writer is exercised for real rather than pattern-matched.
+if command -v node >/dev/null 2>&1; then
+    _s87_dir="$(mktemp -d)"
+    _s87_f="$_s87_dir/c.json"
+    cat > "$_s87_f" <<'S87FIXTURE'
+{
+  "mcpServers": {
+    "ops-linear": { "type": "stdio", "command": "npx", "args": ["-y", "linear-mcp"] },
+    "ops-remote": { "type": "http", "url": "https://mcp.example.invalid/v1" }
+  },
+  "operatorKey": "must-survive"
+}
+S87FIXTURE
+    _s87_before="$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(JSON.stringify(d.mcpServers))' "$_s87_f")"
+
+    # writer 1 — json_merge, extracted from sandy and called as sandy calls it
+    _s87_jm="$(sed -n '/^json_merge()/,/^}$/p' "$_S87")"
+    bash -c "$_s87_jm
+json_merge \"\$1\" '{\"tipsDisabled\":true,\"installMethod\":\"native\"}'" -- "$_s87_f" >/dev/null 2>&1
+
+    # writer 2 — the trust-entry node program, extracted between its own anchors
+    _s87_trust="$(awk '/Pre-trust the workspace/,/hasCompletedProjectOnboarding/' "$_S87" \
+        | sed -n '/node -e/,$p' | sed "1s/.*node -e '//" )"
+    node -e "$_s87_trust
+        fs.writeFileSync(f, JSON.stringify(d, null, 2) + \"\\n\");" \
+        "$_s87_f" "/home/claude/dev/proj" >/dev/null 2>&1
+
+    _s87_after="$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(JSON.stringify(d.mcpServers))' "$_s87_f")"
+
+    check "mcpServers survives both .claude.json writers byte-identical" \
+        bash -c '[ -n "$1" ] && [ "$1" = "$2" ]' -- "$_s87_before" "$_s87_after"
+    check "unrelated operator keys survive too" \
+        bash -c 'node -e "const d=JSON.parse(require(\"fs\").readFileSync(process.argv[1],\"utf8\"));process.exit(d.operatorKey===\"must-survive\"?0:1)" "$1"' -- "$_s87_f"
+    check "sandy-owned keys still land alongside it" \
+        bash -c 'node -e "const d=JSON.parse(require(\"fs\").readFileSync(process.argv[1],\"utf8\"));process.exit(d.tipsDisabled===true&&d.installMethod===\"native\"&&d.projects&&d.projects[\"/home/claude/dev/proj\"]&&d.projects[\"/home/claude/dev/proj\"].hasTrustDialogAccepted===true?0:1)" "$1"' -- "$_s87_f"
+    rm -rf "$_s87_dir"
+else
+    skip "mcpServers preservation behavioral checks (node not available)"
+fi
+
+# (f) --reset-sandbox iterates the sandbox DIRECTORY, so the sibling
+#     <slug>.claude.json (which holds the operator block) is out of its scope.
+#     If this ever changes, fleet MCP provisioning silently resets.
+check "--reset-sandbox scopes to the sandbox dir, not the sibling .claude.json" \
+    bash -c '_f="$(awk "/^if \[\[ \"\\\$\{1:-\}\" == \"--reset-sandbox\" \]\]/,/^fi\$/" "$1")"
+             printf "%s" "$_f" | grep -q "_rs_dir=\"\$SANDY_HOME/sandboxes/" \
+             && ! printf "%s" "$_f" | grep -q "claude.json"' -- "$_S87"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
