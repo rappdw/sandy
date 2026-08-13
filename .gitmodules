@@ -22,3 +22,12 @@
 [submodule "research/bulkhead"]
 	path = research/bulkhead
 	url = https://github.com/pmembrey/bulkhead
+[submodule "research/nono"]
+	path = research/nono
+	url = git@github.com:nolabs-ai/nono.git
+[submodule "research/openworker"]
+	path = research/openworker
+	url = git@github.com:andrewyng/openworker.git
+[submodule "research/qm"]
+	path = research/qm
+	url = git@github.com:yc-software/qm
