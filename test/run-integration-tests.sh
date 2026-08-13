@@ -2125,6 +2125,36 @@ fi
 fi  # section 22
 
 # ============================================================
+section "23. Handoff mailbox acceptance (#132 slice 1) — test/acceptance-handoff-mailbox.sh"
+# ============================================================
+if [ "$_SECTION_ON" = true ]; then
+# Directory/mount substrate ONLY (outbox rw, inbox :ro) — no relay, no helper,
+# no skills, no turn initiation. The real-Docker behavior a static check
+# cannot see: actual bind-mount RW flags, that EROFS wins even for a file the
+# container uid already owns, and that the whole feature is a true zero-diff
+# when SANDY_HANDOFF_DIRS is unset. Same invocation contract as §19-§21 —
+# self-cleaning harness, SANDY pinned to this suite's sandy.
+_acc_handoff="$_INT_SELF_DIR/acceptance-handoff-mailbox.sh"
+if [ -f "$_acc_handoff" ]; then
+    _acc_out="$(mktemp)"
+    set +e   # a failing harness exits non-zero; don't let set -e abort the suite
+    SANDY="$SANDY_SCRIPT" bash "$_acc_handoff" 2>&1 | tee "$_acc_out"
+    _acc_rc=${PIPESTATUS[0]}
+    set -e
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1)"
+    if [ "$_acc_rc" -eq 0 ]; then
+        pass "handoff-mailbox acceptance (${_acc_res:-all assertions passed})"
+    else
+        fail "handoff-mailbox acceptance (${_acc_res:-exited $_acc_rc}) — see harness output above"
+    fi
+    rm -f "$_acc_out"
+else
+    skip "handoff-mailbox acceptance (acceptance-handoff-mailbox.sh not found)"
+fi
+
+fi  # section 23
+
+# ============================================================
 # Summary
 # ============================================================
 _section_close
