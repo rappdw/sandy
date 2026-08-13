@@ -6828,8 +6828,13 @@ _hb_run() {
     out="$(
       warn() { echo "WARN:$*"; }
       SANDBOX_DIR="$dir"
-      # shellcheck disable=SC2034  # consumed by the eval'd $_hb_blk below,
-      # which shellcheck can't see into since it's a dynamic string.
+      # NOTE: no apostrophes in comments inside this $( ) — bash 3.2 (macOS)
+      # scans command substitutions WITHOUT skipping comments, so a lone
+      # apostrophe opens a quote it never closes and the whole file dies with
+      # "unexpected EOF while looking for matching quote". bash 4+ fixed it, so
+      # `bash -n` on Linux/CI passes and only the maintainer macOS run breaks.
+      # shellcheck disable=SC2034  # consumed by the evaluated $_hb_blk below,
+      # which shellcheck cannot see into because it is a dynamic string.
       SANDY_WORKSPACE="$ws"
       if [ -n "$key" ]; then SANDY_HANDOFF_DIRS="$key"; else unset SANDY_HANDOFF_DIRS; fi
       eval "$_hb_blk"
