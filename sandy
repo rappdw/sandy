@@ -473,6 +473,16 @@ _sandy_self_path() {
     esac
 }
 
+# Resolve ONCE, here, at the top of the script — while the cwd is still the one
+# the user invoked sandy from. Every consumer must use this value rather than
+# calling the helper at the point of use: the call sites sit inside
+# `cd <elsewhere> && "$(...)"`, and command substitution in the second half of
+# an && list is expanded AFTER the cd has run, so calling the helper there
+# resolves a relative $0 against the wrong directory — which is the exact bug
+# the helper exists to prevent, just moved later.
+# shellcheck disable=SC2119  # optional arg intentionally omitted; defaults to $0
+SANDY_SELF="$(_sandy_self_path)"
+
 if [[ "${1:-}" == "-v" || "${1:-}" == "--version" ]]; then
     echo "sandy $(sandy_full_version)"
     exit 0
@@ -4706,13 +4716,13 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     # (run `sandy --start` once from a terminal) or SANDY_AUTO_APPROVE_PRIVILEGED
     # set.
     if [ -t 0 ] && [ -t 2 ]; then
-        # "$0" must be resolved to an absolute path FIRST: this subshell cd's to
-        # the workspace, so a relative invocation (./sandy) would resolve to
-        # nothing there, the child would die with "No such file or directory",
-        # and the `|| true` would swallow it — silently skipping the approval
-        # pre-pass this block exists to perform.
-        # shellcheck disable=SC2119  # optional arg intentionally omitted
-        ( cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$(_sandy_self_path)" ) </dev/tty >/dev/tty 2>&1 || true
+        # $SANDY_SELF, not "$0" and not "$(_sandy_self_path)": this subshell cd's
+        # to the workspace, so a relative invocation (./sandy) resolves to nothing
+        # there, the child dies with "No such file or directory", and the
+        # `|| true` swallows it — silently skipping the approval pre-pass this
+        # block exists to perform. Calling the helper HERE would not help: the
+        # substitution is expanded after the cd. It must already be resolved.
+        ( cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$SANDY_SELF" ) </dev/tty >/dev/tty 2>&1 || true
     fi
 
     # D1 — daemonize the supervisor with `nohup … & disown`, deliberately NOT
@@ -5042,14 +5052,11 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
     # self "$0" --stop / --start child process, which manages its own lock
     # exactly as it does for a normal interactive invocation.
     #
-    # Resolve $0 to an absolute, cwd-independent path BEFORE any `cd` below
-    # (step 2 does `cd "$workspace" && "$_sandy_self" --build-only` per
-    # session). Step 2 below does `cd "$workspace" && "$_sandy_self" ...`, so a
-    # relative $0 ("./sandy" — a dev checkout, this repo's own workflow) must be
-    # resolved first or every per-session build dies with "no such file". See
-    # _sandy_self_path for the portability reasoning.
-    # shellcheck disable=SC2119  # optional arg intentionally omitted
-    _sandy_self="$(_sandy_self_path)"
+    # Step 2 below does `cd "$workspace" && "$_sandy_self" --build-only` per
+    # session, so this must already be cwd-independent. $SANDY_SELF was resolved
+    # at script top, before any cd — see the note there for why resolving at the
+    # point of use is too late.
+    _sandy_self="$SANDY_SELF"
 
     _sandy_upd_raw="$(_sandy_update_enum_sessions)"
     if [ -z "$_sandy_upd_raw" ]; then
