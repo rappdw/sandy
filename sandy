@@ -452,6 +452,27 @@ sandy_full_version() {
     [ -n "$hash" ] && ver="$ver-$hash"
     echo "$ver"
 }
+# Absolute path to this script, for the places that `cd` somewhere else and
+# then re-invoke sandy as a child. Left unresolved, a relative $0 ("./sandy")
+# resolves to nothing after the cd and the child silently fails. No
+# `readlink -f` (GNU-only, absent on BSD/macOS readlink) — cd+pwd+basename is
+# portable to both. A bare name (found via PATH) is returned unchanged, since
+# PATH lookup still works from any cwd.
+# shellcheck disable=SC2120  # the arg is optional and defaults to $0; callers
+# pass nothing, but run-tests.sh calls it WITH a path to exercise each shape.
+_sandy_self_path() {
+    local _p="${1:-$0}" _d
+    case "$_p" in
+        /*) printf '%s' "$_p" ;;
+        */*)
+            _d="$(cd "$(dirname "$_p")" 2>/dev/null && pwd)" || _d=""
+            if [ -n "$_d" ]; then printf '%s/%s' "$_d" "$(basename "$_p")"
+            else printf '%s' "$_p"; fi
+            ;;
+        *) printf '%s' "$_p" ;;
+    esac
+}
+
 if [[ "${1:-}" == "-v" || "${1:-}" == "--version" ]]; then
     echo "sandy $(sandy_full_version)"
     exit 0
@@ -4685,7 +4706,13 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     # (run `sandy --start` once from a terminal) or SANDY_AUTO_APPROVE_PRIVILEGED
     # set.
     if [ -t 0 ] && [ -t 2 ]; then
-        ( cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$0" ) </dev/tty >/dev/tty 2>&1 || true
+        # "$0" must be resolved to an absolute path FIRST: this subshell cd's to
+        # the workspace, so a relative invocation (./sandy) would resolve to
+        # nothing there, the child would die with "No such file or directory",
+        # and the `|| true` would swallow it — silently skipping the approval
+        # pre-pass this block exists to perform.
+        # shellcheck disable=SC2119  # optional arg intentionally omitted
+        ( cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$(_sandy_self_path)" ) </dev/tty >/dev/tty 2>&1 || true
     fi
 
     # D1 — daemonize the supervisor with `nohup … & disown`, deliberately NOT
@@ -5017,25 +5044,12 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
     #
     # Resolve $0 to an absolute, cwd-independent path BEFORE any `cd` below
     # (step 2 does `cd "$workspace" && "$_sandy_self" --build-only` per
-    # session). A bare command name (no slash — the common installed case,
-    # `sandy` found via PATH) is left as-is: every bash observed sets $0 to
-    # the already-resolved absolute path in that case. An already-absolute
-    # $0 is also left as-is. The one case that needs fixing is a literal
-    # relative invocation WITH a slash (`./sandy`, `../bin/sandy` — common
-    # when running from a dev checkout, exactly this repo's own workflow):
-    # left unresolved, a later `cd` into some OTHER workspace would make
-    # "./sandy" resolve to nothing there and every per-session build would
-    # fail with "no such file". No `readlink -f` (GNU-only, absent on BSD/
-    # macOS readlink) — cd+pwd+basename is portable to both platforms.
-    _sandy_self="$0"
-    case "$_sandy_self" in
-        /*) : ;;
-        */*)
-            _sandy_self_dir="$(cd "$(dirname "$_sandy_self")" 2>/dev/null && pwd)" || _sandy_self_dir=""
-            [ -n "$_sandy_self_dir" ] && _sandy_self="$_sandy_self_dir/$(basename "$_sandy_self")"
-            ;;
-        *) : ;;
-    esac
+    # session). Step 2 below does `cd "$workspace" && "$_sandy_self" ...`, so a
+    # relative $0 ("./sandy" — a dev checkout, this repo's own workflow) must be
+    # resolved first or every per-session build dies with "no such file". See
+    # _sandy_self_path for the portability reasoning.
+    # shellcheck disable=SC2119  # optional arg intentionally omitted
+    _sandy_self="$(_sandy_self_path)"
 
     _sandy_upd_raw="$(_sandy_update_enum_sessions)"
     if [ -z "$_sandy_upd_raw" ]; then
