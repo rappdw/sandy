@@ -6990,6 +6990,51 @@ check "no cd-then-reinvoke site expands \$(_sandy_self_path) late" \
     bash -c '! grep -nE "cd [^&;]*(&&|;)[^&;]*_sandy_self_path" "$1"' -- "$_S88"
 
 # ============================================================
+echo ""
+echo "§89: bash-3.2 / BSD portability lint (the class CI structurally cannot see)"
+# ============================================================
+# CI is Ubuntu + bash 5 + GNU userland; the maintainer is macOS + bash 3.2 + BSD.
+# Three constructs parse or expand DIFFERENTLY there, so `bash -n` in CI passes
+# and the break only ever shows up on one machine. All three have already bitten
+# this repo, and each was silent in a way that made it expensive:
+#
+#   §83  nested source <(...) inside $( )  -> exit 127, ERR trap, run aborted
+#   §68  backtick inside python3 -c "..."  -> the suite EXECUTED the real sandy
+#   §86  apostrophe in a comment in $( )   -> parse abort, yet the summary still
+#                                             printed "945 passed, 0 failed"
+#
+# So the guard is not "be tidy" — it is that a portability break here does not
+# announce itself as a failure. test/lint-bash32.sh is the detector and is
+# independently runnable; this section asserts BOTH that it detects (its own
+# positive controls) and that the tree is currently clean.
+_S89="$(cd "$(dirname "$0")" && pwd)/lint-bash32.sh"
+
+check "lint-bash32.sh exists and is executable-by-bash" \
+    bash -c '[ -f "$1" ] && bash -n "$1"' -- "$_S89"
+
+# The detectors must be proven to DETECT before a clean run means anything —
+# a linter whose patterns silently stopped matching would report success forever.
+check "detectors self-test: all three fire on known-bad fixtures" \
+    bash -c 'bash "$1" --self-test >/dev/null 2>&1' -- "$_S89"
+
+check "detectors self-test: clean file yields no findings (no false positives)" \
+    bash -c 'bash "$1" --self-test 2>&1 | grep -q "negative control OK"' -- "$_S89"
+
+# The actual guard.
+check "repo shell scripts are free of bash-3.2 hazards" \
+    bash -c 'bash "$1" >/dev/null 2>&1' -- "$_S89"
+
+# Scope: silently dropping sandy or run-tests.sh from the target set would make
+# the check above pass vacuously — the failure mode a lint is most prone to.
+# Asserted via --list so coverage is measured independently of the lint's own
+# pass/fail (a scope assertion that only holds on clean runs is worthless).
+check "lint target set includes sandy itself" \
+    bash -c 'bash "$1" --list | grep -qx ".*/sandy"' -- "$_S89"
+check "lint target set includes run-tests.sh and the acceptance harnesses" \
+    bash -c '_l="$(bash "$1" --list)"; printf "%s" "$_l" | grep -q "test/run-tests.sh" \
+        && [ "$(printf "%s\n" "$_l" | grep -c "test/acceptance-")" -ge 3 ]' -- "$_S89"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
