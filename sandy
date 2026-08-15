@@ -549,6 +549,34 @@ _sandy_head_display() {
         *)            printf '%s' "$1" ;;
     esac
 }
+
+# #151: Claude Code 2.1.x can overwrite sandy's settings.json permissions.defaultMode
+# pin (e.g. bypassPermissions -> auto) via an in-container write that lands ~13s
+# after launch. Sandy writes settings.json host-side BEFORE `docker run`, so only a
+# session-END comparison can observe it. These two pure helpers do that comparison;
+# see the launch-baseline snapshot (near the .head-at-launch block) and the
+# cleanup() drift check (near the #80 HEAD notice) for where they are used.
+#
+# Extract permissions.defaultMode from a settings.json file. Prints the token, or
+# "none" when the key is absent, the file is missing, or unreadable.
+_sandy_settings_default_mode() {
+    local _m
+    _m="$(sed -n 's/.*"defaultMode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1)"
+    if [ -n "$_m" ]; then printf '%s' "$_m"; else printf 'none'; fi
+}
+
+# rc 0 + a drift message when the pinned mode ($1) is non-empty, not "none", and
+# differs from the current mode ($2); rc 1 silent otherwise. The "none" gate is
+# deliberate: without it, every SANDY_SKIP_PERMISSIONS=false session would warn
+# "none -> auto" -- that is Claude Code's own default write, not sandy's pin being
+# overridden, and would just be alarm fatigue.
+_sandy_perm_mode_drift() {
+    if [ -n "$1" ] && [ "$1" != "none" ] && [ "$2" != "$1" ]; then
+        printf 'Claude Code permission mode drifted: sandy pinned "%s" but settings.json now says "%s".' "$1" "$2"
+        return 0
+    fi
+    return 1
+}
 # Protected directories. .github/workflows is included by default; opt out via
 # SANDY_ALLOW_WORKFLOW_EDIT=1 in .sandy/config (passive tier).
 _sandy_protected_dirs() {
@@ -7753,6 +7781,22 @@ cleanup() {
         fi
         rm -f "$SANDBOX_DIR/.head-at-launch"
     fi
+    # #151: Claude Code 2.1.x has been observed overwriting sandy's
+    # permissions.defaultMode pin (e.g. bypassPermissions -> auto) via an
+    # in-container settings.json write ~13s after launch. Sandy seeds
+    # settings.json host-side BEFORE `docker run`, so it cannot see that write as
+    # it happens — only a session-END comparison against the launch baseline can
+    # observe it. This does not change sandy's default or add a config key; it
+    # makes the drift honest and observable instead of silent.
+    if [ -n "${SANDBOX_DIR:-}" ] && [ -f "$SANDBOX_DIR/.claude-perm-mode-at-launch" ]; then
+        _perm_launch="$(cat "$SANDBOX_DIR/.claude-perm-mode-at-launch" 2>/dev/null)"
+        _perm_now="$(_sandy_settings_default_mode "$SANDBOX_DIR/claude/settings.json")"
+        if _perm_msg="$(_sandy_perm_mode_drift "$_perm_launch" "$_perm_now")"; then
+            printf "\n${YELLOW}[sandy]${NC} %s\n" "$_perm_msg" >&2
+            printf "${YELLOW}[sandy]${NC} See github.com/rappdw/sandy/issues/151 — sandy re-pins the mode on the next launch.\n" >&2
+        fi
+        rm -f "$SANDBOX_DIR/.claude-perm-mode-at-launch"
+    fi
     # HF-incident Issue 4: session-end egress summary. When allowed-egress logging
     # is on, roll up proxy.log into "what hosts did the agent actually reach" — the
     # first question after a suspected prompt injection or a leaked-token scare.
@@ -7880,7 +7924,7 @@ fi
 # we exit in the gap, cleanup's existence-guarded blocks skip (no false
 # "protected paths appeared" warnings). SANDBOX_DIR is set (line 3594); the agent
 # does not start until docker run (well after 5906), so nothing is missed.
-rm -f "$SANDBOX_DIR/.session-created-stubs" "$SANDBOX_DIR/.protected-existed-at-launch" "$SANDBOX_DIR/.head-at-launch" 2>/dev/null || true
+rm -f "$SANDBOX_DIR/.session-created-stubs" "$SANDBOX_DIR/.protected-existed-at-launch" "$SANDBOX_DIR/.head-at-launch" "$SANDBOX_DIR/.claude-perm-mode-at-launch" 2>/dev/null || true
 
 # Create the per-instance network(s) now that the cleanup trap is armed — in
 # proxy mode this also starts the dual-homed proxy container. Doing it post-trap
@@ -8787,6 +8831,16 @@ if git -C "$WORK_DIR" rev-parse --git-dir >/dev/null 2>&1; then
     [ -n "$_head_snap" ] && printf '%s\n' "$_head_snap" > "$SANDBOX_DIR/.head-at-launch"
 fi
 
+# #151: snapshot the permission mode sandy just seeded into settings.json, so the
+# session-end sweep (cleanup()) can tell whether Claude Code overwrote it
+# in-container. This runs after every host-side settings.json writer (the seed
+# merge and the cmux hook block, both earlier in this section) and before
+# `docker run`, so it captures the mode as it actually ships into the container.
+if _sandy_agent_has claude && [ -f "$SANDBOX_DIR/claude/settings.json" ]; then
+    _sandy_settings_default_mode "$SANDBOX_DIR/claude/settings.json" \
+        > "$SANDBOX_DIR/.claude-perm-mode-at-launch"
+fi
+
 # --- Submodule gitdir protection (S1.1) ---
 # git stores each submodule's real gitdir under .git/modules/<path>/ (or under
 # $GITDIR_HOST/modules/<path>/ for --separate-git-dir / submodule-worktree
@@ -8961,9 +9015,20 @@ _sandy_session_file="$SANDBOX_DIR/sandy-session.json"
 # string when set; null when sandy did not pin it (the agent ran at Claude
 # Code's own default). Only meaningful for the claude agent.
 _sandy_effort_json="null"; [ -n "${SANDY_EFFORT:-}" ] && _sandy_effort_json="\"$SANDY_EFFORT\""
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s\n}\n' \
+# permission_mode (#151): the permission mode sandy PINNED into settings.json for
+# the claude agent this launch, so it is provable after the fact alongside effort.
+# "bypassPermissions" when sandy pinned it (SANDY_SKIP_PERMISSIONS=true, the
+# default); null when it did not (skip=false, or claude isn't in SANDY_AGENT).
+# This mirrors the effort field's null convention above and is purely additive —
+# schema stays 1.
+_sandy_perm_mode_json="null"
+if _sandy_agent_has claude && [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+    _sandy_perm_mode_json="\"bypassPermissions\""
+fi
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
+    "$_sandy_perm_mode_json" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
 [ "${SANDY_VERBOSE:-0}" != "0" ] && info "Session marker /etc/sandy-session.json nonce=${_sandy_session_nonce} egress=${_sandy_egress_mode}"

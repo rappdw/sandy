@@ -7035,6 +7035,190 @@ check "lint target set includes run-tests.sh and the acceptance harnesses" \
         && [ "$(printf "%s\n" "$_l" | grep -c "test/acceptance-")" -ge 3 ]' -- "$_S89"
 
 # ============================================================
+echo ""
+echo "§90: Claude Code permission-mode drift honesty (#151)"
+# ============================================================
+# Claude Code 2.1.232 has been observed overwriting sandy's
+# permissions.defaultMode: bypassPermissions pin with "auto" via an in-container
+# settings.json write ~13s after launch. Sandy writes settings.json host-side
+# BEFORE `docker run`, so only a session-END comparison against a launch-time
+# baseline can observe the drift. This is NOT a default change and NOT a new
+# config key — it makes an existing silent override honest and observable.
+_S90="$SANDY_SCRIPT"
+
+# --- (a) seeder pins in all three branches, plus the CLI flag. Each branch is
+# checked in isolation (not just "somewhere in the file") so a regression in one
+# branch cannot hide behind the other two passing.
+_s90_seed_block="$(sed -n '/SEED_SETTINGS="\$SANDBOX_DIR\/claude\/settings.json"/,/^fi  # end Claude settings seeding$/p' "$_S90")"
+_s90_node_start="$(printf '%s\n' "$_s90_seed_block" | grep -n 'command -v node' | head -1 | cut -d: -f1)"
+_s90_jq_start="$(printf '%s\n' "$_s90_seed_block" | grep -n 'elif command -v jq' | head -1 | cut -d: -f1)"
+_s90_lastresort_start="$(printf '%s\n' "$_s90_seed_block" | grep -n 'Last resort: write defaults only if no file exists yet' | head -1 | cut -d: -f1)"
+_s90_seed_total="$(printf '%s\n' "$_s90_seed_block" | wc -l | tr -d ' ')"
+_s90_node_branch="$(printf '%s\n' "$_s90_seed_block" | sed -n "${_s90_node_start},$((_s90_jq_start - 1))p")"
+_s90_jq_branch="$(printf '%s\n' "$_s90_seed_block" | sed -n "${_s90_jq_start},$((_s90_lastresort_start - 1))p")"
+_s90_lastresort_branch="$(printf '%s\n' "$_s90_seed_block" | sed -n "${_s90_lastresort_start},${_s90_seed_total}p")"
+
+check "seeder (node branch) pins permissions.defaultMode=bypassPermissions" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2"' -- \
+    "$_s90_node_branch" "s.permissions.defaultMode = 'bypassPermissions';"
+check "seeder (jq branch) pins permissions.defaultMode=bypassPermissions" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2"' -- \
+    "$_s90_jq_branch" '.defaultMode = "bypassPermissions")'
+check "seeder (last-resort printf branch) pins permissions.defaultMode=bypassPermissions" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2"' -- \
+    "$_s90_lastresort_branch" '"defaultMode":"bypassPermissions"'
+check "build_claude_cmd applies --permission-mode bypassPermissions (the CLI-flag pin)" \
+    bash -c 'awk "/^build_claude_cmd\(\)/,/^}/" "$1" | grep -qF -- "--permission-mode bypassPermissions"' -- "$_S90"
+
+# --- (b) _sandy_settings_default_mode: pure extraction helper, 5 fixtures.
+# Extract-then-eval, NEVER `source <(...)` (bash 3.2 sources nothing from
+# process substitution — see the §89/§83 lesson at the top of this section).
+_s90_mode_fn="$(sed -n '/^_sandy_settings_default_mode()/,/^}$/p' "$_S90")"
+
+check "_sandy_settings_default_mode: node-pretty JSON -> bypassPermissions" \
+    bash -c '
+        eval "$1"
+        f="$(mktemp)"
+        printf "%s\n" "{" "  \"permissions\": {" "    \"defaultMode\": \"bypassPermissions\"" "  }" "}" > "$f"
+        out="$(_sandy_settings_default_mode "$f")"
+        rm -f "$f"
+        [ "$out" = "bypassPermissions" ]
+    ' -- "$_s90_mode_fn"
+check "_sandy_settings_default_mode: printf-compact JSON -> bypassPermissions" \
+    bash -c '
+        eval "$1"
+        f="$(mktemp)"
+        printf "%s" "{\"permissions\":{\"defaultMode\":\"bypassPermissions\"}}" > "$f"
+        out="$(_sandy_settings_default_mode "$f")"
+        rm -f "$f"
+        [ "$out" = "bypassPermissions" ]
+    ' -- "$_s90_mode_fn"
+check "_sandy_settings_default_mode: claude-rewritten mode (auto) -> auto" \
+    bash -c '
+        eval "$1"
+        f="$(mktemp)"
+        printf "%s" "{\"permissions\":{\"defaultMode\":\"auto\"}}" > "$f"
+        out="$(_sandy_settings_default_mode "$f")"
+        rm -f "$f"
+        [ "$out" = "auto" ]
+    ' -- "$_s90_mode_fn"
+check "_sandy_settings_default_mode: no defaultMode key -> none" \
+    bash -c '
+        eval "$1"
+        f="$(mktemp)"
+        printf "%s" "{\"teammateMode\":\"tmux\"}" > "$f"
+        out="$(_sandy_settings_default_mode "$f")"
+        rm -f "$f"
+        [ "$out" = "none" ]
+    ' -- "$_s90_mode_fn"
+check "_sandy_settings_default_mode: missing path -> none" \
+    bash -c '
+        eval "$1"
+        out="$(_sandy_settings_default_mode "/nonexistent/__sandy_perm_test__/settings.json")"
+        [ "$out" = "none" ]
+    ' -- "$_s90_mode_fn"
+
+# --- (c) _sandy_perm_mode_drift: pure comparison helper. One positive, two
+# NEGATIVE controls (same/same; the "none" alarm-fatigue gate).
+_s90_drift_fn="$(sed -n '/^_sandy_perm_mode_drift()/,/^}$/p' "$_S90")"
+
+check "_sandy_perm_mode_drift: positive (bypassPermissions/auto) -> rc0, message names both" \
+    bash -c '
+        eval "$1"
+        out="$(_sandy_perm_mode_drift bypassPermissions auto)"; rc=$?
+        [ "$rc" -eq 0 ] && printf "%s" "$out" | grep -qF "bypassPermissions" \
+            && printf "%s" "$out" | grep -qF "auto"
+    ' -- "$_s90_drift_fn"
+check "_sandy_perm_mode_drift: NEGATIVE same/same -> rc1, silent" \
+    bash -c '
+        eval "$1"
+        out="$(_sandy_perm_mode_drift bypassPermissions bypassPermissions)"; rc=$?
+        [ "$rc" -eq 1 ] && [ -z "$out" ]
+    ' -- "$_s90_drift_fn"
+check "_sandy_perm_mode_drift: NEGATIVE none/auto -> rc1 (Claude's own default write, not a pin override)" \
+    bash -c '
+        eval "$1"
+        out="$(_sandy_perm_mode_drift none auto)"; rc=$?
+        [ "$rc" -eq 1 ] && [ -z "$out" ]
+    ' -- "$_s90_drift_fn"
+
+# --- (d) marker field: printf wiring, plus a behavioral eval of the computation
+# with a stubbed _sandy_agent_has (no real agent list needed for this logic).
+check "sandy-session.json printf includes the permission_mode field" \
+    grep -qF '"permission_mode": %s' "$_S90"
+check "sandy-session.json printf wiring references _sandy_perm_mode_json" \
+    grep -qF '_sandy_perm_mode_json' "$_S90"
+
+_s90_marker_fn="$(sed -n '/^_sandy_perm_mode_json="null"$/,/^fi$/p' "$_S90")"
+
+check "marker permission_mode: (claude, skip=true) -> \"bypassPermissions\"" \
+    bash -c '
+        _sandy_agent_has() { [ "${_STUB_HAS_CLAUDE:-1}" = "1" ] && [ "$1" = "claude" ]; }
+        _STUB_HAS_CLAUDE=1
+        SANDY_SKIP_PERMISSIONS=true
+        eval "$2"
+        [ "$_sandy_perm_mode_json" = "\"bypassPermissions\"" ]
+    ' -- x "$_s90_marker_fn"
+check "marker permission_mode: (claude, skip=false) -> null" \
+    bash -c '
+        _sandy_agent_has() { [ "${_STUB_HAS_CLAUDE:-1}" = "1" ] && [ "$1" = "claude" ]; }
+        _STUB_HAS_CLAUDE=1
+        SANDY_SKIP_PERMISSIONS=false
+        eval "$2"
+        [ "$_sandy_perm_mode_json" = "null" ]
+    ' -- x "$_s90_marker_fn"
+check "marker permission_mode: (no claude in SANDY_AGENT) -> null" \
+    bash -c '
+        _sandy_agent_has() { [ "${_STUB_HAS_CLAUDE:-1}" = "1" ] && [ "$1" = "claude" ]; }
+        _STUB_HAS_CLAUDE=0
+        SANDY_SKIP_PERMISSIONS=true
+        eval "$2"
+        [ "$_sandy_perm_mode_json" = "null" ]
+    ' -- x "$_s90_marker_fn"
+
+# --- (e) NEGATIVE scope assertions, mirroring §80's SANDY_TEST_PANE_TAGS pattern:
+# this is deliberately NOT a config key (no default change, no new key), so it
+# must never be settable from a config file and must never show up in
+# --print-schema.
+check "SANDY_PERMISSION_MODE is NOT in SANDY_PRIVILEGED_KEYS" \
+    bash -c '! awk "/^SANDY_PRIVILEGED_KEYS=\(/,/^\)\$/" "$1" | grep -q "SANDY_PERMISSION_MODE"' -- "$_S90"
+check "SANDY_PERMISSION_MODE is NOT in SANDY_PASSIVE_KEYS" \
+    bash -c '! awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)\$/" "$1" | grep -q "SANDY_PERMISSION_MODE"' -- "$_S90"
+check "SANDY_PERMISSION_MODE is NOT in SANDY_ENV_ONLY_KEYS" \
+    bash -c '! awk "/^SANDY_ENV_ONLY_KEYS=\(/,/^\)\$/" "$1" | grep -q "SANDY_PERMISSION_MODE"' -- "$_S90"
+check "SANDY_PERMISSION_MODE has NO _sandy_key_metadata row (never in --print-schema)" \
+    bash -c '! awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -q "SANDY_PERMISSION_MODE"' -- "$_S90"
+check "seeder never ASSIGNS disableBypassPermissionsMode (host policy is left alone)" \
+    bash -c '! grep -qE "disableBypassPermissionsMode[[:space:]]*=" "$1"' -- "$_S90"
+check "marker printf still declares schema: 1 (additive, not replaced)" \
+    bash -c 'grep -qF "\"schema\": 1" "$1"' -- "$_S90"
+
+# --- (f) wiring greps: baseline write site, the stale-rm filename, cleanup()
+# containing both the drift check and its own snapshot rm -f.
+# Both tokens also appear in cleanup(), so two file-wide greps pass even with the
+# snapshot write deleted outright (verified: that exact mutation scored 27/27).
+# Require the helper and the redirect to be ADJACENT, which only the write site is.
+check "launch baseline snapshot writes .claude-perm-mode-at-launch via the helper" \
+    bash -c 'grep -A1 -F "_sandy_settings_default_mode \"\$SANDBOX_DIR/claude/settings.json\"" "$1" \
+        | grep -qF "> \"\$SANDBOX_DIR/.claude-perm-mode-at-launch\""' -- "$_S90"
+check "launch baseline snapshot is guarded on claude + an existing settings.json" \
+    bash -c 'grep -qF "if _sandy_agent_has claude && [ -f \"\$SANDBOX_DIR/claude/settings.json\" ]; then" "$1"' -- "$_S90"
+check "stale-snapshot rm -f (SIGKILLed prior session) includes .claude-perm-mode-at-launch" \
+    bash -c 'grep -qE "^rm -f .*\.session-created-stubs.*\.claude-perm-mode-at-launch" "$1"' -- "$_S90"
+check "cleanup() contains the drift check (_sandy_perm_mode_drift)" \
+    bash -c 'awk "/^cleanup\(\)/,/^}\$/" "$1" | grep -q "_sandy_perm_mode_drift"' -- "$_S90"
+# Name the REMOVAL, not the filename: the existence guard and the cat both mention
+# the file, so a bare filename grep passes with the rm -f deleted (verified).
+check "cleanup() removes its own .claude-perm-mode-at-launch snapshot" \
+    bash -c 'awk "/^cleanup\(\)/,/^}\$/" "$1" | grep -qE "rm -f .*\.claude-perm-mode-at-launch"' -- "$_S90"
+
+# --- (g) DEFERRED: the docker/claude-binary canary (launch a real claude
+# container, let it run long enough for the 2.1.x in-container write to fire,
+# assert the session-end warning appears) needs Docker, which is unavailable in
+# this environment. Left to a maintainer-run Docker acceptance harness, the same
+# pattern as test/acceptance-daemon.sh — not implemented here.
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
