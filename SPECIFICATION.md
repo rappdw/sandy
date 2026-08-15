@@ -806,6 +806,8 @@ The earlier "always-mount with empty fixture" pattern for directories left empty
 
 This is *detection*, not *prevention*. The threat window is "between session end and the user's next operation that auto-executes those paths" (`git pull` for hooks, `git push` for CI workflows, opening the project in VS Code/JetBrains for IDE configs). The trade-off is conscious: prevention required the workspace pollution that drove the redesign. For the realistic threat model (agent occasionally wrong via injection or skill bug; user attentive enough to read launch/exit messages), detection is sufficient.
 
+**Permission-mode drift notice (#151).** The same detection-not-prevention shape applies to `settings.json`'s writable `permissions.defaultMode`: Claude Code 2.1.232 has been observed overwriting sandy's `bypassPermissions` pin with `"auto"` via an in-container write ~13s after launch, and since sandy only writes the file host-side *before* `docker run`, it cannot see that write as it happens. At session end, `cleanup()` compares the launch baseline (`$SANDBOX_DIR/.claude-perm-mode-at-launch`, §C.2) against the current mode (re-extracted from `settings.json` via the same `_sandy_settings_default_mode()` helper) and prints a yellow notice — pointing at issue #151 — if they differ, gated so a mode that was never pinned (`"none"`) never fires the warning (that case is Claude Code's own default write, not an override of sandy's pin, and would otherwise be alarm fatigue on every `SANDY_SKIP_PERMISSIONS=false` session). Informational only: sandy re-pins the mode on every launch regardless, so the drift is at most a mid-session surprise, not a persistent one.
+
 **Long-term direction: `fanotify` with `FAN_OPEN_PERM`.** The "right" answer is to intercept write attempts at the syscall level before they hit the filesystem. A small container-side watcher daemon registers `FAN_OPEN_PERM` / `FAN_ACCESS_PERM` on the protected paths; the kernel suspends each open-for-write until the userspace handler responds; sandy returns `FAN_DENY` → caller gets `-EPERM`, no host artifact ever produced. Properties:
 
 - True prevention with no host pollution, even for absent paths
@@ -1856,6 +1858,8 @@ Note the double-nested `source` — the outer key is the `extraKnownMarketplaces
 
 `enabledPlugins` is **preserved** from the previous sandbox session (and inherited from the host copy on first launch) so `/plugin install` survives relaunches. The file is read-write inside the container — the pre-0.11.3 read-only sidecar was reverted because it broke `/plugin install` with `EROFS`. Host-side edits to `~/.claude/settings.json` still propagate on the next launch (sandy re-reads the host copy every launch), and the sandy-managed keys are re-overwritten every launch regardless of in-session mutations.
 
+**Launch baseline snapshot (#151).** After every host-side writer of `settings.json` has run (the seed merge above, and the cmux hook block) and before `docker run`, sandy extracts `permissions.defaultMode` from the just-seeded file via `_sandy_settings_default_mode()` (a `sed` BRE extraction, "none" when absent/unreadable) and writes it to `$SANDBOX_DIR/.claude-perm-mode-at-launch`. This is rw-writable-settings' one hard blind spot made honest: the file can still be mutated in-container after launch (Claude Code 2.1.232 has been observed doing exactly that, rewriting the pin to `"auto"` ~13s in), and since sandy only controls the file *before* `docker run`, this baseline is what session-end drift detection (§9) compares against. It is not a `:ro` mount and not part of the self-attestation marker's trust boundary — it is a plain sandbox-local scratch file, removed by `cleanup()` (or, for a `SIGKILL`ed prior session, by the stale-snapshot sweep at the next launch) either way.
+
 **`statusLine` (#67)** is set **only if absent** — all three seeding branches (Node `if (!(k in s))`, jq `//=`, and the last-resort `printf` literals) use an only-if-absent guard, so a user's own `statusLine` in `~/.claude/settings.json` is never overwritten. When absent, sandy points it at `/usr/local/bin/sandy-claude-statusline` (baked into the base image, Appendix A.1-adjacent — see the Dockerfile.base `RUN cat > ... STATUSLINE_HELPER` block), a small script that reads Claude Code's statusLine JSON payload from stdin and emits `<model>  ·  [effort: <level>  ·  ]<context%>% ctx`, falling back to a bare `sandy` line on any empty/malformed/wrong-shape input so the TUI never shows an error. This is a live, per-request complement to the tmux status bar (Appendix A.7), which is launch/session-scoped and structurally cannot show per-request model/effort/context — see CLAUDE.md "Status Lines".
 
 **JSON repair** applied before parsing (handles common hand-editing errors):
@@ -2013,13 +2017,14 @@ Written to `$SANDBOX_DIR/sandy-session.json` on every launch and bind-mounted re
   "host_gid": 20,
   "launched_at": "2026-06-11T12:00:00Z",
   "session_nonce": "3f1c…",
-  "effort": "high"
+  "effort": "high",
+  "permission_mode": "bypassPermissions"
 }
 ```
 
 | Field | Meaning |
 |---|---|
-| `schema` | Marker schema version (currently `1`; the `effort` field is additive). |
+| `schema` | Marker schema version (currently `1`; the `effort` and `permission_mode` fields are additive). |
 | `sandy_version` | Full version incl. git short hash (`sandy_full_version()`). |
 | `egress_mode` | Resolved posture: `off` \| `permissive` \| `strict`. |
 | `workspace` | Container-side workspace path (matches `SANDY_WORKSPACE`). |
@@ -2027,6 +2032,7 @@ Written to `$SANDBOX_DIR/sandy-session.json` on every launch and bind-mounted re
 | `launched_at` | UTC ISO-8601 launch timestamp (host clock). |
 | `session_nonce` | Per-launch random hex; printed host-side under `SANDY_VERBOSE!=0` so an external verifier can match the file to a specific launch. Not exported as an env var. |
 | `effort` | Reasoning effort sandy PINNED for the claude agent via `SANDY_EFFORT` (JSON string, e.g. `"high"`), or `null` when sandy did not pin it (agent ran at Claude Code's own default). Makes a run's effort provable after teardown (1.6.0). |
+| `permission_mode` | Permission mode sandy PINNED into settings.json for the claude agent this launch: `"bypassPermissions"` when `SANDY_SKIP_PERMISSIONS=true` (the default), or `null` when it did not (skip off, or claude isn't in `SANDY_AGENT`). Reflects what sandy pinned at launch, not necessarily what's in effect right now — see the settings.json seed step (§C.2) and the session-end drift notice (§9) for why (#151). |
 
 Because the file is a `:ro` bind mount, a committed workspace `.sandy/config` cannot forge it. In-container tooling (the `sandy-isolation-test` kit, CI) should assert on this file rather than on env vars or uid/cap heuristics.
 
