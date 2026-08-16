@@ -31,3 +31,6 @@
 [submodule "research/qm"]
 	path = research/qm
 	url = git@github.com:yc-software/qm
+[submodule "research/OpenSandbox"]
+	path = research/OpenSandbox
+	url = git@github.com:opensandbox-group/OpenSandbox.git
