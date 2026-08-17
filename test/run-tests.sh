@@ -7219,6 +7219,292 @@ check "cleanup() removes its own .claude-perm-mode-at-launch snapshot" \
 # pattern as test/acceptance-daemon.sh — not implemented here.
 
 # ============================================================
+echo ""
+echo "§91: parser <-> cli_flags lockstep (#156)"
+# ============================================================
+# Purpose: --print-schema's cli_flags array is hand-curated (see the comment
+# directly above it in sandy) -- nothing enforces that every flag the real
+# parsers accept is actually advertised there, or vice versa. #156 was exactly
+# this gap: --workspace has been accepted by parsers since 1.1.0 (#17) but
+# never appeared in cli_flags. This section extracts the flag names the
+# parsers ACTUALLY recognize -- fast-path "if [[ "${1:-}" == ..." dispatches,
+# plus every line-leading "--flag)" / "--flag=*)" case label -- and diffs that
+# set against cli_flags, entirely docker-free (grep/sed only, no awk, per the
+# BWK $-anchor trap documented at the top of the §89 section above).
+#
+# Soundness bound (state it plainly, do not oversell it): this is sound only
+# over sandy's two existing parser idioms (fast-path if-dispatch, case-label
+# dispatch). A flag recognized through some novel THIRD idiom would be
+# invisible to this extraction and would not be caught. A COMPLETE version is
+# not statically achievable at all: sandy forwards unrecognized flags straight
+# through to the wrapped agent -- --resume is exactly this case, a real
+# cli_flags entry with ZERO parser cases of its own -- so "a parser matches
+# this flag" and "sandy owns this flag" are not the same question, and no
+# static scan can fully answer the second. What this section DOES guarantee:
+# a future heredoc or generated block that happens to contain a line starting
+# with "--x)" fails LOUDLY here (a new, unexplained extracted entry with no
+# cli_flags match and not on any curated list), never silently passes.
+_S91_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+# Curated exception lists -- each entry is an intentional, hand-verified
+# exception to the parser<->cli_flags identity, not a loophole papering over
+# drift. See the independently-verified framing facts this PR was built on.
+_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox); not standalone cli_flags entries, must instead appear in >=1 description
+_S91_PRIVATE="--print-protected-paths"                        # real, private/debug fast-path flag; deliberately unadvertised
+_S91_FORWARDED="--resume"                                     # a real cli_flags entry with ZERO parser cases (forwarded verbatim to the agent, sandy:4103/4127)
+
+# --- Extraction: fast-path dispatches ("if [[ "${1:-}" == "--flag" ...") ---
+_s91_fastpath_flags="$(grep -E '^if \[\[ "\$\{1:-\}" ==' "$_S91_SANDY" \
+    | grep -oE '"--[a-z][a-z-]*"' | tr -d '"' | sort -u)"
+
+# --- Extraction: case labels ("    --flag)" / "    --flag=*)") ---
+_s91_caselabel_flags="$(grep -noE '^[[:space:]]+--[a-z][a-z-]*(\)|=\*\))' "$_S91_SANDY" \
+    | sed -E 's/^[0-9]+://; s/^[[:space:]]+//; s/=\*\)$//; s/\)$//' | sort -u)"
+
+_S91_EXTRACTED_FILE="$(mktemp)"
+printf '%s\n%s\n' "$_s91_fastpath_flags" "$_s91_caselabel_flags" | grep -v '^$' | sort -u > "$_S91_EXTRACTED_FILE"
+_S91_EXTRACTED_COUNT="$(wc -l < "$_S91_EXTRACTED_FILE" | tr -d ' ')"
+
+# --- Schema side: cli_flags names + descriptions, via a QUOTED heredoc (no
+# interpolation risk -- see the §89 PYBACK lesson) writing standalone scripts
+# to temp files rather than inlining python inside a bash -c string. ---
+_S91_SCHEMA_JSON="$(mktemp)"
+bash "$_S91_SANDY" --print-schema > "$_S91_SCHEMA_JSON" 2>/dev/null
+
+_S91_NAMES_FILE="$(mktemp)"
+_S91_DESC_FILE="$(mktemp)"
+_S91_NAMES_PY="$(mktemp)"
+cat > "$_S91_NAMES_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for f in d["cli_flags"]:
+    print(f["name"])
+PY
+python3 "$_S91_NAMES_PY" "$_S91_SCHEMA_JSON" > "$_S91_NAMES_FILE"
+
+_S91_DESC_PY="$(mktemp)"
+cat > "$_S91_DESC_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for f in d["cli_flags"]:
+    print(f.get("description", ""))
+PY
+python3 "$_S91_DESC_PY" "$_S91_SCHEMA_JSON" > "$_S91_DESC_FILE"
+
+# --- Build the curated-list files (one token per line) ---
+_S91_EXCLUDE_FILE="$(mktemp)"   # SUBOPT union PRIVATE
+printf '%s %s\n' "$_S91_SUBOPT" "$_S91_PRIVATE" | tr ' ' '\n' | grep -v '^$' | sort -u > "$_S91_EXCLUDE_FILE"
+_S91_FORWARDED_FILE="$(mktemp)"
+printf '%s\n' "$_S91_FORWARDED" | tr ' ' '\n' | grep -v '^$' | sort -u > "$_S91_FORWARDED_FILE"
+
+# (1) FORWARD: every extracted flag, minus SUBOPT/PRIVATE, must be a cli_flags name.
+_S91_FWD_CHECK_FILE="$(mktemp)"
+grep -Fxvf "$_S91_EXCLUDE_FILE" "$_S91_EXTRACTED_FILE" > "$_S91_FWD_CHECK_FILE" 2>/dev/null || true
+_S91_FWD_MISSING="$(grep -Fxvf "$_S91_NAMES_FILE" "$_S91_FWD_CHECK_FILE" 2>/dev/null || true)"
+check "§91(1) forward: every extracted parser flag (minus SUBOPT/PRIVATE) is advertised in cli_flags" \
+    bash -c '[ -z "$1" ]' -- "$_S91_FWD_MISSING"
+
+# (2) each SUBOPT token appears in >=1 cli_flags description (substring match).
+_S91_SUBOPT_MISSING=""
+for _s91_tok in $_S91_SUBOPT; do
+    grep -qF -- "$_s91_tok" "$_S91_DESC_FILE" || _S91_SUBOPT_MISSING="$_S91_SUBOPT_MISSING $_s91_tok"
+done
+check "§91(2) every SUBOPT token (--dry-run --yes --idle-for --keep-approvals) appears in >=1 cli_flags description" \
+    bash -c '[ -z "$1" ]' -- "$_S91_SUBOPT_MISSING"
+
+# (3) allowlist self-cleaning, two halves:
+#   (3a) every SUBOPT/PRIVATE entry is still recognized by a real parser (the
+#        curated exception has not gone stale by outliving what it excepts).
+_S91_EXCL_MISSING="$(grep -Fxvf "$_S91_EXTRACTED_FILE" "$_S91_EXCLUDE_FILE" 2>/dev/null || true)"
+check "§91(3a) allowlist self-cleaning: every SUBOPT/PRIVATE entry is still recognized by a real parser" \
+    bash -c '[ -z "$1" ]' -- "$_S91_EXCL_MISSING"
+#   (3b) every FORWARDED entry is a real cli_flags name AND is genuinely absent
+#        from the extracted parser set (it truly has zero parser cases).
+_S91_FWD_IN_NAMES="$(grep -Fxf "$_S91_FORWARDED_FILE" "$_S91_NAMES_FILE" 2>/dev/null || true)"
+_S91_FWD_NOT_IN_NAMES="$(grep -Fxvf "$_S91_NAMES_FILE" "$_S91_FORWARDED_FILE" 2>/dev/null || true)"
+check "§91(3b) FORWARDED entries (--resume) are real cli_flags names" \
+    bash -c '[ -n "$1" ] && [ -z "$2" ]' -- "$_S91_FWD_IN_NAMES" "$_S91_FWD_NOT_IN_NAMES"
+_S91_FWD_IN_EXTRACTED="$(grep -Fxf "$_S91_FORWARDED_FILE" "$_S91_EXTRACTED_FILE" 2>/dev/null || true)"
+check "§91(3b) FORWARDED entries (--resume) are absent from the extracted parser set (genuinely 0 parser cases)" \
+    bash -c '[ -z "$1" ]' -- "$_S91_FWD_IN_EXTRACTED"
+
+# (4) REVERSE: every cli_flags name, minus FORWARDED, must be recognized by a real parser.
+_S91_NAMES_MINUS_FWD_FILE="$(mktemp)"
+grep -Fxvf "$_S91_FORWARDED_FILE" "$_S91_NAMES_FILE" > "$_S91_NAMES_MINUS_FWD_FILE" 2>/dev/null || true
+_S91_REV_MISSING="$(grep -Fxvf "$_S91_EXTRACTED_FILE" "$_S91_NAMES_MINUS_FWD_FILE" 2>/dev/null || true)"
+check "§91(4) reverse: every cli_flags name (minus FORWARDED) is recognized by a real parser" \
+    bash -c '[ -z "$1" ]' -- "$_S91_REV_MISSING"
+
+# (5) --workspace pins: exactly one entry; type/arg_name/description shape.
+_S91_WS_COUNT="$(grep -Fx -- "--workspace" "$_S91_NAMES_FILE" | wc -l | tr -d ' ')"
+check "§91(5a) --workspace appears exactly once in cli_flags" \
+    bash -c '[ "$1" = "1" ]' -- "$_S91_WS_COUNT"
+_S91_WS_CHECK_PY="$(mktemp)"
+cat > "$_S91_WS_CHECK_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+ws = [f for f in d["cli_flags"] if f["name"] == "--workspace"]
+assert len(ws) == 1, "expected exactly one --workspace entry, found %d" % len(ws)
+f = ws[0]
+assert f.get("type") == "string", "type: %r" % f.get("type")
+assert f.get("arg_name") == "PATH", "arg_name: %r" % f.get("arg_name")
+desc = f.get("description", "")
+for tok in ("--start", "--attach", "--stop", "--update-sessions", "--reset-sandbox"):
+    assert tok in desc, "description missing " + tok
+PY
+check "§91(5b) --workspace entry has type=string, arg_name=PATH, description names --start/--attach/--stop/--update-sessions/--reset-sandbox" \
+    python3 "$_S91_WS_CHECK_PY" "$_S91_SCHEMA_JSON"
+
+# (6) anti-rot sentinels: the extraction itself must not have silently gone blind.
+_S91_SENTINEL_MISSING=""
+for _s91_tok in --start --workspace --gc --agent --print-schema --dry-run; do
+    grep -Fxq -- "$_s91_tok" "$_S91_EXTRACTED_FILE" || _S91_SENTINEL_MISSING="$_S91_SENTINEL_MISSING $_s91_tok"
+done
+check "§91(6a) anti-rot: extracted set contains --start/--workspace/--gc/--agent/--print-schema/--dry-run" \
+    bash -c '[ -z "$1" ]' -- "$_S91_SENTINEL_MISSING"
+check "§91(6b) anti-rot: extracted parser set has >=20 entries (scope has not silently shrunk)" \
+    bash -c '[ "$1" -ge 20 ]' -- "$_S91_EXTRACTED_COUNT"
+
+rm -f "$_S91_EXTRACTED_FILE" "$_S91_SCHEMA_JSON" "$_S91_NAMES_FILE" "$_S91_DESC_FILE" \
+      "$_S91_NAMES_PY" "$_S91_DESC_PY" "$_S91_EXCLUDE_FILE" "$_S91_FORWARDED_FILE" \
+      "$_S91_FWD_CHECK_FILE" "$_S91_NAMES_MINUS_FWD_FILE" "$_S91_WS_CHECK_PY" 2>/dev/null || true
+
+# ============================================================
+echo ""
+echo "§92: introspection stream contract pin (#160)"
+# ============================================================
+# Purpose: SPEC_INTROSPECTION.md's guaranteed stream contract (1.7.0) --
+# exactly one JSON document on stdout and NOTHING else (including JSON-shaped
+# failures), diagnostics on stderr only, stdout empty in the usage-error case
+# -- is honored TODAY by every introspection fast-path handler, but nothing
+# pinned it as a regression guard: info()/warn() write to STDOUT (sandy:291-
+# 292, only error() redirects >&2), so a future info()/warn() call added
+# inside a handler would silently corrupt the "pure JSON" contract without any
+# byte landing on stderr to hint at it. Every assertion below is therefore
+# TWO-SIDED: it checks stdout purity AND stderr emptiness (or, for the usage-
+# error case, the reverse) rather than only one side.
+#
+# Determinism: a stub `docker` that unconditionally `exit 1`s is placed FIRST
+# in PATH, so every case below deterministically takes the docker-unreachable
+# branch regardless of what is or is not installed on the host running this
+# suite. Bound (state it plainly): only THAT branch of --print-state is
+# pinned here -- the docker-reachable branch is exercised elsewhere in this
+# suite (with a real/shimmed docker) but not re-verified for stream purity.
+_S92_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S92_HOME="$(mktemp -d)"
+_S92_TMP="$(mktemp -d)"
+
+_S92_BIN="$(mktemp -d)"
+cat > "$_S92_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+exit 1
+DOCKERSHIM
+chmod +x "$_S92_BIN/docker"
+
+# Purity helper written to a file (quoted heredoc) so it can be invoked
+# repeatedly across the matrix below. "Exactly one JSON document and nothing
+# else": non-empty, the very first byte is '{' (no leading whitespace/noise),
+# and json.loads on the FULL byte content succeeds -- json.loads itself
+# rejects trailing non-whitespace data ("Extra data"), which is what makes
+# this reject a second document/line appended after the real one.
+_S92_PURITY_PY="$(mktemp)"
+cat > "$_S92_PURITY_PY" <<'PY'
+import sys, json
+data = open(sys.argv[1], "rb").read()
+if len(data) == 0:
+    sys.exit("stdout is empty")
+if data[:1] != b"{":
+    sys.exit("stdout's first byte is not '{': %r" % data[:1])
+json.loads(data)  # raises on malformed JSON or trailing extra data
+PY
+
+# --- (a) --print-schema ---
+_s92a_out="$_S92_TMP/a.out"; _s92a_err="$_S92_TMP/a.err"; _s92a_rc=0
+env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
+    bash "$_S92_SANDY" --print-schema >"$_s92a_out" 2>"$_s92a_err" || _s92a_rc=$?
+check "§92(a) --print-schema exits 0" test "$_s92a_rc" -eq 0
+check "§92(a) --print-schema stderr is exactly 0 bytes" \
+    bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92a_err"
+check "§92(a) --print-schema stdout is exactly one JSON document" \
+    python3 "$_S92_PURITY_PY" "$_s92a_out"
+
+# --- (b) SANDY_VERBOSE=1 --print-schema (the one case where verbosity is ON) ---
+_s92b_out="$_S92_TMP/b.out"; _s92b_err="$_S92_TMP/b.err"; _s92b_rc=0
+PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" SANDY_VERBOSE=1 \
+    bash "$_S92_SANDY" --print-schema >"$_s92b_out" 2>"$_s92b_err" || _s92b_rc=$?
+check "§92(b) SANDY_VERBOSE=1 --print-schema exits 0" test "$_s92b_rc" -eq 0
+check "§92(b) SANDY_VERBOSE=1 --print-schema stderr is exactly 0 bytes" \
+    bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92b_err"
+check "§92(b) SANDY_VERBOSE=1 --print-schema stdout is exactly one JSON document" \
+    python3 "$_S92_PURITY_PY" "$_s92b_out"
+
+# --- (c) --print-state (full) ---
+_s92c_out="$_S92_TMP/c.out"; _s92c_err="$_S92_TMP/c.err"; _s92c_rc=0
+env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
+    bash "$_S92_SANDY" --print-state >"$_s92c_out" 2>"$_s92c_err" || _s92c_rc=$?
+check "§92(c) --print-state (full) exits 0" test "$_s92c_rc" -eq 0
+check "§92(c) --print-state (full) stderr is exactly 0 bytes" \
+    bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92c_err"
+check "§92(c) --print-state (full) stdout is exactly one JSON document" \
+    python3 "$_S92_PURITY_PY" "$_s92c_out"
+
+# --- (d) --print-state light ---
+_s92d_out="$_S92_TMP/d.out"; _s92d_err="$_S92_TMP/d.err"; _s92d_rc=0
+env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
+    bash "$_S92_SANDY" --print-state light >"$_s92d_out" 2>"$_s92d_err" || _s92d_rc=$?
+check "§92(d) --print-state light exits 0" test "$_s92d_rc" -eq 0
+check "§92(d) --print-state light stderr is exactly 0 bytes" \
+    bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92d_err"
+check "§92(d) --print-state light stdout is exactly one JSON document" \
+    python3 "$_S92_PURITY_PY" "$_s92d_out"
+
+# --- (e) --validate-config: valid key + unknown key + privileged-from-passive key ---
+mkdir -p "$_S92_TMP/ws92/.sandy"
+cat > "$_S92_TMP/ws92/.sandy/config" <<'EOF'
+SANDY_MODEL=claude-opus-4-8
+BOGUS_S92_KEY=yes
+SANDY_SSH=agent
+EOF
+_s92e_out="$_S92_TMP/e.out"; _s92e_err="$_S92_TMP/e.err"; _s92e_rc=0
+env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
+    bash "$_S92_SANDY" --validate-config "$_S92_TMP/ws92/.sandy/config" >"$_s92e_out" 2>"$_s92e_err" || _s92e_rc=$?
+check "§92(e) --validate-config (mixed fixture) exits 0" test "$_s92e_rc" -eq 0
+check "§92(e) --validate-config (mixed fixture) stderr is exactly 0 bytes" \
+    bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92e_err"
+check "§92(e) --validate-config (mixed fixture) stdout is exactly one JSON document" \
+    python3 "$_S92_PURITY_PY" "$_s92e_out"
+
+# --- (f) --validate-config /does/not/exist -> exit 1, stderr 0, JSON errors[] non-empty ---
+_s92f_out="$_S92_TMP/f.out"; _s92f_err="$_S92_TMP/f.err"; _s92f_rc=0
+env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
+    bash "$_S92_SANDY" --validate-config /nonexistent/s92-does-not-exist.config >"$_s92f_out" 2>"$_s92f_err" || _s92f_rc=$?
+check "§92(f) --validate-config missing-file exits 1" test "$_s92f_rc" -eq 1
+check "§92(f) --validate-config missing-file stderr is exactly 0 bytes" \
+    bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92f_err"
+check "§92(f) --validate-config missing-file stdout is exactly one JSON document" \
+    python3 "$_S92_PURITY_PY" "$_s92f_out"
+_S92_ERRORS_PY="$(mktemp)"
+cat > "$_S92_ERRORS_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d.get("errors"), "expected a non-empty errors[] array, got %r" % d.get("errors")
+PY
+check "§92(f) --validate-config missing-file errors[] is non-empty" \
+    python3 "$_S92_ERRORS_PY" "$_s92f_out"
+
+# --- (g) --validate-config with NO argument -> exit 1, stdout 0 bytes, stderr has ERROR ---
+_s92g_out="$_S92_TMP/g.out"; _s92g_err="$_S92_TMP/g.err"; _s92g_rc=0
+env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
+    bash "$_S92_SANDY" --validate-config >"$_s92g_out" 2>"$_s92g_err" || _s92g_rc=$?
+check "§92(g) --validate-config (no argument) exits 1" test "$_s92g_rc" -eq 1
+check "§92(g) --validate-config (no argument) stdout is exactly 0 bytes" \
+    bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92g_out"
+check "§92(g) --validate-config (no argument) stderr is non-empty and contains ERROR" \
+    bash -c '[ "$(( $(wc -c < "$1") ))" -gt 0 ] && grep -q ERROR "$1"' -- "$_s92g_err"
+
+rm -rf "$_S92_HOME" "$_S92_TMP" "$_S92_BIN" "$_S92_PURITY_PY" "$_S92_ERRORS_PY" 2>/dev/null || true
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
