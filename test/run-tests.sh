@@ -7502,7 +7502,158 @@ check "§92(g) --validate-config (no argument) stdout is exactly 0 bytes" \
 check "§92(g) --validate-config (no argument) stderr is non-empty and contains ERROR" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -gt 0 ] && grep -q ERROR "$1"' -- "$_s92g_err"
 
+# --- (h) --print-version (#159) ---
+_s92h_out="$_S92_TMP/h.out"; _s92h_err="$_S92_TMP/h.err"; _s92h_rc=0
+env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
+    bash "$_S92_SANDY" --print-version >"$_s92h_out" 2>"$_s92h_err" || _s92h_rc=$?
+check "§92(h) --print-version exits 0" test "$_s92h_rc" -eq 0
+check "§92(h) --print-version stderr is exactly 0 bytes" \
+    bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92h_err"
+check "§92(h) --print-version stdout is exactly one JSON document" \
+    python3 "$_S92_PURITY_PY" "$_s92h_out"
+
+# --- (h) SANDY_VERBOSE=1 --print-version (mirrors case (b)) ---
+_s92h2_out="$_S92_TMP/h2.out"; _s92h2_err="$_S92_TMP/h2.err"; _s92h2_rc=0
+PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" SANDY_VERBOSE=1 \
+    bash "$_S92_SANDY" --print-version >"$_s92h2_out" 2>"$_s92h2_err" || _s92h2_rc=$?
+check "§92(h) SANDY_VERBOSE=1 --print-version exits 0" test "$_s92h2_rc" -eq 0
+check "§92(h) SANDY_VERBOSE=1 --print-version stderr is exactly 0 bytes" \
+    bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92h2_err"
+check "§92(h) SANDY_VERBOSE=1 --print-version stdout is exactly one JSON document" \
+    python3 "$_S92_PURITY_PY" "$_s92h2_out"
+
 rm -rf "$_S92_HOME" "$_S92_TMP" "$_S92_BIN" "$_S92_PURITY_PY" "$_S92_ERRORS_PY" 2>/dev/null || true
+
+# ============================================================
+echo ""
+echo "§93: machine-readable version (#159)"
+# ============================================================
+# Purpose: sandy-ui was BLOCKED (#159) — it keys its --print-schema cache off
+# `sandy --version`, regex-matching the first dotted-numeric token, and cannot
+# use --print-schema's own sandy.version field (chicken-and-egg: that's the
+# payload being cached). This section pins the new --print-version flag AND
+# the --version human-format guarantee it depends on as the old-sandy-safe
+# probe (a pre-1.7.0 sandy does not recognize --print-version — the catch-all
+# forwards unrecognized flags straight to the wrapped agent, per §91's header
+# comment — so callers must confirm 1.7.0+ via --version before ever calling
+# --print-version). Each assertion below is annotated with the mutation that
+# would kill it; see the report for the actual mutation-test run.
+_S93_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S93_TMP="$(mktemp -d)"
+_S93_HOME="$(mktemp -d)"
+
+_S93_PV_JSON="$(mktemp)"
+env -u SANDY_VERBOSE SANDY_HOME="$_S93_HOME" bash "$_S93_SANDY" --print-version > "$_S93_PV_JSON" 2>/dev/null
+
+# (1) .version equals the SANDY_VERSION literal in source. Kills: an emitter
+#     that hardcodes/derives version from anywhere other than SANDY_VERSION.
+_S93_SRC_VERSION="$(grep -m1 '^SANDY_VERSION=' "$_S93_SANDY" | cut -d'"' -f2)"
+_S93_JSON_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$_S93_PV_JSON")"
+check "§93(1) --print-version .version equals SANDY_VERSION in source" \
+    bash -c '[ "$1" = "$2" ]' -- "$_S93_JSON_VERSION" "$_S93_SRC_VERSION"
+
+# (2) Identity pin: --version stdout byte-equals "sandy <full_version>" built
+#     from --print-version's own full_version. Kills: --version and
+#     --print-version drifting to different commit-derivation logic.
+_S93_JSON_FULLVER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["full_version"])' "$_S93_PV_JSON")"
+_S93_VERSION_STDOUT="$(env -u SANDY_VERBOSE SANDY_HOME="$_S93_HOME" bash "$_S93_SANDY" --version)"
+check "§93(2) identity pin: --version stdout == 'sandy <full_version>' from --print-version" \
+    bash -c '[ "$1" = "sandy $2" ]' -- "$_S93_VERSION_STDOUT" "$_S93_JSON_FULLVER"
+
+# (3) Cross-surface: --print-schema .sandy.version/.sandy.commit match
+#     --print-version's .version/.commit. Kills: the two emitters computing
+#     commit via different code paths (the motivation for extracting
+#     _sandy_commit_hash as a single source of truth).
+_S93_SCHEMA_JSON="$(mktemp)"
+env -u SANDY_VERBOSE SANDY_HOME="$_S93_HOME" bash "$_S93_SANDY" --print-schema > "$_S93_SCHEMA_JSON" 2>/dev/null
+_S93_CROSS_PY="$(mktemp)"
+cat > "$_S93_CROSS_PY" <<'PY'
+import json, sys
+pv = json.load(open(sys.argv[1]))
+sch = json.load(open(sys.argv[2]))
+assert sch["sandy"]["version"] == pv["version"], (sch["sandy"]["version"], pv["version"])
+assert sch["sandy"]["commit"] == pv["commit"], (sch["sandy"]["commit"], pv["commit"])
+PY
+check "§93(3) cross-surface: --print-schema .sandy.version/.commit == --print-version .version/.commit" \
+    python3 "$_S93_CROSS_PY" "$_S93_PV_JSON" "$_S93_SCHEMA_JSON"
+
+# (4) Composition: commit=="" implies full_version==version; else
+#     full_version==version+"-"+commit AND commit matches ^[0-9a-f]{7,40}$.
+#     Kills: full_version built independently of version+commit (e.g. a
+#     separately-cached/staled value).
+_S93_COMPOSE_PY="$(mktemp)"
+cat > "$_S93_COMPOSE_PY" <<'PY'
+import json, re, sys
+d = json.load(open(sys.argv[1]))
+version, commit, full = d["version"], d["commit"], d["full_version"]
+if commit == "":
+    assert full == version, (full, version)
+else:
+    assert full == version + "-" + commit, (full, version, commit)
+    assert re.match(r'^[0-9a-f]{7,40}$', commit), commit
+PY
+check "§93(4) composition: full_version == version[+\"-\"+commit], commit shape ^[0-9a-f]{7,40}\$ when non-empty" \
+    python3 "$_S93_COMPOSE_PY" "$_S93_PV_JSON"
+
+# (5) NEGATIVE, no-commit shape (curl-install simulation): copy sandy to a
+#     mktemp dir OUTSIDE any repo, stub `git` (exit 1) first in PATH, temp
+#     SANDY_HOME -> commit=="", full_version==version, --version prints
+#     exactly "sandy <version>". Kills: an emitter that still shells out to a
+#     real git in PATH regardless of SANDY_COMMIT/repo context.
+_S93_OUTSIDE="$(mktemp -d)"
+cp "$_S93_SANDY" "$_S93_OUTSIDE/sandy"
+chmod +x "$_S93_OUTSIDE/sandy"
+_S93_GITSTUB_BIN="$(mktemp -d)"
+cat > "$_S93_GITSTUB_BIN/git" <<'GITSTUB'
+#!/usr/bin/env bash
+exit 1
+GITSTUB
+chmod +x "$_S93_GITSTUB_BIN/git"
+_S93_NC_HOME="$(mktemp -d)"
+_S93_NC_JSON="$(mktemp)"
+env -u SANDY_VERBOSE PATH="$_S93_GITSTUB_BIN:$PATH" SANDY_HOME="$_S93_NC_HOME" \
+    bash "$_S93_OUTSIDE/sandy" --print-version > "$_S93_NC_JSON" 2>/dev/null
+_S93_NC_PY="$(mktemp)"
+cat > "$_S93_NC_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["commit"] == "", d["commit"]
+assert d["full_version"] == d["version"], (d["full_version"], d["version"])
+PY
+check "§93(5) NEGATIVE no-commit shape: stubbed git -> commit==\"\", full_version==version" \
+    python3 "$_S93_NC_PY" "$_S93_NC_JSON"
+_S93_NC_VERSION_STDOUT="$(env -u SANDY_VERBOSE PATH="$_S93_GITSTUB_BIN:$PATH" SANDY_HOME="$_S93_NC_HOME" bash "$_S93_OUTSIDE/sandy" --version)"
+_S93_NC_VERSION_ONLY="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$_S93_NC_JSON")"
+check "§93(5) NEGATIVE no-commit shape: --version prints exactly 'sandy <version>'" \
+    bash -c '[ "$1" = "sandy $2" ]' -- "$_S93_NC_VERSION_STDOUT" "$_S93_NC_VERSION_ONLY"
+
+# (6) NEGATIVE, baked-commit shape: apply install.sh's exact sed
+#     (s/^SANDY_COMMIT=""/SANDY_COMMIT="abc1234"/, install.sh:54-56) to the
+#     outside-any-repo copy -> .commit=="abc1234". Kills: an emitter that
+#     recomputes commit from git and ignores a baked-in SANDY_COMMIT.
+if sed --version >/dev/null 2>&1; then
+    sed -i "s/^SANDY_COMMIT=\"\"/SANDY_COMMIT=\"abc1234\"/" "$_S93_OUTSIDE/sandy"
+else
+    sed -i '' "s/^SANDY_COMMIT=\"\"/SANDY_COMMIT=\"abc1234\"/" "$_S93_OUTSIDE/sandy"
+fi
+_S93_BAKED_JSON="$(mktemp)"
+env -u SANDY_VERBOSE PATH="$_S93_GITSTUB_BIN:$PATH" SANDY_HOME="$_S93_NC_HOME" \
+    bash "$_S93_OUTSIDE/sandy" --print-version > "$_S93_BAKED_JSON" 2>/dev/null
+_S93_BAKED_COMMIT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"])' "$_S93_BAKED_JSON")"
+check "§93(6) NEGATIVE baked-commit shape: SANDY_COMMIT=abc1234 -> .commit==\"abc1234\"" \
+    bash -c '[ "$1" = "abc1234" ]' -- "$_S93_BAKED_COMMIT"
+
+# (7) .schema_version equals the grep of SANDY_SCHEMA_VERSION from source.
+#     Kills: --print-version hardcoding a literal schema_version instead of
+#     reading SANDY_SCHEMA_VERSION.
+_S93_SRC_SCHEMA_VER="$(grep -m1 '^SANDY_SCHEMA_VERSION=' "$_S93_SANDY" | sed 's/^SANDY_SCHEMA_VERSION=//')"
+_S93_JSON_SCHEMA_VER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["schema_version"])' "$_S93_PV_JSON")"
+check "§93(7) .schema_version equals SANDY_SCHEMA_VERSION in source" \
+    bash -c '[ "$1" = "$2" ]' -- "$_S93_JSON_SCHEMA_VER" "$_S93_SRC_SCHEMA_VER"
+
+rm -rf "$_S93_TMP" "$_S93_HOME" "$_S93_OUTSIDE" "$_S93_GITSTUB_BIN" "$_S93_NC_HOME" 2>/dev/null || true
+rm -f "$_S93_PV_JSON" "$_S93_SCHEMA_JSON" "$_S93_CROSS_PY" "$_S93_COMPOSE_PY" \
+      "$_S93_NC_JSON" "$_S93_NC_PY" "$_S93_BAKED_JSON" 2>/dev/null || true
 
 # ============================================================
 # Summary

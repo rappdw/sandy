@@ -898,16 +898,54 @@ _emit_key_object() {
     printf '}'
 }
 
-# Emit the static schema JSON.
-_sandy_emit_schema() {
+# Short commit hash for the running sandy, or "" when unknown. Extracted
+# (#159) so --print-schema's "sandy.commit" and --print-version's "commit"
+# are computed by the exact same code and cannot drift.
+# sandy_full_version() is "<SANDY_VERSION>-<shorthash>" when a hash is known,
+# else just "<SANDY_VERSION>". Strip the version PREFIX to isolate the hash —
+# NOT `##*-`, which for a suffixed version with no hash (e.g. "1.0.0-rc1")
+# would yield the version's own suffix ("rc1") and report it as a commit.
+_sandy_commit_hash() {
     local commit
-    # sandy_full_version() is "<SANDY_VERSION>-<shorthash>" when a hash is known,
-    # else just "<SANDY_VERSION>". Strip the version PREFIX to isolate the hash —
-    # NOT `##*-`, which for a suffixed version with no hash (e.g. "1.0.0-rc1")
-    # would yield the version's own suffix ("rc1") and report it as a commit.
     commit="$(sandy_full_version)"
     commit="${commit#"$SANDY_VERSION"}"   # "" when no hash, "-<hash>" otherwise
     commit="${commit#-}"                  # drop the leading separator
+    printf '%s' "$commit"
+}
+
+# Emit the machine-readable version JSON (#159). This is the intended unblock
+# for consumers that need to detect sandy's introspection-schema shape before
+# they can safely call --print-schema itself (a chicken-and-egg problem for
+# any cache keyed off --print-schema's own "sandy.version" field). Fields:
+#   schema_version — same contract number as --print-schema/--print-state.
+#   version        — SANDY_VERSION verbatim, e.g. "1.7.0-dev".
+#   commit         — short git hash, or "" when unknown (matches
+#                    --print-schema's sandy.commit convention — NOT null).
+#   full_version   — sandy_full_version() verbatim, e.g. "1.7.0-dev-d89aaba".
+# full_version is the STABLE CACHE KEY: unlike `version`, which stays
+# "1.7.0-dev" across every commit on the dev channel (and then "1.7.0" at
+# release), full_version changes on every commit, so a cache keyed on it
+# actually invalidates across the upgrades a dev-channel consumer makes.
+# NOTE: pre-1.7.0 sandy does not recognize --print-version — its catch-all
+# forwards unrecognized flags to the wrapped agent instead of erroring, so
+# this flag is only safe to call once a caller has already confirmed (e.g.
+# via the guaranteed `sandy <full_version>` format of --version, safe on
+# every sandy version) that it's talking to 1.7.0+.
+_sandy_emit_version() {
+    local commit
+    commit="$(_sandy_commit_hash)"
+    printf '{'
+    _json_kv schema_version "$SANDY_SCHEMA_VERSION"
+    printf ','; _json_kv version "$(_json_escape "$SANDY_VERSION")"
+    printf ','; _json_kv commit "$(_json_escape "$commit")"
+    printf ','; _json_kv full_version "$(_json_escape "$(sandy_full_version)")"
+    printf '}\n'
+}
+
+# Emit the static schema JSON.
+_sandy_emit_schema() {
+    local commit
+    commit="$(_sandy_commit_hash)"
 
     printf '{'
     _json_kv schema_version "$SANDY_SCHEMA_VERSION"
@@ -977,6 +1015,8 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--print-state"';  printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Emit runtime state (sandboxes, approvals, containers) as JSON."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--validate-config"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Validate a config file against the schema; emit JSON."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--print-version"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Emit machine-readable version JSON (schema_version, version, commit, full_version). full_version is the stable cache key for --print-schema consumers — unlike version, it changes on every commit."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--start"';         printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Start a detached daemon session for the workspace and return once attachable."'; printf '}'
     printf ','
@@ -2159,6 +2199,11 @@ _sandy_introspect_err_trap() {
     echo "[sandy]        Report this at https://github.com/rappdw/sandy/issues" >&2
 }
 
+if [[ "${1:-}" == "--print-version" ]]; then
+    set -E; trap _sandy_introspect_err_trap ERR
+    _sandy_emit_version
+    exit 0
+fi
 if [[ "${1:-}" == "--print-schema" ]]; then
     set -E; trap _sandy_introspect_err_trap ERR
     _sandy_emit_schema
@@ -2602,6 +2647,8 @@ Introspection (machine-readable JSON; no Docker required):
                           containers). docker_reachable=false if docker absent.
   --validate-config PATH  Validate a config file against the schema; emit JSON
                           with errors, unknowns, and passive-approval status.
+  --print-version         Emit {schema_version, version, commit, full_version}
+                          as JSON. full_version is the stable cache key.
 
 All other arguments are forwarded to the agent (claude or gemini).
 EOF
