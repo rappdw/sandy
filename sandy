@@ -950,6 +950,9 @@ _sandy_emit_schema() {
     printf '}'
 
     # cli_flags — hand-curated; intentionally limited to the user-visible set.
+    # Kept in lockstep with the real parsers (fast-path dispatches + the main/
+    # sub-command case statements) by test/run-tests.sh §91, which extracts every
+    # flag the parsers actually recognize and diffs it against this list.
     printf ',"cli_flags":['
     printf '{'; _json_kv name '"--rebuild"';      printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Force rebuild of sandy images."'; printf '}'
     printf ','
@@ -990,6 +993,8 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--update-sessions"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Fleet image refresh + rolling restart across every daemon session on the host; scope to one session with --workspace PATH. Sub-options: --dry-run, --yes, --idle-for <minutes>, --rebuild, --workspace."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --keep-approvals, --dry-run, --yes."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --update-sessions, and --reset-sandbox. NOT accepted by --gc, --stop-all, --prune-orphans, or the introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -2433,6 +2438,8 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     while [ $# -gt 0 ]; do
         case "$1" in
             --workspace)      shift; _rs_workspace="${1:-}"
+                              [ -z "$_rs_workspace" ] && { error "--reset-sandbox: --workspace needs a PATH"; exit 1; } ;;
+            --workspace=*)    _rs_workspace="${1#--workspace=}"
                               [ -z "$_rs_workspace" ] && { error "--reset-sandbox: --workspace needs a PATH"; exit 1; } ;;
             --keep-approvals) _rs_keep_approvals=true ;;
             --dry-run)        _rs_dry_run=true ;;
