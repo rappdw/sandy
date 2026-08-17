@@ -59,6 +59,16 @@ As of 1.7.0, sandy guarantees a stronger, test-pinned contract for these four fl
 
 - `--print-schema`, `--print-state` (both modes), and `--print-version` always write exactly one JSON document to stdout and zero bytes to stderr, on every exercised code path.
 - `--validate-config PATH` on a resolvable invocation (the file exists or does not; the key set is valid, unknown, or requires approval) writes exactly one JSON document to stdout and zero bytes to stderr, with the outcome encoded in the JSON body (`errors[]`, `warnings[]`, `approval_status`) and the exit code — including the file-not-found case, which exits 1 WITH a JSON body naming the failure in `errors[]`, not a bare stderr message.
+### Daemon exit codes: no code observed is not a verdict (#157)
+
+`--attach`'s exit codes (`0`/`3`/`4`) are *evidence-backed* — sandy discards `tmux attach`'s return value and re-derives the answer by probing live state afterward. If the sandy process is killed by a signal (typically `SIGHUP` from a pty teardown when an editor closes a terminal), that probe never runs and a supervising parent observes **no exit code at all** (`code === null`).
+
+**That state carries no information about the session.** It means the decision procedure did not execute — not that the attach or the session failed — and it must not be mapped onto `5`. Under D9 the durable session is owned by the running labeled container, and a killed *local client* says nothing about it.
+
+Consumers should **reconcile against `--print-state`**, or simply re-run `--attach` (which returns `4` if the session is genuinely gone), rather than infer liveness from a missing code. Sandy deliberately declines to guess: reporting "the session survived" without probing would be an unverified claim.
+
+(`5` is additionally unreachable on the `--attach` path today — both `exit 5` sites are in `--stop` — so treating an unknown state as "attach failed" maps it onto a code `--attach` never emits.)
+
 - Only the **usage-error** case — `--validate-config` invoked with no PATH argument at all — departs from the JSON contract: stdout is exactly 0 bytes, stderr is non-empty and carries a `[sandy] ERROR: ...` line, and the exit code is 1. This is the one case where there is no path to validate, so there is nothing to build a JSON body around.
 - Consumers may therefore pipe the stdout of any of these four invocations directly into a strict JSON parser (`json.load`, `jq -e`) without pre-filtering: a parse failure signals a genuine sandy bug, not an expected log line sharing the stream.
 
