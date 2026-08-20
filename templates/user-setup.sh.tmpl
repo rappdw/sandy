@@ -737,7 +737,17 @@ _sandy_wrap_cmd_exit_pause() {
 }
 
 build_claude_cmd() {
-    local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-8} --teammate-mode tmux"
+    local cmd="claude --model ${SANDY_MODEL:-claude-opus-5}"
+    # SANDY_TEAMMATE_MODE (#teammate): was hardcoded to "tmux". Now a passive-safe
+    # key, and OPT-IN — empty by default, so sandy passes no --teammate-mode at all
+    # and Claude Code applies its own default. "off"/"none" are accepted as
+    # synonyms for omit. Sandy no longer seeds teammateMode into settings.json
+    # either — this flag governs the session, and the host file is left alone.
+    local _tm="${SANDY_TEAMMATE_MODE-}"
+    case "$_tm" in
+        off|none|"") ;;
+        *) cmd+=" --teammate-mode ${_tm}" ;;
+    esac
     # SANDY_EFFORT (#effort): pin Claude Code's reasoning effort so a run isn't
     # silently at the model default. Validated host-side; a separate axis from
     # --model. Empty → omit the flag → Claude Code's own default applies.

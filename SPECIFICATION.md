@@ -150,7 +150,7 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_TOOL_AUDIT`, `SANDY_HANDOFF_DIRS`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_TEAMMATE_MODE`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_TOOL_AUDIT`, `SANDY_HANDOFF_DIRS`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -186,7 +186,8 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `DISCORD_BOT_TOKEN` | privileged | unset | 0.7.6 | stable | Discord bot token for the channel relay. |
 | `DISCORD_ALLOWED_SENDERS` | privileged | unset | 0.7.6 | stable | Comma-separated Discord user IDs allowed to send messages. |
 | `SANDY_AGENT` | passive | `claude` | 0.9.0 | stable | Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'. |
-| `SANDY_MODEL` | passive | `claude-opus-4-8` | 0.1.0 | stable | Model ID for the Claude agent. |
+| `SANDY_MODEL` | passive | `claude-opus-5` | 0.1.0 | stable | Model ID for the Claude agent. |
+| `SANDY_TEAMMATE_MODE` | passive | unset | 1.7.0 | stable | Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched. |
 | `SANDY_EFFORT` | passive | unset | 1.6.0 | stable | Reasoning effort for the Claude agent (claude only), applied as 'claude --effort <level>'. Empty leaves Claude Code's own default (currently 'high'). Levels are model-dependent; an unsupported level falls back to the highest supported at or below it. Passive-safe (effort does not affect isolation). Recorded in sandy-session.json. |
 | `SANDY_CPUS` | passive | unset | 0.1.0 | stable | CPU limit for container (default: auto-detected). |
 | `SANDY_MEM` | passive | unset | 0.1.0 | stable | Memory limit for container (e.g. '8g'; default: auto-detected). |
@@ -318,7 +319,7 @@ Whenever `claude` is in `SANDY_AGENT`, sandy regenerates `<NAME>/claude/settings
 
 1. Base: read host `~/.claude/settings.json` (or start from `{}` if absent).
 2. Overlay: read the previous sandbox `<NAME>/claude/settings.json` (if it exists) and preserve `enabledPlugins` from it onto the base, so plugin installs survive across launches.
-3. Merge sandy-required defaults (`teammateMode`, `spinnerTipsEnabled`, `skipDangerousModePermissionPrompt`) if not already present. When `SANDY_SKIP_PERMISSIONS=true` (the default), also set `permissions.defaultMode = "bypassPermissions"` (overwrite, not merge — toggling `SANDY_SKIP_PERMISSIONS` between launches reliably propagates). When `SANDY_SKIP_PERMISSIONS=false`, the key is removed if previously sandy-set. `permissions.disableBypassPermissionsMode` (host policy) is left alone.
+3. Merge sandy-required defaults (`spinnerTipsEnabled`, `skipDangerousModePermissionPrompt`) if not already present. **`teammateMode` is deliberately NOT seeded** (1.7.0): the `--teammate-mode` CLI flag governs the session, so seeding the file too only created a second, divergable source of truth. `SANDY_TEAMMATE_MODE` is also empty by default, so sandy passes no `--teammate-mode` flag at all unless a user opts in; a host `settings.json` value is left untouched. When `SANDY_SKIP_PERMISSIONS=true` (the default), also set `permissions.defaultMode = "bypassPermissions"` (overwrite, not merge — toggling `SANDY_SKIP_PERMISSIONS` between launches reliably propagates). When `SANDY_SKIP_PERMISSIONS=false`, the key is removed if previously sandy-set. `permissions.disableBypassPermissionsMode` (host policy) is left alone.
 4. Merge `extraKnownMarketplaces` entries for `claude-plugins-official` and `sandy-plugins`; scrub deprecated entries (`thinkkit`, `ait`, `pka-skills`).
 5. Write the merged result back to `<NAME>/claude/settings.json`.
 6. (First run only) Copy host `~/.claude/.claude.json` → sandbox `<NAME>.claude.json`, stripping the `projects` key.
@@ -1776,7 +1777,7 @@ Capabilities SETUID/SETGID are needed for `gosu` privilege drop. CHOWN/DAC_OVERR
 
 | Variable | Default | Notes |
 |---|---|---|
-| `SANDY_MODEL` | `claude-opus-4-8` | Passed to `claude --model` |
+| `SANDY_MODEL` | `claude-opus-5` | Passed to `claude --model` |
 | `SANDY_SSH` | `token` | Git authentication mode |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Skip trust dialog |
 | `SANDY_VERBOSE` | `0` | No extra output |
@@ -1850,7 +1851,6 @@ Note the double-nested `source` — the outer key is the `extraKnownMarketplaces
 **Sandy defaults merged on every launch** (Node.js tier):
 ```json
 {
-  "teammateMode": "tmux",
   "spinnerTipsEnabled": false,
   "skipDangerousModePermissionPrompt": true,
   "statusLine": { "type": "command", "command": "/usr/local/bin/sandy-claude-statusline", "padding": 0 }

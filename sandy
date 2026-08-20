@@ -68,6 +68,7 @@ SANDY_PRIVILEGED_KEYS=(
 SANDY_PASSIVE_KEYS=(
     SANDY_AGENT
     SANDY_MODEL
+    SANDY_TEAMMATE_MODE
     SANDY_EFFORT
     SANDY_CPUS
     SANDY_MEM
@@ -723,7 +724,8 @@ XAI_API_KEY|secret|||1.5.0|stable|xAI API key for Grok Build (docs.x.ai). Enable
 GOOGLE_API_KEY|secret|||0.9.0|stable|Google API key for Vertex AI / ADC.
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Code experimental agent-teams feature.
 SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
-SANDY_MODEL|string|claude-opus-4-8|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
+SANDY_MODEL|string|claude-opus-5|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
+SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched.
 SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for the Claude agent (claude only), applied as 'claude --effort <level>'. Empty leaves Claude Code's own default (currently 'high'). Levels are model-dependent; an unsupported level falls back to the highest supported at or below it. Passive-safe (effort does not affect isolation). Recorded in sandy-session.json.
 SANDY_CPUS|int|||0.1.0|stable|CPU limit for container (default: auto-detected).
 SANDY_MEM|string|||0.1.0|stable|Memory limit for container (e.g. '8g'; default: auto-detected).
@@ -2574,7 +2576,7 @@ Usage:
   sandy --help                   Show this help
 
 Environment variables:
-  SANDY_MODEL        Model to use (default: claude-opus-4-8)
+  SANDY_MODEL        Model to use (default: claude-opus-5)
   SANDY_EFFORT       Reasoning effort for claude: low|medium|high|xhigh|max
                      (default: Claude Code's own, currently high)
   ANTHROPIC_API_KEY  API key (not needed with Claude Max / OAuth)
@@ -4114,7 +4116,17 @@ _sandy_wrap_cmd_exit_pause() {
 }
 
 build_claude_cmd() {
-    local cmd="claude --model ${SANDY_MODEL:-claude-opus-4-8} --teammate-mode tmux"
+    local cmd="claude --model ${SANDY_MODEL:-claude-opus-5}"
+    # SANDY_TEAMMATE_MODE (#teammate): was hardcoded to "tmux". Now a passive-safe
+    # key, and OPT-IN — empty by default, so sandy passes no --teammate-mode at all
+    # and Claude Code applies its own default. "off"/"none" are accepted as
+    # synonyms for omit. Sandy no longer seeds teammateMode into settings.json
+    # either — this flag governs the session, and the host file is left alone.
+    local _tm="${SANDY_TEAMMATE_MODE-}"
+    case "$_tm" in
+        off|none|"") ;;
+        *) cmd+=" --teammate-mode ${_tm}" ;;
+    esac
     # SANDY_EFFORT (#effort): pin Claude Code's reasoning effort so a run isn't
     # silently at the model default. Validated host-side; a separate axis from
     # --model. Empty → omit the flag → Claude Code's own default applies.
@@ -7143,7 +7155,7 @@ if _sandy_agent_has claude; then
             const prev = readJson(dst);
             if (prev.enabledPlugins) s.enabledPlugins = prev.enabledPlugins;
             const skip = (process.env.SANDY_SKIP_PERMISSIONS || 'true') !== 'false';
-            const defaults = {teammateMode:'tmux', spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:skip, statusLine:{ type:'command', command:'/usr/local/bin/sandy-claude-statusline', padding:0 }};
+            const defaults = {spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:skip, statusLine:{ type:'command', command:'/usr/local/bin/sandy-claude-statusline', padding:0 }};
             for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
             // Set permissions.defaultMode = bypassPermissions when SANDY_SKIP_PERMISSIONS=true.
             // Claude 2.1.x runtime gates make the CLI flag insufficient; the settings.json
@@ -7204,7 +7216,6 @@ if _sandy_agent_has claude; then
         [ -z "$_base_src" ] && _base_src=/dev/null
         jq --arg skip "$skip_perm" --argjson prev "$_prev_plugins" '
             (if . == null then {} else . end) |
-            .teammateMode //= "tmux" |
             .spinnerTipsEnabled //= false |
             .skipDangerousModePermissionPrompt //= ($skip == "true") |
             .statusLine //= {"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0} |
@@ -7232,9 +7243,9 @@ if _sandy_agent_has claude; then
             skip_perm="true"
             [ "${SANDY_SKIP_PERMISSIONS:-true}" = "false" ] && skip_perm="false"
             if [ "$skip_perm" = "true" ]; then
-                printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$SEED_SETTINGS"
             else
-                printf '{"teammateMode":"tmux","spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' > "$SEED_SETTINGS"
             fi
         fi
     fi
@@ -8988,7 +8999,7 @@ RUN_FLAGS+=(-e "SANDY_WORKSPACE=$SANDY_WORKSPACE")
 RUN_FLAGS+=(-e "SANDY_PROJECT_NAME=$(basename "$WORK_DIR")")
 # Validate SANDY_MODEL — only allow alphanumeric, hyphens, dots, underscores
 if _sandy_agent_has claude; then
-    SANDY_MODEL="${SANDY_MODEL:-claude-opus-4-8}"
+    SANDY_MODEL="${SANDY_MODEL:-claude-opus-5}"
 else
     SANDY_MODEL="${SANDY_MODEL:-}"
 fi
@@ -9014,6 +9025,10 @@ fi
 RUN_FLAGS+=(-e "SANDY_AGENT=$SANDY_AGENT")
 RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
 RUN_FLAGS+=(-e "SANDY_EFFORT=${SANDY_EFFORT:-}")
+# SANDY_TEAMMATE_MODE (#teammate): build_claude_cmd runs CONTAINER-side (it lives
+# in the user-setup.sh heredoc), so the value has to cross the boundary or the key
+# would silently do nothing and always fall back to the default.
+RUN_FLAGS+=(-e "SANDY_TEAMMATE_MODE=${SANDY_TEAMMATE_MODE-}")
 RUN_FLAGS+=(-e "SANDY_SKIP_PERMISSIONS=${SANDY_SKIP_PERMISSIONS:-true}")
 RUN_FLAGS+=(-e "SANDY_NEW_SESSION=$SANDY_NEW_SESSION")
 RUN_FLAGS+=(-e "SANDY_REMOTE_CONTROL=$SANDY_REMOTE_CONTROL")
