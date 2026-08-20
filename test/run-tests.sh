@@ -7656,6 +7656,72 @@ rm -f "$_S93_PV_JSON" "$_S93_SCHEMA_JSON" "$_S93_CROSS_PY" "$_S93_COMPOSE_PY" \
       "$_S93_NC_JSON" "$_S93_NC_PY" "$_S93_BAKED_JSON" 2>/dev/null || true
 
 # ============================================================
+echo ""
+echo "§94: SANDY_TEAMMATE_MODE + the teammateMode de-seeding (#teammate)"
+# ============================================================
+# --teammate-mode was hardcoded into build_claude_cmd and teammateMode was ALSO
+# seeded into settings.json, giving one setting two sources of truth that could
+# disagree. 1.7.0 makes the flag a passive key (default tmux, unchanged
+# behavior) and stops seeding the file entirely.
+#
+# Two things here can regress SILENTLY and so are pinned explicitly:
+#   - re-adding teammateMode to any of the THREE seeder branches (node/jq/printf)
+#   - the default model drifting between its two independent literals: the
+#     _sandy_key_metadata row and build_claude_cmd's own ${SANDY_MODEL:-...}
+_S94="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_s94_bcc="$(sed -n '/^build_claude_cmd()/,/^}$/p' "$_S94")"
+
+# --- the key exists, in the right tier -------------------------------------
+check "§94(1) SANDY_TEAMMATE_MODE is a PASSIVE key" \
+    bash -c 'sed -n "/^SANDY_PASSIVE_KEYS=(/,/^)/p" "$1" | grep -qE "^[[:space:]]+SANDY_TEAMMATE_MODE$"' -- "$_S94"
+check "§94(2) NEGATIVE: SANDY_TEAMMATE_MODE is not privileged or env-only" \
+    bash -c '! sed -n "/^SANDY_PRIVILEGED_KEYS=(/,/^)/p;/^SANDY_ENV_ONLY_KEYS=(/,/^)/p" "$1" | grep -qE "^[[:space:]]+SANDY_TEAMMATE_MODE$"' -- "$_S94"
+check "§94(3) SANDY_TEAMMATE_MODE has a _sandy_key_metadata row with an EMPTY default (opt-in)" \
+    bash -c 'grep -q "^SANDY_TEAMMATE_MODE|string|||" "$1"' -- "$_S94"
+
+# --- behavior: default preserved, opt-out honored ---------------------------
+# build_claude_cmd runs container-side; extract-then-eval with its two callees
+# stubbed so we can read the composed command. Never source <(...) — SRCSUB.
+# A temp script, not a shell function: the checks below run via `bash -c`, which
+# does NOT inherit functions from this shell. (Verified the hard way — as a
+# function, checks 5 and 6 passed VACUOUSLY on empty output.)
+_S94_RUN="$(mktemp)"
+cat > "$_S94_RUN" <<'S94RUN'
+_sandy_translate_args(){ :; }
+_sandy_wrap_cmd_exit_pause(){ printf "%s" "$2"; }
+WORKSPACE=/nonexistent-s94; SANDY_HEADLESS=false; SANDY_MODEL=m
+eval "$1"
+build_claude_cmd
+S94RUN
+# The headline behavior change: sandy is opt-in now. Unset must pass NO flag.
+check "§94(4) NEGATIVE: default (unset) passes no --teammate-mode at all" \
+    bash -c 'out="$(bash "$2" "$1" 2>/dev/null)"; [ -n "$out" ] || exit 1; case "$out" in *--teammate-mode*) exit 1 ;; *) exit 0 ;; esac' -- "$_s94_bcc" "$_S94_RUN"
+check "§94(4b) opting in with SANDY_TEAMMATE_MODE=tmux passes the flag" \
+    bash -c 'out="$(SANDY_TEAMMATE_MODE=tmux bash "$2" "$1" 2>/dev/null)"; case "$out" in *"--teammate-mode tmux"*) exit 0 ;; *) exit 1 ;; esac' -- "$_s94_bcc" "$_S94_RUN"
+check "§94(5) NEGATIVE: SANDY_TEAMMATE_MODE=off omits the flag entirely" \
+    bash -c 'out="$(SANDY_TEAMMATE_MODE=off bash "$2" "$1" 2>/dev/null)"; [ -n "$out" ] || exit 1; case "$out" in *--teammate-mode*) exit 1 ;; *) exit 0 ;; esac' -- "$_s94_bcc" "$_S94_RUN"
+check "§94(6) NEGATIVE: empty SANDY_TEAMMATE_MODE omits the flag entirely" \
+    bash -c 'out="$(SANDY_TEAMMATE_MODE= bash "$2" "$1" 2>/dev/null)"; [ -n "$out" ] || exit 1; case "$out" in *--teammate-mode*) exit 1 ;; *) exit 0 ;; esac' -- "$_s94_bcc" "$_S94_RUN"
+check "§94(7) a custom value is passed through verbatim" \
+    bash -c 'out="$(SANDY_TEAMMATE_MODE=sidecar bash "$2" "$1" 2>/dev/null)"; case "$out" in *"--teammate-mode sidecar"*) exit 0 ;; *) exit 1 ;; esac' -- "$_s94_bcc" "$_S94_RUN"
+
+# --- the value must cross into the container -------------------------------
+check "§94(8) SANDY_TEAMMATE_MODE is forwarded into the container" \
+    bash -c 'grep -q "RUN_FLAGS+=(-e \"SANDY_TEAMMATE_MODE=" "$1"' -- "$_S94"
+
+# --- de-seeding: NONE of the three seeder branches may emit teammateMode ----
+check "§94(9) NEGATIVE: the settings.json seeder never writes teammateMode" \
+    bash -c '! grep -q "teammateMode" "$1" || ! grep "teammateMode" "$1" | grep -qvE "^[[:space:]]*#|_sandy_key_metadata|SANDY_TEAMMATE_MODE\|"' -- "$_S94"
+
+# --- default-model drift between the two independent literals --------------
+check "§94(10) build_claude_cmd default model matches the _sandy_key_metadata default" \
+    bash -c '
+        meta="$(grep -m1 "^SANDY_MODEL|string|" "$1" | cut -d"|" -f3)"
+        code="$(printf "%s" "$2" | sed -n "s/.*SANDY_MODEL:-\([a-zA-Z0-9._-]*\)}.*/\1/p" | head -1)"
+        [ -n "$meta" ] && [ "$meta" = "$code" ]
+    ' -- "$_S94" "$_s94_bcc"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

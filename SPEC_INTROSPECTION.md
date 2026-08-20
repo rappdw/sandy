@@ -118,7 +118,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
         "name": "SANDY_MODEL",
         "type": "string",
         "pattern": "^[a-zA-Z0-9._-]+$",
-        "default": "claude-opus-4-8",
+        "default": "claude-opus-5",
         "description": "Model ID for the Claude agent.",
         "sources": ["home_config", "workspace_config", "env"]
       },
@@ -537,7 +537,7 @@ For each key, additional metadata (type, default, description, pattern) is harde
 _sandy_key_metadata() {
     cat <<'EOF'
 key	type	default	pattern	description
-SANDY_MODEL	string	claude-opus-4-8	^[a-zA-Z0-9._-]+$	Model ID for Claude agent
+SANDY_MODEL	string	claude-opus-5	^[a-zA-Z0-9._-]+$	Model ID for Claude agent
 SANDY_CPUS	int	2		Number of CPUs allocated to the container
 SANDY_SSH	enum:token,agent	token		SSH auth mode: token (gh CLI) or agent (forward host SSH agent)
 ...
