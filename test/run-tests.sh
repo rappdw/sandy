@@ -7722,6 +7722,55 @@ check "§94(10) build_claude_cmd default model matches the _sandy_key_metadata d
     ' -- "$_S94" "$_s94_bcc"
 
 # ============================================================
+echo ""
+echo "§95: skipAutoPermissionPrompt is seeded in ALL THREE seeder branches"
+# ============================================================
+# Claude Code 2.1.x offers to make "auto" the default permission mode. Sandy
+# pins bypassPermissions deliberately, so inside a sandbox that prompt is pure
+# friction. Claude gates it on:
+#   !["policySettings","userSettings","flagSettings"].some(t => fn(t)?.skipAutoPermissionPrompt === true)
+# so a top-level skipAutoPermissionPrompt:true in settings.json suppresses it.
+#
+# The class bug this guards: sandy has THREE settings.json seeder branches
+# (node, jq, first-launch printf) and a key added to only some of them works on
+# whichever host tooling happens to be installed. That is invisible until a user
+# on the other path reports it. All three are pinned here, separately named.
+#
+# Note 2.1.x ships a one-time migration that DELETES this key when
+# permissions.defaultMode != "auto" — precisely sandy's configuration — so
+# re-seeding every launch is what makes the suppression stick.
+_S95="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_s95_seed="$(sed -n '/SEED_SETTINGS="\$SANDBOX_DIR\/claude\/settings.json"/,/Seeded settings.json/p' "$_S95")"
+
+check "§95(1) node branch seeds skipAutoPermissionPrompt" \
+    bash -c 'printf "%s" "$1" | grep -q "skipAutoPermissionPrompt:skip"' -- "$_s95_seed"
+check "§95(2) jq branch seeds skipAutoPermissionPrompt" \
+    bash -c 'printf "%s" "$1" | grep -q "\.skipAutoPermissionPrompt //="' -- "$_s95_seed"
+check "§95(3) first-launch printf branch seeds skipAutoPermissionPrompt" \
+    bash -c 'printf "%s" "$1" | grep -q "\"skipAutoPermissionPrompt\":true"' -- "$_s95_seed"
+
+# It must track SANDY_SKIP_PERMISSIONS, not be hardcoded true: with skip=false
+# sandy pins no mode, so the auto-mode offer is a legitimate choice for the user.
+check "§95(4) the value tracks SANDY_SKIP_PERMISSIONS rather than being hardcoded" \
+    bash -c 'printf "%s" "$1" | grep -q "\"skipAutoPermissionPrompt\":false"' -- "$_s95_seed"
+
+# Behavioral: the node merge is only-if-absent, so a user-set value survives.
+check "§95(5) node merge is only-if-absent (a user-set false is preserved)" \
+    bash -c 'command -v node >/dev/null 2>&1 || exit 0
+        out="$(node -e "
+            const skip = true;
+            const s = {skipAutoPermissionPrompt:false};
+            const defaults = {skipAutoPermissionPrompt:skip};
+            for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
+            process.stdout.write(String(s.skipAutoPermissionPrompt));
+        ")"
+        [ "$out" = "false" ]'
+
+# NEGATIVE: the key sandy already had is a DIFFERENT prompt; both must survive.
+check "§95(6) NEGATIVE: skipDangerousModePermissionPrompt is still seeded too (distinct prompt)" \
+    bash -c 'printf "%s" "$1" | grep -q "skipDangerousModePermissionPrompt"' -- "$_s95_seed"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap

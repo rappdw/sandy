@@ -7155,7 +7155,7 @@ if _sandy_agent_has claude; then
             const prev = readJson(dst);
             if (prev.enabledPlugins) s.enabledPlugins = prev.enabledPlugins;
             const skip = (process.env.SANDY_SKIP_PERMISSIONS || 'true') !== 'false';
-            const defaults = {spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:skip, statusLine:{ type:'command', command:'/usr/local/bin/sandy-claude-statusline', padding:0 }};
+            const defaults = {spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:skip, skipAutoPermissionPrompt:skip, statusLine:{ type:'command', command:'/usr/local/bin/sandy-claude-statusline', padding:0 }};
             for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
             // Set permissions.defaultMode = bypassPermissions when SANDY_SKIP_PERMISSIONS=true.
             // Claude 2.1.x runtime gates make the CLI flag insufficient; the settings.json
@@ -7218,6 +7218,12 @@ if _sandy_agent_has claude; then
             (if . == null then {} else . end) |
             .spinnerTipsEnabled //= false |
             .skipDangerousModePermissionPrompt //= ($skip == "true") |
+            # NOTE: the //= operator treats an explicit false as unset, so this and the
+            # sibling skipDangerousModePermissionPrompt / spinnerTipsEnabled lines
+            # will overwrite a user-set false on THIS fallback path, where the node
+            # path above preserves it. Pre-existing quirk of the jq branch, kept
+            # consistent rather than fixed piecemeal for one key.
+            .skipAutoPermissionPrompt //= ($skip == "true") |
             .statusLine //= {"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0} |
             (if $skip == "true"
                 then .permissions = ((.permissions // {}) | .defaultMode = "bypassPermissions")
@@ -7243,9 +7249,9 @@ if _sandy_agent_has claude; then
             skip_perm="true"
             [ "${SANDY_SKIP_PERMISSIONS:-true}" = "false" ] && skip_perm="false"
             if [ "$skip_perm" = "true" ]; then
-                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"skipAutoPermissionPrompt":true,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$SEED_SETTINGS"
             else
-                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"skipAutoPermissionPrompt":false,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' > "$SEED_SETTINGS"
             fi
         fi
     fi
