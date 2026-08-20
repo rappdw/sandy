@@ -6995,7 +6995,7 @@ echo "§89: bash-3.2 / BSD portability lint (the class CI structurally cannot se
 # ============================================================
 # CI is Ubuntu + bash 5 + GNU userland; the maintainer is macOS + bash 3.2 + BSD.
 # Three constructs parse or expand DIFFERENTLY there, so `bash -n` in CI passes
-# and the break only ever shows up on one machine. All three have already bitten
+# and the break only ever shows up on one machine. All four have already bitten
 # this repo, and each was silent in a way that made it expensive:
 #
 #   §83  nested source <(...) inside $( )  -> exit 127, ERR trap, run aborted
@@ -7014,7 +7014,7 @@ check "lint-bash32.sh exists and is executable-by-bash" \
 
 # The detectors must be proven to DETECT before a clean run means anything —
 # a linter whose patterns silently stopped matching would report success forever.
-check "detectors self-test: all three fire on known-bad fixtures" \
+check "detectors self-test: all four fire on known-bad fixtures" \
     bash -c 'bash "$1" --self-test >/dev/null 2>&1' -- "$_S89"
 
 check "detectors self-test: clean file yields no findings (no false positives)" \
@@ -7744,8 +7744,11 @@ _s95_seed="$(sed -n '/SEED_SETTINGS="\$SANDBOX_DIR\/claude\/settings.json"/,/See
 
 check "§95(1) node branch seeds skipAutoPermissionPrompt" \
     bash -c 'printf "%s" "$1" | grep -q "skipAutoPermissionPrompt:skip"' -- "$_s95_seed"
+# NOTE: matches the has() form, not //= — see §96. The jq branch moved off //=
+# because it treats an explicit false as unset; this check pinned the old form
+# and correctly failed when that changed.
 check "§95(2) jq branch seeds skipAutoPermissionPrompt" \
-    bash -c 'printf "%s" "$1" | grep -q "\.skipAutoPermissionPrompt //="' -- "$_s95_seed"
+    bash -c 'printf "%s" "$1" | grep -q "if has(\"skipAutoPermissionPrompt\") then . else"' -- "$_s95_seed"
 check "§95(3) first-launch printf branch seeds skipAutoPermissionPrompt" \
     bash -c 'printf "%s" "$1" | grep -q "\"skipAutoPermissionPrompt\":true"' -- "$_s95_seed"
 
@@ -7769,6 +7772,36 @@ check "§95(5) node merge is only-if-absent (a user-set false is preserved)" \
 # NEGATIVE: the key sandy already had is a DIFFERENT prompt; both must survive.
 check "§95(6) NEGATIVE: skipDangerousModePermissionPrompt is still seeded too (distinct prompt)" \
     bash -c 'printf "%s" "$1" | grep -q "skipDangerousModePermissionPrompt"' -- "$_s95_seed"
+
+# ============================================================
+echo ""
+echo "§96: jq seeder uses has() for booleans, not //= (node/jq parity)"
+# ============================================================
+# jq's //= treats an explicit false as UNSET, so `.k //= true` overwrites a
+# user-set false. The node branch uses a real absence test and preserves it, so
+# the two seeder paths silently disagreed depending on which host tool exists.
+# false is a meaningful value for all three of these keys, so it matters.
+#
+# Object-valued //= (statusLine, extraKnownMarketplaces) is fine and stays: an
+# object is always truthy, so //= never misfires on it.
+_S96="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_s96_seed="$(sed -n '/SEED_SETTINGS="\$SANDBOX_DIR\/claude\/settings.json"/,/Seeded settings.json/p' "$_S96")"
+
+for _s96_k in spinnerTipsEnabled skipDangerousModePermissionPrompt skipAutoPermissionPrompt; do
+    check "§96 jq branch uses has() for $_s96_k" \
+        bash -c 'printf "%s" "$1" | grep -q "if has(\"$2\") then . else"' -- "$_s96_seed" "$_s96_k"
+    check "§96 NEGATIVE: jq branch no longer uses //= for $_s96_k" \
+        bash -c '! printf "%s" "$1" | grep -qE "^[[:space:]]*\.$2 //="' -- "$_s96_seed" "$_s96_k"
+done
+
+# Behavioral, if jq is present: an explicit false must survive, an absent key
+# must be filled. This is the property; the greps above are just the shape.
+check "§96 behavioral: jq preserves a user-set false and fills an absent key" \
+    bash -c 'command -v jq >/dev/null 2>&1 || exit 0
+        prog="if has(\"skipAutoPermissionPrompt\") then . else .skipAutoPermissionPrompt = (\$skip == \"true\") end"
+        kept="$(printf "%s" "{\"skipAutoPermissionPrompt\":false}" | jq --arg skip true "$prog" | jq -r ".skipAutoPermissionPrompt")"
+        made="$(printf "%s" "{}" | jq --arg skip true "$prog" | jq -r ".skipAutoPermissionPrompt")"
+        [ "$kept" = "false" ] && [ "$made" = "true" ]'
 
 # ============================================================
 # Summary

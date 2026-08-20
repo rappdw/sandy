@@ -29,6 +29,14 @@
 #           and it is a PARSE error, so it killed the entire file while the
 #           summary still printed "945 passed, 0 failed".
 #
+#   APOSQ   an apostrophe in a comment inside a multi-line SINGLE-quoted program
+#           argument (jq/awk/python passed as 'one big string'). The apostrophe
+#           closes the string and the shell reinterprets the rest as code. Same
+#           failure as APOSCS in a different container — APOSCS only looks inside
+#           $( ), so a "jq's" in a jq program broke `bash -n` while APOSCS was
+#           clean. Detected via an explicit opener, NOT quote parity: parity was
+#           tried and floods false positives on any ordinary "don't" in prose.
+#
 # Deliberately NOT checked: `set -E` ERR traps firing in command-substitution
 # subshells (real — see sandy:1043 — but not reliably detectable statically, and
 # a false positive here is worse than a miss).
@@ -120,6 +128,31 @@ def scan(path):
             i = j
         i += 1
 
+    # APOSQ — apostrophe in a comment inside a multi-line SINGLE-QUOTED program
+    # argument (jq / awk / python passed as 'one big quoted string'). Inside that
+    # region an apostrophe CLOSES the string and the shell reinterprets the rest
+    # as code. Same failure as APOSCS, different container: APOSCS only looks
+    # inside $( ), and this bit exactly there — a "jq's" in a comment inside a jq
+    # program broke bash -n while APOSCS reported clean.
+    #
+    # Deliberately NARROW. A parity-of-quotes approach was tried first and was
+    # unusable: any lone apostrophe in ordinary prose ("don't") flips parity and
+    # floods the rest of the file with false positives. So this requires an
+    # explicit opener — a known program-taking command whose line ENDS with the
+    # opening quote — and closes on a line whose first character is that quote.
+    i = 0
+    while i < len(lines):
+        if re.search(r"\b(jq|awk|gawk|sed|perl|python3?|node)\b[^']*'\s*$", lines[i]):
+            j, start = i + 1, i
+            while j < len(lines) and j - start < MAX_BLOCK:
+                if re.match(r"^\s*'", lines[j]):
+                    break
+                if re.match(r"^\s*#", lines[j]) and "'" in lines[j]:
+                    out.append((j + 1, "APOSQ", lines[j].strip()[:88]))
+                j += 1
+            i = j
+        i += 1
+
     # APOSCS — apostrophe in a comment inside a multi-line $( ).
     depth, opened_at = 0, 0
     for i, l in enumerate(lines, 1):
@@ -152,8 +185,9 @@ if [ "$SELF_TEST" = true ]; then
     printf '%s\n' '#!/bin/bash' 'x="$(bash -c '"'"'source <(sed -n "1p" f); g'"'"')"' > "$_fx/srcsub.sh"
     printf '%s\n' '#!/bin/bash' 'python3 -c "' '# the `sandy` binary' 'print(1)' '" arg' > "$_fx/pyback.sh"
     printf '%s\n' '#!/bin/bash' 'out="$(' '  # shellcheck can'"'"'t see this' '  echo hi' ')"' > "$_fx/aposcs.sh"
+    printf '%s\n' '#!/bin/bash' "jq --arg s x '" '  .a //= 1 |' "  # note: jq's //= is odd here" '  .b' "' file" > "$_fx/aposq.sh"
     _fails=0
-    for probe in srcsub pyback aposcs; do
+    for probe in srcsub pyback aposcs aposq; do
         if python3 "$_scanner" "$_fx/$probe.sh" >/dev/null 2>&1; then
             echo "SELF-TEST FAIL: $probe fixture was NOT detected" >&2; _fails=$((_fails + 1))
         else
@@ -182,5 +216,6 @@ else
     echo "  SRCSUB  use extract-then-eval: v=\"\$(sed -n '/^f()/,/^}/p' x)\"; bash -c \"\$v; f\"" >&2
     echo "  PYBACK  use a QUOTED heredoc: python3 - arg <<'PY' ... PY" >&2
     echo "  APOSCS  reword the comment to avoid apostrophes" >&2
+    echo "  APOSQ   reword the comment; an apostrophe closes the single-quoted program" >&2
     exit 1
 fi
