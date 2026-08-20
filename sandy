@@ -7216,14 +7216,15 @@ if _sandy_agent_has claude; then
         [ -z "$_base_src" ] && _base_src=/dev/null
         jq --arg skip "$skip_perm" --argjson prev "$_prev_plugins" '
             (if . == null then {} else . end) |
-            .spinnerTipsEnabled //= false |
-            .skipDangerousModePermissionPrompt //= ($skip == "true") |
-            # NOTE: the //= operator treats an explicit false as unset, so this and the
-            # sibling skipDangerousModePermissionPrompt / spinnerTipsEnabled lines
-            # will overwrite a user-set false on THIS fallback path, where the node
-            # path above preserves it. Pre-existing quirk of the jq branch, kept
-            # consistent rather than fixed piecemeal for one key.
-            .skipAutoPermissionPrompt //= ($skip == "true") |
+            # only-if-absent for the BOOLEAN keys via has(), not //=. The //=
+            # operator treats an explicit false as unset, so it would overwrite a
+            # user-set false -- silently disagreeing with the node branch above,
+            # which uses a real absence test. false is a meaningful value for all
+            # three of these, so the distinction matters. Object-valued //= uses
+            # below are unaffected: an object is always truthy.
+            (if has("spinnerTipsEnabled") then . else .spinnerTipsEnabled = false end) |
+            (if has("skipDangerousModePermissionPrompt") then . else .skipDangerousModePermissionPrompt = ($skip == "true") end) |
+            (if has("skipAutoPermissionPrompt") then . else .skipAutoPermissionPrompt = ($skip == "true") end) |
             .statusLine //= {"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0} |
             (if $skip == "true"
                 then .permissions = ((.permissions // {}) | .defaultMode = "bypassPermissions")
