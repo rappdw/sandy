@@ -7744,8 +7744,11 @@ _s95_seed="$(sed -n '/SEED_SETTINGS="\$SANDBOX_DIR\/claude\/settings.json"/,/See
 
 check "§95(1) node branch seeds skipAutoPermissionPrompt" \
     bash -c 'printf "%s" "$1" | grep -q "skipAutoPermissionPrompt:skip"' -- "$_s95_seed"
+# NOTE: matches the has() form, not //= — see §96. The jq branch moved off //=
+# because it treats an explicit false as unset; this check pinned the old form
+# and correctly failed when that changed.
 check "§95(2) jq branch seeds skipAutoPermissionPrompt" \
-    bash -c 'printf "%s" "$1" | grep -q "\.skipAutoPermissionPrompt //="' -- "$_s95_seed"
+    bash -c 'printf "%s" "$1" | grep -q "if has(\"skipAutoPermissionPrompt\") then . else"' -- "$_s95_seed"
 check "§95(3) first-launch printf branch seeds skipAutoPermissionPrompt" \
     bash -c 'printf "%s" "$1" | grep -q "\"skipAutoPermissionPrompt\":true"' -- "$_s95_seed"
 
