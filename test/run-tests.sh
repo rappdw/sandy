@@ -3214,7 +3214,7 @@ check "SEED_SETTINGS points at sandbox-internal settings.json (rw)" \
     grep -q 'SEED_SETTINGS="\$SANDBOX_DIR/claude/settings\.json"' "$SANDY_SCRIPT_PATH"
 
 # Seed block must NOT be gated on SANDBOX_IS_NEW=true.
-_SEED_OPEN_LINE="$(grep -nB -m10 'SEED_SETTINGS="\$SANDBOX_DIR/claude/settings\.json"' "$SANDY_SCRIPT_PATH" | cut -d: -f1)"
+_SEED_OPEN_LINE="$(grep -n -m1 'SEED_SETTINGS="\$SANDBOX_DIR/claude/settings\.json"' "$SANDY_SCRIPT_PATH" | cut -d: -f1)"
 _SEED_GATE_LINE="$(awk -v n="$_SEED_OPEN_LINE" 'NR<n && /if _sandy_agent_has claude/ {last=NR} END {print last}' "$SANDY_SCRIPT_PATH")"
 check "seed block opener does not gate on SANDBOX_IS_NEW" \
     bash -c 'sed -n "${2}p" "$1" | grep -qv SANDBOX_IS_NEW' \

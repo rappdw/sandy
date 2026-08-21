@@ -86,6 +86,7 @@ CI is Ubuntu + bash 5 + GNU userland; the maintainer's machine is macOS + bash 3
 | `SRCSUB` | nested `source <(...)` inside `$( )` | bash 3.2 sources nothing → exit 127 → ERR trap aborted the run (§83) |
 | `PYBACK` | backtick or `$(` inside a **double-quoted** `python3 -c "..."` body | bash expands it regardless of Python comment syntax — a `` `sandy` `` in a comment made the suite **execute the real sandy binary** (§68) |
 | `APOSQ` | apostrophe in a comment inside a multi-line **single-quoted** program argument (`jq '...'`, `awk '...'`) | the apostrophe closes the string and the shell reinterprets the rest as code — `bash -n` fails while `APOSCS` reports clean, since it only scans `$( )` |
+| `GREPM` | `grep -n … \| head` under `pipefail`, or a flag cluster whose numeric argument was split off before `-m` | grep dies on `EPIPE` (exit 2) and the ERR trap **aborts the suite mid-run** — a race, so it passes locally and fails in CI; a partial run still prints its passes |
 | `APOSCS` | apostrophe in a comment inside a multi-line `$( )` | bash 3.2 doesn't skip comments when scanning a command substitution → unterminated quote → **parse abort**, while the summary still printed "945 passed, 0 failed" (§86) |
 
 ```sh
@@ -96,7 +97,7 @@ bash test/lint-bash32.sh --list       # the target set, for coverage assertions
 
 `run-tests.sh §89` runs it and asserts both that the tree is clean **and** that the detectors fire on known-bad fixtures — a linter whose patterns quietly stopped matching would otherwise report success forever. Validated by replay against this repo's own history: pointed at the commits *before* each fix, it flags all three original defects at their exact lines. Deliberately **not** checked: `set -E` ERR traps firing in command-substitution subshells (real — see `sandy:1043` — but not reliably detectable statically, and a false positive is worse than a miss here).
 
-Fixes: `SRCSUB` → extract-then-`eval`; `PYBACK` → a **quoted** heredoc (`python3 - arg <<'PY'`); `APOSCS` and `APOSQ` → reword the comment to avoid apostrophes.
+Fixes: `SRCSUB` → extract-then-`eval`; `PYBACK` → a **quoted** heredoc (`python3 - arg <<'PY'`); `APOSCS` and `APOSQ` → reword the comment to avoid apostrophes; `GREPM` → `grep -m1` rather than `grep | head -1`.
 
 ## Git branch work inside sandy (`.git/HEAD` is writable as of 1.5.0, #80)
 
