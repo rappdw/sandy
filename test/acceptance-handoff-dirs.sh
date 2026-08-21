@@ -26,6 +26,9 @@
 #      inside the container despite being agent-uid-owned (EROFS beats
 #      ownership — the entire point of the :ro mount flag).
 #   C. Persistence — stop/start preserves the outbox content.
+#   D. Enable by MARKER (.handoff-enabled) with no workspace config anywhere,
+#      repeating the EROFS-beats-ownership assertions on THAT path — phase B
+#      only proves them for the SANDY_HANDOFF_DIRS=1 path.
 #
 # Prints PASS/FAIL per assertion; exits non-zero if any FAIL.
 set -uo pipefail
@@ -46,8 +49,19 @@ PASS=0; FAIL=0
 ck() { if eval "$2" >/dev/null 2>&1; then printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS+1));
        else printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); fi; }
 cid() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.workspace_path=$WS" 2>/dev/null | head -1; }
-cleanup_ws() { "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true; rm -rf "$(dirname "$WS")"; }
+# Phase D uses a SECOND workspace, because its whole point is that no workspace
+# .sandy/config exists anywhere — reusing $WS would leave phase B config behind
+# and the marker could not be shown to be what enabled the pair.
+WS2="$(mktemp -d)/mbx-marker-$$"
+mkdir -p "$WS2" && (cd "$WS2" && git init -q)
+WS2="$(cd "$WS2" && pwd -P)"
+cleanup_ws() {
+    "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true
+    "$SANDY" --stop --workspace "$WS2" >/dev/null 2>&1 || true
+    rm -rf "$(dirname "$WS")" "$(dirname "$WS2")"
+}
 trap cleanup_ws EXIT
+cid2() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.workspace_path=$WS2" 2>/dev/null | head -1; }
 
 command -v docker >/dev/null 2>&1 || { echo "docker not found — run this on the host"; exit 2; }
 
@@ -130,6 +144,78 @@ C="$(cid)"
 ck "outbox file from phase B still present after restart" \
    "docker exec -u \"\$(id -u)\" \"$C\" test -f /home/claude/.handoff/outbox/probe.txt"
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase C, final) exits 0" "[ $? -eq 0 ]"
+
+echo "== D. enable by MARKER, with no workspace config anywhere =="
+# Closes acceptance criterion 4 for the MARKER path specifically. Phase B proves
+# EROFS-beats-ownership when the pair is enabled by SANDY_HANDOFF_DIRS=1; that is
+# NOT the same evidence. The marker resolves into the same variable before the
+# gate, so both paths reach identical mount code — but "identical by
+# construction" is an argument, not a test result, and criterion 4 exists
+# precisely to reject that kind of reasoning.
+#
+# The marker lives at the TOP level of the sandbox dir, whose slug is not known
+# until a launch creates it. So: launch once (also proving marker-absent means
+# off), stop, enrol, relaunch. That is exactly the order a provisioner works in.
+
+ck "phase D workspace has NO .sandy/config (the premise)" "[ ! -e \"$WS2/.sandy/config\" ]"
+
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS2"; RC=$?
+ck "--start (D, pre-enrolment) exits 0" "[ $RC -eq 0 ]"
+C2="$(cid2)"
+ck "daemon container is running" "[ -n \"$C2\" ]"
+SESS2="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C2" 2>/dev/null)"
+ck "session label resolved" "[ -n \"$SESS2\" ]"
+# Marker absent and no config => the pair must be OFF. Without this the phase
+# could pass on a sandbox that had handoff enabled for some unrelated reason.
+ck "NEGATIVE: no marker and no config => in-container ~/.handoff does NOT exist" \
+   "! docker exec -u \"\$(id -u)\" \"$C2\" test -e /home/claude/.handoff"
+
+"$SANDY" --stop --workspace "$WS2" >/dev/null 2>&1
+SBX2="$SANDY_HOME_DIR/sandboxes/$SESS2"
+touch "$SBX2/.handoff-enabled"
+ck "marker created at the sandbox top level" "[ -f \"$SBX2/.handoff-enabled\" ]"
+ck "marker is EMPTY (contents are ignored; touch is how a provisioner makes it)" \
+   "[ ! -s \"$SBX2/.handoff-enabled\" ]"
+
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS2"; RC=$?
+ck "--start (D, enrolled by marker) exits 0" "[ $RC -eq 0 ]"
+C2="$(cid2)"
+ck "daemon container is running after enrolment" "[ -n \"$C2\" ]"
+ck "still NO workspace .sandy/config — the marker alone enabled it" "[ ! -e \"$WS2/.sandy/config\" ]"
+
+_m2="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C2" 2>/dev/null)"
+echo "  mounts:"; printf '%s\n' "$_m2" | grep -i handoff | sed 's/^/    /'
+ck "outbox mount is RW=true (marker path)" \
+   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/claude/.handoff/outbox true\$'"
+ck "inbox mount is RW=false (marker path)" \
+   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/claude/.handoff/inbox false\$'"
+
+# --- criterion 4, under the marker path ---
+ck "write to outbox SUCCEEDS (marker path)" \
+   "docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'echo hi > /home/claude/.handoff/outbox/probe.txt'"
+ck "write to inbox FAILS (marker path)" \
+   "! docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'echo hi > /home/claude/.handoff/inbox/probe.txt' 2>/dev/null"
+ck "chmod u+w on the inbox dir itself FAILS (EROFS, marker path)" \
+   "! docker exec -u \"\$(id -u)\" \"$C2\" chmod u+w /home/claude/.handoff/inbox 2>/dev/null"
+echo "host-placed-in-inbox" > "$SBX2/handoff/inbox/from-host.txt"
+ck "host-placed inbox file IS owned by the agent uid (the premise, marker path)" \
+   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C2\" stat -c '%u' /home/claude/.handoff/inbox/from-host.txt 2>/dev/null)\" = \"\$(id -u)\" ]"
+ck "chmod u+w on the agent-OWNED host-placed inbox file STILL FAILS (marker path)" \
+   "! docker exec -u \"\$(id -u)\" \"$C2\" chmod u+w /home/claude/.handoff/inbox/from-host.txt 2>/dev/null"
+
+# --- criterion 5: the agent has no path to the marker ---
+# Not "we did not mount it" as a claim, but: no mount SOURCE is the sandbox top
+# level, so nothing inside the container resolves to the marker file.
+ck "NEGATIVE: no bind mount sources the sandbox top level (agent cannot self-enrol)" \
+   "! docker inspect -f '{{range .Mounts}}{{.Source}}{{\"\n\"}}{{end}}' \"$C2\" 2>/dev/null | grep -qx \"$SBX2\""
+ck "NEGATIVE: the marker is not visible anywhere inside the container" \
+   "! docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'test -e /home/claude/.handoff-enabled -o -e /home/claude/.claude/.handoff-enabled' 2>/dev/null"
+
+# --- introspection agrees with reality ---
+ck "--print-state reports handoff_enabled=true for the enrolled sandbox" \
+   "\"$SANDY\" --print-state light 2>/dev/null | grep -q '\"handoff_enabled\":true'"
+
+"$SANDY" --stop --workspace "$WS2"; ck "--stop (D, final) exits 0" "[ $? -eq 0 ]"
 
 echo
 echo "==================================================="

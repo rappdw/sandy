@@ -7891,6 +7891,24 @@ check "§97(12) --reset-sandbox still destroys handoff/ itself (staged content i
 check "§97(13) --print-state reports handoff_enabled per sandbox" \
     bash -c 'grep -q "_json_kv handoff_enabled" "$1"' -- "$_S97"
 
+# The runtime proof lives in test/acceptance-handoff-dirs.sh and needs Docker, so
+# these are structural: they stop phase D being deleted or quietly reduced to a
+# copy of phase B. §97(10) above only proves sandy WRITES ":ro" into the mount
+# line — it says nothing about chmod actually returning EROFS, which is what the
+# downstream acceptance criterion asks for and what phase D runs.
+_S97_ACC="$(cd "$(dirname "$0")" && pwd)/acceptance-handoff-dirs.sh"
+_s97_d="$(awk '/^echo "== D\./{f=1} f' "$_S97_ACC" 2>/dev/null)"
+
+check "§97(14) the acceptance harness has a marker phase (D)" \
+    bash -c '[ -n "$1" ]' -- "$_s97_d"
+check "§97(15) phase D enables via the MARKER, not a workspace config" \
+    bash -c 'printf "%s" "$1" | grep -q "touch \"\$SBX2/.handoff-enabled\"" \
+        && printf "%s" "$1" | grep -q "NO workspace .sandy/config"' -- "$_s97_d"
+check "§97(16) phase D repeats the EROFS-beats-ownership assertions on that path" \
+    bash -c 'printf "%s" "$1" | grep -q "chmod u+w on the inbox dir itself FAILS" \
+        && printf "%s" "$1" | grep -q "owned by the agent uid" \
+        && printf "%s" "$1" | grep -q "STILL FAILS"' -- "$_s97_d"
+
 # ============================================================
 # Summary
 # ============================================================
