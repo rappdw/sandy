@@ -7804,6 +7804,94 @@ check "§96 behavioral: jq preserves a user-set false and fills an absent key" \
         [ "$kept" = "false" ] && [ "$made" = "true" ]'
 
 # ============================================================
+echo ""
+echo "§97: handoff enable-by-marker (operator-side, non-cloneable)"
+# ============================================================
+# SANDY_HANDOFF_DIRS=1 lives in a workspace .sandy/config, which TRAVELS WITH THE
+# REPOSITORY: clone it elsewhere and the pair is enabled on a sandbox nobody
+# decided about. $SANDBOX_DIR/.handoff-enabled is the operator-side alternative —
+# per-machine, per-sandbox, in state a repo cannot carry. Same passive tier; the
+# property is that it cannot be cloned into existence.
+#
+# Three things here are load-bearing and each is pinned separately:
+#   - TOP LEVEL only. $SANDBOX_DIR/claude is mounted at ~/.claude with writable
+#     overlays, so a marker in that tree would be one the AGENT could create for
+#     itself, converting an operator decision into agent self-service.
+#   - DIRECTORIES are not a trigger. A stray mkdir / restored backup / rsync -a
+#     must not silently enable mail for a sandbox nobody chose.
+#   - The :ro inbox flag is untouched. This must not become a way to get the
+#     pair without the flag that makes a delivered notice unforgeable.
+_S97="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_s97_blk="$(sed -n '/^# Operator-side enable/,/^# END handoff directories/p' "$_S97")"
+
+_S97_RUN="$(mktemp)"
+cat > "$_S97_RUN" <<'S97RUN'
+warn(){ echo "WARN: $*"; }
+info(){ :; }
+SANDY_VERBOSE=0
+eval "$1"
+echo "${SANDY_HANDOFF_DIRS:-0}"
+S97RUN
+
+# --- OR truth table: either mechanism alone, both together is not an error ----
+check "§97(1) marker alone enables the pair" \
+    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+check "§97(2) config alone still enables the pair (unchanged path)" \
+    bash -c 'd="$(mktemp -d)"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=1 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+check "§97(3) both present is not an error" \
+    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=1 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+check "§97(4) NEGATIVE: neither present leaves it off" \
+    bash -c 'd="$(mktemp -d)"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+
+# --- the two rejected shortcuts -------------------------------------------
+check "§97(5) NEGATIVE: the handoff DIRECTORIES alone enable nothing" \
+    bash -c 'd="$(mktemp -d)"; mkdir -p "$d/handoff/inbox" "$d/handoff/outbox"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+check "§97(6) NEGATIVE: a marker under claude/ does NOT enable (agent-reachable tree)" \
+    bash -c 'd="$(mktemp -d)"; mkdir -p "$d/claude"; touch "$d/claude/.handoff-enabled"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+
+# --- the refusal still applies to the marker path --------------------------
+check "§97(7) the ~/.handoff workspace-collision refusal still fires under the marker" \
+    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/.handoff bash "$2" "$1")"; rm -rf "$d"
+        case "$out" in *WARN*) : ;; *) exit 1 ;; esac
+        case "$out" in *0) exit 0 ;; *) exit 1 ;; esac' -- "$_s97_blk" "$_S97_RUN"
+
+# --- the agent must have no path to the marker -----------------------------
+# The marker sits at the TOP level of $SANDBOX_DIR, and no bind mount covers
+# that level (only subdirs plus the :ro session-marker FILE). If a future change
+# adds a bare -v of $SANDBOX_DIR, this fails rather than silently handing the
+# agent a way to enroll itself.
+check "§97(8) NEGATIVE: no bind mount covers the sandbox top level" \
+    bash -c '! grep -qE "RUN_FLAGS\+=\(-v \"\\\$SANDBOX_DIR:" "$1"' -- "$_S97"
+check "§97(9) NEGATIVE: no mount references the marker path" \
+    bash -c '! grep -q "handoff-enabled" <(grep "RUN_FLAGS+=(-v" "$1") 2>/dev/null || ! grep "RUN_FLAGS+=(-v" "$1" | grep -q "handoff-enabled"' -- "$_S97"
+
+# --- the mount flags are untouched by this feature -------------------------
+check "§97(10) inbox is still mounted :ro and outbox still rw" \
+    bash -c 'grep -q "handoff/inbox:/home/claude/.handoff/inbox:ro" "$1" \
+        && grep -q "handoff/outbox:/home/claude/.handoff/outbox\"" "$1"' -- "$_S97"
+
+# --- reset preserves enrollment, destroys staged content -------------------
+check "§97(11) --reset-sandbox preserves .handoff-enabled (operator state)" \
+    bash -c '_fn="$(grep -m1 "_rs_keep() { case" "$1" | sed "s/^ *//")"
+        r="$(bash -c "_rs_keep_approvals=false; $_fn; _rs_keep .handoff-enabled && echo keep || echo gone")"
+        [ "$r" = "keep" ]' -- "$_S97"
+check "§97(12) --reset-sandbox still destroys handoff/ itself (staged content is session state)" \
+    bash -c '_fn="$(grep -m1 "_rs_keep() { case" "$1" | sed "s/^ *//")"
+        r="$(bash -c "_rs_keep_approvals=false; $_fn; _rs_keep handoff && echo keep || echo gone")"
+        [ "$r" = "gone" ]' -- "$_S97"
+
+# --- introspection ---------------------------------------------------------
+check "§97(13) --print-state reports handoff_enabled per sandbox" \
+    bash -c 'grep -q "_json_kv handoff_enabled" "$1"' -- "$_S97"
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
