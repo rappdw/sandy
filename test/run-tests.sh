@@ -802,9 +802,9 @@ info "12. Variable ordering — WORK_DIR defined before Phase 3"
 # if/else), so match leading whitespace; `|| true` so a grep miss surfaces as
 # a FAILed check below instead of aborting the suite under set -euo pipefail.
 SCRIPT="$(dirname "$0")/../sandy"
-WORK_DIR_DEF="$(grep -nE '^[[:space:]]*WORK_DIR=' "$SCRIPT" | head -1 | cut -d: -f1 || true)"
-SANDBOX_NAME_DEF="$(grep -nE '^[[:space:]]*SANDBOX_NAME=' "$SCRIPT" | head -1 | cut -d: -f1 || true)"
-PHASE3_USE="$(grep -n 'Phase 3.*Per-project image' "$SCRIPT" | head -1 | cut -d: -f1 || true)"
+WORK_DIR_DEF="$(grep -nE -m1 '^[[:space:]]*WORK_DIR=' "$SCRIPT" | cut -d: -f1 || true)"
+SANDBOX_NAME_DEF="$(grep -nE -m1 '^[[:space:]]*SANDBOX_NAME=' "$SCRIPT" | cut -d: -f1 || true)"
+PHASE3_USE="$(grep -n -m1 'Phase 3.*Per-project image' "$SCRIPT" | cut -d: -f1 || true)"
 check "WORK_DIR defined before Phase 3" \
     test "$WORK_DIR_DEF" -lt "$PHASE3_USE"
 check "SANDBOX_NAME defined before Phase 3" \
@@ -944,7 +944,7 @@ info "17. Per-project config parsing"
 # ============================================================
 
 # Static analysis: verify .sandy/config loading happens before SSH relay setup
-CONFIG_SOURCE="$(grep -n '\.sandy/config' "$SCRIPT" | head -1 | cut -d: -f1)"
+CONFIG_SOURCE="$(grep -n -m1 '\.sandy/config' "$SCRIPT" | cut -d: -f1)"
 SSH_RELAY="$(grep -n 'SANDY_SSH=.*token' "$SCRIPT" | tail -1 | cut -d: -f1)"
 check ".sandy/config loaded before SSH relay setup" \
     test "$CONFIG_SOURCE" -lt "$SSH_RELAY"
@@ -997,8 +997,8 @@ info "19. pip wrapper created in root section (not inside bash -c)"
 # The pip wrapper heredoc must be in the root section of the entrypoint, NOT
 # inside the 'exec gosu ... bash -c' single-quoted string, because <<'PIPWRAP'
 # would break the outer quoting and expand variables at startup time.
-GOSU_LINE="$(grep -n "exec gosu" "$SCRIPT" | head -1 | cut -d: -f1)"
-PIP_WRAPPER_LINE="$(grep -n "cat > .*/pip <<" "$SCRIPT" | head -1 | cut -d: -f1)"
+GOSU_LINE="$(grep -n -m1 "exec gosu" "$SCRIPT" | cut -d: -f1)"
+PIP_WRAPPER_LINE="$(grep -n -m1 "cat > .*/pip <<" "$SCRIPT" | cut -d: -f1)"
 check "pip wrapper created before exec gosu (root section)" \
     test "$PIP_WRAPPER_LINE" -lt "$GOSU_LINE"
 
@@ -1056,8 +1056,8 @@ rm -f "$TEST_PROJECT/safe-link"
 rm -rf "$TEST_PROJECT/subdir"
 
 # Static analysis: verify symlink check exists in sandy before docker run
-SYMLINK_CHECK="$(grep -n 'DANGEROUS_SYMLINKS' "$SCRIPT" | head -1 | cut -d: -f1)"
-DOCKER_RUN="$(grep -n 'docker run.*RUN_FLAGS' "$SCRIPT" | head -1 | cut -d: -f1)"
+SYMLINK_CHECK="$(grep -n -m1 'DANGEROUS_SYMLINKS' "$SCRIPT" | cut -d: -f1)"
+DOCKER_RUN="$(grep -n -m1 'docker run.*RUN_FLAGS' "$SCRIPT" | cut -d: -f1)"
 check "symlink check runs before docker run" \
     test "$SYMLINK_CHECK" -lt "$DOCKER_RUN"
 
@@ -3214,7 +3214,7 @@ check "SEED_SETTINGS points at sandbox-internal settings.json (rw)" \
     grep -q 'SEED_SETTINGS="\$SANDBOX_DIR/claude/settings\.json"' "$SANDY_SCRIPT_PATH"
 
 # Seed block must NOT be gated on SANDBOX_IS_NEW=true.
-_SEED_OPEN_LINE="$(grep -nB0 'SEED_SETTINGS="\$SANDBOX_DIR/claude/settings\.json"' "$SANDY_SCRIPT_PATH" | head -1 | cut -d: -f1)"
+_SEED_OPEN_LINE="$(grep -n -m1 'SEED_SETTINGS="\$SANDBOX_DIR/claude/settings\.json"' "$SANDY_SCRIPT_PATH" | cut -d: -f1)"
 _SEED_GATE_LINE="$(awk -v n="$_SEED_OPEN_LINE" 'NR<n && /if _sandy_agent_has claude/ {last=NR} END {print last}' "$SANDY_SCRIPT_PATH")"
 check "seed block opener does not gate on SANDBOX_IS_NEW" \
     bash -c 'sed -n "${2}p" "$1" | grep -qv SANDBOX_IS_NEW' \
@@ -4083,8 +4083,8 @@ rm -rf "$_EE_TMP"
 # the empty-check and miss the workspace value entirely. Static check on
 # the source: the bare-call line for the loader must come *after* the
 # bare-call line for the approval resolver.
-_EE_LOADER_LINE="$(grep -nE '^_load_sandy_extra_env$' "$_EE_SCRIPT" | head -1 | cut -d: -f1)"
-_EE_APPROVAL_LINE="$(grep -nE '^_resolve_passive_privileged_approval$' "$_EE_SCRIPT" | head -1 | cut -d: -f1)"
+_EE_LOADER_LINE="$(grep -nE -m1 '^_load_sandy_extra_env$' "$_EE_SCRIPT" | cut -d: -f1)"
+_EE_APPROVAL_LINE="$(grep -nE -m1 '^_resolve_passive_privileged_approval$' "$_EE_SCRIPT" | cut -d: -f1)"
 check "_load_sandy_extra_env runs after _resolve_passive_privileged_approval" \
     test "$_EE_LOADER_LINE" -gt "$_EE_APPROVAL_LINE"
 
@@ -4504,9 +4504,9 @@ check "OAuth-first: ANTHROPIC_API_KEY suppressed when CLAUDE_CODE_OAUTH_TOKEN se
 check "OAuth-first: claude ANTHROPIC_API_KEY forward sits in the no-OAuth-token else" \
     bash -c '
         blk="$(awk "/Claude Code.s OWN auth precedence/{f=1} f{print} f&&/^fi$/{exit}" "$1")"
-        o=$(printf "%s\n" "$blk" | grep -n "CLAUDE_CODE_OAUTH_TOKEN:-" | head -1 | cut -d: -f1)
-        e=$(printf "%s\n" "$blk" | grep -nx "    else" | head -1 | cut -d: -f1)
-        a=$(printf "%s\n" "$blk" | grep -nF "_sandy_add_secret_env ANTHROPIC_API_KEY" | head -1 | cut -d: -f1)
+        o=$(printf "%s\n" "$blk" | grep -n -m1 "CLAUDE_CODE_OAUTH_TOKEN:-" | cut -d: -f1)
+        e=$(printf "%s\n" "$blk" | grep -nx -m1 "    else" | cut -d: -f1)
+        a=$(printf "%s\n" "$blk" | grep -nF -m1 "_sandy_add_secret_env ANTHROPIC_API_KEY" | cut -d: -f1)
         [ -n "$o" ] && [ -n "$e" ] && [ -n "$a" ] && [ "$o" -lt "$e" ] && [ "$e" -lt "$a" ]
     ' -- "$_OAUTH_SCRIPT"
 
@@ -4537,7 +4537,7 @@ check "creds validator: empty (absent creds) → valid (not corrupt)" \
 check "docker-daemon guard present (docker info + message)" \
     bash -c 'grep -q "if ! docker info >/dev/null 2>&1; then" "$1" && grep -q "daemon isn.t responding" "$1"' -- "$_FM_SCRIPT"
 check "docker-daemon check comes after the binary-presence check" \
-    bash -c 'i=$(grep -n "Docker is not installed or not in PATH" "$1" | head -1 | cut -d: -f1); d=$(grep -n "daemon isn.t responding" "$1" | head -1 | cut -d: -f1); [ -n "$i" ] && [ -n "$d" ] && [ "$i" -lt "$d" ]' -- "$_FM_SCRIPT"
+    bash -c 'i=$(grep -n -m1 "Docker is not installed or not in PATH" "$1" | cut -d: -f1); d=$(grep -n -m1 "daemon isn.t responding" "$1" | cut -d: -f1); [ -n "$i" ] && [ -n "$d" ] && [ "$i" -lt "$d" ]' -- "$_FM_SCRIPT"
 
 # (c) SANDY_HOME-writable guard: a write-probe + a chmod-suggesting message.
 check "SANDY_HOME-writable guard present (write-probe + chmod hint)" \
@@ -4610,8 +4610,8 @@ check "cleanup force-removes the agent container (\$CONTAINER_NAME)" \
 check "agent removal precedes the sidecar network rm in cleanup" \
     bash -c '
         c="$(awk "/^cleanup\(\)/,/^}/" "$1")"
-        a=$(printf "%s\n" "$c" | grep -nF "docker rm -f \"\$CONTAINER_NAME\"" | head -1 | cut -d: -f1)
-        n=$(printf "%s\n" "$c" | grep -nF "docker network rm \"\$NETWORK_NAME\"" | head -1 | cut -d: -f1)
+        a=$(printf "%s\n" "$c" | grep -nF -m1 "docker rm -f \"\$CONTAINER_NAME\"" | cut -d: -f1)
+        n=$(printf "%s\n" "$c" | grep -nF -m1 "docker network rm \"\$NETWORK_NAME\"" | cut -d: -f1)
         [ -n "$a" ] && [ -n "$n" ] && [ "$a" -lt "$n" ]
     ' -- "$SANDY_SCRIPT"
 
@@ -5985,9 +5985,9 @@ check "all five new listers + four reapers + the suffix helper exist (#36)" \
 # reference discipline — see the #26 orphan-network lister precedent).
 check "new listers/reapers are defined before _sandy_emit_state (fast-path forward-ref)" \
     bash -c '
-        emit_line=$(grep -n "^_sandy_emit_state()" "$1" | head -1 | cut -d: -f1)
+        emit_line=$(grep -n -m1 "^_sandy_emit_state()" "$1" | cut -d: -f1)
         for f in _sandy_dangling_images_list _sandy_orphaned_project_images_list _sandy_orphaned_skills_images_list _sandy_dead_owner_containers_list _sandy_gc_reap_containers _sandy_gc_reap_project_images _sandy_gc_reap_skills_images _sandy_gc_reap_dangling_images; do
-            def_line=$(grep -n "^${f}()" "$1" | head -1 | cut -d: -f1)
+            def_line=$(grep -n -m1 "^${f}()" "$1" | cut -d: -f1)
             [ -n "$def_line" ] && [ "$def_line" -lt "$emit_line" ] || { echo "$f defined at $def_line, not before $emit_line"; exit 1; }
         done' -- "$_S79"
 
@@ -6259,8 +6259,8 @@ check "--gc --yes reaped the LABELED dangling image but never the unlabeled one 
     bash -c 'grep -qx "dangling-labeled-1" "$1" && ! grep -qx "dangling-unlabeled-1" "$1"' -- "$_S79_RM_IMAGES"
 check "--gc --yes orders container removal BEFORE image removal in the action log" \
     bash -c '
-        _first_container=$(grep -nE "^CALL: (stop |rm -f )" "$1" | head -1 | cut -d: -f1)
-        _first_image=$(grep -nE "^CALL: rmi " "$1" | head -1 | cut -d: -f1)
+        _first_container=$(grep -nE -m1 "^CALL: (stop |rm -f )" "$1" | cut -d: -f1)
+        _first_image=$(grep -nE -m1 "^CALL: rmi " "$1" | cut -d: -f1)
         [ -n "$_first_container" ] && [ -n "$_first_image" ] && [ "$_first_container" -lt "$_first_image" ]' -- "$_S79_ACTIONS"
 
 # Nothing-to-reclaim path: fresh empty fixture, message + exit 0.
@@ -6977,8 +6977,8 @@ check "resolved path still resolves after a cd (the actual bug)" \
 check "SANDY_SELF is resolved once at script top" \
     bash -c 'grep -q "^SANDY_SELF=\"\$(_sandy_self_path)\"" "$1"' -- "$_S88"
 check "SANDY_SELF is assigned before any cd in the script (resolution order)" \
-    bash -c '_a="$(grep -n "^SANDY_SELF=" "$1" | head -1 | cut -d: -f1)";
-             _c="$(grep -nE "^[[:space:]]*\(?[[:space:]]*cd " "$1" | head -1 | cut -d: -f1)";
+    bash -c '_a="$(grep -n -m1 "^SANDY_SELF=" "$1" | cut -d: -f1)";
+             _c="$(grep -nE -m1 "^[[:space:]]*\(?[[:space:]]*cd " "$1" | cut -d: -f1)";
              [ -n "$_a" ] && [ -n "$_c" ] && [ "$_a" -lt "$_c" ]' -- "$_S88"
 check "Fix B (--start approval pre-pass) uses the pre-resolved value" \
     bash -c 'grep -q "cd \"\$WORK_DIR\" 2>/dev/null && SANDY_APPROVE_ONLY=1 \"\$SANDY_SELF\"" "$1"' -- "$_S88"
@@ -7050,9 +7050,9 @@ _S90="$SANDY_SCRIPT"
 # checked in isolation (not just "somewhere in the file") so a regression in one
 # branch cannot hide behind the other two passing.
 _s90_seed_block="$(sed -n '/SEED_SETTINGS="\$SANDBOX_DIR\/claude\/settings.json"/,/^fi  # end Claude settings seeding$/p' "$_S90")"
-_s90_node_start="$(printf '%s\n' "$_s90_seed_block" | grep -n 'command -v node' | head -1 | cut -d: -f1)"
-_s90_jq_start="$(printf '%s\n' "$_s90_seed_block" | grep -n 'elif command -v jq' | head -1 | cut -d: -f1)"
-_s90_lastresort_start="$(printf '%s\n' "$_s90_seed_block" | grep -n 'Last resort: write defaults only if no file exists yet' | head -1 | cut -d: -f1)"
+_s90_node_start="$(printf '%s\n' "$_s90_seed_block" | grep -n -m1 'command -v node' | cut -d: -f1)"
+_s90_jq_start="$(printf '%s\n' "$_s90_seed_block" | grep -n -m1 'elif command -v jq' | cut -d: -f1)"
+_s90_lastresort_start="$(printf '%s\n' "$_s90_seed_block" | grep -n -m1 'Last resort: write defaults only if no file exists yet' | cut -d: -f1)"
 _s90_seed_total="$(printf '%s\n' "$_s90_seed_block" | wc -l | tr -d ' ')"
 _s90_node_branch="$(printf '%s\n' "$_s90_seed_block" | sed -n "${_s90_node_start},$((_s90_jq_start - 1))p")"
 _s90_jq_branch="$(printf '%s\n' "$_s90_seed_block" | sed -n "${_s90_jq_start},$((_s90_lastresort_start - 1))p")"
@@ -7802,6 +7802,94 @@ check "§96 behavioral: jq preserves a user-set false and fills an absent key" \
         kept="$(printf "%s" "{\"skipAutoPermissionPrompt\":false}" | jq --arg skip true "$prog" | jq -r ".skipAutoPermissionPrompt")"
         made="$(printf "%s" "{}" | jq --arg skip true "$prog" | jq -r ".skipAutoPermissionPrompt")"
         [ "$kept" = "false" ] && [ "$made" = "true" ]'
+
+# ============================================================
+echo ""
+echo "§97: handoff enable-by-marker (operator-side, non-cloneable)"
+# ============================================================
+# SANDY_HANDOFF_DIRS=1 lives in a workspace .sandy/config, which TRAVELS WITH THE
+# REPOSITORY: clone it elsewhere and the pair is enabled on a sandbox nobody
+# decided about. $SANDBOX_DIR/.handoff-enabled is the operator-side alternative —
+# per-machine, per-sandbox, in state a repo cannot carry. Same passive tier; the
+# property is that it cannot be cloned into existence.
+#
+# Three things here are load-bearing and each is pinned separately:
+#   - TOP LEVEL only. $SANDBOX_DIR/claude is mounted at ~/.claude with writable
+#     overlays, so a marker in that tree would be one the AGENT could create for
+#     itself, converting an operator decision into agent self-service.
+#   - DIRECTORIES are not a trigger. A stray mkdir / restored backup / rsync -a
+#     must not silently enable mail for a sandbox nobody chose.
+#   - The :ro inbox flag is untouched. This must not become a way to get the
+#     pair without the flag that makes a delivered notice unforgeable.
+_S97="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_s97_blk="$(sed -n '/^# Operator-side enable/,/^# END handoff directories/p' "$_S97")"
+
+_S97_RUN="$(mktemp)"
+cat > "$_S97_RUN" <<'S97RUN'
+warn(){ echo "WARN: $*"; }
+info(){ :; }
+SANDY_VERBOSE=0
+eval "$1"
+echo "${SANDY_HANDOFF_DIRS:-0}"
+S97RUN
+
+# --- OR truth table: either mechanism alone, both together is not an error ----
+check "§97(1) marker alone enables the pair" \
+    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+check "§97(2) config alone still enables the pair (unchanged path)" \
+    bash -c 'd="$(mktemp -d)"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=1 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+check "§97(3) both present is not an error" \
+    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=1 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+check "§97(4) NEGATIVE: neither present leaves it off" \
+    bash -c 'd="$(mktemp -d)"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+
+# --- the two rejected shortcuts -------------------------------------------
+check "§97(5) NEGATIVE: the handoff DIRECTORIES alone enable nothing" \
+    bash -c 'd="$(mktemp -d)"; mkdir -p "$d/handoff/inbox" "$d/handoff/outbox"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+check "§97(6) NEGATIVE: a marker under claude/ does NOT enable (agent-reachable tree)" \
+    bash -c 'd="$(mktemp -d)"; mkdir -p "$d/claude"; touch "$d/claude/.handoff-enabled"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+
+# --- the refusal still applies to the marker path --------------------------
+check "§97(7) the ~/.handoff workspace-collision refusal still fires under the marker" \
+    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/.handoff bash "$2" "$1")"; rm -rf "$d"
+        case "$out" in *WARN*) : ;; *) exit 1 ;; esac
+        case "$out" in *0) exit 0 ;; *) exit 1 ;; esac' -- "$_s97_blk" "$_S97_RUN"
+
+# --- the agent must have no path to the marker -----------------------------
+# The marker sits at the TOP level of $SANDBOX_DIR, and no bind mount covers
+# that level (only subdirs plus the :ro session-marker FILE). If a future change
+# adds a bare -v of $SANDBOX_DIR, this fails rather than silently handing the
+# agent a way to enroll itself.
+check "§97(8) NEGATIVE: no bind mount covers the sandbox top level" \
+    bash -c '! grep -qE "RUN_FLAGS\+=\(-v \"\\\$SANDBOX_DIR:" "$1"' -- "$_S97"
+check "§97(9) NEGATIVE: no mount references the marker path" \
+    bash -c '! grep -q "handoff-enabled" <(grep "RUN_FLAGS+=(-v" "$1") 2>/dev/null || ! grep "RUN_FLAGS+=(-v" "$1" | grep -q "handoff-enabled"' -- "$_S97"
+
+# --- the mount flags are untouched by this feature -------------------------
+check "§97(10) inbox is still mounted :ro and outbox still rw" \
+    bash -c 'grep -q "handoff/inbox:/home/claude/.handoff/inbox:ro" "$1" \
+        && grep -q "handoff/outbox:/home/claude/.handoff/outbox\"" "$1"' -- "$_S97"
+
+# --- reset preserves enrollment, destroys staged content -------------------
+check "§97(11) --reset-sandbox preserves .handoff-enabled (operator state)" \
+    bash -c '_fn="$(grep -m1 "_rs_keep() { case" "$1" | sed "s/^ *//")"
+        r="$(bash -c "_rs_keep_approvals=false; $_fn; _rs_keep .handoff-enabled && echo keep || echo gone")"
+        [ "$r" = "keep" ]' -- "$_S97"
+check "§97(12) --reset-sandbox still destroys handoff/ itself (staged content is session state)" \
+    bash -c '_fn="$(grep -m1 "_rs_keep() { case" "$1" | sed "s/^ *//")"
+        r="$(bash -c "_rs_keep_approvals=false; $_fn; _rs_keep handoff && echo keep || echo gone")"
+        [ "$r" = "gone" ]' -- "$_S97"
+
+# --- introspection ---------------------------------------------------------
+check "§97(13) --print-state reports handoff_enabled per sandbox" \
+    bash -c 'grep -q "_json_kv handoff_enabled" "$1"' -- "$_S97"
 
 # ============================================================
 # Summary

@@ -37,6 +37,12 @@
 #           clean. Detected via an explicit opener, NOT quote parity: parity was
 #           tried and floods false positives on any ordinary "don't" in prose.
 #
+#   GREPM   `grep -n ... | head` under pipefail (grep dies on EPIPE, exit 2,
+#           ERR trap aborts the run — a race, so it passes locally and fails in
+#           CI), and a flag cluster whose numeric argument was split by a bulk
+#           -m1 conversion (`-nB0` -> `-nB -m10`). Both aborted this repo's
+#           harness mid-run; a partial run still prints its passes.
+#
 # Deliberately NOT checked: `set -E` ERR traps firing in command-substitution
 # subshells (real — see sandy:1043 — but not reliably detectable statically, and
 # a false positive here is worse than a miss).
@@ -128,6 +134,35 @@ def scan(path):
             i = j
         i += 1
 
+    # GREPM — two grep hazards that abort a `set -o pipefail` suite mid-run.
+    # Both bit this repo's own harness in CI, and `bash -n` saw nothing wrong
+    # either time because the SHELL syntax was fine:
+    #
+    #   a) `grep -n PATTERN f | head -1`. head exits after one line, grep takes
+    #      EPIPE and exits 2, the pipeline fails, the ERR trap kills the run. A
+    #      RACE — it fires only when grep is still writing, so it passes locally
+    #      and fails on CI. Measured on a 400k-match input: 200/200 failures for
+    #      the pipe form, 0/200 for `grep -m1`. Fix: -m1, which drops the pipe.
+    #
+    #   b) a flag cluster ending in a NUMERIC argument immediately before -m,
+    #      e.g. `-nB0 ... -m1` rewritten to `-nB -m10`: -B loses its argument and
+    #      grep exits 2. Produced by a bulk -m1 conversion.
+    #
+    # Only the -n (line-number) form of (a) is flagged. `grep -o ... | head` is
+    # NOT equivalent to -m1 — with -o, -m1 stops after the first matching LINE
+    # but can still print several matches from it — so converting those is wrong
+    # and this must not nag about them.
+    for i, l in enumerate(lines, 1):
+        if re.match(r"^\s*#", l):
+            continue
+        if re.search(r"grep -n[A-Za-z]*\s[^|]*\|\s*head\b", l):
+            out.append((i, "GREPM", l.strip()[:88]))
+        # -A/-B/-C/-m REQUIRE a numeric argument. If the next token starts with
+        # "-", the argument was lost (this is what a bulk -m1 rewrite does to a
+        # cluster like -nB0) and grep exits 2.
+        if re.search(r"grep\s+-[A-Za-z]*[ABCm]\s+-", l):
+            out.append((i, "GREPM", l.strip()[:88]))
+
     # APOSQ — apostrophe in a comment inside a multi-line SINGLE-QUOTED program
     # argument (jq / awk / python passed as 'one big quoted string'). Inside that
     # region an apostrophe CLOSES the string and the shell reinterprets the rest
@@ -186,8 +221,12 @@ if [ "$SELF_TEST" = true ]; then
     printf '%s\n' '#!/bin/bash' 'python3 -c "' '# the `sandy` binary' 'print(1)' '" arg' > "$_fx/pyback.sh"
     printf '%s\n' '#!/bin/bash' 'out="$(' '  # shellcheck can'"'"'t see this' '  echo hi' ')"' > "$_fx/aposcs.sh"
     printf '%s\n' '#!/bin/bash' "jq --arg s x '" '  .a //= 1 |' "  # note: jq's //= is odd here" '  .b' "' file" > "$_fx/aposq.sh"
+    printf '%s\n' '#!/bin/bash' 'L="$(grep -n PATTERN f | head -1 | cut -d: -f1)"' > "$_fx/grepm.sh"
+    # Second GREPM shape: a cluster ending in an argument-taking flag whose
+    # numeric argument was split off by a bulk -m1 conversion.
+    printf '%s\n' '#!/bin/bash' 'L="$(grep -nB -m10 PATTERN f | cut -d: -f1)"' > "$_fx/grepm2.sh"
     _fails=0
-    for probe in srcsub pyback aposcs aposq; do
+    for probe in srcsub pyback aposcs aposq grepm grepm2; do
         if python3 "$_scanner" "$_fx/$probe.sh" >/dev/null 2>&1; then
             echo "SELF-TEST FAIL: $probe fixture was NOT detected" >&2; _fails=$((_fails + 1))
         else
@@ -217,5 +256,6 @@ else
     echo "  PYBACK  use a QUOTED heredoc: python3 - arg <<'PY' ... PY" >&2
     echo "  APOSCS  reword the comment to avoid apostrophes" >&2
     echo "  APOSQ   reword the comment; an apostrophe closes the single-quoted program" >&2
+    echo "  GREPM   use 'grep -m1' instead of 'grep | head -1'; keep numeric flag args clear of -m" >&2
     exit 1
 fi
