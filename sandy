@@ -3052,11 +3052,31 @@ Flags:
   --upgrade          Update sandy to the latest version
   --agent <list>     Agent(s) to launch (overrides SANDY_AGENT and
                      .sandy/config). One of: claude, gemini, codex,
-                     opencode. Comma-separated for multi-agent,
+                     opencode, grok. Comma-separated for multi-agent,
                      e.g. --agent claude,gemini or --agent=claude,opencode
+  --workspace <path> Target workspace directory (defaults to the current
+                     directory). Honored by the bare launch path (including
+                     -p/--rebuild/--build-only), --start, --attach, --stop,
+                     --update-sessions, --reset-sandbox, and --remove-sandbox.
   -v                 Verbose: show startup sections, pause on exit
   -vv                Debug: add bash trace to user-setup.sh
   -vvv               Full trace: also trace entrypoint.sh and show docker flags
+
+Daemon sessions (survive a closed terminal; a session outlives the client
+that started it, so a closed tab/dropped SSH/IDE quit does not end it):
+  --start            Start a detached daemon session for this workspace and
+                     return once attachable. Sub-options: --workspace PATH
+  --attach           Attach an interactive client to a running daemon
+                     session (last-wins: a second attach displaces the
+                     first). Exit codes: 0 = session ended while attached,
+                     3 = clean detach (session lives on), 4 = no such
+                     session. Sub-options: --workspace PATH
+  --stop             Stop a running daemon session (full teardown: container,
+                     proxy, networks, lock). Sub-options: --workspace PATH
+  --update-sessions  Fleet image refresh + rolling restart across every
+                     daemon session on the host; scope to one session with
+                     --workspace PATH. Sub-options: --dry-run, --yes,
+                     --idle-for <minutes>, --rebuild, --workspace PATH
 
 Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
   --stop-all         Fleet emergency stop: enumerate every daemon session on the
@@ -3093,7 +3113,8 @@ Introspection (machine-readable JSON; no Docker required):
   --print-version         Emit {schema_version, version, commit, full_version}
                           as JSON. full_version is the stable cache key.
 
-All other arguments are forwarded to the agent (claude or gemini).
+All other arguments are forwarded to the agent (claude, gemini, codex,
+opencode, or grok).
 EOF
     exit 0
 fi
