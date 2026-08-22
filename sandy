@@ -1052,7 +1052,9 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --update-sessions, --reset-sandbox, and --remove-sandbox. NOT accepted by --gc, --stop-all, --prune-orphans, or the introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
+    printf '{'; _json_kv name '"--doctor"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Standalone host + runtime readiness check. HOST runs the same checks as doctor.sh (git, curl, docker, PATH, credentials); RUNTIME reuses the sandy predicates verbatim (running-container image staleness, orphaned Docker resources, workspace-lock sanity, orphaned sandboxes -- all read-only findings, never required failures). Exit 0 iff every required HOST check passes; warnings from either section never fail it. Sub-options: --fix, --yes."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --update-sessions, --reset-sandbox, and --remove-sandbox. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -2988,6 +2990,542 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
     exit 0
 fi
 
+# --- sandy --doctor host checks (#124) — the doctor.sh body, embedded so an
+# INSTALLED sandy (install.sh installs ONLY the sandy script — install.sh:47/
+# 62/71 — doctor.sh never lands on disk) can still run it via `sandy --doctor`.
+# This heredoc is the SINGLE SOURCE OF TRUTH: the repo-root doctor.sh is a
+# GENERATED, committed mirror kept in sync by test/regen-doctor.sh, exactly
+# the templates/user-setup.sh.tmpl pattern documented in CLAUDE.md (a heredoc
+# string literal is unshellcheckable, so the mirror exists for lint/review —
+# it is not shipped or read by sandy itself). test/run-tests.sh runs
+# `regen-doctor.sh --check` so editing this heredoc without regenerating
+# fails the suite.
+#
+# HAZARD (do not "simplify" this by inlining the body into sandy's own
+# shell): doctor.sh contains `sandy --version 2>/dev/null | head -1`, which
+# under `sandy --doctor` is a RECURSIVE self-exec of the real sandy binary.
+# That line is harmless ONLY because it runs in a CHILD shell with no
+# `pipefail` — the `| head` EPIPE is inert there. Piping the body to a fresh
+# `bash` (never `source`/`eval` into this script's own `set -euo pipefail`)
+# preserves that isolation; inlining it would turn the EPIPE into exactly the
+# GREPM failure class test/lint-bash32.sh exists to catch.
+_sandy_doctor_host() {
+    bash <<'SANDY_DOCTOR_HOST'
+#!/usr/bin/env bash
+# =============================================================================
+# sandy doctor — check that the host has everything sandy needs.
+#
+# Usage:
+#   bash doctor.sh                                         # from a clone
+#   curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/doctor.sh | bash
+#
+# Exits 0 if all required checks pass, 1 otherwise. Recommended misses are
+# warnings and never block. No sudo, no installs — advice only.
+# =============================================================================
+
+# Intentionally no `set -e -u`: we want every check to run to completion,
+# and bash 3.2 (macOS default) + `set -u` + empty arrays is a trap.
+
+# ---- colors ----
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    BOLD=$'\033[1m'; RED=$'\033[31m'; GREEN=$'\033[32m'
+    YELLOW=$'\033[33m'; BLUE=$'\033[34m'; RESET=$'\033[0m'
+else
+    BOLD=""; RED=""; GREEN=""; YELLOW=""; BLUE=""; RESET=""
+fi
+
+# ---- state ----
+REQUIRED_FAILS=0
+RECOMMENDED_FAILS=0
+HINTS=()
+
+ok()      { printf "  ${GREEN}✓${RESET} %s\n" "$1"; }
+fail()    { printf "  ${RED}✗${RESET} %s\n" "$1"; REQUIRED_FAILS=$((REQUIRED_FAILS+1)); [ -n "${2:-}" ] && HINTS+=("$2"); }
+warn()    { printf "  ${YELLOW}!${RESET} %s\n" "$1"; RECOMMENDED_FAILS=$((RECOMMENDED_FAILS+1)); [ -n "${2:-}" ] && HINTS+=("$2"); }
+section() { printf "\n${BOLD}%s${RESET}\n" "$1"; }
+
+# ---- platform detection ----
+case "$(uname -s 2>/dev/null)" in
+    Darwin) OS=macos ;;
+    Linux)  OS=linux ;;
+    *)      OS=unknown ;;
+esac
+
+DISTRO=unknown
+if [ "$OS" = "linux" ] && [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    DISTRO="${ID:-unknown}"
+fi
+ARCH="$(uname -m 2>/dev/null || echo unknown)"
+
+# Platform-aware package install hint (single-package form).
+pkg_hint() {
+    local pkg="$1"
+    case "$OS" in
+        macos)
+            if command -v brew >/dev/null 2>&1; then
+                echo "brew install $pkg"
+            else
+                echo "Install Homebrew from https://brew.sh, then: brew install $pkg"
+            fi
+            ;;
+        linux)
+            case "$DISTRO" in
+                debian|ubuntu|raspbian|pop|linuxmint) echo "sudo apt update && sudo apt install -y $pkg" ;;
+                fedora|rhel|centos|rocky|almalinux)   echo "sudo dnf install -y $pkg" ;;
+                arch|manjaro|endeavouros)             echo "sudo pacman -S --needed $pkg" ;;
+                alpine)                               echo "sudo apk add $pkg" ;;
+                opensuse*|sles)                       echo "sudo zypper install -y $pkg" ;;
+                *)                                    echo "Install $pkg via your distro's package manager" ;;
+            esac
+            ;;
+        *) echo "Install $pkg for your platform" ;;
+    esac
+}
+
+# ---- banner ----
+printf "${BOLD}sandy doctor${RESET}  —  host readiness check\n"
+printf "  platform: %s" "$OS"
+[ "$OS" = "linux" ] && printf " (%s)" "$DISTRO"
+printf " / %s\n" "$ARCH"
+
+# ---- required ----
+section "Required"
+
+# bash (we're already in it — just report)
+ok "bash ${BASH_VERSION%%(*}"
+
+# git
+if command -v git >/dev/null 2>&1; then
+    ok "git $(git --version 2>/dev/null | awk '{print $3}')"
+else
+    fail "git not found" "$(pkg_hint git)"
+fi
+
+# curl (used by install.sh and sandy's update check)
+if command -v curl >/dev/null 2>&1; then
+    ok "curl"
+else
+    fail "curl not found" "$(pkg_hint curl)"
+fi
+
+# docker runtime — must have the CLI AND a reachable daemon
+if command -v docker >/dev/null 2>&1; then
+    if docker info >/dev/null 2>&1; then
+        _dver="$(docker version --format '{{.Server.Version}}' 2>/dev/null)"
+        [ -z "$_dver" ] && _dver="unknown"
+        ok "docker daemon reachable (server $_dver)"
+    else
+        fail "docker CLI found but 'docker info' failed — daemon not running?" \
+             "Start your Docker runtime:
+    - Rancher Desktop / Docker Desktop / OrbStack: open the app
+    - Colima: colima start
+    - Linux native: sudo systemctl start docker"
+    fi
+else
+    case "$OS" in
+        macos)
+            fail "docker not found" \
+                 "Install any Docker-compatible runtime (sandy works with all of these):
+    - Rancher Desktop: https://rancherdesktop.io/    (free, open source)
+    - OrbStack:        https://orbstack.dev/         (fast, macOS-native)
+    - Colima:          brew install colima docker && colima start
+    - Docker Desktop:  https://www.docker.com/products/docker-desktop/"
+            ;;
+        linux)
+            fail "docker not found" \
+                 "Install Docker Engine following the official guide for your distro:
+    https://docs.docker.com/engine/install/
+After install, add yourself to the docker group and re-login:
+    sudo usermod -aG docker \$USER"
+            ;;
+        *)
+            fail "docker not found" "Install a Docker-compatible runtime for your platform"
+            ;;
+    esac
+fi
+
+# ---- path ----
+section "PATH"
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*)
+        ok "\$HOME/.local/bin is on PATH" ;;
+    *)
+        _shell="$(basename "${SHELL:-/bin/bash}")"
+        case "$_shell" in
+            zsh)  _rc="~/.zshrc" ;;
+            bash) _rc="~/.bashrc (Linux) or ~/.bash_profile (macOS)" ;;
+            fish) _rc="fish" ;;
+            *)    _rc="your shell rc" ;;
+        esac
+        if [ "$_shell" = "fish" ]; then
+            warn "\$HOME/.local/bin not on PATH (sandy installs here)" \
+                 "Add to PATH (fish):
+    fish_add_path \$HOME/.local/bin"
+        else
+            warn "\$HOME/.local/bin not on PATH (sandy installs here)" \
+                 "Add to $_rc:
+    export PATH=\"\$HOME/.local/bin:\$PATH\""
+        fi
+        ;;
+esac
+
+# ---- recommended ----
+section "Recommended"
+
+# gh CLI — default SANDY_SSH=token mode uses 'gh auth token' as the git credential helper
+if command -v gh >/dev/null 2>&1; then
+    if gh auth status >/dev/null 2>&1; then
+        ok "gh CLI authenticated (SANDY_SSH=token mode ready)"
+    else
+        warn "gh CLI installed but not authenticated" \
+             "Sign in so sandy can use it as a git credential helper:
+    gh auth login"
+    fi
+else
+    warn "gh CLI not found (needed for default SANDY_SSH=token mode)" \
+         "$(pkg_hint gh)
+Then: gh auth login"
+fi
+
+# node or jq — sandy uses one of them to merge settings.json; falls back to printf-defaults otherwise
+if command -v node >/dev/null 2>&1; then
+    ok "node $(node --version 2>/dev/null) (used for settings.json merge)"
+elif command -v jq >/dev/null 2>&1; then
+    ok "jq (used as fallback for settings.json merge)"
+else
+    warn "neither node nor jq found (sandy will fall back to printf defaults for settings.json)" \
+         "Install either one:
+    $(pkg_hint node)
+  or
+    $(pkg_hint jq)"
+fi
+
+# socat (macOS only, for SANDY_SSH=agent mode)
+if [ "$OS" = "macos" ]; then
+    if command -v socat >/dev/null 2>&1; then
+        ok "socat (for SANDY_SSH=agent mode on macOS)"
+    else
+        warn "socat not found (only needed if you want SANDY_SSH=agent on macOS)" \
+             "$(pkg_hint socat)"
+    fi
+fi
+
+# ---- credentials ----
+section "Credentials (at least one is needed for Claude Code)"
+
+_found_creds=0
+if [ -f "$HOME/.claude/.credentials.json" ]; then
+    ok "~/.claude/.credentials.json present (Claude Pro/Max OAuth — seeded fresh each launch)"
+    _found_creds=1
+fi
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    ok "ANTHROPIC_API_KEY is set in the environment"
+    _found_creds=1
+fi
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    ok "CLAUDE_CODE_OAUTH_TOKEN is set in the environment"
+    _found_creds=1
+fi
+if [ -f "$HOME/.sandy/.secrets" ] && grep -qE '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)=' "$HOME/.sandy/.secrets" 2>/dev/null; then
+    ok "~/.sandy/.secrets contains a Claude credential"
+    _found_creds=1
+fi
+if [ "$_found_creds" -eq 0 ]; then
+    warn "No Claude credentials detected" \
+         "Pick one:
+    Claude Pro/Max (recommended — no key management):
+        Install Claude Code on the host once, sign in, then run sandy.
+        https://claude.ai/code
+    Long-lived OAuth token (recommended for headless servers):
+        claude setup-token            # on a machine with a browser
+        Add to ~/.sandy/.secrets:  CLAUDE_CODE_OAUTH_TOKEN=sk-ant-...
+    API key:
+        export ANTHROPIC_API_KEY=sk-ant-..."
+fi
+
+# ---- sandy install status (informational) ----
+section "Sandy"
+if command -v sandy >/dev/null 2>&1; then
+    _sver="$(sandy --version 2>/dev/null | head -1)"
+    [ -z "$_sver" ] && _sver="(version unavailable)"
+    ok "sandy installed at $(command -v sandy) — $_sver"
+else
+    warn "sandy is not installed yet" \
+         "Install once the required checks are green:
+    curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | bash"
+fi
+
+# ---- summary ----
+section "Summary"
+if [ "$REQUIRED_FAILS" -eq 0 ]; then
+    printf "  ${GREEN}%s${RESET}\n" "All required checks passed."
+    if [ "$RECOMMENDED_FAILS" -gt 0 ]; then
+        printf "  ${YELLOW}%d recommended item(s) to address.${RESET}\n" "$RECOMMENDED_FAILS"
+    fi
+else
+    printf "  ${RED}%d required check(s) failed.${RESET}" "$REQUIRED_FAILS"
+    if [ "$RECOMMENDED_FAILS" -gt 0 ]; then
+        printf " ${YELLOW}%d recommended.${RESET}" "$RECOMMENDED_FAILS"
+    fi
+    printf "\n"
+fi
+
+if [ "${#HINTS[@]}" -gt 0 ]; then
+    if [ "$REQUIRED_FAILS" -gt 0 ]; then
+        printf "\n${BOLD}Fix these first:${RESET}\n"
+    else
+        printf "\n${BOLD}Suggested actions:${RESET}\n"
+    fi
+    for h in "${HINTS[@]}"; do
+        printf "\n%s\n" "$h"
+    done
+fi
+
+if [ "$REQUIRED_FAILS" -eq 0 ] && ! command -v sandy >/dev/null 2>&1; then
+    printf "\n${BLUE}Next:${RESET} install sandy\n"
+    printf "    curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | bash\n"
+fi
+
+printf "\n"
+[ "$REQUIRED_FAILS" -eq 0 ] && exit 0 || exit 1
+SANDY_DOCTOR_HOST
+}
+
+# --- sandy --doctor RUNTIME helpers (#124) — pure listers, mirroring the
+# --gc/--remove-sandbox house style: newline-delimited STRINGS (not bash
+# arrays, so an empty result is never an empty-array-under-`set -u` trap on
+# bash 3.2), every command guarded so a docker-less/empty host is a silent
+# no-op rather than an abort under sandy's own `set -euo pipefail`.
+
+# Stale workspace locks (one lock DIR path per line): the recorded pid is
+# numeric and PROVABLY dead. Identical predicate to the launch path's own
+# stale-lock auto-clear (sandy:~7184) — re-derived here, not re-implemented
+# differently, so "doctor says stale" and "launch would auto-clear it" can
+# never disagree. Read-only lister; only --fix's applier below ever removes
+# what this reports.
+_sandy_doctor_stale_locks_list() {
+    local _d _pid
+    [ -d "$SANDY_HOME/sandboxes" ] || return 0
+    for _d in "$SANDY_HOME/sandboxes"/.*.lock; do
+        [ -d "$_d" ] || continue
+        _pid="$(cat "$_d/pid" 2>/dev/null || true)"
+        if [ -n "$_pid" ] && [ "$_pid" -eq "$_pid" ] 2>/dev/null && ! kill -0 "$_pid" 2>/dev/null; then
+            printf '%s\n' "$_d"
+        fi
+    done
+    return 0
+}
+
+# Orphaned sandboxes (sandbox NAME per line): WORKSPACE.json exists, its
+# workspace_path is non-empty, and that path no longer exists on disk. Same
+# conservative predicate --remove-sandbox --orphans uses (sandy:~2790) — a
+# legacy sandbox with no marker is never "orphaned" (unknowable, not provably
+# gone). Read-only, ALWAYS: --doctor --fix never touches what this reports —
+# #178 documents the residual (an unmounted volume reads as "gone"), so the
+# remediation stays the explicit opt-in `sandy --remove-sandbox --orphans`.
+_sandy_doctor_orphaned_sandboxes_list() {
+    local _e _n _wp
+    [ -d "$SANDY_HOME/sandboxes" ] || return 0
+    for _e in "$SANDY_HOME/sandboxes"/*/; do
+        [ -d "$_e" ] || continue
+        _e="${_e%/}"
+        _n="$(basename "$_e")"
+        [ -f "$_e/WORKSPACE.json" ] || continue
+        _wp="$(grep -m1 '"workspace_path"' "$_e/WORKSPACE.json" 2>/dev/null \
+               | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//' || true)"
+        [ -n "$_wp" ] || continue
+        [ -e "$_wp" ] && continue
+        printf '%s\n' "$_n"
+    done
+    return 0
+}
+
+# RUNTIME section: sandy's own predicates, called VERBATIM (DEC-4b — a
+# duplicated lister is how gates drift; see the #36/CLAUDE.md history of that
+# lesson). Every finding printed here is a WARNING, never a required failure
+# — --doctor's exit code comes entirely from the HOST section (the things
+# that make sandy unable to run at all: docker/git/curl). $1=fix (true/false)
+# $2=yes (true/false). Called as a plain function (never `$(...)`) because
+# the non-TTY --fix refusal below calls `exit` directly, which must end the
+# whole script, not just this function.
+_sandy_doctor_runtime() {
+    local _fix="$1" _yes="$2"
+    printf '\nRUNTIME\n'
+
+    local _docker_ok=false
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        _docker_ok=true
+    fi
+
+    local _n_stale_net=0
+    if [ "$_docker_ok" != "true" ]; then
+        printf '  %s!%s %s\n' "$YELLOW" "$NC" "skipped: docker unreachable (see Required above)"
+    else
+        # Running-container image staleness — batched inspect, same #52 cache
+        # _sandy_image_stale itself consults.
+        _SANDY_IMAGE_ID_CACHE=""
+        _SANDY_CINSPECT_CACHE=""
+        local _rc_out _rc_id _rc_name _rc_img _rc_stale _rc_any=0
+        _rc_out="$(docker ps --filter 'name=^/sandy-' --format '{{.ID}}|{{.Names}}|{{.Image}}' 2>/dev/null || true)"
+        if [ -n "$_rc_out" ]; then
+            local _pf_cids=()
+            while IFS= read -r _pfl; do
+                [ -n "$_pfl" ] && _pf_cids+=("$(printf '%s' "$_pfl" | awk -F'|' '{print $1}')")
+            done <<< "$_rc_out"
+            [ "${#_pf_cids[@]}" -gt 0 ] && _sandy_prefetch_container_inspect "${_pf_cids[@]}"
+            while IFS='|' read -r _rc_id _rc_name _rc_img; do
+                [ -n "$_rc_id" ] || continue
+                _rc_any=1
+                _rc_stale="$(_sandy_image_stale "$_rc_id")"
+                case "$_rc_stale" in
+                    true)  printf '  %s!%s %s\n' "$YELLOW" "$NC" "$_rc_name: running image is stale (fix: sandy --rebuild)" ;;
+                    false) printf '  %s✓%s %s\n' "$GREEN" "$NC" "$_rc_name: running image up to date" ;;
+                    *)     printf '  %s✓%s %s\n' "$GREEN" "$NC" "$_rc_name: image staleness unknown" ;;
+                esac
+            done <<< "$_rc_out"
+        fi
+        [ "$_rc_any" -eq 0 ] && printf '  %s✓%s %s\n' "$GREEN" "$NC" "no running sandy containers"
+
+        # Proxy image freshness — informational only, HF-incident Issue 3.
+        local _proxy_created
+        _proxy_created="$(docker image inspect -f '{{.Created}}' sandy-proxy 2>/dev/null || true)"
+        [ -n "$_proxy_created" ] && printf '  %s✓%s %s\n' "$GREEN" "$NC" "sandy-proxy image built $_proxy_created"
+
+        # Orphaned Docker resources — pure listers, DEC-4b single source of
+        # truth shared with --gc / --print-state. NEVER re-implemented here.
+        local _n_net _n_cont _n_proj _n_skills _n_dangling
+        _n_net="$(_sandy_orphan_networks_list | grep -c . || true)"; _n_net="${_n_net:-0}"
+        _n_cont="$(_sandy_dead_owner_containers_list | grep -c . || true)"; _n_cont="${_n_cont:-0}"
+        _n_proj="$(_sandy_orphaned_project_images_list | grep -c . || true)"; _n_proj="${_n_proj:-0}"
+        _n_skills="$(_sandy_orphaned_skills_images_list | grep -c . || true)"; _n_skills="${_n_skills:-0}"
+        _n_dangling="$(_sandy_dangling_images_list | grep -c . || true)"; _n_dangling="${_n_dangling:-0}"
+        _n_stale_net="$_n_net"
+        local _n_orphan_total=$((_n_net + _n_cont + _n_proj + _n_skills + _n_dangling))
+        if [ "$_n_orphan_total" -eq 0 ]; then
+            printf '  %s✓%s %s\n' "$GREEN" "$NC" "no orphaned Docker resources"
+        else
+            printf '  %s!%s %d orphaned Docker resource(s): %d network(s), %d container(s), %d project image(s), %d skills image(s), %d dangling image(s) (fix: sandy --gc)\n' \
+                "$YELLOW" "$NC" "$_n_orphan_total" "$_n_net" "$_n_cont" "$_n_proj" "$_n_skills" "$_n_dangling"
+        fi
+    fi
+
+    # Workspace-lock sanity — filesystem-only, runs regardless of docker.
+    local _stale_locks _n_stale
+    _stale_locks="$(_sandy_doctor_stale_locks_list)"
+    _n_stale="$(printf '%s\n' "$_stale_locks" | grep -c . || true)"; _n_stale="${_n_stale:-0}"
+    if [ "$_n_stale" -eq 0 ]; then
+        printf '  %s✓%s %s\n' "$GREEN" "$NC" "no stale workspace locks"
+    else
+        printf '  %s!%s %d stale workspace lock(s) (holder pid dead; fix: sandy --doctor --fix)\n' "$YELLOW" "$NC" "$_n_stale"
+        printf '%s\n' "$_stale_locks" | grep . | sed 's/^/      - /'
+    fi
+
+    # Orphaned sandboxes — read-only, NEVER fixed (see the lister comment above).
+    local _orphan_sb _n_orphan_sb
+    _orphan_sb="$(_sandy_doctor_orphaned_sandboxes_list)"
+    _n_orphan_sb="$(printf '%s\n' "$_orphan_sb" | grep -c . || true)"; _n_orphan_sb="${_n_orphan_sb:-0}"
+    if [ "$_n_orphan_sb" -eq 0 ]; then
+        printf '  %s✓%s %s\n' "$GREEN" "$NC" "no orphaned sandboxes"
+    else
+        printf '  %s!%s %d orphaned sandbox(es) (workspace gone; remove: sandy --remove-sandbox --orphans)\n' "$YELLOW" "$NC" "$_n_orphan_sb"
+        printf '%s\n' "$_orphan_sb" | grep . | sed 's/^/      - /'
+    fi
+
+    # --fix: EXACTLY two remediations, both delegated verbatim to existing
+    # code paths (never reimplemented): stale-lock removal (identical
+    # predicate to the launch path's own auto-clear) and
+    # _sandy_reap_orphan_networks (the same reaper --gc/--prune-orphans use).
+    # Nothing else — no sandbox, image, or container is ever removed here.
+    if [ "$_fix" = "true" ]; then
+        local _fix_total=$((_n_stale + _n_stale_net))
+        if [ "$_fix_total" -eq 0 ]; then
+            printf '\n  %sNothing to fix.%s\n' "$GREEN" "$NC"
+        elif [ "$_yes" != "true" ] && [ ! -t 0 ]; then
+            error "Non-interactive; pass --yes to apply --fix without a prompt."
+            exit 1
+        else
+            if [ "$_yes" != "true" ]; then
+                printf '\n[sandy] Apply %d fix(es) (%d stale lock(s), %d orphaned network(s))? [y/N] ' \
+                    "$_fix_total" "$_n_stale" "$_n_stale_net" >&2
+                local _fix_confirm=""
+                IFS= read -r _fix_confirm </dev/tty || _fix_confirm=""
+                case "$_fix_confirm" in
+                    y|Y|yes|YES|Yes) : ;;
+                    *) printf '\n  %sAborted -- nothing fixed.%s\n' "$YELLOW" "$NC"; return 0 ;;
+                esac
+            fi
+            local _fixed_locks=0 _d
+            if [ "$_n_stale" -gt 0 ]; then
+                while IFS= read -r _d; do
+                    [ -n "$_d" ] || continue
+                    rm -rf "$_d" && _fixed_locks=$((_fixed_locks + 1))
+                done <<< "$_stale_locks"
+            fi
+            local _fixed_nets="none to reap"
+            if [ "$_n_stale_net" -gt 0 ]; then
+                if _sandy_reap_orphan_networks; then _fixed_nets="reaped"; else _fixed_nets="attempted (none freed)"; fi
+            fi
+            printf '\n  %sFixed: %d stale lock(s); orphaned networks: %s.%s\n' "$GREEN" "$_fixed_locks" "$_fixed_nets" "$NC"
+        fi
+    fi
+
+    return 0
+}
+
+# --- sandy --doctor (#124) — standalone `sandy --doctor [--fix] [--yes]`
+# fast-path: same maintenance family as --gc/--stop-all (parses its own
+# trailing sub-flags, dispatches before config load/mutex/image build).
+#
+# Two sections: HOST runs the embedded doctor.sh body (_sandy_doctor_host,
+# defined above the RUNTIME helpers -- see its own header comment for the
+# child-shell/pipefail hazard doctor.sh's `sandy --version | head -1` line
+# creates and why it MUST stay isolated in a child bash); RUNTIME reuses
+# sandy's own predicates verbatim. Exit-code contract (CLAUDE.md's
+# maintenance-family rule): 0 iff every REQUIRED host check passed --
+# warnings (from either section) never fail it. `--yes` without `--fix` is a
+# hard error (a CI job that meant `--fix --yes` and lost `--fix` must not
+# silently run read-only and report success).
+if [[ "${1:-}" == "--doctor" ]]; then
+    _sandy_doctor_fix=false
+    _sandy_doctor_yes=false
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --fix)     _sandy_doctor_fix=true ;;
+            --yes)     _sandy_doctor_yes=true ;;
+            *) error "--doctor: unrecognized argument: $1"; exit 1 ;;
+        esac
+        shift
+    done
+
+    if [ "$_sandy_doctor_yes" = "true" ] && [ "$_sandy_doctor_fix" != "true" ]; then
+        error "--doctor: --yes has no effect without --fix."
+        exit 1
+    fi
+
+    printf 'sandy --doctor -- full readiness check (host + runtime)\n'
+
+    printf '\nHOST\n'
+    # Guarded, not a bare call: doctor.sh exits 1 on any required-check
+    # failure, and a bare nonzero return here would trip sandy's own
+    # `set -e` and abort the whole dispatcher before RUNTIME ever runs.
+    _sandy_doctor_host_rc=0
+    _sandy_doctor_host || _sandy_doctor_host_rc=$?
+
+    _sandy_doctor_runtime "$_sandy_doctor_fix" "$_sandy_doctor_yes"
+
+    printf '\nSummary\n'
+    if [ "$_sandy_doctor_host_rc" -eq 0 ]; then
+        printf '  %sAll required checks passed.%s\n' "$GREEN" "$NC"
+        exit 0
+    else
+        printf '  %sOne or more required checks failed -- see HOST above.%s\n' "$RED" "$NC"
+        exit 1
+    fi
+fi
+
 # --- Help ---
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<EOF
@@ -3102,6 +3640,14 @@ Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
                      (every sandbox whose recorded workspace_path no longer
                      exists on disk). Sub-options: --workspace PATH, --sandbox
                      NAME, --orphans, --dry-run, --yes
+  --doctor           Standalone host + runtime readiness check. HOST runs the
+                     same checks as doctor.sh (git, curl, docker, PATH,
+                     credentials); RUNTIME reuses the sandy predicates
+                     verbatim (image staleness, orphaned Docker resources,
+                     workspace-lock sanity, orphaned sandboxes). Docker is
+                     checked, not required, to invoke this flag. Exit 0 iff
+                     every required HOST check passes; warnings never fail
+                     it. Sub-options: --fix, --yes
 
 Introspection (machine-readable JSON; no Docker required):
   --print-schema          Emit the static schema (config keys, flags, agents,
