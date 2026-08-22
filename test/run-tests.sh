@@ -6773,7 +6773,7 @@ echo "§86: Handoff directories (SANDY_HANDOFF_DIRS, #132 slice 1: dirs + mounts
 # Directory/mount substrate ONLY — no relay, no helper, no skills, no turn
 # initiation, no peers, no manifest, no archive/ (mode unsettled in #132).
 # outbox rw, inbox :ro; gated entirely on SANDY_HANDOFF_DIRS=1 so unset/0
-# is a zero RUN_FLAGS / zero mkdir diff.
+# is a zero RUN_FLAGS diff (the dirs themselves are created either way).
 _S86="$SANDY_SCRIPT"
 check "SANDY_HANDOFF_DIRS is a passive-safe key (schema)" \
     bash -c 'awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)/" "$1" | grep -qx "    SANDY_HANDOFF_DIRS"' -- "$_S86"
@@ -6807,9 +6807,9 @@ check "mount emission is gated on SANDY_HANDOFF_DIRS=1" \
     bash -c 'awk "/Handoff directories mounts \(#132 substrate\)/,/^fi\$/" "$1" | grep -q "SANDY_HANDOFF_DIRS:-0.*= \"1\""' -- "$_S86"
 check "exactly 2 RUN_FLAGS handoff lines (no stray emission outside the gate)" \
     bash -c '[ "$(grep -c "RUN_FLAGS.*handoff" "$1")" -eq 2 ]' -- "$_S86"
-# mkdir is gated, not unconditional: extract the BEGIN/END block and assert
-# both mkdir targets are inside it; the unconditional package-mkdir block
-# above it must not mention handoff.
+# mkdir is now UNCONDITIONAL (only the mount is gated) but must still live in
+# the BEGIN/END handoff block, not drift into the persistent-package block
+# above it — that block is about pip/npm/go/cargo and must stay handoff-free.
 check "mkdir -p targets are inside the BEGIN/END handoff substrate block" \
     bash -c '
       blk="$(awk "/^# BEGIN handoff directories/,/^# END handoff directories\$/" "$1")"
@@ -6846,17 +6846,24 @@ _hb_run() {
     printf '%s' "$out"
 }
 _hb_a="$(_hb_run "/home/claude/.handoff" "1")"
-check "collision guard (a): workspace == ~/.handoff -> var forced 0, no dirs, warning" \
-    bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"OUTBOX:no"* && "$1" == *"INBOX:no"* && "$1" == *"WARN:"* ]]' -- "$_hb_a"
+# Creation is now unconditional; only the MOUNT is gated. So the collision case
+# still forces the var to 0 and still warns — the dirs themselves are inert and
+# were never what collided.
+check "collision guard (a): workspace == ~/.handoff -> var forced 0, warning (dirs inert)" \
+    bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"WARN:"* ]]' -- "$_hb_a"
 _hb_b="$(_hb_run "/home/claude/.handoff/sub" "1")"
-check "collision guard (b): workspace under ~/.handoff/ -> var forced 0, no dirs, warning" \
-    bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"OUTBOX:no"* && "$1" == *"INBOX:no"* && "$1" == *"WARN:"* ]]' -- "$_hb_b"
+check "collision guard (b): workspace under ~/.handoff/ -> var forced 0, warning (dirs inert)" \
+    bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"WARN:"* ]]' -- "$_hb_b"
 _hb_c="$(_hb_run "/home/claude/dev/proj" "1")"
 check "collision guard (c): unrelated workspace -> both dirs created, no warning" \
     bash -c '[[ "$1" == *"VAR:1"* && "$1" == *"OUTBOX:yes"* && "$1" == *"INBOX:yes"* && "$1" != *"WARN:"* ]]' -- "$_hb_c"
 _hb_d="$(_hb_run "/home/claude/dev/proj" "")"
-check "collision guard (d): key unset -> no dirs, no warning" \
-    bash -c '[[ "$1" == *"OUTBOX:no"* && "$1" == *"INBOX:no"* && "$1" != *"WARN:"* ]]' -- "$_hb_d"
+# Key unset: the dirs ARE created (unconditional now) but stay unmounted, and
+# nothing warns. The property that matters is "no mount, no noise" — dir
+# presence deliberately carries no information, which is the whole point of
+# decoupling creation from the gate.
+check "collision guard (d): key unset -> dirs created but inert, no warning" \
+    bash -c '[[ "$1" == *"OUTBOX:yes"* && "$1" == *"INBOX:yes"* && "$1" != *"WARN:"* ]]' -- "$_hb_d"
 
 # ============================================================
 echo ""
