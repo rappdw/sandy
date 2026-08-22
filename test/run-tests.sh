@@ -4179,6 +4179,20 @@ else
 fi
 
 # ============================================================
+# SECTION 48c: doctor.sh generated-file drift (#124)
+# ============================================================
+# The `_sandy_doctor_host()` heredoc body in sandy is the source of truth for
+# the repo-root doctor.sh (curl-able, byte-runnable standalone). Mirrors the
+# 48a gate exactly (same test/regen-template.sh pattern) — see CLAUDE.md.
+info "48c. doctor.sh generated-file drift (regen-doctor.sh)"
+_DOC_DRIFT_OUT="$(bash "$(dirname "$0")/regen-doctor.sh" --check 2>&1)" && _DOC_DRIFT_RC=0 || _DOC_DRIFT_RC=$?
+if [ "$_DOC_DRIFT_RC" -ne 0 ]; then
+    printf "  \033[0;33m%s\033[0m\n" "$_DOC_DRIFT_OUT"
+fi
+check "doctor.sh matches sandy's _sandy_doctor_host() heredoc" \
+    test "$_DOC_DRIFT_RC" -eq 0
+
+# ============================================================
 # SECTION 49: egress proxy image generator (M2.7 PR 2.7.2)
 # ============================================================
 # Static + function-level checks for generate_dockerfile_proxy and the ref
@@ -7262,7 +7276,7 @@ _S91_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Curated exception lists -- each entry is an intentional, hand-verified
 # exception to the parser<->cli_flags identity, not a loophole papering over
 # drift. See the independently-verified framing facts this PR was built on.
-_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --sandbox --orphans"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox); not standalone cli_flags entries, must instead appear in >=1 description
+_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --sandbox --orphans --fix"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor); not standalone cli_flags entries, must instead appear in >=1 description
 _S91_PRIVATE="--print-protected-paths"                        # real, private/debug fast-path flag; deliberately unadvertised
 _S91_FORWARDED="--resume"                                     # a real cli_flags entry with ZERO parser cases (forwarded verbatim to the agent, sandy:4103/4127)
 
@@ -8913,6 +8927,171 @@ rm -rf "$_S100_HOME" "$_S100_EXTRACT_PY" "$_S100_ENVKEYS_PY" \
     "$_S100_OUT7" "$_S100_ERR7" "$_S100_ESC_PY" \
     "$_S100_OUT9" "$_S100_ERR9" "$_S100_NULL_PY" 2>/dev/null || true
 rm -rf "$_S100_UBIN" "$_S100_FBIN" 2>/dev/null || true
+
+# ============================================================
+echo "§101: sandy --doctor [--fix] — standalone readiness check (#124)"
+# ============================================================
+# Structural + behavioral, behind a stubbed docker (the §71/§79b pattern).
+# HOST reuses doctor.sh unchanged; this section focuses on the dispatcher's
+# exit-code contract and the RUNTIME section's --fix scope discipline.
+#
+# NOTE: every `sandy --doctor ...` invocation below is guarded with
+# `|| true` (or captured via `cmd ... && RC=0 || RC=$?`) even when a nonzero
+# exit is the EXPECTED outcome. This suite runs under `set -euo pipefail` +
+# an ERR trap (sourced from run-tests.sh) -- an unguarded nonzero exit from
+# a bare command aborts the entire run rather than failing one check.
+_S101_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S101_BIN="$(mktemp -d)"
+# docker stub: `docker info` succeeds unless S101_DOCKER_DOWN=1; every other
+# subcommand (ps/network/images/version/image inspect) succeeds with empty
+# output, matching the "no results" shape sandy's own guarded (`|| true`)
+# listers already tolerate.
+cat > "$_S101_BIN/docker" <<'STUB'
+#!/bin/sh
+case "$1" in
+    info) [ "${S101_DOCKER_DOWN:-0}" = "1" ] && exit 1 || exit 0 ;;
+    *) exit 0 ;;
+esac
+STUB
+chmod +x "$_S101_BIN/docker"
+
+_s101_fresh_home() { mktemp -d; }
+
+# --- (a) exit-code contract: pass / required-failure / warning-does-not-fail ---
+
+_S101_H1="$(_s101_fresh_home)"
+_S101_RC1=0
+PATH="$_S101_BIN:$PATH" SANDY_HOME="$_S101_H1" bash "$_S101_SANDY" --doctor >/dev/null 2>&1 || _S101_RC1=$?
+check "§101(a1) all required checks pass -> exit 0" \
+    test "$_S101_RC1" -eq 0
+rm -rf "$_S101_H1"
+
+_S101_H2="$(_s101_fresh_home)"
+_S101_RC2=0
+S101_DOCKER_DOWN=1 PATH="$_S101_BIN:$PATH" SANDY_HOME="$_S101_H2" bash "$_S101_SANDY" --doctor >/dev/null 2>&1 || _S101_RC2=$?
+check "§101(a2) docker unreachable (a required HOST failure) -> exit 1" \
+    test "$_S101_RC2" -eq 1
+rm -rf "$_S101_H2"
+
+# A deterministic warning (an orphaned sandbox), reachable docker (no
+# required failure) -- exit must stay 0. This is the explicit "warnings
+# never fail it" assertion the exit-code contract depends on.
+_S101_H3="$(_s101_fresh_home)"
+mkdir -p "$_S101_H3/sandboxes/warnproj-1111"
+printf '{"workspace_path":"/nonexistent/s101/warn-only"}\n' > "$_S101_H3/sandboxes/warnproj-1111/WORKSPACE.json"
+_S101_RC3=0
+_S101_OUT3="$( (PATH="$_S101_BIN:$PATH" SANDY_HOME="$_S101_H3" bash "$_S101_SANDY" --doctor) 2>&1)" || _S101_RC3=$?
+check "§101(a3) a warning-only run (orphaned sandbox, docker reachable) -> exit 0" \
+    test "$_S101_RC3" -eq 0
+check "§101(a3) the warning is actually present in the report (not a vacuous pass)" \
+    bash -c 'printf "%s" "$1" | grep -q "orphaned sandbox"' -- "$_S101_OUT3"
+rm -rf "$_S101_H3"
+
+# --- (b) no --fix: read-only, mutates nothing ---
+
+_S101_H4="$(_s101_fresh_home)"
+mkdir -p "$_S101_H4/sandboxes/.deadlock-2222.lock"
+echo 999999 > "$_S101_H4/sandboxes/.deadlock-2222.lock/pid"
+PATH="$_S101_BIN:$PATH" SANDY_HOME="$_S101_H4" bash "$_S101_SANDY" --doctor >/dev/null 2>&1 || true
+check "§101(b) --doctor with no --fix leaves a stale lock in place" \
+    test -d "$_S101_H4/sandboxes/.deadlock-2222.lock"
+rm -rf "$_S101_H4"
+
+# --- (c) --fix clears a provably-dead stale lock; a LIVE lock (pid \$\$) is untouched ---
+
+_S101_H5="$(_s101_fresh_home)"
+mkdir -p "$_S101_H5/sandboxes/.deadlock-3333.lock" "$_S101_H5/sandboxes/.livelock-4444.lock"
+echo 999999 > "$_S101_H5/sandboxes/.deadlock-3333.lock/pid"
+echo $$ > "$_S101_H5/sandboxes/.livelock-4444.lock/pid"
+PATH="$_S101_BIN:$PATH" SANDY_HOME="$_S101_H5" bash "$_S101_SANDY" --doctor --fix --yes >/dev/null 2>&1 || true
+check "§101(c) --fix --yes clears the dead-pid lock" \
+    test ! -d "$_S101_H5/sandboxes/.deadlock-3333.lock"
+check "§101(c) --fix --yes leaves the live-pid (\$\$) lock untouched" \
+    test -d "$_S101_H5/sandboxes/.livelock-4444.lock"
+rm -rf "$_S101_H5"
+
+# --- (d) --fix never removes a sandbox, image, or container ---
+
+_S101_H6="$(_s101_fresh_home)"
+mkdir -p "$_S101_H6/sandboxes/liveproj-5555/pip" "$_S101_H6/sandboxes/.deadlock-6666.lock"
+echo 999999 > "$_S101_H6/sandboxes/.deadlock-6666.lock/pid"
+PATH="$_S101_BIN:$PATH" SANDY_HOME="$_S101_H6" bash "$_S101_SANDY" --doctor --fix --yes >/dev/null 2>&1 || true
+check "§101(d) --fix --yes leaves an unrelated sandbox directory untouched" \
+    test -d "$_S101_H6/sandboxes/liveproj-5555/pip"
+rm -rf "$_S101_H6"
+# Static corroboration: the --fix code path calls rm -rf ONLY on the stale
+# lock dir variable, and reaps networks only via the existing
+# _sandy_reap_orphan_networks (never docker rmi / docker rm / a sandbox path).
+_S101_FIX_BLOCK="$(awk '/^_sandy_doctor_runtime\(\)/,/^}$/' "$_S101_SANDY")"
+check "§101(d) static: the --fix block contains no docker rm/rmi call" \
+    bash -c '! printf "%s" "$1" | grep -E "docker (rm|rmi)"' -- "$_S101_FIX_BLOCK"
+check "§101(d) static: the --fix block reaps networks via _sandy_reap_orphan_networks (not reimplemented)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_reap_orphan_networks"' -- "$_S101_FIX_BLOCK"
+
+# --- (e) --yes without --fix is an error ---
+
+_S101_H7="$(_s101_fresh_home)"
+_S101_RC7=0
+PATH="$_S101_BIN:$PATH" SANDY_HOME="$_S101_H7" bash "$_S101_SANDY" --doctor --yes >/dev/null 2>&1 || _S101_RC7=$?
+check "§101(e) --yes without --fix exits 1" \
+    test "$_S101_RC7" -eq 1
+rm -rf "$_S101_H7"
+
+# --- (f) non-TTY --fix without --yes: exit 1, mutating nothing ---
+
+_S101_H8="$(_s101_fresh_home)"
+mkdir -p "$_S101_H8/sandboxes/.deadlock-7777.lock"
+echo 999999 > "$_S101_H8/sandboxes/.deadlock-7777.lock/pid"
+_S101_RC8=0
+PATH="$_S101_BIN:$PATH" SANDY_HOME="$_S101_H8" bash "$_S101_SANDY" --doctor --fix </dev/null >/dev/null 2>&1 || _S101_RC8=$?
+check "§101(f) non-TTY --fix without --yes exits 1" \
+    test "$_S101_RC8" -eq 1
+check "§101(f) non-TTY --fix without --yes mutates nothing (stale lock survives)" \
+    test -d "$_S101_H8/sandboxes/.deadlock-7777.lock"
+rm -rf "$_S101_H8"
+
+# --- (g) orphaned-sandbox check: counts correctly, read-only even under --fix ---
+
+_S101_H9="$(_s101_fresh_home)"
+mkdir -p "$_S101_H9/sandboxes/orphan-a-8881" "$_S101_H9/sandboxes/orphan-b-8882" "$_S101_H9/sandboxes/notorphan-8883"
+printf '{"workspace_path":"/nonexistent/s101/orphan-a"}\n' > "$_S101_H9/sandboxes/orphan-a-8881/WORKSPACE.json"
+printf '{"workspace_path":"/nonexistent/s101/orphan-b"}\n' > "$_S101_H9/sandboxes/orphan-b-8882/WORKSPACE.json"
+printf '{"workspace_path":"%s"}\n' "$_S101_H9" > "$_S101_H9/sandboxes/notorphan-8883/WORKSPACE.json"
+_S101_OUT9="$( (PATH="$_S101_BIN:$PATH" SANDY_HOME="$_S101_H9" bash "$_S101_SANDY" --doctor --fix --yes) 2>&1)" || true
+check "§101(g) reports exactly 2 orphaned sandbox(es)" \
+    bash -c 'printf "%s" "$1" | grep -q "2 orphaned sandbox"' -- "$_S101_OUT9"
+check "§101(g) --fix --yes never removes an orphaned sandbox directory" \
+    bash -c 'test -d "$1/sandboxes/orphan-a-8881" && test -d "$1/sandboxes/orphan-b-8882"' -- "$_S101_H9"
+rm -rf "$_S101_H9"
+
+rm -rf "$_S101_BIN"
+
+# --- (h) regen-doctor.sh --check: passes against the real repo, and fails
+# when the heredoc is edited without regenerating (proven against a scratch
+# copy of the repo -- never mutates the real tracked files). ---
+
+_S101_RC_H1=0
+bash "$(dirname "$0")/regen-doctor.sh" --check >/dev/null 2>&1 || _S101_RC_H1=$?
+check "§101(h) regen-doctor.sh --check passes against the committed repo" \
+    test "$_S101_RC_H1" -eq 0
+
+_S101_SCRATCH="$(mktemp -d)"
+mkdir -p "$_S101_SCRATCH/test"
+cp "$_S101_SANDY" "$_S101_SCRATCH/sandy"
+cp "$(dirname "$0")/../doctor.sh" "$_S101_SCRATCH/doctor.sh"
+cp "$(dirname "$0")/regen-doctor.sh" "$_S101_SCRATCH/test/regen-doctor.sh"
+chmod +x "$_S101_SCRATCH/test/regen-doctor.sh"
+sed -i.bak 's/host readiness check/MUTATED HOST READINESS/' "$_S101_SCRATCH/sandy"
+_S101_RC_H2=0
+bash "$_S101_SCRATCH/test/regen-doctor.sh" --check >/dev/null 2>&1 || _S101_RC_H2=$?
+check "§101(h) regen-doctor.sh --check FAILS when the heredoc is edited without regenerating" \
+    test "$_S101_RC_H2" -eq 1
+rm -rf "$_S101_SCRATCH"
+
+# --- (i) introspection ---
+
+check "--print-schema cli_flags includes --doctor" \
+    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"--doctor\""' -- "$_S101_SANDY"
 
 # ============================================================
 # Summary
