@@ -7997,6 +7997,17 @@ PATH="$_S98_BIN_LOG:$PATH" SANDY_HOME="$_S98_HOME" DU_CALL_LOG="$_S98_DULOG_FULL
 check "§98(4) full mode: exactly ONE du call, args name the sandbox path" \
     bash -c '[ "$(wc -l < "$1" | tr -d " ")" = "1" ] && grep -q "demo-abc12345" "$1"' -- "$_S98_DULOG_FULL"
 
+# (4b) -k is LOAD-BEARING for the byte contract, and its absence is invisible to
+# this CI. du without -k reports platform-dependent block sizes: GNU defaults to
+# 1024-byte blocks, but POSIX rules (macOS/BSD default) use 512-byte blocks, so
+# `du -sx` on the maintainer machine returns DOUBLE what it returns on Ubuntu CI.
+# The x1024 in sandy is only correct because -k pins 1024 on both. Dropping it
+# silently doubles every reported size on macOS while every Linux check here
+# still passes -- (1)'s [1MiB,16MiB] range is far too wide to catch a 2x error.
+# So assert the flag we actually send to the external tool, not just the path.
+check "§98(4b) du is invoked with -k (pins 1024-byte blocks on BSD as well as GNU)" \
+    grep -qE '(^| )-[a-z]*k[a-z]* ' "$_S98_DULOG_FULL"
+
 # --- (5): garbage du output -> null, JSON still parses ---
 _S98_BIN_GARBAGE="$(mktemp -d)"
 _s98_write_docker_shim "$_S98_BIN_GARBAGE"
