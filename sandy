@@ -110,7 +110,8 @@ SANDY_PASSIVE_KEYS=(
 #     - UNREGISTERED (array only, no metadata row): internal launch signals
 #       not meant to be operator-discoverable — SANDY_DEBUG_CLEANUP, and
 #       (elsewhere, listed nowhere in this array either)
-#       SANDY_DAEMON_SUPERVISOR / SANDY_UPDATE_RESTART / SANDY_TEST_PANE_TAGS.
+#       SANDY_DAEMON_SUPERVISOR / SANDY_UPDATE_RESTART / SANDY_PROVISION /
+#       SANDY_TEST_PANE_TAGS.
 #   SANDY_SESSION_NONCE stays fully unregistered (not even in this array) for
 #   trust-root reasons specific to it — see "Self-Attestation Marker" in
 #   CLAUDE.md.
@@ -1054,7 +1055,9 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--doctor"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Standalone host + runtime readiness check. HOST runs the same checks as doctor.sh (git, curl, docker, PATH, credentials); RUNTIME reuses the sandy predicates verbatim (running-container image staleness, orphaned Docker resources, workspace-lock sanity, orphaned sandboxes -- all read-only findings, never required failures). Exit 0 iff every required HOST check passes; warnings from either section never fail it. Sub-options: --fix, --yes."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --update-sessions, --reset-sandbox, and --remove-sandbox. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
+    printf '{'; _json_kv name '"--provision"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Non-interactively materialize one workspace sandbox by running the REAL launch path once (start a detached daemon session, confirm it is up, then stop it) — never a flag that fabricates sandbox state directly. Safe no-op (exit 0) against a workspace that already has a live session (foreground lock holder or running daemon container). Sub-options: --workspace PATH, --dry-run, --yes."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --update-sessions, --reset-sandbox, --remove-sandbox, and --provision. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -3526,6 +3529,154 @@ if [[ "${1:-}" == "--doctor" ]]; then
     fi
 fi
 
+# --- sandy --provision (#177) — non-interactively create ONE workspace's
+# sandbox by running the REAL launch path once. A sandbox is only ever a
+# LAUNCH ARTIFACT ("mkdir -p $SANDBOX_DIR" happens during a launch), so there
+# is no way to create one without starting an interactive agent session —
+# a downstream fleet provisioner hit this as a bring-up step that read, in
+# full, "launch each sandbox once." This is deliberately NOT a flag that
+# manufactures the directories from inside sandy: hand-created state no
+# container ever mounted "looks wired and is not" (the same reasoning that
+# rejected treating handoff-directory PRESENCE as sufficient), and a
+# fabricating flag would carry sandy's own authority while being a second
+# code path free to drift from the real one. The ask is the opposite: run
+# the real launch path, non-interactively, so the handoff pair, the settings
+# seed, and WORKSPACE.json all come from the paths that normally produce
+# them. Mechanism (DEC-U2 composition, no new lifecycle surface — mirrors
+# --stop-all/--update-sessions): SANDY_PROVISION=1 "$0" --start --workspace
+# <ws>, then "$0" --stop --workspace <ws>. Same maintenance family as --gc/
+# --reset-sandbox: parses its own trailing sub-flags, but (unlike those two)
+# NEEDS a reachable Docker daemon since it actually launches a container.
+#
+# Exit-code discipline follows the C1 rule (CLAUDE.md "Maintenance-family
+# exit-code rule"): refusal is 1 when the goal state is UNMET; a live session
+# already satisfies "this sandbox is provisioned," so that case is a SAFE
+# NO-OP — exit 0, not a refusal — with the reason printed rather than acted
+# on silently.
+if [[ "${1:-}" == "--provision" ]]; then
+    _pv_workspace=""; _pv_dry_run=false; _pv_yes=false
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workspace)   shift; _pv_workspace="${1:-}"
+                           [ -z "$_pv_workspace" ] && { error "--provision: --workspace needs a PATH"; exit 1; } ;;
+            --workspace=*) _pv_workspace="${1#--workspace=}"
+                           [ -z "$_pv_workspace" ] && { error "--provision: --workspace needs a PATH"; exit 1; } ;;
+            --dry-run)     _pv_dry_run=true ;;
+            --yes)         _pv_yes=true ;;
+            *) error "--provision: unrecognized argument: $1"; exit 1 ;;
+        esac
+        shift
+    done
+
+    if ! command -v docker >/dev/null 2>&1 || ! docker ps >/dev/null 2>&1; then
+        error "--provision requires a reachable Docker daemon (it runs the real launch path, not a filesystem-only shortcut)."
+        exit 1
+    fi
+
+    # Resolve + canonicalize exactly like --reset-sandbox / --remove-sandbox /
+    # the launch path itself: pwd -P (resolves symlinks, folds case-collisions)
+    # -> basename-<8-hex-sha256>. This must be the SAME recipe so --provision
+    # targets exactly the sandbox a real launch from this workspace would use.
+    _pv_wd="${_pv_workspace:-$PWD}"
+    [ -d "$_pv_wd" ] || { error "--provision: workspace not found: $_pv_wd"; exit 1; }
+    _pv_wd="$(cd "$_pv_wd" 2>/dev/null && pwd -P)" || { error "--provision: cannot resolve workspace"; exit 1; }
+    _pv_hash="$(printf '%s' "$_pv_wd" | sha256)"; _pv_hash="${_pv_hash%% *}"; _pv_hash="${_pv_hash:0:8}"
+    _pv_base="$(basename "$_pv_wd" | tr -cd 'a-zA-Z0-9._-')"; _pv_base="${_pv_base:-project}"
+    _pv_name="${_pv_base}-${_pv_hash}"
+
+    # Guard 1 — the workspace mutex ($SANDY_HOME/sandboxes/.<name>.lock/pid +
+    # kill -0, the same #14/--print-state liveness test every command in this
+    # family reuses). Catches BOTH a foreground interactive session AND a live
+    # daemon supervisor (the supervisor holds this lock with its own pid).
+    _pv_lockpid=""
+    [ -f "$SANDY_HOME/sandboxes/.${_pv_name}.lock/pid" ] && \
+        _pv_lockpid="$(cat "$SANDY_HOME/sandboxes/.${_pv_name}.lock/pid" 2>/dev/null || true)"
+    if [ -n "$_pv_lockpid" ] && [ "$_pv_lockpid" -eq "$_pv_lockpid" ] 2>/dev/null && kill -0 "$_pv_lockpid" 2>/dev/null; then
+        info "sandy --provision: $_pv_name already has a live session (pid $_pv_lockpid holds the workspace lock) — nothing to do."
+        exit 0
+    fi
+
+    # Guard 2 — a running daemon container for this workspace (the D9 lesson:
+    # a --restart unless-stopped container can be alive on a DEAD supervisor
+    # pid after a host reboot, which guard 1 alone would miss). Same label
+    # filter --start/--attach/--stop already use.
+    _pv_existing="$(docker ps -q --filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$_pv_wd" 2>/dev/null | head -1)" || true
+    if [ -n "$_pv_existing" ]; then
+        info "sandy --provision: $_pv_name already has a running daemon container (${_pv_existing:0:12}) — nothing to do."
+        exit 0
+    fi
+
+    printf '\nsandy --provision: %s\n' "$_pv_name"
+    printf 'Workspace: %s\n' "$_pv_wd"
+    printf 'No live session found. Will run the real launch path once (start a\n'
+    printf 'detached daemon session, confirm it is up, then stop it) to materialize\n'
+    printf 'this sandbox.\n\n'
+
+    if [ "$_pv_dry_run" = "true" ]; then
+        info "--dry-run: nothing started."
+        exit 0
+    fi
+    if [ "$_pv_yes" != "true" ]; then
+        if [ -t 0 ]; then
+            printf '[sandy] Provision %s (start then stop a real session)? [y/N] ' "$_pv_name" >&2
+            IFS= read -r _pv_c </dev/tty || _pv_c=""
+            case "$_pv_c" in y|Y|yes|YES|Yes) : ;; *) info "Aborted — nothing started."; exit 0 ;; esac
+        else
+            error "Non-interactive; pass --yes to provision without a prompt."
+            exit 1
+        fi
+    fi
+
+    # Execute with child stdio INHERITED (streamed), not captured — this is
+    # meant to prove the real launch path ran, so the user should see it run,
+    # the same way --stop-all/--update-sessions stream their composed calls.
+    info "Starting a real launch for $_pv_wd..."
+    _pv_start_rc=0
+    SANDY_PROVISION=1 "$0" --start --workspace "$_pv_wd" || _pv_start_rc=$?
+    if [ "$_pv_start_rc" -ne 0 ]; then
+        error "--provision: --start failed (rc=$_pv_start_rc) — sandbox not provisioned."
+        exit 1
+    fi
+
+    # TOCTOU guard — never stop a session this run did not create. The
+    # supervisor stamped sandy.provisioned_at (mirrors sandy.updated_at /
+    # DEC-U3) on the container it just launched; read it back now as the
+    # value THIS run owns, then re-read it immediately before calling --stop.
+    # A mismatch (different container, missing label, or a different stamp)
+    # means some other session now occupies this workspace — e.g. a
+    # concurrent plain `sandy --start` raced us and D6 idempotency made our
+    # own --start call a no-op against IT — and --provision must leave that
+    # session running rather than risk tearing down one it did not create.
+    _pv_cid="$(docker ps -q --filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$_pv_wd" 2>/dev/null | head -1)" || true
+    _pv_stamp=""
+    [ -n "$_pv_cid" ] && _pv_stamp="$(docker inspect -f '{{ index .Config.Labels "sandy.provisioned_at" }}' "$_pv_cid" 2>/dev/null || true)"
+    if [ -z "$_pv_cid" ] || [ -z "$_pv_stamp" ]; then
+        warn "--provision: could not confirm ownership of the session that came up for $_pv_wd — leaving it running rather than risk stopping a session this run did not create."
+        info "Sandbox for $_pv_wd is up (the launch path was exercised); provision is stopping here without tearing the session down."
+        exit 0
+    fi
+
+    _pv_cid2="$(docker ps -q --filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$_pv_wd" 2>/dev/null | head -1)" || true
+    _pv_stamp2=""
+    [ -n "$_pv_cid2" ] && _pv_stamp2="$(docker inspect -f '{{ index .Config.Labels "sandy.provisioned_at" }}' "$_pv_cid2" 2>/dev/null || true)"
+    if [ "$_pv_cid2" != "$_pv_cid" ] || [ -z "$_pv_stamp2" ] || [ "$_pv_stamp2" != "$_pv_stamp" ]; then
+        warn "--provision: the session for $_pv_wd changed before teardown (a different session now holds it) — leaving it alone rather than stopping a session this run did not create."
+        info "Sandbox for $_pv_wd is provisioned; skipping --stop."
+        exit 0
+    fi
+
+    info "Stopping the provisioning session..."
+    _pv_stop_rc=0
+    "$0" --stop --workspace "$_pv_wd" || _pv_stop_rc=$?
+    case "$_pv_stop_rc" in
+        0) info "sandy --provision: $_pv_name provisioned — the session started, ran, and stopped cleanly."; exit 0 ;;
+        4) info "sandy --provision: $_pv_name provisioned — the session was already stopped by other means."; exit 0 ;;
+        *) error "--provision: --stop failed (rc=$_pv_stop_rc) after a successful start — the sandbox IS provisioned, but the session is still running. Stop it manually: sandy --stop --workspace $_pv_wd"
+           exit 1 ;;
+    esac
+fi
+
 # --- Help ---
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<EOF
@@ -3595,7 +3746,8 @@ Flags:
   --workspace <path> Target workspace directory (defaults to the current
                      directory). Honored by the bare launch path (including
                      -p/--rebuild/--build-only), --start, --attach, --stop,
-                     --update-sessions, --reset-sandbox, and --remove-sandbox.
+                     --update-sessions, --reset-sandbox, --remove-sandbox, and
+                     --provision.
   -v                 Verbose: show startup sections, pause on exit
   -vv                Debug: add bash trace to user-setup.sh
   -vvv               Full trace: also trace entrypoint.sh and show docker flags
@@ -3649,6 +3801,14 @@ Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
                      every required HOST check passes; warnings never fail
                      it. Sub-options: --fix, --yes
 
+  --provision        Non-interactively create one workspace's sandbox by
+                     running the REAL launch path once: start a detached
+                     daemon session, confirm it is up, then stop it. NOT a
+                     flag that fabricates sandbox state — the launch path
+                     itself is what materializes the handoff dirs, settings
+                     seed, WORKSPACE.json, etc. Safe no-op (exit 0) against a
+                     workspace that already has a live session. Sub-options:
+                     --workspace PATH (default cwd), --dry-run, --yes
 Introspection (machine-readable JSON; no Docker required):
   --print-schema          Emit the static schema (config keys, flags, agents,
                           protected paths). See SPEC_INTROSPECTION.md.
@@ -9465,6 +9625,12 @@ if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
     if [ "${SANDY_UPDATE_RESTART:-0}" = "1" ]; then
         RUN_FLAGS+=(--label "sandy.updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
     fi
+    if [ "${SANDY_PROVISION:-0}" = "1" ]; then
+        RUN_FLAGS+=(--label "sandy.provisioned_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+    fi
+    # D2 — forwarded so the container-side launch script (user-setup.sh) can
+    # create the inner tmux session detached and keep PID 1 alive with
+    # `exec tail -f /dev/null` instead of attaching.
     # D2 — forwarded so the container-side launch script (user-setup.sh) can
     # create the inner tmux session detached and keep PID 1 alive with
     # `exec tail -f /dev/null` instead of attaching.

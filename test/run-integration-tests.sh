@@ -2155,6 +2155,40 @@ fi
 fi  # section 23
 
 # ============================================================
+section "24. Non-interactive sandbox provisioning acceptance (#177) — test/acceptance-provision.sh"
+# ============================================================
+if [ "$_SECTION_ON" = true ]; then
+# run-tests.sh §102 covers --provision's own guard/TOCTOU/exit-code logic
+# behind a stubbed docker and a fake $0 standing in for the daemon
+# supervisor (see CLAUDE.md "sandy --provision"). The real-Docker behavior a
+# static check cannot see: a real --start/--stop round trip actually
+# materializing a sandbox (WORKSPACE.json, version markers, no leftover
+# container/lock), --provision being safely re-runnable, and — the whole
+# point of #177's constraint 2 — a genuinely LIVE session being left
+# completely untouched (same container id, session still alive) rather than
+# bounced. Same invocation contract as §19-§23 — self-cleaning harness,
+# SANDY pinned to this suite's sandy.
+_acc_provision="$_INT_SELF_DIR/acceptance-provision.sh"
+if [ -f "$_acc_provision" ]; then
+    _acc_out="$(mktemp)"
+    set +e   # a failing harness exits non-zero; don't let set -e abort the suite
+    SANDY="$SANDY_SCRIPT" bash "$_acc_provision" 2>&1 | tee "$_acc_out"
+    _acc_rc=${PIPESTATUS[0]}
+    set -e
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1)"
+    if [ "$_acc_rc" -eq 0 ]; then
+        pass "provision-non-interactive sandbox provisioning acceptance (${_acc_res:-all assertions passed})"
+    else
+        fail "provision-non-interactive sandbox provisioning acceptance (${_acc_res:-exited $_acc_rc}) — see harness output above"
+    fi
+    rm -f "$_acc_out"
+else
+    skip "provision-non-interactive sandbox provisioning acceptance (acceptance-provision.sh not found)"
+fi
+
+fi  # section 24
+
+# ============================================================
 # Summary
 # ============================================================
 _section_close
