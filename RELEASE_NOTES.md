@@ -1,3 +1,130 @@
+## sandy v1.7.0
+
+**Consumer-contract release.** Two external projects are now building against sandy's introspection surface, and this release is mostly what that surfaced: a flag that was accepted but never advertised, a version string that could not be used as a cache key, a stream contract that held in practice but was promised nowhere, and an exit code whose meaning nobody had written down. Plus the `#132` handoff substrate reaching a settled shape, and a silent daemon bug that dropped workspace credentials.
+
+`schema_version` stays `1`. Every change to the introspection surface is additive, and the 1.x sandbox forward-compat promise holds (`SANDY_SANDBOX_MIN_COMPAT` unchanged) — **existing sandboxes keep working and need no recreation**.
+
+**Two behavior changes — read these before upgrading.**
+
+## Upgrade notes (read this first)
+
+1. **`--teammate-mode` is no longer passed by default.** Sandy previously hardcoded `--teammate-mode tmux` on every claude session. It is now `SANDY_TEAMMATE_MODE`, **empty by default**, so sandy passes no flag and Claude Code applies its own default. If you relied on tmux teammate mode, set `SANDY_TEAMMATE_MODE=tmux` in `~/.sandy/config`. (#166)
+
+2. **The default model is now `claude-opus-5`** (was `claude-opus-4-8`). Override per-user in `~/.sandy/config`, per-workspace in `.sandy/config`, or per-launch via `SANDY_MODEL=`. (#166)
+
+3. **`teammateMode` is no longer seeded into `settings.json`.** One setting had two sources of truth that could disagree — the CLI flag always won for the session, while the seeded value was whatever sandy or Claude Code last wrote. The flag governs; a host `settings.json` value is now left untouched.
+
+4. **Handoff's default-off is narrower than it was.** With `SANDY_HANDOFF_DIRS` unset, the host directories are now still created — what "off" means is no mount, no env vars, and no `~/.handoff` inside the container. Two empty, inert directories per sandbox. The reasoning is in the handoff section below; it is deliberate, not incidental.
+
+---
+
+## The consumer contract
+
+### `--workspace` was implemented but unadvertised (#156)
+
+`--workspace` has been parsed since 1.1.0 and is the composition primitive `--update-sessions` and `--stop-all` use internally — but it was absent from `--print-schema`'s `cli_flags`. That is worse than a missing doc line, because `SPEC_INTROSPECTION.md` tells consumers to feature-detect capabilities *from* `cli_flags`. sandy-ui builds every daemon command as `["--start"|"--attach"|"--stop", "--workspace", <path>]`, so it detected `--start` and then *assumed* `--workspace`; a rename would have surfaced as field failures.
+
+The advertised description was checked against the parsers in both directions, because a wrong "NOT accepted" would just be a different inaccuracy: honored by the bare launch path, `--start`, `--attach`, `--stop`, `--update-sessions`, `--reset-sandbox`; explicitly rejected by `--gc` and `--stop-all`; ignored by the introspection flags. A one-line consistency fix rode along — `--reset-sandbox` accepted `--workspace PATH` but not `--workspace=PATH`.
+
+The durable part is **`run-tests.sh` §91**, a lockstep guard: it extracts every flag the real parsers recognize and diffs it against `cli_flags` in both directions, with three curated allowlists (sub-options, private flags, and forwarded-not-parsed). `--workspace` was the instance that bit a consumer; the guard is for the class. Its soundness bound is documented rather than implied — a complete version is **not** statically achievable, because sandy deliberately forwards unknown flags to the agent, so no black-box probe can separate "accepted" from "forwarded" without launching one.
+
+### `sandy --print-version`, and `--version` pinned as contract (#159)
+
+A consumer keying a `--print-schema` cache off sandy's version could not use `--print-schema`'s own `sandy.version` — that is the payload being cached. So:
+
+```
+$ sandy --print-version
+{"schema_version":1,"version":"1.7.0","commit":"abc1234","full_version":"1.7.0-abc1234"}
+```
+
+**`full_version` is the cache key, not `version`.** sandy-ui matched the first dotted-numeric token, which yields `1.7.0` for `1.7.0-rc1`, for every `1.7.0-dev` commit, *and* for `1.7.0` final — one distinct key across four builds, so the cache never invalidated across exactly the upgrades a dev-channel consumer makes. Handing over a tidy `version` field would have re-shipped that bug. `full_version` is precomputed rather than left to the client to join, because `1.7.0-dev-abc1234` cannot be split without knowing `SANDY_VERSION`'s grammar.
+
+`--version`'s human output is now **guaranteed** as exactly `sandy <full_version>` — zero code change, byte-identical, handler untouched. That half is the one that actually unblocks a consumer, for a reason worth recording: sandy's parser ends in a catch-all that **forwards unrecognized flags to the wrapped agent**. Calling `--print-version` against a pre-1.7.0 sandy does not error — it attempts a full container launch. So `--version` (safe on every version) stays the capability probe, and `--print-version` is only reached once the parsed version says 1.7.0+.
+
+### The stream contract is now guaranteed (#160)
+
+`--print-schema`, `--print-state`, `--validate-config` and `--print-version` emit **exactly one JSON document on stdout and zero bytes on stderr** — including JSON-shaped failures. `--validate-config` on a missing file exits `1` *with* a JSON body naming the failure. Only the no-argument usage error departs: stdout empty, a `[sandy] ERROR:` line on stderr, exit 1.
+
+The property already held; nothing promised it, so every consumer independently decided how defensive to be. One had to add a tolerant parser after a login shell's prompt hook wrote an OSC terminal-title escape into fd 1, breaking `jq` and `JSON.parse` on piped output.
+
+The pinned property is **two-sided, and that is the substantive part**: sandy's `info()` and `warn()` write to **stdout**; only `error()` redirects. So the realistic regression was never stderr noise — it was an `info`/`warn` added to a fast path corrupting the JSON payload. §92 asserts stdout is exactly one document (first byte `{`, strict parse rejecting trailing data) **and** stderr is zero bytes, independently. An `info` leak fails only the stdout checks; an `error` leak fails only the stderr checks.
+
+Honest bound, stated in the spec: this covers bytes *sandy* writes. It cannot cover what a login shell injects into an inherited fd 1.
+
+### DEC-C: no exit code observed is not a verdict (#157)
+
+`--attach`'s exit codes are evidence-backed — sandy discards `tmux attach`'s return value and re-derives the answer by probing live state. If the process is killed by a signal (a pty teardown when an editor closes a terminal, which sandy-ui hits routinely), that probe **never runs** and a supervising parent sees `code === null`.
+
+DEC-C said nothing about this, so consumers invented a reading. The documented answer: no-code-observed means **the decision procedure did not execute**. It is not a verdict on the session and must not be mapped onto `5`. A killed *local client* says nothing about the durable session, which under D9 is owned by the running labeled container. Reconcile against `--print-state`, or re-run `--attach` (which returns `4` if the session is genuinely gone).
+
+Also recorded: `5` is currently unreachable on the `--attach` path — both `exit 5` sites are in `--stop` — so treating an unknown state as "attach failed" maps it onto a code `--attach` never emits.
+
+---
+
+## Handoff substrate (#132 slice 1)
+
+Per-sandbox cross-workspace directories: `$SANDBOX_DIR/handoff/outbox` mounted **rw** at `~/.handoff/outbox`, `inbox` mounted **read-only** at `~/.handoff/inbox`.
+
+**This is substrate only — nothing moves files.** No relay, no helper, no skills, no turn initiation, no peer list. The directories are created empty and stay empty until something else writes to them; today, nothing does.
+
+The `:ro` flag is the actual boundary, not the permission bits: the container runs as the host uid and *owns* both directories, so against a plain rw mount an in-container `chmod` would succeed. Verified live — `chmod u+w` on an agent-owned file in the inbox returns `Read-only file system`.
+
+### Enabling it: `SANDY_HANDOFF_DIRS`, or a marker
+
+`SANDY_HANDOFF_DIRS=1` (passive-safe) works from any config. But a workspace `.sandy/config` **travels with the repository** — clone it elsewhere and the pair is enabled on a sandbox nobody decided about — and enrolling a fleet means one edit per repository, in a directory most repos do not gitignore.
+
+So an operator can also enable it per-sandbox by touching **`$SANDBOX_DIR/.handoff-enabled`**. Same passive tier; the difference is that a marker in sandy's own state **cannot be cloned into existence**. It ORs with the config key, its contents are ignored (so `touch` works), and it is resolved *before* the existing gate — so the `~/.handoff` collision refusal and the `:ro` flag apply to both paths by construction rather than being duplicated.
+
+**Top level specifically, never under `claude/`**: that subdirectory is mounted at `~/.claude` with writable overlays, so a marker there would be one the *agent* could create for itself. Nothing bind-mounts the sandbox top level; `run-tests.sh` §97 asserts that, so a future mount reaching the marker fails a test rather than silently granting self-enrolment.
+
+`--reset-sandbox` **preserves** the marker like `WORKSPACE.json` — enrollment is operator state, and destroying it would silently un-enroll a sandbox from a fleet. The `handoff/` contents are still destroyed, so staged outbox content does not survive a reset.
+
+`--print-state` reports `handoff_enabled` per sandbox. It reports the **marker only** — a workspace `SANDY_HANDOFF_DIRS=1` also enables the pair but lives in the workspace, and `--print-state` does not read workspace configs — so `false` means "not enrolled via the marker", not "the pair is off next launch".
+
+### Why the directories are now created unconditionally
+
+Creation is no longer gated; only the **mount** is. This makes a rule we already had true by **construction** rather than by convention. "Directory presence means nothing" was previously asserted and tested, and presence was genuinely ambiguous — it might mean a launch had enabled the pair, or that someone ran `mkdir`. When every sandbox has them, presence carries zero information and the marker is the only signal that can mean anything.
+
+Hand-creating `handoff/{inbox,outbox}` still enables nothing, which is the point: a directory is an artefact that can arrive by accident (a stray `mkdir`, a restored backup, an `rsync -a`), while a marker file is a statement of intent.
+
+It also removes a step from fleet provisioning. `$SANDBOX_DIR` is itself a launch artifact, so a sandbox that *has* a marker has already been launched — with the pair created unconditionally, enrolling it is the marker alone rather than a re-launch purely to harvest a side effect.
+
+---
+
+## Fixes
+
+### The `--start` approval pre-pass was silently skipped from a checkout (#147, #149)
+
+Sandy re-invokes itself in two places that first `cd` elsewhere. With a relative `$0` — `./sandy`, i.e. any dev checkout — the child resolved to nothing after the `cd`.
+
+The site that matters is the `--start` **approval pre-pass**, which exists to grant passive-privileged approval with the client's TTY *before* forking the non-TTY supervisor — because that supervisor can only fail closed, **silently dropping workspace-config privileged keys, including credentials in a workspace `.sandy/.secrets`**. It is `|| true`-guarded, so the failure was swallowed and the fix silently did not run, reviving the exact bug it was written to prevent.
+
+Installed users were never affected: `~/.local/bin/sandy` is invoked as a bare PATH name, which resolves from any cwd. This only ever hit checkouts — which is why an acceptance harness found it and the suite did not.
+
+The first fix was wrong in an instructive way: it called the resolver *at* the call site, inside `cd X && … "$(resolve)"`. Command substitution in the second half of an `&&` list expands **after** the `cd`, so it resolved against the workspace. The error moved rather than went away. Now resolved once at script top, so correctness is a property of where the assignment sits rather than of how each call site is written.
+
+### Permission-mode drift is now detectable (#151)
+
+Claude Code 2.1.232 overwrites sandy's `permissions.defaultMode: bypassPermissions` pin with `"auto"` about 13 seconds after launch. Sandy seeds `settings.json` host-side before `docker run`, so no launch-time check can observe it.
+
+`sandy-session.json` gains **`permission_mode`**, recording what sandy pinned — provable after the fact, alongside `effort`. And `cleanup()` compares the launch baseline against the file at session end and prints a yellow drift notice. Chasing each upstream rename is a losing game (`afdc0d7` already fixed one instance of this class); making the mismatch observable is not.
+
+Relatedly, sandy now seeds **`skipAutoPermissionPrompt`** so 2.1.x's *"Make auto mode your default permission mode?"* offer stops appearing on new sandboxes (#167). Note 2.1.x ships a one-time migration that **deletes** that key whenever `permissions.defaultMode != "auto"` — precisely sandy's configuration — so re-seeding every launch is what makes the suppression stick.
+
+### jq seeder overwrote an explicit `false` (#168)
+
+`//=` treats `false` as unset, so `.k //= true` clobbered a user-set `false` — while the node branch preserved it. The two seeder paths silently disagreed depending on which host tool was installed. Fixed with `has()` for the three boolean keys; object-valued `//=` is untouched, since an object is always truthy.
+
+---
+
+## Test infrastructure
+
+`test/lint-bash32.sh` is new: a static lint for bash-3.2 / BSD hazards that CI **structurally cannot see**, since CI is Ubuntu + bash 5 + GNU while the maintainer runs macOS + bash 3.2 + BSD. Every pattern it detects has already broken this repo, and each failed in a way that did not announce itself — the worst printed `945 passed, 0 failed` *after* a parse error had killed the file. Five detectors: `SRCSUB`, `PYBACK`, `APOSCS`, `APOSQ`, `GREPM`.
+
+It is validated by **replay** rather than inspection: pointed at the commits before each historical fix, it flags every original defect at its exact line. `--self-test` proves the detectors still fire, because a linter whose patterns quietly stopped matching would report success forever.
+
+Also new: §87 (sandy never writes `mcpServers` into `.claude.json`, so an operator can pre-populate it), §88, §90–§93, §95–§97, and an acceptance phase proving `EROFS`-beats-ownership on the marker path specifically.
+
 ## sandy v1.6.0
 
 **Base-image modernization** — Debian 13 (trixie), Python 3.13, Node 24, Go 1.26 — plus two additive features and a LAN-allowlist fix. Every pinned toolchain was on an unsupported or maintenance-only release; all four move to current. `schema_version` stays `1` and the 1.x sandbox forward-compat promise holds (`SANDY_SANDBOX_MIN_COMPAT` unchanged), so **existing sandboxes keep working and need no recreation**.
