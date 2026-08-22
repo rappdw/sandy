@@ -3589,6 +3589,12 @@ check "state has sandboxes array" \
 check "state has docker_reachable bool" \
     bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert isinstance(d[\"docker_reachable\"],bool)" "$1"' \
     -- "$_STATE_JSON"
+check "state has host_id (string or null) (#179)" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); v=d[\"host_id\"]; assert v is None or isinstance(v,str), repr(v)" "$1"' \
+    -- "$_STATE_JSON"
+check "state has host_id_source in {env,hostname,null} (#179)" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); v=d[\"host_id_source\"]; assert v in (None,\"env\",\"hostname\"), repr(v)" "$1"' \
+    -- "$_STATE_JSON"
 
 # Per-sandbox field contract: an empty SANDY_HOME (the checks above) can't reveal
 # a dropped per-entry field. Run against a FIXTURE sandbox so workspace_path
@@ -8585,6 +8591,243 @@ check "§99(21) a workspace_path that is a FILE is NOT classified an orphan" \
     bash -c 'printf "%s" "$1" | grep -qF "$2" && exit 1; exit 0' \
     -- "$_S99_21_PLAN" "$_S99_21_NAME"
 rm -rf "$_S99_FH21" "$_S99_BIN21" "$_S99_21_WSFILE"
+
+# ============================================================
+echo ""
+echo "§100: --print-state host_id / host_id_source (#179)"
+# ============================================================
+# Advisory host identity for multi-host fleet aggregation: sandbox names
+# hash only the workspace path, so the SAME path on two hosts yields the
+# SAME slug and a merged --print-state view is unattributable without this.
+# Default source is `uname -n`; SANDY_HOST_ID (registered env-only, see
+# sandy ~105 SANDY_ENV_ONLY_KEYS) overrides it. Invalid/empty overrides fall
+# back SILENTLY (no warning ever — the 1.7.0 stream contract guarantees 0
+# bytes of stderr from --print-state, pinned separately by §92). Fast-path
+# (no docker needed): SANDY_HOME points at an empty scratch dir throughout.
+_S100_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S100_HOME="$(mktemp -d)"
+
+# Purpose-built extractor: prints host_id and host_id_source TAB-separated
+# on ONE line ("" standing in for JSON null) so a single `read` can split
+# both into shell variables via `IFS=$'\t' read -r hid src <<< "$out"` --
+# two `read`-consumes-one-line calls against a two-line stream would silently
+# leave the second field empty, which is why this is one line, not two.
+# Written via a QUOTED heredoc (no $( ) / backtick inside) so it is inert to
+# the shell that writes it and immune to the PYBACK class of drift.
+_S100_EXTRACT_PY="$(mktemp)"
+cat > "$_S100_EXTRACT_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+hid = d.get("host_id")
+src = d.get("host_id_source")
+print("%s\t%s" % (hid if hid is not None else "", src if src is not None else ""))
+PY
+
+# (1) Default derivation: SANDY_HOST_ID unset -> host_id == `uname -n`,
+# host_id_source == "hostname". `uname -n` is queried the same way sandy
+# itself does (flagless, || true) so this stays host-independent.
+_S100_UNAME="$(uname -n 2>/dev/null || true)"
+_S100_OUT1="$(mktemp)"; _S100_ERR1="$(mktemp)"
+env -u SANDY_HOST_ID SANDY_HOME="$_S100_HOME" bash "$_S100_SANDY" --print-state \
+    >"$_S100_OUT1" 2>"$_S100_ERR1" || true
+IFS=$'\t' read -r _s100_hid1 _s100_src1 <<< "$(python3 "$_S100_EXTRACT_PY" "$_S100_OUT1")"
+check "§100(1) SANDY_HOST_ID unset: host_id equals uname -n" \
+    test "$_s100_hid1" = "$_S100_UNAME"
+check "§100(1) SANDY_HOST_ID unset: host_id_source is hostname" \
+    test "$_s100_src1" = "hostname"
+
+# (2) Override honored: a valid SANDY_HOST_ID wins, source flips to "env".
+_S100_OUT2="$(mktemp)"; _S100_ERR2="$(mktemp)"
+SANDY_HOST_ID="fleet-node-07" SANDY_HOME="$_S100_HOME" bash "$_S100_SANDY" --print-state \
+    >"$_S100_OUT2" 2>"$_S100_ERR2" || true
+IFS=$'\t' read -r _s100_hid2 _s100_src2 <<< "$(python3 "$_S100_EXTRACT_PY" "$_S100_OUT2")"
+check "§100(2) valid SANDY_HOST_ID override: host_id equals the override" \
+    test "$_s100_hid2" = "fleet-node-07"
+check "§100(2) valid SANDY_HOST_ID override: host_id_source is env" \
+    test "$_s100_src2" = "env"
+
+# (3) Invalid override (bad chars) and empty override -> silent fallback to
+# uname -n, host_id_source "hostname", and stderr EXACTLY 0 bytes -- this is
+# the contract (SPEC_INTROSPECTION.md's stream-purity guarantee), not a
+# nicety, so it is asserted by byte count, not just "looks empty."
+_S100_OUT3A="$(mktemp)"; _S100_ERR3A="$(mktemp)"
+SANDY_HOST_ID="evil host!" SANDY_HOME="$_S100_HOME" bash "$_S100_SANDY" --print-state \
+    >"$_S100_OUT3A" 2>"$_S100_ERR3A" || true
+IFS=$'\t' read -r _s100_hid3a _s100_src3a <<< "$(python3 "$_S100_EXTRACT_PY" "$_S100_OUT3A")"
+check "§100(3a) invalid SANDY_HOST_ID (bad chars): falls back to uname -n" \
+    test "$_s100_hid3a" = "$_S100_UNAME"
+check "§100(3a) invalid SANDY_HOST_ID (bad chars): host_id_source is hostname" \
+    test "$_s100_src3a" = "hostname"
+check "§100(3a) invalid SANDY_HOST_ID (bad chars): stderr is exactly 0 bytes" \
+    bash -c '[ "$(wc -c < "$1" | tr -d " ")" = "0" ]' -- "$_S100_ERR3A"
+
+_S100_OUT3B="$(mktemp)"; _S100_ERR3B="$(mktemp)"
+SANDY_HOST_ID="" SANDY_HOME="$_S100_HOME" bash "$_S100_SANDY" --print-state \
+    >"$_S100_OUT3B" 2>"$_S100_ERR3B" || true
+IFS=$'\t' read -r _s100_hid3b _s100_src3b <<< "$(python3 "$_S100_EXTRACT_PY" "$_S100_OUT3B")"
+check "§100(3b) empty SANDY_HOST_ID: falls back to uname -n" \
+    test "$_s100_hid3b" = "$_S100_UNAME"
+check "§100(3b) empty SANDY_HOST_ID: host_id_source is hostname" \
+    test "$_s100_src3b" = "hostname"
+check "§100(3b) empty SANDY_HOST_ID: stderr is exactly 0 bytes" \
+    bash -c '[ "$(wc -c < "$1" | tr -d " ")" = "0" ]' -- "$_S100_ERR3B"
+
+# (4) Light-mode parity: both fields present under `--print-state light`
+# with identical semantics to full mode (uname -n is a non-docker spawn, so
+# it rides the light-mode budget with no extra cost — see the sandy ~1750
+# comment block).
+_S100_OUT4="$(mktemp)"; _S100_ERR4="$(mktemp)"
+env -u SANDY_HOST_ID SANDY_HOME="$_S100_HOME" bash "$_S100_SANDY" --print-state light \
+    >"$_S100_OUT4" 2>"$_S100_ERR4" || true
+IFS=$'\t' read -r _s100_hid4 _s100_src4 <<< "$(python3 "$_S100_EXTRACT_PY" "$_S100_OUT4")"
+check "§100(4) light mode: host_id equals uname -n" \
+    test "$_s100_hid4" = "$_S100_UNAME"
+check "§100(4) light mode: host_id_source is hostname" \
+    test "$_s100_src4" = "hostname"
+check "§100(4) light mode: stderr is exactly 0 bytes" \
+    bash -c '[ "$(wc -c < "$1" | tr -d " ")" = "0" ]' -- "$_S100_ERR4"
+
+# (5) Tier enforcement, TWO-SIDED. (a) SANDY_HOST_ID is listed as env-only in
+# --print-schema. (b) The forgery-resistance property itself: a workspace
+# .sandy/config CANNOT set host_id -- --print-state is a fast path that
+# exits before _load_sandy_config is ever invoked (sandy:~5876), so a
+# config-file occurrence is structurally inert, not merely discouraged.
+_S100_SCHEMA_OUT="$(mktemp)"
+env -u SANDY_HOST_ID SANDY_HOME="$_S100_HOME" bash "$_S100_SANDY" --print-schema >"$_S100_SCHEMA_OUT" 2>/dev/null || true
+_S100_ENVKEYS_PY="$(mktemp)"
+cat > "$_S100_ENVKEYS_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+names = [k["name"] for k in d["config"]["env_only_keys"]]
+assert "SANDY_HOST_ID" in names, names
+PY
+check "§100(5a) --print-schema config.env_only_keys lists SANDY_HOST_ID" \
+    python3 "$_S100_ENVKEYS_PY" "$_S100_SCHEMA_OUT"
+
+_S100_WS="$(mktemp -d)"
+mkdir -p "$_S100_WS/.sandy"
+echo "SANDY_HOST_ID=forged-from-repo" > "$_S100_WS/.sandy/config"
+_S100_OUT5="$(mktemp)"; _S100_ERR5="$(mktemp)"
+( cd "$_S100_WS" && env -u SANDY_HOST_ID SANDY_HOME="$_S100_HOME" \
+    bash "$_S100_SANDY" --print-state >"$_S100_OUT5" 2>"$_S100_ERR5" ) || true
+IFS=$'\t' read -r _s100_hid5 _s100_src5 <<< "$(python3 "$_S100_EXTRACT_PY" "$_S100_OUT5")"
+check "§100(5b) FORGERY RESISTANCE: workspace .sandy/config setting SANDY_HOST_ID does NOT change the emitted value" \
+    test "$_s100_hid5" = "$_S100_UNAME"
+check "§100(5b) FORGERY RESISTANCE: host_id_source is still hostname, not env" \
+    test "$_s100_src5" = "hostname"
+check "§100(5b) FORGERY RESISTANCE: stderr is exactly 0 bytes" \
+    bash -c '[ "$(wc -c < "$1" | tr -d " ")" = "0" ]' -- "$_S100_ERR5"
+rm -rf "$_S100_WS"
+
+# (6) Over-long value (129+ chars, one past the 128-char pattern ceiling) ->
+# rejected, falls back, source "hostname".
+_S100_LONG="$(python3 -c 'print("a" * 129)')"
+_S100_OUT6="$(mktemp)"; _S100_ERR6="$(mktemp)"
+SANDY_HOST_ID="$_S100_LONG" SANDY_HOME="$_S100_HOME" bash "$_S100_SANDY" --print-state \
+    >"$_S100_OUT6" 2>"$_S100_ERR6" || true
+IFS=$'\t' read -r _s100_hid6 _s100_src6 <<< "$(python3 "$_S100_EXTRACT_PY" "$_S100_OUT6")"
+check "§100(6) over-long (129-char) SANDY_HOST_ID: falls back to uname -n" \
+    test "$_s100_hid6" = "$_S100_UNAME"
+check "§100(6) over-long (129-char) SANDY_HOST_ID: host_id_source is hostname" \
+    test "$_s100_src6" = "hostname"
+check "§100(6) over-long (129-char) SANDY_HOST_ID: stderr is exactly 0 bytes" \
+    bash -c '[ "$(wc -c < "$1" | tr -d " ")" = "0" ]' -- "$_S100_ERR6"
+
+# --- (7) The FALLBACK value is never charset-validated, so escaping is what
+# keeps the document well-formed there. SANDY_HOST_ID is checked against
+# ^[A-Za-z0-9._-]{1,128}$ and can therefore never carry a JSON metacharacter --
+# but `uname -n` output is emitted with no such filter, so the hostname path is
+# the ONLY one where a quote or backslash can reach the emitter. Dropping
+# _json_escape there passes every other check in this section (verified: 20/20
+# still green with raw interpolation substituted in), because no other fixture
+# uses a hostile hostname. Shim `uname -n` to return one and require the
+# document to still parse with 0 bytes of stderr -- the stream contract, on the
+# one code path that can actually break it.
+_S100_UBIN="$(mktemp -d)"
+cat > "$_S100_UBIN/uname" <<'S100UNAME'
+#!/usr/bin/env bash
+# Surgical: only -n is faked. A blanket-failing uname breaks unrelated startup
+# code that calls `uname -s`.
+if [ "$1" = "-n" ]; then printf 'ev"il\\host\n'; exit 0; fi
+exec /usr/bin/uname "$@"
+S100UNAME
+chmod +x "$_S100_UBIN/uname"
+_S100_OUT7="$(mktemp)"; _S100_ERR7="$(mktemp)"
+env -u SANDY_HOST_ID PATH="$_S100_UBIN:$PATH" SANDY_HOME="$_S100_HOME" \
+    bash "$_S100_SANDY" --print-state >"$_S100_OUT7" 2>"$_S100_ERR7" || true
+_S100_ESC_PY="$(mktemp)"
+cat > "$_S100_ESC_PY" <<'S100ESCPY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["host_id"] == 'ev"il\\host', repr(d["host_id"])
+assert d["host_id_source"] == "hostname", repr(d["host_id_source"])
+S100ESCPY
+check "§100(7) hostname with JSON metacharacters still yields ONE parseable document, value intact" \
+    python3 "$_S100_ESC_PY" "$_S100_OUT7"
+check "§100(7) hostile hostname: stderr is exactly 0 bytes (stream contract)" \
+    bash -c '[ "$(wc -c < "$1" | tr -d " ")" = "0" ]' -- "$_S100_ERR7"
+
+# --- (8) The length boundary is exact, not approximate. (6) proves an
+# over-long value is rejected but never pins WHERE the edge is, so an
+# off-by-one in the {1,128} quantifier is invisible to it.
+_S100_V128="$(printf 'a%.0s' $(seq 1 128))"
+_S100_V129="$(printf 'a%.0s' $(seq 1 129))"
+# Resolve BEFORE the check: a shell function is not visible inside `bash -c`,
+# which silently makes such a check fail for a reason unrelated to the property.
+_s100_src_for() {
+    SANDY_HOST_ID="$1" SANDY_HOME="$_S100_HOME" bash "$_S100_SANDY" --print-state 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["host_id_source"])' || true
+}
+_S100_SRC128="$(_s100_src_for "$_S100_V128")"
+_S100_SRC129="$(_s100_src_for "$_S100_V129")"
+check "§100(8) boundary: exactly 128 chars is ACCEPTED (source=env)" \
+    test "$_S100_SRC128" = "env"
+check "§100(8) boundary: 129 chars is REJECTED (falls back to hostname)" \
+    test "$_S100_SRC129" = "hostname"
+
+# --- (9) The `|| true` inside $(uname -n 2>/dev/null || true) is load-bearing
+# and its removal is INVISIBLE to every other check here, because uname never
+# fails in a normal run. --print-state installs set -E plus an ERR trap, so
+# without the guard a failing uname aborts mid-document: stdout gets partial
+# non-JSON, stderr gets the trap message, exit is non-zero -- a three-way
+# stream-contract violation. Same hazard class as `du -k` in section 98: correct
+# today, silently broken by a plausible "simplification", and only observable
+# by forcing the failure.
+_S100_FBIN="$(mktemp -d)"
+cat > "$_S100_FBIN/uname" <<'S100UNAMEFAIL'
+#!/usr/bin/env bash
+# Fail ONLY for -n. A blanket-failing uname breaks unrelated startup code that
+# calls `uname -s`, which would make this check fail for the wrong reason.
+if [ "$1" = "-n" ]; then exit 1; fi
+exec /usr/bin/uname "$@"
+S100UNAMEFAIL
+chmod +x "$_S100_FBIN/uname"
+_S100_OUT9="$(mktemp)"; _S100_ERR9="$(mktemp)"
+_S100_RC9=0
+env -u SANDY_HOST_ID PATH="$_S100_FBIN:$PATH" SANDY_HOME="$_S100_HOME" \
+    bash "$_S100_SANDY" --print-state >"$_S100_OUT9" 2>"$_S100_ERR9" || _S100_RC9=$?
+_S100_NULL_PY="$(mktemp)"
+cat > "$_S100_NULL_PY" <<'S100NULLPY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["host_id"] is None, repr(d["host_id"])
+assert d["host_id_source"] is None, repr(d["host_id_source"])
+S100NULLPY
+check "§100(9) failing uname -n: exit stays 0 (the || true guard holds)" \
+    test "$_S100_RC9" -eq 0
+check "§100(9) failing uname -n: stdout is still ONE parseable document, both fields null" \
+    python3 "$_S100_NULL_PY" "$_S100_OUT9"
+check "§100(9) failing uname -n: stderr is exactly 0 bytes" \
+    bash -c '[ "$(wc -c < "$1" | tr -d " ")" = "0" ]' -- "$_S100_ERR9"
+
+rm -rf "$_S100_HOME" "$_S100_EXTRACT_PY" "$_S100_ENVKEYS_PY" \
+    "$_S100_OUT1" "$_S100_ERR1" "$_S100_OUT2" "$_S100_ERR2" \
+    "$_S100_OUT3A" "$_S100_ERR3A" "$_S100_OUT3B" "$_S100_ERR3B" \
+    "$_S100_OUT4" "$_S100_ERR4" "$_S100_SCHEMA_OUT" \
+    "$_S100_OUT5" "$_S100_ERR5" "$_S100_OUT6" "$_S100_ERR6" \
+    "$_S100_OUT7" "$_S100_ERR7" "$_S100_ESC_PY" \
+    "$_S100_OUT9" "$_S100_ERR9" "$_S100_NULL_PY" 2>/dev/null || true
+rm -rf "$_S100_UBIN" "$_S100_FBIN" 2>/dev/null || true
 
 # ============================================================
 # Summary

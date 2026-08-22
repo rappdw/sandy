@@ -249,6 +249,8 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 {
   "schema_version": 1,
   "sandy_home": "/Users/drapp/.sandy",
+  "host_id": "drapp-mbp",
+  "host_id_source": "hostname",
   "installed_images": [
     { "name": "sandy-base", "id": "sha256:abc...", "created": "2026-04-15T..." },
     { "name": "sandy-claude-code", "id": "sha256:def...", "created": "2026-04-15T..." }
@@ -307,6 +309,35 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
   "proxy_image_created": "2026-07-28T12:00:00Z"
 }
 ```
+
+> **`host_id` / `host_id_source`** (top-level, added additively in `1.8.0`,
+> #179 — no `schema_version` bump). Advisory host identity for multi-host
+> fleet aggregation: sandbox names are `basename-<hash-of-workspace-path>`,
+> so the SAME workspace path on two hosts yields the SAME slug, making a
+> `--print-state` view merged across machines unattributable without this.
+> `host_id` is a JSON string or `null`; `host_id_source` is one of
+> `"env"` (an operator-set `SANDY_HOST_ID` was honored), `"hostname"`
+> (the `uname -n` default was used), or `null` (neither could be
+> determined). Default source is `uname -n` (flagless, guarded — a failure
+> or empty result yields `host_id: null, host_id_source: null`, never an
+> error). `SANDY_HOST_ID` is an **env-only** config key — set only in the
+> process environment, never honored from any `.sandy/config` file (see the
+> config-keys table above) — a committed workspace config could otherwise
+> forge the identity of whatever machine the repo happens to be cloned onto.
+> An invalid or over-long (>128 char) override is silently ignored and
+> falls back to `uname -n`, with no diagnostic: `--print-state` guarantees
+> zero bytes of stderr (see "Stream contract" above), so `host_id_source`
+> flipping to `"hostname"` when an override was set is the only signal of a
+> rejected value. **Advisory, not a blind join key** — hostnames are
+> neither unique nor immutable in general, and a consumer aggregating
+> across hosts should treat `host_id` as an operator-facing label, not a
+> cryptographic identity. Emitted identically in both `--print-state` and
+> `--print-state light` — `uname -n` is one cheap non-docker spawn, well
+> within the light-mode budget (which counts only docker spawns), and a
+> fleet poller using light mode is exactly the consumer that needs
+> attribution. Sandy itself stays single-host: this field exists so a tool
+> layered above sandy can tell instances apart, not to make sandy aware of
+> other hosts.
 
 > **`sandbox` / `daemon` / `attached_clients`** (per `running_containers[]` entry,
 > added additively in 1.1.0, #17 — no `schema_version` bump). `sandbox` is the
@@ -517,7 +548,7 @@ No exit-code surprises: always `0` (see the stream contract above — this flag 
 
 - Current: `schema_version: 1`
 - **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal`), `description`, `sources`, and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
-- **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. In `1.7.0`, one new `sandboxes[]` field: `handoff_enabled` (bool — whether `$SANDBOX_DIR/.handoff-enabled`, the operator-side handoff enable marker, is present; reports the marker only, not a workspace `SANDY_HANDOFF_DIRS=1`). Clients ignore unknown fields. Three additive changes shipped this way: `since`/`stability` on config-key objects (`0.15.0`, PR 4.1, above); in `1.1.0` (#17), three new `cli_flags` entries (`--start`, `--attach`, `--stop` — daemon-mode flags) plus three new `running_containers[]` fields (`sandbox`, `daemon`, `attached_clients` — see `--print-state` below); and, also in `1.1.0` (#26), one more `cli_flags` entry (`--prune-orphans` — reap orphaned sandy networks and exit) plus one new top-level `--print-state` field (`orphan_networks` — see above). In `1.2.0`, one more `cli_flags` entry (`--update-sessions` — fleet image refresh + rolling restart across every daemon session on the host, scopeable to a single session with `--workspace PATH`, #41) plus two new `running_containers[]` fields: `image_stale` (FULL MODE ONLY, #41 — see above) and `updated_at` (both modes, #44 — see above). In `1.3.0`, one more `cli_flags` entry (`--gc` — unified reclaim of dead-owner containers, orphaned networks, orphaned per-project/skill images, and dangling sandy images, with `--dry-run`/`--yes` sub-options, #36) plus two new top-level `--print-state` fields: `dangling_images` and `orphaned_containers` (both FULL MODE ONLY — see above). In `1.7.0`, one more `cli_flags` entry (`--workspace` — the parsers have accepted this flag since `1.1.0` (#17); only the schema advertisement was missing, #156) plus the guaranteed stream contract for `--print-schema`/`--print-state`/`--validate-config` documented above (#160) — the stream contract formalizes and test-pins behavior every one of these handlers already had, so it carries no field or shape change and needs no `schema_version` bump either. Also in `1.7.0` (#159), a new `cli_flags` entry (`--print-version`) plus the new `--print-version` flag itself (see the `### --print-version` section above) — a wholly new, additive introspection surface, not a change to any existing emitted shape, so it needs no `schema_version` bump either; it does, however, extend the 1.7.0 stream contract (above) to cover this fourth flag. In `1.8.0` (#176), one new `sandboxes[]` field: `size_bytes` (FULL MODE ONLY, always `null` in `--print-state light` — see above) — the allocated-disk-usage figure for each sandbox, computed via `du -skx`. Also in `1.8.0` (#178), one more `cli_flags` entry (`--remove-sandbox` — permanently delete a sandbox directory, with three mutually exclusive selectors: default/`--workspace PATH`, `--sandbox NAME`, `--orphans`; sub-options `--dry-run`/`--yes`) plus one new `sandboxes[]` field: `workspace_exists` (tri-state, emitted identically in BOTH `--print-state` modes since it costs no extra process spawn — see above). The existing `--workspace` `cli_flags` entry's description was also updated to name `--remove-sandbox` among the flags it honors, per the drift discipline #156 established.
+- **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. In `1.7.0`, one new `sandboxes[]` field: `handoff_enabled` (bool — whether `$SANDBOX_DIR/.handoff-enabled`, the operator-side handoff enable marker, is present; reports the marker only, not a workspace `SANDY_HANDOFF_DIRS=1`). Clients ignore unknown fields. Three additive changes shipped this way: `since`/`stability` on config-key objects (`0.15.0`, PR 4.1, above); in `1.1.0` (#17), three new `cli_flags` entries (`--start`, `--attach`, `--stop` — daemon-mode flags) plus three new `running_containers[]` fields (`sandbox`, `daemon`, `attached_clients` — see `--print-state` below); and, also in `1.1.0` (#26), one more `cli_flags` entry (`--prune-orphans` — reap orphaned sandy networks and exit) plus one new top-level `--print-state` field (`orphan_networks` — see above). In `1.2.0`, one more `cli_flags` entry (`--update-sessions` — fleet image refresh + rolling restart across every daemon session on the host, scopeable to a single session with `--workspace PATH`, #41) plus two new `running_containers[]` fields: `image_stale` (FULL MODE ONLY, #41 — see above) and `updated_at` (both modes, #44 — see above). In `1.3.0`, one more `cli_flags` entry (`--gc` — unified reclaim of dead-owner containers, orphaned networks, orphaned per-project/skill images, and dangling sandy images, with `--dry-run`/`--yes` sub-options, #36) plus two new top-level `--print-state` fields: `dangling_images` and `orphaned_containers` (both FULL MODE ONLY — see above). In `1.7.0`, one more `cli_flags` entry (`--workspace` — the parsers have accepted this flag since `1.1.0` (#17); only the schema advertisement was missing, #156) plus the guaranteed stream contract for `--print-schema`/`--print-state`/`--validate-config` documented above (#160) — the stream contract formalizes and test-pins behavior every one of these handlers already had, so it carries no field or shape change and needs no `schema_version` bump either. Also in `1.7.0` (#159), a new `cli_flags` entry (`--print-version`) plus the new `--print-version` flag itself (see the `### --print-version` section above) — a wholly new, additive introspection surface, not a change to any existing emitted shape, so it needs no `schema_version` bump either; it does, however, extend the 1.7.0 stream contract (above) to cover this fourth flag. In `1.8.0` (#176), one new `sandboxes[]` field: `size_bytes` (FULL MODE ONLY, always `null` in `--print-state light` — see above) — the allocated-disk-usage figure for each sandbox, computed via `du -skx`. Also in `1.8.0` (#178), one more `cli_flags` entry (`--remove-sandbox` — permanently delete a sandbox directory, with three mutually exclusive selectors: default/`--workspace PATH`, `--sandbox NAME`, `--orphans`; sub-options `--dry-run`/`--yes`) plus one new `sandboxes[]` field: `workspace_exists` (tri-state, emitted identically in BOTH `--print-state` modes since it costs no extra process spawn — see above). The existing `--workspace` `cli_flags` entry's description was also updated to name `--remove-sandbox` among the flags it honors, per the drift discipline #156 established. Also in `1.8.0` (#179), two new top-level `--print-state` fields: `host_id` and `host_id_source` (see above) — advisory host identity for multi-host fleet aggregation, sourced from `uname -n` by default with an env-only `SANDY_HOST_ID` override, emitted identically in both `--print-state` modes. `SANDY_HOST_ID` also appears as a new `env_only_keys` entry in `--print-schema`.
 - **Deprecations** (existing key changes semantics): bump to `schema_version: 2`. Sandy publishes both versions in parallel via `--print-schema --schema-version 1` for one minor release, then drops v1 with a release-note callout.
 - **Compatibility range**: each sandy version declares `supported_schema_versions` and `deprecated_schema_versions` so clients can decide to warn/refuse.
 
