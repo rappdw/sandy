@@ -3609,7 +3609,7 @@ d=json.load(open(sys.argv[1]))
 sb=[s for s in d[\"sandboxes\"] if s.get(\"name\")==\"zork-3dfda686\"]
 assert sb, \"fixture sandbox missing from --print-state output\"
 s=sb[0]
-req={\"name\",\"path\",\"workspace_path\",\"created_version\",\"last_used_version\",\"created_at\",\"last_used_at\",\"size_bytes\",\"handoff_enabled\",\"lock_held\",\"lock_holder_pid\",\"lock_holder_alive\"}
+req={\"name\",\"path\",\"workspace_path\",\"workspace_exists\",\"created_version\",\"last_used_version\",\"created_at\",\"last_used_at\",\"size_bytes\",\"handoff_enabled\",\"lock_held\",\"lock_holder_pid\",\"lock_holder_alive\"}
 missing=req-set(s)
 assert not missing, \"missing per-sandbox fields: \"+repr(sorted(missing))
 " "$1"' -- "$_PS_FIX_JSON"
@@ -7256,7 +7256,7 @@ _S91_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Curated exception lists -- each entry is an intentional, hand-verified
 # exception to the parser<->cli_flags identity, not a loophole papering over
 # drift. See the independently-verified framing facts this PR was built on.
-_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox); not standalone cli_flags entries, must instead appear in >=1 description
+_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --sandbox --orphans"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox); not standalone cli_flags entries, must instead appear in >=1 description
 _S91_PRIVATE="--print-protected-paths"                        # real, private/debug fast-path flag; deliberately unadvertised
 _S91_FORWARDED="--resume"                                     # a real cli_flags entry with ZERO parser cases (forwarded verbatim to the agent, sandy:4103/4127)
 
@@ -7316,7 +7316,7 @@ _S91_SUBOPT_MISSING=""
 for _s91_tok in $_S91_SUBOPT; do
     grep -qF -- "$_s91_tok" "$_S91_DESC_FILE" || _S91_SUBOPT_MISSING="$_S91_SUBOPT_MISSING $_s91_tok"
 done
-check "§91(2) every SUBOPT token (--dry-run --yes --idle-for --keep-approvals) appears in >=1 cli_flags description" \
+check "§91(2) every SUBOPT token (--dry-run --yes --idle-for --keep-approvals --sandbox --orphans) appears in >=1 cli_flags description" \
     bash -c '[ -z "$1" ]' -- "$_S91_SUBOPT_MISSING"
 
 # (3) allowlist self-cleaning, two halves:
@@ -7356,10 +7356,10 @@ f = ws[0]
 assert f.get("type") == "string", "type: %r" % f.get("type")
 assert f.get("arg_name") == "PATH", "arg_name: %r" % f.get("arg_name")
 desc = f.get("description", "")
-for tok in ("--start", "--attach", "--stop", "--update-sessions", "--reset-sandbox"):
+for tok in ("--start", "--attach", "--stop", "--update-sessions", "--reset-sandbox", "--remove-sandbox"):
     assert tok in desc, "description missing " + tok
 PY
-check "§91(5b) --workspace entry has type=string, arg_name=PATH, description names --start/--attach/--stop/--update-sessions/--reset-sandbox" \
+check "§91(5b) --workspace entry has type=string, arg_name=PATH, description names --start/--attach/--stop/--update-sessions/--reset-sandbox/--remove-sandbox" \
     python3 "$_S91_WS_CHECK_PY" "$_S91_SCHEMA_JSON"
 
 # (6) anti-rot sentinels: the extraction itself must not have silently gone blind.
@@ -8055,6 +8055,532 @@ check "§98(6c) failing noisy du: stderr file is exactly 0 bytes (2>/dev/null is
 
 rm -rf "$_S98_HOME" "$_S98_BIN0" "$_S98_BIN_LOG" "$_S98_BIN_GARBAGE" "$_S98_BIN_FAIL" \
     "$_S98_DULOG_LIGHT" "$_S98_DULOG_FULL" "$_S98_ERR_FAIL" 2>/dev/null || true
+
+# ============================================================
+echo ""
+echo "§99: sandy --remove-sandbox — permanently delete a sandbox directory (#178)"
+# ============================================================
+# Filesystem-only (a reachable Docker, when present, is only a best-effort
+# container-liveness guard — see CLAUDE.md "--remove-sandbox"). All 18 checks
+# run against a fabricated $SANDY_HOME so no real sandbox is ever touched.
+_S99_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+
+# --- shared helpers -----------------------------------------------------
+
+_s99_hash8()  { printf '%s' "$1" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-8; }
+_s99_hash16() { printf '%s' "$1" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16; }
+_s99_sbname() { # $1 = canonical workspace path -> echoes "<base>-<hash8>"
+    local h b
+    h="$(_s99_hash8 "$1")"
+    b="$(basename "$1" | tr -cd 'a-zA-Z0-9._-')"; b="${b:-project}"
+    printf '%s-%s\n' "$b" "$h"
+}
+# A provably-dead pid via the reaped-child idiom: spawn a trivial background
+# job, capture its pid via $!, then `wait` it so the process table entry is
+# actually reaped -- never a magic hardcoded number that might collide with
+# a real live process on the test-running host.
+_s99_dead_pid() {
+    ( exit 0 ) &
+    local p=$!
+    wait "$p" 2>/dev/null || true
+    printf '%s\n' "$p"
+}
+# Ordinary sandbox whose workspace still exists on disk. Echoes "name<TAB>ws".
+_s99_mk_live_ws_sandbox() {
+    local ws name
+    ws="$(mktemp -d)"; ws="$(cd "$ws" && pwd -P)"
+    name="$(_s99_sbname "$ws")"
+    mkdir -p "$1/sandboxes/$name"
+    printf '{"workspace_path":"%s"}\n' "$ws" > "$1/sandboxes/$name/WORKSPACE.json"
+    printf '%s\t%s\n' "$name" "$ws"
+}
+# Orphan sandbox: a workspace dir is created (so its path is well-formed and
+# hashes like a real one), then rmdir'd, then recorded in WORKSPACE.json --
+# the recorded workspace_path no longer exists. Echoes "name<TAB>ws".
+_s99_mk_orphan_sandbox() {
+    local ws name
+    ws="$(mktemp -d)"; ws="$(cd "$ws" && pwd -P)"
+    name="$(_s99_sbname "$ws")"
+    rmdir "$ws"
+    mkdir -p "$1/sandboxes/$name"
+    printf '{"workspace_path":"%s"}\n' "$ws" > "$1/sandboxes/$name/WORKSPACE.json"
+    printf '%s\t%s\n' "$name" "$ws"
+}
+# Legacy sandbox: no WORKSPACE.json at all. Echoes "name".
+_s99_mk_legacy_sandbox() {
+    mkdir -p "$1/sandboxes/$2"
+    : > "$1/sandboxes/$2/somefile"
+    printf '%s\n' "$2"
+}
+# A `docker` stub that reports no running containers at all -- "docker is
+# present and reachable, but nothing sandy-owned is up" -- distinct from
+# check 8's genuinely-absent-docker fixture.
+_s99_write_docker_nomatch() {
+    cat > "$1/docker" <<'S99DOCKERSHIM'
+#!/usr/bin/env bash
+case "$1" in
+    ps) exit 0 ;;
+    *)  exit 0 ;;
+esac
+S99DOCKERSHIM
+    chmod +x "$1/docker"
+}
+# A `docker` stub whose `ps --format '{{.Names}}'` reports exactly one
+# running container name (the exact-match container-liveness guard).
+_s99_write_docker_match() {
+    cat > "$1/docker" <<S99DOCKERSHIM2
+#!/usr/bin/env bash
+case "\$1" in
+    ps) printf '%s\n' "$2"; exit 0 ;;
+    *)  exit 0 ;;
+esac
+S99DOCKERSHIM2
+    chmod +x "$1/docker"
+}
+
+# =====================================================================
+# Checks 1-5, 10, 15, 16, 17: a single shared fixture (sandbox A, a plain
+# sibling sandbox, a legacy sandbox, and a canary sibling of sandboxes/) --
+# these checks either mutate nothing, or mutate only A, so sharing is safe
+# and lets check 3 observe the blast radius of check 2's removal directly.
+# =====================================================================
+_S99_FH="$(mktemp -d)"
+_S99_BIN="$(mktemp -d)"
+_s99_write_docker_nomatch "$_S99_BIN"
+
+IFS=$'\t' read -r _S99_A_NAME _S99_A_WS <<< "$(_s99_mk_live_ws_sandbox "$_S99_FH")"
+_S99_A_DIR="$_S99_FH/sandboxes/$_S99_A_NAME"
+mkdir -p "$_S99_A_DIR/pip"
+echo "pkg" > "$_S99_A_DIR/pip/somepkg"
+: > "$_S99_A_DIR/.handoff-enabled"
+mkdir -p "$_S99_FH/sandboxes/.${_S99_A_NAME}.lock"
+_S99_A_DEADPID="$(_s99_dead_pid)"
+echo "$_S99_A_DEADPID" > "$_S99_FH/sandboxes/.${_S99_A_NAME}.lock/pid"
+_S99_A_H16="$(_s99_hash16 "$_S99_A_WS")"
+mkdir -p "$_S99_FH/approvals"
+echo "somehash" > "$_S99_FH/approvals/passive-${_S99_A_H16}.list"
+echo "somehash" > "$_S99_FH/approvals/dockerfile-${_S99_A_H16}.list"
+echo "unrelated" > "$_S99_FH/approvals/passive-0000000000000000.list"
+
+IFS=$'\t' read -r _S99_SIB_NAME _S99_SIB_WS <<< "$(_s99_mk_live_ws_sandbox "$_S99_FH")"
+_S99_SIB_DIR="$_S99_FH/sandboxes/$_S99_SIB_NAME"
+_S99_C_NAME="legacy-cccccccc"
+_s99_mk_legacy_sandbox "$_S99_FH" "$_S99_C_NAME" >/dev/null
+_S99_C_DIR="$_S99_FH/sandboxes/$_S99_C_NAME"
+echo "canary" > "$_S99_FH/pwned"
+# A REAL directory literally named ".hidden" -- without this, a validation
+# regression that let ".hidden" through would still exit 1 via the
+# nonexistent-target error (no such sandbox), making the check pass for the
+# wrong reason. With a real target present, a validation regression would
+# actually remove it, so this fixture makes the mutation observable.
+mkdir -p "$_S99_FH/sandboxes/.hidden"
+: > "$_S99_FH/sandboxes/.hidden/marker"
+
+# --- (1) dry-run inertness: A fully intact after --dry-run ---
+PATH="$_S99_BIN:$PATH" SANDY_HOME="$_S99_FH" bash "$_S99_SANDY" \
+    --remove-sandbox --sandbox "$_S99_A_NAME" --dry-run >/dev/null 2>&1
+_s99_check1() {
+    [ -f "$_S99_A_DIR/WORKSPACE.json" ] || return 1
+    [ -d "$_S99_A_DIR/pip" ] || return 1
+    [ -e "$_S99_A_DIR/.handoff-enabled" ] || return 1
+    [ -d "$_S99_FH/sandboxes/.${_S99_A_NAME}.lock" ] || return 1
+    [ -f "$_S99_FH/approvals/passive-${_S99_A_H16}.list" ] || return 1
+    [ -f "$_S99_FH/approvals/dockerfile-${_S99_A_H16}.list" ] || return 1
+    return 0
+}
+check "§99(1) --dry-run mutates nothing: sandbox A fully intact (dir, pip/, .handoff-enabled, lock, both approval files)" \
+    _s99_check1
+
+# --- (10) invalid --sandbox names -> exit 1 each, canary intact ---
+_s99_bad_name() {
+    PATH="$_S99_BIN:$PATH" SANDY_HOME="$_S99_FH" bash "$_S99_SANDY" \
+        --remove-sandbox --sandbox "$1" --yes >/dev/null 2>&1
+    [ $? -eq 1 ]
+}
+check "§99(10a) --sandbox ../pwned -> exit 1" _s99_bad_name "../pwned"
+check "§99(10b) --sandbox /abs -> exit 1" _s99_bad_name "/abs"
+check "§99(10c) --sandbox .hidden -> exit 1" _s99_bad_name ".hidden"
+check "§99(10c) --sandbox .hidden -> the real .hidden directory survives (validation, not just nonexistent-target, caught it)" \
+    test -e "$_S99_FH/sandboxes/.hidden/marker"
+check "§99(10d) canary sibling of sandboxes/ untouched by invalid-name attempts" \
+    bash -c 'test -f "$1" && [ "$(cat "$1")" = "canary" ]' -- "$_S99_FH/pwned"
+
+# --- (15) two selectors -> exit 1 ---
+PATH="$_S99_BIN:$PATH" SANDY_HOME="$_S99_FH" bash "$_S99_SANDY" \
+    --remove-sandbox --sandbox "$_S99_A_NAME" --orphans --yes >/dev/null 2>&1
+_S99_TWOSEL_RC=$?
+check "§99(15) --sandbox + --orphans together -> exit 1" test "$_S99_TWOSEL_RC" -eq 1
+
+# --- (16) nonexistent target -> exit 1 with a message ---
+_S99_NOEXIST_OUT="$(PATH="$_S99_BIN:$PATH" SANDY_HOME="$_S99_FH" bash "$_S99_SANDY" \
+    --remove-sandbox --sandbox nosuchsandbox123 --yes 2>&1)"
+_S99_NOEXIST_RC=$?
+check "§99(16) nonexistent --sandbox target -> exit 1" test "$_S99_NOEXIST_RC" -eq 1
+check "§99(16) nonexistent --sandbox target -> error names it" \
+    bash -c 'printf "%s" "$1" | grep -q "nosuchsandbox123"' -- "$_S99_NOEXIST_OUT"
+
+# --- (17) --print-schema advertises --remove-sandbox ---
+check "§99(17) --print-schema cli_flags includes --remove-sandbox" \
+    bash -c 'PATH="$1:$PATH" bash "$2" --print-schema 2>/dev/null | grep -q "\"--remove-sandbox\""' \
+    -- "$_S99_BIN" "$_S99_SANDY"
+
+# --- (2) real removal: A is gone ---
+PATH="$_S99_BIN:$PATH" SANDY_HOME="$_S99_FH" bash "$_S99_SANDY" \
+    --remove-sandbox --sandbox "$_S99_A_NAME" --yes >/dev/null 2>&1
+_S99_REMOVE_A_RC=$?
+check "§99(2) removal exits 0" test "$_S99_REMOVE_A_RC" -eq 0
+check "§99(2) removal removes the whole sandbox A directory" \
+    bash -c '[ ! -e "$1" ]' -- "$_S99_A_DIR"
+
+# --- (3) blast radius is exactly the target ---
+_s99_check3() {
+    [ -d "$_S99_SIB_DIR" ] || return 1
+    [ -f "$_S99_SIB_DIR/WORKSPACE.json" ] || return 1
+    [ -d "$_S99_C_DIR" ] || return 1
+    [ -d "$_S99_FH/sandboxes" ] || return 1
+    [ -f "$_S99_FH/approvals/passive-0000000000000000.list" ] || return 1
+    [ "$(cat "$_S99_FH/approvals/passive-0000000000000000.list")" = "unrelated" ] || return 1
+    [ -f "$_S99_FH/pwned" ] || return 1
+    return 0
+}
+check "§99(3) blast radius: sibling sandbox, legacy sandbox, sandboxes/ dir, unrelated approval file, canary all survive" \
+    _s99_check3
+
+# --- (4) stale-lock reap ---
+check "§99(4) A's sibling lock dir is reaped along with the sandbox" \
+    bash -c '[ ! -e "$1" ]' -- "$_S99_FH/sandboxes/.${_S99_A_NAME}.lock"
+
+# --- (5) approval reap keyed on the 16-char workspace-path hash ---
+_s99_check5() {
+    [ ! -e "$_S99_FH/approvals/passive-${_S99_A_H16}.list" ] || return 1
+    [ ! -e "$_S99_FH/approvals/dockerfile-${_S99_A_H16}.list" ] || return 1
+    [ "${#_S99_A_H16}" -eq 16 ] || return 1
+    return 0
+}
+check "§99(5) both approval files keyed on the 16-char workspace hash are reaped" _s99_check5
+
+rm -rf "$_S99_FH" "$_S99_BIN"
+
+# =====================================================================
+# Check 6: single-target mode hard-errors on a LIVE workspace lock, and
+# removes nothing. Dedicated fixture -- the lock must be alive for the
+# duration of the assertion, which our own test process ($$) guarantees.
+# =====================================================================
+_S99_FH6="$(mktemp -d)"
+_S99_BIN6="$(mktemp -d)"
+_s99_write_docker_nomatch "$_S99_BIN6"
+IFS=$'\t' read -r _S99_L_NAME _S99_L_WS <<< "$(_s99_mk_live_ws_sandbox "$_S99_FH6")"
+_S99_L_DIR="$_S99_FH6/sandboxes/$_S99_L_NAME"
+: > "$_S99_L_DIR/marker"
+mkdir -p "$_S99_FH6/sandboxes/.${_S99_L_NAME}.lock"
+echo "$$" > "$_S99_FH6/sandboxes/.${_S99_L_NAME}.lock/pid"
+PATH="$_S99_BIN6:$PATH" SANDY_HOME="$_S99_FH6" bash "$_S99_SANDY" \
+    --remove-sandbox --sandbox "$_S99_L_NAME" --yes >/dev/null 2>&1
+_S99_LIVE_LOCK_RC=$?
+check "§99(6) live workspace lock -> exit 1" test "$_S99_LIVE_LOCK_RC" -eq 1
+check "§99(6) live workspace lock -> nothing removed" \
+    bash -c 'test -e "$1/marker"' -- "$_S99_L_DIR"
+rm -rf "$_S99_FH6" "$_S99_BIN6"
+
+# =====================================================================
+# Check 7: single-target mode hard-errors when a `docker ps` name exactly
+# matches sandy-<name> (no live lock involved -- purely the container guard).
+# =====================================================================
+_S99_FH7="$(mktemp -d)"
+_S99_BIN7="$(mktemp -d)"
+IFS=$'\t' read -r _S99_D_NAME _S99_D_WS <<< "$(_s99_mk_live_ws_sandbox "$_S99_FH7")"
+_S99_D_DIR="$_S99_FH7/sandboxes/$_S99_D_NAME"
+: > "$_S99_D_DIR/marker"
+_s99_write_docker_match "$_S99_BIN7" "sandy-${_S99_D_NAME}"
+PATH="$_S99_BIN7:$PATH" SANDY_HOME="$_S99_FH7" bash "$_S99_SANDY" \
+    --remove-sandbox --sandbox "$_S99_D_NAME" --yes >/dev/null 2>&1
+_S99_DOCKER_MATCH_RC=$?
+check "§99(7) a live sandy-<name> container -> exit 1" test "$_S99_DOCKER_MATCH_RC" -eq 1
+check "§99(7) a live sandy-<name> container -> nothing removed" \
+    bash -c 'test -e "$1/marker"' -- "$_S99_D_DIR"
+rm -rf "$_S99_FH7" "$_S99_BIN7"
+
+# =====================================================================
+# Check 8: Docker genuinely absent from PATH -> the container guard fails
+# OPEN and removal still succeeds. Same overlay-PATH technique as the
+# docker-absent fixture above (§69-style): every PATH-reachable executable
+# EXCEPT `docker` is symlinked into one dir, so `command -v docker` fails
+# while grep/awk/sha256sum/etc. all stay resolvable.
+# =====================================================================
+_S99_FH8="$(mktemp -d)"
+IFS=$'\t' read -r _S99_E_NAME _S99_E_WS <<< "$(_s99_mk_live_ws_sandbox "$_S99_FH8")"
+_S99_E_DIR="$_S99_FH8/sandboxes/$_S99_E_NAME"
+_S99_NODOCKER_BIN="$(mktemp -d)"
+_S99_SAVE_IFS="$IFS"; IFS=':'
+for _s99_d in $PATH; do
+    IFS="$_S99_SAVE_IFS"
+    [ -d "$_s99_d" ] || continue
+    for _s99_f in "$_s99_d"/*; do
+        [ -x "$_s99_f" ] && [ -f "$_s99_f" ] || continue
+        _s99_base="${_s99_f##*/}"
+        [ "$_s99_base" = "docker" ] && continue
+        [ -e "$_S99_NODOCKER_BIN/$_s99_base" ] || ln -s "$_s99_f" "$_S99_NODOCKER_BIN/$_s99_base" 2>/dev/null
+    done
+    IFS=':'
+done
+IFS="$_S99_SAVE_IFS"
+PATH="$_S99_NODOCKER_BIN" SANDY_HOME="$_S99_FH8" bash "$_S99_SANDY" \
+    --remove-sandbox --sandbox "$_S99_E_NAME" --yes >/dev/null 2>&1
+_S99_NODOCKER_RC=$?
+check "§99(8) docker absent from PATH -> the container guard fails open, removal succeeds" \
+    test "$_S99_NODOCKER_RC" -eq 0
+check "§99(8) docker absent from PATH -> the sandbox is actually gone" \
+    bash -c '[ ! -e "$1" ]' -- "$_S99_E_DIR"
+rm -rf "$_S99_FH8" "$_S99_NODOCKER_BIN"
+
+# =====================================================================
+# Check 9: --sandbox NAME removes a sandbox whose workspace is already gone
+# (workspace mode could not have resolved this target at all).
+# =====================================================================
+_S99_FH9="$(mktemp -d)"
+_S99_BIN9="$(mktemp -d)"
+_s99_write_docker_nomatch "$_S99_BIN9"
+IFS=$'\t' read -r _S99_B9_NAME _S99_B9_WS <<< "$(_s99_mk_orphan_sandbox "$_S99_FH9")"
+_S99_B9_DIR="$_S99_FH9/sandboxes/$_S99_B9_NAME"
+PATH="$_S99_BIN9:$PATH" SANDY_HOME="$_S99_FH9" bash "$_S99_SANDY" \
+    --remove-sandbox --sandbox "$_S99_B9_NAME" --yes >/dev/null 2>&1
+_S99_B9_RC=$?
+check "§99(9) --sandbox NAME removes a workspace-gone sandbox: exit 0" test "$_S99_B9_RC" -eq 0
+check "§99(9) --sandbox NAME removes a workspace-gone sandbox: directory gone" \
+    bash -c '[ ! -e "$1" ]' -- "$_S99_B9_DIR"
+rm -rf "$_S99_FH9" "$_S99_BIN9"
+
+# =====================================================================
+# Checks 11/12: --orphans --dry-run names exactly the orphaned sandboxes
+# (never a non-orphan, never a legacy one), and --orphans --yes removes
+# exactly that set.
+# =====================================================================
+_S99_FH11="$(mktemp -d)"
+_S99_BIN11="$(mktemp -d)"
+_s99_write_docker_nomatch "$_S99_BIN11"
+IFS=$'\t' read -r _S99_OB1_NAME _S99_OB1_WS <<< "$(_s99_mk_orphan_sandbox "$_S99_FH11")"
+IFS=$'\t' read -r _S99_OB2_NAME _S99_OB2_WS <<< "$(_s99_mk_orphan_sandbox "$_S99_FH11")"
+IFS=$'\t' read -r _S99_OB3_NAME _S99_OB3_WS <<< "$(_s99_mk_orphan_sandbox "$_S99_FH11")"
+IFS=$'\t' read -r _S99_ONA_NAME _S99_ONA_WS <<< "$(_s99_mk_live_ws_sandbox "$_S99_FH11")"
+_S99_ONC_NAME="legacy-dddddddd"
+_s99_mk_legacy_sandbox "$_S99_FH11" "$_S99_ONC_NAME" >/dev/null
+
+_S99_DRYRUN_OUT="$(PATH="$_S99_BIN11:$PATH" SANDY_HOME="$_S99_FH11" bash "$_S99_SANDY" \
+    --remove-sandbox --orphans --dry-run 2>&1)"
+check "§99(11) --orphans --dry-run names OB1" \
+    bash -c 'printf "%s" "$1" | grep -q -- "$2"' -- "$_S99_DRYRUN_OUT" "$_S99_OB1_NAME"
+check "§99(11) --orphans --dry-run names OB2" \
+    bash -c 'printf "%s" "$1" | grep -q -- "$2"' -- "$_S99_DRYRUN_OUT" "$_S99_OB2_NAME"
+check "§99(11) --orphans --dry-run names OB3" \
+    bash -c 'printf "%s" "$1" | grep -q -- "$2"' -- "$_S99_DRYRUN_OUT" "$_S99_OB3_NAME"
+check "§99(11) --orphans --dry-run does NOT name the non-orphan sandbox" \
+    bash -c '! printf "%s" "$1" | grep -q -- "$2"' -- "$_S99_DRYRUN_OUT" "$_S99_ONA_NAME"
+check "§99(11) --orphans --dry-run does NOT name the legacy sandbox" \
+    bash -c '! printf "%s" "$1" | grep -q -- "$2"' -- "$_S99_DRYRUN_OUT" "$_S99_ONC_NAME"
+check "§99(11) --orphans --dry-run mutates nothing (OB1 dir still present)" \
+    test -d "$_S99_FH11/sandboxes/$_S99_OB1_NAME"
+
+PATH="$_S99_BIN11:$PATH" SANDY_HOME="$_S99_FH11" bash "$_S99_SANDY" \
+    --remove-sandbox --orphans --yes >/dev/null 2>&1
+_S99_ORPHANS_YES_RC=$?
+check "§99(12) --orphans --yes exits 0" test "$_S99_ORPHANS_YES_RC" -eq 0
+check "§99(12) --orphans --yes removes OB1" bash -c '[ ! -e "$1" ]' -- "$_S99_FH11/sandboxes/$_S99_OB1_NAME"
+check "§99(12) --orphans --yes removes OB2" bash -c '[ ! -e "$1" ]' -- "$_S99_FH11/sandboxes/$_S99_OB2_NAME"
+check "§99(12) --orphans --yes removes OB3" bash -c '[ ! -e "$1" ]' -- "$_S99_FH11/sandboxes/$_S99_OB3_NAME"
+check "§99(12) --orphans --yes leaves the non-orphan sandbox untouched" \
+    test -d "$_S99_FH11/sandboxes/$_S99_ONA_NAME"
+check "§99(12) --orphans --yes leaves the legacy sandbox untouched" \
+    test -d "$_S99_FH11/sandboxes/$_S99_ONC_NAME"
+rm -rf "$_S99_FH11" "$_S99_BIN11"
+
+# =====================================================================
+# Check 13: a live workspace lock on one orphan skips ONLY that one and
+# continues with the rest, exiting 0 (matches --update-sessions' per-item
+# failed-stop handling, NOT a hard error like the single-target modes).
+# =====================================================================
+_S99_FH13="$(mktemp -d)"
+_S99_BIN13="$(mktemp -d)"
+_s99_write_docker_nomatch "$_S99_BIN13"
+IFS=$'\t' read -r _S99_QB2_NAME _S99_QB2_WS <<< "$(_s99_mk_orphan_sandbox "$_S99_FH13")"
+IFS=$'\t' read -r _S99_QB3_NAME _S99_QB3_WS <<< "$(_s99_mk_orphan_sandbox "$_S99_FH13")"
+mkdir -p "$_S99_FH13/sandboxes/.${_S99_QB2_NAME}.lock"
+echo "$$" > "$_S99_FH13/sandboxes/.${_S99_QB2_NAME}.lock/pid"
+
+PATH="$_S99_BIN13:$PATH" SANDY_HOME="$_S99_FH13" bash "$_S99_SANDY" \
+    --remove-sandbox --orphans --yes >/dev/null 2>&1
+_S99_PARTIAL_RC=$?
+check "§99(13) live lock on QB2 -> QB2 skipped (still present)" \
+    test -d "$_S99_FH13/sandboxes/$_S99_QB2_NAME"
+check "§99(13) QB3 (no lock) is still removed" \
+    bash -c '[ ! -e "$1" ]' -- "$_S99_FH13/sandboxes/$_S99_QB3_NAME"
+check "§99(13) exit code is 0 despite the partial skip" test "$_S99_PARTIAL_RC" -eq 0
+rm -rf "$_S99_FH13" "$_S99_BIN13"
+
+# =====================================================================
+# Check 14: non-interactive (non-TTY) stdin without --yes -> exit 1,
+# nothing removed. `</dev/null` forces the non-TTY path deterministically
+# regardless of the outer test runner's own tty status.
+# =====================================================================
+_S99_FH14="$(mktemp -d)"
+_S99_BIN14="$(mktemp -d)"
+_s99_write_docker_nomatch "$_S99_BIN14"
+IFS=$'\t' read -r _S99_F_NAME _S99_F_WS <<< "$(_s99_mk_live_ws_sandbox "$_S99_FH14")"
+_S99_F_DIR="$_S99_FH14/sandboxes/$_S99_F_NAME"
+PATH="$_S99_BIN14:$PATH" SANDY_HOME="$_S99_FH14" bash "$_S99_SANDY" \
+    --remove-sandbox --sandbox "$_S99_F_NAME" </dev/null >/dev/null 2>&1
+_S99_NOTTY_RC=$?
+check "§99(14) non-TTY without --yes -> exit 1" test "$_S99_NOTTY_RC" -eq 1
+check "§99(14) non-TTY without --yes -> nothing removed" test -d "$_S99_F_DIR"
+rm -rf "$_S99_FH14" "$_S99_BIN14"
+
+# =====================================================================
+# Check 18: --print-state's workspace_exists tri-state, in BOTH full and
+# light mode: true (workspace exists), false (recorded but gone), null
+# (legacy, no marker). Parsed via a QUOTED heredoc (python3 - <<'PY') --
+# never python3 -c "...", the PYBACK lint (test/lint-bash32.sh).
+# =====================================================================
+_S99_FH18="$(mktemp -d)"
+_S99_BIN18="$(mktemp -d)"
+_s99_write_docker_nomatch "$_S99_BIN18"
+IFS=$'\t' read -r _S99_TA_NAME _S99_TA_WS <<< "$(_s99_mk_live_ws_sandbox "$_S99_FH18")"
+IFS=$'\t' read -r _S99_TB_NAME _S99_TB_WS <<< "$(_s99_mk_orphan_sandbox "$_S99_FH18")"
+_S99_TC_NAME="legacy-eeeeeeee"
+_s99_mk_legacy_sandbox "$_S99_FH18" "$_S99_TC_NAME" >/dev/null
+
+_S99_TRISTATE_PY="$(mktemp)"
+cat > "$_S99_TRISTATE_PY" <<'PY'
+import json, sys
+name_a, name_b, name_c = sys.argv[1], sys.argv[2], sys.argv[3]
+d = json.load(sys.stdin)
+by_name = {s["name"]: s for s in d["sandboxes"]}
+assert by_name[name_a]["workspace_exists"] is True, by_name[name_a]["workspace_exists"]
+assert by_name[name_b]["workspace_exists"] is False, by_name[name_b]["workspace_exists"]
+assert by_name[name_c]["workspace_exists"] is None, by_name[name_c]["workspace_exists"]
+PY
+
+for _s99_mode_args in "--print-state" "--print-state light"; do
+    _S99_TS_OUT="$(PATH="$_S99_BIN18:$PATH" SANDY_HOME="$_S99_FH18" bash "$_S99_SANDY" $_s99_mode_args 2>/dev/null)"
+    check "§99(18) workspace_exists tri-state correct for [$_s99_mode_args]" \
+        bash -c 'printf "%s" "$1" | python3 "$2" "$3" "$4" "$5"' \
+        -- "$_S99_TS_OUT" "$_S99_TRISTATE_PY" "$_S99_TA_NAME" "$_S99_TB_NAME" "$_S99_TC_NAME"
+done
+rm -rf "$_S99_FH18" "$_S99_BIN18" "$_S99_TRISTATE_PY"
+
+# =====================================================================
+# (19)-(21): three properties the original 18 checks left VACUOUS. Found by
+# mutating the real binary: each mutation below survived all 42 checks.
+# =====================================================================
+
+# (19) DEFENSE IN DEPTH: the containment assert at the rm site.
+# Checks (10a-c) prove NAME VALIDATION rejects ../pwned, /abs and .hidden --
+# the FIRST defense. The containment assert guarding the rm is the SECOND, and
+# because validation already rejected every hostile name, the assert is never
+# reached in those checks: deleting it outright still passed 42/42. An untested
+# belt-and-suspenders guard is decoration.
+# The honest test of a second defense is to DISABLE THE FIRST and assert the
+# second still holds. So: run a copy of sandy with _rms_validate_sandbox_name
+# neutered (redefined to return 0 immediately before its call site, so the last
+# definition wins at runtime) and require the traversal STILL be refused.
+# The canary must be a DIRECTORY -- the --sandbox path requires [ -d ] on the
+# target, so a plain file would be rejected by that gate and the assert would
+# again never be reached (this check passed vacuously until that was fixed).
+_S99_FH19="$(mktemp -d)"; _S99_BIN19="$(mktemp -d)"
+_s99_write_docker_nomatch "$_S99_BIN19"
+mkdir -p "$_S99_FH19/sandboxes" "$_S99_FH19/pwned"
+echo "canary" > "$_S99_FH19/pwned/keep"
+_S99_SANDY_NOVALIDATE="$(mktemp)"
+awk '
+    /_rms_validate_sandbox_name "\$_rms_sandbox" \|\| \{/ {
+        print "        _rms_validate_sandbox_name() { return 0; }"
+    }
+    { print }
+' "$_S99_SANDY" > "$_S99_SANDY_NOVALIDATE"
+# Prove the neutering actually took effect, otherwise (19) passes vacuously.
+check "§99(19a) SELF-CHECK: the patched copy really does bypass name validation" \
+    bash -c 'grep -qF "_rms_validate_sandbox_name() { return 0; }" "$1"' -- "$_S99_SANDY_NOVALIDATE"
+_s99_novalidate_refuses() {
+    PATH="$_S99_BIN19:$PATH" SANDY_HOME="$_S99_FH19" \
+        bash "$_S99_SANDY_NOVALIDATE" --remove-sandbox --sandbox "../pwned" --yes >/dev/null 2>&1 \
+        && return 1
+    return 0
+}
+check "§99(19b) containment assert refuses ../pwned even with name validation bypassed" \
+    _s99_novalidate_refuses
+check "§99(19c) the traversal target outside sandboxes/ is untouched" \
+    bash -c '[ -f "$1" ] && [ "$(cat "$1")" = "canary" ]' -- "$_S99_FH19/pwned/keep"
+
+# (19d) THIRD LAYER. (19b) above is satisfied by the */* slash check on the
+# name. The canonicalizing containment assert sits behind it, so strip BOTH the
+# name validation and the slash check and require the assert alone to refuse.
+# This is the layer that catches an unresolved-prefix containment test: a glob
+# test on "$_rms_home_sb"/?* MATCHES "$_rms_home_sb/../pwned" (verified), so
+# without canonicalization this check fails and the canary is destroyed.
+_S99_FH19B="$(mktemp -d)"; _S99_BIN19B="$(mktemp -d)"
+_s99_write_docker_nomatch "$_S99_BIN19B"
+mkdir -p "$_S99_FH19B/sandboxes" "$_S99_FH19B/pwned"
+echo "canary" > "$_S99_FH19B/pwned/keep"
+_S99_SANDY_BARE="$(mktemp)"
+awk '
+    /_rms_validate_sandbox_name "\$_rms_sandbox" \|\| \{/ {
+        print "        _rms_validate_sandbox_name() { return 0; }"
+    }
+    /refusing \(name contains a slash\)/ { next }
+    { print }
+' "$_S99_SANDY" > "$_S99_SANDY_BARE"
+check "§99(19d-self) SELF-CHECK: patched copy bypasses BOTH validation and the slash check" \
+    bash -c 'grep -qF "_rms_validate_sandbox_name() { return 0; }" "$1" && ! grep -qF "name contains a slash" "$1"' \
+    -- "$_S99_SANDY_BARE"
+_s99_bare_refuses() {
+    PATH="$_S99_BIN19B:$PATH" SANDY_HOME="$_S99_FH19B" \
+        bash "$_S99_SANDY_BARE" --remove-sandbox --sandbox "../pwned" --yes >/dev/null 2>&1 \
+        && return 1
+    return 0
+}
+check "§99(19d) canonicalizing containment assert alone refuses ../pwned" _s99_bare_refuses
+check "§99(19e) and the canary outside sandboxes/ survives that attempt" \
+    bash -c '[ -f "$1" ] && [ "$(cat "$1")" = "canary" ]' -- "$_S99_FH19B/pwned/keep"
+rm -rf "$_S99_FH19B" "$_S99_BIN19B" "$_S99_SANDY_BARE"
+rm -rf "$_S99_FH19" "$_S99_BIN19" "$_S99_SANDY_NOVALIDATE"
+
+# (20) The container guard must match EXACTLY, never by prefix. A prefix test
+# was a real pre-1.3.0 regression (a workspace whose basename is `proxy` yields
+# an agent container literally named sandy-proxy-<hash>). Check (7) only proves
+# the guard FIRES on an exact match; swapping grep -qxF for grep -q survives all
+# 42. Here a running container's name merely CONTAINS the sandbox name as a
+# proper prefix, so an exact-matching guard must NOT fire and removal proceeds.
+_S99_FH20="$(mktemp -d)"; _S99_BIN20="$(mktemp -d)"
+mkdir -p "$_S99_FH20/sandboxes"
+IFS=$'\t' read -r _S99_20_NAME _S99_20_WS <<< "$(_s99_mk_live_ws_sandbox "$_S99_FH20")"
+cat > "$_S99_BIN20/docker" <<S99DOCKER20
+#!/usr/bin/env bash
+[ "\$1" = "ps" ] && { printf '%s\n' "sandy-${_S99_20_NAME}-SUFFIX"; exit 0; }
+exit 0
+S99DOCKER20
+chmod +x "$_S99_BIN20/docker"
+PATH="$_S99_BIN20:$PATH" SANDY_HOME="$_S99_FH20" \
+    bash "$_S99_SANDY" --remove-sandbox --workspace "$_S99_20_WS" --yes >/dev/null 2>&1
+check "§99(20) container guard is EXACT: a superstring container name does not block removal" \
+    bash -c '[ ! -d "$1" ]' -- "$_S99_FH20/sandboxes/$_S99_20_NAME"
+rm -rf "$_S99_FH20" "$_S99_BIN20" "$_S99_20_WS"
+
+# (21) Orphan predicate uses -e, not -d, ON PURPOSE: a workspace_path that
+# exists as a NON-DIRECTORY is "uncertain, keep", never an orphan (CLAUDE.md).
+# Swapping -e for -d survives all 42 checks, because no fixture ever records a
+# workspace_path pointing at a regular file.
+_S99_FH21="$(mktemp -d)"; _S99_BIN21="$(mktemp -d)"
+_s99_write_docker_nomatch "$_S99_BIN21"
+mkdir -p "$_S99_FH21/sandboxes"
+_S99_21_WSFILE="$(mktemp)"
+_S99_21_NAME="filews-$(_s99_hash8 "$_S99_21_WSFILE")"
+mkdir -p "$_S99_FH21/sandboxes/$_S99_21_NAME"
+printf '{"workspace_path":"%s"}\n' "$_S99_21_WSFILE" \
+    > "$_S99_FH21/sandboxes/$_S99_21_NAME/WORKSPACE.json"
+_S99_21_PLAN="$(PATH="$_S99_BIN21:$PATH" SANDY_HOME="$_S99_FH21" \
+    bash "$_S99_SANDY" --remove-sandbox --orphans --dry-run 2>/dev/null || true)"
+check "§99(21) a workspace_path that is a FILE is NOT classified an orphan" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2" && exit 1; exit 0' \
+    -- "$_S99_21_PLAN" "$_S99_21_NAME"
+rm -rf "$_S99_FH21" "$_S99_BIN21" "$_S99_21_WSFILE"
 
 # ============================================================
 # Summary

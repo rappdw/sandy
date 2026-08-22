@@ -1036,7 +1036,9 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --keep-approvals, --dry-run, --yes."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --update-sessions, and --reset-sandbox. NOT accepted by --gc, --stop-all, --prune-orphans, or the introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
+    printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --update-sessions, --reset-sandbox, and --remove-sandbox. NOT accepted by --gc, --stop-all, --prune-orphans, or the introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -1813,6 +1815,25 @@ _sandy_emit_state() {
             _json_kv name "$(_json_escape "$sb_name")"
             printf ','; _json_kv path "$(_json_escape "$sb")"
             printf ','; _json_kv workspace_path "$(_json_escape "$sb_ws_path")"
+            # workspace_exists (#178): tri-state — true/false via a bash-builtin
+            # [ -d ] test when workspace_path is known (a builtin, zero spawns,
+            # so — unlike size_bytes' du walk — this is emitted in BOTH full
+            # and light mode); null when workspace_path is empty (a legacy
+            # sandbox with no WORKSPACE.json marker — unknowable, so we never
+            # claim what we cannot prove, same fail-open-on-uncertainty rule
+            # the sandbox compat floor uses). RESIDUAL: workspace_path may
+            # point at a network mount, and [ -d ] on a hard-mounted
+            # unreachable path can block — documented in
+            # SPEC_INTROSPECTION.md alongside the unmounted-volume caveat.
+            if [ -n "$sb_ws_path" ]; then
+                if [ -d "$sb_ws_path" ]; then
+                    printf ','; _json_kv workspace_exists 'true'
+                else
+                    printf ','; _json_kv workspace_exists 'false'
+                fi
+            else
+                printf ','; _json_kv workspace_exists 'null'
+            fi
             printf ','; _json_kv created_version   "$(_json_escape "$sb_created_ver")"
             printf ','; _json_kv last_used_version "$(_json_escape "$sb_last_ver")"
             printf ','; _json_kv created_at        "$(_json_escape "$sb_created_at")"
@@ -2578,7 +2599,14 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         printf '  - %-30s %s\n' "$_rs_bn" "$_rs_sz"
         _rs_n=$((_rs_n + 1))
     done
-    printf 'Preserved: WORKSPACE.json (lineage)%s\n\n' "$([ "$_rs_keep_approvals" = "true" ] && printf ', approval list')"
+    # Name .handoff-enabled explicitly when present -- otherwise a fleet
+    # operator is told by OMISSION that handoff enrollment was destroyed
+    # when it was not (it is preserved unconditionally, like WORKSPACE.json,
+    # per _rs_keep above). That is the inverse of the "looks wired and is
+    # not" failure the marker exists to prevent (#178 fix).
+    printf 'Preserved: WORKSPACE.json (lineage)%s%s\n\n' \
+        "$([ -e "$_rs_dir/.handoff-enabled" ] && printf ', .handoff-enabled (handoff enrollment)')" \
+        "$([ "$_rs_keep_approvals" = "true" ] && printf ', approval list')"
 
     [ "$_rs_n" -eq 0 ] && { info "Sandbox already minimal — nothing to reset."; exit 0; }
     [ "$_rs_dry_run" = "true" ] && { info "--dry-run: nothing removed."; exit 0; }
@@ -2597,6 +2625,308 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         rm -rf "$_rs_e"
     done
     info "Sandbox $_rs_name reset — next launch re-materializes it from scratch."
+    exit 0
+fi
+
+# --- sandy --remove-sandbox (#178) — permanently delete a sandbox directory.
+# Complements --reset-sandbox: reset REBUILDS one project's sandbox from a
+# known-good skeleton, but its --workspace resolution requires the workspace
+# directory to still exist (it cd's into it and pwd -P's it), and it always
+# preserves WORKSPACE.json lineage. --remove-sandbox is for the case reset
+# cannot resolve at all: the sandbox has outlived its workspace (moved,
+# renamed, deleted) — and it preserves NOTHING; WORKSPACE.json goes with the
+# rest of the directory. Three MUTUALLY EXCLUSIVE selectors:
+#   (default, or --workspace PATH) — same pwd -P + 8-hex-hash resolution as
+#     --reset-sandbox (sandy:~2538). Strict: the workspace dir MUST exist —
+#     no fallback to hashing an unresolved literal path, which would be a
+#     second, weaker resolution path on an rm -rf command.
+#   --sandbox NAME  — exact sandbox dir name under $SANDY_HOME/sandboxes/;
+#     the selector for a sandbox whose workspace is already gone.
+#   --orphans       — every sandbox whose recorded workspace_path no longer
+#     exists on disk (conservative predicate below).
+# Filesystem-only, same maintenance family as --gc/--reset-sandbox: no
+# config load, no mutex acquisition, no image build. Deliberately NOT folded
+# into --gc — see CLAUDE.md ("--remove-sandbox vs --gc"): a false-positive
+# reap here destroys non-reproducible state, not a rebuildable image or
+# container, so it does not belong in a command users already cron with
+# --yes for a much lower-stakes class of reap.
+if [[ "${1:-}" == "--remove-sandbox" ]]; then
+    _rms_workspace=""; _rms_sandbox=""; _rms_orphans=false
+    _rms_dry_run=false; _rms_yes=false
+    _rms_ws_given=false; _rms_sb_given=false
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workspace)   shift; _rms_workspace="${1:-}"; _rms_ws_given=true
+                           [ -z "$_rms_workspace" ] && { error "--remove-sandbox: --workspace needs a PATH"; exit 1; } ;;
+            --workspace=*) _rms_workspace="${1#--workspace=}"; _rms_ws_given=true
+                           [ -z "$_rms_workspace" ] && { error "--remove-sandbox: --workspace needs a PATH"; exit 1; } ;;
+            --sandbox)     shift; _rms_sandbox="${1:-}"; _rms_sb_given=true
+                           [ -z "$_rms_sandbox" ] && { error "--remove-sandbox: --sandbox needs a NAME"; exit 1; } ;;
+            --sandbox=*)   _rms_sandbox="${1#--sandbox=}"; _rms_sb_given=true
+                           [ -z "$_rms_sandbox" ] && { error "--remove-sandbox: --sandbox needs a NAME"; exit 1; } ;;
+            --orphans)     _rms_orphans=true ;;
+            --dry-run)     _rms_dry_run=true ;;
+            --yes)         _rms_yes=true ;;
+            *) error "--remove-sandbox: unrecognized argument: $1"; exit 1 ;;
+        esac
+        shift
+    done
+
+    # Selector exclusivity. Workspace mode (default cwd, or explicit
+    # --workspace), --sandbox NAME, and --orphans are mutually exclusive.
+    # No explicit selector at all still counts as exactly ONE (workspace
+    # mode via cwd, the default) — not a second selector.
+    _rms_selector_count=0
+    [ "$_rms_ws_given" = "true" ] && _rms_selector_count=$((_rms_selector_count + 1))
+    [ "$_rms_sb_given" = "true" ] && _rms_selector_count=$((_rms_selector_count + 1))
+    [ "$_rms_orphans" = "true" ]  && _rms_selector_count=$((_rms_selector_count + 1))
+    if [ "$_rms_selector_count" -gt 1 ]; then
+        error "--remove-sandbox: --workspace, --sandbox, and --orphans are mutually exclusive."
+        exit 1
+    fi
+
+    _rms_home_sb="$SANDY_HOME/sandboxes"
+
+    # --sandbox NAME validation: a single path SEGMENT only. Reject empty
+    # (already caught above), any slash, any leading dot (lock dirs are
+    # hidden siblings ".<name>.lock" — a leading-dot NAME could collide with
+    # lock-dir naming), any ".." substring, and anything outside
+    # [A-Za-z0-9._-] (the same charset sandbox-name generation sanitizes
+    # basenames to, e.g. sandy:2537-2538).
+    _rms_validate_sandbox_name() {
+        case "$1" in
+            "")   return 1 ;;
+            */*)  return 1 ;;
+            .*)   return 1 ;;
+            *..*) return 1 ;;
+        esac
+        case "$1" in
+            *[!A-Za-z0-9._-]*) return 1 ;;
+        esac
+        return 0
+    }
+
+    # File-mtime helper, DUPLICATED here rather than reused: sandy's only
+    # existing copy (_stat_mtime_iso) is defined INSIDE _sandy_emit_state()
+    # (sandy:~1736), so it only exists once --print-state has actually run
+    # this process — a fast path that never calls _sandy_emit_state cannot
+    # depend on it. Same probe idiom (GNU stat -c first — BSD's `stat -f` is
+    # a valid DIFFERENT command, not a usage error, so probing -f first
+    # would misdetect) and the same always-exit-0 discipline (a failing
+    # command substitution under set -euo pipefail would abort this fast
+    # path via the ERR trap).
+    _rms_mtime_iso() { return 0; }
+    if stat -c '%y' / >/dev/null 2>&1; then
+        _rms_mtime_iso() { [ -e "$1" ] || return 0; stat -c '%y' "$1" 2>/dev/null | awk '{print $1"T"$2"Z"}' || true; }
+    elif stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' / >/dev/null 2>&1; then
+        _rms_mtime_iso() { [ -e "$1" ] || return 0; stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
+    fi
+
+    # workspace_path of one sandbox dir, parsed the same lightweight way
+    # _sandy_emit_state does (grep -m1, never grep | head — the GREPM lint).
+    _rms_ws_path_of() {
+        [ -f "$1/WORKSPACE.json" ] || return 0
+        grep -m1 '"workspace_path"' "$1/WORKSPACE.json" 2>/dev/null \
+            | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//' || true
+    }
+
+    # Candidate records, ONE PER LINE as "name<TAB>workspace_path" — a
+    # newline-delimited STRING, not a bash array (the --gc house idiom;
+    # dodges the empty-array-under-`set -u` bash-3.2 trap).
+    _rms_records=""
+
+    if [ "$_rms_orphans" = "true" ]; then
+        # Orphan predicate (conservative — "when uncertain, keep", verbatim
+        # from the --gc lister comments): a sandbox is an orphan iff
+        # WORKSPACE.json exists AND workspace_path is non-empty AND that
+        # path is gone ([ ! -e ]). A legacy sandbox with no marker is NEVER
+        # an orphan (unknowable, not provably "gone"). A workspace_path that
+        # exists as a non-directory (a file sitting where the workspace used
+        # to be) is NOT an orphan either — both deliberate.
+        if [ -d "$_rms_home_sb" ]; then
+            for _rms_e in "$_rms_home_sb"/*/; do
+                [ -d "$_rms_e" ] || continue
+                _rms_e="${_rms_e%/}"
+                _rms_n="$(basename "$_rms_e")"
+                _rms_wp="$(_rms_ws_path_of "$_rms_e")"
+                [ -n "$_rms_wp" ] || continue
+                [ -e "$_rms_wp" ] && continue
+                _rms_records+="$_rms_n"$'\t'"$_rms_wp"$'\n'
+            done
+        fi
+        _rms_n_records="$(printf '%s\n' "$_rms_records" | grep -c . || true)"
+        _rms_n_records="${_rms_n_records:-0}"
+        if [ "$_rms_n_records" -eq 0 ]; then
+            info "No orphaned sandboxes found."
+            exit 0
+        fi
+    elif [ -n "$_rms_sandbox" ]; then
+        _rms_validate_sandbox_name "$_rms_sandbox" || {
+            error "--remove-sandbox: --sandbox: invalid name: $_rms_sandbox"
+            exit 1
+        }
+        [ -d "$_rms_home_sb/$_rms_sandbox" ] || {
+            error "--remove-sandbox: no sandbox named $_rms_sandbox (expected $_rms_home_sb/$_rms_sandbox)."
+            exit 1
+        }
+        _rms_records="$_rms_sandbox"$'\t'"$(_rms_ws_path_of "$_rms_home_sb/$_rms_sandbox")"$'\n'
+    else
+        # Workspace mode: same pwd -P + 8-hex-hash resolution as
+        # --reset-sandbox. Strict — no fallback for a nonexistent dir (see
+        # the block comment above).
+        _rms_wd="${_rms_workspace:-$PWD}"
+        if [ ! -d "$_rms_wd" ]; then
+            error "--remove-sandbox: workspace not found: $_rms_wd"
+            error "If the workspace itself is gone, use --sandbox NAME or --orphans instead."
+            exit 1
+        fi
+        _rms_wd="$(cd "$_rms_wd" 2>/dev/null && pwd -P)" || { error "--remove-sandbox: cannot resolve workspace"; exit 1; }
+        _rms_hash="$(printf '%s' "$_rms_wd" | sha256)"; _rms_hash="${_rms_hash%% *}"; _rms_hash="${_rms_hash:0:8}"
+        _rms_base="$(basename "$_rms_wd" | tr -cd 'a-zA-Z0-9._-')"; _rms_base="${_rms_base:-project}"
+        _rms_name="${_rms_base}-${_rms_hash}"
+        [ -d "$_rms_home_sb/$_rms_name" ] || {
+            error "--remove-sandbox: no sandbox for $_rms_wd (expected $_rms_home_sb/$_rms_name)."
+            exit 1
+        }
+        _rms_records="$_rms_name"$'\t'"$_rms_wd"$'\n'
+    fi
+
+    # Best-effort running-container guard (the D9 lesson): a
+    # `--restart unless-stopped` daemon container can be alive on a DEAD
+    # supervisor pid (a rebooted host), so the lock-liveness test alone
+    # would deprovision a sandbox out from under a healthy session. ONE
+    # batched `docker ps` call; exact whole-line name match ONLY
+    # (grep -qxF) — never a prefix test, which was a real pre-1.3.0
+    # regression: a workspace whose basename is "proxy" produces an agent
+    # container literally named sandy-proxy-<hash>. Docker absent or
+    # unreachable — the guard silently PASSES (fail-open).
+    _rms_docker_names=""
+    if command -v docker >/dev/null 2>&1; then
+        _rms_docker_names="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
+    fi
+    _rms_container_live() {
+        [ -n "$_rms_docker_names" ] || return 1
+        printf '%s\n' "$_rms_docker_names" | grep -qxF "sandy-$1" && return 0
+        printf '%s\n' "$_rms_docker_names" | grep -qxF "sandy-proxy-$1" && return 0
+        return 1
+    }
+    _rms_lock_live() {
+        local lp
+        [ -f "$_rms_home_sb/.$1.lock/pid" ] || return 1
+        lp="$(cat "$_rms_home_sb/.$1.lock/pid" 2>/dev/null || true)"
+        [ -n "$lp" ] && [ "$lp" -eq "$lp" ] 2>/dev/null && kill -0 "$lp" 2>/dev/null
+    }
+
+    # Partition candidates into removable (_rms_ok) vs. live-skipped
+    # (_rms_skip). Single-target modes (workspace/--sandbox) hard-error on a
+    # live target — exit 1 before anything is touched. --orphans skips a
+    # live target with a yellow warning and continues (matches
+    # --update-sessions' failed-stop handling).
+    _rms_ok=""
+    _rms_skip=""
+    while IFS=$'\t' read -r _rms_n _rms_wp; do
+        [ -n "$_rms_n" ] || continue
+        if _rms_lock_live "$_rms_n" || _rms_container_live "$_rms_n"; then
+            if [ "$_rms_orphans" = "true" ]; then
+                warn "--remove-sandbox: skipping $_rms_n — a live session or container holds it."
+                _rms_skip+="$_rms_n"$'\t'"$_rms_wp"$'\n'
+            else
+                error "--remove-sandbox: a live sandy session or container holds $_rms_n."
+                error "Stop it first (sandy --stop) or wait for it to exit."
+                exit 1
+            fi
+        else
+            _rms_ok+="$_rms_n"$'\t'"$_rms_wp"$'\n'
+        fi
+    done <<< "$_rms_records"
+
+    _rms_n_ok="$(printf '%s\n' "$_rms_ok" | grep -c . || true)"
+    _rms_n_ok="${_rms_n_ok:-0}"
+    if [ "$_rms_n_ok" -eq 0 ]; then
+        info "Nothing to remove (all candidates skipped)."
+        exit 0
+    fi
+
+    printf '\nsandy --remove-sandbox: %d target(s)\n' "$_rms_n_ok"
+    while IFS=$'\t' read -r _rms_n _rms_wp; do
+        [ -n "$_rms_n" ] || continue
+        _rms_dir="$_rms_home_sb/$_rms_n"
+        _rms_sz="$(du -sh "$_rms_dir" 2>/dev/null | cut -f1 || echo '?')"
+        _rms_last="$(_rms_mtime_iso "$_rms_dir/.sandy_last_version")"
+        [ -z "$_rms_last" ] && _rms_last="$(_rms_mtime_iso "$_rms_dir/.sandy_created_version")"
+        printf '  - %-30s %-8s workspace: %-40s last used: %s\n' \
+            "$_rms_n" "$_rms_sz" "${_rms_wp:-(unknown)}" "${_rms_last:-(unknown)}"
+        if [ -e "$_rms_dir/.handoff-enabled" ]; then
+            printf '    NOTE: this sandbox is handoff-enrolled (.handoff-enabled) — removal un-enrolls it from the fleet.\n'
+        fi
+    done <<< "$_rms_ok"
+    _rms_n_skip="$(printf '%s\n' "$_rms_skip" | grep -c . || true)"
+    _rms_n_skip="${_rms_n_skip:-0}"
+    if [ "$_rms_n_skip" -gt 0 ]; then
+        printf 'Skipped (live session/container):\n'
+        printf '%s\n' "$_rms_skip" | grep . | cut -f1 | sed 's/^/  - /'
+    fi
+    printf '\n'
+
+    if [ "$_rms_dry_run" = "true" ]; then
+        info "--dry-run: nothing removed."
+        exit 0
+    fi
+    if [ "$_rms_yes" != "true" ]; then
+        if [ -t 0 ]; then
+            printf '[sandy] Remove %d sandbox(es)? This destroys ALL persistent state, including WORKSPACE.json. This cannot be undone. [y/N] ' "$_rms_n_ok" >&2
+            IFS= read -r _rms_c </dev/tty || _rms_c=""
+            case "$_rms_c" in y|Y|yes|YES|Yes) : ;; *) info "Aborted — nothing removed."; exit 0 ;; esac
+        else
+            error "Non-interactive; pass --yes to remove without a prompt."
+            exit 1
+        fi
+    fi
+
+    while IFS=$'\t' read -r _rms_n _rms_wp; do
+        [ -n "$_rms_n" ] || continue
+        _rms_dir="$_rms_home_sb/$_rms_n"
+        # Containment assert immediately before every rm -rf: --reset-sandbox
+        # only removes ENTRIES inside a dir it already validated exists;
+        # this removes a WHOLE dir, so it earns its own check right at the
+        # point of use, not just at candidate-collection time.
+        #
+        # CANONICALIZE BOTH SIDES FIRST. A prefix test on the unresolved path is
+        # NOT containment: "$_rms_home_sb/../pwned" has "$_rms_home_sb/" as a
+        # literal prefix and sails straight through a glob test, which is
+        # exactly the escape this guard exists to stop. Resolving with pwd -P
+        # collapses .. and follows symlinks, so a sandbox entry symlinked out of
+        # the tree is refused too. Both cd-subshells are guarded: at this point
+        # the directory is known to exist, so a failure here is anomalous and
+        # must refuse rather than fall through to an rm.
+        _rms_real_sb="$(cd "$_rms_home_sb" 2>/dev/null && pwd -P)" || {
+            error "--remove-sandbox: cannot resolve sandboxes dir: $_rms_home_sb"; exit 1; }
+        _rms_real_dir="$(cd "$_rms_dir" 2>/dev/null && pwd -P)" || {
+            error "--remove-sandbox: cannot resolve target: $_rms_dir"; exit 1; }
+        case "$_rms_real_dir" in
+            "$_rms_real_sb"/?*) ;;
+            *) error "--remove-sandbox: refusing to remove outside sandboxes/: $_rms_dir"; exit 1 ;;
+        esac
+        case "$_rms_n" in
+            */*) error "--remove-sandbox: refusing (name contains a slash): $_rms_n"; exit 1 ;;
+        esac
+        rm -rf "$_rms_dir"
+        # Reap the sibling lock dir — it lives OUTSIDE the sandbox dir
+        # (sandboxes/.<name>.lock), so removing the sandbox dir alone leaves
+        # it a permanent orphan with no other reaper.
+        rm -rf "$_rms_home_sb/.${_rms_n}.lock" 2>/dev/null || true
+        # Reap the per-workspace approval files, keyed on the 16-CHAR sha256
+        # hash of the canonical workspace path (sandy:5632/7595 — NOT the
+        # 8-char sandbox-name hash). A legacy sandbox with no recorded
+        # workspace_path skips this silently — nothing to key off.
+        if [ -n "$_rms_wp" ]; then
+            _rms_h16="$(printf '%s' "$_rms_wp" | sha256 | awk '{print $1}' | cut -c1-16)"
+            rm -f "$SANDY_HOME/approvals/passive-$_rms_h16.list" 2>/dev/null || true
+            rm -f "$SANDY_HOME/approvals/dockerfile-$_rms_h16.list" 2>/dev/null || true
+        fi
+    done <<< "$_rms_ok"
+    info "Removed $_rms_n_ok sandbox(es)."
     exit 0
 fi
 
@@ -2684,6 +3014,16 @@ Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
                      WORKSPACE.json lineage), refusing while a live session holds
                      it. Filesystem-only (no Docker). Sub-options: --workspace
                      PATH (default cwd), --keep-approvals, --dry-run, --yes
+  --remove-sandbox   Permanently DELETE a sandbox directory (preserves nothing,
+                     unlike --reset-sandbox). Filesystem-only (no Docker
+                     required to run; a reachable Docker is used as a
+                     best-effort liveness guard and skipped if absent). Three
+                     mutually exclusive selectors: default/--workspace PATH
+                     (the workspace must still exist), --sandbox NAME (targets
+                     a sandbox whose workspace is already gone), --orphans
+                     (every sandbox whose recorded workspace_path no longer
+                     exists on disk). Sub-options: --workspace PATH, --sandbox
+                     NAME, --orphans, --dry-run, --yes
 
 Introspection (machine-readable JSON; no Docker required):
   --print-schema          Emit the static schema (config keys, flags, agents,
