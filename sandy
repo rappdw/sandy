@@ -759,7 +759,7 @@ TELEGRAM_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Telegram user IDs
 DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
 DISCORD_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Discord user IDs allowed to send messages.
 SANDY_TOOL_AUDIT|bool|0||1.4.0|stable|Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off).
-SANDY_HANDOFF_DIRS|bool|0||1.7.0|experimental|Create and mount the per-sandbox cross-workspace handoff directories (#132 substrate): $SANDBOX_DIR/handoff/outbox rw at ~/.handoff/outbox, $SANDBOX_DIR/handoff/inbox READ-ONLY at ~/.handoff/inbox. Substrate only — NOTHING moves files: no relay, no helper, no skills, no turn initiation; those are #132 follow-ups gated by separate privileged keys (SANDY_HANDOFF_PEERS, unshipped). Passive-safe: nothing sandy ships today moves files into or out of these directories — the future relay that will is gated on SANDY_HANDOFF_PEERS (privileged, unshipped), where the trust edge lives. Residual: the outbox persists across sessions, so a repo can stage content before an operator ever approves peers; sandy --reset-sandbox clears it. Default 0 (off — no dirs created, no mounts, zero launch diff). An operator can also enable the pair per-sandbox without any workspace config by touching $SANDBOX_DIR/.handoff-enabled — OR with this key, same passive tier. That marker matters for fleets: a workspace .sandy/config travels with the repository, so cloning it enables the pair on a sandbox nobody decided about, whereas the marker is per-machine and a repo cannot carry it. It lives at the sandbox TOP level (never under claude/, which is mounted and agent-writable) and survives --reset-sandbox like WORKSPACE.json, since enrollment is operator state; the handoff/ contents are still destroyed.
+SANDY_HANDOFF_DIRS|bool|0||1.7.0|experimental|Create and mount the per-sandbox cross-workspace handoff directories (#132 substrate): $SANDBOX_DIR/handoff/outbox rw at ~/.handoff/outbox, $SANDBOX_DIR/handoff/inbox READ-ONLY at ~/.handoff/inbox. Substrate only — NOTHING moves files: no relay, no helper, no skills, no turn initiation; those are #132 follow-ups gated by separate privileged keys (SANDY_HANDOFF_PEERS, unshipped). Passive-safe: nothing sandy ships today moves files into or out of these directories — the future relay that will is gated on SANDY_HANDOFF_PEERS (privileged, unshipped), where the trust edge lives. Residual: the outbox persists across sessions, so a repo can stage content before an operator ever approves peers; sandy --reset-sandbox clears it. Default 0 (off — the directories are still created but NOTHING is mounted, no env vars are added, and ~/.handoff does not exist inside the container). Creation is unconditional as of 1.7.0 so that directory PRESENCE carries no information: when every sandbox has them, the marker is the only signal that can mean anything, and enrolling an existing sandbox is the marker alone rather than a re-launch to harvest a side effect. An operator can also enable the pair per-sandbox without any workspace config by touching $SANDBOX_DIR/.handoff-enabled — OR with this key, same passive tier. That marker matters for fleets: a workspace .sandy/config travels with the repository, so cloning it enables the pair on a sandbox nobody decided about, whereas the marker is per-machine and a repo cannot carry it. It lives at the sandbox TOP level (never under claude/, which is mounted and agent-writable) and survives --reset-sandbox like WORKSPACE.json, since enrollment is operator state; the handoff/ contents are still destroyed.
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
 EOF
@@ -7329,14 +7329,33 @@ if [ "${SANDY_HANDOFF_DIRS:-0}" != "1" ] && [ -e "$SANDBOX_DIR/.handoff-enabled"
     SANDY_HANDOFF_DIRS=1
     [ "${SANDY_VERBOSE:-0}" != "0" ] && info "Handoff dirs enabled by $SANDBOX_DIR/.handoff-enabled"
 fi
+# The directories are created on EVERY launch, regardless of the flag; only the
+# MOUNT is gated (see the RUN_FLAGS block far below). Decoupling the two is what
+# makes "directory presence means nothing" true by CONSTRUCTION rather than by
+# convention: when every sandbox has them, presence carries zero information and
+# the marker is the only signal that can mean anything. Previously presence was
+# ambiguous — it might mean a launch had enabled the pair, or that someone ran
+# mkdir — and a rule that has to be asserted is weaker than one that cannot be
+# violated.
+#
+# It also removes a step from fleet provisioning. $SANDBOX_DIR is itself a launch
+# artifact, so a sandbox that HAS a marker has already been launched; with the
+# pair created unconditionally, enrolling it is the marker alone, with no
+# re-launch purely to harvest a side effect.
+#
+# Unmounted, these are inert: nothing bind-mounts them, ~/.handoff does not exist
+# inside the container, and the agent has no path to them. Cost is two empty
+# directories per sandbox on the host, and the loss of the old "zero launch diff"
+# promise for the off case — documented, not silent.
+mkdir -p "$SANDBOX_DIR/handoff/outbox" "$SANDBOX_DIR/handoff/inbox"
 if [ "${SANDY_HANDOFF_DIRS:-0}" = "1" ]; then
     case "$SANDY_WORKSPACE" in
         /home/claude/.handoff|/home/claude/.handoff/*)
-            warn "SANDY_HANDOFF_DIRS=1 but the workspace maps to $SANDY_WORKSPACE — the ~/.handoff directories would collide with the workspace mount. Handoff dirs disabled for this session."
+            # Collision is purely about the MOUNT — the directories above are
+            # harmless here — so this still refuses, and now refuses only the
+            # thing that was ever the problem.
+            warn "SANDY_HANDOFF_DIRS=1 but the workspace maps to $SANDY_WORKSPACE — the ~/.handoff directories would collide with the workspace mount. Handoff mounts disabled for this session."
             SANDY_HANDOFF_DIRS=0
-            ;;
-        *)
-            mkdir -p "$SANDBOX_DIR/handoff/outbox" "$SANDBOX_DIR/handoff/inbox"
             ;;
     esac
 fi

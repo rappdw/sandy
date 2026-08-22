@@ -65,7 +65,7 @@ cid2() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.wor
 
 command -v docker >/dev/null 2>&1 || { echo "docker not found — run this on the host"; exit 2; }
 
-echo "== A. negative / zero-diff (SANDY_HANDOFF_DIRS unset) =="
+echo "== A. negative (SANDY_HANDOFF_DIRS unset: dirs exist, nothing is mounted) =="
 "$SANDY" --start --workspace "$WS"; RC=$?
 ck "--start exits 0" "[ $RC -eq 0 ]"
 C="$(cid)"
@@ -74,7 +74,12 @@ SESS="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C" 2>/dev
 ck "session label resolved" "[ -n \"$SESS\" ]"
 ck "docker inspect has NO mention of handoff anywhere (mounts, env, labels)" \
    "! docker inspect \"$C\" | grep -qi handoff"
-ck "sandbox handoff/ dir does NOT exist" "[ ! -e \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff\" ]"
+# The host directories are now created on EVERY launch (only the MOUNT is
+# gated), so their presence proves nothing and is not asserted either way. What
+# still must hold with handoff off is that nothing reaches the CONTAINER — which
+# the docker-inspect assertion above and the in-container check below cover.
+ck "sandbox handoff/ dirs exist but are INERT (created always; presence means nothing)" \
+   "[ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/inbox\" ]"
 ck "in-container ~/.handoff does NOT exist" \
    "! docker exec -u \"\$(id -u)\" \"$C\" test -e /home/claude/.handoff"
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase A) exits 0" "[ $? -eq 0 ]"
