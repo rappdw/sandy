@@ -7378,9 +7378,94 @@ check "§91(6a) anti-rot: extracted set contains --start/--workspace/--gc/--agen
 check "§91(6b) anti-rot: extracted parser set has >=20 entries (scope has not silently shrunk)" \
     bash -c '[ "$1" -ge 20 ]' -- "$_S91_EXTRACTED_COUNT"
 
+# (7)/(8) parser<->cli_flags lockstep (above) says nothing about --help TEXT --
+# a flag can be a real cli_flags entry with full parser support and still be
+# undocumented in --help (#162: --start/--attach/--stop/--update-sessions were
+# exactly this). This block extracts the --flag tokens --help actually PRINTS
+# and diffs that against cli_flags, independently of the parser-source
+# extraction above.
+_S91_HELP_OUT="$(mktemp)"
+# Guarded for the same reason as the extraction below: a --help that EXITS
+# non-zero must fail a check, not abort the suite before any check runs.
+bash "$_S91_SANDY" --help > "$_S91_HELP_OUT" 2>&1 || true
+_S91_HELP_TOKENS_FILE="$(mktemp)"
+# `|| true` is load-bearing: grep exits 1 on no matches, and under the suite's
+# `set -euo pipefail` + ERR trap that ABORTS THE WHOLE RUN rather than failing a
+# check -- reporting "N passed, 0 failed" with no failing assertion. Latent while
+# --help works, which is exactly what makes it dangerous: a --help regression is
+# the one condition these checks exist to catch, and it is the same condition
+# that would silence them. Guarded, an empty --help fails (7) cleanly instead.
+grep -oE -- '--[a-z][a-z-]+' "$_S91_HELP_OUT" | sort -u > "$_S91_HELP_TOKENS_FILE" || true
+
+# (7) FORWARD: every cli_flags name must be documented (printed as a token) in --help.
+_S91_HELP_FWD_MISSING="$(grep -Fxvf "$_S91_HELP_TOKENS_FILE" "$_S91_NAMES_FILE" 2>/dev/null || true)"
+check "§91(7) cli_flags subset of --help tokens (every real flag is documented)" \
+    bash -c '[ -z "$1" ]' -- "$_S91_HELP_FWD_MISSING"
+
+# (8) REVERSE: every token --help prints, minus real cli_flags names, must be a
+# known SUBOPT (a sub-option of some parent flag, e.g. --dry-run/--idle-for) --
+# not a stray or misspelled token with no home in cli_flags at all.
+_S91_HELP_UNION_FILE="$(mktemp)"
+cat "$_S91_NAMES_FILE" "$_S91_EXCLUDE_FILE" | sort -u > "$_S91_HELP_UNION_FILE"
+_S91_HELP_REV_MISSING="$(grep -Fxvf "$_S91_HELP_UNION_FILE" "$_S91_HELP_TOKENS_FILE" 2>/dev/null || true)"
+check "§91(8) --help tokens subset of (cli_flags union SUBOPT) (no undocumented-origin token)" \
+    bash -c '[ -z "$1" ]' -- "$_S91_HELP_REV_MISSING"
+
+# (9) --agent help text must name exactly the same agent list --print-schema
+# advertises via "agents" -- bound to the machine-readable source so a 6th
+# agent added to sandy without a --help edit is caught here, not by hand.
+_S91_HELP_FLAT="$(tr '\n' ' ' < "$_S91_HELP_OUT" | tr -s ' ')"
+_S91_AGENTS_PY="$(mktemp)"
+cat > "$_S91_AGENTS_PY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(", ".join(a["name"] for a in d["agents"]))
+PY
+_S91_AGENTS_LIST="$(python3 "$_S91_AGENTS_PY" "$_S91_SCHEMA_JSON")"
+case "$_S91_HELP_FLAT" in
+    *"One of: $_S91_AGENTS_LIST."*) _S91_AGENTS_MATCH=1 ;;
+    *) _S91_AGENTS_MATCH=0 ;;
+esac
+check "§91(9) --help --agent list matches --print-schema agents ($_S91_AGENTS_LIST)" \
+    bash -c '[ "$1" = "1" ]' -- "$_S91_AGENTS_MATCH"
+
+# (10) the --workspace help ENTRY (not the whole help text) must name the same
+# command tokens as the --workspace cli_flags description asserted in
+# §91(5b) above -- mirrored here so the two copies cannot drift independently.
+_S91_WS_HELP_PY="$(mktemp)"
+cat > "$_S91_WS_HELP_PY" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+m = re.search(r'--workspace <path>.*?(?=\n  --|\n  -v|\n\n)', text, re.S)
+assert m, "could not locate a --workspace <path> entry in --help output"
+block = m.group(0)
+for tok in ("--start", "--attach", "--stop", "--update-sessions", "--reset-sandbox", "--remove-sandbox"):
+    assert tok in block, "help --workspace entry missing " + tok
+PY
+check "§91(10) --help --workspace entry names --start/--attach/--stop/--update-sessions/--reset-sandbox/--remove-sandbox" \
+    python3 "$_S91_WS_HELP_PY" "$_S91_HELP_OUT"
+
+# (11) every cli_flags flag must appear as its OWN left-column entry in --help
+# (a line beginning with exactly two spaces then the flag), not merely be
+# NAME-DROPPED inside another entry's cross-reference prose (the --workspace
+# entry above legitimately mentions --start/--attach/--stop/etc. by name --
+# that must not be mistaken for --start's OWN documentation). This is what
+# actually proves "the flag has a documented entry", closing a real gap in
+# (7)/(8) above: deleting just the --start entry while --workspace's
+# cross-reference prose still says "--start" leaves the token present
+# somewhere in the help text, so (7) alone would not catch it.
+_S91_HELP_ANCHORED_FILE="$(mktemp)"
+# Guarded like the token extraction above -- same reason, same failure mode.
+grep -oE '^  --[a-z][a-z-]+' "$_S91_HELP_OUT" | sed 's/^  //' | sort -u > "$_S91_HELP_ANCHORED_FILE" || true
+_S91_ENTRY_MISSING="$(grep -Fxvf "$_S91_HELP_ANCHORED_FILE" "$_S91_NAMES_FILE" 2>/dev/null || true)"
+check "§91(11) every cli_flags name has its own left-column --help entry (not just a cross-reference mention)" \
+    bash -c '[ -z "$1" ]' -- "$_S91_ENTRY_MISSING"
+
 rm -f "$_S91_EXTRACTED_FILE" "$_S91_SCHEMA_JSON" "$_S91_NAMES_FILE" "$_S91_DESC_FILE" \
       "$_S91_NAMES_PY" "$_S91_DESC_PY" "$_S91_EXCLUDE_FILE" "$_S91_FORWARDED_FILE" \
-      "$_S91_FWD_CHECK_FILE" "$_S91_NAMES_MINUS_FWD_FILE" "$_S91_WS_CHECK_PY" 2>/dev/null || true
+      "$_S91_FWD_CHECK_FILE" "$_S91_NAMES_MINUS_FWD_FILE" "$_S91_WS_CHECK_PY" \
+      "$_S91_HELP_OUT" "$_S91_HELP_TOKENS_FILE" "$_S91_HELP_UNION_FILE" "$_S91_AGENTS_PY" \
+      "$_S91_WS_HELP_PY" "$_S91_HELP_ANCHORED_FILE" 2>/dev/null || true
 
 # ============================================================
 echo ""
