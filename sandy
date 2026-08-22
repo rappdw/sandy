@@ -100,11 +100,24 @@ SANDY_PASSIVE_KEYS=(
 )
 
 # SANDY_ENV_ONLY_KEYS: honored only when set in the process environment.
-#   NOT readable from any config file — these are CI / debug escape hatches
-#   that a committed .sandy/config must never be able to flip on.
+#   NOT readable from any config file — a committed .sandy/config must never
+#   be able to flip these on.
+#   Two flavors share this array, distinguished by whether they also carry a
+#   _sandy_key_metadata row (#179):
+#     - REGISTERED (array + metadata row): operator-facing and discoverable
+#       via `--print-schema`/`--validate-config` — SANDY_HOST_ID,
+#       SANDY_AUTO_APPROVE_PRIVILEGED.
+#     - UNREGISTERED (array only, no metadata row): internal launch signals
+#       not meant to be operator-discoverable — SANDY_DEBUG_CLEANUP, and
+#       (elsewhere, listed nowhere in this array either)
+#       SANDY_DAEMON_SUPERVISOR / SANDY_UPDATE_RESTART / SANDY_TEST_PANE_TAGS.
+#   SANDY_SESSION_NONCE stays fully unregistered (not even in this array) for
+#   trust-root reasons specific to it — see "Self-Attestation Marker" in
+#   CLAUDE.md.
 SANDY_ENV_ONLY_KEYS=(
     SANDY_AUTO_APPROVE_PRIVILEGED
     SANDY_DEBUG_CLEANUP
+    SANDY_HOST_ID
 )
 
 # Value-aware privileged classification. A handful of passive keys are safe to
@@ -762,6 +775,7 @@ SANDY_TOOL_AUDIT|bool|0||1.4.0|stable|Seed a Claude Code PreToolUse audit hook (
 SANDY_HANDOFF_DIRS|bool|0||1.7.0|experimental|Create and mount the per-sandbox cross-workspace handoff directories (#132 substrate): $SANDBOX_DIR/handoff/outbox rw at ~/.handoff/outbox, $SANDBOX_DIR/handoff/inbox READ-ONLY at ~/.handoff/inbox. Substrate only — NOTHING moves files: no relay, no helper, no skills, no turn initiation; those are #132 follow-ups gated by separate privileged keys (SANDY_HANDOFF_PEERS, unshipped). Passive-safe: nothing sandy ships today moves files into or out of these directories — the future relay that will is gated on SANDY_HANDOFF_PEERS (privileged, unshipped), where the trust edge lives. Residual: the outbox persists across sessions, so a repo can stage content before an operator ever approves peers; sandy --reset-sandbox clears it. Default 0 (off — the directories are still created but NOTHING is mounted, no env vars are added, and ~/.handoff does not exist inside the container). Creation is unconditional as of 1.7.0 so that directory PRESENCE carries no information: when every sandbox has them, the marker is the only signal that can mean anything, and enrolling an existing sandbox is the marker alone rather than a re-launch to harvest a side effect. An operator can also enable the pair per-sandbox without any workspace config by touching $SANDBOX_DIR/.handoff-enabled — OR with this key, same passive tier. That marker matters for fleets: a workspace .sandy/config travels with the repository, so cloning it enables the pair on a sandbox nobody decided about, whereas the marker is per-machine and a repo cannot carry it. It lives at the sandbox TOP level (never under claude/, which is mounted and agent-writable) and survives --reset-sandbox like WORKSPACE.json, since enrollment is operator state; the handoff/ contents are still destroyed.
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
+SANDY_HOST_ID|string||^[A-Za-z0-9._-]{1,128}$|1.8.0|stable|Operator override for the host_id reported by --print-state (#179), advisory identity for multi-host fleet aggregation (sandbox names hash only the workspace path, so the same path on two hosts collides). ENV-ONLY -- a committed .sandy/config can never set it, which would otherwise forge the identity of whatever machine the repo is cloned onto. Default is uname -n (host_id_source: hostname); a valid override reports host_id_source: env. Invalid or empty values are silently ignored and fall back to uname -n -- no warning, ever, since --print-state guarantees 0 bytes of stderr.
 EOF
 }
 
@@ -1748,6 +1762,50 @@ _sandy_emit_state() {
     printf '{'
     _json_kv schema_version "$SANDY_SCHEMA_VERSION"
     printf ','; _json_kv sandy_home "$(_json_escape "$SANDY_HOME")"
+
+    # host_id / host_id_source (#179): advisory host identity for multi-host
+    # fleet aggregation. Sandbox names are basename-<hash-of-workspace-path>,
+    # so the SAME workspace path on two hosts yields the SAME slug -- without
+    # this, a --print-state view merged across machines is unattributable.
+    # Default source is `uname -n` (flagless, guarded || true). Deliberately
+    # NOT the `hostname` binary (absent on some minimal Debian installs, and
+    # its -s/-f flags diverge BSD vs GNU) and NOT bash's $HOSTNAME (inherited
+    # from the environment, so any parent process could override it -- the
+    # whole point of the env-only tier below is forgery resistance, so the
+    # fallback source must not itself be env-spoofable). Operator override:
+    # SANDY_HOST_ID, registered env-only (SANDY_ENV_ONLY_KEYS above, with a
+    # _sandy_key_metadata row) -- a committed .sandy/config can never set it,
+    # which would otherwise forge the identity of whatever machine the repo
+    # is cloned onto. Validated ^[A-Za-z0-9._-]{1,128}$; invalid or empty
+    # falls back to uname -n SILENTLY, no warning ever -- the 1.7.0 stream
+    # contract (SPEC_INTROSPECTION.md, pinned by run-tests.sh §92) guarantees
+    # 0 bytes of stderr from --print-state. The silent fallback is still
+    # observable: host_id_source flips to "hostname", the detection channel
+    # for an operator typo. Emitted in the shared unconditional top of this
+    # function, so BOTH full and light mode carry it -- the light-mode budget
+    # counts only docker spawns, and `uname -n` is one cheap non-docker spawn
+    # a fleet poller using light mode needs. Tri-state: both fields null when
+    # uname fails/returns empty and no valid override is set.
+    local _host_id="" _host_id_source=""
+    if [ -n "${SANDY_HOST_ID:-}" ] && [[ "$SANDY_HOST_ID" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+        _host_id="$SANDY_HOST_ID"
+        _host_id_source="env"
+    else
+        _host_id="$(uname -n 2>/dev/null || true)"
+        [ -n "$_host_id" ] && _host_id_source="hostname"
+    fi
+    printf ','
+    if [ -n "$_host_id" ]; then
+        _json_kv host_id "$(_json_escape "$_host_id")"
+    else
+        _json_kv host_id 'null'
+    fi
+    printf ','
+    if [ -n "$_host_id_source" ]; then
+        _json_kv host_id_source "$(_json_escape "$_host_id_source")"
+    else
+        _json_kv host_id_source 'null'
+    fi
 
     # installed_images: sandy-{base,claude-code,gemini-cli,codex,opencode,full}.
     # Skipped in light mode (no consumer; costs 6 of the 9 docker spawns). The
