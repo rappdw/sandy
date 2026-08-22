@@ -262,12 +262,10 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "last_used_version": "0.11.4",
       "created_at": "2026-04-15T10:00:00Z",
       "last_used_at": "2026-04-20T14:45:00Z",
-      "agent": "claude",
       "size_bytes": 123456789,
       "lock_held": false,
       "lock_holder_pid": null,
-      "lock_holder_alive": null,
-      "compat_warning": null
+      "lock_holder_alive": null
     }
   ],
   "approvals": [
@@ -353,6 +351,24 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > that wants a staleness badge on a light-mode poll fetches full mode
 > on demand.
 
+> **`size_bytes`** (per sandbox, **FULL MODE ONLY**, added additively in `1.8.0`,
+> #176 — no `schema_version` bump). Integer bytes of allocated disk for the
+> sandbox directory (`du -skx`, block-allocated size, not apparent size,
+> multiplied by 1,024 to convert the KiB result to bytes). `-x` stays on one
+> filesystem; a subpath unreadable by the sandy process still yields a
+> best-effort partial total (du warns to stderr but still emits a total on
+> stdout). `null` on any failure — `du` missing, empty output, non-numeric
+> output — and `null`, always, in `--print-state light`: a du walk over a
+> multi-GB sandbox is exactly the cost class the light-mode two-spawn poll
+> budget (see "Light mode" below) exists to exclude. The key is **present**
+> as `null` in light mode rather than absent, matching the
+> `dangling_images`/`orphaned_containers`/`proxy_image_created` precedent
+> above. Cost note: one `du` walk per sandbox per full-mode call —
+> seconds-scale at tens of large sandboxes, and materially worse on a cold
+> cache over a virtiofs mount (macOS/OrbStack) — pollers that want a cheap,
+> frequent read should stick to light mode and fetch full mode only when a
+> size figure is actually needed.
+
 > **`workspace_path`** (per sandbox) is read from the `WORKSPACE.json` marker
 > sandy writes into each sandbox on launch; it is an empty string for a legacy
 > sandbox that predates the marker. It is a stable field of the contract — a
@@ -408,11 +424,17 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > corresponding state exists: one `docker exec … tmux display` per **daemon**
 > container (for `attached_clients`, #17) and one `docker network inspect` per
 > dead-owner orphan **candidate** (#26) — both zero on a host with no daemon
-> sessions and no orphans. All non-docker fields (`sandboxes`, `approvals`,
-> `workspace_path`, locks) are identical to full mode. The arg is
-> **forward-compatible**: any value other than `light` (including none, and an
-> older sandy that ignored `$2`) yields full mode, so a consumer may pass
-> `light` unconditionally. No `schema_version` bump — the shape is unchanged.
+> sessions and no orphans. Non-docker fields (`sandboxes`, `approvals`,
+> `workspace_path`, locks) are **not all** identical to full mode as of
+> `1.8.0`: `size_bytes` (#176, above) is the first non-docker field to
+> diverge between the two modes — it is always `null` in light mode, because
+> the `du` walk it requires costs the same class of latency the light-mode
+> budget exists to avoid, even though computing it needs no docker spawn at
+> all. Every other non-docker field is still identical between modes. The
+> arg is **forward-compatible**: any value other than `light` (including
+> none, and an older sandy that ignored `$2`) yields full mode, so a
+> consumer may pass `light` unconditionally. No `schema_version` bump — the
+> shape is unchanged.
 
 ### `--validate-config`
 
@@ -459,7 +481,7 @@ No exit-code surprises: always `0` (see the stream contract above — this flag 
 
 - Current: `schema_version: 1`
 - **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal`), `description`, `sources`, and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
-- **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. In `1.7.0`, one new `sandboxes[]` field: `handoff_enabled` (bool — whether `$SANDBOX_DIR/.handoff-enabled`, the operator-side handoff enable marker, is present; reports the marker only, not a workspace `SANDY_HANDOFF_DIRS=1`). Clients ignore unknown fields. Three additive changes shipped this way: `since`/`stability` on config-key objects (`0.15.0`, PR 4.1, above); in `1.1.0` (#17), three new `cli_flags` entries (`--start`, `--attach`, `--stop` — daemon-mode flags) plus three new `running_containers[]` fields (`sandbox`, `daemon`, `attached_clients` — see `--print-state` below); and, also in `1.1.0` (#26), one more `cli_flags` entry (`--prune-orphans` — reap orphaned sandy networks and exit) plus one new top-level `--print-state` field (`orphan_networks` — see above). In `1.2.0`, one more `cli_flags` entry (`--update-sessions` — fleet image refresh + rolling restart across every daemon session on the host, scopeable to a single session with `--workspace PATH`, #41) plus two new `running_containers[]` fields: `image_stale` (FULL MODE ONLY, #41 — see above) and `updated_at` (both modes, #44 — see above). In `1.3.0`, one more `cli_flags` entry (`--gc` — unified reclaim of dead-owner containers, orphaned networks, orphaned per-project/skill images, and dangling sandy images, with `--dry-run`/`--yes` sub-options, #36) plus two new top-level `--print-state` fields: `dangling_images` and `orphaned_containers` (both FULL MODE ONLY — see above). In `1.7.0`, one more `cli_flags` entry (`--workspace` — the parsers have accepted this flag since `1.1.0` (#17); only the schema advertisement was missing, #156) plus the guaranteed stream contract for `--print-schema`/`--print-state`/`--validate-config` documented above (#160) — the stream contract formalizes and test-pins behavior every one of these handlers already had, so it carries no field or shape change and needs no `schema_version` bump either. Also in `1.7.0` (#159), a new `cli_flags` entry (`--print-version`) plus the new `--print-version` flag itself (see the `### --print-version` section above) — a wholly new, additive introspection surface, not a change to any existing emitted shape, so it needs no `schema_version` bump either; it does, however, extend the 1.7.0 stream contract (above) to cover this fourth flag.
+- **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. In `1.7.0`, one new `sandboxes[]` field: `handoff_enabled` (bool — whether `$SANDBOX_DIR/.handoff-enabled`, the operator-side handoff enable marker, is present; reports the marker only, not a workspace `SANDY_HANDOFF_DIRS=1`). Clients ignore unknown fields. Three additive changes shipped this way: `since`/`stability` on config-key objects (`0.15.0`, PR 4.1, above); in `1.1.0` (#17), three new `cli_flags` entries (`--start`, `--attach`, `--stop` — daemon-mode flags) plus three new `running_containers[]` fields (`sandbox`, `daemon`, `attached_clients` — see `--print-state` below); and, also in `1.1.0` (#26), one more `cli_flags` entry (`--prune-orphans` — reap orphaned sandy networks and exit) plus one new top-level `--print-state` field (`orphan_networks` — see above). In `1.2.0`, one more `cli_flags` entry (`--update-sessions` — fleet image refresh + rolling restart across every daemon session on the host, scopeable to a single session with `--workspace PATH`, #41) plus two new `running_containers[]` fields: `image_stale` (FULL MODE ONLY, #41 — see above) and `updated_at` (both modes, #44 — see above). In `1.3.0`, one more `cli_flags` entry (`--gc` — unified reclaim of dead-owner containers, orphaned networks, orphaned per-project/skill images, and dangling sandy images, with `--dry-run`/`--yes` sub-options, #36) plus two new top-level `--print-state` fields: `dangling_images` and `orphaned_containers` (both FULL MODE ONLY — see above). In `1.7.0`, one more `cli_flags` entry (`--workspace` — the parsers have accepted this flag since `1.1.0` (#17); only the schema advertisement was missing, #156) plus the guaranteed stream contract for `--print-schema`/`--print-state`/`--validate-config` documented above (#160) — the stream contract formalizes and test-pins behavior every one of these handlers already had, so it carries no field or shape change and needs no `schema_version` bump either. Also in `1.7.0` (#159), a new `cli_flags` entry (`--print-version`) plus the new `--print-version` flag itself (see the `### --print-version` section above) — a wholly new, additive introspection surface, not a change to any existing emitted shape, so it needs no `schema_version` bump either; it does, however, extend the 1.7.0 stream contract (above) to cover this fourth flag. In `1.8.0` (#176), one new `sandboxes[]` field: `size_bytes` (FULL MODE ONLY, always `null` in `--print-state light` — see above) — the allocated-disk-usage figure for each sandbox, computed via `du -skx`.
 - **Deprecations** (existing key changes semantics): bump to `schema_version: 2`. Sandy publishes both versions in parallel via `--print-schema --schema-version 1` for one minor release, then drops v1 with a release-note callout.
 - **Compatibility range**: each sandy version declares `supported_schema_versions` and `deprecated_schema_versions` so clients can decide to warn/refuse.
 

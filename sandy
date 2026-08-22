@@ -1817,6 +1817,34 @@ _sandy_emit_state() {
             printf ','; _json_kv last_used_version "$(_json_escape "$sb_last_ver")"
             printf ','; _json_kv created_at        "$(_json_escape "$sb_created_at")"
             printf ','; _json_kv last_used_at      "$(_json_escape "$sb_last_at")"
+            # size_bytes (#176): integer bytes of allocated disk for this sandbox,
+            # FULL MODE ONLY — a du walk over multi-GB sandboxes is exactly the
+            # cost class the light-mode two-spawn poll budget exists to exclude
+            # (see the #25 rationale above). Light mode emits the key present as
+            # JSON null (not absent), matching the dangling_images/
+            # orphaned_containers/proxy_image_created precedent — shape parity
+            # across modes is friendlier to typed consumers than an
+            # appearing/disappearing key. `du` has no portable bytes flag (GNU
+            # -b only), so we measure allocated KiB with `du -skx` (-x stays on
+            # one filesystem) and multiply by 1024 — that converts a real
+            # block-allocation measurement, it does not fake precision. Any
+            # failure (missing du, empty/non-numeric output) yields null,
+            # reusing the exact validation idiom lock_holder_alive uses below.
+            # `2>/dev/null` is LOAD-BEARING: du warns to stderr on unreadable
+            # subpaths while still printing a partial total on stdout, and the
+            # --print-state stream contract (SPEC_INTROSPECTION.md, #160)
+            # guarantees zero bytes of stderr; a partial total from a
+            # partially-readable sandbox is emitted as-is (best-effort). The
+            # `|| true` guards against a nonzero du exit under `set -o
+            # pipefail` truncating the JSON stream mid-document.
+            local sb_size='null' sb_kb=""
+            if [ "$_mode" != "light" ]; then
+                sb_kb="$(du -skx "$sb" 2>/dev/null | awk '{print $1}' || true)"
+                if [ -n "$sb_kb" ] && [ "$sb_kb" -eq "$sb_kb" ] 2>/dev/null; then
+                    sb_size=$((sb_kb * 1024))
+                fi
+            fi
+            printf ','; _json_kv size_bytes "$sb_size"
             # handoff_enabled (#handoff-marker): whether the OPERATOR marker file is
             # present. Reports the MARKER only — a workspace SANDY_HANDOFF_DIRS=1 also
             # enables the pair but lives in the workspace, and --print-state does not

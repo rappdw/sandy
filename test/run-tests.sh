@@ -3609,7 +3609,7 @@ d=json.load(open(sys.argv[1]))
 sb=[s for s in d[\"sandboxes\"] if s.get(\"name\")==\"zork-3dfda686\"]
 assert sb, \"fixture sandbox missing from --print-state output\"
 s=sb[0]
-req={\"name\",\"path\",\"workspace_path\",\"created_version\",\"last_used_version\",\"created_at\",\"last_used_at\",\"lock_held\",\"lock_holder_pid\",\"lock_holder_alive\"}
+req={\"name\",\"path\",\"workspace_path\",\"created_version\",\"last_used_version\",\"created_at\",\"last_used_at\",\"size_bytes\",\"handoff_enabled\",\"lock_held\",\"lock_holder_pid\",\"lock_holder_alive\"}
 missing=req-set(s)
 assert not missing, \"missing per-sandbox fields: \"+repr(sorted(missing))
 " "$1"' -- "$_PS_FIX_JSON"
@@ -7915,6 +7915,146 @@ check "§97(16) phase D repeats the EROFS-beats-ownership assertions on that pat
     bash -c 'printf "%s" "$1" | grep -q "chmod u+w on the inbox dir itself FAILS" \
         && printf "%s" "$1" | grep -q "owned by the agent uid" \
         && printf "%s" "$1" | grep -q "STILL FAILS"' -- "$_s97_d"
+
+# ============================================================
+echo "§98: --print-state size_bytes (#176)"
+# ============================================================
+# size_bytes (full mode only, disk usage via du -skx times 1024, null on any
+# failure or in light mode) — see the sandy ~1819 comment block for the
+# design rationale (poll safety, portability, stream contract, unit math).
+# Fixture: one sandbox with a 1 MiB /dev/urandom payload (urandom so a
+# compressing filesystem cannot shrink allocation below the lower bound).
+_S98_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S98_HOME="$(mktemp -d)"
+mkdir -p "$_S98_HOME/sandboxes/demo-abc12345"
+dd if=/dev/urandom of="$_S98_HOME/sandboxes/demo-abc12345/payload.bin" bs=1024 count=1024 2>/dev/null
+echo "1.0.0" > "$_S98_HOME/sandboxes/demo-abc12345/.sandy_created_version"
+echo "1.0.1" > "$_S98_HOME/sandboxes/demo-abc12345/.sandy_last_version"
+printf '{ "schema_version": 1, "sandbox_name": "demo-abc12345", "workspace_path": "/ws/demo" }\n' \
+    > "$_S98_HOME/sandboxes/demo-abc12345/WORKSPACE.json"
+
+# A constant docker shim keeps every check below host-independent (whether
+# or not the runner has a real docker on PATH); each per-check bin dir gets
+# a copy so a du shim placed alongside it is found first too.
+_s98_write_docker_shim() { # $1 = target bin dir
+    cat > "$1/docker" <<'S98DOCKERSHIM'
+#!/usr/bin/env bash
+case "$1" in
+    info) exit 0 ;;
+    ps) exit 0 ;;
+    image) exit 1 ;;
+    *) exit 0 ;;
+esac
+S98DOCKERSHIM
+    chmod +x "$1/docker"
+}
+
+# --- (1)/(2): real du against the fixture, full vs light ---
+_S98_BIN0="$(mktemp -d)"
+_s98_write_docker_shim "$_S98_BIN0"
+_s98_full="$(PATH="$_S98_BIN0:$PATH" SANDY_HOME="$_S98_HOME" bash "$_S98_SCRIPT" --print-state 2>/dev/null)"
+check "§98(1) full mode: size_bytes present, integer, within [1MiB,16MiB]" \
+    bash -c 'echo "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+s=[x for x in d[\"sandboxes\"] if x[\"name\"]==\"demo-abc12345\"][0]
+v=s[\"size_bytes\"]
+assert isinstance(v,int) and not isinstance(v,bool), repr(v)
+assert 1048576 <= v <= 16*1048576, v
+"' -- "$_s98_full"
+
+_s98_light="$(PATH="$_S98_BIN0:$PATH" SANDY_HOME="$_S98_HOME" bash "$_S98_SCRIPT" --print-state light 2>/dev/null)"
+check "§98(2) light mode: size_bytes key present, value null" \
+    bash -c 'echo "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+s=[x for x in d[\"sandboxes\"] if x[\"name\"]==\"demo-abc12345\"][0]
+assert \"size_bytes\" in s and s[\"size_bytes\"] is None
+"' -- "$_s98_light"
+
+# --- (3)/(4): a logging du shim proves light makes ZERO du calls and full
+# makes exactly ONE, naming the sandbox path. (3) is the check that catches
+# a gate which nulls the OUTPUT but still pays the walk — a regression that
+# silently breaks pollers while (2) alone would still pass.
+_S98_BIN_LOG="$(mktemp -d)"
+_s98_write_docker_shim "$_S98_BIN_LOG"
+cat > "$_S98_BIN_LOG/du" <<'S98DUSHIM_LOG'
+#!/usr/bin/env bash
+echo "$@" >> "$DU_CALL_LOG"
+printf '123\tx\n'
+S98DUSHIM_LOG
+chmod +x "$_S98_BIN_LOG/du"
+
+_S98_DULOG_LIGHT="$(mktemp)"
+PATH="$_S98_BIN_LOG:$PATH" SANDY_HOME="$_S98_HOME" DU_CALL_LOG="$_S98_DULOG_LIGHT" \
+    bash "$_S98_SCRIPT" --print-state light >/dev/null 2>&1
+check "§98(3) NEGATIVE: light mode makes ZERO du calls" \
+    bash -c '[ "$(wc -l < "$1" | tr -d " ")" = "0" ]' -- "$_S98_DULOG_LIGHT"
+
+_S98_DULOG_FULL="$(mktemp)"
+PATH="$_S98_BIN_LOG:$PATH" SANDY_HOME="$_S98_HOME" DU_CALL_LOG="$_S98_DULOG_FULL" \
+    bash "$_S98_SCRIPT" --print-state >/dev/null 2>&1
+check "§98(4) full mode: exactly ONE du call, args name the sandbox path" \
+    bash -c '[ "$(wc -l < "$1" | tr -d " ")" = "1" ] && grep -q "demo-abc12345" "$1"' -- "$_S98_DULOG_FULL"
+
+# (4b) -k is LOAD-BEARING for the byte contract, and its absence is invisible to
+# this CI. du without -k reports platform-dependent block sizes: GNU defaults to
+# 1024-byte blocks, but POSIX rules (macOS/BSD default) use 512-byte blocks, so
+# `du -sx` on the maintainer machine returns DOUBLE what it returns on Ubuntu CI.
+# The x1024 in sandy is only correct because -k pins 1024 on both. Dropping it
+# silently doubles every reported size on macOS while every Linux check here
+# still passes -- (1)'s [1MiB,16MiB] range is far too wide to catch a 2x error.
+# So assert the flag we actually send to the external tool, not just the path.
+check "§98(4b) du is invoked with -k (pins 1024-byte blocks on BSD as well as GNU)" \
+    grep -qE '(^| )-[a-z]*k[a-z]* ' "$_S98_DULOG_FULL"
+
+# --- (5): garbage du output -> null, JSON still parses ---
+_S98_BIN_GARBAGE="$(mktemp -d)"
+_s98_write_docker_shim "$_S98_BIN_GARBAGE"
+cat > "$_S98_BIN_GARBAGE/du" <<'S98DUSHIM_GARBAGE'
+#!/usr/bin/env bash
+printf 'notanumber\t/x\n'
+S98DUSHIM_GARBAGE
+chmod +x "$_S98_BIN_GARBAGE/du"
+_s98_garbage="$(PATH="$_S98_BIN_GARBAGE:$PATH" SANDY_HOME="$_S98_HOME" bash "$_S98_SCRIPT" --print-state 2>/dev/null)"
+check "§98(5) garbage du output -> size_bytes null, JSON still parses" \
+    bash -c 'echo "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+s=[x for x in d[\"sandboxes\"] if x[\"name\"]==\"demo-abc12345\"][0]
+assert s[\"size_bytes\"] is None
+"' -- "$_s98_garbage"
+
+# --- (6): a du that dies noisily (stderr, no stdout, nonzero exit) still
+# yields size_bytes null and holds the stream contract: stdout stays exactly
+# one JSON document and stderr stays exactly 0 bytes. Kills removing the
+# load-bearing 2>/dev/null (which §92 never exercises, since it never runs
+# a broken du) and kills dropping the || true guard (pipefail would abort
+# the command substitution and truncate the JSON mid-document).
+_S98_BIN_FAIL="$(mktemp -d)"
+_s98_write_docker_shim "$_S98_BIN_FAIL"
+cat > "$_S98_BIN_FAIL/du" <<'S98DUSHIM_FAIL'
+#!/usr/bin/env bash
+echo "du: cannot read some subpath" >&2
+exit 1
+S98DUSHIM_FAIL
+chmod +x "$_S98_BIN_FAIL/du"
+_S98_ERR_FAIL="$(mktemp)"
+_s98_fail="$(PATH="$_S98_BIN_FAIL:$PATH" SANDY_HOME="$_S98_HOME" bash "$_S98_SCRIPT" --print-state 2>"$_S98_ERR_FAIL")"
+check "§98(6a) failing noisy du -> size_bytes null" \
+    bash -c 'echo "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+s=[x for x in d[\"sandboxes\"] if x[\"name\"]==\"demo-abc12345\"][0]
+assert s[\"size_bytes\"] is None
+"' -- "$_s98_fail"
+check "§98(6b) failing noisy du: stdout still exactly one JSON document" \
+    bash -c 'echo "$1" | python3 -c "import json,sys; json.loads(sys.stdin.read())"' -- "$_s98_fail"
+check "§98(6c) failing noisy du: stderr file is exactly 0 bytes (2>/dev/null is load-bearing)" \
+    bash -c '[ "$(wc -c < "$1" | tr -d " ")" = "0" ]' -- "$_S98_ERR_FAIL"
+
+rm -rf "$_S98_HOME" "$_S98_BIN0" "$_S98_BIN_LOG" "$_S98_BIN_GARBAGE" "$_S98_BIN_FAIL" \
+    "$_S98_DULOG_LIGHT" "$_S98_DULOG_FULL" "$_S98_ERR_FAIL" 2>/dev/null || true
 
 # ============================================================
 # Summary
