@@ -1,0 +1,20 @@
+# GitHub "Sponsor" button configuration.
+#
+# IMPORTANT: this file only *renders* the button — it does not enable receiving
+# money. The `github:` entry works only after GitHub Sponsors onboarding for the
+# account is complete and approved. External platforms below work as soon as the
+# account exists (the entry is just a link-out).
+#
+# This file takes effect only on the default branch (main), after commit + push.
+
+# --- GitHub Sponsors (0% platform fee) ---
+# Uncomment once your Sponsors account is live and approved:
+# github: [rappdw]
+
+# --- External platforms (uncomment any you set up; each renders as a link) ---
+# ko_fi: rappdw
+# buy_me_a_coffee: rappdw
+# open_collective: sandy
+# polar: rappdw
+# liberapay: rappdw
+# custom: ["https://your-donate-url"]
