@@ -1,0 +1,90 @@
+name: Integration
+
+# #106. The pure-script suite (.github/workflows/test.yml) runs on every PR.
+# THIS suite builds real agent images, launches real containers, and makes real
+# API calls — so it deliberately does NOT run on `pull_request`.
+#
+# Why not pull_request: GitHub does not pass secrets to forked-repo PRs, and we
+# would not want it to. A keyed run triggered by an untrusted fork would hand
+# an attacker our provider keys. Keyed runs therefore live on schedule and
+# workflow_dispatch only, both of which run in the base-repo trust context.
+on:
+  schedule:
+    # 07:00 UTC daily. Nightly rather than per-merge: every keyed run costs real
+    # provider spend, and a merge queue would multiply it for no added signal.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      skip:
+        description: 'SANDY_INTEG_SKIP (comma-separated section ids). Default skips the three acceptance harnesses (~46% of runtime).'
+        required: false
+        default: '19,20,21'
+      only:
+        description: 'SANDY_INTEG_ONLY (comma-separated section ids). Empty runs everything not skipped. SKIP wins over ONLY.'
+        required: false
+        default: ''
+      no_model_pin:
+        description: 'Set to 1 to disable the Haiku model pin and run claude launches at sandy default model.'
+        required: false
+        default: ''
+
+# Never run two integration jobs at once: sections 19-21 manipulate host-wide
+# daemon state (containers, networks, the workspace mutex), so concurrent runs
+# would interfere. Do not cancel an in-progress run either — a half-torn-down
+# fleet is worse than a queued job.
+concurrency:
+  group: integration
+  cancel-in-progress: false
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    # Full suite is ~27 min on the maintainer host and CI is slower; 90 gives
+    # headroom without letting a hung section burn an hour of runner time.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify Docker
+        run: docker info
+
+      # The suite builds up to five agent images plus the base. A stock
+      # ubuntu-latest runner has ~14 GB free, which is tight. Reclaim the
+      # preinstalled toolchains we do not use before building anything.
+      - name: Free runner disk
+        run: |
+          echo "before:"; df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          docker image prune -af || true
+          echo "after:"; df -h / | tail -1
+
+      - name: Run integration suite
+        env:
+          # Missing keys are NOT a failure: every keyed section probes for its
+          # credential and skips cleanly (the suite has ~22 such skips). So this
+          # workflow still yields signal on a fork-less repo with no secrets set.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          # On the nightly cron, `inputs` is empty, so these fall back to the
+          # lean defaults rather than expanding to the empty string.
+          SANDY_INTEG_SKIP: ${{ github.event.inputs.skip || '19,20,21' }}
+          SANDY_INTEG_ONLY: ${{ github.event.inputs.only || '' }}
+          SANDY_INTEG_NO_MODEL_PIN: ${{ github.event.inputs.no_model_pin || '' }}
+          # CI runners are slower than the maintainer host; the default 300s
+          # per-test timeout is tuned for the latter.
+          SANDY_INTEG_TIMEOUT: '600'
+        run: bash test/run-integration-tests.sh
+
+      # Runs even on failure: a failed section often leaves containers or
+      # networks behind, and the runner is ephemeral anyway — but printing what
+      # leaked is the diagnostic the maintainer actually wants from a red run.
+      - name: Post-run resource report
+        if: always()
+        run: |
+          echo "== containers =="; docker ps -a --filter 'name=sandy' || true
+          echo "== networks ==";   docker network ls --filter 'name=sandy' || true
+          echo "== disk ==";       df -h / | tail -1
