@@ -33,6 +33,13 @@
 # sufficient — each agent needs only ONE working auth path, and the keyed
 # sections probe for whichever they find.
 #
+# THIS SCRIPT IS THE "REUSE WHAT I ALREADY HAVE" PATH. If you would rather give
+# CI its own dedicated, separately-rotatable, spend-capped keys -- which is the
+# recommended posture -- follow docs/CI-CREDENTIALS.md instead and set them with
+# `gh secret set` straight from the provider console. Do NOT put CI-only keys in
+# ~/.sandy/.secrets: that re-merges the two blast radii the separation exists to
+# keep apart, and this script would then treat them as local credentials.
+#
 # Secret VALUES are never printed. Each is reported as a length plus a short
 # sha256 fingerprint, which is enough to confirm the right value synced without
 # putting it on a terminal, in scrollback, or in CI logs.
@@ -49,7 +56,9 @@ while [ $# -gt 0 ]; do
         --repo)    shift; REPO="${1:-}"
                    [ -z "$REPO" ] && { echo "--repo needs OWNER/NAME" >&2; exit 1; } ;;
         --repo=*)  REPO="${1#--repo=}" ;;
-        -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        # Print the whole header block rather than a fixed line range -- a
+        # hardcoded range silently truncates mid-sentence when the header grows.
+        -h|--help) awk 'NR>2 && /^# ={10,}/{exit} NR>2{sub(/^# ?/,""); print}' "$0"; exit 0 ;;
         *) echo "unrecognized argument: $1" >&2; exit 1 ;;
     esac
     shift
