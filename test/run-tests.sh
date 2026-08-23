@@ -4174,6 +4174,28 @@ if command -v shellcheck >/dev/null 2>&1; then
     fi
     check "shellcheck templates/user-setup.sh.tmpl is clean" \
         test "$_SC_RC" -eq 0
+
+    # doctor.sh is the OTHER generated mirror (#124). CLAUDE.md's stated reason
+    # for generating it at all is that a heredoc string literal is
+    # unshellcheckable and the mirror exists "for lint and review" -- but until
+    # now nothing actually linted it, so that rationale was only half true.
+    # Gating it here closes the loop, and means an edit to the
+    # _sandy_doctor_host() heredoc gets the same scrutiny as user-setup.sh.
+    _SC_DOC_OUT="$(shellcheck "$(dirname "$0")/../doctor.sh" 2>&1)" && _SC_DOC_RC=0 || _SC_DOC_RC=$?
+    if [ "$_SC_DOC_RC" -ne 0 ]; then
+        printf "  \033[0;33m%s\033[0m\n" "$_SC_DOC_OUT"
+    fi
+    check "shellcheck doctor.sh is clean" \
+        test "$_SC_DOC_RC" -eq 0
+
+    # test/regen-doctor.sh generates it, so a bug there corrupts the artifact
+    # every consumer curls. Cheap to include; it is a 70-line script.
+    _SC_RGD_OUT="$(shellcheck "$(dirname "$0")/regen-doctor.sh" 2>&1)" && _SC_RGD_RC=0 || _SC_RGD_RC=$?
+    if [ "$_SC_RGD_RC" -ne 0 ]; then
+        printf "  \033[0;33m%s\033[0m\n" "$_SC_RGD_OUT"
+    fi
+    check "shellcheck test/regen-doctor.sh is clean" \
+        test "$_SC_RGD_RC" -eq 0
 else
     printf "  \033[0;33m⊘ skipped — shellcheck not installed (apt-get install shellcheck / brew install shellcheck)\033[0m\n"
 fi

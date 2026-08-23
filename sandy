@@ -3089,7 +3089,7 @@ pkg_hint() {
 }
 
 # ---- banner ----
-printf "${BOLD}sandy doctor${RESET}  —  host readiness check\n"
+printf "%ssandy doctor%s  —  host readiness check\n" "$BOLD" "$RESET"
 printf "  platform: %s" "$OS"
 [ "$OS" = "linux" ] && printf " (%s)" "$DISTRO"
 printf " / %s\n" "$ARCH"
@@ -3157,6 +3157,7 @@ case ":$PATH:" in
         ok "\$HOME/.local/bin is on PATH" ;;
     *)
         _shell="$(basename "${SHELL:-/bin/bash}")"
+        # shellcheck disable=SC2088  # display strings, not paths we expand
         case "$_shell" in
             zsh)  _rc="~/.zshrc" ;;
             bash) _rc="~/.bashrc (Linux) or ~/.bash_profile (macOS)" ;;
@@ -3221,6 +3222,7 @@ section "Credentials (at least one is needed for Claude Code)"
 
 _found_creds=0
 if [ -f "$HOME/.claude/.credentials.json" ]; then
+    # shellcheck disable=SC2088  # a message telling the user where to look
     ok "~/.claude/.credentials.json present (Claude Pro/Max OAuth — seeded fresh each launch)"
     _found_creds=1
 fi
@@ -3233,6 +3235,7 @@ if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     _found_creds=1
 fi
 if [ -f "$HOME/.sandy/.secrets" ] && grep -qE '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)=' "$HOME/.sandy/.secrets" 2>/dev/null; then
+    # shellcheck disable=SC2088  # a message telling the user where to look
     ok "~/.sandy/.secrets contains a Claude credential"
     _found_creds=1
 fi
@@ -3278,9 +3281,9 @@ fi
 
 if [ "${#HINTS[@]}" -gt 0 ]; then
     if [ "$REQUIRED_FAILS" -gt 0 ]; then
-        printf "\n${BOLD}Fix these first:${RESET}\n"
+        printf "\n%sFix these first:%s\n" "$BOLD" "$RESET"
     else
-        printf "\n${BOLD}Suggested actions:${RESET}\n"
+        printf "\n%sSuggested actions:%s\n" "$BOLD" "$RESET"
     fi
     for h in "${HINTS[@]}"; do
         printf "\n%s\n" "$h"
@@ -3288,7 +3291,7 @@ if [ "${#HINTS[@]}" -gt 0 ]; then
 fi
 
 if [ "$REQUIRED_FAILS" -eq 0 ] && ! command -v sandy >/dev/null 2>&1; then
-    printf "\n${BLUE}Next:${RESET} install sandy\n"
+    printf "\n%sNext:%s install sandy\n" "$BLUE" "$RESET"
     printf "    curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | bash\n"
 fi
 
