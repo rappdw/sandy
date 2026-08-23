@@ -9094,6 +9094,359 @@ check "--print-schema cli_flags includes --doctor" \
     bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"--doctor\""' -- "$_S101_SANDY"
 
 # ============================================================
+echo "§102: sandy --provision — non-interactive sandbox creation via the real launch path (#177)"
+# ============================================================
+# Purpose: --provision composes "$0" --start / "$0" --stop (DEC-U2, mirrors
+# --stop-all/--update-sessions) to materialize a sandbox non-interactively.
+# Docker-runtime end-to-end coverage (a REAL daemon actually coming up) is
+# maintainer-run in test/acceptance-provision.sh (run-integration-tests.sh
+# §24) — this section covers everything reachable WITHOUT executing a real
+# child --start: --provision's OWN guard/TOCTOU/exit-code logic, which is
+# what this section proves, using the REAL, unmodified sandy script.
+#
+# Technique: a thin executable WRAPPER stands in for "$0". Invoked with
+# --start/--stop it is a fully test-controlled fake (writes/reads a tiny
+# fake-docker STATE dir, returns whatever exit code the scenario wants);
+# invoked any other way (i.e. --provision ...) it `source`s the real sandy
+# script verbatim — sourcing (not exec, not a nested bash -c) is what keeps
+# $0 pinned to the WRAPPER's own path for the duration, so when --provision's
+# REAL code later runs `"$0" --start ...` / `"$0" --stop ...`, that recursive
+# call re-enters THIS wrapper and hits the fake cases instead of the real
+# daemon supervisor pipeline. --provision's own guard-2/TOCTOU code still
+# calls the real `docker` binary directly (ps/inspect) — that's covered by a
+# second, much smaller stub that reads/writes the same STATE dir, so the two
+# fakes agree on what "the container" looks like at every point.
+_S102_SANDY="$_SBX_SCRIPT"
+_S102_BIN="$(mktemp -d)"
+_S102_HOME="$(mktemp -d)"
+_S102_WS="$(mktemp -d)"
+_S102_WS="$(cd "$_S102_WS" && pwd -P)"
+_S102_STATE="$(mktemp -d)"
+
+# --- fake docker: only what --provision's OWN code calls directly (ps
+# preflight, ps -q --filter.../--filter... for guard 2 + both TOCTOU reads,
+# inspect -f '{{ index .Config.Labels "sandy.provisioned_at" }}'). Every
+# other subcommand is a silent no-op — --provision never calls anything else
+# directly (the daemon machinery that WOULD is the part being faked out via
+# the wrapper, not this stub).
+cat > "$_S102_BIN/docker" <<'S102DOCKERSHIM'
+#!/usr/bin/env bash
+STATE="${_S102_STATE:?}"
+case "${1:-}" in
+    ps)
+        if [ "${2:-}" = "-q" ]; then
+            _p=0
+            [ -f "$STATE/ps_calls" ] && _p="$(cat "$STATE/ps_calls")"
+            _p=$((_p + 1))
+            echo "$_p" > "$STATE/ps_calls"
+            _cidflip="${_S102_FLIP_CID_AFTER_CALL:-0}"
+            if [ "$_cidflip" -gt 0 ] 2>/dev/null && [ "$_p" -gt "$_cidflip" ]; then
+                printf '%s' "${_S102_FLIPPED_CID:-}"
+            elif [ -f "$STATE/cid" ]; then
+                cat "$STATE/cid"
+            fi
+        fi
+        exit 0
+        ;;
+    inspect)
+        shift
+        fmt=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -f) shift; fmt="${1:-}" ;;
+                *) : ;;
+            esac
+            shift
+        done
+        if [ "$fmt" = '{{ index .Config.Labels "sandy.provisioned_at" }}' ]; then
+            _n=0
+            [ -f "$STATE/inspect_calls" ] && _n="$(cat "$STATE/inspect_calls")"
+            _n=$((_n + 1))
+            echo "$_n" > "$STATE/inspect_calls"
+            _flipafter="${_S102_FLIP_STAMP_AFTER_CALL:-0}"
+            if [ "${_S102_NO_STAMP:-0}" = "1" ]; then
+                :
+            elif [ "$_flipafter" -gt 0 ] 2>/dev/null && [ "$_n" -gt "$_flipafter" ]; then
+                printf '%s' "${_S102_FLIPPED_STAMP:-}"
+            elif [ -f "$STATE/provisioned_at" ]; then
+                cat "$STATE/provisioned_at"
+            fi
+        fi
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
+S102DOCKERSHIM
+chmod +x "$_S102_BIN/docker"
+
+# --- the $0-standing-in wrapper (the technique described above). ---
+_S102_WRAPPER="$_S102_BIN/sandy-provision-wrapper"
+cat > "$_S102_WRAPPER" <<S102WRAPPEREOF
+#!/usr/bin/env bash
+STATE="\${_S102_STATE:?}"
+case "\${1:-}" in
+    --start)
+        echo "start \$*" >> "\$STATE/calls.log"
+        rc="\${_S102_START_RC:-0}"
+        if [ "\$rc" = "0" ]; then
+            echo "\${_S102_START_CID:-fakecid001}" > "\$STATE/cid"
+            if [ "\${SANDY_PROVISION:-0}" = "1" ]; then
+                printf '%s' "\${_S102_START_STAMP:-2026-08-22T00:00:00Z}" > "\$STATE/provisioned_at"
+            else
+                rm -f "\$STATE/provisioned_at"
+            fi
+        fi
+        exit "\$rc"
+        ;;
+    --stop)
+        echo "stop \$*" >> "\$STATE/calls.log"
+        rc="\${_S102_STOP_RC:-0}"
+        if [ "\$rc" = "0" ]; then
+            rm -f "\$STATE/cid" "\$STATE/provisioned_at"
+        fi
+        exit "\$rc"
+        ;;
+    *)
+        source "$_S102_SANDY"
+        ;;
+esac
+S102WRAPPEREOF
+chmod +x "$_S102_WRAPPER"
+
+export _S102_STATE
+
+# Reset the fake-docker state + call log to a known-empty baseline between
+# scenarios (no live container, no calls recorded yet).
+_s102_reset_state() {
+    rm -f "$_S102_STATE/cid" "$_S102_STATE/provisioned_at" "$_S102_STATE/inspect_calls" \
+        "$_S102_STATE/ps_calls" "$_S102_STATE/calls.log"
+    : > "$_S102_STATE/calls.log"
+}
+
+_s102_run() {
+    # Runs the wrapper as --provision with a fabricated SANDY_HOME + docker
+    # stub PATH, capturing stdout+stderr to $1 and returning the exit code
+    # via $?; args from $2 onward are passed straight to --provision.
+    local _out="$1"; shift
+    PATH="$_S102_BIN:$PATH" SANDY_HOME="$_S102_HOME" \
+        "$_S102_WRAPPER" --provision "$@" >"$_out" 2>&1
+}
+
+# --- 102.1: docker unreachable -> exit 1, clear message, nothing else ran ---
+_s102_reset_state
+_S102_OUT="$(mktemp)"
+# "Unreachable" must be simulated with a docker stub that FAILS, not by
+# narrowing PATH. PATH="/usr/bin:/bin" makes docker absent on a dev box but NOT
+# on a GitHub runner, where docker lives in /usr/bin -- so the preflight would
+# pass, --provision would proceed, and this check failed in CI while passing
+# locally. A failing stub is deterministic in both places, and it also exercises
+# the real branch (a reachable binary whose daemon is down), which "no binary on
+# PATH" does not.
+_S102_DOWNBIN="$(mktemp -d)"
+cat > "$_S102_DOWNBIN/docker" <<'S102DOCKERDOWN'
+#!/usr/bin/env bash
+# Every subcommand fails: the daemon is unreachable.
+exit 1
+S102DOCKERDOWN
+chmod +x "$_S102_DOWNBIN/docker"
+env PATH="$_S102_DOWNBIN:/usr/bin:/bin" SANDY_HOME="$_S102_HOME" \
+    "$_S102_WRAPPER" --provision --workspace "$_S102_WS" >"$_S102_OUT" 2>&1 && _S102_RC=0 || _S102_RC=$?
+check "§102(1) docker unreachable: exit 1 with its own message (mutation: drop the preflight -> falls through to workspace resolution instead)" \
+    bash -c '[ "$1" -eq 1 ] && grep -q "requires a reachable Docker daemon" "$2"' -- "$_S102_RC" "$_S102_OUT"
+
+# --- 102.2: argument validation, no docker/state needed at all (parsed
+# before the preflight) ---
+_S102_OUT="$(mktemp)"
+_s102_run "$_S102_OUT" --bogus-flag && _S102_RC=0 || _S102_RC=$?
+check "§102(2) unrecognized argument: exit 1 (mutation: drop the *) case -> falls through, wrong behavior)" \
+    bash -c '[ "$1" -eq 1 ] && grep -q "unrecognized argument" "$2"' -- "$_S102_RC" "$_S102_OUT"
+
+_S102_OUT="$(mktemp)"
+_s102_run "$_S102_OUT" --workspace && _S102_RC=0 || _S102_RC=$?
+check "§102(2) --workspace with no PATH: exit 1 (mutation: drop the empty-value guard -> empty path reaches pwd -P instead)" \
+    bash -c '[ "$1" -eq 1 ] && grep -q "needs a PATH" "$2"' -- "$_S102_RC" "$_S102_OUT"
+
+# --- 102.3: workspace not found -> exit 1, no state touched ---
+_s102_reset_state
+_S102_OUT="$(mktemp)"
+_s102_run "$_S102_OUT" --workspace "/no/such/dir/$$" && _S102_RC=0 || _S102_RC=$?
+check "§102(3) nonexistent workspace: exit 1 (mutation: drop the -d guard -> cd fails with a different, unguarded error)" \
+    bash -c '[ "$1" -eq 1 ] && grep -q "workspace not found" "$2"' -- "$_S102_RC" "$_S102_OUT"
+
+# --- 102.4: guard 1 — a LIVE workspace lock (the same #14 pid+kill-0 test
+# every command in this family reuses) is a SAFE NO-OP: exit 0, and the
+# child --start is NEVER invoked (proved by the wrapper's own calls.log
+# staying empty — the fake --start/--stop cases are the ONLY things that
+# ever write to it).
+_s102_reset_state
+_S102_HASH="$(printf '%s' "$_S102_WS" | { shasum -a 256 2>/dev/null || sha256sum; })"; _S102_HASH="${_S102_HASH%% *}"; _S102_HASH="${_S102_HASH:0:8}"
+_S102_BASE="$(basename "$_S102_WS" | tr -cd 'a-zA-Z0-9._-')"; _S102_BASE="${_S102_BASE:-project}"
+_S102_NAME="${_S102_BASE}-${_S102_HASH}"
+mkdir -p "$_S102_HOME/sandboxes/.${_S102_NAME}.lock"
+echo "$$" > "$_S102_HOME/sandboxes/.${_S102_NAME}.lock/pid"   # $$ (this test process) is guaranteed alive
+_S102_OUT="$(mktemp)"
+_s102_run "$_S102_OUT" --workspace "$_S102_WS" --yes && _S102_RC=0 || _S102_RC=$?
+check "§102(4) live workspace lock: exit 0 (C1 — goal already met, safe no-op, not a refusal)" \
+    test "$_S102_RC" -eq 0
+check "§102(4) live workspace lock: message names the live pid (mutation: only check the lock dir exists, not liveness -> a stale dead-pid lock would also wrongly no-op)" \
+    bash -c "grep -q 'already has a live session (pid $$ ' \"\$1\"" -- "$_S102_OUT"
+check "§102(4) live workspace lock: --start was NEVER invoked (mutation: reorder guards or drop guard 1 -> calls.log gains a 'start' line)" \
+    bash -c '[ ! -s "$1" ] || ! grep -q "^start " "$1"' -- "$_S102_STATE/calls.log"
+rm -rf "$_S102_HOME/sandboxes/.${_S102_NAME}.lock"
+
+# --- 102.5: a DEAD lock pid must NOT be treated as live (the #14 liveness
+# test, not mere presence) — falls through to guard 2, which (no container
+# staged) proceeds toward the confirm gate; assert with --dry-run so nothing
+# actually launches.
+_s102_reset_state
+mkdir -p "$_S102_HOME/sandboxes/.${_S102_NAME}.lock"
+# A pid that is astronomically unlikely to be alive on any host.
+echo "999999" > "$_S102_HOME/sandboxes/.${_S102_NAME}.lock/pid"
+_S102_OUT="$(mktemp)"
+_s102_run "$_S102_OUT" --workspace "$_S102_WS" --dry-run && _S102_RC=0 || _S102_RC=$?
+check "§102(5) dead lock pid is NOT treated as live (mutation: check presence instead of kill -0 -> this would wrongly no-op at guard 1 instead of reaching dry-run)" \
+    bash -c '[ "$1" -eq 0 ] && grep -q -- "--dry-run: nothing started" "$2"' -- "$_S102_RC" "$_S102_OUT"
+rm -rf "$_S102_HOME/sandboxes/.${_S102_NAME}.lock"
+
+# --- 102.6: guard 2 — a running daemon CONTAINER (no live lock) is also a
+# safe no-op: exit 0, no child --start invoked. Pre-seed the fake-docker
+# state as if a container already exists.
+_s102_reset_state
+echo "existingcid" > "$_S102_STATE/cid"
+_S102_OUT="$(mktemp)"
+_s102_run "$_S102_OUT" --workspace "$_S102_WS" --yes && _S102_RC=0 || _S102_RC=$?
+check "§102(6) running daemon container (no lock): exit 0, safe no-op" \
+    bash -c '[ "$1" -eq 0 ] && grep -q "already has a running daemon container" "$2"' -- "$_S102_RC" "$_S102_OUT"
+check "§102(6) running daemon container: --start was NEVER invoked" \
+    bash -c '! grep -q "^start " "$1"' -- "$_S102_STATE/calls.log"
+
+# --- 102.7: --dry-run — exit 0, no child invoked, nothing mutated (no cid
+# ever appears in state, meaning the fake --start body never ran).
+_s102_reset_state
+_S102_OUT="$(mktemp)"
+_s102_run "$_S102_OUT" --workspace "$_S102_WS" --dry-run && _S102_RC=0 || _S102_RC=$?
+check "§102(7) --dry-run: exit 0, prints the plan, nothing started (mutation: drop the dry-run early-return -> falls through to the confirm gate/start)" \
+    bash -c '[ "$1" -eq 0 ] && grep -q -- "--dry-run: nothing started" "$2"' -- "$_S102_RC" "$_S102_OUT"
+check "§102(7) --dry-run: no child invoked, no state mutated" \
+    bash -c '[ ! -s "$1" ] && [ ! -e "$2" ]' -- "$_S102_STATE/calls.log" "$_S102_STATE/cid"
+
+# --- 102.8: non-TTY without --yes -> exit 1, no child invoked ---
+_s102_reset_state
+_S102_OUT="$(mktemp)"
+PATH="$_S102_BIN:$PATH" SANDY_HOME="$_S102_HOME" \
+    "$_S102_WRAPPER" --provision --workspace "$_S102_WS" </dev/null >"$_S102_OUT" 2>&1 && _S102_RC=0 || _S102_RC=$?
+check "§102(8) non-TTY without --yes: exit 1, 'pass --yes' guidance (mutation: drop the [ -t 0 ] gate -> hangs reading /dev/tty, or wrong rc)" \
+    bash -c '[ "$1" -eq 1 ] && grep -q "pass --yes" "$2"' -- "$_S102_RC" "$_S102_OUT"
+check "§102(8) non-TTY without --yes: no child invoked" \
+    bash -c '! grep -qE "^(start|stop) " "$1"' -- "$_S102_STATE/calls.log"
+
+# --- 102.9: --start failure -> exit 1, --stop never even attempted (fake
+# --start returns nonzero and writes NO cid; provision must not proceed past
+# the start-rc check into the TOCTOU reads or a stop call).
+_s102_reset_state
+_S102_OUT="$(mktemp)"
+_S102_START_RC=1 _s102_run "$_S102_OUT" --workspace "$_S102_WS" --yes && _S102_RC=0 || _S102_RC=$?
+check "§102(9) --start failure: exit 1, 'sandbox not provisioned' (mutation: ignore the child's rc -> reports success or proceeds to stop anyway)" \
+    bash -c '[ "$1" -eq 1 ] && grep -q "start failed" "$2" && grep -q "not provisioned" "$2"' -- "$_S102_RC" "$_S102_OUT"
+check "§102(9) --start failure: --stop was NEVER attempted (mutation: fall through instead of returning early -> a 'stop' line appears in calls.log)" \
+    bash -c '! grep -q "^stop " "$1"' -- "$_S102_STATE/calls.log"
+
+# --- 102.10: the happy path — a successful --start (stamps
+# sandy.provisioned_at, matching on both TOCTOU reads) followed by a
+# successful --stop (rc 0): exit 0, BOTH children actually invoked.
+_s102_reset_state
+_S102_OUT="$(mktemp)"
+_S102_START_RC=0 _S102_STOP_RC=0 _s102_run "$_S102_OUT" --workspace "$_S102_WS" --yes && _S102_RC=0 || _S102_RC=$?
+check "§102(10) happy path: exit 0, 'provisioned' and 'stopped cleanly' (mutation: swap the exit code, or drop the success message)" \
+    bash -c '[ "$1" -eq 0 ] && grep -q "provisioned" "$2" && grep -q "stopped cleanly" "$2"' -- "$_S102_RC" "$_S102_OUT"
+check "§102(10) happy path: BOTH --start and --stop were actually invoked, in that order (mutation: skip calling --stop after a good start -> only 'start' appears)" \
+    bash -c 'grep -q "^start " "$1" && grep -q "^stop " "$1" && [ "$(grep -m1 -n "^start " "$1" | cut -d: -f1)" -lt "$(grep -m1 -n "^stop " "$1" | cut -d: -f1)" ]' -- "$_S102_STATE/calls.log"
+
+# --- 102.11: --stop rc 4 (session already stopped by other means) after a
+# GOOD --start is ALSO success, per the spec ("--stop exit 4 after a
+# successful --start is ALSO success — the session was stopped by other
+# means; the launch itself completed, which is what proves provisioning").
+_s102_reset_state
+_S102_OUT="$(mktemp)"
+_S102_START_RC=0 _S102_STOP_RC=4 _s102_run "$_S102_OUT" --workspace "$_S102_WS" --yes && _S102_RC=0 || _S102_RC=$?
+check "§102(11) --stop rc 4 after a good start: exit 0 (mutation: treat any nonzero --stop rc as failure -> wrongly exits 1)" \
+    bash -c '[ "$1" -eq 0 ] && grep -q "already stopped by other means" "$2"' -- "$_S102_RC" "$_S102_OUT"
+
+# --- 102.12: --stop failing for a REAL reason (rc 5, teardown failure) after
+# a good start must still be reported as a failure — 4 is special-cased, 5 is
+# not.
+_s102_reset_state
+_S102_OUT="$(mktemp)"
+_S102_START_RC=0 _S102_STOP_RC=5 _s102_run "$_S102_OUT" --workspace "$_S102_WS" --yes && _S102_RC=0 || _S102_RC=$?
+check "§102(12) --stop rc 5 after a good start: exit 1, names the manual fallback (mutation: special-case every nonzero rc like rc 4 -> wrongly exits 0)" \
+    bash -c '[ "$1" -eq 1 ] && grep -q "Stop it manually" "$2"' -- "$_S102_RC" "$_S102_OUT"
+
+# --- 102.13: TOCTOU — a session WITHOUT this run's provisioned_at label
+# (or a different one) appearing between the start-success read and the
+# pre-stop read must NOT be stopped: exit 0, --stop never attempted. Flip
+# the label after the 1st inspect call (the post-start read) so the 2nd
+# (pre-stop) read sees an empty/different stamp.
+_s102_reset_state
+_S102_OUT="$(mktemp)"
+_S102_START_RC=0 _S102_FLIP_STAMP_AFTER_CALL=1 _S102_FLIPPED_STAMP="9999-01-01T00:00:00Z" \
+    _s102_run "$_S102_OUT" --workspace "$_S102_WS" --yes && _S102_RC=0 || _S102_RC=$?
+check "§102(13) TOCTOU: a session that changed before teardown is left alone — exit 0 (mutation: compare only presence, not the VALUE -> a changed-but-nonempty stamp would wrongly be treated as 'ours')" \
+    bash -c '[ "$1" -eq 0 ] && grep -q "changed before teardown" "$2"' -- "$_S102_RC" "$_S102_OUT"
+check "§102(13) TOCTOU: --stop was NEVER attempted on the foreign session (mutation: proceed to stop anyway -> a 'stop' line appears)" \
+    bash -c '! grep -q "^stop " "$1"' -- "$_S102_STATE/calls.log"
+
+# --- 102.13b: TOCTOU, the CONTAINER-IDENTITY half. (13) proves the stamp VALUE
+# is compared; it says nothing about the container id, and dropping the
+# `_pv_cid2 != _pv_cid` test survives every other check here (verified: 22/22
+# still green with it removed). That half is not redundant: provisioned_at is an
+# ISO timestamp at SECOND granularity, so two sandboxes provisioned inside the
+# same second carry byte-identical stamps -- exactly what a fleet bring-up loop
+# does. With only the value compared, provision would then stop a DIFFERENT
+# workspace's session and call it its own. Here the stamp is left untouched and
+# only the container id changes between the two reads.
+_s102_reset_state
+_S102_OUT="$(mktemp)"
+_S102_RC=0
+# ps -q is called THREE times: guard 2 (pre-start), the post-start read, and
+# the pre-stop read. Flip after call 2 so only the LAST one differs -- after
+# call 1 would change the post-start read too and the two would still agree.
+_S102_START_RC=0 _S102_FLIP_CID_AFTER_CALL=2 _S102_FLIPPED_CID="deadbeefcafe" \
+    _s102_run "$_S102_OUT" --workspace "$_S102_WS" --yes || _S102_RC=$?
+check "§102(13b) TOCTOU: a DIFFERENT container carrying the SAME stamp is left alone — exit 0" \
+    bash -c '[ "$1" -eq 0 ]' -- "$_S102_RC"
+check "§102(13b) TOCTOU: --stop was NEVER attempted on that different container" \
+    bash -c '! grep -q "^stop " "$1"' -- "$_S102_STATE/calls.log"
+
+# --- 102.13c: an UNSTAMPED session. If --start reports success but the
+# container carries no provisioned_at at all, it is not ours -- a plain
+# `sandy --start` raced us and D6 idempotency made our own --start a no-op
+# against IT. Leaving it alone is the whole point of the label.
+# Ownership is checked TWICE (post-start, then again pre-stop), so removing
+# either `-z` bail on its own is absorbed by the other -- genuine defense in
+# depth, not redundancy. This check is therefore load-bearing only against the
+# pair: verified by weakening BOTH layers, which fails exactly this check. Same
+# technique as 99(19), where a second defense could not be tested until the
+# first one was disabled.
+_s102_reset_state
+_S102_OUT="$(mktemp)"
+_S102_RC=0
+_S102_START_RC=0 _S102_NO_STAMP=1 \
+    _s102_run "$_S102_OUT" --workspace "$_S102_WS" --yes || _S102_RC=$?
+check "§102(13c) an unstamped session is left alone — exit 0" \
+    bash -c '[ "$1" -eq 0 ]' -- "$_S102_RC"
+check "§102(13c) --stop was NEVER attempted on the unstamped session" \
+    bash -c '! grep -q "^stop " "$1"' -- "$_S102_STATE/calls.log"
+
+# --- 102.14: --workspace and --print-schema/--help lockstep is already
+# covered end-to-end by §91 (which will fail loudly if --provision drifts
+# from cli_flags/--help); this section is deliberately NOT re-asserting that
+# here to avoid a second, driftable copy of the same assertion.
+
+rm -rf "$_S102_DOWNBIN" "$_S102_BIN" "$_S102_HOME" "$_S102_WS" "$_S102_STATE"
+rm -f "$_S102_OUT"
+unset _S102_STATE
+
+# ============================================================
 # Summary
 # ============================================================
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
