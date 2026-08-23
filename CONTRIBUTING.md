@@ -41,6 +41,10 @@ bash test/run-tests.sh              # pure-script tests — needs Docker + built
 bash test/run-integration-tests.sh  # headless end-to-end — needs Docker + API keys
 ```
 
+The integration suite also runs nightly in CI. To give it its own API keys —
+separately rotatable and spend-capped, rather than reusing your local ones —
+see [docs/CI-CREDENTIALS.md](docs/CI-CREDENTIALS.md).
+
 `test/run-tests.sh` also enforces the doc/template regen `--check` modes and
 `shellcheck`, so it catches drift as well as behavior regressions. Manual /
 interactive-TUI validation steps that can't be scripted live in

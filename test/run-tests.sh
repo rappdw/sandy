@@ -9125,7 +9125,7 @@ _S102_STATE="$(mktemp -d)"
 
 # --- fake docker: only what --provision's OWN code calls directly (ps
 # preflight, ps -q --filter.../--filter... for guard 2 + both TOCTOU reads,
-# inspect -f '{{ index .Config.Labels "sandy.provisioned_at" }}'). Every
+# inspect -f '{{ index .Config.Labels "sandy.provision_id" }}'). Every
 # other subcommand is a silent no-op — --provision never calls anything else
 # directly (the daemon machinery that WOULD is the part being faked out via
 # the wrapper, not this stub).
@@ -9158,7 +9158,7 @@ case "${1:-}" in
             esac
             shift
         done
-        if [ "$fmt" = '{{ index .Config.Labels "sandy.provisioned_at" }}' ]; then
+        if [ "$fmt" = '{{ index .Config.Labels "sandy.provision_id" }}' ]; then
             _n=0
             [ -f "$STATE/inspect_calls" ] && _n="$(cat "$STATE/inspect_calls")"
             _n=$((_n + 1))
@@ -9168,8 +9168,8 @@ case "${1:-}" in
                 :
             elif [ "$_flipafter" -gt 0 ] 2>/dev/null && [ "$_n" -gt "$_flipafter" ]; then
                 printf '%s' "${_S102_FLIPPED_STAMP:-}"
-            elif [ -f "$STATE/provisioned_at" ]; then
-                cat "$STATE/provisioned_at"
+            elif [ -f "$STATE/provision_id" ]; then
+                cat "$STATE/provision_id"
             fi
         fi
         exit 0
@@ -9191,9 +9191,14 @@ case "\${1:-}" in
         if [ "\$rc" = "0" ]; then
             echo "\${_S102_START_CID:-fakecid001}" > "\$STATE/cid"
             if [ "\${SANDY_PROVISION:-0}" = "1" ]; then
-                printf '%s' "\${_S102_START_STAMP:-2026-08-22T00:00:00Z}" > "\$STATE/provisioned_at"
+                # Echo back the id --provision generated and passed down. That
+                # is what makes the ownership check pass LEGITIMATELY rather
+                # than by construction. _S102_FORGE_ID overrides it so a test
+                # can simulate a session stamped by somebody else.
+                printf '%s' "\${_S102_FORGE_ID:-\${SANDY_PROVISION_ID:-}}" > "\$STATE/provision_id"
+                printf '%s\n' "\${SANDY_PROVISION_ID:-}" >> "\$STATE/ids.log"
             else
-                rm -f "\$STATE/provisioned_at"
+                rm -f "\$STATE/provision_id"
             fi
         fi
         exit "\$rc"
@@ -9202,7 +9207,7 @@ case "\${1:-}" in
         echo "stop \$*" >> "\$STATE/calls.log"
         rc="\${_S102_STOP_RC:-0}"
         if [ "\$rc" = "0" ]; then
-            rm -f "\$STATE/cid" "\$STATE/provisioned_at"
+            rm -f "\$STATE/cid" "\$STATE/provision_id"
         fi
         exit "\$rc"
         ;;
@@ -9218,7 +9223,7 @@ export _S102_STATE
 # Reset the fake-docker state + call log to a known-empty baseline between
 # scenarios (no live container, no calls recorded yet).
 _s102_reset_state() {
-    rm -f "$_S102_STATE/cid" "$_S102_STATE/provisioned_at" "$_S102_STATE/inspect_calls" \
+    rm -f "$_S102_STATE/cid" "$_S102_STATE/provision_id" "$_S102_STATE/inspect_calls" \
         "$_S102_STATE/ps_calls" "$_S102_STATE/calls.log"
     : > "$_S102_STATE/calls.log"
 }
@@ -9436,6 +9441,40 @@ check "§102(13c) an unstamped session is left alone — exit 0" \
     bash -c '[ "$1" -eq 0 ]' -- "$_S102_RC"
 check "§102(13c) --stop was NEVER attempted on the unstamped session" \
     bash -c '! grep -q "^stop " "$1"' -- "$_S102_STATE/calls.log"
+
+# --- 102.13d: OWNERSHIP, which is the whole reason this label exists.
+# The session that comes up carries a VALID, non-empty token -- just not the one
+# THIS run generated. Comparing timestamps could never catch this: provisioned_at
+# is second-granularity, so a fleet bring-up loop starting two sandboxes in the
+# same second produced byte-identical stamps, and a stability check would have
+# called somebody else's session "ours" and stopped it. Comparing an id this run
+# minted makes correctness independent of the clock entirely.
+_s102_reset_state
+_S102_OUT="$(mktemp)"
+_S102_RC=0
+_S102_START_RC=0 _S102_FORGE_ID="somebody-elses-token" \
+    _s102_run "$_S102_OUT" --workspace "$_S102_WS" --yes || _S102_RC=$?
+check "§102(13d) a session stamped with a DIFFERENT provision_id is left alone — exit 0" \
+    bash -c '[ "$1" -eq 0 ]' -- "$_S102_RC"
+check "§102(13d) --stop was NEVER attempted on the foreign-token session" \
+    bash -c '! grep -q "^stop " "$1"' -- "$_S102_STATE/calls.log"
+
+# --- 102.13e: the token is RANDOM per run, not derived from the clock. Two
+# provisions back to back land in the same second on any normal machine, so if
+# the id were a timestamp they would collide -- exactly the bug this replaced.
+_s102_reset_state
+rm -f "$_S102_STATE/ids.log"
+_S102_OUT="$(mktemp)"
+_S102_START_RC=0 _s102_run "$_S102_OUT" --workspace "$_S102_WS" --yes || true
+_s102_reset_state
+_S102_START_RC=0 _s102_run "$_S102_OUT" --workspace "$_S102_WS" --yes || true
+check "§102(13e) two provisions minted two DISTINCT non-empty provision_ids" \
+    bash -c '
+        [ "$(wc -l < "$1" | tr -d " ")" = "2" ] || exit 1
+        _a="$(sed -n 1p "$1")"; _b="$(sed -n 2p "$1")"
+        [ -n "$_a" ] && [ -n "$_b" ] && [ "$_a" != "$_b" ]' -- "$_S102_STATE/ids.log"
+check "§102(13e) the id is a hex token, not a timestamp (no colons or dashes)" \
+    bash -c 'sed -n 1p "$1" | grep -qE "^[0-9a-f]{8,}$"' -- "$_S102_STATE/ids.log"
 
 # --- 102.14: --workspace and --print-schema/--help lockstep is already
 # covered end-to-end by §91 (which will fail loudly if --provision drifts

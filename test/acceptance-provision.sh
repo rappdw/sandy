@@ -89,6 +89,39 @@ ck "non-TTY without --yes names the fix ('pass --yes')" "grep -q -- 'pass --yes'
 ck "non-TTY without --yes started no container" "[ -z \"$(cid)\" ]"
 rm -f /tmp/provision-accept-noyes-$$.log
 
+echo "== 6. the supervisor stamps sandy.provision_id with the id it was handed =="
+# This is the one half of the ownership model a unit fixture structurally cannot
+# reach: run-tests.sh 102 fakes --start with a wrapper, so sandy's real
+# supervisor branch never executes there (verified -- removing the stamping line
+# does not fail 102). Only a real daemon launch exercises it, so it is asserted
+# here. Drive --start directly with a KNOWN id rather than going through
+# --provision, which starts and stops in one shot and leaves nothing to inspect.
+_PROV_ID="acceptance-$$-$(date -u +%s)"
+SANDY_PROVISION=1 SANDY_PROVISION_ID="$_PROV_ID" \
+    "$SANDY" --start --workspace "$WS" >/dev/null 2>&1 || true
+_PC="$(cid)"
+ck "a provisioned --start produced a container" "[ -n \"$_PC\" ]"
+if [ -n "$_PC" ]; then
+    _GOT="$(docker inspect -f '{{ index .Config.Labels "sandy.provision_id" }}' "$_PC" 2>/dev/null || true)"
+    _AT="$(docker inspect -f '{{ index .Config.Labels "sandy.provisioned_at" }}' "$_PC" 2>/dev/null || true)"
+    ck "sandy.provision_id equals the id passed in (ownership, not just presence)" \
+        "[ \"$_GOT\" = \"$_PROV_ID\" ]"
+    # provisioned_at stays a PURE ISO timestamp -- identity lives in its own
+    # label precisely so this one never has to carry two meanings.
+    ck "sandy.provisioned_at is still a plain ISO-8601 timestamp" \
+        "printf '%s' \"$_AT\" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'"
+fi
+"$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true
+
+echo "== 7. a plain --start (no SANDY_PROVISION) carries NO provision_id =="
+"$SANDY" --start --workspace "$WS" >/dev/null 2>&1 || true
+_PC2="$(cid)"
+if [ -n "$_PC2" ]; then
+    _GOT2="$(docker inspect -f '{{ index .Config.Labels "sandy.provision_id" }}' "$_PC2" 2>/dev/null || true)"
+    ck "an unprovisioned session has an empty sandy.provision_id" "[ -z \"$_GOT2\" ]"
+fi
+"$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true
+
 echo
 echo "==================================================="
 printf 'RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
