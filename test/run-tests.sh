@@ -4168,6 +4168,13 @@ check "templates/user-setup.sh.tmpl matches sandy's generate_user_setup() heredo
     test "$_TMPL_DRIFT_RC" -eq 0
 
 if command -v shellcheck >/dev/null 2>&1; then
+    # Record the version. shellcheck adds checks between releases, so this gate
+    # can pass locally and fail in CI (or vice versa) purely on version skew --
+    # and the first question when that happens is "which one ran?". The log
+    # should answer it without a re-run. The .sandy/Dockerfile deliberately
+    # installs Debian's shellcheck to track the CI runner rather than newest.
+    printf "  \033[2mshellcheck %s\033[0m\n" \
+        "$(shellcheck --version 2>/dev/null | awk '/^version:/{print $2}')"
     _SC_OUT="$(shellcheck "$(dirname "$0")/../templates/user-setup.sh.tmpl" 2>&1)" && _SC_RC=0 || _SC_RC=$?
     if [ "$_SC_RC" -ne 0 ]; then
         printf "  \033[0;33m%s\033[0m\n" "$_SC_OUT"
