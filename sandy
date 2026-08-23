@@ -111,6 +111,7 @@ SANDY_PASSIVE_KEYS=(
 #       not meant to be operator-discoverable — SANDY_DEBUG_CLEANUP, and
 #       (elsewhere, listed nowhere in this array either)
 #       SANDY_DAEMON_SUPERVISOR / SANDY_UPDATE_RESTART / SANDY_PROVISION /
+#       SANDY_PROVISION_ID /
 #       SANDY_TEST_PANE_TAGS.
 #   SANDY_SESSION_NONCE stays fully unregistered (not even in this array) for
 #   trust-root reasons specific to it — see "Self-Attestation Marker" in
@@ -3631,9 +3632,22 @@ if [[ "${1:-}" == "--provision" ]]; then
     # Execute with child stdio INHERITED (streamed), not captured — this is
     # meant to prove the real launch path ran, so the user should see it run,
     # the same way --stop-all/--update-sessions stream their composed calls.
+    # Ownership token for THIS run. Uniqueness comes from randomness, not from
+    # clock resolution: sandy.provisioned_at is an ISO timestamp at SECOND
+    # granularity, so a fleet bring-up loop provisioning two sandboxes inside
+    # the same second produced byte-identical stamps. Sub-second precision is
+    # NOT the fix -- date's %N is GNU-only, and this runs in the host-side
+    # supervisor, so on macOS it would emit a literal N, making every stamp
+    # identical and collisions MORE likely, invisibly to a Linux CI.
+    # Deliberately NOT _sandy_session_nonce: that is the self-attestation trust
+    # root, and a docker label is readable by anything that can run
+    # docker inspect. Same portable generation idiom, separate value.
+    _pv_id="$( (openssl rand -hex 8 2>/dev/null) \
+        || (head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
+        || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
     info "Starting a real launch for $_pv_wd..."
     _pv_start_rc=0
-    SANDY_PROVISION=1 "$0" --start --workspace "$_pv_wd" || _pv_start_rc=$?
+    SANDY_PROVISION=1 SANDY_PROVISION_ID="$_pv_id" "$0" --start --workspace "$_pv_wd" || _pv_start_rc=$?
     if [ "$_pv_start_rc" -ne 0 ]; then
         error "--provision: --start failed (rc=$_pv_start_rc) — sandbox not provisioned."
         exit 1
@@ -3650,8 +3664,10 @@ if [[ "${1:-}" == "--provision" ]]; then
     # session running rather than risk tearing down one it did not create.
     _pv_cid="$(docker ps -q --filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$_pv_wd" 2>/dev/null | head -1)" || true
     _pv_stamp=""
-    [ -n "$_pv_cid" ] && _pv_stamp="$(docker inspect -f '{{ index .Config.Labels "sandy.provisioned_at" }}' "$_pv_cid" 2>/dev/null || true)"
-    if [ -z "$_pv_cid" ] || [ -z "$_pv_stamp" ]; then
+    [ -n "$_pv_cid" ] && _pv_stamp="$(docker inspect -f '{{ index .Config.Labels "sandy.provision_id" }}' "$_pv_cid" 2>/dev/null || true)"
+    # Not merely "carries a token" but "carries OUR token" -- this proves
+    # ownership, where comparing timestamps only ever proved stability.
+    if [ -z "$_pv_cid" ] || [ -z "$_pv_stamp" ] || [ "$_pv_stamp" != "$_pv_id" ]; then
         warn "--provision: could not confirm ownership of the session that came up for $_pv_wd — leaving it running rather than risk stopping a session this run did not create."
         info "Sandbox for $_pv_wd is up (the launch path was exercised); provision is stopping here without tearing the session down."
         exit 0
@@ -3659,7 +3675,7 @@ if [[ "${1:-}" == "--provision" ]]; then
 
     _pv_cid2="$(docker ps -q --filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$_pv_wd" 2>/dev/null | head -1)" || true
     _pv_stamp2=""
-    [ -n "$_pv_cid2" ] && _pv_stamp2="$(docker inspect -f '{{ index .Config.Labels "sandy.provisioned_at" }}' "$_pv_cid2" 2>/dev/null || true)"
+    [ -n "$_pv_cid2" ] && _pv_stamp2="$(docker inspect -f '{{ index .Config.Labels "sandy.provision_id" }}' "$_pv_cid2" 2>/dev/null || true)"
     if [ "$_pv_cid2" != "$_pv_cid" ] || [ -z "$_pv_stamp2" ] || [ "$_pv_stamp2" != "$_pv_stamp" ]; then
         warn "--provision: the session for $_pv_wd changed before teardown (a different session now holds it) — leaving it alone rather than stopping a session this run did not create."
         info "Sandbox for $_pv_wd is provisioned; skipping --stop."
@@ -9626,7 +9642,13 @@ if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
         RUN_FLAGS+=(--label "sandy.updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
     fi
     if [ "${SANDY_PROVISION:-0}" = "1" ]; then
+        # provisioned_at stays a PURE ISO timestamp (informational: "when was
+        # this provisioned", readable in docker inspect). Identity lives in a
+        # separate label so the timestamp never has to carry two meanings, and
+        # so a consumer can still parse it as a plain timestamp.
         RUN_FLAGS+=(--label "sandy.provisioned_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+        [ -n "${SANDY_PROVISION_ID:-}" ] && \
+            RUN_FLAGS+=(--label "sandy.provision_id=$SANDY_PROVISION_ID")
     fi
     # D2 — forwarded so the container-side launch script (user-setup.sh) can
     # create the inner tmux session detached and keep PID 1 alive with
