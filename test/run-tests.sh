@@ -9235,7 +9235,21 @@ _s102_run() {
 # --- 102.1: docker unreachable -> exit 1, clear message, nothing else ran ---
 _s102_reset_state
 _S102_OUT="$(mktemp)"
-env PATH="/usr/bin:/bin" SANDY_HOME="$_S102_HOME" \
+# "Unreachable" must be simulated with a docker stub that FAILS, not by
+# narrowing PATH. PATH="/usr/bin:/bin" makes docker absent on a dev box but NOT
+# on a GitHub runner, where docker lives in /usr/bin -- so the preflight would
+# pass, --provision would proceed, and this check failed in CI while passing
+# locally. A failing stub is deterministic in both places, and it also exercises
+# the real branch (a reachable binary whose daemon is down), which "no binary on
+# PATH" does not.
+_S102_DOWNBIN="$(mktemp -d)"
+cat > "$_S102_DOWNBIN/docker" <<'S102DOCKERDOWN'
+#!/usr/bin/env bash
+# Every subcommand fails: the daemon is unreachable.
+exit 1
+S102DOCKERDOWN
+chmod +x "$_S102_DOWNBIN/docker"
+env PATH="$_S102_DOWNBIN:/usr/bin:/bin" SANDY_HOME="$_S102_HOME" \
     "$_S102_WRAPPER" --provision --workspace "$_S102_WS" >"$_S102_OUT" 2>&1 && _S102_RC=0 || _S102_RC=$?
 check "§102(1) docker unreachable: exit 1 with its own message (mutation: drop the preflight -> falls through to workspace resolution instead)" \
     bash -c '[ "$1" -eq 1 ] && grep -q "requires a reachable Docker daemon" "$2"' -- "$_S102_RC" "$_S102_OUT"
@@ -9428,7 +9442,7 @@ check "§102(13c) --stop was NEVER attempted on the unstamped session" \
 # from cli_flags/--help); this section is deliberately NOT re-asserting that
 # here to avoid a second, driftable copy of the same assertion.
 
-rm -rf "$_S102_BIN" "$_S102_HOME" "$_S102_WS" "$_S102_STATE"
+rm -rf "$_S102_DOWNBIN" "$_S102_BIN" "$_S102_HOME" "$_S102_WS" "$_S102_STATE"
 rm -f "$_S102_OUT"
 unset _S102_STATE
 
