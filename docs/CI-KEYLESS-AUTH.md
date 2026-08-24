@@ -187,40 +187,44 @@ So: keep `XAI_API_KEY` as a secret, or drop it and let the grok sections skip.
    Confirm the log reads `auth: workload identity federation (rule …)` **and** that §7 did not skip. A skip means the credential never arrived.
 5. **Build the per-section loop** (below), run the full suite, and only then delete `ANTHROPIC_API_KEY` from secrets.
 
-### Token lifetimes — measured, and not what the form implies
+### Token lifetimes — the usable window is 300s, not 598s
 
-**Two different lifetimes, and conflating them cost this document two revisions.**
-
-```
-JWT lifetime_seconds : 300    the GitHub assertion's own validity
-expires_in           : 598    the Anthropic access token you actually use
-```
-
-The rule form says *"Token lifetime … Upper-bounded by JWT expiry"*, which reads as "the minted token cannot outlive the JWT". **Measured on 2026-08-24, that is not what happens**: a 300-second JWT yielded a 598-second access token — the rule's configured 600, essentially in full.
-
-So the usable credential is **~10 minutes**, not the 5 the JWT would suggest. Budget against `expires_in`, not against the JWT.
+**Three lifetimes, and confusing them cost this document three revisions.**
 
 ```
-workflow: checkout + docker verify + disk reclaim    ~1-2 min
-suite:    agent image build before the first claude  ~3-6 min   (moved outside the window)
-lean run  (SKIP=19,20,21)                            ~9.5 min on the maintainer host; CI is slower
-full run                                             ~27 min
+JWT lifetime_seconds : 300    the GitHub assertion's validity  <-- THE ONE THAT BINDS
+expires_in           : 598    the access token, IF you exchange immediately
+rule "Token lifetime": 600    configured; not capped by the JWT as the form implies
 ```
 
-Per section, against ~598s:
+The rule form says *"Token lifetime … Upper-bounded by JWT expiry"*. Measured, a 300s JWT yields a 598s access token, so that wording does not describe what happens. But **598s is not the budget**, because nothing in a real run exchanges immediately.
 
-| | duration | fits? |
+**Claude Code performs the exchange lazily — inside the container, when it first needs credentials.** By then the workflow's JWT may already be dead. Proved by a real run:
+
+```
+minted at 03:53:03Z   JWT lifetime 300s   → expires 03:58:03Z
+✗ agent reaches the model API through the proxy   at 04:02:12Z  (+549s)
+  API Error: Token exchange failed with status 401
+```
+
+Note the error: *token exchange* failed, not *access token expired*. The agent was still trying to exchange, 4 minutes after the assertion died.
+
+**So budget against the JWT's 300 seconds.** Every section that ran inside that window passed; the one that runs ~9 minutes in did not.
+
+### What that means for the suite
+
+That lean run: **57 of 58 passed, 8 skipped, 1152s total.** The single failure was this expiry, not a defect.
+
+| | duration | fits 300s from mint? |
 |---|---|---|
-| §20 (runs `--rebuild`) | ~432s | yes |
-| §19 + §21 | ~300s combined | yes |
-| the other ~23 sections | ~14.6 min **total** | trivially |
+| the first few sections | inside the window | yes |
+| proxy end-to-end (§13) | starts ~9 min in | **no** |
+| lean run total | ~1152s | **no** |
+| full run | ~27 min | **no** |
 
-**Every section fits inside one token**, so per-section re-minting covers the whole suite with no section surgery. Two mitigations, in order:
+**Per-section re-minting is therefore required, not optional** — and it must mint immediately before each section, since a token minted at job start is dead within five minutes.
 
-1. **Pre-build outside the token window** (in the drafted patch). `./sandy --build-only` needs no credentials, so the image build should not consume the credential. Still worth doing — it is 3-6 minutes of a 10-minute budget.
-2. **Re-mint per section** — loop `SANDY_INTEG_ONLY` in the workflow. This is the mechanism that retires the API key.
-
-> **Whether the rule's Token lifetime can be raised above 600 is untested.** The form's wording suggested a JWT-derived cap that measurement disproved, so the honest position is that the bound is not understood, not that it is absent. If a longer credential would help, test it rather than reasoning from the form — this document has been wrong about that field twice.
+The earlier claim that "every section fits inside one token" was computed against 598s and is withdrawn. Against 300s, §20 (~432s) does not fit and needs splitting after all.
 
 A third option is deliberately rejected: re-minting from *inside* the container would require forwarding `ACTIONS_ID_TOKEN_REQUEST_TOKEN` into the sandbox and allowlisting GitHub's token endpoint through the egress proxy. That puts a GitHub credential inside the box to avoid an Anthropic one — strictly worse than the problem it solves.
 
