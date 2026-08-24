@@ -193,6 +193,14 @@ jobs:
           # CI runners are slower than the maintainer host; the default 300s
           # per-test timeout is tuned for the latter.
           SANDY_INTEG_TIMEOUT: '600'
+          # Declare that a claude credential is EXPECTED whenever WIF is
+          # configured, so the suite fails instead of skipping ~22 sections and
+          # reporting success. Run 32681634083 did exactly that: it announced
+          # "auth: workload identity federation", ended up with Claude "none
+          # configured", and went green having tested nothing. Actions cannot
+          # omit an env entry conditionally, so this evaluates to '0' (opt-out,
+          # the safe default) when WIF is not configured.
+          SANDY_INTEG_REQUIRE_CLAUDE: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID != '' && '1' || '0' }}
         run: |
           set -euo pipefail
           if [ -n "${ANTHROPIC_FEDERATION_RULE_ID:-}" ]; then
