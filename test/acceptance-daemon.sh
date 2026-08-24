@@ -32,7 +32,19 @@ PASS=0; FAIL=0
 ck() { if eval "$2" >/dev/null 2>&1; then printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS+1));
        else printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); fi; }
 cid() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.workspace_path=$WS" 2>/dev/null | head -1; }
-cleanup_ws() { "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true; rm -rf "$(dirname "$WS")"; }
+cleanup_ws() { "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true; rm -rf "$(dirname "$WS")"; _cleanup_sandy_home || true; }
+# Redirect $SANDY_HOME at a throwaway dir BEFORE anything launches, so the
+# fixture sandboxes this harness creates never land in the developer's real
+# state (where they are indistinguishable from real sandboxes to every
+# --print-state consumer). Override by exporting SANDY_TEST_NO_ISOLATE=1.
+. "$(dirname "$0")/lib-isolated-home.sh"
+[ "${SANDY_TEST_NO_ISOLATE:-0}" = "1" ] || _isolate_sandy_home
+# Re-derive AFTER the switch. This harness resolves SANDY_HOME_DIR near the top
+# of the file, which runs before isolation -- left stale it would point at the
+# real home while sandy created sandboxes in the isolated one, so every
+# assertion about sandbox contents would look for a directory that is not there.
+SANDY_HOME_DIR="${SANDY_HOME:-$HOME/.sandy}"
+
 trap cleanup_ws EXIT
 
 command -v docker >/dev/null 2>&1 || { echo "docker not found — run this on the host"; exit 2; }

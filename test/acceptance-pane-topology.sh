@@ -80,7 +80,15 @@ WS=""   # current in-flight workspace; the trap reads this so an abrupt abort
 cleanup() {
     [ -n "$WS" ] && "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1
     rm -rf "$WSTMP"   # the whole mktemp tree, not just the subdir under it
+    _cleanup_sandy_home || true
 }
+# Redirect $SANDY_HOME at a throwaway dir BEFORE anything launches, so the
+# fixture sandboxes this harness creates never land in the developer's real
+# state (where they are indistinguishable from real sandboxes to every
+# --print-state consumer). Override by exporting SANDY_TEST_NO_ISOLATE=1.
+. "$(dirname "$0")/lib-isolated-home.sh"
+[ "${SANDY_TEST_NO_ISOLATE:-0}" = "1" ] || _isolate_sandy_home
+
 trap cleanup EXIT
 
 command -v docker >/dev/null 2>&1 || { echo "docker not found — run this on the host"; exit 2; }
