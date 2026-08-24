@@ -3615,7 +3615,7 @@ d=json.load(open(sys.argv[1]))
 sb=[s for s in d[\"sandboxes\"] if s.get(\"name\")==\"zork-3dfda686\"]
 assert sb, \"fixture sandbox missing from --print-state output\"
 s=sb[0]
-req={\"name\",\"path\",\"workspace_path\",\"workspace_exists\",\"created_version\",\"last_used_version\",\"created_at\",\"last_used_at\",\"size_bytes\",\"handoff_enabled\",\"lock_held\",\"lock_holder_pid\",\"lock_holder_alive\"}
+req={\"name\",\"path\",\"workspace_path\",\"workspace_exists\",\"created_version\",\"last_used_version\",\"created_at\",\"last_used_at\",\"size_bytes\",\"handoff_enabled\",\"agent_args_files\",\"lock_held\",\"lock_holder_pid\",\"lock_holder_alive\"}
 missing=req-set(s)
 assert not missing, \"missing per-sandbox fields: \"+repr(sorted(missing))
 " "$1"' -- "$_PS_FIX_JSON"
@@ -5941,10 +5941,17 @@ check "value split: quoted arg NOT merged — spaces still split (edge: 3 tokens
 
 # (d) Injection: prepends config args before CLI $@, runs AFTER approval, NEVER
 # eval, and is NOT added to the --start re-exec argv (would double-apply).
-check "injection prepends config args before command-line \$@" \
-    grep -qF 'set -- "${_sandy_agent_args_argv[@]}" "$@"' "$_S77"
-check "injection whitespace-splits with read -ra and never evals the value" \
-    bash -c 'grep -qF "read -ra _sandy_agent_args_raw <<< \"\$SANDY_AGENT_ARGS\"" "$1" && ! grep -q "eval[^a-z].*SANDY_AGENT_ARGS" "$1"' -- "$_S77"
+# Rewritten when per-sandbox agent-args landed (§106): the single global
+# `set -- "${_sandy_agent_args_argv[@]}" "$@"` prepend was replaced by per-agent
+# resolution, so the two checks that asserted those exact strings were stale and
+# FAILED against working code. They now assert the invariant that actually
+# survived the refactor -- ONE tokenizer for BOTH sources -- which is the
+# property worth guarding (a second parallel tokenizer is how the -p/--print
+# filter would drift out of sync between the two sources).
+check "ONE tokenizer serves both agent-args sources (mutation: a second parallel path lets the mode-flag filter drift between them)" \
+    bash -c 'grep -q "_sandy_filter_agent_args \"\$SANDY_AGENT_ARGS\"" "$1" && grep -q "_sandy_filter_agent_args \"\$(cat \"\$_sandy_aa_file\")\"" "$1"' -- "$_S77"
+check "the tokenizer whitespace-splits with read -ra and never evals the value" \
+    bash -c 'grep -qF "read -ra _aa_raw <<< \"\$_aa_norm\"" "$1" && ! grep -q "eval[^a-z].*SANDY_AGENT_ARGS" "$1"' -- "$_S77"
 check "injection runs after the approval/extra-env loader (unapproved workspace value → empty → no-op)" \
     bash -c 'awk "/^_load_sandy_extra_env\$/{seen=1} seen&&/SANDY_AGENT_ARGS:-/{found=1} END{exit !found}" "$1"' -- "$_S77"
 check "SANDY_AGENT_ARGS is NOT added to the --start re-exec argv (no double-apply)" \
@@ -8008,8 +8015,13 @@ check "§97(7) the ~/.handoff workspace-collision refusal still fires under the 
 # that level (only subdirs plus the :ro session-marker FILE). If a future change
 # adds a bare -v of $SANDBOX_DIR, this fails rather than silently handing the
 # agent a way to enroll itself.
-check "§97(8) NEGATIVE: no bind mount covers the sandbox top level" \
-    bash -c '! grep -qE "RUN_FLAGS\+=\(-v \"\\\$SANDBOX_DIR:" "$1"' -- "$_S97"
+# Matches EVERY spelling of the variable, not just `$SANDBOX_DIR:`. The
+# original form was evadable: `${SANDBOX_DIR}:` and `$SANDBOX_DIR/:` both name
+# the same directory and both slipped past it (verified by injection). This
+# guard is what keeps .handoff-enabled -- and now agent-args.<agent> -- out of
+# the agent's reach, so a spelling-sensitive match is not good enough.
+check "§97(8) NEGATIVE: no bind mount covers the sandbox top level, in any spelling of \$SANDBOX_DIR" \
+    bash -c '! grep -E "RUN_FLAGS\+=\(-v \"\\\$\{?SANDBOX_DIR\}?/?:" "$1" >/dev/null' -- "$_S97"
 check "§97(9) NEGATIVE: no mount references the marker path" \
     bash -c '! grep -q "handoff-enabled" <(grep "RUN_FLAGS+=(-v" "$1") 2>/dev/null || ! grep "RUN_FLAGS+=(-v" "$1" | grep -q "handoff-enabled"' -- "$_S97"
 
@@ -9975,6 +9987,361 @@ for _s105_h in "$(dirname "$0")"/acceptance-*.sh; do
     fi
 done
 unset _s105_h _s105_n _s105_iso_ln _s105_hd_ln _s105_out _s105_home _s105_guard_rc
+
+# ============================================================
+echo ""
+echo "§106: per-agent operator args — \$SANDBOX_DIR/agent-args.<agent> (#per-agent-args)"
+# ============================================================
+# An operator can drop a file at the SANDBOX TOP LEVEL, agent-args.<agent>
+# (agent-args.claude, agent-args.codex, ...), whose contents are extra CLI
+# args for that one agent — the same capability SANDY_AGENT_ARGS already has,
+# from a place a git repository cannot reach. Precedence: the file wins over
+# SANDY_AGENT_ARGS for that agent (never merged, always a one-line notice).
+# Per-agent isolation in a multi-agent combo is the hard part: each pane must
+# see only its own agent's tokens. All checks below are filesystem-only —
+# no Docker container is ever launched.
+_S106_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S106_TMPL="$(cd "$(dirname "$0")/.." && pwd)/templates/user-setup.sh.tmpl"
+
+# --- extract the two host-side blocks, exactly as §97 extracts its block ---
+_S106_FILTER_BLK="$(sed -n '/^# BEGIN agent-args filter/,/^# END agent-args filter/p' "$_S106_SANDY")"
+_S106_PERAGENT_BLK="$(sed -n '/^# BEGIN per-agent args (agent-args.<agent>)/,/^# END per-agent args/p' "$_S106_SANDY")"
+
+# --- the runner: stubs warn/info (both write to stdout, greppable), sets
+# _SANDY_AGENTS from S106_AGENTS, evals both blocks, prints the five
+# resolved SANDY_AGENT_ARGS_<AGENT> values one per line. ---
+_S106_RUN="$(mktemp)"
+cat > "$_S106_RUN" <<'S106RUN'
+warn(){ echo "WARN: $*"; }
+info(){ echo "INFO: $*"; }
+IFS=',' read -ra _SANDY_AGENTS <<< "${S106_AGENTS:-claude}"
+eval "$1"
+eval "$2"
+printf 'CLAUDE=%s\n' "$SANDY_AGENT_ARGS_CLAUDE"
+printf 'GEMINI=%s\n' "$SANDY_AGENT_ARGS_GEMINI"
+printf 'CODEX=%s\n' "$SANDY_AGENT_ARGS_CODEX"
+printf 'OPENCODE=%s\n' "$SANDY_AGENT_ARGS_OPENCODE"
+printf 'GROK=%s\n' "$SANDY_AGENT_ARGS_GROK"
+S106RUN
+
+_s106_resolve() { # $1 = SANDBOX_DIR, $2 = SANDY_AGENT_ARGS, $3 = S106_AGENTS
+    SANDBOX_DIR="$1" SANDY_AGENT_ARGS="$2" S106_AGENTS="$3" \
+        bash "$_S106_RUN" "$_S106_FILTER_BLK" "$_S106_PERAGENT_BLK" 2>&1
+}
+
+# --- (1) file alone -> args resolve --------------------------------------
+_s106_c1() {
+    local d out
+    d="$(mktemp -d)"
+    printf '%s' '--foo --bar' > "$d/agent-args.claude"
+    out="$(_s106_resolve "$d" "" claude)"
+    rm -rf "$d"
+    printf '%s\n' "$out" | grep -qx 'CLAUDE=--foo --bar'
+}
+check "§106(1) file alone -> args resolve" _s106_c1
+
+# --- (2) SANDY_AGENT_ARGS fallback unchanged when no file -----------------
+_s106_c2() {
+    local d out
+    d="$(mktemp -d)"
+    out="$(_s106_resolve "$d" "--baz" claude)"
+    rm -rf "$d"
+    printf '%s\n' "$out" | grep -qx 'CLAUDE=--baz'
+}
+check "§106(2) SANDY_AGENT_ARGS fallback unchanged (no file present)" _s106_c2
+
+# --- (3) both present: file wins by EXACT equality, never concatenated,
+# and a one-line notice is emitted. ----------------------------------------
+_s106_c3() {
+    local d out
+    d="$(mktemp -d)"
+    printf '%s' '--foo' > "$d/agent-args.claude"
+    out="$(_s106_resolve "$d" "--baz" claude)"
+    rm -rf "$d"
+    printf '%s\n' "$out" | grep -qx 'CLAUDE=--foo' || return 1
+    printf '%s\n' "$out" | grep -q 'overrides SANDY_AGENT_ARGS for claude' || return 1
+}
+check "§106(3) both present: file wins (exact equality), notice emitted, never merged" _s106_c3
+
+# --- (4) whitespace-only file behaves as ABSENT, falls back to config -----
+_s106_c4() {
+    local d out
+    d="$(mktemp -d)"
+    printf '   \n  \n' > "$d/agent-args.claude"
+    out="$(_s106_resolve "$d" "--baz" claude)"
+    rm -rf "$d"
+    printf '%s\n' "$out" | grep -qx 'CLAUDE=--baz'
+}
+check "§106(4) whitespace-only file = absent (falls back to SANDY_AGENT_ARGS)" _s106_c4
+
+# --- (5) multi-line file: every line survives (read -ra <<< reads ONE
+# line — this catches silent truncation to just the first). ---------------
+_s106_c5() {
+    local d out
+    d="$(mktemp -d)"
+    printf -- '--one\n--two\n' > "$d/agent-args.claude"
+    out="$(_s106_resolve "$d" "" claude)"
+    rm -rf "$d"
+    printf '%s\n' "$out" | grep -qx 'CLAUDE=--one --two'
+}
+check "§106(5) multi-line file: every line survives (no silent truncation)" _s106_c5
+
+# --- (6) mode flags dropped with a warning naming the file; a file that is
+# ONLY a mode flag behaves as absent, falling back to config. --------------
+_s106_c6() {
+    local d out out2
+    d="$(mktemp -d)"
+    printf -- '-p --foo' > "$d/agent-args.claude"
+    out="$(_s106_resolve "$d" "" claude)"
+    printf '%s\n' "$out" | grep -qx 'CLAUDE=--foo' || { rm -rf "$d"; return 1; }
+    printf '%s\n' "$out" | grep -q 'agent-args.claude' || { rm -rf "$d"; return 1; }
+    printf '%s\n' "$out" | grep -q 'ignoring mode flag' || { rm -rf "$d"; return 1; }
+    printf -- '-p' > "$d/agent-args.claude"
+    out2="$(_s106_resolve "$d" "--baz" claude)"
+    rm -rf "$d"
+    printf '%s\n' "$out2" | grep -qx 'CLAUDE=--baz'
+}
+check "§106(6) mode flags dropped (warning names the file); -p-only file = absent" _s106_c6
+
+# --- (7) host-side per-agent isolation: two files, two agents selected,
+# a third selected agent with no file stays empty. -------------------------
+_s106_c7() {
+    local d out
+    d="$(mktemp -d)"
+    printf '%s' '--ca' > "$d/agent-args.claude"
+    printf '%s' '--cx' > "$d/agent-args.codex"
+    out="$(_s106_resolve "$d" "" claude,codex)"
+    rm -rf "$d"
+    printf '%s\n' "$out" | grep -qx 'CLAUDE=--ca' || return 1
+    printf '%s\n' "$out" | grep -qx 'CODEX=--cx' || return 1
+    printf '%s\n' "$out" | grep -qx 'GEMINI=' || return 1
+}
+check "§106(7) host-side per-agent isolation across a multi-agent combo" _s106_c7
+
+# --- (8) an env-forged SANDY_AGENT_ARGS_CLAUDE is overwritten, never
+# survives into the resolved value. -----------------------------------------
+_s106_c8() {
+    local d out
+    d="$(mktemp -d)"
+    out="$(SANDBOX_DIR="$d" SANDY_AGENT_ARGS="" SANDY_AGENT_ARGS_CLAUDE=INJECTED S106_AGENTS=codex \
+        bash "$_S106_RUN" "$_S106_FILTER_BLK" "$_S106_PERAGENT_BLK" 2>&1)"
+    rm -rf "$d"
+    printf '%s\n' "$out" | grep -qx 'CLAUDE='
+}
+check "§106(8) NEGATIVE: env forgery of SANDY_AGENT_ARGS_CLAUDE is overwritten" _s106_c8
+
+# --- (9) container-side half: _sandy_build_agent_cmd prepends only the
+# calling pane's own tokens, before the CLI pass-through args, and adds no
+# stray token when the env is empty. Extracted from the GENERATED mirror
+# (templates/user-setup.sh.tmpl) with stub build_*_cmd functions. -----------
+_S106_C9_FN="$(sed -n '/^_sandy_build_agent_cmd() {$/,/^}$/p' "$_S106_TMPL")"
+_S106_C9_SCRIPT="$(mktemp)"
+{
+    cat <<'S106C9STUBS'
+build_claude_cmd(){ printf '%s\n' "$@"; }
+build_gemini_cmd(){ printf '%s\n' "$@"; }
+build_codex_cmd(){ printf '%s\n' "$@"; }
+build_opencode_cmd(){ printf '%s\n' "$@"; }
+build_grok_cmd(){ printf '%s\n' "$@"; }
+S106C9STUBS
+    printf '%s\n' "$_S106_C9_FN"
+    printf '%s\n' '_sandy_build_agent_cmd "$@"'
+} > "$_S106_C9_SCRIPT"
+
+check "§106(9a) claude pane gets its own tokens, prepended before the CLI arg" \
+    bash -c 'out="$(SANDY_AGENT_ARGS_CLAUDE=--ca SANDY_AGENT_ARGS_CODEX=--cx bash "$1" claude x)"
+        [ "$out" = "$(printf "%s\n%s" --ca x)" ]' -- "$_S106_C9_SCRIPT"
+check "§106(9b) codex pane gets its OWN tokens (not claude's)" \
+    bash -c 'out="$(SANDY_AGENT_ARGS_CLAUDE=--ca SANDY_AGENT_ARGS_CODEX=--cx bash "$1" codex x)"
+        [ "$out" = "$(printf "%s\n%s" --cx x)" ]' -- "$_S106_C9_SCRIPT"
+check "§106(9c) NEGATIVE: an agent with no env value gets nothing prepended" \
+    bash -c 'out="$(SANDY_AGENT_ARGS_CLAUDE=--ca SANDY_AGENT_ARGS_CODEX=--cx bash "$1" gemini x)"
+        [ "$out" = "x" ]' -- "$_S106_C9_SCRIPT"
+check "§106(9d) NEGATIVE: all env empty -> exactly the CLI arg, no stray empty token" \
+    bash -c 'out="$(bash "$1" claude x)"
+        [ "$out" = "x" ]' -- "$_S106_C9_SCRIPT"
+# (9e) STATIC guard for the empty-array idiom itself. On bash >=4.4 (this
+# host) a bare "${arr[@]}" on a truly empty array already expands to zero
+# words, so (9d) above cannot distinguish the guarded form from a bare one —
+# the bug it guards against (an empty array yielding ONE empty-string word)
+# only reproduces on bash <4.4 / bash 3.2, which isn't available here. So the
+# portability property is asserted statically: every one of the five dispatch
+# arms must use the ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} idiom, not a
+# bare "${_sandy_aa_pre[@]}".
+check "§106(9e) STATIC: all 5 dispatch arms use the guarded empty-array idiom (bash-3.2 safety)" \
+    bash -c '[ "$(grep -c "sandy_aa_pre\[@\]+\"\${_sandy_aa_pre\[@\]}\"" "$1")" -eq 5 ]' -- "$_S106_C9_SCRIPT"
+
+# --- (10) NEGATIVE: no docker-run mount ever references agent-args.* -------
+# (a) the guard itself, exactly as written in the plan (pipefail-free child).
+# (10a) NEGATIVE: no bind mount exposes the sandbox top level -- in ANY
+# spelling. The first version of this check grepped for the literal string
+# "agent-args" on a -v line, which the dangerous regression does not contain: a
+# mount of the sandbox ROOT exposes every agent-args.* file while mentioning
+# none of them, and sailed straight through. The pre-existing §97(8) is also
+# evadable -- it matches only the exact `-v "$SANDBOX_DIR:` form, so
+# `${SANDBOX_DIR}:` and `$SANDBOX_DIR/:` both slip past it (verified). Match the
+# variable in every spelling instead, and accept only a mount that descends into
+# a NAMED subdirectory (the legitimate claude/, gemini/, handoff/... mounts).
+check "§106(10a) NEGATIVE: no bind mount exposes the sandbox top level, in any spelling of \$SANDBOX_DIR (mutation: -v \"\$SANDBOX_DIR:/x\", \"\${SANDBOX_DIR}:/x\", or \"\$SANDBOX_DIR/:/x\" must each FAIL this)" \
+    bash -c '! grep -E "RUN_FLAGS\+=\(-v \"\\\$\{?SANDBOX_DIR\}?/?:" "$1" >/dev/null' -- "$_S106_SANDY"
+check "§106(10a2) NEGATIVE: no -v line names an agent-args file directly" \
+    bash -c '! grep "RUN_FLAGS+=(-v" "$1" | grep -q "agent-args"' -- "$_S106_SANDY"
+
+# (10c) THE SEAM. The five -e forwards are the ONLY bridge between host-side
+# resolution and the container-side dispatcher. Deleting all five -- or renaming
+# one -- makes the whole feature inert while every other §106 check still
+# passes; the adversarial review confirmed 23/23 green with the seam removed.
+# Assert the count AND each agent by name, so a rename is caught too.
+check "§106(10c) SEAM: exactly five SANDY_AGENT_ARGS_<AGENT> -e forwards exist (mutation: deleting them all makes the feature inert with every other check still green)" \
+    bash -c '[ "$(grep -c "RUN_FLAGS+=(-e \"SANDY_AGENT_ARGS_" "$1" || true)" -eq 5 ]' -- "$_S106_SANDY"
+for _s106_ag in CLAUDE GEMINI CODEX OPENCODE GROK; do
+    check "§106(10c) SEAM: SANDY_AGENT_ARGS_$_s106_ag is forwarded into the container (mutation: dropping just this one silently disables that agent only)" \
+        grep -qF "RUN_FLAGS+=(-e \"SANDY_AGENT_ARGS_$_s106_ag=" "$_S106_SANDY"
+done
+unset _s106_ag
+
+# (10d) BEHAVIORAL: SANDY_EXTRA_ENV must not be able to forward a
+# SANDY_AGENT_ARGS_<AGENT> name. The secret env-file is appended to RUN_FLAGS
+# AFTER the explicit -e flags and docker resolves duplicate -e last-wins, so a
+# forwarded name silently OVERRIDES sandy's resolved per-agent args -- letting a
+# workspace config inject arbitrary agent flags behind an approval prompt that
+# names only SANDY_EXTRA_ENV. These vars are DERIVED internals, so they are in
+# none of the key lists and the existing "already a sandy-recognized key" test
+# cannot see them; the refusal is a separate case arm and needs its own check.
+# Driven for real (not grepped) by extracting the loader and running it.
+_S106_EE="$(sed -n '/^_load_sandy_extra_env() {$/,/^}$/p' "$_S106_SANDY")"
+check "§106(10d) extracted _load_sandy_extra_env (mutation: a rename empties this extraction and must fail HERE, not silently pass the checks below)" \
+    test -n "$_S106_EE"
+_s106_ee_run() {
+    # $1 = SANDY_EXTRA_ENV value. Echoes the accepted names, one per line.
+    env -i PATH="$PATH" SANDY_EXTRA_ENV="$1" bash -c "
+        warn() { :; }
+        _key_in_list() { return 1; }
+        SANDY_PRIVILEGED_KEYS=(); SANDY_PASSIVE_KEYS=(); _SANDY_EXTRA_ENV_NAMES=()
+        $_S106_EE
+        _load_sandy_extra_env
+        printf '%s\n' \"\${_SANDY_EXTRA_ENV_NAMES[@]+\"\${_SANDY_EXTRA_ENV_NAMES[@]}\"}\"
+    " 2>/dev/null || true
+}
+_S106_EE_BAD="$(_s106_ee_run 'SANDY_AGENT_ARGS_CLAUDE' || true)"
+_S106_EE_OK="$(_s106_ee_run 'HA_TOKEN' || true)"
+check "§106(10d) SANDY_EXTRA_ENV REFUSES SANDY_AGENT_ARGS_CLAUDE (mutation: deleting the case arm lets a workspace config override resolved per-agent args via docker last-wins)" \
+    bash -c '! printf "%s" "$1" | grep -q SANDY_AGENT_ARGS_CLAUDE' -- "$_S106_EE_BAD"
+check "§106(10d) ...while an ordinary name is still accepted (proves the refusal is targeted, not a blanket break of SANDY_EXTRA_ENV)" \
+    bash -c 'printf "%s" "$1" | grep -q HA_TOKEN' -- "$_S106_EE_OK"
+unset _S106_EE _S106_EE_BAD _S106_EE_OK
+# (b) mutation self-test (§89-style): the SAME guard expression must FAIL on
+# a scratch copy carrying an injected agent-args mount line, proving the
+# check above is actually live and not a pattern that stopped matching.
+_s106_c10b() {
+    local scratch rc
+    scratch="$(mktemp)"
+    cp "$_S106_SANDY" "$scratch"
+    printf '\nRUN_FLAGS+=(-v "$SANDBOX_DIR/agent-args.claude:/x")\n' >> "$scratch"
+    rc=0
+    bash -c '! grep "RUN_FLAGS+=(-v" "$1" | grep -q "agent-args"' -- "$scratch" || rc=$?
+    rm -f "$scratch"
+    [ "$rc" -ne 0 ]
+}
+check "§106(10b) mutation self-test: (10a)'s guard FAILS on an injected agent-args mount" _s106_c10b
+
+# --- (11) a copy sitting under claude/ (the agent-writable overlay) is
+# ignored — mirrors §97(6). --------------------------------------------------
+_s106_c11() {
+    local d out
+    d="$(mktemp -d)"
+    mkdir -p "$d/claude"
+    printf '%s' '--foo' > "$d/claude/agent-args.claude"
+    out="$(_s106_resolve "$d" "" claude)"
+    rm -rf "$d"
+    printf '%s\n' "$out" | grep -qx 'CLAUDE='
+}
+check "§106(11) NEGATIVE: a copy under claude/ (agent-writable tree) is ignored" _s106_c11
+
+# --- (12) _rs_keep precision: agent-args.* is kept, but only that exact
+# pattern — a near-miss name is NOT accidentally preserved. -----------------
+_s106_c12() {
+    local fn r1 r2 r3
+    fn="$(grep -m1 "_rs_keep() { case" "$_S106_SANDY" | sed "s/^ *//")"
+    r1="$(bash -c "_rs_keep_approvals=false; $fn; _rs_keep agent-args.claude && echo keep || echo gone")"
+    r2="$(bash -c "_rs_keep_approvals=false; $fn; _rs_keep agent-args.grok && echo keep || echo gone")"
+    r3="$(bash -c "_rs_keep_approvals=false; $fn; _rs_keep agent-argsx && echo keep || echo gone")"
+    [ "$r1" = "keep" ] && [ "$r2" = "keep" ] && [ "$r3" = "gone" ]
+}
+check "§106(12) --reset-sandbox _rs_keep: agent-args.* kept, agent-argsx (near miss) gone" _s106_c12
+
+# --- (13) --print-state: agent_args_files, both modes, contract-clean ------
+_S106_PS_HOME="$(mktemp -d)"
+mkdir -p "$_S106_PS_HOME/sandboxes/demo-aa112233"
+printf '{"workspace_path":"/ws/demo"}\n' > "$_S106_PS_HOME/sandboxes/demo-aa112233/WORKSPACE.json"
+touch "$_S106_PS_HOME/sandboxes/demo-aa112233/agent-args.claude"
+_S106_PS_BIN="$(mktemp -d)"
+cat > "$_S106_PS_BIN/docker" <<'S106DOCKERSHIM'
+#!/usr/bin/env bash
+case "$1" in
+    info) exit 0 ;;
+    ps) exit 0 ;;
+    image) exit 1 ;;
+    *) exit 0 ;;
+esac
+S106DOCKERSHIM
+chmod +x "$_S106_PS_BIN/docker"
+_S106_PS_ERR_FULL="$(mktemp)"
+_S106_PS_OUT_FULL="$(PATH="$_S106_PS_BIN:$PATH" SANDY_HOME="$_S106_PS_HOME" bash "$_S106_SANDY" --print-state 2>"$_S106_PS_ERR_FULL")" || true
+_S106_PS_ERR_LIGHT="$(mktemp)"
+_S106_PS_OUT_LIGHT="$(PATH="$_S106_PS_BIN:$PATH" SANDY_HOME="$_S106_PS_HOME" bash "$_S106_SANDY" --print-state light 2>"$_S106_PS_ERR_LIGHT")" || true
+
+check "§106(13a) --print-state: agent_args_files present + correct shape in BOTH modes" \
+    bash -c 'python3 -c "
+import json,sys
+full=json.loads(sys.argv[1])
+light=json.loads(sys.argv[2])
+want={\"claude\":True,\"gemini\":False,\"codex\":False,\"opencode\":False,\"grok\":False}
+for d in (full, light):
+    sb=[s for s in d[\"sandboxes\"] if s.get(\"name\")==\"demo-aa112233\"]
+    assert sb, \"fixture sandbox missing from --print-state output\"
+    assert sb[0][\"agent_args_files\"] == want, sb[0][\"agent_args_files\"]
+" "$1" "$2"' -- "$_S106_PS_OUT_FULL" "$_S106_PS_OUT_LIGHT"
+check "§106(13b) --print-state stream contract: 0 bytes stderr, both modes" \
+    bash -c '[ ! -s "$1" ] && [ ! -s "$2" ]' -- "$_S106_PS_ERR_FULL" "$_S106_PS_ERR_LIGHT"
+rm -rf "$_S106_PS_HOME" "$_S106_PS_BIN"
+
+# --- (14) --remove-sandbox names the file in the printed plan --------------
+_S106_RMS_HOME="$(mktemp -d)"
+mkdir -p "$_S106_RMS_HOME/sandboxes/rmdemo-bb223344"
+printf '{"workspace_path":"/nonexistent/rmws"}\n' > "$_S106_RMS_HOME/sandboxes/rmdemo-bb223344/WORKSPACE.json"
+touch "$_S106_RMS_HOME/sandboxes/rmdemo-bb223344/agent-args.claude"
+_S106_RMS_OUT="$(SANDY_HOME="$_S106_RMS_HOME" bash "$_S106_SANDY" --remove-sandbox --sandbox rmdemo-bb223344 --dry-run 2>&1)" || true
+check "§106(14) --remove-sandbox --dry-run plan names the per-agent args file" \
+    bash -c 'printf "%s\n" "$1" | grep -q "agent-args.claude will be destroyed"' -- "$_S106_RMS_OUT"
+rm -rf "$_S106_RMS_HOME"
+
+# --- (15) --reset-sandbox real end-to-end: file survives, plan names it,
+# a destroyable entry (pip/) is actually gone. -------------------------------
+_S106_RSB_WS="$(mktemp -d)"; _S106_RSB_WS="$(cd "$_S106_RSB_WS" && pwd -P)"
+_S106_RSB_HOME="$(mktemp -d)"
+_S106_RSB_HASH="$(printf '%s' "$_S106_RSB_WS" | { shasum -a 256 2>/dev/null || sha256sum; })"
+_S106_RSB_HASH="${_S106_RSB_HASH%% *}"; _S106_RSB_HASH="${_S106_RSB_HASH:0:8}"
+_S106_RSB_BASE="$(basename "$_S106_RSB_WS" | tr -cd 'a-zA-Z0-9._-')"; _S106_RSB_BASE="${_S106_RSB_BASE:-project}"
+_S106_RSB_SB="$_S106_RSB_HOME/sandboxes/${_S106_RSB_BASE}-${_S106_RSB_HASH}"
+mkdir -p "$_S106_RSB_SB/pip"
+touch "$_S106_RSB_SB/agent-args.claude"
+printf '{"workspace_path":"%s"}\n' "$_S106_RSB_WS" > "$_S106_RSB_SB/WORKSPACE.json"
+_S106_RSB_OUT="$(SANDY_HOME="$_S106_RSB_HOME" bash "$_S106_SANDY" --reset-sandbox --workspace "$_S106_RSB_WS" --yes 2>&1)" || true
+
+check "§106(15a) --reset-sandbox: agent-args.claude survives a real reset" \
+    test -f "$_S106_RSB_SB/agent-args.claude"
+check "§106(15b) --reset-sandbox: a destroyable entry (pip/) is actually gone" \
+    bash -c '[ ! -d "$1" ]' -- "$_S106_RSB_SB/pip"
+check "§106(15c) --reset-sandbox: Preserved: line names agent-args" \
+    bash -c 'printf "%s\n" "$1" | grep -q "agent-args"' -- "$_S106_RSB_OUT"
+rm -rf "$_S106_RSB_WS" "$_S106_RSB_HOME"
+
+unset _S106_SANDY _S106_TMPL _S106_FILTER_BLK _S106_PERAGENT_BLK _S106_RUN
+unset _S106_C9_FN _S106_C9_SCRIPT
+unset _S106_PS_HOME _S106_PS_BIN _S106_PS_ERR_FULL _S106_PS_OUT_FULL _S106_PS_ERR_LIGHT _S106_PS_OUT_LIGHT
+unset _S106_RMS_HOME _S106_RMS_OUT
+unset _S106_RSB_WS _S106_RSB_HOME _S106_RSB_HASH _S106_RSB_BASE _S106_RSB_SB _S106_RSB_OUT
 
 _run_provenance   # timestamp + commit + tree state, so a result you scroll back
                   # to after a context switch says which build produced it.

@@ -908,12 +908,46 @@ done
 
 # --- Build the command for a given agent ---
 _sandy_build_agent_cmd() {
+    # Per-agent operator/config args (SANDY_AGENT_ARGS_<AGENT>, resolved
+    # host-side from SANDY_AGENT_ARGS and/or an operator agent-args.<agent>
+    # file — see sandy's "per-agent args" block) are PREPENDED onto this
+    # pane's OWN "${@:2}" before dispatch, one lookup per call so each pane in
+    # a multi-agent combo only ever sees its own agent's tokens. Explicit
+    # 5-arm case (no ${var^^}, no indirection — bash-3.2-safe, matches house
+    # style). Prepend-before-dispatch (not appended, not injected elsewhere)
+    # reproduces the exact ordering the old top-level `set --` prepend gave:
+    # sandy flags → config/file tokens → CLI pass-through args — which matters
+    # because build_claude_cmd scans its own "$@" for --continue/--resume
+    # (auto-continue) and codex/opencode scan for headless subcommand
+    # selection, and every builder still emits _sandy_translate_args LAST for
+    # the actual %q quoting (one quoting path, not a second one here).
+    _sandy_aa_val=""
     case "$1" in
-        claude)   build_claude_cmd   "${@:2}" ;;
-        gemini)   build_gemini_cmd   "${@:2}" ;;
-        codex)    build_codex_cmd    "${@:2}" ;;
-        opencode) build_opencode_cmd "${@:2}" ;;
-        grok)     build_grok_cmd     "${@:2}" ;;
+        claude)   _sandy_aa_val="${SANDY_AGENT_ARGS_CLAUDE:-}" ;;
+        gemini)   _sandy_aa_val="${SANDY_AGENT_ARGS_GEMINI:-}" ;;
+        codex)    _sandy_aa_val="${SANDY_AGENT_ARGS_CODEX:-}" ;;
+        opencode) _sandy_aa_val="${SANDY_AGENT_ARGS_OPENCODE:-}" ;;
+        grok)     _sandy_aa_val="${SANDY_AGENT_ARGS_GROK:-}" ;;
+    esac
+    _sandy_aa_pre=()
+    if [ -n "$_sandy_aa_val" ]; then
+        # `|| true`: user-setup.sh runs under `set -e` with an ERR trap, and
+        # this function is always invoked inside a `$( )` command
+        # substitution at every call site — `read` returns 1 at EOF-without-
+        # trailing-newline, which would otherwise abort the pane's command
+        # assembly. Values are single-line by construction (the host-side
+        # tokenizer normalizes newlines before forwarding), so no mode-flag
+        # re-filter is needed here — the host tokenizer is the single
+        # authoritative filter, and the host overwrites any forged env
+        # unconditionally before forwarding.
+        read -ra _sandy_aa_pre <<< "$_sandy_aa_val" || true
+    fi
+    case "$1" in
+        claude)   build_claude_cmd   ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
+        gemini)   build_gemini_cmd   ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
+        codex)    build_codex_cmd    ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
+        opencode) build_opencode_cmd ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
+        grok)     build_grok_cmd     ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
     esac
 }
 
@@ -927,6 +961,16 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
     if [ "$_agent" = "claude" ] && [ "${SANDY_REMOTE_CONTROL:-false}" = "true" ]; then
         sandy_log "Launching Claude Code (remote-control)"
         AGENT_CMD="claude remote-control --name \"sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}\""
+        # This branch bypasses _sandy_build_agent_cmd entirely, so it has to
+        # prepend its own per-agent tokens (SANDY_AGENT_ARGS_CLAUDE) here or
+        # `sandy --remote` would silently lose configured args now that the
+        # old global "$@" prepend is gone. Reuses this branch's own printf %q
+        # quoting loop below — no second quoting path.
+        if [ -n "${SANDY_AGENT_ARGS_CLAUDE:-}" ]; then
+            _sandy_aa_pre=()
+            read -ra _sandy_aa_pre <<< "${SANDY_AGENT_ARGS_CLAUDE}" || true
+            set -- ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "$@"
+        fi
         for arg in "$@"; do
             AGENT_CMD+=" $(printf "%q" "$arg")"
         done
