@@ -2855,9 +2855,34 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
         fi
         _rms_n_records="$(printf '%s\n' "$_rms_records" | grep -c . || true)"
         _rms_n_records="${_rms_n_records:-0}"
-        if [ "$_rms_n_records" -eq 0 ]; then
+        # STRAY SIBLING CONFIGS. <name>.claude.json lives beside the sandbox
+        # dir, not inside it, so removing a sandbox before this reap existed
+        # left the file behind permanently — and --orphans could never see it,
+        # because it walks DIRECTORIES. A host with a long test history
+        # accumulates dozens. Predicate is the conservative one used
+        # throughout: a stray iff the file exists AND its sandbox directory
+        # does NOT. A config whose sandbox is still present is never touched,
+        # so this cannot disturb a live or merely-idle sandbox.
+        _rms_strays=""
+        for _rms_cj in "$_rms_home_sb"/*.claude.json; do
+            [ -f "$_rms_cj" ] || continue
+            _rms_cj_base="$(basename "$_rms_cj")"
+            _rms_cj_name="${_rms_cj_base%.claude.json}"
+            _rms_cj_name="${_rms_cj_name%.bak}"
+            [ -d "$_rms_home_sb/$_rms_cj_name" ] && continue
+            _rms_strays="${_rms_strays}${_rms_cj_base}"$'\n'
+        done
+        _rms_n_strays="$(printf '%s' "$_rms_strays" | grep -c . || true)"
+        _rms_n_strays="${_rms_n_strays:-0}"
+        if [ "$_rms_n_records" -eq 0 ] && [ "$_rms_n_strays" -eq 0 ]; then
             info "No orphaned sandboxes found."
             exit 0
+        fi
+        if [ "$_rms_n_strays" -gt 0 ]; then
+            info "Stray sibling configs (sandbox directory already gone): $_rms_n_strays"
+            printf '%s' "$_rms_strays" | while IFS= read -r _rms_s; do
+                [ -n "$_rms_s" ] && printf '    %s\n' "$_rms_s"
+            done
         fi
     elif [ -n "$_rms_sandbox" ]; then
         _rms_validate_sandbox_name "$_rms_sandbox" || {
@@ -3018,6 +3043,16 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
         # (sandboxes/.<name>.lock), so removing the sandbox dir alone leaves
         # it a permanent orphan with no other reaper.
         rm -rf "$_rms_home_sb/.${_rms_n}.lock" 2>/dev/null || true
+        # Same class, same reason: the seeded Claude config also lives OUTSIDE
+        # the sandbox dir, as a sibling FILE (sandboxes/<name>.claude.json —
+        # see CLAUDE_JSON at the launch path). Nothing else ever removes it, so
+        # every removed sandbox used to leave one behind permanently; a host
+        # with a long test history accumulated dozens of ~40KB files for
+        # sandboxes that no longer exist. It is seeded from the host's own
+        # ~/.claude.json, so leaving copies around is not merely untidy.
+        rm -f "$_rms_home_sb/${_rms_n}.claude.json" 2>/dev/null || true
+        # The .bak sibling some launches write alongside it.
+        rm -f "$_rms_home_sb/${_rms_n}.bak.claude.json" 2>/dev/null || true
         # Reap the per-workspace approval files, keyed on the 16-CHAR sha256
         # hash of the canonical workspace path (sandy:5632/7595 — NOT the
         # 8-char sandbox-name hash). A legacy sandbox with no recorded
@@ -3028,7 +3063,27 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
             rm -f "$SANDY_HOME/approvals/dockerfile-$_rms_h16.list" 2>/dev/null || true
         fi
     done <<< "$_rms_ok"
+    # Reap the strays enumerated in the --orphans plan above. Same containment
+    # assert as every other rm here: the path must sit inside sandboxes/ and the
+    # basename must carry no slash. Re-checks the directory-absent predicate at
+    # the point of removal rather than trusting the earlier scan, so a sandbox
+    # recreated between plan and reap is left alone.
+    _rms_n_strays_done=0
+    if [ "${_rms_orphans:-false}" = "true" ] && [ -n "${_rms_strays:-}" ]; then
+        while IFS= read -r _rms_s; do
+            [ -n "$_rms_s" ] || continue
+            case "$_rms_s" in */*) continue ;; esac
+            _rms_s_name="${_rms_s%.claude.json}"; _rms_s_name="${_rms_s_name%.bak}"
+            [ -d "$_rms_home_sb/$_rms_s_name" ] && continue
+            case "$_rms_home_sb/$_rms_s" in
+                "$_rms_real_sb"/?*)
+                    rm -f "$_rms_home_sb/$_rms_s" 2>/dev/null || true
+                    _rms_n_strays_done=$((_rms_n_strays_done + 1)) ;;
+            esac
+        done <<< "$_rms_strays"
+    fi
     info "Removed $_rms_n_ok sandbox(es)."
+    [ "$_rms_n_strays_done" -gt 0 ] && info "Removed $_rms_n_strays_done stray sibling config(s)."
     exit 0
 fi
 
