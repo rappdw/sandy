@@ -154,6 +154,15 @@ done
 
 # --- Helpers ---
 
+# --- BEGIN SANDY_INTEG_SECTION_HOOK ---
+# Sentinel pair (mirrors the AUTOGEN sentinel convention used elsewhere in
+# this repo) so run-tests.sh's own suite-hook section can extract this exact,
+# real block and drive it directly, rather than maintaining a hand-copied
+# duplicate that could silently drift from the shipped logic. Deliberately
+# not spelling out the sed invocation here: it would repeat this pair's own
+# marker text inline and confuse a naive range-match into stopping early, at
+# this very comment. Keep this block self-contained so the extraction stays
+# valid as a standalone script.
 info()  { printf "\033[0;36m%s\033[0m\n" "$*"; }
 pass()  { PASS=$((PASS + 1)); printf "  \033[0;32m✓ %s\033[0m\n" "$*"; }
 fail()  { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "  \033[0;31m✗ %s\033[0m\n" "$*"; }
@@ -174,6 +183,41 @@ _CUR_SECTION_TITLE=""
 _CUR_SECTION_START=0
 _CUR_SECTION_STATE="run"
 _SECTION_ON=true
+
+# --- Eager per-section credential refresh (SANDY_INTEG_CRED_REFRESH_CMD) ---
+# Lazy in-container WIF exchange binds the whole run to the GitHub JWT's
+# measured ~300s lifetime, and individual sections (§13, §14) already exceed
+# that on their own -- see docs/CI-KEYLESS-AUTH.md. The fix run eagerly here:
+# at the start of every RUN (not deselected) section, if the last refresh is
+# at least 60s old, re-mint+re-exchange and export a fresh ANTHROPIC_AUTH_TOKEN
+# so every section starts with a token close to the full ~598s access-token
+# budget rather than one that has been aging across prior sections.
+# -9999 as the initial "last refresh" so the very first eligible section
+# always refreshes (age is trivially >= 60).
+_CRED_LAST_REFRESH=-9999
+_cred_refresh_if_due() {
+    [ -n "${SANDY_INTEG_CRED_REFRESH_CMD:-}" ] || return 0
+    [ "$_SECTION_ON" = true ] || return 0
+    local _age
+    _age=$(( SECONDS - _CRED_LAST_REFRESH ))
+    [ "$_age" -ge 60 ] || return 0
+    # RC-guarded, never `|| true` before the rc read: a refresh failure must
+    # warn and keep the previous token, not silently vanish or abort the suite.
+    local _rc=0 _tok=""
+    _tok="$(bash -c "$SANDY_INTEG_CRED_REFRESH_CMD")" || _rc=$?
+    if [ "$_rc" -eq 0 ] && [ -n "$_tok" ]; then
+        export ANTHROPIC_AUTH_TOKEN="$_tok"
+        _CRED_LAST_REFRESH=$SECONDS
+        # Mask on the runner's own log processor -- only meaningful (and only
+        # emitted) under GITHUB_ACTIONS, never in a plain terminal run.
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then
+            printf '::add-mask::%s\n' "$_tok"
+        fi
+    else
+        printf "  \033[0;33m! credential refresh failed for section %s (rc=%d) -- keeping previous token\033[0m\n" \
+            "$_CUR_SECTION_ID" "$_rc"
+    fi
+}
 
 # True when "$1" appears as a comma-separated token of "$2" (exact-token match,
 # so ONLY=1 does not select 12/12b/13...).
@@ -232,7 +276,9 @@ section() {
         _CUR_SECTION_STATE="deselected"
         printf "  \033[0;33mo section %s deselected (SANDY_INTEG_ONLY/SANDY_INTEG_SKIP)\033[0m\n" "$_CUR_SECTION_ID"
     fi
+    _cred_refresh_if_due
 }
+# --- END SANDY_INTEG_SECTION_HOOK ---
 
 _print_timing_table() {
     [ "$_SEC_COUNT" -gt 0 ] || return 0
@@ -587,11 +633,20 @@ done
 #
 # The identity token is required as well as the rule id: the rule alone is just
 # configuration, and an exchange cannot happen without an assertion to present.
+# This branch is kept for an operator passing raw WIF vars straight through
+# (lazy in-container exchange) -- it is no longer what the Integration workflow
+# itself does (see ANTHROPIC_AUTH_TOKEN below), but it is still a valid way to
+# supply Claude credentials to this suite.
 HAS_CLAUDE_WIF=false
 if [ -n "${ANTHROPIC_FEDERATION_RULE_ID:-}" ] && [ -n "${ANTHROPIC_IDENTITY_TOKEN:-}" ]; then
     HAS_CLAUDE_WIF=true
 fi
+# ANTHROPIC_AUTH_TOKEN: an already-exchanged Anthropic access token (bearer),
+# eagerly minted host-side (test/ci-wif-access-token.sh) rather than exchanged
+# lazily in-container from a WIF identity token. This is what the Integration
+# workflow's WIF path forwards -- see docs/CI-KEYLESS-AUTH.md "Token lifetimes".
 if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] \
+        || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] \
         || [ -f "$HOME/.claude/.credentials.json" ] || [ "$HAS_CLAUDE_WIF" = true ]; then
     HAS_CLAUDE=true
 fi
@@ -629,7 +684,7 @@ _auth_detail() {
 
 echo "  Codex:    $(_label $HAS_CODEX)  $(_auth_detail "api-key=$HAS_OPENAI_API_KEY" "oauth=$HAS_CODEX_OAUTH")"
 echo "  Gemini:   $(_label $HAS_GEMINI)  $(_auth_detail "api-key=$HAS_GEMINI_API_KEY" "oauth=$HAS_GEMINI_OAUTH" "adc=$HAS_GEMINI_ADC")"
-echo "  Claude:   $(_label $HAS_CLAUDE)  $(_auth_detail "wif=$HAS_CLAUDE_WIF" "api-key=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" "oauth-token=$([ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo true || echo false)" "credentials-file=$([ -f "$HOME/.claude/.credentials.json" ] && echo true || echo false)")"
+echo "  Claude:   $(_label $HAS_CLAUDE)  $(_auth_detail "wif=$HAS_CLAUDE_WIF" "auth-token=$([ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] && echo true || echo false)" "api-key=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" "oauth-token=$([ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo true || echo false)" "credentials-file=$([ -f "$HOME/.claude/.credentials.json" ] && echo true || echo false)")"
 echo "  OpenCode: $(_label $HAS_OPENCODE)  $(_auth_detail "anthropic-key=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" "openai-key=$HAS_OPENAI_API_KEY" "gemini-key=$HAS_GEMINI_API_KEY" "oauth=$HAS_OPENCODE_OAUTH")"
 echo "  Grok:     $(_label $HAS_GROK)  $(_auth_detail "api-key=$HAS_XAI_API_KEY")"
 echo ""

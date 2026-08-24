@@ -9514,6 +9514,286 @@ rm -rf "$_S102_DOWNBIN" "$_S102_BIN" "$_S102_HOME" "$_S102_WS" "$_S102_STATE"
 rm -f "$_S102_OUT"
 unset _S102_STATE
 
+echo "§103: eager per-section WIF credential refresh (test/ci-wif-access-token.sh + the section() hook, #200)"
+# ============================================================
+# Purpose: the Integration workflow exchanges a federated Anthropic access
+# token EAGERLY, host-side (test/ci-wif-access-token.sh), instead of letting
+# Claude Code exchange the raw identity token lazily in-container -- the
+# lazy path bound the whole run to the GitHub JWT's measured ~300s lifetime,
+# and per-section re-minting of the JWT alone was ALSO measured insufficient
+# (two sections individually exceed 300s on their own). The suite's own
+# section() hook (test/run-integration-tests.sh) re-runs the same exchange
+# script before any section whose current token is >=60s old
+# (SANDY_INTEG_CRED_REFRESH_CMD), so no section ever starts on a stale
+# token. See docs/CI-KEYLESS-AUTH.md "Token lifetimes" for the full
+# measurement writeup.
+#
+# This section covers everything reachable WITHOUT Docker or network:
+#   (a) test/ci-wif-access-token.sh's own mint+exchange behavior, behind a
+#       PATH-stubbed curl -- stdout purity (the property the workflow's and
+#       the suite hook's own `$(...)` capture depend on), diagnostics
+#       landing on stderr, and both failure shapes (a failed exchange, and
+#       missing required env).
+#   (b) the suite hook's OWN, REAL code -- extracted verbatim from
+#       test/run-integration-tests.sh via the SANDY_INTEG_SECTION_HOOK
+#       sentinel pair, NOT a hand-copied duplicate that could silently
+#       drift from the shipped logic (the "guard tests assert the
+#       property" lesson) -- driven under a set -euo pipefail + ERR trap
+#       harness matching how the real suite runs it (the "section harness
+#       must match CI" lesson): a successful refresh exports the new
+#       token; the 60s age gate skips a too-recent refresh; a FAILING
+#       refresh warns and keeps the previous token WITHOUT aborting the
+#       harness; the ::add-mask:: line is emitted only under
+#       GITHUB_ACTIONS; a deselected section never refreshes.
+#   (c) a structural assertion that HAS_CLAUDE credential detection names
+#       ANTHROPIC_AUTH_TOKEN (the carrier the workflow actually forwards).
+#
+# Docker-runtime end-to-end proof (the real workflow, a real exchange, a
+# real claude call under the refreshed token) is out of scope here by
+# construction -- the mandatory bring-up proof is a scoped `-f only=7`
+# dispatch, documented in docs/CI-KEYLESS-AUTH.md's Bring-up order.
+
+_S103_REPO="$(dirname "$_SBX_SCRIPT")"
+_S103_SCRIPT="$_S103_REPO/test/ci-wif-access-token.sh"
+_S103_INTEG="$_S103_REPO/test/run-integration-tests.sh"
+_S103_BIN="$(mktemp -d)"
+
+check "§103(pre) test/ci-wif-access-token.sh exists and is executable" \
+    test -x "$_S103_SCRIPT"
+
+# --- (a) test/ci-wif-access-token.sh functional behavior ---
+
+# Fake curl: distinguishes the OIDC-mint call (URL contains the s103mint
+# marker this fixture puts in ACTIONS_ID_TOKEN_REQUEST_URL) from the
+# token-exchange call (the real script's hardcoded oauth/token URL).
+# _S103_MODE selects the exchange call's outcome; success is the default so
+# scenarios that only care about the mint side don't have to set it.
+cat > "$_S103_BIN/curl" <<'S103CURL'
+#!/usr/bin/env bash
+_url=""
+for _a in "$@"; do
+    case "$_a" in http*) _url="$_a" ;; esac
+done
+case "$_url" in
+    *s103mint*)
+        printf '{"value":"%s"}\n' "${_S103_FAKE_JWT:-}"
+        echo "HTTP 200" >&2
+        exit 0
+        ;;
+    *oauth/token*)
+        if [ "${_S103_MODE:-success}" = "exchange_fail" ]; then
+            # Mirrors --fail-with-body: print the error body, exit non-zero.
+            printf '{"type":"error","error":{"type":"authentication_error","message":"Authentication failed"}}\n'
+            echo "HTTP 401" >&2
+            exit 22
+        fi
+        printf '{"access_token":"%s","token_type":"Bearer","expires_in":598}\n' \
+            "${_S103_FAKE_TOKEN:-fake-access-token}"
+        echo "HTTP 200" >&2
+        exit 0
+        ;;
+    *)
+        echo "§103 fake curl: unexpected url: $_url" >&2
+        exit 1
+        ;;
+esac
+S103CURL
+chmod +x "$_S103_BIN/curl"
+
+# A minimal, valid-shaped fake JWT (header.payload.sig) so the script's own
+# claims-decoding diagnostic has something real to parse. Base64url built
+# from plain `base64` (encode is flag-compatible between GNU and BSD; only
+# decode differs) with padding/newlines stripped -- portable to the
+# maintainer's macOS as well as CI.
+_S103_JWT_PAYLOAD="$(printf '{"sub":"repo:rappdw/sandy:ref:refs/heads/main","aud":"https://api.anthropic.com","iat":1000,"exp":1300}' \
+    | base64 | tr -d '=\n' | tr '/+' '_-')"
+_S103_FAKE_JWT="fakehdr.${_S103_JWT_PAYLOAD}.fakesig"
+
+# (a1) success: stdout is EXACTLY the access token, diagnostics on stderr.
+_S103_OUT1="$(mktemp)"; _S103_ERR1="$(mktemp)"
+_s103_rc=0
+PATH="$_S103_BIN:$PATH" \
+    ACTIONS_ID_TOKEN_REQUEST_URL="https://example.invalid/s103mint?x=1" \
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN="reqtok" \
+    ANTHROPIC_FEDERATION_RULE_ID="fdrl_test" \
+    ANTHROPIC_ORGANIZATION_ID="org_test" \
+    ANTHROPIC_SERVICE_ACCOUNT_ID="svac_test" \
+    _S103_FAKE_JWT="$_S103_FAKE_JWT" \
+    _S103_FAKE_TOKEN="fake-access-token-xyz" \
+    _S103_MODE="success" \
+    bash "$_S103_SCRIPT" >"$_S103_OUT1" 2>"$_S103_ERR1" && _s103_rc=0 || _s103_rc=$?
+check "§103(a1) success: exits 0" test "$_s103_rc" -eq 0
+check "§103(a1) success: stdout is EXACTLY the access token, nothing else (stdout purity -- what a \$(...) capture depends on) (mutation: printing a diagnostic to stdout instead of stderr breaks this)" \
+    bash -c '[ "$(cat "$1")" = "fake-access-token-xyz" ]' -- "$_S103_OUT1"
+check "§103(a1) success: diagnostics (expires_in) landed on stderr" \
+    bash -c 'grep -q "expires_in=598s" "$1"' -- "$_S103_ERR1"
+
+# (a2) failed exchange: --fail-with-body's shape (error body + non-zero) is
+# surfaced as a clean non-zero exit with NOTHING on stdout -- a caller must
+# never mistake an error body, or a fragment of one, for a real token.
+_S103_OUT2="$(mktemp)"; _S103_ERR2="$(mktemp)"
+_s103_rc=0
+PATH="$_S103_BIN:$PATH" \
+    ACTIONS_ID_TOKEN_REQUEST_URL="https://example.invalid/s103mint?x=1" \
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN="reqtok" \
+    ANTHROPIC_FEDERATION_RULE_ID="fdrl_test" \
+    ANTHROPIC_ORGANIZATION_ID="org_test" \
+    ANTHROPIC_SERVICE_ACCOUNT_ID="svac_test" \
+    _S103_FAKE_JWT="$_S103_FAKE_JWT" \
+    _S103_MODE="exchange_fail" \
+    bash "$_S103_SCRIPT" >"$_S103_OUT2" 2>"$_S103_ERR2" && _s103_rc=0 || _s103_rc=$?
+check "§103(a2) failed exchange: exits non-zero" test "$_s103_rc" -ne 0
+check "§103(a2) failed exchange: stdout is empty (no partial/garbage token printed)" \
+    bash -c '[ ! -s "$1" ]' -- "$_S103_OUT2"
+
+# (a3) missing required env: fails fast, before ever invoking curl.
+_S103_OUT3="$(mktemp)"; _S103_ERR3="$(mktemp)"
+_s103_rc=0
+PATH="$_S103_BIN:$PATH" bash "$_S103_SCRIPT" >"$_S103_OUT3" 2>"$_S103_ERR3" && _s103_rc=0 || _s103_rc=$?
+check "§103(a3) missing required env: exits 1" test "$_s103_rc" -eq 1
+check "§103(a3) missing required env: stdout is empty" \
+    bash -c '[ ! -s "$1" ]' -- "$_S103_OUT3"
+
+check "§103(a4) both curl invocations use --fail-with-body (mutation: a bare curl exits 0 on an HTTP error, so dropping this would report success on a failed exchange -- (a2)'s stubbed curl exits non-zero unconditionally, so it can't catch this mutation; this static check is what does)" \
+    bash -c 'test "$(grep -c "curl -sS --fail-with-body" "$1")" -eq 2' -- "$_S103_SCRIPT"
+
+rm -f "$_S103_OUT1" "$_S103_ERR1" "$_S103_OUT2" "$_S103_ERR2" "$_S103_OUT3" "$_S103_ERR3"
+rm -rf "$_S103_BIN"
+
+# --- (b) the suite's section() refresh hook: REAL code, extracted verbatim ---
+
+_S103_HOOKSRC="$(mktemp)"
+sed -n '/BEGIN SANDY_INTEG_SECTION_HOOK/,/END SANDY_INTEG_SECTION_HOOK/p' \
+    "$_S103_INTEG" > "$_S103_HOOKSRC"
+check "§103(b0) extracted the real section() hook block from run-integration-tests.sh (mutation: renaming/removing the sentinel pair silently empties this extraction)" \
+    bash -c 'grep -q "_cred_refresh_if_due()" "$1" && grep -q "^section() {" "$1"' -- "$_S103_HOOKSRC"
+
+_S103_DRIVER="$(mktemp)"
+cat > "$_S103_DRIVER" <<'S103DRIVER'
+#!/usr/bin/env bash
+# Replicates the suite's own set -euo pipefail + ERR trap (the "section
+# harness must match CI" lesson) -- without it this harness cannot see an
+# unguarded non-zero exit the way the real suite would.
+set -euo pipefail
+trap 'printf "[err-trap] line %d: %s exited %d\n" "$LINENO" "$BASH_COMMAND" "$?" >&2' ERR
+set -E
+
+# shellcheck source=/dev/null
+. "$1"
+
+# SCEN1: a due refresh (initial -9999 sentinel) exports the new token.
+SANDY_INTEG_CRED_REFRESH_CMD='echo tok-A' section "1. First" >/dev/null
+printf 'SCEN1_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-<unset>}"
+
+# SCEN2: within 60s of SCEN1's refresh -- must NOT refresh again.
+unset ANTHROPIC_AUTH_TOKEN
+SANDY_INTEG_CRED_REFRESH_CMD='echo tok-B' section "2. Second" >/dev/null
+printf 'SCEN2_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-<unset>}"
+
+# SCEN3: force due, but the refresh command FAILS -- must warn, must NOT
+# abort the harness (proves the RC-guard, not `|| true`), must keep the
+# previous token.
+export ANTHROPIC_AUTH_TOKEN="tok-A"
+_CRED_LAST_REFRESH=-9999
+_scen3_out="$(mktemp)"
+SANDY_INTEG_CRED_REFRESH_CMD='exit 7' section "3. Third" >"$_scen3_out"
+printf 'SCEN3_REACHED_AFTER_FAILED_REFRESH=yes\n'
+printf 'SCEN3_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-<unset>}"
+if grep -q "credential refresh failed" "$_scen3_out"; then
+    printf 'SCEN3_WARNED=yes\n'
+else
+    printf 'SCEN3_WARNED=no\n'
+fi
+rm -f "$_scen3_out"
+
+# SCEN4: force due, GITHUB_ACTIONS set -- ::add-mask:: must be emitted.
+_CRED_LAST_REFRESH=-9999
+_scen4_out="$(mktemp)"
+GITHUB_ACTIONS=true SANDY_INTEG_CRED_REFRESH_CMD='echo tok-C' section "4. Fourth" >"$_scen4_out"
+if grep -q '::add-mask::tok-C' "$_scen4_out"; then
+    printf 'SCEN4_MASKED=yes\n'
+else
+    printf 'SCEN4_MASKED=no\n'
+fi
+rm -f "$_scen4_out"
+
+# SCEN5: force due, GITHUB_ACTIONS NOT set -- ::add-mask:: must NOT appear
+# (a plain terminal run must never print a masking directive).
+_CRED_LAST_REFRESH=-9999
+_scen5_out="$(mktemp)"
+unset GITHUB_ACTIONS 2>/dev/null || true
+SANDY_INTEG_CRED_REFRESH_CMD='echo tok-D' section "5. Fifth" >"$_scen5_out"
+if grep -q '::add-mask::' "$_scen5_out"; then
+    printf 'SCEN5_MASKED=yes\n'
+else
+    printf 'SCEN5_MASKED=no\n'
+fi
+rm -f "$_scen5_out"
+
+# SCEN6: a DESELECTED section must never refresh, even when force-due.
+_CRED_LAST_REFRESH=-9999
+export ANTHROPIC_AUTH_TOKEN="tok-D"
+SANDY_INTEG_ONLY=99 SANDY_INTEG_CRED_REFRESH_CMD='echo tok-E' section "6. Sixth" >/dev/null
+printf 'SCEN6_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-<unset>}"
+
+# SCEN7/SCEN8: pin the 60s THRESHOLD itself, both directions. The -9999
+# sentinel is due at ANY threshold and SCEN2's real-time gap is under any sane
+# one, so neither notices if the interval is widened. Verified: changing 60 to
+# 9999 passed all 21 original checks -- and would silently run every section
+# after the first on a stale token, which is the exact failure this design
+# exists to prevent. The interval IS the budget, so it gets asserted.
+_CRED_LAST_REFRESH=$(( SECONDS - 61 ))
+export ANTHROPIC_AUTH_TOKEN="tok-STALE"
+SANDY_INTEG_CRED_REFRESH_CMD='echo tok-FRESH' section "7. Seventh" >/dev/null
+printf 'SCEN7_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-<unset>}"
+
+_CRED_LAST_REFRESH=$(( SECONDS - 59 ))
+export ANTHROPIC_AUTH_TOKEN="tok-KEEP"
+SANDY_INTEG_CRED_REFRESH_CMD='echo tok-NOPE' section "8. Eighth" >/dev/null
+printf 'SCEN8_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-<unset>}"
+
+printf 'ALL_SCENARIOS_COMPLETE=yes\n'
+S103DRIVER
+chmod +x "$_S103_DRIVER"
+
+_S103_DRIVER_OUT="$(mktemp)"
+_s103_rc=0
+bash "$_S103_DRIVER" "$_S103_HOOKSRC" >"$_S103_DRIVER_OUT" 2>&1 && _s103_rc=0 || _s103_rc=$?
+
+check "§103(b1) the driver harness completed all scenarios without the ERR trap firing (mutation: an unguarded \`|| true\` swallowing a real error would let this pass even on broken code -- exit code AND the completion marker are both asserted)" \
+    bash -c 'test "$1" -eq 0 && grep -q "ALL_SCENARIOS_COMPLETE=yes" "$2" && ! grep -q "err-trap" "$2"' \
+    -- "$_s103_rc" "$_S103_DRIVER_OUT"
+check "§103(b2) a due refresh exports the new token (SCEN1)" \
+    bash -c 'grep -q "^SCEN1_TOKEN=tok-A$" "$1"' -- "$_S103_DRIVER_OUT"
+check "§103(b3) a refresh within 60s of the last one does NOT re-run (SCEN2, mutation: dropping the age check makes every section refresh)" \
+    bash -c 'grep -q "^SCEN2_TOKEN=<unset>$" "$1"' -- "$_S103_DRIVER_OUT"
+check "§103(b4) a FAILING refresh command does not abort the harness (SCEN3, mutation: \`|| true\` before the rc read would make this vacuous)" \
+    bash -c 'grep -q "^SCEN3_REACHED_AFTER_FAILED_REFRESH=yes$" "$1"' -- "$_S103_DRIVER_OUT"
+check "§103(b5) a FAILING refresh command warns" \
+    bash -c 'grep -q "^SCEN3_WARNED=yes$" "$1"' -- "$_S103_DRIVER_OUT"
+check "§103(b6) a FAILING refresh command keeps the previous token (mutation: exporting an empty/garbage token on failure)" \
+    bash -c 'grep -q "^SCEN3_TOKEN=tok-A$" "$1"' -- "$_S103_DRIVER_OUT"
+check "§103(b7) ::add-mask:: IS emitted under GITHUB_ACTIONS (SCEN4)" \
+    bash -c 'grep -q "^SCEN4_MASKED=yes$" "$1"' -- "$_S103_DRIVER_OUT"
+check "§103(b8) ::add-mask:: is NOT emitted without GITHUB_ACTIONS (SCEN5, mutation: emitting it unconditionally would leak the marker into a plain terminal run)" \
+    bash -c 'grep -q "^SCEN5_MASKED=no$" "$1"' -- "$_S103_DRIVER_OUT"
+check "§103(b9) a deselected section never refreshes, even when force-due (SCEN6)" \
+    bash -c 'grep -q "^SCEN6_TOKEN=tok-D$" "$1"' -- "$_S103_DRIVER_OUT"
+
+check "§103(b10) age 61s IS due — the section gets a fresh token (pins the 60s threshold; widening the interval fails only this)" \
+    grep -qx 'SCEN7_TOKEN=tok-FRESH' "$_S103_DRIVER_OUT"
+check "§103(b11) age 59s is NOT due — the previous token is kept (pins the other side of the same threshold)" \
+    grep -qx 'SCEN8_TOKEN=tok-KEEP' "$_S103_DRIVER_OUT"
+
+rm -f "$_S103_HOOKSRC" "$_S103_DRIVER" "$_S103_DRIVER_OUT"
+
+# --- (c) structural: HAS_CLAUDE credential detection names ANTHROPIC_AUTH_TOKEN ---
+
+check "§103(c) run-integration-tests.sh's Claude credential detection includes ANTHROPIC_AUTH_TOKEN (mutation: forgetting this leaves the eager-exchange design forwarding a token the suite never looks for -- every claude section would silently skip, the exact 'green run that tested nothing' failure this whole mechanism exists to avoid)" \
+    bash -c 'grep -q "ANTHROPIC_AUTH_TOKEN" "$1"' -- "$_S103_INTEG"
+check "§103(c) the banner surfaces auth-token as its own detail (not folded into api-key) (mutation: silently reusing the api-key slot would make bring-up's \`(auth-token)\` check meaningless)" \
+    bash -c 'grep -q "auth-token=" "$1"' -- "$_S103_INTEG"
+
 # ============================================================
 # Summary
 # ============================================================

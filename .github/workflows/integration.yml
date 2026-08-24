@@ -117,12 +117,11 @@ jobs:
           docker image prune -af || true
           echo "after:"; df -h / | tail -1
 
-      # Build BEFORE minting the token. The federated credential is capped at the
-      # GitHub JWT's life -- MEASURED at 300s, not the 600 the console form
-      # implies. An agent image build costs 3-6 minutes, so minting first would
-      # spend the entire credential before the first claude call. --build-only
-      # needs no credentials, so it belongs outside the token window; the suite's
-      # own ensure_image_built then no-ops.
+      # Build BEFORE exchanging for a token. --build-only needs no credentials,
+      # so it belongs outside the token window; the suite's own
+      # ensure_image_built then no-ops. This still matters under the eager
+      # per-section exchange below -- it is 3-6 minutes that would otherwise
+      # eat into the first section's budget for no reason.
       - name: Pre-build agent images (outside the token window)
         if: vars.ANTHROPIC_FEDERATION_RULE_ID != ''
         run: ./sandy --build-only
@@ -131,37 +130,39 @@ jobs:
       # repository variable is set, so the API-key path below keeps working
       # untouched until this is proven out.
       #
-      # The IDs are repository VARIABLES, not secrets: they are identifiers, and a
-      # rule scoped to this repo means a leaked ID grants nothing. Only the minted
-      # token is sensitive, and it never leaves this job.
-      - name: Mint a federated Anthropic token (OIDC)
+      # The IDs are repository VARIABLES, not secrets: they are identifiers, and
+      # a rule scoped to this repo means a leaked ID grants nothing. Only the
+      # minted JWT and the exchanged access token are sensitive, and neither
+      # leaves this job.
+      #
+      # EAGER, host-side exchange -- not the lazy in-container exchange this
+      # workflow used before. Claude Code resolves credentials lazily (only
+      # when it first needs them), so forwarding the raw identity token bound
+      # the whole run to the GitHub JWT's measured ~300s lifetime, and two
+      # sections individually exceed that on their own regardless of anything
+      # cumulative. test/ci-wif-access-token.sh mints the JWT AND exchanges it
+      # for an access token in one step, right here, so the budget that
+      # matters becomes the ~598s access token instead -- see
+      # docs/CI-KEYLESS-AUTH.md "Token lifetimes". The suite's own section()
+      # hook (test/run-integration-tests.sh) re-runs this same script before
+      # any section whose current token is >=60s old, so no section ever
+      # starts on a stale one. Diagnostics (decoded JWT claims, the access
+      # token's expires_in) are printed by the script itself, to stderr.
+      - name: Exchange a federated Anthropic access token
         if: vars.ANTHROPIC_FEDERATION_RULE_ID != ''
+        env:
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
         run: |
           set -euo pipefail
-          # Anthropic's default audience; the rule leaves "Expected audience" blank,
-          # which means exactly this value is required.
-          _aud="https://api.anthropic.com"
-          _tok="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-                    "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${_aud}" | jq -r '.value')"
-          if [ -z "$_tok" ] || [ "$_tok" = "null" ]; then
-            echo "::error::OIDC token request returned no value"; exit 1
+          _tok="$(bash test/ci-wif-access-token.sh)"
+          if [ -z "$_tok" ]; then
+            echo "::error::WIF exchange returned no access token"; exit 1
           fi
           echo "::add-mask::$_tok"
-          echo "ANTHROPIC_IDENTITY_TOKEN=$_tok" >> "$GITHUB_ENV"
-          # Report the ACTUAL lifetime rather than assuming it -- every budget in
-          # docs/CI-KEYLESS-AUTH.md depends on this number.
-          _pay="$(printf '%s' "$_tok" | cut -d. -f2)"
-          _pay="$_pay$(printf '%*s' $(( (4 - ${#_pay} % 4) % 4 )) '' | tr ' ' '=')"
-          # Print sub/aud alongside the lifetime. When an exchange is rejected the
-          # API says only "Authentication failed"; the decoded `sub` is what you
-          # diff against the federation rule's subject pattern, and it is what
-          # actually identified the first failure. This diagnostic used to live in
-          # the anthropic-wif-test smoke test, which is deleted in this commit --
-          # removing the tool without keeping what made it useful would be a
-          # downgrade. `|| true` throughout: a diagnostic must never fail a run.
-          _claims="$(printf '%s' "$_pay" | tr '_-' '/+' | base64 -d 2>/dev/null \
-                      | jq -c '{sub, aud, lifetime_seconds: (.exp - .iat)}' 2>/dev/null || echo '{}')"
-          echo "minted at $(date -u +%H:%M:%SZ); claims: ${_claims}" || true
+          echo "ANTHROPIC_AUTH_TOKEN=$_tok" >> "$GITHUB_ENV"
 
       - name: Run integration suite
         env:
@@ -172,15 +173,14 @@ jobs:
           # ANTHROPIC_WORKSPACE_ID is included even though the docs call it optional
           # for a single-workspace rule: the smoke test that PROVED this setup did
           # pass workspace_id, so whether it succeeded because of it is untested.
-          # Setting it costs nothing and removes the question.
+          # Setting it costs nothing and removes the question. These four stay in
+          # this step's env regardless of WIF being active -- test/ci-wif-access-token.sh
+          # reads them again on every per-section refresh (SANDY_INTEG_CRED_REFRESH_CMD,
+          # WIF branch below), not just once at job start.
           ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
           ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
           ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
           ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
-          # Sandy only forwards env vars it recognizes; these are not sandy keys, so
-          # name them explicitly. SANDY_EXTRA_ENV is privileged-tier, but the suite
-          # exports SANDY_AUTO_APPROVE_PRIVILEGED=1, so no prompt blocks it.
-          SANDY_EXTRA_ENV: ANTHROPIC_FEDERATION_RULE_ID,ANTHROPIC_ORGANIZATION_ID,ANTHROPIC_SERVICE_ACCOUNT_ID,ANTHROPIC_WORKSPACE_ID,ANTHROPIC_IDENTITY_TOKEN
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -196,14 +196,30 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${ANTHROPIC_FEDERATION_RULE_ID:-}" ]; then
-            # ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN outrank WIF in the client's
-            # credential resolution EVEN WHEN SET TO THE EMPTY STRING. Actions cannot
-            # conditionally omit an `env:` entry -- a conditional expression yields
-            # '', which still counts as set -- so they must be unset here, in the
-            # shell that launches the suite. Leaving them blank silently falls back
-            # to "no credentials" rather than using the federated token.
-            unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
+            # ANTHROPIC_API_KEY outranks ANTHROPIC_AUTH_TOKEN in the client's
+            # credential resolution EVEN WHEN SET TO THE EMPTY STRING. Actions
+            # cannot conditionally omit an `env:` entry -- a conditional
+            # expression yields '', which still counts as set -- so it must be
+            # `unset` here, in the shell that launches the suite. Leaving it
+            # blank would silently fall back to ANTHROPIC_API_KEY (empty ->
+            # "no credentials") instead of using the federated token.
+            #
+            # ANTHROPIC_AUTH_TOKEN is deliberately NOT unset -- it is the
+            # credential this path forwards, set above (via GITHUB_ENV) by the
+            # "Exchange a federated Anthropic access token" step.
+            unset ANTHROPIC_API_KEY
             echo "auth: workload identity federation (rule ${ANTHROPIC_FEDERATION_RULE_ID})"
+            # Sandy only forwards env vars it recognizes, and ANTHROPIC_AUTH_TOKEN
+            # is not a sandy config key -- name it explicitly. Scoped to this
+            # branch (not the job's `env:` block above) so the API-key path
+            # below is byte-identical to before this change: no
+            # SANDY_EXTRA_ENV, no refresh hook, nothing WIF-shaped at all.
+            export SANDY_EXTRA_ENV=ANTHROPIC_AUTH_TOKEN
+            # Re-exchange before any section whose current token is >=60s old
+            # (test/run-integration-tests.sh's section() hook). This is what
+            # fixes the budget being the JWT's ~300s instead of the access
+            # token's ~598s -- see docs/CI-KEYLESS-AUTH.md "Token lifetimes".
+            export SANDY_INTEG_CRED_REFRESH_CMD='bash test/ci-wif-access-token.sh'
           else
             echo "auth: ANTHROPIC_API_KEY secret (WIF not configured)"
           fi
