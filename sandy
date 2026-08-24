@@ -2874,9 +2874,36 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
         done
         _rms_n_strays="$(printf '%s' "$_rms_strays" | grep -c . || true)"
         _rms_n_strays="${_rms_n_strays:-0}"
-        if [ "$_rms_n_records" -eq 0 ] && [ "$_rms_n_strays" -eq 0 ]; then
+        # STALE DAEMON LOGS (#215). `--start` writes
+        # sandboxes/.daemon-start-<pid>.log and removes it on SUCCESS only; a
+        # FAILED start keeps it deliberately, because its tail is the
+        # diagnostic that path prints. Nothing ever removes those, so every
+        # failed start leaves one forever (a reporting host had ~20 back to
+        # July). Reap only DEAD-owner logs, using the same `kill -0` liveness
+        # test the workspace mutex and lock_holder_alive already use. PID reuse
+        # errs safe: a recycled pid reads as live and the log is KEPT -- a false
+        # keep costs a stale file, a false reap destroys a diagnostic.
+        _rms_logs=""
+        for _rms_lg in "$_rms_home_sb"/.daemon-start-*.log; do
+            [ -f "$_rms_lg" ] || continue
+            _rms_lg_base="$(basename "$_rms_lg")"
+            _rms_lg_pid="${_rms_lg_base#.daemon-start-}"
+            _rms_lg_pid="${_rms_lg_pid%.log}"
+            case "$_rms_lg_pid" in ''|*[!0-9]*) continue ;; esac
+            kill -0 "$_rms_lg_pid" 2>/dev/null && continue
+            _rms_logs="${_rms_logs}${_rms_lg_base}"$'\n'
+        done
+        _rms_n_logs="$(printf '%s' "$_rms_logs" | grep -c . || true)"
+        _rms_n_logs="${_rms_n_logs:-0}"
+        if [ "$_rms_n_records" -eq 0 ] && [ "$_rms_n_strays" -eq 0 ] && [ "$_rms_n_logs" -eq 0 ]; then
             info "No orphaned sandboxes found."
             exit 0
+        fi
+        if [ "$_rms_n_logs" -gt 0 ]; then
+            info "Stale daemon-start logs (owning process is gone): $_rms_n_logs"
+            printf '%s' "$_rms_logs" | while IFS= read -r _rms_l; do
+                [ -n "$_rms_l" ] && printf '    %s\n' "$_rms_l"
+            done
         fi
         if [ "$_rms_n_strays" -gt 0 ]; then
             info "Stray sibling configs (sandbox directory already gone): $_rms_n_strays"
@@ -3082,8 +3109,29 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
             esac
         done <<< "$_rms_strays"
     fi
+    # Reap the stale daemon logs enumerated above, plus each one's .fatal
+    # sibling (the fast-fail marker, which is written next to the log and has
+    # no reaper of its own either). Liveness is re-tested at the point of
+    # removal, not trusted from the scan, so a pid that came alive in between
+    # is left alone. Same containment assert as every other rm here.
+    _rms_n_logs_done=0
+    if [ "${_rms_orphans:-false}" = "true" ] && [ -n "${_rms_logs:-}" ]; then
+        while IFS= read -r _rms_l; do
+            [ -n "$_rms_l" ] || continue
+            case "$_rms_l" in */*) continue ;; esac
+            _rms_l_pid="${_rms_l#.daemon-start-}"; _rms_l_pid="${_rms_l_pid%.log}"
+            case "$_rms_l_pid" in ''|*[!0-9]*) continue ;; esac
+            kill -0 "$_rms_l_pid" 2>/dev/null && continue
+            case "$_rms_home_sb/$_rms_l" in
+                "$_rms_real_sb"/?*)
+                    rm -f "$_rms_home_sb/$_rms_l" "$_rms_home_sb/$_rms_l.fatal" 2>/dev/null || true
+                    _rms_n_logs_done=$((_rms_n_logs_done + 1)) ;;
+            esac
+        done <<< "$_rms_logs"
+    fi
     info "Removed $_rms_n_ok sandbox(es)."
     [ "$_rms_n_strays_done" -gt 0 ] && info "Removed $_rms_n_strays_done stray sibling config(s)."
+    [ "$_rms_n_logs_done" -gt 0 ] && info "Removed $_rms_n_logs_done stale daemon log(s)."
     exit 0
 fi
 
