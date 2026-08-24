@@ -103,9 +103,16 @@ jobs:
           # docs/CI-KEYLESS-AUTH.md depends on this number.
           _pay="$(printf '%s' "$_tok" | cut -d. -f2)"
           _pay="$_pay$(printf '%*s' $(( (4 - ${#_pay} % 4) % 4 )) '' | tr ' ' '=')"
-          _life="$(printf '%s' "$_pay" | tr '_-' '/+' | base64 -d 2>/dev/null \
-                    | jq -r 'if .exp and .iat then (.exp - .iat | tostring) else "unknown" end' 2>/dev/null || echo unknown)"
-          echo "minted at $(date -u +%H:%M:%SZ); JWT lifetime: ${_life}s"
+          # Print sub/aud alongside the lifetime. When an exchange is rejected the
+          # API says only "Authentication failed"; the decoded `sub` is what you
+          # diff against the federation rule's subject pattern, and it is what
+          # actually identified the first failure. This diagnostic used to live in
+          # the anthropic-wif-test smoke test, which is deleted in this commit --
+          # removing the tool without keeping what made it useful would be a
+          # downgrade. `|| true` throughout: a diagnostic must never fail a run.
+          _claims="$(printf '%s' "$_pay" | tr '_-' '/+' | base64 -d 2>/dev/null \
+                      | jq -c '{sub, aud, lifetime_seconds: (.exp - .iat)}' 2>/dev/null || echo '{}')"
+          echo "minted at $(date -u +%H:%M:%SZ); claims: ${_claims}" || true
 
       - name: Run integration suite
         env:
