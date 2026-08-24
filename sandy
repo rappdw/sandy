@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.7.1-dev"
+SANDY_VERSION="1.8.0"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -1941,7 +1941,7 @@ _sandy_emit_state() {
             else
                 printf ','; _json_kv handoff_enabled 'false'
             fi
-            # agent_args_files (#per-agent-args): per-agent PRESENCE of an
+            # agent_args_files (#210): per-agent PRESENCE of an
             # operator $SANDBOX_DIR/agent-args.<agent> file, one fixed object
             # with all five agent names as literal keys (independent of
             # SANDY_AGENT, which this fast-path dispatch cannot read — it
@@ -6973,7 +6973,7 @@ _resolve_passive_privileged_approval
 # has been resolved through approval and exported (or dropped on rejection).
 _load_sandy_extra_env
 
-# SANDY_AGENT_ARGS (#59) / agent-args.<agent> (#per-agent-args) — tokenize
+# SANDY_AGENT_ARGS (#59) / agent-args.<agent> (#210) — tokenize
 # config-declared extra agent args for later, per-agent forwarding. Runs AFTER
 # the passive-privileged approval above, so an unapproved/dropped workspace
 # value is empty here and contributes nothing. The value is whitespace-split
@@ -10471,7 +10471,7 @@ fi
 RUN_FLAGS+=(-e "SANDY_AGENT=$SANDY_AGENT")
 RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
 RUN_FLAGS+=(-e "SANDY_EFFORT=${SANDY_EFFORT:-}")
-# SANDY_AGENT_ARGS_<AGENT> (per-agent operator args, #per-agent-args):
+# SANDY_AGENT_ARGS_<AGENT> (per-agent operator args, #210):
 # _sandy_build_agent_cmd runs CONTAINER-side (it lives in the user-setup.sh
 # heredoc), so these five resolved values have to cross the boundary or the
 # per-agent file/config args would silently do nothing. Bare expansion

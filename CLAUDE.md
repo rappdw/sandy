@@ -625,7 +625,7 @@ SANDY_AGENT_ARGS=--mcp-config .mcp.custom.json --some-experimental-flag value
 - **Home.** Workspace `.sandy/config` is the intended home (these args are usually project-specific); host `~/.sandy/config` works too for user-global defaults, though a global home is the wrong scope for project-specific relative-path args.
 - **Security tier.** Privileged — set freely from host `~/.sandy/config`, but from a **workspace** `.sandy/config` it triggers the standard per-workspace approval prompt (arbitrary agent flags from a committed config are a real attack surface: `--dangerously-skip-permissions`, a hostile `--mcp-config`, `--add-dir`-style escapes). Headless/non-TTY drops it, same as `SANDY_EXTRA_ENV`. Headless-mode flags (`-p`/`--print`/`--prompt`) are **dropped with a warning** — host-side headless detection runs before this injection, so a `-p` here would make the host launch interactive while the container went headless (a broken session); put those on the command line. Other mode flags (`--continue`, `--new`) still influence launch mode, so avoid them here too.
 
-### Per-agent override: `$SANDBOX_DIR/agent-args.<agent>` (#per-agent-args)
+### Per-agent override: `$SANDBOX_DIR/agent-args.<agent>` (#210)
 
 An operator can also drop a file at the **sandbox top level** — `$SANDBOX_DIR/agent-args.<agent>` (`agent-args.claude`, `agent-args.codex`, `agent-args.gemini`, `agent-args.opencode`, `agent-args.grok`; non-hidden, one per agent) — whose contents are extra CLI args for that one agent. This is the same capability `SANDY_AGENT_ARGS` gives, from a place a git repository cannot reach: a workspace `.sandy/config` **travels with the repository** (clone it elsewhere and the setting comes along), while sandbox state does not.
 

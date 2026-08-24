@@ -9990,7 +9990,7 @@ unset _s105_h _s105_n _s105_iso_ln _s105_hd_ln _s105_out _s105_home _s105_guard_
 
 # ============================================================
 echo ""
-echo "§106: per-agent operator args — \$SANDBOX_DIR/agent-args.<agent> (#per-agent-args)"
+echo "§106: per-agent operator args — \$SANDBOX_DIR/agent-args.<agent> (#210)"
 # ============================================================
 # An operator can drop a file at the SANDBOX TOP LEVEL, agent-args.<agent>
 # (agent-args.claude, agent-args.codex, ...), whose contents are extra CLI
