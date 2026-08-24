@@ -9808,6 +9808,68 @@ else
         printf "  \033[0;31m- %s\033[0m\n" "$e"
     done
 fi
+echo ""
+echo "§104: fail closed when a claude credential was intended but absent (#106)"
+# WHY THIS EXISTS. Integration run 32681634083 went GREEN having tested nothing:
+# the workflow announced "auth: workload identity federation", the exchange
+# produced no usable credential, Claude came up "none configured", and all ~22
+# claude sections skipped cleanly. A suite that skips when a credential is
+# genuinely absent is correct -- that is what makes it useful on a repo with no
+# secrets -- so the two cases can only be told apart by operator intent.
+# SANDY_INTEG_REQUIRE_CLAUDE=1 declares that intent.
+#
+# This section asserts the PROPERTY (a required-but-absent credential fails the
+# run), not the mere presence of the variable name -- a grep for the string would
+# still pass if the comparison were inverted or the exit dropped.
+_S104_SUITE="$(dirname "$0")/run-integration-tests.sh"
+check "§104(pre) run-integration-tests.sh exists" test -f "$_S104_SUITE"
+
+# Extract the guard and exercise it in isolation, against the four combinations
+# of (intent declared?) x (credential present?). Running the real suite is not an
+# option here -- it launches containers -- so the guard block is lifted verbatim
+# and driven directly, which keeps this coupled to the real source text.
+# Extract the guard VERBATIM from the suite and drive it. Reimplementing the
+# logic here would test a copy -- a disabled guard in the real file would leave
+# these checks green, which is precisely the vacuous-guard failure this repo has
+# hit before. The sentinel pair is asserted below so a rename cannot silently
+# empty the extraction.
+_S104_BLOCK="$(awk '/^# >>> SANDY_REQUIRE_CLAUDE_GUARD/{f=1;next} /^# <<< SANDY_REQUIRE_CLAUDE_GUARD/{f=0} f' "$_S104_SUITE")"
+check "§104(0) extracted the real guard from the suite (mutation: renaming or removing the sentinel pair empties this extraction and must fail here, not silently pass everything after it)" \
+    test -n "$_S104_BLOCK"
+
+_s104_guard() {
+    # $1 = SANDY_INTEG_REQUIRE_CLAUDE, $2 = HAS_CLAUDE. Runs the SUITE's own text.
+    env SANDY_INTEG_REQUIRE_CLAUDE="$1" HAS_CLAUDE="$2" bash -c "
+        $_S104_BLOCK
+        exit 0"
+}
+_s104_rc=0; _s104_guard 1 false || _s104_rc=$?
+check "§104(1) required + absent  -> FAILS (the false-green case; mutation: inverting the test or dropping the exit makes this pass)" \
+    test "$_s104_rc" -eq 1
+_s104_rc=0; _s104_guard 1 true || _s104_rc=$?
+check "§104(2) required + present -> passes" test "$_s104_rc" -eq 0
+_s104_rc=0; _s104_guard 0 false || _s104_rc=$?
+check "§104(3) not required + absent -> passes (a credential-less repo must still run and skip)" \
+    test "$_s104_rc" -eq 0
+_s104_rc=0; _s104_guard "" false || _s104_rc=$?
+check "§104(4) unset + absent -> passes (default must be opt-in, never opt-out)" \
+    test "$_s104_rc" -eq 0
+
+# The guard must actually be present in the suite, and gated on the documented
+# variable -- (1)-(4) above prove the LOGIC, this proves it is WIRED IN.
+check "§104(5) the suite contains the SANDY_INTEG_REQUIRE_CLAUDE guard" \
+    grep -q 'SANDY_INTEG_REQUIRE_CLAUDE' "$_S104_SUITE"
+check "§104(6) the guard exits rather than only warning (mutation: downgrading exit 1 to a printf leaves the false green in place)" \
+    grep -A12 'SANDY_INTEG_REQUIRE_CLAUDE:-0' "$_S104_SUITE" | grep -q 'exit 1'
+
+# And the workflow must SET it on the WIF path, or the guard never fires where
+# the false green actually happened.
+_S104_WF="$(dirname "$0")/../.github/workflows/integration.yml"
+if [ -f "$_S104_WF" ]; then
+    check "§104(7) the Integration workflow sets SANDY_INTEG_REQUIRE_CLAUDE (mutation: the guard is inert in CI without this)" \
+        grep -q 'SANDY_INTEG_REQUIRE_CLAUDE' "$_S104_WF"
+fi
+
 _run_provenance   # timestamp + commit + tree state, so a result you scroll back
                   # to after a context switch says which build produced it.
 [ "$FAIL" -eq 0 ] || exit 1

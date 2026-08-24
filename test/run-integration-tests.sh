@@ -689,6 +689,29 @@ echo "  OpenCode: $(_label $HAS_OPENCODE)  $(_auth_detail "anthropic-key=$([ -n 
 echo "  Grok:     $(_label $HAS_GROK)  $(_auth_detail "api-key=$HAS_XAI_API_KEY")"
 echo ""
 
+# --- fail closed when a credential was INTENDED but did not arrive ----------
+# The #196 class of false green, seen again in run 32681634083: the Integration
+# workflow announced "auth: workload identity federation", the exchange silently
+# produced nothing, Claude came up "none configured", every claude section
+# skipped cleanly, and the run went GREEN having tested nothing.
+#
+# Skipping is the right behavior when no credential was intended -- that is what
+# keeps this suite useful on a repo with no secrets. It is a FALSE GREEN when one
+# was. The two cases are indistinguishable from inside the suite, so the operator
+# declares the intent: SANDY_INTEG_REQUIRE_CLAUDE=1 means "a claude credential is
+# expected", which turns a silent skip into a hard failure that names the cause.
+#
+# Checked AFTER the banner prints, so the log shows the full credential table
+# first -- the table is the diagnosis, the error is just the verdict.
+# >>> SANDY_REQUIRE_CLAUDE_GUARD (extracted verbatim by run-tests.sh §104)
+if [ "${SANDY_INTEG_REQUIRE_CLAUDE:-0}" = "1" ] && [ "$HAS_CLAUDE" != true ]; then
+    printf "\033[0;31mSANDY_INTEG_REQUIRE_CLAUDE=1, but no claude credential is configured.\033[0m\n"
+    printf "This run would have skipped every claude section and reported success.\n"
+    printf "Refusing to report a green run that tested nothing (see the table above).\n"
+    exit 1
+fi
+# <<< SANDY_REQUIRE_CLAUDE_GUARD
+
 _all_true=true
 for _v in $HAS_CODEX $HAS_GEMINI $HAS_CLAUDE $HAS_OPENCODE $HAS_GROK; do
     [ "$_v" = true ] || _all_true=false
