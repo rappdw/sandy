@@ -10,9 +10,20 @@ name: Integration
 # workflow_dispatch only, both of which run in the base-repo trust context.
 on:
   schedule:
-    # 07:00 UTC daily. Nightly rather than per-merge: every keyed run costs real
-    # provider spend, and a merge queue would multiply it for no added signal.
-    - cron: '0 7 * * *'
+    # Mon-Sat 07:00 UTC: runs only if main moved in the last 24h (see the `gate`
+    # job). Every keyed run costs real provider spend, and re-testing an
+    # unchanged tree buys nothing.
+    - cron: '0 7 * * 1-6'
+    # Sunday 07:00 UTC: ALWAYS runs, even with no commits.
+    #
+    # This is not redundancy. Sandy installs the wrapped agents at
+    # floating-latest (claude/codex/gemini/opencode via npm, grok via its
+    # installer) and rebuilds on the per-launch update check -- so the suite can
+    # break with ZERO repo changes, because upstream shipped a new agent
+    # version. An activity-only gate would hide precisely the class of failure a
+    # nightly exists to catch. The weekly baseline bounds how long that can hide
+    # to seven days.
+    - cron: '0 7 * * 0'
   workflow_dispatch:
     inputs:
       skip:
@@ -45,7 +56,45 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Decide whether to run at all, BEFORE spending a runner on checkout, disk
+  # reclaim and image builds. Cheap: one API call, no checkout.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A human asked for this run explicitly. Never second-guess that.
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "manual dispatch — running regardless of activity"
+            exit 0
+          fi
+          # The Sunday baseline always runs; see the cron comments above.
+          if [ "${{ github.event.schedule }}" = "0 7 * * 0" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "weekly baseline — running regardless of activity"
+            exit 0
+          fi
+          _last="$(gh api "repos/${{ github.repository }}/commits/${{ github.ref_name }}" \
+                     --jq '.commit.committer.date')"
+          _age=$(( ( $(date -u +%s) - $(date -u -d "$_last" +%s) ) / 3600 ))
+          echo "last commit on ${{ github.ref_name }}: $_last (${_age}h ago)"
+          if [ "$_age" -lt 24 ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "main moved in the last 24h — running"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "no commits in 24h — skipping. Sunday's baseline run is unconditional."
+          fi
+
   integration:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     # Full suite is ~27 min on the maintainer host and CI is slower; 90 gives
     # headroom without letting a hung section burn an hour of runner time.
