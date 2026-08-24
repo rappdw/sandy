@@ -8591,6 +8591,73 @@ mkdir -p "$SANDBOX_DIR/npm-global"         # npm -g installs
 mkdir -p "$SANDBOX_DIR/go"                 # GOPATH (go install)
 mkdir -p "$SANDBOX_DIR/cargo"              # cargo install
 
+# BEGIN handoff directories (#132 slice 1: dirs + mounts ONLY — no relay,
+# no helper, no skills, no turn initiation; nothing ever moves these files).
+# Collision guard: a workspace at ~/.handoff (or below it) maps to
+# /home/claude/.handoff in-container, so the handoff mounts would nest inside
+# the workspace bind and Docker would create outbox/ and inbox/ dirs in the
+# HOST workspace (pollution) / shadow workspace content. Warn-and-skip, same
+# shape as SANDY_SCREENSHOT_DIR's missing-dir handling.
+# Operator-side enable: a marker file at the TOP LEVEL of the sandbox dir turns
+# the pair on without any workspace .sandy/config. OR with the config key, never
+# AND — either alone is sufficient — and resolved HERE, before the gate below, so
+# the collision refusal and the :ro mount flags downstream apply identically to
+# both paths rather than being duplicated for one of them.
+#
+# Why a marker rather than a committed config, for a fleet: a workspace
+# .sandy/config TRAVELS WITH THE REPOSITORY — clone it elsewhere and the pair is
+# enabled on a sandbox nobody decided about. This file is per-machine,
+# per-sandbox, and lives in state a repo cannot carry. Same passive tier; the
+# difference is that it cannot be cloned into existence.
+#
+# Why the TOP LEVEL specifically, and not under claude/: $SANDBOX_DIR/claude is
+# mounted at ~/.claude and .claude/{commands,agents,plugins} are writable
+# overlays, so a marker in that tree would be one the AGENT can create for
+# itself. At the top level nothing mounts it (there is no bare -v of
+# $SANDBOX_DIR — only subdirs plus the :ro session marker), so the agent has no
+# path to it. If a future change mounts more of $SANDBOX_DIR, this file must stay
+# outside whatever is mounted; run-tests.sh asserts that.
+#
+# Existence is the whole signal — contents are ignored, so `touch` works, which
+# is how a provisioner creates it. Note the DIRECTORIES are deliberately NOT a
+# trigger: a stray mkdir, a restored backup, or an rsync -a of a sandbox dir
+# would otherwise silently enable mail for a sandbox nobody chose.
+if [ "${SANDY_HANDOFF_DIRS:-0}" != "1" ] && [ -e "$SANDBOX_DIR/.handoff-enabled" ]; then
+    SANDY_HANDOFF_DIRS=1
+    [ "${SANDY_VERBOSE:-0}" != "0" ] && info "Handoff dirs enabled by $SANDBOX_DIR/.handoff-enabled"
+fi
+# The directories are created on EVERY launch, regardless of the flag; only the
+# MOUNT is gated (see the RUN_FLAGS block far below). Decoupling the two is what
+# makes "directory presence means nothing" true by CONSTRUCTION rather than by
+# convention: when every sandbox has them, presence carries zero information and
+# the marker is the only signal that can mean anything. Previously presence was
+# ambiguous — it might mean a launch had enabled the pair, or that someone ran
+# mkdir — and a rule that has to be asserted is weaker than one that cannot be
+# violated.
+#
+# It also removes a step from fleet provisioning. $SANDBOX_DIR is itself a launch
+# artifact, so a sandbox that HAS a marker has already been launched; with the
+# pair created unconditionally, enrolling it is the marker alone, with no
+# re-launch purely to harvest a side effect.
+#
+# Unmounted, these are inert: nothing bind-mounts them, ~/.handoff does not exist
+# inside the container, and the agent has no path to them. Cost is two empty
+# directories per sandbox on the host, and the loss of the old "zero launch diff"
+# promise for the off case — documented, not silent.
+mkdir -p "$SANDBOX_DIR/handoff/outbox" "$SANDBOX_DIR/handoff/inbox"
+if [ "${SANDY_HANDOFF_DIRS:-0}" = "1" ]; then
+    case "$SANDY_WORKSPACE" in
+        /home/claude/.handoff|/home/claude/.handoff/*)
+            # Collision is purely about the MOUNT — the directories above are
+            # harmless here — so this still refuses, and now refuses only the
+            # thing that was ever the problem.
+            warn "SANDY_HANDOFF_DIRS=1 but the workspace maps to $SANDY_WORKSPACE — the ~/.handoff directories would collide with the workspace mount. Handoff mounts disabled for this session."
+            SANDY_HANDOFF_DIRS=0
+            ;;
+    esac
+fi
+# END handoff directories
+
 # BEGIN per-agent args (agent-args.<agent>)
 # An operator can drop a file at the SANDBOX TOP LEVEL — $SANDBOX_DIR/agent-
 # args.<agent> (agent-args.claude, agent-args.codex, ...), non-hidden, one per
@@ -8658,73 +8725,6 @@ for _sandy_aa_agent in "${_SANDY_AGENTS[@]}"; do
 done
 unset _sandy_aa_agent _sandy_aa_val _sandy_aa_file
 # END per-agent args
-
-# BEGIN handoff directories (#132 slice 1: dirs + mounts ONLY — no relay,
-# no helper, no skills, no turn initiation; nothing ever moves these files).
-# Collision guard: a workspace at ~/.handoff (or below it) maps to
-# /home/claude/.handoff in-container, so the handoff mounts would nest inside
-# the workspace bind and Docker would create outbox/ and inbox/ dirs in the
-# HOST workspace (pollution) / shadow workspace content. Warn-and-skip, same
-# shape as SANDY_SCREENSHOT_DIR's missing-dir handling.
-# Operator-side enable: a marker file at the TOP LEVEL of the sandbox dir turns
-# the pair on without any workspace .sandy/config. OR with the config key, never
-# AND — either alone is sufficient — and resolved HERE, before the gate below, so
-# the collision refusal and the :ro mount flags downstream apply identically to
-# both paths rather than being duplicated for one of them.
-#
-# Why a marker rather than a committed config, for a fleet: a workspace
-# .sandy/config TRAVELS WITH THE REPOSITORY — clone it elsewhere and the pair is
-# enabled on a sandbox nobody decided about. This file is per-machine,
-# per-sandbox, and lives in state a repo cannot carry. Same passive tier; the
-# difference is that it cannot be cloned into existence.
-#
-# Why the TOP LEVEL specifically, and not under claude/: $SANDBOX_DIR/claude is
-# mounted at ~/.claude and .claude/{commands,agents,plugins} are writable
-# overlays, so a marker in that tree would be one the AGENT can create for
-# itself. At the top level nothing mounts it (there is no bare -v of
-# $SANDBOX_DIR — only subdirs plus the :ro session marker), so the agent has no
-# path to it. If a future change mounts more of $SANDBOX_DIR, this file must stay
-# outside whatever is mounted; run-tests.sh asserts that.
-#
-# Existence is the whole signal — contents are ignored, so `touch` works, which
-# is how a provisioner creates it. Note the DIRECTORIES are deliberately NOT a
-# trigger: a stray mkdir, a restored backup, or an rsync -a of a sandbox dir
-# would otherwise silently enable mail for a sandbox nobody chose.
-if [ "${SANDY_HANDOFF_DIRS:-0}" != "1" ] && [ -e "$SANDBOX_DIR/.handoff-enabled" ]; then
-    SANDY_HANDOFF_DIRS=1
-    [ "${SANDY_VERBOSE:-0}" != "0" ] && info "Handoff dirs enabled by $SANDBOX_DIR/.handoff-enabled"
-fi
-# The directories are created on EVERY launch, regardless of the flag; only the
-# MOUNT is gated (see the RUN_FLAGS block far below). Decoupling the two is what
-# makes "directory presence means nothing" true by CONSTRUCTION rather than by
-# convention: when every sandbox has them, presence carries zero information and
-# the marker is the only signal that can mean anything. Previously presence was
-# ambiguous — it might mean a launch had enabled the pair, or that someone ran
-# mkdir — and a rule that has to be asserted is weaker than one that cannot be
-# violated.
-#
-# It also removes a step from fleet provisioning. $SANDBOX_DIR is itself a launch
-# artifact, so a sandbox that HAS a marker has already been launched; with the
-# pair created unconditionally, enrolling it is the marker alone, with no
-# re-launch purely to harvest a side effect.
-#
-# Unmounted, these are inert: nothing bind-mounts them, ~/.handoff does not exist
-# inside the container, and the agent has no path to them. Cost is two empty
-# directories per sandbox on the host, and the loss of the old "zero launch diff"
-# promise for the off case — documented, not silent.
-mkdir -p "$SANDBOX_DIR/handoff/outbox" "$SANDBOX_DIR/handoff/inbox"
-if [ "${SANDY_HANDOFF_DIRS:-0}" = "1" ]; then
-    case "$SANDY_WORKSPACE" in
-        /home/claude/.handoff|/home/claude/.handoff/*)
-            # Collision is purely about the MOUNT — the directories above are
-            # harmless here — so this still refuses, and now refuses only the
-            # thing that was ever the problem.
-            warn "SANDY_HANDOFF_DIRS=1 but the workspace maps to $SANDY_WORKSPACE — the ~/.handoff directories would collide with the workspace mount. Handoff mounts disabled for this session."
-            SANDY_HANDOFF_DIRS=0
-            ;;
-    esac
-fi
-# END handoff directories
 
 # Workspace .venv overlay. If the host workspace has a .venv/, we shadow it
 # with a sandbox-owned venv so (a) the host venv is never touched and
