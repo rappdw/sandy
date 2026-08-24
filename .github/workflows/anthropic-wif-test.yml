@@ -1,10 +1,9 @@
 name: anthropic-wif-test
-# Scoped to main deliberately. The federation rule's subject pattern is exactly
+# Scoped to main deliberately. The rule's subject pattern is exactly
 # `repo:rappdw/sandy:ref:refs/heads/main`, so a push to any OTHER branch mints a
-# JWT whose `sub` will not match and the exchange fails with a rule mismatch --
-# which reads as a broken setup but is the scoping working correctly.
-# main is protected, so merging the PR that adds this file IS a push to main:
-# the merge itself triggers the first run.
+# JWT whose `sub` will not match and the exchange fails -- which reads as a
+# broken setup but is the scoping working. workflow_dispatch lets this be re-run
+# without a commit; dispatch defaults to main, which is what the rule expects.
 on:
   push:
     branches: [main]
@@ -23,8 +22,9 @@ jobs:
             const token = await core.getIDToken('https://api.anthropic.com');
             core.setSecret(token);
             core.exportVariable('JWT', token);
-      # The ~10 minute budget in docs/CI-KEYLESS-AUTH.md is an assumption until
-      # something measures it. Do that here, where it is cheap and isolated.
+      # Measured 2026-08-23: 300s, not the 600 assumed from the console form.
+      # Every budget in docs/CI-KEYLESS-AUTH.md depends on this number, and the
+      # printed `sub` is what to diff against the rule when an exchange fails.
       - name: Report the JWT's actual lifetime
         run: |
           set -euo pipefail
@@ -35,15 +35,20 @@ jobs:
 
       - name: Exchange for an Anthropic access token
         run: |
-          curl -sS https://api.anthropic.com/v1/oauth/token \
+          set -euo pipefail
+          # --fail-with-body: curl exits 0 on an HTTP error without it, so a
+          # FAILED exchange reported a GREEN run on the first attempt. It still
+          # prints the body, so the error is visible before the non-zero exit.
+          curl -sS --fail-with-body -w '\nHTTP %{http_code}\n' \
+            https://api.anthropic.com/v1/oauth/token \
             -H "content-type: application/json" \
             --data @- <<JSON | jq 'with_entries(if (.key | test("token$")) then .value = "<redacted>" else . end)'
           {
             "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
             "assertion": "$JWT",
-            "federation_rule_id": "fdrl_016DVS3aoiaRui1LxwX4YC6U",
-            "organization_id": "f42a421a-321a-452c-9eb9-860dbccdc4cc",
-            "service_account_id": "svac_01JEjiEmiBLdabESCFbppKhG",
-            "workspace_id": "wrkspc_01Chw1A9mY3LBx9xJr4rgC87"
+            "federation_rule_id": "fdrl_01GhP5sEZuFaFYJ8GvqLpoUC",
+            "organization_id": "a832d015-c5a5-48d4-9461-820ec56e6bce",
+            "service_account_id": "svac_01FHzkuyUmPSykNbvjrSdjp9",
+            "workspace_id": "wrkspc_01QXofwmzAiZAxvyPjB7mUXy"
           }
           JSON
