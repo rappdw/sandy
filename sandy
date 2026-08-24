@@ -730,7 +730,7 @@ SANDY_ALLOW_LAN_HOSTS|string|||0.7.9|stable|Comma-separated IPs/CIDRs to allow t
 SANDY_LOCAL_LLM_HOST|string||^[^[:space:]]+:[0-9]+$|0.12.0|stable|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. With the egress proxy on (default) the proxy's forward listener relays host.docker.internal:<port> to the host; with the proxy off (=0, Linux) it inserts one iptables ACCEPT and maps host.docker.internal.
 SANDY_ALLOW_HOSTS|string|||0.14.0|stable|Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval.
 SANDY_EXTRA_ENV|string|||0.12.0|stable|Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values resolve env > workspace .sandy/.secrets > workspace .sandy/config > ~/.sandy/.secrets > ~/.sandy/config. The privileged tier gates the NAME list (workspace config setting SANDY_EXTRA_ENV itself requires approval); once approved, values may come from any source.
-SANDY_AGENT_ARGS|string|||1.3.0|stable|Extra command-line arguments appended to the agent command (claude/codex/gemini/opencode) on EVERY launch — bare sandy, headless -p, the --start daemon, and sandy-ui alike. Whitespace-split into argv (no embedded-space/quoting support in v1) and forwarded through the same per-agent translation as command-line pass-through args, ordered AFTER sandy's own flags and BEFORE any command-line args. Privileged tier: free from host ~/.sandy/config, but from a workspace .sandy/config it triggers the per-workspace approval prompt (headless/non-TTY drops it). Never eval'd. Typical use: a fixed --mcp-config <path> or project feature flags. In multi-agent combos the same args go to every pane; per-agent variants are a possible follow-up.
+SANDY_AGENT_ARGS|string|||1.3.0|stable|Extra command-line arguments appended to the agent command (claude/codex/gemini/opencode) on EVERY launch — bare sandy, headless -p, the --start daemon, and sandy-ui alike. Whitespace-split into argv (no embedded-space/quoting support in v1) and forwarded through the same per-agent translation as command-line pass-through args, ordered AFTER sandy's own flags and BEFORE any command-line args. Privileged tier: free from host ~/.sandy/config, but from a workspace .sandy/config it triggers the per-workspace approval prompt (headless/non-TTY drops it). Never eval'd. Typical use: a fixed --mcp-config <path> or project feature flags. Applies to every selected agent (each pane in a multi-agent combo) unless overridden per agent by an operator file $SANDBOX_DIR/agent-args.<agent> (sandbox top level, agent-unwritable, privileged by location — no prompt); when both are present the sandbox file wins for that agent, values are never merged, and sandy prints a one-line notice.
 ANTHROPIC_API_KEY|secret|||0.1.0|stable|Anthropic API key for Claude Code. Not required when using Claude Max OAuth.
 CLAUDE_CODE_OAUTH_TOKEN|secret|||0.7.0|stable|Claude Code OAuth token (alternative to ANTHROPIC_API_KEY).
 GEMINI_API_KEY|secret|||0.9.0|stable|Google API key for Gemini CLI.
@@ -1855,6 +1855,7 @@ _sandy_emit_state() {
             [ -d "$sb" ] || continue
             sb="${sb%/}"
             local sb_name sb_created_ver sb_last_ver sb_created_at sb_last_at sb_lock_dir sb_lock_pid sb_ws_path
+            local sb_aa sb_aa_agent
             sb_name="$(basename "$sb")"
             sb_created_ver="$(cat "$sb/.sandy_created_version" 2>/dev/null || true)"
             sb_last_ver="$(cat "$sb/.sandy_last_version" 2>/dev/null || true)"
@@ -1940,6 +1941,32 @@ _sandy_emit_state() {
             else
                 printf ','; _json_kv handoff_enabled 'false'
             fi
+            # agent_args_files (#per-agent-args): per-agent PRESENCE of an
+            # operator $SANDBOX_DIR/agent-args.<agent> file, one fixed object
+            # with all five agent names as literal keys (independent of
+            # SANDY_AGENT, which this fast-path dispatch cannot read — it
+            # exits before the script's linear execution reaches agent
+            # resolution). Five `[ -f ]` builtin tests cost zero spawns, so
+            # this is emitted in BOTH full and light mode (the workspace_exists
+            # precedent, not the size_bytes one). Reports FILE PRESENCE only,
+            # explicitly NOT effective args — a workspace or host
+            # SANDY_AGENT_ARGS also supplies args for that agent and
+            # --print-state does not read configs, so false does not mean "no
+            # extra args next launch" (same caveat as handoff_enabled above).
+            # Contents are never read/reported here: unbounded I/O in the
+            # light-mode poll path, and a leak of operator-placed values to
+            # every state consumer.
+            sb_aa='{'
+            for sb_aa_agent in claude gemini codex opencode grok; do
+                [ "$sb_aa" = '{' ] || sb_aa="$sb_aa,"
+                if [ -f "$sb/agent-args.$sb_aa_agent" ]; then
+                    sb_aa="$sb_aa\"$sb_aa_agent\":true"
+                else
+                    sb_aa="$sb_aa\"$sb_aa_agent\":false"
+                fi
+            done
+            sb_aa="$sb_aa}"
+            printf ','; _json_kv agent_args_files "$sb_aa"
             if [ -d "$sb_lock_dir" ]; then
                 printf ','; _json_kv lock_held 'true'
                 printf ','; _json_kv lock_holder_pid "$(_json_escape "$sb_lock_pid")"
@@ -2649,8 +2676,14 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # OPERATOR enrollment decision, not agent-touched session state. Destroying it
     # would silently un-enroll a sandbox from a fleet — the mounts would just stop
     # appearing, with no error, which is the "looks wired and is not" failure this
-    # marker exists to avoid.
-    _rs_keep() { case "$1" in WORKSPACE.json|.handoff-enabled) return 0 ;; .sandy-approved-symlinks.list) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
+    # marker exists to avoid. agent-args.<agent> files are the same kind of
+    # operator state (see sandy's "per-agent args" block) — destroying them on a
+    # reset would silently un-configure a sandbox's per-agent launch args with no
+    # error, so they are preserved unconditionally too. One consequence: a
+    # sandbox holding only WORKSPACE.json plus agent-args files now correctly
+    # reports "already minimal" with those files named on the Preserved: line, so
+    # an operator does not mistake visible-files-plus-nothing-to-reset for a bug.
+    _rs_keep() { case "$1" in WORKSPACE.json|.handoff-enabled|agent-args.*) return 0 ;; .sandy-approved-symlinks.list) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
     printf '\nsandy --reset-sandbox: %s\n' "$_rs_name"
     printf 'Workspace: %s\n' "$_rs_wd"
     printf 'Will destroy (next launch re-materializes them):\n'
@@ -2668,8 +2701,9 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # when it was not (it is preserved unconditionally, like WORKSPACE.json,
     # per _rs_keep above). That is the inverse of the "looks wired and is
     # not" failure the marker exists to prevent (#178 fix).
-    printf 'Preserved: WORKSPACE.json (lineage)%s%s\n\n' \
+    printf 'Preserved: WORKSPACE.json (lineage)%s%s%s\n\n' \
         "$([ -e "$_rs_dir/.handoff-enabled" ] && printf ', .handoff-enabled (handoff enrollment)')" \
+        "$(set -- "$_rs_dir"/agent-args.*; [ -e "$1" ] && printf ', agent-args.* (per-agent launch args)')" \
         "$([ "$_rs_keep_approvals" = "true" ] && printf ', approval list')"
 
     [ "$_rs_n" -eq 0 ] && { info "Sandbox already minimal — nothing to reset."; exit 0; }
@@ -2924,6 +2958,10 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
         if [ -e "$_rms_dir/.handoff-enabled" ]; then
             printf '    NOTE: this sandbox is handoff-enrolled (.handoff-enabled) — removal un-enrolls it from the fleet.\n'
         fi
+        for _rms_aa in "$_rms_dir"/agent-args.*; do
+            [ -e "$_rms_aa" ] || continue
+            printf '    NOTE: per-agent launch args file %s will be destroyed with the sandbox.\n' "$(basename "$_rms_aa")"
+        done
     done <<< "$_rms_ok"
     _rms_n_skip="$(printf '%s\n' "$_rms_skip" | grep -c . || true)"
     _rms_n_skip="${_rms_n_skip:-0}"
@@ -5474,12 +5512,46 @@ done
 
 # --- Build the command for a given agent ---
 _sandy_build_agent_cmd() {
+    # Per-agent operator/config args (SANDY_AGENT_ARGS_<AGENT>, resolved
+    # host-side from SANDY_AGENT_ARGS and/or an operator agent-args.<agent>
+    # file — see sandy's "per-agent args" block) are PREPENDED onto this
+    # pane's OWN "${@:2}" before dispatch, one lookup per call so each pane in
+    # a multi-agent combo only ever sees its own agent's tokens. Explicit
+    # 5-arm case (no ${var^^}, no indirection — bash-3.2-safe, matches house
+    # style). Prepend-before-dispatch (not appended, not injected elsewhere)
+    # reproduces the exact ordering the old top-level `set --` prepend gave:
+    # sandy flags → config/file tokens → CLI pass-through args — which matters
+    # because build_claude_cmd scans its own "$@" for --continue/--resume
+    # (auto-continue) and codex/opencode scan for headless subcommand
+    # selection, and every builder still emits _sandy_translate_args LAST for
+    # the actual %q quoting (one quoting path, not a second one here).
+    _sandy_aa_val=""
     case "$1" in
-        claude)   build_claude_cmd   "${@:2}" ;;
-        gemini)   build_gemini_cmd   "${@:2}" ;;
-        codex)    build_codex_cmd    "${@:2}" ;;
-        opencode) build_opencode_cmd "${@:2}" ;;
-        grok)     build_grok_cmd     "${@:2}" ;;
+        claude)   _sandy_aa_val="${SANDY_AGENT_ARGS_CLAUDE:-}" ;;
+        gemini)   _sandy_aa_val="${SANDY_AGENT_ARGS_GEMINI:-}" ;;
+        codex)    _sandy_aa_val="${SANDY_AGENT_ARGS_CODEX:-}" ;;
+        opencode) _sandy_aa_val="${SANDY_AGENT_ARGS_OPENCODE:-}" ;;
+        grok)     _sandy_aa_val="${SANDY_AGENT_ARGS_GROK:-}" ;;
+    esac
+    _sandy_aa_pre=()
+    if [ -n "$_sandy_aa_val" ]; then
+        # `|| true`: user-setup.sh runs under `set -e` with an ERR trap, and
+        # this function is always invoked inside a `$( )` command
+        # substitution at every call site — `read` returns 1 at EOF-without-
+        # trailing-newline, which would otherwise abort the pane's command
+        # assembly. Values are single-line by construction (the host-side
+        # tokenizer normalizes newlines before forwarding), so no mode-flag
+        # re-filter is needed here — the host tokenizer is the single
+        # authoritative filter, and the host overwrites any forged env
+        # unconditionally before forwarding.
+        read -ra _sandy_aa_pre <<< "$_sandy_aa_val" || true
+    fi
+    case "$1" in
+        claude)   build_claude_cmd   ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
+        gemini)   build_gemini_cmd   ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
+        codex)    build_codex_cmd    ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
+        opencode) build_opencode_cmd ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
+        grok)     build_grok_cmd     ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
     esac
 }
 
@@ -5493,6 +5565,16 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
     if [ "$_agent" = "claude" ] && [ "${SANDY_REMOTE_CONTROL:-false}" = "true" ]; then
         sandy_log "Launching Claude Code (remote-control)"
         AGENT_CMD="claude remote-control --name \"sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}\""
+        # This branch bypasses _sandy_build_agent_cmd entirely, so it has to
+        # prepend its own per-agent tokens (SANDY_AGENT_ARGS_CLAUDE) here or
+        # `sandy --remote` would silently lose configured args now that the
+        # old global "$@" prepend is gone. Reuses this branch's own printf %q
+        # quoting loop below — no second quoting path.
+        if [ -n "${SANDY_AGENT_ARGS_CLAUDE:-}" ]; then
+            _sandy_aa_pre=()
+            read -ra _sandy_aa_pre <<< "${SANDY_AGENT_ARGS_CLAUDE}" || true
+            set -- ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "$@"
+        fi
         for arg in "$@"; do
             AGENT_CMD+=" $(printf "%q" "$arg")"
         done
@@ -6724,6 +6806,19 @@ _load_sandy_extra_env() {
             warn "SANDY_EXTRA_ENV: '$_name' is already a sandy-recognized key — drop it from SANDY_EXTRA_ENV"
             continue
         fi
+        # SANDY_AGENT_ARGS_<AGENT> are DERIVED internals, not config keys, so
+        # they are in none of the key lists above and that check cannot see
+        # them. They must still be refused here: the secret env-file is appended
+        # to RUN_FLAGS *after* the explicit `-e` flags, and docker resolves
+        # duplicate -e last-wins, so a forwarded name would silently OVERRIDE
+        # sandy's own resolved per-agent args. A workspace config could then
+        # inject arbitrary agent flags behind an approval prompt that names only
+        # SANDY_EXTRA_ENV and says nothing about agent args.
+        case "$_name" in
+            SANDY_AGENT_ARGS_*)
+                warn "SANDY_EXTRA_ENV: refusing '$_name' — per-agent args are resolved by sandy (use \$SANDBOX_DIR/agent-args.<agent> or SANDY_AGENT_ARGS)"
+                continue ;;
+        esac
         _SANDY_EXTRA_ENV_NAMES+=("$_name")
         # If the var is already set in the host env, leave it. `+set`
         # distinguishes "set to empty" from "unset" — we honor an explicit
@@ -6878,38 +6973,68 @@ _resolve_passive_privileged_approval
 # has been resolved through approval and exported (or dropped on rejection).
 _load_sandy_extra_env
 
-# SANDY_AGENT_ARGS (#59) — prepend config-declared extra agent args to the
-# forwarded argv. Runs AFTER the passive-privileged approval above, so an
-# unapproved/dropped workspace value is empty here and injects nothing. The
-# value is whitespace-split into an argv array via `read -ra` (NEVER eval —
-# injection); each token is individually printf %q-quoted downstream by
-# _sandy_translate_args, so it composes safely with the existing pass-through
-# forwarding. PREPENDED to "$@" so config args land after sandy's own agent
-# flags but before command-line pass-through args (a CLI arg still wins). This
-# single top-level injection is reached by every launcher (bare sandy, -p, the
-# --start supervisor which re-loads config itself, and sandy-ui) because they
-# all funnel through the one `docker run … "$@"`. NOT added to the --start
-# re-exec argv: the supervisor re-derives it from config, so that would
-# double-apply.
-if [ -n "${SANDY_AGENT_ARGS:-}" ]; then
-    _sandy_agent_args_raw=()
-    read -ra _sandy_agent_args_raw <<< "$SANDY_AGENT_ARGS" || true
-    _sandy_agent_args_argv=()
-    for _sandy_aa in ${_sandy_agent_args_raw[@]+"${_sandy_agent_args_raw[@]}"}; do
-        case "$_sandy_aa" in
+# SANDY_AGENT_ARGS (#59) / agent-args.<agent> (#per-agent-args) — tokenize
+# config-declared extra agent args for later, per-agent forwarding. Runs AFTER
+# the passive-privileged approval above, so an unapproved/dropped workspace
+# value is empty here and contributes nothing. The value is whitespace-split
+# into an argv array via `read -ra` (NEVER eval — injection); each token is
+# individually printf %q-quoted downstream by _sandy_translate_args, so it
+# composes safely with the existing pass-through forwarding. This value no
+# longer rides "$@" — it used to be a single top-level `set --` prepend, which
+# is exactly why it could only ever be ONE value shared by every pane in a
+# multi-agent combo. It now rides a per-agent env channel
+# (SANDY_AGENT_ARGS_<AGENT>, resolved once $SANDBOX_DIR exists — see the
+# "per-agent args" block below) that the container-side dispatcher
+# (_sandy_build_agent_cmd) prepends onto each pane's OWN "$@" immediately
+# before dispatch, preserving the exact same ordering (sandy flags → config/
+# file tokens → CLI pass-through args) the old prepend produced. Reached by
+# every launcher (bare sandy, -p, the --start daemon, sandy-ui) because they
+# all funnel through the same config-load + env-forward path. The --start
+# supervisor RE-DERIVES these from config: it re-execs sandy top to bottom, so
+# this block runs again in the supervisor process and resolves the same five
+# values. They are deliberately NOT exported and are NOT inherited through the
+# `nohup` re-exec — re-derivation is what makes --start correct, so do not add
+# a `skip if SANDY_DAEMON_SUPERVISOR` guard here on the theory that inheritance
+# covers it. It does not.
+#
+# BEGIN agent-args filter
+# _sandy_filter_agent_args RAW LABEL — shared tokenizer for BOTH sources
+# (SANDY_AGENT_ARGS and an operator agent-args.<agent> file). Returns via the
+# GLOBAL _SANDY_AA_FILTERED (space-joined survivors), never via echo/$( ):
+# warn() writes to STDOUT (sandy:308), so a $( ) capture around a call that
+# might warn would swallow the warning into the captured value.
+_sandy_filter_agent_args() {
+    local _aa_raw_val="$1" _aa_label="$2"
+    # read -ra <<< reads exactly ONE line — a multi-line file (one arg per
+    # line) would silently truncate to its first line without this. Normalize
+    # newlines/CRs to spaces first so the whole value is one line for read.
+    local _aa_norm
+    _aa_norm="$(printf '%s' "$_aa_raw_val" | tr '\n\r' '  ')"
+    local _aa_raw=()
+    read -ra _aa_raw <<< "$_aa_norm" || true
+    local _aa_argv=()
+    local _aa_tok
+    for _aa_tok in ${_aa_raw[@]+"${_aa_raw[@]}"}; do
+        case "$_aa_tok" in
             # Headless-mode flags can't work from here: host-side headless
-            # detection runs BEFORE this injection, so a -p in config would make
-            # the host launch interactive while the container goes headless (a
-            # broken session). Drop them with a warning — put them on the CLI.
+            # detection runs BEFORE this injection, so a -p in config/file
+            # would make the host launch interactive while the container goes
+            # headless (a broken session). Drop them with a warning — put
+            # them on the command line instead.
             -p|--print|--prompt)
-                warn "SANDY_AGENT_ARGS: ignoring mode flag '$_sandy_aa' (put it on the command line, not in config)" ;;
-            *) _sandy_agent_args_argv+=("$_sandy_aa") ;;
+                warn "$_aa_label: ignoring mode flag '$_aa_tok' (put it on the command line, not in config)" ;;
+            *) _aa_argv+=("$_aa_tok") ;;
         esac
     done
-    if [ "${#_sandy_agent_args_argv[@]}" -gt 0 ]; then
-        set -- "${_sandy_agent_args_argv[@]}" "$@"
-    fi
+    _SANDY_AA_FILTERED="${_aa_argv[*]-}"
+}
+
+_SANDY_AGENT_ARGS_FILTERED=""
+if [ -n "${SANDY_AGENT_ARGS:-}" ]; then
+    _sandy_filter_agent_args "$SANDY_AGENT_ARGS" "SANDY_AGENT_ARGS"
+    _SANDY_AGENT_ARGS_FILTERED="$_SANDY_AA_FILTERED"
 fi
+# END agent-args filter
 
 # Fix B — SANDY_APPROVE_ONLY: the internal mode the `--start` client runs as a
 # synchronous TTY subprocess (before forking the non-TTY supervisor) purely to
@@ -8465,6 +8590,74 @@ mkdir -p "$SANDBOX_DIR/uv"                 # uv-managed Python versions
 mkdir -p "$SANDBOX_DIR/npm-global"         # npm -g installs
 mkdir -p "$SANDBOX_DIR/go"                 # GOPATH (go install)
 mkdir -p "$SANDBOX_DIR/cargo"              # cargo install
+
+# BEGIN per-agent args (agent-args.<agent>)
+# An operator can drop a file at the SANDBOX TOP LEVEL — $SANDBOX_DIR/agent-
+# args.<agent> (agent-args.claude, agent-args.codex, ...), non-hidden, one per
+# agent — whose contents are extra CLI args for that one agent. This gives the
+# same capability SANDY_AGENT_ARGS already has, from a place a git repository
+# cannot reach: a workspace .sandy/config TRAVELS WITH THE REPOSITORY (clone it
+# elsewhere and the setting comes along), while sandbox state does not.
+#
+# Why the TOP LEVEL and not under claude/: $SANDBOX_DIR/claude is mounted RW at
+# ~/.claude, so a file living there would be AGENT-WRITABLE — an agent could
+# write its own launch flags, and an agent that can grant itself a flag can
+# grant itself anything that flag allows. Nothing bind-mounts the sandbox top
+# level (only subdirs plus the :ro session marker file), so the agent has no
+# path to this file; run-tests.sh asserts that no mount covers it, the same
+# guard .handoff-enabled relies on.
+#
+# Why no new tier / no approval prompt: $SANDBOX_DIR lives under $SANDY_HOME,
+# which is already the PRIVILEGED config-source root. The file is privileged
+# by construction of WHERE it lives, exactly like the .handoff-enabled marker
+# — an operator who can write into $SANDY_HOME already has privileged-tier
+# trust, so there is nothing new to gate.
+#
+# Precedence: the sandbox file WINS over a workspace/host SANDY_AGENT_ARGS for
+# that agent. Sandy cannot tell whether a surviving SANDY_AGENT_ARGS value came
+# from workspace config, host config, or env (source attribution is discarded
+# at the approval step above), so rather than guess or silently merge, sandy
+# refuses the ambiguity: the file's tokens are used verbatim and a one-line
+# notice always names which source won. Values are NEVER concatenated — the
+# value is whitespace-split with no quoting scheme, and merging two such
+# values multiplies the ways that can go wrong.
+#
+# Files for an agent not selected this session (e.g. agent-args.codex present
+# in a claude-only launch) are silently ignored for the launch — only
+# --print-state surfaces their presence (file-presence, not effective state).
+# An operator pre-provisioning a fleet sandbox for multiple agents would
+# otherwise see a spurious warning on every single-agent launch.
+SANDY_AGENT_ARGS_CLAUDE=""
+SANDY_AGENT_ARGS_GEMINI=""
+SANDY_AGENT_ARGS_CODEX=""
+SANDY_AGENT_ARGS_OPENCODE=""
+SANDY_AGENT_ARGS_GROK=""
+for _sandy_aa_agent in "${_SANDY_AGENTS[@]}"; do
+    _sandy_aa_val="${_SANDY_AGENT_ARGS_FILTERED:-}"
+    _sandy_aa_file="$SANDBOX_DIR/agent-args.$_sandy_aa_agent"
+    if [ -f "$_sandy_aa_file" ]; then
+        _sandy_filter_agent_args "$(cat "$_sandy_aa_file")" "agent-args.$_sandy_aa_agent"
+        # Non-empty AFTER filtering is the precedence predicate — NOT `[ -s ]`
+        # on the raw file. A whitespace-only file, or one containing only a
+        # dropped mode flag (-p), must behave as ABSENT and fall back to
+        # SANDY_AGENT_ARGS rather than winning with nothing.
+        if [ -n "$_SANDY_AA_FILTERED" ]; then
+            _sandy_aa_val="$_SANDY_AA_FILTERED"
+            if [ -n "${_SANDY_AGENT_ARGS_FILTERED:-}" ]; then
+                info "agent-args.$_sandy_aa_agent overrides SANDY_AGENT_ARGS for $_sandy_aa_agent (sandbox file wins; values are never merged)"
+            fi
+        fi
+    fi
+    case "$_sandy_aa_agent" in
+        claude)   SANDY_AGENT_ARGS_CLAUDE="$_sandy_aa_val" ;;
+        gemini)   SANDY_AGENT_ARGS_GEMINI="$_sandy_aa_val" ;;
+        codex)    SANDY_AGENT_ARGS_CODEX="$_sandy_aa_val" ;;
+        opencode) SANDY_AGENT_ARGS_OPENCODE="$_sandy_aa_val" ;;
+        grok)     SANDY_AGENT_ARGS_GROK="$_sandy_aa_val" ;;
+    esac
+done
+unset _sandy_aa_agent _sandy_aa_val _sandy_aa_file
+# END per-agent args
 
 # BEGIN handoff directories (#132 slice 1: dirs + mounts ONLY — no relay,
 # no helper, no skills, no turn initiation; nothing ever moves these files).
@@ -10278,6 +10471,26 @@ fi
 RUN_FLAGS+=(-e "SANDY_AGENT=$SANDY_AGENT")
 RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
 RUN_FLAGS+=(-e "SANDY_EFFORT=${SANDY_EFFORT:-}")
+# SANDY_AGENT_ARGS_<AGENT> (per-agent operator args, #per-agent-args):
+# _sandy_build_agent_cmd runs CONTAINER-side (it lives in the user-setup.sh
+# heredoc), so these five resolved values have to cross the boundary or the
+# per-agent file/config args would silently do nothing. Bare expansion
+# (no :- default) is deliberate: the per-agent args block above assigns all
+# five unconditionally before this point in every reachable launch path, so
+# bare costs nothing today.
+#
+# It buys NO forgery protection, and an earlier version of this comment claimed
+# it did. `set -u` fires only on an UNSET variable; an exported one from the
+# launching shell is SET, so bare expansion would forward a forged value just as
+# silently as `:-` would. The ONLY thing closing that channel is the
+# unconditional five-way initialization above — if that is ever moved, made
+# conditional, or folded into the loop, the forgery channel reopens and nothing
+# here will catch it.
+RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_CLAUDE=${SANDY_AGENT_ARGS_CLAUDE}")
+RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_GEMINI=${SANDY_AGENT_ARGS_GEMINI}")
+RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_CODEX=${SANDY_AGENT_ARGS_CODEX}")
+RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_OPENCODE=${SANDY_AGENT_ARGS_OPENCODE}")
+RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_GROK=${SANDY_AGENT_ARGS_GROK}")
 # SANDY_TEAMMATE_MODE (#teammate): build_claude_cmd runs CONTAINER-side (it lives
 # in the user-setup.sh heredoc), so the value has to cross the boundary or the key
 # would silently do nothing and always fall back to the default.
