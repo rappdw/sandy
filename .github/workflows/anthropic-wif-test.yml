@@ -39,7 +39,12 @@ jobs:
           # --fail-with-body: curl exits 0 on an HTTP error without it, so a
           # FAILED exchange reported a GREEN run on the first attempt. It still
           # prints the body, so the error is visible before the non-zero exit.
-          curl -sS --fail-with-body -w '\nHTTP %{http_code}\n' \
+          # %{stderr} sends the rest of the writeout to STDERR. Without it the
+          # status line lands on stdout, gets piped into jq along with the JSON
+          # body, and jq dies with "Invalid numeric literal" -- which masks
+          # whether the exchange succeeded or failed, since either outcome fails
+          # the same way. stdout must stay pure JSON for the pipe.
+          curl -sS --fail-with-body -w '%{stderr}HTTP %{http_code}\n' \
             https://api.anthropic.com/v1/oauth/token \
             -H "content-type: application/json" \
             --data @- <<JSON | jq 'with_entries(if (.key | test("token$")) then .value = "<redacted>" else . end)'
