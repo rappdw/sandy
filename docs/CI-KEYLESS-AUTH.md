@@ -257,6 +257,19 @@ ref               refs/heads/main
 repository        rappdw/sandy
 ```
 
+### Telling a malformed request apart from a rejected identity
+
+Before reaching for the console, note that `/v1/oauth/token` **validates request shape before it validates identity**, so the status code alone partitions the problem:
+
+| You get | Means |
+|---|---|
+| `400` + a specific message (`Unsupported grant_type: ...`, `federation_rule_id is not a well-formed fdrl_ tagged ID`) | the *request* is wrong — fix it locally, no console needed |
+| `401` `Authentication failed` | the request was well-formed and reached claim verification, which **refused it** — the console log is the only source of why |
+
+Verified directly: a syntactically valid request carrying the literal string `not.a.jwt` as its assertion returns output byte-identical to a real-but-rejected token. So a 401 body is worth capturing but will never explain itself — do not spend round trips reading it.
+
+Two dimensions of the exchange are genuinely ambiguous for a console-created rule, and neither is documented: whether `workspace_id` must be **sent or omitted** for a single-workspace rule, and whether a blank *Expected audience* means Anthropic's default audience or GitHub's. Guessing costs one CI round trip each, so `test/ci-wif-access-token.sh` walks that small matrix itself on rejection, re-minting per attempt, and reports which combination the rule accepts — then uses it, loudly, so the canonical shape gets corrected rather than left wrong.
+
 This is why claim conditions start blank: `sub` alone already carries repo **and** ref, so a `workflow` condition adds little and breaks any workflow not named in it. Add conditions only after the exchange is proven, and only ones you can state a threat for.
 
 ---
