@@ -136,7 +136,7 @@ _attempt() {
     _RESP=""
     _exchange "$_jwt" "$_with_ws" || _rc=$?
     if [ "$_rc" -ne 0 ]; then
-        _log "  $_label: rejected -- $(printf '%s' "${_RESP:-}" | jq -rc '.error.message // "no body"' 2>/dev/null || printf 'no body')"
+        _log "  $_label: rejected -- $(printf '%s' "${_RESP:-}" | jq -rc '.error.message // "no body"' 2>/dev/null || printf 'no body') [request_id $(printf '%s' "${_RESP:-}" | jq -r '.request_id // "?"' 2>/dev/null || printf '?')]"
         return 1
     fi
     _tok="$(_token_from_resp)"
@@ -158,7 +158,13 @@ _access_token=""
 # Only reached when the canonical shape is refused. Each entry re-mints, so a
 # single-use assertion cannot produce a false negative on a later variant.
 if [ -z "$_access_token" ]; then
-    _log "canonical exchange refused (workspace_id sent, audience $_ANTHROPIC_AUD)."
+    # Print the request_id for EVERY attempt. The console audit log is keyed by
+    # request_id, and a run makes several attempts within the same second, so
+    # without this an operator cannot tell which audit entry belongs to which
+    # variant -- and the variants fail for different reasons once the rule is
+    # partly correct. `// "?"` so a non-JSON body cannot break the diagnostic.
+    _log "canonical exchange refused (workspace_id sent, audience $_ANTHROPIC_AUD)"
+    _log "  canonical request_id: $(printf '%s' "${_RESP:-}" | jq -r '.request_id // "?"' 2>/dev/null || printf '?')"
     _log "walking the fallback matrix to identify what this rule accepts:"
     _WORKED=""
     # Newline-delimited rather than an array: an empty array expansion under
