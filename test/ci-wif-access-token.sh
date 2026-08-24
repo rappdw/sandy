@@ -65,6 +65,12 @@ _die() {
 [ -n "${ANTHROPIC_ORGANIZATION_ID:-}" ]      || _die "ANTHROPIC_ORGANIZATION_ID is not set"
 [ -n "${ANTHROPIC_SERVICE_ACCOUNT_ID:-}" ]   || _die "ANTHROPIC_SERVICE_ACCOUNT_ID is not set"
 
+# The audience requested from GitHub. It must MATCH the federation rule's
+# "Expected audience" field, and that field has to be set EXPLICITLY: a blank
+# field is an empty expected-audience list which matches nothing, not a default.
+# Confirmed by an audit entry reading `jwt_audience_mismatch` with
+# `actor.audience: []` while the rule was blank -- every token was refused
+# regardless of the aud it carried.
 _ANTHROPIC_AUD="https://api.anthropic.com"
 
 # --- mint a GitHub OIDC JWT -------------------------------------------------

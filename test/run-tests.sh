@@ -9859,8 +9859,15 @@ check "§104(4) unset + absent -> passes (default must be opt-in, never opt-out)
 # variable -- (1)-(4) above prove the LOGIC, this proves it is WIRED IN.
 check "§104(5) the suite contains the SANDY_INTEG_REQUIRE_CLAUDE guard" \
     grep -q 'SANDY_INTEG_REQUIRE_CLAUDE' "$_S104_SUITE"
+# NO PIPE HERE, deliberately. Written as `check "..." grep -A12 ... | grep -q`,
+# the pipe binds to the whole `check` invocation: check would run only the first
+# grep (so the verdict came from "the pattern exists", never "the guard exits"),
+# and check's own result line was swallowed by grep -q, which is why it printed
+# nothing at all. It was also a latent GREPM -- `grep | grep -q` under pipefail
+# dies on EPIPE. The extracted block already holds the real text, so match it
+# directly instead of re-reading the file through a pipeline.
 check "§104(6) the guard exits rather than only warning (mutation: downgrading exit 1 to a printf leaves the false green in place)" \
-    grep -A12 'SANDY_INTEG_REQUIRE_CLAUDE:-0' "$_S104_SUITE" | grep -q 'exit 1'
+    bash -c 'case "$1" in *"exit 1"*) exit 0 ;; *) exit 1 ;; esac' _ "$_S104_BLOCK"
 
 # And the workflow must SET it on the WIF path, or the guard never fires where
 # the false green actually happened.
