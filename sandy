@@ -2993,12 +2993,20 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
 
     _rms_n_ok="$(printf '%s\n' "$_rms_ok" | grep -c . || true)"
     _rms_n_ok="${_rms_n_ok:-0}"
-    if [ "$_rms_n_ok" -eq 0 ]; then
+    # File-only work counts. This exit used to test _rms_n_ok alone, which meant
+    # that once a host's orphaned sandbox DIRECTORIES were gone, --orphans
+    # enumerated the stray configs and stale logs, printed them, and then bailed
+    # here without removing any of them -- reported from a real host as "lists
+    # 46 strays and 23 logs, removes nothing, same on a second run". The
+    # directory count is not the unit of work any more.
+    _rms_n_files=$(( ${_rms_n_strays:-0} + ${_rms_n_logs:-0} ))
+    if [ "$_rms_n_ok" -eq 0 ] && [ "$_rms_n_files" -eq 0 ]; then
         info "Nothing to remove (all candidates skipped)."
         exit 0
     fi
 
-    printf '\nsandy --remove-sandbox: %d target(s)\n' "$_rms_n_ok"
+    printf '\nsandy --remove-sandbox: %d sandbox target(s), %d loose file(s)\n' \
+        "$_rms_n_ok" "$_rms_n_files"
     while IFS=$'\t' read -r _rms_n _rms_wp; do
         [ -n "$_rms_n" ] || continue
         _rms_dir="$_rms_home_sb/$_rms_n"
@@ -3029,7 +3037,12 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
     fi
     if [ "$_rms_yes" != "true" ]; then
         if [ -t 0 ]; then
-            printf '[sandy] Remove %d sandbox(es)? This destroys ALL persistent state, including WORKSPACE.json. This cannot be undone. [y/N] ' "$_rms_n_ok" >&2
+            if [ "$_rms_n_ok" -eq 0 ]; then
+                # Files only -- do not claim it destroys sandbox state.
+                printf '[sandy] Remove %d loose file(s) (stray configs / stale daemon logs)? This cannot be undone. [y/N] ' "$_rms_n_files" >&2
+            else
+                printf '[sandy] Remove %d sandbox(es) and %d loose file(s)? This destroys ALL persistent state, including WORKSPACE.json. This cannot be undone. [y/N] ' "$_rms_n_ok" "$_rms_n_files" >&2
+            fi
             IFS= read -r _rms_c </dev/tty || _rms_c=""
             case "$_rms_c" in y|Y|yes|YES|Yes) : ;; *) info "Aborted — nothing removed."; exit 0 ;; esac
         else
@@ -3037,6 +3050,16 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
             exit 1
         fi
     fi
+
+    # Resolve the containment root ONCE, before any loop. It used to be computed
+    # inside the per-sandbox loop, which meant that in the FILES-ONLY case (no
+    # orphaned sandbox directories, only stray configs and stale logs) the loop
+    # never ran, the variable was never set, and the stray/log reap below hit
+    # `unbound variable` under set -u and aborted -- silently, because the abort
+    # happened inside a pipeline whose exit status came from the tail end. That
+    # is the reported "lists 46 strays, removes nothing" failure.
+    _rms_real_sb="$(cd "$_rms_home_sb" 2>/dev/null && pwd -P)" || {
+        error "--remove-sandbox: cannot resolve sandboxes dir: $_rms_home_sb"; exit 1; }
 
     while IFS=$'\t' read -r _rms_n _rms_wp; do
         [ -n "$_rms_n" ] || continue
@@ -3054,8 +3077,6 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
         # the tree is refused too. Both cd-subshells are guarded: at this point
         # the directory is known to exist, so a failure here is anomalous and
         # must refuse rather than fall through to an rm.
-        _rms_real_sb="$(cd "$_rms_home_sb" 2>/dev/null && pwd -P)" || {
-            error "--remove-sandbox: cannot resolve sandboxes dir: $_rms_home_sb"; exit 1; }
         _rms_real_dir="$(cd "$_rms_dir" 2>/dev/null && pwd -P)" || {
             error "--remove-sandbox: cannot resolve target: $_rms_dir"; exit 1; }
         case "$_rms_real_dir" in
@@ -3129,7 +3150,7 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
             esac
         done <<< "$_rms_logs"
     fi
-    info "Removed $_rms_n_ok sandbox(es)."
+    [ "$_rms_n_ok" -gt 0 ] && info "Removed $_rms_n_ok sandbox(es)."
     [ "$_rms_n_strays_done" -gt 0 ] && info "Removed $_rms_n_strays_done stray sibling config(s)."
     [ "$_rms_n_logs_done" -gt 0 ] && info "Removed $_rms_n_logs_done stale daemon log(s)."
     exit 0
