@@ -266,6 +266,14 @@ _emit_summary() {
     local code=$?
     printf '\033>' 2>/dev/null || true
     command -v tput >/dev/null 2>&1 && tput rmkx 2>/dev/null || true
+    # A non-zero exit AFTER the run completed means something in the tail work
+    # (timing table, ONLY-token warning, provenance footer) failed under `set -e`.
+    # Without this branch that is completely silent: the summary already printed
+    # "All N tests passed", COMPLETED is true, and the run just... exits 1. Say so.
+    if [ "$COMPLETED" = true ] && [ "$code" -ne 0 ] && [ "$FAIL" -eq 0 ]; then
+        printf "\033[0;31m✗ suite exited %d AFTER completing successfully — a post-summary step failed\033[0m\n" "$code" >&2
+        printf "\033[0;33m  Tests themselves passed. Look at the tail work: timing table, ONLY-token warning, provenance footer.\033[0m\n" >&2
+    fi
     if [ "$COMPLETED" = false ] && [ "$((PASS + FAIL))" -gt 0 ]; then
         echo ""
         printf "\033[0;31m✗ integration test suite aborted early (exit=%d)\033[0m\n" "$code" >&2
@@ -2245,5 +2253,12 @@ if [ -n "${SANDY_INTEG_ONLY:-}" ]; then
     done
 fi
 
-_run_provenance
+# `|| true` is not decoration. This is a COSMETIC footer -- a timestamp, a commit
+# id, clean/dirty -- and it runs AFTER COMPLETED=true, so a non-zero return here
+# aborts under `set -e` with _emit_summary staying silent (it only reports when
+# COMPLETED is false). That is exactly what happened on the first federated CI
+# run: all 5 tests passed, the summary and timing table printed, and the suite
+# then exited 1 with no diagnostic whatsoever. A provenance line must never be
+# able to fail a 27-minute suite.
+_run_provenance || true
 [ "$FAIL" -eq 0 ] || exit 1
