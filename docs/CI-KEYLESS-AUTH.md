@@ -75,7 +75,7 @@ The rule maps verified token claims to API access.
 | Issuer | `github-ci` | the one registered in Step 1 |
 | Subject pattern | `repo:rappdw/sandy:ref:refs/heads/main` | exact — **no trailing `*`** |
 | Additional claim conditions | **blank** initially | see below |
-| Expected audience | **blank** | blank means Anthropic's default `https://api.anthropic.com`, which is what the workflow requests |
+| Expected audience | `https://api.anthropic.com` | **must be set explicitly.** A blank field is an *empty list* that matches nothing — not a default. Leaving it blank rejects every token with `jwt_audience_mismatch`. This value is what the workflow requests |
 | Service account | the one from Step 0 | must be a **member of the target workspace** |
 | Authorization | **Workspaces → Default**, *not* "all workspaces" | least privilege, **and** it avoids needing `ANTHROPIC_WORKSPACE_ID` at all |
 | OAuth scope | `workspace:developer` | the default |
@@ -245,6 +245,7 @@ The entry carries `status.reason` plus the full decoded token claims, which is e
 | `match_claim_value_mismatch` | an **Additional claim condition** on the rule does not match the token | compare the condition against the logged `claims`. A condition pinning `workflow` to one workflow's name fails for *every other* workflow — including a smoke test |
 | subject/pattern mismatch | the `sub` does not match the subject pattern | compare `claims.sub` against the pattern; a push from a non-`main` branch is the usual cause |
 | `workspace_id_required` | the rule spans multiple workspaces | set `ANTHROPIC_WORKSPACE_ID` |
+| `jwt_audience_mismatch` | the token's `aud` is not in the rule's **Expected audience** list | set *Expected audience* on the rule. A blank field matches nothing — the audit entry shows `actor.audience: []`. Use `https://api.anthropic.com`, which is what the workflow requests |
 
 Claims worth knowing are distinct, because pinning the wrong one is the common mistake:
 
@@ -268,7 +269,9 @@ Before reaching for the console, note that `/v1/oauth/token` **validates request
 
 Verified directly: a syntactically valid request carrying the literal string `not.a.jwt` as its assertion returns output byte-identical to a real-but-rejected token. So a 401 body is worth capturing but will never explain itself — do not spend round trips reading it.
 
-Two dimensions of the exchange are genuinely ambiguous for a console-created rule, and neither is documented: whether `workspace_id` must be **sent or omitted** for a single-workspace rule, and whether a blank *Expected audience* means Anthropic's default audience or GitHub's. Guessing costs one CI round trip each, so `test/ci-wif-access-token.sh` walks that small matrix itself on rejection, re-minting per attempt, and reports which combination the rule accepts — then uses it, loudly, so the canonical shape gets corrected rather than left wrong.
+One dimension of the exchange stays ambiguous for a console-created rule: whether `workspace_id` must be **sent or omitted** for a single-workspace rule. Guessing costs a CI round trip, so `test/ci-wif-access-token.sh` walks a small matrix itself on rejection, re-minting per attempt, and reports which combination the rule accepts — then uses it, loudly, so the canonical shape gets corrected rather than left wrong.
+
+The matrix also varies the audience, but that dimension can only ever succeed once the rule's *Expected audience* is set: a blank field matches nothing, so **no** requested audience works. If every variant is refused with `jwt_audience_mismatch`, do not keep varying the request — fix the rule.
 
 This is why claim conditions start blank: `sub` alone already carries repo **and** ref, so a `workflow` condition adds little and breaks any workflow not named in it. Add conditions only after the exchange is proven, and only ones you can state a threat for.
 
