@@ -568,8 +568,23 @@ for _gtp in "$HOME/.gemini/oauth_creds.json" \
     [ -f "$_gtp" ] && HAS_GEMINI_OAUTH=true && break
 done
 [ -f "$HOME/.config/gcloud/application_default_credentials.json" ] && HAS_GEMINI_ADC=true
-# Claude: API key, OAuth token, or credential file
-if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -f "$HOME/.claude/.credentials.json" ]; then
+# Claude: API key, OAuth token, credential file, or workload identity federation.
+#
+# WIF (#190) supplies NONE of the first three -- it hands the client a federation
+# rule plus a short-lived identity token to exchange, and Claude Code resolves
+# that itself. Without this branch the suite reported "no Anthropic credentials"
+# and skipped every claude section while the workflow had authenticated
+# perfectly: a GREEN run that tested nothing ("All 0 tests passed"). A skip is a
+# legitimate outcome here, so nothing failed and the gap was invisible.
+#
+# The identity token is required as well as the rule id: the rule alone is just
+# configuration, and an exchange cannot happen without an assertion to present.
+HAS_CLAUDE_WIF=false
+if [ -n "${ANTHROPIC_FEDERATION_RULE_ID:-}" ] && [ -n "${ANTHROPIC_IDENTITY_TOKEN:-}" ]; then
+    HAS_CLAUDE_WIF=true
+fi
+if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] \
+        || [ -f "$HOME/.claude/.credentials.json" ] || [ "$HAS_CLAUDE_WIF" = true ]; then
     HAS_CLAUDE=true
 fi
 
@@ -606,7 +621,7 @@ _auth_detail() {
 
 echo "  Codex:    $(_label $HAS_CODEX)  $(_auth_detail "api-key=$HAS_OPENAI_API_KEY" "oauth=$HAS_CODEX_OAUTH")"
 echo "  Gemini:   $(_label $HAS_GEMINI)  $(_auth_detail "api-key=$HAS_GEMINI_API_KEY" "oauth=$HAS_GEMINI_OAUTH" "adc=$HAS_GEMINI_ADC")"
-echo "  Claude:   $(_label $HAS_CLAUDE)  $(_auth_detail "api-key=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" "oauth-token=$([ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo true || echo false)" "credentials-file=$([ -f "$HOME/.claude/.credentials.json" ] && echo true || echo false)")"
+echo "  Claude:   $(_label $HAS_CLAUDE)  $(_auth_detail "wif=$HAS_CLAUDE_WIF" "api-key=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" "oauth-token=$([ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo true || echo false)" "credentials-file=$([ -f "$HOME/.claude/.credentials.json" ] && echo true || echo false)")"
 echo "  OpenCode: $(_label $HAS_OPENCODE)  $(_auth_detail "anthropic-key=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo true || echo false)" "openai-key=$HAS_OPENAI_API_KEY" "gemini-key=$HAS_GEMINI_API_KEY" "oauth=$HAS_OPENCODE_OAUTH")"
 echo "  Grok:     $(_label $HAS_GROK)  $(_auth_detail "api-key=$HAS_XAI_API_KEY")"
 echo ""
