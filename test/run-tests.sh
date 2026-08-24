@@ -9958,9 +9958,17 @@ for _s105_h in "$(dirname "$0")"/acceptance-*.sh; do
     # grep -m1, never `grep | head -1`: under pipefail the closing head sends
     # EPIPE to grep, which exits 2 and trips the ERR trap, aborting the suite
     # mid-run -- a race that passes locally and fails in CI (the GREPM class).
-    _s105_iso_ln="$(grep -m1 -n '_isolate_sandy_home$' "$_s105_h" | cut -d: -f1)"
+    # `|| true` on BOTH: a grep that matches nothing exits 1, and an unguarded
+    # non-zero assignment under `set -euo pipefail` + the ERR trap aborts the
+    # WHOLE SUITE rather than failing a check. pane-topology genuinely has no
+    # SANDY_HOME_DIR, so the second grep matches nothing there by design.
+    # (`|| true` is safe here because these capture STDOUT, not $? -- it would
+    # be wrong if a later line read the exit status.) Guarding the first one
+    # too is deliberate: if a harness ever loses the isolation call, the (w)
+    # check above must be what fails, not the suite aborting before it reports.
+    _s105_iso_ln="$(grep -m1 -n '_isolate_sandy_home$' "$_s105_h" | cut -d: -f1 || true)"
     # tail reads its input to completion, so it raises no EPIPE here.
-    _s105_hd_ln="$(grep -n '^SANDY_HOME_DIR=' "$_s105_h" | tail -1 | cut -d: -f1)"
+    _s105_hd_ln="$(grep -n '^SANDY_HOME_DIR=' "$_s105_h" | tail -1 | cut -d: -f1 || true)"
     if [ -n "$_s105_hd_ln" ]; then
         check "§105(w) $_s105_n re-derives SANDY_HOME_DIR AFTER isolation (mutation: dropping the re-derive makes the harness assert against the real home and silently find nothing)" \
             test "$_s105_hd_ln" -gt "$_s105_iso_ln"
