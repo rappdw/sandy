@@ -245,7 +245,23 @@ The entry carries `status.reason` plus the full decoded token claims, which is e
 | `match_claim_value_mismatch` | an **Additional claim condition** on the rule does not match the token | compare the condition against the logged `claims`. A condition pinning `workflow` to one workflow's name fails for *every other* workflow — including a smoke test |
 | subject/pattern mismatch | the `sub` does not match the subject pattern | compare `claims.sub` against the pattern; a push from a non-`main` branch is the usual cause |
 | `workspace_id_required` | the rule spans multiple workspaces | set `ANTHROPIC_WORKSPACE_ID` |
-| `jwt_audience_mismatch` | the token's `aud` is not in the rule's **Expected audience** list | set *Expected audience* on the rule. A blank field matches nothing — the audit entry shows `actor.audience: []`. Use `https://api.anthropic.com`, which is what the workflow requests |
+| `jwt_audience_mismatch` | the token's `aud` does not match the rule's **Expected audience** | set *Expected audience* explicitly to `https://api.anthropic.com`, which is what the workflow requests. A blank field matches nothing |
+
+### `actor` is empty on failure — do not read it as configuration
+
+A failed entry carries an unpopulated actor:
+
+```json
+"actor": { "audience": [], "issuer": "", "subject": "", ... }
+```
+
+`issuer` and `subject` are blank there too. That block is a **blank template on failure**, not a readout of the rule's configured values — so `actor.audience: []` is *not* evidence that the rule's audience list is empty, and an empty `subject` is not evidence the token had none. Only `status.reason` is diagnostic. (This document previously claimed the opposite; it was an over-read of a single entry.)
+
+### The `event_name` trap
+
+A required claim of `event_name = push` rejects **every** run of a workflow triggered by `schedule` or `workflow_dispatch` — which is exactly how a keyed integration workflow is triggered, since it deliberately has no `push`/`pull_request` trigger. The rule then refuses every run forever, and the reason it reports may name a *different* failing condition, so the `event_name` mismatch is easy to miss while chasing something else.
+
+This is the concrete form of the general warning below: pin `event_name` only if you can name a trigger it is meant to exclude, and check it against the workflow's actual `on:` block first.
 
 Claims worth knowing are distinct, because pinning the wrong one is the common mistake:
 
