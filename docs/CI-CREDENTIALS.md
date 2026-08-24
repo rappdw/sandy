@@ -1,5 +1,10 @@
 # CI credentials runbook
 
+> **Consider keyless auth first.** Anthropic, OpenAI, and Google (via Vertex AI) can all authenticate
+> from GitHub Actions using workload identity federation — no stored secret at all. See
+> [CI-KEYLESS-AUTH.md](CI-KEYLESS-AUTH.md). This document remains correct for xAI (which has no
+> machine-to-machine federation) and for anything not yet converted.
+
 How to mint **dedicated** provider API keys for the `Integration` workflow, rather than reusing the ones in your local environment.
 
 > UI paths on provider consoles drift. The durable instruction in each section is the **shape** — create an isolated scope, put a CI-only key in it, give that scope a spend cap. Treat the click-paths as hints, not gospel.
