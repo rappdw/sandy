@@ -61,6 +61,8 @@ Then the two steps below: register the issuer ("we trust GitHub"), then create a
 > The integration suite launches **many** sandy containers, each running its own `claude` process, and each exchanges the **same** `ANTHROPIC_IDENTITY_TOKEN` set once in the workflow env. One `jti`, N exchanges. With replay protection on, the first container authenticates and every later one fails — surfacing as a flaky mid-suite auth error rather than a configuration choice.
 >
 > Minting a fresh token per *section* is the plan (see [Bring-up order](#bring-up-order)) and `SANDY_INTEG_ONLY` is the seam for it — but that does not rescue replay protection. Even within a single section, sandy launches several containers that each exchange the same token, so one `jti` still sees N exchanges. Leave it off.
+>
+> **Update, shipped design:** the mechanism below no longer forwards the identity token into the sandbox at all — `test/ci-wif-access-token.sh` exchanges each minted JWT exactly **once**, host-side, and hands the *already-exchanged* access token to every container as `ANTHROPIC_AUTH_TOKEN`. Under that design one `jti` really does see one exchange, and replay protection **could** be turned back on. It is deliberately left off for now — flipping it is unverified and out of scope for this change, and a false rejection here fails the whole run, not one section. Tracked as a follow-up hardening step once the new path has soaked.
 
 ### Step 2 — Create a rule
 
@@ -115,13 +117,13 @@ Add `ANTHROPIC_WORKSPACE_ID` **only** if the rule spans multiple workspaces; oth
 
 1. **`permissions: id-token: write`** on the job, or `ACTIONS_ID_TOKEN_REQUEST_URL` is never populated and the mint step fails with an empty token.
 2. **An empty `ANTHROPIC_API_KEY` outranks WIF.** The resolution order is `ANTHROPIC_API_KEY` → `ANTHROPIC_AUTH_TOKEN` → OAuth profile → WIF, and *even the empty string counts as set*. GitHub Actions **cannot conditionally omit** an `env:` entry — a conditional expression yields `''`, which is still set. They must be `unset` in the shell that launches the suite. This is the failure mode where everything looks configured and auth silently falls back to nothing.
-3. **Sandy does not forward unrecognized env vars.** The WIF variables are not sandy config keys, so name them in `SANDY_EXTRA_ENV`. That key is privileged-tier, but the suite exports `SANDY_AUTO_APPROVE_PRIVILEGED=1`, so no prompt blocks it:
+3. **Sandy does not forward unrecognized env vars.** `ANTHROPIC_AUTH_TOKEN` is not a sandy config key either, so name it in `SANDY_EXTRA_ENV`. That key is privileged-tier, but the suite exports `SANDY_AUTO_APPROVE_PRIVILEGED=1`, so no prompt blocks it:
 
    ```
-   SANDY_EXTRA_ENV: ANTHROPIC_FEDERATION_RULE_ID,ANTHROPIC_ORGANIZATION_ID,ANTHROPIC_SERVICE_ACCOUNT_ID,ANTHROPIC_IDENTITY_TOKEN
+   SANDY_EXTRA_ENV: ANTHROPIC_AUTH_TOKEN
    ```
 
-Prefer `ANTHROPIC_IDENTITY_TOKEN` (the value) over `ANTHROPIC_IDENTITY_TOKEN_FILE` — the file variant would have to be mounted into the container.
+   This is the shipped design (see "Token lifetimes" below) and it is a smaller surface than an earlier draft: no federation identifiers or identity token cross into the sandbox at all, only the already-exchanged bearer token. `ANTHROPIC_AUTH_TOKEN` sits in the client's resolution order right below `ANTHROPIC_API_KEY` — both must be `unset` before delegating to WIF is even attempted (see item 2 above), and the WIF shell branch re-exports `ANTHROPIC_AUTH_TOKEN` immediately after doing so.
 
 ## 2. OpenAI
 
@@ -170,11 +172,7 @@ So: keep `XAI_API_KEY` as a secret, or drop it and let the grok sections skip.
 
 1. **Console setup** — service account (added as a member of the target workspace), issuer, rule, per the sections above.
 2. **Set the repository variables** (`gh variable set`, above). Setting `ANTHROPIC_FEDERATION_RULE_ID` is what switches the workflow onto the WIF path; until then it uses the key exactly as today.
-3. **Apply the workflow patch**, which is staged behind the existing key path:
-   ```sh
-   git apply 0002-wif-integration.patch
-   ```
-   It needs a `workflow`-scoped token to push (`gh auth refresh -h github.com -s workflow`), and `.github/workflows/` is `:ro` inside a sandy session — so commit it from the host.
+3. **Apply the workflow patch**, which is staged behind the existing key path. `.github/workflows/` is `:ro` inside a sandy session, so commit it from the host; it needs a `workflow`-scoped token to push (`gh auth refresh -h github.com -s workflow`).
 4. **Re-enable the workflow if it is disabled** — a disabled workflow cannot be dispatched either:
    ```sh
    gh workflow list --repo rappdw/sandy --all      # look for disabled_manually
@@ -184,22 +182,19 @@ So: keep `XAI_API_KEY` as a secret, or drop it and let the grok sections skip.
    ```sh
    gh workflow run Integration --repo rappdw/sandy -f only=7 -f skip=19,20,21
    ```
-   Confirm the log reads `auth: workload identity federation (rule …)` **and** that §7 did not skip. A skip means the credential never arrived.
-5. **Build the per-section loop** (below), run the full suite, and only then delete `ANTHROPIC_API_KEY` from secrets.
+   Confirm the log reads `auth: workload identity federation (rule …)`, the suite's own banner reads `Claude: ✓ (auth-token)`, and that §7 did not skip. A skip means the credential never arrived; `(auth-token)` rather than `(wif)` confirms the *new* eager-exchange path is what actually supplied it, not the raw WIF pair.
+5. **Run the full suite**, confirm the timing table shows every section completing, and only then delete `ANTHROPIC_API_KEY` from secrets.
 
-### Token lifetimes — the usable window is 300s, not 598s
+### Token lifetimes — the shipped fix: eager, per-section exchange
 
-**Three lifetimes, and confusing them cost this document three revisions.**
+**Two lifetimes, one JWT-bound and one much longer, and the fix is to stop letting the run live on the short one.**
 
 ```
-JWT lifetime_seconds : 300    the GitHub assertion's validity  <-- THE ONE THAT BINDS
-expires_in           : 598    the access token, IF you exchange immediately
-rule "Token lifetime": 600    configured; not capped by the JWT as the form implies
+JWT lifetime_seconds : 300    the GitHub assertion's own validity
+expires_in           : 598    the Anthropic access token, IF exchanged promptly
 ```
 
-The rule form says *"Token lifetime … Upper-bounded by JWT expiry"*. Measured, a 300s JWT yields a 598s access token, so that wording does not describe what happens. But **598s is not the budget**, because nothing in a real run exchanges immediately.
-
-**Claude Code performs the exchange lazily — inside the container, when it first needs credentials.** By then the workflow's JWT may already be dead. Proved by a real run:
+**What was tried and measured to fail.** Claude Code exchanges the WIF identity token *lazily, inside the container, when it first needs credentials* — so forwarding the raw identity token (as the workflow originally did) binds the whole run to the JWT's 300s, not the access token's 598s. A real lean run proved this:
 
 ```
 minted at 03:53:03Z   JWT lifetime 300s   → expires 03:58:03Z
@@ -207,28 +202,35 @@ minted at 03:53:03Z   JWT lifetime 300s   → expires 03:58:03Z
   API Error: Token exchange failed with status 401
 ```
 
-Note the error: *token exchange* failed, not *access token expired*. The agent was still trying to exchange, 4 minutes after the assertion died.
+That run: **57 of 58 passed, 1152s total.** Note the error is *token exchange failed*, not *access token expired* — the container was still trying to trade a dead JWT for a live token, four minutes after the JWT died.
 
-**So budget against the JWT's 300 seconds.** Every section that ran inside that window passed; the one that runs ~9 minutes in did not.
+**Per-section re-minting of the JWT alone does not rescue this either.** Two individual sections outlast the 300s JWT budget on their own, independent of anything cumulative — measured on CI, not the (faster) maintainer host:
 
-### What that means for the suite
+```
+1:3s  2:0s  4:45s  5:0s  6:45s  7:191s  8-11:0s  12:33s
+13:380s   <-- exceeds 300s on its own
+14:370s   <-- exceeds 300s on its own
+15:2s 16:0s 17:5s 18:0s 22:1s 23:21s 24:19s
+```
 
-That lean run: **57 of 58 passed, 8 skipped, 1152s total.** The single failure was this expiry, not a defect.
+(§19/§20/§21 — the acceptance harnesses — are skipped by default, ~46% more runtime; §20 alone ran ~432s on the maintainer host, see the residual risk below.)
 
-| | duration | fits 300s from mint? |
-|---|---|---|
-| the first few sections | inside the window | yes |
-| proxy end-to-end (§13) | starts ~9 min in | **no** |
-| lean run total | ~1152s | **no** |
-| full run | ~27 min | **no** |
+**The fix that works: exchange eagerly, host-side, and stop passing raw federation material into the sandbox at all.** `test/ci-wif-access-token.sh` mints a fresh JWT and immediately exchanges it for an access token, once, in the workflow shell — not lazily inside a container. That access token is forwarded as `ANTHROPIC_AUTH_TOKEN` (see item 3 above), and `run-integration-tests.sh`'s `section()` hook re-runs the same script whenever the token in hand is ≥60s old, refreshing it before the next section starts (`SANDY_INTEG_CRED_REFRESH_CMD`). So the budget per section becomes the **598s access token**, not the 300s JWT, and every section starts with a token no more than ~60s stale:
 
-**Per-section re-minting is therefore required, not optional** — and it must mint immediately before each section, since a token minted at job start is dead within five minutes.
+```
+worst individual lean section (§13)     380s
+token age ceiling at section start       60s
+remaining budget at section start      ≥538s
+margin over the worst section          ≥158s
+```
 
-The earlier claim that "every section fits inside one token" was computed against 598s and is withdrawn. Against 300s, §20 (~432s) does not fit and needs splitting after all.
+**§13 and §14 both fit comfortably now** — the combination (eager exchange for the longer budget, per-section refresh so no section starts on a stale token) is what makes the whole lean run work, where either half alone was proven insufficient above.
 
 A third option is deliberately rejected: re-minting from *inside* the container would require forwarding `ACTIONS_ID_TOKEN_REQUEST_TOKEN` into the sandbox and allowlisting GitHub's token endpoint through the egress proxy. That puts a GitHub credential inside the box to avoid an Anthropic one — strictly worse than the problem it solves.
 
-**`ANTHROPIC_API_KEY` is a bring-up crutch, not the destination.** It exists so the nightly keeps working while steps 1–3 above are being proven, and it goes away at step 5.
+**`ANTHROPIC_API_KEY` is a bring-up crutch, not the destination.** It exists so the nightly keeps working while steps 1–4 above are being proven, and it goes away at step 5.
+
+**Residual risk, stated rather than hidden:** the numbers above prove the **lean** (default, scheduled) run. §20 runs `--rebuild` and was ~432s on the maintainer host; its CI duration is unmeasured. If the span from its section-start refresh to its last `claude` API call exceeds ~598s on CI, it can still 401 — the follow-up there is a refresh *inside* the acceptance harness between phases, not a change to this mechanism. §19 and §21 (~300s combined on the maintainer host) are expected to fit individually but are likewise unmeasured on CI. Whether the rule's `Token lifetime` field can be raised above 600 also remains untested — this document has been wrong about that field's semantics before, so it is not depended on here.
 
 ---
 
@@ -266,7 +268,7 @@ gh variable list --repo rappdw/sandy    # identifiers — safe to read
 gh secret   list --repo rappdw/sandy    # names only; values are never retrievable
 ```
 
-The suite prints its credential banner near the top of the run. Under WIF, expect `Claude: ✓ (wif)` with **no** `ANTHROPIC_API_KEY` secret configured — that is the whole point.
+The suite prints its credential banner near the top of the run. Under the shipped design, expect `Claude: ✓ (auth-token)` with **no** `ANTHROPIC_API_KEY` secret configured — that is the whole point. (`Claude: ✓ (wif)` also exists, and still means "recognised" — it fires only if an operator forwards the raw WIF pair directly rather than going through `test/ci-wif-access-token.sh`; the Integration workflow itself no longer does that.)
 
 > ### A WIF run can go green having tested nothing
 >
@@ -280,14 +282,14 @@ The suite prints its credential banner near the top of the run. Under WIF, expec
 >
 > The workflow authenticated correctly, but the **suite's own credential detection did not know WIF exists** — it looked for `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or `~/.claude/.credentials.json`, and WIF supplies none of them. Every claude section skipped, and because a skip is a *legitimate* outcome, nothing failed.
 >
-> Fixed in `run-integration-tests.sh` (#196), which now treats `ANTHROPIC_FEDERATION_RULE_ID` **plus** `ANTHROPIC_IDENTITY_TOKEN` as credentials — both, since a rule alone is configuration with nothing to exchange.
+> Fixed in `run-integration-tests.sh` (#196), which now treats `ANTHROPIC_FEDERATION_RULE_ID` **plus** `ANTHROPIC_IDENTITY_TOKEN` as credentials — both, since a rule alone is configuration with nothing to exchange. A second fix layered on top of that once the eager-exchange design shipped: `ANTHROPIC_AUTH_TOKEN` is *also* treated as a Claude credential, since that (not the raw identity token) is what the workflow actually forwards now.
 >
 > **The operational lesson outlives the fix:** on this suite, green does not mean tested. Always confirm the banner shows the auth method you expect *and* that the sections you care about actually ran. A skipped section and a passing section look identical in the exit code.
 
 ### Verification checklist for a WIF run
 
 1. `auth: workload identity federation (rule …)` — the workflow took the WIF branch rather than falling back
-2. `Claude: ✓ (wif)` in the banner — the *suite* recognised the credential
+2. `Claude: ✓ (auth-token)` in the banner — the *suite* recognised the eagerly-exchanged credential
 3. The section you targeted **ran**, rather than reporting `⊘ … (skipped)`
 4. `All N tests passed` with **N > 0**
 
