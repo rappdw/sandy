@@ -9877,6 +9877,97 @@ if [ -f "$_S104_WF" ]; then
         grep -q 'SANDY_INTEG_REQUIRE_CLAUDE' "$_S104_WF"
 fi
 
+echo ""
+echo "§105: acceptance harnesses run against an isolated \$SANDY_HOME (fleet handback)"
+# WHY THIS EXISTS. The acceptance harnesses launch real containers through the
+# real sandy, so each run materialized a fixture sandbox in the DEVELOPER'S
+# $SANDY_HOME. They name workspaces with $$, so every run left a fresh set, and
+# the workspace was a temp dir already gone by the time anyone looked. A fleet
+# consumer bringing up 15 sandboxes read 48: 34 were fixtures from ten runs.
+#
+# That is not merely disk. --print-state IS the fleet API, and nothing marks a
+# fixture as a test artifact -- it is indistinguishable from a real sandbox to
+# every consumer, so an operator scans past three dozen that no longer exist,
+# and a policy with a catch-all auto-enroll profile would enroll all of them.
+_S105_LIB="$(dirname "$0")/lib-isolated-home.sh"
+check "§105(pre) test/lib-isolated-home.sh exists" test -f "$_S105_LIB"
+
+# --- behavior, driven against a fabricated "developer home" ------------------
+_s105_home="$(mktemp -d)"
+mkdir -p "$_s105_home/sandboxes/real-a1b2c3d4" "$_s105_home/approvals"
+printf 'hash-base\n' > "$_s105_home/.base_build_hash"
+printf 'hash-agent\n' > "$_s105_home/.build_hash"
+printf 'FROM scratch\n' > "$_s105_home/Dockerfile.base"
+printf 'approved\n' > "$_s105_home/approvals/passive-deadbeef.list"
+
+_s105_out="$(SANDY_HOME="$_s105_home" bash -c '
+    . "'"$_S105_LIB"'" 2>/dev/null
+    _isolate_sandy_home 2>/dev/null
+    printf "iso=%s\n" "$SANDY_HOME"
+    printf "seeded_base=%s\n" "$([ -f "$SANDY_HOME/.base_build_hash" ] && echo yes || echo no)"
+    printf "seeded_df=%s\n"   "$([ -f "$SANDY_HOME/Dockerfile.base" ] && echo yes || echo no)"
+    printf "copied_sbx=%s\n"  "$([ -e "$SANDY_HOME/sandboxes" ] && echo yes || echo no)"
+    printf "copied_appr=%s\n" "$([ -e "$SANDY_HOME/approvals" ] && echo yes || echo no)"
+    mkdir -p "$SANDY_HOME/sandboxes/fixture-9999-deadbeef"
+    printf "real_count=%s\n" "$(ls "'"$_s105_home"'/sandboxes" | wc -l | tr -d " ")"
+    _p="$SANDY_HOME"; _cleanup_sandy_home 2>/dev/null
+    printf "cleaned=%s\n" "$([ -d "$_p" ] && echo no || echo yes)"
+' 2>/dev/null)" || true
+
+_s105_f() { printf '%s\n' "$_s105_out" | grep -m1 "^$1=" | cut -d= -f2-; }
+check "§105(1) SANDY_HOME is redirected to a sandy-test-home.* temp dir" \
+    bash -c 'case "$(basename "$1")" in sandy-test-home.*) exit 0;; *) exit 1;; esac' _ "$(_s105_f iso)"
+# The build gate's FIRST condition is `[ ! -f "$HASH_FILE" ]`, so an unseeded
+# home rebuilds every image (--no-cache --pull on the base) on every run. If
+# these two go missing the isolation still "works" but becomes unusably slow,
+# which is how a fix like this gets reverted rather than repaired.
+check "§105(2) build-cache hash file is seeded (mutation: dropping the seed makes every acceptance run rebuild all images)" \
+    test "$(_s105_f seeded_base)" = yes
+check "§105(3) generated Dockerfile is seeded" test "$(_s105_f seeded_df)" = yes
+check "§105(4) sandboxes/ is NOT copied in (the developer's real sandboxes must not appear to the run)" \
+    test "$(_s105_f copied_sbx)" = no
+check "§105(5) approvals/ is NOT copied in (a fixture must not inherit an approval granted to a real workspace)" \
+    test "$(_s105_f copied_appr)" = no
+check "§105(6) a sandbox created during the run does NOT land in the real home (the whole point)" \
+    test "$(_s105_f real_count)" = 1
+check "§105(7) cleanup removes the isolated home" test "$(_s105_f cleaned)" = yes
+
+# The containment assert guards an rm -rf, so prove it REFUSES rather than
+# merely that it exists.
+_s105_guard_rc=0
+SANDY_HOME="$_s105_home" bash -c '
+    . "'"$_S105_LIB"'" 2>/dev/null
+    _ISOLATED_SANDY_HOME="'"$_s105_home"'"
+    _cleanup_sandy_home' >/dev/null 2>&1 || _s105_guard_rc=$?
+check "§105(8) cleanup REFUSES a path that is not a sandy-test-home.* dir (mutation: removing the containment case turns this into an rm -rf of the real home)" \
+    test "$_s105_guard_rc" -ne 0
+check "§105(9) ...and the real home survived that attempt" test -d "$_s105_home/sandboxes/real-a1b2c3d4"
+rm -rf "$_s105_home"
+
+# --- wiring: every harness, not just the one that was easy to fix ------------
+for _s105_h in "$(dirname "$0")"/acceptance-*.sh; do
+    _s105_n="$(basename "$_s105_h")"
+    check "§105(w) $_s105_n sources the lib and isolates" \
+        grep -q '_isolate_sandy_home' "$_s105_h"
+    check "§105(w) $_s105_n cleans the isolated home up" \
+        grep -q '_cleanup_sandy_home' "$_s105_h"
+    # Ordering matters and fails SILENTLY: these harnesses resolve
+    # SANDY_HOME_DIR near the top, before isolation runs. Left stale it points
+    # at the real home while sandy creates sandboxes in the isolated one, so
+    # every content assertion looks in a directory that was never written.
+    # grep -m1, never `grep | head -1`: under pipefail the closing head sends
+    # EPIPE to grep, which exits 2 and trips the ERR trap, aborting the suite
+    # mid-run -- a race that passes locally and fails in CI (the GREPM class).
+    _s105_iso_ln="$(grep -m1 -n '_isolate_sandy_home$' "$_s105_h" | cut -d: -f1)"
+    # tail reads its input to completion, so it raises no EPIPE here.
+    _s105_hd_ln="$(grep -n '^SANDY_HOME_DIR=' "$_s105_h" | tail -1 | cut -d: -f1)"
+    if [ -n "$_s105_hd_ln" ]; then
+        check "§105(w) $_s105_n re-derives SANDY_HOME_DIR AFTER isolation (mutation: dropping the re-derive makes the harness assert against the real home and silently find nothing)" \
+            test "$_s105_hd_ln" -gt "$_s105_iso_ln"
+    fi
+done
+unset _s105_h _s105_n _s105_iso_ln _s105_hd_ln _s105_out _s105_home _s105_guard_rc
+
 _run_provenance   # timestamp + commit + tree state, so a result you scroll back
                   # to after a context switch says which build produced it.
 [ "$FAIL" -eq 0 ] || exit 1

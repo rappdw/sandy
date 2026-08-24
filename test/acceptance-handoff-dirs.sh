@@ -59,7 +59,20 @@ cleanup_ws() {
     "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true
     "$SANDY" --stop --workspace "$WS2" >/dev/null 2>&1 || true
     rm -rf "$(dirname "$WS")" "$(dirname "$WS2")"
+    _cleanup_sandy_home || true
 }
+# Redirect $SANDY_HOME at a throwaway dir BEFORE anything launches, so the
+# fixture sandboxes this harness creates never land in the developer's real
+# state (where they are indistinguishable from real sandboxes to every
+# --print-state consumer). Override by exporting SANDY_TEST_NO_ISOLATE=1.
+. "$(dirname "$0")/lib-isolated-home.sh"
+[ "${SANDY_TEST_NO_ISOLATE:-0}" = "1" ] || _isolate_sandy_home
+# Re-derive AFTER the switch. This harness resolves SANDY_HOME_DIR near the top
+# of the file, which runs before isolation -- left stale it would point at the
+# real home while sandy created sandboxes in the isolated one, so every
+# assertion about sandbox contents would look for a directory that is not there.
+SANDY_HOME_DIR="${SANDY_HOME:-$HOME/.sandy}"
+
 trap cleanup_ws EXIT
 cid2() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.workspace_path=$WS2" 2>/dev/null | head -1; }
 

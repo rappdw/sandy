@@ -15,7 +15,6 @@
 set -uo pipefail
 
 SANDY="${SANDY:-./sandy}"
-SANDY_HOME_DIR="${SANDY_HOME:-$HOME/.sandy}"
 WSBASE="$(mktemp -d)/update-accept-$$"
 WS1="$WSBASE/one"
 WS2="$WSBASE/two"
@@ -34,7 +33,15 @@ cleanup_ws() {
     "$SANDY" --stop --workspace "$WS1" >/dev/null 2>&1 || true
     "$SANDY" --stop --workspace "$WS2" >/dev/null 2>&1 || true
     rm -rf "$WSBASE"
+    _cleanup_sandy_home || true
 }
+# Redirect $SANDY_HOME at a throwaway dir BEFORE anything launches, so the
+# fixture sandboxes this harness creates never land in the developer's real
+# state (where they are indistinguishable from real sandboxes to every
+# --print-state consumer). Override by exporting SANDY_TEST_NO_ISOLATE=1.
+. "$(dirname "$0")/lib-isolated-home.sh"
+[ "${SANDY_TEST_NO_ISOLATE:-0}" = "1" ] || _isolate_sandy_home
+
 trap cleanup_ws EXIT
 
 command -v docker >/dev/null 2>&1 || { echo "docker not found — run this on the host"; exit 2; }
