@@ -7559,17 +7559,78 @@ _sandy_prune_old_image() {
 _BASE_BUILD_Q=()
 [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ] && _BASE_BUILD_Q=(-q)
 
+# --- Build-resource reachability gate (#218) --------------------------------
+# A rebuild pulls from Debian mirrors, npm, and Docker Hub. Those are DIFFERENT
+# endpoints from the tiny HTTPS version check that decides an agent update is
+# available, and PARTIAL REACHABILITY IS THE NORMAL FAILURE MODE -- captive
+# portals and in-flight wifi routinely allow one CDN while blocking another. So
+# "the update check succeeded" proves nothing about whether a build can succeed.
+#
+# Observed on in-flight wifi: the version check reached storage.googleapis.com,
+# saw a newer Claude Code, flipped NEEDS_BUILD=true, and the forced --no-cache
+# rebuild died at `apt-get update` with exit 100 -- aborting the launch under
+# set -e on exactly the network where the already-built local image was most
+# wanted. Every retry re-detected the update and re-died, locking the user out.
+#
+# THE RULE: a build is only ATTEMPTED when the resources it needs are reachable.
+# If they are not, use the existing image. If there is no existing image, fail
+# IMMEDIATELY with an accurate message rather than after a multi-minute apt
+# timeout that names the wrong cause.
+#
+# Probed LAZILY and memoized, so a launch that needs no build pays nothing --
+# which is the overwhelmingly common case.
+_SANDY_BUILD_NET=""            # "" unprobed | "ok" reachable | "no" not
+_SANDY_BUILD_NET_WHY=""        # which endpoint failed, for the message
+_SANDY_BUILD_DEFERRED=false    # any build skipped this launch?
+_sandy_build_net_ok() {
+    if [ -z "$_SANDY_BUILD_NET" ]; then
+        _SANDY_BUILD_NET="ok"
+        # Probe the BUILD dependencies, never general connectivity: the whole
+        # lesson of the incident is that a reachable version-check endpoint
+        # coexisted with unreachable mirrors. -I so nothing is downloaded.
+        for _bn_url in "https://deb.debian.org/debian/" "https://registry.npmjs.org/"; do
+            curl -fsS -I --max-time 5 "$_bn_url" >/dev/null 2>&1 && continue
+            _SANDY_BUILD_NET="no"; _SANDY_BUILD_NET_WHY="$_bn_url"; break
+        done
+        unset _bn_url
+    fi
+    [ "$_SANDY_BUILD_NET" = "ok" ]
+}
+
+# Decide whether a build may proceed. $1 = image name, $2 = human label.
+#   returns 0  -> go ahead and build
+#   returns 1  -> SKIP the build; a usable image exists and the caller keeps it
+#   exits 1    -> unreachable AND no image to fall back to
+# Callers MUST wrap their build in `if _sandy_build_allowed ...; then`, so that
+# the hash file write and the predecessor prune stay with the build they belong
+# to -- writing a hash for a build that never ran is exactly the declared-vs-
+# actual drift this repo keeps paying for.
+_sandy_build_allowed() {
+    _sandy_build_net_ok && return 0
+    if docker image inspect "$1" >/dev/null 2>&1; then
+        warn "Build resources unreachable ($_SANDY_BUILD_NET_WHY) — skipping the $2 rebuild."
+        warn "  Continuing on the existing image; it refreshes on the next launch from a healthy network."
+        _SANDY_BUILD_DEFERRED=true
+        return 1
+    fi
+    error "Build resources unreachable ($_SANDY_BUILD_NET_WHY), and no $2 exists to fall back to."
+    error "  sandy cannot build $1 without network access. Reconnect and retry."
+    exit 1
+}
+
 # Phase 1: Base image (language runtimes — rebuilds rarely)
 BASE_HASH="$(cat "$SANDY_HOME/Dockerfile.base" | sha256 | cut -d' ' -f1)"
 BASE_HASH_FILE="$SANDY_HOME/.base_build_hash"
 BASE_REBUILT=false
 if [ ! -f "$BASE_HASH_FILE" ] || [ "$(cat "$BASE_HASH_FILE")" != "$BASE_HASH" ] || ! docker image inspect "$BASE_IMAGE_NAME" &>/dev/null; then
-    info "Building base image (language runtimes) — this may take several minutes on first run..."
-    _old_base_id="$(docker image inspect -f '{{.Id}}' "$BASE_IMAGE_NAME" 2>/dev/null || true)"
-    docker build ${_BASE_BUILD_Q[@]+"${_BASE_BUILD_Q[@]}"} --no-cache --pull --label sandy.managed=1 -t "$BASE_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.base" "$SANDY_HOME"
-    echo "$BASE_HASH" > "$BASE_HASH_FILE"
-    BASE_REBUILT=true
-    _sandy_prune_old_image "$_old_base_id" "$BASE_IMAGE_NAME"
+    if _sandy_build_allowed "$BASE_IMAGE_NAME" "base image"; then
+        info "Building base image (language runtimes) — this may take several minutes on first run..."
+        _old_base_id="$(docker image inspect -f '{{.Id}}' "$BASE_IMAGE_NAME" 2>/dev/null || true)"
+        docker build ${_BASE_BUILD_Q[@]+"${_BASE_BUILD_Q[@]}"} --no-cache --pull --label sandy.managed=1 -t "$BASE_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.base" "$SANDY_HOME"
+        echo "$BASE_HASH" > "$BASE_HASH_FILE"
+        BASE_REBUILT=true
+        _sandy_prune_old_image "$_old_base_id" "$BASE_IMAGE_NAME"
+    fi
 else
     info "Base image up to date."
 fi
@@ -7591,6 +7652,7 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
     PROXY_HASH="$(sha256 < "$SANDY_HOME/Dockerfile.proxy" | cut -d' ' -f1)"
     PROXY_HASH_FILE="$SANDY_HOME/.build_hash_proxy"
     if [ ! -f "$PROXY_HASH_FILE" ] || [ "$(cat "$PROXY_HASH_FILE")" != "$PROXY_HASH" ] || ! docker image inspect "$PROXY_IMAGE_NAME" &>/dev/null; then
+        if _sandy_build_allowed "$PROXY_IMAGE_NAME" "egress proxy image"; then
         info "Building egress proxy image (sandy-proxy, ref=$(_sandy_proxy_ref))..."
         _old_proxy_id="$(docker image inspect -f '{{.Id}}' "$PROXY_IMAGE_NAME" 2>/dev/null || true)"
         # --pull: re-resolve golang:1.26-trixie to the current digest on every
@@ -7600,6 +7662,7 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
         docker build -q --no-cache --pull --label sandy.managed=1 -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$SANDY_HOME"
         echo "$PROXY_HASH" > "$PROXY_HASH_FILE"
         _sandy_prune_old_image "$_old_proxy_id" "$PROXY_IMAGE_NAME"
+        fi
     else
         info "Egress proxy image up to date."
     fi
@@ -7671,11 +7734,30 @@ if [ "$NEEDS_BUILD" = false ]; then
 fi
 
 if [ "$NEEDS_BUILD" = true ]; then
-    info "Building sandbox image (may take a few minutes)..."
-    _old_agent_id="$(docker image inspect -f '{{.Id}}' "$IMAGE_NAME" 2>/dev/null || true)"
-    docker build -q --no-cache --label sandy.managed=1 -t "$IMAGE_NAME" -f "$DOCKERFILE_PATH" "$SANDY_HOME"
-    echo "$BUILD_HASH" > "$HASH_FILE"
-    _sandy_prune_old_image "$_old_agent_id" "$IMAGE_NAME"
+    if _sandy_build_allowed "$IMAGE_NAME" "agent image"; then
+        info "Building sandbox image (may take a few minutes)..."
+        _old_agent_id="$(docker image inspect -f '{{.Id}}' "$IMAGE_NAME" 2>/dev/null || true)"
+        # Layer 2 (#218): the probe above runs on the HOST while `docker build`
+        # runs inside Docker's VM, so a host-reachable mirror can still be
+        # unreachable from the builder, and a network can drop mid-build. When
+        # that happens AND a usable image already exists, a failed OPTIONAL
+        # refresh must not take down a launch that would have succeeded ten
+        # minutes earlier. Nothing is lost by continuing: the hash file is only
+        # written and the predecessor only pruned after a SUCCESSFUL build.
+        _agent_build_rc=0
+        docker build -q --no-cache --label sandy.managed=1 -t "$IMAGE_NAME" -f "$DOCKERFILE_PATH" "$SANDY_HOME" || _agent_build_rc=$?
+        if [ "$_agent_build_rc" -eq 0 ]; then
+            echo "$BUILD_HASH" > "$HASH_FILE"
+            _sandy_prune_old_image "$_old_agent_id" "$IMAGE_NAME"
+        elif [ -n "$_old_agent_id" ]; then
+            warn "Agent image rebuild failed (docker build exit $_agent_build_rc) — continuing on the existing image."
+            warn "  The hash file is unchanged, so the rebuild is retried on the next launch."
+            _SANDY_BUILD_DEFERRED=true
+        else
+            error "Agent image build failed (docker build exit $_agent_build_rc) and no previous image exists."
+            exit 1
+        fi
+    fi
 else
     info "Sandbox image up to date."
 fi
@@ -8027,10 +8109,12 @@ if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
         fi
 
         if [ "$SKILLS_BASE_NEEDS_BUILD" = true ]; then
+            if _sandy_build_allowed "$SKILLS_BASE_IMAGE" "skill-pack base image"; then
             info "Building skill pack base image (Playwright + Chromium)..."
             docker build --label sandy.managed=1 -t "$SKILLS_BASE_IMAGE" \
                 -f "$SANDY_HOME/Dockerfile.skills-base" "$SANDY_HOME"
             echo "$SKILLS_BASE_HASH" > "$SKILLS_BASE_HASH_FILE"
+            fi
         else
             info "Skill pack base image up to date."
         fi
@@ -8057,11 +8141,13 @@ if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
     fi
 
     if [ "$SKILLS_NEEDS_BUILD" = true ]; then
+        if _sandy_build_allowed "$SKILLS_IMAGE_NAME" "skill-pack image"; then
         info "Building skill pack image (${SANDY_SKILL_PACKS})..."
         docker build --no-cache --label sandy.managed=1 -t "$SKILLS_IMAGE_NAME" \
             -f "$SANDY_HOME/Dockerfile.skills" "$SANDY_HOME"
         echo "$SKILLS_BUILD_HASH" > "$SKILLS_HASH_FILE"
         SKILLS_REBUILT=true
+        fi
     else
         info "Skill pack image up to date."
     fi
@@ -9137,6 +9223,10 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
         PROJECT_NEEDS_BUILD=true
     fi
     if [ "$PROJECT_NEEDS_BUILD" = true ]; then
+        # The per-project Dockerfile is arbitrary user RUN commands, so it needs
+        # the network at least as much as sandy's own images do -- and it is the
+        # LAST build, so an unreachable mirror here wastes everything above it.
+        if _sandy_build_allowed "$PROJECT_IMAGE_NAME" "project image"; then
         info "Building project image from .sandy/Dockerfile..."
         docker build -q --no-cache \
             --label sandy.managed=1 \
@@ -9144,6 +9234,7 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
             -t "$PROJECT_IMAGE_NAME" \
             -f "$PROJECT_DOCKERFILE" "$WORK_DIR/.sandy"
         echo "$PROJECT_HASH" > "$PROJECT_HASH_FILE"
+        fi
     else
         info "Project image up to date."
     fi
@@ -9419,6 +9510,16 @@ cleanup() {
             printf "${YELLOW}[sandy]${NC} See github.com/rappdw/sandy/issues/151 — sandy re-pins the mode on the next launch.\n" >&2
         fi
         rm -f "$SANDBOX_DIR/.claude-perm-mode-at-launch"
+    fi
+    # #218: if a build was skipped or fell back this launch, say so at session
+    # end. Sandy auto-patches wrapped agents by rebuilding on a detected update
+    # (CLAUDE.md "Wrapped-agent security"), so a DEFERRED update quietly erodes
+    # that posture. Surfacing it keeps the deferral a known state rather than an
+    # invisible one -- it clears itself on the first launch from a healthy
+    # network, and this line is how the user knows it has not yet.
+    if [ "${_SANDY_BUILD_DEFERRED:-false}" = "true" ]; then
+        printf "${YELLOW}[sandy]${NC} An image refresh was deferred this session (build resources were unreachable).\n" >&2
+        printf "${YELLOW}[sandy]${NC} You ran on the existing image. It rebuilds on the next launch from a healthy network.\n" >&2
     fi
     # HF-incident Issue 4: session-end egress summary. When allowed-egress logging
     # is on, roll up proxy.log into "what hosts did the agent actually reach" — the

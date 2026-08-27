@@ -413,7 +413,13 @@ Add entries to `SKILL_PACK_NAMES`, `SKILL_PACK_REPOS`, `SKILL_PACK_VERSIONS`, an
 
 ## Auto-update
 
-On each launch, sandy checks for newer Claude Code versions by comparing the installed version against the latest release. If an update is available, the image is rebuilt with `--no-cache`. Inside the container, `DISABLE_AUTOUPDATER=1` prevents Claude Code from attempting self-updates against the read-only filesystem.
+On each launch, sandy checks for newer Claude Code versions by comparing the installed version against the latest release. If an update is available, the image is rebuilt with `--no-cache`.
+
+**No image is built when the resources a build needs are unreachable (#218).** The version check and the build pull from *different* endpoints, and **partial reachability is the normal failure mode** — captive portals and in-flight wifi routinely allow one CDN while blocking another, so a successful update check proves nothing about whether a rebuild can succeed. Observed on in-flight wifi: the check reached `storage.googleapis.com`, flipped `NEEDS_BUILD=true`, and the forced `--no-cache` rebuild died at `apt-get update` with exit 100 — aborting the launch under `set -e` on exactly the network where the already-built local image was most wanted, and re-dying on every retry.
+
+So **every** build site — base, proxy, agent, both skill-pack layers, and the per-project `.sandy/Dockerfile` — passes through `_sandy_build_allowed`, which probes the actual build dependencies (`deb.debian.org`, `registry.npmjs.org`) rather than general connectivity. If they are unreachable: an existing image is kept and the refresh deferred; if there is **no** existing image, sandy fails **immediately** with an accurate message instead of after a multi-minute apt timeout that names the wrong cause. The probe is lazy and memoized, so a launch that needs no build pays nothing.
+
+The agent build additionally tolerates a build that fails *despite* the probe passing (the probe runs host-side while `docker build` runs in Docker's VM, and networks drop mid-build): with a usable image present it warns and continues, since the hash file is only written on success so the rebuild retries next launch. Hash-change and missing-image builds keep failing hard — there is nothing known-good to fall back to. A deferred refresh is reported at session end, so the auto-patch CVE posture below does not erode silently. Guarded by `run-tests.sh §107`. Inside the container, `DISABLE_AUTOUPDATER=1` prevents Claude Code from attempting self-updates against the read-only filesystem.
 
 ### Wrapped-agent security / CVE watch (sandbox-escape eval Issue E)
 

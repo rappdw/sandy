@@ -10343,6 +10343,86 @@ unset _S106_PS_HOME _S106_PS_BIN _S106_PS_ERR_FULL _S106_PS_OUT_FULL _S106_PS_ER
 unset _S106_RMS_HOME _S106_RMS_OUT
 unset _S106_RSB_WS _S106_RSB_HOME _S106_RSB_HASH _S106_RSB_BASE _S106_RSB_SB _S106_RSB_OUT
 
+echo ""
+echo "§107: build-resource reachability gate — never attempt a doomed build (#218)"
+# WHY. On degraded networks (in-flight wifi, captive portals) the tiny HTTPS
+# agent-version check succeeds while the Debian mirrors are unreachable. That
+# flipped NEEDS_BUILD=true, the forced --no-cache rebuild died at `apt-get
+# update` with exit 100, and the launch ABORTED under set -e -- on exactly the
+# network where the already-built local image was most wanted. Every retry
+# re-detected the update and re-died. PARTIAL REACHABILITY IS THE NORMAL
+# FAILURE MODE, so "the update check worked" proves nothing about a build.
+_S107_SANDY="$SANDY_SCRIPT"
+check "§107(pre) sandy defines the reachability gate" \
+    grep -q '_sandy_build_allowed()' "$_S107_SANDY"
+
+# --- the decision matrix, driven against the REAL extracted helpers ----------
+# Extracted rather than reimplemented: a copy would keep passing while the real
+# gate broke, which is the vacuous-guard failure this repo keeps rediscovering.
+_S107_H="$(mktemp)"
+sed -n '/^# --- Build-resource reachability gate/,/^}$/p' "$_S107_SANDY" > "$_S107_H"
+awk '/^_sandy_build_allowed\(\) \{/,/^}$/' "$_S107_SANDY" >> "$_S107_H"
+check "§107(0) extracted BOTH helpers from sandy (mutation: a rename empties this and must fail HERE, not silently pass the matrix below)" \
+    bash -c '[ "$(grep -c "^_sandy_build_" "$1")" -eq 2 ]' -- "$_S107_H"
+
+_S107_BIN="$(mktemp -d)"
+# $1 = net reachable (ok|no), $2 = image present (yes|no) -> prints "rc=N deferred=X"
+_s107_decide() {
+    printf '#!/usr/bin/env bash\n[ "%s" = ok ] && exit 0 || exit 7\n' "$1" > "$_S107_BIN/curl"
+    printf '#!/usr/bin/env bash\n[ "$1" = image ] && { [ "%s" = yes ] && exit 0 || exit 1; }\nexit 0\n' "$2" > "$_S107_BIN/docker"
+    chmod +x "$_S107_BIN/curl" "$_S107_BIN/docker"
+    PATH="$_S107_BIN:$PATH" bash -c '
+        set -euo pipefail
+        warn(){ :; }; error(){ :; }; YELLOW=""; NC=""
+        . "$1"
+        RC=0
+        _sandy_build_allowed "sandy-base" "base image" || RC=$?
+        printf "rc=%s deferred=%s" "$RC" "${_SANDY_BUILD_DEFERRED:-false}"
+    ' -- "$_S107_H" 2>/dev/null || printf 'rc=EXIT'
+}
+check "§107(1) reachable + image present -> build PROCEEDS" \
+    test "$(_s107_decide ok yes)" = "rc=0 deferred=false"
+check "§107(2) reachable + NO image -> build PROCEEDS (a first build must not be blocked)" \
+    test "$(_s107_decide ok no)" = "rc=0 deferred=false"
+check "§107(3) UNREACHABLE + image present -> SKIP and keep running (mutation: dropping the docker-image-inspect branch turns this into a hard exit and re-creates the lockout)" \
+    test "$(_s107_decide no yes)" = "rc=1 deferred=true"
+check "§107(4) UNREACHABLE + NO image -> hard exit (mutation: returning 1 here would let the caller build anyway and die at apt with the wrong cause)" \
+    test "$(_s107_decide no no)" = "rc=EXIT"
+rm -rf "$_S107_BIN" "$_S107_H"
+
+# --- every build site is gated ----------------------------------------------
+# The point of #218 is that NO image is built when resources are unreachable,
+# including the per-project .sandy/Dockerfile. A gate on five of six sites still
+# lets a launch die at the ungated one.
+check "§107(5) every docker build site is gated (6 gate calls for 6 build sites; mutation: adding an ungated build makes these counts diverge)" \
+    bash -c '[ "$(grep -c "_sandy_build_allowed \"" "$1")" -eq 6 ]' -- "$_S107_SANDY"
+for _s107_img in BASE_IMAGE_NAME PROXY_IMAGE_NAME IMAGE_NAME SKILLS_BASE_IMAGE SKILLS_IMAGE_NAME PROJECT_IMAGE_NAME; do
+    check "§107(5) gated: \$$_s107_img" \
+        grep -q "_sandy_build_allowed \"\$$_s107_img\"" "$_S107_SANDY"
+done
+unset _s107_img
+
+# --- the probe must be LAZY -------------------------------------------------
+# A launch needing no build must pay zero latency. Structurally: the probe is
+# reachable ONLY through the gate, and every gate call sits inside a
+# needs-build branch.
+check "§107(6) the probe is reachable only via the gate (mutation: calling _sandy_build_net_ok at top level costs every launch a 5s probe)" \
+    bash -c '[ "$(grep -c "_sandy_build_net_ok" "$1")" -eq 2 ]' -- "$_S107_SANDY"
+
+# --- Layer 2: a failed OPTIONAL refresh must not abort the launch -----------
+check "§107(7) the agent build captures its exit rather than dying under set -e (mutation: a bare docker build aborts the launch, which is the reported bug)" \
+    grep -q '|| _agent_build_rc=\$?' "$_S107_SANDY"
+check "§107(8) ...and falls back to the existing image when one exists" \
+    bash -c 'grep -A6 "_agent_build_rc=\\\$?" "$1" | grep -q "elif \[ -n \"\\\$_old_agent_id\" \]"' -- "$_S107_SANDY"
+check "§107(9) the hash file is written ONLY on a successful build (mutation: writing it unconditionally marks a failed build as current and suppresses the retry forever)" \
+    bash -c 'grep -A4 "if \[ \"\\\$_agent_build_rc\" -eq 0 \]" "$1" | grep -q "echo \"\\\$BUILD_HASH\" > \"\\\$HASH_FILE\""' -- "$_S107_SANDY"
+
+# --- the deferral must be surfaced ------------------------------------------
+# Sandy auto-patches wrapped agents by rebuilding on a detected update, so a
+# silent deferral erodes that posture invisibly.
+check "§107(10) a deferred refresh is reported at session end (mutation: dropping it makes the deferral invisible and the CVE posture silently stale)" \
+    bash -c 'grep -q "_SANDY_BUILD_DEFERRED:-false" "$1" && grep -q "image refresh was deferred" "$1"' -- "$_S107_SANDY"
+
 _run_provenance   # timestamp + commit + tree state, so a result you scroll back
                   # to after a context switch says which build produced it.
 [ "$FAIL" -eq 0 ] || exit 1
