@@ -10578,6 +10578,79 @@ check "§109(12) an AGENT named sandy-proxy-* is NOT reaped (the \`proxy\` basen
 rm -rf "$_S109_T2"
 unset _S109 _S109_ABS _S109_T _S109_T2 _S109_OUT _S109_FN _S109_LOG
 
+echo ""
+echo "§110: claude.ai account connectors are suppressed by default (#129)"
+# WHY. The OAuth token sandy mounts is ACCOUNT-scoped, so every connector the
+# user ever enabled on claude.ai (Gmail, Drive, ...) was reachable from EVERY
+# sandbox -- including untrusted-repo sessions, with no extra prompt. Ambient
+# authority crossing the per-project boundary sandy exists to draw. Found in the
+# field: a maintainer noticed all sandy instances could read their Gmail.
+_S110="$SANDY_SCRIPT"
+
+# --- the key, and its tier ---------------------------------------------------
+check "§110(1) SANDY_CLAUDE_CONNECTORS is a recognized passive key" \
+    bash -c 'grep -q "^    SANDY_CLAUDE_CONNECTORS$" "$1"' -- "$_S110"
+# =1 EXPOSES account connectors, so it weakens the sandbox and must go through
+# the per-workspace approval prompt from a committed .sandy/config -- same class
+# as SANDY_EGRESS_NO_ISOLATION=1. Passive-safe at 0.
+check "§110(2) =1 is value-aware WEAKENING, so a committed config cannot silently expose Gmail/Drive (mutation: dropping the case arm lets any repo turn connectors on with no prompt)" \
+    bash -c 'awk "/_sandy_passive_value_privileged\(\)/,/^}\$/" "$1" | grep -q "SANDY_CLAUDE_CONNECTORS)"' -- "$_S110"
+check "§110(3) it appears in --print-schema (metadata row present)" \
+    bash -c 'grep -q "^SANDY_CLAUDE_CONNECTORS|bool|0|" "$1"' -- "$_S110"
+
+# --- every seeding branch --------------------------------------------------
+# node / jq / last-resort. A security default that varies by which tools happen
+# to be installed is not a default; the no-node host is the one with the FEWEST
+# defenses, so omitting it there is the worst place to omit it.
+check "§110(4) all three settings.json seeding branches set disableClaudeAiConnectors (mutation: covering only node leaves connectors ON for jq-only and no-tool hosts)" \
+    bash -c '[ "$(grep -c "disableClaudeAiConnectors" "$1")" -ge 4 ]' -- "$_S110"
+for _s110_b in 's.disableClaudeAiConnectors =' '.disableClaudeAiConnectors = ($connectors' '"disableClaudeAiConnectors":%s'; do
+    check "§110(4) branch seeds it: ${_s110_b:0:34}" \
+        grep -qF "$_s110_b" "$_S110"
+done
+unset _s110_b
+
+# --- ALWAYS-SET, not only-if-absent -----------------------------------------
+# Claude Code resolves this any-source-true-wins (verified against the installed
+# binary's own schema text). So writing false is NOT enough to expose
+# connectors: an inherited true from the host settings.json would win. The key
+# must be overwritten in BOTH directions or the opt-in silently does nothing.
+check "§110(5) the node branch ASSIGNS rather than defaulting-if-absent (mutation: an only-if-absent seed makes SANDY_CLAUDE_CONNECTORS=1 a silent no-op whenever the host settings.json already says true)" \
+    bash -c '! awk "/const defaults = \{/,/for \(const \[k,v\] of Object.entries\(defaults\)\)/" "$1" | grep -q "disableClaudeAiConnectors"' -- "$_S110"
+
+# --- behavioral: the three host states --------------------------------------
+# Drives sandy's REAL seeding statement, extracted -- not a reimplementation.
+# The first version of this inlined an equivalent line, so making the real one
+# only-if-absent (the mutation that silently breaks the opt-in) left every check
+# green. A copy tests the copy.
+_S110_STMT="$(grep -m1 -F 's.disableClaudeAiConnectors' "$_S110" | sed 's/^[[:space:]]*//')"
+check "§110(6pre) extracted sandy's own seeding statement (mutation: a rename empties this and must fail HERE, not silently pass the behavioral checks)" \
+    bash -c '[ -n "$1" ] && printf "%s" "$1" | grep -q disableClaudeAiConnectors' -- "$_S110_STMT"
+_s110_seed() {  # $1 = host settings JSON, $2 = SANDY_CLAUDE_CONNECTORS
+    printf '%s' "$1" > "$_S110_T/host.json"
+    SANDY_CLAUDE_CONNECTORS="$2" node -e '
+        const fs=require("fs");
+        let s = JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+        '"$_S110_STMT"'
+        process.stdout.write(String(s.disableClaudeAiConnectors));
+    ' "$_S110_T/host.json" 2>/dev/null || printf 'ERR'
+}
+if command -v node >/dev/null 2>&1; then
+    _S110_T="$(mktemp -d)"
+    check "§110(6) default: connectors SUPPRESSED on a clean host" \
+        test "$(_s110_seed '{}' 0)" = "true"
+    check "§110(7) a host-level 'false' does NOT defeat the secure default (mutation: reading the host value instead of overwriting re-exposes connectors for anyone who enabled them globally)" \
+        test "$(_s110_seed '{"disableClaudeAiConnectors":false}' 0)" = "true"
+    check "§110(8) opt-in overrides an inherited host 'true' (any-source-true would otherwise win and make =1 a no-op)" \
+        test "$(_s110_seed '{"disableClaudeAiConnectors":true}' 1)" = "false"
+    rm -rf "$_S110_T"
+fi
+
+# --- defense in depth: do not hand over the list either ----------------------
+check "§110(9) claudeAiMcpEverConnected is stripped from the .claude.json seed (mutation: leaving it tells the agent which account connectors exist even once they are gated)" \
+    grep -q 'delete d.claudeAiMcpEverConnected' "$_S110"
+unset _S110 _S110_T
+
 _run_provenance   # timestamp + commit + tree state, so a result you scroll back
                   # to after a context switch says which build produced it.
 [ "$FAIL" -eq 0 ] || exit 1
