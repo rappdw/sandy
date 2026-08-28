@@ -10493,6 +10493,91 @@ check "§108(11) ...and fails closed with actionable guidance when there is no t
 rm -rf "$_S108_T"
 unset _S108 _S108_ABS _S108_SBX _S108_EXIT _S108_BUILD _S108_T _S108_OUT
 
+echo ""
+echo "§109: symlinks never mount \$SANDY_HOME; stranded proxies are reaped (#209, #222)"
+_S109="$SANDY_SCRIPT"
+
+# --- #209: a workspace symlink must not mount sandy's own state -------------
+# $SANDY_HOME defaults to $HOME/.sandy, so it passes the existing $HOME test and
+# would be bind-mounted READ-WRITE like any other target (the symlink mounts
+# carry no :ro). That hands the agent .handoff-enabled and agent-args.<agent> --
+# the two files placed at the sandbox TOP LEVEL precisely so it cannot reach
+# them -- plus the approved-symlinks list that gates this very check.
+check "§109(1) the symlink scan refuses targets under \$SANDY_HOME (mutation: dropping the case arm re-opens agent write access to operator state)" \
+    bash -c 'awk "/^_sandy_resolve_symlinks\(\) \{/,/^\}\$/" "$1" | grep -q "SANDY_HOME\"|\"\\\$SANDY_HOME\"/\\*"' -- "$_S109"
+check "§109(2) ...and warns rather than skipping silently (an operator who pointed a symlink there must learn why it vanished)" \
+    bash -c 'awk "/^_sandy_resolve_symlinks\(\) \{/,/^\}\$/" "$1" | grep -q "sandy own state\|sandy.s own state"' -- "$_S109"
+
+# Behavioral: real script, stubbed docker, three symlinks. The third is the
+# regression guard -- an ORDINARY escape must still be offered for approval, so
+# the exclusion cannot be over-broad.
+_S109_T="$(mktemp -d)"
+mkdir -p "$_S109_T/bin" "$_S109_T/home/sandboxes" "$_S109_T/ws" "$_S109_T/legit"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$_S109_T/bin/docker"; chmod +x "$_S109_T/bin/docker"
+ln -s "$_S109_T/home"                 "$_S109_T/ws/sandy-state"
+ln -s "$_S109_T/home/sandboxes/other" "$_S109_T/ws/other-sandbox"
+ln -s "$_S109_T/legit"                "$_S109_T/ws/legit-escape"
+_S109_ABS="$(cd "$(dirname "$_S109")" && pwd -P)/$(basename "$_S109")"
+_S109_OUT="$( cd "$_S109_T/ws" && PATH="$_S109_T/bin:$PATH" SANDY_HOME="$_S109_T/home" \
+    HOME="$_S109_T" SANDY_APPROVE_ONLY=1 timeout 60 bash "$_S109_ABS" </dev/null 2>&1 || true )"
+# Assert the REFUSAL line, not merely that the link name appears: an unexcluded
+# symlink also prints its name, in the "Symlinks that point outside" approval
+# list. Grepping the name alone passes either way -- a vacuous check that
+# mutation testing caught.
+check "§109(3) a symlink to \$SANDY_HOME itself is REFUSED (mutation: dropping the exclusion offers it for approval instead, which the name alone cannot distinguish)" \
+    bash -c 'printf "%s" "$1" | grep -q "Ignoring symlink into.*sandy-state"' -- "$_S109_OUT"
+check "§109(4) a symlink INTO a sandbox dir is REFUSED" \
+    bash -c 'printf "%s" "$1" | grep -q "Ignoring symlink into.*other-sandbox"' -- "$_S109_OUT"
+check "§109(5) an ORDINARY escaping symlink is STILL offered for approval (mutation: an over-broad exclusion would silently stop surfacing real escapes)" \
+    bash -c 'printf "%s" "$1" | grep -q "legit-escape"' -- "$_S109_OUT"
+rm -rf "$_S109_T"
+
+# --- #222: stranded proxies ---------------------------------------------------
+check "§109(6) sandy reaps stranded proxies at launch" \
+    grep -q '^_sandy_reap_stranded_proxies() {' "$_S109"
+check "§109(7) ...and does so on the launch path, beside the eager network reap (mutation: defining it but never calling it leaves the leak)" \
+    bash -c '[ "$(grep -c "^_sandy_reap_stranded_proxies || true" "$1")" -ge 1 ]' -- "$_S109"
+# The predicate is deliberately NARROWER than --gc's because this runs
+# automatically: it must not reason about liveness, only about existence.
+check "§109(8) the predicate is agent-container-ABSENCE, not liveness (mutation: reusing --gc's liveness lister here would tear the route out from under a live session on any false positive)" \
+    bash -c 'awk "/^_sandy_reap_stranded_proxies\(\) \{/,/^\}\$/" "$1" | grep -q "docker ps -a --filter \"name=\^/sandy-"' -- "$_S109"
+check "§109(9) classification is by IMAGE, never name prefix (mutation: a workspace named \`proxy\` yields an AGENT container called sandy-proxy-<hash>; a name test reaps it — the pre-1.3.0 regression)" \
+    bash -c 'awk "/^_sandy_reap_stranded_proxies\(\) \{/,/^\}\$/" "$1" | grep -q "sandy-proxy\" \]"' -- "$_S109"
+
+# Behavioral: a fleet with one paired proxy, one stranded, and one agent whose
+# name looks like a proxy.
+_S109_T2="$(mktemp -d)"; mkdir -p "$_S109_T2/bin"
+cat > "$_S109_T2/bin/docker" <<'DOCKERSTUB'
+#!/usr/bin/env bash
+LOG="${DOCKER_LOG:-/dev/null}"
+if [ "$1" = ps ]; then
+  filt=""; for a in "$@"; do case "$a" in name=^/*) filt="$a";; esac; done
+  case "$filt" in
+    'name=^/sandy-proxy-')
+        printf 'sandy-proxy-alive-1111|sandy-proxy\n'
+        printf 'sandy-proxy-dead-2222|sandy-proxy\n'
+        printf 'sandy-proxy-proxy-3333|sandy-claude-code\n'
+        exit 0 ;;
+    'name=^/sandy-alive-1111$') echo 'sandy-alive-1111'; exit 0 ;;
+    *) exit 0 ;;
+  esac
+fi
+[ "$1" = rm ] && { echo "REAPED: ${*: -1}" >> "$LOG"; exit 0; }
+exit 0
+DOCKERSTUB
+chmod +x "$_S109_T2/bin/docker"
+_S109_FN="$(awk '/^_sandy_reap_stranded_proxies\(\) \{/,/^\}$/' "$_S109")"
+PATH="$_S109_T2/bin:$PATH" DOCKER_LOG="$_S109_T2/log" bash -c "warn(){ :; }; $_S109_FN; _sandy_reap_stranded_proxies" >/dev/null 2>&1 || true
+_S109_LOG="$(cat "$_S109_T2/log" 2>/dev/null || true)"
+check "§109(10) the stranded proxy IS reaped" \
+    bash -c 'printf "%s" "$1" | grep -q "sandy-proxy-dead-2222"' -- "$_S109_LOG"
+check "§109(11) a proxy whose agent EXISTS is left alone (mutation: reaping it strands a live session on a routeless sidecar)" \
+    bash -c '! printf "%s" "$1" | grep -q "proxy-alive-1111"' -- "$_S109_LOG"
+check "§109(12) an AGENT named sandy-proxy-* is NOT reaped (the \`proxy\` basename trap)" \
+    bash -c '! printf "%s" "$1" | grep -q "proxy-proxy-3333"' -- "$_S109_LOG"
+rm -rf "$_S109_T2"
+unset _S109 _S109_ABS _S109_T _S109_T2 _S109_OUT _S109_FN _S109_LOG
+
 _run_provenance   # timestamp + commit + tree state, so a result you scroll back
                   # to after a context switch says which build produced it.
 [ "$FAIL" -eq 0 ] || exit 1

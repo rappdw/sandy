@@ -1700,6 +1700,56 @@ ${_sbname}"
 # candidate that raced back to life between plan and reap is simply not
 # caught by the NEXT list either, so nothing is force-removed out from under
 # a legitimately-revived resource).
+# _sandy_reap_stranded_proxies (#222) — remove proxy sidecars whose paired
+# agent container does not exist, at launch.
+#
+# WHY THIS EXISTS. The proxy runs with `--restart on-failure:5` so a mid-session
+# proxy death cannot strand the agent on a routeless --internal sidecar. That
+# policy cannot tell "I crashed" from "the host rebooted": a reboot SIGKILLs the
+# container, docker reads the non-zero exit as a failure, and revives it on the
+# next daemon start. A FOREGROUND agent (--rm, no restart policy) does not come
+# back, so the pair splits and the proxy is stranded -- the inverse of the
+# stranded-AGENT failure cleanup()'s atomic teardown exists to prevent. Reported
+# from a real host: three such proxies after one reboot, each holding a network
+# and a 256m memory cap, with nothing to reap them until that same workspace
+# happened to be relaunched.
+#
+# THE PREDICATE IS DELIBERATELY NARROWER THAN --gc'S. This runs AUTOMATICALLY on
+# every launch, where --gc is explicitly invoked and confirmed, so a false
+# positive here would tear the route out from under a LIVE session -- strictly
+# worse than the leak being fixed. So it does not reason about liveness at all:
+# a proxy is stranded only when its paired agent container DOES NOT EXIST. That
+# is unambiguous, needs no has-session probe or lock file, and is exactly the
+# reboot case (the foreground agent was --rm, so nothing remains). Any live or
+# merely-stopped session still has its agent container, so it is never touched.
+#
+# Classification is by IMAGE, never by name prefix: a workspace whose basename
+# is `proxy` produces an AGENT container literally named sandy-proxy-<hash>,
+# which was a real pre-1.3.0 --gc regression. Only containers whose image is
+# sandy-proxy are considered, so that agent is never mistaken for a sidecar.
+_sandy_reap_stranded_proxies() {
+    command -v docker >/dev/null 2>&1 || return 0
+    local _rows _name _img _sb
+    _rows="$(docker ps -a --filter 'name=^/sandy-proxy-' \
+        --format '{{.Names}}|{{.Image}}' 2>/dev/null)" || return 0
+    [ -n "$_rows" ] || return 0
+    while IFS='|' read -r _name _img; do
+        [ -n "$_name" ] || continue
+        # Image gate: this is what tells a sidecar from an agent whose workspace
+        # happens to be named `proxy`.
+        [ "${_img%%:*}" = "sandy-proxy" ] || continue
+        _sb="${_name#sandy-proxy-}"
+        [ -n "$_sb" ] || continue
+        # Paired agent present in ANY state (running or stopped)? Then leave it.
+        if docker ps -a --filter "name=^/sandy-${_sb}$" --format '{{.Names}}' 2>/dev/null | grep -qx "sandy-${_sb}"; then
+            continue
+        fi
+        warn "Removing stranded egress proxy $_name (its agent container is gone)."
+        docker rm -f "$_name" >/dev/null 2>&1 || true
+    done <<< "$_rows"
+    return 0
+}
+
 _sandy_gc_reap_containers() {
     local _cname
     # "reap" mode: retries the mid-startup has-session probe (5x/sleep-1)
@@ -6829,6 +6879,11 @@ fi
 # fall through instead of exiting). Does NOT change bare-sandy session
 # semantics — it only removes leftovers nothing live owns.
 command -v docker >/dev/null 2>&1 && _sandy_reap_orphan_networks || true
+# #222: same moment, same rationale as the eager network reap above -- clean up
+# leaked resources before allocating new ones. A reboot can resurrect a proxy
+# whose foreground agent is gone for good; nothing else reaps it until that
+# workspace is relaunched, so they accumulate silently.
+_sandy_reap_stranded_proxies || true
 
 # Safe key-value config parser (no arbitrary code execution).
 #
@@ -7550,6 +7605,27 @@ _sandy_resolve_symlinks() {
             if [[ "$target" != "$HOME"/* ]]; then
                 continue
             fi
+            # #209: NEVER mount sandy's own state into a sandbox it manages.
+            # $SANDY_HOME defaults to $HOME/.sandy, so it passes the $HOME test
+            # above and would be bind-mounted READ-WRITE like any other target
+            # (the symlink mounts carry no :ro). That hands the agent
+            # .handoff-enabled -- the operator-side enrollment marker placed at
+            # the sandbox TOP LEVEL precisely so the agent cannot create it for
+            # itself -- plus agent-args.<agent>, which would let it write its own
+            # launch flags, plus the approved-symlinks list that gates this very
+            # check, plus every OTHER sandbox if the link targets ~/.sandy.
+            #
+            # Refused rather than routed through approval: there is no legitimate
+            # use for mounting sandy's state into a sandbox, so an extra prompt
+            # would only train the user to say yes. Warned rather than skipped
+            # silently, so an operator who genuinely pointed a symlink there
+            # learns why it did not appear.
+            case "$target" in
+                "$SANDY_HOME"|"$SANDY_HOME"/*)
+                    warn "Ignoring symlink into sandy's own state: ${link#$WORK_DIR/} -> $target"
+                    warn "  Mounting \$SANDY_HOME into a sandbox would expose operator state the agent must not reach."
+                    continue ;;
+            esac
             link_rel="${link#$WORK_DIR/}"
             DANGEROUS_SYMLINKS+=("$link_rel -> $target")
             SYMLINK_HOST_PATHS+=("$target")
