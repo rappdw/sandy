@@ -10651,6 +10651,41 @@ check "§110(9) claudeAiMcpEverConnected is stripped from the .claude.json seed 
     grep -q 'delete d.claudeAiMcpEverConnected' "$_S110"
 unset _S110 _S110_T
 
+echo ""
+echo "§111: the auto-mode opt-in prompt is suppressed at the POLICY layer"
+# WHY THE POLICY LAYER AND NOT settings.json. Sandy has long seeded
+# skipAutoPermissionPrompt into the sandbox settings.json, but Claude Code
+# 2.1.x ships a one-shot migration that DELETES that key from USER settings
+# whenever permissions.defaultMode != "auto" -- precisely sandy's config:
+#
+#   if (p?.skipAutoPermissionPrompt && p?.permissions?.defaultMode !== "auto")
+#       await qt("userSettings", { skipAutoPermissionPrompt: void 0 }, ...)
+#
+# It is guarded by a one-time flag, so an EXISTING sandbox that already ran it
+# keeps sandy's re-seeded value -- which is why the prompt only ever reproduced
+# on FRESH workspaces. The display gate reads three sources:
+#
+#   !["policySettings","userSettings","flagSettings"]
+#       .some(o => _e(o)?.skipAutoPermissionPrompt === true)
+#
+# The migration touches only userSettings, so the policy layer survives it.
+_S111="$SANDY_SCRIPT"
+check "§111(1) sandy writes a managed-settings.json (mutation: relying on the settings.json seed alone lets the migration delete it on every new sandbox)" \
+    grep -q 'managed-settings.json' "$_S111"
+check "§111(2) it carries skipAutoPermissionPrompt: true" \
+    bash -c 'grep -A2 "claude-policy/managed-settings.json" "$1" | grep -q skipAutoPermissionPrompt || grep -q "skipAutoPermissionPrompt.*true.*managed\|managed-settings.json\"" "$1"' -- "$_S111"
+# /etc/claude-code is the hardcoded Linux policy dir -- the env override
+# function returns undefined in this build, so there is no path knob.
+check "§111(3) mounted at /etc/claude-code, the policy dir Claude Code actually reads" \
+    grep -q ':/etc/claude-code:ro' "$_S111"
+# :ro matters: the settings.json seed is rw inside the container by design, so
+# an agent could edit it. A policy file the agent can rewrite is not a policy.
+check "§111(4) the policy mount is READ-ONLY (mutation: dropping :ro lets the agent rewrite its own permission policy)" \
+    bash -c 'grep -q "_sandy_policy_dir\":/etc/claude-code:ro" "$1"' -- "$_S111"
+check "§111(5) it is gated on claude AND skip-permissions (mutation: writing it unconditionally would suppress the prompt even when the user deliberately turned skip off)" \
+    bash -c 'grep -B2 "_sandy_policy_dir=" "$1" | grep -q "_sandy_agent_has claude.*SANDY_SKIP_PERMISSIONS"' -- "$_S111"
+unset _S111
+
 _run_provenance   # timestamp + commit + tree state, so a result you scroll back
                   # to after a context switch says which build produced it.
 [ "$FAIL" -eq 0 ] || exit 1
