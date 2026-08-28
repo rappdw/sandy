@@ -10992,6 +10992,43 @@ printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "
     "$_sandy_perm_mode_json" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
+
+# --- Auto-mode opt-in prompt suppression, at the POLICY layer (#129 follow-up)
+# Claude Code 2.1.x offers "Make auto mode your default permission mode?" on
+# launch. In a sandbox where sandy already pins bypassPermissions that is pure
+# friction, and sandy has long seeded `skipAutoPermissionPrompt` into the
+# sandbox settings.json to suppress it. On a NEW sandbox that no longer works,
+# and reading the shipped binary (2.1.250) says exactly why.
+#
+# A one-shot migration deletes the key from USER settings whenever the mode is
+# not "auto" -- which is precisely sandy's configuration:
+#
+#   if (p?.skipAutoPermissionPrompt && p?.permissions?.defaultMode !== "auto")
+#       await qt("userSettings", { skipAutoPermissionPrompt: void 0 }, ...)
+#
+# It is guarded by a one-time flag, so an EXISTING sandbox that already ran it
+# keeps sandy's re-seeded value and stays quiet -- which is why this only ever
+# reproduced on fresh workspaces. The display gate reads three sources:
+#
+#   !["policySettings","userSettings","flagSettings"]
+#       .some(o => _e(o)?.skipAutoPermissionPrompt === true)
+#
+# The migration only ever rewrites userSettings, so the POLICY layer survives
+# it. On Linux that is /etc/claude-code (hardcoded -- the env override function
+# returns undefined in this build, so there is no path knob to use instead).
+#
+# Mounted :ro, so this is also a value the agent cannot edit -- unlike the
+# settings.json seed, which is rw inside the container by design.
+if _sandy_agent_has claude && [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+    _sandy_policy_dir="$SANDBOX_DIR/claude-policy"
+    mkdir -p "$_sandy_policy_dir"
+    printf '{\n  "skipAutoPermissionPrompt": true\n}\n' > "$_sandy_policy_dir/managed-settings.json"
+    # Mount the DIRECTORY, not the file: /etc/claude-code does not exist in the
+    # image, and a directory mountpoint is the least surprising thing to ask
+    # docker to create under a --read-only rootfs.
+    RUN_FLAGS+=(-v "$_sandy_policy_dir":/etc/claude-code:ro)
+    [ "${SANDY_VERBOSE:-0}" != "0" ] && info "Policy settings /etc/claude-code/managed-settings.json (auto-mode prompt suppressed)"
+fi
 [ "${SANDY_VERBOSE:-0}" != "0" ] && info "Session marker /etc/sandy-session.json nonce=${_sandy_session_nonce} egress=${_sandy_egress_mode}"
 if _sandy_agent_has claude; then
     # Channels env vars: for single-agent 'claude' these drive the in-container plugin path;
