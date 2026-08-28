@@ -6209,7 +6209,26 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # `|| true` swallows it — silently skipping the approval pre-pass this
         # block exists to perform. Calling the helper HERE would not help: the
         # substitution is expanded after the cd. It must already be resolved.
-        ( cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$SANDY_SELF" ) </dev/tty >/dev/tty 2>&1 || true
+        _sandy_approve_rc=0
+        ( cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$SANDY_SELF" ) </dev/tty >/dev/tty 2>&1 || _sandy_approve_rc=$?
+        # #221: the rc is no longer swallowed. Now that this pass also resolves
+        # the dangerous-symlink approval, it can fail for a REAL reason -- the
+        # user declined, or a new escaping symlink appeared since the last
+        # approval (a hard refusal by design). Forking a supervisor that will
+        # certainly hit the same refusal under /dev/null, then reporting it as a
+        # generic timeout minutes later, tells the user nothing they can act on.
+        # Stop here instead, with the same code the supervisor path uses for
+        # "refused before launch", so a consumer handles ONE case rather than two.
+        #
+        # A nonzero rc from a MISSING binary would previously have been silently
+        # swallowed here too; it now surfaces, which is the correct trade -- the
+        # comment above already flags that failure mode as the thing `|| true`
+        # was hiding.
+        if [ "$_sandy_approve_rc" -ne 0 ]; then
+            error "Startup approval was not granted (exit $_sandy_approve_rc) — not starting the daemon."
+            error "Answer the prompt above, or run 'sandy' once interactively in $WORK_DIR."
+            exit 6
+        fi
     fi
 
     # D1 — daemonize the supervisor with `nohup … & disown`, deliberately NOT
@@ -6304,12 +6323,30 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         rm -f "$_sandy_daemon_log" 2>/dev/null || true
         exit 0
     else
+        # #221 Ask 2 — DISTINCT exit codes. These three failures need very
+        # different responses from a consumer: the first is user-actionable in
+        # ONE step ("answer this once from a terminal"), the other two are not.
+        # Collapsing them all onto exit 1 forced sandy-ui to scrape the streamed
+        # human-readable log to tell them apart -- the same fragility #160
+        # removed from the introspection flags. The information already existed
+        # internally; this only surfaces it.
+        #
+        # Codes continue the DEC-C table (--attach uses 3/4/5, --stop 4/5), so
+        # --start-specific failures start at 6 and never collide:
+        #   6  refused before launch  (unanswerable approval; ACTIONABLE)
+        #   7  container crash-looping
+        #   8  timed out waiting for the inner session
+        # 1 remains the catch-all for anything not classified above.
+        _sandy_start_rc=1
         if [ "$_sandy_sup_fatal" = "true" ]; then
             error "Daemon startup was refused before it could launch (see the guidance above)."
+            _sandy_start_rc=6
         elif [ "${_sandy_restarts:-0}" -ge 3 ] 2>/dev/null; then
             error "Daemon container is crash-looping (RestartCount=$_sandy_restarts) — giving up."
+            _sandy_start_rc=7
         else
             error "Daemon session failed to become attachable within ${_sandy_timeout_s}s."
+            _sandy_start_rc=8
         fi
         # The container-side story is usually the useful one (why the inner
         # tmux session never appeared) — dump it alongside the supervisor log.
@@ -6337,7 +6374,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
                 docker rm -f "$_sandy_daemon_container" >/dev/null 2>&1 || true
             fi
         fi
-        exit 1
+        exit "$_sandy_start_rc"
     fi
 fi
 
@@ -7170,9 +7207,17 @@ fi
 # that persisted approval. Env-only internal flag (like SANDY_DAEMON_SUPERVISOR
 # / SANDY_APPROVE_ONLY is never a config key), so a committed config can't set
 # it.
-if [ "${SANDY_APPROVE_ONLY:-0}" = "1" ]; then
-    exit 0
-fi
+#
+# #221: this no longer exits HERE. The passive-privileged approval was the only
+# one it resolved, so a first-encounter DANGEROUS-SYMLINK prompt still reached
+# the supervisor under /dev/null, failed closed, and left the user with no way
+# to answer -- a workspace containing a symlink launched fine from a shell and
+# failed under `--start`. That approval needs SANDBOX_DIR, which is assigned
+# further down, so this mode now continues to just past that point and exits
+# there instead. The stretch in between only COMPUTES (verified: no mkdir, no
+# write, no docker), so traversing it keeps the "touches nothing on disk but the
+# approval file" property this mode is built on -- in particular it still exits
+# BEFORE the workspace mutex, the bare-sandy busy-gate, image builds, and launch.
 
 # Sanity: reject world-open SANDY_ALLOW_LAN_HOSTS values. Even from a
 # privileged source, "0.0.0.0/0" negates the whole point of LAN isolation and
@@ -7467,6 +7512,147 @@ DIR_BASE="$(basename "$WORK_DIR" | tr -cd 'a-zA-Z0-9._-')"
 DIR_BASE="${DIR_BASE:-project}"
 SANDBOX_NAME="${DIR_BASE}-${SHORT_HASH}"
 SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
+
+# --- Dangerous-symlink scan + approval (#221) ------------------------------
+# Extracted into a function so the `--start` CLIENT can resolve this approval
+# on ITS tty BEFORE forking the non-TTY supervisor. Container bring-up runs in
+# that supervisor, whose stdin is /dev/null, so a first-encounter symlink
+# prompt there is unanswerable: it fails closed, drops the .fatal marker, and
+# the user has no way to say yes. Behaviour inside the function is unchanged;
+# only WHERE it can run is new. It stays global (no `local`) because the
+# SYMLINK_* arrays it fills are consumed later by the mount loop.
+# SANDY_APPROVE_ONLY (#221) exits HERE, once SANDBOX_DIR is known and the
+# function below is defined -- still before the mutex, the busy-gate, and every
+# build. Creating SANDBOX_DIR is the one added side effect and it is the same
+# mkdir the launch a moment later performs anyway; the approval list has to live
+# somewhere, and this is the directory that owns it.
+_sandy_approve_only_finish() {
+    mkdir -p "$SANDBOX_DIR"
+    _sandy_resolve_symlinks
+    exit 0
+}
+
+_sandy_resolve_symlinks() {
+    # Check for symlinks that escape the workspace (potential sandbox escape).
+    # We track both the display info and the mount info needed to make them work.
+    REAL_WORK_DIR="$(cd "$WORK_DIR" && pwd -P)"
+    DANGEROUS_SYMLINKS=()
+    # Parallel arrays: resolved host path and the container path where it should be mounted
+    SYMLINK_HOST_PATHS=()
+    SYMLINK_CONTAINER_PATHS=()
+    while IFS= read -r -d '' link; do
+        target="$(readlink -f "$link" 2>/dev/null || true)"
+        [ -z "$target" ] && continue
+        if [[ "$target" != "$REAL_WORK_DIR"* ]]; then
+            # Skip symlinks to system paths — mounting host system binaries over
+            # the container's (e.g. /usr/bin/python3) breaks the container.
+            # Only mount targets under $HOME.
+            if [[ "$target" != "$HOME"/* ]]; then
+                continue
+            fi
+            link_rel="${link#$WORK_DIR/}"
+            DANGEROUS_SYMLINKS+=("$link_rel -> $target")
+            SYMLINK_HOST_PATHS+=("$target")
+            # Determine the container mount path based on symlink type.
+            raw="$(readlink "$link")"
+            if [[ "$raw" == /* ]]; then
+                # Absolute symlink: the OS looks up the raw path literally inside the
+                # container, so mount the resolved target at the raw symlink value.
+                SYMLINK_CONTAINER_PATHS+=("$raw")
+            else
+                # Relative symlink: resolves relative to the symlink's parent dir.
+                # In the container, the parent dir is at its $HOME-relative path, so
+                # the relative traversal lands at the $HOME-relative mapping of the
+                # resolved target.
+                if [[ "$target" == "$HOME"/* ]]; then
+                    SYMLINK_CONTAINER_PATHS+=("/home/claude/${target#$HOME/}")
+                else
+                    SYMLINK_CONTAINER_PATHS+=("$target")
+                fi
+            fi
+        fi
+    done < <(find "$WORK_DIR" -maxdepth 8 -type l \
+        -not -path '*/node_modules/*' \
+        -not -path '*/.venv*/*' \
+        -not -path '*/.git/*' \
+        -print0 2>/dev/null)
+
+    if [ ${#DANGEROUS_SYMLINKS[@]} -gt 0 ]; then
+        # Persistent symlink approval (S2.2). Once the user has approved a specific
+        # set of dangerous symlinks for this sandbox, future launches proceed
+        # silently as long as the set is unchanged. A new entry that wasn't
+        # previously approved is a HARD ERROR (not a re-prompt) — a y/N prompt can
+        # be trained past; an explicit user action to re-approve cannot. Removed
+        # entries are pruned silently (a deleted symlink is always benign).
+        _approved_list="$SANDBOX_DIR/.sandy-approved-symlinks.list"
+        _current_tmp="$(mktemp)"
+        printf '%s\n' "${DANGEROUS_SYMLINKS[@]}" | sort -u > "$_current_tmp"
+        if [ -f "$_approved_list" ]; then
+            # Compute "new" entries: in current set but not in persisted approved.
+            _approved_tmp="$(mktemp)"
+            sort -u "$_approved_list" > "$_approved_tmp"
+            _new_tmp="$(mktemp)"
+            comm -23 "$_current_tmp" "$_approved_tmp" > "$_new_tmp"
+            if [ -s "$_new_tmp" ]; then
+                error "Symlink escape detected that wasn't present at previous approval:"
+                while IFS= read -r _new; do
+                    error "  $_new"
+                done < "$_new_tmp"
+                error ""
+                error "This would expose files outside the workspace to sandy."
+                error "If this is legitimate, delete the symlink, relaunch sandy, re-create it,"
+                error "and re-approve from the symlink warning — or clear the approval list:"
+                error "  rm '$_approved_list'"
+                rm -f "$_current_tmp" "$_approved_tmp" "$_new_tmp"
+                exit 1
+            fi
+            rm -f "$_new_tmp" "$_approved_tmp"
+            # Refresh the persisted list — prunes removed entries silently.
+            cp "$_current_tmp" "$_approved_list"
+        else
+            # First encounter for this sandbox — prompt the user (existing ceremony).
+            warn "Symlinks that point outside the workspace:"
+            for s in "${DANGEROUS_SYMLINKS[@]}"; do
+                warn "  $s"
+            done
+            printf "\033[0;33m[sandy] These could allow Claude to access files outside the sandbox.\033[0m\n"
+            # No interactive stdin to answer y/N — the `sandy --start` supervisor runs
+            # the launch under /dev/null (a headless/piped run has no terminal either).
+            # A bare `read` here consumes EOF and "aborts" with misleading "remove the
+            # symlinks" guidance, and under --start leaves the client polling out the
+            # full readiness timeout (the reported hang). Fail CLOSED with the correct
+            # fix, and drop a marker beside the streamed daemon log so the --start
+            # client stops waiting immediately rather than burning the timeout. The
+            # EXIT trap installed above already tears down the proxy/networks/lock.
+            if [ ! -t 0 ]; then
+                error "Dangerous symlinks need interactive approval, but stdin is not a terminal."
+                error "Approve them once by launching sandy interactively in this workspace:"
+                error "  cd '$WORK_DIR' && sandy      # answer y at the prompt, then exit"
+                error "then retry (e.g. 'sandy --start'). Or clear the list: rm '$_approved_list'"
+                [ -n "${SANDY_DAEMON_LOG:-}" ] && : > "${SANDY_DAEMON_LOG}.fatal"
+                rm -f "$_current_tmp"
+                exit 1
+            fi
+            printf "\033[0;33m[sandy] Proceed anyway? [y/N] \033[0m"
+            read -r REPLY
+            if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+                error "Aborting. Remove dangerous symlinks and try again."
+                rm -f "$_current_tmp"
+                exit 1
+            fi
+            # Persist the approved set — subsequent launches won't re-prompt
+            # unless a NEW entry appears (which hard-errors, above).
+            cp "$_current_tmp" "$_approved_list"
+            info "  Persisted ${#DANGEROUS_SYMLINKS[@]} approved symlink(s) to $(basename "$_approved_list")"
+        fi
+        rm -f "$_current_tmp"
+    fi
+}
+
+if [ "${SANDY_APPROVE_ONLY:-0}" = "1" ]; then
+    _sandy_approve_only_finish
+fi
+
 
 # Detect sibling sandboxes that point at the same workspace. The most common
 # cause is a pre-canonicalization (pre-pwd -P) launch from a different-case
@@ -10262,120 +10448,7 @@ if [ -f "$WORK_DIR/.git" ]; then
         info "  Git submodule: gitdir at $GITDIR_CONTAINER"
     fi
 fi
-# Check for symlinks that escape the workspace (potential sandbox escape).
-# We track both the display info and the mount info needed to make them work.
-REAL_WORK_DIR="$(cd "$WORK_DIR" && pwd -P)"
-DANGEROUS_SYMLINKS=()
-# Parallel arrays: resolved host path and the container path where it should be mounted
-SYMLINK_HOST_PATHS=()
-SYMLINK_CONTAINER_PATHS=()
-while IFS= read -r -d '' link; do
-    target="$(readlink -f "$link" 2>/dev/null || true)"
-    [ -z "$target" ] && continue
-    if [[ "$target" != "$REAL_WORK_DIR"* ]]; then
-        # Skip symlinks to system paths — mounting host system binaries over
-        # the container's (e.g. /usr/bin/python3) breaks the container.
-        # Only mount targets under $HOME.
-        if [[ "$target" != "$HOME"/* ]]; then
-            continue
-        fi
-        link_rel="${link#$WORK_DIR/}"
-        DANGEROUS_SYMLINKS+=("$link_rel -> $target")
-        SYMLINK_HOST_PATHS+=("$target")
-        # Determine the container mount path based on symlink type.
-        raw="$(readlink "$link")"
-        if [[ "$raw" == /* ]]; then
-            # Absolute symlink: the OS looks up the raw path literally inside the
-            # container, so mount the resolved target at the raw symlink value.
-            SYMLINK_CONTAINER_PATHS+=("$raw")
-        else
-            # Relative symlink: resolves relative to the symlink's parent dir.
-            # In the container, the parent dir is at its $HOME-relative path, so
-            # the relative traversal lands at the $HOME-relative mapping of the
-            # resolved target.
-            if [[ "$target" == "$HOME"/* ]]; then
-                SYMLINK_CONTAINER_PATHS+=("/home/claude/${target#$HOME/}")
-            else
-                SYMLINK_CONTAINER_PATHS+=("$target")
-            fi
-        fi
-    fi
-done < <(find "$WORK_DIR" -maxdepth 8 -type l \
-    -not -path '*/node_modules/*' \
-    -not -path '*/.venv*/*' \
-    -not -path '*/.git/*' \
-    -print0 2>/dev/null)
-
-if [ ${#DANGEROUS_SYMLINKS[@]} -gt 0 ]; then
-    # Persistent symlink approval (S2.2). Once the user has approved a specific
-    # set of dangerous symlinks for this sandbox, future launches proceed
-    # silently as long as the set is unchanged. A new entry that wasn't
-    # previously approved is a HARD ERROR (not a re-prompt) — a y/N prompt can
-    # be trained past; an explicit user action to re-approve cannot. Removed
-    # entries are pruned silently (a deleted symlink is always benign).
-    _approved_list="$SANDBOX_DIR/.sandy-approved-symlinks.list"
-    _current_tmp="$(mktemp)"
-    printf '%s\n' "${DANGEROUS_SYMLINKS[@]}" | sort -u > "$_current_tmp"
-    if [ -f "$_approved_list" ]; then
-        # Compute "new" entries: in current set but not in persisted approved.
-        _approved_tmp="$(mktemp)"
-        sort -u "$_approved_list" > "$_approved_tmp"
-        _new_tmp="$(mktemp)"
-        comm -23 "$_current_tmp" "$_approved_tmp" > "$_new_tmp"
-        if [ -s "$_new_tmp" ]; then
-            error "Symlink escape detected that wasn't present at previous approval:"
-            while IFS= read -r _new; do
-                error "  $_new"
-            done < "$_new_tmp"
-            error ""
-            error "This would expose files outside the workspace to sandy."
-            error "If this is legitimate, delete the symlink, relaunch sandy, re-create it,"
-            error "and re-approve from the symlink warning — or clear the approval list:"
-            error "  rm '$_approved_list'"
-            rm -f "$_current_tmp" "$_approved_tmp" "$_new_tmp"
-            exit 1
-        fi
-        rm -f "$_new_tmp" "$_approved_tmp"
-        # Refresh the persisted list — prunes removed entries silently.
-        cp "$_current_tmp" "$_approved_list"
-    else
-        # First encounter for this sandbox — prompt the user (existing ceremony).
-        warn "Symlinks that point outside the workspace:"
-        for s in "${DANGEROUS_SYMLINKS[@]}"; do
-            warn "  $s"
-        done
-        printf "\033[0;33m[sandy] These could allow Claude to access files outside the sandbox.\033[0m\n"
-        # No interactive stdin to answer y/N — the `sandy --start` supervisor runs
-        # the launch under /dev/null (a headless/piped run has no terminal either).
-        # A bare `read` here consumes EOF and "aborts" with misleading "remove the
-        # symlinks" guidance, and under --start leaves the client polling out the
-        # full readiness timeout (the reported hang). Fail CLOSED with the correct
-        # fix, and drop a marker beside the streamed daemon log so the --start
-        # client stops waiting immediately rather than burning the timeout. The
-        # EXIT trap installed above already tears down the proxy/networks/lock.
-        if [ ! -t 0 ]; then
-            error "Dangerous symlinks need interactive approval, but stdin is not a terminal."
-            error "Approve them once by launching sandy interactively in this workspace:"
-            error "  cd '$WORK_DIR' && sandy      # answer y at the prompt, then exit"
-            error "then retry (e.g. 'sandy --start'). Or clear the list: rm '$_approved_list'"
-            [ -n "${SANDY_DAEMON_LOG:-}" ] && : > "${SANDY_DAEMON_LOG}.fatal"
-            rm -f "$_current_tmp"
-            exit 1
-        fi
-        printf "\033[0;33m[sandy] Proceed anyway? [y/N] \033[0m"
-        read -r REPLY
-        if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
-            error "Aborting. Remove dangerous symlinks and try again."
-            rm -f "$_current_tmp"
-            exit 1
-        fi
-        # Persist the approved set — subsequent launches won't re-prompt
-        # unless a NEW entry appears (which hard-errors, above).
-        cp "$_current_tmp" "$_approved_list"
-        info "  Persisted ${#DANGEROUS_SYMLINKS[@]} approved symlink(s) to $(basename "$_approved_list")"
-    fi
-    rm -f "$_current_tmp"
-fi
+_sandy_resolve_symlinks
 
 RUN_FLAGS+=(-v "$WORK_DIR:$SANDY_WORKSPACE")
 

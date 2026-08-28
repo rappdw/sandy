@@ -10423,6 +10423,76 @@ check "§107(9) the hash file is written ONLY on a successful build (mutation: w
 check "§107(10) a deferred refresh is reported at session end (mutation: dropping it makes the deferral invisible and the CVE posture silently stale)" \
     bash -c 'grep -q "_SANDY_BUILD_DEFERRED:-false" "$1" && grep -q "image refresh was deferred" "$1"' -- "$_S107_SANDY"
 
+echo ""
+echo "§108: --start resolves first-encounter approvals pre-fork, and classifies its failures (#221)"
+# WHY. `--start` forks the supervisor with stdin on /dev/null, and container
+# bring-up happens THERE. A first-encounter dangerous-symlink approval reached
+# that supervisor, could not prompt, failed closed, and left the user no way to
+# answer -- a workspace with an escaping symlink launched fine from a shell and
+# failed under --start. The SANDY_APPROVE_ONLY pre-pass already resolved passive
+# -privileged keys on the CLIENT tty; it now also resolves the symlink approval.
+_S108="$SANDY_SCRIPT"
+
+# --- the approval must be reachable in APPROVE_ONLY mode --------------------
+# Ordering is the whole fix: the pass must run far enough to know SANDBOX_DIR
+# (where the approval list lives) but still stop before the mutex and builds.
+# grep -m1, never `grep | head -1`: under pipefail the closing head sends EPIPE
+# to grep, which exits 2 and trips the ERR trap, aborting the suite mid-run --
+# a race that passes locally and fails in CI (the GREPM class).
+_s108_ln() { grep -m1 -n "$1" "$_S108" | cut -d: -f1; }
+_S108_SBX="$(_s108_ln '^SANDBOX_DIR="\$SANDY_HOME/sandboxes/')"
+_S108_EXIT="$(_s108_ln 'if \[ "\${SANDY_APPROVE_ONLY:-0}" = "1" \]; then')"
+_S108_BUILD="$(_s108_ln '^BASE_HASH=')"
+check "§108(1) APPROVE_ONLY exits AFTER SANDBOX_DIR is known (mutation: exiting earlier makes the symlink approval unreachable and restores the bug)" \
+    bash -c '[ "$1" -gt "$2" ]' -- "${_S108_EXIT:-0}" "${_S108_SBX:-999999}"
+check "§108(2) ...and BEFORE any image build (mutation: exiting later makes the approval subprocess build images, which it must never do)" \
+    bash -c '[ "$1" -lt "$2" ]' -- "${_S108_EXIT:-999999}" "${_S108_BUILD:-0}"
+check "§108(3) the symlink scan is a callable function, not inline (mutation: inlining it again makes it unreachable from the pre-fork pass)" \
+    grep -q '^_sandy_resolve_symlinks() {' "$_S108"
+check "§108(4) the normal launch path still calls it (mutation: dropping the call silently disables symlink approval for EVERY launch)" \
+    bash -c '[ "$(grep -c "^_sandy_resolve_symlinks$" "$1")" -ge 1 ]' -- "$_S108"
+
+# --- a refusal in the pre-pass must stop --start ----------------------------
+check "§108(5) the pre-fork pass captures its exit rather than discarding it with || true (mutation: restoring || true forks a supervisor certain to hit the same refusal)" \
+    grep -q '_sandy_approve_rc=\$?' "$_S108"
+check "§108(6) ...and a refusal stops --start instead of forking" \
+    bash -c 'grep -F -A25 "$2" "$1" | grep -q "exit 6"' -- "$_S108" '_sandy_approve_rc=$?'
+
+# --- Ask 2: distinct exit codes ---------------------------------------------
+# All three failures used to be exit 1, so a consumer could only tell them apart
+# by scraping the human-readable log. 6 is actionable in one step; 7/8 are not.
+for _s108_pair in "sup_fatal:6" "restarts:7" "timeout:8"; do
+    _s108_code="${_s108_pair##*:}"
+    check "§108(7) --start emits distinct exit code $_s108_code (mutation: collapsing them back to 1 makes the actionable case indistinguishable)" \
+        grep -q "_sandy_start_rc=$_s108_code" "$_S108"
+done
+unset _s108_pair _s108_code
+check "§108(8) the failure branch exits with the classified code, not a literal 1 (mutation: a hardcoded exit 1 makes the codes above dead assignments)" \
+    grep -q 'exit "\$_sandy_start_rc"' "$_S108"
+check "§108(9) the new codes do not collide with the DEC-C table (--attach 3/4/5, --stop 4/5)" \
+    bash -c '! grep -qE "_sandy_start_rc=[345]$" "$1"' -- "$_S108"
+
+# --- behavioral: APPROVE_ONLY actually reaches the approval -----------------
+# Driven against the REAL script with a stubbed docker, in a workspace holding
+# an escaping symlink. Non-TTY here, so the correct outcome is the fail-closed
+# guidance -- which proves the approval was REACHED (before the fix it was not).
+_S108_T="$(mktemp -d)"
+mkdir -p "$_S108_T/bin" "$_S108_T/home" "$_S108_T/ws" "$_S108_T/outside"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$_S108_T/bin/docker"; chmod +x "$_S108_T/bin/docker"
+ln -s "$_S108_T/outside" "$_S108_T/ws/escape"
+# Absolute path, resolved BEFORE the cd: a relative "$_S108" resolves to
+# nothing inside the fixture workspace and the probe silently tests nothing --
+# the same trap sandy's own $SANDY_SELF comment documents.
+_S108_ABS="$(cd "$(dirname "$_S108")" && pwd -P)/$(basename "$_S108")"
+_S108_OUT="$( cd "$_S108_T/ws" && PATH="$_S108_T/bin:$PATH" SANDY_HOME="$_S108_T/home" \
+    HOME="$_S108_T" SANDY_APPROVE_ONLY=1 timeout 60 bash "$_S108_ABS" </dev/null 2>&1 || true )"
+check "§108(10) APPROVE_ONLY REACHES the symlink approval (mutation: the pre-fix early exit produces no symlink output at all)" \
+    bash -c 'printf "%s" "$1" | grep -q "Symlinks that point outside the workspace"' -- "$_S108_OUT"
+check "§108(11) ...and fails closed with actionable guidance when there is no tty" \
+    bash -c 'printf "%s" "$1" | grep -q "need interactive approval"' -- "$_S108_OUT"
+rm -rf "$_S108_T"
+unset _S108 _S108_ABS _S108_SBX _S108_EXIT _S108_BUILD _S108_T _S108_OUT
+
 _run_provenance   # timestamp + commit + tree state, so a result you scroll back
                   # to after a context switch says which build produced it.
 [ "$FAIL" -eq 0 ] || exit 1
