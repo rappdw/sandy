@@ -96,6 +96,7 @@ SANDY_PASSIVE_KEYS=(
     GROK_MODEL
     SANDY_GROK_AUTH
     SANDY_TOOL_AUDIT
+    SANDY_CLAUDE_CONNECTORS
     SANDY_HANDOFF_DIRS
 )
 
@@ -137,6 +138,7 @@ _sandy_passive_value_privileged() {
         SANDY_EGRESS_STRICT)       [ "$2" = "0" ] && return 0 ;;  # strict -> permissive downgrade
         SANDY_EGRESS_PROXY)        [ "$2" = "0" ] && return 0 ;;  # deprecated alias: =0 == proxy off
         SANDY_ALLOW_WORKFLOW_EDIT) [ "$2" = "1" ] && return 0 ;;  # drops .github/workflows protection
+        SANDY_CLAUDE_CONNECTORS)   [ "$2" = "1" ] && return 0 ;;  # exposes claude.ai ACCOUNT connectors (Gmail/Drive)
     esac
     return 1
 }
@@ -774,6 +776,7 @@ TELEGRAM_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Telegram user IDs
 DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
 DISCORD_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Discord user IDs allowed to send messages.
 SANDY_TOOL_AUDIT|bool|0||1.4.0|stable|Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off).
+SANDY_CLAUDE_CONNECTORS|bool|0||1.9.0|stable|Expose the claude.ai ACCOUNT connectors (Gmail, Google Drive, ...) inside the sandbox (#129). Default 0 = SUPPRESSED. The OAuth token sandy mounts is account-scoped, so without this every connector the user ever enabled on claude.ai was reachable from EVERY sandbox -- including untrusted-repo sessions, with no extra prompt -- which is ambient authority crossing the per-project boundary sandy exists to draw. Implemented by seeding Claude Code's disableClaudeAiConnectors as a MANAGED settings.json key (always overwritten, both directions): Claude resolves it true-in-ANY-settings-scope-wins, so writing false is not enough to expose them -- an inherited true from the host settings.json would win. VALUE-AWARE TIER: 0 is passive-safe wherever it is set, but =1 WEAKENS the sandbox, so a workspace .sandy/config setting it triggers the per-workspace approval prompt like SANDY_EGRESS_NO_ISOLATION=1. Claude-only (the account-connector rider is a Claude Code phenomenon); gates AUTO-FETCHED connectors only -- a server passed explicitly via --mcp-config still follows the normal MCP trust flow.
 SANDY_HANDOFF_DIRS|bool|0||1.7.0|experimental|Create and mount the per-sandbox cross-workspace handoff directories (#132 substrate): $SANDBOX_DIR/handoff/outbox rw at ~/.handoff/outbox, $SANDBOX_DIR/handoff/inbox READ-ONLY at ~/.handoff/inbox. Substrate only — NOTHING moves files: no relay, no helper, no skills, no turn initiation; those are #132 follow-ups gated by separate privileged keys (SANDY_HANDOFF_PEERS, unshipped). Passive-safe: nothing sandy ships today moves files into or out of these directories — the future relay that will is gated on SANDY_HANDOFF_PEERS (privileged, unshipped), where the trust edge lives. Residual: the outbox persists across sessions, so a repo can stage content before an operator ever approves peers; sandy --reset-sandbox clears it. Default 0 (off — the directories are still created but NOTHING is mounted, no env vars are added, and ~/.handoff does not exist inside the container). Creation is unconditional as of 1.7.0 so that directory PRESENCE carries no information: when every sandbox has them, the marker is the only signal that can mean anything, and enrolling an existing sandbox is the marker alone rather than a re-launch to harvest a side effect. An operator can also enable the pair per-sandbox without any workspace config by touching $SANDBOX_DIR/.handoff-enabled — OR with this key, same passive tier. That marker matters for fleets: a workspace .sandy/config travels with the repository, so cloning it enables the pair on a sandbox nobody decided about, whereas the marker is per-machine and a repo cannot carry it. It lives at the sandbox TOP level (never under claude/, which is mounted and agent-writable) and survives --reset-sandbox like WORKSPACE.json, since enrollment is operator state; the handoff/ contents are still destroyed.
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
@@ -8946,6 +8949,24 @@ if _sandy_agent_has claude; then
             // value is the definitive source. We always set it (not //=) so toggling the
             // env var between launches reliably propagates. permissions.disableBypassPermissionsMode
             // is left alone — that's a host policy the user may have set deliberately.
+            // #129 — claude.ai ACCOUNT CONNECTORS. The OAuth token sandy mounts is
+            // account-scoped, so every connector the user ever enabled on
+            // claude.ai (Gmail, Drive, ...) is reachable from EVERY sandbox,
+            // including untrusted-repo sessions, with no extra prompt. That is
+            // ambient authority crossing the boundary sandy exists to draw.
+            //
+            // Verified against the installed Claude Code (2.1.250), whose own
+            // schema text reads: "When true in any settings source, claude.ai MCP
+            // cloud connectors are not auto-fetched or connected. ... Any-source-
+            // true wins: a project can opt out, but a project-level false cannot
+            // override a user-level true."
+            //
+            // ALWAYS SET, never only-if-absent: this is a managed key like
+            // permissions.defaultMode. And because any-source-true wins, exposing
+            // connectors is not "write false" -- an inherited true from the HOST
+            // settings.json would survive and silently defeat the opt-in. The
+            // key is therefore overwritten outright in both directions.
+            s.disableClaudeAiConnectors = (process.env.SANDY_CLAUDE_CONNECTORS || '0') !== '1';
             if (skip) {
                 if (!s.permissions || typeof s.permissions !== 'object') s.permissions = {};
                 s.permissions.defaultMode = 'bypassPermissions';
@@ -8998,7 +9019,7 @@ if _sandy_agent_has claude; then
         fi
         _base_src="$SEED_HOST_SRC"
         [ -z "$_base_src" ] && _base_src=/dev/null
-        jq --arg skip "$skip_perm" --argjson prev "$_prev_plugins" '
+        jq --arg skip "$skip_perm" --arg connectors "${SANDY_CLAUDE_CONNECTORS:-0}" --argjson prev "$_prev_plugins" '
             (if . == null then {} else . end) |
             # only-if-absent for the BOOLEAN keys via has(), not //=. The //=
             # operator treats an explicit false as unset, so it would overwrite a
@@ -9010,6 +9031,12 @@ if _sandy_agent_has claude; then
             (if has("skipDangerousModePermissionPrompt") then . else .skipDangerousModePermissionPrompt = ($skip == "true") end) |
             (if has("skipAutoPermissionPrompt") then . else .skipAutoPermissionPrompt = ($skip == "true") end) |
             .statusLine //= {"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0} |
+            # #129: managed key, always overwritten in BOTH directions. Claude
+            # Code resolves this any-source-true-wins, so writing false is not
+            # enough to expose connectors -- an inherited true from the host
+            # settings.json would win. Assignment (not //=) is what makes the
+            # opt-in actually work.
+            .disableClaudeAiConnectors = ($connectors != "1") |
             (if $skip == "true"
                 then .permissions = ((.permissions // {}) | .defaultMode = "bypassPermissions")
                 elif (.permissions.defaultMode? // "") == "bypassPermissions"
@@ -9033,10 +9060,17 @@ if _sandy_agent_has claude; then
         if [ ! -f "$SEED_SETTINGS" ]; then
             skip_perm="true"
             [ "${SANDY_SKIP_PERMISSIONS:-true}" = "false" ] && skip_perm="false"
+            # #129: connectors default OFF here too. This branch runs when neither
+            # node nor jq exists, and omitting the key would leave account
+            # connectors ON for exactly the hosts with the fewest tools -- a
+            # security default that silently varies by what is installed is not a
+            # default at all.
+            _conn_off="true"
+            [ "${SANDY_CLAUDE_CONNECTORS:-0}" = "1" ] && _conn_off="false"
             if [ "$skip_perm" = "true" ]; then
-                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"skipAutoPermissionPrompt":true,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"skipAutoPermissionPrompt":true,"disableClaudeAiConnectors":%s,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' "$_conn_off" > "$SEED_SETTINGS"
             else
-                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"skipAutoPermissionPrompt":false,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"skipAutoPermissionPrompt":false,"disableClaudeAiConnectors":%s,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' "$_conn_off" > "$SEED_SETTINGS"
             fi
         fi
     fi
@@ -9940,9 +9974,27 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
             let d;
             try { d = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch(e) { process.exit(1); }
             delete d.projects;
+            // #129 defense-in-depth: claudeAiMcpEverConnected is HOST metadata
+            // listing the account connectors the user has enabled on claude.ai
+            // ("claude.ai Gmail", "claude.ai Google Drive", ...). It is
+            // meaningless inside the sandbox and leaky -- it tells an agent which
+            // account connectors exist even when disableClaudeAiConnectors has
+            // stopped them being fetched. Stripped regardless of the knob: the
+            // settings.json key is the real gate, this is just not handing over a
+            // list of what is on the other side of it.
+            delete d.claudeAiMcpEverConnected;
             fs.writeFileSync(process.argv[2], JSON.stringify(d, null, 2) + "\n");
         ' "$HOME/.claude.json" "$CLAUDE_JSON" 2>/dev/null \
-            || cp "$HOME/.claude.json" "$CLAUDE_JSON"
+            || {
+                # node absent or the parse failed: the raw copy carries BOTH the
+                # host project list and claudeAiMcpEverConnected. That is
+                # pre-existing behavior, not a regression from #129 -- and the
+                # actual connector gate is the settings.json key, which is seeded
+                # in all three branches including the no-node one. Warn so the
+                # degraded seed is visible rather than silent.
+                cp "$HOME/.claude.json" "$CLAUDE_JSON"
+                warn "Seeded .claude.json verbatim (node unavailable) — host project list and connector metadata were not stripped."
+            }
         info "Seeded .claude.json from host"
     else
         printf '{"tipsDisabled":true,"installMethod":"native"}\n' > "$CLAUDE_JSON"
