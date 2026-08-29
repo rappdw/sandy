@@ -10670,6 +10670,21 @@ echo "§111: the auto-mode opt-in prompt is suppressed at the POLICY layer"
 #
 # The migration touches only userSettings, so the policy layer survives it.
 _S111="$SANDY_SCRIPT"
+# An unescaped double quote inside the settings.json seeding program CLOSES the
+# shell string it is passed in, and bash then executes the rest of the JS as
+# commands. That shipped in #227 and broke sandbox creation with
+#     sandy: line NNNN: //: is a directory
+# It is syntactically valid bash, so `bash -n` passed, CI passed, and only a
+# real launch found it. This scans the program itself.
+# sed line-range, not awk: the program is delimited by the `node -e "` opener
+# and a line that is exactly the closing quote plus the output path. Strip the
+# escaped quotes (\") first, then anything left is an UNESCAPED one.
+_S111_PROG_BAD="$(sed -n '/SANDY_TOOL_AUDIT=.*node -e "/,/^        " "\$SEED_SETTINGS"/p' "$SANDY_SCRIPT" \
+    | sed '1d;$d' | sed 's/\\"//g' | grep -c '"' || true)"
+check "§111(0) the settings-seeding node program contains no unescaped double quote (mutation: adding one closes the shell string early and bash executes the JS as commands -- bash -n does NOT catch it; this shipped once and broke sandbox creation with: //: is a directory)" \
+    test "${_S111_PROG_BAD:-1}" -eq 0
+unset _S111_PROG_BAD
+
 check "§111(1) sandy writes a managed-settings.json (mutation: relying on the settings.json seed alone lets the migration delete it on every new sandbox)" \
     grep -q 'managed-settings.json' "$_S111"
 check "§111(2) it carries skipAutoPermissionPrompt: true" \

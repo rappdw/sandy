@@ -8956,16 +8956,23 @@ if _sandy_agent_has claude; then
             // ambient authority crossing the boundary sandy exists to draw.
             //
             // Verified against the installed Claude Code (2.1.250), whose own
-            // schema text reads: "When true in any settings source, claude.ai MCP
-            // cloud connectors are not auto-fetched or connected. ... Any-source-
-            // true wins: a project can opt out, but a project-level false cannot
-            // override a user-level true."
+            // schema text says a true value in ANY settings source stops
+            // claude.ai MCP cloud connectors being auto-fetched or connected,
+            // and that true-anywhere wins: a project can opt out, but a
+            // project-level false cannot override a user-level true.
             //
             // ALWAYS SET, never only-if-absent: this is a managed key like
-            // permissions.defaultMode. And because any-source-true wins, exposing
-            // connectors is not "write false" -- an inherited true from the HOST
-            // settings.json would survive and silently defeat the opt-in. The
-            // key is therefore overwritten outright in both directions.
+            // permissions.defaultMode. And because true-anywhere wins, exposing
+            // connectors is not merely writing false -- an inherited true from
+            // the HOST settings.json would survive and silently defeat the
+            // opt-in. The key is overwritten outright in both directions.
+            //
+            // NO DOUBLE QUOTE CHARACTERS ANYWHERE IN THIS COMMENT. The node
+            // program is passed as a double-quoted shell string, so one of them
+            // here closes that string early and bash executes the remainder of
+            // the program as commands. That shipped once and broke sandbox
+            // creation with: //: is a directory. It is syntactically valid
+            // bash, so bash -n and CI both passed it.
             s.disableClaudeAiConnectors = (process.env.SANDY_CLAUDE_CONNECTORS || '0') !== '1';
             if (skip) {
                 if (!s.permissions || typeof s.permissions !== 'object') s.permissions = {};
