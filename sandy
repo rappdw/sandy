@@ -9976,6 +9976,12 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
     # Seed from host's ~/.claude.json (contains onboarding, theme, OAuth, etc.)
     if [ -f "$HOME/.claude.json" ]; then
         # Seed from host, stripping project entries (host paths are meaningless in the container)
+        # NO APOSTROPHES INSIDE THIS PROGRAM -- it is passed as a SINGLE-quoted
+        # shell string, so one closes the string early and bash executes the
+        # rest of the JavaScript as commands. The settings seeder below hit the
+        # mirror image of this (a double quote in a double-quoted program) and
+        # it shipped, breaking sandbox creation. Neither form is caught by
+        # bash -n: both leave syntactically valid bash behind.
         node -e '
             const fs = require("fs");
             let d;
@@ -9990,6 +9996,24 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
             // settings.json key is the real gate, this is just not handing over a
             // list of what is on the other side of it.
             delete d.claudeAiMcpEverConnected;
+            // Suppress the "Make auto mode your default permission mode?" offer
+            // on a fresh sandbox. Reading the shipped binary (2.1.250), that
+            // dialog is an announcement registered as id "auto-mode-default"
+            // and gated by:
+            //     function DEe(e){ let o=oe(); return ... && e==="auto"
+            //         && o.hasCompletedOnboarding===true
+            //         && !o.hasSeenAutoDefaultNotice }
+            // called as DEe("auto"), so the only reachable lever here is the
+            // last clause. NOTE this is NOT skipAutoPermissionPrompt, which
+            // gates a DIFFERENT notice (U5t, the auto-mode entry warning) --
+            // sandy seeds that one too, and it never suppressed this dialog.
+            //
+            // Only fresh sandboxes show it: an existing one has the flag set
+            // because someone answered the offer once, and that answer persists
+            // in this same file. Seeding it makes the first launch behave like
+            // every launch after it, in a sandbox where sandy has already
+            // pinned the permission mode and the offer is pure friction.
+            if (d.hasSeenAutoDefaultNotice !== true) d.hasSeenAutoDefaultNotice = true;
             fs.writeFileSync(process.argv[2], JSON.stringify(d, null, 2) + "\n");
         ' "$HOME/.claude.json" "$CLAUDE_JSON" 2>/dev/null \
             || {

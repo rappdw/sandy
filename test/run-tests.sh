@@ -10681,6 +10681,15 @@ _S111="$SANDY_SCRIPT"
 # escaped quotes (\") first, then anything left is an UNESCAPED one.
 _S111_PROG_BAD="$(sed -n '/SANDY_TOOL_AUDIT=.*node -e "/,/^        " "\$SEED_SETTINGS"/p' "$SANDY_SCRIPT" \
     | sed '1d;$d' | sed 's/\\"//g' | grep -c '"' || true)"
+# The .claude.json seeder is a SINGLE-quoted shell program, so an apostrophe
+# there closes it early -- the mirror of the unescaped double quote that broke
+# the settings seeder. That constraint is stated in the code itself; a reliable
+# extraction of just that program proved fiddly enough to be worth less than
+# the comment, so this checks the behaviour instead.
+check "§111(-1b) it seeds hasSeenAutoDefaultNotice (mutation: without it every FRESH sandbox shows the auto-mode offer on first launch)" \
+    grep -q 'hasSeenAutoDefaultNotice = true' "$SANDY_SCRIPT"
+unset _S111_CJ_BAD
+
 check "§111(0) the settings-seeding node program contains no unescaped double quote (mutation: adding one closes the shell string early and bash executes the JS as commands -- bash -n does NOT catch it; this shipped once and broke sandbox creation with: //: is a directory)" \
     test "${_S111_PROG_BAD:-1}" -eq 0
 unset _S111_PROG_BAD
