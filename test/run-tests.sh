@@ -10718,6 +10718,66 @@ check "§111(5) it is gated on claude AND skip-permissions (mutation: writing it
     bash -c 'grep -B2 "_sandy_policy_dir=" "$1" | grep -q "_sandy_agent_has claude.*SANDY_SKIP_PERMISSIONS"' -- "$_S111"
 unset _S111
 
+echo ""
+echo "§112: SANDY_SUSPICIOUS — refresh-token strip, fail-closed, posture recording (#130)"
+# WHY. Sandy mounts the host Claude credentials — access AND refresh token —
+# into every container. The refresh token is the crown jewel: an exfiltrated
+# copy is permanent, renewable account access until manually revoked, and the
+# permissive-mode egress allowlist (pypi/github) is a plausible exfil channel
+# for a poisoned dependency. SANDY_SUSPICIOUS=1 mounts the short-TTL access
+# token ONLY, so an exfiltrated copy dies at expiresAt.
+_S112="$SANDY_SCRIPT"
+
+# --- tier: strengthening on, gated off --------------------------------------
+check "§112(1) SANDY_SUSPICIOUS is a recognized passive key (a repo may declare itself suspicious with no prompt)" \
+    bash -c 'grep -q "^    SANDY_SUSPICIOUS$" "$1"' -- "$_S112"
+check "§112(2) =0 from a workspace is value-aware WEAKENING (mutation: dropping the case arm lets a committed config silently downgrade a host-set hardened posture)" \
+    bash -c 'awk "/_sandy_passive_value_privileged\(\)/,/^}\$/" "$1" | grep -q "SANDY_SUSPICIOUS)"' -- "$_S112"
+check "§112(3) metadata row present (appears in --print-schema)" \
+    bash -c 'grep -q "^SANDY_SUSPICIOUS|bool|0|" "$1"' -- "$_S112"
+
+# --- the strip, driven against the REAL extracted helper ---------------------
+_S112_FN="$(awk '/^_sandy_strip_refresh_token\(\) \{/,/^\}$/' "$_S112")"
+check "§112(0) extracted the real strip helper (mutation: a rename empties this and must fail HERE, not silently pass the behavioral checks)" \
+    bash -c 'printf "%s" "$1" | grep -q refreshToken' -- "$_S112_FN"
+_S112_CREDS='{"claudeAiOauth":{"accessToken":"at-KEEP","refreshToken":"rt-SECRET","expiresAt":1767225600000,"scopes":["user:inference"],"subscriptionType":"max"}}'
+_s112_run() { bash -c "warn(){ :; }; $_S112_FN; _sandy_strip_refresh_token \"\$1\"" _ "$1" 2>/dev/null; }
+_S112_OUT="$(_s112_run "$_S112_CREDS" || true)"
+check "§112(4) refresh token GONE from the stripped output (the core win: exfiltrated copy cannot be renewed)" \
+    bash -c 'case "$1" in *refreshToken*|*rt-SECRET*) exit 1;; *) exit 0;; esac' -- "$_S112_OUT"
+check "§112(5) access token, expiresAt, scopes RETAINED (mutation: over-stripping breaks auth entirely, which would read as the feature working)" \
+    bash -c 'case "$1" in *at-KEEP*) case "$1" in *1767225600000*) case "$1" in *user:inference*) exit 0;; esac;; esac;; esac; exit 1' -- "$_S112_OUT"
+check "§112(6) stripped output is valid JSON" \
+    bash -c 'printf "%s" "$1" | jq -e . >/dev/null' -- "$_S112_OUT"
+# Fail-closed matrix: garbage input, and a refreshToken nested where the
+# structural delete cannot reach — the verify-after substring test must refuse.
+_s112_rc=0; _s112_run 'not-json' >/dev/null || _s112_rc=$?
+check "§112(7) garbage input fails closed (rc!=0)" test "$_s112_rc" -ne 0
+_s112_rc=0; _s112_run '{"a":{"b":{"refreshToken":"rt-HIDDEN"}}}' >/dev/null || _s112_rc=$?
+check "§112(8) a refreshToken nested beyond the structural delete fails closed (mutation: removing the verify-after case makes this LEAK — the single most important check here)" \
+    test "$_s112_rc" -ne 0
+
+# --- the caller must fail closed, not fall through ---------------------------
+check "§112(9) a failed strip mounts NO credentials file (mutation: falling through to the full file on error betrays the posture exactly when it matters)" \
+    bash -c 'grep -B2 -A6 "could not strip the refresh token" "$1" | grep -q "CRED_JSON=\"\""' -- "$_S112"
+check "§112(10) with an API key and no long-lived token, OAuth creds are NOT mounted at all" \
+    bash -c 'grep -q "using ANTHROPIC_API_KEY; account OAuth credentials are NOT mounted" "$1"' -- "$_S112"
+
+# --- posture composition -----------------------------------------------------
+check "§112(11) suspicious defaults egress to STRICT (mutation: without it the pypi/github exfil channel stays open by default)" \
+    bash -c 'grep -A16 "SANDY_SUSPICIOUS:-0}\" = 1 \]" "$1" | grep -q "SANDY_EGRESS_STRICT=1"' -- "$_S112"
+check "§112(12) suspicious forces account connectors OFF even over an approved =1" \
+    bash -c 'grep -A22 "SANDY_SUSPICIOUS:-0}\" = 1 \]" "$1" | grep -q "SANDY_CLAUDE_CONNECTORS=0"' -- "$_S112"
+check "§112(13) a long-lived CLAUDE_CODE_OAUTH_TOKEN is named as NOT shrunk (mutation: silence here oversells the posture)" \
+    bash -c 'grep -q "long-lived and is NOT shrunk" "$1"' -- "$_S112"
+
+# --- provable after the fact -------------------------------------------------
+check "§112(14) the session marker records cred_mode (mutation: without it a run protection level is only inferable, the #151 declared-vs-actual class)" \
+    bash -c 'grep -q "\"cred_mode\": \"%s\"" "$1" && grep -q "CRED_MODE:-none" "$1"' -- "$_S112"
+check "§112(15) cred_mode covers the full lattice (oauth-token / access-token-only / full / api-key / none)" \
+    bash -c 'for m in oauth-token access-token-only full api-key none; do grep -q "CRED_MODE=\"$m\"" "$1" || exit 1; done' -- "$_S112"
+unset _S112 _S112_FN _S112_CREDS _S112_OUT _s112_rc
+
 _run_provenance   # timestamp + commit + tree state, so a result you scroll back
                   # to after a context switch says which build produced it.
 [ "$FAIL" -eq 0 ] || exit 1
