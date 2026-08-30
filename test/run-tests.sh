@@ -10686,8 +10686,16 @@ _S111_PROG_BAD="$(sed -n '/SANDY_TOOL_AUDIT=.*node -e "/,/^        " "\$SEED_SET
 # the settings seeder. That constraint is stated in the code itself; a reliable
 # extraction of just that program proved fiddly enough to be worth less than
 # the comment, so this checks the behaviour instead.
-check "§111(-1b) it seeds hasSeenAutoDefaultNotice (mutation: without it every FRESH sandbox shows the auto-mode offer on first launch)" \
-    grep -q 'hasSeenAutoDefaultNotice = true' "$SANDY_SCRIPT"
+# PROVEN LIVE (2.1.250, in-container A/B): the offer is the auto-default NUDGE,
+# firing when user settings pin a non-auto defaultMode (sandy always pins
+# bypassPermissions) and hasSeenAutoDefaultNudge is unset. Flag absent = dialog
+# shown, and a stray Enter ACCEPTED it, flipping the pin to auto; flag true =
+# no dialog, pin intact. hasSeenAutoDefaultNotice is its announcement-surface
+# sibling; both are seeded.
+check "§111(-1b) the create-time seed sets hasSeenAutoDefaultNudge (mutation: without it every FRESH sandbox shows the offer, which defaults to YES and un-pins bypassPermissions on a stray Enter)" \
+    grep -q 'hasSeenAutoDefaultNudge !== true' "$SANDY_SCRIPT"
+check "§111(-1c) ...and the EVERY-LAUNCH json_merge sets it too (mutation: the create-time seed alone never heals an existing sandbox or a stale sibling .claude.json left by a pre-#213 removal)" \
+    bash -c 'grep "json_merge .\$CLAUDE_JSON." "$1" | grep -q hasSeenAutoDefaultNudge' -- "$SANDY_SCRIPT"
 unset _S111_CJ_BAD
 
 check "§111(0) the settings-seeding node program contains no unescaped double quote (mutation: adding one closes the shell string early and bash executes the JS as commands -- bash -n does NOT catch it; this shipped once and broke sandbox creation with: //: is a directory)" \

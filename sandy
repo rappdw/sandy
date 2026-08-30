@@ -9996,23 +9996,21 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
             // settings.json key is the real gate, this is just not handing over a
             // list of what is on the other side of it.
             delete d.claudeAiMcpEverConnected;
-            // Suppress the "Make auto mode your default permission mode?" offer
-            // on a fresh sandbox. Reading the shipped binary (2.1.250), that
-            // dialog is an announcement registered as id "auto-mode-default"
-            // and gated by:
-            //     function DEe(e){ let o=oe(); return ... && e==="auto"
-            //         && o.hasCompletedOnboarding===true
-            //         && !o.hasSeenAutoDefaultNotice }
-            // called as DEe("auto"), so the only reachable lever here is the
-            // last clause. NOTE this is NOT skipAutoPermissionPrompt, which
-            // gates a DIFFERENT notice (U5t, the auto-mode entry warning) --
-            // sandy seeds that one too, and it never suppressed this dialog.
-            //
-            // Only fresh sandboxes show it: an existing one has the flag set
-            // because someone answered the offer once, and that answer persists
-            // in this same file. Seeding it makes the first launch behave like
-            // every launch after it, in a sandbox where sandy has already
-            // pinned the permission mode and the offer is pure friction.
+            // Suppress the auto-mode default offer on a fresh sandbox. PROVEN
+            // LIVE against 2.1.250 in a container A/B: the dialog is the
+            // auto-default NUDGE, which fires when user settings pin a non-auto
+            // defaultMode -- sandy always pins bypassPermissions -- and
+            // hasSeenAutoDefaultNudge is unset. It queues behind the first
+            // response, defaults to YES, and one stray Enter flips the pin to
+            // auto mode. With the flag set true the dialog does not appear and
+            // the pin survives. hasSeenAutoDefaultNotice is the announcement-
+            // surface sibling of the same offer; both are set. The every-launch
+            // json_merge later in the launch path sets these too -- this seed
+            // exists so even the very first read of a fresh file has them.
+            // NO APOSTROPHES OR DOUBLE QUOTES IN THIS COMMENT (single-quoted
+            // shell program; either character ends it early and bash executes
+            // the rest -- one of each has already shipped as an outage).
+            if (d.hasSeenAutoDefaultNudge !== true) d.hasSeenAutoDefaultNudge = true;
             if (d.hasSeenAutoDefaultNotice !== true) d.hasSeenAutoDefaultNotice = true;
             fs.writeFileSync(process.argv[2], JSON.stringify(d, null, 2) + "\n");
         ' "$HOME/.claude.json" "$CLAUDE_JSON" 2>/dev/null \
@@ -10033,7 +10031,17 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
 fi
 # Ensure sandy-specific overrides are set (both new and existing sandboxes)
 if _sandy_agent_has claude; then
-    json_merge "$CLAUDE_JSON" '{"tipsDisabled":true,"installMethod":"native"}'
+    # hasSeenAutoDefaultNudge (proven live, 2.1.250): Claude Code offers
+    # {open}Make auto mode your default permission mode?{close} whenever user
+    # settings pin a non-auto defaultMode -- which sandy ALWAYS does
+    # (bypassPermissions) -- and this flag is unset. The offer queues behind the
+    # first response, defaults to YES, and one stray Enter flips the pin to
+    # auto. Reproduced in a live container A/B: flag absent = dialog shown and
+    # an accidental keystroke accepted it; flag true = no dialog, pin intact.
+    # Set EVERY launch, so existing sandboxes and stale sibling .claude.json
+    # files heal too. hasSeenAutoDefaultNotice is its announcement-surface
+    # sibling in the same binary; seeded alongside for the same reason.
+    json_merge "$CLAUDE_JSON" '{"tipsDisabled":true,"installMethod":"native","hasSeenAutoDefaultNudge":true,"hasSeenAutoDefaultNotice":true}'
     # Pre-trust the workspace so Claude Code doesn't show the trust dialog.
     # Sandy provides whole-session isolation — the trust prompt is redundant.
     node -e '
