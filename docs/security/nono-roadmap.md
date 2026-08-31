@@ -38,6 +38,8 @@ sandy adopts the *pattern*, not the tool — so this needs **no** nono dependenc
 
 **Success:** at least one credential (highest-confidence: the Claude/Gemini OAuth refresh→access case A1 already identified) brokered so the raw durable secret never enters the container, provably via the session marker.
 
+> **Partially shipped (1.9.0, #130).** `SANDY_SUSPICIOUS` delivers the *strip* form of A1 for the Claude OAuth case: the refresh token is dropped before the file is mounted (never enters the container), and the resolved posture is recorded as `cred_mode` in `sandy-session.json` — so the "provably via the session marker" criterion is met. What remains for the full A1 broker (#121): make it the default rather than opt-in, refresh host-side so the access token can be renewed in-session, and extend `cmd://` capture to the durable `gh auth token`.
+
 ---
 
 ## Phase 2 — 🤝 Positioning / "better together" (⛔ gated on Phase 0 ✅)
