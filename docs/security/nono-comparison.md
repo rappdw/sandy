@@ -1,7 +1,7 @@
 # nono vs. sandy — comparison and transferable lessons
 
 **Subject:** [`nolabs-ai/nono`](https://github.com/nolabs-ai/nono) — a Rust CLI that sandboxes AI coding agents with **OS-native kernel primitives** (no daemon, no container, no VM), from the team behind Sigstore.
-**Why this doc:** nono ships working implementations of two things sandy has only *evaluated* ([`CREDENTIAL_BROKER_EVALUATION.md`](CREDENTIAL_BROKER_EVALUATION.md) / milestone #12) or *roadmapped* (the fanotify `FAN_OPEN_PERM` idea in `CLAUDE.md` → "Protected Files"). It is **complementary to sandy, not competing** — this doc records why, and what to borrow.
+**Why this doc:** nono ships working implementations of two things sandy had, at the time of this doc, only *evaluated* ([`CREDENTIAL_BROKER_EVALUATION.md`](CREDENTIAL_BROKER_EVALUATION.md) / milestone #12; a first strip-not-broker slice has since shipped as `SANDY_SUSPICIOUS`, #130) or *roadmapped* (the fanotify `FAN_OPEN_PERM` idea in `CLAUDE.md` → "Protected Files"). It is **complementary to sandy, not competing** — this doc records why, and what to borrow.
 
 > **Provenance / caveat.** Everything below is drawn from nono's own public docs (`nono.sh/docs`, `github.com/nolabs-ai/nono`), read-only, on 2026-08-04. These are nono's *claims*, not independently verified by us.
 
@@ -45,7 +45,7 @@ nono is unusually honest about its boundary, and this is the whole "how it appli
 | Isolation primitive | Docker container: PID/net/mount/user **namespaces**, `--read-only`, cap-drop, seccomp | Landlock + seccomp-notify supervisor (Linux) / Seatbelt (macOS) — **shared kernel** |
 | Boundary strength | Namespace/guest-ish boundary (stronger vs. a jailbroken agent; R1 kernel-escape residual) | Same-user containment; **explicitly not** a guest/host boundary |
 | Network isolation | egress proxy sidecar (`--internal` topology, TLS **passthrough**) | localhost reverse proxy, TLS **terminating**, L7 endpoint rules |
-| Credentials | mounted ephemerally into the container (agent holds them) | **broker-not-mount**: phantom token in sandbox, real cred never enters |
+| Credentials | mounted ephemerally into the container (agent holds them; under `SANDY_SUSPICIOUS` the OAuth **refresh** token is stripped first, and account connectors are off by default) | **broker-not-mount**: phantom token in sandbox, real cred never enters |
 | Identity | per-sandbox marker (`sandy-session.json`) | **SPIFFE** SVIDs |
 | Dependency | **requires Docker** | no daemon / no container / cross-platform native |
 | Attestation | — | Sigstore |
@@ -54,7 +54,7 @@ The stack nono *recommends* — **container outside, capability/credential contr
 
 ## 4. What sandy should borrow (maps to existing work)
 
-1. **Credential proxy / phantom tokens — a shipped proof of milestone #12.** nono is a working reference implementation of `CREDENTIAL_BROKER_EVALUATION.md`'s broker-not-mount design, *including the trade-off we already flagged*: injecting a credential at the proxy **requires terminating TLS** (nono's proxy is TLS-terminating; sandy's egress proxy is deliberately TLS-**passthrough**). nono validates the eval's **A2** analysis (real, buildable, cost = the no-MITM invariant) and the **`cmd://` lazy-capture** is a clean blueprint for **A1** (durable cred stays host-side; sandbox gets only a phantom/short-lived token). *(→ issue filed under #12.)*
+1. **Credential proxy / phantom tokens — a shipped proof of milestone #12.** nono is a working reference implementation of `CREDENTIAL_BROKER_EVALUATION.md`'s broker-not-mount design, *including the trade-off we already flagged*: injecting a credential at the proxy **requires terminating TLS** (nono's proxy is TLS-terminating; sandy's egress proxy is deliberately TLS-**passthrough**). nono validates the eval's **A2** analysis (real, buildable, cost = the no-MITM invariant) and the **`cmd://` lazy-capture** is a clean blueprint for **A1** (durable cred stays host-side; sandbox gets only a phantom/short-lived token). *(A1's strip slice shipped in 1.9.0 as `SANDY_SUSPICIOUS`/#130; the full host-side broker is tracked as #121.)*
 2. **`endpoint_rules` L7 scoping** = sandy's strict-mode host-relay broker (currently POST_1.0) — scoping a token to specific API paths closes "exfil to an *allowed* host" (THREAT_MODEL R3).
 3. **seccomp-notify supervisor** = an in-the-wild instance of sandy's **fanotify `FAN_OPEN_PERM`** roadmap (true prevention, not detection-only, for protected paths).
 4. **Per-tool child sandboxes** — narrower blast radius than sandy's one-container-runs-everything model. Longer-horizon.

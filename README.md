@@ -16,14 +16,14 @@ cd /path/to/your/project
 sandy
 ```
 
-Sandy runs Claude Code, Gemini CLI, OpenAI Codex CLI, OpenCode (provider-agnostic), or any combination of them side-by-side in a Docker container with agent permission checks disabled — so the agent works without interruption while your system stays protected and each project stays cleanly isolated:
+Sandy runs Claude Code, Gemini CLI, OpenAI Codex CLI, OpenCode (provider-agnostic), Grok Build (xAI), or any combination of them side-by-side in a Docker container with agent permission checks disabled — so the agent works without interruption while your system stays protected and each project stays cleanly isolated:
 
-- **Per-project sandboxes**: Isolated `~/.claude` (and `~/.gemini` / `~/.codex` / OpenCode), credentials, memory, and package storage per project — no bleed between projects (the "venv" model, [detailed below](#virtual-environments-for-your-coding-agents))
+- **Per-project sandboxes**: Isolated `~/.claude` (and `~/.gemini` / `~/.codex` / OpenCode / `~/.grok`), credentials, memory, and package storage per project — no bleed between projects (the "venv" model, [detailed below](#virtual-environments-for-your-coding-agents))
 - **Filesystem**: Read/write limited to the mounted working directory only
 - **Network**: Public internet only — all LAN/private networks blocked
 - **Resources**: Capped CPU and memory (auto-detected from host)
 - **Security**: Non-root user, read-only root filesystem, no privilege escalation
-- **Protected files**: Shell configs, git hooks, and Claude commands mounted read-only
+- **Protected files**: Shell configs, git hooks, and Claude settings/hooks mounted read-only
 - **Dev environments**: Python, Node.js, Go, Rust, and C/C++ with persistent package installs
 - **Terminal notifications**: OSC passthrough enabled — works with [cmux](https://www.cmux.dev/), iTerm2, and other notification-aware terminals
 
@@ -63,7 +63,7 @@ Sandy wraps the agent in seven layers of OS-enforced isolation. For the assumed 
 
 1. **Network egress.** The agent runs on a Docker `--internal` network with no route off it except a TCP-only proxy sidecar. *Permissive* (default) blocks LAN/host/cloud-metadata and allows the public internet; *strict* allows only an allowlist (model providers, GitHub, package registries) plus `SANDY_ALLOW_HOSTS`. Non-TCP traffic (UDP/QUIC/ICMP/IPv6) is dropped by the topology itself. See [How Network Isolation Works](#how-network-isolation-works).
 2. **Filesystem.** Read-only root filesystem; ephemeral `tmpfs` for `/tmp` and the home directory (lost on exit); **only the working directory** is bind-mounted from the host. ~25 sensitive paths inside it (shell configs, `.git/config`, `.git/hooks/` — and a redirected `core.hooksPath` directory — `.claude/settings*.json` / `.claude/hooks/`, `.github/workflows/`, `.vscode/`, `.devcontainer/`, `.sandy/`, …) are mounted **read-only**. A per-project `.sandy/Dockerfile` build is approval-gated (it runs host commands with unfiltered network) — unapproved in a non-interactive session, sandy skips it and uses the base image.
-3. **Credentials.** Each project gets its own credential sandbox. The session's `.credentials.json` is mounted **ephemerally and never persisted**; codex/gemini OAuth files are mounted read-only. One project's credentials never leak to another.
+3. **Credentials.** Each project gets its own credential sandbox. The session's `.credentials.json` is mounted **ephemerally and never persisted**; codex/gemini OAuth files are mounted read-only. One project's credentials never leak to another. **claude.ai account connectors** (Gmail, Drive, …) are **suppressed by default** — the account-scoped OAuth token no longer silently exposes them to every sandbox (opt back in per-instance with `SANDY_CLAUDE_CONNECTORS=1`). For a workspace you actively distrust, `SANDY_SUSPICIOUS=1` **strips the OAuth refresh token** before mounting (leaving only the short-TTL access token, so an exfiltrated copy can't be renewed), forces connectors off, and defaults egress to strict. The credential posture is recorded as `cred_mode` in the in-container session marker.
 4. **Process & privilege.** Non-root user, `--cap-drop ALL`, `--security-opt no-new-privileges`, Docker's default seccomp + AppArmor profiles, and **no Docker socket** — so the agent can't escalate or reach the daemon.
 5. **Resources.** Capped CPU, memory, PID count, and `tmpfs` sizes (auto-detected from the host).
 6. **Config trust-tier.** A committed `.sandy/config` is **parsed as `KEY=VALUE`, never sourced** (no shell execution), and can only set non-privileged keys; isolation toggles and credential variables require an explicit per-workspace approval prompt.
@@ -128,7 +128,7 @@ workspace that already has a daemon session errors with a hint to `--attach` or
 
 **Exit codes** — `--attach`: `0` = the session ended while you were attached,
 `3` = you detached cleanly and the session is still running, `4` = no such
-session, `5` = attach failed. `--stop`: `0` = stopped, `4` = no such session,
+session (`5` is a `--stop` code, unreachable on `--attach`). `--stop`: `0` = stopped, `4` = no such session,
 `5` = teardown failed.
 
 This is what [`sandy-ui`](https://github.com/rappdw/sandy-ui) uses to keep a
@@ -183,6 +183,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_AGENT` | `claude` | AI agent(s) to run. Single: `claude`, `gemini`, `codex`, `opencode`. Multi (comma-separated, 2–4 panes in tmux): e.g. `claude,gemini` or `claude,gemini,codex,opencode`. Alias: `all` = `claude,gemini,codex,opencode` |
 | `SANDY_MODEL` | `claude-opus-5` | Claude model to use (applies whenever `claude` is in `SANDY_AGENT`) |
 | `SANDY_EFFORT` | _(Claude Code default, currently `high`)_ | Reasoning effort for claude: `low`\|`medium`\|`high`\|`xhigh`\|`max`. Applied as `claude --effort`; recorded in `sandy-session.json` so a run's effort is provable |
+| `SANDY_TEAMMATE_MODE` | (unset) | Value passed to `claude --teammate-mode` (claude only). Empty = sandy passes nothing and Claude Code uses its own default; set e.g. `tmux` to opt in. Passive-safe |
 | `GEMINI_API_KEY` | (unset) | Google API key for Gemini CLI. Put in `.sandy/.secrets` |
 | `GEMINI_MODEL` | (unset) | Gemini model override |
 | `SANDY_GEMINI_AUTH` | `auto` | Force Gemini auth path: `auto`, `api_key`, `oauth`, or `adc` |
@@ -192,14 +193,20 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_CODEX_AUTH` | `auto` | Force Codex auth path: `auto`, `api_key`, or `oauth` |
 | `OPENCODE_MODEL` | (unset) | OpenCode model override (`provider/model` format, e.g. `anthropic/claude-sonnet-4`) |
 | `SANDY_OPENCODE_AUTH` | `auto` | Force OpenCode auth path: `auto`, `api_key`, or `oauth` |
+| `XAI_API_KEY` | (unset) | xAI API key for Grok Build. Fully-headless auth; put in `.sandy/.secrets`. Privileged tier |
+| `GROK_MODEL` | `grok-4.5` | Grok Build model (passed as `-m`) |
+| `SANDY_GROK_AUTH` | `auto` | Force Grok auth path: `auto`, `api_key`, or `oauth` |
 | `SANDY_LOCAL_LLM_HOST` | (unset) | `host:port` to allow through LAN isolation, typically for a local LLM (e.g. `127.0.0.1:11434` for Ollama). With the egress proxy on (default), the proxy's forward listener relays `host.docker.internal:<port>` to the host; with the proxy off (`SANDY_EGRESS_NO_ISOLATION=1`, Linux), inserts a single iptables ACCEPT rule and maps `host.docker.internal`. Privileged tier |
 | `GOOGLE_CLOUD_PROJECT` | (unset) | GCP project ID (Vertex AI) |
 | `GOOGLE_CLOUD_LOCATION` | (unset) | GCP region (Vertex AI) |
 | `GOOGLE_GENAI_USE_VERTEXAI` | (unset) | Set `true` to route Gemini through Vertex AI |
+| `GOOGLE_API_KEY` | (unset) | Google API key for Vertex AI / ADC |
 | `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for Telegram relay in multi-agent mode. `0` = first agent in `SANDY_AGENT`, `1` = second, `2` = third, `3` = fourth |
 | `SANDY_SSH` | `token` | Git auth method: `token` (gh CLI + HTTPS) or `agent` (SSH agent forwarding) |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Set to `false` to keep Claude Code's permission system active |
 | `SANDY_HOME` | `~/.sandy` | Sandy config/build/sandbox directory |
+| `SANDY_VERBOSE` | `0` | Verbosity: `0` quiet, `1` verbose, `2` debug, `3` full trace |
+| `SANDY_HOST_ID` | _(hostname)_ | Advisory host identity reported by `--print-state` for multi-host fleet aggregation (sandbox names hash only the workspace path, so the same path on two hosts collides). **Env-only** — a committed config can't forge it |
 | `SANDY_CPUS` | auto-detected | CPU limit for the container |
 | `SANDY_MEM` | auto-detected | Memory limit for the container |
 | `SANDY_VENV_OVERLAY` | `1` | Set `0` to disable the sandbox-owned `.venv` overlay (see "Using host virtual environments") |
@@ -209,13 +216,19 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_ALLOW_LAN_HOSTS` | (unset) | **Legacy (proxy-off, Linux only).** Comma-separated IPs/CIDRs to poke through the iptables LAN block. Ignored when the egress proxy is on — use `SANDY_ALLOW_HOSTS` instead |
 | `SANDY_ALLOW_NO_ISOLATION` | `0` | **Legacy (proxy-off, Linux only).** `1` = allow launch when iptables rules can't be applied. *Not* the same as `SANDY_EGRESS_NO_ISOLATION` (which turns the proxy off) |
 | `SANDY_ALLOW_WORKFLOW_EDIT` | `0` | `1` = drop `.github/workflows/` from the read-only protected set (for legitimate CI work). Weakens protection, so a workspace `.sandy/config` setting it triggers an approval prompt |
+| `SANDY_EGRESS_LOG` | `0` | `1`/`summary` = log which hosts the agent's egress actually reached (each distinct allowed `host:port` once) and print a session-end summary. Hostnames only — TLS is never terminated. Passive-safe (adds visibility) |
+| `SANDY_TOOL_AUDIT` | `0` | `1` = seed a Claude Code `PreToolUse` hook that appends `{ts,tool,args}` JSONL to `~/.claude/tool-audit.jsonl`. Claude-only, passive-safe (adds visibility); a user's own `PreToolUse` hook is never clobbered |
+| `SANDY_HANDOFF_DIRS` | `0` | `1` = create/mount the per-sandbox `~/.handoff/{outbox,inbox}` pair (inbox `:ro`). Substrate only — nothing moves files yet. Passive-safe. See "Handoff directories" |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth) |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max output tokens per response (Claude Code default is 32K) |
+| `SANDY_CLAUDE_CONNECTORS` | `0` | `1` = expose claude.ai **account connectors** (Gmail, Drive, …) inside the sandbox. Default `0` suppresses them — the account-scoped OAuth token would otherwise make every connector reachable from every sandbox. Weakens isolation, so a workspace `.sandy/config` setting it triggers an approval prompt. Claude-only |
+| `SANDY_SUSPICIOUS` | `0` | `1` = hardened posture for a workspace you distrust: strip the OAuth **refresh token** (mount only the short-TTL access token — fails closed if it can't), prefer a disposable `ANTHROPIC_API_KEY` over mounting OAuth at all, force connectors off, default egress to strict. Records `cred_mode` in the session marker. **Strengthens** isolation — safe to commit in a workspace config. In-session token refresh stops at the access token's expiry (relaunch or `/login`) |
 | `SANDY_SKILL_PACKS` | (unset) | Comma-separated skill packs to install (e.g. `gstack`). Built as a cached Docker layer |
 | `SANDY_GPU` | (disabled) | GPU passthrough: `all` for all GPUs, or device IDs like `0` or `0,1`. Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
 | `SANDY_SCREENSHOT_DIR` | (unset) | Host directory of screenshots to mount into the container (read-only at `/home/claude/screenshots`). When set, sandy generates a `/ss` slash command for Claude/Gemini and a screenshot skill for Codex — type `/ss huh` to have the agent describe your latest screenshot, `/ss 3 explain` for the last three, etc. See "Screenshot skill" below. Privileged tier |
 | `SANDY_EXTRA_ENV` | (unset) | Comma-separated env-var names to forward into the container (e.g. `HA_TOKEN,LINEAR_API_KEY`). Values come from env (wins) or any of the four config files (workspace overrides host). Lets you wire up tokens for user-installed MCP servers without patching sandy. Privileged tier; workspace usage requires approval |
+| `SANDY_AGENT_ARGS` | (unset) | Extra CLI args appended to the agent command on **every** launch (bare, `-p`, `--start`, sandy-ui). Whitespace-split, never `eval`'d, ordered after sandy's flags and before command-line args. Privileged tier; workspace usage requires approval. For agent-specific flags prefer a per-sandbox `$SANDBOX_DIR/agent-args.<agent>` file (scoped to one agent) |
 | `SANDY_CHANNELS` | (unset) | Channel plugins to enable (e.g. `plugin:telegram@claude-plugins-official`) |
 | `TELEGRAM_BOT_TOKEN` | (unset) | Telegram bot token (from BotFather). Put in `.sandy/.secrets`, not `.sandy/config`. Privileged tier |
 | `TELEGRAM_ALLOWED_SENDERS` | (unset) | Comma-separated Telegram user IDs for allowlist (e.g. `123456,789012`). Privileged tier |
@@ -242,6 +255,13 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--prune-orphans` | Reap orphaned `sandy_*` Docker networks and exit |
 | `--update-sessions` | Fleet image refresh + rolling restart across every daemon session on the host (scope to one with `--workspace PATH`). See "Fleet updates" above. Sub-options: `--dry-run`, `--yes`, `--idle-for <minutes>`, `--rebuild`, `--workspace` |
 | `--reset-sandbox` | Rebuild **one** project's sandbox from a known-good skeleton — destroy its persistent package/agent state (preserving `WORKSPACE.json` lineage), refusing while a live session holds it. Filesystem-only, no Docker. "When in doubt, rebuild" in one command. Sub-options: `--workspace PATH` (default cwd), `--keep-approvals`, `--dry-run`, `--yes` |
+| `--remove-sandbox` | Permanently delete a sandbox directory (preserves **nothing**, unlike `--reset-sandbox`). Three selectors: default/`--workspace PATH` (workspace must still exist), `--sandbox NAME` (workspace already gone), `--orphans` (every sandbox whose recorded workspace is gone). Filesystem-only. Sub-options: `--dry-run`, `--yes` |
+| `--provision` | Non-interactively create one workspace's sandbox by running the **real launch path** once (start a detached session, confirm it's up, stop it) — never a flag that fabricates state. Safe no-op against a live session. Needs Docker. Sub-options: `--workspace PATH`, `--dry-run`, `--yes` |
+| `--doctor` | Host + runtime readiness check (git/curl/docker/PATH/credentials, plus image staleness and orphaned resources). Exit `0` iff every required host check passes; runtime findings are warnings. Sub-options: `--fix` (clear a dead lock, reap orphaned networks), `--yes` |
+| `--gc` | One-shot global reclaim of leaked sandy Docker resources: dead-owner containers, orphaned `sandy_*` networks, orphaned per-project/skill images, dangling images. Sub-options: `--dry-run`, `--yes` |
+| `--print-state` / `--print-schema` / `--print-version` | Machine-readable JSON introspection (runtime state / static schema / version). Fast-path, no Docker needed for schema/version. See [`SPEC_INTROSPECTION.md`](SPEC_INTROSPECTION.md) |
+
+**`--start` exit codes:** `0` = ready, `6` = refused before launch (an approval couldn't be granted — answer it once interactively), `7` = container crash-looping, `8` = timed out waiting for the session.
 
 All other arguments are forwarded to `claude`.
 
@@ -353,7 +373,7 @@ SANDY_AGENT=claude,gemini,codex,opencode  # four panes
 SANDY_AGENT=all                        # alias for claude,gemini,codex,opencode
 ```
 
-Panes appear in the order listed. Each agent has its own config dir(s): `~/.claude`, `~/.gemini`, `~/.codex`, and `~/.config/opencode` + `~/.local/share/opencode`. All panes share the same workspace mount. Exiting one pane leaves the others running. Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, `sandy-opencode`); any multi-agent combo uses the `sandy-full` image, which bundles all four CLIs.
+Panes appear in the order listed. Each agent has its own config dir(s): `~/.claude`, `~/.gemini`, `~/.codex`, and `~/.config/opencode` + `~/.local/share/opencode`. All panes share the same workspace mount. Exiting one pane leaves the others running. Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, `sandy-opencode`, `sandy-grok`); any multi-agent combo uses the `sandy-full` image, which bundles all five CLIs.
 
 **Feature support in multi-agent mode**: skill packs apply to the Claude pane only. Telegram channels use the host-side relay and are routed to pane 0 by default — override with `SANDY_CHANNEL_TARGET_PANE=0|1|2|3`. `--remote` is not supported in any multi-agent combo. `SANDY_LOCAL_LLM_HOST` works in any combo that includes opencode (or any agent that wants to reach a host-side service over the gateway).
 
@@ -388,7 +408,7 @@ No default — leaving `SANDY_SCREENSHOT_DIR` unset disables the feature entirel
 
 ### Handoff directories (`SANDY_HANDOFF_DIRS`)
 
-Set `SANDY_HANDOFF_DIRS=1` (passive-safe, default `0`) to create per-sandbox handoff directories: `~/.handoff/outbox` (read-write, for the agent to stage outgoing files) and `~/.handoff/inbox` (**read-only** — only the host can place files there). This is directory/mount substrate only — there's no relay, helper, skill, or peer mechanism yet to actually move files between workspaces, so today they stay empty until you put something in them yourself. See `CLAUDE.md` for the full rationale.
+Set `SANDY_HANDOFF_DIRS=1` (passive-safe, default `0`) to **mount** the per-sandbox handoff pair into the container: `~/.handoff/outbox` (read-write, for the agent to stage outgoing files) and `~/.handoff/inbox` (**read-only** — only the host can place files there). The host-side directories are created on **every** launch regardless of the flag (as of 1.7.0, so directory presence carries no information); the flag — or an operator-side `$SANDBOX_DIR/.handoff-enabled` marker file, which a cloned repo can't carry — is what gates the mount. This is directory/mount substrate only: there's no relay, helper, skill, or peer mechanism yet to actually move files between workspaces, so today they stay empty until you put something in them yourself. See `CLAUDE.md` for the full rationale.
 
 ## How Network Isolation Works
 
@@ -713,7 +733,7 @@ SANDY_CHANNELS=plugin:telegram@claude-plugins-official plugin:discord@claude-plu
 
 ### Channels with Gemini / Codex / multi-agent mode
 
-For any `SANDY_AGENT` value other than single-agent `claude`, sandy uses a **host-side Telegram relay** instead of the in-container plugin — it long-polls the Telegram Bot API on the host and injects messages into the container's tmux session via `docker exec … tmux send-keys`. This is agent-agnostic but lower-fidelity: no chat threading, no edit-message updates, no attachments. Set `SANDY_CHANNEL_TARGET_PANE=0|1|2` to route messages to a specific pane in multi-agent mode (default is pane 0 = the first agent listed in `SANDY_AGENT`). Discord via relay is not supported yet — use single-agent `SANDY_AGENT=claude` for Discord.
+For any `SANDY_AGENT` value other than single-agent `claude`, sandy uses a **host-side Telegram relay** instead of the in-container plugin — it long-polls the Telegram Bot API on the host and injects messages into the container's tmux session via `docker exec … tmux send-keys`. This is agent-agnostic but lower-fidelity: no chat threading, no edit-message updates, no attachments. Set `SANDY_CHANNEL_TARGET_PANE=0|1|2|3` to route messages to a specific pane in multi-agent mode (default is pane 0 = the first agent listed in `SANDY_AGENT`). Discord via relay is not supported yet — use single-agent `SANDY_AGENT=claude` for Discord.
 
 > ⚠️ **`SANDY_CHANNELS` format for the relay is different.** The relay matches the **bare channel name** — `SANDY_CHANNELS=telegram` — *not* the `plugin:telegram@claude-plugins-official` form used for single-agent `claude` above (that qualified form is what `claude --channels` needs, but it won't trigger the relay). Use bare names when the relay is in play (any non-single-`claude` `SANDY_AGENT`). This dual-format wart is tracked in [#30](https://github.com/rappdw/sandy/issues/30) and will be unified.
 
@@ -731,6 +751,7 @@ For any `SANDY_AGENT` value other than single-agent `claude`, sandy uses a **hos
 - The root filesystem is read-only (`/tmp` and `/home/claude` are tmpfs)
 - `no-new-privileges` prevents privilege escalation
 - Credentials are seeded into per-project sandboxes, not shared across projects
+- claude.ai account connectors are suppressed by default (`SANDY_CLAUDE_CONNECTORS=1` to opt in); `SANDY_SUSPICIOUS=1` additionally strips the OAuth refresh token so a distrusted workspace only ever sees a short-lived access token
 - The working directory is bind-mounted read/write — Claude can modify your files there (that's the point)
 ### Protected files and directories
 
