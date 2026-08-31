@@ -637,6 +637,17 @@ done
 # (lazy in-container exchange) -- it is no longer what the Integration workflow
 # itself does (see ANTHROPIC_AUTH_TOKEN below), but it is still a valid way to
 # supply Claude credentials to this suite.
+# Provider-side API errors that mean "sandy did its job — the agent launched
+# and REACHED the API — but the provider refused for account reasons". Sections
+# SKIP on these rather than FAIL. One variable, because the same regex was
+# previously pasted at every site and drifted as one: a real host ran dry of
+# OpenAI credits and the resulting "You have no credits remaining" stream error
+# matched nothing, failing two codex sections as if sandy were broken.
+# Deliberately tight: billing/quota/rate/auth phrasings only — never a bare
+# "billing" or "error", which would mask genuine sandy faults that merely
+# mention them.
+_API_ERR_RE='HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota|no credits remaining|exceeded your current quota'
+
 HAS_CLAUDE_WIF=false
 if [ -n "${ANTHROPIC_FEDERATION_RULE_ID:-}" ] && [ -n "${ANTHROPIC_IDENTITY_TOKEN:-}" ]; then
     HAS_CLAUDE_WIF=true
@@ -972,8 +983,8 @@ if [ "$HAS_OPENAI_API_KEY" = true ]; then
     if [ -n "$_out" ] && echo "$_out" | grep -vi "reply with exactly one word" | grep -qi "pineapple"; then
         pass "codex headless responds without errors"
     elif [ -n "$_out" ] \
-         && echo "$_out" | grep -qiE 'HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota'; then
-        skip "codex headless responds without errors — codex API error, not a sandy fault ($(echo "$_out" | grep -oiE 'HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota' | head -1))"
+         && echo "$_out" | grep -qiE "$_API_ERR_RE"; then
+        skip "codex headless responds without errors — codex API error, not a sandy fault ($(echo "$_out" | grep -oiE "$_API_ERR_RE" | head -1))"
     else
         fail "codex headless responds without errors"
         if [ -z "$_out" ]; then
@@ -1308,8 +1319,8 @@ if [ "$HAS_CLAUDE" = true ] && [ "$HAS_OPENAI_API_KEY" = true ]; then
     if [ -n "$_out" ] && echo "$_out" | grep -vi "reply one word" | grep -qi "first"; then
         pass "codex session works in switch test"
     elif [ -n "$_out" ] \
-         && echo "$_out" | grep -qiE 'HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota'; then
-        skip "codex session works in switch test — codex API error, not a sandy fault ($(echo "$_out" | grep -oiE 'HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota' | head -1))"
+         && echo "$_out" | grep -qiE "$_API_ERR_RE"; then
+        skip "codex session works in switch test — codex API error, not a sandy fault ($(echo "$_out" | grep -oiE "$_API_ERR_RE" | head -1))"
     else
         fail "codex session works in switch test"
         if [ -z "$_out" ]; then
@@ -1872,7 +1883,7 @@ if [ -n "$_combo" ]; then
     if [ -n "$_out" ] && echo "$_out" | grep -vi "reply one word" | grep -qi "alpha"; then
         pass "combo $_combo → headless routes to $_routed, which responds"
     elif [ -n "$_out" ] \
-         && echo "$_out" | grep -qiE 'status: *[45][0-9][0-9]|critical error|503|500|RESOURCE_EXHAUSTED|quota|UNAVAILABLE|rate.?limit|HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|insufficient.?quota'; then
+         && echo "$_out" | grep -qiE "status: *[45][0-9][0-9]|critical error|503|500|RESOURCE_EXHAUSTED|quota|UNAVAILABLE|$_API_ERR_RE"; then
         skip "combo $_combo → routed $_routed reached API but it errored, not a sandy fault ($(echo "$_out" | grep -oiE 'status: *[0-9]+|critical error|RESOURCE_EXHAUSTED|quota|HTTP error: [45][0-9][0-9]|[45][0-9][0-9] [A-Za-z]+' | head -1))"
     else
         fail "combo $_combo → headless routes to $_routed, which responds"
