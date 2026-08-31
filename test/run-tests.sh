@@ -10778,6 +10778,36 @@ check "§112(15) cred_mode covers the full lattice (oauth-token / access-token-o
     bash -c 'for m in oauth-token access-token-only full api-key none; do grep -q "CRED_MODE=\"$m\"" "$1" || exit 1; done' -- "$_S112"
 unset _S112 _S112_FN _S112_CREDS _S112_OUT _s112_rc
 
+echo ""
+echo "§113: the API-error skip recognizer knows real provider failures, and only those"
+# WHY. Integration sections SKIP when the agent reached the API and the PROVIDER
+# refused (billing, quota, rate, auth) — that is sandy doing its job — and FAIL
+# otherwise. The recognizer was pasted at every site and drifted as one: a real
+# host ran out of OpenAI credits and the "You have no credits remaining" stream
+# error matched nothing, failing two codex sections as if sandy were broken.
+# Now one variable; this drives it against REAL captured strings both ways.
+# `|| true`: a no-match grep exits 1 and an unguarded assignment under the
+# suite ERR trap aborts the WHOLE RUN as "pass=N fail=0" — the dead-run shape.
+# Safe here because this captures stdout and nothing reads $?; §113(0) is the
+# check that judges the empty result.
+_S113_RE="$(grep -m1 '^_API_ERR_RE=' "$(dirname "$0")/run-integration-tests.sh" | cut -d= -f2- | sed "s/^'//;s/'\$//" || true)"
+check "§113(0) extracted a non-empty recognizer (mutation: a rename empties this, and an empty ERE matches EVERYTHING — every check below would pass vacuously)" \
+    test -n "$_S113_RE"
+_s113() { printf '%s' "$1" | grep -qiE "$_S113_RE"; }
+check "§113(1) SKIPS the no-credits stream error (the reported false-FAIL, verbatim)" \
+    _s113 'ERROR: stream disconnected before completion: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.'
+check "§113(2) SKIPS the exceeded-quota phrasing" \
+    _s113 'You exceeded your current quota, please check your plan and billing details'
+check "§113(3) SKIPS an HTTP 401" _s113 'HTTP error: 401'
+check "§113(4) SKIPS a rate limit" _s113 'Rate limit reached for gpt-5.5'
+check "§113(5) still FAILS a usage banner (mutation: an over-broad recognizer masks the agent-args class of sandy fault that produced exactly this output once)" \
+    bash -c '! printf "%s" "$1" | grep -qiE "$2"' -- 'Usage: codex exec [OPTIONS] [PROMPT]' "$_S113_RE"
+check "§113(6) still FAILS a mount fault" \
+    bash -c '! printf "%s" "$1" | grep -qiE "$2"' -- 'Error: EROFS read-only file system /home/claude/.codex' "$_S113_RE"
+check "§113(7) exactly ONE literal copy of the regex exists (the definition; mutation: re-pasting it at a call site restores the drift this section exists to end)" \
+    bash -c '[ "$(grep -c "Unauthorized|Forbidden|Too Many Requests" "$1")" -eq 1 ]' -- "$(dirname "$0")/run-integration-tests.sh"
+unset _S113_RE
+
 _run_provenance   # timestamp + commit + tree state, so a result you scroll back
                   # to after a context switch says which build produced it.
 [ "$FAIL" -eq 0 ] || exit 1
