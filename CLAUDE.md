@@ -146,7 +146,7 @@ On every launch (all egress modes), sandy writes `$SANDBOX_DIR/sandy-session.jso
 { "schema": 1, "sandy_version": "...", "egress_mode": "off|permissive|strict",
   "workspace": "...", "host_uid": 501, "host_gid": 20,
   "launched_at": "2026-06-11T12:00:00Z", "session_nonce": "<hex>",
-  "effort": "high", "permission_mode": "bypassPermissions" }
+  "effort": "high", "permission_mode": "bypassPermissions", "cred_mode": "full" }
 ```
 
 The `effort` field records the reasoning effort sandy **pinned** for the claude agent via `SANDY_EFFORT` (a JSON string like `"high"`), or `null` when sandy did not pin it (the agent ran at Claude Code's own default — currently `high`). This makes a run's effort provable after the fact rather than inferred from the ephemeral live statusline — the gap that let a red-team run silently at default effort. `schema` stays `1` (additive field).
@@ -185,7 +185,7 @@ Sandy loads configuration from four sources in order: `$HOME/.sandy/config`, `$H
 
 - **Passive-safe keys** (allowed from any source):
   <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_TEAMMATE_MODE`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_TOOL_AUDIT`, `SANDY_CLAUDE_CONNECTORS`, `SANDY_HANDOFF_DIRS`
+  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_TEAMMATE_MODE`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_TOOL_AUDIT`, `SANDY_CLAUDE_CONNECTORS`, `SANDY_SUSPICIOUS`, `SANDY_HANDOFF_DIRS`
   <!-- END AUTOGEN:passive-key-list -->
 
 - **Value-aware exceptions** (passive for values that *strengthen* isolation, approval-gated for values that *weaken* it): a few passive keys are not uniformly safe from a committed `.sandy/config` because one of their values lowers the sandbox's protection. `_sandy_passive_value_privileged()` routes those weakening values through the same per-workspace approval prompt as a privileged key, while leaving the strengthening/neutral values frictionless — *"a repo may make the sandbox tighter, never looser."* The gated values are: `SANDY_EGRESS_NO_ISOLATION=1` (proxy off), `SANDY_EGRESS_STRICT=0` (downgrade a host-set strict), `SANDY_EGRESS_PROXY=0` (deprecated alias for proxy-off), and `SANDY_ALLOW_WORKFLOW_EDIT=1` (drops `.github/workflows/` protection). This closes the hole where a committed workspace config could silently disable network isolation (threat-model adversary #2) — on macOS with the proxy off that is *total* loss of network isolation. Guarded by `run-tests.sh §65`.
@@ -559,6 +559,17 @@ So exposing connectors is **not** simply "write `false`" — an inherited `true`
 **Two honest limits.** It gates **auto-fetched** connectors only: a claudeai-proxy server passed explicitly via `--mcp-config` still follows the normal MCP trust flow. And it is **Claude-only** — the account-connector rider is a Claude Code phenomenon, so this is coverage, not parity with codex/gemini/opencode.
 
 Defense in depth: `claudeAiMcpEverConnected` — host metadata listing which connectors exist — is stripped from the `.claude.json` seed regardless of the knob. The settings key is the gate; this is simply not handing over a list of what is behind it. Guarded by `run-tests.sh §110`.
+
+## Suspicious workspaces (`SANDY_SUSPICIOUS`, #130)
+
+The mounted Claude `.credentials.json` carries the **refresh token** — permanent, renewable account access until manually revoked — and permissive-mode egress allowlists (pypi, github) are plausible exfil channels for a poisoned dependency. `SANDY_SUSPICIOUS=1` is the hardened posture for a workspace you actively distrust, the pre-broker slice of #121:
+
+- **Refresh token stripped** before mounting: the container gets the short-TTL access token only, so an exfiltrated copy dies at `expiresAt` and cannot be renewed. The strip is **verified after the rewrite** (a `refreshToken` surviving anywhere fails it) and **fails closed** — on any error, *no* credentials file is mounted rather than an unstripped one. Trade-off, stated: in-session token refresh stops working when the access token expires; relaunch or `/login`. Acceptable-to-desirable for a deliberately short suspicious session.
+- **Disposable-key mode**: with `ANTHROPIC_API_KEY` set and no long-lived token, the OAuth file is not mounted at all — instantly revocable compartmentalization.
+- **Connectors forced off** (overrides an approved `SANDY_CLAUDE_CONNECTORS=1`) and **egress defaults to strict**; an explicit egress choice still wins but is named loudly.
+- **`cred_mode` recorded** in `/etc/sandy-session.json` (`oauth-token` | `access-token-only` | `full` | `api-key` | `none`) — the *worst credential actually present*, so a run's blast radius is provable after the fact, not inferred. Recorded on every launch, suspicious or not.
+
+Tier: passive-safe to turn **on** from a committed `.sandy/config` (a repo may declare itself suspicious); `=0` from a workspace is approval-gated (never looser). **Honest limits:** a long-lived `CLAUDE_CODE_OAUTH_TOKEN` is *not* shrunk by this — it is recorded honestly and warned about; the specifics are Claude-only; the access token remains exfiltrable for its remaining TTL. Real prevention — the token never entering the container — is #121. Guarded by `run-tests.sh §112`.
 
 ## Screenshots / `/ss` skill
 

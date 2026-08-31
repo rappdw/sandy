@@ -97,6 +97,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_GROK_AUTH
     SANDY_TOOL_AUDIT
     SANDY_CLAUDE_CONNECTORS
+    SANDY_SUSPICIOUS
     SANDY_HANDOFF_DIRS
 )
 
@@ -139,6 +140,7 @@ _sandy_passive_value_privileged() {
         SANDY_EGRESS_PROXY)        [ "$2" = "0" ] && return 0 ;;  # deprecated alias: =0 == proxy off
         SANDY_ALLOW_WORKFLOW_EDIT) [ "$2" = "1" ] && return 0 ;;  # drops .github/workflows protection
         SANDY_CLAUDE_CONNECTORS)   [ "$2" = "1" ] && return 0 ;;  # exposes claude.ai ACCOUNT connectors (Gmail/Drive)
+        SANDY_SUSPICIOUS)          [ "$2" = "0" ] && return 0 ;;  # downgrades a host-set hardened posture
     esac
     return 1
 }
@@ -777,6 +779,7 @@ DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
 DISCORD_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Discord user IDs allowed to send messages.
 SANDY_TOOL_AUDIT|bool|0||1.4.0|stable|Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off).
 SANDY_CLAUDE_CONNECTORS|bool|0||1.9.0|stable|Expose the claude.ai ACCOUNT connectors (Gmail, Google Drive, ...) inside the sandbox (#129). Default 0 = SUPPRESSED. The OAuth token sandy mounts is account-scoped, so without this every connector the user ever enabled on claude.ai was reachable from EVERY sandbox -- including untrusted-repo sessions, with no extra prompt -- which is ambient authority crossing the per-project boundary sandy exists to draw. Implemented by seeding Claude Code's disableClaudeAiConnectors as a MANAGED settings.json key (always overwritten, both directions): Claude resolves it true-in-ANY-settings-scope-wins, so writing false is not enough to expose them -- an inherited true from the host settings.json would win. VALUE-AWARE TIER: 0 is passive-safe wherever it is set, but =1 WEAKENS the sandbox, so a workspace .sandy/config setting it triggers the per-workspace approval prompt like SANDY_EGRESS_NO_ISOLATION=1. Claude-only (the account-connector rider is a Claude Code phenomenon); gates AUTO-FETCHED connectors only -- a server passed explicitly via --mcp-config still follows the normal MCP trust flow.
+SANDY_SUSPICIOUS|bool|0||1.9.0|experimental|Hardened-credential posture for a workspace you actively distrust (#130) -- the pre-broker slice of #121. When 1: (a) the mounted Claude .credentials.json is REWRITTEN to drop claudeAiOauth.refreshToken, so an exfiltrated copy is worth only the remaining access-token lifetime (hours) instead of permanent renewable account access; the strip is verified after the rewrite and FAILS CLOSED -- if it cannot be performed or verified, no credentials file is mounted at all; (b) if ANTHROPIC_API_KEY is set and no long-lived CLAUDE_CODE_OAUTH_TOKEN is, the API key is used and OAuth credentials are not mounted (clean, instantly-revocable compartmentalization); (c) claude.ai account connectors are forced off, overriding an approved SANDY_CLAUDE_CONNECTORS=1; (d) egress DEFAULTS to strict -- an explicit egress setting still wins but is named loudly. The resolved posture is recorded as cred_mode in /etc/sandy-session.json so a run protection level is provable after the fact. Passive-safe to turn ON from a committed .sandy/config (a repo may make itself tighter); =0 from a workspace is approval-gated (never looser). HONEST LIMITS: in-session token refresh stops working once the access token expires (rerun sandy or /login -- acceptable for a deliberately short suspicious session); a long-lived CLAUDE_CODE_OAUTH_TOKEN is NOT shrunk by this (recorded honestly as cred_mode oauth-token, with a warning); Claude-only for the credential specifics; real prevention (token never in-container) is #121.
 SANDY_HANDOFF_DIRS|bool|0||1.7.0|experimental|Create and mount the per-sandbox cross-workspace handoff directories (#132 substrate): $SANDBOX_DIR/handoff/outbox rw at ~/.handoff/outbox, $SANDBOX_DIR/handoff/inbox READ-ONLY at ~/.handoff/inbox. Substrate only — NOTHING moves files: no relay, no helper, no skills, no turn initiation; those are #132 follow-ups gated by separate privileged keys (SANDY_HANDOFF_PEERS, unshipped). Passive-safe: nothing sandy ships today moves files into or out of these directories — the future relay that will is gated on SANDY_HANDOFF_PEERS (privileged, unshipped), where the trust edge lives. Residual: the outbox persists across sessions, so a repo can stage content before an operator ever approves peers; sandy --reset-sandbox clears it. Default 0 (off — the directories are still created but NOTHING is mounted, no env vars are added, and ~/.handoff does not exist inside the container). Creation is unconditional as of 1.7.0 so that directory PRESENCE carries no information: when every sandbox has them, the marker is the only signal that can mean anything, and enrolling an existing sandbox is the marker alone rather than a re-launch to harvest a side effect. An operator can also enable the pair per-sandbox without any workspace config by touching $SANDBOX_DIR/.handoff-enabled — OR with this key, same passive tier. That marker matters for fleets: a workspace .sandy/config travels with the repository, so cloning it enables the pair on a sandbox nobody decided about, whereas the marker is per-machine and a repo cannot carry it. It lives at the sandbox TOP level (never under claude/, which is mounted and agent-writable) and survives --reset-sandbox like WORKSPACE.json, since enrollment is operator state; the handoff/ contents are still destroyed.
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
@@ -7354,6 +7357,33 @@ for _ek in SANDY_EGRESS_NO_ISOLATION SANDY_EGRESS_STRICT; do
     esac
 done
 unset _ek
+# --- SANDY_SUSPICIOUS (#130): hardened posture for a workspace you distrust ---
+# Validation is if-form, NOT a case: run-tests.sh §53 extracts the egress
+# region as sed -n /^_SANDY_PROXY_ON=false/,/^esac/p, so a new column-0 esac
+# here truncates that extraction before the resolution lines and fails the
+# tri-state checks (it did, in CI). The region boundary is part of the code
+# now — respect it rather than re-anchoring the test around this block.
+if [ "${SANDY_SUSPICIOUS:-0}" != 0 ] && [ "${SANDY_SUSPICIOUS:-0}" != 1 ]; then
+    echo "[sandy] ERROR: SANDY_SUSPICIOUS='${SANDY_SUSPICIOUS}' invalid (want 0 or 1)" >&2
+    exit 1
+fi
+if [ "${SANDY_SUSPICIOUS:-0}" = 1 ]; then
+    # Egress: strict becomes the DEFAULT. An explicit egress choice still wins —
+    # it went through its own value-aware approval gates — but a weaker one is
+    # named loudly, because narrowing the exfil channel set is half the point.
+    if [ "${SANDY_EGRESS_NO_ISOLATION:-0}" = 1 ]; then
+        warn "SANDY_SUSPICIOUS=1 but egress isolation is explicitly OFF — honoring the explicit setting. Exfil channels are wide open; this combination defeats the posture."
+    elif [ "${SANDY_EGRESS_STRICT:-0}" != 1 ]; then
+        info "SANDY_SUSPICIOUS=1 — defaulting egress to STRICT (allowlist-only)."
+        SANDY_EGRESS_STRICT=1
+    fi
+    # Connectors: forced off, even over an approved =1. A suspicious workspace
+    # must not reach Gmail/Drive through the account token, full stop.
+    if [ "${SANDY_CLAUDE_CONNECTORS:-0}" = 1 ]; then
+        warn "SANDY_SUSPICIOUS=1 — forcing claude.ai account connectors OFF (overrides SANDY_CLAUDE_CONNECTORS=1)."
+    fi
+    SANDY_CLAUDE_CONNECTORS=0
+fi
 # Off and strict are contradictory — fail loud rather than silently pick one.
 if [ "${SANDY_EGRESS_NO_ISOLATION:-0}" = 1 ] && [ "${SANDY_EGRESS_STRICT:-0}" = 1 ]; then
     echo "[sandy] ERROR: SANDY_EGRESS_NO_ISOLATION and SANDY_EGRESS_STRICT are mutually exclusive." >&2
@@ -10117,10 +10147,57 @@ except Exception:
     fi
 }
 
+# _sandy_strip_refresh_token CREDS_JSON — print the credentials with every
+# refreshToken removed (claudeAiOauth.refreshToken and any top-level one);
+# non-zero exit means the strip could not be performed OR could not be
+# verified. #130: the refresh token is the crown jewel — an exfiltrated copy is
+# permanent, renewable account access until manually revoked, while the access
+# token alone dies at expiresAt. Callers must FAIL CLOSED on non-zero: under
+# SANDY_SUSPICIOUS an unstripped file is never mounted.
+# Quoting: the node program is a SINGLE-quoted shell string (no apostrophes in
+# it, ever) and the python fallback is a QUOTED heredoc — both shipped-outage
+# classes are documented in the seeder comments.
+_sandy_strip_refresh_token() {
+    local creds="$1" out=""
+    [ -z "$creds" ] && return 1
+    if command -v node &>/dev/null; then
+        out="$(node -e '
+            try {
+                const c = JSON.parse(process.argv[1]);
+                if (c.claudeAiOauth && typeof c.claudeAiOauth === "object") delete c.claudeAiOauth.refreshToken;
+                delete c.refreshToken;
+                process.stdout.write(JSON.stringify(c));
+            } catch (e) { process.exit(1); }
+        ' "$creds")" || return 1
+    elif command -v python3 &>/dev/null; then
+        out="$(python3 - "$creds" <<'PYSTRIP'
+import json, sys
+try:
+    c = json.loads(sys.argv[1])
+    if isinstance(c.get("claudeAiOauth"), dict):
+        c["claudeAiOauth"].pop("refreshToken", None)
+    c.pop("refreshToken", None)
+    sys.stdout.write(json.dumps(c))
+except Exception:
+    sys.exit(1)
+PYSTRIP
+)" || return 1
+    else
+        return 1
+    fi
+    # VERIFY AFTER STRIP: never hand back a blob that still names the token.
+    # Substring test on purpose — even a differently-nested refreshToken key
+    # fails closed rather than slipping through a structural assumption.
+    [ -n "$out" ] || return 1
+    case "$out" in *refreshToken*) return 1 ;; esac
+    printf '%s' "$out"
+}
+
 # --- Credential setup ---
 # Long-lived token (from `claude setup-token`) takes precedence over OAuth credentials.
 # When set via .sandy/config or .sandy/.secrets, skip the entire credential file flow.
 CRED_TMPDIR=""
+CRED_MODE="none"   # #130: resolved claude credential posture, recorded in the session marker
 GEMINI_CRED_TMPDIR=""
 OPENCODE_CRED_TMPDIR=""
 GEMINI_ADC_MOUNT=""
@@ -10344,6 +10421,48 @@ else
                 warn "OAuth token expired. Use /login inside the session to re-authenticate."
             fi
         fi
+    fi
+
+    # --- #130: credential posture. This is the SINGLE site every branch above
+    # funnels through before anything is mounted — including the long-lived-
+    # token branch, which still mounts the full file for cloud features — so
+    # the suspicious-mode decisions live here and cannot be bypassed.
+    _cred_stripped=false
+    if [ "${SANDY_SUSPICIOUS:-0}" = 1 ]; then
+        if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -n "${ANTHROPIC_API_KEY:-}" ] && [ -n "$CRED_JSON" ]; then
+            # Disposable-key compartmentalization: a scoped ANTHROPIC_API_KEY is
+            # instantly revocable without touching the primary account, so with
+            # one present the account OAuth file is not mounted at all.
+            info "SANDY_SUSPICIOUS — using ANTHROPIC_API_KEY; account OAuth credentials are NOT mounted."
+            CRED_JSON=""
+        elif [ -n "$CRED_JSON" ]; then
+            if _cred_stripped_json="$(_sandy_strip_refresh_token "$CRED_JSON")"; then
+                CRED_JSON="$_cred_stripped_json"
+                _cred_stripped=true
+                info "SANDY_SUSPICIOUS — refresh token stripped; mounting the access token only (dies at its expiresAt, cannot be renewed)."
+            else
+                # FAIL CLOSED: a posture that silently mounted the full file on a
+                # strip error would betray exactly the promise it makes.
+                warn "SANDY_SUSPICIOUS — could not strip the refresh token (no node/python3, or verification failed)."
+                warn "  Mounting NO credentials file. Use an ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, or /login in-session."
+                CRED_JSON=""
+            fi
+        fi
+        unset _cred_stripped_json
+        if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+            warn "SANDY_SUSPICIOUS — CLAUDE_CODE_OAUTH_TOKEN is long-lived and is NOT shrunk by this posture (see #121 for the broker endgame)."
+        fi
+    fi
+    # Record the WORST credential actually present in the container, so the
+    # session marker states blast radius rather than intent.
+    if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+        CRED_MODE="oauth-token"
+    elif [ -n "$CRED_JSON" ]; then
+        if [ "$_cred_stripped" = true ]; then CRED_MODE="access-token-only"; else CRED_MODE="full"; fi
+    elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        CRED_MODE="api-key"
+    else
+        CRED_MODE="none"
     fi
 
     if [ -n "$CRED_JSON" ]; then
@@ -11025,10 +11144,10 @@ _sandy_perm_mode_json="null"
 if _sandy_agent_has claude && [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
     _sandy_perm_mode_json="\"bypassPermissions\""
 fi
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s\n}\n' \
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cred_mode": "%s"\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
-    "$_sandy_perm_mode_json" \
+    "$_sandy_perm_mode_json" "${CRED_MODE:-none}" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
 
