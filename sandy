@@ -7358,10 +7358,15 @@ for _ek in SANDY_EGRESS_NO_ISOLATION SANDY_EGRESS_STRICT; do
 done
 unset _ek
 # --- SANDY_SUSPICIOUS (#130): hardened posture for a workspace you distrust ---
-case "${SANDY_SUSPICIOUS:-0}" in
-    0|1) ;;
-    *) echo "[sandy] ERROR: SANDY_SUSPICIOUS='${SANDY_SUSPICIOUS}' invalid (want 0 or 1)" >&2; exit 1 ;;
-esac
+# Validation is if-form, NOT a case: run-tests.sh §53 extracts the egress
+# region as sed -n /^_SANDY_PROXY_ON=false/,/^esac/p, so a new column-0 esac
+# here truncates that extraction before the resolution lines and fails the
+# tri-state checks (it did, in CI). The region boundary is part of the code
+# now — respect it rather than re-anchoring the test around this block.
+if [ "${SANDY_SUSPICIOUS:-0}" != 0 ] && [ "${SANDY_SUSPICIOUS:-0}" != 1 ]; then
+    echo "[sandy] ERROR: SANDY_SUSPICIOUS='${SANDY_SUSPICIOUS}' invalid (want 0 or 1)" >&2
+    exit 1
+fi
 if [ "${SANDY_SUSPICIOUS:-0}" = 1 ]; then
     # Egress: strict becomes the DEFAULT. An explicit egress choice still wins —
     # it went through its own value-aware approval gates — but a weaker one is
