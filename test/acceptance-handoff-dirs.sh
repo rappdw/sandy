@@ -1,15 +1,26 @@
 #!/usr/bin/env bash
-# End-to-end handoff-handoff directories acceptance (#132 slice 1: dirs + mounts only).
+# End-to-end handoff directories + relay acceptance (#132 slice 1, plus
+# SANDY_HANDOFF_RELAY 1.10.0).
 #
 # ⚠️ RUN ON A HOST WITH DOCKER. This cannot run inside sandy (no Docker). It
 # proves the real container-level behavior that the static run-tests.sh §86
-# checks cannot: the actual bind-mount modes (outbox rw / inbox :ro), that
-# EROFS wins even for files the container-uid already owns, and that the
-# whole handoff directories is a true zero-diff when the key is unset.
+# and §114 checks cannot: the actual bind-mount modes (outbox rw / inbox
+# :ro), that EROFS wins even for files the container-uid already owns, that
+# the whole handoff directories feature is a true zero-diff when the key is
+# unset, and (phase E, 1.10.0) that the relay supervisor described in
+# CLAUDE.md "Handoff relay" actually behaves that way against a real
+# container: starts with it, restarts a killed relay, never runs twice, and
+# survives an --update-sessions recreation.
 #
-# This slice ships directory/mount substrate ONLY — no relay, no helper, no
-# skills, no turn initiation, no peers, no manifest, no archive/ (its mode is
-# unsettled in #132). Nothing here ever moves a file between workspaces.
+# Phases A-D ship directory/mount substrate only — no skills, no turn
+# initiation, no peers, no manifest, no archive/ (its mode is unsettled in
+# #132). Phase E covers the ONE mechanism that does move bytes today: the
+# relay process itself, plus the crossSessionInbound pin that gates whether
+# a peer message it forwards is delivered, held, or refused. Phase E does
+# NOT drive an actual UDS handoff message end-to-end (that is Claude Code's
+# own live gate, covered by the live probe recorded in
+# docs/security/CROSS_SESSION_INBOUND.md, not by this harness) — it proves
+# sandy's OWN mechanics: the supervisor lifecycle and the settings writes.
 #
 #   Usage:  bash test/acceptance-handoff-dirs.sh          # uses ./sandy
 #           SANDY=/path/to/sandy bash test/acceptance-handoff-dirs.sh
@@ -29,6 +40,15 @@
 #   D. Enable by MARKER (.handoff-enabled) with no workspace config anywhere,
 #      repeating the EROFS-beats-ownership assertions on THAT path — phase B
 #      only proves them for the SANDY_HANDOFF_DIRS=1 path.
+#   E. SANDY_HANDOFF_RELAY (1.10.0, privileged, set via the isolated host's
+#      OWN ~/.sandy/config so no approval prompt applies): the relay mount +
+#      env forwarding, the supervisor actually running as a sibling of tmux
+#      (not a pane, not a session child), singleton-via-flock, restart on
+#      death with a fresh pid, survival of an --update-sessions recreation
+#      (state persists), sandy-handoff-sessions producing a real socket path,
+#      the crossSessionInbound pin landing in both measured-working files and
+#      the workspace copy being genuinely :ro, and that headless (-p) runs
+#      never start a relay.
 #
 # Prints PASS/FAIL per assertion; exits non-zero if any FAIL.
 set -uo pipefail
@@ -55,9 +75,14 @@ cid() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.work
 WS2="$(mktemp -d)/mbx-marker-$$"
 mkdir -p "$WS2" && (cd "$WS2" && git init -q)
 WS2="$(cd "$WS2" && pwd -P)"
+# Phase E's workspace. Declared (empty) here, alongside WS/WS2, so cleanup_ws
+# can reference it under `set -u` no matter how early the script exits —
+# guarded on non-empty below since phase E assigns it much later in the file.
+WS3=""
 cleanup_ws() {
     "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true
     "$SANDY" --stop --workspace "$WS2" >/dev/null 2>&1 || true
+    [ -n "$WS3" ] && { "$SANDY" --stop --workspace "$WS3" >/dev/null 2>&1 || true; rm -rf "$(dirname "$WS3")"; }
     rm -rf "$(dirname "$WS")" "$(dirname "$WS2")"
     _cleanup_sandy_home || true
 }
@@ -234,6 +259,235 @@ ck "--print-state reports handoff_enabled=true for the enrolled sandbox" \
    "\"$SANDY\" --print-state light 2>/dev/null | grep -q '\"handoff_enabled\":true'"
 
 "$SANDY" --stop --workspace "$WS2"; ck "--stop (D, final) exits 0" "[ $? -eq 0 ]"
+
+echo "== E. handoff relay (SANDY_HANDOFF_RELAY, 1.10.0) =="
+# Fresh workspace: relay fixtures shouldn't share state with A-D.
+WS3="$(mktemp -d)/mbx-relay-$$"
+mkdir -p "$WS3/.sandy" && (cd "$WS3" && git init -q)
+WS3="$(cd "$WS3" && pwd -P)"
+cid3() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.workspace_path=$WS3" 2>/dev/null | head -1; }
+
+cat > "$WS3/.sandy/relay.sh" <<'RELAYFIX'
+#!/bin/sh
+# Fixture relay for phase E: records its own pid + the env contract on each
+# (re)start, then blocks. Deliberately NOT `exec sleep` -- pgrep -f below
+# matches on this script's own path, and `exec` would replace this process's
+# argv with "sleep 3600", losing that match the instant it ran.
+echo "$$ $SANDY_HANDOFF_INBOX $SANDY_HANDOFF_OUTBOX $SANDY_HANDOFF_RELAY_STATE" >> "$SANDY_HANDOFF_RELAY_STATE/seen"
+sleep 3600
+RELAYFIX
+chmod +x "$WS3/.sandy/relay.sh"
+
+# SANDY_HANDOFF_RELAY is PRIVILEGED tier. Setting it via the isolated HOST's
+# own ~/.sandy/config (a privileged SOURCE) needs no approval prompt at all --
+# unlike phases B/D above (which prove the PASSIVE tier from a WORKSPACE
+# source), a privileged source may set a privileged key freely. `env -u
+# SANDY_AUTO_APPROVE_PRIVILEGED` is kept anyway, for the same "prove it, don't
+# assume it" discipline as the rest of this file: this phase must pass
+# without that escape hatch, because it isn't the thing being exercised here.
+echo "SANDY_HANDOFF_RELAY=.sandy/relay.sh" >> "$SANDY_HOME_DIR/config"
+
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS3"; RC=$?
+ck "--start exits 0 with the relay configured" "[ $RC -eq 0 ]"
+C3="$(cid3)"
+ck "daemon container is running" "[ -n \"$C3\" ]"
+SESS3="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C3" 2>/dev/null)"
+ck "session label resolved" "[ -n \"$SESS3\" ]"
+SBX3="$SANDY_HOME_DIR/sandboxes/$SESS3"
+
+echo "-- E1. mount + env forwarding --"
+_m3="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C3" 2>/dev/null)"
+echo "  mounts:"; printf '%s\n' "$_m3" | grep -i handoff | sed 's/^/    /'
+ck "relay mount is RW=true" \
+   "printf '%s\n' \"\$_m3\" | grep -qE '^/home/claude/.handoff/relay true\$'"
+# Never dump the whole env -- it carries CLAUDE_CODE_OAUTH_TOKEN and friends.
+# Count occurrences of the one var under test instead of printing anything.
+_envcount="$(docker inspect -f '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' "$C3" 2>/dev/null | grep -c '^SANDY_HANDOFF_RELAY=\.sandy/relay\.sh$')"
+ck "SANDY_HANDOFF_RELAY forwarded into the container exactly once" "[ \"$_envcount\" = 1 ]"
+
+echo "-- E2. relay is running, as a sibling of tmux (not a pane, not a session child) --"
+# The subshell that runs _sandy_start_handoff_relay's loop is backgrounded
+# (&) before tmux new-session runs, so --start's own readiness gate (which
+# only waits on the inner tmux session) can return before the relay has
+# actually flock'd and written its first log line. Poll rather than assert
+# immediately.
+_pid1=""
+for _i in 1 2 3 4 5 6; do
+    _pid1="$(docker exec -u "$(id -u)" "$C3" pgrep -f '\.sandy/relay\.sh' 2>/dev/null | head -1)"
+    [ -n "$_pid1" ] && break
+    sleep 1
+done
+ck "relay process is running in the container" "[ -n \"$_pid1\" ]"
+ck "exactly one relay process" \
+   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f '\.sandy/relay\.sh' 2>/dev/null)\" = 1 ]"
+# Two /proc/<pid>/status hops: relay's parent is the supervisor loop shell;
+# the loop shell's parent must be PID 1 (tail -f /dev/null in daemon mode,
+# which the loop was backgrounded under BEFORE PID 1 exec'd into tail --
+# exec preserves the pid, so children reparent to nothing across it).
+_ppid1="$(docker exec -u "$(id -u)" "$C3" sh -c "awk '/^PPid:/{print \$2}' /proc/$_pid1/status" 2>/dev/null)"
+ck "relay's immediate parent resolved (the supervisor loop shell)" "[ -n \"$_ppid1\" ]"
+_ppid2="$(docker exec -u "$(id -u)" "$C3" sh -c "awk '/^PPid:/{print \$2}' /proc/$_ppid1/status" 2>/dev/null)"
+ck "the supervisor loop's parent is PID 1 -- sibling of tmux, not a pane, not a session child" \
+   "[ \"$_ppid2\" = 1 ]"
+
+echo "-- E3. restart on death --"
+_pid_before="$_pid1"
+docker exec -u "$(id -u)" "$C3" kill "$_pid_before" >/dev/null 2>&1
+_pid_after=""
+for _i in 1 2 3 4 5 6 7 8; do
+    sleep 1
+    _pid_after="$(docker exec -u "$(id -u)" "$C3" pgrep -f '\.sandy/relay\.sh' 2>/dev/null | head -1)"
+    [ -n "$_pid_after" ] && [ "$_pid_after" != "$_pid_before" ] && break
+done
+ck "relay came back with a NEW pid after being killed" \
+   "[ -n \"$_pid_after\" ] && [ \"$_pid_after\" != \"$_pid_before\" ]"
+_exits="$(docker exec -u "$(id -u)" "$C3" grep -c 'exit rc=' /home/claude/.handoff/relay/supervisor.log 2>/dev/null || echo 0)"
+ck "supervisor.log recorded the exit" "[ \"${_exits:-0}\" -ge 1 ]"
+# The log line is "[sandy-relay] <ISO ts> start <path>", so the timestamp sits
+# between the bracket and the word -- the old '\] start ' pattern required them
+# adjacent and therefore never matched, making this check fail even on a
+# perfectly working restart (which E3s own new-pid assertion had just proved).
+_starts="$(docker exec -u "$(id -u)" "$C3" grep -c ' start /' /home/claude/.handoff/relay/supervisor.log 2>/dev/null || echo 0)"
+ck "supervisor.log shows at least 2 starts (initial + restart)" "[ \"${_starts:-0}\" -ge 2 ]"
+
+echo "-- E4. never started twice --"
+ck "the supervisor lock is HELD (a second flock -n attempt fails)" \
+   "! docker exec -u \"\$(id -u)\" \"$C3\" flock -n /home/claude/.sandy-handoff-relay.lock true"
+ck "still exactly one relay process (no second supervisor was spawned)" \
+   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f '\.sandy/relay\.sh' 2>/dev/null)\" = 1 ]"
+
+echo "-- E5. sandy-handoff-sessions --"
+_hs=""
+for _i in 1 2 3 4 5 6; do
+    _hs="$(docker exec -u "$(id -u)" "$C3" sandy-handoff-sessions 2>/dev/null)"
+    printf '%s\n' "$_hs" | awk -F'\t' '$1=="claude"{f=1} END{exit !f}' && break
+    sleep 5
+done
+ck "sandy-handoff-sessions lists a claude row" \
+   "printf '%s\n' \"\$_hs\" | awk -F'\t' '\$1==\"claude\"{f=1} END{exit !f}'"
+_sock="$(printf '%s\n' "$_hs" | awk -F'\t' '$1=="claude"{print $5; exit}')"
+ck "the listed socket path is a real socket in the container" \
+   "[ -n \"$_sock\" ] && [ \"$_sock\" != \"-\" ] && docker exec -u \"\$(id -u)\" \"$C3\" test -S \"$_sock\""
+
+echo "-- E6. crossSessionInbound pin lands in both measured-working files --"
+_marker="$(docker exec -u "$(id -u)" "$C3" cat /etc/sandy-session.json 2>/dev/null)"
+ck "session marker reports handoff_relay=true" \
+   "printf '%s' \"\$_marker\" | grep -q '\"handoff_relay\": true'"
+ck "session marker reports cross_session_inbound=\"accept\" (default: relay configured)" \
+   "printf '%s' \"\$_marker\" | grep -q '\"cross_session_inbound\": \"accept\"'"
+ck "userSettings (sandbox claude/settings.json, RW) carries the accept pin" \
+   "grep -q '\"crossSessionInbound\": *\"accept\"' \"$SBX3/claude/settings.json\""
+ck "workspace .claude/settings.local.json ALSO carries the pin (harmless no-op there, clears staleness)" \
+   "grep -q '\"crossSessionInbound\": *\"accept\"' \"$WS3/.claude/settings.local.json\""
+# WS3 is under /tmp, outside $HOME, so sandy's workspace-mount fallback mounts
+# it at its own real host path verbatim -- the container path equals $WS3.
+ck "the workspace settings.local.json is genuinely :ro in-container" \
+   "! docker exec -u \"\$(id -u)\" \"$C3\" sh -c 'echo x >> \"$WS3/.claude/settings.local.json\"' 2>/dev/null"
+
+echo "-- E7. survives container recreation --"
+# WHY THIS IS NOT `--update-sessions` ALONE: that command only restarts
+# sessions whose running image id differs from the current image id. In an
+# isolated $SANDY_HOME with a freshly built image nothing is stale, so it
+# correctly does nothing and exits 0 -- and the old "container id changed"
+# assertion, which assumed a restart always happens, failed on a perfectly
+# healthy fleet. Worse, its two follow-on checks then passed VACUOUSLY against
+# the very same container: "relay is running again" was just the original relay
+# never having died, and the seen-file count was still E3s kill/restart pair.
+# So: run --update-sessions for its own contract (exit 0, restart-or-no-op),
+# then force a real recreation deterministically and assert the relay property
+# against that.
+_cid_before="$C3"
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --update-sessions --yes --workspace "$WS3" >/dev/null 2>&1; RC=$?
+ck "--update-sessions exits 0 (whether it restarted a stale session or correctly no-opped)" "[ $RC -eq 0 ]"
+
+_seen_before="$(wc -l < "$SBX3/handoff/relay/seen" 2>/dev/null | tr -d ' ')"
+_cid_before="$(cid3)"
+"$SANDY" --stop --workspace "$WS3" >/dev/null 2>&1
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS3" >/dev/null 2>&1; RC=$?
+ck "--start after --stop exits 0 (deterministic recreation)" "[ $RC -eq 0 ]"
+C3="$(cid3)"
+ck "container id changed (a real recreation happened)" \
+   "[ -n \"$C3\" ] && [ \"$C3\" != \"$_cid_before\" ]"
+_pid_new=""
+for _i in 1 2 3 4 5 6 7 8; do
+    _pid_new="$(docker exec -u "$(id -u)" "$C3" pgrep -f '\.sandy/relay\.sh' 2>/dev/null | head -1)"
+    [ -n "$_pid_new" ] && break
+    sleep 1
+done
+ck "relay is running again in the NEW container" "[ -n \"$_pid_new\" ]"
+# Asserted as GROWTH against the pre-recreation count, not a bare ">= 2":
+# the sandbox dir survives recreation, so a fixed threshold would be satisfied
+# by lines an earlier phase wrote and would prove nothing about this step.
+_seen_after="$(wc -l < "$SBX3/handoff/relay/seen" 2>/dev/null | tr -d ' ')"
+ck "relay state persisted across recreation AND the new instance appended to it" \
+   "[ \"${_seen_after:-0}\" -gt \"${_seen_before:-0}\" ]"
+
+echo "-- E8. headless (-p) never starts a relay --"
+# Stop the daemon first -- a headless launch against a workspace whose daemon
+# is still live would just be refused by the workspace mutex, proving nothing
+# about the relay gate specifically.
+"$SANDY" --stop --workspace "$WS3" >/dev/null 2>&1
+_lines_before="$(wc -l < "$SBX3/handoff/relay/supervisor.log" 2>/dev/null | tr -d ' ')"
+# `timeout` is GNU coreutils and is NOT present on a stock macOS (homebrew
+# installs it as `gtimeout`). Invoking it unconditionally made the -p launch
+# exit 127, which this phase then reported as "the launch did not succeed" --
+# a SKIP with a misleading reason that hid a portability bug rather than
+# naming it. Resolve a real binary, and skip honestly if there is none.
+_e8_to=""
+if command -v timeout >/dev/null 2>&1; then _e8_to="timeout 120"
+elif command -v gtimeout >/dev/null 2>&1; then _e8_to="gtimeout 120"
+fi
+_e8_rc=0
+_e8_out="$(mktemp)"
+if [ -z "$_e8_to" ]; then
+    printf '  \033[33mSKIP\033[0m %s\n' "E8 headless relay gate (no timeout/gtimeout on this host; refusing to run an unbounded -p launch inside an acceptance harness)"
+    _e8_rc=127
+else
+    env -u SANDY_AUTO_APPROVE_PRIVILEGED $_e8_to "$SANDY" -p "reply with the single word pong" --workspace "$WS3" > "$_e8_out" 2>&1 || _e8_rc=$?
+fi
+if [ "$_e8_rc" -ne 0 ]; then
+    # A failed headless launch (missing credentials, image not built, mutex,
+    # timeout) proves nothing about the relay gate -- an unchanged log count
+    # would be trivially true either way, so don't let this pass vacuously.
+    # No `skip` counter exists in this harness (only PASS/FAIL) -- print and
+    # move on without touching either, rather than counting it as a pass.
+    [ -n "$_e8_to" ] && printf '  \033[33mSKIP\033[0m %s\n' "E8 headless relay gate (the -p launch itself did not succeed, rc=$_e8_rc -- cannot conclude anything about the relay gate from it)"
+else
+    _lines_after="$(wc -l < "$SBX3/handoff/relay/supervisor.log" 2>/dev/null | tr -d ' ')"
+    ck "supervisor.log line count unchanged after a successful headless run (no relay was started)" \
+       "[ \"${_lines_before:-0}\" = \"${_lines_after:-0}\" ]"
+    # Acceptance criterion 8: the skip is announced, and the announcement names
+    # the consequence for the receive surface -- a silent skip would leave the
+    # operator unable to tell "no relay because headless" from "relay died".
+    ck "headless launch prints the criterion-8 skip line naming the refuse consequence" \
+       "grep -q 'SANDY_HANDOFF_RELAY not started (headless run); crossSessionInbound will default to refuse' \"$_e8_out\""
+fi
+rm -f "$_e8_out"
+
+echo "-- E10. criterion 7: a configured relay that CANNOT start fails the launch --"
+# The whole point of the fail-the-launch rule: the crossSessionInbound default
+# resolves to `accept` on the strength of the key alone, so a configured relay
+# that never starts would leave that surface open with nothing delivering.
+# Host-side detection (the path is workspace-relative, so sandy can resolve it
+# back to the host and refuse before `docker run` ever happens).
+"$SANDY" --stop --workspace "$WS3" >/dev/null 2>&1
+sed -i.bak 's|^SANDY_HANDOFF_RELAY=.*|SANDY_HANDOFF_RELAY=.sandy/does-not-exist.sh|' "$SANDY_HOME_DIR/config"
+_e10_out="$(mktemp)"
+_e10_rc=0
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS3" > "$_e10_out" 2>&1 || _e10_rc=$?
+ck "--start refuses (nonzero) when the configured relay is not an executable file" "[ $_e10_rc -ne 0 ]"
+ck "...and says so, naming the fail-the-launch rule" \
+   "grep -q 'A configured relay that cannot start fails the launch' \"$_e10_out\""
+ck "...and no daemon container was left behind" "[ -z \"$(cid3)\" ]"
+rm -f "$_e10_out"
+# Restore the working relay so anything added after this phase is unaffected.
+mv "$SANDY_HOME_DIR/config.bak" "$SANDY_HOME_DIR/config" 2>/dev/null || \
+    sed -i.bak2 's|^SANDY_HANDOFF_RELAY=.*|SANDY_HANDOFF_RELAY=.sandy/relay.sh|' "$SANDY_HOME_DIR/config"
+rm -f "$SANDY_HOME_DIR/config.bak2"
+
+# E9 (zero-diff regression) is phase A, which already ran with the relay
+# entirely unset and asserted no "handoff" string anywhere in `docker
+# inspect` -- not repeated here.
 
 echo
 echo "==================================================="

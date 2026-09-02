@@ -951,7 +951,77 @@ _sandy_build_agent_cmd() {
     esac
 }
 
+# ---- handoff relay supervisor (SANDY_HANDOFF_RELAY, 1.10.0) -------------------
+# Container-level process: a sibling of the tmux server, never a pane, never a
+# child of an agent. Singleton via flock on the tmpfs home; restart-on-death with
+# backoff; never overlaps; never gives up. Headless (-p) and --remote runs never
+# start it (the launcher also never forwards the key for those).
+#
+# A configured relay that cannot start FAILS THE SESSION (exit 1 from
+# user-setup.sh, so the container dies) — never "warn and proceed". The
+# launcher resolved crossSessionInbound=accept on the strength of this key;
+# proceeding without the relay would leave that surface open with nothing
+# delivering. The launcher already fails host-side for any path it can see;
+# these checks are the in-container remainder (image-only absolute paths,
+# the mount, flock).
+_sandy_start_handoff_relay() {
+    [ -n "${SANDY_HANDOFF_RELAY:-}" ] || return 0
+    local _r="$SANDY_HANDOFF_RELAY" _st="$HOME/.handoff/relay" _lock="$HOME/.sandy-handoff-relay.lock"
+    case "$_r" in /*) ;; *) _r="$WORKSPACE/$_r" ;; esac
+    if [ ! -f "$_r" ] || [ ! -x "$_r" ]; then
+        sandy_log "ERROR: SANDY_HANDOFF_RELAY=$SANDY_HANDOFF_RELAY resolves to $_r, which is not an executable file inside the container. A configured relay that cannot start fails the session (unset SANDY_HANDOFF_RELAY to launch without one)."
+        exit 1
+    fi
+    if [ ! -d "$_st" ]; then
+        sandy_log "ERROR: SANDY_HANDOFF_RELAY is configured but ~/.handoff/relay is not mounted. A configured relay that cannot start fails the session."
+        exit 1
+    fi
+    if ! command -v flock >/dev/null 2>&1; then
+        sandy_log "ERROR: SANDY_HANDOFF_RELAY is configured but flock is not available in this image, so the relay singleton cannot be enforced. A configured relay that cannot start fails the session."
+        exit 1
+    fi
+    export SANDY_HANDOFF_INBOX="$HOME/.handoff/inbox" SANDY_HANDOFF_OUTBOX="$HOME/.handoff/outbox" SANDY_HANDOFF_RELAY_STATE="$_st"
+    (
+        set +e; trap - ERR; trap '' HUP     # user-setup runs set -e + an ERR trap; the loop must survive relay exits
+        exec 9>"$_lock"
+        if ! flock -n 9; then
+            echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor already running (lock held); not starting a second" >> "$_st/supervisor.log"
+            exit 0
+        fi
+        # The success log is written here, AFTER the lock is actually held, not by
+        # the caller before backgrounding — the caller cannot yet know whether this
+        # attempt is the singleton winner or the "already running" loser above, and
+        # logging unconditionally on the caller's side would claim success for both.
+        echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor started ($_r)" >> "$_st/supervisor.log"
+        backoff=1
+        while :; do
+            echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) start $_r" >> "$_st/supervisor.log"
+            t0=$(date +%s)
+            # 9>&- closes the lock fd in the relay's own process: the lock is held by
+            # THIS loop shell, not by the relay child, so a kill of the loop alone
+            # (without the relay) releases the lock instead of stranding it with an
+            # orphaned holder that would make every future supervisor see a false
+            # "already running".
+            "$_r" 9>&- >> "$_st/supervisor.log" 2>&1 </dev/null
+            rc=$?; up=$(( $(date +%s) - t0 ))
+            [ "$up" -gt 60 ] && backoff=1
+            echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) exit rc=$rc uptime=${up}s; restart in ${backoff}s" >> "$_st/supervisor.log"
+            sleep "$backoff"
+            backoff=$(( backoff * 2 )); [ "$backoff" -gt 60 ] && backoff=60
+        done
+    ) </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    sandy_log "Handoff relay supervisor requested ($_r); outcome (started vs. already running) is in ~/.handoff/relay/supervisor.log"
+}
+
 cd "$WORKSPACE"
+
+# Relay slot: skipped for headless (-p) and for --remote (criterion 8 — under
+# remote-control there is no tmux session, so sandy-handoff-sessions has no rows
+# and a helper-driven relay would be restarted every 60s for the container's
+# life with nothing to target). The launcher also unsets the key for both, so
+# this gate is the in-container half of the same decision, not the only half.
+if [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then _sandy_start_handoff_relay; fi
 
 if [ "$_SANDY_IS_MULTI" = false ]; then
     # --- Single-agent launch ---

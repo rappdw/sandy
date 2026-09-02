@@ -2237,15 +2237,23 @@ fi
 fi  # section 22
 
 # ============================================================
-section "23. Handoff directories acceptance (#132 slice 1) — test/acceptance-handoff-dirs.sh"
+section "23. Handoff directories + relay acceptance (#132 slice 1, SANDY_HANDOFF_RELAY 1.10.0) — test/acceptance-handoff-dirs.sh"
 # ============================================================
 if [ "$_SECTION_ON" = true ]; then
-# Directory/mount substrate ONLY (outbox rw, inbox :ro) — no relay, no helper,
-# no skills, no turn initiation. The real-Docker behavior a static check
+# Phases A-D: directory/mount substrate (outbox rw, inbox :ro) — no relay, no
+# skills, no turn initiation. The real-Docker behavior a static check
 # cannot see: actual bind-mount RW flags, that EROFS wins even for a file the
 # container uid already owns, and that the whole feature is a true zero-diff
-# when SANDY_HANDOFF_DIRS is unset. Same invocation contract as §19-§21 —
-# self-cleaning harness, SANDY pinned to this suite's sandy.
+# when SANDY_HANDOFF_DIRS is unset.
+# Phase E (1.10.0): SANDY_HANDOFF_RELAY — the container-level relay
+# supervisor actually starts with the container, restarts a killed relay,
+# never runs twice, and survives an --update-sessions recreation; also that
+# the crossSessionInbound pin lands in BOTH measured-working files and that
+# the workspace copy is genuinely :ro in-container. run-tests.sh §114 covers
+# the same supervisor logic structurally (no Docker); this is the one place
+# that proves it against a real container.
+# Same invocation contract as §19-§21 — self-cleaning harness, SANDY pinned
+# to this suite's sandy.
 _acc_handoff="$_INT_SELF_DIR/acceptance-handoff-dirs.sh"
 if [ -f "$_acc_handoff" ]; then
     _acc_out="$(mktemp)"
