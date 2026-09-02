@@ -2077,8 +2077,9 @@ check "sandbox layout creates codex/ subdir for SANDY_AGENT=codex" \
 check "codex sandbox mounted at /home/claude/.codex" \
     grep -q 'SANDBOX_DIR/codex:/home/claude/.codex' "$SANDY_SCRIPT"
 
-# Auth.json mounted read-only.
-check "codex auth.json mount is read-only (:ro)" \
+# Auth.json mounted read-only -- api_key path ONLY. The OAuth path seeds the
+# rw sandbox instead, so `codex login` in-container can write and persist.
+check "codex auth.json mount is read-only (:ro) on the api_key path" \
     grep -q 'auth.json:/home/claude/.codex/auth.json:ro' "$SANDY_SCRIPT"
 
 # Env passthrough: OPENAI_API_KEY forwarded to container (codex reads this),
@@ -3179,7 +3180,7 @@ info "40. Sprint 1 — Credentials mounts"
 SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 check "Claude credentials mount is rw (no :ro suffix)" \
     bash -c 'grep -q "CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json\")" "$1" && ! grep -q "CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json:ro" "$1"' -- "$SANDY_SCRIPT_PATH"
-check "Codex credentials mount has :ro" \
+check "Codex credentials mount has :ro (api_key path; CODEX_CRED_TMPDIR is now set only there)" \
     grep -q 'CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro' "$SANDY_SCRIPT_PATH"
 check "Gemini OAuth mount has :ro" \
     grep -q 'home/claude/.gemini/.*:ro' "$SANDY_SCRIPT_PATH"
@@ -11733,6 +11734,80 @@ unset _S114_SANDY _S114_TMPL _S114 _S114_PVP_FN _S114_VC_ACCEPT _S114_VC_HOLD _S
     _S114_RW _S114_RELAY_OUT _S114_COLL_BLK _S114_COLL_RC _S114_COLL_OUT _S114_D8_OUT \
     _S114_ACC _S114_ACC_E _S114_START_PAT \
     2>/dev/null || true
+
+# ============================================================
+echo "§116: codex OAuth credentials are seeded into the rw sandbox, not overlaid :ro"
+# ============================================================
+# WHY. The old design overlaid an ephemeral copy of the host's ~/.codex/auth.json
+# READ-ONLY at /home/claude/.codex/auth.json, so `codex login`, `codex logout`
+# and in-session token refresh all died with EROFS inside the container -- while
+# sandy's own comments, CLAUDE.md and SPECIFICATION.md all told the user to
+# "re-login inside the container", which that configuration makes impossible.
+# The :ro was also not buying its two stated properties (no leakage to host, no
+# stale-token race): the mount source was already an ephemeral COPY that
+# cleanup() removes, so a write could neither reach the host nor race it.
+#
+# Now: the OAuth path SEEDS the sandbox (rw) and the sandbox copy WINS on later
+# launches -- without that precedence a relaunch would clobber a fresh
+# in-container login with the host's stale token, which is the whole bug.
+# The api_key path is deliberately unchanged.
+_S116_SANDY="$SANDY_SCRIPT"
+_S116_FN="$(awk '/^load_codex_credentials\(\) \{/,/^}$/' "$_S116_SANDY")"
+check "§116(pre) extracted load_codex_credentials (mutation: a rename empties this and every check below must fail HERE, not silently pass)" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDBOX_DIR/codex/auth.json"' -- "$_S116_FN"
+
+# $1=mode $2=OPENAI_API_KEY $3=host-auth(yes/no) $4=sandbox-auth content ("" = none)
+# Echoes: "<info/warn text>||TMPDIR=<yes|> SBX=<content|none>"
+_s116_run() {
+    local _t; _t="$(mktemp -d)"
+    mkdir -p "$_t/home/.codex" "$_t/sbx/codex"
+    [ "$3" = yes ] && printf '{"tokens":{"host":"HOSTTOKEN"}}' > "$_t/home/.codex/auth.json"
+    [ -n "$4" ] && printf '%s' "$4" > "$_t/sbx/codex/auth.json"
+    env -u OPENAI_API_KEY SANDY_CODEX_AUTH="$1" OPENAI_API_KEY="$2" \
+        HOME="$_t/home" SANDBOX_DIR="$_t/sbx" bash -c "
+            info(){ printf '%s ' \"\$*\"; }; warn(){ printf '%s ' \"\$*\"; }
+            CODEX_CRED_TMPDIR=''
+            $_S116_FN
+            load_codex_credentials
+            printf '||TMPDIR=%s SBX=%s' \"\${CODEX_CRED_TMPDIR:+yes}\" \
+                \"\$( [ -s \"\$SANDBOX_DIR/codex/auth.json\" ] && cat \"\$SANDBOX_DIR/codex/auth.json\" || echo none)\"
+        " 2>&1
+    rm -rf "$_t"
+}
+
+check "§116(1) host OAuth + fresh sandbox -> SEEDED into the rw sandbox, NO :ro overlay (mutation: restoring the overlay sets TMPDIR and leaves the sandbox empty)" \
+    bash -c '[ "${1##*||}" = "TMPDIR= SBX={\"tokens\":{\"host\":\"HOSTTOKEN\"}}" ]' -- "$(_s116_run auto "" yes "")"
+check "§116(2) an in-container login WINS over the host copy (mutation: drop the -s sandbox check -> the host token overwrites it every launch, which is the reported bug)" \
+    bash -c '[ "${1##*||}" = "TMPDIR= SBX={\"tokens\":{\"s\":\"SBXTOKEN\"}}" ]' -- "$(_s116_run auto "" yes '{"tokens":{"s":"SBXTOKEN"}}')"
+check "§116(3) NEGATIVE: OPENAI_API_KEY keeps its precedence in auto mode, still via the ephemeral :ro overlay" \
+    bash -c 'case "$1" in *"TMPDIR=yes SBX=none") exit 0;; esac; exit 1' -- "$(_s116_run auto "sk-abc" yes "")"
+check "§116(4) mode=oauth ignores the env key and still seeds" \
+    bash -c '[ "${1##*||}" = "TMPDIR= SBX={\"tokens\":{\"host\":\"HOSTTOKEN\"}}" ]' -- "$(_s116_run oauth "sk-abc" yes "")"
+check "§116(5) mode=api_key overlays :ro even when the sandbox holds its own credential (an explicit mode choice wins)" \
+    bash -c 'case "$1" in *"TMPDIR=yes"*) exit 0;; esac; exit 1' -- "$(_s116_run api_key "sk-abc" yes '{"tokens":{"s":"X"}}')"
+check "§116(6) no credentials anywhere -> warns, seeds nothing, mounts nothing" \
+    bash -c 'case "$1" in "No Codex credentials found."*"TMPDIR= SBX=none") exit 0;; esac; exit 1' -- "$(_s116_run auto "" no "")"
+# The host file is READ, never written -- the seed direction must not invert.
+check "§116(7) NEGATIVE: nothing is ever copied back to the host's ~/.codex/auth.json" \
+    bash -c '! printf "%s" "$1" | grep -qE "cp .*SANDBOX_DIR/codex/auth\.json .*HOME/\.codex"' -- "$_S116_FN"
+# NOTE: written as an exact-copy-target assertion, not `grep -qv`. The first
+# version used `... | grep -qv CODEX_CRED_TMPDIR`, which returns 0 whenever ANY
+# line differs -- so it passed even against the restored overlay. Vacuous, and
+# caught only because the mutation run showed it staying green while (1) and (4)
+# went red.
+check "§116(8) the host OAuth copy targets the SANDBOX, never an ephemeral tmpdir (mutation: reinstating the overlay flips this copy target and it fails)" \
+    bash -c '
+        printf "%s\n" "$1" | grep -q '"'"'cp "\$HOME/.codex/auth.json" "\$SANDBOX_DIR/codex/auth.json"'"'"' || exit 1
+        ! printf "%s\n" "$1" | grep -q '"'"'cp "\$HOME/.codex/auth.json" "\$CODEX_CRED_TMPDIR'"'"'
+    ' -- "$_S116_FN"
+check "§116(9) --print-schema advertises sandbox_auth_json in the codex probe order" \
+    bash -c 'cd "$(dirname "$1")" && ./sandy --print-schema 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+c=[a for a in d[\"agents\"] if a[\"name\"]==\"codex\"][0]
+assert c[\"credentials\"][\"probe_order\"]==[\"OPENAI_API_KEY\",\"sandbox_auth_json\",\"host_auth_json\"], c
+"' -- "$_S116_SANDY"
+unset _S116_SANDY _S116_FN
 
 # ============================================================
 echo "§115: the run's own summary is actually the last thing that runs"

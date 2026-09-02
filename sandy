@@ -1089,7 +1089,7 @@ _sandy_emit_schema() {
     printf '{'
     _json_kv name '"codex"'; printf ','; _json_kv image '"sandy-codex"'
     printf ','; _json_kv features '["skills_context"]'
-    printf ','; _json_kv credentials '{"probe_order":["OPENAI_API_KEY","host_auth_json"]}'
+    printf ','; _json_kv credentials '{"probe_order":["OPENAI_API_KEY","sandbox_auth_json","host_auth_json"]}'
     printf '}'
     printf ','
     printf '{'
@@ -10622,9 +10622,25 @@ _gemini_write_auth_type() {
 }
 
 # Codex credentials: OPENAI_API_KEY is what the codex CLI reads natively.
-# OAuth path uses an ephemeral read-only mount of the host's ~/.codex/auth.json;
-# in-session token refresh will fail gracefully and prompt the user to
-# re-login inside the container.
+# Two paths, deliberately different.
+#
+# OAuth: the host's ~/.codex/auth.json is SEEDED into the sandbox (rw) on first
+# use, not overlaid read-only. The old :ro overlay made `codex login`, `codex
+# logout` and in-session token refresh fail with EROFS inside the container --
+# while three separate docs told the user to "re-login inside the container",
+# which that configuration makes impossible. The :ro was also not buying its
+# stated properties: the mount source was already an ephemeral COPY that
+# cleanup() rm -rf's, so a write could neither reach the host nor race it.
+# Seeding gives an in-container login somewhere durable to land, and the
+# sandbox copy then WINS over the host's on later launches -- otherwise every
+# relaunch would clobber a fresh login with the host's stale token. Mirrors
+# grok, whose interactive login already persists in its own rw ~/.grok mount.
+#
+# api_key: unchanged -- still an ephemeral read-only overlay. The value comes
+# from the environment and is re-supplied every launch, so there is nothing to
+# persist, and writing a raw API key to disk in the sandbox is a larger posture
+# change than persisting an OAuth session. In-container `codex login` is
+# therefore still refused on this path; that is stated in the launch line.
 load_codex_credentials() {
     local mode="${SANDY_CODEX_AUTH:-auto}"
     if [ "$mode" = "api_key" ] || [ "$mode" = "auto" ]; then
@@ -10640,20 +10656,31 @@ load_codex_credentials() {
             CODEX_CRED_TMPDIR="$(mktemp -d)"
             printf '{"OPENAI_API_KEY":"%s"}\n' "$_k" > "$CODEX_CRED_TMPDIR/auth.json"
             chmod 600 "$CODEX_CRED_TMPDIR/auth.json"
-            info "Using OPENAI_API_KEY for Codex (ephemeral auth.json, read-only mount)"
+            info "Using OPENAI_API_KEY for Codex (ephemeral auth.json, read-only mount; in-container 'codex login' cannot write it -- unset the key or set SANDY_CODEX_AUTH=oauth to log in interactively)"
             return 0
         fi
     fi
     if [ "$mode" = "oauth" ] || [ "$mode" = "auto" ]; then
+        # The sandbox's own credential wins over the host's. It only exists if
+        # someone ran `codex login` inside this container, which is a more
+        # deliberate and more recent act than whatever the host happens to hold.
+        # (An EMPTY auth.json -- what codex leaves behind on the api_key path --
+        # is already removed earlier in setup, so -s is the right test.)
+        if [ -s "$SANDBOX_DIR/codex/auth.json" ]; then
+            info "Using Codex credentials from this sandbox (an in-container 'codex login'); the host copy is not used"
+            return 0
+        fi
         if [ -f "$HOME/.codex/auth.json" ]; then
-            CODEX_CRED_TMPDIR="$(mktemp -d)"
-            cp "$HOME/.codex/auth.json" "$CODEX_CRED_TMPDIR/auth.json"
-            chmod 600 "$CODEX_CRED_TMPDIR/auth.json"
-            info "Loaded Codex OAuth credentials from host (read-only mount)"
+            # Seeded, not overlaid: the container path stays inside the rw
+            # sandbox mount so login/logout/refresh can write it. Never copied
+            # back -- the host file is only ever read.
+            cp "$HOME/.codex/auth.json" "$SANDBOX_DIR/codex/auth.json"
+            chmod 600 "$SANDBOX_DIR/codex/auth.json"
+            info "Seeded Codex OAuth credentials from host into this sandbox (writable; 'codex login' in-container persists here)"
             return 0
         fi
     fi
-    warn "No Codex credentials found. Set OPENAI_API_KEY, or run 'codex login' on host."
+    warn "No Codex credentials found. Set OPENAI_API_KEY, run 'codex login' on the host, or run it inside the container (it persists in this sandbox)."
 }
 
 # OpenCode credential probe. Unlike claude/gemini/codex which each have one
@@ -11005,9 +11032,11 @@ fi
 if _sandy_agent_has codex; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/codex:/home/claude/.codex")
     if [ -n "${CODEX_CRED_TMPDIR:-}" ]; then
-        # :ro — prevents token leakage back to host and prevents a
-        # stale-token-on-exit race. In-session refresh will fail; user
-        # must re-login inside the container if the token expires.
+        # Only the api_key path reaches here now (the OAuth path seeds the
+        # sandbox instead). :ro because the file is synthesized from an env
+        # var that is re-supplied every launch: there is nothing an
+        # in-container write could usefully persist, and keeping it read-only
+        # stops the agent swapping in a credential of its own mid-session.
         RUN_FLAGS+=(-v "$CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro")
     fi
 fi
