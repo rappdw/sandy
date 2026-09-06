@@ -13,8 +13,9 @@
 # survives an --update-sessions recreation.
 #
 # Phases A-D ship directory/mount substrate only — no skills, no turn
-# initiation, no peers, no manifest, no archive/ (its mode is unsettled in
-# #132). Phase E covers the ONE mechanism that does move bytes today: the
+# initiation, no manifest, no archive/ (its mode is unsettled in #132). Since
+# 1.10.0 the tree is ON BY DEFAULT (outbox rw, inbox :ro, peer :ro, relay rw)
+# and SANDY_HANDOFF_DIRS=0 is the opt-out. Phase E covers the ONE mechanism that does move bytes today: the
 # relay process itself, plus the crossSessionInbound pin that gates whether
 # a peer message it forwards is delivered, held, or refused. Phase E does
 # NOT drive an actual UDS handoff message end-to-end (that is Claude Code's
@@ -26,18 +27,25 @@
 #           SANDY=/path/to/sandy bash test/acceptance-handoff-dirs.sh
 #
 # Phases:
-#   A. Negative/zero-diff — key unset: no "handoff" anywhere in `docker
-#      inspect` (Mounts + Env in one grep), no sandbox handoff/ dir, no
+#   A. Default — NO config anywhere: all four mounts present with the right
+#      RW flags (outbox true, inbox false, peer false, relay true) and the
+#      in-container ~/.handoff/{inbox,outbox,peer} directories exist — the
+#      exact check a consumer runs.
+#   A2. Opt-out/zero-diff — SANDY_HANDOFF_DIRS=0 via the WORKSPACE's
+#      .sandy/config: no "handoff" anywhere in `docker inspect` (Mounts + Env
+#      in one grep), the host handoff/ dirs still exist (inert), no
 #      in-container ~/.handoff path.
-#   B. Positive — key set via the WORKSPACE's .sandy/config (proves the
+#   B. Explicit on — key =1 via the WORKSPACE's .sandy/config (proves the
 #      passive tier end-to-end: no approval prompt, works under the
 #      non-interactive --start supervisor): host dirs exist, mount RW flags
-#      are outbox=true/inbox=false, outbox is writable, inbox is not (even
-#      after chmod), and a host-placed file in inbox resists chmod from
-#      inside the container despite being agent-uid-owned (EROFS beats
-#      ownership — the entire point of the :ro mount flag).
+#      are outbox=true/inbox=false/peer=false, outbox is writable, inbox and
+#      peer are not (even after chmod), and a host-placed file in inbox
+#      resists chmod from inside the container despite being agent-uid-owned
+#      (EROFS beats ownership — the entire point of the :ro mount flag).
 #   C. Persistence — stop/start preserves the outbox content.
-#   D. Enable by MARKER (.handoff-enabled) with no workspace config anywhere,
+#   D. The MARKER (.handoff-enabled) OVERRIDES an opt-out: with
+#      SANDY_HANDOFF_DIRS=0 in the isolated HOST config and no workspace
+#      config anywhere, pre-marker the tree is off; post-marker it is on,
 #      repeating the EROFS-beats-ownership assertions on THAT path — phase B
 #      only proves them for the SANDY_HANDOFF_DIRS=1 path.
 #   E. SANDY_HANDOFF_RELAY (1.10.0, privileged, set via the isolated host's
@@ -71,7 +79,7 @@ ck() { if eval "$2" >/dev/null 2>&1; then printf '  \033[32mPASS\033[0m %s\n' "$
 cid() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.workspace_path=$WS" 2>/dev/null | head -1; }
 # Phase D uses a SECOND workspace, because its whole point is that no workspace
 # .sandy/config exists anywhere — reusing $WS would leave phase B config behind
-# and the marker could not be shown to be what enabled the pair.
+# and the marker could not be shown to be what overrode the opt-out.
 WS2="$(mktemp -d)/mbx-marker-$$"
 mkdir -p "$WS2" && (cd "$WS2" && git init -q)
 WS2="$(cd "$WS2" && pwd -P)"
@@ -103,29 +111,71 @@ cid2() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.wor
 
 command -v docker >/dev/null 2>&1 || { echo "docker not found — run this on the host"; exit 2; }
 
-echo "== A. negative (SANDY_HANDOFF_DIRS unset: dirs exist, nothing is mounted) =="
-"$SANDY" --start --workspace "$WS"; RC=$?
+echo "== A. default (no config anywhere): the whole tree is mounted =="
+ck "phase A workspace has NO .sandy/config (the premise)" "[ ! -e \"$WS/.sandy/config\" ]"
+ck "isolated host config does not mention SANDY_HANDOFF_DIRS (the premise)" \
+   "! grep -qs SANDY_HANDOFF_DIRS \"$SANDY_HOME_DIR/config\""
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS"; RC=$?
 ck "--start exits 0" "[ $RC -eq 0 ]"
 C="$(cid)"
 ck "daemon container is running" "[ -n \"$C\" ]"
 SESS="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C" 2>/dev/null)"
 ck "session label resolved" "[ -n \"$SESS\" ]"
+_m0="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C" 2>/dev/null)"
+echo "  mounts:"; printf '%s\n' "$_m0" | grep -i handoff | sed 's/^/    /'
+# This is the exact mount table a consumer verifies against -- four rows, no
+# more: outbox rw, inbox ro, peer ro, relay rw.
+ck "default: outbox mount is RW=true" \
+   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/claude/.handoff/outbox true\$'"
+ck "default: inbox mount is RW=false" \
+   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/claude/.handoff/inbox false\$'"
+ck "default: peer mount is RW=false" \
+   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/claude/.handoff/peer false\$'"
+ck "default: relay mount is RW=true" \
+   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/claude/.handoff/relay true\$'"
+ck "default: exactly four ~/.handoff/* mounts (no stray rows)" \
+   "[ \"\$(printf '%s\n' \"\$_m0\" | grep -c '^/home/claude/.handoff/')\" = 4 ]"
+# The in-container half of the consumer check.
+ck "default: in-container ~/.handoff/inbox, outbox and peer all exist" \
+   "docker exec -u \"\$(id -u)\" \"$C\" sh -c 'test -d /home/claude/.handoff/inbox && test -d /home/claude/.handoff/outbox && test -d /home/claude/.handoff/peer'"
+ck "default: no relay env forwarded (the tree being on says nothing about a relay)" \
+   "! docker inspect -f '{{range .Config.Env}}{{.}}{{\"\n\"}}{{end}}' \"$C\" | grep -q '^SANDY_HANDOFF_RELAY='"
+"$SANDY" --stop --workspace "$WS"; ck "--stop (phase A) exits 0" "[ $? -eq 0 ]"
+# Idempotence: a second launch of the same sandbox must produce the same table
+# (mkdir -p + the same -v lines), not fail on directories that now exist.
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS"; RC=$?
+ck "default: a SECOND launch exits 0 (idempotent)" "[ $RC -eq 0 ]"
+C="$(cid)"
+ck "default: second launch has the same four ~/.handoff/* mounts" \
+   "[ \"\$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{\"\n\"}}{{end}}' \"$C\" | grep -c '^/home/claude/.handoff/')\" = 4 ]"
+"$SANDY" --stop --workspace "$WS"; ck "--stop (phase A, second) exits 0" "[ $? -eq 0 ]"
+
+echo "== A2. opt-out (SANDY_HANDOFF_DIRS=0 via workspace .sandy/config): dirs exist, nothing is mounted =="
+# The opt-out from a WORKSPACE source: it tightens, so the passive tier must
+# take it with no prompt (env -u below keeps that claim honest, see phase B).
+mkdir -p "$WS/.sandy"
+echo "SANDY_HANDOFF_DIRS=0" > "$WS/.sandy/config"
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS"; RC=$?
+ck "--start exits 0 under the opt-out" "[ $RC -eq 0 ]"
+C="$(cid)"
+ck "daemon container is running" "[ -n \"$C\" ]"
 ck "docker inspect has NO mention of handoff anywhere (mounts, env, labels)" \
    "! docker inspect \"$C\" | grep -qi handoff"
-# The host directories are now created on EVERY launch (only the MOUNT is
-# gated), so their presence proves nothing and is not asserted either way. What
-# still must hold with handoff off is that nothing reaches the CONTAINER — which
-# the docker-inspect assertion above and the in-container check below cover.
+# The host directories are created on EVERY launch (only the MOUNT is gated),
+# so their presence proves nothing and is not asserted either way. What must
+# hold under the opt-out is that nothing reaches the CONTAINER -- which the
+# docker-inspect assertion above and the in-container check below cover.
 ck "sandbox handoff/ dirs exist but are INERT (created always; presence means nothing)" \
-   "[ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/inbox\" ]"
+   "[ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/inbox\" ] && [ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/peer\" ]"
 ck "in-container ~/.handoff does NOT exist" \
    "! docker exec -u \"\$(id -u)\" \"$C\" test -e /home/claude/.handoff"
-"$SANDY" --stop --workspace "$WS"; ck "--stop (phase A) exits 0" "[ $? -eq 0 ]"
+"$SANDY" --stop --workspace "$WS"; ck "--stop (phase A2) exits 0" "[ $? -eq 0 ]"
 
-echo "== B. positive (SANDY_HANDOFF_DIRS=1 via workspace .sandy/config) =="
+echo "== B. explicit on (SANDY_HANDOFF_DIRS=1 via workspace .sandy/config) =="
 # Setting it here — not via env — proves the passive tier end-to-end: no
 # approval prompt is needed, and it works under the non-interactive --start
-# supervisor exactly like any other passive key.
+# supervisor exactly like any other passive key. The file is REWRITTEN (not
+# appended) so the phase-A2 opt-out line is gone and =1 is the only setting.
 #
 # `env -u SANDY_AUTO_APPROVE_PRIVILEGED` is load-bearing for that claim. When
 # this harness runs under run-integration-tests.sh it inherits that variable
@@ -135,7 +185,7 @@ echo "== B. positive (SANDY_HANDOFF_DIRS=1 via workspace .sandy/config) =="
 # assertion would silently become vacuous. Unsetting it keeps the proof real
 # whether the script runs standalone or as a suite section.
 mkdir -p "$WS/.sandy"
-echo "SANDY_HANDOFF_DIRS=1" >> "$WS/.sandy/config"
+echo "SANDY_HANDOFF_DIRS=1" > "$WS/.sandy/config"
 env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS"; RC=$?
 ck "--start exits 0 with the handoff directories enabled" "[ $RC -eq 0 ]"
 C="$(cid)"
@@ -151,11 +201,17 @@ ck "outbox mount is RW=true" \
    "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/claude/.handoff/outbox true\$'"
 ck "inbox mount is RW=false" \
    "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/claude/.handoff/inbox false\$'"
+ck "peer mount is RW=false" \
+   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/claude/.handoff/peer false\$'"
 
 ck "write to outbox SUCCEEDS from inside the container" \
    "docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/claude/.handoff/outbox/probe.txt'"
 ck "write to inbox FAILS from inside the container" \
    "! docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/claude/.handoff/inbox/probe.txt' 2>/dev/null"
+ck "write to peer FAILS from inside the container" \
+   "! docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/claude/.handoff/peer/probe.txt' 2>/dev/null"
+ck "chmod u+w on the peer dir itself FAILS (EROFS, not a mode problem)" \
+   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/claude/.handoff/peer 2>/dev/null"
 ck "chmod u+w on the inbox dir itself FAILS (EROFS, not a mode problem)" \
    "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/claude/.handoff/inbox 2>/dev/null"
 
@@ -188,19 +244,25 @@ ck "outbox file from phase B still present after restart" \
    "docker exec -u \"\$(id -u)\" \"$C\" test -f /home/claude/.handoff/outbox/probe.txt"
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase C, final) exits 0" "[ $? -eq 0 ]"
 
-echo "== D. enable by MARKER, with no workspace config anywhere =="
+echo "== D. the MARKER overrides an opt-out, with no workspace config anywhere =="
 # Closes acceptance criterion 4 for the MARKER path specifically. Phase B proves
-# EROFS-beats-ownership when the pair is enabled by SANDY_HANDOFF_DIRS=1; that is
+# EROFS-beats-ownership when the tree is on by SANDY_HANDOFF_DIRS=1; that is
 # NOT the same evidence. The marker resolves into the same variable before the
 # gate, so both paths reach identical mount code — but "identical by
 # construction" is an argument, not a test result, and criterion 4 exists
 # precisely to reject that kind of reasoning.
 #
-# The marker lives at the TOP level of the sandbox dir, whose slug is not known
-# until a launch creates it. So: launch once (also proving marker-absent means
-# off), stop, enrol, relaunch. That is exactly the order a provisioner works in.
+# Since 1.10.0 the tree is on by default, so the marker is only observable
+# against an opt-out. The opt-out here is HOST-level (the isolated
+# $SANDY_HOME/config) with no workspace config at all -- the "off everywhere,
+# on for these" fleet shape. The marker lives at the TOP level of the sandbox
+# dir, whose slug is not known until a launch creates it. So: launch once
+# (proving the host opt-out holds with no marker), stop, touch the marker,
+# relaunch. That is exactly the order a provisioner works in.
 
 ck "phase D workspace has NO .sandy/config (the premise)" "[ ! -e \"$WS2/.sandy/config\" ]"
+echo "SANDY_HANDOFF_DIRS=0" >> "$SANDY_HOME_DIR/config"
+ck "host-level opt-out is in place (the premise)" "grep -qx SANDY_HANDOFF_DIRS=0 \"$SANDY_HOME_DIR/config\""
 
 env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS2"; RC=$?
 ck "--start (D, pre-enrolment) exits 0" "[ $RC -eq 0 ]"
@@ -208,9 +270,10 @@ C2="$(cid2)"
 ck "daemon container is running" "[ -n \"$C2\" ]"
 SESS2="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C2" 2>/dev/null)"
 ck "session label resolved" "[ -n \"$SESS2\" ]"
-# Marker absent and no config => the pair must be OFF. Without this the phase
-# could pass on a sandbox that had handoff enabled for some unrelated reason.
-ck "NEGATIVE: no marker and no config => in-container ~/.handoff does NOT exist" \
+# Marker absent + host opt-out => the tree must be OFF. Without this the phase
+# could pass on a sandbox that had the tree for some unrelated reason (the
+# default, for one).
+ck "NEGATIVE: no marker + host opt-out => in-container ~/.handoff does NOT exist" \
    "! docker exec -u \"\$(id -u)\" \"$C2\" test -e /home/claude/.handoff"
 
 "$SANDY" --stop --workspace "$WS2" >/dev/null 2>&1
@@ -224,7 +287,8 @@ env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS2"; RC=$?
 ck "--start (D, enrolled by marker) exits 0" "[ $RC -eq 0 ]"
 C2="$(cid2)"
 ck "daemon container is running after enrolment" "[ -n \"$C2\" ]"
-ck "still NO workspace .sandy/config — the marker alone enabled it" "[ ! -e \"$WS2/.sandy/config\" ]"
+ck "still NO workspace .sandy/config — the marker alone overrode the host opt-out" "[ ! -e \"$WS2/.sandy/config\" ]"
+ck "the host opt-out is STILL in place (the marker won over it, it did not remove it)" "grep -qx SANDY_HANDOFF_DIRS=0 \"$SANDY_HOME_DIR/config\""
 
 _m2="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C2" 2>/dev/null)"
 echo "  mounts:"; printf '%s\n' "$_m2" | grep -i handoff | sed 's/^/    /'
@@ -232,6 +296,8 @@ ck "outbox mount is RW=true (marker path)" \
    "printf '%s\n' \"\$_m2\" | grep -qE '^/home/claude/.handoff/outbox true\$'"
 ck "inbox mount is RW=false (marker path)" \
    "printf '%s\n' \"\$_m2\" | grep -qE '^/home/claude/.handoff/inbox false\$'"
+ck "peer mount is RW=false (marker path)" \
+   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/claude/.handoff/peer false\$'"
 
 # --- criterion 4, under the marker path ---
 ck "write to outbox SUCCEEDS (marker path)" \
@@ -259,6 +325,11 @@ ck "--print-state reports handoff_enabled=true for the enrolled sandbox" \
    "\"$SANDY\" --print-state light 2>/dev/null | grep -q '\"handoff_enabled\":true'"
 
 "$SANDY" --stop --workspace "$WS2"; ck "--stop (D, final) exits 0" "[ $? -eq 0 ]"
+# Remove the host-level opt-out so phase E runs against the default. Portable
+# rewrite (no sed -i: BSD sed needs a suffix argument, GNU does not).
+grep -vx 'SANDY_HANDOFF_DIRS=0' "$SANDY_HOME_DIR/config" > "$SANDY_HOME_DIR/config.tmp" || true
+mv "$SANDY_HOME_DIR/config.tmp" "$SANDY_HOME_DIR/config"
+ck "host-level opt-out removed before phase E" "! grep -qs SANDY_HANDOFF_DIRS \"$SANDY_HOME_DIR/config\""
 
 echo "== E. handoff relay (SANDY_HANDOFF_RELAY, 1.10.0) =="
 # Fresh workspace: relay fixtures shouldn't share state with A-D.
@@ -300,6 +371,8 @@ _m3="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end
 echo "  mounts:"; printf '%s\n' "$_m3" | grep -i handoff | sed 's/^/    /'
 ck "relay mount is RW=true" \
    "printf '%s\n' \"\$_m3\" | grep -qE '^/home/claude/.handoff/relay true\$'"
+ck "peer mount is RW=false alongside the relay" \
+   "printf '%s\n' \"\$_m3\" | grep -qE '^/home/claude/.handoff/peer false\$'"
 # Never dump the whole env -- it carries CLAUDE_CODE_OAUTH_TOKEN and friends.
 # Count occurrences of the one var under test instead of printing anything.
 _envcount="$(docker inspect -f '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' "$C3" 2>/dev/null | grep -c '^SANDY_HANDOFF_RELAY=\.sandy/relay\.sh$')"

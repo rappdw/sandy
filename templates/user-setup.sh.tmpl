@@ -980,7 +980,7 @@ _sandy_start_handoff_relay() {
         sandy_log "ERROR: SANDY_HANDOFF_RELAY is configured but flock is not available in this image, so the relay singleton cannot be enforced. A configured relay that cannot start fails the session."
         exit 1
     fi
-    export SANDY_HANDOFF_INBOX="$HOME/.handoff/inbox" SANDY_HANDOFF_OUTBOX="$HOME/.handoff/outbox" SANDY_HANDOFF_RELAY_STATE="$_st"
+    export SANDY_HANDOFF_INBOX="$HOME/.handoff/inbox" SANDY_HANDOFF_OUTBOX="$HOME/.handoff/outbox" SANDY_HANDOFF_RELAY_STATE="$_st" SANDY_HANDOFF_PEER="$HOME/.handoff/peer"
     (
         set +e; trap - ERR; trap '' HUP     # user-setup runs set -e + an ERR trap; the loop must survive relay exits
         exec 9>"$_lock"
