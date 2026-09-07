@@ -1091,7 +1091,7 @@ _sandy_emit_schema() {
     printf '{'
     _json_kv name '"claude"'; printf ','; _json_kv image '"sandy-claude-code"'
     printf ','; _json_kv features '["skills","channels_telegram","channels_discord","remote","synthkit"]'
-    printf ','; _json_kv credentials '{"probe_order":["CLAUDE_CODE_OAUTH_TOKEN","ANTHROPIC_API_KEY","host_credentials_file"]}'
+    printf ','; _json_kv credentials '{"probe_order":["CLAUDE_CODE_OAUTH_TOKEN","host_credentials_file","ANTHROPIC_API_KEY"]}'
     printf '}'
     printf ','
     printf '{'
@@ -4701,6 +4701,33 @@ _sandy_proxy_ref() {
     esac
 }
 
+# Echo the path to a local proxy/ source tree to build the egress proxy FROM
+# (via COPY), or nothing to fall back to the git-clone path in
+# _sandy_proxy_ref/generate_dockerfile_proxy. Both a correctness and a
+# supply-chain fix:
+#   - Correctness: the clone path does `git clone …/sandy && git checkout <ref>`
+#     where <ref> for a -dev tree is the current branch name. A branch that has
+#     not been pushed cannot be checked out of the public remote, so launching
+#     from ANY unpushed feature branch failed the proxy build outright (the
+#     normal state of a branch before it merges).
+#   - Supply chain: cloning builds the security chokepoint from a MUTABLE remote
+#     ref over the network; COPY builds exactly the audited source the operator
+#     is already running, with no code fetched at build time.
+# An explicit ref override (a pinned SANDY_PROXY_REF, or CI's GITHUB_HEAD_REF)
+# still forces the clone path, so those flows are unchanged. Anchored on
+# $SANDY_SELF (resolved once at script top), NOT BASH_SOURCE, so the isolated
+# generate_dockerfile_proxy unit test — which sets neither — deterministically
+# takes the clone path its assertions expect.
+_sandy_proxy_local_src() {
+    [ -n "${SANDY_PROXY_REF:-}" ] && return 0
+    [ -n "${GITHUB_HEAD_REF:-}" ] && return 0
+    local _d
+    _d="$(dirname "${SANDY_SELF:-/nonexistent/sandy}")"
+    if [ -f "$_d/proxy/go.mod" ] && [ -f "$_d/proxy/main.go" ]; then
+        printf '%s' "$_d/proxy"
+    fi
+}
+
 # sandy-proxy egress-proxy image (M2.7). Multi-stage: a golang build stage that
 # clones the sandy repo at the resolved ref and statically compiles proxy/, then
 # a `scratch` runtime holding just the binary. The proxy never terminates TLS
@@ -4709,8 +4736,7 @@ _sandy_proxy_ref() {
 # component. The git ref is a build-arg so the build hash (and thus rebuilds)
 # track the pinned version.
 generate_dockerfile_proxy() {
-    local ref epoch
-    ref="$(_sandy_proxy_ref)"
+    local ref epoch src
     # HF-incident Issue 3: the proxy image otherwise only rebuilds when the ref
     # (SANDY_VERSION) changes, so its golang base + Go stdlib — the TLS/HTTP/CONNECT
     # I/O of the security-critical component — freeze between sandy releases while
@@ -4720,6 +4746,44 @@ generate_dockerfile_proxy() {
     # golang:1.26-trixie to the current digest and picks up Go stdlib / Debian
     # security fixes. Bound to one refresh/month so it's not per-launch churn.
     epoch="$(date -u +%Y-%m 2>/dev/null || echo static)"
+
+    src="$(_sandy_proxy_local_src)"
+    if [ -n "$src" ]; then
+        # Local-checkout path (see _sandy_proxy_local_src): COPY the operator's
+        # own proxy/ source, no git clone, no network fetch of code. The
+        # `# proxy-src` line is a content hash of that source tree so the
+        # existing "rebuild when Dockerfile.proxy's hash moves" trigger fires
+        # whenever the local proxy source changes — the property the clone
+        # path got from the ref string moving. The `proxy` binary and any
+        # `*.test` (both gitignored) are excluded so build artifacts don't
+        # perturb the hash or the build context.
+        local src_hash
+        src_hash="$( { cd "$src" && find . -type f ! -name proxy ! -name '*.test' \
+            | LC_ALL=C sort | while IFS= read -r _f; do sha256 < "$_f"; done; } \
+            | sha256 | cut -d' ' -f1 )"
+        cat > "$SANDY_HOME/Dockerfile.proxy.new" <<DOCKERFILE
+# freshness-epoch: ${epoch} (monthly proxy base/stdlib refresh — HF-incident Issue 3)
+# proxy-src: ${src_hash} (built from the local checkout's proxy/; rebuilds when it changes)
+FROM golang:1.26-trixie AS build
+COPY proxy /src/proxy
+RUN cd /src/proxy \\
+ && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /sandy-proxy .
+
+FROM scratch
+COPY --from=build /sandy-proxy /usr/local/bin/sandy-proxy
+# Config is bind-mounted at /etc/sandy-proxy.json by the launcher (PR 2.7.3).
+# Readiness (#37): scratch has no shell, so the healthcheck IS the binary
+# re-invoked with -healthcheck, probing its own listeners.
+HEALTHCHECK --interval=1s --start-period=0s --timeout=2s --retries=3 CMD ["/usr/local/bin/sandy-proxy", "-healthcheck"]
+ENTRYPOINT ["/usr/local/bin/sandy-proxy"]
+DOCKERFILE
+        return
+    fi
+
+    # Clone path: installed copies (no local proxy/), CI (GITHUB_HEAD_REF), and
+    # release/rc pins. The git ref is a build-arg so the build hash (and thus
+    # rebuilds) track the pinned version.
+    ref="$(_sandy_proxy_ref)"
     cat > "$SANDY_HOME/Dockerfile.proxy.new" <<DOCKERFILE
 # syntax pinned implicitly by the golang base tag
 # freshness-epoch: ${epoch} (monthly proxy base/stdlib refresh — HF-incident Issue 3)
@@ -8103,13 +8167,29 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
     PROXY_HASH_FILE="$SANDY_HOME/.build_hash_proxy"
     if [ ! -f "$PROXY_HASH_FILE" ] || [ "$(cat "$PROXY_HASH_FILE")" != "$PROXY_HASH" ] || ! docker image inspect "$PROXY_IMAGE_NAME" &>/dev/null; then
         if _sandy_build_allowed "$PROXY_IMAGE_NAME" "egress proxy image"; then
-        info "Building egress proxy image (sandy-proxy, ref=$(_sandy_proxy_ref))..."
+        # Build context: for the local-checkout path (generate_dockerfile_proxy
+        # emitted a `COPY proxy …` Dockerfile), stage just proxy/ into a clean
+        # dir so the daemon receives a small, source-only context — never
+        # $SANDY_HOME (which holds sandboxes/). For the clone path the Dockerfile
+        # COPYs nothing, so the context is irrelevant; keep $SANDY_HOME as before.
+        _proxy_src="$(_sandy_proxy_local_src)"
+        _proxy_ctx="$SANDY_HOME"
+        if [ -n "$_proxy_src" ]; then
+            info "Building egress proxy image (sandy-proxy, from local checkout proxy/)..."
+            _proxy_ctx="$SANDY_HOME/proxy-build"
+            rm -rf "$_proxy_ctx"
+            mkdir -p "$_proxy_ctx"
+            cp -R "$_proxy_src" "$_proxy_ctx/proxy"
+            rm -f "$_proxy_ctx/proxy/proxy" "$_proxy_ctx/proxy/"*.test
+        else
+            info "Building egress proxy image (sandy-proxy, ref=$(_sandy_proxy_ref))..."
+        fi
         _old_proxy_id="$(docker image inspect -f '{{.Id}}' "$PROXY_IMAGE_NAME" 2>/dev/null || true)"
         # --pull: re-resolve golang:1.26-trixie to the current digest on every
         # proxy (re)build so the base + Go stdlib get security updates — the
         # monthly freshness epoch (HF-incident Issue 3) makes this fire ~monthly
         # without a sandy release. --no-cache already rebuilds the binary itself.
-        docker build -q --no-cache --pull --label sandy.managed=1 -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$SANDY_HOME"
+        docker build -q --no-cache --pull --label sandy.managed=1 -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$_proxy_ctx"
         echo "$PROXY_HASH" > "$PROXY_HASH_FILE"
         _sandy_prune_old_image "$_old_proxy_id" "$PROXY_IMAGE_NAME"
         fi
@@ -11678,9 +11758,29 @@ if _sandy_agent_has claude; then
             warn "CLAUDE_CODE_OAUTH_TOKEN is set; not forwarding ANTHROPIC_API_KEY (it would take precedence in Claude Code and bill per-use). Unset the token to use the API key instead."
         fi
         _sandy_add_secret_env CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
+    elif [ -n "${ANTHROPIC_API_KEY:-}" ] && [ -n "${CRED_TMPDIR:-}" ]; then
+        # Same precedence problem one level down: the host OAuth credentials file
+        # IS being mounted this launch (CRED_TMPDIR is set only then), and Claude
+        # Code resolves an environment API key ahead of the account credentials.
+        # Forwarding both has two failure modes and no good one: the key silently
+        # wins and bills per-use, or -- if that key has never been approved in this
+        # sandbox .claude.json -- the session parks on the startup modal
+        # ("Detected a custom API key in your environment ... Do you want to use
+        # this API key?"). The modal is the nastier half: the container is up and
+        # `tmux has-session` succeeds, so `--start` reports READY (exit 0) for a
+        # session that is inert. It accepts cross-session messages and routes them
+        # to its queue and never runs them, because it is parked on a dialog no one
+        # is attached to answer. Measured against 2.1.263 in a real daemon
+        # container by test/acceptance-uds-delivery.sh.
+        # NOTE the deliberate gaps: SANDY_SUSPICIOUS disposable-key mode and the
+        # strip-fail fallback both clear CRED_JSON, so CRED_TMPDIR is empty there
+        # and the key still forwards -- which is exactly what those postures want.
+        info "Host OAuth credentials are mounted; not forwarding ANTHROPIC_API_KEY (Claude Code resolves it ahead of the account credentials, and an unapproved key parks the session on the custom-API-key modal). Set SANDY_SUSPICIOUS=1, or remove the host credentials, to use the API key instead."
+        RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=")
     else
-        # No OAuth token configured: forward the API key if present, and clear the
-        # OAuth var so a stray host value can't leak into the container.
+        # No OAuth token configured and no OAuth file mounted: forward the API key
+        # if present, and clear the OAuth var so a stray host value can't leak into
+        # the container.
         if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
             _sandy_add_secret_env ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
         fi

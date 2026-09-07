@@ -4243,7 +4243,9 @@ info "49. Egress proxy image generator (M2.7)"
 _PX_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Pull just the two functions and exercise them in isolation.
 _PX_FNS="$(sed -n '/^_sandy_proxy_ref()/,/^}$/p' "$_PX_SCRIPT")
-$(sed -n '/^generate_dockerfile_proxy()/,/^}$/p' "$_PX_SCRIPT")"
+$(sed -n '/^_sandy_proxy_local_src()/,/^}$/p' "$_PX_SCRIPT")
+$(sed -n '/^generate_dockerfile_proxy()/,/^}$/p' "$_PX_SCRIPT")
+sha256() { shasum -a 256 2>/dev/null || sha256sum; }"
 
 # Ref resolution: release -> version tag; -dev -> main; override wins.
 _px_ref() {
@@ -4308,6 +4310,54 @@ check "proxy build uses --pull to refresh the golang base (Issue 3)" \
     bash -c 'grep -qE "docker build -q --no-cache --pull" "$1"' -- "$_PX_SCRIPT"
 check "--print-state carries proxy_image_created (Issue 3)" \
     bash -c 'grep -q "proxy_image_created" "$1"' -- "$_PX_SCRIPT"
+
+# Local-checkout proxy build (fix, 2026-09-07): when sandy runs from a checkout
+# that carries proxy/ source, the proxy is built by COPYing that local source,
+# NOT by `git clone` of a remote ref. Motivation: a `git checkout <branch>` of
+# an UNPUSHED feature branch fails against the public remote, so before this fix
+# launching from any local-only -dev branch could not build the proxy at all;
+# and cloning built the security chokepoint from a mutable remote ref rather
+# than the audited local source. A fake checkout (proxy/go.mod + proxy/main.go)
+# with SANDY_SELF pointed at it must flip the generator to the COPY path.
+_PX_CO="$(mktemp -d)"; mkdir -p "$_PX_CO/proxy"
+printf 'module x\n' > "$_PX_CO/proxy/go.mod"
+printf 'package main\nfunc main(){}\n' > "$_PX_CO/proxy/main.go"
+printf 'touch "%s/sandy"\n' "$_PX_CO" | sh   # a stand-in script so dirname($SANDY_SELF) resolves here
+_PX_CO_DF="$_PX_CO/home/Dockerfile.proxy.new"; mkdir -p "$_PX_CO/home"
+SANDY_HOME="$_PX_CO/home" SANDY_SELF="$_PX_CO/sandy" SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" GITHUB_HEAD_REF= \
+    bash -c "$_PX_FNS
+generate_dockerfile_proxy" 2>/dev/null
+check "proxy (local): COPYs the local proxy/ source, no git clone" \
+    bash -c 'grep -qx "COPY proxy /src/proxy" "$1" && ! grep -q "git clone" "$1"' -- "$_PX_CO_DF"
+check "proxy (local): no SANDY_PROXY_REF build-arg (nothing is fetched by ref)" \
+    bash -c '! grep -q "ARG SANDY_PROXY_REF" "$1"' -- "$_PX_CO_DF"
+check "proxy (local): carries a proxy-src content hash (the rebuild trigger on source change)" \
+    bash -c 'grep -qE "^# proxy-src: [0-9a-f]{64} " "$1"' -- "$_PX_CO_DF"
+check "proxy (local): still carries the monthly freshness epoch and the scratch/entrypoint shape" \
+    bash -c 'grep -qE "^# freshness-epoch: [0-9]{4}-[0-9]{2} " "$1" && grep -qx "FROM scratch" "$1" && grep -qF "ENTRYPOINT [\"/usr/local/bin/sandy-proxy\"]" "$1"' -- "$_PX_CO_DF"
+# The content hash must MOVE when the local source changes (else a proxy edit
+# would not rebuild). Mutation-style: regenerate after editing main.go.
+_PX_H1="$(grep -m1 '^# proxy-src:' "$_PX_CO_DF" | awk '{print $3}')"
+printf 'package main\nfunc main(){ _ = 1 }\n' > "$_PX_CO/proxy/main.go"
+SANDY_HOME="$_PX_CO/home" SANDY_SELF="$_PX_CO/sandy" SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" GITHUB_HEAD_REF= \
+    bash -c "$_PX_FNS
+generate_dockerfile_proxy" 2>/dev/null
+_PX_H2="$(grep -m1 '^# proxy-src:' "$_PX_CO_DF" | awk '{print $3}')"
+check "proxy (local): the proxy-src hash changes when proxy/ source changes (rebuild fires)" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$2" ]' -- "$_PX_H1" "$_PX_H2"
+# Explicit overrides still force the clone path even with a local proxy/ present.
+SANDY_HOME="$_PX_CO/home" SANDY_SELF="$_PX_CO/sandy" SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF=v9.9.9 GITHUB_HEAD_REF= \
+    bash -c "$_PX_FNS
+generate_dockerfile_proxy" 2>/dev/null
+check "proxy (local): SANDY_PROXY_REF override forces the clone path (explicit pin wins over local source)" \
+    bash -c 'grep -q "git clone https://github.com/rappdw/sandy /src" "$1" && grep -qx "ARG SANDY_PROXY_REF=v9.9.9" "$1"' -- "$_PX_CO_DF"
+SANDY_HOME="$_PX_CO/home" SANDY_SELF="$_PX_CO/sandy" SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" GITHUB_HEAD_REF=some-pr-branch \
+    bash -c "$_PX_FNS
+generate_dockerfile_proxy" 2>/dev/null
+check "proxy (local): GITHUB_HEAD_REF (CI) forces the clone path" \
+    bash -c 'grep -q "git clone" "$1" && grep -qx "ARG SANDY_PROXY_REF=some-pr-branch" "$1"' -- "$_PX_CO_DF"
+rm -rf "$_PX_CO"
+
 # Regression (real launch bug, 2026-07-23): the Dockerfile.proxy heredoc is
 # UNQUOTED (it needs ${ref} expanded), so any backtick / $( ) / unescaped ${ }
 # in its body is executed by the SHELL at generation time — a stray `word` in a
@@ -11932,6 +11982,68 @@ unset _S116_SANDY _S116_FN
 
 # ============================================================
 echo "§115: the run's own summary is actually the last thing that runs"
+# ============================================================
+echo "§117: ANTHROPIC_API_KEY is not forwarded when host OAuth credentials are mounted"
+# ============================================================
+# WHY. Claude Code resolves an environment API key AHEAD of the account
+# credentials file, so forwarding both had two failure modes and no good one:
+# the key silently wins and bills per-use, or -- if that key has never been
+# approved in this sandbox's .claude.json -- the session parks on the startup
+# modal ("Detected a custom API key in your environment ... Do you want to use
+# this API key?"). The modal is the dangerous half in DAEMON mode: the container
+# is up and `tmux has-session` succeeds, so `--start` returns 0 READY for a
+# session that is inert -- it accepts cross-session messages, routes them to its
+# queue, and never runs them, because it is parked on a dialog nobody is
+# attached to answer. Found by test/acceptance-uds-delivery.sh against 2.1.263,
+# where it masqueraded as "accept did not deliver" for three debugging rounds.
+#
+# The property, not the mechanism: run the REAL branch with the three inputs
+# varied and assert WHICH env vars it actually adds.
+# Extract from the block's unique comment through the OUTER `fi` (column 0 --
+# the inner branch's `fi` is indented), then re-supply the `if` header. Anchoring
+# on `if _sandy_agent_has claude; then` directly is not usable: sandy has many
+# such blocks and an awk range would splice unrelated ones together.
+_S117_BODY="$(awk '/Claude Code.s OWN auth precedence/,/^fi$/' "$SANDY_SCRIPT")"
+_S117_FN="if _sandy_agent_has claude; then
+$_S117_BODY"
+check "§117(pre) extracted the claude key-forwarding branch, and it is evaluable shell (mutation: a reword or a reindent breaks this HERE rather than passing vacuously below)" \
+    bash -c 'printf "%s" "$1" | grep -q CRED_TMPDIR && printf "%s" "$1" | bash -n' -- "$_S117_FN"
+
+# $1=CLAUDE_CODE_OAUTH_TOKEN $2=ANTHROPIC_API_KEY $3=CRED_TMPDIR
+# Echoes the names of the secret env vars the branch actually chose to forward.
+_s117_run() {
+    S117_FN="$_S117_FN" CLAUDE_CODE_OAUTH_TOKEN="$1" ANTHROPIC_API_KEY="$2" CRED_TMPDIR="$3" \
+        bash -c '
+            set -u
+            _sandy_agent_has() { [ "$1" = claude ]; }
+            _sandy_add_secret_env() { printf "%s\n" "$1"; }
+            info() { :; }; warn() { :; }
+            RUN_FLAGS=()
+            eval "$S117_FN"
+        ' 2>/dev/null
+}
+
+_S117_A="$(_s117_run "" "sk-ant-KEY" "/tmp/creds")"
+check "§117(1) OAuth file mounted + API key set -> the API key is NOT forwarded" \
+    bash -c '! printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_A"
+
+_S117_B="$(_s117_run "" "sk-ant-KEY" "")"
+check "§117(2) no OAuth file + API key set -> the API key IS forwarded (the posture is suppression, not removal)" \
+    bash -c 'printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_B"
+
+_S117_C="$(_s117_run "oauth-tok" "sk-ant-KEY" "/tmp/creds")"
+check "§117(3) long-lived OAuth token wins over both (pre-existing precedence intact)" \
+    bash -c 'printf "%s" "$1" | grep -q CLAUDE_CODE_OAUTH_TOKEN && ! printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_C"
+
+_S117_D="$(_s117_run "" "" "/tmp/creds")"
+check "§117(4) OAuth file only -> nothing extra forwarded, no spurious API key" \
+    bash -c '! printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_D"
+
+# The documented probe order must match the code, or a consumer reading
+# --print-schema plans around a precedence sandy no longer implements.
+check "§117(5) --print-schema probe_order puts host_credentials_file ahead of ANTHROPIC_API_KEY" \
+    bash -c '"$1" --print-schema 2>/dev/null | tr -d " \n" | grep -q "\"probe_order\":\[\"CLAUDE_CODE_OAUTH_TOKEN\",\"host_credentials_file\",\"ANTHROPIC_API_KEY\"\]"' -- "$SANDY_SCRIPT"
+
 # ============================================================
 # WHY. The Summary block below used to sit in the MIDDLE of this file: sections
 # appended afterwards ran, counted, and then nothing printed a final tally. A

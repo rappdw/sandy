@@ -632,7 +632,7 @@ If the host UID differs from the image default (1001), sandy generates custom `p
 
 **Claude Code config**: `SANDY_WORKSPACE`, `SANDY_PROJECT_NAME`, `SANDY_MODEL`, `SANDY_SKIP_PERMISSIONS`, `SANDY_NEW_SESSION`, `SANDY_REMOTE_CONTROL`, `SANDY_VERBOSE`, `SANDY_CHANNELS`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
 
-**Credentials**: `CLAUDE_CODE_OAUTH_TOKEN` (explicitly emptied if not set, to prevent host env leakage) and `ANTHROPIC_API_KEY` — but **at most one Claude key reaches the container**. Claude Code's own auth precedence resolves `ANTHROPIC_API_KEY` *ahead of* `CLAUDE_CODE_OAUTH_TOKEN`, so forwarding both would silently route to per-use API billing and bypass the OAuth/subscription path. To honor sandy's documented OAuth-first preference, when an OAuth token is configured sandy **suppresses `ANTHROPIC_API_KEY`** (forwarding only the token, with a launch warning); the API key is forwarded only when no OAuth token is set.
+**Credentials**: `CLAUDE_CODE_OAUTH_TOKEN` (explicitly emptied if not set, to prevent host env leakage) and `ANTHROPIC_API_KEY` — but **at most one Claude key reaches the container**. Claude Code's own auth precedence resolves `ANTHROPIC_API_KEY` *ahead of* `CLAUDE_CODE_OAUTH_TOKEN`, so forwarding both would silently route to per-use API billing and bypass the OAuth/subscription path. To honor sandy's documented OAuth-first preference, when an OAuth token is configured sandy **suppresses `ANTHROPIC_API_KEY`** (forwarding only the token, with a launch warning). **The same suppression applies one level down**: when the host OAuth *credentials file* is being mounted this launch, `ANTHROPIC_API_KEY` is not forwarded either — Claude Code resolves an environment key ahead of the account credentials, so forwarding both either bills per-use or, if that key has never been approved in this sandbox's `.claude.json`, parks the session on Claude Code's custom-API-key startup modal. In daemon mode that modal is silent and severe: the container is up and `tmux has-session` succeeds, so `--start` returns `0` (ready) for a session that accepts cross-session messages, queues them, and never runs them because nothing is attached to answer the dialog. The key is therefore forwarded only when **no** Claude OAuth credential reaches the container — including `SANDY_SUSPICIOUS` disposable-key mode and its fail-closed strip path, both of which clear the credential blob deliberately. Resolved order: `CLAUDE_CODE_OAUTH_TOKEN` → host credentials file → `ANTHROPIC_API_KEY`. Guarded by `run-tests.sh §117`.
 
 **Channel credentials**: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`
 
@@ -2689,7 +2689,10 @@ GH_ACCOUNTS=<user1:tok1,user2:tok2>  # all gh-authenticated accounts
 # Claude credentials (OAuth-first since 0.15.2; block gated on claude ∈ agent set):
 #   CLAUDE_CODE_OAUTH_TOKEN set → forward ONLY the token; ANTHROPIC_API_KEY is
 #                                 suppressed entirely (launch warning if both set)
-#   no OAuth token              → forward ANTHROPIC_API_KEY only if non-empty, plus
+#   OAuth credentials MOUNTED   → also suppress ANTHROPIC_API_KEY (it resolves
+#                                 ahead of the account credentials; an unapproved
+#                                 key parks the session on the startup modal)
+#   neither                     → forward ANTHROPIC_API_KEY only if non-empty, plus
 #                                 CLAUDE_CODE_OAUTH_TOKEN= (emptied vs host-env leak)
 CLAUDE_CODE_OAUTH_TOKEN=<token>     # or ANTHROPIC_API_KEY=<key> — never both
 
