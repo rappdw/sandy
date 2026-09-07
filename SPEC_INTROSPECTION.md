@@ -187,7 +187,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "image": "sandy-claude-code",
       "features": ["skills", "channels_telegram", "channels_discord", "remote", "synthkit"],
       "credentials": {
-        "probe_order": ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "host_credentials_file"]
+        "probe_order": ["CLAUDE_CODE_OAUTH_TOKEN", "host_credentials_file", "ANTHROPIC_API_KEY"]
       }
     },
     {
