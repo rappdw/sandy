@@ -12179,6 +12179,52 @@ check "§118(7) with both, ONLY the top-level one is rewritten" \
     bash -c 'printf "%s" "$1" | grep -q "^sandbox_mode = \"danger-full-access\"$" && printf "%s" "$1" | grep -q "^sandbox_mode = \"read-only\"$"' -- "$_S118_D"
 
 # ============================================================
+echo "§119: every config key in --print-schema is documented in README.md"
+# ============================================================
+# WHY. CLAUDE.md's own rule is "also update README.md if user-facing behavior
+# changes", and that rule was followed for CLAUDE.md and SPECIFICATION.md and
+# silently missed for README twice in one release: SANDY_CLAUDE_AUTH and
+# SANDY_CROSS_SESSION_INBOUND both shipped in 1.10.0 documented everywhere except
+# the file a user actually reads first. A convention that depends on remembering
+# is not a convention; §91 already ratchets cli_flags against --help for exactly
+# this reason, and this is the config-key half of the same idea.
+#
+# Scope: the key must APPEAR in README.md. This cannot judge whether the prose is
+# any good -- it catches the failure that actually happened (a key documented
+# nowhere user-facing), not prose quality.
+_S119_README="$(cd "$(dirname "$SANDY_SCRIPT")" && pwd)/README.md"
+check "§119(pre) README.md is readable (mutation: a bad path would make every check below vacuous)" \
+    bash -c '[ -s "$1" ] && grep -q "SANDY_AGENT" "$1"' -- "$_S119_README"
+
+# EXCEPTIONS, deliberately short and justified individually. env-only keys are
+# not settable from any config file, so they are not part of the user-facing
+# config surface the README table documents; both of these are operational
+# knobs documented in CLAUDE.md where their reader already is.
+#   SANDY_AUTO_APPROVE_PRIVILEGED - CI escape hatch, env-only BY DESIGN so a
+#     committed config cannot set it; documented in CLAUDE.md's tier section.
+#   SANDY_DEBUG_CLEANUP           - debug knob, not a supported surface.
+_S119_EXEMPT="SANDY_AUTO_APPROVE_PRIVILEGED SANDY_DEBUG_CLEANUP"
+
+_S119_MISSING="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' \
+    | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([A-Z][A-Z0-9_]*\)".*/\1/p' | sort -u \
+    | while IFS= read -r _k; do
+          case " $_S119_EXEMPT " in *" $_k "*) continue ;; esac
+          grep -q "$_k" "$_S119_README" || printf '%s ' "$_k"
+      done)"
+check "§119(1) no config key is missing from README.md${_S119_MISSING:+ (missing: $_S119_MISSING)}" \
+    bash -c '[ -z "$1" ]' -- "$_S119_MISSING"
+
+# Non-vacuity: the extractor must actually be finding keys. Without this a typo
+# in the sed would yield an empty key list and (1) would pass trivially forever.
+_S119_COUNT="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' \
+    | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([A-Z][A-Z0-9_]*\)".*/\1/p' | sort -u | wc -l | tr -d ' ')"
+check "§119(2) the key extractor found a plausible number of keys (>40), so (1) cannot pass vacuously" \
+    bash -c '[ "$1" -gt 40 ]' -- "$_S119_COUNT"
+
+check "§119(3) the two 1.10.0 keys this guard was written for are present" \
+    bash -c 'grep -q SANDY_CLAUDE_AUTH "$1" && grep -q SANDY_CROSS_SESSION_INBOUND "$1"' -- "$_S119_README"
+
+# ============================================================
 # WHY. The Summary block below used to sit in the MIDDLE of this file: sections
 # appended afterwards ran, counted, and then nothing printed a final tally. A
 # real maintainer run ended with "2/1253 tests failed:" printed before §104 and
