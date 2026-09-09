@@ -222,7 +222,8 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_CROSS_SESSION_INBOUND` | _(conditional)_ | Whether another local session may inject a turn into this one (Claude Code's `crossSessionInbound`): `accept` (delivered, no prompt), `hold` (interactive approval), `refuse` (sender told it was not accepted). Unset resolves to `accept` **only** when a `SANDY_HANDOFF_RELAY` is configured *and will actually start this launch* — otherwise `refuse`, so a workspace with no relay has no open receive surface. `hold`/`refuse` are passive-safe; `accept` from a workspace `.sandy/config` triggers an approval prompt. Claude-only |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth). **Not forwarded when a Claude OAuth credential is already going into the container** (Claude Code resolves an env key ahead of the account credentials, so forwarding both either bills per-use or parks the session on Claude Code's custom-API-key startup prompt). Set `SANDY_CLAUDE_AUTH=api_key` to use it anyway |
-| `SANDY_CLAUDE_AUTH` | `auto` | Force Claude auth path: `auto`, `api_key`, or `oauth`. `api_key` withholds **both** the OAuth credentials file and a long-lived token, so one revocable key is the only Claude credential in the container; `oauth` never forwards the API key. `api_key` is passive-safe (it reduces what is in the box); `oauth` from a workspace `.sandy/config` triggers an approval prompt |
+| `SANDY_CLAUDE_AUTH` | `auto` | Force Claude auth path: `auto`, `api_key`, `oauth`, or `profile`. `api_key` withholds **both** the OAuth credentials file and a long-lived token, so one revocable key is the only Claude credential in the container; `oauth` never forwards the API key; `profile` uses an Anthropic Console profile from `ant auth login` — the route to workspace-bound entitlements such as **Claude Mythos** (see "Using a Console profile" below). `api_key` and `profile` are passive-safe (each reduces what is in the box); `oauth` from a workspace `.sandy/config` triggers an approval prompt |
+| `ANTHROPIC_PROFILE` | (unset) | With `SANDY_CLAUDE_AUTH=profile`, the named Console profile to use instead of the host's active one. **Privileged**: it picks *which* profile's token enters the container, and an `org:admin` profile carries organization-wide access, so a committed config cannot select it |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max output tokens per response (Claude Code default is 32K) |
 | `SANDY_CLAUDE_CONNECTORS` | `0` | `1` = expose claude.ai **account connectors** (Gmail, Drive, …) inside the sandbox. Default `0` suppresses them — the account-scoped OAuth token would otherwise make every connector reachable from every sandbox. Weakens isolation, so a workspace `.sandy/config` setting it triggers an approval prompt. Claude-only |
 | `SANDY_SUSPICIOUS` | `0` | `1` = hardened posture for a workspace you distrust: strip the OAuth **refresh token** (mount only the short-TTL access token — fails closed if it can't), prefer a disposable `ANTHROPIC_API_KEY` over mounting OAuth at all, force connectors off, default egress to strict. Records `cred_mode` in the session marker. **Strengthens** isolation — safe to commit in a workspace config. In-session token refresh stops at the access token's expiry (relaunch or `/login`) |
@@ -292,6 +293,26 @@ To automate this as a global keyboard shortcut (e.g., Ctrl+Cmd+U):
 3. Add a **Run Shell Script** action with: `pbpaste | tr -d ' \n\t' | xargs open`
 4. Save as "Open Cleaned URL"
 5. Assign a shortcut in **System Settings > Keyboard > Keyboard Shortcuts > Services**
+
+### Using a Console profile — Claude Mythos and workspace-scoped access
+
+Some Claude entitlements are granted to a **Console workspace**, not to an API key or a claude.ai subscription — Claude Mythos 5.1 (`claude-mythos-5-1`, Project Glasswing) is one. You reach them with an *Anthropic profile* written by the Claude Platform CLI, `ant`. Sandy supports that as `SANDY_CLAUDE_AUTH=profile`:
+
+```sh
+# on the HOST (browser flow; use --no-browser on a remote box):
+ant auth login --workspace-id wrkspc_<id>      # binds the profile to the workspace
+ant auth status                                # want: "(active) * Profile (user_oauth)"
+
+# ~/.sandy/config
+SANDY_CLAUDE_AUTH=profile
+SANDY_MODEL=claude-mythos-5-1                  # or set it per workspace in .sandy/config
+```
+
+What sandy does on each launch: copies **only the selected profile** (`ANTHROPIC_PROFILE`, else the host's `active_config`, else `default`) from `~/.config/anthropic` into an ephemeral read-write mount at the same path in the container, and **withholds** `~/.claude/.credentials.json`, `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`. That is not optional: Claude Code ranks a profile *below* a `/login` credential and below every environment credential, so any of those in the box would silently win and you would be running on the wrong account. Inside, `/status` shows a `Profile` row; the session marker records `cred_mode: "profile"`.
+
+Two things to know. The mount is a copy, so an in-session token refresh never rewrites the host's file (same rule as `.credentials.json`) — the host copy refreshes when you use `ant` or Claude Code there. And a profile directory can hold several profiles; sandy copies one, never the directory, so an `admin` profile on your host does not ride along.
+
+Run `ant auth login` on the host, not in the container — the browser callback cannot reach a port bound inside the sandbox.
 
 ### Running Gemini CLI (`SANDY_AGENT=gemini`)
 
