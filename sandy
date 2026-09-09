@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.10.1-dev"
+SANDY_VERSION="1.11.0-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -54,6 +54,7 @@ SANDY_PRIVILEGED_KEYS=(
     DISCORD_BOT_TOKEN
     DISCORD_ALLOWED_SENDERS
     SANDY_HANDOFF_RELAY
+    ANTHROPIC_PROFILE
 )
 
 # SANDY_PASSIVE_KEYS: allowed from a workspace .sandy/config (checked into
@@ -792,7 +793,7 @@ OPENCODE_MODEL|string|||0.12.0|stable|OpenCode model override (provider/model fo
 SANDY_OPENCODE_AUTH|enum:auto,api_key,oauth|auto||0.12.0|stable|OpenCode credential probe strategy.
 GROK_MODEL|string|||1.5.0|stable|Grok Build model override (passed as -m; default grok-4.5).
 SANDY_GROK_AUTH|enum:auto,api_key,oauth|auto||1.5.0|stable|Grok Build credential probe strategy.
-SANDY_CLAUDE_AUTH|enum:auto,api_key,oauth|auto||1.10.0|stable|Claude Code credential selection. auto (default): a long-lived CLAUDE_CODE_OAUTH_TOKEN wins, else the host OAuth credentials file is mounted and ANTHROPIC_API_KEY is SUPPRESSED (Claude Code resolves an env key ahead of the account credentials, so forwarding both either bills per-use or parks the session on the custom-API-key startup modal). api_key: forward ANTHROPIC_API_KEY and do NOT mount OAuth credentials -- a revocable project key instead of the account refresh token, and the only way to choose per-use billing on a host that has OAuth. oauth: mount OAuth and never forward the API key. Value-aware tier: api_key and auto are passive-safe (api_key REDUCES what is in the container), while oauth from a workspace is approval-gated because it forces the account-scoped credential in even when a revocable key is available.
+SANDY_CLAUDE_AUTH|enum:auto,api_key,oauth,profile|auto||1.10.0|stable|Claude Code credential selection. auto (default): a long-lived CLAUDE_CODE_OAUTH_TOKEN wins, else the host OAuth credentials file is mounted and ANTHROPIC_API_KEY is SUPPRESSED (Claude Code resolves an env key ahead of the account credentials, so forwarding both either bills per-use or parks the session on the custom-API-key startup modal). api_key: forward ANTHROPIC_API_KEY and do NOT mount OAuth credentials -- a revocable project key instead of the account refresh token, and the only way to choose per-use billing on a host that has OAuth. oauth: mount OAuth and never forward the API key. profile (1.11.0): use an Anthropic Console profile written by `ant auth login` (the Claude Platform CLI) -- the ONLY way to reach a workspace-bound entitlement such as Claude Mythos. Sandy copies just the selected profile (ANTHROPIC_PROFILE, else the host active_config, else default) from $ANTHROPIC_CONFIG_DIR (default ~/.config/anthropic) into an ephemeral rw mount at ~/.config/anthropic and withholds the OAuth credentials file, CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY, because Claude Code ranks a user_oauth profile BELOW a /login credential and below every env credential -- measured on 2.1.263. Never probed by auto. Value-aware tier: api_key, profile and auto are passive-safe (each REDUCES what is in the container), while oauth from a workspace is approval-gated because it forces the account-scoped credential in even when a revocable key is available.
 TELEGRAM_BOT_TOKEN|secret|||0.7.6|stable|Telegram bot token for the channel relay.
 TELEGRAM_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Telegram user IDs allowed to send messages.
 DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
@@ -802,6 +803,7 @@ SANDY_CLAUDE_CONNECTORS|bool|0||1.9.0|stable|Expose the claude.ai ACCOUNT connec
 SANDY_SUSPICIOUS|bool|0||1.9.0|experimental|Hardened-credential posture for a workspace you actively distrust (#130) -- the pre-broker slice of #121. When 1: (a) the mounted Claude .credentials.json is REWRITTEN to drop claudeAiOauth.refreshToken, so an exfiltrated copy is worth only the remaining access-token lifetime (hours) instead of permanent renewable account access; the strip is verified after the rewrite and FAILS CLOSED -- if it cannot be performed or verified, no credentials file is mounted at all; (b) if ANTHROPIC_API_KEY is set and no long-lived CLAUDE_CODE_OAUTH_TOKEN is, the API key is used and OAuth credentials are not mounted (clean, instantly-revocable compartmentalization); (c) claude.ai account connectors are forced off, overriding an approved SANDY_CLAUDE_CONNECTORS=1; (d) egress DEFAULTS to strict -- an explicit egress setting still wins but is named loudly. The resolved posture is recorded as cred_mode in /etc/sandy-session.json so a run protection level is provable after the fact. Passive-safe to turn ON from a committed .sandy/config (a repo may make itself tighter); =0 from a workspace is approval-gated (never looser). HONEST LIMITS: in-session token refresh stops working once the access token expires (rerun sandy or /login -- acceptable for a deliberately short suspicious session); a long-lived CLAUDE_CODE_OAUTH_TOKEN is NOT shrunk by this (recorded honestly as cred_mode oauth-token, with a warning); Claude-only for the credential specifics; real prevention (token never in-container) is #121.
 SANDY_HANDOFF_DIRS|bool|1||1.7.0|experimental|Create and mount the per-sandbox cross-workspace handoff directories (#132 substrate): $SANDBOX_DIR/handoff/outbox rw at ~/.handoff/outbox, handoff/inbox READ-ONLY at ~/.handoff/inbox, handoff/peer READ-ONLY at ~/.handoff/peer (a second host-written inbound directory, 1.10.0) and handoff/relay rw at ~/.handoff/relay (relay state + supervisor.log). DEFAULT 1 SINCE 1.10.0 (was 0): every sandbox gets the tree on every launch, idempotently, so a host-side process can be pointed at any sandbox without a per-sandbox enabling step that has to be remembered, provisioned and verified. Set 0 to opt a host or workspace out: nothing is mounted, no env vars are added, and ~/.handoff does not exist inside the container. Both values are passive-safe for the reason the key always was: a directory confers no reach on its own — nothing lands in inbox/peer unless something on the host writes there and nothing leaves outbox unless something on the host reads it — so 1 is what a workspace could always set without approval and 0 only tightens. The two things that DO confer reach are unchanged and privileged: SANDY_HANDOFF_RELAY (off unless set; setting it forces this key to 1 because the relay cannot run without its mounts) and the crossSessionInbound pin (accept only when a relay is set and will start). Residual: the outbox persists across sessions, so a repo can stage content before an operator ever approves a relay; sandy --reset-sandbox clears it. The host directories are created unconditionally regardless of this key (since 1.7.0) so directory PRESENCE carries no information; consumers verify the MOUNTS (inside: test -d ~/.handoff/inbox ~/.handoff/outbox ~/.handoff/peer; outside: docker inspect .Mounts), never the directories or a marker. The operator marker $SANDBOX_DIR/.handoff-enabled (sandbox TOP level, never mounted, survives --reset-sandbox) now means FORCE ON for this sandbox even when config says 0 — the per-sandbox operator override of an opt-out, privileged by location like agent-args.<agent>, and a no-op when nothing opts out. It lives at the top level (never under claude/, which is mounted and agent-writable) so the agent cannot create it.
 SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|Claude-only. Pins Claude Code crossSessionInbound (accept = deliver messages from other sessions on this container without a prompt; hold = queue for approval; refuse = drop with a sender-visible status) by writing the SAME resolved value into TWO places every launch, merge-preserving and idempotent: the sandbox's own claude/settings.json (mounted RW as the container's ~/.claude/settings.json, i.e. Claude Code userSettings) and the WORKSPACE project file .claude/settings.local.json (mounted :ro). This split is measured, not assumed, against Claude Code 2.1.251: accept only takes effect when present in userSettings (workspace-file accept alone is a no-op there); hold/refuse are honored from either, and the workspace file's copy is tighten-only so it cannot be loosened by a stale accept and still wins over userSettings when a repo hand-edits it stricter. Never writes ~/.claude/settings.json on the HOST. Default is CONDITIONAL, which is why the schema default is empty: accept iff SANDY_HANDOFF_RELAY is set AND the relay will actually be started this launch, else refuse — headless (-p) and --remote runs never start a relay, so they default to refuse even with the key set, and a configured relay that cannot start fails the launch rather than leaving accept in place with nothing delivering. Value-aware tier: hold and refuse are passive-safe wherever set; accept set via a workspace .sandy/config is approval-gated (it lets any process at the workspace uid inside the container inject a turn). Residual: the userSettings target is RW in-container (required for /plugin install), so unlike the :ro workspace copy it is agent-mutable mid-session; sandy resets it on the next launch, not mid-session. Recorded in /etc/sandy-session.json as cross_session_inbound. See docs/security/CROSS_SESSION_INBOUND.md.
+ANTHROPIC_PROFILE|string||^[A-Za-z0-9._-]+$|1.11.0|experimental|Privileged. Name of the Anthropic Console profile to use when SANDY_CLAUDE_AUTH=profile (overrides the host active_config); forwarded into the container so Claude Code selects it explicitly (its /status shows the Profile row as profile-explicit). Privileged on purpose: it chooses WHICH profile's token enters the box, and a profile logged in with --scope org:admin carries organization-wide access, so a committed .sandy/config must not be able to select it. Ignored with a notice unless SANDY_CLAUDE_AUTH=profile.
 SANDY_HANDOFF_RELAY|path|||1.10.0|experimental|Privileged. Path of an executable INSIDE the container (absolute, or relative to the workspace, e.g. .sandy/relay.sh) that sandy runs as a container-level process: a sibling of the tmux server, not a pane and not a child of any agent session. Started once per container by user-setup.sh before the tmux session exists (never in headless -p runs and never under --remote, where there is no tmux session to target — in both the key is dropped host-side, so crossSessionInbound defaults to refuse and the marker records handoff_relay=false), singleton via flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never overlapping, never given up on. Setting it forces SANDY_HANDOFF_DIRS=1 (over an explicit opt-out — the relay cannot run without its mounts; the dirs are on by default since 1.10.0 anyway) so $SANDBOX_DIR/handoff/relay is mounted rw at ~/.handoff/relay (relay state + supervisor.log). Env contract: SANDY_HANDOFF_INBOX, SANDY_HANDOFF_OUTBOX, SANDY_HANDOFF_PEER, SANDY_HANDOFF_RELAY_STATE, SANDY_AGENT, SANDY_WORKSPACE; enumerate live sessions with /usr/local/bin/sandy-handoff-sessions. A configured relay that cannot start FAILS THE LAUNCH, never warn-and-proceed: host-side (exit 1 before docker run) for whitespace, shell metacharacters, .. segments, a ~/.handoff collision, and any path the host can see (workspace-relative, or absolute under the workspace mount) that is missing or not executable; in-container (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) for an image-only absolute path that is missing or not executable, a missing ~/.handoff/relay mount, or no flock. So handoff_relay=true in the marker means the relay was started or the session did not come up. In daemon mode the relay (and anything else planted at the uid) outlives sessions until the container is recreated — run sandy --update-sessions --yes on a 24h cron. Recorded in /etc/sandy-session.json as handoff_relay.
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
@@ -10433,6 +10435,7 @@ cleanup() {
     # (a live localhost→host-agent bridge) and the workspace lock below.
     if [ -n "${CRED_TMPDIR:-}" ]; then
         rm -rf "$CRED_TMPDIR" || true
+        rm -rf "$PROFILE_TMPDIR" || true
     fi
     if [ -n "${GEMINI_CRED_TMPDIR:-}" ]; then
         rm -rf "$GEMINI_CRED_TMPDIR" || true
@@ -10700,6 +10703,7 @@ PYSTRIP
 # Long-lived token (from `claude setup-token`) takes precedence over OAuth credentials.
 # When set via .sandy/config or .sandy/.secrets, skip the entire credential file flow.
 CRED_TMPDIR=""
+PROFILE_TMPDIR=""   # SANDY_CLAUDE_AUTH=profile: ephemeral copy of ONE Anthropic Console profile
 CRED_MODE="none"   # #130: resolved claude credential posture, recorded in the session marker
 GEMINI_CRED_TMPDIR=""
 OPENCODE_CRED_TMPDIR=""
@@ -10966,8 +10970,8 @@ else
     # already has (SANDY_CODEX_AUTH / _GEMINI_ / _OPENCODE_ / _GROK_).
     _claude_auth="${SANDY_CLAUDE_AUTH:-auto}"
     case "$_claude_auth" in
-        auto|api_key|oauth) : ;;
-        *)  warn "SANDY_CLAUDE_AUTH=$_claude_auth is not one of auto|api_key|oauth; using auto."
+        auto|api_key|oauth|profile) : ;;
+        *)  warn "SANDY_CLAUDE_AUTH=$_claude_auth is not one of auto|api_key|oauth|profile; using auto."
             _claude_auth=auto ;;
     esac
     if [ "$_claude_auth" = api_key ]; then
@@ -10988,6 +10992,67 @@ else
             warn "SANDY_CLAUDE_AUTH=api_key but ANTHROPIC_API_KEY is not set; falling back to auto (OAuth). Set the key in ~/.sandy/.secrets, or remove the setting."
             _claude_auth=auto
         fi
+    fi
+    if [ "$_claude_auth" = profile ]; then
+        # An Anthropic Console PROFILE, written by `ant auth login` (the Claude
+        # Platform CLI) into $ANTHROPIC_CONFIG_DIR (default ~/.config/anthropic):
+        #   active_config                   one line: the active profile name
+        #   configs/<name>.json             non-secret: workspace binding, base_url
+        #   credentials/<name>.json         secret 0600: access_token, refresh_token
+        # This is the only route to a workspace-bound entitlement such as Claude
+        # Mythos, whose access is a Console workspace grant rather than an API
+        # key or a claude.ai subscription.
+        #
+        # Three things measured against Claude Code 2.1.263 shape this branch:
+        #   1. Claude Code ranks a user_oauth profile BELOW a /login credential
+        #      ("a claude.ai login exists -- using the claude.ai login") and
+        #      below every env credential. So the OAuth file, the long-lived token
+        #      and the API key are all WITHHELD -- the profile is the only Claude
+        #      credential in the box, the same one-credential rule api_key uses.
+        #   2. Claude Code REFRESHES the profile token at startup, so the mount
+        #      is rw. It is an ephemeral copy for the same reason .credentials.json
+        #      is: an in-session refresh must not rewrite the host's file.
+        #   3. A config dir can hold several profiles, and one logged in with
+        #      --scope org:admin carries organization-wide access. Only the
+        #      SELECTED profile is copied -- never the directory.
+        _prof_dir="${ANTHROPIC_CONFIG_DIR:-$HOME/.config/anthropic}"
+        _prof_name="${ANTHROPIC_PROFILE:-}"
+        if [ -z "$_prof_name" ] && [ -f "$_prof_dir/active_config" ]; then
+            _prof_name="$(head -n1 "$_prof_dir/active_config" 2>/dev/null | tr -d '[:space:]')"
+        fi
+        [ -n "$_prof_name" ] || _prof_name=default
+        # The name becomes a path component (credentials/<name>.json): reject
+        # anything that could escape the directory, not merely anything odd.
+        if ! printf '%s' "$_prof_name" | grep -Eq '^[A-Za-z0-9._-]+$' \
+           || [ "$_prof_name" = . ] || [ "$_prof_name" = .. ]; then
+            warn "SANDY_CLAUDE_AUTH=profile: profile name '$_prof_name' is not a plain name; falling back to auto."
+            _claude_auth=auto
+        elif [ ! -s "$_prof_dir/credentials/$_prof_name.json" ]; then
+            # Fail loudly rather than silently on the account credential: a
+            # workspace that asked for a Mythos profile and got the personal
+            # subscription instead is exactly the surprise this mode prevents.
+            warn "SANDY_CLAUDE_AUTH=profile but no credentials for profile '$_prof_name' under $_prof_dir/credentials/ (run 'ant auth login' on the host, or set ANTHROPIC_PROFILE); falling back to auto."
+            _claude_auth=auto
+        else
+            PROFILE_TMPDIR="$(mktemp -d)"
+            chmod 700 "$PROFILE_TMPDIR"
+            mkdir -p "$PROFILE_TMPDIR/configs" "$PROFILE_TMPDIR/credentials"
+            if [ -f "$_prof_dir/configs/$_prof_name.json" ]; then
+                cp "$_prof_dir/configs/$_prof_name.json" "$PROFILE_TMPDIR/configs/"
+            fi
+            cp "$_prof_dir/credentials/$_prof_name.json" "$PROFILE_TMPDIR/credentials/"
+            chmod 600 "$PROFILE_TMPDIR/credentials/$_prof_name.json"
+            printf '%s\n' "$_prof_name" > "$PROFILE_TMPDIR/active_config"
+            if [ -n "$CRED_JSON" ]; then
+                info "SANDY_CLAUDE_AUTH=profile — using Anthropic profile '$_prof_name'; host OAuth credentials are NOT mounted (Claude Code would prefer them over the profile)."
+            else
+                info "SANDY_CLAUDE_AUTH=profile — using Anthropic profile '$_prof_name'."
+            fi
+            CRED_JSON=""
+        fi
+        unset _prof_dir _prof_name
+    elif [ -n "${ANTHROPIC_PROFILE:-}" ]; then
+        info "ANTHROPIC_PROFILE is set but SANDY_CLAUDE_AUTH is '$_claude_auth', not 'profile'; the profile is not used."
     fi
 
     # --- #130: credential posture. This is the SINGLE site every branch above
@@ -11022,7 +11087,9 @@ else
     fi
     # Record the WORST credential actually present in the container, so the
     # session marker states blast radius rather than intent.
-    if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    if [ -n "$PROFILE_TMPDIR" ]; then
+        CRED_MODE="profile"
+    elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
         CRED_MODE="oauth-token"
     elif [ -n "$CRED_JSON" ]; then
         if [ "$_cred_stripped" = true ]; then CRED_MODE="access-token-only"; else CRED_MODE="full"; fi
@@ -11210,6 +11277,11 @@ if _sandy_agent_has claude; then
         # features like /ultrareview. The tmpdir is ephemeral (fresh each launch,
         # rm -rf on exit) so in-session writes don't persist to the host.
         RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json")
+    fi
+    if [ -n "$PROFILE_TMPDIR" ]; then
+        # rw: Claude Code refreshes the profile token in-session. Ephemeral, so
+        # the refreshed token never reaches the host's copy (rm -rf on exit).
+        RUN_FLAGS+=(-v "$PROFILE_TMPDIR:/home/claude/.config/anthropic")
     fi
     RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/claude/.claude.json")
     # Mount host Claude Code hooks (read-only) for terminal notifications (cmux, iTerm2, etc.)
@@ -11832,7 +11904,20 @@ if _sandy_agent_has claude; then
     # documented preference is OAuth-first (see the claude credential probe order in
     # --print-schema), so when a long-lived OAuth token (`claude setup-token`) is
     # explicitly configured we forward ONLY the token and suppress ANTHROPIC_API_KEY.
-    if [ "${_claude_auth:-auto}" = api_key ]; then
+    if [ "${_claude_auth:-auto}" = profile ] && [ -n "${PROFILE_TMPDIR:-}" ]; then
+        # EXPLICIT profile-only. The profile is already mounted; everything that
+        # would outrank it in Claude Code is withheld (see the credential site).
+        if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+            info "SANDY_CLAUDE_AUTH=profile — not forwarding CLAUDE_CODE_OAUTH_TOKEN (it would outrank the profile)."
+        fi
+        if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            info "SANDY_CLAUDE_AUTH=profile — not forwarding ANTHROPIC_API_KEY (it would outrank the profile)."
+        fi
+        if [ -n "${ANTHROPIC_PROFILE:-}" ]; then
+            RUN_FLAGS+=(-e "ANTHROPIC_PROFILE=$ANTHROPIC_PROFILE")
+        fi
+        RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=")
+    elif [ "${_claude_auth:-auto}" = api_key ]; then
         # EXPLICIT key-only. The OAuth credentials file was already withheld
         # where CRED_JSON is resolved, so this is the whole credential story for
         # the container: one revocable key, no account refresh token. A

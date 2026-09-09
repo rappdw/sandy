@@ -12030,6 +12030,7 @@ check "§117(pre) extracted the claude key-forwarding branch, and it is evaluabl
 # Echoes the names of the secret env vars the branch actually chose to forward.
 _s117_run() {
     S117_FN="$_S117_FN" _claude_auth="${_claude_auth:-auto}" \
+    PROFILE_TMPDIR="${PROFILE_TMPDIR:-}" ANTHROPIC_PROFILE="${ANTHROPIC_PROFILE:-}" \
     CLAUDE_CODE_OAUTH_TOKEN="$1" ANTHROPIC_API_KEY="$2" CRED_TMPDIR="$3" \
         bash -c '
             set -u
@@ -12038,6 +12039,10 @@ _s117_run() {
             info() { :; }; warn() { :; }
             RUN_FLAGS=()
             eval "$S117_FN"
+            # empty-array-safe under set -u on bash 3.2 (the macOS trap)
+            for _f in "${RUN_FLAGS[@]+"${RUN_FLAGS[@]}"}"; do
+                case "$_f" in ANTHROPIC_PROFILE=*) printf "PROFILE_ENV_FORWARDED\n" ;; esac
+            done
         ' 2>/dev/null
 }
 
@@ -12098,6 +12103,72 @@ check "§117(12) api_key mode withholds the host OAuth credentials file (CRED_JS
     bash -c 'printf "%s" "$1" | grep -A12 "_claude_auth\" = api_key" | grep -q "CRED_JSON=\"\""' -- "$_S117_CRED"
 check "§117(13) an unrecognized SANDY_CLAUDE_AUTH value falls back to auto rather than silently doing something else" \
     bash -c 'printf "%s" "$1" | grep -q "_claude_auth=auto"' -- "$_S117_CRED"
+
+# SANDY_CLAUDE_AUTH=profile: an Anthropic Console profile from `ant auth login`,
+# the only route to a workspace-bound entitlement (Claude Mythos). Measured on
+# 2.1.263: Claude Code ranks a user_oauth profile BELOW a /login credential and
+# below every env credential, so the mode must withhold all three -- and a config
+# dir can hold an org:admin profile, so only the SELECTED one may be copied.
+_S117_H="$(_claude_auth=profile PROFILE_TMPDIR=/tmp/prof ANTHROPIC_PROFILE=work _s117_run "oauth-tok" "sk-ant-KEY" "/tmp/creds")"
+check "§117(14) profile mode withholds BOTH the API key and the long-lived token, and forwards ANTHROPIC_PROFILE" \
+    bash -c '! printf "%s" "$1" | grep -q ANTHROPIC_API_KEY && ! printf "%s" "$1" | grep -q CLAUDE_CODE_OAUTH_TOKEN && printf "%s" "$1" | grep -q PROFILE_ENV_FORWARDED' -- "$_S117_H"
+_S117_I="$(_claude_auth=profile PROFILE_TMPDIR=/tmp/prof _s117_run "" "" "")"
+check "§117(15) profile mode with no ANTHROPIC_PROFILE forwards none (the copied active_config selects it)" \
+    bash -c '! printf "%s" "$1" | grep -q PROFILE_ENV_FORWARDED' -- "$_S117_I"
+
+# Credential-site runner: RUN the real block against a fixture config dir that
+# also holds an `admin` decoy, and report what actually got copied.
+# $1=SANDY_CLAUDE_AUTH $2=ANTHROPIC_PROFILE $3=fixture-dir(or "" for none)
+_s117_cred_run() {
+    local h; h="$(mktemp -d)"
+    S117C="$_S117_CRED" HOME="$h" SANDY_CLAUDE_AUTH="$1" ANTHROPIC_PROFILE="$2" ANTHROPIC_CONFIG_DIR="${3:-$h/nope}" \
+        bash -c '
+            set -u
+            info() { :; }; warn() { printf "WARN:%s\n" "$1"; }
+            CRED_JSON="HOSTCREDS"; PROFILE_TMPDIR=""; ANTHROPIC_API_KEY=""
+            eval "$S117C"
+            printf "CRED_JSON=%s\nAUTH=%s\nTMP=%s\n" "$CRED_JSON" "$_claude_auth" "${PROFILE_TMPDIR:+set}"
+            if [ -n "$PROFILE_TMPDIR" ]; then
+                ( cd "$PROFILE_TMPDIR" && find . -type f | LC_ALL=C sort | sed "s|^|FILE:|" )
+                printf "ACTIVE=%s\n" "$(cat "$PROFILE_TMPDIR/active_config")"
+                printf "MODE=%s\n" "$(stat -c %a "$PROFILE_TMPDIR/credentials/"*.json 2>/dev/null || stat -f %Lp "$PROFILE_TMPDIR/credentials/"*.json 2>/dev/null)"
+                rm -rf "$PROFILE_TMPDIR"
+            fi
+        ' 2>/dev/null
+    rm -rf "$h"
+}
+_S117_FX="$(mktemp -d)"; mkdir -p "$_S117_FX/configs" "$_S117_FX/credentials"
+printf 'work\n' > "$_S117_FX/active_config"
+for _p in work admin; do
+    printf '{"version":"1.0","workspace_id":"wrkspc_%s"}' "$_p" > "$_S117_FX/configs/$_p.json"
+    printf '{"version":"1.0","access_token":"sk-ant-oat01-%s"}' "$_p" > "$_S117_FX/credentials/$_p.json"
+done
+_S117_J="$(_s117_cred_run profile "" "$_S117_FX")"
+check "§117(16) profile mode: the OAuth file is withheld and the ACTIVE profile is copied (from active_config)" \
+    bash -c 'printf "%s" "$1" | grep -q "^CRED_JSON=$" && printf "%s" "$1" | grep -q "^AUTH=profile$" && printf "%s" "$1" | grep -q "^FILE:./credentials/work.json$" && printf "%s" "$1" | grep -q "^ACTIVE=work$"' -- "$_S117_J"
+check "§117(17) profile mode copies ONLY the selected profile -- the org:admin decoy never enters the box" \
+    bash -c '! printf "%s" "$1" | grep -q "admin"' -- "$_S117_J"
+check "§117(18) the copied credentials file is mode 0600" \
+    bash -c 'printf "%s" "$1" | grep -q "^MODE=600$"' -- "$_S117_J"
+_S117_K="$(_s117_cred_run profile admin "$_S117_FX")"
+check "§117(19) an explicit ANTHROPIC_PROFILE selects that profile instead (the privileged path)" \
+    bash -c 'printf "%s" "$1" | grep -q "^FILE:./credentials/admin.json$" && ! printf "%s" "$1" | grep -q "work.json" && printf "%s" "$1" | grep -q "^ACTIVE=admin$"' -- "$_S117_K"
+_S117_L="$(_s117_cred_run profile "../evil" "$_S117_FX")"
+check "§117(20) a profile name that could escape the directory is refused and the mode falls back to auto" \
+    bash -c 'printf "%s" "$1" | grep -q "^AUTH=auto$" && printf "%s" "$1" | grep -q "^TMP=$" && printf "%s" "$1" | grep -q "^CRED_JSON=HOSTCREDS$" && printf "%s" "$1" | grep -q "^WARN:"' -- "$_S117_L"
+_S117_M="$(_s117_cred_run profile "" "")"
+check "§117(21) profile mode with no profile on the host warns and falls back to auto, KEEPING the OAuth file (never a silent no-credential session)" \
+    bash -c 'printf "%s" "$1" | grep -q "^AUTH=auto$" && printf "%s" "$1" | grep -q "^CRED_JSON=HOSTCREDS$" && printf "%s" "$1" | grep -q "^WARN:"' -- "$_S117_M"
+rm -rf "$_S117_FX"
+
+check "§117(22) ANTHROPIC_PROFILE is a PRIVILEGED key (a committed config must not be able to pick an org:admin profile)" \
+    bash -c 'awk "/^SANDY_PRIVILEGED_KEYS=\(/,/^\)/" "$1" | grep -qx "    ANTHROPIC_PROFILE"' -- "$SANDY_SCRIPT"
+check "§117(23) --print-schema lists profile as a SANDY_CLAUDE_AUTH choice" \
+    bash -c '"$1" --print-schema 2>/dev/null | tr -d " \n" | grep -q "\"name\":\"SANDY_CLAUDE_AUTH\",\"type\":\"enum\",\"choices\":\[\"auto\",\"api_key\",\"oauth\",\"profile\"\]"' -- "$SANDY_SCRIPT"
+# cred_mode: first-match-wins, and a host token may still be SET in the env (it
+# is withheld at the forwarding site), so the profile test must come first.
+check "§117(24) cred_mode tests the profile BEFORE the env token, so the marker cannot claim oauth-token for a profile session" \
+    bash -c 'p=$(grep -n -m1 "CRED_MODE=\"profile\"" "$1" | cut -d: -f1); t=$(grep -n -m1 "CRED_MODE=\"oauth-token\"" "$1" | cut -d: -f1); [ -n "$p" ] && [ -n "$t" ] && [ "$p" -lt "$t" ]' -- "$SANDY_SCRIPT"
 
 # The documented probe order must match the code, or a consumer reading
 # --print-schema plans around a precedence sandy no longer implements.
