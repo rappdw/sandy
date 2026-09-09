@@ -12012,7 +12012,8 @@ check "§117(pre) extracted the claude key-forwarding branch, and it is evaluabl
 # $1=CLAUDE_CODE_OAUTH_TOKEN $2=ANTHROPIC_API_KEY $3=CRED_TMPDIR
 # Echoes the names of the secret env vars the branch actually chose to forward.
 _s117_run() {
-    S117_FN="$_S117_FN" CLAUDE_CODE_OAUTH_TOKEN="$1" ANTHROPIC_API_KEY="$2" CRED_TMPDIR="$3" \
+    S117_FN="$_S117_FN" _claude_auth="${_claude_auth:-auto}" \
+    CLAUDE_CODE_OAUTH_TOKEN="$1" ANTHROPIC_API_KEY="$2" CRED_TMPDIR="$3" \
         bash -c '
             set -u
             _sandy_agent_has() { [ "$1" = claude ]; }
@@ -12038,6 +12039,48 @@ check "§117(3) long-lived OAuth token wins over both (pre-existing precedence i
 _S117_D="$(_s117_run "" "" "/tmp/creds")"
 check "§117(4) OAuth file only -> nothing extra forwarded, no spurious API key" \
     bash -c '! printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_D"
+
+# SANDY_CLAUDE_AUTH makes the choice EXPLICIT. Without it, suppression (above)
+# left no way to say "use the API key for this workspace" on a host that has
+# OAuth -- the only escape was SANDY_SUSPICIOUS=1, which also strips the refresh
+# token, forces connectors off and defaults egress to strict: a package deal,
+# not a billing choice. These run the same real branch with the mode varied.
+# CRED_TMPDIR is set here ON PURPOSE. In a real launch api_key mode clears
+# CRED_JSON so CRED_TMPDIR is empty -- but then this check would pass whether or
+# not the api_key branch exists, because the fallback branch forwards the key
+# too. (It did exactly that, and the mutation run caught it.) Setting it proves
+# the FORWARDING site honours the mode independently of the credential site, so
+# the two halves cannot silently drift apart.
+_S117_E="$(_claude_auth=api_key _s117_run "" "sk-ant-KEY" "/tmp/creds")"
+check "§117(6) SANDY_CLAUDE_AUTH=api_key forwards the key even in the configuration where auto suppresses it" \
+    bash -c 'printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_E"
+
+_S117_F="$(_claude_auth=api_key _s117_run "oauth-tok" "sk-ant-KEY" "/tmp/creds")"
+check "§117(7) api_key mode ALSO suppresses a long-lived CLAUDE_CODE_OAUTH_TOKEN (one credential in the box, not two)" \
+    bash -c 'printf "%s" "$1" | grep -q ANTHROPIC_API_KEY && ! printf "%s" "$1" | grep -q CLAUDE_CODE_OAUTH_TOKEN' -- "$_S117_F"
+
+_S117_G="$(_claude_auth=oauth _s117_run "" "sk-ant-KEY" "")"
+check "§117(8) SANDY_CLAUDE_AUTH=oauth suppresses the key even with NO OAuth file mounted (explicit beats inference)" \
+    bash -c '! printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_G"
+
+# Tier: api_key REDUCES what is in the container (a revocable project key instead
+# of the account refresh token) so it stays passive-safe; `oauth` forces the
+# account credential in even when a key is available, so it is approval-gated.
+check "§117(9) SANDY_CLAUDE_AUTH=oauth is approval-gated from a passive source" \
+    bash -c '"$1" --print-schema >/dev/null 2>&1; printf "%s" "$(awk "/_sandy_passive_value_privileged\(\)/,/^}/" "$1")" | grep -q "SANDY_CLAUDE_AUTH.*oauth"' -- "$SANDY_SCRIPT"
+check "§117(10) SANDY_CLAUDE_AUTH=api_key is NOT approval-gated (it is the tightening direction)" \
+    bash -c '! printf "%s" "$(awk "/_sandy_passive_value_privileged\(\)/,/^}/" "$1")" | grep -q "SANDY_CLAUDE_AUTH.*api_key"' -- "$SANDY_SCRIPT"
+
+# The credential-side half: api_key mode must WITHHOLD the OAuth file, or the
+# account refresh token is in the container alongside the key and the mode is a
+# billing switch pretending to be a compartmentalization one.
+_S117_CRED="$(awk '/--- SANDY_CLAUDE_AUTH: make the choice EXPLICIT/,/^    # --- #130: credential posture/' "$SANDY_SCRIPT")"
+check "§117(11) the credential site exists and is evaluable (mutation: a reword fails HERE)" \
+    bash -c 'printf "%s" "$1" | grep -q "CRED_JSON=\"\"" && printf "%s" "$1" | sed "\$d" | bash -n' -- "$_S117_CRED"
+check "§117(12) api_key mode withholds the host OAuth credentials file (CRED_JSON cleared)" \
+    bash -c 'printf "%s" "$1" | grep -A12 "_claude_auth\" = api_key" | grep -q "CRED_JSON=\"\""' -- "$_S117_CRED"
+check "§117(13) an unrecognized SANDY_CLAUDE_AUTH value falls back to auto rather than silently doing something else" \
+    bash -c 'printf "%s" "$1" | grep -q "_claude_auth=auto"' -- "$_S117_CRED"
 
 # The documented probe order must match the code, or a consumer reading
 # --print-schema plans around a precedence sandy no longer implements.
