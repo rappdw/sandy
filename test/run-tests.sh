@@ -4610,14 +4610,31 @@ check "CLAUDE_CODE_OAUTH_TOKEN forwarded to container when set" \
 # in the no-token `else` branch, and a warning fires when both are present.
 check "OAuth-first: ANTHROPIC_API_KEY suppressed when CLAUDE_CODE_OAUTH_TOKEN set (warning present)" \
     grep -qF 'not forwarding ANTHROPIC_API_KEY' "$_OAUTH_SCRIPT"
-check "OAuth-first: claude ANTHROPIC_API_KEY forward sits in the no-OAuth-token else" \
+# This was a LAYOUT assertion -- "the API-key forward sits after the `else`" --
+# and layout stopped being a proxy for the property when SANDY_CLAUDE_AUTH added
+# a legitimate earlier forward in api_key mode. A check that fails on correct
+# code is worse than no check, so it now asserts the PROPERTY by running the real
+# branch: with the token set, the API key must not be forwarded. Ordering is
+# §117's business, and it tests it by behaviour too.
+_s53_fwd() {   # $1=CLAUDE_CODE_OAUTH_TOKEN $2=ANTHROPIC_API_KEY $3=CRED_TMPDIR
+    local blk; blk="$(awk '/Claude Code.s OWN auth precedence/,/^fi$/' "$_OAUTH_SCRIPT")"
+    S53="if _sandy_agent_has claude; then
+$blk" CLAUDE_CODE_OAUTH_TOKEN="$1" ANTHROPIC_API_KEY="$2" CRED_TMPDIR="$3" _claude_auth=auto \
     bash -c '
-        blk="$(awk "/Claude Code.s OWN auth precedence/{f=1} f{print} f&&/^fi$/{exit}" "$1")"
-        o=$(printf "%s\n" "$blk" | grep -n -m1 "CLAUDE_CODE_OAUTH_TOKEN:-" | cut -d: -f1)
-        e=$(printf "%s\n" "$blk" | grep -nx -m1 "    else" | cut -d: -f1)
-        a=$(printf "%s\n" "$blk" | grep -nF -m1 "_sandy_add_secret_env ANTHROPIC_API_KEY" | cut -d: -f1)
-        [ -n "$o" ] && [ -n "$e" ] && [ -n "$a" ] && [ "$o" -lt "$e" ] && [ "$e" -lt "$a" ]
-    ' -- "$_OAUTH_SCRIPT"
+        set -u
+        _sandy_agent_has() { [ "$1" = claude ]; }
+        _sandy_add_secret_env() { printf "%s\n" "$1"; }
+        info() { :; }; warn() { :; }
+        RUN_FLAGS=()
+        eval "$S53"
+    ' 2>/dev/null
+}
+_S53_BOTH="$(_s53_fwd tok key "")"
+check "OAuth-first: with CLAUDE_CODE_OAUTH_TOKEN set, ANTHROPIC_API_KEY is NOT forwarded (property, not layout)" \
+    bash -c 'printf "%s" "$1" | grep -q CLAUDE_CODE_OAUTH_TOKEN && ! printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S53_BOTH"
+_S53_KEY="$(_s53_fwd "" key "")"
+check "OAuth-first: with no token and no OAuth file, ANTHROPIC_API_KEY IS forwarded (the guard is suppression, not removal)" \
+    bash -c 'printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S53_KEY"
 
 # ============================================================
 info "53. Failure-mode guards (M4 PR 4.4)"
