@@ -2237,15 +2237,24 @@ fi
 fi  # section 22
 
 # ============================================================
-section "23. Handoff directories acceptance (#132 slice 1) — test/acceptance-handoff-dirs.sh"
+section "23. Handoff directories + relay acceptance (#132 slice 1, SANDY_HANDOFF_RELAY 1.10.0) — test/acceptance-handoff-dirs.sh"
 # ============================================================
 if [ "$_SECTION_ON" = true ]; then
-# Directory/mount substrate ONLY (outbox rw, inbox :ro) — no relay, no helper,
-# no skills, no turn initiation. The real-Docker behavior a static check
-# cannot see: actual bind-mount RW flags, that EROFS wins even for a file the
-# container uid already owns, and that the whole feature is a true zero-diff
-# when SANDY_HANDOFF_DIRS is unset. Same invocation contract as §19-§21 —
-# self-cleaning harness, SANDY pinned to this suite's sandy.
+# Phases A-D: directory/mount substrate (outbox rw, inbox :ro, peer :ro,
+# relay rw; ON BY DEFAULT since 1.10.0) — no skills, no turn initiation. The
+# real-Docker behavior a static check cannot see: actual bind-mount RW flags
+# on a default launch, that EROFS wins even for a file the container uid
+# already owns, that the whole feature is a true zero-diff under the opt-out
+# SANDY_HANDOFF_DIRS=0, and that the marker overrides an opt-out.
+# Phase E (1.10.0): SANDY_HANDOFF_RELAY — the container-level relay
+# supervisor actually starts with the container, restarts a killed relay,
+# never runs twice, and survives an --update-sessions recreation; also that
+# the crossSessionInbound pin lands in BOTH measured-working files and that
+# the workspace copy is genuinely :ro in-container. run-tests.sh §114 covers
+# the same supervisor logic structurally (no Docker); this is the one place
+# that proves it against a real container.
+# Same invocation contract as §19-§21 — self-cleaning harness, SANDY pinned
+# to this suite's sandy.
 _acc_handoff="$_INT_SELF_DIR/acceptance-handoff-dirs.sh"
 if [ -f "$_acc_handoff" ]; then
     _acc_out="$(mktemp)"
@@ -2299,6 +2308,44 @@ else
 fi
 
 fi  # section 24
+
+# ============================================================
+section "25. UDS cross-session delivery under accept (uds_handoff.md acceptance criterion 7.4) — test/acceptance-uds-delivery.sh"
+# ============================================================
+if [ "$_SECTION_ON" = true ]; then
+# The one criterion the 1.10.0 probe could NOT close from where it ran. That
+# probe measured Claude Code's resolver against a scratch pty session in a
+# throwaway HOME; it never measured the thing sandy ships — a daemon
+# container, sandy's own settings seeding, sandy's uid. So `accept actually
+# lifts the hold` was established for the resolver and merely inferred for
+# sandy. This closes that, with a NEGATIVE control (explicit refuse, identical
+# injection) so a green result cannot mean "the agent made that file for some
+# other reason". Needs credentials: the agent has to complete a turn for the
+# sentinel to appear, so the harness skips loudly without them rather than
+# reporting a pass that measured nothing (the §104 failure mode).
+# Same invocation contract as §19-§24 — self-cleaning harness, SANDY pinned
+# to this suite's sandy.
+_acc_uds="$_INT_SELF_DIR/acceptance-uds-delivery.sh"
+if [ -f "$_acc_uds" ]; then
+    _acc_out="$(mktemp)"
+    set +e   # a failing harness exits non-zero; don't let set -e abort the suite
+    SANDY="$SANDY_SCRIPT" bash "$_acc_uds" 2>&1 | tee "$_acc_out"
+    _acc_rc=${PIPESTATUS[0]}
+    set -e
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed( \([0-9]+ skipped\))?' "$_acc_out" | tail -1)"
+    if grep -q 'RESULT: 0 passed, 0 failed' "$_acc_out"; then
+        skip "uds-delivery cross-session delivery acceptance (${_acc_res:-skipped}) — no Claude credentials"
+    elif [ "$_acc_rc" -eq 0 ]; then
+        pass "uds-delivery cross-session delivery acceptance (${_acc_res:-all assertions passed})"
+    else
+        fail "uds-delivery cross-session delivery acceptance (${_acc_res:-exited $_acc_rc}) — see harness output above"
+    fi
+    rm -f "$_acc_out"
+else
+    skip "uds-delivery cross-session delivery acceptance (acceptance-uds-delivery.sh not found)"
+fi
+
+fi  # section 25
 
 # ============================================================
 # Summary

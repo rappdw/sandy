@@ -75,6 +75,11 @@ set -E
 info()  { printf "\033[0;36m%s\033[0m\n" "$*"; }
 pass()  { PASS=$((PASS + 1)); printf "  \033[0;32m✓ %s\033[0m\n" "$*"; }
 fail()  { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "  \033[0;31m✗ %s\033[0m\n" "$*"; }
+# skip: a host-capability gap (no node/jq/flock) that removes checks from THIS
+# run. Printed loudly and counted, never silent -- a `skip` that no-ops makes a
+# run on a bare host report "all passed" while having run fewer assertions.
+SKIPPED=0
+skip()  { SKIPPED=$((SKIPPED + 1)); printf "  \033[0;33m– skipped: %s\033[0m\n" "$*"; }
 check() {
     # check "description" <command...>
     local desc="$1"; shift
@@ -422,6 +427,9 @@ sandy_run '
     # — this runs INSIDE the Debian container, so it is available (unlike on a
     # BSD/macOS host). On timeout the install is simply incomplete and the
     # `check` below reports a clean FAIL instead of the run freezing.
+    # Container-side (Debian), not host shell. This block is a single-quoted
+    # argument, which no heredoc heuristic can detect, hence the explicit marker.
+    # lint-bash32: allow GNUBIN
     timeout 300 uv python install "$PY_WANT" 2>/dev/null || true
     uv python find "$PY_WANT" >/dev/null 2>&1 || true
     exit 0
@@ -1321,6 +1329,7 @@ _MIGRATE_SNIPPET='
         rm -rf "$_old_proj"
     done
     if [ -f "$HOME/.claude/history.jsonl" ]; then
+        # lint-bash32: allow GNUBIN
         sed -i "s|\"project\":\"[^\"]*\"|\"project\":\"$WORKSPACE\"|g" "$HOME/.claude/history.jsonl"
     fi
 '
@@ -2068,8 +2077,9 @@ check "sandbox layout creates codex/ subdir for SANDY_AGENT=codex" \
 check "codex sandbox mounted at /home/claude/.codex" \
     grep -q 'SANDBOX_DIR/codex:/home/claude/.codex' "$SANDY_SCRIPT"
 
-# Auth.json mounted read-only.
-check "codex auth.json mount is read-only (:ro)" \
+# Auth.json mounted read-only -- api_key path ONLY. The OAuth path seeds the
+# rw sandbox instead, so `codex login` in-container can write and persist.
+check "codex auth.json mount is read-only (:ro) on the api_key path" \
     grep -q 'auth.json:/home/claude/.codex/auth.json:ro' "$SANDY_SCRIPT"
 
 # Env passthrough: OPENAI_API_KEY forwarded to container (codex reads this),
@@ -3170,7 +3180,7 @@ info "40. Sprint 1 — Credentials mounts"
 SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 check "Claude credentials mount is rw (no :ro suffix)" \
     bash -c 'grep -q "CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json\")" "$1" && ! grep -q "CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json:ro" "$1"' -- "$SANDY_SCRIPT_PATH"
-check "Codex credentials mount has :ro" \
+check "Codex credentials mount has :ro (api_key path; CODEX_CRED_TMPDIR is now set only there)" \
     grep -q 'CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro' "$SANDY_SCRIPT_PATH"
 check "Gemini OAuth mount has :ro" \
     grep -q 'home/claude/.gemini/.*:ro' "$SANDY_SCRIPT_PATH"
@@ -4233,7 +4243,9 @@ info "49. Egress proxy image generator (M2.7)"
 _PX_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Pull just the two functions and exercise them in isolation.
 _PX_FNS="$(sed -n '/^_sandy_proxy_ref()/,/^}$/p' "$_PX_SCRIPT")
-$(sed -n '/^generate_dockerfile_proxy()/,/^}$/p' "$_PX_SCRIPT")"
+$(sed -n '/^_sandy_proxy_local_src()/,/^}$/p' "$_PX_SCRIPT")
+$(sed -n '/^generate_dockerfile_proxy()/,/^}$/p' "$_PX_SCRIPT")
+sha256() { shasum -a 256 2>/dev/null || sha256sum; }"
 
 # Ref resolution: release -> version tag; -dev -> main; override wins.
 _px_ref() {
@@ -4298,6 +4310,54 @@ check "proxy build uses --pull to refresh the golang base (Issue 3)" \
     bash -c 'grep -qE "docker build -q --no-cache --pull" "$1"' -- "$_PX_SCRIPT"
 check "--print-state carries proxy_image_created (Issue 3)" \
     bash -c 'grep -q "proxy_image_created" "$1"' -- "$_PX_SCRIPT"
+
+# Local-checkout proxy build (fix, 2026-09-07): when sandy runs from a checkout
+# that carries proxy/ source, the proxy is built by COPYing that local source,
+# NOT by `git clone` of a remote ref. Motivation: a `git checkout <branch>` of
+# an UNPUSHED feature branch fails against the public remote, so before this fix
+# launching from any local-only -dev branch could not build the proxy at all;
+# and cloning built the security chokepoint from a mutable remote ref rather
+# than the audited local source. A fake checkout (proxy/go.mod + proxy/main.go)
+# with SANDY_SELF pointed at it must flip the generator to the COPY path.
+_PX_CO="$(mktemp -d)"; mkdir -p "$_PX_CO/proxy"
+printf 'module x\n' > "$_PX_CO/proxy/go.mod"
+printf 'package main\nfunc main(){}\n' > "$_PX_CO/proxy/main.go"
+printf 'touch "%s/sandy"\n' "$_PX_CO" | sh   # a stand-in script so dirname($SANDY_SELF) resolves here
+_PX_CO_DF="$_PX_CO/home/Dockerfile.proxy.new"; mkdir -p "$_PX_CO/home"
+SANDY_HOME="$_PX_CO/home" SANDY_SELF="$_PX_CO/sandy" SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" GITHUB_HEAD_REF= \
+    bash -c "$_PX_FNS
+generate_dockerfile_proxy" 2>/dev/null
+check "proxy (local): COPYs the local proxy/ source, no git clone" \
+    bash -c 'grep -qx "COPY proxy /src/proxy" "$1" && ! grep -q "git clone" "$1"' -- "$_PX_CO_DF"
+check "proxy (local): no SANDY_PROXY_REF build-arg (nothing is fetched by ref)" \
+    bash -c '! grep -q "ARG SANDY_PROXY_REF" "$1"' -- "$_PX_CO_DF"
+check "proxy (local): carries a proxy-src content hash (the rebuild trigger on source change)" \
+    bash -c 'grep -qE "^# proxy-src: [0-9a-f]{64} " "$1"' -- "$_PX_CO_DF"
+check "proxy (local): still carries the monthly freshness epoch and the scratch/entrypoint shape" \
+    bash -c 'grep -qE "^# freshness-epoch: [0-9]{4}-[0-9]{2} " "$1" && grep -qx "FROM scratch" "$1" && grep -qF "ENTRYPOINT [\"/usr/local/bin/sandy-proxy\"]" "$1"' -- "$_PX_CO_DF"
+# The content hash must MOVE when the local source changes (else a proxy edit
+# would not rebuild). Mutation-style: regenerate after editing main.go.
+_PX_H1="$(grep -m1 '^# proxy-src:' "$_PX_CO_DF" | awk '{print $3}')"
+printf 'package main\nfunc main(){ _ = 1 }\n' > "$_PX_CO/proxy/main.go"
+SANDY_HOME="$_PX_CO/home" SANDY_SELF="$_PX_CO/sandy" SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" GITHUB_HEAD_REF= \
+    bash -c "$_PX_FNS
+generate_dockerfile_proxy" 2>/dev/null
+_PX_H2="$(grep -m1 '^# proxy-src:' "$_PX_CO_DF" | awk '{print $3}')"
+check "proxy (local): the proxy-src hash changes when proxy/ source changes (rebuild fires)" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$2" ]' -- "$_PX_H1" "$_PX_H2"
+# Explicit overrides still force the clone path even with a local proxy/ present.
+SANDY_HOME="$_PX_CO/home" SANDY_SELF="$_PX_CO/sandy" SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF=v9.9.9 GITHUB_HEAD_REF= \
+    bash -c "$_PX_FNS
+generate_dockerfile_proxy" 2>/dev/null
+check "proxy (local): SANDY_PROXY_REF override forces the clone path (explicit pin wins over local source)" \
+    bash -c 'grep -q "git clone https://github.com/rappdw/sandy /src" "$1" && grep -qx "ARG SANDY_PROXY_REF=v9.9.9" "$1"' -- "$_PX_CO_DF"
+SANDY_HOME="$_PX_CO/home" SANDY_SELF="$_PX_CO/sandy" SANDY_VERSION=0.13.1-dev SANDY_PROXY_REF="" GITHUB_HEAD_REF=some-pr-branch \
+    bash -c "$_PX_FNS
+generate_dockerfile_proxy" 2>/dev/null
+check "proxy (local): GITHUB_HEAD_REF (CI) forces the clone path" \
+    bash -c 'grep -q "git clone" "$1" && grep -qx "ARG SANDY_PROXY_REF=some-pr-branch" "$1"' -- "$_PX_CO_DF"
+rm -rf "$_PX_CO"
+
 # Regression (real launch bug, 2026-07-23): the Dockerfile.proxy heredoc is
 # UNQUOTED (it needs ${ref} expanded), so any backtick / $( ) / unescaped ${ }
 # in its body is executed by the SHELL at generation time — a stray `word` in a
@@ -4550,14 +4610,31 @@ check "CLAUDE_CODE_OAUTH_TOKEN forwarded to container when set" \
 # in the no-token `else` branch, and a warning fires when both are present.
 check "OAuth-first: ANTHROPIC_API_KEY suppressed when CLAUDE_CODE_OAUTH_TOKEN set (warning present)" \
     grep -qF 'not forwarding ANTHROPIC_API_KEY' "$_OAUTH_SCRIPT"
-check "OAuth-first: claude ANTHROPIC_API_KEY forward sits in the no-OAuth-token else" \
+# This was a LAYOUT assertion -- "the API-key forward sits after the `else`" --
+# and layout stopped being a proxy for the property when SANDY_CLAUDE_AUTH added
+# a legitimate earlier forward in api_key mode. A check that fails on correct
+# code is worse than no check, so it now asserts the PROPERTY by running the real
+# branch: with the token set, the API key must not be forwarded. Ordering is
+# §117's business, and it tests it by behaviour too.
+_s53_fwd() {   # $1=CLAUDE_CODE_OAUTH_TOKEN $2=ANTHROPIC_API_KEY $3=CRED_TMPDIR
+    local blk; blk="$(awk '/Claude Code.s OWN auth precedence/,/^fi$/' "$_OAUTH_SCRIPT")"
+    S53="if _sandy_agent_has claude; then
+$blk" CLAUDE_CODE_OAUTH_TOKEN="$1" ANTHROPIC_API_KEY="$2" CRED_TMPDIR="$3" _claude_auth=auto \
     bash -c '
-        blk="$(awk "/Claude Code.s OWN auth precedence/{f=1} f{print} f&&/^fi$/{exit}" "$1")"
-        o=$(printf "%s\n" "$blk" | grep -n -m1 "CLAUDE_CODE_OAUTH_TOKEN:-" | cut -d: -f1)
-        e=$(printf "%s\n" "$blk" | grep -nx -m1 "    else" | cut -d: -f1)
-        a=$(printf "%s\n" "$blk" | grep -nF -m1 "_sandy_add_secret_env ANTHROPIC_API_KEY" | cut -d: -f1)
-        [ -n "$o" ] && [ -n "$e" ] && [ -n "$a" ] && [ "$o" -lt "$e" ] && [ "$e" -lt "$a" ]
-    ' -- "$_OAUTH_SCRIPT"
+        set -u
+        _sandy_agent_has() { [ "$1" = claude ]; }
+        _sandy_add_secret_env() { printf "%s\n" "$1"; }
+        info() { :; }; warn() { :; }
+        RUN_FLAGS=()
+        eval "$S53"
+    ' 2>/dev/null
+}
+_S53_BOTH="$(_s53_fwd tok key "")"
+check "OAuth-first: with CLAUDE_CODE_OAUTH_TOKEN set, ANTHROPIC_API_KEY is NOT forwarded (property, not layout)" \
+    bash -c 'printf "%s" "$1" | grep -q CLAUDE_CODE_OAUTH_TOKEN && ! printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S53_BOTH"
+_S53_KEY="$(_s53_fwd "" key "")"
+check "OAuth-first: with no token and no OAuth file, ANTHROPIC_API_KEY IS forwarded (the guard is suppression, not removal)" \
+    bash -c 'printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S53_KEY"
 
 # ============================================================
 info "53. Failure-mode guards (M4 PR 4.4)"
@@ -6824,12 +6901,14 @@ check "marker JSON valid + carries the pinned nonce" \
 
 # ============================================================
 echo ""
-echo "§86: Handoff directories (SANDY_HANDOFF_DIRS, #132 slice 1: dirs + mounts only)"
+echo "§86: Handoff directories (SANDY_HANDOFF_DIRS, #132 substrate: dirs + mounts, ON BY DEFAULT since 1.10.0)"
 # ============================================================
-# Directory/mount substrate ONLY — no relay, no helper, no skills, no turn
-# initiation, no peers, no manifest, no archive/ (mode unsettled in #132).
-# outbox rw, inbox :ro; gated entirely on SANDY_HANDOFF_DIRS=1 so unset/0
-# is a zero RUN_FLAGS diff (the dirs themselves are created either way).
+# Directory/mount substrate ONLY — no helper, no skills, no turn initiation,
+# no manifest, no archive/ (mode unsettled in #132). outbox rw, inbox :ro,
+# peer :ro, relay rw. Default 1 as of 1.10.0: unset resolves to 1 inside the
+# BEGIN/END handoff block, and only the explicit opt-out SANDY_HANDOFF_DIRS=0
+# (or the ~/.handoff workspace collision) is a zero RUN_FLAGS diff. The dirs
+# themselves are created either way.
 _S86="$SANDY_SCRIPT"
 check "SANDY_HANDOFF_DIRS is a passive-safe key (schema)" \
     bash -c 'awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)/" "$1" | grep -qx "    SANDY_HANDOFF_DIRS"' -- "$_S86"
@@ -6841,28 +6920,42 @@ check "SANDY_HANDOFF_DIRS is NOT in SANDY_ENV_ONLY_KEYS" \
     bash -c '! awk "/^SANDY_ENV_ONLY_KEYS=\(/,/^\)/" "$1" | grep -qx "    SANDY_HANDOFF_DIRS"' -- "$_S86"
 check "SANDY_HANDOFF_DIRS is NOT referenced by _sandy_passive_value_privileged" \
     bash -c '! awk "/^_sandy_passive_value_privileged\(\)/,/^}/" "$1" | grep -qE "SANDY_HANDOFF_DIRS([^_A-Za-z0-9]|$)"' -- "$_S86"
-check "SANDY_HANDOFF_DIRS has a _sandy_key_metadata row (bool, default 0)" \
-    bash -c 'grep -q "^SANDY_HANDOFF_DIRS|bool|0|" "$1"' -- "$_S86"
+check "SANDY_HANDOFF_DIRS has a _sandy_key_metadata row (bool, default 1 since 1.10.0)" \
+    bash -c 'grep -q "^SANDY_HANDOFF_DIRS|bool|1|" "$1"' -- "$_S86"
+check "NEGATIVE: the old default-0 row is gone (no second row for the key)" \
+    bash -c '[ "$(grep -c "^SANDY_HANDOFF_DIRS|" "$1")" -eq 1 ]' -- "$_S86"
 # --print-schema exposes it as a passive bool key
 check "--print-schema lists SANDY_HANDOFF_DIRS as a passive bool key" \
     bash -c '"$1" --print-schema 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); e=[k for k in d[\"config\"][\"passive_keys\"] if k[\"name\"]==\"SANDY_HANDOFF_DIRS\"]; assert e and e[0][\"type\"]==\"bool\", e"' -- "$_S86"
+check "--print-schema advertises default 1 for SANDY_HANDOFF_DIRS (consumers read the default from here, not from the docs)" \
+    bash -c '"$1" --print-schema 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); e=[k for k in d[\"config\"][\"passive_keys\"] if k[\"name\"]==\"SANDY_HANDOFF_DIRS\"]; assert e and str(e[0][\"default\"])==\"1\", e"' -- "$_S86"
 # Mount emission
 check "RUN_FLAGS mounts outbox rw at ~/.handoff/outbox" \
     bash -c 'grep -qF "handoff/outbox:/home/claude/.handoff/outbox" "$1"' -- "$_S86"
 check "RUN_FLAGS mounts inbox :ro at ~/.handoff/inbox" \
     bash -c 'grep -qF "handoff/inbox:/home/claude/.handoff/inbox:ro" "$1"' -- "$_S86"
+check "RUN_FLAGS mounts peer :ro at ~/.handoff/peer (the second inbound directory, 1.10.0)" \
+    bash -c 'grep -qF "handoff/peer:/home/claude/.handoff/peer:ro" "$1"' -- "$_S86"
+check "peer path appears exactly once, and it is :ro (a second, rw spelling would be a writable inbound directory)" \
+    bash -c '[ "$(grep -c "handoff/peer:/home/claude/.handoff/peer" "$1")" -eq 1 ] && grep -q "handoff/peer:/home/claude/.handoff/peer:ro" "$1"' -- "$_S86"
 # Mode negative controls (load-bearing): outbox must NOT be :ro; inbox path
 # appears exactly once and that occurrence carries :ro.
 check "outbox mount is NOT :ro" \
     bash -c '! grep -q "handoff/outbox:/home/claude/.handoff/outbox:ro" "$1"' -- "$_S86"
 check "inbox path appears exactly once, and it is :ro" \
     bash -c '[ "$(grep -c "handoff/inbox:/home/claude/.handoff/inbox" "$1")" -eq 1 ] && grep -q "handoff/inbox:/home/claude/.handoff/inbox:ro" "$1"' -- "$_S86"
-# Gating: the mount block lives inside the SANDY_HANDOFF_DIRS=1 guard, and
-# there is no stray emission outside it (exactly 2 RUN_FLAGS handoff lines).
-check "mount emission is gated on SANDY_HANDOFF_DIRS=1" \
-    bash -c 'awk "/Handoff directories mounts \(#132 substrate\)/,/^fi\$/" "$1" | grep -q "SANDY_HANDOFF_DIRS:-0.*= \"1\""' -- "$_S86"
-check "exactly 2 RUN_FLAGS handoff lines (no stray emission outside the gate)" \
-    bash -c '[ "$(grep -c "RUN_FLAGS.*handoff" "$1")" -eq 2 ]' -- "$_S86"
+# Gating: the mount block lives inside the SANDY_HANDOFF_DIRS=1 guard, whose
+# unset-fallback is 1 (default on), and there is no stray emission outside it
+# (exactly 4 RUN_FLAGS handoff lines as of 1.10.0 — outbox, inbox, peer, and
+# the relay/ mount; see §114 for the relay-specific coverage. The -e
+# "SANDY_HANDOFF_RELAY=..." line has no lowercase "handoff" substring so it is
+# correctly NOT counted here).
+check "mount emission is gated on SANDY_HANDOFF_DIRS = 1, with unset falling back to 1 (default on)" \
+    bash -c 'awk "/Handoff directories mounts \(#132 substrate\)/,/^fi\$/" "$1" | grep -q "SANDY_HANDOFF_DIRS:-1.*= \"1\""' -- "$_S86"
+check "NEGATIVE: no site in the script still falls back to 0 for SANDY_HANDOFF_DIRS (a stray :-0 would silently turn the default back off at that one site)" \
+    bash -c '! grep -q "SANDY_HANDOFF_DIRS:-0" "$1"' -- "$_S86"
+check "exactly 4 RUN_FLAGS handoff lines (outbox, inbox, peer, relay; no stray emission outside the gate)" \
+    bash -c '[ "$(grep -c "RUN_FLAGS.*handoff" "$1")" -eq 4 ]' -- "$_S86"
 # mkdir is now UNCONDITIONAL (only the mount is gated) but must still live in
 # the BEGIN/END handoff block, not drift into the persistent-package block
 # above it — that block is about pip/npm/go/cargo and must stay handoff-free.
@@ -6897,6 +6990,8 @@ _hb_run() {
       echo "VAR:${SANDY_HANDOFF_DIRS:-unset}"
       [ -d "$dir/handoff/outbox" ] && echo "OUTBOX:yes" || echo "OUTBOX:no"
       [ -d "$dir/handoff/inbox" ] && echo "INBOX:yes" || echo "INBOX:no"
+      [ -d "$dir/handoff/peer" ] && echo "PEER:yes" || echo "PEER:no"
+      [ -d "$dir/handoff/relay" ] && echo "RELAY:yes" || echo "RELAY:no"
     )"
     rm -rf "$dir"
     printf '%s' "$out"
@@ -6914,12 +7009,25 @@ _hb_c="$(_hb_run "/home/claude/dev/proj" "1")"
 check "collision guard (c): unrelated workspace -> both dirs created, no warning" \
     bash -c '[[ "$1" == *"VAR:1"* && "$1" == *"OUTBOX:yes"* && "$1" == *"INBOX:yes"* && "$1" != *"WARN:"* ]]' -- "$_hb_c"
 _hb_d="$(_hb_run "/home/claude/dev/proj" "")"
-# Key unset: the dirs ARE created (unconditional now) but stay unmounted, and
-# nothing warns. The property that matters is "no mount, no noise" — dir
-# presence deliberately carries no information, which is the whole point of
-# decoupling creation from the gate.
-check "collision guard (d): key unset -> dirs created but inert, no warning" \
-    bash -c '[[ "$1" == *"OUTBOX:yes"* && "$1" == *"INBOX:yes"* && "$1" != *"WARN:"* ]]' -- "$_hb_d"
+# Key unset: DEFAULT ON (1.10.0). The block resolves the variable to 1 itself,
+# all four dirs are created, and nothing warns.
+check "collision guard (d): key unset -> resolved to 1 (default on), all four dirs created, no warning" \
+    bash -c '[[ "$1" == *"VAR:1"* && "$1" == *"OUTBOX:yes"* && "$1" == *"INBOX:yes"* && "$1" == *"PEER:yes"* && "$1" == *"RELAY:yes"* && "$1" != *"WARN:"* ]]' -- "$_hb_d"
+_hb_e="$(_hb_run "/home/claude/dev/proj" "0")"
+# The opt-out: the dirs ARE still created (unconditional) but the variable
+# stays 0 so nothing downstream mounts them, and nothing warns — opting out
+# is a quiet, supported choice, not an error condition.
+check "collision guard (e): SANDY_HANDOFF_DIRS=0 (the opt-out) -> stays 0, dirs created but inert, no warning" \
+    bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"OUTBOX:yes"* && "$1" == *"INBOX:yes"* && "$1" == *"PEER:yes"* && "$1" != *"WARN:"* ]]' -- "$_hb_e"
+_hb_f="$(_hb_run "/home/claude/.handoff" "")"
+# With the default on, the collision refusal must fire for a colliding
+# workspace even when nobody set the key — otherwise the default would mount
+# ~/.handoff/* inside a workspace that IS ~/.handoff.
+check "collision guard (f): key unset + workspace == ~/.handoff -> var forced 0, warning (the default does not bypass the guard)" \
+    bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"WARN:"* ]]' -- "$_hb_f"
+_hb_g="$(_hb_run "/home/claude/.handoff" "0")"
+check "collision guard (g): opt-out + colliding workspace -> no warning (nothing would have been mounted anyway)" \
+    bash -c '[[ "$1" == *"VAR:0"* && "$1" != *"WARN:"* ]]' -- "$_hb_g"
 
 # ============================================================
 echo ""
@@ -7057,14 +7165,18 @@ echo ""
 echo "§89: bash-3.2 / BSD portability lint (the class CI structurally cannot see)"
 # ============================================================
 # CI is Ubuntu + bash 5 + GNU userland; the maintainer is macOS + bash 3.2 + BSD.
-# Three constructs parse or expand DIFFERENTLY there, so `bash -n` in CI passes
-# and the break only ever shows up on one machine. All four have already bitten
-# this repo, and each was silent in a way that made it expensive:
+# Several constructs parse or expand DIFFERENTLY there, so `bash -n` in CI
+# passes and the break only ever shows up on one machine. Every one has already
+# bitten this repo, each silent in a way that made it expensive:
 #
 #   §83  nested source <(...) inside $( )  -> exit 127, ERR trap, run aborted
 #   §68  backtick inside python3 -c "..."  -> the suite EXECUTED the real sandy
 #   §86  apostrophe in a comment in $( )   -> parse abort, yet the summary still
 #                                             printed "945 passed, 0 failed"
+#   GNUBIN  a GNU-only binary on a BSD host. `timeout` cost THREE debugging
+#           rounds in one session (§108/§109 here, plus acceptance-handoff-dirs
+#           E8): exit 127, swallowed by `|| true`, and the assertion then
+#           grepped "timeout: command not found" for real output.
 #
 # So the guard is not "be tidy" — it is that a portability break here does not
 # announce itself as a failure. test/lint-bash32.sh is the detector and is
@@ -7077,11 +7189,18 @@ check "lint-bash32.sh exists and is executable-by-bash" \
 
 # The detectors must be proven to DETECT before a clean run means anything —
 # a linter whose patterns silently stopped matching would report success forever.
-check "detectors self-test: all four fire on known-bad fixtures" \
+check "detectors self-test: every detector fires on known-bad fixtures" \
     bash -c 'bash "$1" --self-test >/dev/null 2>&1' -- "$_S89"
 
 check "detectors self-test: clean file yields no findings (no false positives)" \
     bash -c 'bash "$1" --self-test 2>&1 | grep -q "negative control OK"' -- "$_S89"
+# Named explicitly: "every detector fires" passes vacuously if a probe is quietly
+# dropped from the loop, and GNUBIN is the one whose fixtures are most tempting
+# to delete (its false-positive tuning is the fiddliest).
+check "detectors self-test: the GNUBIN probes are among them (mutation: drop a gnubin fixture -> this fails while the generic check above stays green)" \
+    bash -c 'bash "$1" --self-test 2>&1 | grep -q "detector OK: gnubin"' -- "$_S89"
+check "detectors self-test: GNUBIN does not fire on prose, BSD-correct idioms, or container-side heredocs" \
+    bash -c 'bash "$1" --self-test 2>&1 | grep -q "GNUBIN does not fire"' -- "$_S89"
 
 # The actual guard.
 check "repo shell scripts are free of bash-3.2 hazards" \
@@ -7566,11 +7685,25 @@ if data[:1] != b"{":
 json.loads(data)  # raises on malformed JSON or trailing extra data
 PY
 
+# A "stderr is exactly 0 bytes" assertion that DISCARDS the bytes it rejects is
+# unactionable: a real maintainer run failed §92(c)/(d) on macOS and the report
+# said only that the count was non-zero, so the cause could not be identified
+# from the output. Print the offending bytes (truncated, control chars escaped,
+# newlines flattened) right before the check that will fail on them. Silent on a
+# clean run, so it costs nothing when the contract holds.
+_s92_diag() {   # $1=stderr file  $2=label
+    [ -s "$1" ] || return 0
+    printf '    \033[0;33m^ %s wrote %s byte(s) to stderr: %s\033[0m\n' \
+        "$2" "$(wc -c < "$1" | tr -d ' ')" \
+        "$(head -c 300 "$1" | tr '\n' ' ' | cat -v)"
+}
+
 # --- (a) --print-schema ---
 _s92a_out="$_S92_TMP/a.out"; _s92a_err="$_S92_TMP/a.err"; _s92a_rc=0
 env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --print-schema >"$_s92a_out" 2>"$_s92a_err" || _s92a_rc=$?
 check "§92(a) --print-schema exits 0" test "$_s92a_rc" -eq 0
+_s92_diag "$_s92a_err" "§92(a) --print-schema"
 check "§92(a) --print-schema stderr is exactly 0 bytes" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92a_err"
 check "§92(a) --print-schema stdout is exactly one JSON document" \
@@ -7581,6 +7714,7 @@ _s92b_out="$_S92_TMP/b.out"; _s92b_err="$_S92_TMP/b.err"; _s92b_rc=0
 PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" SANDY_VERBOSE=1 \
     bash "$_S92_SANDY" --print-schema >"$_s92b_out" 2>"$_s92b_err" || _s92b_rc=$?
 check "§92(b) SANDY_VERBOSE=1 --print-schema exits 0" test "$_s92b_rc" -eq 0
+_s92_diag "$_s92b_err" "§92(b) SANDY_VERBOSE=1 --print-schema"
 check "§92(b) SANDY_VERBOSE=1 --print-schema stderr is exactly 0 bytes" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92b_err"
 check "§92(b) SANDY_VERBOSE=1 --print-schema stdout is exactly one JSON document" \
@@ -7591,6 +7725,7 @@ _s92c_out="$_S92_TMP/c.out"; _s92c_err="$_S92_TMP/c.err"; _s92c_rc=0
 env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --print-state >"$_s92c_out" 2>"$_s92c_err" || _s92c_rc=$?
 check "§92(c) --print-state (full) exits 0" test "$_s92c_rc" -eq 0
+_s92_diag "$_s92c_err" "§92(c) --print-state (full)"
 check "§92(c) --print-state (full) stderr is exactly 0 bytes" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92c_err"
 check "§92(c) --print-state (full) stdout is exactly one JSON document" \
@@ -7601,10 +7736,108 @@ _s92d_out="$_S92_TMP/d.out"; _s92d_err="$_S92_TMP/d.err"; _s92d_rc=0
 env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --print-state light >"$_s92d_out" 2>"$_s92d_err" || _s92d_rc=$?
 check "§92(d) --print-state light exits 0" test "$_s92d_rc" -eq 0
+_s92_diag "$_s92d_err" "§92(d) --print-state light"
 check "§92(d) --print-state light stderr is exactly 0 bytes" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92d_err"
 check "§92(d) --print-state light stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92d_out"
+
+# --- (c2/d2) STATIC: no docker probe substitution can fire the inherited ERR
+# trap. WHY THIS IS NOT COVERED BY THE BYTE ASSERTIONS ABOVE ON CI: sandy runs
+# `set -E`, so the ERR trap is inherited into command substitutions. Inside
+# `$(docker ps ... )` the docker call is the subshell's LAST command, and on
+# bash 3.2 the "part of an if condition" exemption does not reach it -- the
+# trap fires, sandy's handler writes ~310 bytes to stderr, and the subshell
+# still exits 1 so the outer `if` behaves correctly (exit 0, valid JSON, only
+# the stream contract broken). Bash 5 suppresses it, so §92(c)/(d) above are
+# GREEN on CI and RED on macOS. This static check is what makes the class
+# visible on both. A docker probe is safe if it either neutralizes the trap
+# (`trap - ERR;` first) or ends in `|| true` INSIDE the substitution.
+# Written to a FILE, not fed through a multi-line $( ) heredoc. bash 3.2
+# scans a command substitution WITHOUT skipping comments, so apostrophes and
+# parens in this program's comments desynchronized the parser and produced a
+# "syntax error near unexpected token (" two thousand lines further down --
+# after 1034 checks had already passed. Same idiom as _S92_PURITY_PY above.
+_S92_PROBE_PY="$(mktemp)"
+cat > "$_S92_PROBE_PY" <<'PROBEPY'
+import re, sys
+
+src = open(sys.argv[1]).read().split("\n")
+
+# Scope: ONLY the helpers the introspection fast paths actually reach. The
+# stream contract binds those four handlers; everywhere else (daemon
+# lifecycle, proxy readiness, network setup) a diagnostic on stderr is
+# correct behaviour, so flagging the whole file would be noise.
+SCOPED = [
+    "_sandy_image_stale", "_sandy_prefetch_container_inspect",
+    "_sandy_orphan_networks_list", "_sandy_dangling_images_list",
+    "_sandy_orphaned_project_images_list", "_sandy_orphaned_skills_images_list",
+    "_sandy_gc_probe_has_session", "_sandy_dead_owner_containers_list",
+    "_sandy_emit_state",
+]
+ranges = []
+for fn in SCOPED:
+    for i, l in enumerate(src):
+        if l.startswith(fn + "() {"):
+            for j in range(i + 1, len(src)):
+                if src[j] == "}":
+                    ranges.append((i, j))
+                    break
+            break
+
+def in_scope(n):
+    return any(a <= n - 1 <= b for a, b in ranges)
+
+# Balanced-paren extraction. A naive non-greedy regex stops at the first
+# closing-paren-quote pair, which truncates a nested command substitution
+# and hides a trailing or-true guard behind it.
+def substitutions(t):
+    out, i = [], 0
+    while True:
+        j = t.find("$(", i)
+        if j < 0:
+            return out
+        depth, k = 0, j + 1
+        while k < len(t):
+            if t[k] == "(":
+                depth += 1
+            elif t[k] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        out.append(t[j + 2:k])
+        i = k + 1
+
+joined, buf, ln = [], "", 1
+for i, l in enumerate(src):
+    if not buf:
+        ln = i + 1
+    if l.rstrip().endswith("\\"):
+        buf += l.rstrip()[:-1] + " "
+        continue
+    joined.append((ln, buf + l))
+    buf = ""
+
+bad = []
+for n, l in joined:
+    if not in_scope(n):
+        continue
+    t = l.strip()
+    if t.startswith("#"):
+        continue
+    for inner in substitutions(t):
+        if not re.search(r"\bdocker\b", inner):
+            continue
+        if "|| true" in inner or "trap - ERR" in inner:
+            continue
+        bad.append("%d: %s" % (n, t[:100]))
+        break
+print("\n".join(bad))
+PROBEPY
+_S92_PROBE_BAD="$(python3 "$_S92_PROBE_PY" "$_S92_SANDY")"
+check "§92(c2) every docker probe substitution in sandy neutralizes the inherited ERR trap or ends in '|| true' (mutation: drop a 'trap - ERR;' prefix -> that line is listed here; this is the bash-3.2-only stderr leak that §92(c)/(d) can only see on macOS)" \
+    bash -c '[ -z "$1" ] || { printf "%s\n" "$1"; false; }' -- "$_S92_PROBE_BAD"
 
 # --- (e) --validate-config: valid key + unknown key + privileged-from-passive key ---
 mkdir -p "$_S92_TMP/ws92/.sandy"
@@ -7617,6 +7850,7 @@ _s92e_out="$_S92_TMP/e.out"; _s92e_err="$_S92_TMP/e.err"; _s92e_rc=0
 env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --validate-config "$_S92_TMP/ws92/.sandy/config" >"$_s92e_out" 2>"$_s92e_err" || _s92e_rc=$?
 check "§92(e) --validate-config (mixed fixture) exits 0" test "$_s92e_rc" -eq 0
+_s92_diag "$_s92e_err" "§92(e) --validate-config (mixed fixture)"
 check "§92(e) --validate-config (mixed fixture) stderr is exactly 0 bytes" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92e_err"
 check "§92(e) --validate-config (mixed fixture) stdout is exactly one JSON document" \
@@ -7627,6 +7861,7 @@ _s92f_out="$_S92_TMP/f.out"; _s92f_err="$_S92_TMP/f.err"; _s92f_rc=0
 env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --validate-config /nonexistent/s92-does-not-exist.config >"$_s92f_out" 2>"$_s92f_err" || _s92f_rc=$?
 check "§92(f) --validate-config missing-file exits 1" test "$_s92f_rc" -eq 1
+_s92_diag "$_s92f_err" "§92(f) --validate-config missing-file"
 check "§92(f) --validate-config missing-file stderr is exactly 0 bytes" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92f_err"
 check "§92(f) --validate-config missing-file stdout is exactly one JSON document" \
@@ -7655,6 +7890,7 @@ _s92h_out="$_S92_TMP/h.out"; _s92h_err="$_S92_TMP/h.err"; _s92h_rc=0
 env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --print-version >"$_s92h_out" 2>"$_s92h_err" || _s92h_rc=$?
 check "§92(h) --print-version exits 0" test "$_s92h_rc" -eq 0
+_s92_diag "$_s92h_err" "§92(h) --print-version"
 check "§92(h) --print-version stderr is exactly 0 bytes" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92h_err"
 check "§92(h) --print-version stdout is exactly one JSON document" \
@@ -7665,12 +7901,13 @@ _s92h2_out="$_S92_TMP/h2.out"; _s92h2_err="$_S92_TMP/h2.err"; _s92h2_rc=0
 PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" SANDY_VERBOSE=1 \
     bash "$_S92_SANDY" --print-version >"$_s92h2_out" 2>"$_s92h2_err" || _s92h2_rc=$?
 check "§92(h) SANDY_VERBOSE=1 --print-version exits 0" test "$_s92h2_rc" -eq 0
+_s92_diag "$_s92h2_err" "§92(h) SANDY_VERBOSE=1 --print-version"
 check "§92(h) SANDY_VERBOSE=1 --print-version stderr is exactly 0 bytes" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92h2_err"
 check "§92(h) SANDY_VERBOSE=1 --print-version stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92h2_out"
 
-rm -rf "$_S92_HOME" "$_S92_TMP" "$_S92_BIN" "$_S92_PURITY_PY" "$_S92_ERRORS_PY" 2>/dev/null || true
+rm -rf "$_S92_HOME" "$_S92_TMP" "$_S92_BIN" "$_S92_PURITY_PY" "$_S92_ERRORS_PY" "$_S92_PROBE_PY" 2>/dev/null || true
 
 # ============================================================
 echo ""
@@ -7953,22 +8190,24 @@ check "§96 behavioral: jq preserves a user-set false and fills an absent key" \
 
 # ============================================================
 echo ""
-echo "§97: handoff enable-by-marker (operator-side, non-cloneable)"
+echo "§97: handoff marker (operator-side, non-cloneable) — the per-sandbox override of an opt-out"
 # ============================================================
-# SANDY_HANDOFF_DIRS=1 lives in a workspace .sandy/config, which TRAVELS WITH THE
-# REPOSITORY: clone it elsewhere and the pair is enabled on a sandbox nobody
-# decided about. $SANDBOX_DIR/.handoff-enabled is the operator-side alternative —
-# per-machine, per-sandbox, in state a repo cannot carry. Same passive tier; the
-# property is that it cannot be cloned into existence.
+# The tree is ON BY DEFAULT since 1.10.0; SANDY_HANDOFF_DIRS=0 is the opt-out.
+# A workspace .sandy/config TRAVELS WITH THE REPOSITORY: clone a repo that opts
+# out and every sandbox of it is out, on machines nobody consulted.
+# $SANDBOX_DIR/.handoff-enabled is the operator-side override — per-machine,
+# per-sandbox, in state a repo cannot carry, privileged by location (it lives
+# under $SANDY_HOME) — so it WINS over a config opt-out, the same "sandbox file
+# wins" rule agent-args.<agent> follows. It is a no-op when nothing opts out.
 #
 # Three things here are load-bearing and each is pinned separately:
 #   - TOP LEVEL only. $SANDBOX_DIR/claude is mounted at ~/.claude with writable
 #     overlays, so a marker in that tree would be one the AGENT could create for
 #     itself, converting an operator decision into agent self-service.
-#   - DIRECTORIES are not a trigger. A stray mkdir / restored backup / rsync -a
-#     must not silently enable mail for a sandbox nobody chose.
-#   - The :ro inbox flag is untouched. This must not become a way to get the
-#     pair without the flag that makes a delivered notice unforgeable.
+#   - DIRECTORIES are not a trigger. They exist for every sandbox now, so a
+#     stray mkdir / restored backup / rsync -a must not defeat an opt-out.
+#   - The :ro inbox/peer flags are untouched. This must not become a way to get
+#     the tree without the flag that makes a delivered notice unforgeable.
 _S97="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 _s97_blk="$(sed -n '/^# Operator-side enable/,/^# END handoff directories/p' "$_S97")"
 
@@ -7978,30 +8217,49 @@ warn(){ echo "WARN: $*"; }
 info(){ :; }
 SANDY_VERBOSE=0
 eval "$1"
-echo "${SANDY_HANDOFF_DIRS:-0}"
+# The block itself resolves unset to 1; if that ever regresses this prints
+# "unresolved" and every truth-table row below fails loudly instead of the
+# harness quietly supplying a default of its own.
+echo "${SANDY_HANDOFF_DIRS:-unresolved}"
 S97RUN
 
-# --- OR truth table: either mechanism alone, both together is not an error ----
-check "§97(1) marker alone enables the pair" \
+# --- truth table: default on; 0 opts out; the marker overrides an opt-out ----
+check "§97(1) marker alone (no config) leaves the tree on" \
     bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
         out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
-check "§97(2) config alone still enables the pair (unchanged path)" \
+check "§97(2) SANDY_HANDOFF_DIRS=1 alone is on (explicit form of the default, unchanged path)" \
     bash -c 'd="$(mktemp -d)"
         out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=1 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
 check "§97(3) both present is not an error" \
     bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
         out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=1 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
-check "§97(4) NEGATIVE: neither present leaves it off" \
+check "§97(4) neither marker nor key present -> ON (the 1.10.0 default; the block resolves unset to 1 itself)" \
     bash -c 'd="$(mktemp -d)"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+check "§97(4b) the opt-out: SANDY_HANDOFF_DIRS=0 with no marker -> 0" \
+    bash -c 'd="$(mktemp -d)"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+check "§97(4c) the marker OVERRIDES an opt-out: SANDY_HANDOFF_DIRS=0 + marker -> 1" \
+    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+check "§97(4d) the override is SAID, not silent: marker over an opt-out logs an info line naming both" \
+    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=0 bash -c "info(){ echo \"INFO: \$*\"; }; warn(){ :; }; eval \"\$1\"" _ "$1")"; rm -rf "$d"
+        case "$out" in *"INFO: Handoff dirs forced on by"*".handoff-enabled (overrides SANDY_HANDOFF_DIRS=0)"*) exit 0 ;; *) exit 1 ;; esac' -- "$_s97_blk"
+check "§97(4e) NEGATIVE: with nothing to override, the marker logs nothing (a no-op stays quiet)" \
+    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash -c "info(){ echo \"INFO: \$*\"; }; warn(){ :; }; eval \"\$1\"" _ "$1")"; rm -rf "$d"
+        case "$out" in *"forced on"*) exit 1 ;; *) exit 0 ;; esac' -- "$_s97_blk"
 
-# --- the two rejected shortcuts -------------------------------------------
-check "§97(5) NEGATIVE: the handoff DIRECTORIES alone enable nothing" \
-    bash -c 'd="$(mktemp -d)"; mkdir -p "$d/handoff/inbox" "$d/handoff/outbox"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
-check "§97(6) NEGATIVE: a marker under claude/ does NOT enable (agent-reachable tree)" \
+# --- the two rejected shortcuts, now measured against an OPT-OUT: with the
+# default on, "enables nothing" is only observable when something has turned
+# the tree off, so each case carries SANDY_HANDOFF_DIRS=0.
+check "§97(5) NEGATIVE: the handoff DIRECTORIES alone do not defeat an opt-out (presence is not a signal)" \
+    bash -c 'd="$(mktemp -d)"; mkdir -p "$d/handoff/inbox" "$d/handoff/outbox" "$d/handoff/peer" "$d/handoff/relay"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+check "§97(6) NEGATIVE: a marker under claude/ does NOT override an opt-out (agent-reachable tree)" \
     bash -c 'd="$(mktemp -d)"; mkdir -p "$d/claude"; touch "$d/claude/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
 
 # --- the refusal still applies to the marker path --------------------------
 check "§97(7) the ~/.handoff workspace-collision refusal still fires under the marker" \
@@ -8026,8 +8284,9 @@ check "§97(9) NEGATIVE: no mount references the marker path" \
     bash -c '! grep -q "handoff-enabled" <(grep "RUN_FLAGS+=(-v" "$1") 2>/dev/null || ! grep "RUN_FLAGS+=(-v" "$1" | grep -q "handoff-enabled"' -- "$_S97"
 
 # --- the mount flags are untouched by this feature -------------------------
-check "§97(10) inbox is still mounted :ro and outbox still rw" \
+check "§97(10) inbox and peer are still mounted :ro and outbox still rw" \
     bash -c 'grep -q "handoff/inbox:/home/claude/.handoff/inbox:ro" "$1" \
+        && grep -q "handoff/peer:/home/claude/.handoff/peer:ro" "$1" \
         && grep -q "handoff/outbox:/home/claude/.handoff/outbox\"" "$1"' -- "$_S97"
 
 # --- reset preserves enrollment, destroys staged content -------------------
@@ -8360,7 +8619,7 @@ check "§99(15) --sandbox + --orphans together -> exit 1" test "$_S99_TWOSEL_RC"
 
 # --- (16) nonexistent target -> exit 1 with a message ---
 _S99_NOEXIST_RC=0
-_S99_NOEXIST_OUT="$(PATH="$_S99_BIN:$PATH" SANDY_HOME="$_S99_FH" bash "$_S99_SANDY" \
+_S99_NOEXIST_OUT="$(trap - ERR; PATH="$_S99_BIN:$PATH" SANDY_HOME="$_S99_FH" bash "$_S99_SANDY" \
     --remove-sandbox --sandbox nosuchsandbox123 --yes 2>&1)" || _S99_NOEXIST_RC=$?
 check "§99(16) nonexistent --sandbox target -> exit 1" test "$_S99_NOEXIST_RC" -eq 1
 check "§99(16) nonexistent --sandbox target -> error names it" \
@@ -9806,21 +10065,6 @@ check "§103(c) run-integration-tests.sh's Claude credential detection includes 
 check "§103(c) the banner surfaces auth-token as its own detail (not folded into api-key) (mutation: silently reusing the api-key slot would make bring-up's \`(auth-token)\` check meaningless)" \
     bash -c 'grep -q "auth-token=" "$1"' -- "$_S103_INTEG"
 
-# ============================================================
-# Summary
-# ============================================================
-COMPLETED=true   # suppress the early-abort message in the EXIT trap
-echo ""
-TOTAL=$((PASS + FAIL))
-if [ "$FAIL" -eq 0 ]; then
-    printf "\033[0;32mAll %d tests passed.\033[0m\n" "$TOTAL"
-else
-    printf "\033[0;31m%d/%d tests failed:\033[0m\n" "$FAIL" "$TOTAL"
-    for e in "${ERRORS[@]}"; do
-        printf "  \033[0;31m- %s\033[0m\n" "$e"
-    done
-fi
-echo ""
 echo "§104: fail closed when a claude credential was intended but absent (#106)"
 # WHY THIS EXISTS. Integration run 32681634083 went GREEN having tested nothing:
 # the workflow announced "auth: workload identity federation", the exchange
@@ -10157,8 +10401,14 @@ check "§106(9b) codex pane gets its OWN tokens (not claude's)" \
 check "§106(9c) NEGATIVE: an agent with no env value gets nothing prepended" \
     bash -c 'out="$(SANDY_AGENT_ARGS_CLAUDE=--ca SANDY_AGENT_ARGS_CODEX=--cx bash "$1" gemini x)"
         [ "$out" = "x" ]' -- "$_S106_C9_SCRIPT"
+# `env -u` rather than trusting the ambient environment: this check ASSERTS
+# "all env empty", so it must ENSURE that. A sandy session exports
+# SANDY_AGENT_ARGS_<AGENT> into its own container, so running this section
+# inside sandy made 9d fail on a perfectly correct tree.
 check "§106(9d) NEGATIVE: all env empty -> exactly the CLI arg, no stray empty token" \
-    bash -c 'out="$(bash "$1" claude x)"
+    bash -c 'out="$(env -u SANDY_AGENT_ARGS_CLAUDE -u SANDY_AGENT_ARGS_GEMINI \
+        -u SANDY_AGENT_ARGS_CODEX -u SANDY_AGENT_ARGS_OPENCODE -u SANDY_AGENT_ARGS_GROK \
+        bash "$1" claude x)"
         [ "$out" = "x" ]' -- "$_S106_C9_SCRIPT"
 # (9e) STATIC guard for the empty-array idiom itself. On bash >=4.4 (this
 # host) a bare "${arr[@]}" on a truly empty array already expands to zero
@@ -10472,11 +10722,31 @@ check "§108(8) the failure branch exits with the classified code, not a literal
 check "§108(9) the new codes do not collide with the DEC-C table (--attach 3/4/5, --stop 4/5)" \
     bash -c '! grep -qE "_sandy_start_rc=[345]$" "$1"' -- "$_S108"
 
+# `timeout` is GNU coreutils and is NOT on a stock macOS (homebrew ships it as
+# `gtimeout`). Hardcoding it made the behavioral runs below exit 127 -- the
+# `|| true` then swallowed it and the greps searched "timeout: command not
+# found" for sandy output, so §108(10)/(11) and §109(3)-(5) FAILED on the
+# maintainer's machine while passing in CI. Resolve a real binary; with neither,
+# run unbounded -- every call site feeds </dev/null, so an approval prompt gets
+# EOF and returns rather than hanging.
+_S108_TO=""
+if command -v timeout >/dev/null 2>&1; then _S108_TO="timeout 60"
+elif command -v gtimeout >/dev/null 2>&1; then _S108_TO="gtimeout 60"
+fi
+
 # --- behavioral: APPROVE_ONLY actually reaches the approval -----------------
 # Driven against the REAL script with a stubbed docker, in a workspace holding
 # an escaping symlink. Non-TTY here, so the correct outcome is the fail-closed
 # guidance -- which proves the approval was REACHED (before the fix it was not).
-_S108_T="$(mktemp -d)"
+# Canonicalized with `pwd -P`. On macOS `mktemp -d` returns /var/folders/...,
+# which is a SYMLINK to /private/var/folders/...; this fixture then sets it as
+# $HOME. _sandy_resolve_symlinks compares a `readlink -f`-canonicalized target
+# against an uncanonicalized $HOME, so the prefix test failed, every symlink was
+# skipped, and the scan reported nothing -- all five behavioral checks in §108
+# and §109 failed on macOS while passing in CI. The fixture must hand sandy a
+# path that survives canonicalization; see the note in §109 about the latent
+# asymmetry this exposed in sandy itself.
+_S108_T="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S108_T/bin" "$_S108_T/home" "$_S108_T/ws" "$_S108_T/outside"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$_S108_T/bin/docker"; chmod +x "$_S108_T/bin/docker"
 ln -s "$_S108_T/outside" "$_S108_T/ws/escape"
@@ -10485,7 +10755,16 @@ ln -s "$_S108_T/outside" "$_S108_T/ws/escape"
 # the same trap sandy's own $SANDY_SELF comment documents.
 _S108_ABS="$(cd "$(dirname "$_S108")" && pwd -P)/$(basename "$_S108")"
 _S108_OUT="$( cd "$_S108_T/ws" && PATH="$_S108_T/bin:$PATH" SANDY_HOME="$_S108_T/home" \
-    HOME="$_S108_T" SANDY_APPROVE_ONLY=1 timeout 60 bash "$_S108_ABS" </dev/null 2>&1 || true )"
+    HOME="$_S108_T" SANDY_APPROVE_ONLY=1 $_S108_TO bash "$_S108_ABS" </dev/null 2>&1 || true )"
+# Same lesson as _s92_diag: a grep over captured output that fails without
+# showing the output is unactionable -- these two checks failed for a full
+# session with no way to see that the capture was "timeout: command not found".
+_s108_diag() {   # $1=captured output  $2=label
+    printf '%s' "$1" | grep -q "Symlinks that point outside the workspace" && return 0
+    printf '    \033[0;33m^ %s captured (first 200 bytes): %s\033[0m\n' \
+        "$2" "$(printf '%s' "$1" | head -c 200 | tr '\n' ' ' | cat -v)"
+}
+_s108_diag "$_S108_OUT" "§108(10/11) APPROVE_ONLY run"
 check "§108(10) APPROVE_ONLY REACHES the symlink approval (mutation: the pre-fix early exit produces no symlink output at all)" \
     bash -c 'printf "%s" "$1" | grep -q "Symlinks that point outside the workspace"' -- "$_S108_OUT"
 check "§108(11) ...and fails closed with actionable guidance when there is no tty" \
@@ -10511,7 +10790,15 @@ check "§109(2) ...and warns rather than skipping silently (an operator who poin
 # Behavioral: real script, stubbed docker, three symlinks. The third is the
 # regression guard -- an ORDINARY escape must still be offered for approval, so
 # the exclusion cannot be over-broad.
-_S109_T="$(mktemp -d)"
+# Canonicalized with `pwd -P`. On macOS `mktemp -d` returns /var/folders/...,
+# which is a SYMLINK to /private/var/folders/...; this fixture then sets it as
+# $HOME. _sandy_resolve_symlinks compares a `readlink -f`-canonicalized target
+# against an uncanonicalized $HOME, so the prefix test failed, every symlink was
+# skipped, and the scan reported nothing -- all five behavioral checks in §108
+# and §109 failed on macOS while passing in CI. The fixture must hand sandy a
+# path that survives canonicalization; see the note in §109 about the latent
+# asymmetry this exposed in sandy itself.
+_S109_T="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S109_T/bin" "$_S109_T/home/sandboxes" "$_S109_T/ws" "$_S109_T/legit"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$_S109_T/bin/docker"; chmod +x "$_S109_T/bin/docker"
 ln -s "$_S109_T/home"                 "$_S109_T/ws/sandy-state"
@@ -10519,11 +10806,12 @@ ln -s "$_S109_T/home/sandboxes/other" "$_S109_T/ws/other-sandbox"
 ln -s "$_S109_T/legit"                "$_S109_T/ws/legit-escape"
 _S109_ABS="$(cd "$(dirname "$_S109")" && pwd -P)/$(basename "$_S109")"
 _S109_OUT="$( cd "$_S109_T/ws" && PATH="$_S109_T/bin:$PATH" SANDY_HOME="$_S109_T/home" \
-    HOME="$_S109_T" SANDY_APPROVE_ONLY=1 timeout 60 bash "$_S109_ABS" </dev/null 2>&1 || true )"
+    HOME="$_S109_T" SANDY_APPROVE_ONLY=1 $_S108_TO bash "$_S109_ABS" </dev/null 2>&1 || true )"
 # Assert the REFUSAL line, not merely that the link name appears: an unexcluded
 # symlink also prints its name, in the "Symlinks that point outside" approval
 # list. Grepping the name alone passes either way -- a vacuous check that
 # mutation testing caught.
+_s108_diag "$_S109_OUT" "§109(3-5) APPROVE_ONLY run"
 check "§109(3) a symlink to \$SANDY_HOME itself is REFUSED (mutation: dropping the exclusion offers it for approval instead, which the name alone cannot distinguish)" \
     bash -c 'printf "%s" "$1" | grep -q "Ignoring symlink into.*sandy-state"' -- "$_S109_OUT"
 check "§109(4) a symlink INTO a sandbox dir is REFUSED" \
@@ -10808,6 +11096,1126 @@ check "§113(7) exactly ONE literal copy of the regex exists (the definition; mu
     bash -c '[ "$(grep -c "Unauthorized|Forbidden|Too Many Requests" "$1")" -eq 1 ]' -- "$(dirname "$0")/run-integration-tests.sh"
 unset _S113_RE
 
+echo ""
+echo "§114: SANDY_CROSS_SESSION_INBOUND + SANDY_HANDOFF_RELAY (1.10.0)"
+# WHY. Claude Code's crossSessionInbound gate decides whether another local
+# process (same uid, same container, out of a session's process ancestry) may
+# inject a turn with no human checkpoint. accept is the surface a handoff
+# relay needs; sandy's job is (a) never open it by accident (conditional
+# default: accept only when a relay is configured, refuse otherwise), (b) pin
+# it into the WORKSPACE project settings file every launch without clobbering
+# unrelated content, (c) validate + supervise the relay process itself as a
+# container-level sibling of tmux, never a session child. This section proves
+# the host-side logic and the container-side supervisor's local mechanics
+# with no Docker; the real end-to-end (container actually starting the relay,
+# restart across --update-sessions) is test/acceptance-handoff-dirs.sh Phase E.
+_S114_SANDY="$SANDY_SCRIPT"
+_S114_TMPL="$(dirname "$0")/../templates/user-setup.sh.tmpl"
+_S114="$(mktemp -d)"
+mkdir -p "$_S114/home/.claude" "$_S114/ws-empty/.claude" "$_S114/ws/.claude" \
+    "$_S114/ws-bad/.claude" "$_S114/ws-arr/.claude" "$_S114/ws-mine/.claude" \
+    "$_S114/ws-git/.claude" "$_S114/cfg"
+echo '{"theme":"dark"}' > "$_S114/home/.claude/settings.json"
+cp "$_S114/home/.claude/settings.json" "$_S114/home-settings.orig"
+printf '{"permissions":{"allow":["Bash(ls:*)"]},"x":1}\n' > "$_S114/ws/.claude/settings.local.json"
+printf '{not json' > "$_S114/ws-bad/.claude/settings.local.json"
+printf '[1,2]' > "$_S114/ws-arr/.claude/settings.local.json"
+printf '{"crossSessionInbound":"hold"}\n' > "$_S114/ws-mine/.claude/settings.local.json"
+
+# --- (1) schema + tiers -------------------------------------------------------
+check "§114(1a) SANDY_CROSS_SESSION_INBOUND is a recognized passive key" \
+    bash -c 'grep -q "^    SANDY_CROSS_SESSION_INBOUND$" "$1"' -- "$_S114_SANDY"
+check "§114(1b) SANDY_HANDOFF_RELAY is a recognized privileged key" \
+    bash -c 'grep -q "^    SANDY_HANDOFF_RELAY$" "$1"' -- "$_S114_SANDY"
+check "§114(1c) metadata row: SANDY_CROSS_SESSION_INBOUND is enum:accept,hold,refuse, since 1.10.0, experimental" \
+    bash -c 'grep -q "^SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|" "$1"' -- "$_S114_SANDY"
+check "§114(1d) metadata row: SANDY_HANDOFF_RELAY is type path, since 1.10.0, experimental" \
+    bash -c 'grep -q "^SANDY_HANDOFF_RELAY|path|||1.10.0|experimental|" "$1"' -- "$_S114_SANDY"
+check "§114(1e) --print-schema carries both keys in the right tier with the right type" \
+    bash -c '
+        cd "$(dirname "$1")" && ./sandy --print-schema 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+priv={k[\"name\"] for k in d[\"config\"][\"privileged_keys\"]}
+pas ={k[\"name\"]: k for k in d[\"config\"][\"passive_keys\"]}
+assert \"SANDY_HANDOFF_RELAY\" in priv, \"relay not privileged\"
+assert \"SANDY_CROSS_SESSION_INBOUND\" in pas, \"csi not passive\"
+assert pas[\"SANDY_CROSS_SESSION_INBOUND\"][\"type\"] == \"enum\", \"csi not enum\"
+assert pas[\"SANDY_CROSS_SESSION_INBOUND\"][\"choices\"] == [\"accept\",\"hold\",\"refuse\"], \"csi choices wrong\"
+"
+    ' -- "$_S114_SANDY"
+
+# --- (2) value-aware gate: accept is gated, hold/refuse are not --------------
+_S114_PVP_FN="$(awk '/^_sandy_passive_value_privileged\(\) \{/,/^}$/' "$_S114_SANDY")"
+_s114_pvp() {
+    # $1=key $2=value ; runs the extracted function in a fresh bash, rc mirrors it
+    bash -c "$_S114_PVP_FN"$'\n''_sandy_passive_value_privileged "$1" "$2"' _ "$1" "$2"
+}
+_s114_pvp_not() { ! _s114_pvp "$1" "$2"; }
+check "§114(2a) accept from a passive source IS gated (rc=0, treat as privileged)" \
+    _s114_pvp SANDY_CROSS_SESSION_INBOUND accept
+check "§114(2b) hold from a passive source is NOT gated (mutation: gating a tighten-only value would break the tighten-freely rule)" \
+    _s114_pvp_not SANDY_CROSS_SESSION_INBOUND hold
+check "§114(2c) refuse from a passive source is NOT gated" \
+    _s114_pvp_not SANDY_CROSS_SESSION_INBOUND refuse
+check "§114(2d) the gate function still does NOT mention SANDY_HANDOFF_DIRS (guards run-tests §86's own regex assumption)" \
+    bash -c '! printf "%s" "$1" | grep -qE "SANDY_HANDOFF_DIRS([^_A-Za-z0-9]|\$)"' -- "$_S114_PVP_FN"
+
+# --- (3) --validate-config surfaces the approval requirement -----------------
+printf 'SANDY_CROSS_SESSION_INBOUND=accept\n' > "$_S114/cfg/accept.conf"
+printf 'SANDY_CROSS_SESSION_INBOUND=hold\n' > "$_S114/cfg/hold.conf"
+printf 'SANDY_HANDOFF_RELAY=.sandy/relay.sh\n' > "$_S114/cfg/relay.conf"
+_S114_VC_ACCEPT="$(cd "$(dirname "$_S114_SANDY")" && ./sandy --validate-config "$_S114/cfg/accept.conf" 2>/dev/null)"
+_S114_VC_HOLD="$(cd "$(dirname "$_S114_SANDY")" && ./sandy --validate-config "$_S114/cfg/hold.conf" 2>/dev/null)"
+_S114_VC_RELAY="$(cd "$(dirname "$_S114_SANDY")" && ./sandy --validate-config "$_S114/cfg/relay.conf" 2>/dev/null)"
+check "§114(3a) accept.conf requires approval" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_CROSS_SESSION_INBOUND"' -- "$_S114_VC_ACCEPT"
+check "§114(3b) hold.conf requires NO approval" \
+    bash -c 'printf "%s" "$1" | grep -q "none_required"' -- "$_S114_VC_HOLD"
+check "§114(3c) relay.conf requires approval (privileged, unconditionally)" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_HANDOFF_RELAY"' -- "$_S114_VC_RELAY"
+
+# --- (4) _sandy_csi_write: extraction, merge, idempotence, non-clobber -------
+_S114_CSI_FN="$(awk '/^_sandy_csi_write\(\) \{/,/^}$/' "$_S114_SANDY")"
+check "§114(4pre) extracted the real write helper (mutation: a rename empties this and every check below must fail HERE, not silently pass)" \
+    bash -c 'printf "%s" "$1" | grep -q crossSessionInbound' -- "$_S114_CSI_FN"
+check "§114(4pre-b) exactly one column-0 closing brace inside the function (a stray one inside the embedded node program would truncate this exact awk extraction — regression guard for a real bug found and fixed this pass)" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c "^}\$")" -eq 1 ]' -- "$_S114_CSI_FN"
+
+_s114_csi_write() {
+    # $1=value $2=target-file ; runs the extracted function in a fresh bash
+    bash -c "warn(){ echo \"WARN:\$*\" >&2; }; $_S114_CSI_FN
+_sandy_csi_write \"\$1\" \"\$2\"" _ "$1" "$2"
+}
+
+_s114_csi_write accept "$_S114/ws-empty/.claude/settings.local.json" >/dev/null 2>&1
+check "§114(4a) create: writes a fresh file with the given value" \
+    bash -c 'python3 -c "import json; d=json.load(open(\"$1\")); assert d==[{\"crossSessionInbound\":\"accept\"}][0]"' -- "$_S114/ws-empty/.claude/settings.local.json" 2>/dev/null
+
+_s114_csi_write hold "$_S114/ws/.claude/settings.local.json" >/dev/null 2>&1
+check "§114(4b) merge: unrelated keys preserved" \
+    bash -c 'python3 -c "
+import json
+d=json.load(open(\"$1\"))
+assert d[\"permissions\"][\"allow\"]==[\"Bash(ls:*)\"], d
+assert d[\"x\"]==1, d
+assert d[\"crossSessionInbound\"]==\"hold\", d
+"' -- "$_S114/ws/.claude/settings.local.json"
+
+touch -t 202001010000 "$_S114/ws/.claude/settings.local.json"
+_S114_MTIME_BEFORE="$(stat -c '%Y' "$_S114/ws/.claude/settings.local.json" 2>/dev/null || stat -f '%m' "$_S114/ws/.claude/settings.local.json")"
+_s114_csi_write hold "$_S114/ws/.claude/settings.local.json" >/dev/null 2>&1
+_S114_MTIME_AFTER="$(stat -c '%Y' "$_S114/ws/.claude/settings.local.json" 2>/dev/null || stat -f '%m' "$_S114/ws/.claude/settings.local.json")"
+check "§114(4c) idempotent: rewriting the SAME value leaves mtime untouched (byte-identical content is discarded, not rewritten)" \
+    test "$_S114_MTIME_BEFORE" = "$_S114_MTIME_AFTER"
+
+cp "$_S114/ws-bad/.claude/settings.local.json" "$_S114/ws-bad.orig"
+_S114_BAD_RC=0
+_s114_csi_write accept "$_S114/ws-bad/.claude/settings.local.json" >/dev/null 2>"$_S114/warn.out" || _S114_BAD_RC=$?
+check "§114(4d) invalid JSON: rc!=0, warned, file byte-identical (never clobbered)" \
+    bash -c 'test "$1" -ne 0' -- "$_S114_BAD_RC"
+check "§114(4d-2) invalid JSON: file byte-identical (never clobbered)" \
+    cmp -s "$_S114/ws-bad/.claude/settings.local.json" "$_S114/ws-bad.orig"
+check "§114(4e) invalid JSON: no .sandy-tmp.* leftover" \
+    bash -c '! ls "$1"/.claude/*.sandy-tmp.* >/dev/null 2>&1' -- "$_S114/ws-bad"
+
+cp "$_S114/ws-arr/.claude/settings.local.json" "$_S114/ws-arr.orig"
+_s114_csi_write refuse "$_S114/ws-arr/.claude/settings.local.json" >/dev/null 2>&1 || true
+check "§114(4f) a JSON array (not object) is also non-clobbered" \
+    cmp -s "$_S114/ws-arr/.claude/settings.local.json" "$_S114/ws-arr.orig"
+
+check "§114(4g) ~/.claude/settings.json (the HOME/user-scope file) is NEVER touched by any of the writes above" \
+    cmp -s "$_S114/home/.claude/settings.json" "$_S114/home-settings.orig"
+
+# Build a PATH "farm" of symlinks to every executable on the CURRENT $PATH
+# except the named tools, so a branch that is supposed to run without node/jq
+# can be isolated. Built from $PATH, NOT from a hardcoded /usr/bin: macOS has
+# no /usr/bin/bash (only /bin/bash), so a /usr/bin-only farm made
+# `PATH="$farm" bash -c ...` exit 127 -- and because that call was unguarded,
+# the ERR trap aborted the whole suite mid-run. Linux has /usr/bin/bash, so CI
+# never saw it. First match wins, preserving $PATH order.
+_s114_make_stripped_bin() {
+    local dest="$1"; shift
+    mkdir -p "$dest"
+    local excl=" $* "
+    local d f b oldifs
+    oldifs="$IFS"; IFS=:
+    set -f            # a PATH entry containing a glob char must not expand here
+    set -- $PATH
+    set +f
+    IFS="$oldifs"
+    for d in "$@"; do
+        [ -d "$d" ] || continue
+        for f in "$d"/*; do
+            [ -f "$f" ] && [ -x "$f" ] || continue
+            b="$(basename "$f")"
+            case "$excl" in *" $b "*) continue ;; esac
+            [ -e "$dest/$b" ] || ln -sf "$f" "$dest/$b" 2>/dev/null || true
+        done
+    done
+}
+
+# --- (5) jq branch (node absent, jq present) ----------------------------------
+_S114_NOJQ_HAS_JQ=0
+command -v jq >/dev/null 2>&1 && _S114_NOJQ_HAS_JQ=1
+if [ "$_S114_NOJQ_HAS_JQ" = "1" ] && command -v node >/dev/null 2>&1; then
+    _S114_NONODE="$_S114/nonode-bin"
+    _s114_make_stripped_bin "$_S114_NONODE" node
+    check "§114(5pre) stripped PATH really has bash+jq and really lacks node (otherwise 5a/5b would pass vacuously via the no-tool branch, or die 127 with no bash)" \
+        bash -c '[ -x "$1/bash" ] && [ -x "$1/jq" ] && [ ! -e "$1/node" ]' -- "$_S114_NONODE"
+    mkdir -p "$_S114/ws-jq/.claude"
+    printf '{"a":1}\n' > "$_S114/ws-jq/.claude/settings.local.json"
+    PATH="$_S114_NONODE" bash -c "warn(){ :; }; $_S114_CSI_FN
+_sandy_csi_write refuse \"\$1\"" _ "$_S114/ws-jq/.claude/settings.local.json" >/dev/null 2>&1 || true
+    check "§114(5a) jq branch: merges into an existing file when node is absent" \
+        bash -c 'python3 -c "
+import json
+d=json.load(open(\"$1\"))
+assert d[\"a\"]==1 and d[\"crossSessionInbound\"]==\"refuse\", d
+"' -- "$_S114/ws-jq/.claude/settings.local.json"
+    mkdir -p "$_S114/ws-jq-bad/.claude"
+    printf '[1,2]' > "$_S114/ws-jq-bad/.claude/settings.local.json"
+    cp "$_S114/ws-jq-bad/.claude/settings.local.json" "$_S114/ws-jq-bad.orig"
+    PATH="$_S114_NONODE" bash -c "warn(){ :; }; $_S114_CSI_FN
+_sandy_csi_write accept \"\$1\"" _ "$_S114/ws-jq-bad/.claude/settings.local.json" >/dev/null 2>&1 || true
+    check "§114(5b) jq branch: non-object input non-clobbered" \
+        cmp -s "$_S114/ws-jq-bad/.claude/settings.local.json" "$_S114/ws-jq-bad.orig"
+else
+    skip "§114(5) jq branch (needs both node and jq on this host to isolate the branch)"
+fi
+
+# --- (6) no-tool last-resort branch ------------------------------------------
+if command -v node >/dev/null 2>&1 || command -v jq >/dev/null 2>&1; then
+    _S114_NOTOOL="$_S114/notool-bin"
+    _s114_make_stripped_bin "$_S114_NOTOOL" node jq
+    check "§114(6pre) stripped PATH really has bash and really lacks BOTH node and jq" \
+        bash -c '[ -x "$1/bash" ] && [ ! -e "$1/node" ] && [ ! -e "$1/jq" ]' -- "$_S114_NOTOOL"
+    mkdir -p "$_S114/ws-none-empty/.claude" "$_S114/ws-none-mine/.claude" "$_S114/ws-none-foreign/.claude"
+    printf '{"crossSessionInbound":"hold"}\n' > "$_S114/ws-none-mine/.claude/settings.local.json"
+    printf '{"x":1}\n' > "$_S114/ws-none-foreign/.claude/settings.local.json"
+    cp "$_S114/ws-none-foreign/.claude/settings.local.json" "$_S114/ws-none-foreign.orig"
+    PATH="$_S114_NOTOOL" bash -c "warn(){ :; }; $_S114_CSI_FN
+_sandy_csi_write accept \"\$1\"" _ "$_S114/ws-none-empty/.claude/settings.local.json" >/dev/null 2>&1 || true
+    PATH="$_S114_NOTOOL" bash -c "warn(){ :; }; $_S114_CSI_FN
+_sandy_csi_write refuse \"\$1\"" _ "$_S114/ws-none-mine/.claude/settings.local.json" >/dev/null 2>&1 || true
+    PATH="$_S114_NOTOOL" bash -c "warn(){ echo \"WARN:\$*\"; }; $_S114_CSI_FN
+_sandy_csi_write accept \"\$1\"" _ "$_S114/ws-none-foreign/.claude/settings.local.json" >"$_S114/notool.out" 2>&1 || true
+    check "§114(6a) no-tool branch: creates a compact literal on an absent/empty file" \
+        bash -c 'grep -qx '\''{"crossSessionInbound":"accept"}'\'' "$1"' -- "$_S114/ws-none-empty/.claude/settings.local.json"
+    check "§114(6b) no-tool branch: rewrites a file matching sandy's OWN literal shape" \
+        bash -c 'grep -qx '\''{"crossSessionInbound":"refuse"}'\'' "$1"' -- "$_S114/ws-none-mine/.claude/settings.local.json"
+    check "§114(6c) no-tool branch: a foreign file is left untouched with a warning naming cannot-be-merged" \
+        bash -c 'cmp -s "$1" "$2" && grep -q "cannot be merged" "$3"' -- "$_S114/ws-none-foreign/.claude/settings.local.json" "$_S114/ws-none-foreign.orig" "$_S114/notool.out"
+else
+    skip "§114(6) no-tool branch (host has neither node nor jq to strip in the first place)"
+fi
+
+# --- (7) conditional default + explicit value, full block -------------------
+_S114_CSI_BLK="$(sed -n '/^# BEGIN cross-session inbound/,/^# END cross-session inbound$/p' "$_S114_SANDY")"
+check "§114(7pre) extracted the full cross-session-inbound block" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_CROSS_SESSION_INBOUND"' -- "$_S114_CSI_BLK"
+_s114_csi_block() {
+    # $1=SANDY_CROSS_SESSION_INBOUND(may be empty) $2=SANDY_HANDOFF_RELAY(may be empty)
+    # $3=SANDY_AGENT $4=target WORK_DIR $5=target SANDBOX_DIR (the sandbox's own
+    # claude/settings.json lives under here — the userSettings/accept-delivering
+    # seam; _sandy_csi_write creates claude/settings.json itself if absent, so
+    # $5 need not be pre-populated).
+    env SANDY_CROSS_SESSION_INBOUND="$1" SANDY_HANDOFF_RELAY="$2" SANDY_AGENT="$3" WORK_DIR="$4" SANDBOX_DIR="$5" bash -c "
+        _sandy_agent_has(){ case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0;; esac; return 1; }
+        info(){ printf '%s\n' \"\$*\"; }
+        warn(){ printf '%s\n' \"\$*\"; }
+        $_S114_CSI_FN
+        $_S114_CSI_BLK
+    "
+}
+# NOTE on the trailing `|| true` below: the real "BEGIN cross-session inbound"
+# block ends its else-branch with a bare `[ cond ] && info ...` statement (an
+# existing, deliberate house idiom — see e.g. the pre-existing, unguarded
+# "Session marker" line near the end of the real script). At the TOP LEVEL of
+# a script this is exempt from `set -e` (confirmed: it does not abort the real
+# sandy launch), but _s114_csi_block below runs it inside a `bash -c` whose
+# OWN exit status is then captured via command substitution — a context set -e
+# DOES fire on. `|| true` reflects that this test only cares about stdout here,
+# not the wrapper's incidental exit code; §114(7e)/(7f) below capture the rc
+# explicitly instead, for the one case that's supposed to be nonzero.
+rm -rf "$_S114/ws-d1" "$_S114/sbx-d1"; mkdir -p "$_S114/ws-d1/.claude" "$_S114/sbx-d1"
+_S114_D1_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d1" "$_S114/sbx-d1" 2>&1)" || true
+check "§114(7a) unset + no relay -> refuse, both files named, correct reason string" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no relay configured)"' -- "$_S114_D1_OUT"
+check "§114(7a-user) refuse actually landed in the sandbox userSettings file (the seam that gates delivery)" \
+    bash -c 'grep -q "\"crossSessionInbound\": *\"refuse\"" "$1/claude/settings.json"' -- "$_S114/sbx-d1"
+check "§114(7a-ws) refuse ALSO landed in the workspace project file (the seam that is honored for hold/refuse)" \
+    bash -c 'grep -q "\"crossSessionInbound\": *\"refuse\"" "$1/.claude/settings.local.json"' -- "$_S114/ws-d1"
+
+rm -rf "$_S114/ws-d2" "$_S114/sbx-d2"; mkdir -p "$_S114/ws-d2/.claude" "$_S114/sbx-d2"
+_S114_D2_OUT="$(_s114_csi_block '' x claude "$_S114/ws-d2" "$_S114/sbx-d2" 2>&1)" || true
+check "§114(7b) unset + relay configured -> accept, both files named, correct reason string (naming criterion 7's disposition: the launch fails if the relay cannot start)" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=accept written to claude/settings.json (sandbox) and .claude/settings.local.json (default: relay configured; the launch fails if it cannot start)"' -- "$_S114_D2_OUT"
+check "§114(7b-user) accept actually landed in the sandbox userSettings file — this is the ONLY placement measured to make accept deliver (probe case E); accept in the workspace file alone is a measured no-op (probe cases A/A2)" \
+    bash -c 'grep -q "\"crossSessionInbound\": *\"accept\"" "$1/claude/settings.json"' -- "$_S114/sbx-d2"
+
+rm -rf "$_S114/ws-d3" "$_S114/sbx-d3"; mkdir -p "$_S114/ws-d3/.claude" "$_S114/sbx-d3"
+_S114_D3_OUT="$(_s114_csi_block hold '' claude "$_S114/ws-d3" "$_S114/sbx-d3" 2>&1)" || true
+check "§114(7c) explicit hold, no relay -> hold, explicit reason string" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=hold written to claude/settings.json (sandbox) and .claude/settings.local.json (explicit SANDY_CROSS_SESSION_INBOUND)"' -- "$_S114_D3_OUT"
+
+rm -rf "$_S114/ws-d4" "$_S114/sbx-d4"; mkdir -p "$_S114/ws-d4/.claude" "$_S114/sbx-d4"
+_S114_D4_OUT="$(_s114_csi_block refuse x claude "$_S114/ws-d4" "$_S114/sbx-d4" 2>&1)" || true
+check "§114(7d) explicit refuse WITH a relay configured -> refuse wins (explicit beats default in either direction)" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (explicit SANDY_CROSS_SESSION_INBOUND)"' -- "$_S114_D4_OUT"
+
+_S114_D5_RC=0
+_S114_D5_OUT="$(_s114_csi_block maybe '' claude "$_S114/ws-d1" "$_S114/sbx-d1" 2>&1)" || _S114_D5_RC=$?
+check "§114(7e) invalid value -> hard error exit 1, exact message, checked BEFORE the agent gate" \
+    bash -c 'test "$1" -eq 1 && printf "%s" "$2" | grep -q "SANDY_CROSS_SESSION_INBOUND=.maybe. is invalid (accept|hold|refuse)"' -- "$_S114_D5_RC" "$_S114_D5_OUT"
+_S114_D5B_RC=0
+_s114_csi_block maybe '' codex "$_S114/ws-d1" "$_S114/sbx-d1" >/dev/null 2>&1 || _S114_D5B_RC=$?
+check "§114(7f) invalid value also errors for a non-claude agent (validated before the agent check)" \
+    test "$_S114_D5B_RC" -eq 1
+
+rm -rf "$_S114/ws-d6" "$_S114/sbx-d6"; mkdir -p "$_S114/ws-d6/.claude" "$_S114/sbx-d6"
+_s114_csi_block '' '' codex "$_S114/ws-d6" "$_S114/sbx-d6" >/dev/null 2>&1 || true
+check "§114(7g) claude not in SANDY_AGENT -> nothing written to either file, rc 0" \
+    bash -c 'test ! -e "$1/.claude/settings.local.json" -a ! -e "$2/claude/settings.json"' -- "$_S114/ws-d6" "$_S114/sbx-d6"
+
+# --- (7h) partial failure: userSettings write fails (mkdir blocked by a file at
+# the parent path), workspace write still succeeds -> "... only" wording, plus
+# the accept-specific non-delivery warning.
+rm -rf "$_S114/ws-d7" "$_S114/sbx-d7"; mkdir -p "$_S114/ws-d7/.claude"
+mkdir -p "$_S114/sbx-d7" && : > "$_S114/sbx-d7/claude"   # a FILE named "claude", not a dir -- mkdir -p "claude/settings.json"'s parent fails
+_S114_D7_OUT="$(_s114_csi_block accept '' claude "$_S114/ws-d7" "$_S114/sbx-d7" 2>&1)" || true
+check "§114(7h) userSettings write blocked -> workspace-only wording, correct warning about non-delivery" \
+    bash -c '
+        printf "%s\n" "$1" | grep -q "written to .claude/settings.local.json only (explicit SANDY_CROSS_SESSION_INBOUND)" &&
+        printf "%s\n" "$1" | grep -q "NOT to the sandbox settings.json" &&
+        printf "%s\n" "$1" | grep -q "will still be held"
+    ' -- "$_S114_D7_OUT"
+
+# --- (8) gitignore nudge ------------------------------------------------------
+if command -v git >/dev/null 2>&1; then
+    rm -rf "$_S114/ws-nudge" "$_S114/sbx-nudge"; mkdir -p "$_S114/ws-nudge/.claude" "$_S114/sbx-nudge"
+    (cd "$_S114/ws-nudge" && git init -q 2>/dev/null && git config user.email t@t.example && git config user.name t) || true
+    _S114_NUDGE_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-nudge" "$_S114/sbx-nudge" 2>&1)" || true
+    check "§114(8a) unignored .claude/settings.local.json in a git repo -> nudge printed" \
+        bash -c 'printf "%s" "$1" | grep -q "is not gitignored"' -- "$_S114_NUDGE_OUT"
+    echo '.claude/settings.local.json' >> "$_S114/ws-nudge/.gitignore"
+    rm -f "$_S114/ws-nudge/.claude/settings.local.json"
+    _S114_NUDGE_OUT2="$(_s114_csi_block '' '' claude "$_S114/ws-nudge" "$_S114/sbx-nudge" 2>&1)" || true
+    check "§114(8b) once gitignored, the nudge disappears" \
+        bash -c '! printf "%s" "$1" | grep -q "is not gitignored"' -- "$_S114_NUDGE_OUT2"
+fi
+
+# --- (9) ordering: the write must land before the :ro loop and the snapshot --
+_S114_END_LINE="$(grep -m1 -n '^# END cross-session inbound$' "$_S114_SANDY" | cut -d: -f1)"
+_S114_MOUNT_LINE="$(grep -m1 -n 'RUN_FLAGS+=(-v "\$WORK_DIR/\$_pf:\$SANDY_WORKSPACE/\$_pf:ro")' "$_S114_SANDY" | cut -d: -f1)"
+_S114_SNAP_LINE="$(grep -m1 -n '^: > "\$SANDBOX_DIR/.protected-existed-at-launch"$' "$_S114_SANDY" | cut -d: -f1)"
+check "§114(9a) BEGIN/END cross-session-inbound block precedes the protected-files :ro mount loop" \
+    test "${_S114_END_LINE:-0}" -lt "${_S114_MOUNT_LINE:-0}" -a -n "$_S114_MOUNT_LINE"
+check "§114(9b) ...and precedes the .protected-existed-at-launch snapshot write" \
+    test "${_S114_END_LINE:-0}" -lt "${_S114_SNAP_LINE:-0}" -a -n "$_S114_SNAP_LINE"
+_S114_RELAY_BEGIN_LINE="$(grep -m1 -n '^# BEGIN handoff relay' "$_S114_SANDY" | cut -d: -f1)"
+_S114_PKGDIR_LINE="$(grep -m1 -n '^# Ensure persistent package directories exist' "$_S114_SANDY" | cut -d: -f1)"
+_S114_HANDOFFDIR_LINE="$(grep -m1 -n '^# BEGIN handoff directories' "$_S114_SANDY" | cut -d: -f1)"
+check "§114(9c) handoff-relay validation precedes package-dir setup precedes handoff directories (relay ⇒ dirs ordering)" \
+    test "${_S114_RELAY_BEGIN_LINE:-0}" -lt "${_S114_PKGDIR_LINE:-0}" -a "${_S114_PKGDIR_LINE:-0}" -lt "${_S114_HANDOFFDIR_LINE:-0}"
+
+# --- (10) both settings files remain protected (self-pin can't be loosened) --
+check "§114(10) .claude/settings.local.json AND .claude/settings.json are both in _sandy_protected_files" \
+    bash -c '
+        cd "$(dirname "$1")"
+        ./sandy --print-schema 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+files=set(d[\"protected_paths\"][\"files\"])
+assert \".claude/settings.local.json\" in files, files
+assert \".claude/settings.json\" in files, files
+"
+    ' -- "$_S114_SANDY"
+
+# --- (11) SANDY_HANDOFF_RELAY host-side validation ---------------------------
+_S114_RELAY_BLK="$(sed -n '/^# BEGIN handoff relay/,/^# END handoff relay$/p' "$_S114_SANDY")"
+check "§114(11pre) extracted the relay validation block" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_HANDOFF_RELAY"' -- "$_S114_RELAY_BLK"
+# Fixture workspace with a REAL executable relay: as of criterion 7 the block
+# resolves a workspace-relative (or workspace-absolute) path back to the host
+# and refuses to launch when it is not an executable file, so a bare path with
+# no WORK_DIR behind it is now a hard error rather than a pass.
+_S114_RW="$_S114/relayws"
+mkdir -p "$_S114_RW/.sandy"
+printf '#!/bin/sh\nexit 0\n' > "$_S114_RW/.sandy/relay.sh"
+chmod +x "$_S114_RW/.sandy/relay.sh"
+printf '#!/bin/sh\nexit 0\n' > "$_S114_RW/.sandy/noexec.sh"   # deliberately NOT chmod +x
+_s114_relay_validate() {
+    # $1=SANDY_HANDOFF_RELAY $2=SANDY_HANDOFF_DIRS $3=headless(true|"") $4=remote(true|false)
+    env SANDY_HANDOFF_RELAY="$1" SANDY_HANDOFF_DIRS="${2:-0}" \
+        WORK_DIR="$_S114_RW" SANDY_WORKSPACE="/home/claude/relayws" \
+        _sandy_is_headless="${3:-false}" SANDY_REMOTE_CONTROL="${4:-false}" bash -c "
+        info(){ printf '%s\n' \"\$*\"; }
+        $_S114_RELAY_BLK
+        printf 'DIRS=%s RELAY=%s\n' \"\${SANDY_HANDOFF_DIRS:-0}\" \"\${SANDY_HANDOFF_RELAY:-UNSET}\"
+    "
+}
+check "§114(11a) absolute image-only path OK, enables SANDY_HANDOFF_DIRS (regression guard: an earlier version double-prepended '/' and rejected EVERY absolute path as containing '//')" \
+    bash -c 'printf "%s" "$1" | grep -q "DIRS=1"' -- "$(_s114_relay_validate /opt/relay 0 2>&1)"
+check "§114(11b) workspace-relative path that EXISTS and is executable on the host is accepted" \
+    bash -c 'printf "%s" "$1" | grep -q "DIRS=1"' -- "$(_s114_relay_validate .sandy/relay.sh 0 2>&1)"
+check "§114(11c) already-enabled dirs: no duplicate info line" \
+    bash -c '! printf "%s" "$1" | grep -q "Handoff dirs enabled"' -- "$(_s114_relay_validate /opt/relay 1 2>&1)"
+check "§114(11c-2) relay over an explicit opt-out (SANDY_HANDOFF_DIRS=0): forced to 1 AND the info line says it is an override, not a default" \
+    bash -c 'printf "%s" "$1" | grep -q "DIRS=1" && printf "%s" "$1" | grep -q "Handoff dirs enabled by SANDY_HANDOFF_RELAY (overrides SANDY_HANDOFF_DIRS=0"' -- "$(_s114_relay_validate /opt/relay 0 2>&1)"
+_S114_RELAY_RC=0
+_s114_relay_validate 'a b' 0 >/dev/null 2>&1 || _S114_RELAY_RC=$?
+check "§114(11d) whitespace rejected, exit 1" test "$_S114_RELAY_RC" -eq 1
+_S114_RELAY_RC=0
+_s114_relay_validate 'x;y' 0 >/dev/null 2>&1 || _S114_RELAY_RC=$?
+check "§114(11e) shell metacharacter ';' rejected, exit 1" test "$_S114_RELAY_RC" -eq 1
+_S114_RELAY_RC=0
+_s114_relay_validate '$(x)' 0 >/dev/null 2>&1 || _S114_RELAY_RC=$?
+check "§114(11f) command substitution syntax rejected, exit 1" test "$_S114_RELAY_RC" -eq 1
+_S114_RELAY_RC=0
+_s114_relay_validate '../x' 0 >/dev/null 2>&1 || _S114_RELAY_RC=$?
+check "§114(11g) leading .. rejected, exit 1" test "$_S114_RELAY_RC" -eq 1
+_S114_RELAY_RC=0
+_s114_relay_validate '/a/../b' 0 >/dev/null 2>&1 || _S114_RELAY_RC=$?
+check "§114(11h) .. inside an absolute path rejected, exit 1" test "$_S114_RELAY_RC" -eq 1
+_S114_RELAY_RC=0
+_s114_relay_validate 'a//b' 0 >/dev/null 2>&1 || _S114_RELAY_RC=$?
+check "§114(11i) embedded double-slash rejected, exit 1" test "$_S114_RELAY_RC" -eq 1
+
+# --- (11j-q) acceptance criterion 7: a configured relay that CANNOT START fails
+# the launch, host-side, before docker run. WHY THIS IS NOT COSMETIC: the
+# crossSessionInbound conditional default resolves to `accept` on the strength
+# of this key alone, so the pre-criterion-7 behavior (one warning, launch
+# proceeds) left an open receive surface with nothing delivering into it. The
+# rc AND the message are both asserted -- an exit 1 from the earlier
+# metacharacter/.. guards would satisfy an rc-only check for the wrong reason.
+_S114_RELAY_RC=0
+_S114_RELAY_OUT="$(_s114_relay_validate .sandy/missing.sh 0 2>&1)" || _S114_RELAY_RC=$?
+check "§114(11j) workspace-relative relay MISSING on the host -> exit 1, message names both paths and the fail-the-launch rule" \
+    bash -c '
+        [ "$1" -eq 1 ] || exit 1
+        printf "%s\n" "$2" | grep -q "resolves to .*/relayws/.sandy/missing.sh on the host" || exit 1
+        printf "%s\n" "$2" | grep -q "A configured relay that cannot start fails the launch"
+    ' -- "$_S114_RELAY_RC" "$_S114_RELAY_OUT"
+_S114_RELAY_RC=0
+_S114_RELAY_OUT="$(_s114_relay_validate .sandy/noexec.sh 0 2>&1)" || _S114_RELAY_RC=$?
+check "§114(11k) relay present but NOT executable -> exit 1 (existence alone is not enough)" \
+    bash -c '[ "$1" -eq 1 ] && printf "%s\n" "$2" | grep -q "not an executable file"' -- "$_S114_RELAY_RC" "$_S114_RELAY_OUT"
+check "§114(11l) container-absolute path UNDER \$SANDY_WORKSPACE is mapped back to \$WORK_DIR and accepted when it exists there" \
+    bash -c 'printf "%s" "$1" | grep -q "DIRS=1"' -- "$(_s114_relay_validate /home/claude/relayws/.sandy/relay.sh 0 2>&1)"
+_S114_RELAY_RC=0
+_S114_RELAY_OUT="$(_s114_relay_validate /home/claude/relayws/.sandy/missing.sh 0 2>&1)" || _S114_RELAY_RC=$?
+check "§114(11m) ...and the same mapping catches a MISSING one, exit 1 (the workspace-absolute form is not an escape hatch)" \
+    bash -c '[ "$1" -eq 1 ] && printf "%s\n" "$2" | grep -q "fails the launch"' -- "$_S114_RELAY_RC" "$_S114_RELAY_OUT"
+check "§114(11n) an image-only absolute path is NOT rejected host-side (the host cannot see inside the image; user-setup.sh is the second detection point)" \
+    bash -c 'printf "%s" "$1" | grep -q "RELAY=/opt/relay"' -- "$(_s114_relay_validate /opt/relay 0 2>&1)"
+
+# --- criterion 8: headless and --remote are SKIPS, not failures. The key is
+# unset host-side (so nothing is forwarded and crossSessionInbound resolves to
+# refuse), while SANDY_HANDOFF_DIRS stays enabled -- the directory pair is not
+# what is being skipped.
+_S114_RELAY_OUT="$(_s114_relay_validate .sandy/relay.sh 0 true false 2>&1)"
+check "§114(11o) headless: key unset, DIRS still 1, info line names the reason and the refuse consequence" \
+    bash -c '
+        printf "%s\n" "$1" | grep -q "RELAY=UNSET" || exit 1
+        printf "%s\n" "$1" | grep -q "DIRS=1" || exit 1
+        printf "%s\n" "$1" | grep -q "SANDY_HANDOFF_RELAY not started (headless run); crossSessionInbound will default to refuse"
+    ' -- "$_S114_RELAY_OUT"
+_S114_RELAY_OUT="$(_s114_relay_validate .sandy/relay.sh 0 false true 2>&1)"
+check "§114(11p) --remote: key unset, DIRS still 1, info line names the no-tmux-session reason (criterion 8; a relay there would restart every 60s for the life of the container)" \
+    bash -c '
+        printf "%s\n" "$1" | grep -q "RELAY=UNSET" || exit 1
+        printf "%s\n" "$1" | grep -q "DIRS=1" || exit 1
+        printf "%s\n" "$1" | grep -q "SANDY_HANDOFF_RELAY not started (--remote has no tmux session to target); crossSessionInbound will default to refuse"
+    ' -- "$_S114_RELAY_OUT"
+_S114_RELAY_RC=0
+_s114_relay_validate .sandy/missing.sh 0 true false >/dev/null 2>&1 || _S114_RELAY_RC=$?
+check "§114(11q) path validation runs BEFORE the skip decision: a broken relay path is a hard error even on a headless run that would not have started it (a misconfigured key never rides along silently)" \
+    test "$_S114_RELAY_RC" -eq 1
+
+# --- (11r) the two skips feed the crossSessionInbound default: an unset key
+# after the relay block must resolve to refuse, not accept. This is the join
+# between criterion 8 and the conditional default, asserted end-to-end rather
+# than inferred from the two halves.
+rm -rf "$_S114/ws-d8" "$_S114/sbx-d8"; mkdir -p "$_S114/ws-d8/.claude" "$_S114/sbx-d8"
+_S114_D8_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d8" "$_S114/sbx-d8" 2>&1)" || true
+check "§114(11r) after a criterion-8 skip has unset the key, the default resolves to refuse (not accept) and lands in the sandbox userSettings seam" \
+    bash -c '
+        printf "%s\n" "$1" | grep -q "crossSessionInbound=refuse" || exit 1
+        printf "%s\n" "$1" | grep -q "(default: no relay configured)" || exit 1
+        grep -q "\"crossSessionInbound\": *\"refuse\"" "$2/claude/settings.json"
+    ' -- "$_S114_D8_OUT" "$_S114/sbx-d8"
+
+# --- (11s-u) every host-side relay refusal must fast-fail a waiting --start
+# client. WHY: the launch path runs INSIDE the detached supervisor under
+# --start, so a bare `exit 1` there is invisible to the client, which then
+# polls its full 600s readiness timeout. That is not a slow failure, it reads
+# as a HANG -- acceptance-handoff-dirs.sh E10 sat there until it was killed.
+# #221/§75 solved this once for the symlink approval; criterion 7's refusals
+# shipped without it. Asserted as a COUNT so a fifth refusal added later
+# without the marker fails here rather than being discovered by hanging.
+_S114_RELAY_EXITS="$(printf '%s\n' "$_S114_RELAY_BLK" | grep -c 'exit 1')"
+_S114_RELAY_FATALS="$(printf '%s\n' "$_S114_RELAY_BLK" | grep -c '_sandy_daemon_fatal')"
+check "§114(11s) every 'exit 1' in the relay block is paired with a _sandy_daemon_fatal (mutation: add a bare 'exit 1' refusal -> the counts diverge and this fails)" \
+    bash -c '[ "$1" -gt 0 ] && [ "$1" = "$2" ]' -- "$_S114_RELAY_EXITS" "$_S114_RELAY_FATALS"
+check "§114(11t) the helper writes the marker the --start readiness loop actually watches for (mutation: rename the marker on either side and these stop agreeing)" \
+    bash -c '
+        awk "/^_sandy_daemon_fatal\(\) \{/,/^}\$/" "$1" | grep -qF ": > \"\${SANDY_DAEMON_LOG}.fatal\"" || exit 1
+        grep -qF "_sandy_fatal_marker=\"\${_sandy_daemon_log}.fatal\"" "$1"
+    ' -- "$_S114_SANDY"
+# Behavioural, not just structural: run the real block and look for the file.
+_S114_FM_T="$(mktemp -d)"; mkdir -p "$_S114_FM_T/ws/.sandy" "$_S114_FM_T/logs"
+_S114_FM_FN="$(awk '/^_sandy_daemon_fatal\(\) \{/,/^}$/' "$_S114_SANDY")"
+env SANDY_HANDOFF_RELAY=".sandy/missing.sh" SANDY_HANDOFF_DIRS=0 WORK_DIR="$_S114_FM_T/ws" \
+    SANDY_WORKSPACE=/home/claude/ws _sandy_is_headless=false SANDY_REMOTE_CONTROL=false \
+    SANDY_DAEMON_LOG="$_S114_FM_T/logs/d.log" bash -c "trap - ERR; info(){ :; }
+$_S114_FM_FN
+$_S114_RELAY_BLK" >/dev/null 2>&1 || true
+check "§114(11u) BEHAVIOURAL: a missing relay actually writes the .fatal marker (mutation: drop the call and the file is absent, which is the ten-minute hang)" \
+    bash -c '[ -f "$1/logs/d.log.fatal" ]' -- "$_S114_FM_T"
+rm -rf "$_S114_FM_T"
+unset _S114_RELAY_EXITS _S114_RELAY_FATALS _S114_FM_T _S114_FM_FN
+
+# --- (12) handoff-dirs collision: the relay CANNOT start, so the launch fails --
+# Extracted from the real script (between the handoff-directories block and the
+# cross-session-inbound block) rather than re-typed here: an inline copy of the
+# logic would keep passing after the real code changed, which is exactly the
+# failure mode this section exists to prevent.
+_S114_COLL_BLK="$(sed -n '/^# END handoff directories$/,/^# BEGIN cross-session inbound/p' "$_S114_SANDY" | sed '1d;$d')"
+check "§114(12pre) extracted the collision guard from the real script" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_HANDOFF_RELAY"' -- "$_S114_COLL_BLK"
+_S114_COLL_RC=0
+_S114_COLL_OUT="$(env SANDY_HANDOFF_RELAY=x SANDY_HANDOFF_DIRS=0 bash -c "$_S114_COLL_BLK" 2>&1)" || _S114_COLL_RC=$?
+check "§114(12a) relay configured + handoff mounts impossible (workspace collides with ~/.handoff) -> exit 1, not a warning-and-proceed (criterion 7: the relay cannot start, so the launch fails)" \
+    bash -c '[ "$1" -eq 1 ] && printf "%s\n" "$2" | grep -q "A configured relay that cannot start fails the launch"' -- "$_S114_COLL_RC" "$_S114_COLL_OUT"
+_S114_COLL_RC=0
+env SANDY_HANDOFF_DIRS=0 bash -c "$_S114_COLL_BLK" >/dev/null 2>&1 || _S114_COLL_RC=$?
+check "§114(12b) ...and with NO relay configured the same collision is silent, rc 0 (the guard is about the relay, not about the dirs)" \
+    test "$_S114_COLL_RC" -eq 0
+
+# --- (13) RUN_FLAGS / marker wiring ------------------------------------------
+check "§114(13a) exactly 4 handoff RUN_FLAGS lines (outbox, inbox, peer, relay — was 2 before 1.10.0; the -e SANDY_HANDOFF_RELAY line has no lowercase 'handoff' so it is correctly NOT counted here)" \
+    bash -c '[ "$(grep -c "RUN_FLAGS.*handoff" "$1")" -eq 4 ]' -- "$_S114_SANDY"
+check "§114(13b) the relay mount has no :ro (it is read-write, unlike inbox)" \
+    bash -c 'grep -q "handoff/relay:/home/claude/.handoff/relay\")" "$1" && ! grep -q "handoff/relay:/home/claude/.handoff/relay:ro" "$1"' -- "$_S114_SANDY"
+check "§114(13c) -e SANDY_HANDOFF_RELAY appears exactly once, inside the handoff-mounts gate" \
+    bash -c '[ "$(grep -c "\-e \"SANDY_HANDOFF_RELAY=" "$1")" -eq 1 ]' -- "$_S114_SANDY"
+check "§114(13d) mkdir for the four handoff subdirs is on one line (outbox inbox relay peer)" \
+    bash -c 'grep -q "mkdir -p \"\$SANDBOX_DIR/handoff/outbox\" \"\$SANDBOX_DIR/handoff/inbox\" \"\$SANDBOX_DIR/handoff/relay\" \"\$SANDBOX_DIR/handoff/peer\"" "$1"' -- "$_S114_SANDY"
+check "§114(13e) zero-diff invariant: with the opt-out (SANDY_HANDOFF_DIRS=0) and no relay, the handoff-mounts gate emits zero RUN_FLAGS" \
+    bash -c '
+        _blk="$(awk "/Handoff directories mounts/,/^fi\$/" "$1")"
+        RUN_FLAGS=()
+        SANDY_HANDOFF_DIRS=0
+        unset SANDY_HANDOFF_RELAY
+        eval "$_blk"
+        [ "${#RUN_FLAGS[@]}" -eq 0 ]
+    ' -- "$_S114_SANDY"
+check "§114(13e-2) default-on invariant: with SANDY_HANDOFF_DIRS unset and no relay, the gate emits exactly the four -v mounts and no -e (the relay env line stays tied to the relay key)" \
+    bash -c '
+        _blk="$(awk "/Handoff directories mounts/,/^fi\$/" "$1")"
+        RUN_FLAGS=()
+        unset SANDY_HANDOFF_DIRS SANDY_HANDOFF_RELAY
+        SANDBOX_DIR=/sb
+        eval "$_blk"
+        [ "${#RUN_FLAGS[@]}" -eq 8 ] || exit 1
+        _joined="$(printf "%s\n" "${RUN_FLAGS[@]}")"
+        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/outbox:/home/claude/.handoff/outbox" || exit 1
+        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/inbox:/home/claude/.handoff/inbox:ro" || exit 1
+        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/peer:/home/claude/.handoff/peer:ro" || exit 1
+        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/relay:/home/claude/.handoff/relay" || exit 1
+        ! printf "%s\n" "$_joined" | grep -q "^-e\$"
+    ' -- "$_S114_SANDY"
+
+check "§114(13f) marker printf: cross_session_inbound and handoff_relay fields present" \
+    bash -c 'grep -q "\"cross_session_inbound\": %s" "$1" && grep -q "\"handoff_relay\": %s" "$1"' -- "$_S114_SANDY"
+_S114_FMT_LINE="$(grep -m1 -n '"cross_session_inbound": %s' "$_S114_SANDY" | cut -d: -f1)"
+_S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]' | wc -l | tr -d ' ')"
+check "§114(13g) marker printf format/arg count line up (12 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 12
+
+# --- (14) sandy-handoff-sessions helper: extraction + local functional test --
+# _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
+# tab-delimited row matcher via bash's own `case` glob matching. $1=text $2=glob
+# pattern (built with $_S114_TAB between fields; '*' wildcards allowed in $2).
+_S114_TAB="$(printf '\t')"
+_s114_hs_match() {
+    case "$1" in
+        $2) return 0 ;;
+    esac
+    return 1
+}
+_S114_HS_HELPER="$(sed -n "/<<'HS_HELPER'/,/^HS_HELPER\$/p" "$_S114_SANDY" | sed '1,2d;$d')"
+check "§114(14pre) extracted the sandy-handoff-sessions helper body" \
+    bash -c 'printf "%s" "$1" | grep -q "sandy-handoff-sessions"' -- "$_S114_HS_HELPER"
+_S114_HS="$_S114/hs"
+printf '%s\n' "$_S114_HS_HELPER" > "$_S114_HS"
+chmod +x "$_S114_HS"
+check "§114(14a) helper is syntactically valid bash" bash -n "$_S114_HS"
+
+mkdir -p "$_S114/proc/100" "$_S114/proc/101" "$_S114/socks" "$_S114/keys"
+printf '100 (bash) S 1 100 100 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' > "$_S114/proc/100/stat"
+printf '101 (claude) S 100 100 100 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' > "$_S114/proc/101/stat"
+printf 'node\0/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js\0' > "$_S114/proc/101/cmdline"
+touch "$_S114/keys/101.abc.key"
+printf '0\t100\t\n' > "$_S114/panes.tsv"
+_S114_HS_OUT="$(SANDY_SESSIONS_PANES_FILE="$_S114/panes.tsv" SANDY_SESSIONS_PROC="$_S114/proc" SANDY_SESSIONS_SOCK_DIR="$_S114/socks" SANDY_SESSIONS_KEY_DIR="$_S114/keys" SANDY_AGENT=claude "$_S114_HS" 2>&1)"
+check "§114(14b) single-agent: one row, correct agent/pane/pid/keyfile, socket '-' (none bound)" \
+    _s114_hs_match "$_S114_HS_OUT" "claude${_S114_TAB}0${_S114_TAB}100${_S114_TAB}101${_S114_TAB}-${_S114_TAB}*/keys/101.abc.key"
+
+mkdir -p "$_S114/proc/200" "$_S114/proc/202"
+printf '200 (bash) S 1 200 200 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' > "$_S114/proc/200/stat"
+printf '202 (codex) S 200 200 200 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' > "$_S114/proc/202/stat"
+printf 'node\0/usr/local/bin/codex\0' > "$_S114/proc/202/cmdline"
+printf '0\t100\tclaude\n2\t200\tcodex\n' > "$_S114/panes-multi.tsv"
+_S114_HS_OUT2="$(SANDY_SESSIONS_PANES_FILE="$_S114/panes-multi.tsv" SANDY_SESSIONS_PROC="$_S114/proc" SANDY_SESSIONS_SOCK_DIR="$_S114/socks" SANDY_SESSIONS_KEY_DIR="$_S114/keys" SANDY_AGENT=codex,claude "$_S114_HS" 2>&1)"
+_S114_HS_OUT2_L1="$(printf '%s\n' "$_S114_HS_OUT2" | sed -n '1p')"
+_S114_HS_OUT2_L2="$(printf '%s\n' "$_S114_HS_OUT2" | sed -n '2p')"
+check "§114(14c) multi-agent: rows follow SANDY_AGENT order (codex first), proving pane_index is NOT assumed to equal spawn order" \
+    _s114_hs_match "$_S114_HS_OUT2_L1" "codex${_S114_TAB}2${_S114_TAB}200${_S114_TAB}202${_S114_TAB}-${_S114_TAB}-"
+check "§114(14d) ...and the claude row still resolves correctly second" \
+    _s114_hs_match "$_S114_HS_OUT2_L2" "claude${_S114_TAB}0${_S114_TAB}100${_S114_TAB}101${_S114_TAB}-${_S114_TAB}*"
+
+_S114_HS_EMPTY_RC=0
+SANDY_SESSIONS_PANES_FILE="$_S114/empty.tsv" SANDY_SESSIONS_PROC="$_S114/proc" >/dev/null 2>&1
+: > "$_S114/empty.tsv"
+_S114_HS_EMPTY_OUT="$(SANDY_SESSIONS_PANES_FILE="$_S114/empty.tsv" SANDY_SESSIONS_PROC="$_S114/proc" SANDY_AGENT=claude "$_S114_HS" 2>&1)" || _S114_HS_EMPTY_RC=$?
+check "§114(14e) no panes -> empty output, rc 0 (never invokes tmux when the test-hook file is given, even empty)" \
+    bash -c 'test -z "$1" -a "$2" -eq 0' -- "$_S114_HS_EMPTY_OUT" "$_S114_HS_EMPTY_RC"
+
+# --- (14f) SIGPIPE regression guard: is_agent()'s cmdline check must not use a
+# raw `tr | grep -q` pipe under this helper's own `set -o pipefail` -- a match
+# near the FRONT of an oversized cmdline lets grep -q exit before tr finishes
+# writing, tr dies of SIGPIPE (141), and pipefail turns that into the whole
+# pipeline's exit status even though the match was real. Fresh pid namespace
+# (500/501) so this doesn't collide with the 100/101/200/202 fixtures above --
+# descendants() walks the WHOLE $PROC tree filtering by ppid, so a reused pane
+# pid could pick up an unrelated sibling and mask the bug. comm is "node" (a
+# node-installed claude, the live case), forcing the fallback into the
+# cmdline check rather than short-circuiting on comm_of.
+mkdir -p "$_S114/proc/500" "$_S114/proc/501"
+printf '500 (bash) S 1 500 500 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' > "$_S114/proc/500/stat"
+printf '501 (node) S 500 500 500 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' > "$_S114/proc/501/stat"
+{ printf 'claude\0'; head -c 200000 /dev/zero | tr '\0' 'x'; printf '\0'; } > "$_S114/proc/501/cmdline"
+printf '0\t500\t\n' > "$_S114/panes-big.tsv"
+_S114_HS_BIG_OUT="$(SANDY_SESSIONS_PANES_FILE="$_S114/panes-big.tsv" SANDY_SESSIONS_PROC="$_S114/proc" SANDY_SESSIONS_SOCK_DIR="$_S114/socks" SANDY_SESSIONS_KEY_DIR="$_S114/keys" SANDY_AGENT=claude "$_S114_HS" 2>&1)"
+check "§114(14f) oversized cmdline with the match FIRST still recognizes the agent (agent_pid resolves, not '-')" \
+    _s114_hs_match "$_S114_HS_BIG_OUT" "claude${_S114_TAB}0${_S114_TAB}500${_S114_TAB}501${_S114_TAB}*"
+
+# --- (15) relay supervisor: static checks against the TEMPLATE (mirror of the heredoc) --
+if [ -f "$_S114_TMPL" ]; then
+    _S114_SUP_FN="$(awk '/^_sandy_start_handoff_relay\(\) \{/,/^}$/' "$_S114_TMPL")"
+    check "§114(15pre) extracted _sandy_start_handoff_relay from templates/user-setup.sh.tmpl (proves the heredoc/template mirror stayed in sync, and regen-template.sh --check is the drift gate)" \
+        bash -c 'printf "%s" "$1" | grep -q SANDY_HANDOFF_RELAY' -- "$_S114_SUP_FN"
+    check "§114(15a) single column-0 closing brace (clean extraction)" \
+        bash -c '[ "$(printf "%s\n" "$1" | grep -c "^}\$")" -eq 1 ]' -- "$_S114_SUP_FN"
+    check "§114(15b) survives its own relay's nonzero exit (set +e; trap - ERR under the caller's set -e/ERR trap)" \
+        bash -c 'printf "%s" "$1" | grep -q "set +e; trap - ERR"' -- "$_S114_SUP_FN"
+    check "§114(15c) singleton via flock -n on a lock fd" \
+        bash -c 'printf "%s" "$1" | grep -q "flock -n 9"' -- "$_S114_SUP_FN"
+    check "§114(15d) exponential backoff: doubling, capped at 60" \
+        bash -c 'printf "%s" "$1" | grep -q "backoff \* 2" && printf "%s" "$1" | grep -q "\-gt 60"' -- "$_S114_SUP_FN"
+    check "§114(15e) backoff resets to 1 after a run staying up >60s" \
+        bash -c 'printf "%s" "$1" | grep -q "up.*-gt 60.*&&.*backoff=1"' -- "$_S114_SUP_FN"
+    check "§114(15f) call site precedes the first tmux new-session by line order" \
+        bash -c '
+            c=$(grep -m1 -n "_sandy_start_handoff_relay;" "$1" | cut -d: -f1)
+            t=$(grep -m1 -n "tmux new-session" "$1" | cut -d: -f1)
+            [ -n "$c" ] && [ -n "$t" ] && [ "$c" -lt "$t" ]
+        ' -- "$_S114_TMPL"
+    check "§114(15g) call site is gated on headless (never starts the relay for -p/--print/--prompt)" \
+        bash -c 'grep -B1 "_sandy_start_handoff_relay;" "$1" | grep -q "_sandy_is_headless"' -- "$_S114_TMPL"
+    # Exactly ONE call site: the definition line plus one invocation. A second
+    # invocation (e.g. added inside the multi-agent branch) would not be caught
+    # by 15g, which only checks that SOME call site is headless-gated.
+    check "§114(15h) exactly one _sandy_start_handoff_relay call site (definition + 1 invocation = 2 mentions)" \
+        bash -c '[ "$(grep -c "_sandy_start_handoff_relay" "$1")" -eq 2 ]' -- "$_S114_TMPL"
+    # --- criterion 8, in-container half: the call site is gated on --remote as
+    # well as headless. Belt-and-suspenders with the host-side unset (11p) --
+    # the host is the only half that can log the reason, this half is what
+    # holds if a caller ever forwards the key anyway.
+    check "§114(15i) call site is ALSO gated on SANDY_REMOTE_CONTROL (criterion 8: --remote has no panes for the relay to target, and the supervisor never gives up)" \
+        bash -c 'grep -q "_sandy_is_headless.*!=.*true.*SANDY_REMOTE_CONTROL.*!=.*true.*_sandy_start_handoff_relay" "$1"' -- "$_S114_TMPL"
+    # --- criterion 7, in-container half: three preconditions the host cannot
+    # check (an image-only path, the ~/.handoff/relay mount, flock in the
+    # image) each `exit 1` so the container dies before any tmux session
+    # exists, rather than logging and leaving crossSessionInbound=accept with
+    # nothing delivering.
+    check "§114(15i-2) env contract: the supervisor exports SANDY_HANDOFF_PEER at ~/.handoff/peer alongside INBOX/OUTBOX/RELAY_STATE (1.10.0, additive)" \
+        bash -c 'printf "%s\n" "$1" | grep -q "export SANDY_HANDOFF_INBOX=.*SANDY_HANDOFF_OUTBOX=.*SANDY_HANDOFF_RELAY_STATE=.*SANDY_HANDOFF_PEER=\"\$HOME/.handoff/peer\""' -- "$_S114_SUP_FN"
+    check "§114(15j) exactly three ERROR+exit-1 preconditions in the supervisor (relay not executable, relay state dir not mounted, flock missing)" \
+        bash -c '[ "$(printf "%s\n" "$1" | grep -c "^        exit 1\$")" -eq 3 ]' -- "$_S114_SUP_FN"
+    check "§114(15k) each of the three names the fail-the-session rule in its ERROR line" \
+        bash -c '[ "$(printf "%s\n" "$1" | grep -c "A configured relay that cannot start fails the session")" -eq 3 ]' -- "$_S114_SUP_FN"
+    # A flock check INSIDE the backgrounded subshell could only exit that
+    # subshell, never the session -- the container would come up with
+    # crossSessionInbound=accept and no relay. Ordering is the property, so it
+    # is asserted as ordering, not as presence.
+    check "§114(15l) the flock availability check precedes the backgrounded supervisor subshell (inside it, exit 1 would kill only the subshell and the session would survive with accept and no relay)" \
+        bash -c '
+            f=$(printf "%s\n" "$1" | grep -n -m1 "command -v flock" | cut -d: -f1)
+            b=$(printf "%s\n" "$1" | grep -n -m1 "^    ($" | cut -d: -f1)
+            [ -n "$f" ] && [ -n "$b" ] && [ "$f" -lt "$b" ]
+        ' -- "$_S114_SUP_FN"
+fi
+
+# --- (16) dynamic supervisor test (local loop, no Docker) --------------------
+if command -v flock >/dev/null 2>&1 && [ -n "${_S114_SUP_FN:-}" ]; then
+    _S114_RF="$_S114/relayfix"
+    mkdir -p "$_S114_RF/home/.handoff/relay" "$_S114_RF/home/.handoff/inbox" "$_S114_RF/home/.handoff/outbox" "$_S114_RF/ws/.sandy"
+    # The fixture relay records $PPID (the supervisor loop's OWN pid) on every
+    # invocation, so cleanup can kill that exact loop deterministically --
+    # pkill -f pattern-matching is unreliable here because the loop's argv
+    # only ever contains the RELATIVE '.sandy/relay-fail.sh' text (the
+    # absolute path is resolved inside the running shell, never re-exec'd
+    # into argv), so a path-based pkill silently fails to match the loop
+    # itself (only a transient, already-exited child would ever carry the
+    # resolved absolute path in its argv).
+    cat > "$_S114_RF/ws/.sandy/relay-fail.sh" <<'S114_RELAY_EOF'
+#!/bin/sh
+echo "$PPID" > "$SANDY_HANDOFF_RELAY_STATE/loop.pid"
+printf '%s|%s|%s\n' "$SANDY_HANDOFF_INBOX" "$SANDY_HANDOFF_OUTBOX" "$SANDY_HANDOFF_RELAY_STATE" >> "$SANDY_HANDOFF_RELAY_STATE/env-seen"
+exit 7
+S114_RELAY_EOF
+    chmod +x "$_S114_RF/ws/.sandy/relay-fail.sh"
+    ( HOME="$_S114_RF/home" WORKSPACE="$_S114_RF/ws" bash -c "
+        sandy_log(){ :; }
+        SANDY_HANDOFF_RELAY='.sandy/relay-fail.sh'
+        $_S114_SUP_FN
+        _sandy_start_handoff_relay
+        sleep 4
+    " ) >/dev/null 2>&1
+    _S114_LOOP_PID="$(cat "$_S114_RF/home/.handoff/relay/loop.pid" 2>/dev/null || true)"
+    # Freeze the loop FIRST so it cannot respawn, then kill its current child
+    # (the backoff `sleep`), then the loop -- killing the loop alone leaves that
+    # child orphaned as a <defunct> entry for the rest of the suite.
+    if [ -n "$_S114_LOOP_PID" ]; then
+        kill -STOP "$_S114_LOOP_PID" >/dev/null 2>&1 || true
+        command -v pkill >/dev/null 2>&1 && pkill -9 -P "$_S114_LOOP_PID" >/dev/null 2>&1 || true
+        kill -9 "$_S114_LOOP_PID" >/dev/null 2>&1 || true
+    fi
+    check "§114(16a) restart-with-backoff actually happened (>=2 start lines, increasing backoff)" \
+        bash -c '[ "$(grep -c " start " "$1")" -ge 2 ] && grep -q "restart in 1s" "$1" && grep -q "restart in 2s" "$1"' -- "$_S114_RF/home/.handoff/relay/supervisor.log"
+    check "§114(16b) env contract: SANDY_HANDOFF_INBOX/OUTBOX/RELAY_STATE all point under ~/.handoff" \
+        bash -c 'grep -q "/.handoff/inbox|.*/.handoff/outbox|.*/.handoff/relay\$" "$1"' -- "$_S114_RF/home/.handoff/relay/env-seen"
+    rm -rf "$_S114_RF"
+else
+    skip "§114(16) dynamic supervisor loop test (flock unavailable on this host)"
+fi
+
+# --- (16c-e) dynamic singleton guard ------------------------------------------
+# WHY THIS EXISTS SEPARATELY FROM 15c: 15c is a presence grep for the literal
+# string "flock -n 9" in the extracted function body -- it passes on ANY code
+# that contains that substring, including code where the guard is dead (e.g.
+# `if flock -n 9 && false; then`). This block calls the REAL extracted
+# supervisor function three times in a row against a long-running fixture
+# relay and asserts the actual property 7.6 requires: never more than one live
+# relay instance. Mutation-verified: `if flock -n 9 && false` leaves 15c green
+# but makes (16c) and (16d) below fail (three instances/zero "already running"
+# lines instead of one/two).
+if command -v flock >/dev/null 2>&1 && [ -n "${_S114_SUP_FN:-}" ]; then
+    _S114_RF2="$_S114/relaylong"
+    mkdir -p "$_S114_RF2/home/.handoff/relay" "$_S114_RF2/home/.handoff/inbox" "$_S114_RF2/home/.handoff/outbox" "$_S114_RF2/ws/.sandy"
+    cat > "$_S114_RF2/ws/.sandy/relay-long.sh" <<'S114_RELAY_LONG_EOF'
+#!/bin/sh
+echo "$$" >> "$SANDY_HANDOFF_RELAY_STATE/instances"
+echo "$PPID" >> "$SANDY_HANDOFF_RELAY_STATE/loop.pids"
+sleep 30
+S114_RELAY_LONG_EOF
+    chmod +x "$_S114_RF2/ws/.sandy/relay-long.sh"
+    ( HOME="$_S114_RF2/home" WORKSPACE="$_S114_RF2/ws" bash -c "
+        sandy_log(){ :; }
+        SANDY_HANDOFF_RELAY='.sandy/relay-long.sh'
+        $_S114_SUP_FN
+        _sandy_start_handoff_relay
+        _sandy_start_handoff_relay
+        _sandy_start_handoff_relay
+        sleep 2
+    " ) >/dev/null 2>&1
+    _S114_LOCK="$_S114_RF2/home/.sandy-handoff-relay.lock"
+    _S114_FLOCK_RC=0
+    flock -n "$_S114_LOCK" true >/dev/null 2>&1 || _S114_FLOCK_RC=$?
+    check "§114(16c) singleton dynamic: exactly ONE relay instance across three concurrent starts (mutation: 'flock -n 9 && false' breaks this while 15c's presence-grep stays green)" \
+        bash -c '[ "$(wc -l < "$1" | tr -d " ")" -eq 1 ]' -- "$_S114_RF2/home/.handoff/relay/instances"
+    check "§114(16d) singleton dynamic: exactly 2 'already running (lock held)' lines (the two extra starts correctly refused, not silently duplicated)" \
+        bash -c '[ "$(grep -c "already running (lock held)" "$1")" -eq 2 ]' -- "$_S114_RF2/home/.handoff/relay/supervisor.log"
+    check "§114(16e) singleton dynamic: a foreign flock -n on the SAME lock file fails while the loop is alive (the lock is genuinely held, not merely present in the source)" \
+        test "$_S114_FLOCK_RC" -ne 0
+    # cleanup: kill the one loop + one relay this block leaked (detached background
+    # job). Freeze the loop before killing the relay so it cannot respawn in between.
+    while IFS= read -r _p; do [ -n "$_p" ] && kill -STOP "$_p" >/dev/null 2>&1 || true; done < "$_S114_RF2/home/.handoff/relay/loop.pids" 2>/dev/null
+    while IFS= read -r _p; do [ -n "$_p" ] && kill -9 "$_p" >/dev/null 2>&1 || true; done < "$_S114_RF2/home/.handoff/relay/instances" 2>/dev/null
+    while IFS= read -r _p; do [ -n "$_p" ] && kill -9 "$_p" >/dev/null 2>&1 || true; done < "$_S114_RF2/home/.handoff/relay/loop.pids" 2>/dev/null
+    rm -rf "$_S114_RF2"
+else
+    skip "§114(16c-e) dynamic singleton guard (flock unavailable on this host)"
+fi
+
+# --- (16f-h) structural: the real-Docker harness still covers criteria 7/8 ---
+# Same reasoning as §97(14-16): the runtime proof needs Docker, so these guard
+# the harness against a phase being deleted or quietly reduced to something
+# weaker. Without them a green run-tests.sh would coexist with an acceptance
+# file that no longer proves the launch actually fails.
+_S114_ACC="$(cd "$(dirname "$0")" && pwd)/acceptance-handoff-dirs.sh"
+_S114_ACC_E="$(awk '/^echo "== E\./{f=1} f' "$_S114_ACC" 2>/dev/null)"
+check "§114(16f) the acceptance harness still has a relay phase (E)" \
+    bash -c '[ -n "$1" ]' -- "$_S114_ACC_E"
+check "§114(16g) phase E proves criterion 7 end-to-end: a non-executable relay makes --start refuse, with the message, and leaves no container" \
+    bash -c 'printf "%s" "$1" | grep -q "does-not-exist.sh" \
+        && printf "%s" "$1" | grep -q "A configured relay that cannot start fails the launch" \
+        && printf "%s" "$1" | grep -q "no daemon container was left behind"' -- "$_S114_ACC_E"
+check "§114(16h) phase E proves criterion 8 end-to-end: a real headless launch prints the skip line naming the refuse consequence" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_HANDOFF_RELAY not started (headless run); crossSessionInbound will default to refuse"' -- "$_S114_ACC_E"
+# --- (16i) the harness restart-count pattern must actually match the log line
+# the supervisor writes. A real maintainer run failed here: the pattern was
+# '\] start ' but the line is "[sandy-relay] <ISO ts> start <path>", so the
+# bracket and the word are never adjacent and the count was always 0 -- on a
+# restart that E3s own new-pid assertion had already proved healthy. Assert
+# the RELATION between the two files, not either one in isolation.
+_S114_START_PAT="$(printf '%s\n' "$_S114_ACC_E" | grep -m1 '_starts=' | sed -e "s/.*grep -c '//" -e "s/'.*//")"
+check "§114(16i) extracted the restart-count pattern from phase E" \
+    bash -c '[ -n "$1" ]' -- "$_S114_START_PAT"
+check "§114(16i-2) that pattern actually matches a supervisor.log start line as the template writes it (regression guard for the never-matching '\] start ' pattern)" \
+    bash -c 'printf "%s\n" "[sandy-relay] 2026-01-01T00:00:00Z start /home/claude/ws/.sandy/relay.sh" | grep -q "$1"' -- "$_S114_START_PAT"
+# --- (16j-m) structural: the criterion-7.4 delivery harness still exists and
+# still proves what it claims. Same reasoning as (16f-h): the runtime proof
+# needs Docker AND credentials, so nothing here can run it -- these guard it
+# against being deleted or quietly reduced to a positive-only test, which is
+# the shape that would let it pass while measuring nothing.
+_S114_UDS="$(cd "$(dirname "$0")" && pwd)/acceptance-uds-delivery.sh"
+check "§114(16j) the criterion-7.4 delivery harness exists and parses" \
+    bash -c '[ -f "$1" ] && bash -n "$1"' -- "$_S114_UDS"
+check "§114(16k) it asserts BOTH directions: delivery under accept AND a negative control under refuse (mutation: delete the refuse case -> a harness that cannot distinguish delivery from an agent doing it for another reason)" \
+    bash -c '
+        grep -q "run_case \"accept\" yes" "$1" || exit 1
+        grep -q "run_case \"refuse\" no"  "$1" || exit 1
+        grep -q "NEGATIVE CONTROL" "$1"
+    ' -- "$_S114_UDS"
+check "§114(16l) it reads the resolved posture from the session MARKER, not from the config it wrote (asserting your own input proves nothing)" \
+    bash -c 'grep -q "/etc/sandy-session.json" "$1" && grep -q "cross_session_inbound" "$1"' -- "$_S114_UDS"
+check "§114(16m) it skips loudly without credentials instead of reporting a pass (the §104 false-green shape)" \
+    bash -c 'grep -q "RESULT: 0 passed, 0 failed" "$1" && grep -q "_HAS_CRED" "$1"' -- "$_S114_UDS"
+check "§114(16n) run-integration-tests.sh invokes it as §25" \
+    bash -c 'grep -q "acceptance-uds-delivery.sh" "$1" && grep -q "^section \"25\." "$1"' -- "$(cd "$(dirname "$0")" && pwd)/run-integration-tests.sh"
+unset _S114_UDS
+
+check "§114(16i-3) ...and does NOT match the exit line, so a restart count cannot be inflated by exits" \
+    bash -c '! printf "%s\n" "[sandy-relay] 2026-01-01T00:00:00Z exit rc=143 uptime=3s; restart in 1s" | grep -q "$1"' -- "$_S114_START_PAT"
+
+# --- (17) regen drift gates (already run suite-wide; asserted here too so a §114-only run still catches drift) --
+check "§114(17a) test/regen-config-docs.sh --check is clean" \
+    bash -c 'cd "$(dirname "$1")" && test/regen-config-docs.sh --check' -- "$_S114_SANDY"
+if [ -f "$_S114_TMPL" ]; then
+    check "§114(17b) test/regen-template.sh --check is clean" \
+        bash -c 'cd "$(dirname "$1")" && test/regen-template.sh --check' -- "$_S114_SANDY"
+fi
+
+rm -rf "$_S114"
+unset _S114_SANDY _S114_TMPL _S114 _S114_PVP_FN _S114_VC_ACCEPT _S114_VC_HOLD _S114_VC_RELAY \
+    _S114_CSI_FN _S114_MTIME_BEFORE _S114_MTIME_AFTER _S114_BAD_RC \
+    _S114_NOJQ_HAS_JQ _S114_NONODE _S114_NOTOOL \
+    _S114_CSI_BLK _S114_D1_OUT _S114_D2_OUT _S114_D3_OUT _S114_D4_OUT _S114_D5_RC _S114_D5B_RC _S114_D6_OUT \
+    _S114_NUDGE_OUT _S114_NUDGE_OUT2 _S114_END_LINE _S114_MOUNT_LINE _S114_SNAP_LINE _S114_RELAY_BEGIN_LINE _S114_PKGDIR_LINE _S114_HANDOFFDIR_LINE \
+    _S114_RELAY_BLK _S114_RELAY_RC _S114_FMT_LINE _S114_CONV_COUNT _S114_HS_HELPER _S114_HS _S114_HS_OUT _S114_HS_OUT2 \
+    _S114_HS_OUT2_L1 _S114_HS_OUT2_L2 _S114_HS_BIG_OUT \
+    _S114_HS_EMPTY_RC _S114_HS_EMPTY_OUT _S114_SUP_FN _S114_RF _S114_TAB _S114_RF2 _S114_LOCK _S114_FLOCK_RC \
+    _S114_RW _S114_RELAY_OUT _S114_COLL_BLK _S114_COLL_RC _S114_COLL_OUT _S114_D8_OUT \
+    _S114_ACC _S114_ACC_E _S114_START_PAT _S114_UDS \
+    2>/dev/null || true
+
+# ============================================================
+echo "§116: codex OAuth credentials are seeded into the rw sandbox, not overlaid :ro"
+# ============================================================
+# WHY. The old design overlaid an ephemeral copy of the host's ~/.codex/auth.json
+# READ-ONLY at /home/claude/.codex/auth.json, so `codex login`, `codex logout`
+# and in-session token refresh all died with EROFS inside the container -- while
+# sandy's own comments, CLAUDE.md and SPECIFICATION.md all told the user to
+# "re-login inside the container", which that configuration makes impossible.
+# The :ro was also not buying its two stated properties (no leakage to host, no
+# stale-token race): the mount source was already an ephemeral COPY that
+# cleanup() removes, so a write could neither reach the host nor race it.
+#
+# Now: the OAuth path SEEDS the sandbox (rw) and the sandbox copy WINS on later
+# launches -- without that precedence a relaunch would clobber a fresh
+# in-container login with the host's stale token, which is the whole bug.
+# The api_key path is deliberately unchanged.
+_S116_SANDY="$SANDY_SCRIPT"
+_S116_FN="$(awk '/^load_codex_credentials\(\) \{/,/^}$/' "$_S116_SANDY")"
+check "§116(pre) extracted load_codex_credentials (mutation: a rename empties this and every check below must fail HERE, not silently pass)" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDBOX_DIR/codex/auth.json"' -- "$_S116_FN"
+
+# $1=mode $2=OPENAI_API_KEY $3=host-auth(yes/no) $4=sandbox-auth content ("" = none)
+# Echoes: "<info/warn text>||TMPDIR=<yes|> SBX=<content|none>"
+_s116_run() {
+    local _t; _t="$(mktemp -d)"
+    mkdir -p "$_t/home/.codex" "$_t/sbx/codex"
+    [ "$3" = yes ] && printf '{"tokens":{"host":"HOSTTOKEN"}}' > "$_t/home/.codex/auth.json"
+    [ -n "$4" ] && printf '%s' "$4" > "$_t/sbx/codex/auth.json"
+    env -u OPENAI_API_KEY SANDY_CODEX_AUTH="$1" OPENAI_API_KEY="$2" \
+        HOME="$_t/home" SANDBOX_DIR="$_t/sbx" bash -c "
+            info(){ printf '%s ' \"\$*\"; }; warn(){ printf '%s ' \"\$*\"; }
+            CODEX_CRED_TMPDIR=''
+            $_S116_FN
+            load_codex_credentials
+            printf '||TMPDIR=%s SBX=%s' \"\${CODEX_CRED_TMPDIR:+yes}\" \
+                \"\$( [ -s \"\$SANDBOX_DIR/codex/auth.json\" ] && cat \"\$SANDBOX_DIR/codex/auth.json\" || echo none)\"
+        " 2>&1
+    rm -rf "$_t"
+}
+
+check "§116(1) host OAuth + fresh sandbox -> SEEDED into the rw sandbox, NO :ro overlay (mutation: restoring the overlay sets TMPDIR and leaves the sandbox empty)" \
+    bash -c '[ "${1##*||}" = "TMPDIR= SBX={\"tokens\":{\"host\":\"HOSTTOKEN\"}}" ]' -- "$(_s116_run auto "" yes "")"
+check "§116(2) an in-container login WINS over the host copy (mutation: drop the -s sandbox check -> the host token overwrites it every launch, which is the reported bug)" \
+    bash -c '[ "${1##*||}" = "TMPDIR= SBX={\"tokens\":{\"s\":\"SBXTOKEN\"}}" ]' -- "$(_s116_run auto "" yes '{"tokens":{"s":"SBXTOKEN"}}')"
+check "§116(3) NEGATIVE: OPENAI_API_KEY keeps its precedence in auto mode, still via the ephemeral :ro overlay" \
+    bash -c 'case "$1" in *"TMPDIR=yes SBX=none") exit 0;; esac; exit 1' -- "$(_s116_run auto "sk-abc" yes "")"
+check "§116(4) mode=oauth ignores the env key and still seeds" \
+    bash -c '[ "${1##*||}" = "TMPDIR= SBX={\"tokens\":{\"host\":\"HOSTTOKEN\"}}" ]' -- "$(_s116_run oauth "sk-abc" yes "")"
+check "§116(5) mode=api_key overlays :ro even when the sandbox holds its own credential (an explicit mode choice wins)" \
+    bash -c 'case "$1" in *"TMPDIR=yes"*) exit 0;; esac; exit 1' -- "$(_s116_run api_key "sk-abc" yes '{"tokens":{"s":"X"}}')"
+check "§116(6) no credentials anywhere -> warns, seeds nothing, mounts nothing" \
+    bash -c 'case "$1" in "No Codex credentials found."*"TMPDIR= SBX=none") exit 0;; esac; exit 1' -- "$(_s116_run auto "" no "")"
+# The host file is READ, never written -- the seed direction must not invert.
+check "§116(7) NEGATIVE: nothing is ever copied back to the host's ~/.codex/auth.json" \
+    bash -c '! printf "%s" "$1" | grep -qE "cp .*SANDBOX_DIR/codex/auth\.json .*HOME/\.codex"' -- "$_S116_FN"
+# NOTE: written as an exact-copy-target assertion, not `grep -qv`. The first
+# version used `... | grep -qv CODEX_CRED_TMPDIR`, which returns 0 whenever ANY
+# line differs -- so it passed even against the restored overlay. Vacuous, and
+# caught only because the mutation run showed it staying green while (1) and (4)
+# went red.
+check "§116(8) the host OAuth copy targets the SANDBOX, never an ephemeral tmpdir (mutation: reinstating the overlay flips this copy target and it fails)" \
+    bash -c '
+        printf "%s\n" "$1" | grep -q '"'"'cp "\$HOME/.codex/auth.json" "\$SANDBOX_DIR/codex/auth.json"'"'"' || exit 1
+        ! printf "%s\n" "$1" | grep -q '"'"'cp "\$HOME/.codex/auth.json" "\$CODEX_CRED_TMPDIR'"'"'
+    ' -- "$_S116_FN"
+check "§116(9) --print-schema advertises sandbox_auth_json in the codex probe order" \
+    bash -c 'cd "$(dirname "$1")" && ./sandy --print-schema 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+c=[a for a in d[\"agents\"] if a[\"name\"]==\"codex\"][0]
+assert c[\"credentials\"][\"probe_order\"]==[\"OPENAI_API_KEY\",\"sandbox_auth_json\",\"host_auth_json\"], c
+"' -- "$_S116_SANDY"
+unset _S116_SANDY _S116_FN
+
+# ============================================================
+echo "§115: the run's own summary is actually the last thing that runs"
+# ============================================================
+echo "§117: ANTHROPIC_API_KEY is not forwarded when host OAuth credentials are mounted"
+# ============================================================
+# WHY. Claude Code resolves an environment API key AHEAD of the account
+# credentials file, so forwarding both had two failure modes and no good one:
+# the key silently wins and bills per-use, or -- if that key has never been
+# approved in this sandbox's .claude.json -- the session parks on the startup
+# modal ("Detected a custom API key in your environment ... Do you want to use
+# this API key?"). The modal is the dangerous half in DAEMON mode: the container
+# is up and `tmux has-session` succeeds, so `--start` returns 0 READY for a
+# session that is inert -- it accepts cross-session messages, routes them to its
+# queue, and never runs them, because it is parked on a dialog nobody is
+# attached to answer. Found by test/acceptance-uds-delivery.sh against 2.1.263,
+# where it masqueraded as "accept did not deliver" for three debugging rounds.
+#
+# The property, not the mechanism: run the REAL branch with the three inputs
+# varied and assert WHICH env vars it actually adds.
+# Extract from the block's unique comment through the OUTER `fi` (column 0 --
+# the inner branch's `fi` is indented), then re-supply the `if` header. Anchoring
+# on `if _sandy_agent_has claude; then` directly is not usable: sandy has many
+# such blocks and an awk range would splice unrelated ones together.
+_S117_BODY="$(awk '/Claude Code.s OWN auth precedence/,/^fi$/' "$SANDY_SCRIPT")"
+_S117_FN="if _sandy_agent_has claude; then
+$_S117_BODY"
+check "§117(pre) extracted the claude key-forwarding branch, and it is evaluable shell (mutation: a reword or a reindent breaks this HERE rather than passing vacuously below)" \
+    bash -c 'printf "%s" "$1" | grep -q CRED_TMPDIR && printf "%s" "$1" | bash -n' -- "$_S117_FN"
+
+# $1=CLAUDE_CODE_OAUTH_TOKEN $2=ANTHROPIC_API_KEY $3=CRED_TMPDIR
+# Echoes the names of the secret env vars the branch actually chose to forward.
+_s117_run() {
+    S117_FN="$_S117_FN" _claude_auth="${_claude_auth:-auto}" \
+    CLAUDE_CODE_OAUTH_TOKEN="$1" ANTHROPIC_API_KEY="$2" CRED_TMPDIR="$3" \
+        bash -c '
+            set -u
+            _sandy_agent_has() { [ "$1" = claude ]; }
+            _sandy_add_secret_env() { printf "%s\n" "$1"; }
+            info() { :; }; warn() { :; }
+            RUN_FLAGS=()
+            eval "$S117_FN"
+        ' 2>/dev/null
+}
+
+_S117_A="$(_s117_run "" "sk-ant-KEY" "/tmp/creds")"
+check "§117(1) OAuth file mounted + API key set -> the API key is NOT forwarded" \
+    bash -c '! printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_A"
+
+_S117_B="$(_s117_run "" "sk-ant-KEY" "")"
+check "§117(2) no OAuth file + API key set -> the API key IS forwarded (the posture is suppression, not removal)" \
+    bash -c 'printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_B"
+
+_S117_C="$(_s117_run "oauth-tok" "sk-ant-KEY" "/tmp/creds")"
+check "§117(3) long-lived OAuth token wins over both (pre-existing precedence intact)" \
+    bash -c 'printf "%s" "$1" | grep -q CLAUDE_CODE_OAUTH_TOKEN && ! printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_C"
+
+_S117_D="$(_s117_run "" "" "/tmp/creds")"
+check "§117(4) OAuth file only -> nothing extra forwarded, no spurious API key" \
+    bash -c '! printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_D"
+
+# SANDY_CLAUDE_AUTH makes the choice EXPLICIT. Without it, suppression (above)
+# left no way to say "use the API key for this workspace" on a host that has
+# OAuth -- the only escape was SANDY_SUSPICIOUS=1, which also strips the refresh
+# token, forces connectors off and defaults egress to strict: a package deal,
+# not a billing choice. These run the same real branch with the mode varied.
+# CRED_TMPDIR is set here ON PURPOSE. In a real launch api_key mode clears
+# CRED_JSON so CRED_TMPDIR is empty -- but then this check would pass whether or
+# not the api_key branch exists, because the fallback branch forwards the key
+# too. (It did exactly that, and the mutation run caught it.) Setting it proves
+# the FORWARDING site honours the mode independently of the credential site, so
+# the two halves cannot silently drift apart.
+_S117_E="$(_claude_auth=api_key _s117_run "" "sk-ant-KEY" "/tmp/creds")"
+check "§117(6) SANDY_CLAUDE_AUTH=api_key forwards the key even in the configuration where auto suppresses it" \
+    bash -c 'printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_E"
+
+_S117_F="$(_claude_auth=api_key _s117_run "oauth-tok" "sk-ant-KEY" "/tmp/creds")"
+check "§117(7) api_key mode ALSO suppresses a long-lived CLAUDE_CODE_OAUTH_TOKEN (one credential in the box, not two)" \
+    bash -c 'printf "%s" "$1" | grep -q ANTHROPIC_API_KEY && ! printf "%s" "$1" | grep -q CLAUDE_CODE_OAUTH_TOKEN' -- "$_S117_F"
+
+_S117_G="$(_claude_auth=oauth _s117_run "" "sk-ant-KEY" "")"
+check "§117(8) SANDY_CLAUDE_AUTH=oauth suppresses the key even with NO OAuth file mounted (explicit beats inference)" \
+    bash -c '! printf "%s" "$1" | grep -q ANTHROPIC_API_KEY' -- "$_S117_G"
+
+# Tier: api_key REDUCES what is in the container (a revocable project key instead
+# of the account refresh token) so it stays passive-safe; `oauth` forces the
+# account credential in even when a key is available, so it is approval-gated.
+check "§117(9) SANDY_CLAUDE_AUTH=oauth is approval-gated from a passive source" \
+    bash -c '"$1" --print-schema >/dev/null 2>&1; printf "%s" "$(awk "/_sandy_passive_value_privileged\(\)/,/^}/" "$1")" | grep -q "SANDY_CLAUDE_AUTH.*oauth"' -- "$SANDY_SCRIPT"
+check "§117(10) SANDY_CLAUDE_AUTH=api_key is NOT approval-gated (it is the tightening direction)" \
+    bash -c '! printf "%s" "$(awk "/_sandy_passive_value_privileged\(\)/,/^}/" "$1")" | grep -q "SANDY_CLAUDE_AUTH.*api_key"' -- "$SANDY_SCRIPT"
+
+# The credential-side half: api_key mode must WITHHOLD the OAuth file, or the
+# account refresh token is in the container alongside the key and the mode is a
+# billing switch pretending to be a compartmentalization one.
+_S117_CRED="$(awk '/--- SANDY_CLAUDE_AUTH: make the choice EXPLICIT/,/^    # --- #130: credential posture/' "$SANDY_SCRIPT")"
+check "§117(11) the credential site exists and is evaluable (mutation: a reword fails HERE)" \
+    bash -c 'printf "%s" "$1" | grep -q "CRED_JSON=\"\"" && printf "%s" "$1" | sed "\$d" | bash -n' -- "$_S117_CRED"
+check "§117(12) api_key mode withholds the host OAuth credentials file (CRED_JSON cleared)" \
+    bash -c 'printf "%s" "$1" | grep -A12 "_claude_auth\" = api_key" | grep -q "CRED_JSON=\"\""' -- "$_S117_CRED"
+check "§117(13) an unrecognized SANDY_CLAUDE_AUTH value falls back to auto rather than silently doing something else" \
+    bash -c 'printf "%s" "$1" | grep -q "_claude_auth=auto"' -- "$_S117_CRED"
+
+# The documented probe order must match the code, or a consumer reading
+# --print-schema plans around a precedence sandy no longer implements.
+check "§117(5) --print-schema probe_order puts host_credentials_file ahead of ANTHROPIC_API_KEY" \
+    bash -c '"$1" --print-schema 2>/dev/null | tr -d " \n" | grep -q "\"probe_order\":\[\"CLAUDE_CODE_OAUTH_TOKEN\",\"host_credentials_file\",\"ANTHROPIC_API_KEY\"\]"' -- "$SANDY_SCRIPT"
+
+# ============================================================
+echo "§118: codex config.toml sandbox_mode is repaired by VALUE, not just key presence"
+# ============================================================
+# WHY. The seed block above is first-run only and its gate greps for the KEY
+# `sandbox_mode`, so a file containing sandbox_mode = "workspace-write" satisfies
+# it and is never corrected. That gap became reachable when the codex dir went
+# read-write (#238): the user -- or codex itself -- can edit config.toml
+# in-session and the edit persists into every later launch. A non-full-access
+# mode makes codex try to initialize its Landlock sandbox INSIDE sandy's
+# container, which does not nest; commands fail to spawn and codex falls back to
+# its approval path, which reads like a sandy fault and is not one.
+#
+# The repair must be surgical: config.toml is documented as safe to edit, so it
+# rewrites ONE top-level line and leaves everything else -- including a
+# profile-scoped sandbox_mode, which only applies when that profile is selected.
+_S118_FN="$(awk '/# VALUE-AWARE REPAIR, not merely key-presence/,/^    fi$/' "$SANDY_SCRIPT")"
+check "§118(pre) extracted the repair block, and it is evaluable shell (mutation: a reword or reindent fails HERE, not silently below)" \
+    bash -c 'printf "%s" "$1" | grep -q "danger-full-access" && printf "%s" "$1" | bash -n' -- "$_S118_FN"
+
+# $1 = config.toml content. Echoes the resulting file, then a WARN line if any.
+_s118_run() {
+    local d; d="$(mktemp -d)"; mkdir -p "$d/codex"
+    printf '%s' "$1" > "$d/codex/config.toml"
+    SANDBOX_DIR="$d" S118_FN="$_S118_FN" bash -c '
+        set -uo pipefail
+        warn() { printf "WARN\n"; }
+        eval "$S118_FN"
+    ' 2>/dev/null
+    cat "$d/codex/config.toml"
+    rm -rf "$d"
+}
+
+_S118_A="$(_s118_run 'model = "gpt-5.5"
+sandbox_mode = "workspace-write"
+
+[notice]
+hide_full_access_warning = true
+')"
+check "§118(1) a wrong TOP-LEVEL sandbox_mode is corrected to danger-full-access" \
+    bash -c 'printf "%s" "$1" | grep -q "^sandbox_mode = \"danger-full-access\"$"' -- "$_S118_A"
+check "§118(2) the wrong value is actually gone (not merely appended alongside)" \
+    bash -c '! printf "%s" "$1" | grep -q "workspace-write"' -- "$_S118_A"
+check "§118(3) the REST of the file survives the repair (config.toml is documented as user-editable)" \
+    bash -c 'printf "%s" "$1" | grep -q "^model = \"gpt-5.5\"$" && printf "%s" "$1" | grep -q "hide_full_access_warning"' -- "$_S118_A"
+check "§118(4) the repair is announced, not silent" \
+    bash -c 'printf "%s" "$1" | grep -q "^WARN$"' -- "$_S118_A"
+
+_S118_OK='model = "x"
+sandbox_mode = "danger-full-access"
+
+[notice]
+a = 1
+'
+_S118_B="$(_s118_run "$_S118_OK")"
+check "§118(5) an already-correct file is left byte-identical (no churn, no warning)" \
+    bash -c '[ "$(printf %s "$1")" = "$(printf %s "$2")" ]' -- "$_S118_B" "$_S118_OK"
+
+_S118_PROF='model = "x"
+
+[profiles.tight]
+sandbox_mode = "read-only"
+'
+_S118_C="$(_s118_run "$_S118_PROF")"
+check "§118(6) a PROFILE-scoped sandbox_mode is deliberately left alone (it applies only when selected)" \
+    bash -c '[ "$(printf %s "$1")" = "$(printf %s "$2")" ]' -- "$_S118_C" "$_S118_PROF"
+
+_S118_D="$(_s118_run 'sandbox_mode = "read-only"
+
+[profiles.tight]
+sandbox_mode = "read-only"
+')"
+check "§118(7) with both, ONLY the top-level one is rewritten" \
+    bash -c 'printf "%s" "$1" | grep -q "^sandbox_mode = \"danger-full-access\"$" && printf "%s" "$1" | grep -q "^sandbox_mode = \"read-only\"$"' -- "$_S118_D"
+
+# ============================================================
+# WHY. The Summary block below used to sit in the MIDDLE of this file: sections
+# appended afterwards ran, counted, and then nothing printed a final tally. A
+# real maintainer run ended with "2/1253 tests failed:" printed before §104 and
+# no totals at all after §114 -- the suite still exited 1, so CI was correct,
+# but a human reading the tail could not see how many checks had run. Assert the
+# ORDERING so a section appended after the summary fails the build instead of
+# silently truncating the report.
+_S115_SELF="$(cd "$(dirname "$0")" && pwd)/run-tests.sh"
+_S115_SUMMARY_LINE="$(grep -n '^# BEGIN SUMMARY$' "$_S115_SELF" | cut -d: -f1)"
+_S115_LAST_SECTION="$(grep -n '^echo "§' "$_S115_SELF" | tail -1 | cut -d: -f1)"
+check "§115(1) the summary carries its BEGIN SUMMARY sentinel (mutation: renaming it empties the line numbers below and must fail HERE, not silently pass)" \
+    bash -c '[ -n "$1" ]' -- "$_S115_SUMMARY_LINE"
+check "§115(2) no section header appears AFTER the summary block (mutation: append an `echo \"§116: ...\"` line below the summary -> this fails)" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$2" -lt "$1" ]' -- "$_S115_SUMMARY_LINE" "$_S115_LAST_SECTION"
+check "§115(3) exactly one summary block exists (mutation: a second copy would print two conflicting tallies)" \
+    bash -c '[ "$(grep -c "^# BEGIN SUMMARY\$" "$1")" -eq 1 ]' -- "$_S115_SELF"
+unset _S115_SELF _S115_SUMMARY_LINE _S115_LAST_SECTION
+
+# BEGIN SUMMARY
+# ============================================================
+# Summary
+# ============================================================
+COMPLETED=true   # suppress the early-abort message in the EXIT trap
+echo ""
+TOTAL=$((PASS + FAIL))
+if [ "$FAIL" -eq 0 ]; then
+    printf "\033[0;32mAll %d tests passed.\033[0m\n" "$TOTAL"
+else
+    printf "\033[0;31m%d/%d tests failed:\033[0m\n" "$FAIL" "$TOTAL"
+    for e in "${ERRORS[@]}"; do
+        printf "  \033[0;31m- %s\033[0m\n" "$e"
+    done
+fi
+# END SUMMARY
+
+echo ""
 _run_provenance   # timestamp + commit + tree state, so a result you scroll back
                   # to after a context switch says which build produced it.
+[ "$SKIPPED" -eq 0 ] || printf "\033[0;33m%d check group(s) skipped for missing host tools (node/jq/flock) -- see the '– skipped:' lines above; those assertions did NOT run here.\033[0m\n" "$SKIPPED"
 [ "$FAIL" -eq 0 ] || exit 1

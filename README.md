@@ -218,7 +218,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_ALLOW_WORKFLOW_EDIT` | `0` | `1` = drop `.github/workflows/` from the read-only protected set (for legitimate CI work). Weakens protection, so a workspace `.sandy/config` setting it triggers an approval prompt |
 | `SANDY_EGRESS_LOG` | `0` | `1`/`summary` = log which hosts the agent's egress actually reached (each distinct allowed `host:port` once) and print a session-end summary. Hostnames only — TLS is never terminated. Passive-safe (adds visibility) |
 | `SANDY_TOOL_AUDIT` | `0` | `1` = seed a Claude Code `PreToolUse` hook that appends `{ts,tool,args}` JSONL to `~/.claude/tool-audit.jsonl`. Claude-only, passive-safe (adds visibility); a user's own `PreToolUse` hook is never clobbered |
-| `SANDY_HANDOFF_DIRS` | `0` | `1` = create/mount the per-sandbox `~/.handoff/{outbox,inbox}` pair (inbox `:ro`). Substrate only — nothing moves files yet. Passive-safe. See "Handoff directories" |
+| `SANDY_HANDOFF_DIRS` | `1` | Mount the per-sandbox handoff tree `~/.handoff/{outbox,inbox,peer,relay}` (inbox and peer `:ro`). **On by default since 1.10.0**; `0` opts a host or workspace out. Substrate only — sandy moves no files; a privileged `SANDY_HANDOFF_RELAY` is what moves them. Passive-safe. See "Handoff directories" |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth) |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max output tokens per response (Claude Code default is 32K) |
@@ -408,7 +408,16 @@ No default — leaving `SANDY_SCREENSHOT_DIR` unset disables the feature entirel
 
 ### Handoff directories (`SANDY_HANDOFF_DIRS`)
 
-Set `SANDY_HANDOFF_DIRS=1` (passive-safe, default `0`) to **mount** the per-sandbox handoff pair into the container: `~/.handoff/outbox` (read-write, for the agent to stage outgoing files) and `~/.handoff/inbox` (**read-only** — only the host can place files there). The host-side directories are created on **every** launch regardless of the flag (as of 1.7.0, so directory presence carries no information); the flag — or an operator-side `$SANDBOX_DIR/.handoff-enabled` marker file, which a cloned repo can't carry — is what gates the mount. This is directory/mount substrate only: there's no relay, helper, skill, or peer mechanism yet to actually move files between workspaces, so today they stay empty until you put something in them yourself. See `CLAUDE.md` for the full rationale.
+**Every sandbox gets the handoff tree by default** (since 1.10.0; it was opt-in before). On every launch sandy creates and mounts, idempotently:
+
+| in-container | host | mode |
+|---|---|---|
+| `~/.handoff/outbox` | `$SANDBOX_DIR/handoff/outbox` | read-write — the agent stages outgoing files here |
+| `~/.handoff/inbox` | `$SANDBOX_DIR/handoff/inbox` | **read-only** — only the host can place files here |
+| `~/.handoff/peer` | `$SANDBOX_DIR/handoff/peer` | **read-only** — a second host-written inbound directory |
+| `~/.handoff/relay` | `$SANDBOX_DIR/handoff/relay` | read-write — relay state and `supervisor.log` |
+
+Set `SANDY_HANDOFF_DIRS=0` (passive-safe, same tiers as any other passive key: env, `~/.sandy/config`, or a workspace `.sandy/config`) to opt out: nothing is mounted and `~/.handoff` does not exist inside the container. The directories are only substrate — a directory confers no reach on its own. Nothing lands in `inbox`/`peer` unless something on the host writes there, and nothing leaves `outbox` unless something on the host reads it; the thing that actually moves files is a **privileged** `SANDY_HANDOFF_RELAY`, which stays off unless an operator sets it (see `CLAUDE.md`). The host-side directories exist for every sandbox regardless of the setting, so directory presence carries no information: to check whether a sandbox has the tree, check the **mounts** (`docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' <container>`, or `test -d ~/.handoff/inbox` inside). An operator-side `$SANDBOX_DIR/.handoff-enabled` marker file, which a cloned repo cannot carry, forces the tree **on** for one sandbox even when a config opts out — handy for "off everywhere except these". See `CLAUDE.md` for the full rationale.
 
 ## How Network Isolation Works
 
