@@ -944,7 +944,22 @@ Sandy now copies the host's `auth.json` into `$SANDBOX_DIR/codex/auth.json` (mod
 
 **The api_key path keeps the read-only overlay.** Its `auth.json` is synthesized from `OPENAI_API_KEY`, which is re-supplied on every launch, so there is nothing an in-container write could usefully persist — and keeping it read-only stops the agent substituting a credential of its own mid-session. In-container `codex login` is consequently still refused on that path; the launch line says so and names the two ways out (unset the key, or set `SANDY_CODEX_AUTH=oauth`).
 
-**Note**: `codex login` (browser OAuth) must be run **on the host** — the container is headless and cannot open a browser.
+**In-container login: use `codex login --device-auth`.** The plain `codex login` starts a **local** callback server (`DEFAULT_ISSUER = https://auth.openai.com`, `DEFAULT_PORT = 1455`, fallback `1457`) and expects the browser to redirect to `http://localhost:<port>`. Inside sandy that can never complete: the port is bound in the *container*, so a browser on the host redirects to the *host's* localhost, and under the egress proxy the agent sits on an `--internal` sidecar with no inbound path at all. Codex itself names the fix in that flow's own output — *"On a remote or headless machine? Use `codex login --device-auth` instead."*
+
+The device flow has no callback and binds no port: codex prints a URL (`<issuer>/codex/device`) and a user code, you open it on any machine, and codex **polls** for the token. It therefore works unchanged in the sandbox, and — since the OAuth path is seeded read-write rather than overlaid `:ro` (above) — the resulting `auth.json` persists in `$SANDBOX_DIR/codex/` and wins over the host copy on later launches.
+
+```sh
+# workspace .sandy/config, or simply leave OPENAI_API_KEY unset:
+SANDY_CODEX_AUTH=oauth
+# then, inside the container:
+codex login --device-auth
+```
+
+**Precondition, and it is the usual trip-up:** with `OPENAI_API_KEY` set, `auto` selects the **api_key** path, whose `auth.json` is a read-only overlay — `codex login` is refused there by design (previous paragraph). Unset the key or pin `SANDY_CODEX_AUTH=oauth`.
+
+**Egress**: the device flow is outbound-only to `auth.openai.com`, already covered by the `*.openai.com` entry in `SANDY_DEFAULT_ALLOW_HOSTS`, so it works in **strict** mode with no added host. (`chatgpt.com` is *not* in the default allowlist — irrelevant to the device flow, but a candidate if some other codex sign-in path is ever needed.)
+
+**Provenance**: the flag, the issuer, and the port were read from the codex source (`codex-rs/cli/src/main.rs`, `codex-rs/login/src/{server,device_code_auth}.rs`) at `main`, not from a pinned release — sandy tracks codex at floating-latest, so confirm with `codex login --help` if a build ever disagrees.
 
 ---
 
