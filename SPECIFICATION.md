@@ -341,7 +341,7 @@ At container launch, `<NAME>/claude` is bind-mounted rw at `/home/claude/.claude
 
 Whenever `gemini` is in `SANDY_AGENT`, sandy creates `gemini/` and its `commands/`, `extensions/`, `tmp/` subdirs. Gemini settings.json is not seeded from the host (Gemini has no direct host-settings equivalent for sandy to copy).
 
-For `SANDY_AGENT=codex`, sandy creates `codex/` and seeds `codex/config.toml` (first run only) with:
+For `SANDY_AGENT=codex`, sandy creates `codex/` and seeds `codex/config.toml` (first run only; the top-level `sandbox_mode` is then value-checked and repaired on every launch — see C.7b) with:
 
 ```toml
 model = "gpt-5.5"
@@ -2043,6 +2043,17 @@ hide_world_writable_warning = true
 ```
 
 The file is created exactly once per sandbox — re-runs preserve user edits. The `[notice]` list may grow upstream; sandy seeds all five documented keys as cheap insurance. Source-of-truth reference: `codex-rs/core/src/config.rs` in the openai/codex repository.
+
+**`sandbox_mode` is additionally repaired by VALUE on every launch.** Creation is first-run only and its gate greps for the *key* `sandbox_mode`, so a file containing `sandbox_mode = "workspace-write"` satisfies that gate and would never be corrected. The gap became reachable when the codex directory went read-write (#238): the user — or codex itself — can edit `config.toml` in-session and the edit persists into every later launch. A non-full-access mode makes codex initialize its own Landlock sandbox **inside** sandy's container, which does not nest; commands then fail to spawn and codex falls back to its approval path, a symptom that reads like a sandy fault and is not one.
+
+So each launch re-reads the file and, if the **top-level** `sandbox_mode` is present and is not `danger-full-access`, rewrites that one line and warns, naming the value it found. The repair is deliberately narrow, because this file is documented as user-editable:
+
+- exactly one line is rewritten; everything else — `model`, `[notice]`, `[projects]`, any user additions — is preserved byte for byte;
+- an already-correct file is left byte-identical, with no warning and no churn;
+- a **profile-scoped** `sandbox_mode` (under a `[profiles.…]` header) is left alone: it applies only when that profile is selected, and silently rewriting a user's profile is a larger liberty than this repair is entitled to take;
+- if the rewrite cannot be completed the original is kept and the failure is warned, rather than leaving a half-written config.
+
+Guarded by `run-tests.sh §118`.
 
 After the first session start, the file additionally contains the trust entry:
 

@@ -12045,6 +12045,80 @@ check "§117(5) --print-schema probe_order puts host_credentials_file ahead of A
     bash -c '"$1" --print-schema 2>/dev/null | tr -d " \n" | grep -q "\"probe_order\":\[\"CLAUDE_CODE_OAUTH_TOKEN\",\"host_credentials_file\",\"ANTHROPIC_API_KEY\"\]"' -- "$SANDY_SCRIPT"
 
 # ============================================================
+echo "§118: codex config.toml sandbox_mode is repaired by VALUE, not just key presence"
+# ============================================================
+# WHY. The seed block above is first-run only and its gate greps for the KEY
+# `sandbox_mode`, so a file containing sandbox_mode = "workspace-write" satisfies
+# it and is never corrected. That gap became reachable when the codex dir went
+# read-write (#238): the user -- or codex itself -- can edit config.toml
+# in-session and the edit persists into every later launch. A non-full-access
+# mode makes codex try to initialize its Landlock sandbox INSIDE sandy's
+# container, which does not nest; commands fail to spawn and codex falls back to
+# its approval path, which reads like a sandy fault and is not one.
+#
+# The repair must be surgical: config.toml is documented as safe to edit, so it
+# rewrites ONE top-level line and leaves everything else -- including a
+# profile-scoped sandbox_mode, which only applies when that profile is selected.
+_S118_FN="$(awk '/# VALUE-AWARE REPAIR, not merely key-presence/,/^    fi$/' "$SANDY_SCRIPT")"
+check "§118(pre) extracted the repair block, and it is evaluable shell (mutation: a reword or reindent fails HERE, not silently below)" \
+    bash -c 'printf "%s" "$1" | grep -q "danger-full-access" && printf "%s" "$1" | bash -n' -- "$_S118_FN"
+
+# $1 = config.toml content. Echoes the resulting file, then a WARN line if any.
+_s118_run() {
+    local d; d="$(mktemp -d)"; mkdir -p "$d/codex"
+    printf '%s' "$1" > "$d/codex/config.toml"
+    SANDBOX_DIR="$d" S118_FN="$_S118_FN" bash -c '
+        set -uo pipefail
+        warn() { printf "WARN\n"; }
+        eval "$S118_FN"
+    ' 2>/dev/null
+    cat "$d/codex/config.toml"
+    rm -rf "$d"
+}
+
+_S118_A="$(_s118_run 'model = "gpt-5.5"
+sandbox_mode = "workspace-write"
+
+[notice]
+hide_full_access_warning = true
+')"
+check "§118(1) a wrong TOP-LEVEL sandbox_mode is corrected to danger-full-access" \
+    bash -c 'printf "%s" "$1" | grep -q "^sandbox_mode = \"danger-full-access\"$"' -- "$_S118_A"
+check "§118(2) the wrong value is actually gone (not merely appended alongside)" \
+    bash -c '! printf "%s" "$1" | grep -q "workspace-write"' -- "$_S118_A"
+check "§118(3) the REST of the file survives the repair (config.toml is documented as user-editable)" \
+    bash -c 'printf "%s" "$1" | grep -q "^model = \"gpt-5.5\"$" && printf "%s" "$1" | grep -q "hide_full_access_warning"' -- "$_S118_A"
+check "§118(4) the repair is announced, not silent" \
+    bash -c 'printf "%s" "$1" | grep -q "^WARN$"' -- "$_S118_A"
+
+_S118_OK='model = "x"
+sandbox_mode = "danger-full-access"
+
+[notice]
+a = 1
+'
+_S118_B="$(_s118_run "$_S118_OK")"
+check "§118(5) an already-correct file is left byte-identical (no churn, no warning)" \
+    bash -c '[ "$(printf %s "$1")" = "$(printf %s "$2")" ]' -- "$_S118_B" "$_S118_OK"
+
+_S118_PROF='model = "x"
+
+[profiles.tight]
+sandbox_mode = "read-only"
+'
+_S118_C="$(_s118_run "$_S118_PROF")"
+check "§118(6) a PROFILE-scoped sandbox_mode is deliberately left alone (it applies only when selected)" \
+    bash -c '[ "$(printf %s "$1")" = "$(printf %s "$2")" ]' -- "$_S118_C" "$_S118_PROF"
+
+_S118_D="$(_s118_run 'sandbox_mode = "read-only"
+
+[profiles.tight]
+sandbox_mode = "read-only"
+')"
+check "§118(7) with both, ONLY the top-level one is rewritten" \
+    bash -c 'printf "%s" "$1" | grep -q "^sandbox_mode = \"danger-full-access\"$" && printf "%s" "$1" | grep -q "^sandbox_mode = \"read-only\"$"' -- "$_S118_D"
+
+# ============================================================
 # WHY. The Summary block below used to sit in the MIDDLE of this file: sections
 # appended afterwards ran, counted, and then nothing printed a final tally. A
 # real maintainer run ended with "2/1253 tests failed:" printed before §104 and
