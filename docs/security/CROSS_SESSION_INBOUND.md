@@ -112,6 +112,21 @@ This was a latent bug, not the cause of the failure: `authRequired` defaults to 
 
 **Correction 3 — the reply address was unshaped.** `"from": "uds:/tmp/cc-socks/detached-<pid>.sock"` fails the receiver's reply-address check (basename must match `^(\d+(-[0-9a-f]{8})?|[0-9a-f]{1,16})\.sock$` inside a recognized `cc-socks` directory), which logs `hold-receipt skipped: reply address unshaped` and renders the sender as `from=unknown`. Harmless under `accept` (the receipt channel is silent anyway, §6) but it suppressed the receipt that makes the `hold` case legible. Now shaped.
 
+**The two cases the acceptance script does not yet cover, measured by hand on 2.1.263.** Both were open items in the release runbook; the script still runs only `accept` and `refuse`.
+
+- **Non-bypass receiver + `accept` → DELIVERED.** `[uds-messaging] Routed user message to queue`, no hold, no refuse, no receipt. Run twice: once with `permissions.defaultMode: "default"`, and once with the key **absent**, which is what sandy actually produces for `SANDY_SKIP_PERMISSIONS=false` (it *deletes* `defaultMode` rather than setting `"default"`). Identical outcome. So the receiver's permission mode does not change the result once `crossSessionInbound` is explicit — the same precedence §6 cases I–L found for the sender's envelope. The mode-sensitive hold causes (`bypass-default`, `mode-mismatch`, `mode-unknown`, `no-mode-asserted`) are reachable only when the setting is **unset**, which sandy never leaves it.
+- **`refuse` STALLS the inbound connection; the refusal arrives out of band.** The sender's connection is **not closed** — no bytes, still open at 40s (the 30s first-line deadline does not apply once complete lines have been sent). ~1ms after the send, a receipt is delivered to the socket named in the frame's `from`:
+
+  ```json
+  {"type":"control","action":"peer_message_status","status":"expired","status_detail":"refused",
+   "reason":"The recipient session is not accepting cross-session messages (the feature is off there,
+             or a setting or policy there refuses them); your message was not delivered to its Claude."}
+  ```
+
+  **This is the operationally important half, and it decides a relay's design:** receipts are delivered by the receiver *connecting outward* to the sender's `from` address — they never come back on the inbound connection. A sender that does not **bind an actually-listening socket at a well-shaped `from`** cannot observe a refusal at all and sees only a hang, making `refuse` indistinguishable from a dead receiver or a lost frame. A relay must therefore bind its reply socket before it sends, or treat every non-delivery as an ambiguous timeout. (`accept` remains silent on both channels — §6 residual 4 — so the receipt channel distinguishes *refused* from *delivered*, not *delivered* from *dropped*.) Confirms the 2.1.251 case-J/K result reproduces on 2.1.263.
+
+  Note the harness's own injector does **not** bind a reply socket, which is why its refuse case reports `recv: none (TimeoutError)`. That is correct and harmless there — the harness asserts on the receiver's logged decision, not on a receipt — but it means the harness cannot be used as a model for a relay's sender.
+
 **What this does NOT close, stated so nobody rounds up.** This rig is still **not a real `sandy --start` launch** — same limitation §6 ends on. It writes `~/.claude/settings.json` directly in a scratch `HOME`; it does not exercise sandy's settings *seeding* (statusLine, hooks, marketplace entries, the `permissions.defaultMode` pin merged into the same file), the `$SANDBOX_DIR/claude` bind mount, the relay, or the daemon container. It confirms the **frame, the token semantics, the three decisions, and the log signatures** on 2.1.263 — which is exactly what the acceptance harness needed to stop being unfalsifiable — and it leaves "sandy's own seeded file, under a real launch" to `test/acceptance-uds-delivery.sh` on a Docker host. Also unmeasured here: a non-`bypassPermissions` receiver, the policy/managed layer, and the `<cross-session-message>` envelope against 2.1.263 (§6 case G was 2.1.251 and the envelope regex was not re-read this pass).
 
 ## 7. Test evidence map
