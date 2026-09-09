@@ -8988,6 +8988,45 @@ hide_world_writable_warning = true
 CODEX_TOML
         info "  Seeded .codex/config.toml"
     fi
+    # VALUE-AWARE REPAIR, not merely key-presence. The seed above is first-run
+    # only and its gate greps for the KEY `sandbox_mode`, so a file containing
+    # sandbox_mode = "workspace-write" satisfies it and is left alone forever.
+    # That gap became reachable when the codex dir went read-write (#238): the
+    # user -- or codex itself -- can now edit config.toml in-session and the edit
+    # persists into every later launch. A non-full-access mode makes codex try to
+    # initialize its Landlock sandbox INSIDE sandy container, which does not nest:
+    # commands fail to spawn and codex falls back to its approval path, which
+    # reads like a sandy fault and is not one.
+    # Scope: the TOP-LEVEL table only (lines before the first [section] header).
+    # A profile-scoped sandbox_mode is deliberately left alone -- it applies only
+    # when that profile is selected, and silently rewriting a user's profile is a
+    # bigger liberty than this repair is entitled to take.
+    if [ -f "$SANDBOX_DIR/codex/config.toml" ]; then
+        _codex_sbx_line="$(awk '/^[[:space:]]*\[/{exit} /^[[:space:]]*sandbox_mode[[:space:]]*=/{print; exit}' \
+                           "$SANDBOX_DIR/codex/config.toml" 2>/dev/null || true)"
+        case "$_codex_sbx_line" in
+            *danger-full-access*) : ;;   # correct, nothing to do
+            "")                   : ;;   # absent at top level; the seed gate owns that case
+            *)
+                if awk '
+                        /^[[:space:]]*\[/ { sec = 1 }
+                        {
+                            if (!sec && !done && $0 ~ /^[[:space:]]*sandbox_mode[[:space:]]*=/) {
+                                print "sandbox_mode = \"danger-full-access\""; done = 1; next
+                            }
+                            print
+                        }
+                    ' "$SANDBOX_DIR/codex/config.toml" > "$SANDBOX_DIR/codex/config.toml.new" 2>/dev/null \
+                   && mv "$SANDBOX_DIR/codex/config.toml.new" "$SANDBOX_DIR/codex/config.toml"; then
+                    warn "Repaired .codex/config.toml: top-level sandbox_mode was not \"danger-full-access\" (found: ${_codex_sbx_line# }). Codex's own sandbox does not nest inside sandy's container; the rest of your config is untouched."
+                else
+                    rm -f "$SANDBOX_DIR/codex/config.toml.new" 2>/dev/null || true
+                    warn "Could not repair .codex/config.toml (top-level sandbox_mode is not \"danger-full-access\"). Codex may fail to spawn commands inside the container; fix it by hand or delete the file to reseed."
+                fi
+                ;;
+        esac
+        unset _codex_sbx_line
+    fi
     # One-shot model migration: bump existing sandboxes from the old default
     # (gpt-5.4) to the current default (gpt-5.5). Only updates the exact
     # previous default string — any user-customized model is left alone.
