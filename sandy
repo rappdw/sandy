@@ -96,6 +96,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_OPENCODE_AUTH
     GROK_MODEL
     SANDY_GROK_AUTH
+    SANDY_CLAUDE_AUTH
     SANDY_TOOL_AUDIT
     SANDY_CLAUDE_CONNECTORS
     SANDY_SUSPICIOUS
@@ -144,6 +145,7 @@ _sandy_passive_value_privileged() {
         SANDY_CLAUDE_CONNECTORS)   [ "$2" = "1" ] && return 0 ;;  # exposes claude.ai ACCOUNT connectors (Gmail/Drive)
         SANDY_SUSPICIOUS)          [ "$2" = "0" ] && return 0 ;;  # downgrades a host-set hardened posture
         SANDY_CROSS_SESSION_INBOUND) [ "$2" = "accept" ] && return 0 ;;  # lets any same-uid process inject a turn
+        SANDY_CLAUDE_AUTH)         [ "$2" = "oauth" ] && return 0 ;;  # forces the ACCOUNT OAuth credential in even when a revocable API key is present
     esac
     return 1
 }
@@ -790,6 +792,7 @@ OPENCODE_MODEL|string|||0.12.0|stable|OpenCode model override (provider/model fo
 SANDY_OPENCODE_AUTH|enum:auto,api_key,oauth|auto||0.12.0|stable|OpenCode credential probe strategy.
 GROK_MODEL|string|||1.5.0|stable|Grok Build model override (passed as -m; default grok-4.5).
 SANDY_GROK_AUTH|enum:auto,api_key,oauth|auto||1.5.0|stable|Grok Build credential probe strategy.
+SANDY_CLAUDE_AUTH|enum:auto,api_key,oauth|auto||1.10.0|stable|Claude Code credential selection. auto (default): a long-lived CLAUDE_CODE_OAUTH_TOKEN wins, else the host OAuth credentials file is mounted and ANTHROPIC_API_KEY is SUPPRESSED (Claude Code resolves an env key ahead of the account credentials, so forwarding both either bills per-use or parks the session on the custom-API-key startup modal). api_key: forward ANTHROPIC_API_KEY and do NOT mount OAuth credentials -- a revocable project key instead of the account refresh token, and the only way to choose per-use billing on a host that has OAuth. oauth: mount OAuth and never forward the API key. Value-aware tier: api_key and auto are passive-safe (api_key REDUCES what is in the container), while oauth from a workspace is approval-gated because it forces the account-scoped credential in even when a revocable key is available.
 TELEGRAM_BOT_TOKEN|secret|||0.7.6|stable|Telegram bot token for the channel relay.
 TELEGRAM_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Telegram user IDs allowed to send messages.
 DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
@@ -10950,6 +10953,43 @@ else
         fi
     fi
 
+    # --- SANDY_CLAUDE_AUTH: make the choice EXPLICIT instead of inferring it
+    # from which credentials happen to exist. Sandy suppresses ANTHROPIC_API_KEY
+    # whenever an OAuth credential reaches the container (Claude Code resolves an
+    # env key ahead of the account credentials, so forwarding both either bills
+    # per-use or parks the session on the custom-API-key startup modal). That is
+    # the right default, but on its own it leaves NO way to say "use the API key
+    # for this workspace" on a host that has OAuth -- the only escape was
+    # SANDY_SUSPICIOUS=1, which also strips the refresh token, forces connectors
+    # off and defaults egress to strict: a package deal, not a billing choice.
+    # `api_key` is that missing knob. It is the same shape every other agent
+    # already has (SANDY_CODEX_AUTH / _GEMINI_ / _OPENCODE_ / _GROK_).
+    _claude_auth="${SANDY_CLAUDE_AUTH:-auto}"
+    case "$_claude_auth" in
+        auto|api_key|oauth) : ;;
+        *)  warn "SANDY_CLAUDE_AUTH=$_claude_auth is not one of auto|api_key|oauth; using auto."
+            _claude_auth=auto ;;
+    esac
+    if [ "$_claude_auth" = api_key ]; then
+        if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            # Do not mount the account credential at all: the point of this mode
+            # is that a revocable project key is the ONLY Claude credential in
+            # the box. Mirrors SANDY_SUSPICIOUS disposable-key compartmentalization,
+            # without that posture's other four effects.
+            if [ -n "$CRED_JSON" ]; then
+                info "SANDY_CLAUDE_AUTH=api_key — using ANTHROPIC_API_KEY; host OAuth credentials are NOT mounted."
+                CRED_JSON=""
+            fi
+        else
+            # Fail loudly rather than silently falling back to the account
+            # credential: a workspace that asked for key-only billing and got
+            # account OAuth instead is exactly the surprise this knob exists to
+            # prevent.
+            warn "SANDY_CLAUDE_AUTH=api_key but ANTHROPIC_API_KEY is not set; falling back to auto (OAuth). Set the key in ~/.sandy/.secrets, or remove the setting."
+            _claude_auth=auto
+        fi
+    fi
+
     # --- #130: credential posture. This is the SINGLE site every branch above
     # funnels through before anything is mounted — including the long-lived-
     # token branch, which still mounts the full file for cloud features — so
@@ -11792,12 +11832,25 @@ if _sandy_agent_has claude; then
     # documented preference is OAuth-first (see the claude credential probe order in
     # --print-schema), so when a long-lived OAuth token (`claude setup-token`) is
     # explicitly configured we forward ONLY the token and suppress ANTHROPIC_API_KEY.
-    if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    if [ "${_claude_auth:-auto}" = api_key ]; then
+        # EXPLICIT key-only. The OAuth credentials file was already withheld
+        # where CRED_JSON is resolved, so this is the whole credential story for
+        # the container: one revocable key, no account refresh token. A
+        # long-lived CLAUDE_CODE_OAUTH_TOKEN is suppressed here too -- it would
+        # otherwise be a second Claude credential in the box, which is exactly
+        # what this mode exists to avoid (and it is not shrunk by SANDY_SUSPICIOUS
+        # either, so leaving it in would be the larger of the two credentials).
+        if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+            info "SANDY_CLAUDE_AUTH=api_key — not forwarding CLAUDE_CODE_OAUTH_TOKEN; ANTHROPIC_API_KEY is the only Claude credential in the container."
+        fi
+        _sandy_add_secret_env ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
+        RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=")
+    elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
         if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-            warn "CLAUDE_CODE_OAUTH_TOKEN is set; not forwarding ANTHROPIC_API_KEY (it would take precedence in Claude Code and bill per-use). Unset the token to use the API key instead."
+            warn "CLAUDE_CODE_OAUTH_TOKEN is set; not forwarding ANTHROPIC_API_KEY (it would take precedence in Claude Code and bill per-use). Unset the token, or set SANDY_CLAUDE_AUTH=api_key, to use the API key instead."
         fi
         _sandy_add_secret_env CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"
-    elif [ -n "${ANTHROPIC_API_KEY:-}" ] && [ -n "${CRED_TMPDIR:-}" ]; then
+    elif [ -n "${ANTHROPIC_API_KEY:-}" ] && { [ -n "${CRED_TMPDIR:-}" ] || [ "${_claude_auth:-auto}" = oauth ]; }; then
         # Same precedence problem one level down: the host OAuth credentials file
         # IS being mounted this launch (CRED_TMPDIR is set only then), and Claude
         # Code resolves an environment API key ahead of the account credentials.
@@ -11814,7 +11867,7 @@ if _sandy_agent_has claude; then
         # NOTE the deliberate gaps: SANDY_SUSPICIOUS disposable-key mode and the
         # strip-fail fallback both clear CRED_JSON, so CRED_TMPDIR is empty there
         # and the key still forwards -- which is exactly what those postures want.
-        info "Host OAuth credentials are mounted; not forwarding ANTHROPIC_API_KEY (Claude Code resolves it ahead of the account credentials, and an unapproved key parks the session on the custom-API-key modal). Set SANDY_SUSPICIOUS=1, or remove the host credentials, to use the API key instead."
+        info "Not forwarding ANTHROPIC_API_KEY: Claude Code resolves it ahead of the account credentials, and an unapproved key parks the session on the custom-API-key modal. Set SANDY_CLAUDE_AUTH=api_key to use the key instead."
         RUN_FLAGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=")
     else
         # No OAuth token configured and no OAuth file mounted: forward the API key
