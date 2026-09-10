@@ -12502,6 +12502,37 @@ check "§121(3) the sibling MAX_OUTPUT_TOKENS forwarding is unaffected" \
 check "§121(4) the key is PASSIVE (a model ID is not a capability)" \
     bash -c 'awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)/" "$1" | grep -qx "    CLAUDE_CODE_SUBAGENT_MODEL"' -- "$SANDY_SCRIPT"
 
+# The config parser does NOT strip inline comments: `KEY=v   # note` yields the
+# literal "v   # note". SANDY_MODEL has rejected that for years; this key shipped
+# without the check, so a copy-pasted line with a trailing comment silently
+# mis-pinned the fan-out. Driven through the REAL extracted validation block --
+# the introspection flags are fast-path handlers that exit long before it, so a
+# `sandy --print-version` probe would pass vacuously no matter what the code did.
+_S121_VBLK="$(awk '/^# Same validation for the SUBAGENT model/,/^fi$/' "$SANDY_SCRIPT")"
+check "§121(5pre) extracted the validation block (mutation: a reword fails HERE, not vacuously below)" \
+    bash -c 'printf "%s" "$1" | grep -q "Invalid CLAUDE_CODE_SUBAGENT_MODEL" && printf "%s" "$1" | bash -n' -- "$_S121_VBLK"
+
+_s121_validate() {   # $1 = value -> "rc=<n> <stderr>"
+    S121_VBLK="$_S121_VBLK" CLAUDE_CODE_SUBAGENT_MODEL="$1" bash -c '
+        set -u
+        error() { printf "%s\n" "$*" >&2; }
+        rc=0
+        # SUBSHELL: the block ends in `exit 1`, which would otherwise take this
+        # probe shell with it and the rc line would never print.
+        ( eval "$S121_VBLK" ) 2>&1 || rc=$?
+        printf "rc=%s\n" "$rc"
+    ' 2>&1
+}
+_S121_BAD="$(trap - ERR; _s121_validate "claude-mythos-5-1   # new")"
+check "§121(5) a value carrying an inline comment is REJECTED (exit 1), naming the comment trap" \
+    bash -c 'printf "%s" "$1" | grep -q "^rc=1$" && printf "%s" "$1" | grep -q "Invalid CLAUDE_CODE_SUBAGENT_MODEL" && printf "%s" "$1" | grep -q "inline comments"' -- "$_S121_BAD"
+_S121_OK="$(trap - ERR; _s121_validate claude-mythos-5-1)"
+check "§121(6) a legitimate model ID is accepted (rc=0, no error)" \
+    bash -c 'printf "%s" "$1" | grep -q "^rc=0$" && ! printf "%s" "$1" | grep -q Invalid' -- "$_S121_OK"
+_S121_EMPTY="$(trap - ERR; _s121_validate "")"
+check "§121(7) unset/empty is accepted — the key is optional, not required" \
+    bash -c 'printf "%s" "$1" | grep -q "^rc=0$"' -- "$_S121_EMPTY"
+
 # ============================================================
 # WHY. The Summary block below used to sit in the MIDDLE of this file: sections
 # appended afterwards ran, counted, and then nothing printed a final tally. A
