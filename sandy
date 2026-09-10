@@ -3906,7 +3906,13 @@ if [[ "${1:-}" == "--exec" ]]; then
         exit 0
     fi
 
-    [ "$SANDY_VERBOSE" -ge 1 ] && info "exec into ${_ex_container:0:12} as ${_ex_uid}:${_ex_gid} (cwd $_ex_cwd)"
+    # ${SANDY_VERBOSE:-0}, NOT $SANDY_VERBOSE: this dispatcher runs ~400 lines
+    # before SANDY_VERBOSE is initialised, so under `set -u` a bare reference is
+    # an unbound-variable abort (exit 1) on any host that does not already export
+    # it. It only looked fine from inside a sandy container, which exports
+    # SANDY_VERBOSE=0 -- an environment leak that hid the bug locally until CI's
+    # clean env caught it. Every early dispatcher has this hazard.
+    [ "${SANDY_VERBOSE:-0}" -ge 1 ] && info "exec into ${_ex_container:0:12} as ${_ex_uid}:${_ex_gid} (cwd $_ex_cwd)"
     # Pass through the command's own exit status; `|| rc=$?` because set -e
     # would otherwise swallow a non-zero command result before we can return it.
     _ex_rc=0

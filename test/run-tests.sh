@@ -12342,7 +12342,13 @@ chmod +x "$_S120_DIR/bin/docker"
 # call, and that differs by bash minor: it worked on 5.2.37 locally and did not
 # on CI's 5.2.21, so §120(12) failed only in CI. Naming them here makes the
 # plumbing version-independent.
+# `env -u SANDY_VERBOSE`: the section must exercise a CLEAN environment. --exec
+# dispatches ~400 lines before SANDY_VERBOSE is initialised, so a bare reference
+# is an unbound-variable abort under `set -u` -- invisible from inside a sandy
+# container, which exports SANDY_VERBOSE=0. Running these checks in the ambient
+# environment is what let that ship; CI's clean env is the honest one.
 _s120_run() {
+    env -u SANDY_VERBOSE \
     PATH="$_S120_DIR/bin:$PATH" HOME="$_S120_DIR/home" S120_DIR="$_S120_DIR" \
     S120_DAEMON="${S120_DAEMON:-}" S120_FOREGROUND="${S120_FOREGROUND:-}" S120_RC="${S120_RC:-0}" \
         bash "$SANDY_SCRIPT" --exec --workspace "$_S120_DIR/home/ws" "$@" 2>&1
@@ -12418,6 +12424,12 @@ check "§120(13) the REAL exec argv carries the numeric uid:gid (not just the --
     bash -c 'printf "%s" "$1" | grep -q "^ARGV:" && printf "%s" "$1" | grep -q -- "-u $(id -u):$(id -g) " && ! printf "%s" "$1" | grep -q -- "-u claude"' -- "$_S120_REAL"
 check "§120(14) the REAL exec argv carries -w and -e HOME too" \
     bash -c 'printf "%s" "$1" | grep -q -- "-w /home/claude/ws " && printf "%s" "$1" | grep -q -- "-e HOME=/home/claude"' -- "$_S120_REAL"
+# Regression guard for the exact defect CI caught: an early dispatcher reading a
+# variable initialised hundreds of lines later. The real exec path is the one
+# that hit it (every --dry-run check passed while both real-exec checks failed).
+check "§120(16) --exec survives a CLEAN environment -- no unbound variable from an early dispatcher" \
+    bash -c 'printf "%s" "$1" | grep -q "^ARGV:" && ! printf "%s" "$1" | grep -qi "unbound variable"' -- "$_S120_REAL"
+
 check "§120(15) --dry-run and the real exec agree on the flags they render" \
     bash -c '
         d=$(printf "%s" "$1" | sed "s/^docker exec //")
