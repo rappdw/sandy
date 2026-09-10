@@ -1072,6 +1072,8 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--stop"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Stop a running daemon session (full teardown)."'; printf '}'
     printf ','
+    printf '{'; _json_kv name '"--exec"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Open a shell (or run one command) inside this workspace running container, as the HOST uid. Exists because the hand-rolled form is wrong: docker resolves -u <name> against the image, where the user is uid 1001, while sandy bind-mounts a passwd carrying the host uid -- so docker exec -u claude yields uid 1001, prints I have no name!, and writes to the workspace mount as the wrong owner. Finds a labelled daemon container first, then a foreground one by exact name. Sub-options: --workspace PATH, --dry-run (print the docker exec command, run nothing), -- CMD... (default /bin/bash)."'; printf '}'
+    printf ','
     printf '{'; _json_kv name '"--prune-orphans"'; printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Reap orphaned sandy_* networks (dead-owner, no attached container) and exit."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--stop-all"';      printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Fleet emergency stop: enumerate every daemon session on the host and stop each via the hardened per-session teardown. Sub-options: --dry-run, --yes."'; printf '}'
@@ -1088,7 +1090,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--provision"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Non-interactively materialize one workspace sandbox by running the REAL launch path once (start a detached daemon session, confirm it is up, then stop it) — never a flag that fabricates sandbox state directly. Safe no-op (exit 0) against a workspace that already has a live session (foreground lock holder or running daemon container). Sub-options: --workspace PATH, --dry-run, --yes."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --update-sessions, --reset-sandbox, --remove-sandbox, and --provision. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
+    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --update-sessions, --reset-sandbox, --remove-sandbox, and --provision. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -3801,6 +3803,118 @@ fi
 # already satisfies "this sandbox is provisioned," so that case is a SAFE
 # NO-OP — exit 0, not a refusal — with the reason printed rather than acted
 # on silently.
+# --- sandy --exec: a shell (or one command) inside the RUNNING container ---
+# Early dispatcher, same placement and reasoning as --provision/--attach: it
+# needs no config loading, no build, no mutex.
+#
+# WHY THIS EXISTS. The obvious hand-rolled form is wrong in a way that does not
+# announce itself:
+#
+#     docker exec -it -u claude <container> /bin/bash   # -> "I have no name!"
+#
+# The image creates the user with `useradd -u 1001 claude`, but sandy bind-mounts
+# a generated /etc/passwd carrying the HOST uid (e.g. 501) so bind-mount
+# ownership works. Docker resolves `-u <name>` against the container's IMAGE
+# filesystem, not the runtime bind mount, so `-u claude` yields uid 1001 --
+# CONFIRMED, `docker exec -u claude <c> id` prints uid=1001. The process then has
+# no passwd entry (the mounted file only has 501), so the shell prompt reads
+# "I have no name!" -- and, far worse than cosmetics, every write lands as the
+# wrong uid on a workspace mount owned by the host user.
+#
+# The numeric form is the correct one, and this flag is here so nobody has to
+# know that.
+if [[ "${1:-}" == "--exec" ]]; then
+    _ex_workspace=""; _ex_dry_run=false; _ex_cmd=()
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workspace)   shift; _ex_workspace="${1:-}"
+                           [ -z "$_ex_workspace" ] && { error "--exec: --workspace needs a PATH"; exit 1; } ;;
+            --workspace=*) _ex_workspace="${1#--workspace=}"
+                           [ -z "$_ex_workspace" ] && { error "--exec: --workspace needs a PATH"; exit 1; } ;;
+            --dry-run)     _ex_dry_run=true ;;
+            --)            shift; _ex_cmd=("$@"); break ;;
+            -*)            error "--exec: unrecognized option: $1"
+                           error "  (to run a command starting with '-', put it after '--')"
+                           exit 1 ;;
+            *)             _ex_cmd=("$@"); break ;;   # first non-option starts the command
+        esac
+        shift
+    done
+
+    if ! command -v docker >/dev/null 2>&1 || ! docker ps >/dev/null 2>&1; then
+        error "--exec requires a reachable Docker daemon."
+        exit 1
+    fi
+
+    # Same resolution recipe as --provision / --reset-sandbox / the launch path.
+    _ex_wd="${_ex_workspace:-$PWD}"
+    [ -d "$_ex_wd" ] || { error "--exec: workspace not found: $_ex_wd"; exit 1; }
+    _ex_wd="$(cd "$_ex_wd" 2>/dev/null && pwd -P)" || { error "--exec: cannot resolve workspace"; exit 1; }
+    _ex_hash="$(printf '%s' "$_ex_wd" | sha256)"; _ex_hash="${_ex_hash%% *}"; _ex_hash="${_ex_hash:0:8}"
+    _ex_base="$(basename "$_ex_wd" | tr -cd 'a-zA-Z0-9._-')"; _ex_base="${_ex_base:-project}"
+    _ex_name="${_ex_base}-${_ex_hash}"
+
+    # Daemon container first (labelled), then a foreground one by EXACT name.
+    # Foreground runs carry only sandy.managed=true -- no workspace_path label --
+    # so the label filter alone would make `--exec` work for daemon sessions and
+    # mysteriously not for a plain `sandy`, which is the common case.
+    # The name match is fully anchored, never a prefix: a workspace basename of
+    # "proxy" produces an agent named sandy-proxy-<hash> whose sidecar is
+    # sandy-proxy-proxy-<hash>, and ^...$ tells them apart (the --gc lesson).
+    _ex_container="$(docker ps -q --filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$_ex_wd" 2>/dev/null | head -1)" || true
+    if [ -z "$_ex_container" ]; then
+        _ex_container="$(docker ps -q --filter "name=^sandy-${_ex_name}$" 2>/dev/null | head -1)" || true
+    fi
+    if [ -z "$_ex_container" ]; then
+        error "No running sandy container for $_ex_wd."
+        error "  Start one with 'sandy' (foreground) or 'sandy --start' (daemon)."
+        exit 4
+    fi
+
+    # The uid the entrypoint gosu-drops to, and the one the workspace mount is
+    # owned by. Numeric on purpose -- see the header comment.
+    _ex_uid="$(id -u)"; _ex_gid="$(id -g)"
+
+    # Container-side workspace path: the same $HOME-relative mapping the launch
+    # path applies (SANDY_WORKSPACE), so --exec lands where the agent works.
+    if [[ "$_ex_wd" == "$HOME"/* ]]; then
+        _ex_cwd="/home/claude/${_ex_wd#$HOME/}"
+    else
+        _ex_cwd="$_ex_wd"
+    fi
+
+    # HOME is asked of the container rather than assumed: docker only sets it
+    # when it can resolve the user, which is exactly what is unreliable here.
+    # Getting this wrong is not cosmetic -- as root, HOME=/root sits on the
+    # --read-only rootfs, which is why an in-container `codex logout` failed
+    # with "Read-only file system (os error 30)".
+    _ex_home="$(docker exec -u "$_ex_uid" "$_ex_container" sh -c 'getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6' 2>/dev/null | tr -d '\r\n')"
+    [ -n "$_ex_home" ] || _ex_home="/home/claude"
+
+    # -it only with a real stdin tty, so `sandy --exec -- cmd | grep x` and CI
+    # callers work instead of dying on "the input device is not a TTY".
+    _ex_tty=(-i); [ -t 0 ] && _ex_tty=(-i -t)
+    [ ${#_ex_cmd[@]} -eq 0 ] && _ex_cmd=(/bin/bash)
+
+    if [ "$_ex_dry_run" = true ]; then
+        printf 'docker exec'
+        printf ' %s' "${_ex_tty[@]}" "-u" "${_ex_uid}:${_ex_gid}" "-w" "$_ex_cwd" "-e" "HOME=$_ex_home"
+        printf ' %s' "$_ex_container"
+        printf ' %q' "${_ex_cmd[@]}"
+        printf '\n'
+        exit 0
+    fi
+
+    [ "$SANDY_VERBOSE" -ge 1 ] && info "exec into ${_ex_container:0:12} as ${_ex_uid}:${_ex_gid} (cwd $_ex_cwd)"
+    # Pass through the command's own exit status; `|| rc=$?` because set -e
+    # would otherwise swallow a non-zero command result before we can return it.
+    _ex_rc=0
+    docker exec "${_ex_tty[@]}" -u "${_ex_uid}:${_ex_gid}" -w "$_ex_cwd" -e "HOME=$_ex_home" \
+        "$_ex_container" "${_ex_cmd[@]}" || _ex_rc=$?
+    exit "$_ex_rc"
+fi
+
 if [[ "${1:-}" == "--provision" ]]; then
     _pv_workspace=""; _pv_dry_run=false; _pv_yes=false
     shift
@@ -4021,6 +4135,9 @@ that started it, so a closed tab/dropped SSH/IDE quit does not end it):
                      return once attachable. Sub-options: --workspace PATH
   --attach           Attach an interactive client to a running daemon
                      session (last-wins: a second attach displaces the
+  --exec [-- CMD]    Shell (or run CMD) inside this workspace's running
+                     container as the host uid -- the hand-rolled
+                     'docker exec -u claude' silently runs as uid 1001.
                      first). Exit codes: 0 = session ended while attached,
                      3 = clean detach (session lives on), 4 = no such
                      session. Sub-options: --workspace PATH

@@ -2051,6 +2051,25 @@ Plain text file at `$SANDY_HOME/.update_check`:
 
 Example: `1711843200 0.8.0`. Stale after 86,400 seconds.
 
+### E.13 `sandy --exec` (1.11.0)
+
+Opens a shell, or runs one command, inside the workspace's already-running container. An early dispatcher: it runs after argument parsing and before config loading, image builds, and the mutex — like `--provision` and `--attach`, none of whose side effects it needs.
+
+```
+docker exec [-i|-i -t] -u <host-uid>:<host-gid> -w <container-workspace> -e HOME=<container-home> <container> <cmd...>
+```
+
+| Element | Resolution |
+|---|---|
+| container | `docker ps --filter label=sandy.daemon=true --filter label=sandy.workspace_path=<wd>`, else `--filter name=^sandy-<sandbox>$`. The name match is **fully anchored** — foreground runs carry only `sandy.managed=true`, so the label filter alone finds daemon sessions only, and an unanchored name would also match the `sandy-proxy-…` sidecar |
+| `-u` | **numeric**, never `-u claude`. Docker resolves a *name* against the image filesystem, where `useradd -u 1001 claude` applies; sandy's host-uid `/etc/passwd` is a runtime bind mount docker does not consult. `-u claude` therefore runs as uid 1001, prints `I have no name!`, and writes as the wrong owner |
+| `-w` | the launch path's own `$HOME`-relative mapping (`SANDY_WORKSPACE`), so the shell starts where the agent works |
+| `HOME` | read from the container's own passwd (`getent passwd $(id -u)`), defaulting to `/home/claude` — docker sets HOME only when it can resolve the user, and as root `HOME=/root` is on the read-only rootfs |
+| tty | `-i -t` only when stdin is a tty, so `sandy --exec -- cmd \| grep x` and CI callers work |
+| exit | `4` — no running container for the workspace (the `--attach`/`--stop` "no such session" convention); `1` — usage or unreachable docker; otherwise **the command's own status** |
+
+Sub-options: `--workspace PATH`, `--dry-run` (print the command, execute nothing), and `-- CMD...` (default `/bin/bash`). A bare first non-option token also begins the command; an unrecognized `-…` is refused with a pointer to `--`. Guarded by `run-tests.sh §120`.
+
 ### C.7b Codex `config.toml` (seeded by sandy)
 
 Written to `$SANDBOX_DIR/codex/config.toml` on first launch of a new sandbox with `SANDY_AGENT=codex`. Mounted into the container at `/home/claude/.codex/config.toml`.

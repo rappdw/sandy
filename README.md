@@ -294,6 +294,27 @@ To automate this as a global keyboard shortcut (e.g., Ctrl+Cmd+U):
 4. Save as "Open Cleaned URL"
 5. Assign a shortcut in **System Settings > Keyboard > Keyboard Shortcuts > Services**
 
+### Getting a shell inside a running sandbox (`sandy --exec`)
+
+```sh
+sandy --exec                  # interactive shell in this workspace's container
+sandy --exec -- codex login --device-auth
+sandy --exec --workspace ~/other-project -- git status
+sandy --exec --dry-run        # print the docker exec command, run nothing
+```
+
+**Do not hand-roll this.** The obvious form is wrong in a way that does not announce itself:
+
+```sh
+docker exec -it -u claude <container> /bin/bash     # -> "I have no name!"
+```
+
+The image creates the user with `useradd -u 1001 claude`, but sandy bind-mounts a generated `/etc/passwd` carrying **your** uid so bind-mount ownership works. Docker resolves `-u <name>` against the container's *image* filesystem, not the runtime mount — so `-u claude` runs as **uid 1001**. The prompt reading `I have no name!` is the harmless symptom; the real one is that every write lands as the wrong owner on a workspace mount owned by you.
+
+`--exec` uses the numeric `-u $(id -u):$(id -g)`, sets `-w` to the container-side workspace path, and sets `HOME` explicitly (as root, `HOME=/root` sits on the read-only rootfs — which is why an in-container `codex logout` fails with `Read-only file system`). It finds a daemon container by label and a foreground one by exact name, exits `4` when the workspace has no running container, and otherwise passes the command's own exit status through.
+
+For an interactive *agent* session, attach to the tmux session instead: `sandy --attach`.
+
 ### Using a Console profile — Claude Mythos and workspace-scoped access
 
 Some Claude entitlements are granted to a **Console workspace**, not to an API key or a claude.ai subscription — Claude Mythos 5.1 (`claude-mythos-5-1`, Project Glasswing) is one. You reach them with an *Anthropic profile* written by the Claude Platform CLI, `ant`. Sandy supports that as `SANDY_CLAUDE_AUTH=profile`:
