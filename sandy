@@ -11811,6 +11811,18 @@ if [ -n "$SANDY_MODEL" ] && ! [[ "$SANDY_MODEL" =~ ^[a-zA-Z0-9._-]+$ ]]; then
     error "Invalid SANDY_MODEL: $SANDY_MODEL (only alphanumeric, hyphens, dots, underscores allowed)"
     exit 1
 fi
+# Same validation for the SUBAGENT model, and for a sharper reason than symmetry.
+# The config parser does NOT strip inline comments -- `KEY=value   # note` yields
+# the literal "value   # note" -- so a copy-pasted line with a trailing comment
+# silently produces a bogus model ID. SANDY_MODEL has caught that since 0.x; this
+# key shipped without it, and an unvalidated subagent model fails in the worst
+# way available: the orchestrator runs on the pinned model, the fan-out quietly
+# does not, and nothing in the transcript says so.
+if [ -n "${CLAUDE_CODE_SUBAGENT_MODEL:-}" ] && ! [[ "$CLAUDE_CODE_SUBAGENT_MODEL" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    error "Invalid CLAUDE_CODE_SUBAGENT_MODEL: $CLAUDE_CODE_SUBAGENT_MODEL (only alphanumeric, hyphens, dots, underscores allowed)"
+    error "  Note: .sandy/config does not strip inline comments — put '# ...' on its own line, not after a value."
+    exit 1
+fi
 # Validate SANDY_EFFORT — Claude Code reasoning effort (claude only), applied as
 # `claude --effort <level>` in build_claude_cmd. Empty = Claude Code's own default
 # (currently 'high'). Cleared when claude isn't in the agent set so it's never a
