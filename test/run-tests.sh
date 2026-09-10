@@ -12296,6 +12296,128 @@ check "§119(3) the two 1.10.0 keys this guard was written for are present" \
     bash -c 'grep -q SANDY_CLAUDE_AUTH "$1" && grep -q SANDY_CROSS_SESSION_INBOUND "$1"' -- "$_S119_README"
 
 # ============================================================
+echo "§120: sandy --exec runs as the HOST uid, never -u claude"
+# ============================================================
+# WHY. The hand-rolled incantation is wrong in a way that does not announce
+# itself. The image creates the user with `useradd -u 1001 claude`, but sandy
+# bind-mounts a generated /etc/passwd carrying the HOST uid so bind-mount
+# ownership works. Docker resolves `-u <name>` against the container's IMAGE
+# filesystem, not the runtime bind mount -- so `docker exec -u claude` runs as
+# uid 1001 (confirmed on a real container: it prints uid=1001). The visible
+# symptom is a shell prompt reading "I have no name!"; the invisible one is
+# every write landing as the wrong owner on a workspace mount owned by the host
+# user. --exec exists so nobody has to know that, which makes "numeric, not the
+# name" the property this section defends.
+#
+# Driven end to end against a stubbed `docker`, so these assert what the command
+# DOES, not what the source says.
+_S120_DIR="$(mktemp -d)"; mkdir -p "$_S120_DIR/bin" "$_S120_DIR/home/ws"
+cat > "$_S120_DIR/bin/docker" <<'S120_STUB'
+#!/bin/bash
+# ps: honour the filter it was given so the daemon-vs-foreground precedence is
+# testable. S120_DAEMON / S120_FOREGROUND select which lookups find something.
+case "$1" in
+  ps)
+    for a in "$@"; do
+      case "$a" in
+        label=sandy.workspace_path=*) [ -n "${S120_DAEMON:-}" ] && { echo "daemoncafe11"; exit 0; } ;;
+        name=^sandy-*)
+            printf '%s\n' "$a" >> "$S120_DIR/name-filters"
+            [ -n "${S120_FOREGROUND:-}" ] && { echo "foregroundbb22"; exit 0; } ;;
+      esac
+    done
+    echo ""; exit 0 ;;
+  exec)
+    case " $* " in *getent*) echo "/home/claude"; exit 0 ;; esac
+    printf 'ARGV:'; printf ' %s' "$@"; printf '\n'
+    exit "${S120_RC:-0}" ;;
+esac
+exit 0
+S120_STUB
+chmod +x "$_S120_DIR/bin/docker"
+
+# $1.. = args to --exec ; echoes the stub's observed argv (or sandy's error)
+_s120_run() {
+    PATH="$_S120_DIR/bin:$PATH" HOME="$_S120_DIR/home" S120_DIR="$_S120_DIR" \
+        bash "$SANDY_SCRIPT" --exec --workspace "$_S120_DIR/home/ws" "$@" 2>&1
+}
+
+_S120_FG="$(S120_FOREGROUND=1 _s120_run --dry-run)"
+check "§120(pre) --exec dispatches and emits a docker exec line (mutation: a rename or reorder fails HERE, not vacuously below)" \
+    bash -c 'printf "%s" "$1" | grep -q "^docker exec "' -- "$_S120_FG"
+
+# THE point of the flag.
+check "§120(1) the uid is NUMERIC, and the name form that yields uid 1001 is never used" \
+    bash -c 'printf "%s" "$1" | grep -qE " -u [0-9]+:[0-9]+ " && ! printf "%s" "$1" | grep -q -- "-u claude"' -- "$_S120_FG"
+check "§120(2) the numeric uid:gid is THIS host's, not a hardcoded pair" \
+    bash -c 'printf "%s" "$1" | grep -q -- " -u $(id -u):$(id -g) "' -- "$_S120_FG"
+
+# HOME: not cosmetic. As root HOME=/root, which is on the --read-only rootfs --
+# the reason an in-container `codex logout` failed with EROFS.
+check "§120(3) HOME is set explicitly rather than left to docker's user lookup" \
+    bash -c 'printf "%s" "$1" | grep -q -- "-e HOME=/home/claude"' -- "$_S120_FG"
+
+# -w uses the launch path's own $HOME-relative mapping, so --exec lands where
+# the agent works instead of the container's default cwd.
+check "§120(4) -w is the container-side workspace path (host \$HOME-relative mapping)" \
+    bash -c 'printf "%s" "$1" | grep -q -- "-w /home/claude/ws "' -- "$_S120_FG"
+
+check "§120(5) with no command, the default is an interactive shell" \
+    bash -c 'printf "%s" "$1" | grep -q "/bin/bash$"' -- "$_S120_FG"
+_S120_CMD="$(S120_FOREGROUND=1 _s120_run --dry-run -- ls -la)"
+check "§120(6) a command after -- replaces the shell" \
+    bash -c 'printf "%s" "$1" | grep -q "ls -la$" && ! printf "%s" "$1" | grep -q "/bin/bash"' -- "$_S120_CMD"
+
+# --dry-run must print and run NOTHING: the stub records a real exec as ARGV:.
+check "§120(7) --dry-run executes nothing (prints the command only)" \
+    bash -c '! printf "%s" "$1" | grep -q "^ARGV:"' -- "$_S120_FG"
+
+# Precedence: a labelled daemon container wins; a foreground one is found by
+# EXACT name because foreground runs carry no workspace_path label at all.
+_S120_BOTH="$(S120_DAEMON=1 S120_FOREGROUND=1 _s120_run --dry-run)"
+check "§120(8) a labelled daemon container is preferred over the name lookup" \
+    bash -c 'printf "%s" "$1" | grep -q "daemoncafe11"' -- "$_S120_BOTH"
+_S120_ONLYFG="$(S120_FOREGROUND=1 _s120_run --dry-run)"
+check "§120(9) a FOREGROUND container is still found (it has no workspace_path label, so the label filter alone would miss it)" \
+    bash -c 'printf "%s" "$1" | grep -q "foregroundbb22"' -- "$_S120_ONLYFG"
+# Anchored, never a prefix: a workspace basename of "proxy" yields agent
+# sandy-proxy-<hash> beside sidecar sandy-proxy-proxy-<hash> (the --gc lesson).
+check "§120(10) the name filter is fully anchored (^...\$), so it cannot match a proxy sidecar" \
+    bash -c 'grep -q "name=\^sandy-.*\$$" "$1/name-filters"' -- "$_S120_DIR"
+
+# Exit contract: 4 = no such session (the --attach/--stop convention); otherwise
+# the command's own status, which is what makes --exec usable in a script.
+# `trap - ERR` inside the substitution: this call is SUPPOSED to exit 4, and
+# under set -E the ERR trap fires inside command substitutions (the §92 lesson --
+# bash 3.2 does not extend the if-condition exemption to the subshell).
+_S120_NONE="$(trap - ERR; _s120_run 2>&1 || true)"; _S120_NONE_RC=0
+_s120_run >/dev/null 2>&1 || _S120_NONE_RC=$?
+check "§120(11) no running container for the workspace -> exit 4, with a start hint" \
+    bash -c '[ "$1" = 4 ] && printf "%s" "$2" | grep -q "No running sandy container"' -- "$_S120_NONE_RC" "$_S120_NONE"
+_S120_RC=0
+S120_FOREGROUND=1 S120_RC=7 _s120_run -- false >/dev/null 2>&1 || _S120_RC=$?
+check "§120(12) the command's own exit status is passed through, not swallowed by set -e" \
+    bash -c '[ "$1" = 7 ]' -- "$_S120_RC"
+
+# --dry-run and the real exec are SEPARATE render paths (a printf line and a
+# docker argv line) and can drift. Everything above reads the dry-run; these
+# read what the stub actually RECEIVED, so a fix to one that misses the other
+# cannot pass. Found by mutation: a first cut of this section rewrote only the
+# real-exec line and all 13 checks stayed green.
+_S120_REAL="$(S120_FOREGROUND=1 _s120_run -- id)"
+check "§120(13) the REAL exec argv carries the numeric uid:gid (not just the --dry-run rendering)" \
+    bash -c 'printf "%s" "$1" | grep -q "^ARGV:" && printf "%s" "$1" | grep -q -- "-u $(id -u):$(id -g) " && ! printf "%s" "$1" | grep -q -- "-u claude"' -- "$_S120_REAL"
+check "§120(14) the REAL exec argv carries -w and -e HOME too" \
+    bash -c 'printf "%s" "$1" | grep -q -- "-w /home/claude/ws " && printf "%s" "$1" | grep -q -- "-e HOME=/home/claude"' -- "$_S120_REAL"
+check "§120(15) --dry-run and the real exec agree on the flags they render" \
+    bash -c '
+        d=$(printf "%s" "$1" | sed "s/^docker exec //")
+        r=$(printf "%s" "$2" | sed "s/^ARGV: exec //")
+        [ "${d% *}" = "${r% *}" ]' -- "$(S120_FOREGROUND=1 _s120_run --dry-run -- id)" "$_S120_REAL"
+
+rm -rf "$_S120_DIR"
+
+# ============================================================
 # WHY. The Summary block below used to sit in the MIDDLE of this file: sections
 # appended afterwards ran, counted, and then nothing printed a final tally. A
 # real maintainer run ended with "2/1253 tests failed:" printed before §104 and
