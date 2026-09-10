@@ -12292,6 +12292,30 @@ _S119_COUNT="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' \
 check "§119(2) the key extractor found a plausible number of keys (>40), so (1) cannot pass vacuously" \
     bash -c '[ "$1" -gt 40 ]' -- "$_S119_COUNT"
 
+# The CLI-flag half of the same idea. §91 already diffs cli_flags against the
+# parsers and against --help; nothing tied it to README, and `--exec` shipped
+# with a how-to section but no row in the flags table -- exactly the reader who
+# then hand-rolls `docker exec -u claude`. Same failure as SANDY_CLAUDE_AUTH
+# missing from the config table: prose and schema updated, reference table not.
+# Scoped to the FLAGS TABLE, not the whole file. A first cut grepped all of
+# README and was satisfied by prose: `--exec` had a how-to section, so the check
+# passed while the table row -- the thing a reader scans -- was still missing.
+# That is the same vacuity trap as §120's dry-run-only checks.
+# --help/--version are exempt: universal CLI conventions, and this table
+# documents sandy-specific behaviour rather than restating them.
+_S119_FLAG_EXEMPT="--help --version"
+_S119_FLAGROWS="$(grep '^| `--' "$_S119_README" || true)"
+_S119_FLAGS_MISSING="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' \
+    | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\(--[a-z-]*\)".*/\1/p' | sort -u \
+    | while IFS= read -r _f; do
+          case " $_S119_FLAG_EXEMPT " in *" $_f "*) continue ;; esac
+          printf '%s' "$_S119_FLAGROWS" | grep -q -- "\`$_f" || printf '%s ' "$_f"
+      done)"
+check "§119(4) every cli_flag has a row in README.md's flags TABLE (prose does not count)${_S119_FLAGS_MISSING:+ — missing: $_S119_FLAGS_MISSING}" \
+    bash -c '[ -z "$1" ]' -- "$_S119_FLAGS_MISSING"
+check "§119(5) the flag extractor found a plausible number of flags (>15), so (4) cannot pass vacuously" \
+    bash -c '[ "$("$2" --print-schema 2>/dev/null | tr "," "\n" | sed -n "s/.*\"name\"[[:space:]]*:[[:space:]]*\"\(--[a-z-]*\)\".*/\1/p" | sort -u | wc -l)" -gt 15 ]' -- "" "$SANDY_SCRIPT"
+
 check "§119(3) the two 1.10.0 keys this guard was written for are present" \
     bash -c 'grep -q SANDY_CLAUDE_AUTH "$1" && grep -q SANDY_CROSS_SESSION_INBOUND "$1"' -- "$_S119_README"
 
