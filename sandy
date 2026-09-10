@@ -86,6 +86,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_EGRESS_LOG
     SANDY_ALLOW_WORKFLOW_EDIT
     CLAUDE_CODE_MAX_OUTPUT_TOKENS
+    CLAUDE_CODE_SUBAGENT_MODEL
     GEMINI_MODEL
     SANDY_GEMINI_AUTH
     GOOGLE_CLOUD_PROJECT
@@ -781,6 +782,7 @@ SANDY_EGRESS_LOG|enum:0,1,summary|0||1.4.0|stable|Log which hosts the agent's eg
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||0.11.1|stable|Remove .github/workflows from the read-only protection list.
 SANDY_SCREENSHOT_DIR|path|||0.12.0|stable|Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
 CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||0.6.0|stable|Max output tokens per Claude response.
+CLAUDE_CODE_SUBAGENT_MODEL|string||^[a-zA-Z0-9._-]+$|1.11.0|stable|Model ID for Claude Code SUBAGENTS -- the parallel researchers a skill fans out. Subagents do NOT inherit the orchestrator model, so unset they run on their own default tier: a session pinned to a gated model (e.g. claude-mythos-5-1) silently does its fan-out work on a different one, with nothing in the transcript saying so. Passive-safe: a model ID is not a capability and can only select a model the session credential is already entitled to.
 GEMINI_MODEL|string|||0.9.0|stable|Gemini model override.
 SANDY_GEMINI_AUTH|enum:auto,api_key,oauth,adc|auto||0.9.0|stable|Gemini credential probe strategy.
 SANDY_GEMINI_EXTENSIONS|string|||0.9.0|stable|Comma-separated Gemini extensions to enable.
@@ -11984,6 +11986,14 @@ if _sandy_agent_has claude; then
         RUN_FLAGS+=(-e "DISCORD_ALLOWED_SENDERS=$DISCORD_ALLOWED_SENDERS")
     fi
     RUN_FLAGS+=(-e "CLAUDE_CODE_MAX_OUTPUT_TOKENS=${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}")
+    # Subagents do NOT inherit the orchestrator's model. Unset, a session pinned
+    # to a gated model fans out to a default tier and nothing says so -- the
+    # failure mode is a review that LOOKS like it ran at the pinned model when
+    # only the orchestrator did. No default here on purpose: sandy should not
+    # invent a subagent tier, only carry the one the operator names.
+    if [ -n "${CLAUDE_CODE_SUBAGENT_MODEL:-}" ]; then
+        RUN_FLAGS+=(-e "CLAUDE_CODE_SUBAGENT_MODEL=$CLAUDE_CODE_SUBAGENT_MODEL")
+    fi
     if [ "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-0}" = "1" ]; then
         RUN_FLAGS+=(-e "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1")
     fi

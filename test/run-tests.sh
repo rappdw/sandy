@@ -12463,6 +12463,46 @@ check "§120(15) --dry-run and the real exec agree on the flags they render" \
 rm -rf "$_S120_DIR"
 
 # ============================================================
+echo "§121: CLAUDE_CODE_SUBAGENT_MODEL is forwarded, and only when set"
+# ============================================================
+# WHY. Subagents do NOT inherit the orchestrator's model. Unset, the parallel
+# researchers a skill fans out run on their own default tier -- so a session
+# pinned to a gated model (claude-mythos-5-1, invite-only via Project Glasswing)
+# silently does its fan-out work on a different model, with nothing in the
+# transcript saying so. The failure mode is a vulnerability review that LOOKS
+# like it ran at the pinned model when only the orchestrator did. Reported from
+# a live Glasswing session; the variable was empty in the container.
+#
+# Two properties, because the second is the one a default would break: forwarded
+# when set, and ABSENT when unset (sandy must not invent a subagent tier -- an
+# operator who pins nothing gets Claude Code's own behaviour, not sandy's guess).
+_S121_BLK="$(awk '/RUN_FLAGS\+=\(-e "CLAUDE_CODE_MAX_OUTPUT_TOKENS=/,/^fi$/' "$SANDY_SCRIPT")"
+check "§121(pre) extracted the forwarding block (mutation: a reword fails HERE, not vacuously below)" \
+    bash -c 'printf "%s" "$1" | grep -q CLAUDE_CODE_SUBAGENT_MODEL' -- "$_S121_BLK"
+
+# $1 = value ("" for unset). Echoes the RUN_FLAGS entries the block produced.
+_s121_run() {
+    S121_BLK="$_S121_BLK" CLAUDE_CODE_SUBAGENT_MODEL="$1" bash -c '
+        set -u
+        RUN_FLAGS=()
+        _sandy_add_secret_env() { :; }
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}"
+        eval "$S121_BLK"
+        for _f in "${RUN_FLAGS[@]+"${RUN_FLAGS[@]}"}"; do printf "%s\n" "$_f"; done
+    ' 2>/dev/null
+}
+_S121_SET="$(_s121_run claude-mythos-5-1)"
+check "§121(1) a set value is forwarded verbatim" \
+    bash -c 'printf "%s" "$1" | grep -q "^CLAUDE_CODE_SUBAGENT_MODEL=claude-mythos-5-1$"' -- "$_S121_SET"
+_S121_UNSET="$(_s121_run "")"
+check "§121(2) unset forwards NOTHING (sandy never invents a subagent tier)" \
+    bash -c '! printf "%s" "$1" | grep -q CLAUDE_CODE_SUBAGENT_MODEL' -- "$_S121_UNSET"
+check "§121(3) the sibling MAX_OUTPUT_TOKENS forwarding is unaffected" \
+    bash -c 'printf "%s" "$1" | grep -q "^CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000$"' -- "$_S121_UNSET"
+check "§121(4) the key is PASSIVE (a model ID is not a capability)" \
+    bash -c 'awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)/" "$1" | grep -qx "    CLAUDE_CODE_SUBAGENT_MODEL"' -- "$SANDY_SCRIPT"
+
+# ============================================================
 # WHY. The Summary block below used to sit in the MIDDLE of this file: sections
 # appended afterwards ran, counted, and then nothing printed a final tally. A
 # real maintainer run ended with "2/1253 tests failed:" printed before §104 and
