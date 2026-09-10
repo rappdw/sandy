@@ -12337,12 +12337,18 @@ S120_STUB
 chmod +x "$_S120_DIR/bin/docker"
 
 # $1.. = args to --exec ; echoes the stub's observed argv (or sandy's error)
+# The three S120_* knobs are forwarded EXPLICITLY. A `VAR=x _s120_run` prefix
+# only reaches the stub (a grandchild) if bash exports it through the function
+# call, and that differs by bash minor: it worked on 5.2.37 locally and did not
+# on CI's 5.2.21, so §120(12) failed only in CI. Naming them here makes the
+# plumbing version-independent.
 _s120_run() {
     PATH="$_S120_DIR/bin:$PATH" HOME="$_S120_DIR/home" S120_DIR="$_S120_DIR" \
+    S120_DAEMON="${S120_DAEMON:-}" S120_FOREGROUND="${S120_FOREGROUND:-}" S120_RC="${S120_RC:-0}" \
         bash "$SANDY_SCRIPT" --exec --workspace "$_S120_DIR/home/ws" "$@" 2>&1
 }
 
-_S120_FG="$(S120_FOREGROUND=1 _s120_run --dry-run)"
+_S120_FG="$( S120_FOREGROUND=1; _s120_run --dry-run )"
 check "§120(pre) --exec dispatches and emits a docker exec line (mutation: a rename or reorder fails HERE, not vacuously below)" \
     bash -c 'printf "%s" "$1" | grep -q "^docker exec "' -- "$_S120_FG"
 
@@ -12364,7 +12370,7 @@ check "§120(4) -w is the container-side workspace path (host \$HOME-relative ma
 
 check "§120(5) with no command, the default is an interactive shell" \
     bash -c 'printf "%s" "$1" | grep -q "/bin/bash$"' -- "$_S120_FG"
-_S120_CMD="$(S120_FOREGROUND=1 _s120_run --dry-run -- ls -la)"
+_S120_CMD="$( S120_FOREGROUND=1; _s120_run --dry-run -- ls -la )"
 check "§120(6) a command after -- replaces the shell" \
     bash -c 'printf "%s" "$1" | grep -q "ls -la$" && ! printf "%s" "$1" | grep -q "/bin/bash"' -- "$_S120_CMD"
 
@@ -12374,10 +12380,10 @@ check "§120(7) --dry-run executes nothing (prints the command only)" \
 
 # Precedence: a labelled daemon container wins; a foreground one is found by
 # EXACT name because foreground runs carry no workspace_path label at all.
-_S120_BOTH="$(S120_DAEMON=1 S120_FOREGROUND=1 _s120_run --dry-run)"
+_S120_BOTH="$( S120_DAEMON=1; S120_FOREGROUND=1; _s120_run --dry-run )"
 check "§120(8) a labelled daemon container is preferred over the name lookup" \
     bash -c 'printf "%s" "$1" | grep -q "daemoncafe11"' -- "$_S120_BOTH"
-_S120_ONLYFG="$(S120_FOREGROUND=1 _s120_run --dry-run)"
+_S120_ONLYFG="$( S120_FOREGROUND=1; _s120_run --dry-run )"
 check "§120(9) a FOREGROUND container is still found (it has no workspace_path label, so the label filter alone would miss it)" \
     bash -c 'printf "%s" "$1" | grep -q "foregroundbb22"' -- "$_S120_ONLYFG"
 # Anchored, never a prefix: a workspace basename of "proxy" yields agent
@@ -12394,8 +12400,11 @@ _S120_NONE="$(trap - ERR; _s120_run 2>&1 || true)"; _S120_NONE_RC=0
 _s120_run >/dev/null 2>&1 || _S120_NONE_RC=$?
 check "§120(11) no running container for the workspace -> exit 4, with a start hint" \
     bash -c '[ "$1" = 4 ] && printf "%s" "$2" | grep -q "No running sandy container"' -- "$_S120_NONE_RC" "$_S120_NONE"
+# Subshell: whether a function-prefix assignment persists afterwards is also
+# version-dependent, and a leaked S120_RC=7 makes every later real exec exit 7 --
+# which is what aborted the CI run one check later.
 _S120_RC=0
-S120_FOREGROUND=1 S120_RC=7 _s120_run -- false >/dev/null 2>&1 || _S120_RC=$?
+( S120_FOREGROUND=1; S120_RC=7; _s120_run -- false ) >/dev/null 2>&1 || _S120_RC=$?
 check "§120(12) the command's own exit status is passed through, not swallowed by set -e" \
     bash -c '[ "$1" = 7 ]' -- "$_S120_RC"
 
@@ -12404,7 +12413,7 @@ check "§120(12) the command's own exit status is passed through, not swallowed 
 # read what the stub actually RECEIVED, so a fix to one that misses the other
 # cannot pass. Found by mutation: a first cut of this section rewrote only the
 # real-exec line and all 13 checks stayed green.
-_S120_REAL="$(S120_FOREGROUND=1 _s120_run -- id)"
+_S120_REAL="$( S120_FOREGROUND=1; _s120_run -- id )"
 check "§120(13) the REAL exec argv carries the numeric uid:gid (not just the --dry-run rendering)" \
     bash -c 'printf "%s" "$1" | grep -q "^ARGV:" && printf "%s" "$1" | grep -q -- "-u $(id -u):$(id -g) " && ! printf "%s" "$1" | grep -q -- "-u claude"' -- "$_S120_REAL"
 check "§120(14) the REAL exec argv carries -w and -e HOME too" \
@@ -12413,7 +12422,7 @@ check "§120(15) --dry-run and the real exec agree on the flags they render" \
     bash -c '
         d=$(printf "%s" "$1" | sed "s/^docker exec //")
         r=$(printf "%s" "$2" | sed "s/^ARGV: exec //")
-        [ "${d% *}" = "${r% *}" ]' -- "$(S120_FOREGROUND=1 _s120_run --dry-run -- id)" "$_S120_REAL"
+        [ "${d% *}" = "${r% *}" ]' -- "$( S120_FOREGROUND=1; _s120_run --dry-run -- id )" "$_S120_REAL"
 
 rm -rf "$_S120_DIR"
 
