@@ -1008,10 +1008,17 @@ _sandy_start_handoff_relay() {
         # mounted rw (the relay needs to write state there), so the agent can
         # write this file too. Nothing may make a trust decision on it.
         restarts=0
+        # Written to a temp and moved, so a reader never sees a half-written
+        # file. An explicit if rather than `A && B || C`: that form is not
+        # if-then-else (C runs when A succeeds and B fails, which here would
+        # mean silently leaving the temp behind), and shellcheck flags it.
         _relay_state() {
-            printf 'state=%s\nrestarts=%s\nlast_exit_code=%s\nlast_restart_at=%s\n' \
-                "$1" "$restarts" "${2:-}" "${3:-}" > "$_st/.state.tmp" 2>/dev/null \
-                && mv -f "$_st/.state.tmp" "$_st/.state" 2>/dev/null || true
+            if printf 'state=%s\nrestarts=%s\nlast_exit_code=%s\nlast_restart_at=%s\n' \
+                "$1" "$restarts" "${2:-}" "${3:-}" > "$_st/.state.tmp" 2>/dev/null; then
+                mv -f "$_st/.state.tmp" "$_st/.state" 2>/dev/null || true
+            else
+                rm -f "$_st/.state.tmp" 2>/dev/null || true
+            fi
         }
         _relay_state started
         backoff=1
