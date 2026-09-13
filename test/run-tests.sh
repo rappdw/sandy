@@ -12293,11 +12293,22 @@ check "§119(pre) README.md is readable (mutation: a bad path would make every c
 #     committed config cannot set it; documented in CLAUDE.md's tier section.
 #   SANDY_DEBUG_CLEANUP           - debug knob, not a supported surface.
 _S119_EXEMPT="SANDY_AUTO_APPROVE_PRIVILEGED SANDY_DEBUG_CLEANUP"
+# The exemptions are applied with `grep -vxF`, NOT with a `case` inside the
+# command substitution below. bash 3.2 does not fully parse `$( )` -- it scans
+# for the matching `)` -- so the unbalanced `)` that terminates a case PATTERN
+# is counted as closing the substitution, and the whole file fails to parse --
+# bash reports a syntax error near an unexpected newline. CI is bash 5 and never sees
+# it; the maintainer's macOS bash 3.2 aborts the entire suite here, before any
+# later section runs. Same family as APOSCS in test/lint-bash32.sh, which
+# catches the apostrophe version of the same scanner flaw; CASESUB now catches
+# this one.
+_S119_EXEMPT_ARGS=()
+for _S119_K in $_S119_EXEMPT; do _S119_EXEMPT_ARGS+=(-e "$_S119_K"); done
 
 _S119_MISSING="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' \
     | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([A-Z][A-Z0-9_]*\)".*/\1/p' | sort -u \
+    | grep -vxF "${_S119_EXEMPT_ARGS[@]}" \
     | while IFS= read -r _k; do
-          case " $_S119_EXEMPT " in *" $_k "*) continue ;; esac
           grep -q "$_k" "$_S119_README" || printf '%s ' "$_k"
       done)"
 check "§119(1) no config key is missing from README.md${_S119_MISSING:+ (missing: $_S119_MISSING)}" \
@@ -12322,11 +12333,16 @@ check "§119(2) the key extractor found a plausible number of keys (>40), so (1)
 # --help/--version are exempt: universal CLI conventions, and this table
 # documents sandy-specific behaviour rather than restating them.
 _S119_FLAG_EXEMPT="--help --version"
+# grep -vxF, not a `case` inside the substitution below -- see the CASESUB note
+# on _S119_EXEMPT above. This is the second instance of the same bug; the macOS
+# run aborted on the first one and never reached this line.
+_S119_FLAG_EXEMPT_ARGS=()
+for _S119_F in $_S119_FLAG_EXEMPT; do _S119_FLAG_EXEMPT_ARGS+=(-e "$_S119_F"); done
 _S119_FLAGROWS="$(grep '^| `--' "$_S119_README" || true)"
 _S119_FLAGS_MISSING="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' \
     | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\(--[a-z-]*\)".*/\1/p' | sort -u \
+    | grep -vxF "${_S119_FLAG_EXEMPT_ARGS[@]}" \
     | while IFS= read -r _f; do
-          case " $_S119_FLAG_EXEMPT " in *" $_f "*) continue ;; esac
           printf '%s' "$_S119_FLAGROWS" | grep -q -- "\`$_f" || printf '%s ' "$_f"
       done)"
 check "§119(4) every cli_flag has a row in README.md's flags TABLE (prose does not count)${_S119_FLAGS_MISSING:+ — missing: $_S119_FLAGS_MISSING}" \

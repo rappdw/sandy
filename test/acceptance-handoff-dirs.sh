@@ -588,11 +588,20 @@ env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4"; RC=$?
 ck "--start exits 0 with no relay installed" "[ $RC -eq 0 ]"
 C4="$(cid4)"
 ck "daemon container is running" "[ -n \"$C4\" ]"
-SESS4="$(docker inspect -f '{{index .Config.Labels \"sandy.session\"}}' "$C4" 2>/dev/null)"
+SESS4="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C4" 2>/dev/null)"
+# PREMISE, not decoration. The first cut of this phase escaped the Go template
+# ({{index .Config.Labels \"sandy.session\"}}), docker returned nothing, SBX4
+# became ".../sandboxes/" and every write below landed nowhere -- while the
+# NEGATIVE checks ("nothing is mounted", "the write fails") all reported PASS,
+# because an empty inspect satisfies them. A premise that can silently go empty
+# has to be asserted before anything is concluded from it.
+ck "session label resolved (premise: every path below is built from it)" "[ -n \"$SESS4\" ]"
 SBX4="$SANDY_HOME_DIR/sandboxes/$SESS4"
 ck "the slot directory was created host-side (presence carries no information, by construction)" \
    "[ -d \"$SBX4/relay-bin\" ]"
-_m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{\"\n\"}}{{end}}' "$C4" 2>/dev/null)"
+_m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C4" 2>/dev/null)"
+ck "docker inspect returned mount rows (premise: the negative below is vacuous against empty output)" \
+   "printf '%s' \"$_m4\" | grep -q '/home/claude'"
 ck "...and NOTHING is mounted at /opt/sandy/relay when the slot is empty" \
    "! printf '%s' \"$_m4\" | grep -q '/opt/sandy/relay'"
 "$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1
@@ -607,7 +616,7 @@ chmod +x "$SBX4/relay-bin/relay"
 env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4"; RC=$?
 ck "--start exits 0 with a relay installed in the slot" "[ $RC -eq 0 ]"
 C4="$(cid4)"
-_m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{\"\n\"}}{{end}}' "$C4" 2>/dev/null)"
+_m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C4" 2>/dev/null)"
 ck "the slot is mounted at /opt/sandy/relay" \
    "printf '%s' \"$_m4\" | grep -q '/opt/sandy/relay'"
 ck "...and docker reports it READ-ONLY (RW=false)" \
@@ -620,6 +629,12 @@ ck "...as a container-level process, not inside any tmux pane" \
 echo "-- F3. THE claim: the agent cannot replace its own relay (EROFS, not EACCES) --"
 # Run as the workspace uid, which is the uid that OWNS the file on the host --
 # the case permission bits cannot defend against.
+# PREMISE: without this, "the write fails" passes for the wrong reason -- the
+# first run of this phase failed with "Directory nonexistent" (the slot was
+# never mounted) and the check reported PASS. EROFS is only meaningful once the
+# path exists.
+ck "the slot entry EXISTS in the container (premise: a missing path fails a write for the wrong reason)" \
+   "docker exec \"$C4\" test -f /opt/sandy/relay/relay"
 _f3_uid="$(docker exec "$C4" id -u 2>/dev/null || echo 0)"
 _f3_err="$(docker exec "$C4" sh -c 'echo pwned > /opt/sandy/relay/relay' 2>&1 || true)"
 ck "a write to the installed relay FAILS from inside the container" \
@@ -647,11 +662,17 @@ ck "crossSessionInbound still defaults to accept on the strength of a slot relay
 
 echo "-- F5. SANDY_RELAY=0 suppresses it, and names who --"
 "$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1
+# mkdir first: sandy reaps empty protected stub dirs at launch ("Cleaned up 1
+# empty stub dir(s) ... .sandy"), so the directory this phase created at the top
+# is gone by now and the redirect would fail.
+mkdir -p "$WS4/.sandy"
 echo "SANDY_RELAY=0" > "$WS4/.sandy/config"
 env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4"; RC=$?
 ck "--start exits 0 with the capability off (SANDY_RELAY=0 is passive-safe: it only tightens)" "[ $RC -eq 0 ]"
 C4="$(cid4)"
-_m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{\"\n\"}}{{end}}' "$C4" 2>/dev/null)"
+_m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C4" 2>/dev/null)"
+ck "docker inspect returned mount rows (premise for the negative below)" \
+   "printf '%s' \"$_m4\" | grep -q '/home/claude'"
 ck "nothing is mounted at /opt/sandy/relay" \
    "! printf '%s' \"$_m4\" | grep -q '/opt/sandy/relay'"
 ck "no relay process is running" \
