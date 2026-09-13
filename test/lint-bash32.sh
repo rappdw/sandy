@@ -37,6 +37,15 @@
 #           clean. Detected via an explicit opener, NOT quote parity: parity was
 #           tried and floods false positives on any ordinary "don't" in prose.
 #
+#   CASESUB a `case` pattern inside a multi-line `$( )`. The sibling of APOSCS:
+#           bash 3.2 scans the substitution for the matching `)` instead of
+#           parsing it, so the `)` terminating a case PATTERN closes the
+#           substitution early and the file fails to parse -- reported at an
+#           unrelated line far below. run-tests.sh §119 carried this for weeks,
+#           green in CI (bash 5) and aborting the whole suite on macOS after
+#           1591 passing checks. Fix: hoist the `case` out of the substitution,
+#           or use the POSIX leading-paren form `(pattern)`.
+#
 #   GREPM   `grep -n ... | head` under pipefail (grep dies on EPIPE, exit 2,
 #           ERR trap aborts the run — a race, so it passes locally and fails in
 #           CI), and a flag cluster whose numeric argument was split by a bulk
@@ -297,20 +306,51 @@ def scan(path):
     # inside unrelated (and correct) code, after 1034 checks had passed.
     # Unbalanced parens are flagged for the same reason apostrophes are: the
     # observed error was `syntax error near unexpected token (`.
-    depth, opened_at = 0, 0
+    depth, opened_at, bal_mode, bal = 0, 0, False, 0
     for i, l in enumerate(lines, 1):
         # The heredoc opener must be a real one: not a `<<<` herestring (an awk
         # pattern containing "<<<" matched, and the block then ran on into
         # unrelated comments), and the substitution must not already CLOSE on
         # this line (`"$(sed -n "/<<'"'"'TAG'"'"'/,/^TAG$/p" f)"` is complete as written).
         _hd = re.search(r"(?<!<)<<(?!<)-?\s*['\"]?[A-Za-z_]", l)
-        if re.search(r"\$\(\s*$", l) or (_hd and l.count("$(") > l.count(")")):
-            if depth == 0:
-                opened_at = i
-            depth += 1
-        elif re.match(r'^\s*\)"?\s*$', l) and depth > 0:
+        # Third opener: a `$(` that is simply left OPEN at end of line, with the
+        # command continuing on the next line via `\` or a pipe. The original
+        # rule required `$(` to be the LAST thing on the line, which missed
+        # exactly the shape that cost a macOS run of run-tests.sh §119 --
+        # `X="$("$S" --print-schema | tr ... \` -- so neither APOSCS nor CASESUB
+        # ever looked inside it. Balanced lines (`x=$(foo bar)`) do not open.
+        # Narrow deliberately: the line must END in a continuation (`\` or a
+        # pipe), which is what makes it a genuine multi-line substitution. A
+        # bare "unbalanced $( anywhere" rule was tried and kept spans open
+        # across heredoc bodies and unrelated code for MAX_BLOCK lines, which
+        # is the false-positive flood the APOSCS header warns about -- it
+        # produced two bogus findings in run-tests.sh on first run.
+        _open = ("$(" in l and l.count("(") > l.count(")")
+                 and re.search(r"(?:\\|\|)\s*$", l) is not None)
+        if depth == 0:
+            if re.search(r"\$\(\s*$", l) or (_hd and l.count("$(") > l.count(")")):
+                # Balance-closed as well. The heredoc-carrying opener typically
+                # ends `)" || return 1`, which the bare-`)` rule never matched,
+                # so the span ran on for MAX_BLOCK lines and reported code far
+                # BELOW the substitution (a real false positive on sandy's
+                # _sandy_strip_refresh_token). The bare-`)` rule is kept as a
+                # second trigger for spans whose parens do not balance cleanly.
+                depth, opened_at, bal_mode = 1, i, True
+                bal = l.count("(") - l.count(")")
+            elif _open:
+                # Opened by the continuation rule: this span is closed by PAREN
+                # BALANCE, because the line that ends it typically closes inline
+                # (`| cut -d'"' -f4)" || true`) and never matches the bare-`)`
+                # rule the other openers rely on. Without that, the span stayed
+                # open for MAX_BLOCK lines and reported prose comments far below
+                # as findings.
+                depth, opened_at, bal_mode = 1, i, True
+                bal = l.count("(") - l.count(")")
+            continue
+        if re.match(r'^\s*\)"?\s*$', l):
             depth -= 1
-        elif depth > 0:
+            continue
+        if depth > 0:
             if i - opened_at > MAX_BLOCK:
                 depth = 0
                 continue
@@ -318,6 +358,32 @@ def scan(path):
                 "'" in l or l.count("(") != l.count(")")
             ):
                 out.append((i, "APOSCS", l.strip()[:88]))
+            # CASESUB — a `case` pattern inside a multi-line $( ). Same scanner
+            # flaw as APOSCS, different token: bash 3.2 does not parse the
+            # substitution, it scans for the matching `)`, so the unbalanced `)`
+            # that TERMINATES a case pattern is counted as closing the
+            # substitution. The file then fails to parse, bash reports the error
+            # at an unrelated line far below, and on a test suite the run aborts
+            # after printing a screenful of passes. Cost a full macOS run of
+            # run-tests.sh §119, which CI (bash 5) had been passing for weeks.
+            #
+            # The fix is either to hoist the `case` out of the substitution, or
+            # to write the POSIX leading-paren form `(pattern)`, which balances
+            # the scanner. A bare `case x in` with its patterns on later lines is
+            # flagged too: those lines carry the same unbalanced `)`.
+            elif re.match(r"^\s*case\b", l) and re.search(r"\bin\b", l):
+                _after = re.split(r"\bin\b", l, maxsplit=1)[1].strip()
+                if not _after.startswith("("):
+                    out.append((i, "CASESUB", l.strip()[:88]))
+            # Balance is updated AFTER the checks, deliberately. The `)` that
+            # terminates a case pattern is exactly what drives the balance to
+            # zero -- update first and the detector closes the span on the very
+            # line it is meant to report, reproducing the bash 3.2 bug it exists
+            # to find rather than catching it.
+            if bal_mode:
+                bal += l.count("(") - l.count(")")
+                if bal <= 0:
+                    depth = 0
 
     # GNUBIN — see the header for scope and why heredoc bodies are out.
     if os.path.basename(path) not in GNUBIN_EXEMPT:
@@ -400,8 +466,10 @@ if [ "$SELF_TEST" = true ]; then
     # An unterminated heredoc opener must not blank the rest of the file: the
     # `timeout` below it still has to be reported.
     printf '%s\n' '#!/bin/bash' 'echo "a string mentioning <<EOF that never ends"' 'timeout 60 prog' > "$_fx/gnubin4.sh"
+    # CASESUB: the exact run-tests.sh §119 shape that aborted a macOS run.
+    printf '%s\n' '#!/bin/bash' 'M="$(prog --list 2>/dev/null | tr "," "\\n" \\' '    | sort -u \\' '    | while IFS= read -r k; do' '          case " $E " in *" $k "*) continue ;; esac' '          echo "$k"' '      done)"' > "$_fx/casesub.sh"
     _fails=0
-    for probe in srcsub pyback aposcs aposcs2 aposq grepm grepm2 gnubin gnubin2 gnubin3 gnubin4; do
+    for probe in srcsub pyback aposcs aposcs2 aposq casesub grepm grepm2 gnubin gnubin2 gnubin3 gnubin4; do
         if python3 "$_scanner" "$_fx/$probe.sh" >/dev/null 2>&1; then
             echo "SELF-TEST FAIL: $probe fixture was NOT detected" >&2; _fails=$((_fails + 1))
         else
@@ -452,6 +520,7 @@ else
     echo "  SRCSUB  use extract-then-eval: v=\"\$(sed -n '/^f()/,/^}/p' x)\"; bash -c \"\$v; f\"" >&2
     echo "  PYBACK  use a QUOTED heredoc: python3 - arg <<'PY' ... PY" >&2
     echo "  APOSCS  reword the comment to avoid apostrophes" >&2
+    echo "  CASESUB hoist the case out of the \$( ), or use the leading-paren form (pattern)" >&2
     echo "  APOSQ   reword the comment; an apostrophe closes the single-quoted program" >&2
     echo "  GREPM   use 'grep -m1' instead of 'grep | head -1'; keep numeric flag args clear of -m" >&2
     echo "  GNUBIN  GNU-only on a BSD host: resolve timeout->gtimeout (or drop it), shasum -a 256," >&2

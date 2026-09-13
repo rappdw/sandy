@@ -219,6 +219,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_EGRESS_LOG` | `0` | `1`/`summary` = log which hosts the agent's egress actually reached (each distinct allowed `host:port` once) and print a session-end summary. Hostnames only — TLS is never terminated. Passive-safe (adds visibility) |
 | `SANDY_TOOL_AUDIT` | `0` | `1` = seed a Claude Code `PreToolUse` hook that appends `{ts,tool,args}` JSONL to `~/.claude/tool-audit.jsonl`. Claude-only, passive-safe (adds visibility); a user's own `PreToolUse` hook is never clobbered |
 | `SANDY_HANDOFF_DIRS` | `1` | Mount the per-sandbox handoff tree `~/.handoff/{outbox,inbox,peer,relay}` (inbox and peer `:ro`). **On by default since 1.10.0**; `0` opts a host or workspace out. Substrate only — sandy moves no files; a privileged `SANDY_HANDOFF_RELAY` is what moves them. Passive-safe. See "Handoff directories" |
+| `SANDY_RELAY` | `1` | Run the relay installed in this sandbox's slot, if there is one. A **capability** toggle: it names no path and asserts no payload. Install a relay by writing one executable file to `~/.sandy/sandboxes/<name>/relay-bin/relay` on the host — sandy mounts that directory **read-only** at `/opt/sandy/relay` and runs the entry. No config key, no approval prompt. `0` opts out and is passive-safe (it only tightens), but the resolved state records **who** turned it off (`disabled_by`) so a cloned repo cannot silently disable a fleet connector. See "Installing a relay" |
 | `SANDY_CROSS_SESSION_INBOUND` | _(conditional)_ | Whether another local session may inject a turn into this one (Claude Code's `crossSessionInbound`): `accept` (delivered, no prompt), `hold` (interactive approval), `refuse` (sender told it was not accepted). Unset resolves to `accept` **only** when a `SANDY_HANDOFF_RELAY` is configured *and will actually start this launch* — otherwise `refuse`, so a workspace with no relay has no open receive surface. `hold`/`refuse` are passive-safe; `accept` from a workspace `.sandy/config` triggers an approval prompt. Claude-only |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth). **Not forwarded when a Claude OAuth credential is already going into the container** (Claude Code resolves an env key ahead of the account credentials, so forwarding both either bills per-use or parks the session on Claude Code's custom-API-key startup prompt). Set `SANDY_CLAUDE_AUTH=api_key` to use it anyway |
@@ -471,6 +472,39 @@ Set `SANDY_HANDOFF_DIRS=0` (passive-safe, same tiers as any other passive key: e
 > the assumed adversary, every layer, and the honest residual risks — see
 > [`THREAT_MODEL.md`](docs/security/THREAT_MODEL.md). Empirical bypass attempts are in
 > [`ISOLATION_STRESS.md`](docs/security/ISOLATION_STRESS.md).
+
+
+### Installing a relay (`SANDY_RELAY`)
+
+A *relay* is a program that drains and fills the handoff directories — the thing that actually moves files. Before 1.11.0 the only way to install one was `SANDY_HANDOFF_RELAY=<path>`, a **privileged** key naming a file. That cost a per-workspace approval prompt, and it could not be turned on by default: it names a file sandy does not install, and a configured relay that cannot start fails the launch, so a global default would refuse to launch every sandbox that had not been provisioned by hand.
+
+`SANDY_RELAY` is a capability toggle instead. It is on by default and means *"run the installed relay if there is one"* — safe as a default because it is inert without host-side state a repository cannot create.
+
+Installing a relay is one file write, host-side:
+
+```sh
+install -m 755 my-connector ~/.sandy/sandboxes/<sandbox>/relay-bin/relay
+```
+
+Sandy mounts `relay-bin/` **read-only** at `/opt/sandy/relay` and runs `/opt/sandy/relay/relay` as a container-level process (a sibling of the tmux server, never a pane). Exactly one entry named `relay` — a `relay.d/*` set would break connectors whose claim lock refuses a second consumer on one notice directory.
+
+**Why a read-only mount and not permission bits.** The container process runs as *your* uid and owns that file, so `chmod` would succeed against a normal mount — the agent could rewrite its own relay. Under `:ro` the write returns `EROFS`, because the mount flag is checked above the permission check. An adapter can write files; only sandy can create a mount.
+
+**The honest limit**: sandy guarantees the *first* executable. It cannot guarantee the chain — a relay that execs a daemon out of a writable directory is replaceable at that second link.
+
+Two failure shapes, handled differently:
+
+- **Cannot start** (missing, not executable, no `~/.handoff/relay` mount, no `flock`): fails the launch, before or during container start.
+- **Starts, then exits**: if the first run exits non-zero within ~5s the session fails with that exit code. Past that window it is a runtime loop, which cannot un-succeed a launch that already completed — it is reported instead:
+
+```sh
+sandy --print-state | jq '.sandboxes[] | {name, relay}'
+# {"name":"myproj-1a2b3c4d","relay":{"state":"looping","restarts":417,"last_exit_code":3, ...}}
+```
+
+`state` is one of `absent`, `started`, `looping`, `failed`, `disabled`. The session marker (`/etc/sandy-session.json`) carries only `relay.slot` — `present`/`absent`/`disabled` — because it is written **before** the container starts and therefore cannot know whether the relay ran; live state comes from `--print-state`. Treat both as diagnostics: `~/.handoff/relay` is writable by the agent.
+
+`SANDY_HANDOFF_RELAY=<path>` still works and still wins when both are set (with a notice naming the winner), but it is **deprecated** as of 1.11.0.
 
 ### Egress proxy — cross-platform isolation
 

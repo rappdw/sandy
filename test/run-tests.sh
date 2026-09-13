@@ -11631,8 +11631,13 @@ check "§114(13f) marker printf: cross_session_inbound and handoff_relay fields 
     bash -c 'grep -q "\"cross_session_inbound\": %s" "$1" && grep -q "\"handoff_relay\": %s" "$1"' -- "$_S114_SANDY"
 _S114_FMT_LINE="$(grep -m1 -n '"cross_session_inbound": %s' "$_S114_SANDY" | cut -d: -f1)"
 _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]' | wc -l | tr -d ' ')"
-check "§114(13g) marker printf format/arg count line up (12 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 12
+# 15 as of 1.11.0: the relay{} object (#258) added slot, path and disabled_by to
+# the 12 fields this pinned before. The count is a cheap static tripwire for a
+# printf/arg mismatch, which silently shifts every field after the missing one;
+# §123(11a) is the behavioural half, asserting the composer's actual output
+# parses and carries the value it was given.
+check "§114(13g) marker printf format/arg count line up (15 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 15
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -11778,13 +11783,26 @@ printf '%s|%s|%s\n' "$SANDY_HANDOFF_INBOX" "$SANDY_HANDOFF_OUTBOX" "$SANDY_HANDO
 exit 7
 S114_RELAY_EOF
     chmod +x "$_S114_RF/ws/.sandy/relay-fail.sh"
+    # As of 1.11.0 (#258) this fixture relay — which exits 7 immediately — trips
+    # the bounded STARTUP WINDOW, so _sandy_start_handoff_relay now returns
+    # non-zero instead of returning 0 and leaving the session up. That is the
+    # point of the window (a relay that dies at startup on every launch must
+    # fail the session rather than crash-loop unnoticed for 35 hours), and it is
+    # asserted as a property in (16z) below rather than merely tolerated here.
+    # The `sleep 4` moved OUT of the subshell: the function no longer reaches
+    # it, and the backgrounded supervisor loop — disowned, so it outlives the
+    # subshell — still needs wall-clock time to accumulate the restarts (16a)
+    # measures.
+    _S114_RF_RC=0
     ( HOME="$_S114_RF/home" WORKSPACE="$_S114_RF/ws" bash -c "
         sandy_log(){ :; }
         SANDY_HANDOFF_RELAY='.sandy/relay-fail.sh'
         $_S114_SUP_FN
         _sandy_start_handoff_relay
-        sleep 4
-    " ) >/dev/null 2>&1
+    " ) >/dev/null 2>&1 || _S114_RF_RC=$?
+    sleep 4
+    check "§114(16z) a relay that dies at startup makes the supervisor function FAIL, so the session does not come up with nothing delivering (#258 startup window; got rc=$_S114_RF_RC)" \
+        bash -c '[ "$1" -ne 0 ]' -- "$_S114_RF_RC"
     _S114_LOOP_PID="$(cat "$_S114_RF/home/.handoff/relay/loop.pid" 2>/dev/null || true)"
     # Freeze the loop FIRST so it cannot respawn, then kill its current child
     # (the backoff `sleep`), then the loop -- killing the loop alone leaves that
@@ -11798,7 +11816,7 @@ S114_RELAY_EOF
         bash -c '[ "$(grep -c " start " "$1")" -ge 2 ] && grep -q "restart in 1s" "$1" && grep -q "restart in 2s" "$1"' -- "$_S114_RF/home/.handoff/relay/supervisor.log"
     check "§114(16b) env contract: SANDY_HANDOFF_INBOX/OUTBOX/RELAY_STATE all point under ~/.handoff" \
         bash -c 'grep -q "/.handoff/inbox|.*/.handoff/outbox|.*/.handoff/relay\$" "$1"' -- "$_S114_RF/home/.handoff/relay/env-seen"
-    rm -rf "$_S114_RF"
+    rm -rf "$_S114_RF"; unset _S114_RF_RC
 else
     skip "§114(16) dynamic supervisor loop test (flock unavailable on this host)"
 fi
@@ -12275,11 +12293,22 @@ check "§119(pre) README.md is readable (mutation: a bad path would make every c
 #     committed config cannot set it; documented in CLAUDE.md's tier section.
 #   SANDY_DEBUG_CLEANUP           - debug knob, not a supported surface.
 _S119_EXEMPT="SANDY_AUTO_APPROVE_PRIVILEGED SANDY_DEBUG_CLEANUP"
+# The exemptions are applied with `grep -vxF`, NOT with a `case` inside the
+# command substitution below. bash 3.2 does not fully parse `$( )` -- it scans
+# for the matching `)` -- so the unbalanced `)` that terminates a case PATTERN
+# is counted as closing the substitution, and the whole file fails to parse --
+# bash reports a syntax error near an unexpected newline. CI is bash 5 and never sees
+# it; the maintainer's macOS bash 3.2 aborts the entire suite here, before any
+# later section runs. Same family as APOSCS in test/lint-bash32.sh, which
+# catches the apostrophe version of the same scanner flaw; CASESUB now catches
+# this one.
+_S119_EXEMPT_ARGS=()
+for _S119_K in $_S119_EXEMPT; do _S119_EXEMPT_ARGS+=(-e "$_S119_K"); done
 
 _S119_MISSING="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' \
     | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([A-Z][A-Z0-9_]*\)".*/\1/p' | sort -u \
+    | grep -vxF "${_S119_EXEMPT_ARGS[@]}" \
     | while IFS= read -r _k; do
-          case " $_S119_EXEMPT " in *" $_k "*) continue ;; esac
           grep -q "$_k" "$_S119_README" || printf '%s ' "$_k"
       done)"
 check "§119(1) no config key is missing from README.md${_S119_MISSING:+ (missing: $_S119_MISSING)}" \
@@ -12304,11 +12333,16 @@ check "§119(2) the key extractor found a plausible number of keys (>40), so (1)
 # --help/--version are exempt: universal CLI conventions, and this table
 # documents sandy-specific behaviour rather than restating them.
 _S119_FLAG_EXEMPT="--help --version"
+# grep -vxF, not a `case` inside the substitution below -- see the CASESUB note
+# on _S119_EXEMPT above. This is the second instance of the same bug; the macOS
+# run aborted on the first one and never reached this line.
+_S119_FLAG_EXEMPT_ARGS=()
+for _S119_F in $_S119_FLAG_EXEMPT; do _S119_FLAG_EXEMPT_ARGS+=(-e "$_S119_F"); done
 _S119_FLAGROWS="$(grep '^| `--' "$_S119_README" || true)"
 _S119_FLAGS_MISSING="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' \
     | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\(--[a-z-]*\)".*/\1/p' | sort -u \
+    | grep -vxF "${_S119_FLAG_EXEMPT_ARGS[@]}" \
     | while IFS= read -r _f; do
-          case " $_S119_FLAG_EXEMPT " in *" $_f "*) continue ;; esac
           printf '%s' "$_S119_FLAGROWS" | grep -q -- "\`$_f" || printf '%s ' "$_f"
       done)"
 check "§119(4) every cli_flag has a row in README.md's flags TABLE (prose does not count)${_S119_FLAGS_MISSING:+ — missing: $_S119_FLAGS_MISSING}" \
@@ -12335,7 +12369,14 @@ echo "§120: sandy --exec runs as the HOST uid, never -u claude"
 #
 # Driven end to end against a stubbed `docker`, so these assert what the command
 # DOES, not what the source says.
-_S120_DIR="$(mktemp -d)"; mkdir -p "$_S120_DIR/bin" "$_S120_DIR/home/ws"
+# `pwd -P`, not a bare mktemp: on macOS `mktemp -d` hands back /var/folders/...,
+# which is a SYMLINK to /private/var/folders/... . sandy canonicalizes the
+# workspace with `pwd -P` but takes $HOME as given, so an uncanonicalized HOME
+# no longer prefixes the resolved workspace, the $HOME-relative mapping does not
+# apply, and -w falls back to the real host path -- failing §120(4) and §120(14)
+# on macOS only while CI (where /tmp is not a symlink) stays green. Reproduced
+# on Linux by pointing HOME at a symlink to the same tree.
+_S120_DIR="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$_S120_DIR/bin" "$_S120_DIR/home/ws"
 cat > "$_S120_DIR/bin/docker" <<'S120_STUB'
 #!/bin/bash
 # ps: honour the filter it was given so the daemon-vs-foreground precedence is
@@ -12587,6 +12628,240 @@ check "§115(2) no section header appears AFTER the summary block (mutation: app
 check "§115(3) exactly one summary block exists (mutation: a second copy would print two conflicting tallies)" \
     bash -c '[ "$(grep -c "^# BEGIN SUMMARY\$" "$1")" -eq 1 ]' -- "$_S115_SELF"
 unset _S115_SELF _S115_SUMMARY_LINE _S115_LAST_SECTION
+
+# ============================================================
+echo "§123: the relay capability — SANDY_RELAY, the :ro relay-bin slot, and honest state (#258)"
+# ============================================================
+# WHY THIS SECTION EXISTS, and what it deliberately does NOT test.
+#
+# #258 replaced "a relay is a per-workspace CONFIGURATION" (SANDY_HANDOFF_RELAY,
+# privileged, names a path) with "a relay is a sandy CAPABILITY" (SANDY_RELAY,
+# passive, names nothing; the payload is an executable in a host-owned slot).
+# Three properties carry the whole design, and each has a way of passing
+# vacuously that this section is built to prevent:
+#
+#   1. The slot is READ-ONLY BY MOUNT, not by permission bits. The agent runs
+#      as the host uid and OWNS the entry, so bits bind nothing — it could
+#      chmod and rewrite its own relay. Only the mount flag stops it. A check
+#      that greps RUN_FLAGS for ":ro" proves the string is present, NOT that
+#      the write fails; the real assertion is a write returning EROFS inside a
+#      container, which needs Docker and therefore lives in
+#      acceptance-handoff-dirs.sh. What is testable here is that the flag is on
+#      the right mount and that the mount exists exactly when the slot supplies
+#      the relay — so the acceptance test has something true to confirm.
+#   2. An installed-but-broken entry must be an ERROR, never "absent". The
+#      silent no-op is the failure mode the whole design exists to retire.
+#   3. The session marker must NEVER claim the relay started. It is bind-mounted
+#      :ro, so it is written before `docker run`, while the relay starts
+#      in-container — it cannot know. Reading `handoff_relay: true` as liveness
+#      is exactly why a relay crash-looped for 35 hours unnoticed.
+_S123_DIR="$(mktemp -d)"
+# Extract the two units under test rather than re-implementing their logic: a
+# paraphrase in a test asserts the paraphrase, not the shipped code.
+sed -n '/^# BEGIN relay capability/,/^# END relay capability/p' "$SANDY_SCRIPT" > "$_S123_DIR/resolve.sh"
+sed -n '/^_sandy_start_handoff_relay() {/,/^}$/p'                "$SANDY_SCRIPT" > "$_S123_DIR/supervisor.sh"
+
+check "§123(pre-a) the resolution block was extracted (mutation: renaming the BEGIN/END markers empties it and would make every resolution check below vacuous)" \
+    bash -c 'grep -q "_sandy_relay_slot=" "$1" && [ "$(grep -c . "$1")" -gt 20 ]' -- "$_S123_DIR/resolve.sh"
+check "§123(pre-b) the supervisor function was extracted" \
+    bash -c 'grep -q "flock -n 9" "$1" && [ "$(grep -c . "$1")" -gt 30 ]' -- "$_S123_DIR/supervisor.sh"
+
+# --- resolution: what the slot resolves to, driven through the real block ----
+# Each case runs the SHIPPED block against a real sandbox directory and reports
+# the three values every downstream site reads. `trap - ERR` inside the
+# substitution: run-tests.sh runs with an ERR trap and these cases include ones
+# that are SUPPOSED to exit non-zero (§92-class — an unguarded failure inside
+# `$( )` would abort the whole suite rather than being measured).
+_s123_resolve() {
+    # _s123_resolve <entry: none|exec|noexec> <SANDY_RELAY> <override> -> "slot from_slot relayvar" or "EXIT <n>"
+    local entry="$1" relayval="$2" override="$3" sb
+    sb="$_S123_DIR/sb.$$.$RANDOM"; mkdir -p "$sb"
+    case "$entry" in
+        exec)   mkdir -p "$sb/relay-bin"; printf '#!/bin/sh\nexit 0\n' > "$sb/relay-bin/relay"; chmod +x "$sb/relay-bin/relay" ;;
+        noexec) mkdir -p "$sb/relay-bin"; printf '#!/bin/sh\nexit 0\n' > "$sb/relay-bin/relay"; chmod 644 "$sb/relay-bin/relay" ;;
+    esac
+    # The block under test uses `exit 1` for its refusals, which kills the
+    # subshell outright -- so the status is captured HERE and turned into a
+    # value. Without that the assignment at the call site inherits a non-zero
+    # status and run-tests.sh's own ERR trap aborts the suite on the cases that
+    # are supposed to fail (the §92-class trap this repo has hit repeatedly).
+    local out rc=0
+    out="$(
+        trap - ERR
+        set +e
+        warn() { :; }; info() { :; }; _sandy_daemon_fatal() { :; }
+        SANDBOX_DIR="$sb"
+        [ -n "$relayval" ] && SANDY_RELAY="$relayval"
+        [ -n "$override" ] && SANDY_HANDOFF_RELAY="$override"
+        . "$_S123_DIR/resolve.sh"
+        echo "$_sandy_relay_slot $_sandy_relay_from_slot ${SANDY_HANDOFF_RELAY:-<unset>}"
+    2>/dev/null )" || rc=$?
+    if [ "$rc" -ne 0 ]; then echo "EXIT $rc"; else echo "$out"; fi
+    return 0
+}
+
+_S123_A="$(trap - ERR; _s123_resolve none   '' '')"
+check "§123(1) no entry in the slot is 'absent' and starts nothing — the state that lets SANDY_RELAY default to 1 without breaking unprovisioned sandboxes (got: $_S123_A)" \
+    bash -c '[ "$1" = "absent false <unset>" ]' -- "$_S123_A"
+
+_S123_B="$(trap - ERR; _s123_resolve exec   '' '')"
+check "§123(2) an executable entry resolves to the container-side slot path, so the existing relay machinery runs it unchanged (got: $_S123_B)" \
+    bash -c '[ "$1" = "present true /opt/sandy/relay/relay" ]' -- "$_S123_B"
+
+_S123_C="$(trap - ERR; _s123_resolve exec   0  '')"
+check "§123(3) SANDY_RELAY=0 suppresses an installed relay entirely — the opt-out tightens, and nothing is handed downstream (got: $_S123_C)" \
+    bash -c '[ "$1" = "disabled false <unset>" ]' -- "$_S123_C"
+
+_S123_D="$(trap - ERR; _s123_resolve noexec '' '')"
+check "§123(4) an entry that exists but is NOT executable FAILS THE LAUNCH — never silently 'absent', which is the no-op this design exists to retire (got: $_S123_D)" \
+    bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_D"
+
+_S123_E="$(trap - ERR; _s123_resolve exec   '' '/workspace/.sandy/relay.sh')"
+check "§123(5) an explicit SANDY_HANDOFF_RELAY wins over the slot and the slot is NOT also used — never merged, one winner (got: $_S123_E)" \
+    bash -c '[ "$1" = "present false /workspace/.sandy/relay.sh" ]' -- "$_S123_E"
+
+# Anti-vacuity for 1-5: the five cases must not all be the same string, which is
+# what a resolve.sh that failed to source would produce.
+check "§123(6) the five resolution cases produced five distinct outcomes (mutation: a block that no-ops makes them identical and 1-5 meaningless)" \
+    bash -c '[ "$(printf "%s\n%s\n%s\n%s\n%s\n" "$1" "$2" "$3" "$4" "$5" | sort -u | grep -c .)" -eq 5 ]' \
+    -- "$_S123_A" "$_S123_B" "$_S123_C" "$_S123_D" "$_S123_E"
+
+# --- the mount: right target, right flag, present exactly when it should be --
+# This asserts the flag is attached to the SLOT mount specifically. It cannot
+# assert EROFS (no container here) — acceptance-handoff-dirs.sh does that.
+_S123_MOUNTBLK="$(grep -n 'relay-bin\|_sandy_relay_slot_dir:' "$SANDY_SCRIPT" | grep '/opt/sandy/relay' || true)"
+check "§123(7) the slot is mounted at /opt/sandy/relay with the :ro FLAG (bits would not bind an agent running as the owning uid)" \
+    bash -c 'echo "$1" | grep -q -- "_sandy_relay_slot_dir:/opt/sandy/relay:ro"' -- "$_S123_MOUNTBLK"
+check "§123(8) the slot mount is gated on the slot actually supplying the relay, so a deprecated override or a headless skip leaves nothing mounted" \
+    bash -c 'grep -A3 "_sandy_relay_from_slot:-false" "$1" | grep -q "_sandy_relay_slot_dir:/opt/sandy/relay:ro"' -- "$SANDY_SCRIPT"
+check "§123(9) the slot mount does NOT reuse the handoff relay STATE dir (relay-bin/ vs handoff/relay/ — one is :ro code, the other rw state)" \
+    bash -c '! grep -q "handoff/relay:/opt/sandy/relay" "$1"' -- "$SANDY_SCRIPT"
+
+# --- the marker records INTENT and is structurally unable to record liveness --
+check "§123(10) the session marker emits relay.slot (launch intent), not relay.state" \
+    bash -c 'grep -q "\"slot\": %s" "$1"' -- "$SANDY_SCRIPT"
+# (11) is BEHAVIOURAL, not a grep: it runs the shipped marker composer with the
+# slot in its "a relay will run" state — the one case where a careless
+# implementation would be tempted to write "started" — and reads the JSON it
+# actually produced. A source-text check can be walked around by moving the
+# literal into the printf format string; this cannot.
+sed -n '/^_sandy_relay_json=false;/,/^    > "\$_sandy_session_file"$/p' "$SANDY_SCRIPT" > "$_S123_DIR/marker.sh"
+_S123_MARKER="$(
+    trap - ERR
+    set +e
+    sandy_full_version() { echo "1.11.0-test"; }
+    _sandy_egress_mode=permissive; SANDY_WORKSPACE=/home/claude/dev/x
+    _sandy_session_nonce=deadbeef; _sandy_effort_json=null
+    _sandy_perm_mode_json='"bypassPermissions"'; _sandy_csi_json='"accept"'; CRED_MODE=full
+    _sandy_session_file="$_S123_DIR/marker.json"
+    _sandy_relay_slot=present; SANDY_HANDOFF_RELAY=/opt/sandy/relay/relay; _SANDY_RELAY_SOURCE=""
+    . "$_S123_DIR/marker.sh" >/dev/null 2>&1
+    cat "$_S123_DIR/marker.json" 2>/dev/null
+)"
+check "§123(11a) the marker composer emits parseable JSON carrying relay.slot" \
+    bash -c 'echo "$1" | tr -d " \n" | grep -q "\"relay\":{\"slot\":\"present\"" && echo "$1" | grep -q "\"schema\": 1"' -- "$_S123_MARKER"
+check "§123(11b) the marker NEVER says the relay started, even with a relay about to run — it is composed before docker run while the relay starts in-container, so that field would be a claim sandy is structurally unable to make (this is the 35-hour-crash-loop regression)" \
+    bash -c '! echo "$1" | grep -q "started"' -- "$_S123_MARKER"
+check "§123(11c) the marker carries no live-state fields at all (no restarts/last_exit_code/state) — those belong to --print-state, which can actually observe them" \
+    bash -c '! echo "$1" | grep -qE "\"(state|restarts|last_exit_code|last_restart_at)\""' -- "$_S123_MARKER"
+check "§123(12) handoff_relay is still emitted, so 1.10.0 consumers do not break on the new field" \
+    bash -c 'grep -q "\"handoff_relay\": %s" "$1"' -- "$SANDY_SCRIPT"
+
+# --- --print-state carries the LIVE state, from fixtures of every shape -------
+# Built as real sandbox directories under an isolated SANDY_HOME and read by the
+# real fast-path handler, so this exercises the shipped emitter end to end.
+_S123_PSH="$_S123_DIR/home"; mkdir -p "$_S123_PSH/sandboxes"
+_s123_mksb() { mkdir -p "$_S123_PSH/sandboxes/$1/handoff/relay" "$_S123_PSH/sandboxes/$1/relay-bin"; printf '{"canonical_path":"/nonexistent/%s"}\n' "$1" > "$_S123_PSH/sandboxes/$1/WORKSPACE.json"; }
+_s123_install() { printf '#!/bin/sh\n' > "$_S123_PSH/sandboxes/$1/relay-bin/relay"; chmod +x "$_S123_PSH/sandboxes/$1/relay-bin/relay"; }
+_s123_mksb r-absent
+_s123_mksb r-started;  _s123_install r-started;  printf 'state=started\nrestarts=0\nlast_exit_code=\nlast_restart_at=\n' > "$_S123_PSH/sandboxes/r-started/handoff/relay/.state"
+_s123_mksb r-looping;  _s123_install r-looping;  printf 'state=looping\nrestarts=417\nlast_exit_code=3\nlast_restart_at=2026-09-12T01:02:03Z\n' > "$_S123_PSH/sandboxes/r-looping/handoff/relay/.state"
+_s123_mksb r-failed;   _s123_install r-failed
+_s123_mksb r-disabled; printf '{\n  "schema": 1,\n  "relay": {\n    "slot": "disabled",\n    "path": null,\n    "disabled_by": "workspace"\n  }\n}\n' > "$_S123_PSH/sandboxes/r-disabled/sandy-session.json"
+
+_s123_state() { SANDY_HOME="$_S123_PSH" "$SANDY_SCRIPT" --print-state 2>/dev/null | tr -d ' \n' | sed -n "s/.*\"name\":\"$1\".*/&/p"; }
+_S123_PS="$(trap - ERR; SANDY_HOME="$_S123_PSH" "$SANDY_SCRIPT" --print-state 2>/dev/null || true)"
+_s123_field() { printf '%s' "$_S123_PS" | tr -d ' \n' | sed -n "s/.*\"name\":\"$1\"[^}]*\"relay\":{\([^}]*\)}.*/\1/p"; }
+
+check "§123(13) --print-state reports 'absent' for a sandbox with no relay installed" \
+    bash -c 'echo "$1" | grep -q "\"state\":\"absent\""' -- "$(trap - ERR; _s123_field r-absent)"
+check "§123(14) --print-state reports 'started' when the supervisor recorded a clean start" \
+    bash -c 'echo "$1" | grep -q "\"state\":\"started\""' -- "$(trap - ERR; _s123_field r-started)"
+check "§123(15) --print-state reports 'looping' WITH the restart count and last exit code — the field that would have surfaced a 35-hour crash loop" \
+    bash -c 'echo "$1" | grep -q "\"state\":\"looping\"" && echo "$1" | grep -q "\"restarts\":417" && echo "$1" | grep -q "\"last_exit_code\":3"' \
+    -- "$(trap - ERR; _s123_field r-looping)"
+check "§123(16) --print-state reports 'failed' for a relay that is installed but which no supervisor ever recorded starting" \
+    bash -c 'echo "$1" | grep -q "\"state\":\"failed\""' -- "$(trap - ERR; _s123_field r-failed)"
+check "§123(17) --print-state reports 'disabled' and names WHO disabled it, so a cloned repo cannot silently un-enrol a fleet sandbox" \
+    bash -c 'echo "$1" | grep -q "\"state\":\"disabled\"" && echo "$1" | grep -q "\"disabled_by\":\"workspace\""' \
+    -- "$(trap - ERR; _s123_field r-disabled)"
+check "§123(18) the five fixtures produced five DISTINCT states (mutation: an emitter hardcoding one value passes 13-17 individually and fails here)" \
+    bash -c 'n="$(for s in r-absent r-started r-looping r-failed r-disabled; do v="$(printf "%s\n" "$1" | tr -d " \n" | sed -n "s/.*\"name\":\"$s\"[^}]*\"relay\":{\"state\":\"\([a-z]*\)\".*/\1/p" | head -1)"; printf "%s\n" "$v"; done | sort -u | grep -c .)"; [ "$n" -eq 5 ]' -- "$_S123_PS"
+check "§123(19) relay is emitted in LIGHT mode too — a fleet poller must not have to pay for a du walk to learn its connectors are down" \
+    bash -c 'SANDY_HOME="$2" "$1" --print-state --light 2>/dev/null | tr -d " \n" | grep -q "\"relay\":{\"state\""' -- "$SANDY_SCRIPT" "$_S123_PSH"
+check "§123(20) --print-state keeps its stream contract with the new field (0 bytes on stderr)" \
+    bash -c 'e="$(SANDY_HOME="$2" "$1" --print-state 2>&1 >/dev/null)"; [ -z "$e" ]' -- "$SANDY_SCRIPT" "$_S123_PSH"
+check "§123(21) live state is read from the fixed-size .state file, NOT by parsing the append-only supervisor.log (which a crash loop grows without bound — an unbounded read in a polling path)" \
+    bash -c '! grep -q "supervisor.log" "$1" || ! grep -n "supervisor.log" "$1" | awk -F: "\$1 > 1900 && \$1 < 2200" | grep -q .' -- "$SANDY_SCRIPT"
+
+# --- housekeeping: the slot must survive a reset, and be named when destroyed -
+check "§123(22) --reset-sandbox PRESERVES relay-bin/ — without this the reset silently un-enrols the sandbox, since everything unnamed is destroyed" \
+    bash -c 'grep -q "WORKSPACE.json|.handoff-enabled|relay-bin|agent-args" "$1"' -- "$SANDY_SCRIPT"
+check "§123(23) --reset-sandbox NAMES the preserved relay, so an operator is not told by omission that it was destroyed" \
+    bash -c 'grep -q "relay-bin/ (installed relay)" "$1"' -- "$SANDY_SCRIPT"
+check "§123(24) --remove-sandbox names the relay it will destroy in its printed plan" \
+    bash -c 'grep -q "an installed relay (relay-bin/relay) will be destroyed" "$1"' -- "$SANDY_SCRIPT"
+check "§123(25) SANDY_EXTRA_ENV REFUSES SANDY_HANDOFF_* — the one route by which those derived exports were settable; a forwarded name lands last-wins in the -e order and makes the environment and the marker disagree" \
+    bash -c 'grep -q "SANDY_HANDOFF_\*)" "$1"' -- "$SANDY_SCRIPT"
+
+# --- the bounded startup window, driven by REAL relays that really exit -------
+# The property under test is behavioural and cannot be greped for: a relay that
+# dies at startup must fail the session, while one that exits 0 or stays up must
+# not. Needs flock (the supervisor refuses without it), so it is skipped loudly
+# rather than silently on a host that lacks it.
+if command -v flock >/dev/null 2>&1; then
+    _s123_window() {
+        # _s123_window <relay body> -> "rc=<n>"
+        local body="$1" h="$_S123_DIR/w.$$.$RANDOM"
+        mkdir -p "$h/.handoff/relay" "$h/ws"
+        printf '%s\n' "$body" > "$h/r.sh"; chmod +x "$h/r.sh"
+        local rc=0
+        (
+            trap - ERR
+            set +e
+            sandy_log() { :; }
+            HOME="$h"; WORKSPACE="$h/ws"; SANDY_HANDOFF_RELAY="$h/r.sh"
+            . "$_S123_DIR/supervisor.sh"
+            # Same capture rule as _s123_resolve: the function's refusal is an
+            # `exit 1` that kills this subshell, so the status is read outside
+            # it rather than echoed from within (which would never run).
+            _sandy_start_handoff_relay
+        ) >/dev/null 2>&1 || rc=$?
+        pkill -f "$h/r.sh" >/dev/null 2>&1 || true
+        echo "rc=$rc"
+        return 0
+    }
+    _S123_W1="$(trap - ERR; _s123_window '#!/bin/sh
+exit 3')"
+    check "§123(26) a relay that exits NON-ZERO inside the startup window fails the session — the 'died at startup on every launch' case, which a launch-time check alone never caught (got: $_S123_W1)" \
+        bash -c '[ "$1" = "rc=1" ]' -- "$_S123_W1"
+    _S123_W2="$(trap - ERR; _s123_window '#!/bin/sh
+exit 0')"
+    check "§123(27) a relay that exits ZERO does NOT fail the session — a relay is allowed to be a one-shot (got: $_S123_W2)" \
+        bash -c '[ "$1" = "rc=0" ]' -- "$_S123_W2"
+    _S123_W3="$(trap - ERR; _s123_window '#!/bin/sh
+sleep 30')"
+    check "§123(28) a relay that stays up does NOT fail the session — the window must not false-positive on a healthy relay (got: $_S123_W3)" \
+        bash -c '[ "$1" = "rc=0" ]' -- "$_S123_W3"
+    check "§123(29) only the FIRST run's outcome is used for the window — a later exit is a runtime loop and cannot un-succeed a launch that already completed" \
+        bash -c 'grep -q "if \[ \"\$first\" = 1 \]; then echo \"rc=\$rc\" > \"\$_st/.startup\"; first=0; fi" "$1"' -- "$_S123_DIR/supervisor.sh"
+    check "§123(30) a stale verdict from a previous container is cleared before the supervisor starts (the sandbox dir outlives the container)" \
+        bash -c 'grep -q "rm -f \"\$_st/.startup\" \"\$_st/.state\"" "$1"' -- "$_S123_DIR/supervisor.sh"
+else
+    skip "§123(26-30) startup-window behaviour — no flock on this host, so the supervisor cannot run"
+fi
+rm -rf "$_S123_DIR"
+unset _S123_MARKER _S123_DIR _S123_A _S123_B _S123_C _S123_D _S123_E _S123_PS _S123_PSH _S123_MOUNTBLK _S123_W1 _S123_W2 _S123_W3
 
 # BEGIN SUMMARY
 # ============================================================

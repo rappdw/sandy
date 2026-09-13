@@ -2237,7 +2237,7 @@ fi
 fi  # section 22
 
 # ============================================================
-section "23. Handoff directories + relay acceptance (#132 slice 1, SANDY_HANDOFF_RELAY 1.10.0) — test/acceptance-handoff-dirs.sh"
+section "23. Handoff directories + relay acceptance (#132 slice 1, SANDY_HANDOFF_RELAY 1.10.0, relay slot 1.11.0/#258) — test/acceptance-handoff-dirs.sh"
 # ============================================================
 if [ "$_SECTION_ON" = true ]; then
 # Phases A-D: directory/mount substrate (outbox rw, inbox :ro, peer :ro,

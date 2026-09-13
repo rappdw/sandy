@@ -563,6 +563,172 @@ rm -f "$SANDY_HOME_DIR/config.bak2"
 # inspect` -- not repeated here.
 
 echo
+echo "== F. the relay SLOT (SANDY_RELAY + relay-bin/, 1.11.0, #258) =="
+# WHY THIS PHASE NEEDS DOCKER, when run-tests.sh §123 already covers the logic:
+# §123 can prove the `:ro` flag is on the right mount. It CANNOT prove the write
+# actually fails, and that is the entire security claim of the slot. The agent
+# runs as the HOST uid and OWNS $SANDBOX_DIR/relay-bin/relay, so permission bits
+# bind nothing -- it could chmod and rewrite its own relay. Only a read-only
+# MOUNT stops it, and only a real container can demonstrate EROFS rather than
+# EACCES. An adapter can write files; it cannot create a mount.
+#
+# Runs on a fresh workspace with NO SANDY_HANDOFF_RELAY anywhere, because the
+# deprecated key wins over the slot and would mask everything below.
+WS4="$(mktemp -d)/mbx-slot-$$"
+mkdir -p "$WS4/.sandy" && (cd "$WS4" && git init -q)
+WS4="$(cd "$WS4" && pwd -P)"
+cid4() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.workspace_path=$WS4" 2>/dev/null | head -1; }
+# Drop the privileged relay key for this phase, then restore it afterwards.
+cp "$SANDY_HOME_DIR/config" "$SANDY_HOME_DIR/config.f.bak"
+grep -v '^SANDY_HANDOFF_RELAY=' "$SANDY_HOME_DIR/config" > "$SANDY_HOME_DIR/config.f.tmp" || true
+mv "$SANDY_HOME_DIR/config.f.tmp" "$SANDY_HOME_DIR/config"
+
+echo "-- F1. an EMPTY slot launches normally (this is what lets SANDY_RELAY default to 1) --"
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4"; RC=$?
+ck "--start exits 0 with no relay installed" "[ $RC -eq 0 ]"
+C4="$(cid4)"
+ck "daemon container is running" "[ -n \"$C4\" ]"
+SESS4="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C4" 2>/dev/null)"
+# PREMISE, not decoration. The first cut of this phase escaped the Go template
+# ({{index .Config.Labels \"sandy.session\"}}), docker returned nothing, SBX4
+# became ".../sandboxes/" and every write below landed nowhere -- while the
+# NEGATIVE checks ("nothing is mounted", "the write fails") all reported PASS,
+# because an empty inspect satisfies them. A premise that can silently go empty
+# has to be asserted before anything is concluded from it.
+ck "session label resolved (premise: every path below is built from it)" "[ -n \"$SESS4\" ]"
+SBX4="$SANDY_HOME_DIR/sandboxes/$SESS4"
+ck "the slot directory was created host-side (presence carries no information, by construction)" \
+   "[ -d \"$SBX4/relay-bin\" ]"
+_m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C4" 2>/dev/null)"
+ck "docker inspect returned mount rows (premise: the negative below is vacuous against empty output)" \
+   "printf '%s' \"$_m4\" | grep -q '/home/claude'"
+ck "...and NOTHING is mounted at /opt/sandy/relay when the slot is empty" \
+   "! printf '%s' \"$_m4\" | grep -q '/opt/sandy/relay'"
+"$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1
+
+echo "-- F2. an installed relay runs, and its slot is mounted READ-ONLY --"
+cat > "$SBX4/relay-bin/relay" <<'SLOTFIX'
+#!/bin/sh
+echo "$$ $SANDY_HANDOFF_INBOX $SANDY_HANDOFF_OUTBOX $SANDY_HANDOFF_RELAY_STATE" >> "$SANDY_HANDOFF_RELAY_STATE/slot-seen"
+sleep 3600
+SLOTFIX
+chmod +x "$SBX4/relay-bin/relay"
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4"; RC=$?
+ck "--start exits 0 with a relay installed in the slot" "[ $RC -eq 0 ]"
+C4="$(cid4)"
+_m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C4" 2>/dev/null)"
+ck "the slot is mounted at /opt/sandy/relay" \
+   "printf '%s' \"$_m4\" | grep -q '/opt/sandy/relay'"
+ck "...and docker reports it READ-ONLY (RW=false)" \
+   "printf '%s' \"$_m4\" | grep -q '^/opt/sandy/relay false'"
+ck "the relay from the slot actually ran (it wrote the env contract)" \
+   "docker exec \"$C4\" test -s /home/claude/.handoff/relay/slot-seen"
+ck "...as a container-level process, not inside any tmux pane" \
+   "docker exec \"$C4\" pgrep -f /opt/sandy/relay/relay >/dev/null"
+
+echo "-- F3. THE claim: the agent cannot replace its own relay (EROFS, not EACCES) --"
+# Run as the workspace uid, which is the uid that OWNS the file on the host --
+# the case permission bits cannot defend against.
+# PREMISE: without this, "the write fails" passes for the wrong reason -- the
+# first run of this phase failed with "Directory nonexistent" (the slot was
+# never mounted) and the check reported PASS. EROFS is only meaningful once the
+# path exists.
+ck "the slot entry EXISTS in the container (premise: a missing path fails a write for the wrong reason)" \
+   "docker exec \"$C4\" test -f /opt/sandy/relay/relay"
+_f3_uid="$(docker exec "$C4" id -u 2>/dev/null || echo 0)"
+_f3_err="$(docker exec "$C4" sh -c 'echo pwned > /opt/sandy/relay/relay' 2>&1 || true)"
+ck "a write to the installed relay FAILS from inside the container" \
+   "! docker exec \"$C4\" sh -c 'echo pwned > /opt/sandy/relay/relay' 2>/dev/null"
+ck "...and fails with a READ-ONLY FILE SYSTEM error, not a permission error -- proving the MOUNT is the boundary, not the bits (got: $_f3_err)" \
+   "printf '%s' \"$_f3_err\" | grep -qi 'read-only'"
+ck "...the file is still owned by the container user, so bits alone would NOT have stopped it (this is what makes the check above meaningful rather than incidental)" \
+   "[ \"\$(docker exec \"$C4\" stat -c %u /opt/sandy/relay/relay 2>/dev/null)\" = \"$_f3_uid\" ]"
+ck "creating a NEW file in the slot also fails (the whole directory is :ro, not just the entry)" \
+   "! docker exec \"$C4\" sh -c 'touch /opt/sandy/relay/evil' 2>/dev/null"
+ck "the relay is unchanged on the host after the attempt" \
+   "grep -q 'slot-seen' \"$SBX4/relay-bin/relay\""
+
+echo "-- F4. --print-state reports the live state, and the marker reports only intent --"
+# NOTE the `\$` in every pattern below: the variable must expand when ck EVALs
+# the string, not when the string is built. These hold JSON, so interpolating
+# them at write time embeds raw `"` characters into the command and destroys its
+# quoting -- which is what made the first run of this phase report four
+# failures against a feature that was working. Phase E6 gets this right; this
+# did not.
+_f4_ps="$("$SANDY" --print-state 2>/dev/null | tr -d ' \n')"
+_f4_marker="$(docker exec "$C4" cat /etc/sandy-session.json 2>/dev/null | tr -d ' \n')"
+# PREMISES. Without these the NEGATIVE below ("does not claim started") passes
+# against an empty read, which is exactly how it passed while telling us
+# nothing -- twice in this phase now.
+ck "the marker was read and is JSON (premise: the negative below is vacuous against an empty read)" \
+   "printf '%s' \"\$_f4_marker\" | grep -q '\"schema\":1'"
+ck "--print-state produced output naming this sandbox (premise)" \
+   "printf '%s' \"\$_f4_ps\" | grep -q '\"name\":\"$SESS4\"'"
+ck "--print-state reports relay.state=started for this sandbox" \
+   "printf '%s' \"\$_f4_ps\" | grep -q '\"name\":\"$SESS4\"[^}]*\"relay\":{\"state\":\"started\"'"
+ck "the session marker reports relay.slot=present (launch intent)" \
+   "printf '%s' \"\$_f4_marker\" | grep -q '\"relay\":{\"slot\":\"present\"'"
+ck "...and the marker does NOT claim the relay started -- it is written before docker run and cannot know" \
+   "! printf '%s' \"\$_f4_marker\" | grep -q 'started'"
+ck "crossSessionInbound still defaults to accept on the strength of a slot relay" \
+   "printf '%s' \"\$_f4_marker\" | grep -q '\"cross_session_inbound\":\"accept\"'"
+
+echo "-- F5. SANDY_RELAY=0 suppresses it, and names who --"
+"$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1
+# mkdir first: sandy reaps empty protected stub dirs at launch ("Cleaned up 1
+# empty stub dir(s) ... .sandy"), so the directory this phase created at the top
+# is gone by now and the redirect would fail.
+mkdir -p "$WS4/.sandy"
+echo "SANDY_RELAY=0" > "$WS4/.sandy/config"
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4"; RC=$?
+ck "--start exits 0 with the capability off (SANDY_RELAY=0 is passive-safe: it only tightens)" "[ $RC -eq 0 ]"
+C4="$(cid4)"
+_m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C4" 2>/dev/null)"
+ck "docker inspect returned mount rows (premise for the negative below)" \
+   "printf '%s' \"$_m4\" | grep -q '/home/claude'"
+ck "nothing is mounted at /opt/sandy/relay" \
+   "! printf '%s' \"$_m4\" | grep -q '/opt/sandy/relay'"
+ck "no relay process is running" \
+   "! docker exec \"$C4\" pgrep -f /opt/sandy/relay/relay >/dev/null 2>&1"
+_f5_marker="$(docker exec "$C4" cat /etc/sandy-session.json 2>/dev/null | tr -d ' \n')"
+ck "the marker was read and is JSON (premise)" \
+   "printf '%s' \"\$_f5_marker\" | grep -q '\"schema\":1'"
+ck "the marker records slot=disabled and NAMES the workspace as the source, so a cloned repo cannot silently un-enrol a fleet sandbox" \
+   "printf '%s' \"\$_f5_marker\" | grep -q '\"slot\":\"disabled\",\"path\":null,\"disabled_by\":\"workspace\"'"
+ck "...and crossSessionInbound falls back to refuse, leaving no open receive surface with nothing delivering" \
+   "printf '%s' \"\$_f5_marker\" | grep -q '\"cross_session_inbound\":\"refuse\"'"
+
+echo "-- F6. --reset-sandbox preserves the installed relay --"
+"$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1
+rm -f "$WS4/.sandy/config"
+"$SANDY" --reset-sandbox --workspace "$WS4" --yes >/dev/null 2>&1
+ck "relay-bin/relay survives a --reset-sandbox (operator state; destroying it would silently un-enrol the sandbox)" \
+   "[ -x \"$SBX4/relay-bin/relay\" ]"
+ck "...while the rest of the sandbox really was reset (handoff/ is gone)" \
+   "[ ! -d \"$SBX4/handoff/relay\" ] || [ -z \"\$(ls -A \"$SBX4/handoff/relay\" 2>/dev/null)\" ]"
+
+echo "-- F7. an installed-but-not-executable entry FAILS the launch (never silently 'absent') --"
+chmod -x "$SBX4/relay-bin/relay"
+_f7_out="$(mktemp)"; _f7_rc=0
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4" > "$_f7_out" 2>&1 || _f7_rc=$?
+ck "--start refuses (nonzero) when the slot entry is not executable" "[ $_f7_rc -ne 0 ]"
+ck "...and says so, naming the remedy" \
+   "grep -q 'is not an executable file' \"$_f7_out\""
+ck "...and no daemon container was left behind" "[ -z \"$(cid4)\" ]"
+rm -f "$_f7_out"
+
+echo "-- F8. a relay that dies at startup FAILS the launch (the 35-hour crash loop) --"
+printf '#!/bin/sh\nexit 3\n' > "$SBX4/relay-bin/relay"; chmod +x "$SBX4/relay-bin/relay"
+_f8_out="$(mktemp)"; _f8_rc=0
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4" > "$_f8_out" 2>&1 || _f8_rc=$?
+ck "--start refuses (nonzero) for a relay that execs and immediately exits non-zero" "[ $_f8_rc -ne 0 ]"
+ck "...the supervisor log records the failing exit code host-side, where an operator can actually find it" \
+   "grep -q 'rc=3' \"$SBX4/handoff/relay/supervisor.log\""
+rm -f "$_f8_out"
+"$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1 || true
+mv "$SANDY_HOME_DIR/config.f.bak" "$SANDY_HOME_DIR/config"
+
+echo
 echo "==================================================="
 printf 'RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
 echo "==================================================="
