@@ -981,11 +981,15 @@ _sandy_start_handoff_relay() {
         exit 1
     fi
     export SANDY_HANDOFF_INBOX="$HOME/.handoff/inbox" SANDY_HANDOFF_OUTBOX="$HOME/.handoff/outbox" SANDY_HANDOFF_RELAY_STATE="$_st" SANDY_HANDOFF_PEER="$HOME/.handoff/peer"
+    # A verdict or state file left by an earlier container must not be read as
+    # this one's — the sandbox directory outlives the container.
+    rm -f "$_st/.startup" "$_st/.state"
     (
         set +e; trap - ERR; trap '' HUP     # user-setup runs set -e + an ERR trap; the loop must survive relay exits
         exec 9>"$_lock"
         if ! flock -n 9; then
             echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor already running (lock held); not starting a second" >> "$_st/supervisor.log"
+            echo "already-running" > "$_st/.startup"
             exit 0
         fi
         # The success log is written here, AFTER the lock is actually held, not by
@@ -993,7 +997,25 @@ _sandy_start_handoff_relay() {
         # attempt is the singleton winner or the "already running" loser above, and
         # logging unconditionally on the caller's side would claim success for both.
         echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor started ($_r)" >> "$_st/supervisor.log"
+        # A small, FIXED-SIZE state file beside the log (#258). `sandy
+        # --print-state` reads this rather than parsing supervisor.log: the log
+        # is append-only and a crash-looping relay grows it without bound, so
+        # counting exits in it would put an unbounded read in a polling path.
+        # The supervisor is anyway the authority on its own restart count —
+        # deriving it by re-parsing its own output would be a second source.
+        #
+        # It is DIAGNOSTICS, never a security signal: ~/.handoff/relay is
+        # mounted rw (the relay needs to write state there), so the agent can
+        # write this file too. Nothing may make a trust decision on it.
+        restarts=0
+        _relay_state() {
+            printf 'state=%s\nrestarts=%s\nlast_exit_code=%s\nlast_restart_at=%s\n' \
+                "$1" "$restarts" "${2:-}" "${3:-}" > "$_st/.state.tmp" 2>/dev/null \
+                && mv -f "$_st/.state.tmp" "$_st/.state" 2>/dev/null || true
+        }
+        _relay_state started
         backoff=1
+        first=1
         while :; do
             echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) start $_r" >> "$_st/supervisor.log"
             t0=$(date +%s)
@@ -1004,6 +1026,12 @@ _sandy_start_handoff_relay() {
             # "already running".
             "$_r" 9>&- >> "$_st/supervisor.log" 2>&1 </dev/null
             rc=$?; up=$(( $(date +%s) - t0 ))
+            # Record the FIRST run's outcome for the startup window the caller
+            # polls below. Only the first: later exits are a runtime loop, which
+            # cannot un-succeed a launch that has already completed.
+            if [ "$first" = 1 ]; then echo "rc=$rc" > "$_st/.startup"; first=0; fi
+            restarts=$((restarts + 1))
+            _relay_state looping "$rc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             [ "$up" -gt 60 ] && backoff=1
             echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) exit rc=$rc uptime=${up}s; restart in ${backoff}s" >> "$_st/supervisor.log"
             sleep "$backoff"
@@ -1011,6 +1039,40 @@ _sandy_start_handoff_relay() {
         done
     ) </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
+    # ---- bounded startup window (#258) --------------------------------------
+    #
+    # Two failure shapes were conflated before this, and only one was covered:
+    #
+    #   - CANNOT START  — missing, not executable, no mount, no flock. Detected
+    #     above, before exec, and it fails the session (criterion 7).
+    #   - STARTS, THEN EXITS — the reported case: a delivery daemon died at
+    #     startup on every launch for 35 hours while the supervisor restarted it
+    #     forever and the session marker read handoff_relay:true. The launch had
+    #     already succeeded, so nothing could fail it and nothing surfaced it.
+    #
+    # This window bridges them. "Died at startup on every launch" lands inside
+    # it, so that case now fails the session with the relay's own exit code.
+    # Past the window it is a runtime loop: the launch already succeeded and is
+    # NOT retroactively un-succeeded — it is reported by `sandy --print-state`,
+    # which reads the supervisor log host-side.
+    #
+    # rc=0 inside the window is NOT a failure: a relay is allowed to be a
+    # one-shot that does its work and exits. Only a non-zero first exit is.
+    _w=0
+    while [ "$_w" -lt 50 ]; do
+        if [ -f "$_st/.startup" ]; then
+            _v="$(cat "$_st/.startup" 2>/dev/null || true)"
+            case "$_v" in
+                already-running) break ;;
+                rc=0)            break ;;
+                rc=*)
+                    sandy_log "ERROR: the relay ($_r) exited ${_v#rc=} within 5s of starting, on every launch this reproduces. An installed relay that cannot stay up fails the session; see ~/.handoff/relay/supervisor.log for its own output."
+                    exit 1 ;;
+            esac
+        fi
+        sleep 0.1
+        _w=$((_w + 1))
+    done
     sandy_log "Handoff relay supervisor requested ($_r); outcome (started vs. already running) is in ~/.handoff/relay/supervisor.log"
 }
 

@@ -159,7 +159,7 @@ Four sources, in order: `$HOME/.sandy/config`, `$HOME/.sandy/.secrets`, `$WORK_D
 
 - **Passive-safe keys** (any source):
   <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_TEAMMATE_MODE`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_SUBAGENT_MODEL`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_CLAUDE_AUTH`, `SANDY_TOOL_AUDIT`, `SANDY_CLAUDE_CONNECTORS`, `SANDY_SUSPICIOUS`, `SANDY_HANDOFF_DIRS`, `SANDY_CROSS_SESSION_INBOUND`
+  `SANDY_AGENT`, `SANDY_MODEL`, `SANDY_TEAMMATE_MODE`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_SUBAGENT_MODEL`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_CLAUDE_AUTH`, `SANDY_TOOL_AUDIT`, `SANDY_CLAUDE_CONNECTORS`, `SANDY_SUSPICIOUS`, `SANDY_HANDOFF_DIRS`, `SANDY_CROSS_SESSION_INBOUND`, `SANDY_RELAY`
   <!-- END AUTOGEN:passive-key-list -->
 
 - **Value-aware exceptions** — a few passive keys are not uniformly safe, because one value *weakens* the sandbox. `_sandy_passive_value_privileged()` routes those through the same approval prompt while leaving the strengthening values frictionless: ***a repo may make the sandbox tighter, never looser.*** Gated values: `SANDY_EGRESS_NO_ISOLATION=1`, `SANDY_EGRESS_STRICT=0`, `SANDY_EGRESS_PROXY=0`, `SANDY_ALLOW_WORKFLOW_EDIT=1`, `SANDY_CLAUDE_CONNECTORS=1`, `SANDY_SUSPICIOUS=0`, `SANDY_CROSS_SESSION_INBOUND=accept`, `SANDY_CLAUDE_AUTH=oauth`. Guarded by `run-tests.sh §65`.
@@ -302,12 +302,14 @@ Every launch writes `$SANDBOX_DIR/sandy-session.json`, bind-mounted **read-only*
   "workspace": "...", "host_uid": 501, "host_gid": 20,
   "launched_at": "2026-06-11T12:00:00Z", "session_nonce": "<hex>",
   "effort": "high", "permission_mode": "bypassPermissions",
-  "cross_session_inbound": "refuse", "handoff_relay": false, "cred_mode": "full" }
+  "cross_session_inbound": "refuse", "handoff_relay": false,
+  "relay": { "slot": "absent", "path": null, "disabled_by": null },
+  "cred_mode": "full" }
 ```
 
 **Why it exists**: env vars are spoofable and the *absence* of a path proves nothing, so an in-container probe that distrusts env otherwise cannot tell sandy from a bare VM — a red-team run in sandy on macOS/OrbStack concluded it was *not* in sandy at all (uid 501, virtiofs mounts, and the documented `--cap-add` set all read as "ordinary VM"). Because the marker is `:ro`, a committed workspace config cannot forge it. **In-container tooling should assert on this file, not on uid/caps/env heuristics.**
 
-Fields record what sandy **pinned**, which is not necessarily what is in effect now (see the settings.json drift note above): `effort` (or `null` when unpinned), `permission_mode`, `cross_session_inbound`, `handoff_relay` (bool), and `cred_mode` (`profile|oauth-token|access-token-only|full|api-key|none` — the *worst* credential actually present, so a run's blast radius is provable after the fact).
+Fields record what sandy **pinned**, which is not necessarily what is in effect now (see the settings.json drift note above): `effort` (or `null` when unpinned), `permission_mode`, `cross_session_inbound`, `handoff_relay` (bool), `relay` (see below), and `cred_mode` (`profile|oauth-token|access-token-only|full|api-key|none` — the *worst* credential actually present, so a run's blast radius is provable after the fact).
 
 **Tamper-evidence.** `session_nonce` is minted fresh per launch and forwarded out-of-band (printed host-side under `SANDY_VERBOSE=1`) so an external verifier can confirm the file matches the launch it expects. It is deliberately **not** exported as an env var — the read-only file is the trust root. An operator can pin it via `SANDY_SESSION_NONCE` (validated `^[A-Za-z0-9._-]{8,128}$`; invalid warns and falls back to auto-mint, never failing the launch). That knob is **env-only**, so a committed workspace config cannot pin it.
 
@@ -523,6 +525,32 @@ Both writes are merge-preserving and idempotent, via node → jq → literal-mat
 - **Daemon-mode lifetime**: the relay outlives individual sessions until the container is recreated; there is no in-container reaper. The mitigation is cadence, not detection — `sandy --update-sessions --yes` on a 24-hour cron. That bounds an *instance*, not a compromised *source*.
 
 Marker field: `handoff_relay` — given criteria 7 and 8, `true` means the relay was started or the session never came up. Guarded by §114 and `acceptance-handoff-dirs.sh` Phase E.
+
+### Relay as a capability (`SANDY_RELAY` + the `relay-bin/` slot, 1.11.0, #258)
+
+`SANDY_HANDOFF_RELAY` made a relay a **per-workspace configuration**: a privileged key naming a path, so installing one cost an approval prompt, and it could never be defaulted on — the value names a file sandy does not install, and a configured relay that cannot start fails the launch, so a global default would refuse the launch of every unprovisioned sandbox. `SANDY_RELAY` (passive, default `1`) makes it a **capability** instead: it names no path and asserts no payload, which is exactly why it is safe on by default — it is inert without host-side state a repository cannot create, the same argument that let `SANDY_HANDOFF_DIRS` flip in 1.10.0. **"No entry in the slot" is a legitimate resolved state, not a broken path.**
+
+**The slot.** `$SANDBOX_DIR/relay-bin/` (created every launch, like the handoff tree, so presence carries no information) holding exactly **one** entry named `relay`, mounted **`:ro`** at `/opt/sandy/relay`. Installing a connector is one host-side file write.
+
+- **A mount, not permission bits** — this is the whole security claim, and it is the one part an adapter cannot do for itself (it can write files; it cannot create a mount). The container process runs as the host uid and **owns** the entry, so bits bind nothing — the agent could `chmod` and rewrite its own relay. Under `:ro` the write returns **EROFS**, checked above the permission check. The guard is tested by attempting the write, never by grepping the argv for `:ro`.
+- **`relay-bin/`, not `relay/`** — `$SANDBOX_DIR/handoff/relay/` already exists and is the **rw** state dir mounted at `~/.handoff/relay`. Two siblings named `relay`, one rw state and one `:ro` code, is a trap.
+- **`/opt/sandy/relay`, not under the agent's home** — that tree is rw tmpfs, and `/home/claude` moves in 2.0 (#248). `/opt` already holds `/opt/claude-code` and `/opt/skills`.
+- **Exactly one entry, not `relay.d/*`** — a connector's claim lock refuses a second consumer on one notice directory.
+- **Honest limit, stated rather than left to be inferred**: sandy guarantees the **first executable**. A relay that execs a daemon out of a writable directory is replaceable at the second link. "The agent cannot replace its own relay" is true of the entry point only.
+
+**Resolution.** A slot entry is handed to the *existing* relay machinery by setting `SANDY_HANDOFF_RELAY=/opt/sandy/relay/relay`, so validation, the headless/`--remote` skips, the `flock` singleton, the backoff and the `crossSessionInbound=accept` default all apply unchanged rather than being duplicated. An explicitly-set `SANDY_HANDOFF_RELAY` **wins** over the slot (deprecated as of 1.11.0, with a notice naming the winner — never merged, the `agent-args` rule), and then the slot is neither mounted nor run. An entry that exists but is **not executable is a hard error**, never silently "absent" — that silent no-op is what this design exists to retire.
+
+**The two failure shapes, which the old posture conflated.** "Cannot start" (missing, not executable, no mount, no `flock`) fails the launch, as it always did. "Starts, then exits" was invisible: a delivery daemon died at startup on every launch **for 35 hours** while the supervisor restarted it forever and the marker read `handoff_relay: true`. A launch that already succeeded cannot be un-succeeded, so a **bounded ~5s startup window** bridges them — a first run that exits non-zero inside it fails the session with that exit code (`rc=0` is fine; a relay may be a one-shot); past it, it is a runtime loop and is *reported*, not retroactively fatal.
+
+**Reporting is split, because the marker structurally cannot carry live state.** `sandy-session.json` is bind-mounted `:ro`, so it is written **before `docker run`**, while the relay starts in-container — the marker cannot know whether it started, and a `state: "started"` field there would be a claim sandy is unable to make. So:
+
+- **marker** → `relay: { slot: "absent"|"present"|"disabled", path, disabled_by }` — launch **intent** only. `handoff_relay` stays as a deprecated alias meaning exactly what it always meant; **do not migrate consumers onto it expecting liveness** — reading it as a liveness signal is what made the 35-hour loop invisible.
+- **`--print-state`** → `relay: { state: "absent"|"started"|"failed"|"looping"|"disabled", path, last_exit_code, restarts, last_restart_at, disabled_by }`, read host-side at query time from a small fixed-size `$SANDBOX_DIR/handoff/relay/.state` the supervisor rewrites. **Not** by parsing `supervisor.log`: that file is append-only and a crash-looping relay grows it without bound, so counting exits in it would put an unbounded read in a polling path — and the supervisor is anyway the authority on its own restart count. Both modes (the `agent_args_files` precedent, not `size_bytes`').
+- **Both are diagnostics, never a security signal**: `~/.handoff/relay` is mounted **rw**, so the agent can write `.state` and `supervisor.log`.
+
+**`disabled_by` (`env|host|workspace`).** `SANDY_RELAY=0` only tightens, so it is passive-safe — but a **cloned repo** shipping it would silently disable an operator's fleet connector, the hazard `.handoff-enabled` exists to answer. The config loader keeps no per-key provenance, so this is recorded narrowly for this one key rather than by growing a general mechanism nothing else reads. Visible, not forbidden.
+
+**Housekeeping.** `--reset-sandbox` **preserves `relay-bin/`** (operator state under `$SANDY_HOME`, privileged by location like `.handoff-enabled`; without this it would be silently destroyed, un-enrolling the sandbox) and names it on the `Preserved:` line; `--remove-sandbox` destroys it and names it in the plan. `SANDY_EXTRA_ENV` **refuses** any `SANDY_HANDOFF_*` name — the one route by which those derived exports were settable, and a forwarded one would land last-wins in the `-e` order and make the environment and the marker disagree about where the tree is.
 
 ## Forwarding env vars and agent args
 
