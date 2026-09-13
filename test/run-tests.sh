@@ -12534,6 +12534,42 @@ check "§121(7) unset/empty is accepted — the key is optional, not required" \
     bash -c 'printf "%s" "$1" | grep -q "^rc=0$"' -- "$_S121_EMPTY"
 
 # ============================================================
+echo "§122: a fresh sandbox never parks on Claude Code's first-run theme picker"
+# ============================================================
+# WHY. With no host ~/.claude.json to seed from -- every fresh CI runner, and any
+# user who has never run claude outside sandy -- the sandbox's .claude.json got
+# only {"tipsDisabled","installMethod"}. Claude Code then opens its first-run
+# THEME PICKER and waits. Interactively that is one keypress; under `--start`
+# nobody is attached, so the container is up, `tmux has-session` succeeds, the
+# client reports READY (exit 0), and the agent sits on a dialog forever.
+#
+# Same failure class as the auto-mode nudge (#151) and the custom-API-key modal:
+# a first-run prompt that makes a daemon session INERT while every structural
+# check passes. Caught in CI by acceptance-uds-delivery.sh §25, whose pane dump
+# showed "Welcome to Claude Code / Choose the text style" where the agent should
+# have been -- the message was delivered and queued, and nothing drained it.
+_S122_SEED="$(grep -m1 'tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding' "$SANDY_SCRIPT" || true)"
+check "§122(pre) the no-host-config seed line is present (mutation: a reword fails HERE, not vacuously below)" \
+    bash -c '[ -n "$1" ]' -- "$_S122_SEED"
+
+# The PROPERTY: the JSON sandy writes when there is no host config must carry
+# onboarding completion. Parse it, do not grep it -- a comment mentioning the key
+# would satisfy a grep.
+_S122_JSON="$(printf '%s' "$_S122_SEED" | sed -n "s/.*printf '\(.*\)\\\\n'.*/\1/p")"
+check "§122(1) the seeded JSON parses and sets hasCompletedOnboarding=true" \
+    bash -c 'printf "%s" "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get(\"hasCompletedOnboarding\") is True else 1)"' -- "$_S122_JSON"
+check "§122(2) it also pins a theme (absent theme re-opens the picker on some builds)" \
+    bash -c 'printf "%s" "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get(\"theme\") else 1)"' -- "$_S122_JSON"
+
+# Existing sandboxes created before the fix must HEAL, so the key is merged every
+# launch, not only at seed time.
+_S122_MERGE="$(grep -m1 'json_merge "\$CLAUDE_JSON"' "$SANDY_SCRIPT" || true)"
+check "§122(3) hasCompletedOnboarding is re-merged every launch, so pre-fix sandboxes heal" \
+    bash -c 'printf "%s" "$1" | grep -q hasCompletedOnboarding' -- "$_S122_MERGE"
+check "§122(4) theme is NOT re-merged every launch (a user's /theme choice must survive)" \
+    bash -c '! printf "%s" "$1" | grep -q theme' -- "$_S122_MERGE"
+
+# ============================================================
 # WHY. The Summary block below used to sit in the MIDDLE of this file: sections
 # appended afterwards ran, counted, and then nothing printed a final tally. A
 # real maintainer run ended with "2/1253 tests failed:" printed before §104 and
