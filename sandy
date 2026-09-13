@@ -10687,7 +10687,16 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
             }
         info "Seeded .claude.json from host"
     else
-        printf '{"tipsDisabled":true,"installMethod":"native"}\n' > "$CLAUDE_JSON"
+        # hasCompletedOnboarding/theme: with no host ~/.claude.json to seed from
+        # (a machine that has never run claude outside sandy -- every fresh CI
+        # runner, and any new user), Claude Code opens its first-run THEME PICKER
+        # and waits. Interactively that is a keypress; under --start nobody is
+        # attached, so the container is up, `tmux has-session` succeeds, the
+        # client reports READY (exit 0), and the agent sits on a dialog forever.
+        # Same failure class as the auto-mode nudge below and the custom-API-key
+        # modal: a first-run prompt that turns a daemon session inert while every
+        # structural check passes. Measured against 2.1.263 and again on 2.1.270.
+        printf '{"tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding":true,"theme":"dark"}\n' > "$CLAUDE_JSON"
     fi
 fi
 # Ensure sandy-specific overrides are set (both new and existing sandboxes)
@@ -10702,7 +10711,11 @@ if _sandy_agent_has claude; then
     # Set EVERY launch, so existing sandboxes and stale sibling .claude.json
     # files heal too. hasSeenAutoDefaultNotice is its announcement-surface
     # sibling in the same binary; seeded alongside for the same reason.
-    json_merge "$CLAUDE_JSON" '{"tipsDisabled":true,"installMethod":"native","hasSeenAutoDefaultNudge":true,"hasSeenAutoDefaultNotice":true}'
+    # hasCompletedOnboarding is merged every launch, not only at seed time, so
+    # sandboxes created before this fix heal instead of staying parked on the
+    # theme picker. `theme` is deliberately NOT re-merged: the seed sets it once,
+    # and a user who picks another theme with /theme must keep it.
+    json_merge "$CLAUDE_JSON" '{"tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding":true,"hasSeenAutoDefaultNudge":true,"hasSeenAutoDefaultNotice":true}'
     # Pre-trust the workspace so Claude Code doesn't show the trust dialog.
     # Sandy provides whole-session isolation — the trust prompt is redundant.
     node -e '
