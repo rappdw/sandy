@@ -12369,7 +12369,14 @@ echo "§120: sandy --exec runs as the HOST uid, never -u claude"
 #
 # Driven end to end against a stubbed `docker`, so these assert what the command
 # DOES, not what the source says.
-_S120_DIR="$(mktemp -d)"; mkdir -p "$_S120_DIR/bin" "$_S120_DIR/home/ws"
+# `pwd -P`, not a bare mktemp: on macOS `mktemp -d` hands back /var/folders/...,
+# which is a SYMLINK to /private/var/folders/... . sandy canonicalizes the
+# workspace with `pwd -P` but takes $HOME as given, so an uncanonicalized HOME
+# no longer prefixes the resolved workspace, the $HOME-relative mapping does not
+# apply, and -w falls back to the real host path -- failing §120(4) and §120(14)
+# on macOS only while CI (where /tmp is not a symlink) stays green. Reproduced
+# on Linux by pointing HOME at a symlink to the same tree.
+_S120_DIR="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$_S120_DIR/bin" "$_S120_DIR/home/ws"
 cat > "$_S120_DIR/bin/docker" <<'S120_STUB'
 #!/bin/bash
 # ps: honour the filter it was given so the daemon-vs-foreground precedence is

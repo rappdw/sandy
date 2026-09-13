@@ -649,16 +649,29 @@ ck "the relay is unchanged on the host after the attempt" \
    "grep -q 'slot-seen' \"$SBX4/relay-bin/relay\""
 
 echo "-- F4. --print-state reports the live state, and the marker reports only intent --"
+# NOTE the `\$` in every pattern below: the variable must expand when ck EVALs
+# the string, not when the string is built. These hold JSON, so interpolating
+# them at write time embeds raw `"` characters into the command and destroys its
+# quoting -- which is what made the first run of this phase report four
+# failures against a feature that was working. Phase E6 gets this right; this
+# did not.
 _f4_ps="$("$SANDY" --print-state 2>/dev/null | tr -d ' \n')"
-ck "--print-state reports relay.state=started for this sandbox" \
-   "printf '%s' \"$_f4_ps\" | grep -q '\"name\":\"$SESS4\"[^}]*\"relay\":{\"state\":\"started\"'"
 _f4_marker="$(docker exec "$C4" cat /etc/sandy-session.json 2>/dev/null | tr -d ' \n')"
+# PREMISES. Without these the NEGATIVE below ("does not claim started") passes
+# against an empty read, which is exactly how it passed while telling us
+# nothing -- twice in this phase now.
+ck "the marker was read and is JSON (premise: the negative below is vacuous against an empty read)" \
+   "printf '%s' \"\$_f4_marker\" | grep -q '\"schema\":1'"
+ck "--print-state produced output naming this sandbox (premise)" \
+   "printf '%s' \"\$_f4_ps\" | grep -q '\"name\":\"$SESS4\"'"
+ck "--print-state reports relay.state=started for this sandbox" \
+   "printf '%s' \"\$_f4_ps\" | grep -q '\"name\":\"$SESS4\"[^}]*\"relay\":{\"state\":\"started\"'"
 ck "the session marker reports relay.slot=present (launch intent)" \
-   "printf '%s' \"$_f4_marker\" | grep -q '\"relay\":{\"slot\":\"present\"'"
+   "printf '%s' \"\$_f4_marker\" | grep -q '\"relay\":{\"slot\":\"present\"'"
 ck "...and the marker does NOT claim the relay started -- it is written before docker run and cannot know" \
-   "! printf '%s' \"$_f4_marker\" | grep -q 'started'"
+   "! printf '%s' \"\$_f4_marker\" | grep -q 'started'"
 ck "crossSessionInbound still defaults to accept on the strength of a slot relay" \
-   "printf '%s' \"$_f4_marker\" | grep -q '\"cross_session_inbound\":\"accept\"'"
+   "printf '%s' \"\$_f4_marker\" | grep -q '\"cross_session_inbound\":\"accept\"'"
 
 echo "-- F5. SANDY_RELAY=0 suppresses it, and names who --"
 "$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1
@@ -678,10 +691,12 @@ ck "nothing is mounted at /opt/sandy/relay" \
 ck "no relay process is running" \
    "! docker exec \"$C4\" pgrep -f /opt/sandy/relay/relay >/dev/null 2>&1"
 _f5_marker="$(docker exec "$C4" cat /etc/sandy-session.json 2>/dev/null | tr -d ' \n')"
+ck "the marker was read and is JSON (premise)" \
+   "printf '%s' \"\$_f5_marker\" | grep -q '\"schema\":1'"
 ck "the marker records slot=disabled and NAMES the workspace as the source, so a cloned repo cannot silently un-enrol a fleet sandbox" \
-   "printf '%s' \"$_f5_marker\" | grep -q '\"slot\":\"disabled\",\"path\":null,\"disabled_by\":\"workspace\"'"
+   "printf '%s' \"\$_f5_marker\" | grep -q '\"slot\":\"disabled\",\"path\":null,\"disabled_by\":\"workspace\"'"
 ck "...and crossSessionInbound falls back to refuse, leaving no open receive surface with nothing delivering" \
-   "printf '%s' \"$_f5_marker\" | grep -q '\"cross_session_inbound\":\"refuse\"'"
+   "printf '%s' \"\$_f5_marker\" | grep -q '\"cross_session_inbound\":\"refuse\"'"
 
 echo "-- F6. --reset-sandbox preserves the installed relay --"
 "$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1
