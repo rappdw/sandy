@@ -117,6 +117,33 @@ ck "isolated host config does not mention SANDY_HANDOFF_DIRS (the premise)" \
    "! grep -qs SANDY_HANDOFF_DIRS \"$SANDY_HOME_DIR/config\""
 env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS"; RC=$?
 ck "--start exits 0" "[ $RC -eq 0 ]"
+# ABORT HERE if the very first launch failed (#261). Everything after this point
+# inspects a container that does not exist, so it produces ~40 assertion
+# failures about mount flags and --stop exit codes whose real cause is this one
+# line, hundreds of lines above. That is exactly what happened when an expired
+# OAuth token hung the supervisor: the run reported "inbox mount is RW=false"
+# for a container that was never created, and the diagnosis cost a full pass.
+#
+# Worse, a --start that dies holding the workspace lock poisons every LATER
+# phase too ("Another sandy is already running"), so continuing does not even
+# test the later phases -- it just manufactures noise.
+if [ "$RC" -ne 0 ]; then
+    echo ""
+    echo "==================================================="
+    echo "ABORTING: the first --start failed (exit $RC)."
+    echo ""
+    echo "Every later assertion in this harness inspects a container that does"
+    echo "not exist, and a --start that died holding the workspace lock will"
+    echo "fail the remaining phases for an unrelated reason. Fix this first."
+    echo ""
+    echo "Most common causes:"
+    echo "  - the host OAuth token expired  -> run 'claude auth login' on the host"
+    echo "  - a stale workspace lock        -> sandy --doctor --fix"
+    echo "  - Docker not reachable         -> docker ps"
+    echo "==================================================="
+    printf 'RESULT: %d passed, %d failed (aborted early)\n' "$PASS" "$FAIL"
+    exit 1
+fi
 C="$(cid)"
 ck "daemon container is running" "[ -n \"$C\" ]"
 SESS="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C" 2>/dev/null)"
