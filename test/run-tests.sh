@@ -13204,6 +13204,102 @@ check "§125(12) ...while a plain interactive macOS launch is still allowed (the
 rm -rf "$_S125_DIR"
 unset _S125_DIR _S125_A _S125_B _S125_SUP _S125_HL _S125_FG _S125_TTY
 
+# ============================================================
+echo "§126: SANDY_SUSPICIOUS shrinks a PROFILE credential too (#252)"
+# ============================================================
+# WHY. SANDY_CLAUDE_AUTH=profile (1.11.0) clears CRED_JSON before the #130
+# posture block runs, so every branch in that block was a no-op for it and the
+# profile's own credentials/<name>.json rode into the container UNMODIFIED --
+# with its refresh_token. SANDY_SUSPICIOUS is documented to drop exactly that,
+# so the knob silently did nothing for one mode. A posture documented to shrink
+# blast radius that quietly doesn't is worse than one that doesn't exist.
+#
+# THE TRAP, and the reason (1) exists: the two file shapes spell the key
+# differently. Claude Code's .credentials.json uses camelCase
+# (claudeAiOauth.refreshToken); a Console profile uses snake_case
+# (refresh_token), per the WIF layout. The strip helper deleted and VERIFIED
+# only the camelCase spelling -- so reusing it unchanged would have deleted
+# nothing and returned SUCCESS, reporting a posture that did not hold. That is
+# the same bug wearing a fix's clothes.
+_S126_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+sed -n '/^_sandy_strip_refresh_token() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S126_DIR/fn.sh"
+check "§126(pre) the strip helper was extracted and parses" \
+    bash -c 'grep -q "_sandy_strip_refresh_token()" "$1" && bash -n "$1"' -- "$_S126_DIR/fn.sh"
+
+_s126_strip() { ( trap - ERR; set +e; . "$_S126_DIR/fn.sh"; _sandy_strip_refresh_token "$1"; echo "|rc=$?" ) 2>/dev/null; }
+_S126_SNAKE="$(trap - ERR; _s126_strip '{"access_token":"AT","expires_at":1,"refresh_token":"SECRET"}')"
+check "§126(1) the helper strips the snake_case refresh_token a Console profile uses (got: $_S126_SNAKE)" \
+    bash -c 'printf "%s" "$1" | grep -q "|rc=0$" && ! printf "%s" "$1" | grep -q "SECRET"' -- "$_S126_SNAKE"
+_S126_CAMEL="$(trap - ERR; _s126_strip '{"claudeAiOauth":{"accessToken":"AT","refreshToken":"SECRET"}}')"
+check "§126(2) ...and still strips the camelCase one .credentials.json uses (no regression on the 1.9.0 path)" \
+    bash -c 'printf "%s" "$1" | grep -q "|rc=0$" && ! printf "%s" "$1" | grep -q "SECRET"' -- "$_S126_CAMEL"
+_S126_NEST="$(trap - ERR; _s126_strip '{"x":{"refresh_token":"SECRET"}}')"
+check "§126(3) a refresh token nested where the delete cannot reach FAILS CLOSED rather than being handed back" \
+    bash -c 'printf "%s" "$1" | grep -q "|rc=1$"' -- "$_S126_NEST"
+
+# --- the posture block, driven end to end -----------------------------------
+python3 - "$SANDY_SCRIPT" "$_S126_DIR/blk.sh" <<'S126_EXTRACT'
+import sys
+s = open(sys.argv[1]).read()
+i = s.index('    _cred_stripped=false\n    _cred_profile_stripped=false')
+j = s.index('    if [ -n "$CRED_JSON" ]; then\n        CRED_TMPDIR=', i)
+open(sys.argv[2], 'w').write(s[i:j])
+S126_EXTRACT
+check "§126(pre-b) the #130 posture block was extracted as a balanced fragment" \
+    bash -c '[ -s "$1" ] && bash -n "$1" && grep -q "PROFILE_TMPDIR" "$1"' -- "$_S126_DIR/blk.sh"
+
+# _s126_posture <profile-json> <SANDY_SUSPICIOUS> [break] -> one line of facts
+_s126_posture() {
+    local out rc=0
+    out="$( {
+        trap - ERR; set +e
+        warn(){ :; }; info(){ :; }
+        . "$_S126_DIR/fn.sh"
+        # `break` simulates a host with neither node nor python3, which is the
+        # only way the strip can fail without a malformed file.
+        if [ -n "${3:-}" ]; then command(){ case "$2" in node|python3) return 1 ;; esac; builtin command "$@"; }; fi
+        PROFILE_TMPDIR="$_S126_DIR/pt.$$.$RANDOM"; mkdir -p "$PROFILE_TMPDIR/credentials"
+        local host="$_S126_DIR/host.$$.$RANDOM.json"
+        printf '%s' "$1" > "$host"
+        cp "$host" "$PROFILE_TMPDIR/credentials/default.json"
+        SANDY_SUSPICIOUS="$2"; CRED_JSON=""; CLAUDE_CODE_OAUTH_TOKEN=""; ANTHROPIC_API_KEY=""
+        . "$_S126_DIR/blk.sh"
+        printf 'mode=%s mounted=%s host_ok=%s' "$CRED_MODE" \
+            "$([ -n "$PROFILE_TMPDIR" ] && echo yes || echo no)" \
+            "$([ "$(cat "$host")" = "$1" ] && echo yes || echo no)"
+        if [ -n "$PROFILE_TMPDIR" ]; then printf ' body=%s' "$(cat "$PROFILE_TMPDIR/credentials/default.json")"; fi
+        echo ""
+    } 2>&1 )" || rc=$?
+    printf '%s exit=%s\n' "$out" "$rc"
+}
+_S126_WITH='{"access_token":"AT","expires_at":1,"refresh_token":"REFRESH-SECRET"}'
+_S126_ON="$(trap  - ERR; _s126_posture "$_S126_WITH" 1)"
+_S126_OFF="$(trap - ERR; _s126_posture "$_S126_WITH" 0)"
+_S126_NONE="$(trap - ERR; _s126_posture '{"access_token":"AT"}' 1)"
+_S126_BROKE="$(trap - ERR; _s126_posture "$_S126_WITH" 1 break)"
+
+check "§126(4) SANDY_SUSPICIOUS=1 removes the refresh token from the MOUNTED profile copy (got: $_S126_ON)" \
+    bash -c 'printf "%s" "$1" | grep -q "mounted=yes" && ! printf "%s" "$1" | grep -q "REFRESH-SECRET"' -- "$_S126_ON"
+check "§126(5) ...the HOST profile is byte-unchanged (sandy rewrites only its ephemeral copy)" \
+    bash -c 'printf "%s" "$1" | grep -q "host_ok=yes"' -- "$_S126_ON"
+check "§126(6) ...and cred_mode says profile-access-only, so a run's blast radius stays provable after the fact" \
+    bash -c 'printf "%s" "$1" | grep -q "mode=profile-access-only"' -- "$_S126_ON"
+check "§126(7) SANDY_SUSPICIOUS=0 leaves the profile exactly as it was — the posture is opt-in, not a silent default (got: $_S126_OFF)" \
+    bash -c 'printf "%s" "$1" | grep -q "REFRESH-SECRET" && printf "%s" "$1" | grep -q "mode=profile"' -- "$_S126_OFF"
+check "§126(8) a profile with no refresh token is WARNED about, not failed — nothing to strip is a fine state" \
+    bash -c 'printf "%s" "$1" | grep -q "mounted=yes" && printf "%s" "$1" | grep -q "mode=profile"' -- "$_S126_NONE"
+# THE fail-closed check. A strip that cannot be performed must mount NOTHING;
+# mounting the unstripped profile would betray exactly the promise being made.
+check "§126(9) a strip that cannot run mounts NO PROFILE AT ALL (fail closed), rather than the unstripped one (got: $_S126_BROKE)" \
+    bash -c 'printf "%s" "$1" | grep -q "mounted=no" && ! printf "%s" "$1" | grep -q "REFRESH-SECRET"' -- "$_S126_BROKE"
+check "§126(10) ...and cred_mode does not still claim a profile is present" \
+    bash -c '! printf "%s" "$1" | grep -q "mode=profile"' -- "$_S126_BROKE"
+check "§126(11) the four postures produced four distinct outcomes (mutation: a block that no-ops collapses them)" \
+    bash -c '[ "$(printf "%s\n%s\n%s\n%s\n" "$1" "$2" "$3" "$4" | sed "s/pt\.[0-9]*\.[0-9]*//g; s/host\.[0-9]*\.[0-9]*//g" | sort -u | grep -c .)" -eq 4 ]' \
+    -- "$_S126_ON" "$_S126_OFF" "$_S126_NONE" "$_S126_BROKE"
+rm -rf "$_S126_DIR"
+unset _S126_DIR _S126_SNAKE _S126_CAMEL _S126_NEST _S126_WITH _S126_ON _S126_OFF _S126_NONE _S126_BROKE
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
