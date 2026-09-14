@@ -881,7 +881,7 @@ DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
 DISCORD_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Discord user IDs allowed to send messages.
 SANDY_TOOL_AUDIT|bool|0||1.4.0|stable|Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off).
 SANDY_CLAUDE_CONNECTORS|bool|0||1.9.0|stable|Expose the claude.ai ACCOUNT connectors (Gmail, Google Drive, ...) inside the sandbox (#129). Default 0 = SUPPRESSED. The OAuth token sandy mounts is account-scoped, so without this every connector the user ever enabled on claude.ai was reachable from EVERY sandbox -- including untrusted-repo sessions, with no extra prompt -- which is ambient authority crossing the per-project boundary sandy exists to draw. Implemented by seeding Claude Code's disableClaudeAiConnectors as a MANAGED settings.json key (always overwritten, both directions): Claude resolves it true-in-ANY-settings-scope-wins, so writing false is not enough to expose them -- an inherited true from the host settings.json would win. VALUE-AWARE TIER: 0 is passive-safe wherever it is set, but =1 WEAKENS the sandbox, so a workspace .sandy/config setting it triggers the per-workspace approval prompt like SANDY_EGRESS_NO_ISOLATION=1. Claude-only (the account-connector rider is a Claude Code phenomenon); gates AUTO-FETCHED connectors only -- a server passed explicitly via --mcp-config still follows the normal MCP trust flow.
-SANDY_SUSPICIOUS|bool|0||1.9.0|experimental|Hardened-credential posture for a workspace you actively distrust (#130) -- the pre-broker slice of #121. When 1: (a) the mounted Claude .credentials.json is REWRITTEN to drop claudeAiOauth.refreshToken, so an exfiltrated copy is worth only the remaining access-token lifetime (hours) instead of permanent renewable account access; the strip is verified after the rewrite and FAILS CLOSED -- if it cannot be performed or verified, no credentials file is mounted at all; (b) if ANTHROPIC_API_KEY is set and no long-lived CLAUDE_CODE_OAUTH_TOKEN is, the API key is used and OAuth credentials are not mounted (clean, instantly-revocable compartmentalization); (c) claude.ai account connectors are forced off, overriding an approved SANDY_CLAUDE_CONNECTORS=1; (d) egress DEFAULTS to strict -- an explicit egress setting still wins but is named loudly. The resolved posture is recorded as cred_mode in /etc/sandy-session.json so a run protection level is provable after the fact. Passive-safe to turn ON from a committed .sandy/config (a repo may make itself tighter); =0 from a workspace is approval-gated (never looser). HONEST LIMITS: in-session token refresh stops working once the access token expires (rerun sandy or /login -- acceptable for a deliberately short suspicious session); a long-lived CLAUDE_CODE_OAUTH_TOKEN is NOT shrunk by this (recorded honestly as cred_mode oauth-token, with a warning); Claude-only for the credential specifics; real prevention (token never in-container) is #121.
+SANDY_SUSPICIOUS|bool|0||1.9.0|experimental|Hardened-credential posture for a workspace you actively distrust (#130) -- the pre-broker slice of #121. When 1: (a) the mounted Claude .credentials.json is REWRITTEN to drop claudeAiOauth.refreshToken, so an exfiltrated copy is worth only the remaining access-token lifetime (hours) instead of permanent renewable account access; the strip is verified after the rewrite and FAILS CLOSED -- if it cannot be performed or verified, no credentials file is mounted at all; (b) if ANTHROPIC_API_KEY is set and no long-lived CLAUDE_CODE_OAUTH_TOKEN is, the API key is used and OAuth credentials are not mounted (clean, instantly-revocable compartmentalization); (c) claude.ai account connectors are forced off, overriding an approved SANDY_CLAUDE_CONNECTORS=1; (d) egress DEFAULTS to strict -- an explicit egress setting still wins but is named loudly. Since 1.12.0 this also covers SANDY_CLAUDE_AUTH=profile (#252): the ephemeral copy of the Console profile has its refresh_token stripped (the host profile is never touched) and cred_mode becomes profile-access-only; a strip that cannot be performed or verified mounts NO profile at all. The resolved posture is recorded as cred_mode in /etc/sandy-session.json so a run protection level is provable after the fact. Passive-safe to turn ON from a committed .sandy/config (a repo may make itself tighter); =0 from a workspace is approval-gated (never looser). HONEST LIMITS: in-session token refresh stops working once the access token expires (rerun sandy or /login -- acceptable for a deliberately short suspicious session); a long-lived CLAUDE_CODE_OAUTH_TOKEN is NOT shrunk by this (recorded honestly as cred_mode oauth-token, with a warning); Claude-only for the credential specifics; real prevention (token never in-container) is #121.
 SANDY_HANDOFF_DIRS|bool|1||1.7.0|experimental|Create and mount the per-sandbox cross-workspace handoff directories (#132 substrate): $SANDBOX_DIR/handoff/outbox rw at ~/.handoff/outbox, handoff/inbox READ-ONLY at ~/.handoff/inbox, handoff/peer READ-ONLY at ~/.handoff/peer (a second host-written inbound directory, 1.10.0) and handoff/relay rw at ~/.handoff/relay (relay state + supervisor.log). DEFAULT 1 SINCE 1.10.0 (was 0): every sandbox gets the tree on every launch, idempotently, so a host-side process can be pointed at any sandbox without a per-sandbox enabling step that has to be remembered, provisioned and verified. Set 0 to opt a host or workspace out: nothing is mounted, no env vars are added, and ~/.handoff does not exist inside the container. Both values are passive-safe for the reason the key always was: a directory confers no reach on its own — nothing lands in inbox/peer unless something on the host writes there and nothing leaves outbox unless something on the host reads it — so 1 is what a workspace could always set without approval and 0 only tightens. The two things that DO confer reach are unchanged and privileged: SANDY_HANDOFF_RELAY (off unless set; setting it forces this key to 1 because the relay cannot run without its mounts) and the crossSessionInbound pin (accept only when a relay is set and will start). Residual: the outbox persists across sessions, so a repo can stage content before an operator ever approves a relay; sandy --reset-sandbox clears it. The host directories are created unconditionally regardless of this key (since 1.7.0) so directory PRESENCE carries no information; consumers verify the MOUNTS (inside: test -d ~/.handoff/inbox ~/.handoff/outbox ~/.handoff/peer; outside: docker inspect .Mounts), never the directories or a marker. The operator marker $SANDBOX_DIR/.handoff-enabled (sandbox TOP level, never mounted, survives --reset-sandbox) now means FORCE ON for this sandbox even when config says 0 — the per-sandbox operator override of an opt-out, privileged by location like agent-args.<agent>, and a no-op when nothing opts out. It lives at the top level (never under claude/, which is mounted and agent-writable) so the agent cannot create it.
 SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|Claude-only. Pins Claude Code crossSessionInbound (accept = deliver messages from other sessions on this container without a prompt; hold = queue for approval; refuse = drop with a sender-visible status) by writing the SAME resolved value into TWO places every launch, merge-preserving and idempotent: the sandbox's own claude/settings.json (mounted RW as the container's ~/.claude/settings.json, i.e. Claude Code userSettings) and the WORKSPACE project file .claude/settings.local.json (mounted :ro). This split is measured, not assumed, against Claude Code 2.1.251: accept only takes effect when present in userSettings (workspace-file accept alone is a no-op there); hold/refuse are honored from either, and the workspace file's copy is tighten-only so it cannot be loosened by a stale accept and still wins over userSettings when a repo hand-edits it stricter. Never writes ~/.claude/settings.json on the HOST. Default is CONDITIONAL, which is why the schema default is empty: accept iff SANDY_HANDOFF_RELAY is set AND the relay will actually be started this launch, else refuse — headless (-p) and --remote runs never start a relay, so they default to refuse even with the key set, and a configured relay that cannot start fails the launch rather than leaving accept in place with nothing delivering. Value-aware tier: hold and refuse are passive-safe wherever set; accept set via a workspace .sandy/config is approval-gated (it lets any process at the workspace uid inside the container inject a turn). Residual: the userSettings target is RW in-container (required for /plugin install), so unlike the :ro workspace copy it is agent-mutable mid-session; sandy resets it on the next launch, not mid-session. Recorded in /etc/sandy-session.json as cross_session_inbound. See docs/security/CROSS_SESSION_INBOUND.md.
 ANTHROPIC_PROFILE|string||^[A-Za-z0-9._-]+$|1.11.0|experimental|Privileged. Name of the Anthropic Console profile to use when SANDY_CLAUDE_AUTH=profile (overrides the host active_config); forwarded into the container so Claude Code selects it explicitly (its /status shows the Profile row as profile-explicit). Privileged on purpose: it chooses WHICH profile's token enters the box, and a profile logged in with --scope org:admin carries organization-wide access, so a committed .sandy/config must not be able to select it. Ignored with a notice unless SANDY_CLAUDE_AUTH=profile.
@@ -11287,7 +11287,9 @@ except Exception:
 }
 
 # _sandy_strip_refresh_token CREDS_JSON — print the credentials with every
-# refreshToken removed (claudeAiOauth.refreshToken and any top-level one);
+# refresh token removed, in BOTH spellings: claudeAiOauth.refreshToken and a
+# top-level refreshToken (Claude Code's .credentials.json), and a top-level
+# refresh_token (an Anthropic Console profile, per the WIF file layout);
 # non-zero exit means the strip could not be performed OR could not be
 # verified. #130: the refresh token is the crown jewel — an exfiltrated copy is
 # permanent, renewable account access until manually revoked, while the access
@@ -11305,6 +11307,7 @@ _sandy_strip_refresh_token() {
                 const c = JSON.parse(process.argv[1]);
                 if (c.claudeAiOauth && typeof c.claudeAiOauth === "object") delete c.claudeAiOauth.refreshToken;
                 delete c.refreshToken;
+                delete c.refresh_token;
                 process.stdout.write(JSON.stringify(c));
             } catch (e) { process.exit(1); }
         ' "$creds")" || return 1
@@ -11316,6 +11319,7 @@ try:
     if isinstance(c.get("claudeAiOauth"), dict):
         c["claudeAiOauth"].pop("refreshToken", None)
     c.pop("refreshToken", None)
+    c.pop("refresh_token", None)
     sys.stdout.write(json.dumps(c))
 except Exception:
     sys.exit(1)
@@ -11328,7 +11332,14 @@ PYSTRIP
     # Substring test on purpose — even a differently-nested refreshToken key
     # fails closed rather than slipping through a structural assumption.
     [ -n "$out" ] || return 1
-    case "$out" in *refreshToken*) return 1 ;; esac
+    # BOTH spellings. Claude Code's .credentials.json uses camelCase
+    # (claudeAiOauth.refreshToken); an Anthropic Console profile's
+    # credentials/<name>.json uses snake_case (refresh_token), per the WIF file
+    # layout. A verify that only knew the camelCase spelling would return
+    # SUCCESS on a profile it had not stripped at all -- silently handing back
+    # the crown jewel while reporting the posture held, which is the exact
+    # failure #252 is about.
+    case "$out" in *refreshToken*|*refresh_token*) return 1 ;; esac
     printf '%s' "$out"
 }
 
@@ -11728,6 +11739,7 @@ else
     # token branch, which still mounts the full file for cloud features — so
     # the suspicious-mode decisions live here and cannot be bypassed.
     _cred_stripped=false
+    _cred_profile_stripped=false
     if [ "${SANDY_SUSPICIOUS:-0}" = 1 ]; then
         if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -n "${ANTHROPIC_API_KEY:-}" ] && [ -n "$CRED_JSON" ]; then
             # Disposable-key compartmentalization: a scoped ANTHROPIC_API_KEY is
@@ -11749,6 +11761,47 @@ else
             fi
         fi
         unset _cred_stripped_json
+        # #252: the PROFILE half. SANDY_CLAUDE_AUTH=profile clears CRED_JSON
+        # before this block runs, so every branch above is a no-op for it and
+        # the profile's own credentials/<name>.json rode in UNMODIFIED -- with
+        # its refresh_token. A posture documented to shrink blast radius that
+        # silently does nothing for one mode is worse than one that does not
+        # exist, and this one shipped in 1.11.0 already.
+        #
+        # Stripped HERE rather than at the copy site, so it lives at the single
+        # place every credential branch funnels through and cannot be bypassed
+        # by a future branch that forgets it. Only the ephemeral copy under
+        # PROFILE_TMPDIR is rewritten; the host profile is never touched.
+        if [ -n "$PROFILE_TMPDIR" ]; then
+            _prof_cred=""
+            for _prof_f in "$PROFILE_TMPDIR"/credentials/*.json; do
+                [ -f "$_prof_f" ] && { _prof_cred="$_prof_f"; break; }
+            done
+            if [ -n "$_prof_cred" ]; then
+                _prof_raw="$(cat "$_prof_cred" 2>/dev/null || true)"
+                case "$_prof_raw" in
+                    *refresh_token*|*refreshToken*)
+                        if _prof_stripped="$(_sandy_strip_refresh_token "$_prof_raw")"; then
+                            printf '%s\n' "$_prof_stripped" > "$_prof_cred"
+                            chmod 600 "$_prof_cred"
+                            _cred_profile_stripped=true
+                            info "SANDY_SUSPICIOUS — refresh token stripped from the profile copy; the access token dies at its expires_at (~8h) and cannot be renewed. Re-run 'ant auth login' on the host when it does."
+                        else
+                            # FAIL CLOSED, exactly as the .credentials.json path
+                            # does: mounting an unstripped profile would betray
+                            # the promise this posture makes.
+                            warn "SANDY_SUSPICIOUS — could not strip the refresh token from profile credentials (no node/python3, or verification failed)."
+                            warn "  Mounting NO profile. Use an ANTHROPIC_API_KEY, or drop SANDY_SUSPICIOUS for this workspace."
+                            rm -rf "$PROFILE_TMPDIR" || true
+                            PROFILE_TMPDIR=""
+                        fi ;;
+                    *)  # Nothing to strip is a fine state, but it should be
+                        # visible rather than looking like the strip ran.
+                        warn "SANDY_SUSPICIOUS — the selected profile carries no refresh token; nothing to strip." ;;
+                esac
+            fi
+            unset _prof_cred _prof_f _prof_raw _prof_stripped
+        fi
         if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
             warn "SANDY_SUSPICIOUS — CLAUDE_CODE_OAUTH_TOKEN is long-lived and is NOT shrunk by this posture (see #121 for the broker endgame)."
         fi
@@ -11756,7 +11809,10 @@ else
     # Record the WORST credential actually present in the container, so the
     # session marker states blast radius rather than intent.
     if [ -n "$PROFILE_TMPDIR" ]; then
-        CRED_MODE="profile"
+        # Distinguished so a run's blast radius stays provable after the fact:
+        # a stripped profile is worth its remaining access-token lifetime, an
+        # unstripped one is renewable account access until manually revoked.
+        if [ "$_cred_profile_stripped" = true ]; then CRED_MODE="profile-access-only"; else CRED_MODE="profile"; fi
     elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
         CRED_MODE="oauth-token"
     elif [ -n "$CRED_JSON" ]; then
