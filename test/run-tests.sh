@@ -13054,6 +13054,156 @@ unset _S124_DIR _S124_OK _S124_PART _S124_NONE _S124_FILE _S124_LINK _S124_PSH _
 unset _S124_BEFORE _S124_AFTER _S124_EXCL _S124_NOTTY _S124_DRY _S124_ALLOK _S124_NOOP
 unset _S124_ORPH _S124_ORPHOUT _S124_EMPTY _S124_SCOPE
 
+# ============================================================
+echo "§125: an expired OAuth token never prompts where nobody can answer (#261)"
+# ============================================================
+# WHY. A maintainer run hit this: the host credential had expired, and sandy ran
+# `claude auth login` -- browser plus a "Paste code here" prompt -- inside the
+# DETACHED daemon supervisor, whose stdin is /dev/null. Nothing could answer it,
+# the --start client waited out its full 600s readiness timeout, and because the
+# supervisor had already taken the workspace lock, every later launch in that
+# workspace failed "Another sandy is already running (pid N)". One expired token
+# poisoned a whole test run, and the real cause was 300 lines above the first
+# visible failure.
+#
+# THE TEMPTING FIX IS WRONG, which is the point of (4) and (5) below. "Just do
+# not prompt in the supervisor" lets the launch continue with an expired
+# credential: Claude Code then comes up on its own /login prompt, and with nobody
+# attached the session is INERT -- container up, `tmux has-session` succeeds,
+# --start reports ready, messages queue forever. That is the same shape as #151,
+# the custom-API-key modal and #256's theme picker, and it trades a loud 600s
+# failure for a silent permanent one. So the non-interactive contexts REFUSE
+# before docker run instead.
+_S125_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+sed -n '/^        can_open_browser() {/,/^        }$/p' "$SANDY_SCRIPT" > "$_S125_DIR/cob.sh"
+_S125_A="$(grep -n 'if token_needs_refresh "\$CRED_JSON"; then' "$SANDY_SCRIPT" | tail -1 | cut -d: -f1)"
+_S125_A="$(grep -n 'if token_needs_refresh "\$CRED_JSON"; then' "$SANDY_SCRIPT" | sed -n '2p' | cut -d: -f1)"
+_S125_B="$(awk -v s="$_S125_A" 'NR>s && /^        fi$/ {print NR; exit}' "$SANDY_SCRIPT")"
+sed -n "${_S125_A},${_S125_B}p" "$SANDY_SCRIPT" > "$_S125_DIR/blk.sh"
+check "§125(pre-a) can_open_browser was extracted and parses (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'grep -q "can_open_browser()" "$1" && bash -n "$1"' -- "$_S125_DIR/cob.sh"
+check "§125(pre-b) the refresh block was extracted as a BALANCED fragment — an unbalanced slice reports syntax errors that read like failures" \
+    bash -c '[ -s "$1" ] && bash -n "$1" && grep -q "token_needs_refresh" "$1"' -- "$_S125_DIR/blk.sh"
+
+cat > "$_S125_DIR/stubs.sh" <<'S125_STUBS'
+warn(){ echo "WARN: $*"; }; info(){ echo "INFO: $*"; }; error(){ echo "ERR: $*"; }
+_sandy_daemon_fatal(){ echo "FATAL-MARKER"; }
+token_needs_refresh(){ return 0; }      # the token is always expired in this fixture
+load_credentials(){ printf '{}'; }
+claude(){ echo "INTERACTIVE-LOGIN-RAN"; }
+# PINNED to Darwin deliberately. can_open_browser's LAST line is
+# `[[ "$(uname -s)" == "Darwin" ]] && return 0`, so on Linux it returns 1 for
+# everyone and the new guards above it are never reached -- removing them
+# entirely (i.e. restoring the #261 bug) left this section green on Linux while
+# failing only on the maintainer's macOS machine. A regression guard that does
+# not run in CI is not a regression guard. Pinning uname exercises the branch
+# that actually had the bug, on every host.
+uname(){ echo Darwin; }
+CRED_JSON='{}'
+S125_STUBS
+
+# Runs the SHIPPED block in one context and reports what happened. stdin is
+# /dev/null so no probe can accidentally borrow the suite's terminal.
+# The status is captured HERE and turned into text. The block under test refuses
+# with `exit 1`, which kills the subshell outright -- so without this the
+# assignment at the call site inherits a non-zero status and run-tests.sh's own
+# ERR trap aborts the suite on exactly the cases that are supposed to refuse.
+# Same §92-class trap that bit §123 and acceptance phase F.
+_s125_run() {   # _s125_run <shell assignments>
+    local out rc=0
+    # The redirection wraps the GROUP. A trailing `2>&1` on its own line is a
+    # null command with redirections attached to nothing, so stderr escaped to
+    # the suite's own output and every assertion that looked for an error
+    # MESSAGE failed while the ones looking at stdout passed -- a split that
+    # reads like a half-working feature and is entirely the harness.
+    out="$( {
+        trap - ERR
+        set +e
+        . "$_S125_DIR/stubs.sh"
+        . "$_S125_DIR/cob.sh"
+        eval "$1"
+        . "$_S125_DIR/blk.sh"
+        echo "rc=$?"
+    } 2>&1 </dev/null )" || rc=$?
+    printf '%s\nexit=%s\n' "$out" "$rc"
+    return 0
+}
+_S125_SUP="$(trap - ERR; _s125_run 'SANDY_DAEMON_SUPERVISOR=1')"
+_S125_HL="$(trap - ERR;  _s125_run '_sandy_is_headless=true')"
+_S125_FG="$(trap - ERR;  _s125_run ':')"
+
+# (1)-(3): the browser/prompt flow must not even be attempted.
+check "§125(1) the interactive login is NEVER run in the daemon supervisor — stdin is /dev/null there, so it can only hang" \
+    bash -c '! printf "%s" "$1" | grep -q "INTERACTIVE-LOGIN-RAN"' -- "$_S125_SUP"
+check "§125(2) ...nor in a headless -p run, where there is no human at all" \
+    bash -c '! printf "%s" "$1" | grep -q "INTERACTIVE-LOGIN-RAN"' -- "$_S125_HL"
+check "§125(3) ...nor when stdin is not a TTY" \
+    bash -c '! printf "%s" "$1" | grep -q "INTERACTIVE-LOGIN-RAN"' -- "$_S125_FG"
+
+# (4)-(5): and the launch must REFUSE, not proceed into an inert session.
+check "§125(4) the supervisor REFUSES: it drops the .fatal marker so --start fails in ~1s with exit 6, instead of proceeding to a session parked on a login prompt nobody can answer" \
+    bash -c 'printf "%s" "$1" | grep -q "FATAL-MARKER" && printf "%s" "$1" | grep -q "cannot be refreshed non-interactively"' -- "$_S125_SUP"
+check "§125(5) a headless -p run refuses the same way — a one-shot against an expired credential produces nothing useful" \
+    bash -c 'printf "%s" "$1" | grep -q "FATAL-MARKER"' -- "$_S125_HL"
+check "§125(6) the refusal NAMES the remedy rather than leaving the operator to guess" \
+    bash -c 'printf "%s" "$1" | grep -q "claude auth login"' -- "$_S125_SUP"
+# Logging a refusal and then carrying on is the same inert session with extra
+# noise, so assert the block actually STOPPED: a non-zero status, and none of
+# the "rc=" line the block prints only when it runs to completion.
+check "§125(6b) the refusal STOPS the launch — non-zero status and no fall-through (mutation: keep the marker, drop the exit, and this is the only check that fails)" \
+    bash -c 'printf "%s" "$1" | grep -q "^exit=1$" && ! printf "%s" "$1" | grep -q "^rc="' -- "$_S125_SUP"
+check "§125(6c) ...and the headless path stops too" \
+    bash -c 'printf "%s" "$1" | grep -q "^exit=1$" && ! printf "%s" "$1" | grep -q "^rc="' -- "$_S125_HL"
+
+# (7): an INTERACTIVE foreground launch is deliberately untouched -- a human is
+# attached and /login inside the session works, so warn-and-proceed is correct
+# there. Regression guard: the fix must not turn every expired token into a
+# refusal.
+_S125_TTY="$(trap - ERR; _s125_run 'can_open_browser(){ return 0; }')"
+check "§125(7) an interactive foreground launch still refreshes and does NOT refuse — the fix is scoped to contexts with nobody to answer" \
+    bash -c 'printf "%s" "$1" | grep -q "INTERACTIVE-LOGIN-RAN" && ! printf "%s" "$1" | grep -q "FATAL-MARKER"' -- "$_S125_TTY"
+check "§125(8) a non-interactive FOREGROUND launch keeps the old warn-and-proceed (unchanged behaviour, not silently widened to a refusal)" \
+    bash -c 'printf "%s" "$1" | grep -q "Use /login inside the session" && ! printf "%s" "$1" | grep -q "FATAL-MARKER"' -- "$_S125_FG"
+
+# (9): the four contexts must not all behave identically -- a guard that refuses
+# (or permits) everything passes several checks above in isolation.
+check "§125(9) the four contexts produced distinct outcomes (mutation: a can_open_browser returning a constant collapses them)" \
+    bash -c 'a=0; b=0
+             printf "%s" "$1" | grep -q "FATAL-MARKER" && a=1
+             printf "%s" "$2" | grep -q "INTERACTIVE-LOGIN-RAN" && b=1
+             [ "$a" -eq 1 ] && [ "$b" -eq 1 ]' -- "$_S125_SUP" "$_S125_TTY"
+# (10)-(11): each guard in can_open_browser, ISOLATED.
+#
+# Every probe above runs with stdin on /dev/null, so `[ -t 0 ] || return 1`
+# fires and masks the other two -- deleting the headless line survived mutation
+# testing for that reason alone. It is not redundant in the field: a headless
+# `-p` run launched from a terminal HAS a tty on stdin, so without its own line
+# can_open_browser returns 0, the interactive branch wins, and the refusal below
+# it is never reached -- a one-shot that opens a browser and waits.
+#
+# So the tty guard is neutralised and the remaining two are tested on their own.
+sed 's/\[ -t 0 \] || return 1//' "$_S125_DIR/cob.sh" > "$_S125_DIR/cob-notty.sh"
+check "§125(pre-c) the tty-guard neutralisation actually changed the function (else 10-11 test nothing)" \
+    bash -c '! grep -q -- "-t 0" "$1" && grep -q "SANDY_DAEMON_SUPERVISOR" "$1"' -- "$_S125_DIR/cob-notty.sh"
+_s125_cob() {   # _s125_cob <assignments> -> "yes" if can_open_browser would allow the prompt
+    (
+        trap - ERR
+        set +e
+        uname(){ echo Darwin; }
+        . "$_S125_DIR/cob-notty.sh"
+        eval "$1"
+        if can_open_browser; then echo yes; else echo no; fi
+    ) 2>/dev/null
+}
+check "§125(10) with the tty guard neutralised, the HEADLESS guard alone still refuses — the line that stops a -p run from opening a browser at a terminal" \
+    bash -c '[ "$1" = "no" ]' -- "$(trap - ERR; _s125_cob '_sandy_is_headless=true')"
+check "§125(11) ...and the SUPERVISOR guard alone still refuses" \
+    bash -c '[ "$1" = "no" ]' -- "$(trap - ERR; _s125_cob 'SANDY_DAEMON_SUPERVISOR=1')"
+check "§125(12) ...while a plain interactive macOS launch is still allowed (the guards are not a blanket refusal)" \
+    bash -c '[ "$1" = "yes" ]' -- "$(trap - ERR; _s125_cob ':')"
+rm -rf "$_S125_DIR"
+unset _S125_DIR _S125_A _S125_B _S125_SUP _S125_HL _S125_FG _S125_TTY
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

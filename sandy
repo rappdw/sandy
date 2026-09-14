@@ -11566,6 +11566,17 @@ else
         # Refresh expired OAuth tokens before launching the container
         # Helper: detect if we can open a browser (headless servers cannot)
         can_open_browser() {
+            # NOBODY CAN ANSWER A PROMPT IN THESE CONTEXTS (#261). The daemon
+            # supervisor is detached with stdin on /dev/null, and a headless -p
+            # run has no human at all. `claude auth login` opens a browser AND
+            # waits on "Paste code here if prompted >", so attempting it there
+            # hangs until the --start client times out after 600s -- with the
+            # workspace lock already taken, so every later launch in that
+            # workspace then fails "Another sandy is already running (pid N)".
+            # One expired token poisoned a whole test run that way.
+            [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ] && return 1
+            [ "${_sandy_is_headless:-false}" = "true" ] && return 1
+            [ -t 0 ] || return 1
             # macOS: `open` always works and the user is local
             [[ "$(uname -s)" == "Darwin" ]] && return 0
             # Linux: too many false positives (DISPLAY set by NoMachine/X server on
@@ -11584,6 +11595,30 @@ else
                 else
                     info "OAuth token refreshed successfully."
                 fi
+            elif [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ] || [ "${_sandy_is_headless:-false}" = "true" ]; then
+                # FAIL, do not warn-and-proceed. The tempting fix for #261 is
+                # "just don't prompt in the supervisor" -- but then the launch
+                # continues with an expired credential, Claude Code comes up on
+                # its own /login prompt, and with nobody attached the session is
+                # INERT: the container is up, `tmux has-session` succeeds,
+                # `--start` reports ready, and messages queue forever. That is
+                # the recurring shape this repo keeps paying for (#151, the
+                # custom-API-key modal, #256's theme picker), and it would trade
+                # a loud 600s failure for a silent permanent one -- the worse
+                # half of the trade.
+                #
+                # So: refuse before `docker run`. The `.fatal` marker makes the
+                # --start client fail in ~1s with exit 6 (refused before launch)
+                # instead of polling out its readiness timeout, and the EXIT trap
+                # armed above releases the workspace lock, so the failure does
+                # not poison the next launch.
+                #
+                # An interactive FOREGROUND launch is deliberately NOT covered:
+                # there a human is attached and `/login` inside the session works,
+                # which is why that path keeps the warning below.
+                echo "[sandy] ERROR: the host OAuth token is expired and cannot be refreshed non-interactively. Run 'claude auth login' on the host (or 'sandy' once interactively in this workspace) and retry. Refusing rather than starting a session that would sit on Claude Code's login prompt with nobody attached to answer it." >&2
+                _sandy_daemon_fatal
+                exit 1
             else
                 warn "OAuth token expired. Use /login inside the session to re-authenticate."
             fi
