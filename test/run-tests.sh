@@ -11446,10 +11446,11 @@ printf '#!/bin/sh\nexit 0\n' > "$_S114_RW/.sandy/relay.sh"
 chmod +x "$_S114_RW/.sandy/relay.sh"
 printf '#!/bin/sh\nexit 0\n' > "$_S114_RW/.sandy/noexec.sh"   # deliberately NOT chmod +x
 _s114_relay_validate() {
-    # $1=SANDY_HANDOFF_RELAY $2=SANDY_HANDOFF_DIRS $3=headless(true|"") $4=remote(true|false)
+    # $1=SANDY_HANDOFF_RELAY $2=SANDY_HANDOFF_DIRS $3=headless(true|"") $4=remote(true|false) $5=provision(1|0)
     env SANDY_HANDOFF_RELAY="$1" SANDY_HANDOFF_DIRS="${2:-0}" \
         WORK_DIR="$_S114_RW" SANDY_WORKSPACE="/home/claude/relayws" \
-        _sandy_is_headless="${3:-false}" SANDY_REMOTE_CONTROL="${4:-false}" bash -c "
+        _sandy_is_headless="${3:-false}" SANDY_REMOTE_CONTROL="${4:-false}" \
+        SANDY_PROVISION="${5:-0}" bash -c "
         info(){ printf '%s\n' \"\$*\"; }
         $_S114_RELAY_BLK
         printf 'DIRS=%s RELAY=%s\n' \"\${SANDY_HANDOFF_DIRS:-0}\" \"\${SANDY_HANDOFF_RELAY:-UNSET}\"
@@ -11521,6 +11522,28 @@ check "§114(11o) headless: key unset, DIRS still 1, info line names the reason 
         printf "%s\n" "$1" | grep -q "DIRS=1" || exit 1
         printf "%s\n" "$1" | grep -q "SANDY_HANDOFF_RELAY not started (headless run); crossSessionInbound will default to refuse"
     ' -- "$_S114_RELAY_OUT"
+# --provision is the THIRD criterion-8 skip (1.12.1). It starts a session only to
+# prove it comes up and then stops it, so a relay would live ~10s and deliver
+# nothing -- while criterion 7 would FAIL the launch if it could not start,
+# defeating the one command whose job is materialising the handoff pair.
+#
+# Found in the field, not in review: a host-wide SANDY_HANDOFF_RELAY naming an
+# in-container path that unprovisioned sandboxes do not have made every
+# `--provision --all` target crash-loop (--start rc=7). 44 of 52 failed in a row
+# for a reason unrelated to provisioning them.
+_S114_RELAY_OUT="$(_s114_relay_validate .sandy/relay.sh 0 false false 1 2>&1)"
+check "§114(11p2) --provision: key unset, DIRS still 1, info line names the verify-then-stop reason (criterion 8)" \
+    bash -c '
+        printf "%s\n" "$1" | grep -q "RELAY=UNSET" || exit 1
+        printf "%s\n" "$1" | grep -q "DIRS=1" || exit 1
+        printf "%s\n" "$1" | grep -q "SANDY_HANDOFF_RELAY not started (--provision starts a session only to verify it, then stops it); crossSessionInbound will default to refuse"
+    ' -- "$_S114_RELAY_OUT"
+# The skip is also the SAFER resolution, and that is the half worth pinning: with
+# the key unset the throwaway provisioning session resolves crossSessionInbound
+# to `refuse` rather than `accept`, so it never opens a receive surface at all.
+_S114_RELAY_OUT="$(_s114_relay_validate .sandy/relay.sh 0 false false 0 2>&1)"
+check "§114(11p3) ...and WITHOUT --provision the same relay is still honoured, so the skip is scoped rather than a blanket disable" \
+    bash -c 'printf "%s\n" "$1" | grep -q "RELAY=.sandy/relay.sh"' -- "$_S114_RELAY_OUT"
 _S114_RELAY_OUT="$(_s114_relay_validate .sandy/relay.sh 0 false true 2>&1)"
 check "§114(11p) --remote: key unset, DIRS still 1, info line names the no-tmux-session reason (criterion 8; a relay there would restart every 60s for the life of the container)" \
     bash -c '
