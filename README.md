@@ -262,7 +262,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--update-sessions` | Fleet image refresh + rolling restart across every daemon session on the host (scope to one with `--workspace PATH`). See "Fleet updates" above. Sub-options: `--dry-run`, `--yes`, `--idle-for <minutes>`, `--rebuild`, `--workspace` |
 | `--reset-sandbox` | Rebuild **one** project's sandbox from a known-good skeleton — destroy its persistent package/agent state (preserving `WORKSPACE.json` lineage), refusing while a live session holds it. Filesystem-only, no Docker. "When in doubt, rebuild" in one command. Sub-options: `--workspace PATH` (default cwd), `--keep-approvals`, `--dry-run`, `--yes` |
 | `--remove-sandbox` | Permanently delete a sandbox directory (preserves **nothing**, unlike `--reset-sandbox`). Three selectors: default/`--workspace PATH` (workspace must still exist), `--sandbox NAME` (workspace already gone), `--orphans` (every sandbox whose recorded workspace is gone). Filesystem-only. Sub-options: `--dry-run`, `--yes` |
-| `--provision` | Non-interactively create one workspace's sandbox by running the **real launch path** once (start a detached session, confirm it's up, stop it) — never a flag that fabricates state. Safe no-op against a live session. Needs Docker. Sub-options: `--workspace PATH`, `--dry-run`, `--yes` |
+| `--provision` | Non-interactively create one workspace's sandbox by running the **real launch path** once (start a detached session, confirm it's up, stop it) — never a flag that fabricates state. Safe no-op against a live session. **`--all`** does every sandbox sandy already knows about whose handoff pair is missing or wrong — the state `--reset-sandbox` leaves behind. Needs Docker. Sub-options: `--workspace PATH`, `--all`, `--dry-run`, `--yes` |
 | `--doctor` | Host + runtime readiness check (git/curl/docker/PATH/credentials, plus image staleness and orphaned resources). Exit `0` iff every required host check passes; runtime findings are warnings. Sub-options: `--fix` (clear a dead lock, reap orphaned networks), `--yes` |
 | `--gc` | One-shot global reclaim of leaked sandy Docker resources: dead-owner containers, orphaned `sandy_*` networks, orphaned per-project/skill images, dangling images. Sub-options: `--dry-run`, `--yes` |
 | `--print-state` / `--print-schema` / `--print-version` / `--validate-config` | Machine-readable JSON introspection (runtime state / static schema / version). Fast-path, no Docker needed for schema/version. See [`SPEC_INTROSPECTION.md`](SPEC_INTROSPECTION.md) |
@@ -473,6 +473,33 @@ Set `SANDY_HANDOFF_DIRS=0` (passive-safe, same tiers as any other passive key: e
 > [`THREAT_MODEL.md`](docs/security/THREAT_MODEL.md). Empirical bypass attempts are in
 > [`ISOLATION_STRESS.md`](docs/security/ISOLATION_STRESS.md).
 
+
+### Checking and repairing the handoff pair
+
+The handoff directories are created **by the launch**, which is deliberate: a pair exists only because the thing that mounts it made one, so a hand-made pair cannot be mistaken for a working one. The cost is that a sandbox can sit without a pair — most often after `sandy --reset-sandbox`, which destroys `handoff/` and keeps the sandbox, but also after any launch that failed between creating the sandbox directory and creating the pair.
+
+`--print-state` reports the state of each sandbox's pair, read-only:
+
+```sh
+sandy --print-state | jq -r '.sandboxes[] | select(.handoff.state != "ok") | "\(.name): \(.handoff.state) \(.handoff.problems | join("; "))"'
+```
+
+`state` is `ok`, `missing` (a directory is absent), or `wrong` (one exists but is a file, a symlink, not yours, or not usable by you). It **never repairs** — you get the diagnosis, and what to do about it is yours. As a gate:
+
+```sh
+sandy --print-state | jq -e '[.sandboxes[] | select(.handoff.state != "ok")] | length == 0'
+```
+
+To fix them, in bulk:
+
+```sh
+sandy --provision --all --dry-run   # what would be done
+sandy --provision --all --yes
+```
+
+This provisions every sandbox sandy already **knows about** whose pair is missing or wrong, serially, through the real launch path. It **cannot** reach a workspace that has never been launched — that has no sandbox directory, so sandy does not know it exists; enrolling one is a deliberate `sandy --provision --workspace PATH`. A sandbox whose workspace has been deleted cannot be provisioned at all: it is named, counted as unprepared, and makes the run exit non-zero rather than being skipped into a false success.
+
+**`handoff.state: "ok"` means the directories are correct on the host.** It does not mean the tree is mounted in any container — `--print-state` reads no config and cannot know the next launch's `SANDY_HANDOFF_DIRS`. For a *running* sandbox, check the container's mounts.
 
 ### Installing a relay (`SANDY_RELAY`)
 

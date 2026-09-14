@@ -7431,7 +7431,7 @@ _S91_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Curated exception lists -- each entry is an intentional, hand-verified
 # exception to the parser<->cli_flags identity, not a loophole papering over
 # drift. See the independently-verified framing facts this PR was built on.
-_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --sandbox --orphans --fix"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor); not standalone cli_flags entries, must instead appear in >=1 description
+_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --sandbox --orphans --fix --all"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor/--provision); not standalone cli_flags entries, must instead appear in >=1 description
 _S91_PRIVATE="--print-protected-paths"                        # real, private/debug fast-path flag; deliberately unadvertised
 _S91_FORWARDED="--resume"                                     # a real cli_flags entry with ZERO parser cases (forwarded verbatim to the agent, sandy:4103/4127)
 
@@ -12779,9 +12779,26 @@ _s123_mksb r-looping;  _s123_install r-looping;  printf 'state=looping\nrestarts
 _s123_mksb r-failed;   _s123_install r-failed
 _s123_mksb r-disabled; printf '{\n  "schema": 1,\n  "relay": {\n    "slot": "disabled",\n    "path": null,\n    "disabled_by": "workspace"\n  }\n}\n' > "$_S123_PSH/sandboxes/r-disabled/sandy-session.json"
 
-_s123_state() { SANDY_HOME="$_S123_PSH" "$SANDY_SCRIPT" --print-state 2>/dev/null | tr -d ' \n' | sed -n "s/.*\"name\":\"$1\".*/&/p"; }
 _S123_PS="$(trap - ERR; SANDY_HOME="$_S123_PSH" "$SANDY_SCRIPT" --print-state 2>/dev/null || true)"
-_s123_field() { printf '%s' "$_S123_PS" | tr -d ' \n' | sed -n "s/.*\"name\":\"$1\"[^}]*\"relay\":{\([^}]*\)}.*/\1/p"; }
+# Each fixture is read from a home containing ONLY that fixture, so "the document
+# says looping" is unambiguous without having to carve one sandbox object out of
+# a five-sandbox document.
+#
+# The previous version anchored on "name":"<fixture>"[^}]*"relay":{ -- and broke
+# the moment #265 inserted a `handoff` OBJECT ahead of `relay`, because the
+# character class cannot span that object's closing brace. Six checks failed
+# against an emitter that was entirely correct. A per-sandbox extractor that
+# encodes the field ORDER of its neighbours is a tripwire for the next person to
+# add a field, not a test of this one; portable per-object splitting is not worth
+# it (BSD sed will not put a newline in a replacement, and BWK awk takes only a
+# single-character RS), so the fixtures are separated instead of the output.
+_s123_one() {   # _s123_one <fixture> -> that fixture's --print-state document
+    local h="$_S123_DIR/one-$1"
+    rm -rf "$h"; mkdir -p "$h/sandboxes"
+    cp -R "$_S123_PSH/sandboxes/$1" "$h/sandboxes/$1"
+    SANDY_HOME="$h" "$SANDY_SCRIPT" --print-state 2>/dev/null | tr -d ' \n'
+}
+_s123_field() { _s123_one "$1"; }
 
 check "§123(13) --print-state reports 'absent' for a sandbox with no relay installed" \
     bash -c 'echo "$1" | grep -q "\"state\":\"absent\""' -- "$(trap - ERR; _s123_field r-absent)"
@@ -12796,7 +12813,9 @@ check "§123(17) --print-state reports 'disabled' and names WHO disabled it, so 
     bash -c 'echo "$1" | grep -q "\"state\":\"disabled\"" && echo "$1" | grep -q "\"disabled_by\":\"workspace\""' \
     -- "$(trap - ERR; _s123_field r-disabled)"
 check "§123(18) the five fixtures produced five DISTINCT states (mutation: an emitter hardcoding one value passes 13-17 individually and fails here)" \
-    bash -c 'n="$(for s in r-absent r-started r-looping r-failed r-disabled; do v="$(printf "%s\n" "$1" | tr -d " \n" | sed -n "s/.*\"name\":\"$s\"[^}]*\"relay\":{\"state\":\"\([a-z]*\)\".*/\1/p" | head -1)"; printf "%s\n" "$v"; done | sort -u | grep -c .)"; [ "$n" -eq 5 ]' -- "$_S123_PS"
+    bash -c 'n="$(for v in "$@"; do printf "%s\n" "$v" | sed -n "s/.*\"relay\":{\"state\":\"\([a-z]*\)\".*/\1/p"; done | sort -u | grep -c .)"; [ "$n" -eq 5 ]' -- \
+    "$(trap - ERR; _s123_field r-absent)" "$(trap - ERR; _s123_field r-started)" "$(trap - ERR; _s123_field r-looping)" \
+    "$(trap - ERR; _s123_field r-failed)" "$(trap - ERR; _s123_field r-disabled)"
 check "§123(19) relay is emitted in LIGHT mode too — a fleet poller must not have to pay for a du walk to learn its connectors are down" \
     bash -c 'SANDY_HOME="$2" "$1" --print-state --light 2>/dev/null | tr -d " \n" | grep -q "\"relay\":{\"state\""' -- "$SANDY_SCRIPT" "$_S123_PSH"
 check "§123(20) --print-state keeps its stream contract with the new field (0 bytes on stderr)" \
@@ -12862,6 +12881,178 @@ else
 fi
 rm -rf "$_S123_DIR"
 unset _S123_MARKER _S123_DIR _S123_A _S123_B _S123_C _S123_D _S123_E _S123_PS _S123_PSH _S123_MOUNTBLK _S123_W1 _S123_W2 _S123_W3
+
+# ============================================================
+echo "§124: the handoff pair — classification, --print-state reporting, and --provision --all (#265)"
+# ============================================================
+# WHY. A consumer asked for a way to bring a sandbox's handoff pair into
+# existence and to check existing ones without launching. Two halves shipped:
+# a read-only `handoff` object in --print-state, and `--provision --all`.
+#
+# The property that makes them safe together is that they share ONE predicate,
+# _sandy_handoff_classify. A reporter that says "ok" while the provisioner still
+# provisions -- or worse, the reverse -- is the drift this repo keeps paying for,
+# and it would be invisible: both halves would look right in isolation. §124(12)
+# is the check that they cannot disagree.
+#
+# The reporting half must also never repair. That is a REQUIREMENT, not taste:
+# the consumer relies on a hand-made pair staying distinguishable from one a
+# launch created, so a field that quietly fixed things would destroy the property
+# they are protecting. §124(6) asserts it by running the emitter against a
+# deliberately broken tree and checking the tree is untouched.
+_S124_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # pwd -P: macOS mktemp returns a symlink (§120)
+sed -n '/^_sandy_handoff_classify() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S124_DIR/hc.sh"
+check "§124(pre) the classifier was extracted (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'grep -q "_SANDY_HC_STATE=" "$1" && [ "$(grep -c . "$1")" -gt 25 ]' -- "$_S124_DIR/hc.sh"
+
+# --- classification, driven through the SHIPPED function ---------------------
+_s124_mk() {   # _s124_mk <name> <shape>
+    local sb="$_S124_DIR/sb-$1"; mkdir -p "$sb/handoff"
+    case "$2" in
+        ok)      mkdir -p "$sb/handoff/inbox" "$sb/handoff/outbox" "$sb/handoff/peer" "$sb/handoff/relay" ;;
+        partial) mkdir -p "$sb/handoff/inbox" "$sb/handoff/outbox" "$sb/handoff/relay" ;;
+        none)    : ;;
+        file)    mkdir -p "$sb/handoff/inbox" "$sb/handoff/outbox" "$sb/handoff/peer"; : > "$sb/handoff/relay" ;;
+        link)    mkdir -p "$sb/handoff/inbox" "$sb/handoff/outbox" "$sb/handoff/peer" "$_S124_DIR/elsewhere"
+                 ln -s "$_S124_DIR/elsewhere" "$sb/handoff/relay" ;;
+    esac
+    printf '%s' "$sb"
+}
+_s124_state() {  # echoes the classified state for a prepared sandbox
+    (
+        trap - ERR
+        set +e
+        . "$_S124_DIR/hc.sh"
+        _sandy_handoff_classify "$1"
+        printf '%s' "$_SANDY_HC_STATE"
+    )
+}
+_S124_OK="$(trap - ERR; _s124_state "$(_s124_mk ok ok)")"
+check "§124(1) four present directories classify as ok (got: $_S124_OK)" \
+    bash -c '[ "$1" = "ok" ]' -- "$_S124_OK"
+_S124_PART="$(trap - ERR; _s124_state "$(_s124_mk part partial)")"
+check "§124(2) a pair missing ONE directory is 'missing', not ok — the --reset-sandbox and failed-launch state (got: $_S124_PART)" \
+    bash -c '[ "$1" = "missing" ]' -- "$_S124_PART"
+_S124_NONE="$(trap - ERR; _s124_state "$(_s124_mk none none)")"
+check "§124(3) no handoff tree at all is 'missing' (got: $_S124_NONE)" \
+    bash -c '[ "$1" = "missing" ]' -- "$_S124_NONE"
+_S124_FILE="$(trap - ERR; _s124_state "$(_s124_mk file file)")"
+check "§124(4) a FILE where a mount target belongs is 'wrong', not ok (got: $_S124_FILE)" \
+    bash -c '[ "$1" = "wrong" ]' -- "$_S124_FILE"
+# THE ordering check. -d follows a symlink, so a symlink TO a directory passes
+# every other test. `mkdir -p` never creates one, so a symlink here was placed by
+# something else -- and inbox/peer are the host-written, :ro-mounted halves, so a
+# redirected one is an integrity problem. Mutation: move the -L test below -d and
+# this is the check that fails.
+_S124_LINK="$(trap - ERR; _s124_state "$(_s124_mk link link)")"
+check "§124(5) a SYMLINK to a real directory is 'wrong' — -d follows links, so testing -L first is load-bearing (got: $_S124_LINK)" \
+    bash -c '[ "$1" = "wrong" ]' -- "$_S124_LINK"
+check "§124(5b) the five shapes produced three distinct states (mutation: a classifier returning a constant passes 1-5 individually and fails here)" \
+    bash -c '[ "$(printf "%s\n%s\n%s\n%s\n%s\n" "$1" "$2" "$3" "$4" "$5" | sort -u | grep -c .)" -eq 3 ]' \
+    -- "$_S124_OK" "$_S124_PART" "$_S124_NONE" "$_S124_FILE" "$_S124_LINK"
+
+# --- the reporter must never repair -----------------------------------------
+_S124_PSH="$_S124_DIR/home"; mkdir -p "$_S124_PSH/sandboxes"
+_s124_sb() {   # _s124_sb <name> <shape> [workspace]
+    local d="$_S124_PSH/sandboxes/$1"; mkdir -p "$d/handoff"
+    case "$2" in
+        ok)      mkdir -p "$d/handoff/inbox" "$d/handoff/outbox" "$d/handoff/peer" "$d/handoff/relay" ;;
+        missing) : ;;
+        wrong)   mkdir -p "$d/handoff/inbox" "$d/handoff/outbox" "$d/handoff/peer"; : > "$d/handoff/relay" ;;
+    esac
+    printf '{\n  "schema_version": 1,\n  "workspace_path": "%s"\n}\n' "${3:-$_S124_DIR/ws}" > "$d/WORKSPACE.json"
+}
+mkdir -p "$_S124_DIR/ws"
+_s124_sb r-ok ok; _s124_sb r-missing missing; _s124_sb r-wrong wrong
+_S124_BEFORE="$(find "$_S124_PSH/sandboxes" | sort | sha256 2>/dev/null || find "$_S124_PSH/sandboxes" | sort | shasum -a 256)"
+_S124_PS="$(trap - ERR; SANDY_HOME="$_S124_PSH" "$SANDY_SCRIPT" --print-state 2>/dev/null || true)"
+_S124_AFTER="$(find "$_S124_PSH/sandboxes" | sort | sha256 2>/dev/null || find "$_S124_PSH/sandboxes" | sort | shasum -a 256)"
+check "§124(6) --print-state REPAIRS NOTHING — the tree is byte-identical after reporting on a broken pair (the consumer relies on a hand-made pair staying distinguishable)" \
+    bash -c '[ "$1" = "$2" ]' -- "$_S124_BEFORE" "$_S124_AFTER"
+
+_s124_field() { printf '%s' "$_S124_PS" | tr -d ' \n' | sed -n "s/.*\"name\":\"$1\"[^}]*\"handoff\":{\"state\":\"\([a-z]*\)\".*/\1/p" | head -1; }
+check "§124(7) --print-state reports ok / missing / wrong for the three fixtures" \
+    bash -c '[ "$1" = "ok" ] && [ "$2" = "missing" ] && [ "$3" = "wrong" ]' \
+    -- "$(trap - ERR; _s124_field r-ok)" "$(trap - ERR; _s124_field r-missing)" "$(trap - ERR; _s124_field r-wrong)"
+# NOT anchored on the sandbox name with [^}]*: `dirs` is a nested object, so its
+# closing brace sits between `name` and `problems` and the class can never span
+# it. Asserted instead as "exactly one sandbox reports a problem, and it names
+# relay" -- which is what the fixture set makes true.
+check "§124(8) a 'wrong' pair carries a populated problems[] naming the offending directory" \
+    bash -c 'o="$(printf "%s" "$1" | tr -d " \n")"; printf "%s" "$o" | grep -q "\"problems\":\[\"relay:" \
+             && [ "$(printf "%s" "$o" | grep -o "\"problems\":\[\"" | grep -c .)" -eq 1 ]' -- "$_S124_PS"
+check "§124(9) handoff is emitted in LIGHT mode too — a fleet poller must not pay for a du walk to learn a pair is broken" \
+    bash -c 'SANDY_HOME="$2" "$1" --print-state --light 2>/dev/null | tr -d " \n" | grep -q "\"handoff\":{\"state\""' -- "$SANDY_SCRIPT" "$_S124_PSH"
+check "§124(10) the stream contract holds with the new field (0 bytes on stderr)" \
+    bash -c 'e="$(SANDY_HOME="$2" "$1" --print-state 2>&1 >/dev/null)"; [ -z "$e" ]' -- "$SANDY_SCRIPT" "$_S124_PSH"
+# The consumer's actual gate, asserted rather than assumed to work.
+check "§124(11) the documented preview gate selects exactly the two bad sandboxes" \
+    bash -c 'n="$(printf "%s" "$1" | tr -d " \n" | grep -o "\"handoff\":{\"state\":\"[a-z]*\"" | grep -cv "\"ok\"")"; [ "$n" -eq 2 ]' -- "$_S124_PS"
+
+# --- the anti-drift property: ONE predicate, two callers --------------------
+# --print-state's report and --provision --all's selection must be the same
+# verdict. Asserted by construction (both call the one function) and by
+# behaviour: the set --all plans to provision is exactly the set --print-state
+# does not call ok.
+check "§124(12) --provision --all and --print-state share one predicate — neither re-implements the classification" \
+    bash -c 'n="$(grep -c "_sandy_handoff_classify" "$1")"; [ "$n" -ge 3 ] && [ "$(grep -c "^_sandy_handoff_classify() {" "$1")" -eq 1 ]' -- "$SANDY_SCRIPT"
+
+# --- --provision --all: guards and the plan ---------------------------------
+# A docker stub makes the dispatcher reachable without a daemon. It never gets
+# as far as a real provision (that forks a supervisor), so these cover the
+# selector guards, the plan, and the exit contract -- the serial run itself is
+# covered by acceptance-provision.sh, which has Docker.
+mkdir -p "$_S124_DIR/bin"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$_S124_DIR/bin/docker"
+chmod +x "$_S124_DIR/bin/docker"
+_s124_pv() { ( trap - ERR; set +e; PATH="$_S124_DIR/bin:$PATH" SANDY_HOME="$1" bash "$SANDY_SCRIPT" --provision --all "${@:2}" </dev/null 2>&1; echo "rc=$?" ); }
+
+_S124_EXCL="$(trap - ERR; _s124_pv "$_S124_PSH" --workspace /tmp)"
+check "§124(13) --all and --workspace are mutually exclusive (one selector, one resolution path)" \
+    bash -c 'printf "%s" "$1" | grep -q "mutually exclusive" && printf "%s" "$1" | grep -q "rc=1"' -- "$_S124_EXCL"
+_S124_NOTTY="$(trap - ERR; _s124_pv "$_S124_PSH")"
+check "§124(14) non-TTY without --yes ERRORS rather than running — cron has to opt in explicitly" \
+    bash -c 'printf "%s" "$1" | grep -q "needs --yes" && printf "%s" "$1" | grep -q "rc=1"' -- "$_S124_NOTTY"
+_S124_DRY="$(trap - ERR; _s124_pv "$_S124_PSH" --dry-run)"
+check "§124(15) --dry-run names both bad sandboxes, exits 0, and provisions nothing" \
+    bash -c 'printf "%s" "$1" | grep -q "r-missing" && printf "%s" "$1" | grep -q "r-wrong" && printf "%s" "$1" | grep -q "rc=0" && printf "%s" "$1" | grep -q "nothing provisioned"' -- "$_S124_DRY"
+check "§124(16) --dry-run did NOT create the missing pair (a dry run that provisions is the worst outcome)" \
+    bash -c '[ ! -d "$1/sandboxes/r-missing/handoff/inbox" ]' -- "$_S124_PSH"
+
+# nothing-to-do: goal already met -> 0 (the C1 rule; NOT "0 because I did work")
+_S124_ALLOK="$_S124_DIR/allok"; mkdir -p "$_S124_ALLOK/sandboxes/a/handoff"
+mkdir -p "$_S124_ALLOK/sandboxes/a/handoff/inbox" "$_S124_ALLOK/sandboxes/a/handoff/outbox" \
+         "$_S124_ALLOK/sandboxes/a/handoff/peer" "$_S124_ALLOK/sandboxes/a/handoff/relay"
+printf '{\n  "workspace_path": "%s"\n}\n' "$_S124_DIR/ws" > "$_S124_ALLOK/sandboxes/a/WORKSPACE.json"
+_S124_NOOP="$(trap - ERR; _s124_pv "$_S124_ALLOK" --yes)"
+check "§124(17) every pair already correct exits 0 and does no work (C1: skip when the goal is ALREADY MET)" \
+    bash -c 'printf "%s" "$1" | grep -q "already has a correct handoff pair" && printf "%s" "$1" | grep -q "rc=0"' -- "$_S124_NOOP"
+
+# an orphan cannot be provisioned: named, counted unprepared, exit NON-ZERO.
+# The consumer was explicit that an exit 0 with one sandbox silently unprepared
+# is worse for them than a command that refuses often.
+_S124_ORPH="$_S124_DIR/orph"; mkdir -p "$_S124_ORPH/sandboxes/gone"
+printf '{\n  "workspace_path": "%s"\n}\n' "$_S124_DIR/no-such-workspace" > "$_S124_ORPH/sandboxes/gone/WORKSPACE.json"
+_S124_ORPHOUT="$(trap - ERR; _s124_pv "$_S124_ORPH" --yes)"
+check "§124(18) a sandbox whose workspace is gone is NAMED and exits non-zero — never skipped into a false exit 0" \
+    bash -c 'printf "%s" "$1" | grep -q "gone" && printf "%s" "$1" | grep -q "workspace is gone" && printf "%s" "$1" | grep -q "rc=1"' -- "$_S124_ORPHOUT"
+check "§124(19) ...and it names the remedy rather than leaving the operator to guess" \
+    bash -c 'printf "%s" "$1" | grep -q -- "--remove-sandbox --orphans"' -- "$_S124_ORPHOUT"
+
+# SCOPE, asserted rather than assumed: --all cannot reach a workspace that has
+# no sandbox directory. That is the consumer's own constraint ("if a slug has
+# never been seen, refusing is the right answer") and it holds by construction,
+# because the enumeration is over directories that exist.
+_S124_EMPTY="$_S124_DIR/emptyhome"; mkdir -p "$_S124_EMPTY/sandboxes" "$_S124_DIR/never-launched"
+_S124_SCOPE="$(trap - ERR; _s124_pv "$_S124_EMPTY" --yes)"
+check "§124(20) --all cannot reach a never-launched workspace: with no sandbox dirs it finds nothing and exits 0" \
+    bash -c 'printf "%s" "$1" | grep -q "rc=0" && ! printf "%s" "$1" | grep -q "never-launched"' -- "$_S124_SCOPE"
+check "§124(21) ...and it did not create a sandbox for it (enrolling a new workspace stays a deliberate --workspace call)" \
+    bash -c '[ -z "$(ls -A "$1/sandboxes" 2>/dev/null)" ]' -- "$_S124_EMPTY"
+rm -rf "$_S124_DIR"
+unset _S124_DIR _S124_OK _S124_PART _S124_NONE _S124_FILE _S124_LINK _S124_PSH _S124_PS
+unset _S124_BEFORE _S124_AFTER _S124_EXCL _S124_NOTTY _S124_DRY _S124_ALLOK _S124_NOOP
+unset _S124_ORPH _S124_ORPHOUT _S124_EMPTY _S124_SCOPE
 
 # BEGIN SUMMARY
 # ============================================================
