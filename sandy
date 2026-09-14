@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.11.1-dev"
+SANDY_VERSION="1.12.0-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -619,6 +619,84 @@ _sandy_perm_mode_drift() {
     fi
     return 1
 }
+# --- handoff pair classification (#265) --------------------------------------
+#
+# ONE predicate, TWO callers: `--print-state` reports it and `--provision --all`
+# acts on it. They must never disagree about what "this sandbox has a correct
+# pair" means -- a reporter that says ok while the provisioner still provisions
+# (or worse, the reverse) is the drift this repo keeps paying for. Same rule as
+# _sandy_reap_orphan_networks serving both --gc and --prune-orphans.
+#
+# WHAT IS CHECKED, and deliberately what is not. Sandy creates these with a bare
+# `mkdir -p` -- it sets no mode and no owner. So this asserts only what sandy
+# actually guarantees, and inventing a mode standard here would be reporting a
+# rule nothing enforces:
+#
+#   - all four directories exist                    -> else "missing"
+#   - each is a real directory, not a file          -> a file where a mount
+#                                                      target belongs
+#   - each is NOT a symlink. `mkdir -p` never makes one, so a symlink here was
+#     placed by something else, and inbox/ and peer/ are the host-written,
+#     :ro-mounted halves of the pair -- a redirected one is an integrity problem,
+#     not a cosmetic one.
+#   - each is owned by the invoking user (`-O`), and r/w/x by them. The container
+#     process runs as the host uid, so an outbox owned by somebody else is one
+#     the agent cannot write.
+#
+# Implemented with bash builtins only (-d -L -O -r -w -x). `stat` would need the
+# GNU `-c` / BSD `-f` split that test/lint-bash32.sh exists to catch, for a
+# result no more accurate than `-O`.
+#
+# Sets three globals rather than echoing, so a caller needs no subshell and no
+# parsing: _SANDY_HC_STATE (ok|missing|wrong), _SANDY_HC_DIRS (JSON object),
+# _SANDY_HC_PROBLEMS (JSON array).
+_sandy_handoff_classify() {
+    local _hc_sb="$1" _hc_d _hc_name _hc_probs="" _hc_dirs="" _hc_missing=0 _hc_bad=0
+    for _hc_name in inbox outbox peer relay; do
+        _hc_d="$_hc_sb/handoff/$_hc_name"
+        [ -n "$_hc_dirs" ] && _hc_dirs="$_hc_dirs,"
+        if [ ! -e "$_hc_d" ] && [ ! -L "$_hc_d" ]; then
+            _hc_dirs="$_hc_dirs\"$_hc_name\":false"
+            _hc_missing=$((_hc_missing + 1))
+            continue
+        fi
+        _hc_dirs="$_hc_dirs\"$_hc_name\":true"
+        # Symlink first: -d follows the link, so a symlink TO a directory would
+        # otherwise pass every check below while pointing anywhere at all.
+        if [ -L "$_hc_d" ]; then
+            _hc_probs="$_hc_probs${_hc_probs:+,}\"$_hc_name: is a symlink; sandy creates these with mkdir and never links them\""
+            _hc_bad=$((_hc_bad + 1))
+            continue
+        fi
+        if [ ! -d "$_hc_d" ]; then
+            _hc_probs="$_hc_probs${_hc_probs:+,}\"$_hc_name: exists but is not a directory\""
+            _hc_bad=$((_hc_bad + 1))
+            continue
+        fi
+        if [ ! -O "$_hc_d" ]; then
+            _hc_probs="$_hc_probs${_hc_probs:+,}\"$_hc_name: not owned by you; the container runs as your uid and could not use it\""
+            _hc_bad=$((_hc_bad + 1))
+            continue
+        fi
+        if [ ! -r "$_hc_d" ] || [ ! -w "$_hc_d" ] || [ ! -x "$_hc_d" ]; then
+            _hc_probs="$_hc_probs${_hc_probs:+,}\"$_hc_name: not readable, writable and searchable by you\""
+            _hc_bad=$((_hc_bad + 1))
+            continue
+        fi
+    done
+    _SANDY_HC_DIRS="{$_hc_dirs}"
+    _SANDY_HC_PROBLEMS="[$_hc_probs]"
+    # missing outranks wrong: "some of it is not there" is the more actionable
+    # report, and the fix (provision it) is the same either way.
+    if [ "$_hc_missing" -gt 0 ]; then
+        _SANDY_HC_STATE="missing"
+    elif [ "$_hc_bad" -gt 0 ]; then
+        _SANDY_HC_STATE="wrong"
+    else
+        _SANDY_HC_STATE="ok"
+    fi
+}
+
 # Protected directories. .github/workflows is included by default; opt out via
 # SANDY_ALLOW_WORKFLOW_EDIT=1 in .sandy/config (passive tier).
 _sandy_protected_dirs() {
@@ -1092,7 +1170,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--doctor"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Standalone host + runtime readiness check. HOST runs the same checks as doctor.sh (git, curl, docker, PATH, credentials); RUNTIME reuses the sandy predicates verbatim (running-container image staleness, orphaned Docker resources, workspace-lock sanity, orphaned sandboxes -- all read-only findings, never required failures). Exit 0 iff every required HOST check passes; warnings from either section never fail it. Sub-options: --fix, --yes."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--provision"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Non-interactively materialize one workspace sandbox by running the REAL launch path once (start a detached daemon session, confirm it is up, then stop it) — never a flag that fabricates sandbox state directly. Safe no-op (exit 0) against a workspace that already has a live session (foreground lock holder or running daemon container). Sub-options: --workspace PATH, --dry-run, --yes."'; printf '}'
+    printf '{'; _json_kv name '"--provision"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Non-interactively materialize one workspace sandbox by running the REAL launch path once (start a detached daemon session, confirm it is up, then stop it) — never a flag that fabricates sandbox state directly. Safe no-op (exit 0) against a workspace that already has a live session (foreground lock holder or running daemon container). --all provisions every sandbox sandy already KNOWS about whose handoff pair is missing or wrong (the state --reset-sandbox leaves behind, and any launch that failed between creating the sandbox directory and creating the pair); it enumerates $SANDY_HOME/sandboxes, so a workspace that has never been launched has no directory and cannot be reached by it -- enrolling a new workspace stays a deliberate single --workspace call. A sandbox whose recorded workspace no longer exists cannot be provisioned: it is named, counted as unprepared, and makes the run exit non-zero rather than being skipped silently. Exit 0 iff every known sandbox ends with a correct pair. Sub-options: --workspace PATH, --all, --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --update-sessions, --reset-sandbox, --remove-sandbox, and --provision. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
     printf ']'
@@ -2028,6 +2106,27 @@ _sandy_emit_state() {
             else
                 printf ','; _json_kv handoff_enabled 'false'
             fi
+            # handoff (#265): does this sandbox have a correct pair, on the HOST.
+            #
+            # Read-only by construction -- it classifies and never repairs. That
+            # is a requirement, not an implementation detail: the consumer that
+            # asked for it relies on a hand-made pair being distinguishable from
+            # one a launch created, and a field that quietly fixed things would
+            # destroy exactly that property.
+            #
+            # READ THIS THE WAY IT IS MEANT. "ok" means the four directories are
+            # present and well-formed ON THE HOST. It does NOT mean the tree is
+            # mounted in any container: --print-state reads no configs, so it
+            # cannot know next launch's SANDY_HANDOFF_DIRS, and it does not
+            # inspect a running container. `handoff_enabled` above carries the
+            # same caveat and has been misread as a mount signal before. To ask
+            # "does this RUNNING sandbox have the tree", check the container's
+            # mounts.
+            #
+            # Both modes: four builtin file tests per sandbox cost no process
+            # spawns (the agent_args_files precedent, not size_bytes').
+            _sandy_handoff_classify "$sb"
+            printf ','; _json_kv handoff "{\"state\":\"$_SANDY_HC_STATE\",\"dirs\":$_SANDY_HC_DIRS,\"problems\":$_SANDY_HC_PROBLEMS}"
             # relay (#258): LIVE state, which is the half the session marker
             # structurally cannot carry. The marker is written before `docker
             # run` and the relay starts in-container, so it can only record
@@ -3993,7 +4092,7 @@ if [[ "${1:-}" == "--exec" ]]; then
 fi
 
 if [[ "${1:-}" == "--provision" ]]; then
-    _pv_workspace=""; _pv_dry_run=false; _pv_yes=false
+    _pv_workspace=""; _pv_dry_run=false; _pv_yes=false; _pv_all=false
     shift
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -4001,15 +4100,144 @@ if [[ "${1:-}" == "--provision" ]]; then
                            [ -z "$_pv_workspace" ] && { error "--provision: --workspace needs a PATH"; exit 1; } ;;
             --workspace=*) _pv_workspace="${1#--workspace=}"
                            [ -z "$_pv_workspace" ] && { error "--provision: --workspace needs a PATH"; exit 1; } ;;
+            --all)         _pv_all=true ;;
             --dry-run)     _pv_dry_run=true ;;
             --yes)         _pv_yes=true ;;
             *) error "--provision: unrecognized argument: $1"; exit 1 ;;
         esac
         shift
     done
+    if [ "$_pv_all" = "true" ] && [ -n "$_pv_workspace" ]; then
+        error "--provision: --all and --workspace are mutually exclusive."
+        exit 1
+    fi
 
     if ! command -v docker >/dev/null 2>&1 || ! docker ps >/dev/null 2>&1; then
         error "--provision requires a reachable Docker daemon (it runs the real launch path, not a filesystem-only shortcut)."
+        exit 1
+    fi
+
+    # --- --all: every KNOWN sandbox whose handoff pair is missing or wrong -----
+    #
+    # The population is real and it REGENERATES, which is why this is a command
+    # and not a one-off script. `--reset-sandbox` is the documented recovery from
+    # a poisoned session and it destroys handoff/ while keeping the sandbox
+    # directory, so every reset puts a sandbox back into this state. So does a
+    # --start refused at the approval pre-pass (the directory is created, the
+    # launch dies long before the pair is), and any launch that fails in the gap
+    # between the two.
+    #
+    # SCOPE, and it is a guarantee rather than a limitation: this enumerates
+    # $SANDY_HOME/sandboxes/*/ -- directories that EXIST. A workspace that has
+    # never been launched has no sandbox directory, so sandy does not know it
+    # exists and this cannot reach it even in principle. There is nowhere for a
+    # registry of INTENDED sandboxes to live: the sandbox directory IS the
+    # registry, and the launch creates it. Enrolling a new workspace stays a
+    # deliberate act (one `--provision --workspace P`), which is the answer to
+    # "could a sweep silently adopt something it should not".
+    #
+    # Classification is _sandy_handoff_classify -- the same predicate
+    # --print-state reports, so a consumer that gates on that field and this
+    # command can never disagree about what needs doing.
+    if [ "$_pv_all" = "true" ]; then
+        _pva_todo_name=(); _pva_todo_ws=(); _pva_todo_why=()
+        _pva_orphan_name=(); _pva_ok=0; _pva_live=0
+        for _pva_sb in "$SANDY_HOME/sandboxes"/*/; do
+            [ -d "$_pva_sb" ] || continue
+            _pva_sb="${_pva_sb%/}"
+            _pva_name="$(basename "$_pva_sb")"
+            _sandy_handoff_classify "$_pva_sb"
+            if [ "$_SANDY_HC_STATE" = "ok" ]; then _pva_ok=$((_pva_ok + 1)); continue; fi
+            # The workspace is where --provision has to launch, so a sandbox
+            # whose workspace is gone cannot be provisioned at all. It is named
+            # and counted as UNPREPARED rather than skipped quietly: the
+            # consumer this was built for said an exit 0 with one sandbox
+            # silently unprepared is worse for them than a command that refuses
+            # often, because that failure stays invisible until something does
+            # not arrive.
+            _pva_ws=""
+            # Same grep -m1 | sed idiom --print-state and --remove-sandbox
+            # --orphans already use on this file, so all three agree about where
+            # a sandbox's workspace is. (`-m1`, not `| head` -- grep dies on
+            # EPIPE under pipefail; see GREPM in test/lint-bash32.sh.)
+            if [ -f "$_pva_sb/WORKSPACE.json" ]; then
+                _pva_ws="$(grep -m1 '"workspace_path"' "$_pva_sb/WORKSPACE.json" 2>/dev/null \
+                    | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//' || true)"
+            fi
+            if [ -z "$_pva_ws" ] || [ ! -d "$_pva_ws" ]; then
+                _pva_orphan_name+=("$_pva_name")
+                continue
+            fi
+            _pva_todo_name+=("$_pva_name"); _pva_todo_ws+=("$_pva_ws"); _pva_todo_why+=("$_SANDY_HC_STATE")
+        done
+
+        printf '\nsandy --provision --all: %d sandbox(es) to provision, %d already correct, %d unprovisionable\n' \
+            "${#_pva_todo_name[@]}" "$_pva_ok" "${#_pva_orphan_name[@]}"
+        _pva_i=0
+        while [ "$_pva_i" -lt "${#_pva_todo_name[@]}" ]; do
+            printf '  - %-34s %-8s workspace: %s\n' "${_pva_todo_name[$_pva_i]}" "${_pva_todo_why[$_pva_i]}" "${_pva_todo_ws[$_pva_i]}"
+            _pva_i=$((_pva_i + 1))
+        done
+        for _pva_n in ${_pva_orphan_name[@]+"${_pva_orphan_name[@]}"}; do
+            printf '  ! %-34s %s\n' "$_pva_n" "workspace is gone — cannot provision; sandy --remove-sandbox --orphans"
+        done
+        echo ""
+
+        # C1: the goal is "every known sandbox has a correct pair". Nothing to do
+        # AND no orphans means it already holds -> 0. Orphans mean it does not,
+        # and no amount of work here can make it hold -> 1, said up front rather
+        # than after a run that could not have fixed them.
+        if [ "${#_pva_todo_name[@]}" -eq 0 ]; then
+            if [ "${#_pva_orphan_name[@]}" -eq 0 ]; then
+                info "Every known sandbox already has a correct handoff pair."
+                exit 0
+            fi
+            error "${#_pva_orphan_name[@]} sandbox(es) cannot be provisioned (workspace gone); the goal state is not met."
+            exit 1
+        fi
+        [ "$_pv_dry_run" = "true" ] && { info "--dry-run: nothing provisioned."; exit 0; }
+        if [ "$_pv_yes" != "true" ]; then
+            if [ -t 0 ]; then
+                printf '[sandy] Provision %d sandbox(es)? [y/N] ' "${#_pva_todo_name[@]}" >&2
+                read -r _pva_ans < /dev/tty || _pva_ans=""
+                case "$_pva_ans" in [yY]|[yY][eE][sS]) ;; *) info "Aborted."; exit 1 ;; esac
+            else
+                error "--provision --all needs --yes when stdin is not a TTY."
+                exit 1
+            fi
+        fi
+
+        # Serial, and composed from the per-workspace --provision verbatim rather
+        # than reimplemented: one lifecycle path, so the fleet form cannot drift
+        # from the single form (the --stop-all rule, DEC-U2).
+        _pva_fail=(); _pva_done=0; _pva_i=0
+        while [ "$_pva_i" -lt "${#_pva_todo_name[@]}" ]; do
+            _pva_n="${_pva_todo_name[$_pva_i]}"; _pva_w="${_pva_todo_ws[$_pva_i]}"
+            info "Provisioning $_pva_n ($_pva_w)…"
+            _pva_rc=0
+            "$0" --provision --workspace "$_pva_w" --yes || _pva_rc=$?
+            if [ "$_pva_rc" -ne 0 ]; then
+                _pva_fail+=("$_pva_n (exit $_pva_rc)")
+            else
+                # Verify the GOAL, not the child's exit code. --provision
+                # attests to sandy's goal (the sandbox is provisioned), which is
+                # not automatically the caller's -- the same caveat its own docs
+                # carry. Re-classify and believe the filesystem.
+                _sandy_handoff_classify "$SANDY_HOME/sandboxes/$_pva_n"
+                if [ "$_SANDY_HC_STATE" = "ok" ]; then
+                    _pva_done=$((_pva_done + 1))
+                else
+                    _pva_fail+=("$_pva_n (provisioned, but the pair is still $_SANDY_HC_STATE)")
+                fi
+            fi
+            _pva_i=$((_pva_i + 1))
+        done
+
+        printf '\nsandy --provision --all: %d created, %d already correct, %d failed, %d unprovisionable\n' \
+            "$_pva_done" "$_pva_ok" "${#_pva_fail[@]}" "${#_pva_orphan_name[@]}"
+        for _pva_n in ${_pva_fail[@]+"${_pva_fail[@]}"}; do printf '  x %s\n' "$_pva_n"; done
+        for _pva_n in ${_pva_orphan_name[@]+"${_pva_orphan_name[@]}"}; do printf '  ! %s (workspace gone)\n' "$_pva_n"; done
+        if [ "${#_pva_fail[@]}" -eq 0 ] && [ "${#_pva_orphan_name[@]}" -eq 0 ]; then exit 0; fi
         exit 1
     fi
 
@@ -4264,8 +4492,17 @@ Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
                      flag that fabricates sandbox state — the launch path
                      itself is what materializes the handoff dirs, settings
                      seed, WORKSPACE.json, etc. Safe no-op (exit 0) against a
-                     workspace that already has a live session. Sub-options:
-                     --workspace PATH (default cwd), --dry-run, --yes
+                     workspace that already has a live session. --all does
+                     every sandbox sandy already KNOWS about whose handoff
+                     pair is missing or wrong — the state --reset-sandbox
+                     leaves behind. It enumerates existing sandbox dirs, so a
+                     never-launched workspace has none and cannot be reached
+                     by it; enrolling one stays a deliberate --workspace call.
+                     A sandbox whose workspace is gone is named, counted
+                     unprepared, and makes the run exit non-zero. Exit 0 iff
+                     every known sandbox ends with a correct pair.
+                     Sub-options: --workspace PATH (default cwd), --all,
+                     --dry-run, --yes
 Introspection (machine-readable JSON; no Docker required):
   --print-schema          Emit the static schema (config keys, flags, agents,
                           protected paths). See SPEC_INTROSPECTION.md.
