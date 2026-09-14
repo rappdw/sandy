@@ -5375,6 +5375,14 @@ if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
 else
     sandy_log() { :; }
 fi
+# FATAL errors never route through sandy_log. That function is a NO-OP unless
+# SANDY_VERBOSE>=1, so every criterion-7 refusal below was invisible by default:
+# the container called `exit 1`, `--start` reported a crash loop, and the reason
+# was printed NOWHERE -- not on the console, not in `docker logs`. A failure path
+# whose entire purpose is to fail loudly was the quietest thing in the launch,
+# and diagnosing one cost a maintainer a full round trip with the container log
+# showing only unrelated warnings.
+sandy_err() { printf '\033[0;31m[sandy] ERROR: %s\033[0m\n' "$1" >&2; }
 if [ "${SANDY_VERBOSE:-0}" -ge 2 ]; then
     set -x
 fi
@@ -6338,15 +6346,15 @@ _sandy_start_handoff_relay() {
     local _r="$SANDY_HANDOFF_RELAY" _st="$HOME/.handoff/relay" _lock="$HOME/.sandy-handoff-relay.lock"
     case "$_r" in /*) ;; *) _r="$WORKSPACE/$_r" ;; esac
     if [ ! -f "$_r" ] || [ ! -x "$_r" ]; then
-        sandy_log "ERROR: SANDY_HANDOFF_RELAY=$SANDY_HANDOFF_RELAY resolves to $_r, which is not an executable file inside the container. A configured relay that cannot start fails the session (unset SANDY_HANDOFF_RELAY to launch without one)."
+        sandy_err "SANDY_HANDOFF_RELAY=$SANDY_HANDOFF_RELAY resolves to $_r, which is not an executable file inside the container. A configured relay that cannot start fails the session (unset SANDY_HANDOFF_RELAY to launch without one)."
         exit 1
     fi
     if [ ! -d "$_st" ]; then
-        sandy_log "ERROR: SANDY_HANDOFF_RELAY is configured but ~/.handoff/relay is not mounted. A configured relay that cannot start fails the session."
+        sandy_err "SANDY_HANDOFF_RELAY is configured but ~/.handoff/relay is not mounted. A configured relay that cannot start fails the session."
         exit 1
     fi
     if ! command -v flock >/dev/null 2>&1; then
-        sandy_log "ERROR: SANDY_HANDOFF_RELAY is configured but flock is not available in this image, so the relay singleton cannot be enforced. A configured relay that cannot start fails the session."
+        sandy_err "SANDY_HANDOFF_RELAY is configured but flock is not available in this image, so the relay singleton cannot be enforced. A configured relay that cannot start fails the session."
         exit 1
     fi
     export SANDY_HANDOFF_INBOX="$HOME/.handoff/inbox" SANDY_HANDOFF_OUTBOX="$HOME/.handoff/outbox" SANDY_HANDOFF_RELAY_STATE="$_st" SANDY_HANDOFF_PEER="$HOME/.handoff/peer"
@@ -6442,7 +6450,7 @@ _sandy_start_handoff_relay() {
                 already-running) break ;;
                 rc=0)            break ;;
                 rc=*)
-                    sandy_log "ERROR: the relay ($_r) exited ${_v#rc=} within 5s of starting, on every launch this reproduces. An installed relay that cannot stay up fails the session; see ~/.handoff/relay/supervisor.log for its own output."
+                    sandy_err "the relay ($_r) exited ${_v#rc=} within 5s of starting, on every launch this reproduces. An installed relay that cannot stay up fails the session; see ~/.handoff/relay/supervisor.log for its own output."
                     exit 1 ;;
             esac
         fi

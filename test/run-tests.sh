@@ -11762,6 +11762,40 @@ if [ -f "$_S114_TMPL" ]; then
     # well as headless. Belt-and-suspenders with the host-side unset (11p) --
     # the host is the only half that can log the reason, this half is what
     # holds if a caller ever forwards the key anyway.
+    # --- fatal in-container errors must be VISIBLE AT DEFAULT VERBOSITY ------
+    #
+    # user-setup.sh defines sandy_log as `{ :; }` -- a NO-OP -- unless
+    # SANDY_VERBOSE>=1. Every criterion-7 refusal used it, so the container
+    # called `exit 1` in total silence: --start reported a crash loop, `docker
+    # logs` showed only unrelated warnings, and the reason was printed NOWHERE.
+    # A failure path whose entire purpose is to fail loudly was the quietest
+    # thing in the launch. Diagnosing one instance cost a maintainer a full
+    # round trip.
+    #
+    # (15j) is the ratchet and (15k) is the property. The ratchet matters
+    # because the pull toward `sandy_log "ERROR: …"` is strong -- it reads
+    # correctly, sits beside every other log call, and the 1.12.0 startup-window
+    # error was written that way by copying its neighbours.
+    check "§114(15j) NO fatal error routes through sandy_log, which is a no-op at default verbosity" \
+        bash -c '! grep -q "sandy_log \"ERROR" "$1"' -- "$_S114_TMPL"
+    check "§114(15k) sandy_err exists, is unconditional (not inside a SANDY_VERBOSE branch), and writes to stderr" \
+        bash -c 'grep -q "^sandy_err() {" "$1" && grep -q "^sandy_err() {.*>&2" "$1"' -- "$_S114_TMPL"
+    _S114_ERRV="$(
+        trap - ERR
+        set +e
+        _d="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$_d/h/ws"
+        sed -n '1,20p' "$_S114_TMPL" > "$_d/hdr.sh"
+        sed -n '/^_sandy_start_handoff_relay() {/,/^}$/p' "$_S114_TMPL" > "$_d/fn.sh"
+        ( unset SANDY_VERBOSE
+          HOME="$_d/h"; WORKSPACE="$_d/h/ws"; SANDY_HANDOFF_RELAY=/nonexistent/relay
+          . "$_d/hdr.sh" 2>/dev/null
+          . "$_d/fn.sh"
+          _sandy_start_handoff_relay ) 2>&1
+        rm -rf "$_d"
+    )"
+    check "§114(15l) a relay that cannot start PRINTS its reason with SANDY_VERBOSE unset — the behavioural half, not just the grep (got: ${_S114_ERRV:0:60})" \
+        bash -c 'printf "%s" "$1" | grep -q "not an executable file inside the container"' -- "$_S114_ERRV"
+    unset _S114_ERRV
     check "§114(15i) call site is ALSO gated on SANDY_REMOTE_CONTROL (criterion 8: --remote has no panes for the relay to target, and the supervisor never gives up)" \
         bash -c 'grep -q "_sandy_is_headless.*!=.*true.*SANDY_REMOTE_CONTROL.*!=.*true.*_sandy_start_handoff_relay" "$1"' -- "$_S114_TMPL"
     # --- criterion 7, in-container half: three preconditions the host cannot
