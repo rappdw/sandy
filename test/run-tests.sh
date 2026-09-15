@@ -13503,6 +13503,136 @@ check "§127(12) the marker WRITES the key --print-state READS (mutation: rename
 rm -rf "$_S127_DIR"
 unset _S127_DIR _S127_ONE _S127_TWO _S127_FOUR _S127_DEF _S127_IFS _S127_PSH _S127_PS
 
+# ============================================================
+echo "§128: a passive config value can never inject shell into the agent command (R1)"
+# ============================================================
+# WHY. build_claude_cmd assembles a STRING that is later run by
+# `exec bash -c "$AGENT_CMD 2>&1"`. Two interpolations went in unquoted:
+#
+#     cmd+=" --teammate-mode ${_tm}"          <- SANDY_TEAMMATE_MODE
+#     cmd+=" --channels${_ch_specs}"          <- SANDY_CHANNELS
+#
+# Both keys are PASSIVE and neither is in the value-aware gate, so a committed
+# workspace .sandy/config sets them with NO approval prompt. `gh pr checkout N
+# && sandy` was enough, and the payload ran BEFORE the agent's first turn --
+# ahead of any prompt-injection defence, and invisible to SANDY_TOOL_AUDIT,
+# which instruments agent tool calls only. Demonstrated live on 1.13.0: `;`,
+# `&&` and `|` all executed.
+#
+# Every OTHER agent's --model append already used printf %q; these two were
+# simply missed. That is why this section tests the PROPERTY rather than the
+# presence of a %q call -- the next interpolation someone adds should fail here.
+#
+# THE PREDICATE IS THE SUBTLE PART. The payload's output must be distinguished
+# from the payload TEXT merely appearing inside an argv echo: a correctly
+# quoted value still contains the marker, as one literal argument. So the stub
+# prints argv on a single `CLAUDE-ARGV:` line, and execution is detected only by
+# a line that STARTS with the marker -- which can only come from the injected
+# command running. A substring match reports the fix as vulnerable; a whole-line
+# match reports the bug as fixed. Both were tried while writing this.
+if ! command -v bash >/dev/null 2>&1; then
+    skip "§128 needs bash"
+else
+_S128_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S128_DIR/bin"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "CLAUDE-ARGV:"; printf " [%s]" "$@"; printf "\n"' \
+    > "$_S128_DIR/bin/claude"
+# A real command on PATH. The channels sink wraps every token as
+# plugin:<tok>@claude-plugins-official, so a `; echo MARKER` payload comes back
+# mangled and never runs -- the first version of (5) used one and passed while
+# the sink was still unquoted. Making the marker a COMMAND NAME survives the
+# wrapping: plugin:x;S128_PWNED_CMD;x@... parses as `plugin:x`, then the command,
+# then the rest.
+printf '%s\n' '#!/usr/bin/env bash' 'echo S128_PWNED' > "$_S128_DIR/bin/S128_PWNED_CMD"
+chmod +x "$_S128_DIR/bin/claude" "$_S128_DIR/bin/S128_PWNED_CMD"
+sed -n '/^build_claude_cmd() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S128_DIR/bcc.sh"
+check "§128(pre) build_claude_cmd was extracted and parses (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'grep -q "teammate-mode" "$1" && bash -n "$1"' -- "$_S128_DIR/bcc.sh"
+
+# Builds the command the way sandy does, then RUNS it through bash -c the way
+# sandy does, and reports whether the injected command produced output of its own.
+# Returns the RAW output, and every check below asserts two things about it:
+# the stub ran at all (a CLAUDE-ARGV line), and no line begins with the marker.
+# The first version returned a bare EXECUTED/inert verdict, and `set -u` -- which
+# `set +e` does NOT clear, and which the suite has on -- killed the subshell at
+# build_claude_cmd's unguarded ${SANDY_CHANNELS//,/ } after the unset. Every
+# payload then reported "inert" because NOTHING RAN, and the section passed
+# vacuously against unquoted code. Asserting the positive half makes that
+# failure mode impossible rather than merely unlikely.
+_s128_exec() {   # _s128_exec <var> <value> -> raw output of the built command
+    (
+        trap - ERR
+        set +e
+        set +u
+        _sandy_translate_args() { :; }
+        _sandy_wrap_cmd_exit_pause() { printf '%s' "$2"; }
+        SANDY_MODEL=claude-opus-5
+        SANDY_TEAMMATE_MODE=""; SANDY_CHANNELS=""; SANDY_EFFORT=""
+        export "$1=$2"
+        . "$_S128_DIR/bcc.sh"
+        _c="$(build_claude_cmd 2>/dev/null)"
+        PATH="$_S128_DIR/bin:$PATH" bash -c "$_c 2>&1"
+    ) 2>/dev/null
+    return 0
+}
+# ran-and-did-not-execute, as one predicate
+_s128_inert() { printf '%s\n' "$1" | grep -q '^CLAUDE-ARGV:' && ! printf '%s\n' "$1" | grep -q '^S128_PWNED'; }
+_S128_SEMI="$(trap - ERR;  _s128_exec SANDY_TEAMMATE_MODE 'tmux; echo S128_PWNED')"
+_S128_AND="$(trap - ERR;   _s128_exec SANDY_TEAMMATE_MODE 'tmux && echo S128_PWNED')"
+_S128_PIPE="$(trap - ERR;  _s128_exec SANDY_TEAMMATE_MODE 'tmux | echo S128_PWNED')"
+_S128_NL="$(trap - ERR;    _s128_exec SANDY_TEAMMATE_MODE 'tmux
+echo S128_PWNED')"
+_S128_CHAN="$(trap - ERR;  _s128_exec SANDY_CHANNELS      'x;S128_PWNED_CMD;x')"
+check "§128(1) SANDY_TEAMMATE_MODE with a command separator does not execute (got: $_S128_SEMI)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^CLAUDE-ARGV:" && ! printf "%s\n" "$1" | grep -q "^S128_PWNED"' -- "$_S128_SEMI"
+check "§128(2) ...nor with && (got: $_S128_AND)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^CLAUDE-ARGV:" && ! printf "%s\n" "$1" | grep -q "^S128_PWNED"' -- "$_S128_AND"
+check "§128(3) ...nor with a pipe (got: $_S128_PIPE)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^CLAUDE-ARGV:" && ! printf "%s\n" "$1" | grep -q "^S128_PWNED"' -- "$_S128_PIPE"
+check "§128(4) ...nor with an embedded newline (got: $_S128_NL)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^CLAUDE-ARGV:" && ! printf "%s\n" "$1" | grep -q "^S128_PWNED"' -- "$_S128_NL"
+check "§128(5) SANDY_CHANNELS cannot inject at the same sink — a SECOND live chain, demonstrated: this payload executes on the unquoted code and not on the fixed (got: $_S128_CHAN)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^CLAUDE-ARGV:" && ! printf "%s\n" "$1" | grep -q "^S128_PWNED"' -- "$_S128_CHAN"
+
+# ANTI-VACUITY: the harness must be able to SEE an injection. Without this, a
+# probe that silently built an empty command would report every payload inert
+# and the section would pass against unquoted code.
+_S128_CANARY="$(
+    trap - ERR
+    set +e
+    set +u
+    PATH="$_S128_DIR/bin:$PATH" bash -c "claude --teammate-mode tmux; echo S128_PWNED" 2>&1
+)"
+check "§128(6) the probe CAN detect an injection when one is present (canary: an unquoted string through the same bash -c must report EXECUTED; got: $_S128_CANARY)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^CLAUDE-ARGV:" && printf "%s\n" "$1" | grep -q "^S128_PWNED"' -- "$_S128_CANARY"
+# A benign value must still reach the agent unchanged -- the fix must not
+# neuter the feature it guards. Reuses the same shape as _s128_exec rather than
+# a second bespoke subshell: the first attempt at this check built its own and
+# came back empty, which reads as a failure of the CODE and was a failure of the
+# harness.
+_s128_argv() {   # _s128_argv <var> <value> -> the CLAUDE-ARGV line
+    (
+        trap - ERR
+        set +e
+        set +u
+        _sandy_translate_args() { :; }
+        _sandy_wrap_cmd_exit_pause() { printf '%s' "$2"; }
+        SANDY_MODEL=claude-opus-5
+        SANDY_TEAMMATE_MODE=""; SANDY_CHANNELS=""; SANDY_EFFORT=""
+        export "$1=$2"
+        . "$_S128_DIR/bcc.sh"
+        _c="$(build_claude_cmd 2>/dev/null)"
+        PATH="$_S128_DIR/bin:$PATH" bash -c "$_c 2>&1"
+    ) 2>/dev/null
+    return 0
+}
+_S128_OK="$(trap - ERR; _s128_argv SANDY_TEAMMATE_MODE tmux)"
+check "§128(7) a benign value still arrives as its own argv element, unescaped and unmangled (got: ${_S128_OK:0:70})" \
+    bash -c 'printf "%s" "$1" | grep -qF -- "[--teammate-mode] [tmux]"' -- "$_S128_OK"
+rm -rf "$_S128_DIR"
+unset _S128_DIR _S128_SEMI _S128_AND _S128_PIPE _S128_NL _S128_CHAN _S128_CANARY _S128_OK
+fi
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

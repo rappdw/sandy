@@ -485,6 +485,23 @@ Passive-safe to turn **on** from a repo (a repo may declare itself suspicious); 
 
 **Honest limits**: a long-lived `CLAUDE_CODE_OAUTH_TOKEN` is *not* shrunk (recorded honestly and warned about), it is Claude-only, and the access token stays exfiltrable for its remaining TTL. Real prevention is #121 (credential broker). Guarded by §112.
 
+### Passive config values reach `bash -c` — quote every interpolation (R1, 1.13.1)
+
+`build_claude_cmd` assembles a **string** that is later run by `exec bash -c "$AGENT_CMD 2>&1"`. Two interpolations went in **unquoted**:
+
+```sh
+cmd+=" --teammate-mode ${_tm}"      # SANDY_TEAMMATE_MODE
+cmd+=" --channels${_ch_specs}"      # SANDY_CHANNELS
+```
+
+Both keys are **passive** and neither is in the value-aware gate, so a committed workspace `.sandy/config` sets them with **no approval prompt**. `gh pr checkout N && sandy` was enough, and the payload ran **before the agent's first turn** — ahead of any prompt-injection defence, and invisible to `SANDY_TOOL_AUDIT`, which instruments agent tool calls only. Both chains were demonstrated live on 1.13.0, not inferred: `;`, `&&`, `|` and a bare newline through `--teammate-mode`, and `x;<command>;x` through `--channels`.
+
+**Every other agent's `--model` append already used `printf "%q"`** — these two were simply missed, which is the whole lesson. The rule is therefore the class, not the two lines: **any value interpolated into an agent command string goes through `printf "%q"`**, because the sink is `bash -c`, not an argv array. `SANDY_MODEL` and `SANDY_EFFORT` are safe by a *different* mechanism — both are validated host-side and the launch exits on a bad value — and that asymmetry is exactly why quoting at the sink is the reliable rule rather than remembering which keys are validated.
+
+`SANDY_CHANNELS` is quoted **per token**, not once over the whole string: `_ch_specs` is a space-separated argument list, so a single `%q` over it would collapse the separators into one argument.
+
+Guarded by §128, which asserts the **property** — run the built command and check nothing executed — rather than the presence of a `%q` call, so the next unquoted interpolation fails there. Two details of that section are load-bearing and were both got wrong first: the predicate must distinguish the payload *executing* from its text merely appearing inside an argv echo (a correctly quoted value still contains the marker), and every check must assert the command **ran** — the suite's `set -u` silently killed the probe subshell at `build_claude_cmd`'s unguarded `${SANDY_CHANNELS//,/ }`, so every payload reported "inert" and the section passed vacuously against unquoted code.
+
 ### Agent-layer tool-use audit (`SANDY_TOOL_AUDIT`)
 
 Sandy is otherwise entirely the NDR side — it constrains the box and sees nothing of tool calls. `SANDY_TOOL_AUDIT=1` (passive-safe, default `0`) adds the EDR side: a `PreToolUse` hook running `/usr/local/bin/sandy-tool-audit`, appending one `{ts, tool, args}` JSONL line per call to `~/.claude/tool-audit.jsonl`. The seed uses the **same only-if-absent guard** as `statusLine`, so a user's own hook is never clobbered; the helper **always exits 0** (a non-zero `PreToolUse` would *block* the call) and truncates `tool_input` to 200 chars. **Two limits**: Claude-Code-only, and an audit hook running *inside* the box is not tamper-proof against a determined agent — it is instrumentation for the wrong-but-not-evil adversary. Guarded by §82.
