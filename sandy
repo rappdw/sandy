@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.12.3-dev"
+SANDY_VERSION="1.13.0-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -2183,6 +2183,34 @@ EOF_RELAY_STATE
                 fi
             fi
             printf ','; _json_kv relay "{\"state\":$sb_r_state,\"path\":$sb_r_path,\"last_exit_code\":$sb_r_rc,\"restarts\":$sb_r_restarts,\"last_restart_at\":$sb_r_at,\"disabled_by\":$sb_r_by}"
+            # agents (#sixth-ask): which agent(s) this sandbox RESOLVED to on its
+            # last launch, read back from the session marker — the same file, and
+            # the same one-line read, that disabled_by above comes from, so this
+            # costs no extra open.
+            #
+            # WHY THIS IS NOT DERIVABLE BY A CONSUMER. SANDY_AGENT settles at
+            # sandy:8257 from four sources — env, host config, workspace config,
+            # the --agent flag — plus the `all` alias. A reader inspecting the
+            # workspace's own .sandy/config therefore cannot know what will
+            # launch: a workspace naming nothing may still launch as anything.
+            # Only the launch knows, which is why the launch records it.
+            #
+            # LAST LAUNCH, NOT NEXT LAUNCH, and consumers must encode that: a
+            # sandbox whose SANDY_AGENT changes in config reports the old value
+            # until it is launched again. `handoff_enabled` and `handoff.state`
+            # carry the same caveat and both have been misread here before.
+            #
+            # null means UNKNOWN — never assume `claude`. It is the default, so
+            # inferring it would rebuild exactly the guess this field exists to
+            # retire: a host-side tool enrolled 51 sandboxes, one ran codex, its
+            # per-agent component could never work there, and nothing readable
+            # said so.
+            sb_agents='null'
+            if [ -f "$sb/sandy-session.json" ]; then
+                sb_ag_line="$(sed -n 's/.*"agents": \(\[[^]]*\]\).*/\1/p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                [ -n "$sb_ag_line" ] && sb_agents="$sb_ag_line"
+            fi
+            printf ','; _json_kv agents "$sb_agents"
             # agent_args_files (#210): per-agent PRESENCE of an
             # operator $SANDBOX_DIR/agent-args.<agent> file, one fixed object
             # with all five agent names as literal keys (independent of
@@ -12584,6 +12612,32 @@ _sandy_relay_json=false; [ -n "${SANDY_HANDOFF_RELAY:-}" ] && _sandy_relay_json=
 #
 # `handoff_relay` is kept, unchanged, as a deprecated alias. It has always meant
 # launch intent; consumers must not be migrated onto it expecting liveness.
+# agents (#sixth-ask): the RESOLVED agent list for this launch, recorded the way
+# every other marker field is -- what sandy pinned, not what a config declared.
+#
+# It belongs here rather than being derived by a reader because SANDY_AGENT is
+# settled at sandy:8257 from FOUR sources (env, host config, workspace config,
+# the --agent flag) plus the `all` alias. A consumer reading the workspace's own
+# .sandy/config therefore cannot know what will launch -- a workspace naming
+# nothing may still launch as anything. Only the launch knows.
+#
+# A JSON array, because the setting is a combo; the order is SANDY_AGENT's own,
+# which is also pane order.
+#
+# Motivating failure: a host-side tool enrolled all 51 sandboxes on a machine and
+# installed a per-agent component into each. One ran codex, and that component
+# speaks one agent's local protocol, so it could never work there. Everything
+# readable looked healthy -- directories, mounts, config -- and the only symptom
+# was a process exiting non-zero once a second into a log nobody was watching.
+# Nothing in the state a consumer can read said which agent a sandbox runs.
+_sandy_agents_json=""
+_sandy_agents_ifs="$IFS"; IFS=','
+for _sandy_a in ${SANDY_AGENT:-claude}; do
+    [ -n "$_sandy_a" ] || continue
+    _sandy_agents_json="${_sandy_agents_json:+$_sandy_agents_json,}\"$_sandy_a\""
+done
+IFS="$_sandy_agents_ifs"; unset _sandy_agents_ifs _sandy_a
+_sandy_agents_json="[$_sandy_agents_json]"
 _sandy_relay_slot_json="\"${_sandy_relay_slot:-absent}\""
 _sandy_relay_path_json="null"
 [ -n "${SANDY_HANDOFF_RELAY:-}" ] && _sandy_relay_path_json="\"$SANDY_HANDOFF_RELAY\""
@@ -12594,10 +12648,10 @@ _sandy_relay_disabled_by_json="null"
 if [ "${_sandy_relay_slot:-absent}" = "disabled" ] && [ -n "${_SANDY_RELAY_SOURCE:-}" ]; then
     _sandy_relay_disabled_by_json="\"$_SANDY_RELAY_SOURCE\""
 fi
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "handoff_relay": %s,\n  "relay": {\n    "slot": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "cred_mode": "%s"\n}\n' \
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "handoff_relay": %s,\n  "relay": {\n    "slot": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "cred_mode": "%s"\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
-    "$_sandy_perm_mode_json" "$_sandy_csi_json" "$_sandy_relay_json" \
+    "$_sandy_perm_mode_json" "$_sandy_csi_json" "$_sandy_agents_json" "$_sandy_relay_json" \
     "$_sandy_relay_slot_json" "$_sandy_relay_path_json" "$_sandy_relay_disabled_by_json" "${CRED_MODE:-none}" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)

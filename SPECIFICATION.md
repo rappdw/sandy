@@ -2153,6 +2153,7 @@ Written to `$SANDBOX_DIR/sandy-session.json` on every launch and bind-mounted re
   "effort": "high",
   "permission_mode": "bypassPermissions",
   "cross_session_inbound": "refuse",
+  "agents": ["claude"],
   "handoff_relay": false,
   "relay": { "slot": "absent", "path": null, "disabled_by": null },
   "cred_mode": "full"
