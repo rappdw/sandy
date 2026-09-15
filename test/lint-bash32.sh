@@ -157,6 +157,24 @@ GNU_FLAGS = [
     ("xargs", r"\bxargs\b[^|;]*\s-r\b", None),
     ("find",  r"\bfind\b[^|;]*\s-printf\b", None),
     ("sleep", r"\bsleep\s+infinity\b", None),
+    # GNU BRE alternation. `\|` (and `\+`, `\?`) are GNU EXTENSIONS to basic
+    # regular expressions; POSIX BRE has no alternation at all, so BSD sed
+    # matches a LITERAL pipe and the expression silently never fires -- empty
+    # output, exit 0, no error. Cost run-tests.sh §127(6-9): four checks that
+    # passed in CI and failed on macOS the first time they ran there, because
+    # `s/.*"agents":\(\[[^]]*\]\|null\).*/\1/p` matched nothing at all.
+    # The fix is POSIX ERE -- `sed -E -n \'s/...(\[[^]]*\]|null).*/\1/p\'` --
+    # which BSD sed and GNU sed both accept, so the allow pattern below stands
+    # down for any -E/-r invocation.
+    ("sed",   r"\bsed\b[^|;]*\\[|+?]", r"\bsed\s+(?:-[A-Za-z]*[Er])"),
+    # NOT extended to grep, and that is an evidence call rather than an
+    # oversight. The same macOS run that failed the sed form PASSED §109(2),
+    # whose `grep -q "sandy own state\|sandy.s own state"` has no fallback and
+    # whose FIRST alternative does not occur in the file -- it can only pass if
+    # BSD grep honoured the alternation. Flagging grep would have produced 12
+    # findings against lines that demonstrably work, which is the crying-wolf
+    # failure the GNUBIN header warns about. Revisit only with a macOS run that
+    # contradicts it.
 ]
 # The BSD counterpart. Its presence on the SAME line means the call is already
 # a portable fallback chain (`shasum -a 256 2>/dev/null || sha256sum`), which is
@@ -515,8 +533,11 @@ if [ "$SELF_TEST" = true ]; then
     # And the leading-paren form of the SAME line must NOT fire -- a detector
     # that flags the documented fix is worse than no detector.
     printf '%s\n' '#!/bin/bash' '_f() {' '    out="$( {' '        trap - ERR' '        if [ -n "${3:-}" ]; then command(){ case "$2" in (node|python3) return 1 ;; esac; builtin command "$@"; }; fi' '        echo done' '    } 2>&1 )"' '}' > "$_fx/casesub2ok.sh"
+    # GNUBIN: GNU-only BRE alternation. The exact run-tests.sh §127 shape --
+    # silent empty output on BSD sed, never an error.
+    printf '%s\n' '#!/bin/bash' 'v="$(prog | sed -n '"'"'s/.*"agents":\\(\\[[^]]*\\]\\|null\\).*/\\1/p'"'"')"' > "$_fx/gnubin5.sh"
     _fails=0
-    for probe in srcsub pyback aposcs aposcs2 aposq casesub casesub2 grepm grepm2 gnubin gnubin2 gnubin3 gnubin4; do
+    for probe in srcsub pyback aposcs aposcs2 aposq casesub casesub2 grepm grepm2 gnubin gnubin2 gnubin3 gnubin4 gnubin5; do
         if python3 "$_scanner" "$_fx/$probe.sh" >/dev/null 2>&1; then
             echo "SELF-TEST FAIL: $probe fixture was NOT detected" >&2; _fails=$((_fails + 1))
         else
@@ -527,6 +548,18 @@ if [ "$SELF_TEST" = true ]; then
         echo "  negative control OK: the leading-paren case form does not fire"
     else
         echo "SELF-TEST FAIL: the (pattern) fix was flagged as a finding" >&2; _fails=$((_fails + 1))
+    fi
+    # The documented fix -- POSIX ERE -- must NOT fire, in either tool.
+    {
+        echo '#!/bin/bash'
+        echo 'v="$(prog | sed -E -n '"'"'s/.*"agents":(\[[^]]*\]|null).*/\1/p'"'"')"'
+        echo 'grep -E '"'"'a|b'"'"' f'
+        echo 'grep -F '"'"'a\|b'"'"' f'
+    } > "$_fx/gnubin5ok.sh"
+    if python3 "$_scanner" "$_fx/gnubin5ok.sh" >/dev/null 2>&1; then
+        echo "  negative control OK: POSIX ERE alternation does not fire"
+    else
+        echo "SELF-TEST FAIL: the -E fix was flagged as a finding" >&2; _fails=$((_fails + 1))
     fi
     # Negative control: a clean file must produce nothing.
     printf '%s\n' '#!/bin/bash' 'x="$(echo hi)"' '# a normal comment with an apostrophe, outside any $( )' > "$_fx/clean.sh"

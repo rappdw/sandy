@@ -13497,8 +13497,15 @@ _s127_field() {
     local h="$_S127_DIR/one-$1"
     rm -rf "$h"; mkdir -p "$h/sandboxes"
     cp -R "$_S127_PSH/sandboxes/$1" "$h/sandboxes/$1"
+    # `sed -E`, POSIX ERE, NOT a BRE with `\|`. Alternation is a GNU EXTENSION
+    # to BRE -- POSIX BRE has none -- so BSD sed matched a literal pipe, printed
+    # nothing, and exited 0. That is checks (6) through (9) failing on the first
+    # macOS run they ever got, silently and with no error to read. The same run
+    # passed §109(2), whose grep uses `\|` with no fallback and whose first
+    # alternative does not occur in the file, so BSD grep does honour it; the
+    # divergence is sed-specific. Both seds accept -E.
     SANDY_HOME="$h" "$SANDY_SCRIPT" --print-state 2>/dev/null \
-        | tr -d ' \n' | sed -n 's/.*"agents":\(\[[^]]*\]\|null\).*/\1/p' | head -1
+        | tr -d ' \n' | sed -E -n 's/.*"agents":(\[[^]]*\]|null).*/\1/p' | head -1
     return 0
 }
 
