@@ -14107,6 +14107,138 @@ check "§131(11) README no longer tells the reader an omitted allowlist gives pa
 rm -rf "$_S131_DIR"
 unset _S131_DIR _S131_EMPTY _S131_SET _S131_README _S131_EMPTY_RC _S131_SET_RC
 
+# ============================================================
+echo "§132: SANDY_SSH=agent stages an ALLOWLIST, not the whole ~/.ssh (R7a)"
+# ============================================================
+# WHY. `SANDY_SSH=agent` used to do `-v "$HOME/.ssh:/tmp/host-ssh:ro"` and the
+# entrypoint then copied every file into the container's ~/.ssh, chowned to the
+# agent uid at mode 600. Measured on the one workspace that uses this mode: 57
+# files, 35 of them PRIVATE KEYS -- the operator's employer credentials (corp
+# stash, GHE, corp-mac), six AWS .pem files, unrelated third-party keys, and a
+# gitCredentials.csv -- handed to an agent working on a home-network repo. The
+# docs described only the socket relay and never mentioned copying keys.
+#
+# TWO THINGS THAT LOOK LIKE THE FIX AND ARE NOT, both pinned by checks here:
+#
+# 1. Filtering only what the ENTRYPOINT copies. Nothing unmounts /tmp/host-ssh,
+#    the container runs as the host uid (the entrypoint gosu-drops to it), and
+#    the files are 600 owned by that uid -- so every key stays readable AT THE
+#    MOUNT for the container's life. The mount is the exposure, which is why the
+#    filtering is host-side and (1f) asserts the mount source is the staged dir.
+#
+# 2. Skipping files that LOOK like private keys (first line -----BEGIN ... PRIVATE
+#    KEY-----). gitCredentials.csv is the case that kills it: credential-shaped,
+#    no BEGIN line, waved straight through. A blocklist can only reject what its
+#    author anticipated. (1b) is that check, and it is the whole argument for
+#    default-deny in one assertion.
+#
+# NOT platform-gated. Only the agent RELAY differs by platform; this block never
+# did. On Linux the agent usually works, so nothing fails to reveal the copy --
+# quieter there, not smaller.
+#
+# The gitCredentials.csv case and the warn-on-absent-entry rule were both
+# contributed by the rapphaus-network session, which ran the real inventory.
+if ! command -v ssh-keygen >/dev/null 2>&1; then
+    skip "§132 needs ssh-keygen"
+else
+_S132_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+awk '/^    # R7a \(1\.14\.0\): stage a FILTERED copy of/{f=1} f{print} /^        unset _s_f _s_k _s_keys _s_staged _s_old_ifs$/{print "    fi"; exit}' \
+    "$SANDY_SCRIPT" > "$_S132_DIR/stage.sh"
+check "§132(pre) the staging block was extracted and parses (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'bash -n "$1/stage.sh" && grep -q "SSH_STAGE_TMPDIR" "$1/stage.sh" && grep -q "SANDY_SSH_KEYS" "$1/stage.sh"' -- "$_S132_DIR"
+
+# Builds a realistic ~/.ssh, runs sandy's own staging block, and reports what
+# landed: one "F=<name>" per staged file, the mount flag, and any warnings.
+_s132_stage() {   # _s132_stage <SANDY_SSH_KEYS> <SANDY_SUSPICIOUS>
+    (
+        trap - ERR; set +e
+        d="$(cd "$(mktemp -d)" && pwd -P)"
+        HOME="$d/home"; mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+        ssh-keygen -q -t ed25519 -N '' -C w -f "$HOME/.ssh/id_wanted"   >/dev/null 2>&1
+        ssh-keygen -q -t ed25519 -N '' -C c -f "$HOME/.ssh/corp_secret" >/dev/null 2>&1
+        ssh-keygen -q -t ed25519 -N '' -C n -f "$HOME/.ssh/id_nopub"    >/dev/null 2>&1
+        rm -f "$HOME/.ssh/id_nopub.pub"
+        printf 'Host x\n'        > "$HOME/.ssh/config"
+        printf 'gh ssh-rsa AAA\n' > "$HOME/.ssh/known_hosts"
+        printf 'user,token\n'     > "$HOME/.ssh/gitCredentials.csv"
+        printf -- '-----BEGIN RSA PRIVATE KEY-----\nx\n' > "$HOME/.ssh/aws.pem"
+        # A real file at the traversal target, two levels above ~/.ssh. Without
+        # it (6b) is VACUOUS: strip the path guard and the entry falls into the
+        # "no such file" branch instead of escaping, so the check passes against
+        # code that has no guard at all. Caught by mutation M5, which failed only
+        # the warn and not the containment.
+        printf 'HOST-FILE\n' > "$d/.bashrc"
+        chmod 600 "$HOME/.ssh"/* 2>/dev/null
+        warn() { printf 'W=%s\n' "$*"; }
+        info() { :; }
+        RUN_FLAGS=(); SSH_STAGE_TMPDIR=""
+        SANDY_SSH_KEYS="$1"; SANDY_SUSPICIOUS="$2"
+        export HOME
+        . "$_S132_DIR/stage.sh"
+        # `ls -A`, not `ls`. The traversal fixture lands a DOTFILE (.bashrc), and
+        # a plain `ls` omits it -- so (6b) reported "nothing escaped" while the
+        # file was sitting in the staged dir. Second vacuity found in the same
+        # check by the same mutation; the first was a missing fixture file.
+        for _n in $(cd "$SSH_STAGE_TMPDIR" 2>/dev/null && ls -A 2>/dev/null); do printf 'F=%s\n' "$_n"; done
+        case "${RUN_FLAGS[1]:-}" in
+            "$SSH_STAGE_TMPDIR:/tmp/host-ssh:ro") printf 'MOUNT=staged\n' ;;
+            "$HOME/.ssh:"*)                       printf 'MOUNT=raw-home-ssh\n' ;;
+            *)                                    printf 'MOUNT=other\n' ;;
+        esac
+        rm -rf "$d" "$SSH_STAGE_TMPDIR"
+    ) 2>/dev/null
+    return 0
+}
+_S132_DEF="$(trap - ERR;  _s132_stage '' 0)"
+_S132_ONE="$(trap - ERR;  _s132_stage 'id_wanted' 0)"
+_S132_NOPUB="$(trap - ERR; _s132_stage 'id_nopub' 0)"
+_S132_MISS="$(trap - ERR; _s132_stage 'id_typo' 0)"
+_S132_SUSP="$(trap - ERR; _s132_stage 'id_wanted' 1)"
+_S132_PATH="$(trap - ERR; _s132_stage '../../.bashrc' 0)"
+
+_s132_has() { printf '%s\n' "$2" | grep -qx "F=$1"; }
+check "§132(1a) DEFAULT (no allowlist): no private key is staged at all (got: $(printf '%s' "$_S132_DEF" | tr '\n' ' '))" \
+    bash -c '! printf "%s\n" "$1" | grep -qxE "F=(id_wanted|corp_secret|id_nopub|aws\.pem)"' -- "$_S132_DEF"
+check "§132(1b) ...including gitCredentials.csv — credential-shaped with NO 'BEGIN PRIVATE KEY' line, so a content-sniff blocklist waves it through. This one assertion is the case for default-deny" \
+    bash -c '! printf "%s\n" "$1" | grep -qx "F=gitCredentials.csv"' -- "$_S132_DEF"
+check "§132(1c) ...but config IS staged — the positive half; without it a block that staged nothing would satisfy every negative above" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "F=config"' -- "$_S132_DEF"
+check "§132(1d) ...and known_hosts" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "F=known_hosts"' -- "$_S132_DEF"
+check "§132(1e) ...and public keys, which are published to servers by design and are what IdentitiesOnly matches against" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c "^F=.*\.pub$")" -ge 2 ]' -- "$_S132_DEF"
+check "§132(1f) the MOUNT SOURCE is the staged dir, not \$HOME/.ssh — filtering only the entrypoint copy would leave every key readable at the mount for the container's life (got: $(printf '%s\n' "$_S132_DEF" | grep '^MOUNT='))" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "MOUNT=staged"' -- "$_S132_DEF"
+
+check "§132(2a) an allowlisted key IS staged" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "F=id_wanted"' -- "$_S132_ONE"
+check "§132(2b) ...and an unlisted employer-style key is NOT, even with the allowlist non-empty" \
+    bash -c '! printf "%s\n" "$1" | grep -qx "F=corp_secret"' -- "$_S132_ONE"
+check "§132(2c) ...nor an unlisted .pem" \
+    bash -c '! printf "%s\n" "$1" | grep -qx "F=aws.pem"' -- "$_S132_ONE"
+
+check "§132(3a) an allowlisted key with no .pub sibling is staged" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "F=id_nopub"' -- "$_S132_NOPUB"
+check "§132(3b) ...and its .pub is DERIVED — with IdentitiesOnly yes, a missing public half breaks identification even when the agent holds the key" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "F=id_nopub.pub"' -- "$_S132_NOPUB"
+
+check "§132(4) an allowlist entry matching NO file WARNS — a silent no-op there looks exactly like the mechanism working, which is the failure mode this series keeps finding (got: $(printf '%s' "$_S132_MISS" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^W=.*no such file.*id_typo"' -- "$_S132_MISS"
+
+check "§132(5a) SANDY_SUSPICIOUS=1 overrides an opt-in: the named key is NOT staged" \
+    bash -c '! printf "%s\n" "$1" | grep -qx "F=id_wanted"' -- "$_S132_SUSP"
+check "§132(5b) ...and says so rather than silently ignoring the setting" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^W=SANDY_SUSPICIOUS=1"' -- "$_S132_SUSP"
+
+check "§132(6a) a path-shaped entry is refused — the value is privileged but still operator-typed, and a / or .. would reach outside ~/.ssh" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^W=.*must be a filename"' -- "$_S132_PATH"
+check "§132(6b) ...and nothing from outside ~/.ssh is staged" \
+    bash -c '! printf "%s\n" "$1" | grep -q "^F=.*bashrc"' -- "$_S132_PATH"
+
+rm -rf "$_S132_DIR"
+unset _S132_DIR _S132_DEF _S132_ONE _S132_NOPUB _S132_MISS _S132_SUSP _S132_PATH
+fi
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
