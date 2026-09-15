@@ -13857,6 +13857,158 @@ check "§129(12) a fully real path is clean — the walk does not just always fl
 rm -rf "$_S129_DIR"
 unset _S129_DIR _S129_FILE _S129_DIRL _S129_IN _S129_OK
 
+# ============================================================
+echo "§130: a repository cannot choose what gets bind-mounted (R5)"
+# ============================================================
+# WHY, in three parts, all measured before anything was changed.
+#
+# R5a -- the `gitdir:` line in a `.git` FILE is REPOSITORY CONTENT, and it was
+# resolved with a bare `cd` and no containment check, then bind-mounted with no
+# `:ro`. `gitdir: ../../.ssh` produced `-v $HOME/.ssh:/home/claude/.ssh`
+# READ-WRITE; `gitdir: /etc` produced `-v /etc:/etc` READ-WRITE. Write access to
+# ~/.ssh is host code execution -- an ~/.ssh/config ProxyCommand fires on the
+# next `git push`. _sandy_resolve_symlinks is structurally blind to it: `.git`
+# is a regular FILE, not a link, so the scan finds nothing to approve.
+#
+# The gate is STRUCTURAL, not a path prefix, and that is the design decision
+# this section pins. A legitimate submodule gitdir is deliberately OUTSIDE
+# $WORK_DIR (it lives under the superproject) and a --separate-git-dir may be
+# anywhere, so "is it under X" rejects real setups. "Is it actually a git
+# directory" is the property that separates those from ~/.ssh and /etc.
+#
+# R5b -- even a wholly trustworthy submodule worktree was unprotected. Measured:
+# the gitdir produced exactly ONE mount flag, read-write, with no :ro over
+# config or hooks/. _protect_submodule_gitdirs runs on $GITDIR_HOST/modules
+# (gitdirs NESTED under this one) and never on this one, and
+# _sandy_protected_git_files targets $WORK_DIR/.git/config, which does not exist
+# when .git is a file. So the agent had host-write access to that submodule's
+# hooks -- the exact vector .git/hooks/ is on the protected list to block.
+#
+# R5c -- the three protected-path mount loops existence-gate with -e/-f/-d,
+# every one of which FOLLOWS a symlink, and Docker dereferences a symlinked
+# `-v` source (measured on macOS Docker Desktop -- the review's one open
+# question, settled). _sandy_resolve_symlinks would have caught it, but it
+# `continue`s on any target not under $HOME, so a link to /etc, /Volumes or
+# /private/var was mounted with no prompt and no warning.
+_S130_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+awk '/^if \[ -f "\$WORK_DIR\/\.git" \]; then$/,/^fi$/' "$SANDY_SCRIPT" > "$_S130_DIR/gitblk.sh"
+sed -n '/^_sandy_is_protected_rel() {/,/^}$/p'   "$SANDY_SCRIPT"  > "$_S130_DIR/pred.sh"
+sed -n '/^_sandy_protected_files() {/,/^}$/p'    "$SANDY_SCRIPT" >> "$_S130_DIR/pred.sh"
+sed -n '/^_sandy_protected_dirs() {/,/^}$/p'     "$SANDY_SCRIPT" >> "$_S130_DIR/pred.sh"
+sed -n '/^_sandy_protected_git_files() {/,/^}$/p' "$SANDY_SCRIPT" >> "$_S130_DIR/pred.sh"
+awk '/^    while IFS= read -r -d .. link; do$/,/^        -print0 2>\/dev\/null\)$/' "$SANDY_SCRIPT" > "$_S130_DIR/scan.sh"
+check "§130(pre) the gitdir block, the protected predicates and the symlink scan all extracted and parse (mutation: a rename empties one and its checks go vacuous)" \
+    bash -c 'bash -n "$1/gitblk.sh" && bash -n "$1/pred.sh" && bash -n "$1/scan.sh" &&
+             grep -q GITDIR_HOST "$1/gitblk.sh" && grep -q _sandy_is_protected_rel "$1/pred.sh" &&
+             grep -q DANGEROUS_SYMLINKS "$1/scan.sh"' -- "$_S130_DIR"
+
+# --- R5a / R5b: the gitdir ---------------------------------------------------
+# Builds a REAL submodule-worktree layout, writes the given gitdir line, runs
+# sandy's own block, and echoes one mount flag per line. Exit status is the
+# block's -- a refusal `exit 1`s out of the subshell, so a refused case prints
+# nothing and returns 1.
+_s130_git() {   # _s130_git <gitdir-line> [missing-marker]
+    local d rc
+    d="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$d/home/dev/super/.git/modules/vendor/lib/hooks" \
+             "$d/home/dev/super/.git/modules/vendor/lib/info" \
+             "$d/home/dev/super/.git/modules/vendor/lib/objects" \
+             "$d/home/dev/super/.git/modules/vendor/lib/refs" \
+             "$d/home/dev/super/vendor/lib" "$d/home/.ssh"
+    printf 'ref: refs/heads/main\n' > "$d/home/dev/super/.git/modules/vendor/lib/HEAD"
+    printf '[core]\n'               > "$d/home/dev/super/.git/modules/vendor/lib/config"
+    printf 'PRIVATE-KEY\n'          > "$d/home/.ssh/id_ed25519"
+    [ -n "${2:-}" ] && rm -rf "$d/home/dev/super/.git/modules/vendor/lib/$2"
+    printf '%s\n' "$1" > "$d/home/dev/super/vendor/lib/.git"
+    (
+        trap - ERR; set +e
+        info() { :; }
+        _sandy_daemon_fatal() { return 0; }
+        HOME="$d/home"; WORK_DIR="$d/home/dev/super/vendor/lib"; RUN_FLAGS=()
+        . "$_S130_DIR/gitblk.sh" >/dev/null 2>&1 || exit $?
+        for _f in "${RUN_FLAGS[@]:-}"; do
+            [ "$_f" = "-v" ] && continue
+            [ -n "$_f" ] && printf '%s\n' "$_f"
+        done
+    ) 2>/dev/null
+    rc=$?
+    rm -rf "$d"
+    return $rc
+}
+# `&& rc=0 || rc=$?`, not `; rc=$?`: a REFUSED case exits 1, and a bare
+# assignment carrying a non-zero status trips the suite's `set -e` before the
+# next line ever runs. The conditional form makes it a tested command.
+_S130_ESC_RC=0; _S130_ESC="$(trap - ERR; _s130_git 'gitdir: ../../../.ssh' 2>/dev/null)" || _S130_ESC_RC=$?
+_S130_ABS_RC=0; _S130_ABS="$(trap - ERR; _s130_git 'gitdir: /etc' 2>/dev/null)" || _S130_ABS_RC=$?
+_S130_OK_RC=0; _S130_OK="$(trap - ERR;  _s130_git 'gitdir: ../../.git/modules/vendor/lib' 2>/dev/null)" || _S130_OK_RC=$?
+
+check "§130(1) a .git file escaping the workspace with ../ is REFUSED — it produced '-v \$HOME/.ssh:/home/claude/.ssh' READ-WRITE, and write access to ~/.ssh is host code execution via an ssh config ProxyCommand" \
+    test "$_S130_ESC_RC" = 1
+check "§130(2) ...and emits no mount flag at all (the refusal is before the mount, not a narrower mount)" \
+    test -z "$_S130_ESC"
+check "§130(3) an absolute gitdir outside \$HOME is REFUSED — '/etc' produced '-v /etc:/etc' READ-WRITE" \
+    test "$_S130_ABS_RC" = 1
+check "§130(4) a LEGITIMATE submodule worktree still launches — the positive half, without which every refusal above is satisfied by a block that refuses everything (got: $_S130_OK)" \
+    test "$_S130_OK_RC" = 0
+check "§130(5) ...and the gitdir itself is still mounted READ-WRITE, because git must write index/refs/objects" \
+    bash -c 'printf "%s\n" "$1" | grep -q "modules/vendor/lib:/home/claude/dev/super/.git/modules/vendor/lib$"' -- "$_S130_OK"
+check "§130(6) ...but its config is :ro (R5b: nothing covered it before — _protect_submodule_gitdirs walks \$GITDIR_HOST/modules, never \$GITDIR_HOST itself)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "/config:.*:ro$"' -- "$_S130_OK"
+check "§130(7) ...and hooks/ is :ro — the host-code-execution vector .git/hooks/ is on the protected list to block, which a submodule worktree was not getting" \
+    bash -c 'printf "%s\n" "$1" | grep -q "/hooks:.*:ro$"' -- "$_S130_OK"
+check "§130(8) ...and info/ is :ro" \
+    bash -c 'printf "%s\n" "$1" | grep -q "/info:.*:ro$"' -- "$_S130_OK"
+# The gate is structural, so each marker is load-bearing on its own.
+for _m in HEAD objects refs; do
+    _S130_M_RC=0; _S130_M="$(trap - ERR; _s130_git 'gitdir: ../../.git/modules/vendor/lib' "$_m" 2>/dev/null)" || _S130_M_RC=$?
+    check "§130(9:$_m) a target missing $_m is refused — the gate is 'is it a git directory', and all three markers are required" \
+        test "$_S130_M_RC" = 1
+done
+unset _m _S130_M _S130_M_RC
+
+# --- R5c: a symlinked protected path is surfaced wherever it points ----------
+# Runs sandy's own scan loop and reports the two array sizes it fills.
+_s130_scan() {   # _s130_scan <link-rel> <target-abs-under-d> <target-kind>
+    local d
+    d="$(cd "$(mktemp -d)" && pwd -P)"
+    (
+        trap - ERR; set +e
+        warn() { :; }
+        . "$_S130_DIR/pred.sh"
+        HOME="$d/home"; SANDY_HOME="$d/home/.sandy"; WORK_DIR="$d/home/dev/repo"
+        mkdir -p "$WORK_DIR" "$SANDY_HOME" "$(dirname "$d/$2")" "$(dirname "$WORK_DIR/$1")"
+        if [ "$3" = dir ]; then mkdir -p "$d/$2"; else printf 'x\n' > "$d/$2"; fi
+        ln -s "$d/$2" "$WORK_DIR/$1"
+        REAL_WORK_DIR="$(cd "$WORK_DIR" && pwd -P)"
+        DANGEROUS_SYMLINKS=(); SYMLINK_HOST_PATHS=(); SYMLINK_CONTAINER_PATHS=()
+        . "$_S130_DIR/scan.sh"
+        printf 'dangerous=%s mounts=%s\n' "${#DANGEROUS_SYMLINKS[@]}" "${#SYMLINK_HOST_PATHS[@]}"
+    ) 2>/dev/null
+    rm -rf "$d"
+    return 0
+}
+# "outside" sits under the fixture root but OUTSIDE its $HOME, which is the
+# branch that used to `continue` unconditionally.
+_S130_PF="$(trap - ERR;  _s130_scan '.npmrc'      'outside/f.json'  file)"
+_S130_PD="$(trap - ERR;  _s130_scan '.vscode'     'outside/d'       dir)"
+_S130_NP="$(trap - ERR;  _s130_scan 'src/note.md' 'outside/n.md'    file)"
+_S130_IN="$(trap - ERR;  _s130_scan '.npmrc'      'home/secrets/k'  file)"
+
+check "§130(10) a symlinked protected FILE pointing outside \$HOME is surfaced for approval — it was silently mounted before, and Docker dereferences the source (got: $_S130_PF)" \
+    bash -c 'printf "%s" "$1" | grep -q "dangerous=1"' -- "$_S130_PF"
+check "§130(11) ...and adds NO second mount: the protected-path loop already mounts it :ro, and the symlink mounts carry no :ro (got: $_S130_PF)" \
+    bash -c 'printf "%s" "$1" | grep -q "mounts=0"' -- "$_S130_PF"
+check "§130(12) a symlinked protected DIR pointing outside \$HOME is surfaced too (got: $_S130_PD)" \
+    bash -c 'printf "%s" "$1" | grep -q "dangerous=1"' -- "$_S130_PD"
+check "§130(13) an ORDINARY path pointing outside \$HOME is still ignored — this rule adds no new prompts outside the protected list, and without this check a scan that flagged everything would satisfy the three above (got: $_S130_NP)" \
+    bash -c 'printf "%s" "$1" | grep -q "dangerous=0"' -- "$_S130_NP"
+check "§130(14) a protected path pointing INSIDE \$HOME is unchanged: dangerous AND mounted, exactly as before (got: $_S130_IN)" \
+    bash -c 'printf "%s" "$1" | grep -q "dangerous=1 mounts=1"' -- "$_S130_IN"
+
+rm -rf "$_S130_DIR"
+unset _S130_DIR _S130_ESC _S130_ESC_RC _S130_ABS _S130_ABS_RC _S130_OK _S130_OK_RC
+unset _S130_PF _S130_PD _S130_NP _S130_IN
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
