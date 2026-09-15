@@ -13633,6 +13633,152 @@ rm -rf "$_S128_DIR"
 unset _S128_DIR _S128_SEMI _S128_AND _S128_PIPE _S128_NL _S128_CHAN _S128_CANARY _S128_OK
 fi
 
+# ============================================================
+echo "§129: sandy never writes crossSessionInbound through a symlink (R2)"
+# ============================================================
+# WHY. With claude selected -- the default -- every launch writes the resolved
+# crossSessionInbound into $WORK_DIR/.claude/settings.local.json, host-side,
+# before `docker run`. The writer read the target with JSON.parse/jq and
+# `mv -f`'d the result back, and neither step cared that the path was a symlink
+# a REPOSITORY had committed. Three measured consequences, all reachable by
+# `gh pr checkout N && sandy`, with no agent, no prompt injection and no
+# approval prompt anywhere:
+#
+#   1. EXFILTRATION. `.claude/settings.local.json -> ~/.claude/.credentials.json`
+#      made sandy read that file and write its contents back into the workspace
+#      as a regular file. Measured: the refresh token landed in the repo. Any
+#      JSON object on the host works -- ~/.claude.json, ~/.docker/config.json,
+#      an ADC file.
+#   2. ESCAPE. `.claude` committed as a symlink to a directory outside the
+#      workspace made the write land there instead. `mkdir -p` succeeds silently
+#      on a symlink-to-directory, so it cannot be the thing that catches this;
+#      the component walk is. (The guard runs before the mkdir only so that a
+#      refusal creates nothing -- detection does not depend on the order.)
+#   3. THE APPROVAL GATE ATE ITSELF. `mv -f` replaces a symlink with a regular
+#      file, so by the time _sandy_resolve_symlinks runs -- ~1800 lines later on
+#      the bare-`sandy` path -- the escaping link it exists to surface is gone.
+#      Sandy's own write consumed the evidence its approval keys on.
+#
+# So the fix REFUSES rather than resolving or replacing: that hands the case
+# back to the symlink approval, which is where an escaping link belongs. (3) is
+# what check (4) asserts, and it is the reason a "canonicalize and write" fix
+# would be wrong even though it also stops (1) and (2).
+#
+# The positive half of every group is load-bearing. A harness that silently
+# refused everything would satisfy each negative on its own, so the ordinary
+# non-symlink case must WRITE for this section to mean anything.
+_S129_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+sed -n '/^_sandy_path_symlink_component() {/,/^}$/p' "$SANDY_SCRIPT"  > "$_S129_DIR/csi.sh"
+sed -n '/^_sandy_csi_write() {/,/^}$/p'              "$SANDY_SCRIPT" >> "$_S129_DIR/csi.sh"
+check "§129(pre) both functions were extracted and parse (mutation: a rename empties this and every check below goes vacuous)" \
+    bash -c 'grep -q "_sandy_path_symlink_component() {" "$1" && grep -q "_sandy_csi_write() {" "$1" && bash -n "$1"' -- "$_S129_DIR/csi.sh"
+
+# Runs the real writer against a throwaway tree. $2 picks the workspace layout;
+# echoes "rc=<n>" then a line per artifact the checks below assert on.
+_s129_run() {   # _s129_run <case> [path-override]
+    (
+        trap - ERR
+        set +e
+        warn() { :; }
+        info() { :; }
+        . "$_S129_DIR/csi.sh"
+        _d="$_S129_DIR/$1"
+        WORK_DIR="$_d/repo"; HOME="$_d/home"
+        mkdir -p "$WORK_DIR" "$HOME/.claude" "$_d/outside"
+        printf '%s\n' '{"claudeAiOauth":{"refreshToken":"S129_SECRET"}}' > "$HOME/.claude/.credentials.json"
+        case "$1" in
+            file-link)  mkdir -p "$WORK_DIR/.claude"
+                        ln -s "$HOME/.claude/.credentials.json" "$WORK_DIR/.claude/settings.local.json" ;;
+            dir-link)   ln -s "$_d/outside" "$WORK_DIR/.claude" ;;
+            inside-link) mkdir -p "$WORK_DIR/.claude" "$WORK_DIR/elsewhere"
+                        printf '%s\n' '{"a":1}' > "$WORK_DIR/elsewhere/x.json"
+                        ln -s "$WORK_DIR/elsewhere/x.json" "$WORK_DIR/.claude/settings.local.json" ;;
+            plain)      ;;
+        esac
+        export WORK_DIR HOME
+        PATH="${2:-$PATH}" _sandy_csi_write refuse "$WORK_DIR/.claude/settings.local.json" "$WORK_DIR" >/dev/null 2>&1
+        printf 'rc=%s\n' "$?"
+        [ -L "$WORK_DIR/.claude/settings.local.json" ] && printf 'still-a-symlink\n'
+        # Would _sandy_resolve_symlinks still have something to approve? Same
+        # find predicate it uses. This is the check a canonicalizing fix fails.
+        [ -n "$(find "$WORK_DIR" -maxdepth 8 -type l -not -path '*/.git/*' 2>/dev/null)" ] && printf 'scan-sees-a-link\n'
+        find "$_d/outside" -type f 2>/dev/null | while IFS= read -r _o; do printf 'wrote-outside\n'; done
+        find "$WORK_DIR" ! -type l -type f 2>/dev/null | while IFS= read -r _r; do
+            grep -q S129_SECRET "$_r" 2>/dev/null && printf 'secret-copied\n'
+            grep -q '"crossSessionInbound": "refuse"' "$_r" 2>/dev/null && printf 'value-written\n'
+        done
+        true
+    ) 2>/dev/null
+    return 0
+}
+_S129_FILE="$(trap - ERR; _s129_run file-link)"
+_S129_DIRL="$(trap - ERR; _s129_run dir-link)"
+_S129_IN="$(trap - ERR;   _s129_run inside-link)"
+_S129_OK="$(trap - ERR;   _s129_run plain)"
+
+check "§129(1) ORDINARY case still writes — the positive half, without which every negative below is vacuous (got: $_S129_OK)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0" && printf "%s\n" "$1" | grep -qx "value-written"' -- "$_S129_OK"
+check "§129(2) a committed settings.local.json SYMLINK is refused, not followed (got: $_S129_FILE)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=1"' -- "$_S129_FILE"
+check "§129(3) ...and no host secret is copied into the workspace (got: $_S129_FILE)" \
+    bash -c '! printf "%s\n" "$1" | grep -qx "secret-copied"' -- "$_S129_FILE"
+check "§129(4) ...and the link SURVIVES, so the symlink approval still has something to surface — a fix that canonicalized and wrote would fail here (got: $_S129_FILE)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "still-a-symlink" && printf "%s\n" "$1" | grep -qx "scan-sees-a-link"' -- "$_S129_FILE"
+check "§129(5) a committed .claude DIRECTORY symlink is refused — the walk catches it, and it must, because \`mkdir -p\` succeeds silently on a symlink-to-directory (got: $_S129_DIRL)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=1"' -- "$_S129_DIRL"
+check "§129(6) ...and nothing is written outside the workspace (got: $_S129_DIRL)" \
+    bash -c '! printf "%s\n" "$1" | grep -qx "wrote-outside"' -- "$_S129_DIRL"
+check "§129(7) a symlink is refused even when its target is INSIDE the workspace — the rule is the symlink-free chain, not containment, because containment needs canonicalization and \`realpath\` is GNU-only (got: $_S129_IN)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=1"' -- "$_S129_IN"
+
+# The guard sits above the node/jq/no-tool branch selection, so a fix applied to
+# only one branch is the #252 mistake wearing a fix's clothes. Re-run the
+# symlink case with node hidden.
+if command -v jq >/dev/null 2>&1; then
+    mkdir -p "$_S129_DIR/nonode"
+    for _b in jq mkdir rm mv cmp tr find grep sed; do
+        _p="$(command -v "$_b" 2>/dev/null || true)"
+        [ -n "$_p" ] && ln -s "$_p" "$_S129_DIR/nonode/$_b" 2>/dev/null
+    done
+    _S129_JQ="$(trap - ERR; _s129_run file-link "$_S129_DIR/nonode")"
+    _S129_JQOK="$(trap - ERR; _s129_run plain "$_S129_DIR/nonode")"
+    check "§129(8) the jq branch writes normally with node hidden — proves the next check is not passing because the harness broke (got: $_S129_JQOK)" \
+        bash -c 'printf "%s\n" "$1" | grep -qx "rc=0" && printf "%s\n" "$1" | grep -qx "value-written"' -- "$_S129_JQOK"
+    check "§129(9) ...and the symlink is refused there too — the guard is above the branch, not inside one (got: $_S129_JQ)" \
+        bash -c 'printf "%s\n" "$1" | grep -qx "rc=1" && ! printf "%s\n" "$1" | grep -qx "secret-copied"' -- "$_S129_JQ"
+    unset _S129_JQ _S129_JQOK _b _p
+else
+    skip "§129(8-9) need jq"
+fi
+
+# The walk is the whole guard; exercise it directly on a deep path so a fix that
+# only checked the final component or only the parent is caught.
+_s129_walk() {
+    (
+        trap - ERR
+        set +e
+        . "$_S129_DIR/csi.sh"
+        _d="$_S129_DIR/walk"; mkdir -p "$_d/a/b/c" "$_d/target"
+        case "$1" in
+            mid)  rm -rf "$_d/a/b"; ln -s "$_d/target" "$_d/a/b"; mkdir -p "$_d/a/b/c" ;;
+            leaf) : > "$_d/target/f"; ln -s "$_d/target/f" "$_d/a/b/c/f" ;;
+            none) : > "$_d/a/b/c/f" ;;
+        esac
+        if _bad="$(_sandy_path_symlink_component "$_d" "$_d/a/b/c/f")"; then printf 'flagged:%s\n' "$_bad"; else printf 'clean\n'; fi
+        rm -rf "$_d"
+    ) 2>/dev/null
+    return 0
+}
+check "§129(10) a symlink at an INTERMEDIATE component is flagged by name (got: $(trap - ERR; _s129_walk mid))" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "flagged:a/b"' -- "$(trap - ERR; _s129_walk mid)"
+check "§129(11) a symlink at the FINAL component is flagged by name (got: $(trap - ERR; _s129_walk leaf))" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "flagged:a/b/c/f"' -- "$(trap - ERR; _s129_walk leaf)"
+check "§129(12) a fully real path is clean — the walk does not just always flag (got: $(trap - ERR; _s129_walk none))" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "clean"' -- "$(trap - ERR; _s129_walk none)"
+
+rm -rf "$_S129_DIR"
+unset _S129_DIR _S129_FILE _S129_DIRL _S129_IN _S129_OK
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
