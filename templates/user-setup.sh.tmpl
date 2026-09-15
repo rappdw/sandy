@@ -629,10 +629,12 @@ _seed_channel() {
     chmod 600 "$HOME/.claude/channels/$chan/.env"
     [ -f "$HOME/.claude/channels/$chan/access.json" ] && return
     if [ -n "$senders" ]; then
-        # gsub escapes \ and " in each sender before quoting — TELEGRAM_/
-        # DISCORD_ALLOWED_SENDERS are passive-tier (no approval prompt), so a
-        # committed workspace value containing " could otherwise inject entries
-        # into the bot's DM allowlist (who may drive the agent).
+        # gsub escapes \ and " in each sender before quoting. Both keys are
+        # PRIVILEGED (an earlier version of this comment said passive-tier; it
+        # was wrong), so a workspace setting one hits the approval prompt first.
+        # The escaping stays regardless: the value may still arrive from a
+        # privileged source that was approved, and a " in it would otherwise
+        # inject entries into the bot's DM allowlist -- who may drive the agent.
         ALLOW_JSON=$(echo "$senders" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NR>1{printf ","}{gsub(/\\/,"\\\\");gsub(/"/,"\\\"");printf "\"%s\"",$0}')
         cat > "$HOME/.claude/channels/$chan/access.json" <<CHACCESS
 {

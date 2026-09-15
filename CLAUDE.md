@@ -214,6 +214,12 @@ Sandbox subdirs mount as: `claude/`→`~/.claude`, `gemini/`→`~/.gemini`, `cod
 
 The Telegram host-side relay (`$SANDY_HOME/channel-relay.sh`) is an agent-agnostic long-polling bridge injecting via `docker exec … tmux send-keys`; `SANDY_CHANNEL_TARGET_PANE=0|1|2` picks the pane.
 
+**The host relay REQUIRES `TELEGRAM_ALLOWED_SENDERS` and refuses to start without it (R7b, 1.13.4).** Its sender gate used to `return 0` on an empty allowlist, so an unset value allowed **everyone** — and what an allowed message buys is `tmux send-keys` into a pane sandy pins to `bypassPermissions`, i.e. arbitrary keystrokes into a session that does not ask before acting. A Telegram bot is reachable by anyone who knows its username, so the only thing in the way was the bot token staying secret.
+
+**The documentation made it worse than a bad default.** README told the reader that an omitted allowlist meant `pairing` mode. That is true of the **in-container Claude plugin** and false of the **host relay** — which is what runs for gemini, codex, opencode, grok and every multi-agent combo. Someone who left it unset did so on the documentation's word, which is why the fix corrects the README as well as the code, and why §131 checks the README.
+
+Two gates, deliberately: the relay **refuses to start**, and `_is_allowed` denies on empty even if it somehow does. Starting-and-silently-dropping was rejected — it reads as "channels are broken" and gets debugged as a bug, which is how a security default becomes a patch that restores the hole. The refusal is printed host-side too, so the reason lands in sandy's own launch output rather than only a backgrounded child's stderr. Discord has no host relay (plugin only), so it is unaffected. Guarded by §131.
+
 **Pane identity: never assume `pane_index == spawn order`.** In the 4-agent grid the last split re-splits pane 0, and tmux inserts the new index *after* the pane it split — so `sandy.1` holds the **fourth** agent, `sandy.2` the second, `sandy.3` the third. The on-screen layout is still correct. Sandy sets a `@sandy_pane_agent` **tmux pane option** on every pane unconditionally; it drives the border label and is the robust identity source (a scrollback marker gets wiped when a live agent redraws, and `select-pane -T` is OSC-2-clobberable). Consequence: `SANDY_CHANNEL_TARGET_PANE=1|2|3` against a 4-agent combo does not reliably route to "the Nth agent in `SANDY_AGENT`" — a separate, unfixed gap.
 
 ## Per-project Sandboxes

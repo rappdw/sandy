@@ -818,7 +818,9 @@ Sandy supports [Claude Code channels](https://code.claude.com/docs/en/channels) 
    ```
 4. Run `sandy` — the plugin is auto-installed, credentials are seeded, and Claude starts with the channel active
 
-To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot). If `TELEGRAM_ALLOWED_SENDERS` is omitted, sandy starts in `pairing` mode — DM your bot, then run `/telegram:access pair <code>` inside the session.
+To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot).
+
+**`TELEGRAM_ALLOWED_SENDERS` is required for the host-side relay**, which is what runs for `gemini`, `codex`, `opencode`, `grok` and every multi-agent combo. Without it the relay refuses to start, because an empty allowlist would let any Telegram user who finds your bot send keystrokes to the agent. Pairing mode is the **in-container Claude plugin only** (single-agent `claude`): there, omitting the allowlist starts `pairing` — DM your bot, then run `/telegram:access pair <code>` inside the session. The host relay has no pairing flow.
 
 ### Quick setup (Discord)
 
