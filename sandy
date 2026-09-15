@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.13.3-dev"
+SANDY_VERSION="1.13.3"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -756,6 +756,25 @@ _sandy_configured_hooks_rel() {
     while IFS= read -r pd; do [ "$rel" = "$pd" ] && return 0; done < <(_sandy_protected_dirs)
     printf '%s\n' "$rel"
     return 0
+}
+
+# True (0) when a workspace-relative path is on one of the protected lists.
+# R5c (1.14.0): the three mount loops existence-gate with -e/-f/-d, every one of
+# which FOLLOWS a symlink, and Docker dereferences a symlinked `-v` source --
+# measured on macOS Docker Desktop, which was the review's one open question.
+# So a repository committing `.npmrc` as a link to a host file had that file
+# mounted into the container. _sandy_resolve_symlinks would have caught it, but
+# only for targets under $HOME: it `continue`s on anything else, so a link to
+# /etc, /Volumes or /private/var was mounted with no prompt and no warning.
+# This predicate is what makes "a link at a protected path is dangerous wherever
+# it points" expressible in that scan.
+_sandy_is_protected_rel() {
+    local _r="$1" _p
+    [ -n "$_r" ] || return 1
+    while IFS= read -r _p; do [ "$_r" = "$_p" ] && return 0; done < <(_sandy_protected_files)
+    while IFS= read -r _p; do [ "$_r" = "$_p" ] && return 0; done < <(_sandy_protected_dirs)
+    while IFS= read -r _p; do [ "$_r" = "$_p" ] && return 0; done < <(_sandy_protected_git_files)
+    return 1
 }
 
 _sandy_extra_hooks_dir() {
@@ -8435,6 +8454,20 @@ _sandy_resolve_symlinks() {
             # the container's (e.g. /usr/bin/python3) breaks the container.
             # Only mount targets under $HOME.
             if [[ "$target" != "$HOME"/* ]]; then
+                # R5c: a link at a PROTECTED path is an integrity problem
+                # wherever it points, so it is surfaced for approval even
+                # though the target is outside $HOME. Recorded in
+                # DANGEROUS_SYMLINKS ONLY -- deliberately no entry in
+                # SYMLINK_HOST_PATHS/SYMLINK_CONTAINER_PATHS, because the
+                # protected-path mount loop already mounts this path :ro and a
+                # second -v for the same target would be an unnecessary, and
+                # un-:ro, second door. The two arrays are consumed by index
+                # against each OTHER, never against this one, so adding here
+                # alone is safe.
+                _sl_rel="${link#$WORK_DIR/}"
+                if _sandy_is_protected_rel "$_sl_rel"; then
+                    DANGEROUS_SYMLINKS+=("$_sl_rel -> $target")
+                fi
                 continue
             fi
             # #209: NEVER mount sandy's own state into a sandbox it manages.
@@ -12221,7 +12254,33 @@ esac
 if [ -f "$WORK_DIR/.git" ]; then
     GITDIR_REL="$(sed 's/^gitdir: //' "$WORK_DIR/.git" | tr -d '[:space:]')"
     if [ -n "$GITDIR_REL" ]; then
-        GITDIR_HOST="$(cd "$WORK_DIR" && cd "$GITDIR_REL" && pwd)"
+        GITDIR_HOST="$(cd "$WORK_DIR" && cd "$GITDIR_REL" 2>/dev/null && pwd)" || GITDIR_HOST=""
+        # R5a (1.14.0): the `gitdir:` line is REPOSITORY CONTENT, and this used
+        # to be a bare `cd` with no containment check feeding a bind mount with
+        # no :ro. Measured: `gitdir: ../../.ssh` produced
+        # `-v $HOME/.ssh:/home/claude/.ssh` READ-WRITE, and `gitdir: /etc`
+        # produced `-v /etc:/etc` READ-WRITE. Write access to ~/.ssh is host
+        # code execution -- an ~/.ssh/config ProxyCommand fires on the user's
+        # next `git push`. _sandy_resolve_symlinks cannot see any of it: `.git`
+        # is a regular FILE, not a link, so the scan finds nothing to approve.
+        #
+        # The gate is STRUCTURAL rather than a path prefix, because a legitimate
+        # submodule gitdir is deliberately outside $WORK_DIR (it lives under the
+        # superproject) and a --separate-git-dir may be anywhere the user chose.
+        # "Is it actually a git directory" is the property that separates those
+        # from ~/.ssh, ~/.aws and /etc, and it needs no canonicalization. A
+        # directory an attacker could already furnish with HEAD/objects/refs is
+        # one they can already write, so the check gives nothing away.
+        if [ -z "$GITDIR_HOST" ] || [ ! -f "$GITDIR_HOST/HEAD" ] || \
+           [ ! -d "$GITDIR_HOST/objects" ] || [ ! -d "$GITDIR_HOST/refs" ]; then
+            echo "[sandy] ERROR: .git names a gitdir that is not a git directory: '$GITDIR_REL'" >&2
+            echo "[sandy]        Resolved to: ${GITDIR_HOST:-<unresolvable>}" >&2
+            echo "[sandy]        Refusing to bind-mount it. A .git FILE is repository content, so an" >&2
+            echo "[sandy]        arbitrary path there would mount a host directory of the repository's" >&2
+            echo "[sandy]        choosing into the container. Expected HEAD, objects/ and refs/." >&2
+            _sandy_daemon_fatal
+            exit 1
+        fi
         if [[ "$GITDIR_HOST" == "$HOME"/* ]]; then
             _gitdir_rel="${GITDIR_HOST#$HOME/}"
             GITDIR_CONTAINER="/home/claude/$_gitdir_rel"
@@ -12229,6 +12288,19 @@ if [ -f "$WORK_DIR/.git" ]; then
             GITDIR_CONTAINER="$GITDIR_HOST"
         fi
         RUN_FLAGS+=(-v "$GITDIR_HOST:$GITDIR_CONTAINER")
+        # R5b: the gitdir is mounted RW because git must write it (index, refs,
+        # objects) -- so the host-code-execution surfaces inside it need the same
+        # :ro overlay every other repo gets. _protect_submodule_gitdirs runs on
+        # $GITDIR_HOST/modules, i.e. gitdirs NESTED under this one, and never on
+        # this one; and _sandy_protected_git_files targets $WORK_DIR/.git/config,
+        # which does not exist when .git is a FILE. Measured on a real submodule
+        # worktree: the gitdir produced exactly ONE mount flag, read-write, with
+        # no :ro coverage of config or hooks/. So a wholly trustworthy repo still
+        # handed the agent host-write access to that submodule's hooks -- the
+        # exact vector .git/hooks/ is on the protected list to block.
+        [ -f "$GITDIR_HOST/config" ] && RUN_FLAGS+=(-v "$GITDIR_HOST/config:$GITDIR_CONTAINER/config:ro")
+        [ -d "$GITDIR_HOST/hooks" ]  && RUN_FLAGS+=(-v "$GITDIR_HOST/hooks:$GITDIR_CONTAINER/hooks:ro")
+        [ -d "$GITDIR_HOST/info" ]   && RUN_FLAGS+=(-v "$GITDIR_HOST/info:$GITDIR_CONTAINER/info:ro")
         info "  Git submodule: gitdir at $GITDIR_CONTAINER"
     fi
 fi
