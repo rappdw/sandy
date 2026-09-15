@@ -203,6 +203,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `GOOGLE_API_KEY` | (unset) | Google API key for Vertex AI / ADC |
 | `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for Telegram relay in multi-agent mode. `0` = first agent in `SANDY_AGENT`, `1` = second, `2` = third, `3` = fourth |
 | `SANDY_SSH` | `token` | Git auth method: `token` (gh CLI + HTTPS) or `agent` (SSH agent forwarding) |
+| `SANDY_SSH_KEYS` | (unset) | With `SANDY_SSH=agent`, comma-separated **filenames** under `~/.ssh` that may be staged into the container. Default empty = **no private key material is staged**. `config`, `known_hosts` and `*.pub` are staged regardless. Privileged tier |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Set to `false` to keep Claude Code's permission system active |
 | `SANDY_HOME` | `~/.sandy` | Sandy config/build/sandbox directory |
 | `SANDY_VERBOSE` | `0` | Verbosity: `0` quiet, `1` verbose, `2` debug, `3` full trace |
@@ -550,6 +551,15 @@ SANDY_EGRESS_STRICT=1   # in ~/.sandy/config or a workspace .sandy/config
 > The older `SANDY_EGRESS_PROXY=0|1|2` still works as a **deprecated alias** (`0`→off, `1`→permissive, `2`→strict) with a migration warning; its `=0` is approval-gated from a workspace config just like `SANDY_EGRESS_NO_ISOLATION=1`.
 
 Add extra reachable hosts with `SANDY_ALLOW_HOSTS` (privileged; comma-separated `host`, `*.suffix`, or `host:port`). git-over-SSH (`SANDY_SSH=agent`) is tunneled through the proxy automatically on both platforms; on macOS, host-agent *key signing* is unavailable under the proxy (use `SANDY_SSH=token` for a fully-supported HTTPS path). A local LLM (`SANDY_LOCAL_LLM_HOST`) is forwarded through the proxy rather than an iptables hole. See `CLAUDE.md` → "Egress Proxy" for the full topology.
+
+**`SANDY_SSH=agent` no longer hands the container your whole `~/.ssh`.** Before 1.14.0 it mounted `~/.ssh` in full and copied every file into the container, agent-readable — in one measured case 35 private keys, including the operator's employer credentials and six AWS `.pem` files, in a container working on an unrelated repo. Now nothing private is staged unless you name it:
+
+```sh
+# in <project>/.sandy/config — one approval prompt, scoped to this workspace
+SANDY_SSH_KEYS=id_rsa_homelab,id_rsa_deploy
+```
+
+`config`, `known_hosts` and `*.pub` are always staged. A name that matches no file warns rather than silently doing nothing. A named key with no `.pub` sibling gets one derived. `SANDY_SUSPICIOUS=1` forces the list empty.
 
 **macOS SSH-agent relay exposure.** Outside proxy mode, `SANDY_SSH=agent` on macOS bridges the host SSH agent into the container via a host-side TCP relay (`socat TCP-LISTEN:<port>,bind=127.0.0.1`) — Linux doesn't need this since the agent socket is bind-mounted directly. The relay is bound to `127.0.0.1` and lives only for the session, but on a multi-user Mac any local process that can reach `127.0.0.1` can connect to it and sign with your keys for as long as the session is open (the ephemeral port number is weak obscurity, not an authentication boundary). If that matters for your threat model, prefer `SANDY_SSH=token` (HTTPS via `gh auth token`), which never exposes the agent.
 
