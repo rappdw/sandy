@@ -111,6 +111,27 @@ cid2() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.wor
 
 command -v docker >/dev/null 2>&1 || { echo "docker not found — run this on the host"; exit 2; }
 
+# Slice ONE sandbox object out of a `--print-state` document.
+#
+# NEVER anchor a JSON assertion on a field NEIGHBOURS. `"name":"X"[^}]*"relay":{`
+# reads naturally and is a tripwire: the character class cannot cross the `}` of
+# a nested object, so it fails against an emitter that is entirely correct the
+# day one lands in between. That is exactly what happened here -- `handoff{}`
+# was added between `name` and `relay` in 1.12.0, and this harness then reported
+# `relay.state=started` FAILING while --print-state was emitting precisely that.
+# Third time this pattern has cost a round; run-tests.sh §123 and §124(8) were
+# the first two, and run-tests.sh now ratchets against it.
+#
+# index/substr only -- no regex, so there is no BRE-vs-ERE or brace-metachar
+# question, and it is BWK-awk safe (no multi-character RS). Selection is exact
+# because the trailing quote is part of the key, so the sandbox `mbx-x` is not
+# matched by the container `sandy-mbx-x`.
+_ps_obj() {   # _ps_obj <print-state-output-with-whitespace-stripped> <sandbox-name>
+    # One line: see the note in run-tests.sh _s124_obj -- a multi-line
+    # single-quoted program argument desynchronizes the portability lint.
+    printf '%s' "$1" | awk -v key="\"name\":\"$2\"" '{ p = index($0, key); if (p == 0) exit 0; rest = substr($0, p); q = index(substr(rest, 2), "{\"name\":\""); if (q > 0) rest = substr(rest, 1, q); print rest }'
+}
+
 echo "== A. default (no config anywhere): the whole tree is mounted =="
 ck "phase A workspace has NO .sandy/config (the premise)" "[ ! -e \"$WS/.sandy/config\" ]"
 ck "isolated host config does not mention SANDY_HANDOFF_DIRS (the premise)" \
@@ -691,8 +712,11 @@ ck "the marker was read and is JSON (premise: the negative below is vacuous agai
    "printf '%s' \"\$_f4_marker\" | grep -q '\"schema\":1'"
 ck "--print-state produced output naming this sandbox (premise)" \
    "printf '%s' \"\$_f4_ps\" | grep -q '\"name\":\"$SESS4\"'"
+_f4_obj="$(_ps_obj "$_f4_ps" "$SESS4")"
+ck "the sandbox object was sliced out of --print-state (premise: the assertion below is vacuous against an empty slice)" \
+   "printf '%s' \"\$_f4_obj\" | grep -q '\"name\":\"$SESS4\"'"
 ck "--print-state reports relay.state=started for this sandbox" \
-   "printf '%s' \"\$_f4_ps\" | grep -q '\"name\":\"$SESS4\"[^}]*\"relay\":{\"state\":\"started\"'"
+   "printf '%s' \"\$_f4_obj\" | grep -q '\"relay\":{\"state\":\"started\"'"
 ck "the session marker reports relay.slot=present (launch intent)" \
    "printf '%s' \"\$_f4_marker\" | grep -q '\"relay\":{\"slot\":\"present\"'"
 ck "...and the marker does NOT claim the relay started -- it is written before docker run and cannot know" \

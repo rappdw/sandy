@@ -7162,6 +7162,38 @@ check "no cd-then-reinvoke site expands \$(_sandy_self_path) late" \
 
 # ============================================================
 echo ""
+echo "§88b: no JSON assertion is anchored on a field NEIGHBOURS"
+# ============================================================
+# `grep '"name":"X"[^}]*"relay":{'` reads naturally and is a tripwire: the
+# character class cannot cross the `}` of a NESTED object, so the check starts
+# failing against an emitter that is entirely correct the moment one lands in
+# between. It is a false alarm that looks exactly like a real regression, and it
+# has now cost THREE rounds -- §123 when handoff{} landed ahead of relay{},
+# §124(8) on its own dirs{}, and acceptance-handoff-dirs.sh Phase F, which spent
+# a maintainer run reporting relay.state=started as FAILING while --print-state
+# was emitting precisely that.
+#
+# The rule is not "avoid this regex", it is: slice the ONE object out first
+# (index/substr, no regex), then assert on the slice -- or, where the fixture
+# set allows it, give each case a $SANDY_HOME containing only that sandbox, as
+# §127 does. Comment lines are exempt so the rule can be WRITTEN down.
+_S88B_DIR="$(cd "$(dirname "$0")" && pwd)"
+# -F, a FIXED string. The obvious BRE spelling of this pattern (`\[^}\]\*`)
+# matches NOTHING -- the backslash does not stop `[^` from opening a negated
+# bracket expression -- so the first version of this ratchet passed against a
+# tree that still contained the anti-pattern. Caught by mutation, which is the
+# only reason it is not still sitting here green and useless.
+# The needle is ASSEMBLED rather than written out, so this line does not match
+# itself. A literal here made the check fail on its own source -- the same
+# self-match that made lint-bash32.sh flag the prose of the tests guarding its
+# own hazards.
+_S88B_PAT="$(printf '[^%s]*' '}')"
+_S88B="$(grep -rnF -- "$_S88B_PAT" "$_S88B_DIR" 2>/dev/null | grep -v ':[0-9]*:[[:space:]]*#' || true)"
+check "§88b no test anchors a JSON assertion across a neighbouring field (got: ${_S88B:-none})" \
+    test -z "$_S88B"
+unset _S88B _S88B_DIR _S88B_PAT
+
+# ============================================================
 echo "§89: bash-3.2 / BSD portability lint (the class CI structurally cannot see)"
 # ============================================================
 # CI is Ubuntu + bash 5 + GNU userland; the maintainer is macOS + bash 3.2 + BSD.
@@ -13041,7 +13073,21 @@ _S124_AFTER="$(find "$_S124_PSH/sandboxes" | sort | sha256 2>/dev/null || find "
 check "§124(6) --print-state REPAIRS NOTHING — the tree is byte-identical after reporting on a broken pair (the consumer relies on a hand-made pair staying distinguishable)" \
     bash -c '[ "$1" = "$2" ]' -- "$_S124_BEFORE" "$_S124_AFTER"
 
-_s124_field() { printf '%s' "$_S124_PS" | tr -d ' \n' | sed -n "s/.*\"name\":\"$1\"[^}]*\"handoff\":{\"state\":\"\([a-z]*\)\".*/\1/p" | head -1; }
+# Slice the ONE sandbox object out first, then read the field from it. The
+# previous form anchored on the neighbours -- `"name":"$1"[^}]*"handoff":{` --
+# which worked only because nothing nested happened to sit between those two
+# fields. It is the same tripwire that broke §123, §124(8), and (while this
+# section was green) acceptance-handoff-dirs.sh Phase F, which reported
+# relay.state=started FAILING against an emitter that was emitting exactly that.
+# index/substr only: no regex, so no BRE-vs-ERE question and BWK-awk safe.
+_s124_obj() {   # _s124_obj <sandbox-name> -> the JSON object for that sandbox
+    # ONE LINE on purpose: a multi-line single-quoted program argument is the
+    # shape lint-bash32.sh cannot track (it desynchronized the APOSQ span and
+    # reported three unrelated comments 20 lines below as findings), and it is
+    # the same shape CLAUDE.md records as untellable from host shell.
+    printf '%s' "$_S124_PS" | tr -d ' \n' | awk -v key="\"name\":\"$1\"" '{ p = index($0, key); if (p == 0) exit 0; rest = substr($0, p); q = index(substr(rest, 2), "{\"name\":\""); if (q > 0) rest = substr(rest, 1, q); print rest }'
+}
+_s124_field() { _s124_obj "$1" | sed -n 's/.*"handoff":{"state":"\([a-z]*\)".*/\1/p' | head -1; }
 check "§124(7) --print-state reports ok / missing / wrong for the three fixtures" \
     bash -c '[ "$1" = "ok" ] && [ "$2" = "missing" ] && [ "$3" = "wrong" ]' \
     -- "$(trap - ERR; _s124_field r-ok)" "$(trap - ERR; _s124_field r-missing)" "$(trap - ERR; _s124_field r-wrong)"

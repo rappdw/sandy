@@ -364,7 +364,32 @@ run_case() {
     done
     ck "[$label] a claude session exposes a bound socket and a key file" \
        "[ -n \"$sock\" ] && [ \"$sock\" != '-' ] && [ -n \"$keyf\" ] && [ \"$keyf\" != '-' ]"
-    if [ -z "$sock" ] || [ "$sock" = "-" ]; then "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1; return 0; fi
+    if [ -z "$sock" ] || [ "$sock" = "-" ]; then
+        # DIAGNOSE, do not just bail. A session that comes up, passes every
+        # structural check, and then never binds its messaging socket is the
+        # repo's most-repeated failure shape -- the theme picker (#256), the
+        # auto-mode nudge, the custom-API-key modal (#151). Each time, the thing
+        # that actually identified it was a PANE DUMP showing a dialog where the
+        # agent should have been; each time it was first misread as a delivery
+        # bug. The container is about to be stopped and the evidence lost, so
+        # capture it here rather than asking for another full run.
+        #
+        # `.claude.json` is printed with it because that is where the dialog
+        # state lives, and sandy deletes `projects` from the seed -- so a
+        # non-bypass receiver has no hasTrustDialogAccepted entry while a
+        # bypass one never needs it. That is a HYPOTHESIS for the
+        # accept/non-bypass case, not a finding; the dump settles it.
+        echo "    -- [$label] no bound socket after 60s; pane dump follows --"
+        docker exec "$c" tmux capture-pane -p -t sandy.0 2>/dev/null \
+            | sed 's/^/          | /' || echo "          | <pane capture failed>"
+        echo "    -- [$label] ~/.claude.json (dialog state lives here) --"
+        docker exec -u "$(id -u)" "$c" sh -c 'cut -c1-600 "$HOME/.claude.json"' 2>/dev/null \
+            | sed 's/^/          | /' || echo "          | <unreadable>"
+        echo "    -- [$label] sandy-handoff-sessions rows --"
+        docker exec -u "$(id -u)" "$c" sandy-handoff-sessions 2>&1 \
+            | sed 's/^/          | /' || echo "          | <none>"
+        "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1; return 0
+    fi
 
     local inject_log="$sentinel.inject.log"
     # The claude receiver holds cc-debug.log open from launch, so do NOT unlink
