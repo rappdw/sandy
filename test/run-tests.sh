@@ -13320,6 +13320,22 @@ check "§126(pre-b) the #130 posture block was extracted as a balanced fragment"
     bash -c '[ -s "$1" ] && bash -n "$1" && grep -q "PROFILE_TMPDIR" "$1"' -- "$_S126_DIR/blk.sh"
 
 # _s126_posture <profile-json> <SANDY_SUSPICIOUS> [break] -> one line of facts
+#
+# CASESUB, and the reason the `case` inside this function is written in the
+# POSIX leading-paren form. The body below sits inside a multi-line
+# `out="$( { ... } 2>&1 )"`, and bash 3.2 does not parse a command
+# substitution -- it scans for the matching close paren. A bare `node|python3`
+# case pattern therefore ENDED the substitution at its own terminator. That was
+# live on macOS from 1.12.0 through 1.13.1: the suite aborted at that line after
+# 1720 passing checks, so sections 127, 128 and 129 never ran there at all,
+# while CI on bash 5 stayed green the whole time.
+#
+# Two separate blind spots in test/lint-bash32.sh let it through, and both are
+# now closed with fixtures: the `$( {` group opener matched none of the three
+# span-opener rules, so nothing in this function was scanned for ANY detector;
+# and the CASESUB matcher was anchored to the start of a line, while this
+# `case` is buried mid-statement. Keep comments in here free of apostrophes and
+# unbalanced parens for the same reason -- that is the sibling code APOSCS.
 _s126_posture() {
     local out rc=0
     out="$( {
@@ -13328,7 +13344,9 @@ _s126_posture() {
         . "$_S126_DIR/fn.sh"
         # `break` simulates a host with neither node nor python3, which is the
         # only way the strip can fail without a malformed file.
-        if [ -n "${3:-}" ]; then command(){ case "$2" in node|python3) return 1 ;; esac; builtin command "$@"; }; fi
+        # The leading-paren pattern form below is REQUIRED, not stylistic --
+        # see the CASESUB note above this function.
+        if [ -n "${3:-}" ]; then command(){ case "$2" in (node|python3) return 1 ;; esac; builtin command "$@"; }; fi
         PROFILE_TMPDIR="$_S126_DIR/pt.$$.$RANDOM"; mkdir -p "$PROFILE_TMPDIR/credentials"
         local host="$_S126_DIR/host.$$.$RANDOM.json"
         printf '%s' "$1" > "$host"
@@ -13696,8 +13714,15 @@ _s129_run() {   # _s129_run <case> [path-override]
             plain)      ;;
         esac
         export WORK_DIR HOME
-        PATH="${2:-$PATH}" _sandy_csi_write refuse "$WORK_DIR/.claude/settings.local.json" "$WORK_DIR" >/dev/null 2>&1
+        # Set and restore PATH explicitly rather than as an assignment PREFIX:
+        # for a shell FUNCTION, whether the prefix persists after the call is
+        # shell- and POSIX-mode-dependent, and the reporting below still needs
+        # working tools. Not worth leaving to chance on a shell this has never
+        # run under.
+        _s129_oldpath="$PATH"; PATH="${2:-$PATH}"
+        _sandy_csi_write refuse "$WORK_DIR/.claude/settings.local.json" "$WORK_DIR" >/dev/null 2>&1
         printf 'rc=%s\n' "$?"
+        PATH="$_s129_oldpath"
         [ -L "$WORK_DIR/.claude/settings.local.json" ] && printf 'still-a-symlink\n'
         # Would _sandy_resolve_symlinks still have something to approve? Same
         # find predicate it uses. This is the check a canonicalizing fix fails.
