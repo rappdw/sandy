@@ -14009,6 +14009,104 @@ rm -rf "$_S130_DIR"
 unset _S130_DIR _S130_ESC _S130_ESC_RC _S130_ABS _S130_ABS_RC _S130_OK _S130_OK_RC
 unset _S130_PF _S130_PD _S130_NP _S130_IN
 
+# ============================================================
+echo "§131: the Telegram host relay fails CLOSED on an empty allowlist (R7b)"
+# ============================================================
+# WHY. The relay's sender gate was:
+#
+#     _is_allowed() { [ -z "$ALLOWED" ] && return 0; ... }
+#
+# An unset TELEGRAM_ALLOWED_SENDERS therefore allowed EVERYONE, and an allowed
+# message goes to `docker exec ... tmux send-keys` into a pane sandy pins to
+# bypassPermissions -- arbitrary keystrokes into a session that does not ask
+# before acting. A Telegram bot is reachable by anyone who knows its username,
+# so the only thing in the way was the bot token staying secret.
+#
+# The documentation made it worse than a bad default. README told the user that
+# an omitted allowlist meant `pairing` mode -- true of the IN-CONTAINER Claude
+# plugin, false of this HOST relay, which is what runs for gemini, codex,
+# opencode, grok and every multi-agent combo. Someone who left it unset did so
+# on the documentation's word. That is why this section also checks the README.
+#
+# Two gates, deliberately: the relay REFUSES TO START without an allowlist, and
+# _is_allowed denies on empty even if it somehow does. Starting and silently
+# dropping every message would read as "channels are broken" and get debugged as
+# a bug -- which is how a security default becomes a patch that puts the hole
+# back.
+_S131_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S131_README="$(cd "$(dirname "$SANDY_SCRIPT")" && pwd)/README.md"
+awk '/^    cat > "\$SANDY_HOME\/channel-relay.sh.new" <<.RELAY.$/{f=1;next} /^RELAY$/{f=0} f' \
+    "$SANDY_SCRIPT" > "$_S131_DIR/relay.sh"
+check "§131(pre) the relay script was extracted and parses (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'bash -n "$1/relay.sh" && grep -q "_is_allowed" "$1/relay.sh" && grep -q "TELEGRAM_ALLOWED_SENDERS" "$1/relay.sh"' -- "$_S131_DIR"
+
+# The startup guard, exercised without entering the poll loop (which would hit
+# the network). Extracted from `ALLOWED=` down to the `fi` that closes it.
+sed -n '/^ALLOWED=/,/^fi$/p' "$_S131_DIR/relay.sh" > "$_S131_DIR/guard.sh"
+# PREMISE, and not a formality: the extraction is a line RANGE, so deleting the
+# guard makes it run on to some unrelated `fi` and the checks below then measure
+# the wrong block. Verified by mutation -- with the guard removed, (1) still
+# passed and only the others failed, i.e. it was caught by accident rather than
+# by the check that names it. This turns that into a stated failure.
+check "§131(pre-b) the startup guard was extracted as its own block (mutation: delete the guard and the sed range runs on to an unrelated fi)" \
+    bash -c 'bash -n "$1/guard.sh" && grep -q "Telegram host relay requires" "$1/guard.sh" && [ "$(grep -c "^fi$" "$1/guard.sh")" = 1 ]' -- "$_S131_DIR"
+# Prints the refusal text and RETURNS the guard's own status. The status cannot
+# be captured inside: the guard ends in `exit 1`, and a sourced `exit` leaves the
+# subshell immediately, so a trailing `printf rc=$?` never runs. Same trap §130
+# hit. And `|| rc=$?` on the assignment, not `; rc=$?`, or the non-zero status
+# trips the suite's set -e before the next line.
+_s131_guard() {   # _s131_guard <allowlist-value> -> refusal text; rc = the guard's
+    (
+        trap - ERR; set +e
+        TELEGRAM_ALLOWED_SENDERS="$1"
+        . "$_S131_DIR/guard.sh"
+    ) 2>&1
+}
+_S131_EMPTY_RC=0; _S131_EMPTY="$(trap - ERR; _s131_guard '')"       || _S131_EMPTY_RC=$?
+_S131_SET_RC=0;   _S131_SET="$(trap - ERR;   _s131_guard '123456789')" || _S131_SET_RC=$?
+
+check "§131(1) the relay REFUSES TO START with an empty allowlist (got rc=$_S131_EMPTY_RC)" \
+    test "$_S131_EMPTY_RC" = 1
+check "§131(2) ...and it STARTS when one is set — the positive half, without which a guard that refused everything would satisfy (1)" \
+    test "$_S131_SET_RC" = 0
+check "§131(3) the refusal names the key to set, so it is actionable rather than just a denial" \
+    bash -c 'printf "%s\n" "$1" | grep -q "TELEGRAM_ALLOWED_SENDERS"' -- "$_S131_EMPTY"
+check "§131(4) ...and corrects the pairing claim, because the README sent people here believing an empty allowlist meant pairing" \
+    bash -c 'printf "%s\n" "$1" | grep -qi "pairing"' -- "$_S131_EMPTY"
+
+# The sender gate itself, as a second layer.
+_s131_allowed() {   # _s131_allowed <allowlist> <uid> -> allowed|denied
+    (
+        trap - ERR; set +e; set +u
+        ALLOWED="$1"
+        eval "$(sed -n '/^_is_allowed() {/,/^}$/p' "$_S131_DIR/relay.sh")"
+        if _is_allowed "$2"; then printf 'allowed\n'; else printf 'denied\n'; fi
+    ) 2>/dev/null
+    return 0
+}
+check "§131(5) _is_allowed DENIES on an empty allowlist — the second layer, so the gate holds even if the startup guard is bypassed" \
+    bash -c '[ "$1" = denied ]' -- "$(trap - ERR; _s131_allowed '' '12345')"
+check "§131(6) ...and ALLOWS a listed uid — the positive half for this layer too" \
+    bash -c '[ "$1" = allowed ]' -- "$(trap - ERR; _s131_allowed '12345,67890' '12345')"
+check "§131(7) ...including one that is not first in the list" \
+    bash -c '[ "$1" = allowed ]' -- "$(trap - ERR; _s131_allowed '12345,67890' '67890')"
+check "§131(8) ...and denies an unlisted uid" \
+    bash -c '[ "$1" = denied ]' -- "$(trap - ERR; _s131_allowed '12345,67890' '99999')"
+check "§131(9) ...and a PREFIX of a listed uid is not a match (the comma-wrapping is load-bearing)" \
+    bash -c '[ "$1" = denied ]' -- "$(trap - ERR; _s131_allowed '12345' '1234')"
+
+# Anti-drift, structural and labelled as such: the host-side launch site must
+# refuse too, so the reason appears in sandy's own output rather than only in a
+# backgrounded child's stderr.
+check "§131(10) the host-side launch site also refuses without the allowlist (structural: the behavioural half needs Docker)" \
+    bash -c 'grep -q "the host relay is NOT started without TELEGRAM_ALLOWED_SENDERS" "$1"' -- "$SANDY_SCRIPT"
+# The documentation half of the finding.
+check "§131(11) README no longer tells the reader an omitted allowlist gives pairing without saying it is plugin-only" \
+    bash -c '! grep -q "If .TELEGRAM_ALLOWED_SENDERS. is omitted, sandy starts in .pairing. mode" "$1"' -- "$_S131_README"
+
+rm -rf "$_S131_DIR"
+unset _S131_DIR _S131_EMPTY _S131_SET _S131_README _S131_EMPTY_RC _S131_SET_RC
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.13.4-dev"
+SANDY_VERSION="1.13.4"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -6045,10 +6045,12 @@ _seed_channel() {
     chmod 600 "$HOME/.claude/channels/$chan/.env"
     [ -f "$HOME/.claude/channels/$chan/access.json" ] && return
     if [ -n "$senders" ]; then
-        # gsub escapes \ and " in each sender before quoting — TELEGRAM_/
-        # DISCORD_ALLOWED_SENDERS are passive-tier (no approval prompt), so a
-        # committed workspace value containing " could otherwise inject entries
-        # into the bot's DM allowlist (who may drive the agent).
+        # gsub escapes \ and " in each sender before quoting. Both keys are
+        # PRIVILEGED (an earlier version of this comment said passive-tier; it
+        # was wrong), so a workspace setting one hits the approval prompt first.
+        # The escaping stays regardless: the value may still arrive from a
+        # privileged source that was approved, and a " in it would otherwise
+        # inject entries into the bot's DM allowlist -- who may drive the agent.
         ALLOW_JSON=$(echo "$senders" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NR>1{printf ","}{gsub(/\\/,"\\\\");gsub(/"/,"\\\"");printf "\"%s\"",$0}')
         cat > "$HOME/.claude/channels/$chan/access.json" <<CHACCESS
 {
@@ -6702,12 +6704,39 @@ set -u
 : "${SANDY_CONTAINER_NAME:?}"
 TARGET_PANE="${SANDY_CHANNEL_TARGET_PANE:-0}"
 ALLOWED="${TELEGRAM_ALLOWED_SENDERS:-}"
+# Refuse to run with no allowlist, rather than run and drop everything. A relay
+# that starts and silently delivers nothing reads as "channels are broken" and
+# gets debugged as a bug -- which is how a security default turns into a patch
+# that puts the hole back. Exiting non-zero with the reason is the honest form.
+if [ -z "$ALLOWED" ]; then
+    echo "[sandy] ERROR: the Telegram host relay requires TELEGRAM_ALLOWED_SENDERS." >&2
+    echo "[sandy]        Without it ANY Telegram user who finds the bot could send" >&2
+    echo "[sandy]        keystrokes to the agent. Set it to your numeric user id" >&2
+    echo "[sandy]        (message @userinfobot to find it), e.g." >&2
+    echo "[sandy]            TELEGRAM_ALLOWED_SENDERS=123456789" >&2
+    echo "[sandy]        Pairing mode is the in-container Claude plugin only; this" >&2
+    echo "[sandy]        host relay has no pairing flow." >&2
+    exit 1
+fi
 API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
 OFFSET=0
 
 _is_allowed() {
     local uid="$1"
-    [ -z "$ALLOWED" ] && return 0
+    # FAIL CLOSED (R7b, 1.13.4). This used to `return 0` on an empty allowlist,
+    # so an unset TELEGRAM_ALLOWED_SENDERS let ANY Telegram user drive the
+    # agent -- and _inject below is `tmux send-keys` into a pane sandy pins to
+    # bypassPermissions, i.e. arbitrary keystrokes into a session that does not
+    # ask before acting. A Telegram bot is reachable by anyone who knows its
+    # username, so the only thing standing in the way was the bot token staying
+    # secret. README:821 made it worse than a plain default: it told the user an
+    # omitted allowlist meant `pairing` mode, which is true of the IN-CONTAINER
+    # Claude plugin and false of this host relay -- so someone who left it unset
+    # did so on the documentation''"'"'s word.
+    #
+    # The empty case is also refused before the poll loop starts (see the guard
+    # at the top), so this branch is defence in depth rather than the only gate.
+    [ -z "$ALLOWED" ] && return 1
     case ",$ALLOWED," in *,"$uid",*) return 0 ;; esac
     return 1
 }
@@ -13218,7 +13247,15 @@ CHANNEL_RELAY_PID=""
 if { [ "$_SANDY_IS_MULTI" = true ] || ! _sandy_agent_has claude; } && [ -n "${SANDY_CHANNELS:-}" ]; then
     case ",$SANDY_CHANNELS," in
         *,telegram,*)
-            if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+            if [ -z "${TELEGRAM_ALLOWED_SENDERS:-}" ]; then
+                # Checked HERE as well as inside the relay so the reason appears
+                # in sandy''"'"'s own launch output rather than only in a backgrounded
+                # child''"'"'s stderr. The relay refuses too; neither is the sole gate.
+                warn "SANDY_CHANNELS=telegram: the host relay is NOT started without TELEGRAM_ALLOWED_SENDERS"
+                warn "  An empty allowlist would let any Telegram user send keystrokes to the agent."
+                warn "  Set TELEGRAM_ALLOWED_SENDERS to your numeric user id (message @userinfobot)."
+                warn "  Note: pairing mode is the in-container Claude plugin only; this relay has none."
+            elif [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
                 SANDY_CONTAINER_NAME="$CONTAINER_NAME" \
                 TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
                 TELEGRAM_ALLOWED_SENDERS="${TELEGRAM_ALLOWED_SENDERS:-}" \
