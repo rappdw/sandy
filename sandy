@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.13.1"
+SANDY_VERSION="1.13.2"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -10292,13 +10292,59 @@ fi
 # escape hatch, not a bug. Runs here so both files exist BEFORE the protected-files
 # :ro mount loop and the .protected-existed-at-launch snapshot (workspace target only
 # — the sandbox target is never :ro and predates this block regardless).
+# R2 (1.13.2): a path is safe to write only if NO component below the anchor is
+# a symlink. Stated as a property of the path rather than a containment test,
+# because it needs no canonicalization: a symlink-free chain from the anchor
+# down IS proof the file sits inside it, and `realpath` is GNU-only anyway.
+# Bash builtins only, so it is bash-3.2/BSD-clean.
+_sandy_path_symlink_component() {   # $1 = anchor dir, $2 = path under it -> prints the offending component
+    local _anchor="$1" _p="$2" _rest _seg _cur
+    _rest="${_p#"$_anchor"/}"
+    [ "$_rest" = "$_p" ] && return 1        # not under the anchor; nothing to walk
+    _cur="$_anchor"
+    while [ -n "$_rest" ]; do
+        _seg="${_rest%%/*}"
+        _cur="$_cur/$_seg"
+        if [ -L "$_cur" ]; then printf '%s' "${_cur#"$_anchor"/}"; return 0; fi
+        case "$_rest" in
+            */*) _rest="${_rest#*/}" ;;
+            *)   _rest="" ;;
+        esac
+    done
+    return 1
+}
+
 _sandy_csi_write() {
-    # $1 = accept|hold|refuse   $2 = absolute target file
+    # $1 = accept|hold|refuse   $2 = absolute target file   $3 = anchor dir the
+    # target must sit inside without traversing a symlink
     # 0 = written (or already identical), 1 = not written (a warning was printed)
-    local _v="$1" _f="$2" _t _rc _rel
+    local _v="$1" _f="$2" _anchor="$3" _t _rc _rel _bad
     _rel="${_f#"$WORK_DIR"/}"
+    # R2: REFUSE to write through a symlink. The walk is what detects it -- do
+    # NOT be tempted to let `mkdir -p` fail on a bad parent instead: it succeeds
+    # silently on a symlink-to-directory. Running before the mkdir is only so a
+    # refusal creates nothing. A repository that commits `.claude/settings.local.json` as a link
+    # to any JSON object on the host made sandy READ that file and write its
+    # contents back into the workspace (measured against a `.credentials.json`
+    # shape: the refresh token landed in the repo, host-side, before `docker run`,
+    # with no agent and no approval involved); committing `.claude` itself as a
+    # directory link made the write land wherever it pointed. Worse, `mv -f`
+    # replaced the link with a regular file, so `_sandy_resolve_symlinks` -- which
+    # on the bare-`sandy` path does not run until ~1800 lines later -- found
+    # nothing left to approve. Sandy's own write consumed the evidence its
+    # approval gate keys on. Refusing (rather than resolving, or replacing the
+    # link) is what hands that case back to the symlink approval, where an
+    # escaping link is surfaced to the user as it always should have been.
+    if _bad="$(_sandy_path_symlink_component "$_anchor" "$_f")"; then
+        warn "crossSessionInbound NOT written: $_rel traverses a symlink ($_bad) -- refusing to write through it"
+        return 1
+    fi
     mkdir -p "${_f%/*}" || { warn "crossSessionInbound NOT written: cannot create ${_rel%/*}/"; return 1; }
     _t="$_f.sandy-tmp.$$"
+    # The temp name sits in the directory just proven symlink-free, but it is a
+    # path this function creates rather than checks, and every writer below
+    # follows a link at it. Unlinking first costs nothing and removes the class.
+    rm -f "$_t"
     if command -v node >/dev/null 2>&1; then
         node -e '
   const fs=require("fs"), f=process.argv[1], v=process.argv[2], t=process.argv[3];
@@ -10362,9 +10408,9 @@ if _sandy_agent_has claude; then
         _sandy_csi_val="refuse"; _sandy_csi_why="default: no relay configured"
     fi
     _sandy_csi_user_written=0
-    if _sandy_csi_write "$_sandy_csi_val" "$_sandy_csi_user_target"; then _sandy_csi_user_written=1; fi
+    if _sandy_csi_write "$_sandy_csi_val" "$_sandy_csi_user_target" "$SANDBOX_DIR"; then _sandy_csi_user_written=1; fi
     _sandy_csi_ws_written=0
-    if _sandy_csi_write "$_sandy_csi_val" "$WORK_DIR/$_sandy_csi_ws_rel"; then _sandy_csi_ws_written=1; fi
+    if _sandy_csi_write "$_sandy_csi_val" "$WORK_DIR/$_sandy_csi_ws_rel" "$WORK_DIR"; then _sandy_csi_ws_written=1; fi
     if [ "$_sandy_csi_user_written" = 1 ] && [ "$_sandy_csi_ws_written" = 1 ]; then
         info "crossSessionInbound=$_sandy_csi_val written to claude/settings.json (sandbox) and $_sandy_csi_ws_rel ($_sandy_csi_why)"
         _sandy_csi_json="\"$_sandy_csi_val\""

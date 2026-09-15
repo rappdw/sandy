@@ -157,6 +157,24 @@ GNU_FLAGS = [
     ("xargs", r"\bxargs\b[^|;]*\s-r\b", None),
     ("find",  r"\bfind\b[^|;]*\s-printf\b", None),
     ("sleep", r"\bsleep\s+infinity\b", None),
+    # GNU BRE alternation. `\|` (and `\+`, `\?`) are GNU EXTENSIONS to basic
+    # regular expressions; POSIX BRE has no alternation at all, so BSD sed
+    # matches a LITERAL pipe and the expression silently never fires -- empty
+    # output, exit 0, no error. Cost run-tests.sh §127(6-9): four checks that
+    # passed in CI and failed on macOS the first time they ran there, because
+    # `s/.*"agents":\(\[[^]]*\]\|null\).*/\1/p` matched nothing at all.
+    # The fix is POSIX ERE -- `sed -E -n \'s/...(\[[^]]*\]|null).*/\1/p\'` --
+    # which BSD sed and GNU sed both accept, so the allow pattern below stands
+    # down for any -E/-r invocation.
+    ("sed",   r"\bsed\b[^|;]*\\[|+?]", r"\bsed\s+(?:-[A-Za-z]*[Er])"),
+    # NOT extended to grep, and that is an evidence call rather than an
+    # oversight. The same macOS run that failed the sed form PASSED §109(2),
+    # whose `grep -q "sandy own state\|sandy.s own state"` has no fallback and
+    # whose FIRST alternative does not occur in the file -- it can only pass if
+    # BSD grep honoured the alternation. Flagging grep would have produced 12
+    # findings against lines that demonstrably work, which is the crying-wolf
+    # failure the GNUBIN header warns about. Revisit only with a macOS run that
+    # contradicts it.
 ]
 # The BSD counterpart. Its presence on the SAME line means the call is already
 # a portable fallback chain (`shasum -a 256 2>/dev/null || sha256sum`), which is
@@ -306,6 +324,26 @@ def scan(path):
     # inside unrelated (and correct) code, after 1034 checks had passed.
     # Unbalanced parens are flagged for the same reason apostrophes are: the
     # observed error was `syntax error near unexpected token (`.
+    def _case_in(l):
+        """Text after the `in` of a `case ... in` on this line, else None.
+
+        `case` need not start the line: the §126 instance was buried
+        mid-statement (`...; then command(){ case "$2" in node|python3) ...`),
+        which a start-of-line anchor could never match. Any command position
+        counts. The scan for `in` is deliberately loose -- the subject may be
+        quoted and contain spaces (`case " $E " in ...`, the §119 shape) -- so
+        it is "case at a command position, then `in` somewhere after it",
+        not an adjacency pattern. Requiring `case <word> in` was tried and
+        silently stopped matching §119.
+        """
+        m = re.search(r"(?:^|[;&|(){}]|\bthen\b|\bdo\b|\belse\b)\s*case\b", l)
+        if not m:
+            return None
+        rest = l[m.end():]
+        if not re.search(r"\bin\b", rest):
+            return None
+        return re.split(r"\bin\b", rest, maxsplit=1)[1].strip()
+
     depth, opened_at, bal_mode, bal = 0, 0, False, 0
     for i, l in enumerate(lines, 1):
         # The heredoc opener must be a real one: not a `<<<` herestring (an awk
@@ -327,6 +365,16 @@ def scan(path):
         # produced two bogus findings in run-tests.sh on first run.
         _open = ("$(" in l and l.count("(") > l.count(")")
                  and re.search(r"(?:\\|\|)\s*$", l) is not None)
+        # Fourth opener: `$( {` opening a brace GROUP, which by construction
+        # continues on the following lines. run-tests.sh §126 used exactly this
+        # (`out="$( {`) and matched none of the three rules above -- `$(` is not
+        # last on the line, and the line ends in `{`, not a continuation -- so
+        # its body was never scanned at all, CASESUB and APOSCS alike. It
+        # carried a live CASESUB from 1.12.0 through four releases: green in CI,
+        # aborting the macOS run at §126 so that §127, §128 and §129 never ran
+        # there. Kept narrow (the group opener must END the line) for the reason
+        # the APOSCS header gives: a loose rule floods.
+        _grp = re.search(r"\$\(\s*\{\s*$", l) is not None
         if depth == 0:
             if re.search(r"\$\(\s*$", l) or (_hd and l.count("$(") > l.count(")")):
                 # Balance-closed as well. The heredoc-carrying opener typically
@@ -337,7 +385,7 @@ def scan(path):
                 # second trigger for spans whose parens do not balance cleanly.
                 depth, opened_at, bal_mode = 1, i, True
                 bal = l.count("(") - l.count(")")
-            elif _open:
+            elif _open or _grp:
                 # Opened by the continuation rule: this span is closed by PAREN
                 # BALANCE, because the line that ends it typically closes inline
                 # (`| cut -d'"' -f4)" || true`) and never matches the bare-`)`
@@ -371,9 +419,17 @@ def scan(path):
             # to write the POSIX leading-paren form `(pattern)`, which balances
             # the scanner. A bare `case x in` with its patterns on later lines is
             # flagged too: those lines carry the same unbalanced `)`.
-            elif re.match(r"^\s*case\b", l) and re.search(r"\bin\b", l):
-                _after = re.split(r"\bin\b", l, maxsplit=1)[1].strip()
-                if not _after.startswith("("):
+            # `case` does NOT have to start the line. The §126 instance was
+            # `if [ -n "${3:-}" ]; then command(){ case "$2" in node|python3) ...`
+            # -- a one-line case buried mid-statement, which the old
+            # start-of-line anchor could never match even with the span open.
+            # Anywhere a command may begin is enough: line start, or after
+            # ; & | ( ) { } or then/do/else.
+            elif not re.match(r"^\s*#", l) and _case_in(l) is not None:
+                # What follows `in` is the first PATTERN. The leading-paren form
+                # `(a|b)` balances the scanner and is the documented fix, so it
+                # is the one spelling that does not fire.
+                if not _case_in(l).startswith("("):
                     out.append((i, "CASESUB", l.strip()[:88]))
             # Balance is updated AFTER the checks, deliberately. The `)` that
             # terminates a case pattern is exactly what drives the balance to
@@ -468,14 +524,43 @@ if [ "$SELF_TEST" = true ]; then
     printf '%s\n' '#!/bin/bash' 'echo "a string mentioning <<EOF that never ends"' 'timeout 60 prog' > "$_fx/gnubin4.sh"
     # CASESUB: the exact run-tests.sh §119 shape that aborted a macOS run.
     printf '%s\n' '#!/bin/bash' 'M="$(prog --list 2>/dev/null | tr "," "\\n" \\' '    | sort -u \\' '    | while IFS= read -r k; do' '          case " $E " in *" $k "*) continue ;; esac' '          echo "$k"' '      done)"' > "$_fx/casesub.sh"
+    # CASESUB, the run-tests.sh §126 shape: a `$( {` group opener (which none of
+    # the other three opener rules match) carrying a one-line `case` buried
+    # mid-statement (which a start-of-line anchor cannot match). BOTH gaps had
+    # to close for this to be seen; it survived four releases while the tree
+    # linted clean.
+    printf '%s\n' '#!/bin/bash' '_f() {' '    out="$( {' '        trap - ERR' '        if [ -n "${3:-}" ]; then command(){ case "$2" in node|python3) return 1 ;; esac; builtin command "$@"; }; fi' '        echo done' '    } 2>&1 )"' '}' > "$_fx/casesub2.sh"
+    # And the leading-paren form of the SAME line must NOT fire -- a detector
+    # that flags the documented fix is worse than no detector.
+    printf '%s\n' '#!/bin/bash' '_f() {' '    out="$( {' '        trap - ERR' '        if [ -n "${3:-}" ]; then command(){ case "$2" in (node|python3) return 1 ;; esac; builtin command "$@"; }; fi' '        echo done' '    } 2>&1 )"' '}' > "$_fx/casesub2ok.sh"
+    # GNUBIN: GNU-only BRE alternation. The exact run-tests.sh §127 shape --
+    # silent empty output on BSD sed, never an error.
+    printf '%s\n' '#!/bin/bash' 'v="$(prog | sed -n '"'"'s/.*"agents":\\(\\[[^]]*\\]\\|null\\).*/\\1/p'"'"')"' > "$_fx/gnubin5.sh"
     _fails=0
-    for probe in srcsub pyback aposcs aposcs2 aposq casesub grepm grepm2 gnubin gnubin2 gnubin3 gnubin4; do
+    for probe in srcsub pyback aposcs aposcs2 aposq casesub casesub2 grepm grepm2 gnubin gnubin2 gnubin3 gnubin4 gnubin5; do
         if python3 "$_scanner" "$_fx/$probe.sh" >/dev/null 2>&1; then
             echo "SELF-TEST FAIL: $probe fixture was NOT detected" >&2; _fails=$((_fails + 1))
         else
             echo "  detector OK: $probe"
         fi
     done
+    if python3 "$_scanner" "$_fx/casesub2ok.sh" >/dev/null 2>&1; then
+        echo "  negative control OK: the leading-paren case form does not fire"
+    else
+        echo "SELF-TEST FAIL: the (pattern) fix was flagged as a finding" >&2; _fails=$((_fails + 1))
+    fi
+    # The documented fix -- POSIX ERE -- must NOT fire, in either tool.
+    {
+        echo '#!/bin/bash'
+        echo 'v="$(prog | sed -E -n '"'"'s/.*"agents":(\[[^]]*\]|null).*/\1/p'"'"')"'
+        echo 'grep -E '"'"'a|b'"'"' f'
+        echo 'grep -F '"'"'a\|b'"'"' f'
+    } > "$_fx/gnubin5ok.sh"
+    if python3 "$_scanner" "$_fx/gnubin5ok.sh" >/dev/null 2>&1; then
+        echo "  negative control OK: POSIX ERE alternation does not fire"
+    else
+        echo "SELF-TEST FAIL: the -E fix was flagged as a finding" >&2; _fails=$((_fails + 1))
+    fi
     # Negative control: a clean file must produce nothing.
     printf '%s\n' '#!/bin/bash' 'x="$(echo hi)"' '# a normal comment with an apostrophe, outside any $( )' > "$_fx/clean.sh"
     if python3 "$_scanner" "$_fx/clean.sh" >/dev/null 2>&1; then

@@ -1968,6 +1968,14 @@ Both writes run host-side, after `SANDY_HANDOFF_RELAY` validation/defaulting is 
 
 **Residual.** Unlike the `:ro` workspace copy, the sandbox target is RW inside the container (required for `/plugin install` and other in-session settings writes), so it is the one placement where a compromised in-session agent could rewrite its own `crossSessionInbound` — reset on the next launch (same class of managed-key residual as `permissions.defaultMode`, #151), not mitigated mid-session.
 
+**Symlink refusal (R2, 1.13.2).** Before either write, sandy walks every path component below the anchor (`$WORK_DIR` for the workspace target, `$SANDBOX_DIR` for the sandbox target) and **refuses the write if any component is a symlink**, naming the offending component:
+
+```
+WARNING: crossSessionInbound NOT written: .claude/settings.local.json traverses a symlink (.claude) -- refusing to write through it
+```
+
+The refusal is reported through the same `_written` flags as any other failure, so the log lines above already cover it. The check is a symlink-free-chain test rather than a canonicalize-and-compare containment test: the former needs no `realpath` (GNU-only) and, unlike canonicalization, it leaves the link **in place** for `_sandy_resolve_symlinks` (§ "Persistent symlink approval") to surface. `mkdir -p` is not the detector — it succeeds silently on a symlink-to-directory. Guarded by `run-tests.sh §129`.
+
 **gitignore nudge.** When the workspace write to `.claude/settings.local.json` succeeds and the workspace is a git repo, sandy checks (via `git check-ignore`, or a literal `.gitignore` grep fallback when git is unavailable) whether the file is ignored, and prints a two-line warning if not — mirrors the `.gstack/` nudge (§ "Persistent state (gstack)" in CLAUDE.md).
 
 ### C.3 `.claude.json` (User Setup State)
