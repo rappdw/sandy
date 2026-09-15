@@ -11612,7 +11612,11 @@ _S114_COLL_OUT="$(env SANDY_HANDOFF_RELAY=x SANDY_HANDOFF_DIRS=0 bash -c "$_S114
 check "§114(12a) relay configured + handoff mounts impossible (workspace collides with ~/.handoff) -> exit 1, not a warning-and-proceed (criterion 7: the relay cannot start, so the launch fails)" \
     bash -c '[ "$1" -eq 1 ] && printf "%s\n" "$2" | grep -q "A configured relay that cannot start fails the launch"' -- "$_S114_COLL_RC" "$_S114_COLL_OUT"
 _S114_COLL_RC=0
-env SANDY_HANDOFF_DIRS=0 bash -c "$_S114_COLL_BLK" >/dev/null 2>&1 || _S114_COLL_RC=$?
+# `env -u`: "no relay configured" must mean the CODE sees none, not that the
+# developer's shell happens to lack it. Running this suite from inside a sandbox
+# that has a relay installed exports SANDY_HANDOFF_RELAY, and this check then
+# asserted the opposite of its own description.
+env -u SANDY_HANDOFF_RELAY SANDY_HANDOFF_DIRS=0 bash -c "$_S114_COLL_BLK" >/dev/null 2>&1 || _S114_COLL_RC=$?
 check "§114(12b) ...and with NO relay configured the same collision is silent, rc 0 (the guard is about the relay, not about the dirs)" \
     test "$_S114_COLL_RC" -eq 0
 
@@ -11659,8 +11663,9 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # printf/arg mismatch, which silently shifts every field after the missing one;
 # §123(11a) is the behavioural half, asserting the composer's actual output
 # parses and carries the value it was given.
-check "§114(13g) marker printf format/arg count line up (15 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 15
+# 16 as of 1.13.0: `agents` joined the 15 pinned since 1.11.0's relay{}.
+check "§114(13g) marker printf format/arg count line up (16 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 16
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -12747,6 +12752,15 @@ _s123_resolve() {
         trap - ERR
         set +e
         warn() { :; }; info() { :; }; _sandy_daemon_fatal() { :; }
+        # CLEAR THE AMBIENT VALUES FIRST. A developer running this suite from
+        # inside a sandbox that has a relay installed inherits
+        # SANDY_HANDOFF_RELAY=/opt/sandy/relay/relay, and the "no relay
+        # configured" cases below then silently test the opposite of what they
+        # claim. Discovered exactly that way: §123(1)/(2)/(3) failed on a
+        # one developer machine and passed in CI, which is the SANDY_VERBOSE bug
+        # (#249) wearing different clothes -- the environment supplying what the
+        # code should.
+        unset SANDY_HANDOFF_RELAY SANDY_RELAY
         SANDBOX_DIR="$sb"
         [ -n "$relayval" ] && SANDY_RELAY="$relayval"
         [ -n "$override" ] && SANDY_HANDOFF_RELAY="$override"
@@ -13356,6 +13370,138 @@ check "§126(11) the four postures produced four distinct outcomes (mutation: a 
     -- "$_S126_ON" "$_S126_OFF" "$_S126_NONE" "$_S126_BROKE"
 rm -rf "$_S126_DIR"
 unset _S126_DIR _S126_SNAKE _S126_CAMEL _S126_NEST _S126_WITH _S126_ON _S126_OFF _S126_NONE _S126_BROKE
+
+# ============================================================
+echo "§127: the session marker and --print-state name the RESOLVED agent(s) (#sixth-ask)"
+# ============================================================
+# WHY. A host-side tool enrolled all 51 sandboxes on a machine and installed a
+# per-agent component into each. One sandbox runs codex; that component speaks
+# one agent's local protocol, so it could never work there. Directories, mounts
+# and config all read healthy, and the only symptom was a process exiting
+# non-zero once a second into a log nobody was watching. NOTHING in the state a
+# consumer can read said which agent a sandbox runs.
+#
+# WHY A CONSUMER CANNOT DERIVE IT. SANDY_AGENT settles at sandy:8257 from four
+# sources -- env, host config, workspace config, the --agent flag -- plus the
+# `all` alias. Reading the workspace's own .sandy/config is therefore not a
+# weaker answer, it is a WRONG one: a workspace naming nothing may still launch
+# as anything. Only the launch knows, so the launch records it.
+#
+# THE TRAP THIS SECTION EXISTS FOR is (5): `claude` is the default, so a reader
+# -- or a future refactor -- that fills in `claude` when the marker is absent
+# rebuilds exactly the guess this field retires, and does it invisibly, because
+# the overwhelming majority of sandboxes really are claude. null must stay null.
+_S127_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+python3 - "$SANDY_SCRIPT" "$_S127_DIR/marker.sh" <<'S127_EXTRACT'
+import sys
+s = open(sys.argv[1]).read()
+i = s.index('# agents (#sixth-ask): the RESOLVED agent list')
+j = s.index('> "$_sandy_session_file"', i) + len('> "$_sandy_session_file"')
+open(sys.argv[2], 'w').write(s[i:j])
+S127_EXTRACT
+check "§127(pre) the marker composer was extracted as a balanced fragment" \
+    bash -c '[ -s "$1" ] && bash -n "$1" && grep -q "_sandy_agents_json" "$1"' -- "$_S127_DIR/marker.sh"
+
+# Drives the SHIPPED composer. The stubs supply only what the launch sets ABOVE
+# the extraction point; getting that wrong yields invalid JSON rather than a
+# wrong value, which is why (1) asserts parseability explicitly.
+_s127_marker() {   # _s127_marker <SANDY_AGENT or empty> -> the agents value, or PARSE-FAIL
+    (
+        trap - ERR
+        set +e
+        sandy_full_version() { echo "1.13.0-test"; }
+        _sandy_egress_mode=permissive; SANDY_WORKSPACE=/w; _sandy_session_nonce=deadbeef
+        _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
+        CRED_MODE=none; _sandy_relay_slot=absent; _sandy_relay_json=false
+        _sandy_session_file="$_S127_DIR/m.json"
+        unset SANDY_HANDOFF_RELAY SANDY_AGENT
+        [ -n "$1" ] && SANDY_AGENT="$1"
+        . "$_S127_DIR/marker.sh" >/dev/null 2>&1
+        python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["agents"]))' \
+            "$_S127_DIR/m.json" 2>/dev/null || echo PARSE-FAIL
+    ) 2>/dev/null
+    return 0
+}
+_S127_ONE="$(trap - ERR;   _s127_marker claude)"
+_S127_TWO="$(trap - ERR;   _s127_marker 'claude,codex')"
+_S127_FOUR="$(trap - ERR;  _s127_marker 'claude,gemini,codex,opencode')"
+_S127_DEF="$(trap - ERR;   _s127_marker '')"
+check "§127(1) a single agent is recorded as a one-element ARRAY, and the marker still parses (got: $_S127_ONE)" \
+    bash -c '[ "$1" = "[\"claude\"]" ]' -- "$_S127_ONE"
+check "§127(2) a combo records every agent in SANDY_AGENT order, which is also pane order (got: $_S127_TWO)" \
+    bash -c '[ "$1" = "[\"claude\", \"codex\"]" ]' -- "$_S127_TWO"
+check "§127(3) a four-agent combo round-trips (got: $_S127_FOUR)" \
+    bash -c '[ "$1" = "[\"claude\", \"gemini\", \"codex\", \"opencode\"]" ]' -- "$_S127_FOUR"
+check "§127(4) an unset SANDY_AGENT records the resolved default rather than an empty list (got: $_S127_DEF)" \
+    bash -c '[ "$1" = "[\"claude\"]" ]' -- "$_S127_DEF"
+check "§127(4b) the four inputs produced three distinct outputs (mutation: a composer hardcoding [\"claude\"] passes 1 and 4 and fails here)" \
+    bash -c '[ "$(printf "%s\n%s\n%s\n%s\n" "$1" "$2" "$3" "$4" | sort -u | grep -c .)" -eq 3 ]' \
+    -- "$_S127_ONE" "$_S127_TWO" "$_S127_FOUR" "$_S127_DEF"
+
+# IFS is set to ',' to split the combo. Leaking it would silently corrupt every
+# later unquoted expansion in the launch -- a failure that would surface far
+# away from its cause.
+_S127_IFS="$(
+    trap - ERR
+    set +e
+    ( sandy_full_version() { echo x; }
+      _sandy_egress_mode=p; SANDY_WORKSPACE=/w; _sandy_session_nonce=n
+      _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
+      CRED_MODE=none; _sandy_relay_slot=absent; _sandy_relay_json=false
+      _sandy_session_file="$_S127_DIR/m2.json"; unset SANDY_HANDOFF_RELAY
+      SANDY_AGENT="claude,codex"
+      _before="$IFS"
+      . "$_S127_DIR/marker.sh" >/dev/null 2>&1
+      [ "$IFS" = "$_before" ] && echo RESTORED || echo "LEAKED" ) 2>/dev/null
+)"
+check "§127(5a) IFS is restored after splitting the combo (a leak would corrupt later word-splitting far from its cause; got: $_S127_IFS)" \
+    bash -c '[ "$1" = "RESTORED" ]' -- "$_S127_IFS"
+
+# --- --print-state reads it back -------------------------------------------
+_S127_PSH="$_S127_DIR/home"; mkdir -p "$_S127_PSH/sandboxes"
+_s127_sb() {   # _s127_sb <name> [agents-json]
+    local d="$_S127_PSH/sandboxes/$1"; mkdir -p "$d"
+    printf '{"workspace_path":"/nonexistent/%s"}\n' "$1" > "$d/WORKSPACE.json"
+    [ -n "${2:-}" ] && printf '{\n  "schema": 1,\n  "cross_session_inbound": null,\n  "agents": %s,\n  "handoff_relay": false\n}\n' "$2" > "$d/sandy-session.json"
+    return 0
+}
+_s127_sb a-claude '["claude"]'
+_s127_sb a-codex  '["codex"]'
+_s127_sb a-combo  '["claude","gemini","codex","opencode"]'
+_s127_sb a-never  ''
+_S127_PS="$(trap - ERR; SANDY_HOME="$_S127_PSH" "$SANDY_SCRIPT" --print-state 2>/dev/null || true)"
+# Read each case from a $SANDY_HOME containing ONLY that sandbox. The obvious
+# form -- anchoring on "name":"<fixture>" and scanning forward to "agents" --
+# cannot work: handoff{} and relay{} sit between them, so no character class
+# spans the gap. That is the trap CLAUDE.md records from §123 and §124(8), and
+# the documented fix is exactly this: separate the fixtures, not the output.
+_s127_field() {
+    local h="$_S127_DIR/one-$1"
+    rm -rf "$h"; mkdir -p "$h/sandboxes"
+    cp -R "$_S127_PSH/sandboxes/$1" "$h/sandboxes/$1"
+    SANDY_HOME="$h" "$SANDY_SCRIPT" --print-state 2>/dev/null \
+        | tr -d ' \n' | sed -n 's/.*"agents":\(\[[^]]*\]\|null\).*/\1/p' | head -1
+    return 0
+}
+
+check "§127(6) --print-state reports the recorded agent for a claude sandbox" \
+    bash -c '[ "$1" = "[\"claude\"]" ]' -- "$(trap - ERR; _s127_field a-claude)"
+check "§127(7) ...and for the CODEX sandbox — the case that shipped a per-agent component somewhere it could never work" \
+    bash -c '[ "$1" = "[\"codex\"]" ]' -- "$(trap - ERR; _s127_field a-codex)"
+check "§127(8) ...and a combo round-trips through the marker intact" \
+    bash -c '[ "$1" = "[\"claude\",\"gemini\",\"codex\",\"opencode\"]" ]' -- "$(trap - ERR; _s127_field a-combo)"
+# THE anti-inference check.
+check "§127(9) a sandbox with NO marker reports null, never \"claude\" — filling in the default would rebuild the guess this field retires, and would be invisible because most sandboxes really are claude" \
+    bash -c '[ "$1" = "null" ]' -- "$(trap - ERR; _s127_field a-never)"
+check "§127(10) agents is emitted in LIGHT mode too — a fleet poller must not pay for a du walk to learn which agent a sandbox runs" \
+    bash -c 'SANDY_HOME="$2" "$1" --print-state --light 2>/dev/null | tr -d " \n" | grep -q "\"agents\":\[\"codex\"\]"' -- "$SANDY_SCRIPT" "$_S127_PSH"
+check "§127(11) the stream contract holds with the new field (0 bytes on stderr)" \
+    bash -c 'e="$(SANDY_HOME="$2" "$1" --print-state 2>&1 >/dev/null)"; [ -z "$e" ]' -- "$SANDY_SCRIPT" "$_S127_PSH"
+# Anti-drift: the composer's key and the reader's key must be the same one.
+check "§127(12) the marker WRITES the key --print-state READS (mutation: rename either side and every sandbox reports null)" \
+    bash -c 'grep -q "\\\\n  \\\"agents\\\": %s," "$1" && grep -q "s/\\.\\*\\\"agents\\\": " "$1"' -- "$SANDY_SCRIPT"
+rm -rf "$_S127_DIR"
+unset _S127_DIR _S127_ONE _S127_TWO _S127_FOUR _S127_DEF _S127_IFS _S127_PSH _S127_PS
 
 # BEGIN SUMMARY
 # ============================================================

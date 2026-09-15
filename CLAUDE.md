@@ -305,14 +305,20 @@ Every launch writes `$SANDBOX_DIR/sandy-session.json`, bind-mounted **read-only*
   "workspace": "...", "host_uid": 501, "host_gid": 20,
   "launched_at": "2026-06-11T12:00:00Z", "session_nonce": "<hex>",
   "effort": "high", "permission_mode": "bypassPermissions",
-  "cross_session_inbound": "refuse", "handoff_relay": false,
+  "cross_session_inbound": "refuse", "agents": ["claude"], "handoff_relay": false,
   "relay": { "slot": "absent", "path": null, "disabled_by": null },
   "cred_mode": "full" }
 ```
 
 **Why it exists**: env vars are spoofable and the *absence* of a path proves nothing, so an in-container probe that distrusts env otherwise cannot tell sandy from a bare VM — a red-team run in sandy on macOS/OrbStack concluded it was *not* in sandy at all (uid 501, virtiofs mounts, and the documented `--cap-add` set all read as "ordinary VM"). Because the marker is `:ro`, a committed workspace config cannot forge it. **In-container tooling should assert on this file, not on uid/caps/env heuristics.**
 
-Fields record what sandy **pinned**, which is not necessarily what is in effect now (see the settings.json drift note above): `effort` (or `null` when unpinned), `permission_mode`, `cross_session_inbound`, `handoff_relay` (bool), `relay` (see below), and `cred_mode` (`profile|profile-access-only|oauth-token|access-token-only|full|api-key|none` — the *worst* credential actually present, so a run's blast radius is provable after the fact).
+Fields record what sandy **pinned**, which is not necessarily what is in effect now (see the settings.json drift note above): `effort` (or `null` when unpinned), `permission_mode`, `cross_session_inbound`, **`agents`** (the resolved list — see below), `handoff_relay` (bool), `relay` (see below), and `cred_mode` (`profile|profile-access-only|oauth-token|access-token-only|full|api-key|none` — the *worst* credential actually present, so a run's blast radius is provable after the fact).
+
+**`agents` — the resolved agent list (1.13.0).** `SANDY_AGENT` settles from **four** sources (env, host `~/.sandy/config`, workspace `.sandy/config`, the `--agent` flag) plus the `all` alias, so a consumer reading a workspace's own config cannot know what will launch — **a workspace naming nothing may still launch as anything**. Only the launch knows, so the launch records it, as a JSON array in `SANDY_AGENT` order (which is also pane order). `--print-state` reads it back per sandbox.
+
+It exists because nothing readable said which agent a sandbox runs: a host-side tool enrolled all 51 sandboxes on a machine and installed a per-agent component into each; one ran codex, that component speaks one agent's local protocol, and it could never work there. Directories, mounts and config all read healthy — the only symptom was a process exiting non-zero once a second into a log nobody was watching. `agent_args_files` is not a substitute: it reports operator-override *file presence* against five fixed agent keys, independent of what the sandbox runs.
+
+**Two things consumers must encode.** It is **last launch, not next launch** — a sandbox whose `SANDY_AGENT` changes reports the old value until relaunched, the same caveat `handoff_enabled` and `handoff.state` carry and that both have been misread here before. And **`null` means unknown, never `claude`**: `claude` is the default, so filling it in would rebuild the very guess this field retires, and would do so invisibly because the overwhelming majority of sandboxes really are claude. Guarded by §127, whose (9) is that check.
 
 **Tamper-evidence.** `session_nonce` is minted fresh per launch and forwarded out-of-band (printed host-side under `SANDY_VERBOSE=1`) so an external verifier can confirm the file matches the launch it expects. It is deliberately **not** exported as an env var — the read-only file is the trust root. An operator can pin it via `SANDY_SESSION_NONCE` (validated `^[A-Za-z0-9._-]{8,128}$`; invalid warns and falls back to auto-mint, never failing the launch). That knob is **env-only**, so a committed workspace config cannot pin it.
 
