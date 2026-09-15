@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.13.1-dev"
+SANDY_VERSION="1.13.1"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -6151,7 +6151,15 @@ build_claude_cmd() {
     local _tm="${SANDY_TEAMMATE_MODE-}"
     case "$_tm" in
         off|none|"") ;;
-        *) cmd+=" --teammate-mode ${_tm}" ;;
+        # printf %q, like every other agent's --model append a few lines below.
+        # This string is built to be run by `exec bash -c "$AGENT_CMD 2>&1"`, so
+        # an unquoted interpolation here is command injection, not a quoting
+        # nicety -- and SANDY_TEAMMATE_MODE is PASSIVE and has no value-aware
+        # gate, so a committed .sandy/config sets it with NO approval prompt.
+        # `gh pr checkout N && sandy` was enough: the payload ran before the
+        # agent's first turn, ahead of any prompt-injection defence and
+        # invisible to SANDY_TOOL_AUDIT, which instruments agent tool calls only.
+        *) cmd+=" --teammate-mode $(printf "%q" "$_tm")" ;;
     esac
     # SANDY_EFFORT (#effort): pin Claude Code's reasoning effort so a run isn't
     # silently at the model default. Validated host-side; a separate axis from
@@ -6178,9 +6186,14 @@ build_claude_cmd() {
         local _ch_specs="" _ch_tok _ch_dep=0
         for _ch_tok in ${SANDY_CHANNELS//,/ }; do
             [ -z "$_ch_tok" ] && continue
+            # Quoted PER TOKEN, not once over the whole string: _ch_specs is a
+            # space-separated argument list, so a single %q over it would
+            # collapse the separators and pass one argument. Same injection
+            # sink as --teammate-mode above -- SANDY_CHANNELS is passive and
+            # ungated too.
             case "$_ch_tok" in
-                plugin:*@*) _ch_specs+=" $_ch_tok"; _ch_dep=1 ;;
-                *)          _ch_specs+=" plugin:${_ch_tok}@claude-plugins-official" ;;
+                plugin:*@*) _ch_specs+=" $(printf "%q" "$_ch_tok")"; _ch_dep=1 ;;
+                *)          _ch_specs+=" $(printf "%q" "plugin:${_ch_tok}@claude-plugins-official")" ;;
             esac
         done
         [ "$_ch_dep" = 1 ] && echo "[sandy] WARN: SANDY_CHANNELS: the plugin:<name>@<marketplace> form is deprecated; use bare comma-separated names (e.g. 'telegram,discord'). Accepted for now." >&2
