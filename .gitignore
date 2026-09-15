@@ -13,6 +13,12 @@
 
 .secrets
 
+# Claude Code's per-workspace settings. Sandy WRITES this file on every launch
+# (the crossSessionInbound pin, see CLAUDE.md), so it reappears whether or not
+# anyone commits it -- and its contents are a per-machine launch artifact, not
+# project configuration.
+.claude/settings.local.json
+
 # Working docs (not for the repo)
 POLISH_AND_PUBLICITY.md
 
