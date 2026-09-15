@@ -354,14 +354,25 @@ run_case() {
     # Wait for a claude row whose socket is actually bound. sandy-handoff-sessions
     # emits '-' until the agent has created it; injecting before then would
     # measure the race, not the setting.
-    local row="" sock="" keyf="" i
-    for i in $(seq 1 30); do
+    # 120s, not the original 60s, and the elapsed time is REPORTED. Two
+    # different cases have now failed here on different runs -- once
+    # accept/non-bypass, once refuse, which is a plain bypass case -- so this is
+    # a starved cold start, not a posture-specific fault or a first-run dialog.
+    # Raising a timeout silently is how a real regression gets buried, so a bind
+    # that needed more than the old budget says so on stdout and the run stays
+    # honest about having been slow.
+    local row="" sock="" keyf="" i _waited=0
+    for i in $(seq 1 60); do
         row="$(docker exec -u "$(id -u)" "$c" sandy-handoff-sessions 2>/dev/null | awk -F'\t' '$1=="claude"{print; exit}')"
         sock="$(printf '%s' "$row" | awk -F'\t' '{print $5}')"
         keyf="$(printf '%s' "$row" | awk -F'\t' '{print $6}')"
         [ -n "$sock" ] && [ "$sock" != "-" ] && [ -n "$keyf" ] && [ "$keyf" != "-" ] && break
         sleep 2
+        _waited=$((_waited + 2))
     done
+    if [ "$_waited" -gt 60 ]; then
+        echo "    -- [$label] NOTE: the socket bound only after ${_waited}s, past the original 60s budget --"
+    fi
     ck "[$label] a claude session exposes a bound socket and a key file" \
        "[ -n \"$sock\" ] && [ \"$sock\" != '-' ] && [ -n \"$keyf\" ] && [ \"$keyf\" != '-' ]"
     if [ -z "$sock" ] || [ "$sock" = "-" ]; then
@@ -379,11 +390,23 @@ run_case() {
         # non-bypass receiver has no hasTrustDialogAccepted entry while a
         # bypass one never needs it. That is a HYPOTHESIS for the
         # accept/non-bypass case, not a finding; the dump settles it.
-        echo "    -- [$label] no bound socket after 60s; pane dump follows --"
-        docker exec "$c" tmux capture-pane -p -t sandy.0 2>/dev/null \
+        echo "    -- [$label] no bound socket after ${_waited}s; diagnostics follow --"
+        # -u AND -e HOME. `docker exec` with no -u runs as ROOT, whose HOME is
+        # /root on the read-only rootfs, and it cannot reach the tmux server
+        # socket owned by the workspace uid -- so the first version of this dump
+        # printed "<pane capture failed>" and told us nothing. Same trap
+        # CLAUDE.md records for `sandy --exec`; every other docker exec in this
+        # harness already passes -u.
+        echo "    -- [$label] pane 0 --"
+        docker exec -u "$(id -u)" -e HOME=/home/claude "$c" tmux capture-pane -p -t sandy.0 2>&1 \
             | sed 's/^/          | /' || echo "          | <pane capture failed>"
-        echo "    -- [$label] ~/.claude.json (dialog state lives here) --"
-        docker exec -u "$(id -u)" "$c" sh -c 'cut -c1-600 "$HOME/.claude.json"' 2>/dev/null \
+        echo "    -- [$label] is the agent process even alive? --"
+        docker exec -u "$(id -u)" "$c" sh -c 'ps -o pid=,etime=,args= -A 2>/dev/null | grep -v grep | grep -i claude | head -5' 2>&1 \
+            | sed 's/^/          | /' || echo "          | <no claude process>"
+        # Targeted keys only. Printing the head of the file buried the answer
+        # under a screenful of tipsHistory on the first attempt.
+        echo "    -- [$label] .claude.json dialog/trust state --"
+        docker exec -u "$(id -u)" "$c" sh -c 'for k in hasCompletedOnboarding theme hasTrustDialogAccepted bypassPermissionsModeAccepted projects; do printf "%s: " "$k"; grep -o "\"$k\"[^,]*" "$HOME/.claude.json" 2>/dev/null | head -1 || true; echo; done' 2>&1 \
             | sed 's/^/          | /' || echo "          | <unreadable>"
         echo "    -- [$label] sandy-handoff-sessions rows --"
         docker exec -u "$(id -u)" "$c" sandy-handoff-sessions 2>&1 \
