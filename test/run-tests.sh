@@ -14142,14 +14142,18 @@ if ! command -v ssh-keygen >/dev/null 2>&1; then
     skip "§132 needs ssh-keygen"
 else
 _S132_DIR="$(cd "$(mktemp -d)" && pwd -P)"
-awk '/^    # R7a \(1\.14\.0\): stage a FILTERED copy of/{f=1} f{print} /^        unset _s_f _s_k _s_keys _s_staged _s_old_ifs$/{print "    fi"; exit}' \
+# Extraction starts at the MODE GATE, not at the staging block, so the checks
+# below exercise "does this mode stage at all" and not only "what does staging
+# copy". Two closers are appended: the inner `if [ -d ~/.ssh ]` and the outer
+# `if [ "$_sandy_ssh_stage" = true ]`.
+awk '/^_sandy_ssh_stage=false$/{f=1} f{print} /^        unset _s_f _s_k _s_keys _s_staged _s_old_ifs$/{print "    fi"; print "fi"; exit}' \
     "$SANDY_SCRIPT" > "$_S132_DIR/stage.sh"
-check "§132(pre) the staging block was extracted and parses (mutation: a rename empties it and every check below goes vacuous)" \
-    bash -c 'bash -n "$1/stage.sh" && grep -q "SSH_STAGE_TMPDIR" "$1/stage.sh" && grep -q "SANDY_SSH_KEYS" "$1/stage.sh"' -- "$_S132_DIR"
+check "§132(pre) the mode gate + staging block were extracted and parse (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'bash -n "$1/stage.sh" && grep -q "_sandy_ssh_stage" "$1/stage.sh" && grep -q "SSH_STAGE_TMPDIR" "$1/stage.sh" && grep -q "SANDY_SSH_KEYS" "$1/stage.sh"' -- "$_S132_DIR"
 
 # Builds a realistic ~/.ssh, runs sandy's own staging block, and reports what
 # landed: one "F=<name>" per staged file, the mount flag, and any warnings.
-_s132_stage() {   # _s132_stage <SANDY_SSH_KEYS> <SANDY_SUSPICIOUS>
+_s132_stage() {   # _s132_stage <SANDY_SSH_KEYS> <SANDY_SUSPICIOUS> [SANDY_SSH=agent]
     (
         trap - ERR; set +e
         d="$(cd "$(mktemp -d)" && pwd -P)"
@@ -14172,19 +14176,34 @@ _s132_stage() {   # _s132_stage <SANDY_SSH_KEYS> <SANDY_SUSPICIOUS>
         warn() { printf 'W=%s\n' "$*"; }
         info() { :; }
         RUN_FLAGS=(); SSH_STAGE_TMPDIR=""
-        SANDY_SSH_KEYS="$1"; SANDY_SUSPICIOUS="$2"
+        SANDY_SSH_KEYS="$1"; SANDY_SUSPICIOUS="$2"; SANDY_SSH="${3:-agent}"
         export HOME
         . "$_S132_DIR/stage.sh"
         # `ls -A`, not `ls`. The traversal fixture lands a DOTFILE (.bashrc), and
         # a plain `ls` omits it -- so (6b) reported "nothing escaped" while the
         # file was sitting in the staged dir. Second vacuity found in the same
         # check by the same mutation; the first was a missing fixture file.
-        for _n in $(cd "$SSH_STAGE_TMPDIR" 2>/dev/null && ls -A 2>/dev/null); do printf 'F=%s\n' "$_n"; done
-        case "${RUN_FLAGS[1]:-}" in
-            "$SSH_STAGE_TMPDIR:/tmp/host-ssh:ro") printf 'MOUNT=staged\n' ;;
-            "$HOME/.ssh:"*)                       printf 'MOUNT=raw-home-ssh\n' ;;
-            *)                                    printf 'MOUNT=other\n' ;;
-        esac
+        # The -n guard is load-bearing. When nothing is staged SSH_STAGE_TMPDIR
+        # is EMPTY, `cd ""` silently fails, and `ls -A` then lists the CURRENT
+        # directory -- so (8) reported the whole repo as "staged files". An empty
+        # variable turning a scoped listing into a listing of the cwd; third
+        # vacuity of this shape found in this section, and the only case that
+        # could expose it is the one that stages nothing.
+        if [ -n "$SSH_STAGE_TMPDIR" ]; then
+            for _n in $(cd "$SSH_STAGE_TMPDIR" 2>/dev/null && ls -A 2>/dev/null); do printf 'F=%s\n' "$_n"; done
+        fi
+        # SCAN every flag; do not index. The extraction now also carries the
+        # known_hosts mount, so the staged mount is no longer at a fixed
+        # position -- indexing RUN_FLAGS[1] reported the wrong thing the moment
+        # the gate moved.
+        _m=none
+        for _fl in "${RUN_FLAGS[@]:-}"; do
+            case "$_fl" in
+                ("$SSH_STAGE_TMPDIR:/tmp/host-ssh:ro") [ -n "$SSH_STAGE_TMPDIR" ] && _m=staged ;;
+                ("$HOME/.ssh:"*)                       _m=raw-home-ssh ;;
+            esac
+        done
+        printf 'MOUNT=%s\n' "$_m"
         rm -rf "$d" "$SSH_STAGE_TMPDIR"
     ) 2>/dev/null
     return 0
@@ -14235,8 +14254,21 @@ check "§132(6a) a path-shaped entry is refused — the value is privileged but 
 check "§132(6b) ...and nothing from outside ~/.ssh is staged" \
     bash -c '! printf "%s\n" "$1" | grep -q "^F=.*bashrc"' -- "$_S132_PATH"
 
+# The mode gate. SANDY_SSH_KEYS is honoured in EVERY mode, because forwarding
+# the agent and staging key material are orthogonal -- the flag used to bundle
+# them, so a workspace whose real need is `ssh -i` had to enable a relay it has
+# no use for and that may be dead anyway (#288).
+_S132_TOKKEY="$(trap - ERR; _s132_stage 'id_wanted' 0 token)"
+_S132_TOKNONE="$(trap - ERR; _s132_stage '' 0 token)"
+check "§132(7a) SANDY_SSH=token + an allowlist DOES stage the named key — no agent mode required, and therefore no relay" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "F=id_wanted"' -- "$_S132_TOKKEY"
+check "§132(7b) ...and still excludes everything unnamed, so the mode change did not relax the allowlist" \
+    bash -c '! printf "%s\n" "$1" | grep -qxE "F=(corp_secret|aws\.pem|gitCredentials\.csv)"' -- "$_S132_TOKKEY"
+check "§132(8) SANDY_SSH=token with NO allowlist stages NOTHING and mounts nothing — the default is byte-identical to before, including the known_hosts info-disclosure reduction (got: $(printf '%s' "$_S132_TOKNONE" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "MOUNT=none" && ! printf "%s\n" "$1" | grep -q "^F="' -- "$_S132_TOKNONE"
+
 rm -rf "$_S132_DIR"
-unset _S132_DIR _S132_DEF _S132_ONE _S132_NOPUB _S132_MISS _S132_SUSP _S132_PATH
+unset _S132_DIR _S132_DEF _S132_ONE _S132_NOPUB _S132_MISS _S132_SUSP _S132_PATH _S132_TOKKEY _S132_TOKNONE
 fi
 
 # BEGIN SUMMARY
