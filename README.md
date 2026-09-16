@@ -203,6 +203,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `GOOGLE_API_KEY` | (unset) | Google API key for Vertex AI / ADC |
 | `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for Telegram relay in multi-agent mode. `0` = first agent in `SANDY_AGENT`, `1` = second, `2` = third, `3` = fourth |
 | `SANDY_SSH` | `token` | Git auth method: `token` (gh CLI + HTTPS) or `agent` (SSH agent forwarding) |
+| `SANDY_SSH_KEYS` | (unset) | Comma-separated **filenames** under `~/.ssh` that may be staged into the container, in **any** `SANDY_SSH` mode. Default empty = **no private key material is staged**. `config`, `known_hosts` and `*.pub` come with them. Privileged tier |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Set to `false` to keep Claude Code's permission system active |
 | `SANDY_HOME` | `~/.sandy` | Sandy config/build/sandbox directory |
 | `SANDY_VERBOSE` | `0` | Verbosity: `0` quiet, `1` verbose, `2` debug, `3` full trace |
@@ -551,6 +552,17 @@ SANDY_EGRESS_STRICT=1   # in ~/.sandy/config or a workspace .sandy/config
 
 Add extra reachable hosts with `SANDY_ALLOW_HOSTS` (privileged; comma-separated `host`, `*.suffix`, or `host:port`). git-over-SSH (`SANDY_SSH=agent`) is tunneled through the proxy automatically on both platforms; on macOS, host-agent *key signing* is unavailable under the proxy (use `SANDY_SSH=token` for a fully-supported HTTPS path). A local LLM (`SANDY_LOCAL_LLM_HOST`) is forwarded through the proxy rather than an iptables hole. See `CLAUDE.md` → "Egress Proxy" for the full topology.
 
+**`SANDY_SSH=agent` no longer hands the container your whole `~/.ssh`.** Before 1.14.0 it mounted `~/.ssh` in full and copied every file into the container, agent-readable — in one measured case 35 private keys, including the operator's employer credentials and six AWS `.pem` files, in a container working on an unrelated repo. Now nothing private is staged unless you name it:
+
+```sh
+# in <project>/.sandy/config — one approval prompt, scoped to this workspace
+SANDY_SSH_KEYS=id_rsa_homelab,id_rsa_deploy
+```
+
+This works in **any** `SANDY_SSH` mode. If your workspace reaches other machines with `ssh -i` and doesn't need agent forwarding, `SANDY_SSH=token` plus an allowlist is the right combination — git over HTTPS, the specific keys you named, and no agent relay at all.
+
+`config`, `known_hosts` and `*.pub` are always staged. A name that matches no file warns rather than silently doing nothing. A named key with no `.pub` sibling gets one derived. `SANDY_SUSPICIOUS=1` forces the list empty.
+
 **macOS SSH-agent relay exposure.** Outside proxy mode, `SANDY_SSH=agent` on macOS bridges the host SSH agent into the container via a host-side TCP relay (`socat TCP-LISTEN:<port>,bind=127.0.0.1`) — Linux doesn't need this since the agent socket is bind-mounted directly. The relay is bound to `127.0.0.1` and lives only for the session, but on a multi-user Mac any local process that can reach `127.0.0.1` can connect to it and sign with your keys for as long as the session is open (the ephemeral port number is weak obscurity, not an authentication boundary). If that matters for your threat model, prefer `SANDY_SSH=token` (HTTPS via `gh auth token`), which never exposes the agent.
 
 ### macOS (Docker Desktop) — not isolated when the proxy is off
@@ -818,7 +830,9 @@ Sandy supports [Claude Code channels](https://code.claude.com/docs/en/channels) 
    ```
 4. Run `sandy` — the plugin is auto-installed, credentials are seeded, and Claude starts with the channel active
 
-To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot). If `TELEGRAM_ALLOWED_SENDERS` is omitted, sandy starts in `pairing` mode — DM your bot, then run `/telegram:access pair <code>` inside the session.
+To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot).
+
+**`TELEGRAM_ALLOWED_SENDERS` is required for the host-side relay**, which is what runs for `gemini`, `codex`, `opencode`, `grok` and every multi-agent combo. Without it the relay refuses to start, because an empty allowlist would let any Telegram user who finds your bot send keystrokes to the agent. Pairing mode is the **in-container Claude plugin only** (single-agent `claude`): there, omitting the allowlist starts `pairing` — DM your bot, then run `/telegram:access pair <code>` inside the session. The host relay has no pairing flow.
 
 ### Quick setup (Discord)
 

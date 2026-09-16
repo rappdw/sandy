@@ -7723,6 +7723,22 @@ PY
 # from the output. Print the offending bytes (truncated, control chars escaped,
 # newlines flattened) right before the check that will fail on them. Silent on a
 # clean run, so it costs nothing when the contract holds.
+#
+# THAT WAS NOT ENOUGH, and the same class bit again: §92(b) failed once on a
+# maintainer run and the bytes were gone by the time anyone looked. The inline
+# line lands in SCROLLBACK; what actually gets read and pasted is the ERRORS
+# summary at the end, which carried only the check name. The failure did not
+# reproduce afterwards, so a one-shot intermittent lost its only evidence.
+#
+# So the preview goes in the check LABEL as well, which is what the summary
+# reprints -- the `(got: ...)` convention the later sections use throughout.
+# _s92_diag is kept because it renders before the check on a live run; the label
+# is what survives being copied out of the terminal an hour later.
+_s92_pv() {   # $1=stderr file -> short, single-line, control-escaped preview
+    [ -s "$1" ] || { printf '<empty>'; return 0; }
+    printf '%s byte(s): %s' "$(wc -c < "$1" | tr -d ' ')" \
+        "$(head -c 200 "$1" | tr '\n' ' ' | cat -v)"
+}
 _s92_diag() {   # $1=stderr file  $2=label
     [ -s "$1" ] || return 0
     printf '    \033[0;33m^ %s wrote %s byte(s) to stderr: %s\033[0m\n' \
@@ -7736,7 +7752,7 @@ env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --print-schema >"$_s92a_out" 2>"$_s92a_err" || _s92a_rc=$?
 check "§92(a) --print-schema exits 0" test "$_s92a_rc" -eq 0
 _s92_diag "$_s92a_err" "§92(a) --print-schema"
-check "§92(a) --print-schema stderr is exactly 0 bytes" \
+check "§92(a) --print-schema stderr is exactly 0 bytes (got: $(_s92_pv "$_s92a_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92a_err"
 check "§92(a) --print-schema stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92a_out"
@@ -7747,7 +7763,7 @@ PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" SANDY_VERBOSE=1 \
     bash "$_S92_SANDY" --print-schema >"$_s92b_out" 2>"$_s92b_err" || _s92b_rc=$?
 check "§92(b) SANDY_VERBOSE=1 --print-schema exits 0" test "$_s92b_rc" -eq 0
 _s92_diag "$_s92b_err" "§92(b) SANDY_VERBOSE=1 --print-schema"
-check "§92(b) SANDY_VERBOSE=1 --print-schema stderr is exactly 0 bytes" \
+check "§92(b) SANDY_VERBOSE=1 --print-schema stderr is exactly 0 bytes (got: $(_s92_pv "$_s92b_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92b_err"
 check "§92(b) SANDY_VERBOSE=1 --print-schema stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92b_out"
@@ -7758,7 +7774,7 @@ env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --print-state >"$_s92c_out" 2>"$_s92c_err" || _s92c_rc=$?
 check "§92(c) --print-state (full) exits 0" test "$_s92c_rc" -eq 0
 _s92_diag "$_s92c_err" "§92(c) --print-state (full)"
-check "§92(c) --print-state (full) stderr is exactly 0 bytes" \
+check "§92(c) --print-state (full) stderr is exactly 0 bytes (got: $(_s92_pv "$_s92c_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92c_err"
 check "§92(c) --print-state (full) stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92c_out"
@@ -7769,7 +7785,7 @@ env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --print-state light >"$_s92d_out" 2>"$_s92d_err" || _s92d_rc=$?
 check "§92(d) --print-state light exits 0" test "$_s92d_rc" -eq 0
 _s92_diag "$_s92d_err" "§92(d) --print-state light"
-check "§92(d) --print-state light stderr is exactly 0 bytes" \
+check "§92(d) --print-state light stderr is exactly 0 bytes (got: $(_s92_pv "$_s92d_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92d_err"
 check "§92(d) --print-state light stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92d_out"
@@ -7883,7 +7899,7 @@ env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --validate-config "$_S92_TMP/ws92/.sandy/config" >"$_s92e_out" 2>"$_s92e_err" || _s92e_rc=$?
 check "§92(e) --validate-config (mixed fixture) exits 0" test "$_s92e_rc" -eq 0
 _s92_diag "$_s92e_err" "§92(e) --validate-config (mixed fixture)"
-check "§92(e) --validate-config (mixed fixture) stderr is exactly 0 bytes" \
+check "§92(e) --validate-config (mixed fixture) stderr is exactly 0 bytes (got: $(_s92_pv "$_s92e_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92e_err"
 check "§92(e) --validate-config (mixed fixture) stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92e_out"
@@ -7894,7 +7910,7 @@ env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --validate-config /nonexistent/s92-does-not-exist.config >"$_s92f_out" 2>"$_s92f_err" || _s92f_rc=$?
 check "§92(f) --validate-config missing-file exits 1" test "$_s92f_rc" -eq 1
 _s92_diag "$_s92f_err" "§92(f) --validate-config missing-file"
-check "§92(f) --validate-config missing-file stderr is exactly 0 bytes" \
+check "§92(f) --validate-config missing-file stderr is exactly 0 bytes (got: $(_s92_pv "$_s92f_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92f_err"
 check "§92(f) --validate-config missing-file stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92f_out"
@@ -7923,7 +7939,7 @@ env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --print-version >"$_s92h_out" 2>"$_s92h_err" || _s92h_rc=$?
 check "§92(h) --print-version exits 0" test "$_s92h_rc" -eq 0
 _s92_diag "$_s92h_err" "§92(h) --print-version"
-check "§92(h) --print-version stderr is exactly 0 bytes" \
+check "§92(h) --print-version stderr is exactly 0 bytes (got: $(_s92_pv "$_s92h_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92h_err"
 check "§92(h) --print-version stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92h_out"
@@ -7934,7 +7950,7 @@ PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" SANDY_VERBOSE=1 \
     bash "$_S92_SANDY" --print-version >"$_s92h2_out" 2>"$_s92h2_err" || _s92h2_rc=$?
 check "§92(h) SANDY_VERBOSE=1 --print-version exits 0" test "$_s92h2_rc" -eq 0
 _s92_diag "$_s92h2_err" "§92(h) SANDY_VERBOSE=1 --print-version"
-check "§92(h) SANDY_VERBOSE=1 --print-version stderr is exactly 0 bytes" \
+check "§92(h) SANDY_VERBOSE=1 --print-version stderr is exactly 0 bytes (got: $(_s92_pv "$_s92h2_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92h2_err"
 check "§92(h) SANDY_VERBOSE=1 --print-version stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92h2_out"
@@ -14008,6 +14024,331 @@ check "§130(14) a protected path pointing INSIDE \$HOME is unchanged: dangerous
 rm -rf "$_S130_DIR"
 unset _S130_DIR _S130_ESC _S130_ESC_RC _S130_ABS _S130_ABS_RC _S130_OK _S130_OK_RC
 unset _S130_PF _S130_PD _S130_NP _S130_IN
+
+# ============================================================
+echo "§131: the Telegram host relay fails CLOSED on an empty allowlist (R7b)"
+# ============================================================
+# WHY. The relay's sender gate was:
+#
+#     _is_allowed() { [ -z "$ALLOWED" ] && return 0; ... }
+#
+# An unset TELEGRAM_ALLOWED_SENDERS therefore allowed EVERYONE, and an allowed
+# message goes to `docker exec ... tmux send-keys` into a pane sandy pins to
+# bypassPermissions -- arbitrary keystrokes into a session that does not ask
+# before acting. A Telegram bot is reachable by anyone who knows its username,
+# so the only thing in the way was the bot token staying secret.
+#
+# The documentation made it worse than a bad default. README told the user that
+# an omitted allowlist meant `pairing` mode -- true of the IN-CONTAINER Claude
+# plugin, false of this HOST relay, which is what runs for gemini, codex,
+# opencode, grok and every multi-agent combo. Someone who left it unset did so
+# on the documentation's word. That is why this section also checks the README.
+#
+# Two gates, deliberately: the relay REFUSES TO START without an allowlist, and
+# _is_allowed denies on empty even if it somehow does. Starting and silently
+# dropping every message would read as "channels are broken" and get debugged as
+# a bug -- which is how a security default becomes a patch that puts the hole
+# back.
+_S131_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S131_README="$(cd "$(dirname "$SANDY_SCRIPT")" && pwd)/README.md"
+awk '/^    cat > "\$SANDY_HOME\/channel-relay.sh.new" <<.RELAY.$/{f=1;next} /^RELAY$/{f=0} f' \
+    "$SANDY_SCRIPT" > "$_S131_DIR/relay.sh"
+check "§131(pre) the relay script was extracted and parses (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'bash -n "$1/relay.sh" && grep -q "_is_allowed" "$1/relay.sh" && grep -q "TELEGRAM_ALLOWED_SENDERS" "$1/relay.sh"' -- "$_S131_DIR"
+
+# The startup guard, exercised without entering the poll loop (which would hit
+# the network). Extracted from `ALLOWED=` down to the `fi` that closes it.
+sed -n '/^ALLOWED=/,/^fi$/p' "$_S131_DIR/relay.sh" > "$_S131_DIR/guard.sh"
+# PREMISE, and not a formality: the extraction is a line RANGE, so deleting the
+# guard makes it run on to some unrelated `fi` and the checks below then measure
+# the wrong block. Verified by mutation -- with the guard removed, (1) still
+# passed and only the others failed, i.e. it was caught by accident rather than
+# by the check that names it. This turns that into a stated failure.
+check "§131(pre-b) the startup guard was extracted as its own block (mutation: delete the guard and the sed range runs on to an unrelated fi)" \
+    bash -c 'bash -n "$1/guard.sh" && grep -q "Telegram host relay requires" "$1/guard.sh" && [ "$(grep -c "^fi$" "$1/guard.sh")" = 1 ]' -- "$_S131_DIR"
+# Prints the refusal text and RETURNS the guard's own status. The status cannot
+# be captured inside: the guard ends in `exit 1`, and a sourced `exit` leaves the
+# subshell immediately, so a trailing `printf rc=$?` never runs. Same trap §130
+# hit. And `|| rc=$?` on the assignment, not `; rc=$?`, or the non-zero status
+# trips the suite's set -e before the next line.
+_s131_guard() {   # _s131_guard <allowlist-value> -> refusal text; rc = the guard's
+    (
+        trap - ERR; set +e
+        TELEGRAM_ALLOWED_SENDERS="$1"
+        . "$_S131_DIR/guard.sh"
+    ) 2>&1
+}
+_S131_EMPTY_RC=0; _S131_EMPTY="$(trap - ERR; _s131_guard '')"       || _S131_EMPTY_RC=$?
+_S131_SET_RC=0;   _S131_SET="$(trap - ERR;   _s131_guard '123456789')" || _S131_SET_RC=$?
+
+check "§131(1) the relay REFUSES TO START with an empty allowlist (got rc=$_S131_EMPTY_RC)" \
+    test "$_S131_EMPTY_RC" = 1
+check "§131(2) ...and it STARTS when one is set — the positive half, without which a guard that refused everything would satisfy (1)" \
+    test "$_S131_SET_RC" = 0
+check "§131(3) the refusal names the key to set, so it is actionable rather than just a denial" \
+    bash -c 'printf "%s\n" "$1" | grep -q "TELEGRAM_ALLOWED_SENDERS"' -- "$_S131_EMPTY"
+check "§131(4) ...and corrects the pairing claim, because the README sent people here believing an empty allowlist meant pairing" \
+    bash -c 'printf "%s\n" "$1" | grep -qi "pairing"' -- "$_S131_EMPTY"
+
+# The sender gate itself, as a second layer.
+_s131_allowed() {   # _s131_allowed <allowlist> <uid> -> allowed|denied
+    (
+        trap - ERR; set +e; set +u
+        ALLOWED="$1"
+        eval "$(sed -n '/^_is_allowed() {/,/^}$/p' "$_S131_DIR/relay.sh")"
+        if _is_allowed "$2"; then printf 'allowed\n'; else printf 'denied\n'; fi
+    ) 2>/dev/null
+    return 0
+}
+check "§131(5) _is_allowed DENIES on an empty allowlist — the second layer, so the gate holds even if the startup guard is bypassed" \
+    bash -c '[ "$1" = denied ]' -- "$(trap - ERR; _s131_allowed '' '12345')"
+check "§131(6) ...and ALLOWS a listed uid — the positive half for this layer too" \
+    bash -c '[ "$1" = allowed ]' -- "$(trap - ERR; _s131_allowed '12345,67890' '12345')"
+check "§131(7) ...including one that is not first in the list" \
+    bash -c '[ "$1" = allowed ]' -- "$(trap - ERR; _s131_allowed '12345,67890' '67890')"
+check "§131(8) ...and denies an unlisted uid" \
+    bash -c '[ "$1" = denied ]' -- "$(trap - ERR; _s131_allowed '12345,67890' '99999')"
+check "§131(9) ...and a PREFIX of a listed uid is not a match (the comma-wrapping is load-bearing)" \
+    bash -c '[ "$1" = denied ]' -- "$(trap - ERR; _s131_allowed '12345' '1234')"
+
+# Anti-drift, structural and labelled as such: the host-side launch site must
+# refuse too, so the reason appears in sandy's own output rather than only in a
+# backgrounded child's stderr.
+check "§131(10) the host-side launch site also refuses without the allowlist (structural: the behavioural half needs Docker)" \
+    bash -c 'grep -q "the host relay is NOT started without TELEGRAM_ALLOWED_SENDERS" "$1"' -- "$SANDY_SCRIPT"
+# The documentation half of the finding.
+check "§131(11) README no longer tells the reader an omitted allowlist gives pairing without saying it is plugin-only" \
+    bash -c '! grep -q "If .TELEGRAM_ALLOWED_SENDERS. is omitted, sandy starts in .pairing. mode" "$1"' -- "$_S131_README"
+
+rm -rf "$_S131_DIR"
+unset _S131_DIR _S131_EMPTY _S131_SET _S131_README _S131_EMPTY_RC _S131_SET_RC
+
+# ============================================================
+echo "§132: SANDY_SSH=agent stages an ALLOWLIST, not the whole ~/.ssh (R7a)"
+# ============================================================
+# WHY. `SANDY_SSH=agent` used to do `-v "$HOME/.ssh:/tmp/host-ssh:ro"` and the
+# entrypoint then copied every file into the container's ~/.ssh, chowned to the
+# agent uid at mode 600. Measured on the one workspace that uses this mode: 57
+# files, 35 of them PRIVATE KEYS -- the operator's employer credentials (corp
+# stash, GHE, corp-mac), six AWS .pem files, unrelated third-party keys, and a
+# gitCredentials.csv -- handed to an agent working on a home-network repo. The
+# docs described only the socket relay and never mentioned copying keys.
+#
+# TWO THINGS THAT LOOK LIKE THE FIX AND ARE NOT, both pinned by checks here:
+#
+# 1. Filtering only what the ENTRYPOINT copies. Nothing unmounts /tmp/host-ssh,
+#    the container runs as the host uid (the entrypoint gosu-drops to it), and
+#    the files are 600 owned by that uid -- so every key stays readable AT THE
+#    MOUNT for the container's life. The mount is the exposure, which is why the
+#    filtering is host-side and (1f) asserts the mount source is the staged dir.
+#
+# 2. Skipping files that LOOK like private keys (first line -----BEGIN ... PRIVATE
+#    KEY-----). gitCredentials.csv is the case that kills it: credential-shaped,
+#    no BEGIN line, waved straight through. A blocklist can only reject what its
+#    author anticipated. (1b) is that check, and it is the whole argument for
+#    default-deny in one assertion.
+#
+# NOT platform-gated. Only the agent RELAY differs by platform; this block never
+# did. On Linux the agent usually works, so nothing fails to reveal the copy --
+# quieter there, not smaller.
+#
+# The gitCredentials.csv case and the warn-on-absent-entry rule were both
+# contributed by the rapphaus-network session, which ran the real inventory.
+if ! command -v ssh-keygen >/dev/null 2>&1 || ! command -v ssh >/dev/null 2>&1; then
+    skip "§132 needs ssh and ssh-keygen"
+else
+_S132_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+# Extraction starts at the MODE GATE, not at the staging block, so the checks
+# below exercise "does this mode stage at all" and not only "what does staging
+# copy". Two closers are appended: the inner `if [ -d ~/.ssh ]` and the outer
+# `if [ "$_sandy_ssh_stage" = true ]`.
+awk '/^_sandy_ssh_stage=false$/{f=1} f{print} /^        unset _s_f _s_k _s_keys _s_staged _s_old_ifs$/{print "    fi"; print "fi"; exit}' \
+    "$SANDY_SCRIPT" > "$_S132_DIR/stage.sh"
+check "§132(pre) the mode gate + staging block were extracted and parse (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'bash -n "$1/stage.sh" && grep -q "_sandy_ssh_stage" "$1/stage.sh" && grep -q "SSH_STAGE_TMPDIR" "$1/stage.sh" && grep -q "SANDY_SSH_KEYS" "$1/stage.sh"' -- "$_S132_DIR"
+
+# Builds a realistic ~/.ssh, runs sandy's own staging block, and reports what
+# landed: one "F=<name>" per staged file, the mount flag, and any warnings.
+_s132_stage() {   # _s132_stage <SANDY_SSH_KEYS> <SANDY_SUSPICIOUS> [SANDY_SSH=agent]
+    (
+        trap - ERR; set +e
+        d="$(cd "$(mktemp -d)" && pwd -P)"
+        HOME="$d/home"; mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+        ssh-keygen -q -t ed25519 -N '' -C w -f "$HOME/.ssh/id_wanted"   >/dev/null 2>&1
+        ssh-keygen -q -t ed25519 -N '' -C c -f "$HOME/.ssh/corp_secret" >/dev/null 2>&1
+        ssh-keygen -q -t ed25519 -N '' -C n -f "$HOME/.ssh/id_nopub"    >/dev/null 2>&1
+        rm -f "$HOME/.ssh/id_nopub.pub"
+        # A macOS-shaped config: UseKeychain is Apple-fork-only and Linux
+        # OpenSSH TERMINATES on it, and an IdentityFile pointing at a key the
+        # allowlist excludes.
+        # UseKeychain is the REAL-WORLD case and is kept for documentation value.
+        # The PREMISE checks below key off SandyUnknownDirectiveProbe instead,
+        # because UseKeychain is only unknown to *some* OpenSSH builds -- see the
+        # note at (9b).
+        printf 'Host mac\n    UseKeychain yes\n    SandyUnknownDirectiveProbe yes\n    IdentityFile ~/.ssh/corp_secret\nHost x\n    User b\n' > "$HOME/.ssh/config"
+        printf 'gh ssh-rsa AAA\n' > "$HOME/.ssh/known_hosts"
+        printf 'user,token\n'     > "$HOME/.ssh/gitCredentials.csv"
+        printf -- '-----BEGIN RSA PRIVATE KEY-----\nx\n' > "$HOME/.ssh/aws.pem"
+        # A real file at the traversal target, two levels above ~/.ssh. Without
+        # it (6b) is VACUOUS: strip the path guard and the entry falls into the
+        # "no such file" branch instead of escaping, so the check passes against
+        # code that has no guard at all. Caught by mutation M5, which failed only
+        # the warn and not the containment.
+        printf 'HOST-FILE\n' > "$d/.bashrc"
+        chmod 600 "$HOME/.ssh"/* 2>/dev/null
+        warn() { printf 'W=%s\n' "$*"; }
+        info() { :; }
+        RUN_FLAGS=(); SSH_STAGE_TMPDIR=""
+        SANDY_SSH_KEYS="$1"; SANDY_SUSPICIOUS="$2"; SANDY_SSH="${3:-agent}"
+        export HOME
+        . "$_S132_DIR/stage.sh"
+        # `ls -A`, not `ls`. The traversal fixture lands a DOTFILE (.bashrc), and
+        # a plain `ls` omits it -- so (6b) reported "nothing escaped" while the
+        # file was sitting in the staged dir. Second vacuity found in the same
+        # check by the same mutation; the first was a missing fixture file.
+        # The -n guard is load-bearing. When nothing is staged SSH_STAGE_TMPDIR
+        # is EMPTY, `cd ""` silently fails, and `ls -A` then lists the CURRENT
+        # directory -- so (8) reported the whole repo as "staged files". An empty
+        # variable turning a scoped listing into a listing of the cwd; third
+        # vacuity of this shape found in this section, and the only case that
+        # could expose it is the one that stages nothing.
+        if [ -n "$SSH_STAGE_TMPDIR" ]; then
+            for _n in $(cd "$SSH_STAGE_TMPDIR" 2>/dev/null && ls -A 2>/dev/null); do printf 'F=%s\n' "$_n"; done
+        fi
+        # SCAN every flag; do not index. The extraction now also carries the
+        # known_hosts mount, so the staged mount is no longer at a fixed
+        # position -- indexing RUN_FLAGS[1] reported the wrong thing the moment
+        # the gate moved.
+        _m=none
+        for _fl in "${RUN_FLAGS[@]:-}"; do
+            case "$_fl" in
+                ("$SSH_STAGE_TMPDIR:/tmp/host-ssh:ro") [ -n "$SSH_STAGE_TMPDIR" ] && _m=staged ;;
+                ("$HOME/.ssh:"*)                       _m=raw-home-ssh ;;
+            esac
+        done
+        printf 'MOUNT=%s\n' "$_m"
+        if [ -f "$SSH_STAGE_TMPDIR/config" ]; then
+            ssh -F "$SSH_STAGE_TMPDIR/config" -G x >/dev/null 2>&1 && printf 'CFGPARSE=ok\n' || printf 'CFGPARSE=fail\n'
+            # The same config WITHOUT sandy's prepend, i.e. 1.14.0 as first shipped.
+            # Without this the check above could pass on a host OpenSSH that simply
+            # tolerates UseKeychain, proving nothing.
+            grep -v '^IgnoreUnknown \*$' "$SSH_STAGE_TMPDIR/config" > "$SSH_STAGE_TMPDIR/raw" 2>/dev/null
+            ssh -F "$SSH_STAGE_TMPDIR/raw" -G x >/dev/null 2>&1 && printf 'RAWPARSE=ok\n' || printf 'RAWPARSE=fail\n'
+            # PLACEMENT: IgnoreUnknown must sit above every Host block.
+            # awk, not `grep -n ... | head`: that is GREPM (grep dies on EPIPE
+            # under pipefail and the ERR trap aborts the run), and the arithmetic
+            # it fed would also break on a config with no Host line at all.
+            # Prints whichever token appears FIRST, which is the whole question.
+            _pl="$(awk '/^IgnoreUnknown \*$/{print "top"; exit} /^[ \t]*Host[ \t]/{print "scoped"; exit}' \
+                "$SSH_STAGE_TMPDIR/config" 2>/dev/null)"
+            printf 'PLACEMENT=%s\n' "${_pl:-none}"
+            # PREMISE for the placement rule. IgnoreUnknown is scope-sensitive to
+            # the MATCHED block, so scoping it to one Host and querying a
+            # DIFFERENT one is fatal again. Without this, the rule is asserted by
+            # a check that cannot fail on it -- comparing "top" against "inside
+            # Host *" proves nothing, because Host * matches everything and the
+            # two are indistinguishable. (Raised by rapphaus-network; their
+            # stated discriminator was "inside a specific Host block", which is
+            # only fatal when the queried host is OUTSIDE it -- measured both.)
+            printf 'Host other\n    IgnoreUnknown *\nHost x\n    SandyUnknownDirectiveProbe yes\n' > "$SSH_STAGE_TMPDIR/scoped"
+            ssh -F "$SSH_STAGE_TMPDIR/scoped" -G x >/dev/null 2>&1 \
+                && printf 'SCOPEDPREMISE=ok\n' || printf 'SCOPEDPREMISE=fail\n'
+        fi
+        rm -rf "$d" "$SSH_STAGE_TMPDIR"
+    ) 2>/dev/null
+    return 0
+}
+_S132_DEF="$(trap - ERR;  _s132_stage '' 0)"
+_S132_ONE="$(trap - ERR;  _s132_stage 'id_wanted' 0)"
+_S132_NOPUB="$(trap - ERR; _s132_stage 'id_nopub' 0)"
+_S132_MISS="$(trap - ERR; _s132_stage 'id_typo' 0)"
+_S132_SUSP="$(trap - ERR; _s132_stage 'id_wanted' 1)"
+_S132_PATH="$(trap - ERR; _s132_stage '../../.bashrc' 0)"
+
+_s132_has() { printf '%s\n' "$2" | grep -qx "F=$1"; }
+check "§132(1a) DEFAULT (no allowlist): no private key is staged at all (got: $(printf '%s' "$_S132_DEF" | tr '\n' ' '))" \
+    bash -c '! printf "%s\n" "$1" | grep -qxE "F=(id_wanted|corp_secret|id_nopub|aws\.pem)"' -- "$_S132_DEF"
+check "§132(1b) ...including gitCredentials.csv — credential-shaped with NO 'BEGIN PRIVATE KEY' line, so a content-sniff blocklist waves it through. This one assertion is the case for default-deny" \
+    bash -c '! printf "%s\n" "$1" | grep -qx "F=gitCredentials.csv"' -- "$_S132_DEF"
+check "§132(1c) ...but config IS staged — the positive half; without it a block that staged nothing would satisfy every negative above" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "F=config"' -- "$_S132_DEF"
+check "§132(1d) ...and known_hosts" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "F=known_hosts"' -- "$_S132_DEF"
+check "§132(1e) ...and public keys, which are published to servers by design and are what IdentitiesOnly matches against" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c "^F=.*\.pub$")" -ge 2 ]' -- "$_S132_DEF"
+check "§132(1f) the MOUNT SOURCE is the staged dir, not \$HOME/.ssh — filtering only the entrypoint copy would leave every key readable at the mount for the container's life (got: $(printf '%s\n' "$_S132_DEF" | grep '^MOUNT='))" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "MOUNT=staged"' -- "$_S132_DEF"
+
+check "§132(2a) an allowlisted key IS staged" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "F=id_wanted"' -- "$_S132_ONE"
+check "§132(2b) ...and an unlisted employer-style key is NOT, even with the allowlist non-empty" \
+    bash -c '! printf "%s\n" "$1" | grep -qx "F=corp_secret"' -- "$_S132_ONE"
+check "§132(2c) ...nor an unlisted .pem" \
+    bash -c '! printf "%s\n" "$1" | grep -qx "F=aws.pem"' -- "$_S132_ONE"
+
+check "§132(3a) an allowlisted key with no .pub sibling is staged" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "F=id_nopub"' -- "$_S132_NOPUB"
+check "§132(3b) ...and its .pub is DERIVED — with IdentitiesOnly yes, a missing public half breaks identification even when the agent holds the key" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "F=id_nopub.pub"' -- "$_S132_NOPUB"
+
+check "§132(4) an allowlist entry matching NO file WARNS — a silent no-op there looks exactly like the mechanism working, which is the failure mode this series keeps finding (got: $(printf '%s' "$_S132_MISS" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^W=.*no such file.*id_typo"' -- "$_S132_MISS"
+
+check "§132(5a) SANDY_SUSPICIOUS=1 overrides an opt-in: the named key is NOT staged" \
+    bash -c '! printf "%s\n" "$1" | grep -qx "F=id_wanted"' -- "$_S132_SUSP"
+check "§132(5b) ...and says so rather than silently ignoring the setting" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^W=SANDY_SUSPICIOUS=1"' -- "$_S132_SUSP"
+
+check "§132(6a) a path-shaped entry is refused — the value is privileged but still operator-typed, and a / or .. would reach outside ~/.ssh" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^W=.*must be a filename"' -- "$_S132_PATH"
+check "§132(6b) ...and nothing from outside ~/.ssh is staged" \
+    bash -c '! printf "%s\n" "$1" | grep -q "^F=.*bashrc"' -- "$_S132_PATH"
+
+# The mode gate. SANDY_SSH_KEYS is honoured in EVERY mode, because forwarding
+# the agent and staging key material are orthogonal -- the flag used to bundle
+# them, so a workspace whose real need is `ssh -i` had to enable a relay it has
+# no use for and that may be dead anyway (#288).
+_S132_TOKKEY="$(trap - ERR; _s132_stage 'id_wanted' 0 token)"
+_S132_TOKNONE="$(trap - ERR; _s132_stage '' 0 token)"
+check "§132(7a) SANDY_SSH=token + an allowlist DOES stage the named key — no agent mode required, and therefore no relay" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "F=id_wanted"' -- "$_S132_TOKKEY"
+check "§132(7b) ...and still excludes everything unnamed, so the mode change did not relax the allowlist" \
+    bash -c '! printf "%s\n" "$1" | grep -qxE "F=(corp_secret|aws\.pem|gitCredentials\.csv)"' -- "$_S132_TOKKEY"
+# The staged ~/.ssh/config. Found in the field on the 1.14.0 candidate: the host
+# config was copied verbatim, and a macOS one carries `UseKeychain`, which Linux
+# OpenSSH does not warn about -- it TERMINATES. Config parsing happens before
+# anything else, so it killed EVERY ssh invocation regardless of flags. The
+# workspace went from working to 100% broken SSH.
+check "§132(9a) the staged config carries a wildcard IgnoreUnknown — naming the offenders instead would be a blocklist, tolerating only what its author knew about; the same argument that made the key staging an allowlist" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "CFGPARSE=ok"' -- "$_S132_DEF"
+# The premise directive is SYNTHETIC on purpose, and this is the second time this
+# check has had to learn the lesson it exists to teach. It first used UseKeychain
+# -- the real-world case -- and passed in CI and in-container, then FAILED on the
+# maintainer's macOS host: Apple's OpenSSH fork KNOWS UseKeychain, so the raw
+# config parsed there and the premise was false on exactly the platform whose
+# configs cause the problem. These checks run HOST-side; the property is about the
+# CONTAINER's Linux OpenSSH. A directive no OpenSSH knows is unknown by
+# construction, so the premise holds on every host.
+#
+# Honest limit: host-side, this proves "sandy prepends IgnoreUnknown *, and that
+# makes an unknown directive non-fatal on THIS OpenSSH". The container-side claim
+# rests on that plus (9d)/(9e). A real macOS-config-in-a-Linux-container check
+# needs Docker and lives in the acceptance harnesses.
+check "§132(9b) ...and the SAME config without it FAILS to parse — without this the check above would pass on any OpenSSH that tolerates the directive, proving nothing (got: $(printf '%s\n' "$_S132_DEF" | grep -E '^(CFG|RAW)PARSE='  | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "RAWPARSE=fail"' -- "$_S132_DEF"
+check "§132(9d) IgnoreUnknown is placed ABOVE every Host block, so a later edit cannot scope it to one" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "PLACEMENT=top"' -- "$_S132_DEF"
+check "§132(9e) ...and scoping it to a non-matching Host block IS fatal — the premise that makes (9d) load-bearing. Comparing top against 'inside Host *' proves nothing: Host * matches everything, so both parse and the rule cannot fail" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "SCOPEDPREMISE=fail"' -- "$_S132_DEF"
+check "§132(9c) an IdentityFile in the staged config naming an UNSTAGED key is warned about — ssh would report a missing identity, not 'sandy did not stage this', so a silent reference looks like the mechanism working" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^W=.*IdentityFile.*NOT staged.*corp_secret"' -- "$_S132_DEF"
+
+check "§132(8) SANDY_SSH=token with NO allowlist stages NOTHING and mounts nothing — the default is byte-identical to before, including the known_hosts info-disclosure reduction (got: $(printf '%s' "$_S132_TOKNONE" | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "MOUNT=none" && ! printf "%s\n" "$1" | grep -q "^F="' -- "$_S132_TOKNONE"
+
+rm -rf "$_S132_DIR"
+unset _S132_DIR _S132_DEF _S132_ONE _S132_NOPUB _S132_MISS _S132_SUSP _S132_PATH _S132_TOKKEY _S132_TOKNONE
+fi
 
 # BEGIN SUMMARY
 # ============================================================

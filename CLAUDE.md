@@ -155,7 +155,7 @@ Four sources, in order: `$HOME/.sandy/config`, `$HOME/.sandy/.secrets`, `$WORK_D
 
 - **Privileged-only keys** — from a passive source these trigger a one-time per-workspace approval prompt showing the exact `KEY=VALUE` set:
   <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-  `SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`, `SANDY_HANDOFF_RELAY`, `ANTHROPIC_PROFILE`
+  `SANDY_SSH`, `SANDY_SSH_KEYS`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`, `SANDY_HANDOFF_RELAY`, `ANTHROPIC_PROFILE`
   <!-- END AUTOGEN:privileged-key-list -->
 
   A malicious committed `.sandy/config` could otherwise disable isolation or exfiltrate credentials. Approvals persist to `$SANDY_HOME/approvals/passive-<workspace-hash>.list` (first line a sha256 of the sorted set); any edit that changes a privileged key re-prompts. Revoke by deleting that file. **Headless (`-p`) and non-TTY stdin fail closed** — the keys are dropped with a pointer to launch interactively once.
@@ -213,6 +213,12 @@ Sandbox subdirs mount as: `claude/`→`~/.claude`, `gemini/`→`~/.gemini`, `cod
 | Provider choice via own config | — | — | — | yes | — | — |
 
 The Telegram host-side relay (`$SANDY_HOME/channel-relay.sh`) is an agent-agnostic long-polling bridge injecting via `docker exec … tmux send-keys`; `SANDY_CHANNEL_TARGET_PANE=0|1|2` picks the pane.
+
+**The host relay REQUIRES `TELEGRAM_ALLOWED_SENDERS` and refuses to start without it (R7b, 1.13.4).** Its sender gate used to `return 0` on an empty allowlist, so an unset value allowed **everyone** — and what an allowed message buys is `tmux send-keys` into a pane sandy pins to `bypassPermissions`, i.e. arbitrary keystrokes into a session that does not ask before acting. A Telegram bot is reachable by anyone who knows its username, so the only thing in the way was the bot token staying secret.
+
+**The documentation made it worse than a bad default.** README told the reader that an omitted allowlist meant `pairing` mode. That is true of the **in-container Claude plugin** and false of the **host relay** — which is what runs for gemini, codex, opencode, grok and every multi-agent combo. Someone who left it unset did so on the documentation's word, which is why the fix corrects the README as well as the code, and why §131 checks the README.
+
+Two gates, deliberately: the relay **refuses to start**, and `_is_allowed` denies on empty even if it somehow does. Starting-and-silently-dropping was rejected — it reads as "channels are broken" and gets debugged as a bug, which is how a security default becomes a patch that restores the hole. The refusal is printed host-side too, so the reason lands in sandy's own launch output rather than only a backgrounded child's stderr. Discord has no host relay (plugin only), so it is unaffected. Guarded by §131.
 
 **Pane identity: never assume `pane_index == spawn order`.** In the 4-agent grid the last split re-splits pane 0, and tmux inserts the new index *after* the pane it split — so `sandy.1` holds the **fourth** agent, `sandy.2` the second, `sandy.3` the third. The on-screen layout is still correct. Sandy sets a `@sandy_pane_agent` **tmux pane option** on every pane unconditionally; it drives the border label and is the robust identity source (a scrollback marker gets wiped when a live agent redraws, and `select-pane -T` is OSC-2-clobberable). Consequence: `SANDY_CHANNEL_TARGET_PANE=1|2|3` against a 4-agent combo does not reliably route to "the Nth agent in `SANDY_AGENT`" — a separate, unfixed gap.
 
@@ -430,6 +436,35 @@ The egress proxy closes that gap and works **identically on Linux and macOS** be
 **SSH interaction.** Under `--internal`, git-over-SSH tunnels through CONNECT (the entrypoint injects `Host * ProxyCommand socat - PROXY:<proxy-ip>:%h:%p,proxyport=3128`). On Linux the agent socket is a direct bind mount so signing keeps working; on **macOS** the agent socket relies on a host TCP relay the sidecar blocks, so agent *signing* is unavailable in proxy mode — sandy warns and suggests `SANDY_SSH=token`.
 
 **`SANDY_SSH` modes**: `token` (default, `gh auth token` over HTTPS) or `agent` (Linux: direct socket mount; macOS: host-side `socat`/`python3` TCP relay plus an in-container `socat` relay).
+
+### `SANDY_SSH=agent` stages an allowlist, never the whole `~/.ssh` (R7a, 1.14.0)
+
+`agent` used to mount `$HOME/.ssh` **whole** at `/tmp/host-ssh:ro` and copy every file into the container's `~/.ssh`, chowned to the agent uid at mode 600. Measured on the only workspace using this mode: **57 files, 35 of them private keys** — the operator's *employer* credentials (corp stash, GHE, corp-mac), six AWS `.pem` files, unrelated third-party keys, and a `gitCredentials.csv` — handed to an agent working on a home-network repo. The docs described only the socket relay and never mentioned copying keys, so nobody had reason to look.
+
+**`SANDY_SSH_KEYS`** (privileged, default empty) names filenames under `~/.ssh` that may be staged. By default **no private key material reaches the container at all**; `config`, `known_hosts` and `*.pub` still do. Set it per-workspace in `.sandy/config` and the privileged tier turns it into one approval prompt for that workspace, so it can't be enabled fleet-wide by accident or by a cloned repo.
+
+**It is honoured in every `SANDY_SSH` mode, because forwarding the agent and staging key material are orthogonal.** The flag used to bundle them: the only way to get key files was `agent`, so a workspace whose real need is `ssh -i` to other machines had to enable a relay it has no use for — and which may be dead anyway (#288).
+
+| | stages key material | forwards the agent |
+|---|---|---|
+| `token` + `SANDY_SSH_KEYS=…` | yes | no relay at all |
+| `agent` + no keys | no | yes — the mode finally meaning what its name says |
+| `agent` + keys | yes | yes |
+
+**Token mode with no allowlist is byte-identical to before**, including the `known_hosts` info-disclosure reduction: git over HTTPS never needs it, so it stays unmounted. Once the operator has asked for keys, host verification needs it and withholding it would only train people into `StrictHostKeyChecking=no`.
+
+**Two designs that look like the fix and are not**, both pinned by §132:
+
+- **Filtering only what the entrypoint copies.** Nothing unmounts `/tmp/host-ssh`, the container runs as the host uid (the entrypoint `gosu`-drops to it), and the files are 600 owned by that uid — so every key stayed readable *at the mount* for the container's life. **The mount is the exposure**, which is why the filtering is host-side into an ephemeral staged dir. §132(1f) asserts the mount source.
+- **Skipping files that look like private keys** (first line `-----BEGIN … PRIVATE KEY-----`). `gitCredentials.csv` is the case that kills it: credential-shaped, no `BEGIN` line, waved straight through. A blocklist can only reject what its author anticipated; an allowlist excludes what nobody thought of. §132(1b) is that one assertion, and it is the whole argument for default-deny.
+
+**Not platform-gated, and that matters for how it reads.** Only the agent *relay* differs by platform. On Linux the agent usually **works**, so nothing fails to reveal the copy — quieter there, not smaller.
+
+**An allowlist entry matching no file WARNS**, naming it. A silent no-op there looks exactly like the mechanism working, which is the failure mode this review series keeps finding. A named key with no `.pub` sibling gets one derived with `ssh-keygen -y` (a passphrase-protected key warns and is staged without it) — with `IdentitiesOnly yes`, the public half is what ssh needs to know which identity to offer. `SANDY_SUSPICIOUS=1` forces the allowlist empty, overriding an opt-in, same posture as the connector override.
+
+**The staged `~/.ssh/config` gets a wildcard `IgnoreUnknown` prepended.** The container is Linux; the host may not be. A macOS config routinely carries `UseKeychain`, which is Apple's OpenSSH fork only — and Linux OpenSSH does not warn and continue, it **terminates**. Parsing happens before anything else, so that kills *every* `ssh` invocation regardless of flags: explicit `-i`, `-o IdentitiesOnly=yes`, git-over-ssh, all of it. Found in the field on the 1.14.0 candidate, where the affected workspace went from working to 100% broken SSH. Naming the offenders (`IgnoreUnknown UseKeychain`) also works and is the **wrong shape** — a blocklist tolerating only what its author knew about, the same mistake the key staging avoids by being an allowlist. The wildcard is host-OpenSSH-agnostic by construction; the cost is that a genuine typo is ignored rather than reported, acceptable for a copy nobody edits in-container. An `IdentityFile` in the staged config naming a key the allowlist excluded is **warned about**, for the same reason an absent allowlist entry is: ssh would report a missing identity, not "sandy did not stage this".
+
+**Honest limit**: agent forwarding only ever covered keys loaded in the host agent, and on macOS the relay can be dead entirely (**#288** — it dies with the launching process, so every later `--attach` gets a frozen port and no listener). So the allowlist is not a fallback for a broken relay; it is the supported way to give a workspace the specific keys it needs. Guarded by §132.
 
 ## Protected Files
 
