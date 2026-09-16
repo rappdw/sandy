@@ -14214,6 +14214,25 @@ _s132_stage() {   # _s132_stage <SANDY_SSH_KEYS> <SANDY_SUSPICIOUS> [SANDY_SSH=a
             # tolerates UseKeychain, proving nothing.
             grep -v '^IgnoreUnknown \*$' "$SSH_STAGE_TMPDIR/config" > "$SSH_STAGE_TMPDIR/raw" 2>/dev/null
             ssh -F "$SSH_STAGE_TMPDIR/raw" -G x >/dev/null 2>&1 && printf 'RAWPARSE=ok\n' || printf 'RAWPARSE=fail\n'
+            # PLACEMENT: IgnoreUnknown must sit above every Host block.
+            # awk, not `grep -n ... | head`: that is GREPM (grep dies on EPIPE
+            # under pipefail and the ERR trap aborts the run), and the arithmetic
+            # it fed would also break on a config with no Host line at all.
+            # Prints whichever token appears FIRST, which is the whole question.
+            _pl="$(awk '/^IgnoreUnknown \*$/{print "top"; exit} /^[ \t]*Host[ \t]/{print "scoped"; exit}' \
+                "$SSH_STAGE_TMPDIR/config" 2>/dev/null)"
+            printf 'PLACEMENT=%s\n' "${_pl:-none}"
+            # PREMISE for the placement rule. IgnoreUnknown is scope-sensitive to
+            # the MATCHED block, so scoping it to one Host and querying a
+            # DIFFERENT one is fatal again. Without this, the rule is asserted by
+            # a check that cannot fail on it -- comparing "top" against "inside
+            # Host *" proves nothing, because Host * matches everything and the
+            # two are indistinguishable. (Raised by rapphaus-network; their
+            # stated discriminator was "inside a specific Host block", which is
+            # only fatal when the queried host is OUTSIDE it -- measured both.)
+            printf 'Host other\n    IgnoreUnknown *\nHost x\n    UseKeychain yes\n' > "$SSH_STAGE_TMPDIR/scoped"
+            ssh -F "$SSH_STAGE_TMPDIR/scoped" -G x >/dev/null 2>&1 \
+                && printf 'SCOPEDPREMISE=ok\n' || printf 'SCOPEDPREMISE=fail\n'
         fi
         rm -rf "$d" "$SSH_STAGE_TMPDIR"
     ) 2>/dev/null
@@ -14284,6 +14303,10 @@ check "§132(9a) the staged config carries a wildcard IgnoreUnknown — naming t
     bash -c 'printf "%s\n" "$1" | grep -qx "CFGPARSE=ok"' -- "$_S132_DEF"
 check "§132(9b) ...and the SAME config without it FAILS to parse — without this the check above would pass on any OpenSSH that merely tolerates UseKeychain, proving nothing (got: $(printf '%s\n' "$_S132_DEF" | grep -E '^(CFG|RAW)PARSE='  | tr '\n' ' '))" \
     bash -c 'printf "%s\n" "$1" | grep -qx "RAWPARSE=fail"' -- "$_S132_DEF"
+check "§132(9d) IgnoreUnknown is placed ABOVE every Host block, so a later edit cannot scope it to one" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "PLACEMENT=top"' -- "$_S132_DEF"
+check "§132(9e) ...and scoping it to a non-matching Host block IS fatal — the premise that makes (9d) load-bearing. Comparing top against 'inside Host *' proves nothing: Host * matches everything, so both parse and the rule cannot fail" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "SCOPEDPREMISE=fail"' -- "$_S132_DEF"
 check "§132(9c) an IdentityFile in the staged config naming an UNSTAGED key is warned about — ssh would report a missing identity, not 'sandy did not stage this', so a silent reference looks like the mechanism working" \
     bash -c 'printf "%s\n" "$1" | grep -q "^W=.*IdentityFile.*NOT staged.*corp_secret"' -- "$_S132_DEF"
 
