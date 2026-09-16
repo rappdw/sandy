@@ -14185,7 +14185,14 @@ _s132_stage() {   # _s132_stage <SANDY_SSH_KEYS> <SANDY_SUSPICIOUS> [SANDY_SSH=a
         # The PREMISE checks below key off SandyUnknownDirectiveProbe instead,
         # because UseKeychain is only unknown to *some* OpenSSH builds -- see the
         # note at (9b).
-        printf 'Host mac\n    UseKeychain yes\n    SandyUnknownDirectiveProbe yes\n    IdentityFile ~/.ssh/corp_secret\nHost x\n    User b\n' > "$HOME/.ssh/config"
+        # The quoted IdentityFile with a SPACE is a real line from the field
+        # (a macOS "~/Library/Application Support/..." path). It is here because
+        # the naive extraction -- awk '{print $2}' -- splits it and yields the
+        # literal word `Application` as the basename. sandy does not do that
+        # (`IFS= read -r` keeps the line whole, `${v##*/}` takes everything after
+        # the last slash), but it held by construction rather than by design, and
+        # a future rewrite of this extractor would not know that.
+        printf 'Host mac\n    UseKeychain yes\n    SandyUnknownDirectiveProbe yes\n    IdentityFile ~/.ssh/corp_secret\n    IdentityFile "~/Lib Dir/sub/nvsync.key"\n    IdentityFile ~/.ssh/corp_secret\nHost x\n    User b\n' > "$HOME/.ssh/config"
         printf 'gh ssh-rsa AAA\n' > "$HOME/.ssh/known_hosts"
         printf 'user,token\n'     > "$HOME/.ssh/gitCredentials.csv"
         printf -- '-----BEGIN RSA PRIVATE KEY-----\nx\n' > "$HOME/.ssh/aws.pem"
@@ -14340,6 +14347,10 @@ check "§132(9d) IgnoreUnknown is placed ABOVE every Host block, so a later edit
     bash -c 'printf "%s\n" "$1" | grep -qx "PLACEMENT=top"' -- "$_S132_DEF"
 check "§132(9e) ...and scoping it to a non-matching Host block IS fatal — the premise that makes (9d) load-bearing. Comparing top against 'inside Host *' proves nothing: Host * matches everything, so both parse and the rule cannot fail" \
     bash -c 'printf "%s\n" "$1" | grep -qx "SCOPEDPREMISE=fail"' -- "$_S132_DEF"
+check "§132(9f) a QUOTED IdentityFile containing a space is named by its basename, not split — the naive awk extraction yields the literal word 'Application' from a real macOS path (got: $(printf '%s\n' "$_S132_DEF" | grep '^W=.*NOT staged' | head -1))" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^W=.*NOT staged.*nvsync\.key" && ! printf "%s\n" "$1" | grep -q "^W=.*NOT staged.*Lib"' -- "$_S132_DEF"
+check "§132(9g) ...and a repeated IdentityFile is named once, not twice" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep "^W=.*NOT staged" | grep -o "corp_secret" | wc -l | tr -d " ")" = 1 ]' -- "$_S132_DEF"
 check "§132(9c) an IdentityFile in the staged config naming an UNSTAGED key is warned about — ssh would report a missing identity, not 'sandy did not stage this', so a silent reference looks like the mechanism working" \
     bash -c 'printf "%s\n" "$1" | grep -q "^W=.*IdentityFile.*NOT staged.*corp_secret"' -- "$_S132_DEF"
 
