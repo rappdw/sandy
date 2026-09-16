@@ -13165,9 +13165,39 @@ if [ "$_sandy_ssh_stage" = true ]; then
         chmod 700 "$SSH_STAGE_TMPDIR"
         # Always safe: host aliases and public material. known_hosts rides in
         # via its own mount too; copying it here keeps the staged tree coherent.
-        for _s_f in config known_hosts; do
-            [ -f "$HOME/.ssh/$_s_f" ] && cp -L "$HOME/.ssh/$_s_f" "$SSH_STAGE_TMPDIR/" 2>/dev/null || true
-        done
+        [ -f "$HOME/.ssh/known_hosts" ] && cp -L "$HOME/.ssh/known_hosts" "$SSH_STAGE_TMPDIR/" 2>/dev/null || true
+        if [ -f "$HOME/.ssh/config" ]; then
+            # `IgnoreUnknown *` is PREPENDED, and the wildcard is the point.
+            #
+            # The container is Linux; the host may not be. A macOS ~/.ssh/config
+            # routinely carries `UseKeychain`, which is Apple's OpenSSH fork only
+            # -- and Linux OpenSSH does not warn and continue, it TERMINATES:
+            #   ~/.ssh/config: line 87: Bad configuration option: usekeychain
+            #   terminating, 3 bad configuration options
+            # Parsing happens before anything else, so that kills EVERY ssh
+            # invocation regardless of flags -- explicit -i, -o IdentitiesOnly,
+            # git over ssh, all of it. Found in the field on the 1.14.0 candidate:
+            # the workspace went from working to 100% broken SSH.
+            #
+            # Naming the offenders (`IgnoreUnknown UseKeychain`) also works and is
+            # the wrong shape: it is a blocklist, and can only tolerate the
+            # directives whoever wrote this line happened to know about. Same
+            # argument that made the key staging an allowlist rather than a
+            # BEGIN-line sniff. The wildcard is host-OpenSSH-agnostic by
+            # construction. Cost: a genuine typo in the config is ignored rather
+            # than reported -- acceptable for a copy the user does not edit here.
+            #
+            # Placement is first-line deliberately: the in-container proxy path
+            # prepends its own `Host *` block. Measured both orderings on
+            # OpenSSH 10.0 -- either works -- but keeping it above every Host
+            # block means it is not scoped to one by a later edit.
+            {
+                printf '# Prepended by sandy: tolerate directives this OpenSSH does not know\n'
+                printf '# (e.g. macOS UseKeychain), which would otherwise be a fatal parse error.\n'
+                printf 'IgnoreUnknown *\n\n'
+                cat "$HOME/.ssh/config"
+            } > "$SSH_STAGE_TMPDIR/config" 2>/dev/null || true
+        fi
         for _s_f in "$HOME"/.ssh/*.pub; do
             [ -f "$_s_f" ] && cp -L "$_s_f" "$SSH_STAGE_TMPDIR/" 2>/dev/null || true
         done
@@ -13219,6 +13249,30 @@ if [ "$_sandy_ssh_stage" = true ]; then
                 IFS=','
             done
             IFS="$_s_old_ifs"
+        fi
+        # A staged config may name IdentityFiles the allowlist excluded. Those Host
+        # blocks will fail, and they will fail confusingly -- ssh reports a missing
+        # identity, not "sandy did not stage this". Same rule as an allowlist entry
+        # matching no file: a reference that silently goes nowhere looks exactly
+        # like the mechanism working. (Raised by rapphaus-network, which had five.)
+        if [ -f "$SSH_STAGE_TMPDIR/config" ]; then
+            _s_missing=""
+            while IFS= read -r _s_idf; do
+                [ -z "$_s_idf" ] && continue
+                _s_idb="${_s_idf##*/}"
+                [ -z "$_s_idb" ] && continue
+                case "$_s_idb" in *[!A-Za-z0-9._-]*) continue ;; esac
+                [ -e "$SSH_STAGE_TMPDIR/$_s_idb" ] && continue
+                case " $_s_missing " in *" $_s_idb "*) continue ;; esac
+                _s_missing="$_s_missing $_s_idb"
+            done <<EOF_IDF
+$(sed -n 's/^[[:space:]]*[Ii][Dd][Ee][Nn][Tt][Ii][Tt][Yy][Ff][Ii][Ll][Ee][[:space:]][[:space:]]*//p' "$SSH_STAGE_TMPDIR/config" 2>/dev/null | tr -d '"')
+EOF_IDF
+            if [ -n "$_s_missing" ]; then
+                warn "SSH: the staged ~/.ssh/config names IdentityFile(s) that are NOT staged:$_s_missing"
+                warn "  Host blocks using them will fail. Add them to SANDY_SSH_KEYS if this workspace needs them."
+            fi
+            unset _s_missing _s_idf _s_idb
         fi
         if [ "$_s_staged" -gt 0 ]; then
             info "SSH: staged $_s_staged private key(s) from SANDY_SSH_KEYS (plus config/known_hosts/*.pub)"

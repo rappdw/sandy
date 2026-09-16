@@ -14138,8 +14138,8 @@ echo "§132: SANDY_SSH=agent stages an ALLOWLIST, not the whole ~/.ssh (R7a)"
 #
 # The gitCredentials.csv case and the warn-on-absent-entry rule were both
 # contributed by the rapphaus-network session, which ran the real inventory.
-if ! command -v ssh-keygen >/dev/null 2>&1; then
-    skip "§132 needs ssh-keygen"
+if ! command -v ssh-keygen >/dev/null 2>&1 || ! command -v ssh >/dev/null 2>&1; then
+    skip "§132 needs ssh and ssh-keygen"
 else
 _S132_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 # Extraction starts at the MODE GATE, not at the staging block, so the checks
@@ -14162,7 +14162,10 @@ _s132_stage() {   # _s132_stage <SANDY_SSH_KEYS> <SANDY_SUSPICIOUS> [SANDY_SSH=a
         ssh-keygen -q -t ed25519 -N '' -C c -f "$HOME/.ssh/corp_secret" >/dev/null 2>&1
         ssh-keygen -q -t ed25519 -N '' -C n -f "$HOME/.ssh/id_nopub"    >/dev/null 2>&1
         rm -f "$HOME/.ssh/id_nopub.pub"
-        printf 'Host x\n'        > "$HOME/.ssh/config"
+        # A macOS-shaped config: UseKeychain is Apple-fork-only and Linux
+        # OpenSSH TERMINATES on it, and an IdentityFile pointing at a key the
+        # allowlist excludes.
+        printf 'Host mac\n    UseKeychain yes\n    IdentityFile ~/.ssh/corp_secret\nHost x\n    User b\n' > "$HOME/.ssh/config"
         printf 'gh ssh-rsa AAA\n' > "$HOME/.ssh/known_hosts"
         printf 'user,token\n'     > "$HOME/.ssh/gitCredentials.csv"
         printf -- '-----BEGIN RSA PRIVATE KEY-----\nx\n' > "$HOME/.ssh/aws.pem"
@@ -14204,6 +14207,14 @@ _s132_stage() {   # _s132_stage <SANDY_SSH_KEYS> <SANDY_SUSPICIOUS> [SANDY_SSH=a
             esac
         done
         printf 'MOUNT=%s\n' "$_m"
+        if [ -f "$SSH_STAGE_TMPDIR/config" ]; then
+            ssh -F "$SSH_STAGE_TMPDIR/config" -G x >/dev/null 2>&1 && printf 'CFGPARSE=ok\n' || printf 'CFGPARSE=fail\n'
+            # The same config WITHOUT sandy's prepend, i.e. 1.14.0 as first shipped.
+            # Without this the check above could pass on a host OpenSSH that simply
+            # tolerates UseKeychain, proving nothing.
+            grep -v '^IgnoreUnknown \*$' "$SSH_STAGE_TMPDIR/config" > "$SSH_STAGE_TMPDIR/raw" 2>/dev/null
+            ssh -F "$SSH_STAGE_TMPDIR/raw" -G x >/dev/null 2>&1 && printf 'RAWPARSE=ok\n' || printf 'RAWPARSE=fail\n'
+        fi
         rm -rf "$d" "$SSH_STAGE_TMPDIR"
     ) 2>/dev/null
     return 0
@@ -14264,6 +14275,18 @@ check "§132(7a) SANDY_SSH=token + an allowlist DOES stage the named key — no 
     bash -c 'printf "%s\n" "$1" | grep -qx "F=id_wanted"' -- "$_S132_TOKKEY"
 check "§132(7b) ...and still excludes everything unnamed, so the mode change did not relax the allowlist" \
     bash -c '! printf "%s\n" "$1" | grep -qxE "F=(corp_secret|aws\.pem|gitCredentials\.csv)"' -- "$_S132_TOKKEY"
+# The staged ~/.ssh/config. Found in the field on the 1.14.0 candidate: the host
+# config was copied verbatim, and a macOS one carries `UseKeychain`, which Linux
+# OpenSSH does not warn about -- it TERMINATES. Config parsing happens before
+# anything else, so it killed EVERY ssh invocation regardless of flags. The
+# workspace went from working to 100% broken SSH.
+check "§132(9a) the staged config carries a wildcard IgnoreUnknown — naming the offenders instead would be a blocklist, tolerating only what its author knew about; the same argument that made the key staging an allowlist" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "CFGPARSE=ok"' -- "$_S132_DEF"
+check "§132(9b) ...and the SAME config without it FAILS to parse — without this the check above would pass on any OpenSSH that merely tolerates UseKeychain, proving nothing (got: $(printf '%s\n' "$_S132_DEF" | grep -E '^(CFG|RAW)PARSE='  | tr '\n' ' '))" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "RAWPARSE=fail"' -- "$_S132_DEF"
+check "§132(9c) an IdentityFile in the staged config naming an UNSTAGED key is warned about — ssh would report a missing identity, not 'sandy did not stage this', so a silent reference looks like the mechanism working" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^W=.*IdentityFile.*NOT staged.*corp_secret"' -- "$_S132_DEF"
+
 check "§132(8) SANDY_SSH=token with NO allowlist stages NOTHING and mounts nothing — the default is byte-identical to before, including the known_hosts info-disclosure reduction (got: $(printf '%s' "$_S132_TOKNONE" | tr '\n' ' '))" \
     bash -c 'printf "%s\n" "$1" | grep -qx "MOUNT=none" && ! printf "%s\n" "$1" | grep -q "^F="' -- "$_S132_TOKNONE"
 
