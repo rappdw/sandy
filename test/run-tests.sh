@@ -14165,7 +14165,11 @@ _s132_stage() {   # _s132_stage <SANDY_SSH_KEYS> <SANDY_SUSPICIOUS> [SANDY_SSH=a
         # A macOS-shaped config: UseKeychain is Apple-fork-only and Linux
         # OpenSSH TERMINATES on it, and an IdentityFile pointing at a key the
         # allowlist excludes.
-        printf 'Host mac\n    UseKeychain yes\n    IdentityFile ~/.ssh/corp_secret\nHost x\n    User b\n' > "$HOME/.ssh/config"
+        # UseKeychain is the REAL-WORLD case and is kept for documentation value.
+        # The PREMISE checks below key off SandyUnknownDirectiveProbe instead,
+        # because UseKeychain is only unknown to *some* OpenSSH builds -- see the
+        # note at (9b).
+        printf 'Host mac\n    UseKeychain yes\n    SandyUnknownDirectiveProbe yes\n    IdentityFile ~/.ssh/corp_secret\nHost x\n    User b\n' > "$HOME/.ssh/config"
         printf 'gh ssh-rsa AAA\n' > "$HOME/.ssh/known_hosts"
         printf 'user,token\n'     > "$HOME/.ssh/gitCredentials.csv"
         printf -- '-----BEGIN RSA PRIVATE KEY-----\nx\n' > "$HOME/.ssh/aws.pem"
@@ -14230,7 +14234,7 @@ _s132_stage() {   # _s132_stage <SANDY_SSH_KEYS> <SANDY_SUSPICIOUS> [SANDY_SSH=a
             # two are indistinguishable. (Raised by rapphaus-network; their
             # stated discriminator was "inside a specific Host block", which is
             # only fatal when the queried host is OUTSIDE it -- measured both.)
-            printf 'Host other\n    IgnoreUnknown *\nHost x\n    UseKeychain yes\n' > "$SSH_STAGE_TMPDIR/scoped"
+            printf 'Host other\n    IgnoreUnknown *\nHost x\n    SandyUnknownDirectiveProbe yes\n' > "$SSH_STAGE_TMPDIR/scoped"
             ssh -F "$SSH_STAGE_TMPDIR/scoped" -G x >/dev/null 2>&1 \
                 && printf 'SCOPEDPREMISE=ok\n' || printf 'SCOPEDPREMISE=fail\n'
         fi
@@ -14301,7 +14305,20 @@ check "§132(7b) ...and still excludes everything unnamed, so the mode change di
 # workspace went from working to 100% broken SSH.
 check "§132(9a) the staged config carries a wildcard IgnoreUnknown — naming the offenders instead would be a blocklist, tolerating only what its author knew about; the same argument that made the key staging an allowlist" \
     bash -c 'printf "%s\n" "$1" | grep -qx "CFGPARSE=ok"' -- "$_S132_DEF"
-check "§132(9b) ...and the SAME config without it FAILS to parse — without this the check above would pass on any OpenSSH that merely tolerates UseKeychain, proving nothing (got: $(printf '%s\n' "$_S132_DEF" | grep -E '^(CFG|RAW)PARSE='  | tr '\n' ' '))" \
+# The premise directive is SYNTHETIC on purpose, and this is the second time this
+# check has had to learn the lesson it exists to teach. It first used UseKeychain
+# -- the real-world case -- and passed in CI and in-container, then FAILED on the
+# maintainer's macOS host: Apple's OpenSSH fork KNOWS UseKeychain, so the raw
+# config parsed there and the premise was false on exactly the platform whose
+# configs cause the problem. These checks run HOST-side; the property is about the
+# CONTAINER's Linux OpenSSH. A directive no OpenSSH knows is unknown by
+# construction, so the premise holds on every host.
+#
+# Honest limit: host-side, this proves "sandy prepends IgnoreUnknown *, and that
+# makes an unknown directive non-fatal on THIS OpenSSH". The container-side claim
+# rests on that plus (9d)/(9e). A real macOS-config-in-a-Linux-container check
+# needs Docker and lives in the acceptance harnesses.
+check "§132(9b) ...and the SAME config without it FAILS to parse — without this the check above would pass on any OpenSSH that tolerates the directive, proving nothing (got: $(printf '%s\n' "$_S132_DEF" | grep -E '^(CFG|RAW)PARSE='  | tr '\n' ' '))" \
     bash -c 'printf "%s\n" "$1" | grep -qx "RAWPARSE=fail"' -- "$_S132_DEF"
 check "§132(9d) IgnoreUnknown is placed ABOVE every Host block, so a later edit cannot scope it to one" \
     bash -c 'printf "%s\n" "$1" | grep -qx "PLACEMENT=top"' -- "$_S132_DEF"
