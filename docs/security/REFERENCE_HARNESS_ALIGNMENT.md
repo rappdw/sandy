@@ -2,7 +2,7 @@
 
 **Assessed:** 2026-09-09, against [`anthropics/defending-code-reference-harness`](https://github.com/anthropics/defending-code-reference-harness) at commit `d3bea6b`, reading `docs/security.md`, `docs/agent-sandbox.md`, the blog post's §2 (sandboxing), `scripts/setup_sandbox.sh`, `scripts/egress_proxy.py`, `harness/sandbox.py`, `harness/docker_ops.py`, `harness/auth.py`, and `harness/agent_image.py`. Sandy at `main` post-1.10.0 (`1.11.0-dev`). Re-run this comparison when either side's runtime, egress, or credential handling changes.
 
-**Tracking:** the four gaps below are #127, #244, #246, #245. Companion to `../../SECURITY_REVIEW_2026-09-04.md`, which this cross-references rather than repeats.
+**Tracking:** the four gaps below are #127, #244, #246, #245. Companion to `SECURITY_REVIEW_2026-09-04.md`, which this cross-references rather than repeats.
 
 ## 1. What the two things are — the framing that decides most rows
 

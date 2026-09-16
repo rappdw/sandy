@@ -29,7 +29,7 @@ So three of four can go keyless. `XAI_API_KEY` stays a secret; that section skip
 
 ## 1. Anthropic
 
-Tracked in [#190](https://github.com/rappdw/sandy/issues/190). Patch drafted at `0002-wif-integration.patch`.
+Tracked in [#190](https://github.com/rappdw/sandy/issues/190). **Implemented** — `.github/workflows/integration.yml` carries `permissions: id-token: write`, pre-builds images outside the token window, and mints/exchanges via `test/ci-wif-access-token.sh`. An earlier `0002-wif-integration.patch` drafted the mint inline in the workflow; that approach was superseded by the script, which does both halves in one place, so the patch is obsolete rather than pending.
 
 **Console** (<https://platform.claude.com/settings/workload-identity-federation>) — three objects: a **service account**, an **issuer**, and a **rule**.
 

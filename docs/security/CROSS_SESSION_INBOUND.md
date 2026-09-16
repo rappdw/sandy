@@ -1,6 +1,6 @@
 # Cross-session inbound (`SANDY_CROSS_SESSION_INBOUND` + `SANDY_HANDOFF_RELAY`, 1.10.0, experimental)
 
-Companion to the "Cross-session inbound" and "Handoff relay" sections in `CLAUDE.md`. Those sections say what sandy does; this document says why the defaults are what they are, what they grant, what they don't, and what is still unverified. See also `docs/CROSS_SESSION_INBOUND_PERSISTENCE.md` (the daemon-mode persistence analysis this feature's mitigation cadence is built on) and `docs/design/cross-session-messaging.md` (the broader relay design, including the UDS injection recipe this document assumes).
+Companion to the "Cross-session inbound" and "Handoff relay" sections in `CLAUDE.md`. Those sections say what sandy does; this document says why the defaults are what they are, what they grant, what they don't, and what is still unverified. See also `CROSS_SESSION_INBOUND_PERSISTENCE.md` (the daemon-mode persistence analysis this feature's mitigation cadence is built on) and `docs/design/cross-session-messaging.md` (the broader relay design, including the UDS injection recipe this document assumes).
 
 ## 1. What `accept` grants
 

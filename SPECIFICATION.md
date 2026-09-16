@@ -1312,7 +1312,7 @@ The category list below covers the founding sections and is not exhaustive — l
 | `doctor.sh` | ~280 | Environment preflight / diagnosis. **Generated** (#124) from the `_sandy_doctor_host()` heredoc in `sandy` — `test/regen-doctor.sh` keeps it in sync; still byte-runnable standalone (`bash doctor.sh` / `curl \| bash`) and, once sandy is installed, invokable as `sandy --doctor` |
 | `CLAUDE.md` | ~515 | Claude Code agent guidance |
 | `README.md` | ~670 | User documentation |
-| `RELEASE_NOTES.md` | ~635 | Version history (v0.6.0–v1.0.0-rc1) |
+| `RELEASE_NOTES.md` | ~1360 | **Frozen archive**, v0.6.0–v1.7.0. Not maintained — GitHub Releases is canonical for v1.8.0 onward. |
 | `SPECIFICATION.md` | this file | Technical specification |
 | `SPEC_INTROSPECTION.md` | — | Introspection JSON stability contract |
 | `proxy/` | — | Egress proxy (Go: listeners, policy, DNS, guard + unit tests) |
