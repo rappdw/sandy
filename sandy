@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.13.4"
+SANDY_VERSION="1.14.0"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -33,6 +33,7 @@ SANDY_SCHEMA_VERSION=1
 #   require explicit per-workspace approval (see _resolve_passive_privileged_approval).
 SANDY_PRIVILEGED_KEYS=(
     SANDY_SSH
+    SANDY_SSH_KEYS
     SANDY_SKIP_PERMISSIONS
     SANDY_ALLOW_NO_ISOLATION
     SANDY_ALLOW_LAN_HOSTS
@@ -847,6 +848,7 @@ fi
 _sandy_key_metadata() {
     cat <<'EOF'
 SANDY_SSH|enum:token,agent|token||0.1.0|stable|SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent.
+SANDY_SSH_KEYS|string|||1.14.0|stable|Comma-separated FILENAMES under ~/.ssh that may be staged into the container, in ANY SANDY_SSH mode. Default empty = no private key material is staged at all. Only these files, plus config, known_hosts and *.pub, reach the container; everything else in ~/.ssh stays on the host. A name matching no file is warned about rather than silently ignored. Forced empty by SANDY_SUSPICIOUS=1.
 SANDY_SKIP_PERMISSIONS|bool|true||0.1.0|stable|Skip Claude Code's in-session permission prompts (default: true).
 SANDY_ALLOW_NO_ISOLATION|bool|0||0.1.0|stable|Allow launch when iptables rules cannot be applied (Linux only).
 SANDY_ALLOW_LAN_HOSTS|string|||0.7.9|stable|Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
@@ -5314,6 +5316,30 @@ if [ -f "/tmp/host-ssh-known_hosts" ]; then
     chmod 644 /home/claude/.ssh/known_hosts
 fi
 
+# Copy whatever the host STAGED, in any SANDY_SSH mode. The host decides what
+# may come in (SANDY_SSH_KEYS, R7a); the presence of the mount is the signal, so
+# no second env var is needed and the two sides cannot disagree about it.
+#
+# Deliberately NOT inside the `agent` branch any more. Staging key material and
+# forwarding the agent are orthogonal: a workspace that reaches other machines
+# with `ssh -i` needs the files and has no use for the relay, and requiring
+# `agent` to get them meant opting into a relay that may not even work (#288).
+# Use -L to dereference symlinks; skip dangling ones.
+if [ -d "/tmp/host-ssh" ]; then
+    mkdir -p /home/claude/.ssh
+    for _f in /tmp/host-ssh/*  /tmp/host-ssh/.*; do
+        [ -e "$_f" ] || continue
+        case "$(basename "$_f")" in (.|..) continue ;; esac
+        cp -aL "$_f" /home/claude/.ssh/ 2>/dev/null || true
+    done
+    chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
+    chmod 700 /home/claude/.ssh
+    chmod 600 /home/claude/.ssh/* 2>/dev/null || true
+    chmod 644 /home/claude/.ssh/*.pub 2>/dev/null || true
+    chmod 644 /home/claude/.ssh/known_hosts 2>/dev/null || true
+    chmod 644 /home/claude/.ssh/config 2>/dev/null || true
+fi
+
 if [ "${SANDY_SSH:-token}" = "agent" ]; then
     # --- SSH agent mode ---
     # SSH agent relay: create a Unix socket that relays to the host's TCP relay
@@ -5327,24 +5353,6 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
     elif [ -S "/tmp/ssh-agent.sock" ]; then
         # Linux: socket was mounted directly
         chmod 600 /tmp/ssh-agent.sock && chown "$RUN_UID:$RUN_GID" /tmp/ssh-agent.sock
-    fi
-
-    # Copy host SSH config/keys with correct ownership and permissions.
-    # Use -L to dereference symlinks (host absolute paths break in container).
-    # Skip dangling symlinks (target doesn't exist on host).
-    if [ -d "/tmp/host-ssh" ]; then
-        mkdir -p /home/claude/.ssh
-        for _f in /tmp/host-ssh/*  /tmp/host-ssh/.*; do
-            [ -e "$_f" ] || continue
-            case "$(basename "$_f")" in .|..) continue ;; esac
-            cp -aL "$_f" /home/claude/.ssh/ 2>/dev/null || true
-        done
-        chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
-        chmod 700 /home/claude/.ssh
-        chmod 600 /home/claude/.ssh/* 2>/dev/null || true
-        chmod 644 /home/claude/.ssh/*.pub 2>/dev/null || true
-        chmod 644 /home/claude/.ssh/known_hosts 2>/dev/null || true
-        chmod 644 /home/claude/.ssh/config 2>/dev/null || true
     fi
 
     # Egress-proxy mode: the agent is on the --internal sidecar, so a direct
@@ -11245,6 +11253,9 @@ cleanup() {
     if [ -n "${SECRET_ENV_TMPDIR:-}" ]; then
         rm -rf "$SECRET_ENV_TMPDIR" || true
     fi
+    if [ -n "${SSH_STAGE_TMPDIR:-}" ]; then
+        rm -rf "$SSH_STAGE_TMPDIR" || true
+    fi
     if [ -n "${SSH_RELAY_PID:-}" ]; then
         kill "$SSH_RELAY_PID" 2>/dev/null || true
     fi
@@ -11523,6 +11534,7 @@ PYSTRIP
 # Long-lived token (from `claude setup-token`) takes precedence over OAuth credentials.
 # When set via .sandy/config or .sandy/.secrets, skip the entire credential file flow.
 CRED_TMPDIR=""
+SSH_STAGE_TMPDIR=""  # SANDY_SSH=agent: ephemeral, FILTERED copy of ~/.ssh (R7a)
 PROFILE_TMPDIR=""   # SANDY_CLAUDE_AUTH=profile: ephemeral copy of ONE Anthropic Console profile
 CRED_MODE="none"   # #130: resolved claude credential posture, recorded in the session marker
 GEMINI_CRED_TMPDIR=""
@@ -13096,16 +13108,201 @@ SSH_RELAY_PID=""
 # git over HTTPS and never needs it; mounting it there needlessly exposes the
 # host's known internal hosts/IPs to the container (info disclosure surfaced by
 # the isolation-test Layer 3 review).
-if [ "$SANDY_SSH" = "agent" ] && [ -f "$HOME/.ssh/known_hosts" ]; then
+# SANDY_SSH_KEYS is honoured in EVERY mode (R7a, 1.14.0). Forwarding the agent
+# and staging key material are orthogonal capabilities that this flag used to
+# bundle: a workspace whose real need is `ssh -i` to other machines wants the
+# files and has no use for the relay, and making `agent` the only way to get
+# them forced it to enable a relay that may be dead anyway (#288). So:
+#
+#   SANDY_SSH=token + SANDY_SSH_KEYS=...  git over HTTPS, named keys, NO relay
+#   SANDY_SSH=agent + no keys             genuine agent forwarding, nothing private
+#   SANDY_SSH=agent + keys                both
+#
+# Token mode with no allowlist is byte-identical to before -- the default is
+# untouched, including the known_hosts info-disclosure reduction below.
+_sandy_ssh_stage=false
+if [ "$SANDY_SSH" = "agent" ] || [ -n "${SANDY_SSH_KEYS:-}" ]; then
+    _sandy_ssh_stage=true
+fi
+
+# known_hosts rides in whenever anything is staged. Token mode with no keys
+# still skips it: git over HTTPS never needs it, and it would needlessly expose
+# the host's known internal hosts/IPs (isolation-test Layer 3 finding). Once the
+# operator has asked for keys, host verification needs it and withholding it
+# would only train people into StrictHostKeyChecking=no.
+if [ "$_sandy_ssh_stage" = true ] && [ -f "$HOME/.ssh/known_hosts" ]; then
     RUN_FLAGS+=(-v "$HOME/.ssh/known_hosts:/tmp/host-ssh-known_hosts:ro")
 fi
 
-if [[ "$SANDY_SSH" == "agent" ]]; then
-    # --- SSH agent forwarding (opt-in) ---
-    # Mount ~/.ssh read-only at a staging path; entrypoint copies to ~/.ssh with correct ownership.
+if [ "$_sandy_ssh_stage" = true ]; then
+    # R7a (1.14.0): stage a FILTERED copy of ~/.ssh and mount THAT, rather than
+    # mounting ~/.ssh whole.
+    #
+    # The old line was `-v "$HOME/.ssh:/tmp/host-ssh:ro"`, and filtering only
+    # what the entrypoint COPIED would have fixed nothing: nothing unmounts
+    # /tmp/host-ssh, the container runs as the host uid (entrypoint gosu-drops
+    # to it), and the files are 600 owned by that uid -- so every key stayed
+    # readable at the mount for the container's life. The mount is the exposure.
+    #
+    # Measured on the one workspace that uses this mode: 57 files, 35 of them
+    # private keys -- employer credentials (corp stash, GHE, corp-mac), six AWS
+    # .pem files, unrelated third-party keys, and a gitCredentials.csv -- handed
+    # to an agent working on a home-network repo.
+    #
+    # DEFAULT-DENY, not a content sniff. An earlier design skipped files whose
+    # first line matched BEGIN...PRIVATE KEY. gitCredentials.csv is the case that
+    # kills it: credential-shaped, no BEGIN line, waved straight through. A
+    # blocklist can only reject what its author anticipated; an allowlist
+    # excludes what nobody thought of. (Argument contributed by the
+    # rapphaus-network session, which found the file.)
+    #
+    # NOT platform-gated, deliberately -- this block never was. Only the agent
+    # RELAY differs by platform (Linux bind-mounts the socket directly). On Linux
+    # the agent usually WORKS, so nothing fails to reveal the copy, which makes
+    # the exposure quieter there rather than smaller.
     if [ -d "$HOME/.ssh" ]; then
-        RUN_FLAGS+=(-v "$HOME/.ssh:/tmp/host-ssh:ro")
+        SSH_STAGE_TMPDIR="$(mktemp -d)"
+        chmod 700 "$SSH_STAGE_TMPDIR"
+        # Always safe: host aliases and public material. known_hosts rides in
+        # via its own mount too; copying it here keeps the staged tree coherent.
+        [ -f "$HOME/.ssh/known_hosts" ] && cp -L "$HOME/.ssh/known_hosts" "$SSH_STAGE_TMPDIR/" 2>/dev/null || true
+        if [ -f "$HOME/.ssh/config" ]; then
+            # `IgnoreUnknown *` is PREPENDED, and the wildcard is the point.
+            #
+            # The container is Linux; the host may not be. A macOS ~/.ssh/config
+            # routinely carries `UseKeychain`, which is Apple's OpenSSH fork only
+            # -- and Linux OpenSSH does not warn and continue, it TERMINATES:
+            #   ~/.ssh/config: line 87: Bad configuration option: usekeychain
+            #   terminating, 3 bad configuration options
+            # Parsing happens before anything else, so that kills EVERY ssh
+            # invocation regardless of flags -- explicit -i, -o IdentitiesOnly,
+            # git over ssh, all of it. Found in the field on the 1.14.0 candidate:
+            # the workspace went from working to 100% broken SSH.
+            #
+            # Naming the offenders (`IgnoreUnknown UseKeychain`) also works and is
+            # the wrong shape: it is a blocklist, and can only tolerate the
+            # directives whoever wrote this line happened to know about. Same
+            # argument that made the key staging an allowlist rather than a
+            # BEGIN-line sniff. The wildcard is host-OpenSSH-agnostic by
+            # construction. Cost: a genuine typo in the config is ignored rather
+            # than reported -- acceptable for a copy the user does not edit here.
+            #
+            # Placement is first-line deliberately, and the reason is subtler
+            # than "both orderings worked when I measured them".
+            #
+            # IgnoreUnknown applies only within the MATCHED block. `Host *`
+            # matches everything, so putting it there is global BY ACCIDENT;
+            # at the top it is global BY CONSTRUCTION. That is why comparing
+            # "at the top" against "inside Host *" is the same test wearing two
+            # hats -- both parse, and the placement rule cannot fail it. The
+            # shape that discriminates is a block that does NOT match the host
+            # being asked about:
+            #
+            #   IgnoreUnknown in `Host nas`, query nas       parses
+            #   IgnoreUnknown in `Host nas`, query ha        FATAL
+            #   IgnoreUnknown at top, any host               parses
+            #
+            # Note the trap for whoever writes that test: the intuitive negative
+            # -- same block, same host -- is the PASSING case. §132(9e) builds
+            # the non-matching shape for exactly this reason. (Mechanism found
+            # jointly with the rapphaus-network session; the proxy path also
+            # prepends its own `Host *`, which is what made the two orderings
+            # look equivalent in the first place.)
+            {
+                printf '# Prepended by sandy: tolerate directives this OpenSSH does not know\n'
+                printf '# (e.g. macOS UseKeychain), which would otherwise be a fatal parse error.\n'
+                printf 'IgnoreUnknown *\n\n'
+                cat "$HOME/.ssh/config"
+            } > "$SSH_STAGE_TMPDIR/config" 2>/dev/null || true
+        fi
+        for _s_f in "$HOME"/.ssh/*.pub; do
+            [ -f "$_s_f" ] && cp -L "$_s_f" "$SSH_STAGE_TMPDIR/" 2>/dev/null || true
+        done
+        # SANDY_SUSPICIOUS forces the allowlist empty, overriding an opt-in --
+        # same posture as the connector override: a workspace you distrust never
+        # receives host private keys, whatever the operator set globally.
+        _s_keys="${SANDY_SSH_KEYS:-}"
+        if [ "${SANDY_SUSPICIOUS:-0}" = "1" ] && [ -n "$_s_keys" ]; then
+            warn "SANDY_SUSPICIOUS=1: ignoring SANDY_SSH_KEYS — no private key material is staged"
+            _s_keys=""
+        fi
+        _s_staged=0
+        if [ -n "$_s_keys" ]; then
+            _s_old_ifs="$IFS"; IFS=','
+            for _s_k in $_s_keys; do
+                IFS="$_s_old_ifs"
+                _s_k="$(printf '%s' "$_s_k" | tr -d '[:space:]')"
+                [ -z "$_s_k" ] && { IFS=','; continue; }
+                # One path segment. A name containing / or .. would reach outside
+                # ~/.ssh, and the value is privileged but still operator-typed.
+                case "$_s_k" in
+                    */*|..|.|*..*)
+                        warn "SANDY_SSH_KEYS: ignoring '$_s_k' — must be a filename in ~/.ssh, not a path"
+                        IFS=','; continue ;;
+                esac
+                if [ ! -f "$HOME/.ssh/$_s_k" ]; then
+                    # WARN rather than skip. An allowlist entry that matches no
+                    # file would otherwise be a silent no-op that looks exactly
+                    # like the mechanism working -- the failure mode this whole
+                    # review series keeps finding. (Raised by rapphaus-network.)
+                    warn "SANDY_SSH_KEYS: no such file ~/.ssh/$_s_k — nothing staged for it"
+                    IFS=','; continue
+                fi
+                cp -L "$HOME/.ssh/$_s_k" "$SSH_STAGE_TMPDIR/" 2>/dev/null || true
+                _s_staged=$((_s_staged + 1))
+                # A named key with no .pub sibling: derive one. With
+                # `IdentitiesOnly yes` ssh needs the public half to know which
+                # identity to offer, so a missing .pub breaks identification even
+                # when the agent holds the key. Failure here is a passphrase, not
+                # an error worth failing a launch over.
+                if [ ! -f "$HOME/.ssh/$_s_k.pub" ]; then
+                    if ssh-keygen -y -P "" -f "$SSH_STAGE_TMPDIR/$_s_k" > "$SSH_STAGE_TMPDIR/$_s_k.pub" 2>/dev/null; then
+                        :
+                    else
+                        rm -f "$SSH_STAGE_TMPDIR/$_s_k.pub"
+                        warn "SANDY_SSH_KEYS: could not derive $_s_k.pub (passphrase-protected?) — staged the key without it"
+                    fi
+                fi
+                IFS=','
+            done
+            IFS="$_s_old_ifs"
+        fi
+        # A staged config may name IdentityFiles the allowlist excluded. Those Host
+        # blocks will fail, and they will fail confusingly -- ssh reports a missing
+        # identity, not "sandy did not stage this". Same rule as an allowlist entry
+        # matching no file: a reference that silently goes nowhere looks exactly
+        # like the mechanism working. (Raised by rapphaus-network, which had five.)
+        if [ -f "$SSH_STAGE_TMPDIR/config" ]; then
+            _s_missing=""
+            while IFS= read -r _s_idf; do
+                [ -z "$_s_idf" ] && continue
+                _s_idb="${_s_idf##*/}"
+                [ -z "$_s_idb" ] && continue
+                case "$_s_idb" in *[!A-Za-z0-9._-]*) continue ;; esac
+                [ -e "$SSH_STAGE_TMPDIR/$_s_idb" ] && continue
+                case " $_s_missing " in *" $_s_idb "*) continue ;; esac
+                _s_missing="$_s_missing $_s_idb"
+            done <<EOF_IDF
+$(sed -n 's/^[[:space:]]*[Ii][Dd][Ee][Nn][Tt][Ii][Tt][Yy][Ff][Ii][Ll][Ee][[:space:]][[:space:]]*//p' "$SSH_STAGE_TMPDIR/config" 2>/dev/null | tr -d '"')
+EOF_IDF
+            if [ -n "$_s_missing" ]; then
+                warn "SSH: the staged ~/.ssh/config names IdentityFile(s) that are NOT staged:$_s_missing"
+                warn "  Host blocks using them will fail. Add them to SANDY_SSH_KEYS if this workspace needs them."
+            fi
+            unset _s_missing _s_idf _s_idb
+        fi
+        if [ "$_s_staged" -gt 0 ]; then
+            info "SSH: staged $_s_staged private key(s) from SANDY_SSH_KEYS (plus config/known_hosts/*.pub)"
+        else
+            info "SSH: no private key material staged (set SANDY_SSH_KEYS to name files under ~/.ssh)"
+        fi
+        RUN_FLAGS+=(-v "$SSH_STAGE_TMPDIR:/tmp/host-ssh:ro")
+        unset _s_f _s_k _s_keys _s_staged _s_old_ifs
     fi
+fi
+
+if [[ "$SANDY_SSH" == "agent" ]]; then
+    # --- SSH agent forwarding (opt-in). Relay only; staging is above. ---
     if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK}" ]; then
         if [[ "$OS" == "Linux" ]]; then
             # Linux: direct socket mount works

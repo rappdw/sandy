@@ -148,7 +148,7 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Privileged-only keys** (allowed only from `$SANDY_HOME/config` and `$SANDY_HOME/.secrets`):
 <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_SSH`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`, `SANDY_HANDOFF_RELAY`, `ANTHROPIC_PROFILE`
+`SANDY_SSH`, `SANDY_SSH_KEYS`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`, `SANDY_HANDOFF_RELAY`, `ANTHROPIC_PROFILE`
 <!-- END AUTOGEN:privileged-key-list -->
 
 **Passive-safe keys** (allowed from any source):
@@ -168,6 +168,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | Variable | Tier | Default | Since | Stability | Description |
 |---|---|---|---|---|---|
 | `SANDY_SSH` | privileged | `token` | 0.1.0 | stable | SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent. |
+| `SANDY_SSH_KEYS` | privileged | unset | 1.14.0 | stable | Comma-separated FILENAMES under ~/.ssh that may be staged into the container, in ANY SANDY_SSH mode. Default empty = no private key material is staged at all. Only these files, plus config, known_hosts and *.pub, reach the container; everything else in ~/.ssh stays on the host. A name matching no file is warned about rather than silently ignored. Forced empty by SANDY_SUSPICIOUS=1. |
 | `SANDY_SKIP_PERMISSIONS` | privileged | `true` | 0.1.0 | stable | Skip Claude Code's in-session permission prompts (default: true). |
 | `SANDY_ALLOW_NO_ISOLATION` | privileged | `0` | 0.1.0 | stable | Allow launch when iptables rules cannot be applied (Linux only). |
 | `SANDY_ALLOW_LAN_HOSTS` | privileged | unset | 0.7.9 | stable | Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected. |
