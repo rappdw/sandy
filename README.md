@@ -203,7 +203,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `GOOGLE_API_KEY` | (unset) | Google API key for Vertex AI / ADC |
 | `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for Telegram relay in multi-agent mode. `0` = first agent in `SANDY_AGENT`, `1` = second, `2` = third, `3` = fourth |
 | `SANDY_SSH` | `token` | Git auth method: `token` (gh CLI + HTTPS) or `agent` (SSH agent forwarding) |
-| `SANDY_SSH_KEYS` | (unset) | With `SANDY_SSH=agent`, comma-separated **filenames** under `~/.ssh` that may be staged into the container. Default empty = **no private key material is staged**. `config`, `known_hosts` and `*.pub` are staged regardless. Privileged tier |
+| `SANDY_SSH_KEYS` | (unset) | Comma-separated **filenames** under `~/.ssh` that may be staged into the container, in **any** `SANDY_SSH` mode. Default empty = **no private key material is staged**. `config`, `known_hosts` and `*.pub` come with them. Privileged tier |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Set to `false` to keep Claude Code's permission system active |
 | `SANDY_HOME` | `~/.sandy` | Sandy config/build/sandbox directory |
 | `SANDY_VERBOSE` | `0` | Verbosity: `0` quiet, `1` verbose, `2` debug, `3` full trace |
@@ -558,6 +558,8 @@ Add extra reachable hosts with `SANDY_ALLOW_HOSTS` (privileged; comma-separated 
 # in <project>/.sandy/config — one approval prompt, scoped to this workspace
 SANDY_SSH_KEYS=id_rsa_homelab,id_rsa_deploy
 ```
+
+This works in **any** `SANDY_SSH` mode. If your workspace reaches other machines with `ssh -i` and doesn't need agent forwarding, `SANDY_SSH=token` plus an allowlist is the right combination — git over HTTPS, the specific keys you named, and no agent relay at all.
 
 `config`, `known_hosts` and `*.pub` are always staged. A name that matches no file warns rather than silently doing nothing. A named key with no `.pub` sibling gets one derived. `SANDY_SUSPICIOUS=1` forces the list empty.
 

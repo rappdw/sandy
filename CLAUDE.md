@@ -443,6 +443,16 @@ The egress proxy closes that gap and works **identically on Linux and macOS** be
 
 **`SANDY_SSH_KEYS`** (privileged, default empty) names filenames under `~/.ssh` that may be staged. By default **no private key material reaches the container at all**; `config`, `known_hosts` and `*.pub` still do. Set it per-workspace in `.sandy/config` and the privileged tier turns it into one approval prompt for that workspace, so it can't be enabled fleet-wide by accident or by a cloned repo.
 
+**It is honoured in every `SANDY_SSH` mode, because forwarding the agent and staging key material are orthogonal.** The flag used to bundle them: the only way to get key files was `agent`, so a workspace whose real need is `ssh -i` to other machines had to enable a relay it has no use for — and which may be dead anyway (#288).
+
+| | stages key material | forwards the agent |
+|---|---|---|
+| `token` + `SANDY_SSH_KEYS=…` | yes | no relay at all |
+| `agent` + no keys | no | yes — the mode finally meaning what its name says |
+| `agent` + keys | yes | yes |
+
+**Token mode with no allowlist is byte-identical to before**, including the `known_hosts` info-disclosure reduction: git over HTTPS never needs it, so it stays unmounted. Once the operator has asked for keys, host verification needs it and withholding it would only train people into `StrictHostKeyChecking=no`.
+
 **Two designs that look like the fix and are not**, both pinned by §132:
 
 - **Filtering only what the entrypoint copies.** Nothing unmounts `/tmp/host-ssh`, the container runs as the host uid (the entrypoint `gosu`-drops to it), and the files are 600 owned by that uid — so every key stayed readable *at the mount* for the container's life. **The mount is the exposure**, which is why the filtering is host-side into an ephemeral staged dir. §132(1f) asserts the mount source.

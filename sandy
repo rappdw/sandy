@@ -848,7 +848,7 @@ fi
 _sandy_key_metadata() {
     cat <<'EOF'
 SANDY_SSH|enum:token,agent|token||0.1.0|stable|SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent.
-SANDY_SSH_KEYS|string|||1.14.0|stable|Comma-separated FILENAMES under ~/.ssh that may be staged into the container when SANDY_SSH=agent. Default empty = no private key material is staged at all. Only these files, plus config, known_hosts and *.pub, reach the container; everything else in ~/.ssh stays on the host. A name matching no file is warned about rather than silently ignored. Forced empty by SANDY_SUSPICIOUS=1.
+SANDY_SSH_KEYS|string|||1.14.0|stable|Comma-separated FILENAMES under ~/.ssh that may be staged into the container, in ANY SANDY_SSH mode. Default empty = no private key material is staged at all. Only these files, plus config, known_hosts and *.pub, reach the container; everything else in ~/.ssh stays on the host. A name matching no file is warned about rather than silently ignored. Forced empty by SANDY_SUSPICIOUS=1.
 SANDY_SKIP_PERMISSIONS|bool|true||0.1.0|stable|Skip Claude Code's in-session permission prompts (default: true).
 SANDY_ALLOW_NO_ISOLATION|bool|0||0.1.0|stable|Allow launch when iptables rules cannot be applied (Linux only).
 SANDY_ALLOW_LAN_HOSTS|string|||0.7.9|stable|Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
@@ -5316,6 +5316,30 @@ if [ -f "/tmp/host-ssh-known_hosts" ]; then
     chmod 644 /home/claude/.ssh/known_hosts
 fi
 
+# Copy whatever the host STAGED, in any SANDY_SSH mode. The host decides what
+# may come in (SANDY_SSH_KEYS, R7a); the presence of the mount is the signal, so
+# no second env var is needed and the two sides cannot disagree about it.
+#
+# Deliberately NOT inside the `agent` branch any more. Staging key material and
+# forwarding the agent are orthogonal: a workspace that reaches other machines
+# with `ssh -i` needs the files and has no use for the relay, and requiring
+# `agent` to get them meant opting into a relay that may not even work (#288).
+# Use -L to dereference symlinks; skip dangling ones.
+if [ -d "/tmp/host-ssh" ]; then
+    mkdir -p /home/claude/.ssh
+    for _f in /tmp/host-ssh/*  /tmp/host-ssh/.*; do
+        [ -e "$_f" ] || continue
+        case "$(basename "$_f")" in (.|..) continue ;; esac
+        cp -aL "$_f" /home/claude/.ssh/ 2>/dev/null || true
+    done
+    chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
+    chmod 700 /home/claude/.ssh
+    chmod 600 /home/claude/.ssh/* 2>/dev/null || true
+    chmod 644 /home/claude/.ssh/*.pub 2>/dev/null || true
+    chmod 644 /home/claude/.ssh/known_hosts 2>/dev/null || true
+    chmod 644 /home/claude/.ssh/config 2>/dev/null || true
+fi
+
 if [ "${SANDY_SSH:-token}" = "agent" ]; then
     # --- SSH agent mode ---
     # SSH agent relay: create a Unix socket that relays to the host's TCP relay
@@ -5329,24 +5353,6 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
     elif [ -S "/tmp/ssh-agent.sock" ]; then
         # Linux: socket was mounted directly
         chmod 600 /tmp/ssh-agent.sock && chown "$RUN_UID:$RUN_GID" /tmp/ssh-agent.sock
-    fi
-
-    # Copy host SSH config/keys with correct ownership and permissions.
-    # Use -L to dereference symlinks (host absolute paths break in container).
-    # Skip dangling symlinks (target doesn't exist on host).
-    if [ -d "/tmp/host-ssh" ]; then
-        mkdir -p /home/claude/.ssh
-        for _f in /tmp/host-ssh/*  /tmp/host-ssh/.*; do
-            [ -e "$_f" ] || continue
-            case "$(basename "$_f")" in .|..) continue ;; esac
-            cp -aL "$_f" /home/claude/.ssh/ 2>/dev/null || true
-        done
-        chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
-        chmod 700 /home/claude/.ssh
-        chmod 600 /home/claude/.ssh/* 2>/dev/null || true
-        chmod 644 /home/claude/.ssh/*.pub 2>/dev/null || true
-        chmod 644 /home/claude/.ssh/known_hosts 2>/dev/null || true
-        chmod 644 /home/claude/.ssh/config 2>/dev/null || true
     fi
 
     # Egress-proxy mode: the agent is on the --internal sidecar, so a direct
@@ -13102,12 +13108,33 @@ SSH_RELAY_PID=""
 # git over HTTPS and never needs it; mounting it there needlessly exposes the
 # host's known internal hosts/IPs to the container (info disclosure surfaced by
 # the isolation-test Layer 3 review).
-if [ "$SANDY_SSH" = "agent" ] && [ -f "$HOME/.ssh/known_hosts" ]; then
+# SANDY_SSH_KEYS is honoured in EVERY mode (R7a, 1.14.0). Forwarding the agent
+# and staging key material are orthogonal capabilities that this flag used to
+# bundle: a workspace whose real need is `ssh -i` to other machines wants the
+# files and has no use for the relay, and making `agent` the only way to get
+# them forced it to enable a relay that may be dead anyway (#288). So:
+#
+#   SANDY_SSH=token + SANDY_SSH_KEYS=...  git over HTTPS, named keys, NO relay
+#   SANDY_SSH=agent + no keys             genuine agent forwarding, nothing private
+#   SANDY_SSH=agent + keys                both
+#
+# Token mode with no allowlist is byte-identical to before -- the default is
+# untouched, including the known_hosts info-disclosure reduction below.
+_sandy_ssh_stage=false
+if [ "$SANDY_SSH" = "agent" ] || [ -n "${SANDY_SSH_KEYS:-}" ]; then
+    _sandy_ssh_stage=true
+fi
+
+# known_hosts rides in whenever anything is staged. Token mode with no keys
+# still skips it: git over HTTPS never needs it, and it would needlessly expose
+# the host's known internal hosts/IPs (isolation-test Layer 3 finding). Once the
+# operator has asked for keys, host verification needs it and withholding it
+# would only train people into StrictHostKeyChecking=no.
+if [ "$_sandy_ssh_stage" = true ] && [ -f "$HOME/.ssh/known_hosts" ]; then
     RUN_FLAGS+=(-v "$HOME/.ssh/known_hosts:/tmp/host-ssh-known_hosts:ro")
 fi
 
-if [[ "$SANDY_SSH" == "agent" ]]; then
-    # --- SSH agent forwarding (opt-in) ---
+if [ "$_sandy_ssh_stage" = true ]; then
     # R7a (1.14.0): stage a FILTERED copy of ~/.ssh and mount THAT, rather than
     # mounting ~/.ssh whole.
     #
@@ -13201,6 +13228,10 @@ if [[ "$SANDY_SSH" == "agent" ]]; then
         RUN_FLAGS+=(-v "$SSH_STAGE_TMPDIR:/tmp/host-ssh:ro")
         unset _s_f _s_k _s_keys _s_staged _s_old_ifs
     fi
+fi
+
+if [[ "$SANDY_SSH" == "agent" ]]; then
+    # --- SSH agent forwarding (opt-in). Relay only; staging is above. ---
     if [ -n "${SSH_AUTH_SOCK:-}" ] && [ -S "${SSH_AUTH_SOCK}" ]; then
         if [[ "$OS" == "Linux" ]]; then
             # Linux: direct socket mount works
