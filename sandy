@@ -13187,10 +13187,27 @@ if [ "$_sandy_ssh_stage" = true ]; then
             # construction. Cost: a genuine typo in the config is ignored rather
             # than reported -- acceptable for a copy the user does not edit here.
             #
-            # Placement is first-line deliberately: the in-container proxy path
-            # prepends its own `Host *` block. Measured both orderings on
-            # OpenSSH 10.0 -- either works -- but keeping it above every Host
-            # block means it is not scoped to one by a later edit.
+            # Placement is first-line deliberately, and the reason is subtler
+            # than "both orderings worked when I measured them".
+            #
+            # IgnoreUnknown applies only within the MATCHED block. `Host *`
+            # matches everything, so putting it there is global BY ACCIDENT;
+            # at the top it is global BY CONSTRUCTION. That is why comparing
+            # "at the top" against "inside Host *" is the same test wearing two
+            # hats -- both parse, and the placement rule cannot fail it. The
+            # shape that discriminates is a block that does NOT match the host
+            # being asked about:
+            #
+            #   IgnoreUnknown in `Host nas`, query nas       parses
+            #   IgnoreUnknown in `Host nas`, query ha        FATAL
+            #   IgnoreUnknown at top, any host               parses
+            #
+            # Note the trap for whoever writes that test: the intuitive negative
+            # -- same block, same host -- is the PASSING case. §132(9e) builds
+            # the non-matching shape for exactly this reason. (Mechanism found
+            # jointly with the rapphaus-network session; the proxy path also
+            # prepends its own `Host *`, which is what made the two orderings
+            # look equivalent in the first place.)
             {
                 printf '# Prepended by sandy: tolerate directives this OpenSSH does not know\n'
                 printf '# (e.g. macOS UseKeychain), which would otherwise be a fatal parse error.\n'
