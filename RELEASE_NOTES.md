@@ -1,3 +1,24 @@
+# Release notes
+
+> **GitHub Releases is canonical.** Full notes for every release live at
+> <https://github.com/rappdw/sandy/releases>, and that is where they are written
+> and published from.
+>
+> **This file is a frozen archive covering v0.6.0 through v1.7.0.** It is not
+> maintained and will not gain new entries. It stopped at v1.7.0 in practice long
+> before this line was added, which is the reason for saying so plainly: a
+> release-notes file that looks maintained and is a dozen releases stale is worse
+> than one that admits what it is.
+>
+> To read the notes for a newer release without a browser:
+>
+> ```sh
+> gh release view v1.14.0            # or any tag
+> gh release list                    # what exists
+> ```
+
+---
+
 ## sandy v1.7.0
 
 **Consumer-contract release.** Two external projects are now building against sandy's introspection surface, and this release is mostly what that surfaced: a flag that was accepted but never advertised, a version string that could not be used as a cache key, a stream contract that held in practice but was promised nowhere, and an exit code whose meaning nobody had written down. Plus the `#132` handoff substrate reaching a settled shape, and a silent daemon bug that dropped workspace credentials.
