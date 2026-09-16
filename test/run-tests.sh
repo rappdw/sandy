@@ -7723,6 +7723,22 @@ PY
 # from the output. Print the offending bytes (truncated, control chars escaped,
 # newlines flattened) right before the check that will fail on them. Silent on a
 # clean run, so it costs nothing when the contract holds.
+#
+# THAT WAS NOT ENOUGH, and the same class bit again: §92(b) failed once on a
+# maintainer run and the bytes were gone by the time anyone looked. The inline
+# line lands in SCROLLBACK; what actually gets read and pasted is the ERRORS
+# summary at the end, which carried only the check name. The failure did not
+# reproduce afterwards, so a one-shot intermittent lost its only evidence.
+#
+# So the preview goes in the check LABEL as well, which is what the summary
+# reprints -- the `(got: ...)` convention the later sections use throughout.
+# _s92_diag is kept because it renders before the check on a live run; the label
+# is what survives being copied out of the terminal an hour later.
+_s92_pv() {   # $1=stderr file -> short, single-line, control-escaped preview
+    [ -s "$1" ] || { printf '<empty>'; return 0; }
+    printf '%s byte(s): %s' "$(wc -c < "$1" | tr -d ' ')" \
+        "$(head -c 200 "$1" | tr '\n' ' ' | cat -v)"
+}
 _s92_diag() {   # $1=stderr file  $2=label
     [ -s "$1" ] || return 0
     printf '    \033[0;33m^ %s wrote %s byte(s) to stderr: %s\033[0m\n' \
@@ -7736,7 +7752,7 @@ env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --print-schema >"$_s92a_out" 2>"$_s92a_err" || _s92a_rc=$?
 check "§92(a) --print-schema exits 0" test "$_s92a_rc" -eq 0
 _s92_diag "$_s92a_err" "§92(a) --print-schema"
-check "§92(a) --print-schema stderr is exactly 0 bytes" \
+check "§92(a) --print-schema stderr is exactly 0 bytes (got: $(_s92_pv "$_s92a_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92a_err"
 check "§92(a) --print-schema stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92a_out"
@@ -7747,7 +7763,7 @@ PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" SANDY_VERBOSE=1 \
     bash "$_S92_SANDY" --print-schema >"$_s92b_out" 2>"$_s92b_err" || _s92b_rc=$?
 check "§92(b) SANDY_VERBOSE=1 --print-schema exits 0" test "$_s92b_rc" -eq 0
 _s92_diag "$_s92b_err" "§92(b) SANDY_VERBOSE=1 --print-schema"
-check "§92(b) SANDY_VERBOSE=1 --print-schema stderr is exactly 0 bytes" \
+check "§92(b) SANDY_VERBOSE=1 --print-schema stderr is exactly 0 bytes (got: $(_s92_pv "$_s92b_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92b_err"
 check "§92(b) SANDY_VERBOSE=1 --print-schema stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92b_out"
@@ -7758,7 +7774,7 @@ env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --print-state >"$_s92c_out" 2>"$_s92c_err" || _s92c_rc=$?
 check "§92(c) --print-state (full) exits 0" test "$_s92c_rc" -eq 0
 _s92_diag "$_s92c_err" "§92(c) --print-state (full)"
-check "§92(c) --print-state (full) stderr is exactly 0 bytes" \
+check "§92(c) --print-state (full) stderr is exactly 0 bytes (got: $(_s92_pv "$_s92c_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92c_err"
 check "§92(c) --print-state (full) stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92c_out"
@@ -7769,7 +7785,7 @@ env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --print-state light >"$_s92d_out" 2>"$_s92d_err" || _s92d_rc=$?
 check "§92(d) --print-state light exits 0" test "$_s92d_rc" -eq 0
 _s92_diag "$_s92d_err" "§92(d) --print-state light"
-check "§92(d) --print-state light stderr is exactly 0 bytes" \
+check "§92(d) --print-state light stderr is exactly 0 bytes (got: $(_s92_pv "$_s92d_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92d_err"
 check "§92(d) --print-state light stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92d_out"
@@ -7883,7 +7899,7 @@ env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --validate-config "$_S92_TMP/ws92/.sandy/config" >"$_s92e_out" 2>"$_s92e_err" || _s92e_rc=$?
 check "§92(e) --validate-config (mixed fixture) exits 0" test "$_s92e_rc" -eq 0
 _s92_diag "$_s92e_err" "§92(e) --validate-config (mixed fixture)"
-check "§92(e) --validate-config (mixed fixture) stderr is exactly 0 bytes" \
+check "§92(e) --validate-config (mixed fixture) stderr is exactly 0 bytes (got: $(_s92_pv "$_s92e_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92e_err"
 check "§92(e) --validate-config (mixed fixture) stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92e_out"
@@ -7894,7 +7910,7 @@ env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --validate-config /nonexistent/s92-does-not-exist.config >"$_s92f_out" 2>"$_s92f_err" || _s92f_rc=$?
 check "§92(f) --validate-config missing-file exits 1" test "$_s92f_rc" -eq 1
 _s92_diag "$_s92f_err" "§92(f) --validate-config missing-file"
-check "§92(f) --validate-config missing-file stderr is exactly 0 bytes" \
+check "§92(f) --validate-config missing-file stderr is exactly 0 bytes (got: $(_s92_pv "$_s92f_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92f_err"
 check "§92(f) --validate-config missing-file stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92f_out"
@@ -7923,7 +7939,7 @@ env -u SANDY_VERBOSE PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" \
     bash "$_S92_SANDY" --print-version >"$_s92h_out" 2>"$_s92h_err" || _s92h_rc=$?
 check "§92(h) --print-version exits 0" test "$_s92h_rc" -eq 0
 _s92_diag "$_s92h_err" "§92(h) --print-version"
-check "§92(h) --print-version stderr is exactly 0 bytes" \
+check "§92(h) --print-version stderr is exactly 0 bytes (got: $(_s92_pv "$_s92h_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92h_err"
 check "§92(h) --print-version stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92h_out"
@@ -7934,7 +7950,7 @@ PATH="$_S92_BIN:$PATH" SANDY_HOME="$_S92_HOME" SANDY_VERBOSE=1 \
     bash "$_S92_SANDY" --print-version >"$_s92h2_out" 2>"$_s92h2_err" || _s92h2_rc=$?
 check "§92(h) SANDY_VERBOSE=1 --print-version exits 0" test "$_s92h2_rc" -eq 0
 _s92_diag "$_s92h2_err" "§92(h) SANDY_VERBOSE=1 --print-version"
-check "§92(h) SANDY_VERBOSE=1 --print-version stderr is exactly 0 bytes" \
+check "§92(h) SANDY_VERBOSE=1 --print-version stderr is exactly 0 bytes (got: $(_s92_pv "$_s92h2_err"))" \
     bash -c '[ "$(( $(wc -c < "$1") ))" -eq 0 ]' -- "$_s92h2_err"
 check "§92(h) SANDY_VERBOSE=1 --print-version stdout is exactly one JSON document" \
     python3 "$_S92_PURITY_PY" "$_s92h2_out"
