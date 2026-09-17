@@ -67,3 +67,15 @@ Rows marked N/A are not sandy shortfalls; they are the reference doing its own j
 ## 6. Cultural note
 
 The reference states its residuals plainly — *"a mitigation, not a guarantee"*, *"`--ignore-cgroups`: container `--memory` caps are not enforced"*, *"Vertex support is currently untested"*. Sandy's documentation does the same throughout (every "Honest limits", "Residual, stated rather than glossed"). The philosophies match. The gaps in §4 are mechanisms, not attitude, and each has a testable acceptance criterion on its issue.
+
+## 7. Second pass, 2026-09-17 — the ten docs the first pass did not read
+
+The assessment above read `docs/security.md`, `docs/agent-sandbox.md` and the blog's §2. The harness ships **thirteen** docs. The remaining ten were read on 2026-09-17, against the **same commit** `d3bea6b` — the submodule has not moved, so nothing in §1–§6 is stale. Three items came out that §2's table does not cover, because they are not sandbox-boundary rules and the first pass was scoped to the boundary.
+
+1. **Threat vs vulnerability** (`docs/threat-model.md`). *"Fix that line and the vulnerability is gone, but the threat still stands."* Applied to sandy's own review in `SECURITY_REVIEW_2026-09-04.md` §0 — the register is eleven vulnerabilities, §3 names the threats, and four of the five shipped fixes were serial instances of one threat that had already been written down. **Not a gap in sandy's sandbox; a gap in how sandy tracks its own findings.**
+2. **The setup/attack phase split** (`docs/best-practices.md:193`). Setup has internet to pull dependencies and bake them into the image; attack locks egress to the model API only. This is the missing *usability* half of gap #2 above — filed as a comment on **#244**. Sandy's three-phase build and `.sandy/Dockerfile` already are a setup phase.
+3. **The supervisor loop** (`docs/best-practices.md:205`). A watch-loop in a **separate context** over each agent's idle clock, loop signature and spend. Sandy's daemon supervisor already satisfies the structural half — it is a host-side process, not a pane, not in any agent's ancestry — and already polls every 30s (`sandy:13534`). It watches `tmux has-session` and `.State.Running`, i.e. **existence**, and both are true for every inert-session incident on record (#151, #256, #261, #284). Filed as **#301**. The startup half is decidable; the runtime half is recorded there as open, because a daemon's normal resting state *is* idle and stasis alone would kill healthy sessions.
+
+One framing worth adopting verbatim, from `docs/detection-response.md`: *"The skills' `allowed-tools` lists shape permission prompts and intent, not security. `Bash(python3:*)` is effectively arbitrary execution, so the curated list is not a sandbox."* That is a cleaner statement of `SANDY_TOOL_AUDIT`'s documented limit than sandy's own, and it bears on #253.
+
+**Nothing in the ten docs contradicts §2–§4.** The four gaps and their rankings stand.
