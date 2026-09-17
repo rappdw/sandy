@@ -14361,6 +14361,106 @@ rm -rf "$_S132_DIR"
 unset _S132_DIR _S132_DEF _S132_ONE _S132_NOPUB _S132_MISS _S132_SUSP _S132_PATH _S132_TOKKEY _S132_TOKNONE
 fi
 
+# ============================================================
+echo ""
+echo "§133: --provision --all SKIPS a live sandbox instead of reporting it as a failed provision"
+# ============================================================
+# WHY. The --all planning loop filtered on the handoff classification and on
+# the workspace directory existing. It did NOT check liveness -- `_pva_live`
+# was declared and never read again, so the accounting looked intended and
+# unfinished. For a RUNNING sandbox whose pair is missing or wrong:
+#
+#   1. it entered the plan and was counted in "N sandbox(es) to provision";
+#   2. the child hit guard 1 (workspace mutex) or guard 2 (running daemon
+#      container), did nothing, and returned 0;
+#   3. the parent re-classified, the pair was still bad because NOTHING RAN,
+#      and it landed in _pva_fail as
+#          "<name> (provisioned, but the pair is still missing)"
+#      -- which it was not. It was skipped.
+#   4. the run exited 1.
+#
+# Nothing was ever torn down -- guards 1-3 in the per-workspace form are
+# intact and this section does not touch them -- so it was never a safety bug.
+# It was a REPORTING bug of the class that costs debugging time: a correct
+# mechanism asserting something untrue, with an exit code that conflates
+# "failed" with "skipped because live". A fleet consumer reads exit 1 plus the
+# word "provisioned" and hunts a provisioning failure that never happened.
+#
+# C1 is preserved rather than changed: a live sandbox with a bad pair leaves
+# the goal state -- every known sandbox has a correct pair -- UNMET, and no
+# work here can fix it, exactly like an orphan. So it stays exit 1, named and
+# counted, never skipped into a false 0. It differs from an orphan only in
+# being trivially clearable: stop the session and re-run.
+#
+# THE TEST IS A PAIR, AND THAT IS THE POINT. The live case alone would pass
+# against a planner that skipped this sandbox for some OTHER reason -- an
+# orphan misread, a classify bug. The dead-pid control is the same fixture
+# with one byte changed, and it must come out the opposite way. Delete the
+# _pva_lock_live branch and the two cases become identical, so (1)-(6) go red
+# together.
+#
+# The lock predicate is pure filesystem + kill -0, so this runs without
+# starting anything. The container predicate (guard 2 / D9) needs a real
+# daemon container and is deliberately NOT exercised here -- stated rather
+# than implied.
+_S133_ROOT="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_s133_fixture() {
+    # $1 = home root, $2 = pid to write into the lock. Builds a $SANDY_HOME
+    # holding exactly ONE sandbox, so the plan is unambiguous without carving
+    # the output (§88b: separate the fixtures, not the document).
+    local home="$1" pid="$2" ws="$1/ws"
+    rm -rf "$home"; mkdir -p "$home/sandboxes/proj-aaaaaaaa" "$ws"
+    printf '{\n  "schema_version": 1,\n  "sandbox_name": "proj-aaaaaaaa",\n  "workspace_path": "%s"\n}\n' \
+        "$ws" > "$home/sandboxes/proj-aaaaaaaa/WORKSPACE.json"
+    # No handoff/ tree at all -> _sandy_handoff_classify reports "missing".
+    mkdir -p "$home/sandboxes/.proj-aaaaaaaa.lock"
+    printf '%s\n' "$pid" > "$home/sandboxes/.proj-aaaaaaaa.lock/pid"
+}
+
+# --- live: this shell's own pid, alive by construction ----------------------
+_s133_fixture "$_S133_ROOT/live" "$$"
+_S133_LIVE_RC=0
+_S133_LIVE="$(SANDY_HOME="$_S133_ROOT/live" "$SANDY_SCRIPT" --provision --all --dry-run 2>&1)" || _S133_LIVE_RC=$?
+
+# --- dead: a pid that has already exited (the negative control) -------------
+( : ) & _S133_DEADPID=$!
+wait "$_S133_DEADPID" 2>/dev/null || true
+_s133_fixture "$_S133_ROOT/dead" "$_S133_DEADPID"
+_S133_DEAD_RC=0
+_S133_DEAD="$(SANDY_HOME="$_S133_ROOT/dead" "$SANDY_SCRIPT" --provision --all --dry-run 2>&1)" || _S133_DEAD_RC=$?
+
+if printf '%s' "$_S133_LIVE" | grep -q 'requires a reachable Docker daemon'; then
+    skip "§133 needs a reachable Docker daemon (--provision gates on one before the --all planner)"
+else
+check "§133(1) a LIVE sandbox with a missing pair is counted as live-skipped, not queued (got: $(printf '%s' "$_S133_LIVE" | grep -m1 'sandbox(es) to provision' || echo none))" \
+    bash -c 'printf "%s" "$1" | grep -q "0 sandbox(es) to provision, 0 already correct, 1 live (skipped)"' _ "$_S133_LIVE"
+check "§133(2) ...and it is named with the remedy, so the operator can act on it" \
+    bash -c 'printf "%s" "$1" | grep -q "proj-aaaaaaaa.*live session"' _ "$_S133_LIVE"
+check "§133(3) ...and the run exits 1: the goal state is UNMET and no work here can fix it (C1; got rc=$_S133_LIVE_RC)" \
+    test "$_S133_LIVE_RC" -eq 1
+check "§133(4) ...and NOTHING claims it was provisioned — the misleading 'provisioned, but the pair is still ...' line is what this section exists to kill" \
+    bash -c '! printf "%s" "$1" | grep -q "provisioned, but the pair is still"' _ "$_S133_LIVE"
+check "§133(5:control) the SAME fixture with a DEAD lock pid IS queued for provisioning (got: $(printf '%s' "$_S133_DEAD" | grep -m1 'sandbox(es) to provision' || echo none))" \
+    bash -c 'printf "%s" "$1" | grep -q "1 sandbox(es) to provision, 0 already correct, 0 live (skipped)"' _ "$_S133_DEAD"
+check "§133(6:control) ...and --dry-run then exits 0 with nothing started (got rc=$_S133_DEAD_RC)" \
+    test "$_S133_DEAD_RC" -eq 0
+fi
+
+# Abort-on-confirm parity. Seven members of the maintenance family exit 0 when
+# the operator declines: --stop-all, --gc, --reset-sandbox, --remove-sandbox,
+# --doctor --fix, per-workspace --provision, --update-sessions. Only
+# --provision --all exited 1, and it was also the only one whose message was a
+# bare "Aborted." rather than "Aborted — nothing X." An outlier on both axes at
+# once is an inconsistency, not a contract. Asserted against the source: the
+# confirm reads /dev/tty, so exercising it would need a pty rig for one key.
+check "§133(7) --provision --all exits 0 when the operator declines the confirm, like every other member of the family" \
+    bash -c 'grep -q "Aborted — nothing provisioned.\"; exit 0" "$1"' _ "$SANDY_SCRIPT"
+check "§133(8) ...and NO abort site in the maintenance family exits non-zero (mutation: restore the exit 1 and this goes red)" \
+    bash -c '[ "$(grep -c "Aborted.*exit 1" "$1")" -eq 0 ]' _ "$SANDY_SCRIPT"
+
+rm -rf "$_S133_ROOT"
+unset _S133_ROOT _S133_LIVE _S133_DEAD _S133_LIVE_RC _S133_DEAD_RC _S133_DEADPID
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
