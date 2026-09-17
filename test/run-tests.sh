@@ -12951,8 +12951,22 @@ check "§123(21) live state is read from the fixed-size .state file, NOT by pars
     bash -c '! grep -q "supervisor.log" "$1" || ! grep -n "supervisor.log" "$1" | awk -F: "\$1 > 1900 && \$1 < 2200" | grep -q .' -- "$SANDY_SCRIPT"
 
 # --- housekeeping: the slot must survive a reset, and be named when destroyed -
+# _rs_keep is EXTRACTED AND CALLED rather than grepped for its literal pattern.
+# The previous form matched the contiguous string
+# "WORKSPACE.json|.handoff-enabled|relay-bin|agent-args", which is an assertion
+# about relay-bin's NEIGHBOURS: adding features/ between relay-bin and
+# agent-args (1.15.0, #304) broke it against a preserve list that still
+# preserves relay-bin perfectly. That is the same anti-pattern §88b ratchets
+# for JSON -- do not anchor on what sits next to the thing you care about --
+# wearing a case pattern instead of a character class, and it cost a red CI run
+# on a correct change. Calling the predicate cannot drift that way.
+_S123_KEEP="$(grep -m1 '^    _rs_keep() {' "$SANDY_SCRIPT" || true)"
+check "§123(22-pre) the _rs_keep predicate was extracted (mutation: a rename empties it and the two checks below go vacuous)" \
+    bash -c '[ -n "$1" ] && printf "%s" "$1" | grep -q "case"' -- "$_S123_KEEP"
 check "§123(22) --reset-sandbox PRESERVES relay-bin/ — without this the reset silently un-enrols the sandbox, since everything unnamed is destroyed" \
-    bash -c 'grep -q "WORKSPACE.json|.handoff-enabled|relay-bin|agent-args" "$1"' -- "$SANDY_SCRIPT"
+    bash -c '_rs_keep_approvals=false; eval "$1"; _rs_keep relay-bin' -- "$_S123_KEEP"
+check "§123(22b) ...and the predicate is not simply true for everything — pip/ is still destroyed (without this, 22 passes on a reset that preserves the whole sandbox)" \
+    bash -c '_rs_keep_approvals=false; eval "$1"; ! _rs_keep pip' -- "$_S123_KEEP"
 check "§123(23) --reset-sandbox NAMES the preserved relay, so an operator is not told by omission that it was destroyed" \
     bash -c 'grep -q "relay-bin/ (installed relay)" "$1"' -- "$SANDY_SCRIPT"
 check "§123(24) --remove-sandbox names the relay it will destroy in its printed plan" \
@@ -14582,8 +14596,14 @@ _S134_EMPTY="$(bash -c '
 ' _ "$_S134_SANDY" "$_S134_ROOT" 2>/dev/null || true)"
 check "§134(11) an empty features/ and an absent one both report [], never null (got: ${_S134_EMPTY:-none})" \
     test "$_S134_EMPTY" = "[] []"
+# Same lesson as §123(22), which this change itself broke: call the predicate,
+# do not grep its literal pattern. A neighbour-anchored match here would break
+# for whoever adds the NEXT preserved entry, against code that is correct.
+_S134_KEEP="$(grep -m1 '^    _rs_keep() {' "$_S134_SANDY" || true)"
 check "§134(12) --reset-sandbox PRESERVES features/ — without this a reset silently un-enrols the sandbox" \
-    bash -c 'grep -q "WORKSPACE.json|.handoff-enabled|relay-bin|features|agent-args" "$1"' _ "$_S134_SANDY"
+    bash -c '_rs_keep_approvals=false; eval "$1"; _rs_keep features' _ "$_S134_KEEP"
+check "§134(12b) ...while an ordinary sandbox dir is still destroyed, so (12) is not satisfied by a predicate that preserves everything" \
+    bash -c '_rs_keep_approvals=false; eval "$1"; ! _rs_keep npm-global' _ "$_S134_KEEP"
 
 # --- #305: the marker-gated shared mount ------------------------------------
 # WHY GATED. An unconditional shared mount would install into EVERY sandbox,
@@ -14638,7 +14658,7 @@ check "§134(19) SANDY_FEATURES_DIR is PRIVILEGED — it chooses a host path to 
     bash -c '"$1" --print-schema | tr "," "\n" | grep -q "SANDY_FEATURES_DIR"' _ "$_S134_SANDY"
 
 rm -rf "$_S134_ROOT"
-unset _S134_ROOT _S134_SANDY _S134_MARKER _S134_MK_NAME _S134_MK_WS _S134_ENV \
+unset _S134_KEEP _S134_ROOT _S134_SANDY _S134_MARKER _S134_MK_NAME _S134_MK_WS _S134_ENV \
       _S134_FSB _S134_SCAN _S134_NAMES _S134_PROBS _S134_EMPTY _S134_M_ON _S134_M_OFF
 
 # BEGIN SUMMARY
