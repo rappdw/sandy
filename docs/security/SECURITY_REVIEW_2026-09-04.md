@@ -40,6 +40,30 @@ Four design decisions came from verifying the fixes against a real workspace rat
 3. **A control whose misconfiguration is indistinguishable from success is not a control.** An allowlist entry naming a file that does not exist now warns. Without it, a typo produces exactly the output of a correctly-configured system.
 4. **The test suite could not have caught most of this.** The decisive evidence came from two-hop SSH through a NAS to a DMZ, `scp -O` to a Synology, and cloud-init `.pub` reads — none of which any unit test reaches.
 
+### The register tracks vulnerabilities; §3 names the threats — and only the register was maintained
+
+Added 2026-09-17, from `research/defending-code-reference-harness/docs/threat-model.md` (at `d3bea6b`), which draws the distinction this document blurs:
+
+> A **threat** is a property of the system's architecture and exposure... A **vulnerability** is one concrete instance... Fix that line and the vulnerability is gone, but the threat still stands — the parser still ingests untrusted bytes, and the next bug in it has the same consequence.
+
+This review is a **vulnerability register**. R1–R11 are eleven concrete instances, each with a file and a line, each closable by a patch. §3 already names the **threats** — and then nothing tracked them. The table at the top of this section can reach eleven-of-eleven green while every threat in §3 is still live.
+
+That is not hypothetical here; it is what the fixing process did:
+
+| Threat (§3) | Instances found, in order |
+|---|---|
+| (1) values are never validated, only key names | **R1** (`bash -c` injection via two passive keys) — and `SANDY_MODEL`/`SANDY_EFFORT` are safe only by a *different* mechanism, which is why the rule had to become "quote at the sink" rather than "validate these keys" |
+| (2) trust decisions test path existence, which follows symlinks | **R2** (settings writer), **R5** (protected paths), **R5 again** (the `gitdir:` line — repository content, resolved with a bare `cd`, mounted **rw**), and arguably **R7a** (the `~/.ssh` mount, where the exposure was the mount rather than the copy) |
+
+Four of the five shipped fixes are instances of threat (2). They were discovered **serially, across four releases**, each one by measuring a surface nobody had measured before — never by the review predicting the next instance from the threat it had already written down. R5's own entry above says so: *"Both were found by measuring the emitted mount flags rather than reading the code."*
+
+**What this changes going forward.** The threats in §3 outlive their instances, so they are the durable artefact and the register is the perishable one. Two consequences worth holding to:
+
+1. **A green register is not a closed threat.** When R6 and R8 close, threat (1) is still live for every future interpolation into a command string, and threat (2) for every future `[ -e ]`/`[ -d ]` gate. Neither is retired by a patch; both are retired only by a rule applied at the class — which is what `printf %q` at the sink and `_sandy_path_symlink_component` actually are.
+2. **The clean-room re-run below should re-derive the threats, not re-test the findings.** Re-checking R1–R11 confirms eleven patches. Enumerating every place sandy makes a trust decision on a name, a path, or an unvalidated value is the search that would have found R5's `gitdir:` case before a review missed it twice.
+
+This is a framing correction, not a new finding. No R-number changes, and nothing above or below is restated.
+
 ### The recommended clean-room re-run has NOT happened
 
 §8 recommends a fresh-context re-run before any public disclosure. That has not been done. What has been done is targeted verification of each fix, which is a different and narrower thing: it confirms the named findings are closed; it does not re-examine the surfaces nobody looked at the first time.
