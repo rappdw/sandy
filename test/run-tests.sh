@@ -11712,8 +11712,11 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # §123(11a) is the behavioural half, asserting the composer's actual output
 # parses and carries the value it was given.
 # 16 as of 1.13.0: `agents` joined the 15 pinned since 1.11.0's relay{}.
-check "§114(13g) marker printf format/arg count line up (16 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 16
+# 17 as of 1.15.0: `sandbox_name` (#303) -- the sandbox slug, which nothing
+# in-container could learn before and which was not derivable from
+# SANDY_PROJECT_NAME (the raw basename) plus the hash.
+check "§114(13g) marker printf format/arg count line up (17 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 17
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -12870,6 +12873,11 @@ _S123_MARKER="$(
     set +e
     sandy_full_version() { echo "1.11.0-test"; }
     _sandy_egress_mode=permissive; SANDY_WORKSPACE=/home/claude/dev/x
+    # SANDBOX_NAME is required by the composer as of 1.15.0 (#303). Without it
+    # the substitution dies on set -u (which set +e does not cover) and the
+    # OUTER assignment trips the ERR trap, aborting the whole suite -- which is
+    # how this was found: CI red, every section after this one never running.
+    SANDBOX_NAME=x-deadbeef
     _sandy_session_nonce=deadbeef; _sandy_effort_json=null
     _sandy_perm_mode_json='"bypassPermissions"'; _sandy_csi_json='"accept"'; CRED_MODE=full
     _sandy_session_file="$_S123_DIR/marker.json"
@@ -13493,6 +13501,7 @@ _s127_marker() {   # _s127_marker <SANDY_AGENT or empty> -> the agents value, or
         _sandy_egress_mode=permissive; SANDY_WORKSPACE=/w; _sandy_session_nonce=deadbeef
         _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
         CRED_MODE=none; _sandy_relay_slot=absent; _sandy_relay_json=false
+        SANDBOX_NAME=w-deadbeef          # required by the composer since 1.15.0 (#303)
         _sandy_session_file="$_S127_DIR/m.json"
         unset SANDY_HANDOFF_RELAY SANDY_AGENT
         [ -n "$1" ] && SANDY_AGENT="$1"
@@ -13528,6 +13537,7 @@ _S127_IFS="$(
       _sandy_egress_mode=p; SANDY_WORKSPACE=/w; _sandy_session_nonce=n
       _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
       CRED_MODE=none; _sandy_relay_slot=absent; _sandy_relay_json=false
+      SANDBOX_NAME=w-deadbeef            # required by the composer since 1.15.0 (#303)
       _sandy_session_file="$_S127_DIR/m2.json"; unset SANDY_HANDOFF_RELAY
       SANDY_AGENT="claude,codex"
       _before="$IFS"
