@@ -155,7 +155,7 @@ Four sources, in order: `$HOME/.sandy/config`, `$HOME/.sandy/.secrets`, `$WORK_D
 
 - **Privileged-only keys** — from a passive source these trigger a one-time per-workspace approval prompt showing the exact `KEY=VALUE` set:
   <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-  `SANDY_SSH`, `SANDY_SSH_KEYS`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`, `SANDY_HANDOFF_RELAY`, `ANTHROPIC_PROFILE`
+  `SANDY_SSH`, `SANDY_SSH_KEYS`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`, `SANDY_HANDOFF_RELAY`, `SANDY_FEATURES_DIR`, `ANTHROPIC_PROFILE`
   <!-- END AUTOGEN:privileged-key-list -->
 
   A malicious committed `.sandy/config` could otherwise disable isolation or exfiltrate credentials. Approvals persist to `$SANDY_HOME/approvals/passive-<workspace-hash>.list` (first line a sha256 of the sorted set); any edit that changes a privileged key re-prompts. Revoke by deleting that file. **Headless (`-p`) and non-TTY stdin fail closed** — the keys are dropped with a pointer to launch interactively once.
@@ -310,7 +310,7 @@ Every launch writes `$SANDBOX_DIR/sandy-session.json`, bind-mounted **read-only*
 
 ```json
 { "schema": 1, "sandy_version": "...", "egress_mode": "off|permissive|strict",
-  "workspace": "...", "host_uid": 501, "host_gid": 20,
+  "workspace": "...", "sandbox_name": "myrepo-a1b2c3d4", "host_uid": 501, "host_gid": 20,
   "launched_at": "2026-06-11T12:00:00Z", "session_nonce": "<hex>",
   "effort": "high", "permission_mode": "bypassPermissions",
   "cross_session_inbound": "refuse", "agents": ["claude"], "handoff_relay": false,
@@ -319,6 +319,8 @@ Every launch writes `$SANDBOX_DIR/sandy-session.json`, bind-mounted **read-only*
 ```
 
 **Why it exists**: env vars are spoofable and the *absence* of a path proves nothing, so an in-container probe that distrusts env otherwise cannot tell sandy from a bare VM — a red-team run in sandy on macOS/OrbStack concluded it was *not* in sandy at all (uid 501, virtiofs mounts, and the documented `--cap-add` set all read as "ordinary VM"). Because the marker is `:ro`, a committed workspace config cannot forge it. **In-container tooling should assert on this file, not on uid/caps/env heuristics.**
+
+**`sandbox_name` — the slug, in-container (1.15.0, #303).** Nothing inside could learn `<basename>-<sha8>`, and it was **not derivable** from anything that was: `SANDY_PROJECT_NAME` is the **raw** basename while the slug takes `basename | tr -cd 'a-zA-Z0-9._-'`, so it is lossy in *both* directions — missing the hash **and** unfiltered. A workspace named `my repo` has `SANDY_PROJECT_NAME='my repo'` against slug `myrepo-<sha8>`. Sandy passes no `--hostname` either, so the container hostname is the docker container id. The field is spelled `sandbox_name` to match `WORKSPACE.json`, which has carried it host-side since 0.10.1 — one value, one name. `SANDY_SANDBOX_NAME` is exported too, but the **marker is the authoritative copy**: env is spoofable, which is the same reason `session_nonce` is deliberately not exported. The generalizable need is that anything in-container wanting to name *itself* to something outside previously had to be told by a host-side file written per sandbox. Guarded by §134, whose fixture basename contains a space — a basename that survives `tr` unchanged cannot tell a correct emitter from one writing `basename(workspace)`.
 
 Fields record what sandy **pinned**, which is not necessarily what is in effect now (see the settings.json drift note above): `effort` (or `null` when unpinned), `permission_mode`, `cross_session_inbound`, **`agents`** (the resolved list — see below), `handoff_relay` (bool), `relay` (see below), and `cred_mode` (`profile|profile-access-only|oauth-token|access-token-only|full|api-key|none` — the *worst* credential actually present, so a run's blast radius is provable after the fact).
 
@@ -585,6 +587,24 @@ The rule is now a property of the path, not a containment test: **no component b
 **Residual, stated rather than glossed**: `handoff/outbox` **persists across sessions**, so with the tree on by default any repo can stage content today that a relay could deliver the day an operator approves one. That does not justify a privileged tier (the edge is on the relay key), but it imposes a requirement: **a relay should quarantine or ignore outbox content predating its own first run.** `--reset-sandbox` preserves `.handoff-enabled` (the override is operator state) but destroys `handoff/`.
 
 `--print-state` reports `handoff_enabled` — the **marker only**, i.e. "forced on"; `false` does not mean "off next launch" (the tree is on unless a config `--print-state` does not read opts out). Guarded by §86, §97 and `test/acceptance-handoff-dirs.sh` (§23).
+
+### Feature markers (`features/<name>`) and the shared payload mount (1.15.0, #304/#305)
+
+`$SANDBOX_DIR/features/<name>` records *"this sandbox participates in `<name>`"* for an `<name>` that is not sandy's. **Privileged by construction of where it lives** — `$SANDY_HOME` is already the privileged config root and a git repository cannot reach it — exactly like `.handoff-enabled` and `agent-args.<agent>`: no new tier, no config key, no prompt. `--print-state` reports `sandboxes[].features` (sorted names) and `sandboxes[].feature_problems`, in **both** modes.
+
+**Note the deliberate inversion.** For the handoff tree, directory presence carries **no** information — the dirs are created every launch regardless of config, so a stray `mkdir` or a restored backup can neither enable nor defeat anything. Here **presence is the signal**. That is only defensible because a repository cannot write there, and it has one consequence to state rather than let people discover: an **`rsync -a` of `$SANDY_HOME` carries enrolment across machines**. `features/` itself is created every launch (so the *directory* still carries nothing) and sandy **never creates an entry**.
+
+`features` is better than `agents` and `handoff_enabled` on one axis worth naming: it is read from the filesystem **at query time**, so it is current rather than last-launch. It still reports only what sandy was *told* — a name means a marker exists, never that anything works.
+
+**One predicate, two callers** (the `_sandy_handoff_classify` rule): `_sandy_features_scan` is what `--print-state` reports *and* what the launch mounts from, so a reporter that sees a feature the mounter does not is impossible by construction. It tests **`-L` before `-d`/`-f`** — `-d` follows links, so a symlink to a directory would pass every other test — and it globs `*` **plus** `.[!.]*` **plus** `..?*`, because a bare `*` skips dotfiles and an entry sandy will not use *and does not mention* is the silent skip this design exists to retire. `--reset-sandbox` **preserves `features/`** (without it, a reset silently un-enrols the sandbox); `--remove-sandbox` names each entry in the plan.
+
+**`SANDY_FEATURES_DIR` (privileged) mounts shared payloads `:ro` at `/opt/sandy/features/<name>`, into only the sandboxes carrying the matching marker.** One install, one version, N sandboxes — instead of a per-sandbox copy a consumer has to keep in sync and byte-compare. Three things are load-bearing:
+
+- **Gated, never unconditional.** An unconditional shared mount would install into *every* sandbox including ones running a different agent — the incident `agents` exists for, made **structural**: you could no longer choose not to install somewhere. Guarded by §134(15), whose fixture has a payload with no marker.
+- **`:ro` is the boundary, not permission bits** — the relay-slot argument verbatim: the container runs as the host uid and owns the payload, so bits bind nothing. **Honest limit, also the relay slot's:** sandy guarantees the **first executable**; a binary that execs out of a writable directory is replaceable at the second link.
+- **A marker with no matching source warns**, naming it. A silent no-op there is indistinguishable from the mechanism working, which is finding #3 of the R7a work.
+
+Mounted under `/opt`, not the agent home — that tree is rw tmpfs and `/home/claude` moves in 2.0 (#248). Validation follows `SANDY_SCREENSHOT_DIR`: metacharacters and overly-broad targets (`$HOME`, `/`) are hard errors, a missing directory is warn-and-disable so Docker never auto-creates an empty host stub.
 
 **Checking and bulk-repairing the pair (#265, 1.12.0).** The pair is created **by the launch**, and that ownership is load-bearing: a pair exists only because the thing that mounts it made one, so a hand-made pair cannot be mistaken for a working one. The cost is that a sandbox can sit without one — most often after **`--reset-sandbox`**, which destroys `handoff/` and keeps the sandbox (so the population *regenerates*, it is not a one-time migration), and also after a `--start` refused at the approval pre-pass or any launch that failed between creating the sandbox directory (`sandy:8131`) and creating the pair (`sandy:9928`).
 

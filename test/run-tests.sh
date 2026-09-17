@@ -11712,8 +11712,11 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # §123(11a) is the behavioural half, asserting the composer's actual output
 # parses and carries the value it was given.
 # 16 as of 1.13.0: `agents` joined the 15 pinned since 1.11.0's relay{}.
-check "§114(13g) marker printf format/arg count line up (16 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 16
+# 17 as of 1.15.0: `sandbox_name` (#303) -- the sandbox slug, which nothing
+# in-container could learn before and which was not derivable from
+# SANDY_PROJECT_NAME (the raw basename) plus the hash.
+check "§114(13g) marker printf format/arg count line up (17 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 17
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -12870,6 +12873,11 @@ _S123_MARKER="$(
     set +e
     sandy_full_version() { echo "1.11.0-test"; }
     _sandy_egress_mode=permissive; SANDY_WORKSPACE=/home/claude/dev/x
+    # SANDBOX_NAME is required by the composer as of 1.15.0 (#303). Without it
+    # the substitution dies on set -u (which set +e does not cover) and the
+    # OUTER assignment trips the ERR trap, aborting the whole suite -- which is
+    # how this was found: CI red, every section after this one never running.
+    SANDBOX_NAME=x-deadbeef
     _sandy_session_nonce=deadbeef; _sandy_effort_json=null
     _sandy_perm_mode_json='"bypassPermissions"'; _sandy_csi_json='"accept"'; CRED_MODE=full
     _sandy_session_file="$_S123_DIR/marker.json"
@@ -12943,8 +12951,22 @@ check "§123(21) live state is read from the fixed-size .state file, NOT by pars
     bash -c '! grep -q "supervisor.log" "$1" || ! grep -n "supervisor.log" "$1" | awk -F: "\$1 > 1900 && \$1 < 2200" | grep -q .' -- "$SANDY_SCRIPT"
 
 # --- housekeeping: the slot must survive a reset, and be named when destroyed -
+# _rs_keep is EXTRACTED AND CALLED rather than grepped for its literal pattern.
+# The previous form matched the contiguous string
+# "WORKSPACE.json|.handoff-enabled|relay-bin|agent-args", which is an assertion
+# about relay-bin's NEIGHBOURS: adding features/ between relay-bin and
+# agent-args (1.15.0, #304) broke it against a preserve list that still
+# preserves relay-bin perfectly. That is the same anti-pattern §88b ratchets
+# for JSON -- do not anchor on what sits next to the thing you care about --
+# wearing a case pattern instead of a character class, and it cost a red CI run
+# on a correct change. Calling the predicate cannot drift that way.
+_S123_KEEP="$(grep -m1 '^    _rs_keep() {' "$SANDY_SCRIPT" || true)"
+check "§123(22-pre) the _rs_keep predicate was extracted (mutation: a rename empties it and the two checks below go vacuous)" \
+    bash -c '[ -n "$1" ] && printf "%s" "$1" | grep -q "case"' -- "$_S123_KEEP"
 check "§123(22) --reset-sandbox PRESERVES relay-bin/ — without this the reset silently un-enrols the sandbox, since everything unnamed is destroyed" \
-    bash -c 'grep -q "WORKSPACE.json|.handoff-enabled|relay-bin|agent-args" "$1"' -- "$SANDY_SCRIPT"
+    bash -c '_rs_keep_approvals=false; eval "$1"; _rs_keep relay-bin' -- "$_S123_KEEP"
+check "§123(22b) ...and the predicate is not simply true for everything — pip/ is still destroyed (without this, 22 passes on a reset that preserves the whole sandbox)" \
+    bash -c '_rs_keep_approvals=false; eval "$1"; ! _rs_keep pip' -- "$_S123_KEEP"
 check "§123(23) --reset-sandbox NAMES the preserved relay, so an operator is not told by omission that it was destroyed" \
     bash -c 'grep -q "relay-bin/ (installed relay)" "$1"' -- "$SANDY_SCRIPT"
 check "§123(24) --remove-sandbox names the relay it will destroy in its printed plan" \
@@ -13493,6 +13515,7 @@ _s127_marker() {   # _s127_marker <SANDY_AGENT or empty> -> the agents value, or
         _sandy_egress_mode=permissive; SANDY_WORKSPACE=/w; _sandy_session_nonce=deadbeef
         _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
         CRED_MODE=none; _sandy_relay_slot=absent; _sandy_relay_json=false
+        SANDBOX_NAME=w-deadbeef          # required by the composer since 1.15.0 (#303)
         _sandy_session_file="$_S127_DIR/m.json"
         unset SANDY_HANDOFF_RELAY SANDY_AGENT
         [ -n "$1" ] && SANDY_AGENT="$1"
@@ -13528,6 +13551,7 @@ _S127_IFS="$(
       _sandy_egress_mode=p; SANDY_WORKSPACE=/w; _sandy_session_nonce=n
       _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
       CRED_MODE=none; _sandy_relay_slot=absent; _sandy_relay_json=false
+      SANDBOX_NAME=w-deadbeef            # required by the composer since 1.15.0 (#303)
       _sandy_session_file="$_S127_DIR/m2.json"; unset SANDY_HANDOFF_RELAY
       SANDY_AGENT="claude,codex"
       _before="$IFS"
@@ -14460,6 +14484,182 @@ check "§133(8) ...and NO abort site in the maintenance family exits non-zero (m
 
 rm -rf "$_S133_ROOT"
 unset _S133_ROOT _S133_LIVE _S133_DEAD _S133_LIVE_RC _S133_DEAD_RC _S133_DEADPID
+
+# ============================================================
+echo ""
+echo "§134: the sandbox slug in-container (#303), features/ markers (#304), and the marker-gated shared mount (#305)"
+# ============================================================
+# Three additive features that compose. Read them in order; each block below
+# says what it is asserting and what the mutation is.
+_S134_ROOT="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S134_SANDY="$SANDY_SCRIPT"
+
+# --- #303: the slug reaches the container ----------------------------------
+# WHY. Nothing in-container could learn <basename>-<sha8>, and it was not
+# derivable from anything that was. SANDY_PROJECT_NAME is the RAW basename
+# while the slug takes `basename | tr -cd [A-Za-z0-9._-]`, so it is lossy in
+# BOTH directions -- missing the hash AND unfiltered. Sandy passes no
+# --hostname either, so the container hostname is the docker container id.
+#
+# THE FIXTURE IS THE TEST. A workspace whose basename survives tr unchanged
+# cannot tell a correct emitter from one writing basename(workspace): both
+# produce the same first half. So the fixture uses a basename with a SPACE,
+# where the slug is myrepo-... and the basename is "my repo".
+_s134_marker() {
+    # Evaluate the real marker printf with controlled globals; echo the JSON.
+    local _blk
+    _blk="$(awk '/"schema": 1/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$_S134_SANDY")"
+    (
+        sandy_full_version() { echo "9.9.9"; }
+        _sandy_egress_mode=off
+        SANDY_WORKSPACE="/home/claude/my repo"
+        SANDBOX_NAME="myrepo-abc12345"
+        _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
+        _sandy_agents_json=null; _sandy_relay_json=false; _sandy_relay_slot_json=null
+        _sandy_relay_path_json=null; _sandy_relay_disabled_by_json=null
+        CRED_MODE=none; _sandy_session_nonce=deadbeef; _sandy_session_file=/dev/stdout
+        eval "$_blk"
+    )
+}
+_S134_MARKER="$(_s134_marker 2>/dev/null || true)"
+_S134_MK_NAME="$(printf '%s' "$_S134_MARKER" | sed -n 's/.*"sandbox_name": "\([^"]*\)".*/\1/p')"
+_S134_MK_WS="$(printf '%s' "$_S134_MARKER" | sed -n 's/.*"workspace": "\([^"]*\)".*/\1/p')"
+
+check "§134(pre) the marker printf was extracted and produced JSON (mutation: a rename empties it and every #303 check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "sandy_version"' _ "$_S134_MARKER"
+check "§134(1) /etc/sandy-session.json carries sandbox_name (got: ${_S134_MK_NAME:-none})" \
+    test -n "$_S134_MK_NAME"
+check "§134(2) ...and it is the SLUG, not the workspace basename — the fixture basename is 'my repo', the slug 'myrepo-abc12345', and an emitter using basename(workspace) would say the former" \
+    test "$_S134_MK_NAME" = "myrepo-abc12345"
+check "§134(3) ...while workspace still reports the full path, so the two fields did not collapse into one (got: ${_S134_MK_WS:-none})" \
+    test "$_S134_MK_WS" = "/home/claude/my repo"
+
+# The env export. Asserted through the real RUN_FLAGS line, not by grepping.
+_S134_ENV="$(bash -c '
+    _blk="$(grep -n "SANDY_SANDBOX_NAME=" "$1" | grep RUN_FLAGS | head -1 | cut -d: -f2-)"
+    RUN_FLAGS=(); SANDBOX_NAME="myrepo-abc12345"
+    eval "$_blk"
+    printf "%s\n" "${RUN_FLAGS[@]}"
+' _ "$_S134_SANDY" 2>/dev/null || true)"
+check "§134(4) SANDY_SANDBOX_NAME is exported into the container with the slug as its value (got: ${_S134_ENV:-none})" \
+    bash -c 'printf "%s" "$1" | grep -qx "SANDY_SANDBOX_NAME=myrepo-abc12345"' _ "$_S134_ENV"
+
+# --- #304: features/<name> markers ------------------------------------------
+# WHY. Sandy had no way to record "this sandbox participates in X" for an X
+# that is not sandy's, so consumers kept a registry beside sandy's state and the
+# two could drift. Privileged by construction of WHERE it lives ($SANDY_HOME,
+# which a repository cannot reach) -- no new tier, no key, no prompt.
+#
+# It is a REGISTRY: sandy reports it and (apart from #305) never acts on it.
+_S134_FSB="$_S134_ROOT/sb"
+mkdir -p "$_S134_FSB/features" "$_S134_ROOT/linktarget"
+: > "$_S134_FSB/features/amap"                       # valid: regular file
+mkdir -p "$_S134_FSB/features/connector"             # valid: directory
+ln -s "$_S134_ROOT/linktarget" "$_S134_FSB/features/evil"   # symlink TO A DIRECTORY
+: > "$_S134_FSB/features/bad name"                   # invalid: space
+: > "$_S134_FSB/features/.hidden"                    # invalid AND dot-globbed
+: > "$_S134_FSB/features/..sneaky"                   # invalid AND dot-globbed
+_S134_SCAN="$(bash -c '
+    _blk="$(awk "/^_sandy_features_scan\(\) \{/,/^\}/" "$1")"
+    eval "$_blk"
+    _sandy_features_scan "$2"
+    printf "NAMES=%s\nLIST=%s\nPROBS=%s\n" "$_SANDY_FEAT_NAMES" "$_SANDY_FEAT_LIST" "$_SANDY_FEAT_PROBLEMS"
+' _ "$_S134_SANDY" "$_S134_FSB" 2>/dev/null || true)"
+_S134_NAMES="$(printf '%s' "$_S134_SCAN" | sed -n 's/^NAMES=//p')"
+_S134_PROBS="$(printf '%s' "$_S134_SCAN" | sed -n 's/^PROBS=//p')"
+
+check "§134(pre-b) the features scanner was extracted and ran (mutation: a rename empties it and every #304 check goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "^NAMES=\["' _ "$_S134_SCAN"
+check "§134(5) a regular file and a directory are both valid feature markers, sorted (got: ${_S134_NAMES:-none})" \
+    test "$_S134_NAMES" = '["amap","connector"]'
+check "§134(6) a SYMLINK TO A DIRECTORY is a problem, not a feature — -L is tested BEFORE -d, which follows links, so reordering them would accept it" \
+    bash -c 'printf "%s" "$1" | grep -q "evil: is a symlink"' _ "$_S134_PROBS"
+check "§134(7) ...and it is absent from the names, so a hand-placed link cannot enrol a sandbox" \
+    bash -c '! printf "%s" "$1" | grep -q "\"evil\""' _ "$_S134_NAMES"
+check "§134(8) an invalid name is REPORTED, not silently dropped" \
+    bash -c 'printf "%s" "$1" | grep -q "bad name: invalid name"' _ "$_S134_PROBS"
+# The dotfile case is its own check because a bare * glob SKIPS dotfiles: the
+# first implementation reported three problems and silently swallowed two more.
+# An entry sandy will not use and also does not mention is the exact silent-skip
+# failure this design exists to retire. Mutation: drop the .[!.]* and ..?* globs
+# and both of these go red while everything above still passes.
+check "§134(9) a DOTFILE entry is reported — a bare * glob skips dotfiles, so this needs the extra globs" \
+    bash -c 'printf "%s" "$1" | grep -q "[.]hidden: invalid name"' _ "$_S134_PROBS"
+check "§134(10) ...including a ..-prefixed entry, which .[!.]* alone does not match" \
+    bash -c 'printf "%s" "$1" | grep -q "[.][.]sneaky: invalid name"' _ "$_S134_PROBS"
+# Empty and absent must both be [] rather than null: a consumer iterating the
+# array should never have to special-case "no features" twice.
+_S134_EMPTY="$(bash -c '
+    _blk="$(awk "/^_sandy_features_scan\(\) \{/,/^\}/" "$1")"; eval "$_blk"
+    mkdir -p "$2/empty/features"; _sandy_features_scan "$2/empty"; printf "%s" "$_SANDY_FEAT_NAMES"
+    _sandy_features_scan "$2/nosuchsandbox"; printf " %s" "$_SANDY_FEAT_NAMES"
+' _ "$_S134_SANDY" "$_S134_ROOT" 2>/dev/null || true)"
+check "§134(11) an empty features/ and an absent one both report [], never null (got: ${_S134_EMPTY:-none})" \
+    test "$_S134_EMPTY" = "[] []"
+# Same lesson as §123(22), which this change itself broke: call the predicate,
+# do not grep its literal pattern. A neighbour-anchored match here would break
+# for whoever adds the NEXT preserved entry, against code that is correct.
+_S134_KEEP="$(grep -m1 '^    _rs_keep() {' "$_S134_SANDY" || true)"
+check "§134(12) --reset-sandbox PRESERVES features/ — without this a reset silently un-enrols the sandbox" \
+    bash -c '_rs_keep_approvals=false; eval "$1"; _rs_keep features' _ "$_S134_KEEP"
+check "§134(12b) ...while an ordinary sandbox dir is still destroyed, so (12) is not satisfied by a predicate that preserves everything" \
+    bash -c '_rs_keep_approvals=false; eval "$1"; ! _rs_keep npm-global' _ "$_S134_KEEP"
+
+# --- #305: the marker-gated shared mount ------------------------------------
+# WHY GATED. An unconditional shared mount would install into EVERY sandbox,
+# including ones running a different agent -- the incident the `agents` field
+# exists for. Gating makes "do not install here" expressible; without it, it
+# is not.
+#
+# :ro IS THE BOUNDARY, not permission bits: the container runs as the host uid
+# and owns the payload, so bits bind nothing. Asserted on the mount flag here
+# because this harness assembles RUN_FLAGS without Docker; the EROFS behaviour
+# of a :ro bind mount is docker's, not sandy's, and is exercised for real by
+# the relay slot in acceptance-handoff-dirs.sh.
+# src/unmarked has a payload and NO marker -- it is the negative control for
+# (15). src/connector is deliberately NOT reused for that: `connector` IS a
+# valid marker above (check 5), so it is mounted correctly and asserting its
+# absence would fail against working code. The first cut of this section made
+# exactly that mistake and (15) caught it.
+mkdir -p "$_S134_ROOT/src/amap" "$_S134_ROOT/src/connector" "$_S134_ROOT/src/unmarked"
+: > "$_S134_FSB/features/nosrc"
+_s134_mounts() {
+    # $1 = SANDBOX_DIR, $2 = SANDY_FEATURES_DIR (empty to leave it unset)
+    bash -c '
+        warn() { printf "WARN:%s\n" "$*"; }
+        _s="$(awk "/^_sandy_features_scan\(\) \{/,/^\}/" "$1")"; eval "$_s"
+        _m="$(awk "/Marker-gated shared feature mounts/,/^fi\$/" "$1")"
+        RUN_FLAGS=(); SANDBOX_DIR="$2"; SANDY_FEATURES_DIR="$3"
+        eval "$_m"
+        printf "%s\n" ${RUN_FLAGS[@]+"${RUN_FLAGS[@]}"}
+    ' _ "$_S134_SANDY" "$1" "$2" 2>/dev/null || true
+}
+_S134_M_ON="$(_s134_mounts "$_S134_FSB" "$_S134_ROOT/src")"
+check "§134(pre-c) the mount block was extracted and ran (mutation: a rename empties it and every #305 check goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "WARN:\|/opt/sandy/features/"' _ "$_S134_M_ON"
+check "§134(13) a MARKED feature with a matching source is mounted at /opt/sandy/features/<name>" \
+    bash -c 'printf "%s" "$1" | grep -qx ".*/src/amap:/opt/sandy/features/amap:ro"' _ "$_S134_M_ON"
+check "§134(14) ...and it is :ro — the mount flag is the boundary, not permission bits, because the agent runs as the host uid and owns the payload" \
+    bash -c 'printf "%s" "$1" | grep "/opt/sandy/features/amap" | grep -q ":ro$"' _ "$_S134_M_ON"
+# THE SECURITY CHECK. `unmarked` has a source directory and NO marker. If the
+# gate is removed it gets mounted into a sandbox that never asked for it, which
+# is the 51-sandbox incident made structural. Mutation: iterate the SOURCE
+# directory instead of the markers and this goes red while (13) still passes.
+check "§134(15) an UNMARKED feature is NOT mounted even though its source exists — this is the whole security claim of #305" \
+    bash -c '! printf "%s" "$1" | grep -q "/opt/sandy/features/unmarked"' _ "$_S134_M_ON"
+check "§134(16) a marker with NO matching source WARNS and names it, rather than no-opping silently" \
+    bash -c 'printf "%s" "$1" | grep -q "WARN:.*nosrc.*does not exist"' _ "$_S134_M_ON"
+check "§134(17) ...and mounts nothing for it" \
+    bash -c '! printf "%s" "$1" | grep -q "/opt/sandy/features/nosrc"' _ "$_S134_M_ON"
+_S134_M_OFF="$(_s134_mounts "$_S134_FSB" "")"
+check "§134(18) with SANDY_FEATURES_DIR unset nothing is mounted at all, and no warning is emitted — the feature is inert without the operator opting in" \
+    test -z "$(printf '%s' "$_S134_M_OFF" | tr -d '[:space:]')"
+check "§134(19) SANDY_FEATURES_DIR is PRIVILEGED — it chooses a host path to mount, so a committed workspace config must not set it" \
+    bash -c '"$1" --print-schema | tr "," "\n" | grep -q "SANDY_FEATURES_DIR"' _ "$_S134_SANDY"
+
+rm -rf "$_S134_ROOT"
+unset _S134_KEEP _S134_ROOT _S134_SANDY _S134_MARKER _S134_MK_NAME _S134_MK_WS _S134_ENV \
+      _S134_FSB _S134_SCAN _S134_NAMES _S134_PROBS _S134_EMPTY _S134_M_ON _S134_M_OFF
 
 # BEGIN SUMMARY
 # ============================================================

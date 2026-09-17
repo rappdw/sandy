@@ -504,6 +504,21 @@ A sandbox with a **live session** is named and skipped the same way — it canno
 
 **`handoff.state: "ok"` means the directories are correct on the host.** It does not mean the tree is mounted in any container — `--print-state` reads no config and cannot know the next launch's `SANDY_HANDOFF_DIRS`. For a *running* sandbox, check the container's mounts.
 
+### Feature markers and shared payloads (`SANDY_FEATURES_DIR`)
+
+`$SANDBOX_DIR/features/<name>` records that a sandbox takes part in something that is not sandy's — a connector, a fleet agent, whatever you are deploying. Sandy holds the fact and reports it in `--print-state` as `sandboxes[].features`; it does not know what a feature *is*.
+
+```sh
+touch ~/.sandy/sandboxes/<sandbox>/features/amap     # enrol
+sandy --print-state | jq '.sandboxes[] | {name, features}'
+```
+
+The markers live under `$SANDY_HOME`, which a cloned repository cannot write, so enrolment is per-machine operator state — the same tier argument as `.handoff-enabled`. `--reset-sandbox` preserves them.
+
+Set `SANDY_FEATURES_DIR=<host-dir>` (privileged) and each `<host-dir>/<name>` is mounted **read-only** at `/opt/sandy/features/<name>` into **only** the sandboxes carrying that marker. One install, one version, however many sandboxes — rather than a copy per sandbox to keep in sync.
+
+It is gated on the marker on purpose: an unconditional shared mount would install into every sandbox, including ones running a different agent. A marker with no matching source directory warns rather than doing nothing quietly. And `:ro` is the real boundary — the container runs as your uid and owns the payload, so file permissions would not stop it rewriting its own tooling. Sandy guarantees the **first** executable; a binary that runs something out of a writable directory is replaceable at the second step.
+
 ### Installing a relay (`SANDY_RELAY`)
 
 A *relay* is a program that drains and fills the handoff directories — the thing that actually moves files. Before 1.11.0 the only way to install one was `SANDY_HANDOFF_RELAY=<path>`, a **privileged** key naming a file. That cost a per-workspace approval prompt, and it could not be turned on by default: it names a file sandy does not install, and a configured relay that cannot start fails the launch, so a global default would refuse to launch every sandbox that had not been provisioned by hand.
