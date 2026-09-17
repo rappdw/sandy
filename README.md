@@ -500,6 +500,8 @@ sandy --provision --all --yes
 
 This provisions every sandbox sandy already **knows about** whose pair is missing or wrong, serially, through the real launch path. It **cannot** reach a workspace that has never been launched — that has no sandbox directory, so sandy does not know it exists; enrolling one is a deliberate `sandy --provision --workspace PATH`. A sandbox whose workspace has been deleted cannot be provisioned at all: it is named, counted as unprepared, and makes the run exit non-zero rather than being skipped into a false success.
 
+A sandbox with a **live session** is named and skipped the same way — it cannot be provisioned while it runs, so the run exits non-zero and tells you to stop it and re-run. Nothing running is ever touched. Because of that, **exit `1` here means "re-read the state and see which", not "something broke"**: read `--print-state` rather than the exit code if you need to tell a genuine failure from a live skip.
+
 **`handoff.state: "ok"` means the directories are correct on the host.** It does not mean the tree is mounted in any container — `--print-state` reads no config and cannot know the next launch's `SANDY_HANDOFF_DIRS`. For a *running* sandbox, check the container's mounts.
 
 ### Installing a relay (`SANDY_RELAY`)

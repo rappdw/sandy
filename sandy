@@ -4190,13 +4190,46 @@ if [[ "${1:-}" == "--provision" ]]; then
     # command can never disagree about what needs doing.
     if [ "$_pv_all" = "true" ]; then
         _pva_todo_name=(); _pva_todo_ws=(); _pva_todo_why=()
-        _pva_orphan_name=(); _pva_ok=0; _pva_live=0
+        _pva_orphan_name=(); _pva_ok=0
+        _pva_live_name=(); _pva_live_why=()
+        # Liveness, batched: ONE docker ps for the whole sweep (the --stop-all
+        # idiom), not one per sandbox. Docker absent or unreachable fails OPEN
+        # -- the per-workspace --provision re-checks both of its own guards
+        # before it starts anything, so a miss here costs a wasted child
+        # invocation, never a torn-down session. The two predicates mirror
+        # the _rms_lock_live / _rms_container_live pair in --remove-sandbox,
+        # rather than inventing a third spelling of the same question.
+        _pva_running_ws="$( (docker ps --filter "label=sandy.daemon=true" --format '{{.Label "sandy.workspace_path"}}' 2>/dev/null) || true )"
+        _pva_lock_live() {
+            local lp
+            [ -f "$SANDY_HOME/sandboxes/.$1.lock/pid" ] || return 1
+            lp="$(cat "$SANDY_HOME/sandboxes/.$1.lock/pid" 2>/dev/null || true)"
+            [ -n "$lp" ] && [ "$lp" -eq "$lp" ] 2>/dev/null && kill -0 "$lp" 2>/dev/null
+        }
+        _pva_container_live() {
+            [ -n "$_pva_running_ws" ] || return 1
+            printf '%s\n' "$_pva_running_ws" | grep -qxF "$1"
+        }
         for _pva_sb in "$SANDY_HOME/sandboxes"/*/; do
             [ -d "$_pva_sb" ] || continue
             _pva_sb="${_pva_sb%/}"
             _pva_name="$(basename "$_pva_sb")"
             _sandy_handoff_classify "$_pva_sb"
             if [ "$_SANDY_HC_STATE" = "ok" ]; then _pva_ok=$((_pva_ok + 1)); continue; fi
+            # A LIVE session is tested BEFORE the workspace-gone test, and
+            # before the sandbox reaches the todo list at all. Two reasons.
+            # The plan must not promise work the child will refuse: guards 1
+            # and 2 in the per-workspace form make it a no-op returning 0, and
+            # the goal re-check then filed it under _pva_fail as "provisioned,
+            # but the pair is still <state>" -- which it was not; it was
+            # skipped. And a running sandbox is a STRONGER fact than a missing
+            # WORKSPACE.json, so telling the operator to --remove-sandbox
+            # --orphans something that is running right now would be dangerous
+            # advice.
+            if _pva_lock_live "$_pva_name"; then
+                _pva_live_name+=("$_pva_name"); _pva_live_why+=("$_SANDY_HC_STATE")
+                continue
+            fi
             # The workspace is where --provision has to launch, so a sandbox
             # whose workspace is gone cannot be provisioned at all. It is named
             # and counted as UNPREPARED rather than skipped quietly: the
@@ -4217,14 +4250,27 @@ if [[ "${1:-}" == "--provision" ]]; then
                 _pva_orphan_name+=("$_pva_name")
                 continue
             fi
+            # D9: --restart unless-stopped can leave a live container on a
+            # DEAD supervisor pid after a host reboot, which the lock test
+            # above cannot see. Same second guard the per-workspace form has.
+            if _pva_container_live "$_pva_ws"; then
+                _pva_live_name+=("$_pva_name"); _pva_live_why+=("$_SANDY_HC_STATE")
+                continue
+            fi
             _pva_todo_name+=("$_pva_name"); _pva_todo_ws+=("$_pva_ws"); _pva_todo_why+=("$_SANDY_HC_STATE")
         done
 
-        printf '\nsandy --provision --all: %d sandbox(es) to provision, %d already correct, %d unprovisionable\n' \
-            "${#_pva_todo_name[@]}" "$_pva_ok" "${#_pva_orphan_name[@]}"
+        printf '\nsandy --provision --all: %d sandbox(es) to provision, %d already correct, %d live (skipped), %d unprovisionable\n' \
+            "${#_pva_todo_name[@]}" "$_pva_ok" "${#_pva_live_name[@]}" "${#_pva_orphan_name[@]}"
         _pva_i=0
         while [ "$_pva_i" -lt "${#_pva_todo_name[@]}" ]; do
             printf '  - %-34s %-8s workspace: %s\n' "${_pva_todo_name[$_pva_i]}" "${_pva_todo_why[$_pva_i]}" "${_pva_todo_ws[$_pva_i]}"
+            _pva_i=$((_pva_i + 1))
+        done
+        _pva_i=0
+        while [ "$_pva_i" -lt "${#_pva_live_name[@]}" ]; do
+            printf '  ~ %-34s %-8s %s\n' "${_pva_live_name[$_pva_i]}" "${_pva_live_why[$_pva_i]}" \
+                "live session — cannot provision while it runs; sandy --stop --workspace <path>, then re-run"
             _pva_i=$((_pva_i + 1))
         done
         for _pva_n in ${_pva_orphan_name[@]+"${_pva_orphan_name[@]}"}; do
@@ -4237,11 +4283,25 @@ if [[ "${1:-}" == "--provision" ]]; then
         # and no amount of work here can make it hold -> 1, said up front rather
         # than after a run that could not have fixed them.
         if [ "${#_pva_todo_name[@]}" -eq 0 ]; then
-            if [ "${#_pva_orphan_name[@]}" -eq 0 ]; then
+            if [ "${#_pva_orphan_name[@]}" -eq 0 ] && [ "${#_pva_live_name[@]}" -eq 0 ]; then
                 info "Every known sandbox already has a correct handoff pair."
                 exit 0
             fi
-            error "${#_pva_orphan_name[@]} sandbox(es) cannot be provisioned (workspace gone); the goal state is not met."
+            # C1: the goal is "every known sandbox has a correct pair". A live
+            # sandbox with a bad pair leaves it UNMET and no work here can fix
+            # it, exactly like an orphan -- so it is named and counted, never
+            # skipped into a false 0. Unlike an orphan it is trivially
+            # clearable: stop the session and re-run.
+            # if/fi rather than `[ ... ] && error`: a false AND-list is safe
+            # under set -e (POSIX ignores -e for a non-final AND-OR member),
+            # but this file is read by people checking exactly that, and an
+            # explicit branch costs nothing to be sure of.
+            if [ "${#_pva_live_name[@]}" -gt 0 ]; then
+                error "${#_pva_live_name[@]} sandbox(es) have a live session and cannot be provisioned; stop them and re-run."
+            fi
+            if [ "${#_pva_orphan_name[@]}" -gt 0 ]; then
+                error "${#_pva_orphan_name[@]} sandbox(es) cannot be provisioned (workspace gone); the goal state is not met."
+            fi
             exit 1
         fi
         [ "$_pv_dry_run" = "true" ] && { info "--dry-run: nothing provisioned."; exit 0; }
@@ -4249,7 +4309,7 @@ if [[ "${1:-}" == "--provision" ]]; then
             if [ -t 0 ]; then
                 printf '[sandy] Provision %d sandbox(es)? [y/N] ' "${#_pva_todo_name[@]}" >&2
                 read -r _pva_ans < /dev/tty || _pva_ans=""
-                case "$_pva_ans" in [yY]|[yY][eE][sS]) ;; *) info "Aborted."; exit 1 ;; esac
+                case "$_pva_ans" in [yY]|[yY][eE][sS]) ;; *) info "Aborted — nothing provisioned."; exit 0 ;; esac
             else
                 error "--provision --all needs --yes when stdin is not a TTY."
                 exit 1
@@ -4282,11 +4342,13 @@ if [[ "${1:-}" == "--provision" ]]; then
             _pva_i=$((_pva_i + 1))
         done
 
-        printf '\nsandy --provision --all: %d created, %d already correct, %d failed, %d unprovisionable\n' \
-            "$_pva_done" "$_pva_ok" "${#_pva_fail[@]}" "${#_pva_orphan_name[@]}"
+        printf '\nsandy --provision --all: %d created, %d already correct, %d failed, %d live (skipped), %d unprovisionable\n' \
+            "$_pva_done" "$_pva_ok" "${#_pva_fail[@]}" "${#_pva_live_name[@]}" "${#_pva_orphan_name[@]}"
         for _pva_n in ${_pva_fail[@]+"${_pva_fail[@]}"}; do printf '  x %s\n' "$_pva_n"; done
+        for _pva_n in ${_pva_live_name[@]+"${_pva_live_name[@]}"}; do printf '  ~ %s (live session — stop it and re-run)\n' "$_pva_n"; done
         for _pva_n in ${_pva_orphan_name[@]+"${_pva_orphan_name[@]}"}; do printf '  ! %s (workspace gone)\n' "$_pva_n"; done
-        if [ "${#_pva_fail[@]}" -eq 0 ] && [ "${#_pva_orphan_name[@]}" -eq 0 ]; then exit 0; fi
+        if [ "${#_pva_fail[@]}" -eq 0 ] && [ "${#_pva_live_name[@]}" -eq 0 ] \
+           && [ "${#_pva_orphan_name[@]}" -eq 0 ]; then exit 0; fi
         exit 1
     fi
 
