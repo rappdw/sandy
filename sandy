@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="1.14.1-dev"
+SANDY_VERSION="1.15.0-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -55,6 +55,7 @@ SANDY_PRIVILEGED_KEYS=(
     DISCORD_BOT_TOKEN
     DISCORD_ALLOWED_SENDERS
     SANDY_HANDOFF_RELAY
+    SANDY_FEATURES_DIR
     ANTHROPIC_PROFILE
 )
 
@@ -698,6 +699,76 @@ _sandy_handoff_classify() {
     fi
 }
 
+# --- Per-sandbox feature markers (#304) -------------------------------------
+# $SANDBOX_DIR/features/<name> records "this sandbox participates in <name>"
+# for an X that is not sandy's. Sandy holds the fact and reports it; it is a
+# REGISTRY. (The one thing sandy does with it is #305's marker-gated mount,
+# which is a separate, separately-reviewable consumer.)
+#
+# PRIVILEGED BY CONSTRUCTION OF WHERE IT LIVES, exactly like .handoff-enabled
+# and agent-args.<agent>: $SANDY_HOME is already the privileged config root and
+# a git repository cannot reach it. No new tier, no config key, no prompt.
+#
+# NOTE THE DELIBERATE INVERSION. For the handoff tree, directory presence
+# carries NO information -- the dirs are created every launch regardless of
+# config, so a stray mkdir or a restored backup can neither enable nor defeat
+# anything. Here presence IS the signal. That is defensible only because a
+# repository cannot write here, and it has one consequence worth stating in the
+# docs rather than discovering: an `rsync -a` of $SANDY_HOME between machines
+# carries enrolment across.
+#
+# ONE PREDICATE, TWO CALLERS (the _sandy_handoff_classify rule): --print-state
+# reports what this returns and the launch mounts from it, so a reporter that
+# sees a feature the mounter does not is impossible by construction.
+#
+# Sets three globals: _SANDY_FEAT_NAMES (JSON array of valid names, sorted),
+# _SANDY_FEAT_PROBLEMS (JSON array of "<entry>: <reason>"), and _SANDY_FEAT_LIST
+# (the same valid names, space-separated, for shell iteration). The plain list
+# exists so the launch path never has to parse the JSON back apart -- names are
+# validated below to [A-Za-z0-9._-], so they cannot contain a space and plain
+# word-splitting is exact.
+_sandy_features_scan() {
+    local _fs_dir="$1/features" _fs_e _fs_n _fs_names="" _fs_probs="" _fs_list=""
+    if [ -d "$_fs_dir" ]; then
+        # Three globs, not one. A bare * skips DOTFILES, so `.hidden` and
+        # `..sneaky` were invisible -- and an entry sandy will not use, that it
+        # also does not mention, is the silent skip this whole design exists to
+        # retire. They cannot enable anything (the name check below rejects a
+        # leading dot), but they must still be REPORTED. Same triple-glob idiom
+        # --reset-sandbox uses. Nullglob is not set globally, so an unmatched
+        # pattern arrives literally and fails the -e/-L test below.
+        for _fs_e in "$_fs_dir"/* "$_fs_dir"/.[!.]* "$_fs_dir"/..?*; do
+            [ -e "$_fs_e" ] || [ -L "$_fs_e" ] || continue
+            _fs_n="${_fs_e##*/}"
+            # -L BEFORE -d/-f, the classifier rule: -d and -f FOLLOW links, so a
+            # symlink to a directory would pass every other test. Sandy never
+            # creates an entry at all, so a link here was placed by hand and is
+            # an integrity question, not a convenience.
+            if [ -L "$_fs_e" ]; then
+                _fs_probs="$_fs_probs${_fs_probs:+,}\"$_fs_n: is a symlink; sandy never creates entries, so this was placed by hand\""
+                continue
+            fi
+            # The name becomes a container-side path component in #305, so it is
+            # validated here where the one predicate lives rather than at the
+            # mount site. No /, no leading dot, no .., ASCII word characters.
+            case "$_fs_n" in
+                *[!A-Za-z0-9._-]*|.*|*..*|"")
+                    _fs_probs="$_fs_probs${_fs_probs:+,}\"$_fs_n: invalid name; use [A-Za-z0-9._-] with no leading dot and no ..\""
+                    continue ;;
+            esac
+            if [ ! -d "$_fs_e" ] && [ ! -f "$_fs_e" ]; then
+                _fs_probs="$_fs_probs${_fs_probs:+,}\"$_fs_n: neither a regular file nor a directory\""
+                continue
+            fi
+            _fs_names="$_fs_names${_fs_names:+,}\"$_fs_n\""
+            _fs_list="$_fs_list${_fs_list:+ }$_fs_n"
+        done
+    fi
+    _SANDY_FEAT_NAMES="[$_fs_names]"
+    _SANDY_FEAT_PROBLEMS="[$_fs_probs]"
+    _SANDY_FEAT_LIST="$_fs_list"
+}
+
 # Protected directories. .github/workflows is included by default; opt out via
 # SANDY_ALLOW_WORKFLOW_EDIT=1 in .sandy/config (passive tier).
 _sandy_protected_dirs() {
@@ -907,6 +978,7 @@ SANDY_HANDOFF_DIRS|bool|1||1.7.0|experimental|Create and mount the per-sandbox c
 SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|Claude-only. Pins Claude Code crossSessionInbound (accept = deliver messages from other sessions on this container without a prompt; hold = queue for approval; refuse = drop with a sender-visible status) by writing the SAME resolved value into TWO places every launch, merge-preserving and idempotent: the sandbox's own claude/settings.json (mounted RW as the container's ~/.claude/settings.json, i.e. Claude Code userSettings) and the WORKSPACE project file .claude/settings.local.json (mounted :ro). This split is measured, not assumed, against Claude Code 2.1.251: accept only takes effect when present in userSettings (workspace-file accept alone is a no-op there); hold/refuse are honored from either, and the workspace file's copy is tighten-only so it cannot be loosened by a stale accept and still wins over userSettings when a repo hand-edits it stricter. Never writes ~/.claude/settings.json on the HOST. Default is CONDITIONAL, which is why the schema default is empty: accept iff SANDY_HANDOFF_RELAY is set AND the relay will actually be started this launch, else refuse — headless (-p) and --remote runs never start a relay, so they default to refuse even with the key set, and a configured relay that cannot start fails the launch rather than leaving accept in place with nothing delivering. Value-aware tier: hold and refuse are passive-safe wherever set; accept set via a workspace .sandy/config is approval-gated (it lets any process at the workspace uid inside the container inject a turn). Residual: the userSettings target is RW in-container (required for /plugin install), so unlike the :ro workspace copy it is agent-mutable mid-session; sandy resets it on the next launch, not mid-session. Recorded in /etc/sandy-session.json as cross_session_inbound. See docs/security/CROSS_SESSION_INBOUND.md.
 ANTHROPIC_PROFILE|string||^[A-Za-z0-9._-]+$|1.11.0|experimental|Privileged. Name of the Anthropic Console profile to use when SANDY_CLAUDE_AUTH=profile (overrides the host active_config); forwarded into the container so Claude Code selects it explicitly (its /status shows the Profile row as profile-explicit). Privileged on purpose: it chooses WHICH profile's token enters the box, and a profile logged in with --scope org:admin carries organization-wide access, so a committed .sandy/config must not be able to select it. Ignored with a notice unless SANDY_CLAUDE_AUTH=profile.
 SANDY_HANDOFF_RELAY|path|||1.10.0|experimental|Privileged. Path of an executable INSIDE the container (absolute, or relative to the workspace, e.g. .sandy/relay.sh) that sandy runs as a container-level process: a sibling of the tmux server, not a pane and not a child of any agent session. Started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote (no tmux session to target), and never under --provision (which starts a session only to verify it and then stops it, so a relay would live ~10s and criterion 7 would fail the very launch that materialises the handoff pair) — in both the key is dropped host-side, so crossSessionInbound defaults to refuse and the marker records handoff_relay=false), singleton via flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never overlapping, never given up on. Setting it forces SANDY_HANDOFF_DIRS=1 (over an explicit opt-out — the relay cannot run without its mounts; the dirs are on by default since 1.10.0 anyway) so $SANDBOX_DIR/handoff/relay is mounted rw at ~/.handoff/relay (relay state + supervisor.log). Env contract: SANDY_HANDOFF_INBOX, SANDY_HANDOFF_OUTBOX, SANDY_HANDOFF_PEER, SANDY_HANDOFF_RELAY_STATE, SANDY_AGENT, SANDY_WORKSPACE; enumerate live sessions with /usr/local/bin/sandy-handoff-sessions. A configured relay that cannot start FAILS THE LAUNCH, never warn-and-proceed: host-side (exit 1 before docker run) for whitespace, shell metacharacters, .. segments, a ~/.handoff collision, and any path the host can see (workspace-relative, or absolute under the workspace mount) that is missing or not executable; in-container (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) for an image-only absolute path that is missing or not executable, a missing ~/.handoff/relay mount, or no flock. So handoff_relay=true in the marker means the relay was started or the session did not come up. In daemon mode the relay (and anything else planted at the uid) outlives sessions until the container is recreated — run sandy --update-sessions --yes on a 24h cron. Recorded in /etc/sandy-session.json as handoff_relay.
+SANDY_FEATURES_DIR|path|||1.15.0|experimental|Privileged. Host directory whose children are SHARED feature payloads, mounted READ-ONLY at /opt/sandy/features/<name> into only those sandboxes carrying a matching $SANDBOX_DIR/features/<name> marker (#304). One install, one version, N sandboxes -- instead of a per-sandbox copy the consumer has to keep in sync and byte-compare. GATED ON THE MARKER, never unconditional: an unconditional shared mount would install into EVERY sandbox including ones running a different agent, which is the incident the `agents` field exists for (a host-side tool enrolled 51 sandboxes and installed a per-agent component into each; one ran codex, and the only symptom was a process exiting non-zero once a second into a log nobody was watching). The :ro MOUNT is the boundary, not permission bits: the container runs as the host uid, so a writable payload is one the agent could rewrite; under :ro the write returns EROFS. HONEST LIMIT, as for the relay slot: sandy guarantees the FIRST executable only -- a binary that execs out of a writable directory is replaceable at the second link. Mounted under /opt, not the agent home, because that tree is rw tmpfs and /home/claude moves in 2.0 (#248). Privileged for the same reason SANDY_SCREENSHOT_DIR is: it chooses a host path to mount, so a committed workspace config must not be able to set it. Shell metacharacters and overly-broad targets (literal $HOME, /) are hard errors; a MISSING directory is warn-and-disable, because Docker would otherwise auto-create an empty host dir at bind time. A marker naming a feature with no matching source WARNS rather than no-opping -- an unnamed misconfiguration is indistinguishable from a working one.
 SANDY_RELAY|bool|1||1.11.0|experimental|Relay CAPABILITY toggle (#258). Names no path and asserts no payload: it means 'run the installed relay if there is one'. The relay is installed HOST-SIDE by writing one executable entry named 'relay' into the per-sandbox slot $SANDBOX_DIR/relay-bin/, which sandy mounts READ-ONLY at /opt/sandy/relay -- so installing a connector is one file write, with no workspace config key, no privileged-key approval prompt and no generated wrapper. Exactly one entry: a relay.d-style set would break connectors whose claim lock refuses a second consumer on one notice directory. Default 1, safe because the capability is INERT without host-side state a repository cannot create -- 'no entry in the slot' is a legitimate resolved state, not a broken path (contrast a hypothetical default for SANDY_HANDOFF_RELAY, which names a file sandy does not install, so every unprovisioned sandbox would fail to launch). The read-only MOUNT is the boundary, not permission bits: the container process runs as the host uid and OWNS the entry, so bits bind nothing and the agent could chmod its own relay; under a :ro mount the write returns EROFS. An adapter can write files, it cannot create a mount. HONEST LIMIT: sandy guarantees the FIRST executable only -- a relay that execs a daemon out of a writable directory is replaceable at the second link. An entry that exists but is not executable is an ERROR that fails the launch, never silently absent. A present entry forces SANDY_HANDOFF_DIRS=1 (the relay needs ~/.handoff/relay for state) and makes crossSessionInbound default to accept, on the same condition it always did. Both values are passive-safe: 0 only tightens. But because a CLONED repo shipping 0 would silently disable an operator's fleet connector, the resolved state records disabled_by (env, host or workspace) in /etc/sandy-session.json and --print-state -- visible, not forbidden. Skipped, not failed, in headless (-p) and --remote runs, exactly like SANDY_HANDOFF_RELAY. Reported as relay.slot (absent, present or disabled) in the session marker -- launch INTENT, since the marker is written before docker run and the relay starts in-container -- and as live relay.state (absent, started, failed, looping or disabled) in --print-state.
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
@@ -2258,6 +2330,20 @@ EOF_RELAY_STATE
             done
             sb_aa="$sb_aa}"
             printf ','; _json_kv agent_args_files "$sb_aa"
+            # features (#304): which non-sandy things this sandbox is enrolled
+            # in, read from $SANDBOX_DIR/features/ at QUERY TIME. That makes it
+            # better than `agents` and `handoff_enabled` on one axis worth
+            # naming: those report the LAST LAUNCH and have both been misread
+            # here as current state; this one is current by construction.
+            #
+            # It still reports only what sandy was TOLD. A name here means a
+            # marker exists, never that anything works -- sandy does not know
+            # what a feature is, and (apart from #305's mount) never acts on it.
+            # Both modes: one directory read, no spawns (the agent_args_files
+            # precedent, not size_bytes').
+            _sandy_features_scan "$sb"
+            printf ','; _json_kv features "$_SANDY_FEAT_NAMES"
+            printf ','; _json_kv feature_problems "$_SANDY_FEAT_PROBLEMS"
             if [ -d "$sb_lock_dir" ]; then
                 printf ','; _json_kv lock_held 'true'
                 printf ','; _json_kv lock_holder_pid "$(_json_escape "$sb_lock_pid")"
@@ -2982,7 +3068,7 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # a poisoned session must not silently un-enrol it from the fleet, which is
     # exactly what would happen by default, since everything not named here is
     # destroyed.
-    _rs_keep() { case "$1" in WORKSPACE.json|.handoff-enabled|relay-bin|agent-args.*) return 0 ;; .sandy-approved-symlinks.list) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
+    _rs_keep() { case "$1" in WORKSPACE.json|.handoff-enabled|relay-bin|features|agent-args.*) return 0 ;; .sandy-approved-symlinks.list) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
     printf '\nsandy --reset-sandbox: %s\n' "$_rs_name"
     printf 'Workspace: %s\n' "$_rs_wd"
     printf 'Will destroy (next launch re-materializes them):\n'
@@ -3000,9 +3086,10 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # when it was not (it is preserved unconditionally, like WORKSPACE.json,
     # per _rs_keep above). That is the inverse of the "looks wired and is
     # not" failure the marker exists to prevent (#178 fix).
-    printf 'Preserved: WORKSPACE.json (lineage)%s%s%s%s\n\n' \
+    printf 'Preserved: WORKSPACE.json (lineage)%s%s%s%s%s\n\n' \
         "$([ -e "$_rs_dir/.handoff-enabled" ] && printf ', .handoff-enabled (handoff enrollment)')" \
         "$([ -e "$_rs_dir/relay-bin/relay" ] && printf ', relay-bin/ (installed relay)')" \
+        "$(set -- "$_rs_dir"/features/*; [ -e "$1" ] && printf ', features/ (feature enrollment)')" \
         "$(set -- "$_rs_dir"/agent-args.*; [ -e "$1" ] && printf ', agent-args.* (per-agent launch args)')" \
         "$([ "$_rs_keep_approvals" = "true" ] && printf ', approval list')"
 
@@ -3321,6 +3408,10 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
         if [ -e "$_rms_dir/relay-bin/relay" ]; then
             printf '    NOTE: an installed relay (relay-bin/relay) will be destroyed with the sandbox.\n'
         fi
+        for _rms_ft in "$_rms_dir"/features/*; do
+            [ -e "$_rms_ft" ] || [ -L "$_rms_ft" ] || continue
+            printf '    NOTE: feature enrollment (features/%s) will be destroyed with the sandbox.\n' "${_rms_ft##*/}"
+        done
         for _rms_aa in "$_rms_dir"/agent-args.*; do
             [ -e "$_rms_aa" ] || continue
             printf '    NOTE: per-agent launch args file %s will be destroyed with the sandbox.\n' "$(basename "$_rms_aa")"
@@ -8410,6 +8501,37 @@ if [ -n "${SANDY_SCREENSHOT_DIR:-}" ]; then
     unset _ssd_real
 fi
 
+# Validate SANDY_FEATURES_DIR (#305) on the SANDY_SCREENSHOT_DIR pattern, for
+# the same reasons: it names a host directory that gets bind-mounted into
+# containers, so shell metacharacters and obviously-too-broad targets are hard
+# errors, while a MISSING directory is warn-and-disable -- Docker would
+# silently auto-create an empty host dir at bind-mount time, and an operator
+# who mistypes the path would get a working-looking mount of nothing.
+# PRIVILEGED for the same reason SANDY_SCREENSHOT_DIR is: a committed workspace
+# config must not be able to choose a host path to mount.
+if [ -n "${SANDY_FEATURES_DIR:-}" ]; then
+    if [[ "$SANDY_FEATURES_DIR" =~ [\;\$\`\&\|\<\>] ]]; then
+        echo "[sandy] ERROR: SANDY_FEATURES_DIR contains shell metacharacters" >&2
+        _sandy_daemon_fatal
+        exit 1
+    fi
+    _sfd_real="$(cd "$SANDY_FEATURES_DIR" 2>/dev/null && pwd -P || echo "$SANDY_FEATURES_DIR")"
+    case "$_sfd_real" in
+        "$HOME"|/|"")
+            echo "[sandy] ERROR: SANDY_FEATURES_DIR='$SANDY_FEATURES_DIR' is too broad (resolves to '$_sfd_real'). Pick a specific subdirectory." >&2
+            _sandy_daemon_fatal
+            exit 1
+            ;;
+    esac
+    if [ ! -d "$SANDY_FEATURES_DIR" ]; then
+        echo "[sandy] WARNING: SANDY_FEATURES_DIR='$SANDY_FEATURES_DIR' does not exist or is not a directory; no feature payloads will be mounted." >&2
+        SANDY_FEATURES_DIR=""
+    else
+        SANDY_FEATURES_DIR="$_sfd_real"
+    fi
+    unset _sfd_real
+fi
+
 # --- Resolve agent ---
 # CLI --agent flag wins over all config sources (per-project, user, env)
 [ -n "$SANDY_AGENT_OVERRIDE" ] && SANDY_AGENT="$SANDY_AGENT_OVERRIDE"
@@ -10169,6 +10291,11 @@ _sandy_relay_from_slot="false"    # did the slot supply the relay we will run?
 # CONSTRUCTION rather than convention. A stray mkdir, a restored backup or an
 # rsync -a can neither enable nor defeat anything; only an ENTRY does.
 mkdir -p "$_sandy_relay_slot_dir"
+# features/ (#304) is created on every launch for the SAME reason the relay
+# slot and the handoff tree are: the DIRECTORY carries no information, so a
+# consumer cannot be fooled by its presence or absence. Only an ENTRY does, and
+# sandy never creates one.
+mkdir -p "$SANDBOX_DIR/features"
 if [ "$SANDY_RELAY" != "1" ]; then
     _sandy_relay_slot="disabled"
 elif [ -e "$_sandy_relay_slot_dir/relay" ]; then
@@ -12341,6 +12468,46 @@ if [ "${SANDY_HANDOFF_DIRS:-1}" = "1" ]; then
         RUN_FLAGS+=(-e "SANDY_HANDOFF_RELAY=$SANDY_HANDOFF_RELAY")
     fi
 fi
+# --- Marker-gated shared feature mounts (#305) ------------------------------
+# One host directory, mounted :ro at a stable path, into ONLY the sandboxes
+# carrying the matching features/<name> marker.
+#
+# GATED, NOT UNCONDITIONAL, and that is the whole design. An unconditional
+# shared mount would install into EVERY sandbox, including ones running a
+# different agent -- which is exactly the incident the `agents` field exists
+# for: a host-side tool enrolled all 51 sandboxes on a machine and installed a
+# per-agent component into each, one ran codex, and the only symptom was a
+# process exiting non-zero once a second into a log nobody was watching. An
+# unconditional mount makes that failure STRUCTURAL: you could no longer choose
+# not to install into a sandbox.
+#
+# :ro IS THE BOUNDARY, not permission bits -- the relay-slot argument verbatim.
+# The container runs as the host uid; if the payload were writable the agent
+# could rewrite the very thing it is supposed to be given. HONEST LIMIT, the
+# relay slot's again: sandy guarantees the FIRST executable. A binary that
+# execs out of a writable directory is replaceable at the second link.
+#
+# /opt/sandy/features/<name>, not under the agent's home: that tree is rw tmpfs
+# and /home/claude moves in 2.0 (#248). /opt already holds /opt/claude-code,
+# /opt/skills and /opt/sandy/relay.
+#
+# A marker with NO matching source WARNS rather than no-opping. An unnamed
+# misconfiguration is indistinguishable from a working one, which is finding #3
+# of the R7a work and the reason SANDY_SSH_KEYS warns on an unmatched entry.
+if [ -n "${SANDY_FEATURES_DIR:-}" ]; then
+    _sandy_features_scan "$SANDBOX_DIR"
+    # _SANDY_FEAT_LIST is the scan's own space-separated list of VALID names --
+    # no JSON surgery here. Unquoted on purpose: word-splitting is the iteration,
+    # and the scan guarantees [A-Za-z0-9._-], so no name can carry a space.
+    for _sfm_n in ${_SANDY_FEAT_LIST:-}; do
+        if [ -d "$SANDY_FEATURES_DIR/$_sfm_n" ]; then
+            RUN_FLAGS+=(-v "$SANDY_FEATURES_DIR/$_sfm_n:/opt/sandy/features/$_sfm_n:ro")
+        else
+            warn "features/$_sfm_n is marked on this sandbox but \$SANDY_FEATURES_DIR/$_sfm_n does not exist — nothing mounted for it."
+        fi
+    done
+    unset _sfm_n
+fi
 # Skill pack persistent state mounts. gstack mounts from the workspace (not
 # the sandbox) — see the migration block above where $WORK_DIR/.gstack is
 # ensured to exist.
@@ -12700,6 +12867,23 @@ if _sandy_agent_has gemini; then
 fi
 RUN_FLAGS+=(-e "SANDY_WORKSPACE=$SANDY_WORKSPACE")
 RUN_FLAGS+=(-e "SANDY_PROJECT_NAME=$(basename "$WORK_DIR")")
+# SANDY_SANDBOX_NAME (#303): the sandbox SLUG, <basename>-<sha8>. Nothing
+# in-container could learn it before, and it was not derivable from anything
+# that was there. SANDY_PROJECT_NAME above is the RAW basename, while the slug
+# takes `basename | tr -cd 'a-zA-Z0-9._-'` -- so it is lossy in BOTH
+# directions, missing the hash AND unfiltered, and a workspace whose basename
+# carries a stripped character (a space, say) has SANDY_PROJECT_NAME='my repo'
+# against slug 'myrepo-<sha8>'. Sandy passes no --hostname either, so the
+# container hostname is the docker container id.
+#
+# The AUTHORITATIVE copy is `sandbox_name` in /etc/sandy-session.json, which is
+# :ro and is the trust root; this export is convenience. In-container tooling
+# that needs to name itself to something outside should assert on the marker,
+# for the same reason session_nonce is deliberately NOT exported.
+#
+# Spelled `sandbox_name` in the marker to match WORKSPACE.json, which has
+# carried that field host-side since 0.10.1 -- one value, one name.
+RUN_FLAGS+=(-e "SANDY_SANDBOX_NAME=$SANDBOX_NAME")
 # Validate SANDY_MODEL — only allow alphanumeric, hyphens, dots, underscores
 if _sandy_agent_has claude; then
     SANDY_MODEL="${SANDY_MODEL:-claude-opus-5}"
@@ -12882,8 +13066,8 @@ _sandy_relay_disabled_by_json="null"
 if [ "${_sandy_relay_slot:-absent}" = "disabled" ] && [ -n "${_SANDY_RELAY_SOURCE:-}" ]; then
     _sandy_relay_disabled_by_json="\"$_SANDY_RELAY_SOURCE\""
 fi
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "handoff_relay": %s,\n  "relay": {\n    "slot": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "cred_mode": "%s"\n}\n' \
-    "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" \
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "handoff_relay": %s,\n  "relay": {\n    "slot": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "cred_mode": "%s"\n}\n' \
+    "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
     "$_sandy_perm_mode_json" "$_sandy_csi_json" "$_sandy_agents_json" "$_sandy_relay_json" \
     "$_sandy_relay_slot_json" "$_sandy_relay_path_json" "$_sandy_relay_disabled_by_json" "${CRED_MODE:-none}" \
