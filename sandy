@@ -81,6 +81,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_CHANNEL_TARGET_PANE
     SANDY_VERBOSE
     SANDY_VENV_OVERLAY
+    SANDY_EGRESS
     SANDY_EGRESS_PROXY
     SANDY_EGRESS_NO_ISOLATION
     SANDY_EGRESS_STRICT
@@ -142,6 +143,7 @@ SANDY_ENV_ONLY_KEYS=(
 # config and env are trusted and set these directly.
 _sandy_passive_value_privileged() {
     case "$1" in
+        SANDY_EGRESS)              [ "$2" = "off" ] && return 0 ;;  # proxy OFF (2.0.0; the enum that replaces the two booleans below)
         SANDY_EGRESS_NO_ISOLATION) [ "$2" = "1" ] && return 0 ;;  # proxy OFF
         SANDY_EGRESS_STRICT)       [ "$2" = "0" ] && return 0 ;;  # strict -> permissive downgrade
         SANDY_EGRESS_PROXY)        [ "$2" = "0" ] && return 0 ;;  # deprecated alias: =0 == proxy off
@@ -1347,6 +1349,7 @@ SANDY_VERBOSE|int|0||0.8.0|stable|Verbosity (0=quiet, 1=verbose, 2=debug, 3=full
 SANDY_VENV_OVERLAY|bool|1||0.10.0|stable|Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container.
 SANDY_EGRESS_NO_ISOLATION|bool|0||1.0.0|stable|Turn the egress proxy OFF — legacy path (Linux iptables-only; NO network isolation on macOS). WEAKENS isolation, so from a workspace .sandy/config it is quarantined to the per-workspace approval prompt (a committed config cannot silently disable isolation). Mutually exclusive with SANDY_EGRESS_STRICT. Default 0 (proxy on).
 SANDY_EGRESS_STRICT|bool|0||1.0.0|stable|Run the egress proxy in strict mode (allow only the built-in default allowlist + SANDY_ALLOW_HOSTS; deny all other internet). STRENGTHENS isolation, so =1 is passive-safe from any source; =0 (downgrading a host-configured strict) is approval-gated from a workspace source. Mutually exclusive with SANDY_EGRESS_NO_ISOLATION. Default 0 (permissive).
+SANDY_EGRESS|enum:off,permissive,strict|permissive||2.0.0|stable|Egress posture, ONE key as of 2.0.0. off = proxy off (legacy: Linux iptables only, NO network isolation on macOS). permissive (default) = proxy on, blocking private/LAN/link-local/CGNAT/cloud-metadata destinations while allowing the internet. strict = proxy on with an allowlist only (model providers, GitHub, npm, PyPI, crates, Go, Debian) plus SANDY_ALLOW_HOSTS. Replaces a three-way choice encoded as TWO MUTUALLY EXCLUSIVE BOOLEANS (SANDY_EGRESS_NO_ISOLATION, SANDY_EGRESS_STRICT) plus a deprecated tri-state whose 0/1/2 were opaque (SANDY_EGRESS_PROXY) -- all three still work, are listed in README's Deprecated section, and are IGNORED WITH A NOTICE when this key is set (never merged; the winner is named). Value-aware tier: permissive and strict are passive-safe, while off WEAKENS the sandbox and is therefore approval-gated from a workspace .sandy/config, exactly as SANDY_EGRESS_NO_ISOLATION=1 was. SANDY_SUSPICIOUS=1 still defaults the posture to strict; an explicit choice wins and a weaker one is named loudly.
 SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|DEPRECATED — use SANDY_EGRESS_NO_ISOLATION / SANDY_EGRESS_STRICT. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 is approval-gated (weakening), matching the new keys.
 SANDY_EGRESS_LOG|enum:0,1,summary|0||1.4.0|stable|Log which hosts the agent's egress actually reached (HF-incident Issue 4). The proxy logs each DISTINCT allowed host:port once (deduped) to proxy.log; at session end sandy prints an egress summary (distinct hosts reached + denial count). 0=off (deny-only, the pre-1.4 behavior); 1=per-connection allow lines + session-end summary; summary=session-end summary only (the proxy still records allows to build it). Passive-safe: it only ADDS visibility. Hostnames only — TLS is never terminated, no payload; the log stays in $SANDBOX_DIR.
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||0.11.1|stable|Remove .github/workflows from the read-only protection list.
@@ -8788,11 +8791,47 @@ fi
 # is the string the proxy config consumes.
 _SANDY_PROXY_ON=false
 _SANDY_PROXY_MODE=""
-# Egress posture is set by two boolean knobs (default permissive, i.e. both 0):
-#   SANDY_EGRESS_NO_ISOLATION=1 → proxy OFF (legacy; weakening — approval-gated
-#                                 from a workspace source)
-#   SANDY_EGRESS_STRICT=1       → strict allowlist (strengthening — passive-safe)
-# The old tri-state SANDY_EGRESS_PROXY is a DEPRECATED alias, mapped here.
+# Snapshot the deprecated booleans BEFORE the enum below overwrites them, so
+# the "which one won" notice can say something true rather than inferring it
+# from values it just assigned itself.
+SANDY_EGRESS_NO_ISOLATION_WAS="${SANDY_EGRESS_NO_ISOLATION:-}"
+SANDY_EGRESS_STRICT_WAS="${SANDY_EGRESS_STRICT:-}"
+# Egress posture is ONE key as of 2.0.0:
+#
+#   SANDY_EGRESS=off|permissive|strict      (default permissive)
+#
+# It replaces a three-way choice that was encoded as TWO MUTUALLY EXCLUSIVE
+# BOOLEANS -- SANDY_EGRESS_NO_ISOLATION and SANDY_EGRESS_STRICT -- which needed
+# a contradiction check, two entries in the value-aware tier gate, and a
+# separate deprecated tri-state (SANDY_EGRESS_PROXY, whose 0/1/2 were opaque)
+# to express what one enum says plainly. Both old keys still work and are
+# listed in README's Deprecated section; `off` is the weakening value and is
+# approval-gated from a workspace exactly as SANDY_EGRESS_NO_ISOLATION=1 was.
+#
+# NOTE FOR ANYONE EDITING THIS REGION: run-tests.sh §53 extracts it as
+# sed -n '/^_SANDY_PROXY_ON=false/,/^esac/p', so a column-0 `esac` before the
+# resolution lines truncates the extraction and fails the tri-state checks. It
+# has already done so once in CI. Keep every `case` indented.
+#
+# Everything here TRANSLATES into the two internal booleans rather than
+# branching separately, so the resolution below and every consumer downstream
+# are untouched -- the same shape the deprecated alias has always used.
+if [ -n "${SANDY_EGRESS:-}" ]; then
+    case "$SANDY_EGRESS" in
+        off)        SANDY_EGRESS_NO_ISOLATION=1; SANDY_EGRESS_STRICT=0 ;;
+        permissive) SANDY_EGRESS_NO_ISOLATION=0; SANDY_EGRESS_STRICT=0 ;;
+        strict)     SANDY_EGRESS_NO_ISOLATION=0; SANDY_EGRESS_STRICT=1 ;;
+        *) echo "[sandy] ERROR: SANDY_EGRESS='$SANDY_EGRESS' invalid (want off, permissive, or strict)" >&2; exit 1 ;;
+    esac
+    # Never merge two sources; name the winner (the agent-args rule). A
+    # deprecated key set alongside the new one is ignored, and silently
+    # ignoring it is how someone spends an afternoon on a setting that was
+    # never in effect.
+    if [ -n "${SANDY_EGRESS_NO_ISOLATION_WAS:-}" ] || [ -n "${SANDY_EGRESS_STRICT_WAS:-}" ] || [ -n "${SANDY_EGRESS_PROXY:-}" ]; then
+        warn "SANDY_EGRESS=$SANDY_EGRESS is set, so it WINS — the deprecated SANDY_EGRESS_NO_ISOLATION / SANDY_EGRESS_STRICT / SANDY_EGRESS_PROXY values are ignored this launch."
+    fi
+    SANDY_EGRESS_PROXY=""
+fi
 if [ -n "${SANDY_EGRESS_PROXY:-}" ]; then
     case "$SANDY_EGRESS_PROXY" in
         0) SANDY_EGRESS_NO_ISOLATION=1 ;;
@@ -8800,7 +8839,16 @@ if [ -n "${SANDY_EGRESS_PROXY:-}" ]; then
         2) SANDY_EGRESS_STRICT=1 ;;
         *) echo "[sandy] ERROR: SANDY_EGRESS_PROXY='$SANDY_EGRESS_PROXY' invalid (want 0, 1, or 2)" >&2; exit 1 ;;
     esac
-    warn "SANDY_EGRESS_PROXY is deprecated — use SANDY_EGRESS_NO_ISOLATION=1 (off) or SANDY_EGRESS_STRICT=1 (strict)."
+    warn "SANDY_EGRESS_PROXY is deprecated — use SANDY_EGRESS=off|permissive|strict."
+fi
+if [ -z "${SANDY_EGRESS:-}" ]; then
+    # Deprecated since 2.0.0, still honoured. The warning names the deprecated
+    # key FIRST, before its replacement -- run-tests.sh §138 reads the first
+    # SANDY_* token on the line and requires it to be announced in README.
+    [ -n "${SANDY_EGRESS_NO_ISOLATION_WAS:-}" ] && \
+        warn "SANDY_EGRESS_NO_ISOLATION is deprecated — use SANDY_EGRESS=off."
+    [ -n "${SANDY_EGRESS_STRICT_WAS:-}" ] && \
+        warn "SANDY_EGRESS_STRICT is deprecated — use SANDY_EGRESS=strict (or SANDY_EGRESS=permissive)."
 fi
 # Validate the boolean knobs (reject typos rather than silently fail-open).
 for _ek in SANDY_EGRESS_NO_ISOLATION SANDY_EGRESS_STRICT; do

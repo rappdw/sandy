@@ -921,7 +921,9 @@ Sandy's rule: an entry can only be **added** to this list in an `X.0.0` release,
 | `handoff_enabled` and `handoff{}` in `--print-state` | 2.0.0 | they report on the handoff tree above, so they go with it — and their removal bumps `schema_version` for the same reason |
 | the `.handoff-enabled` sandbox marker | 2.0.0 | nothing: it forces the handoff tree on for one sandbox, and the tree is what is going. A feature manifest selects per sandbox instead |
 | `SANDY_SCREENSHOT_DIR` | 2.0.0 | intended to become a feature manifest; the design is not settled (#317), and the key stays until it is |
-| `SANDY_EGRESS_PROXY` | 2.0.0 | `SANDY_EGRESS_NO_ISOLATION=1` (off) or `SANDY_EGRESS_STRICT=1` (strict). It has warned since 0.14.0; listing it here is what finally gives its removal a date |
+| `SANDY_EGRESS_PROXY` | 2.0.0 | `SANDY_EGRESS=off\|permissive\|strict`. It has warned since 0.14.0; listing it here is what finally gives its removal a date |
+| `SANDY_EGRESS_NO_ISOLATION` | 2.0.0 | `SANDY_EGRESS=off` — same posture, same approval gate, one key instead of two mutually exclusive booleans |
+| `SANDY_EGRESS_STRICT` | 2.0.0 | `SANDY_EGRESS=strict` (or `permissive`) |
 | `SANDY_CHANNELS`: the `plugin:<name>@<marketplace>` form | 2.0.0 | bare comma-separated names. The key itself is **not** deprecated — only that spelling of its value |
 
 Removals are loud where sandy can see them: a removed config key is a hard error naming its replacement, a removed mechanism warns first, and a removed introspection field bumps `schema_version`.

@@ -15040,6 +15040,92 @@ check "§138(4) every key listed as deprecated still EXISTS in sandy — a liste
 
 unset _S138_SANDY _S138_README _S138_TABLE _S138_MISSING _S138_FOUND _S138_DEPR _S138_STALE _s138_line _s138_key _s138_row _s138_k
 
+# ============================================================
+echo ""
+echo "§139: SANDY_EGRESS — one enum replaces two mutually exclusive booleans (2.0.0)"
+# ============================================================
+# A three-way posture was encoded as TWO booleans that had to be checked for
+# contradiction, two entries in the value-aware tier gate, and a deprecated
+# tri-state whose 0/1/2 were opaque. One enum says it plainly. Nothing is
+# removed: all three old keys still resolve, and are announced in README.
+#
+# THE REGION THIS EXTRACTS IS LOAD-BEARING. sandy's own comment says so: §53
+# reads it as sed '/^_SANDY_PROXY_ON=false/,/^esac/p', so a column-0 `esac`
+# before the resolution lines truncates the extraction and the tri-state checks
+# pass on a fragment. It has happened in CI once already.
+_S139_BLK="$(sed -n '/^_SANDY_PROXY_ON=false/,/^esac/p' "$SANDY_SCRIPT")"
+check "§139(pre) the egress region extracted and reaches the RESOLUTION, not just the validation (mutation: a column-0 esac above it truncates the range and every check below runs on a fragment)" \
+    bash -c 'printf "%s" "$1" | grep -q "_SANDY_PROXY_MODE=\"permissive\""' _ "$_S139_BLK"
+
+# The region calls `exit 1` on an invalid value, which ends the shell -- so a
+# trailing printf never runs and an ERROR case comes back EMPTY, not "ERROR".
+# The first cut of this helper tried to catch it with `|| printf ERROR` and got
+# an empty string it then compared against "ERROR", failing against correct
+# code. Empty IS the error signal; say so rather than fighting it.
+_s139() {   # $1 = env assignments -> "mode|on", or "" when the region exited
+    env -u SANDY_EGRESS -u SANDY_EGRESS_NO_ISOLATION -u SANDY_EGRESS_STRICT \
+        -u SANDY_EGRESS_PROXY -u SANDY_SUSPICIOUS $1 bash -c '
+            warn(){ :; }; info(){ :; }
+            eval "$1" >/dev/null 2>&1
+            printf "%s|%s" "${_SANDY_PROXY_MODE:-off}" "$_SANDY_PROXY_ON"
+        ' _ "$_S139_BLK" 2>/dev/null
+}
+# NOTE the missing redirect, which is the whole point of this helper: _s139
+# sends the region's output to /dev/null because it only wants the final
+# printf, and copying that line here silenced exactly the warnings this
+# captures -- the check then reported "none" against code that warns correctly.
+_s139w() {  # $1 = env assignments -> the warnings the region emitted
+    env -u SANDY_EGRESS -u SANDY_EGRESS_NO_ISOLATION -u SANDY_EGRESS_STRICT \
+        -u SANDY_EGRESS_PROXY -u SANDY_SUSPICIOUS $1 bash -c '
+            warn(){ printf "WARN:%s\n" "$*"; }; info(){ :; }
+            eval "$1"
+        ' _ "$_S139_BLK" 2>&1
+}
+check "§139(1) unset defaults to permissive — the posture nobody chose is still the protected one" \
+    bash -c '[ "$1" = "permissive|true" ]' _ "$(_s139 '')"
+check "§139(2) SANDY_EGRESS=off" \
+    bash -c '[ "$1" = "off|false" ]' _ "$(_s139 'SANDY_EGRESS=off')"
+check "§139(3) SANDY_EGRESS=permissive" \
+    bash -c '[ "$1" = "permissive|true" ]' _ "$(_s139 'SANDY_EGRESS=permissive')"
+check "§139(4) SANDY_EGRESS=strict" \
+    bash -c '[ "$1" = "strict|true" ]' _ "$(_s139 'SANDY_EGRESS=strict')"
+check "§139(5) a typo EXITS, never silently falling through to a weaker posture (an empty result means the region called exit; mutation: replace the error branch with a default and this reports permissive)" \
+    bash -c '[ -z "$1" ]' _ "$(_s139 'SANDY_EGRESS=bogus')"
+
+# The deprecated keys keep working. Without these, the enum could have been
+# added by quietly breaking every existing config.
+check "§139(6) deprecated SANDY_EGRESS_STRICT=1 still resolves to strict" \
+    bash -c '[ "$1" = "strict|true" ]' _ "$(_s139 'SANDY_EGRESS_STRICT=1')"
+check "§139(7) deprecated SANDY_EGRESS_NO_ISOLATION=1 still resolves to off" \
+    bash -c '[ "$1" = "off|false" ]' _ "$(_s139 'SANDY_EGRESS_NO_ISOLATION=1')"
+check "§139(8) doubly-deprecated SANDY_EGRESS_PROXY=2 still resolves to strict" \
+    bash -c '[ "$1" = "strict|true" ]' _ "$(_s139 'SANDY_EGRESS_PROXY=2')"
+
+# Never merge two sources; the newer key wins and says so.
+check "§139(9) the enum WINS over a contradicting deprecated key rather than erroring or merging" \
+    bash -c '[ "$1" = "strict|true" ]' _ "$(_s139 'SANDY_EGRESS=strict SANDY_EGRESS_NO_ISOLATION=1')"
+_S139_WARN="$(_s139w 'SANDY_EGRESS=strict SANDY_EGRESS_NO_ISOLATION=1')"
+check "§139(10) ...and the loser is NAMED — a deprecated value silently ignored is an afternoon spent on a setting that was never in effect (got: ${_S139_WARN:-none})" \
+    bash -c 'case "$1" in *WINS*) exit 0 ;; esac; exit 1' _ "$_S139_WARN"
+
+# SANDY_SUSPICIOUS composes with the new key exactly as with the old ones.
+check "§139(11) SANDY_SUSPICIOUS=1 still defaults the posture to strict" \
+    bash -c '[ "$1" = "strict|true" ]' _ "$(_s139 'SANDY_SUSPICIOUS=1')"
+check "§139(12) ...and an explicit SANDY_EGRESS=off still WINS over it (the explicit choice went through its own approval gate)" \
+    bash -c '[ "$1" = "off|false" ]' _ "$(_s139 'SANDY_SUSPICIOUS=1 SANDY_EGRESS=off')"
+
+# The tier. `off` weakens the sandbox, so a repository must not be able to set
+# it without an approval prompt -- the property the two booleans had and that a
+# rename could silently drop.
+_S139_TIER="$(bash -c 'eval "$(awk "/^_sandy_passive_value_privileged\(\) \{/,/^\}/" "$1")"
+    for v in off permissive strict; do
+        if _sandy_passive_value_privileged SANDY_EGRESS "$v"; then printf "%s:gated " "$v"; else printf "%s:free " "$v"; fi
+    done' _ "$SANDY_SCRIPT" 2>/dev/null)"
+check "§139(13) SANDY_EGRESS=off is approval-gated from a workspace while permissive and strict are free — a repo may tighten the sandbox, never loosen it (got: $_S139_TIER)" \
+    bash -c '[ "$1" = "off:gated permissive:free strict:free " ]' _ "$_S139_TIER"
+
+unset _S139_BLK _S139_TIER _S139_WARN
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
