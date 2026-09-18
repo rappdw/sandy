@@ -15185,6 +15185,100 @@ check "§140(11) --exec's HOME fallback is the new home — docker only derives 
 
 unset _S140_SANDY
 
+# ============================================================
+echo ""
+echo "§141: the 2.0 migration path — --reset-sandbox --all, and #309's backfill"
+# ============================================================
+# 2.0 moves the container home, so every 1.x sandbox is refused. The migration
+# has to be a COMMAND, not a paragraph, and it has to preserve the state that
+# nothing else recreates: relay-bin/, agent-args.* and .handoff-enabled are
+# operator state a repository cannot carry.
+#
+# #309 IS PART OF THIS, which is why it moved from curiosity to blocker.
+# --reset-sandbox destroys .sandy_created_version, and the directory still
+# exists afterwards, so SANDBOX_IS_NEW is false and the marker is never
+# rewritten -- leaving the RECOMMENDED migration with a permanent warning
+# telling the operator to recreate a sandbox that is provably fine.
+_S141_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S141_SANDY="$SANDY_SCRIPT"
+
+# --- #309: backfill iff there is provably nothing to break -------------------
+# The predicate is EMPTINESS of the package caches, not a grep for old paths:
+# the hazard IS the cached absolute paths, so no caches means no hazard. That
+# is cheap and provably right rather than heuristically right.
+_S141_BLK="$(awk '/^        unknown\|invalid\)/,/^            ;;/' "$_S141_SANDY")"
+check "§141(pre) the unknown-version branch was extracted (mutation: a rename empties it and the two checks below go vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandbox_has_cached_paths"' _ "$_S141_BLK"
+
+mkdir -p "$_S141_DIR/clean"
+_S141_CLEAN="$(bash -c 'set -uo pipefail
+    warn(){ printf "WARN\n"; }; info(){ printf "INFO:%s\n" "$*"; }
+    SANDBOX_DIR="$2"; WORK_DIR=/x; SANDY_VERSION="9.9.9"
+    _sandbox_created_ver_file="$SANDBOX_DIR/.sandy_created_version"
+    eval "case unknown in $1 esac"' _ "$_S141_BLK" "$_S141_DIR/clean" 2>&1)"
+check "§141(1) a sandbox with NO package caches is BACKFILLED, not warned — this is the state --reset-sandbox leaves, so without it the recommended migration nags forever" \
+    bash -c 'case "$1" in INFO:*recording\ it\ as\ created*) exit 0 ;; esac; exit 1' _ "$_S141_CLEAN"
+check "§141(2) ...and the marker is actually written, so the NEXT launch is silent too" \
+    bash -c '[ -s "$1/.sandy_created_version" ]' _ "$_S141_DIR/clean"
+
+mkdir -p "$_S141_DIR/dirty/venv"; : > "$_S141_DIR/dirty/venv/pyvenv.cfg"
+_S141_DIRTY="$(bash -c 'set -uo pipefail
+    warn(){ printf "WARN:%s\n" "$*"; }; info(){ printf "INFO\n"; }
+    SANDBOX_DIR="$2"; WORK_DIR=/x; SANDY_VERSION="9.9.9"
+    _sandbox_created_ver_file="$SANDBOX_DIR/.sandy_created_version"
+    eval "case unknown in $1 esac"' _ "$_S141_BLK" "$_S141_DIR/dirty" 2>&1)"
+check "§141(3) a sandbox WITH cached package state still warns — the backfill must not paper over a genuinely stale sandbox (mutation: drop the emptiness test and this goes red while (1) passes)" \
+    bash -c 'case "$1" in WARN:*cached\ package\ state*) exit 0 ;; esac; exit 1' _ "$_S141_DIRTY"
+check "§141(4) ...and does NOT write a marker it cannot justify" \
+    bash -c '[ ! -e "$1/.sandy_created_version" ]' _ "$_S141_DIR/dirty"
+
+# --- the refusal names the command that PRESERVES operator state -------------
+check "§141(5) the below-floor refusal recommends --reset-sandbox, not rm -rf — rm -rf takes relay-bin/, agent-args.* and .handoff-enabled with it, and nothing recreates those" \
+    bash -c 'grep -q "sandy --reset-sandbox --workspace" "$1" && ! grep -q "rm -rf \\\\\"\$SANDBOX_DIR\\\\\" && sandy --rebuild" "$1"' _ "$_S141_SANDY"
+
+# --- --reset-sandbox --all ---------------------------------------------------
+_S141_H="$_S141_DIR/home"; mkdir -p "$_S141_H/ws1" "$_S141_H/ws2"
+for _s141_w in ws1 ws2; do
+    _s141_ws="$_S141_H/$_s141_w"
+    _s141_h="$(printf '%s' "$_s141_ws" | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-8)"
+    _s141_d="$_S141_H/sandboxes/$_s141_w-$_s141_h"
+    mkdir -p "$_s141_d/pip" "$_s141_d/relay-bin"
+    printf '{\n  "workspace_path": "%s"\n}\n' "$_s141_ws" > "$_s141_d/WORKSPACE.json"
+    : > "$_s141_d/pip/cached"; : > "$_s141_d/relay-bin/relay"; : > "$_s141_d/agent-args.claude"
+done
+mkdir -p "$_S141_H/sandboxes/gone-deadbeef"
+printf '{\n  "workspace_path": "/no/such/workspace"\n}\n' > "$_S141_H/sandboxes/gone-deadbeef/WORKSPACE.json"
+
+_S141_DRY="$(SANDY_HOME="$_S141_H" bash "$_S141_SANDY" --reset-sandbox --all --dry-run 2>&1; printf 'rc=%s' "$?")"
+check "§141(6) --all plans every known sandbox and names the one whose workspace is gone (which cannot be reset, because the per-workspace form resolves through the workspace)" \
+    bash -c 'printf "%s" "$1" | grep -q "2 sandbox(es), 1 unresettable" &&
+             printf "%s" "$1" | grep -q "gone-deadbeef" &&
+             printf "%s" "$1" | grep -q "remove-sandbox --orphans"' _ "$_S141_DRY"
+check "§141(7) --dry-run resets NOTHING (a dry run that acts is the worst outcome)" \
+    bash -c 'ls "$1"/sandboxes/*/pip/cached >/dev/null 2>&1' _ "$_S141_H"
+
+_S141_RC=0
+SANDY_HOME="$_S141_H" bash "$_S141_SANDY" --reset-sandbox --all --yes >/dev/null 2>&1 || _S141_RC=$?
+check "§141(8) --all actually clears the package caches it planned" \
+    bash -c '! ls "$1"/sandboxes/*/pip/cached >/dev/null 2>&1' _ "$_S141_H"
+# THE CHECK THE WHOLE MIGRATION RESTS ON.
+check "§141(9) ...and PRESERVES relay-bin/ and agent-args.* on every sandbox — operator state nothing else recreates (mutation: reset via rm -rf and this goes red while (8) still passes)" \
+    bash -c 'for d in "$1"/sandboxes/ws*/; do
+                [ -e "$d/relay-bin/relay" ] || exit 1
+                [ -e "$d/agent-args.claude" ] || exit 1
+             done; exit 0' _ "$_S141_H"
+check "§141(10) an unresettable orphan makes the run exit NON-ZERO — the C1 rule: the goal state is not met and no work here can meet it (got rc=$_S141_RC)" \
+    test "$_S141_RC" -eq 1
+check "§141(11) --all and --workspace are mutually exclusive (one selector, one resolution path)" \
+    bash -c 'out="$(SANDY_HOME="$2" bash "$1" --reset-sandbox --all --workspace /tmp --yes 2>&1 || true)"
+             case "$out" in *"mutually exclusive"*) exit 0 ;; esac; exit 1' _ "$_S141_SANDY" "$_S141_H"
+check "§141(12) --all needs --yes when stdin is not a TTY — cron must opt in explicitly" \
+    bash -c 'out="$(SANDY_HOME="$2" bash "$1" --reset-sandbox --all </dev/null 2>&1 || true)"
+             case "$out" in *"needs --yes"*) exit 0 ;; esac; exit 1' _ "$_S141_SANDY" "$_S141_H"
+
+rm -rf "$_S141_DIR"
+unset _S141_DIR _S141_SANDY _S141_BLK _S141_CLEAN _S141_DIRTY _S141_H _S141_DRY _S141_RC _s141_w _s141_ws _s141_h _s141_d
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

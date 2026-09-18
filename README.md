@@ -906,6 +906,53 @@ For any `SANDY_AGENT` value other than single-agent `claude`, sandy uses a **hos
 .sandy/.secrets
 ```
 
+## Upgrading to 2.0
+
+**Read this before upgrading. 2.0 renames the container user and home from `claude` to `sandy`, and every sandbox created by 1.x must be migrated.**
+
+Your **workspaces are never touched** — the change is entirely inside sandy's own state under `~/.sandy/`.
+
+### Why a migration is needed at all
+
+`/home/claude` is baked into files sandy does not own: virtualenv shebangs and `pyvenv.cfg`, `.pth` files, editable installs, `GOPATH` and `PYTHONUSERBASE` metadata, npm and cargo state. Moving the home leaves those pointing at a directory that no longer exists, and they fail in ways that look like broken packages rather than a moved home. Sandy refuses to launch against such a sandbox rather than limping into it.
+
+### The migration
+
+One command, once, for every sandbox on the host:
+
+```sh
+sandy --reset-sandbox --all --dry-run   # see what it will do
+sandy --reset-sandbox --all --yes
+```
+
+| destroyed (rebuilt on next launch) | preserved |
+|---|---|
+| `pip/`, `uv/`, `npm-global/`, `go/`, `cargo/` package caches | `WORKSPACE.json` (lineage) |
+| the `venv/` overlay | `relay-bin/` (an installed relay) |
+| per-agent state: `claude/`, `gemini/`, `codex/`, `opencode/`, `grok/` | `agent-args.<agent>` (per-agent launch args) |
+| `.claude.json`, installed plugins, approvals | `.handoff-enabled` |
+
+**Do not use `rm -rf` on the sandbox directory.** It takes the preserved column with it, and nothing recreates those — `relay-bin/` and `agent-args.*` are operator state a repository cannot carry.
+
+The cost is time and bandwidth: the next launch in each workspace re-downloads packages and rebuilds the venv. Nothing is lost that a `uv sync` or `npm install` will not restore.
+
+A sandbox whose workspace no longer exists cannot be migrated — it is named and counted, and `sandy --remove-sandbox --orphans` is the command for it.
+
+### If you have scripts, MCP configs or agent args that hardcode `/home/claude`
+
+They break. Container paths are available from the environment and from the read-only attestation marker rather than by assumption:
+
+```sh
+sandy --exec -- printenv HOME                 # the container home
+sandy --exec -- cat /etc/sandy-session.json   # workspace, sandbox_name, posture
+```
+
+### Also in 2.0
+
+- `--print-state`'s `schema_version` is **`2`**. Gate on that number, not on sandy's version string — `2.0.0-dev` compares equal to `2.0.0`.
+- `sandboxes[].features` now reports **manifest selection** rather than per-sandbox markers; `SANDY_FEATURES_DIR` is removed with an error naming its replacement.
+- `SANDY_EGRESS=off|permissive|strict` replaces two booleans. The old keys still work — see **Deprecated** below.
+
 ## Deprecated
 
 Everything here still works. Each entry was announced in the major release named, and **may be removed in any later `X.Y.0`** — so if you depend on one, plan the move rather than waiting for it to break.

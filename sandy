@@ -1658,7 +1658,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--update-sessions"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Fleet image refresh + rolling restart across every daemon session on the host; scope to one session with --workspace PATH. Sub-options: --dry-run, --yes, --idle-for <minutes>, --rebuild, --workspace."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --keep-approvals, --dry-run, --yes."'; printf '}'
+    printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-approvals, --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
     printf ','
@@ -3435,7 +3435,7 @@ fi
 # one command. Same maintenance family as --gc: parses its own trailing sub-flags,
 # exits before config load / mutex / image build. Workspace-scoped (default cwd).
 if [[ "${1:-}" == "--reset-sandbox" ]]; then
-    _rs_workspace=""; _rs_keep_approvals=false; _rs_dry_run=false; _rs_yes=false
+    _rs_workspace=""; _rs_keep_approvals=false; _rs_dry_run=false; _rs_yes=false; _rs_all=false
     shift
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -3444,12 +3444,83 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
             --workspace=*)    _rs_workspace="${1#--workspace=}"
                               [ -z "$_rs_workspace" ] && { error "--reset-sandbox: --workspace needs a PATH"; exit 1; } ;;
             --keep-approvals) _rs_keep_approvals=true ;;
+            --all)            _rs_all=true ;;
             --dry-run)        _rs_dry_run=true ;;
             --yes)            _rs_yes=true ;;
             *) error "--reset-sandbox: unrecognized argument: $1"; exit 1 ;;
         esac
         shift
     done
+
+    # --all: the one command an operator runs at a major upgrade. Composed from
+    # the per-workspace form VERBATIM rather than reimplemented -- the --stop-all
+    # and --provision --all rule, so the fleet form cannot drift from the single
+    # form (and in particular cannot grow a different idea of what is preserved).
+    #
+    # SCOPE IS THE SANDBOX DIRECTORY, which IS sandy's registry: a workspace that
+    # has never been launched has no directory and cannot be reached, so this
+    # can never adopt something it should not.
+    #
+    # A sandbox whose workspace is GONE is named and counted, never silently
+    # skipped -- the --provision --all rule. It cannot be reset, because the
+    # per-workspace form resolves through the workspace; --remove-sandbox
+    # --orphans is the command for those.
+    if [ "${_rs_all:-false}" = true ]; then
+        [ -n "$_rs_workspace" ] && { error "--reset-sandbox: --all and --workspace are mutually exclusive."; exit 1; }
+        _rsa_todo_n=(); _rsa_todo_w=(); _rsa_orphan=()
+        for _rsa_sb in "$SANDY_HOME/sandboxes"/*/; do
+            [ -d "$_rsa_sb" ] || continue
+            _rsa_sb="${_rsa_sb%/}"; _rsa_name="${_rsa_sb##*/}"
+            _rsa_ws=""
+            if [ -f "$_rsa_sb/WORKSPACE.json" ]; then
+                _rsa_ws="$(grep -m1 '"workspace_path"' "$_rsa_sb/WORKSPACE.json" 2>/dev/null \
+                    | sed 's/.*"workspace_path"[[:space:]]*:[[:space:]]*"//; s/".*//' || true)"
+            fi
+            if [ -z "$_rsa_ws" ] || [ ! -d "$_rsa_ws" ]; then
+                _rsa_orphan+=("$_rsa_name"); continue
+            fi
+            _rsa_todo_n+=("$_rsa_name"); _rsa_todo_w+=("$_rsa_ws")
+        done
+        printf '\nsandy --reset-sandbox --all: %d sandbox(es), %d unresettable\n' \
+            "${#_rsa_todo_n[@]}" "${#_rsa_orphan[@]}"
+        _rsa_i=0
+        while [ "$_rsa_i" -lt "${#_rsa_todo_n[@]}" ]; do
+            printf '  - %-34s %s\n' "${_rsa_todo_n[$_rsa_i]}" "${_rsa_todo_w[$_rsa_i]}"
+            _rsa_i=$((_rsa_i + 1))
+        done
+        for _rsa_name in ${_rsa_orphan[@]+"${_rsa_orphan[@]}"}; do
+            printf '  ! %-34s %s\n' "$_rsa_name" "workspace is gone — sandy --remove-sandbox --orphans"
+        done
+        echo ""
+        if [ "${#_rsa_todo_n[@]}" -eq 0 ]; then
+            if [ "${#_rsa_orphan[@]}" -eq 0 ]; then info "No sandboxes to reset."; exit 0; fi
+            error "${#_rsa_orphan[@]} sandbox(es) cannot be reset (workspace gone)."; exit 1
+        fi
+        [ "$_rs_dry_run" = true ] && { info "--dry-run: nothing reset."; exit 0; }
+        if [ "$_rs_yes" != true ]; then
+            if [ -t 0 ]; then
+                printf '[sandy] Reset %d sandbox(es)? [y/N] ' "${#_rsa_todo_n[@]}" >&2
+                read -r _rsa_ans < /dev/tty || _rsa_ans=""
+                case "$_rsa_ans" in [yY]|[yY][eE][sS]) ;; *) info "Aborted — nothing reset."; exit 0 ;; esac
+            else
+                error "--reset-sandbox --all needs --yes when stdin is not a TTY."; exit 1
+            fi
+        fi
+        _rsa_fail=(); _rsa_i=0
+        while [ "$_rsa_i" -lt "${#_rsa_todo_n[@]}" ]; do
+            info "Resetting ${_rsa_todo_n[$_rsa_i]}…"
+            "$0" --reset-sandbox --workspace "${_rsa_todo_w[$_rsa_i]}" --yes \
+                $([ "$_rs_keep_approvals" = true ] && printf -- --keep-approvals) \
+                || _rsa_fail+=("${_rsa_todo_n[$_rsa_i]}")
+            _rsa_i=$((_rsa_i + 1))
+        done
+        printf '\nsandy --reset-sandbox --all: %d reset, %d failed, %d unresettable\n' \
+            "$(( ${#_rsa_todo_n[@]} - ${#_rsa_fail[@]} ))" "${#_rsa_fail[@]}" "${#_rsa_orphan[@]}"
+        for _rsa_name in ${_rsa_fail[@]+"${_rsa_fail[@]}"}; do printf '  x %s\n' "$_rsa_name"; done
+        for _rsa_name in ${_rsa_orphan[@]+"${_rsa_orphan[@]}"}; do printf '  ! %s (workspace gone)\n' "$_rsa_name"; done
+        [ "${#_rsa_fail[@]}" -eq 0 ] && [ "${#_rsa_orphan[@]}" -eq 0 ] && exit 0
+        exit 1
+    fi
 
     # Resolve + canonicalize the target workspace exactly like the launch path so
     # the sandbox hash matches (pwd -P: resolves symlinks / folds case-collisions).
@@ -10176,20 +10247,57 @@ else
             error "  npm/cargo metadata — all still pointing at /home/claude. They would fail"
             error "  in ways that look like broken packages rather than a moved home."
             error ""
-            error "  Recreate the sandbox (host-side, one-time; your workspace is untouched):"
-            error "    rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
+            error "  Migrate it (host-side, one-time; your WORKSPACE is never touched):"
+            error "    sandy --reset-sandbox --workspace \"$WORK_DIR\""
             error ""
-            error "  Keeping operator state: relay-bin/, features/ and agent-args.* live in"
-            error "  this directory too. Copy them aside first if you have any."
+            error "  That clears exactly the contaminated state -- pip, uv, npm-global, go,"
+            error "  cargo, venv and the per-agent dirs -- and PRESERVES relay-bin/,"
+            error "  agent-args.* and .handoff-enabled, which are operator state nothing else"
+            error "  recreates. Use it rather than rm -rf on the sandbox directory, which"
+            error "  takes those with it. Across a fleet: sandy --reset-sandbox --all --yes"
             exit 1
             ;;
         unknown|invalid)
-            # No marker (pre-0.10.1) or an unreadable one. We can't prove it's below
-            # the floor, so warn rather than refuse.
-            warn "Sandbox version is unknown (.sandy_created_version missing or unreadable)."
-            warn "  If it was created before sandy $SANDY_SANDBOX_MIN_COMPAT (the /workspace →"
-            warn "  /home/sandy/<rel> mount change), cached paths may be broken. If you hit"
-            warn "  path issues, recreate:  rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
+            # No marker (pre-0.10.1, an unreadable one, or a directory something
+            # else created) -- so we cannot prove it is below the floor and must
+            # not refuse.
+            #
+            # #309: BACKFILL WHEN THERE IS PROVABLY NOTHING TO BREAK. The hazard
+            # this whole classification exists for is CACHED ABSOLUTE PATHS --
+            # venv shebangs and pyvenv.cfg, .pth files, editable installs, GOPATH
+            # and PYTHONUSERBASE metadata, npm and cargo state. If none of those
+            # caches exist, there are no cached paths, so there is no hazard, and
+            # a permanent warning telling the operator to recreate a sandbox that
+            # is provably fine is worse than no warning at all.
+            #
+            # That is exactly the state `--reset-sandbox` leaves behind, which is
+            # the supported 2.0 migration -- so without this the recommended
+            # upgrade path produces a sandbox that nags forever. It was filed as
+            # a curiosity (#309) and became a blocker the moment the migration
+            # depended on it.
+            #
+            # The predicate is EMPTINESS, not a grep for old paths: cheaper, and
+            # provably right rather than heuristically right. Five directory
+            # tests, no I/O into the files.
+            _sandbox_has_cached_paths=false
+            for _sbc in pip uv npm-global go cargo venv; do
+                if [ -d "$SANDBOX_DIR/$_sbc" ] && [ -n "$(ls -A "$SANDBOX_DIR/$_sbc" 2>/dev/null)" ]; then
+                    _sandbox_has_cached_paths=true; break
+                fi
+            done
+            unset _sbc
+            if [ "$_sandbox_has_cached_paths" = false ]; then
+                echo "$SANDY_VERSION" > "$_sandbox_created_ver_file" 2>/dev/null || true
+                info "Sandbox had no version marker and no cached package state — recording it as created by sandy $SANDY_VERSION."
+            else
+                warn "Sandbox version is unknown (.sandy_created_version missing or unreadable)"
+                warn "  and it carries cached package state (pip/uv/npm/go/cargo/venv), which may"
+                warn "  hold absolute paths from an older layout. If you hit path issues:"
+                warn "    sandy --reset-sandbox --workspace \"$WORK_DIR\""
+                warn "  which clears those caches and preserves relay-bin/, agent-args.* and"
+                warn "  .handoff-enabled."
+            fi
+            unset _sandbox_has_cached_paths
             ;;
         ok) : ;;  # created at/after the floor — silent
     esac
