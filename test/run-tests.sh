@@ -14936,6 +14936,99 @@ check "§136(10) a feature DIRECTORY whose name is not a valid path segment is r
 rm -rf "$_S136_DIR"
 unset _S136_DIR _S136_BLK _S136_R _S136_SEL _S136_UNSEL _S136_FLAT _S136_NEST _S136_MIX
 
+# ============================================================
+echo ""
+echo "§137: selected.json — sandy writes membership for a consumer that executes nothing"
+# ============================================================
+# WHY IT EXISTS. The router executes nothing -- no subprocess, no dependencies
+# -- which is the basis of its claim to be a trusted runtime. Running
+# `sandy --print-state` to learn membership would invert the trust direction
+# between the repositories, so sandy writes a file and the router reads it.
+#
+# WHY IT IS PER-SLUG FILES, RENDERED. --remove-sandbox is filesystem-only and
+# must drop an entry with no parser on the host, and sandy controls this format
+# on both ends -- so the node/jq requirement stays where it belongs, on reading
+# the OPERATOR's manifest, not on sandy's own state.
+#
+# THE NOTE IS THE POINT. Selection depends on the agents a launch resolved to,
+# so for a sandbox that is not running the agent dimension is UNKNOWABLE rather
+# than merely stale. That distinction has been misread here three times
+# (`agents`, `handoff_enabled`, `handoff.state`), which is why it ships INSIDE
+# the document rather than in prose a consumer may never read.
+_S137_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S137_BLK="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$SANDY_SCRIPT")
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$SANDY_SCRIPT")"
+_S137_R="$_S137_DIR/features"
+mkdir -p "$_S137_R/amap/payload" "$_S137_R/amap/instances/sel-aaaaaaaa/inbox" \
+         "$_S137_R/amap/instances/sel-aaaaaaaa/outbox"
+: > "$_S137_R/amap/payload/relay"
+cat > "$_S137_R/amap/feature.json" <<'S137_JSON'
+{ "sandboxes": { "include": ["*"], "exclude": ["scratch-*"] },
+  "agents":    { "include": ["claude"] },
+  "mounts": [ { "name": "payload", "from": "payload" } ] }
+S137_JSON
+bash -c 'set -uo pipefail; eval "$1"
+    _sandy_fm_apply "$2" sel-aaaaaaaa      /x/sel     claude >/dev/null
+    _sandy_fm_apply "$2" scratch-bbbbbbbb  /x/scratch claude >/dev/null
+    _sandy_fm_apply "$2" wrongagent-cccccc /x/other   codex  >/dev/null' \
+    _ "$_S137_BLK" "$_S137_R" 2>/dev/null || true
+_S137_JSON="$_S137_R/amap/selected.json"
+
+check "§137(pre) selected.json was written (mutation: a rename empties it and every check below goes vacuous)" \
+    test -s "$_S137_JSON"
+check "§137(1) it is valid JSON — sandy renders it with printf, so a malformed one is sandy's bug and nobody else's" \
+    bash -c 'python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$1" 2>/dev/null || node -e "JSON.parse(require(\"fs\").readFileSync(process.argv[1]))" "$1"' _ "$_S137_JSON"
+check "§137(2) a SELECTED sandbox is listed" \
+    bash -c 'grep -q "\"slug\": \"sel-aaaaaaaa\"" "$1" && grep -A2 "\"selected\"" "$1" | grep -q "sel-aaaaaaaa"' _ "$_S137_JSON"
+# The negative must be RECORDED, not merely absent: a router has to tell
+# "considered and excluded, here is the pattern" from "never launched since
+# this feature was configured". Absence alone cannot express that.
+check "§137(3) a NOT-selected sandbox is recorded WITH ITS REASON, not merely omitted — absence must stay available to mean 'never launched'" \
+    bash -c 'grep -q "scratch-bbbbbbbb" "$1" && grep -q "exclude" "$1" &&
+             grep -q "wrongagent-cccccc" "$1" && grep -q "no agents include matched" "$1"' _ "$_S137_JSON"
+check "§137(4) the note ships INSIDE the file and says the agent dimension is UNKNOWABLE, not stale" \
+    bash -c 'grep -q "UNKNOWABLE" "$1"' _ "$_S137_JSON"
+check "§137(5) the instance tree was created for the selected sandbox ONLY" \
+    bash -c '[ -d "$1/amap/instances/sel-aaaaaaaa" ] &&
+             [ ! -d "$1/amap/instances/scratch-bbbbbbbb" ] &&
+             [ ! -d "$1/amap/instances/wrongagent-cccccc" ]' _ "$_S137_R"
+# Escaping is not decorative: a `why` quotes a manifest-supplied pattern, and
+# the manifest is the operator's file.
+_S137_ESC="$_S137_DIR/esc"; mkdir -p "$_S137_ESC"
+bash -c 'set -uo pipefail; eval "$1"; _sandy_fm_record "$2" s-1 "pattern \"a\\b\" matched"; _sandy_fm_render_selected "$2"' \
+    _ "$_S137_BLK" "$_S137_ESC" 2>/dev/null || true
+# The expected value is written to a file rather than fought through four
+# layers of shell quoting -- the first attempt at this check compared against a
+# mangled literal and failed against correct output, which is a test bug
+# wearing a finding's clothes.
+printf '%s' 'pattern "a\b" matched' > "$_S137_ESC/expected"
+check "§137(6) a reason containing a double quote and a backslash round-trips EXACTLY (the pattern comes from the operator's manifest, so this is not decorative)" \
+    bash -c 'python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+want = open(sys.argv[2]).read()
+got = d[\"not_selected\"][0][\"why\"]
+sys.exit(0 if got == want else 1)
+" "$1/selected.json" "$1/expected"' _ "$_S137_ESC"
+# The claim is "no PARSER needed", not "no coreutils needed" -- forget is an
+# unlink and still needs rm. So the fixture hides node and jq specifically,
+# with a bin directory holding only what a plain unlink uses, and ASSERTS
+# inside the test that neither parser resolves. A PATH stripped to nothing
+# would prove something else entirely, and did on the first attempt.
+mkdir -p "$_S137_DIR/nobin"
+for _s137_b in bash rm ls; do
+    ln -sf "$(command -v "$_s137_b" 2>/dev/null)" "$_S137_DIR/nobin/$_s137_b" 2>/dev/null || true
+done
+check "§137(7) an entry can be forgotten with NO node and NO jq on the host — --remove-sandbox is filesystem-only, which is why this is per-slug files and not a read-modify-write of the JSON" \
+    bash -c 'PATH="$3" bash -c "
+        if command -v node >/dev/null 2>&1 || command -v jq >/dev/null 2>&1; then exit 1; fi
+        $(printf %s "$1")
+        _sandy_fm_forget \"$2\" s-1
+        [ ! -e \"$2/.selected/s-1\" ]"' _ "$_S137_BLK" "$_S137_ESC" "$_S137_DIR/nobin"
+
+rm -rf "$_S137_DIR"
+unset _s137_b _S137_DIR _S137_BLK _S137_R _S137_JSON _S137_ESC
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

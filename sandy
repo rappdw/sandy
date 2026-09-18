@@ -1060,6 +1060,78 @@ _sandy_fm_dest() {
     esac
 }
 
+# --- selected.json (D6) -----------------------------------------------------
+# The router executes nothing -- no subprocess, no dependencies, which is the
+# basis of its claim to be a trusted runtime. Running `sandy --print-state` to
+# learn membership would invert the trust direction between the repositories,
+# so sandy writes a file instead and the router reads it.
+#
+# STATE IS PER-SLUG FILES, RENDERED. Each launch writes one tiny record under
+# .selected/<slug>; selected.json is re-rendered from that directory with
+# printf alone. Two reasons this is not a read-modify-write of the JSON:
+# --remove-sandbox is filesystem-only and must be able to drop an entry without
+# a parser, and sandy controls this format on both ends, so the parser
+# requirement stays where it belongs -- reading the OPERATOR's manifest, not
+# sandy's own state.
+#
+# WHAT IT CANNOT KNOW, stated in the file rather than left to the reader:
+# selection depends on the agents a launch resolved to, so for a sandbox that
+# is not running the agent dimension is UNKNOWABLE, not merely stale. That
+# caveat has been misread here three times (`agents`, `handoff_enabled`,
+# `handoff.state`), which is why it ships inside the document.
+_sandy_fm_jesc() {
+    # Escape the two characters JSON forbids raw in a string. Sandy generates
+    # every value here, but a `reason` can quote a manifest-supplied pattern,
+    # so this is not decorative.
+    local _s="$1"
+    _s="${_s//\\/\\\\}"
+    _s="${_s//\"/\\\"}"
+    printf '%s' "$_s"
+}
+_sandy_fm_record() {
+    # $1 = feature dir, $2 = slug, $3 = "" when selected, else the reason
+    local _d="$1/.selected"
+    mkdir -p "$_d" || return 0
+    printf '%s\t%s\n' "${3:-}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '?')" \
+        > "$_d/$2" 2>/dev/null || true
+}
+_sandy_fm_forget() {
+    # $1 = feature dir, $2 = slug. Used by --remove-sandbox; a plain unlink, so
+    # it works with no parser on the host.
+    rm -f "$1/.selected/$2" 2>/dev/null || true
+}
+_sandy_fm_render_selected() {
+    local _fdir="$1" _d="$1/.selected" _f _slug _why _at _sel="" _not="" _line
+    [ -d "$_fdir" ] || return 0
+    if [ -d "$_d" ]; then
+        for _f in "$_d"/*; do
+            [ -f "$_f" ] || continue
+            _slug="${_f##*/}"
+            IFS= read -r _line < "$_f" || _line=""
+            _why="${_line%%	*}"; _at="${_line#*	}"
+            [ "$_at" = "$_line" ] && _at=""
+            if [ -z "$_why" ]; then
+                _sel="$_sel${_sel:+,}
+    {\"slug\": \"$(_sandy_fm_jesc "$_slug")\", \"at\": \"$(_sandy_fm_jesc "$_at")\"}"
+            else
+                _not="$_not${_not:+,}
+    {\"slug\": \"$(_sandy_fm_jesc "$_slug")\", \"why\": \"$(_sandy_fm_jesc "$_why")\", \"at\": \"$(_sandy_fm_jesc "$_at")\"}"
+            fi
+        done
+    fi
+    {
+        printf '{\n'
+        printf '  "schema": 1,\n'
+        printf '  "note": "Written by sandy at each launch and removal. An entry records what the LAST LAUNCH of that sandbox resolved to. Selection depends on the agents a launch runs, so for a sandbox that is not currently running the agent dimension is UNKNOWABLE rather than merely stale -- a sandbox absent from both lists has simply not been launched since this feature was configured. Use the slug dimension for orphan checks; an instance directory exists only because a launch was selected.",\n'
+        printf '  "selected": [%s%s],\n' "$_sel" "${_sel:+
+  }"
+        printf '  "not_selected": [%s%s]\n' "$_not" "${_not:+
+  }"
+        printf '}\n'
+    } > "$_fdir/selected.json.tmp" 2>/dev/null || return 0
+    mv -f "$_fdir/selected.json.tmp" "$_fdir/selected.json" 2>/dev/null || true
+}
+
 # --- Applying a feature to a launch (2.0.0) ---------------------------------
 # One pass over $SANDY_HOME/features/*/ . For each feature: load the manifest,
 # evaluate selection, and for a SELECTED sandbox create the declared tree and
@@ -1111,7 +1183,19 @@ _sandy_fm_apply() {
             printf 'err\t%s\t%s\n' "$_fname" "$_SANDY_FM_ERR"; return 1
         fi
         if ! _sandy_fm_selected "$_slug" "$_ws" "$_agents"; then
-            printf 'skip\t%s\t%s\n' "$_fname" "$_SANDY_FM_WHYNOT"; continue
+            printf 'skip\t%s\t%s\n' "$_fname" "$_SANDY_FM_WHYNOT"
+            # D6: record the NEGATIVE too. A router needs "considered and
+            # excluded, here is which pattern" to be distinguishable from
+            # "never launched since this feature was configured".
+            if [ "$_dry" != 1 ]; then
+                _sandy_fm_record "$_fdir" "$_slug" "$_SANDY_FM_WHYNOT"
+                _sandy_fm_render_selected "$_fdir"
+            fi
+            continue
+        fi
+        if [ "$_dry" != 1 ]; then
+            _sandy_fm_record "$_fdir" "$_slug" ""
+            _sandy_fm_render_selected "$_fdir"
         fi
         for _c in ${_SANDY_FM_CREATE[@]+"${_SANDY_FM_CREATE[@]}"}; do
             _c="${_c//\$\{slug\}/$_slug}"
