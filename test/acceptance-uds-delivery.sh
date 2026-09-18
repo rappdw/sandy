@@ -144,7 +144,7 @@ echo "SANDY_HANDOFF_RELAY=.sandy/relay.sh" >> "$SANDY_HOME_DIR/config"
 # layer" (a harness-frame problem). SANDY_AGENT_ARGS is privileged and set here
 # from the HOST config (a privileged source → no approval prompt); --debug-file
 # writes to a file, not the pane, so the marker-in-pane diagnostic stays clean.
-echo 'SANDY_AGENT_ARGS=--debug --debug-file /home/claude/.handoff/relay/cc-debug.log' >> "$SANDY_HOME_DIR/config"
+echo 'SANDY_AGENT_ARGS=--debug --debug-file /home/sandy/.handoff/relay/cc-debug.log' >> "$SANDY_HOME_DIR/config"
 
 # The injector. Runs INSIDE the container, detached (setsid + double fork) so
 # it is provably out of the receiving session's ancestry — the same property
@@ -306,7 +306,7 @@ INJECT
 run_case() {
     local label="$1" expect="$2" extra="${3:-}" host_extra="${4:-}"
     local marker="ACC74-$expect-$$-$RANDOM"
-    local sentinel="/home/claude/.handoff/relay/delivered-$marker"
+    local sentinel="/home/sandy/.handoff/relay/delivered-$marker"
 
     rm -f "$WS/.sandy/config"
     [ -n "$extra" ] && printf '%s\n' "$extra" > "$WS/.sandy/config"
@@ -398,7 +398,7 @@ run_case() {
         # CLAUDE.md records for `sandy --exec`; every other docker exec in this
         # harness already passes -u.
         echo "    -- [$label] pane 0 --"
-        docker exec -u "$(id -u)" -e HOME=/home/claude "$c" tmux capture-pane -p -t sandy.0 2>&1 \
+        docker exec -u "$(id -u)" -e HOME=/home/sandy "$c" tmux capture-pane -p -t sandy.0 2>&1 \
             | sed 's/^/          | /' || echo "          | <pane capture failed>"
         echo "    -- [$label] is the agent process even alive? --"
         docker exec -u "$(id -u)" "$c" sh -c 'ps -o pid=,etime=,args= -A 2>/dev/null | grep -v grep | grep -i claude | head -5' 2>&1 \
@@ -418,7 +418,7 @@ run_case() {
     # The claude receiver holds cc-debug.log open from launch, so do NOT unlink
     # it here (that would orphan the inode it keeps writing to). This injection's
     # decision is found by grepping the log for THIS case's unique marker below.
-    local dbg_log="/home/claude/.handoff/relay/cc-debug.log"
+    local dbg_log="/home/sandy/.handoff/relay/cc-debug.log"
     docker exec -u "$(id -u)" "$c" rm -f "$sentinel" "$inject_log" 2>/dev/null || true
     # Byte offset of the receiver's debug log BEFORE the injection. The refusal
     # line carries no marker, so scoping by marker cannot work for the negative
@@ -427,7 +427,7 @@ run_case() {
     local dbg_pre
     dbg_pre="$(docker exec -u "$(id -u)" "$c" sh -c 'wc -c < "'"$dbg_log"'" 2>/dev/null | tr -d " "' 2>/dev/null || true)"
     [ -n "${dbg_pre:-}" ] || dbg_pre=0
-    docker exec -u "$(id -u)" -e HOME=/home/claude "$c" \
+    docker exec -u "$(id -u)" -e HOME=/home/sandy "$c" \
         python3 "$SANDY_WS_IN_CONTAINER/.sandy/inject.py" "$sock" "$keyf" "$marker" "$sentinel" "$inject_log" >/dev/null 2>&1
 
     # Poll for the sentinel. Generous on the positive case (a real model turn),

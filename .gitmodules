@@ -37,3 +37,6 @@
 [submodule "research/defending-code-reference-harness"]
 	path = research/defending-code-reference-harness
 	url = git@github.com:anthropics/defending-code-reference-harness.git
+[submodule "research/trueforge"]
+	path = research/trueforge
+	url = git@github.com:truefoundry/trueforge.git

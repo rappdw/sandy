@@ -86,8 +86,8 @@ The binary having `bridge:` and `did:` in its address grammar is the strongest p
 
 ```
 $SANDBOX_DIR/handoff/
-  outbox/  → /home/claude/.handoff/outbox   (rw)    the agent stages outgoing files here
-  inbox/   → /home/claude/.handoff/inbox    (:ro)   only the relay writes here
+  outbox/  → /home/sandy/.handoff/outbox   (rw)    the agent stages outgoing files here
+  inbox/   → /home/sandy/.handoff/inbox    (:ro)   only the relay writes here
 ```
 
 - **On by default since 1.10.0** (`SANDY_HANDOFF_DIRS` default `1`; `0` is the passive-safe opt-out). The tree also gained `peer/` (`:ro`, a second host-written inbound directory) and `relay/` (rw). An operator-side `$SANDBOX_DIR/.handoff-enabled` marker (per-machine; a cloned repo cannot carry it) forces the tree on for one sandbox over a config opt-out. The directories are created on **every** launch as of 1.7.0, so *presence carries no information* — the resolved key gates the **mount**, not the directory, and consumers check the mounts.

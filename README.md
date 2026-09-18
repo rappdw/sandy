@@ -232,7 +232,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_SUSPICIOUS` | `0` | `1` = hardened posture for a workspace you distrust: strip the OAuth **refresh token** (mount only the short-TTL access token — fails closed if it can't), prefer a disposable `ANTHROPIC_API_KEY` over mounting OAuth at all, force connectors off, default egress to strict. Records `cred_mode` in the session marker. **Strengthens** isolation — safe to commit in a workspace config. In-session token refresh stops at the access token's expiry (relaunch or `/login`) |
 | `SANDY_SKILL_PACKS` | (unset) | Comma-separated skill packs to install (e.g. `gstack`). Built as a cached Docker layer |
 | `SANDY_GPU` | (disabled) | GPU passthrough: `all` for all GPUs, or device IDs like `0` or `0,1`. Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
-| `SANDY_SCREENSHOT_DIR` | (unset) | Host directory of screenshots to mount into the container (read-only at `/home/claude/screenshots`). When set, sandy generates a `/ss` slash command for Claude/Gemini and a screenshot skill for Codex — type `/ss huh` to have the agent describe your latest screenshot, `/ss 3 explain` for the last three, etc. See "Screenshot skill" below. Privileged tier |
+| `SANDY_SCREENSHOT_DIR` | (unset) | Host directory of screenshots to mount into the container (read-only at `/home/sandy/screenshots`). When set, sandy generates a `/ss` slash command for Claude/Gemini and a screenshot skill for Codex — type `/ss huh` to have the agent describe your latest screenshot, `/ss 3 explain` for the last three, etc. See "Screenshot skill" below. Privileged tier |
 | `SANDY_EXTRA_ENV` | (unset) | Comma-separated env-var names to forward into the container (e.g. `HA_TOKEN,LINEAR_API_KEY`). Values come from env (wins) or any of the four config files (workspace overrides host). Lets you wire up tokens for user-installed MCP servers without patching sandy. Privileged tier; workspace usage requires approval |
 | `SANDY_AGENT_ARGS` | (unset) | Extra CLI args appended to the agent command on **every** launch (bare, `-p`, `--start`, sandy-ui). Whitespace-split, never `eval`'d, ordered after sandy's flags and before command-line args. Privileged tier; workspace usage requires approval. For agent-specific flags prefer a per-sandbox `$SANDBOX_DIR/agent-args.<agent>` file (scoped to one agent) |
 | `SANDY_CHANNELS` | (unset) | Channel plugins to enable (e.g. `plugin:telegram@claude-plugins-official`) |
@@ -257,7 +257,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--start` | Start a detached [daemon session](#daemon-mode) and return once attachable |
 | `--attach` | Attach an interactive client to a running daemon session |
 | `--stop` | Stop a running daemon session (full teardown) |
-| `--exec [-- CMD]` | Shell (or run `CMD`) inside this workspace's running container, **as the host uid**. Do not hand-roll it: `docker exec -u claude` resolves the name against the *image*, where the user is uid 1001, so it runs as the wrong owner and prints `I have no name!`. Sub-options: `--workspace PATH`, `--dry-run`. See [Getting a shell inside a running sandbox](#getting-a-shell-inside-a-running-sandbox-sandy---exec) |
+| `--exec [-- CMD]` | Shell (or run `CMD`) inside this workspace's running container, **as the host uid**. Do not hand-roll it: `docker exec -u sandy` resolves the name against the *image*, where the user is uid 1001, so it runs as the wrong owner and prints `I have no name!`. Sub-options: `--workspace PATH`, `--dry-run`. See [Getting a shell inside a running sandbox](#getting-a-shell-inside-a-running-sandbox-sandy---exec) |
 | `--stop-all` | **Fleet emergency stop** — stop every daemon session on the host via the hardened per-session teardown. Sub-options: `--dry-run`, `--yes` |
 | `--prune-orphans` | Reap orphaned `sandy_*` Docker networks and exit |
 | `--update-sessions` | Fleet image refresh + rolling restart across every daemon session on the host (scope to one with `--workspace PATH`). See "Fleet updates" above. Sub-options: `--dry-run`, `--yes`, `--idle-for <minutes>`, `--rebuild`, `--workspace` |
@@ -313,7 +313,7 @@ sandy --exec --dry-run        # print the docker exec command, run nothing
 docker exec -it -u claude <container> /bin/bash     # -> "I have no name!"
 ```
 
-The image creates the user with `useradd -u 1001 claude`, but sandy bind-mounts a generated `/etc/passwd` carrying **your** uid so bind-mount ownership works. Docker resolves `-u <name>` against the container's *image* filesystem, not the runtime mount — so `-u claude` runs as **uid 1001**. The prompt reading `I have no name!` is the harmless symptom; the real one is that every write lands as the wrong owner on a workspace mount owned by you.
+The image creates the user with `useradd -u 1001 claude`, but sandy bind-mounts a generated `/etc/passwd` carrying **your** uid so bind-mount ownership works. Docker resolves `-u <name>` against the container's *image* filesystem, not the runtime mount — so `-u sandy` runs as **uid 1001**. The prompt reading `I have no name!` is the harmless symptom; the real one is that every write lands as the wrong owner on a workspace mount owned by you.
 
 `--exec` uses the numeric `-u $(id -u):$(id -g)`, sets `-w` to the container-side workspace path, and sets `HOME` explicitly (as root, `HOME=/root` sits on the read-only rootfs — which is why an in-container `codex logout` fails with `Read-only file system`). It finds a daemon container by label and a foreground one by exact name, exits `4` when the workspace has no running container, and otherwise passes the command's own exit status through.
 
@@ -504,22 +504,36 @@ A sandbox with a **live session** is named and skipped the same way — it canno
 
 **`handoff.state: "ok"` means the directories are correct on the host.** It does not mean the tree is mounted in any container — `--print-state` reads no config and cannot know the next launch's `SANDY_HANDOFF_DIRS`. For a *running* sandbox, check the container's mounts.
 
-### Feature markers and shared payloads (`SANDY_FEATURES_DIR`)
+### Features (`$SANDY_HOME/features/<name>/feature.json`)
 
-`$SANDBOX_DIR/features/<name>` records that a sandbox takes part in something that is not sandy's — a connector, a fleet agent, whatever you are deploying. Sandy holds the fact and reports it in `--print-state` as `sandboxes[].features`; it does not know what a feature *is*.
+A **feature** is something you deploy into sandboxes that is not sandy's — a connector, a fleet agent, a shared toolchain. It lives in one directory with a manifest that says which sandboxes get it and what they get:
 
-```sh
-touch ~/.sandy/sandboxes/<sandbox>/features/amap     # enrol
-sandy --print-state | jq '.sandboxes[] | {name, features}'
+```json
+{
+  "sandboxes": { "include": ["*"], "exclude": ["scratch-*"] },
+  "agents":    { "include": ["claude"] },
+  "create":    ["instances/${slug}/inbox"],
+  "mounts": [
+    { "name": "payload", "from": "payload", "export": "MYTOOL_DIR" },
+    { "name": "inbox",   "from": "instances/${slug}/inbox" }
+  ],
+  "entry": "payload/relay"
+}
 ```
 
-The markers live under `$SANDY_HOME`, which a cloned repository cannot write, so enrolment is per-machine operator state — the same tier argument as `.handoff-enabled`. `--reset-sandbox` preserves them.
+Sandy computes every container path — you name a mount, sandy decides where it lands (`payload` at `/opt/sandy/features/<name>`, anything else under `~/.<name>/`) and exports it if you ask. Mounts are **read-only unless you say `rw`**.
 
-Set `SANDY_FEATURES_DIR=<host-dir>` (privileged) and each `<host-dir>/<name>` is mounted **read-only** at `/opt/sandy/features/<name>` into **only** the sandboxes carrying that marker. One install, one version, however many sandboxes — rather than a copy per sandbox to keep in sync.
+**Selection is enrolment.** A sandbox gets the feature only if an include matches in both blocks and no exclude matches in either. A sandbox that is not selected gets nothing at all — no mount, no export, no entry. Check what applied:
 
-It is gated on the marker on purpose: an unconditional shared mount would install into every sandbox, including ones running a different agent. A marker with no matching source directory warns rather than doing nothing quietly. And `:ro` is the real boundary — the container runs as your uid and owns the payload, so file permissions would not stop it rewriting its own tooling. Sandy guarantees the **first** executable; a binary that runs something out of a writable directory is replaceable at the second step.
+```sh
+sandy --print-state | jq '.sandboxes[] | {name, features, feature_problems}'
+```
 
-### Installing a relay (`SANDY_RELAY`)
+and `$SANDY_HOME/features/<name>/selected.json` says the same thing for tools that cannot run sandy.
+
+Reading a manifest needs `node` or `jq` on the host. If neither is there, a launch that would use one **refuses** rather than mounting a guess — see `sandy --doctor`.
+
+### Installing a relay (`SANDY_RELAY`)### Installing a relay (`SANDY_RELAY`)
 
 A *relay* is a program that drains and fills the handoff directories — the thing that actually moves files. Before 1.11.0 the only way to install one was `SANDY_HANDOFF_RELAY=<path>`, a **privileged** key naming a file. That cost a per-workspace approval prompt, and it could not be turned on by default: it names a file sandy does not install, and a configured relay that cannot start fails the launch, so a global default would refuse to launch every sandbox that had not been provisioned by hand.
 
@@ -892,10 +906,98 @@ For any `SANDY_AGENT` value other than single-agent `claude`, sandy uses a **hos
 .sandy/.secrets
 ```
 
+## Upgrading to 2.0
+
+**Read this before upgrading. 2.0 renames the container user and home from `claude` to `sandy`, and every sandbox created by 1.x must be migrated.**
+
+Your **workspaces are never touched** — the change is entirely inside sandy's own state under `~/.sandy/`.
+
+### Why a migration is needed at all
+
+`/home/claude` is baked into files sandy does not own: virtualenv shebangs and `pyvenv.cfg`, `.pth` files, editable installs, `GOPATH` and `PYTHONUSERBASE` metadata, npm and cargo state. Moving the home leaves those pointing at a directory that no longer exists, and they fail in ways that look like broken packages rather than a moved home. Sandy refuses to launch against such a sandbox rather than limping into it.
+
+### The migration
+
+One command, once, for every sandbox on the host:
+
+```sh
+sandy --reset-sandbox --all --dry-run                  # see what it will do
+sandy --reset-sandbox --all --keep-history --yes       # migrate
+```
+
+`--keep-history` preserves `claude/projects/` — every session transcript and all auto-memory. **It is not the default and `--yes` does not choose it**, because the same command is also how you remediate a sandbox you distrust, and there memory is the thing you most want gone: it reaches the agent's context every session, so a compromised session writing to it is persistent injection with no expiry. Run interactively and sandy asks; run non-interactively and it requires `--keep-history` or `--purge-history` rather than guessing.
+
+| destroyed (rebuilt on next launch) | preserved |
+|---|---|
+| `pip/`, `uv/`, `npm-global/`, `go/`, `cargo/` package caches | `WORKSPACE.json` (lineage) |
+| the `venv/` overlay | `relay-bin/` (an installed relay) |
+| per-agent state: `claude/`, `gemini/`, `codex/`, `opencode/`, `grok/` | `agent-args.<agent>` (per-agent launch args) |
+| `.claude.json`, installed plugins, approvals | `.handoff-enabled` |
+| `claude/projects/` — transcripts and auto-memory, **unless `--keep-history`** | `claude/projects/` **with `--keep-history`** |
+
+### Back up anyway
+
+`--keep-history` preserves the corpus, but a backup costs little against 149 MB of irreplaceable transcripts per sandbox:
+
+```sh
+tar czf sandy-history-$(date +%F).tar.gz ~/.sandy/sandboxes/*/claude/projects
+```
+
+If you use [lore](https://github.com/rappdw/lore), also export the memory corpus — **its JSON export covers memories only and does not include transcripts**, so you want both:
+
+```sh
+lore export --json > lore-memories-$(date +%F).json
+```
+
+**Do not use `rm -rf` on the sandbox directory.** It takes the preserved column with it, and nothing recreates those — `relay-bin/` and `agent-args.*` are operator state a repository cannot carry.
+
+The cost is time and bandwidth: the next launch in each workspace re-downloads packages and rebuilds the venv. Nothing is lost that a `uv sync` or `npm install` will not restore.
+
+A sandbox whose workspace no longer exists cannot be migrated — it is named and counted, and `sandy --remove-sandbox --orphans` is the command for it.
+
+### If you have scripts, MCP configs or agent args that hardcode `/home/claude`
+
+They break. Container paths are available from the environment and from the read-only attestation marker rather than by assumption:
+
+```sh
+sandy --exec -- printenv HOME                 # the container home
+sandy --exec -- cat /etc/sandy-session.json   # workspace, sandbox_name, posture
+```
+
+### Also in 2.0
+
+- `--print-state`'s `schema_version` is **`2`**. Gate on that number, not on sandy's version string — `2.0.0-dev` compares equal to `2.0.0`.
+- `sandboxes[].features` now reports **manifest selection** rather than per-sandbox markers; `SANDY_FEATURES_DIR` is removed with an error naming its replacement.
+- `SANDY_EGRESS=off|permissive|strict` replaces two booleans. The old keys still work — see **Deprecated** below.
+
+## Deprecated
+
+Everything here still works. Each entry was announced in the major release named, and **may be removed in any later `X.Y.0`** — so if you depend on one, plan the move rather than waiting for it to break.
+
+Sandy's rule: an entry can only be **added** to this list in an `X.0.0` release, and nothing is ever removed that was not listed here first. Reading this section after a major upgrade tells you everything that may disappear during that line.
+
+| deprecated | since | use instead |
+|---|---|---|
+| `SANDY_HANDOFF_DIRS`, and the `~/.handoff/{inbox,outbox,peer,relay}` tree it mounts | 2.0.0 | a feature manifest's `mounts` — it names its own directories instead of using sandy's four fixed ones |
+| `SANDY_HANDOFF_*` container env vars (`_INBOX`, `_OUTBOX`, `_PEER`, `_RELAY_STATE`) | 2.0.0 | a mount's `export`, which names the variable the feature wants |
+| `SANDY_HANDOFF_RELAY` and the `relay-bin/` slot | 2.0.0 | a feature manifest's `entry`. During the window `relay-bin/relay` still **wins** when both are present, so removing the slot is what hands over |
+| `handoff_relay` and `relay{}` in `/etc/sandy-session.json` and `--print-state` | 2.0.0 | the feature's own entry in `--print-state`. Removing these will bump `schema_version`, because a vanished field is otherwise silent |
+| `handoff_enabled` and `handoff{}` in `--print-state` | 2.0.0 | they report on the handoff tree above, so they go with it — and their removal bumps `schema_version` for the same reason |
+| the `.handoff-enabled` sandbox marker | 2.0.0 | nothing: it forces the handoff tree on for one sandbox, and the tree is what is going. A feature manifest selects per sandbox instead |
+| `SANDY_SCREENSHOT_DIR` | 2.0.0 | intended to become a feature manifest; the design is not settled (#317), and the key stays until it is |
+| `SANDY_EGRESS_PROXY` | 2.0.0 | `SANDY_EGRESS=off\|permissive\|strict`. It has warned since 0.14.0; listing it here is what finally gives its removal a date |
+| `SANDY_EGRESS_NO_ISOLATION` | 2.0.0 | `SANDY_EGRESS=off` — same posture, same approval gate, one key instead of two mutually exclusive booleans |
+| `SANDY_EGRESS_STRICT` | 2.0.0 | `SANDY_EGRESS=strict` (or `permissive`) |
+| `SANDY_CHANNELS`: the `plugin:<name>@<marketplace>` form | 2.0.0 | bare comma-separated names. The key itself is **not** deprecated — only that spelling of its value |
+
+Removals are loud where sandy can see them: a removed config key is a hard error naming its replacement, a removed mechanism warns first, and a removed introspection field bumps `schema_version`.
+
+*(For maintainers: a deprecation warning in `sandy` names the deprecated thing **first**, before any replacement — `run-tests.sh` §138 reads the first `SANDY_*` token on the line and requires it to appear in the table above, so a deprecation added in code but never announced here fails the suite.)*
+
 ## Security Notes
 
-- The container runs as a non-root user (`claude`, mapped to host UID)
-- The root filesystem is read-only (`/tmp` and `/home/claude` are tmpfs)
+- The container runs as a non-root user (`sandy`, mapped to host UID)
+- The root filesystem is read-only (`/tmp` and `/home/sandy` are tmpfs)
 - `no-new-privileges` prevents privilege escalation
 - Credentials are seeded into per-project sandboxes, not shared across projects
 - claude.ai account connectors are suppressed by default (`SANDY_CLAUDE_CONNECTORS=1` to opt in); `SANDY_SUSPICIOUS=1` additionally strips the OAuth refresh token so a distrusted workspace only ever sees a short-lived access token

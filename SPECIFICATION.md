@@ -148,12 +148,12 @@ Each call to `_load_sandy_config` takes a `tier` argument (`privileged` or `pass
 
 **Privileged-only keys** (allowed only from `$SANDY_HOME/config` and `$SANDY_HOME/.secrets`):
 <!-- BEGIN AUTOGEN:privileged-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_SSH`, `SANDY_SSH_KEYS`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`, `SANDY_HANDOFF_RELAY`, `SANDY_FEATURES_DIR`, `ANTHROPIC_PROFILE`
+`SANDY_SSH`, `SANDY_SSH_KEYS`, `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_LOCAL_LLM_HOST`, `SANDY_ALLOW_HOSTS`, `SANDY_EXTRA_ENV`, `SANDY_AGENT_ARGS`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `SANDY_SCREENSHOT_DIR`, `SANDY_GEMINI_EXTENSIONS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_SENDERS`, `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_SENDERS`, `SANDY_HANDOFF_RELAY`, `ANTHROPIC_PROFILE`
 <!-- END AUTOGEN:privileged-key-list -->
 
 **Passive-safe keys** (allowed from any source):
 <!-- BEGIN AUTOGEN:passive-key-list Run `test/regen-config-docs.sh` to update. -->
-`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_TEAMMATE_MODE`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_SUBAGENT_MODEL`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_CLAUDE_AUTH`, `SANDY_TOOL_AUDIT`, `SANDY_CLAUDE_CONNECTORS`, `SANDY_SUSPICIOUS`, `SANDY_HANDOFF_DIRS`, `SANDY_CROSS_SESSION_INBOUND`, `SANDY_RELAY`
+`SANDY_AGENT`, `SANDY_MODEL`, `SANDY_TEAMMATE_MODE`, `SANDY_EFFORT`, `SANDY_CPUS`, `SANDY_MEM`, `SANDY_GPU`, `SANDY_SKILL_PACKS`, `SANDY_CHANNELS`, `SANDY_CHANNEL_TARGET_PANE`, `SANDY_VERBOSE`, `SANDY_VENV_OVERLAY`, `SANDY_EGRESS`, `SANDY_EGRESS_PROXY`, `SANDY_EGRESS_NO_ISOLATION`, `SANDY_EGRESS_STRICT`, `SANDY_EGRESS_LOG`, `SANDY_ALLOW_WORKFLOW_EDIT`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_SUBAGENT_MODEL`, `GEMINI_MODEL`, `SANDY_GEMINI_AUTH`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `CODEX_MODEL`, `SANDY_CODEX_AUTH`, `OPENCODE_MODEL`, `SANDY_OPENCODE_AUTH`, `GROK_MODEL`, `SANDY_GROK_AUTH`, `SANDY_CLAUDE_AUTH`, `SANDY_TOOL_AUDIT`, `SANDY_CLAUDE_CONNECTORS`, `SANDY_SUSPICIOUS`, `SANDY_HANDOFF_DIRS`, `SANDY_CROSS_SESSION_INBOUND`, `SANDY_RELAY`
 <!-- END AUTOGEN:passive-key-list -->
 
 ### `SANDY_ALLOW_LAN_HOSTS` Sanity Check
@@ -183,14 +183,13 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `XAI_API_KEY` | privileged | unset | 1.5.0 | stable | xAI API key for Grok Build (docs.x.ai). Enables fully-headless auth (resolution: model.api_key > env_key > session token > XAI_API_KEY); alternative is an interactive 'grok login' OAuth session inside the container. |
 | `GOOGLE_API_KEY` | privileged | unset | 0.9.0 | stable | Google API key for Vertex AI / ADC. |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | privileged | unset | 0.1.0 | experimental | Enable Claude Code experimental agent-teams feature. |
-| `SANDY_SCREENSHOT_DIR` | privileged | unset | 0.12.0 | stable | Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents. |
+| `SANDY_SCREENSHOT_DIR` | privileged | unset | 0.12.0 | stable | Host directory containing screenshots; mounted read-only at /home/sandy/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents. |
 | `SANDY_GEMINI_EXTENSIONS` | privileged | unset | 0.9.0 | stable | Comma-separated Gemini extensions to enable. |
 | `TELEGRAM_BOT_TOKEN` | privileged | unset | 0.7.6 | stable | Telegram bot token for the channel relay. |
 | `TELEGRAM_ALLOWED_SENDERS` | privileged | unset | 0.7.6 | stable | Comma-separated Telegram user IDs allowed to send messages. |
 | `DISCORD_BOT_TOKEN` | privileged | unset | 0.7.6 | stable | Discord bot token for the channel relay. |
 | `DISCORD_ALLOWED_SENDERS` | privileged | unset | 0.7.6 | stable | Comma-separated Discord user IDs allowed to send messages. |
 | `SANDY_HANDOFF_RELAY` | privileged | unset | 1.10.0 | experimental | Privileged. Path of an executable INSIDE the container (absolute, or relative to the workspace, e.g. .sandy/relay.sh) that sandy runs as a container-level process: a sibling of the tmux server, not a pane and not a child of any agent session. Started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote (no tmux session to target), and never under --provision (which starts a session only to verify it and then stops it, so a relay would live ~10s and criterion 7 would fail the very launch that materialises the handoff pair) — in both the key is dropped host-side, so crossSessionInbound defaults to refuse and the marker records handoff_relay=false), singleton via flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never overlapping, never given up on. Setting it forces SANDY_HANDOFF_DIRS=1 (over an explicit opt-out — the relay cannot run without its mounts; the dirs are on by default since 1.10.0 anyway) so $SANDBOX_DIR/handoff/relay is mounted rw at ~/.handoff/relay (relay state + supervisor.log). Env contract: SANDY_HANDOFF_INBOX, SANDY_HANDOFF_OUTBOX, SANDY_HANDOFF_PEER, SANDY_HANDOFF_RELAY_STATE, SANDY_AGENT, SANDY_WORKSPACE; enumerate live sessions with /usr/local/bin/sandy-handoff-sessions. A configured relay that cannot start FAILS THE LAUNCH, never warn-and-proceed: host-side (exit 1 before docker run) for whitespace, shell metacharacters, .. segments, a ~/.handoff collision, and any path the host can see (workspace-relative, or absolute under the workspace mount) that is missing or not executable; in-container (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) for an image-only absolute path that is missing or not executable, a missing ~/.handoff/relay mount, or no flock. So handoff_relay=true in the marker means the relay was started or the session did not come up. In daemon mode the relay (and anything else planted at the uid) outlives sessions until the container is recreated — run sandy --update-sessions --yes on a 24h cron. Recorded in /etc/sandy-session.json as handoff_relay. |
-| `SANDY_FEATURES_DIR` | privileged | unset | 1.15.0 | experimental | Privileged. Host directory whose children are SHARED feature payloads, mounted READ-ONLY at /opt/sandy/features/<name> into only those sandboxes carrying a matching $SANDBOX_DIR/features/<name> marker (#304). One install, one version, N sandboxes -- instead of a per-sandbox copy the consumer has to keep in sync and byte-compare. GATED ON THE MARKER, never unconditional: an unconditional shared mount would install into EVERY sandbox including ones running a different agent, which is the incident the `agents` field exists for (a host-side tool enrolled 51 sandboxes and installed a per-agent component into each; one ran codex, and the only symptom was a process exiting non-zero once a second into a log nobody was watching). The :ro MOUNT is the boundary, not permission bits: the container runs as the host uid, so a writable payload is one the agent could rewrite; under :ro the write returns EROFS. HONEST LIMIT, as for the relay slot: sandy guarantees the FIRST executable only -- a binary that execs out of a writable directory is replaceable at the second link. Mounted under /opt, not the agent home, because that tree is rw tmpfs and /home/claude moves in 2.0 (#248). Privileged for the same reason SANDY_SCREENSHOT_DIR is: it chooses a host path to mount, so a committed workspace config must not be able to set it. Shell metacharacters and overly-broad targets (literal $HOME, /) are hard errors; a MISSING directory is warn-and-disable, because Docker would otherwise auto-create an empty host dir at bind time. A marker naming a feature with no matching source WARNS rather than no-opping -- an unnamed misconfiguration is indistinguishable from a working one. |
 | `ANTHROPIC_PROFILE` | privileged | unset | 1.11.0 | experimental | Privileged. Name of the Anthropic Console profile to use when SANDY_CLAUDE_AUTH=profile (overrides the host active_config); forwarded into the container so Claude Code selects it explicitly (its /status shows the Profile row as profile-explicit). Privileged on purpose: it chooses WHICH profile's token enters the box, and a profile logged in with --scope org:admin carries organization-wide access, so a committed .sandy/config must not be able to select it. Ignored with a notice unless SANDY_CLAUDE_AUTH=profile. |
 | `SANDY_AGENT` | passive | `claude` | 0.9.0 | stable | Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'. |
 | `SANDY_MODEL` | passive | `claude-opus-5` | 0.1.0 | stable | Model ID for the Claude agent. |
@@ -204,6 +203,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_CHANNEL_TARGET_PANE` | passive | `0` | 0.9.0 | stable | Which tmux pane in multi-agent mode receives channel messages. |
 | `SANDY_VERBOSE` | passive | `0` | 0.8.0 | stable | Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace). |
 | `SANDY_VENV_OVERLAY` | passive | `1` | 0.10.0 | stable | Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container. |
+| `SANDY_EGRESS` | passive | `permissive` | 2.0.0 | stable | Egress posture, ONE key as of 2.0.0. off = proxy off (legacy: Linux iptables only, NO network isolation on macOS). permissive (default) = proxy on, blocking private/LAN/link-local/CGNAT/cloud-metadata destinations while allowing the internet. strict = proxy on with an allowlist only (model providers, GitHub, npm, PyPI, crates, Go, Debian) plus SANDY_ALLOW_HOSTS. Replaces a three-way choice encoded as TWO MUTUALLY EXCLUSIVE BOOLEANS (SANDY_EGRESS_NO_ISOLATION, SANDY_EGRESS_STRICT) plus a deprecated tri-state whose 0/1/2 were opaque (SANDY_EGRESS_PROXY) -- all three still work, are listed in README's Deprecated section, and are IGNORED WITH A NOTICE when this key is set (never merged; the winner is named). Value-aware tier: permissive and strict are passive-safe, while off WEAKENS the sandbox and is therefore approval-gated from a workspace .sandy/config, exactly as SANDY_EGRESS_NO_ISOLATION=1 was. SANDY_SUSPICIOUS=1 still defaults the posture to strict; an explicit choice wins and a weaker one is named loudly. |
 | `SANDY_EGRESS_PROXY` | passive | `1` | 0.14.0 | stable | DEPRECATED — use SANDY_EGRESS_NO_ISOLATION / SANDY_EGRESS_STRICT. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 is approval-gated (weakening), matching the new keys. |
 | `SANDY_EGRESS_NO_ISOLATION` | passive | `0` | 1.0.0 | stable | Turn the egress proxy OFF — legacy path (Linux iptables-only; NO network isolation on macOS). WEAKENS isolation, so from a workspace .sandy/config it is quarantined to the per-workspace approval prompt (a committed config cannot silently disable isolation). Mutually exclusive with SANDY_EGRESS_STRICT. Default 0 (proxy on). |
 | `SANDY_EGRESS_STRICT` | passive | `0` | 1.0.0 | stable | Run the egress proxy in strict mode (allow only the built-in default allowlist + SANDY_ALLOW_HOSTS; deny all other internet). STRENGTHENS isolation, so =1 is passive-safe from any source; =0 (downgrading a host-configured strict) is approval-gated from a workspace source. Mutually exclusive with SANDY_EGRESS_NO_ISOLATION. Default 0 (permissive). |
@@ -290,7 +290,7 @@ As of v0.9.0, the sandbox directory contains **sibling** per-agent subdirs (`cla
 
 ```
 ~/.sandy/sandboxes/<name>-<hash>/
-├── claude/                    # → /home/claude/.claude
+├── claude/                    # → /home/sandy/.claude
 │   ├── settings.json
 │   ├── projects/
 │   ├── plugins/
@@ -298,25 +298,25 @@ As of v0.9.0, the sandbox directory contains **sibling** per-agent subdirs (`cla
 │   ├── channels/
 │   ├── hooks/
 │   └── history.jsonl
-├── gemini/                    # → /home/claude/.gemini
+├── gemini/                    # → /home/sandy/.gemini
 │   ├── settings.json
 │   ├── commands/              # TOML slash commands
 │   ├── extensions/
 │   └── tmp/                   # session history
-├── codex/                     # → /home/claude/.codex
+├── codex/                     # → /home/sandy/.codex
 │   ├── config.toml            # sandbox_mode + [notice] + [projects] trust
 │   ├── log/
 │   ├── memories/
 │   └── skills/                # SKILL.md files (synthkit seeds md2pdf etc.)
-├── pip/                       # → /home/claude/.pip-packages
-├── uv/                        # → /home/claude/.local/share/uv
-├── npm-global/                # → /home/claude/.npm-global
-├── go/                        # → /home/claude/go
-├── cargo/                     # → /home/claude/.cargo
+├── pip/                       # → /home/sandy/.pip-packages
+├── uv/                        # → /home/sandy/.local/share/uv
+├── npm-global/                # → /home/sandy/.npm-global
+├── go/                        # → /home/sandy/go
+├── cargo/                     # → /home/sandy/.cargo
 ├── handoff/                   # only when SANDY_HANDOFF_DIRS=1
-│   ├── outbox/                # → /home/claude/.handoff/outbox (rw)
-│   ├── inbox/                 # → /home/claude/.handoff/inbox (:ro)
-│   └── relay/                 # → /home/claude/.handoff/relay (rw); relay state + supervisor.log + .state/.startup; created unconditionally alongside outbox/inbox
+│   ├── outbox/                # → /home/sandy/.handoff/outbox (rw)
+│   ├── inbox/                 # → /home/sandy/.handoff/inbox (:ro)
+│   └── relay/                 # → /home/sandy/.handoff/relay (rw); relay state + supervisor.log + .state/.startup; created unconditionally alongside outbox/inbox
 ├── relay-bin/                 # → /opt/sandy/relay (:RO) — the relay slot (1.11.0, #258); exactly one entry, `relay`;
 │                              #   created unconditionally, mounted only when it supplies the relay that will run;
 │                              #   preserved by --reset-sandbox (operator state, like .handoff-enabled)
@@ -351,7 +351,7 @@ Whenever `claude` is in `SANDY_AGENT`, sandy regenerates `<NAME>/claude/settings
 7. (First run only) Copy host `~/.claude/statsig/` → sandbox `claude/statsig/` (refreshed on every launch from a separate "always-refresh statsig" block).
 8. (First run only) Create all persistent subdirectories.
 
-At container launch, `<NAME>/claude` is bind-mounted rw at `/home/claude/.claude` — there is no child `:ro` overlay on `settings.json`. The agent can write to it (required for `/plugin install`), but sandy-managed keys are re-overwritten on the next launch.
+At container launch, `<NAME>/claude` is bind-mounted rw at `/home/sandy/.claude` — there is no child `:ro` overlay on `settings.json`. The agent can write to it (required for `/plugin install`), but sandy-managed keys are re-overwritten on the next launch.
 
 **Consequence:** host-side edits to `~/.claude/settings.json` are picked up automatically on the next sandy launch, and the sandy-managed keys are always re-derived. Agent-owned state (`enabledPlugins`) is preserved across launches. The trade-off vs a strict reset: the agent can modify its own settings mid-session, and those modifications (to keys sandy doesn't manage) persist into the next session as well — the merge overlays rather than wipes.
 
@@ -603,7 +603,7 @@ Add entries to all four arrays (`SKILL_PACK_NAMES`, `SKILL_PACK_REPOS`, `SKILL_P
 --pids-limit 512
 --read-only
 --tmpfs /tmp:exec,size=1G
---tmpfs /home/claude:exec,size=2G,uid=1001,gid=1001
+--tmpfs /home/sandy:exec,size=2G,uid=1001,gid=1001
 --network <NETWORK_NAME>
 ```
 
@@ -674,7 +674,7 @@ If the host UID differs from the image default (1001), sandy generates custom `p
 - **CPU**: Auto-detected from `docker info` (number of CPUs), overridable via `SANDY_CPUS`
 - **Memory**: Auto-detected as `available - 1GB` (minimum 2GB), overridable via `SANDY_MEM`
 - **PIDs**: Hard limit of 512 processes
-- **Tmpfs**: `/tmp` = 1GB, `/home/claude` = 2GB (persistent mounts bypass tmpfs)
+- **Tmpfs**: `/tmp` = 1GB, `/home/sandy` = 2GB (persistent mounts bypass tmpfs)
 
 ---
 
@@ -945,7 +945,7 @@ Sandy's `load_gemini_credentials()` tries the following sources, controlled by `
 | Mode | Source | Container mount / env |
 |---|---|---|
 | `api_key` | `GEMINI_API_KEY` env var on host | Forwarded via `-e GEMINI_API_KEY=…` |
-| `oauth` | Host `~/.gemini/oauth_creds.json` (Gemini CLI ≥0.30), falling back to legacy `~/.gemini/tokens.json` | Ephemeral copy of whichever was found, mounted at the same filename under `/home/claude/.gemini/` **read-only** (1.0-rc1) |
+| `oauth` | Host `~/.gemini/oauth_creds.json` (Gemini CLI ≥0.30), falling back to legacy `~/.gemini/tokens.json` | Ephemeral copy of whichever was found, mounted at the same filename under `/home/sandy/.gemini/` **read-only** (1.0-rc1) |
 | `adc` | `~/.config/gcloud/application_default_credentials.json` | Mounted read-only + `GOOGLE_APPLICATION_CREDENTIALS` env var |
 
 In `auto` mode, all three are probed; a warning is emitted if none are found. OAuth tokens are copied to a tmpdir each launch and discarded on exit (same pattern as Claude credentials). Gemini's OAuth refresh is handled inside the CLI itself, so sandy does not run a refresh check.
@@ -962,12 +962,12 @@ Sandy's `load_codex_credentials()` tries the following sources, controlled by `S
 
 | Mode | Source | Container mount / env |
 |---|---|---|
-| `api_key` | `OPENAI_API_KEY` env var on host | Materialized as an ephemeral `auth.json` (`{"OPENAI_API_KEY":"…"}` — what `codex login --with-api-key` writes) mounted at `/home/claude/.codex/auth.json` **read-only**; the env var is also forwarded via `-e OPENAI_API_KEY=…` for other in-container tooling |
+| `api_key` | `OPENAI_API_KEY` env var on host | Materialized as an ephemeral `auth.json` (`{"OPENAI_API_KEY":"…"}` — what `codex login --with-api-key` writes) mounted at `/home/sandy/.codex/auth.json` **read-only**; the env var is also forwarded via `-e OPENAI_API_KEY=…` for other in-container tooling |
 | `oauth` | `$SANDBOX_DIR/codex/auth.json` if present and non-empty, else host `~/.codex/auth.json` | The host copy is **seeded into the sandbox** (`$SANDBOX_DIR/codex/auth.json`, mode 600) and reached through the existing **read-write** `~/.codex` mount — no `:ro` overlay, so an in-container `codex login` can write and persist. The host file is only ever read |
 
 In `auto` mode (default), `OPENAI_API_KEY` wins if set; otherwise this sandbox's own `auth.json` is used if present and non-empty; otherwise the host's is seeded in; otherwise a warning is emitted. The api_key path materializes a file (rather than relying on env passthrough) because codex 0.139+ no longer reads `OPENAI_API_KEY` from the environment for first-party auth — requests go out with no Authorization header at all and fail with 401 "Missing bearer or basic authentication in header".
 
-**The OAuth credential is seeded, not overlaid.** Until 1.10.x the host's `auth.json` was copied to a temp dir and bind-mounted **read-only** over `/home/claude/.codex/auth.json`. That made `codex login`, `codex logout` and in-session token refresh fail with `Read-only file system (os error 30)` inside the container — while this document, `CLAUDE.md` and sandy's own comments all told the user to re-login *inside the container*, which that configuration makes impossible. The `:ro` was also not providing its two stated properties: the mount source was already an ephemeral **copy** that `cleanup()` removes, so an in-container write could neither reach the host's file nor race it.
+**The OAuth credential is seeded, not overlaid.** Until 1.10.x the host's `auth.json` was copied to a temp dir and bind-mounted **read-only** over `/home/sandy/.codex/auth.json`. That made `codex login`, `codex logout` and in-session token refresh fail with `Read-only file system (os error 30)` inside the container — while this document, `CLAUDE.md` and sandy's own comments all told the user to re-login *inside the container*, which that configuration makes impossible. The `:ro` was also not providing its two stated properties: the mount source was already an ephemeral **copy** that `cleanup()` removes, so an in-container write could neither reach the host's file nor race it.
 
 Sandy now copies the host's `auth.json` into `$SANDBOX_DIR/codex/auth.json` (mode 600) on first use and lets the agent reach it through the ordinary read-write `~/.codex` mount. An in-container login therefore works and **persists for that sandbox**, and on later launches the sandbox's own copy takes precedence over the host's — without that precedence every relaunch would overwrite a fresh login with the host's stale token. The host file is only ever read; nothing is copied back. `sandy --reset-sandbox` discards the sandbox copy, after which the host's is seeded again.
 
@@ -999,7 +999,7 @@ codex login --device-auth
 Sandy wraps Claude Code in a tmux session:
 - **Session name**: `sandy` (fixed)
 - **Window name**: `sandy: <PROJECT_NAME>`
-- **Auto-resume**: If session files (`.jsonl`) exist in `~/.claude/projects/<WORKSPACE_KEY>/` and no overriding flags (`--new`, `-p`, `--resume`, `--continue`), sandy automatically adds `--continue` to resume the last session. `WORKSPACE_KEY` is the container workspace path with all `/` replaced by `-` (e.g., `/home/claude/dev/sandy` → `-home-claude-dev-sandy`)
+- **Auto-resume**: If session files (`.jsonl`) exist in `~/.claude/projects/<WORKSPACE_KEY>/` and no overriding flags (`--new`, `-p`, `--resume`, `--continue`), sandy automatically adds `--continue` to resume the last session. `WORKSPACE_KEY` is the container workspace path with all `/` replaced by `-` (e.g., `/home/sandy/dev/sandy` → `-home-claude-dev-sandy`)
 - **Fallback**: If `--continue` fails (stale session), retry without it
 
 ### Tmux Configuration
@@ -1044,12 +1044,12 @@ The workspace is mounted inside the container at a path that mirrors the host's 
 
 ```
 If host path starts with $HOME:
-    container path = /home/claude/<relative-to-HOME>
+    container path = /home/sandy/<relative-to-HOME>
 Else:
     container path = host path (fallback for paths outside $HOME)
 ```
 
-For example, `~/dev/sandy` on the host becomes `/home/claude/dev/sandy` inside the container. This preserves the relative path relationship needed for git submodules.
+For example, `~/dev/sandy` on the host becomes `/home/sandy/dev/sandy` inside the container. This preserves the relative path relationship needed for git submodules.
 
 ### Git Submodule Support
 
@@ -1205,12 +1205,12 @@ For `SANDY_AGENT=codex`, `_check_codex_update` compares the in-image `/opt/codex
 | Control | Setting |
 |---|---|
 | Root filesystem | `--read-only` |
-| User | Non-root (`claude`, mapped to host UID) |
+| User | Non-root (`sandy`, mapped to host UID) |
 | Privilege escalation | `--security-opt no-new-privileges:true` |
 | Capabilities | `--cap-drop ALL`, add back only SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER |
 | Process limit | `--pids-limit 512` |
 | Network | Per-instance isolated bridge, LAN blocked |
-| Tmpfs | `/tmp` (1GB), `/home/claude` (2GB) |
+| Tmpfs | `/tmp` (1GB), `/home/sandy` (2GB) |
 
 ### Threat Mitigations
 
@@ -1498,7 +1498,7 @@ RUN useradd -m -s /bin/bash -u 1001 claude
 
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
-ENV PATH="/home/claude/.local/bin:/usr/local/cargo/bin:/usr/local/go/bin:$PATH"
+ENV PATH="/home/sandy/.local/bin:/usr/local/cargo/bin:/usr/local/go/bin:$PATH"
 ```
 
 ### A.2 Dockerfile (Phase 2)
@@ -1508,10 +1508,10 @@ ENV PATH="/home/claude/.local/bin:/usr/local/cargo/bin:/usr/local/go/bin:$PATH"
 ```dockerfile
 FROM ${BASE_IMAGE_NAME}
 
-RUN HOME=/home/claude su -s /bin/bash claude -c \
+RUN HOME=/home/sandy su -s /bin/bash sandy -c \
     "curl -fsSL https://claude.ai/install.sh | bash" \
- && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \
- && mv /home/claude/.local/share/claude /opt/claude-code \
+ && cp -L /home/sandy/.local/bin/claude /usr/local/bin/claude \
+ && mv /home/sandy/.local/share/claude /opt/claude-code \
  && { /usr/local/bin/claude --version 2>/dev/null \
     | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' > /opt/claude-code/.version || true; }
 
@@ -1533,7 +1533,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 ```
 
 Key details:
-- Claude Code is installed as user `claude`, then relocated to `/usr/local/bin/claude` (binary) and `/opt/claude-code` (data) so it survives the tmpfs overlay on `/home/claude`.
+- Claude Code is installed as user `sandy`, then relocated to `/usr/local/bin/claude` (binary) and `/opt/claude-code` (data) so it survives the tmpfs overlay on `/home/sandy`.
 - `UV_TOOL_DIR=/opt/uv-tools` ensures synthkit's venv goes to an accessible location (not `/root/`).
 - Version is cached at `/opt/claude-code/.version` for update detection.
 
@@ -1624,7 +1624,7 @@ RUN_UID="${HOST_UID:-1001}"
 RUN_GID="${HOST_GID:-1001}"
 
 # 1. Fix tmpfs ownership
-chown "$RUN_UID:$RUN_GID" /home/claude
+chown "$RUN_UID:$RUN_GID" /home/sandy
 
 # 2. Seed known_hosts
 # Copies from /tmp/host-ssh-known_hosts if present
@@ -1768,7 +1768,7 @@ All magic numbers, thresholds, timeouts, and limits used in the sandy script.
 | Container CPUs | All available (from `docker info --format '{{.NCPU}}'`) | Default 2 if detection fails |
 | PID limit | 512 | `--pids-limit 512` |
 | tmpfs `/tmp` | 1 GB, exec | `--tmpfs /tmp:exec,size=1G` |
-| tmpfs `/home/claude` | 2 GB, exec | `--tmpfs /home/claude:exec,size=2G,uid=1001,gid=1001` |
+| tmpfs `/home/sandy` | 2 GB, exec | `--tmpfs /home/sandy:exec,size=2G,uid=1001,gid=1001` |
 | tmux history | 10,000 lines | `set -g history-limit 10000` |
 
 ### B.2 Timeouts
@@ -1989,7 +1989,7 @@ The refusal is reported through the same `_written` flags as any other failure, 
 
 ### C.3 `.claude.json` (User Setup State)
 
-Stored at `$SANDY_HOME/sandboxes/<NAME>.claude.json` (outside the sandbox dir to avoid mount conflicts). Mounted into the container at `/home/claude/.claude.json`.
+Stored at `$SANDY_HOME/sandboxes/<NAME>.claude.json` (outside the sandbox dir to avoid mount conflicts). Mounted into the container at `/home/sandy/.claude.json`.
 
 **Seeding from host** (Node.js):
 ```javascript
@@ -2052,7 +2052,7 @@ Auto-generated at `~/.claude/hooks/cmux-notify.sh` when cmux is detected. Merged
         "hooks": [
           {
             "type": "command",
-            "command": "/home/claude/.claude/hooks/cmux-notify.sh"
+            "command": "/home/sandy/.claude/hooks/cmux-notify.sh"
           }
         ]
       }
@@ -2084,9 +2084,9 @@ docker exec [-i|-i -t] -u <host-uid>:<host-gid> -w <container-workspace> -e HOME
 | Element | Resolution |
 |---|---|
 | container | `docker ps --filter label=sandy.daemon=true --filter label=sandy.workspace_path=<wd>`, else `--filter name=^sandy-<sandbox>$`. The name match is **fully anchored** — foreground runs carry only `sandy.managed=true`, so the label filter alone finds daemon sessions only, and an unanchored name would also match the `sandy-proxy-…` sidecar |
-| `-u` | **numeric**, never `-u claude`. Docker resolves a *name* against the image filesystem, where `useradd -u 1001 claude` applies; sandy's host-uid `/etc/passwd` is a runtime bind mount docker does not consult. `-u claude` therefore runs as uid 1001, prints `I have no name!`, and writes as the wrong owner |
+| `-u` | **numeric**, never `-u sandy`. Docker resolves a *name* against the image filesystem, where `useradd -u 1001 claude` applies; sandy's host-uid `/etc/passwd` is a runtime bind mount docker does not consult. `-u sandy` therefore runs as uid 1001, prints `I have no name!`, and writes as the wrong owner |
 | `-w` | the launch path's own `$HOME`-relative mapping (`SANDY_WORKSPACE`), so the shell starts where the agent works |
-| `HOME` | read from the container's own passwd (`getent passwd $(id -u)`), defaulting to `/home/claude` — docker sets HOME only when it can resolve the user, and as root `HOME=/root` is on the read-only rootfs |
+| `HOME` | read from the container's own passwd (`getent passwd $(id -u)`), defaulting to `/home/sandy` — docker sets HOME only when it can resolve the user, and as root `HOME=/root` is on the read-only rootfs |
 | tty | `-i -t` only when stdin is a tty, so `sandy --exec -- cmd \| grep x` and CI callers work |
 | exit | `4` — no running container for the workspace (the `--attach`/`--stop` "no such session" convention); `1` — usage or unreachable docker; otherwise **the command's own status** |
 
@@ -2094,7 +2094,7 @@ Sub-options: `--workspace PATH`, `--dry-run` (print the command, execute nothing
 
 ### C.7b Codex `config.toml` (seeded by sandy)
 
-Written to `$SANDBOX_DIR/codex/config.toml` on first launch of a new sandbox with `SANDY_AGENT=codex`. Mounted into the container at `/home/claude/.codex/config.toml`.
+Written to `$SANDBOX_DIR/codex/config.toml` on first launch of a new sandbox with `SANDY_AGENT=codex`. Mounted into the container at `/home/sandy/.codex/config.toml`.
 
 ```toml
 # Written by sandy on first launch. Safe to edit, but sandbox_mode must stay
@@ -2130,7 +2130,7 @@ Guarded by `run-tests.sh §118`.
 After the first session start, the file additionally contains the trust entry:
 
 ```toml
-[projects."/home/claude/dev/myproject"]
+[projects."/home/sandy/dev/myproject"]
 trust_level = "trusted"
 ```
 
@@ -2138,7 +2138,7 @@ Appended by `user-setup.sh` only if a matching `^[projects."<workspace>"]` line 
 
 ### C.7c Codex `auth.json` (ephemeral mount, both auth paths)
 
-Both codex auth paths produce an ephemeral `auth.json` mounted **read-only** into the container at `/home/claude/.codex/auth.json`; the tmpdir is removed on exit (cleanup trap):
+Both codex auth paths produce an ephemeral `auth.json` mounted **read-only** into the container at `/home/sandy/.codex/auth.json`; the tmpdir is removed on exit (cleanup trap):
 
 - **api_key** (`OPENAI_API_KEY` set, `SANDY_CODEX_AUTH` is `auto` or `api_key`): sandy generates the file itself as `{"OPENAI_API_KEY":"<key>"}` (with `"` and `\` JSON-escaped) — the same shape `codex login --with-api-key` writes. Required because codex 0.139+ no longer reads the env var for first-party auth.
 - **oauth** (host has `~/.codex/auth.json`, mode `auto` or `oauth`): sandy copies the host file to the tmpdir. Schema is opaque to sandy — the file is produced by `codex login` on the host.
@@ -2162,7 +2162,7 @@ Written to `$SANDBOX_DIR/sandy-session.json` on every launch and bind-mounted re
   "schema": 1,
   "sandy_version": "0.14.1-dev-a1b2c3d",
   "egress_mode": "off",
-  "workspace": "/home/claude/dev/myproject",
+  "workspace": "/home/sandy/dev/myproject",
   "sandbox_name": "myproject-a1b2c3d4",
   "host_uid": 501,
   "host_gid": 20,
@@ -2351,7 +2351,7 @@ docker rm -f "sandy-<SANDBOX_NAME>" 2>/dev/null || true
 --pids-limit 512
 --read-only
 --tmpfs /tmp:exec,size=1G
---tmpfs /home/claude:exec,size=2G,uid=1001,gid=1001
+--tmpfs /home/sandy:exec,size=2G,uid=1001,gid=1001
 --network <NETWORK_NAME>
 ```
 
@@ -2366,12 +2366,12 @@ If `SANDY_GPU` is set and Docker supports GPUs (`docker info --format '{{.Runtim
 
 If credentials were loaded (OAuth token or credentials file):
 ```bash
--v "<CRED_TMPDIR>/.credentials.json:/home/claude/.claude/.credentials.json"
+-v "<CRED_TMPDIR>/.credentials.json:/home/sandy/.claude/.credentials.json"
 ```
 
 If `SANDY_CLAUDE_AUTH=profile` resolved a profile (1.11.0) — and then the block above is **not** emitted, because the OAuth file is withheld:
 ```bash
--v "<PROFILE_TMPDIR>:/home/claude/.config/anthropic"     # rw, ephemeral; holds ONE profile:
+-v "<PROFILE_TMPDIR>:/home/sandy/.config/anthropic"     # rw, ephemeral; holds ONE profile:
                                                           #   active_config, configs/<name>.json,
                                                           #   credentials/<name>.json (0600)
 -e "ANTHROPIC_PROFILE=<name>"                             # only when the operator set it
@@ -2384,7 +2384,7 @@ The temporary directory is created per-launch and cleaned up on exit. The mount 
 ### E.5 .claude.json Mount
 
 ```bash
--v "<SANDY_HOME>/sandboxes/<NAME>.claude.json:/home/claude/.claude.json"
+-v "<SANDY_HOME>/sandboxes/<NAME>.claude.json:/home/sandy/.claude.json"
 ```
 
 Always mounted — this file is seeded on first run and persists across sessions.
@@ -2393,7 +2393,7 @@ Always mounted — this file is seeded on first run and persists across sessions
 
 If `~/.claude/hooks/` exists on the host:
 ```bash
--v "$HOME/.claude/hooks:/home/claude/.claude/hooks:ro"
+-v "$HOME/.claude/hooks:/home/sandy/.claude/hooks:ro"
 ```
 
 ### E.7 Workspace Mount
@@ -2534,11 +2534,11 @@ This hides host content at these paths and provides a writable overlay from the 
 
 If `SANDY_SCREENSHOT_DIR` is set on the host (and passes validation):
 ```bash
--v "<SANDY_SCREENSHOT_DIR>:/home/claude/screenshots:ro"
--e "SANDY_SCREENSHOTS_PATH=/home/claude/screenshots"
+-v "<SANDY_SCREENSHOT_DIR>:/home/sandy/screenshots:ro"
+-e "SANDY_SCREENSHOTS_PATH=/home/sandy/screenshots"
 ```
 
-Read-only by design — the agent must never mutate the host's screenshot folder. The container-side path is fixed (`/home/claude/screenshots`) so the `/ss` slash command files generated by `user-setup.sh` and the `sandy-ss-paths` helper baked into the base image can hardcode it.
+Read-only by design — the agent must never mutate the host's screenshot folder. The container-side path is fixed (`/home/sandy/screenshots`) so the `/ss` slash command files generated by `user-setup.sh` and the `sandy-ss-paths` helper baked into the base image can hardcode it.
 
 Validation (run at launch, before any `docker run`):
 - Reject shell metacharacters (`; $ \` & | < >`).
@@ -2597,10 +2597,10 @@ Note: gstack mounts from the **workspace**, not the sandbox — see §6 "Workspa
 ### E.12a Handoff directories Mounts (default ON since 1.10.0; conditional on the resolved SANDY_HANDOFF_DIRS=1)
 
 ```bash
--v "<SANDBOX>/handoff/outbox:/home/claude/.handoff/outbox"
--v "<SANDBOX>/handoff/inbox:/home/claude/.handoff/inbox:ro"
--v "<SANDBOX>/handoff/peer:/home/claude/.handoff/peer:ro"
--v "<SANDBOX>/handoff/relay:/home/claude/.handoff/relay"
+-v "<SANDBOX>/handoff/outbox:/home/sandy/.handoff/outbox"
+-v "<SANDBOX>/handoff/inbox:/home/sandy/.handoff/inbox:ro"
+-v "<SANDBOX>/handoff/peer:/home/sandy/.handoff/peer:ro"
+-v "<SANDBOX>/handoff/relay:/home/sandy/.handoff/relay"
 -e "SANDY_HANDOFF_RELAY=<value>"   # only emitted when SANDY_HANDOFF_RELAY is set
 ```
 
@@ -2673,7 +2673,7 @@ implication so the directory pair still mounts. The host-side path check runs
 a launch that would never have started the relay — a misconfigured key never
 rides along silently.
 
-**Collision guard.** A workspace mounted at `/home/claude/.handoff` or below
+**Collision guard.** A workspace mounted at `/home/sandy/.handoff` or below
 it (i.e. the host workspace itself resolves under `~/.handoff`) would nest the
 handoff mounts inside the workspace bind, so Docker would materialize
 `outbox/`/`inbox/` as real directories inside the host workspace tree —
@@ -2698,14 +2698,14 @@ the bind mount; it is not a host-side permission change.
 
 The sandbox directory itself becomes `~/.claude` inside the container:
 ```bash
--v "<SANDBOX_DIR>:/home/claude/.claude"
+-v "<SANDBOX_DIR>:/home/sandy/.claude"
 ```
 
 ### E.13a Seed `settings.json` (conditional on `claude` agent)
 
 As of 0.11.3, there is no child overlay on `settings.json`. The file lives at `<SANDBOX_DIR>/claude/settings.json` inside the rw sandbox mount (E.13) and is regenerated host-side by the pre-launch seed step (§4 Seeding) every launch. The regeneration re-reads the host `~/.claude/settings.json`, overlays sandy defaults and marketplaces, and preserves `enabledPlugins` from the previous sandbox session. No additional mount flag is emitted.
 
-Rationale: the pre-0.11.3 approach used a `:ro` child overlay (`<SANDBOX_DIR>/.seed-settings.json → /home/claude/.claude/settings.json:ro`), but that caused `/plugin install` to fail with EROFS because Claude Code writes the plugin list to `settings.json` at install time. The merge-preserving rw approach trades strict F6 reset-on-launch for functional plugin installs, while still guaranteeing sandy-managed keys are re-overwritten every launch.
+Rationale: the pre-0.11.3 approach used a `:ro` child overlay (`<SANDBOX_DIR>/.seed-settings.json → /home/sandy/.claude/settings.json:ro`), but that caused `/plugin install` to fail with EROFS because Claude Code writes the plugin list to `settings.json` at install time. The merge-preserving rw approach trades strict F6 reset-on-launch for functional plugin installs, while still guaranteeing sandy-managed keys are re-overwritten every launch.
 
 ### E.14 SSH Mounts (conditional on `SANDY_SSH`)
 
@@ -2832,7 +2832,7 @@ GOOGLE_CLOUD_PROJECT=<proj>         # Vertex AI
 GOOGLE_CLOUD_LOCATION=<region>
 GOOGLE_GENAI_USE_VERTEXAI=<true>
 GOOGLE_API_KEY=<key>
-GOOGLE_APPLICATION_CREDENTIALS=/home/claude/.config/gcloud/application_default_credentials.json  # adc mode
+GOOGLE_APPLICATION_CREDENTIALS=/home/sandy/.config/gcloud/application_default_credentials.json  # adc mode
 ```
 
 **Codex-specific env** (`SANDY_AGENT=codex`):
@@ -2842,13 +2842,13 @@ CODEX_MODEL=<model>                 # if set
 SANDY_CODEX_AUTH=<auto|api_key|oauth>
 ```
 
-`CODEX_HOME` is **not** a sandy config key and is never forwarded — sandy owns the in-container path (`/home/claude/.codex`) via the sandbox mount, and overriding it would break the mount. (Removed from the passive allowlist in the PR 4.1 surface audit, where it was found declared-but-never-consumed.)
+`CODEX_HOME` is **not** a sandy config key and is never forwarded — sandy owns the in-container path (`/home/sandy/.codex`) via the sandbox mount, and overriding it would break the mount. (Removed from the passive allowlist in the PR 4.1 surface audit, where it was found declared-but-never-consumed.)
 
 **Codex-specific mounts** (`SANDY_AGENT=codex`):
 ```bash
--v "$SANDBOX_DIR/codex:/home/claude/.codex"
+-v "$SANDBOX_DIR/codex:/home/sandy/.codex"
 # if OAuth path active:
--v "$CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro"
+-v "$CODEX_CRED_TMPDIR/auth.json:/home/sandy/.codex/auth.json:ro"
 ```
 
 The codex sandbox dir is writable (codex needs `log/`, `memories/`, session rollouts, sqlite state), but the `auth.json` file inside it is shadowed by a read-only overlay bind when either auth path is active (OAuth copy or api-key materialization — see C.7c). See §11 for the rationale of the read-only overlay.
@@ -2867,10 +2867,10 @@ OpenCode mounts: `$SANDBOX_DIR/opencode/config` → `~/.config/opencode` and `$S
 
 **Handoff relay derived env** (1.10.0, container-side only — set by `_sandy_start_handoff_relay` in `user-setup.sh`, not passed via docker `-e`): when `SANDY_HANDOFF_RELAY` resolves to an executable file and `~/.handoff/relay` is mounted, sandy `export`s these in `user-setup.sh`'s own shell **before** it forks the supervisor subshell and (later in the same script) `exec`s into `tmux new-session` — so they are inherited by the tmux server and by every agent pane in the session, not scoped to the relay process alone. The relay itself, and anything else running as the container's uid, additionally sees:
 ```bash
-SANDY_HANDOFF_INBOX=/home/claude/.handoff/inbox
-SANDY_HANDOFF_OUTBOX=/home/claude/.handoff/outbox
-SANDY_HANDOFF_RELAY_STATE=/home/claude/.handoff/relay
-SANDY_HANDOFF_PEER=/home/claude/.handoff/peer      # 1.10.0, additive: the second (read-only) inbound directory
+SANDY_HANDOFF_INBOX=/home/sandy/.handoff/inbox
+SANDY_HANDOFF_OUTBOX=/home/sandy/.handoff/outbox
+SANDY_HANDOFF_RELAY_STATE=/home/sandy/.handoff/relay
+SANDY_HANDOFF_PEER=/home/sandy/.handoff/peer      # 1.10.0, additive: the second (read-only) inbound directory
 ```
 plus the ambient `SANDY_AGENT`/`SANDY_WORKSPACE` and the rest of the container's inherited environment (including `CLAUDE_CODE_OAUTH_TOKEN` if present — see `docs/security/CROSS_SESSION_INBOUND.md` §8). A relay wanting to enumerate live sessions runs `/usr/local/bin/sandy-handoff-sessions` (Appendix A.1) rather than parsing `~/.claude/sessions/` itself.
 

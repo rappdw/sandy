@@ -86,7 +86,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "sandy": {
     "version": "0.12.0",
     "commit": "abc1234",
@@ -229,8 +229,8 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
     }
   ],
   "compatibility": {
-    "current_schema_version": 1,
-    "supported_schema_versions": [1],
+    "current_schema_version": 2,
+    "supported_schema_versions": [2],
     "deprecated_schema_versions": []
   }
 }
@@ -247,7 +247,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "sandy_home": "/Users/drapp/.sandy",
   "host_id": "drapp-mbp",
   "host_id_source": "hostname",
@@ -536,7 +536,7 @@ Takes a path to a `.sandy/config`-style file. Emits:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "path": "/Users/drapp/dev/foo/zork/.sandy/config",
   "source_tier": "workspace",
   "errors": [],
@@ -581,9 +581,17 @@ No exit-code surprises: always `0` (see the stream contract above — this flag 
 
 - Current: `schema_version: 1`
 - **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal`), `description`, `sources`, and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
+- **`2.0.0` — `schema_version` moves to `2`, the first bump.** Not additive: `sandboxes[].features` keeps its name and changes its SOURCE. It reported `$SANDBOX_DIR/features/<name>` markers (1.15.0); it now reports which features a sandbox was **selected** for by each feature's own manifest, evaluated at every launch. A consumer that kept parsing the field would silently have a different question answered, which is worse than a break, so the version says so. `feature_problems` likewise becomes `"<feature>: <why this sandbox was not selected>"`.
+
+  **Gate on `schema_version`**, not on the sandy version string and not on probing for a field: `X.Y.Z-dev` compares equal to `X.Y.Z` (see the `--print-version` guidance above), so a version gate admits builds that predate the change.
+
+  **Still last launch**, and unknowably so in one dimension: selection depends on the agents a launch resolved to, so a sandbox absent from both arrays has simply not been launched since the feature was configured — it is not "excluded". `$SANDY_HOME/features/<feature>/selected.json` carries that note in full, for consumers that cannot execute sandy.
+
+  Removed in the same release: `SANDY_FEATURES_DIR` (the features root is fixed at `$SANDY_HOME/features/`, and setting the key is now a hard error naming the replacement) and the per-sandbox marker itself. Full design: `docs/design/FEATURE-MANIFEST.md`.
+
 - **`1.15.0`**: two new `sandboxes[]` fields, `features` (a JSON array of marker names, sorted) and `feature_problems` (a JSON array of `"<entry>: <reason>"` strings), both emitted in BOTH modes; one new field in the session marker, `sandbox_name` (#303); and one new privileged config key, `SANDY_FEATURES_DIR` (#305). Additive, so `schema_version` stays `1`.
 
-  **`features`** reports `$SANDBOX_DIR/features/<name>` markers — "this sandbox participates in `<name>`" for an `<name>` that is not sandy's. It is **privileged by construction of where it lives** (a repository cannot write under `$SANDY_HOME`), and it is read **at query time**, so unlike `agents`, `handoff_enabled` and `handoff.state` it does **not** carry the last-launch-not-next-launch caveat. It still reports only what sandy was *told*: a name means a marker exists, never that anything works. Empty and absent both yield `[]`, never `null`. `feature_problems` names every entry sandy will **not** use and why, because an entry that is ignored *and* unmentioned is indistinguishable from one that works. Its strings contain commas, so parse the array as JSON rather than splitting.
+  *(Superseded by 2.0.0 — the field now reports manifest selection; the paragraph below describes 1.15.0 behaviour and is kept because the record of what a version emitted is the point of this section.)* **`features`** reported `$SANDBOX_DIR/features/<name>` markers — "this sandbox participates in `<name>`" for an `<name>` that is not sandy's. It is **privileged by construction of where it lives** (a repository cannot write under `$SANDY_HOME`), and it is read **at query time**, so unlike `agents`, `handoff_enabled` and `handoff.state` it does **not** carry the last-launch-not-next-launch caveat. It still reports only what sandy was *told*: a name means a marker exists, never that anything works. Empty and absent both yield `[]`, never `null`. `feature_problems` names every entry sandy will **not** use and why, because an entry that is ignored *and* unmentioned is indistinguishable from one that works. Its strings contain commas, so parse the array as JSON rather than splitting.
 
   **The marker rule, in full — because consumers WRITE these markers.** An entry is valid iff it is **not a symlink** (tested before the type test, since `-d`/`-f` follow links), its name matches `[A-Za-z0-9._-]+` with **no leading dot** and **no `..` substring anywhere**, and it is **either a regular file or a directory**. Nothing else is examined: not size, not mode, not owner, not contents.
 

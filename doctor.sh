@@ -177,13 +177,15 @@ else
 Then: gh auth login"
 fi
 
-# node or jq — sandy uses one of them to merge settings.json; falls back to printf-defaults otherwise
+# node or jq — sandy merges settings.json with one of them (printf defaults otherwise),
+# and REQUIRES one to read a feature manifest: a manifest decides what gets bind-mounted,
+# so there is no best-effort path (docs/design/FEATURE-MANIFEST.md, D2).
 if command -v node >/dev/null 2>&1; then
     ok "node $(node --version 2>/dev/null) (used for settings.json merge)"
 elif command -v jq >/dev/null 2>&1; then
     ok "jq (used as fallback for settings.json merge)"
 else
-    warn "neither node nor jq found (sandy will fall back to printf defaults for settings.json)" \
+    warn "neither node nor jq found (settings.json falls back to printf defaults, and a launch that must read a feature manifest will REFUSE)" \
          "Install either one:
     $(pkg_hint node)
   or
