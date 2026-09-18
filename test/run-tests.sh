@@ -15158,6 +15158,75 @@ for sb in ps[\"sandboxes\"]:
 sys.exit(0)
 " "$1" "$2"' _ "$_S137_PS" "$_S137_H/features/amap/selected.json"
 
+# --- three more the consumer named, grouped by CONTRACT not by code location --
+# (15) belongs to the reader and (16)/(17) to the apply pass, but all three are
+# published-consumer-contract pins like (8)-(14), and keeping the consumer's
+# dependency list readable in one place is worth more than filing each beside
+# its function.
+_S137_C="$_S137_DIR/carry"; mkdir -p "$_S137_C/amap/payload"
+: > "$_S137_C/amap/payload/relay"
+cat > "$_S137_C/amap/feature.json" <<'S137_CARRY'
+{
+  "sandboxes": { "include": ["*"] },
+  "agents":    { "include": ["claude"] },
+  "mounts": [
+    { "name": "payload", "from": "payload", "mode": "ro", "export": "AMAP_PAYLOAD_DIR" }
+  ],
+  "expose": { "AMAP_FLEET_DOMAIN": "home.fleet.example  (spaced & punctuated!)" },
+  "feature": {
+    "rendered_at": "2026-09-18T19:00:00Z",
+    "policy": { "nested": { "deep": [1, 2, {"k": "v"}] }, "unknown_to_sandy": true }
+  }
+}
+S137_CARRY
+_S137_C_BEFORE="$(cksum < "$_S137_C/amap/feature.json")"
+_S137_C_OUT="$_S137_DIR/carry-records.txt"
+bash -c 'set -uo pipefail; eval "$1"
+    _SANDY_FM_HOME=/home/sandy
+    _sandy_fm_apply "$2" carry-11111111 /x/carry claude' \
+    _ "$_S137_BLK" "$_S137_C" > "$_S137_C_OUT" 2>/dev/null || true
+_S137_C_AFTER="$(cksum < "$_S137_C/amap/feature.json")"
+
+# (15) The consumer asked for a round-trip pin. There is no round trip: sandy
+# NEVER writes feature.json -- it reads it once per launch to validate and
+# project, and no code path rewrites it. That is stronger than "re-emitted
+# unchanged", so it is what gets asserted. Two halves: the file is byte-
+# identical after a full apply, and NOTHING derived from `feature` appears in
+# the record stream (a projector that emitted its contents would put operator
+# policy into RUN_FLAGS).
+check "§137(15a) a full apply leaves feature.json BYTE-IDENTICAL — sandy reads the manifest and never writes it, so a \`feature\` section carrying a consumer's own stamp and policy cannot be moved under it" \
+    bash -c 'test "$1" = "$2"' _ "$_S137_C_BEFORE" "$_S137_C_AFTER"
+check "§137(15b) NOTHING from the reserved \`feature\` section reaches the record stream (mutation: emit it and operator policy lands in RUN_FLAGS)" \
+    bash -c '! grep -qE "rendered_at|unknown_to_sandy|nested" "$1"' _ "$_S137_C_OUT"
+
+# (16) An expose value is the address a host-side wrapper announces. A
+# projector that trimmed, collapsed or quoted it would have every daemon
+# announcing an unroutable address -- wrong, confidently, everywhere at once.
+# The fixture value carries double spaces, an ampersand and a bang for that
+# reason; it is not decorative.
+printf '%s' 'home.fleet.example  (spaced & punctuated!)' > "$_S137_DIR/expect-expose"
+check "§137(16) an \`expose\` VALUE reaches the export record verbatim — no trim, no collapse, no requote" \
+    bash -c 'python3 -c "
+import sys
+want = open(sys.argv[2]).read()
+for ln in open(sys.argv[1]):
+    p = ln.rstrip(chr(10)).split(chr(9))
+    if len(p) == 3 and p[0] == \"export\" and p[1] == \"AMAP_FLEET_DOMAIN\":
+        sys.exit(0 if p[2] == want else 1)
+sys.exit(1)
+" "$1" "$2"' _ "$_S137_C_OUT" "$_S137_DIR/expect-expose"
+
+# (17) A mount's `export` carries the COMPUTED container destination, which is
+# how a wrapper stops hardcoding /opt/sandy/features/<name>. Asserted against
+# _sandy_fm_dest rather than against a literal, so the check follows the rule
+# if the mapping ever changes rather than pinning today's string twice.
+check "§137(17) a mount's \`export\` VALUE is the computed container destination for that mount, per _sandy_fm_dest — not the source, not the manifest's \`from\`" \
+    bash -c 'eval "$1"
+        _SANDY_FM_HOME=/home/sandy
+        want="$(_sandy_fm_dest amap payload)"
+        got="$(awk -F"\t" "\$1==\"export\" && \$2==\"AMAP_PAYLOAD_DIR\" {print \$3}" "$2")"
+        [ -n "$got" ] && [ "$got" = "$want" ]' _ "$_S137_BLK" "$_S137_C_OUT"
+
 # The claim is "no PARSER needed", not "no coreutils needed" -- forget is an
 # unlink and still needs rm. So the fixture hides node and jq specifically,
 # with a bin directory holding only what a plain unlink uses, and ASSERTS
