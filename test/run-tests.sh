@@ -14849,6 +14849,93 @@ fi
 rm -rf "$_S135_DIR"
 unset _S135_DIR _S135_SANDY _S135_BLK _S135_OK _S135_DEST _s135_case _s135_n _s135_m
 
+# ============================================================
+echo ""
+echo "§136: applying a feature to a launch — a sandbox that is not selected gets NOTHING"
+# ============================================================
+# §135 covers reading and selecting. This covers what a launch DOES with the
+# result, and it carries the security check of the whole 2.0 feature work:
+#
+#   (3) an unselected sandbox emits no mount, no export and no entry.
+#
+# Mutation: drop the _sandy_fm_selected gate in _sandy_fm_apply and (3) goes
+# red while (1) still passes -- which is the shape of the incident the `agents`
+# field exists for, a host-side tool installing a component into all 51
+# sandboxes on a machine when one of them ran a different agent.
+_S136_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S136_BLK="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$SANDY_SCRIPT")
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$SANDY_SCRIPT")"
+check "§136(pre) the manifest+apply block was extracted from sandy and parses (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_fm_apply" && printf "%s\n" "$1" | bash -n' _ "$_S136_BLK"
+
+_S136_R="$_S136_DIR/features"
+mkdir -p "$_S136_R/amap/payload" "$_S136_R/amap/instances/myrepo-a1b2c3d4/inbox" \
+         "$_S136_R/amap/instances/myrepo-a1b2c3d4/outbox"
+: > "$_S136_R/amap/payload/relay"
+cat > "$_S136_R/amap/feature.json" <<'S136_JSON'
+{ "sandboxes": { "include": ["*"], "exclude": ["scratch-*"] },
+  "agents":    { "include": ["claude"] },
+  "mounts": [
+    { "name": "payload", "from": "payload", "export": "AMAP_PAYLOAD_DIR" },
+    { "name": "inbox",   "from": "instances/${slug}/inbox" },
+    { "name": "outbox",  "from": "instances/${slug}/outbox", "mode": "rw" } ],
+  "entry":  "payload/relay",
+  "expose": { "AMAP_FLEET_DOMAIN": "agents.internal" } }
+S136_JSON
+_s136() {   # $1 = slug, $2 = workspace, $3 = agents -> the record stream
+    bash -c 'set -uo pipefail; eval "$1"; _sandy_fm_apply "$2" "$3" "$4" "$5" 1 2>&1' \
+        _ "$_S136_BLK" "$_S136_R" "$1" "$2" "$3" 2>/dev/null || true
+}
+_S136_SEL="$(_s136 myrepo-a1b2c3d4 /Users/x/dev/myrepo claude)"
+_S136_UNSEL="$(_s136 myrepo-a1b2c3d4 /Users/x/dev/myrepo codex)"
+
+check "§136(1) a SELECTED sandbox gets the payload mounted :ro at the computed destination" \
+    bash -c 'printf "%s" "$1" | grep -q "	/opt/sandy/features/amap	ro"' _ "$_S136_SEL"
+check "§136(2) ...its declared exports, including the one attached to a mount and the one from expose{}" \
+    bash -c 'printf "%s" "$1" | grep -q "^export	AMAP_PAYLOAD_DIR	/opt/sandy/features/amap$" &&
+             printf "%s" "$1" | grep -q "^export	AMAP_FLEET_DOMAIN	agents.internal$"' _ "$_S136_SEL"
+# THE SECURITY CHECK.
+check "§136(3) an UNSELECTED sandbox gets NO mount, NO export and NO entry — only a named skip (mutation: drop the selection gate and this goes red while (1) passes)" \
+    bash -c 'printf "%s" "$1" | grep -qv "^mount	" &&
+             ! printf "%s" "$1" | grep -qE "^(mount|export|entry)	" &&
+             printf "%s" "$1" | grep -q "^skip	amap	"' _ "$_S136_UNSEL"
+check "§136(4) mode defaults to ro and rw is honoured only where declared (D7: the router refuses to publish into an agent-writable tree)" \
+    bash -c 'printf "%s" "$1" | grep -q "/home/claude/.amap/inbox	ro$" &&
+             printf "%s" "$1" | grep -q "/home/claude/.amap/outbox	rw$"' _ "$_S136_SEL"
+check "§136(5) the entry is reported under the payload mount point, not as a host path" \
+    bash -c 'printf "%s" "$1" | grep -q "^entry	/opt/sandy/features/amap/relay$"' _ "$_S136_SEL"
+check "§136(6) a declared mount whose source does not exist is NAMED and skipped, never mounted silently (the R7a finding)" \
+    bash -c 'printf "%s" "$1" | grep -q "has no source at"' _ "$(_s136 other-bbbbbbbb /Users/x/dev/other claude)"
+
+# --- D10 --------------------------------------------------------------------
+mkdir -p "$_S136_DIR/flat/flatfeat"; : > "$_S136_DIR/flat/flatfeat/bin"
+_S136_FLAT="$(bash -c 'set -uo pipefail; eval "$1"; _sandy_fm_apply "$2" s-1 /x claude 1 2>&1; echo "rc=$?"' _ "$_S136_BLK" "$_S136_DIR/flat" 2>/dev/null || true)"
+check "§136(7) D10: a FLAT feature directory with no manifest keeps 1.15.0 behaviour — mounted whole, :ro" \
+    bash -c 'printf "%s" "$1" | grep -q "	/opt/sandy/features/flatfeat	ro" && printf "%s" "$1" | grep -q "rc=0"' _ "$_S136_FLAT"
+mkdir -p "$_S136_DIR/flat/flatfeat/sub"
+_S136_NEST="$(bash -c 'set -uo pipefail; eval "$1"; _sandy_fm_apply "$2" s-1 /x claude 1 2>&1; echo "rc=$?"' _ "$_S136_BLK" "$_S136_DIR/flat" 2>/dev/null || true)"
+check "§136(8) D10: the SAME directory with a subdirectory added is a HARD ERROR — a whole-directory mount would hand every sandbox every other instance tree" \
+    bash -c 'printf "%s" "$1" | grep -q "^err	flatfeat	has subdirectories" && printf "%s" "$1" | grep -q "rc=1"' _ "$_S136_NEST"
+
+# --- the caller contract ----------------------------------------------------
+# Records stream as features are processed, so a failing feature may be
+# preceded by valid mount lines from an earlier one. The caller must check the
+# RETURN CODE first and discard everything on a non-zero one; using the partial
+# set is exactly what D2 exists to prevent. Asserted here so the contract is
+# pinned rather than merely commented.
+mkdir -p "$_S136_DIR/mixed/aaa" "$_S136_DIR/mixed/zzz"; : > "$_S136_DIR/mixed/aaa/bin"
+printf '%s' '{"sandboxes":{"inc' > "$_S136_DIR/mixed/zzz/feature.json"
+_S136_MIX="$(bash -c 'set -uo pipefail; eval "$1"; _sandy_fm_apply "$2" s-1 /x claude 1 2>&1; echo "rc=$?"' _ "$_S136_BLK" "$_S136_DIR/mixed" 2>/dev/null || true)"
+check "§136(9) a malformed manifest fails the WHOLE pass (rc=1) even though an earlier feature already emitted a valid mount — the caller discards the lot" \
+    bash -c 'printf "%s" "$1" | grep -q "rc=1" && printf "%s" "$1" | grep -q "^mount	" && printf "%s" "$1" | grep -q "^err	zzz	"' _ "$_S136_MIX"
+check "§136(10) a feature DIRECTORY whose name is not a valid path segment is refused, not skipped — it becomes a container path component" \
+    bash -c 'mkdir -p "$2/badname/../bad name" 2>/dev/null
+             r="$(bash -c "set -uo pipefail; eval \"\$1\"; _sandy_fm_apply \"\$2\" s-1 /x claude 1 2>&1; echo rc=\$?" _ "$1" "$2" 2>/dev/null)"
+             case "$r" in *"rc=1"*) exit 0 ;; esac; exit 1' _ "$_S136_BLK" "$_S136_DIR/badroot"
+
+rm -rf "$_S136_DIR"
+unset _S136_DIR _S136_BLK _S136_R _S136_SEL _S136_UNSEL _S136_FLAT _S136_NEST _S136_MIX
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

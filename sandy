@@ -1060,6 +1060,94 @@ _sandy_fm_dest() {
     esac
 }
 
+# --- Applying a feature to a launch (2.0.0) ---------------------------------
+# One pass over $SANDY_HOME/features/*/ . For each feature: load the manifest,
+# evaluate selection, and for a SELECTED sandbox create the declared tree and
+# emit its mounts and exports. A sandbox that is not selected gets NOTHING --
+# that is D4, and §135/§136 assert it as the security property it is.
+#
+# Emits records on stdout so the caller assembles RUN_FLAGS and so this is
+# testable without Docker:
+#   mount<TAB><host-src><TAB><container-dest><TAB>ro|rw
+#   export<TAB><NAME><TAB><value>
+#   entry<TAB><container-path>
+#   skip<TAB><feature><TAB><why>
+#   err<TAB><feature><TAB><message>
+#
+# CALLER CONTRACT: check the return code FIRST and discard every record on a
+# non-zero one. Records stream as features are processed, so a feature that
+# fails may be preceded by valid mount lines from an earlier one; using them
+# would mount a partial set, which is the thing D2 exists to prevent.
+_sandy_fm_apply() {
+    local _root="$1" _slug="$2" _ws="$3" _agents="$4" _dry="${5:-0}"
+    local _fdir _fname _m _name _from _mode _exp _rest _dest _src _c
+    [ -d "$_root" ] || return 0
+    for _fdir in "$_root"/*/; do
+        [ -d "$_fdir" ] || continue
+        _fdir="${_fdir%/}"
+        _fname="${_fdir##*/}"
+        # The feature directory name becomes a container path component, so it
+        # gets the same predicate as a mount name. A directory nobody can name
+        # safely is refused rather than skipped: silently ignoring it is how a
+        # feature "stops working" with nothing to read.
+        if ! _sandy_fm_valid_segment "$_fname"; then
+            printf 'err\t%s\tfeature directory name is not a valid path segment\n' "$_fname"; return 1
+        fi
+        if ! _sandy_fm_load "$_fdir" "$_slug"; then
+            if [ "$_SANDY_FM_ERR" = "no-manifest" ]; then
+                # D10: a FLAT directory with no manifest keeps 1.15.0 behaviour.
+                # A NESTED one is a hard error -- per-slug instance trees live
+                # under the feature dir, and mounting it whole would give every
+                # sandbox every other sandbox's inbox.
+                local _nested=0
+                for _c in "$_fdir"/*/; do [ -d "$_c" ] && { _nested=1; break; }; done
+                if [ "$_nested" = 1 ]; then
+                    printf 'err\t%s\thas subdirectories but no feature.json; a whole-directory mount would expose every other sandbox instance tree\n' "$_fname"
+                    return 1
+                fi
+                printf 'mount\t%s\t/opt/sandy/features/%s\tro\n' "$_fdir" "$_fname"
+                continue
+            fi
+            printf 'err\t%s\t%s\n' "$_fname" "$_SANDY_FM_ERR"; return 1
+        fi
+        if ! _sandy_fm_selected "$_slug" "$_ws" "$_agents"; then
+            printf 'skip\t%s\t%s\n' "$_fname" "$_SANDY_FM_WHYNOT"; continue
+        fi
+        for _c in ${_SANDY_FM_CREATE[@]+"${_SANDY_FM_CREATE[@]}"}; do
+            _c="${_c//\$\{slug\}/$_slug}"
+            [ "$_dry" = 1 ] || mkdir -p "$_fdir/$_c"
+        done
+        local _i=0
+        while [ "$_i" -lt "${#_SANDY_FM_MOUNT[@]}" ]; do
+            _m="${_SANDY_FM_MOUNT[$_i]}"; _i=$((_i + 1))
+            _name="${_m%%	*}"; _rest="${_m#*	}"
+            _from="${_rest%%	*}"; _rest="${_rest#*	}"
+            _mode="${_rest%%	*}"; _exp="${_rest#*	}"
+            [ "$_exp" = "$_mode" ] && _exp=""
+            _from="${_from//\$\{slug\}/$_slug}"
+            _src="$_fdir/$_from"
+            _dest="$(_sandy_fm_dest "$_fname" "$_name")"
+            # A declared mount whose source does not exist WARNS by name rather
+            # than mounting nothing quietly -- an unnamed misconfiguration is
+            # indistinguishable from a working one (the R7a finding).
+            if [ ! -e "$_src" ]; then
+                printf 'skip\t%s\tdeclared mount %s has no source at %s\n' "$_fname" "$_name" "$_from"
+                continue
+            fi
+            printf 'mount\t%s\t%s\t%s\n' "$_src" "$_dest" "$_mode"
+            [ -n "$_exp" ] && printf 'export\t%s\t%s\n' "$_exp" "$_dest"
+        done
+        local _e
+        for _e in ${_SANDY_FM_EXPOSE[@]+"${_SANDY_FM_EXPOSE[@]}"}; do
+            printf 'export\t%s\t%s\n' "${_e%%	*}" "${_e#*	}"
+        done
+        if [ -n "$_SANDY_FM_ENTRY" ]; then
+            printf 'entry\t/opt/sandy/features/%s/%s\n' "$_fname" "${_SANDY_FM_ENTRY#payload/}"
+        fi
+    done
+    return 0
+}
+
 # Protected directories. .github/workflows is included by default; opt out via
 # SANDY_ALLOW_WORKFLOW_EDIT=1 in .sandy/config (passive tier).
 _sandy_protected_dirs() {
