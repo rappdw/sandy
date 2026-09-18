@@ -1205,7 +1205,7 @@ For `SANDY_AGENT=codex`, `_check_codex_update` compares the in-image `/opt/codex
 | Control | Setting |
 |---|---|
 | Root filesystem | `--read-only` |
-| User | Non-root (`claude`, mapped to host UID) |
+| User | Non-root (`sandy`, mapped to host UID) |
 | Privilege escalation | `--security-opt no-new-privileges:true` |
 | Capabilities | `--cap-drop ALL`, add back only SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER |
 | Process limit | `--pids-limit 512` |
@@ -1533,7 +1533,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 ```
 
 Key details:
-- Claude Code is installed as user `claude`, then relocated to `/usr/local/bin/claude` (binary) and `/opt/claude-code` (data) so it survives the tmpfs overlay on `/home/sandy`.
+- Claude Code is installed as user `sandy`, then relocated to `/usr/local/bin/claude` (binary) and `/opt/claude-code` (data) so it survives the tmpfs overlay on `/home/sandy`.
 - `UV_TOOL_DIR=/opt/uv-tools` ensures synthkit's venv goes to an accessible location (not `/root/`).
 - Version is cached at `/opt/claude-code/.version` for update detection.
 

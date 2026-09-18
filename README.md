@@ -996,7 +996,7 @@ Removals are loud where sandy can see them: a removed config key is a hard error
 
 ## Security Notes
 
-- The container runs as a non-root user (`claude`, mapped to host UID)
+- The container runs as a non-root user (`sandy`, mapped to host UID)
 - The root filesystem is read-only (`/tmp` and `/home/sandy` are tmpfs)
 - `no-new-privileges` prevents privilege escalation
 - Credentials are seeded into per-project sandboxes, not shared across projects
