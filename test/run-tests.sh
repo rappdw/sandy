@@ -15036,6 +15036,197 @@ want = open(sys.argv[2]).read()
 got = d[\"not_selected\"][0][\"why\"]
 sys.exit(0 if got == want else 1)
 " "$1/selected.json" "$1/expected"' _ "$_S137_ESC"
+# --- selected.json is a PUBLISHED CONSUMER CONTRACT (2.0.0) ------------------
+# A downstream fleet tool pins this file's shape as the membership its provision,
+# render and bringup steps act on. Its maintainer asked to be told before the
+# shape or the write moments move, and a promise to remember is not a mechanism
+# -- so the shape is pinned HERE, where a change to it fails the suite and the
+# person making the change learns they owe a notification.
+#
+# §137(2)/(3)/(4)/(6) pin VALUES, which a silently ADDED or RENAMED key passes
+# straight through. These pin the KEY SETS, exactly, so it cannot.
+check "§137(8) the top-level key set is EXACTLY {schema, note, selected, not_selected} — a consumer pins this; adding or renaming a key here is a contract change that owes them a heads-up" \
+    bash -c 'python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if sorted(d) == [\"not_selected\",\"note\",\"schema\",\"selected\"] else 1)
+" "$1"' _ "$_S137_JSON"
+check "§137(9) a SELECTED entry is exactly {slug, at} and a NOT_SELECTED entry exactly {slug, why, at} — the asymmetry is the contract: why exists only where there is one" \
+    bash -c 'python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+ok = all(sorted(e) == [\"at\",\"slug\"] for e in d[\"selected\"]) and len(d[\"selected\"]) > 0
+ok = ok and all(sorted(e) == [\"at\",\"slug\",\"why\"] for e in d[\"not_selected\"]) and len(d[\"not_selected\"]) > 0
+sys.exit(0 if ok else 1)
+" "$1"' _ "$_S137_JSON"
+check "§137(10) schema is 1 — it versions this file independently of --print-state's schema_version, so moving it is the signal a consumer watches" \
+    bash -c 'python3 -c "
+import json,sys
+sys.exit(0 if json.load(open(sys.argv[1]))[\"schema\"] == 1 else 1)
+" "$1"' _ "$_S137_JSON"
+# THE SECOND WRITE MOMENT. Removal must RE-RENDER, not merely unlink the
+# per-slug file: a selected.json still naming a removed sandbox is a fleet tool
+# provisioning a member that no longer exists, with every other check green.
+# Forgetting without rendering passes §137(7) and fails here, which is the
+# split worth having.
+_S137_RM="$_S137_DIR/rm"; mkdir -p "$_S137_RM"
+bash -c 'set -uo pipefail; eval "$1"
+    _sandy_fm_record "$2" keep-1 ""
+    _sandy_fm_record "$2" drop-1 ""
+    _sandy_fm_render_selected "$2"
+    _sandy_fm_forget "$2" drop-1
+    _sandy_fm_render_selected "$2"' _ "$_S137_BLK" "$_S137_RM" 2>/dev/null || true
+check "§137(11) REMOVAL re-renders selected.json — a forgotten slug is gone from the rendered file, not just from .selected/ (mutation: drop the render call after _sandy_fm_forget and this goes red while (7) still passes)" \
+    bash -c 'python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+names = [e[\"slug\"] for e in d[\"selected\"]] + [e[\"slug\"] for e in d[\"not_selected\"]]
+sys.exit(0 if \"keep-1\" in names and \"drop-1\" not in names else 1)
+" "$1/selected.json"' _ "$_S137_RM"
+# The first cut of this check was an awk RANGE, /_sandy_fm_forget/ to
+# /_sandy_fm_render_selected/, and it was VACUOUS: delete the render call and
+# the range never closes, so awk runs to EOF and matches the function
+# DEFINITION further down the file. It passed against the exact mutation it
+# existed to catch. Anchor on the call site instead -- the two lines after the
+# forget must contain the render -- so a deleted call leaves `done`/`unset`
+# there and nothing matches.
+check "§137(12) --remove-sandbox actually CALLS the render right after forgetting — (11) proves the helpers compose, this proves the CALLER uses them that way (mutation: delete that one line and this is the only check that goes red)" \
+    bash -c 'grep -A2 "_sandy_fm_forget \"\$_rms_ft_real\"" "$1" | grep -q "_sandy_fm_render_selected"' _ "$SANDY_SCRIPT"
+
+# --- two facts a consumer depends on that were held by CONSTRUCTION only -----
+# Both were true because of how the code happens to be arranged, and nothing
+# would have failed if a refactor changed either. One of them (14) is the fact
+# I got WRONG when advising the downstream maintainer -- I claimed the two
+# surfaces could disagree, they shipped against it, and it cost them a dead
+# code path and a wrong membership model. An unasserted fact I am confident
+# about is exactly the kind that turns out to be false.
+
+# (13) A CARRIED-OVER `at` IS NEVER REFRESHED. The consumer compares a
+# verdict's `at` against when its rule last changed, to show "this verdict was
+# taken under a previous rule". If the renderer restamped carried-over entries,
+# every verdict would read current and the comparison would silently mean
+# nothing. No timing dependency in the test: the old entries are PLANTED with
+# fixed 2020 stamps, so it measures preservation, not clock skew.
+_S137_AT="$_S137_DIR/at"; mkdir -p "$_S137_AT/.selected"
+printf '\t2020-01-01T00:00:00Z\n'                    > "$_S137_AT/.selected/old-selected"
+printf 'excluded by pattern\t2020-01-02T00:00:00Z\n' > "$_S137_AT/.selected/old-notsel"
+bash -c 'set -uo pipefail; eval "$1"
+    _sandy_fm_record "$2" fresh-slug ""
+    _sandy_fm_render_selected "$2"
+    _sandy_fm_render_selected "$2"' _ "$_S137_BLK" "$_S137_AT" 2>/dev/null || true
+check "§137(13) a carried-over \`at\` survives re-rendering BYTE-UNCHANGED, and only the recorded slug is restamped (mutation: move the date call from _sandy_fm_record into _sandy_fm_render_selected and this goes red)" \
+    bash -c 'python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+at = {e[\"slug\"]: e[\"at\"] for e in d[\"selected\"] + d[\"not_selected\"]}
+ok = at.get(\"old-selected\") == \"2020-01-01T00:00:00Z\"
+ok = ok and at.get(\"old-notsel\") == \"2020-01-02T00:00:00Z\"
+ok = ok and at.get(\"fresh-slug\", \"\").startswith(\"20\") and at.get(\"fresh-slug\") != \"2020-01-01T00:00:00Z\"
+sys.exit(0 if ok else 1)
+" "$1/selected.json"' _ "$_S137_AT"
+
+# (14) --print-state's features/feature_problems AND selected.json ARE ONE
+# SOURCE. Both read $SANDY_HOME/features/<f>/.selected/<slug>; they differ only
+# in what they ENUMERATE (sandboxes/ vs .selected/). Nothing said so, so it was
+# reasonable -- and wrong -- to infer they could disagree. Asserted against a
+# real --print-state run, per sandbox, in both directions.
+_S137_H="$_S137_DIR/home"; mkdir -p "$_S137_H/features/amap" "$_S137_H/sandboxes/sel-aaaaaaaa" "$_S137_H/sandboxes/wrongagent-cccccc"
+for _s137_sb in sel-aaaaaaaa wrongagent-cccccc; do
+    printf '2.0.0\n' > "$_S137_H/sandboxes/$_s137_sb/.sandy_created_version"
+    printf '{"workspace_path":"/x/%s"}\n' "$_s137_sb" > "$_S137_H/sandboxes/$_s137_sb/WORKSPACE.json"
+done
+bash -c 'set -uo pipefail; eval "$1"
+    _sandy_fm_record "$2" sel-aaaaaaaa ""
+    _sandy_fm_record "$2" wrongagent-cccccc "no agents include matched"
+    _sandy_fm_render_selected "$2"' _ "$_S137_BLK" "$_S137_H/features/amap" 2>/dev/null || true
+_S137_PS="$_S137_DIR/ps.json"
+SANDY_HOME="$_S137_H" bash "$SANDY_SCRIPT" --print-state > "$_S137_PS" 2>/dev/null || true
+check "§137(14) --print-state's features/feature_problems and selected.json AGREE for every sandbox — they are ONE source (.selected/<slug>) rendered twice, and a consumer told otherwise builds a state that cannot occur" \
+    bash -c 'python3 -c "
+import json,sys
+ps  = json.load(open(sys.argv[1]))
+sel = json.load(open(sys.argv[2]))
+insel  = {e[\"slug\"] for e in sel[\"selected\"]}
+notsel = {e[\"slug\"] for e in sel[\"not_selected\"]}
+if not insel or not notsel: sys.exit(1)
+for sb in ps[\"sandboxes\"]:
+    n = sb[\"name\"]
+    has  = \"amap\" in sb[\"features\"]
+    prob = any(p.startswith(\"amap:\") for p in sb[\"feature_problems\"])
+    if n in insel  and not (has and not prob): sys.exit(1)
+    if n in notsel and not (prob and not has): sys.exit(1)
+sys.exit(0)
+" "$1" "$2"' _ "$_S137_PS" "$_S137_H/features/amap/selected.json"
+
+# --- three more the consumer named, grouped by CONTRACT not by code location --
+# (15) belongs to the reader and (16)/(17) to the apply pass, but all three are
+# published-consumer-contract pins like (8)-(14), and keeping the consumer's
+# dependency list readable in one place is worth more than filing each beside
+# its function.
+_S137_C="$_S137_DIR/carry"; mkdir -p "$_S137_C/amap/payload"
+: > "$_S137_C/amap/payload/relay"
+cat > "$_S137_C/amap/feature.json" <<'S137_CARRY'
+{
+  "sandboxes": { "include": ["*"] },
+  "agents":    { "include": ["claude"] },
+  "mounts": [
+    { "name": "payload", "from": "payload", "mode": "ro", "export": "AMAP_PAYLOAD_DIR" }
+  ],
+  "expose": { "AMAP_FLEET_DOMAIN": "home.fleet.example  (spaced & punctuated!)" },
+  "feature": {
+    "rendered_at": "2026-09-18T19:00:00Z",
+    "policy": { "nested": { "deep": [1, 2, {"k": "v"}] }, "unknown_to_sandy": true }
+  }
+}
+S137_CARRY
+_S137_C_BEFORE="$(cksum < "$_S137_C/amap/feature.json")"
+_S137_C_OUT="$_S137_DIR/carry-records.txt"
+bash -c 'set -uo pipefail; eval "$1"
+    _SANDY_FM_HOME=/home/sandy
+    _sandy_fm_apply "$2" carry-11111111 /x/carry claude' \
+    _ "$_S137_BLK" "$_S137_C" > "$_S137_C_OUT" 2>/dev/null || true
+_S137_C_AFTER="$(cksum < "$_S137_C/amap/feature.json")"
+
+# (15) The consumer asked for a round-trip pin. There is no round trip: sandy
+# NEVER writes feature.json -- it reads it once per launch to validate and
+# project, and no code path rewrites it. That is stronger than "re-emitted
+# unchanged", so it is what gets asserted. Two halves: the file is byte-
+# identical after a full apply, and NOTHING derived from `feature` appears in
+# the record stream (a projector that emitted its contents would put operator
+# policy into RUN_FLAGS).
+check "§137(15a) a full apply leaves feature.json BYTE-IDENTICAL — sandy reads the manifest and never writes it, so a \`feature\` section carrying a consumer's own stamp and policy cannot be moved under it" \
+    bash -c 'test "$1" = "$2"' _ "$_S137_C_BEFORE" "$_S137_C_AFTER"
+check "§137(15b) NOTHING from the reserved \`feature\` section reaches the record stream (mutation: emit it and operator policy lands in RUN_FLAGS)" \
+    bash -c '! grep -qE "rendered_at|unknown_to_sandy|nested" "$1"' _ "$_S137_C_OUT"
+
+# (16) An expose value is the address a host-side wrapper announces. A
+# projector that trimmed, collapsed or quoted it would have every daemon
+# announcing an unroutable address -- wrong, confidently, everywhere at once.
+# The fixture value carries double spaces, an ampersand and a bang for that
+# reason; it is not decorative.
+printf '%s' 'home.fleet.example  (spaced & punctuated!)' > "$_S137_DIR/expect-expose"
+check "§137(16) an \`expose\` VALUE reaches the export record verbatim — no trim, no collapse, no requote" \
+    bash -c 'python3 -c "
+import sys
+want = open(sys.argv[2]).read()
+for ln in open(sys.argv[1]):
+    p = ln.rstrip(chr(10)).split(chr(9))
+    if len(p) == 3 and p[0] == \"export\" and p[1] == \"AMAP_FLEET_DOMAIN\":
+        sys.exit(0 if p[2] == want else 1)
+sys.exit(1)
+" "$1" "$2"' _ "$_S137_C_OUT" "$_S137_DIR/expect-expose"
+
+# (17) A mount's `export` carries the COMPUTED container destination, which is
+# how a wrapper stops hardcoding /opt/sandy/features/<name>. Asserted against
+# _sandy_fm_dest rather than against a literal, so the check follows the rule
+# if the mapping ever changes rather than pinning today's string twice.
+check "§137(17) a mount's \`export\` VALUE is the computed container destination for that mount, per _sandy_fm_dest — not the source, not the manifest's \`from\`" \
+    bash -c 'eval "$1"
+        _SANDY_FM_HOME=/home/sandy
+        want="$(_sandy_fm_dest amap payload)"
+        got="$(awk -F"\t" "\$1==\"export\" && \$2==\"AMAP_PAYLOAD_DIR\" {print \$3}" "$2")"
+        [ -n "$got" ] && [ "$got" = "$want" ]' _ "$_S137_BLK" "$_S137_C_OUT"
+
 # The claim is "no PARSER needed", not "no coreutils needed" -- forget is an
 # unlink and still needs rm. So the fixture hides node and jq specifically,
 # with a bin directory holding only what a plain unlink uses, and ASSERTS
