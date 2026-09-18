@@ -15237,6 +15237,72 @@ check "§137(17) a mount's \`export\` VALUE is the computed container destinatio
         got="$(awk -F"\t" "\$1==\"export\" && \$2==\"AMAP_PAYLOAD_DIR\" {print \$3}" "$2")"
         [ -n "$got" ] && [ "$got" = "$want" ]' _ "$_S137_BLK" "$_S137_C_OUT"
 
+# (18) #329: TWO CONCURRENT RENDERS MUST NOT PUBLISH A TRUNCATED DOCUMENT.
+# The rename was always atomic against a READER -- same directory, so
+# same filesystem. It was never atomic against a second WRITER: the launch
+# mutex is per SANDBOX ($SANDY_HOME/sandboxes/.<slug>.lock), so two workspaces
+# launch concurrently BY DESIGN and both render the same feature through what
+# used to be one shared temp name:
+#     A truncate, A write, B truncate, A mv -> a truncated document, published
+# atomically. The rename never helped; the damage preceded it.
+#
+# Simulated deterministically rather than by racing: write a foreign process's
+# temp file into the feature dir, render, and assert the render ignored it and
+# published its own complete document. With a shared name the render would
+# have written THROUGH that file.
+_S137_RACE="$_S137_DIR/race"; mkdir -p "$_S137_RACE"
+bash -c 'set -uo pipefail; eval "$1"
+    _sandy_fm_record "$2" slug-aaaa ""
+    _sandy_fm_record "$2" slug-bbbb "excluded"' _ "$_S137_BLK" "$_S137_RACE" 2>/dev/null || true
+# A half-written temp from "another launch", under the name a FIXED-name
+# implementation would collide with.
+printf '{ "schema": 1, "selected": [ {"slug": "TRUNCA' > "$_S137_RACE/selected.json.tmp"
+bash -c 'set -uo pipefail; eval "$1"; _sandy_fm_render_selected "$2"' \
+    _ "$_S137_BLK" "$_S137_RACE" 2>/dev/null || true
+# WHAT THESE TWO CAN AND CANNOT SHOW, because the first draft of (18) claimed
+# more than it measured. The real defect needs two writers INTERLEAVED mid-write,
+# which a deterministic test cannot stage. What IS deterministic is whether a
+# render touches a temp file belonging to another process -- and that is the
+# mechanism, not a proxy for it: with a per-process name it cannot, so the
+# interleaving cannot happen. So (18) is the fixture sanity check (it passes
+# either way, and its job is to fail loudly if the render stops working at all)
+# and (18b) carries the #329 claim alone. Mutation confirms the split: restoring
+# the fixed name reddens (18b) and NOT (18), because a fixed-name render
+# overwrites the foreign temp and still publishes its own correct content.
+check "§137(18) the render publishes its own complete document — fixture sanity, NOT the #329 claim; (18b) is that one" \
+    bash -c 'python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+names = [e[\"slug\"] for e in d[\"selected\"]] + [e[\"slug\"] for e in d[\"not_selected\"]]
+sys.exit(0 if sorted(names) == [\"slug-aaaa\",\"slug-bbbb\"] else 1)
+" "$1/selected.json"' _ "$_S137_RACE"
+check "§137(18b) #329: a render does NOT touch another process's in-flight temp file — the per-process name is what makes the interleaving impossible (mutation: restore the fixed selected.json.tmp and this alone goes red)" \
+    bash -c 'test -f "$1/selected.json.tmp"' _ "$_S137_RACE"
+
+# (19) AN UNKNOWN FILE IN THE FEATURE ROOT IS IGNORED. A consumer writes a
+# GENERATED sibling ($SANDY_HOME/features/<f>/router.json) beside the authored
+# manifest and polls it; that is a dependency on the walk being `*/`. It was
+# true by CONSTRUCTION and held by nothing -- the same category (13) and (14)
+# were in before they were pinned, and one of those turned out to be wrong.
+_S137_SIB="$_S137_DIR/sib"; mkdir -p "$_S137_SIB/amap/payload"
+: > "$_S137_SIB/amap/payload/relay"
+printf '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts":[{"name":"payload","from":"payload"}]}' \
+    > "$_S137_SIB/amap/feature.json"
+printf '{"graph":"the router spelling, unknown to sandy"}' > "$_S137_SIB/amap/router.json"
+printf 'a stray file at the features ROOT\n' > "$_S137_SIB/loose-file.txt"
+_S137_SIB_SUM="$(cksum < "$_S137_SIB/amap/router.json")"
+_S137_SIB_OUT="$(bash -c 'set -uo pipefail; eval "$1"
+    _SANDY_FM_HOME=/home/sandy
+    _sandy_fm_apply "$2" box-11111111 /x/ws claude 0' _ "$_S137_BLK
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$SANDY_SCRIPT")" "$_S137_SIB" 2>/dev/null)" || true
+check "§137(19) a feature dir carrying an unknown regular file still applies, emitting EXACTLY its declared records — no extra mount, no err (mutation: walk \"\$_root\"/* without the -d guard and the stray root file becomes a feature, emitting a mount nobody declared)" \
+    bash -c 'test "$(printf "%s\n" "$1" | grep -c "^mount")" = 1 &&
+             ! printf "%s\n" "$1" | grep -q "^err" &&
+             ! printf "%s\n" "$1" | grep -q "loose-file" &&
+             ! printf "%s\n" "$1" | grep -q "router.json"' _ "$_S137_SIB_OUT"
+check "§137(19b) ...and the unknown sibling is left BYTE-IDENTICAL — sandy reads feature.json and the sources its mounts name, nothing else in that directory" \
+    bash -c 'test "$(cksum < "$1/amap/router.json")" = "$2"' _ "$_S137_SIB" "$_S137_SIB_SUM"
+
 # The claim is "no PARSER needed", not "no coreutils needed" -- forget is an
 # unlink and still needs rm. So the fixture hides node and jq specifically,
 # with a bin directory holding only what a plain unlink uses, and ASSERTS

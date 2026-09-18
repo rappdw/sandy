@@ -1106,8 +1106,18 @@ _sandy_fm_render_selected() {
         printf '  "not_selected": [%s%s]\n' "$_not" "${_not:+
   }"
         printf '}\n'
-    } > "$_fdir/selected.json.tmp" 2>/dev/null || return 0
-    mv -f "$_fdir/selected.json.tmp" "$_fdir/selected.json" 2>/dev/null || true
+    # #329: the temp name is PER-PROCESS. A fixed name was atomic against a
+    # READER (same-directory rename) and not against a second WRITER: the
+    # launch mutex is per SANDBOX, so two workspaces launch concurrently by
+    # design and both render the SAME feature through the same temp path --
+    #   A truncate, A write, B truncate, A mv  -> a truncated document,
+    # published atomically. The rename never helped; the damage preceded it.
+    # $$ is the same uniqueness token the network naming uses (sandy_net_$$).
+    # The temp is removed on the failure path so a dead launch does not leave
+    # one per pid behind.
+    } > "$_fdir/selected.json.tmp.$$" 2>/dev/null || { rm -f "$_fdir/selected.json.tmp.$$" 2>/dev/null; return 0; }
+    mv -f "$_fdir/selected.json.tmp.$$" "$_fdir/selected.json" 2>/dev/null \
+        || rm -f "$_fdir/selected.json.tmp.$$" 2>/dev/null || true
 }
 
 # --- Applying a feature to a launch (2.0.0) ---------------------------------
