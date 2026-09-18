@@ -1658,7 +1658,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--update-sessions"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Fleet image refresh + rolling restart across every daemon session on the host; scope to one session with --workspace PATH. Sub-options: --dry-run, --yes, --idle-for <minutes>, --rebuild, --workspace."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-history / --purge-history (session transcripts and auto-memory in claude/projects/ — asked interactively, REQUIRED non-interactively, and deliberately NOT answered by --yes), --keep-approvals, --dry-run, --yes."'; printf '}'
+    printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-history / --purge-history (session transcripts and auto-memory in claude/projects/ — asked interactively, REQUIRED non-interactively, deliberately NOT answered by --yes, and never asked at all under --dry-run, which reports the question as unanswered), --keep-approvals, --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
     printf ','
@@ -3512,7 +3512,16 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         # children run non-interactively, so an unanswered question would reach
         # them as an error rather than a prompt -- and asking 51 times is not a
         # question, it is an obstacle.
-        if [ -z "$_rs_history" ]; then
+        # --dry-run NEVER asks. The maintenance family's discipline is that
+        # --dry-run exits 0 before any confirm, and a plan that blocks on a
+        # prompt is not a plan -- it hung the maintainer's suite before it hung
+        # anyone in the field. It reports the question as unanswered rather
+        # than assuming a default, because printing a disposition nobody chose
+        # is how a plan misrepresents what a real run would do.
+        if [ -z "$_rs_history" ] && [ "$_rs_dry_run" = true ]; then
+            info "History (claude/projects/): NOT ANSWERED — a real run asks."
+            info "  Pass --keep-history or --purge-history to see it in this plan."
+        elif [ -z "$_rs_history" ]; then
             if [ -t 0 ]; then
                 printf '[sandy] Keep session history and memory (claude/projects/) in ALL of them? [Y/n] ' >&2
                 IFS= read -r _rsa_hc </dev/tty || _rsa_hc=""
@@ -3525,7 +3534,7 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
                 exit 1
             fi
         fi
-        info "History across the fleet: $_rs_history"
+        [ -n "$_rs_history" ] && info "History across the fleet: $_rs_history"
         [ "$_rs_dry_run" = true ] && { info "--dry-run: nothing reset."; exit 0; }
         if [ "$_rs_yes" != true ]; then
             if [ -t 0 ]; then
@@ -3636,7 +3645,12 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # is injected into the agent's context every session, so a compromised
     # session writing to it is persistent prompt injection with no expiry.
     # Neither default is right for both, so the operator says.
-    if [ -z "$_rs_history" ]; then
+    if [ -z "$_rs_history" ] && [ "$_rs_dry_run" = true ]; then
+        # See the --all path: --dry-run exits 0 before any confirm, so it must
+        # not ask, and must not print an answer nobody gave.
+        info "History (claude/projects/): NOT ANSWERED — a real run asks."
+        info "  Pass --keep-history or --purge-history to see it in this plan."
+    elif [ -z "$_rs_history" ]; then
         if [ -t 0 ]; then
             printf '[sandy] Keep session history and memory (claude/projects/)? [Y/n] ' >&2
             IFS= read -r _rs_hc </dev/tty || _rs_hc=""
@@ -5273,7 +5287,11 @@ Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
                      destroy its persistent package/agent state (preserving
                      WORKSPACE.json lineage), refusing while a live session holds
                      it. Filesystem-only (no Docker). Sub-options: --workspace
-                     PATH (default cwd), --keep-approvals, --dry-run, --yes
+                     PATH (default cwd), --all (every known sandbox),
+                     --keep-history / --purge-history (session transcripts and
+                     auto-memory in claude/projects/: asked interactively,
+                     REQUIRED non-interactively, and NOT answered by --yes),
+                     --keep-approvals, --dry-run, --yes
   --remove-sandbox   Permanently DELETE a sandbox directory (preserves nothing,
                      unlike --reset-sandbox). Filesystem-only (no Docker
                      required to run; a reachable Docker is used as a

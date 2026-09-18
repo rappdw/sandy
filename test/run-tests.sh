@@ -6634,23 +6634,73 @@ _rsb_setup() { # $1 = fake SANDY_HOME dir; echoes the sandbox dir path
     printf 'link\t/etc/passwd\n' > "$sb/.sandy-approved-symlinks.list"
     printf '%s\n%s\n%s' "$ws" "$sb" "${base}-${hash}"
 }
+# EVERY sandy invocation in this section redirects stdin from /dev/null.
+# Not decoration: --reset-sandbox now asks the history question, gated on
+# [ -t 0 ], so a section that inherits the suite's stdin behaves DIFFERENTLY
+# depending on whether the suite was run from a terminal. It passed in CI
+# (stdin not a TTY) and HUNG the maintainer's macOS run at the first
+# invocation, which is not a failure anyone can read -- the suite simply
+# stopped, mid-section, with no output.
 # dry-run: plan printed, nothing removed
 _RSB_FH="$(mktemp -d)"; { read -r _RSB_WS; read -r _RSB_SB; read -r _RSB_NAME; } <<<"$(_rsb_setup "$_RSB_FH")"
-SANDY_HOME="$_RSB_FH" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS" --dry-run >/dev/null 2>&1
+SANDY_HOME="$_RSB_FH" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS" --dry-run </dev/null >/dev/null 2>&1 || true
 check "--reset-sandbox --dry-run mutates nothing (pip survives)" test -d "$_RSB_SB/pip"
+
+# --dry-run must not ask the history question AT ALL, and the two ways that
+# goes wrong are the same bug wearing different clothes: with a TTY it blocks
+# forever, without one it exits 1 demanding a flag. The maintenance family's
+# rule is that --dry-run exits 0 before any confirm, so this asserts the
+# reachable half -- exit 0 with no history flag -- which fails on the code
+# that hung, deterministically and on both platforms.
+_RSB_DRY_OUT="$(SANDY_HOME="$_RSB_FH" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS" --dry-run </dev/null 2>&1)" && _RSB_DRY_RC=0 || _RSB_DRY_RC=$?
+check "--reset-sandbox --dry-run exits 0 with NO history flag (it must never ask: a plan that blocks is not a plan)" \
+    test "$_RSB_DRY_RC" -eq 0
+check "...and says the question is UNANSWERED rather than printing a disposition nobody chose" \
+    bash -c 'printf "%s" "$1" | grep -q "NOT ANSWERED"' _ "$_RSB_DRY_OUT"
+check "...and does not claim a default by naming keep/purge in the plan" \
+    bash -c '! printf "%s" "$1" | grep -qE "History[^:]*: *(keep|purge)"' _ "$_RSB_DRY_OUT"
+
 # real reset: persistent dirs gone, WORKSPACE.json preserved
-SANDY_HOME="$_RSB_FH" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS" --yes >/dev/null 2>&1
+SANDY_HOME="$_RSB_FH" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS" --purge-history --yes </dev/null >/dev/null 2>&1 || true
 check "--reset-sandbox --yes removes persistent state (pip gone)" test ! -d "$_RSB_SB/pip"
 check "--reset-sandbox preserves WORKSPACE.json lineage" test -f "$_RSB_SB/WORKSPACE.json"
 check "--reset-sandbox (no --keep-approvals) removes the approval list" test ! -f "$_RSB_SB/.sandy-approved-symlinks.list"
 rm -rf "$_RSB_FH" "$_RSB_WS"
+
+# The history question is NOT answered by --yes, in either direction. These
+# two fixtures differ only in the history flag, so they measure the flag.
+_RSB_FH3="$(mktemp -d)"; { read -r _RSB_WS3; read -r _RSB_SB3; read -r _RSB_NAME3; } <<<"$(_rsb_setup "$_RSB_FH3")"
+mkdir -p "$_RSB_SB3/claude/projects/-ws-demo"; echo hi > "$_RSB_SB3/claude/projects/-ws-demo/a.jsonl"
+SANDY_HOME="$_RSB_FH3" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS3" --keep-history --yes </dev/null >/dev/null 2>&1 || true
+check "--keep-history preserves claude/projects/ (transcripts + memory, which nothing recreates)" \
+    test -f "$_RSB_SB3/claude/projects/-ws-demo/a.jsonl"
+check "--keep-history still resets the rest (pip gone) — it answers ONE question, not the operation" \
+    test ! -d "$_RSB_SB3/pip"
+rm -rf "$_RSB_FH3" "$_RSB_WS3"
+
+_RSB_FH4="$(mktemp -d)"; { read -r _RSB_WS4; read -r _RSB_SB4; read -r _RSB_NAME4; } <<<"$(_rsb_setup "$_RSB_FH4")"
+mkdir -p "$_RSB_SB4/claude/projects/-ws-demo"; echo hi > "$_RSB_SB4/claude/projects/-ws-demo/a.jsonl"
+SANDY_HOME="$_RSB_FH4" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS4" --purge-history --yes </dev/null >/dev/null 2>&1 || true
+check "--purge-history destroys claude/projects/ (remediation: memory reaches the agent's context every session)" \
+    test ! -e "$_RSB_SB4/claude/projects/-ws-demo/a.jsonl"
+rm -rf "$_RSB_FH4" "$_RSB_WS4"
+
+# --yes alone, non-interactively, REFUSES rather than picking one. A scripted
+# reset must not destroy a corpus by omission.
+_RSB_FH5="$(mktemp -d)"; { read -r _RSB_WS5; read -r _RSB_SB5; read -r _RSB_NAME5; } <<<"$(_rsb_setup "$_RSB_FH5")"
+SANDY_HOME="$_RSB_FH5" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS5" --yes </dev/null >/dev/null 2>&1 && _RSB_NOH_RC=0 || _RSB_NOH_RC=$?
+check "--yes with no history flag, non-interactive, refuses (exit 1) — --yes answers whether to proceed, not what to destroy" \
+    test "$_RSB_NOH_RC" -eq 1
+check "...and removes nothing when it refuses (pip survives)" test -d "$_RSB_SB5/pip"
+rm -rf "$_RSB_FH5" "$_RSB_WS5"
+
 # --keep-approvals preserves the approval list
 _RSB_FH2="$(mktemp -d)"; { read -r _RSB_WS2; read -r _RSB_SB2; read -r _RSB_NAME2; } <<<"$(_rsb_setup "$_RSB_FH2")"
-SANDY_HOME="$_RSB_FH2" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS2" --keep-approvals --yes >/dev/null 2>&1
+SANDY_HOME="$_RSB_FH2" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS2" --keep-approvals --purge-history --yes </dev/null >/dev/null 2>&1 || true
 check "--reset-sandbox --keep-approvals preserves the approval list" test -f "$_RSB_SB2/.sandy-approved-symlinks.list"
 # live lock -> refuse (exit 1)
 mkdir -p "$_RSB_SB2/pip" "$_RSB_FH2/sandboxes/.${_RSB_NAME2}.lock"; echo $$ > "$_RSB_FH2/sandboxes/.${_RSB_NAME2}.lock/pid"
-SANDY_HOME="$_RSB_FH2" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS2" --yes >/dev/null 2>&1 && _RSB_LOCK_RC=0 || _RSB_LOCK_RC=$?
+SANDY_HOME="$_RSB_FH2" bash "$_RSB_SANDY" --reset-sandbox --workspace "$_RSB_WS2" --purge-history --yes </dev/null >/dev/null 2>&1 && _RSB_LOCK_RC=0 || _RSB_LOCK_RC=$?
 check "--reset-sandbox refuses under a live workspace lock (exit 1)" test "$_RSB_LOCK_RC" -eq 1
 check "--reset-sandbox under a live lock removes nothing (pip survives)" test -d "$_RSB_SB2/pip"
 rm -rf "$_RSB_FH2" "$_RSB_WS2"
@@ -7508,7 +7558,7 @@ _S91_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Curated exception lists -- each entry is an intentional, hand-verified
 # exception to the parser<->cli_flags identity, not a loophole papering over
 # drift. See the independently-verified framing facts this PR was built on.
-_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --sandbox --orphans --fix --all"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor/--provision); not standalone cli_flags entries, must instead appear in >=1 description
+_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --keep-history --purge-history --sandbox --orphans --fix --all"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor/--provision); not standalone cli_flags entries, must instead appear in >=1 description
 _S91_PRIVATE="--print-protected-paths"                        # real, private/debug fast-path flag; deliberately unadvertised
 _S91_FORWARDED="--resume"                                     # a real cli_flags entry with ZERO parser cases (forwarded verbatim to the agent, sandy:4103/4127)
 
@@ -10698,7 +10748,7 @@ _S106_RSB_SB="$_S106_RSB_HOME/sandboxes/${_S106_RSB_BASE}-${_S106_RSB_HASH}"
 mkdir -p "$_S106_RSB_SB/pip"
 touch "$_S106_RSB_SB/agent-args.claude"
 printf '{"workspace_path":"%s"}\n' "$_S106_RSB_WS" > "$_S106_RSB_SB/WORKSPACE.json"
-_S106_RSB_OUT="$(SANDY_HOME="$_S106_RSB_HOME" bash "$_S106_SANDY" --reset-sandbox --workspace "$_S106_RSB_WS" --yes 2>&1)" || true
+_S106_RSB_OUT="$(SANDY_HOME="$_S106_RSB_HOME" bash "$_S106_SANDY" --reset-sandbox --workspace "$_S106_RSB_WS" --purge-history --yes </dev/null 2>&1)" || true
 
 check "§106(15a) --reset-sandbox: agent-args.claude survives a real reset" \
     test -f "$_S106_RSB_SB/agent-args.claude"
@@ -15297,7 +15347,7 @@ done
 mkdir -p "$_S141_H/sandboxes/gone-deadbeef"
 printf '{\n  "workspace_path": "/no/such/workspace"\n}\n' > "$_S141_H/sandboxes/gone-deadbeef/WORKSPACE.json"
 
-_S141_DRY="$(SANDY_HOME="$_S141_H" bash "$_S141_SANDY" --reset-sandbox --all --dry-run 2>&1; printf 'rc=%s' "$?")"
+_S141_DRY="$(SANDY_HOME="$_S141_H" bash "$_S141_SANDY" --reset-sandbox --all --dry-run </dev/null 2>&1; printf 'rc=%s' "$?")"
 check "§141(6) --all plans every known sandbox and names the one whose workspace is gone (which cannot be reset, because the per-workspace form resolves through the workspace)" \
     bash -c 'printf "%s" "$1" | grep -q "2 sandbox(es), 1 unresettable" &&
              printf "%s" "$1" | grep -q "gone-deadbeef" &&
@@ -15306,7 +15356,7 @@ check "§141(7) --dry-run resets NOTHING (a dry run that acts is the worst outco
     bash -c 'ls "$1"/sandboxes/*/pip/cached >/dev/null 2>&1' _ "$_S141_H"
 
 _S141_RC=0
-SANDY_HOME="$_S141_H" bash "$_S141_SANDY" --reset-sandbox --all --keep-history --yes >/dev/null 2>&1 || _S141_RC=$?
+SANDY_HOME="$_S141_H" bash "$_S141_SANDY" --reset-sandbox --all --keep-history --yes </dev/null >/dev/null 2>&1 || _S141_RC=$?
 check "§141(8) --all actually clears the package caches it planned" \
     bash -c '! ls "$1"/sandboxes/*/pip/cached >/dev/null 2>&1' _ "$_S141_H"
 # THE CHECK THE WHOLE MIGRATION RESTS ON.
@@ -15318,7 +15368,7 @@ check "§141(9) ...and PRESERVES relay-bin/ and agent-args.* on every sandbox �
 check "§141(10) an unresettable orphan makes the run exit NON-ZERO — the C1 rule: the goal state is not met and no work here can meet it (got rc=$_S141_RC)" \
     test "$_S141_RC" -eq 1
 check "§141(11) --all and --workspace are mutually exclusive (one selector, one resolution path)" \
-    bash -c 'out="$(SANDY_HOME="$2" bash "$1" --reset-sandbox --all --workspace /tmp --yes 2>&1 || true)"
+    bash -c 'out="$(SANDY_HOME="$2" bash "$1" --reset-sandbox --all --workspace /tmp --yes </dev/null 2>&1 || true)"
              case "$out" in *"mutually exclusive"*) exit 0 ;; esac; exit 1' _ "$_S141_SANDY" "$_S141_H"
 # Answers the history question so this isolates the --yes gate. Without that it
 # would trip the history refusal first and pass for the wrong reason -- two
