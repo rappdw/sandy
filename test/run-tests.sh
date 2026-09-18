@@ -15093,6 +15093,71 @@ sys.exit(0 if \"keep-1\" in names and \"drop-1\" not in names else 1)
 check "§137(12) --remove-sandbox actually CALLS the render right after forgetting — (11) proves the helpers compose, this proves the CALLER uses them that way (mutation: delete that one line and this is the only check that goes red)" \
     bash -c 'grep -A2 "_sandy_fm_forget \"\$_rms_ft_real\"" "$1" | grep -q "_sandy_fm_render_selected"' _ "$SANDY_SCRIPT"
 
+# --- two facts a consumer depends on that were held by CONSTRUCTION only -----
+# Both were true because of how the code happens to be arranged, and nothing
+# would have failed if a refactor changed either. One of them (14) is the fact
+# I got WRONG when advising the downstream maintainer -- I claimed the two
+# surfaces could disagree, they shipped against it, and it cost them a dead
+# code path and a wrong membership model. An unasserted fact I am confident
+# about is exactly the kind that turns out to be false.
+
+# (13) A CARRIED-OVER `at` IS NEVER REFRESHED. The consumer compares a
+# verdict's `at` against when its rule last changed, to show "this verdict was
+# taken under a previous rule". If the renderer restamped carried-over entries,
+# every verdict would read current and the comparison would silently mean
+# nothing. No timing dependency in the test: the old entries are PLANTED with
+# fixed 2020 stamps, so it measures preservation, not clock skew.
+_S137_AT="$_S137_DIR/at"; mkdir -p "$_S137_AT/.selected"
+printf '\t2020-01-01T00:00:00Z\n'                    > "$_S137_AT/.selected/old-selected"
+printf 'excluded by pattern\t2020-01-02T00:00:00Z\n' > "$_S137_AT/.selected/old-notsel"
+bash -c 'set -uo pipefail; eval "$1"
+    _sandy_fm_record "$2" fresh-slug ""
+    _sandy_fm_render_selected "$2"
+    _sandy_fm_render_selected "$2"' _ "$_S137_BLK" "$_S137_AT" 2>/dev/null || true
+check "§137(13) a carried-over \`at\` survives re-rendering BYTE-UNCHANGED, and only the recorded slug is restamped (mutation: move the date call from _sandy_fm_record into _sandy_fm_render_selected and this goes red)" \
+    bash -c 'python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+at = {e[\"slug\"]: e[\"at\"] for e in d[\"selected\"] + d[\"not_selected\"]}
+ok = at.get(\"old-selected\") == \"2020-01-01T00:00:00Z\"
+ok = ok and at.get(\"old-notsel\") == \"2020-01-02T00:00:00Z\"
+ok = ok and at.get(\"fresh-slug\", \"\").startswith(\"20\") and at.get(\"fresh-slug\") != \"2020-01-01T00:00:00Z\"
+sys.exit(0 if ok else 1)
+" "$1/selected.json"' _ "$_S137_AT"
+
+# (14) --print-state's features/feature_problems AND selected.json ARE ONE
+# SOURCE. Both read $SANDY_HOME/features/<f>/.selected/<slug>; they differ only
+# in what they ENUMERATE (sandboxes/ vs .selected/). Nothing said so, so it was
+# reasonable -- and wrong -- to infer they could disagree. Asserted against a
+# real --print-state run, per sandbox, in both directions.
+_S137_H="$_S137_DIR/home"; mkdir -p "$_S137_H/features/amap" "$_S137_H/sandboxes/sel-aaaaaaaa" "$_S137_H/sandboxes/wrongagent-cccccc"
+for _s137_sb in sel-aaaaaaaa wrongagent-cccccc; do
+    printf '2.0.0\n' > "$_S137_H/sandboxes/$_s137_sb/.sandy_created_version"
+    printf '{"workspace_path":"/x/%s"}\n' "$_s137_sb" > "$_S137_H/sandboxes/$_s137_sb/WORKSPACE.json"
+done
+bash -c 'set -uo pipefail; eval "$1"
+    _sandy_fm_record "$2" sel-aaaaaaaa ""
+    _sandy_fm_record "$2" wrongagent-cccccc "no agents include matched"
+    _sandy_fm_render_selected "$2"' _ "$_S137_BLK" "$_S137_H/features/amap" 2>/dev/null || true
+_S137_PS="$_S137_DIR/ps.json"
+SANDY_HOME="$_S137_H" bash "$SANDY_SCRIPT" --print-state > "$_S137_PS" 2>/dev/null || true
+check "§137(14) --print-state's features/feature_problems and selected.json AGREE for every sandbox — they are ONE source (.selected/<slug>) rendered twice, and a consumer told otherwise builds a state that cannot occur" \
+    bash -c 'python3 -c "
+import json,sys
+ps  = json.load(open(sys.argv[1]))
+sel = json.load(open(sys.argv[2]))
+insel  = {e[\"slug\"] for e in sel[\"selected\"]}
+notsel = {e[\"slug\"] for e in sel[\"not_selected\"]}
+if not insel or not notsel: sys.exit(1)
+for sb in ps[\"sandboxes\"]:
+    n = sb[\"name\"]
+    has  = \"amap\" in sb[\"features\"]
+    prob = any(p.startswith(\"amap:\") for p in sb[\"feature_problems\"])
+    if n in insel  and not (has and not prob): sys.exit(1)
+    if n in notsel and not (prob and not has): sys.exit(1)
+sys.exit(0)
+" "$1" "$2"' _ "$_S137_PS" "$_S137_H/features/amap/selected.json"
+
 # The claim is "no PARSER needed", not "no coreutils needed" -- forget is an
 # unlink and still needs rm. So the fixture hides node and jq specifically,
 # with a bin directory holding only what a plain unlink uses, and ASSERTS
