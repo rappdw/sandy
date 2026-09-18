@@ -15486,6 +15486,87 @@ unset _S140_SANDY
 
 # ============================================================
 echo ""
+echo "§144: #327 — a JSON syntax error names a LINE on both parser hosts"
+# ============================================================
+# The manifest is hand-edited by operators, so sandy's refusal is the first
+# reader of a typo and the quality of that message IS the debugging experience.
+#
+# It used to depend on which parser the host had. Measured, same manifest:
+#   node host:  not valid JSON: Expected double-quoted property name ... (line 2 column 36)
+#   jq host:    not valid JSON
+# and nothing else, for a file the operator had just edited.
+#
+# The detail was ALREADY captured -- the jq call redirects 2>&1 into $_proj and
+# the error path discarded it. The node path never had the problem because
+# JSON.parse is wrapped inside the JS and emits its own ERR line.
+#
+# THIS IS A NODE/JQ ASYMMETRY, the class §135(20) exists to police, and that
+# check structurally CANNOT see it: it diffs projector OUTPUT, while this
+# divergence lives in the caller's error handling. So it needs its own check.
+_S144_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+mkdir -p "$_S144_DIR/f"
+_S144_BLK="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Computed mount destinations/' "$SANDY_SCRIPT")
+$(awk '/^_sandy_fm_dest\(\) \{/,/^\}/' "$SANDY_SCRIPT")"
+# A realistic hand-edit: a trailing comma, on a known line.
+printf '{\n  "sandboxes": { "include": ["*"], },\n  "agents": { "include": ["claude"] }\n}\n' \
+    > "$_S144_DIR/f/feature.json"
+
+# PATH ISOLATION THAT PROVES ITSELF. The first attempt at this measurement
+# appended /usr/bin to the probe PATH, so node stayed reachable and BOTH hosts
+# reported node's message -- the check would have passed against the very
+# asymmetry it exists to catch. So the probe ASSERTS the other parser is
+# unreachable from inside, exactly as §137(7) does, rather than trusting the
+# PATH it was handed.
+_s144_msg() {   # $1 = the one parser to expose -> its refusal message, or ISOLATION-FAILED
+    local _only="$1" _b="$_S144_DIR/only-$1" _other=node
+    [ "$_only" = node ] && _other=jq
+    rm -rf "$_b"; mkdir -p "$_b"
+    local _t
+    for _t in bash cat sed grep rm mkdir tr printf; do
+        ln -sf "$(command -v "$_t" 2>/dev/null)" "$_b/$_t" 2>/dev/null || true
+    done
+    ln -sf "$(command -v "$_only" 2>/dev/null)" "$_b/$_only" 2>/dev/null || true
+    PATH="$_b" bash -c '
+        set -uo pipefail
+        command -v "$4" >/dev/null 2>&1 && { printf "ISOLATION-FAILED:%s-still-reachable" "$4"; exit 0; }
+        command -v "$3" >/dev/null 2>&1 || { printf "ISOLATION-FAILED:%s-missing" "$3"; exit 0; }
+        eval "$1"
+        _sandy_fm_load "$2/f" box-1 >/dev/null 2>&1 || true
+        printf "%s" "${_SANDY_FM_ERR:-<none>}"
+    ' _ "$_S144_BLK" "$_S144_DIR" "$_only" "$_other" 2>/dev/null
+}
+
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    _S144_NODE="$(_s144_msg node)"
+    _S144_JQ="$(_s144_msg jq)"
+    check "§144(pre) the PATH isolation actually isolates — each probe proves the OTHER parser is unreachable from inside (the first version of this measurement did not, and reported node's message for both)" \
+        bash -c '! printf "%s%s" "$1" "$2" | grep -q "ISOLATION-FAILED"' _ "$_S144_NODE" "$_S144_JQ"
+    check "§144(1) a node-only host names a line" \
+        bash -c 'printf "%s" "$1" | grep -qi "line 2"' _ "$_S144_NODE"
+    check "§144(2) #327: a JQ-ONLY host names a line too (mutation: drop \$_proj from the message and this alone goes red)" \
+        bash -c 'printf "%s" "$1" | grep -qi "line 2"' _ "$_S144_JQ"
+    check "§144(3) both still say 'not valid JSON', so the refusal reason stays greppable and only the detail differs" \
+        bash -c 'printf "%s" "$1" | grep -q "^not valid JSON" && printf "%s" "$2" | grep -q "^not valid JSON"' _ "$_S144_NODE" "$_S144_JQ"
+    # (4) asserts the NORMALISATION, and it took two attempts to make it
+    # exercisable. The first version only checked "no embedded newline" --
+    # true, and unfalsifiable: jq's parse errors are reliably single-line for
+    # every malformed input I could construct (two documents, trailing
+    # garbage, plain text, empty file), so removing the fold changed nothing
+    # and the check passed against the mutation. What the fold DOES do
+    # observably is strip jq's own `jq: ` prefix, which would otherwise read
+    # as "not valid JSON: jq: parse error: ..." -- two tool names in one
+    # sentence. That half is falsifiable, so that is what this asserts.
+    check "§144(4) the jq detail is normalised — one line, and jq's own 'jq: ' prefix stripped rather than doubled into sandy's message (mutation: drop the fold and this goes red)" \
+        bash -c 'test "$(printf "%s" "$1" | wc -l | tr -d " ")" = 0 &&
+                 ! printf "%s" "$1" | grep -q "jq:"' _ "$_S144_JQ"
+else
+    skip "§144 needs both node and jq on the host to compare them"
+fi
+rm -rf "$_S144_DIR"
+unset _S144_DIR _S144_BLK _S144_NODE _S144_JQ
+
+# ============================================================
+echo ""
 echo "§143: #322/#324 — an export name cannot shadow SANDY_, a value cannot forge records"
 # ============================================================
 # TWO REFUSALS IN ONE PLACE because they are one validation: what a manifest
