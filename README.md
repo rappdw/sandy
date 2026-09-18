@@ -931,6 +931,23 @@ sandy --reset-sandbox --all --yes
 | the `venv/` overlay | `relay-bin/` (an installed relay) |
 | per-agent state: `claude/`, `gemini/`, `codex/`, `opencode/`, `grok/` | `agent-args.<agent>` (per-agent launch args) |
 | `.claude.json`, installed plugins, approvals | `.handoff-enabled` |
+| **`claude/projects/` — every session transcript and all auto-memory** | |
+
+### Back up your session history and memory first
+
+The destroyed column includes **`claude/projects/`**, which is where Claude Code keeps session transcripts (`*.jsonl`) and auto-memory. Those are not caches — nothing regenerates them. Save them before you migrate:
+
+```sh
+tar czf sandy-history-$(date +%F).tar.gz ~/.sandy/sandboxes/*/claude/projects
+```
+
+If you use [lore](https://github.com/rappdw/lore), also export the memory corpus — **its JSON export covers memories only and does not include transcripts**, so you want both:
+
+```sh
+lore export --json > lore-memories-$(date +%F).json
+```
+
+Whether the reset should preserve `claude/projects/` by default is an open question: `--reset-sandbox` is also the remediation for a sandbox you suspect is poisoned, and memory is exactly what a poisoned session would poison. Until that is settled, back up.
 
 **Do not use `rm -rf` on the sandbox directory.** It takes the preserved column with it, and nothing recreates those — `relay-bin/` and `agent-args.*` are operator state a repository cannot carry.
 

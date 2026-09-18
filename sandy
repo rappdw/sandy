@@ -2537,7 +2537,17 @@ _sandy_emit_state() {
             printf '{'
             _json_kv name "$(_json_escape "$sb_name")"
             printf ','; _json_kv path "$(_json_escape "$sb")"
-            printf ','; _json_kv workspace_path "$(_json_escape "$sb_ws_path")"
+            # null, not "", when WORKSPACE.json is absent or unreadable. Empty
+            # string is a VALUE; null is the absence of one, and every other
+            # unknown in this document (agents, effort, lock_holder_alive) is
+            # already null. A consumer reading "" through a falsy test cannot
+            # distinguish "no marker" from "the field is not emitted at all" --
+            # which is exactly the conclusion one consumer drew.
+            if [ -n "$sb_ws_path" ]; then
+                printf ','; _json_kv workspace_path "$(_json_escape "$sb_ws_path")"
+            else
+                printf ','; _json_kv workspace_path null
+            fi
             # workspace_exists (#178): tri-state — true/false via a bash-builtin
             # [ -d ] test when workspace_path is known (a builtin, zero spawns,
             # so — unlike size_bytes' du walk — this is emitted in BOTH full
@@ -10255,7 +10265,15 @@ else
             error "  agent-args.* and .handoff-enabled, which are operator state nothing else"
             error "  recreates. Use it rather than rm -rf on the sandbox directory, which"
             error "  takes those with it. Across a fleet: sandy --reset-sandbox --all --yes"
-            exit 1
+            # A refusal the operator can act on in one step is exit 6, not a
+            # generic 1 -- and under `--start` the launch runs in the DETACHED
+            # SUPERVISOR, so without the marker the client cannot tell a refusal
+            # from a hang and polls out its full readiness timeout to exit 8.
+            # That is the #221/#261 shape exactly: a loud 600s failure where a
+            # 1s one was available, and a consumer (sandy-ui) offering "Retry in
+            # Foreground" for a refusal that will reproduce identically.
+            _sandy_daemon_fatal
+            exit 6
             ;;
         unknown|invalid)
             # No marker (pre-0.10.1, an unreadable one, or a directory something

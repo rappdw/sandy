@@ -3,7 +3,15 @@
 A minimal sandbox directory **as created at the `1.0.0-rc1` cut** (2026-07-02).
 
 **Do not update these files when sandy's version changes — staleness is the
-point.** This fixture stands in for every real user sandbox created by a `1.x`
+point.**
+
+> **2.0.0 changed what this fixture proves, not whether it matters.** Through
+> all of `1.x` it asserted that an old sandbox still classifies `ok`. #248 moved
+> the container home from `/home/claude` to `/home/sandy`, `SANDY_SANDBOX_MIN_COMPAT`
+> advanced to `2.0.0`, and the fixture now asserts that an old sandbox is
+> **refused** — against a real 1.0 directory rather than a synthetic version
+> string. If it ever classifies `ok` again, the floor moved *down* and the
+> refusal stopped working. Still do not edit the files. This fixture stands in for every real user sandbox created by a `1.x`
 sandy. `run-tests.sh §60` asserts, on every future release, that:
 
 1. `_sandbox_compat_classify` still classifies this sandbox `ok` against the

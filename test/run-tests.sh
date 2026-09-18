@@ -3183,7 +3183,7 @@ check "Claude credentials mount is rw (no :ro suffix)" \
 check "Codex credentials mount has :ro (api_key path; CODEX_CRED_TMPDIR is now set only there)" \
     grep -q 'CODEX_CRED_TMPDIR/auth.json:/home/sandy/.codex/auth.json:ro' "$SANDY_SCRIPT_PATH"
 check "Gemini OAuth mount has :ro" \
-    grep -q 'home/claude/.gemini/.*:ro' "$SANDY_SCRIPT_PATH"
+    grep -q 'home/sandy/.gemini/.*:ro' "$SANDY_SCRIPT_PATH"
 check "cleanup trap includes QUIT ABRT" \
     bash -c '
         grep -qF "trap '"'"'_sandy_on_signal 131'"'"' QUIT" "$1" \
@@ -4569,11 +4569,23 @@ check "compat classify: 0.14.1-dev-abc123 → ok"             test "$(_sbx_class
 check "compat classify: 'unknown' → unknown"                test "$(_sbx_classify unknown)"           = unknown
 check "compat classify: empty → unknown"                    test "$(_sbx_classify '')"                = unknown
 check "compat classify: garbage → invalid"                  test "$(_sbx_classify garbage)"           = invalid
-# The launch path must hard-refuse a below-floor sandbox (error message + exit 1).
-check "launch hard-refuses below-floor sandbox (unique error string)" \
-    bash -c 'grep -q "sandy refuses to launch against it" "$1"' -- "$_SBX_SCRIPT"
-check "below-floor branch exits non-zero" \
-    bash -c 'awk "/below-floor\\)/{f=1} f&&/exit 1/{print; exit}" "$1" | grep -q "exit 1"' -- "$_SBX_SCRIPT"
+# The launch path must hard-refuse a below-floor sandbox, and the refusal must
+# be ACTIONABLE: exit 6 ("refused before launch — user-actionable in one step"),
+# not a generic 1, and it must drop the .fatal marker. Under `--start` the
+# launch runs in the DETACHED SUPERVISOR, so without the marker the client
+# cannot tell a refusal from a hang and polls out its full readiness timeout to
+# exit 8 -- the #221/#261 shape. A consumer (sandy-ui) classifies --start
+# failures by exit code and offers "Retry in Foreground" on the generic branch,
+# which for this refusal reproduces it identically. They asked; it was a
+# generic 1 with no marker.
+check "launch hard-refuses a below-floor sandbox, naming the rename rather than a generic floor" \
+    bash -c 'grep -q "2.0 renamed the container user and home" "$1"' -- "$_SBX_SCRIPT"
+check "...and points at --reset-sandbox, which PRESERVES relay-bin/ and agent-args.*, rather than rm -rf which does not" \
+    bash -c 'grep -q "sandy --reset-sandbox --workspace" "$1"' -- "$_SBX_SCRIPT"
+check "...and exits 6 (refused), not a generic 1 (mutation: change it back and a --start client waits out 600s to exit 8 instead of failing in ~1s)" \
+    bash -c 'awk "/below-floor\\)/{f=1} f&&/exit [0-9]/{print; exit}" "$1" | grep -q "exit 6"' -- "$_SBX_SCRIPT"
+check "...and drops the .fatal marker, which is what makes the --start client stop waiting" \
+    bash -c 'awk "/below-floor\\)/{f=1} f&&/exit [0-9]/{exit} f" "$1" | grep -q "_sandy_daemon_fatal"' -- "$_SBX_SCRIPT"
 
 # ============================================================
 info "52. Long-lived OAuth token (claude setup-token) auth"
@@ -4835,17 +4847,27 @@ check "§13 network-leak check is baseline-scoped (ignores a real session's nets
 
 # ============================================================
 echo ""
-echo "§60: frozen 1.0 sandbox snapshot — the 1.x forward-compat guard (PR 5.2)"
+echo "§60: frozen 1.0 sandbox snapshot — the 1.x promise, now proving the REFUSAL (2.0.0)"
 # ============================================================
-# The 1.x promise: a sandbox created by ANY 1.x sandy works with every later
-# 1.x sandy. Enforced two ways, both against the LIVE script values (unlike
-# §51, which pins the floor — here drift is exactly what must fail):
-#   (a) the frozen fixture (test/fixtures/frozen-sandbox-1.0/, created at the
-#       1.0.0-rc1 cut and never updated) still classifies `ok`;
-#   (b) SANDY_SANDBOX_MIN_COMPAT itself has not moved above 1.0.0.
-# If either check fails, the change on your branch is 2.0.0 territory — see
-# CLAUDE.md §Sandbox compatibility and the fixture README before "fixing" the
-# test.
+# THE 1.x PROMISE HELD, AND EXPIRED ON PURPOSE AT 2.0.0.
+#
+# It said: a sandbox created by ANY 1.x sandy works with every later 1.x sandy,
+# and therefore SANDY_SANDBOX_MIN_COMPAT never rises above 1.0.0 WITHIN 1.x.
+# This section enforced exactly that, and it FIRED when #248 moved the container
+# home from /home/claude to /home/sandy — which is the guard working, not
+# failing. Its own comment said so: "if either check fails, the change on your
+# branch is 2.0.0 territory."
+#
+# What the fixture proves now is the other half of the promise, and it is worth
+# as much: an old sandbox is REFUSED, cleanly, against a REAL 1.0 directory
+# rather than a synthetic version string. A migration that silently accepted a
+# contaminated sandbox would be far worse than one that refuses -- its venv
+# shebangs, .pth files, GOPATH and npm/cargo metadata all still say
+# /home/claude, and they fail in ways that look like broken packages.
+#
+# DO NOT "fix" a future failure here by editing the fixture. It is frozen at the
+# 1.0.0-rc1 cut and staleness is the point. If it starts classifying `ok` again,
+# the floor moved DOWN and the refusal stopped working.
 _FROZEN_FIXTURE="$(cd "$(dirname "$0")" && pwd)/fixtures/frozen-sandbox-1.0"
 _sbx_classify_live() {
     bash -c "
@@ -4858,15 +4880,18 @@ _sbx_classify_live() {
 check "frozen fixture exists with a created-version marker" \
     test -s "$_FROZEN_FIXTURE/.sandy_created_version"
 _FROZEN_VER="$(cat "$_FROZEN_FIXTURE/.sandy_created_version" 2>/dev/null | tr -d '[:space:]')"
-check "frozen fixture created-version classifies ok against the LIVE floor" \
-    test "$(_sbx_classify_live "$_FROZEN_VER")" = ok
-check "a plain 1.0.0 sandbox classifies ok against the LIVE floor" \
-    test "$(_sbx_classify_live 1.0.0)" = ok
-check "compat floor has not moved above 1.0.0 (the 1.x promise)" \
+check "the frozen 1.0 fixture is REFUSED by the live floor — a real 1.x sandbox directory, not a synthetic version string (got: $(_sbx_classify_live "$_FROZEN_VER"))" \
+    test "$(_sbx_classify_live "$_FROZEN_VER")" = below-floor
+check "a plain 1.0.0 sandbox is refused too — the promise covered ALL of 1.x, so all of 1.x migrates" \
+    test "$(_sbx_classify_live 1.0.0)" = below-floor
+check "the last 1.x version is refused as well (mutation: a floor of 1.x instead of 2.0.0 would let 1.15.x through with its cached /home/claude paths)" \
+    test "$(_sbx_classify_live 1.15.0)" = below-floor
+check "a 2.0.0 sandbox classifies ok — without this, 'refuses everything' satisfies the three above" \
+    test "$(_sbx_classify_live 2.0.0)" = ok
+check "the floor moved to exactly 2.0.0 — it may rise above 1.0.0 in a MAJOR and nowhere else (the 1.x promise, honoured by expiring rather than by never moving)" \
     bash -c "
-        $(sed -n '/^_ver_lt()/,/^}$/p' "$_SBX_SCRIPT")
         $(grep '^SANDY_SANDBOX_MIN_COMPAT=' "$_SBX_SCRIPT")
-        ! _ver_lt 1.0.0 \"\$SANDY_SANDBOX_MIN_COMPAT\"
+        [ \"\$SANDY_SANDBOX_MIN_COMPAT\" = 2.0.0 ]
     "
 check "frozen WORKSPACE.json declares schema_version 1" \
     grep -q '"schema_version": 1' "$_FROZEN_FIXTURE/WORKSPACE.json"
