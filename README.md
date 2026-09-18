@@ -918,6 +918,8 @@ Sandy's rule: an entry can only be **added** to this list in an `X.0.0` release,
 | `SANDY_HANDOFF_*` container env vars (`_INBOX`, `_OUTBOX`, `_PEER`, `_RELAY_STATE`) | 2.0.0 | a mount's `export`, which names the variable the feature wants |
 | `SANDY_HANDOFF_RELAY` and the `relay-bin/` slot | 2.0.0 | a feature manifest's `entry`. During the window `relay-bin/relay` still **wins** when both are present, so removing the slot is what hands over |
 | `handoff_relay` and `relay{}` in `/etc/sandy-session.json` and `--print-state` | 2.0.0 | the feature's own entry in `--print-state`. Removing these will bump `schema_version`, because a vanished field is otherwise silent |
+| `handoff_enabled` and `handoff{}` in `--print-state` | 2.0.0 | they report on the handoff tree above, so they go with it — and their removal bumps `schema_version` for the same reason |
+| the `.handoff-enabled` sandbox marker | 2.0.0 | nothing: it forces the handoff tree on for one sandbox, and the tree is what is going. A feature manifest selects per sandbox instead |
 | `SANDY_SCREENSHOT_DIR` | 2.0.0 | intended to become a feature manifest; the design is not settled (#317), and the key stays until it is |
 | `SANDY_EGRESS_PROXY` | 2.0.0 | `SANDY_EGRESS_NO_ISOLATION=1` (off) or `SANDY_EGRESS_STRICT=1` (strict). It has warned since 0.14.0; listing it here is what finally gives its removal a date |
 | `SANDY_CHANNELS`: the `plugin:<name>@<marketplace>` form | 2.0.0 | bare comma-separated names. The key itself is **not** deprecated — only that spelling of its value |
