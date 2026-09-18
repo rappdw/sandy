@@ -17,7 +17,7 @@ sandy_err() { printf '\033[0;31m[sandy] ERROR: %s\033[0m\n' "$1" >&2; }
 if [ "${SANDY_VERBOSE:-0}" -ge 2 ]; then
     set -x
 fi
-export HOME=/home/claude
+export HOME=/home/sandy
 # Convenience: _sandy_has_X returns true if agent X is in the comma-separated SANDY_AGENT list.
 _sandy_has_claude()   { case ",${SANDY_AGENT:-claude}," in *,claude,*)   return 0 ;; esac; return 1; }
 _sandy_has_gemini()   { case ",${SANDY_AGENT:-claude}," in *,gemini,*)   return 0 ;; esac; return 1; }
@@ -289,8 +289,8 @@ fi
 #
 # grep -F (fixed-string) is important here: the workspace path contains '/'
 # and '.' characters that are regex metacharacters in grep's default BRE
-# mode. Without -F, a workspace like /home/claude/dev/sandy could falsely
-# match a stored entry for /home/claudeXdevYsandy and skip the append,
+# mode. Without -F, a workspace like /home/sandy/dev/sandy could falsely
+# match a stored entry for /home/sandyXdevYsandy and skip the append,
 # leaving codex to prompt on every launch.
 if _sandy_has_codex; then
     _codex_cfg="$HOME/.codex/config.toml"
@@ -479,7 +479,7 @@ if [ "${SANDY_VENV_OVERLAY_ACTIVE:-0}" = "1" ] && [ -d "$WORKSPACE/.venv" ]; the
     # Auto-activate: set VIRTUAL_ENV and prepend bin/ to PATH so python, pip,
     # and installed console_scripts resolve to the sandbox venv without the
     # user having to `source .venv/bin/activate`. The pip wrapper at
-    # /home/claude/.local/bin/pip also respects VIRTUAL_ENV and skips its
+    # /home/sandy/.local/bin/pip also respects VIRTUAL_ENV and skips its
     # --user fallback when this is set.
     if [ -f "$WORKSPACE/.venv/bin/python" ]; then
         export VIRTUAL_ENV="$WORKSPACE/.venv"

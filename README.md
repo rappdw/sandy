@@ -232,7 +232,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_SUSPICIOUS` | `0` | `1` = hardened posture for a workspace you distrust: strip the OAuth **refresh token** (mount only the short-TTL access token — fails closed if it can't), prefer a disposable `ANTHROPIC_API_KEY` over mounting OAuth at all, force connectors off, default egress to strict. Records `cred_mode` in the session marker. **Strengthens** isolation — safe to commit in a workspace config. In-session token refresh stops at the access token's expiry (relaunch or `/login`) |
 | `SANDY_SKILL_PACKS` | (unset) | Comma-separated skill packs to install (e.g. `gstack`). Built as a cached Docker layer |
 | `SANDY_GPU` | (disabled) | GPU passthrough: `all` for all GPUs, or device IDs like `0` or `0,1`. Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
-| `SANDY_SCREENSHOT_DIR` | (unset) | Host directory of screenshots to mount into the container (read-only at `/home/claude/screenshots`). When set, sandy generates a `/ss` slash command for Claude/Gemini and a screenshot skill for Codex — type `/ss huh` to have the agent describe your latest screenshot, `/ss 3 explain` for the last three, etc. See "Screenshot skill" below. Privileged tier |
+| `SANDY_SCREENSHOT_DIR` | (unset) | Host directory of screenshots to mount into the container (read-only at `/home/sandy/screenshots`). When set, sandy generates a `/ss` slash command for Claude/Gemini and a screenshot skill for Codex — type `/ss huh` to have the agent describe your latest screenshot, `/ss 3 explain` for the last three, etc. See "Screenshot skill" below. Privileged tier |
 | `SANDY_EXTRA_ENV` | (unset) | Comma-separated env-var names to forward into the container (e.g. `HA_TOKEN,LINEAR_API_KEY`). Values come from env (wins) or any of the four config files (workspace overrides host). Lets you wire up tokens for user-installed MCP servers without patching sandy. Privileged tier; workspace usage requires approval |
 | `SANDY_AGENT_ARGS` | (unset) | Extra CLI args appended to the agent command on **every** launch (bare, `-p`, `--start`, sandy-ui). Whitespace-split, never `eval`'d, ordered after sandy's flags and before command-line args. Privileged tier; workspace usage requires approval. For agent-specific flags prefer a per-sandbox `$SANDBOX_DIR/agent-args.<agent>` file (scoped to one agent) |
 | `SANDY_CHANNELS` | (unset) | Channel plugins to enable (e.g. `plugin:telegram@claude-plugins-official`) |
@@ -257,7 +257,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--start` | Start a detached [daemon session](#daemon-mode) and return once attachable |
 | `--attach` | Attach an interactive client to a running daemon session |
 | `--stop` | Stop a running daemon session (full teardown) |
-| `--exec [-- CMD]` | Shell (or run `CMD`) inside this workspace's running container, **as the host uid**. Do not hand-roll it: `docker exec -u claude` resolves the name against the *image*, where the user is uid 1001, so it runs as the wrong owner and prints `I have no name!`. Sub-options: `--workspace PATH`, `--dry-run`. See [Getting a shell inside a running sandbox](#getting-a-shell-inside-a-running-sandbox-sandy---exec) |
+| `--exec [-- CMD]` | Shell (or run `CMD`) inside this workspace's running container, **as the host uid**. Do not hand-roll it: `docker exec -u sandy` resolves the name against the *image*, where the user is uid 1001, so it runs as the wrong owner and prints `I have no name!`. Sub-options: `--workspace PATH`, `--dry-run`. See [Getting a shell inside a running sandbox](#getting-a-shell-inside-a-running-sandbox-sandy---exec) |
 | `--stop-all` | **Fleet emergency stop** — stop every daemon session on the host via the hardened per-session teardown. Sub-options: `--dry-run`, `--yes` |
 | `--prune-orphans` | Reap orphaned `sandy_*` Docker networks and exit |
 | `--update-sessions` | Fleet image refresh + rolling restart across every daemon session on the host (scope to one with `--workspace PATH`). See "Fleet updates" above. Sub-options: `--dry-run`, `--yes`, `--idle-for <minutes>`, `--rebuild`, `--workspace` |
@@ -313,7 +313,7 @@ sandy --exec --dry-run        # print the docker exec command, run nothing
 docker exec -it -u claude <container> /bin/bash     # -> "I have no name!"
 ```
 
-The image creates the user with `useradd -u 1001 claude`, but sandy bind-mounts a generated `/etc/passwd` carrying **your** uid so bind-mount ownership works. Docker resolves `-u <name>` against the container's *image* filesystem, not the runtime mount — so `-u claude` runs as **uid 1001**. The prompt reading `I have no name!` is the harmless symptom; the real one is that every write lands as the wrong owner on a workspace mount owned by you.
+The image creates the user with `useradd -u 1001 claude`, but sandy bind-mounts a generated `/etc/passwd` carrying **your** uid so bind-mount ownership works. Docker resolves `-u <name>` against the container's *image* filesystem, not the runtime mount — so `-u sandy` runs as **uid 1001**. The prompt reading `I have no name!` is the harmless symptom; the real one is that every write lands as the wrong owner on a workspace mount owned by you.
 
 `--exec` uses the numeric `-u $(id -u):$(id -g)`, sets `-w` to the container-side workspace path, and sets `HOME` explicitly (as root, `HOME=/root` sits on the read-only rootfs — which is why an in-container `codex logout` fails with `Read-only file system`). It finds a daemon container by label and a foreground one by exact name, exits `4` when the workspace has no running container, and otherwise passes the command's own exit status through.
 
@@ -933,7 +933,7 @@ Removals are loud where sandy can see them: a removed config key is a hard error
 ## Security Notes
 
 - The container runs as a non-root user (`claude`, mapped to host UID)
-- The root filesystem is read-only (`/tmp` and `/home/claude` are tmpfs)
+- The root filesystem is read-only (`/tmp` and `/home/sandy` are tmpfs)
 - `no-new-privileges` prevents privilege escalation
 - Credentials are seeded into per-project sandboxes, not shared across projects
 - claude.ai account connectors are suppressed by default (`SANDY_CLAUDE_CONNECTORS=1` to opt in); `SANDY_SUSPICIOUS=1` additionally strips the OAuth refresh token so a distrusted workspace only ever sees a short-lived access token

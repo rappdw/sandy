@@ -140,13 +140,13 @@ debug_container_run() {
     docker run --rm \
         --read-only \
         --tmpfs /tmp:exec,size=64M \
-        --tmpfs /home/claude:exec,size=64M,uid=1001,gid=1001 \
-        -v "$SANDBOX_DIR:/home/claude/.claude" \
-        -v "$SANDBOX_DIR/pip:/home/claude/.pip-packages" \
-        -v "$SANDBOX_DIR/uv:/home/claude/.local/share/uv" \
-        -v "$SANDBOX_DIR/npm-global:/home/claude/.npm-global" \
-        -v "$SANDBOX_DIR/go:/home/claude/go" \
-        -v "$SANDBOX_DIR/cargo:/home/claude/.cargo" \
+        --tmpfs /home/sandy:exec,size=64M,uid=1001,gid=1001 \
+        -v "$SANDBOX_DIR:/home/sandy/.claude" \
+        -v "$SANDBOX_DIR/pip:/home/sandy/.pip-packages" \
+        -v "$SANDBOX_DIR/uv:/home/sandy/.local/share/uv" \
+        -v "$SANDBOX_DIR/npm-global:/home/sandy/.npm-global" \
+        -v "$SANDBOX_DIR/go:/home/sandy/go" \
+        -v "$SANDBOX_DIR/cargo:/home/sandy/.cargo" \
         -v "$TEST_PROJECT:/workspace" \
         ${_ro_mounts[@]+"${_ro_mounts[@]}"} \
         -w /workspace \
@@ -159,9 +159,9 @@ debug_container_run() {
         -c '
             RUN_UID=${HOST_UID:-1001}
             RUN_GID=${HOST_GID:-1001}
-            chown "$RUN_UID:$RUN_GID" /home/claude 2>/dev/null || true
+            chown "$RUN_UID:$RUN_GID" /home/sandy 2>/dev/null || true
             exec gosu "$RUN_UID:$RUN_GID" bash -c "
-                export HOME=/home/claude
+                export HOME=/home/sandy
                 eval \"\$DEBUG_CMD\"
             "
         ' 2>&1

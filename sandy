@@ -381,12 +381,12 @@ _ver_should_update() {
 }
 
 # Sandboxes created before this version pre-date the workspace mount path
-# change (c99eb97, v0.7.10) from /workspace → /home/claude/<rel>. Any cached
+# change (c99eb97, v0.7.10) from /workspace → /home/sandy/<rel>. Any cached
 # absolute paths inside the sandbox (venv pyvenv.cfg, .pth files, editable
 # installs, Python package caches) reference /workspace/... and break
 # silently inside the new mount layout. Bump this when introducing further
 # sandbox-incompatible changes.
-SANDY_SANDBOX_MIN_COMPAT="0.7.10"
+SANDY_SANDBOX_MIN_COMPAT="2.0.0"
 
 # Classify a sandbox's recorded .sandy_created_version against the compat floor.
 # Pure (no side effects, no exit) so it can be unit-tested directly. Echoes one of:
@@ -988,7 +988,7 @@ _sandy_fm_selected() {
 #
 # The container home is a parameter, not a literal, so #248 (claude -> sandy)
 # is one assignment rather than a sweep through this logic.
-_SANDY_FM_HOME="${_SANDY_FM_HOME:-/home/claude}"
+_SANDY_FM_HOME="${_SANDY_FM_HOME:-/home/sandy}"
 _sandy_fm_dest() {
     # $1 = feature name, $2 = mount name
     case "$2" in
@@ -1353,7 +1353,7 @@ SANDY_EGRESS|enum:off,permissive,strict|permissive||2.0.0|stable|Egress posture,
 SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|DEPRECATED — use SANDY_EGRESS_NO_ISOLATION / SANDY_EGRESS_STRICT. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 is approval-gated (weakening), matching the new keys.
 SANDY_EGRESS_LOG|enum:0,1,summary|0||1.4.0|stable|Log which hosts the agent's egress actually reached (HF-incident Issue 4). The proxy logs each DISTINCT allowed host:port once (deduped) to proxy.log; at session end sandy prints an egress summary (distinct hosts reached + denial count). 0=off (deny-only, the pre-1.4 behavior); 1=per-connection allow lines + session-end summary; summary=session-end summary only (the proxy still records allows to build it). Passive-safe: it only ADDS visibility. Hostnames only — TLS is never terminated, no payload; the log stays in $SANDBOX_DIR.
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||0.11.1|stable|Remove .github/workflows from the read-only protection list.
-SANDY_SCREENSHOT_DIR|path|||0.12.0|stable|Host directory containing screenshots; mounted read-only at /home/claude/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
+SANDY_SCREENSHOT_DIR|path|||0.12.0|stable|Host directory containing screenshots; mounted read-only at /home/sandy/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
 CLAUDE_CODE_MAX_OUTPUT_TOKENS|int|128000||0.6.0|stable|Max output tokens per Claude response.
 CLAUDE_CODE_SUBAGENT_MODEL|string||^[a-zA-Z0-9._-]+$|1.11.0|stable|Model ID for Claude Code SUBAGENTS -- the parallel researchers a skill fans out. Subagents do NOT inherit the orchestrator model, so unset they run on their own default tier: a session pinned to a gated model (e.g. claude-mythos-5-1) silently does its fan-out work on a different one, with nothing in the transcript saying so. Passive-safe: a model ID is not a capability and can only select a model the session credential is already entitled to.
 GEMINI_MODEL|string|||0.9.0|stable|Gemini model override.
@@ -1648,7 +1648,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--stop"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Stop a running daemon session (full teardown)."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--exec"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Open a shell (or run one command) inside this workspace running container, as the HOST uid. Exists because the hand-rolled form is wrong: docker resolves -u <name> against the image, where the user is uid 1001, while sandy bind-mounts a passwd carrying the host uid -- so docker exec -u claude yields uid 1001, prints I have no name!, and writes to the workspace mount as the wrong owner. Finds a labelled daemon container first, then a foreground one by exact name. Sub-options: --workspace PATH, --dry-run (print the docker exec command, run nothing), -- CMD... (default /bin/bash)."'; printf '}'
+    printf '{'; _json_kv name '"--exec"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Open a shell (or run one command) inside this workspace running container, as the HOST uid. Exists because the hand-rolled form is wrong: docker resolves -u <name> against the image, where the user is uid 1001, while sandy bind-mounts a passwd carrying the host uid -- so docker exec -u sandy yields uid 1001, prints I have no name!, and writes to the workspace mount as the wrong owner. Finds a labelled daemon container first, then a foreground one by exact name. Sub-options: --workspace PATH, --dry-run (print the docker exec command, run nothing), -- CMD... (default /bin/bash)."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--prune-orphans"'; printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Reap orphaned sandy_* networks (dead-owner, no attached container) and exit."'; printf '}'
     printf ','
@@ -4568,13 +4568,13 @@ fi
 # WHY THIS EXISTS. The obvious hand-rolled form is wrong in a way that does not
 # announce itself:
 #
-#     docker exec -it -u claude <container> /bin/bash   # -> "I have no name!"
+#     docker exec -it -u sandy <container> /bin/bash   # -> "I have no name!"
 #
-# The image creates the user with `useradd -u 1001 claude`, but sandy bind-mounts
+# The image creates the user with `useradd -u 1001 sandy`, but sandy bind-mounts
 # a generated /etc/passwd carrying the HOST uid (e.g. 501) so bind-mount
 # ownership works. Docker resolves `-u <name>` against the container's IMAGE
-# filesystem, not the runtime bind mount, so `-u claude` yields uid 1001 --
-# CONFIRMED, `docker exec -u claude <c> id` prints uid=1001. The process then has
+# filesystem, not the runtime bind mount, so `-u sandy` yields uid 1001 --
+# CONFIRMED, `docker exec -u sandy <c> id` prints uid=1001. The process then has
 # no passwd entry (the mounted file only has 501), so the shell prompt reads
 # "I have no name!" -- and, far worse than cosmetics, every write lands as the
 # wrong uid on a workspace mount owned by the host user.
@@ -4637,7 +4637,7 @@ if [[ "${1:-}" == "--exec" ]]; then
     # Container-side workspace path: the same $HOME-relative mapping the launch
     # path applies (SANDY_WORKSPACE), so --exec lands where the agent works.
     if [[ "$_ex_wd" == "$HOME"/* ]]; then
-        _ex_cwd="/home/claude/${_ex_wd#$HOME/}"
+        _ex_cwd="/home/sandy/${_ex_wd#$HOME/}"
     else
         _ex_cwd="$_ex_wd"
     fi
@@ -4648,7 +4648,7 @@ if [[ "${1:-}" == "--exec" ]]; then
     # --read-only rootfs, which is why an in-container `codex logout` failed
     # with "Read-only file system (os error 30)".
     _ex_home="$(docker exec -u "$_ex_uid" "$_ex_container" sh -c 'getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6' 2>/dev/null | tr -d '\r\n')"
-    [ -n "$_ex_home" ] || _ex_home="/home/claude"
+    [ -n "$_ex_home" ] || _ex_home="/home/sandy"
 
     # -it only with a real stdin tty, so `sandy --exec -- cmd | grep x` and CI
     # callers work instead of dying on "the input device is not a TTY".
@@ -5092,7 +5092,7 @@ that started it, so a closed tab/dropped SSH/IDE quit does not end it):
                      session (last-wins: a second attach displaces the
   --exec [-- CMD]    Shell (or run CMD) inside this workspace's running
                      container as the host uid -- the hand-rolled
-                     'docker exec -u claude' silently runs as uid 1001.
+                     'docker exec -u sandy' silently runs as uid 1001.
                      first). Exit codes: 0 = session ended while attached,
                      3 = clean detach (session lives on), 4 = no such
                      session. Sub-options: --workspace PATH
@@ -5538,11 +5538,11 @@ exit 0
 TOOL_AUDIT_HELPER
 
 # User
-RUN useradd -m -s /bin/bash -u 1001 claude
+RUN useradd -m -s /bin/bash -u 1001 sandy
 
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
-ENV PATH="/home/claude/.local/bin:/usr/local/cargo/bin:/usr/local/go/bin:$PATH"
+ENV PATH="/home/sandy/.local/bin:/usr/local/cargo/bin:/usr/local/go/bin:$PATH"
 DOCKERFILE_BASE
 }
 
@@ -5550,13 +5550,13 @@ generate_dockerfile() {
     cat > "$SANDY_HOME/Dockerfile.new" <<DOCKERFILE
 FROM ${BASE_IMAGE_NAME}
 # Install Claude Code natively. The installer places files under
-# /home/claude/.local/{bin,share}/claude.  Since /home/claude gets a
+# /home/sandy/.local/{bin,share}/claude.  Since /home/sandy gets a
 # tmpfs overlay at runtime, we relocate the binary to /usr/local/bin
 # and the data directory to /opt/claude-code.  The entrypoint symlinks
 # them back into the expected paths.
-RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
- && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \\
- && mv /home/claude/.local/share/claude /opt/claude-code \\
+RUN HOME=/home/sandy su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
+ && cp -L /home/sandy/.local/bin/claude /usr/local/bin/claude \\
+ && mv /home/sandy/.local/share/claude /opt/claude-code \\
  && { /usr/local/bin/claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version || true; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
@@ -5680,9 +5680,9 @@ generate_dockerfile_full() {
 FROM ${BASE_IMAGE_NAME}
 # Install all five agents. Used for any multi-agent combo.
 # Claude Code
-RUN HOME=/home/claude su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
- && cp -L /home/claude/.local/bin/claude /usr/local/bin/claude \\
- && mv /home/claude/.local/share/claude /opt/claude-code \\
+RUN HOME=/home/sandy su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
+ && cp -L /home/sandy/.local/bin/claude /usr/local/bin/claude \\
+ && mv /home/sandy/.local/share/claude /opt/claude-code \\
  && { /usr/local/bin/claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version || true; }
 # Gemini CLI
 RUN npm install -g @google/gemini-cli \\
@@ -5906,15 +5906,15 @@ RUN_UID="${HOST_UID:-1001}"
 RUN_GID="${HOST_GID:-1001}"
 
 # Fix ownership of tmpfs home directory (mounted with uid=1001, may differ from host)
-chown "$RUN_UID:$RUN_GID" /home/claude
+chown "$RUN_UID:$RUN_GID" /home/sandy
 
 # Seed known_hosts from host if available
 if [ -f "/tmp/host-ssh-known_hosts" ]; then
-    mkdir -p /home/claude/.ssh
-    cp /tmp/host-ssh-known_hosts /home/claude/.ssh/known_hosts
-    chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
-    chmod 700 /home/claude/.ssh
-    chmod 644 /home/claude/.ssh/known_hosts
+    mkdir -p /home/sandy/.ssh
+    cp /tmp/host-ssh-known_hosts /home/sandy/.ssh/known_hosts
+    chown -R "$RUN_UID:$RUN_GID" /home/sandy/.ssh
+    chmod 700 /home/sandy/.ssh
+    chmod 644 /home/sandy/.ssh/known_hosts
 fi
 
 # Copy whatever the host STAGED, in any SANDY_SSH mode. The host decides what
@@ -5927,18 +5927,18 @@ fi
 # `agent` to get them meant opting into a relay that may not even work (#288).
 # Use -L to dereference symlinks; skip dangling ones.
 if [ -d "/tmp/host-ssh" ]; then
-    mkdir -p /home/claude/.ssh
+    mkdir -p /home/sandy/.ssh
     for _f in /tmp/host-ssh/*  /tmp/host-ssh/.*; do
         [ -e "$_f" ] || continue
         case "$(basename "$_f")" in (.|..) continue ;; esac
-        cp -aL "$_f" /home/claude/.ssh/ 2>/dev/null || true
+        cp -aL "$_f" /home/sandy/.ssh/ 2>/dev/null || true
     done
-    chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
-    chmod 700 /home/claude/.ssh
-    chmod 600 /home/claude/.ssh/* 2>/dev/null || true
-    chmod 644 /home/claude/.ssh/*.pub 2>/dev/null || true
-    chmod 644 /home/claude/.ssh/known_hosts 2>/dev/null || true
-    chmod 644 /home/claude/.ssh/config 2>/dev/null || true
+    chown -R "$RUN_UID:$RUN_GID" /home/sandy/.ssh
+    chmod 700 /home/sandy/.ssh
+    chmod 600 /home/sandy/.ssh/* 2>/dev/null || true
+    chmod 644 /home/sandy/.ssh/*.pub 2>/dev/null || true
+    chmod 644 /home/sandy/.ssh/known_hosts 2>/dev/null || true
+    chmod 644 /home/sandy/.ssh/config 2>/dev/null || true
 fi
 
 if [ "${SANDY_SSH:-token}" = "agent" ]; then
@@ -5964,16 +5964,16 @@ if [ "${SANDY_SSH:-token}" = "agent" ]; then
     # it obtains for a host). The proxy allowlist-checks github.com:22 (in the
     # default set) before splicing.
     if [ -n "${SANDY_PROXY_IP:-}" ]; then
-        mkdir -p /home/claude/.ssh
-        _sshcfg=/home/claude/.ssh/config
+        mkdir -p /home/sandy/.ssh
+        _sshcfg=/home/sandy/.ssh/config
         _sshtmp="$(mktemp)"
         {
             printf 'Host *\n    ProxyCommand socat - PROXY:%s:%%h:%%p,proxyport=3128\n\n' "$SANDY_PROXY_IP"
             [ -f "$_sshcfg" ] && cat "$_sshcfg"
         } > "$_sshtmp"
         mv "$_sshtmp" "$_sshcfg"
-        chown -R "$RUN_UID:$RUN_GID" /home/claude/.ssh
-        chmod 700 /home/claude/.ssh
+        chown -R "$RUN_UID:$RUN_GID" /home/sandy/.ssh
+        chmod 700 /home/sandy/.ssh
         chmod 644 "$_sshcfg"
     fi
 fi
@@ -5982,29 +5982,29 @@ fi
 # omitted — it's bind-mounted from the workspace (not from $SANDBOX_DIR), so
 # chown'ing it here would write through to the host workspace's ownership,
 # which we don't want to touch.
-for d in /home/claude/.pip-packages /home/claude/.local/share/uv \
-         /home/claude/.npm-global /home/claude/go /home/claude/.cargo; do
+for d in /home/sandy/.pip-packages /home/sandy/.local/share/uv \
+         /home/sandy/.npm-global /home/sandy/go /home/sandy/.cargo; do
     chown "$RUN_UID:$RUN_GID" "$d" 2>/dev/null || true
 done
 
 # Restore native install layout so Claude Code finds its binary and data at the
-# expected paths (the real files live outside /home/claude to survive the tmpfs overlay).
+# expected paths (the real files live outside /home/sandy to survive the tmpfs overlay).
 # Gemini CLI is installed globally via npm and doesn't need this relocation.
-mkdir -p /home/claude/.local/bin /home/claude/.local/share
+mkdir -p /home/sandy/.local/bin /home/sandy/.local/share
 case ",${SANDY_AGENT:-claude}," in *,claude,*)
-    ln -sf /usr/local/bin/claude /home/claude/.local/bin/claude
-    ln -sf /opt/claude-code /home/claude/.local/share/claude
+    ln -sf /usr/local/bin/claude /home/sandy/.local/bin/claude
+    ln -sf /opt/claude-code /home/sandy/.local/share/claude
     ;; esac
 # chown the tmpfs dirs individually — avoid -R which would recurse into
 # the bind-mounted uv directory at .local/share/uv
-chown "$RUN_UID:$RUN_GID" /home/claude/.local /home/claude/.local/bin \
-    /home/claude/.local/share 2>/dev/null || true
-[ -L /home/claude/.local/share/claude ] && chown "$RUN_UID:$RUN_GID" /home/claude/.local/share/claude 2>/dev/null || true
+chown "$RUN_UID:$RUN_GID" /home/sandy/.local /home/sandy/.local/bin \
+    /home/sandy/.local/share 2>/dev/null || true
+[ -L /home/sandy/.local/share/claude ] && chown "$RUN_UID:$RUN_GID" /home/sandy/.local/share/claude 2>/dev/null || true
 
 # Create pip/pip3 wrappers that auto-add --user for install commands when NOT
 # inside a virtualenv. Created here (root section) because the user section is
 # inside bash -c '...' where heredoc quoting breaks.
-cat > /home/claude/.local/bin/pip <<'PIPWRAP'
+cat > /home/sandy/.local/bin/pip <<'PIPWRAP'
 #!/bin/bash
 if [ -z "$VIRTUAL_ENV" ] && [ "${1:-}" = "install" ]; then
     shift
@@ -6012,9 +6012,9 @@ if [ -z "$VIRTUAL_ENV" ] && [ "${1:-}" = "install" ]; then
 fi
 exec python3 -m pip "$@"
 PIPWRAP
-cp /home/claude/.local/bin/pip /home/claude/.local/bin/pip3
-chmod +x /home/claude/.local/bin/pip /home/claude/.local/bin/pip3
-chown "$RUN_UID:$RUN_GID" /home/claude/.local/bin/pip /home/claude/.local/bin/pip3
+cp /home/sandy/.local/bin/pip /home/sandy/.local/bin/pip3
+chmod +x /home/sandy/.local/bin/pip /home/sandy/.local/bin/pip3
+chown "$RUN_UID:$RUN_GID" /home/sandy/.local/bin/pip /home/sandy/.local/bin/pip3
 
 # Drop privileges to host user's UID/GID
 exec gosu "$RUN_UID:$RUN_GID" /usr/local/bin/user-setup.sh "$@"
@@ -6042,7 +6042,7 @@ sandy_err() { printf '\033[0;31m[sandy] ERROR: %s\033[0m\n' "$1" >&2; }
 if [ "${SANDY_VERBOSE:-0}" -ge 2 ]; then
     set -x
 fi
-export HOME=/home/claude
+export HOME=/home/sandy
 # Convenience: _sandy_has_X returns true if agent X is in the comma-separated SANDY_AGENT list.
 _sandy_has_claude()   { case ",${SANDY_AGENT:-claude}," in *,claude,*)   return 0 ;; esac; return 1; }
 _sandy_has_gemini()   { case ",${SANDY_AGENT:-claude}," in *,gemini,*)   return 0 ;; esac; return 1; }
@@ -6314,8 +6314,8 @@ fi
 #
 # grep -F (fixed-string) is important here: the workspace path contains '/'
 # and '.' characters that are regex metacharacters in grep's default BRE
-# mode. Without -F, a workspace like /home/claude/dev/sandy could falsely
-# match a stored entry for /home/claudeXdevYsandy and skip the append,
+# mode. Without -F, a workspace like /home/sandy/dev/sandy could falsely
+# match a stored entry for /home/sandyXdevYsandy and skip the append,
 # leaving codex to prompt on every launch.
 if _sandy_has_codex; then
     _codex_cfg="$HOME/.codex/config.toml"
@@ -6504,7 +6504,7 @@ if [ "${SANDY_VENV_OVERLAY_ACTIVE:-0}" = "1" ] && [ -d "$WORKSPACE/.venv" ]; the
     # Auto-activate: set VIRTUAL_ENV and prepend bin/ to PATH so python, pip,
     # and installed console_scripts resolve to the sandbox venv without the
     # user having to `source .venv/bin/activate`. The pip wrapper at
-    # /home/claude/.local/bin/pip also respects VIRTUAL_ENV and skips its
+    # /home/sandy/.local/bin/pip also respects VIRTUAL_ENV and skips its
     # --user fallback when this is set.
     if [ -f "$WORKSPACE/.venv/bin/python" ]; then
         export VIRTUAL_ENV="$WORKSPACE/.venv"
@@ -9202,7 +9202,7 @@ _sandy_resolve_symlinks() {
                 # the relative traversal lands at the $HOME-relative mapping of the
                 # resolved target.
                 if [[ "$target" == "$HOME"/* ]]; then
-                    SYMLINK_CONTAINER_PATHS+=("/home/claude/${target#$HOME/}")
+                    SYMLINK_CONTAINER_PATHS+=("/home/sandy/${target#$HOME/}")
                 else
                     SYMLINK_CONTAINER_PATHS+=("$target")
                 fi
@@ -9347,7 +9347,7 @@ unset _sandy_siblings _sib _sib_name _sib_ws _sib_base _sib_hash _s
 
 # Compute container workspace path
 if [[ "$WORK_DIR" == "$HOME"/* ]]; then
-    SANDY_WORKSPACE="/home/claude/${WORK_DIR#$HOME/}"
+    SANDY_WORKSPACE="/home/sandy/${WORK_DIR#$HOME/}"
 else
     SANDY_WORKSPACE="$WORK_DIR"
 fi
@@ -10152,19 +10152,35 @@ else
     fi
     case "$(_sandbox_compat_classify "$_sandbox_created_ver")" in
         below-floor)
-            # Forward-compat promise (1.x): a sandbox below the compat floor cannot
-            # be honored in the current container layout — its cached absolute paths
-            # (venv pyvenv.cfg, .pth files, editable installs) reference the old
-            # /workspace layout and break silently. We refuse to launch rather than
-            # limp into a half-broken sandbox. (A non-destructive migration utility
-            # is POST_1.0; for now, recreate. See SPECIFICATION "Sandbox version
-            # tracking" and "Sandbox compatibility (1.x forward-compat promise)".)
-            error "Sandbox was created by sandy $_sandbox_created_ver, which is below the"
-            error "  compatibility floor (sandy $SANDY_SANDBOX_MIN_COMPAT). Its cached absolute"
-            error "  paths (venv, .pth files, editable installs) reference the old /workspace"
-            error "  layout and would break silently. sandy refuses to launch against it."
-            error "  Recreate the sandbox (host-side, one-time):"
+            # A sandbox below the floor cannot be honored in the current container
+            # layout, because its cached ABSOLUTE paths are baked into files sandy
+            # does not own: venv shebangs and pyvenv.cfg, .pth files, editable
+            # installs, GOPATH and PYTHONUSERBASE metadata, npm and cargo state.
+            # They would break SILENTLY, which is why this refuses rather than
+            # limping on. (A non-destructive migration utility is POST_1.0.)
+            #
+            # The floor is 2.0.0 for #248: the container user and home moved from
+            # claude to sandy, so every one of those cached paths still says
+            # /home/claude. That is the 1.x forward-compat promise expiring on
+            # purpose -- it held that MIN_COMPAT never rises above 1.0.0 WITHIN
+            # 1.x, and this is the major where it may.
+            #
+            # The message NAMES THE RENAME rather than reporting a generic floor,
+            # because "below the compatibility floor" sends someone reading it to
+            # the wrong question entirely.
+            error "Sandbox was created by sandy $_sandbox_created_ver and cannot be used by 2.0."
+            error ""
+            error "  2.0 renamed the container user and home: /home/claude -> /home/sandy (#248)."
+            error "  This sandbox has absolute paths baked into files sandy does not own —"
+            error "  venv shebangs and pyvenv.cfg, .pth files, editable installs, GOPATH and"
+            error "  npm/cargo metadata — all still pointing at /home/claude. They would fail"
+            error "  in ways that look like broken packages rather than a moved home."
+            error ""
+            error "  Recreate the sandbox (host-side, one-time; your workspace is untouched):"
             error "    rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
+            error ""
+            error "  Keeping operator state: relay-bin/, features/ and agent-args.* live in"
+            error "  this directory too. Copy them aside first if you have any."
             exit 1
             ;;
         unknown|invalid)
@@ -10172,7 +10188,7 @@ else
             # the floor, so warn rather than refuse.
             warn "Sandbox version is unknown (.sandy_created_version missing or unreadable)."
             warn "  If it was created before sandy $SANDY_SANDBOX_MIN_COMPAT (the /workspace →"
-            warn "  /home/claude/<rel> mount change), cached paths may be broken. If you hit"
+            warn "  /home/sandy/<rel> mount change), cached paths may be broken. If you hit"
             warn "  path issues, recreate:  rm -rf \"$SANDBOX_DIR\" && sandy --rebuild"
             ;;
         ok) : ;;  # created at/after the floor — silent
@@ -10738,7 +10754,7 @@ fi
 #     `relay`, one rw state and one :ro code, is a mistake waiting for a tired
 #     operator.
 #   - /opt/sandy/relay in-container, not under the agent's home: that tree is
-#     rw tmpfs, and /home/claude moves in 2.0 (#248). /opt already holds
+#     rw tmpfs, and /home/sandy moves in 2.0 (#248). /opt already holds
 #     /opt/claude-code and /opt/skills and is outside every writable mount.
 #
 # HONEST LIMIT, documented rather than left to be inferred: sandy guarantees the
@@ -10908,7 +10924,7 @@ mkdir -p "$SANDBOX_DIR/cargo"              # cargo install
 # crossSessionInbound pin (accept only when a relay is set and will start).
 #
 # Collision guard: a workspace at ~/.handoff (or below it) maps to
-# /home/claude/.handoff in-container, so the handoff mounts would nest inside
+# /home/sandy/.handoff in-container, so the handoff mounts would nest inside
 # the workspace bind and Docker would create outbox/, inbox/, peer/ and relay/
 # in the HOST workspace (pollution) / shadow workspace content. Warn-and-skip,
 # same shape as SANDY_SCREENSHOT_DIR's missing-dir handling.
@@ -10962,7 +10978,7 @@ SANDY_HANDOFF_DIRS="${SANDY_HANDOFF_DIRS:-1}"
 mkdir -p "$SANDBOX_DIR/handoff/outbox" "$SANDBOX_DIR/handoff/inbox" "$SANDBOX_DIR/handoff/relay" "$SANDBOX_DIR/handoff/peer"
 if [ "${SANDY_HANDOFF_DIRS:-1}" = "1" ]; then
     case "$SANDY_WORKSPACE" in
-        /home/claude/.handoff|/home/claude/.handoff/*)
+        /home/sandy/.handoff|/home/sandy/.handoff/*)
             # Collision is purely about the MOUNT — the directories above are
             # harmless here — so this still refuses, and refuses only the
             # thing that was ever the problem. With the default on this fires
@@ -11393,7 +11409,7 @@ CMUXHOOK
                     matcher: "",
                     hooks: [{
                         type: "command",
-                        command: "/home/claude/.claude/hooks/cmux-notify.sh"
+                        command: "/home/sandy/.claude/hooks/cmux-notify.sh"
                     }]
                 });
             }
@@ -12779,7 +12795,7 @@ RUN_FLAGS+=(--cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER)
 RUN_FLAGS+=(--pids-limit 512)
 RUN_FLAGS+=(--read-only)
 RUN_FLAGS+=(--tmpfs /tmp:exec,size=1G)
-RUN_FLAGS+=(--tmpfs /home/claude:exec,size=2G,uid=1001,gid=1001)
+RUN_FLAGS+=(--tmpfs /home/sandy:exec,size=2G,uid=1001,gid=1001)
 RUN_FLAGS+=(--network "$NETWORK_NAME")
 if [ "$_SANDY_PROXY_ON" = true ]; then
     # Egress-proxy mode: the agent is on the --internal sidecar with no route
@@ -12839,7 +12855,7 @@ if [ -n "${SANDY_GPU:-}" ]; then
     fi
 fi
 if _sandy_agent_has claude; then
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/claude:/home/claude/.claude")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/claude:/home/sandy/.claude")
     # settings.json lives inside the rw sandbox mount above — no separate child
     # overlay. The seed block regenerated it from host defaults this launch
     # (preserving enabledPlugins from the previous session).
@@ -12847,65 +12863,65 @@ if _sandy_agent_has claude; then
         # rw — Claude Code needs to write refreshed/scoped tokens during cloud
         # features like /ultrareview. The tmpdir is ephemeral (fresh each launch,
         # rm -rf on exit) so in-session writes don't persist to the host.
-        RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json")
+        RUN_FLAGS+=(-v "$CRED_TMPDIR/.credentials.json:/home/sandy/.claude/.credentials.json")
     fi
     if [ -n "$PROFILE_TMPDIR" ]; then
         # rw: Claude Code refreshes the profile token in-session. Ephemeral, so
         # the refreshed token never reaches the host's copy (rm -rf on exit).
-        RUN_FLAGS+=(-v "$PROFILE_TMPDIR:/home/claude/.config/anthropic")
+        RUN_FLAGS+=(-v "$PROFILE_TMPDIR:/home/sandy/.config/anthropic")
     fi
-    RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/claude/.claude.json")
+    RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/sandy/.claude.json")
     # Mount host Claude Code hooks (read-only) for terminal notifications (cmux, iTerm2, etc.)
     if [ -d "$HOME/.claude/hooks" ]; then
-        RUN_FLAGS+=(-v "$HOME/.claude/hooks:/home/claude/.claude/hooks:ro")
+        RUN_FLAGS+=(-v "$HOME/.claude/hooks:/home/sandy/.claude/hooks:ro")
     fi
 fi
 if _sandy_agent_has gemini; then
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/gemini:/home/claude/.gemini")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/gemini:/home/sandy/.gemini")
     if [ -n "${GEMINI_CRED_TMPDIR:-}" ]; then
         # Mount whichever OAuth file was found (oauth_creds.json or tokens.json)
         # :ro — same rationale as the Claude/Codex creds mounts above/below.
         for _oaf in "$GEMINI_CRED_TMPDIR"/oauth_creds.json "$GEMINI_CRED_TMPDIR"/tokens.json; do
-            [ -f "$_oaf" ] && RUN_FLAGS+=(-v "$_oaf:/home/claude/.gemini/$(basename "$_oaf"):ro") && break
+            [ -f "$_oaf" ] && RUN_FLAGS+=(-v "$_oaf:/home/sandy/.gemini/$(basename "$_oaf"):ro") && break
         done
     fi
     if [ -n "${GEMINI_ADC_MOUNT:-}" ]; then
-        RUN_FLAGS+=(-v "$GEMINI_ADC_MOUNT:/home/claude/.config/gcloud/application_default_credentials.json:ro")
-        RUN_FLAGS+=(-e "GOOGLE_APPLICATION_CREDENTIALS=/home/claude/.config/gcloud/application_default_credentials.json")
+        RUN_FLAGS+=(-v "$GEMINI_ADC_MOUNT:/home/sandy/.config/gcloud/application_default_credentials.json:ro")
+        RUN_FLAGS+=(-e "GOOGLE_APPLICATION_CREDENTIALS=/home/sandy/.config/gcloud/application_default_credentials.json")
     fi
 fi
 if _sandy_agent_has codex; then
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/codex:/home/claude/.codex")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/codex:/home/sandy/.codex")
     if [ -n "${CODEX_CRED_TMPDIR:-}" ]; then
         # Only the api_key path reaches here now (the OAuth path seeds the
         # sandbox instead). :ro because the file is synthesized from an env
         # var that is re-supplied every launch: there is nothing an
         # in-container write could usefully persist, and keeping it read-only
         # stops the agent swapping in a credential of its own mid-session.
-        RUN_FLAGS+=(-v "$CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro")
+        RUN_FLAGS+=(-v "$CODEX_CRED_TMPDIR/auth.json:/home/sandy/.codex/auth.json:ro")
     fi
 fi
 if _sandy_agent_has grok; then
     # grok stores config.toml (+ any `grok login` session) under ~/.grok; the
     # sandbox mount persists it rw across launches. Auth itself rides XAI_API_KEY
     # (env, forwarded above) so — unlike codex — no ephemeral :ro auth mount.
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/grok:/home/claude/.grok")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/grok:/home/sandy/.grok")
 fi
 if _sandy_agent_has opencode; then
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/opencode/config:/home/claude/.config/opencode")
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/opencode/share:/home/claude/.local/share/opencode")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/opencode/config:/home/sandy/.config/opencode")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/opencode/share:/home/sandy/.local/share/opencode")
     if [ -n "${OPENCODE_CRED_TMPDIR:-}" ]; then
         # :ro — same rationale as codex/gemini OAuth mounts: prevents
         # token leakage back to host and stale-token-on-exit races.
-        RUN_FLAGS+=(-v "$OPENCODE_CRED_TMPDIR/auth.json:/home/claude/.local/share/opencode/auth.json:ro")
+        RUN_FLAGS+=(-v "$OPENCODE_CRED_TMPDIR/auth.json:/home/sandy/.local/share/opencode/auth.json:ro")
     fi
 fi
 # Persistent package environment mounts
-RUN_FLAGS+=(-v "$SANDBOX_DIR/pip:/home/claude/.pip-packages")
-RUN_FLAGS+=(-v "$SANDBOX_DIR/uv:/home/claude/.local/share/uv")
-RUN_FLAGS+=(-v "$SANDBOX_DIR/npm-global:/home/claude/.npm-global")
-RUN_FLAGS+=(-v "$SANDBOX_DIR/go:/home/claude/go")
-RUN_FLAGS+=(-v "$SANDBOX_DIR/cargo:/home/claude/.cargo")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/pip:/home/sandy/.pip-packages")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/uv:/home/sandy/.local/share/uv")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/npm-global:/home/sandy/.npm-global")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/go:/home/sandy/go")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/cargo:/home/sandy/.cargo")
 # Handoff directories mounts (#132 substrate). ON BY DEFAULT since 1.10.0;
 # gated on the value the BEGIN/END handoff block resolved above — 0 (the
 # opt-out, or the ~/.handoff workspace collision) ⇒ zero RUN_FLAGS diff.
@@ -12919,10 +12935,10 @@ RUN_FLAGS+=(-v "$SANDBOX_DIR/cargo:/home/claude/.cargo")
 # agent is unprivileged with an empty effective capability set, so that half is
 # not load-bearing here.)
 if [ "${SANDY_HANDOFF_DIRS:-1}" = "1" ]; then
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/outbox:/home/claude/.handoff/outbox")
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/inbox:/home/claude/.handoff/inbox:ro")
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/peer:/home/claude/.handoff/peer:ro")
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/relay:/home/claude/.handoff/relay")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/outbox:/home/sandy/.handoff/outbox")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/inbox:/home/sandy/.handoff/inbox:ro")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/peer:/home/sandy/.handoff/peer:ro")
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/handoff/relay:/home/sandy/.handoff/relay")
     # The relay slot (#258), :ro. Same reasoning as inbox/peer one line up, and
     # it is the whole security claim of the feature: the agent runs as the host
     # uid and OWNS $SANDBOX_DIR/relay-bin/relay, so permission bits would bind
@@ -12948,7 +12964,7 @@ fi
 # by valid mount lines from an earlier one, and using that partial set is what
 # D2 exists to prevent. So the whole pass is buffered, the status checked, and
 # only then are RUN_FLAGS touched.
-_SANDY_FM_HOME="/home/claude"
+_SANDY_FM_HOME="/home/sandy"
 _sandy_fm_root="$SANDY_HOME/features"
 if [ -d "$_sandy_fm_root" ]; then
     _sandy_fm_out=""; _sandy_fm_rc=0
@@ -12994,10 +13010,10 @@ fi
 # the sandbox) — see the migration block above where $WORK_DIR/.gstack is
 # ensured to exist.
 case ",${SANDY_SKILL_PACKS:-}," in
-    *,gstack,*) RUN_FLAGS+=(-v "$WORK_DIR/.gstack:/home/claude/.gstack") ;;
+    *,gstack,*) RUN_FLAGS+=(-v "$WORK_DIR/.gstack:/home/sandy/.gstack") ;;
 esac
 # SANDY_WORKSPACE was computed earlier (before Docker/network setup).
-# Map: host ~/dev/sandy → container /home/claude/dev/sandy.
+# Map: host ~/dev/sandy → container /home/sandy/dev/sandy.
 
 # --- Git submodule support ---
 # Submodules use a .git *file* with a relative gitdir: path. We remap the gitdir
@@ -13010,7 +13026,7 @@ if [ -f "$WORK_DIR/.git" ]; then
         # R5a (1.14.0): the `gitdir:` line is REPOSITORY CONTENT, and this used
         # to be a bare `cd` with no containment check feeding a bind mount with
         # no :ro. Measured: `gitdir: ../../.ssh` produced
-        # `-v $HOME/.ssh:/home/claude/.ssh` READ-WRITE, and `gitdir: /etc`
+        # `-v $HOME/.ssh:/home/sandy/.ssh` READ-WRITE, and `gitdir: /etc`
         # produced `-v /etc:/etc` READ-WRITE. Write access to ~/.ssh is host
         # code execution -- an ~/.ssh/config ProxyCommand fires on the user's
         # next `git push`. _sandy_resolve_symlinks cannot see any of it: `.git`
@@ -13035,7 +13051,7 @@ if [ -f "$WORK_DIR/.git" ]; then
         fi
         if [[ "$GITDIR_HOST" == "$HOME"/* ]]; then
             _gitdir_rel="${GITDIR_HOST#$HOME/}"
-            GITDIR_CONTAINER="/home/claude/$_gitdir_rel"
+            GITDIR_CONTAINER="/home/sandy/$_gitdir_rel"
         else
             GITDIR_CONTAINER="$GITDIR_HOST"
         fi
@@ -13644,15 +13660,15 @@ RUN_FLAGS+=(-e "HOST_GID=$HOST_GID")
 if [ "$HOST_UID" != "1001" ] || [ "$HOST_GID" != "1001" ]; then
     SANDY_PASSWD="$SANDY_HOME/passwd"
     SANDY_GROUP="$SANDY_HOME/group"
-    # Generate passwd/group with correct UID/GID for the claude user.
-    # Only root and claude exist in the container; other system users are
+    # Generate passwd/group with correct UID/GID for the sandy user.
+    # Only root and sandy exist in the container; other system users are
     # from the base image and only needed at build time.
     if [ ! -f "$SANDY_PASSWD" ] \
-        || ! grep -q "^claude:x:${HOST_UID}:${HOST_GID}:" "$SANDY_PASSWD" 2>/dev/null; then
+        || ! grep -q "^sandy:x:${HOST_UID}:${HOST_GID}:" "$SANDY_PASSWD" 2>/dev/null; then
         docker run --rm --entrypoint cat "$IMAGE_NAME" /etc/passwd \
-            | sed "s/^claude:x:1001:1001:/claude:x:${HOST_UID}:${HOST_GID}:/" > "$SANDY_PASSWD"
+            | sed "s/^sandy:x:1001:1001:/sandy:x:${HOST_UID}:${HOST_GID}:/" > "$SANDY_PASSWD"
         docker run --rm --entrypoint cat "$IMAGE_NAME" /etc/group \
-            | sed "s/^claude:x:1001:/claude:x:${HOST_GID}:/" > "$SANDY_GROUP"
+            | sed "s/^sandy:x:1001:/sandy:x:${HOST_GID}:/" > "$SANDY_GROUP"
     fi
     RUN_FLAGS+=(-v "$SANDY_PASSWD:/etc/passwd:ro")
     RUN_FLAGS+=(-v "$SANDY_GROUP:/etc/group:ro")
@@ -13729,8 +13745,8 @@ fi
 # write into the user's screenshot folder. The container-side path is fixed so
 # the /ss skill files and sandy-ss-paths helper can hardcode it.
 if [ -n "${SANDY_SCREENSHOT_DIR:-}" ]; then
-    RUN_FLAGS+=(-v "$SANDY_SCREENSHOT_DIR:/home/claude/screenshots:ro")
-    RUN_FLAGS+=(-e "SANDY_SCREENSHOTS_PATH=/home/claude/screenshots")
+    RUN_FLAGS+=(-v "$SANDY_SCREENSHOT_DIR:/home/sandy/screenshots:ro")
+    RUN_FLAGS+=(-e "SANDY_SCREENSHOTS_PATH=/home/sandy/screenshots")
 fi
 
 # SANDY_EXTRA_ENV passthrough: forward each user-listed env-var into the

@@ -241,13 +241,13 @@ sandy_run() {
     docker run --rm \
         --read-only \
         --tmpfs /tmp:exec,size=256M \
-        --tmpfs /home/claude:exec,size=256M,uid=1001,gid=1001 \
-        -v "$SANDBOX_DIR:/home/claude/.claude" \
-        -v "$SANDBOX_DIR/pip:/home/claude/.pip-packages" \
-        -v "$SANDBOX_DIR/uv:/home/claude/.local/share/uv" \
-        -v "$SANDBOX_DIR/npm-global:/home/claude/.npm-global" \
-        -v "$SANDBOX_DIR/go:/home/claude/go" \
-        -v "$SANDBOX_DIR/cargo:/home/claude/.cargo" \
+        --tmpfs /home/sandy:exec,size=256M,uid=1001,gid=1001 \
+        -v "$SANDBOX_DIR:/home/sandy/.claude" \
+        -v "$SANDBOX_DIR/pip:/home/sandy/.pip-packages" \
+        -v "$SANDBOX_DIR/uv:/home/sandy/.local/share/uv" \
+        -v "$SANDBOX_DIR/npm-global:/home/sandy/.npm-global" \
+        -v "$SANDBOX_DIR/go:/home/sandy/go" \
+        -v "$SANDBOX_DIR/cargo:/home/sandy/.cargo" \
         -v "$TEST_PROJECT:/workspace" \
         ${_ro_mounts[@]+"${_ro_mounts[@]}"} \
         -w /workspace \
@@ -261,27 +261,27 @@ sandy_run() {
             # Replicate the essential entrypoint setup (root phase)
             RUN_UID=\${HOST_UID:-1001}
             RUN_GID=\${HOST_GID:-1001}
-            chown \"\$RUN_UID:\$RUN_GID\" /home/claude
-            for d in /home/claude/.pip-packages /home/claude/.local/share/uv \
-                     /home/claude/.npm-global /home/claude/go /home/claude/.cargo; do
+            chown \"\$RUN_UID:\$RUN_GID\" /home/sandy
+            for d in /home/sandy/.pip-packages /home/sandy/.local/share/uv \
+                     /home/sandy/.npm-global /home/sandy/go /home/sandy/.cargo; do
                 chown \"\$RUN_UID:\$RUN_GID\" \"\$d\" 2>/dev/null || true
             done
-            mkdir -p /home/claude/.local/bin /home/claude/.local/share
-            ln -sf /usr/local/bin/claude /home/claude/.local/bin/claude
-            ln -sf /opt/claude-code /home/claude/.local/share/claude
-            chown \"\$RUN_UID:\$RUN_GID\" /home/claude/.local /home/claude/.local/bin \
-                /home/claude/.local/share /home/claude/.local/share/claude 2>/dev/null || true
+            mkdir -p /home/sandy/.local/bin /home/sandy/.local/share
+            ln -sf /usr/local/bin/claude /home/sandy/.local/bin/claude
+            ln -sf /opt/claude-code /home/sandy/.local/share/claude
+            chown \"\$RUN_UID:\$RUN_GID\" /home/sandy/.local /home/sandy/.local/bin \
+                /home/sandy/.local/share /home/sandy/.local/share/claude 2>/dev/null || true
 
             # Create pip/pip3 wrappers (base64-encoded to avoid quoting hell)
-            echo IyEvYmluL2Jhc2gKaWYgWyAteiAiJFZJUlRVQUxfRU5WIiBdICYmIFsgIiR7MTotfSIgPSAiaW5zdGFsbCIgXTsgdGhlbgogICAgc2hpZnQKICAgIGV4ZWMgcHl0aG9uMyAtbSBwaXAgaW5zdGFsbCAtLXVzZXIgIiRAIgpmaQpleGVjIHB5dGhvbjMgLW0gcGlwICIkQCIK | base64 -d > /home/claude/.local/bin/pip
-            cp /home/claude/.local/bin/pip /home/claude/.local/bin/pip3
-            chmod +x /home/claude/.local/bin/pip /home/claude/.local/bin/pip3
-            chown \"\$RUN_UID:\$RUN_GID\" /home/claude/.local/bin/pip /home/claude/.local/bin/pip3
+            echo IyEvYmluL2Jhc2gKaWYgWyAteiAiJFZJUlRVQUxfRU5WIiBdICYmIFsgIiR7MTotfSIgPSAiaW5zdGFsbCIgXTsgdGhlbgogICAgc2hpZnQKICAgIGV4ZWMgcHl0aG9uMyAtbSBwaXAgaW5zdGFsbCAtLXVzZXIgIiRAIgpmaQpleGVjIHB5dGhvbjMgLW0gcGlwICIkQCIK | base64 -d > /home/sandy/.local/bin/pip
+            cp /home/sandy/.local/bin/pip /home/sandy/.local/bin/pip3
+            chmod +x /home/sandy/.local/bin/pip /home/sandy/.local/bin/pip3
+            chown \"\$RUN_UID:\$RUN_GID\" /home/sandy/.local/bin/pip /home/sandy/.local/bin/pip3
 
             # Drop to user and run the test command (passed via env var to
             # avoid quoting issues with nested bash -c single-quoted strings)
             exec gosu \"\$RUN_UID:\$RUN_GID\" bash -c '
-                export HOME=/home/claude
+                export HOME=/home/sandy
                 export CARGO_HOME=\"\$HOME/.cargo\"
                 mkdir -p \"\$CARGO_HOME/bin\"
                 for bin in /usr/local/cargo/bin/*; do
@@ -388,7 +388,7 @@ info "6. PATH order"
 
 ACTUAL_FIRST="$(sandy_run 'echo $PATH' | tr ':' '\n' | head -1)"
 check "~/.local/bin is first on PATH" \
-    test "$ACTUAL_FIRST" = "/home/claude/.local/bin"
+    test "$ACTUAL_FIRST" = "/home/sandy/.local/bin"
 
 # ============================================================
 info "7. Read-only root filesystem"
@@ -400,7 +400,7 @@ check "cannot write to /usr" \
 check "can write to /tmp" \
     sandy_run "touch /tmp/test"
 check "can write to home" \
-    sandy_run "touch /home/claude/test"
+    sandy_run "touch /home/sandy/test"
 
 # ============================================================
 info "8. Dev environment detection — .python-version auto-install"
@@ -767,13 +767,13 @@ OUTPUT="$(
     docker run --rm \
         --read-only \
         --tmpfs /tmp:exec,size=256M \
-        --tmpfs /home/claude:exec,size=256M,uid=1001,gid=1001 \
-        -v "$SANDBOX_DIR2:/home/claude/.claude" \
-        -v "$SANDBOX_DIR2/pip:/home/claude/.pip-packages" \
-        -v "$SANDBOX_DIR2/uv:/home/claude/.local/share/uv" \
-        -v "$SANDBOX_DIR2/npm-global:/home/claude/.npm-global" \
-        -v "$SANDBOX_DIR2/go:/home/claude/go" \
-        -v "$SANDBOX_DIR2/cargo:/home/claude/.cargo" \
+        --tmpfs /home/sandy:exec,size=256M,uid=1001,gid=1001 \
+        -v "$SANDBOX_DIR2:/home/sandy/.claude" \
+        -v "$SANDBOX_DIR2/pip:/home/sandy/.pip-packages" \
+        -v "$SANDBOX_DIR2/uv:/home/sandy/.local/share/uv" \
+        -v "$SANDBOX_DIR2/npm-global:/home/sandy/.npm-global" \
+        -v "$SANDBOX_DIR2/go:/home/sandy/go" \
+        -v "$SANDBOX_DIR2/cargo:/home/sandy/.cargo" \
         -v "$TEST_PROJECT:/workspace" \
         -w /workspace \
         -e HOST_UID="$(id -u)" \
@@ -782,14 +782,14 @@ OUTPUT="$(
         "$IMAGE_NAME" \
         -c "
             RUN_UID=\${HOST_UID:-1001}; RUN_GID=\${HOST_GID:-1001}
-            chown \"\$RUN_UID:\$RUN_GID\" /home/claude
-            for d in /home/claude/.pip-packages /home/claude/.npm-global /home/claude/go /home/claude/.cargo; do
+            chown \"\$RUN_UID:\$RUN_GID\" /home/sandy
+            for d in /home/sandy/.pip-packages /home/sandy/.npm-global /home/sandy/go /home/sandy/.cargo; do
                 chown \"\$RUN_UID:\$RUN_GID\" \"\$d\" 2>/dev/null || true
             done
-            mkdir -p /home/claude/.local/bin /home/claude/.local/share
-            chown \"\$RUN_UID:\$RUN_GID\" /home/claude/.local /home/claude/.local/bin /home/claude/.local/share 2>/dev/null || true
+            mkdir -p /home/sandy/.local/bin /home/sandy/.local/share
+            chown \"\$RUN_UID:\$RUN_GID\" /home/sandy/.local /home/sandy/.local/bin /home/sandy/.local/share 2>/dev/null || true
             exec gosu \"\$RUN_UID:\$RUN_GID\" bash -c '
-                export HOME=/home/claude
+                export HOME=/home/sandy
                 export PIP_BREAK_SYSTEM_PACKAGES=1
                 export PYTHONUSERBASE=\"\$HOME/.pip-packages\"
                 python3 -c \"import cowsay\" 2>&1 && echo LEAKED || echo ISOLATED
@@ -1079,7 +1079,7 @@ check "tmux.conf enables allow-passthrough" \
 
 # Static analysis: verify host hooks mount exists
 check "host hooks mounted read-only" \
-    grep -q '\.claude/hooks:/home/claude/\.claude/hooks:ro' "$SCRIPT"
+    grep -q '\.claude/hooks:/home/sandy/\.claude/hooks:ro' "$SCRIPT"
 
 # ============================================================
 info "22. cmux auto-setup"
@@ -1132,7 +1132,7 @@ SETTINGS_FILE="$SANDBOX_DIR/settings.json"
 [ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
 HAS_CMUX=$(jq '[.hooks.Notification // [] | .[] | select(.hooks[]?.command? | contains("cmux-notify"))] | length' "$SETTINGS_FILE")
 if [ "$HAS_CMUX" = "0" ]; then
-    jq '.hooks //= {} | .hooks.Notification //= [] | .hooks.Notification += [{"matcher":"","hooks":[{"type":"command","command":"/home/claude/.claude/hooks/cmux-notify.sh"}]}]' "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp"
+    jq '.hooks //= {} | .hooks.Notification //= [] | .hooks.Notification += [{"matcher":"","hooks":[{"type":"command","command":"/home/sandy/.claude/hooks/cmux-notify.sh"}]}]' "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp"
     mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
 fi
 SETUP_SCRIPT
@@ -1338,7 +1338,7 @@ _MIGRATE_SNIPPET='
 mkdir -p "$SANDBOX_DIR/projects/-workspace"
 echo "old-session" > "$SANDBOX_DIR/projects/-workspace/session.jsonl"
 sandy_run "
-    export WORKSPACE=/home/claude/dev/myproject
+    export WORKSPACE=/home/sandy/dev/myproject
     $_MIGRATE_SNIPPET
 "
 check "old -workspace session migrated to new path" \
@@ -1355,7 +1355,7 @@ echo "era2" > "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject/era2.jsonl"
 mkdir -p "$SANDBOX_DIR/projects/-home-claude-dev-myproject"
 echo "era3" > "$SANDBOX_DIR/projects/-home-claude-dev-myproject/era3.jsonl"
 sandy_run "
-    export WORKSPACE=/home/claude/dev/myproject
+    export WORKSPACE=/home/sandy/dev/myproject
     $_MIGRATE_SNIPPET
 "
 check "era1 (/workspace) session merged" \
@@ -1376,7 +1376,7 @@ echo "old-version" > "$SANDBOX_DIR/projects/-workspace/same.jsonl"
 mkdir -p "$SANDBOX_DIR/projects/-home-claude-dev-myproject"
 echo "new-version" > "$SANDBOX_DIR/projects/-home-claude-dev-myproject/same.jsonl"
 sandy_run "
-    export WORKSPACE=/home/claude/dev/myproject
+    export WORKSPACE=/home/sandy/dev/myproject
     $_MIGRATE_SNIPPET
 "
 CONTENT="$(cat "$SANDBOX_DIR/projects/-home-claude-dev-myproject/same.jsonl")"
@@ -1391,7 +1391,7 @@ echo "shared" > "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject/memory/MEMORY
 mkdir -p "$SANDBOX_DIR/projects/-home-claude-dev-myproject/memory"
 echo "new-mem" > "$SANDBOX_DIR/projects/-home-claude-dev-myproject/memory/MEMORY.md"
 sandy_run "
-    export WORKSPACE=/home/claude/dev/myproject
+    export WORKSPACE=/home/sandy/dev/myproject
     $_MIGRATE_SNIPPET
 "
 check "old memory file merged into subdirectory" \
@@ -1419,7 +1419,7 @@ HIST
 # completes) and capture via stdout — that's the kernel's view inside the
 # bind mount, never goes through gRPCFUSE's host-side cache.
 HIST_CONTENT="$(sandy_run "
-    export WORKSPACE=/home/claude/dev/myproject
+    export WORKSPACE=/home/sandy/dev/myproject
     $_MIGRATE_SNIPPET
     cat \"\$HOME/.claude/history.jsonl\"
 " 2>/dev/null)"
@@ -1440,9 +1440,9 @@ for _hist_try in 1 2 3 4 5 6; do
     HIST_CONTENT="$(sandy_run "cat \"\$HOME/.claude/history.jsonl\" 2>/dev/null" 2>/dev/null)"
 done
 check "history.jsonl era1 project path rewritten" \
-    bash -c 'echo "$1" | grep -q "\"project\":\"/home/claude/dev/myproject\".*sess1"' -- "$HIST_CONTENT"
+    bash -c 'echo "$1" | grep -q "\"project\":\"/home/sandy/dev/myproject\".*sess1"' -- "$HIST_CONTENT"
 check "history.jsonl era2 project path rewritten" \
-    bash -c 'echo "$1" | grep -q "\"project\":\"/home/claude/dev/myproject\".*sess2"' -- "$HIST_CONTENT"
+    bash -c 'echo "$1" | grep -q "\"project\":\"/home/sandy/dev/myproject\".*sess2"' -- "$HIST_CONTENT"
 check "history.jsonl has no stale project paths" \
     bash -c '! echo "$1" | grep -q "\"project\":\"/workspace\""' -- "$HIST_CONTENT"
 rm -rf "$SANDBOX_DIR/projects/-home-claude-dev-myproject" "$SANDBOX_DIR/history.jsonl"
@@ -1502,7 +1502,7 @@ cat > "$SANDBOX_DIR/.claude.json.test" <<'CJ6'
 }
 CJ6
 sandy_run "
-    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/claude/.claude/.claude.json.test /home/claude/dev/genai/google
+    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/sandy/.claude/.claude.json.test /home/sandy/dev/genai/google
 "
 CJ6_RESULT="$(cat "$SANDBOX_DIR/.claude.json.test")"
 check ".claude.json: trust=true inherited from /workspace era" \
@@ -1521,7 +1521,7 @@ rm -f "$SANDBOX_DIR/.claude.json.test"
 cat > "$SANDBOX_DIR/.claude.json.test" <<'CJ7'
 {
   "projects": {
-    "/home/claude/dev/myproject": {
+    "/home/sandy/dev/myproject": {
       "hasTrustDialogAccepted": true,
       "lastCost": 1.23
     }
@@ -1530,7 +1530,7 @@ cat > "$SANDBOX_DIR/.claude.json.test" <<'CJ7'
 CJ7
 cp "$SANDBOX_DIR/.claude.json.test" "$SANDBOX_DIR/.claude.json.test.before"
 sandy_run "
-    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/claude/.claude/.claude.json.test /home/claude/dev/myproject
+    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/sandy/.claude/.claude.json.test /home/sandy/dev/myproject
 "
 check ".claude.json: no-op when only current entry exists" \
     diff -q "$SANDBOX_DIR/.claude.json.test" "$SANDBOX_DIR/.claude.json.test.before"
@@ -1539,7 +1539,7 @@ rm -f "$SANDBOX_DIR/.claude.json.test" "$SANDBOX_DIR/.claude.json.test.before"
 # Test 8: .claude.json graceful with malformed JSON
 echo "not valid json" > "$SANDBOX_DIR/.claude.json.test"
 sandy_run "
-    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/claude/.claude/.claude.json.test /home/claude/dev/myproject
+    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/sandy/.claude/.claude.json.test /home/sandy/dev/myproject
 "
 CJ8_CONTENT="$(cat "$SANDBOX_DIR/.claude.json.test")"
 check ".claude.json: malformed JSON not corrupted" \
@@ -1556,7 +1556,7 @@ cat > "$SANDBOX_DIR/.claude.json.test" <<'CJ9'
 }
 CJ9
 sandy_run "
-    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/claude/.claude/.claude.json.test /home/claude/dev/myproject
+    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/sandy/.claude/.claude.json.test /home/sandy/dev/myproject
 "
 check ".claude.json: file ends with newline" \
     bash -c 'test "$(tail -c 1 "$1/.claude.json.test" | xxd -p)" = "0a"' -- "$SANDBOX_DIR"
@@ -1708,7 +1708,7 @@ check "dispatch calls build_grok_cmd for grok" \
 check "XAI_API_KEY forwarded for grok" \
     grep -q '_sandy_add_secret_env XAI_API_KEY' "$_GROK_S"
 check "grok config dir mounts at ~/.grok" \
-    grep -qF 'SANDBOX_DIR/grok:/home/claude/.grok' "$_GROK_S"
+    grep -qF 'SANDBOX_DIR/grok:/home/sandy/.grok' "$_GROK_S"
 check "sandy-grok in the image-name lists (GC + rebuild loop)" \
     bash -c 'grep -q "sandy-opencode|sandy-grok|sandy-full" "$1" && grep -q "sandy-opencode sandy-grok sandy-full" "$1"' -- "$_GROK_S"
 check ".build_hash_grok cleared on --rebuild" \
@@ -1993,13 +1993,13 @@ sandbox_mode = "danger-full-access"
 hide_full_access_warning = true
 TOML
 
-    HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/claude/myproj" SANDY_AGENT=codex \
+    HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/sandy/myproj" SANDY_AGENT=codex \
         bash -c "
             _sandy_has_codex() { case \",\${SANDY_AGENT:-claude},\" in *,codex,*) return 0 ;; esac; return 1; }
             $_TRUST_BLOCK
         " 2>/dev/null
 
-    if grep -q '^\[projects\."/home/claude/myproj"\]$' "$_TRUST_TMP/.codex/config.toml"; then
+    if grep -q '^\[projects\."/home/sandy/myproj"\]$' "$_TRUST_TMP/.codex/config.toml"; then
         pass "trust entry appended for SANDY_WORKSPACE"
     else
         fail "trust entry appended for SANDY_WORKSPACE"
@@ -2012,13 +2012,13 @@ TOML
     fi
 
     # Idempotency: second run must not duplicate.
-    HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/claude/myproj" SANDY_AGENT=codex \
+    HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/sandy/myproj" SANDY_AGENT=codex \
         bash -c "
             _sandy_has_codex() { case \",\${SANDY_AGENT:-claude},\" in *,codex,*) return 0 ;; esac; return 1; }
             $_TRUST_BLOCK
         " 2>/dev/null
 
-    _count=$(grep -c '^\[projects\."/home/claude/myproj"\]$' "$_TRUST_TMP/.codex/config.toml" 2>/dev/null || echo 0)
+    _count=$(grep -c '^\[projects\."/home/sandy/myproj"\]$' "$_TRUST_TMP/.codex/config.toml" 2>/dev/null || echo 0)
     if [ "$_count" = "1" ]; then
         pass "trust entry idempotent on repeat invocation"
     else
@@ -2027,7 +2027,7 @@ TOML
 
     # Non-codex agents must not touch the config.
     echo "# marker" > "$_TRUST_TMP/.codex/config.toml"
-    HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/claude/myproj" SANDY_AGENT=claude \
+    HOME="$_TRUST_TMP" SANDY_WORKSPACE="/home/sandy/myproj" SANDY_AGENT=claude \
         bash -c "
             _sandy_has_codex() { case \",\${SANDY_AGENT:-claude},\" in *,codex,*) return 0 ;; esac; return 1; }
             $_TRUST_BLOCK
@@ -2074,13 +2074,13 @@ check "sandbox layout creates codex/ subdir for SANDY_AGENT=codex" \
     grep -q 'mkdir -p "$SANDBOX_DIR/codex"' "$SANDY_SCRIPT"
 
 # Mount block: codex sandbox mounted at ~/.codex.
-check "codex sandbox mounted at /home/claude/.codex" \
-    grep -q 'SANDBOX_DIR/codex:/home/claude/.codex' "$SANDY_SCRIPT"
+check "codex sandbox mounted at /home/sandy/.codex" \
+    grep -q 'SANDBOX_DIR/codex:/home/sandy/.codex' "$SANDY_SCRIPT"
 
 # Auth.json mounted read-only -- api_key path ONLY. The OAuth path seeds the
 # rw sandbox instead, so `codex login` in-container can write and persist.
 check "codex auth.json mount is read-only (:ro) on the api_key path" \
-    grep -q 'auth.json:/home/claude/.codex/auth.json:ro' "$SANDY_SCRIPT"
+    grep -q 'auth.json:/home/sandy/.codex/auth.json:ro' "$SANDY_SCRIPT"
 
 # Env passthrough: OPENAI_API_KEY forwarded to container (codex reads this),
 # via the secret env-file helper (#13) rather than argv -e.
@@ -2399,14 +2399,14 @@ check "sandbox layout creates opencode/config and opencode/share for SANDY_AGENT
     grep -q 'mkdir -p "$SANDBOX_DIR/opencode/config" "$SANDBOX_DIR/opencode/share"' "$SANDY_SCRIPT"
 
 # Mount blocks: both XDG paths bind-mounted at expected container paths.
-check "opencode config mounted at /home/claude/.config/opencode" \
-    grep -q 'SANDBOX_DIR/opencode/config:/home/claude/.config/opencode' "$SANDY_SCRIPT"
-check "opencode share mounted at /home/claude/.local/share/opencode" \
-    grep -q 'SANDBOX_DIR/opencode/share:/home/claude/.local/share/opencode' "$SANDY_SCRIPT"
+check "opencode config mounted at /home/sandy/.config/opencode" \
+    grep -q 'SANDBOX_DIR/opencode/config:/home/sandy/.config/opencode' "$SANDY_SCRIPT"
+check "opencode share mounted at /home/sandy/.local/share/opencode" \
+    grep -q 'SANDBOX_DIR/opencode/share:/home/sandy/.local/share/opencode' "$SANDY_SCRIPT"
 
 # Auth.json mounted read-only when present.
 check "opencode auth.json mount is read-only (:ro)" \
-    grep -q 'auth.json:/home/claude/.local/share/opencode/auth.json:ro' "$SANDY_SCRIPT"
+    grep -q 'auth.json:/home/sandy/.local/share/opencode/auth.json:ro' "$SANDY_SCRIPT"
 
 # Env passthrough: OPENCODE_MODEL forwarded.
 check "OPENCODE_MODEL passed to container via -e" \
@@ -2567,9 +2567,9 @@ if docker image inspect sandy-gemini-cli &>/dev/null; then
     _gemini_in_container() {
         docker run --rm --read-only \
             --tmpfs /tmp:exec,size=64M \
-            --tmpfs /home/claude:exec,size=64M,uid=1001,gid=1001 \
+            --tmpfs /home/sandy:exec,size=64M,uid=1001,gid=1001 \
             --user 1001:1001 \
-            -e HOME=/home/claude \
+            -e HOME=/home/sandy \
             --entrypoint bash \
             sandy-gemini-cli -c "$1" >/dev/null 2>&1
     }
@@ -3179,9 +3179,9 @@ info "40. Sprint 1 — Credentials mounts"
 
 SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 check "Claude credentials mount is rw (no :ro suffix)" \
-    bash -c 'grep -q "CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json\")" "$1" && ! grep -q "CRED_TMPDIR/.credentials.json:/home/claude/.claude/.credentials.json:ro" "$1"' -- "$SANDY_SCRIPT_PATH"
+    bash -c 'grep -q "CRED_TMPDIR/.credentials.json:/home/sandy/.claude/.credentials.json\")" "$1" && ! grep -q "CRED_TMPDIR/.credentials.json:/home/sandy/.claude/.credentials.json:ro" "$1"' -- "$SANDY_SCRIPT_PATH"
 check "Codex credentials mount has :ro (api_key path; CODEX_CRED_TMPDIR is now set only there)" \
-    grep -q 'CODEX_CRED_TMPDIR/auth.json:/home/claude/.codex/auth.json:ro' "$SANDY_SCRIPT_PATH"
+    grep -q 'CODEX_CRED_TMPDIR/auth.json:/home/sandy/.codex/auth.json:ro' "$SANDY_SCRIPT_PATH"
 check "Gemini OAuth mount has :ro" \
     grep -q 'home/claude/.gemini/.*:ro' "$SANDY_SCRIPT_PATH"
 check "cleanup trap includes QUIT ABRT" \
@@ -3848,10 +3848,10 @@ assert \"SANDY_SCREENSHOT_DIR\" in names, names
 # 45c. Mount + env-var emission: when SANDY_SCREENSHOT_DIR is set in the env
 # and the dir exists, sandy adds the bind mount and SANDY_SCREENSHOTS_PATH.
 # Static check on the source — no container.
-check "sandy adds /home/claude/screenshots:ro mount when SANDY_SCREENSHOT_DIR is set" \
-    grep -q 'SANDY_SCREENSHOT_DIR.*/home/claude/screenshots:ro' "$_SS_SCRIPT"
+check "sandy adds /home/sandy/screenshots:ro mount when SANDY_SCREENSHOT_DIR is set" \
+    grep -q 'SANDY_SCREENSHOT_DIR.*/home/sandy/screenshots:ro' "$_SS_SCRIPT"
 check "sandy exports SANDY_SCREENSHOTS_PATH inside the container" \
-    grep -q 'SANDY_SCREENSHOTS_PATH=/home/claude/screenshots' "$_SS_SCRIPT"
+    grep -q 'SANDY_SCREENSHOTS_PATH=/home/sandy/screenshots' "$_SS_SCRIPT"
 
 # 45d-f. Validation: extract the validation block from sandy (introspection
 # fast-paths exit before the launch-time validation block runs), then exercise
@@ -3925,7 +3925,7 @@ check "/ss generation gated on SANDY_SCREENSHOTS_PATH" \
 check "screenshot mount gated on SANDY_SCREENSHOT_DIR being set" \
     bash -c '
         # The line right above the mount addition must be the gate.
-        grep -B1 "SANDY_SCREENSHOT_DIR:/home/claude/screenshots:ro" "$1" \
+        grep -B1 "SANDY_SCREENSHOT_DIR:/home/sandy/screenshots:ro" "$1" \
             | grep -qF "if [ -n \"\${SANDY_SCREENSHOT_DIR:-}\" ]"
     ' -- "$_SS_SCRIPT"
 
@@ -6938,19 +6938,19 @@ check "--print-schema advertises default 1 for SANDY_HANDOFF_DIRS (consumers rea
     bash -c '"$1" --print-schema 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); e=[k for k in d[\"config\"][\"passive_keys\"] if k[\"name\"]==\"SANDY_HANDOFF_DIRS\"]; assert e and str(e[0][\"default\"])==\"1\", e"' -- "$_S86"
 # Mount emission
 check "RUN_FLAGS mounts outbox rw at ~/.handoff/outbox" \
-    bash -c 'grep -qF "handoff/outbox:/home/claude/.handoff/outbox" "$1"' -- "$_S86"
+    bash -c 'grep -qF "handoff/outbox:/home/sandy/.handoff/outbox" "$1"' -- "$_S86"
 check "RUN_FLAGS mounts inbox :ro at ~/.handoff/inbox" \
-    bash -c 'grep -qF "handoff/inbox:/home/claude/.handoff/inbox:ro" "$1"' -- "$_S86"
+    bash -c 'grep -qF "handoff/inbox:/home/sandy/.handoff/inbox:ro" "$1"' -- "$_S86"
 check "RUN_FLAGS mounts peer :ro at ~/.handoff/peer (the second inbound directory, 1.10.0)" \
-    bash -c 'grep -qF "handoff/peer:/home/claude/.handoff/peer:ro" "$1"' -- "$_S86"
+    bash -c 'grep -qF "handoff/peer:/home/sandy/.handoff/peer:ro" "$1"' -- "$_S86"
 check "peer path appears exactly once, and it is :ro (a second, rw spelling would be a writable inbound directory)" \
-    bash -c '[ "$(grep -c "handoff/peer:/home/claude/.handoff/peer" "$1")" -eq 1 ] && grep -q "handoff/peer:/home/claude/.handoff/peer:ro" "$1"' -- "$_S86"
+    bash -c '[ "$(grep -c "handoff/peer:/home/sandy/.handoff/peer" "$1")" -eq 1 ] && grep -q "handoff/peer:/home/sandy/.handoff/peer:ro" "$1"' -- "$_S86"
 # Mode negative controls (load-bearing): outbox must NOT be :ro; inbox path
 # appears exactly once and that occurrence carries :ro.
 check "outbox mount is NOT :ro" \
-    bash -c '! grep -q "handoff/outbox:/home/claude/.handoff/outbox:ro" "$1"' -- "$_S86"
+    bash -c '! grep -q "handoff/outbox:/home/sandy/.handoff/outbox:ro" "$1"' -- "$_S86"
 check "inbox path appears exactly once, and it is :ro" \
-    bash -c '[ "$(grep -c "handoff/inbox:/home/claude/.handoff/inbox" "$1")" -eq 1 ] && grep -q "handoff/inbox:/home/claude/.handoff/inbox:ro" "$1"' -- "$_S86"
+    bash -c '[ "$(grep -c "handoff/inbox:/home/sandy/.handoff/inbox" "$1")" -eq 1 ] && grep -q "handoff/inbox:/home/sandy/.handoff/inbox:ro" "$1"' -- "$_S86"
 # Gating: the mount block lives inside the SANDY_HANDOFF_DIRS=1 guard, whose
 # unset-fallback is 1 (default on), and there is no stray emission outside it
 # (exactly 4 RUN_FLAGS handoff lines as of 1.10.0 — outbox, inbox, peer, and
@@ -7003,36 +7003,36 @@ _hb_run() {
     rm -rf "$dir"
     printf '%s' "$out"
 }
-_hb_a="$(_hb_run "/home/claude/.handoff" "1")"
+_hb_a="$(_hb_run "/home/sandy/.handoff" "1")"
 # Creation is now unconditional; only the MOUNT is gated. So the collision case
 # still forces the var to 0 and still warns — the dirs themselves are inert and
 # were never what collided.
 check "collision guard (a): workspace == ~/.handoff -> var forced 0, warning (dirs inert)" \
     bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"WARN:"* ]]' -- "$_hb_a"
-_hb_b="$(_hb_run "/home/claude/.handoff/sub" "1")"
+_hb_b="$(_hb_run "/home/sandy/.handoff/sub" "1")"
 check "collision guard (b): workspace under ~/.handoff/ -> var forced 0, warning (dirs inert)" \
     bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"WARN:"* ]]' -- "$_hb_b"
-_hb_c="$(_hb_run "/home/claude/dev/proj" "1")"
+_hb_c="$(_hb_run "/home/sandy/dev/proj" "1")"
 check "collision guard (c): unrelated workspace -> both dirs created, no warning" \
     bash -c '[[ "$1" == *"VAR:1"* && "$1" == *"OUTBOX:yes"* && "$1" == *"INBOX:yes"* && "$1" != *"WARN:"* ]]' -- "$_hb_c"
-_hb_d="$(_hb_run "/home/claude/dev/proj" "")"
+_hb_d="$(_hb_run "/home/sandy/dev/proj" "")"
 # Key unset: DEFAULT ON (1.10.0). The block resolves the variable to 1 itself,
 # all four dirs are created, and nothing warns.
 check "collision guard (d): key unset -> resolved to 1 (default on), all four dirs created, no warning" \
     bash -c '[[ "$1" == *"VAR:1"* && "$1" == *"OUTBOX:yes"* && "$1" == *"INBOX:yes"* && "$1" == *"PEER:yes"* && "$1" == *"RELAY:yes"* && "$1" != *"WARN:"* ]]' -- "$_hb_d"
-_hb_e="$(_hb_run "/home/claude/dev/proj" "0")"
+_hb_e="$(_hb_run "/home/sandy/dev/proj" "0")"
 # The opt-out: the dirs ARE still created (unconditional) but the variable
 # stays 0 so nothing downstream mounts them, and nothing warns — opting out
 # is a quiet, supported choice, not an error condition.
 check "collision guard (e): SANDY_HANDOFF_DIRS=0 (the opt-out) -> stays 0, dirs created but inert, no warning" \
     bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"OUTBOX:yes"* && "$1" == *"INBOX:yes"* && "$1" == *"PEER:yes"* && "$1" != *"WARN:"* ]]' -- "$_hb_e"
-_hb_f="$(_hb_run "/home/claude/.handoff" "")"
+_hb_f="$(_hb_run "/home/sandy/.handoff" "")"
 # With the default on, the collision refusal must fire for a colliding
 # workspace even when nobody set the key — otherwise the default would mount
 # ~/.handoff/* inside a workspace that IS ~/.handoff.
 check "collision guard (f): key unset + workspace == ~/.handoff -> var forced 0, warning (the default does not bypass the guard)" \
     bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"WARN:"* ]]' -- "$_hb_f"
-_hb_g="$(_hb_run "/home/claude/.handoff" "0")"
+_hb_g="$(_hb_run "/home/sandy/.handoff" "0")"
 check "collision guard (g): opt-out + colliding workspace -> no warning (nothing would have been mounted anyway)" \
     bash -c '[[ "$1" == *"VAR:0"* && "$1" != *"WARN:"* ]]' -- "$_hb_g"
 
@@ -7097,7 +7097,7 @@ json_merge \"\$1\" '{\"tipsDisabled\":true,\"installMethod\":\"native\"}'" -- "$
         | sed -n '/node -e/,$p' | sed "1s/.*node -e '//" )"
     node -e "$_s87_trust
         fs.writeFileSync(f, JSON.stringify(d, null, 2) + \"\\n\");" \
-        "$_s87_f" "/home/claude/dev/proj" >/dev/null 2>&1
+        "$_s87_f" "/home/sandy/dev/proj" >/dev/null 2>&1
 
     _s87_after="$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(JSON.stringify(d.mcpServers))' "$_s87_f")"
 
@@ -7106,7 +7106,7 @@ json_merge \"\$1\" '{\"tipsDisabled\":true,\"installMethod\":\"native\"}'" -- "$
     check "unrelated operator keys survive too" \
         bash -c 'node -e "const d=JSON.parse(require(\"fs\").readFileSync(process.argv[1],\"utf8\"));process.exit(d.operatorKey===\"must-survive\"?0:1)" "$1"' -- "$_s87_f"
     check "sandy-owned keys still land alongside it" \
-        bash -c 'node -e "const d=JSON.parse(require(\"fs\").readFileSync(process.argv[1],\"utf8\"));process.exit(d.tipsDisabled===true&&d.installMethod===\"native\"&&d.projects&&d.projects[\"/home/claude/dev/proj\"]&&d.projects[\"/home/claude/dev/proj\"].hasTrustDialogAccepted===true?0:1)" "$1"' -- "$_s87_f"
+        bash -c 'node -e "const d=JSON.parse(require(\"fs\").readFileSync(process.argv[1],\"utf8\"));process.exit(d.tipsDisabled===true&&d.installMethod===\"native\"&&d.projects&&d.projects[\"/home/sandy/dev/proj\"]&&d.projects[\"/home/sandy/dev/proj\"].hasTrustDialogAccepted===true?0:1)" "$1"' -- "$_s87_f"
     rm -rf "$_s87_dir"
 else
     skip "mcpServers preservation behavioral checks (node not available)"
@@ -7137,7 +7137,7 @@ _s88_fn="$(sed -n '/^_sandy_self_path()/,/^}$/p' "$_S88")"
 
 check "_sandy_self_path exists" bash -c '[ -n "$1" ]' -- "$_s88_fn"
 check "_sandy_self_path makes a relative path absolute" \
-    bash -c 'cd /home/claude 2>/dev/null || cd /tmp; r="$(eval "$1"; _sandy_self_path ./sandy)"; case "$r" in /*/sandy) exit 0 ;; *) exit 1 ;; esac' -- "$_s88_fn"
+    bash -c 'cd /home/sandy 2>/dev/null || cd /tmp; r="$(eval "$1"; _sandy_self_path ./sandy)"; case "$r" in /*/sandy) exit 0 ;; *) exit 1 ;; esac' -- "$_s88_fn"
 check "_sandy_self_path leaves an absolute path unchanged" \
     bash -c 'r="$(eval "$1"; _sandy_self_path /opt/x/sandy)"; [ "$r" = "/opt/x/sandy" ]' -- "$_s88_fn"
 check "_sandy_self_path leaves a bare PATH name unchanged" \
@@ -8309,29 +8309,29 @@ S97RUN
 # --- truth table: default on; 0 opts out; the marker overrides an opt-out ----
 check "§97(1) marker alone (no config) leaves the tree on" \
     bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
 check "§97(2) SANDY_HANDOFF_DIRS=1 alone is on (explicit form of the default, unchanged path)" \
     bash -c 'd="$(mktemp -d)"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=1 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=1 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
 check "§97(3) both present is not an error" \
     bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=1 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=1 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
 check "§97(4) neither marker nor key present -> ON (the 1.10.0 default; the block resolves unset to 1 itself)" \
     bash -c 'd="$(mktemp -d)"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
 check "§97(4b) the opt-out: SANDY_HANDOFF_DIRS=0 with no marker -> 0" \
     bash -c 'd="$(mktemp -d)"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
 check "§97(4c) the marker OVERRIDES an opt-out: SANDY_HANDOFF_DIRS=0 + marker -> 1" \
     bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
 check "§97(4d) the override is SAID, not silent: marker over an opt-out logs an info line naming both" \
     bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=0 bash -c "info(){ echo \"INFO: \$*\"; }; warn(){ :; }; eval \"\$1\"" _ "$1")"; rm -rf "$d"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=0 bash -c "info(){ echo \"INFO: \$*\"; }; warn(){ :; }; eval \"\$1\"" _ "$1")"; rm -rf "$d"
         case "$out" in *"INFO: Handoff dirs forced on by"*".handoff-enabled (overrides SANDY_HANDOFF_DIRS=0)"*) exit 0 ;; *) exit 1 ;; esac' -- "$_s97_blk"
 check "§97(4e) NEGATIVE: with nothing to override, the marker logs nothing (a no-op stays quiet)" \
     bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x bash -c "info(){ echo \"INFO: \$*\"; }; warn(){ :; }; eval \"\$1\"" _ "$1")"; rm -rf "$d"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x bash -c "info(){ echo \"INFO: \$*\"; }; warn(){ :; }; eval \"\$1\"" _ "$1")"; rm -rf "$d"
         case "$out" in *"forced on"*) exit 1 ;; *) exit 0 ;; esac' -- "$_s97_blk"
 
 # --- the two rejected shortcuts, now measured against an OPT-OUT: with the
@@ -8339,15 +8339,15 @@ check "§97(4e) NEGATIVE: with nothing to override, the marker logs nothing (a n
 # the tree off, so each case carries SANDY_HANDOFF_DIRS=0.
 check "§97(5) NEGATIVE: the handoff DIRECTORIES alone do not defeat an opt-out (presence is not a signal)" \
     bash -c 'd="$(mktemp -d)"; mkdir -p "$d/handoff/inbox" "$d/handoff/outbox" "$d/handoff/peer" "$d/handoff/relay"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
 check "§97(6) NEGATIVE: a marker under claude/ does NOT override an opt-out (agent-reachable tree)" \
     bash -c 'd="$(mktemp -d)"; mkdir -p "$d/claude"; touch "$d/claude/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
 
 # --- the refusal still applies to the marker path --------------------------
 check "§97(7) the ~/.handoff workspace-collision refusal still fires under the marker" \
     bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/claude/.handoff bash "$2" "$1")"; rm -rf "$d"
+        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/.handoff bash "$2" "$1")"; rm -rf "$d"
         case "$out" in *WARN*) : ;; *) exit 1 ;; esac
         case "$out" in *0) exit 0 ;; *) exit 1 ;; esac' -- "$_s97_blk" "$_S97_RUN"
 
@@ -8368,9 +8368,9 @@ check "§97(9) NEGATIVE: no mount references the marker path" \
 
 # --- the mount flags are untouched by this feature -------------------------
 check "§97(10) inbox and peer are still mounted :ro and outbox still rw" \
-    bash -c 'grep -q "handoff/inbox:/home/claude/.handoff/inbox:ro" "$1" \
-        && grep -q "handoff/peer:/home/claude/.handoff/peer:ro" "$1" \
-        && grep -q "handoff/outbox:/home/claude/.handoff/outbox\"" "$1"' -- "$_S97"
+    bash -c 'grep -q "handoff/inbox:/home/sandy/.handoff/inbox:ro" "$1" \
+        && grep -q "handoff/peer:/home/sandy/.handoff/peer:ro" "$1" \
+        && grep -q "handoff/outbox:/home/sandy/.handoff/outbox\"" "$1"' -- "$_S97"
 
 # --- reset preserves enrollment, destroys staged content -------------------
 check "§97(11) --reset-sandbox preserves .handoff-enabled (operator state)" \
@@ -11174,7 +11174,7 @@ check "§113(4) SKIPS a rate limit" _s113 'Rate limit reached for gpt-5.5'
 check "§113(5) still FAILS a usage banner (mutation: an over-broad recognizer masks the agent-args class of sandy fault that produced exactly this output once)" \
     bash -c '! printf "%s" "$1" | grep -qiE "$2"' -- 'Usage: codex exec [OPTIONS] [PROMPT]' "$_S113_RE"
 check "§113(6) still FAILS a mount fault" \
-    bash -c '! printf "%s" "$1" | grep -qiE "$2"' -- 'Error: EROFS read-only file system /home/claude/.codex' "$_S113_RE"
+    bash -c '! printf "%s" "$1" | grep -qiE "$2"' -- 'Error: EROFS read-only file system /home/sandy/.codex' "$_S113_RE"
 check "§113(7) exactly ONE literal copy of the regex exists (the definition; mutation: re-pasting it at a call site restores the drift this section exists to end)" \
     bash -c '[ "$(grep -c "Unauthorized|Forbidden|Too Many Requests" "$1")" -eq 1 ]' -- "$(dirname "$0")/run-integration-tests.sh"
 unset _S113_RE
@@ -11531,7 +11531,7 @@ printf '#!/bin/sh\nexit 0\n' > "$_S114_RW/.sandy/noexec.sh"   # deliberately NOT
 _s114_relay_validate() {
     # $1=SANDY_HANDOFF_RELAY $2=SANDY_HANDOFF_DIRS $3=headless(true|"") $4=remote(true|false) $5=provision(1|0)
     env SANDY_HANDOFF_RELAY="$1" SANDY_HANDOFF_DIRS="${2:-0}" \
-        WORK_DIR="$_S114_RW" SANDY_WORKSPACE="/home/claude/relayws" \
+        WORK_DIR="$_S114_RW" SANDY_WORKSPACE="/home/sandy/relayws" \
         _sandy_is_headless="${3:-false}" SANDY_REMOTE_CONTROL="${4:-false}" \
         SANDY_PROVISION="${5:-0}" bash -c "
         info(){ printf '%s\n' \"\$*\"; }
@@ -11586,9 +11586,9 @@ _S114_RELAY_OUT="$(_s114_relay_validate .sandy/noexec.sh 0 2>&1)" || _S114_RELAY
 check "§114(11k) relay present but NOT executable -> exit 1 (existence alone is not enough)" \
     bash -c '[ "$1" -eq 1 ] && printf "%s\n" "$2" | grep -q "not an executable file"' -- "$_S114_RELAY_RC" "$_S114_RELAY_OUT"
 check "§114(11l) container-absolute path UNDER \$SANDY_WORKSPACE is mapped back to \$WORK_DIR and accepted when it exists there" \
-    bash -c 'printf "%s" "$1" | grep -q "DIRS=1"' -- "$(_s114_relay_validate /home/claude/relayws/.sandy/relay.sh 0 2>&1)"
+    bash -c 'printf "%s" "$1" | grep -q "DIRS=1"' -- "$(_s114_relay_validate /home/sandy/relayws/.sandy/relay.sh 0 2>&1)"
 _S114_RELAY_RC=0
-_S114_RELAY_OUT="$(_s114_relay_validate /home/claude/relayws/.sandy/missing.sh 0 2>&1)" || _S114_RELAY_RC=$?
+_S114_RELAY_OUT="$(_s114_relay_validate /home/sandy/relayws/.sandy/missing.sh 0 2>&1)" || _S114_RELAY_RC=$?
 check "§114(11m) ...and the same mapping catches a MISSING one, exit 1 (the workspace-absolute form is not an escape hatch)" \
     bash -c '[ "$1" -eq 1 ] && printf "%s\n" "$2" | grep -q "fails the launch"' -- "$_S114_RELAY_RC" "$_S114_RELAY_OUT"
 check "§114(11n) an image-only absolute path is NOT rejected host-side (the host cannot see inside the image; user-setup.sh is the second detection point)" \
@@ -11673,7 +11673,7 @@ check "§114(11t) the helper writes the marker the --start readiness loop actual
 _S114_FM_T="$(mktemp -d)"; mkdir -p "$_S114_FM_T/ws/.sandy" "$_S114_FM_T/logs"
 _S114_FM_FN="$(awk '/^_sandy_daemon_fatal\(\) \{/,/^}$/' "$_S114_SANDY")"
 env SANDY_HANDOFF_RELAY=".sandy/missing.sh" SANDY_HANDOFF_DIRS=0 WORK_DIR="$_S114_FM_T/ws" \
-    SANDY_WORKSPACE=/home/claude/ws _sandy_is_headless=false SANDY_REMOTE_CONTROL=false \
+    SANDY_WORKSPACE=/home/sandy/ws _sandy_is_headless=false SANDY_REMOTE_CONTROL=false \
     SANDY_DAEMON_LOG="$_S114_FM_T/logs/d.log" bash -c "trap - ERR; info(){ :; }
 $_S114_FM_FN
 $_S114_RELAY_BLK" >/dev/null 2>&1 || true
@@ -11707,7 +11707,7 @@ check "§114(12b) ...and with NO relay configured the same collision is silent, 
 check "§114(13a) exactly 4 handoff RUN_FLAGS lines (outbox, inbox, peer, relay — was 2 before 1.10.0; the -e SANDY_HANDOFF_RELAY line has no lowercase 'handoff' so it is correctly NOT counted here)" \
     bash -c '[ "$(grep -c "RUN_FLAGS.*handoff" "$1")" -eq 4 ]' -- "$_S114_SANDY"
 check "§114(13b) the relay mount has no :ro (it is read-write, unlike inbox)" \
-    bash -c 'grep -q "handoff/relay:/home/claude/.handoff/relay\")" "$1" && ! grep -q "handoff/relay:/home/claude/.handoff/relay:ro" "$1"' -- "$_S114_SANDY"
+    bash -c 'grep -q "handoff/relay:/home/sandy/.handoff/relay\")" "$1" && ! grep -q "handoff/relay:/home/sandy/.handoff/relay:ro" "$1"' -- "$_S114_SANDY"
 check "§114(13c) -e SANDY_HANDOFF_RELAY appears exactly once, inside the handoff-mounts gate" \
     bash -c '[ "$(grep -c "\-e \"SANDY_HANDOFF_RELAY=" "$1")" -eq 1 ]' -- "$_S114_SANDY"
 check "§114(13d) mkdir for the four handoff subdirs is on one line (outbox inbox relay peer)" \
@@ -11730,10 +11730,10 @@ check "§114(13e-2) default-on invariant: with SANDY_HANDOFF_DIRS unset and no r
         eval "$_blk"
         [ "${#RUN_FLAGS[@]}" -eq 8 ] || exit 1
         _joined="$(printf "%s\n" "${RUN_FLAGS[@]}")"
-        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/outbox:/home/claude/.handoff/outbox" || exit 1
-        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/inbox:/home/claude/.handoff/inbox:ro" || exit 1
-        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/peer:/home/claude/.handoff/peer:ro" || exit 1
-        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/relay:/home/claude/.handoff/relay" || exit 1
+        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/outbox:/home/sandy/.handoff/outbox" || exit 1
+        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/inbox:/home/sandy/.handoff/inbox:ro" || exit 1
+        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/peer:/home/sandy/.handoff/peer:ro" || exit 1
+        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/relay:/home/sandy/.handoff/relay" || exit 1
         ! printf "%s\n" "$_joined" | grep -q "^-e\$"
     ' -- "$_S114_SANDY"
 
@@ -12055,7 +12055,7 @@ _S114_START_PAT="$(printf '%s' "$_S114_START_LINE" | sed -e "s/.*grep -c '//" -e
 check "§114(16i) extracted the restart-count pattern from phase E" \
     bash -c '[ -n "$1" ]' -- "$_S114_START_PAT"
 check "§114(16i-2) that pattern actually matches a supervisor.log start line as the template writes it (regression guard for the never-matching '\] start ' pattern)" \
-    bash -c 'printf "%s\n" "[sandy-relay] 2026-01-01T00:00:00Z start /home/claude/ws/.sandy/relay.sh" | grep -q "$1"' -- "$_S114_START_PAT"
+    bash -c 'printf "%s\n" "[sandy-relay] 2026-01-01T00:00:00Z start /home/sandy/ws/.sandy/relay.sh" | grep -q "$1"' -- "$_S114_START_PAT"
 # --- (16j-m) structural: the criterion-7.4 delivery harness still exists and
 # still proves what it claims. Same reasoning as (16f-h): the runtime proof
 # needs Docker AND credentials, so nothing here can run it -- these guard it
@@ -12106,7 +12106,7 @@ unset _S114_SANDY _S114_TMPL _S114 _S114_PVP_FN _S114_VC_ACCEPT _S114_VC_HOLD _S
 echo "§116: codex OAuth credentials are seeded into the rw sandbox, not overlaid :ro"
 # ============================================================
 # WHY. The old design overlaid an ephemeral copy of the host's ~/.codex/auth.json
-# READ-ONLY at /home/claude/.codex/auth.json, so `codex login`, `codex logout`
+# READ-ONLY at /home/sandy/.codex/auth.json, so `codex login`, `codex logout`
 # and in-session token refresh all died with EROFS inside the container -- while
 # sandy's own comments, CLAUDE.md and SPECIFICATION.md all told the user to
 # "re-login inside the container", which that configuration makes impossible.
@@ -12485,7 +12485,7 @@ check "§119(2) the key extractor found a plausible number of keys (>40), so (1)
 # The CLI-flag half of the same idea. §91 already diffs cli_flags against the
 # parsers and against --help; nothing tied it to README, and `--exec` shipped
 # with a how-to section but no row in the flags table -- exactly the reader who
-# then hand-rolls `docker exec -u claude`. Same failure as SANDY_CLAUDE_AUTH
+# then hand-rolls `docker exec -u sandy`. Same failure as SANDY_CLAUDE_AUTH
 # missing from the config table: prose and schema updated, reference table not.
 # Scoped to the FLAGS TABLE, not the whole file. A first cut grepped all of
 # README and was satisfied by prose: `--exec` had a how-to section, so the check
@@ -12521,7 +12521,7 @@ echo "§120: sandy --exec runs as the HOST uid, never -u claude"
 # itself. The image creates the user with `useradd -u 1001 claude`, but sandy
 # bind-mounts a generated /etc/passwd carrying the HOST uid so bind-mount
 # ownership works. Docker resolves `-u <name>` against the container's IMAGE
-# filesystem, not the runtime bind mount -- so `docker exec -u claude` runs as
+# filesystem, not the runtime bind mount -- so `docker exec -u sandy` runs as
 # uid 1001 (confirmed on a real container: it prints uid=1001). The visible
 # symptom is a shell prompt reading "I have no name!"; the invisible one is
 # every write landing as the wrong owner on a workspace mount owned by the host
@@ -12554,7 +12554,7 @@ case "$1" in
     done
     echo ""; exit 0 ;;
   exec)
-    case " $* " in *getent*) echo "/home/claude"; exit 0 ;; esac
+    case " $* " in *getent*) echo "/home/sandy"; exit 0 ;; esac
     printf 'ARGV:'; printf ' %s' "$@"; printf '\n'
     exit "${S120_RC:-0}" ;;
 esac
@@ -12593,12 +12593,12 @@ check "§120(2) the numeric uid:gid is THIS host's, not a hardcoded pair" \
 # HOME: not cosmetic. As root HOME=/root, which is on the --read-only rootfs --
 # the reason an in-container `codex logout` failed with EROFS.
 check "§120(3) HOME is set explicitly rather than left to docker's user lookup" \
-    bash -c 'printf "%s" "$1" | grep -q -- "-e HOME=/home/claude"' -- "$_S120_FG"
+    bash -c 'printf "%s" "$1" | grep -q -- "-e HOME=/home/sandy"' -- "$_S120_FG"
 
 # -w uses the launch path's own $HOME-relative mapping, so --exec lands where
 # the agent works instead of the container's default cwd.
 check "§120(4) -w is the container-side workspace path (host \$HOME-relative mapping)" \
-    bash -c 'printf "%s" "$1" | grep -q -- "-w /home/claude/ws "' -- "$_S120_FG"
+    bash -c 'printf "%s" "$1" | grep -q -- "-w /home/sandy/ws "' -- "$_S120_FG"
 
 check "§120(5) with no command, the default is an interactive shell" \
     bash -c 'printf "%s" "$1" | grep -q "/bin/bash$"' -- "$_S120_FG"
@@ -12649,7 +12649,7 @@ _S120_REAL="$( S120_FOREGROUND=1; _s120_run -- id )"
 check "§120(13) the REAL exec argv carries the numeric uid:gid (not just the --dry-run rendering)" \
     bash -c 'printf "%s" "$1" | grep -q "^ARGV:" && printf "%s" "$1" | grep -q -- "-u $(id -u):$(id -g) " && ! printf "%s" "$1" | grep -q -- "-u claude"' -- "$_S120_REAL"
 check "§120(14) the REAL exec argv carries -w and -e HOME too" \
-    bash -c 'printf "%s" "$1" | grep -q -- "-w /home/claude/ws " && printf "%s" "$1" | grep -q -- "-e HOME=/home/claude"' -- "$_S120_REAL"
+    bash -c 'printf "%s" "$1" | grep -q -- "-w /home/sandy/ws " && printf "%s" "$1" | grep -q -- "-e HOME=/home/sandy"' -- "$_S120_REAL"
 # Regression guard for the exact defect CI caught: an early dispatcher reading a
 # variable initialised hundreds of lines later. The real exec path is the one
 # that hit it (every --dry-run check passed while both real-exec checks failed).
@@ -12920,7 +12920,7 @@ _S123_MARKER="$(
     trap - ERR
     set +e
     sandy_full_version() { echo "1.11.0-test"; }
-    _sandy_egress_mode=permissive; SANDY_WORKSPACE=/home/claude/dev/x
+    _sandy_egress_mode=permissive; SANDY_WORKSPACE=/home/sandy/dev/x
     # SANDBOX_NAME is required by the composer as of 1.15.0 (#303). Without it
     # the substitution dies on set -u (which set +e does not cover) and the
     # OUTER assignment trips the ERR trap, aborting the whole suite -- which is
@@ -13952,7 +13952,7 @@ echo "§130: a repository cannot choose what gets bind-mounted (R5)"
 #
 # R5a -- the `gitdir:` line in a `.git` FILE is REPOSITORY CONTENT, and it was
 # resolved with a bare `cd` and no containment check, then bind-mounted with no
-# `:ro`. `gitdir: ../../.ssh` produced `-v $HOME/.ssh:/home/claude/.ssh`
+# `:ro`. `gitdir: ../../.ssh` produced `-v $HOME/.ssh:/home/sandy/.ssh`
 # READ-WRITE; `gitdir: /etc` produced `-v /etc:/etc` READ-WRITE. Write access to
 # ~/.ssh is host code execution -- an ~/.ssh/config ProxyCommand fires on the
 # next `git push`. _sandy_resolve_symlinks is structurally blind to it: `.git`
@@ -14030,7 +14030,7 @@ _S130_ESC_RC=0; _S130_ESC="$(trap - ERR; _s130_git 'gitdir: ../../../.ssh' 2>/de
 _S130_ABS_RC=0; _S130_ABS="$(trap - ERR; _s130_git 'gitdir: /etc' 2>/dev/null)" || _S130_ABS_RC=$?
 _S130_OK_RC=0; _S130_OK="$(trap - ERR;  _s130_git 'gitdir: ../../.git/modules/vendor/lib' 2>/dev/null)" || _S130_OK_RC=$?
 
-check "§130(1) a .git file escaping the workspace with ../ is REFUSED — it produced '-v \$HOME/.ssh:/home/claude/.ssh' READ-WRITE, and write access to ~/.ssh is host code execution via an ssh config ProxyCommand" \
+check "§130(1) a .git file escaping the workspace with ../ is REFUSED — it produced '-v \$HOME/.ssh:/home/sandy/.ssh' READ-WRITE, and write access to ~/.ssh is host code execution via an ssh config ProxyCommand" \
     test "$_S130_ESC_RC" = 1
 check "§130(2) ...and emits no mount flag at all (the refusal is before the mount, not a narrower mount)" \
     test -z "$_S130_ESC"
@@ -14039,7 +14039,7 @@ check "§130(3) an absolute gitdir outside \$HOME is REFUSED — '/etc' produced
 check "§130(4) a LEGITIMATE submodule worktree still launches — the positive half, without which every refusal above is satisfied by a block that refuses everything (got: $_S130_OK)" \
     test "$_S130_OK_RC" = 0
 check "§130(5) ...and the gitdir itself is still mounted READ-WRITE, because git must write index/refs/objects" \
-    bash -c 'printf "%s\n" "$1" | grep -q "modules/vendor/lib:/home/claude/dev/super/.git/modules/vendor/lib$"' -- "$_S130_OK"
+    bash -c 'printf "%s\n" "$1" | grep -q "modules/vendor/lib:/home/sandy/dev/super/.git/modules/vendor/lib$"' -- "$_S130_OK"
 check "§130(6) ...but its config is :ro (R5b: nothing covered it before — _protect_submodule_gitdirs walks \$GITDIR_HOST/modules, never \$GITDIR_HOST itself)" \
     bash -c 'printf "%s\n" "$1" | grep -q "/config:.*:ro$"' -- "$_S130_OK"
 check "§130(7) ...and hooks/ is :ro — the host-code-execution vector .git/hooks/ is on the protected list to block, which a submodule worktree was not getting" \
@@ -14566,7 +14566,7 @@ _s134_marker() {
     (
         sandy_full_version() { echo "9.9.9"; }
         _sandy_egress_mode=off
-        SANDY_WORKSPACE="/home/claude/my repo"
+        SANDY_WORKSPACE="/home/sandy/my repo"
         SANDBOX_NAME="myrepo-abc12345"
         _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
         _sandy_agents_json=null; _sandy_relay_json=false; _sandy_relay_slot_json=null
@@ -14586,7 +14586,7 @@ check "§134(1) /etc/sandy-session.json carries sandbox_name (got: ${_S134_MK_NA
 check "§134(2) ...and it is the SLUG, not the workspace basename — the fixture basename is 'my repo', the slug 'myrepo-abc12345', and an emitter using basename(workspace) would say the former" \
     test "$_S134_MK_NAME" = "myrepo-abc12345"
 check "§134(3) ...while workspace still reports the full path, so the two fields did not collapse into one (got: ${_S134_MK_WS:-none})" \
-    test "$_S134_MK_WS" = "/home/claude/my repo"
+    test "$_S134_MK_WS" = "/home/sandy/my repo"
 
 # The env export. Asserted through the real RUN_FLAGS line, not by grepping.
 _S134_ENV="$(bash -c '
@@ -14641,7 +14641,7 @@ mkdir -p "$_S135_DIR/f"
 # Extract the manifest block from sandy rather than reimplementing it.
 _S135_BLK="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Computed mount destinations/' "$_S135_SANDY")
 $(awk '/^_sandy_fm_dest\(\) \{/,/^\}/' "$_S135_SANDY")
-_SANDY_FM_HOME=\"\${_SANDY_FM_HOME:-/home/claude}\""
+_SANDY_FM_HOME=\"\${_SANDY_FM_HOME:-/home/sandy}\""
 check "§135(pre) the manifest block was extracted from sandy and parses (mutation: a rename empties it and every check below goes vacuous)" \
     bash -c 'printf "%s" "$1" | grep -q "_sandy_fm_load" && printf "%s\n" "$1" | bash -n' _ "$_S135_BLK"
 
@@ -14731,7 +14731,7 @@ check "§135(17) ...case-folded, so a capitalised workspace still matches a lowe
 # --- D5 destinations --------------------------------------------------------
 _S135_DEST="$(bash -c 'set -uo pipefail; eval "$1"; printf "%s|%s|%s" "$(_sandy_fm_dest amap payload)" "$(_sandy_fm_dest amap .)" "$(_sandy_fm_dest amap inbox)"' _ "$_S135_BLK" 2>/dev/null)"
 check "§135(18) destinations are COMPUTED under two roots sandy owns — payload, the feature root, and a named mount (got: $_S135_DEST)" \
-    bash -c '[ "$1" = "/opt/sandy/features/amap|/home/claude/.amap|/home/claude/.amap/inbox" ]' _ "$_S135_DEST"
+    bash -c '[ "$1" = "/opt/sandy/features/amap|/home/sandy/.amap|/home/sandy/.amap/inbox" ]' _ "$_S135_DEST"
 check "§135(19) the manifest carries NO destination field — the schema has no 'to', so there is nothing to police (mutation: add one to the projector and this goes red)" \
     bash -c '! printf "%s" "$1" | grep -q "\"to\""' _ "$_S135_BLK"
 
@@ -14838,8 +14838,8 @@ check "§136(3) an UNSELECTED sandbox gets NO mount, NO export and NO entry — 
              ! printf "%s" "$1" | grep -qE "^(mount|export|entry)	" &&
              printf "%s" "$1" | grep -q "^skip	amap	"' _ "$_S136_UNSEL"
 check "§136(4) mode defaults to ro and rw is honoured only where declared (D7: the router refuses to publish into an agent-writable tree)" \
-    bash -c 'printf "%s" "$1" | grep -q "/home/claude/.amap/inbox	ro$" &&
-             printf "%s" "$1" | grep -q "/home/claude/.amap/outbox	rw$"' _ "$_S136_SEL"
+    bash -c 'printf "%s" "$1" | grep -q "/home/sandy/.amap/inbox	ro$" &&
+             printf "%s" "$1" | grep -q "/home/sandy/.amap/outbox	rw$"' _ "$_S136_SEL"
 check "§136(5) the entry is reported under the payload mount point, not as a host path" \
     bash -c 'printf "%s" "$1" | grep -q "^entry	/opt/sandy/features/amap/relay$"' _ "$_S136_SEL"
 check "§136(6) a declared mount whose source does not exist is NAMED and skipped, never mounted silently (the R7a finding)" \
@@ -15125,6 +15125,65 @@ check "§139(13) SANDY_EGRESS=off is approval-gated from a workspace while permi
     bash -c '[ "$1" = "off:gated permissive:free strict:free " ]' _ "$_S139_TIER"
 
 unset _S139_BLK _S139_TIER _S139_WARN
+
+# ============================================================
+echo ""
+echo "§140: the container user and home are 'sandy', not 'claude' (#248)"
+# ============================================================
+# WHY THIS IS A MAJOR AND NOT A RENAME. /home/claude is baked into files sandy
+# does not own -- venv shebangs and pyvenv.cfg, .pth files, editable installs,
+# GOPATH and PYTHONUSERBASE metadata, npm and cargo state. Moving HOME
+# invalidates every existing sandbox, which is why SANDY_SANDBOX_MIN_COMPAT
+# advances and why this could not happen in 1.x: that promise held the floor at
+# 1.0.0 or below WITHIN the line.
+#
+# THE TRAP THIS SECTION GUARDS is not the rename, it is the over-rename. Four
+# different things are called "claude" here and only ONE of them moved:
+#
+#   the container user/home  -> sandy        (moved)
+#   the AGENT named claude   -> claude       (stays: SANDY_AGENT=claude)
+#   Claude Code's config dir -> ~/.claude    (stays: upstream owns the name)
+#   the agent install path   -> /opt/claude-code, sandy-claude-code (stays)
+#
+# A naive sed over "claude" breaks the agent, the credential probe and the
+# image names. So the positive checks below matter as much as the negative one.
+_S140_SANDY="$SANDY_SCRIPT"
+
+check "§140(1) no /home/claude path remains in sandy except where it NAMES the old path for the user (the compat refusal)" \
+    bash -c 'n="$(grep -c "/home/claude" "$1" || true)"
+             m="$(grep "/home/claude" "$1" | grep -c "2.0 renamed\|still pointing at\|forward-compat promise expiring" || true)"
+             [ "$n" = "$m" ]' _ "$_S140_SANDY"
+check "§140(2) the image creates the user as sandy" \
+    bash -c 'grep -q "useradd -m -s /bin/bash -u 1001 sandy" "$1"' _ "$_S140_SANDY"
+check "§140(3) the generated /etc/passwd and /etc/group overlay rewrites the sandy entry, not a claude one (a stale pattern here silently produces 'I have no name!')" \
+    bash -c 'grep -q "s/\^sandy:x:1001:1001:/" "$1" && grep -q "s/\^sandy:x:1001:/" "$1" && ! grep -q "\^claude:x:" "$1"' _ "$_S140_SANDY"
+check "§140(4) the compat floor advanced to 2.0.0 — without it every 1.x sandbox launches with its cached paths pointing at a home that no longer exists" \
+    bash -c 'grep -q "SANDY_SANDBOX_MIN_COMPAT=\"2.0.0\"" "$1"' _ "$_S140_SANDY"
+check "§140(5) ...and the refusal NAMES THE RENAME rather than reporting a generic floor, which would send the reader to the wrong question" \
+    bash -c 'grep -q "2.0 renamed the container user and home" "$1"' _ "$_S140_SANDY"
+
+# --- the four things called claude: only one moved ---------------------------
+check "§140(6) the AGENT named claude is untouched — SANDY_AGENT=claude still resolves" \
+    bash -c 'grep -q "_sandy_agent_has claude" "$1"' _ "$_S140_SANDY"
+check "§140(7) Claude Code's own config dir keeps its name: ~/.claude under the NEW home" \
+    bash -c 'grep -q "/home/sandy/.claude" "$1"' _ "$_S140_SANDY"
+check "§140(8) the agent install path and image names are untouched (/opt/claude-code, sandy-claude-code)" \
+    bash -c 'grep -q "/opt/claude-code" "$1" && grep -q "sandy-claude-code" "$1"' _ "$_S140_SANDY"
+check "§140(9) the credential env vars are untouched (a naive rename would have eaten CLAUDE_CODE_OAUTH_TOKEN)" \
+    bash -c 'grep -q "CLAUDE_CODE_OAUTH_TOKEN" "$1"' _ "$_S140_SANDY"
+
+# --- the workspace mapping, which is the user-visible half --------------------
+check "§140(10) the \$HOME-relative workspace mount maps under the new home" \
+    bash -c '! grep -q "SANDY_WORKSPACE=/home/claude" "$1"' _ "$_S140_SANDY"
+# Positive, not negative. The first cut asserted the ABSENCE of the old path
+# with an escaped regex, and the escaping mangled the pattern inside a nested
+# double-quote -- it failed against code that was already correct. Asserting
+# what the value IS needs no escaping and cannot rot into a pattern that
+# matches nothing.
+check "§140(11) --exec's HOME fallback is the new home — docker only derives HOME when it can resolve the user, and as root HOME=/root is on the read-only rootfs" \
+    bash -c 'grep -qF "_ex_home=\"/home/sandy\"" "$1"' _ "$_S140_SANDY"
+
+unset _S140_SANDY
 
 # BEGIN SUMMARY
 # ============================================================

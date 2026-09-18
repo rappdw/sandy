@@ -174,18 +174,18 @@ echo "  mounts:"; printf '%s\n' "$_m0" | grep -i handoff | sed 's/^/    /'
 # This is the exact mount table a consumer verifies against -- four rows, no
 # more: outbox rw, inbox ro, peer ro, relay rw.
 ck "default: outbox mount is RW=true" \
-   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/claude/.handoff/outbox true\$'"
+   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/sandy/.handoff/outbox true\$'"
 ck "default: inbox mount is RW=false" \
-   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/claude/.handoff/inbox false\$'"
+   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/sandy/.handoff/inbox false\$'"
 ck "default: peer mount is RW=false" \
-   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/claude/.handoff/peer false\$'"
+   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/sandy/.handoff/peer false\$'"
 ck "default: relay mount is RW=true" \
-   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/claude/.handoff/relay true\$'"
+   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/sandy/.handoff/relay true\$'"
 ck "default: exactly four ~/.handoff/* mounts (no stray rows)" \
-   "[ \"\$(printf '%s\n' \"\$_m0\" | grep -c '^/home/claude/.handoff/')\" = 4 ]"
+   "[ \"\$(printf '%s\n' \"\$_m0\" | grep -c '^/home/sandy/.handoff/')\" = 4 ]"
 # The in-container half of the consumer check.
 ck "default: in-container ~/.handoff/inbox, outbox and peer all exist" \
-   "docker exec -u \"\$(id -u)\" \"$C\" sh -c 'test -d /home/claude/.handoff/inbox && test -d /home/claude/.handoff/outbox && test -d /home/claude/.handoff/peer'"
+   "docker exec -u \"\$(id -u)\" \"$C\" sh -c 'test -d /home/sandy/.handoff/inbox && test -d /home/sandy/.handoff/outbox && test -d /home/sandy/.handoff/peer'"
 ck "default: no relay env forwarded (the tree being on says nothing about a relay)" \
    "! docker inspect -f '{{range .Config.Env}}{{.}}{{\"\n\"}}{{end}}' \"$C\" | grep -q '^SANDY_HANDOFF_RELAY='"
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase A) exits 0" "[ $? -eq 0 ]"
@@ -195,7 +195,7 @@ env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS"; RC=$?
 ck "default: a SECOND launch exits 0 (idempotent)" "[ $RC -eq 0 ]"
 C="$(cid)"
 ck "default: second launch has the same four ~/.handoff/* mounts" \
-   "[ \"\$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{\"\n\"}}{{end}}' \"$C\" | grep -c '^/home/claude/.handoff/')\" = 4 ]"
+   "[ \"\$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{\"\n\"}}{{end}}' \"$C\" | grep -c '^/home/sandy/.handoff/')\" = 4 ]"
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase A, second) exits 0" "[ $? -eq 0 ]"
 
 echo "== A2. opt-out (SANDY_HANDOFF_DIRS=0 via workspace .sandy/config): dirs exist, nothing is mounted =="
@@ -216,7 +216,7 @@ ck "docker inspect has NO mention of handoff anywhere (mounts, env, labels)" \
 ck "sandbox handoff/ dirs exist but are INERT (created always; presence means nothing)" \
    "[ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/inbox\" ] && [ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/peer\" ]"
 ck "in-container ~/.handoff does NOT exist" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" test -e /home/claude/.handoff"
+   "! docker exec -u \"\$(id -u)\" \"$C\" test -e /home/sandy/.handoff"
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase A2) exits 0" "[ $? -eq 0 ]"
 
 echo "== B. explicit on (SANDY_HANDOFF_DIRS=1 via workspace .sandy/config) =="
@@ -246,22 +246,22 @@ ck "host inbox dir exists" "[ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/inbox
 _mounts="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C" 2>/dev/null)"
 echo "  mounts:"; printf '%s\n' "$_mounts" | grep -i handoff | sed 's/^/    /'
 ck "outbox mount is RW=true" \
-   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/claude/.handoff/outbox true\$'"
+   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/sandy/.handoff/outbox true\$'"
 ck "inbox mount is RW=false" \
-   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/claude/.handoff/inbox false\$'"
+   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/sandy/.handoff/inbox false\$'"
 ck "peer mount is RW=false" \
-   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/claude/.handoff/peer false\$'"
+   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/sandy/.handoff/peer false\$'"
 
 ck "write to outbox SUCCEEDS from inside the container" \
-   "docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/claude/.handoff/outbox/probe.txt'"
+   "docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/sandy/.handoff/outbox/probe.txt'"
 ck "write to inbox FAILS from inside the container" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/claude/.handoff/inbox/probe.txt' 2>/dev/null"
+   "! docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/sandy/.handoff/inbox/probe.txt' 2>/dev/null"
 ck "write to peer FAILS from inside the container" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/claude/.handoff/peer/probe.txt' 2>/dev/null"
+   "! docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/sandy/.handoff/peer/probe.txt' 2>/dev/null"
 ck "chmod u+w on the peer dir itself FAILS (EROFS, not a mode problem)" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/claude/.handoff/peer 2>/dev/null"
+   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/sandy/.handoff/peer 2>/dev/null"
 ck "chmod u+w on the inbox dir itself FAILS (EROFS, not a mode problem)" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/claude/.handoff/inbox 2>/dev/null"
+   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/sandy/.handoff/inbox 2>/dev/null"
 
 # The EROFS-beats-ownership assertion — the entire point of the :ro mount
 # flag. A file placed by the HOST into inbox is owned by the agent's
@@ -270,26 +270,26 @@ ck "chmod u+w on the inbox dir itself FAILS (EROFS, not a mode problem)" \
 # flag is what actually stops it.
 echo "host-placed-in-inbox" > "$SANDY_HOME_DIR/sandboxes/$SESS/handoff/inbox/from-host.txt"
 ck "cat of the host-placed inbox file SUCCEEDS (read is fine)" \
-   "docker exec -u \"\$(id -u)\" \"$C\" cat /home/claude/.handoff/inbox/from-host.txt"
+   "docker exec -u \"\$(id -u)\" \"$C\" cat /home/sandy/.handoff/inbox/from-host.txt"
 # Prove the ownership premise BEFORE asserting chmod fails. Without this the
 # chmod check passes for the wrong reason if the file is not actually owned by
 # the agent uid — it would be testing permissions, not the mount flag.
 ck "host-placed inbox file IS owned by the agent uid (the premise)" \
-   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C\" stat -c '%u' /home/claude/.handoff/inbox/from-host.txt 2>/dev/null)\" = \"\$(id -u)\" ]"
+   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C\" stat -c '%u' /home/sandy/.handoff/inbox/from-host.txt 2>/dev/null)\" = \"\$(id -u)\" ]"
 ck "chmod u+w on the agent-OWNED host-placed inbox file STILL FAILS" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/claude/.handoff/inbox/from-host.txt 2>/dev/null"
+   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/sandy/.handoff/inbox/from-host.txt 2>/dev/null"
 
 # Informational only — not asserted, since the parent's on-host ownership
 # depends on how the harness itself was invoked (sudo, CI runner uid, etc.).
-_parent_stat="$(docker exec -u "$(id -u)" "$C" sh -c 'stat -c "%U:%G %a" /home/claude/.handoff 2>/dev/null || stat -f "%Su:%Sg %Lp" /home/claude/.handoff 2>/dev/null')" || _parent_stat="(stat unavailable)"
-echo "  info: /home/claude/.handoff parent ownership/mode: $_parent_stat"
+_parent_stat="$(docker exec -u "$(id -u)" "$C" sh -c 'stat -c "%U:%G %a" /home/sandy/.handoff 2>/dev/null || stat -f "%Su:%Sg %Lp" /home/sandy/.handoff 2>/dev/null')" || _parent_stat="(stat unavailable)"
+echo "  info: /home/sandy/.handoff parent ownership/mode: $_parent_stat"
 
 echo "== C. persistence across --stop / --start =="
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase B) exits 0" "[ $? -eq 0 ]"
 "$SANDY" --start --workspace "$WS"; ck "--start (phase C) exits 0" "[ $? -eq 0 ]"
 C="$(cid)"
 ck "outbox file from phase B still present after restart" \
-   "docker exec -u \"\$(id -u)\" \"$C\" test -f /home/claude/.handoff/outbox/probe.txt"
+   "docker exec -u \"\$(id -u)\" \"$C\" test -f /home/sandy/.handoff/outbox/probe.txt"
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase C, final) exits 0" "[ $? -eq 0 ]"
 
 echo "== D. the MARKER overrides an opt-out, with no workspace config anywhere =="
@@ -322,7 +322,7 @@ ck "session label resolved" "[ -n \"$SESS2\" ]"
 # could pass on a sandbox that had the tree for some unrelated reason (the
 # default, for one).
 ck "NEGATIVE: no marker + host opt-out => in-container ~/.handoff does NOT exist" \
-   "! docker exec -u \"\$(id -u)\" \"$C2\" test -e /home/claude/.handoff"
+   "! docker exec -u \"\$(id -u)\" \"$C2\" test -e /home/sandy/.handoff"
 
 "$SANDY" --stop --workspace "$WS2" >/dev/null 2>&1
 SBX2="$SANDY_HOME_DIR/sandboxes/$SESS2"
@@ -341,24 +341,24 @@ ck "the host opt-out is STILL in place (the marker won over it, it did not remov
 _m2="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C2" 2>/dev/null)"
 echo "  mounts:"; printf '%s\n' "$_m2" | grep -i handoff | sed 's/^/    /'
 ck "outbox mount is RW=true (marker path)" \
-   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/claude/.handoff/outbox true\$'"
+   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/sandy/.handoff/outbox true\$'"
 ck "inbox mount is RW=false (marker path)" \
-   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/claude/.handoff/inbox false\$'"
+   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/sandy/.handoff/inbox false\$'"
 ck "peer mount is RW=false (marker path)" \
-   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/claude/.handoff/peer false\$'"
+   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/sandy/.handoff/peer false\$'"
 
 # --- criterion 4, under the marker path ---
 ck "write to outbox SUCCEEDS (marker path)" \
-   "docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'echo hi > /home/claude/.handoff/outbox/probe.txt'"
+   "docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'echo hi > /home/sandy/.handoff/outbox/probe.txt'"
 ck "write to inbox FAILS (marker path)" \
-   "! docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'echo hi > /home/claude/.handoff/inbox/probe.txt' 2>/dev/null"
+   "! docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'echo hi > /home/sandy/.handoff/inbox/probe.txt' 2>/dev/null"
 ck "chmod u+w on the inbox dir itself FAILS (EROFS, marker path)" \
-   "! docker exec -u \"\$(id -u)\" \"$C2\" chmod u+w /home/claude/.handoff/inbox 2>/dev/null"
+   "! docker exec -u \"\$(id -u)\" \"$C2\" chmod u+w /home/sandy/.handoff/inbox 2>/dev/null"
 echo "host-placed-in-inbox" > "$SBX2/handoff/inbox/from-host.txt"
 ck "host-placed inbox file IS owned by the agent uid (the premise, marker path)" \
-   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C2\" stat -c '%u' /home/claude/.handoff/inbox/from-host.txt 2>/dev/null)\" = \"\$(id -u)\" ]"
+   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C2\" stat -c '%u' /home/sandy/.handoff/inbox/from-host.txt 2>/dev/null)\" = \"\$(id -u)\" ]"
 ck "chmod u+w on the agent-OWNED host-placed inbox file STILL FAILS (marker path)" \
-   "! docker exec -u \"\$(id -u)\" \"$C2\" chmod u+w /home/claude/.handoff/inbox/from-host.txt 2>/dev/null"
+   "! docker exec -u \"\$(id -u)\" \"$C2\" chmod u+w /home/sandy/.handoff/inbox/from-host.txt 2>/dev/null"
 
 # --- criterion 5: the agent has no path to the marker ---
 # Not "we did not mount it" as a claim, but: no mount SOURCE is the sandbox top
@@ -366,7 +366,7 @@ ck "chmod u+w on the agent-OWNED host-placed inbox file STILL FAILS (marker path
 ck "NEGATIVE: no bind mount sources the sandbox top level (agent cannot self-enrol)" \
    "! docker inspect -f '{{range .Mounts}}{{.Source}}{{\"\n\"}}{{end}}' \"$C2\" 2>/dev/null | grep -qx \"$SBX2\""
 ck "NEGATIVE: the marker is not visible anywhere inside the container" \
-   "! docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'test -e /home/claude/.handoff-enabled -o -e /home/claude/.claude/.handoff-enabled' 2>/dev/null"
+   "! docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'test -e /home/sandy/.handoff-enabled -o -e /home/sandy/.claude/.handoff-enabled' 2>/dev/null"
 
 # --- introspection agrees with reality ---
 ck "--print-state reports handoff_enabled=true for the enrolled sandbox" \
@@ -418,9 +418,9 @@ echo "-- E1. mount + env forwarding --"
 _m3="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C3" 2>/dev/null)"
 echo "  mounts:"; printf '%s\n' "$_m3" | grep -i handoff | sed 's/^/    /'
 ck "relay mount is RW=true" \
-   "printf '%s\n' \"\$_m3\" | grep -qE '^/home/claude/.handoff/relay true\$'"
+   "printf '%s\n' \"\$_m3\" | grep -qE '^/home/sandy/.handoff/relay true\$'"
 ck "peer mount is RW=false alongside the relay" \
-   "printf '%s\n' \"\$_m3\" | grep -qE '^/home/claude/.handoff/peer false\$'"
+   "printf '%s\n' \"\$_m3\" | grep -qE '^/home/sandy/.handoff/peer false\$'"
 # Never dump the whole env -- it carries CLAUDE_CODE_OAUTH_TOKEN and friends.
 # Count occurrences of the one var under test instead of printing anything.
 _envcount="$(docker inspect -f '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' "$C3" 2>/dev/null | grep -c '^SANDY_HANDOFF_RELAY=\.sandy/relay\.sh$')"
@@ -462,18 +462,18 @@ for _i in 1 2 3 4 5 6 7 8; do
 done
 ck "relay came back with a NEW pid after being killed" \
    "[ -n \"$_pid_after\" ] && [ \"$_pid_after\" != \"$_pid_before\" ]"
-_exits="$(docker exec -u "$(id -u)" "$C3" grep -c 'exit rc=' /home/claude/.handoff/relay/supervisor.log 2>/dev/null || echo 0)"
+_exits="$(docker exec -u "$(id -u)" "$C3" grep -c 'exit rc=' /home/sandy/.handoff/relay/supervisor.log 2>/dev/null || echo 0)"
 ck "supervisor.log recorded the exit" "[ \"${_exits:-0}\" -ge 1 ]"
 # The log line is "[sandy-relay] <ISO ts> start <path>", so the timestamp sits
 # between the bracket and the word -- the old '\] start ' pattern required them
 # adjacent and therefore never matched, making this check fail even on a
 # perfectly working restart (which E3s own new-pid assertion had just proved).
-_starts="$(docker exec -u "$(id -u)" "$C3" grep -c ' start /' /home/claude/.handoff/relay/supervisor.log 2>/dev/null || echo 0)"
+_starts="$(docker exec -u "$(id -u)" "$C3" grep -c ' start /' /home/sandy/.handoff/relay/supervisor.log 2>/dev/null || echo 0)"
 ck "supervisor.log shows at least 2 starts (initial + restart)" "[ \"${_starts:-0}\" -ge 2 ]"
 
 echo "-- E4. never started twice --"
 ck "the supervisor lock is HELD (a second flock -n attempt fails)" \
-   "! docker exec -u \"\$(id -u)\" \"$C3\" flock -n /home/claude/.sandy-handoff-relay.lock true"
+   "! docker exec -u \"\$(id -u)\" \"$C3\" flock -n /home/sandy/.sandy-handoff-relay.lock true"
 ck "still exactly one relay process (no second supervisor was spawned)" \
    "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f '\.sandy/relay\.sh' 2>/dev/null)\" = 1 ]"
 
@@ -649,7 +649,7 @@ ck "the slot directory was created host-side (presence carries no information, b
    "[ -d \"$SBX4/relay-bin\" ]"
 _m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C4" 2>/dev/null)"
 ck "docker inspect returned mount rows (premise: the negative below is vacuous against empty output)" \
-   "printf '%s' \"$_m4\" | grep -q '/home/claude'"
+   "printf '%s' \"$_m4\" | grep -q '/home/sandy'"
 ck "...and NOTHING is mounted at /opt/sandy/relay when the slot is empty" \
    "! printf '%s' \"$_m4\" | grep -q '/opt/sandy/relay'"
 "$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1
@@ -670,7 +670,7 @@ ck "the slot is mounted at /opt/sandy/relay" \
 ck "...and docker reports it READ-ONLY (RW=false)" \
    "printf '%s' \"$_m4\" | grep -q '^/opt/sandy/relay false'"
 ck "the relay from the slot actually ran (it wrote the env contract)" \
-   "docker exec \"$C4\" test -s /home/claude/.handoff/relay/slot-seen"
+   "docker exec \"$C4\" test -s /home/sandy/.handoff/relay/slot-seen"
 ck "...as a container-level process, not inside any tmux pane" \
    "docker exec \"$C4\" pgrep -f /opt/sandy/relay/relay >/dev/null"
 
@@ -736,7 +736,7 @@ ck "--start exits 0 with the capability off (SANDY_RELAY=0 is passive-safe: it o
 C4="$(cid4)"
 _m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C4" 2>/dev/null)"
 ck "docker inspect returned mount rows (premise for the negative below)" \
-   "printf '%s' \"$_m4\" | grep -q '/home/claude'"
+   "printf '%s' \"$_m4\" | grep -q '/home/sandy'"
 ck "nothing is mounted at /opt/sandy/relay" \
    "! printf '%s' \"$_m4\" | grep -q '/opt/sandy/relay'"
 ck "no relay process is running" \
