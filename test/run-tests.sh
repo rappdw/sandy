@@ -3505,8 +3505,15 @@ bash "$SANDY_SCRIPT_PATH" --print-schema > "$_SCHEMA_JSON" 2>/dev/null || _SCHEM
 check "--print-schema exits 0" test "$_SCHEMA_RC" -eq 0
 check "--print-schema output is valid JSON" \
     python3 -m json.tool < "$_SCHEMA_JSON"
-check "schema has schema_version=1" \
-    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d[\"schema_version\"]==1" "$1"' \
+# HARDCODED ON PURPOSE, and it stays that way through every future bump. The
+# number is what consumers pin, so changing it must cost a deliberate edit here
+# rather than being absorbed by a test that reads it back out of the source.
+# §93(7) separately asserts the emitted value matches SANDY_SCHEMA_VERSION;
+# this one asserts WHICH number that is. 2 as of 2.0.0 (D11): sandboxes[].features
+# kept its name and changed its source, so a consumer that kept parsing would
+# silently get a different question answered.
+check "schema has schema_version=2" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d[\"schema_version\"]==2" "$1"' \
     -- "$_SCHEMA_JSON"
 check "schema has sandy.version" \
     bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d[\"sandy\"][\"version\"]" "$1"' \
@@ -3558,11 +3565,11 @@ import json,sys
 d=json.load(open(sys.argv[1]))
 assert \".envrc\" in d[\"protected_paths\"][\"files\"]
 " "$1"' -- "$_SCHEMA_JSON"
-check "schema compatibility.supported_schema_versions contains 1" \
+check "schema compatibility.supported_schema_versions contains 2 (sandy emits exactly one schema; it does not offer to speak the old one)" \
     bash -c 'python3 -c "
 import json,sys
 d=json.load(open(sys.argv[1]))
-assert 1 in d[\"compatibility\"][\"supported_schema_versions\"]
+assert 2 in d[\"compatibility\"][\"supported_schema_versions\"]
 " "$1"' -- "$_SCHEMA_JSON"
 
 # --- --print-state ---
@@ -5595,11 +5602,11 @@ DOCKERSHIM
 chmod +x "$_U71_IS_BIN/docker"
 
 _U71_IS_FULL="$(PATH="$_U71_IS_BIN:$PATH" bash "$_SBX_SCRIPT" --print-state 2>/dev/null)"
-check "image_stale (full mode): true for the stale container, false for the current one; schema_version 1 (mutation: swap the comparison, or compare the wrong ids -> true/false flip or both null)" \
+check "image_stale (full mode): true for the stale container, false for the current one; schema_version 2 (mutation: swap the comparison, or compare the wrong ids -> true/false flip or both null)" \
     bash -c 'python3 -c "
 import json, sys
 d = json.loads(sys.argv[1])
-assert d[\"schema_version\"] == 1, d[\"schema_version\"]
+assert d[\"schema_version\"] == 2, d[\"schema_version\"]
 rc = d[\"running_containers\"]
 stale = next(c for c in rc if c[\"sandbox\"] == \"stale-aaa111\")
 curr  = next(c for c in rc if c[\"sandbox\"] == \"curr-bbb222\")

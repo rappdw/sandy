@@ -229,8 +229,8 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
     }
   ],
   "compatibility": {
-    "current_schema_version": 1,
-    "supported_schema_versions": [1],
+    "current_schema_version": 2,
+    "supported_schema_versions": [2],
     "deprecated_schema_versions": []
   }
 }
