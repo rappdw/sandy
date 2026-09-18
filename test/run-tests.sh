@@ -14685,8 +14685,31 @@ check "§134(18) with SANDY_FEATURES_DIR unset nothing is mounted at all, and no
 check "§134(19) SANDY_FEATURES_DIR is PRIVILEGED — it chooses a host path to mount, so a committed workspace config must not set it" \
     bash -c '"$1" --print-schema | tr "," "\n" | grep -q "SANDY_FEATURES_DIR"' _ "$_S134_SANDY"
 
+# --- the PUBLISHED marker rule, because consumers write these markers --------
+# features/ exists so a host-side tool can enrol a sandbox, which means the tool
+# WRITES the marker -- so the predicate is part of the consumer contract, not an
+# implementation detail. SPEC_INTROSPECTION originally described the rejected
+# shapes illustratively ("a symlink, an invalid name, a dotfile") and never
+# stated what is ACCEPTED. The first consumer to write markers read that as "a
+# regular file" and would have refused a DIRECTORY, which sandy honours --
+# producing a sandbox sandy reports as enrolled and the consumer does not. That
+# is precisely the silent disagreement feature_problems exists to prevent, one
+# level up, and it is the same shape as #310: a doc that describes a hazard
+# without stating the part that decides behaviour.
+#
+# (20) pins the case that actually diverged. (21) pins that the rule is stated
+# as a rule at all, so deleting the paragraph and keeping the word "directory"
+# somewhere incidental does not satisfy it.
+_S134_SPEC="$(cd "$(dirname "$0")/.." && pwd)/SPEC_INTROSPECTION.md"
+check "§134(19-pre) SPEC_INTROSPECTION.md was found and carries the features contract (mutation: a rename empties it and the two checks below go vacuous)" \
+    bash -c '[ -f "$1" ] && grep -q "feature_problems" "$1"' _ "$_S134_SPEC"
+check "§134(20) the contract states that a DIRECTORY is a valid marker — the one shape a consumer got wrong, against code that honours it" \
+    bash -c 'grep -q "either a regular file or a directory" "$1"' _ "$_S134_SPEC"
+check "§134(21) ...and states the rule as a rule, not as a list of examples (mutation: drop the marker-rule paragraph and this goes red while §134(20) could still pass on a stray word)" \
+    bash -c 'grep -q "The marker rule, in full" "$1"' _ "$_S134_SPEC"
+
 rm -rf "$_S134_ROOT"
-unset _S134_KEEP _S134_ROOT _S134_SANDY _S134_MARKER _S134_MK_NAME _S134_MK_WS _S134_ENV \
+unset _S134_SPEC _S134_KEEP _S134_ROOT _S134_SANDY _S134_MARKER _S134_MK_NAME _S134_MK_WS _S134_ENV \
       _S134_FSB _S134_SCAN _S134_NAMES _S134_PROBS _S134_EMPTY _S134_M_ON _S134_M_OFF
 
 # BEGIN SUMMARY
