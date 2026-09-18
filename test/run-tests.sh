@@ -14643,17 +14643,28 @@ _s135() {   # $1 = manifest JSON, $2 = slug, $3 = workspace, $4 = agents -> verd
 }
 _S135_OK='"sandboxes":{"include":["*"],"exclude":["scratch-*"]},"agents":{"include":["claude"]}'
 
+# EVERY manifest below is composed into a variable on its own line, from
+# SINGLE-quoted fragments, and the $( ) then contains only "$_S135_M". That is
+# not style. A `\"` inside a $( ) inside a double-quoted word is mishandled by
+# bash 3.2, and the maintainer's macOS run showed exactly what that costs: the
+# checks expecting SELECTED failed outright, while (7)-(9) -- the D5 path-escape
+# checks -- kept PASSING, because mangled JSON is refused too. A security check
+# that cannot distinguish "refused for the right reason" from "refused because
+# the fixture never survived the shell" is worth nothing, and it was green on
+# CI the whole time.
+_s135m() { printf '{%s%s}' "$_S135_OK" "$1"; }   # compose, no escapes anywhere
+
 # --- D2: strict parse or refuse ---------------------------------------------
 check "§135(1) a well-formed manifest loads and selects" \
-    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 "{$_S135_OK}" myrepo-a1b2c3d4 /x/myrepo claude)"
+    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 "$(_s135m '')" myrepo-a1b2c3d4 /x/myrepo claude)"
 check "§135(2) TRUNCATED JSON is refused — never a partial mount" \
     bash -c 'case "$1" in REFUSED:*) exit 0 ;; esac; exit 1' _ "$(_s135 '{"sandboxes":{"inc' s-1 /x claude)"
 check "§135(3) a typo-ed top-level key is REFUSED, not ignored — this is the reserved-namespace decision, and a silently-ignored 'mounts_typo' mounts nothing while looking fine" \
-    bash -c 'case "$1" in REFUSED:*unknown\ top-level\ key*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK,\"mounts_typo\":[]}" s-1 /x claude)"
+    bash -c 'case "$1" in REFUSED:*unknown\ top-level\ key*) exit 0 ;; esac; exit 1' _ "$(_s135 "$(_s135m ',"mounts_typo":[]')" s-1 /x claude)"
 check "§135(4) ...while the ONE reserved key 'feature' is accepted untouched (without this, (3) is satisfied by refusing everything)" \
-    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 "{$_S135_OK,\"feature\":{\"anything\":[1,2]}}" myrepo-a1b2c3d4 /x/myrepo claude)"
+    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 "$(_s135m ',"feature":{"anything":[1,2]}')" myrepo-a1b2c3d4 /x/myrepo claude)"
 check "§135(5) a bad mode is refused" \
-    bash -c 'case "$1" in REFUSED:*mode\ must\ be*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK,\"mounts\":[{\"name\":\"x\",\"from\":\"payload\",\"mode\":\"rwx\"}]}" s-1 /x claude)"
+    bash -c 'case "$1" in REFUSED:*mode\ must\ be*) exit 0 ;; esac; exit 1' _ "$(_s135 "$(_s135m ',"mounts":[{"name":"x","from":"payload","mode":"rwx"}]')" s-1 /x claude)"
 check "§135(6) a symlinked feature.json is refused (sandy never creates one, so it was placed by hand)" \
     bash -c 'rm -f "$2/f/feature.json"; ln -s /etc/passwd "$2/f/feature.json"
              r="$(bash -c "set -uo pipefail; eval \"\$1\"; _sandy_fm_load \"\$2/f\" s || printf REFUSED:%s \"\$_SANDY_FM_ERR\"" _ "$1" "$2" 2>/dev/null)"
@@ -14663,31 +14674,38 @@ check "§135(6) a symlinked feature.json is refused (sandy never creates one, so
 # Each of these would land a mount OUTSIDE ${HOME}/.<feature>/ if the predicate
 # were dropped. Mutation: delete the _sandy_fm_valid_* calls and all six pass
 # as SELECTED, which is the whole of D5 gone.
+# EACH MATCHES ITS OWN REFUSAL REASON, not a bare REFUSED:*. That mattered more
+# than it looks: a mangled fixture is refused too ("not valid JSON"), so the
+# loose form passed on the maintainer's bash 3.2 while the fixture never
+# survived the shell -- four security checks green and inert, on CI too. A
+# check that cannot tell "refused for the right reason" from "refused because
+# the input never arrived" is not a check.
 for _s135_case in \
-    'name-escape:{"name":"../../.ssh","from":"payload"}' \
-    'name-slash:{"name":"a/b","from":"payload"}' \
-    'from-escape:{"name":"x","from":"../../../etc"}' \
-    'from-absolute:{"name":"x","from":"/etc"}' ; do
-    _s135_n="${_s135_case%%:*}"; _s135_m="${_s135_case#*:}"
-    check "§135(7:$_s135_n) refused — the manifest cannot reach outside the feature directory" \
-        bash -c 'case "$1" in REFUSED:*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK,\"mounts\":[$_s135_m]}" s-1 /x claude)"
+    'name-escape|{"name":"../../.ssh","from":"payload"}|not a valid path segment' \
+    'name-slash|{"name":"a/b","from":"payload"}|not a valid path segment' \
+    'from-escape|{"name":"x","from":"../../../etc"}|escapes the feature directory' \
+    'from-absolute|{"name":"x","from":"/etc"}|escapes the feature directory' ; do
+    _s135_n="${_s135_case%%|*}"; _s135_r="${_s135_case##*|}"
+    _s135_m="${_s135_case#*|}"; _s135_m="${_s135_m%|*}"
+    check "§135(7:$_s135_n) refused, and for the RIGHT reason — the manifest cannot reach outside the feature directory (want: $_s135_r)" \
+        bash -c 'case "$1" in *"$2"*) exit 0 ;; esac; exit 1' _ "$(_s135 "$(_s135m ",\"mounts\":[$_s135_m]")" s-1 /x claude)" "$_s135_r"
 done
-check "§135(8) create escaping the feature directory is refused" \
-    bash -c 'case "$1" in REFUSED:*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK,\"create\":[\"../../evil\"]}" s-1 /x claude)"
-check "§135(9) entry escaping the feature directory is refused" \
-    bash -c 'case "$1" in REFUSED:*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK,\"entry\":\"../../../bin/sh\"}" s-1 /x claude)"
+check "§135(8) create escaping the feature directory is refused, naming create" \
+    bash -c 'case "$1" in REFUSED:*create*escapes\ the\ feature\ directory*) exit 0 ;; esac; exit 1' _ "$(_s135 "$(_s135m ',"create":["../../evil"]')" s-1 /x claude)"
+check "§135(9) entry escaping the feature directory is refused, naming entry" \
+    bash -c 'case "$1" in REFUSED:*entry*escapes\ the\ feature\ directory*) exit 0 ;; esac; exit 1' _ "$(_s135 "$(_s135m ',"entry":"../../../bin/sh"')" s-1 /x claude)"
 # The positive controls: without these, (7)-(9) are satisfied by a predicate
 # that refuses every manifest.
 check "§135(10:control) the '.' mount name is ACCEPTED — it means the feature root" \
-    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 "{$_S135_OK,\"mounts\":[{\"name\":\".\",\"from\":\"payload\"}]}" myrepo-a1b2c3d4 /x/myrepo claude)"
+    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 "$(_s135m ',"mounts":[{"name":".","from":"payload"}]')" myrepo-a1b2c3d4 /x/myrepo claude)"
 check "§135(11:control) a from containing \${slug} is ACCEPTED and substituted before validation" \
-    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 "{$_S135_OK,\"mounts\":[{\"name\":\"inbox\",\"from\":\"instances/\${slug}/inbox\"}]}" myrepo-a1b2c3d4 /x/myrepo claude)"
+    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 "$(_s135m ',"mounts":[{"name":"inbox","from":"instances/${slug}/inbox"}]')" myrepo-a1b2c3d4 /x/myrepo claude)"
 
 # --- D4: selection is enrolment ---------------------------------------------
 check "§135(12) a sandbox matched by an exclude glob is NOT selected" \
-    bash -c 'case "$1" in NO:*exclude*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK}" scratch-aaaaaaaa /x/scratch claude)"
+    bash -c 'case "$1" in NO:*exclude*) exit 0 ;; esac; exit 1' _ "$(_s135 "$(_s135m '')" scratch-aaaaaaaa /x/scratch claude)"
 check "§135(13) a sandbox running the wrong agent is NOT selected — applied AT the launch, not from last-launch data" \
-    bash -c 'case "$1" in NO:*agents\ include*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK}" myrepo-a1b2c3d4 /x/myrepo codex)"
+    bash -c 'case "$1" in NO:*agents\ include*) exit 0 ;; esac; exit 1' _ "$(_s135 "$(_s135m '')" myrepo-a1b2c3d4 /x/myrepo codex)"
 check "§135(14) EXCLUDE WINS over include, in the agents block" \
     bash -c 'case "$1" in NO:*exclude*) exit 0 ;; esac; exit 1' _ "$(_s135 '{"sandboxes":{"include":["*"]},"agents":{"include":["*"],"exclude":["codex"]}}' myrepo-a1b2c3d4 /x/myrepo claude,codex)"
 check "§135(15) a manifest with no include in a block selects NOTHING (default-deny, not default-allow)" \
@@ -14704,6 +14722,22 @@ check "§135(18) destinations are COMPUTED under two roots sandy owns — payloa
 check "§135(19) the manifest carries NO destination field — the schema has no 'to', so there is nothing to police (mutation: add one to the projector and this goes red)" \
     bash -c '! printf "%s" "$1" | grep -q "\"to\""' _ "$_S135_BLK"
 
+# --- the schema must not PRECLUDE sandy's own built-ins --------------------
+# docs/design/FEATURE-MANIFEST.md §8 keeps screenshots and skill packs out of
+# scope but promises the schema stays general enough to express them. That
+# promise is only worth something if something fails when it stops being true,
+# so here is the shape a screenshots feature would take: ONE mount with an
+# export, no entry, no create, no instance tree, include ["*"].
+#
+# HONEST SCOPE, because this check is narrower than the sentence it guards:
+# it covers the MOUNT AND EXPORT half only. The /ss surface is also a pair of
+# per-agent command files written container-side (~/.claude/commands/ss.md,
+# ~/.gemini/commands/ss.toml), and the schema has no concept for contributing
+# those -- see the issue linked from §8. A green check here does NOT mean
+# screenshots could be migrated today.
+check "§135(21) a screenshots-SHAPED manifest is valid — one mount with an export, no entry, no create, include [*] (the mount/export half of §8's promise; the agent-side command files are NOT covered)" \
+    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 '{"sandboxes":{"include":["*"]},"agents":{"include":["*"]},"mounts":[{"name":"screenshots","from":"payload","export":"SANDY_SCREENSHOTS_PATH"}]}' anyslug-a1b2c3d4 /x/any claude)"
+
 # --- node/jq PARITY, which is a security property and not ceremony ---------
 # Both projectors must emit byte-identical records for the same manifest. The
 # jq one silently dropped the unknown-top-level-key check on its first draft
@@ -14712,13 +14746,16 @@ check "§135(19) the manifest carries NO destination field — the schema has no
 # to one projector and not the other is caught here.
 if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     _S135_PAR_FAIL=""
+    # Single-quoted literals throughout: no `\"` anywhere in this section, in
+    # a for-list or otherwise. The for-list form is not what bash 3.2 breaks on,
+    # but leaving one instance of the construction behind is how it comes back.
     for _s135_j in \
-        "{$_S135_OK}" \
-        "{$_S135_OK,\"mounts_typo\":[]}" \
-        "{$_S135_OK,\"mounts\":[{\"name\":\"x\",\"from\":\"y\",\"mode\":\"rwx\"}]}" \
-        "{$_S135_OK,\"mounts\":[{\"from\":\"y\"}]}" \
-        "{$_S135_OK,\"mounts\":[{\"name\":\"x\",\"from\":\"y\",\"bogus\":1}]}" \
-        "{$_S135_OK,\"expose\":{\"K\":5}}" \
+        '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]}}' \
+        '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts_typo":[]}' \
+        '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts":[{"name":"x","from":"y","mode":"rwx"}]}' \
+        '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts":[{"from":"y"}]}' \
+        '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts":[{"name":"x","from":"y","bogus":1}]}' \
+        '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"expose":{"K":5}}' \
         '{"sandboxes":{"include":"notalist"},"agents":{"include":["*"]}}' \
         '{"sandboxes":{"include":["*"]}}' \
         '[1,2,3]' ; do
