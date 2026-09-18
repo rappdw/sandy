@@ -738,6 +738,20 @@ if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
   process.stdout.write("ERR\ttop level is not an object\n"); process.exit(0);
 }
 const KNOWN = ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature"];
+// #322: sandy owns the SANDY_ prefix. Manifest exports are appended to the
+// docker `-e` list AFTER sandy's own, and -e is last-wins, so an unfiltered
+// name could shadow SANDY_HANDOFF_RELAY and make the container environment and
+// the attestation marker disagree. SANDY_EXTRA_ENV already refuses these names
+// for exactly that reason; the manifest simply had no equivalent. Blanket
+// prefix, not a list of the ones sandy sets today: an enumeration only rejects
+// what its author anticipated.
+// #324: a newline or tab in a value FORGES RECORDS. The reader parses this
+// stream line by line, so a value carrying "\nentry\t/path" yields an `entry`
+// record no manifest key declared -- in no key, past every validation, absent
+// from the manifest a reviewer reads. Refuse rather than sanitize: stripping
+// would silently change an operator's declared value.
+const ENVNAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const CTRL = /[\n\r\t]/;
 for (const k of Object.keys(doc)) if (!KNOWN.includes(k)) err("unknown top-level key: " + k);
 const strArr = (v, what) => {
   if (v === undefined) return [];
@@ -768,6 +782,8 @@ if (doc.mounts !== undefined) {
     if (mode !== "ro" && mode !== "rw") { err("mount " + m.name + ": mode must be ro or rw"); continue; }
     const exp = m.export === undefined ? "" : m.export;
     if (typeof exp !== "string") { err("mount " + m.name + ": export is not a string"); continue; }
+    if (exp !== "" && !ENVNAME.test(exp)) { err("mount " + m.name + ": export '" + exp + "' is not a valid environment variable name"); continue; }
+    if (exp.indexOf("SANDY_") === 0) { err("mount " + m.name + ": export " + exp + " is reserved (sandy owns the SANDY_ prefix)"); continue; }
     OUT.push("mount\t" + m.name + "\t" + m.from + "\t" + mode + "\t" + exp);
   }
 }
@@ -779,6 +795,9 @@ if (doc.expose !== undefined) {
   if (doc.expose === null || typeof doc.expose !== "object" || Array.isArray(doc.expose)) err("expose is not an object");
   else for (const [k, v] of Object.entries(doc.expose)) {
     if (typeof v !== "string") { err("expose " + k + ": value is not a string"); continue; }
+    if (!ENVNAME.test(k)) { err("expose " + k + ": name is not a valid environment variable name"); continue; }
+    if (k.indexOf("SANDY_") === 0) { err("expose " + k + ": name is reserved (sandy owns the SANDY_ prefix)"); continue; }
+    if (CTRL.test(v)) { err("expose " + k + ": value contains a newline, carriage return or tab (the record stream is line-oriented)"); continue; }
     OUT.push("expose\t" + k + "\t" + v);
   }
 }
@@ -812,6 +831,8 @@ def mountline:
     elif ((.from|type) != "string") or (.from == "") then $unk + ["ERR\tmount \(.name): from missing or not a string"]
     elif ((.mode // "ro") | . != "ro" and . != "rw") then $unk + ["ERR\tmount \(.name): mode must be ro or rw"]
     elif ((.export // "") | type) != "string" then $unk + ["ERR\tmount \(.name): export is not a string"]
+    elif ((.export // "") != "") and ((.export // "") | test("^[A-Za-z_][A-Za-z0-9_]*$") | not) then $unk + ["ERR\tmount \(.name): export '\(.export)' is not a valid environment variable name"]
+    elif ((.export // "") | startswith("SANDY_")) then $unk + ["ERR\tmount \(.name): export \(.export) is reserved (sandy owns the SANDY_ prefix)"]
     else $unk + ["mount\t\(.name)\t\(.from)\t\(.mode // "ro")\t\(.export // "")"] end
   end;
 if type != "object" then "ERR\ttop level is not an object"
@@ -829,6 +850,12 @@ else
      elif (.expose|type) != "object" then ["ERR\texpose is not an object"]
      else [.expose | to_entries[] | if (.value|type) != "string"
              then "ERR\texpose \(.key): value is not a string"
+             elif (.key | test("^[A-Za-z_][A-Za-z0-9_]*$") | not)
+             then "ERR\texpose \(.key): name is not a valid environment variable name"
+             elif (.key | startswith("SANDY_"))
+             then "ERR\texpose \(.key): name is reserved (sandy owns the SANDY_ prefix)"
+             elif (.value | test("[\n\r\t]"))
+             then "ERR\texpose \(.key): value contains a newline, carriage return or tab (the record stream is line-oriented)"
              else "expose\t\(.key)\t\(.value)" end] end)
   | .[]
 end

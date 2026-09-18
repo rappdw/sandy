@@ -14836,8 +14836,18 @@ check "§135(19) the manifest carries NO destination field — the schema has no
 # ~/.gemini/commands/ss.toml), and the schema has no concept for contributing
 # those -- see the issue linked from §8. A green check here does NOT mean
 # screenshots could be migrated today.
-check "§135(21) a screenshots-SHAPED manifest is valid — one mount with an export, no entry, no create, include [*] (the mount/export half of §8's promise; the agent-side command files are NOT covered)" \
-    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 '{"sandboxes":{"include":["*"]},"agents":{"include":["*"]},"mounts":[{"name":"screenshots","from":"payload","export":"SANDY_SCREENSHOTS_PATH"}]}' anyslug-a1b2c3d4 /x/any claude)"
+# A SECOND SCOPE LIMIT, added when #322 landed. This fixture used to export
+# SANDY_SCREENSHOTS_PATH -- the name screenshots publishes today -- and #322's
+# refusal of the whole SANDY_ prefix now rejects it. That is not a stale
+# fixture, it is a real collision: a feature cannot declare the variable
+# screenshots already publishes, so migrating it needs a decision (rename the
+# published variable, or give sandy a way to distinguish a feature PROVIDING a
+# SANDY_ name from one SHADOWING it). Recorded on #317. The fixture uses a
+# neutral name because the SHAPE is what this check is about -- one mount with
+# an export -- and keeping a SANDY_ name here would only assert that #322 is
+# broken.
+check "§135(21) a screenshots-SHAPED manifest is valid — one mount with an export, no entry, no create, include [*] (the mount/export half of §8's promise; the agent-side command files are NOT covered, and since #322 the published SANDY_SCREENSHOTS_PATH name is not declarable — see #317)" \
+    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 '{"sandboxes":{"include":["*"]},"agents":{"include":["*"]},"mounts":[{"name":"screenshots","from":"payload","export":"SCREENSHOTS_PATH"}]}' anyslug-a1b2c3d4 /x/any claude)"
 
 # --- node/jq PARITY, which is a security property and not ceremony ---------
 # Both projectors must emit byte-identical records for the same manifest. The
@@ -15473,6 +15483,140 @@ check "§140(11) --exec's HOME fallback is the new home — docker only derives 
     bash -c 'grep -qF "_ex_home=\"/home/sandy\"" "$1"' _ "$_S140_SANDY"
 
 unset _S140_SANDY
+
+# ============================================================
+echo ""
+echo "§143: #322/#324 — an export name cannot shadow SANDY_, a value cannot forge records"
+# ============================================================
+# TWO REFUSALS IN ONE PLACE because they are one validation: what a manifest
+# may put in the export/expose channel.
+#
+# #322 -- sandy owns the SANDY_ prefix. Manifest exports are appended to the
+# docker `-e` list AFTER sandy's own, and -e is last-wins, so an unfiltered
+# name could shadow SANDY_HANDOFF_RELAY and make the container environment and
+# the attestation marker disagree about where the relay is. SANDY_EXTRA_ENV
+# already refuses these names for exactly that reason (sandy:8671); the
+# manifest simply had no equivalent.
+#
+# #324 -- THIS IS THE ONE WORTH READING. A newline in a value does not merely
+# make a malformed value; it FORGES RECORDS. The reader parses this stream line
+# by line, so a value carrying a newline followed by `entry<TAB>/path` yields an
+# `entry` record that no manifest key declared -- in no key, past every
+# validation, absent from the manifest a reviewer reads. Demonstrated live
+# before the fix: the forged record appeared in the stream.
+#
+# Not a privilege escalation (a manifest lives in $SANDY_HOME and can declare
+# `entry` outright), which is why it is a refusal rather than a security fix.
+# What it buys an attacker is INVISIBILITY, and what it costs an operator is a
+# pasted trailing newline silently changing a mount decision.
+#
+# THE ASSERTION IS THAT THE FORGED RECORD IS ABSENT, not that the value was
+# rejected. Those are different claims and only the second one matters.
+_S143_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S143_SANDY="$SANDY_SCRIPT"
+mkdir -p "$_S143_DIR/f"
+_S143_BLK="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Computed mount destinations/' "$_S143_SANDY")
+$(awk '/^_sandy_fm_dest\(\) \{/,/^\}/' "$_S143_SANDY")
+_SANDY_FM_HOME=\"\${_SANDY_FM_HOME:-/home/sandy}\""
+check "§143(pre) the manifest block was extracted and parses (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_fm_load" && printf "%s\n" "$1" | bash -n' _ "$_S143_BLK"
+
+# Returns REFUSED:<reason>, or the emitted record stream on success.
+_s143() {
+    printf '%s' "$1" > "$_S143_DIR/f/feature.json"
+    bash -c '
+        set -uo pipefail
+        eval "$1"
+        if ! _sandy_fm_load "$2/f" box-11111111; then printf "REFUSED:%s" "$_SANDY_FM_ERR"; exit 0; fi
+        for _e in ${_SANDY_FM_EXPOSE[@]+"${_SANDY_FM_EXPOSE[@]}"}; do printf "expose|%s\n" "$_e"; done
+        printf "entrykey|%s\n" "${_SANDY_FM_ENTRY:-<none>}"
+    ' _ "$_S143_BLK" "$_S143_DIR" 2>/dev/null || true
+}
+_S143_SEL='"sandboxes":{"include":["*"]},"agents":{"include":["claude"]}'
+
+# Composed from SINGLE-quoted fragments on their own lines -- a `\"` inside a
+# $( ) inside a double-quoted word is mishandled by bash 3.2, which cost §135 a
+# whole macOS run.
+_S143_M='{'"$_S143_SEL"',"expose":{"SANDY_HANDOFF_RELAY":"/opt/evil"}}'
+_S143_R="$(_s143 "$_S143_M")"
+check "§143(1) #322: an expose NAME under the SANDY_ prefix is REFUSED by name" \
+    bash -c 'printf "%s" "$1" | grep -q "^REFUSED:expose SANDY_HANDOFF_RELAY: name is reserved"' _ "$_S143_R"
+
+_S143_M='{'"$_S143_SEL"',"mounts":[{"name":"p","from":"p","export":"SANDY_FOO"}]}'
+_S143_R="$(_s143 "$_S143_M")"
+check "§143(2) #322: a MOUNT export name under the SANDY_ prefix is refused too (the channel is the same; only the spelling differs)" \
+    bash -c 'printf "%s" "$1" | grep -q "^REFUSED:mount p: export SANDY_FOO is reserved"' _ "$_S143_R"
+
+_S143_M='{'"$_S143_SEL"',"expose":{"9BAD-NAME":"x"}}'
+_S143_R="$(_s143 "$_S143_M")"
+check "§143(3) a name that is not a legal environment identifier is refused (SANDY_EXTRA_ENV has always required this of its names; the manifest required nothing)" \
+    bash -c 'printf "%s" "$1" | grep -q "^REFUSED:expose 9BAD-NAME: name is not a valid"' _ "$_S143_R"
+
+# The forgery fixture is built with python so the newline and tab are REAL
+# control characters in the JSON string, not backslash sequences a shell might
+# leave literal -- the whole point is what the reader does with a real newline.
+# THE FORGED PAYLOAD IS A *VALID-LOOKING* RELATIVE PATH, and that detail is
+# the whole test. The first version forged `entry<TAB>/opt/sandy/features/x/evil`
+# and the check passed with the fix REVERTED -- not because nothing was forged,
+# but because the loader's own entry-path validation rejected the absolute path
+# downstream. The guard was measuring an unrelated defence.
+#
+# Measured with the refusal removed: a forged record whose payload would pass
+# the same validation a DECLARED record passes is accepted, for all three
+# record types --
+#   entry<TAB>payload/evil       -> ACCEPTED, _SANDY_FM_ENTRY=payload/evil
+#   mount<TAB>secret<TAB>payload<TAB>rw -> ACCEPTED, one mount
+#   create<TAB>instances/x       -> ACCEPTED, one create
+# -- so the forgery is bounded by the same rules as a declaration, which is
+# narrower than "arbitrary records" and still worth refusing: the record is in
+# no key and absent from the manifest a reviewer reads.
+python3 - "$_S143_DIR/forge.json" <<'S143_PY'
+import json, sys
+json.dump({"sandboxes": {"include": ["*"]}, "agents": {"include": ["claude"]},
+           "expose": {"AMAP_X": "home.example\nentry\tpayload/evil"}},
+          open(sys.argv[1], "w"))
+S143_PY
+_S143_R="$(_s143 "$(cat "$_S143_DIR/forge.json")")"
+check "§143(4) #324: a value carrying a newline is REFUSED, naming the record stream as the reason" \
+    bash -c 'printf "%s" "$1" | grep -q "^REFUSED:expose AMAP_X: value contains a newline"' _ "$_S143_R"
+check "§143(5) #324 THE PROPERTY: NO forged entry reaches the reader. 'The value was rejected' and 'the forged record is absent' are different claims and only this one matters — and the payload must be one the loader would otherwise ACCEPT, or the check measures a different defence (it did, on the first attempt)" \
+    bash -c '! printf "%s" "$1" | grep -q "entrykey|payload/evil"' _ "$_S143_R"
+
+# NEGATIVE CONTROL: the refusals must not eat legitimate manifests. Without
+# this, deleting the whole expose branch would pass (1)-(5) by refusing
+# everything, which is the shape of a guard that looks strict and is broken.
+_S143_M='{'"$_S143_SEL"',"expose":{"AMAP_FLEET_DOMAIN":"home.fleet.example  (spaced & punctuated!)"},"mounts":[{"name":"p","from":"p","export":"AMAP_PAYLOAD_DIR"}]}'
+_S143_R="$(_s143 "$_S143_M")"
+check "§143(6) NEGATIVE CONTROL: a legitimate name and an awkward-but-legal value still pass, verbatim (mutation: over-broad refusals redden this while (1)-(5) stay green)" \
+    bash -c 'printf "%s" "$1" | grep -q "^expose|AMAP_FLEET_DOMAIN	home.fleet.example  (spaced & punctuated!)$"' _ "$_S143_R"
+
+# PARITY. The jq projector silently dropped the unknown-key check on its first
+# draft, so a typo would have been ignored on a jq-only host. §135(20) diffs the
+# two across its corpus; these four cases are new surface and get the same
+# treatment, run through BOTH projectors directly.
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    awk '/^_sandy_fm_projector_js\(\) \{$/{f=1;next} f&&/^SANDY_FM_JS$/{exit} f&&!/^cat <</{print}' "$_S143_SANDY" > "$_S143_DIR/p.js"
+    awk '/^_sandy_fm_projector_jq\(\) \{$/{f=1;next} f&&/^SANDY_FM_JQ$/{exit} f&&!/^cat <</{print}' "$_S143_SANDY" > "$_S143_DIR/p.jq"
+    printf '%s' '{'"$_S143_SEL"',"expose":{"SANDY_HANDOFF_RELAY":"/opt/evil"}}' > "$_S143_DIR/c1.json"
+    printf '%s' '{'"$_S143_SEL"',"mounts":[{"name":"p","from":"p","export":"SANDY_FOO"}]}' > "$_S143_DIR/c2.json"
+    printf '%s' '{'"$_S143_SEL"',"expose":{"9BAD-NAME":"x"}}' > "$_S143_DIR/c3.json"
+    cp "$_S143_DIR/forge.json" "$_S143_DIR/c4.json"
+    _S143_PAR=ok
+    for _s143_c in c1 c2 c3 c4; do
+        _s143_j="$(node "$_S143_DIR/p.js" "$_S143_DIR/$_s143_c.json" 2>&1 || true)"
+        _s143_q="$(jq -r -f "$_S143_DIR/p.jq" "$_S143_DIR/$_s143_c.json" 2>&1 || true)"
+        [ "$_s143_j" = "$_s143_q" ] || _S143_PAR="diff-at-$_s143_c"
+        printf '%s' "$_s143_j" | grep -q '^ERR' || _S143_PAR="no-refusal-at-$_s143_c"
+    done
+    check "§143(7) PARITY: node and jq refuse all four identically, byte for byte — a jq-only host must not wave through what node rejects (the jq projector dropped a check exactly this way once)" \
+        bash -c 'test "$1" = ok' _ "$_S143_PAR"
+    unset _s143_c _s143_j _s143_q _S143_PAR
+else
+    skip "§143(7) parity needs both node and jq on the host"
+fi
+
+rm -rf "$_S143_DIR"
+unset _S143_DIR _S143_SANDY _S143_BLK _S143_SEL _S143_M _S143_R
 
 # ============================================================
 echo ""
