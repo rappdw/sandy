@@ -15290,6 +15290,14 @@ printf '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts":
     > "$_S137_SIB/amap/feature.json"
 printf '{"graph":"the router spelling, unknown to sandy"}' > "$_S137_SIB/amap/router.json"
 printf 'a stray file at the features ROOT\n' > "$_S137_SIB/loose-file.txt"
+# A consumer stashes a daemon's ledger at features/<f>/migration/<slug>/ across
+# a reset, so the unknown-sibling rule has to hold for a DIRECTORY TREE and not
+# only a file. Same code path, but (19)/(19b) asserted only the file, and
+# "measured once" is what this block exists to stop being good enough.
+mkdir -p "$_S137_SIB/amap/migration/box-11111111/connector/delivery-state"
+printf 'ledger row\n' > "$_S137_SIB/amap/migration/box-11111111/connector/delivery-state/ledger.jsonl"
+_S137_SIB_TREE="$(cd "$_S137_SIB/amap/migration" && find . | sort | tr '\n' ' ')"
+_S137_SIB_LSUM="$(cksum < "$_S137_SIB/amap/migration/box-11111111/connector/delivery-state/ledger.jsonl")"
 _S137_SIB_SUM="$(cksum < "$_S137_SIB/amap/router.json")"
 _S137_SIB_OUT="$(bash -c 'set -uo pipefail; eval "$1"
     _SANDY_FM_HOME=/home/sandy
@@ -15302,6 +15310,40 @@ check "§137(19) a feature dir carrying an unknown regular file still applies, e
              ! printf "%s\n" "$1" | grep -q "router.json"' _ "$_S137_SIB_OUT"
 check "§137(19b) ...and the unknown sibling is left BYTE-IDENTICAL — sandy reads feature.json and the sources its mounts name, nothing else in that directory" \
     bash -c 'test "$(cksum < "$1/amap/router.json")" = "$2"' _ "$_S137_SIB" "$_S137_SIB_SUM"
+# Two claims, and the second is the one the consumer depends on. "Unmodified"
+# alone is weakly falsifiable -- nothing writes there today, so it guards a
+# future sweep rather than a present bug. "NOT A MOUNT SOURCE" is the live
+# property: the stash must never become one, because that would put another
+# sandbox's delivery ledger inside a container. The descend mutation reddens
+# (19) on the record COUNT and this on the SOURCE, which is what makes it a
+# check rather than a restatement of (19).
+check "§137(19c) an unknown DIRECTORY TREE inside a feature dir is NEVER a mount source, and is left unmodified — the walk is one level and never descends (mutation: make it descend and this goes red alongside (19))" \
+    bash -c '! printf "%s\n" "$4" | grep -q "migration" &&
+             test "$(cd "$1/amap/migration" && find . | sort | tr "\n" " ")" = "$2" &&
+             test "$(cksum < "$1/amap/migration/box-11111111/connector/delivery-state/ledger.jsonl")" = "$3"' \
+        _ "$_S137_SIB" "$_S137_SIB_TREE" "$_S137_SIB_LSUM" "$_S137_SIB_OUT"
+
+# THE SHARP EDGE NEXT DOOR, pinned because a consumer's tooling writes into
+# $SANDY_HOME/features/ and a near-miss there is not a near-miss. A directory
+# at the features ROOT is not "unknown" -- it is a CANDIDATE FEATURE:
+#   flat, no feature.json   -> mounted into every selected sandbox (D10, the
+#                              1.15.0-compat path)
+#   nested, no feature.json -> HARD ERROR that fails every launch on the host
+# So features/amap/migration/ is safe and features/amap-migration/ would take
+# the host down. One character apart. This asserts the error, so that if the
+# D10 path is ever relaxed into a silent skip it is a deliberate act.
+_S137_ROOTD="$_S137_DIR/rootd"; mkdir -p "$_S137_ROOTD/amap/payload" "$_S137_ROOTD/stray-dir/box-1/connector"
+: > "$_S137_ROOTD/amap/payload/relay"
+printf '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts":[{"name":"payload","from":"payload"}]}' \
+    > "$_S137_ROOTD/amap/feature.json"
+_S137_ROOTD_RC=0
+_S137_ROOTD_OUT="$(bash -c 'set -uo pipefail; eval "$1"
+    _SANDY_FM_HOME=/home/sandy
+    _sandy_fm_apply "$2" box-11111111 /x/ws claude 0' _ "$_S137_BLK
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$SANDY_SCRIPT")" "$_S137_ROOTD" 2>/dev/null)" || _S137_ROOTD_RC=$?
+check "§137(19d) a NESTED directory at the features ROOT is a hard error, not a silent skip — it is a candidate feature, and a whole-directory mount there would expose every other sandbox's instance tree" \
+    bash -c 'test "$2" -ne 0 && printf "%s\n" "$1" | grep -q "^err	stray-dir	has subdirectories but no feature.json"' \
+        _ "$_S137_ROOTD_OUT" "$_S137_ROOTD_RC"
 
 # The claim is "no PARSER needed", not "no coreutils needed" -- forget is an
 # unlink and still needs rm. So the fixture hides node and jq specifically,
