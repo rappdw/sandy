@@ -15036,6 +15036,63 @@ want = open(sys.argv[2]).read()
 got = d[\"not_selected\"][0][\"why\"]
 sys.exit(0 if got == want else 1)
 " "$1/selected.json" "$1/expected"' _ "$_S137_ESC"
+# --- selected.json is a PUBLISHED CONSUMER CONTRACT (2.0.0) ------------------
+# A downstream fleet tool pins this file's shape as the membership its provision,
+# render and bringup steps act on. Its maintainer asked to be told before the
+# shape or the write moments move, and a promise to remember is not a mechanism
+# -- so the shape is pinned HERE, where a change to it fails the suite and the
+# person making the change learns they owe a notification.
+#
+# §137(2)/(3)/(4)/(6) pin VALUES, which a silently ADDED or RENAMED key passes
+# straight through. These pin the KEY SETS, exactly, so it cannot.
+check "§137(8) the top-level key set is EXACTLY {schema, note, selected, not_selected} — a consumer pins this; adding or renaming a key here is a contract change that owes them a heads-up" \
+    bash -c 'python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if sorted(d) == [\"not_selected\",\"note\",\"schema\",\"selected\"] else 1)
+" "$1"' _ "$_S137_JSON"
+check "§137(9) a SELECTED entry is exactly {slug, at} and a NOT_SELECTED entry exactly {slug, why, at} — the asymmetry is the contract: why exists only where there is one" \
+    bash -c 'python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+ok = all(sorted(e) == [\"at\",\"slug\"] for e in d[\"selected\"]) and len(d[\"selected\"]) > 0
+ok = ok and all(sorted(e) == [\"at\",\"slug\",\"why\"] for e in d[\"not_selected\"]) and len(d[\"not_selected\"]) > 0
+sys.exit(0 if ok else 1)
+" "$1"' _ "$_S137_JSON"
+check "§137(10) schema is 1 — it versions this file independently of --print-state's schema_version, so moving it is the signal a consumer watches" \
+    bash -c 'python3 -c "
+import json,sys
+sys.exit(0 if json.load(open(sys.argv[1]))[\"schema\"] == 1 else 1)
+" "$1"' _ "$_S137_JSON"
+# THE SECOND WRITE MOMENT. Removal must RE-RENDER, not merely unlink the
+# per-slug file: a selected.json still naming a removed sandbox is a fleet tool
+# provisioning a member that no longer exists, with every other check green.
+# Forgetting without rendering passes §137(7) and fails here, which is the
+# split worth having.
+_S137_RM="$_S137_DIR/rm"; mkdir -p "$_S137_RM"
+bash -c 'set -uo pipefail; eval "$1"
+    _sandy_fm_record "$2" keep-1 ""
+    _sandy_fm_record "$2" drop-1 ""
+    _sandy_fm_render_selected "$2"
+    _sandy_fm_forget "$2" drop-1
+    _sandy_fm_render_selected "$2"' _ "$_S137_BLK" "$_S137_RM" 2>/dev/null || true
+check "§137(11) REMOVAL re-renders selected.json — a forgotten slug is gone from the rendered file, not just from .selected/ (mutation: drop the render call after _sandy_fm_forget and this goes red while (7) still passes)" \
+    bash -c 'python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1]))
+names = [e[\"slug\"] for e in d[\"selected\"]] + [e[\"slug\"] for e in d[\"not_selected\"]]
+sys.exit(0 if \"keep-1\" in names and \"drop-1\" not in names else 1)
+" "$1/selected.json"' _ "$_S137_RM"
+# The first cut of this check was an awk RANGE, /_sandy_fm_forget/ to
+# /_sandy_fm_render_selected/, and it was VACUOUS: delete the render call and
+# the range never closes, so awk runs to EOF and matches the function
+# DEFINITION further down the file. It passed against the exact mutation it
+# existed to catch. Anchor on the call site instead -- the two lines after the
+# forget must contain the render -- so a deleted call leaves `done`/`unset`
+# there and nothing matches.
+check "§137(12) --remove-sandbox actually CALLS the render right after forgetting — (11) proves the helpers compose, this proves the CALLER uses them that way (mutation: delete that one line and this is the only check that goes red)" \
+    bash -c 'grep -A2 "_sandy_fm_forget \"\$_rms_ft_real\"" "$1" | grep -q "_sandy_fm_render_selected"' _ "$SANDY_SCRIPT"
+
 # The claim is "no PARSER needed", not "no coreutils needed" -- forget is an
 # unlink and still needs rm. So the fixture hides node and jq specifically,
 # with a bin directory holding only what a plain unlink uses, and ASSERTS
