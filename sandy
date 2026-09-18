@@ -769,6 +769,297 @@ _sandy_features_scan() {
     _SANDY_FEAT_LIST="$_fs_list"
 }
 
+# --- Feature manifest (2.0.0) — docs/design/FEATURE-MANIFEST.md -------------
+# D2: STRICT PARSE OR REFUSE. This document decides what gets bind-mounted, so
+# there is no best-effort path: no parser, no manifest, no partial mount. It
+# deliberately does NOT reuse json_merge, which opens
+#   command -v node &>/dev/null || return 0
+# and silently does nothing. That shape must never reach a mount decision.
+#
+# Sandy never parses JSON itself. node or jq PROJECTS the manifest to flat
+# TAB-separated records and bash reads those. The two projectors are held to
+# byte-identical output by a parity guard, because a divergence is a security
+# bug: the jq projector silently dropped the unknown-top-level-key check on
+# its first draft -- the very check that makes a typo-ed "mounts" refuse
+# instead of mounting nothing.
+#
+# Each projector lives in its own function so its heredoc is never inside a
+# $( ) span: bash 3.2 does not skip comments when scanning a command
+# substitution (see APOSCS/CASESUB in test/lint-bash32.sh).
+_sandy_fm_projector_js() {
+cat <<'SANDY_FM_JS'
+// Projector: JSON manifest -> flat TAB-separated lines bash can read exactly.
+// Emits ERR lines for anything structurally wrong; the caller refuses on any.
+const fs = require("fs");
+const OUT = [];
+const err = m => OUT.push("ERR\t" + m);
+let doc;
+try { doc = JSON.parse(fs.readFileSync(process.argv[2], "utf8")); }
+catch (e) { process.stdout.write("ERR\tnot valid JSON: " + e.message + "\n"); process.exit(0); }
+if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
+  process.stdout.write("ERR\ttop level is not an object\n"); process.exit(0);
+}
+const KNOWN = ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature"];
+for (const k of Object.keys(doc)) if (!KNOWN.includes(k)) err("unknown top-level key: " + k);
+const strArr = (v, what) => {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) { err(what + " is not an array"); return null; }
+  for (const x of v) if (typeof x !== "string") { err(what + " contains a non-string"); return null; }
+  return v;
+};
+for (const block of ["sandboxes", "agents"]) {
+  const b = doc[block];
+  if (b === undefined) { err("missing required block: " + block); continue; }
+  if (b === null || typeof b !== "object" || Array.isArray(b)) { err(block + " is not an object"); continue; }
+  for (const k of Object.keys(b)) if (k !== "include" && k !== "exclude") err(block + ": unknown key " + k);
+  const inc = strArr(b.include, block + ".include");
+  const exc = strArr(b.exclude, block + ".exclude");
+  if (inc !== null) for (const p of inc) OUT.push("select\t" + block + "\tinclude\t" + p);
+  if (exc !== null) for (const p of exc) OUT.push("select\t" + block + "\texclude\t" + p);
+}
+const cr = strArr(doc.create, "create");
+if (cr) for (const p of cr) OUT.push("create\t" + p);
+if (doc.mounts !== undefined) {
+  if (!Array.isArray(doc.mounts)) err("mounts is not an array");
+  else for (const m of doc.mounts) {
+    if (m === null || typeof m !== "object" || Array.isArray(m)) { err("a mount is not an object"); continue; }
+    for (const k of Object.keys(m)) if (!["name", "from", "mode", "export"].includes(k)) err("mount: unknown key " + k);
+    if (typeof m.name !== "string" || m.name === "") { err("mount: name missing or not a string"); continue; }
+    if (typeof m.from !== "string" || m.from === "") { err("mount " + m.name + ": from missing or not a string"); continue; }
+    const mode = m.mode === undefined ? "ro" : m.mode;
+    if (mode !== "ro" && mode !== "rw") { err("mount " + m.name + ": mode must be ro or rw"); continue; }
+    const exp = m.export === undefined ? "" : m.export;
+    if (typeof exp !== "string") { err("mount " + m.name + ": export is not a string"); continue; }
+    OUT.push("mount\t" + m.name + "\t" + m.from + "\t" + mode + "\t" + exp);
+  }
+}
+if (doc.entry !== undefined) {
+  if (typeof doc.entry !== "string" || doc.entry === "") err("entry is not a non-empty string");
+  else OUT.push("entry\t" + doc.entry);
+}
+if (doc.expose !== undefined) {
+  if (doc.expose === null || typeof doc.expose !== "object" || Array.isArray(doc.expose)) err("expose is not an object");
+  else for (const [k, v] of Object.entries(doc.expose)) {
+    if (typeof v !== "string") { err("expose " + k + ": value is not a string"); continue; }
+    OUT.push("expose\t" + k + "\t" + v);
+  }
+}
+process.stdout.write(OUT.join("\n") + (OUT.length ? "\n" : ""));
+SANDY_FM_JS
+}
+_sandy_fm_projector_jq() {
+cat <<'SANDY_FM_JQ'
+def known: ["schema","sandboxes","agents","create","mounts","entry","expose","feature"];
+def strarr($v; $what):
+  if $v == null then []
+  elif ($v|type) != "array" then ["ERR\t\($what) is not an array"]
+  elif ([$v[] | select(type != "string")] | length) > 0 then ["ERR\t\($what) contains a non-string"]
+  else $v end;
+def block($name):
+  .[$name] as $b
+  | if $b == null then ["ERR\tmissing required block: \($name)"]
+    elif ($b|type) != "object" then ["ERR\t\($name) is not an object"]
+    else ([$b | keys_unsorted[] | select(. != "include" and . != "exclude")
+             | "ERR\t\($name): unknown key \(.)"])
+       + (strarr($b.include; "\($name).include")
+          | if (.[0]? // "") | startswith("ERR\t") then . else [.[] | "select\t\($name)\tinclude\t\(.)"] end)
+       + (strarr($b.exclude; "\($name).exclude")
+          | if (.[0]? // "") | startswith("ERR\t") then . else [.[] | "select\t\($name)\texclude\t\(.)"] end)
+    end;
+def mountline:
+  if (type) != "object" then ["ERR\ta mount is not an object"]
+  else ([keys_unsorted[] | select(. != "name" and . != "from" and . != "mode" and . != "export")
+          | "ERR\tmount: unknown key \(.)"]) as $unk
+  | if ((.name|type) != "string") or (.name == "") then $unk + ["ERR\tmount: name missing or not a string"]
+    elif ((.from|type) != "string") or (.from == "") then $unk + ["ERR\tmount \(.name): from missing or not a string"]
+    elif ((.mode // "ro") | . != "ro" and . != "rw") then $unk + ["ERR\tmount \(.name): mode must be ro or rw"]
+    elif ((.export // "") | type) != "string" then $unk + ["ERR\tmount \(.name): export is not a string"]
+    else $unk + ["mount\t\(.name)\t\(.from)\t\(.mode // "ro")\t\(.export // "")"] end
+  end;
+if type != "object" then "ERR\ttop level is not an object"
+else
+  ([keys_unsorted[] as $k | select((known | index($k)) == null) | "ERR\tunknown top-level key: \($k)"])
+  + block("sandboxes") + block("agents")
+  + (strarr(.create; "create") | if (.[0]? // "") | startswith("ERR\t") then . else [.[] | "create\t\(.)"] end)
+  + (if .mounts == null then []
+     elif (.mounts|type) != "array" then ["ERR\tmounts is not an array"]
+     else [.mounts[] | mountline] | add // [] end)
+  + (if .entry == null then []
+     elif ((.entry|type) != "string") or (.entry == "") then ["ERR\tentry is not a non-empty string"]
+     else ["entry\t\(.entry)"] end)
+  + (if .expose == null then []
+     elif (.expose|type) != "object" then ["ERR\texpose is not an object"]
+     else [.expose | to_entries[] | if (.value|type) != "string"
+             then "ERR\texpose \(.key): value is not a string"
+             else "expose\t\(.key)\t\(.value)" end] end)
+  | .[]
+end
+SANDY_FM_JQ
+}
+_sandy_fm_valid_segment() {
+    # D5: the published feature-marker predicate (SPEC_INTROSPECTION, §134),
+    # verbatim. A computed root is only a root if its components cannot escape
+    # it -- without this, name "../../.ssh" lands outside ${HOME}/.<feature>/.
+    case "$1" in
+        ""|.*|*..*|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    return 0
+}
+_sandy_fm_valid_relpath() {
+    # Every segment of a `from` path, same predicate. `${slug}` is substituted
+    # BEFORE this runs, so the slug's own charset is checked too.
+    local _p="$1" _seg
+    [ -n "$_p" ] || return 1
+    case "$_p" in /*) return 1 ;; esac      # absolute is never under the feature dir
+    local IFS=/
+    for _seg in $_p; do
+        [ "$_seg" = "." ] && continue
+        _sandy_fm_valid_segment "$_seg" || return 1
+    done
+    return 0
+}
+_sandy_fm_load() {
+    local _dir="$1" _slug="$2" _mf="$1/feature.json" _line _k
+    _SANDY_FM_SELECT=(); _SANDY_FM_CREATE=(); _SANDY_FM_MOUNT=()
+    _SANDY_FM_EXPOSE=(); _SANDY_FM_ENTRY=""; _SANDY_FM_ERR=""
+    if [ ! -e "$_mf" ]; then _SANDY_FM_ERR="no-manifest"; return 1; fi
+    if [ -L "$_mf" ] || [ ! -f "$_mf" ]; then
+        _SANDY_FM_ERR="feature.json is not a regular file"; return 1
+    fi
+    local _proj=""
+    if command -v node >/dev/null 2>&1; then
+        _proj="$(_sandy_fm_projector_js | node - "$_mf" 2>&1)" || { _SANDY_FM_ERR="projector failed"; return 1; }
+    elif command -v jq >/dev/null 2>&1; then
+        _proj="$(_sandy_fm_projector_jq | jq -r -f /dev/stdin "$_mf" 2>&1)" || { _SANDY_FM_ERR="not valid JSON"; return 1; }
+    else
+        _SANDY_FM_ERR="neither node nor jq is available, and a feature manifest cannot be read without one"
+        return 1
+    fi
+    while IFS= read -r _line; do
+        [ -n "$_line" ] || continue
+        _k="${_line%%	*}"
+        case "$_k" in
+            ERR)    _SANDY_FM_ERR="${_line#*	}"; return 1 ;;
+            select) _SANDY_FM_SELECT+=("${_line#*	}") ;;
+            create) _SANDY_FM_CREATE+=("${_line#*	}") ;;
+            entry)  _SANDY_FM_ENTRY="${_line#*	}" ;;
+            expose) _SANDY_FM_EXPOSE+=("${_line#*	}") ;;
+            mount)  _SANDY_FM_MOUNT+=("${_line#*	}") ;;
+            *)      _SANDY_FM_ERR="projector emitted an unknown record: $_k"; return 1 ;;
+        esac
+    done <<< "$_proj"
+    # D5 validation, in bash, after projection: the projector is deliberately
+    # dumb about paths so the rule lives in one readable place.
+    local _m _name _from _rest
+    for _m in ${_SANDY_FM_MOUNT[@]+"${_SANDY_FM_MOUNT[@]}"}; do :; done
+    local _i=0
+    while [ "$_i" -lt "${#_SANDY_FM_MOUNT[@]}" ]; do
+        _m="${_SANDY_FM_MOUNT[$_i]}"
+        _name="${_m%%	*}"; _rest="${_m#*	}"; _from="${_rest%%	*}"
+        if [ "$_name" != "." ] && ! _sandy_fm_valid_segment "$_name"; then
+            _SANDY_FM_ERR="mount name '$_name' is not a valid path segment"; return 1
+        fi
+        _from="${_from//\$\{slug\}/$_slug}"
+        if ! _sandy_fm_valid_relpath "$_from"; then
+            _SANDY_FM_ERR="mount $_name: from '$_from' escapes the feature directory"; return 1
+        fi
+        _i=$((_i + 1))
+    done
+    local _c
+    for _c in ${_SANDY_FM_CREATE[@]+"${_SANDY_FM_CREATE[@]}"}; do
+        _c="${_c//\$\{slug\}/$_slug}"
+        _sandy_fm_valid_relpath "$_c" || { _SANDY_FM_ERR="create '$_c' escapes the feature directory"; return 1; }
+    done
+    if [ -n "$_SANDY_FM_ENTRY" ]; then
+        _sandy_fm_valid_relpath "$_SANDY_FM_ENTRY" \
+            || { _SANDY_FM_ERR="entry '$_SANDY_FM_ENTRY' escapes the feature directory"; return 1; }
+    fi
+    return 0
+}
+# --- Selection (D4) ---------------------------------------------------------
+# Selected iff an include matches in BOTH blocks and no exclude matches in
+# EITHER. Exclude wins. An exact name is a pattern without a wildcard and "*"
+# is "all", so there is no keyword and no special case.
+#
+# `sandboxes` patterns are matched against the slug AND the workspace host
+# path, case-folded. `agents` patterns are matched against the agents this
+# launch resolved to.
+#
+# MULTI-AGENT, which the design record left open: a launch may run several
+# agents in one container, and the mounts are per-container, not per-pane. So
+# an include matches if ANY resolved agent matches it, and an exclude fires if
+# ANY resolved agent matches it. Exclude is therefore the strict side: a
+# combo containing an excluded agent is not selected even if another agent in
+# it is included. That is the safe direction -- the excluded agent would
+# otherwise share the container with the payload.
+_sandy_fm_lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+_sandy_fm_selected() {
+    # $1 = slug, $2 = workspace host path, $3 = comma-separated resolved agents
+    local _slug="$1" _ws="$2" _agents="$3"
+    local _e _blk _kind _pat _a
+    local _inc_sb=0 _inc_ag=0
+    local _slug_lc _ws_lc; _slug_lc="$(_sandy_fm_lc "$_slug")"; _ws_lc="$(_sandy_fm_lc "$_ws")"
+    _SANDY_FM_WHYNOT=""
+    for _e in ${_SANDY_FM_SELECT[@]+"${_SANDY_FM_SELECT[@]}"}; do
+        _blk="${_e%%	*}"; _e="${_e#*	}"
+        _kind="${_e%%	*}"; _pat="${_e#*	}"
+        if [ "$_blk" = "sandboxes" ]; then
+            local _pat_lc; _pat_lc="$(_sandy_fm_lc "$_pat")"
+            # shellcheck disable=SC2254
+            case "$_slug_lc" in $_pat_lc) : ;; *)
+                # shellcheck disable=SC2254
+                case "$_ws_lc" in $_pat_lc) : ;; *) continue ;; esac ;;
+            esac
+            if [ "$_kind" = "exclude" ]; then
+                _SANDY_FM_WHYNOT="sandboxes exclude '$_pat' matched"; return 1
+            fi
+            _inc_sb=1
+        else
+            local _hit=0
+            local IFS=,
+            for _a in $_agents; do
+                # shellcheck disable=SC2254
+                case "$_a" in $_pat) _hit=1 ;; esac
+            done
+            unset IFS
+            [ "$_hit" = 1 ] || continue
+            if [ "$_kind" = "exclude" ]; then
+                _SANDY_FM_WHYNOT="agents exclude '$_pat' matched"; return 1
+            fi
+            _inc_ag=1
+        fi
+    done
+    if [ "$_inc_sb" != 1 ]; then _SANDY_FM_WHYNOT="no sandboxes include matched"; return 1; fi
+    if [ "$_inc_ag" != 1 ]; then _SANDY_FM_WHYNOT="no agents include matched"; return 1; fi
+    return 0
+}
+
+# --- Computed mount destinations (D5) ---------------------------------------
+# The manifest declares a NAME, never a destination. Sandy computes it under
+# two roots it owns:
+#
+#   payload      -> /opt/sandy/features/<feature>
+#   .            -> <container home>/.<feature>
+#   <name>       -> <container home>/.<feature>/<name>
+#
+# There is no `to` field, so there is nothing to police and nothing to
+# allowlist. An earlier draft let the manifest choose the container path, which
+# would have permitted a mount over /etc/sandy-session.json -- the :ro
+# attestation trust root -- or over ~/.claude. Removing the capability beats
+# constraining it.
+#
+# The container home is a parameter, not a literal, so #248 (claude -> sandy)
+# is one assignment rather than a sweep through this logic.
+_SANDY_FM_HOME="${_SANDY_FM_HOME:-/home/claude}"
+_sandy_fm_dest() {
+    # $1 = feature name, $2 = mount name
+    case "$2" in
+        payload) printf '/opt/sandy/features/%s' "$1" ;;
+        .)       printf '%s/.%s' "$_SANDY_FM_HOME" "$1" ;;
+        *)       printf '%s/.%s/%s' "$_SANDY_FM_HOME" "$1" "$2" ;;
+    esac
+}
+
 # Protected directories. .github/workflows is included by default; opt out via
 # SANDY_ALLOW_WORKFLOW_EDIT=1 in .sandy/config (passive tier).
 _sandy_protected_dirs() {

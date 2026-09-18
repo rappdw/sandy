@@ -14712,6 +14712,143 @@ rm -rf "$_S134_ROOT"
 unset _S134_SPEC _S134_KEEP _S134_ROOT _S134_SANDY _S134_MARKER _S134_MK_NAME _S134_MK_WS _S134_ENV \
       _S134_FSB _S134_SCAN _S134_NAMES _S134_PROBS _S134_EMPTY _S134_M_ON _S134_M_OFF
 
+# ============================================================
+echo ""
+echo "§135: the feature manifest — strict parse, path containment, selection (2.0.0)"
+# ============================================================
+# WHY THIS SECTION IS LARGE. The manifest decides what gets BIND-MOUNTED into a
+# container, so every failure here is a mount failure. Three properties carry
+# the design and each has its mutation named below:
+#
+#   D2  no parser, or an unreadable manifest -> REFUSE. Never a partial mount,
+#       never a silent skip. json_merge's `command -v node || return 0` shape is
+#       what this must not become.
+#   D5  the manifest declares a NAME, never a destination. Sandy computes the
+#       destination, so `name` and every `from` segment must be unable to
+#       escape the computed root -- otherwise "computed root" means nothing.
+#   D4  selection IS enrolment. A sandbox that is not selected gets nothing.
+#
+# The node/jq PARITY checks are not ceremony. The jq projector silently dropped
+# the unknown-top-level-key check on its first draft, because `index(.)`
+# resolved `.` to the array rather than the key -- so on a jq-only host a
+# typo-ed "mounts" would have been ignored instead of refused, which is the
+# reserved-namespace decision quietly absent. Parity is a security property.
+_S135_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S135_SANDY="$SANDY_SCRIPT"
+mkdir -p "$_S135_DIR/f"
+
+# Extract the manifest block from sandy rather than reimplementing it.
+_S135_BLK="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Computed mount destinations/' "$_S135_SANDY")
+$(awk '/^_sandy_fm_dest\(\) \{/,/^\}/' "$_S135_SANDY")
+_SANDY_FM_HOME=\"\${_SANDY_FM_HOME:-/home/claude}\""
+check "§135(pre) the manifest block was extracted from sandy and parses (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_fm_load" && printf "%s\n" "$1" | bash -n' _ "$_S135_BLK"
+
+_s135() {   # $1 = manifest JSON, $2 = slug, $3 = workspace, $4 = agents -> verdict
+    printf '%s' "$1" > "$_S135_DIR/f/feature.json"
+    bash -c '
+        set -uo pipefail
+        eval "$1"
+        if ! _sandy_fm_load "$2/f" "$3"; then printf "REFUSED:%s" "$_SANDY_FM_ERR"; exit 0; fi
+        if _sandy_fm_selected "$3" "$4" "$5"; then printf "SELECTED"; else printf "NO:%s" "$_SANDY_FM_WHYNOT"; fi
+    ' _ "$_S135_BLK" "$_S135_DIR" "$2" "$3" "$4" 2>/dev/null || true
+}
+_S135_OK='"sandboxes":{"include":["*"],"exclude":["scratch-*"]},"agents":{"include":["claude"]}'
+
+# --- D2: strict parse or refuse ---------------------------------------------
+check "§135(1) a well-formed manifest loads and selects" \
+    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 "{$_S135_OK}" myrepo-a1b2c3d4 /x/myrepo claude)"
+check "§135(2) TRUNCATED JSON is refused — never a partial mount" \
+    bash -c 'case "$1" in REFUSED:*) exit 0 ;; esac; exit 1' _ "$(_s135 '{"sandboxes":{"inc' s-1 /x claude)"
+check "§135(3) a typo-ed top-level key is REFUSED, not ignored — this is the reserved-namespace decision, and a silently-ignored 'mounts_typo' mounts nothing while looking fine" \
+    bash -c 'case "$1" in REFUSED:*unknown\ top-level\ key*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK,\"mounts_typo\":[]}" s-1 /x claude)"
+check "§135(4) ...while the ONE reserved key 'feature' is accepted untouched (without this, (3) is satisfied by refusing everything)" \
+    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 "{$_S135_OK,\"feature\":{\"anything\":[1,2]}}" myrepo-a1b2c3d4 /x/myrepo claude)"
+check "§135(5) a bad mode is refused" \
+    bash -c 'case "$1" in REFUSED:*mode\ must\ be*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK,\"mounts\":[{\"name\":\"x\",\"from\":\"payload\",\"mode\":\"rwx\"}]}" s-1 /x claude)"
+check "§135(6) a symlinked feature.json is refused (sandy never creates one, so it was placed by hand)" \
+    bash -c 'rm -f "$2/f/feature.json"; ln -s /etc/passwd "$2/f/feature.json"
+             r="$(bash -c "set -uo pipefail; eval \"\$1\"; _sandy_fm_load \"\$2/f\" s || printf REFUSED:%s \"\$_SANDY_FM_ERR\"" _ "$1" "$2" 2>/dev/null)"
+             rm -f "$2/f/feature.json"; case "$r" in REFUSED:*regular\ file*) exit 0 ;; esac; exit 1' _ "$_S135_BLK" "$_S135_DIR"
+
+# --- D5: a computed root is only a root if nothing can escape it ------------
+# Each of these would land a mount OUTSIDE ${HOME}/.<feature>/ if the predicate
+# were dropped. Mutation: delete the _sandy_fm_valid_* calls and all six pass
+# as SELECTED, which is the whole of D5 gone.
+for _s135_case in \
+    'name-escape:{"name":"../../.ssh","from":"payload"}' \
+    'name-slash:{"name":"a/b","from":"payload"}' \
+    'from-escape:{"name":"x","from":"../../../etc"}' \
+    'from-absolute:{"name":"x","from":"/etc"}' ; do
+    _s135_n="${_s135_case%%:*}"; _s135_m="${_s135_case#*:}"
+    check "§135(7:$_s135_n) refused — the manifest cannot reach outside the feature directory" \
+        bash -c 'case "$1" in REFUSED:*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK,\"mounts\":[$_s135_m]}" s-1 /x claude)"
+done
+check "§135(8) create escaping the feature directory is refused" \
+    bash -c 'case "$1" in REFUSED:*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK,\"create\":[\"../../evil\"]}" s-1 /x claude)"
+check "§135(9) entry escaping the feature directory is refused" \
+    bash -c 'case "$1" in REFUSED:*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK,\"entry\":\"../../../bin/sh\"}" s-1 /x claude)"
+# The positive controls: without these, (7)-(9) are satisfied by a predicate
+# that refuses every manifest.
+check "§135(10:control) the '.' mount name is ACCEPTED — it means the feature root" \
+    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 "{$_S135_OK,\"mounts\":[{\"name\":\".\",\"from\":\"payload\"}]}" myrepo-a1b2c3d4 /x/myrepo claude)"
+check "§135(11:control) a from containing \${slug} is ACCEPTED and substituted before validation" \
+    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 "{$_S135_OK,\"mounts\":[{\"name\":\"inbox\",\"from\":\"instances/\${slug}/inbox\"}]}" myrepo-a1b2c3d4 /x/myrepo claude)"
+
+# --- D4: selection is enrolment ---------------------------------------------
+check "§135(12) a sandbox matched by an exclude glob is NOT selected" \
+    bash -c 'case "$1" in NO:*exclude*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK}" scratch-aaaaaaaa /x/scratch claude)"
+check "§135(13) a sandbox running the wrong agent is NOT selected — applied AT the launch, not from last-launch data" \
+    bash -c 'case "$1" in NO:*agents\ include*) exit 0 ;; esac; exit 1' _ "$(_s135 "{$_S135_OK}" myrepo-a1b2c3d4 /x/myrepo codex)"
+check "§135(14) EXCLUDE WINS over include, in the agents block" \
+    bash -c 'case "$1" in NO:*exclude*) exit 0 ;; esac; exit 1' _ "$(_s135 '{"sandboxes":{"include":["*"]},"agents":{"include":["*"],"exclude":["codex"]}}' myrepo-a1b2c3d4 /x/myrepo claude,codex)"
+check "§135(15) a manifest with no include in a block selects NOTHING (default-deny, not default-allow)" \
+    bash -c 'case "$1" in NO:*) exit 0 ;; esac; exit 1' _ "$(_s135 '{"sandboxes":{"exclude":["nope"]},"agents":{"include":["*"]}}' myrepo-a1b2c3d4 /x/myrepo claude)"
+check "§135(16) sandboxes patterns match the WORKSPACE PATH as well as the slug" \
+    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 '{"sandboxes":{"include":["*rapphaus*"]},"agents":{"include":["*"]}}' slug-deadbeef /Users/x/dev/rapphaus claude)"
+check "§135(17) ...case-folded, so a capitalised workspace still matches a lowercase pattern" \
+    bash -c '[ "$1" = "SELECTED" ]' _ "$(_s135 '{"sandboxes":{"include":["myrepo-*"]},"agents":{"include":["*"]}}' MyRepo-a1b2c3d4 /Users/x/dev/MyRepo claude)"
+
+# --- D5 destinations --------------------------------------------------------
+_S135_DEST="$(bash -c 'set -uo pipefail; eval "$1"; printf "%s|%s|%s" "$(_sandy_fm_dest amap payload)" "$(_sandy_fm_dest amap .)" "$(_sandy_fm_dest amap inbox)"' _ "$_S135_BLK" 2>/dev/null)"
+check "§135(18) destinations are COMPUTED under two roots sandy owns — payload, the feature root, and a named mount (got: $_S135_DEST)" \
+    bash -c '[ "$1" = "/opt/sandy/features/amap|/home/claude/.amap|/home/claude/.amap/inbox" ]' _ "$_S135_DEST"
+check "§135(19) the manifest carries NO destination field — the schema has no 'to', so there is nothing to police (mutation: add one to the projector and this goes red)" \
+    bash -c '! printf "%s" "$1" | grep -q "\"to\""' _ "$_S135_BLK"
+
+# --- node/jq PARITY, which is a security property and not ceremony ---------
+# Both projectors must emit byte-identical records for the same manifest. The
+# jq one silently dropped the unknown-top-level-key check on its first draft
+# (`index(.)` resolved `.` to the array, not the key), so on a jq-only host a
+# typo-ed "mounts" would have been ignored rather than refused. Any future edit
+# to one projector and not the other is caught here.
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    _S135_PAR_FAIL=""
+    for _s135_j in \
+        "{$_S135_OK}" \
+        "{$_S135_OK,\"mounts_typo\":[]}" \
+        "{$_S135_OK,\"mounts\":[{\"name\":\"x\",\"from\":\"y\",\"mode\":\"rwx\"}]}" \
+        "{$_S135_OK,\"mounts\":[{\"from\":\"y\"}]}" \
+        "{$_S135_OK,\"mounts\":[{\"name\":\"x\",\"from\":\"y\",\"bogus\":1}]}" \
+        "{$_S135_OK,\"expose\":{\"K\":5}}" \
+        '{"sandboxes":{"include":"notalist"},"agents":{"include":["*"]}}' \
+        '{"sandboxes":{"include":["*"]}}' \
+        '[1,2,3]' ; do
+        printf '%s' "$_s135_j" > "$_S135_DIR/f/feature.json"
+        _s135_a="$(bash -c 'eval "$1"; _sandy_fm_projector_js | node - "$2" 2>&1' _ "$_S135_BLK" "$_S135_DIR/f/feature.json" 2>/dev/null)"
+        _s135_b="$(bash -c 'eval "$1"; _sandy_fm_projector_jq | jq -r -f /dev/stdin "$2" 2>&1' _ "$_S135_BLK" "$_S135_DIR/f/feature.json" 2>/dev/null)"
+        [ "$_s135_a" = "$_s135_b" ] || _S135_PAR_FAIL="$_S135_PAR_FAIL|$_s135_j"
+    done
+    check "§135(20) the node and jq projectors agree EXACTLY across the corpus — a divergence is a security bug, and the first jq draft dropped the unknown-key check entirely (diverged on:${_S135_PAR_FAIL:-nothing})" \
+        bash -c '[ -z "$1" ]' _ "$_S135_PAR_FAIL"
+    unset _S135_PAR_FAIL _s135_j _s135_a _s135_b
+else
+    skip "§135(20) node/jq projector parity needs BOTH node and jq on the host"
+fi
+
+rm -rf "$_S135_DIR"
+unset _S135_DIR _S135_SANDY _S135_BLK _S135_OK _S135_DEST _s135_case _s135_n _s135_m
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
