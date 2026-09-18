@@ -15476,6 +15476,153 @@ unset _S140_SANDY
 
 # ============================================================
 echo ""
+echo "§142: #321 — a manifest entry must reach crossSessionInbound"
+# ============================================================
+# THE BUG. A manifest `entry` supplies SANDY_HANDOFF_RELAY, and four decisions
+# are gated on that key: the host-side path validation, SANDY_HANDOFF_DIRS
+# being forced on, the dirs resolution, and crossSessionInbound defaulting to
+# `accept`. The entry was adopted ~2200 lines AFTER all four, so a relay
+# installed the way 2.0 tells you to install it resolved the session to
+# `refuse`, then started and ran correctly, delivering into a session that
+# refused everything. --start exited 0, --print-state said relay.state=started,
+# the marker said handoff_relay: true. Every signal green, nothing delivered.
+#
+# THE TEST ASSERTS THE PROPERTY, NOT THE LINE ORDER. It extracts the feature
+# manifest evaluation and the crossSessionInbound resolution FROM THE FILE IN
+# FILE ORDER, composes them, and reads the resolved value. That is what makes
+# it a real guard: move the manifest block back below the csi block and the
+# extraction still finds both, in the new order, and `accept` becomes `refuse`.
+# A check that grepped for the block's line number would pass on any
+# rearrangement that still broke delivery.
+_S142_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+_S142_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+
+# Slice A: the manifest reader + apply (needed for _sandy_fm_apply), then the
+# two spans under test, emitted in the order they appear in sandy.
+_S142_FM="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$_S142_SANDY")
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$_S142_SANDY")"
+# The span starts at the relay-bin SLOT resolution, not at the manifest block,
+# because precedence is part of what is under test: slot > manifest entry, and
+# an explicit SANDY_HANDOFF_RELAY over both. Extracting only the manifest half
+# would test adoption in isolation and miss exactly the interaction (6) covers.
+_S142_EVAL="$(awk '/^_sandy_relay_slot="absent"/,/^# BEGIN handoff relay/' "$_S142_SANDY")"
+# The csi span ends INSIDE `if _sandy_agent_has claude; then`, so the extraction
+# drops its trailing marker line and closes the block explicitly. Ending the
+# range on a balanced point instead would have to swallow the settings-file
+# writing, which needs far more stubbing and is §114's job, not this one's.
+_S142_CSI="$(awk '/^_sandy_csi_json="null"/,/^    _sandy_csi_user_written=0/' "$_S142_SANDY" | sed '$d')
+fi"
+
+check "§142(pre) both spans extracted and parse (mutation: a rename empties one and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_fm_apply" &&
+             printf "%s" "$2" | grep -q "_sandy_fm_ran=true" &&
+             printf "%s" "$3" | grep -q "_sandy_csi_val" &&
+             printf "%s\n%s\n%s\n" "$1" "$2" "$3" | bash -n' _ "$_S142_FM" "$_S142_EVAL" "$_S142_CSI"
+
+# ORDER IS THE THING UNDER TEST: assert the evaluation really does precede the
+# csi resolution in the file. Not a substitute for the behavioural check below
+# -- it is the reason that check is meaningful, since composing two spans in
+# file order only proves something if the file order is what ships.
+check "§142(1) the manifest evaluation appears BEFORE the crossSessionInbound resolution in sandy (mutation: move it back down and this reverses)" \
+    bash -c '_e="$(grep -n -m1 "_sandy_fm_ran=true" "$1" | cut -d: -f1)"
+             _c="$(grep -n -m1 "^_sandy_csi_json=\"null\"" "$1" | cut -d: -f1)"
+             [ -n "$_e" ] && [ -n "$_c" ] && [ "$_e" -lt "$_c" ]' _ "$_S142_SANDY"
+
+# A feature declaring `entry`, no relay-bin slot, no explicit key.
+_S142_H="$_S142_DIR/home"; mkdir -p "$_S142_H/features/amap/payload"
+printf '#!/bin/sh\n' > "$_S142_H/features/amap/payload/relay"
+chmod +x "$_S142_H/features/amap/payload/relay"
+cat > "$_S142_H/features/amap/feature.json" <<'S142_JSON'
+{ "sandboxes": { "include": ["*"] },
+  "agents":    { "include": ["claude"] },
+  "mounts":    [ { "name": "payload", "from": "payload", "mode": "ro" } ],
+  "entry":     "payload/relay" }
+S142_JSON
+
+# The driver composes the two spans IN FILE ORDER with only the stubs the spans
+# themselves call. _sandy_csi_write is stubbed to a no-op success: this measures
+# the RESOLVED VALUE, not the settings-file writing, which §114 already covers.
+cat > "$_S142_DIR/drive.sh" <<'S142_DRV'
+set -uo pipefail
+# HERMETIC BY CONSTRUCTION, and this is not hygiene -- it is a correctness bug
+# found the hard way. This suite is routinely run INSIDE sandy, and a sandy
+# container with a relay installed exports SANDY_HANDOFF_RELAY=/opt/sandy/relay/relay
+# into every process it starts. Inheriting it made the driver report the
+# AMBIENT relay instead of the one the manifest supplied: the check failed
+# here and would have passed in CI, where nothing sets it. A test whose result
+# depends on where it runs is worse than no test. So the inputs are named
+# T_* and the real names are unset first; the spans under test may then set
+# them and only they can.
+unset SANDY_HANDOFF_RELAY SANDY_CROSS_SESSION_INBOUND
+[ -n "${T_RELAY:-}" ] && SANDY_HANDOFF_RELAY="$T_RELAY"
+[ -n "${T_CSI:-}" ]   && SANDY_CROSS_SESSION_INBOUND="$T_CSI"
+info() { :; }; warn() { :; }; error() { :; }
+_sandy_daemon_fatal() { :; }
+_sandy_agent_has() { case ",$SANDY_AGENT," in *",$1,"*) return 0 ;; esac; return 1; }
+_sandy_csi_write() { return 0; }
+eval "$FM_BLOCK"
+eval "$EVAL_BLOCK"
+eval "$CSI_BLOCK"
+printf 'csi=%s\nrelay=%s\n' "${_sandy_csi_val:-UNSET}" "${SANDY_HANDOFF_RELAY:-EMPTY}"
+S142_DRV
+_S142_OUT="$(cd "$_S142_DIR" && SANDY_HOME="$_S142_H" SANDBOX_DIR="$_S142_DIR/sb" WORK_DIR="$_S142_DIR/ws" \
+    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY=1 \
+    FM_BLOCK="$_S142_FM" EVAL_BLOCK="$_S142_EVAL" CSI_BLOCK="$_S142_CSI" \
+    _sandy_relay_slot_dir="$_S142_DIR/slot" \
+    bash "$_S142_DIR/drive.sh" 2>/dev/null)" || _S142_OUT="DRIVER-FAILED"
+
+check "§142(2) the driver RAN (a silently dead probe would make every check below vacuously pass — the §128 lesson)" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi="' _ "$_S142_OUT"
+check "§142(3) a manifest entry is adopted into SANDY_HANDOFF_RELAY at EVALUATION time" \
+    bash -c 'printf "%s" "$1" | grep -q "^relay=/opt/sandy/features/amap/relay$"' _ "$_S142_OUT"
+check "§142(4) THE BUG: crossSessionInbound resolves to ACCEPT for a manifest-supplied relay (it resolved to refuse before #321 — a healthy relay delivering into a session that refuses everything)" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=accept$"' _ "$_S142_OUT"
+
+# An explicit value must still win over the manifest-supplied relay.
+_S142_OUT2="$(cd "$_S142_DIR" && SANDY_HOME="$_S142_H" SANDBOX_DIR="$_S142_DIR/sb" WORK_DIR="$_S142_DIR/ws" \
+    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY=1 T_CSI=hold \
+    FM_BLOCK="$_S142_FM" EVAL_BLOCK="$_S142_EVAL" CSI_BLOCK="$_S142_CSI" \
+    _sandy_relay_slot_dir="$_S142_DIR/slot" \
+    bash "$_S142_DIR/drive.sh" 2>/dev/null)" || _S142_OUT2="DRIVER-FAILED"
+check "§142(5) an EXPLICIT SANDY_CROSS_SESSION_INBOUND still wins over the manifest-supplied relay (tighten-only must keep working)" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=hold$"' _ "$_S142_OUT2"
+
+# PRECEDENCE, including the second defect found while fixing this one: the old
+# site tested `_sandy_relay_from_slot != true`, so an explicitly-set
+# SANDY_HANDOFF_RELAY (which makes the slot stand down, leaving that flag
+# false) was OVERWRITTEN by a manifest entry. The emptiness test gives one
+# order for all three sources.
+_S142_OUT3="$(cd "$_S142_DIR" && SANDY_HOME="$_S142_H" SANDBOX_DIR="$_S142_DIR/sb" WORK_DIR="$_S142_DIR/ws" \
+    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY=1 \
+    T_RELAY=/opt/explicit/relay \
+    FM_BLOCK="$_S142_FM" EVAL_BLOCK="$_S142_EVAL" CSI_BLOCK="$_S142_CSI" \
+    _sandy_relay_slot_dir="$_S142_DIR/slot" \
+    bash "$_S142_DIR/drive.sh" 2>/dev/null)" || _S142_OUT3="DRIVER-FAILED"
+check "§142(6) an explicitly-set SANDY_HANDOFF_RELAY is NOT overwritten by a manifest entry (the old site's \`_sandy_relay_from_slot != true\` test overwrote it)" \
+    bash -c 'printf "%s" "$1" | grep -q "^relay=/opt/explicit/relay$"' _ "$_S142_OUT3"
+
+# THE COEXISTENCE-WINDOW PRECEDENCE, which nothing asserted before. 2.0.0
+# promises relay-bin/relay WINS over a manifest `entry` for one release, and a
+# consumer is holding off migrating on the strength of it. A flag day on the
+# mechanism that starts a delivery daemon is how a fleet goes silently dark, so
+# the promise is worth a check rather than a paragraph.
+mkdir -p "$_S142_DIR/slot2"
+printf '#!/bin/sh\n' > "$_S142_DIR/slot2/relay"; chmod +x "$_S142_DIR/slot2/relay"
+_S142_OUT4="$(cd "$_S142_DIR" && SANDY_HOME="$_S142_H" SANDBOX_DIR="$_S142_DIR/sb" WORK_DIR="$_S142_DIR/ws" \
+    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY=1 \
+    FM_BLOCK="$_S142_FM" EVAL_BLOCK="$_S142_EVAL" CSI_BLOCK="$_S142_CSI" \
+    _sandy_relay_slot_dir="$_S142_DIR/slot2" \
+    bash "$_S142_DIR/drive.sh" 2>/dev/null)" || _S142_OUT4="DRIVER-FAILED"
+check "§142(7) relay-bin/relay WINS over a manifest entry (the 2.0 coexistence promise a consumer is deferring its migration on)" \
+    bash -c 'printf "%s" "$1" | grep -q "^relay=/opt/sandy/relay/relay$"' _ "$_S142_OUT4"
+check "§142(8) ...and crossSessionInbound is still ACCEPT on that path — the slot was never broken by #321, which is why the bug stayed hidden" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=accept$"' _ "$_S142_OUT4"
+
+rm -rf "$_S142_DIR"
+unset _S142_SANDY _S142_DIR _S142_FM _S142_EVAL _S142_CSI _S142_H _S142_OUT _S142_OUT2 _S142_OUT3 _S142_OUT4
+
+# ============================================================
+echo ""
 echo "§141: the 2.0 migration path — --reset-sandbox --all, and #309's backfill"
 # ============================================================
 # 2.0 moves the container home, so every 1.x sandbox is refused. The migration

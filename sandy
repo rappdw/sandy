@@ -11031,6 +11031,73 @@ elif [ -e "$_sandy_relay_slot_dir/relay" ]; then
 fi
 # END relay capability
 
+# --- Feature manifest: EVALUATED HERE, APPLIED LATER (#321) ------------------
+# This pass used to sit ~2200 lines below, next to the mounts it produces. That
+# read naturally and was wrong: a manifest `entry` supplies SANDY_HANDOFF_RELAY,
+# and FOUR decisions between here and there are gated on that key --
+#
+#   the host-side path validation (immediately below)
+#   SANDY_HANDOFF_DIRS forced on, "the relay cannot run without its mounts"
+#   the SANDY_HANDOFF_DIRS final resolution
+#   crossSessionInbound defaulting to `accept`
+#
+# -- so a relay that came from a manifest was invisible to all four. The last
+# one is what made #321 SILENT rather than loud: the session resolved to
+# `refuse`, then the entry was adopted and the relay started and ran correctly,
+# delivering into a session that refused everything. --start exited 0,
+# tmux has-session succeeded, --print-state reported relay.state=started and the
+# marker said handoff_relay: true. Every structural signal green, nothing
+# delivered -- the same class as #151's API-key modal and #256's theme picker.
+#
+# It CANNOT be applied here: RUN_FLAGS does not exist yet (it is built ~1900
+# lines below). So the record stream is BUFFERED and consumed once, later,
+# where the mounts are assembled. One evaluation with two consumption points --
+# deliberately NOT two evaluations, which is the `_sandy_reap_orphan_networks`
+# rule: two callers, one predicate, because two could silently disagree.
+_SANDY_FM_HOME="/home/sandy"
+_sandy_fm_root="$SANDY_HOME/features"
+_sandy_fm_out=""; _sandy_fm_rc=0; _sandy_fm_ran=false
+if [ -d "$_sandy_fm_root" ]; then
+    _sandy_fm_ran=true
+    # rc-FIRST, as before: a feature that fails may be preceded by valid mount
+    # lines from an earlier one, and using that partial set is what D2 exists
+    # to prevent.
+    _sandy_fm_out="$(_sandy_fm_apply "$_sandy_fm_root" "$SANDBOX_NAME" "$WORK_DIR" "$SANDY_AGENT" 0)" \
+        || _sandy_fm_rc=$?
+    if [ "$_sandy_fm_rc" -ne 0 ]; then
+        error "A feature manifest could not be applied; no feature was mounted."
+        printf '%s\n' "$_sandy_fm_out" | while IFS= read -r _fm_l; do
+            case "$_fm_l" in err*) error "  ${_fm_l#err	}" ;; esac
+        done
+        _sandy_daemon_fatal
+        exit 1
+    fi
+    # Adopt the entry now, so everything below sees it. Placed AFTER the slot
+    # block above so relay-bin still wins during the 2.0 coexistence window.
+    #
+    # The test is `-z SANDY_HANDOFF_RELAY`, not `_sandy_relay_from_slot != true`
+    # as the old site had it. That old test was a second defect on the same
+    # line: when a user set SANDY_HANDOFF_RELAY explicitly AND a slot entry
+    # existed, the slot stood down (with a warning) leaving _sandy_relay_from_slot
+    # false -- so a manifest entry then OVERWROTE the user's explicit path. The
+    # emptiness test gives one precedence order for all three sources:
+    # explicit SANDY_HANDOFF_RELAY > relay-bin slot > manifest entry.
+    while IFS= read -r _fm_l; do
+        [ -n "$_fm_l" ] || continue
+        case "$_fm_l" in
+            entry*)
+                if [ -z "${SANDY_HANDOFF_RELAY:-}" ]; then
+                    SANDY_HANDOFF_RELAY="${_fm_l#*	}"
+                elif [ "$_sandy_relay_from_slot" = "true" ]; then
+                    info "a feature manifest declares an entry, but relay-bin/relay is installed and wins (2.0.0 coexistence window)."
+                else
+                    info "a feature manifest declares an entry, but SANDY_HANDOFF_RELAY is set explicitly and wins."
+                fi ;;
+        esac
+    done <<< "$_sandy_fm_out"
+    unset _fm_l
+fi
+
 # BEGIN handoff relay (host-side validation; the relay itself runs in user-setup.sh)
 if [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
     case "$SANDY_HANDOFF_RELAY" in
@@ -13186,20 +13253,13 @@ fi
 # by valid mount lines from an earlier one, and using that partial set is what
 # D2 exists to prevent. So the whole pass is buffered, the status checked, and
 # only then are RUN_FLAGS touched.
-_SANDY_FM_HOME="/home/sandy"
-_sandy_fm_root="$SANDY_HOME/features"
-if [ -d "$_sandy_fm_root" ]; then
-    _sandy_fm_out=""; _sandy_fm_rc=0
-    _sandy_fm_out="$(_sandy_fm_apply "$_sandy_fm_root" "$SANDBOX_NAME" "$WORK_DIR" "$SANDY_AGENT" 0)" \
-        || _sandy_fm_rc=$?
-    if [ "$_sandy_fm_rc" -ne 0 ]; then
-        error "A feature manifest could not be applied; no feature was mounted."
-        printf '%s\n' "$_sandy_fm_out" | while IFS= read -r _fm_l; do
-            case "$_fm_l" in err*) error "  ${_fm_l#err	}" ;; esac
-        done
-        _sandy_daemon_fatal
-        exit 1
-    fi
+# APPLIED HERE, EVALUATED EARLIER (#321). The pass ran above, before the relay
+# block, because a manifest `entry` had to be visible to the four decisions
+# gated on SANDY_HANDOFF_RELAY. Its buffered record stream is consumed here,
+# where RUN_FLAGS exists. The `entry` record is deliberately NOT handled again
+# below -- it was adopted at evaluation time, and re-adopting it here would
+# re-introduce exactly the ordering this fix removes.
+if [ "${_sandy_fm_ran:-false}" = "true" ] && [ -n "$_sandy_fm_out" ]; then
     while IFS= read -r _fm_l; do
         [ -n "$_fm_l" ] || continue
         _fm_k="${_fm_l%%	*}"; _fm_v="${_fm_l#*	}"
@@ -13214,20 +13274,14 @@ if [ -d "$_sandy_fm_root" ]; then
                 fi ;;
             export)
                 RUN_FLAGS+=(-e "${_fm_v%%	*}=${_fm_v#*	}") ;;
-            entry)
-                # D9: relay-bin wins when both are present, so the manifest
-                # entry is only adopted when the slot did not supply one.
-                if [ "${_sandy_relay_from_slot:-false}" != "true" ]; then
-                    SANDY_HANDOFF_RELAY="$_fm_v"
-                else
-                    info "a feature manifest declares an entry, but relay-bin/relay is installed and wins (2.0.0 coexistence window)."
-                fi ;;
+            entry) : ;;   # adopted at evaluation time, above -- see #321
             skip)
                 [ "${SANDY_VERBOSE:-0}" = "1" ] && info "feature ${_fm_v%%	*}: ${_fm_v#*	}" ;;
         esac
     done <<< "$_sandy_fm_out"
-    unset _sandy_fm_out _sandy_fm_rc _fm_l _fm_k _fm_v _fm_src _fm_dst _fm_mode
+    unset _fm_l _fm_k _fm_v _fm_src _fm_dst _fm_mode
 fi
+unset _sandy_fm_out _sandy_fm_rc _sandy_fm_ran _sandy_fm_root
 # Skill pack persistent state mounts. gstack mounts from the workspace (not
 # the sandbox) — see the migration block above where $WORK_DIR/.gstack is
 # ensured to exist.
