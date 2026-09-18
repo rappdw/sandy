@@ -8084,6 +8084,34 @@ _S93_JSON_SCHEMA_VER="$(python3 -c 'import json,sys; print(json.load(open(sys.ar
 check "§93(7) .schema_version equals SANDY_SCHEMA_VERSION in source" \
     bash -c '[ "$1" = "$2" ]' -- "$_S93_JSON_SCHEMA_VER" "$_S93_SRC_SCHEMA_VER"
 
+# (8) THE PUBLISHED GUIDANCE ITSELF (#310). The contract consumers write their
+# gates against is a document, so the document is what this checks.
+#
+# SPEC_INTROSPECTION already warned against parsing the first dotted-numeric
+# token out of `version` -- but only as a CACHE-KEYING hazard, whose stated
+# consequence is a stale cache. The worse consequence went unstated: the same
+# strip makes a ">= X.Y.Z" gate pass on every X.Y.Z-dev build, INCLUDING the
+# commits that predate the feature being gated on, so the consumer proceeds
+# against a sandy that cannot do the thing and gets no error.
+#
+# And the doc then PRESCRIBED a gate of exactly that shape. Its pre-1.7.0
+# probe said to confirm the parsed version is ">= 1.7.0" before calling
+# --print-version -- which on a 1.7.0-dev build predating that flag parses to
+# 1.7.0, passes, and forwards to the wrapped agent, attempting the very
+# container launch the bullet exists to prevent. The doc warned against the
+# strip in one paragraph and depended on it in the next.
+#
+# Both checks read the DOC, because that is the artifact that was wrong; the
+# emitter was always correct. Reported live by two consumers in one afternoon.
+_S93_SPEC="$(cd "$(dirname "$0")/.." && pwd)/SPEC_INTROSPECTION.md"
+check "§93(8-pre) SPEC_INTROSPECTION.md was found and carries the --print-version section (mutation: a rename empties it and the two checks below go vacuous)" \
+    bash -c '[ -f "$1" ] && grep -q "Pre-1.7.0 forwarding hazard" "$1"' -- "$_S93_SPEC"
+check "§93(8) the pre-1.7.0 probe does NOT tell a consumer to gate on a parsed version (mutation: restore 'confirmed >= 1.7.0' and this goes red)" \
+    bash -c '! grep -q "confirmed \`>= 1.7.0\`" "$1"' -- "$_S93_SPEC"
+check "§93(9) ...and the FEATURE-GATING consequence of a stripped version is stated, not just the cache-keying one (mutation: delete that bullet and this goes red while §93(8) stays green)" \
+    bash -c 'grep -q "not evidence that a feature exists" "$1" || grep -qi "NOT evidence that a feature exists" "$1"' -- "$_S93_SPEC"
+
+unset _S93_SPEC
 rm -rf "$_S93_TMP" "$_S93_HOME" "$_S93_OUTSIDE" "$_S93_GITSTUB_BIN" "$_S93_NC_HOME" 2>/dev/null || true
 rm -f "$_S93_PV_JSON" "$_S93_SCHEMA_JSON" "$_S93_CROSS_PY" "$_S93_COMPOSE_PY" \
       "$_S93_NC_JSON" "$_S93_NC_PY" "$_S93_BAKED_JSON" 2>/dev/null || true
