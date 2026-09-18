@@ -12038,7 +12038,20 @@ check "§114(16h) phase E proves criterion 8 end-to-end: a real headless launch 
 # bracket and the word are never adjacent and the count was always 0 -- on a
 # restart that E3s own new-pid assertion had already proved healthy. Assert
 # the RELATION between the two files, not either one in isolation.
-_S114_START_PAT="$(printf '%s\n' "$_S114_ACC_E" | grep -m1 '_starts=' | sed -e "s/.*grep -c '//" -e "s/'.*//")"
+# Two steps, and the grep is guarded. As one pipeline
+#   printf ... | grep -m1 ... | sed ...
+# this is the GREPM shape test/lint-bash32.sh exists for: grep -m1 exits as
+# soon as it matches, the upstream printf can take SIGPIPE, and under
+# `set -o pipefail` the ERR trap then ABORTS THE WHOLE SUITE mid-run -- which
+# is what it did on CI, at §114, so every section after it never ran while the
+# summary still printed a count. It is a race, which is why it had passed for
+# months and passes locally.
+#
+# Guarded, a missing pattern becomes a FAILED CHECK (16i already asserts
+# non-empty) instead of an aborted run. That is the difference between one red
+# line and a suite that stops reporting.
+_S114_START_LINE="$(printf '%s\n' "$_S114_ACC_E" | grep -m1 '_starts=' || true)"
+_S114_START_PAT="$(printf '%s' "$_S114_START_LINE" | sed -e "s/.*grep -c '//" -e "s/'.*//" || true)"
 check "§114(16i) extracted the restart-count pattern from phase E" \
     bash -c '[ -n "$1" ]' -- "$_S114_START_PAT"
 check "§114(16i-2) that pattern actually matches a supervisor.log start line as the template writes it (regression guard for the never-matching '\] start ' pattern)" \
@@ -14953,6 +14966,79 @@ check "§137(7) an entry can be forgotten with NO node and NO jq on the host —
 
 rm -rf "$_S137_DIR"
 unset _s137_b _S137_DIR _S137_BLK _S137_R _S137_JSON _S137_ESC
+
+# ============================================================
+echo ""
+echo "§138: nothing is removed that was never announced — README's Deprecated list"
+# ============================================================
+# THE RULE (CLAUDE.md, semver discipline): an entry may only be ADDED to
+# README's `## Deprecated` section in an X.0.0 release, and anything listed
+# there may then be removed in a later X.Y.0. Nothing may be removed that was
+# never listed.
+#
+# That protection is worth exactly as much as the list's accuracy, and a list
+# maintained by memory rots -- RELEASE_NOTES.md went twelve releases stale
+# before it admitted what it was. So this asserts the half that is mechanically
+# checkable: every deprecation sandy WARNS ABOUT at runtime is announced in the
+# table.
+#
+# CONVENTION IT ENFORCES, stated in README beside the table: a deprecation
+# warning names the deprecated thing FIRST, before any replacement. Both
+# existing warnings already read that way ("SANDY_EGRESS_PROXY is deprecated --
+# use SANDY_EGRESS_NO_ISOLATION=1..."), and without the convention the check
+# could not tell subject from replacement.
+#
+# WHAT THIS CANNOT CHECK, stated rather than implied: that a removal in some
+# future X.Y.0 was listed in the preceding X.0.0. That is a fact about history,
+# not about the tree. This catches the failure that actually happens -- a
+# deprecation added in code and never announced.
+_S138_SANDY="$SANDY_SCRIPT"
+_S138_README="$(cd "$(dirname "$0")/.." && pwd)/README.md"
+check "§138(pre) README carries a Deprecated section (mutation: rename the heading and every check below goes vacuous)" \
+    bash -c 'grep -q "^## Deprecated$" "$1"' _ "$_S138_README"
+
+# The table, as a blob: everything between the heading and the next one.
+_S138_TABLE="$(awk '/^## Deprecated$/{f=1} f&&/^## /&&!/^## Deprecated$/{exit} f' "$_S138_README")"
+check "§138(1) ...and it is a table with entries, not an empty heading" \
+    bash -c 'printf "%s" "$1" | grep -qE "^\| .SANDY_"' _ "$_S138_TABLE"
+
+# Every runtime deprecation warning's SUBJECT must appear in the table.
+_S138_MISSING=""
+while IFS= read -r _s138_line; do
+    [ -n "$_s138_line" ] || continue
+    _s138_key="$(printf '%s' "$_s138_line" | grep -oE 'SANDY_[A-Z_]+' | head -1)"
+    [ -n "$_s138_key" ] || continue
+    printf '%s' "$_S138_TABLE" | grep -q "$_s138_key" \
+        || _S138_MISSING="$_S138_MISSING $_s138_key"
+done <<S138_EOF
+$(grep -E '^[[:space:]]*(warn "|echo "\[sandy\] WARN)' "$_S138_SANDY" | grep -i deprecat)
+S138_EOF
+check "§138(2) every deprecation sandy WARNS about at runtime is announced in README's table — a deprecation in code that nobody announced is a removal nobody can plan for (missing:${_S138_MISSING:- none})" \
+    bash -c '[ -z "$1" ]' _ "$_S138_MISSING"
+
+# The negative control. Without it, (2) is satisfied by a loop that never runs
+# -- which is exactly how this check would rot into silence.
+_S138_FOUND="$(grep -cE '^[[:space:]]*(warn "|echo "\[sandy\] WARN)' "$_S138_SANDY" | tr -d ' ')"
+_S138_DEPR="$(grep -E '^[[:space:]]*(warn "|echo "\[sandy\] WARN)' "$_S138_SANDY" | grep -ci deprecat | tr -d ' ')"
+check "§138(3) the scan actually found deprecation warnings to check (got $_S138_DEPR of $_S138_FOUND warnings; mutation: reword them all and this goes red rather than (2) passing on an empty set)" \
+    bash -c '[ "$1" -ge 2 ]' _ "$_S138_DEPR"
+
+# And the reverse direction, loosely: a listed key should still be findable in
+# sandy. A key that is gone but still listed means a removal happened without
+# delisting, which leaves the table lying in the other direction.
+_S138_STALE=""
+while IFS= read -r _s138_row; do
+    case "$_s138_row" in '| `SANDY_'*) ;; *) continue ;; esac
+    _s138_k="$(printf '%s' "$_s138_row" | grep -oE 'SANDY_[A-Z_]+' | head -1)"
+    [ -n "$_s138_k" ] || continue
+    grep -q "$_s138_k" "$_S138_SANDY" || _S138_STALE="$_S138_STALE $_s138_k"
+done <<S138_EOF2
+$(printf '%s' "$_S138_TABLE")
+S138_EOF2
+check "§138(4) every key listed as deprecated still EXISTS in sandy — a listed-but-gone key means something was removed without being delisted (stale:${_S138_STALE:- none})" \
+    bash -c '[ -z "$1" ]' _ "$_S138_STALE"
+
+unset _S138_SANDY _S138_README _S138_TABLE _S138_MISSING _S138_FOUND _S138_DEPR _S138_STALE _s138_line _s138_key _s138_row _s138_k
 
 # BEGIN SUMMARY
 # ============================================================

@@ -134,7 +134,26 @@ You can also `git switch -c <feature>` and work directly; just expect the sessio
 - `SANDY_COMMIT` holds the git short hash — empty in source, detected at runtime from a repo checkout, baked in by `install.sh` for local installs. Full string: `1.0.1-dev-a1b2c3d`.
 - The update check compares only `SANDY_VERSION` via `_ver_lt()`, which **strips everything after the first `-`**, and uses `releases/latest` (skips pre-releases). So stable users are never nagged toward an rc, and rc users are not nagged when the same-numbered final ships — they upgrade with an explicit `sandy --upgrade`.
 
-**1.x semver discipline**: `X.Y.(Z+1)` = fixes only; `X.(Y+1).0` = additive (new keys/flags, no retiering or renames); `2.0.0` = anything breaking the sandbox forward-compat promise, the introspection `schema_version: 1` contract, or config-key tier semantics.
+**Semver discipline**: `X.Y.(Z+1)` = fixes only; `X.(Y+1).0` = additive (new keys/flags, no retiering or renames) **plus removals that were already announced — see below**; `X.0.0` = anything breaking the sandbox forward-compat promise, the introspection `schema_version` contract, or config-key tier semantics.
+
+**Removal is governed by announcement, not by the act of deleting.** What breaks a consumer is *surprise*, so the major-gated event is the **announcement**:
+
+1. `README.md` carries a **`## Deprecated`** section.
+2. An entry may only be **added** to it in an `X.0.0` release.
+3. Anything listed there may be **removed** in a later `X.Y.0`.
+4. **Nothing may be removed that was never listed.** That is the whole of the protection — without it the section is decoration. Guarded by `run-tests.sh` §138.
+
+Someone upgrading across a major therefore reads one list and learns everything that may vanish during that line. The rule was written after its absence made "is removing a key major?" a live question twice in ten minutes: the old wording named renames and retiering and simply did not mention removal.
+
+**Removal must be loud where sandy can see it**, which is not everywhere:
+
+| removed | how the consumer finds out |
+|---|---|
+| config key | hard error naming the replacement (the `SANDY_FEATURES_DIR` shape) |
+| mechanism (directory, slot) | launch warning while deprecated, error after |
+| **emitted introspection field** | **`schema_version` bumps** |
+
+The third row is the one that needs saying. A removed field is otherwise **silent** — a consumer gating on `schema_version: 2` still finds `2` and merely stops seeing the field, inside a schema it was told was stable. So removing a deprecated field bumps `schema_version`, which means **`schema_version` can move in a minor**. That is deliberate: it is a separate contract from sandy's own version, and the bump *is* the signal.
 
 ## Per-project Configuration
 

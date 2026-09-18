@@ -906,6 +906,26 @@ For any `SANDY_AGENT` value other than single-agent `claude`, sandy uses a **hos
 .sandy/.secrets
 ```
 
+## Deprecated
+
+Everything here still works. Each entry was announced in the major release named, and **may be removed in any later `X.Y.0`** — so if you depend on one, plan the move rather than waiting for it to break.
+
+Sandy's rule: an entry can only be **added** to this list in an `X.0.0` release, and nothing is ever removed that was not listed here first. Reading this section after a major upgrade tells you everything that may disappear during that line.
+
+| deprecated | since | use instead |
+|---|---|---|
+| `SANDY_HANDOFF_DIRS`, and the `~/.handoff/{inbox,outbox,peer,relay}` tree it mounts | 2.0.0 | a feature manifest's `mounts` — it names its own directories instead of using sandy's four fixed ones |
+| `SANDY_HANDOFF_*` container env vars (`_INBOX`, `_OUTBOX`, `_PEER`, `_RELAY_STATE`) | 2.0.0 | a mount's `export`, which names the variable the feature wants |
+| `SANDY_HANDOFF_RELAY` and the `relay-bin/` slot | 2.0.0 | a feature manifest's `entry`. During the window `relay-bin/relay` still **wins** when both are present, so removing the slot is what hands over |
+| `handoff_relay` and `relay{}` in `/etc/sandy-session.json` and `--print-state` | 2.0.0 | the feature's own entry in `--print-state`. Removing these will bump `schema_version`, because a vanished field is otherwise silent |
+| `SANDY_SCREENSHOT_DIR` | 2.0.0 | intended to become a feature manifest; the design is not settled (#317), and the key stays until it is |
+| `SANDY_EGRESS_PROXY` | 2.0.0 | `SANDY_EGRESS_NO_ISOLATION=1` (off) or `SANDY_EGRESS_STRICT=1` (strict). It has warned since 0.14.0; listing it here is what finally gives its removal a date |
+| `SANDY_CHANNELS`: the `plugin:<name>@<marketplace>` form | 2.0.0 | bare comma-separated names. The key itself is **not** deprecated — only that spelling of its value |
+
+Removals are loud where sandy can see them: a removed config key is a hard error naming its replacement, a removed mechanism warns first, and a removed introspection field bumps `schema_version`.
+
+*(For maintainers: a deprecation warning in `sandy` names the deprecated thing **first**, before any replacement — `run-tests.sh` §138 reads the first `SANDY_*` token on the line and requires it to appear in the table above, so a deprecation added in code but never announced here fails the suite.)*
+
 ## Security Notes
 
 - The container runs as a non-root user (`claude`, mapped to host UID)
