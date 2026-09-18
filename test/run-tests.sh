@@ -15283,7 +15283,7 @@ check "§141(7) --dry-run resets NOTHING (a dry run that acts is the worst outco
     bash -c 'ls "$1"/sandboxes/*/pip/cached >/dev/null 2>&1' _ "$_S141_H"
 
 _S141_RC=0
-SANDY_HOME="$_S141_H" bash "$_S141_SANDY" --reset-sandbox --all --yes >/dev/null 2>&1 || _S141_RC=$?
+SANDY_HOME="$_S141_H" bash "$_S141_SANDY" --reset-sandbox --all --keep-history --yes >/dev/null 2>&1 || _S141_RC=$?
 check "§141(8) --all actually clears the package caches it planned" \
     bash -c '! ls "$1"/sandboxes/*/pip/cached >/dev/null 2>&1' _ "$_S141_H"
 # THE CHECK THE WHOLE MIGRATION RESTS ON.
@@ -15297,12 +15297,65 @@ check "§141(10) an unresettable orphan makes the run exit NON-ZERO — the C1 r
 check "§141(11) --all and --workspace are mutually exclusive (one selector, one resolution path)" \
     bash -c 'out="$(SANDY_HOME="$2" bash "$1" --reset-sandbox --all --workspace /tmp --yes 2>&1 || true)"
              case "$out" in *"mutually exclusive"*) exit 0 ;; esac; exit 1' _ "$_S141_SANDY" "$_S141_H"
+# Answers the history question so this isolates the --yes gate. Without that it
+# would trip the history refusal first and pass for the wrong reason -- two
+# separate non-interactive requirements, each tested alone.
 check "§141(12) --all needs --yes when stdin is not a TTY — cron must opt in explicitly" \
-    bash -c 'out="$(SANDY_HOME="$2" bash "$1" --reset-sandbox --all </dev/null 2>&1 || true)"
+    bash -c 'out="$(SANDY_HOME="$2" bash "$1" --reset-sandbox --all --keep-history </dev/null 2>&1 || true)"
              case "$out" in *"needs --yes"*) exit 0 ;; esac; exit 1' _ "$_S141_SANDY" "$_S141_H"
+check "§141(12b) ...and --all with --yes but NO history answer is refused too — the two gates are independent, and --yes does not stand in for the corpus decision" \
+    bash -c 'out="$(SANDY_HOME="$2" bash "$1" --reset-sandbox --all --yes </dev/null 2>&1 || true)"
+             case "$out" in *"--keep-history or --purge-history"*) exit 0 ;; esac; exit 1' _ "$_S141_SANDY" "$_S141_H"
+
+# --- the history question (claude/projects/) --------------------------------
+# --reset-sandbox serves two intents that DISAGREE here. Migration wants the
+# corpus kept: transcripts are not path-stale, and sandy's era-consolidation
+# merges the old project slug into the new one on the next launch. Remediation
+# wants it wiped: memory reaches the agent's context every session, so a
+# compromised session writing to it is persistent injection with no expiry.
+#
+# Neither default is right for both, so the operator answers -- and the answer
+# is DELIBERATELY NOT --yes. --yes means "do not ask me to confirm the thing I
+# asked for"; this is a different question with a different blast radius, and
+# conflating them is how a scripted reset destroys 149MB of irreplaceable
+# transcripts by omission.
+_s141h() {   # $1 = flags -> "transcript|memory|pip|relay" survival
+    local d h ws
+    d="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$d/ws"
+    ws="$d/ws"; h="$(printf '%s' "$ws" | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-8)"
+    local sb="$d/sandboxes/ws-$h"
+    mkdir -p "$sb/claude/projects/p/memory" "$sb/claude/plugins" "$sb/pip" "$sb/relay-bin"
+    printf '{\n  "workspace_path": "%s"\n}\n' "$ws" > "$sb/WORKSPACE.json"
+    : > "$sb/claude/projects/p/s.jsonl"; : > "$sb/claude/projects/p/memory/MEMORY.md"
+    : > "$sb/claude/plugins/x"; : > "$sb/pip/cache"; : > "$sb/relay-bin/relay"
+    SANDY_HOME="$d" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$ws" --yes $1 </dev/null >/dev/null 2>&1
+    printf '%s|%s|%s|%s' \
+        "$([ -f "$sb/claude/projects/p/s.jsonl" ] && echo keep || echo gone)" \
+        "$([ -f "$sb/claude/projects/p/memory/MEMORY.md" ] && echo keep || echo gone)" \
+        "$([ -e "$sb/pip/cache" ] && echo keep || echo gone)" \
+        "$([ -e "$sb/relay-bin/relay" ] && echo keep || echo gone)"
+    rm -rf "$d"
+}
+check "§141(13) --keep-history preserves transcripts AND memory while still clearing the package caches — that split is the whole point, since only the caches are path-stale" \
+    bash -c '[ "$1" = "keep|keep|gone|keep" ]' _ "$(_s141h --keep-history)"
+check "§141(14) --purge-history wipes them, because that is what remediating a distrusted sandbox requires (mutation: make keep the default and this goes red while (13) passes)" \
+    bash -c '[ "$1" = "gone|gone|gone|keep" ]' _ "$(_s141h --purge-history)"
+# THE CHECK THAT MATTERS MOST: --yes must not silently choose.
+_S141_NOANS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$_S141_NOANS/ws"
+_s141_nh="$(printf '%s' "$_S141_NOANS/ws" | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-8)"
+mkdir -p "$_S141_NOANS/sandboxes/ws-$_s141_nh/claude/projects/p"
+printf '{\n  "workspace_path": "%s"\n}\n' "$_S141_NOANS/ws" > "$_S141_NOANS/sandboxes/ws-$_s141_nh/WORKSPACE.json"
+: > "$_S141_NOANS/sandboxes/ws-$_s141_nh/claude/projects/p/s.jsonl"
+_S141_NRC=0
+SANDY_HOME="$_S141_NOANS" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$_S141_NOANS/ws" --yes </dev/null >/dev/null 2>&1 || _S141_NRC=$?
+check "§141(15) --yes ALONE is refused non-interactively — it answers whether to proceed, not what to do with the corpus (got rc=$_S141_NRC)" \
+    test "$_S141_NRC" -eq 1
+check "§141(16) ...and the refusal destroys NOTHING, so a cron job that forgot the flag loses no data" \
+    test -f "$_S141_NOANS/sandboxes/ws-$_s141_nh/claude/projects/p/s.jsonl"
+rm -rf "$_S141_NOANS"
 
 rm -rf "$_S141_DIR"
-unset _S141_DIR _S141_SANDY _S141_BLK _S141_CLEAN _S141_DIRTY _S141_H _S141_DRY _S141_RC _s141_w _s141_ws _s141_h _s141_d
+unset _S141_DIR _S141_SANDY _S141_BLK _S141_CLEAN _S141_DIRTY _S141_H _S141_DRY _S141_RC _S141_NOANS _S141_NRC _s141_nh _s141_w _s141_ws _s141_h _s141_d
 
 # BEGIN SUMMARY
 # ============================================================

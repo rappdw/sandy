@@ -921,9 +921,11 @@ Your **workspaces are never touched** — the change is entirely inside sandy's 
 One command, once, for every sandbox on the host:
 
 ```sh
-sandy --reset-sandbox --all --dry-run   # see what it will do
-sandy --reset-sandbox --all --yes
+sandy --reset-sandbox --all --dry-run                  # see what it will do
+sandy --reset-sandbox --all --keep-history --yes       # migrate
 ```
+
+`--keep-history` preserves `claude/projects/` — every session transcript and all auto-memory. **It is not the default and `--yes` does not choose it**, because the same command is also how you remediate a sandbox you distrust, and there memory is the thing you most want gone: it reaches the agent's context every session, so a compromised session writing to it is persistent injection with no expiry. Run interactively and sandy asks; run non-interactively and it requires `--keep-history` or `--purge-history` rather than guessing.
 
 | destroyed (rebuilt on next launch) | preserved |
 |---|---|
@@ -931,11 +933,11 @@ sandy --reset-sandbox --all --yes
 | the `venv/` overlay | `relay-bin/` (an installed relay) |
 | per-agent state: `claude/`, `gemini/`, `codex/`, `opencode/`, `grok/` | `agent-args.<agent>` (per-agent launch args) |
 | `.claude.json`, installed plugins, approvals | `.handoff-enabled` |
-| **`claude/projects/` — every session transcript and all auto-memory** | |
+| `claude/projects/` — transcripts and auto-memory, **unless `--keep-history`** | `claude/projects/` **with `--keep-history`** |
 
-### Back up your session history and memory first
+### Back up anyway
 
-The destroyed column includes **`claude/projects/`**, which is where Claude Code keeps session transcripts (`*.jsonl`) and auto-memory. Those are not caches — nothing regenerates them. Save them before you migrate:
+`--keep-history` preserves the corpus, but a backup costs little against 149 MB of irreplaceable transcripts per sandbox:
 
 ```sh
 tar czf sandy-history-$(date +%F).tar.gz ~/.sandy/sandboxes/*/claude/projects
@@ -946,8 +948,6 @@ If you use [lore](https://github.com/rappdw/lore), also export the memory corpus
 ```sh
 lore export --json > lore-memories-$(date +%F).json
 ```
-
-Whether the reset should preserve `claude/projects/` by default is an open question: `--reset-sandbox` is also the remediation for a sandbox you suspect is poisoned, and memory is exactly what a poisoned session would poison. Until that is settled, back up.
 
 **Do not use `rm -rf` on the sandbox directory.** It takes the preserved column with it, and nothing recreates those — `relay-bin/` and `agent-args.*` are operator state a repository cannot carry.
 
