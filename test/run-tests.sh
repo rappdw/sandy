@@ -14536,7 +14536,13 @@ _S134_SANDY="$SANDY_SCRIPT"
 _s134_marker() {
     # Evaluate the real marker printf with controlled globals; echo the JSON.
     local _blk
-    _blk="$(awk '/"schema": 1/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$_S134_SANDY")"
+    # Anchored on the marker printf's own OPENING, not on a substring that
+    # merely happened to be unique when this was written. `"schema": 1` now
+    # also appears in the selected.json renderer (2.0.0), which silently moved
+    # this range to the wrong span and reddened §134(1)-(3) against an emitter
+    # that was entirely correct. Same lesson as §123(22): an assertion anchored
+    # on something whose uniqueness is incidental breaks on an unrelated change.
+    _blk="$(awk '/^printf .\{.n  "schema": 1,/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$_S134_SANDY")"
     (
         sandy_full_version() { echo "9.9.9"; }
         _sandy_egress_mode=off
