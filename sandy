@@ -895,7 +895,20 @@ _sandy_fm_load() {
     if command -v node >/dev/null 2>&1; then
         _proj="$(_sandy_fm_projector_js | node - "$_mf" 2>&1)" || { _SANDY_FM_ERR="projector failed"; return 1; }
     elif command -v jq >/dev/null 2>&1; then
-        _proj="$(_sandy_fm_projector_jq | jq -r -f /dev/stdin "$_mf" 2>&1)" || { _SANDY_FM_ERR="not valid JSON"; return 1; }
+        # #327: jq's own parse error carries the line and column, it is ALREADY
+        # captured by the 2>&1 above, and this used to throw it away -- so a
+        # jq-only host was told "not valid JSON" and nothing else, for a file
+        # the operator had just hand-edited. The node path never had this
+        # problem because JSON.parse is wrapped inside the JS and emits its own
+        # ERR line, which is exactly the kind of asymmetry §135(20) exists to
+        # police and structurally cannot see: it diffs projector OUTPUT, while
+        # this divergence is in the caller's error handling.
+        # `jq: ` is stripped and newlines folded so the refusal stays one line.
+        if ! _proj="$(_sandy_fm_projector_jq | jq -r -f /dev/stdin "$_mf" 2>&1)"; then
+            _proj="$(printf '%s' "$_proj" | tr '\n' ' ' | sed 's/^jq: //; s/  */ /g; s/ *$//')"
+            _SANDY_FM_ERR="not valid JSON${_proj:+: $_proj}"
+            return 1
+        fi
     else
         _SANDY_FM_ERR="neither node nor jq is available, and a feature manifest cannot be read without one"
         return 1
