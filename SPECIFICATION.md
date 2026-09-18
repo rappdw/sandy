@@ -1508,7 +1508,7 @@ ENV PATH="/home/sandy/.local/bin:/usr/local/cargo/bin:/usr/local/go/bin:$PATH"
 ```dockerfile
 FROM ${BASE_IMAGE_NAME}
 
-RUN HOME=/home/sandy su -s /bin/bash claude -c \
+RUN HOME=/home/sandy su -s /bin/bash sandy -c \
     "curl -fsSL https://claude.ai/install.sh | bash" \
  && cp -L /home/sandy/.local/bin/claude /usr/local/bin/claude \
  && mv /home/sandy/.local/share/claude /opt/claude-code \

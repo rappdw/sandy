@@ -4584,8 +4584,14 @@ check "...and points at --reset-sandbox, which PRESERVES relay-bin/ and agent-ar
     bash -c 'grep -q "sandy --reset-sandbox --workspace" "$1"' -- "$_SBX_SCRIPT"
 check "...and exits 6 (refused), not a generic 1 (mutation: change it back and a --start client waits out 600s to exit 8 instead of failing in ~1s)" \
     bash -c 'awk "/below-floor\\)/{f=1} f&&/exit [0-9]/{print; exit}" "$1" | grep -q "exit 6"' -- "$_SBX_SCRIPT"
+# Delimited by the case branch itself (`below-floor)` .. `;;`), not by the first
+# line matching /exit [0-9]/. The earlier form terminated on a COMMENT -- the
+# one explaining that a client "polls out its full readiness timeout to exit 8"
+# -- and so stopped before reaching the marker it was looking for. A range that
+# ends on a pattern the prose can satisfy is a range the prose can break, and
+# this one was broken by the comment written to explain it.
 check "...and drops the .fatal marker, which is what makes the --start client stop waiting" \
-    bash -c 'awk "/below-floor\\)/{f=1} f&&/exit [0-9]/{exit} f" "$1" | grep -q "_sandy_daemon_fatal"' -- "$_SBX_SCRIPT"
+    bash -c 'awk "/below-floor\\)/{f=1} f{print} f&&/^            ;;/{exit}" "$1" | grep -q "_sandy_daemon_fatal"' -- "$_SBX_SCRIPT"
 
 # ============================================================
 info "52. Long-lived OAuth token (claude setup-token) auth"
@@ -5006,8 +5012,15 @@ _ps_run() { # $1=mode(""|light) → emits JSON on stdout, spawn log to $DOCKER_C
 _ps_full="$(PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$(mktemp)" bash "$_SBX_SCRIPT" --print-state 2>/dev/null)"
 check "print-state emits workspace_path from WORKSPACE.json (#19)" \
     bash -c 'echo "$1" | grep -q "\"workspace_path\":\"/ws/demo\""' -- "$_ps_full"
-check "print-state emits empty workspace_path for a legacy (no-marker) sandbox" \
-    bash -c 'echo "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); assert any(s[\"name\"].startswith(\"legacy\") and s[\"workspace_path\"]==\"\" for s in d[\"sandboxes\"])"' -- "$_ps_full"
+# null, not "", as of schema 2. Empty string is a VALUE; null is the absence of
+# one, and every other unknown in this document (agents, effort,
+# lock_holder_alive) was already null. The "" was unreadable in practice: a
+# consumer testing it for falsiness cannot distinguish "this sandbox has no
+# WORKSPACE.json" from "sandy does not emit this field at all" -- and one
+# consumer concluded the latter and wrote it into their spec, then worked around
+# a field that had been there the whole time.
+check "print-state emits NULL workspace_path for a legacy (no-marker) sandbox — not an empty string, which is a value and reads as a working answer" \
+    bash -c 'echo "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); assert any(s[\"name\"].startswith(\"legacy\") and s[\"workspace_path\"] is None for s in d[\"sandboxes\"])"' -- "$_ps_full"
 
 # #18: light mode → installed_images empty, workspace_path still present.
 _ps_light="$(PATH="$_PS_BIN:$PATH" SANDY_HOME="$_PS_HOME" DOCKER_CALL_LOG="$(mktemp)" bash "$_SBX_SCRIPT" --print-state light 2>/dev/null)"
@@ -15196,6 +15209,16 @@ check "§140(8) the agent install path and image names are untouched (/opt/claud
     bash -c 'grep -q "/opt/claude-code" "$1" && grep -q "sandy-claude-code" "$1"' _ "$_S140_SANDY"
 check "§140(9) the credential env vars are untouched (a naive rename would have eaten CLAUDE_CODE_OAUTH_TOKEN)" \
     bash -c 'grep -q "CLAUDE_CODE_OAUTH_TOKEN" "$1"' _ "$_S140_SANDY"
+# THE SPELLING THAT GOT AWAY. §140 originally checked `-u claude` and the passwd
+# overlay, and missed `su -s /bin/bash claude` in the Dockerfile heredoc -- the
+# HOME on the same line had been renamed, the USER had not. Static checks passed;
+# the IMAGE BUILD failed in CI, which is the only place that line runs.
+#
+# So this enumerates the ways a username is named to a command rather than
+# checking the two that happened to be known. If a future change introduces a
+# fourth spelling, it fails here instead of in a build log.
+check "§140(9b) NO command names 'claude' as a USER — su, gosu, chown, USER, adduser, useradd or docker exec -u. The rename moved the user; a path renamed on the same line is not the same thing" \
+    bash -c '! grep -qE "(su( -s [^ ]+)? claude|gosu claude|chown( +-[^ ]+)* +[^ ]*claude|--chown=[a-z:]*claude|^USER claude|adduser[^\"]*claude|useradd[^\"]*claude|-u claude)" "$1"' _ "$_S140_SANDY"
 
 # --- the workspace mapping, which is the user-visible half --------------------
 check "§140(10) the \$HOME-relative workspace mount maps under the new home" \

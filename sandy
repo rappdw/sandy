@@ -5711,7 +5711,7 @@ FROM ${BASE_IMAGE_NAME}
 # tmpfs overlay at runtime, we relocate the binary to /usr/local/bin
 # and the data directory to /opt/claude-code.  The entrypoint symlinks
 # them back into the expected paths.
-RUN HOME=/home/sandy su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
+RUN HOME=/home/sandy su -s /bin/bash sandy -c "curl -fsSL https://claude.ai/install.sh | bash" \\
  && cp -L /home/sandy/.local/bin/claude /usr/local/bin/claude \\
  && mv /home/sandy/.local/share/claude /opt/claude-code \\
  && { /usr/local/bin/claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version || true; }
@@ -5837,7 +5837,7 @@ generate_dockerfile_full() {
 FROM ${BASE_IMAGE_NAME}
 # Install all five agents. Used for any multi-agent combo.
 # Claude Code
-RUN HOME=/home/sandy su -s /bin/bash claude -c "curl -fsSL https://claude.ai/install.sh | bash" \\
+RUN HOME=/home/sandy su -s /bin/bash sandy -c "curl -fsSL https://claude.ai/install.sh | bash" \\
  && cp -L /home/sandy/.local/bin/claude /usr/local/bin/claude \\
  && mv /home/sandy/.local/share/claude /opt/claude-code \\
  && { /usr/local/bin/claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version || true; }
