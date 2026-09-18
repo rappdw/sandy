@@ -14515,7 +14515,7 @@ unset _S133_ROOT _S133_LIVE _S133_DEAD _S133_LIVE_RC _S133_DEAD_RC _S133_DEADPID
 
 # ============================================================
 echo ""
-echo "§134: the sandbox slug in-container (#303), features/ markers (#304), and the marker-gated shared mount (#305)"
+echo "§134: the sandbox slug in-container (#303)"
 # ============================================================
 # Three additive features that compose. Read them in order; each block below
 # says what it is asserting and what the mutation is.
@@ -14578,145 +14578,20 @@ _S134_ENV="$(bash -c '
 check "§134(4) SANDY_SANDBOX_NAME is exported into the container with the slug as its value (got: ${_S134_ENV:-none})" \
     bash -c 'printf "%s" "$1" | grep -qx "SANDY_SANDBOX_NAME=myrepo-abc12345"' _ "$_S134_ENV"
 
-# --- #304: features/<name> markers ------------------------------------------
-# WHY. Sandy had no way to record "this sandbox participates in X" for an X
-# that is not sandy's, so consumers kept a registry beside sandy's state and the
-# two could drift. Privileged by construction of WHERE it lives ($SANDY_HOME,
-# which a repository cannot reach) -- no new tier, no key, no prompt.
+# --- #304/#305 marker tests: RETIRED in 2.0.0 -------------------------------
+# The per-sandbox features/<name> marker and SANDY_FEATURES_DIR are gone (D3,
+# D4): a feature's manifest decides which sandboxes it applies to, evaluated at
+# every launch. Their checks are not weakened here, they are SUPERSEDED --
+# §135 covers the predicate they pinned (it is now the manifest's `name` and
+# `from` rule, unchanged in substance), §136 covers what a selected sandbox
+# gets and what an unselected one does not, and §137 covers the record that
+# replaced the marker. Deleting them without saying where they went is how a
+# retired mechanism takes its guards with it unnoticed.
 #
-# It is a REGISTRY: sandy reports it and (apart from #305) never acts on it.
-_S134_FSB="$_S134_ROOT/sb"
-mkdir -p "$_S134_FSB/features" "$_S134_ROOT/linktarget"
-: > "$_S134_FSB/features/amap"                       # valid: regular file
-mkdir -p "$_S134_FSB/features/connector"             # valid: directory
-ln -s "$_S134_ROOT/linktarget" "$_S134_FSB/features/evil"   # symlink TO A DIRECTORY
-: > "$_S134_FSB/features/bad name"                   # invalid: space
-: > "$_S134_FSB/features/.hidden"                    # invalid AND dot-globbed
-: > "$_S134_FSB/features/..sneaky"                   # invalid AND dot-globbed
-_S134_SCAN="$(bash -c '
-    _blk="$(awk "/^_sandy_features_scan\(\) \{/,/^\}/" "$1")"
-    eval "$_blk"
-    _sandy_features_scan "$2"
-    printf "NAMES=%s\nLIST=%s\nPROBS=%s\n" "$_SANDY_FEAT_NAMES" "$_SANDY_FEAT_LIST" "$_SANDY_FEAT_PROBLEMS"
-' _ "$_S134_SANDY" "$_S134_FSB" 2>/dev/null || true)"
-_S134_NAMES="$(printf '%s' "$_S134_SCAN" | sed -n 's/^NAMES=//p')"
-_S134_PROBS="$(printf '%s' "$_S134_SCAN" | sed -n 's/^PROBS=//p')"
-
-check "§134(pre-b) the features scanner was extracted and ran (mutation: a rename empties it and every #304 check goes vacuous)" \
-    bash -c 'printf "%s" "$1" | grep -q "^NAMES=\["' _ "$_S134_SCAN"
-check "§134(5) a regular file and a directory are both valid feature markers, sorted (got: ${_S134_NAMES:-none})" \
-    test "$_S134_NAMES" = '["amap","connector"]'
-check "§134(6) a SYMLINK TO A DIRECTORY is a problem, not a feature — -L is tested BEFORE -d, which follows links, so reordering them would accept it" \
-    bash -c 'printf "%s" "$1" | grep -q "evil: is a symlink"' _ "$_S134_PROBS"
-check "§134(7) ...and it is absent from the names, so a hand-placed link cannot enrol a sandbox" \
-    bash -c '! printf "%s" "$1" | grep -q "\"evil\""' _ "$_S134_NAMES"
-check "§134(8) an invalid name is REPORTED, not silently dropped" \
-    bash -c 'printf "%s" "$1" | grep -q "bad name: invalid name"' _ "$_S134_PROBS"
-# The dotfile case is its own check because a bare * glob SKIPS dotfiles: the
-# first implementation reported three problems and silently swallowed two more.
-# An entry sandy will not use and also does not mention is the exact silent-skip
-# failure this design exists to retire. Mutation: drop the .[!.]* and ..?* globs
-# and both of these go red while everything above still passes.
-check "§134(9) a DOTFILE entry is reported — a bare * glob skips dotfiles, so this needs the extra globs" \
-    bash -c 'printf "%s" "$1" | grep -q "[.]hidden: invalid name"' _ "$_S134_PROBS"
-check "§134(10) ...including a ..-prefixed entry, which .[!.]* alone does not match" \
-    bash -c 'printf "%s" "$1" | grep -q "[.][.]sneaky: invalid name"' _ "$_S134_PROBS"
-# Empty and absent must both be [] rather than null: a consumer iterating the
-# array should never have to special-case "no features" twice.
-_S134_EMPTY="$(bash -c '
-    _blk="$(awk "/^_sandy_features_scan\(\) \{/,/^\}/" "$1")"; eval "$_blk"
-    mkdir -p "$2/empty/features"; _sandy_features_scan "$2/empty"; printf "%s" "$_SANDY_FEAT_NAMES"
-    _sandy_features_scan "$2/nosuchsandbox"; printf " %s" "$_SANDY_FEAT_NAMES"
-' _ "$_S134_SANDY" "$_S134_ROOT" 2>/dev/null || true)"
-check "§134(11) an empty features/ and an absent one both report [], never null (got: ${_S134_EMPTY:-none})" \
-    test "$_S134_EMPTY" = "[] []"
-# Same lesson as §123(22), which this change itself broke: call the predicate,
-# do not grep its literal pattern. A neighbour-anchored match here would break
-# for whoever adds the NEXT preserved entry, against code that is correct.
-_S134_KEEP="$(grep -m1 '^    _rs_keep() {' "$_S134_SANDY" || true)"
-check "§134(12) --reset-sandbox PRESERVES features/ — without this a reset silently un-enrols the sandbox" \
-    bash -c '_rs_keep_approvals=false; eval "$1"; _rs_keep features' _ "$_S134_KEEP"
-check "§134(12b) ...while an ordinary sandbox dir is still destroyed, so (12) is not satisfied by a predicate that preserves everything" \
-    bash -c '_rs_keep_approvals=false; eval "$1"; ! _rs_keep npm-global' _ "$_S134_KEEP"
-
-# --- #305: the marker-gated shared mount ------------------------------------
-# WHY GATED. An unconditional shared mount would install into EVERY sandbox,
-# including ones running a different agent -- the incident the `agents` field
-# exists for. Gating makes "do not install here" expressible; without it, it
-# is not.
-#
-# :ro IS THE BOUNDARY, not permission bits: the container runs as the host uid
-# and owns the payload, so bits bind nothing. Asserted on the mount flag here
-# because this harness assembles RUN_FLAGS without Docker; the EROFS behaviour
-# of a :ro bind mount is docker's, not sandy's, and is exercised for real by
-# the relay slot in acceptance-handoff-dirs.sh.
-# src/unmarked has a payload and NO marker -- it is the negative control for
-# (15). src/connector is deliberately NOT reused for that: `connector` IS a
-# valid marker above (check 5), so it is mounted correctly and asserting its
-# absence would fail against working code. The first cut of this section made
-# exactly that mistake and (15) caught it.
-mkdir -p "$_S134_ROOT/src/amap" "$_S134_ROOT/src/connector" "$_S134_ROOT/src/unmarked"
-: > "$_S134_FSB/features/nosrc"
-_s134_mounts() {
-    # $1 = SANDBOX_DIR, $2 = SANDY_FEATURES_DIR (empty to leave it unset)
-    bash -c '
-        warn() { printf "WARN:%s\n" "$*"; }
-        _s="$(awk "/^_sandy_features_scan\(\) \{/,/^\}/" "$1")"; eval "$_s"
-        _m="$(awk "/Marker-gated shared feature mounts/,/^fi\$/" "$1")"
-        RUN_FLAGS=(); SANDBOX_DIR="$2"; SANDY_FEATURES_DIR="$3"
-        eval "$_m"
-        printf "%s\n" ${RUN_FLAGS[@]+"${RUN_FLAGS[@]}"}
-    ' _ "$_S134_SANDY" "$1" "$2" 2>/dev/null || true
-}
-_S134_M_ON="$(_s134_mounts "$_S134_FSB" "$_S134_ROOT/src")"
-check "§134(pre-c) the mount block was extracted and ran (mutation: a rename empties it and every #305 check goes vacuous)" \
-    bash -c 'printf "%s" "$1" | grep -q "WARN:\|/opt/sandy/features/"' _ "$_S134_M_ON"
-check "§134(13) a MARKED feature with a matching source is mounted at /opt/sandy/features/<name>" \
-    bash -c 'printf "%s" "$1" | grep -qx ".*/src/amap:/opt/sandy/features/amap:ro"' _ "$_S134_M_ON"
-check "§134(14) ...and it is :ro — the mount flag is the boundary, not permission bits, because the agent runs as the host uid and owns the payload" \
-    bash -c 'printf "%s" "$1" | grep "/opt/sandy/features/amap" | grep -q ":ro$"' _ "$_S134_M_ON"
-# THE SECURITY CHECK. `unmarked` has a source directory and NO marker. If the
-# gate is removed it gets mounted into a sandbox that never asked for it, which
-# is the 51-sandbox incident made structural. Mutation: iterate the SOURCE
-# directory instead of the markers and this goes red while (13) still passes.
-check "§134(15) an UNMARKED feature is NOT mounted even though its source exists — this is the whole security claim of #305" \
-    bash -c '! printf "%s" "$1" | grep -q "/opt/sandy/features/unmarked"' _ "$_S134_M_ON"
-check "§134(16) a marker with NO matching source WARNS and names it, rather than no-opping silently" \
-    bash -c 'printf "%s" "$1" | grep -q "WARN:.*nosrc.*does not exist"' _ "$_S134_M_ON"
-check "§134(17) ...and mounts nothing for it" \
-    bash -c '! printf "%s" "$1" | grep -q "/opt/sandy/features/nosrc"' _ "$_S134_M_ON"
-_S134_M_OFF="$(_s134_mounts "$_S134_FSB" "")"
-check "§134(18) with SANDY_FEATURES_DIR unset nothing is mounted at all, and no warning is emitted — the feature is inert without the operator opting in" \
-    test -z "$(printf '%s' "$_S134_M_OFF" | tr -d '[:space:]')"
-check "§134(19) SANDY_FEATURES_DIR is PRIVILEGED — it chooses a host path to mount, so a committed workspace config must not set it" \
-    bash -c '"$1" --print-schema | tr "," "\n" | grep -q "SANDY_FEATURES_DIR"' _ "$_S134_SANDY"
-
-# --- the PUBLISHED marker rule, because consumers write these markers --------
-# features/ exists so a host-side tool can enrol a sandbox, which means the tool
-# WRITES the marker -- so the predicate is part of the consumer contract, not an
-# implementation detail. SPEC_INTROSPECTION originally described the rejected
-# shapes illustratively ("a symlink, an invalid name, a dotfile") and never
-# stated what is ACCEPTED. The first consumer to write markers read that as "a
-# regular file" and would have refused a DIRECTORY, which sandy honours --
-# producing a sandbox sandy reports as enrolled and the consumer does not. That
-# is precisely the silent disagreement feature_problems exists to prevent, one
-# level up, and it is the same shape as #310: a doc that describes a hazard
-# without stating the part that decides behaviour.
-#
-# (20) pins the case that actually diverged. (21) pins that the rule is stated
-# as a rule at all, so deleting the paragraph and keeping the word "directory"
-# somewhere incidental does not satisfy it.
-_S134_SPEC="$(cd "$(dirname "$0")/.." && pwd)/SPEC_INTROSPECTION.md"
-check "§134(19-pre) SPEC_INTROSPECTION.md was found and carries the features contract (mutation: a rename empties it and the two checks below go vacuous)" \
-    bash -c '[ -f "$1" ] && grep -q "feature_problems" "$1"' _ "$_S134_SPEC"
-check "§134(20) the contract states that a DIRECTORY is a valid marker — the one shape a consumer got wrong, against code that honours it" \
-    bash -c 'grep -q "either a regular file or a directory" "$1"' _ "$_S134_SPEC"
-check "§134(21) ...and states the rule as a rule, not as a list of examples (mutation: drop the marker-rule paragraph and this goes red while §134(20) could still pass on a stray word)" \
-    bash -c 'grep -q "The marker rule, in full" "$1"' _ "$_S134_SPEC"
+# What remains below is #303, which 2.0.0 does not touch.
 
 rm -rf "$_S134_ROOT"
-unset _S134_SPEC _S134_KEEP _S134_ROOT _S134_SANDY _S134_MARKER _S134_MK_NAME _S134_MK_WS _S134_ENV \
-      _S134_FSB _S134_SCAN _S134_NAMES _S134_PROBS _S134_EMPTY _S134_M_ON _S134_M_OFF
+unset _S134_ROOT _S134_SANDY _S134_MARKER _S134_MK_NAME _S134_MK_WS _S134_ENV
 
 # ============================================================
 echo ""

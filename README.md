@@ -504,22 +504,36 @@ A sandbox with a **live session** is named and skipped the same way — it canno
 
 **`handoff.state: "ok"` means the directories are correct on the host.** It does not mean the tree is mounted in any container — `--print-state` reads no config and cannot know the next launch's `SANDY_HANDOFF_DIRS`. For a *running* sandbox, check the container's mounts.
 
-### Feature markers and shared payloads (`SANDY_FEATURES_DIR`)
+### Features (`$SANDY_HOME/features/<name>/feature.json`)
 
-`$SANDBOX_DIR/features/<name>` records that a sandbox takes part in something that is not sandy's — a connector, a fleet agent, whatever you are deploying. Sandy holds the fact and reports it in `--print-state` as `sandboxes[].features`; it does not know what a feature *is*.
+A **feature** is something you deploy into sandboxes that is not sandy's — a connector, a fleet agent, a shared toolchain. It lives in one directory with a manifest that says which sandboxes get it and what they get:
 
-```sh
-touch ~/.sandy/sandboxes/<sandbox>/features/amap     # enrol
-sandy --print-state | jq '.sandboxes[] | {name, features}'
+```json
+{
+  "sandboxes": { "include": ["*"], "exclude": ["scratch-*"] },
+  "agents":    { "include": ["claude"] },
+  "create":    ["instances/${slug}/inbox"],
+  "mounts": [
+    { "name": "payload", "from": "payload", "export": "MYTOOL_DIR" },
+    { "name": "inbox",   "from": "instances/${slug}/inbox" }
+  ],
+  "entry": "payload/relay"
+}
 ```
 
-The markers live under `$SANDY_HOME`, which a cloned repository cannot write, so enrolment is per-machine operator state — the same tier argument as `.handoff-enabled`. `--reset-sandbox` preserves them.
+Sandy computes every container path — you name a mount, sandy decides where it lands (`payload` at `/opt/sandy/features/<name>`, anything else under `~/.<name>/`) and exports it if you ask. Mounts are **read-only unless you say `rw`**.
 
-Set `SANDY_FEATURES_DIR=<host-dir>` (privileged) and each `<host-dir>/<name>` is mounted **read-only** at `/opt/sandy/features/<name>` into **only** the sandboxes carrying that marker. One install, one version, however many sandboxes — rather than a copy per sandbox to keep in sync.
+**Selection is enrolment.** A sandbox gets the feature only if an include matches in both blocks and no exclude matches in either. A sandbox that is not selected gets nothing at all — no mount, no export, no entry. Check what applied:
 
-It is gated on the marker on purpose: an unconditional shared mount would install into every sandbox, including ones running a different agent. A marker with no matching source directory warns rather than doing nothing quietly. And `:ro` is the real boundary — the container runs as your uid and owns the payload, so file permissions would not stop it rewriting its own tooling. Sandy guarantees the **first** executable; a binary that runs something out of a writable directory is replaceable at the second step.
+```sh
+sandy --print-state | jq '.sandboxes[] | {name, features, feature_problems}'
+```
 
-### Installing a relay (`SANDY_RELAY`)
+and `$SANDY_HOME/features/<name>/selected.json` says the same thing for tools that cannot run sandy.
+
+Reading a manifest needs `node` or `jq` on the host. If neither is there, a launch that would use one **refuses** rather than mounting a guess — see `sandy --doctor`.
+
+### Installing a relay (`SANDY_RELAY`)### Installing a relay (`SANDY_RELAY`)
 
 A *relay* is a program that drains and fills the handoff directories — the thing that actually moves files. Before 1.11.0 the only way to install one was `SANDY_HANDOFF_RELAY=<path>`, a **privileged** key naming a file. That cost a per-workspace approval prompt, and it could not be turned on by default: it names a file sandy does not install, and a configured relay that cannot start fails the launch, so a global default would refuse to launch every sandbox that had not been provisioned by hand.
 
