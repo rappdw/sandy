@@ -3733,6 +3733,24 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
             error "Non-interactive; pass --yes to reset without a prompt."; exit 1
         fi
     fi
+    # #339: MAKE THE TREE WRITABLE BEFORE DESTROYING IT, or the destroy is not
+    # all-or-nothing. Go's module cache is 0444 files inside 0555 directories,
+    # and a 0555 directory denies its OWNER the write needed to unlink its
+    # children -- so `rm -rf` fails partway. `go clean -modcache` exists for
+    # exactly this reason.
+    #
+    # MEASURED, on Linux, with real Go-cache permissions: the reset aborted on
+    # the unreadable entry (rm is unguarded, so `set -e` takes it) having
+    # ALREADY destroyed every entry sorting before it. What survived was
+    # decided by GLOB ORDER and nothing else -- `cargo/` gone and `venv/` kept,
+    # because c < g < v. There is no useful sentence to write about that state,
+    # which is why this makes it impossible rather than documenting it.
+    #
+    # Safe on the preserved set: _rs_keep is what protects WORKSPACE.json,
+    # relay-bin/, agent-args.* and claude/projects/, and it never consults mode
+    # bits. Verified after the fix -- exit 0, full reset, preserved set intact.
+    # The chmod touches only a directory sandy owns and is about to empty.
+    chmod -R u+w "$_rs_dir" 2>/dev/null || true
     for _rs_e in "$_rs_dir"/* "$_rs_dir"/.[!.]*; do
         [ -e "$_rs_e" ] || continue
         _rs_bn2="$(basename "$_rs_e")"
