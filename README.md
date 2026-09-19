@@ -4,6 +4,23 @@
 
 # sandy — an isolated sibling for your coding agents
 
+> ### ⚠️ Upgrading from 1.x? Migrate your sandboxes first
+>
+> 2.0 renames the container user and home from `claude` to `sandy`. `/home/claude` is baked into virtualenv shebangs, `GOPATH`, `PYTHONUSERBASE` and npm/cargo metadata, so **every sandbox created by 1.x must be migrated** — sandy refuses to launch against one rather than limping into it and failing later in ways that look like broken packages.
+>
+> **Your workspaces are never touched.** The change is entirely inside sandy's own state under `~/.sandy/`.
+>
+> ```sh
+> sandy --reset-sandbox --all --dry-run                 # see exactly what it will do
+> sandy --reset-sandbox --all --keep-history --yes      # migrate, keeping transcripts + memory
+> ```
+>
+> `--keep-history` preserves every session transcript and all auto-memory. **It is not the default, and `--yes` does not choose it** — the same command is how you remediate a sandbox you distrust, and there memory is the thing you most want gone. Run it interactively and sandy asks; run it non-interactively and it requires an explicit `--keep-history` or `--purge-history` rather than guessing.
+>
+> **Do not use `rm -rf` on a sandbox directory.** It also destroys `relay-bin/` and `agent-args.*` — operator state that nothing recreates.
+>
+> **[Full upgrade guide →](#upgrading-to-20)** — what is preserved, what to back up first, and what to do about scripts that hardcode `/home/claude`.
+
 When you're giving AI agents real autonomy to write code, run tests, and modify systems, the environment needs OS-enforced boundaries, not permission prompts. Sandy is the tool we built to make that work.
 
 Sandy is **two things at once**: a **security sandbox** that keeps a rogue or prompt-injected agent off your machine, and a **per-project virtual environment** that keeps each project's agent state — plugins, memory, credentials, installed packages — from bleeding into the others. It's the same `venv` mental model you already use for Python, applied to your whole coding-agent setup — and the second half is useful even if you completely trust the agent.
