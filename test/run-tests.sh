@@ -15290,6 +15290,14 @@ printf '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts":
     > "$_S137_SIB/amap/feature.json"
 printf '{"graph":"the router spelling, unknown to sandy"}' > "$_S137_SIB/amap/router.json"
 printf 'a stray file at the features ROOT\n' > "$_S137_SIB/loose-file.txt"
+# A consumer stashes a daemon's ledger at features/<f>/migration/<slug>/ across
+# a reset, so the unknown-sibling rule has to hold for a DIRECTORY TREE and not
+# only a file. Same code path, but (19)/(19b) asserted only the file, and
+# "measured once" is what this block exists to stop being good enough.
+mkdir -p "$_S137_SIB/amap/migration/box-11111111/connector/delivery-state"
+printf 'ledger row\n' > "$_S137_SIB/amap/migration/box-11111111/connector/delivery-state/ledger.jsonl"
+_S137_SIB_TREE="$(cd "$_S137_SIB/amap/migration" && find . | sort | tr '\n' ' ')"
+_S137_SIB_LSUM="$(cksum < "$_S137_SIB/amap/migration/box-11111111/connector/delivery-state/ledger.jsonl")"
 _S137_SIB_SUM="$(cksum < "$_S137_SIB/amap/router.json")"
 _S137_SIB_OUT="$(bash -c 'set -uo pipefail; eval "$1"
     _SANDY_FM_HOME=/home/sandy
@@ -15302,6 +15310,40 @@ check "§137(19) a feature dir carrying an unknown regular file still applies, e
              ! printf "%s\n" "$1" | grep -q "router.json"' _ "$_S137_SIB_OUT"
 check "§137(19b) ...and the unknown sibling is left BYTE-IDENTICAL — sandy reads feature.json and the sources its mounts name, nothing else in that directory" \
     bash -c 'test "$(cksum < "$1/amap/router.json")" = "$2"' _ "$_S137_SIB" "$_S137_SIB_SUM"
+# Two claims, and the second is the one the consumer depends on. "Unmodified"
+# alone is weakly falsifiable -- nothing writes there today, so it guards a
+# future sweep rather than a present bug. "NOT A MOUNT SOURCE" is the live
+# property: the stash must never become one, because that would put another
+# sandbox's delivery ledger inside a container. The descend mutation reddens
+# (19) on the record COUNT and this on the SOURCE, which is what makes it a
+# check rather than a restatement of (19).
+check "§137(19c) an unknown DIRECTORY TREE inside a feature dir is NEVER a mount source, and is left unmodified — the walk is one level and never descends (mutation: make it descend and this goes red alongside (19))" \
+    bash -c '! printf "%s\n" "$4" | grep -q "migration" &&
+             test "$(cd "$1/amap/migration" && find . | sort | tr "\n" " ")" = "$2" &&
+             test "$(cksum < "$1/amap/migration/box-11111111/connector/delivery-state/ledger.jsonl")" = "$3"' \
+        _ "$_S137_SIB" "$_S137_SIB_TREE" "$_S137_SIB_LSUM" "$_S137_SIB_OUT"
+
+# THE SHARP EDGE NEXT DOOR, pinned because a consumer's tooling writes into
+# $SANDY_HOME/features/ and a near-miss there is not a near-miss. A directory
+# at the features ROOT is not "unknown" -- it is a CANDIDATE FEATURE:
+#   flat, no feature.json   -> mounted into every selected sandbox (D10, the
+#                              1.15.0-compat path)
+#   nested, no feature.json -> HARD ERROR that fails every launch on the host
+# So features/amap/migration/ is safe and features/amap-migration/ would take
+# the host down. One character apart. This asserts the error, so that if the
+# D10 path is ever relaxed into a silent skip it is a deliberate act.
+_S137_ROOTD="$_S137_DIR/rootd"; mkdir -p "$_S137_ROOTD/amap/payload" "$_S137_ROOTD/stray-dir/box-1/connector"
+: > "$_S137_ROOTD/amap/payload/relay"
+printf '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts":[{"name":"payload","from":"payload"}]}' \
+    > "$_S137_ROOTD/amap/feature.json"
+_S137_ROOTD_RC=0
+_S137_ROOTD_OUT="$(bash -c 'set -uo pipefail; eval "$1"
+    _SANDY_FM_HOME=/home/sandy
+    _sandy_fm_apply "$2" box-11111111 /x/ws claude 0' _ "$_S137_BLK
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$SANDY_SCRIPT")" "$_S137_ROOTD" 2>/dev/null)" || _S137_ROOTD_RC=$?
+check "§137(19d) a NESTED directory at the features ROOT is a hard error, not a silent skip — it is a candidate feature, and a whole-directory mount there would expose every other sandbox's instance tree" \
+    bash -c 'test "$2" -ne 0 && printf "%s\n" "$1" | grep -q "^err	stray-dir	has subdirectories but no feature.json"' \
+        _ "$_S137_ROOTD_OUT" "$_S137_ROOTD_RC"
 
 # The claim is "no PARSER needed", not "no coreutils needed" -- forget is an
 # unlink and still needs rm. So the fixture hides node and jq specifically,
@@ -15549,6 +15591,161 @@ check "§140(11) --exec's HOME fallback is the new home — docker only derives 
     bash -c 'grep -qF "_ex_home=\"/home/sandy\"" "$1"' _ "$_S140_SANDY"
 
 unset _S140_SANDY
+
+# ============================================================
+echo ""
+echo "§145: --doctor names sandboxes the launch will refuse (the 2.0 upgrade's first question)"
+# ============================================================
+# WHY. The 2.0 floor refuses EVERY sandbox created by 1.x -- the whole
+# population on an upgrading host. Until this check, `_sandbox_compat_classify`
+# had exactly ONE caller, the launch path, so the only way to discover that was
+# to launch a workspace and be refused, one workspace at a time. --doctor,
+# whose entire job is preflight, reported a clean host.
+#
+# DEC-4b: the lister calls _sandbox_compat_classify VERBATIM rather than
+# re-deriving the comparison, so "doctor says refused" and "launch refuses"
+# cannot disagree. The mutation for that is the floor itself: move it and both
+# must follow.
+_S145_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+mkdir -p "$_S145_DIR/sandboxes/old-aaaaaaaa" \
+         "$_S145_DIR/sandboxes/new-bbbbbbbb" \
+         "$_S145_DIR/sandboxes/nomarker-cccccccc"
+echo "1.15.0" > "$_S145_DIR/sandboxes/old-aaaaaaaa/.sandy_created_version"
+echo "2.0.0"  > "$_S145_DIR/sandboxes/new-bbbbbbbb/.sandy_created_version"
+# nomarker-cccccccc deliberately has no .sandy_created_version.
+
+_S145_OUT="$(SANDY_HOME="$_S145_DIR" bash "$SANDY_SCRIPT" --doctor 2>&1 || true)"
+_S145_RUNTIME="$(printf '%s\n' "$_S145_OUT" | sed -n '/^RUNTIME/,$p')"
+
+check "§145(pre) --doctor ran and produced a RUNTIME section (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "^RUNTIME"' _ "$_S145_RUNTIME"
+check "§145(1) a below-floor sandbox is NAMED, with the version that created it — 'some sandboxes are old' is not actionable" \
+    bash -c 'printf "%s" "$1" | grep -q "old-aaaaaaaa" && printf "%s" "$1" | grep -q "1.15.0"' _ "$_S145_RUNTIME"
+check "§145(2) it says the LAUNCH WILL REFUSE them, not that they are merely old — the consequence is the point" \
+    bash -c 'printf "%s" "$1" | grep -qi "REFUSE"' _ "$_S145_RUNTIME"
+check "§145(3) it gives the FLEET command, since on an upgrading host this is every sandbox" \
+    bash -c 'printf "%s" "$1" | grep -q -- "--reset-sandbox --all --keep-history"' _ "$_S145_RUNTIME"
+check "§145(4) an at-floor sandbox is NOT named (mutation: report everything and this goes red)" \
+    bash -c '! printf "%s" "$1" | grep -q "new-bbbbbbbb"' _ "$_S145_RUNTIME"
+# THE ONE THAT MATTERS MOST. A sandbox with no marker classifies as `unknown`,
+# and the LAUNCH warns and proceeds there -- fail-open on uncertainty, per the
+# classifier's own contract. A doctor finding would therefore claim a refusal
+# that will not happen, which is worse than saying nothing: it would send an
+# operator to destroy a sandbox that works.
+check "§145(5) a NO-MARKER sandbox is NOT named — it classifies unknown, the launch warns and PROCEEDS, so claiming a refusal here would send an operator to reset a working sandbox" \
+    bash -c '! printf "%s" "$1" | grep -q "nomarker-cccccccc"' _ "$_S145_RUNTIME"
+
+# RUNTIME findings are warnings and NEVER affect the exit code (--doctor's
+# stated contract: exit 0 iff every required HOST check passes). Asserted as a
+# DIFFERENCE rather than against a literal 0, because HOST's docker check fails
+# in most test environments and would make a literal assertion untestable here.
+_S145_CLEAN="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$_S145_CLEAN/sandboxes"
+_S145_RC_BF=0; SANDY_HOME="$_S145_DIR"   bash "$SANDY_SCRIPT" --doctor >/dev/null 2>&1 || _S145_RC_BF=$?
+_S145_RC_OK=0; SANDY_HOME="$_S145_CLEAN" bash "$SANDY_SCRIPT" --doctor >/dev/null 2>&1 || _S145_RC_OK=$?
+check "§145(6) below-floor sandboxes do NOT change --doctor's exit code — every RUNTIME finding is a warning (mutation: make it a required failure and this goes red)" \
+    bash -c 'test "$1" = "$2"' _ "$_S145_RC_BF" "$_S145_RC_OK"
+
+# DEC-4b, asserted as a PROPERTY: the set the lister reports must EQUAL the set
+# _sandbox_compat_classify calls below-floor, for the same inputs. A lister that
+# re-implemented the comparison -- a string compare, a stale floor, its own
+# _ver_lt -- would diverge on some version and fail here.
+#
+# NOT done by overriding the floor from the environment: SANDY_SANDBOX_MIN_COMPAT
+# is a plain assignment, not ${VAR:-default}, so it is deliberately NOT a knob.
+# A safety refusal an operator can switch off from the environment is not one.
+# (The first version of this check assumed otherwise and failed against correct
+# code, which is the test being wrong rather than the code.)
+_S145_DEC4B="$_S145_DIR/dec4b"; mkdir -p "$_S145_DEC4B/sandboxes"
+for _s145_v in 0.5.0 0.7.10 1.0.0 1.15.0 2.0.0 2.0.1 2.1.0-dev; do
+    _s145_slug="v$(printf '%s' "$_s145_v" | tr -cd '0-9')-aaaaaaaa"
+    mkdir -p "$_S145_DEC4B/sandboxes/$_s145_slug"
+    printf '%s\n' "$_s145_v" > "$_S145_DEC4B/sandboxes/$_s145_slug/.sandy_created_version"
+done
+# What the lister reports, via the real --doctor.
+# A FUNCTION, then a single-line $( ). Every multi-line command substitution in
+# this section was hoisted for the same reason: its sed program carries parens,
+# and parens inside a single-quoted argument inside a multi-line $( ) is the
+# APOSCS/CASESUB shape -- the span never appears to close, and the detector then
+# flags apostrophes in comments hundreds of lines later, including the next
+# section entirely. Three separate attempts here each left one behind.
+#
+# `|| true`: --doctor exits 1 whenever a required HOST check fails (docker is
+# absent in most test environments), and under pipefail that reaches the ERR
+# trap and aborts the section. The rc is measured separately by (6); here only
+# the OUTPUT is under test.
+_s145_reported() {
+    SANDY_HOME="$_S145_DEC4B" bash "$SANDY_SCRIPT" --doctor 2>&1 |
+        sed -n 's/^      - \([A-Za-z0-9._-]*\)  (created by sandy.*/\1/p' | sort | tr '\n' ' '
+}
+_S145_REPORTED="$(_s145_reported || true)"
+# What the classifier itself says, extracted from sandy and run directly.
+# EXTRACT-THEN-USE, not a multi-line $( ) of sed calls. Those sed programs
+# contain `()` (they match function definitions), and a paren inside a
+# single-quoted program argument inside a multi-line command substitution is
+# exactly what the APOSCS/CASESUB detectors exist for -- the first version of
+# this leaked its span into the NEXT section and flagged apostrophes in §144's
+# comments, which is the span-tracking confusion those codes describe.
+_S145_CLASSIFIER="$(sed -n '/^_ver_lt()/,/^}$/p' "$SANDY_SCRIPT")"
+_S145_CLASSIFIER="$_S145_CLASSIFIER
+$(sed -n '/^_sandbox_compat_classify()/,/^}$/p' "$SANDY_SCRIPT")"
+_S145_CLASSIFIER="$_S145_CLASSIFIER
+$(grep -m1 '^SANDY_SANDBOX_MIN_COMPAT=' "$SANDY_SCRIPT")"
+_S145_LISTER="$_S145_CLASSIFIER
+$(sed -n '/^_sandy_doctor_below_floor_list()/,/^}$/p' "$SANDY_SCRIPT")"
+# Defined as a FUNCTION at top level, then called with a single-line $( ).
+# The multi-line `$(bash -c '...')` this replaces was itself the hazard shape
+# APOSCS/CASESUB describe -- a single-quoted program containing parens inside a
+# multi-line command substitution -- and it leaked its span forward, flagging
+# apostrophes in the NEXT section's comments. Found by the lint, not by reading.
+_s145_expected() {
+    eval "$_S145_CLASSIFIER"
+    local v
+    for v in 0.5.0 0.7.10 1.0.0 1.15.0 2.0.0 2.0.1 2.1.0-dev; do
+        if [ "$(_sandbox_compat_classify "$v")" = below-floor ]; then
+            printf 'v%s-aaaaaaaa\n' "$(printf '%s' "$v" | tr -cd '0-9')"
+        fi
+    done | sort | tr '\n' ' '
+}
+_S145_EXPECTED="$(_s145_expected 2>/dev/null || true)"
+check "§145(7pre) both sides produced a non-empty verdict set (a silent failure on either would make (7) vacuously true)" \
+    bash -c 'test -n "$(printf "%s" "$1" | tr -d " ")" && test -n "$(printf "%s" "$2" | tr -d " ")"' \
+        _ "$_S145_REPORTED" "$_S145_EXPECTED"
+check "§145(7) DEC-4b: the set --doctor reports EQUALS the set _sandbox_compat_classify calls below-floor — one predicate, so 'doctor says refused' and 'launch refuses' cannot disagree" \
+    bash -c 'test "$1" = "$2"' _ "$_S145_REPORTED" "$_S145_EXPECTED"
+unset _s145_v _s145_slug _S145_DEC4B _S145_REPORTED _S145_EXPECTED
+
+# (8) WHAT (7) STRUCTURALLY CANNOT CATCH, found by running the mutation rather
+# than trusting the check. The floor is 2.0.0 -- an X.0.0 -- so a naive
+# major-only comparison (`${v%%.*} -lt 2`) gives the IDENTICAL verdict to
+# _ver_lt for every well-formed version. (7) compares the two sets and they
+# agree, so a lister that re-implemented the comparison passes it. The drift
+# is real but invisible at this floor; it would surface the day the floor moves
+# to an X.Y.0, which is exactly when nobody would be looking.
+#
+# So this exercises the lister at a DISCRIMINATING floor: at 2.1.0, `2.0.5` is
+# below-floor by _ver_lt and "ok" by major-only. Extracted rather than driven
+# through --doctor because SANDY_SANDBOX_MIN_COMPAT is a plain assignment and
+# deliberately NOT env-overridable -- a safety refusal an operator can switch
+# off from the environment is not one.
+_S145_X="$_S145_DIR/xfloor"; mkdir -p "$_S145_X/sandboxes/a-aaaaaaaa" "$_S145_X/sandboxes/b-bbbbbbbb"
+echo "2.0.5" > "$_S145_X/sandboxes/a-aaaaaaaa/.sandy_created_version"
+echo "2.1.0" > "$_S145_X/sandboxes/b-bbbbbbbb/.sandy_created_version"
+_s145_xfloor() {
+    eval "$_S145_LISTER"
+    SANDY_HOME="$_S145_X"
+    SANDY_SANDBOX_MIN_COMPAT=2.1.0
+    _sandy_doctor_below_floor_list | cut -f1 | sort | tr '\n' ' '
+}
+_S145_XOUT="$(_s145_xfloor 2>/dev/null || true)"
+check "§145(8pre) the extracted lister ran at the discriminating floor (empty output would make (8) vacuously true)" \
+    bash -c 'test -n "$(printf "%s" "$1" | tr -d " ")"' _ "$_S145_XOUT"
+check "§145(8) at a floor of 2.1.0 the lister reports 2.0.5 and NOT 2.1.0 — it uses _ver_lt, not a major-only compare that happens to agree at today's X.0.0 floor (mutation: replace the classify call with \${v%%.*} -lt 2 and this alone goes red)" \
+    bash -c 'test "$1" = "a-aaaaaaaa "' _ "$_S145_XOUT"
+unset _S145_X _S145_XOUT _S145_CLASSIFIER _S145_LISTER
+unset -f _s145_expected _s145_xfloor _s145_reported
+
+rm -rf "$_S145_DIR" "$_S145_CLEAN"
+unset _S145_DIR _S145_CLEAN _S145_OUT _S145_OUT2 _S145_RUNTIME _S145_RC_BF _S145_RC_OK
 
 # ============================================================
 echo ""
