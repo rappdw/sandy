@@ -15546,9 +15546,15 @@ echo "§140: the container user and home are 'sandy', not 'claude' (#248)"
 # image names. So the positive checks below matter as much as the negative one.
 _S140_SANDY="$SANDY_SCRIPT"
 
+# The allowlist is PHRASE-based, so every new legitimate mention of the old
+# path has to be added here deliberately. That is the point rather than a
+# defect: the check exists to catch a rename the sweep MISSED, and the cost of
+# a missed one (an image that builds against a user that does not exist, #248's
+# `su … claude`) is far higher than the cost of editing this list when a
+# message genuinely needs to name /home/claude for the reader.
 check "§140(1) no /home/claude path remains in sandy except where it NAMES the old path for the user (the compat refusal)" \
     bash -c 'n="$(grep -c "/home/claude" "$1" || true)"
-             m="$(grep "/home/claude" "$1" | grep -c "2.0 renamed\|still pointing at\|forward-compat promise expiring" || true)"
+             m="$(grep "/home/claude" "$1" | grep -c "2.0 renamed\|still pointing at\|forward-compat promise expiring\|scripts that hardcode" || true)"
              [ "$n" = "$m" ]' _ "$_S140_SANDY"
 check "§140(2) the image creates the user as sandy" \
     bash -c 'grep -q "useradd -m -s /bin/bash -u 1001 sandy" "$1"' _ "$_S140_SANDY"
