@@ -4550,6 +4550,44 @@ _sandy_doctor_stale_locks_list() {
     return 0
 }
 
+# Below-floor sandboxes (sandbox NAME<TAB>created-version per line): created by
+# a sandy older than SANDY_SANDBOX_MIN_COMPAT, so the LAUNCH will refuse them.
+# Calls _sandbox_compat_classify VERBATIM — the same pure function the launch
+# path classifies with (sandy:~10378), which until now was its ONLY caller.
+# That is the DEC-4b rule: "doctor says refused" and "launch refuses" cannot
+# disagree, because they are one predicate.
+#
+# WHY THIS EXISTS (2.0). The 2.0 floor refuses every 1.x sandbox, which is the
+# whole population on an upgrading host. Before this, the only way to discover
+# that was to launch a workspace and be refused, one workspace at a time --
+# --doctor, whose entire job is preflight, reported a clean host. A fleet
+# operator had no way to see "48 of these will be refused" before starting.
+#
+# Read-only, ALWAYS: --fix never touches these. The remediation is
+# --reset-sandbox, which destroys state, and --fix is deliberately limited to
+# two remediations that cannot lose anything (#178's rule).
+_sandy_doctor_below_floor_list() {
+    local _e _n _v
+    [ -d "$SANDY_HOME/sandboxes" ] || return 0
+    for _e in "$SANDY_HOME/sandboxes"/*/; do
+        [ -d "$_e" ] || continue
+        _e="${_e%/}"
+        _n="$(basename "$_e")"
+        if [ -f "$_e/.sandy_created_version" ]; then
+            _v="$(head -n1 "$_e/.sandy_created_version" 2>/dev/null | tr -d '[:space:]')"
+        else
+            _v="unknown"
+        fi
+        # Only below-floor is reported. unknown/invalid is deliberately silent:
+        # the launch WARNS and proceeds there (fail-open on uncertainty), so a
+        # doctor finding would claim a refusal that will not happen.
+        if [ "$(_sandbox_compat_classify "$_v")" = "below-floor" ]; then
+            printf '%s\t%s\n' "$_n" "$_v"
+        fi
+    done
+    return 0
+}
+
 # Orphaned sandboxes (sandbox NAME per line): WORKSPACE.json exists, its
 # workspace_path is non-empty, and that path no longer exists on disk. Same
 # conservative predicate --remove-sandbox --orphans uses (sandy:~2790) — a
@@ -4663,6 +4701,24 @@ _sandy_doctor_runtime() {
     else
         printf '  %s!%s %d orphaned sandbox(es) (workspace gone; remove: sandy --remove-sandbox --orphans)\n' "$YELLOW" "$NC" "$_n_orphan_sb"
         printf '%s\n' "$_orphan_sb" | grep . | sed 's/^/      - /'
+    fi
+
+    # Below-floor sandboxes — the 2.0 upgrade's first question, and the reason
+    # this check exists: on an upgrading host this is EVERY sandbox, and the
+    # launch is otherwise the only thing that will tell you.
+    local _bf _n_bf
+    _bf="$(_sandy_doctor_below_floor_list)"
+    _n_bf="$(printf '%s\n' "$_bf" | grep -c . || true)"; _n_bf="${_n_bf:-0}"
+    if [ "$_n_bf" -eq 0 ]; then
+        printf '  %s✓%s %s\n' "$GREEN" "$NC" "no sandboxes below the $SANDY_SANDBOX_MIN_COMPAT compatibility floor"
+    else
+        printf '  %s!%s %d sandbox(es) created before the %s compatibility floor — the launch will REFUSE them\n' \
+            "$YELLOW" "$NC" "$_n_bf" "$SANDY_SANDBOX_MIN_COMPAT"
+        printf '%s\n' "$_bf" | grep . | sed 's/^/      - /' | sed 's/\t/  (created by sandy /' | sed 's/$/)/'
+        printf '      %s\n' "Migrate the fleet, keeping transcripts and memory:"
+        printf '      %s\n' "  sandy --reset-sandbox --all --keep-history --yes"
+        printf '      %s\n' "Your workspaces are never touched. See the upgrade guide:"
+        printf '      %s\n' "  https://github.com/rappdw/sandy#upgrading-to-20"
     fi
 
     # --fix: EXACTLY two remediations, both delegated verbatim to existing
@@ -10401,16 +10457,30 @@ else
             error "  npm/cargo metadata — all still pointing at /home/claude. They would fail"
             error "  in ways that look like broken packages rather than a moved home."
             error ""
-            error "  Migrate it (host-side, one-time; your WORKSPACE is never touched):"
-            error "    sandy --reset-sandbox --workspace \"$WORK_DIR\" --keep-history"
+            error "  Migrate (host-side, one-time; your WORKSPACE is never touched):"
             error ""
-            error "  That clears exactly the contaminated state -- pip, uv, npm-global, go,"
-            error "  cargo, venv and the per-agent dirs -- and PRESERVES relay-bin/,"
-            error "  agent-args.* and .handoff-enabled, which are operator state nothing else"
-            error "  recreates. Use it rather than rm -rf on the sandbox directory, which"
-            error "  takes those with it. --keep-history also preserves claude/projects/ --"
-            error "  session transcripts and auto-memory, which nothing recreates."
-            error "  Across a fleet: sandy --reset-sandbox --all --keep-history --yes"
+            error "    ALL sandboxes on this host, which is what an upgrade needs:"
+            error "      sandy --reset-sandbox --all --keep-history --yes"
+            error ""
+            error "    Just this one:"
+            error "      sandy --reset-sandbox --workspace \"$WORK_DIR\" --keep-history"
+            error ""
+            error "  The 2.0 floor refuses EVERY sandbox created by 1.x, so the per-workspace"
+            error "  form means meeting this message once per project. Check the whole host"
+            error "  first with: sandy --doctor"
+            error ""
+            error "  --keep-history preserves claude/projects/ -- session transcripts and"
+            error "  auto-memory, which nothing recreates. It is not the default and --yes"
+            error "  does not choose it. The reset also PRESERVES relay-bin/, agent-args.*"
+            error "  and .handoff-enabled (operator state nothing recreates), which is why"
+            error "  you should use it rather than rm -rf on the sandbox directory."
+            error ""
+            error "  Cost: the next launch in each workspace re-downloads packages and"
+            error "  rebuilds the venv. Nothing is lost that uv sync or npm install will"
+            error "  not restore."
+            error ""
+            error "  Full guide (backups, orphans, scripts that hardcode /home/claude):"
+            error "    https://github.com/rappdw/sandy#upgrading-to-20"
             # A refusal the operator can act on in one step is exit 6, not a
             # generic 1 -- and under `--start` the launch runs in the DETACHED
             # SUPERVISOR, so without the marker the client cannot tell a refusal
