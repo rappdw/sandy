@@ -15554,7 +15554,7 @@ _S140_SANDY="$SANDY_SCRIPT"
 # message genuinely needs to name /home/claude for the reader.
 check "§140(1) no /home/claude path remains in sandy except where it NAMES the old path for the user (the compat refusal)" \
     bash -c 'n="$(grep -c "/home/claude" "$1" || true)"
-             m="$(grep "/home/claude" "$1" | grep -c "2.0 renamed\|still pointing at\|forward-compat promise expiring\|scripts that hardcode" || true)"
+             m="$(grep "/home/claude" "$1" | grep -c "2.0 renamed\|still pointing at\|forward-compat promise expiring\|scripts that hardcode\|old-home literal" || true)"
              [ "$n" = "$m" ]' _ "$_S140_SANDY"
 check "§140(2) the image creates the user as sandy" \
     bash -c 'grep -q "useradd -m -s /bin/bash -u 1001 sandy" "$1"' _ "$_S140_SANDY"
@@ -15657,6 +15657,146 @@ check "§146(5) entries sorting BEFORE and AFTER the unwritable directory are bo
 chmod -R u+w "$_S146_DIR" 2>/dev/null || true
 rm -rf "$_S146_DIR" "$_S146_WS"
 unset _S146_DIR _S146_WS _S146_H _S146_B _S146_SB _S146_RC
+echo "§147: #338 — the 2.0 home re-key heals a sandbox crossed from 1.x"
+# ============================================================
+# Claude Code keys a project by the DASH-ENCODED CONTAINER PATH of the
+# workspace. #248 moved the container home, so the same workspace got a new
+# key and every transcript stayed under the old one, unreachable. The symptom
+# is "my session did not resume" and nothing in it names the cause.
+#
+# THREE HALVES. The second is the one that makes the first sufficient, and the
+# one a directory-only fix would miss: Claude Code's resume picker filters on
+# the `cwd` recorded in each RECORD, so a correct-looking directory merge still
+# produces an empty picker. Found in the field across 70 sandboxes.
+_S147_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S147_BLK="$(awk '/^# --- #248 home re-key/,/^# --- sandy --doctor RUNTIME helpers/' "$SANDY_SCRIPT")"
+check "§147(pre) the re-key block was extracted from sandy and parses (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_rekey_home" && printf "%s\n" "$1" | bash -n' _ "$_S147_BLK"
+
+_s147_run() {
+    bash -c '
+        set -uo pipefail
+        warn() { printf "WARN %s\n" "$*"; }
+        info() { printf "INFO %s\n" "$*"; }
+        eval "$1"
+        _sandy_rekey_home "$2" "$3" "$4"
+    ' _ "$_S147_BLK" "$1" "$2" "$3" 2>&1 || true
+}
+
+_S147_SB="$_S147_DIR/sandboxes/box-a1b2c3d4"
+_S147_P="$_S147_SB/claude/projects"
+_S147_CJ="$_S147_DIR/sandboxes/box-a1b2c3d4.claude.json"
+mkdir -p "$_S147_P/-home-claude-dev-lore" "$_S147_P/-home-sandy-dev-lore"
+python3 - "$_S147_P" "$_S147_CJ" <<'S147_PY'
+import json, os, sys
+p, cj = sys.argv[1], sys.argv[2]
+old = os.path.join(p, "-home-claude-dev-lore")
+new = os.path.join(p, "-home-sandy-dev-lore")
+with open(os.path.join(old, "sess.jsonl"), "w") as f:
+    f.write(json.dumps({"type": "user", "cwd": "/home/claude/dev/lore"}, separators=(",", ":")) + "\n")
+    f.write("this line is not json\n")
+    f.write(json.dumps({"type": "x", "cwd": "/elsewhere/keep"}, separators=(",", ":")) + "\n")
+open(os.path.join(old, "collide.jsonl"), "w").write(json.dumps({"from": "OLD"}) + "\n")
+open(os.path.join(new, "collide.jsonl"), "w").write(json.dumps({"from": "NEW"}) + "\n")
+json.dump({"projects": {
+    "/home/claude/dev/lore": {"hasTrustDialogAccepted": True, "allowedTools": ["a"], "lastVersionBase": "2.1.274"},
+    "/home/sandy/dev/lore": {"lastVersionBase": "2.1.278"}}}, open(cj, "w"), indent=2)
+S147_PY
+_S147_OUT1="$(_s147_run "$_S147_SB" "/home/sandy/dev/lore" "$_S147_CJ")"
+
+check "§147(1) HALF 1: the transcript moves to the new project key" \
+    bash -c '[ -f "$1/-home-sandy-dev-lore/sess.jsonl" ]' _ "$_S147_P"
+check "§147(2) HALF 2 — THE ONE A DIRECTORY-ONLY FIX MISSES: the cwd INSIDE the record is rewritten, which is what the resume picker filters on" \
+    bash -c 'grep -q "cwd\":\"/home/sandy/dev/lore" "$1/-home-sandy-dev-lore/sess.jsonl"' _ "$_S147_P"
+check "§147(3) ...and ONLY the old-home prefix: an unrelated cwd is untouched" \
+    bash -c 'grep -q "/elsewhere/keep" "$1/-home-sandy-dev-lore/sess.jsonl"' _ "$_S147_P"
+check "§147(4) an unparseable line passes through BYTE-IDENTICAL rather than being dropped" \
+    bash -c 'grep -qx "this line is not json" "$1/-home-sandy-dev-lore/sess.jsonl"' _ "$_S147_P"
+check "§147(5) records are re-serialized COMPACTLY, as Claude Code writes them — pretty-printing doubles every file and every diff" \
+    bash -c '! grep -q "cwd\": " "$1/-home-sandy-dev-lore/sess.jsonl"' _ "$_S147_P"
+check "§147(6) a name present on BOTH sides keeps the new copy" \
+    bash -c 'grep -q NEW "$1/-home-sandy-dev-lore/collide.jsonl"' _ "$_S147_P"
+check "§147(7) ...the old copy survives in the old directory, which is therefore NOT removed — a collision leaves evidence, not a half-moved tree" \
+    bash -c '[ -f "$1/-home-claude-dev-lore/collide.jsonl" ]' _ "$_S147_P"
+check "§147(8) ...and the collision is NAMED, not silent" \
+    bash -c 'printf "%s" "$1" | grep -q "^WARN .*collide"' _ "$_S147_OUT1"
+check "§147(9) HALF 3: the NEW key wins per field (lastVersionBase stays 2.1.278, not rolled back by a wholesale copy)" \
+    bash -c 'python3 -c "
+import json,sys
+p=json.load(open(sys.argv[1]))[chr(112)+chr(114)+chr(111)+chr(106)+chr(101)+chr(99)+chr(116)+chr(115)]
+sys.exit(0 if p[sys.argv[2]][sys.argv[3]]==sys.argv[4] else 1)
+" "$1" /home/sandy/dev/lore lastVersionBase 2.1.278' _ "$_S147_CJ"
+check "§147(10) ...the old key fills only what the new one LACKS (hasTrustDialogAccepted carried — its absence re-prompts the trust dialog)" \
+    bash -c 'python3 -c "
+import json,sys
+v=json.load(open(sys.argv[1]))[sys.argv[2]][sys.argv[3]]
+sys.exit(0 if v.get(sys.argv[4]) is True and v.get(sys.argv[5])==[sys.argv[6]] else 1)
+" "$1" projects /home/sandy/dev/lore hasTrustDialogAccepted allowedTools a' _ "$_S147_CJ"
+check "§147(11) ...and the OLD key is REMOVED — a dead key something can still reach is how the split returns (observed in the field)" \
+    bash -c 'python3 -c "
+import json,sys
+p=json.load(open(sys.argv[1]))[sys.argv[2]]
+sys.exit(0 if sys.argv[3] not in p else 1)
+" "$1" projects /home/claude/dev/lore' _ "$_S147_CJ"
+
+# IDEMPOTENCE is the whole reason this runs at launch rather than once at
+# reset: the split RE-SPLITS, so the heal must be safe to run every time.
+_S147_D2="$_S147_DIR/s2"; mkdir -p "$_S147_D2/sandboxes/b/claude/projects/-home-claude-dev-x"
+_S147_CJ2="$_S147_D2/sandboxes/b.claude.json"
+python3 - "$_S147_D2/sandboxes/b/claude/projects" "$_S147_CJ2" <<'S147_PY2'
+import json, os, sys
+open(os.path.join(sys.argv[1], "-home-claude-dev-x", "s.jsonl"), "w").write(
+    json.dumps({"cwd": "/home/claude/dev/x"}, separators=(",", ":")) + "\n")
+json.dump({"projects": {"/home/claude/dev/x": {"hasTrustDialogAccepted": True}}}, open(sys.argv[2], "w"), indent=2)
+S147_PY2
+_S147_R1="$(_s147_run "$_S147_D2/sandboxes/b" "/home/sandy/dev/x" "$_S147_CJ2")"
+_S147_R2="$(_s147_run "$_S147_D2/sandboxes/b" "/home/sandy/dev/x" "$_S147_CJ2")"
+check "§147(12) the first run reports what it healed" \
+    bash -c 'printf "%s" "$1" | grep -q "^INFO Re-keyed"' _ "$_S147_R1"
+check "§147(13) IDEMPOTENT: the second run is entirely SILENT (mutation: any half that re-fires on healed state reddens this — but NOT the gate; see (16))" \
+    bash -c 'test -z "$(printf "%s" "$1" | tr -d "[:space:]")"' _ "$_S147_R2"
+check "§147(14) ...and the healed state is unchanged by the second run" \
+    bash -c 'grep -q "/home/sandy/dev/x" "$1/sandboxes/b/claude/projects/-home-sandy-dev-x/s.jsonl"' _ "$_S147_D2"
+
+# (16) THE GATE, MEASURED AS COST RATHER THAN AS SILENCE. The first draft of
+# (13) claimed the cheap gate was what kept a healed sandbox quiet, and the
+# mutation proved otherwise: remove the gate and the run is STILL silent,
+# because the counters are what suppress the report — the directory loop finds
+# nothing, the cwd pass finds no hits, the map finds no old key. Silence was
+# never the gate's job.
+#
+# What the gate actually buys is not scanning every transcript on every launch
+# of a healthy sandbox, and the observable for that is whether node runs at
+# all. A `node` shim on PATH records its own invocation and then execs the real
+# one, so behaviour is unchanged and the question is answered directly.
+_S147_BIN="$_S147_DIR/bin"; mkdir -p "$_S147_BIN"
+_S147_NODE="$(command -v node 2>/dev/null || true)"
+if [ -n "$_S147_NODE" ]; then
+    {
+        printf '#!/bin/sh\n'
+        printf 'echo called >> "%s/node.calls"\n' "$_S147_DIR"
+        printf 'exec %s "$@"\n' "$_S147_NODE"
+    } > "$_S147_BIN/node"
+    chmod +x "$_S147_BIN/node"
+    rm -f "$_S147_DIR/node.calls"
+    PATH="$_S147_BIN:$PATH" _s147_run "$_S147_D2/sandboxes/b" "/home/sandy/dev/x" "$_S147_CJ2" >/dev/null 2>&1
+    check "§147(16) THE GATE: a HEALED sandbox never invokes node — the expensive transcript scan is skipped, not merely silent (mutation: drop the gate and node runs on every launch)" \
+        bash -c '[ ! -f "$1/node.calls" ]' _ "$_S147_DIR"
+    rm -f "$_S147_DIR/node.calls"
+    PATH="$_S147_BIN:$PATH" _s147_run "$_S147_SB" "/home/sandy/dev/lore" "$_S147_CJ" >/dev/null 2>&1
+    check "§147(16b) ...and an UNHEALED one does invoke it, so (16) is not passing because node was unreachable" \
+        bash -c '[ -f "$1/node.calls" ]' _ "$_S147_DIR"
+else
+    skip "§147(16) gate-cost check needs node on the host"
+fi
+
+_S147_R3="$(_s147_run "$_S147_D2/sandboxes/b" /opt/elsewhere "$_S147_CJ2")"
+check "§147(15) a workspace OUTSIDE the container home is a no-op — its path was never renamed, so there is nothing to heal" \
+    bash -c 'test -z "$(printf "%s" "$1" | tr -d "[:space:]")"' _ "$_S147_R3"
+
+rm -rf "$_S147_DIR"
+unset _S147_BIN _S147_NODE _S147_DIR _S147_BLK _S147_SB _S147_P _S147_CJ _S147_OUT1 _S147_D2 _S147_CJ2 _S147_R1 _S147_R2 _S147_R3
+unset -f _s147_run
 
 # ============================================================
 echo ""

@@ -4543,6 +4543,213 @@ printf "\n"
 SANDY_DOCTOR_HOST
 }
 
+# --- #248 home re-key: heal a sandbox crossed from 1.x (#338) -----------------
+# Claude Code keys a project by the DASH-ENCODED CONTAINER PATH of the
+# workspace, and #248 moved the container home. Same workspace, new key:
+#
+#   pre-2.0   <old home>/dev/lore  ->  projects/-home-claude-dev-lore
+#   post-2.0  /home/sandy/dev/lore  ->  projects/-home-sandy-dev-lore
+#
+# user-setup.sh mkdir -p's the NEW key (its own comment says the transform is
+# "essential for --continue to find the right session history") while the old
+# one keeps every transcript, unreachable. The symptom is "my session did not
+# resume" and nothing in it names the cause.
+#
+# THREE HALVES, ALL NEEDED. Measured across a 70-sandbox fleet by the operator
+# who hit this; the second is the one that makes the first sufficient:
+#   1. the project DIRECTORY
+#   2. the `cwd` recorded INSIDE every transcript record -- Claude Code's
+#      resume picker filters on it, so a correct directory merge alone still
+#      produces an empty picker
+#   3. the `projects` map in the sibling <slug>.claude.json
+#
+# AT LAUNCH AND IDEMPOTENT, not once at reset. Two reasons, both evidence
+# rather than preference: a sandbox that classifies `unknown` crosses without
+# ever being refused, so it is never reset; and the split RE-SPLITS -- a
+# sandbox merged by hand at 01:40 had the old directory back at 06:33 holding
+# one session's closing metadata. A one-shot migration does not hold.
+#
+# Closing metadata written AFTER a launch-time re-key is merged on the NEXT
+# launch. That one-session lag is accepted: nothing is lost, and hooking
+# session end is far more machinery than a cost-state record justifies.
+_sandy_rekey_js() {
+cat <<'SANDY_REKEY_JS'
+// argv: <dir> <oldPrefix> <newPrefix>. Rewrites ONLY `cwd`, and only when it
+// starts with oldPrefix. Unparseable lines pass through BYTE-IDENTICAL rather
+// than being dropped. Records are re-serialized COMPACTLY, as Claude Code
+// writes them -- pretty-printing here would double every file and every diff.
+// Whole-file write to a temp, then rename: atomic per file.
+const fs = require("fs"), path = require("path");
+const dir = process.argv[2], oldp = process.argv[3], newp = process.argv[4];
+let names = [];
+try { names = fs.readdirSync(dir); } catch (e) { process.stdout.write("0 0\n"); process.exit(0); }
+let files = 0, hits = 0;
+for (const name of names) {
+  if (!name.endsWith(".jsonl")) continue;
+  const p = path.join(dir, name);
+  let text;
+  try { text = fs.readFileSync(p, "utf8"); } catch (e) { continue; }
+  const trailing = text.endsWith("\n");
+  const lines = text.split("\n");
+  if (trailing) lines.pop();
+  let n = 0;
+  const out = lines.map(function (line) {
+    let rec;
+    try { rec = JSON.parse(line); } catch (e) { return line; }
+    if (rec && typeof rec === "object" && !Array.isArray(rec) &&
+        typeof rec.cwd === "string" && rec.cwd.indexOf(oldp) === 0) {
+      rec.cwd = newp + rec.cwd.slice(oldp.length);
+      n++;
+      return JSON.stringify(rec);
+    }
+    return line;
+  });
+  if (n === 0) continue;
+  const tmp = p + ".rekey.tmp";
+  try {
+    fs.writeFileSync(tmp, out.join("\n") + (trailing ? "\n" : ""));
+    fs.renameSync(tmp, p);
+  } catch (e) { try { fs.unlinkSync(tmp); } catch (e2) {} continue; }
+  files++; hits += n;
+}
+process.stdout.write(files + " " + hits + "\n");
+SANDY_REKEY_JS
+}
+
+_sandy_rekey_map_js() {
+cat <<'SANDY_REKEY_MAP_JS'
+// argv: <file> <oldHome> <newHome>. Re-keys the `projects` map.
+// CARRY FIELD BY FIELD, THEN REMOVE. The NEW key wins per field -- Claude Code
+// may have advanced lastVersionBase since the crossing -- and the old key
+// fills only what the new one lacks. A wholesale object copy would roll that
+// back. The old key is then DELETED: a dead key something can still reach is
+// how the split returns, which the field observed.
+const fs = require("fs");
+const file = process.argv[2], oldh = process.argv[3], newh = process.argv[4];
+let doc;
+try { doc = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { process.stdout.write("0\n"); process.exit(0); }
+if (!doc || typeof doc !== "object" || Array.isArray(doc)) { process.stdout.write("0\n"); process.exit(0); }
+const projects = doc.projects;
+if (!projects || typeof projects !== "object" || Array.isArray(projects)) { process.stdout.write("0\n"); process.exit(0); }
+let moved = 0;
+for (const oldKey of Object.keys(projects).sort()) {
+  if (oldKey.indexOf(oldh) !== 0) continue;
+  const newKey = newh + oldKey.slice(oldh.length);
+  const oldVal = projects[oldKey], newVal = projects[newKey];
+  if (!oldVal || typeof oldVal !== "object" || Array.isArray(oldVal)) continue;
+  if (!newVal || typeof newVal !== "object" || Array.isArray(newVal)) {
+    projects[newKey] = oldVal;
+  } else {
+    for (const k of Object.keys(oldVal)) {
+      if (!Object.prototype.hasOwnProperty.call(newVal, k)) newVal[k] = oldVal[k];
+    }
+  }
+  delete projects[oldKey];
+  moved++;
+}
+if (moved > 0) {
+  const tmp = file + ".rekey.tmp";
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(doc, null, 2) + "\n");
+    fs.renameSync(tmp, file);
+  } catch (e) { try { fs.unlinkSync(tmp); } catch (e2) {} process.stdout.write("0\n"); process.exit(0); }
+}
+process.stdout.write(moved + "\n");
+SANDY_REKEY_MAP_JS
+}
+
+# $1 = SANDBOX_DIR, $2 = container workspace path, $3 = <slug>.claude.json path
+_sandy_rekey_home() {
+    local _sb="$1" _ws="$2" _cj="$3"
+    # THE ONLY old-home literal in the re-key -- the comment above and the
+    # gate below both derive from it, so §140(1) allows one line rather than a
+    # phrase list that grows every time this block is edited.
+    local _oldh="/home/claude" _newh="/home/sandy"   # old-home literal (#338)
+    local _pd="$_sb/claude/projects"
+    local _d _old _new _base _rest _entry _target _left _moved_dirs=0 _e
+
+    # A workspace OUTSIDE $HOME maps to its real host path, which the rename
+    # never touched -- nothing to re-key.
+    case "$_ws" in "$_newh"/*) ;; *) return 0 ;; esac
+
+    # THE CHEAP GATE. Both conditions are absent on a sandbox created after 2.0
+    # and on one already healed, so the expensive scan never runs on a healthy
+    # host. Idempotent by construction rather than by bookkeeping.
+    local _gate=0
+    for _d in "$_pd"/-home-claude-*; do
+        [ -d "$_d" ] && { _gate=1; break; }
+    done
+    if [ "$_gate" = 0 ] && [ -f "$_cj" ]; then
+        grep -q "\"$_oldh/" "$_cj" 2>/dev/null && _gate=1
+    fi
+    [ "$_gate" = 1 ] || return 0
+
+    # node only, matching the .claude.json seeder directly above, which is also
+    # node-only with a warn-and-degrade fallback. Deliberately NOT the
+    # manifest's strict node-or-jq refusal: a manifest decides a MOUNT and must
+    # refuse, while this is a heal that can wait for the next launch on a host
+    # that grows a parser. Warned, never silent.
+    if ! command -v node >/dev/null 2>&1; then
+        warn "Sandbox carries 1.x session history under the old container home, and node is unavailable to re-key it."
+        warn "  Sessions will not resume until a launch finds node. See https://github.com/rappdw/sandy/issues/338"
+        return 0
+    fi
+
+    # --- 1. the project DIRECTORY ---------------------------------------------
+    for _d in "$_pd"/-home-claude-*; do
+        [ -d "$_d" ] || continue
+        _base="$(basename "$_d")"
+        _rest="${_base#-home-claude-}"
+        _new="$_pd/-home-sandy-$_rest"
+        if [ -d "$_new" ]; then
+            # NEVER OVERWRITE. Session files are id-named so a collision is
+            # vanishingly rare, but the losing copy must not vanish silently.
+            _left=0
+            for _entry in "$_d"/* "$_d"/.[!.]*; do
+                [ -e "$_entry" ] || continue
+                _target="$_new/$(basename "$_entry")"
+                if [ -e "$_target" ]; then
+                    _left=$((_left + 1))
+                    warn "Session history: kept existing $(basename "$_entry") under the new project key; the old copy remains in $_base/"
+                    continue
+                fi
+                mv "$_entry" "$_target" 2>/dev/null || _left=$((_left + 1))
+            done
+            # Removed ONLY when it emptied, so a collision leaves evidence
+            # rather than a half-moved tree with no record of what stayed.
+            [ "$_left" -eq 0 ] && rmdir "$_d" 2>/dev/null || true
+        else
+            mv "$_d" "$_new" 2>/dev/null || true
+        fi
+        _moved_dirs=$((_moved_dirs + 1))
+    done
+
+    # --- 2. the `cwd` INSIDE every transcript ---------------------------------
+    # Claude Code's resume picker filters on this, so half 1 alone leaves the
+    # picker empty against a directory that looks correct. Runs over the NEW
+    # key, after the move.
+    local _cwd_out="" _cwd_files=0
+    for _d in "$_pd"/-home-sandy-*; do
+        [ -d "$_d" ] || continue
+        _cwd_out="$(_sandy_rekey_js | node - "$_d" "$_oldh/" "$_newh/" 2>/dev/null || true)"
+        _e="${_cwd_out%% *}"
+        case "$_e" in ''|*[!0-9]*) _e=0 ;; esac
+        _cwd_files=$((_cwd_files + _e))
+    done
+
+    # --- 3. the `projects` map in <slug>.claude.json --------------------------
+    local _map_moved=0
+    if [ -f "$_cj" ]; then
+        _map_moved="$(_sandy_rekey_map_js | node - "$_cj" "$_oldh/" "$_newh/" 2>/dev/null || echo 0)"
+        case "$_map_moved" in ''|*[!0-9]*) _map_moved=0 ;; esac
+    fi
+
+    if [ "$_moved_dirs" -gt 0 ] || [ "$_cwd_files" -gt 0 ] || [ "$_map_moved" -gt 0 ]; then
+        info "Re-keyed 1.x session history for the 2.0 container home (#248): ${_moved_dirs} project dir(s), ${_cwd_files} transcript file(s), ${_map_moved} config entry(ies)."
+    fi
+    return 0
+}
+
 # --- sandy --doctor RUNTIME helpers (#124) — pure listers, mirroring the
 # --gc/--remove-sandbox house style: newline-delimited STRINGS (not bash
 # arrays, so an empty result is never an empty-array-under-`set -u` trap on
@@ -12483,6 +12690,14 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
         printf '{"tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding":true,"theme":"dark"}\n' > "$CLAUDE_JSON"
     fi
 fi
+# #338: heal a sandbox crossed from 1.x, BEFORE the container starts. That
+# ordering is the one hard constraint -- the picker must see the new key, and
+# nothing may rewrite a transcript Claude Code is appending to. Cheap-gated, so
+# a sandbox created after 2.0 or already healed pays a glob and a grep.
+if _sandy_agent_has claude; then
+    _sandy_rekey_home "$SANDBOX_DIR" "$SANDY_WORKSPACE" "$CLAUDE_JSON"
+fi
+
 # Ensure sandy-specific overrides are set (both new and existing sandboxes)
 if _sandy_agent_has claude; then
     # hasSeenAutoDefaultNudge (proven live, 2.1.250): Claude Code offers
