@@ -15600,6 +15600,66 @@ unset _S140_SANDY
 
 # ============================================================
 echo ""
+echo "§146: #339 — a reset survives an unwritable directory (Go module cache)"
+# ============================================================
+# Go's module cache is 0444 files inside 0555 directories, and a 0555 directory
+# denies its OWNER the write needed to unlink its children. `rm -rf` therefore
+# fails partway, and because the destroy loop's rm is UNGUARDED, `set -e` takes
+# the script at that entry -- after it has already destroyed everything sorting
+# before it.
+#
+# MEASURED before the fix, on Linux, with these exact permissions:
+#   cargo destroyed (c < g), go survives (the failure), npm-global/uv/venv
+#   survive (after g), and ALL dotfiles survive -- the abort is mid-first-glob,
+#   so "$_rs_dir"/.[!.]* is never reached.
+# So what survives a partial reset is decided by GLOB ORDER and nothing else.
+# There is no useful sentence to write about that state, which is why the fix
+# makes it impossible rather than documenting it.
+#
+# The fixture is the reproduction: a 0555 directory holding a 0444 file, named
+# so it sorts MID-WAY through the entries, with entries on both sides of it.
+_S146_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S146_WS="$(cd "$(mktemp -d)" && pwd -P)"
+_S146_H="$(printf '%s' "$_S146_WS" | { shasum -a 256 2>/dev/null || sha256sum; })"
+_S146_H="${_S146_H%% *}"; _S146_H="${_S146_H:0:8}"
+_S146_B="$(basename "$_S146_WS" | tr -cd 'a-zA-Z0-9._-')"; _S146_B="${_S146_B:-project}"
+_S146_SB="$_S146_DIR/sandboxes/${_S146_B}-${_S146_H}"
+mkdir -p "$_S146_SB/cargo" "$_S146_SB/claude/projects/p" "$_S146_SB/go/pkg/mod/x" "$_S146_SB/venv"
+printf '{"workspace_path":"%s"}\n' "$_S146_WS" > "$_S146_SB/WORKSPACE.json"
+echo "1.15.0" > "$_S146_SB/.sandy_created_version"
+: > "$_S146_SB/agent-args.claude"
+echo transcript > "$_S146_SB/claude/projects/p/s.jsonl"
+echo cfg > "$_S146_SB/claude/config.json"
+echo mod > "$_S146_SB/go/pkg/mod/x/f.go"
+chmod 0444 "$_S146_SB/go/pkg/mod/x/f.go"
+chmod 0555 "$_S146_SB/go/pkg/mod/x" "$_S146_SB/go/pkg/mod" "$_S146_SB/go/pkg" "$_S146_SB/go"
+_S146_RC=0
+SANDY_HOME="$_S146_DIR" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$_S146_WS" \
+    --keep-history --yes >/dev/null 2>&1 || _S146_RC=$?
+
+check "§146(1) the reset EXITS 0 with an unwritable Go module cache present (mutation: drop the chmod and this is 1)" \
+    bash -c 'test "$1" = 0' _ "$_S146_RC"
+check "§146(2) the unwritable tree is actually GONE — exit 0 alone would pass on a reset that skipped it" \
+    bash -c '[ ! -e "$1/go" ]' _ "$_S146_SB"
+# THE ONE THAT MAKES (1) MEAN SOMETHING. A chmod -R u+w over the whole sandbox
+# makes the PRESERVED entries writable too; if that also made them deletable,
+# the fix would trade a partial destroy for a total one. It does not, because
+# _rs_keep is what protects them and it never consults mode bits.
+check "§146(3) the preserved set SURVIVES the chmod — WORKSPACE.json and agent-args.* are protected by _rs_keep, not by their mode bits" \
+    bash -c '[ -f "$1/WORKSPACE.json" ] && [ -f "$1/agent-args.claude" ]' _ "$_S146_SB"
+check "§146(4) --keep-history still holds through it: claude/projects/ kept, the rest of claude/ emptied" \
+    bash -c '[ -f "$1/claude/projects/p/s.jsonl" ] && [ ! -f "$1/claude/config.json" ]' _ "$_S146_SB"
+# Entries on BOTH sides of the unwritable one, so a partial destroy is visible
+# as a partial destroy rather than as a clean one.
+check "§146(5) entries sorting BEFORE and AFTER the unwritable directory are both gone (a partial destroy leaves the later ones behind)" \
+    bash -c '[ ! -e "$1/cargo" ] && [ ! -e "$1/venv" ]' _ "$_S146_SB"
+
+chmod -R u+w "$_S146_DIR" 2>/dev/null || true
+rm -rf "$_S146_DIR" "$_S146_WS"
+unset _S146_DIR _S146_WS _S146_H _S146_B _S146_SB _S146_RC
+
+# ============================================================
+echo ""
 echo "§145: --doctor names sandboxes the launch will refuse (the 2.0 upgrade's first question)"
 # ============================================================
 # WHY. The 2.0 floor refuses EVERY sandbox created by 1.x -- the whole
