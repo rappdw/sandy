@@ -14665,6 +14665,8 @@ _s134_marker() {
         _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
         _sandy_agents_json=null; _sandy_relay_json=false; _sandy_relay_slot_json=null
         _sandy_relay_path_json=null; _sandy_relay_disabled_by_json=null
+        _sandy_relay_source_json=null            # 2.1.0 (#345)
+        _SANDY_FM_AA_JSON=""                     # 2.1.0 (#348)
         CRED_MODE=none; _sandy_session_nonce=deadbeef; _sandy_session_file=/dev/stdout
         eval "$_blk"
     )
