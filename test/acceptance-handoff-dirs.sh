@@ -4,7 +4,7 @@
 #
 # ⚠️ RUN ON A HOST WITH DOCKER. This cannot run inside sandy (no Docker). It
 # proves the real container-level behavior that the static run-tests.sh §86
-# and §114 checks cannot: the actual bind-mount modes (outbox rw / inbox
+# and §114 checks cannot: the actual bind-mount mode (relay rw) and the
 # :ro), that EROFS wins even for files the container-uid already owns, that
 # the whole handoff directories feature is a true zero-diff when the key is
 # unset, and (phase E, 1.10.0) that the relay supervisor described in
@@ -14,7 +14,7 @@
 #
 # Phases A-D ship directory/mount substrate only — no skills, no turn
 # initiation, no manifest, no archive/ (its mode is unsettled in #132). Since
-# 1.10.0 the tree is ON BY DEFAULT (outbox rw, inbox :ro, peer :ro, relay rw)
+# 2.2.0 the tree is ONE DIRECTORY: relay rw. inbox, outbox and peer were
 # and SANDY_HANDOFF_DIRS=0 is the opt-out. Phase E covers the ONE mechanism that does move bytes today: the
 # relay process itself, plus the crossSessionInbound pin that gates whether
 # a peer message it forwards is delivered, held, or refused. Phase E does
@@ -28,8 +28,7 @@
 #
 # Phases:
 #   A. Default — NO config anywhere: all four mounts present with the right
-#      RW flags (outbox true, inbox false, peer false, relay true) and the
-#      in-container ~/.handoff/{inbox,outbox,peer} directories exist — the
+#      RW flag (relay true) and that the three removed lanes are absent — the
 #      exact check a consumer runs.
 #   A2. Opt-out/zero-diff — SANDY_HANDOFF_DIRS=0 via the WORKSPACE's
 #      .sandy/config: no "handoff" anywhere in `docker inspect` (Mounts + Env
@@ -38,11 +37,10 @@
 #   B. Explicit on — key =1 via the WORKSPACE's .sandy/config (proves the
 #      passive tier end-to-end: no approval prompt, works under the
 #      non-interactive --start supervisor): host dirs exist, mount RW flags
-#      are outbox=true/inbox=false/peer=false, outbox is writable, inbox and
-#      peer are not (even after chmod), and a host-placed file in inbox
+#   B, C. REMOVED in 2.2.0 with the lanes they tested (#352); see the note
 #      resists chmod from inside the container despite being agent-uid-owned
 #      (EROFS beats ownership — the entire point of the :ro mount flag).
-#   C. Persistence — stop/start preserves the outbox content.
+#      where they used to be.
 #   D. The MARKER (.handoff-enabled) OVERRIDES an opt-out: with
 #      SANDY_HANDOFF_DIRS=0 in the isolated HOST config and no workspace
 #      config anywhere, pre-marker the tree is off; post-marker it is on,
@@ -142,7 +140,7 @@ ck "--start exits 0" "[ $RC -eq 0 ]"
 # inspects a container that does not exist, so it produces ~40 assertion
 # failures about mount flags and --stop exit codes whose real cause is this one
 # line, hundreds of lines above. That is exactly what happened when an expired
-# OAuth token hung the supervisor: the run reported "inbox mount is RW=false"
+# OAuth token hung the supervisor: the run reported a mount assertion failing
 # for a container that was never created, and the diagnosis cost a full pass.
 #
 # Worse, a --start that dies holding the workspace lock poisons every LATER
@@ -172,21 +170,16 @@ ck "session label resolved" "[ -n \"$SESS\" ]"
 _m0="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C" 2>/dev/null)"
 echo "  mounts:"; printf '%s\n' "$_m0" | grep -i handoff | sed 's/^/    /'
 # This is the exact mount table a consumer verifies against -- four rows, no
-# more: outbox rw, inbox ro, peer ro, relay rw.
-ck "default: outbox mount is RW=true" \
-   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/sandy/.handoff/outbox true\$'"
-ck "default: inbox mount is RW=false" \
-   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/sandy/.handoff/inbox false\$'"
-ck "default: peer mount is RW=false" \
-   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/sandy/.handoff/peer false\$'"
+# more: relay rw, and nothing else under ~/.handoff/.
+ck "default: relay mount is RW=true (the only lane left since 2.2.0, #352)" \
+   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/sandy/.handoff/relay true\$'"
 ck "default: relay mount is RW=true" \
    "printf '%s\n' \"\$_m0\" | grep -qE '^/home/sandy/.handoff/relay true\$'"
-ck "default: exactly four ~/.handoff/* mounts (no stray rows)" \
+ck "default: exactly ONE ~/.handoff/* mount (relay; the three lanes were removed in 2.2.0, #352)" \
    "[ \"\$(printf '%s\n' \"\$_m0\" | grep -c '^/home/sandy/.handoff/')\" = 4 ]"
 # The in-container half of the consumer check.
-ck "default: in-container ~/.handoff/inbox, outbox and peer all exist" \
-   "docker exec -u \"\$(id -u)\" \"$C\" sh -c 'test -d /home/sandy/.handoff/inbox && test -d /home/sandy/.handoff/outbox && test -d /home/sandy/.handoff/peer'"
-ck "default: no relay env forwarded (the tree being on says nothing about a relay)" \
+ck "default: in-container ~/.handoff/relay exists, and the three removed lanes do NOT (#352)" \
+   "docker exec $C sh -c '[ -d ~/.handoff/relay ] && [ ! -e ~/.handoff/inbox ] && [ ! -e ~/.handoff/outbox ] && [ ! -e ~/.handoff/peer ]'"
    "! docker inspect -f '{{range .Config.Env}}{{.}}{{\"\n\"}}{{end}}' \"$C\" | grep -q '^SANDY_HANDOFF_RELAY='"
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase A) exits 0" "[ $? -eq 0 ]"
 # Idempotence: a second launch of the same sandbox must produce the same table
@@ -194,7 +187,7 @@ ck "default: no relay env forwarded (the tree being on says nothing about a rela
 env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS"; RC=$?
 ck "default: a SECOND launch exits 0 (idempotent)" "[ $RC -eq 0 ]"
 C="$(cid)"
-ck "default: second launch has the same four ~/.handoff/* mounts" \
+ck "default: second launch has the same single ~/.handoff/* mount" \
    "[ \"\$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{\"\n\"}}{{end}}' \"$C\" | grep -c '^/home/sandy/.handoff/')\" = 4 ]"
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase A, second) exits 0" "[ $? -eq 0 ]"
 
@@ -214,83 +207,23 @@ ck "docker inspect has NO mention of handoff anywhere (mounts, env, labels)" \
 # hold under the opt-out is that nothing reaches the CONTAINER -- which the
 # docker-inspect assertion above and the in-container check below cover.
 ck "sandbox handoff/ dirs exist but are INERT (created always; presence means nothing)" \
-   "[ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/inbox\" ] && [ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/peer\" ]"
+   "[ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/relay\" ]"
 ck "in-container ~/.handoff does NOT exist" \
    "! docker exec -u \"\$(id -u)\" \"$C\" test -e /home/sandy/.handoff"
 "$SANDY" --stop --workspace "$WS"; ck "--stop (phase A2) exits 0" "[ $? -eq 0 ]"
 
-echo "== B. explicit on (SANDY_HANDOFF_DIRS=1 via workspace .sandy/config) =="
-# Setting it here — not via env — proves the passive tier end-to-end: no
-# approval prompt is needed, and it works under the non-interactive --start
-# supervisor exactly like any other passive key. The file is REWRITTEN (not
-# appended) so the phase-A2 opt-out line is gone and =1 is the only setting.
+# Phases B and C were REMOVED in 2.2.0 (#352) along with the lanes they tested.
 #
-# `env -u SANDY_AUTO_APPROVE_PRIVILEGED` is load-bearing for that claim. When
-# this harness runs under run-integration-tests.sh it inherits that variable
-# (the suite exports it because sandy's own repo carries privileged keys in
-# .sandy/.secrets). With it set, a privileged key would be auto-approved and
-# this phase would pass even if SANDY_HANDOFF_DIRS were retiered — i.e. the tier
-# assertion would silently become vacuous. Unsetting it keeps the proof real
-# whether the script runs standalone or as a suite section.
-mkdir -p "$WS/.sandy"
-echo "SANDY_HANDOFF_DIRS=1" > "$WS/.sandy/config"
-env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS"; RC=$?
-ck "--start exits 0 with the handoff directories enabled" "[ $RC -eq 0 ]"
-C="$(cid)"
-ck "daemon container is running" "[ -n \"$C\" ]"
-SESS="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C" 2>/dev/null)"
-ck "session label resolved" "[ -n \"$SESS\" ]"
-ck "host outbox dir exists" "[ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/outbox\" ]"
-ck "host inbox dir exists" "[ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/inbox\" ]"
-
-_mounts="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C" 2>/dev/null)"
-echo "  mounts:"; printf '%s\n' "$_mounts" | grep -i handoff | sed 's/^/    /'
-ck "outbox mount is RW=true" \
-   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/sandy/.handoff/outbox true\$'"
-ck "inbox mount is RW=false" \
-   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/sandy/.handoff/inbox false\$'"
-ck "peer mount is RW=false" \
-   "printf '%s\n' \"\$_mounts\" | grep -qE '^/home/sandy/.handoff/peer false\$'"
-
-ck "write to outbox SUCCEEDS from inside the container" \
-   "docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/sandy/.handoff/outbox/probe.txt'"
-ck "write to inbox FAILS from inside the container" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/sandy/.handoff/inbox/probe.txt' 2>/dev/null"
-ck "write to peer FAILS from inside the container" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" sh -c 'echo hi > /home/sandy/.handoff/peer/probe.txt' 2>/dev/null"
-ck "chmod u+w on the peer dir itself FAILS (EROFS, not a mode problem)" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/sandy/.handoff/peer 2>/dev/null"
-ck "chmod u+w on the inbox dir itself FAILS (EROFS, not a mode problem)" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/sandy/.handoff/inbox 2>/dev/null"
-
-# The EROFS-beats-ownership assertion — the entire point of the :ro mount
-# flag. A file placed by the HOST into inbox is owned by the agent's
-# in-container uid (same uid as the host user placing it, since sandy maps
-# uid 1:1), so ownership alone would let the agent rewrite it — the mount
-# flag is what actually stops it.
-echo "host-placed-in-inbox" > "$SANDY_HOME_DIR/sandboxes/$SESS/handoff/inbox/from-host.txt"
-ck "cat of the host-placed inbox file SUCCEEDS (read is fine)" \
-   "docker exec -u \"\$(id -u)\" \"$C\" cat /home/sandy/.handoff/inbox/from-host.txt"
-# Prove the ownership premise BEFORE asserting chmod fails. Without this the
-# chmod check passes for the wrong reason if the file is not actually owned by
-# the agent uid — it would be testing permissions, not the mount flag.
-ck "host-placed inbox file IS owned by the agent uid (the premise)" \
-   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C\" stat -c '%u' /home/sandy/.handoff/inbox/from-host.txt 2>/dev/null)\" = \"\$(id -u)\" ]"
-ck "chmod u+w on the agent-OWNED host-placed inbox file STILL FAILS" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" chmod u+w /home/sandy/.handoff/inbox/from-host.txt 2>/dev/null"
-
-# Informational only — not asserted, since the parent's on-host ownership
-# depends on how the harness itself was invoked (sudo, CI runner uid, etc.).
-_parent_stat="$(docker exec -u "$(id -u)" "$C" sh -c 'stat -c "%U:%G %a" /home/sandy/.handoff 2>/dev/null || stat -f "%Su:%Sg %Lp" /home/sandy/.handoff 2>/dev/null')" || _parent_stat="(stat unavailable)"
-echo "  info: /home/sandy/.handoff parent ownership/mode: $_parent_stat"
-
-echo "== C. persistence across --stop / --start =="
-"$SANDY" --stop --workspace "$WS"; ck "--stop (phase B) exits 0" "[ $? -eq 0 ]"
-"$SANDY" --start --workspace "$WS"; ck "--start (phase C) exits 0" "[ $? -eq 0 ]"
-C="$(cid)"
-ck "outbox file from phase B still present after restart" \
-   "docker exec -u \"\$(id -u)\" \"$C\" test -f /home/sandy/.handoff/outbox/probe.txt"
-"$SANDY" --stop --workspace "$WS"; ck "--stop (phase C, final) exits 0" "[ $? -eq 0 ]"
+# B proved that inbox and peer really do return EROFS on a chmod, not merely
+# that sandy writes ":ro" into the mount line -- the distinction §97(10) cannot
+# make from the script text alone. C proved outbox content survived a
+# stop/start. Both lanes are gone: a feature manifest names its own directories
+# via `mounts`, and the fleet was measured empty before removal.
+#
+# The EROFS proof itself is NOT lost, and must not be. It moved to whatever
+# exercises a manifest mount declared `mode: ro`, which is where a read-only
+# guarantee now lives. If that coverage does not exist, this deletion traded a
+# real runtime assertion for nothing -- which is the one way it could be wrong.
 
 echo "== D. the MARKER overrides an opt-out, with no workspace config anywhere =="
 # Closes acceptance criterion 4 for the MARKER path specifically. Phase B proves
@@ -340,25 +273,12 @@ ck "the host opt-out is STILL in place (the marker won over it, it did not remov
 
 _m2="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C2" 2>/dev/null)"
 echo "  mounts:"; printf '%s\n' "$_m2" | grep -i handoff | sed 's/^/    /'
-ck "outbox mount is RW=true (marker path)" \
-   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/sandy/.handoff/outbox true\$'"
-ck "inbox mount is RW=false (marker path)" \
-   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/sandy/.handoff/inbox false\$'"
-ck "peer mount is RW=false (marker path)" \
-   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/sandy/.handoff/peer false\$'"
-
-# --- criterion 4, under the marker path ---
-ck "write to outbox SUCCEEDS (marker path)" \
-   "docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'echo hi > /home/sandy/.handoff/outbox/probe.txt'"
-ck "write to inbox FAILS (marker path)" \
-   "! docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'echo hi > /home/sandy/.handoff/inbox/probe.txt' 2>/dev/null"
-ck "chmod u+w on the inbox dir itself FAILS (EROFS, marker path)" \
-   "! docker exec -u \"\$(id -u)\" \"$C2\" chmod u+w /home/sandy/.handoff/inbox 2>/dev/null"
-echo "host-placed-in-inbox" > "$SBX2/handoff/inbox/from-host.txt"
-ck "host-placed inbox file IS owned by the agent uid (the premise, marker path)" \
-   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C2\" stat -c '%u' /home/sandy/.handoff/inbox/from-host.txt 2>/dev/null)\" = \"\$(id -u)\" ]"
-ck "chmod u+w on the agent-OWNED host-placed inbox file STILL FAILS (marker path)" \
-   "! docker exec -u \"\$(id -u)\" \"$C2\" chmod u+w /home/sandy/.handoff/inbox/from-host.txt 2>/dev/null"
+ck "relay mount is RW=true (marker path) — the one lane left since 2.2.0, #352" \
+   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/sandy/.handoff/relay true\$'"
+ck "the three removed lanes are NOT mounted on the marker path either" \
+   "! printf '%s\n' \"\$_m2\" | grep -qE '^/home/sandy/.handoff/(inbox|outbox|peer) '"
+ck "write to relay SUCCEEDS (marker path) — the supervisor writes .state and supervisor.log here" \
+   "docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'echo hi > /home/sandy/.handoff/relay/probe.txt'"
 
 # --- criterion 5: the agent has no path to the marker ---
 # Not "we did not mount it" as a claim, but: no mount SOURCE is the sandbox top
@@ -419,8 +339,8 @@ _m3="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end
 echo "  mounts:"; printf '%s\n' "$_m3" | grep -i handoff | sed 's/^/    /'
 ck "relay mount is RW=true" \
    "printf '%s\n' \"\$_m3\" | grep -qE '^/home/sandy/.handoff/relay true\$'"
-ck "peer mount is RW=false alongside the relay" \
-   "printf '%s\n' \"\$_m3\" | grep -qE '^/home/sandy/.handoff/peer false\$'"
+ck "no removed lane is mounted alongside the relay (#352)" \
+   "! printf '%s\n' \"\$_m3\" | grep -qE '^/home/sandy/.handoff/(inbox|outbox|peer) '"
 # Never dump the whole env -- it carries CLAUDE_CODE_OAUTH_TOKEN and friends.
 # Count occurrences of the one var under test instead of printing anything.
 _envcount="$(docker inspect -f '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' "$C3" 2>/dev/null | grep -c '^SANDY_HANDOFF_RELAY=\.sandy/relay\.sh$')"
