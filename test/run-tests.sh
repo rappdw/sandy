@@ -11842,8 +11842,10 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # each agent this launch. This tripwire is what caught the field being added,
 # which is exactly its job: a new conversion with no matching argument shifts
 # every field after it silently.
-check "§114(13g) marker printf format/arg count line up (18 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 18
+# 19 as of 2.1.0: `relay.source` (#345) -- WHICH producer supplied the relay,
+# which `relay.slot` never could answer and was being misread as.
+check "§114(13g) marker printf format/arg count line up (19 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 19
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -16728,6 +16730,191 @@ unset _S148_SANDY _S148_DIR _S148_LIB _S148_R1 _S148_R2 _S148_R3 _S148_R4 _S148_
       _S148_SCHEMA_KEYS _S148_JS_KEYS _S148_JQ_KEYS _S148_SCHEMA_AGENTS _S148_JS_AGENTS _S148_JQ_AGENTS \
       _S148_H _S148_PS _S148_BLK
 unset -f _s148_resolve _s148_mk _s148_field
+
+# ============================================================
+echo ""
+echo "§149: relay reporting — which producer, and is its executable still there (#345, #344)"
+# ============================================================
+# #345: `relay.slot` is written ONLY by the relay-bin slot block, so an explicit
+# SANDY_HANDOFF_RELAY, a manifest `entry` and no relay at all all report
+# "absent". A consumer shipped a check on it that called every correctly
+# migrated sandbox broken and would have called one still running a shim
+# healthy.
+#
+# MEASURED WHILE FIXING, and it is why documentation could not have been the
+# answer: in --print-state the field `path` -- which the issue proposed as the
+# discriminator -- was derived from the slot DIRECTORY alone, so the manifest
+# and explicit producers were BYTE-IDENTICAL there ({"state":"started",
+# "path":null}). The fleet API could not tell them apart at all.
+#
+# #344: migrating off the slot means removing a mounted executable from under a
+# running relay. Every sandbox up at that moment keeps state=started,
+# restarts=0, and nothing anywhere distinguishes it from a correct one.
+#
+# THE GUARDS ASSERT DISCRIMINATION, NOT VALUES. A check that pins
+# source=="manifest" for one fixture passes on an emitter that returns
+# "manifest" for everything; these assert that no two producers collide.
+_S149_SANDY="$SANDY_SCRIPT"
+_S149_H="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S149_H/sandboxes" "$_S149_H/features/amap/payload"
+printf '#!/bin/sh\n' > "$_S149_H/features/amap/payload/relay"; chmod +x "$_S149_H/features/amap/payload/relay"
+
+# _s149_mk <slug> <slot> <source> <path-json> [install-slot-entry]
+_s149_mk() {
+    mkdir -p "$_S149_H/sandboxes/$1/handoff/relay"
+    printf 'state=started\nrestarts=0\n' > "$_S149_H/sandboxes/$1/handoff/relay/.state"
+    printf '{\n  "schema": 1,\n  "relay": {\n    "slot": "%s",\n    "source": "%s",\n    "path": %s,\n    "disabled_by": null\n  },\n  "cred_mode": "full"\n}\n' \
+        "$2" "$3" "$4" > "$_S149_H/sandboxes/$1/sandy-session.json"
+    if [ "${5:-}" = "install" ]; then
+        mkdir -p "$_S149_H/sandboxes/$1/relay-bin"
+        printf '#!/bin/sh\n' > "$_S149_H/sandboxes/$1/relay-bin/relay"
+        chmod +x "$_S149_H/sandboxes/$1/relay-bin/relay"
+    fi
+}
+_s149_mk p1explicit-11111111 absent  explicit '"/home/sandy/dev/x/.sandy/relay.sh"'
+_s149_mk p2slot-22222222     present slot     '"/opt/sandy/relay/relay"'          install
+_s149_mk p3manifest-33333333 absent  manifest '"/opt/sandy/features/amap/relay"'
+_s149_mk p4gone-44444444     absent  manifest '"/opt/sandy/features/ghost/relay"'
+_s149_mk p5slotgone-55555555 present slot     '"/opt/sandy/relay/relay"'
+
+_S149_PS="$(SANDY_HOME="$_S149_H" bash "$_S149_SANDY" --print-state 2>/dev/null)"
+check "§149(pre) --print-state produced a parseable document for the five fixtures" \
+    bash -c 'printf "%s" "$1" | grep -q p3manifest' _ "$_S149_PS"
+
+if command -v node >/dev/null 2>&1; then
+    # --- #345: discrimination, asserted as a property -------------------------
+    # Every producer's (source, path) pair must be UNIQUE across the corpus. The
+    # pre-fix emitter fails this: p1explicit and p3manifest both yielded
+    # (absent, null). Deliberately computed rather than enumerated, so adding a
+    # producer later without a discriminator fails here.
+    _S149_UNIQ="$(printf '%s' "$_S149_PS" | node -e '
+        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+          const j = JSON.parse(s);
+          const keys = j.sandboxes.map(sb => JSON.stringify([sb.relay.source, sb.relay.path]));
+          const distinct = new Set(keys).size;
+          // p2slot and p5slotgone are the SAME producer with the same path and
+          // are expected to collide on this pair -- they are separated by
+          // executable_present, checked below. So four producers, four pairs.
+          console.log(distinct);
+        });')"
+    check "§149(1) the four DISTINCT producers yield four distinct (source, path) pairs — pre-fix, explicit and manifest both reported (absent, null) (got $_S149_UNIQ distinct pairs across 5 fixtures, 2 of which share a producer)" \
+        test "$_S149_UNIQ" -eq 4
+    _S149_SRCS="$(printf '%s' "$_S149_PS" | node -e '
+        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+          const j = JSON.parse(s);
+          console.log(j.sandboxes.map(sb => sb.name.slice(0,2) + "=" + sb.relay.source).sort().join(" "));
+        });')"
+    check "§149(2) each producer names ITSELF — not a single value returned for everything (got: $_S149_SRCS)" \
+        bash -c 'printf "%s" "$1" | grep -q "p1=explicit" && printf "%s" "$1" | grep -q "p2=slot" && printf "%s" "$1" | grep -q "p3=manifest"' _ "$_S149_SRCS"
+    check "§149(3) a manifest-entry relay reports its real path in --print-state, not null — this surface derived path from the slot directory alone, so it was blind to two of the three producers" \
+        bash -c 'printf "%s" "$1" | node -e "
+            let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>{
+              const j=JSON.parse(s);
+              const sb=j.sandboxes.find(x=>x.name.startsWith(\"p3manifest\"));
+              process.exit(sb.relay.path === \"/opt/sandy/features/amap/relay\" ? 0 : 1);
+            });"' _ "$_S149_PS"
+
+    # --- #344: the executable fact -------------------------------------------
+    _S149_EXE="$(printf '%s' "$_S149_PS" | node -e '
+        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+          const j = JSON.parse(s);
+          console.log(j.sandboxes.map(sb => sb.name.slice(0,2) + "=" + String(sb.relay.executable_present)).sort().join(" "));
+        });')"
+    check "§149(4) a relay whose executable is still present reports true (got: $_S149_EXE)" \
+        bash -c 'printf "%s" "$1" | grep -q "p2=true" && printf "%s" "$1" | grep -q "p3=true"' _ "$_S149_EXE"
+    check "§149(5) a relay recorded as STARTED whose executable is gone reports false — for BOTH producers, which is the state the whole fleet lands in when the slot is emptied under running sandboxes" \
+        bash -c 'printf "%s" "$1" | grep -q "p4=false" && printf "%s" "$1" | grep -q "p5=false"' _ "$_S149_EXE"
+    check "§149(6) an EXPLICIT relay path reports null — the host cannot resolve a container path, and saying so beats guessing (a false here would be a fabricated verdict)" \
+        bash -c 'printf "%s" "$1" | grep -q "p1=null"' _ "$_S149_EXE"
+
+    # --- the property #344 actually asks for ---------------------------------
+    # "must not present the sandbox as indistinguishable from a healthy one."
+    # Compared as WHOLE relay objects: a check on executable_present alone would
+    # pass on an emitter that dropped `state`, and the reported complaint was
+    # precisely that two sandboxes were identical in every readable field.
+    _S149_DISTINCT="$(printf '%s' "$_S149_PS" | node -e '
+        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+          const j = JSON.parse(s);
+          const ok   = j.sandboxes.find(x => x.name.startsWith("p3manifest")).relay;
+          const gone = j.sandboxes.find(x => x.name.startsWith("p4gone")).relay;
+          const okS = {...ok}, goneS = {...gone};
+          delete okS.path; delete goneS.path;   // the path alone always differed
+          console.log(JSON.stringify(okS) === JSON.stringify(goneS) ? "IDENTICAL" : "DISTINCT");
+        });')"
+    check "§149(7) a started-but-orphaned relay is DISTINGUISHABLE from a healthy one even ignoring the path — both report state=started, so without executable_present these objects are identical (got: $_S149_DISTINCT)" \
+        test "$_S149_DISTINCT" = "DISTINCT"
+else
+    skip "§149(1-7) relay producer discrimination needs node to read --print-state back"
+fi
+
+# --- marker side: which producer claims the relay, and in what order ---------
+# Precedence is explicit > slot > manifest, and it is the block itself that is
+# run here rather than a restatement of it.
+# The span opens at the slot DIRECTORY assignment, not at _sandy_relay_slot --
+# the directory is set one line earlier and the block dereferences it, so the
+# narrower range produced an unbound-variable abort that the checks below read
+# as an empty result rather than as a red.
+_S149_BLK="$(awk '/^_sandy_relay_slot_dir="\$SANDBOX_DIR\/relay-bin"/,/^# END relay capability/' "$_S149_SANDY")"
+check "§149(pre-8) the relay capability block was extracted (mutation: rename its first line and (8)-(10) go vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_relay_source="' _ "$_S149_BLK"
+_s149_src() {   # $1 = install slot entry?  $2 = explicit value
+    bash -c '
+        set -uo pipefail
+        warn(){ :; }; info(){ :; }; error(){ :; }
+        # unset EXPLICITLY, never "just do not set it": a sandy session exports
+        # SANDY_HANDOFF_RELAY, so this helper inherited a real relay path from
+        # the surrounding environment and every case reported "explicit". That
+        # is a host-dependent test -- green on a clean CI runner, red on a
+        # developer machine inside sandy, or the reverse.
+        unset SANDY_HANDOFF_RELAY
+        SANDBOX_DIR="$2"; SANDY_RELAY=1
+        mkdir -p "$SANDBOX_DIR"
+        if [ "$3" = install ]; then mkdir -p "$SANDBOX_DIR/relay-bin"; printf "#!/bin/sh\n" > "$SANDBOX_DIR/relay-bin/relay"; chmod +x "$SANDBOX_DIR/relay-bin/relay"; fi
+        [ -n "$4" ] && SANDY_HANDOFF_RELAY="$4"
+        eval "$1"
+        echo "$_sandy_relay_source"
+    ' _ "$_S149_BLK" "$_S149_H/probe$$_$RANDOM" "$1" "$2" 2>/dev/null
+}
+check "§149(8) no slot entry and no explicit key -> source is 'none' (got: $(_s149_src noinstall ''))" \
+    test "$(_s149_src noinstall '')" = "none"
+check "§149(9) a slot entry claims it -> 'slot' (got: $(_s149_src install ''))" \
+    test "$(_s149_src install '')" = "slot"
+check "§149(10) an explicit SANDY_HANDOFF_RELAY WINS over an installed slot entry — the documented precedence, asserted against the block that implements it (got: $(_s149_src install /x/relay))" \
+    test "$(_s149_src install /x/relay)" = "explicit"
+
+# The manifest producer is claimed in the entry-adoption loop, not in the block
+# above, so it is extracted and run separately rather than asserted from a
+# hand-written fixture marker -- (2) reads a marker someone wrote; this runs the
+# code that writes one.
+_S149_ADOPT="$(awk '/^    while IFS= read -r _fm_l; do/,/^    done <<< "\$_sandy_fm_out"/' "$_S149_SANDY")"
+check "§149(pre-11) the manifest entry-adoption loop was extracted" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_relay_source=\"manifest\""' _ "$_S149_ADOPT"
+# $1 = pre-existing SANDY_HANDOFF_RELAY ("" for none), $2 = the source the
+# capability block already resolved. Both are inputs because this loop runs
+# AFTER that block: in a real launch an explicit key has already set the source
+# to "explicit", and the property here is that the loop does not CLOBBER it.
+_s149_adopt() {
+    bash -c '
+        set -uo pipefail
+        info(){ :; }
+        unset SANDY_HANDOFF_RELAY   # inherited from the surrounding sandy session otherwise
+        _sandy_relay_source="$3"; _sandy_relay_from_slot="false"
+        _sandy_fm_out="$(printf "entry\t/opt/sandy/features/amap/relay\n")"
+        [ -n "$2" ] && SANDY_HANDOFF_RELAY="$2"
+        eval "$1"
+        echo "$_sandy_relay_source ${SANDY_HANDOFF_RELAY:-}"
+    ' _ "$_S149_ADOPT" "$1" "$2" 2>/dev/null
+}
+check "§149(11) a manifest entry claims the relay and names itself 'manifest' — the value #345 says slot could never produce (got: $(_s149_adopt '' none))" \
+    test "$(_s149_adopt '' none)" = "manifest /opt/sandy/features/amap/relay"
+check "§149(12) with an explicit key already resolved, the manifest entry neither takes the path NOR relabels the source — a source that followed the losing producer would misreport a whole fleet mid-migration (got: $(_s149_adopt /custom/relay explicit))" \
+    test "$(_s149_adopt /custom/relay explicit)" = "explicit /custom/relay"
+check "§149(13) ...and the same holds for the slot: a manifest entry does not relabel a relay the slot already supplied (the 2.0 coexistence promise, in the reporting) (got: $(_s149_adopt /opt/sandy/relay/relay slot))" \
+    test "$(_s149_adopt /opt/sandy/relay/relay slot)" = "slot /opt/sandy/relay/relay"
+
+rm -rf "$_S149_H"
+unset _S149_SANDY _S149_H _S149_PS _S149_UNIQ _S149_SRCS _S149_EXE _S149_DISTINCT _S149_BLK _S149_ADOPT
+unset -f _s149_mk _s149_src _s149_adopt
 
 # BEGIN SUMMARY
 # ============================================================

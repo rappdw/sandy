@@ -2791,6 +2791,8 @@ _sandy_emit_state() {
             #   - $sb/sandy-session.json     — last launch's disabled_by.
             local sb_r_state='"absent"' sb_r_restarts='0' sb_r_rc='null' sb_r_at='null' sb_r_by='null' sb_r_path='null'
             local sb_r_line sb_r_k sb_r_v sb_r_raw=''
+            local sb_r_src='null' sb_r_exe='null' sb_r_mk='' sb_r_srcraw='' sb_r_pathraw=''
+            local sb_r_rest sb_r_feat sb_r_sub
             # An `if`, not `[ -f … ] && var=…`: under `set -e` that form is a
             # statement-level list whose failure (the common case — no relay
             # installed) is the shell's to act on. It happens to be survivable
@@ -2815,6 +2817,61 @@ EOF_RELAY_STATE
                 sb_r_state='"failed"'
             fi
             if [ -f "$sb/relay-bin/relay" ]; then sb_r_path='"/opt/sandy/relay/relay"'; fi
+            # source + path from the marker (#345). ONE extra sed for both, to
+            # stay inside the light-mode poll budget -- a fleet poller runs this
+            # per sandbox. Each expression is anchored on its OWN key, so
+            # neither depends on which field sits next to it (§88b).
+            #
+            # This also FIXES `path` here: it used to be derived from the slot
+            # directory alone, so a manifest entry and an explicit
+            # SANDY_HANDOFF_RELAY both reported null and were byte-identical in
+            # this surface. Measured before the fix, not assumed.
+            if [ -f "$sb/sandy-session.json" ]; then
+                sb_r_mk="$(sed -n -e 's/^    "source": "\([a-z]*\)".*/src \1/p' -e 's/^    "path": "\(.*\)",*$/path \1/p' "$sb/sandy-session.json" 2>/dev/null || true)"
+            fi
+            if [ -n "$sb_r_mk" ]; then
+                while IFS=' ' read -r sb_r_k sb_r_v; do
+                    case "$sb_r_k" in
+                        src)  [ -n "$sb_r_v" ] && { sb_r_srcraw="$sb_r_v"; sb_r_src="\"$sb_r_v\""; } ;;
+                        path) [ -n "$sb_r_v" ] && { sb_r_pathraw="$sb_r_v"; sb_r_path="\"$sb_r_v\""; } ;;
+                    esac
+                done <<EOF_RELAY_MARKER
+$sb_r_mk
+EOF_RELAY_MARKER
+            fi
+            # executable_present (#344): a FACT, not a health verdict. Migrating
+            # from the relay-bin slot to a manifest entry means removing a
+            # mounted executable from under whatever is running -- every sandbox
+            # up at that moment lands with state=started, restarts=0, and no
+            # signal anywhere, for as long as the process happens to survive.
+            # The operator had no query that found them.
+            #
+            # Checked at QUERY time on a path sandy already knows, never by a
+            # timer in the supervisor (which would poll for an almost-always
+            # false condition and fire spuriously mid-replacement), and never by
+            # matching a process name sandy does not own -- the relay's
+            # executable is named by the operator and its children by whatever
+            # it runs, so a name match answers confidently and wrongly.
+            #
+            # null means CANNOT ANSWER, and is the honest value for an explicit
+            # SANDY_HANDOFF_RELAY: that path is resolved inside the container
+            # and the host may have no corresponding file at all.
+            case "$sb_r_srcraw" in
+                slot)
+                    if [ -f "$sb/relay-bin/relay" ]; then sb_r_exe='true'; else sb_r_exe='false'; fi ;;
+                manifest)
+                    sb_r_rest="${sb_r_pathraw#/opt/sandy/features/}"
+                    if [ "$sb_r_rest" != "$sb_r_pathraw" ]; then
+                        sb_r_feat="${sb_r_rest%%/*}"; sb_r_sub="${sb_r_rest#*/}"
+                        if [ -n "$sb_r_feat" ] && [ "$sb_r_feat" != "$sb_r_rest" ]; then
+                            if [ -f "$SANDY_HOME/features/$sb_r_feat/payload/$sb_r_sub" ]; then
+                                sb_r_exe='true'
+                            else
+                                sb_r_exe='false'
+                            fi
+                        fi
+                    fi ;;
+            esac
             # disabled_by comes from the marker, i.e. the LAST LAUNCH's intent —
             # the only thing a config-free reader can honestly say about why the
             # capability was off. A cloned repo shipping SANDY_RELAY=0 is a
@@ -2826,7 +2883,7 @@ EOF_RELAY_STATE
                     [ -z "$sb_r_raw" ] && sb_r_state='"disabled"'
                 fi
             fi
-            printf ','; _json_kv relay "{\"state\":$sb_r_state,\"path\":$sb_r_path,\"last_exit_code\":$sb_r_rc,\"restarts\":$sb_r_restarts,\"last_restart_at\":$sb_r_at,\"disabled_by\":$sb_r_by}"
+            printf ','; _json_kv relay "{\"state\":$sb_r_state,\"source\":$sb_r_src,\"executable_present\":$sb_r_exe,\"path\":$sb_r_path,\"last_exit_code\":$sb_r_rc,\"restarts\":$sb_r_restarts,\"last_restart_at\":$sb_r_at,\"disabled_by\":$sb_r_by}"
             # agents (#sixth-ask): which agent(s) this sandbox RESOLVED to on its
             # last launch, read back from the session marker — the same file, and
             # the same one-line read, that disabled_by above comes from, so this
@@ -11456,6 +11513,19 @@ SANDY_RELAY="${SANDY_RELAY:-1}"
 _sandy_relay_slot_dir="$SANDBOX_DIR/relay-bin"
 _sandy_relay_slot="absent"        # absent | present | disabled
 _sandy_relay_from_slot="false"    # did the slot supply the relay we will run?
+# relay.source (#345): WHICH PRODUCER supplied the relay this launch --
+# explicit | slot | manifest | none. `slot` alone cannot answer that and never
+# could: it is written only by the slot block below, so an explicit
+# SANDY_HANDOFF_RELAY, a manifest `entry` and no relay at all all report
+# "absent". A consumer shipped a check on it that called every correctly
+# migrated sandbox broken, and would have called one still running a shim
+# healthy. MEASURED: in --print-state it is worse than in the marker, because
+# that surface derives `path` from the slot directory alone, so the manifest
+# and explicit producers are BYTE-IDENTICAL there ({"state":"started",
+# "path":null}). So documentation could not have fixed this; the field had to
+# exist. `slot` keeps its old meaning untouched.
+_sandy_relay_source="none"        # explicit | slot | manifest | none
+[ -n "${SANDY_HANDOFF_RELAY:-}" ] && _sandy_relay_source="explicit"
 # Created on EVERY launch regardless of the value, exactly like the handoff
 # tree: that is what makes "directory presence carries no information" true by
 # CONSTRUCTION rather than convention. A stray mkdir, a restored backup or an
@@ -11484,6 +11554,7 @@ elif [ -e "$_sandy_relay_slot_dir/relay" ]; then
         # resolves to `accept` on the same condition it always did.
         SANDY_HANDOFF_RELAY="/opt/sandy/relay/relay"
         _sandy_relay_from_slot="true"
+        _sandy_relay_source="slot"
     fi
 fi
 # END relay capability
@@ -11551,6 +11622,7 @@ if [ -d "$_sandy_fm_root" ]; then
             entry*)
                 if [ -z "${SANDY_HANDOFF_RELAY:-}" ]; then
                     SANDY_HANDOFF_RELAY="${_fm_l#*	}"
+                    _sandy_relay_source="manifest"
                 elif [ "$_sandy_relay_from_slot" = "true" ]; then
                     info "a feature manifest declares an entry, but relay-bin/relay is installed and wins (2.0.0 coexistence window)."
                 else
@@ -14389,11 +14461,16 @@ _sandy_relay_disabled_by_json="null"
 if [ "${_sandy_relay_slot:-absent}" = "disabled" ] && [ -n "${_SANDY_RELAY_SOURCE:-}" ]; then
     _sandy_relay_disabled_by_json="\"$_SANDY_RELAY_SOURCE\""
 fi
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "handoff_relay": %s,\n  "relay": {\n    "slot": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "cred_mode": "%s"\n}\n' \
+# Headless and --remote drop the key host-side AFTER a producer may have
+# claimed it, so the final state is what gets recorded -- "none" means nothing
+# will run, whatever was resolved earlier.
+[ -n "${SANDY_HANDOFF_RELAY:-}" ] || _sandy_relay_source="none"
+_sandy_relay_source_json="\"${_sandy_relay_source:-none}\""
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "handoff_relay": %s,\n  "relay": {\n    "slot": %s,\n    "source": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "cred_mode": "%s"\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
     "$_sandy_perm_mode_json" "$_sandy_csi_json" "$_sandy_agents_json" "$_sandy_relay_json" \
-    "$_sandy_relay_slot_json" "$_sandy_relay_path_json" "$_sandy_relay_disabled_by_json" \
+    "$_sandy_relay_slot_json" "$_sandy_relay_source_json" "$_sandy_relay_path_json" "$_sandy_relay_disabled_by_json" \
     "${_SANDY_FM_AA_JSON:-}" "${CRED_MODE:-none}" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
