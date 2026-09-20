@@ -2237,22 +2237,28 @@ fi
 fi  # section 22
 
 # ============================================================
-section "23. Handoff directories + relay acceptance (#132 slice 1, SANDY_HANDOFF_RELAY 1.10.0, relay slot 1.11.0/#258) — test/acceptance-handoff-dirs.sh"
+section "23. Relay acceptance + the read-only-mount proof (2.2.0: #352/#353/#354/#355) — test/acceptance-handoff-dirs.sh"
 # ============================================================
 if [ "$_SECTION_ON" = true ]; then
-# Phases A-D: directory/mount substrate (outbox rw, inbox :ro, peer :ro,
-# relay rw; ON BY DEFAULT since 1.10.0) — no skills, no turn initiation. The
-# real-Docker behavior a static check cannot see: actual bind-mount RW flags
-# on a default launch, that EROFS wins even for a file the container uid
-# already owns, that the whole feature is a true zero-diff under the opt-out
-# SANDY_HANDOFF_DIRS=0, and that the marker overrides an opt-out.
-# Phase E (1.10.0): SANDY_HANDOFF_RELAY — the container-level relay
-# supervisor actually starts with the container, restarts a killed relay,
-# never runs twice, and survives an --update-sessions recreation; also that
-# the crossSessionInbound pin lands in BOTH measured-working files and that
-# the workspace copy is genuinely :ro in-container. run-tests.sh §114 covers
-# the same supervisor logic structurally (no Docker); this is the one place
-# that proves it against a real container.
+# Phases A-D and F are GONE, with the mechanisms they tested. 2.2.0 removed
+# the ~/.handoff tree (#352, #353), the SANDY_HANDOFF_DIRS opt-out and the
+# .handoff-enabled marker (#355), and the relay-bin slot (#354). The file name
+# is kept so this section keeps its number and its history.
+#
+# Phase E (1.10.0): the relay supervisor — it actually starts with the
+# container, restarts a killed relay, never runs twice, and survives an
+# --update-sessions recreation; also that the crossSessionInbound pin lands in
+# BOTH measured-working files and that the workspace copy is genuinely :ro
+# in-container. run-tests.sh §114 covers the same supervisor logic structurally
+# (no Docker); this is the one place that proves it against a real container.
+#
+# Phase G (2.2.0): THE read-only-mount claim — that a :ro mount returns EROFS
+# for a file the container uid OWNS, which permission bits could never
+# guarantee and no script-text check can establish. It has moved twice as its
+# host mechanisms were deleted: phase B (the inbox lane) -> F3 (the relay slot)
+# -> G (a feature manifest mount declared mode: ro), which is the only :ro
+# mount sandy still makes. run-tests.sh §97(16) is the tripwire that goes red
+# if it is ever left with no runtime home at all.
 # Same invocation contract as §19-§21 — self-cleaning harness, SANDY pinned
 # to this suite's sandy.
 _acc_handoff="$_INT_SELF_DIR/acceptance-handoff-dirs.sh"
