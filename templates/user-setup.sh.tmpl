@@ -989,21 +989,42 @@ _sandy_build_agent_cmd() {
 # the mount, flock).
 _sandy_start_handoff_relay() {
     [ -n "${SANDY_HANDOFF_RELAY:-}" ] || return 0
-    local _r="$SANDY_HANDOFF_RELAY" _st="$HOME/.handoff/relay" _lock="$HOME/.sandy-handoff-relay.lock"
+    # Relay state lives at /opt/sandy/relay-state since 2.2.0 (#353), not under
+    # ~/.handoff. It is PRODUCER-AGNOSTIC by design: an earlier draft proposed
+    # the feature's own instance tree, which relay.source (#345) disproved --
+    # two of the three producers had no feature to own it. The deciding reason
+    # outlives even that: .state and supervisor.log are SANDY'S SUPERVISOR'S
+    # files, not the relay's, so putting them inside a feature's tree would
+    # make sandy's own bookkeeping a tenant of the thing it supervises.
+    #
+    # Under /opt/sandy, not the agent home: /opt/sandy is already sandy's
+    # in-container namespace (features mount there), it is not swept by
+    # home-directory tooling, and ~/.sandy would read as the HOST config root.
+    # SANDY_RELAY_STATE is set HOST-SIDE, next to the mount that creates it, so
+    # the path has exactly ONE source rather than being spelled here and there.
+    # The fallback is the same literal, for a container started before the host
+    # began setting it.
+    local _r="$SANDY_HANDOFF_RELAY" _st="${SANDY_RELAY_STATE:-/opt/sandy/relay-state}" _lock="$HOME/.sandy-handoff-relay.lock"
     case "$_r" in /*) ;; *) _r="$WORKSPACE/$_r" ;; esac
     if [ ! -f "$_r" ] || [ ! -x "$_r" ]; then
         sandy_err "SANDY_HANDOFF_RELAY=$SANDY_HANDOFF_RELAY resolves to $_r, which is not an executable file inside the container. A configured relay that cannot start fails the session (unset SANDY_HANDOFF_RELAY to launch without one)."
         exit 1
     fi
     if [ ! -d "$_st" ]; then
-        sandy_err "SANDY_HANDOFF_RELAY is configured but ~/.handoff/relay is not mounted. A configured relay that cannot start fails the session."
+        sandy_err "a relay is configured but its state directory ($_st) is not mounted. A configured relay that cannot start fails the session."
         exit 1
     fi
     if ! command -v flock >/dev/null 2>&1; then
         sandy_err "SANDY_HANDOFF_RELAY is configured but flock is not available in this image, so the relay singleton cannot be enforced. A configured relay that cannot start fails the session."
         exit 1
     fi
-    export SANDY_HANDOFF_RELAY_STATE="$_st"
+    # SANDY_RELAY_STATE replaces SANDY_HANDOFF_RELAY_STATE, which is removed
+    # with the rest of the SANDY_HANDOFF_* container contract (#352 took the
+    # other three). A relay locates its state directory by reading this, never
+    # by constructing a path sandy owns -- that construction has been the fault
+    # line three times now (#248 moved the home, #345 derived a path from the
+    # slot, #353 moved this one).
+    export SANDY_RELAY_STATE="$_st"   # idempotent when the host already set it
     # A verdict or state file left by an earlier container must not be read as
     # this one's — the sandbox directory outlives the container.
     rm -f "$_st/.startup" "$_st/.state"
@@ -1096,14 +1117,14 @@ _sandy_start_handoff_relay() {
                 already-running) break ;;
                 rc=0)            break ;;
                 rc=*)
-                    sandy_err "the relay ($_r) exited ${_v#rc=} within 5s of starting, on every launch this reproduces. An installed relay that cannot stay up fails the session; see ~/.handoff/relay/supervisor.log for its own output."
+                    sandy_err "the relay ($_r) exited ${_v#rc=} within 5s of starting, on every launch this reproduces. An installed relay that cannot stay up fails the session; see /opt/sandy/relay-state/supervisor.log for its own output."
                     exit 1 ;;
             esac
         fi
         sleep 0.1
         _w=$((_w + 1))
     done
-    sandy_log "Handoff relay supervisor requested ($_r); outcome (started vs. already running) is in ~/.handoff/relay/supervisor.log"
+    sandy_log "Handoff relay supervisor requested ($_r); outcome (started vs. already running) is in /opt/sandy/relay-state/supervisor.log"
 }
 
 cd "$WORKSPACE"
