@@ -1003,7 +1003,7 @@ _sandy_start_handoff_relay() {
         sandy_err "SANDY_HANDOFF_RELAY is configured but flock is not available in this image, so the relay singleton cannot be enforced. A configured relay that cannot start fails the session."
         exit 1
     fi
-    export SANDY_HANDOFF_INBOX="$HOME/.handoff/inbox" SANDY_HANDOFF_OUTBOX="$HOME/.handoff/outbox" SANDY_HANDOFF_RELAY_STATE="$_st" SANDY_HANDOFF_PEER="$HOME/.handoff/peer"
+    export SANDY_HANDOFF_RELAY_STATE="$_st"
     # A verdict or state file left by an earlier container must not be read as
     # this one's — the sandbox directory outlives the container.
     rm -f "$_st/.startup" "$_st/.state"
