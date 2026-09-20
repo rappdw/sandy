@@ -3512,8 +3512,8 @@ check "--print-schema output is valid JSON" \
 # this one asserts WHICH number that is. 2 as of 2.0.0 (D11): sandboxes[].features
 # kept its name and changed its source, so a consumer that kept parsing would
 # silently get a different question answered.
-check "schema has schema_version=2" \
-    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d[\"schema_version\"]==2" "$1"' \
+check "schema has schema_version=3 (moved by #355: the bundled removal of the handoff reporting fields — a vanished field is otherwise silent, so the bump IS the signal)" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d[\"schema_version\"]==3" "$1"' \
     -- "$_SCHEMA_JSON"
 check "schema has sandy.version" \
     bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d[\"sandy\"][\"version\"]" "$1"' \
@@ -3565,11 +3565,11 @@ import json,sys
 d=json.load(open(sys.argv[1]))
 assert \".envrc\" in d[\"protected_paths\"][\"files\"]
 " "$1"' -- "$_SCHEMA_JSON"
-check "schema compatibility.supported_schema_versions contains 2 (sandy emits exactly one schema; it does not offer to speak the old one)" \
+check "schema compatibility.supported_schema_versions contains 3 (sandy emits exactly one schema; it does not offer to speak the old one)" \
     bash -c 'python3 -c "
 import json,sys
 d=json.load(open(sys.argv[1]))
-assert 2 in d[\"compatibility\"][\"supported_schema_versions\"]
+assert 3 in d[\"compatibility\"][\"supported_schema_versions\"]
 " "$1"' -- "$_SCHEMA_JSON"
 
 # --- --print-state ---
@@ -3625,14 +3625,16 @@ echo "1.0.1" > "$_PS_FIX/sandboxes/zork-3dfda686/.sandy_last_version"
 _PS_FIX_JSON="$_INTRO_TMP/ps-fixture.json"
 SANDY_HOME="$_PS_FIX" bash "$SANDY_SCRIPT_PATH" --print-state > "$_PS_FIX_JSON" 2>/dev/null || true
 
-check "--print-state sandbox entry carries all documented per-sandbox fields" \
+check "--print-state sandbox entry carries all documented per-sandbox fields, and NONE of the ones #355 removed"
     bash -c 'python3 -c "
 import json,sys
 d=json.load(open(sys.argv[1]))
 sb=[s for s in d[\"sandboxes\"] if s.get(\"name\")==\"zork-3dfda686\"]
 assert sb, \"fixture sandbox missing from --print-state output\"
 s=sb[0]
-req={\"name\",\"path\",\"workspace_path\",\"workspace_exists\",\"created_version\",\"last_used_version\",\"created_at\",\"last_used_at\",\"size_bytes\",\"handoff_enabled\",\"agent_args_files\",\"lock_held\",\"lock_holder_pid\",\"lock_holder_alive\"}
+req={\"name\",\"path\",\"workspace_path\",\"workspace_exists\",\"created_version\",\"last_used_version\",\"created_at\",\"last_used_at\",\"size_bytes\",\"relay\",\"agents\",\"agent_args_files\",\"lock_held\",\"lock_holder_pid\",\"lock_holder_alive\"}
+gone={\"handoff_enabled\",\"handoff\"}
+assert not (gone & set(s)), \"removed fields still emitted: \"+repr(sorted(gone & set(s)))
 missing=req-set(s)
 assert not missing, \"missing per-sandbox fields: \"+repr(sorted(missing))
 " "$1"' -- "$_PS_FIX_JSON"
@@ -5640,11 +5642,11 @@ DOCKERSHIM
 chmod +x "$_U71_IS_BIN/docker"
 
 _U71_IS_FULL="$(PATH="$_U71_IS_BIN:$PATH" bash "$_SBX_SCRIPT" --print-state 2>/dev/null)"
-check "image_stale (full mode): true for the stale container, false for the current one; schema_version 2 (mutation: swap the comparison, or compare the wrong ids -> true/false flip or both null)" \
+check "image_stale (full mode): true for the stale container, false for the current one; schema_version 3 (mutation: swap the comparison, or compare the wrong ids -> true/false flip or both null)" \
     bash -c 'python3 -c "
 import json, sys
 d = json.loads(sys.argv[1])
-assert d[\"schema_version\"] == 2, d[\"schema_version\"]
+assert d[\"schema_version\"] == 3, d[\"schema_version\"]
 rc = d[\"running_containers\"]
 stale = next(c for c in rc if c[\"sandbox\"] == \"stale-aaa111\")
 curr  = next(c for c in rc if c[\"sandbox\"] == \"curr-bbb222\")
