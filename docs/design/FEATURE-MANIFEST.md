@@ -31,6 +31,8 @@ $SANDY_HOME/features/<feature>/
   selected.json                written by sandy; read-only to everyone else
 ```
 
+A manifest declares `schema`, `sandboxes`, `agents`, `create`, `mounts`, `entry`, `expose` and (2.1.0) `agent_args`. `--print-schema` publishes that list as `manifest.top_level_keys` so a consumer can gate on **membership** rather than on a sandy version — see §9.
+
 `$SANDY_HOME` is already the privileged config root, so the whole tree is **privileged by construction of where it lives** — a repository cannot reach it. That is the same argument that carries `.handoff-enabled`, `agent-args.<agent>` and `relay-bin/`, and it is why no new config tier is needed.
 
 ## 3. The ten decisions
@@ -160,3 +162,30 @@ Assert the property, never the presence of a mechanism; mutation-test every guar
 
 - Moving sandy's own built-ins (screenshots, skill packs) onto the manifest. The schema must not **preclude** it — a feature with one mount, no entry, no instance tree and `include: ["*"]` is valid, which is the shape a screenshots directory would take — but nothing is migrated here.
 - Any change to `_ver_lt`, the config tiers, or the passive/privileged split.
+
+## 9. `agent_args` — wiring the agent, not just the files (2.1.0, #348)
+
+A manifest could mount files and export variables but had no way to make the agent **read** them, so anything agent-facing still needed a per-sandbox write *after* selection — and selection only happens at launch, so a new sandbox cost three steps (launch, sync, relaunch). `agent_args` closes that gap:
+
+```json
+"agent_args": {
+  "claude": ["--mcp-config", "/opt/sandy/features/amap/mcp-servers.json",
+             "--append-system-prompt-file", "/opt/sandy/features/amap/policy.md"]
+}
+```
+
+Stateless by construction: nothing is written into the sandbox, so removing the feature leaves nothing to reap. Every file named lives on the same `:ro` payload the manifest already mounts, so the agent cannot edit its own registration.
+
+**The name is not `args`.** The manifest already has `entry`; `args` beside it reads as *the entry's* arguments, which is exactly what it is not. `agent_args` also matches the two existing spellings of this concept — `SANDY_AGENT_ARGS` and `agent-args.<agent>` — rather than inventing a third.
+
+**Refusals are whole-manifest, and that is the operationally important part.** An unknown top-level key, an unknown agent name, an empty token, or a token containing a space, tab, newline or CR refuses the manifest — which takes that feature's **mounts and exports down with it**, not just its arguments. On a mixed-version fleet an older sandy therefore loses the feature entirely rather than degrading. That is why `manifest.top_level_keys` exists and why a consumer must gate on it before emitting the key.
+
+**A token containing whitespace is refused, never split.** The channel is whitespace-separated and has no quoting scheme, so the choice was refuse-loudly or split-silently; splitting is how `--append-system-prompt "two words"` becomes two arguments nobody wrote. Use a flag that takes a file. This may be widened later — refusing now and permitting later breaks nothing, the reverse would.
+
+**No flag denylist.** The same manifest can already declare `entry` (a binary sandy supervises as a daemon) and `rw` mounts of any host path, so filtering flags beside those would protect nothing. Only the mode flags `-p`/`--print`/`--prompt` are dropped, and that is a correctness rule, not a security one: host-side headless detection runs before injection, so a `-p` here would make the host launch interactive while the container went headless. The warning names the feature — an unnamed misconfiguration is indistinguishable from a working one.
+
+**Precedence.** Feature args are additive, ordered first, and never suppressible; several features compose in sorted slug order. Sandy defines the ORDER — PRECEDENCE belongs to the agent's parser, and `claude --mcp-config` is variadic, so a second occurrence may accumulate rather than replace.
+
+**Reporting.** The launch records what it applied in `sandy-session.json` (§C.9), attributed per feature and post-filter, and `--print-state` reads it back. Deliberately *not* re-derived from the manifest at query time: that would report a prediction, and would disagree with the running container for any sandbox whose manifest changed since — the same last-launch-vs-next-launch confusion `agents`, `handoff_enabled` and `handoff.state` each carry a caveat about.
+
+**It narrows §8.** A Claude Code plugin directory carries `commands/`, `agents/` and `skills/`, and `claude --plugin-dir <path>` is repeatable — so a feature can now contribute slash commands off its `:ro` payload with no new manifest concept and no write into the sandbox. That answers the claude half of #317; the open question shrinks to the other four agents, which have three different command formats between them.

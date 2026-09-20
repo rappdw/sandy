@@ -11838,8 +11838,14 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # 17 as of 1.15.0: `sandbox_name` (#303) -- the sandbox slug, which nothing
 # in-container could learn before and which was not derivable from
 # SANDY_PROJECT_NAME (the raw basename) plus the hash.
-check "§114(13g) marker printf format/arg count line up (17 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 17
+# 18 as of 2.1.0: `agent_args` (#348) -- what a feature manifest contributed to
+# each agent this launch. This tripwire is what caught the field being added,
+# which is exactly its job: a new conversion with no matching argument shifts
+# every field after it silently.
+# 19 as of 2.1.0: `relay.source` (#345) -- WHICH producer supplied the relay,
+# which `relay.slot` never could answer and was being misread as.
+check "§114(13g) marker printf format/arg count line up (19 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 19
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -14659,6 +14665,8 @@ _s134_marker() {
         _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
         _sandy_agents_json=null; _sandy_relay_json=false; _sandy_relay_slot_json=null
         _sandy_relay_path_json=null; _sandy_relay_disabled_by_json=null
+        _sandy_relay_source_json=null            # 2.1.0 (#345)
+        _SANDY_FM_AA_JSON=""                     # 2.1.0 (#348)
         CRED_MODE=none; _sandy_session_nonce=deadbeef; _sandy_session_file=/dev/stdout
         eval "$_blk"
     )
@@ -16461,6 +16469,541 @@ rm -rf "$_S141_NOANS"
 
 rm -rf "$_S141_DIR"
 unset _S141_DIR _S141_SANDY _S141_BLK _S141_CLEAN _S141_DIRTY _S141_H _S141_DRY _S141_RC _S141_NOANS _S141_NRC _s141_nh _s141_w _s141_ws _s141_h _s141_d
+
+# ============================================================
+echo ""
+echo "§148: feature manifests contribute per-agent launch arguments (#348)"
+# ============================================================
+# A manifest could mount files and export variables but had no way to make the
+# agent READ them, so anything agent-facing still needed a per-sandbox write
+# after selection. `agent_args` closes that: a list of strings per agent,
+# resolved at the launch that selects the sandbox, passed through the same
+# channel SANDY_AGENT_ARGS and agent-args.<agent> already use.
+#
+# WHAT THESE CHECKS ASSERT IS THE PROPERTY, NOT THE MECHANISM. A grep for the
+# key in the projector would pass on code that parses it and drops it on the
+# floor; every check below runs the resolver and looks at the tokens that come
+# out, or runs the projector and looks at the records.
+_S148_SANDY="$SANDY_SCRIPT"
+_S148_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+
+# The launch-side resolver, extracted with the shared tokenizer it calls and
+# the manifest reader that feeds it. warn/info are stubbed to stdout because
+# _sandy_filter_agent_args reports a dropped mode flag through warn().
+_S148_LIB="$_S148_DIR/lib.sh"
+{
+    echo 'warn(){ echo "[sandy] WARNING: $*"; }'
+    echo 'info(){ echo "[sandy] $*"; }'
+    echo '_SANDY_FM_HOME=/home/sandy'
+    awk '/^_sandy_fm_projector_js\(\) \{/,/^# --- Applying a feature/' "$_S148_SANDY"
+    awk '/^_sandy_fm_apply\(\) \{/,/^\}$/' "$_S148_SANDY"
+    awk '/^_sandy_filter_agent_args\(\) \{/,/^\}$/' "$_S148_SANDY"
+    awk '/^_sandy_fm_agent_args_for\(\) \{/,/^\}$/' "$_S148_SANDY"
+} > "$_S148_LIB"
+check "§148(pre) the resolver and its collaborators were extracted (mutation: rename one and every check below goes vacuous instead of red)" \
+    bash -c 'grep -q "^_sandy_fm_agent_args_for() {" "$1" && grep -q "^_sandy_fm_apply() {" "$1" && grep -q "^_sandy_filter_agent_args() {" "$1"' _ "$_S148_LIB"
+
+# _s148_resolve MANIFEST_DIR AGENT -> prints "TOKENS:<space-joined>" then the
+# marker JSON, having run the real apply + collect + resolve path.
+_s148_resolve() {
+    bash -c '
+        set -uo pipefail
+        source "$1"
+        _out="$(_sandy_fm_apply "$2" "myrepo-a1b2c3d4" "/home/sandy/dev/myrepo" "$3" 1)" || { echo "APPLY_RC=$?"; exit 0; }
+        _SANDY_FM_AA_RECORDS=""; _SANDY_FM_AA_JSON=""
+        while IFS= read -r _l; do
+            [ -n "$_l" ] || continue
+            case "$_l" in agent_args*) _SANDY_FM_AA_RECORDS="${_SANDY_FM_AA_RECORDS}${_l#agent_args	}"$'"'"'\n'"'"' ;; esac
+        done <<< "$_out"
+        _sandy_fm_agent_args_for "$3"
+        echo "TOKENS:$_SANDY_FM_AA_TOKENS"
+        echo "MARKER:{$_SANDY_FM_AA_JSON}"
+    ' _ "$_S148_LIB" "$2" "$3" 2>&1
+}
+
+_s148_mk() {   # _s148_mk <dir> <feature> <json-body>
+    mkdir -p "$1/$2/payload"
+    printf '%s' "$3" > "$1/$2/feature.json"
+}
+
+# --- (1) the happy path: tokens arrive, in the manifest's own order ---------
+_S148_R1="$_S148_DIR/r1"; mkdir -p "$_S148_R1"
+_s148_mk "$_S148_R1" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts":[{"name":"payload","from":"payload"}],"agent_args":{"claude":["--mcp-config","/opt/sandy/features/amap/mcp-servers.json"]}}'
+_S148_O1="$(_s148_resolve "$_S148_LIB" "$_S148_R1" claude)"
+check "§148(1) a declared agent_args list reaches the agent's arg channel, in order (got: $(printf '%s' "$_S148_O1" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^TOKENS:--mcp-config /opt/sandy/features/amap/mcp-servers.json$"' _ "$_S148_O1"
+check "§148(2) ...and it is recorded in the marker ATTRIBUTED to the feature that supplied it (a merged list cannot answer which feature put a flag there)" \
+    bash -c 'printf "%s" "$1" | grep "^MARKER:" | grep -q "\"feature\": \"amap\"" && printf "%s" "$1" | grep "^MARKER:" | grep -q -- "--mcp-config"' _ "$_S148_O1"
+
+# --- (3) per-agent isolation -------------------------------------------------
+# A manifest naming codex must contribute NOTHING to a claude launch. This is
+# the pane-isolation property agent-args.<agent> already has, one level up.
+_S148_R2="$_S148_DIR/r2"; mkdir -p "$_S148_R2"
+_s148_mk "$_S148_R2" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["*"]},"agent_args":{"codex":["--codex-only"],"claude":["--claude-only"]}}'
+_S148_O2="$(_s148_resolve "$_S148_LIB" "$_S148_R2" claude)"
+check "§148(3) a claude launch gets ONLY claude's list — codex's tokens never cross (got: $(printf '%s' "$_S148_O2" | grep '^TOKENS:'))" \
+    bash -c 'printf "%s" "$1" | grep -q "^TOKENS:--claude-only$"' _ "$_S148_O2"
+check "§148(4) ...and the marker for that launch records only the agent that ran, not every agent the manifest mentions" \
+    bash -c 'printf "%s" "$1" | grep "^MARKER:" | grep -qv "codex-only"' _ "$_S148_O2"
+
+# --- (5) multiple features compose, deterministically ------------------------
+_S148_R3="$_S148_DIR/r3"; mkdir -p "$_S148_R3"
+_s148_mk "$_S148_R3" zeta '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"agent_args":{"claude":["--zeta"]}}'
+_s148_mk "$_S148_R3" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"agent_args":{"claude":["--amap"]}}'
+_S148_O3="$(_s148_resolve "$_S148_LIB" "$_S148_R3" claude)"
+check "§148(5) two features compose in SORTED SLUG order, not filesystem order (amap before zeta, whichever was written first)" \
+    bash -c 'printf "%s" "$1" | grep -q "^TOKENS:--amap --zeta$"' _ "$_S148_O3"
+
+# --- (6) the mode-flag filter, and WHO it blames -----------------------------
+# -p cannot work from here (host-side headless detection runs before injection,
+# so the host would launch interactive while the container went headless). The
+# warning must name the FEATURE: "a flag was dropped" with no owner is the
+# unnamed-misconfiguration shape R7a was about.
+_S148_R4="$_S148_DIR/r4"; mkdir -p "$_S148_R4"
+_s148_mk "$_S148_R4" zeta '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"agent_args":{"claude":["--keep","-p","--also-keep"]}}'
+_S148_O4="$(_s148_resolve "$_S148_LIB" "$_S148_R4" claude)"
+check "§148(6) a mode flag in a manifest is DROPPED, and the surviving tokens are otherwise untouched" \
+    bash -c 'printf "%s" "$1" | grep -q "^TOKENS:--keep --also-keep$"' _ "$_S148_O4"
+check "§148(7) ...and the warning NAMES THE FEATURE that supplied it (got: $(printf '%s' "$_S148_O4" | grep WARNING))" \
+    bash -c 'printf "%s" "$1" | grep WARNING | grep -q "zeta"' _ "$_S148_O4"
+check "§148(8) ...and the dropped flag is NOT recorded in the marker — the field reports what was APPLIED, not what was declared" \
+    bash -c 'printf "%s" "$1" | grep "^MARKER:" | grep -qv -- "\"-p\""' _ "$_S148_O4"
+
+# --- (9) refusals: the whole manifest, not just the key ----------------------
+# An unknown key or a bad token REFUSES the manifest, which takes that feature's
+# MOUNTS AND EXPORTS down with it. That is the property a consumer must gate on
+# (R7), so it is asserted rather than assumed.
+_S148_R5="$_S148_DIR/r5"; mkdir -p "$_S148_R5"
+_s148_mk "$_S148_R5" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts":[{"name":"payload","from":"payload"}],"agent_args":{"claude":["--flag","two words"]}}'
+_S148_O5="$(_s148_resolve "$_S148_LIB" "$_S148_R5" claude)"
+check "§148(9) a token containing a SPACE refuses the manifest (rc!=0), rather than splitting into arguments nobody wrote" \
+    bash -c 'printf "%s" "$1" | grep -q "^APPLY_RC="' _ "$_S148_O5"
+check "§148(10) ...and NOTHING is mounted as a result — the refusal is whole-manifest, which is why a consumer must gate on the capability before emitting the key" \
+    bash -c 'printf "%s" "$1" | grep -qv "^mount"' _ "$_S148_O5"
+
+_S148_R6="$_S148_DIR/r6"; mkdir -p "$_S148_R6"
+_s148_mk "$_S148_R6" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"agent_args":{"cluade":["--x"]}}'
+_S148_O6="$(_s148_resolve "$_S148_LIB" "$_S148_R6" claude)"
+check "§148(11) a TYPO'D AGENT NAME is refused, never silently skipped — a key that contributes nothing while everything else works is the failure class this project keeps removing" \
+    bash -c 'printf "%s" "$1" | grep -q "^APPLY_RC="' _ "$_S148_O6"
+
+# --- (12) feature args come BEFORE operator args -----------------------------
+# Decided: feature args are additive and never suppressible; the operator's
+# existing file-vs-env exclusivity is untouched. Sandy defines the ORDER only --
+# precedence belongs to the agent's parser -- so this pins order, not "who wins".
+#
+# This runs sandy's REAL per-agent block. An earlier draft hand-rolled the
+# concatenation in the test and asserted its own arithmetic: reversing the order
+# in sandy left it green, which is the whole reason this suite mutation-tests.
+_S148_BLK="$(awk '/^# BEGIN per-agent args/,/^# END per-agent args/' "$_S148_SANDY")"
+check "§148(pre-12) the per-agent args block was extracted (mutation: rename its BEGIN marker and (12) goes vacuous instead of red)" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_AGENT_ARGS_CLAUDE="' _ "$_S148_BLK"
+_S148_O7="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    _out="$(_sandy_fm_apply "$2" "myrepo-a1b2c3d4" "/home/sandy/dev/myrepo" claude 1)"
+    _SANDY_FM_AA_RECORDS=""; _SANDY_FM_AA_JSON=""
+    while IFS= read -r _l; do
+        [ -n "$_l" ] || continue
+        case "$_l" in agent_args*) _SANDY_FM_AA_RECORDS="${_SANDY_FM_AA_RECORDS}${_l#agent_args	}"$'"'"'\n'"'"' ;; esac
+    done <<< "$_out"
+    SANDBOX_DIR="$3"
+    _SANDY_AGENTS=(claude)
+    _SANDY_AGENT_ARGS_FILTERED="--operator-flag"
+    eval "$4"
+    echo "FINAL:$SANDY_AGENT_ARGS_CLAUDE"
+' _ "$_S148_LIB" "$_S148_R3" "$_S148_DIR/nosuchsandbox" "$_S148_BLK" 2>&1)"
+check "§148(12) sandy's own per-agent block orders feature args BEFORE the operator's, and keeps both — the operator value is never suppressed and never suppresses (got: $(printf '%s' "$_S148_O7" | grep '^FINAL:'))" \
+    bash -c 'printf "%s" "$1" | grep -q "^FINAL:--amap --zeta --operator-flag$"' _ "$_S148_O7"
+
+# --- (13) the published input contract, and the three copies of the key list -
+# --print-schema now describes what sandy ACCEPTS, not only what it emits. The
+# list exists in three places (both projectors, which are heredocs in other
+# languages and cannot call bash, plus the shell copy behind --print-schema),
+# so all three are diffed here. This is §135(20)'s drift, one layer out.
+# Only the top_level_keys array: it holds no nested brackets, so a [^]]* run is
+# exact and needs no alternation (BSD sed has none in a BRE).
+_S148_SCHEMA_KEYS="$(bash "$_S148_SANDY" --print-schema 2>/dev/null | sed -n 's/.*"top_level_keys":\[\([^]]*\)\].*/\1/p' | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S148_JS_KEYS="$(sed -n 's/^const KNOWN = \[\(.*\)\];$/\1/p' "$_S148_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S148_JQ_KEYS="$(sed -n 's/^def known: \[\(.*\)\];$/\1/p' "$_S148_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+check "§148(13) --print-schema publishes the manifest's accepted top-level keys (the capability signal a consumer gates on instead of a version number) (got: $_S148_SCHEMA_KEYS)" \
+    bash -c 'printf "%s" "$1" | grep -q "agent_args"' _ "$_S148_SCHEMA_KEYS"
+check "§148(14) --print-schema's list equals the NODE projector's KNOWN array (mutation: add a key to one and this goes red)" \
+    test "$_S148_SCHEMA_KEYS" = "$_S148_JS_KEYS"
+check "§148(15) ...and equals the JQ projector's, so a jq-only host accepts exactly what the schema advertises" \
+    test "$_S148_JS_KEYS" = "$_S148_JQ_KEYS"
+
+# --- (16) the agent list a consumer validates against ------------------------
+# The consumer was told to read --print-schema's agents[].name rather than
+# hardcode the set. That is only safe if it equals what the projectors accept.
+_S148_SCHEMA_AGENTS="$(bash "$_S148_SANDY" --print-schema 2>/dev/null | tr '{' '\n' | sed -n 's/.*"name":"\([a-z]*\)","image":"sandy-.*/\1/p' | tr '\n' ' ' | sed 's/ *$//')"
+_S148_JS_AGENTS="$(sed -n 's/^const AGENTS = \[\(.*\)\];$/\1/p' "$_S148_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S148_JQ_AGENTS="$(sed -n 's/^def agents_known: \[\(.*\)\];$/\1/p' "$_S148_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+check "§148(16) --print-schema's agents[].name equals the set agent_args accepts — a consumer validating against the published list cannot be refused for a name sandy advertises (schema: $_S148_SCHEMA_AGENTS / js: $_S148_JS_AGENTS)" \
+    test "$_S148_SCHEMA_AGENTS" = "$_S148_JS_AGENTS"
+check "§148(17) ...and both projectors accept the same agents" \
+    test "$_S148_JS_AGENTS" = "$_S148_JQ_AGENTS"
+
+# --- (18) node/jq parity across the agent_args corpus ------------------------
+# §135(20) covers the pre-#348 corpus. These are the cases the new clause adds,
+# including one where the ORDER of the checks is observable: a manifest with
+# both a spaced token and an empty one must blame the SAME offender in both.
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    _S148_PJS="$_S148_DIR/p.js"; _S148_PJQ="$_S148_DIR/p.jq"
+    awk '/^_sandy_fm_projector_js\(\) \{$/{f=1;next} f&&/^SANDY_FM_JS$/{exit} f&&!/^cat <</{print}' "$_S148_SANDY" > "$_S148_PJS"
+    awk '/^_sandy_fm_projector_jq\(\) \{$/{f=1;next} f&&/^SANDY_FM_JQ$/{exit} f&&!/^cat <</{print}' "$_S148_SANDY" > "$_S148_PJQ"
+    _S148_PAR=""
+    _s148_base='"sandboxes":{"include":["*"]},"agents":{"include":["claude"]}'
+    for _s148_j in \
+        '{'"$_s148_base"',"agent_args":{"claude":["--a","--b"]}}' \
+        '{'"$_s148_base"',"agent_args":{"claude":["-a"],"codex":["-b"]}}' \
+        '{'"$_s148_base"',"agent_args":{"nope":["-a"]}}' \
+        '{'"$_s148_base"',"agent_args":["notanobject"]}' \
+        '{'"$_s148_base"',"agent_args":{"claude":"notalist"}}' \
+        '{'"$_s148_base"',"agent_args":{"claude":[1]}}' \
+        '{'"$_s148_base"',"agent_args":{"claude":[""]}}' \
+        '{'"$_s148_base"',"agent_args":{"claude":["a b"]}}' \
+        '{'"$_s148_base"',"agent_args":{"claude":["ok","a b",""]}}' \
+        '{'"$_s148_base"',"agent_args":{}}' ; do
+        printf '%s' "$_s148_j" > "$_S148_DIR/f.json"
+        _s148_a="$(node "$_S148_PJS" "$_S148_DIR/f.json" 2>&1)"
+        _s148_b="$(jq -r -f "$_S148_PJQ" "$_S148_DIR/f.json" 2>&1)"
+        [ "$_s148_a" = "$_s148_b" ] || _S148_PAR="$_S148_PAR|$_s148_j"
+    done
+    check "§148(18) node and jq agree EXACTLY across the agent_args corpus, messages included — a jq-only host must not accept what node refuses (diverged on:${_S148_PAR:-nothing})" \
+        bash -c '[ -z "$1" ]' _ "$_S148_PAR"
+    unset _S148_PAR _s148_j _s148_a _s148_b _s148_base _S148_PJS _S148_PJQ
+else
+    skip "§148(18) node/jq agent_args parity needs BOTH node and jq on the host"
+fi
+
+# --- (19) the marker's three states, read back through --print-state ---------
+# absent / {} / populated must stay distinguishable: rounding "absent" to
+# "nothing applied" would report a fully configured fleet as unconfigured. This
+# is the None-vs-[] rule agent_args_files already carries.
+_S148_H="$_S148_DIR/home"
+mkdir -p "$_S148_H/sandboxes/new-11111111" "$_S148_H/sandboxes/none-22222222" "$_S148_H/sandboxes/old-33333333"
+printf '{\n  "schema": 1,\n  "agents": ["claude"],\n  "agent_args": {"claude": [{"feature": "amap", "args": ["--mcp-config", "/o/x.json"]}]},\n  "cred_mode": "full"\n}\n' > "$_S148_H/sandboxes/new-11111111/sandy-session.json"
+printf '{\n  "schema": 1,\n  "agents": ["claude"],\n  "agent_args": {},\n  "cred_mode": "full"\n}\n' > "$_S148_H/sandboxes/none-22222222/sandy-session.json"
+printf '{\n  "schema": 1,\n  "agents": ["claude"],\n  "cred_mode": "full"\n}\n' > "$_S148_H/sandboxes/old-33333333/sandy-session.json"
+_S148_PS="$(SANDY_HOME="$_S148_H" bash "$_S148_SANDY" --print-state 2>/dev/null)"
+# Read back with a real parser rather than by slicing text: the three states
+# differ by BRACES ({} vs null vs populated), and every text-slicing idiom that
+# splits on a brace destroys the value under test. Not a portable-sed problem --
+# the wrong tool. §88b's rule is to separate the FIXTURES, which the three
+# single-purpose sandboxes above already do.
+if command -v node >/dev/null 2>&1; then
+    _s148_state() {
+        printf '%s' "$_S148_PS" | node -e '
+            let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+              const j = JSON.parse(s);
+              const sb = j.sandboxes.find(x => x.name === process.argv[1]);
+              if (!sb) { console.log("NOSANDBOX"); return; }
+              console.log(sb.agent_args === null ? "NULL"
+                        : Object.keys(sb.agent_args).length === 0 ? "EMPTY"
+                        : JSON.stringify(sb.agent_args));
+            });' "$1"
+    }
+    _S148_ST1="$(_s148_state new-11111111)"
+    _S148_ST2="$(_s148_state none-22222222)"
+    _S148_ST3="$(_s148_state old-33333333)"
+    check "§148(19) a launch that applied feature args reports them in --print-state, attributed (got: $_S148_ST1)" \
+        bash -c 'printf "%s" "$1" | grep -q amap' _ "$_S148_ST1"
+    check "§148(20) a 2.1.0 launch that applied NONE reports {} -- sandy looked and there were none (got: $_S148_ST2)" \
+        test "$_S148_ST2" = "EMPTY"
+    check "§148(21) a marker PREDATING the field reports null -- sandy CANNOT ANSWER, which a consumer must not collapse into none-applied (got: $_S148_ST3)" \
+        test "$_S148_ST3" = "NULL"
+    unset -f _s148_state
+    unset _S148_ST1 _S148_ST2 _S148_ST3
+else
+    skip "§148(19-21) the marker's three states need node to read --print-state back"
+fi
+
+# --- (22) the marker line the reader depends on ------------------------------
+# --print-state reads agent_args with a BRE anchored on its own key at line
+# start. That only works if the emitter keeps the value on ONE line, so the
+# format string is pinned here rather than discovered by a consumer later.
+check "§148(22) the marker emits agent_args on ONE line (the host-side reader anchors on its own key and would silently return nothing against a pretty-printed object)" \
+    grep -Fq '"agent_args": {%s},' "$_S148_SANDY"
+
+rm -rf "$_S148_DIR"
+unset _S148_SANDY _S148_DIR _S148_LIB _S148_R1 _S148_R2 _S148_R3 _S148_R4 _S148_R5 _S148_R6 \
+      _S148_O1 _S148_O2 _S148_O3 _S148_O4 _S148_O5 _S148_O6 _S148_O7 \
+      _S148_SCHEMA_KEYS _S148_JS_KEYS _S148_JQ_KEYS _S148_SCHEMA_AGENTS _S148_JS_AGENTS _S148_JQ_AGENTS \
+      _S148_H _S148_PS _S148_BLK
+unset -f _s148_resolve _s148_mk _s148_field
+
+# ============================================================
+echo ""
+echo "§149: relay reporting — which producer, and is its executable still there (#345, #344)"
+# ============================================================
+# #345: `relay.slot` is written ONLY by the relay-bin slot block, so an explicit
+# SANDY_HANDOFF_RELAY, a manifest `entry` and no relay at all all report
+# "absent". A consumer shipped a check on it that called every correctly
+# migrated sandbox broken and would have called one still running a shim
+# healthy.
+#
+# MEASURED WHILE FIXING, and it is why documentation could not have been the
+# answer: in --print-state the field `path` -- which the issue proposed as the
+# discriminator -- was derived from the slot DIRECTORY alone, so the manifest
+# and explicit producers were BYTE-IDENTICAL there ({"state":"started",
+# "path":null}). The fleet API could not tell them apart at all.
+#
+# #344: migrating off the slot means removing a mounted executable from under a
+# running relay. Every sandbox up at that moment keeps state=started,
+# restarts=0, and nothing anywhere distinguishes it from a correct one.
+#
+# THE GUARDS ASSERT DISCRIMINATION, NOT VALUES. A check that pins
+# source=="manifest" for one fixture passes on an emitter that returns
+# "manifest" for everything; these assert that no two producers collide.
+_S149_SANDY="$SANDY_SCRIPT"
+_S149_H="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S149_H/sandboxes" "$_S149_H/features/amap/payload"
+printf '#!/bin/sh\n' > "$_S149_H/features/amap/payload/relay"; chmod +x "$_S149_H/features/amap/payload/relay"
+
+# _s149_mk <slug> <slot> <source> <path-json> [install-slot-entry]
+_s149_mk() {
+    mkdir -p "$_S149_H/sandboxes/$1/handoff/relay"
+    printf 'state=started\nrestarts=0\n' > "$_S149_H/sandboxes/$1/handoff/relay/.state"
+    printf '{\n  "schema": 1,\n  "relay": {\n    "slot": "%s",\n    "source": "%s",\n    "path": %s,\n    "disabled_by": null\n  },\n  "cred_mode": "full"\n}\n' \
+        "$2" "$3" "$4" > "$_S149_H/sandboxes/$1/sandy-session.json"
+    if [ "${5:-}" = "install" ]; then
+        mkdir -p "$_S149_H/sandboxes/$1/relay-bin"
+        printf '#!/bin/sh\n' > "$_S149_H/sandboxes/$1/relay-bin/relay"
+        chmod +x "$_S149_H/sandboxes/$1/relay-bin/relay"
+    fi
+}
+_s149_mk p1explicit-11111111 absent  explicit '"/home/sandy/dev/x/.sandy/relay.sh"'
+_s149_mk p2slot-22222222     present slot     '"/opt/sandy/relay/relay"'          install
+_s149_mk p3manifest-33333333 absent  manifest '"/opt/sandy/features/amap/relay"'
+_s149_mk p4gone-44444444     absent  manifest '"/opt/sandy/features/ghost/relay"'
+_s149_mk p5slotgone-55555555 present slot     '"/opt/sandy/relay/relay"'
+
+_S149_PS="$(SANDY_HOME="$_S149_H" bash "$_S149_SANDY" --print-state 2>/dev/null)"
+check "§149(pre) --print-state produced a parseable document for the five fixtures" \
+    bash -c 'printf "%s" "$1" | grep -q p3manifest' _ "$_S149_PS"
+
+if command -v node >/dev/null 2>&1; then
+    # --- #345: discrimination, asserted as a property -------------------------
+    # Every producer's (source, path) pair must be UNIQUE across the corpus. The
+    # pre-fix emitter fails this: p1explicit and p3manifest both yielded
+    # (absent, null). Deliberately computed rather than enumerated, so adding a
+    # producer later without a discriminator fails here.
+    _S149_UNIQ="$(printf '%s' "$_S149_PS" | node -e '
+        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+          const j = JSON.parse(s);
+          const keys = j.sandboxes.map(sb => JSON.stringify([sb.relay.source, sb.relay.path]));
+          const distinct = new Set(keys).size;
+          // p2slot and p5slotgone are the SAME producer with the same path and
+          // are expected to collide on this pair -- they are separated by
+          // executable_present, checked below. So four producers, four pairs.
+          console.log(distinct);
+        });')"
+    check "§149(1) the four DISTINCT producers yield four distinct (source, path) pairs — pre-fix, explicit and manifest both reported (absent, null) (got $_S149_UNIQ distinct pairs across 5 fixtures, 2 of which share a producer)" \
+        test "$_S149_UNIQ" -eq 4
+    _S149_SRCS="$(printf '%s' "$_S149_PS" | node -e '
+        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+          const j = JSON.parse(s);
+          console.log(j.sandboxes.map(sb => sb.name.slice(0,2) + "=" + sb.relay.source).sort().join(" "));
+        });')"
+    check "§149(2) each producer names ITSELF — not a single value returned for everything (got: $_S149_SRCS)" \
+        bash -c 'printf "%s" "$1" | grep -q "p1=explicit" && printf "%s" "$1" | grep -q "p2=slot" && printf "%s" "$1" | grep -q "p3=manifest"' _ "$_S149_SRCS"
+    check "§149(3) a manifest-entry relay reports its real path in --print-state, not null — this surface derived path from the slot directory alone, so it was blind to two of the three producers" \
+        bash -c 'printf "%s" "$1" | node -e "
+            let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>{
+              const j=JSON.parse(s);
+              const sb=j.sandboxes.find(x=>x.name.startsWith(\"p3manifest\"));
+              process.exit(sb.relay.path === \"/opt/sandy/features/amap/relay\" ? 0 : 1);
+            });"' _ "$_S149_PS"
+
+    # --- #344: the executable fact -------------------------------------------
+    _S149_EXE="$(printf '%s' "$_S149_PS" | node -e '
+        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+          const j = JSON.parse(s);
+          console.log(j.sandboxes.map(sb => sb.name.slice(0,2) + "=" + String(sb.relay.executable_present)).sort().join(" "));
+        });')"
+    check "§149(4) a relay whose executable is still present reports true (got: $_S149_EXE)" \
+        bash -c 'printf "%s" "$1" | grep -q "p2=true" && printf "%s" "$1" | grep -q "p3=true"' _ "$_S149_EXE"
+    check "§149(5) a relay recorded as STARTED whose executable is gone reports false — for BOTH producers, which is the state the whole fleet lands in when the slot is emptied under running sandboxes" \
+        bash -c 'printf "%s" "$1" | grep -q "p4=false" && printf "%s" "$1" | grep -q "p5=false"' _ "$_S149_EXE"
+    check "§149(6) an EXPLICIT relay path reports null — the host cannot resolve a container path, and saying so beats guessing (a false here would be a fabricated verdict)" \
+        bash -c 'printf "%s" "$1" | grep -q "p1=null"' _ "$_S149_EXE"
+
+    # --- the property #344 actually asks for ---------------------------------
+    # "must not present the sandbox as indistinguishable from a healthy one."
+    # Compared as WHOLE relay objects: a check on executable_present alone would
+    # pass on an emitter that dropped `state`, and the reported complaint was
+    # precisely that two sandboxes were identical in every readable field.
+    _S149_DISTINCT="$(printf '%s' "$_S149_PS" | node -e '
+        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+          const j = JSON.parse(s);
+          const ok   = j.sandboxes.find(x => x.name.startsWith("p3manifest")).relay;
+          const gone = j.sandboxes.find(x => x.name.startsWith("p4gone")).relay;
+          const okS = {...ok}, goneS = {...gone};
+          delete okS.path; delete goneS.path;   // the path alone always differed
+          console.log(JSON.stringify(okS) === JSON.stringify(goneS) ? "IDENTICAL" : "DISTINCT");
+        });')"
+    check "§149(7) a started-but-orphaned relay is DISTINGUISHABLE from a healthy one even ignoring the path — both report state=started, so without executable_present these objects are identical (got: $_S149_DISTINCT)" \
+        test "$_S149_DISTINCT" = "DISTINCT"
+else
+    skip "§149(1-7) relay producer discrimination needs node to read --print-state back"
+fi
+
+# --- marker side: which producer claims the relay, and in what order ---------
+# Precedence is explicit > slot > manifest, and it is the block itself that is
+# run here rather than a restatement of it.
+# The span opens at the slot DIRECTORY assignment, not at _sandy_relay_slot --
+# the directory is set one line earlier and the block dereferences it, so the
+# narrower range produced an unbound-variable abort that the checks below read
+# as an empty result rather than as a red.
+_S149_BLK="$(awk '/^_sandy_relay_slot_dir="\$SANDBOX_DIR\/relay-bin"/,/^# END relay capability/' "$_S149_SANDY")"
+check "§149(pre-8) the relay capability block was extracted (mutation: rename its first line and (8)-(10) go vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_relay_source="' _ "$_S149_BLK"
+_s149_src() {   # $1 = install slot entry?  $2 = explicit value
+    bash -c '
+        set -uo pipefail
+        warn(){ :; }; info(){ :; }; error(){ :; }
+        # unset EXPLICITLY, never "just do not set it": a sandy session exports
+        # SANDY_HANDOFF_RELAY, so this helper inherited a real relay path from
+        # the surrounding environment and every case reported "explicit". That
+        # is a host-dependent test -- green on a clean CI runner, red on a
+        # developer machine inside sandy, or the reverse.
+        unset SANDY_HANDOFF_RELAY
+        SANDBOX_DIR="$2"; SANDY_RELAY=1
+        mkdir -p "$SANDBOX_DIR"
+        if [ "$3" = install ]; then mkdir -p "$SANDBOX_DIR/relay-bin"; printf "#!/bin/sh\n" > "$SANDBOX_DIR/relay-bin/relay"; chmod +x "$SANDBOX_DIR/relay-bin/relay"; fi
+        [ -n "$4" ] && SANDY_HANDOFF_RELAY="$4"
+        eval "$1"
+        echo "$_sandy_relay_source"
+    ' _ "$_S149_BLK" "$_S149_H/probe$$_$RANDOM" "$1" "$2" 2>/dev/null
+}
+check "§149(8) no slot entry and no explicit key -> source is 'none' (got: $(_s149_src noinstall ''))" \
+    test "$(_s149_src noinstall '')" = "none"
+check "§149(9) a slot entry claims it -> 'slot' (got: $(_s149_src install ''))" \
+    test "$(_s149_src install '')" = "slot"
+check "§149(10) an explicit SANDY_HANDOFF_RELAY WINS over an installed slot entry — the documented precedence, asserted against the block that implements it (got: $(_s149_src install /x/relay))" \
+    test "$(_s149_src install /x/relay)" = "explicit"
+
+# The manifest producer is claimed in the entry-adoption loop, not in the block
+# above, so it is extracted and run separately rather than asserted from a
+# hand-written fixture marker -- (2) reads a marker someone wrote; this runs the
+# code that writes one.
+_S149_ADOPT="$(awk '/^    while IFS= read -r _fm_l; do/,/^    done <<< "\$_sandy_fm_out"/' "$_S149_SANDY")"
+check "§149(pre-11) the manifest entry-adoption loop was extracted" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_relay_source=\"manifest\""' _ "$_S149_ADOPT"
+# $1 = pre-existing SANDY_HANDOFF_RELAY ("" for none), $2 = the source the
+# capability block already resolved. Both are inputs because this loop runs
+# AFTER that block: in a real launch an explicit key has already set the source
+# to "explicit", and the property here is that the loop does not CLOBBER it.
+_s149_adopt() {
+    bash -c '
+        set -uo pipefail
+        info(){ :; }
+        unset SANDY_HANDOFF_RELAY   # inherited from the surrounding sandy session otherwise
+        _sandy_relay_source="$3"; _sandy_relay_from_slot="false"
+        _sandy_fm_out="$(printf "entry\t/opt/sandy/features/amap/relay\n")"
+        [ -n "$2" ] && SANDY_HANDOFF_RELAY="$2"
+        eval "$1"
+        echo "$_sandy_relay_source ${SANDY_HANDOFF_RELAY:-}"
+    ' _ "$_S149_ADOPT" "$1" "$2" 2>/dev/null
+}
+check "§149(11) a manifest entry claims the relay and names itself 'manifest' — the value #345 says slot could never produce (got: $(_s149_adopt '' none))" \
+    test "$(_s149_adopt '' none)" = "manifest /opt/sandy/features/amap/relay"
+check "§149(12) with an explicit key already resolved, the manifest entry neither takes the path NOR relabels the source — a source that followed the losing producer would misreport a whole fleet mid-migration (got: $(_s149_adopt /custom/relay explicit))" \
+    test "$(_s149_adopt /custom/relay explicit)" = "explicit /custom/relay"
+check "§149(13) ...and the same holds for the slot: a manifest entry does not relabel a relay the slot already supplied (the 2.0 coexistence promise, in the reporting) (got: $(_s149_adopt /opt/sandy/relay/relay slot))" \
+    test "$(_s149_adopt /opt/sandy/relay/relay slot)" = "slot /opt/sandy/relay/relay"
+
+rm -rf "$_S149_H"
+unset _S149_SANDY _S149_H _S149_PS _S149_UNIQ _S149_SRCS _S149_EXE _S149_DISTINCT _S149_BLK _S149_ADOPT
+unset -f _s149_mk _s149_src _s149_adopt
+
+# ============================================================
+echo ""
+echo "§150: a rebuilt parent invalidates the skill-pack images (#294)"
+# ============================================================
+# sandy-skills-base-<pack> is FROM sandy-claude-code and sandy-skills-<pack> is
+# FROM one of the two, but each was rebuilt only when its OWN Dockerfile
+# changed. So once the agent image moved, a skill-pack sandbox kept launching
+# with whatever user-setup.sh and entrypoint.sh were baked in at its last build.
+#
+# Measured in the field: a gstack base from 2026-07-20 carried a user-setup.sh
+# predating the relay supervisor (1.10.0). Every launch mounted the relay slot,
+# exported SANDY_HANDOFF_RELAY, started the agent -- and never started the
+# supervisor, because the script that would start it was not in the image.
+# --print-state then reported relay.state="failed" for a sandbox that had done
+# nothing wrong.
+#
+# NO DOCKER NEEDED: the property is "the cache key moves when the parent id
+# moves", and the parent id is read through one command that can be stubbed.
+_S150_SANDY="$SANDY_SCRIPT"
+_S150_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S150_FN="$(awk '/^_sandy_parent_image_id\(\) \{$/,/^\}$/' "$_S150_SANDY")"
+check "§150(pre) _sandy_parent_image_id was extracted (mutation: rename it and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "image inspect"' _ "$_S150_FN"
+
+printf 'FROM sandy-claude-code\nRUN echo hi\n'          > "$_S150_DIR/Dockerfile.skills-base"
+printf 'FROM sandy-skills-base-gstack\nRUN echo yo\n'   > "$_S150_DIR/Dockerfile.skills"
+
+# _s150_id <dockerfile> <what `docker image inspect` prints, or FAIL>
+_s150_id() {
+    bash -c '
+        set -uo pipefail
+        eval "$1"
+        # The fake id is captured into a variable FIRST: inside a function
+        # body $3 is the third argument OF THAT FUNCTION, and `docker image
+        # inspect -f {{.Id}} NAME` would have made it print "{{.Id}}" for every
+        # parent -- identical for both, so (5)/(7) went red and (6) passed
+        # vacuously.
+        _s150_fake="$3"
+        if [ "$3" = FAIL ]; then docker() { return 1; }; else docker() { printf "%s" "$_s150_fake"; }; fi
+        _sandy_parent_image_id "$2"
+    ' _ "$_S150_FN" "$1" "$2" 2>/dev/null
+}
+check "§150(1) the parent is read from the FROM line of the file, so the skills image follows whichever parent it was generated against (got: $(_s150_id "$_S150_DIR/Dockerfile.skills" sha256:aaa))" \
+    test "$(_s150_id "$_S150_DIR/Dockerfile.skills" sha256:aaa)" = "sha256:aaa"
+check "§150(2) a docker that cannot answer yields 'absent', never an empty string — an empty parent would hash the same as a missing one and silently stop invalidating" \
+    test "$(_s150_id "$_S150_DIR/Dockerfile.skills" FAIL)" = "absent"
+check "§150(3) a Dockerfile that does not exist yields 'absent' rather than aborting the launch under set -e" \
+    test "$(_s150_id "$_S150_DIR/nosuch" sha256:aaa)" = "absent"
+
+# --- the property: the real hash lines, with the parent moved underneath ------
+# The two assignments are lifted from sandy rather than restated, so a revert to
+# `cat FILE | sha256` is caught here instead of passing against a restatement.
+_S150_HB="$(grep -m1 'SKILLS_BASE_HASH="\$(' "$_S150_SANDY")"
+_S150_HC="$(grep -m1 'SKILLS_BUILD_HASH="\$(' "$_S150_SANDY")"
+check "§150(pre-4) both skills hash assignments were extracted" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ]' _ "$_S150_HB" "$_S150_HC"
+_s150_hash() {   # $1 = the assignment line, $2 = var name, $3 = fake parent id
+    bash -c '
+        set -uo pipefail
+        sha256() { shasum -a 256 2>/dev/null || sha256sum; }
+        eval "$1"
+        _s150_fake="$4"          # see the note in _s150_id: NOT "$4" inside the body
+        docker() { printf "%s" "$_s150_fake"; }
+        SANDY_HOME="$5"
+        eval "$2"
+        eval "printf %s \"\$$3\""
+    ' _ "$_S150_FN" "$1" "$2" "$3" "$_S150_DIR" 2>/dev/null
+}
+_S150_B1="$(_s150_hash "$_S150_HB" SKILLS_BASE_HASH sha256:parentA)"
+_S150_B2="$(_s150_hash "$_S150_HB" SKILLS_BASE_HASH sha256:parentB)"
+_S150_B3="$(_s150_hash "$_S150_HB" SKILLS_BASE_HASH sha256:parentA)"
+check "§150(4) the skills-BASE cache key is non-empty (mutation: a broken extraction would make (5) compare two empty strings and pass)" \
+    bash -c '[ -n "$1" ]' _ "$_S150_B1"
+check "§150(5) rebuilding the agent image MOVES the skills-base cache key — this is the whole bug: the Dockerfile is byte-identical and only the parent changed" \
+    bash -c '[ "$1" != "$2" ]' _ "$_S150_B1" "$_S150_B2"
+check "§150(6) ...and an UNCHANGED parent leaves it identical, so this does not rebuild Chromium on every launch" \
+    test "$_S150_B1" = "$_S150_B3"
+
+_S150_C1="$(_s150_hash "$_S150_HC" SKILLS_BUILD_HASH sha256:baseA)"
+_S150_C2="$(_s150_hash "$_S150_HC" SKILLS_BUILD_HASH sha256:baseB)"
+check "§150(7) the same holds one link down: a rebuilt skills-BASE moves the skills CODE image cache key, so the whole chain invalidates" \
+    bash -c '[ -n "$1" ] && [ "$1" != "$2" ]' _ "$_S150_C1" "$_S150_C2"
+
+rm -rf "$_S150_DIR"
+unset _S150_SANDY _S150_DIR _S150_FN _S150_HB _S150_HC _S150_B1 _S150_B2 _S150_B3 _S150_C1 _S150_C2
+unset -f _s150_id _s150_hash
 
 # BEGIN SUMMARY
 # ============================================================
