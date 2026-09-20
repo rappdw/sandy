@@ -16462,6 +16462,269 @@ rm -rf "$_S141_NOANS"
 rm -rf "$_S141_DIR"
 unset _S141_DIR _S141_SANDY _S141_BLK _S141_CLEAN _S141_DIRTY _S141_H _S141_DRY _S141_RC _S141_NOANS _S141_NRC _s141_nh _s141_w _s141_ws _s141_h _s141_d
 
+# ============================================================
+echo ""
+echo "§148: feature manifests contribute per-agent launch arguments (#348)"
+# ============================================================
+# A manifest could mount files and export variables but had no way to make the
+# agent READ them, so anything agent-facing still needed a per-sandbox write
+# after selection. `agent_args` closes that: a list of strings per agent,
+# resolved at the launch that selects the sandbox, passed through the same
+# channel SANDY_AGENT_ARGS and agent-args.<agent> already use.
+#
+# WHAT THESE CHECKS ASSERT IS THE PROPERTY, NOT THE MECHANISM. A grep for the
+# key in the projector would pass on code that parses it and drops it on the
+# floor; every check below runs the resolver and looks at the tokens that come
+# out, or runs the projector and looks at the records.
+_S148_SANDY="$SANDY_SCRIPT"
+_S148_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+
+# The launch-side resolver, extracted with the shared tokenizer it calls and
+# the manifest reader that feeds it. warn/info are stubbed to stdout because
+# _sandy_filter_agent_args reports a dropped mode flag through warn().
+_S148_LIB="$_S148_DIR/lib.sh"
+{
+    echo 'warn(){ echo "[sandy] WARNING: $*"; }'
+    echo 'info(){ echo "[sandy] $*"; }'
+    echo '_SANDY_FM_HOME=/home/sandy'
+    awk '/^_sandy_fm_projector_js\(\) \{/,/^# --- Applying a feature/' "$_S148_SANDY"
+    awk '/^_sandy_fm_apply\(\) \{/,/^\}$/' "$_S148_SANDY"
+    awk '/^_sandy_filter_agent_args\(\) \{/,/^\}$/' "$_S148_SANDY"
+    awk '/^_sandy_fm_agent_args_for\(\) \{/,/^\}$/' "$_S148_SANDY"
+} > "$_S148_LIB"
+check "§148(pre) the resolver and its collaborators were extracted (mutation: rename one and every check below goes vacuous instead of red)" \
+    bash -c 'grep -q "^_sandy_fm_agent_args_for() {" "$1" && grep -q "^_sandy_fm_apply() {" "$1" && grep -q "^_sandy_filter_agent_args() {" "$1"' _ "$_S148_LIB"
+
+# _s148_resolve MANIFEST_DIR AGENT -> prints "TOKENS:<space-joined>" then the
+# marker JSON, having run the real apply + collect + resolve path.
+_s148_resolve() {
+    bash -c '
+        set -uo pipefail
+        source "$1"
+        _out="$(_sandy_fm_apply "$2" "myrepo-a1b2c3d4" "/home/sandy/dev/myrepo" "$3" 1)" || { echo "APPLY_RC=$?"; exit 0; }
+        _SANDY_FM_AA_RECORDS=""; _SANDY_FM_AA_JSON=""
+        while IFS= read -r _l; do
+            [ -n "$_l" ] || continue
+            case "$_l" in agent_args*) _SANDY_FM_AA_RECORDS="${_SANDY_FM_AA_RECORDS}${_l#agent_args	}"$'"'"'\n'"'"' ;; esac
+        done <<< "$_out"
+        _sandy_fm_agent_args_for "$3"
+        echo "TOKENS:$_SANDY_FM_AA_TOKENS"
+        echo "MARKER:{$_SANDY_FM_AA_JSON}"
+    ' _ "$_S148_LIB" "$2" "$3" 2>&1
+}
+
+_s148_mk() {   # _s148_mk <dir> <feature> <json-body>
+    mkdir -p "$1/$2/payload"
+    printf '%s' "$3" > "$1/$2/feature.json"
+}
+
+# --- (1) the happy path: tokens arrive, in the manifest's own order ---------
+_S148_R1="$_S148_DIR/r1"; mkdir -p "$_S148_R1"
+_s148_mk "$_S148_R1" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts":[{"name":"payload","from":"payload"}],"agent_args":{"claude":["--mcp-config","/opt/sandy/features/amap/mcp-servers.json"]}}'
+_S148_O1="$(_s148_resolve "$_S148_LIB" "$_S148_R1" claude)"
+check "§148(1) a declared agent_args list reaches the agent's arg channel, in order (got: $(printf '%s' "$_S148_O1" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^TOKENS:--mcp-config /opt/sandy/features/amap/mcp-servers.json$"' _ "$_S148_O1"
+check "§148(2) ...and it is recorded in the marker ATTRIBUTED to the feature that supplied it (a merged list cannot answer which feature put a flag there)" \
+    bash -c 'printf "%s" "$1" | grep "^MARKER:" | grep -q "\"feature\": \"amap\"" && printf "%s" "$1" | grep "^MARKER:" | grep -q -- "--mcp-config"' _ "$_S148_O1"
+
+# --- (3) per-agent isolation -------------------------------------------------
+# A manifest naming codex must contribute NOTHING to a claude launch. This is
+# the pane-isolation property agent-args.<agent> already has, one level up.
+_S148_R2="$_S148_DIR/r2"; mkdir -p "$_S148_R2"
+_s148_mk "$_S148_R2" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["*"]},"agent_args":{"codex":["--codex-only"],"claude":["--claude-only"]}}'
+_S148_O2="$(_s148_resolve "$_S148_LIB" "$_S148_R2" claude)"
+check "§148(3) a claude launch gets ONLY claude's list — codex's tokens never cross (got: $(printf '%s' "$_S148_O2" | grep '^TOKENS:'))" \
+    bash -c 'printf "%s" "$1" | grep -q "^TOKENS:--claude-only$"' _ "$_S148_O2"
+check "§148(4) ...and the marker for that launch records only the agent that ran, not every agent the manifest mentions" \
+    bash -c 'printf "%s" "$1" | grep "^MARKER:" | grep -qv "codex-only"' _ "$_S148_O2"
+
+# --- (5) multiple features compose, deterministically ------------------------
+_S148_R3="$_S148_DIR/r3"; mkdir -p "$_S148_R3"
+_s148_mk "$_S148_R3" zeta '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"agent_args":{"claude":["--zeta"]}}'
+_s148_mk "$_S148_R3" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"agent_args":{"claude":["--amap"]}}'
+_S148_O3="$(_s148_resolve "$_S148_LIB" "$_S148_R3" claude)"
+check "§148(5) two features compose in SORTED SLUG order, not filesystem order (amap before zeta, whichever was written first)" \
+    bash -c 'printf "%s" "$1" | grep -q "^TOKENS:--amap --zeta$"' _ "$_S148_O3"
+
+# --- (6) the mode-flag filter, and WHO it blames -----------------------------
+# -p cannot work from here (host-side headless detection runs before injection,
+# so the host would launch interactive while the container went headless). The
+# warning must name the FEATURE: "a flag was dropped" with no owner is the
+# unnamed-misconfiguration shape R7a was about.
+_S148_R4="$_S148_DIR/r4"; mkdir -p "$_S148_R4"
+_s148_mk "$_S148_R4" zeta '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"agent_args":{"claude":["--keep","-p","--also-keep"]}}'
+_S148_O4="$(_s148_resolve "$_S148_LIB" "$_S148_R4" claude)"
+check "§148(6) a mode flag in a manifest is DROPPED, and the surviving tokens are otherwise untouched" \
+    bash -c 'printf "%s" "$1" | grep -q "^TOKENS:--keep --also-keep$"' _ "$_S148_O4"
+check "§148(7) ...and the warning NAMES THE FEATURE that supplied it (got: $(printf '%s' "$_S148_O4" | grep WARNING))" \
+    bash -c 'printf "%s" "$1" | grep WARNING | grep -q "zeta"' _ "$_S148_O4"
+check "§148(8) ...and the dropped flag is NOT recorded in the marker — the field reports what was APPLIED, not what was declared" \
+    bash -c 'printf "%s" "$1" | grep "^MARKER:" | grep -qv -- "\"-p\""' _ "$_S148_O4"
+
+# --- (9) refusals: the whole manifest, not just the key ----------------------
+# An unknown key or a bad token REFUSES the manifest, which takes that feature's
+# MOUNTS AND EXPORTS down with it. That is the property a consumer must gate on
+# (R7), so it is asserted rather than assumed.
+_S148_R5="$_S148_DIR/r5"; mkdir -p "$_S148_R5"
+_s148_mk "$_S148_R5" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"mounts":[{"name":"payload","from":"payload"}],"agent_args":{"claude":["--flag","two words"]}}'
+_S148_O5="$(_s148_resolve "$_S148_LIB" "$_S148_R5" claude)"
+check "§148(9) a token containing a SPACE refuses the manifest (rc!=0), rather than splitting into arguments nobody wrote" \
+    bash -c 'printf "%s" "$1" | grep -q "^APPLY_RC="' _ "$_S148_O5"
+check "§148(10) ...and NOTHING is mounted as a result — the refusal is whole-manifest, which is why a consumer must gate on the capability before emitting the key" \
+    bash -c 'printf "%s" "$1" | grep -qv "^mount"' _ "$_S148_O5"
+
+_S148_R6="$_S148_DIR/r6"; mkdir -p "$_S148_R6"
+_s148_mk "$_S148_R6" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["claude"]},"agent_args":{"cluade":["--x"]}}'
+_S148_O6="$(_s148_resolve "$_S148_LIB" "$_S148_R6" claude)"
+check "§148(11) a TYPO'D AGENT NAME is refused, never silently skipped — a key that contributes nothing while everything else works is the failure class this project keeps removing" \
+    bash -c 'printf "%s" "$1" | grep -q "^APPLY_RC="' _ "$_S148_O6"
+
+# --- (12) feature args come BEFORE operator args -----------------------------
+# Decided: feature args are additive and never suppressible; the operator's
+# existing file-vs-env exclusivity is untouched. Sandy defines the ORDER only --
+# precedence belongs to the agent's parser -- so this pins order, not "who wins".
+#
+# This runs sandy's REAL per-agent block. An earlier draft hand-rolled the
+# concatenation in the test and asserted its own arithmetic: reversing the order
+# in sandy left it green, which is the whole reason this suite mutation-tests.
+_S148_BLK="$(awk '/^# BEGIN per-agent args/,/^# END per-agent args/' "$_S148_SANDY")"
+check "§148(pre-12) the per-agent args block was extracted (mutation: rename its BEGIN marker and (12) goes vacuous instead of red)" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_AGENT_ARGS_CLAUDE="' _ "$_S148_BLK"
+_S148_O7="$(bash -c '
+    set -uo pipefail
+    source "$1"
+    _out="$(_sandy_fm_apply "$2" "myrepo-a1b2c3d4" "/home/sandy/dev/myrepo" claude 1)"
+    _SANDY_FM_AA_RECORDS=""; _SANDY_FM_AA_JSON=""
+    while IFS= read -r _l; do
+        [ -n "$_l" ] || continue
+        case "$_l" in agent_args*) _SANDY_FM_AA_RECORDS="${_SANDY_FM_AA_RECORDS}${_l#agent_args	}"$'"'"'\n'"'"' ;; esac
+    done <<< "$_out"
+    SANDBOX_DIR="$3"
+    _SANDY_AGENTS=(claude)
+    _SANDY_AGENT_ARGS_FILTERED="--operator-flag"
+    eval "$4"
+    echo "FINAL:$SANDY_AGENT_ARGS_CLAUDE"
+' _ "$_S148_LIB" "$_S148_R3" "$_S148_DIR/nosuchsandbox" "$_S148_BLK" 2>&1)"
+check "§148(12) sandy's own per-agent block orders feature args BEFORE the operator's, and keeps both — the operator value is never suppressed and never suppresses (got: $(printf '%s' "$_S148_O7" | grep '^FINAL:'))" \
+    bash -c 'printf "%s" "$1" | grep -q "^FINAL:--amap --zeta --operator-flag$"' _ "$_S148_O7"
+
+# --- (13) the published input contract, and the three copies of the key list -
+# --print-schema now describes what sandy ACCEPTS, not only what it emits. The
+# list exists in three places (both projectors, which are heredocs in other
+# languages and cannot call bash, plus the shell copy behind --print-schema),
+# so all three are diffed here. This is §135(20)'s drift, one layer out.
+# Only the top_level_keys array: it holds no nested brackets, so a [^]]* run is
+# exact and needs no alternation (BSD sed has none in a BRE).
+_S148_SCHEMA_KEYS="$(bash "$_S148_SANDY" --print-schema 2>/dev/null | sed -n 's/.*"top_level_keys":\[\([^]]*\)\].*/\1/p' | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S148_JS_KEYS="$(sed -n 's/^const KNOWN = \[\(.*\)\];$/\1/p' "$_S148_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S148_JQ_KEYS="$(sed -n 's/^def known: \[\(.*\)\];$/\1/p' "$_S148_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+check "§148(13) --print-schema publishes the manifest's accepted top-level keys (the capability signal a consumer gates on instead of a version number) (got: $_S148_SCHEMA_KEYS)" \
+    bash -c 'printf "%s" "$1" | grep -q "agent_args"' _ "$_S148_SCHEMA_KEYS"
+check "§148(14) --print-schema's list equals the NODE projector's KNOWN array (mutation: add a key to one and this goes red)" \
+    test "$_S148_SCHEMA_KEYS" = "$_S148_JS_KEYS"
+check "§148(15) ...and equals the JQ projector's, so a jq-only host accepts exactly what the schema advertises" \
+    test "$_S148_JS_KEYS" = "$_S148_JQ_KEYS"
+
+# --- (16) the agent list a consumer validates against ------------------------
+# The consumer was told to read --print-schema's agents[].name rather than
+# hardcode the set. That is only safe if it equals what the projectors accept.
+_S148_SCHEMA_AGENTS="$(bash "$_S148_SANDY" --print-schema 2>/dev/null | tr '{' '\n' | sed -n 's/.*"name":"\([a-z]*\)","image":"sandy-.*/\1/p' | tr '\n' ' ' | sed 's/ *$//')"
+_S148_JS_AGENTS="$(sed -n 's/^const AGENTS = \[\(.*\)\];$/\1/p' "$_S148_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S148_JQ_AGENTS="$(sed -n 's/^def agents_known: \[\(.*\)\];$/\1/p' "$_S148_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+check "§148(16) --print-schema's agents[].name equals the set agent_args accepts — a consumer validating against the published list cannot be refused for a name sandy advertises (schema: $_S148_SCHEMA_AGENTS / js: $_S148_JS_AGENTS)" \
+    test "$_S148_SCHEMA_AGENTS" = "$_S148_JS_AGENTS"
+check "§148(17) ...and both projectors accept the same agents" \
+    test "$_S148_JS_AGENTS" = "$_S148_JQ_AGENTS"
+
+# --- (18) node/jq parity across the agent_args corpus ------------------------
+# §135(20) covers the pre-#348 corpus. These are the cases the new clause adds,
+# including one where the ORDER of the checks is observable: a manifest with
+# both a spaced token and an empty one must blame the SAME offender in both.
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    _S148_PJS="$_S148_DIR/p.js"; _S148_PJQ="$_S148_DIR/p.jq"
+    awk '/^_sandy_fm_projector_js\(\) \{$/{f=1;next} f&&/^SANDY_FM_JS$/{exit} f&&!/^cat <</{print}' "$_S148_SANDY" > "$_S148_PJS"
+    awk '/^_sandy_fm_projector_jq\(\) \{$/{f=1;next} f&&/^SANDY_FM_JQ$/{exit} f&&!/^cat <</{print}' "$_S148_SANDY" > "$_S148_PJQ"
+    _S148_PAR=""
+    _s148_base='"sandboxes":{"include":["*"]},"agents":{"include":["claude"]}'
+    for _s148_j in \
+        '{'"$_s148_base"',"agent_args":{"claude":["--a","--b"]}}' \
+        '{'"$_s148_base"',"agent_args":{"claude":["-a"],"codex":["-b"]}}' \
+        '{'"$_s148_base"',"agent_args":{"nope":["-a"]}}' \
+        '{'"$_s148_base"',"agent_args":["notanobject"]}' \
+        '{'"$_s148_base"',"agent_args":{"claude":"notalist"}}' \
+        '{'"$_s148_base"',"agent_args":{"claude":[1]}}' \
+        '{'"$_s148_base"',"agent_args":{"claude":[""]}}' \
+        '{'"$_s148_base"',"agent_args":{"claude":["a b"]}}' \
+        '{'"$_s148_base"',"agent_args":{"claude":["ok","a b",""]}}' \
+        '{'"$_s148_base"',"agent_args":{}}' ; do
+        printf '%s' "$_s148_j" > "$_S148_DIR/f.json"
+        _s148_a="$(node "$_S148_PJS" "$_S148_DIR/f.json" 2>&1)"
+        _s148_b="$(jq -r -f "$_S148_PJQ" "$_S148_DIR/f.json" 2>&1)"
+        [ "$_s148_a" = "$_s148_b" ] || _S148_PAR="$_S148_PAR|$_s148_j"
+    done
+    check "§148(18) node and jq agree EXACTLY across the agent_args corpus, messages included — a jq-only host must not accept what node refuses (diverged on:${_S148_PAR:-nothing})" \
+        bash -c '[ -z "$1" ]' _ "$_S148_PAR"
+    unset _S148_PAR _s148_j _s148_a _s148_b _s148_base _S148_PJS _S148_PJQ
+else
+    skip "§148(18) node/jq agent_args parity needs BOTH node and jq on the host"
+fi
+
+# --- (19) the marker's three states, read back through --print-state ---------
+# absent / {} / populated must stay distinguishable: rounding "absent" to
+# "nothing applied" would report a fully configured fleet as unconfigured. This
+# is the None-vs-[] rule agent_args_files already carries.
+_S148_H="$_S148_DIR/home"
+mkdir -p "$_S148_H/sandboxes/new-11111111" "$_S148_H/sandboxes/none-22222222" "$_S148_H/sandboxes/old-33333333"
+printf '{\n  "schema": 1,\n  "agents": ["claude"],\n  "agent_args": {"claude": [{"feature": "amap", "args": ["--mcp-config", "/o/x.json"]}]},\n  "cred_mode": "full"\n}\n' > "$_S148_H/sandboxes/new-11111111/sandy-session.json"
+printf '{\n  "schema": 1,\n  "agents": ["claude"],\n  "agent_args": {},\n  "cred_mode": "full"\n}\n' > "$_S148_H/sandboxes/none-22222222/sandy-session.json"
+printf '{\n  "schema": 1,\n  "agents": ["claude"],\n  "cred_mode": "full"\n}\n' > "$_S148_H/sandboxes/old-33333333/sandy-session.json"
+_S148_PS="$(SANDY_HOME="$_S148_H" bash "$_S148_SANDY" --print-state 2>/dev/null)"
+# Read back with a real parser rather than by slicing text: the three states
+# differ by BRACES ({} vs null vs populated), and every text-slicing idiom that
+# splits on a brace destroys the value under test. Not a portable-sed problem --
+# the wrong tool. §88b's rule is to separate the FIXTURES, which the three
+# single-purpose sandboxes above already do.
+if command -v node >/dev/null 2>&1; then
+    _s148_state() {
+        printf '%s' "$_S148_PS" | node -e '
+            let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+              const j = JSON.parse(s);
+              const sb = j.sandboxes.find(x => x.name === process.argv[1]);
+              if (!sb) { console.log("NOSANDBOX"); return; }
+              console.log(sb.agent_args === null ? "NULL"
+                        : Object.keys(sb.agent_args).length === 0 ? "EMPTY"
+                        : JSON.stringify(sb.agent_args));
+            });' "$1"
+    }
+    _S148_ST1="$(_s148_state new-11111111)"
+    _S148_ST2="$(_s148_state none-22222222)"
+    _S148_ST3="$(_s148_state old-33333333)"
+    check "§148(19) a launch that applied feature args reports them in --print-state, attributed (got: $_S148_ST1)" \
+        bash -c 'printf "%s" "$1" | grep -q amap' _ "$_S148_ST1"
+    check "§148(20) a 2.1.0 launch that applied NONE reports {} -- sandy looked and there were none (got: $_S148_ST2)" \
+        test "$_S148_ST2" = "EMPTY"
+    check "§148(21) a marker PREDATING the field reports null -- sandy CANNOT ANSWER, which a consumer must not collapse into none-applied (got: $_S148_ST3)" \
+        test "$_S148_ST3" = "NULL"
+    unset -f _s148_state
+    unset _S148_ST1 _S148_ST2 _S148_ST3
+else
+    skip "§148(19-21) the marker's three states need node to read --print-state back"
+fi
+
+# --- (22) the marker line the reader depends on ------------------------------
+# --print-state reads agent_args with a BRE anchored on its own key at line
+# start. That only works if the emitter keeps the value on ONE line, so the
+# format string is pinned here rather than discovered by a consumer later.
+check "§148(22) the marker emits agent_args on ONE line (the host-side reader anchors on its own key and would silently return nothing against a pretty-printed object)" \
+    grep -Fq '"agent_args": {%s},' "$_S148_SANDY"
+
+rm -rf "$_S148_DIR"
+unset _S148_SANDY _S148_DIR _S148_LIB _S148_R1 _S148_R2 _S148_R3 _S148_R4 _S148_R5 _S148_R6 \
+      _S148_O1 _S148_O2 _S148_O3 _S148_O4 _S148_O5 _S148_O6 _S148_O7 \
+      _S148_SCHEMA_KEYS _S148_JS_KEYS _S148_JQ_KEYS _S148_SCHEMA_AGENTS _S148_JS_AGENTS _S148_JQ_AGENTS \
+      _S148_H _S148_PS _S148_BLK
+unset -f _s148_resolve _s148_mk _s148_field
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

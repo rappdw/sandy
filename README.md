@@ -534,7 +534,10 @@ A **feature** is something you deploy into sandboxes that is not sandy's — a c
     { "name": "payload", "from": "payload", "export": "MYTOOL_DIR" },
     { "name": "inbox",   "from": "instances/${slug}/inbox" }
   ],
-  "entry": "payload/relay"
+  "entry": "payload/relay",
+  "agent_args": {
+    "claude": ["--mcp-config", "/opt/sandy/features/mytool/mcp-servers.json"]
+  }
 }
 ```
 
@@ -547,6 +550,22 @@ sandy --print-state | jq '.sandboxes[] | {name, features, feature_problems}'
 ```
 
 and `$SANDY_HOME/features/<name>/selected.json` says the same thing for tools that cannot run sandy.
+
+**`agent_args` wires the agent, not just the files** (2.1.0). Mounting a config does not make the agent read it; these are passed to the agent at launch, per agent, straight from the `:ro` payload — so a feature needs no write into the sandbox and leaves nothing behind when you remove it.
+
+A manifest is **all-or-nothing**: an unknown key, an unknown agent name, or a token containing a space refuses the whole file, and that feature's mounts and exports do not happen either. So before a tool writes `agent_args` into a manifest, it should check that the host accepts it — by membership, never by version number:
+
+```sh
+sandy --print-schema | jq '.manifest.top_level_keys | index("agent_args")'
+```
+
+`null` (or no `.manifest` block at all) means this sandy predates the key: do not emit it. What a launch actually passed is recorded per sandbox:
+
+```sh
+sandy --print-state | jq '.sandboxes[] | {name, agent_args}'
+```
+
+`{}` means sandy looked and no feature contributed; `null` means the sandbox last launched under a sandy too old to say — not the same thing.
 
 Reading a manifest needs `node` or `jq` on the host. If neither is there, a launch that would use one **refuses** rather than mounting a guess — see `sandy --doctor`.
 

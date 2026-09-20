@@ -17,7 +17,7 @@ set -euo pipefail
 #   sandy --agent claude,gemini   Override agent selection for this run
 # =============================================================================
 
-SANDY_VERSION="2.0.3-dev"
+SANDY_VERSION="2.1.0-dev"
 SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 
 # Schema contract version for --print-schema / --print-state / --validate-config.
@@ -737,7 +737,7 @@ catch (e) { process.stdout.write("ERR\tnot valid JSON: " + e.message + "\n"); pr
 if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
   process.stdout.write("ERR\ttop level is not an object\n"); process.exit(0);
 }
-const KNOWN = ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature"];
+const KNOWN = ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature", "agent_args"];
 // #322: sandy owns the SANDY_ prefix. Manifest exports are appended to the
 // docker `-e` list AFTER sandy's own, and -e is last-wins, so an unfiltered
 // name could shadow SANDY_HANDOFF_RELAY and make the container environment and
@@ -752,6 +752,11 @@ const KNOWN = ["schema", "sandboxes", "agents", "create", "mounts", "entry", "ex
 // would silently change an operator's declared value.
 const ENVNAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const CTRL = /[\n\r\t]/;
+// #348: the agent set is spelled in several places in sandy already (launch
+// validation, --print-state's agent_args_files loop, --print-schema's agents[]).
+// run-tests.sh asserts this copy equals --print-schema's agents[].name, so a
+// consumer can validate against that published list rather than hardcoding one.
+const AGENTS = ["claude", "gemini", "codex", "opencode", "grok"];
 for (const k of Object.keys(doc)) if (!KNOWN.includes(k)) err("unknown top-level key: " + k);
 const strArr = (v, what) => {
   if (v === undefined) return [];
@@ -801,12 +806,30 @@ if (doc.expose !== undefined) {
     OUT.push("expose\t" + k + "\t" + v);
   }
 }
+if (doc.agent_args !== undefined) {
+  if (doc.agent_args === null || typeof doc.agent_args !== "object" || Array.isArray(doc.agent_args)) err("agent_args is not an object");
+  else for (const [a, v] of Object.entries(doc.agent_args)) {
+    if (AGENTS.indexOf(a) === -1) { err("agent_args: unknown agent '" + a + "' (valid: " + AGENTS.join(", ") + ")"); continue; }
+    const toks = strArr(v, "agent_args " + a);
+    if (toks === null) continue;
+    // Checked condition-by-condition across all tokens, NOT token-by-token
+    // across all conditions -- the jq projector can only express the former,
+    // and the two must report the SAME offender to stay byte-identical (the
+    // §135(20) corpus diffs full output, messages included).
+    if (toks.some(t => t === "")) { err("agent_args " + a + ": empty token"); continue; }
+    if (toks.some(t => CTRL.test(t))) { err("agent_args " + a + ": token contains a newline, carriage return or tab (the record stream is line-oriented)"); continue; }
+    const sp = toks.filter(t => t.indexOf(" ") !== -1)[0];
+    if (sp !== undefined) { err("agent_args " + a + ": token '" + sp + "' contains a space (the argument channel is whitespace-separated; use a flag that takes a file)"); continue; }
+    for (const t of toks) OUT.push("agent_args\t" + a + "\t" + t);
+  }
+}
 process.stdout.write(OUT.join("\n") + (OUT.length ? "\n" : ""));
 SANDY_FM_JS
 }
 _sandy_fm_projector_jq() {
 cat <<'SANDY_FM_JQ'
-def known: ["schema","sandboxes","agents","create","mounts","entry","expose","feature"];
+def known: ["schema","sandboxes","agents","create","mounts","entry","expose","feature","agent_args"];
+def agents_known: ["claude","gemini","codex","opencode","grok"];
 def strarr($v; $what):
   if $v == null then []
   elif ($v|type) != "array" then ["ERR\t\($what) is not an array"]
@@ -857,9 +880,54 @@ else
              elif (.value | test("[\n\r\t]"))
              then "ERR\texpose \(.key): value contains a newline, carriage return or tab (the record stream is line-oriented)"
              else "expose\t\(.key)\t\(.value)" end] end)
+  + (if .agent_args == null then []
+     elif (.agent_args|type) != "object" then ["ERR\tagent_args is not an object"]
+     else [.agent_args | to_entries[]
+           | .key as $a | .value as $v
+           | if (agents_known | index($a)) == null
+             then ["ERR\tagent_args: unknown agent '\($a)' (valid: \(agents_known | join(", ")))"]
+             else (strarr($v; "agent_args \($a)")) as $toks
+               | if (($toks[0]? // "") | startswith("ERR\t")) then $toks
+                 elif ([$toks[] | select(. == "")] | length) > 0
+                   then ["ERR\tagent_args \($a): empty token"]
+                 elif ([$toks[] | select(test("[\n\r\t]"))] | length) > 0
+                   then ["ERR\tagent_args \($a): token contains a newline, carriage return or tab (the record stream is line-oriented)"]
+                 elif ([$toks[] | select(index(" "))] | length) > 0
+                   then ["ERR\tagent_args \($a): token '\([$toks[] | select(index(" "))] | .[0])' contains a space (the argument channel is whitespace-separated; use a flag that takes a file)"]
+                 else [$toks[] | "agent_args\t\($a)\t\(.)"] end
+               end] | add // [] end)
   | .[]
 end
 SANDY_FM_JQ
+}
+# The manifest's accepted keys, as published by --print-schema (#348 R7). A
+# consumer gates on MEMBERSHIP here rather than on a sandy version: a stripped
+# X.Y.Z-dev compares equal to X.Y.Z, so a version gate is satisfied by every
+# commit on a dev line including ones predating the key.
+#
+# This is a THIRD copy of a list the two projectors already carry (they are
+# heredocs in other languages and cannot call bash), so run-tests.sh asserts all
+# three agree -- the same drift §135(20) exists to police, one layer out.
+_sandy_fm_known_keys() {
+    cat <<'EOF'
+schema
+sandboxes
+agents
+create
+mounts
+entry
+expose
+feature
+agent_args
+EOF
+}
+_sandy_fm_mount_keys() {
+    cat <<'EOF'
+name
+from
+mode
+export
+EOF
 }
 _sandy_fm_valid_segment() {
     # D5: the published feature-marker predicate (SPEC_INTROSPECTION, §134),
@@ -887,6 +955,7 @@ _sandy_fm_load() {
     local _dir="$1" _slug="$2" _mf="$1/feature.json" _line _k
     _SANDY_FM_SELECT=(); _SANDY_FM_CREATE=(); _SANDY_FM_MOUNT=()
     _SANDY_FM_EXPOSE=(); _SANDY_FM_ENTRY=""; _SANDY_FM_ERR=""
+    _SANDY_FM_AGENT_ARGS=()
     if [ ! -e "$_mf" ]; then _SANDY_FM_ERR="no-manifest"; return 1; fi
     if [ -L "$_mf" ] || [ ! -f "$_mf" ]; then
         _SANDY_FM_ERR="feature.json is not a regular file"; return 1
@@ -923,6 +992,7 @@ _sandy_fm_load() {
             entry)  _SANDY_FM_ENTRY="${_line#*	}" ;;
             expose) _SANDY_FM_EXPOSE+=("${_line#*	}") ;;
             mount)  _SANDY_FM_MOUNT+=("${_line#*	}") ;;
+            agent_args) _SANDY_FM_AGENT_ARGS+=("${_line#*	}") ;;
             *)      _SANDY_FM_ERR="projector emitted an unknown record: $_k"; return 1 ;;
         esac
     done <<< "$_proj"
@@ -1216,6 +1286,15 @@ _sandy_fm_apply() {
         if [ -n "$_SANDY_FM_ENTRY" ]; then
             printf 'entry\t/opt/sandy/features/%s/%s\n' "$_fname" "${_SANDY_FM_ENTRY#payload/}"
         fi
+        # agent_args (#348). Emitted with the FEATURE NAME attached, because
+        # the launch has to be able to say which feature contributed a flag --
+        # both in the mode-flag warning and in the session marker. A merged
+        # list cannot answer "which feature put that there", which is the first
+        # question when a launch misbehaves.
+        local _aa
+        for _aa in ${_SANDY_FM_AGENT_ARGS[@]+"${_SANDY_FM_AGENT_ARGS[@]}"}; do
+            printf 'agent_args\t%s\t%s\n' "$_fname" "$_aa"
+        done
     done
     return 0
 }
@@ -1775,6 +1854,17 @@ _sandy_emit_schema() {
         printf '}'
     done
     printf ']'
+
+    # manifest — the feature-manifest INPUT contract (#348 R7). --print-schema
+    # described everything sandy EMITS and nothing it ACCEPTS, so a consumer
+    # rendering a manifest had no way to ask a host what its parser would take.
+    # Emitting an unaccepted key is not a degraded feature: an unknown key
+    # refuses the whole manifest, taking that feature's mounts and exports with
+    # it, so this is what makes a mixed-version fleet safe.
+    printf ',"manifest":{'
+    printf '"top_level_keys":'; _sandy_fm_known_keys | _json_str_array
+    printf ',"mount_keys":';    _sandy_fm_mount_keys | _json_str_array
+    printf '}'
 
     # compatibility — schema versioning declarations.
     printf ',"compatibility":{'
@@ -2832,6 +2922,28 @@ EOF_RELAY_STATE
             fi
             printf ','; _json_kv features "[$sb_feat]"
             printf ','; _json_kv feature_problems "[$sb_featp]"
+            # agent_args (#348): what the LAST LAUNCH passed to each agent on
+            # behalf of a feature, read back from that launch's own marker.
+            # Deliberately NOT re-evaluated from the manifests at query time:
+            # that would report a PREDICTION, and would disagree with the
+            # running container for any sandbox whose manifest changed since --
+            # the same last-launch-vs-next-launch confusion `agents`,
+            # `handoff_enabled` and `handoff.state` each carry a caveat about.
+            #
+            # null (no marker, or one predating the field) means CANNOT ANSWER
+            # and must not be collapsed with {} = "looked, none applied".
+            #
+            # Read with a BRE anchored on the field's OWN key at line start,
+            # with the trailing comma stripped in the shell rather than matched:
+            # no braces (ERE intervals), no \| alternation, and no dependency on
+            # which field happens to sit next to it (§88b).
+            sb_fargs='null'
+            if [ -f "$sb/sandy-session.json" ]; then
+                sb_fa_line="$(sed -n 's/^  "agent_args": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_fa_line="${sb_fa_line%,}"
+                [ -n "$sb_fa_line" ] && sb_fargs="$sb_fa_line"
+            fi
+            printf ','; _json_kv agent_args "$sb_fargs"
             if [ -d "$sb_lock_dir" ]; then
                 printf ','; _json_kv lock_held 'true'
                 printf ','; _json_kv lock_holder_pid "$(_json_escape "$sb_lock_pid")"
@@ -11402,6 +11514,12 @@ fi
 _SANDY_FM_HOME="/home/sandy"
 _sandy_fm_root="$SANDY_HOME/features"
 _sandy_fm_out=""; _sandy_fm_rc=0; _sandy_fm_ran=false
+# agent_args (#348): newline-separated "<feature>\t<agent>\t<token>" records,
+# collected here and consumed by the per-agent args block far below. Declared
+# unconditionally so the consumer is safe under set -u when $SANDY_HOME has no
+# features/ directory at all.
+_SANDY_FM_AA_RECORDS=""
+_SANDY_FM_AA_JSON=""
 if [ -d "$_sandy_fm_root" ]; then
     _sandy_fm_ran=true
     # rc-FIRST, as before: a feature that fails may be preceded by valid mount
@@ -11438,6 +11556,8 @@ if [ -d "$_sandy_fm_root" ]; then
                 else
                     info "a feature manifest declares an entry, but SANDY_HANDOFF_RELAY is set explicitly and wins."
                 fi ;;
+            agent_args*)
+                _SANDY_FM_AA_RECORDS="${_SANDY_FM_AA_RECORDS}${_fm_l#agent_args	}"$'\n' ;;
         esac
     done <<< "$_sandy_fm_out"
     unset _fm_l
@@ -11819,6 +11939,54 @@ else
 fi
 # END cross-session inbound
 
+# --- feature-contributed agent args (#348) ---------------------------------
+# Resolves $1's feature args from the records collected at manifest evaluation.
+# Returns via globals (never echo: _sandy_filter_agent_args may warn, and warn()
+# writes to STDOUT, so a $( ) capture would swallow the warning into the value):
+#
+#   _SANDY_FM_AA_TOKENS — space-joined surviving tokens, in feature order
+#   _SANDY_FM_AA_JSON   — accumulated "<agent>":[{feature,args}] marker fragments
+#
+# Filtering is PER FEATURE, not over the merged list, so the mode-flag warning
+# can name the feature that supplied it. Word-splitting on $_feats and on the
+# filtered tokens is safe by construction: a feature name is validated
+# [A-Za-z0-9._-]+ and the projector REFUSES any token containing a space.
+_sandy_fm_agent_args_for() {
+    local _agent="$1"
+    _SANDY_FM_AA_TOKENS=""
+    [ -n "$_SANDY_FM_AA_RECORDS" ] || return 0
+    local _feats="" _line _f _rest _a
+    while IFS= read -r _line; do
+        [ -n "$_line" ] || continue
+        _f="${_line%%	*}"; _rest="${_line#*	}"; _a="${_rest%%	*}"
+        [ "$_a" = "$_agent" ] || continue
+        case " $_feats " in *" $_f "*) ;; *) _feats="${_feats:+$_feats }$_f" ;; esac
+    done <<< "$_SANDY_FM_AA_RECORDS"
+    [ -n "$_feats" ] || return 0
+    local _entries="" _toks _lf _la _lt _ajson _tok
+    for _f in $_feats; do
+        _toks=""
+        while IFS= read -r _line; do
+            [ -n "$_line" ] || continue
+            _lf="${_line%%	*}"; _rest="${_line#*	}"
+            _la="${_rest%%	*}"; _lt="${_rest#*	}"
+            [ "$_lf" = "$_f" ] && [ "$_la" = "$_agent" ] || continue
+            _toks="${_toks:+$_toks }$_lt"
+        done <<< "$_SANDY_FM_AA_RECORDS"
+        [ -n "$_toks" ] || continue
+        _sandy_filter_agent_args "$_toks" "agent_args (feature '$_f')"
+        [ -n "$_SANDY_AA_FILTERED" ] || continue
+        _SANDY_FM_AA_TOKENS="${_SANDY_FM_AA_TOKENS:+$_SANDY_FM_AA_TOKENS }$_SANDY_AA_FILTERED"
+        _ajson=""
+        for _tok in $_SANDY_AA_FILTERED; do
+            _ajson="${_ajson:+$_ajson,}\"$(_sandy_fm_jesc "$_tok")\""
+        done
+        _entries="${_entries:+$_entries,}{\"feature\": \"$(_sandy_fm_jesc "$_f")\", \"args\": [$_ajson]}"
+    done
+    [ -n "$_entries" ] || return 0
+    _SANDY_FM_AA_JSON="${_SANDY_FM_AA_JSON:+$_SANDY_FM_AA_JSON, }\"$_agent\": [$_entries]"
+}
+
 # BEGIN per-agent args (agent-args.<agent>)
 # An operator can drop a file at the SANDBOX TOP LEVEL — $SANDBOX_DIR/agent-
 # args.<agent> (agent-args.claude, agent-args.codex, ...), non-hidden, one per
@@ -11875,6 +12043,19 @@ for _sandy_aa_agent in "${_SANDY_AGENTS[@]}"; do
                 info "agent-args.$_sandy_aa_agent overrides SANDY_AGENT_ARGS for $_sandy_aa_agent (sandbox file wins; values are never merged)"
             fi
         fi
+    fi
+    # Feature args go FIRST and are never suppressed by an operator value
+    # (#348). The file-vs-SANDY_AGENT_ARGS exclusivity above exists because
+    # both are the SAME actor from two places and sandy cannot attribute the
+    # survivor; a feature is a different actor whose args are part of its own
+    # wiring, applied unconditionally exactly as its mounts are. Sandy defines
+    # the ORDER; PRECEDENCE belongs to the agent's own parser (claude's
+    # --mcp-config is variadic, so a second occurrence may accumulate rather
+    # than replace) -- so this is deliberately not documented as "the operator
+    # wins".
+    _sandy_fm_agent_args_for "$_sandy_aa_agent"
+    if [ -n "$_SANDY_FM_AA_TOKENS" ]; then
+        _sandy_aa_val="$_SANDY_FM_AA_TOKENS${_sandy_aa_val:+ $_sandy_aa_val}"
     fi
     case "$_sandy_aa_agent" in
         claude)   SANDY_AGENT_ARGS_CLAUDE="$_sandy_aa_val" ;;
@@ -14175,6 +14356,21 @@ _sandy_relay_json=false; [ -n "${SANDY_HANDOFF_RELAY:-}" ] && _sandy_relay_json=
 # readable looked healthy -- directories, mounts, config -- and the only symptom
 # was a process exiting non-zero once a second into a log nobody was watching.
 # Nothing in the state a consumer can read said which agent a sandbox runs.
+# agent_args (#348): what THIS launch actually passed to each agent on behalf
+# of a feature manifest, attributed per feature and recorded post-filter (a
+# dropped mode flag is not reported as applied). Emitted on ONE line so a
+# host-side reader can take it with a single anchored match on its own key
+# rather than brace-counting or anchoring on a neighbouring field (§88b).
+#
+# THREE STATES, THREE SPELLINGS, and consumers must not collapse them:
+#   absent  -> a sandy predating this field; it cannot answer
+#   {}      -> sandy looked and no feature contributed args
+#   {...}   -> exactly what was applied, and by which feature
+# Rounding "absent" to "none applied" would report a fully configured fleet
+# as unconfigured. Same None-vs-[] rule agent_args_files already carries.
+#
+# Like every other marker field this is LAST LAUNCH, never next launch: a
+# sandbox whose manifest changed reports the old value until it relaunches.
 _sandy_agents_json=""
 _sandy_agents_ifs="$IFS"; IFS=','
 for _sandy_a in ${SANDY_AGENT:-claude}; do
@@ -14193,11 +14389,12 @@ _sandy_relay_disabled_by_json="null"
 if [ "${_sandy_relay_slot:-absent}" = "disabled" ] && [ -n "${_SANDY_RELAY_SOURCE:-}" ]; then
     _sandy_relay_disabled_by_json="\"$_SANDY_RELAY_SOURCE\""
 fi
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "handoff_relay": %s,\n  "relay": {\n    "slot": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "cred_mode": "%s"\n}\n' \
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "handoff_relay": %s,\n  "relay": {\n    "slot": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "cred_mode": "%s"\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
     "$_sandy_perm_mode_json" "$_sandy_csi_json" "$_sandy_agents_json" "$_sandy_relay_json" \
-    "$_sandy_relay_slot_json" "$_sandy_relay_path_json" "$_sandy_relay_disabled_by_json" "${CRED_MODE:-none}" \
+    "$_sandy_relay_slot_json" "$_sandy_relay_path_json" "$_sandy_relay_disabled_by_json" \
+    "${_SANDY_FM_AA_JSON:-}" "${CRED_MODE:-none}" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
 
