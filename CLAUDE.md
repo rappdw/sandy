@@ -631,6 +631,14 @@ The rule is now a property of the path, not a containment test: **no component b
 
 **Retired in 2.0.0**: the `features/<name>` per-sandbox marker and `SANDY_FEATURES_DIR` (now a hard error naming the replacement). `--print-state`'s `features` keeps its name with a **different source**, which is why `schema_version` moved to `2`. `--remove-sandbox` reaps the feature-owned instance tree and selection record; `--reset-sandbox` leaves them, because a reset keeps the sandbox.
 
+**The coexistence window CLOSED in 2.2.0 (#354).** The `relay-bin/` slot and `SANDY_HANDOFF_RELAY`-as-a-configuration-key are both removed; a manifest `entry` is the only producer. A leftover slot entry, or an operator setting `SANDY_HANDOFF_RELAY`, is a **hard error naming the replacement** — never a silent skip, because ignoring either would start the wrong relay, or none, without saying so. `--reset-sandbox` now **destroys** `relay-bin/` rather than preserving it, since a surviving entry blocks the next launch.
+
+**The variable is not the key.** `SANDY_HANDOFF_RELAY` remains the internal channel a manifest `entry` travels through to the container-side supervisor, so a change that deletes the variable deletes the entry mechanism with it. The hard error fires only for a value present *before* the manifest block runs — which can only have come from an operator.
+
+**`SANDY_RELAY` was RE-SCOPED, not retired.** It was never listed in README's `## Deprecated` table and entries may only be **added** there in an `X.0.0`, so removing it in a minor is exactly what §138 exists to prevent. Its documented meaning was never slot-specific — *"run the installed relay if there is one"* — so with the slot gone it gates the only remaining producer. That is a behaviour change in the **tightening** direction: `=0` used to disable a slot relay and silently **not** stop a manifest entry. It now stops both, and the suppression is **loud** (named at launch, `disabled_by` recorded), because a fleet going silently dark is the failure the window existed to prevent.
+
+*The paragraph below describes the window that has now closed, kept for the reasoning.*
+
 **Coexistence window**: `entry` and `relay-bin/relay` both work for one release and **`relay-bin` wins**, with a notice — a flag day on the mechanism that starts a delivery daemon is how a fleet goes silently dark. The `handoff/` tree, `SANDY_HANDOFF_*` and the `handoff_relay`/`relay{}` session keys also survive 2.0, deprecated.
 
 ## Forwarding env vars and agent args

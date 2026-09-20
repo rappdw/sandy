@@ -17,7 +17,7 @@
 >
 > `--keep-history` preserves every session transcript and all auto-memory. **It is not the default, and `--yes` does not choose it** — the same command is how you remediate a sandbox you distrust, and there memory is the thing you most want gone. Run it interactively and sandy asks; run it non-interactively and it requires an explicit `--keep-history` or `--purge-history` rather than guessing.
 >
-> **Do not use `rm -rf` on a sandbox directory.** It also destroys `relay-bin/` and `agent-args.*` — operator state that nothing recreates.
+> **Do not use `rm -rf` on a sandbox directory.** It also destroys `agent-args.*` — operator state that nothing recreates.
 >
 > **[Full upgrade guide →](#upgrading-to-20)** — what is preserved, what to back up first, and what to do about scripts that hardcode `/home/claude`.
 
@@ -237,7 +237,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_EGRESS_LOG` | `0` | `1`/`summary` = log which hosts the agent's egress actually reached (each distinct allowed `host:port` once) and print a session-end summary. Hostnames only — TLS is never terminated. Passive-safe (adds visibility) |
 | `SANDY_TOOL_AUDIT` | `0` | `1` = seed a Claude Code `PreToolUse` hook that appends `{ts,tool,args}` JSONL to `~/.claude/tool-audit.jsonl`. Claude-only, passive-safe (adds visibility); a user's own `PreToolUse` hook is never clobbered |
 | `SANDY_HANDOFF_DIRS` | `1` | **Deprecated.** Mount `~/.handoff/relay` (relay state + `supervisor.log`). The `inbox`, `outbox` and `peer` lanes were removed in 2.2.0 — use a feature manifest `mounts` entry instead. `0` opts out; a configured relay forces it back on. Passive-safe. See "Handoff directories" |
-| `SANDY_RELAY` | `1` | Run the relay installed in this sandbox's slot, if there is one. A **capability** toggle: it names no path and asserts no payload. Install a relay by writing one executable file to `~/.sandy/sandboxes/<name>/relay-bin/relay` on the host — sandy mounts that directory **read-only** at `/opt/sandy/relay` and runs the entry. No config key, no approval prompt. `0` opts out and is passive-safe (it only tightens), but the resolved state records **who** turned it off (`disabled_by`) so a cloned repo cannot silently disable a fleet connector. See "Installing a relay" |
+| `SANDY_RELAY` | `1` | Run the installed relay if there is one — since 2.2.0 that means a feature manifest `entry`. A **capability** toggle naming no path: inert when nothing is installed. `0` disables the relay capability entirely (including an `entry`, which it did not before), loudly. Passive-safe. See "Installing a relay" |
 | `SANDY_CROSS_SESSION_INBOUND` | _(conditional)_ | Whether another local session may inject a turn into this one (Claude Code's `crossSessionInbound`): `accept` (delivered, no prompt), `hold` (interactive approval), `refuse` (sender told it was not accepted). Unset resolves to `accept` **only** when a `SANDY_HANDOFF_RELAY` is configured *and will actually start this launch* — otherwise `refuse`, so a workspace with no relay has no open receive surface. `hold`/`refuse` are passive-safe; `accept` from a workspace `.sandy/config` triggers an approval prompt. Claude-only |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth). **Not forwarded when a Claude OAuth credential is already going into the container** (Claude Code resolves an env key ahead of the account credentials, so forwarding both either bills per-use or parks the session on Claude Code's custom-API-key startup prompt). Set `SANDY_CLAUDE_AUTH=api_key` to use it anyway |
@@ -570,21 +570,28 @@ sandy --print-state | jq '.sandboxes[] | {name, agent_args}'
 
 Reading a manifest needs `node` or `jq` on the host. If neither is there, a launch that would use one **refuses** rather than mounting a guess — see `sandy --doctor`.
 
-### Installing a relay (`SANDY_RELAY`)### Installing a relay (`SANDY_RELAY`)
+### Installing a relay (`SANDY_RELAY`)
 
-A *relay* is a program that drains and fills the handoff directories — the thing that actually moves files. Before 1.11.0 the only way to install one was `SANDY_HANDOFF_RELAY=<path>`, a **privileged** key naming a file. That cost a per-workspace approval prompt, and it could not be turned on by default: it names a file sandy does not install, and a configured relay that cannot start fails the launch, so a global default would refuse to launch every sandbox that had not been provisioned by hand.
+A *relay* is a program sandy runs as a container-level process — a sibling of the tmux server, never a pane — restarted on death with backoff and held to one instance by a lock.
 
-`SANDY_RELAY` is a capability toggle instead. It is on by default and means *"run the installed relay if there is one"* — safe as a default because it is inert without host-side state a repository cannot create.
+**Installing one is a feature manifest `entry`:**
 
-Installing a relay is one file write, host-side:
-
-```sh
-install -m 755 my-connector ~/.sandy/sandboxes/<sandbox>/relay-bin/relay
+```json
+{
+  "sandboxes": { "include": ["*"] },
+  "agents":    { "include": ["claude"] },
+  "mounts":    [ { "name": "payload", "from": "payload" } ],
+  "entry":     "payload/relay"
+}
 ```
 
-Sandy mounts `relay-bin/` **read-only** at `/opt/sandy/relay` and runs `/opt/sandy/relay/relay` as a container-level process (a sibling of the tmux server, never a pane). Exactly one entry named `relay` — a `relay.d/*` set would break connectors whose claim lock refuses a second consumer on one notice directory.
+> **Removed in 2.2.0.** The two older routes are gone. `SANDY_HANDOFF_RELAY=<path>` as a configuration key, and installing an executable at `~/.sandy/sandboxes/<sandbox>/relay-bin/relay`, are both now **hard errors** naming the replacement — never silent skips, because ignoring either would start the wrong relay, or none, without saying so. `sandy --reset-sandbox` **destroys** a leftover `relay-bin/relay` for the same reason.
 
-**Why a read-only mount and not permission bits.** The container process runs as *your* uid and owns that file, so `chmod` would succeed against a normal mount — the agent could rewrite its own relay. Under `:ro` the write returns `EROFS`, because the mount flag is checked above the permission check. An adapter can write files; only sandy can create a mount.
+`SANDY_RELAY` is the capability toggle. It is on by default and means *"run the installed relay if there is one"* — safe as a default because it is inert without host-side state a repository cannot create: no feature, no entry, nothing to run.
+
+Setting `SANDY_RELAY=0` disables the relay capability for that host or workspace. **Since 2.2.0 that covers a manifest `entry` too** — previously it stopped only the `relay-bin` slot, so `=0` could mean "no relay" while a relay ran. A launch that declines to start a declared entry **says so by name**, and records `disabled_by` in `--print-state` and the session marker, so a cloned repo shipping `0` is visible rather than forbidden.
+
+**Read-only by construction.** An `entry` lives on the feature payload, which the manifest mounts `:ro`. That matters because the container process runs as *your* uid and owns the file, so permission bits bind nothing — `chmod` would succeed against a normal mount and the agent could rewrite its own relay. Under `:ro` the write returns `EROFS`, because the mount flag is checked above the permission check. An adapter can write files; only sandy can create a mount.
 
 **The honest limit**: sandy guarantees the *first* executable. It cannot guarantee the chain — a relay that execs a daemon out of a writable directory is replaceable at that second link.
 
@@ -967,7 +974,7 @@ sandy --reset-sandbox --all --keep-history --yes       # migrate
 | destroyed (rebuilt on next launch) | preserved |
 |---|---|
 | `pip/`, `uv/`, `npm-global/`, `go/`, `cargo/` package caches | `WORKSPACE.json` (lineage) |
-| the `venv/` overlay | `relay-bin/` (an installed relay) |
+| the `venv/` overlay | — |
 | per-agent state: `claude/`, `gemini/`, `codex/`, `opencode/`, `grok/` | `agent-args.<agent>` (per-agent launch args) |
 | `.claude.json`, installed plugins, approvals | `.handoff-enabled` |
 | `claude/projects/` — transcripts and auto-memory, **unless `--keep-history`** | `claude/projects/` **with `--keep-history`** |
@@ -1017,7 +1024,7 @@ Sandy's rule: an entry can only be **added** to this list in an `X.0.0` release,
 |---|---|---|
 | `SANDY_HANDOFF_DIRS`, and the `~/.handoff/{inbox,outbox,peer,relay}` tree it mounts | 2.0.0 | a feature manifest's `mounts` — it names its own directories instead of using sandy's four fixed ones |
 | `SANDY_HANDOFF_*` container env vars (`_INBOX`, `_OUTBOX`, `_PEER`, `_RELAY_STATE`) | 2.0.0 | a mount's `export`, which names the variable the feature wants |
-| `SANDY_HANDOFF_RELAY` and the `relay-bin/` slot | 2.0.0 | a feature manifest's `entry`. During the window `relay-bin/relay` still **wins** when both are present, so removing the slot is what hands over |
+| ~~`SANDY_HANDOFF_RELAY` and the `relay-bin/` slot~~ **— REMOVED in 2.2.0** | 2.0.0 | a feature manifest's `entry`. Setting the key, or leaving an executable in the slot, is now a **hard error** naming the replacement. The *variable* survives as the manifest entry's internal channel; only the operator-facing key is gone |
 | `handoff_relay` and `relay{}` in `/etc/sandy-session.json` and `--print-state` | 2.0.0 | the feature's own entry in `--print-state`. Removing these will bump `schema_version`, because a vanished field is otherwise silent |
 | `handoff_enabled` and `handoff{}` in `--print-state` | 2.0.0 | they report on the handoff tree above, so they go with it — and their removal bumps `schema_version` for the same reason |
 | the `.handoff-enabled` sandbox marker | 2.0.0 | nothing: it forces the handoff tree on for one sandbox, and the tree is what is going. A feature manifest selects per sandbox instead |

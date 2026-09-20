@@ -1508,8 +1508,8 @@ SANDY_SUSPICIOUS|bool|0||1.9.0|experimental|Hardened-credential posture for a wo
 SANDY_HANDOFF_DIRS|bool|1||1.7.0|deprecated|DEPRECATED since 2.0.0, and as of 2.2.0 it governs ONE directory. Create and mount $SANDBOX_DIR/handoff/relay rw at ~/.handoff/relay (relay state + supervisor.log). The inbox, outbox and peer lanes were REMOVED in 2.2.0 (#352): a feature manifest names its own directories via mounts, and every lane was measured empty across the fleet before removal. Set 0 to opt out: nothing is mounted and ~/.handoff does not exist in the container -- but a configured relay forces this key to 1, because the relay cannot run without its state directory. Passive-safe in both directions: a directory confers no reach on its own, and 0 only tightens. The host directory is created unconditionally regardless of this key (since 1.7.0) so directory PRESENCE carries no information; consumers verify the MOUNT (inside: test -d ~/.handoff/relay; outside: docker inspect .Mounts), never the directory or a marker. The operator marker $SANDBOX_DIR/.handoff-enabled (sandbox TOP level, never mounted, survives --reset-sandbox) forces it ON for one sandbox even when config says 0 -- privileged by location like agent-args.<agent>, and a no-op when nothing opts out. Relay state moves to a producer-agnostic directory in a later release (#353), which is what finally retires this key.
 SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|Claude-only. Pins Claude Code crossSessionInbound (accept = deliver messages from other sessions on this container without a prompt; hold = queue for approval; refuse = drop with a sender-visible status) by writing the SAME resolved value into TWO places every launch, merge-preserving and idempotent: the sandbox's own claude/settings.json (mounted RW as the container's ~/.claude/settings.json, i.e. Claude Code userSettings) and the WORKSPACE project file .claude/settings.local.json (mounted :ro). This split is measured, not assumed, against Claude Code 2.1.251: accept only takes effect when present in userSettings (workspace-file accept alone is a no-op there); hold/refuse are honored from either, and the workspace file's copy is tighten-only so it cannot be loosened by a stale accept and still wins over userSettings when a repo hand-edits it stricter. Never writes ~/.claude/settings.json on the HOST. Default is CONDITIONAL, which is why the schema default is empty: accept iff SANDY_HANDOFF_RELAY is set AND the relay will actually be started this launch, else refuse — headless (-p) and --remote runs never start a relay, so they default to refuse even with the key set, and a configured relay that cannot start fails the launch rather than leaving accept in place with nothing delivering. Value-aware tier: hold and refuse are passive-safe wherever set; accept set via a workspace .sandy/config is approval-gated (it lets any process at the workspace uid inside the container inject a turn). Residual: the userSettings target is RW in-container (required for /plugin install), so unlike the :ro workspace copy it is agent-mutable mid-session; sandy resets it on the next launch, not mid-session. Recorded in /etc/sandy-session.json as cross_session_inbound. See docs/security/CROSS_SESSION_INBOUND.md.
 ANTHROPIC_PROFILE|string||^[A-Za-z0-9._-]+$|1.11.0|experimental|Privileged. Name of the Anthropic Console profile to use when SANDY_CLAUDE_AUTH=profile (overrides the host active_config); forwarded into the container so Claude Code selects it explicitly (its /status shows the Profile row as profile-explicit). Privileged on purpose: it chooses WHICH profile's token enters the box, and a profile logged in with --scope org:admin carries organization-wide access, so a committed .sandy/config must not be able to select it. Ignored with a notice unless SANDY_CLAUDE_AUTH=profile.
-SANDY_HANDOFF_RELAY|path|||1.10.0|experimental|Privileged. Path of an executable INSIDE the container (absolute, or relative to the workspace, e.g. .sandy/relay.sh) that sandy runs as a container-level process: a sibling of the tmux server, not a pane and not a child of any agent session. Started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote (no tmux session to target), and never under --provision (which starts a session only to verify it and then stops it, so a relay would live ~10s and criterion 7 would fail the very launch that materialises the handoff pair) — in both the key is dropped host-side, so crossSessionInbound defaults to refuse and the marker records handoff_relay=false), singleton via flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never overlapping, never given up on. Setting it forces SANDY_HANDOFF_DIRS=1 (over an explicit opt-out — the relay cannot run without its mounts; the dirs are on by default since 1.10.0 anyway) so $SANDBOX_DIR/handoff/relay is mounted rw at ~/.handoff/relay (relay state + supervisor.log). Env contract: SANDY_HANDOFF_RELAY_STATE, SANDY_AGENT, SANDY_WORKSPACE (the _INBOX, _OUTBOX and _PEER vars were removed in 2.2.0 with their directories, #352); enumerate live sessions with /usr/local/bin/sandy-handoff-sessions. A configured relay that cannot start FAILS THE LAUNCH, never warn-and-proceed: host-side (exit 1 before docker run) for whitespace, shell metacharacters, .. segments, a ~/.handoff collision, and any path the host can see (workspace-relative, or absolute under the workspace mount) that is missing or not executable; in-container (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) for an image-only absolute path that is missing or not executable, a missing ~/.handoff/relay mount, or no flock. So handoff_relay=true in the marker means the relay was started or the session did not come up. In daemon mode the relay (and anything else planted at the uid) outlives sessions until the container is recreated — run sandy --update-sessions --yes on a 24h cron. Recorded in /etc/sandy-session.json as handoff_relay.
-SANDY_RELAY|bool|1||1.11.0|experimental|Relay CAPABILITY toggle (#258). Names no path and asserts no payload: it means 'run the installed relay if there is one'. The relay is installed HOST-SIDE by writing one executable entry named 'relay' into the per-sandbox slot $SANDBOX_DIR/relay-bin/, which sandy mounts READ-ONLY at /opt/sandy/relay -- so installing a connector is one file write, with no workspace config key, no privileged-key approval prompt and no generated wrapper. Exactly one entry: a relay.d-style set would break connectors whose claim lock refuses a second consumer on one notice directory. Default 1, safe because the capability is INERT without host-side state a repository cannot create -- 'no entry in the slot' is a legitimate resolved state, not a broken path (contrast a hypothetical default for SANDY_HANDOFF_RELAY, which names a file sandy does not install, so every unprovisioned sandbox would fail to launch). The read-only MOUNT is the boundary, not permission bits: the container process runs as the host uid and OWNS the entry, so bits bind nothing and the agent could chmod its own relay; under a :ro mount the write returns EROFS. An adapter can write files, it cannot create a mount. HONEST LIMIT: sandy guarantees the FIRST executable only -- a relay that execs a daemon out of a writable directory is replaceable at the second link. An entry that exists but is not executable is an ERROR that fails the launch, never silently absent. A present entry forces SANDY_HANDOFF_DIRS=1 (the relay needs ~/.handoff/relay for state) and makes crossSessionInbound default to accept, on the same condition it always did. Both values are passive-safe: 0 only tightens. But because a CLONED repo shipping 0 would silently disable an operator's fleet connector, the resolved state records disabled_by (env, host or workspace) in /etc/sandy-session.json and --print-state -- visible, not forbidden. Skipped, not failed, in headless (-p) and --remote runs, exactly like SANDY_HANDOFF_RELAY. Reported as relay.slot (absent, present or disabled) in the session marker -- launch INTENT, since the marker is written before docker run and the relay starts in-container -- and as live relay.state (absent, started, failed, looping or disabled) in --print-state.
+SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|REMOVED AS A CONFIGURATION KEY in 2.2.0 (#354): setting it from the environment or any config file is a HARD ERROR naming the replacement. Declare the executable as an 'entry' in a feature manifest instead. THE VARIABLE IS NOT REMOVED and must not be -- it is still the internal channel a manifest entry travels through to the container-side supervisor, so a change that deletes the variable deletes the entry mechanism with it. Everything below describes the mechanism the entry still uses. Path of an executable INSIDE the container (absolute, or relative to the workspace, e.g. .sandy/relay.sh) that sandy runs as a container-level process: a sibling of the tmux server, not a pane and not a child of any agent session. Started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote (no tmux session to target), and never under --provision (which starts a session only to verify it and then stops it, so a relay would live ~10s and criterion 7 would fail the very launch that materialises the handoff pair) — in both the key is dropped host-side, so crossSessionInbound defaults to refuse and the marker records handoff_relay=false), singleton via flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never overlapping, never given up on. Setting it forces SANDY_HANDOFF_DIRS=1 (over an explicit opt-out — the relay cannot run without its mounts; the dirs are on by default since 1.10.0 anyway) so $SANDBOX_DIR/handoff/relay is mounted rw at ~/.handoff/relay (relay state + supervisor.log). Env contract: SANDY_HANDOFF_RELAY_STATE, SANDY_AGENT, SANDY_WORKSPACE (the _INBOX, _OUTBOX and _PEER vars were removed in 2.2.0 with their directories, #352); enumerate live sessions with /usr/local/bin/sandy-handoff-sessions. A configured relay that cannot start FAILS THE LAUNCH, never warn-and-proceed: host-side (exit 1 before docker run) for whitespace, shell metacharacters, .. segments, a ~/.handoff collision, and any path the host can see (workspace-relative, or absolute under the workspace mount) that is missing or not executable; in-container (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) for an image-only absolute path that is missing or not executable, a missing ~/.handoff/relay mount, or no flock. So handoff_relay=true in the marker means the relay was started or the session did not come up. In daemon mode the relay (and anything else planted at the uid) outlives sessions until the container is recreated — run sandy --update-sessions --yes on a 24h cron. Recorded in /etc/sandy-session.json as handoff_relay.
+SANDY_RELAY|bool|1||1.11.0|experimental|Relay CAPABILITY toggle (#258), RE-SCOPED in 2.2.0 (#354). Names no path and asserts no payload: it means 'run the installed relay if there is one'. That meaning was never slot-specific, so with the relay-bin slot removed the key now gates the only remaining producer -- a feature manifest's entry. BEHAVIOUR CHANGE, in the tightening direction: =0 used to disable a slot relay and silently NOT stop a manifest entry; it now stops both, which is what the key always claimed. Because a fleet going silently dark is the failure the entry/relay-bin coexistence window existed to prevent, the suppression is LOUD -- a launch that declines to start a declared entry says so by name, and the resolved state records disabled_by (env, host or workspace) in /etc/sandy-session.json and --print-state, so a CLONED repo shipping 0 is visible rather than forbidden. Default 1, safe because the capability is INERT without host-side state a repository cannot create: no feature, no entry, nothing to run. Both values are passive-safe: 0 only tightens. Skipped, not failed, in headless (-p) and --remote runs. Reported as relay.slot (absent or disabled; 'present' retired with the slot) in the session marker -- launch INTENT, since the marker is written before docker run and the relay starts in-container -- and as live relay.state (absent, started, failed, looping or disabled) in --print-state, alongside relay.source (#345) which names the producer.
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
 SANDY_HOST_ID|string||^[A-Za-z0-9._-]{1,128}$|1.8.0|stable|Operator override for the host_id reported by --print-state (#179), advisory identity for multi-host fleet aggregation (sandbox names hash only the workspace path, so the same path on two hosts collides). ENV-ONLY -- a committed .sandy/config can never set it, which would otherwise forge the identity of whatever machine the repo is cloned onto. Default is uname -n (host_id_source: hostname); a valid override reports host_id_source: env. Invalid or empty values are silently ignored and fall back to uname -n -- no warning, ever, since --print-state guarantees 0 bytes of stderr.
@@ -2812,11 +2812,16 @@ _sandy_emit_state() {
                 done <<EOF_RELAY_STATE
 $sb_r_raw
 EOF_RELAY_STATE
-            elif [ -f "$sb/relay-bin/relay" ] && [ -x "$sb/relay-bin/relay" ]; then
-                # Installed, but no supervisor ever recorded a start for it.
+            elif [ -f "$sb/relay-bin/relay" ]; then
+                # The slot is removed (#354) so it can no longer PRODUCE a
+                # relay, but a leftover entry now BLOCKS the next launch. With
+                # no recorded state there is nothing else this sandbox could be
+                # reporting, so saying `failed` here is cheaper than a failed
+                # launch -- and it must stay an `elif`: a sandbox running a
+                # healthy manifest relay that also carries a stale entry must
+                # keep reporting the relay it is actually running.
                 sb_r_state='"failed"'
             fi
-            if [ -f "$sb/relay-bin/relay" ]; then sb_r_path='"/opt/sandy/relay/relay"'; fi
             # source + path from the marker (#345). ONE extra sed for both, to
             # stay inside the light-mode poll budget -- a fleet poller runs this
             # per sandbox. Each expression is anchored on its OWN key, so
@@ -3826,7 +3831,10 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # a poisoned session must not silently un-enrol it from the fleet, which is
     # exactly what would happen by default, since everything not named here is
     # destroyed.
-    _rs_keep() { case "$1" in WORKSPACE.json|.handoff-enabled|relay-bin|agent-args.*) return 0 ;; .sandy-approved-symlinks.list) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
+    # relay-bin/ is NO LONGER preserved (#354): the slot is removed and a
+    # surviving entry blocks the next launch, so keeping it across a reset would
+    # preserve the one thing the reset is most likely being run to clear.
+    _rs_keep() { case "$1" in WORKSPACE.json|.handoff-enabled|agent-args.*) return 0 ;; .sandy-approved-symlinks.list) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
     printf '\nsandy --reset-sandbox: %s\n' "$_rs_name"
     printf 'Workspace: %s\n' "$_rs_wd"
     printf 'Will destroy (next launch re-materializes them):\n'
@@ -3846,7 +3854,7 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # not" failure the marker exists to prevent (#178 fix).
     printf 'Preserved: WORKSPACE.json (lineage)%s%s%s%s\n\n' \
         "$([ -e "$_rs_dir/.handoff-enabled" ] && printf ', .handoff-enabled (handoff enrollment)')" \
-        "$([ -e "$_rs_dir/relay-bin/relay" ] && printf ', relay-bin/ (installed relay)')" \
+        "$([ -e "$_rs_dir/relay-bin/relay" ] && printf ', AND DESTROYS relay-bin/relay (the slot was removed in 2.2.0; it would block the next launch)')" \
         "$(set -- "$_rs_dir"/agent-args.*; [ -e "$1" ] && printf ', agent-args.* (per-agent launch args)')" \
         "$([ "$_rs_keep_approvals" = "true" ] && printf ', approval list')"
 
@@ -11540,51 +11548,59 @@ fi
 if [ -z "${_SANDY_RELAY_SOURCE:-}" ]; then _SANDY_RELAY_SOURCE=""; fi
 SANDY_RELAY="${SANDY_RELAY:-1}"
 _sandy_relay_slot_dir="$SANDBOX_DIR/relay-bin"
-_sandy_relay_slot="absent"        # absent | present | disabled
-_sandy_relay_from_slot="false"    # did the slot supply the relay we will run?
-# relay.source (#345): WHICH PRODUCER supplied the relay this launch --
-# explicit | slot | manifest | none. `slot` alone cannot answer that and never
-# could: it is written only by the slot block below, so an explicit
-# SANDY_HANDOFF_RELAY, a manifest `entry` and no relay at all all report
-# "absent". A consumer shipped a check on it that called every correctly
-# migrated sandbox broken, and would have called one still running a shim
-# healthy. MEASURED: in --print-state it is worse than in the marker, because
-# that surface derives `path` from the slot directory alone, so the manifest
-# and explicit producers are BYTE-IDENTICAL there ({"state":"started",
-# "path":null}). So documentation could not have fixed this; the field had to
-# exist. `slot` keeps its old meaning untouched.
-_sandy_relay_source="none"        # explicit | slot | manifest | none
-[ -n "${SANDY_HANDOFF_RELAY:-}" ] && _sandy_relay_source="explicit"
-# Created on EVERY launch regardless of the value, exactly like the handoff
-# tree: that is what makes "directory presence carries no information" true by
-# CONSTRUCTION rather than convention. A stray mkdir, a restored backup or an
-# rsync -a can neither enable nor defeat anything; only an ENTRY does.
-mkdir -p "$_sandy_relay_slot_dir"
+_sandy_relay_slot="absent"        # absent | disabled  ("present" retired with the slot)
+_sandy_relay_from_slot="false"    # retained one release; always false now
+# relay.source (#345): WHICH PRODUCER supplied the relay. With the slot and the
+# operator key both gone, the reachable values are `manifest` and `none` --
+# `explicit` and `slot` survive only in markers written by an older sandy, which
+# --print-state still reads back.
+_sandy_relay_source="none"
+
+# SANDY_HANDOFF_RELAY as an OPERATOR KEY is removed (deprecated 2.0.0, listed in
+# README's table since). The VARIABLE is not, and that distinction is the thing
+# most likely to cause a wrong edit here: it is still the internal channel a
+# manifest `entry` travels through, and the manifest sets it BELOW this point --
+# so a non-empty value HERE can only have come from the environment or a config
+# file, i.e. from an operator.
+if [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
+    echo "[sandy] ERROR: SANDY_HANDOFF_RELAY was removed as a configuration key in 2.2.0." >&2
+    echo "[sandy]        Declare the executable as an \"entry\" in a feature manifest instead:" >&2
+    echo "[sandy]          \$SANDY_HOME/features/<name>/feature.json  ->  \"entry\": \"payload/relay\"" >&2
+    echo "[sandy]        Unset the key (got: $SANDY_HANDOFF_RELAY). See docs/design/FEATURE-MANIFEST.md." >&2
+    _sandy_daemon_fatal
+    exit 1
+fi
+
+# The relay-bin SLOT is removed (#354). A PRESENT ENTRY IS A HARD ERROR, never
+# a silent skip: the slot winning over a manifest entry is what the 2.0
+# coexistence window was for, so a sandbox still carrying one is a migration
+# that never finished, and ignoring it would start the wrong relay -- or none --
+# without saying so. The directory is no longer created; an empty one left over
+# from an earlier release is harmless and says nothing.
+if [ -e "$_sandy_relay_slot_dir/relay" ]; then
+    echo "[sandy] ERROR: $_sandy_relay_slot_dir/relay exists, but the relay slot was removed in 2.2.0." >&2
+    echo "[sandy]        The entry/relay-bin coexistence window has closed. Move the executable into a" >&2
+    echo "[sandy]        feature payload and declare it as \"entry\" in that feature's feature.json, then" >&2
+    echo "[sandy]        delete $_sandy_relay_slot_dir/relay. See docs/design/FEATURE-MANIFEST.md." >&2
+    _sandy_daemon_fatal
+    exit 1
+fi
+
+# SANDY_RELAY is RE-SCOPED, not retired (#354). It was never listed in README's
+# ## Deprecated table and an entry may only be ADDED there in an X.0.0, so
+# removing it in a minor is precisely what §138 exists to prevent. Its own
+# documented meaning was never slot-specific -- "it means run the installed
+# relay if there is one" -- and with the slot gone, the installed relay is a
+# manifest entry. So the key now gates THAT.
+#
+# This is a real behaviour change in the TIGHTENING direction: =0 used to
+# disable a slot relay and silently NOT stop a manifest entry. It now stops
+# both, which is what the key always claimed. Because "the fleet goes silently
+# dark" is the exact failure the coexistence window existed to prevent, the
+# suppression is LOUD -- named at launch below, and recorded as
+# relay.slot=disabled with disabled_by naming who set it.
 if [ "$SANDY_RELAY" != "1" ]; then
     _sandy_relay_slot="disabled"
-elif [ -e "$_sandy_relay_slot_dir/relay" ]; then
-    # A present but non-executable entry is an ERROR, not "absent". It is the
-    # "installed but broken" case and must never read as "nothing installed" --
-    # that is the silent no-op this whole design exists to retire.
-    if [ ! -f "$_sandy_relay_slot_dir/relay" ] || [ ! -x "$_sandy_relay_slot_dir/relay" ]; then
-        echo "[sandy] ERROR: $_sandy_relay_slot_dir/relay exists but is not an executable file. An installed relay that cannot start fails the launch (chmod +x it, or remove it to launch without a relay)." >&2
-        _sandy_daemon_fatal
-        exit 1
-    fi
-    _sandy_relay_slot="present"
-    if [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
-        # Never merge two sources; name the one that won (the agent-args rule).
-        warn "SANDY_HANDOFF_RELAY is set, so it wins over the installed relay slot ($_sandy_relay_slot_dir/relay is NOT mounted or run this launch). SANDY_HANDOFF_RELAY is deprecated as of 1.11.0 -- install the relay into the slot instead."
-    else
-        # Hand the slot entry to the existing, tested relay machinery rather
-        # than duplicating it: the block below validates it, the skip rules
-        # (headless, --remote) apply unchanged, user-setup.sh's supervisor runs
-        # it under the same flock singleton and backoff, and crossSessionInbound
-        # resolves to `accept` on the same condition it always did.
-        SANDY_HANDOFF_RELAY="/opt/sandy/relay/relay"
-        _sandy_relay_from_slot="true"
-        _sandy_relay_source="slot"
-    fi
 fi
 # END relay capability
 
@@ -11649,13 +11665,14 @@ if [ -d "$_sandy_fm_root" ]; then
         [ -n "$_fm_l" ] || continue
         case "$_fm_l" in
             entry*)
-                if [ -z "${SANDY_HANDOFF_RELAY:-}" ]; then
+                # SANDY_RELAY=0 suppresses it, and says so. Silence here is the
+                # "fleet goes dark" failure: the entry is declared, the feature
+                # is mounted, and nothing would run.
+                if [ "$SANDY_RELAY" != "1" ]; then
+                    warn "a feature manifest declares an entry, but SANDY_RELAY=0${_SANDY_RELAY_SOURCE:+ (set in $_SANDY_RELAY_SOURCE config)} disables the relay capability -- NO relay will run this launch. Unset it, or set SANDY_RELAY=1, to run '${_fm_l#*	}'."
+                elif [ -z "${SANDY_HANDOFF_RELAY:-}" ]; then
                     SANDY_HANDOFF_RELAY="${_fm_l#*	}"
                     _sandy_relay_source="manifest"
-                elif [ "$_sandy_relay_from_slot" = "true" ]; then
-                    info "a feature manifest declares an entry, but relay-bin/relay is installed and wins (2.0.0 coexistence window)."
-                else
-                    info "a feature manifest declares an entry, but SANDY_HANDOFF_RELAY is set explicitly and wins."
                 fi ;;
             agent_args*)
                 _SANDY_FM_AA_RECORDS="${_SANDY_FM_AA_RECORDS}${_fm_l#agent_args	}"$'\n' ;;
@@ -13865,12 +13882,12 @@ if [ "${SANDY_HANDOFF_DIRS:-1}" = "1" ]; then
     # uid and OWNS $SANDBOX_DIR/relay-bin/relay, so permission bits would bind
     # nothing — it could chmod and rewrite its own relay. The mount flag is
     # checked above the permission check, so the write returns EROFS instead.
-    # Mounted only when the slot actually supplies the relay we will run, so a
-    # deprecated SANDY_HANDOFF_RELAY override or a headless/--remote skip leaves
-    # nothing mounted and "the slot is mounted iff its relay runs" stays true.
-    if [ "${_sandy_relay_from_slot:-false}" = "true" ] && [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
-        RUN_FLAGS+=(-v "$_sandy_relay_slot_dir:/opt/sandy/relay:ro")
-    fi
+    # The :ro slot mount is GONE with the slot (#354). A feature payload is
+    # already mounted :ro by the manifest, so an `entry` living on it keeps the
+    # same guarantee the slot bought: the agent runs as the host uid and owns
+    # the file, so permission bits bind nothing -- the MOUNT is what makes a
+    # write return EROFS. What is lost is the runtime PROOF of that, which
+    # phase F3 carried; see the note in acceptance-handoff-dirs.sh.
     if [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
         RUN_FLAGS+=(-e "SANDY_HANDOFF_RELAY=$SANDY_HANDOFF_RELAY")
     fi
