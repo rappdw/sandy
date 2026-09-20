@@ -11838,8 +11838,12 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # 17 as of 1.15.0: `sandbox_name` (#303) -- the sandbox slug, which nothing
 # in-container could learn before and which was not derivable from
 # SANDY_PROJECT_NAME (the raw basename) plus the hash.
-check "§114(13g) marker printf format/arg count line up (17 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 17
+# 18 as of 2.1.0: `agent_args` (#348) -- what a feature manifest contributed to
+# each agent this launch. This tripwire is what caught the field being added,
+# which is exactly its job: a new conversion with no matching argument shifts
+# every field after it silently.
+check "§114(13g) marker printf format/arg count line up (18 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 18
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
