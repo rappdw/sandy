@@ -616,6 +616,12 @@ No exit-code surprises: always `0` (see the stream contract above — this flag 
 
   **`executable_present`** — `true` \| `false` \| `null`: whether the executable the supervisor started is still there, checked host-side at QUERY time. Migrating off the slot means removing a mounted executable from under a running relay, and every sandbox up at that moment keeps `state: "started"`, `restarts: 0` and no other signal, for as long as the process survives. **This is a fact, not a health verdict** — it is deliberately reported *alongside* `state` rather than changing it. `null` means sandy cannot answer, which is the honest value for an `explicit` path resolved inside the container: the host may have no corresponding file. Never inferred from a process-name match — the relay's executable is named by the operator and its children by whatever it runs, so such a probe answers confidently and wrongly.
 
+- **`2.2.0` (#355) — `schema_version` moves to `3`.** Removed: `handoff_enabled` and `handoff{}` from `sandboxes[]`; `handoff_relay` and `relay.slot` from the session marker; `relay.slot` from `--print-state`. They described the `~/.handoff` tree and the `relay-bin` slot, both removed in this release.
+
+  **The bump IS the signal.** A removed field is otherwise silent: a consumer gating on `schema_version: 2` keeps finding `2` and merely stops seeing the field, inside a schema it was told was stable. Every removal in this release is bundled into this one move, because a consumer comparing `schema_version` by equality pays a refusal and a release for each bump.
+
+  **`relay.disabled_by` is KEPT**, against the original plan. It was to go with `relay.slot` as slot-specific, but #354 re-scoped `SANDY_RELAY` to gate a manifest `entry` — so the key it names is live, and this is the only host-side signal that a cloned repo shipping `SANDY_RELAY=0` has disabled a fleet connector.
+
 - **`2.2.0` (#353)**: one new `relay` sub-field, **`state_dir`** — the HOST directory holding `.state` and `supervisor.log`. Additive, `schema_version` unchanged.
 
   Emitted so a consumer reads a path sandy **names** instead of constructing one. It reports whichever location that sandbox's last launch actually used: `relay-state` after the move, `handoff/relay` for a sandbox that has not relaunched since the upgrade. **Two frames in one object:** `path` is a CONTAINER path (where the executable lives); `state_dir` is a HOST path (openable by the tool reading this document).
