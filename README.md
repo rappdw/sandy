@@ -471,19 +471,11 @@ Usage inside a session:
 
 No default — leaving `SANDY_SCREENSHOT_DIR` unset disables the feature entirely. macOS users typically point at `~/Desktop` (the macOS default for `Cmd+Shift+4` captures) or a custom folder configured via `defaults write com.apple.screencapture location <path>`. The mount is read-only by design; the agent should never modify your screenshot folder.
 
-### Handoff directories (`SANDY_HANDOFF_DIRS`)
+### Per-sandbox directories for a feature
 
-> **Deprecated, and mostly removed.** `inbox`, `outbox` and `peer` were deleted in **2.2.0**, with their `SANDY_HANDOFF_{INBOX,OUTBOX,PEER}` container variables. A feature manifest names its own directories via `mounts`. Only `relay` remains, and only until relay state moves to a directory of its own — which is what will retire this key entirely.
+**The `~/.handoff` tree was removed in 2.2.0.** A feature manifest names its own directories instead — see "Features" above — which is more flexible and does not require every sandbox to carry four fixed directories it may not use.
 
-On every launch sandy creates and mounts, idempotently:
-
-| in-container | host | mode |
-|---|---|---|
-| `~/.handoff/relay` | `$SANDBOX_DIR/handoff/relay` | read-write — relay state and `supervisor.log` |
-
-Set `SANDY_HANDOFF_DIRS=0` (passive-safe, same tiers as any other passive key: env, `~/.sandy/config`, or a workspace `.sandy/config`) to opt out: nothing is mounted and `~/.handoff` does not exist inside the container. A configured relay forces the key back on, because the relay cannot run without its state directory.
-
-The host-side directory exists for every sandbox regardless of the setting, so **directory presence carries no information**. To check whether a sandbox has it, check the **mount** — `docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' <container>`, or `test -d ~/.handoff/relay` inside — never the directory and never the marker. An operator-side `$SANDBOX_DIR/.handoff-enabled` marker file, which a cloned repo cannot carry, forces it **on** for one sandbox even when a config opts out. See `CLAUDE.md` for the full rationale.
+If you were using it: `inbox`, `outbox` and `peer` become manifest `mounts` (`mode: ro` for host-written inbound lanes). Relay state moved to `$SANDBOX_DIR/relay-state`, mounted at `/opt/sandy/relay-state`, and sandy reports that path as `relay.state_dir` in `--print-state` so nothing has to construct it. `SANDY_HANDOFF_DIRS` and the `.handoff-enabled` marker are gone; setting the key is a hard error naming the replacement.
 
 ## How Network Isolation Works
 
@@ -1020,14 +1012,16 @@ Everything here still works. Each entry was announced in the major release named
 
 Sandy's rule: an entry can only be **added** to this list in an `X.0.0` release, and nothing is ever removed that was not listed here first. Reading this section after a major upgrade tells you everything that may disappear during that line.
 
+An entry may also be **withdrawn** in any release — it is struck through and marked *kept*. Withdrawal is allowed in a minor because it **strictly reduces** what you have to plan for: it retracts a threat rather than creating one, which is the opposite of what the add-only rule guards against.
+
 | deprecated | since | use instead |
 |---|---|---|
-| `SANDY_HANDOFF_DIRS`, and the `~/.handoff/{inbox,outbox,peer,relay}` tree it mounts | 2.0.0 | a feature manifest's `mounts` — it names its own directories instead of using sandy's four fixed ones |
-| `SANDY_HANDOFF_*` container env vars (`_INBOX`, `_OUTBOX`, `_PEER`, `_RELAY_STATE`) | 2.0.0 | a mount's `export`, which names the variable the feature wants |
+| ~~`SANDY_HANDOFF_DIRS`, and the `~/.handoff/{inbox,outbox,peer,relay}` tree it mounts~~ **— REMOVED in 2.2.0** | 2.0.0 | a feature manifest's `mounts` — it names its own directories instead of using sandy's four fixed ones |
+| ~~`SANDY_HANDOFF_*` container env vars (`_INBOX`, `_OUTBOX`, `_PEER`, `_RELAY_STATE`)~~ **— REMOVED in 2.2.0** | 2.0.0 | a mount's `export`, which names the variable the feature wants |
 | ~~`SANDY_HANDOFF_RELAY` and the `relay-bin/` slot~~ **— REMOVED in 2.2.0** | 2.0.0 | a feature manifest's `entry`. Setting the key, or leaving an executable in the slot, is now a **hard error** naming the replacement. The *variable* survives as the manifest entry's internal channel; only the operator-facing key is gone |
-| `handoff_relay` and `relay{}` in `/etc/sandy-session.json` and `--print-state` | 2.0.0 | the feature's own entry in `--print-state`. Removing these will bump `schema_version`, because a vanished field is otherwise silent |
-| `handoff_enabled` and `handoff{}` in `--print-state` | 2.0.0 | they report on the handoff tree above, so they go with it — and their removal bumps `schema_version` for the same reason |
-| the `.handoff-enabled` sandbox marker | 2.0.0 | nothing: it forces the handoff tree on for one sandbox, and the tree is what is going. A feature manifest selects per sandbox instead |
+| ~~`relay{}` in `/etc/sandy-session.json` and `--print-state`~~ **— WITHDRAWN, kept** · `handoff_relay`, `relay.slot`, `relay.disabled_by` **— REMOVED in 2.2.0, `schema_version` 3** | 2.0.0 | **`relay{}` stays.** Its stated replacement, "the feature's own entry in `--print-state`", was never built, and the premise for it disappeared with the other producers: a sandbox runs exactly **one** relay, so nesting a singular fact inside a per-feature collection would add a level for no gain. What went is the dead fields inside it — `slot` and `disabled_by` both described the `relay-bin` slot, removed in 2.2.0 |
+| ~~`handoff_enabled` and `handoff{}` in `--print-state`~~ **— REMOVED in 2.2.0, `schema_version` 3** | 2.0.0 | they report on the handoff tree above, so they go with it — and their removal bumps `schema_version` for the same reason |
+| ~~the `.handoff-enabled` sandbox marker~~ **— REMOVED in 2.2.0** | 2.0.0 | nothing: it forces the handoff tree on for one sandbox, and the tree is what is going. A feature manifest selects per sandbox instead |
 | `SANDY_SCREENSHOT_DIR` | 2.0.0 | intended to become a feature manifest; the design is not settled (#317), and the key stays until it is |
 | `SANDY_EGRESS_PROXY` | 2.0.0 | `SANDY_EGRESS=off\|permissive\|strict`. It has warned since 0.14.0; listing it here is what finally gives its removal a date |
 | `SANDY_EGRESS_NO_ISOLATION` | 2.0.0 | `SANDY_EGRESS=off` — same posture, same approval gate, one key instead of two mutually exclusive booleans |

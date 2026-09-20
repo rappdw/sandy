@@ -23,7 +23,7 @@ SANDY_COMMIT=""  # baked in by install.sh; empty = detect from git at runtime
 # Schema contract version for --print-schema / --print-state / --validate-config.
 # Bumped when existing fields change semantics; additive changes do not bump.
 # See SPEC_INTROSPECTION.md in the repo for the contract.
-SANDY_SCHEMA_VERSION=2
+SANDY_SCHEMA_VERSION=3
 
 # --- Config tier lists (single source of truth for _load_sandy_config,
 # --- --validate-config, and --print-schema) ---
@@ -104,7 +104,6 @@ SANDY_PASSIVE_KEYS=(
     SANDY_TOOL_AUDIT
     SANDY_CLAUDE_CONNECTORS
     SANDY_SUSPICIOUS
-    SANDY_HANDOFF_DIRS
     SANDY_CROSS_SESSION_INBOUND
     SANDY_RELAY
 )
@@ -653,10 +652,17 @@ _sandy_perm_mode_drift() {
 # Sets three globals rather than echoing, so a caller needs no subshell and no
 # parsing: _SANDY_HC_STATE (ok|missing|wrong), _SANDY_HC_DIRS (JSON object),
 # _SANDY_HC_PROBLEMS (JSON array).
-_sandy_handoff_classify() {
+#
+# 2.2.0 (#355): the handoff tree is gone and so is the `handoff` field this
+# used to feed. The PREDICATE survives because --provision --all still needs
+# one -- "which sandboxes are missing the per-sandbox state a launch creates"
+# -- and it now classifies relay-state/, which is what a launch creates today.
+# It is INTERNAL now: nothing emits it, so there is no field for a consumer to
+# gate on and no contract to keep.
+_sandy_sandbox_state_classify() {
     local _hc_sb="$1" _hc_d _hc_name _hc_probs="" _hc_dirs="" _hc_missing=0 _hc_bad=0
-    for _hc_name in relay; do
-        _hc_d="$_hc_sb/handoff/$_hc_name"
+    for _hc_name in relay-state; do
+        _hc_d="$_hc_sb/$_hc_name"
         [ -n "$_hc_dirs" ] && _hc_dirs="$_hc_dirs,"
         if [ ! -e "$_hc_d" ] && [ ! -L "$_hc_d" ]; then
             _hc_dirs="$_hc_dirs\"$_hc_name\":false"
@@ -1505,7 +1511,6 @@ DISCORD_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Discord user IDs a
 SANDY_TOOL_AUDIT|bool|0||1.4.0|stable|Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off).
 SANDY_CLAUDE_CONNECTORS|bool|0||1.9.0|stable|Expose the claude.ai ACCOUNT connectors (Gmail, Google Drive, ...) inside the sandbox (#129). Default 0 = SUPPRESSED. The OAuth token sandy mounts is account-scoped, so without this every connector the user ever enabled on claude.ai was reachable from EVERY sandbox -- including untrusted-repo sessions, with no extra prompt -- which is ambient authority crossing the per-project boundary sandy exists to draw. Implemented by seeding Claude Code's disableClaudeAiConnectors as a MANAGED settings.json key (always overwritten, both directions): Claude resolves it true-in-ANY-settings-scope-wins, so writing false is not enough to expose them -- an inherited true from the host settings.json would win. VALUE-AWARE TIER: 0 is passive-safe wherever it is set, but =1 WEAKENS the sandbox, so a workspace .sandy/config setting it triggers the per-workspace approval prompt like SANDY_EGRESS_NO_ISOLATION=1. Claude-only (the account-connector rider is a Claude Code phenomenon); gates AUTO-FETCHED connectors only -- a server passed explicitly via --mcp-config still follows the normal MCP trust flow.
 SANDY_SUSPICIOUS|bool|0||1.9.0|experimental|Hardened-credential posture for a workspace you actively distrust (#130) -- the pre-broker slice of #121. When 1: (a) the mounted Claude .credentials.json is REWRITTEN to drop claudeAiOauth.refreshToken, so an exfiltrated copy is worth only the remaining access-token lifetime (hours) instead of permanent renewable account access; the strip is verified after the rewrite and FAILS CLOSED -- if it cannot be performed or verified, no credentials file is mounted at all; (b) if ANTHROPIC_API_KEY is set and no long-lived CLAUDE_CODE_OAUTH_TOKEN is, the API key is used and OAuth credentials are not mounted (clean, instantly-revocable compartmentalization); (c) claude.ai account connectors are forced off, overriding an approved SANDY_CLAUDE_CONNECTORS=1; (d) egress DEFAULTS to strict -- an explicit egress setting still wins but is named loudly. Since 1.12.0 this also covers SANDY_CLAUDE_AUTH=profile (#252): the ephemeral copy of the Console profile has its refresh_token stripped (the host profile is never touched) and cred_mode becomes profile-access-only; a strip that cannot be performed or verified mounts NO profile at all. The resolved posture is recorded as cred_mode in /etc/sandy-session.json so a run protection level is provable after the fact. Passive-safe to turn ON from a committed .sandy/config (a repo may make itself tighter); =0 from a workspace is approval-gated (never looser). HONEST LIMITS: in-session token refresh stops working once the access token expires (rerun sandy or /login -- acceptable for a deliberately short suspicious session); a long-lived CLAUDE_CODE_OAUTH_TOKEN is NOT shrunk by this (recorded honestly as cred_mode oauth-token, with a warning); Claude-only for the credential specifics; real prevention (token never in-container) is #121.
-SANDY_HANDOFF_DIRS|bool|1||1.7.0|deprecated|DEPRECATED since 2.0.0, and as of 2.2.0 it governs ONE directory. Create and mount $SANDBOX_DIR/handoff/relay rw at ~/.handoff/relay (relay state + supervisor.log). The inbox, outbox and peer lanes were REMOVED in 2.2.0 (#352): a feature manifest names its own directories via mounts, and every lane was measured empty across the fleet before removal. Set 0 to opt out: nothing is mounted and ~/.handoff does not exist in the container -- but a configured relay forces this key to 1, because the relay cannot run without its state directory. Passive-safe in both directions: a directory confers no reach on its own, and 0 only tightens. The host directory is created unconditionally regardless of this key (since 1.7.0) so directory PRESENCE carries no information; consumers verify the MOUNT (inside: test -d ~/.handoff/relay; outside: docker inspect .Mounts), never the directory or a marker. The operator marker $SANDBOX_DIR/.handoff-enabled (sandbox TOP level, never mounted, survives --reset-sandbox) forces it ON for one sandbox even when config says 0 -- privileged by location like agent-args.<agent>, and a no-op when nothing opts out. Relay state moves to a producer-agnostic directory in a later release (#353), which is what finally retires this key.
 SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|Claude-only. Pins Claude Code crossSessionInbound (accept = deliver messages from other sessions on this container without a prompt; hold = queue for approval; refuse = drop with a sender-visible status) by writing the SAME resolved value into TWO places every launch, merge-preserving and idempotent: the sandbox's own claude/settings.json (mounted RW as the container's ~/.claude/settings.json, i.e. Claude Code userSettings) and the WORKSPACE project file .claude/settings.local.json (mounted :ro). This split is measured, not assumed, against Claude Code 2.1.251: accept only takes effect when present in userSettings (workspace-file accept alone is a no-op there); hold/refuse are honored from either, and the workspace file's copy is tighten-only so it cannot be loosened by a stale accept and still wins over userSettings when a repo hand-edits it stricter. Never writes ~/.claude/settings.json on the HOST. Default is CONDITIONAL, which is why the schema default is empty: accept iff SANDY_HANDOFF_RELAY is set AND the relay will actually be started this launch, else refuse — headless (-p) and --remote runs never start a relay, so they default to refuse even with the key set, and a configured relay that cannot start fails the launch rather than leaving accept in place with nothing delivering. Value-aware tier: hold and refuse are passive-safe wherever set; accept set via a workspace .sandy/config is approval-gated (it lets any process at the workspace uid inside the container inject a turn). Residual: the userSettings target is RW in-container (required for /plugin install), so unlike the :ro workspace copy it is agent-mutable mid-session; sandy resets it on the next launch, not mid-session. Recorded in /etc/sandy-session.json as cross_session_inbound. See docs/security/CROSS_SESSION_INBOUND.md.
 ANTHROPIC_PROFILE|string||^[A-Za-z0-9._-]+$|1.11.0|experimental|Privileged. Name of the Anthropic Console profile to use when SANDY_CLAUDE_AUTH=profile (overrides the host active_config); forwarded into the container so Claude Code selects it explicitly (its /status shows the Profile row as profile-explicit). Privileged on purpose: it chooses WHICH profile's token enters the box, and a profile logged in with --scope org:admin carries organization-wide access, so a committed .sandy/config must not be able to select it. Ignored with a notice unless SANDY_CLAUDE_AUTH=profile.
 SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|REMOVED AS A CONFIGURATION KEY in 2.2.0 (#354): setting it from the environment or any config file is a HARD ERROR naming the replacement. Declare the executable as an 'entry' in a feature manifest instead. THE VARIABLE IS NOT REMOVED and must not be -- it is still the internal channel a manifest entry travels through to the container-side supervisor, so a change that deletes the variable deletes the entry mechanism with it. Everything below describes the mechanism the entry still uses. Path of an executable INSIDE the container (absolute, or relative to the workspace, e.g. .sandy/relay.sh) that sandy runs as a container-level process: a sibling of the tmux server, not a pane and not a child of any agent session. Started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote (no tmux session to target), and never under --provision (which starts a session only to verify it and then stops it, so a relay would live ~10s and criterion 7 would fail the very launch that materialises the handoff pair) — in both the key is dropped host-side, so crossSessionInbound defaults to refuse and the marker records handoff_relay=false), singleton via flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never overlapping, never given up on. Setting it forces SANDY_HANDOFF_DIRS=1 (over an explicit opt-out — the relay cannot run without its mounts; the dirs are on by default since 1.10.0 anyway) so $SANDBOX_DIR/handoff/relay is mounted rw at ~/.handoff/relay (relay state + supervisor.log). Env contract: SANDY_HANDOFF_RELAY_STATE, SANDY_AGENT, SANDY_WORKSPACE (the _INBOX, _OUTBOX and _PEER vars were removed in 2.2.0 with their directories, #352); enumerate live sessions with /usr/local/bin/sandy-handoff-sessions. A configured relay that cannot start FAILS THE LAUNCH, never warn-and-proceed: host-side (exit 1 before docker run) for whitespace, shell metacharacters, .. segments, a ~/.handoff collision, and any path the host can see (workspace-relative, or absolute under the workspace mount) that is missing or not executable; in-container (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) for an image-only absolute path that is missing or not executable, a missing ~/.handoff/relay mount, or no flock. So handoff_relay=true in the marker means the relay was started or the session did not come up. In daemon mode the relay (and anything else planted at the uid) outlives sessions until the container is recreated — run sandy --update-sessions --yes on a 24h cron. Recorded in /etc/sandy-session.json as handoff_relay.
@@ -2739,38 +2744,11 @@ _sandy_emit_state() {
                 fi
             fi
             printf ','; _json_kv size_bytes "$sb_size"
-            # handoff_enabled (#handoff-marker): whether the OPERATOR marker file is
-            # present, i.e. this sandbox is FORCED on regardless of any opt-out.
-            # Reports the MARKER only. The tree is on by default (1.10.0), so
-            # false means "not forced", NOT "the tree is off next launch" — it
-            # is off only if a config the marker does not read says
-            # SANDY_HANDOFF_DIRS=0, and --print-state reads no workspace config.
-            if [ -e "$sb/.handoff-enabled" ]; then
-                printf ','; _json_kv handoff_enabled 'true'
-            else
-                printf ','; _json_kv handoff_enabled 'false'
-            fi
-            # handoff (#265): does this sandbox have a correct pair, on the HOST.
-            #
-            # Read-only by construction -- it classifies and never repairs. That
-            # is a requirement, not an implementation detail: the consumer that
-            # asked for it relies on a hand-made pair being distinguishable from
-            # one a launch created, and a field that quietly fixed things would
-            # destroy exactly that property.
-            #
-            # READ THIS THE WAY IT IS MEANT. "ok" means the four directories are
-            # present and well-formed ON THE HOST. It does NOT mean the tree is
-            # mounted in any container: --print-state reads no configs, so it
-            # cannot know next launch's SANDY_HANDOFF_DIRS, and it does not
-            # inspect a running container. `handoff_enabled` above carries the
-            # same caveat and has been misread as a mount signal before. To ask
-            # "does this RUNNING sandbox have the tree", check the container's
-            # mounts.
-            #
-            # Both modes: four builtin file tests per sandbox cost no process
-            # spawns (the agent_args_files precedent, not size_bytes').
-            _sandy_handoff_classify "$sb"
-            printf ','; _json_kv handoff "{\"state\":\"$_SANDY_HC_STATE\",\"dirs\":$_SANDY_HC_DIRS,\"problems\":$_SANDY_HC_PROBLEMS}"
+            # handoff_enabled and handoff{} were REMOVED in 2.2.0 (#355) with the
+            # tree they described. Removing an emitted field is otherwise
+            # SILENT -- a consumer gating on schema_version 2 keeps finding 2
+            # and merely stops seeing the field -- so schema_version moved to 3,
+            # and that bump IS the signal.
             # relay (#258): LIVE state, which is the half the session marker
             # structurally cannot carry. The marker is written before `docker
             # run` and the relay starts in-container, so it can only record
@@ -2883,10 +2861,15 @@ EOF_RELAY_MARKER
                         fi
                     fi ;;
             esac
-            # disabled_by comes from the marker, i.e. the LAST LAUNCH's intent —
-            # the only thing a config-free reader can honestly say about why the
-            # capability was off. A cloned repo shipping SANDY_RELAY=0 is a
-            # legitimate tightening, so it is surfaced rather than refused.
+            # relay.disabled_by SURVIVES (#355), and the reason is worth writing
+            # down: the plan was to remove it with relay.slot, because both
+            # described the relay-bin capability. #354 then RE-SCOPED
+            # SANDY_RELAY to gate a manifest `entry` instead of the slot, which
+            # made that premise false -- the key it names is live, and now gates
+            # the only producer left. Removing this would have deleted the one
+            # host-side signal that a cloned repo shipping SANDY_RELAY=0 has
+            # silently disabled a fleet connector, which is the hazard #258 put
+            # it there for. Visible, not forbidden.
             if [ -f "$sb/sandy-session.json" ]; then
                 sb_r_line="$(sed -n 's/.*"disabled_by": "\([a-z]*\)".*/\1/p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
                 if [ -n "$sb_r_line" ]; then
@@ -3832,11 +3815,11 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # Everything in the sandbox dir is destroyed EXCEPT WORKSPACE.json (lineage)
     # and, with --keep-approvals, the approved-symlinks list. The next launch
     # re-materializes pip/uv/npm/go/cargo + agent state from scratch.
-    # .handoff-enabled is preserved unconditionally, like WORKSPACE.json: it is an
-    # OPERATOR decision (force the handoff mounts on for this sandbox over any
-    # config opt-out), not agent-touched session state. Destroying it would
-    # silently drop that override — under an opt-out the mounts would just stop
-    # appearing, with no error, which is the "looks wired and is not" failure this
+    # .handoff-enabled and relay-bin/ are NO LONGER preserved (2.2.0): the
+    # handoff tree the marker forced on is gone (#355), and a surviving slot
+    # entry blocks the next launch (#354). What survives is what an operator set
+    # and nothing else recreates.
+    # agent-args.<agent> files are exactly that kind of
     # marker exists to avoid. agent-args.<agent> files are the same kind of
     # operator state (see sandy's "per-agent args" block) — destroying them on a
     # reset would silently un-configure a sandbox's per-agent launch args with no
@@ -3844,17 +3827,10 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # sandbox holding only WORKSPACE.json plus agent-args files now correctly
     # reports "already minimal" with those files named on the Preserved: line, so
     # an operator does not mistake visible-files-plus-nothing-to-reset for a bug.
-    # relay-bin/ is preserved for the same reason .handoff-enabled is (#258):
-    # it is OPERATOR state, living under $SANDY_HOME rather than in the
-    # workspace, so it is privileged by construction of where it lives. It is
-    # also the installed connector itself — resetting a sandbox to recover from
-    # a poisoned session must not silently un-enrol it from the fleet, which is
-    # exactly what would happen by default, since everything not named here is
-    # destroyed.
     # relay-bin/ is NO LONGER preserved (#354): the slot is removed and a
     # surviving entry blocks the next launch, so keeping it across a reset would
     # preserve the one thing the reset is most likely being run to clear.
-    _rs_keep() { case "$1" in WORKSPACE.json|.handoff-enabled|agent-args.*) return 0 ;; .sandy-approved-symlinks.list) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
+    _rs_keep() { case "$1" in WORKSPACE.json|agent-args.*) return 0 ;; .sandy-approved-symlinks.list) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
     printf '\nsandy --reset-sandbox: %s\n' "$_rs_name"
     printf 'Workspace: %s\n' "$_rs_wd"
     printf 'Will destroy (next launch re-materializes them):\n'
@@ -3867,13 +3843,7 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         printf '  - %-30s %s\n' "$_rs_bn" "$_rs_sz"
         _rs_n=$((_rs_n + 1))
     done
-    # Name .handoff-enabled explicitly when present -- otherwise a fleet
-    # operator is told by OMISSION that handoff enrollment was destroyed
-    # when it was not (it is preserved unconditionally, like WORKSPACE.json,
-    # per _rs_keep above). That is the inverse of the "looks wired and is
-    # not" failure the marker exists to prevent (#178 fix).
     printf 'Preserved: WORKSPACE.json (lineage)%s%s%s%s\n\n' \
-        "$([ -e "$_rs_dir/.handoff-enabled" ] && printf ', .handoff-enabled (handoff enrollment)')" \
         "$([ -e "$_rs_dir/relay-bin/relay" ] && printf ', AND DESTROYS relay-bin/relay (the slot was removed in 2.2.0; it would block the next launch)')" \
         "$(set -- "$_rs_dir"/agent-args.*; [ -e "$1" ] && printf ', agent-args.* (per-agent launch args)')" \
         "$([ "$_rs_keep_approvals" = "true" ] && printf ', approval list')"
@@ -4265,9 +4235,6 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
         [ -z "$_rms_last" ] && _rms_last="$(_rms_mtime_iso "$_rms_dir/.sandy_created_version")"
         printf '  - %-30s %-8s workspace: %-40s last used: %s\n' \
             "$_rms_n" "$_rms_sz" "${_rms_wp:-(unknown)}" "${_rms_last:-(unknown)}"
-        if [ -e "$_rms_dir/.handoff-enabled" ]; then
-            printf '    NOTE: this sandbox is handoff-enrolled (.handoff-enabled) — removal un-enrolls it from the fleet.\n'
-        fi
         if [ -e "$_rms_dir/relay-bin/relay" ]; then
             printf '    NOTE: an installed relay (relay-bin/relay) will be destroyed with the sandbox.\n'
         fi
@@ -5423,9 +5390,10 @@ if [[ "${1:-}" == "--provision" ]]; then
     # deliberate act (one `--provision --workspace P`), which is the answer to
     # "could a sweep silently adopt something it should not".
     #
-    # Classification is _sandy_handoff_classify -- the same predicate
-    # --print-state reports, so a consumer that gates on that field and this
-    # command can never disagree about what needs doing.
+    # Classification is _sandy_sandbox_state_classify, which since #355 is
+    # INTERNAL to this command: the handoff{} field it used to share with
+    # --print-state was removed with the tree, so there is no longer a
+    # consumer-visible field for this to agree or disagree with.
     if [ "$_pv_all" = "true" ]; then
         _pva_todo_name=(); _pva_todo_ws=(); _pva_todo_why=()
         _pva_orphan_name=(); _pva_ok=0
@@ -5452,7 +5420,7 @@ if [[ "${1:-}" == "--provision" ]]; then
             [ -d "$_pva_sb" ] || continue
             _pva_sb="${_pva_sb%/}"
             _pva_name="$(basename "$_pva_sb")"
-            _sandy_handoff_classify "$_pva_sb"
+            _sandy_sandbox_state_classify "$_pva_sb"
             if [ "$_SANDY_HC_STATE" = "ok" ]; then _pva_ok=$((_pva_ok + 1)); continue; fi
             # A LIVE session is tested BEFORE the workspace-gone test, and
             # before the sandbox reaches the todo list at all. Two reasons.
@@ -5570,7 +5538,7 @@ if [[ "${1:-}" == "--provision" ]]; then
                 # attests to sandy's goal (the sandbox is provisioned), which is
                 # not automatically the caller's -- the same caveat its own docs
                 # carry. Re-classify and believe the filesystem.
-                _sandy_handoff_classify "$SANDY_HOME/sandboxes/$_pva_n"
+                _sandy_sandbox_state_classify "$SANDY_HOME/sandboxes/$_pva_n"
                 if [ "$_SANDY_HC_STATE" = "ok" ]; then
                     _pva_done=$((_pva_done + 1))
                 else
@@ -9721,6 +9689,19 @@ fi
 # D3 (2.0.0): SANDY_FEATURES_DIR is REMOVED. The features root is fixed at
 # $SANDY_HOME/features/. It is a hard error rather than a silent ignore because
 # the key shipped in 1.15.0 -- anyone who set it must be told, not left
+# SANDY_HANDOFF_DIRS is REMOVED in 2.2.0 (#355) with the tree it mounted. A
+# hard error rather than a silent ignore, for the reason SANDY_FEATURES_DIR
+# gives: anyone who set it must be told, not left wondering why their
+# directories stopped appearing.
+if [ -n "${SANDY_HANDOFF_DIRS:-}" ]; then
+    echo "[sandy] ERROR: SANDY_HANDOFF_DIRS was removed in 2.2.0 along with the ~/.handoff tree." >&2
+    echo "[sandy]        A feature manifest names its own directories instead:" >&2
+    echo "[sandy]          \$SANDY_HOME/features/<name>/feature.json  ->  \"mounts\": [{\"name\": \"inbox\", \"from\": \"instances/\${slug}/inbox\"}]" >&2
+    echo "[sandy]        Unset the key. See docs/design/FEATURE-MANIFEST.md." >&2
+    _sandy_daemon_fatal
+    exit 1
+fi
+
 # wondering why their payload stopped mounting.
 if [ -n "${SANDY_FEATURES_DIR:-}" ]; then
     echo "[sandy] ERROR: SANDY_FEATURES_DIR was removed in 2.0.0. The features root is now fixed at" >&2
@@ -10943,9 +10924,9 @@ else
             error ""
             error "  --keep-history preserves claude/projects/ -- session transcripts and"
             error "  auto-memory, which nothing recreates. It is not the default and --yes"
-            error "  does not choose it. The reset also PRESERVES relay-bin/, agent-args.*"
-            error "  and .handoff-enabled (operator state nothing recreates), which is why"
-            error "  you should use it rather than rm -rf on the sandbox directory."
+            error "  does not choose it. The reset also PRESERVES agent-args.* (operator"
+            error "  state nothing recreates), which is why you should use it rather than"
+            error "  rm -rf on the sandbox directory."
             error ""
             error "  Cost: the next launch in each workspace re-downloads packages and"
             error "  rebuilds the venv. Nothing is lost that uv sync or npm install will"
@@ -11000,8 +10981,7 @@ else
                 warn "  and it carries cached package state (pip/uv/npm/go/cargo/venv), which may"
                 warn "  hold absolute paths from an older layout. If you hit path issues:"
                 warn "    sandy --reset-sandbox --workspace \"$WORK_DIR\""
-                warn "  which clears those caches and preserves relay-bin/, agent-args.* and"
-                warn "  .handoff-enabled."
+                warn "  which clears those caches and preserves agent-args.*"
             fi
             unset _sandbox_has_cached_paths
             ;;
@@ -11819,106 +11799,28 @@ mkdir -p "$SANDBOX_DIR/npm-global"         # npm -g installs
 mkdir -p "$SANDBOX_DIR/go"                 # GOPATH (go install)
 mkdir -p "$SANDBOX_DIR/cargo"              # cargo install
 
-# BEGIN handoff directories (#132 substrate: dirs + mounts ONLY — no helper,
-# no skills, no turn initiation; nothing sandy ships ever moves these files).
+# The handoff tree is GONE (2.2.0). #352 removed the inbox, outbox and peer
+# lanes; #353 moved relay state to $SANDBOX_DIR/relay-state; #355 removes what
+# was left -- the directory, the SANDY_HANDOFF_DIRS key, the .handoff-enabled
+# marker, and the handoff{}/handoff_enabled reporting that described them.
+# A feature manifest names its own directories via `mounts`.
+
+# --- Relay state (#353) ------------------------------------------------------
+# $SANDBOX_DIR/relay-state -> /opt/sandy/relay-state (rw), created here and
+# mounted where RUN_FLAGS is built. These are sandy's SUPERVISOR's files
+# (.state, supervisor.log), not the relay's.
 #
-# ON BY DEFAULT as of 1.10.0. Every sandbox gets the tree — outbox rw, inbox
-# :ro, peer :ro, relay rw — on every launch, idempotently, so a host-side
-# process can be pointed at any sandbox without a per-sandbox enabling step
-# that has to be remembered, provisioned and verified. SANDY_HANDOFF_DIRS=0 is
-# the opt-out, honoured from the same passive tiers the enabling value always
-# was (env, ~/.sandy/config, workspace .sandy/config). Both values sit in the
-# passive tier for the same reason the key was passive-safe at default 0: a
-# directory confers no reach on its own — nothing lands in inbox/ or peer/
-# unless something on the host writes there, nothing leaves outbox/ unless
-# something on the host reads it — so 1 is what a workspace could always set
-# without approval, and 0 only tightens. What DOES confer reach is unchanged
-# and privileged: SANDY_HANDOFF_RELAY (off unless set) and the
-# crossSessionInbound pin (accept only when a relay is set and will start).
-#
-# Collision guard: a workspace at ~/.handoff (or below it) maps to
-# /home/sandy/.handoff in-container, so the handoff mounts would nest inside
-# the workspace bind and Docker would create outbox/, inbox/, peer/ and relay/
-# in the HOST workspace (pollution) / shadow workspace content. Warn-and-skip,
-# same shape as SANDY_SCREENSHOT_DIR's missing-dir handling.
-#
-# Operator-side enable: a marker file at the TOP LEVEL of the sandbox dir
-# forces the mounts on for THIS sandbox regardless of what any config says.
-# Before 1.10.0 it ORed with a default-off key ("enrol this sandbox without a
-# workspace config"); with the default on it is the inverse of the opt-out —
-# the operator's per-sandbox override of a workspace or host
-# SANDY_HANDOFF_DIRS=0 — and a no-op when nothing opts out. Resolved HERE,
-# before the gate below, so the collision refusal and the :ro mount flags
-# downstream apply identically to every path rather than being duplicated.
-#
-# Why a marker wins over a config, for a fleet: a workspace .sandy/config
-# TRAVELS WITH THE REPOSITORY — clone a repo that opts out and every sandbox
-# of it is out, on machines nobody consulted. The marker is per-machine,
-# per-sandbox, in state a repo cannot carry, and it lives under $SANDY_HOME —
-# the privileged config root — so it is privileged by construction of WHERE
-# it lives, exactly like agent-args.<agent>, whose "sandbox file wins" rule
-# this mirrors. "Off everywhere, on for these" is one host-config line plus a
-# touch per sandbox.
-#
-# Why the TOP LEVEL specifically, and not under claude/: $SANDBOX_DIR/claude is
-# mounted at ~/.claude and .claude/{commands,agents,plugins} are writable
-# overlays, so a marker in that tree would be one the AGENT can create for
-# itself. At the top level nothing mounts it (there is no bare -v of
-# $SANDBOX_DIR — only subdirs plus the :ro session marker), so the agent has no
-# path to it. If a future change mounts more of $SANDBOX_DIR, this file must stay
-# outside whatever is mounted; run-tests.sh asserts that.
-#
-# Existence is the whole signal — contents are ignored, so `touch` works, which
-# is how a provisioner creates it. The DIRECTORIES are deliberately NOT a
-# trigger and never were: they exist for every sandbox, mounted or not, so
-# their presence cannot be read as anything. Consumers verify the MOUNTS.
-if [ -e "$SANDBOX_DIR/.handoff-enabled" ]; then
-    [ "${SANDY_HANDOFF_DIRS:-1}" = "1" ] || info "Handoff dirs forced on by $SANDBOX_DIR/.handoff-enabled (overrides SANDY_HANDOFF_DIRS=0)"
-    SANDY_HANDOFF_DIRS=1
-fi
-# Resolve the default ONCE, here, so every site downstream reads a settled
-# value and no single `${...:-x}` can quietly disagree about what unset means.
-SANDY_HANDOFF_DIRS="${SANDY_HANDOFF_DIRS:-1}"
-# The directories are created on EVERY launch, regardless of the value; only
-# the MOUNT is gated (see the RUN_FLAGS block far below). Decoupling the two is
-# what makes "directory presence means nothing" true by CONSTRUCTION rather than
-# by convention: when every sandbox has them, presence carries zero information,
-# so nothing — not sandy, not a consumer — can be tricked by a stray mkdir, a
-# restored backup or an rsync -a into believing anything about the sandbox.
-# Unmounted (the opt-out), these are inert: nothing bind-mounts them, ~/.handoff
-# does not exist inside the container, and the agent has no path to them. Cost
-# is four empty directories per sandbox on the host — documented, not silent.
-# --- Relay state, moved out of handoff/ (#353) -------------------------------
-# $SANDBOX_DIR/relay-state -> /opt/sandy/relay-state (rw). Producer-agnostic:
-# .state and supervisor.log are sandy's SUPERVISOR's files, not the relay's, so
-# they do not belong inside a feature's instance tree.
-#
-# ONE-TIME MIGRATION, idempotent, and it must run BEFORE the handoff mkdir
-# below -- otherwise it moves the empty directory that mkdir just created, on
-# every launch, and handoff/relay never persists. An existing sandbox has its
-# history here, and supervisor.log is the only record of a relay's restarts, so
-# moving rather than starting fresh keeps a crash loop diagnosable across the
-# upgrade. `mv` only when the destination does not exist, so a second launch is
-# a no-op and a hand-made relay-state is never clobbered.
+# The one-time migration survives the tree's removal deliberately: a sandbox
+# last launched before 2.2.0 still has its history under handoff/relay, and
+# supervisor.log is the only record of a relay's restarts, so moving it keeps a
+# crash loop diagnosable across the upgrade. It is conditional, so a second
+# launch is a no-op and a hand-made relay-state is never clobbered or nested
+# into. The handoff/ directory it leaves behind is inert and unreferenced --
+# nothing recreates it, so it drains away as sandboxes relaunch.
 if [ ! -d "$SANDBOX_DIR/relay-state" ] && [ -d "$SANDBOX_DIR/handoff/relay" ]; then
     mv "$SANDBOX_DIR/handoff/relay" "$SANDBOX_DIR/relay-state" 2>/dev/null || true
 fi
 mkdir -p "$SANDBOX_DIR/relay-state"
-mkdir -p "$SANDBOX_DIR/handoff/relay"
-if [ "${SANDY_HANDOFF_DIRS:-1}" = "1" ]; then
-    case "$SANDY_WORKSPACE" in
-        /home/sandy/.handoff|/home/sandy/.handoff/*)
-            # Collision is purely about the MOUNT — the directories above are
-            # harmless here — so this still refuses, and refuses only the
-            # thing that was ever the problem. With the default on this fires
-            # for any workspace at ~/.handoff whether or not anyone set the
-            # key, so the wording does not claim they did.
-            warn "The workspace maps to $SANDY_WORKSPACE, which collides with the ~/.handoff mounts. Handoff mounts disabled for this session (set SANDY_HANDOFF_DIRS=0 to opt out explicitly and silence this)."
-            SANDY_HANDOFF_DIRS=0
-            ;;
-    esac
-fi
-# END handoff directories
 
 if [ -n "${SANDY_HANDOFF_RELAY:-}" ] && [ "${SANDY_HANDOFF_DIRS:-1}" != "1" ]; then
     # Same rule as the host-side existence check above (criterion 7): the relay
@@ -13914,43 +13816,6 @@ if _sandy_agent_has opencode; then
         RUN_FLAGS+=(-v "$OPENCODE_CRED_TMPDIR/auth.json:/home/sandy/.local/share/opencode/auth.json:ro")
     fi
 fi
-# Persistent package environment mounts
-RUN_FLAGS+=(-v "$SANDBOX_DIR/pip:/home/sandy/.pip-packages")
-RUN_FLAGS+=(-v "$SANDBOX_DIR/uv:/home/sandy/.local/share/uv")
-RUN_FLAGS+=(-v "$SANDBOX_DIR/npm-global:/home/sandy/.npm-global")
-RUN_FLAGS+=(-v "$SANDBOX_DIR/go:/home/sandy/go")
-RUN_FLAGS+=(-v "$SANDBOX_DIR/cargo:/home/sandy/.cargo")
-# Handoff directories mounts (#132 substrate). ON BY DEFAULT since 1.10.0;
-# gated on the value the BEGIN/END handoff block resolved above — 0 (the
-# opt-out, or the ~/.handoff workspace collision) ⇒ zero RUN_FLAGS diff.
-# outbox rw (agent stages files); inbox :ro and peer :ro (only the host may
-# write either); relay rw (relay state + supervisor.log).
-# The :ro MOUNT FLAG is the boundary, not file modes: the agent runs as the
-# host uid and OWNS these dirs, so against a plain rw mount its chmod would
-# succeed. Under :ro the chmod itself returns EROFS — the mount flag is checked
-# above the permission check, which is what makes host-written content in inbox
-# un-forgeable from inside. (chown to another uid would fail either way: the
-# agent is unprivileged with an empty effective capability set, so that half is
-# not load-bearing here.)
-if [ "${SANDY_HANDOFF_DIRS:-1}" = "1" ]; then
-    # handoff/relay is NO LONGER MOUNTED (#353) -- relay state moved to
-    # /opt/sandy/relay-state. The host directory and the handoff{} reporting
-    # that describes it are removed in #355, with the schema_version move.
-    # The relay slot (#258), :ro. Same reasoning as inbox/peer one line up, and
-    # it is the whole security claim of the feature: the agent runs as the host
-    # uid and OWNS $SANDBOX_DIR/relay-bin/relay, so permission bits would bind
-    # nothing — it could chmod and rewrite its own relay. The mount flag is
-    # checked above the permission check, so the write returns EROFS instead.
-    # The :ro slot mount is GONE with the slot (#354). A feature payload is
-    # already mounted :ro by the manifest, so an `entry` living on it keeps the
-    # same guarantee the slot bought: the agent runs as the host uid and owns
-    # the file, so permission bits bind nothing -- the MOUNT is what makes a
-    # write return EROFS. What is lost is the runtime PROOF of that, which
-    # phase F3 carried; see the note in acceptance-handoff-dirs.sh.
-    if [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
-        RUN_FLAGS+=(-e "SANDY_HANDOFF_RELAY=$SANDY_HANDOFF_RELAY")
-    fi
-fi
 # Relay state (#353). NOT gated on SANDY_HANDOFF_DIRS: it is not part of the
 # handoff tree, and the supervisor fails the session without it -- tying it to
 # a deprecated key that opts out of a different mechanism is how a relay would
@@ -13958,6 +13823,11 @@ fi
 if [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/relay-state:/opt/sandy/relay-state")
     RUN_FLAGS+=(-e "SANDY_RELAY_STATE=/opt/sandy/relay-state")
+    # The relay path itself. This used to ride the handoff-mounts gate and was
+    # removed with it (#355) -- which would have left the container-side
+    # supervisor with no relay to start, silently, on every launch. The test
+    # that pins "exactly one emission" caught it.
+    RUN_FLAGS+=(-e "SANDY_HANDOFF_RELAY=$SANDY_HANDOFF_RELAY")
 fi
 
 # --- Feature mounts, from the manifest (2.0.0) ------------------------------
@@ -14577,11 +14447,11 @@ fi
 # will run, whatever was resolved earlier.
 [ -n "${SANDY_HANDOFF_RELAY:-}" ] || _sandy_relay_source="none"
 _sandy_relay_source_json="\"${_sandy_relay_source:-none}\""
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "handoff_relay": %s,\n  "relay": {\n    "slot": %s,\n    "source": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "cred_mode": "%s"\n}\n' \
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "relay": {\n    "source": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "cred_mode": "%s"\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
-    "$_sandy_perm_mode_json" "$_sandy_csi_json" "$_sandy_agents_json" "$_sandy_relay_json" \
-    "$_sandy_relay_slot_json" "$_sandy_relay_source_json" "$_sandy_relay_path_json" "$_sandy_relay_disabled_by_json" \
+    "$_sandy_perm_mode_json" "$_sandy_csi_json" "$_sandy_agents_json" \
+    "$_sandy_relay_source_json" "$_sandy_relay_path_json" "$_sandy_relay_disabled_by_json" \
     "${_SANDY_FM_AA_JSON:-}" "${CRED_MODE:-none}" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)

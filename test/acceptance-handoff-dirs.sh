@@ -130,174 +130,19 @@ _ps_obj() {   # _ps_obj <print-state-output-with-whitespace-stripped> <sandbox-n
     printf '%s' "$1" | awk -v key="\"name\":\"$2\"" '{ p = index($0, key); if (p == 0) exit 0; rest = substr($0, p); q = index(substr(rest, 2), "{\"name\":\""); if (q > 0) rest = substr(rest, 1, q); print rest }'
 }
 
-echo "== A. default (no config anywhere): the whole tree is mounted =="
-ck "phase A workspace has NO .sandy/config (the premise)" "[ ! -e \"$WS/.sandy/config\" ]"
-ck "isolated host config does not mention SANDY_HANDOFF_DIRS (the premise)" \
-   "! grep -qs SANDY_HANDOFF_DIRS \"$SANDY_HOME_DIR/config\""
-env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS"; RC=$?
-ck "--start exits 0" "[ $RC -eq 0 ]"
-# ABORT HERE if the very first launch failed (#261). Everything after this point
-# inspects a container that does not exist, so it produces ~40 assertion
-# failures about mount flags and --stop exit codes whose real cause is this one
-# line, hundreds of lines above. That is exactly what happened when an expired
-# OAuth token hung the supervisor: the run reported a mount assertion failing
-# for a container that was never created, and the diagnosis cost a full pass.
+# Phases A, A2, B, C and D were REMOVED in 2.2.0 with the mechanisms they
+# tested: the ~/.handoff tree (#352, #353), the SANDY_HANDOFF_DIRS opt-out and
+# the .handoff-enabled operator marker (#355).
 #
-# Worse, a --start that dies holding the workspace lock poisons every LATER
-# phase too ("Another sandy is already running"), so continuing does not even
-# test the later phases -- it just manufactures noise.
-if [ "$RC" -ne 0 ]; then
-    echo ""
-    echo "==================================================="
-    echo "ABORTING: the first --start failed (exit $RC)."
-    echo ""
-    echo "Every later assertion in this harness inspects a container that does"
-    echo "not exist, and a --start that died holding the workspace lock will"
-    echo "fail the remaining phases for an unrelated reason. Fix this first."
-    echo ""
-    echo "Most common causes:"
-    echo "  - the host OAuth token expired  -> run 'claude auth login' on the host"
-    echo "  - a stale workspace lock        -> sandy --doctor --fix"
-    echo "  - Docker not reachable         -> docker ps"
-    echo "==================================================="
-    printf 'RESULT: %d passed, %d failed (aborted early)\n' "$PASS" "$FAIL"
-    exit 1
-fi
-C="$(cid)"
-ck "daemon container is running" "[ -n \"$C\" ]"
-SESS="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C" 2>/dev/null)"
-ck "session label resolved" "[ -n \"$SESS\" ]"
-_m0="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C" 2>/dev/null)"
-echo "  mounts:"; printf '%s\n' "$_m0" | grep -i handoff | sed 's/^/    /'
-# This is the exact mount table a consumer verifies against -- four rows, no
-# more: relay rw, and nothing else under ~/.handoff/.
-ck "default: relay mount is RW=true (the only lane left since 2.2.0, #352)" \
-   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/sandy/.handoff/relay true\$'"
-ck "default: relay mount is RW=true" \
-   "printf '%s\n' \"\$_m0\" | grep -qE '^/home/sandy/.handoff/relay true\$'"
-ck "default: exactly ONE ~/.handoff/* mount (relay; the three lanes were removed in 2.2.0, #352)" \
-   "[ \"\$(printf '%s\n' \"\$_m0\" | grep -c '^/home/sandy/.handoff/')\" = 4 ]"
-# The in-container half of the consumer check.
-ck "default: in-container ~/.handoff/relay exists, and the three removed lanes do NOT (#352)" \
-   "docker exec $C sh -c '[ -d ~/.handoff/relay ] && [ ! -e ~/.handoff/inbox ] && [ ! -e ~/.handoff/outbox ] && [ ! -e ~/.handoff/peer ]'"
-   "! docker inspect -f '{{range .Config.Env}}{{.}}{{\"\n\"}}{{end}}' \"$C\" | grep -q '^SANDY_HANDOFF_RELAY='"
-"$SANDY" --stop --workspace "$WS"; ck "--stop (phase A) exits 0" "[ $? -eq 0 ]"
-# Idempotence: a second launch of the same sandbox must produce the same table
-# (mkdir -p + the same -v lines), not fail on directories that now exist.
-env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS"; RC=$?
-ck "default: a SECOND launch exits 0 (idempotent)" "[ $RC -eq 0 ]"
-C="$(cid)"
-ck "default: second launch has the same single ~/.handoff/* mount" \
-   "[ \"\$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{\"\n\"}}{{end}}' \"$C\" | grep -c '^/home/sandy/.handoff/')\" = 4 ]"
-"$SANDY" --stop --workspace "$WS"; ck "--stop (phase A, second) exits 0" "[ $? -eq 0 ]"
-
-echo "== A2. opt-out (SANDY_HANDOFF_DIRS=0 via workspace .sandy/config): dirs exist, nothing is mounted =="
-# The opt-out from a WORKSPACE source: it tightens, so the passive tier must
-# take it with no prompt (env -u below keeps that claim honest, see phase B).
-mkdir -p "$WS/.sandy"
-echo "SANDY_HANDOFF_DIRS=0" > "$WS/.sandy/config"
-env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS"; RC=$?
-ck "--start exits 0 under the opt-out" "[ $RC -eq 0 ]"
-C="$(cid)"
-ck "daemon container is running" "[ -n \"$C\" ]"
-ck "docker inspect has NO mention of handoff anywhere (mounts, env, labels)" \
-   "! docker inspect \"$C\" | grep -qi handoff"
-# The host directories are created on EVERY launch (only the MOUNT is gated),
-# so their presence proves nothing and is not asserted either way. What must
-# hold under the opt-out is that nothing reaches the CONTAINER -- which the
-# docker-inspect assertion above and the in-container check below cover.
-ck "sandbox handoff/ dirs exist but are INERT (created always; presence means nothing)" \
-   "[ -d \"$SANDY_HOME_DIR/sandboxes/$SESS/handoff/relay\" ]"
-ck "in-container ~/.handoff does NOT exist" \
-   "! docker exec -u \"\$(id -u)\" \"$C\" test -e /home/sandy/.handoff"
-"$SANDY" --stop --workspace "$WS"; ck "--stop (phase A2) exits 0" "[ $? -eq 0 ]"
-
-# Phases B and C were REMOVED in 2.2.0 (#352) along with the lanes they tested.
+# THE ONE THING THAT MUST NOT BE LOST WITH THEM is the EROFS-beats-ownership
+# proof: that a :ro mount really returns EROFS for a file the container uid
+# OWNS, which permission bits could never guarantee and which no script-text
+# check can establish. It lived in phase B (inbox), moved to F3 (the relay
+# slot) when #352 removed the lanes, and #354 then removed the slot.
 #
-# B proved that inbox and peer really do return EROFS on a chmod, not merely
-# that sandy writes ":ro" into the mount line -- the distinction §97(10) cannot
-# make from the script text alone. C proved outbox content survived a
-# stop/start. Both lanes are gone: a feature manifest names its own directories
-# via `mounts`, and the fleet was measured empty before removal.
-#
-# The EROFS proof itself is NOT lost, and must not be. It moved to whatever
-# exercises a manifest mount declared `mode: ro`, which is where a read-only
-# guarantee now lives. If that coverage does not exist, this deletion traded a
-# real runtime assertion for nothing -- which is the one way it could be wrong.
-
-echo "== D. the MARKER overrides an opt-out, with no workspace config anywhere =="
-# Closes acceptance criterion 4 for the MARKER path specifically. Phase B proves
-# EROFS-beats-ownership when the tree is on by SANDY_HANDOFF_DIRS=1; that is
-# NOT the same evidence. The marker resolves into the same variable before the
-# gate, so both paths reach identical mount code — but "identical by
-# construction" is an argument, not a test result, and criterion 4 exists
-# precisely to reject that kind of reasoning.
-#
-# Since 1.10.0 the tree is on by default, so the marker is only observable
-# against an opt-out. The opt-out here is HOST-level (the isolated
-# $SANDY_HOME/config) with no workspace config at all -- the "off everywhere,
-# on for these" fleet shape. The marker lives at the TOP level of the sandbox
-# dir, whose slug is not known until a launch creates it. So: launch once
-# (proving the host opt-out holds with no marker), stop, touch the marker,
-# relaunch. That is exactly the order a provisioner works in.
-
-ck "phase D workspace has NO .sandy/config (the premise)" "[ ! -e \"$WS2/.sandy/config\" ]"
-echo "SANDY_HANDOFF_DIRS=0" >> "$SANDY_HOME_DIR/config"
-ck "host-level opt-out is in place (the premise)" "grep -qx SANDY_HANDOFF_DIRS=0 \"$SANDY_HOME_DIR/config\""
-
-env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS2"; RC=$?
-ck "--start (D, pre-enrolment) exits 0" "[ $RC -eq 0 ]"
-C2="$(cid2)"
-ck "daemon container is running" "[ -n \"$C2\" ]"
-SESS2="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C2" 2>/dev/null)"
-ck "session label resolved" "[ -n \"$SESS2\" ]"
-# Marker absent + host opt-out => the tree must be OFF. Without this the phase
-# could pass on a sandbox that had the tree for some unrelated reason (the
-# default, for one).
-ck "NEGATIVE: no marker + host opt-out => in-container ~/.handoff does NOT exist" \
-   "! docker exec -u \"\$(id -u)\" \"$C2\" test -e /home/sandy/.handoff"
-
-"$SANDY" --stop --workspace "$WS2" >/dev/null 2>&1
-SBX2="$SANDY_HOME_DIR/sandboxes/$SESS2"
-touch "$SBX2/.handoff-enabled"
-ck "marker created at the sandbox top level" "[ -f \"$SBX2/.handoff-enabled\" ]"
-ck "marker is EMPTY (contents are ignored; touch is how a provisioner makes it)" \
-   "[ ! -s \"$SBX2/.handoff-enabled\" ]"
-
-env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS2"; RC=$?
-ck "--start (D, enrolled by marker) exits 0" "[ $RC -eq 0 ]"
-C2="$(cid2)"
-ck "daemon container is running after enrolment" "[ -n \"$C2\" ]"
-ck "still NO workspace .sandy/config — the marker alone overrode the host opt-out" "[ ! -e \"$WS2/.sandy/config\" ]"
-ck "the host opt-out is STILL in place (the marker won over it, it did not remove it)" "grep -qx SANDY_HANDOFF_DIRS=0 \"$SANDY_HOME_DIR/config\""
-
-_m2="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C2" 2>/dev/null)"
-echo "  mounts:"; printf '%s\n' "$_m2" | grep -i handoff | sed 's/^/    /'
-ck "relay mount is RW=true (marker path) — the one lane left since 2.2.0, #352" \
-   "printf '%s\n' \"\$_m2\" | grep -qE '^/home/sandy/.handoff/relay true\$'"
-ck "the three removed lanes are NOT mounted on the marker path either" \
-   "! printf '%s\n' \"\$_m2\" | grep -qE '^/home/sandy/.handoff/(inbox|outbox|peer) '"
-ck "write to relay SUCCEEDS (marker path) — the supervisor writes .state and supervisor.log here" \
-   "docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'echo hi > /home/sandy/.handoff/relay/probe.txt'"
-
-# --- criterion 5: the agent has no path to the marker ---
-# Not "we did not mount it" as a claim, but: no mount SOURCE is the sandbox top
-# level, so nothing inside the container resolves to the marker file.
-ck "NEGATIVE: no bind mount sources the sandbox top level (agent cannot self-enrol)" \
-   "! docker inspect -f '{{range .Mounts}}{{.Source}}{{\"\n\"}}{{end}}' \"$C2\" 2>/dev/null | grep -qx \"$SBX2\""
-ck "NEGATIVE: the marker is not visible anywhere inside the container" \
-   "! docker exec -u \"\$(id -u)\" \"$C2\" sh -c 'test -e /home/sandy/.handoff-enabled -o -e /home/sandy/.claude/.handoff-enabled' 2>/dev/null"
-
-# --- introspection agrees with reality ---
-ck "--print-state reports handoff_enabled=true for the enrolled sandbox" \
-   "\"$SANDY\" --print-state light 2>/dev/null | grep -q '\"handoff_enabled\":true'"
-
-"$SANDY" --stop --workspace "$WS2"; ck "--stop (D, final) exits 0" "[ $? -eq 0 ]"
-# Remove the host-level opt-out so phase E runs against the default. Portable
-# rewrite (no sed -i: BSD sed needs a suffix argument, GNU does not).
-grep -vx 'SANDY_HANDOFF_DIRS=0' "$SANDY_HOME_DIR/config" > "$SANDY_HOME_DIR/config.tmp" || true
-mv "$SANDY_HOME_DIR/config.tmp" "$SANDY_HOME_DIR/config"
-ck "host-level opt-out removed before phase E" "! grep -qs SANDY_HANDOFF_DIRS \"$SANDY_HOME_DIR/config\""
+# It now lives in phase G, against a feature manifest mount declared `mode:
+# ro` -- the only :ro mount sandy still makes. run-tests.sh §97(16) is the
+# tripwire that fails if it ever has no runtime home at all.
 
 echo "== E. handoff relay (SANDY_HANDOFF_RELAY, 1.10.0) =="
 # Fresh workspace: relay fixtures shouldn't share state with A-D.
@@ -531,176 +376,43 @@ rm -f "$SANDY_HOME_DIR/config.bak2"
 # inspect` -- not repeated here.
 
 echo
-echo "== F. the relay SLOT (SANDY_RELAY + relay-bin/, 1.11.0, #258) =="
-# WHY THIS PHASE NEEDS DOCKER, when run-tests.sh §123 already covers the logic:
-# §123 can prove the `:ro` flag is on the right mount. It CANNOT prove the write
-# actually fails, and that is the entire security claim of the slot. The agent
-# runs as the HOST uid and OWNS $SANDBOX_DIR/relay-bin/relay, so permission bits
-# bind nothing -- it could chmod and rewrite its own relay. Only a read-only
-# MOUNT stops it, and only a real container can demonstrate EROFS rather than
-# EACCES. An adapter can write files; it cannot create a mount.
+echo "== G. THE claim: a :ro manifest mount returns EROFS, not EACCES =="
+# Phase F tested the relay-bin slot, removed in 2.2.0 (#354). This is the same
+# claim re-homed onto the mechanism that replaced it: a feature payload the
+# manifest mounts read-only.
 #
-# Runs on a fresh workspace with NO SANDY_HANDOFF_RELAY anywhere, because the
-# deprecated key wins over the slot and would mask everything below.
-WS4="$(mktemp -d)/mbx-slot-$$"
-mkdir -p "$WS4/.sandy" && (cd "$WS4" && git init -q)
-WS4="$(cd "$WS4" && pwd -P)"
-cid4() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.workspace_path=$WS4" 2>/dev/null | head -1; }
-# Drop the privileged relay key for this phase, then restore it afterwards.
-cp "$SANDY_HOME_DIR/config" "$SANDY_HOME_DIR/config.f.bak"
-grep -v '^SANDY_HANDOFF_RELAY=' "$SANDY_HOME_DIR/config" > "$SANDY_HOME_DIR/config.f.tmp" || true
-mv "$SANDY_HOME_DIR/config.f.tmp" "$SANDY_HOME_DIR/config"
+# Run as the uid that OWNS the file on the host -- the case permission bits
+# cannot defend against, and the whole reason the MOUNT is the boundary.
+#
+# PREMISE FIRST, because without it "the write fails" passes for the wrong
+# reason: the first run of the phase this replaces failed with "Directory
+# nonexistent" (the mount was never made) and reported PASS. EROFS is only
+# meaningful once the path exists.
+_G_FEAT="$SANDY_HOME_DIR/features/acc-erofs"
+mkdir -p "$_G_FEAT/payload"
+printf 'payload-seen\n' > "$_G_FEAT/payload/thing"
+cat > "$_G_FEAT/feature.json" <<'G_MANIFEST'
+{ "sandboxes": {"include": ["*"]}, "agents": {"include": ["*"]},
+  "mounts": [ { "name": "payload", "from": "payload", "mode": "ro" } ] }
+G_MANIFEST
 
-echo "-- F1. an EMPTY slot launches normally (this is what lets SANDY_RELAY default to 1) --"
-env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4"; RC=$?
-ck "--start exits 0 with no relay installed" "[ $RC -eq 0 ]"
-C4="$(cid4)"
-ck "daemon container is running" "[ -n \"$C4\" ]"
-SESS4="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C4" 2>/dev/null)"
-# PREMISE, not decoration. The first cut of this phase escaped the Go template
-# ({{index .Config.Labels \"sandy.session\"}}), docker returned nothing, SBX4
-# became ".../sandboxes/" and every write below landed nowhere -- while the
-# NEGATIVE checks ("nothing is mounted", "the write fails") all reported PASS,
-# because an empty inspect satisfies them. A premise that can silently go empty
-# has to be asserted before anything is concluded from it.
-ck "session label resolved (premise: every path below is built from it)" "[ -n \"$SESS4\" ]"
-SBX4="$SANDY_HOME_DIR/sandboxes/$SESS4"
-ck "the slot directory was created host-side (presence carries no information, by construction)" \
-   "[ -d \"$SBX4/relay-bin\" ]"
-_m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C4" 2>/dev/null)"
-ck "docker inspect returned mount rows (premise: the negative below is vacuous against empty output)" \
-   "printf '%s' \"$_m4\" | grep -q '/home/sandy'"
-ck "...and NOTHING is mounted at /opt/sandy/relay when the slot is empty" \
-   "! printf '%s' \"$_m4\" | grep -q '/opt/sandy/relay'"
-"$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1
-
-echo "-- F2. an installed relay runs, and its slot is mounted READ-ONLY --"
-cat > "$SBX4/relay-bin/relay" <<'SLOTFIX'
-#!/bin/sh
-echo "$$ $SANDY_HANDOFF_INBOX $SANDY_HANDOFF_OUTBOX $SANDY_HANDOFF_RELAY_STATE" >> "$SANDY_HANDOFF_RELAY_STATE/slot-seen"
-sleep 3600
-SLOTFIX
-chmod +x "$SBX4/relay-bin/relay"
-env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4"; RC=$?
-ck "--start exits 0 with a relay installed in the slot" "[ $RC -eq 0 ]"
-C4="$(cid4)"
-_m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C4" 2>/dev/null)"
-ck "the slot is mounted at /opt/sandy/relay" \
-   "printf '%s' \"$_m4\" | grep -q '/opt/sandy/relay'"
-ck "...and docker reports it READ-ONLY (RW=false)" \
-   "printf '%s' \"$_m4\" | grep -q '^/opt/sandy/relay false'"
-ck "the relay from the slot actually ran (it wrote the env contract)" \
-   "docker exec \"$C4\" test -s /home/sandy/.handoff/relay/slot-seen"
-ck "...as a container-level process, not inside any tmux pane" \
-   "docker exec \"$C4\" pgrep -f /opt/sandy/relay/relay >/dev/null"
-
-echo "-- F3. THE claim: the agent cannot replace its own relay (EROFS, not EACCES) --"
-# Run as the workspace uid, which is the uid that OWNS the file on the host --
-# the case permission bits cannot defend against.
-# PREMISE: without this, "the write fails" passes for the wrong reason -- the
-# first run of this phase failed with "Directory nonexistent" (the slot was
-# never mounted) and the check reported PASS. EROFS is only meaningful once the
-# path exists.
-ck "the slot entry EXISTS in the container (premise: a missing path fails a write for the wrong reason)" \
-   "docker exec \"$C4\" test -f /opt/sandy/relay/relay"
-_f3_uid="$(docker exec "$C4" id -u 2>/dev/null || echo 0)"
-_f3_err="$(docker exec "$C4" sh -c 'echo pwned > /opt/sandy/relay/relay' 2>&1 || true)"
-ck "a write to the installed relay FAILS from inside the container" \
-   "! docker exec \"$C4\" sh -c 'echo pwned > /opt/sandy/relay/relay' 2>/dev/null"
-ck "...and fails with a READ-ONLY FILE SYSTEM error, not a permission error -- proving the MOUNT is the boundary, not the bits (got: $_f3_err)" \
-   "printf '%s' \"$_f3_err\" | grep -qi 'read-only'"
-ck "...the file is still owned by the container user, so bits alone would NOT have stopped it (this is what makes the check above meaningful rather than incidental)" \
-   "[ \"\$(docker exec \"$C4\" stat -c %u /opt/sandy/relay/relay 2>/dev/null)\" = \"$_f3_uid\" ]"
-ck "creating a NEW file in the slot also fails (the whole directory is :ro, not just the entry)" \
-   "! docker exec \"$C4\" sh -c 'touch /opt/sandy/relay/evil' 2>/dev/null"
-ck "the relay is unchanged on the host after the attempt" \
-   "grep -q 'slot-seen' \"$SBX4/relay-bin/relay\""
-
-echo "-- F4. --print-state reports the live state, and the marker reports only intent --"
-# NOTE the `\$` in every pattern below: the variable must expand when ck EVALs
-# the string, not when the string is built. These hold JSON, so interpolating
-# them at write time embeds raw `"` characters into the command and destroys its
-# quoting -- which is what made the first run of this phase report four
-# failures against a feature that was working. Phase E6 gets this right; this
-# did not.
-_f4_ps="$("$SANDY" --print-state 2>/dev/null | tr -d ' \n')"
-_f4_marker="$(docker exec "$C4" cat /etc/sandy-session.json 2>/dev/null | tr -d ' \n')"
-# PREMISES. Without these the NEGATIVE below ("does not claim started") passes
-# against an empty read, which is exactly how it passed while telling us
-# nothing -- twice in this phase now.
-ck "the marker was read and is JSON (premise: the negative below is vacuous against an empty read)" \
-   "printf '%s' \"\$_f4_marker\" | grep -q '\"schema\":1'"
-ck "--print-state produced output naming this sandbox (premise)" \
-   "printf '%s' \"\$_f4_ps\" | grep -q '\"name\":\"$SESS4\"'"
-_f4_obj="$(_ps_obj "$_f4_ps" "$SESS4")"
-ck "the sandbox object was sliced out of --print-state (premise: the assertion below is vacuous against an empty slice)" \
-   "printf '%s' \"\$_f4_obj\" | grep -q '\"name\":\"$SESS4\"'"
-ck "--print-state reports relay.state=started for this sandbox" \
-   "printf '%s' \"\$_f4_obj\" | grep -q '\"relay\":{\"state\":\"started\"'"
-ck "the session marker reports relay.slot=present (launch intent)" \
-   "printf '%s' \"\$_f4_marker\" | grep -q '\"relay\":{\"slot\":\"present\"'"
-ck "...and the marker does NOT claim the relay started -- it is written before docker run and cannot know" \
-   "! printf '%s' \"\$_f4_marker\" | grep -q 'started'"
-ck "crossSessionInbound still defaults to accept on the strength of a slot relay" \
-   "printf '%s' \"\$_f4_marker\" | grep -q '\"cross_session_inbound\":\"accept\"'"
-
-echo "-- F5. SANDY_RELAY=0 suppresses it, and names who --"
-"$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1
-# mkdir first: sandy reaps empty protected stub dirs at launch ("Cleaned up 1
-# empty stub dir(s) ... .sandy"), so the directory this phase created at the top
-# is gone by now and the redirect would fail.
-mkdir -p "$WS4/.sandy"
-echo "SANDY_RELAY=0" > "$WS4/.sandy/config"
-env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4"; RC=$?
-ck "--start exits 0 with the capability off (SANDY_RELAY=0 is passive-safe: it only tightens)" "[ $RC -eq 0 ]"
-C4="$(cid4)"
-_m4="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C4" 2>/dev/null)"
-ck "docker inspect returned mount rows (premise for the negative below)" \
-   "printf '%s' \"$_m4\" | grep -q '/home/sandy'"
-ck "nothing is mounted at /opt/sandy/relay" \
-   "! printf '%s' \"$_m4\" | grep -q '/opt/sandy/relay'"
-ck "no relay process is running" \
-   "! docker exec \"$C4\" pgrep -f /opt/sandy/relay/relay >/dev/null 2>&1"
-_f5_marker="$(docker exec "$C4" cat /etc/sandy-session.json 2>/dev/null | tr -d ' \n')"
-ck "the marker was read and is JSON (premise)" \
-   "printf '%s' \"\$_f5_marker\" | grep -q '\"schema\":1'"
-ck "the marker records slot=disabled and NAMES the workspace as the source, so a cloned repo cannot silently un-enrol a fleet sandbox" \
-   "printf '%s' \"\$_f5_marker\" | grep -q '\"slot\":\"disabled\",\"path\":null,\"disabled_by\":\"workspace\"'"
-ck "...and crossSessionInbound falls back to refuse, leaving no open receive surface with nothing delivering" \
-   "printf '%s' \"\$_f5_marker\" | grep -q '\"cross_session_inbound\":\"refuse\"'"
-
-echo "-- F6. --reset-sandbox preserves the installed relay --"
-"$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1
-rm -f "$WS4/.sandy/config"
-"$SANDY" --reset-sandbox --workspace "$WS4" --yes >/dev/null 2>&1
-ck "relay-bin/relay survives a --reset-sandbox (operator state; destroying it would silently un-enrol the sandbox)" \
-   "[ -x \"$SBX4/relay-bin/relay\" ]"
-ck "...while the rest of the sandbox really was reset (handoff/ is gone)" \
-   "[ ! -d \"$SBX4/handoff/relay\" ] || [ -z \"\$(ls -A \"$SBX4/handoff/relay\" 2>/dev/null)\" ]"
-
-echo "-- F7. an installed-but-not-executable entry FAILS the launch (never silently 'absent') --"
-chmod -x "$SBX4/relay-bin/relay"
-_f7_out="$(mktemp)"; _f7_rc=0
-env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4" > "$_f7_out" 2>&1 || _f7_rc=$?
-ck "--start refuses (nonzero) when the slot entry is not executable" "[ $_f7_rc -ne 0 ]"
-ck "...and says so, naming the remedy" \
-   "grep -q 'is not an executable file' \"$_f7_out\""
-ck "...and no daemon container was left behind" "[ -z \"$(cid4)\" ]"
-rm -f "$_f7_out"
-
-echo "-- F8. a relay that dies at startup FAILS the launch (the 35-hour crash loop) --"
-printf '#!/bin/sh\nexit 3\n' > "$SBX4/relay-bin/relay"; chmod +x "$SBX4/relay-bin/relay"
-_f8_out="$(mktemp)"; _f8_rc=0
-env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS4" > "$_f8_out" 2>&1 || _f8_rc=$?
-ck "--start refuses (nonzero) for a relay that execs and immediately exits non-zero" "[ $_f8_rc -ne 0 ]"
-ck "...the supervisor log records the failing exit code host-side, where an operator can actually find it" \
-   "grep -q 'rc=3' \"$SBX4/handoff/relay/supervisor.log\""
-rm -f "$_f8_out"
-"$SANDY" --stop --workspace "$WS4" >/dev/null 2>&1 || true
-mv "$SANDY_HOME_DIR/config.f.bak" "$SANDY_HOME_DIR/config"
-
-echo
-echo "==================================================="
-printf 'RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
-echo "==================================================="
-[ "$FAIL" -eq 0 ]
+"$SANDY" --start --workspace "$WS" >/dev/null 2>&1; RC=$?
+ck "--start exits 0 with the feature enrolled" "[ $RC -eq 0 ]"
+CG="$(docker ps -q --filter "label=sandy.workspace_path=$WS" | head -1)"
+ck "container is running" "[ -n \"$CG\" ]"
+ck "the payload EXISTS in the container (premise: a missing path fails a write for the wrong reason)" \
+   "docker exec \"$CG\" test -f /opt/sandy/features/acc-erofs/thing"
+_g_uid="$(docker exec "$CG" id -u 2>/dev/null || echo 0)"
+_g_err="$(docker exec "$CG" sh -c 'echo pwned > /opt/sandy/features/acc-erofs/thing' 2>&1 || true)"
+ck "a write to the :ro payload FAILS from inside the container" \
+   "! docker exec \"$CG\" sh -c 'echo pwned > /opt/sandy/features/acc-erofs/thing' 2>/dev/null"
+ck "...and fails with a READ-ONLY FILE SYSTEM error, not a permission error -- proving the MOUNT is the boundary, not the bits (got: $_g_err)" \
+   "printf '%s' \"$_g_err\" | grep -qi 'read-only'"
+ck "...the file is still owned by the container user, so bits alone would NOT have stopped it (this is what makes the check above meaningful)" \
+   "[ \"\$(docker exec \"$CG\" stat -c %u /opt/sandy/features/acc-erofs/thing 2>/dev/null)\" = \"$_g_uid\" ]"
+ck "creating a NEW file in the payload also fails (the whole directory is :ro, not just the file)" \
+   "! docker exec \"$CG\" sh -c 'touch /opt/sandy/features/acc-erofs/evil' 2>/dev/null"
+ck "the payload is unchanged on the host after the attempt" \
+   "grep -q 'payload-seen' \"$_G_FEAT/payload/thing\""
+"$SANDY" --stop --workspace "$WS" >/dev/null 2>&1
+rm -rf "$_G_FEAT"

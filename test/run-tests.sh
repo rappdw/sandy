@@ -6996,144 +6996,35 @@ check "marker JSON valid + carries the pinned nonce" \
 
 # ============================================================
 echo ""
-echo "§86: Handoff directories (SANDY_HANDOFF_DIRS, #132 substrate: dirs + mounts, ON BY DEFAULT since 1.10.0)"
+echo "§86: the handoff tree is REMOVED (2.2.0 — #352, #353, #355)"
 # ============================================================
-# Directory/mount substrate ONLY — no helper, no skills, no turn initiation,
-# no manifest, no archive/ (mode unsettled in #132). outbox rw, inbox :ro,
-# peer :ro, relay rw. Default 1 as of 1.10.0: unset resolves to 1 inside the
-# BEGIN/END handoff block, and only the explicit opt-out SANDY_HANDOFF_DIRS=0
-# (or the ~/.handoff workspace collision) is a zero RUN_FLAGS diff. The dirs
-# themselves are created either way.
+# This section used to exercise the tree: four mounts, their modes, the
+# SANDY_HANDOFF_DIRS gate, the collision refusal, the operator marker. All of
+# it is gone. #352 removed the inbox, outbox and peer lanes, #353 moved relay
+# state to $SANDBOX_DIR/relay-state, and #355 removed what was left.
+#
+# It is REPLACED by removal guards rather than deleted. A removal with no guard
+# is one a well-meaning revert can undo silently, and this one spans a config
+# key, a mount block, a marker file, two emitted fields and a schema bump --
+# any of which could come back alone and look reasonable in isolation.
+#
+# What the old section proved and where it went: the EROFS-beats-ownership
+# claim (that :ro really returns EROFS for a file the container uid owns) was
+# phase B of acceptance-handoff-dirs.sh; §97(16) tracks where it lives now.
 _S86="$SANDY_SCRIPT"
-check "SANDY_HANDOFF_DIRS is a passive-safe key (schema)" \
-    bash -c 'awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)/" "$1" | grep -qx "    SANDY_HANDOFF_DIRS"' -- "$_S86"
-# Negative controls: not privileged, not env-only, not in the value-aware
-# weakening-value gate.
-check "SANDY_HANDOFF_DIRS is NOT in SANDY_PRIVILEGED_KEYS" \
-    bash -c '! awk "/^SANDY_PRIVILEGED_KEYS=\(/,/^\)/" "$1" | grep -qx "    SANDY_HANDOFF_DIRS"' -- "$_S86"
-check "SANDY_HANDOFF_DIRS is NOT in SANDY_ENV_ONLY_KEYS" \
-    bash -c '! awk "/^SANDY_ENV_ONLY_KEYS=\(/,/^\)/" "$1" | grep -qx "    SANDY_HANDOFF_DIRS"' -- "$_S86"
-check "SANDY_HANDOFF_DIRS is NOT referenced by _sandy_passive_value_privileged" \
-    bash -c '! awk "/^_sandy_passive_value_privileged\(\)/,/^}/" "$1" | grep -qE "SANDY_HANDOFF_DIRS([^_A-Za-z0-9]|$)"' -- "$_S86"
-check "SANDY_HANDOFF_DIRS has a _sandy_key_metadata row (bool, default 1 since 1.10.0)" \
-    bash -c 'grep -q "^SANDY_HANDOFF_DIRS|bool|1|" "$1"' -- "$_S86"
-check "NEGATIVE: the old default-0 row is gone (no second row for the key)" \
-    bash -c '[ "$(grep -c "^SANDY_HANDOFF_DIRS|" "$1")" -eq 1 ]' -- "$_S86"
-# --print-schema exposes it as a passive bool key
-check "--print-schema lists SANDY_HANDOFF_DIRS as a passive bool key" \
-    bash -c '"$1" --print-schema 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); e=[k for k in d[\"config\"][\"passive_keys\"] if k[\"name\"]==\"SANDY_HANDOFF_DIRS\"]; assert e and e[0][\"type\"]==\"bool\", e"' -- "$_S86"
-check "--print-schema advertises default 1 for SANDY_HANDOFF_DIRS (consumers read the default from here, not from the docs)" \
-    bash -c '"$1" --print-schema 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); e=[k for k in d[\"config\"][\"passive_keys\"] if k[\"name\"]==\"SANDY_HANDOFF_DIRS\"]; assert e and str(e[0][\"default\"])==\"1\", e"' -- "$_S86"
-# Mount emission. The inbox, outbox and peer lanes were REMOVED in 2.2.0
-# (#352) -- measured empty across the whole fleet first, and their one consumer
-# had migrated to manifest-declared mounts. Only relay/ survives, and only until
-# #353 moves relay state out from under it.
-#
-# The old positive assertions are INVERTED rather than deleted: a removal with
-# no guard is a removal that can be undone by accident, and these three mounts
-# are the ones a well-meaning revert would restore first.
-check "§86 inbox is NOT mounted (removed in 2.2.0, #352)" \
-    bash -c '! grep -qF "handoff/inbox:/home/sandy/.handoff/inbox" "$1"' -- "$_S86"
-check "§86 outbox is NOT mounted (removed in 2.2.0, #352)" \
-    bash -c '! grep -qF "handoff/outbox:/home/sandy/.handoff/outbox" "$1"' -- "$_S86"
-check "§86 peer is NOT mounted (removed in 2.2.0, #352)" \
-    bash -c '! grep -qF "handoff/peer:/home/sandy/.handoff/peer" "$1"' -- "$_S86"
-check "§86 NO handoff lane is mounted at all any more — relay state moved to /opt/sandy/relay-state in #353, so the tree is inert host-side state until #355 deletes it" \
-    bash -c '! grep -qF ":/home/sandy/.handoff/" "$1"' -- "$_S86"
-check "§86 ...and relay state IS mounted rw at its new producer-agnostic path, which is NOT under the agent home" \
-    bash -c 'grep -qF "relay-state:/opt/sandy/relay-state" "$1" && ! grep -qF "relay-state:/opt/sandy/relay-state:ro" "$1"' -- "$_S86"
-check "§86 the three lanes are gone from the container ENV contract too — a variable naming a directory that is not mounted is worse than neither" \
-    bash -c '! grep -q "SANDY_HANDOFF_INBOX\|SANDY_HANDOFF_OUTBOX\|SANDY_HANDOFF_PEER" "$1"' -- "$_S86"
-# Gating: the mount block lives inside the SANDY_HANDOFF_DIRS=1 guard, whose
-# unset-fallback is 1 (default on), and there is no stray emission outside it.
-check "mount emission is gated on SANDY_HANDOFF_DIRS = 1, with unset falling back to 1 (default on)" \
-    bash -c 'awk "/Handoff directories mounts \(#132 substrate\)/,/^fi\$/" "$1" | grep -q "SANDY_HANDOFF_DIRS:-1.*= \"1\""' -- "$_S86"
-check "NEGATIVE: no site in the script still falls back to 0 for SANDY_HANDOFF_DIRS (a stray :-0 would silently turn the default back off at that one site)" \
-    bash -c '! grep -q "SANDY_HANDOFF_DIRS:-0" "$1"' -- "$_S86"
-check "ZERO RUN_FLAGS handoff mount lines (#353 moved the last one out; the -e SANDY_HANDOFF_RELAY line has no lowercase handoff substring so it is correctly not counted)" \
-    bash -c '[ "$(grep -c "RUN_FLAGS.*handoff/" "$1")" -eq 0 ]' -- "$_S86"
-# mkdir is UNCONDITIONAL (only the mount is gated) but must still live in the
-# BEGIN/END handoff block, not drift into the persistent-package block above it.
-#
-# THIS LINE IS THE ONE CONSUMERS OBSERVE. It runs above the SANDY_HANDOFF_DIRS
-# gate, so directory presence carries no information by construction -- which
-# means a host-side check that stats <SANDBOX_DIR>/handoff has been passing
-# unconditionally, including on sandboxes where nothing is mounted. One
-# downstream teardown assertion was found in exactly that state. So a lane
-# leaving this line is externally visible where a lane leaving the mount gate is
-# not, and that is why the assertion is on the mkdir.
-check "mkdir -p targets are inside the BEGIN/END handoff substrate block, and create ONLY relay/" \
-    bash -c '
-      blk="$(awk "/^# BEGIN handoff directories/,/^# END handoff directories\$/" "$1")"
-      printf "%s" "$blk" | grep -q "mkdir -p \"\$SANDBOX_DIR/handoff/relay\"$" &&
-      ! printf "%s" "$blk" | grep -q "handoff/outbox\|handoff/inbox\|handoff/peer"' -- "$_S86"
-check "unconditional persistent-package mkdir block does NOT mention handoff" \
-    bash -c 'awk "/Ensure persistent package directories exist/,/^# BEGIN handoff directories/" "$1" | grep -v "^# BEGIN handoff directories" | grep -qi handoff && exit 1 || exit 0' -- "$_S86"
-
-# Behavioral collision guard (pure bash, extract-and-exercise). Stubs warn()
-# so we can observe it fired, and uses a scratch SANDBOX_DIR so dir-creation
-# assertions are real filesystem checks, not string matches.
-_hb_blk="$(sed -n '/^# BEGIN handoff directories/,/^# END handoff directories$/p' "$_S86")"
-_hb_run() {
-    # args: SANDY_WORKSPACE, SANDY_HANDOFF_DIRS (may be unset -> pass "")
-    local ws="$1" key="$2" dir out
-    dir="$(mktemp -d)"
-    out="$(
-      warn() { echo "WARN:$*"; }
-      SANDBOX_DIR="$dir"
-      # NOTE: no apostrophes in comments inside this $( ) — bash 3.2 (macOS)
-      # scans command substitutions WITHOUT skipping comments, so a lone
-      # apostrophe opens a quote it never closes and the whole file dies with
-      # "unexpected EOF while looking for matching quote". bash 4+ fixed it, so
-      # `bash -n` on Linux/CI passes and only the maintainer macOS run breaks.
-      # shellcheck disable=SC2034  # consumed by the evaluated $_hb_blk below,
-      # which shellcheck cannot see into because it is a dynamic string.
-      SANDY_WORKSPACE="$ws"
-      if [ -n "$key" ]; then SANDY_HANDOFF_DIRS="$key"; else unset SANDY_HANDOFF_DIRS; fi
-      eval "$_hb_blk"
-      echo "VAR:${SANDY_HANDOFF_DIRS:-unset}"
-      [ -d "$dir/handoff/outbox" ] && echo "OUTBOX:yes" || echo "OUTBOX:no"
-      [ -d "$dir/handoff/inbox" ] && echo "INBOX:yes" || echo "INBOX:no"
-      [ -d "$dir/handoff/peer" ] && echo "PEER:yes" || echo "PEER:no"
-      [ -d "$dir/handoff/relay" ] && echo "RELAY:yes" || echo "RELAY:no"
-      # (#352) the first three must now report :no -- the mkdir creates relay
-      # only, so a lane reappearing here is a real regression, not cosmetic.
-    )"
-    rm -rf "$dir"
-    printf '%s' "$out"
-}
-_hb_a="$(_hb_run "/home/sandy/.handoff" "1")"
-# Creation is now unconditional; only the MOUNT is gated. So the collision case
-# still forces the var to 0 and still warns — the dirs themselves are inert and
-# were never what collided.
-check "collision guard (a): workspace == ~/.handoff -> var forced 0, warning (dirs inert)" \
-    bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"WARN:"* ]]' -- "$_hb_a"
-_hb_b="$(_hb_run "/home/sandy/.handoff/sub" "1")"
-check "collision guard (b): workspace under ~/.handoff/ -> var forced 0, warning (dirs inert)" \
-    bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"WARN:"* ]]' -- "$_hb_b"
-_hb_c="$(_hb_run "/home/sandy/dev/proj" "1")"
-check "collision guard (c): unrelated workspace -> relay/ created, the three removed lanes are NOT, no warning" \
-    bash -c '[[ "$1" == *"VAR:1"* && "$1" == *"RELAY:yes"* && "$1" == *"OUTBOX:no"* && "$1" == *"INBOX:no"* && "$1" == *"PEER:no"* && "$1" != *"WARN:"* ]]' -- "$_hb_c"
-_hb_d="$(_hb_run "/home/sandy/dev/proj" "")"
-# Key unset: DEFAULT ON (1.10.0). The block resolves the variable to 1 itself,
-# the one surviving dir is created, and nothing warns.
-check "collision guard (d): key unset -> resolved to 1 (default on), relay/ created, no warning" \
-    bash -c '[[ "$1" == *"VAR:1"* && "$1" == *"RELAY:yes"* && "$1" == *"OUTBOX:no"* && "$1" == *"INBOX:no"* && "$1" == *"PEER:no"* && "$1" != *"WARN:"* ]]' -- "$_hb_d"
-_hb_e="$(_hb_run "/home/sandy/dev/proj" "0")"
-# The opt-out: the dirs ARE still created (unconditional) but the variable
-# stays 0 so nothing downstream mounts them, and nothing warns — opting out
-# is a quiet, supported choice, not an error condition.
-check "collision guard (e): SANDY_HANDOFF_DIRS=0 (the opt-out) -> stays 0, relay/ created but inert, no warning" \
-    bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"RELAY:yes"* && "$1" != *"WARN:"* ]]' -- "$_hb_e"
-_hb_f="$(_hb_run "/home/sandy/.handoff" "")"
-# With the default on, the collision refusal must fire for a colliding
-# workspace even when nobody set the key — otherwise the default would mount
-# ~/.handoff/* inside a workspace that IS ~/.handoff.
-check "collision guard (f): key unset + workspace == ~/.handoff -> var forced 0, warning (the default does not bypass the guard)" \
-    bash -c '[[ "$1" == *"VAR:0"* && "$1" == *"WARN:"* ]]' -- "$_hb_f"
-_hb_g="$(_hb_run "/home/sandy/.handoff" "0")"
-check "collision guard (g): opt-out + colliding workspace -> no warning (nothing would have been mounted anyway)" \
-    bash -c '[[ "$1" == *"VAR:0"* && "$1" != *"WARN:"* ]]' -- "$_hb_g"
+check "§86(1) no ~/.handoff mount is emitted anywhere" \
+    bash -c '! grep -q ":/home/sandy/.handoff/" "$1"' -- "$_S86"
+check "§86(2) SANDY_HANDOFF_DIRS is no longer a config key — no metadata row, and not in any tier list" \
+    bash -c '! grep -q "^SANDY_HANDOFF_DIRS|" "$1" && ! grep -qx "    SANDY_HANDOFF_DIRS" "$1"' -- "$_S86"
+check "§86(3) ...but a config that still SETS it is a hard error naming the replacement, never a silent ignore — an unknown key is dropped quietly, which is the failure mode this project keeps removing" \
+    bash -c 'grep -q "SANDY_HANDOFF_DIRS was removed in 2.2.0" "$1"' -- "$_S86"
+check "§86(4) the retired container env vars are gone (_INBOX, _OUTBOX, _PEER, _RELAY_STATE) — a variable naming a path that is not mounted is worse than no variable" \
+    bash -c '! grep -qE "^ *export .*SANDY_HANDOFF_(INBOX|OUTBOX|PEER|RELAY_STATE)" "$1"' -- "$_S86"
+check "§86(5) the .handoff-enabled marker is no longer read anywhere — it forced a tree that no longer exists" \
+    bash -c '! grep -q "\-e \"\$sb/.handoff-enabled\"\|\-e \"\$_rms_dir/.handoff-enabled\"" "$1"' -- "$_S86"
+check "§86(6) relay state IS mounted rw at its own path, so the removal did not take the surviving mechanism with it" \
+    bash -c 'grep -q "relay-state:/opt/sandy/relay-state\")" "$1"' -- "$_S86"
+unset _S86
 
 # ============================================================
 echo ""
@@ -8372,144 +8263,25 @@ check "§96 behavioral: jq preserves a user-set false and fills an absent key" \
 
 # ============================================================
 echo ""
-echo "§97: handoff marker (operator-side, non-cloneable) — the per-sandbox override of an opt-out"
+echo "§97: the handoff marker is REMOVED, and where its one runtime proof went"
 # ============================================================
-# The tree is ON BY DEFAULT since 1.10.0; SANDY_HANDOFF_DIRS=0 is the opt-out.
-# A workspace .sandy/config TRAVELS WITH THE REPOSITORY: clone a repo that opts
-# out and every sandbox of it is out, on machines nobody consulted.
-# $SANDBOX_DIR/.handoff-enabled is the operator-side override — per-machine,
-# per-sandbox, in state a repo cannot carry, privileged by location (it lives
-# under $SANDY_HOME) — so it WINS over a config opt-out, the same "sandbox file
-# wins" rule agent-args.<agent> follows. It is a no-op when nothing opts out.
+# $SANDBOX_DIR/.handoff-enabled was the operator-side override that forced the
+# handoff tree on for one sandbox over a config opt-out. Both the tree and the
+# key are gone (#355), so the marker has nothing left to force.
 #
-# Three things here are load-bearing and each is pinned separately:
-#   - TOP LEVEL only. $SANDBOX_DIR/claude is mounted at ~/.claude with writable
-#     overlays, so a marker in that tree would be one the AGENT could create for
-#     itself, converting an operator decision into agent self-service.
-#   - DIRECTORIES are not a trigger. They exist for every sandbox now, so a
-#     stray mkdir / restored backup / rsync -a must not defeat an opt-out.
-#   - The :ro inbox/peer flags are untouched. This must not become a way to get
-#     the tree without the flag that makes a delivered notice unforgeable.
-_S97="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-_s97_blk="$(sed -n '/^# Operator-side enable/,/^# END handoff directories/p' "$_S97")"
-
-_S97_RUN="$(mktemp)"
-cat > "$_S97_RUN" <<'S97RUN'
-warn(){ echo "WARN: $*"; }
-info(){ :; }
-SANDY_VERBOSE=0
-eval "$1"
-# The block itself resolves unset to 1; if that ever regresses this prints
-# "unresolved" and every truth-table row below fails loudly instead of the
-# harness quietly supplying a default of its own.
-echo "${SANDY_HANDOFF_DIRS:-unresolved}"
-S97RUN
-
-# --- truth table: default on; 0 opts out; the marker overrides an opt-out ----
-check "§97(1) marker alone (no config) leaves the tree on" \
-    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
-check "§97(2) SANDY_HANDOFF_DIRS=1 alone is on (explicit form of the default, unchanged path)" \
-    bash -c 'd="$(mktemp -d)"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=1 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
-check "§97(3) both present is not an error" \
-    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=1 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
-check "§97(4) neither marker nor key present -> ON (the 1.10.0 default; the block resolves unset to 1 itself)" \
-    bash -c 'd="$(mktemp -d)"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
-check "§97(4b) the opt-out: SANDY_HANDOFF_DIRS=0 with no marker -> 0" \
-    bash -c 'd="$(mktemp -d)"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
-check "§97(4c) the marker OVERRIDES an opt-out: SANDY_HANDOFF_DIRS=0 + marker -> 1" \
-    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "1" ]' -- "$_s97_blk" "$_S97_RUN"
-check "§97(4d) the override is SAID, not silent: marker over an opt-out logs an info line naming both" \
-    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=0 bash -c "info(){ echo \"INFO: \$*\"; }; warn(){ :; }; eval \"\$1\"" _ "$1")"; rm -rf "$d"
-        case "$out" in *"INFO: Handoff dirs forced on by"*".handoff-enabled (overrides SANDY_HANDOFF_DIRS=0)"*) exit 0 ;; *) exit 1 ;; esac' -- "$_s97_blk"
-check "§97(4e) NEGATIVE: with nothing to override, the marker logs nothing (a no-op stays quiet)" \
-    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x bash -c "info(){ echo \"INFO: \$*\"; }; warn(){ :; }; eval \"\$1\"" _ "$1")"; rm -rf "$d"
-        case "$out" in *"forced on"*) exit 1 ;; *) exit 0 ;; esac' -- "$_s97_blk"
-
-# --- the two rejected shortcuts, now measured against an OPT-OUT: with the
-# default on, "enables nothing" is only observable when something has turned
-# the tree off, so each case carries SANDY_HANDOFF_DIRS=0.
-check "§97(5) NEGATIVE: the handoff DIRECTORIES alone do not defeat an opt-out (presence is not a signal)" \
-    bash -c 'd="$(mktemp -d)"; mkdir -p "$d/handoff/relay"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
-check "§97(6) NEGATIVE: a marker under claude/ does NOT override an opt-out (agent-reachable tree)" \
-    bash -c 'd="$(mktemp -d)"; mkdir -p "$d/claude"; touch "$d/claude/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/dev/x SANDY_HANDOFF_DIRS=0 bash "$2" "$1")"; rm -rf "$d"; [ "$out" = "0" ]' -- "$_s97_blk" "$_S97_RUN"
-
-# --- the refusal still applies to the marker path --------------------------
-check "§97(7) the ~/.handoff workspace-collision refusal still fires under the marker" \
-    bash -c 'd="$(mktemp -d)"; touch "$d/.handoff-enabled"
-        out="$(SANDBOX_DIR="$d" SANDY_WORKSPACE=/home/sandy/.handoff bash "$2" "$1")"; rm -rf "$d"
-        case "$out" in *WARN*) : ;; *) exit 1 ;; esac
-        case "$out" in *0) exit 0 ;; *) exit 1 ;; esac' -- "$_s97_blk" "$_S97_RUN"
-
-# --- the agent must have no path to the marker -----------------------------
-# The marker sits at the TOP level of $SANDBOX_DIR, and no bind mount covers
-# that level (only subdirs plus the :ro session-marker FILE). If a future change
-# adds a bare -v of $SANDBOX_DIR, this fails rather than silently handing the
-# agent a way to enroll itself.
-# Matches EVERY spelling of the variable, not just `$SANDBOX_DIR:`. The
-# original form was evadable: `${SANDBOX_DIR}:` and `$SANDBOX_DIR/:` both name
-# the same directory and both slipped past it (verified by injection). This
-# guard is what keeps .handoff-enabled -- and now agent-args.<agent> -- out of
-# the agent's reach, so a spelling-sensitive match is not good enough.
-check "§97(8) NEGATIVE: no bind mount covers the sandbox top level, in any spelling of \$SANDBOX_DIR" \
-    bash -c '! grep -E "RUN_FLAGS\+=\(-v \"\\\$\{?SANDBOX_DIR\}?/?:" "$1" >/dev/null' -- "$_S97"
-check "§97(9) NEGATIVE: no mount references the marker path" \
-    bash -c '! grep -q "handoff-enabled" <(grep "RUN_FLAGS+=(-v" "$1") 2>/dev/null || ! grep "RUN_FLAGS+=(-v" "$1" | grep -q "handoff-enabled"' -- "$_S97"
-
-# --- the mount flags are untouched by this feature -------------------------
-check "§97(10) no handoff lane is mounted at all (#352 removed three, #353 moved the fourth out) — the marker now governs a tree with nothing left in it, which is why #355 deletes both" \
-    bash -c '! grep -q ":/home/sandy/.handoff/" "$1"' -- "$_S97"
-
-# --- reset preserves enrollment, destroys staged content -------------------
-check "§97(11) --reset-sandbox preserves .handoff-enabled (operator state)" \
-    bash -c '_fn="$(grep -m1 "_rs_keep() { case" "$1" | sed "s/^ *//")"
-        r="$(bash -c "_rs_keep_approvals=false; $_fn; _rs_keep .handoff-enabled && echo keep || echo gone")"
-        [ "$r" = "keep" ]' -- "$_S97"
-check "§97(12) --reset-sandbox still destroys handoff/ itself (staged content is session state)" \
-    bash -c '_fn="$(grep -m1 "_rs_keep() { case" "$1" | sed "s/^ *//")"
-        r="$(bash -c "_rs_keep_approvals=false; $_fn; _rs_keep handoff && echo keep || echo gone")"
-        [ "$r" = "gone" ]' -- "$_S97"
-
-# --- introspection ---------------------------------------------------------
-check "§97(13) --print-state reports handoff_enabled per sandbox" \
-    bash -c 'grep -q "_json_kv handoff_enabled" "$1"' -- "$_S97"
-
-# The runtime proof lives in test/acceptance-handoff-dirs.sh and needs Docker, so
-# these are structural: they stop phase D being deleted or quietly reduced to a
-# copy of phase B. §97(10) above only proves sandy WRITES ":ro" into the mount
-# line — it says nothing about chmod actually returning EROFS, which is what the
-# downstream acceptance criterion asks for and what phase D runs.
+# The section is kept for ONE reason: §97(16) tracked where the
+# EROFS-beats-ownership claim is proven at runtime, and that claim outlives
+# every mechanism here. It must never be dropped silently.
+_S97="$SANDY_SCRIPT"
 _S97_ACC="$(cd "$(dirname "$0")" && pwd)/acceptance-handoff-dirs.sh"
-_s97_d="$(awk '/^echo "== D\./{f=1} f' "$_S97_ACC" 2>/dev/null)"
 _S97_ACC_ALL="$(cat "$_S97_ACC" 2>/dev/null || true)"
-
-check "§97(14) the acceptance harness has a marker phase (D)" \
-    bash -c '[ -n "$1" ]' -- "$_s97_d"
-check "§97(15) phase D enables via the MARKER, not a workspace config" \
-    bash -c 'printf "%s" "$1" | grep -q "touch \"\$SBX2/.handoff-enabled\"" \
-        && printf "%s" "$1" | grep -q "NO workspace .sandy/config"' -- "$_s97_d"
-# EROFS-beats-ownership moved when #352 removed the :ro lanes. Phase D used to
-# carry it on the marker path via inbox; with relay (rw) the only lane left,
-# there is no :ro handoff mount for it to assert on, and the claim now lives at
-# phase F3 — "the agent cannot replace its own relay (EROFS, not EACCES)" —
-# against the :ro relay-bin slot.
-#
-# THAT COVERAGE HAS AN EXPIRY. #354 removes the slot, which removes F3 with it,
-# and at that point the only remaining :ro mount sandy makes is a manifest mount
-# declared `mode: ro` — which has no runtime EROFS proof today. This check is
-# repointed rather than deleted so the move is visible, and #354 carries the
-# requirement to re-home it again rather than let it lapse.
-check "§97(16) the EROFS-beats-ownership claim is still proven at runtime somewhere in the harness — at phase F3 since #352, and it must be re-homed again when #354 removes the slot" \
-    bash -c 'printf "%s" "$1" | grep -q "EROFS, not EACCES"' -- "$_S97_ACC_ALL"
+check "§97(1) the marker is not consulted on any launch path" \
+    bash -c '! grep -q "handoff-enabled" "$1" || ! grep -qE "^[^#]*\.handoff-enabled" "$1"' -- "$_S97"
+check "§97(2) nothing bind-mounts the sandbox TOP LEVEL — the property every privileged-by-location file relied on, and it still holds for agent-args.<agent>" \
+    bash -c '! grep -qE "RUN_FLAGS\+=\(-v \"\\\$\{?SANDBOX_DIR\}?/?:" "$1"' -- "$_S97"
+check "§97(16) the EROFS-beats-ownership claim is still proven at runtime somewhere in the harness — it moved from phase B (inbox) to phase F3 (the relay slot) in #352, and #354 removed the slot, so if this is red the claim has no runtime proof and that must be a decision, not an accident" \
+    bash -c 'printf "%s" "$1" | grep -q "EROFS, not EACCES"' _ "$_S97_ACC_ALL"
+unset _S97 _S97_ACC _S97_ACC_ALL
 
 # ============================================================
 echo "§98: --print-state size_bytes (#176)"
@@ -11603,11 +11375,15 @@ check "§114(9a) BEGIN/END cross-session-inbound block precedes the protected-fi
     test "${_S114_END_LINE:-0}" -lt "${_S114_MOUNT_LINE:-0}" -a -n "$_S114_MOUNT_LINE"
 check "§114(9b) ...and precedes the .protected-existed-at-launch snapshot write" \
     test "${_S114_END_LINE:-0}" -lt "${_S114_SNAP_LINE:-0}" -a -n "$_S114_SNAP_LINE"
+# (9c) asserted relay-validation < package-dirs < handoff-directories. The
+# handoff directory block is gone (#355), so the ordering it pinned no longer
+# exists. What survives, and is the half that mattered: the relay path is
+# VALIDATED before the relay state directory it needs is created, because a
+# relay that cannot start must fail the launch rather than get a directory.
 _S114_RELAY_BEGIN_LINE="$(grep -m1 -n '^# BEGIN handoff relay' "$_S114_SANDY" | cut -d: -f1)"
-_S114_PKGDIR_LINE="$(grep -m1 -n '^# Ensure persistent package directories exist' "$_S114_SANDY" | cut -d: -f1)"
-_S114_HANDOFFDIR_LINE="$(grep -m1 -n '^# BEGIN handoff directories' "$_S114_SANDY" | cut -d: -f1)"
-check "§114(9c) handoff-relay validation precedes package-dir setup precedes handoff directories (relay ⇒ dirs ordering)" \
-    test "${_S114_RELAY_BEGIN_LINE:-0}" -lt "${_S114_PKGDIR_LINE:-0}" -a "${_S114_PKGDIR_LINE:-0}" -lt "${_S114_HANDOFFDIR_LINE:-0}"
+_S114_RELAYSTATE_LINE="$(grep -m1 -n '^mkdir -p "\$SANDBOX_DIR/relay-state"' "$_S114_SANDY" | cut -d: -f1)"
+check "§114(9c) handoff-relay validation precedes relay-state creation — validation first, so a relay that cannot start fails the launch instead of being handed a directory" \
+    test "${_S114_RELAY_BEGIN_LINE:-0}" -lt "${_S114_RELAYSTATE_LINE:-0}" -a -n "$_S114_RELAYSTATE_LINE"
 
 # --- (10) both settings files remain protected (self-pin can't be loosened) --
 check "§114(10) .claude/settings.local.json AND .claude/settings.json are both in _sandy_protected_files" \
@@ -11795,30 +11571,23 @@ unset _S114_RELAY_EXITS _S114_RELAY_FATALS _S114_FM_T _S114_FM_FN
 # logic would keep passing after the real code changed, which is exactly the
 # failure mode this section exists to prevent.
 _S114_COLL_BLK="$(sed -n '/^# END handoff directories$/,/^# BEGIN cross-session inbound/p' "$_S114_SANDY" | sed '1d;$d')"
-check "§114(12pre) extracted the collision guard from the real script" \
-    bash -c 'printf "%s" "$1" | grep -q "SANDY_HANDOFF_RELAY"' -- "$_S114_COLL_BLK"
-_S114_COLL_RC=0
-_S114_COLL_OUT="$(env SANDY_HANDOFF_RELAY=x SANDY_HANDOFF_DIRS=0 bash -c "$_S114_COLL_BLK" 2>&1)" || _S114_COLL_RC=$?
-check "§114(12a) relay configured + handoff mounts impossible (workspace collides with ~/.handoff) -> exit 1, not a warning-and-proceed (criterion 7: the relay cannot start, so the launch fails)" \
-    bash -c '[ "$1" -eq 1 ] && printf "%s\n" "$2" | grep -q "A configured relay that cannot start fails the launch"' -- "$_S114_COLL_RC" "$_S114_COLL_OUT"
-_S114_COLL_RC=0
-# `env -u`: "no relay configured" must mean the CODE sees none, not that the
-# developer's shell happens to lack it. Running this suite from inside a sandbox
-# that has a relay installed exports SANDY_HANDOFF_RELAY, and this check then
-# asserted the opposite of its own description.
-env -u SANDY_HANDOFF_RELAY SANDY_HANDOFF_DIRS=0 bash -c "$_S114_COLL_BLK" >/dev/null 2>&1 || _S114_COLL_RC=$?
-check "§114(12b) ...and with NO relay configured the same collision is silent, rc 0 (the guard is about the relay, not about the dirs)" \
-    test "$_S114_COLL_RC" -eq 0
+# (12) asserted the ~/.handoff workspace-collision refusal: a workspace that IS
+# ~/.handoff could not have the tree mounted inside itself. The tree is gone
+# (#355), so there is nothing left to collide with and the guard was removed
+# with it. Nothing replaces it, because nothing mounts under the agent home any
+# more -- which is itself worth asserting.
+check "§114(12) no mount targets the agent home at all, so a workspace can no longer collide with one (the ~/.handoff refusal is gone because its hazard is)" \
+    bash -c '! grep -q ":/home/sandy/.handoff" "$1"' -- "$_S114_SANDY"
 
-# --- (13) RUN_FLAGS / marker wiring ------------------------------------------
 check "§114(13a) zero handoff mount lines — #352 removed three lanes and #353 moved relay state to /opt/sandy/relay-state" \
     bash -c '[ "$(grep -c "RUN_FLAGS.*handoff/" "$1")" -eq 0 ]' -- "$_S114_SANDY"
 check "§114(13b) the relay STATE mount is read-write at its new path (#353) — the supervisor writes .state and supervisor.log there, and a :ro slip would fail every relay launch" \
     bash -c 'grep -q "relay-state:/opt/sandy/relay-state\")" "$1" && ! grep -q "relay-state:/opt/sandy/relay-state:ro" "$1"' -- "$_S114_SANDY"
-check "§114(13c) -e SANDY_HANDOFF_RELAY appears exactly once, inside the handoff-mounts gate" \
+check "§114(13c) -e SANDY_HANDOFF_RELAY appears exactly once — it is the internal channel a manifest entry travels through, and a second emission would mean two sources disagreeing about which relay runs" \
     bash -c '[ "$(grep -c "\-e \"SANDY_HANDOFF_RELAY=" "$1")" -eq 1 ]' -- "$_S114_SANDY"
-check "§114(13d) mkdir for the four handoff subdirs is on one line (outbox inbox relay peer)" \
-    bash -c 'grep -q "mkdir -p \"\$SANDBOX_DIR/handoff/relay\"$" "$1"' -- "$_S114_SANDY"
+check "§114(13d) the handoff mkdir is gone entirely (#355) — that line, not the mount gate, is what a host-side consumer could observe, so its removal is the externally visible half" \
+    bash -c '! grep -q "mkdir -p \"\$SANDBOX_DIR/handoff" "$1"' -- "$_S114_SANDY"
+
 check "§114(13e) zero-diff invariant: with the opt-out (SANDY_HANDOFF_DIRS=0) and no relay, the handoff-mounts gate emits zero RUN_FLAGS" \
     bash -c '
         _blk="$(awk "/Handoff directories mounts/,/^fi\$/" "$1")"
@@ -11838,8 +11607,8 @@ check "§114(13e-2) default-on invariant: with SANDY_HANDOFF_DIRS unset and no r
         [ "${#RUN_FLAGS[@]}" -eq 0 ]
     ' -- "$_S114_SANDY"
 
-check "§114(13f) marker printf: cross_session_inbound and handoff_relay fields present" \
-    bash -c 'grep -q "\"cross_session_inbound\": %s" "$1" && grep -q "\"handoff_relay\": %s" "$1"' -- "$_S114_SANDY"
+check "§114(13f) marker printf: cross_session_inbound present, handoff_relay GONE (#355 — the deprecated alias for launch intent, superseded by relay.source)" \
+    bash -c 'grep -q "\"cross_session_inbound\": %s" "$1" && ! grep -q "\"handoff_relay\": %s" "$1"' -- "$_S114_SANDY"
 _S114_FMT_LINE="$(grep -m1 -n '"cross_session_inbound": %s' "$_S114_SANDY" | cut -d: -f1)"
 _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]' | wc -l | tr -d ' ')"
 # 15 as of 1.11.0: the relay{} object (#258) added slot, path and disabled_by to
@@ -11857,8 +11626,11 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # every field after it silently.
 # 19 as of 2.1.0: `relay.source` (#345) -- WHICH producer supplied the relay,
 # which `relay.slot` never could answer and was being misread as.
-check "§114(13g) marker printf format/arg count line up (19 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 19
+# 17 as of 2.2.0: `handoff_relay` and `relay.slot` removed (#355). Note it went
+# DOWN -- the tripwire is an equality, not a floor, so a removal that forgot to
+# drop its argument is caught exactly as an addition that forgot to add one.
+check "§114(13g) marker printf format/arg count line up (17 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 17
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -13031,8 +12803,8 @@ check "§123(9) the slot mount does NOT reuse the handoff relay STATE dir (relay
     bash -c '! grep -q "handoff/relay:/opt/sandy/relay" "$1"' -- "$SANDY_SCRIPT"
 
 # --- the marker records INTENT and is structurally unable to record liveness --
-check "§123(10) the session marker emits relay.slot (launch intent), not relay.state" \
-    bash -c 'grep -q "\"slot\": %s" "$1"' -- "$SANDY_SCRIPT"
+check "§123(10) the session marker no longer emits relay.slot — removed in 2.2.0 (#355) with the slot it described; relay.source replaced it and relay.disabled_by SURVIVES, because #354 re-scoped the key it names" \
+    bash -c '! grep -q "\"slot\": %s" "$1" && grep -q "\"source\": %s" "$1" && grep -q "\"disabled_by\": %s" "$1"' -- "$SANDY_SCRIPT"
 # (11) is BEHAVIOURAL, not a grep: it runs the shipped marker composer with the
 # slot in its "a relay will run" state — the one case where a careless
 # implementation would be tempted to write "started" — and reads the JSON it
@@ -13056,14 +12828,14 @@ _S123_MARKER="$(
     . "$_S123_DIR/marker.sh" >/dev/null 2>&1
     cat "$_S123_DIR/marker.json" 2>/dev/null
 )"
-check "§123(11a) the marker composer emits parseable JSON carrying relay.slot" \
-    bash -c 'echo "$1" | tr -d " \n" | grep -q "\"relay\":{\"slot\":\"present\"" && echo "$1" | grep -q "\"schema\": 1"' -- "$_S123_MARKER"
+check "§123(11a) the marker composer emits parseable JSON carrying relay.source (mutation: a printf/arg mismatch shifts every field after the gap and this goes red)" \
+    bash -c 'echo "$1" | tr -d " \n" | grep -q "\"relay\":{\"source\":" && echo "$1" | grep -q "\"schema\": 1"' -- "$_S123_MARKER"
 check "§123(11b) the marker NEVER says the relay started, even with a relay about to run — it is composed before docker run while the relay starts in-container, so that field would be a claim sandy is structurally unable to make (this is the 35-hour-crash-loop regression)" \
     bash -c '! echo "$1" | grep -q "started"' -- "$_S123_MARKER"
 check "§123(11c) the marker carries no live-state fields at all (no restarts/last_exit_code/state) — those belong to --print-state, which can actually observe them" \
     bash -c '! echo "$1" | grep -qE "\"(state|restarts|last_exit_code|last_restart_at)\""' -- "$_S123_MARKER"
-check "§123(12) handoff_relay is still emitted, so 1.10.0 consumers do not break on the new field" \
-    bash -c 'grep -q "\"handoff_relay\": %s" "$1"' -- "$SANDY_SCRIPT"
+check "§123(12) handoff_relay is GONE from the marker (#355) — the deprecated alias for launch intent, superseded by relay.source; a vanished field is silent unless schema_version moves, which is why it did" \
+    bash -c '! grep -q "\"handoff_relay\": %s" "$1"' -- "$SANDY_SCRIPT"
 
 # --- --print-state carries the LIVE state, from fixtures of every shape -------
 # Built as real sandbox directories under an isolated SANDY_HOME and read by the
@@ -13207,7 +12979,7 @@ echo "§124: the handoff pair — classification, --print-state reporting, and -
 # a read-only `handoff` object in --print-state, and `--provision --all`.
 #
 # The property that makes them safe together is that they share ONE predicate,
-# _sandy_handoff_classify. A reporter that says "ok" while the provisioner still
+# _sandy_sandbox_state_classify. A reporter that says "ok" while the provisioner still
 # provisions -- or worse, the reverse -- is the drift this repo keeps paying for,
 # and it would be invisible: both halves would look right in isolation. §124(12)
 # is the check that they cannot disagree.
@@ -13218,13 +12990,13 @@ echo "§124: the handoff pair — classification, --print-state reporting, and -
 # they are protecting. §124(6) asserts it by running the emitter against a
 # deliberately broken tree and checking the tree is untouched.
 _S124_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # pwd -P: macOS mktemp returns a symlink (§120)
-sed -n '/^_sandy_handoff_classify() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S124_DIR/hc.sh"
+sed -n '/^_sandy_sandbox_state_classify() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S124_DIR/hc.sh"
 check "§124(pre) the classifier was extracted (mutation: a rename empties it and every check below goes vacuous)" \
     bash -c 'grep -q "_SANDY_HC_STATE=" "$1" && [ "$(grep -c . "$1")" -gt 25 ]' -- "$_S124_DIR/hc.sh"
 
 # --- classification, driven through the SHIPPED function ---------------------
 _s124_mk() {   # _s124_mk <name> <shape>
-    local sb="$_S124_DIR/sb-$1"; mkdir -p "$sb/handoff"
+    local sb="$_S124_DIR/sb-$1"; mkdir -p "$sb"
     # #352 removed inbox, outbox and peer, so `relay` is the only directory the
     # classifier looks at. "partial" therefore no longer exists as a distinct
     # shape -- with one directory, a pair is present or it is not -- and the
@@ -13233,12 +13005,12 @@ _s124_mk() {   # _s124_mk <name> <shape>
     # classifier ignores is a fixture that cannot tell a correct classifier
     # from one still iterating four names.
     case "$2" in
-        ok)      mkdir -p "$sb/handoff/relay" ;;
+        ok)      mkdir -p "$sb/relay-state" ;;
         none)    : ;;
-        stale)   mkdir -p "$sb/handoff/inbox" "$sb/handoff/outbox" "$sb/handoff/peer" ;;
-        file)    : > "$sb/handoff/relay" ;;
+        stale)   mkdir -p "$sb/handoff/relay" ;;   # the pre-2.2.0 shape: tree, no relay-state
+        file)    : > "$sb/relay-state" ;;
         link)    mkdir -p "$_S124_DIR/elsewhere"
-                 ln -s "$_S124_DIR/elsewhere" "$sb/handoff/relay" ;;
+                 ln -s "$_S124_DIR/elsewhere" "$sb/relay-state" ;;
     esac
     printf '%s' "$sb"
 }
@@ -13247,7 +13019,7 @@ _s124_state() {  # echoes the classified state for a prepared sandbox
         trap - ERR
         set +e
         . "$_S124_DIR/hc.sh"
-        _sandy_handoff_classify "$1"
+        _sandy_sandbox_state_classify "$1"
         printf '%s' "$_SANDY_HC_STATE"
     )
 }
@@ -13259,13 +13031,13 @@ check "§124(1) the present relay directory classifies as ok (got: $_S124_OK)" \
 # relay/. It must classify as missing, not ok: a classifier still iterating the
 # old four names would find three of them present and say so.
 _S124_PART="$(trap - ERR; _s124_state "$(_s124_mk part stale)")"
-check "§124(2) a sandbox holding ONLY the removed lanes (#352) is 'missing', not ok — the pre-2.2.0 shape, and the mutation that catches a classifier still looking at four names (got: $_S124_PART)" \
+check "§124(2) a PRE-2.2.0 sandbox — handoff/relay present, relay-state absent — is 'missing', not ok. This is the shape every sandbox has on its first launch under 2.2.0, and a classifier still looking at the old path would call it fine (got: $_S124_PART)" \
     bash -c '[ "$1" = "missing" ]' -- "$_S124_PART"
 _S124_NONE="$(trap - ERR; _s124_state "$(_s124_mk none none)")"
-check "§124(3) no handoff tree at all is 'missing' (got: $_S124_NONE)" \
+check "§124(3) no per-sandbox state at all is 'missing' (got: $_S124_NONE)" \
     bash -c '[ "$1" = "missing" ]' -- "$_S124_NONE"
 _S124_FILE="$(trap - ERR; _s124_state "$(_s124_mk file file)")"
-check "§124(4) a FILE where a mount target belongs is 'wrong', not ok (got: $_S124_FILE)" \
+check "§124(4) a FILE where the state directory belongs is 'wrong', not ok (got: $_S124_FILE)" \
     bash -c '[ "$1" = "wrong" ]' -- "$_S124_FILE"
 # THE ordering check. -d follows a symlink, so a symlink TO a directory passes
 # every other test. `mkdir -p` never creates one, so a symlink here was placed by
@@ -13282,11 +13054,11 @@ check "§124(5b) the shapes produced three distinct states (mutation: a classifi
 # --- the reporter must never repair -----------------------------------------
 _S124_PSH="$_S124_DIR/home"; mkdir -p "$_S124_PSH/sandboxes"
 _s124_sb() {   # _s124_sb <name> <shape> [workspace]
-    local d="$_S124_PSH/sandboxes/$1"; mkdir -p "$d/handoff"
+    local d="$_S124_PSH/sandboxes/$1"; mkdir -p "$d"
     case "$2" in
-        ok)      mkdir -p "$d/handoff/relay" ;;
+        ok)      mkdir -p "$d/relay-state" ;;
         missing) : ;;
-        wrong)   : > "$d/handoff/relay" ;;
+        wrong)   : > "$d/relay-state" ;;
     esac
     printf '{\n  "schema_version": 1,\n  "workspace_path": "%s"\n}\n' "${3:-$_S124_DIR/ws}" > "$d/WORKSPACE.json"
 }
@@ -13313,31 +13085,27 @@ _s124_obj() {   # _s124_obj <sandbox-name> -> the JSON object for that sandbox
     printf '%s' "$_S124_PS" | tr -d ' \n' | awk -v key="\"name\":\"$1\"" '{ p = index($0, key); if (p == 0) exit 0; rest = substr($0, p); q = index(substr(rest, 2), "{\"name\":\""); if (q > 0) rest = substr(rest, 1, q); print rest }'
 }
 _s124_field() { _s124_obj "$1" | sed -n 's/.*"handoff":{"state":"\([a-z]*\)".*/\1/p' | head -1; }
-check "§124(7) --print-state reports ok / missing / wrong for the three fixtures" \
-    bash -c '[ "$1" = "ok" ] && [ "$2" = "missing" ] && [ "$3" = "wrong" ]' \
-    -- "$(trap - ERR; _s124_field r-ok)" "$(trap - ERR; _s124_field r-missing)" "$(trap - ERR; _s124_field r-wrong)"
-# NOT anchored on the sandbox name with [^}]*: `dirs` is a nested object, so its
-# closing brace sits between `name` and `problems` and the class can never span
-# it. Asserted instead as "exactly one sandbox reports a problem, and it names
-# relay" -- which is what the fixture set makes true.
-check "§124(8) a 'wrong' pair carries a populated problems[] naming the offending directory" \
-    bash -c 'o="$(printf "%s" "$1" | tr -d " \n")"; printf "%s" "$o" | grep -q "\"problems\":\[\"relay:" \
-             && [ "$(printf "%s" "$o" | grep -o "\"problems\":\[\"" | grep -c .)" -eq 1 ]' -- "$_S124_PS"
-check "§124(9) handoff is emitted in LIGHT mode too — a fleet poller must not pay for a du walk to learn a pair is broken" \
-    bash -c 'SANDY_HOME="$2" "$1" --print-state --light 2>/dev/null | tr -d " \n" | grep -q "\"handoff\":{\"state\""' -- "$SANDY_SCRIPT" "$_S124_PSH"
-check "§124(10) the stream contract holds with the new field (0 bytes on stderr)" \
+# (7)-(11) REMOVED with the handoff{} field they read (#355). They asserted
+# that --print-state reported the classifier's verdict; there is no longer a
+# field for it, because the tree it described is gone. The classifier itself
+# survives as --provision's internal selection predicate, and its verdict is
+# still observable -- through what --all PLANS to do, which (12), (15) and (17)
+# assert behaviourally rather than by reading a field.
+#
+# The stream contract moved here rather than being dropped with them: it is a
+# property of --print-state, not of the field that happened to be under test.
+check "§124(7) the --print-state stream contract still holds after the removals (0 bytes on stderr)" \
     bash -c 'e="$(SANDY_HOME="$2" "$1" --print-state 2>&1 >/dev/null)"; [ -z "$e" ]' -- "$SANDY_SCRIPT" "$_S124_PSH"
-# The consumer's actual gate, asserted rather than assumed to work.
-check "§124(11) the documented preview gate selects exactly the two bad sandboxes" \
-    bash -c 'n="$(printf "%s" "$1" | tr -d " \n" | grep -o "\"handoff\":{\"state\":\"[a-z]*\"" | grep -cv "\"ok\"")"; [ "$n" -eq 2 ]' -- "$_S124_PS"
+check "§124(8) ...and handoff{} / handoff_enabled are genuinely ABSENT, not emitted empty — a consumer must be able to tell 'removed' from 'present and empty'" \
+    bash -c '! printf "%s" "$1" | tr -d " \n" | grep -q "\"handoff\"\|\"handoff_enabled\""' _ "$_S124_PS"
 
 # --- the anti-drift property: ONE predicate, two callers --------------------
 # --print-state's report and --provision --all's selection must be the same
 # verdict. Asserted by construction (both call the one function) and by
 # behaviour: the set --all plans to provision is exactly the set --print-state
 # does not call ok.
-check "§124(12) --provision --all and --print-state share one predicate — neither re-implements the classification" \
-    bash -c 'n="$(grep -c "_sandy_handoff_classify" "$1")"; [ "$n" -ge 3 ] && [ "$(grep -c "^_sandy_handoff_classify() {" "$1")" -eq 1 ]' -- "$SANDY_SCRIPT"
+check "§124(12) --provision --all uses ONE classification helper, defined once and called from its two selection sites — neither re-implements it (since #355 the helper is internal; --print-state no longer reports it)" \
+    bash -c 'n="$(grep -c "_sandy_sandbox_state_classify" "$1")"; [ "$n" -ge 3 ] && [ "$(grep -c "^_sandy_sandbox_state_classify() {" "$1")" -eq 1 ]' -- "$SANDY_SCRIPT"
 
 # --- --provision --all: guards and the plan ---------------------------------
 # A docker stub makes the dispatcher reachable without a daemon. It never gets
@@ -13359,11 +13127,11 @@ _S124_DRY="$(trap - ERR; _s124_pv "$_S124_PSH" --dry-run)"
 check "§124(15) --dry-run names both bad sandboxes, exits 0, and provisions nothing" \
     bash -c 'printf "%s" "$1" | grep -q "r-missing" && printf "%s" "$1" | grep -q "r-wrong" && printf "%s" "$1" | grep -q "rc=0" && printf "%s" "$1" | grep -q "nothing provisioned"' -- "$_S124_DRY"
 check "§124(16) --dry-run did NOT create the missing pair (a dry run that provisions is the worst outcome)" \
-    bash -c '[ ! -d "$1/sandboxes/r-missing/handoff/relay" ]' -- "$_S124_PSH"
+    bash -c '[ ! -d "$1/sandboxes/r-missing/relay-state" ]' -- "$_S124_PSH"
 
 # nothing-to-do: goal already met -> 0 (the C1 rule; NOT "0 because I did work")
 _S124_ALLOK="$_S124_DIR/allok"; mkdir -p "$_S124_ALLOK/sandboxes/a/handoff"
-mkdir -p "$_S124_ALLOK/sandboxes/a/handoff/relay"
+mkdir -p "$_S124_ALLOK/sandboxes/a/relay-state"
 printf '{\n  "workspace_path": "%s"\n}\n' "$_S124_DIR/ws" > "$_S124_ALLOK/sandboxes/a/WORKSPACE.json"
 _S124_NOOP="$(trap - ERR; _s124_pv "$_S124_ALLOK" --yes)"
 check "§124(17) every pair already correct exits 0 and does no work (C1: skip when the goal is ALREADY MET)" \
@@ -14622,7 +14390,7 @@ _s133_fixture() {
     rm -rf "$home"; mkdir -p "$home/sandboxes/proj-aaaaaaaa" "$ws"
     printf '{\n  "schema_version": 1,\n  "sandbox_name": "proj-aaaaaaaa",\n  "workspace_path": "%s"\n}\n' \
         "$ws" > "$home/sandboxes/proj-aaaaaaaa/WORKSPACE.json"
-    # No handoff/ tree at all -> _sandy_handoff_classify reports "missing".
+    # No relay-state at all -> _sandy_sandbox_state_classify reports "missing".
     mkdir -p "$home/sandboxes/.proj-aaaaaaaa.lock"
     printf '%s\n' "$pid" > "$home/sandboxes/.proj-aaaaaaaa.lock/pid"
 }
@@ -17100,7 +16868,7 @@ _S151_SANDY="$SANDY_SCRIPT"
 _S151_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 
 # --- (1-3) the one-time migration -------------------------------------------
-_S151_MIG="$(awk '/^# --- Relay state, moved out of handoff/,/^mkdir -p "\$SANDBOX_DIR\/handoff\/relay"$/' "$_S151_SANDY")"
+_S151_MIG="$(awk '/^# --- Relay state \(#353\)/,/^mkdir -p "\$SANDBOX_DIR\/relay-state"$/' "$_S151_SANDY")"
 check "§151(pre) the migration block was extracted (mutation: rename its header and (1)-(3) go vacuous)" \
     bash -c 'printf "%s" "$1" | grep -q "mv .*handoff/relay"' _ "$_S151_MIG"
 _s151_mig() {   # $1 = "old" (pre-2.2.0 sandbox) | "new" | "both"
@@ -17120,14 +16888,13 @@ _s151_mig() {   # $1 = "old" (pre-2.2.0 sandbox) | "new" | "both"
 }
 check "§151(1) a pre-2.2.0 sandbox has its relay history MOVED, not discarded — supervisor.log is the only record of a relay's restarts, so losing it would make a crash loop undiagnosable across the upgrade (got: $(_s151_mig old))" \
     bash -c '[ "${1%%|*}" = "HISTORY" ]' _ "$(_s151_mig old)"
-# THE ORDERING CASE, and it must be the FRESH sandbox to bite. On an old one
-# the mv works from either position, so testing only that shape leaves the bug
-# uncaught -- which it did on the first draft of this section. On a fresh
-# sandbox the migration must run BEFORE the mkdir, or it moves the empty
-# directory mkdir just created and handoff/relay never survives a launch.
-check "§151(2) a FRESH sandbox ends with BOTH directories — the migration runs before the mkdir, so it cannot move the empty directory that mkdir just made (got: $(_s151_mig fresh))" \
+# A FRESH sandbox gets relay-state and nothing else. handoff/ is not recreated
+# since #355 removed the tree, so the migration must not depend on it existing
+# -- and the mv must stay conditional or it would fire against a directory that
+# is no longer there.
+check "§151(2) a FRESH sandbox gets relay-state, and handoff/ is NOT recreated — the tree was removed in #355 and nothing brings it back (got: $(_s151_mig fresh))" \
     bash -c '[ "$(printf "%s" "$1" | cut -d"|" -f1)" != "MISSING" ] \
-             && [ "$(printf "%s" "$1" | cut -d"|" -f2)" = "handoff-exists" ]' _ "$(_s151_mig fresh)"
+             && [ "$(printf "%s" "$1" | cut -d"|" -f2)" = "handoff-gone" ]' _ "$(_s151_mig fresh)"
 check "§151(3) an existing relay-state is neither clobbered NOR nested into — the mv is conditional, so a second launch is a no-op; without the guard, mv would put handoff/relay INSIDE relay-state, which preserves the file while corrupting the layout (got: $(_s151_mig both))" \
     bash -c '[ "$(printf "%s" "$1" | cut -d"|" -f1)" = "HANDMADE" ] && [ "$(printf "%s" "$1" | cut -d"|" -f3)" = "flat" ]' _ "$(_s151_mig both)"
 
@@ -17137,10 +16904,9 @@ check "§151(4) relay state is mounted READ-WRITE at /opt/sandy/relay-state — 
 check "§151(5) the container path has ONE source: the host sets SANDY_RELAY_STATE beside the mount and the supervisor reads it, rather than both spelling the literal (mutation: hardcode it in the supervisor and the harnesses that relocate it break)" \
     bash -c 'grep -q -- "-e \"SANDY_RELAY_STATE=/opt/sandy/relay-state\"" "$1" \
              && grep -q "_st=\"\${SANDY_RELAY_STATE:-/opt/sandy/relay-state}\"" "$1"' _ "$_S151_SANDY"
-check "§151(6) the mount is NOT gated on SANDY_HANDOFF_DIRS — relay state is not part of the handoff tree, and tying it to a deprecated opt-out for a different mechanism is how a relay stops starting for a reason nobody can find" \
-    bash -c '_blk="$(awk "/Handoff directories mounts/,/^fi\$/" "$1")"
-             [ -n "$_blk" ] || exit 1
-             ! printf "%s" "$_blk" | grep -q "RUN_FLAGS.*relay-state"' _ "$_S151_SANDY"
+check "§151(6) the relay-state mount is gated on a relay being configured and on nothing else — it was never part of the handoff tree, and tying it to that tree's opt-out would have made a relay stop starting for a reason nobody could find (SANDY_HANDOFF_DIRS is now gone entirely, #355)" \
+    bash -c 'grep -B3 "relay-state:/opt/sandy/relay-state\")" "$1" | grep -q "if \[ -n \"\${SANDY_HANDOFF_RELAY:-}\" \]" \
+' _ "$_S151_SANDY"
 
 # --- (7-9) state_dir: the fact a consumer reads instead of constructing ------
 _S151_H="$_S151_DIR/home"
