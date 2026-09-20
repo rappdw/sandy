@@ -11318,8 +11318,8 @@ check "§114(1b) SANDY_HANDOFF_RELAY is a recognized privileged key" \
     bash -c 'grep -q "^    SANDY_HANDOFF_RELAY$" "$1"' -- "$_S114_SANDY"
 check "§114(1c) metadata row: SANDY_CROSS_SESSION_INBOUND is enum:accept,hold,refuse, since 1.10.0, experimental" \
     bash -c 'grep -q "^SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|" "$1"' -- "$_S114_SANDY"
-check "§114(1d) metadata row: SANDY_HANDOFF_RELAY is type path, since 1.10.0, experimental" \
-    bash -c 'grep -q "^SANDY_HANDOFF_RELAY|path|||1.10.0|experimental|" "$1"' -- "$_S114_SANDY"
+check "§114(1d) metadata row: SANDY_HANDOFF_RELAY is type path, since 1.10.0, and now marked DEPRECATED — removed as a configuration key in 2.2.0 (#354) while the variable survives as the manifest entry's internal channel" \
+    bash -c 'grep -q "^SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|" "$1"' -- "$_S114_SANDY"
 check "§114(1e) --print-schema carries both keys in the right tier with the right type" \
     bash -c '
         cd "$(dirname "$1")" && ./sandy --print-schema 2>/dev/null | python3 -c "
@@ -12985,35 +12985,41 @@ check "§123(1) no entry in the slot is 'absent' and starts nothing — the stat
     bash -c '[ "$1" = "absent false <unset>" ]' -- "$_S123_A"
 
 _S123_B="$(trap - ERR; _s123_resolve exec   '' '')"
-check "§123(2) an executable entry resolves to the container-side slot path, so the existing relay machinery runs it unchanged (got: $_S123_B)" \
-    bash -c '[ "$1" = "present true /opt/sandy/relay/relay" ]' -- "$_S123_B"
+check "§123(2) an executable entry now FAILS THE LAUNCH — the slot was removed in 2.2.0 (#354) and a leftover entry is a migration that never finished, so ignoring it would start the wrong relay, or none, without saying so (got: $_S123_B)" \
+    bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_B"
 
 _S123_C="$(trap - ERR; _s123_resolve exec   0  '')"
-check "§123(3) SANDY_RELAY=0 suppresses an installed relay entirely — the opt-out tightens, and nothing is handed downstream (got: $_S123_C)" \
-    bash -c '[ "$1" = "disabled false <unset>" ]' -- "$_S123_C"
+check "§123(3) SANDY_RELAY=0 does NOT excuse a leftover slot entry — the entry is a blocking error either way, so the opt-out cannot hide an unfinished migration (got: $_S123_C)" \
+    bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_C"
 
 _S123_D="$(trap - ERR; _s123_resolve noexec '' '')"
 check "§123(4) an entry that exists but is NOT executable FAILS THE LAUNCH — never silently 'absent', which is the no-op this design exists to retire (got: $_S123_D)" \
     bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_D"
 
 _S123_E="$(trap - ERR; _s123_resolve exec   '' '/workspace/.sandy/relay.sh')"
-check "§123(5) an explicit SANDY_HANDOFF_RELAY wins over the slot and the slot is NOT also used — never merged, one winner (got: $_S123_E)" \
-    bash -c '[ "$1" = "present false /workspace/.sandy/relay.sh" ]' -- "$_S123_E"
+check "§123(5) an operator-set SANDY_HANDOFF_RELAY now FAILS THE LAUNCH — removed as a configuration key in 2.2.0 (#354), naming the manifest entry that replaces it. The VARIABLE survives: the manifest sets it below this block, which is why a non-empty value HERE can only have come from an operator (got: $_S123_E)" \
+    bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_E"
 
 # Anti-vacuity for 1-5: the five cases must not all be the same string, which is
 # what a resolve.sh that failed to source would produce.
-check "§123(6) the five resolution cases produced five distinct outcomes (mutation: a block that no-ops makes them identical and 1-5 meaningless)" \
-    bash -c '[ "$(printf "%s\n%s\n%s\n%s\n%s\n" "$1" "$2" "$3" "$4" "$5" | sort -u | grep -c .)" -eq 5 ]' \
+# Anti-vacuity. Four of the five cases are now refusals, so "all distinct" is
+# no longer the right shape -- it would be satisfied by a block that failed to
+# source at all, which is the failure this guards. The property that survives:
+# exactly ONE case resolves, the rest refuse, and the one that resolves is the
+# empty slot.
+check "§123(6) exactly ONE of the five cases resolves (the empty slot) and the other four REFUSE — a block that failed to source would make all five identical, and a block that ignored the removals would make all five resolve" \
+    bash -c '_ok=0; for v in "$2" "$3" "$4" "$5"; do case "$v" in "EXIT "*) _ok=$((_ok+1)) ;; esac; done
+             [ "$_ok" -eq 4 ] && [ "$1" = "absent false <unset>" ]' \
     -- "$_S123_A" "$_S123_B" "$_S123_C" "$_S123_D" "$_S123_E"
 
 # --- the mount: right target, right flag, present exactly when it should be --
 # This asserts the flag is attached to the SLOT mount specifically. It cannot
 # assert EROFS (no container here) — acceptance-handoff-dirs.sh does that.
 _S123_MOUNTBLK="$(grep -n 'relay-bin\|_sandy_relay_slot_dir:' "$SANDY_SCRIPT" | grep '/opt/sandy/relay' || true)"
-check "§123(7) the slot is mounted at /opt/sandy/relay with the :ro FLAG (bits would not bind an agent running as the owning uid)" \
-    bash -c 'echo "$1" | grep -q -- "_sandy_relay_slot_dir:/opt/sandy/relay:ro"' -- "$_S123_MOUNTBLK"
-check "§123(8) the slot mount is gated on the slot actually supplying the relay, so a deprecated override or a headless skip leaves nothing mounted" \
-    bash -c 'grep -A3 "_sandy_relay_from_slot:-false" "$1" | grep -q "_sandy_relay_slot_dir:/opt/sandy/relay:ro"' -- "$SANDY_SCRIPT"
+check "§123(7) NOTHING is mounted at /opt/sandy/relay any more — the slot mount went with the slot (#354), and a feature payload is already :ro, so an entry living on it keeps the guarantee the slot bought" \
+    bash -c '! grep -q -- "_sandy_relay_slot_dir:/opt/sandy/relay" "$SANDY_SCRIPT"' _
+check "§123(8) the slot mount site is gone entirely, not merely un-gated — a dormant mount line behind a false condition is one revert away from returning" \
+    bash -c '! grep -q "RUN_FLAGS.*_sandy_relay_slot_dir" "$1"' -- "$SANDY_SCRIPT"
 check "§123(9) the slot mount does NOT reuse the handoff relay STATE dir (relay-bin/ vs handoff/relay/ — one is :ro code, the other rw state)" \
     bash -c '! grep -q "handoff/relay:/opt/sandy/relay" "$1"' -- "$SANDY_SCRIPT"
 
@@ -13121,12 +13127,12 @@ check "§123(21) live state is read from the fixed-size .state file, NOT by pars
 _S123_KEEP="$(grep -m1 '^    _rs_keep() {' "$SANDY_SCRIPT" || true)"
 check "§123(22-pre) the _rs_keep predicate was extracted (mutation: a rename empties it and the two checks below go vacuous)" \
     bash -c '[ -n "$1" ] && printf "%s" "$1" | grep -q "case"' -- "$_S123_KEEP"
-check "§123(22) --reset-sandbox PRESERVES relay-bin/ — without this the reset silently un-enrols the sandbox, since everything unnamed is destroyed" \
-    bash -c '_rs_keep_approvals=false; eval "$1"; _rs_keep relay-bin' -- "$_S123_KEEP"
+check "§123(22) --reset-sandbox now DESTROYS relay-bin/ (#354) — the slot is removed and a surviving entry blocks the next launch, so preserving it would keep the one thing a reset is most likely being run to clear" \
+    bash -c '_rs_keep_approvals=false; eval "$1"; ! _rs_keep relay-bin' -- "$_S123_KEEP"
 check "§123(22b) ...and the predicate is not simply true for everything — pip/ is still destroyed (without this, 22 passes on a reset that preserves the whole sandbox)" \
     bash -c '_rs_keep_approvals=false; eval "$1"; ! _rs_keep pip' -- "$_S123_KEEP"
-check "§123(23) --reset-sandbox NAMES the preserved relay, so an operator is not told by omission that it was destroyed" \
-    bash -c 'grep -q "relay-bin/ (installed relay)" "$1"' -- "$SANDY_SCRIPT"
+check "§123(23) --reset-sandbox NAMES the relay it destroys, so the change from preserve to destroy is stated rather than discovered" \
+    bash -c 'grep -q "AND DESTROYS relay-bin/relay" "$1"' -- "$SANDY_SCRIPT"
 check "§123(24) --remove-sandbox names the relay it will destroy in its printed plan" \
     bash -c 'grep -q "an installed relay (relay-bin/relay) will be destroyed" "$1"' -- "$SANDY_SCRIPT"
 check "§123(25) SANDY_EXTRA_ENV REFUSES SANDY_HANDOFF_* — the one route by which those derived exports were settable; a forwarded name lands last-wins in the -e order and makes the environment and the marker disagree" \
@@ -16326,14 +16332,20 @@ _S142_OUT3="$(cd "$_S142_DIR" && SANDY_HOME="$_S142_H" SANDBOX_DIR="$_S142_DIR/s
     FM_BLOCK="$_S142_FM" EVAL_BLOCK="$_S142_EVAL" CSI_BLOCK="$_S142_CSI" \
     _sandy_relay_slot_dir="$_S142_DIR/slot" \
     bash "$_S142_DIR/drive.sh" 2>/dev/null)" || _S142_OUT3="DRIVER-FAILED"
-check "§142(6) an explicitly-set SANDY_HANDOFF_RELAY is NOT overwritten by a manifest entry (the old site's \`_sandy_relay_from_slot != true\` test overwrote it)" \
-    bash -c 'printf "%s" "$1" | grep -q "^relay=/opt/explicit/relay$"' _ "$_S142_OUT3"
+check "§142(6) an operator-set SANDY_HANDOFF_RELAY now REFUSES THE LAUNCH rather than winning — removed as a configuration key in 2.2.0 (#354). The precedence it used to win is gone because the contender is gone (got: $(printf '%s' "$_S142_OUT3" | tr '\n' ' '))" \
+    bash -c '[ "$1" = "DRIVER-FAILED" ] || ! printf "%s" "$1" | grep -q "^relay=/opt/explicit/relay$"' _ "$_S142_OUT3"
 
-# THE COEXISTENCE-WINDOW PRECEDENCE, which nothing asserted before. 2.0.0
-# promises relay-bin/relay WINS over a manifest `entry` for one release, and a
-# consumer is holding off migrating on the strength of it. A flag day on the
-# mechanism that starts a delivery daemon is how a fleet goes silently dark, so
-# the promise is worth a check rather than a paragraph.
+# THE COEXISTENCE WINDOW IS CLOSED (#354). 2.0.0 promised relay-bin/relay would
+# win over a manifest `entry` for one release, and a consumer deferred their
+# migration on that promise. The window was scoped at one release and that was
+# 2.0; this is it closing.
+#
+# The checks are INVERTED, not deleted. A flag day on the mechanism that starts
+# a delivery daemon is how a fleet goes silently dark, so the replacement
+# behaviour has to be loud and asserted: a leftover slot entry REFUSES the
+# launch naming `entry`, rather than being ignored while the manifest relay
+# quietly takes over -- which is the same "silently dark" failure wearing the
+# opposite coat.
 mkdir -p "$_S142_DIR/slot2"
 printf '#!/bin/sh\n' > "$_S142_DIR/slot2/relay"; chmod +x "$_S142_DIR/slot2/relay"
 _S142_OUT4="$(cd "$_S142_DIR" && SANDY_HOME="$_S142_H" SANDBOX_DIR="$_S142_DIR/sb" WORK_DIR="$_S142_DIR/ws" \
@@ -16341,10 +16353,10 @@ _S142_OUT4="$(cd "$_S142_DIR" && SANDY_HOME="$_S142_H" SANDBOX_DIR="$_S142_DIR/s
     FM_BLOCK="$_S142_FM" EVAL_BLOCK="$_S142_EVAL" CSI_BLOCK="$_S142_CSI" \
     _sandy_relay_slot_dir="$_S142_DIR/slot2" \
     bash "$_S142_DIR/drive.sh" 2>/dev/null)" || _S142_OUT4="DRIVER-FAILED"
-check "§142(7) relay-bin/relay WINS over a manifest entry (the 2.0 coexistence promise a consumer is deferring its migration on)" \
-    bash -c 'printf "%s" "$1" | grep -q "^relay=/opt/sandy/relay/relay$"' _ "$_S142_OUT4"
-check "§142(8) ...and crossSessionInbound is still ACCEPT on that path — the slot was never broken by #321, which is why the bug stayed hidden" \
-    bash -c 'printf "%s" "$1" | grep -q "^csi=accept$"' _ "$_S142_OUT4"
+check "§142(7) a leftover relay-bin/relay no longer WINS — it refuses the launch, so a sandbox mid-migration is told rather than silently served the wrong relay (got: $(printf '%s' "$_S142_OUT4" | tr '\n' ' '))" \
+    bash -c '[ "$1" = "DRIVER-FAILED" ] || ! printf "%s" "$1" | grep -q "^relay=/opt/sandy/relay/relay$"' _ "$_S142_OUT4"
+check "§142(8) ...and it does not resolve crossSessionInbound to accept on the way out — a refused launch must not leave an open receive surface pinned behind it" \
+    bash -c '[ "$1" = "DRIVER-FAILED" ] || ! printf "%s" "$1" | grep -q "^csi=accept$"' _ "$_S142_OUT4"
 
 rm -rf "$_S142_DIR"
 unset _S142_SANDY _S142_DIR _S142_FM _S142_EVAL _S142_CSI _S142_H _S142_OUT _S142_OUT2 _S142_OUT3 _S142_OUT4
@@ -16426,9 +16438,13 @@ SANDY_HOME="$_S141_H" bash "$_S141_SANDY" --reset-sandbox --all --keep-history -
 check "§141(8) --all actually clears the package caches it planned" \
     bash -c '! ls "$1"/sandboxes/*/pip/cached >/dev/null 2>&1' _ "$_S141_H"
 # THE CHECK THE WHOLE MIGRATION RESTS ON.
-check "§141(9) ...and PRESERVES relay-bin/ and agent-args.* on every sandbox — operator state nothing else recreates (mutation: reset via rm -rf and this goes red while (8) still passes)" \
+# relay-bin/ is NO LONGER preserved (#354): the slot is removed and a leftover
+# entry blocks the next launch, so a reset that kept it would preserve the one
+# thing the reset is most likely being run to clear. agent-args.* is still
+# operator state nothing else recreates, and still preserved.
+check "§141(9) ...and PRESERVES agent-args.* on every sandbox while DESTROYING relay-bin/ (#354) — operator state nothing else recreates is kept; a launch-blocking leftover is not (mutation: reset via rm -rf and this goes red while (8) still passes)" \
     bash -c 'for d in "$1"/sandboxes/ws*/; do
-                [ -e "$d/relay-bin/relay" ] || exit 1
+                [ ! -e "$d/relay-bin/relay" ] || exit 1
                 [ -e "$d/agent-args.claude" ] || exit 1
              done; exit 0' _ "$_S141_H"
 check "§141(10) an unresettable orphan makes the run exit NON-ZERO — the C1 rule: the goal state is not met and no work here can meet it (got rc=$_S141_RC)" \
@@ -16458,6 +16474,11 @@ check "§141(12b) ...and --all with --yes but NO history answer is refused too �
 # asked for"; this is a different question with a different blast radius, and
 # conflating them is how a scripted reset destroys 149MB of irreplaceable
 # transcripts by omission.
+# The fourth field is relay-bin/relay, which since #354 must be GONE under both
+# flags: the slot is removed and a leftover entry blocks the next launch, so a
+# reset preserving it would keep the one thing the reset is most likely being
+# run to clear. It stays in the tuple rather than being dropped, so the change
+# from keep to gone is asserted rather than untested.
 _s141h() {   # $1 = flags -> "transcript|memory|pip|relay" survival
     local d h ws
     d="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$d/ws"
@@ -16476,9 +16497,9 @@ _s141h() {   # $1 = flags -> "transcript|memory|pip|relay" survival
     rm -rf "$d"
 }
 check "§141(13) --keep-history preserves transcripts AND memory while still clearing the package caches — that split is the whole point, since only the caches are path-stale" \
-    bash -c '[ "$1" = "keep|keep|gone|keep" ]' _ "$(_s141h --keep-history)"
+    bash -c '[ "$1" = "keep|keep|gone|gone" ]' _ "$(_s141h --keep-history)"
 check "§141(14) --purge-history wipes them, because that is what remediating a distrusted sandbox requires (mutation: make keep the default and this goes red while (13) passes)" \
-    bash -c '[ "$1" = "gone|gone|gone|keep" ]' _ "$(_s141h --purge-history)"
+    bash -c '[ "$1" = "gone|gone|gone|gone" ]' _ "$(_s141h --purge-history)"
 # THE CHECK THAT MATTERS MOST: --yes must not silently choose.
 _S141_NOANS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$_S141_NOANS/ws"
 _s141_nh="$(printf '%s' "$_S141_NOANS/ws" | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-8)"
@@ -16903,12 +16924,16 @@ _s149_src() {   # $1 = install slot entry?  $2 = explicit value
         echo "$_sandy_relay_source"
     ' _ "$_S149_BLK" "$_S149_H/probe$$_$RANDOM" "$1" "$2" 2>/dev/null
 }
-check "§149(8) no slot entry and no explicit key -> source is 'none' (got: $(_s149_src noinstall ''))" \
+check "§149(8) no slot entry and no operator key -> source is 'none' (got: $(_s149_src noinstall ''))" \
     test "$(_s149_src noinstall '')" = "none"
-check "§149(9) a slot entry claims it -> 'slot' (got: $(_s149_src install ''))" \
-    test "$(_s149_src install '')" = "slot"
-check "§149(10) an explicit SANDY_HANDOFF_RELAY WINS over an installed slot entry — the documented precedence, asserted against the block that implements it (got: $(_s149_src install /x/relay))" \
-    test "$(_s149_src install /x/relay)" = "explicit"
+# (9) and (10) INVERTED by #354: both producers they asserted are removed, and
+# the replacement behaviour is a refusal rather than a different winner. A
+# deleted check would leave the removal unguarded; these assert that the block
+# REFUSES rather than silently resolving to something else.
+check "§149(9) a leftover relay-bin entry REFUSES the launch — the slot was removed in 2.2.0, and ignoring an entry would start the wrong relay, or none, without saying so (got: $(_s149_src install ''))" \
+    test "$(_s149_src install '')" = ""
+check "§149(10) an operator-set SANDY_HANDOFF_RELAY REFUSES too — removed as a configuration key. The VARIABLE survives as the manifest's internal channel, which is why a value present at THIS point can only be an operator's (got: $(_s149_src noinstall /x/relay))" \
+    test "$(_s149_src noinstall /x/relay)" = ""
 
 # The manifest producer is claimed in the entry-adoption loop, not in the block
 # above, so it is extracted and run separately rather than asserted from a
@@ -16917,31 +16942,45 @@ check "§149(10) an explicit SANDY_HANDOFF_RELAY WINS over an installed slot ent
 _S149_ADOPT="$(awk '/^    while IFS= read -r _fm_l; do/,/^    done <<< "\$_sandy_fm_out"/' "$_S149_SANDY")"
 check "§149(pre-11) the manifest entry-adoption loop was extracted" \
     bash -c 'printf "%s" "$1" | grep -q "_sandy_relay_source=\"manifest\""' _ "$_S149_ADOPT"
-# $1 = pre-existing SANDY_HANDOFF_RELAY ("" for none), $2 = the source the
-# capability block already resolved. Both are inputs because this loop runs
-# AFTER that block: in a real launch an explicit key has already set the source
-# to "explicit", and the property here is that the loop does not CLOBBER it.
+# $1 = SANDY_RELAY, $2 = the source the capability block already resolved.
 _s149_adopt() {
     bash -c '
         set -uo pipefail
-        info(){ :; }
+        # warn() to STDERR here: this helper captures STDOUT to read the
+        # resolved source, and a warning landing there would be prepended to
+        # the value. The warning itself is asserted separately by (13).
+        info(){ :; }; warn(){ echo "WARN:$*" >&2; }
         unset SANDY_HANDOFF_RELAY   # inherited from the surrounding sandy session otherwise
+        SANDY_RELAY="$2"; _SANDY_RELAY_SOURCE="workspace"
         _sandy_relay_source="$3"; _sandy_relay_from_slot="false"
         _sandy_fm_out="$(printf "entry\t/opt/sandy/features/amap/relay\n")"
-        [ -n "$2" ] && SANDY_HANDOFF_RELAY="$2"
         eval "$1"
-        echo "$_sandy_relay_source ${SANDY_HANDOFF_RELAY:-}"
+        echo "$_sandy_relay_source ${SANDY_HANDOFF_RELAY:-<none>}"
     ' _ "$_S149_ADOPT" "$1" "$2" 2>/dev/null
 }
-check "§149(11) a manifest entry claims the relay and names itself 'manifest' — the value #345 says slot could never produce (got: $(_s149_adopt '' none))" \
-    test "$(_s149_adopt '' none)" = "manifest /opt/sandy/features/amap/relay"
-check "§149(12) with an explicit key already resolved, the manifest entry neither takes the path NOR relabels the source — a source that followed the losing producer would misreport a whole fleet mid-migration (got: $(_s149_adopt /custom/relay explicit))" \
-    test "$(_s149_adopt /custom/relay explicit)" = "explicit /custom/relay"
-check "§149(13) ...and the same holds for the slot: a manifest entry does not relabel a relay the slot already supplied (the 2.0 coexistence promise, in the reporting) (got: $(_s149_adopt /opt/sandy/relay/relay slot))" \
-    test "$(_s149_adopt /opt/sandy/relay/relay slot)" = "slot /opt/sandy/relay/relay"
+check "§149(11) a manifest entry claims the relay and names itself 'manifest' — the only producer left, and the value #345 says slot could never produce (got: $(_s149_adopt 1 none))" \
+    test "$(_s149_adopt 1 none)" = "manifest /opt/sandy/features/amap/relay"
+
+# (12) is the behaviour change #354 makes to SANDY_RELAY, and the one the
+# maintainer has to be able to veto: =0 used to disable a SLOT relay and
+# silently NOT stop a manifest entry. It now stops both.
+_S149_OFF="$(_s149_adopt 0 none)"
+_S149_OFFW="$(bash -c '
+    set -uo pipefail
+    info(){ :; }; warn(){ echo "WARN:$*"; }
+    unset SANDY_HANDOFF_RELAY
+    SANDY_RELAY=0; _SANDY_RELAY_SOURCE="workspace"
+    _sandy_relay_source="none"; _sandy_relay_from_slot="false"
+    _sandy_fm_out="$(printf "entry\t/opt/sandy/features/amap/relay\n")"
+    eval "$1"
+' _ "$_S149_ADOPT" 2>/dev/null)"
+check "§149(12) SANDY_RELAY=0 now suppresses a MANIFEST entry too (#354) — previously it stopped only the slot, so =0 meant 'no relay' while a relay ran (got: $_S149_OFF)" \
+    test "$_S149_OFF" = "none <none>"
+check "§149(13) ...and the suppression is LOUD, naming the entry it declined to run and where the 0 came from — a silent suppression here is the 'fleet goes dark' failure the coexistence window existed to prevent (got: $(printf '%s' "$_S149_OFFW" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^WARN:" && printf "%s" "$1" | grep -q "amap/relay" && printf "%s" "$1" | grep -q "workspace"' _ "$_S149_OFFW"
 
 rm -rf "$_S149_H"
-unset _S149_SANDY _S149_H _S149_PS _S149_UNIQ _S149_SRCS _S149_EXE _S149_DISTINCT _S149_BLK _S149_ADOPT
+unset _S149_SANDY _S149_H _S149_PS _S149_UNIQ _S149_SRCS _S149_EXE _S149_DISTINCT _S149_BLK _S149_ADOPT _S149_OFF _S149_OFFW
 unset -f _s149_mk _s149_src _s149_adopt
 
 # ============================================================
