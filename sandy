@@ -10592,6 +10592,35 @@ start_proxy_sidecar() {
 # failure during network/proxy setup can't leak networks (which would exhaust
 # Docker's address pool across repeated failed launches).
 
+# _sandy_parent_image_id DOCKERFILE -- the image id this Dockerfile's FROM
+# resolves to right now, or "absent". #294: the skills images are built FROM the
+# agent image and rebuilt only when their OWN Dockerfile changes, so once
+# sandy-claude-code moves, a skill-pack sandbox keeps launching with whatever
+# user-setup.sh and entrypoint.sh were baked in at its last build. Measured in
+# the field: a gstack base from 2026-07-20 carried a user-setup.sh predating the
+# relay supervisor (1.10.0), so every launch mounted the relay slot, exported
+# SANDY_HANDOFF_RELAY, started the agent -- and never started the supervisor,
+# because the script that would start it was not in the image. --print-state
+# then reported relay.state=failed for a sandbox that had done nothing wrong.
+#
+# BUILD_HASH for the agent images already folds in user-setup.sh and
+# entrypoint.sh for exactly this reason; the skills chain inherits those files
+# through FROM and so never sees them change. Folding the parent's id into the
+# child's cache key makes a rebuilt parent invalidate the chain the same way an
+# edited Dockerfile does.
+#
+# The FROM is READ FROM THE FILE rather than reconstructed: Dockerfile.skills is
+# FROM the skills-base image when a pack needs one and FROM the agent image when
+# none does, so a second copy of that rule here would be a second place to get
+# it wrong. awk with a field compare, no regex, so it is BWK-safe.
+_sandy_parent_image_id() {
+    local _df="$1" _from
+    [ -f "$_df" ] || { printf 'absent'; return 0; }
+    _from="$(awk 'toupper($1)=="FROM"{print $2; exit}' "$_df")"
+    [ -n "$_from" ] || { printf 'absent'; return 0; }
+    docker image inspect -f '{{.Id}}' "$_from" 2>/dev/null || printf 'absent'
+}
+
 # --- Phase 2.5: Skill pack image (after config so SANDY_SKILL_PACKS is available) ---
 if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
     # Resolve latest versions from GitHub (caches locally for offline fallback)
@@ -10611,7 +10640,7 @@ if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
             rm -f "$SANDY_HOME/Dockerfile.skills-base.new"
         fi
 
-        SKILLS_BASE_HASH="$(cat "$SANDY_HOME/Dockerfile.skills-base" | sha256 | cut -d' ' -f1)"
+        SKILLS_BASE_HASH="$( { cat "$SANDY_HOME/Dockerfile.skills-base"; printf 'parent:%s\n' "$(_sandy_parent_image_id "$SANDY_HOME/Dockerfile.skills-base")"; } | sha256 | cut -d' ' -f1)"
         SKILLS_BASE_HASH_FILE="$SANDY_HOME/.skills_base_build_hash"
 
         SKILLS_BASE_NEEDS_BUILD=false
@@ -10642,7 +10671,7 @@ if [ -n "${SANDY_SKILL_PACKS:-}" ]; then
         rm -f "$SANDY_HOME/Dockerfile.skills.new"
     fi
 
-    SKILLS_BUILD_HASH="$(cat "$SANDY_HOME/Dockerfile.skills" | sha256 | cut -d' ' -f1)"
+    SKILLS_BUILD_HASH="$( { cat "$SANDY_HOME/Dockerfile.skills"; printf 'parent:%s\n' "$(_sandy_parent_image_id "$SANDY_HOME/Dockerfile.skills")"; } | sha256 | cut -d' ' -f1)"
     SKILLS_HASH_FILE="$SANDY_HOME/.skills_build_hash"
 
     SKILLS_NEEDS_BUILD=false

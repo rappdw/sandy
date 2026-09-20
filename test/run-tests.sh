@@ -16918,6 +16918,93 @@ rm -rf "$_S149_H"
 unset _S149_SANDY _S149_H _S149_PS _S149_UNIQ _S149_SRCS _S149_EXE _S149_DISTINCT _S149_BLK _S149_ADOPT
 unset -f _s149_mk _s149_src _s149_adopt
 
+# ============================================================
+echo ""
+echo "§150: a rebuilt parent invalidates the skill-pack images (#294)"
+# ============================================================
+# sandy-skills-base-<pack> is FROM sandy-claude-code and sandy-skills-<pack> is
+# FROM one of the two, but each was rebuilt only when its OWN Dockerfile
+# changed. So once the agent image moved, a skill-pack sandbox kept launching
+# with whatever user-setup.sh and entrypoint.sh were baked in at its last build.
+#
+# Measured in the field: a gstack base from 2026-07-20 carried a user-setup.sh
+# predating the relay supervisor (1.10.0). Every launch mounted the relay slot,
+# exported SANDY_HANDOFF_RELAY, started the agent -- and never started the
+# supervisor, because the script that would start it was not in the image.
+# --print-state then reported relay.state="failed" for a sandbox that had done
+# nothing wrong.
+#
+# NO DOCKER NEEDED: the property is "the cache key moves when the parent id
+# moves", and the parent id is read through one command that can be stubbed.
+_S150_SANDY="$SANDY_SCRIPT"
+_S150_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S150_FN="$(awk '/^_sandy_parent_image_id\(\) \{$/,/^\}$/' "$_S150_SANDY")"
+check "§150(pre) _sandy_parent_image_id was extracted (mutation: rename it and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "image inspect"' _ "$_S150_FN"
+
+printf 'FROM sandy-claude-code\nRUN echo hi\n'          > "$_S150_DIR/Dockerfile.skills-base"
+printf 'FROM sandy-skills-base-gstack\nRUN echo yo\n'   > "$_S150_DIR/Dockerfile.skills"
+
+# _s150_id <dockerfile> <what `docker image inspect` prints, or FAIL>
+_s150_id() {
+    bash -c '
+        set -uo pipefail
+        eval "$1"
+        # The fake id is captured into a variable FIRST: inside a function
+        # body $3 is the third argument OF THAT FUNCTION, and `docker image
+        # inspect -f {{.Id}} NAME` would have made it print "{{.Id}}" for every
+        # parent -- identical for both, so (5)/(7) went red and (6) passed
+        # vacuously.
+        _s150_fake="$3"
+        if [ "$3" = FAIL ]; then docker() { return 1; }; else docker() { printf "%s" "$_s150_fake"; }; fi
+        _sandy_parent_image_id "$2"
+    ' _ "$_S150_FN" "$1" "$2" 2>/dev/null
+}
+check "§150(1) the parent is read from the FROM line of the file, so the skills image follows whichever parent it was generated against (got: $(_s150_id "$_S150_DIR/Dockerfile.skills" sha256:aaa))" \
+    test "$(_s150_id "$_S150_DIR/Dockerfile.skills" sha256:aaa)" = "sha256:aaa"
+check "§150(2) a docker that cannot answer yields 'absent', never an empty string — an empty parent would hash the same as a missing one and silently stop invalidating" \
+    test "$(_s150_id "$_S150_DIR/Dockerfile.skills" FAIL)" = "absent"
+check "§150(3) a Dockerfile that does not exist yields 'absent' rather than aborting the launch under set -e" \
+    test "$(_s150_id "$_S150_DIR/nosuch" sha256:aaa)" = "absent"
+
+# --- the property: the real hash lines, with the parent moved underneath ------
+# The two assignments are lifted from sandy rather than restated, so a revert to
+# `cat FILE | sha256` is caught here instead of passing against a restatement.
+_S150_HB="$(grep -m1 'SKILLS_BASE_HASH="\$(' "$_S150_SANDY")"
+_S150_HC="$(grep -m1 'SKILLS_BUILD_HASH="\$(' "$_S150_SANDY")"
+check "§150(pre-4) both skills hash assignments were extracted" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ]' _ "$_S150_HB" "$_S150_HC"
+_s150_hash() {   # $1 = the assignment line, $2 = var name, $3 = fake parent id
+    bash -c '
+        set -uo pipefail
+        sha256() { shasum -a 256 2>/dev/null || sha256sum; }
+        eval "$1"
+        _s150_fake="$4"          # see the note in _s150_id: NOT "$4" inside the body
+        docker() { printf "%s" "$_s150_fake"; }
+        SANDY_HOME="$5"
+        eval "$2"
+        eval "printf %s \"\$$3\""
+    ' _ "$_S150_FN" "$1" "$2" "$3" "$_S150_DIR" 2>/dev/null
+}
+_S150_B1="$(_s150_hash "$_S150_HB" SKILLS_BASE_HASH sha256:parentA)"
+_S150_B2="$(_s150_hash "$_S150_HB" SKILLS_BASE_HASH sha256:parentB)"
+_S150_B3="$(_s150_hash "$_S150_HB" SKILLS_BASE_HASH sha256:parentA)"
+check "§150(4) the skills-BASE cache key is non-empty (mutation: a broken extraction would make (5) compare two empty strings and pass)" \
+    bash -c '[ -n "$1" ]' _ "$_S150_B1"
+check "§150(5) rebuilding the agent image MOVES the skills-base cache key — this is the whole bug: the Dockerfile is byte-identical and only the parent changed" \
+    bash -c '[ "$1" != "$2" ]' _ "$_S150_B1" "$_S150_B2"
+check "§150(6) ...and an UNCHANGED parent leaves it identical, so this does not rebuild Chromium on every launch" \
+    test "$_S150_B1" = "$_S150_B3"
+
+_S150_C1="$(_s150_hash "$_S150_HC" SKILLS_BUILD_HASH sha256:baseA)"
+_S150_C2="$(_s150_hash "$_S150_HC" SKILLS_BUILD_HASH sha256:baseB)"
+check "§150(7) the same holds one link down: a rebuilt skills-BASE moves the skills CODE image cache key, so the whole chain invalidates" \
+    bash -c '[ -n "$1" ] && [ "$1" != "$2" ]' _ "$_S150_C1" "$_S150_C2"
+
+rm -rf "$_S150_DIR"
+unset _S150_SANDY _S150_DIR _S150_FN _S150_HB _S150_HC _S150_B1 _S150_B2 _S150_B3 _S150_C1 _S150_C2
+unset -f _s150_id _s150_hash
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
