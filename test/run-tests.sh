@@ -7038,8 +7038,10 @@ check "§86 outbox is NOT mounted (removed in 2.2.0, #352)" \
     bash -c '! grep -qF "handoff/outbox:/home/sandy/.handoff/outbox" "$1"' -- "$_S86"
 check "§86 peer is NOT mounted (removed in 2.2.0, #352)" \
     bash -c '! grep -qF "handoff/peer:/home/sandy/.handoff/peer" "$1"' -- "$_S86"
-check "§86 relay IS still mounted, rw — it is the supervisor state directory and the session fails without it (sandy:7699); removing it belongs to #353, not here" \
-    bash -c 'grep -qF "handoff/relay:/home/sandy/.handoff/relay" "$1" && ! grep -qF "handoff/relay:/home/sandy/.handoff/relay:ro" "$1"' -- "$_S86"
+check "§86 NO handoff lane is mounted at all any more — relay state moved to /opt/sandy/relay-state in #353, so the tree is inert host-side state until #355 deletes it" \
+    bash -c '! grep -qF ":/home/sandy/.handoff/" "$1"' -- "$_S86"
+check "§86 ...and relay state IS mounted rw at its new producer-agnostic path, which is NOT under the agent home" \
+    bash -c 'grep -qF "relay-state:/opt/sandy/relay-state" "$1" && ! grep -qF "relay-state:/opt/sandy/relay-state:ro" "$1"' -- "$_S86"
 check "§86 the three lanes are gone from the container ENV contract too — a variable naming a directory that is not mounted is worse than neither" \
     bash -c '! grep -q "SANDY_HANDOFF_INBOX\|SANDY_HANDOFF_OUTBOX\|SANDY_HANDOFF_PEER" "$1"' -- "$_S86"
 # Gating: the mount block lives inside the SANDY_HANDOFF_DIRS=1 guard, whose
@@ -7048,8 +7050,8 @@ check "mount emission is gated on SANDY_HANDOFF_DIRS = 1, with unset falling bac
     bash -c 'awk "/Handoff directories mounts \(#132 substrate\)/,/^fi\$/" "$1" | grep -q "SANDY_HANDOFF_DIRS:-1.*= \"1\""' -- "$_S86"
 check "NEGATIVE: no site in the script still falls back to 0 for SANDY_HANDOFF_DIRS (a stray :-0 would silently turn the default back off at that one site)" \
     bash -c '! grep -q "SANDY_HANDOFF_DIRS:-0" "$1"' -- "$_S86"
-check "exactly 1 RUN_FLAGS handoff line (relay only; three lanes removed in #352, no stray emission outside the gate)" \
-    bash -c '[ "$(grep -c "RUN_FLAGS.*handoff" "$1")" -eq 1 ]' -- "$_S86"
+check "ZERO RUN_FLAGS handoff mount lines (#353 moved the last one out; the -e SANDY_HANDOFF_RELAY line has no lowercase handoff substring so it is correctly not counted)" \
+    bash -c '[ "$(grep -c "RUN_FLAGS.*handoff/" "$1")" -eq 0 ]' -- "$_S86"
 # mkdir is UNCONDITIONAL (only the mount is gated) but must still live in the
 # BEGIN/END handoff block, not drift into the persistent-package block above it.
 #
@@ -8464,9 +8466,8 @@ check "§97(9) NEGATIVE: no mount references the marker path" \
     bash -c '! grep -q "handoff-enabled" <(grep "RUN_FLAGS+=(-v" "$1") 2>/dev/null || ! grep "RUN_FLAGS+=(-v" "$1" | grep -q "handoff-enabled"' -- "$_S97"
 
 # --- the mount flags are untouched by this feature -------------------------
-check "§97(10) relay is still mounted rw, and the three removed lanes (#352) are not mounted at all — the marker governs the mount, and there is now exactly one" \
-    bash -c 'grep -q "handoff/relay:/home/sandy/.handoff/relay" "$1" \
-        && ! grep -q "handoff/inbox\|handoff/outbox\|handoff/peer" "$1"' -- "$_S97"
+check "§97(10) no handoff lane is mounted at all (#352 removed three, #353 moved the fourth out) — the marker now governs a tree with nothing left in it, which is why #355 deletes both" \
+    bash -c '! grep -q ":/home/sandy/.handoff/" "$1"' -- "$_S97"
 
 # --- reset preserves enrollment, destroys staged content -------------------
 check "§97(11) --reset-sandbox preserves .handoff-enabled (operator state)" \
@@ -11810,10 +11811,10 @@ check "§114(12b) ...and with NO relay configured the same collision is silent, 
     test "$_S114_COLL_RC" -eq 0
 
 # --- (13) RUN_FLAGS / marker wiring ------------------------------------------
-check "§114(13a) exactly 1 handoff RUN_FLAGS line (relay only — inbox, outbox and peer were removed in 2.2.0, #352; the -e SANDY_HANDOFF_RELAY line has no lowercase handoff substring so it is correctly not counted)" \
-    bash -c '[ "$(grep -c "RUN_FLAGS.*handoff" "$1")" -eq 1 ]' -- "$_S114_SANDY"
-check "§114(13b) the relay mount has no :ro (it is read-write, unlike inbox)" \
-    bash -c 'grep -q "handoff/relay:/home/sandy/.handoff/relay\")" "$1" && ! grep -q "handoff/relay:/home/sandy/.handoff/relay:ro" "$1"' -- "$_S114_SANDY"
+check "§114(13a) zero handoff mount lines — #352 removed three lanes and #353 moved relay state to /opt/sandy/relay-state" \
+    bash -c '[ "$(grep -c "RUN_FLAGS.*handoff/" "$1")" -eq 0 ]' -- "$_S114_SANDY"
+check "§114(13b) the relay STATE mount is read-write at its new path (#353) — the supervisor writes .state and supervisor.log there, and a :ro slip would fail every relay launch" \
+    bash -c 'grep -q "relay-state:/opt/sandy/relay-state\")" "$1" && ! grep -q "relay-state:/opt/sandy/relay-state:ro" "$1"' -- "$_S114_SANDY"
 check "§114(13c) -e SANDY_HANDOFF_RELAY appears exactly once, inside the handoff-mounts gate" \
     bash -c '[ "$(grep -c "\-e \"SANDY_HANDOFF_RELAY=" "$1")" -eq 1 ]' -- "$_S114_SANDY"
 check "§114(13d) mkdir for the four handoff subdirs is on one line (outbox inbox relay peer)" \
@@ -11827,18 +11828,14 @@ check "§114(13e) zero-diff invariant: with the opt-out (SANDY_HANDOFF_DIRS=0) a
         eval "$_blk"
         [ "${#RUN_FLAGS[@]}" -eq 0 ]
     ' -- "$_S114_SANDY"
-check "§114(13e-2) default-on invariant: with SANDY_HANDOFF_DIRS unset and no relay, the gate emits exactly the four -v mounts and no -e (the relay env line stays tied to the relay key)" \
+check "§114(13e-2) default-on invariant: with SANDY_HANDOFF_DIRS unset and no relay, the gate emits NOTHING — every lane it governed is gone (#352 took three, #353 moved the fourth out), so the key now guards an empty block until #355 removes it" \
     bash -c '
         _blk="$(awk "/Handoff directories mounts/,/^fi\$/" "$1")"
         RUN_FLAGS=()
         unset SANDY_HANDOFF_DIRS SANDY_HANDOFF_RELAY
         SANDBOX_DIR=/sb
         eval "$_blk"
-        [ "${#RUN_FLAGS[@]}" -eq 2 ] || exit 1
-        _joined="$(printf "%s\n" "${RUN_FLAGS[@]}")"
-        printf "%s\n" "$_joined" | grep -qx "/sb/handoff/relay:/home/sandy/.handoff/relay" || exit 1
-        ! printf "%s\n" "$_joined" | grep -q "inbox\|outbox\|peer" || exit 1
-        ! printf "%s\n" "$_joined" | grep -q "^-e\$"
+        [ "${#RUN_FLAGS[@]}" -eq 0 ]
     ' -- "$_S114_SANDY"
 
 check "§114(13f) marker printf: cross_session_inbound and handoff_relay fields present" \
@@ -12000,12 +11997,12 @@ if [ -f "$_S114_TMPL" ]; then
     check "§114(15i) call site is ALSO gated on SANDY_REMOTE_CONTROL (criterion 8: --remote has no panes for the relay to target, and the supervisor never gives up)" \
         bash -c 'grep -q "_sandy_is_headless.*!=.*true.*SANDY_REMOTE_CONTROL.*!=.*true.*_sandy_start_handoff_relay" "$1"' -- "$_S114_TMPL"
     # --- criterion 7, in-container half: three preconditions the host cannot
-    # check (an image-only path, the ~/.handoff/relay mount, flock in the
+    # check (an image-only path, the /opt/sandy/relay-state mount, flock in the
     # image) each `exit 1` so the container dies before any tmux session
     # exists, rather than logging and leaving crossSessionInbound=accept with
     # nothing delivering.
-    check "§114(15i-2) env contract: the supervisor exports ONLY SANDY_HANDOFF_RELAY_STATE — _INBOX, _OUTBOX and _PEER went with their directories (#352), and a variable naming an unmounted path is worse than no variable" \
-        bash -c 'printf "%s\n" "$1" | grep -q "export SANDY_HANDOFF_RELAY_STATE=" && ! printf "%s\n" "$1" | grep -q "SANDY_HANDOFF_INBOX\|SANDY_HANDOFF_OUTBOX\|SANDY_HANDOFF_PEER"' -- "$_S114_SUP_FN"
+    check "§114(15i-2) env contract: the supervisor exports ONLY SANDY_RELAY_STATE — the SANDY_HANDOFF_* container vars went with their directories (#352, #353). A variable naming a path that is not mounted is worse than no variable" \
+        bash -c 'printf "%s\n" "$1" | grep -q "export SANDY_RELAY_STATE=" && ! printf "%s\n" "$1" | grep -qE "^ *export .*SANDY_HANDOFF_(INBOX|OUTBOX|PEER|RELAY_STATE)"' -- "$_S114_SUP_FN"
     check "§114(15j) exactly three ERROR+exit-1 preconditions in the supervisor (relay not executable, relay state dir not mounted, flock missing)" \
         bash -c '[ "$(printf "%s\n" "$1" | grep -c "^        exit 1\$")" -eq 3 ]' -- "$_S114_SUP_FN"
     check "§114(15k) each of the three names the fail-the-session rule in its ERROR line" \
@@ -12025,7 +12022,7 @@ fi
 # --- (16) dynamic supervisor test (local loop, no Docker) --------------------
 if command -v flock >/dev/null 2>&1 && [ -n "${_S114_SUP_FN:-}" ]; then
     _S114_RF="$_S114/relayfix"
-    mkdir -p "$_S114_RF/home/.handoff/relay" "$_S114_RF/ws/.sandy"
+    mkdir -p "$_S114_RF/opt/sandy/relay-state" "$_S114_RF/home" "$_S114_RF/ws/.sandy"
     # The fixture relay records $PPID (the supervisor loop's OWN pid) on every
     # invocation, so cleanup can kill that exact loop deterministically --
     # pkill -f pattern-matching is unreliable here because the loop's argv
@@ -12036,8 +12033,8 @@ if command -v flock >/dev/null 2>&1 && [ -n "${_S114_SUP_FN:-}" ]; then
     # resolved absolute path in its argv).
     cat > "$_S114_RF/ws/.sandy/relay-fail.sh" <<'S114_RELAY_EOF'
 #!/bin/sh
-echo "$PPID" > "$SANDY_HANDOFF_RELAY_STATE/loop.pid"
-printf '%s|%s\n' "${SANDY_HANDOFF_INBOX:-unset}" "$SANDY_HANDOFF_RELAY_STATE" >> "$SANDY_HANDOFF_RELAY_STATE/env-seen"
+echo "$PPID" > "$SANDY_RELAY_STATE/loop.pid"
+printf '%s|%s\n' "${SANDY_HANDOFF_INBOX:-unset}" "$SANDY_RELAY_STATE" >> "$SANDY_RELAY_STATE/env-seen"
 exit 7
 S114_RELAY_EOF
     chmod +x "$_S114_RF/ws/.sandy/relay-fail.sh"
@@ -12052,7 +12049,12 @@ S114_RELAY_EOF
     # subshell — still needs wall-clock time to accumulate the restarts (16a)
     # measures.
     _S114_RF_RC=0
-    ( HOME="$_S114_RF/home" WORKSPACE="$_S114_RF/ws" bash -c "
+    ( HOME="$_S114_RF/home" WORKSPACE="$_S114_RF/ws" SANDY_RELAY_STATE="$_S114_RF/opt/sandy/relay-state" bash -c "
+        # unset EXPLICITLY: a sandy session still exports the retired
+        # SANDY_HANDOFF_* vars until it relaunches, so this fixture inherited a
+        # real /home/sandy/.handoff/inbox from the surrounding container, and the
+        # is-it-unset assertion measured the developer machine, not the code.
+        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE
         sandy_log(){ :; }
         SANDY_HANDOFF_RELAY='.sandy/relay-fail.sh'
         $_S114_SUP_FN
@@ -12061,7 +12063,7 @@ S114_RELAY_EOF
     sleep 4
     check "§114(16z) a relay that dies at startup makes the supervisor function FAIL, so the session does not come up with nothing delivering (#258 startup window; got rc=$_S114_RF_RC)" \
         bash -c '[ "$1" -ne 0 ]' -- "$_S114_RF_RC"
-    _S114_LOOP_PID="$(cat "$_S114_RF/home/.handoff/relay/loop.pid" 2>/dev/null || true)"
+    _S114_LOOP_PID="$(cat "$_S114_RF/opt/sandy/relay-state/loop.pid" 2>/dev/null || true)"
     # Freeze the loop FIRST so it cannot respawn, then kill its current child
     # (the backoff `sleep`), then the loop -- killing the loop alone leaves that
     # child orphaned as a <defunct> entry for the rest of the suite.
@@ -12071,9 +12073,9 @@ S114_RELAY_EOF
         kill -9 "$_S114_LOOP_PID" >/dev/null 2>&1 || true
     fi
     check "§114(16a) restart-with-backoff actually happened (>=2 start lines, increasing backoff)" \
-        bash -c '[ "$(grep -c " start " "$1")" -ge 2 ] && grep -q "restart in 1s" "$1" && grep -q "restart in 2s" "$1"' -- "$_S114_RF/home/.handoff/relay/supervisor.log"
-    check "§114(16b) env contract, AS THE RELAY SEES IT: SANDY_HANDOFF_RELAY_STATE points at ~/.handoff/relay, and SANDY_HANDOFF_INBOX is genuinely unset (#352) — asserted from inside a real relay process, not from the script text" \
-        bash -c 'grep -q "^unset|.*/.handoff/relay\$" "$1"' -- "$_S114_RF/home/.handoff/relay/env-seen"
+        bash -c '[ "$(grep -c " start " "$1")" -ge 2 ] && grep -q "restart in 1s" "$1" && grep -q "restart in 2s" "$1"' -- "$_S114_RF/opt/sandy/relay-state/supervisor.log"
+    check "§114(16b) env contract, AS THE RELAY SEES IT: SANDY_RELAY_STATE points at the state directory and the retired SANDY_HANDOFF_INBOX is genuinely unset — asserted from inside a real relay process, not from the script text, because what matters is the environment the relay RECEIVES" \
+        bash -c 'grep -q "^unset|.*/relay-state\$" "$1"' -- "$_S114_RF/opt/sandy/relay-state/env-seen"
     rm -rf "$_S114_RF"; unset _S114_RF_RC
 else
     skip "§114(16) dynamic supervisor loop test (flock unavailable on this host)"
@@ -12091,15 +12093,20 @@ fi
 # lines instead of one/two).
 if command -v flock >/dev/null 2>&1 && [ -n "${_S114_SUP_FN:-}" ]; then
     _S114_RF2="$_S114/relaylong"
-    mkdir -p "$_S114_RF2/home/.handoff/relay" "$_S114_RF2/ws/.sandy"
+    mkdir -p "$_S114_RF2/opt/sandy/relay-state" "$_S114_RF2/home" "$_S114_RF2/ws/.sandy"
     cat > "$_S114_RF2/ws/.sandy/relay-long.sh" <<'S114_RELAY_LONG_EOF'
 #!/bin/sh
-echo "$$" >> "$SANDY_HANDOFF_RELAY_STATE/instances"
-echo "$PPID" >> "$SANDY_HANDOFF_RELAY_STATE/loop.pids"
+echo "$$" >> "$SANDY_RELAY_STATE/instances"
+echo "$PPID" >> "$SANDY_RELAY_STATE/loop.pids"
 sleep 30
 S114_RELAY_LONG_EOF
     chmod +x "$_S114_RF2/ws/.sandy/relay-long.sh"
-    ( HOME="$_S114_RF2/home" WORKSPACE="$_S114_RF2/ws" bash -c "
+    ( HOME="$_S114_RF2/home" WORKSPACE="$_S114_RF2/ws" SANDY_RELAY_STATE="$_S114_RF2/opt/sandy/relay-state" bash -c "
+        # unset EXPLICITLY: a sandy session still exports the retired
+        # SANDY_HANDOFF_* vars until it relaunches, so this fixture inherited a
+        # real /home/sandy/.handoff/inbox from the surrounding container, and the
+        # is-it-unset assertion measured the developer machine, not the code.
+        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE
         sandy_log(){ :; }
         SANDY_HANDOFF_RELAY='.sandy/relay-long.sh'
         $_S114_SUP_FN
@@ -12112,16 +12119,16 @@ S114_RELAY_LONG_EOF
     _S114_FLOCK_RC=0
     flock -n "$_S114_LOCK" true >/dev/null 2>&1 || _S114_FLOCK_RC=$?
     check "§114(16c) singleton dynamic: exactly ONE relay instance across three concurrent starts (mutation: 'flock -n 9 && false' breaks this while 15c's presence-grep stays green)" \
-        bash -c '[ "$(wc -l < "$1" | tr -d " ")" -eq 1 ]' -- "$_S114_RF2/home/.handoff/relay/instances"
+        bash -c '[ "$(wc -l < "$1" | tr -d " ")" -eq 1 ]' -- "$_S114_RF2/opt/sandy/relay-state/instances"
     check "§114(16d) singleton dynamic: exactly 2 'already running (lock held)' lines (the two extra starts correctly refused, not silently duplicated)" \
-        bash -c '[ "$(grep -c "already running (lock held)" "$1")" -eq 2 ]' -- "$_S114_RF2/home/.handoff/relay/supervisor.log"
+        bash -c '[ "$(grep -c "already running (lock held)" "$1")" -eq 2 ]' -- "$_S114_RF2/opt/sandy/relay-state/supervisor.log"
     check "§114(16e) singleton dynamic: a foreign flock -n on the SAME lock file fails while the loop is alive (the lock is genuinely held, not merely present in the source)" \
         test "$_S114_FLOCK_RC" -ne 0
     # cleanup: kill the one loop + one relay this block leaked (detached background
     # job). Freeze the loop before killing the relay so it cannot respawn in between.
-    while IFS= read -r _p; do [ -n "$_p" ] && kill -STOP "$_p" >/dev/null 2>&1 || true; done < "$_S114_RF2/home/.handoff/relay/loop.pids" 2>/dev/null
-    while IFS= read -r _p; do [ -n "$_p" ] && kill -9 "$_p" >/dev/null 2>&1 || true; done < "$_S114_RF2/home/.handoff/relay/instances" 2>/dev/null
-    while IFS= read -r _p; do [ -n "$_p" ] && kill -9 "$_p" >/dev/null 2>&1 || true; done < "$_S114_RF2/home/.handoff/relay/loop.pids" 2>/dev/null
+    while IFS= read -r _p; do [ -n "$_p" ] && kill -STOP "$_p" >/dev/null 2>&1 || true; done < "$_S114_RF2/opt/sandy/relay-state/loop.pids" 2>/dev/null
+    while IFS= read -r _p; do [ -n "$_p" ] && kill -9 "$_p" >/dev/null 2>&1 || true; done < "$_S114_RF2/opt/sandy/relay-state/instances" 2>/dev/null
+    while IFS= read -r _p; do [ -n "$_p" ] && kill -9 "$_p" >/dev/null 2>&1 || true; done < "$_S114_RF2/opt/sandy/relay-state/loop.pids" 2>/dev/null
     rm -rf "$_S114_RF2"
 else
     skip "§114(16c-e) dynamic singleton guard (flock unavailable on this host)"
@@ -13147,7 +13154,7 @@ if command -v flock >/dev/null 2>&1; then
     _s123_window() {
         # _s123_window <relay body> -> "rc=<n>"
         local body="$1" h="$_S123_DIR/w.$$.$RANDOM"
-        mkdir -p "$h/.handoff/relay" "$h/ws"
+        mkdir -p "$h/relay-state" "$h/ws"
         printf '%s\n' "$body" > "$h/r.sh"; chmod +x "$h/r.sh"
         local rc=0
         (
@@ -13155,6 +13162,11 @@ if command -v flock >/dev/null 2>&1; then
             set +e
             sandy_log() { :; }
             HOME="$h"; WORKSPACE="$h/ws"; SANDY_HANDOFF_RELAY="$h/r.sh"
+            # The state dir is an ABSOLUTE container path now (#353), so the
+            # harness cannot relocate it via HOME. Sandy sets it host-side next
+            # to the mount and the supervisor reads it, which is what makes the
+            # path have exactly one source -- and what lets this run at all.
+            SANDY_RELAY_STATE="$h/relay-state"
             . "$_S123_DIR/supervisor.sh"
             # Same capture rule as _s123_resolve: the function's refusal is an
             # `exit 1` that kills this subshell, so the status is read outside
@@ -17069,6 +17081,98 @@ check "§150(7) the same holds one link down: a rebuilt skills-BASE moves the sk
 rm -rf "$_S150_DIR"
 unset _S150_SANDY _S150_DIR _S150_FN _S150_HB _S150_HC _S150_B1 _S150_B2 _S150_B3 _S150_C1 _S150_C2
 unset -f _s150_id _s150_hash
+
+# ============================================================
+echo ""
+echo "§151: relay state moved out of handoff/ (#353)"
+# ============================================================
+# .state and supervisor.log are SANDY'S SUPERVISOR'S files, not the relay's, so
+# they do not belong inside a feature's instance tree -- which is what the issue
+# originally proposed, and what relay.source (#345) disproved by showing two of
+# the three producers had no feature to own them.
+#
+# The consumer coupling that actually forced this: a downstream --verify read
+# supervisor.log through a CONSTRUCTED path, Path("handoff")/"relay"/... . That
+# is the third time "consumer constructs a path sandy owns" has been the fault
+# line (#248 moved the container home, #345 derived relay.path from the slot),
+# so sandy now REPORTS the path as a fact.
+_S151_SANDY="$SANDY_SCRIPT"
+_S151_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+
+# --- (1-3) the one-time migration -------------------------------------------
+_S151_MIG="$(awk '/^# --- Relay state, moved out of handoff/,/^mkdir -p "\$SANDBOX_DIR\/handoff\/relay"$/' "$_S151_SANDY")"
+check "§151(pre) the migration block was extracted (mutation: rename its header and (1)-(3) go vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "mv .*handoff/relay"' _ "$_S151_MIG"
+_s151_mig() {   # $1 = "old" (pre-2.2.0 sandbox) | "new" | "both"
+    local d; d="$(cd "$(mktemp -d)" && pwd -P)"
+    case "$1" in
+        old)   mkdir -p "$d/handoff/relay"; echo HISTORY > "$d/handoff/relay/supervisor.log" ;;
+        fresh) : ;;   # a brand-new sandbox: neither directory exists yet
+        both)  mkdir -p "$d/handoff/relay" "$d/relay-state"
+               echo HISTORY > "$d/handoff/relay/supervisor.log"
+               echo HANDMADE > "$d/relay-state/supervisor.log" ;;
+    esac
+    bash -c 'SANDBOX_DIR="$2"; eval "$1"' _ "$_S151_MIG" "$d" 2>/dev/null
+    printf '%s|%s|%s' "$(cat "$d/relay-state/supervisor.log" 2>/dev/null || { [ -d "$d/relay-state" ] && echo EMPTY || echo MISSING; })" \
+                      "$([ -d "$d/handoff/relay" ] && echo handoff-exists || echo handoff-gone)" \
+                      "$([ -e "$d/relay-state/relay" ] && echo NESTED || echo flat)"
+    rm -rf "$d"
+}
+check "§151(1) a pre-2.2.0 sandbox has its relay history MOVED, not discarded — supervisor.log is the only record of a relay's restarts, so losing it would make a crash loop undiagnosable across the upgrade (got: $(_s151_mig old))" \
+    bash -c '[ "${1%%|*}" = "HISTORY" ]' _ "$(_s151_mig old)"
+# THE ORDERING CASE, and it must be the FRESH sandbox to bite. On an old one
+# the mv works from either position, so testing only that shape leaves the bug
+# uncaught -- which it did on the first draft of this section. On a fresh
+# sandbox the migration must run BEFORE the mkdir, or it moves the empty
+# directory mkdir just created and handoff/relay never survives a launch.
+check "§151(2) a FRESH sandbox ends with BOTH directories — the migration runs before the mkdir, so it cannot move the empty directory that mkdir just made (got: $(_s151_mig fresh))" \
+    bash -c '[ "$(printf "%s" "$1" | cut -d"|" -f1)" != "MISSING" ] \
+             && [ "$(printf "%s" "$1" | cut -d"|" -f2)" = "handoff-exists" ]' _ "$(_s151_mig fresh)"
+check "§151(3) an existing relay-state is neither clobbered NOR nested into — the mv is conditional, so a second launch is a no-op; without the guard, mv would put handoff/relay INSIDE relay-state, which preserves the file while corrupting the layout (got: $(_s151_mig both))" \
+    bash -c '[ "$(printf "%s" "$1" | cut -d"|" -f1)" = "HANDMADE" ] && [ "$(printf "%s" "$1" | cut -d"|" -f3)" = "flat" ]' _ "$(_s151_mig both)"
+
+# --- (4-5) the mount and the single source of the path ----------------------
+check "§151(4) relay state is mounted READ-WRITE at /opt/sandy/relay-state — not under the agent home, where ~/.sandy would read as the HOST config root" \
+    bash -c 'grep -q "relay-state:/opt/sandy/relay-state\")" "$1" && ! grep -q "relay-state:/opt/sandy/relay-state:ro" "$1"' _ "$_S151_SANDY"
+check "§151(5) the container path has ONE source: the host sets SANDY_RELAY_STATE beside the mount and the supervisor reads it, rather than both spelling the literal (mutation: hardcode it in the supervisor and the harnesses that relocate it break)" \
+    bash -c 'grep -q -- "-e \"SANDY_RELAY_STATE=/opt/sandy/relay-state\"" "$1" \
+             && grep -q "_st=\"\${SANDY_RELAY_STATE:-/opt/sandy/relay-state}\"" "$1"' _ "$_S151_SANDY"
+check "§151(6) the mount is NOT gated on SANDY_HANDOFF_DIRS — relay state is not part of the handoff tree, and tying it to a deprecated opt-out for a different mechanism is how a relay stops starting for a reason nobody can find" \
+    bash -c '_blk="$(awk "/Handoff directories mounts/,/^fi\$/" "$1")"
+             [ -n "$_blk" ] || exit 1
+             ! printf "%s" "$_blk" | grep -q "RUN_FLAGS.*relay-state"' _ "$_S151_SANDY"
+
+# --- (7-9) state_dir: the fact a consumer reads instead of constructing ------
+_S151_H="$_S151_DIR/home"
+mkdir -p "$_S151_H/sandboxes/new-11111111/relay-state" "$_S151_H/sandboxes/old-22222222/handoff/relay"
+printf 'state=started\nrestarts=2\n' > "$_S151_H/sandboxes/new-11111111/relay-state/.state"
+printf 'state=started\nrestarts=9\n' > "$_S151_H/sandboxes/old-22222222/handoff/relay/.state"
+for _s151_n in new-11111111 old-22222222; do
+    printf '{\n  "schema": 1,\n  "relay": {\n    "slot": "absent",\n    "source": "manifest",\n    "path": "/opt/sandy/features/amap/relay",\n    "disabled_by": null\n  },\n  "cred_mode": "full"\n}\n' \
+        > "$_S151_H/sandboxes/$_s151_n/sandy-session.json"
+done
+_S151_PS="$(SANDY_HOME="$_S151_H" bash "$_S151_SANDY" --print-state 2>/dev/null)"
+if command -v node >/dev/null 2>&1; then
+    _s151_rel() { printf '%s' "$_S151_PS" | node -e '
+        let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+          const j=JSON.parse(s);
+          const sb=j.sandboxes.find(x=>x.name===process.argv[1]);
+          console.log(sb ? (sb.relay.state_dir||"") + " " + sb.relay.restarts : "NOSANDBOX");
+        });' "$1"; }
+    check "§151(7) --print-state NAMES the relay state directory, so a consumer reads a path sandy owns instead of constructing one (got: $(_s151_rel new-11111111))" \
+        bash -c 'printf "%s" "$1" | grep -q "/relay-state "' _ "$(_s151_rel new-11111111)"
+    check "§151(8) a sandbox that has NOT relaunched since the upgrade still reports its last launch honestly — read from the pre-2.2.0 location, and state_dir names THAT one (got: $(_s151_rel old-22222222))" \
+        bash -c 'printf "%s" "$1" | grep -q "handoff/relay 9$"' _ "$(_s151_rel old-22222222)"
+    check "§151(9) the two sandboxes report DIFFERENT state_dirs — a reader that always emitted the new path would pass (7) and silently mislead every un-relaunched sandbox" \
+        bash -c '[ "$1" != "$2" ]' _ "$(_s151_rel new-11111111)" "$(_s151_rel old-22222222)"
+    unset -f _s151_rel
+else
+    skip "§151(7-9) state_dir reporting needs node to read --print-state back"
+fi
+
+rm -rf "$_S151_DIR"
+unset _S151_SANDY _S151_DIR _S151_MIG _S151_H _S151_PS _s151_n
+unset -f _s151_mig
 
 # BEGIN SUMMARY
 # ============================================================
