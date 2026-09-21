@@ -468,6 +468,36 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > include things like MCP config paths) to every `--print-state` consumer.
 > See CLAUDE.md "Per-agent override" for the mechanism this field reports on.
 
+> **`agent_args_composed`** (per sandbox, added additively in `2.3.0`,
+> #363 — no `schema_version` bump). An object keyed by agent name; each value
+> is an array of entries `{flag, policy, composed, from, path}` describing what
+> sandy did about **two or more contributors of the same flag**. Read back from
+> the sandbox's own session marker, exactly like `agent_args` (2.1.0, #348 —
+> which this document does not otherwise describe; that is a gap from 2.1.0,
+> not a statement that the field is unstable). Same **LAST LAUNCH, never next
+> launch** caveat, and the same three non-collapsible states: field **absent**
+> = a sandy predating it, which cannot answer; `{}` = sandy looked and found no
+> collision; populated = what happened.
+>
+> **It answers a different question from `agent_args`, and the distinction is
+> the reason it exists.** `agent_args` records what sandy **passed**. Whether a
+> contribution can have taken **effect** depends on the agent's parser: for a
+> flag that parser reads once, the last occurrence wins and every earlier
+> contributor is silently discarded — which shipped, with `agent_args`
+> faithfully reporting both contributing features the whole time. `policy` is
+> `concat` (sandy merged the contributions into one file it owns, named by
+> `path`, a **container** path) or `report` (the flag replaces rather than
+> appends, so there is no correct merge). `composed` is `false` whenever sandy
+> detected the collision but left the argv alone — a `report` flag, or a value
+> under no mount sandy made and therefore unreadable to it. **Do not collapse
+> `composed: false` with an absent entry**: one means "looked, collided, said
+> so", the other means "no collision". `from` lists the contributor labels in
+> the order sandy passed them, so an operator can see which feature lost.
+>
+> The set of flags sandy will act on is published by `--print-schema` as
+> `manifest.agent_args_compose`; a consumer deciding whether two features may
+> each ship a given flag should read that rather than infer it.
+
 > **`orphan_networks`** (top-level, added additively in `1.1.0`, #26 — no
 > `schema_version` bump). Integer count of `sandy_(sidecar|egress|net)_<pid>`
 > networks that are reap-eligible right now: the owning `<pid>` is dead (or
