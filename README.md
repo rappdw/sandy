@@ -1002,7 +1002,7 @@ sandy --exec -- cat /etc/sandy-session.json   # workspace, sandbox_name, posture
 
 ### Also in 2.0
 
-- `--print-state`'s `schema_version` is **`2`**. Gate on that number, not on sandy's version string — `2.0.0-dev` compares equal to `2.0.0`.
+- `--print-state`'s `schema_version` was **`2`** in the 2.0 line and is **`3`** as of 2.2.0 (see **Deprecated**). Gate on that number, not on sandy's version string — `2.0.0-dev` compares equal to `2.0.0`. Treat it as an **opaque token**: compare against a reviewed set, not with `>=`, so a future bump is something you read rather than something you silently accept.
 - `sandboxes[].features` now reports **manifest selection** rather than per-sandbox markers; `SANDY_FEATURES_DIR` is removed with an error naming its replacement.
 - `SANDY_EGRESS=off|permissive|strict` replaces two booleans. The old keys still work — see **Deprecated** below.
 
