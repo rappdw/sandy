@@ -16947,6 +16947,48 @@ rm -rf "$_S151_DIR"
 unset _S151_SANDY _S151_DIR _S151_MIG _S151_H _S151_PS _s151_n
 unset -f _s151_mig
 
+# ============================================================
+echo ""
+echo "§152: an acceptance harness that DIES must be recorded as a failure"
+# ============================================================
+# run-integration-tests.sh wraps each acceptance harness as:
+#
+#     set +e; bash "$harness"; _acc_rc=$?; set -e
+#     _acc_res="$(grep -oE  RESULT-pattern  "$out" | tail -1)"
+#     if [ "$_acc_rc" -eq 0 ]; then pass ...; else fail ...; fi
+#
+# If the harness dies BEFORE printing its RESULT line, that grep matches
+# nothing and exits 1 -- which under the set -e of the suite aborts the run
+# BEFORE fail() is reached. The harness failed, and the summary said
+# "0 failed".
+#
+# MEASURED, not theorised: it happened on a real host run. A harness lost its
+# RESULT block in an edit, nineteen assertions failed, and the suite reported
+# "1 passed, 0 failed (of 1 run)" before aborting.
+#
+# This is a STATIC ratchet, and deliberately so: the wrappers are inline in a
+# 2000-line script with no extractable seam, so the behavioural equivalent
+# would have to re-implement the thing under test -- which is how a guard ends
+# up asserting its own copy rather than the product (see §148(12)).
+_S152_INT="$(cd "$(dirname "$0")" && pwd)/run-integration-tests.sh"
+check "§152(pre) run-integration-tests.sh was found (mutation: a rename makes every check below vacuous)" \
+    test -f "$_S152_INT"
+_S152_TOTAL="$(grep -c "_acc_res=\"\$(grep -oE 'RESULT:" "$_S152_INT" || true)"
+_S152_GUARDED="$(grep -c "_acc_res=\"\$(grep -oE 'RESULT:.*| tail -1 || true)\"" "$_S152_INT" || true)"
+check "§152(1) there IS at least one acceptance wrapper to guard (got $_S152_TOTAL)" \
+    bash -c '[ "$1" -ge 1 ]' _ "$_S152_TOTAL"
+check "§152(2) EVERY acceptance wrapper guards its RESULT grep with '|| true' — an unguarded one aborts the suite under set -e before fail() runs, so a dead harness reports as 0 failed (guarded $_S152_GUARDED of $_S152_TOTAL)" \
+    bash -c '[ "$1" = "$2" ]' _ "$_S152_GUARDED" "$_S152_TOTAL"
+check "§152(3) every harness the suite wraps still ENDS by printing RESULT and exiting on its FAIL count — the wrapper keys off that line, and a harness that stops printing it is invisible rather than red" \
+    bash -c '
+        _d="$(cd "$(dirname "$1")" && pwd)"
+        for _h in "$_d"/acceptance-*.sh; do
+            [ -f "$_h" ] || continue
+            grep -q "RESULT: %d passed, %d failed" "$_h" || { echo "no RESULT: $_h"; exit 1; }
+            grep -q "^\[ \"\$FAIL\" -eq 0 \]" "$_h" || { echo "no exit-on-FAIL: $_h"; exit 1; }
+        done' _ "$_S152_INT"
+unset _S152_INT _S152_TOTAL _S152_GUARDED
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

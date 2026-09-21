@@ -205,13 +205,13 @@ echo "-- E2. relay is running, as a sibling of tmux (not a pane, not a session c
 # immediately.
 _pid1=""
 for _i in 1 2 3 4 5 6; do
-    _pid1="$(docker exec -u "$(id -u)" "$C3" pgrep -f '\.sandy/relay\.sh' 2>/dev/null | head -1)"
+    _pid1="$(docker exec -u "$(id -u)" "$C3" pgrep -f 'acc-relay/relay' 2>/dev/null | head -1)"
     [ -n "$_pid1" ] && break
     sleep 1
 done
 ck "relay process is running in the container" "[ -n \"$_pid1\" ]"
 ck "exactly one relay process" \
-   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f '\.sandy/relay\.sh' 2>/dev/null)\" = 1 ]"
+   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f 'acc-relay/relay' 2>/dev/null)\" = 1 ]"
 # Two /proc/<pid>/status hops: relay's parent is the supervisor loop shell;
 # the loop shell's parent must be PID 1 (tail -f /dev/null in daemon mode,
 # which the loop was backgrounded under BEFORE PID 1 exec'd into tail --
@@ -228,7 +228,7 @@ docker exec -u "$(id -u)" "$C3" kill "$_pid_before" >/dev/null 2>&1
 _pid_after=""
 for _i in 1 2 3 4 5 6 7 8; do
     sleep 1
-    _pid_after="$(docker exec -u "$(id -u)" "$C3" pgrep -f '\.sandy/relay\.sh' 2>/dev/null | head -1)"
+    _pid_after="$(docker exec -u "$(id -u)" "$C3" pgrep -f 'acc-relay/relay' 2>/dev/null | head -1)"
     [ -n "$_pid_after" ] && [ "$_pid_after" != "$_pid_before" ] && break
 done
 ck "relay came back with a NEW pid after being killed" \
@@ -246,7 +246,7 @@ echo "-- E4. never started twice --"
 ck "the supervisor lock is HELD (a second flock -n attempt fails)" \
    "! docker exec -u \"\$(id -u)\" \"$C3\" flock -n /home/sandy/.sandy-handoff-relay.lock true"
 ck "still exactly one relay process (no second supervisor was spawned)" \
-   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f '\.sandy/relay\.sh' 2>/dev/null)\" = 1 ]"
+   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f 'acc-relay/relay' 2>/dev/null)\" = 1 ]"
 
 echo "-- E5. sandy-handoff-sessions --"
 _hs=""
@@ -263,8 +263,8 @@ ck "the listed socket path is a real socket in the container" \
 
 echo "-- E6. crossSessionInbound pin lands in both measured-working files --"
 _marker="$(docker exec -u "$(id -u)" "$C3" cat /etc/sandy-session.json 2>/dev/null)"
-ck "session marker reports handoff_relay=true" \
-   "printf '%s' \"\$_marker\" | grep -q '\"handoff_relay\": true'"
+ck "session marker reports relay.source=manifest -- handoff_relay was REMOVED in #355 and relay.source replaced it, so asserting the old field would be asserting a mechanism that no longer exists" \
+   "docker exec \"$C3\" grep -q '\"source\": \"manifest\"' /etc/sandy-session.json"
 ck "session marker reports cross_session_inbound=\"accept\" (default: relay configured)" \
    "printf '%s' \"\$_marker\" | grep -q '\"cross_session_inbound\": \"accept\"'"
 ck "userSettings (sandbox claude/settings.json, RW) carries the accept pin" \
@@ -302,7 +302,7 @@ ck "container id changed (a real recreation happened)" \
    "[ -n \"$C3\" ] && [ \"$C3\" != \"$_cid_before\" ]"
 _pid_new=""
 for _i in 1 2 3 4 5 6 7 8; do
-    _pid_new="$(docker exec -u "$(id -u)" "$C3" pgrep -f '\.sandy/relay\.sh' 2>/dev/null | head -1)"
+    _pid_new="$(docker exec -u "$(id -u)" "$C3" pgrep -f 'acc-relay/relay' 2>/dev/null | head -1)"
     [ -n "$_pid_new" ] && break
     sleep 1
 done
@@ -441,5 +441,11 @@ ck "creating a NEW file in the payload also fails (the whole directory is :ro, n
    "[ -n \"$CG\" ] && ! docker exec \"$CG\" sh -c 'touch /opt/sandy/features/acc-erofs/evil' 2>/dev/null"
 ck "the payload is unchanged on the host after the attempt" \
    "[ -n \"$CG\" ] && grep -q 'payload-seen' \"$_G_FEAT/payload/thing\""
-"$SANDY" --stop --workspace "$WS" >/dev/null 2>&1
+"$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true
 rm -rf "$_G_FEAT"
+
+echo
+echo "==================================================="
+printf 'RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
+echo "==================================================="
+[ "$FAIL" -eq 0 ]
