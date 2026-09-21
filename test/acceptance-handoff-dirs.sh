@@ -194,7 +194,7 @@ ck "no removed lane is mounted alongside the relay (#352)" \
    "! printf '%s\n' \"\$_m3\" | grep -qE '^/home/sandy/.handoff/(inbox|outbox|peer) '"
 # Never dump the whole env -- it carries CLAUDE_CODE_OAUTH_TOKEN and friends.
 # Count occurrences of the one var under test instead of printing anything.
-_envcount="$(docker inspect -f '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' "$C3" 2>/dev/null | grep -c '^SANDY_HANDOFF_RELAY=\.sandy/relay\.sh$')"
+_envcount="$(docker inspect -f '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' "$C3" 2>/dev/null | grep -c '^SANDY_HANDOFF_RELAY=/opt/sandy/features/acc-relay/relay$' || true)"
 ck "the resolved entry is forwarded into the container exactly once (SANDY_HANDOFF_RELAY survives as the INTERNAL channel a manifest entry travels through -- only the config key was removed)" "[ \"$_envcount\" = 1 ]"
 
 echo "-- E2. relay is running, as a sibling of tmux (not a pane, not a session child) --"
@@ -381,7 +381,20 @@ env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS3" > "$_e1
 ck "--start refuses (nonzero) when the declared entry is not an executable file" "[ $_e10_rc -ne 0 ]"
 ck "...and says so, naming the fail-the-launch rule" \
    "grep -q 'A configured relay that cannot start fails the session' \"$_e10_out\" || grep -q 'cannot start fails the' \"$_e10_out\""
-ck "...and no daemon container was left behind" "[ -z \"$(cid3)\" ]"
+# NOT "no container was left behind" -- that was true of the HOST-side
+# refusal, which happened before `docker run`. A manifest entry resolves to an
+# image-only path the host cannot stat, so the refusal is in-container:
+# user-setup.sh exits 1, the container dies, and --start classifies it as
+# CRASH-LOOPING (exit 7) rather than refusing before launch (exit 6). Asserting
+# the old property here would assert something the branch does not promise.
+#
+# What criterion 7 actually requires is that the session never comes up
+# READY -- a container that exists but is crash-looping is loud; a container
+# that is up with nothing delivering is the silent failure the rule exists for.
+ck "...and reports CRASH-LOOPING (exit 7), not ready -- the in-container branch of criterion 7" \
+   "[ $_e10_rc -eq 7 ]"
+ck "...and --stop cleans it up, so a refused launch leaves nothing running" \
+   "\"$SANDY\" --stop --workspace \"$WS3\" >/dev/null 2>&1; [ -z \"\$(cid3)\" ]"
 rm -f "$_e10_out"
 # Restore the working entry so anything added after this phase is unaffected.
 mv "$_E_FEAT/feature.json.bak" "$_E_FEAT/feature.json"
