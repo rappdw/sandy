@@ -151,26 +151,32 @@ mkdir -p "$WS3/.sandy" && (cd "$WS3" && git init -q)
 WS3="$(cd "$WS3" && pwd -P)"
 cid3() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.workspace_path=$WS3" 2>/dev/null | head -1; }
 
-cat > "$WS3/.sandy/relay.sh" <<'RELAYFIX'
+# The relay is installed as a feature manifest ENTRY (2.2.0). It used to be
+# installed by setting SANDY_HANDOFF_RELAY in the isolated host config, which
+# #354 made a HARD ERROR -- so a harness that still did that would refuse the
+# launch and report the supervisor as broken, when what is broken is the
+# harness. That happened; this is the fix.
+_E_FEAT="$SANDY_HOME_DIR/features/acc-relay"
+mkdir -p "$_E_FEAT/payload"
+cat > "$_E_FEAT/payload/relay" <<'RELAYFIX'
 #!/bin/sh
 # Fixture relay for phase E: records its own pid + the env contract on each
 # (re)start, then blocks. Deliberately NOT `exec sleep` -- pgrep -f below
 # matches on this script's own path, and `exec` would replace this process's
 # argv with "sleep 3600", losing that match the instant it ran.
-echo "$$ $SANDY_HANDOFF_INBOX $SANDY_HANDOFF_OUTBOX $SANDY_HANDOFF_RELAY_STATE" >> "$SANDY_HANDOFF_RELAY_STATE/seen"
+echo "$$ $SANDY_RELAY_STATE" >> "$SANDY_RELAY_STATE/seen"
 sleep 3600
 RELAYFIX
-chmod +x "$WS3/.sandy/relay.sh"
+chmod +x "$_E_FEAT/payload/relay"
+cat > "$_E_FEAT/feature.json" <<'E_MANIFEST'
+{ "sandboxes": {"include": ["*"]}, "agents": {"include": ["*"]},
+  "mounts": [ { "name": "payload", "from": "payload" } ],
+  "entry": "payload/relay" }
+E_MANIFEST
 
-# SANDY_HANDOFF_RELAY is PRIVILEGED tier. Setting it via the isolated HOST's
-# own ~/.sandy/config (a privileged SOURCE) needs no approval prompt at all --
-# unlike phases B/D above (which prove the PASSIVE tier from a WORKSPACE
-# source), a privileged source may set a privileged key freely. `env -u
-# SANDY_AUTO_APPROVE_PRIVILEGED` is kept anyway, for the same "prove it, don't
-# assume it" discipline as the rest of this file: this phase must pass
-# without that escape hatch, because it isn't the thing being exercised here.
-echo "SANDY_HANDOFF_RELAY=.sandy/relay.sh" >> "$SANDY_HOME_DIR/config"
-
+# No config key is involved any more: a manifest under $SANDY_HOME is
+# privileged by construction of WHERE IT LIVES, so there is nothing to approve.
+# `env -u SANDY_AUTO_APPROVE_PRIVILEGED` is kept anyway, to prove that.
 env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS3"; RC=$?
 ck "--start exits 0 with the relay configured" "[ $RC -eq 0 ]"
 C3="$(cid3)"
@@ -181,15 +187,15 @@ SBX3="$SANDY_HOME_DIR/sandboxes/$SESS3"
 
 echo "-- E1. mount + env forwarding --"
 _m3="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C3" 2>/dev/null)"
-echo "  mounts:"; printf '%s\n' "$_m3" | grep -i handoff | sed 's/^/    /'
-ck "relay mount is RW=true" \
-   "printf '%s\n' \"\$_m3\" | grep -qE '^/home/sandy/.handoff/relay true\$'"
+echo "  mounts:"; printf '%s\n' "$_m3" | grep -iE 'handoff|relay-state' | sed 's/^/    /'
+ck "relay STATE mount is RW=true at its 2.2.0 path (#353)" \
+   "printf '%s\n' \"\$_m3\" | grep -qE '^/opt/sandy/relay-state true\$'"
 ck "no removed lane is mounted alongside the relay (#352)" \
    "! printf '%s\n' \"\$_m3\" | grep -qE '^/home/sandy/.handoff/(inbox|outbox|peer) '"
 # Never dump the whole env -- it carries CLAUDE_CODE_OAUTH_TOKEN and friends.
 # Count occurrences of the one var under test instead of printing anything.
-_envcount="$(docker inspect -f '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' "$C3" 2>/dev/null | grep -c '^SANDY_HANDOFF_RELAY=\.sandy/relay\.sh$')"
-ck "SANDY_HANDOFF_RELAY forwarded into the container exactly once" "[ \"$_envcount\" = 1 ]"
+_envcount="$(docker inspect -f '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' "$C3" 2>/dev/null | grep -c '^SANDY_HANDOFF_RELAY=/opt/sandy/features/acc-relay/relay$' || true)"
+ck "the resolved entry is forwarded into the container exactly once (SANDY_HANDOFF_RELAY survives as the INTERNAL channel a manifest entry travels through -- only the config key was removed)" "[ \"$_envcount\" = 1 ]"
 
 echo "-- E2. relay is running, as a sibling of tmux (not a pane, not a session child) --"
 # The subshell that runs _sandy_start_handoff_relay's loop is backgrounded
@@ -199,13 +205,13 @@ echo "-- E2. relay is running, as a sibling of tmux (not a pane, not a session c
 # immediately.
 _pid1=""
 for _i in 1 2 3 4 5 6; do
-    _pid1="$(docker exec -u "$(id -u)" "$C3" pgrep -f '\.sandy/relay\.sh' 2>/dev/null | head -1)"
+    _pid1="$(docker exec -u "$(id -u)" "$C3" pgrep -f 'acc-relay/relay' 2>/dev/null | head -1)"
     [ -n "$_pid1" ] && break
     sleep 1
 done
 ck "relay process is running in the container" "[ -n \"$_pid1\" ]"
 ck "exactly one relay process" \
-   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f '\.sandy/relay\.sh' 2>/dev/null)\" = 1 ]"
+   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f 'acc-relay/relay' 2>/dev/null)\" = 1 ]"
 # Two /proc/<pid>/status hops: relay's parent is the supervisor loop shell;
 # the loop shell's parent must be PID 1 (tail -f /dev/null in daemon mode,
 # which the loop was backgrounded under BEFORE PID 1 exec'd into tail --
@@ -222,25 +228,25 @@ docker exec -u "$(id -u)" "$C3" kill "$_pid_before" >/dev/null 2>&1
 _pid_after=""
 for _i in 1 2 3 4 5 6 7 8; do
     sleep 1
-    _pid_after="$(docker exec -u "$(id -u)" "$C3" pgrep -f '\.sandy/relay\.sh' 2>/dev/null | head -1)"
+    _pid_after="$(docker exec -u "$(id -u)" "$C3" pgrep -f 'acc-relay/relay' 2>/dev/null | head -1)"
     [ -n "$_pid_after" ] && [ "$_pid_after" != "$_pid_before" ] && break
 done
 ck "relay came back with a NEW pid after being killed" \
    "[ -n \"$_pid_after\" ] && [ \"$_pid_after\" != \"$_pid_before\" ]"
-_exits="$(docker exec -u "$(id -u)" "$C3" grep -c 'exit rc=' /home/sandy/.handoff/relay/supervisor.log 2>/dev/null || echo 0)"
+_exits="$(docker exec -u "$(id -u)" "$C3" grep -c 'exit rc=' /opt/sandy/relay-state/supervisor.log 2>/dev/null || echo 0)"
 ck "supervisor.log recorded the exit" "[ \"${_exits:-0}\" -ge 1 ]"
 # The log line is "[sandy-relay] <ISO ts> start <path>", so the timestamp sits
 # between the bracket and the word -- the old '\] start ' pattern required them
 # adjacent and therefore never matched, making this check fail even on a
 # perfectly working restart (which E3s own new-pid assertion had just proved).
-_starts="$(docker exec -u "$(id -u)" "$C3" grep -c ' start /' /home/sandy/.handoff/relay/supervisor.log 2>/dev/null || echo 0)"
+_starts="$(docker exec -u "$(id -u)" "$C3" grep -c ' start /' /opt/sandy/relay-state/supervisor.log 2>/dev/null || echo 0)"
 ck "supervisor.log shows at least 2 starts (initial + restart)" "[ \"${_starts:-0}\" -ge 2 ]"
 
 echo "-- E4. never started twice --"
 ck "the supervisor lock is HELD (a second flock -n attempt fails)" \
    "! docker exec -u \"\$(id -u)\" \"$C3\" flock -n /home/sandy/.sandy-handoff-relay.lock true"
 ck "still exactly one relay process (no second supervisor was spawned)" \
-   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f '\.sandy/relay\.sh' 2>/dev/null)\" = 1 ]"
+   "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f 'acc-relay/relay' 2>/dev/null)\" = 1 ]"
 
 echo "-- E5. sandy-handoff-sessions --"
 _hs=""
@@ -257,8 +263,8 @@ ck "the listed socket path is a real socket in the container" \
 
 echo "-- E6. crossSessionInbound pin lands in both measured-working files --"
 _marker="$(docker exec -u "$(id -u)" "$C3" cat /etc/sandy-session.json 2>/dev/null)"
-ck "session marker reports handoff_relay=true" \
-   "printf '%s' \"\$_marker\" | grep -q '\"handoff_relay\": true'"
+ck "session marker reports relay.source=manifest -- handoff_relay was REMOVED in #355 and relay.source replaced it, so asserting the old field would be asserting a mechanism that no longer exists" \
+   "docker exec \"$C3\" grep -q '\"source\": \"manifest\"' /etc/sandy-session.json"
 ck "session marker reports cross_session_inbound=\"accept\" (default: relay configured)" \
    "printf '%s' \"\$_marker\" | grep -q '\"cross_session_inbound\": \"accept\"'"
 ck "userSettings (sandbox claude/settings.json, RW) carries the accept pin" \
@@ -286,7 +292,7 @@ _cid_before="$C3"
 env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --update-sessions --yes --workspace "$WS3" >/dev/null 2>&1; RC=$?
 ck "--update-sessions exits 0 (whether it restarted a stale session or correctly no-opped)" "[ $RC -eq 0 ]"
 
-_seen_before="$(wc -l < "$SBX3/handoff/relay/seen" 2>/dev/null | tr -d ' ')"
+_seen_before="$(wc -l < "$SBX3/relay-state/seen" 2>/dev/null | tr -d ' ')"
 _cid_before="$(cid3)"
 "$SANDY" --stop --workspace "$WS3" >/dev/null 2>&1
 env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS3" >/dev/null 2>&1; RC=$?
@@ -296,7 +302,7 @@ ck "container id changed (a real recreation happened)" \
    "[ -n \"$C3\" ] && [ \"$C3\" != \"$_cid_before\" ]"
 _pid_new=""
 for _i in 1 2 3 4 5 6 7 8; do
-    _pid_new="$(docker exec -u "$(id -u)" "$C3" pgrep -f '\.sandy/relay\.sh' 2>/dev/null | head -1)"
+    _pid_new="$(docker exec -u "$(id -u)" "$C3" pgrep -f 'acc-relay/relay' 2>/dev/null | head -1)"
     [ -n "$_pid_new" ] && break
     sleep 1
 done
@@ -304,7 +310,7 @@ ck "relay is running again in the NEW container" "[ -n \"$_pid_new\" ]"
 # Asserted as GROWTH against the pre-recreation count, not a bare ">= 2":
 # the sandbox dir survives recreation, so a fixed threshold would be satisfied
 # by lines an earlier phase wrote and would prove nothing about this step.
-_seen_after="$(wc -l < "$SBX3/handoff/relay/seen" 2>/dev/null | tr -d ' ')"
+_seen_after="$(wc -l < "$SBX3/relay-state/seen" 2>/dev/null | tr -d ' ')"
 ck "relay state persisted across recreation AND the new instance appended to it" \
    "[ \"${_seen_after:-0}\" -gt \"${_seen_before:-0}\" ]"
 
@@ -313,7 +319,7 @@ echo "-- E8. headless (-p) never starts a relay --"
 # is still live would just be refused by the workspace mutex, proving nothing
 # about the relay gate specifically.
 "$SANDY" --stop --workspace "$WS3" >/dev/null 2>&1
-_lines_before="$(wc -l < "$SBX3/handoff/relay/supervisor.log" 2>/dev/null | tr -d ' ')"
+_lines_before="$(wc -l < "$SBX3/relay-state/supervisor.log" 2>/dev/null | tr -d ' ')"
 # `timeout` is GNU coreutils and is NOT present on a stock macOS (homebrew
 # installs it as `gtimeout`). Invoking it unconditionally made the -p launch
 # exit 127, which this phase then reported as "the launch did not succeed" --
@@ -339,7 +345,7 @@ if [ "$_e8_rc" -ne 0 ]; then
     # move on without touching either, rather than counting it as a pass.
     [ -n "$_e8_to" ] && printf '  \033[33mSKIP\033[0m %s\n' "E8 headless relay gate (the -p launch itself did not succeed, rc=$_e8_rc -- cannot conclude anything about the relay gate from it)"
 else
-    _lines_after="$(wc -l < "$SBX3/handoff/relay/supervisor.log" 2>/dev/null | tr -d ' ')"
+    _lines_after="$(wc -l < "$SBX3/relay-state/supervisor.log" 2>/dev/null | tr -d ' ')"
     ck "supervisor.log line count unchanged after a successful headless run (no relay was started)" \
        "[ \"${_lines_before:-0}\" = \"${_lines_after:-0}\" ]"
     # Acceptance criterion 8: the skip is announced, and the announcement names
@@ -357,19 +363,48 @@ echo "-- E10. criterion 7: a configured relay that CANNOT start fails the launch
 # Host-side detection (the path is workspace-relative, so sandy can resolve it
 # back to the host and refuse before `docker run` ever happens).
 "$SANDY" --stop --workspace "$WS3" >/dev/null 2>&1
-sed -i.bak 's|^SANDY_HANDOFF_RELAY=.*|SANDY_HANDOFF_RELAY=.sandy/does-not-exist.sh|' "$SANDY_HOME_DIR/config"
+# Break the ENTRY, not a config key: point the manifest at a path that is not
+# executable. The refusal is in-container now (user-setup.sh exits 1 and the
+# container dies), because a manifest entry resolves to an image-only path the
+# host cannot stat -- which is the branch the host-side check was never
+# covering anyway.
+cp "$_E_FEAT/feature.json" "$_E_FEAT/feature.json.bak"
+cat > "$_E_FEAT/feature.json" <<'E10_MANIFEST'
+{ "sandboxes": {"include": ["*"]}, "agents": {"include": ["*"]},
+  "mounts": [ { "name": "payload", "from": "payload" } ],
+  "entry": "payload/not-executable" }
+E10_MANIFEST
+printf 'not executable\n' > "$_E_FEAT/payload/not-executable"   # deliberately no chmod +x
 _e10_out="$(mktemp)"
 _e10_rc=0
 env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS3" > "$_e10_out" 2>&1 || _e10_rc=$?
-ck "--start refuses (nonzero) when the configured relay is not an executable file" "[ $_e10_rc -ne 0 ]"
+ck "--start refuses (nonzero) when the declared entry is not an executable file" "[ $_e10_rc -ne 0 ]"
 ck "...and says so, naming the fail-the-launch rule" \
-   "grep -q 'A configured relay that cannot start fails the launch' \"$_e10_out\""
-ck "...and no daemon container was left behind" "[ -z \"$(cid3)\" ]"
+   "grep -q 'A configured relay that cannot start fails the session' \"$_e10_out\" || grep -q 'cannot start fails the' \"$_e10_out\""
+# NOT "no container was left behind" -- that was true of the HOST-side
+# refusal, which happened before `docker run`. A manifest entry resolves to an
+# image-only path the host cannot stat, so the refusal is in-container:
+# user-setup.sh exits 1, the container dies, and --start classifies it as
+# CRASH-LOOPING (exit 7) rather than refusing before launch (exit 6). Asserting
+# the old property here would assert something the branch does not promise.
+#
+# What criterion 7 actually requires is that the session never comes up
+# READY -- a container that exists but is crash-looping is loud; a container
+# that is up with nothing delivering is the silent failure the rule exists for.
+ck "...and reports CRASH-LOOPING (exit 7), not ready -- the in-container branch of criterion 7" \
+   "[ $_e10_rc -eq 7 ]"
+ck "...and --stop cleans it up, so a refused launch leaves nothing running" \
+   "\"$SANDY\" --stop --workspace \"$WS3\" >/dev/null 2>&1; [ -z \"\$(cid3)\" ]"
 rm -f "$_e10_out"
-# Restore the working relay so anything added after this phase is unaffected.
-mv "$SANDY_HOME_DIR/config.bak" "$SANDY_HOME_DIR/config" 2>/dev/null || \
-    sed -i.bak2 's|^SANDY_HANDOFF_RELAY=.*|SANDY_HANDOFF_RELAY=.sandy/relay.sh|' "$SANDY_HOME_DIR/config"
-rm -f "$SANDY_HOME_DIR/config.bak2"
+# Restore the working entry so anything added after this phase is unaffected.
+mv "$_E_FEAT/feature.json.bak" "$_E_FEAT/feature.json"
+rm -f "$_E_FEAT/payload/not-executable"
+
+# Remove phase E's feature before anything else runs: its manifest selects
+# every sandbox, so leaving it installed would enrol it in phase G too and
+# start a relay there for no reason.
+"$SANDY" --stop --workspace "$WS3" >/dev/null 2>&1 || true
+rm -rf "$_E_FEAT"
 
 # E9 (zero-diff regression) is phase A, which already ran with the relay
 # entirely unset and asserted no "handoff" string anywhere in `docker
@@ -402,17 +437,28 @@ CG="$(docker ps -q --filter "label=sandy.workspace_path=$WS" | head -1)"
 ck "container is running" "[ -n \"$CG\" ]"
 ck "the payload EXISTS in the container (premise: a missing path fails a write for the wrong reason)" \
    "docker exec \"$CG\" test -f /opt/sandy/features/acc-erofs/thing"
+# EVERY check below is gated on a non-empty $CG. Without that gate a missing
+# container makes `docker exec "" ...` fail, and "the write FAILED" then passes
+# for the wrong reason -- three of these reported PASS against an empty id on
+# the first real run of this phase, while the premise check correctly failed.
+# A phase whose premise is red must not report green assertions beneath it.
 _g_uid="$(docker exec "$CG" id -u 2>/dev/null || echo 0)"
-_g_err="$(docker exec "$CG" sh -c 'echo pwned > /opt/sandy/features/acc-erofs/thing' 2>&1 || true)"
+_g_err="$([ -n "$CG" ] && docker exec "$CG" sh -c 'echo pwned > /opt/sandy/features/acc-erofs/thing' 2>&1 || echo "NO-CONTAINER")"
 ck "a write to the :ro payload FAILS from inside the container" \
-   "! docker exec \"$CG\" sh -c 'echo pwned > /opt/sandy/features/acc-erofs/thing' 2>/dev/null"
+   "[ -n \"$CG\" ] && ! docker exec \"$CG\" sh -c 'echo pwned > /opt/sandy/features/acc-erofs/thing' 2>/dev/null"
 ck "...and fails with a READ-ONLY FILE SYSTEM error, not a permission error -- proving the MOUNT is the boundary, not the bits (got: $_g_err)" \
-   "printf '%s' \"$_g_err\" | grep -qi 'read-only'"
+   "[ -n \"$CG\" ] && printf '%s' \"$_g_err\" | grep -qi 'read-only'"
 ck "...the file is still owned by the container user, so bits alone would NOT have stopped it (this is what makes the check above meaningful)" \
-   "[ \"\$(docker exec \"$CG\" stat -c %u /opt/sandy/features/acc-erofs/thing 2>/dev/null)\" = \"$_g_uid\" ]"
+   "[ -n \"$CG\" ] && [ \"\$(docker exec \"$CG\" stat -c %u /opt/sandy/features/acc-erofs/thing 2>/dev/null)\" = \"$_g_uid\" ]"
 ck "creating a NEW file in the payload also fails (the whole directory is :ro, not just the file)" \
-   "! docker exec \"$CG\" sh -c 'touch /opt/sandy/features/acc-erofs/evil' 2>/dev/null"
+   "[ -n \"$CG\" ] && ! docker exec \"$CG\" sh -c 'touch /opt/sandy/features/acc-erofs/evil' 2>/dev/null"
 ck "the payload is unchanged on the host after the attempt" \
-   "grep -q 'payload-seen' \"$_G_FEAT/payload/thing\""
-"$SANDY" --stop --workspace "$WS" >/dev/null 2>&1
+   "[ -n \"$CG\" ] && grep -q 'payload-seen' \"$_G_FEAT/payload/thing\""
+"$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true
 rm -rf "$_G_FEAT"
+
+echo
+echo "==================================================="
+printf 'RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
+echo "==================================================="
+[ "$FAIL" -eq 0 ]

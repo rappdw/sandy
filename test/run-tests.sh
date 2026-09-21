@@ -11917,10 +11917,23 @@ _S114_ACC="$(cd "$(dirname "$0")" && pwd)/acceptance-handoff-dirs.sh"
 _S114_ACC_E="$(awk '/^echo "== E\./{f=1} f' "$_S114_ACC" 2>/dev/null)"
 check "§114(16f) the acceptance harness still has a relay phase (E)" \
     bash -c '[ -n "$1" ]' -- "$_S114_ACC_E"
-check "§114(16g) phase E proves criterion 7 end-to-end: a non-executable relay makes --start refuse, with the message, and leaves no container" \
-    bash -c 'printf "%s" "$1" | grep -q "does-not-exist.sh" \
-        && printf "%s" "$1" | grep -q "A configured relay that cannot start fails the launch" \
-        && printf "%s" "$1" | grep -q "no daemon container was left behind"' -- "$_S114_ACC_E"
+# The fixture changed shape in 2.2.0: the relay is installed as a manifest
+# `entry` now, so criterion 7 is exercised by pointing the entry at a
+# non-executable payload file rather than by setting a removed config key.
+# Asserted on the PROPERTY the phase must still prove -- refuse, name the
+# rule, leave nothing behind -- not on the spelling of the fixture.
+# The THIRD property changed shape in 2.2.0 and the change is not cosmetic.
+# With the relay installed as a manifest `entry`, the path is image-only, so
+# the host cannot stat it and the refusal moves IN-CONTAINER: exit 7
+# (crash-looping) instead of exit 6 (refused before launch), and a container
+# does exist. Demanding "no container was left behind" there would assert a
+# promise that branch does not make. What criterion 7 requires either way is
+# that the session never comes up READY.
+check "§114(16g) phase E proves criterion 7 end-to-end: a non-executable relay makes --start refuse, name the fail-the-launch rule, and end with nothing running" \
+    bash -c 'printf "%s" "$1" | grep -q "not-executable" \
+        && printf "%s" "$1" | grep -q "cannot start fails the" \
+        && printf "%s" "$1" | grep -q "CRASH-LOOPING" \
+        && printf "%s" "$1" | grep -q "leaves nothing running"' -- "$_S114_ACC_E"
 check "§114(16h) phase E proves criterion 8 end-to-end: a real headless launch prints the skip line naming the refuse consequence" \
     bash -c 'printf "%s" "$1" | grep -q "SANDY_HANDOFF_RELAY not started (headless run); crossSessionInbound will default to refuse"' -- "$_S114_ACC_E"
 # --- (16i) the harness restart-count pattern must actually match the log line
@@ -16941,6 +16954,48 @@ fi
 rm -rf "$_S151_DIR"
 unset _S151_SANDY _S151_DIR _S151_MIG _S151_H _S151_PS _s151_n
 unset -f _s151_mig
+
+# ============================================================
+echo ""
+echo "§152: an acceptance harness that DIES must be recorded as a failure"
+# ============================================================
+# run-integration-tests.sh wraps each acceptance harness as:
+#
+#     set +e; bash "$harness"; _acc_rc=$?; set -e
+#     _acc_res="$(grep -oE  RESULT-pattern  "$out" | tail -1)"
+#     if [ "$_acc_rc" -eq 0 ]; then pass ...; else fail ...; fi
+#
+# If the harness dies BEFORE printing its RESULT line, that grep matches
+# nothing and exits 1 -- which under the set -e of the suite aborts the run
+# BEFORE fail() is reached. The harness failed, and the summary said
+# "0 failed".
+#
+# MEASURED, not theorised: it happened on a real host run. A harness lost its
+# RESULT block in an edit, nineteen assertions failed, and the suite reported
+# "1 passed, 0 failed (of 1 run)" before aborting.
+#
+# This is a STATIC ratchet, and deliberately so: the wrappers are inline in a
+# 2000-line script with no extractable seam, so the behavioural equivalent
+# would have to re-implement the thing under test -- which is how a guard ends
+# up asserting its own copy rather than the product (see §148(12)).
+_S152_INT="$(cd "$(dirname "$0")" && pwd)/run-integration-tests.sh"
+check "§152(pre) run-integration-tests.sh was found (mutation: a rename makes every check below vacuous)" \
+    test -f "$_S152_INT"
+_S152_TOTAL="$(grep -c "_acc_res=\"\$(grep -oE 'RESULT:" "$_S152_INT" || true)"
+_S152_GUARDED="$(grep -c "_acc_res=\"\$(grep -oE 'RESULT:.*| tail -1 || true)\"" "$_S152_INT" || true)"
+check "§152(1) there IS at least one acceptance wrapper to guard (got $_S152_TOTAL)" \
+    bash -c '[ "$1" -ge 1 ]' _ "$_S152_TOTAL"
+check "§152(2) EVERY acceptance wrapper guards its RESULT grep with '|| true' — an unguarded one aborts the suite under set -e before fail() runs, so a dead harness reports as 0 failed (guarded $_S152_GUARDED of $_S152_TOTAL)" \
+    bash -c '[ "$1" = "$2" ]' _ "$_S152_GUARDED" "$_S152_TOTAL"
+check "§152(3) every harness the suite wraps still ENDS by printing RESULT and exiting on its FAIL count — the wrapper keys off that line, and a harness that stops printing it is invisible rather than red" \
+    bash -c '
+        _d="$(cd "$(dirname "$1")" && pwd)"
+        for _h in "$_d"/acceptance-*.sh; do
+            [ -f "$_h" ] || continue
+            grep -q "RESULT: %d passed, %d failed" "$_h" || { echo "no RESULT: $_h"; exit 1; }
+            grep -q "^\[ \"\$FAIL\" -eq 0 \]" "$_h" || { echo "no exit-on-FAIL: $_h"; exit 1; }
+        done' _ "$_S152_INT"
+unset _S152_INT _S152_TOTAL _S152_GUARDED
 
 # BEGIN SUMMARY
 # ============================================================

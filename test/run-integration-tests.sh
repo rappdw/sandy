@@ -2040,11 +2040,14 @@ if [ -f "$_acc_daemon" ]; then
     SANDY="$SANDY_SCRIPT" bash "$_acc_daemon" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
     set -e
-    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1)"
+    # `|| true`: an UNGUARDED grep here exits 1 when the harness died before
+    # printing its RESULT line, which under set -e aborts the suite BEFORE
+    # fail() runs -- reporting a dead harness as "0 failed". Measured.
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1 || true)"
     if [ "$_acc_rc" -eq 0 ]; then
         pass "daemon-mode acceptance (${_acc_res:-all assertions passed})"
     else
-        fail "daemon-mode acceptance (${_acc_res:-exited $_acc_rc}) — see harness output above"
+        fail "daemon-mode acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
     rm -f "$_acc_out"
 else
@@ -2071,11 +2074,14 @@ if [ -f "$_acc_upd" ]; then
     SANDY="$SANDY_SCRIPT" bash "$_acc_upd" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
     set -e
-    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1)"
+    # `|| true`: an UNGUARDED grep here exits 1 when the harness died before
+    # printing its RESULT line, which under set -e aborts the suite BEFORE
+    # fail() runs -- reporting a dead harness as "0 failed". Measured.
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1 || true)"
     if [ "$_acc_rc" -eq 0 ]; then
         pass "fleet-update acceptance (${_acc_res:-all assertions passed})"
     else
-        fail "fleet-update acceptance (${_acc_res:-exited $_acc_rc}) — see harness output above"
+        fail "fleet-update acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
     rm -f "$_acc_out"
 else
@@ -2103,11 +2109,14 @@ if [ -f "$_acc_topo" ]; then
     SANDY="$SANDY_SCRIPT" bash "$_acc_topo" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
     set -e
-    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1)"
+    # `|| true`: an UNGUARDED grep here exits 1 when the harness died before
+    # printing its RESULT line, which under set -e aborts the suite BEFORE
+    # fail() runs -- reporting a dead harness as "0 failed". Measured.
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1 || true)"
     if [ "$_acc_rc" -eq 0 ]; then
         pass "multi-agent pane-topology acceptance (${_acc_res:-all assertions passed})"
     else
-        fail "multi-agent pane-topology acceptance (${_acc_res:-exited $_acc_rc}) — see harness output above"
+        fail "multi-agent pane-topology acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
     rm -f "$_acc_out"
 else
@@ -2268,11 +2277,14 @@ if [ -f "$_acc_handoff" ]; then
     SANDY="$SANDY_SCRIPT" bash "$_acc_handoff" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
     set -e
-    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1)"
+    # `|| true`: an UNGUARDED grep here exits 1 when the harness died before
+    # printing its RESULT line, which under set -e aborts the suite BEFORE
+    # fail() runs -- reporting a dead harness as "0 failed". Measured.
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1 || true)"
     if [ "$_acc_rc" -eq 0 ]; then
         pass "handoff-handoff directories acceptance (${_acc_res:-all assertions passed})"
     else
-        fail "handoff-handoff directories acceptance (${_acc_res:-exited $_acc_rc}) — see harness output above"
+        fail "handoff-handoff directories acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
     rm -f "$_acc_out"
 else
@@ -2302,11 +2314,14 @@ if [ -f "$_acc_provision" ]; then
     SANDY="$SANDY_SCRIPT" bash "$_acc_provision" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
     set -e
-    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1)"
+    # `|| true`: an UNGUARDED grep here exits 1 when the harness died before
+    # printing its RESULT line, which under set -e aborts the suite BEFORE
+    # fail() runs -- reporting a dead harness as "0 failed". Measured.
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1 || true)"
     if [ "$_acc_rc" -eq 0 ]; then
         pass "provision-non-interactive sandbox provisioning acceptance (${_acc_res:-all assertions passed})"
     else
-        fail "provision-non-interactive sandbox provisioning acceptance (${_acc_res:-exited $_acc_rc}) — see harness output above"
+        fail "provision-non-interactive sandbox provisioning acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
     rm -f "$_acc_out"
 else
@@ -2338,13 +2353,13 @@ if [ -f "$_acc_uds" ]; then
     SANDY="$SANDY_SCRIPT" bash "$_acc_uds" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
     set -e
-    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed( \([0-9]+ skipped\))?' "$_acc_out" | tail -1)"
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed( \([0-9]+ skipped\))?' "$_acc_out" | tail -1 || true)"
     if grep -q 'RESULT: 0 passed, 0 failed' "$_acc_out"; then
         skip "uds-delivery cross-session delivery acceptance (${_acc_res:-skipped}) — no Claude credentials"
     elif [ "$_acc_rc" -eq 0 ]; then
         pass "uds-delivery cross-session delivery acceptance (${_acc_res:-all assertions passed})"
     else
-        fail "uds-delivery cross-session delivery acceptance (${_acc_res:-exited $_acc_rc}) — see harness output above"
+        fail "uds-delivery cross-session delivery acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
     rm -f "$_acc_out"
 else
