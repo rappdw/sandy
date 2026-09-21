@@ -130,12 +130,27 @@ cid() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.work
 # A relay that does nothing but stay alive. Its ONLY job here is to make
 # SANDY_HANDOFF_RELAY resolve, which is what drives the conditional default to
 # `accept` — this harness measures the setting, not the relay.
-cat > "$WS/.sandy/relay.sh" <<'RELAYFIX'
+#
+# Installed as a feature manifest `entry`. The config key it used to use was
+# REMOVED in 2.2.0 (#354) and setting it is now a hard error before launch, so
+# this harness refused every --start and reported three identical "daemon
+# container is running" failures in 5s. #362 fixed exactly this in
+# acceptance-handoff-dirs.sh and did not sweep here -- the retired mechanism has
+# to be grepped for in BOTH roles, what ASSERTS it and what SETS IT UP, and
+# across every harness, including the ones CI never runs.
+_UDS_FEAT="$SANDY_HOME_DIR/features/udsrelay"
+mkdir -p "$_UDS_FEAT/payload"
+cat > "$_UDS_FEAT/payload/relay" <<'RELAYFIX'
 #!/bin/sh
 sleep 3600
 RELAYFIX
-chmod +x "$WS/.sandy/relay.sh"
-echo "SANDY_HANDOFF_RELAY=.sandy/relay.sh" >> "$SANDY_HOME_DIR/config"
+chmod +x "$_UDS_FEAT/payload/relay"
+cat > "$_UDS_FEAT/feature.json" <<'UDS_MANIFEST'
+{ "sandboxes": { "include": ["*"] },
+  "agents": { "include": ["*"] },
+  "mounts": [ { "name": "payload", "from": "payload" } ],
+  "entry": "payload/relay" }
+UDS_MANIFEST
 # Run the receiver under Claude Code's own debug log. This is the authoritative
 # artifact the original probe (docs/security/CROSS_SESSION_INBOUND.md §6) read
 # to see the cross-session decision + cause — the ONLY thing that separates
@@ -144,7 +159,7 @@ echo "SANDY_HANDOFF_RELAY=.sandy/relay.sh" >> "$SANDY_HOME_DIR/config"
 # layer" (a harness-frame problem). SANDY_AGENT_ARGS is privileged and set here
 # from the HOST config (a privileged source → no approval prompt); --debug-file
 # writes to a file, not the pane, so the marker-in-pane diagnostic stays clean.
-echo 'SANDY_AGENT_ARGS=--debug --debug-file /home/sandy/.handoff/relay/cc-debug.log' >> "$SANDY_HOME_DIR/config"
+echo 'SANDY_AGENT_ARGS=--debug --debug-file /opt/sandy/relay-state/cc-debug.log' >> "$SANDY_HOME_DIR/config"
 
 # The injector. Runs INSIDE the container, detached (setsid + double fork) so
 # it is provably out of the receiving session's ancestry — the same property
@@ -306,7 +321,7 @@ INJECT
 run_case() {
     local label="$1" expect="$2" extra="${3:-}" host_extra="${4:-}"
     local marker="ACC74-$expect-$$-$RANDOM"
-    local sentinel="/home/sandy/.handoff/relay/delivered-$marker"
+    local sentinel="/opt/sandy/relay-state/delivered-$marker"
 
     rm -f "$WS/.sandy/config"
     [ -n "$extra" ] && printf '%s\n' "$extra" > "$WS/.sandy/config"
@@ -319,16 +334,29 @@ run_case() {
 
     # `env -u` for the same "prove it, don't assume it" reason as
     # acceptance-handoff-dirs.sh: nothing here needs the approval escape hatch.
-    # The relay is set from the isolated HOST config (a privileged source, so no
-    # prompt), and `refuse` is passive-safe (a repo may always tighten). If a
-    # prompt ever appears, this must fail rather than be waved through.
-    env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS" >/dev/null 2>&1
+    # The relay comes from a feature manifest under $SANDY_HOME (privileged by
+    # location, so no prompt), and `refuse` is passive-safe (a repo may always
+    # tighten). If a prompt ever appears, this must fail rather than be waved
+    # through.
+    #
+    # KEEP THE OUTPUT. Discarding it is why a launch that refused BEFORE docker
+    # run -- naming the removed config key on stderr, in one line -- surfaced
+    # only as three identical "daemon container is running" failures with no
+    # cause anywhere in the log.
+    local _start_log; _start_log="$(mktemp)"
+    env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS" >"$_start_log" 2>&1
+    local _start_rc=$?
     # Restore immediately: the config has already been read, and every later
     # `return` in this function would otherwise leak it into the next case.
     if [ -n "$_host_cfg_bak" ]; then
         cp "$_host_cfg_bak" "$SANDY_HOME_DIR/config"; rm -f "$_host_cfg_bak"
     fi
     local c; c="$(cid)"
+    if [ -z "$c" ]; then
+        echo "    -- [$label] --start exited $_start_rc and no container appeared; its output was:"
+        sed 's/^/       /' "$_start_log" | tail -20
+    fi
+    rm -f "$_start_log"
     ck "[$label] daemon container is running" "[ -n \"$c\" ]"
     [ -n "$c" ] || return 0
 
@@ -418,7 +446,7 @@ run_case() {
     # The claude receiver holds cc-debug.log open from launch, so do NOT unlink
     # it here (that would orphan the inode it keeps writing to). This injection's
     # decision is found by grepping the log for THIS case's unique marker below.
-    local dbg_log="/home/sandy/.handoff/relay/cc-debug.log"
+    local dbg_log="/opt/sandy/relay-state/cc-debug.log"
     docker exec -u "$(id -u)" "$c" rm -f "$sentinel" "$inject_log" 2>/dev/null || true
     # Byte offset of the receiver's debug log BEFORE the injection. The refusal
     # line carries no marker, so scoping by marker cannot work for the negative
