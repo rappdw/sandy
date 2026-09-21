@@ -560,6 +560,22 @@ sandy --print-state | jq '.sandboxes[] | {name, agent_args}'
 
 `{}` means sandy looked and no feature contributed; `null` means the sandbox last launched under a sandy too old to say — not the same thing.
 
+**Two features can contribute the same flag, and for some flags that discards one of them** (2.3.0). `agent_args` is additive in the command line sandy builds; whether it is additive in *effect* is up to the agent. Claude Code reads `--append-system-prompt-file` **once** — the last occurrence wins — so two features each supplying it meant one feature's prompt silently never arrived, with every other signal looking healthy.
+
+Sandy now merges those contributions itself, into a file it owns and mounts `:ro`, and passes the flag once. Which flags it will do this for is published:
+
+```sh
+sandy --print-schema | jq '.manifest.agent_args_compose'
+```
+
+At one contributor nothing changes. At two or more, the result is recorded per sandbox:
+
+```sh
+sandy --print-state | jq '.sandboxes[] | {name, agent_args_composed}'
+```
+
+`{}` means no collision; an entry with `composed: false` means sandy **found** a collision and deliberately did not merge it — either the flag replaces rather than appends, or it named a file sandy cannot read — and `from` says which contributors were involved. The launch prints this too, alongside a line naming every feature that applied and what it contributed.
+
 Reading a manifest needs `node` or `jq` on the host. If neither is there, a launch that would use one **refuses** rather than mounting a guess — see `sandy --doctor`.
 
 ### Installing a relay (`SANDY_RELAY`)

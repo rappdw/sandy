@@ -11631,8 +11631,12 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # 17 as of 2.2.0: `handoff_relay` and `relay.slot` removed (#355). Note it went
 # DOWN -- the tripwire is an equality, not a floor, so a removal that forgot to
 # drop its argument is caught exactly as an addition that forgot to add one.
-check "§114(13g) marker printf format/arg count line up (17 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 17
+# 18 as of 2.3.0: `agent_args_composed` (#363) -- what sandy did about two
+# contributors of the same non-repeatable flag. It sits beside `agent_args`
+# deliberately and answers a different question: that one records what was
+# PASSED, this one whether it can have taken EFFECT.
+check "§114(13g) marker printf format/arg count line up (18 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 18
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -16341,9 +16345,16 @@ _S148_LIB="$_S148_DIR/lib.sh"
     awk '/^_sandy_fm_apply\(\) \{/,/^\}$/' "$_S148_SANDY"
     awk '/^_sandy_filter_agent_args\(\) \{/,/^\}$/' "$_S148_SANDY"
     awk '/^_sandy_fm_agent_args_for\(\) \{/,/^\}$/' "$_S148_SANDY"
+    # (12) evals sandy's REAL per-agent block, so every function that block
+    # calls has to be here. #363 added the compose pass to it, and leaving
+    # these out did not make (12) fail -- it aborted the section mid-run under
+    # set -e, taking (13) onward with it while the summary still looked sane.
+    awk '/^_sandy_aa_compose_table\(\) \{/,/^\}$/' "$_S148_SANDY"
+    awk '/^_sandy_aa_host_path\(\) \{/,/^\}$/' "$_S148_SANDY"
+    awk '/^_sandy_aa_compose\(\) \{/,/^\}$/' "$_S148_SANDY"
 } > "$_S148_LIB"
 check "§148(pre) the resolver and its collaborators were extracted (mutation: rename one and every check below goes vacuous instead of red)" \
-    bash -c 'grep -q "^_sandy_fm_agent_args_for() {" "$1" && grep -q "^_sandy_fm_apply() {" "$1" && grep -q "^_sandy_filter_agent_args() {" "$1"' _ "$_S148_LIB"
+    bash -c 'grep -q "^_sandy_fm_agent_args_for() {" "$1" && grep -q "^_sandy_fm_apply() {" "$1" && grep -q "^_sandy_filter_agent_args() {" "$1" && grep -q "^_sandy_aa_compose() {" "$1"' _ "$_S148_LIB"
 
 # _s148_resolve MANIFEST_DIR AGENT -> prints "TOKENS:<space-joined>" then the
 # marker JSON, having run the real apply + collect + resolve path.
@@ -16996,6 +17007,208 @@ check "§152(3) every harness the suite wraps still ENDS by printing RESULT and 
             grep -q "^\[ \"\$FAIL\" -eq 0 \]" "$_h" || { echo "no exit-on-FAIL: $_h"; exit 1; }
         done' _ "$_S152_INT"
 unset _S152_INT _S152_TOTAL _S152_GUARDED
+
+# ============================================================
+echo ""
+echo "§153: agent_args compose — a second contributor of a non-repeatable flag must not vanish"
+# ============================================================
+# #363. agent_args is additive in the argv sandy BUILDS; whether it is additive
+# in EFFECT is decided by the parser of the agent, and for a flag that parser reads
+# once the second occurrence silently DISCARDS the first. Measured on Claude
+# Code 2.1.278: --append-system-prompt-file, --append-subagent-system-prompt-file
+# and --system-prompt-file are all last-wins.
+#
+# It shipped in the field and nothing caught it, so note WHY every structural
+# check passed: all mounts were present and :ro, and the session marker
+# recorded BOTH contributing features -- because the marker records what was
+# PASSED. These checks therefore assert the RESULT (what is in the composed
+# file, and what the argv finally says), never that a compose function exists.
+_S153_SANDY="$SANDY_SCRIPT"
+_S153_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S153_DIR/fa" "$_S153_DIR/fb" "$_S153_DIR/sb"
+printf 'ALPHA-MARKER\n' > "$_S153_DIR/fa/A.md"
+printf 'BETA-MARKER\n'  > "$_S153_DIR/fb/B.md"
+
+# Extract-then-eval, never `source <(...)` (SRCSUB: bash 3.2 sources nothing
+# there and the calls below die 127 into the ERR trap).
+_S153_BLK="$(sed -n '/^_sandy_fm_jesc()/,/^}/p; /^_sandy_aa_compose_table()/,/^}/p; /^_sandy_aa_host_path()/,/^}/p; /^_sandy_aa_compose()/,/^}/p' "$_S153_SANDY")"
+_S153_APPLYBLK="$(awk '/^_sandy_fm_projector_js\(\) \{/,/^# Protected directories/' "$_S153_SANDY" | sed '$d')"
+check "§153(pre) the compose block was extracted from sandy and defines _sandy_aa_compose (mutation: a rename empties this and every check below goes vacuous)" \
+    bash -c 'case "$1" in *"_sandy_aa_compose()"*) exit 0 ;; esac; exit 1' _ "$_S153_BLK"
+
+# _s153_run <contributors> -> "<tokens>|<mount>|<json>" on stdout, warnings on fd 3
+#
+# The helper unsets every SANDY_* the code under test could read: this suite is
+# developed INSIDE a sandy sandbox, which exports them, so a value can leak in
+# and the check then measures the live container of the developer (the §149 lesson).
+_s153_run() {
+    bash -c '
+        set -uo pipefail
+        unset SANDY_AGENT_ARGS SANDY_HANDOFF_RELAY SANDY_RELAY 2>/dev/null || true
+        warn() { printf "WARN %s\n" "$*" >&2; }
+        info() { printf "INFO %s\n" "$*" >&2; }
+        eval "$1"
+        _sandy_aa_compose claude "$2" "$3" "$4"
+        printf "%s|%s|%s\n" "$_SANDY_AA_OUT_TOKENS" "$_SANDY_AA_OUT_MOUNT" "$_SANDY_AA_OUT_JSON"
+    ' _ "$_S153_BLK" "$1" "$_S153_TBL" "$_S153_DIR/sb" 2>"$_S153_DIR/err"
+}
+_S153_TBL="$(printf 'mount\t%s\t/home/sandy/.fa\tro\nmount\t%s\t/home/sandy/.fb\tro\n' "$_S153_DIR/fa" "$_S153_DIR/fb")"
+_S153_T="$(printf '\t')"
+_S153_TWO="feature 'a'${_S153_T}--append-system-prompt-file /home/sandy/.fa/A.md
+feature 'b'${_S153_T}--append-system-prompt-file /home/sandy/.fb/B.md"
+_S153_ONE="feature 'a'${_S153_T}--append-system-prompt-file /home/sandy/.fa/A.md"
+
+# --- one contributor: nothing happens, and that is the safety argument -------
+rm -rf "$_S153_DIR/sb"; mkdir -p "$_S153_DIR/sb"
+_S153_R1="$(_s153_run "$_S153_ONE")"
+check "§153(1) ONE contributor leaves the argv byte-identical — composition must engage only where the alternative is silent loss" \
+    test "${_S153_R1%%|*}" = "--append-system-prompt-file /home/sandy/.fa/A.md"
+check "§153(2) ONE contributor requests no mount" \
+    bash -c 'IFS="|" read -r _t _m _j <<< "$1"; test "$_m" = 0' _ "$_S153_R1"
+check "§153(3) ONE contributor writes no composed file — a file nothing references is how 'it is wired' becomes untrue" \
+    bash -c 'test ! -e "$1/sb/agent-args-composed/claude.append-system-prompt-file.md"' _ "$_S153_DIR"
+
+# --- two contributors: merged, in order, and actually referenced -------------
+rm -rf "$_S153_DIR/sb"; mkdir -p "$_S153_DIR/sb"
+_S153_R2="$(_s153_run "$_S153_TWO")"
+_S153_OUT="$_S153_DIR/sb/agent-args-composed/claude.append-system-prompt-file.md"
+check "§153(4) TWO contributors produce a composed file" test -f "$_S153_OUT"
+check "§153(5) the composed file carries the FIRST contributor's content (this is the contribution the agent was discarding)" \
+    grep -q 'ALPHA-MARKER' "$_S153_OUT"
+check "§153(6) the composed file carries the SECOND contributor's content" \
+    grep -q 'BETA-MARKER' "$_S153_OUT"
+# Order is asserted explicitly: a concat that reverses its inputs still
+# contains both markers, so a both-present assertion alone passes on reversed code.
+check "§153(7) contributions appear in the order sandy would have passed them (mutation: reverse the concat and this fails while (5) and (6) still pass)" \
+    bash -c 'a=$(grep -n ALPHA-MARKER "$1" | cut -d: -f1); b=$(grep -n BETA-MARKER "$1" | cut -d: -f1); test "$a" -lt "$b"' _ "$_S153_OUT"
+check "§153(8) each contribution is attributed by name in the composed file" \
+    bash -c 'grep -q "contributed by feature .a." "$1" && grep -q "contributed by feature .b." "$1"' _ "$_S153_OUT"
+# The anti-vacuity check: writing the file is worthless unless the argv points
+# at it. This is the one that fails if compose writes and forgets to rewrite.
+check "§153(9) the argv REFERENCES the composed file — writing it without rewriting the tokens changes nothing the agent sees" \
+    bash -c 'case "${1%%|*}" in *"--append-system-prompt-file /opt/sandy/agent-args/claude.append-system-prompt-file.md"*) exit 0 ;; esac; exit 1' _ "$_S153_R2"
+check "§153(10) NEITHER original path survives in the argv — a leftover occurrence re-creates the last-wins bug it just fixed" \
+    bash -c 'case "${1%%|*}" in *"/home/sandy/.fa/A.md"*|*"/home/sandy/.fb/B.md"*) exit 1 ;; esac; exit 0' _ "$_S153_R2"
+check "§153(11) the flag appears exactly ONCE in the rewritten argv" \
+    bash -c 'n=0; for t in ${1%%|*}; do [ "$t" = --append-system-prompt-file ] && n=$((n+1)); done; test "$n" -eq 1' _ "$_S153_R2"
+check "§153(12) TWO contributors request the mount, or the composed file is unreachable in the container" \
+    bash -c 'IFS="|" read -r _t _m _j <<< "$1"; test "$_m" = 1' _ "$_S153_R2"
+# Needles are passed as ARGUMENTS, never written into the single-quoted
+# program: a literal apostrophe there closes the quote and the shell
+# reinterprets the rest as code, which is the APOSQ hazard in a form the lint
+# does not scan (it looks at multi-line blocks, and this is one line).
+check "§153(13) the marker fragment records composed=true" \
+    bash -c 'j="${1#*|}"; j="${j#*|}"; case "$j" in *"$2"*) exit 0 ;; esac; exit 1' \
+    _ "$_S153_R2" '"composed": true'
+check "§153(13b) ...and names BOTH contributors, in the order sandy passed them" \
+    bash -c 'j="${1#*|}"; j="${j#*|}"; case "$j" in *"$2"*"$3"*) exit 0 ;; esac; exit 1' \
+    _ "$_S153_R2" "feature 'a'" "feature 'b'"
+
+# --- an unreadable path: report the loss, change nothing ---------------------
+rm -rf "$_S153_DIR/sb"; mkdir -p "$_S153_DIR/sb"
+_S153_R3="$(_s153_run "feature 'a'${_S153_T}--append-system-prompt-file /home/sandy/.fa/A.md
+operator agent-args.claude${_S153_T}--append-system-prompt-file /nowhere/x.md")"
+check "§153(14) a value under no mount sandy made leaves the argv untouched — sandy cannot read it, so it must not pretend to have merged it" \
+    bash -c 'case "${1%%|*}" in *"/home/sandy/.fa/A.md"*) exit 0 ;; esac; exit 1' _ "$_S153_R3"
+check "§153(15) ...and the collision is still REPORTED, naming both contributors — an unmergeable collision is exactly the case that was silent before" \
+    bash -c 'grep -q "feature .a." "$1" && grep -q "operator agent-args.claude" "$1"' _ "$_S153_DIR/err"
+check "§153(16) ...and the marker records composed=false rather than omitting the entry — 'merged' and 'collision reported' must not collapse" \
+    bash -c 'case "$1" in *"\"composed\": false"*) exit 0 ;; esac; exit 1' _ "$_S153_R3"
+
+# --- report policy: a replacing flag has no correct merge --------------------
+rm -rf "$_S153_DIR/sb"; mkdir -p "$_S153_DIR/sb"
+_S153_R4="$(_s153_run "feature 'a'${_S153_T}--system-prompt-file /home/sandy/.fa/A.md
+feature 'b'${_S153_T}--system-prompt-file /home/sandy/.fb/B.md")"
+check "§153(17) a 'report' flag is never merged — --system-prompt-file REPLACES, so concatenating would invent a prompt neither feature wrote" \
+    bash -c 'test ! -e "$1/sb/agent-args-composed/claude.system-prompt-file.md"' _ "$_S153_DIR"
+check "§153(18) ...the argv is unchanged" \
+    test "${_S153_R4%%|*}" = "--system-prompt-file /home/sandy/.fa/A.md --system-prompt-file /home/sandy/.fb/B.md"
+check "§153(19) ...and the operator is told, by name" \
+    bash -c 'grep -q "REPLACES rather than appends" "$1" && grep -q "feature .b." "$1"' _ "$_S153_DIR/err"
+
+# --- a flag with NO policy is left entirely alone ----------------------------
+rm -rf "$_S153_DIR/sb"; mkdir -p "$_S153_DIR/sb"
+_S153_R5="$(_s153_run "feature 'a'${_S153_T}--mcp-config /home/sandy/.fa/A.md
+feature 'b'${_S153_T}--mcp-config /home/sandy/.fb/B.md")"
+check "§153(20) a repeatable flag (--mcp-config accumulates, measured) is untouched — sandy interprets only what it has proof about" \
+    test "${_S153_R5%%|*}" = "--mcp-config /home/sandy/.fa/A.md --mcp-config /home/sandy/.fb/B.md"
+check "§153(21) ...and produces no marker entry, so {} keeps meaning 'looked, no collision'" \
+    bash -c 'j="${1#*|}"; test -z "${j#*|}"' _ "$_S153_R5"
+
+# --- the published table IS the table sandy uses -----------------------------
+if command -v node >/dev/null 2>&1; then
+    # Both captures are `|| true` and the node program swallows its own parse
+    # error, because a $( ) that fails here would abort the WHOLE SUITE under
+    # set -e rather than failing a check -- the §83/§86 failure class, and this
+    # section hit it for real: a sandy that could not emit a schema killed the
+    # run at this line and every check after it silently never executed. The
+    # two non-empty assertions below are what keep `|| true` from making the
+    # equality vacuous.
+    _S153_PUB="$("$_S153_SANDY" --print-schema 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let t=[];try{t=(JSON.parse(s).manifest||{}).agent_args_compose||[]}catch(e){};process.stdout.write(t.map(e=>e.agent+"\t"+e.flag+"\t"+e.policy).join("\n"))})' 2>/dev/null || true)"
+    _S153_OWN="$(bash -c 'eval "$1"; _sandy_aa_compose_table' _ "$_S153_BLK" 2>/dev/null || true)"
+    check "§153(22a) --print-schema published a NON-EMPTY agent_args_compose table (mutation: an empty one makes the equality below pass by comparing nothing to nothing)" \
+        bash -c 'test -n "$1"' _ "$_S153_PUB"
+    check "§153(22) --print-schema publishes EXACTLY the policy table the launch applies — a consumer that reads it must not be told something sandy will not do" \
+        bash -c 'test "$1" = "$2"' _ "$(printf '%s' "$_S153_PUB")" "$(printf '%s' "$_S153_OWN")"
+    check "§153(23) the table sandy APPLIES is non-empty (mutation: emptying it makes every compose check above pass vacuously by doing nothing)" \
+        bash -c 'test -n "$1"' _ "$_S153_OWN"
+else
+    skip "§153(22-23) published-vs-applied table comparison needs node"
+    SKIPPED=$((SKIPPED + 1))
+fi
+
+# --- the launch marker must be able to say what took effect ------------------
+check "§153(24) the session marker emits agent_args_composed BESIDE agent_args — agent_args records what was PASSED and structurally cannot answer whether it took effect" \
+    bash -c 'grep -q "\"agent_args_composed\": {%s}" "$1"' _ "$_S153_SANDY"
+check "§153(25) --print-state reads agent_args_composed anchored on its OWN key (§88b: never on a neighbour, and the agent_args reader must not swallow it)" \
+    bash -c 'grep -qF "$2" "$1"' _ "$_S153_SANDY" 's/^  "agent_args_composed": //p'
+check "§153(26) ...and the agent_args reader keeps its own closing quote and colon, which is what stops it matching agent_args_composed" \
+    bash -c 'grep -qF "$2" "$1"' _ "$_S153_SANDY" 's/^  "agent_args": //p'
+
+# --- the launch must SAY which features applied ------------------------------
+# Before #363 a selected feature printed NOTHING and a skip was verbose-only,
+# so at launch "installed" and "applied to this sandbox" were indistinguishable.
+# Extraction uses index() and an exact string compare, never a regex: a literal
+# $ in an awk pattern is the BWK-awk trap that makes a check silently match
+# nothing on the maintainer machine.
+_S153_BAN="$(awk 'index($0,"if [ -d \"$_sandy_fm_root\" ]; then")==1{f=1} f{print} f&&$0=="fi"{exit}' "$_S153_SANDY")"
+check "§153(27pre) the launch feature block was extracted (mutation: change its opening line and every banner check goes vacuous)" \
+    bash -c 'case "$1" in *_fm_applied*) exit 0 ;; esac; exit 1' _ "$_S153_BAN"
+
+mkdir -p "$_S153_DIR/root/applied/payload" "$_S153_DIR/root/notsel" "$_S153_DIR/root/badmount"
+printf '{"sandboxes":{"include":["*"]},"agents":{"include":["*"]},"mounts":[{"name":"payload","from":"payload"}],"agent_args":{"claude":["--x"]}}\n' > "$_S153_DIR/root/applied/feature.json"
+printf '{"sandboxes":{"include":["nomatch-*"]},"agents":{"include":["*"]}}\n' > "$_S153_DIR/root/notsel/feature.json"
+printf '{"sandboxes":{"include":["*"]},"agents":{"include":["*"]},"mounts":[{"name":"payload","from":"payload"}]}\n' > "$_S153_DIR/root/badmount/feature.json"
+_S153_BANOUT="$(bash -c '
+    set -uo pipefail
+    unset SANDY_HANDOFF_RELAY SANDY_RELAY 2>/dev/null || true
+    warn() { printf "WARN %s\n" "$*"; }
+    info() { printf "INFO %s\n" "$*"; }
+    error() { printf "ERR %s\n" "$*"; }
+    _sandy_daemon_fatal() { :; }
+    _SANDY_FM_HOME=/home/sandy
+    eval "$1"
+    SANDY_RELAY=1; SANDBOX_NAME=amap-router-11112222; WORK_DIR=/w/amap-router; SANDY_AGENT=claude
+    _sandy_fm_root="$3"; _sandy_fm_out=""; _sandy_fm_rc=0; _sandy_fm_ran=false
+    _SANDY_FM_AA_RECORDS=""; _SANDY_FM_AA_JSON=""; _SANDY_RELAY_SOURCE=""; _sandy_relay_source=""
+    eval "$2"
+' _ "$_S153_APPLYBLK" "$_S153_BAN" "$_S153_DIR/root" 2>&1)"
+check "§153(27) an APPLIED feature is named at launch with what it contributed — no SANDY_VERBOSE required (got: $(printf '%s' "$_S153_BANOUT" | grep -m1 '^INFO features:'))" \
+    bash -c 'case "$1" in *"applied (1 mount"*) exit 0 ;; esac; exit 1' _ "$_S153_BANOUT"
+check "§153(28) ...including which agents received args, since a mount without the wiring is the failure this feature exists to make visible" \
+    bash -c 'case "$1" in *"args:claude"*) exit 0 ;; esac; exit 1' _ "$_S153_BANOUT"
+check "§153(29) a feature that was NOT selected is named WITH ITS REASON — that reason used to be verbose-only, so silence meant both 'applied' and 'excluded'" \
+    bash -c 'case "$1" in *"feature notsel not applied: no sandboxes include matched"*) exit 0 ;; esac; exit 1' _ "$_S153_BANOUT"
+check "§153(30) a SELECTED feature whose declared mount source is missing WARNS instead of being reported as not applied — one skip record, two different meanings" \
+    bash -c 'case "$1" in *"WARN feature badmount: declared mount payload has no source"*) exit 0 ;; esac; exit 1' _ "$_S153_BANOUT"
+check "§153(31) ...and badmount is still listed as APPLIED, because it was selected — reporting it as excluded would send the operator after the wrong problem" \
+    bash -c 'case "$1" in *"badmount (0 mounts)"*) exit 0 ;; esac; exit 1' _ "$_S153_BANOUT"
+
+rm -rf "$_S153_DIR"
+unset _S153_BAN _S153_BANOUT _S153_APPLYBLK
+unset _S153_SANDY _S153_DIR _S153_BLK _S153_TBL _S153_T _S153_TWO _S153_ONE
+unset _S153_R1 _S153_R2 _S153_R3 _S153_R4 _S153_R5 _S153_OUT _S153_PUB _S153_OWN
+unset -f _s153_run
 
 # BEGIN SUMMARY
 # ============================================================
