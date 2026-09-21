@@ -11917,9 +11917,14 @@ _S114_ACC="$(cd "$(dirname "$0")" && pwd)/acceptance-handoff-dirs.sh"
 _S114_ACC_E="$(awk '/^echo "== E\./{f=1} f' "$_S114_ACC" 2>/dev/null)"
 check "§114(16f) the acceptance harness still has a relay phase (E)" \
     bash -c '[ -n "$1" ]' -- "$_S114_ACC_E"
-check "§114(16g) phase E proves criterion 7 end-to-end: a non-executable relay makes --start refuse, with the message, and leaves no container" \
-    bash -c 'printf "%s" "$1" | grep -q "does-not-exist.sh" \
-        && printf "%s" "$1" | grep -q "A configured relay that cannot start fails the launch" \
+# The fixture changed shape in 2.2.0: the relay is installed as a manifest
+# `entry` now, so criterion 7 is exercised by pointing the entry at a
+# non-executable payload file rather than by setting a removed config key.
+# Asserted on the PROPERTY the phase must still prove -- refuse, name the
+# rule, leave nothing behind -- not on the spelling of the fixture.
+check "§114(16g) phase E proves criterion 7 end-to-end: a non-executable relay makes --start refuse, name the fail-the-launch rule, and leave no container" \
+    bash -c 'printf "%s" "$1" | grep -q "not-executable" \
+        && printf "%s" "$1" | grep -q "cannot start fails the" \
         && printf "%s" "$1" | grep -q "no daemon container was left behind"' -- "$_S114_ACC_E"
 check "§114(16h) phase E proves criterion 8 end-to-end: a real headless launch prints the skip line naming the refuse consequence" \
     bash -c 'printf "%s" "$1" | grep -q "SANDY_HANDOFF_RELAY not started (headless run); crossSessionInbound will default to refuse"' -- "$_S114_ACC_E"
