@@ -10398,8 +10398,24 @@ check "§106(9e) STATIC: all 5 dispatch arms use the guarded empty-array idiom (
 # a NAMED subdirectory (the legitimate claude/, gemini/, handoff/... mounts).
 check "§106(10a) NEGATIVE: no bind mount exposes the sandbox top level, in any spelling of \$SANDBOX_DIR (mutation: -v \"\$SANDBOX_DIR:/x\", \"\${SANDBOX_DIR}:/x\", or \"\$SANDBOX_DIR/:/x\" must each FAIL this)" \
     bash -c '! grep -E "RUN_FLAGS\+=\(-v \"\\\$\{?SANDBOX_DIR\}?/?:" "$1" >/dev/null' -- "$_S106_SANDY"
-check "§106(10a2) NEGATIVE: no -v line names an agent-args file directly" \
-    bash -c '! grep "RUN_FLAGS+=(-v" "$1" | grep -q "agent-args"' -- "$_S106_SANDY"
+# (10a2-4) What this protects is the OPERATOR files: $SANDBOX_DIR/agent-args.<agent>
+# sit at the sandbox top level precisely so the agent cannot write them, and an
+# agent that can grant itself a flag can grant itself anything that flag allows.
+# The check used to ban the substring agent-args in any -v line, which is a
+# proxy for that property rather than the property. #363 mounts a DIFFERENT
+# thing whose name shares the prefix -- agent-args-composed/, sandy own
+# derivation from several features, rewritten every launch -- so the guard is
+# now split: the operator spelling stays banned outright, and the one permitted
+# neighbour is pinned to exactly one line that is read-only. That is strictly
+# stronger than the substring ban it replaces.
+_S106_AAV="$(grep "RUN_FLAGS+=(-v" "$_S106_SANDY" | grep "agent-args" || true)"
+_S106_AAVN="$(printf '%s\n' "$_S106_AAV" | grep -c "agent-args" || true)"
+check "§106(10a2) NEGATIVE: no -v line names an operator agent-args.<agent> file — those are agent-unwritable BY LOCATION, and mounting one would hand the agent its own launch flags" \
+    bash -c 'case "$1" in *agent-args.*) exit 1 ;; esac; exit 0' -- "$_S106_AAV"
+check "§106(10a3) at most ONE -v names agent-args at all, so a second path cannot appear beside the audited one (got $_S106_AAVN)" \
+    bash -c 'test "$1" -le 1' -- "$_S106_AAVN"
+check "§106(10a4) ...and if it exists it is the #363 composed directory mounted :ro (mutation: drop :ro and the agent can rewrite the flags sandy passes it next launch)" \
+    bash -c 'test -z "$1" && exit 0; case "$1" in *"SANDBOX_DIR/agent-args-composed:/opt/sandy/agent-args:ro\")"*) exit 0 ;; esac; exit 1' -- "$_S106_AAV"
 
 # (10c) THE SEAM. The five -e forwards are the ONLY bridge between host-side
 # resolution and the container-side dispatcher. Deleting all five -- or renaming
@@ -10412,7 +10428,7 @@ for _s106_ag in CLAUDE GEMINI CODEX OPENCODE GROK; do
     check "§106(10c) SEAM: SANDY_AGENT_ARGS_$_s106_ag is forwarded into the container (mutation: dropping just this one silently disables that agent only)" \
         grep -qF "RUN_FLAGS+=(-e \"SANDY_AGENT_ARGS_$_s106_ag=" "$_S106_SANDY"
 done
-unset _s106_ag
+unset _s106_ag _S106_AAV _S106_AAVN
 
 # (10d) BEHAVIORAL: SANDY_EXTRA_ENV must not be able to forward a
 # SANDY_AGENT_ARGS_<AGENT> name. The secret env-file is appended to RUN_FLAGS
