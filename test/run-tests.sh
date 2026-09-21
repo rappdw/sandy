@@ -11922,10 +11922,18 @@ check "§114(16f) the acceptance harness still has a relay phase (E)" \
 # non-executable payload file rather than by setting a removed config key.
 # Asserted on the PROPERTY the phase must still prove -- refuse, name the
 # rule, leave nothing behind -- not on the spelling of the fixture.
-check "§114(16g) phase E proves criterion 7 end-to-end: a non-executable relay makes --start refuse, name the fail-the-launch rule, and leave no container" \
+# The THIRD property changed shape in 2.2.0 and the change is not cosmetic.
+# With the relay installed as a manifest `entry`, the path is image-only, so
+# the host cannot stat it and the refusal moves IN-CONTAINER: exit 7
+# (crash-looping) instead of exit 6 (refused before launch), and a container
+# does exist. Demanding "no container was left behind" there would assert a
+# promise that branch does not make. What criterion 7 requires either way is
+# that the session never comes up READY.
+check "§114(16g) phase E proves criterion 7 end-to-end: a non-executable relay makes --start refuse, name the fail-the-launch rule, and end with nothing running" \
     bash -c 'printf "%s" "$1" | grep -q "not-executable" \
         && printf "%s" "$1" | grep -q "cannot start fails the" \
-        && printf "%s" "$1" | grep -q "no daemon container was left behind"' -- "$_S114_ACC_E"
+        && printf "%s" "$1" | grep -q "CRASH-LOOPING" \
+        && printf "%s" "$1" | grep -q "leaves nothing running"' -- "$_S114_ACC_E"
 check "§114(16h) phase E proves criterion 8 end-to-end: a real headless launch prints the skip line naming the refuse consequence" \
     bash -c 'printf "%s" "$1" | grep -q "SANDY_HANDOFF_RELAY not started (headless run); crossSessionInbound will default to refuse"' -- "$_S114_ACC_E"
 # --- (16i) the harness restart-count pattern must actually match the log line
