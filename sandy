@@ -935,6 +935,52 @@ mode
 export
 EOF
 }
+# --- agent-args composition policy (#363) ------------------------------------
+# `agent_args` is additive in the argv sandy BUILDS. That is not the same as
+# additive in EFFECT: whether two contributions compose is decided by the
+# AGENT'S parser, and for a flag that parser reads once, the second occurrence
+# silently DISCARDS the first. Sandy is the only layer that knows two
+# contributors existed, so it is the only layer that can say so.
+#
+# Found in the field: two features each contributed
+# --append-system-prompt-file, sandy passed both, claude kept the last, and the
+# first feature's prompt never reached the system prompt. Every observable said
+# it was fine -- all mounts present and :ro, and the session marker recorded
+# BOTH features, because the marker records what was PASSED, not what took
+# EFFECT.
+#
+# Measured on Claude Code 2.1.278 (2026-09-21), runtime, via the startup
+# file-existence check -- `FLAG exists FLAG /nope` errors on /nope while
+# `FLAG /nope FLAG exists` does not, so the LAST occurrence is the one read:
+#   --append-system-prompt-file           last wins
+#   --append-subagent-system-prompt-file  last wins
+#   --system-prompt-file                  last wins
+# and statically, the contrast is explicit in the bundle: --plugin-dir carries
+# a collector and an [] default, --mcp-config/--add-dir are .push(e) consumed
+# with .flatMap, and these three have no collector at all.
+#
+# RE-MEASURE THIS TABLE ON EVERY CLAUDE CODE BUMP, the same discipline
+# acceptance-uds-delivery.sh carries for the delivery path. A flag that becomes
+# repeatable upstream makes composing it redundant but harmless; a NEW
+# non-repeatable flag is invisible here until someone measures it.
+#
+# One table, three consumers -- the launch, --print-schema, and run-tests.sh --
+# so what sandy DOES and what it PUBLISHES cannot drift.
+#
+#   <agent><TAB><flag><TAB>concat|report
+#
+#   concat  the flag names a text file. Sandy merges the contributions, in the
+#           order it would have passed them, into one file IT owns, and passes
+#           the flag once.
+#   report  the flag REPLACES rather than appends, so there is no correct
+#           merge. Sandy names the collision and the loser and changes nothing.
+#   absent  sandy assumes the agent accumulates and does nothing. That is the
+#           default for every flag, including every flag of every other agent.
+_sandy_aa_compose_table() {
+    printf 'claude\t--append-system-prompt-file\tconcat\n'
+    printf 'claude\t--append-subagent-system-prompt-file\tconcat\n'
+    printf 'claude\t--system-prompt-file\treport\n'
+}
 _sandy_fm_valid_segment() {
     # D5: the published feature-marker predicate (SPEC_INTROSPECTION, §134),
     # verbatim. A computed root is only a root if its components cannot escape
@@ -1207,6 +1253,7 @@ _sandy_fm_render_selected() {
 #   mount<TAB><host-src><TAB><container-dest><TAB>ro|rw
 #   export<TAB><NAME><TAB><value>
 #   entry<TAB><container-path>
+#   summary<TAB><feature><TAB><mount-count><TAB><agents-with-args><TAB>entry|
 #   skip<TAB><feature><TAB><why>
 #   err<TAB><feature><TAB><message>
 #
@@ -1216,6 +1263,7 @@ _sandy_fm_render_selected() {
 # would mount a partial set, which is the thing D2 exists to prevent.
 _sandy_fm_apply() {
     local _root="$1" _slug="$2" _ws="$3" _agents="$4" _dry="${5:-0}"
+    local _TAB; _TAB="$(printf '\t')"
     local _fdir _fname _m _name _from _mode _exp _rest _dest _src _c
     [ -d "$_root" ] || return 0
     for _fdir in "$_root"/*/; do
@@ -1265,7 +1313,7 @@ _sandy_fm_apply() {
             _c="${_c//\$\{slug\}/$_slug}"
             [ "$_dry" = 1 ] || mkdir -p "$_fdir/$_c"
         done
-        local _i=0
+        local _i=0 _mcount=0
         while [ "$_i" -lt "${#_SANDY_FM_MOUNT[@]}" ]; do
             _m="${_SANDY_FM_MOUNT[$_i]}"; _i=$((_i + 1))
             _name="${_m%%	*}"; _rest="${_m#*	}"
@@ -1283,6 +1331,7 @@ _sandy_fm_apply() {
                 continue
             fi
             printf 'mount\t%s\t%s\t%s\n' "$_src" "$_dest" "$_mode"
+            _mcount=$((_mcount + 1))
             [ -n "$_exp" ] && printf 'export\t%s\t%s\n' "$_exp" "$_dest"
         done
         local _e
@@ -1297,10 +1346,22 @@ _sandy_fm_apply() {
         # both in the mode-flag warning and in the session marker. A merged
         # list cannot answer "which feature put that there", which is the first
         # question when a launch misbehaves.
-        local _aa
+        local _aa _aaagents="" _aaa
         for _aa in ${_SANDY_FM_AGENT_ARGS[@]+"${_SANDY_FM_AGENT_ARGS[@]}"}; do
             printf 'agent_args\t%s\t%s\n' "$_fname" "$_aa"
+            _aaa="${_aa%%"$_TAB"*}"
+            case ",$_aaagents," in *",$_aaa,"*) ;; *) _aaagents="${_aaagents:+$_aaagents,}$_aaa" ;; esac
         done
+        # D11 (#363): one record per SELECTED feature, so the launch can SAY
+        # what applied without re-deriving it from the mount lines -- which it
+        # cannot do, because a `mount` record deliberately carries no feature
+        # name. It also separates the two meanings `skip` has always carried:
+        # a feature WITH a summary was selected (a skip beside it is a missing
+        # mount source), one WITHOUT a summary was not selected at all.
+        # Consumers that do not know this kind ignore it; the stream has always
+        # been kind-dispatched.
+        printf 'summary\t%s\t%s\t%s\t%s\n' "$_fname" "$_mcount" "$_aaagents" \
+            "$([ -n "$_SANDY_FM_ENTRY" ] && printf 'entry')"
     done
     return 0
 }
@@ -1869,6 +1930,26 @@ _sandy_emit_schema() {
     printf ',"manifest":{'
     printf '"top_level_keys":'; _sandy_fm_known_keys | _json_str_array
     printf ',"mount_keys":';    _sandy_fm_mount_keys | _json_str_array
+    # agent_args_compose (#363) — which agent_args flags sandy will NOT leave
+    # to the agent's parser, because that parser reads them once and a second
+    # contributor silently discards the first. Published so a consumer can ASK
+    # rather than infer: whether two features may each ship a given flag is not
+    # derivable from top_level_keys, and getting it wrong is silent.
+    printf ',"agent_args_compose":['
+    _sac_first=1
+    while IFS= read -r _sac_l; do
+        [ -n "$_sac_l" ] || continue
+        _sac_a="${_sac_l%%	*}"; _sac_l="${_sac_l#*	}"
+        _sac_f="${_sac_l%%	*}"; _sac_p="${_sac_l#*	}"
+        [ "$_sac_first" = 1 ] || printf ','
+        _sac_first=0
+        printf '{'; _json_kv agent "\"$_sac_a\""
+        printf ','; _json_kv flag "\"$_sac_f\""
+        printf ','; _json_kv policy "\"$_sac_p\""
+        printf '}'
+    done <<< "$(_sandy_aa_compose_table)"
+    printf ']'
+    unset _sac_first _sac_l _sac_a _sac_f _sac_p
     printf '}'
 
     # compatibility — schema versioning declarations.
@@ -3009,6 +3090,27 @@ EOF_RELAY_MARKER
                 [ -n "$sb_fa_line" ] && sb_fargs="$sb_fa_line"
             fi
             printf ','; _json_kv agent_args "$sb_fargs"
+            # agent_args_composed (#363): what the last launch did about two
+            # contributors of the same flag. THIS is the field that answers
+            # "did the prompt actually land", which `agent_args` structurally
+            # cannot -- that one records what was PASSED, and passing two
+            # occurrences of a flag the agent reads once is exactly how a
+            # contribution gets discarded while every other signal reads
+            # healthy. Entries carry `composed: true|false`, so "merged" and
+            # "collision reported, argv unchanged" never collapse.
+            #
+            # Same reader shape and the same null contract as above: null means
+            # CANNOT ANSWER (no marker, or a sandy predating the field), {}
+            # means looked and found no collision. The BRE is anchored on this
+            # field's OWN key -- the agent_args reader above cannot match it,
+            # since that pattern requires the closing quote and colon (§88b).
+            sb_facomp='null'
+            if [ -f "$sb/sandy-session.json" ]; then
+                sb_fc_line="$(sed -n 's/^  "agent_args_composed": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_fc_line="${sb_fc_line%,}"
+                [ -n "$sb_fc_line" ] && sb_facomp="$sb_fc_line"
+            fi
+            printf ','; _json_kv agent_args_composed "$sb_facomp"
             if [ -d "$sb_lock_dir" ]; then
                 printf ','; _json_kv lock_held 'true'
                 printf ','; _json_kv lock_holder_pid "$(_json_escape "$sb_lock_pid")"
@@ -9399,6 +9501,148 @@ _sandy_filter_agent_args() {
     _SANDY_AA_FILTERED="${_aa_argv[*]-}"
 }
 
+# --- agent-args composition (#363) -------------------------------------------
+# Resolve a CONTAINER path back to its HOST source through the feature mount
+# table sandy just built. An agent_args value IS a container path -- the file it
+# names lives on a :ro feature payload -- so sandy must reverse the mapping to
+# read one. Longest destination prefix wins, because feature mounts nest.
+#
+# Echoes NOTHING when the path is under no mount sandy made, and that is the
+# honest answer rather than an error: an operator agent-args.<agent> may name a
+# path sandy knows nothing about. The caller treats empty as "cannot compose",
+# reports the collision anyway, and changes no argv.
+_sandy_aa_host_path() {   # $1 = container path, $2 = mount table
+    local _p="$1" _tbl="$2" _l _rest _src _dst _cand _best="" _best_len=0
+    local _T; _T="$(printf '\t')"
+    [ -n "$_tbl" ] || return 0
+    while IFS= read -r _l; do
+        case "$_l" in mount$_T*) ;; *) continue ;; esac
+        _rest="${_l#mount	}"
+        _src="${_rest%%	*}"; _rest="${_rest#*	}"
+        _dst="${_rest%%	*}"
+        case "$_p" in
+            "$_dst")   _cand="$_src" ;;
+            "$_dst"/*) _cand="$_src/${_p#"$_dst"/}" ;;
+            *) continue ;;
+        esac
+        if [ "${#_dst}" -gt "$_best_len" ]; then _best_len="${#_dst}"; _best="$_cand"; fi
+    done <<< "$_tbl"
+    [ -n "$_best" ] && printf '%s' "$_best"
+    return 0
+}
+
+# _sandy_aa_compose AGENT CONTRIBUTORS MOUNT_TABLE SANDBOX_DIR
+#
+# CONTRIBUTORS is newline-separated "<label>	<space-separated tokens>" IN THE ORDER
+# SANDY WILL PASS THEM. Returns through globals, never $( ), because it warns
+# and warn() writes to stdout (the _sandy_filter_agent_args rule).
+#
+#   _SANDY_AA_OUT_TOKENS  the token list to use (rewritten only when composing)
+#   _SANDY_AA_OUT_MOUNT   1 when the composed directory must be mounted
+#   _SANDY_AA_OUT_JSON    marker fragment: the composition entries for AGENT
+#
+# NOTHING HAPPENS AT ONE CONTRIBUTOR. That is the whole safety argument: with a
+# single occurrence the argv is byte-identical to before this existed and the
+# feature's own live :ro mount is what the agent reads. Composition engages
+# only where the alternative is a contribution being silently discarded.
+_sandy_aa_compose() {
+    local _agent="$1" _contrib="$2" _tbl="$3" _sbdir="$4"
+    _SANDY_AA_OUT_TOKENS=""; _SANDY_AA_OUT_MOUNT=0; _SANDY_AA_OUT_JSON=""
+    local _toks=() _owner=() _l _lab _rest _t _arr=()
+    local _T; _T="$(printf '\t')"
+    while IFS= read -r _l; do
+        [ -n "$_l" ] || continue
+        case "$_l" in *$_T*) ;; *) continue ;; esac
+        _lab="${_l%%	*}"; _rest="${_l#*	}"
+        _arr=(); read -ra _arr <<< "$_rest" || true
+        for _t in ${_arr[@]+"${_arr[@]}"}; do _toks+=("$_t"); _owner+=("$_lab"); done
+    done <<< "$_contrib"
+    [ "${#_toks[@]}" -gt 0 ] || return 0
+    _SANDY_AA_OUT_TOKENS="${_toks[*]}"
+
+    local _flag _policy _ta _i _n _idx _vals _owns _cnt _first _slug _host _dest
+    local _out _unres _from_json _entries="" _drop _new=() _j _ok
+    while IFS= read -r _l; do
+        [ -n "$_l" ] || continue
+        _ta="${_l%%	*}"; _rest="${_l#*	}"
+        _flag="${_rest%%	*}"; _policy="${_rest#*	}"
+        [ "$_ta" = "$_agent" ] || continue
+        _n="${#_toks[@]}"; _idx=""; _vals=""; _owns=""; _cnt=0; _first=-1
+        _i=0
+        while [ "$_i" -lt "$_n" ]; do
+            if [ "${_toks[$_i]}" = "$_flag" ] && [ $((_i + 1)) -lt "$_n" ]; then
+                _idx="$_idx $_i"; _cnt=$((_cnt + 1))
+                [ "$_first" -lt 0 ] && _first="$_i"
+                _vals="${_vals}${_toks[$((_i + 1))]}"$'\n'
+                _owns="${_owns}${_owner[$_i]}"$'\n'
+                _i=$((_i + 2)); continue
+            fi
+            _i=$((_i + 1))
+        done
+        [ "$_cnt" -ge 2 ] || continue
+
+        _from_json=""
+        while IFS= read -r _t; do
+            [ -n "$_t" ] || continue
+            _from_json="${_from_json:+$_from_json,}\"$(_sandy_fm_jesc "$_t")\""
+        done <<< "$_owns"
+
+        if [ "$_policy" = "report" ]; then
+            warn "$_agent: $_cnt contributors set $_flag, which REPLACES rather than appends -- the last wins and the others have no effect:"
+            while IFS= read -r _t; do [ -n "$_t" ] || continue; warn "    $_t"; done <<< "$_owns"
+            warn "  sandy will not choose between them; remove the flag from all but one."
+            _entries="${_entries:+$_entries,}{\"flag\": \"$(_sandy_fm_jesc "$_flag")\", \"policy\": \"report\", \"composed\": false, \"from\": [$_from_json], \"path\": null}"
+            continue
+        fi
+
+        # concat: every value must resolve to a host file sandy can read.
+        _unres=""; _ok=1
+        while IFS= read -r _t; do
+            [ -n "$_t" ] || continue
+            _host="$(_sandy_aa_host_path "$_t" "$_tbl")"
+            if [ -z "$_host" ] || [ ! -f "$_host" ]; then _ok=0; _unres="$_t"; fi
+        done <<< "$_vals"
+        if [ "$_ok" != 1 ]; then
+            warn "$_agent: $_cnt contributors set $_flag, which the agent reads ONCE -- the last wins and the others are discarded:"
+            while IFS= read -r _t; do [ -n "$_t" ] || continue; warn "    $_t"; done <<< "$_owns"
+            warn "  sandy cannot merge them: '$_unres' is not under any mount it made, so it cannot read it."
+            _entries="${_entries:+$_entries,}{\"flag\": \"$(_sandy_fm_jesc "$_flag")\", \"policy\": \"concat\", \"composed\": false, \"from\": [$_from_json], \"path\": null}"
+            continue
+        fi
+
+        _slug="${_flag#--}"
+        _out="$_sbdir/agent-args-composed/$_agent.$_slug.md"
+        mkdir -p "$_sbdir/agent-args-composed" 2>/dev/null || true
+        : > "$_out" 2>/dev/null || { warn "$_agent: cannot write $_out; leaving $_flag to the agent (last wins)"; continue; }
+        {
+            printf '<!-- Composed by sandy from %s contributors for %s. Do not edit: rewritten every launch. -->\n' "$_cnt" "$_flag"
+            # Walk the ORIGINAL indices, so provenance and content cannot
+            # drift apart. _toks is rebuilt below, never before this.
+            for _i in $_idx; do
+                printf '\n<!-- sandy: contributed by %s -->\n' "${_owner[$_i]}"
+                cat "$(_sandy_aa_host_path "${_toks[$((_i + 1))]}" "$_tbl")" 2>/dev/null || true
+                printf '\n'
+            done
+        } >> "$_out" 2>/dev/null || true
+
+        _dest="/opt/sandy/agent-args/$_agent.$_slug.md"
+        _drop=" "; for _i in $_idx; do _drop="$_drop$_i $((_i + 1)) "; done
+        _new=(); _j=0; _n="${#_toks[@]}"
+        while [ "$_j" -lt "$_n" ]; do
+            if [ "$_j" = "$_first" ]; then _new+=("$_flag" "$_dest"); fi
+            case "$_drop" in *" $_j "*) : ;; *) _new+=("${_toks[$_j]}") ;; esac
+            _j=$((_j + 1))
+        done
+        _toks=(${_new[@]+"${_new[@]}"})
+        _SANDY_AA_OUT_TOKENS="${_toks[*]}"
+        _SANDY_AA_OUT_MOUNT=1
+        _entries="${_entries:+$_entries,}{\"flag\": \"$(_sandy_fm_jesc "$_flag")\", \"policy\": \"concat\", \"composed\": true, \"from\": [$_from_json], \"path\": \"$(_sandy_fm_jesc "$_dest")\"}"
+        info "feature args: merged $_cnt contributions of $_flag into $_dest"
+    done <<< "$(_sandy_aa_compose_table)"
+    [ -n "$_entries" ] && _SANDY_AA_OUT_JSON="\"$_agent\": [$_entries]"
+    return 0
+}
+
 _SANDY_AGENT_ARGS_FILTERED=""
 if [ -n "${SANDY_AGENT_ARGS:-}" ]; then
     _sandy_filter_agent_args "$SANDY_AGENT_ARGS" "SANDY_AGENT_ARGS"
@@ -11659,6 +11903,7 @@ _SANDY_FM_AA_RECORDS=""
 _SANDY_FM_AA_JSON=""
 if [ -d "$_sandy_fm_root" ]; then
     _sandy_fm_ran=true
+    _fm_applied=""; _fm_applied_names=""; _fm_skipped=""
     # rc-FIRST, as before: a feature that fails may be preceded by valid mount
     # lines from an earlier one, and using that partial set is what D2 exists
     # to prevent.
@@ -11697,9 +11942,53 @@ if [ -d "$_sandy_fm_root" ]; then
                 fi ;;
             agent_args*)
                 _SANDY_FM_AA_RECORDS="${_SANDY_FM_AA_RECORDS}${_fm_l#agent_args	}"$'\n' ;;
+            summary*)
+                _fm_rest="${_fm_l#summary	}"
+                _fm_n="${_fm_rest%%	*}"; _fm_rest="${_fm_rest#*	}"
+                _fm_c="${_fm_rest%%	*}"; _fm_rest="${_fm_rest#*	}"
+                _fm_a="${_fm_rest%%	*}"; _fm_e="${_fm_rest#*	}"
+                _fm_applied_names="$_fm_applied_names $_fm_n"
+                _fm_what="$_fm_c mount$([ "$_fm_c" = 1 ] || printf 's')"
+                [ -n "$_fm_a" ] && _fm_what="$_fm_what, args:$_fm_a"
+                [ -n "$_fm_e" ] && _fm_what="$_fm_what, $_fm_e"
+                _fm_applied="${_fm_applied:+$_fm_applied, }$_fm_n ($_fm_what)" ;;
+            skip*)
+                _fm_skipped="${_fm_skipped}${_fm_l#skip	}"$'\n' ;;
         esac
     done <<< "$_sandy_fm_out"
-    unset _fm_l
+    unset _fm_l _fm_rest _fm_n _fm_c _fm_a _fm_e _fm_what
+
+    # #363: SAY what applied, every launch, without SANDY_VERBOSE.
+    #
+    # Until now a SELECTED feature printed nothing at all and a skip was
+    # verbose-only, so at launch "installed" and "applied to THIS sandbox"
+    # were indistinguishable -- and that silence is half of why a feature
+    # whose prompt was being silently discarded took a debugging round to
+    # even confirm as applied. A feature is infrastructure the operator
+    # installed deliberately; one line naming what it contributed is the
+    # cheapest possible answer to "did my feature apply".
+    if [ -n "$_fm_applied" ]; then
+        info "features: $_fm_applied"
+    elif [ -n "$_fm_skipped" ]; then
+        info "features: none applied to this sandbox"
+    fi
+    # A `skip` means one of two different things and they need different
+    # volume. For a feature that WAS selected it is a declared mount whose
+    # source is missing -- a real misconfiguration, so warn. For one that
+    # was not selected it is routine enrolment, so state it plainly with
+    # the reason, which is the half that used to be verbose-only.
+    if [ -n "$_fm_skipped" ]; then
+        while IFS= read -r _fm_l; do
+            [ -n "$_fm_l" ] || continue
+            _fm_n="${_fm_l%%	*}"
+            case " $_fm_applied_names " in
+                *" $_fm_n "*) warn "feature $_fm_n: ${_fm_l#*	}" ;;
+                *)             info "feature $_fm_n not applied: ${_fm_l#*	}" ;;
+            esac
+        done <<< "$_fm_skipped"
+        unset _fm_l _fm_n
+    fi
+    unset _fm_applied _fm_applied_names _fm_skipped
 fi
 
 # BEGIN handoff relay (host-side validation; the relay itself runs in user-setup.sh)
@@ -12031,6 +12320,11 @@ fi
 _sandy_fm_agent_args_for() {
     local _agent="$1"
     _SANDY_FM_AA_TOKENS=""
+    # #363: the per-FEATURE lists, kept beside the merged one. Composition has
+    # to be able to name which feature contributed a flag, and the merged list
+    # cannot answer that -- the same reason the records carry the feature name
+    # at all (#348).
+    _SANDY_FM_AA_CONTRIB=""
     [ -n "$_SANDY_FM_AA_RECORDS" ] || return 0
     local _feats="" _line _f _rest _a
     while IFS= read -r _line; do
@@ -12054,6 +12348,7 @@ _sandy_fm_agent_args_for() {
         _sandy_filter_agent_args "$_toks" "agent_args (feature '$_f')"
         [ -n "$_SANDY_AA_FILTERED" ] || continue
         _SANDY_FM_AA_TOKENS="${_SANDY_FM_AA_TOKENS:+$_SANDY_FM_AA_TOKENS }$_SANDY_AA_FILTERED"
+        _SANDY_FM_AA_CONTRIB="${_SANDY_FM_AA_CONTRIB}feature '$_f'	$_SANDY_AA_FILTERED"$'\n'
         _ajson=""
         for _tok in $_SANDY_AA_FILTERED; do
             _ajson="${_ajson:+$_ajson,}\"$(_sandy_fm_jesc "$_tok")\""
@@ -12105,8 +12400,11 @@ SANDY_AGENT_ARGS_GEMINI=""
 SANDY_AGENT_ARGS_CODEX=""
 SANDY_AGENT_ARGS_OPENCODE=""
 SANDY_AGENT_ARGS_GROK=""
+_SANDY_AA_COMPOSE_MOUNT=0
+_SANDY_AA_COMPOSED_JSON=""
 for _sandy_aa_agent in "${_SANDY_AGENTS[@]}"; do
     _sandy_aa_val="${_SANDY_AGENT_ARGS_FILTERED:-}"
+    _sandy_aa_operator_label="operator SANDY_AGENT_ARGS"
     _sandy_aa_file="$SANDBOX_DIR/agent-args.$_sandy_aa_agent"
     if [ -f "$_sandy_aa_file" ]; then
         _sandy_filter_agent_args "$(cat "$_sandy_aa_file")" "agent-args.$_sandy_aa_agent"
@@ -12116,6 +12414,7 @@ for _sandy_aa_agent in "${_SANDY_AGENTS[@]}"; do
         # SANDY_AGENT_ARGS rather than winning with nothing.
         if [ -n "$_SANDY_AA_FILTERED" ]; then
             _sandy_aa_val="$_SANDY_AA_FILTERED"
+            _sandy_aa_operator_label="operator agent-args.$_sandy_aa_agent"
             if [ -n "${_SANDY_AGENT_ARGS_FILTERED:-}" ]; then
                 info "agent-args.$_sandy_aa_agent overrides SANDY_AGENT_ARGS for $_sandy_aa_agent (sandbox file wins; values are never merged)"
             fi
@@ -12125,14 +12424,45 @@ for _sandy_aa_agent in "${_SANDY_AGENTS[@]}"; do
     # (#348). The file-vs-SANDY_AGENT_ARGS exclusivity above exists because
     # both are the SAME actor from two places and sandy cannot attribute the
     # survivor; a feature is a different actor whose args are part of its own
-    # wiring, applied unconditionally exactly as its mounts are. Sandy defines
-    # the ORDER; PRECEDENCE belongs to the agent's own parser (claude's
-    # --mcp-config is variadic, so a second occurrence may accumulate rather
-    # than replace) -- so this is deliberately not documented as "the operator
-    # wins".
+    # wiring, applied unconditionally exactly as its mounts are.
+    #
+    # Sandy defines the ORDER, and PRECEDENCE among them belongs to the agent's
+    # own parser -- but only where the parser HAS a precedence to apply. That
+    # distinction was missing here until #363 and the omission was load-bearing:
+    # this comment used to justify itself with claude's --mcp-config being
+    # variadic, generalizing one repeatable flag into an assumption about every
+    # flag. For a flag the parser reads ONCE the second occurrence is not
+    # precedence, it is DATA LOSS, and sandy is the only layer that knows two
+    # contributors existed. _sandy_aa_compose below is where that is handled;
+    # for every flag with no entry in the policy table the original rule stands
+    # unchanged and sandy does nothing.
+    #
+    # Snapshot the operator contribution before the feature tokens are
+    # prepended -- afterwards the list is merged and attribution is gone, which
+    # is precisely what made the original bug unreportable.
+    _sandy_aa_operator_val="$_sandy_aa_val"
     _sandy_fm_agent_args_for "$_sandy_aa_agent"
     if [ -n "$_SANDY_FM_AA_TOKENS" ]; then
         _sandy_aa_val="$_SANDY_FM_AA_TOKENS${_sandy_aa_val:+ $_sandy_aa_val}"
+    fi
+    # #363. Everything above assembles the argv; this asks whether the AGENT
+    # will actually honour it. For a flag the agent's parser reads once, a
+    # second contributor silently discards the first -- so the contributors are
+    # handed over WITH THEIR LABELS, in the order they will be passed, and
+    # sandy either merges them (concat) or at minimum names the loss (report,
+    # or a path it cannot read). At fewer than two contributors of a flag this
+    # is a no-op and the argv is byte-identical to before it existed.
+    _sandy_aa_contrib="${_SANDY_FM_AA_CONTRIB:-}"
+    if [ -n "$_sandy_aa_operator_val" ]; then
+        _sandy_aa_contrib="${_sandy_aa_contrib}${_sandy_aa_operator_label}	$_sandy_aa_operator_val"$'\n'
+    fi
+    if [ -n "$_sandy_aa_contrib" ]; then
+        _sandy_aa_compose "$_sandy_aa_agent" "$_sandy_aa_contrib" "${_sandy_fm_out:-}" "$SANDBOX_DIR"
+        [ -n "$_SANDY_AA_OUT_TOKENS" ] && _sandy_aa_val="$_SANDY_AA_OUT_TOKENS"
+        [ "${_SANDY_AA_OUT_MOUNT:-0}" = 1 ] && _SANDY_AA_COMPOSE_MOUNT=1
+        if [ -n "${_SANDY_AA_OUT_JSON:-}" ]; then
+            _SANDY_AA_COMPOSED_JSON="${_SANDY_AA_COMPOSED_JSON:+$_SANDY_AA_COMPOSED_JSON, }$_SANDY_AA_OUT_JSON"
+        fi
     fi
     case "$_sandy_aa_agent" in
         claude)   SANDY_AGENT_ARGS_CLAUDE="$_sandy_aa_val" ;;
@@ -12143,6 +12473,7 @@ for _sandy_aa_agent in "${_SANDY_AGENTS[@]}"; do
     esac
 done
 unset _sandy_aa_agent _sandy_aa_val _sandy_aa_file
+unset _sandy_aa_operator_val _sandy_aa_operator_label _sandy_aa_contrib
 # END per-agent args
 
 # Workspace .venv overlay. If the host workspace has a .venv/, we shadow it
@@ -13869,6 +14200,14 @@ if [ "${_sandy_fm_ran:-false}" = "true" ] && [ -n "$_sandy_fm_out" ]; then
     unset _fm_l _fm_k _fm_v _fm_src _fm_dst _fm_mode
 fi
 unset _sandy_fm_out _sandy_fm_rc _sandy_fm_ran _sandy_fm_root
+# #363: the composed agent-args directory, written above by
+# _sandy_aa_compose. Mounted :ro under /opt/sandy -- a path SANDY owns --
+# and deliberately NOT inside any feature root: the file is sandy's own
+# derivation from several features and belongs to none of them, the same
+# argument that moved relay state out of a feature tree in #353.
+if [ "${_SANDY_AA_COMPOSE_MOUNT:-0}" = 1 ]; then
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/agent-args-composed:/opt/sandy/agent-args:ro")
+fi
 # Skill pack persistent state mounts. gstack mounts from the workspace (not
 # the sandbox) — see the migration block above where $WORK_DIR/.gstack is
 # ensured to exist.
@@ -14447,12 +14786,12 @@ fi
 # will run, whatever was resolved earlier.
 [ -n "${SANDY_HANDOFF_RELAY:-}" ] || _sandy_relay_source="none"
 _sandy_relay_source_json="\"${_sandy_relay_source:-none}\""
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "relay": {\n    "source": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "cred_mode": "%s"\n}\n' \
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "relay": {\n    "source": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "cred_mode": "%s"\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
     "$_sandy_perm_mode_json" "$_sandy_csi_json" "$_sandy_agents_json" \
     "$_sandy_relay_source_json" "$_sandy_relay_path_json" "$_sandy_relay_disabled_by_json" \
-    "${_SANDY_FM_AA_JSON:-}" "${CRED_MODE:-none}" \
+    "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${CRED_MODE:-none}" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
 
