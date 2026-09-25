@@ -11,6 +11,13 @@
 # only ever appears on one machine, usually mid-task. Every pattern below has
 # ALREADY broken this repo at least once — none is speculative:
 #
+#   VARMB   an UNBRACED `$name` immediately followed by a non-ASCII character,
+#           e.g. `"Probing $host…"`. bash 3.2 on macOS reads the bytes of the
+#           `…` as part of the NAME, looks up a variable that does not exist, and
+#           `set -u` aborts: `line 4217: _rsy_host<?>: unbound variable`. bash 5
+#           ends the name at the first non-ASCII byte, so CI never sees it. Hit
+#           by the first macOS run of `sandy --rsync` (#374). Fix: `${name}…`.
+#
 #   SRCSUB  nested `source <(...)` inside `$(...)`. bash 3.2 yields an empty
 #           source; the calls that follow exit 127 and the ERR trap aborts the
 #           whole run. Hit in run-tests.sh §83 — every section after it silently
@@ -235,6 +242,16 @@ def scan(path):
             continue
         if re.search(r"(^|[^\w-])(source|\.)\s+<\(", l):
             out.append((i, "SRCSUB", l.strip()[:88]))
+
+    # VARMB — unbraced $name followed directly by a non-ASCII character. Heredoc
+    # BODIES are skipped for the GNUBIN reason: they are container-side scripts,
+    # run by the image's bash 5, or another language entirely.
+    _vb = heredoc_body_lines(lines)
+    for i, l in enumerate(lines, 1):
+        if (i - 1) in _vb or re.match(r"^\s*#", l):
+            continue
+        if re.search(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]", l):
+            out.append((i, "VARMB", l.strip()[:88]))
 
     # PYBACK — backticks / $( inside a double-quoted `python3 -c "` body. Only
     # multi-line bodies are considered (the line ends with the opening quote);
@@ -536,14 +553,24 @@ if [ "$SELF_TEST" = true ]; then
     # GNUBIN: GNU-only BRE alternation. The exact run-tests.sh §127 shape --
     # silent empty output on BSD sed, never an error.
     printf '%s\n' '#!/bin/bash' 'v="$(prog | sed -n '"'"'s/.*"agents":\\(\\[[^]]*\\]\\|null\\).*/\\1/p'"'"')"' > "$_fx/gnubin5.sh"
+    # VARMB: the exact line that aborted the first macOS run of sandy --rsync.
+    printf '%s\n' '#!/bin/bash' 'info "Probing $_rsy_host…"' > "$_fx/varmb.sh"
+    # ...and the documented fix must NOT fire, nor may the same text inside a
+    # heredoc body (container-side, bash 5).
+    printf '%s\n' '#!/bin/bash' 'info "Probing ${_rsy_host}…"' 'cat <<EOF' 'Probing $_rsy_host…' 'EOF' > "$_fx/varmbok.sh"
     _fails=0
-    for probe in srcsub pyback aposcs aposcs2 aposq casesub casesub2 grepm grepm2 gnubin gnubin2 gnubin3 gnubin4 gnubin5; do
+    for probe in srcsub varmb pyback aposcs aposcs2 aposq casesub casesub2 grepm grepm2 gnubin gnubin2 gnubin3 gnubin4 gnubin5; do
         if python3 "$_scanner" "$_fx/$probe.sh" >/dev/null 2>&1; then
             echo "SELF-TEST FAIL: $probe fixture was NOT detected" >&2; _fails=$((_fails + 1))
         else
             echo "  detector OK: $probe"
         fi
     done
+    if python3 "$_scanner" "$_fx/varmbok.sh" >/dev/null 2>&1; then
+        echo "  negative control OK: \${name} and heredoc bodies do not fire VARMB"
+    else
+        echo "SELF-TEST FAIL: VARMB flagged the braced fix or a heredoc body" >&2; _fails=$((_fails + 1))
+    fi
     if python3 "$_scanner" "$_fx/casesub2ok.sh" >/dev/null 2>&1; then
         echo "  negative control OK: the leading-paren case form does not fire"
     else
@@ -603,6 +630,7 @@ else
     echo "" >&2
     echo "bash-3.2 lint FAILED — the above parse or expand differently on macOS" >&2
     echo "  SRCSUB  use extract-then-eval: v=\"\$(sed -n '/^f()/,/^}/p' x)\"; bash -c \"\$v; f\"" >&2
+    echo "  VARMB   brace the variable: \"\${name}…\" -- bash 3.2 reads a following non-ASCII char as part of the name" >&2
     echo "  PYBACK  use a QUOTED heredoc: python3 - arg <<'PY' ... PY" >&2
     echo "  APOSCS  reword the comment to avoid apostrophes" >&2
     echo "  CASESUB hoist the case out of the \$( ), or use the leading-paren form (pattern)" >&2

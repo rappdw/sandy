@@ -4170,16 +4170,19 @@ if [[ "${1:-}" == "--rsync" ]]; then
     _rsy_lockpid=""
     [ -f "$SANDY_HOME/sandboxes/.${_rsy_name}.lock/pid" ] && \
         _rsy_lockpid="$(cat "$SANDY_HOME/sandboxes/.${_rsy_name}.lock/pid" 2>/dev/null || true)"
+    # --dry-run only READS, so it still prints the plan and says the real run
+    # would be refused. Refusing the plan too would leave an operator unable
+    # to see what a copy would do until they stopped the session they are
+    # probably working in.
+    _rsy_live=""
     if [ -n "$_rsy_lockpid" ] && [ "$_rsy_lockpid" -eq "$_rsy_lockpid" ] 2>/dev/null && kill -0 "$_rsy_lockpid" 2>/dev/null; then
-        error "--rsync: a live sandy session (pid $_rsy_lockpid) holds this workspace."
-        error "Stop it first (sandy --stop), then copy."
-        exit 1
+        _rsy_live="a live sandy session (pid $_rsy_lockpid) holds this workspace. Stop it first (sandy --stop), then copy."
+    elif command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "sandy-${_rsy_name}"; then
+        _rsy_live="container sandy-${_rsy_name} is running. Stop it first (sandy --stop --workspace $_rsy_wd)."
     fi
-    if command -v docker >/dev/null 2>&1; then
-        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "sandy-${_rsy_name}"; then
-            error "--rsync: container sandy-${_rsy_name} is running. Stop it first (sandy --stop --workspace $_rsy_wd)."
-            exit 1
-        fi
+    if [ -n "$_rsy_live" ] && [ "$_rsy_dry" != true ]; then
+        error "--rsync: $_rsy_live"
+        exit 1
     fi
 
     _rsy_scws="$(_sandy_container_ws_for "$_rsy_wd" "$HOME")"
@@ -4214,7 +4217,7 @@ S="$(command -v sandy 2>/dev/null || true)"
 exit 0
 PROBE
     } > "$_rsy_tmp/probe.sh"
-    info "Probing $_rsy_host…"
+    info "Probing ${_rsy_host}…"
     if ! ssh "$_rsy_host" sh -s < "$_rsy_tmp/probe.sh" > "$_rsy_tmp/probe.out" 2>"$_rsy_tmp/probe.err"; then
         error "--rsync: could not reach $_rsy_host over ssh:"
         sed 's/^/    /' "$_rsy_tmp/probe.err" >&2
@@ -4357,7 +4360,11 @@ PROBE
         exit 1
     fi
 
-    [ "$_rsy_dry" = true ] && { info "--dry-run: nothing copied."; exit 0; }
+    if [ "$_rsy_dry" = true ]; then
+        [ -n "$_rsy_live" ] && warn "A real run would REFUSE: $_rsy_live"
+        info "--dry-run: nothing copied."
+        exit 0
+    fi
     if [ "$_rsy_yes" != true ]; then
         if [ -t 0 ]; then
             printf '[sandy] Copy to %s? [y/N] ' "$_rsy_host" >&2
@@ -4395,7 +4402,7 @@ PROBE
         fi
     fi
 
-    info "Copying to $_rsy_host…"
+    info "Copying to ${_rsy_host}…"
     ssh "$_rsy_host" "mkdir -p $_rsy_dsandy_home/sandboxes" </dev/null \
         || { error "--rsync: could not create $_rsy_dsandy_home/sandboxes on $_rsy_host."; exit 1; }
     rsync -a "${_rsy_excl[@]}" "$_rsy_src/" "$_rsy_host:$_rsy_ddir/" \
@@ -6285,8 +6292,9 @@ Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
                      relative to $HOME and must already exist there. Credential
                      files are copied and named in the plan; on a CPU
                      architecture mismatch the package dirs are skipped.
-                     Refuses while a live session holds the workspace, and
-                     never overwrites a sandbox already on the destination.
+                     Refuses while a live session holds the workspace
+                     (--dry-run still prints the plan), and never overwrites
+                     a sandbox already on the destination.
                      Sub-options: --workspace PATH, --dest-workspace PATH,
                      --dest-sandy-home PATH, --dry-run, --yes
   --doctor           Standalone host + runtime readiness check. HOST runs the

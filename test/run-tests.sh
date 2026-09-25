@@ -17409,9 +17409,16 @@ _s154_mk R4 dev/proj; mkdir -p "$_S154_DIR/R4/rhome/dev/proj" "$_S154_DIR/R4/lho
 sleep 300 & _S154_PID=$!
 printf '%s\n' "$_S154_PID" > "$(find "$_S154_DIR/R4/lhome/.sandy/sandboxes" -mindepth 1 -maxdepth 1 -name '.*.lock' | sed -n 1p)/pid"
 _s154_run R4 --workspace "$_S154_DIR/R4/lhome/dev/proj" --yes
+_S154_RC_REAL="$_S154_RC"
+_s154_run R4 --workspace "$_S154_DIR/R4/lhome/dev/proj" --dry-run
 kill "$_S154_PID" 2>/dev/null || true; wait "$_S154_PID" 2>/dev/null || true
 check "§154(23) a live session holding the lock is refused -- copying mid-write ships a torn history" \
-    bash -c 'test "$1" -eq 1 && test -z "$2"' _ "$_S154_RC" "$(_s154_dest R4)"
+    bash -c 'test "$1" -eq 1 && test -z "$2"' _ "$_S154_RC_REAL" "$(_s154_dest R4)"
+# The maintainer hit this first: sandy developed inside sandy means the
+# workspace you would copy is the one your own session holds. --dry-run only
+# reads, so it must still show the plan -- and say plainly a real run refuses.
+check "§154(23b) --dry-run against a live session still prints the plan and exits 0, and says a real run would refuse" \
+    bash -c 'test "$1" -eq 0 && case "$2" in *"Container path"*"would REFUSE"*) exit 0 ;; esac; exit 1' _ "$_S154_RC" "$_S154_OUT"
 _s154_mk R5 dev/proj
 _s154_run R5 --workspace "$_S154_DIR/R5/lhome/dev/proj" --yes
 check "§154(24) a destination with no such workspace is refused before anything is copied" \
@@ -17422,7 +17429,7 @@ check "§154(25) an option-shaped host is refused and ssh is NEVER invoked -- a 
     bash -c 'test "$1" -eq 1 && test ! -s "$2"' _ "$_S154_RC" "$_S154_DIR/ssh.log"
 fi
 rm -rf "$_S154_DIR"
-unset _S154_SANDY _S154_DIR _S154_HLP _S154_LAUNCH _S154_LCWS _S154_D _S154_OUT _S154_RC _S154_PID _s154_p _s154_c
+unset _S154_SANDY _S154_DIR _S154_HLP _S154_LAUNCH _S154_LCWS _S154_D _S154_OUT _S154_RC _S154_RC_REAL _S154_PID _s154_p _s154_c
 unset _F _LH _W _SH _H8 _NAME _SB _CWS _PD _dw
 unset -f _s154_mk _s154_run _s154_dest _s154_expect
 
