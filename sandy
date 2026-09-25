@@ -1856,6 +1856,7 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-history / --purge-history (session transcripts and auto-memory in claude/projects/ — asked interactively, REQUIRED non-interactively, deliberately NOT answered by --yes, and never asked at all under --dry-run, which reports the question as unanswered), --keep-approvals, --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
+    printf ','; printf '{'; _json_kv name '"--rsync"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"COPY this workspace sandbox to another host over ssh + rsync (the source is never modified), renamed for the destination workspace path, since the sandbox name hashes it. Rewrites the path-keyed state a hand copy gets wrong: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json (so --remove-sandbox --orphans there cannot mistake it for an orphan). The destination workspace defaults to the same path relative to $HOME and must already exist there. Credential-bearing files are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. Refuses while a live session holds the workspace and never overwrites a sandbox already on the destination. Takes the destination host as its argument. Sub-options: --workspace PATH, --dest-workspace PATH, --dest-sandy-home PATH, --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--doctor"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Standalone host + runtime readiness check. HOST runs the same checks as doctor.sh (git, curl, docker, PATH, credentials); RUNTIME reuses the sandy predicates verbatim (running-container image staleness, orphaned Docker resources, workspace-lock sanity, orphaned sandboxes -- all read-only findings, never required failures). Exit 0 iff every required HOST check passes; warnings from either section never fail it. Sub-options: --fix, --yes."'; printf '}'
     printf ','
@@ -4048,6 +4049,382 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     exit 0
 fi
 
+# --- sandy --rsync <dest_host> (#374) — copy this workspace's sandbox to another host.
+#
+# A hand rsync gets four things wrong, each losing state nothing recreates:
+#   1. The sandbox dir is NAMED from the workspace path (<basename>-<sha8>), so a
+#      different absolute path on the destination means a different directory.
+#   2. Claude Code's .claude.json lives BESIDE the directory
+#      ($SANDY_HOME/sandboxes/<name>.claude.json), so copying the dir drops it.
+#   3. If the workspace moves relative to $HOME, the CONTAINER path moves too,
+#      and Claude Code keys session history and auto-memory by it
+#      (claude/projects/<container path, non-alphanumerics -> '-'>).
+#   4. Until the first launch there, WORKSPACE.json names a path that does not
+#      exist on the destination -- which is exactly --remove-sandbox --orphans'
+#      deletion criterion.
+# This command does all four. It COPIES; the source is never modified.
+#
+# Decisions (#374, maintainer, 2026-09-25): the destination workspace defaults
+# to the same $HOME-relative path and must already exist there; credential-
+# bearing files ARE copied and every one is named in the plan; on a CPU
+# architecture mismatch the package dirs are skipped and the plan says so.
+
+# The sandbox name for a CANONICAL (pwd -P) workspace path. The launch path
+# computes the same thing inline (SHORT_HASH / DIR_BASE / SANDBOX_NAME);
+# run-tests.sh §154 asserts the two agree, including for awkward basenames.
+_sandy_slug_for() {
+    local _p="$1" _h _b
+    _h="$(printf '%s' "$_p" | sha256)"; _h="${_h%% *}"; _h="${_h:0:8}"
+    _b="$(basename "$_p" | tr -cd 'a-zA-Z0-9._-')"; _b="${_b:-project}"
+    printf '%s-%s' "$_b" "$_h"
+}
+# Container-side workspace path for a canonical host path and a host $HOME taken
+# AS GIVEN -- the launch path does not canonicalize $HOME, and neither may this.
+_sandy_container_ws_for() {
+    case "$1" in
+        "$2"/*) printf '/home/sandy/%s' "${1#"$2"/}" ;;
+        *)      printf '%s' "$1" ;;
+    esac
+}
+# Claude Code's projects-dir name for a path. Measured from the 2.1.278 bundle:
+# `function k(e){return e.replace(/[^a-zA-Z0-9]/g,"-")}`, which reproduces the
+# live directories exactly. That is a JavaScript regex over UTF-16 code units,
+# so node computes it EXACTLY; sed under LC_ALL=C works per BYTE and therefore
+# agrees only for ASCII paths. Non-ASCII without node: echo nothing, and the
+# caller reports that it cannot rename rather than guessing a name.
+_sandy_cc_project_dir() {
+    if command -v node >/dev/null 2>&1; then
+        node -e 'process.stdout.write(process.argv[1].replace(/[^a-zA-Z0-9]/g,"-"))' "$1"
+        return 0
+    fi
+    case "$1" in
+        *[![:print:]]*) return 0 ;;
+    esac
+    if printf '%s' "$1" | LC_ALL=C grep -q '[^ -~]'; then return 0; fi
+    printf '%s' "$1" | LC_ALL=C sed 's/[^a-zA-Z0-9]/-/g'
+}
+# Single-quote a value for a POSIX sh script. The remote side is `sh -s`, so
+# bash's printf %q (which can emit $'...') is not safe to hand it.
+_sandy_sq() { printf "'"; printf '%s' "$1" | sed "s/'/'\\\\''/g"; printf "'"; }
+_sandy_norm_arch() {
+    case "$1" in
+        arm64|aarch64) printf 'arm64' ;;
+        x86_64|amd64)  printf 'x86_64' ;;
+        *)             printf '%s' "$1" ;;
+    esac
+}
+
+if [[ "${1:-}" == "--rsync" ]]; then
+    shift
+    _rsy_host=""; _rsy_ws=""; _rsy_dws=""; _rsy_dsh=""; _rsy_dry=false; _rsy_yes=false
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workspace)          shift; _rsy_ws="${1:-}"
+                                  [ -z "$_rsy_ws" ] && { error "--rsync: --workspace needs a PATH"; exit 1; } ;;
+            --workspace=*)        _rsy_ws="${1#--workspace=}" ;;
+            --dest-workspace)     shift; _rsy_dws="${1:-}"
+                                  [ -z "$_rsy_dws" ] && { error "--rsync: --dest-workspace needs a PATH"; exit 1; } ;;
+            --dest-workspace=*)   _rsy_dws="${1#--dest-workspace=}" ;;
+            --dest-sandy-home)    shift; _rsy_dsh="${1:-}"
+                                  [ -z "$_rsy_dsh" ] && { error "--rsync: --dest-sandy-home needs a PATH"; exit 1; } ;;
+            --dest-sandy-home=*)  _rsy_dsh="${1#--dest-sandy-home=}" ;;
+            --dry-run)            _rsy_dry=true ;;
+            --yes)                _rsy_yes=true ;;
+            -*)                   error "--rsync: unrecognized argument: $1"; exit 1 ;;
+            *)
+                [ -n "$_rsy_host" ] && { error "--rsync: one destination host only (got '$_rsy_host' and '$1')"; exit 1; }
+                _rsy_host="$1" ;;
+        esac
+        shift
+    done
+    if [ -z "$_rsy_host" ]; then
+        error "Usage: sandy --rsync <dest_host> [--workspace P] [--dest-workspace P] [--dest-sandy-home P] [--dry-run] [--yes]"
+        exit 1
+    fi
+    # The host reaches ssh and rsync as an argument. A leading '-' would be read
+    # as an OPTION (`-oProxyCommand=...` is command execution), and ':' is
+    # rsync's host/path separator. Refuse both rather than escape them.
+    case "$_rsy_host" in
+        -*) error "--rsync: destination host may not start with '-': $_rsy_host"; exit 1 ;;
+    esac
+    if ! printf '%s' "$_rsy_host" | grep -qE '^[A-Za-z0-9._@-]+$'; then
+        error "--rsync: destination host must be [A-Za-z0-9._@-] (an ssh host, alias or user@host): $_rsy_host"
+        exit 1
+    fi
+    for _rsy_t in ssh rsync; do
+        command -v "$_rsy_t" >/dev/null 2>&1 || { error "--rsync: '$_rsy_t' is not installed on this host."; exit 1; }
+    done
+
+    # --- source: resolved exactly as the launch path resolves it -------------
+    _rsy_wd="${_rsy_ws:-$PWD}"
+    [ -d "$_rsy_wd" ] || { error "--rsync: workspace not found: $_rsy_wd"; exit 1; }
+    _rsy_wd="$(cd "$_rsy_wd" 2>/dev/null && pwd -P)" || { error "--rsync: cannot resolve workspace"; exit 1; }
+    _rsy_name="$(_sandy_slug_for "$_rsy_wd")"
+    _rsy_src="$SANDY_HOME/sandboxes/$_rsy_name"
+    [ -d "$_rsy_src" ] || { error "--rsync: no sandbox for $_rsy_wd (expected $_rsy_src)."; exit 1; }
+
+    # Refuse while a LIVE session holds it: copying mid-write ships a torn
+    # history and a half-written .claude.json. Same lock and liveness test as
+    # --reset-sandbox, plus the --remove-sandbox container guard, because a
+    # daemon container resurrected after a reboot (D9) holds no lock at all.
+    _rsy_lockpid=""
+    [ -f "$SANDY_HOME/sandboxes/.${_rsy_name}.lock/pid" ] && \
+        _rsy_lockpid="$(cat "$SANDY_HOME/sandboxes/.${_rsy_name}.lock/pid" 2>/dev/null || true)"
+    if [ -n "$_rsy_lockpid" ] && [ "$_rsy_lockpid" -eq "$_rsy_lockpid" ] 2>/dev/null && kill -0 "$_rsy_lockpid" 2>/dev/null; then
+        error "--rsync: a live sandy session (pid $_rsy_lockpid) holds this workspace."
+        error "Stop it first (sandy --stop), then copy."
+        exit 1
+    fi
+    if command -v docker >/dev/null 2>&1; then
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "sandy-${_rsy_name}"; then
+            error "--rsync: container sandy-${_rsy_name} is running. Stop it first (sandy --stop --workspace $_rsy_wd)."
+            exit 1
+        fi
+    fi
+
+    _rsy_scws="$(_sandy_container_ws_for "$_rsy_wd" "$HOME")"
+    _rsy_rel=""
+    case "$_rsy_wd" in "$HOME"/*) _rsy_rel="${_rsy_wd#"$HOME"/}" ;; esac
+    if [ -z "$_rsy_dws" ] && [ -z "$_rsy_rel" ]; then
+        error "--rsync: $_rsy_wd is not under \$HOME, so there is no \$HOME-relative default."
+        error "Pass --dest-workspace PATH."
+        exit 1
+    fi
+
+    # --- destination probe: ONE ssh round trip, values embedded single-quoted.
+    # The workspace must already exist there, because only the destination can
+    # canonicalize it (pwd -P) -- and the name hashes the canonical form.
+    _rsy_tmp="$(mktemp -d 2>/dev/null || mktemp -d -t sandy-rsync)"
+    trap 'rm -rf "$_rsy_tmp"' EXIT
+    {
+        printf 'DWS=%s; REL=%s; DSH=%s\n' "$(_sandy_sq "$_rsy_dws")" "$(_sandy_sq "$_rsy_rel")" "$(_sandy_sq "$_rsy_dsh")"
+        cat <<'PROBE'
+[ -n "$DWS" ] || DWS="$HOME/$REL"
+case "$DWS" in "~") DWS="$HOME" ;; "~/"*) DWS="$HOME/${DWS#\~/}" ;; esac
+[ -n "$DSH" ] || DSH="${SANDY_HOME:-$HOME/.sandy}"
+case "$DSH" in "~") DSH="$HOME" ;; "~/"*) DSH="$HOME/${DSH#\~/}" ;; esac
+echo "home=$HOME"
+if [ -d "$DWS" ]; then echo "ws=$(cd "$DWS" && pwd -P)"; else echo "ws_missing=$DWS"; fi
+echo "sandy_home=$DSH"
+echo "arch=$(uname -m)"
+if command -v rsync >/dev/null 2>&1; then echo "rsync=yes"; else echo "rsync=no"; fi
+S="$(command -v sandy 2>/dev/null || true)"
+[ -z "$S" ] && [ -x "$HOME/.local/bin/sandy" ] && S="$HOME/.local/bin/sandy"
+[ -n "$S" ] && echo "sandy_version=$("$S" --print-version 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')"
+exit 0
+PROBE
+    } > "$_rsy_tmp/probe.sh"
+    info "Probing $_rsy_host…"
+    if ! ssh "$_rsy_host" sh -s < "$_rsy_tmp/probe.sh" > "$_rsy_tmp/probe.out" 2>"$_rsy_tmp/probe.err"; then
+        error "--rsync: could not reach $_rsy_host over ssh:"
+        sed 's/^/    /' "$_rsy_tmp/probe.err" >&2
+        exit 1
+    fi
+    _rsy_dhome=""; _rsy_dwd=""; _rsy_dmiss=""; _rsy_dsandy_home=""; _rsy_darch=""; _rsy_drsync=""; _rsy_dver=""
+    while IFS= read -r _rsy_l; do
+        case "$_rsy_l" in
+            home=*)          _rsy_dhome="${_rsy_l#home=}" ;;
+            ws=*)            _rsy_dwd="${_rsy_l#ws=}" ;;
+            ws_missing=*)    _rsy_dmiss="${_rsy_l#ws_missing=}" ;;
+            sandy_home=*)    _rsy_dsandy_home="${_rsy_l#sandy_home=}" ;;
+            arch=*)          _rsy_darch="${_rsy_l#arch=}" ;;
+            rsync=*)         _rsy_drsync="${_rsy_l#rsync=}" ;;
+            sandy_version=*) _rsy_dver="${_rsy_l#sandy_version=}" ;;
+        esac
+    done < "$_rsy_tmp/probe.out"
+    if [ -n "$_rsy_dmiss" ] || [ -z "$_rsy_dwd" ]; then
+        error "--rsync: workspace not found on $_rsy_host: ${_rsy_dmiss:-?}"
+        error "Clone or copy the workspace there first, or name it with --dest-workspace PATH."
+        exit 1
+    fi
+    [ "$_rsy_drsync" = yes ] || { error "--rsync: rsync is not installed on $_rsy_host."; exit 1; }
+    [ -n "$_rsy_dhome" ] && [ -n "$_rsy_dsandy_home" ] || { error "--rsync: the probe of $_rsy_host returned no \$HOME / SANDY_HOME."; exit 1; }
+    # The destination sandbox path reaches rsync as host:path, which the REMOTE
+    # shell word-splits. The name is [A-Za-z0-9._-] by construction; the
+    # SANDY_HOME part is checked here rather than escaped, because rsync
+    # --protect-args is not available in every rsync (macOS ships openrsync).
+    if ! printf '%s' "$_rsy_dsandy_home" | grep -qE '^/[A-Za-z0-9._/@+-]+$'; then
+        error "--rsync: destination SANDY_HOME '$_rsy_dsandy_home' contains characters this command will not pass to a remote shell."
+        error "Use --dest-sandy-home with a plain path."
+        exit 1
+    fi
+
+    _rsy_dname="$(_sandy_slug_for "$_rsy_dwd")"
+    _rsy_ddir="$_rsy_dsandy_home/sandboxes/$_rsy_dname"
+    _rsy_dcws="$(_sandy_container_ws_for "$_rsy_dwd" "$_rsy_dhome")"
+
+    # Never overwrite a sandbox that already exists there: it may be the one
+    # in use on that host, and a copy over it is a silent merge of two histories.
+    if ssh "$_rsy_host" "test -e $_rsy_ddir || test -e $_rsy_ddir.claude.json" </dev/null 2>/dev/null; then
+        error "--rsync: $_rsy_host already has a sandbox for that workspace: $_rsy_ddir"
+        error "Nothing was copied. If it is disposable, remove it there first:"
+        error "  ssh $_rsy_host sandy --remove-sandbox --workspace $_rsy_dwd"
+        exit 1
+    fi
+
+    # --- what moves, and what is rewritten -----------------------------------
+    _rsy_excl=(--exclude=/sandy-session.json --exclude=/relay-state/ --exclude=/agent-args-composed/
+               --exclude=/proxy.log --exclude=/.protected-existed-at-launch --exclude=/claude/sessions/
+               --exclude=/WORKSPACE.json)
+    _rsy_skipnote=""
+    _rsy_larch="$(_sandy_norm_arch "$(uname -m)")"; _rsy_rarch="$(_sandy_norm_arch "$_rsy_darch")"
+    _rsy_archmis=false
+    [ -n "$_rsy_rarch" ] && [ "$_rsy_larch" != "$_rsy_rarch" ] && _rsy_archmis=true
+    if [ "$_rsy_archmis" = true ]; then
+        for _rsy_d in cargo go npm-global pip uv venv; do _rsy_excl+=("--exclude=/$_rsy_d/"); done
+        _rsy_skipnote="cargo/ go/ npm-global/ pip/ uv/ venv/ -- built for $_rsy_larch, destination is $_rsy_rarch; they rebuild on first use"
+    elif [ "$_rsy_scws" != "$_rsy_dcws" ]; then
+        _rsy_excl+=(--exclude=/venv/)
+        _rsy_skipnote="venv/ -- its scripts hardcode the old container path; sandy recreates it next launch (then run uv sync)"
+    fi
+
+    # History: renamed only when the container path changes. A projects dir
+    # that is not where the rule says (a Claude Code change, or a path the rule
+    # cannot be computed for) is copied UNDER ITS OLD NAME and reported -- the
+    # transcripts still arrive; they are never dropped to make a rename work.
+    _rsy_oldp=""; _rsy_newp=""; _rsy_histnote="unchanged (container path is the same)"
+    if [ "$_rsy_scws" != "$_rsy_dcws" ]; then
+        _rsy_oldp="$(_sandy_cc_project_dir "$_rsy_scws")"
+        _rsy_newp="$(_sandy_cc_project_dir "$_rsy_dcws")"
+        if [ -z "$_rsy_oldp" ] || [ -z "$_rsy_newp" ]; then
+            _rsy_histnote="NOT renamed: a non-ASCII path needs node to compute Claude Code's directory name; copied as-is"
+            _rsy_oldp=""; _rsy_newp=""
+        elif [ -d "$_rsy_src/claude/projects/$_rsy_oldp" ]; then
+            _rsy_n="$(find "$_rsy_src/claude/projects/$_rsy_oldp" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')"
+            _rsy_histnote="claude/projects/$_rsy_oldp -> $_rsy_newp ($_rsy_n session(s))"
+            _rsy_excl+=("--exclude=/claude/projects/$_rsy_oldp/")
+        else
+            _rsy_histnote="none found under claude/projects/$_rsy_oldp (nothing to rename)"
+            _rsy_oldp=""; _rsy_newp=""
+        fi
+    fi
+
+    # .claude.json -- the sibling file a directory copy misses.
+    _rsy_cj="$SANDY_HOME/sandboxes/$_rsy_name.claude.json"
+    _rsy_cjnote="absent (Claude Code creates it on first launch)"
+    if [ -f "$_rsy_cj" ]; then
+        if [ "$_rsy_scws" = "$_rsy_dcws" ]; then
+            _rsy_cjnote="copied unchanged, renamed to $_rsy_dname.claude.json"
+        elif command -v node >/dev/null 2>&1 || command -v jq >/dev/null 2>&1; then
+            _rsy_cjnote="copied as $_rsy_dname.claude.json, projects key $_rsy_scws -> $_rsy_dcws"
+        else
+            _rsy_cjnote="copied as $_rsy_dname.claude.json UNCHANGED -- neither node nor jq to rewrite its projects key, so Claude Code will treat it as a new project"
+        fi
+    fi
+
+    # Credential-bearing files, named in the plan (#374 decision 2). Matched BY
+    # NAME, so the plan says so: anything else in these directories is copied too.
+    _rsy_creds=()
+    while IFS= read -r _rsy_c; do
+        [ -n "$_rsy_c" ] && _rsy_creds+=("${_rsy_c#"$_rsy_src"/}")
+    done < <(find "$_rsy_src/codex" "$_rsy_src/grok" "$_rsy_src/gemini" "$_rsy_src/opencode" -type f \
+                \( -name 'auth*.json' -o -name '*credential*' -o -name 'oauth_creds*' -o -name '*token*' \) 2>/dev/null | sort)
+    if [ -s "$_rsy_src/claude/.credentials.json" ]; then _rsy_creds+=("claude/.credentials.json"); fi
+
+    _rsy_size="$(du -sh "$_rsy_src" 2>/dev/null | cut -f1 || echo '?')"
+    printf '\nsandy --rsync: %s  ->  %s:%s\n' "$_rsy_name" "$_rsy_host" "$_rsy_ddir"
+    printf '  Workspace       %s  ->  %s\n' "$_rsy_wd" "$_rsy_dwd"
+    if [ "$_rsy_scws" = "$_rsy_dcws" ]; then
+        printf '  Container path  %s (unchanged)\n' "$_rsy_scws"
+    else
+        printf '  Container path  %s  ->  %s\n' "$_rsy_scws" "$_rsy_dcws"
+    fi
+    printf '  History         %s\n' "$_rsy_histnote"
+    printf '  .claude.json    %s\n' "$_rsy_cjnote"
+    printf '  WORKSPACE.json  rewritten for the destination path (so --remove-sandbox --orphans there cannot mistake it for an orphan)\n'
+    if [ "${#_rsy_creds[@]}" -gt 0 ]; then
+        printf '  Credentials     COPIED -- matched by name; anything else in these directories is copied too:\n'
+        for _rsy_c in "${_rsy_creds[@]}"; do printf '                    %s\n' "$_rsy_c"; done
+    else
+        printf '  Credentials     none matched by name (codex/, grok/, gemini/, opencode/ are copied as they are)\n'
+    fi
+    printf '  Not copied      sandy-session.json relay-state/ agent-args-composed/ proxy.log claude/sessions/ (regenerated each launch)\n'
+    [ -n "$_rsy_skipnote" ] && printf '  Skipped         %s\n' "$_rsy_skipnote"
+    if [ -n "$_rsy_dver" ]; then
+        printf '  Destination     sandy %s, %s\n' "$_rsy_dver" "$_rsy_darch"
+    else
+        printf '  Destination     sandy NOT FOUND on PATH -- install it there before launching (%s)\n' "$_rsy_darch"
+    fi
+    printf '  Size            %s\n\n' "$_rsy_size"
+
+    # A 2.x sandbox under a 1.x sandy is the #248 breakage (/home/claude vs
+    # /home/sandy) with no floor to catch it from that side.
+    _rsy_cmaj="$(cut -d. -f1 < "$_rsy_src/.sandy_created_version" 2>/dev/null || true)"
+    _rsy_dmaj="${_rsy_dver%%.*}"
+    if [ -n "$_rsy_cmaj" ] && [ -n "$_rsy_dmaj" ] && [ "$_rsy_dmaj" -eq "$_rsy_dmaj" ] 2>/dev/null \
+       && [ "$_rsy_cmaj" -eq "$_rsy_cmaj" ] 2>/dev/null && [ "$_rsy_dmaj" -lt "$_rsy_cmaj" ]; then
+        error "--rsync: this sandbox was created by sandy $_rsy_cmaj.x; $_rsy_host runs sandy $_rsy_dver. Upgrade sandy there first."
+        exit 1
+    fi
+
+    [ "$_rsy_dry" = true ] && { info "--dry-run: nothing copied."; exit 0; }
+    if [ "$_rsy_yes" != true ]; then
+        if [ -t 0 ]; then
+            printf '[sandy] Copy to %s? [y/N] ' "$_rsy_host" >&2
+            read -r _rsy_ans < /dev/tty || _rsy_ans=""
+            case "$_rsy_ans" in [yY]|[yY][eE][sS]) ;; *) info "Aborted — nothing copied."; exit 0 ;; esac
+        else
+            error "--rsync needs --yes when stdin is not a TTY."; exit 1
+        fi
+    fi
+
+    # --- stage the rewritten files locally, then send ------------------------
+    if [ -f "$_rsy_src/WORKSPACE.json" ]; then
+        _RSY_NAME_J="$(_json_escape "$_rsy_dname")" _RSY_WS_J="$(_json_escape "$_rsy_dwd")" \
+            awk 'index($0,"  \"sandbox_name\": ")==1{print "  \"sandbox_name\": " ENVIRON["_RSY_NAME_J"] ","; next} index($0,"  \"workspace_path_uncanonicalized\": ")==1{next} index($0,"  \"workspace_path\": ")==1{print "  \"workspace_path\": " ENVIRON["_RSY_WS_J"] ","; next} {print}' \
+            "$_rsy_src/WORKSPACE.json" > "$_rsy_tmp/WORKSPACE.json"
+    fi
+    if [ -f "$_rsy_cj" ]; then
+        if [ "$_rsy_scws" != "$_rsy_dcws" ] && command -v node >/dev/null 2>&1; then
+            node -e '
+                const fs=require("fs"); const [src,dst,o,n]=process.argv.slice(1);
+                const j=JSON.parse(fs.readFileSync(src,"utf8"));
+                if (j.projects && Object.prototype.hasOwnProperty.call(j.projects,o) && !Object.prototype.hasOwnProperty.call(j.projects,n)) {
+                    j.projects[n]=j.projects[o]; delete j.projects[o];
+                }
+                fs.writeFileSync(dst, JSON.stringify(j,null,2)+"\n");
+            ' "$_rsy_cj" "$_rsy_tmp/claude.json" "$_rsy_scws" "$_rsy_dcws" \
+                || { error "--rsync: could not rewrite .claude.json; nothing was copied."; exit 1; }
+        elif [ "$_rsy_scws" != "$_rsy_dcws" ] && command -v jq >/dev/null 2>&1; then
+            jq --arg o "$_rsy_scws" --arg n "$_rsy_dcws" \
+                'if (.projects|type)=="object" and (.projects|has($o)) and ((.projects|has($n))|not) then .projects[$n]=.projects[$o] | del(.projects[$o]) else . end' \
+                "$_rsy_cj" > "$_rsy_tmp/claude.json" \
+                || { error "--rsync: could not rewrite .claude.json; nothing was copied."; exit 1; }
+        else
+            cp "$_rsy_cj" "$_rsy_tmp/claude.json"
+        fi
+    fi
+
+    info "Copying to $_rsy_host…"
+    ssh "$_rsy_host" "mkdir -p $_rsy_dsandy_home/sandboxes" </dev/null \
+        || { error "--rsync: could not create $_rsy_dsandy_home/sandboxes on $_rsy_host."; exit 1; }
+    rsync -a "${_rsy_excl[@]}" "$_rsy_src/" "$_rsy_host:$_rsy_ddir/" \
+        || { error "--rsync: rsync failed; $_rsy_host may hold a partial copy at $_rsy_ddir."; exit 1; }
+    if [ -n "$_rsy_oldp" ]; then
+        rsync -a "$_rsy_src/claude/projects/$_rsy_oldp/" "$_rsy_host:$_rsy_ddir/claude/projects/$_rsy_newp/" \
+            || { error "--rsync: copying session history failed."; exit 1; }
+    fi
+    if [ -f "$_rsy_tmp/WORKSPACE.json" ]; then
+        rsync -a "$_rsy_tmp/WORKSPACE.json" "$_rsy_host:$_rsy_ddir/WORKSPACE.json" \
+            || { error "--rsync: copying WORKSPACE.json failed."; exit 1; }
+    fi
+    if [ -f "$_rsy_tmp/claude.json" ]; then
+        rsync -a "$_rsy_tmp/claude.json" "$_rsy_host:$_rsy_ddir.claude.json" \
+            || { error "--rsync: copying .claude.json failed."; exit 1; }
+    fi
+
+    # C1: exit 0 only when the goal state holds, so check it rather than trust
+    # the transfers' exit codes.
+    if ! ssh "$_rsy_host" "test -d $_rsy_ddir && test -f $_rsy_ddir/WORKSPACE.json" </dev/null 2>/dev/null; then
+        error "--rsync: the copy did not verify on $_rsy_host ($_rsy_ddir)."
+        exit 1
+    fi
+    info "Copied. On $_rsy_host:  cd $_rsy_dwd && sandy"
+    [ -n "$_rsy_skipnote" ] && info "  Skipped: $_rsy_skipnote"
+    [ "${#_rsy_creds[@]}" -gt 0 ] && info "  ${#_rsy_creds[@]} credential file(s) were copied; revoke them here if this host should no longer hold them."
+    exit 0
+fi
+
 # --- sandy --remove-sandbox (#178) — permanently delete a sandbox directory.
 # Complements --reset-sandbox: reset REBUILDS one project's sandbox from a
 # known-good skeleton, but its --workspace resolution requires the workspace
@@ -5900,6 +6277,18 @@ Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
                      (every sandbox whose recorded workspace_path no longer
                      exists on disk). Sub-options: --workspace PATH, --sandbox
                      NAME, --orphans, --dry-run, --yes
+  --rsync HOST       COPY this workspace's sandbox to another host over ssh +
+                     rsync, renamed for the destination's workspace path (the
+                     sandbox name hashes it) with path-keyed state rewritten:
+                     session history and memory, .claude.json, WORKSPACE.json.
+                     The destination workspace defaults to the same path
+                     relative to $HOME and must already exist there. Credential
+                     files are copied and named in the plan; on a CPU
+                     architecture mismatch the package dirs are skipped.
+                     Refuses while a live session holds the workspace, and
+                     never overwrites a sandbox already on the destination.
+                     Sub-options: --workspace PATH, --dest-workspace PATH,
+                     --dest-sandy-home PATH, --dry-run, --yes
   --doctor           Standalone host + runtime readiness check. HOST runs the
                      same checks as doctor.sh (git, curl, docker, PATH,
                      credentials); RUNTIME reuses the sandy predicates
