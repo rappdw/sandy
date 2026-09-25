@@ -7462,7 +7462,7 @@ _S91_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Curated exception lists -- each entry is an intentional, hand-verified
 # exception to the parser<->cli_flags identity, not a loophole papering over
 # drift. See the independently-verified framing facts this PR was built on.
-_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --keep-history --purge-history --sandbox --orphans --fix --all"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor/--provision); not standalone cli_flags entries, must instead appear in >=1 description
+_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --keep-history --purge-history --sandbox --orphans --fix --all --dest-workspace --dest-sandy-home"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor/--provision/--rsync); not standalone cli_flags entries, must instead appear in >=1 description
 _S91_PRIVATE="--print-protected-paths"                        # real, private/debug fast-path flag; deliberately unadvertised
 _S91_FORWARDED="--resume"                                     # a real cli_flags entry with ZERO parser cases (forwarded verbatim to the agent, sandy:4103/4127)
 
@@ -17225,6 +17225,217 @@ unset _S153_BAN _S153_BANOUT _S153_APPLYBLK
 unset _S153_SANDY _S153_DIR _S153_BLK _S153_TBL _S153_T _S153_TWO _S153_ONE
 unset _S153_R1 _S153_R2 _S153_R3 _S153_R4 _S153_R5 _S153_OUT _S153_PUB _S153_OWN
 unset -f _s153_run
+
+# ============================================================
+echo ""
+echo "§154: sandy --rsync copies a sandbox to a host whose workspace path differs (#374)"
+# ============================================================
+# The destination is simulated on this machine: an `ssh` stub runs commands
+# under a separate fake remote $HOME, and an `rsync` stub implements the subset
+# sandy uses with rsync semantics (anchored excludes, SRC/ = contents). So this
+# drives the REAL command end to end, and asserts what arrives -- the name the
+# destination will look for, the rewritten files, what was left behind -- not
+# that the command contains the right rsync flags.
+_S154_SANDY="$SANDY_SCRIPT"
+_S154_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+if ! command -v python3 >/dev/null 2>&1; then
+    skip "§154 needs python3 for the rsync stub"
+else
+mkdir -p "$_S154_DIR/bin"
+cat > "$_S154_DIR/bin/ssh" <<'STUB'
+#!/bin/bash
+host="$1"; shift
+echo "$host" >> "${SSH_STUB_LOG:-/dev/null}"
+if [ "$1" = sh ] && [ "$2" = -s ]; then exec env -u SANDY_HOME HOME="$REMOTE_HOME" FAKE_REMOTE=1 sh -s; fi
+exec env -u SANDY_HOME HOME="$REMOTE_HOME" FAKE_REMOTE=1 sh -c "$*"
+STUB
+cat > "$_S154_DIR/bin/rsync" <<'STUB'
+#!/usr/bin/env python3
+import os, sys, shutil
+ex, paths = [], []
+for a in sys.argv[1:]:
+    if a == "-a": continue
+    if a.startswith("--exclude="): ex.append(a[len("--exclude="):]); continue
+    if a.startswith("-"): sys.exit("rsync stub: unsupported flag " + a)
+    paths.append(a)
+src, dst = paths
+def strip(p): return p.split(":", 1)[1] if (":" in p and not p.startswith("/")) else p
+src, dst = strip(src), strip(dst)
+def excluded(rel, isdir):
+    for p in ex:
+        dironly = p.endswith("/"); q = p.strip("/")
+        if dironly and not isdir: continue
+        if p.startswith("/"):
+            if rel == q: return True
+        elif os.path.basename(rel) == q: return True
+    return False
+if src.endswith("/"):
+    root = src.rstrip("/"); os.makedirs(dst, exist_ok=True)
+    for d, dirs, files in os.walk(root):
+        reld = os.path.relpath(d, root); reld = "" if reld == "." else reld
+        dirs[:] = [x for x in dirs if not excluded(os.path.join(reld, x), True)]
+        for x in dirs: os.makedirs(os.path.join(dst, reld, x), exist_ok=True)
+        for f in files:
+            r = os.path.join(reld, f)
+            if not excluded(r, False): shutil.copy2(os.path.join(d, f), os.path.join(dst, r))
+else:
+    if dst.endswith("/"): dst = os.path.join(dst, os.path.basename(src))
+    os.makedirs(os.path.dirname(dst), exist_ok=True); shutil.copy2(src, dst)
+STUB
+cat > "$_S154_DIR/bin/uname" <<'STUB'
+#!/bin/sh
+if [ "$1" = -m ]; then
+  if [ "${FAKE_REMOTE:-}" = 1 ]; then echo "${REMOTE_ARCH:-x86_64}"; else echo "${LOCAL_ARCH:-x86_64}"; fi
+  exit 0
+fi
+exec /bin/uname "$@"
+STUB
+chmod +x "$_S154_DIR/bin/ssh" "$_S154_DIR/bin/rsync" "$_S154_DIR/bin/uname"
+
+# _s154_mk NAME REL -> a source host with one populated sandbox for ~/REL. The
+# name is computed INDEPENDENTLY of sandy, so a drifting helper disagrees here.
+_s154_mk() {
+    _F="$_S154_DIR/$1"; mkdir -p "$_F/lhome/$2" "$_F/rhome"
+    _LH="$_F/lhome"; _W="$(cd "$_F/lhome/$2" && pwd -P)"; _SH="$_LH/.sandy"
+    _H8="$(printf '%s' "$_W" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-8)"
+    _NAME="$(basename "$_W" | tr -cd 'a-zA-Z0-9._-')-$_H8"; _SB="$_SH/sandboxes/$_NAME"
+    _CWS="/home/sandy/$2"; _PD="$(printf '%s' "$_CWS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$_SB/claude/projects/$_PD" "$_SB/claude/sessions" "$_SB/codex" "$_SB/venv/bin" "$_SB/cargo/bin" "$_SB/relay-state"
+    printf 'TRANSCRIPT\n' > "$_SB/claude/projects/$_PD/s1.jsonl"
+    printf 'key\n' > "$_SB/claude/sessions/1.a.key"
+    printf '{"t":"CODEX"}\n' > "$_SB/codex/auth.json"
+    printf 'py\n' > "$_SB/venv/bin/python"; printf 'bin\n' > "$_SB/cargo/bin/tool"
+    printf '{}\n' > "$_SB/sandy-session.json"; printf 'started\n' > "$_SB/relay-state/.state"
+    printf '2.3.0\n' > "$_SB/.sandy_created_version"
+    printf '{\n  "schema_version": 1,\n  "sandbox_name": "%s",\n  "workspace_path": "%s",\n  "first_seen_at": "2026-01-01T00:00:00Z",\n  "last_seen_at": "2026-09-01T00:00:00Z",\n  "sandy_version_first": "2.0.0",\n  "sandy_version_last": "2.3.0"\n}\n' "$_NAME" "$_W" > "$_SB/WORKSPACE.json"
+    printf '{"projects":{"%s":{"trusted":true}}}\n' "$_CWS" > "$_SH/sandboxes/$_NAME.claude.json"
+}
+# _s154_run FIXTURE [args...] -> rc in _S154_RC, output in _S154_OUT. Every
+# SANDY_* the code reads is unset: this suite is developed inside a sandy
+# sandbox, and an inherited value measures the developer container instead.
+_s154_run() {
+    _F="$_S154_DIR/$1"; shift
+    _S154_OUT="$(env -u SANDY_WORKSPACE -u SANDY_SANDBOX_NAME -u SANDY_HANDOFF_RELAY -u SANDY_RELAY_STATE \
+        PATH="$_S154_DIR/bin:$PATH" HOME="$_F/lhome" SANDY_HOME="$_F/lhome/.sandy" REMOTE_HOME="$_F/rhome" \
+        bash "$_S154_SANDY" --rsync desthost "$@" </dev/null 2>&1)" && _S154_RC=0 || _S154_RC=$?
+}
+# The refusal cases assert the destination has NO sandboxes directory at all,
+# so find failing there is the expected outcome, not an error. Under the
+# suite's set -E it would otherwise reach the ERR trap from inside every $( ),
+# and pipefail would pin the failure on sed.
+_s154_dest() { { find "$_S154_DIR/$1/rhome/.sandy/sandboxes" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true; } | sed -n 1p; }
+_s154_expect() {  # the name the destination will compute for its canonical path
+    _dw="$(cd "$1" && pwd -P)"
+    printf '%s-%s' "$(basename "$_dw" | tr -cd 'a-zA-Z0-9._-')" "$(printf '%s' "$_dw" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-8)"
+}
+
+# --- the helpers agree with the LAUNCH path's own inline computation ---------
+_S154_HLP="$(sed -n '/^_sandy_slug_for()/,/^}/p; /^_sandy_container_ws_for()/,/^}/p; /^_sandy_cc_project_dir()/,/^}/p' "$_S154_SANDY")"
+_S154_LAUNCH="$(awk 'index($0,"SHORT_HASH=\"$(printf")==1{f=1} f{print} f&&index($0,"SANDBOX_NAME=")==1{exit}' "$_S154_SANDY")"
+_S154_LCWS="$(awk 'index($0,"# Compute container workspace path")==1{f=1;next} f{print} f&&$0=="fi"{exit}' "$_S154_SANDY")"
+check "§154(pre) the helpers and both launch-path blocks were extracted (mutation: a rename makes every agreement check below vacuous)" \
+    bash -c 'case "$1" in *_sandy_slug_for*) ;; *) exit 1 ;; esac; case "$2" in *SANDBOX_NAME=*) ;; *) exit 1 ;; esac; case "$3" in *SANDY_WORKSPACE=*) exit 0 ;; esac; exit 1' _ "$_S154_HLP" "$_S154_LAUNCH" "$_S154_LCWS"
+for _s154_p in "/w/my repo" "/w/a.b-c_d" "/w/space and (parens)" "/w/..." "/w/UPPER"; do
+    check "§154(1) the name --rsync computes equals the name a LAUNCH computes, for '$_s154_p' -- the destination must look for the directory the copy created" \
+        bash -c 'sha256() { shasum -a 256 2>/dev/null || sha256sum; }; eval "$1"; WORK_DIR="$3"; eval "$2"; test "$(_sandy_slug_for "$3")" = "$SANDBOX_NAME"' _ "$_S154_HLP" "$_S154_LAUNCH" "$_s154_p"
+done
+for _s154_c in "/home/u/dev/x|/home/u" "/home/ux/dev/x|/home/u" "/srv/x|/home/u" "/home/u|/home/u"; do
+    check "§154(2) the container path --rsync computes equals the launch computation for ${_s154_c%%|*} with HOME=${_s154_c#*|} (includes the /home/u vs /home/ux prefix trap)" \
+        bash -c 'eval "$1"; WORK_DIR="$3"; HOME="$4"; eval "$2"; test "$(_sandy_container_ws_for "$3" "$4")" = "$SANDY_WORKSPACE"' _ "$_S154_HLP" "$_S154_LCWS" "${_s154_c%%|*}" "${_s154_c#*|}"
+done
+check "§154(3) the Claude Code projects-dir rule reproduces a measured directory name (-home-sandy-dev-sandy)" \
+    bash -c 'eval "$1"; test "$(_sandy_cc_project_dir /home/sandy/dev/sandy)" = "-home-sandy-dev-sandy"' _ "$_S154_HLP"
+
+# --- A: same $HOME-relative path, different $HOME ----------------------------
+_s154_mk A dev/proj; mkdir -p "$_S154_DIR/A/rhome/dev/proj"
+_s154_run A --workspace "$_S154_DIR/A/lhome/dev/proj" --yes
+_S154_D="$(_s154_dest A)"
+check "§154(4) copy succeeds (rc=$_S154_RC)" test "$_S154_RC" -eq 0
+check "§154(5) it lands under the name the DESTINATION will compute for its own canonical path, not the source name" \
+    test "$(basename "$_S154_D")" = "$(_s154_expect "$_S154_DIR/A/rhome/dev/proj")"
+check "§154(6) WORKSPACE.json names the DESTINATION path -- otherwise --remove-sandbox --orphans there deletes it as an orphan" \
+    grep -qF "\"workspace_path\": \"$(cd "$_S154_DIR/A/rhome/dev/proj" && pwd -P)\"," "$_S154_D/WORKSPACE.json"
+check "§154(7) ...and keeps its lineage (first_seen_at and sandy_version_first survive)" \
+    bash -c 'grep -qF "\"first_seen_at\": \"2026-01-01T00:00:00Z\"" "$1" && grep -qF "\"sandy_version_first\": \"2.0.0\"" "$1"' _ "$_S154_D/WORKSPACE.json"
+check "§154(8) the sibling .claude.json arrives under the destination name -- a directory copy alone drops it" \
+    test -f "$_S154_D.claude.json"
+check "§154(9) history is copied unrenamed when the container path is unchanged" \
+    test -f "$_S154_D/claude/projects/-home-sandy-dev-proj/s1.jsonl"
+check "§154(10) per-process and per-launch state is NOT copied (claude/sessions keys, sandy-session.json, relay-state)" \
+    bash -c 'test ! -e "$1/claude/sessions" && test ! -e "$1/sandy-session.json" && test ! -e "$1/relay-state"' _ "$_S154_D"
+check "§154(11) same arch and same container path: venv/ and cargo/ are copied" \
+    bash -c 'test -f "$1/venv/bin/python" && test -f "$1/cargo/bin/tool"' _ "$_S154_D"
+check "§154(12) credential files ARE copied (#374 decision 2)..." test -f "$_S154_D/codex/auth.json"
+check "§154(13) ...and each one is NAMED in the plan, so the confirmation covered it" \
+    bash -c 'case "$1" in *"Credentials     COPIED"*"codex/auth.json"*) exit 0 ;; esac; exit 1' _ "$_S154_OUT"
+
+# --- B: the container path changes -------------------------------------------
+_s154_mk B dev/proj; mkdir -p "$_S154_DIR/B/rhome/work/proj2"
+_s154_run B --workspace "$_S154_DIR/B/lhome/dev/proj" --dest-workspace '~/work/proj2' --yes
+_S154_D="$(_s154_dest B)"
+check "§154(14) history is RENAMED for the new container path, transcripts intact -- Claude Code finds sessions and memory by that name" \
+    bash -c 'test -f "$1/claude/projects/-home-sandy-work-proj2/s1.jsonl" && test ! -e "$1/claude/projects/-home-sandy-dev-proj"' _ "$_S154_D"
+check "§154(15) .claude.json projects key is rewritten to the new container path" \
+    bash -c 'grep -qF "\"/home/sandy/work/proj2\"" "$1" && ! grep -qF "\"/home/sandy/dev/proj\"" "$1"' _ "$_S154_D.claude.json"
+check "§154(16) venv/ is skipped (its scripts hardcode the old path); cargo/ still copied" \
+    bash -c 'test ! -e "$1/venv" && test -f "$1/cargo/bin/tool"' _ "$_S154_D"
+check "§154(17) the SOURCE is untouched -- this is a copy" \
+    bash -c 'test -d "$1/claude/projects/-home-sandy-dev-proj" && grep -qF "\"/home/sandy/dev/proj\"" "$2"' _ \
+    "$_S154_DIR/B/lhome/.sandy/sandboxes/$(basename "$(find "$_S154_DIR/B/lhome/.sandy/sandboxes" -mindepth 1 -maxdepth 1 -type d | sed -n 1p)")" \
+    "$(find "$_S154_DIR/B/lhome/.sandy/sandboxes" -maxdepth 1 -name '*.claude.json' | sed -n 1p)"
+
+# --- C: architecture mismatch ------------------------------------------------
+_s154_mk C dev/proj; mkdir -p "$_S154_DIR/C/rhome/dev/proj"
+LOCAL_ARCH=arm64 REMOTE_ARCH=x86_64 _s154_run C --workspace "$_S154_DIR/C/lhome/dev/proj" --yes
+_S154_D="$(_s154_dest C)"
+check "§154(18) arm64 -> x86_64: the package dirs are skipped, history and credentials are not (#374 decision 3)" \
+    bash -c 'test ! -e "$1/cargo" && test ! -e "$1/venv" && test -f "$1/claude/projects/-home-sandy-dev-proj/s1.jsonl" && test -f "$1/codex/auth.json"' _ "$_S154_D"
+_s154_mk C2 dev/proj; mkdir -p "$_S154_DIR/C2/rhome/dev/proj"
+LOCAL_ARCH=arm64 REMOTE_ARCH=aarch64 _s154_run C2 --workspace "$_S154_DIR/C2/lhome/dev/proj" --yes
+check "§154(19) arm64 and aarch64 are the SAME architecture -- nothing skipped" test -f "$(_s154_dest C2)/cargo/bin/tool"
+
+# --- refusals: each leaves the destination exactly as it was -----------------
+_s154_mk R1 dev/proj; mkdir -p "$_S154_DIR/R1/rhome/dev/proj"
+_s154_run R1 --workspace "$_S154_DIR/R1/lhome/dev/proj" --yes
+printf 'PRECIOUS\n' > "$(_s154_dest R1)/marker"
+_s154_run R1 --workspace "$_S154_DIR/R1/lhome/dev/proj" --yes
+check "§154(20) an existing sandbox on the destination is never overwritten (rc=$_S154_RC, its contents intact)" \
+    bash -c 'test "$1" -eq 1 && grep -q PRECIOUS "$2/marker"' _ "$_S154_RC" "$(_s154_dest R1)"
+_s154_mk R2 dev/proj; mkdir -p "$_S154_DIR/R2/rhome/dev/proj"
+_s154_run R2 --workspace "$_S154_DIR/R2/lhome/dev/proj" --dry-run
+check "§154(21) --dry-run prints the plan, exits 0, and copies NOTHING" \
+    bash -c 'test "$1" -eq 0 && test -z "$2"' _ "$_S154_RC" "$(_s154_dest R2)"
+_s154_mk R3 dev/proj; mkdir -p "$_S154_DIR/R3/rhome/dev/proj"
+_s154_run R3 --workspace "$_S154_DIR/R3/lhome/dev/proj"
+check "§154(22) non-TTY without --yes exits 1 and copies nothing" \
+    bash -c 'test "$1" -eq 1 && test -z "$2"' _ "$_S154_RC" "$(_s154_dest R3)"
+_s154_mk R4 dev/proj; mkdir -p "$_S154_DIR/R4/rhome/dev/proj" "$_S154_DIR/R4/lhome/.sandy/sandboxes/.$(basename "$(find "$_S154_DIR/R4/lhome/.sandy/sandboxes" -mindepth 1 -maxdepth 1 -type d | sed -n 1p)").lock"
+sleep 300 & _S154_PID=$!
+printf '%s\n' "$_S154_PID" > "$(find "$_S154_DIR/R4/lhome/.sandy/sandboxes" -mindepth 1 -maxdepth 1 -name '.*.lock' | sed -n 1p)/pid"
+_s154_run R4 --workspace "$_S154_DIR/R4/lhome/dev/proj" --yes
+_S154_RC_REAL="$_S154_RC"
+_s154_run R4 --workspace "$_S154_DIR/R4/lhome/dev/proj" --dry-run
+kill "$_S154_PID" 2>/dev/null || true; wait "$_S154_PID" 2>/dev/null || true
+check "§154(23) a live session holding the lock is refused -- copying mid-write ships a torn history" \
+    bash -c 'test "$1" -eq 1 && test -z "$2"' _ "$_S154_RC_REAL" "$(_s154_dest R4)"
+# The maintainer hit this first: sandy developed inside sandy means the
+# workspace you would copy is the one your own session holds. --dry-run only
+# reads, so it must still show the plan -- and say plainly a real run refuses.
+check "§154(23b) --dry-run against a live session still prints the plan and exits 0, and says a real run would refuse" \
+    bash -c 'test "$1" -eq 0 && case "$2" in *"Container path"*"would REFUSE"*) exit 0 ;; esac; exit 1' _ "$_S154_RC" "$_S154_OUT"
+_s154_mk R5 dev/proj
+_s154_run R5 --workspace "$_S154_DIR/R5/lhome/dev/proj" --yes
+check "§154(24) a destination with no such workspace is refused before anything is copied" \
+    bash -c 'test "$1" -eq 1 && test -z "$2"' _ "$_S154_RC" "$(_s154_dest R5)"
+_s154_mk R6 dev/proj; mkdir -p "$_S154_DIR/R6/rhome/dev/proj"
+SSH_STUB_LOG="$_S154_DIR/ssh.log" _s154_run R6 --workspace "$_S154_DIR/R6/lhome/dev/proj" -oProxyCommand=true --yes
+check "§154(25) an option-shaped host is refused and ssh is NEVER invoked -- a leading '-' reaches ssh as an option, and -oProxyCommand is command execution" \
+    bash -c 'test "$1" -eq 1 && test ! -s "$2"' _ "$_S154_RC" "$_S154_DIR/ssh.log"
+fi
+rm -rf "$_S154_DIR"
+unset _S154_SANDY _S154_DIR _S154_HLP _S154_LAUNCH _S154_LCWS _S154_D _S154_OUT _S154_RC _S154_RC_REAL _S154_PID _s154_p _s154_c
+unset _F _LH _W _SH _H8 _NAME _SB _CWS _PD _dw
+unset -f _s154_mk _s154_run _s154_dest _s154_expect
 
 # BEGIN SUMMARY
 # ============================================================
