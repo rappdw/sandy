@@ -17319,7 +17319,11 @@ _s154_run() {
         PATH="$_S154_DIR/bin:$PATH" HOME="$_F/lhome" SANDY_HOME="$_F/lhome/.sandy" REMOTE_HOME="$_F/rhome" \
         bash "$_S154_SANDY" --rsync desthost "$@" </dev/null 2>&1)" && _S154_RC=0 || _S154_RC=$?
 }
-_s154_dest() { find "$_S154_DIR/$1/rhome/.sandy/sandboxes" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sed -n 1p; }
+# The refusal cases assert the destination has NO sandboxes directory at all,
+# so find failing there is the expected outcome, not an error. Under the
+# suite's set -E it would otherwise reach the ERR trap from inside every $( ),
+# and pipefail would pin the failure on sed.
+_s154_dest() { { find "$_S154_DIR/$1/rhome/.sandy/sandboxes" -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true; } | sed -n 1p; }
 _s154_expect() {  # the name the destination will compute for its canonical path
     _dw="$(cd "$1" && pwd -P)"
     printf '%s-%s' "$(basename "$_dw" | tr -cd 'a-zA-Z0-9._-')" "$(printf '%s' "$_dw" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-8)"

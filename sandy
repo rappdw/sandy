@@ -4350,8 +4350,8 @@ PROBE
     fi
     printf '  Size            %s\n\n' "$_rsy_size"
 
-    # A 2.x sandbox under a 1.x sandy is the #248 breakage (/home/claude vs
-    # /home/sandy) with no floor to catch it from that side.
+    # A 2.x sandbox under a 1.x sandy is the #248 breakage (the container home
+    # moved in 2.0) with no floor to catch it from that side.
     _rsy_cmaj="$(cut -d. -f1 < "$_rsy_src/.sandy_created_version" 2>/dev/null || true)"
     _rsy_dmaj="${_rsy_dver%%.*}"
     if [ -n "$_rsy_cmaj" ] && [ -n "$_rsy_dmaj" ] && [ "$_rsy_dmaj" -eq "$_rsy_dmaj" ] 2>/dev/null \
