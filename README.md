@@ -236,7 +236,6 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_ALLOW_WORKFLOW_EDIT` | `0` | `1` = drop `.github/workflows/` from the read-only protected set (for legitimate CI work). Weakens protection, so a workspace `.sandy/config` setting it triggers an approval prompt |
 | `SANDY_EGRESS_LOG` | `0` | `1`/`summary` = log which hosts the agent's egress actually reached (each distinct allowed `host:port` once) and print a session-end summary. Hostnames only — TLS is never terminated. Passive-safe (adds visibility) |
 | `SANDY_TOOL_AUDIT` | `0` | `1` = seed a Claude Code `PreToolUse` hook that appends `{ts,tool,args}` JSONL to `~/.claude/tool-audit.jsonl`. Claude-only, passive-safe (adds visibility); a user's own `PreToolUse` hook is never clobbered |
-| `SANDY_HANDOFF_DIRS` | `1` | **Deprecated.** Mount `~/.handoff/relay` (relay state + `supervisor.log`). The `inbox`, `outbox` and `peer` lanes were removed in 2.2.0 — use a feature manifest `mounts` entry instead. `0` opts out; a configured relay forces it back on. Passive-safe. See "Handoff directories" |
 | `SANDY_RELAY` | `1` | Run the installed relay if there is one — since 2.2.0 that means a feature manifest `entry`. A **capability** toggle naming no path: inert when nothing is installed. `0` disables the relay capability entirely (including an `entry`, which it did not before), loudly. Passive-safe. See "Installing a relay" |
 | `SANDY_CROSS_SESSION_INBOUND` | _(conditional)_ | Whether another local session may inject a turn into this one (Claude Code's `crossSessionInbound`): `accept` (delivered, no prompt), `hold` (interactive approval), `refuse` (sender told it was not accepted). Unset resolves to `accept` **only** when a `SANDY_HANDOFF_RELAY` is configured *and will actually start this launch* — otherwise `refuse`, so a workspace with no relay has no open receive surface. `hold`/`refuse` are passive-safe; `accept` from a workspace `.sandy/config` triggers an approval prompt. Claude-only |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
@@ -281,7 +280,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--reset-sandbox` | Rebuild **one** project's sandbox from a known-good skeleton — destroy its persistent package/agent state (preserving `WORKSPACE.json` lineage), refusing while a live session holds it. Filesystem-only, no Docker. "When in doubt, rebuild" in one command. Sub-options: `--workspace PATH` (default cwd), `--keep-approvals`, `--dry-run`, `--yes` |
 | `--rsync HOST` | **Copy** this workspace's sandbox to another host, even when the workspace lives at a different path there: renames it for the destination and rewrites the path-keyed state a hand `rsync` gets wrong (session history and memory, `.claude.json`, `WORKSPACE.json`). The destination workspace defaults to the same path under `$HOME` (`--dest-workspace PATH` to override) and must already exist. Credential files are copied and named in the plan; on a different CPU architecture the package caches are skipped and rebuild on first use. Sub-options: `--dry-run`, `--yes` |
 | `--remove-sandbox` | Permanently delete a sandbox directory (preserves **nothing**, unlike `--reset-sandbox`). Three selectors: default/`--workspace PATH` (workspace must still exist), `--sandbox NAME` (workspace already gone), `--orphans` (every sandbox whose recorded workspace is gone). Filesystem-only. Sub-options: `--dry-run`, `--yes` |
-| `--provision` | Non-interactively create one workspace's sandbox by running the **real launch path** once (start a detached session, confirm it's up, stop it) — never a flag that fabricates state. Safe no-op against a live session. **`--all`** does every sandbox sandy already knows about whose handoff pair is missing or wrong — the state `--reset-sandbox` leaves behind. Needs Docker. Sub-options: `--workspace PATH`, `--all`, `--dry-run`, `--yes` |
+| `--provision` | Non-interactively create one workspace's sandbox by running the **real launch path** once (start a detached session, confirm it's up, stop it) — never a flag that fabricates state. Safe no-op against a live session. **`--all`** does every sandbox sandy already knows about that is missing the per-sandbox state a launch creates (`relay-state/`) — the state `--reset-sandbox` leaves behind. Needs Docker. Sub-options: `--workspace PATH`, `--all`, `--dry-run`, `--yes` |
 | `--doctor` | Host + runtime readiness check (git/curl/docker/PATH/credentials, plus image staleness and orphaned resources). Exit `0` iff every required host check passes; runtime findings are warnings. Sub-options: `--fix` (clear a dead lock, reap orphaned networks), `--yes` |
 | `--gc` | One-shot global reclaim of leaked sandy Docker resources: dead-owner containers, orphaned `sandy_*` networks, orphaned per-project/skill images, dangling images. Sub-options: `--dry-run`, `--yes` |
 | `--print-state` / `--print-schema` / `--print-version` / `--validate-config` | Machine-readable JSON introspection (runtime state / static schema / version). Fast-path, no Docker needed for schema/version. See [`SPEC_INTROSPECTION.md`](SPEC_INTROSPECTION.md) |
@@ -486,34 +485,20 @@ If you were using it: `inbox`, `outbox` and `peer` become manifest `mounts` (`mo
 > [`ISOLATION_STRESS.md`](docs/security/ISOLATION_STRESS.md).
 
 
-### Checking and repairing the handoff pair
+### Re-provisioning sandboxes after a reset
 
-The handoff directories are created **by the launch**, which is deliberate: a pair exists only because the thing that mounts it made one, so a hand-made pair cannot be mistaken for a working one. The cost is that a sandbox can sit without a pair — most often after `sandy --reset-sandbox`, which destroys `handoff/` and keeps the sandbox, but also after any launch that failed between creating the sandbox directory and creating the pair.
+Some per-sandbox state is created **by the launch**, deliberately: it exists only because the thing that mounts it made it, so hand-made state can never pass for working state. Today that is `relay-state/` (see "Installing a relay" below). The cost is that a sandbox can sit without it — most often after `sandy --reset-sandbox`, which keeps the sandbox but destroys everything a launch re-creates, and also after any launch that failed part-way.
 
-`--print-state` reports the state of each sandbox's pair, read-only:
-
-```sh
-sandy --print-state | jq -r '.sandboxes[] | select(.handoff.state != "ok") | "\(.name): \(.handoff.state) \(.handoff.problems | join("; "))"'
-```
-
-`state` is `ok`, `missing` (a directory is absent), or `wrong` (one exists but is a file, a symlink, not yours, or not usable by you). It **never repairs** — you get the diagnosis, and what to do about it is yours. As a gate:
-
-```sh
-sandy --print-state | jq -e '[.sandboxes[] | select(.handoff.state != "ok")] | length == 0'
-```
-
-To fix them, in bulk:
+To bring every sandbox back in one pass:
 
 ```sh
 sandy --provision --all --dry-run   # what would be done
 sandy --provision --all --yes
 ```
 
-This provisions every sandbox sandy already **knows about** whose pair is missing or wrong, serially, through the real launch path. It **cannot** reach a workspace that has never been launched — that has no sandbox directory, so sandy does not know it exists; enrolling one is a deliberate `sandy --provision --workspace PATH`. A sandbox whose workspace has been deleted cannot be provisioned at all: it is named, counted as unprepared, and makes the run exit non-zero rather than being skipped into a false success.
+This provisions every sandbox sandy already **knows about** that is missing that state, serially, through the real launch path. It **cannot** reach a workspace that has never been launched — that has no sandbox directory, so sandy does not know it exists; enrolling one is a deliberate `sandy --provision --workspace PATH`. A sandbox whose workspace has been deleted cannot be provisioned at all: it is named, counted as unprepared, and makes the run exit non-zero rather than being skipped into a false success.
 
-A sandbox with a **live session** is named and skipped the same way — it cannot be provisioned while it runs, so the run exits non-zero and tells you to stop it and re-run. Nothing running is ever touched. Because of that, **exit `1` here means "re-read the state and see which", not "something broke"**: read `--print-state` rather than the exit code if you need to tell a genuine failure from a live skip.
-
-**`handoff.state: "ok"` means the directories are correct on the host.** It does not mean the tree is mounted in any container — `--print-state` reads no config and cannot know the next launch's `SANDY_HANDOFF_DIRS`. For a *running* sandbox, check the container's mounts.
+A sandbox with a **live session** is named and skipped the same way — it cannot be provisioned while it runs, so the run exits non-zero and tells you to stop it and re-run. Nothing running is ever touched. Because of that, **exit `1` here means "re-read the output and see which", not "something broke"**.
 
 ### Features (`$SANDY_HOME/features/<name>/feature.json`)
 
@@ -536,6 +521,8 @@ A **feature** is something you deploy into sandboxes that is not sandy's — a c
 ```
 
 Sandy computes every container path — you name a mount, sandy decides where it lands (`payload` at `/opt/sandy/features/<name>`, anything else under `~/.<name>/`) and exports it if you ask. Mounts are **read-only unless you say `rw`**.
+
+**`entry` is the relay**: sandy runs it as a supervised, container-level process — see "Installing a relay" below. `SANDY_RELAY=0` stops it (since 2.2.0), and the launch says so by name rather than running without it silently.
 
 **Selection is enrolment.** A sandbox gets the feature only if an include matches in both blocks and no exclude matches in either. A sandbox that is not selected gets nothing at all — no mount, no export, no entry. Check what applied:
 
@@ -606,7 +593,7 @@ Setting `SANDY_RELAY=0` disables the relay capability for that host or workspace
 
 Two failure shapes, handled differently:
 
-- **Cannot start** (missing, not executable, no `~/.handoff/relay` mount, no `flock`): fails the launch, before or during container start.
+- **Cannot start** (missing, not executable, no `relay-state` mount, no `flock`): fails the launch, before or during container start.
 - **Starts, then exits**: if the first run exits non-zero within ~5s the session fails with that exit code. Past that window it is a runtime loop, which cannot un-succeed a launch that already completed — it is reported instead:
 
 ```sh
@@ -614,9 +601,10 @@ sandy --print-state | jq '.sandboxes[] | {name, relay}'
 # {"name":"myproj-1a2b3c4d","relay":{"state":"looping","restarts":417,"last_exit_code":3, ...}}
 ```
 
-`state` is one of `absent`, `started`, `looping`, `failed`, `disabled`. The session marker (`/etc/sandy-session.json`) carries only `relay.slot` — `present`/`absent`/`disabled` — because it is written **before** the container starts and therefore cannot know whether the relay ran; live state comes from `--print-state`. Treat both as diagnostics: `~/.handoff/relay` is writable by the agent.
+`state` is one of `absent`, `started`, `looping`, `failed`, `disabled`. `--print-state` also reports `source` (who supplied the relay: `manifest`, or `none`), `path` (a **container** path), `executable_present` (checked on the host at query time — a fact, not a health verdict), `disabled_by`, and `state_dir` — the **host** path of `$SANDBOX_DIR/relay-state`, where the relay's `.state` and `supervisor.log` live. Inside the container that directory is `/opt/sandy/relay-state`; a relay finds it through `SANDY_RELAY_STATE` rather than by building the path.
 
-`SANDY_HANDOFF_RELAY=<path>` still works and still wins when both are set (with a notice naming the winner), but it is **deprecated** as of 1.11.0.
+The session marker (`/etc/sandy-session.json`) carries `relay.source`, `relay.path` and `relay.disabled_by` — launch **intent**, because it is written **before** the container starts and cannot know whether the relay ran; live state comes from `--print-state`. Treat all of it as diagnostics: `relay-state/` is mounted read-write, so the agent can write it.
+
 
 ### Egress proxy — cross-platform isolation
 
@@ -1002,7 +990,7 @@ If you use [lore](https://github.com/rappdw/lore), also export the memory corpus
 lore export --json > lore-memories-$(date +%F).json
 ```
 
-**Do not use `rm -rf` on the sandbox directory.** It takes the preserved column with it, and nothing recreates those — `relay-bin/` and `agent-args.*` are operator state a repository cannot carry.
+**Do not use `rm -rf` on the sandbox directory.** It takes the preserved column with it, and nothing recreates those — `agent-args.*` is operator state a repository cannot carry. (`relay-bin/` is **not** preserved since 2.2.0: the slot was removed, and a leftover entry would block the next launch.)
 
 The cost is time and bandwidth: the next launch in each workspace re-downloads packages and rebuilds the venv. Nothing is lost that a `uv sync` or `npm install` will not restore.
 
