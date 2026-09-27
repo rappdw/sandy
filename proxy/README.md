@@ -33,16 +33,22 @@ chokepoint and enforces an allowlist.
 ## Modes
 
 The proxy runs in one of two policies (set by the launcher from
-`SANDY_EGRESS_PROXY`):
+`SANDY_EGRESS`):
 
-- **permissive** (`SANDY_EGRESS_PROXY=1`) — block only private/LAN/link-local/
+- **permissive** (`SANDY_EGRESS=permissive`) — block only private/LAN/link-local/
   CGNAT/metadata destinations; allow all internet. DNS answers any well-formed
   name with the proxy IP; the forward path resolves the real address and refuses
   it only if it's private (resolving-then-checking also defeats DNS rebinding).
   `allow` is a LAN-**exception** list (e.g. a local registry, or
   `host.docker.internal:port` for a local LLM). Closes F2 (macOS host/LAN reach)
   with ~zero tool friction. Does NOT stop exfil to an arbitrary internet host.
-- **strict** (`SANDY_EGRESS_PROXY=2`) — deny everything except `allow`-listed
+  It also refuses a built-in list of **well-known DNS-over-HTTPS resolvers**
+  (`dns.google`, `cloudflare-dns.com`, `dns.quad9.net`, … — `doh.go`) on every
+  path, so name resolution cannot quietly move off the DNS responder and out of
+  the egress log (#154). An `allow` entry naming one re-allows it. The list is
+  enumerable, not complete: an unlisted provider or an IP-literal resolver is
+  not covered — strict mode is the real fix.
+- **strict** (`SANDY_EGRESS=strict`) — deny everything except `allow`-listed
   hosts. Closes F2 AND exfil-to-internet, at the cost of failing closed on any
   un-listed host. `allow` is the full allowlist.
 
