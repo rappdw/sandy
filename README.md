@@ -151,6 +151,38 @@ session (`5` is a `--stop` code, unreachable on `--attach`). `--stop`: `0` = sto
 This is what [`sandy-ui`](https://github.com/rappdw/sandy-ui) uses to keep a
 session alive across a VSCode quit/relaunch.
 
+#### Remote access: what sandy covers, and what sits below it
+
+Three things get conflated when sandy runs on a remote machine (an always-on
+workstation or GPU box you reach from a laptop). Sandy owns exactly one of them.
+
+- **Session persistence — sandy's layer.** A daemon session lives on the host
+  that ran `sandy --start`, independent of any client. When your SSH or VS Code
+  Remote connection drops, only the *client* is gone: the container and its tmux
+  session keep running. Reconnect however you like, then `sandy --attach` (from
+  the workspace, or with `--workspace PATH`) and carry on. If your client was
+  killed mid-attach (a `SIGHUP` from a closed terminal), just run `--attach`
+  again; it exits `4` if the session is genuinely gone. A foreground `sandy`
+  (no `--start`) is the exception: it is tied to the terminal that launched it
+  and cannot be reattached.
+- **Connection resilience — below sandy.** Keeping the client link itself alive
+  across laptop sleep or a flaky network is a transport problem: Remote-SSH, VS
+  Code Remote Tunnels, mosh, Eternal Terminal, autossh and the like. Sandy needs,
+  and takes, **zero changes** for any of them — it neither bundles nor checks
+  for one, and there is no `sandy --tunnel`. Pick whichever you already trust.
+- **Session mobility — not a sandy feature.** Reaching a session *from* another
+  device is just the two above: get a shell on the host (SSH, over Tailscale or
+  any VPN) and `sandy --attach`. Moving a running session *to* a different
+  machine is something sandy does not do; the session stays on the host that
+  started it. `sandy --rsync <host>` copies a sandbox's state to another host so
+  a new session can start there, and it refuses while a session is live.
+
+These transports run on the **host**, outside sandy's containers, so they are
+orthogonal to its isolation: sandy's network blocking applies to what the
+*agent* can reach from inside the container (the `--internal` sidecar and egress
+proxy), and a host-side `sshd`, `etserver` or tunnel is neither weakened by it
+nor governed by it. Securing the path to your host is the host's business.
+
 ### Fleet updates (`--update-sessions`)
 
 Daemon sessions can sit up for days, running an ever-staler image. `sandy --update-sessions` is a **global** maintenance command (ignores cwd — it operates on every daemon session on the host) that refreshes each session's images and rolling-restarts the ones that came out stale:
