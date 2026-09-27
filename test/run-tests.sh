@@ -18240,7 +18240,7 @@ unset _S164_SANDY _S164_D _S164_OUT _S164_RC _S164_AGENT_URL _S164_SELF_URL _S16
 unset _S164_SP _S164_SPV _S164_RX _S164_RXA _S164_MK
 unset -f _s164_run _s164_sp _s164_mk
 echo ""
-echo "§162: the --start pre-pass answers the .sandy/Dockerfile gate too; SANDY_AUTO_APPROVE_PRIVILEGED covers two gates of three (#296)"
+echo "§162: the --start pre-pass answers the .sandy/Dockerfile gate too; SANDY_AUTO_APPROVE_PRIVILEGED covers two gates of three; the prompt names its provenance (#296, #295)"
 # WHY. `--start` answers launch approvals on the CLIENT tty in a SANDY_APPROVE_ONLY
 # pre-pass, because the supervisor it forks has stdin on /dev/null. That pass
 # covered the config keys and the symlinks but exited ~2500 lines before the
@@ -18373,6 +18373,28 @@ check "§162(10) the --start client forwards the decline into the supervisor env
     grep -q '"SANDY_DOCKERFILE_DECLINED_HASH=\$_sandy_df_declined"' "$_S162_SANDY"
 check "§162(11) --print-schema describes the bypass as covering the Dockerfile gate and NOT the symlink gate (#296 item 3; R8 in the 2026-09-04 review)" \
     bash -c '"$1" --print-schema | python3 -c "import json,sys; d=[k for k in json.load(sys.stdin)[\"config\"][\"env_only_keys\"] if k[\"name\"]==\"SANDY_AUTO_APPROVE_PRIVILEGED\"][0][\"description\"]; assert \".sandy/Dockerfile\" in d and \"NOT bypass the dangerous-symlink\" in d"' _ "$_S162_SANDY"
+
+# --- B (#295 items 4-6): the prompt says WHICH question it is asking --------
+# "Is this content acceptable" is half the question; "did you put this here"
+# is the other half, and the operator can only answer it knowing whether the
+# content is new to this workspace or changed since a review they already did.
+# Both fixtures reach the prompt through the no-tty path, which prints the full
+# review before failing closed; the wording is the same one a tty user sees.
+_S162_OUT="$(_s162_sup D "")"
+check "§162(12) no approval file: the prompt says NO prior approval, and does not claim a change (mutation: a single undifferentiated prompt loses the provenance)" \
+    bash -c 'printf "%s" "$1" | grep -q "NO prior approval for this workspace" && ! printf "%s" "$1" | grep -q "CHANGED since"' _ "$_S162_OUT"
+_s162_mk E
+mkdir -p "$_S162_DIR/E/home/approvals"
+printf '%s\n# workspace: %s\n# approved:  2026-01-02T03:04:05Z\n' "0000000000000000000000000000000000000000000000000000000000000000" "$_S162_DIR/E/ws" > "$(_s162_approval E)"
+_S162_OUT="$(_s162_sup E "")"
+check "§162(13) an approval for OTHER content: the prompt says the context CHANGED and names the earlier approval date (mutation: reading the date from the wrong line, or not at all, drops the when)" \
+    bash -c 'printf "%s" "$1" | grep -q "CHANGED since you approved it on 2026-01-02T03:04:05Z" && ! printf "%s" "$1" | grep -q "NO prior approval"' _ "$_S162_OUT"
+check "§162(14) the prompt carries a reading rule, not just the risk (#295 item 5)" \
+    bash -c 'printf "%s" "$1" | grep -q "fetches and installs from a package registry is expected" && printf "%s" "$1" | grep -q "piping a URL to a shell"' _ "$_S162_OUT"
+# Item 6 is structural: exercising it for real means running the whole launch
+# up to Phase 3 with a docker that fails only the project build.
+check "§162(15) a failed project build names the probe scope -- sandy's own hosts only (mutation: a bare docker build under set -e fails with no hint and reads like a sandy fault)" \
+    bash -c 'grep -F -A12 -e "-f \"\$PROJECT_DOCKERFILE\" \"\$WORK_DIR/.sandy\" || _sandy_proj_build_rc=\$?" "$1" | grep -q "covers only its OWN build hosts"' _ "$_S162_SANDY"
 
 rm -rf "$_S162_DIR"
 unset _S162_SANDY _S162_DIR _S162_FN _S162_OUT _S162_RC _S162_HA _S162_HB _S162_HD

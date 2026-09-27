@@ -10672,7 +10672,7 @@ _sandy_context_hash() {
 # APPROVE_ONLY pre-pass can hand a decline to the supervisor bound to exactly
 # that content (#296).
 _sandy_project_dockerfile_approved() {
-    local dockerfile="$1" df_hash wd_hash approval_file stored _ans _line _ctx _other
+    local dockerfile="$1" df_hash wd_hash approval_file stored _ans _line _ctx _other _prov_date
     _ctx="$(dirname "$dockerfile")"
     df_hash="$(_sandy_context_hash "$_ctx")"
     _SANDY_DF_HASH="$df_hash"
@@ -10703,10 +10703,33 @@ _sandy_project_dockerfile_approved() {
     fi
     echo "[sandy]" >&2
     echo "[sandy] This project ships a .sandy/Dockerfile:  $dockerfile" >&2
+    # #295 item 4: say WHICH question this is. "Is this content acceptable" is
+    # only half of it; the other half is "did you put this here", and the
+    # operator cannot answer that without knowing whether the content is new
+    # to this workspace or changed since a review they already did. The
+    # approval file already tells the two apart -- absent vs. a first line
+    # that no longer matches -- and records the date of the earlier approval.
+    # .sandy/ is :ro in-session only when it EXISTED at launch, so a session
+    # that started without one could have written this one (#295 item 1).
+    if [ -f "$approval_file" ]; then
+        _prov_date="$(awk '/^# approved:/ { sub(/^# approved: */, ""); print; exit }' "$approval_file" 2>/dev/null || true)"
+        echo "[sandy] PROVENANCE: the build context CHANGED since you approved it on ${_prov_date:-an unrecorded date}." >&2
+        echo "[sandy] If you did not change it yourself (an edit, a pull, a branch you checked out)," >&2
+        echo "[sandy] find out what did before answering y." >&2
+    else
+        echo "[sandy] PROVENANCE: NO prior approval for this workspace is on record. If you did" >&2
+        echo "[sandy] not write it, or take it from a repository you trust, treat it as planted:" >&2
+        echo "[sandy] an agent session that started without a .sandy/ directory can create one." >&2
+    fi
     echo "[sandy] Building it runs its RUN commands on your HOST docker daemon with" >&2
     echo "[sandy] UNFILTERED network (build-time is NOT behind the egress proxy), and the" >&2
     echo "[sandy] whole .sandy/ dir is the build context. A committed or agent-written" >&2
     echo "[sandy] Dockerfile could run host code or exfiltrate here. Review it:" >&2
+    # #295 item 5: a reading strategy, not just the risk. "Review it carefully"
+    # leaves the operator to invent one for an arbitrary Dockerfile.
+    echo "[sandy]   A RUN line that fetches and installs from a package registry is expected." >&2
+    echo "[sandy]   A RUN line doing anything ELSE -- piping a URL to a shell, writing outside" >&2
+    echo "[sandy]   the image, reading from the build context -- is what deserves your attention." >&2
     echo "[sandy]" >&2
     # Strip control chars (incl. ESC) per line — the Dockerfile is untrusted and
     # raw terminal escapes could spoof what the reviewer sees vs. what's approved.
@@ -13415,13 +13438,30 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
         # The per-project Dockerfile is arbitrary user RUN commands, so it needs
         # the network at least as much as sandy's own images do -- and it is the
         # LAST build, so an unreachable mirror here wastes everything above it.
+        #
+        # SCOPE (#295 item 6): _sandy_build_allowed probes SANDY'S OWN build
+        # dependencies (deb.debian.org, registry.npmjs.org) and nothing else.
+        # A project layer can fetch from anywhere -- rubygems.org, pypi.org, a
+        # vendor CDN -- and sandy cannot parse an arbitrary Dockerfile for its
+        # network needs. So on a partially reachable network the gate can pass
+        # and this build still die at its own download step; that is the
+        # project's dependency, not a sandy fault, and the failure message says
+        # so rather than leaving it to read like one.
         if _sandy_build_allowed "$PROJECT_IMAGE_NAME" "project image"; then
         info "Building project image from .sandy/Dockerfile..."
+        _sandy_proj_build_rc=0
         docker build -q --no-cache \
             --label sandy.managed=1 \
             --build-arg BASE_IMAGE="$IMAGE_NAME" \
             -t "$PROJECT_IMAGE_NAME" \
-            -f "$PROJECT_DOCKERFILE" "$WORK_DIR/.sandy"
+            -f "$PROJECT_DOCKERFILE" "$WORK_DIR/.sandy" || _sandy_proj_build_rc=$?
+        if [ "$_sandy_proj_build_rc" -ne 0 ]; then
+            error "The .sandy/Dockerfile build failed (exit $_sandy_proj_build_rc)."
+            error "Note: sandy's reachability probe covers only its OWN build hosts (deb.debian.org,"
+            error "registry.npmjs.org), not whatever this Dockerfile fetches. If the failure is a"
+            error "download, check that the hosts this Dockerfile uses are reachable from here."
+            exit "$_sandy_proj_build_rc"
+        fi
         echo "$PROJECT_HASH" > "$PROJECT_HASH_FILE"
         fi
     else
