@@ -106,6 +106,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_SUSPICIOUS
     SANDY_CROSS_SESSION_INBOUND
     SANDY_RELAY
+    SANDY_OFFLINE
 )
 
 # SANDY_ENV_ONLY_KEYS: honored only when set in the process environment.
@@ -291,8 +292,11 @@ skill_pack_resolve_versions() {
         # Read cached version
         [ -f "$cache_file" ] && cached="$(cat "$cache_file")"
 
-        # Check GitHub for latest release
-        latest="$(skill_pack_latest_release "$pack")"
+        # Check GitHub for latest release -- unless SANDY_OFFLINE (#219), in
+        # which case the cache/pin fallback below is the whole answer.
+        if [ "${SANDY_OFFLINE:-0}" != 1 ]; then
+            latest="$(skill_pack_latest_release "$pack")"
+        fi
 
         if [ -n "$latest" ]; then
             resolved="$latest"
@@ -1591,6 +1595,7 @@ SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|Claude
 ANTHROPIC_PROFILE|string||^[A-Za-z0-9._-]+$|1.11.0|experimental|Privileged. Name of the Anthropic Console profile to use when SANDY_CLAUDE_AUTH=profile (overrides the host active_config); forwarded into the container so Claude Code selects it explicitly (its /status shows the Profile row as profile-explicit). Privileged on purpose: it chooses WHICH profile's token enters the box, and a profile logged in with --scope org:admin carries organization-wide access, so a committed .sandy/config must not be able to select it. Ignored with a notice unless SANDY_CLAUDE_AUTH=profile.
 SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|REMOVED AS A CONFIGURATION KEY in 2.2.0 (#354): setting it from the environment or any config file is a HARD ERROR naming the replacement -- declare the executable as an 'entry' in a feature manifest. THE VARIABLE IS NOT REMOVED and must not be: it is the internal channel a manifest entry travels through to the container-side supervisor, so a change that deletes the variable deletes the entry mechanism with it. At most ONE entry runs per container: the first selected feature to declare one, in feature-directory name order, wins, and each later one is named in a launch warning rather than dropped silently (#381). What an entry gets: a container-level process (a sibling of the tmux server, not a pane, not a child of any agent session), started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote, never under --provision), held to one instance by flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never given up on. Its state (.state, supervisor.log) lives at $SANDBOX_DIR/relay-state, mounted rw at /opt/sandy/relay-state and exported as SANDY_RELAY_STATE -- a relay reads that variable rather than constructing the path (#353). Env contract: SANDY_RELAY_STATE, SANDY_AGENT, SANDY_WORKSPACE; enumerate live sessions with /usr/local/bin/sandy-handoff-sessions. An entry that cannot start FAILS THE LAUNCH, never warn-and-proceed: missing or not executable, no relay-state mount, or no flock (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7). SANDY_RELAY=0 stops it, loudly, and records relay.disabled_by. Reported in /etc/sandy-session.json as relay.source/path/disabled_by (launch intent) and live in --print-state as relay.state. In daemon mode the relay (and anything else planted at the uid) outlives sessions until the container is recreated -- run sandy --update-sessions --yes on a 24h cron.
 SANDY_RELAY|bool|1||1.11.0|experimental|Relay CAPABILITY toggle (#258), RE-SCOPED in 2.2.0 (#354). Names no path and asserts no payload: it means 'run the installed relay if there is one'. That meaning was never slot-specific, so with the relay-bin slot removed the key now gates the only remaining producer -- a feature manifest's entry. BEHAVIOUR CHANGE, in the tightening direction: =0 used to disable a slot relay and silently NOT stop a manifest entry; it now stops both, which is what the key always claimed. Because a fleet going silently dark is the failure the entry/relay-bin coexistence window existed to prevent, the suppression is LOUD -- a launch that declines to start a declared entry says so by name, and the resolved state records disabled_by (env, host or workspace) in /etc/sandy-session.json and --print-state, so a CLONED repo shipping 0 is visible rather than forbidden. Default 1, safe because the capability is INERT without host-side state a repository cannot create: no feature, no entry, nothing to run. Both values are passive-safe: 0 only tightens. Skipped, not failed, in headless (-p) and --remote runs. Reported as relay.slot (absent or disabled; 'present' retired with the slot) in the session marker -- launch INTENT, since the marker is written before docker run and the relay starts in-container -- and as live relay.state (absent, started, failed, looping or disabled) in --print-state, alongside relay.source (#345) which names the producer.
+SANDY_OFFLINE|bool|0||2.4.0|stable|Offline mode (#219): skip the lookups a launch makes only to learn whether something NEWER exists -- the per-agent version checks (a hit forces a --no-cache agent rebuild), skill-pack version resolution from GitHub (falls back to the local cache, then the built-in pin), and sandy's own release nag. Builds that are REQUIRED still run: a missing image or a changed Dockerfile builds through the build-reachability gate and fails there as it always has. For a known-bad network (in-flight wifi, captive portal) or an air-gapped host, where the checks cost latency and a detected update would force a rebuild that cannot succeed. The one-shot CLI form is --no-update-check, which wins over this key. Passive-safe: it defers the auto-patch pickup the wrapped-agent CVE posture relies on, but only until the next launch without it -- equivalent to not relaunching -- and it is never silent: one line at launch, one at session end, and 'offline': true in /etc/sandy-session.json. Default 0.
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
 SANDY_HOST_ID|string||^[A-Za-z0-9._-]{1,128}$|1.8.0|stable|Operator override for the host_id reported by --print-state (#179), advisory identity for multi-host fleet aggregation (sandbox names hash only the workspace path, so the same path on two hosts collides). ENV-ONLY -- a committed .sandy/config can never set it, which would otherwise forge the identity of whatever machine the repo is cloned onto. Default is uname -n (host_id_source: hostname); a valid override reports host_id_source: env. Invalid or empty values are silently ignored and fall back to uname -n -- no warning, ever, since --print-state guarantees 0 bytes of stderr.
@@ -1829,6 +1834,8 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--rebuild"';      printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Force rebuild of sandy images."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--build-only"';   printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Build images and exit (for CI)."'; printf '}'
+    printf ','
+    printf '{'; _json_kv name '"--no-update-check"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"One-shot SANDY_OFFLINE=1 (#219): skip the agent, skill-pack and sandy release lookups for this launch. Builds that are REQUIRED (missing image, changed inputs) still run. Honored by the bare launch path, -p, --build-only and --start; wins over SANDY_OFFLINE=0 in any config file."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--new"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Start a fresh session (default: resume last)."'; printf '}'
     printf ','
@@ -6242,6 +6249,9 @@ Flags:
   --version          Show version
   --rebuild          Force rebuild of the sandbox Docker image
   --build-only       Build images and exit (for CI)
+  --no-update-check  Skip agent/skill-pack/sandy update checks for this
+                     launch (one-shot SANDY_OFFLINE=1). Required builds
+                     (missing image, changed inputs) still run.
   --new              Start a fresh session (default: resume last)
   --resume           Open session picker
   --remote           Start in remote-control server mode
@@ -6365,6 +6375,10 @@ fi
 # --- Parse sandy flags (order-independent, consumed before forwarding to claude) ---
 SANDY_REBUILD=false
 SANDY_BUILD_ONLY=false
+# --no-update-check (#219) is the one-shot form of SANDY_OFFLINE=1. Stashed
+# here, like --agent, and applied after config loading, so a flag on the
+# command line beats a SANDY_OFFLINE=0 in any config file.
+SANDY_NO_UPDATE_CHECK=false
 SANDY_NEW_SESSION=false
 SANDY_REMOTE_CONTROL=false
 # Daemon-mode (milestone 1.1.0, #17). SANDY_START=true, SANDY_ATTACH=true, and
@@ -6402,6 +6416,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --rebuild)    SANDY_REBUILD=true ;;
         --build-only) SANDY_BUILD_ONLY=true ;;
+        --no-update-check) SANDY_NO_UPDATE_CHECK=true ;;
         --new)        SANDY_NEW_SESSION=true ;;
         --remote)     SANDY_REMOTE_CONTROL=true ;;
         --start)      SANDY_START=true ;;
@@ -6473,8 +6488,9 @@ for _sandy_headless_arg in "$@"; do
     esac
 done
 
-# --- Check for sandy updates (non-blocking, cached 24h) ---
-sandy_check_update
+# The sandy self-update check used to run here. It moved below config loading
+# (#219), because SANDY_OFFLINE may come from a config file and only the loaded
+# configuration can say whether the check is wanted at all.
 
 # --- Preflight checks ---
 if ! command -v docker &>/dev/null; then
@@ -8940,6 +8956,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     _sandy_reexec_args=(--start --workspace "$WORK_DIR")
     [ "$SANDY_REBUILD" = "true" ] && _sandy_reexec_args+=(--rebuild)
     [ "$SANDY_BUILD_ONLY" = "true" ] && _sandy_reexec_args+=(--build-only)
+    [ "$SANDY_NO_UPDATE_CHECK" = "true" ] && _sandy_reexec_args+=(--no-update-check)
     [ "$SANDY_NEW_SESSION" = "true" ] && _sandy_reexec_args+=(--new)
     [ "$SANDY_REMOTE_CONTROL" = "true" ] && _sandy_reexec_args+=(--remote)
     [ -n "$SANDY_AGENT_OVERRIDE" ] && _sandy_reexec_args+=(--agent "$SANDY_AGENT_OVERRIDE")
@@ -9709,6 +9726,47 @@ _load_sandy_config "$SANDY_HOME/config"            privileged
 _load_sandy_config "$SANDY_HOME/.secrets"          privileged
 _load_sandy_config "$WORK_DIR/.sandy/config"       passive
 _load_sandy_config "$WORK_DIR/.sandy/.secrets"     passive
+
+# --- Offline mode: SANDY_OFFLINE=1 / --no-update-check (#219) ---
+# "Use what you have, do not check for updates." Skips the three things a launch
+# fetches only to decide whether something NEWER exists: the per-agent version
+# checks (a hit forces a --no-cache rebuild), skill-pack version resolution
+# from GitHub (falls back to the local cache, then the built-in pin), and
+# sandy's own release nag. It does NOT skip a build that is REQUIRED -- a
+# missing image or a changed Dockerfile still builds, through the #218
+# reachability gate, and fails there as it always did.
+#
+# Why an explicit switch when #218 already degrades gracefully: the probe costs
+# latency, detection can be wrong in both directions, and "I know I am on a
+# plane, just launch" should not depend on a heuristic.
+#
+# PASSIVE-SAFE (maintainer decision). It defers the auto-patch pickup the
+# wrapped-agent CVE posture relies on, which is a mild weakening -- but it is
+# time-bounded (the next launch without it checks as normal), equivalent to
+# simply not relaunching, and a committed .sandy/config gains no capability
+# from it. What keeps it honest is that it is never SILENT: one line at launch
+# and one at session end, and the marker records it.
+#
+# The flag wins over any config value, like --agent. Deliberately not exported:
+# the --start supervisor gets the flag back through its re-exec argv and reads
+# the same config files itself, while a child launched for ANOTHER workspace
+# must resolve that workspace's own setting, not inherit this one's.
+if [ "$SANDY_NO_UPDATE_CHECK" = true ]; then SANDY_OFFLINE=1; fi
+if [ "${SANDY_OFFLINE:-0}" != 0 ] && [ "${SANDY_OFFLINE:-0}" != 1 ]; then
+    echo "[sandy] ERROR: SANDY_OFFLINE='${SANDY_OFFLINE}' invalid (want 0 or 1)" >&2
+    exit 1
+fi
+SANDY_OFFLINE="${SANDY_OFFLINE:-0}"
+if [ "$SANDY_OFFLINE" = 1 ] && [ "${SANDY_APPROVE_ONLY:-0}" != "1" ]; then
+    info "Offline mode (SANDY_OFFLINE=1 / --no-update-check): skipping update checks — agent, skill-pack and sandy releases are not looked up this launch. Images that must be built still are."
+fi
+
+# --- Check for sandy updates (non-blocking, cached 24h) ---
+# Not in the SANDY_APPROVE_ONLY pre-pass: the --start supervisor that follows
+# runs this same line, and the nag would otherwise print twice.
+if [ "$SANDY_OFFLINE" != 1 ] && [ "${SANDY_APPROVE_ONLY:-0}" != "1" ]; then
+    sandy_check_update
+fi
 
 # SANDY_EXTRA_ENV: user-defined passthrough of arbitrary env-var names into
 # the container (e.g. tokens for MCP servers sandy doesn't know about).
@@ -10874,6 +10932,11 @@ _sandy_build_allowed() {
     fi
     error "Build resources unreachable ($_SANDY_BUILD_NET_WHY), and no $2 exists to fall back to."
     error "  sandy cannot build $1 without network access. Reconnect and retry."
+    # #219: offline mode reads as "never touch the network", so name the
+    # boundary rather than let the user wonder why it did not apply here.
+    if [ "${SANDY_OFFLINE:-0}" = 1 ]; then
+        error "  SANDY_OFFLINE=1 / --no-update-check skips update CHECKS only; an image that does not exist yet still has to be built."
+    fi
     exit 1
 }
 
@@ -11001,7 +11064,9 @@ _check_opencode_update() {
     fi
     return 1
 }
-if [ "$NEEDS_BUILD" = false ]; then
+# SANDY_OFFLINE (#219) skips only this lookup. A build already required above
+# (missing image, changed inputs, rebuilt base) is not a check and still runs.
+if [ "$NEEDS_BUILD" = false ] && [ "${SANDY_OFFLINE:-0}" != 1 ]; then
     _sandy_agent_has claude   && _check_claude_update   && NEEDS_BUILD=true
     _sandy_agent_has gemini   && [ "$NEEDS_BUILD" = false ] && _check_gemini_update   && NEEDS_BUILD=true
     _sandy_agent_has codex    && [ "$NEEDS_BUILD" = false ] && _check_codex_update    && NEEDS_BUILD=true
@@ -13606,6 +13671,13 @@ cleanup() {
         printf "${YELLOW}[sandy]${NC} An image refresh was deferred this session (build resources were unreachable).\n" >&2
         printf "${YELLOW}[sandy]${NC} You ran on the existing image. It rebuilds on the next launch from a healthy network.\n" >&2
     fi
+    # #219: the same erosion, chosen rather than suffered. SANDY_OFFLINE skips
+    # the lookups that would have found a patched agent release, so say so at
+    # the end too -- the launch line has long scrolled away by now.
+    if [ "${SANDY_OFFLINE:-0}" = "1" ]; then
+        printf "${YELLOW}[sandy]${NC} Update checks were skipped this session (SANDY_OFFLINE=1 / --no-update-check); a newer agent release may exist.\n" >&2
+        printf "${YELLOW}[sandy]${NC} Launch without it to pick up patches.\n" >&2
+    fi
     # HF-incident Issue 4: session-end egress summary. When allowed-egress logging
     # is on, roll up proxy.log into "what hosts did the agent actually reach" — the
     # first question after a suspected prompt injection or a leaked-token scare.
@@ -15308,6 +15380,10 @@ _sandy_relay_json=false; [ -n "${SANDY_HANDOFF_RELAY:-}" ] && _sandy_relay_json=
 #
 # Like every other marker field this is LAST LAUNCH, never next launch: a
 # sandbox whose manifest changed reports the old value until it relaunches.
+#
+# offline (#219): true when SANDY_OFFLINE / --no-update-check skipped the
+# update lookups, so "this run was launched on a possibly-unpatched agent by
+# choice" is provable after the fact -- the effort/permission_mode precedent.
 _sandy_agents_json=""
 _sandy_agents_ifs="$IFS"; IFS=','
 for _sandy_a in ${SANDY_AGENT:-claude}; do
@@ -15331,12 +15407,13 @@ fi
 # will run, whatever was resolved earlier.
 [ -n "${SANDY_HANDOFF_RELAY:-}" ] || _sandy_relay_source="none"
 _sandy_relay_source_json="\"${_sandy_relay_source:-none}\""
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "relay": {\n    "source": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "cred_mode": "%s"\n}\n' \
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "relay": {\n    "source": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "offline": %s,\n  "cred_mode": "%s"\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
     "$_sandy_perm_mode_json" "$_sandy_csi_json" "$_sandy_agents_json" \
     "$_sandy_relay_source_json" "$_sandy_relay_path_json" "$_sandy_relay_disabled_by_json" \
-    "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${CRED_MODE:-none}" \
+    "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" \
+    "$(if [ "${SANDY_OFFLINE:-0}" = 1 ]; then echo true; else echo false; fi)" "${CRED_MODE:-none}" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
 
