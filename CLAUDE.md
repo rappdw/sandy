@@ -13,6 +13,14 @@ This file is loaded into **every** session, so it holds the rules you must follo
 
 **Three-phase build**: `sandy-base` (OS, Node 24, Go 1.26, Rust stable, Python 3, C/C++, system tools) → `sandy-claude-code` (or the per-agent image) → optional per-project image from `.sandy/Dockerfile`. Each phase rebuilds only when its inputs change. The per-project `.sandy/Dockerfile` build is **approval-gated** and fails closed when non-interactive — its `RUN` commands execute on the host daemon with unfiltered network.
 
+## Consumer boundary
+
+**Sandy code and docs name no consumer's protocol.** A mechanism requested by one consumer lands as (a) something that consumer's feature payload can do with existing capabilities, or (b) a generalized capability whose name, cardinality and rationale would make sense to a second, unrelated consumer. The single-entry rationale that cited a connector claim lock is the example of what fails that test (#381 replaced it) — "exactly one supervised entry" was never a property sandy's own supervision needed; it was one consumer's exclusivity requirement, smuggled into the launcher as if it were sandy's rule to enforce.
+
+The rule exists because the alternative reads as reasonable right up until a second, unrelated consumer shows up and finds the mechanism already shaped around the first one's assumptions — a feature manifest field named after one consumer's vocabulary (`inbox`/`outbox`/`peer` for a specific messaging design, rather than a mount a feature names itself), a cardinality limit that was really an exclusivity lock, a default wired to "does this one thing's process happen to be running" instead of a declared need. Each of those shipped once and each had to be generalized later, in a minor, without breaking the one consumer already depending on the narrower shape. Naming no consumer up front is cheaper than that generalization.
+
+Historical issue references and changelog-style facts may still name who asked for something (`#132`, "requested by X") — that is provenance, not rationale, and this file and `SPECIFICATION.md`/`SPEC_INTROSPECTION.md` keep plenty of it. What the rule forbids is *justifying* a mechanism's shape — its cardinality, its field names, its defaults — by appeal to one consumer's protocol. `run-tests.sh` §158 ratchets the textual half of this (`sandy` itself names no consumer by name or by its "claim lock" language); it cannot check for a smuggled-in assumption dressed as a generic one, which is why the test above matters more than the grep.
+
 ## Installation and Usage
 
 ```sh
@@ -625,7 +633,7 @@ The rule is now a property of the path, not a containment test: **no component b
 
 **`schema_version` is `3`.** The removals above are all emitted-field removals, and a vanished field is otherwise silent — a consumer gating on `2` keeps finding `2` and merely stops seeing it. Every removal was bundled into one bump because at least one consumer compares `schema_version` by equality, so each bump costs them a refusal and a release.
 
-**`relay.disabled_by` was NOT removed**, and the reason is worth keeping: the plan was to drop it with `relay.slot`, because both described the `relay-bin` capability. `#354` then re-scoped `SANDY_RELAY` to gate a manifest entry, which made that premise false — the key it names is live and now gates the only producer left. Removing it would have deleted the one host-side signal that a cloned repo shipping `SANDY_RELAY=0` has silently disabled a fleet connector.
+**`relay.disabled_by` was NOT removed**, and the reason is worth keeping: the plan was to drop it with `relay.slot`, because both described the `relay-bin` capability. `#354` then re-scoped `SANDY_RELAY` to gate a manifest entry, which made that premise false — the key it names is live and now gates the only producer left. Removing it would have deleted the one host-side signal that a cloned repo shipping `SANDY_RELAY=0` has silently disabled a feature entry an operator installed fleet-wide.
 
 ### Features: one manifest per feature (2.0.0, `docs/design/FEATURE-MANIFEST.md`)
 

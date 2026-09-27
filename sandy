@@ -3056,8 +3056,9 @@ EOF_RELAY_MARKER
             # made that premise false -- the key it names is live, and now gates
             # the only producer left. Removing this would have deleted the one
             # host-side signal that a cloned repo shipping SANDY_RELAY=0 has
-            # silently disabled a fleet connector, which is the hazard #258 put
-            # it there for. Visible, not forbidden.
+            # silently disabled a feature entry an operator installed
+            # fleet-wide, which is the hazard #258 put it there for. Visible,
+            # not forbidden.
             if [ -f "$sb/sandy-session.json" ]; then
                 # Anchored on column 0 (#381): feature_entries now adds lines
                 # like `    "<f>": {"path": ..., "disabled_by": ...}` at the
@@ -13056,8 +13057,8 @@ if _sandy_agent_has claude; then
         # fail the launch, and has been unset for the headless/--remote/
         # --provision skips -- so "an entry will start" here means "the launch
         # fails if it cannot". DEPRECATED (#380/#382): retained, additive-only,
-        # so an existing amap-deploy-sandy manifest that has not yet added
-        # `receives` keeps delivering.
+        # so an existing manifest that ships only an entry and has not yet
+        # added `receives` keeps delivering.
         _sandy_csi_val="accept"; _sandy_csi_why="default (legacy rule): a feature entry will start and no feature declares receives cross_session; the launch fails if it cannot start"
         _sandy_csi_src="relay-legacy"
     else
@@ -15587,7 +15588,8 @@ _sandy_relay_path_json="null"
 [ -n "${SANDY_HANDOFF_RELAY:-}" ] && _sandy_relay_path_json="\"$SANDY_HANDOFF_RELAY\""
 # disabled_by is meaningful only when the capability is off: it names WHO turned
 # it off, because SANDY_RELAY=0 is passive-safe (it only tightens) yet a cloned
-# repo shipping it would silently disable an operator's fleet connector.
+# repo shipping it would silently disable a feature entry an operator
+# installed fleet-wide.
 _sandy_relay_disabled_by_json="null"
 if [ "${_sandy_relay_slot:-absent}" = "disabled" ] && [ -n "${_SANDY_RELAY_SOURCE:-}" ]; then
     _sandy_relay_disabled_by_json="\"$_SANDY_RELAY_SOURCE\""

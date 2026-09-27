@@ -18333,6 +18333,76 @@ unset _S157_FM2 _S157_EVAL _S157_CSI
 unset _S157_SCHEMA_RV _S157_JS_RV _S157_JQ_RV _S157_SH_RV
 unset -f _s157_load _s157_apply 2>/dev/null || true
 
+# ============================================================
+echo ""
+echo "§158: #379 measurement harness structural checks; #383 consumer-boundary ratchet"
+# ============================================================
+# Two unrelated properties, one section, because both belong to the same unit
+# (#383's umbrella): the #379 harness this section pins needs no Docker, and
+# neither does the boundary rule below.
+#
+# --- (a) test/measure-settings-inbound.sh: STRUCTURAL only. It measures
+# Claude Code's own --settings resolver on a real Docker host with real
+# credentials, neither of which this suite can assume -- so this section
+# proves the harness is well-formed and honors its own safety properties,
+# never that its measurement came out any particular way. See the harness's
+# own header and docs/security/CROSS_SESSION_INBOUND.md §9 for what it
+# measures and why it cannot be run here.
+_S158_MSI="$(cd "$(dirname "$0")" && pwd)/measure-settings-inbound.sh"
+
+check "§158(a1) test/measure-settings-inbound.sh exists, is executable-by-bash, and is bash -n clean" \
+    bash -c '[ -f "$1" ] && bash -n "$1"' -- "$_S158_MSI"
+
+check "§158(a2) sources lib-isolated-home.sh and calls _isolate_sandy_home (no fixture sandbox leaking into the operator's real \$SANDY_HOME -- the §105 lesson)" \
+    bash -c 'grep -q "lib-isolated-home.sh" "$1" && grep -q "_isolate_sandy_home" "$1"' -- "$_S158_MSI"
+
+check "§158(a3) the injector authenticates with the session key file's peerToken" \
+    bash -c 'grep -q "peerToken" "$1"' -- "$_S158_MSI"
+
+# NEVER a repo assertion on run-time behavior -- CLAUDE_CODE_MESSAGING_TOKEN is
+# the receiver's OWN childToken (handed to its children), and sending it
+# instead of peerToken BYPASSES crossSessionInbound entirely (CROSS_SESSION_
+# INBOUND.md §6a "Correction 2" -- the exact bug the acceptance harness this
+# file is modeled on had and fixed). The property is textual: the harness must
+# never even reference the name outside a comment, so nobody can wire it in
+# later without this going red. `grep -v '^\s*#'` strips comment-only lines;
+# a mid-line comment after real code would still be caught because the whole
+# line still matches the token substring.
+check "§158(a4) no non-comment line references CLAUDE_CODE_MESSAGING_TOKEN (mutation: adding it as real code goes red -- see a4-mut)" \
+    bash -c '! grep -vE "^[[:space:]]*#" "$1" | grep -q "CLAUDE_CODE_MESSAGING_TOKEN"' -- "$_S158_MSI"
+check "§158(a4-mut) ...and the check above actually fires on an injected non-comment line naming the token (self-test of (a4), not a repo assertion)" \
+    bash -c 'printf "%s\ntoken = CLAUDE_CODE_MESSAGING_TOKEN\n" "$(cat "$1")" | grep -vE "^[[:space:]]*#" | grep -q "CLAUDE_CODE_MESSAGING_TOKEN"' -- "$_S158_MSI"
+
+check "§158(a5) prints UNKNOWN when a send is confirmed but no decision signature appears within the poll window (never silently reads absence as a verdict)" \
+    bash -c 'grep -q "UNKNOWN" "$1" && grep -q "no decision line within poll window" "$1" && grep -q "OUTCOME:%s signature=%s" "$1"' -- "$_S158_MSI"
+
+check "§158(a6) lint-bash32's default target set picks up this file with no wiring (test/*.sh, confirmed via --list rather than assumed)" \
+    bash -c 'bash "$1" --list | grep -qF "measure-settings-inbound.sh"' -- "$(cd "$(dirname "$0")" && pwd)/lint-bash32.sh"
+check "§158(a7) ...and the file itself is clean under lint-bash32" \
+    bash -c 'bash "$1" "$2" >/dev/null 2>&1' -- "$(cd "$(dirname "$0")" && pwd)/lint-bash32.sh" "$_S158_MSI"
+
+check "§158(a8) NOT wired into run-integration-tests.sh (it is a measurement with no pass/fail verdict, and says so in its own header)" \
+    bash -c '! grep -q "measure-settings-inbound" "$1"' -- "$(cd "$(dirname "$0")/.." && pwd)/test/run-integration-tests.sh"
+
+unset _S158_MSI
+
+# --- (b) the #383 consumer-boundary rule: sandy code and docs name no
+# consumer's protocol (docs/DESIGN-NOTES.md / CLAUDE.md "Consumer boundary").
+# u381 replaced the single-entry rationale that used to cite "a connector's
+# claim lock"; this is the ratchet that keeps it from coming back. Tested
+# against a COPY of the file (a temp file, never the tracked script) so a
+# mutation self-test never leaves the working tree dirty if interrupted
+# mid-run -- the same reason no check here ever edits $SANDY_SCRIPT in place.
+check "§158(b1) sandy names no consumer's protocol: no 'amap' or 'claim lock', case-insensitive, anywhere in the shipped script" \
+    bash -c '! grep -qiE "amap|claim lock" "$1"' -- "$SANDY_SCRIPT"
+
+_S158_MUT_COPY="$(mktemp)"
+cat "$SANDY_SCRIPT" > "$_S158_MUT_COPY"
+printf '# for AMAP\n' >> "$_S158_MUT_COPY"
+check "§158(b2) mutation: injecting a consumer-named comment ('# for AMAP') into a COPY makes (b1)'s property fail on that copy (self-test of (b1), not a repo assertion)" \
+    bash -c 'grep -qiE "amap|claim lock" "$1"' -- "$_S158_MUT_COPY"
+rm -f "$_S158_MUT_COPY"
+unset _S158_MUT_COPY
 
 # BEGIN SUMMARY
 # ============================================================

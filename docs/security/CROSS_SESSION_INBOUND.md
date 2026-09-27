@@ -157,3 +157,45 @@ The whole `crossSessionInbound` mechanism is **undocumented** upstream (no `clau
 Adjacent finding from the original handoff, carried forward rather than fixed here: `CLAUDE_CODE_OAUTH_TOKEN` is set at **container level** (present in PID 1's environment), so any process in the container — including the handoff relay, and including a `docker exec` as a non-workspace uid — inherits it and can run an authenticated `claude`. The relay's process env (§ "Handoff relay" in `CLAUDE.md`) inherits the full container environment for this reason; sandy does not attempt to strip or scope it for the relay specifically. This is not new exposure created by this feature — it is a pre-existing property of how sandy forwards the token — but a relay is a new *long-lived, workspace-supplied* process that now sits inside that blast radius by design, so it is worth naming here rather than only in the general threat model. Real prevention (the token never entering the container at all) is tracked under #121 (credential broker); see `docs/security/CREDENTIAL_BROKER_EVALUATION.md`.
 
 **The supervisor's log is a persisted file, not ephemeral output.** The relay's stdout+stderr are appended by `_sandy_start_handoff_relay` to `$SANDBOX_DIR/handoff/relay/supervisor.log` — a **host-persisted** file that survives the session, is never rotated or truncated by sandy, and sits in `$SANDY_HOME` rather than the workspace. A workspace-supplied relay that (deliberately, or via a bug — `env`, `printenv`, an uncaught exception dump, a verbose HTTP-client debug log) prints its own environment therefore writes `CLAUDE_CODE_OAUTH_TOKEN`, and any other forwarded secret, to disk on the host, outliving the container. This is a sharper version of the point above: the token being container-level env is the pre-existing exposure, but a relay is the first sandy-integrated process whose stdio sandy itself chooses to persist. **Contract for a relay author: never print your own environment, and treat `supervisor.log` as write-only from the relay's side** — sandy does not scrub it, and nothing currently warns if a relay violates this.
+
+## 9. Pending measurement (#379): `--settings` precedence and repeatability
+
+**Not yet run.** `test/measure-settings-inbound.sh` (host-run only — see its own header, and never from inside a sandy sandbox) is written and validated structurally (`bash -n`, `test/lint-bash32.sh`, `test/run-tests.sh` §158), but it has not been executed: that needs a real Docker host with Claude credentials, both of which are unavailable to the agent that wrote it. Every cell below is `PENDING` until someone runs it there. Do not fill these in from reasoning about the resolver — §6/§6a's whole point is that this mechanism has to be *run*, not read.
+
+**Why this is its own harness, not an extension of `test/acceptance-uds-delivery.sh`.** §6a's own resolution precedence names `--settings` (`flagSettings`) as a candidate delivering seam alongside `userSettings`, but nobody has ever set it independently of the other two layers — `sandy` itself never has a reason to pass `--settings`, and no probe run has isolated it. A real `sandy` launch cannot answer this either: sandy writes the *same* resolved value into both `userSettings` and the workspace `settings.local.json` every launch (§2/§6a above), so those two layers can never disagree from a sandy launch's own doing. `test/measure-settings-inbound.sh` drives a receiver directly (via `sandy --exec`, never through the agent pane sandy's own launch seeds) so each of `userSettings`, workspace `local`, and one or more `--settings` files can be set to *different* values in the same run.
+
+**The four questions, and why each one matters:**
+
+1. **Does `--settings` deliver `accept`, or is it tighten-only like the workspace files (§6a "Two placements were measured to actually deliver `accept`")?** If it delivers, it is a second seam sandy could use instead of (or alongside) the `userSettings` write. If it is tighten-only like the workspace files, it changes nothing about sandy's current design but rules out ever routing delivery through it.
+2. **Where does it rank relative to `userSettings` when both set `accept`/conflicting values (Q1, Q2)?** Precedence between two layers that both supposedly "deliver" has never been measured; either could rank above the other, or the ranking could depend on which is more specific.
+3. **Is `--settings` repeatable, and if two occurrences disagree, does the file order matter (Q3a, Q3b)?** This is the direct analogue of `docs/design/FEATURE-MANIFEST.md` §9's `agent_args_compose` table (`concat`/`report`/accumulate), one layer down: Claude Code's own CLI, not sandy's composition of it.
+4. **If repeatable, does a later occurrence MERGE per-key onto an earlier one, or REPLACE the whole object (Q3c)?** A merge means two features could each contribute one key without clobbering the other; a replace means only the last file's keys survive at all, silently dropping everything an earlier file set.
+
+**The case table.** Every `Outcome` cell is deliberately `PENDING` — filling one in without running the harness is exactly the failure mode this document's §6/§6a were written to correct.
+
+| case | layers | outcome | signature line |
+|---|---|---|---|
+| K1 (rig control) | `userSettings={"crossSessionInbound":"accept"}`, no local, no `--settings` | PENDING (run test/measure-settings-inbound.sh on the host) | — |
+| K2 (rig control) | `userSettings` has no `crossSessionInbound` key, `local={"crossSessionInbound":"refuse"}` | PENDING (run test/measure-settings-inbound.sh on the host) | — |
+| Q1 | `userSettings={}` (present, no key), `local=refuse`, `--settings={"crossSessionInbound":"accept"}` | PENDING (run test/measure-settings-inbound.sh on the host) | — |
+| Q2 | `userSettings=refuse`, `--settings={"crossSessionInbound":"accept"}`, no local | PENDING (run test/measure-settings-inbound.sh on the host) | — |
+| Q3a | `--settings A(accept)` then `--settings B(refuse)` | PENDING (run test/measure-settings-inbound.sh on the host) | — |
+| Q3b | `--settings B(refuse)` then `--settings A(accept)` (reversed) | PENDING (run test/measure-settings-inbound.sh on the host) | — |
+| Q3c | `--settings A(accept)` then `--settings C({"cleanupPeriodDays":30}, no inbound key)` | PENDING (run test/measure-settings-inbound.sh on the host) | — |
+| Q3d-AB | `--settings <exists> --settings <nonexistent> --version` | PENDING (run test/measure-settings-inbound.sh on the host) | n/a (exit code + first stderr line) |
+| Q3d-BA | `--settings <nonexistent> --settings <exists> --version` (reversed) | PENDING (run test/measure-settings-inbound.sh on the host) | n/a (exit code + first stderr line) |
+
+K1 must ROUTE or the harness itself prints `RIG-INVALID` and refuses to report the Q rows at all — the same discipline `test/acceptance-uds-delivery.sh` applies to its own positive control, generalized to a harness with no single fixed "expected" outcome to check the rest against.
+
+**How to run it:**
+
+```sh
+bash test/measure-settings-inbound.sh
+```
+
+Needs a reachable Docker daemon, a built sandy image, and working Claude credentials on the host (the same gate `test/acceptance-uds-delivery.sh` uses — `ANTHROPIC_API_KEY` alone does not qualify, for the reason given in that script's header). It isolates `$SANDY_HOME` the same way every acceptance harness does (`test/lib-isolated-home.sh`), so a run never leaves a fixture sandbox in the operator's real state.
+
+**If Q3 turns out to be last-wins, `--settings` joins the `#363` compose table.** `docs/design/FEATURE-MANIFEST.md` §9 already has a published `manifest.agent_args_compose` policy (`concat` / `report` / silently-accumulates) for exactly this shape of question, one layer up — a flag Claude Code only partially honors across repeats. If `--settings` measures as last-wins, sandy's own composition of `agent_args`-contributed `--settings` values (should a future feature ever contribute one) needs the same `report`-or-`concat` treatment `_sandy_aa_compose_table` already gives `--append-system-prompt-file`; if it measures as accumulating-and-merging, no new entry is needed, exactly the same asymmetry that table already documents for other flags.
+
+**#380 shipped option B (a declared `receives` need) regardless of how this measures, and that was deliberate.** Whichever way `--settings` precedence and repeatability come out, sandy resolves `SANDY_CROSS_SESSION_INBOUND`'s value itself and writes it into the two seams §6a already measured to work (`userSettings` and the workspace file) — it does not need `--settings` to exist as a delivery path at all. This measurement is about whether `--settings` becomes a *usable third seam* for some future purpose (a feature-scoped value, for instance), not about unblocking anything #380 already shipped.
+

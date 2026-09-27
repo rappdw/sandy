@@ -2214,11 +2214,11 @@ Written to `$SANDBOX_DIR/sandy-session.json` on every launch and bind-mounted re
   "cross_session_inbound_source": "explicit",
   "agents": ["claude"],
   "handoff_relay": false,
-  "relay": { "slot": "absent", "source": "manifest", "path": "/opt/sandy/features/amap/relay", "disabled_by": null },
-  "agent_args": {"claude": [{"feature": "amap", "args": ["--mcp-config", "/opt/sandy/features/amap/mcp-servers.json"]}]},
-  "agent_args_composed": {"claude": [{"flag": "--append-system-prompt-file", "policy": "concat", "composed": true, "from": ["feature 'amap-spec'", "feature 'amap'"], "path": "/opt/sandy/agent-args/claude.append-system-prompt-file.md"}]},
+  "relay": { "slot": "absent", "source": "manifest", "path": "/opt/sandy/features/notify/relay", "disabled_by": null },
+  "agent_args": {"claude": [{"feature": "notify", "args": ["--mcp-config", "/opt/sandy/features/notify/mcp-servers.json"]}]},
+  "agent_args_composed": {"claude": [{"flag": "--append-system-prompt-file", "policy": "concat", "composed": true, "from": ["feature 'policy'", "feature 'notify'"], "path": "/opt/sandy/agent-args/claude.append-system-prompt-file.md"}]},
   "feature_entries": {
-    "amap": {"path": "/opt/sandy/features/amap/relay", "relay_alias": true, "disabled_by": null},
+    "notify": {"path": "/opt/sandy/features/notify/relay", "relay_alias": true, "disabled_by": null},
     "sync-daemon": {"path": "/opt/sandy/features/sync-daemon/watch", "relay_alias": false, "disabled_by": null}
   },
   "cred_mode": "full"

@@ -122,7 +122,7 @@ Consumers affected: the AMAP adapter, the router, and **lore**, which reads `--p
 
 **#248 — rename the container user and home, `claude` → `sandy`. DONE, in this release.** Queued for 2.0 and included here: two 2.0 releases in short order is worse than one, and the manifest computes `${HOME}/.<feature>/<name>`, so the home is in the new contract from day one.
 
-Consumers are protected **only if they read the exported paths**. A manifest mount may declare an `export` name, and sandy exports the resolved container path under it. Anything that hardcodes the old `/home/claude` breaks at the tag; anything that reads `$AMAP_INBOX_DIR` does not. That is stated here so three repos build the right way the first time. **`SANDY_SANDBOX_MIN_COMPAT` advances to `2.0.0` with the rename**, so every existing sandbox is refused with a message naming the rename — its venv shebangs, `.pth` files, `GOPATH` and npm/cargo metadata all still say `/home/claude`, and they would fail in ways that look like broken packages rather than a moved home.
+Consumers are protected **only if they read the exported paths**. A manifest mount may declare an `export` name, and sandy exports the resolved container path under it. Anything that hardcodes the old `/home/claude` breaks at the tag; anything that reads `$NOTIFY_INBOX_DIR` does not. That is stated here so three repos build the right way the first time. **`SANDY_SANDBOX_MIN_COMPAT` advances to `2.0.0` with the rename**, so every existing sandbox is refused with a message naming the rename — its venv shebangs, `.pth` files, `GOPATH` and npm/cargo metadata all still say `/home/claude`, and they would fail in ways that look like broken packages rather than a moved home.
 
 ## 5. Deprecation windows
 
@@ -169,8 +169,8 @@ A manifest could mount files and export variables but had no way to make the age
 
 ```json
 "agent_args": {
-  "claude": ["--mcp-config", "/opt/sandy/features/amap/mcp-servers.json",
-             "--append-system-prompt-file", "/opt/sandy/features/amap/policy.md"]
+  "claude": ["--mcp-config", "/opt/sandy/features/notify/mcp-servers.json",
+             "--append-system-prompt-file", "/opt/sandy/features/notify/policy.md"]
 }
 ```
 
