@@ -213,7 +213,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `XAI_API_KEY` | (unset) | xAI API key for Grok Build. Fully-headless auth; put in `.sandy/.secrets`. Privileged tier |
 | `GROK_MODEL` | `grok-4.5` | Grok Build model (passed as `-m`) |
 | `SANDY_GROK_AUTH` | `auto` | Force Grok auth path: `auto`, `api_key`, or `oauth` |
-| `SANDY_LOCAL_LLM_HOST` | (unset) | `host:port` to allow through LAN isolation, typically for a local LLM (e.g. `127.0.0.1:11434` for Ollama). With the egress proxy on (default), the proxy's forward listener relays `host.docker.internal:<port>` to the host; with the proxy off (`SANDY_EGRESS_NO_ISOLATION=1`, Linux), inserts a single iptables ACCEPT rule and maps `host.docker.internal`. Privileged tier |
+| `SANDY_LOCAL_LLM_HOST` | (unset) | `host:port` to allow through LAN isolation, typically for a local LLM (e.g. `127.0.0.1:11434` for Ollama). With the egress proxy on (default), the proxy's forward listener relays `host.docker.internal:<port>` to the host; with the proxy off (`SANDY_EGRESS=off`, Linux), inserts a single iptables ACCEPT rule and maps `host.docker.internal`. Privileged tier |
 | `GOOGLE_CLOUD_PROJECT` | (unset) | GCP project ID (Vertex AI) |
 | `GOOGLE_CLOUD_LOCATION` | (unset) | GCP region (Vertex AI) |
 | `GOOGLE_GENAI_USE_VERTEXAI` | (unset) | Set `true` to route Gemini through Vertex AI |
@@ -228,8 +228,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_CPUS` | auto-detected | CPU limit for the container |
 | `SANDY_MEM` | auto-detected | Memory limit for the container |
 | `SANDY_VENV_OVERLAY` | `1` | Set `0` to disable the sandbox-owned `.venv` overlay (see "Using host virtual environments") |
-| `SANDY_EGRESS_STRICT` | `0` | `1` = strict egress: reach only the built-in allowlist + `SANDY_ALLOW_HOSTS`. Strengthens isolation — safe to commit in a workspace `.sandy/config`. See "How Network Isolation Works" |
-| `SANDY_EGRESS_NO_ISOLATION` | `0` | `1` = turn the egress proxy **off** (legacy: iptables-only on Linux, no isolation on macOS). Weakens isolation, so a workspace `.sandy/config` setting it triggers an approval prompt |
+| `SANDY_EGRESS` | `permissive` | Egress posture: `off` (proxy off — legacy iptables-only on Linux, **no** isolation on macOS), `permissive` (block private/LAN/cloud-metadata, allow the internet), or `strict` (built-in allowlist + `SANDY_ALLOW_HOSTS` only). `strict` is safe to commit in a workspace `.sandy/config`; `off` **and `permissive`** set there trigger an approval prompt, because a workspace value outranks your host config and could otherwise downgrade a host that chose strict. Replaces the deprecated `SANDY_EGRESS_STRICT` / `SANDY_EGRESS_NO_ISOLATION` booleans. See "How Network Isolation Works" |
 | `SANDY_ALLOW_HOSTS` | (unset) | Comma-separated extra egress-**proxy** allowlist entries (`host`, `*.suffix`, or `host:port`), appended to the built-in default set. This is the way to widen reach when the proxy is on (the default). Privileged tier |
 | `SANDY_ALLOW_LAN_HOSTS` | (unset) | **Legacy (proxy-off, Linux only).** Comma-separated IPs/CIDRs to poke through the iptables LAN block. Ignored when the egress proxy is on — use `SANDY_ALLOW_HOSTS` instead |
 | `SANDY_ALLOW_NO_ISOLATION` | `0` | **Legacy (proxy-off, Linux only).** `1` = allow launch when iptables rules can't be applied. *Not* the same as `SANDY_EGRESS_NO_ISOLATION` (which turns the proxy off) |
@@ -407,7 +406,7 @@ OpenCode (sst/opencode) is a provider-agnostic agent — sandy doesn't bind it t
 
 Sandy seeds `~/.config/opencode/opencode.json` from the host's copy on first launch — point it at any provider OpenCode supports, including a local LLM.
 
-**Local LLM passthrough.** Pair OpenCode with `SANDY_LOCAL_LLM_HOST=<ip>:<port>` (e.g. `127.0.0.1:11434` for Ollama, `localhost:8000` for vLLM, etc.) to allow the container to reach a local LLM running on the Docker host. With the egress proxy on (default), the proxy's dedicated forward listener relays `host.docker.internal:<port>` to the real host; with the proxy off (`SANDY_EGRESS_NO_ISOLATION=1`, Linux) sandy instead inserts a single narrow `iptables ACCEPT` for that exact `host:port` and maps `host.docker.internal` to the bridge gateway (Linux Docker doesn't auto-resolve it). Either way sandy rejects world-open IPs (`0.0.0.0`) and bare IPs without ports. Edit `~/.config/opencode/opencode.json` to set the provider's `baseURL` to `http://host.docker.internal:<port>/v1`. The rule is removed on session exit. The rest of LAN remains blocked.
+**Local LLM passthrough.** Pair OpenCode with `SANDY_LOCAL_LLM_HOST=<ip>:<port>` (e.g. `127.0.0.1:11434` for Ollama, `localhost:8000` for vLLM, etc.) to allow the container to reach a local LLM running on the Docker host. With the egress proxy on (default), the proxy's dedicated forward listener relays `host.docker.internal:<port>` to the real host; with the proxy off (`SANDY_EGRESS=off`, Linux) sandy instead inserts a single narrow `iptables ACCEPT` for that exact `host:port` and maps `host.docker.internal` to the bridge gateway (Linux Docker doesn't auto-resolve it). Either way sandy rejects world-open IPs (`0.0.0.0`) and bare IPs without ports. Edit `~/.config/opencode/opencode.json` to set the provider's `baseURL` to `http://host.docker.internal:<port>/v1`. The rule is removed on session exit. The rest of LAN remains blocked.
 
 Headless mode (`-p` / `--print` / `--prompt "..."`) translates to `opencode run` — the prompt is positional. `--continue` / `-c` is silently dropped (no headless resume flag yet).
 
@@ -610,19 +609,21 @@ The session marker (`/etc/sandy-session.json`) carries `relay.source`, `relay.pa
 
 ### Egress proxy — cross-platform isolation
 
-The egress proxy is the recommended isolation mechanism and the **only** one that works on macOS. It routes the agent through a small proxy sidecar on a Docker `--internal` network (no route off the bridge except through the proxy), so it behaves identically on macOS and Linux. The posture is set by two mutually-exclusive boolean knobs (default **permissive**):
+The egress proxy is the recommended isolation mechanism and the **only** one that works on macOS. It routes the agent through a small proxy sidecar on a Docker `--internal` network (no route off the bridge except through the proxy), so it behaves identically on macOS and Linux. The posture is one key, `SANDY_EGRESS` (default **permissive**):
 
 | Setting | Mode | Behavior |
 |---|---|---|
-| *(neither set)* | permissive (default) | Blocks private/LAN/host/cloud-metadata destinations, allows all internet. Closes the macOS LAN gap with ~zero friction. |
-| `SANDY_EGRESS_STRICT=1` | strict | Allows only a built-in default allowlist (model providers, GitHub incl. SSH, npm/PyPI/crates/Go/Debian) plus `SANDY_ALLOW_HOSTS`. Fails closed on everything else. **Strengthens isolation — safe to commit in a workspace config.** |
-| `SANDY_EGRESS_NO_ISOLATION=1` | off | Linux iptables only; macOS has no network isolation (see below). **Weakens isolation — a workspace `.sandy/config` setting it triggers an approval prompt** so a cloned repo can't silently disable your sandbox. |
+| `SANDY_EGRESS=permissive` *(or unset)* | permissive (default) | Blocks private/LAN/host/cloud-metadata destinations, allows all internet. Closes the macOS LAN gap with ~zero friction. |
+| `SANDY_EGRESS=strict` | strict | Allows only a built-in default allowlist (model providers, GitHub incl. SSH, npm/PyPI/crates/Go/Debian) plus `SANDY_ALLOW_HOSTS`. Fails closed on everything else. **Strengthens isolation — safe to commit in a workspace config.** |
+| `SANDY_EGRESS=off` | off | Linux iptables only; macOS has no network isolation (see below). **Weakens isolation — a workspace `.sandy/config` setting it triggers an approval prompt** so a cloned repo can't silently disable your sandbox. |
 
 ```sh
-SANDY_EGRESS_STRICT=1   # in ~/.sandy/config or a workspace .sandy/config
+SANDY_EGRESS=strict   # in ~/.sandy/config or a workspace .sandy/config
 ```
 
-> The older `SANDY_EGRESS_PROXY=0|1|2` still works as a **deprecated alias** (`0`→off, `1`→permissive, `2`→strict) with a migration warning; its `=0` is approval-gated from a workspace config just like `SANDY_EGRESS_NO_ISOLATION=1`.
+**A workspace `SANDY_EGRESS=permissive` also triggers the approval prompt.** A workspace `.sandy/config` outranks `~/.sandy/config` for the same key, so on a host that chose `strict`, a cloned repository's one-line `SANDY_EGRESS=permissive` would otherwise re-open the whole internet with no prompt (#371; sandy 2.0.0–2.3.x gated only `off`). Only `strict` — the tightening value — is free from a workspace. The prompt appears even when your host is already permissive, because the gate judges the value, not what your host resolved; approving it once for that workspace silences it.
+
+> The pre-2.0 keys still work and are listed under **Deprecated**: `SANDY_EGRESS_STRICT=1`/`=0` (strict/permissive), `SANDY_EGRESS_NO_ISOLATION=1` (off), and the older `SANDY_EGRESS_PROXY=0|1|2` alias (`0`→off, `1`→permissive, `2`→strict). If `SANDY_EGRESS` is set it wins and the old values are ignored with a notice. Their weakening values are approval-gated from a workspace the same way: `SANDY_EGRESS_STRICT=0`, `SANDY_EGRESS_NO_ISOLATION=1`, `SANDY_EGRESS_PROXY=0` and `=1`.
 
 Add extra reachable hosts with `SANDY_ALLOW_HOSTS` (privileged; comma-separated `host`, `*.suffix`, or `host:port`). git-over-SSH (`SANDY_SSH=agent`) is tunneled through the proxy automatically on both platforms; on macOS, host-agent *key signing* is unavailable under the proxy (use `SANDY_SSH=token` for a fully-supported HTTPS path). A local LLM (`SANDY_LOCAL_LLM_HOST`) is forwarded through the proxy rather than an iptables hole. See `CLAUDE.md` → "Egress Proxy" for the full topology.
 
@@ -641,11 +642,11 @@ This works in **any** `SANDY_SSH` mode. If your workspace reaches other machines
 
 ### macOS (Docker Desktop) — not isolated when the proxy is off
 
-**Warning:** if you turn the proxy off with `SANDY_EGRESS_NO_ISOLATION=1` (the proxy is on by default), Docker Desktop does *not* provide LAN isolation. The container *can* reach `host.docker.internal` (→ your Mac's gateway), your host's `localhost` services, and any device on your physical LAN — your home router at `192.168.1.1`, a NAS, a printer, an internal dashboard, your SSH daemon. A stress test in April 2026 opened a live TCP connection from inside the container to the host's SSHD and read its banner (see `ISOLATION_STRESS.md`, finding F2).
+**Warning:** if you turn the proxy off with `SANDY_EGRESS=off` (the proxy is on by default), Docker Desktop does *not* provide LAN isolation. The container *can* reach `host.docker.internal` (→ your Mac's gateway), your host's `localhost` services, and any device on your physical LAN — your home router at `192.168.1.1`, a NAS, a printer, an internal dashboard, your SSH daemon. A stress test in April 2026 opened a live TCP connection from inside the container to the host's SSHD and read its banner (see `ISOLATION_STRESS.md`, finding F2).
 
 As defense-in-depth, sandy nullifies the Docker Desktop magic hostnames (`gateway.docker.internal`, `metadata.google.internal`, and — when `SANDY_SSH != agent` — `host.docker.internal`) via `--add-host`, and prints a launch-time warning banner on macOS. But **raw-IP access is unaffected**, and the banner is a warning, not a fix.
 
-**Fix:** leave the proxy on (the default) or set `SANDY_EGRESS_STRICT=1` — both apply real isolation on macOS. Otherwise treat proxy-off macOS sandy as "process and filesystem isolation only; no network isolation."
+**Fix:** leave the proxy on (the default) or set `SANDY_EGRESS=strict` — both apply real isolation on macOS. Otherwise treat proxy-off macOS sandy as "process and filesystem isolation only; no network isolation."
 
 ### Linux
 Sandy automatically inserts `iptables` rules into the `DOCKER-USER` chain that block all RFC 1918 traffic from the container's bridge interface:

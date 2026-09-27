@@ -142,10 +142,25 @@ SANDY_ENV_ONLY_KEYS=(
 # config and env are trusted and set these directly.
 _sandy_passive_value_privileged() {
     case "$1" in
-        SANDY_EGRESS)              [ "$2" = "off" ] && return 0 ;;  # proxy OFF (2.0.0; the enum that replaces the two booleans below)
+        # SANDY_EGRESS (2.0.0) is the enum that replaces the booleans below, so
+        # it must gate EVERY value its booleans gated: `off` is proxy-off
+        # (NO_ISOLATION=1) and `permissive` is the strict -> permissive
+        # downgrade (STRICT=0). 2.0.0 translated only the first, so one
+        # committed `SANDY_EGRESS=permissive` re-opened the public internet on a
+        # host that had chosen strict, with no prompt (#371) -- a workspace
+        # source outranks the host config for the same key. Only `strict` is
+        # free. Like STRICT=0, this prompts even where the host is already
+        # permissive (a no-op prompt); an ORDERED gate that compares against
+        # what the privileged sources resolved is the better shape once a
+        # fourth value exists (#244), and is deliberately not built here.
+        SANDY_EGRESS)              { [ "$2" = "off" ] || [ "$2" = "permissive" ]; } && return 0 ;;
         SANDY_EGRESS_NO_ISOLATION) [ "$2" = "1" ] && return 0 ;;  # proxy OFF
         SANDY_EGRESS_STRICT)       [ "$2" = "0" ] && return 0 ;;  # strict -> permissive downgrade
-        SANDY_EGRESS_PROXY)        [ "$2" = "0" ] && return 0 ;;  # deprecated alias: =0 == proxy off
+        # Deprecated alias: =0 is proxy off, and =1 is permissive -- the same
+        # strict -> permissive downgrade as STRICT=0 when the host set the
+        # alias to 2 (the workspace value replaces the host one for the same
+        # key). Gated since #371; only =2 is free.
+        SANDY_EGRESS_PROXY)        { [ "$2" = "0" ] || [ "$2" = "1" ]; } && return 0 ;;
         SANDY_ALLOW_WORKFLOW_EDIT) [ "$2" = "1" ] && return 0 ;;  # drops .github/workflows protection
         SANDY_CLAUDE_CONNECTORS)   [ "$2" = "1" ] && return 0 ;;  # exposes claude.ai ACCOUNT connectors (Gmail/Drive)
         SANDY_SUSPICIOUS)          [ "$2" = "0" ] && return 0 ;;  # downgrades a host-set hardened posture
@@ -1545,8 +1560,8 @@ SANDY_VERBOSE|int|0||0.8.0|stable|Verbosity (0=quiet, 1=verbose, 2=debug, 3=full
 SANDY_VENV_OVERLAY|bool|1||0.10.0|stable|Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container.
 SANDY_EGRESS_NO_ISOLATION|bool|0||1.0.0|stable|Turn the egress proxy OFF — legacy path (Linux iptables-only; NO network isolation on macOS). WEAKENS isolation, so from a workspace .sandy/config it is quarantined to the per-workspace approval prompt (a committed config cannot silently disable isolation). Mutually exclusive with SANDY_EGRESS_STRICT. Default 0 (proxy on).
 SANDY_EGRESS_STRICT|bool|0||1.0.0|stable|Run the egress proxy in strict mode (allow only the built-in default allowlist + SANDY_ALLOW_HOSTS; deny all other internet). STRENGTHENS isolation, so =1 is passive-safe from any source; =0 (downgrading a host-configured strict) is approval-gated from a workspace source. Mutually exclusive with SANDY_EGRESS_NO_ISOLATION. Default 0 (permissive).
-SANDY_EGRESS|enum:off,permissive,strict|permissive||2.0.0|stable|Egress posture, ONE key as of 2.0.0. off = proxy off (legacy: Linux iptables only, NO network isolation on macOS). permissive (default) = proxy on, blocking private/LAN/link-local/CGNAT/cloud-metadata destinations while allowing the internet. strict = proxy on with an allowlist only (model providers, GitHub, npm, PyPI, crates, Go, Debian) plus SANDY_ALLOW_HOSTS. Replaces a three-way choice encoded as TWO MUTUALLY EXCLUSIVE BOOLEANS (SANDY_EGRESS_NO_ISOLATION, SANDY_EGRESS_STRICT) plus a deprecated tri-state whose 0/1/2 were opaque (SANDY_EGRESS_PROXY) -- all three still work, are listed in README's Deprecated section, and are IGNORED WITH A NOTICE when this key is set (never merged; the winner is named). Value-aware tier: permissive and strict are passive-safe, while off WEAKENS the sandbox and is therefore approval-gated from a workspace .sandy/config, exactly as SANDY_EGRESS_NO_ISOLATION=1 was. SANDY_SUSPICIOUS=1 still defaults the posture to strict; an explicit choice wins and a weaker one is named loudly.
-SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|DEPRECATED — use SANDY_EGRESS_NO_ISOLATION / SANDY_EGRESS_STRICT. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 is approval-gated (weakening), matching the new keys.
+SANDY_EGRESS|enum:off,permissive,strict|permissive||2.0.0|stable|Egress posture, ONE key as of 2.0.0. off = proxy off (legacy: Linux iptables only, NO network isolation on macOS). permissive (default) = proxy on, blocking private/LAN/link-local/CGNAT/cloud-metadata destinations while allowing the internet. strict = proxy on with an allowlist only (model providers, GitHub, npm, PyPI, crates, Go, Debian) plus SANDY_ALLOW_HOSTS. Replaces a three-way choice encoded as TWO MUTUALLY EXCLUSIVE BOOLEANS (SANDY_EGRESS_NO_ISOLATION, SANDY_EGRESS_STRICT) plus a deprecated tri-state whose 0/1/2 were opaque (SANDY_EGRESS_PROXY) -- all three still work, are listed in README's Deprecated section, and are IGNORED WITH A NOTICE when this key is set (never merged; the winner is named). Value-aware tier: only strict is passive-safe. off and permissive are approval-gated from a workspace .sandy/config, exactly as SANDY_EGRESS_NO_ISOLATION=1 and SANDY_EGRESS_STRICT=0 are -- a workspace value outranks the host config for the same key, so an ungated permissive would silently downgrade a host that chose strict (#371, fixed in 2.4.0; 2.0.0-2.3.x gated only off). Like STRICT=0 it prompts even where the host is already permissive. SANDY_SUSPICIOUS=1 still defaults the posture to strict; an explicit choice wins and a weaker one is named loudly.
+SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|DEPRECATED — use SANDY_EGRESS=off,permissive,strict. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 (off) and =1 (permissive: a downgrade of a host-set =2) are approval-gated, matching SANDY_EGRESS; only =2 is free (#371).
 SANDY_EGRESS_LOG|enum:0,1,summary|0||1.4.0|stable|Log which hosts the agent's egress actually reached (HF-incident Issue 4). The proxy logs each DISTINCT allowed host:port once (deduped) to proxy.log; at session end sandy prints an egress summary (distinct hosts reached + denial count). 0=off (deny-only, the pre-1.4 behavior); 1=per-connection allow lines + session-end summary; summary=session-end summary only (the proxy still records allows to build it). Passive-safe: it only ADDS visibility. Hostnames only — TLS is never terminated, no payload; the log stays in $SANDBOX_DIR.
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||0.11.1|stable|Remove .github/workflows from the read-only protection list.
 SANDY_SCREENSHOT_DIR|path|||0.12.0|stable|Host directory containing screenshots; mounted read-only at /home/sandy/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
@@ -10189,8 +10204,10 @@ SANDY_EGRESS_STRICT_WAS="${SANDY_EGRESS_STRICT:-}"
 # a contradiction check, two entries in the value-aware tier gate, and a
 # separate deprecated tri-state (SANDY_EGRESS_PROXY, whose 0/1/2 were opaque)
 # to express what one enum says plainly. Both old keys still work and are
-# listed in README's Deprecated section; `off` is the weakening value and is
-# approval-gated from a workspace exactly as SANDY_EGRESS_NO_ISOLATION=1 was.
+# listed in README's Deprecated section. `off` and `permissive` are the
+# weakening values and are approval-gated from a workspace exactly as
+# SANDY_EGRESS_NO_ISOLATION=1 and SANDY_EGRESS_STRICT=0 were (#371 -- 2.0.0
+# gated only `off`, dropping the downgrade case in translation).
 #
 # NOTE FOR ANYONE EDITING THIS REGION: run-tests.sh §53 extracts it as
 # sed -n '/^_SANDY_PROXY_ON=false/,/^esac/p', so a column-0 `esac` before the
