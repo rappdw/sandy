@@ -17557,11 +17557,20 @@ check "§155(3) single-agent: one row, agent falls back to SANDY_AGENT when @san
 # grep -oE captures only lines that actually match (a bare grep+sed pipeline
 # would echo a non-matching line unchanged and poison the set -- this bit).
 if [ -f "$_S155_TMPL" ]; then
-    _S155_TMPL_SESSIONS="$(grep 'tmux new-session' "$_S155_TMPL" | grep -oE ' -s [A-Za-z0-9_.-]+' | sed -E 's/^ -s //' | sort -u)"
-    _S155_TMPL_OPTS="$(grep 'set-option -p' "$_S155_TMPL" | grep -oE '@[A-Za-z0-9_]+' | sed 's/^@//' | sort -u)"
-    _S155_TMPL_OPT_COUNT="$(grep -c 'set-option -p.*@sandy_pane_agent' "$_S155_TMPL")"
-    _S155_HS_SESSION="$(grep 'tmux list-panes -t' "$_S155_HS" | grep -oE ' -t [A-Za-z0-9_.-]+' | sed -E 's/^ -t //' | sort -u)"
-    _S155_HS_OPT="$(grep -oE '#\{@[A-Za-z0-9_]+\}' "$_S155_HS" | sed -E 's/#\{@([A-Za-z0-9_]+)\}/\1/' | sort -u)"
+    # Each of these must survive a mutation that empties it -- e.g. renaming
+    # @sandy_pane_agent in every launcher set-option line -- rather than
+    # aborting the whole suite. Under this suite's `set -euo pipefail` a
+    # $(...) assignment whose pipeline's last-nonzero stage is a non-matching
+    # grep still fails the assignment itself (an empty result from `sort -u`
+    # does not rescue it), which trips the ERR trap and would silently skip
+    # every section appended after this one (#378 verifier finding). `|| true`
+    # on each assignment turns "no candidate" into an empty variable, which
+    # (4pre) below is the check that catches.
+    _S155_TMPL_SESSIONS="$(grep 'tmux new-session' "$_S155_TMPL" | grep -oE ' -s [A-Za-z0-9_.-]+' | sed -E 's/^ -s //' | sort -u)" || true
+    _S155_TMPL_OPTS="$(grep 'set-option -p' "$_S155_TMPL" | grep -oE '@[A-Za-z0-9_]+' | sed 's/^@//' | sort -u)" || true
+    _S155_TMPL_OPT_COUNT="$(grep -c 'set-option -p.*@sandy_pane_agent' "$_S155_TMPL")" || true
+    _S155_HS_SESSION="$(grep 'tmux list-panes -t' "$_S155_HS" | grep -oE ' -t [A-Za-z0-9_.-]+' | sed -E 's/^ -t //' | sort -u)" || true
+    _S155_HS_OPT="$(grep -oE '#\{@[A-Za-z0-9_]+\}' "$_S155_HS" | sed -E 's/#\{@([A-Za-z0-9_]+)\}/\1/' | sort -u)" || true
 
     check "§155(4pre) all four extractions produced exactly one candidate each (mutation: a rename that empties one makes every check below vacuous)" \
         bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$3" -ge 1 ] && [ -n "$4" ] && [ -n "$5" ]' \

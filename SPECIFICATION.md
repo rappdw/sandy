@@ -1023,7 +1023,7 @@ The previous `both` alias (= `claude,gemini`) was removed in `v0.12` once the co
 
 ### Pane-identity contract (stable, 2.4.0, #378)
 
-Anything outside the container that needs to know which pane runs which agent — today that means `amap-deploy-sandy`'s own copy of the session helper described in Appendix A.1 (`/usr/local/bin/sandy-handoff-sessions`, unchanged) — depends on four facts. As of 2.4.0 these are a **published, stable contract**: renaming or removing any of them is a breaking change governed by README's `## Deprecated` table (announced in an `X.0.0`, removed no earlier than a later `X.Y.0` — see "Versioning" in CLAUDE.md), not a free refactor.
+Anything inside the container that needs to know which pane runs which agent — today that means `amap-deploy-sandy`'s own copy of the session helper described in Appendix A.1 (`/usr/local/bin/sandy-handoff-sessions`, unchanged) — depends on four facts. As of 2.4.0 these are a **published, stable contract**: renaming or removing any of them is a breaking change governed by README's `## Deprecated` table (announced in an `X.0.0`, removed no earlier than a later `X.Y.0` — see "Versioning" in CLAUDE.md), not a free refactor.
 
 | # | Fact | Detail |
 |---|---|---|
@@ -1041,7 +1041,7 @@ Anything outside the container that needs to know which pane runs which agent �
 
 For 2- and 3-agent layouts `pane_index` and spawn order coincide; the trap is specific to the fourth pane of the 2×2 grid.
 
-**Read identity from the option, never from `pane_index`, a scrollback marker, or the pane title.** `pane_index` is wrong for the reason above; a scrollback marker is wiped the moment a real credentialed agent redraws or clears its pane; `select-pane -T` (the pane title) is OSC-2-clobberable by anything running inside the pane. `@sandy_pane_agent` is the one identity source the agent process cannot touch and that binds correctly regardless of the pane-index shuffle.
+**Read identity from the option, never from `pane_index`, a scrollback marker, or the pane title.** `pane_index` is wrong for the reason above; a scrollback marker is wiped the moment a real credentialed agent redraws or clears its pane; `select-pane -T` (the pane title) is OSC-2-clobberable by anything running inside the pane. `@sandy_pane_agent` is the identity source which the agent's redraws and OSC-2 title writes do not touch, and it binds correctly regardless of the pane-index shuffle. (It is not tamper-proof against a deliberate rewrite: the agent runs in the same pane, on the same tmux server, with `$TMUX` set, so `tmux set-option -p @sandy_pane_agent ...` would work from inside it. Safe from accidental clobbering, not from an adversarial one.)
 
 A property test pins this contract in `test/run-tests.sh` §155: a fixture where the option disagrees with `pane_index`-as-spawn-order must still yield the correct agent per row, and the real 4-agent mapping table above is asserted directly.
 
