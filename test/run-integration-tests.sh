@@ -195,6 +195,15 @@ _SECTION_ON=true
 # -9999 as the initial "last refresh" so the very first eligible section
 # always refreshes (age is trivially >= 60).
 _CRED_LAST_REFRESH=-9999
+# The directory the suite was LAUNCHED from, captured when this block is
+# sourced -- before setup_project() or any section `cd`s into a scratch
+# workspace. The refresh command is a string the caller wrote relative to
+# where they launched us (CI: `bash test/ci-wif-access-token.sh`, from the
+# repo root), so it has to run there. It used to run in whatever directory
+# the suite happened to be in: the first section's refresh worked, and every
+# one after the first setup_project() failed `No such file or directory`,
+# rc=127 (#257). The token then silently stopped refreshing.
+_INT_LAUNCH_DIR="${_INT_LAUNCH_DIR:-$PWD}"
 _cred_refresh_if_due() {
     [ -n "${SANDY_INTEG_CRED_REFRESH_CMD:-}" ] || return 0
     [ "$_SECTION_ON" = true ] || return 0
@@ -202,9 +211,10 @@ _cred_refresh_if_due() {
     _age=$(( SECONDS - _CRED_LAST_REFRESH ))
     [ "$_age" -ge 60 ] || return 0
     # RC-guarded, never `|| true` before the rc read: a refresh failure must
-    # warn and keep the previous token, not silently vanish or abort the suite.
+    # be recorded and keep the previous token, not silently vanish or abort
+    # the suite. The subshell cd scopes the directory change to the refresh.
     local _rc=0 _tok=""
-    _tok="$(bash -c "$SANDY_INTEG_CRED_REFRESH_CMD")" || _rc=$?
+    _tok="$(cd "$_INT_LAUNCH_DIR" && bash -c "$SANDY_INTEG_CRED_REFRESH_CMD")" || _rc=$?
     if [ "$_rc" -eq 0 ] && [ -n "$_tok" ]; then
         export ANTHROPIC_AUTH_TOKEN="$_tok"
         _CRED_LAST_REFRESH=$SECONDS
@@ -214,8 +224,17 @@ _cred_refresh_if_due() {
             printf '::add-mask::%s\n' "$_tok"
         fi
     else
-        printf "  \033[0;33m! credential refresh failed for section %s (rc=%d) -- keeping previous token\033[0m\n" \
-            "$_CUR_SECTION_ID" "$_rc"
+        # A FAILURE, not a yellow `!` (#257). That line sat mid-log for an
+        # unknown number of runs while the mechanism was inert, and the run
+        # was green. The section still proceeds on the previous token -- it
+        # may well be valid -- but the run is red at the end, and under
+        # GitHub Actions the failure is an annotation on the run page rather
+        # than one line in a hundred sections of log.
+        fail "credential refresh failed for section $_CUR_SECTION_ID (rc=$_rc) -- keeping previous token"
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then
+            printf '::error title=Credential refresh failed::section %s: SANDY_INTEG_CRED_REFRESH_CMD exited %d (run from %s); continuing on the previous token\n' \
+                "$_CUR_SECTION_ID" "$_rc" "$_INT_LAUNCH_DIR"
+        fi
     fi
 }
 
