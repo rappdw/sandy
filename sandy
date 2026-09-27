@@ -12550,6 +12550,22 @@ if _sandy_agent_has claude; then
             // creation with: //: is a directory. It is syntactically valid
             // bash, so bash -n and CI both passed it.
             s.disableClaudeAiConnectors = (process.env.SANDY_CLAUDE_CONNECTORS || '0') !== '1';
+            // #126 -- Claude Code's OWN sandbox (/sandbox, the sandbox object in
+            // settings). Verified against code.claude.com/docs settings-reference
+            // (sandbox.enabled: Boolean, default unset = no sandbox) and the
+            // sandboxing page: it brings its own HTTP/SOCKS egress proxy and, in
+            // an unprivileged container, needs enableWeakerNestedSandbox -- whose
+            // own caveat is that it is only for when an outer container already
+            // provides the boundary. Sandy IS that boundary, and its egress proxy
+            // is the one policy chokepoint; a second, uncoordinated proxy inside
+            // it double-prompts and muddies which posture is in force. So this
+            // is a MANAGED key like disableClaudeAiConnectors: forced false every
+            // launch, because the host settings.json is the merge base and a host
+            // sandbox.enabled true would otherwise ride in. Only enabled is
+            // forced -- every other key under sandbox the host set is kept, so
+            // turning it back on elsewhere is one edit, not a reconstruction.
+            if (!s.sandbox || typeof s.sandbox !== 'object' || Array.isArray(s.sandbox)) s.sandbox = {};
+            s.sandbox.enabled = false;
             if (skip) {
                 if (!s.permissions || typeof s.permissions !== 'object') s.permissions = {};
                 s.permissions.defaultMode = 'bypassPermissions';
@@ -12601,7 +12617,16 @@ if _sandy_agent_has claude; then
             _prev_plugins="$(jq -c '.enabledPlugins // null' "$SEED_SETTINGS" 2>/dev/null || echo 'null')"
         fi
         _base_src="$SEED_HOST_SRC"
-        [ -z "$_base_src" ] && _base_src=/dev/null
+        # No (or an empty) host settings.json: feed jq a literal {} rather than
+        # /dev/null. jq over an empty input emits NOTHING -- the null guard below
+        # never runs -- so the redirect wrote a 0-byte settings.json and every
+        # managed key (the bypassPermissions pin, #129 connectors off, #126
+        # sandbox off) was silently missing on a jq-only host with no host
+        # settings. Found by §168, whose clean-host jq case read back nothing.
+        if [ -z "$_base_src" ] || [ ! -s "$_base_src" ]; then
+            _base_src="$SEED_SETTINGS.base"
+            printf '{}\n' > "$_base_src"
+        fi
         jq --arg skip "$skip_perm" --arg connectors "${SANDY_CLAUDE_CONNECTORS:-0}" --argjson prev "$_prev_plugins" '
             (if . == null then {} else . end) |
             # only-if-absent for the BOOLEAN keys via has(), not //=. The //=
@@ -12620,6 +12645,10 @@ if _sandy_agent_has claude; then
             # settings.json would win. Assignment (not //=) is what makes the
             # opt-in actually work.
             .disableClaudeAiConnectors = ($connectors != "1") |
+            # #126: Claude Code native sandbox -- managed, forced off every
+            # launch (sandy is the boundary; see the node branch). Only enabled
+            # is forced; other keys under sandbox the host set are kept.
+            .sandbox = ((if (.sandbox | type) == "object" then .sandbox else {} end) | .enabled = false) |
             (if $skip == "true"
                 then .permissions = ((.permissions // {}) | .defaultMode = "bypassPermissions")
                 elif (.permissions.defaultMode? // "") == "bypassPermissions"
@@ -12638,6 +12667,7 @@ if _sandy_agent_has claude; then
                 then .enabledPlugins |= (del(.synthkit) | del(."synthkit@sandy-plugins") | del(."synthkit@thinkkit"))
                 else . end)
         ' "$_base_src" > "$SEED_SETTINGS.tmp" 2>/dev/null && mv "$SEED_SETTINGS.tmp" "$SEED_SETTINGS"
+        rm -f "$SEED_SETTINGS.base"
     else
         # Last resort: write defaults only if no file exists yet.
         if [ ! -f "$SEED_SETTINGS" ]; then
@@ -12648,12 +12678,16 @@ if _sandy_agent_has claude; then
             # connectors ON for exactly the hosts with the fewest tools -- a
             # security default that silently varies by what is installed is not a
             # default at all.
+            # #126: Claude Code's native sandbox is seeded off here too. This
+            # branch never reads the host settings.json, so nothing can carry a
+            # host true in -- but a seed that differs by installed tools is how
+            # the #129 hole looked, so all three branches say the same thing.
             _conn_off="true"
             [ "${SANDY_CLAUDE_CONNECTORS:-0}" = "1" ] && _conn_off="false"
             if [ "$skip_perm" = "true" ]; then
-                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"skipAutoPermissionPrompt":true,"disableClaudeAiConnectors":%s,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' "$_conn_off" > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"skipAutoPermissionPrompt":true,"disableClaudeAiConnectors":%s,"sandbox":{"enabled":false},"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' "$_conn_off" > "$SEED_SETTINGS"
             else
-                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"skipAutoPermissionPrompt":false,"disableClaudeAiConnectors":%s,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' "$_conn_off" > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"skipAutoPermissionPrompt":false,"disableClaudeAiConnectors":%s,"sandbox":{"enabled":false},"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' "$_conn_off" > "$SEED_SETTINGS"
             fi
         fi
     fi

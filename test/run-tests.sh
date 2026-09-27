@@ -18653,6 +18653,69 @@ rm -rf "$_S167_DIR"
 unset _S167_DIR _S167_OUT _S167_HL _S167_NONE _S167_GEM _S167_INJ _S167_VAL _S167_HAS _s167_a _s167_l
 unset -f _s167_run _s167_val
 
+echo "§168: Claude Code's native /sandbox is forced off in every seeding branch (#126)"
+# ============================================================
+# Claude Code ships its own sandbox (settings key sandbox.enabled) with its own
+# egress proxy. Inside sandy that is a second, uncoordinated proxy behind the
+# one policy chokepoint, and the host settings.json is the merge base -- so a
+# host sandbox.enabled:true used to ride straight into every sandbox. It is now
+# a MANAGED key: forced false every launch, other sandbox.* keys preserved.
+# Driven for real: sandy's whole settings-seeding block is extracted and run
+# three times -- with node, with only jq, and with neither -- and the resulting
+# settings.json is read back. A seed that differs by installed tools is how the
+# #129 hole looked, so every branch is exercised, not just the one CI has.
+_S168_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S168_BLOCK="$(awk '/^if _sandy_agent_has claude; then$/{b=$0; getline; if ($0 ~ /SEED_SETTINGS=/) {f=1; print b}} f{print} f&&/^fi  # end Claude settings seeding/{exit}' "$SANDY_SCRIPT")"
+check "§168(0) extracted the settings-seeding block (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "node -e" && printf "%s" "$1" | grep -q "command -v jq" && printf "%s" "$1" | grep -q "end Claude settings seeding"' _ "$_S168_BLOCK"
+# A PATH holding only what the block needs, so a branch can be selected by
+# which of node/jq exist. $1 = node|jq|none.
+_s168_seed() { # _s168_seed <tools> <host settings.json body or ""> -> resulting settings.json
+    local _t="$1" _c _b
+    _c="$(mktemp -d "$_S168_DIR/c.XXXXXX")"; _b="$_c/bin"
+    mkdir -p "$_b" "$_c/home/.claude" "$_c/sb/claude"
+    for _x in mv rm cp cat; do ln -s "$(command -v "$_x")" "$_b/$_x"; done
+    if [ "$_t" = node ] && command -v node >/dev/null 2>&1; then ln -s "$(command -v node)" "$_b/node"; fi
+    if [ "$_t" != none ] && command -v jq >/dev/null 2>&1; then ln -s "$(command -v jq)" "$_b/jq"; fi
+    [ -n "$2" ] && printf '%s\n' "$2" > "$_c/home/.claude/settings.json"
+    env -i PATH="$_b" HOME="$_c/home" SANDBOX_DIR="$_c/sb" "$BASH" -c '
+        _sandy_agent_has() { return 0; }
+        info() { :; }
+        SANDBOX_IS_NEW=false
+        eval "$1"
+        cat "$SANDBOX_DIR/claude/settings.json"
+    ' _ "$_S168_BLOCK" 2>/dev/null || true
+}
+_S168_HOST='{"sandbox":{"enabled":true,"enableWeakerNestedSandbox":true,"excludedCommands":["docker *"]},"theme":"dark"}'
+# (jq reads the result in every case, independent of the branch under test)
+_s168_q() { printf '%s' "$1" | jq -c "$2" 2>/dev/null || echo "PARSE-ERROR"; }
+if ! command -v jq >/dev/null 2>&1; then
+    skip "§168 needs jq to read the seeded settings.json"
+else
+    for _s168_t in node jq; do
+        if [ "$_s168_t" = node ] && ! command -v node >/dev/null 2>&1; then skip "§168 node branch needs node"; continue; fi
+        _S168_OUT="$(_s168_seed "$_s168_t" "$_S168_HOST")"
+        check "§168(1:$_s168_t) a host sandbox.enabled:true is forced to false (mutation: only-if-absent, or not seeding at all, lets the host value start Claude Code's own proxy inside sandy's)" \
+            test "$(_s168_q "$_S168_OUT" '.sandbox.enabled')" = "false"
+        check "§168(2:$_s168_t) ...and only enabled is forced: the host's other sandbox.* keys survive" \
+            test "$(_s168_q "$_S168_OUT" '[.sandbox.enableWeakerNestedSandbox, .sandbox.excludedCommands]')" = '[true,["docker *"]]'
+        check "§168(3:$_s168_t) ...and the rest of the host settings still merge (theme kept, connectors still managed)" \
+            test "$(_s168_q "$_S168_OUT" '[.theme, .disableClaudeAiConnectors]')" = '["dark",true]'
+        _S168_CLEAN="$(_s168_seed "$_s168_t" "")"
+        check "§168(4:$_s168_t) a host with no settings.json still gets sandbox.enabled:false -- and the other managed keys (the jq branch used to write a 0-byte file here: jq over /dev/null emits nothing)" \
+            test "$(_s168_q "$_S168_CLEAN" '[.sandbox.enabled, .disableClaudeAiConnectors, .permissions.defaultMode]')" = '[false,true,"bypassPermissions"]'
+        _S168_ODD="$(_s168_seed "$_s168_t" '{"sandbox":true}')"
+        check "§168(5:$_s168_t) a non-object host sandbox value is replaced, not crashed on" \
+            test "$(_s168_q "$_S168_ODD" '.sandbox')" = '{"enabled":false}'
+    done
+    _S168_NONE="$(_s168_seed none "$_S168_HOST")"
+    check "§168(6:none) the no-tool literal branch seeds sandbox.enabled:false too (it never reads the host file, so this is the whole of its answer)" \
+        test "$(_s168_q "$_S168_NONE" '.sandbox.enabled')" = "false"
+fi
+rm -rf "$_S168_DIR"
+unset _S168_DIR _S168_BLOCK _S168_HOST _S168_OUT _S168_CLEAN _S168_ODD _S168_NONE _s168_t
+unset -f _s168_seed _s168_q
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
