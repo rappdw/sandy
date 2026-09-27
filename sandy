@@ -6921,6 +6921,11 @@ RUN cat > /usr/local/bin/sandy-handoff-sessions <<'HS_HELPER' \
 # sandy-handoff-sessions — enumerate live agent sessions in this container.
 # Output: agent<TAB>pane_index<TAB>pane_pid<TAB>agent_pid<TAB>socket<TAB>keyfile   ("-" = n/a)
 # Default target rule for relays: the first row whose agent is claude, in SANDY_AGENT order.
+# Untagged panes (@sandy_pane_agent unset) count as SANDY_AGENT only when
+# SANDY_AGENT names exactly one agent AND the session has exactly one pane --
+# the only shape a pre-2.4.0 single-agent sandy could have produced. Any other
+# untagged pane (a user split, a teammate an agent opened, a second untagged
+# pane) is skipped rather than guessed.
 # Test hooks (env-only): SANDY_SESSIONS_PANES_FILE, SANDY_SESSIONS_PROC, SANDY_SESSIONS_SOCK_DIR, SANDY_SESSIONS_KEY_DIR.
 set -uo pipefail
 PROC="${SANDY_SESSIONS_PROC:-/proc}"
@@ -6957,10 +6962,19 @@ descendants() {  # BFS over /proc, prints pids in depth order
 # SANDY_AGENT order for stable output
 IFS=',' read -ra ORDER <<< "${SANDY_AGENT:-claude}"
 rows="$(panes)"; [ -n "$rows" ] || exit 0
+row_count="$(printf '%s\n' "$rows" | grep -c '.')"
 for a in "${ORDER[@]}"; do
   while IFS="$TAB" read -r idx ppid tag; do
     [ -n "${idx:-}" ] || continue
-    [ -n "$tag" ] || tag="${SANDY_AGENT:-claude}"     # single-agent: option unset
+    if [ -z "$tag" ]; then
+        # Mirrors the reference consumer's own guard:
+        # [ "${#ORDER[@]}" -eq 1 ] && [ "$count" -eq 1 ] || continue
+        if [ "${#ORDER[@]}" -eq 1 ] && [ "$row_count" -eq 1 ]; then
+            tag="${SANDY_AGENT:-claude}"
+        else
+            continue
+        fi
+    fi
     [ "$tag" = "$a" ] || continue
     apid="-"; sock="-"; key="-"
     for d in $(descendants "$ppid"); do
@@ -8791,13 +8805,35 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
         # On failure, exit loudly: a dead PID 1 puts the error in `docker
         # logs` (where --start's failure path surfaces it) instead of leaving
         # a session-less container that hangs the readiness gate.
-        tmux new-session -d -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1" || {
+        #
+        # Single-agent mode tags its pane too, as of 2.4.0 (#378) — same
+        # -P -F '#{pane_id}' capture the multi-agent path below uses, so the
+        # option is set by pane-id rather than raced via the pane's own
+        # command. See "Pane-identity contract" in SPECIFICATION.md.
+        _p_id="$(tmux new-session -d -P -F '#{pane_id}' -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1")" || {
             echo "[sandy] FATAL: tmux new-session failed in daemon mode" >&2
             exit 1
         }
+        tmux set-option -p -t "$_p_id" @sandy_pane_agent "$SANDY_AGENT" 2>/dev/null
         exec tail -f /dev/null
     else
-        tmux new-session -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1"
+        # Foreground: create detached, tag the pane, THEN attach in this
+        # process. Chaining `set-option` onto the same `new-session`
+        # invocation via `\; set-option ...` was considered and rejected: once
+        # `--` ends new-session's own option parsing, everything after it
+        # (here, `bash -c "$AGENT_CMD 2>&1"`) is consumed as that command's own
+        # argv, not re-split by tmux on a later `;` — the same reason this
+        # form was chosen originally over a single quoted shell-command
+        # string. So a trailing `\; set-option ...` would be swallowed as
+        # extra arguments to `bash -c`, not parsed as a second tmux command.
+        # create-detached-then-attach sidesteps that: it is the exact pattern
+        # the multi-agent path below already uses and relies on, so it is
+        # proven rather than speculative. `exec tmux attach` preserves the
+        # attach-and-block-until-session-ends behavior the previous single
+        # foreground `tmux new-session` (no `-d`) call had.
+        _p_id="$(tmux new-session -d -P -F '#{pane_id}' -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1")"
+        tmux set-option -p -t "$_p_id" @sandy_pane_agent "$SANDY_AGENT" 2>/dev/null
+        exec tmux attach -t sandy
     fi
 else
     # --- Multi-agent launch (2-4 panes) ---
@@ -8878,9 +8914,10 @@ set -as terminal-features ",tmux-256color:RGB"
 set -as terminal-overrides ",*:U8=1"
 set -sg escape-time 0
 
-# Pane borders — clean single-line, short labels. In multi-agent mode each pane
-# is tagged with @sandy_pane_agent (set by the launcher, #64), so show the agent
-# name per pane; single-agent / untagged panes fall back to the window name.
+# Pane borders — clean single-line, short labels. Every pane sandy creates is
+# tagged with @sandy_pane_agent (set by the launcher, #64; single-agent mode
+# too as of 2.4.0, #378), so show the agent name per pane; a pane sandy did
+# NOT create (a user split, a teammate pane) falls back to the window name.
 set -g pane-border-lines single
 set -g pane-border-style "fg=colour240"
 set -g pane-active-border-style "fg=colour51"

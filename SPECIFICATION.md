@@ -1024,12 +1024,12 @@ The previous `both` alias (= `claude,gemini`) was removed in `v0.12` once the co
 
 ### Pane-identity contract (stable, 2.4.0, #378)
 
-Anything inside the container that needs to know which pane runs which agent — today that means `amap-deploy-sandy`'s own copy of the session helper described in Appendix A.1 (`/usr/local/bin/sandy-handoff-sessions`, unchanged) — depends on four facts. As of 2.4.0 these are a **published, stable contract**: renaming or removing any of them is a breaking change governed by README's `## Deprecated` table (announced in an `X.0.0`, removed no earlier than a later `X.Y.0` — see "Versioning" in CLAUDE.md), not a free refactor.
+Anything inside the container that needs to know which pane runs which agent — today that means an external consumer's own copy of the session helper described in Appendix A.1 (`/usr/local/bin/sandy-handoff-sessions`, unchanged) — depends on four facts. As of 2.4.0 these are a **published, stable contract**: renaming or removing any of them is a breaking change governed by README's `## Deprecated` table (announced in an `X.0.0`, removed no earlier than a later `X.Y.0` — see "Versioning" in CLAUDE.md), not a free refactor.
 
 | # | Fact | Detail |
 |---|---|---|
 | 1 | Session name | The tmux session is always the literal `sandy`, one window, in both single-agent and multi-agent mode. |
-| 2 | `@sandy_pane_agent` tmux pane option | **Multi-agent only.** The launcher sets this pane option, by pane-id, on every pane immediately after creating it, to that pane's agent name. **Single-agent mode does not set it at all** — the sole pane's identity is `$SANDY_AGENT` itself. (An earlier draft of this document said the option was set "on every pane unconditionally"; that was never true of single-agent mode and is corrected here and in CLAUDE.md.) |
+| 2 | `@sandy_pane_agent` tmux pane option | `@sandy_pane_agent` is set, by pane id, on every pane sandy creates, in both single-agent and multi-agent mode (2.4.0+). A pane without it was not created by sandy: a user split, or a pane an agent opened (e.g. an agent-teams teammate). Sandy before 2.4.0 set it in multi-agent mode only. |
 | 3 | `SANDY_AGENT` order = spawn order | The comma-separated list, in-container, is in the order panes were created — the same order `agents` reports in the session marker (`/etc/sandy-session.json`) and in `--print-state`. |
 | 4 | `pane_index` ≠ spawn order, in the 4-agent grid | The fourth split re-splits pane 0 (`split-window -v -t sandy.0`), and tmux inserts the new pane's index immediately after the one it split. The on-screen layout is unaffected; only the index numbering is: |
 
@@ -1042,9 +1042,11 @@ Anything inside the container that needs to know which pane runs which agent —
 
 For 2- and 3-agent layouts `pane_index` and spawn order coincide; the trap is specific to the fourth pane of the 2×2 grid.
 
-**Read identity from the option, never from `pane_index`, a scrollback marker, or the pane title.** `pane_index` is wrong for the reason above; a scrollback marker is wiped the moment a real credentialed agent redraws or clears its pane; `select-pane -T` (the pane title) is OSC-2-clobberable by anything running inside the pane. `@sandy_pane_agent` is the identity source which the agent's redraws and OSC-2 title writes do not touch, and it binds correctly regardless of the pane-index shuffle. (It is not tamper-proof against a deliberate rewrite: the agent runs in the same pane, on the same tmux server, with `$TMUX` set, so `tmux set-option -p @sandy_pane_agent ...` would work from inside it. Safe from accidental clobbering, not from an adversarial one.)
+**Read identity from the option, never from `pane_index`, a scrollback marker, or the pane title.** `pane_index` is wrong for the reason above; a scrollback marker is wiped the moment a real credentialed agent redraws or clears its pane; `select-pane -T` (the pane title) is OSC-2-clobberable by anything running inside the pane. `@sandy_pane_agent` is the identity source which the agent's redraws and OSC-2 title writes do not touch, and it binds correctly regardless of the pane-index shuffle.
 
-A property test pins this contract in `test/run-tests.sh` §155: a fixture where the option disagrees with `pane_index`-as-spawn-order must still yield the correct agent per row, and the real 4-agent mapping table above is asserted directly.
+**Not a security boundary.** A process inside the session can rewrite or clear the option (`tmux set-option -p`). The worst it can do is stop delivery within its own sandbox: the helper reports an ambiguous target, or delivery waits. It can never redirect delivery elsewhere. It is not a security boundary.
+
+A property test pins this contract in `test/run-tests.sh` §155: a fixture where the option disagrees with `pane_index`-as-spawn-order must still yield the correct agent per row, and the real 4-agent mapping table above is asserted directly. `test/host-check-pane-tag.sh` (host-only, live tmux, not wired into any automated suite) additionally proves the single-agent daemon and foreground launch forms actually tag their pane against a real tmux server.
 
 ### Codex Headless Translation (`SANDY_AGENT=codex`)
 
@@ -1490,14 +1492,17 @@ SS_HELPER
 # sandy-handoff-sessions: enumerate live agent sessions in this container, for a
 # SANDY_HANDOFF_RELAY to discover its delivery target(s) (1.10.0). A convenience
 # built on the pane-identity contract ("Pane-identity contract" in section 12
-# above) — sandy publishes the contract; this helper is one consumer of it, and
-# amap-deploy-sandy ships its own copy against the same three facts (#378).
+# above) — sandy publishes the contract, and this helper is one consumer of it
+# (an external consumer ships its own copy against the same facts, #378).
 # Output columns (tab-separated): agent, pane_index, pane_pid, agent_pid, socket,
 # keyfile ("-" = n/a). Identity is read from the @sandy_pane_agent tmux pane
 # option (never assumes pane_index == spawn order — see the 4-agent-grid
 # mapping table in "Pane-identity contract" above), walked via a /proc BFS to
 # find the claude/codex/gemini/opencode/grok process under each pane and, for
-# claude, its /tmp/cc-socks/<pid>.sock and ~/.claude/sessions/<pid>.*.key.
+# claude, its /tmp/cc-socks/<pid>.sock and ~/.claude/sessions/<pid>.*.key. An
+# untagged pane counts as SANDY_AGENT only when exactly one agent is configured
+# AND exactly one pane exists (the only shape a pre-2.4.0 sandy could have
+# produced); any other untagged pane is skipped rather than guessed.
 # Test hooks (env-only, no _sandy_key_metadata row): SANDY_SESSIONS_PANES_FILE,
 # SANDY_SESSIONS_PROC, SANDY_SESSIONS_SOCK_DIR, SANDY_SESSIONS_KEY_DIR.
 RUN cat > /usr/local/bin/sandy-handoff-sessions <<'HS_HELPER' \

@@ -17587,14 +17587,25 @@ printf '%s\n' "$_S155_HS_HELPER" > "$_S155_HS"
 chmod +x "$_S155_HS"
 check "§155(pre2) helper is syntactically valid bash" bash -n "$_S155_HS"
 
-# _s155_run PANES_FILE PROC_DIR AGENT_LIST -> stdout in _S155_OUT. SOCK_DIR and
-# KEY_DIR always point at guaranteed-empty, non-existent directories under this
-# section's own temp dir so a real /tmp/cc-socks or ~/.claude/sessions on the
-# host running this suite can never leak a socket/keyfile into a fixture row.
+# _s155_run PANES_FILE PROC_DIR AGENT_LIST -> stdout in _S155_OUT, exit code in
+# _S155_RC. SOCK_DIR and KEY_DIR always point at guaranteed-empty, non-existent
+# directories under this section's own temp dir so a real /tmp/cc-socks or
+# ~/.claude/sessions on the host running this suite can never leak a
+# socket/keyfile into a fixture row.
+#
+# The `|| _S155_RC=$?` is load-bearing, not decorative: under this suite's
+# `set -euo pipefail`, a bare `_S155_OUT="$(... "$_S155_HS" 2>&1)"` assignment
+# whose helper exits non-zero fails the ASSIGNMENT itself, which trips the ERR
+# trap and aborts the WHOLE SUITE -- silently skipping every section appended
+# after §155 (a verifier finding against the first cut of this section, which
+# had exactly this gap). Reset _S155_RC to 0 before every call so a check that
+# only reads it (rather than calling _s155_run again first) can't read a stale
+# value from a previous fixture.
 _s155_run() {
+    _S155_RC=0
     _S155_OUT="$(SANDY_SESSIONS_PANES_FILE="$1" SANDY_SESSIONS_PROC="$2" \
         SANDY_SESSIONS_SOCK_DIR="$_S155_DIR/nosock" SANDY_SESSIONS_KEY_DIR="$_S155_DIR/nokey" \
-        SANDY_AGENT="$3" "$_S155_HS" 2>&1)"
+        SANDY_AGENT="$3" "$_S155_HS" 2>&1)" || _S155_RC=$?
 }
 # _s155_stat PID COMM PPID -> a /proc/<pid>/stat line in the same shape §114
 # uses (comm in parens; ppid is the field right after the state char).
@@ -17611,6 +17622,8 @@ printf '0%s300%scodex\n1%s400%sclaude\n' "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" 
 _s155_run "$_S155_DIR/panes1.tsv" "$_S155_DIR/proc1" claude,codex
 _S155_OUT1_L1="$(printf '%s\n' "$_S155_OUT" | sed -n '1p')"
 _S155_OUT1_L2="$(printf '%s\n' "$_S155_OUT" | sed -n '2p')"
+check "§155(1rc) helper exited 0" \
+    bash -c '[ "$1" -eq 0 ]' _ "$_S155_RC"
 check "§155(1pre) exactly 2 rows" \
     bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 2 ]' _ "$_S155_OUT"
 check "§155(1a) row 1 is claude at pane_index 1 / pane_pid 400 / agent_pid 401 -- SANDY_AGENT order (claude,codex), not pane order (pane 0 is codex)" \
@@ -17634,6 +17647,8 @@ _S155_OUT2_L1="$(printf '%s\n' "$_S155_OUT" | sed -n '1p')"
 _S155_OUT2_L2="$(printf '%s\n' "$_S155_OUT" | sed -n '2p')"
 _S155_OUT2_L3="$(printf '%s\n' "$_S155_OUT" | sed -n '3p')"
 _S155_OUT2_L4="$(printf '%s\n' "$_S155_OUT" | sed -n '4p')"
+check "§155(2rc) helper exited 0" \
+    bash -c '[ "$1" -eq 0 ]' _ "$_S155_RC"
 check "§155(2pre) exactly 4 rows" \
     bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 4 ]' _ "$_S155_OUT"
 check "§155(2a) claude: pane_index 0 (the split root)" \
@@ -17645,14 +17660,60 @@ check "§155(2c) codex: pane_index 3" \
 check "§155(2d) opencode: pane_index 1 -- the FOURTH agent lands at index 1 because the last split re-splits pane 0 and tmux inserts the new pane right after it (the trap this contract exists to name)" \
     _s155_match "$_S155_OUT2_L4" "opencode${_S155_TAB}1${_S155_TAB}601${_S155_TAB}611${_S155_TAB}*"
 
-# --- (3) single-agent: the option is unset, fall back to SANDY_AGENT ---
+# --- (3) PRE-2.4.0 SHAPE: one untagged pane, one agent -- falls back to SANDY_AGENT ---
+# As of 2.4.0 sandy tags the single-agent pane too (#378 fix pass), so this
+# shape (@sandy_pane_agent unset entirely) is now specifically the LEGACY one
+# a pre-2.4.0 image could have produced, not the current default. The helper
+# still has to resolve it, which is exactly what the fallback rule below
+# checks it does -- and does NOT overreach into.
 mkdir -p "$_S155_DIR/proc3/501"
 _s155_stat 501 codex 500 > "$_S155_DIR/proc3/501/stat"
 printf '0%s500%s\n' "$_S155_TAB" "$_S155_TAB" > "$_S155_DIR/panes3.tsv"
 _s155_run "$_S155_DIR/panes3.tsv" "$_S155_DIR/proc3" codex
-check "§155(3) single-agent: one row, agent falls back to SANDY_AGENT when @sandy_pane_agent is unset (CLAUDE.md's 'unconditionally' claim was wrong -- single-agent mode never sets the option)" \
+check "§155(3rc) helper exited 0" \
+    bash -c '[ "$1" -eq 0 ]' _ "$_S155_RC"
+check "§155(3) single-agent, ONE untagged pane (pre-2.4.0 shape): one row, labelled \$SANDY_AGENT" \
     bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 1 ] && case "$1" in $2) exit 0 ;; esac; exit 1' \
     _ "$_S155_OUT" "codex${_S155_TAB}0${_S155_TAB}500${_S155_TAB}501${_S155_TAB}*"
+
+# --- (5) single-agent, tagged agent pane PLUS an untagged user split: the
+# fallback must NOT fire (row_count is 2, not 1) -- exactly one row, the
+# TAGGED pane, regardless of its pane_index. Proc entry only for the tagged
+# pane's agent_pid: the untagged row is skipped before descendants() would
+# ever need the untagged pane's own pid to resolve to anything. ---
+mkdir -p "$_S155_DIR/proc5/801"
+_s155_stat 801 codex 800 > "$_S155_DIR/proc5/801/stat"
+printf '0%s700%s\n1%s800%scodex\n' "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" > "$_S155_DIR/panes5.tsv"
+_s155_run "$_S155_DIR/panes5.tsv" "$_S155_DIR/proc5" codex
+check "§155(5rc) helper exited 0" \
+    bash -c '[ "$1" -eq 0 ]' _ "$_S155_RC"
+check "§155(5) single-agent, tagged pane (idx1) + untagged user split (idx0): exactly one row, the tagged pane, whatever its pane_index" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 1 ] && case "$1" in $2) exit 0 ;; esac; exit 1' \
+    _ "$_S155_OUT" "codex${_S155_TAB}1${_S155_TAB}800${_S155_TAB}801${_S155_TAB}*"
+
+# --- (6) single-agent, tagged lead PLUS two untagged teammate panes (e.g.
+# agent-teams): the fallback must NOT fire (row_count is 3) -- exactly one
+# claude row, the two untagged teammates skipped rather than guessed. ---
+mkdir -p "$_S155_DIR/proc6/901"
+_s155_stat 901 claude 900 > "$_S155_DIR/proc6/901/stat"
+printf '0%s900%sclaude\n1%s910%s\n2%s920%s\n' \
+    "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" > "$_S155_DIR/panes6.tsv"
+_s155_run "$_S155_DIR/panes6.tsv" "$_S155_DIR/proc6" claude
+check "§155(6rc) helper exited 0" \
+    bash -c '[ "$1" -eq 0 ]' _ "$_S155_RC"
+check "§155(6) single-agent, tagged lead + two untagged teammate panes: exactly one claude row" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 1 ] && case "$1" in $2) exit 0 ;; esac; exit 1' \
+    _ "$_S155_OUT" "claude${_S155_TAB}0${_S155_TAB}900${_S155_TAB}901${_S155_TAB}*"
+
+# --- (7) single-agent, TWO untagged panes: the fallback's own row-count==1
+# requirement fails, so NEITHER row is guessed -- no output at all. No /proc
+# fixtures needed: both rows are skipped before any pid is ever resolved. ---
+printf '0%s800%s\n1%s801%s\n' "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" > "$_S155_DIR/panes7.tsv"
+_s155_run "$_S155_DIR/panes7.tsv" "$_S155_DIR/proc7-nonexistent" codex
+check "§155(7rc) helper exited 0" \
+    bash -c '[ "$1" -eq 0 ]' _ "$_S155_RC"
+check "§155(7) single-agent, TWO untagged panes: no rows (nothing is guessed)" \
+    bash -c '[ -z "$1" ]' _ "$_S155_OUT"
 
 # --- (4) producer/consumer AGREEMENT, not a presence grep ---
 # Extract from the user-setup TEMPLATE (the launcher's mirror, same discipline
@@ -17684,20 +17745,45 @@ if [ -f "$_S155_TMPL" ]; then
         bash -c '[ "$1" = "sandy" ]' _ "$_S155_TMPL_SESSIONS"
     check "§155(4b) the launcher's every set-option -p sets a single option name, '@sandy_pane_agent'" \
         bash -c '[ "$1" = "sandy_pane_agent" ]' _ "$_S155_TMPL_OPTS"
-    check "§155(4c) exactly 4 set-option -p ... @sandy_pane_agent lines -- one per possible agent slot" \
-        bash -c '[ "$1" -eq 4 ]' _ "$_S155_TMPL_OPT_COUNT"
+    check "§155(4c) exactly 6 set-option -p ... @sandy_pane_agent lines -- 4 multi-agent slots + 2 single-agent paths (daemon, foreground; #378 fix pass)" \
+        bash -c '[ "$1" -eq 6 ]' _ "$_S155_TMPL_OPT_COUNT"
     check "§155(4d) the helper's tmux list-panes targets the SAME session name" \
         bash -c '[ "$1" = "$2" ]' _ "$_S155_HS_SESSION" "$_S155_TMPL_SESSIONS"
     check "§155(4e) the helper's pane-format reads the SAME option name -- producer and consumer agree; a rename on one side only fails this pair" \
         bash -c '[ "$1" = "$2" ]' _ "$_S155_HS_OPT" "$_S155_TMPL_OPTS"
+
+    # --- (8) STRUCTURAL: both single-agent new-session paths tag their pane ---
+    # (#378 fix pass: before this, only multi-agent mode ever set the option.)
+    # Isolate the single-agent branch (bounded by its own start/end comments,
+    # inclusive) and count `tmux new-session` invocations against
+    # `set-option -p ... @sandy_pane_agent` lines within that SAME span, rather
+    # than trusting (4c)'s whole-file count to imply pairing -- a mutation
+    # that moved one set-option line into the multi-agent branch while adding
+    # an unrelated one elsewhere could hold the whole-file count at 6 without
+    # every single-agent new-session actually being paired.
+    _S155_SA_BLOCK="$(awk '
+        /^    # --- Single-agent launch ---$/ { on=1 }
+        on { print }
+        /^    # --- Multi-agent launch \(2-4 panes\) ---$/ { exit }
+    ' "$_S155_TMPL")"
+    _S155_SA_NS_COUNT="$(printf '%s\n' "$_S155_SA_BLOCK" | grep -c 'tmux new-session -d -P -F')" || true
+    _S155_SA_OPT_COUNT="$(printf '%s\n' "$_S155_SA_BLOCK" | grep -c 'set-option -p.*@sandy_pane_agent')" || true
+    check "§155(8pre) isolated the single-agent block (mutation: renaming either boundary comment empties it, which the next two checks then fail on)" \
+        bash -c '[ -n "$1" ]' _ "$_S155_SA_BLOCK"
+    check "§155(8a) the single-agent block has exactly 2 tagged tmux new-session invocations (daemon + foreground)" \
+        bash -c '[ "$1" -eq 2 ]' _ "$_S155_SA_NS_COUNT"
+    check "§155(8b) the single-agent block sets @sandy_pane_agent exactly once per new-session -- both paths tag their pane, neither is missed" \
+        bash -c '[ "$1" -eq "$2" ] && [ "$1" -ge 2 ]' _ "$_S155_SA_OPT_COUNT" "$_S155_SA_NS_COUNT"
 else
     skip "§155(4) templates/user-setup.sh.tmpl not found -- producer/consumer agreement not checked"
+    skip "§155(8) templates/user-setup.sh.tmpl not found -- single-agent pane-tagging structure not checked"
 fi
 
 rm -rf "$_S155_DIR"
-unset _S155_SANDY _S155_TMPL _S155_TAB _S155_DIR _S155_HS_HELPER _S155_HS _S155_OUT \
+unset _S155_SANDY _S155_TMPL _S155_TAB _S155_DIR _S155_HS_HELPER _S155_HS _S155_OUT _S155_RC \
     _S155_OUT1_L1 _S155_OUT1_L2 _S155_OUT2_L1 _S155_OUT2_L2 _S155_OUT2_L3 _S155_OUT2_L4 \
-    _S155_TMPL_SESSIONS _S155_TMPL_OPTS _S155_TMPL_OPT_COUNT _S155_HS_SESSION _S155_HS_OPT
+    _S155_TMPL_SESSIONS _S155_TMPL_OPTS _S155_TMPL_OPT_COUNT _S155_HS_SESSION _S155_HS_OPT \
+    _S155_SA_BLOCK _S155_SA_NS_COUNT _S155_SA_OPT_COUNT
 unset -f _s155_match _s155_run _s155_stat
 
 # ============================================================
