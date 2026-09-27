@@ -614,6 +614,7 @@ Listed roughly by "risk reduction per hour of work":
 2. **(10 min, Critical doc fix; 2 days for real fix)** Correct the `SPECIFICATION.md` claim that macOS has LAN isolation. It doesn't. Add an explicit warning on first-run under macOS. Longer-term: ship a sandy-side outbound proxy for the 1.1 milestone. (Finding 2)
 
 3. **(15 min, High)** Move these from workspace-config to host-only-config: `SANDY_SKIP_PERMISSIONS`, `SANDY_ALLOW_NO_ISOLATION`, `SANDY_ALLOW_LAN_HOSTS`, `SANDY_SSH`, all API-key/token keys. Drop them (with warning) when loaded from `$WORK_DIR/.sandy/config`. (Finding 5)
+   *Status (2.4.0, #299): no longer unguarded — every key named here is in `SANDY_PRIVILEGED_KEYS`, so a workspace setting one hits the per-workspace approval prompt (and headless/non-TTY drops it); host-config-**only** is a further tightening still under discussion in #299, not an open hole. Separately, the iptables path no longer claims isolation it did not get: each Linux DROP rule is now verified with `iptables -C` after insertion, and a missing one refuses the launch (or, under `SANDY_ALLOW_NO_ISOLATION=1`, warns that isolation is incomplete) rather than printing "applied".*
 
 4. **(20 min, High)** Always overlay `.vscode`, `.idea`, `.git/hooks` as read-only, even when they don't exist on host. Empty tmpfs works. (Finding 3)
 
