@@ -218,7 +218,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `GOOGLE_CLOUD_LOCATION` | (unset) | GCP region (Vertex AI) |
 | `GOOGLE_GENAI_USE_VERTEXAI` | (unset) | Set `true` to route Gemini through Vertex AI |
 | `GOOGLE_API_KEY` | (unset) | Google API key for Vertex AI / ADC |
-| `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for Telegram relay in multi-agent mode. `0` = first agent in `SANDY_AGENT`, `1` = second, `2` = third, `3` = fourth |
+| `SANDY_CHANNEL_TARGET_PANE` | `0` | Which agent receives Telegram relay messages in multi-agent mode. `0` = first agent in `SANDY_AGENT`, `1` = second, `2` = third, `3` = fourth — routed to that agent's pane by name, not by raw tmux pane index |
 | `SANDY_SSH` | `token` | Git auth method: `token` (gh CLI + HTTPS) or `agent` (SSH agent forwarding) |
 | `SANDY_SSH_KEYS` | (unset) | Comma-separated **filenames** under `~/.ssh` that may be staged into the container, in **any** `SANDY_SSH` mode. Default empty = **no private key material is staged**. `config`, `known_hosts` and `*.pub` come with them. Privileged tier |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Set to `false` to keep Claude Code's permission system active |
@@ -440,7 +440,7 @@ SANDY_AGENT=all                        # alias for claude,gemini,codex,opencode
 
 Panes appear in the order listed. Each agent has its own config dir(s): `~/.claude`, `~/.gemini`, `~/.codex`, and `~/.config/opencode` + `~/.local/share/opencode`. All panes share the same workspace mount. Exiting one pane leaves the others running. Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, `sandy-opencode`, `sandy-grok`); any multi-agent combo uses the `sandy-full` image, which bundles all five CLIs.
 
-**Feature support in multi-agent mode**: skill packs apply to the Claude pane only. Telegram channels use the host-side relay and are routed to pane 0 by default — override with `SANDY_CHANNEL_TARGET_PANE=0|1|2|3`. `--remote` is not supported in any multi-agent combo. `SANDY_LOCAL_LLM_HOST` works in any combo that includes opencode (or any agent that wants to reach a host-side service over the gateway).
+**Feature support in multi-agent mode**: skill packs apply to the Claude pane only. Telegram channels use the host-side relay and are routed to the first agent in `SANDY_AGENT` by default — override with `SANDY_CHANNEL_TARGET_PANE=0|1|2|3` (the Nth agent, 0-based; sandy finds that agent's pane by name, so the 2×2 grid routes correctly). `--remote` is not supported in any multi-agent combo. `SANDY_LOCAL_LLM_HOST` works in any combo that includes opencode (or any agent that wants to reach a host-side service over the gateway).
 
 ### Screenshot skill (`/ss`)
 
@@ -935,7 +935,7 @@ SANDY_CHANNELS=plugin:telegram@claude-plugins-official plugin:discord@claude-plu
 
 ### Channels with Gemini / Codex / multi-agent mode
 
-For any `SANDY_AGENT` value other than single-agent `claude`, sandy uses a **host-side Telegram relay** instead of the in-container plugin — it long-polls the Telegram Bot API on the host and injects messages into the container's tmux session via `docker exec … tmux send-keys`. This is agent-agnostic but lower-fidelity: no chat threading, no edit-message updates, no attachments. Set `SANDY_CHANNEL_TARGET_PANE=0|1|2|3` to route messages to a specific pane in multi-agent mode (default is pane 0 = the first agent listed in `SANDY_AGENT`). Discord via relay is not supported yet — use single-agent `SANDY_AGENT=claude` for Discord.
+For any `SANDY_AGENT` value other than single-agent `claude`, sandy uses a **host-side Telegram relay** instead of the in-container plugin — it long-polls the Telegram Bot API on the host and injects messages into the container's tmux session via `docker exec … tmux send-keys`. This is agent-agnostic but lower-fidelity: no chat threading, no edit-message updates, no attachments. Set `SANDY_CHANNEL_TARGET_PANE=0|1|2|3` to route messages to a specific agent in multi-agent mode — `N` is the Nth agent listed in `SANDY_AGENT`, 0-based (default `0` = the first); the relay looks up that agent's pane by its tag rather than trusting the tmux pane number. Discord via relay is not supported yet — use single-agent `SANDY_AGENT=claude` for Discord.
 
 > ⚠️ **`SANDY_CHANNELS` format for the relay is different.** The relay matches the **bare channel name** — `SANDY_CHANNELS=telegram` — *not* the `plugin:telegram@claude-plugins-official` form used for single-agent `claude` above (that qualified form is what `claude --channels` needs, but it won't trigger the relay). Use bare names when the relay is in play (any non-single-`claude` `SANDY_AGENT`). This dual-format wart is tracked in [#30](https://github.com/rappdw/sandy/issues/30) and will be unified.
 

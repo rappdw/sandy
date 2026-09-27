@@ -17437,6 +17437,113 @@ unset _S154_SANDY _S154_DIR _S154_HLP _S154_LAUNCH _S154_LCWS _S154_D _S154_OUT 
 unset _F _LH _W _SH _H8 _NAME _SB _CWS _PD _dw
 unset -f _s154_mk _s154_run _s154_dest _s154_expect
 
+# ============================================================
+echo "§160: SANDY_CHANNEL_TARGET_PANE=N reaches the Nth AGENT, not tmux pane N (#65)"
+# ============================================================
+# WHY. The Telegram host relay did `tmux send-keys -t "sandy.${TARGET_PANE}"`,
+# while README and SPECIFICATION promised N = "the Nth agent in SANDY_AGENT".
+# Those agree for 1-3 agents and NOT for four: the 2x2 grid's last split
+# re-splits pane 0, and tmux numbers the new pane right after the one it split,
+# so the real map is sandy.0=agent0, sandy.1=agent3, sandy.2=agent1,
+# sandy.3=agent2. "Send to agent 1" went to agent 3 -- a message delivered,
+# confidently, to the wrong agent, which nothing on the host could notice.
+#
+# The fix routes N -> agent name (the launcher passes the resolved list as
+# SANDY_CHANNEL_AGENTS) -> the pane whose @sandy_pane_agent tag matches. This
+# section drives the relay's REAL _inject with a stub `docker` that serves a
+# pane map in the true grid order and records where send-keys was aimed, so it
+# asserts the delivery target -- not that a lookup function exists. (Mutation:
+# restoring `-t "sandy.${TARGET_PANE}"` in _inject fails (2)-(4).)
+_S160_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S160_DIR/bin"
+awk '/^    cat > "\$SANDY_HOME\/channel-relay.sh.new" <<.RELAY.$/{f=1;next} /^RELAY$/{f=0} f' \
+    "$SANDY_SCRIPT" > "$_S160_DIR/relay.sh"
+# The stub docker: `list-panes` prints $S160_PANES (a file) if set, else fails
+# like an unreachable container; `has-session` succeeds; `send-keys` records
+# its -t argument to $S160_OUT. Any exec WITHOUT `-u <uid>` fails, as it does
+# for real: root cannot see the host-uid tmux socket (#48), so a lookup that
+# dropped -u would silently find no panes -- this makes that a failure here.
+cat > "$_S160_DIR/bin/docker" <<'S160_DOCKER'
+#!/usr/bin/env bash
+[ "${1:-} ${2:-} ${3:-}" = "exec -u $(id -u)" ] || exit 1
+case " $* " in
+    *" list-panes "*)
+        if [ -n "${S160_PANES:-}" ]; then cat "$S160_PANES"; exit 0; fi
+        exit 1 ;;
+    *" has-session "*) exit 0 ;;
+    *" send-keys "*)
+        while [ $# -gt 0 ]; do
+            if [ "$1" = "-t" ]; then printf '%s\n' "$2" > "$S160_OUT"; fi
+            shift
+        done
+        exit 0 ;;
+esac
+exit 1
+S160_DOCKER
+chmod +x "$_S160_DIR/bin/docker"
+# Pane maps as `tmux list-panes -F '#{pane_index} #{@sandy_pane_agent}'`
+# prints them. grid4 is the REAL 2x2 order for SANDY_AGENT=claude,gemini,codex,
+# opencode (verified empirically by acceptance-pane-topology.sh, #22).
+printf '0 claude\n1 opencode\n2 gemini\n3 codex\n' > "$_S160_DIR/grid4"
+printf '0 claude\n1 gemini\n2 codex\n'             > "$_S160_DIR/grid3"
+# An image predating the tag, or a single-agent session: the option is unset,
+# so tmux prints an empty field.
+printf '0 \n1 \n2 \n3 \n'                          > "$_S160_DIR/untagged"
+check "§160(pre) the relay was extracted, parses, and still carries both functions this section drives (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'bash -n "$1/relay.sh" && grep -q "^_target() {" "$1/relay.sh" && grep -q "^_inject() {" "$1/relay.sh"' -- "$_S160_DIR"
+# _s160_route <agents-csv> <N> <panemap-file|""> -> the send-keys target.
+# The relay's own TARGET_PANE= / AGENTS= lines are evaluated rather than the
+# variables set directly, so the env var NAMES the launcher exports are part of
+# what is tested.
+_s160_route() {
+    (
+        trap - ERR; set +e
+        PATH="$_S160_DIR/bin:$PATH"
+        SANDY_CONTAINER_NAME=c160
+        SANDY_CHANNEL_AGENTS="$1"; SANDY_CHANNEL_TARGET_PANE="$2"
+        export S160_PANES="$3" S160_OUT="$_S160_DIR/out"
+        rm -f "$S160_OUT"
+        eval "$(grep -E '^(TARGET_PANE|AGENTS)=' "$_S160_DIR/relay.sh")"
+        eval "$(sed -n '/^_target() {/,/^}$/p' "$_S160_DIR/relay.sh")"
+        eval "$(sed -n '/^_inject() {/,/^}$/p' "$_S160_DIR/relay.sh")"
+        _inject "hello from telegram" >/dev/null 2>&1
+        cat "$S160_OUT" 2>/dev/null
+    )
+    return 0
+}
+_S160_A4="claude,gemini,codex,opencode"
+check "§160(1) 4-agent grid: N=0 reaches the first agent (sandy.0 — the one index that always coincides)" \
+    test "$(trap - ERR; _s160_route "$_S160_A4" 0 "$_S160_DIR/grid4")" = "sandy.0"
+check "§160(2) 4-agent grid: N=1 reaches gemini at sandy.2, NOT sandy.1 (which holds the fourth agent) — the bug" \
+    test "$(trap - ERR; _s160_route "$_S160_A4" 1 "$_S160_DIR/grid4")" = "sandy.2"
+check "§160(3) 4-agent grid: N=2 reaches codex at sandy.3" \
+    test "$(trap - ERR; _s160_route "$_S160_A4" 2 "$_S160_DIR/grid4")" = "sandy.3"
+check "§160(4) 4-agent grid: N=3 reaches opencode at sandy.1" \
+    test "$(trap - ERR; _s160_route "$_S160_A4" 3 "$_S160_DIR/grid4")" = "sandy.1"
+check "§160(5) 3-agent layout (index == spawn order there) still routes N=2 to sandy.2 — the fix changes nothing that was already right" \
+    test "$(trap - ERR; _s160_route "claude,gemini,codex" 2 "$_S160_DIR/grid3")" = "sandy.2"
+check "§160(6) fallback: untagged panes (an image predating @sandy_pane_agent) -> raw sandy.N, the pre-#65 behaviour" \
+    test "$(trap - ERR; _s160_route "$_S160_A4" 1 "$_S160_DIR/untagged")" = "sandy.1"
+check "§160(7) fallback: no agent list passed (an older launcher) -> raw sandy.N" \
+    test "$(trap - ERR; _s160_route "" 3 "$_S160_DIR/grid4")" = "sandy.3"
+check "§160(8) fallback: the pane lookup itself fails -> raw sandy.N, and the message is still sent rather than dropped" \
+    test "$(trap - ERR; _s160_route "$_S160_A4" 2 "")" = "sandy.2"
+check "§160(9) single non-claude agent (the other case that runs this relay): N=0 -> sandy.0" \
+    test "$(trap - ERR; _s160_route "codex" 0 "$_S160_DIR/untagged")" = "sandy.0"
+# The launcher half, structural and labelled as such: the behavioural half
+# needs Docker and a Telegram bot. Without this the relay silently falls back
+# to raw sandy.N on every launch and (1)-(5) keep passing.
+check "§160(10) the launch site passes the resolved agent list to the relay as SANDY_CHANNEL_AGENTS (structural; mutation: dropping it reverts every real launch to raw sandy.N)" \
+    bash -c 'awk "/^# Launch host-side channel relay/,/^fi\$/" "$1" | grep -q "SANDY_CHANNEL_AGENTS=\"\$SANDY_AGENT\""' -- "$SANDY_SCRIPT"
+# channel-relay.sh lives in $SANDY_HOME, so a stale copy there would keep the
+# old routing after an upgrade. It is regenerated by every launch through
+# ensure_build_files; this pins that it stays in the replace-on-diff loop.
+check "§160(11) channel-relay.sh is in ensure_build_files' replace-on-change list, so an upgrade replaces a stale on-disk relay" \
+    bash -c 'awk "/^ensure_build_files\\(\\)/,/^}\$/" "$1" | grep -q "for f in .*channel-relay.sh"' -- "$SANDY_SCRIPT"
+rm -rf "$_S160_DIR"
+unset _S160_DIR _S160_A4
+unset -f _s160_route
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

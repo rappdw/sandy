@@ -1540,7 +1540,7 @@ SANDY_MEM|string|||0.1.0|stable|Memory limit for container (e.g. '8g'; default: 
 SANDY_GPU|string|||0.7.5|stable|GPU passthrough: 'all', or device IDs like '0' / '0,1'.
 SANDY_SKILL_PACKS|string|||0.7.10|stable|Comma-separated skill pack names (e.g. 'gstack').
 SANDY_CHANNELS|string|||0.7.6|stable|Comma-separated channel names (e.g. 'telegram,discord').
-SANDY_CHANNEL_TARGET_PANE|int|0||0.9.0|stable|Which tmux pane in multi-agent mode receives channel messages.
+SANDY_CHANNEL_TARGET_PANE|int|0||0.9.0|stable|Which agent's pane receives Telegram host-relay messages in multi-agent mode: a 0-based position in SANDY_AGENT (0 = first agent, up to 3), resolved to the pane tagged with that agent -- not a raw tmux pane index, which differs from spawn order in the 2x2 grid.
 SANDY_VERBOSE|int|0||0.8.0|stable|Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace).
 SANDY_VENV_OVERLAY|bool|1||0.10.0|stable|Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container.
 SANDY_EGRESS_NO_ISOLATION|bool|0||1.0.0|stable|Turn the egress proxy OFF — legacy path (Linux iptables-only; NO network isolation on macOS). WEAKENS isolation, so from a workspace .sandy/config it is quarantined to the per-workspace approval prompt (a committed config cannot silently disable isolation). Mutually exclusive with SANDY_EGRESS_STRICT. Default 0 (proxy on).
@@ -8424,7 +8424,12 @@ else
     fi
 
     # Fourth agent (if present): split the left pane vertically → 2x2 grid.
-    # Layout: 0 top-left, 1 top-right, 2 bottom-right, 3 bottom-left.
+    # On screen, by SPAWN order: agent 0 top-left, agent 1 top-right, agent 2
+    # bottom-right, agent 3 bottom-left. The tmux pane INDICES do not follow:
+    # this split re-splits pane 0 and tmux numbers the new pane right after the
+    # one it split, so sandy.0 = agent 0, sandy.1 = agent 3, sandy.2 = agent 1,
+    # sandy.3 = agent 2. Anything addressing "the Nth agent" must resolve it
+    # through @sandy_pane_agent, never as sandy.N (#65).
     if [ "$_SANDY_AGENT_COUNT" -ge 4 ]; then
         _cmd3="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[3]}" "$@")"
         [ "${SANDY_TEST_PANE_TAGS:-0}" = "1" ] && _cmd3="printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[3]}'; $_cmd3"
@@ -8499,11 +8504,13 @@ generate_channel_relay() {
 # tmux session via `docker exec ... tmux send-keys`. Stateless, agent-agnostic.
 #
 # Required env: TELEGRAM_BOT_TOKEN, SANDY_CONTAINER_NAME
-# Optional:     TELEGRAM_ALLOWED_SENDERS (csv of user IDs), SANDY_CHANNEL_TARGET_PANE (default 0)
+# Optional:     TELEGRAM_ALLOWED_SENDERS (csv of user IDs), SANDY_CHANNEL_TARGET_PANE (default 0),
+#               SANDY_CHANNEL_AGENTS (the resolved SANDY_AGENT list, csv, in pane-spawn order)
 set -u
 : "${TELEGRAM_BOT_TOKEN:?}"
 : "${SANDY_CONTAINER_NAME:?}"
 TARGET_PANE="${SANDY_CHANNEL_TARGET_PANE:-0}"
+AGENTS="${SANDY_CHANNEL_AGENTS:-}"
 ALLOWED="${TELEGRAM_ALLOWED_SENDERS:-}"
 # Refuse to run with no allowlist, rather than run and drop everything. A relay
 # that starts and silently delivers nothing reads as "channels are broken" and
@@ -8542,6 +8549,36 @@ _is_allowed() {
     return 1
 }
 
+# SANDY_CHANNEL_TARGET_PANE=N means "the Nth agent in SANDY_AGENT" (0-based),
+# which is NOT tmux pane_index N (#65). In the 4-agent 2x2 grid the last split
+# re-splits pane 0 and tmux numbers the new pane right after the one it split,
+# so sandy.1 holds the FOURTH agent, sandy.2 the second, sandy.3 the third --
+# raw `sandy.N` sent "pane 1" to the wrong agent. So resolve N -> agent name
+# (SANDY_CHANNEL_AGENTS, passed by the launcher) -> the pane whose
+# @sandy_pane_agent tag carries that name. Agent names are unique within a
+# combo (duplicates are refused at launch), so the match is unambiguous.
+# Falls back to raw sandy.N when there is no tag to match -- a single-agent
+# session (untagged) or an image predating the tag -- where the index and the
+# spawn order coincide anyway.
+_target() {
+    local want="" rest="$AGENTS," a i=0 idx tag
+    case "$TARGET_PANE" in ''|*[!0-9]*) rest="" ;; esac
+    while [ -n "$rest" ]; do
+        a="${rest%%,*}"; rest="${rest#*,}"
+        if [ "$i" = "$TARGET_PANE" ]; then want="$a"; break; fi
+        i=$((i+1))
+    done
+    if [ -n "$want" ]; then
+        while read -r idx tag; do
+            case "$idx" in ''|*[!0-9]*) continue ;; esac
+            if [ "$tag" = "$want" ]; then
+                printf 'sandy.%s\n' "$idx"; return 0
+            fi
+        done < <(docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux list-panes -t sandy -F '#{pane_index} #{@sandy_pane_agent}' 2>/dev/null || true)
+    fi
+    printf 'sandy.%s\n' "$TARGET_PANE"
+}
+
 _inject() {
     local text="$1"
     # Wait for container tmux session to exist (up to 30s)
@@ -8553,7 +8590,7 @@ _inject() {
         sleep 0.5
         tries=$((tries+1))
     done
-    docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux send-keys -t "sandy.${TARGET_PANE}" "$text" Enter 2>/dev/null || true
+    docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux send-keys -t "$(_target)" "$text" Enter 2>/dev/null || true
 }
 
 # Drain stale updates once at startup
@@ -15822,9 +15859,24 @@ if { [ "$_SANDY_IS_MULTI" = true ] || ! _sandy_agent_has claude; } && [ -n "${SA
                 TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
                 TELEGRAM_ALLOWED_SENDERS="${TELEGRAM_ALLOWED_SENDERS:-}" \
                 SANDY_CHANNEL_TARGET_PANE="${SANDY_CHANNEL_TARGET_PANE:-0}" \
+                SANDY_CHANNEL_AGENTS="$SANDY_AGENT" \
                 bash "$SANDY_HOME/channel-relay.sh" &
                 CHANNEL_RELAY_PID=$!
-                info "Telegram channel relay started (PID $CHANNEL_RELAY_PID → $CONTAINER_NAME pane ${SANDY_CHANNEL_TARGET_PANE:-0})"
+                # Name the AGENT, not just the number: N is a position in
+                # SANDY_AGENT (#65), which is what the relay now routes by.
+                _relay_n="${SANDY_CHANNEL_TARGET_PANE:-0}"
+                _relay_agent=""
+                case "$_relay_n" in
+                    ''|*[!0-9]*) ;;
+                    *) if [ "$_relay_n" -lt "$_SANDY_AGENT_COUNT" ]; then _relay_agent="${_SANDY_AGENTS[$_relay_n]}"; fi ;;
+                esac
+                if [ -n "$_relay_agent" ]; then
+                    info "Telegram channel relay started (PID $CHANNEL_RELAY_PID → $CONTAINER_NAME, agent $_relay_n = $_relay_agent)"
+                else
+                    info "Telegram channel relay started (PID $CHANNEL_RELAY_PID → $CONTAINER_NAME pane $_relay_n)"
+                    warn "SANDY_CHANNEL_TARGET_PANE=$_relay_n names no agent in SANDY_AGENT=$SANDY_AGENT (valid: 0..$((_SANDY_AGENT_COUNT - 1))); messages will likely reach no pane"
+                fi
+                unset _relay_n _relay_agent
             else
                 warn "SANDY_CHANNELS=telegram but TELEGRAM_BOT_TOKEN is not set"
             fi

@@ -1228,7 +1228,12 @@ else
     fi
 
     # Fourth agent (if present): split the left pane vertically → 2x2 grid.
-    # Layout: 0 top-left, 1 top-right, 2 bottom-right, 3 bottom-left.
+    # On screen, by SPAWN order: agent 0 top-left, agent 1 top-right, agent 2
+    # bottom-right, agent 3 bottom-left. The tmux pane INDICES do not follow:
+    # this split re-splits pane 0 and tmux numbers the new pane right after the
+    # one it split, so sandy.0 = agent 0, sandy.1 = agent 3, sandy.2 = agent 1,
+    # sandy.3 = agent 2. Anything addressing "the Nth agent" must resolve it
+    # through @sandy_pane_agent, never as sandy.N (#65).
     if [ "$_SANDY_AGENT_COUNT" -ge 4 ]; then
         _cmd3="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[3]}" "$@")"
         [ "${SANDY_TEST_PANE_TAGS:-0}" = "1" ] && _cmd3="printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[3]}'; $_cmd3"
