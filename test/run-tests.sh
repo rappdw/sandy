@@ -18577,6 +18577,82 @@ unset _S166_DIR _S166_WS _S166_SB _S166_WS2 _S166_SB2 _S166_WS3 _S166_SB3 _S166_
 unset _S166_NAMED _S166_NAMED2 _S166_BEFORE _S166_AFTER _S166_GONE
 unset -f _s166_mk _s166_named _s166_inventory
 
+echo "§167: SANDY_EFFORT reaches codex as model_reasoning_effort (#116)"
+# ============================================================
+# Before 2.4.0 SANDY_EFFORT was claude-only and CLEARED for any launch without
+# claude, so a codex run was silently at its default and recorded as unpinned.
+# Driven for real: build_codex_cmd is extracted, the command it builds is RUN
+# through `bash -c` the way the pane runs it, against a stub `codex` that prints
+# its argv -- so the assertion is on the argv codex would receive.
+_S167_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S167_DIR/bin"
+for _s167_a in codex gemini; do
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "ARGV:"; printf " [%s]" "$@"; printf "\n"' > "$_S167_DIR/bin/$_s167_a"
+done
+printf '%s\n' '#!/usr/bin/env bash' 'echo S167_PWNED' > "$_S167_DIR/bin/S167_PWNED_CMD"
+chmod +x "$_S167_DIR/bin/codex" "$_S167_DIR/bin/gemini" "$_S167_DIR/bin/S167_PWNED_CMD"
+sed -n '/^build_codex_cmd() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S167_DIR/codex.sh"
+sed -n '/^build_gemini_cmd() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S167_DIR/gemini.sh"
+check "§167(0) build_codex_cmd and build_gemini_cmd were extracted and parse (mutation: a rename empties them and every check below goes vacuous)" \
+    bash -c 'grep -q "danger-full-access" "$1" && bash -n "$1" && grep -q "gemini" "$2" && bash -n "$2"' _ "$_S167_DIR/codex.sh" "$_S167_DIR/gemini.sh"
+_s167_run() { # _s167_run <builder> <effort> [args...] -> argv line of the stub
+    local _b="$1" _e="$2"; shift 2
+    (
+        trap - ERR; set +e; set +u
+        _sandy_translate_args() { :; }
+        _sandy_wrap_cmd_exit_pause() { printf '%s' "$2"; }
+        CODEX_MODEL=""; GEMINI_MODEL=""; SANDY_EFFORT="$_e"
+        . "$_S167_DIR/codex.sh"; . "$_S167_DIR/gemini.sh"
+        _c="$("$_b" "$@" 2>/dev/null)"
+        PATH="$_S167_DIR/bin:$PATH" bash -c "$_c 2>&1"
+    ) 2>/dev/null
+    return 0
+}
+# Each sandy level must reach codex as its exact codex namesake (verified
+# against codex 0.157.1: max is codex's own top non-delegating level; ultra is
+# multi-agent delegation, a behaviour change, and must NOT be what max maps to).
+for _s167_l in low:low medium:medium high:high xhigh:xhigh max:max; do
+    _S167_OUT="$(trap - ERR; _s167_run build_codex_cmd "${_s167_l%%:*}")"
+    check "§167(1:${_s167_l%%:*}) SANDY_EFFORT=${_s167_l%%:*} reaches codex as -c model_reasoning_effort=${_s167_l#*:} (got: $_S167_OUT)" \
+        bash -c 'case "$1" in "ARGV:"*" [-c] [model_reasoning_effort=$2]"*) exit 0 ;; esac; exit 1' _ "$_S167_OUT" "${_s167_l#*:}"
+done
+_S167_HL="$(trap - ERR; _s167_run build_codex_cmd high -p)"
+check "§167(2) the headless path (codex exec) carries it too (got: $_S167_HL)" \
+    bash -c 'case "$1" in "ARGV: [exec]"*" [-c] [model_reasoning_effort=high]"*) exit 0 ;; esac; exit 1' _ "$_S167_HL"
+_S167_NONE="$(trap - ERR; _s167_run build_codex_cmd "")"
+check "§167(3) no SANDY_EFFORT -> no override: codex keeps its own default (got: $_S167_NONE)" \
+    bash -c 'case "$1" in "ARGV:"*reasoning*) exit 1 ;; "ARGV:"*) exit 0 ;; esac; exit 1' _ "$_S167_NONE"
+_S167_GEM="$(trap - ERR; _s167_run build_gemini_cmd high)"
+check "§167(4) gemini does not receive it -- no effort surface sandy drives (got: $_S167_GEM)" \
+    bash -c 'case "$1" in "ARGV:"*effort*) exit 1 ;; "ARGV:"*) exit 0 ;; esac; exit 1' _ "$_S167_GEM"
+# The sink is `bash -c`. Host-side validation already rejects anything but the
+# five levels, but the builder must be safe on its own (R1): an unvalidated
+# value neither executes nor reaches codex as an invented level.
+_S167_INJ="$(trap - ERR; _s167_run build_codex_cmd 'high;S167_PWNED_CMD;x')"
+check "§167(5) an injected SANDY_EFFORT neither executes nor reaches codex (got: $_S167_INJ)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^ARGV:" && ! printf "%s\n" "$1" | grep -q "^S167_PWNED" && ! printf "%s\n" "$1" | grep -q reasoning' _ "$_S167_INJ"
+# Host-side: the validation block keeps the pinned value for a codex launch
+# (so the marker records it) and still clears it -- now with a message -- for a
+# launch with neither claude nor codex.
+_S167_VAL="$(awk '/^# Validate SANDY_EFFORT/{f=1} f{print} f&&/^fi$/{exit}' "$SANDY_SCRIPT")"
+_S167_HAS="$(grep -m1 '^_sandy_agent_has() {' "$SANDY_SCRIPT" || true)"
+_s167_val() { # _s167_val <agents> <effort> -> "rc=<n> effort=<v>" plus messages
+    bash -c 'error() { echo "ERR $*"; }; info() { echo "INFO $*"; }; eval "$3"; SANDY_AGENT="$1"; SANDY_EFFORT="$2"; ( eval "$4"; echo "rc=0 effort=$SANDY_EFFORT" ) || echo "rc=$?"' _ "$1" "$2" "$_S167_HAS" "$_S167_VAL" 2>&1
+}
+check "§167(6) the validation block and _sandy_agent_has were extracted (mutation: a rename empties them)" \
+    bash -c 'printf "%s" "$1" | grep -q "Invalid SANDY_EFFORT" && test -n "$2"' _ "$_S167_VAL" "$_S167_HAS"
+check "§167(7) a codex-only launch KEEPS SANDY_EFFORT (it used to be cleared, so codex ran unpinned and the marker said null)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=max"' _ "$(_s167_val codex max)"
+check "§167(8) a gemini-only launch clears it and SAYS so (it applies to claude and codex only)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=" && printf "%s\n" "$1" | grep -q "INFO SANDY_EFFORT=high ignored"' _ "$(_s167_val gemini high)"
+check "§167(9) a codex launch still fails loud on an invalid level" \
+    bash -c 'printf "%s\n" "$1" | grep -q "ERR Invalid SANDY_EFFORT" && printf "%s\n" "$1" | grep -qx "rc=1"' _ "$(_s167_val codex extreme)"
+check "§167(10) claude-only is unchanged: kept" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=high"' _ "$(_s167_val claude high)"
+rm -rf "$_S167_DIR"
+unset _S167_DIR _S167_OUT _S167_HL _S167_NONE _S167_GEM _S167_INJ _S167_VAL _S167_HAS _s167_a _s167_l
+unset -f _s167_run _s167_val
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

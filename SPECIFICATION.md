@@ -195,7 +195,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `SANDY_AGENT` | passive | `claude` | 0.9.0 | stable | Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'. |
 | `SANDY_MODEL` | passive | `claude-opus-5` | 0.1.0 | stable | Model ID for the Claude agent. |
 | `SANDY_TEAMMATE_MODE` | passive | unset | 1.7.0 | stable | Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched. |
-| `SANDY_EFFORT` | passive | unset | 1.6.0 | stable | Reasoning effort for the Claude agent (claude only), applied as 'claude --effort <level>'. Empty leaves Claude Code's own default (currently 'high'). Levels are model-dependent; an unsupported level falls back to the highest supported at or below it. Passive-safe (effort does not affect isolation). Recorded in sandy-session.json. |
+| `SANDY_EFFORT` | passive | unset | 1.6.0 | stable | Reasoning effort for claude and (2.4.0) codex. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Empty leaves each agent's own default. Ignored, with a notice, for a launch with neither claude nor codex (gemini, opencode and grok have no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json. |
 | `SANDY_CPUS` | passive | unset | 0.1.0 | stable | CPU limit for container (default: auto-detected). |
 | `SANDY_MEM` | passive | unset | 0.1.0 | stable | Memory limit for container (e.g. '8g'; default: auto-detected). |
 | `SANDY_GPU` | passive | unset | 0.7.5 | stable | GPU passthrough: 'all', or device IDs like '0' / '0,1'. |
@@ -1707,7 +1707,7 @@ Key implementation details not covered in the main spec:
   trust_level = "trusted"
   ```
   This must happen container-side because it needs the in-container workspace path.
-- `build_codex_cmd()`: translates sandy's `-p`/`--print`/`--prompt` into `codex exec` with a positional prompt; drops `--continue`/`-c`; injects `--sandbox danger-full-access`, `--skip-git-repo-check` (headless only), and optional `--model`.
+- `build_codex_cmd()`: translates sandy's `-p`/`--print`/`--prompt` into `codex exec` with a positional prompt; drops `--continue`/`-c`; injects `--sandbox danger-full-access`, `--skip-git-repo-check` (headless only), optional `--model`, and (2.4.0, #116) `-c model_reasoning_effort=<level>` when `SANDY_EFFORT` is set (Appendix B.10).
 - Launch dispatch: the `codex` case sits alongside `claude` and `gemini` in the per-agent dispatch; multi-agent combos iterate over the parsed `_SANDY_AGENTS` array and call each `build_*_cmd` in pane order.
 
 **`/ss` screenshot-skill seeding**:
@@ -1918,6 +1918,19 @@ Capabilities SETUID/SETGID are needed for `gosu` privilege drop. CHOWN/DAC_OVERR
 | Python | Debian trixie system default (3.13) | `apt-get install python3` |
 
 ---
+
+### B.10 Reasoning Effort Mapping (`SANDY_EFFORT`)
+
+| sandy level | claude | codex (`-c model_reasoning_effort=`) |
+|---|---|---|
+| `low` | `--effort low` | `low` |
+| `medium` | `--effort medium` | `medium` |
+| `high` | `--effort high` | `high` |
+| `xhigh` | `--effort xhigh` | `xhigh` |
+| `max` | `--effort max` | `max` |
+| _(unset)_ | flag omitted (Claude Code default) | flag omitted (codex/model default) |
+
+Codex (2.4.0, #116) was verified against codex **0.157.1**: `ReasoningEffort::from_str` in `codex-rs/protocol/src/openai_models.rs` accepts `none|minimal|low|medium|high|xhigh|max|ultra|persistent` (any other non-empty string passes through as a custom value), so every sandy level has an exact namesake and the mapping is the identity. `max` maps to codex's `max` ("maximum reasoning depth"), **not** `ultra`, which sorts higher but is "maximum reasoning with automatic task delegation" — a multi-agent behaviour change, not an effort level. `-c` values parse as TOML and fall back to a literal string; both `codex` and `codex exec` take `-c`. Whether a given model offers a level is codex's model catalog's business (in 0.157.1, `gpt-5.4`/`gpt-5.5` top out at `xhigh`). The mapping is a `case`, so a future divergence is one arm and an unmapped value omits the flag rather than inventing one; the value is `printf %q`-quoted at the `bash -c` sink regardless. gemini, opencode and grok receive nothing: `SANDY_EFFORT` is cleared, with a notice, for a launch that includes neither claude nor codex.
 
 ## Appendix C: JSON Schemas
 
@@ -2233,7 +2246,7 @@ Written to `$SANDBOX_DIR/sandy-session.json` on every launch and bind-mounted re
 | `host_uid` / `host_gid` | Host identity sandy mapped the container to. |
 | `launched_at` | UTC ISO-8601 launch timestamp (host clock). |
 | `session_nonce` | Per-launch random hex; printed host-side under `SANDY_VERBOSE!=0` so an external verifier can match the file to a specific launch. Not exported as an env var. |
-| `effort` | Reasoning effort sandy PINNED for the claude agent via `SANDY_EFFORT` (JSON string, e.g. `"high"`), or `null` when sandy did not pin it (agent ran at Claude Code's own default). Makes a run's effort provable after teardown (1.6.0). |
+| `effort` | Reasoning effort sandy PINNED via `SANDY_EFFORT` (JSON string, e.g. `"high"`), or `null` when sandy did not pin it (agent ran at its own default). It is the **sandy-level** value: since 2.4.0 (#116) it also applies to codex, where each level maps to its codex namesake (Appendix B.10), so in a claude+codex combo one value describes both panes; a launch with neither claude nor codex records `null`. Makes a run's effort provable after teardown (1.6.0). |
 | `permission_mode` | Permission mode sandy PINNED into settings.json for the claude agent this launch: `"bypassPermissions"` when `SANDY_SKIP_PERMISSIONS=true` (the default), or `null` when it did not (skip off, or claude isn't in `SANDY_AGENT`). Reflects what sandy pinned at launch, not necessarily what's in effect right now — see the settings.json seed step (§C.2) and the session-end drift notice (§9) for why (#151). |
 | `cross_session_inbound` | (1.10.0) The `crossSessionInbound` value sandy actually wrote this launch (`"accept"` \| `"hold"` \| `"refuse"`), or `null` when neither of the two write targets (§C.2a) succeeded (claude isn't in `SANDY_AGENT`, or both writes failed and a warning was printed). Does not distinguish which of the two targets received it — see the launch-time log line for that. See §C.2a. |
 | ~~`handoff_relay`~~ | **Removed in 2.2.0 (#355).** (1.10.0) Was a bool: whether `SANDY_HANDOFF_RELAY` was forwarded this launch. `relay.source` other than `"none"` carries the same fact — criterion 7 still holds, so it means the relay was started or the session never came up. |

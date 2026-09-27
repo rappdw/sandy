@@ -219,6 +219,8 @@ Sandbox subdirs mount as: `claude/`→`~/.claude`, `gemini/`→`~/.gemini`, `cod
 
 **Headless (`-p`/`--print`/`--prompt`) translation**: claude → `--print`; codex → `codex exec --skip-git-repo-check`; opencode → `opencode run <prompt>`; grok → `-p` (Claude-shaped, positional prompt). `--continue`/`-c` is silently dropped for codex/opencode/grok. `exec`/`run` only produce 0/1 exit codes.
 
+**`SANDY_EFFORT` reaches codex too (2.4.0, #116)**, as `-c model_reasoning_effort=<level>`. Verified against codex 0.157.1 (`ReasoningEffort::from_str`): every sandy level has an exact codex namesake, so the mapping is the identity — and `max` maps to `max`, **never `ultra`**, which sorts higher but means "maximum reasoning with automatic task delegation", a multi-agent behaviour change rather than an effort level. The mapping is a `case` in `build_codex_cmd` (an unmapped value omits the flag), `printf %q`-quoted at the sink. The marker's `effort` keeps the sandy-level value, so in a claude+codex combo one value describes both panes. A launch with neither claude nor codex clears it **with a notice** (it used to be cleared silently). Grok/gemini/opencode: no effort surface wired. Guarded by §167.
+
 **OpenCode config seeding** resolves three states on sandbox creation: (1) host `~/.config/opencode/opencode.json` exists → seeded in; (2) no host config but `SANDY_LOCAL_LLM_HOST` set → sandy generates a starter config from a `/v1/models` probe pointing at `http://host.docker.internal:<port>/v1`; (3) neither → loud warning naming the three fixes, but the launch proceeds (opencode's built-in default model would otherwise fail confusingly).
 
 **Local-LLM passthrough.** `SANDY_LOCAL_LLM_HOST=<ip>:<port>` opens exactly one narrow path through sandy's RFC-1918 block: format-validated, world-open IPs rejected, a single `iptables ACCEPT` for that host:port (plus `--add-host=host.docker.internal:host-gateway` on Linux). With the egress proxy on it is served by the proxy's forward listener instead. Orthogonal to `SANDY_ALLOW_HOSTS`.
@@ -235,6 +237,7 @@ Sandbox subdirs mount as: `claude/`→`~/.claude`, `gemini/`→`~/.gemini`, `cod
 | Gemini extensions | — | yes | — | — | — | yes (when gemini is in the combo) |
 | Local-LLM passthrough | — | — | — | yes | — | yes (when opencode is in the combo) |
 | Provider choice via own config | — | — | — | yes | — | — |
+| Reasoning effort (`SANDY_EFFORT`) | `--effort` | — | `-c model_reasoning_effort=` (2.4.0, #116) | — | — | claude and codex panes |
 
 The Telegram host-side relay (`$SANDY_HOME/channel-relay.sh`) is an agent-agnostic long-polling bridge injecting via `docker exec … tmux send-keys`; `SANDY_CHANNEL_TARGET_PANE=0|1|2|3` picks the **agent** — a 0-based position in `SANDY_AGENT`, not a tmux pane index (see Pane identity below).
 
