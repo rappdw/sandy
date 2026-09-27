@@ -19972,6 +19972,55 @@ unset _S172_W6 _S172_W7
 unset _S172_IMGBLK _S172_W1 _S172_W2 _S172_W3 _S172_W4 _S172_W5
 unset -f _s172_imgwarn
 
+# --- (11) the OTHER half of the stale-image contract: every generated agent
+# Dockerfile must actually emit the label (10) inspects for. (10) only ever
+# stubs `docker image inspect`, so nothing before this ran the six
+# generate_dockerfile* functions and looked at their OUTPUT -- renaming or
+# dropping `LABEL sandy.feature_entries=1` in a single generator left every
+# section, including (10), green (verifier finding: renaming it in all six
+# generators to `sandy.feature-entries` was undetected). Docker-free, same
+# pattern the codex agent-dispatch checks already use (extract the function,
+# run it into a temp SANDY_HOME, read the file). The label KEY is read from
+# the same docker-image-inspect line (10) stubs, not hardcoded a second time,
+# so the two sides cannot independently drift.
+_S172_LBLKEY="$(grep "docker image inspect -f '{{index \.Config\.Labels" "$_S172_SANDY" | sed -E 's/.*Labels "([^"]*)".*/\1/')"
+check "§172(11pre) the stale-image label KEY was read from the docker-image-inspect line (10) stubs (mutation: if that line stops naming a bare 'sandy.something' label, this and every (11) check below goes vacuous)" \
+    bash -c '[ -n "$1" ]' _ "$_S172_LBLKEY"
+
+_s172_gen_label() {
+    # _s172_gen_label FUNC_NAME OUTFILE DESTDIR -> 0 if OUTFILE, generated
+    # fresh by FUNC_NAME into DESTDIR, contains "LABEL <key>=1".
+    local _fn="$1" _out="$2" _dir="$3"
+    local _body; _body="$(sed -n "/^${_fn}()/,/^}\$/p" "$_S172_SANDY")"
+    [ -n "$_body" ] || return 1
+    rm -f "$_dir/$_out"
+    bash -c "
+        SANDY_HOME='$_dir'
+        BASE_IMAGE_NAME='sandy-base'
+        $_body
+        $_fn
+    " >/dev/null 2>&1
+    [ -f "$_dir/$_out" ] && grep -qF "LABEL ${_S172_LBLKEY}=1" "$_dir/$_out"
+}
+
+_S172_DFTMP="$(cd "$(mktemp -d)" && pwd -P)"
+for _s172_g in \
+    "generate_dockerfile:Dockerfile.new" \
+    "generate_dockerfile_gemini:Dockerfile.gemini.new" \
+    "generate_dockerfile_codex:Dockerfile.codex.new" \
+    "generate_dockerfile_grok:Dockerfile.grok.new" \
+    "generate_dockerfile_opencode:Dockerfile.opencode.new" \
+    "generate_dockerfile_full:Dockerfile.full.new"
+do
+    _s172_fn="${_s172_g%%:*}"
+    _s172_out="${_s172_g##*:}"
+    check "§172(11) $_s172_fn emits LABEL ${_S172_LBLKEY:-sandy.feature_entries}=1 in $_s172_out (a stale image lacking this makes (10)'s warning fire even for a launcher and generator that are perfectly in sync)" \
+        _s172_gen_label "$_s172_fn" "$_s172_out" "$_S172_DFTMP"
+done
+rm -rf "$_S172_DFTMP"
+unset _s172_g _s172_fn _s172_out _S172_DFTMP _S172_LBLKEY
+unset -f _s172_gen_label
+
 unset _S172_SANDY _S172_TMPL _S172_ADOPT
 unset -f _s172_adopt _s172_marker_fe 2>/dev/null || true
 
