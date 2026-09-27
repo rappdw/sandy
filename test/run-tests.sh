@@ -11712,8 +11712,10 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # contributors of the same non-repeatable flag. It sits beside `agent_args`
 # deliberately and answers a different question: that one records what was
 # PASSED, this one whether it can have taken EFFECT.
-check "§114(13g) marker printf format/arg count line up (18 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 18
+# 19 as of 2.4.0: `offline` (#219) -- the launch skipped the update lookups
+# by choice (SANDY_OFFLINE / --no-update-check), provable after the fact.
+check "§114(13g) marker printf format/arg count line up (19 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 19
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -18074,6 +18076,169 @@ rm -rf "$_S163_DIR"
 unset _S163_SANDY _S163_DIR _S163_FNS _S163_BAD_OK _s163_v _S163_BLK _S163_ARGV _S163_L_BLK _S163_L_D _S163_L_F
 unset _S163_EP _S163_DATES _S163_NDATES _S163_LOCAL _s163_l _s163_c _s163_a _s163_b
 unset -f _s163_tz _s163_ep
+
+# ============================================================
+echo ""
+echo "§164: SANDY_OFFLINE=1 / --no-update-check — no update lookup leaves the host, required builds still run (#219)"
+# ============================================================
+# WHY. On a degraded network every launch ran the agent version check, a hit
+# forced a --no-cache rebuild, and the rebuild died at apt. #218 made that
+# survivable; this is the explicit "I know I am on a plane, just launch".
+#
+# THE PROPERTY IS "NO REQUEST", so it is asserted on requests: the REAL sandy
+# runs `--build-only` against a stub curl that logs every URL it is handed and
+# a stub docker that reports every image present at agent version 1.0.0 (the
+# stub curl says 9.9.9 is out, so an unsuppressed check ALWAYS fires and
+# ALWAYS triggers a rebuild). A priming run writes the hash files, so the
+# measured runs reach the update check with nothing else to build. Each
+# measured run first deletes sandy's 24h release-check cache, so its own
+# check would hit the network too. (1) is the positive control: without it,
+# "no request was made" would pass against a fixture where nothing ever runs.
+_S164_SANDY="$SANDY_SCRIPT"
+_S164_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+mkdir -p "$_S164_D/bin" "$_S164_D/home/ws/.sandy" "$_S164_D/sh"
+cat > "$_S164_D/bin/curl" <<'EOF'
+#!/bin/bash
+for a in "$@"; do case "$a" in http*) printf '%s\n' "$a" >> "$S164_CURL_LOG" ;; esac; done
+case "$*" in
+    *claude-code-releases/latest*) echo "9.9.9" ;;
+    *repos/rappdw/sandy/releases/latest*) echo '{"tag_name":"v99.0.0"}' ;;
+    *commits*) echo '[{"sha":"abcdef1234567890"}]' ;;
+esac
+exit 0
+EOF
+cat > "$_S164_D/bin/docker" <<'EOF'
+#!/bin/bash
+printf 'docker %s\n' "$*" >> "$S164_DOCKER_LOG"
+case "$1" in
+    image) case "$*" in *'{{.Id}}'*) echo sha256:0000 ;; esac ;;
+    run) case "$*" in *.version*) echo "1.0.0" ;; esac ;;
+esac
+exit 0
+EOF
+chmod +x "$_S164_D/bin/curl" "$_S164_D/bin/docker"
+export S164_CURL_LOG="$_S164_D/curl.log" S164_DOCKER_LOG="$_S164_D/docker.log"
+_S164_OUT=""; _S164_RC=0
+# $@ = extra env assignments, then `--` and sandy's own args
+_s164_run() {
+    local _envs=()
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do _envs+=("$1"); shift; done
+    [ "${1:-}" = "--" ] && shift
+    rm -f "$_S164_D/sh/.update_check"
+    : > "$S164_CURL_LOG"; : > "$S164_DOCKER_LOG"
+    _S164_RC=0
+    # env: every -u must precede every NAME=VALUE, so the extras go first.
+    _S164_OUT="$(cd "$_S164_D/home/ws" && env -u SANDY_OFFLINE ${_envs[@]+"${_envs[@]}"} HOME="$_S164_D/home" \
+        SANDY_HOME="$_S164_D/sh" PATH="$_S164_D/bin:$PATH" bash "$_S164_SANDY" --build-only "$@" </dev/null 2>&1)" || _S164_RC=$?
+}
+_S164_AGENT_URL="claude-code-releases/latest"
+_S164_SELF_URL="repos/rappdw/sandy/releases/latest"
+
+_s164_run -- ; _S164_PRIME_RC="$_S164_RC"
+check "§164(pre) the priming run completed (rc=$_S164_PRIME_RC), so the measured runs below reach the update check" \
+    test "$_S164_PRIME_RC" -eq 0
+
+_s164_run -- ; _S164_C1="$(cat "$S164_CURL_LOG")"; _S164_B1="$(grep -c '^docker build' "$S164_DOCKER_LOG" || true)"
+check "§164(1) CONTROL: with no offline setting, both the agent version check and sandy's release check are requested (got: $(printf '%s' "$_S164_C1" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2" && printf "%s" "$1" | grep -qF "$3"' _ "$_S164_C1" "$_S164_AGENT_URL" "$_S164_SELF_URL"
+check "§164(1b) CONTROL: ...and the detected update forces an agent rebuild (${_S164_B1} docker build)" \
+    test "${_S164_B1:-0}" -ge 1
+
+_s164_run -- --no-update-check
+check "§164(2) --no-update-check: NO request leaves the host at all (rc=$_S164_RC; got: $(tr '\n' ' ' < "$S164_CURL_LOG"))" \
+    bash -c 'test "$1" -eq 0 && test ! -s "$2"' _ "$_S164_RC" "$S164_CURL_LOG"
+check "§164(3) --no-update-check: nothing is rebuilt, because nothing was looked up" \
+    bash -c '! grep -q "^docker build" "$1"' _ "$S164_DOCKER_LOG"
+check "§164(4) offline is SAID, once, at launch -- the CVE-freshness trade-off is visible" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c "Offline mode")" -eq 1 ]' _ "$_S164_OUT"
+
+_s164_run SANDY_OFFLINE=1 --
+check "§164(5) SANDY_OFFLINE=1 in the environment: no update request" \
+    bash -c 'test "$1" -eq 0 && ! grep -qF "$3" "$2" && ! grep -qF "$4" "$2"' _ "$_S164_RC" "$S164_CURL_LOG" "$_S164_AGENT_URL" "$_S164_SELF_URL"
+
+# PASSIVE-SAFE (maintainer decision): a WORKSPACE config sets it with no
+# approval. The suite exports SANDY_AUTO_APPROVE_PRIVILEGED=1, which would
+# mask an approval gate, so this run removes it -- a privileged or
+# value-gated key would be dropped here (non-TTY fails closed) and the checks
+# would fire.
+printf 'SANDY_OFFLINE=1\n' > "$_S164_D/home/ws/.sandy/config"
+_s164_run -u SANDY_AUTO_APPROVE_PRIVILEGED --
+check "§164(6) SANDY_OFFLINE=1 in a WORKSPACE .sandy/config is honoured with no approval (passive-safe): no update request (rc=$_S164_RC)" \
+    bash -c 'test "$1" -eq 0 && ! grep -qF "$3" "$2" && ! grep -qF "$4" "$2"' _ "$_S164_RC" "$S164_CURL_LOG" "$_S164_AGENT_URL" "$_S164_SELF_URL"
+printf 'SANDY_OFFLINE=0\n' > "$_S164_D/home/ws/.sandy/config"
+_s164_run -- --no-update-check
+check "§164(7) the flag wins over SANDY_OFFLINE=0 in config, like --agent" \
+    bash -c '! grep -qF "$2" "$1"' _ "$S164_CURL_LOG" "$_S164_AGENT_URL"
+rm -f "$_S164_D/home/ws/.sandy/config"
+
+# A REQUIRED build is not an update check. Remove the agent hash so its
+# inputs read as changed: the build must still run under offline mode.
+rm -f "$_S164_D/sh/.build_hash"
+_s164_run -- --no-update-check
+check "§164(8) offline does NOT skip a REQUIRED build: a changed-inputs agent image is still built (rc=$_S164_RC)" \
+    bash -c 'test "$1" -eq 0 && grep -q "^docker build.*sandy-claude-code" "$2"' _ "$_S164_RC" "$S164_DOCKER_LOG"
+check "§164(8b) ...while still making no UPDATE request (only the build-reachability probe may run)" \
+    bash -c '! grep -qF "$3" "$2" && ! grep -qF "$4" "$2"' _ "$_S164_RC" "$S164_CURL_LOG" "$_S164_AGENT_URL" "$_S164_SELF_URL"
+
+_s164_run SANDY_OFFLINE=yes --
+check "§164(9) an invalid SANDY_OFFLINE is refused, not read as either value (rc=$_S164_RC)" \
+    bash -c 'test "$1" -eq 1 && printf "%s" "$2" | grep -q "SANDY_OFFLINE=.yes. invalid"' _ "$_S164_RC" "$_S164_OUT"
+
+# Skill packs resolve their version after --build-only exits, so the REAL
+# resolver is driven directly, against the same stub curl.
+_S164_SP="$(sed -n '/^SKILL_PACK_NAMES=/,/^SKILL_PACK_TAG_PREFIXES=/p;/^skill_pack_lookup()/,/^}$/p;/^skill_pack_latest_release()/,/^}$/p;/^skill_pack_resolve_versions()/,/^}$/p' "$_S164_SANDY")"
+_s164_sp() {
+    : > "$S164_CURL_LOG"
+    rm -f "$_S164_D/sh/.skill_version_gstack"
+    PATH="$_S164_D/bin:$PATH" SANDY_HOME="$_S164_D/sh" SANDY_OFFLINE="$1" bash -c '
+        info() { :; }
+        eval "$1"
+        skill_pack_resolve_versions gstack
+        printf "%s" "${SKILL_PACK_VERSIONS[0]}"
+    ' _ "$_S164_SP" 2>/dev/null || true
+}
+_s164_sp 0 >/dev/null
+check "§164(10) CONTROL: skill-pack resolution asks GitHub when online" \
+    grep -qF "api.github.com/repos/garrytan/gstack" "$S164_CURL_LOG"
+_S164_SPV="$(_s164_sp 1)"
+check "§164(11) SANDY_OFFLINE=1: skill-pack resolution asks nothing and falls back to the built-in pin (got: ${_S164_SPV:-none})" \
+    bash -c 'test ! -s "$1" && test "$2" = main' _ "$S164_CURL_LOG" "$_S164_SPV"
+
+# The --start supervisor is a fresh process: the flag must survive the re-exec.
+_S164_RX="$(sed -n '/^    _sandy_reexec_args=(--start --workspace/,/^    _sandy_reexec_args+=("\$@")$/p' "$_S164_SANDY")"
+_S164_RXA="$(bash -c '
+    WORK_DIR=/w SANDY_REBUILD=false SANDY_BUILD_ONLY=false SANDY_NEW_SESSION=false
+    SANDY_REMOTE_CONTROL=false SANDY_AGENT_OVERRIDE="" SANDY_VERBOSE=0
+    SANDY_NO_UPDATE_CHECK=true
+    _blk="$1"; shift   # the block ends by appending "$@", which must be empty
+    eval "$_blk"
+    printf "%s " "${_sandy_reexec_args[@]}"
+' _ "$_S164_RX" 2>/dev/null || true)"
+check "§164(12) --start hands --no-update-check to the supervisor it re-execs (got: ${_S164_RXA:-none})" \
+    bash -c 'case " $1" in *" --no-update-check "*) exit 0 ;; esac; exit 1' _ "$_S164_RXA"
+
+# Provable after the fact: the session marker records it.
+_S164_MK="$(awk '/^printf .\{.n  "schema": 1,/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$_S164_SANDY")"
+_s164_mk() {
+    bash -c '
+        sandy_full_version() { echo 9.9.9; }
+        _sandy_egress_mode=off SANDY_WORKSPACE=/w SANDBOX_NAME=w-1 _sandy_effort_json=null
+        _sandy_perm_mode_json=null _sandy_csi_json=null _sandy_agents_json=null
+        _sandy_relay_source_json=null _sandy_relay_path_json=null _sandy_relay_disabled_by_json=null
+        CRED_MODE=none _sandy_session_nonce=x _sandy_session_file=/dev/stdout
+        SANDY_OFFLINE="$2"
+        eval "$1"
+    ' _ "$_S164_MK" "$1" 2>/dev/null | grep '"offline"' || true
+}
+check "§164(13) /etc/sandy-session.json records \"offline\": true for an offline launch (got: $(_s164_mk 1))" \
+    bash -c 'printf "%s" "$1" | grep -q "\"offline\": true,"' _ "$(_s164_mk 1)"
+check "§164(14) ...and \"offline\": false otherwise -- a boolean, never absent on a sandy that knows the field" \
+    bash -c 'printf "%s" "$1" | grep -q "\"offline\": false,"' _ "$(_s164_mk 0)"
+rm -rf "$_S164_D"
+unset S164_CURL_LOG S164_DOCKER_LOG
+unset _S164_SANDY _S164_D _S164_OUT _S164_RC _S164_AGENT_URL _S164_SELF_URL _S164_PRIME_RC _S164_C1 _S164_B1
+unset _S164_SP _S164_SPV _S164_RX _S164_RXA _S164_MK
+unset -f _s164_run _s164_sp _s164_mk
 
 # BEGIN SUMMARY
 # ============================================================
