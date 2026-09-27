@@ -15366,15 +15366,18 @@ check "§139(11) SANDY_SUSPICIOUS=1 still defaults the posture to strict" \
 check "§139(12) ...and an explicit SANDY_EGRESS=off still WINS over it (the explicit choice went through its own approval gate)" \
     bash -c '[ "$1" = "off|false" ]' _ "$(_s139 'SANDY_SUSPICIOUS=1 SANDY_EGRESS=off')"
 
-# The tier. `off` weakens the sandbox, so a repository must not be able to set
-# it without an approval prompt -- the property the two booleans had and that a
-# rename could silently drop.
+# The tier. `off` AND `permissive` weaken the sandbox relative to a host that
+# chose strict, so a repository must not be able to set either without an
+# approval prompt -- the property the two booleans had (NO_ISOLATION=1 and
+# STRICT=0 were both gated) and that the 2.0.0 rename silently dropped for the
+# downgrade half. This check ASSERTED THE BUG (permissive:free) until #371;
+# the end-to-end property is §155.
 _S139_TIER="$(bash -c 'eval "$(awk "/^_sandy_passive_value_privileged\(\) \{/,/^\}/" "$1")"
     for v in off permissive strict; do
         if _sandy_passive_value_privileged SANDY_EGRESS "$v"; then printf "%s:gated " "$v"; else printf "%s:free " "$v"; fi
     done' _ "$SANDY_SCRIPT" 2>/dev/null)"
-check "§139(13) SANDY_EGRESS=off is approval-gated from a workspace while permissive and strict are free — a repo may tighten the sandbox, never loosen it (got: $_S139_TIER)" \
-    bash -c '[ "$1" = "off:gated permissive:free strict:free " ]' _ "$_S139_TIER"
+check "§139(13) SANDY_EGRESS=off and =permissive are approval-gated from a workspace while strict is free — a repo may tighten the sandbox, never loosen it (#371) (got: $_S139_TIER)" \
+    bash -c '[ "$1" = "off:gated permissive:gated strict:free " ]' _ "$_S139_TIER"
 
 unset _S139_BLK _S139_TIER _S139_WARN
 
@@ -17438,6 +17441,109 @@ unset _F _LH _W _SH _H8 _NAME _SB _CWS _PD _dw
 unset -f _s154_mk _s154_run _s154_dest _s154_expect
 
 # ============================================================
+echo ""
+echo "§155: a workspace cannot DOWNGRADE a host-strict egress posture without approval (#371)"
+# ============================================================
+# 2.0.0 replaced the booleans with SANDY_EGRESS=off|permissive|strict and gave
+# the value-aware gate one entry for it, `off`. The downgrade half -- the
+# reason SANDY_EGRESS_STRICT=0 is gated -- was dropped in translation, so on a
+# host that chose strict, one committed `SANDY_EGRESS=permissive` re-opened the
+# public internet with no prompt (a workspace source outranks the host config
+# for the same key). §139(13) asserted that bug as correct until #371.
+#
+# The classifier and --validate-config checks below are the mechanism; (6)-(10)
+# are the PROPERTY: the real loader, the real approval resolver and the real
+# egress resolution, composed exactly as the launch composes them, run
+# non-interactively (the case `gh pr checkout N && sandy -p ...` hits), and the
+# EFFECTIVE posture is asserted -- not merely that an approval is pending.
+_S155_SANDY="$SANDY_SCRIPT"
+_s155_pvp() {
+    bash -c "$(sed -n '/^_sandy_passive_value_privileged()/,/^}$/p' "$_S155_SANDY")
+    if _sandy_passive_value_privileged \"\$1\" \"\$2\"; then echo gated; else echo free; fi" _ "$1" "$2"
+}
+check "§155(1) classifier gates SANDY_EGRESS=permissive — the strict -> permissive downgrade, exactly what SANDY_EGRESS_STRICT=0 is gated for (mutation: drop the permissive arm and this reads free)" \
+    test "$(_s155_pvp SANDY_EGRESS permissive)" = gated
+check "§155(2) classifier gates the deprecated alias SANDY_EGRESS_PROXY=1 — the same downgrade when the host set the alias to 2" \
+    test "$(_s155_pvp SANDY_EGRESS_PROXY 1)" = gated
+check "§155(3) ...while SANDY_EGRESS=strict and SANDY_EGRESS_PROXY=2 stay FREE — a repo may tighten the sandbox without a prompt" \
+    bash -c '[ "$1" = free ] && [ "$2" = free ]' _ "$(_s155_pvp SANDY_EGRESS strict)" "$(_s155_pvp SANDY_EGRESS_PROXY 2)"
+
+_S155_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S155_D/vc/.sandy"
+_s155_vc() {  # $1 = workspace config line -> gated|free, per --validate-config
+    printf '%s\n' "$1" > "$_S155_D/vc/.sandy/config"
+    bash "$_S155_SANDY" --validate-config "$_S155_D/vc/.sandy/config" 2>/dev/null \
+        | python3 -c 'import json,sys; print("gated" if json.load(sys.stdin)["privileged_keys_requiring_approval"] else "free")'
+}
+check "§155(4) --validate-config: a workspace SANDY_EGRESS=permissive requires approval (and so does SANDY_EGRESS_PROXY=1)" \
+    bash -c '[ "$1" = gated ] && [ "$2" = gated ]' _ "$(_s155_vc SANDY_EGRESS=permissive)" "$(_s155_vc SANDY_EGRESS_PROXY=1)"
+check "§155(5) --validate-config: a workspace SANDY_EGRESS=strict does NOT (the tightening direction stays frictionless)" \
+    test "$(_s155_vc SANDY_EGRESS=strict)" = free
+
+# The launch composition, extracted from sandy rather than re-typed: key arrays
+# + value-aware classifier, _key_in_list, sha256, the loader, the approval
+# resolver, then the egress region up to its resolution (the same awk range
+# §65 uses). Written to a file and sourced, never `source <(...)` (SRCSUB).
+_S155_SRC="$_S155_D/launch.sh"
+{
+    sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^}$/p' "$_S155_SANDY"
+    sed -n '/^_key_in_list()/,/^}$/p' "$_S155_SANDY"
+    grep -m1 '^sha256() {' "$_S155_SANDY"
+    sed -n '/^_load_sandy_config() {/,/^}$/p' "$_S155_SANDY"
+    sed -n '/^_resolve_passive_privileged_approval() {/,/^}$/p' "$_S155_SANDY"
+} > "$_S155_SRC"
+_S155_EG="$(awk '/^_SANDY_PROXY_ON=false$/{f=1} f{print} f&&/permissive.*default-on/{print "fi"; exit}' "$_S155_SANDY")"
+# $1 host ~/.sandy/config line, $2 workspace .sandy/config line, $3 = 1 to
+# auto-approve (the CI hatch) or empty for none -> "<mode>|<n>", where n is the
+# number of fail-closed "dropping these keys" notices the resolver printed.
+# stdin is /dev/null and _sandy_is_headless=true: nobody can answer a prompt.
+# The suite exports SANDY_AUTO_APPROVE_PRIVILEGED=1, so it MUST be unset here
+# or every case below would pass the downgrade straight through.
+_S155_N=0
+_s155_launch() {
+    _S155_N=$((_S155_N + 1))
+    local d="$_S155_D/case$_S155_N"
+    mkdir -p "$d/home" "$d/ws/.sandy"
+    printf '%s\n' "$1" > "$d/home/config"
+    printf '%s\n' "$2" > "$d/ws/.sandy/config"
+    env -u SANDY_EGRESS -u SANDY_EGRESS_NO_ISOLATION -u SANDY_EGRESS_STRICT -u SANDY_EGRESS_PROXY \
+        -u SANDY_SUSPICIOUS -u SANDY_AUTO_APPROVE_PRIVILEGED ${3:+SANDY_AUTO_APPROVE_PRIVILEGED=$3} \
+        SANDY_HOME="$d/home" WORK_DIR="$d/ws" bash -c '
+            warn(){ :; }; info(){ :; }
+            source "$1"
+            _SANDY_ENV_SET_KEYS=(); _PASSIVE_PRIVILEGED_PENDING=(); _PASSIVE_PRIVILEGED_SOURCES=()
+            _sandy_is_headless=true
+            _load_sandy_config "$SANDY_HOME/config" privileged
+            _load_sandy_config "$WORK_DIR/.sandy/config" passive
+            _resolve_passive_privileged_approval
+            eval "$2"
+            printf "%s" "${_SANDY_PROXY_MODE:-off}"
+        ' _ "$_S155_SRC" "$_S155_EG" </dev/null >"$d/out" 2>"$d/err" || true
+    printf '%s|%s' "$(cat "$d/out")" "$(grep -c 'dropping these keys' "$d/err" || true)"
+}
+_S155_R1="$(_s155_launch SANDY_EGRESS=strict SANDY_EGRESS=permissive '')"
+check "§155(6) PROPERTY: host strict + committed workspace SANDY_EGRESS=permissive, non-interactive -> the EFFECTIVE posture is still strict and the key was dropped fail-closed (got: $_S155_R1; mutation: remove the permissive arm from the gate and this resolves permissive with no notice)" \
+    test "$_S155_R1" = "strict|1"
+_S155_R2="$(_s155_launch SANDY_EGRESS_PROXY=2 SANDY_EGRESS_PROXY=1 '')"
+check "§155(7) PROPERTY: the deprecated-alias route (host SANDY_EGRESS_PROXY=2, workspace =1) is closed the same way (got: $_S155_R2; mutation: drop the =1 arm and this resolves permissive)" \
+    test "$_S155_R2" = "strict|1"
+_S155_R3="$(_s155_launch SANDY_EGRESS=strict SANDY_EGRESS=off '')"
+check "§155(8) PROPERTY: host strict + workspace off -> still strict (the value 2.0.0 did gate)" \
+    test "$_S155_R3" = "strict|1"
+_S155_R4="$(_s155_launch '' SANDY_EGRESS=strict '')"
+check "§155(9) PROPERTY: a workspace TIGHTENING to strict takes effect with no prompt at all — the fix must not tax the direction that is free (got: $_S155_R4)" \
+    test "$_S155_R4" = "strict|0"
+# Non-vacuity control: the fixture CAN express the downgrade. Were the harness
+# unable to make a workspace value win at all, (6) and (7) would pass against
+# the unfixed gate. With an approval in hand (the env-only CI hatch) the
+# workspace value must win -- the gate is a prompt, not a ban.
+_S155_R5="$(_s155_launch SANDY_EGRESS=strict SANDY_EGRESS=permissive 1)"
+check "§155(10) control: once APPROVED, the workspace permissive does win over host strict — so (6) measures the gate, not a harness that ignores the workspace (got: $_S155_R5)" \
+    test "$_S155_R5" = "permissive|0"
+
+rm -rf "$_S155_D"
+unset _S155_SANDY _S155_D _S155_SRC _S155_EG _S155_N _S155_R1 _S155_R2 _S155_R3 _S155_R4 _S155_R5
+unset -f _s155_pvp _s155_vc _s155_launch
 echo "§160: SANDY_CHANNEL_TARGET_PANE=N reaches the Nth AGENT, not tmux pane N (#65)"
 # ============================================================
 # WHY. The Telegram host relay did `tmux send-keys -t "sandy.${TARGET_PANE}"`,
