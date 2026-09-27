@@ -2294,8 +2294,10 @@ sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 | Remapping needed | Usually yes (1000 ≠ 1001) | Usually yes (501 ≠ 1001) |
 | Implementation | Custom `passwd`/`group` files mounted read-only | Same |
 
-**passwd sed pattern**: `sed "s/^claude:x:1001:1001:/claude:x:${HOST_UID}:${HOST_GID}:/"`
-**group sed pattern**: `sed "s/^claude:x:1001:/claude:x:${HOST_GID}:/"`
+**passwd sed pattern**: `sed "s/^sandy:x:1001:1001:/sandy:x:${HOST_UID}:${HOST_GID}:/"`
+**group sed pattern**: `sed "s/^sandy:x:1001:/sandy:x:${HOST_GID}:/"`
+
+(The container user is `sandy` since 2.0.0, #248; it was `claude` before.)
 
 ### D.6 Error Recovery & Fallback Chains
 
@@ -2318,6 +2320,10 @@ sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 2. **GitHub commits API**: 5s timeout, gets latest commit SHA (truncated to 12 chars)
 3. **Local cache file**: `$SANDY_HOME/.skill_version_<pack>`
 4. **Hardcoded fallback**: `SKILL_PACK_VERSIONS` array entry
+
+### D.7 CPU feature floor (x86-64 virtual machines)
+
+Not a Linux/macOS divergence but a host-hardware one, recorded here because it is the platform difference that fails silently (#117). The agent image build runs the native installers of Claude Code (`curl -fsSL https://claude.ai/install.sh | bash`, whose last step executes the downloaded `~/.claude/downloads/claude-<version>-linux-x64 install`) and Grok Build. Both binaries embed a JavaScript runtime that needs at least the **x86-64-v2** feature level. A QEMU/KVM guest on the hypervisor's generic CPU model (`kvm64`/`qemu64`; `lscpu` reports *Common KVM processor*) is offered only the x86-64 baseline — no `sse4_2`, `popcnt`, `avx`, `avx2` — and the binary then **busy-loops in userspace** rather than failing: state `R`, ~90–100% CPU, zero syscalls under `strace`, so the build sits at "Building sandbox image" indefinitely. Real hardware and CI runners expose the full feature set and are unaffected. Sandy does not detect it; the remedy is operator-side — set the VM CPU type to `host` (or an x86-64-v2+ model) and cold-boot. User-facing steps: README "Troubleshooting".
 
 ---
 
