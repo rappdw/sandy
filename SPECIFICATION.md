@@ -1547,6 +1547,10 @@ ENV PATH="/home/sandy/.local/bin:/usr/local/cargo/bin:/usr/local/go/bin:$PATH"
 
 ```dockerfile
 FROM ${BASE_IMAGE_NAME}
+# sandy.feature_entries (#381): every entry supported by this image's
+# user-setup.sh/entrypoint.sh; a stale image predating this label runs only
+# the relay-designated entry, and sandy warns at launch naming the rest.
+LABEL sandy.feature_entries=1
 
 RUN HOME=/home/sandy su -s /bin/bash sandy -c \
     "curl -fsSL https://claude.ai/install.sh | bash" \
@@ -1583,6 +1587,10 @@ Key details:
 
 ```dockerfile
 FROM ${BASE_IMAGE_NAME}
+# sandy.feature_entries (#381): every entry supported by this image's
+# user-setup.sh/entrypoint.sh; a stale image predating this label runs only
+# the relay-designated entry, and sandy warns at launch naming the rest.
+LABEL sandy.feature_entries=1
 # Install Codex CLI as a global npm package. The @openai/codex package ships
 # a prebuilt Rust binary per platform; Node is only the installation vehicle.
 RUN npm install -g @openai/codex \
@@ -3004,7 +3012,7 @@ OpenCode mounts: `$SANDBOX_DIR/opencode/config` → `~/.config/opencode` and `$S
 -v "$SANDBOX_DIR/feature-state/<feature>:/opt/sandy/feature-state/<feature>"  # every other entry
 ```
 
-`-e SANDY_FEATURE_ENTRIES` carries the **full** adopted list (D5) — not just the designated entry's path — so the container-side supervisor (`_sandy_start_entries`) can start and report every one, not only the one `SANDY_HANDOFF_RELAY` names. Each entry also gets its own `-v` mount at `/opt/sandy/feature-state/<feature>`, uniform across entries: the designated entry's directory is `$SANDBOX_DIR/relay-state` itself, mounted at **both** `/opt/sandy/relay-state` and `/opt/sandy/feature-state/<feature>` (its own feature name) — a second mount of the same host directory, not a second directory — so `SANDY_FEATURE_STATE` is spelled the same way for every entry's process regardless of which one happens to be designated. Every other adopted entry's mount instead sources `$SANDBOX_DIR/feature-state/<feature>`, rw, created host-side (`mkdir -p`) for that feature before `RUN_FLAGS` is assembled. None of these mount targets collide with the `:ro` feature payload at `/opt/sandy/features/<feature>` — a different tree entirely. With zero or one entry (or the criterion-8 skip having already cleared `SANDY_HANDOFF_RELAY`), none of this block runs and zero `RUN_FLAGS` are emitted for it — the E.12a zero-diff invariant is unaffected by #381.
+`-e SANDY_FEATURE_ENTRIES` carries the **full** adopted list (D5) — not just the designated entry's path — so the container-side supervisor (`_sandy_start_entries`) can start and report every one, not only the one `SANDY_HANDOFF_RELAY` names. Each entry also gets its own `-v` mount at `/opt/sandy/feature-state/<feature>`, uniform across entries: the designated entry's directory is `$SANDBOX_DIR/relay-state` itself, mounted at **both** `/opt/sandy/relay-state` and `/opt/sandy/feature-state/<feature>` (its own feature name) — a second mount of the same host directory, not a second directory — so `SANDY_FEATURE_STATE` is spelled the same way for every entry's process regardless of which one happens to be designated. Every other adopted entry's mount instead sources `$SANDBOX_DIR/feature-state/<feature>`, rw, created host-side (`mkdir -p`) for that feature before `RUN_FLAGS` is assembled. None of these mount targets collide with the `:ro` feature payload at `/opt/sandy/features/<feature>` — a different tree entirely. With **zero** entries (or the criterion-8 skip having already cleared `SANDY_HANDOFF_RELAY`), none of this block runs and zero `RUN_FLAGS` are emitted for it — the E.12a zero-diff invariant is unaffected by #381. With **exactly one** entry the block still runs in full: that entry is by definition the relay-designated one, so its `-v` mount at `/opt/sandy/feature-state/<feature>` sources the same `$SANDBOX_DIR/relay-state` directory as the `/opt/sandy/relay-state` mount above it — a **second** `-v` line, not a no-op — alongside `-e SANDY_RELAY_STATE`, `-e SANDY_HANDOFF_RELAY` and `-e SANDY_FEATURE_ENTRIES` (naming the single entry). Total: two `-v` lines (both sourcing `relay-state`) plus three `-e` flags, byte-identical in shape to what a two-or-more-entry launch emits for its designated entry alone.
 
 **Per-feature entry derived env** (1.10.0, generalized 2.4.0 #381, container-side only — set inside `_sandy_supervise_entry`'s own subshell in `user-setup.sh`, not passed via docker `-e`): the relay-designated entry's process (and the tmux server and every agent pane, since it is exported in `user-setup.sh`'s own shell **before** `_sandy_start_entries` forks any subshell) additionally sees `SANDY_RELAY_STATE` (its state directory, host default `/opt/sandy/relay-state`). **Every** entry's own child process — designated or not, per D3 of #381 — sees `SANDY_FEATURE_STATE` set to `/opt/sandy/feature-state/<feature>`, exported **inside that entry's own subshell only** (never the parent shell or any other entry's process). For the designated entry this is a *second* mount of the same host directory as `SANDY_RELAY_STATE` (`$SANDBOX_DIR/relay-state`, mounted at both container paths), not a different directory — the point is that `SANDY_FEATURE_STATE` is uniform across every entry regardless of which one happens to be designated. The one exception is the pre-#381 legacy fallback path (`SANDY_FEATURE_ENTRIES` unset, a lone `SANDY_HANDOFF_RELAY` forwarded — an image whose build was deferred per #218): there, no `feature-state/<name>` mount was ever requested by that older launcher, so the designated entry's `SANDY_FEATURE_STATE` falls back to `SANDY_RELAY_STATE` directly rather than naming a mount that does not exist. Both plus the ambient `SANDY_AGENT`/`SANDY_WORKSPACE` and the rest of the container's inherited environment (including `CLAUDE_CODE_OAUTH_TOKEN` if present — see `docs/security/CROSS_SESSION_INBOUND.md` §8). A relay wanting to enumerate live sessions runs `/usr/local/bin/sandy-handoff-sessions` (Appendix A.1) rather than parsing `~/.claude/sessions/` itself.
 

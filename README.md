@@ -614,7 +614,7 @@ Each value carries `state`, `restarts`, `executable_present`, `path`, `state_dir
 
 Two failure shapes, handled differently:
 
-- **Cannot start** (missing, not executable, no `relay-state` mount, no `flock`): fails the launch, before or during container start.
+- **Cannot start** (missing, not executable, no `relay-state` mount, no `flock`): fails the launch, before or during container start. **One documented exception**: a stale image built before the `sandy.feature_entries=1` Dockerfile label existed (a build deferred by #218's reachability gate, or any other old cached image) only ever knew the pre-#381 single-relay path, so with more than one entry adopted it starts the relay-designated entry and never sees the rest — that is not a broken entry, so it does not fail the launch. Sandy warns at launch instead, naming every entry that will not start and pointing at `sandy --rebuild`; `--print-state` reports those entries as `state: "absent"`.
 - **Starts, then exits**: if the first run exits non-zero within ~5s the session fails with that exit code. Past that window it is a runtime loop, which cannot un-succeed a launch that already completed — it is reported instead:
 
 ```sh

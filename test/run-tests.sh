@@ -17963,6 +17963,33 @@ check "§156(3) single entry: relay source/path match §149(11)'s pre-#381 value
     bash -c '[ "$(printf "%s" "$1" | cut -d"|" -f1-2)" = "manifest|/opt/sandy/features/amap/relay" ]' _ "$_S156_A3"
 rm -f "$_S156_WF"; unset _S156_A1 _S156_A2 _S156_A3 _S156_WF
 
+# _s156_kill_loops PATTERN -- kills every supervisor LOOP process whose
+# cmdline matches PATTERN (the fixture's own tmpdir path), INCLUDING each
+# loop's currently-forked `sleep "$backoff"` child, which a plain `pkill -f
+# PATTERN` cannot see: that child's own cmdline is just "sleep N", with no
+# reference to the fixture path, so killing only the loop process orphans it
+# for up to 60s. Freezing each matching loop (SIGSTOP) before touching its
+# children closes the race where it forks a NEW backoff child between the
+# two kill steps below; SIGKILL still terminates a stopped process.
+_s156_kill_loops() {
+    if ! command -v pgrep >/dev/null 2>&1; then
+        if command -v pkill >/dev/null 2>&1; then
+            pkill -9 -f "$1" >/dev/null 2>&1 || true
+        fi
+        return 0
+    fi
+    local _lp _lps
+    _lps="$(pgrep -f "$1" 2>/dev/null || true)"
+    if [ -n "$_lps" ]; then
+        for _lp in $_lps; do kill -STOP "$_lp" >/dev/null 2>&1 || true; done
+        for _lp in $_lps; do pkill -9 -P "$_lp" >/dev/null 2>&1 || true; done
+    fi
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -9 -f "$1" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
 # --- (4)-(5) dynamic: two entries, each independently supervised -----------
 # Needs flock (the supervisor refuses without it); skipped loudly otherwise,
 # same discipline as §114(16).
@@ -18036,13 +18063,14 @@ EOF
     # one line per (re)start, including alpha's post-restart pid the (4g) kill
     # above never explicitly targeted, and beta's, which nothing above killed
     # at all) -- these are the fixture's own `exec sleep 30` processes, so
-    # killing the recorded pid IS killing the sleep, no orphan. Then pkill -f
-    # on the unique tmpdir path (exists on macOS too) for the supervisor LOOP
-    # processes, whose command line still carries it (they never exec).
+    # killing the recorded pid IS killing the sleep, no orphan. Then reap the
+    # supervisor LOOP processes (and their own backoff-sleep children) via
+    # _s156_kill_loops -- the unique tmpdir path is on their cmdline too
+    # (they never exec, they only fork/exec the entry and `sleep`).
     for _s156_p in $(cat "$_S156_D/pid-a" "$_S156_D/pid-b" 2>/dev/null); do
         kill -9 "$_s156_p" >/dev/null 2>&1 || true
     done
-    command -v pkill >/dev/null 2>&1 && pkill -9 -f "$_S156_D/" >/dev/null 2>&1 || true
+    _s156_kill_loops "$_S156_D/"
     rm -rf "$_S156_D"
     unset _S156_RC _S156_PIDA1 _S156_PIDA2 _S156_PIDB1 _s156_p
 
@@ -18076,12 +18104,17 @@ EOF
     for _s156_p in $(cat "$_S156_D2/pid-a" 2>/dev/null); do
         kill -9 "$_s156_p" >/dev/null 2>&1 || true
     done
-    command -v pkill >/dev/null 2>&1 && pkill -9 -f "$_S156_D2/" >/dev/null 2>&1 || true
+    # Both alpha's and beta's loops are live here -- beta's own entry exits
+    # immediately every time, but its supervisor loop keeps retrying with
+    # backoff regardless of the overall session having already failed, so
+    # it needs the same loop+backoff-child reaping as alpha's.
+    _s156_kill_loops "$_S156_D2/"
     rm -rf "$_S156_D2"
     unset _S156_OUT5 _S156_RC5 _S156_FNS _S156_OUT5F _s156_p
 else
     skip "§156(4)-(5) dynamic per-feature supervision (flock or templates/user-setup.sh.tmpl unavailable)"
 fi
+unset -f _s156_kill_loops
 
 # --- (6) the marker printf, with feature_entries populated ------------------
 _S156_MKFN="$(awk '/^_sandy_fm_jesc\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$_S156_SANDY")"
@@ -18362,23 +18395,40 @@ _S156_IMGBLK="$(awk '/^# --- BEGIN stale-image feature-entries warning \(#381\)/
 check "§156(10pre) the stale-image warning block was extracted (mutation: a rename empties this and every check below goes vacuous)" \
     bash -c 'printf "%s" "$1" | grep -q "sandy.feature_entries"' _ "$_S156_IMGBLK"
 
-# _s156_imgwarn BLOCK LABEL_VALUE FE_LIST RELAY_FEATURE -> every warn() call's
-# argument, one per line, on stdout. LABEL_VALUE is what the stubbed `docker
-# image inspect` prints (e.g. "1", "", or "<no value>") -- threaded through as
-# a positional param to the nested `bash -c`, which has its own $1.. and
-# cannot see the outer function's locals.
+# _s156_imgwarn BLOCK LABEL_VALUE FE_LIST RELAY_FEATURE [WANT_KEY] [WANT_IMAGE]
+# -> every warn() call's argument, one per line, on stdout. LABEL_VALUE is
+# what the stubbed `docker image inspect` prints (e.g. "1", "", or
+# "<no value>") -- but ONLY when it is actually invoked as `docker image
+# inspect -f '{{index .Config.Labels "<WANT_KEY>"}}' <WANT_IMAGE>`; any other
+# invocation (wrong subcommand, wrong label key, wrong image argument) prints
+# nothing, exactly like docker rendering an absent label. This is what
+# catches a block that inspects a hard-coded image name or the wrong label
+# key instead of "$IMAGE_NAME"/sandy.feature_entries -- a stub that ignored
+# its arguments could never fail on either mutation. WANT_KEY/WANT_IMAGE
+# default to the real key and to IMAGE_NAME itself (the no-mismatch case);
+# passing a different value simulates the block being fed a mismatch.
+# Threaded through as positional params to the nested `bash -c`, which has
+# its own $1.. and cannot see the outer function's locals.
 _s156_imgwarn() {
     local _blk="$1" _label="$2" _fe="$3" _relf="$4"
+    local _want_key="${5:-sandy.feature_entries}" _want_img="${6:-stub-image}"
     bash -c '
         set -uo pipefail
         _lbl="$2"
-        docker() { printf "%s" "$_lbl"; }
+        _want_key="$5"
+        _want_img="$6"
+        docker() {
+            if [ "$1" = "image" ] && [ "$2" = "inspect" ] && [ "$3" = "-f" ] \
+               && [[ "$4" == *"\"$_want_key\""* ]] && [ "$5" = "$_want_img" ]; then
+                printf "%s" "$_lbl"
+            fi
+        }
         IMAGE_NAME="stub-image"
         _sandy_fe_list="$3"
         _sandy_fe_relay_feature="$4"
         warn() { printf "WARN:%s\n" "$*"; }
         eval "$1"
-    ' _ "$_blk" "$_label" "$_fe" "$_relf"
+    ' _ "$_blk" "$_label" "$_fe" "$_relf" "$_want_key" "$_want_img"
 }
 
 _S156_W1="$(_s156_imgwarn "$_S156_IMGBLK" "" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
@@ -18405,6 +18455,27 @@ check "§156(10d) label ABSENT + only 1 entry: silent (nothing a stale image wou
 _S156_W5="$(_s156_imgwarn "$_S156_IMGBLK" "" "" "")"
 check "§156(10e) label ABSENT + zero entries: silent" \
     bash -c '[ -z "$1" ]' _ "$_S156_W5"
+
+# The stub's own args-checking is what makes (10c) mean anything: without it,
+# a block that inspects the WRONG image (a hard-coded name instead of
+# "$IMAGE_NAME") or the WRONG label key would still see "1" come back and
+# stay silent. Simulate exactly that by making the stub answer "1" only for
+# an image/key the real block does NOT pass -- so from the block's own
+# point of view the label is absent (docker prints nothing for its actual
+# query), and it must warn even though a label value of "1" exists somewhere.
+_S156_W6="$(_s156_imgwarn "$_S156_IMGBLK" "1" \
+    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha \
+    sandy.feature_entries not-the-real-image)"
+check "§156(10f) a block inspecting the WRONG IMAGE (stub only answers for a name the block never passes) warns, same as a genuinely absent label" \
+    bash -c 'printf "%s\n" "$1" | grep -q "WARN:.*beta"' _ "$_S156_W6"
+
+_S156_W7="$(_s156_imgwarn "$_S156_IMGBLK" "1" \
+    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha \
+    not.the.real.key stub-image)"
+check "§156(10g) a block inspecting the WRONG LABEL KEY (stub only answers for a key the block never passes) warns, same as a genuinely absent label" \
+    bash -c 'printf "%s\n" "$1" | grep -q "WARN:.*beta"' _ "$_S156_W7"
+
+unset _S156_W6 _S156_W7
 
 unset _S156_IMGBLK _S156_W1 _S156_W2 _S156_W3 _S156_W4 _S156_W5
 unset -f _s156_imgwarn
