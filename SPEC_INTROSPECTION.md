@@ -141,7 +141,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       {
         "name": "SANDY_AUTO_APPROVE_PRIVILEGED",
         "type": "bool",
-        "description": "Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.",
+        "description": "Bypass TWO of the three launch approval gates: the passive-privileged config-key prompt AND the per-project .sandy/Dockerfile build prompt ... It does NOT bypass the dangerous-symlink gate, deliberately ... Intended for CI / test harnesses only.",
         "sources": ["env"]
       },
       {

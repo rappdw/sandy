@@ -18239,6 +18239,144 @@ unset S164_CURL_LOG S164_DOCKER_LOG
 unset _S164_SANDY _S164_D _S164_OUT _S164_RC _S164_AGENT_URL _S164_SELF_URL _S164_PRIME_RC _S164_C1 _S164_B1
 unset _S164_SP _S164_SPV _S164_RX _S164_RXA _S164_MK
 unset -f _s164_run _s164_sp _s164_mk
+echo ""
+echo "§162: the --start pre-pass answers the .sandy/Dockerfile gate too; SANDY_AUTO_APPROVE_PRIVILEGED covers two gates of three (#296)"
+# WHY. `--start` answers launch approvals on the CLIENT tty in a SANDY_APPROVE_ONLY
+# pre-pass, because the supervisor it forks has stdin on /dev/null. That pass
+# covered the config keys and the symlinks but exited ~2500 lines before the
+# per-project Dockerfile gate, which was therefore reached only in the
+# supervisor and could only fail closed: no way to approve a project image in
+# daemon mode at all. Declining there is NOT a refusal (maintainer decision): N
+# means "use the base image", so the pass exits 0 and hands the decline to the
+# supervisor bound to the context hash.
+#
+# The pre-pass is driven for real under a pty (python3 pty.fork), because the
+# gate branches on [ -t 0 ] and reads its answer from /dev/tty; the driver
+# answers the [y/N] prompt when it appears. This harness exports
+# SANDY_AUTO_APPROVE_PRIVILEGED=1 globally, which the gate honours as a bypass,
+# so every run that must reach the prompt strips it with env -u.
+_S162_SANDY="$(cd "$(dirname "$0")/.." && pwd -P)/sandy"
+_S162_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+# Not named pty.py: a script of that name shadows the pty module it imports.
+cat > "$_S162_DIR/ptydrive.py" <<'PY'
+import os, pty, sys, select, time, signal
+answer = sys.argv[1]
+argv = sys.argv[2:]
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        os.execvp(argv[0], argv)
+    finally:
+        os._exit(127)
+buf = b''
+sent = False
+deadline = time.time() + 90
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try:
+            d = os.read(fd, 4096)
+        except OSError:
+            break
+        if not d:
+            break
+        buf += d
+        if not sent and answer and b'[y/N]' in buf:
+            os.write(fd, (answer + '\n').encode())
+            sent = True
+else:
+    os.kill(pid, signal.SIGKILL)
+_, st = os.waitpid(pid, 0)
+rc = os.WEXITSTATUS(st) if os.WIFEXITED(st) else 128 + os.WTERMSIG(st)
+sys.stdout.write(buf.decode('utf-8', 'replace'))
+sys.stdout.write('\nPTYDRIVE_RC=%d\n' % rc)
+PY
+# Same extraction 38c uses, so the hash the checks expect is computed by the
+# real _sandy_context_hash rather than re-derived here.
+_S162_FN="$(awk '
+    /^sha256\(\)/ {print; next}
+    /^_sandy_context_hash\(\)/,/^}/ {print; next}
+    /^_sandy_project_dockerfile_approved\(\)/,/^}/ {print; next}
+' "$_S162_SANDY")"
+_s162_mk() {   # $1 = fixture name; a workspace with a .sandy/Dockerfile and a stub docker
+    local T="$_S162_DIR/$1"
+    mkdir -p "$T/bin" "$T/home" "$T/ws/.sandy"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/docker"; chmod +x "$T/bin/docker"
+    printf 'ARG BASE_IMAGE\nFROM $BASE_IMAGE\nRUN echo hi\n' > "$T/ws/.sandy/Dockerfile"
+}
+_s162_pre() {   # $1 = fixture  $2 = answer (y|n); runs the pre-pass on a pty, sets _S162_OUT / _S162_RC
+    local T="$_S162_DIR/$1"
+    _S162_OUT="$( cd "$T/ws" && env -u SANDY_AUTO_APPROVE_PRIVILEGED PATH="$T/bin:$PATH" SANDY_HOME="$T/home" HOME="$T" SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$T/result" python3 "$_S162_DIR/ptydrive.py" "$2" bash "$_S162_SANDY" 2>&1 || true )"
+    _S162_RC="$(printf '%s\n' "$_S162_OUT" | sed -n 's/^PTYDRIVE_RC=\([0-9][0-9]*\).*/\1/p')"
+}
+_s162_hash() { bash -c "$_S162_FN"$'\n'"_sandy_context_hash '$1'"; }
+_s162_approval() {   # $1 = fixture; path of its dockerfile approval file
+    local T="$_S162_DIR/$1" wh
+    wh="$(printf '%s' "$T/ws" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16)"
+    printf '%s' "$T/home/approvals/dockerfile-$wh.list"
+}
+_s162_diag() {   # $1 = label; show what the pty run produced when a check is about to fail
+    printf '    \033[0;33m^ %s: rc=%s, captured (last 300 bytes): %s\033[0m\n' \
+        "$1" "${_S162_RC:-?}" "$(printf '%s' "$_S162_OUT" | tail -c 300 | tr '\n\r' '  ' | cat -v)"
+}
+
+if ! command -v python3 >/dev/null 2>&1; then
+    skip "§162(1-6) python3 not available to drive a pty"
+else
+# --- A1: approving in the pre-pass persists the SAME approval file a foreground launch writes
+_s162_mk A
+_s162_pre A y
+_S162_HA="$(_s162_hash "$_S162_DIR/A/ws/.sandy")"
+printf '%s' "$_S162_OUT" | grep -q "Build this .sandy/Dockerfile" || _s162_diag "§162(1) pre-pass y"
+check "§162(1) the APPROVE_ONLY pre-pass REACHES the Dockerfile prompt (mutation: dropping the call from _sandy_approve_only_finish restores the unanswerable-in-daemon-mode bug)" \
+    bash -c 'printf "%s" "$1" | grep -q "Build this .sandy/Dockerfile"' _ "$_S162_OUT"
+check "§162(2) answering y writes the approval file, keyed on the build-context hash, and the pass exits 0" \
+    bash -c 'test "$1" = 0 && test "$(head -n1 "$2" 2>/dev/null)" = "$3"' _ "$_S162_RC" "$(_s162_approval A)" "$_S162_HA"
+
+# --- A2: declining is NOT a refusal (the maintainer decision), and the decline is handed on
+_s162_mk B
+_s162_pre B n
+_S162_HB="$(_s162_hash "$_S162_DIR/B/ws/.sandy")"
+[ "$_S162_RC" = 0 ] || _s162_diag "§162(3) pre-pass n"
+check "§162(3) answering N exits 0 -- use the base image, do not stop --start (mutation: treating it like a declined symlink makes --start exit 6)" \
+    test "$_S162_RC" = 0
+check "§162(4) ...after SHOWING the prompt, and writes NO approval file" \
+    bash -c 'printf "%s" "$1" | grep -q "Build this .sandy/Dockerfile" && test ! -e "$2"' _ "$_S162_OUT" "$(_s162_approval B)"
+check "§162(5) ...and records the decline for the supervisor, bound to the context hash (mutation: dropping the result write makes the supervisor re-print a review nobody can answer)" \
+    bash -c 'test "$(sed -n "s/^dockerfile_declined=//p" "$1" 2>/dev/null)" = "$2"' _ "$_S162_DIR/B/result" "$_S162_HB"
+
+# --- A3: the bypass covers the Dockerfile gate but deliberately NOT the symlink gate
+_s162_mk C
+mkdir -p "$_S162_DIR/C/outside"; ln -s "$_S162_DIR/C/outside" "$_S162_DIR/C/ws/escape"
+_S162_OUT="$( cd "$_S162_DIR/C/ws" && PATH="$_S162_DIR/C/bin:$PATH" SANDY_HOME="$_S162_DIR/C/home" HOME="$_S162_DIR/C" SANDY_APPROVE_ONLY=1 SANDY_AUTO_APPROVE_PRIVILEGED=1 bash "$_S162_SANDY" </dev/null 2>&1 || true )"
+check "§162(6) SANDY_AUTO_APPROVE_PRIVILEGED=1 does NOT approve an escaping symlink -- the documented asymmetry is real (mutation: honouring the bypass in _sandy_resolve_symlinks silently mounts every future escape)" \
+    bash -c 'printf "%s" "$1" | grep -q "need interactive approval"' _ "$_S162_OUT"
+fi
+
+# --- A4: the supervisor side of the hand-off (no tty, as under nohup </dev/null)
+_s162_sup() {   # $1 = fixture  $2 = SANDY_DOCKERFILE_DECLINED_HASH; prints output then RC=<n>
+    local T="$_S162_DIR/$1"
+    bash -c "$_S162_FN"$'\n'"WORK_DIR='$T/ws' SANDY_HOME='$T/home' SANDY_AUTO_APPROVE_PRIVILEGED=0 SANDY_DOCKERFILE_DECLINED_HASH='$2'"$'\n''_sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile"; echo "RC=$?"' </dev/null 2>&1 || true
+}
+_s162_mk D
+_S162_HD="$(_s162_hash "$_S162_DIR/D/ws/.sandy")"
+_S162_OUT="$(_s162_sup D "$_S162_HD")"
+check "§162(7) a matching declined hash skips the build (rc 1) with ONE line, not the whole review again (mutation: removing the hand-off re-prints the Dockerfile and advises approving a prompt the user just answered)" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && printf "%s" "$1" | grep -q "not approved at the --start prompt" && ! printf "%s" "$1" | grep -q "Review it"' _ "$_S162_OUT"
+_S162_OUT="$(_s162_sup D "0000000000000000000000000000000000000000000000000000000000000000")"
+check "§162(8) a declined hash for OTHER content falls through to the normal fail-closed path (mutation: honouring any non-empty value would let a stale decline describe bytes nobody reviewed)" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && printf "%s" "$1" | grep -q "Non-interactive session"' _ "$_S162_OUT"
+_S162_OUT="$(_s162_sup D "")"
+check "§162(9) no hand-off at all keeps the pre-#296 fail-closed behaviour" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && printf "%s" "$1" | grep -q "Non-interactive session"' _ "$_S162_OUT"
+check "§162(10) the --start client forwards the decline into the supervisor env (the one step the pty runs above cannot reach without forking a real supervisor)" \
+    grep -q '"SANDY_DOCKERFILE_DECLINED_HASH=\$_sandy_df_declined"' "$_S162_SANDY"
+check "§162(11) --print-schema describes the bypass as covering the Dockerfile gate and NOT the symlink gate (#296 item 3; R8 in the 2026-09-04 review)" \
+    bash -c '"$1" --print-schema | python3 -c "import json,sys; d=[k for k in json.load(sys.stdin)[\"config\"][\"env_only_keys\"] if k[\"name\"]==\"SANDY_AUTO_APPROVE_PRIVILEGED\"][0][\"description\"]; assert \".sandy/Dockerfile\" in d and \"NOT bypass the dangerous-symlink\" in d"' _ "$_S162_SANDY"
+
+rm -rf "$_S162_DIR"
+unset _S162_SANDY _S162_DIR _S162_FN _S162_OUT _S162_RC _S162_HA _S162_HB _S162_HD
+unset -f _s162_mk _s162_pre _s162_hash _s162_approval _s162_diag _s162_sup
 
 # BEGIN SUMMARY
 # ============================================================
