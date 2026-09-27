@@ -11321,6 +11321,7 @@ _s114_csi_block() {
         warn(){ printf '%s\n' \"\$*\"; }
         $_S114_CSI_FN
         $_S114_CSI_BLK
+        printf 'src_json=%s\n' \"\${_sandy_csi_src_json:-UNSET}\"
     "
 }
 # NOTE on the trailing `|| true` below: the real "BEGIN cross-session inbound"
@@ -11337,6 +11338,19 @@ rm -rf "$_S114/ws-d1" "$_S114/sbx-d1"; mkdir -p "$_S114/ws-d1/.claude" "$_S114/s
 _S114_D1_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d1" "$_S114/sbx-d1" 2>&1)" || true
 check "§114(7a) unset + no relay -> refuse, both files named, correct reason string" \
     bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no selected feature declares receives cross_session and no entry will start)"' -- "$_S114_D1_OUT"
+# A verifier found the gap this closes: the resolution block sets BOTH
+# _sandy_csi_json and _sandy_csi_src_json in each of its three "written"
+# branches (both files / userSettings-only / workspace-only), but nothing
+# before this asserted the SECOND assignment survives -- a mutation reverting
+# it to set only _sandy_csi_json left every normal launch recording
+# cross_session_inbound_source: null (the marker printf's own `:-null`
+# fallback) while cross_session_inbound was populated, and all existing
+# checks (which only look at the info/warn TEXT, never this variable) still
+# passed. §114(7a-json)/(7b-json)/(7h-json) below cover the three write
+# branches directly; the rest of (7c)-(7m) below add one more assertion each
+# so the whole precedence table is covered, not just one branch.
+check "§114(7a-json) ...and _sandy_csi_src_json (the value the marker printf reads) is populated by the SAME both-files-written branch (mutation: dropping that assignment leaves this UNSET) (got: $(printf '%s' "$_S114_D1_OUT" | tail -1))" \
+    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"default\""' -- "$_S114_D1_OUT"
 check "§114(7a-user) refuse actually landed in the sandbox userSettings file (the seam that gates delivery)" \
     bash -c 'grep -q "\"crossSessionInbound\": *\"refuse\"" "$1/claude/settings.json"' -- "$_S114/sbx-d1"
 check "§114(7a-ws) refuse ALSO landed in the workspace project file (the seam that is honored for hold/refuse)" \
@@ -11348,6 +11362,8 @@ check "§114(7b) unset + relay configured, no declared need -> accept via the DE
     bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=accept written to claude/settings.json (sandbox) and .claude/settings.local.json (default (legacy rule): a feature entry will start and no feature declares receives cross_session; the launch fails if it cannot start)"' -- "$_S114_D2_OUT"
 check "§114(7b-user) accept actually landed in the sandbox userSettings file — this is the ONLY placement measured to make accept deliver (probe case E); accept in the workspace file alone is a measured no-op (probe cases A/A2)" \
     bash -c 'grep -q "\"crossSessionInbound\": *\"accept\"" "$1/claude/settings.json"' -- "$_S114/sbx-d2"
+check "§114(7b-json) ...and src_json is \"relay-legacy\" (the legacy path's own resolution branch also sets it) (got: $(printf '%s' "$_S114_D2_OUT" | tail -1))" \
+    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"relay-legacy\""' -- "$_S114_D2_OUT"
 
 rm -rf "$_S114/ws-d3" "$_S114/sbx-d3"; mkdir -p "$_S114/ws-d3/.claude" "$_S114/sbx-d3"
 _S114_D3_OUT="$(_s114_csi_block hold '' claude "$_S114/ws-d3" "$_S114/sbx-d3" 2>&1)" || true
@@ -11385,6 +11401,8 @@ check "§114(7h) userSettings write blocked -> workspace-only wording, correct w
         printf "%s\n" "$1" | grep -q "NOT to the sandbox settings.json" &&
         printf "%s\n" "$1" | grep -q "will still be held"
     ' -- "$_S114_D7_OUT"
+check "§114(7h-json) ...and the THIRD write branch (workspace-only) also sets src_json, not just the other two (got: $(printf '%s' "$_S114_D7_OUT" | tail -1))" \
+    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"explicit\""' -- "$_S114_D7_OUT"
 
 # --- (7i)-(7o) #380: the default is keyed on a DECLARED NEED, not the relay --
 # _s114_csi_block's new $6 (_sandy_csi_need) and $7 (nostart reason token) let
@@ -11396,6 +11414,8 @@ rm -rf "$_S114/ws-d9" "$_S114/sbx-d9"; mkdir -p "$_S114/ws-d9/.claude" "$_S114/s
 _S114_D9_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d9" "$_S114/sbx-d9" amap 2>&1)" || true
 check "§114(7i) declared need, no entry -> accept, reason names the declaring feature" \
     bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=accept written to claude/settings.json (sandbox) and .claude/settings.local.json (default: feature amap declares receives cross_session)"' -- "$_S114_D9_OUT"
+check "§114(7i-json) ...and src_json names the feature: \"feature:amap\" (got: $(printf '%s' "$_S114_D9_OUT" | tail -1))" \
+    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"feature:amap\""' -- "$_S114_D9_OUT"
 
 rm -rf "$_S114/ws-d10" "$_S114/sbx-d10"; mkdir -p "$_S114/ws-d10/.claude" "$_S114/sbx-d10"
 _S114_D10_OUT="$(_s114_csi_block refuse '' claude "$_S114/ws-d10" "$_S114/sbx-d10" amap 2>&1)" || true
@@ -11411,6 +11431,8 @@ rm -rf "$_S114/ws-d12" "$_S114/sbx-d12"; mkdir -p "$_S114/ws-d12/.claude" "$_S11
 _S114_D12_OUT="$(_s114_csi_block '' x claude "$_S114/ws-d12" "$_S114/sbx-d12" 2>&1)" || true
 check "§114(7l) legacy: no declared need, entry present -> accept, reason explicitly says 'legacy rule'" \
     bash -c 'printf "%s" "$1" | grep -q "(default (legacy rule): a feature entry will start"' -- "$_S114_D12_OUT"
+check "§114(7l-json) ...and src_json is \"relay-legacy\", not \"default\" or a stale value from a prior case (got: $(printf '%s' "$_S114_D12_OUT" | tail -1))" \
+    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"relay-legacy\""' -- "$_S114_D12_OUT"
 
 rm -rf "$_S114/ws-d13" "$_S114/sbx-d13"; mkdir -p "$_S114/ws-d13/.claude" "$_S114/sbx-d13"
 _S114_D13_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d13" "$_S114/sbx-d13" amap headless 2>&1)" || true
