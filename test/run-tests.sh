@@ -18678,13 +18678,13 @@ _s168_seed() { # _s168_seed <tools> <host settings.json body or ""> -> resulting
     local _t="$1" _c _b
     _c="$(mktemp -d "$_S168_DIR/c.XXXXXX")"; _b="$_c/bin"
     mkdir -p "$_b" "$_c/home/.claude" "$_c/sb/claude"
-    for _x in mv rm cp cat; do ln -s "$(command -v "$_x")" "$_b/$_x"; done
+    for _x in mv rm cp cat mktemp readlink; do ln -s "$(command -v "$_x")" "$_b/$_x"; done
     if [ "$_t" = node ] && command -v node >/dev/null 2>&1; then ln -s "$(command -v node)" "$_b/node"; fi
     if [ "$_t" != none ] && command -v jq >/dev/null 2>&1; then ln -s "$(command -v jq)" "$_b/jq"; fi
     [ -n "$2" ] && printf '%s\n' "$2" > "$_c/home/.claude/settings.json"
     env -i PATH="$_b" HOME="$_c/home" SANDBOX_DIR="$_c/sb" "$BASH" -c '
         _sandy_agent_has() { return 0; }
-        info() { :; }
+        info() { :; }; warn() { :; }
         SANDBOX_IS_NEW=false
         eval "$1"
         cat "$SANDBOX_DIR/claude/settings.json"
@@ -18719,6 +18719,67 @@ fi
 rm -rf "$_S168_DIR"
 unset _S168_DIR _S168_BLOCK _S168_HOST _S168_OUT _S168_CLEAN _S168_ODD _S168_NONE _s168_t
 unset -f _s168_seed _s168_q
+
+echo "§169: the settings seed never writes THROUGH a link the agent planted in its rw ~/.claude"
+# ============================================================
+# $SANDBOX_DIR/claude is the container's ~/.claude, mounted rw, and the seeding
+# block runs HOST-side at the next launch. A relative link planted there
+# resolves on the host: settings.json -> ../../home/.claude/settings.json made
+# the node merge write the host's own settings.json back with the
+# bypassPermissions pin and the native sandbox off (pre-existing; #126 added
+# sandbox.enabled:false to what leaked), and the jq branch's staged
+# settings.json.base (added with #126) truncated whatever file a planted link
+# named. Driven for real through the same extraction §168 uses; each case
+# asserts the VICTIM is byte-identical afterwards.
+_S169_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S169_BLOCK="$(awk '/^if _sandy_agent_has claude; then$/{b=$0; getline; if ($0 ~ /SEED_SETTINGS=/) {f=1; print b}} f{print} f&&/^fi  # end Claude settings seeding/{exit}' "$SANDY_SCRIPT")"
+# _s169_seed <node|jq> <link-name> <link-target relative to sb/claude> <host settings body or ""> -> case dir
+_s169_seed() {
+    local _c _b
+    _c="$(mktemp -d "$_S169_DIR/c.XXXXXX")"; _b="$_c/bin"
+    mkdir -p "$_b" "$_c/home/.claude" "$_c/sb/claude"
+    for _x in mv rm cp cat mktemp readlink; do ln -s "$(command -v "$_x")" "$_b/$_x"; done
+    if [ "$1" = node ]; then ln -s "$(command -v node)" "$_b/node"; fi
+    ln -s "$(command -v jq)" "$_b/jq"
+    [ -n "$4" ] && printf '%s\n' "$4" > "$_c/home/.claude/settings.json"
+    printf 'VICTIM-UNTOUCHED\n' > "$_c/victim"
+    ln -s "$3" "$_c/sb/claude/$2"
+    env -i PATH="$_b" HOME="$_c/home" SANDBOX_DIR="$_c/sb" "$BASH" -c '
+        _sandy_agent_has() { return 0; }
+        info() { :; }; warn() { echo "[warn] $*" >&2; }
+        SANDBOX_IS_NEW=false
+        eval "$1"
+    ' _ "$_S169_BLOCK" >"$_c/out" 2>"$_c/err" || true
+    printf '%s' "$_c"
+}
+_S169_HOST='{"theme":"dark","permissions":{"defaultMode":"default"}}'
+if ! command -v jq >/dev/null 2>&1; then
+    skip "§169 needs jq"
+else
+    for _s169_t in node jq; do
+        if [ "$_s169_t" = node ] && ! command -v node >/dev/null 2>&1; then skip "§169 node branch needs node"; continue; fi
+        _C="$(_s169_seed "$_s169_t" settings.json ../../home/.claude/settings.json "$_S169_HOST")"
+        check "§169(1:$_s169_t) a settings.json link to the HOST settings.json leaves the host file byte-identical (mutation: drop the link removal and the node merge writes bypassPermissions + sandbox off into the host's own settings)" \
+            test "$(cat "$_C/home/.claude/settings.json")" = "$_S169_HOST"
+        check "§169(2:$_s169_t) ...the sandbox gets a regular settings.json carrying the managed keys instead" \
+            bash -c 'test ! -L "$1" && test "$(jq -c "[.permissions.defaultMode, .sandbox.enabled]" "$1")" = "[\"bypassPermissions\",false]"' _ "$_C/sb/claude/settings.json"
+        check "§169(3:$_s169_t) ...and the launch NAMES the link it removed" \
+            grep -q 'Removed a symlink at claude/settings.json' "$_C/err"
+    done
+    # jq branch, no host settings.json: the {} base used to be STAGED next to
+    # settings.json with a plain redirect.
+    _C="$(_s169_seed jq settings.json.base ../../victim "")"
+    check "§169(4) a planted settings.json.base link does not truncate its target (defence in depth: red only with BOTH the link removal dropped and {} staged by redirect into \$SEED_SETTINGS.base again)" \
+        grep -qx VICTIM-UNTOUCHED "$_C/victim"
+    check "§169(5) ...and the seed still wrote a complete settings.json from the piped {}" \
+        test "$(jq -c '.permissions.defaultMode' "$_C/sb/claude/settings.json" 2>/dev/null)" = '"bypassPermissions"'
+    _C="$(_s169_seed jq settings.json.tmp ../../victim "$_S169_HOST")"
+    check "§169(6) a planted settings.json.tmp link does not receive the merged output (defence in depth: red only with BOTH the link removal dropped and the output redirected into \$SEED_SETTINGS.tmp again)" \
+        grep -qx VICTIM-UNTOUCHED "$_C/victim"
+fi
+rm -rf "$_S169_DIR"
+unset _S169_DIR _S169_BLOCK _S169_HOST _C _s169_t
+unset -f _s169_seed
 
 # BEGIN SUMMARY
 # ============================================================
