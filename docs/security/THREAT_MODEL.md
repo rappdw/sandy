@@ -47,6 +47,12 @@ each:
   cache). Not modeled.
 - **Supply chain of sandy's own base images** (Docker Hub `golang`/`debian`).
   Pinned, but ultimately a trust assumption.
+- **The client transport to the host.** How a user reaches the machine running
+  sandy — SSH, mosh, Eternal Terminal, VS Code Remote-SSH/Tunnels, a VPN such as
+  Tailscale — runs on the host, outside every sandy container. Sandy's network
+  isolation governs what the *agent* can reach from inside the box; it neither
+  weakens nor secures a host-side transport, and a daemon session's survival
+  across a dropped connection does not depend on one (README "Remote access").
 
 ---
 
