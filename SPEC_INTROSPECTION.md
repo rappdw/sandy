@@ -607,8 +607,22 @@ The standalone, minimal-payload version probe. It exists to unblock a consumer (
 
 No exit-code surprises: always `0` (see the stream contract above — this flag carries the same guarantee as `--print-schema`/`--print-state`).
 
+## In-container pane identity (stable, 2.4.0)
+
+Not a flag on this list — it is read from live tmux state **inside** the container, not from a fast-path handler that runs before Docker, so `--print-state` (a host-side, no-container-required probe) cannot report it and never will. It is documented here anyway because, as of 2.4.0, it is a **published, stable contract** an in-container consumer may depend on: full rationale and the 4-agent mapping table live in SPECIFICATION.md's "Pane-identity contract" (section 12).
+
+| Fact | Value |
+|---|---|
+| tmux session name | `sandy` (fixed, one window) |
+| Pane identity source | The `@sandy_pane_agent` tmux **pane option** — multi-agent mode only; single-agent mode leaves it unset and the sole pane is `$SANDY_AGENT` |
+| Pane order | `SANDY_AGENT`, in-container, is in **spawn order** — the same order the session marker's `agents` field and `--print-state`'s `sandboxes[].agents` report |
+| `pane_index` | **Not** spawn order in the 4-agent grid (the fourth split re-splits pane 0, and tmux inserts the new pane's index right after the one it split) — see SPECIFICATION.md for the exact mapping |
+
+Reading identity from `pane_index`, a scrollback marker, or the pane title is unsupported and unreliable for the reasons in SPECIFICATION.md; read the pane option. A property test pins the contract in `test/run-tests.sh` §155.
+
 ## Schema versioning
 
+- **`2.4.0` (#378):** documents the pane-identity contract (tmux session `sandy`, the `@sandy_pane_agent` pane option, `SANDY_AGENT` spawn order). Nothing emitted changes — this is a documentation-only release for an existing in-container mechanism — so `schema_version` is unchanged.
 - Current: `schema_version: 1`
 - **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal`), `description`, `sources`, and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
 - **`2.0.0` — `schema_version` moves to `2`, the first bump.** Not additive: `sandboxes[].features` keeps its name and changes its SOURCE. It reported `$SANDBOX_DIR/features/<name>` markers (1.15.0); it now reports which features a sandbox was **selected** for by each feature's own manifest, evaluated at every launch. A consumer that kept parsing the field would silently have a different question answered, which is worse than a break, so the version says so. `feature_problems` likewise becomes `"<feature>: <why this sandbox was not selected>"`.

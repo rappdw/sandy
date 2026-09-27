@@ -1017,9 +1017,33 @@ Sandy wraps Claude Code in a tmux session:
 
 ### Multi-Agent Mode (comma-separated `SANDY_AGENT`)
 
-When `SANDY_AGENT` contains more than one agent (e.g. `claude,gemini`, `claude,codex`, `claude,gemini,codex,opencode`, or the alias `all`), the user-setup script creates a tmux session with one pane per agent, in the order listed. Layouts: 2 agents → side-by-side; 3 agents → left half + top-right + bottom-right; 4 agents → 2×2 grid (top-left, top-right, bottom-right, bottom-left in pane-index order). The launch logic is factored into per-agent helpers (`build_claude_cmd()`, `build_gemini_cmd()`, `build_codex_cmd()`, `build_opencode_cmd()`, `build_grok_cmd()`) so single-agent and multi-agent paths share the same command construction. Each pane is an independent process; exiting one leaves the others running.
+When `SANDY_AGENT` contains more than one agent (e.g. `claude,gemini`, `claude,codex`, `claude,gemini,codex,opencode`, or the alias `all`), the user-setup script creates a tmux session with one pane per agent, in the order listed. Layouts, by on-screen position: 2 agents → side-by-side; 3 agents → left half + top-right + bottom-right; 4 agents → 2×2 grid, agent1 top-left, agent2 top-right, agent3 bottom-right, agent4 bottom-left. **This is the visual layout, not the `pane_index` order** — see "Pane-identity contract" immediately below for the mapping between the two. The launch logic is factored into per-agent helpers (`build_claude_cmd()`, `build_gemini_cmd()`, `build_codex_cmd()`, `build_opencode_cmd()`, `build_grok_cmd()`) so single-agent and multi-agent paths share the same command construction. Each pane is an independent process; exiting one leaves the others running.
 
 The previous `both` alias (= `claude,gemini`) was removed in `v0.12` once the comma-separated syntax supported every combination. Using it now exits early with an error message pointing at the new syntax.
+
+### Pane-identity contract (stable, 2.4.0, #378)
+
+Anything outside the container that needs to know which pane runs which agent — today that means `amap-deploy-sandy`'s own copy of the session helper described in Appendix A.1 (`/usr/local/bin/sandy-handoff-sessions`, unchanged) — depends on four facts. As of 2.4.0 these are a **published, stable contract**: renaming or removing any of them is a breaking change governed by README's `## Deprecated` table (announced in an `X.0.0`, removed no earlier than a later `X.Y.0` — see "Versioning" in CLAUDE.md), not a free refactor.
+
+| # | Fact | Detail |
+|---|---|---|
+| 1 | Session name | The tmux session is always the literal `sandy`, one window, in both single-agent and multi-agent mode. |
+| 2 | `@sandy_pane_agent` tmux pane option | **Multi-agent only.** The launcher sets this pane option, by pane-id, on every pane immediately after creating it, to that pane's agent name. **Single-agent mode does not set it at all** — the sole pane's identity is `$SANDY_AGENT` itself. (An earlier draft of this document said the option was set "on every pane unconditionally"; that was never true of single-agent mode and is corrected here and in CLAUDE.md.) |
+| 3 | `SANDY_AGENT` order = spawn order | The comma-separated list, in-container, is in the order panes were created — the same order `agents` reports in the session marker (`/etc/sandy-session.json`) and in `--print-state`. |
+| 4 | `pane_index` ≠ spawn order, in the 4-agent grid | The fourth split re-splits pane 0 (`split-window -v -t sandy.0`), and tmux inserts the new pane's index immediately after the one it split. The on-screen layout is unaffected; only the index numbering is: |
+
+| `pane_index` | on-screen position | spawn order |
+|---|---|---|
+| 0 | top-left | agent 1 |
+| 1 | bottom-left | agent 4 |
+| 2 | top-right | agent 2 |
+| 3 | bottom-right | agent 3 |
+
+For 2- and 3-agent layouts `pane_index` and spawn order coincide; the trap is specific to the fourth pane of the 2×2 grid.
+
+**Read identity from the option, never from `pane_index`, a scrollback marker, or the pane title.** `pane_index` is wrong for the reason above; a scrollback marker is wiped the moment a real credentialed agent redraws or clears its pane; `select-pane -T` (the pane title) is OSC-2-clobberable by anything running inside the pane. `@sandy_pane_agent` is the one identity source the agent process cannot touch and that binds correctly regardless of the pane-index shuffle.
+
+A property test pins this contract in `test/run-tests.sh` §155: a fixture where the option disagrees with `pane_index`-as-spawn-order must still yield the correct agent per row, and the real 4-agent mapping table above is asserted directly.
 
 ### Codex Headless Translation (`SANDY_AGENT=codex`)
 
@@ -1463,11 +1487,14 @@ RUN cat > /usr/local/bin/sandy-ss-paths <<'SS_HELPER' \
 SS_HELPER
 
 # sandy-handoff-sessions: enumerate live agent sessions in this container, for a
-# SANDY_HANDOFF_RELAY to discover its delivery target(s) (1.10.0).
+# SANDY_HANDOFF_RELAY to discover its delivery target(s) (1.10.0). A convenience
+# built on the pane-identity contract ("Pane-identity contract" in section 12
+# above) — sandy publishes the contract; this helper is one consumer of it, and
+# amap-deploy-sandy ships its own copy against the same three facts (#378).
 # Output columns (tab-separated): agent, pane_index, pane_pid, agent_pid, socket,
 # keyfile ("-" = n/a). Identity is read from the @sandy_pane_agent tmux pane
 # option (never assumes pane_index == spawn order — see the 4-agent-grid
-# caveat under "Verification reality" in CLAUDE.md), walked via a /proc BFS to
+# mapping table in "Pane-identity contract" above), walked via a /proc BFS to
 # find the claude/codex/gemini/opencode/grok process under each pane and, for
 # claude, its /tmp/cc-socks/<pid>.sock and ~/.claude/sessions/<pid>.*.key.
 # Test hooks (env-only, no _sandy_key_metadata row): SANDY_SESSIONS_PANES_FILE,

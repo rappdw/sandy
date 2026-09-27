@@ -17437,6 +17437,155 @@ unset _S154_SANDY _S154_DIR _S154_HLP _S154_LAUNCH _S154_LCWS _S154_D _S154_OUT 
 unset _F _LH _W _SH _H8 _NAME _SB _CWS _PD _dw
 unset -f _s154_mk _s154_run _s154_dest _s154_expect
 
+# ============================================================
+echo ""
+echo "§155: the pane-identity contract (#378) — identity comes from @sandy_pane_agent, order from SANDY_AGENT"
+# ============================================================
+# WHY. #378 step 1 publishes tmux session "sandy", the @sandy_pane_agent pane
+# option, and SANDY_AGENT spawn order (SPECIFICATION.md "Pane-identity
+# contract") as a STABLE surface external tooling is now allowed to depend on
+# -- amap-deploy-sandy ships its own copy of sandy-handoff-sessions against
+# exactly these three facts. A grep for the option name does not pin a
+# contract; this section asserts the PROPERTY the acceptance criterion names:
+# a fixture where @sandy_pane_agent DISAGREES with pane_index still yields the
+# correct agent per row, in SANDY_AGENT order.
+#
+# Reuses §114(14)'s extraction mechanics (sed out the HS_HELPER heredoc body,
+# write it to a temp file, chmod +x) but with this section's OWN canonical
+# temp dir and a FRESH fake /proc tree -- descendants() walks the WHOLE $PROC
+# tree by ppid, so reusing §114's pids would mask a bug that only shows up
+# when two sections' fixtures collide.
+_S155_SANDY="$SANDY_SCRIPT"
+_S155_TMPL="$(dirname "$0")/../templates/user-setup.sh.tmpl"
+_S155_TAB="$(printf '\t')"
+_S155_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+
+# Hermetic by construction (the §142 lesson): this suite is routinely run
+# INSIDE a sandy sandbox, whose live session exports SANDY_AGENT and could in
+# principle export SANDY_SESSIONS_* test hooks. Every invocation below passes
+# all five explicitly, but unset first too so nothing here can silently read
+# the developer's own container.
+unset SANDY_AGENT SANDY_SESSIONS_PANES_FILE SANDY_SESSIONS_PROC SANDY_SESSIONS_SOCK_DIR SANDY_SESSIONS_KEY_DIR
+
+_s155_match() {  # $1=text $2=glob -- case, not grep -P (BSD grep rejects it)
+    case "$1" in
+        $2) return 0 ;;
+    esac
+    return 1
+}
+
+_S155_HS_HELPER="$(sed -n "/<<'HS_HELPER'/,/^HS_HELPER\$/p" "$_S155_SANDY" | sed '1,2d;$d')"
+check "§155(pre) extracted the sandy-handoff-sessions helper body" \
+    bash -c 'printf "%s" "$1" | grep -q "sandy-handoff-sessions"' -- "$_S155_HS_HELPER"
+_S155_HS="$_S155_DIR/hs"
+printf '%s\n' "$_S155_HS_HELPER" > "$_S155_HS"
+chmod +x "$_S155_HS"
+check "§155(pre2) helper is syntactically valid bash" bash -n "$_S155_HS"
+
+# _s155_run PANES_FILE PROC_DIR AGENT_LIST -> stdout in _S155_OUT. SOCK_DIR and
+# KEY_DIR always point at guaranteed-empty, non-existent directories under this
+# section's own temp dir so a real /tmp/cc-socks or ~/.claude/sessions on the
+# host running this suite can never leak a socket/keyfile into a fixture row.
+_s155_run() {
+    _S155_OUT="$(SANDY_SESSIONS_PANES_FILE="$1" SANDY_SESSIONS_PROC="$2" \
+        SANDY_SESSIONS_SOCK_DIR="$_S155_DIR/nosock" SANDY_SESSIONS_KEY_DIR="$_S155_DIR/nokey" \
+        SANDY_AGENT="$3" "$_S155_HS" 2>&1)"
+}
+# _s155_stat PID COMM PPID -> a /proc/<pid>/stat line in the same shape §114
+# uses (comm in parens; ppid is the field right after the state char).
+_s155_stat() {
+    printf '%s (%s) S %s %s %s 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' \
+        "$1" "$2" "$3" "$1" "$1"
+}
+
+# --- (1) TWO-AGENT DISAGREEMENT: the option disagrees with index-as-spawn-order ---
+mkdir -p "$_S155_DIR/proc1/301" "$_S155_DIR/proc1/401"
+_s155_stat 301 codex 300 > "$_S155_DIR/proc1/301/stat"
+_s155_stat 401 claude 400 > "$_S155_DIR/proc1/401/stat"
+printf '0%s300%scodex\n1%s400%sclaude\n' "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" > "$_S155_DIR/panes1.tsv"
+_s155_run "$_S155_DIR/panes1.tsv" "$_S155_DIR/proc1" claude,codex
+_S155_OUT1_L1="$(printf '%s\n' "$_S155_OUT" | sed -n '1p')"
+_S155_OUT1_L2="$(printf '%s\n' "$_S155_OUT" | sed -n '2p')"
+check "§155(1pre) exactly 2 rows" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 2 ]' _ "$_S155_OUT"
+check "§155(1a) row 1 is claude at pane_index 1 / pane_pid 400 / agent_pid 401 -- SANDY_AGENT order (claude,codex), not pane order (pane 0 is codex)" \
+    _s155_match "$_S155_OUT1_L1" "claude${_S155_TAB}1${_S155_TAB}400${_S155_TAB}401${_S155_TAB}*"
+check "§155(1b) row 2 is codex at pane_index 0 / pane_pid 300 / agent_pid 301 -- the row the @sandy_pane_agent option identifies, not the one pane_index would suggest" \
+    _s155_match "$_S155_OUT1_L2" "codex${_S155_TAB}0${_S155_TAB}300${_S155_TAB}301${_S155_TAB}-${_S155_TAB}-"
+
+# --- (2) the real 4-agent grid mapping: pane_index != spawn order ---
+# The tmux order the launcher actually produces (SPECIFICATION.md's mapping
+# table): pane_index 0=agent1, 1=agent4, 2=agent2, 3=agent3.
+mkdir -p "$_S155_DIR/proc2/610" "$_S155_DIR/proc2/611" "$_S155_DIR/proc2/612" "$_S155_DIR/proc2/613"
+_s155_stat 610 claude   600 > "$_S155_DIR/proc2/610/stat"
+_s155_stat 611 opencode 601 > "$_S155_DIR/proc2/611/stat"
+_s155_stat 612 gemini   602 > "$_S155_DIR/proc2/612/stat"
+_s155_stat 613 codex    603 > "$_S155_DIR/proc2/613/stat"
+printf '0%s600%sclaude\n1%s601%sopencode\n2%s602%sgemini\n3%s603%scodex\n' \
+    "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" "$_S155_TAB" \
+    > "$_S155_DIR/panes2.tsv"
+_s155_run "$_S155_DIR/panes2.tsv" "$_S155_DIR/proc2" claude,gemini,codex,opencode
+_S155_OUT2_L1="$(printf '%s\n' "$_S155_OUT" | sed -n '1p')"
+_S155_OUT2_L2="$(printf '%s\n' "$_S155_OUT" | sed -n '2p')"
+_S155_OUT2_L3="$(printf '%s\n' "$_S155_OUT" | sed -n '3p')"
+_S155_OUT2_L4="$(printf '%s\n' "$_S155_OUT" | sed -n '4p')"
+check "§155(2pre) exactly 4 rows" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 4 ]' _ "$_S155_OUT"
+check "§155(2a) claude: pane_index 0 (the split root)" \
+    _s155_match "$_S155_OUT2_L1" "claude${_S155_TAB}0${_S155_TAB}600${_S155_TAB}610${_S155_TAB}*"
+check "§155(2b) gemini: pane_index 2 -- the THIRD split, not the second" \
+    _s155_match "$_S155_OUT2_L2" "gemini${_S155_TAB}2${_S155_TAB}602${_S155_TAB}612${_S155_TAB}*"
+check "§155(2c) codex: pane_index 3" \
+    _s155_match "$_S155_OUT2_L3" "codex${_S155_TAB}3${_S155_TAB}603${_S155_TAB}613${_S155_TAB}*"
+check "§155(2d) opencode: pane_index 1 -- the FOURTH agent lands at index 1 because the last split re-splits pane 0 and tmux inserts the new pane right after it (the trap this contract exists to name)" \
+    _s155_match "$_S155_OUT2_L4" "opencode${_S155_TAB}1${_S155_TAB}601${_S155_TAB}611${_S155_TAB}*"
+
+# --- (3) single-agent: the option is unset, fall back to SANDY_AGENT ---
+mkdir -p "$_S155_DIR/proc3/501"
+_s155_stat 501 codex 500 > "$_S155_DIR/proc3/501/stat"
+printf '0%s500%s\n' "$_S155_TAB" "$_S155_TAB" > "$_S155_DIR/panes3.tsv"
+_s155_run "$_S155_DIR/panes3.tsv" "$_S155_DIR/proc3" codex
+check "§155(3) single-agent: one row, agent falls back to SANDY_AGENT when @sandy_pane_agent is unset (CLAUDE.md's 'unconditionally' claim was wrong -- single-agent mode never sets the option)" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 1 ] && case "$1" in $2) exit 0 ;; esac; exit 1' \
+    _ "$_S155_OUT" "codex${_S155_TAB}0${_S155_TAB}500${_S155_TAB}501${_S155_TAB}*"
+
+# --- (4) producer/consumer AGREEMENT, not a presence grep ---
+# Extract from the user-setup TEMPLATE (the launcher's mirror, same discipline
+# as §114(15)) which session name every `tmux new-session ... -s X` targets and
+# which option name every `set-option -p ... @X` sets; extract from the HELPER
+# which session `tmux list-panes -t X` targets and which option `#{@X}` reads.
+# grep -oE captures only lines that actually match (a bare grep+sed pipeline
+# would echo a non-matching line unchanged and poison the set -- this bit).
+if [ -f "$_S155_TMPL" ]; then
+    _S155_TMPL_SESSIONS="$(grep 'tmux new-session' "$_S155_TMPL" | grep -oE ' -s [A-Za-z0-9_.-]+' | sed -E 's/^ -s //' | sort -u)"
+    _S155_TMPL_OPTS="$(grep 'set-option -p' "$_S155_TMPL" | grep -oE '@[A-Za-z0-9_]+' | sed 's/^@//' | sort -u)"
+    _S155_TMPL_OPT_COUNT="$(grep -c 'set-option -p.*@sandy_pane_agent' "$_S155_TMPL")"
+    _S155_HS_SESSION="$(grep 'tmux list-panes -t' "$_S155_HS" | grep -oE ' -t [A-Za-z0-9_.-]+' | sed -E 's/^ -t //' | sort -u)"
+    _S155_HS_OPT="$(grep -oE '#\{@[A-Za-z0-9_]+\}' "$_S155_HS" | sed -E 's/#\{@([A-Za-z0-9_]+)\}/\1/' | sort -u)"
+
+    check "§155(4pre) all four extractions produced exactly one candidate each (mutation: a rename that empties one makes every check below vacuous)" \
+        bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$3" -ge 1 ] && [ -n "$4" ] && [ -n "$5" ]' \
+        _ "$_S155_TMPL_SESSIONS" "$_S155_TMPL_OPTS" "$_S155_TMPL_OPT_COUNT" "$_S155_HS_SESSION" "$_S155_HS_OPT"
+    check "§155(4a) the launcher's every tmux new-session targets a single session name, 'sandy'" \
+        bash -c '[ "$1" = "sandy" ]' _ "$_S155_TMPL_SESSIONS"
+    check "§155(4b) the launcher's every set-option -p sets a single option name, '@sandy_pane_agent'" \
+        bash -c '[ "$1" = "sandy_pane_agent" ]' _ "$_S155_TMPL_OPTS"
+    check "§155(4c) exactly 4 set-option -p ... @sandy_pane_agent lines -- one per possible agent slot" \
+        bash -c '[ "$1" -eq 4 ]' _ "$_S155_TMPL_OPT_COUNT"
+    check "§155(4d) the helper's tmux list-panes targets the SAME session name" \
+        bash -c '[ "$1" = "$2" ]' _ "$_S155_HS_SESSION" "$_S155_TMPL_SESSIONS"
+    check "§155(4e) the helper's pane-format reads the SAME option name -- producer and consumer agree; a rename on one side only fails this pair" \
+        bash -c '[ "$1" = "$2" ]' _ "$_S155_HS_OPT" "$_S155_TMPL_OPTS"
+else
+    skip "§155(4) templates/user-setup.sh.tmpl not found -- producer/consumer agreement not checked"
+fi
+
+rm -rf "$_S155_DIR"
+unset _S155_SANDY _S155_TMPL _S155_TAB _S155_DIR _S155_HS_HELPER _S155_HS _S155_OUT \
+    _S155_OUT1_L1 _S155_OUT1_L2 _S155_OUT2_L1 _S155_OUT2_L2 _S155_OUT2_L3 _S155_OUT2_L4 \
+    _S155_TMPL_SESSIONS _S155_TMPL_OPTS _S155_TMPL_OPT_COUNT _S155_HS_SESSION _S155_HS_OPT
+unset -f _s155_match _s155_run _s155_stat
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
