@@ -1139,6 +1139,7 @@ Removals are loud where sandy can see them: a removed config key is a hard error
 - `no-new-privileges` prevents privilege escalation
 - Credentials are seeded into per-project sandboxes, not shared across projects
 - claude.ai account connectors are suppressed by default (`SANDY_CLAUDE_CONNECTORS=1` to opt in); `SANDY_SUSPICIOUS=1` additionally strips the OAuth refresh token so a distrusted workspace only ever sees a short-lived access token
+- Claude Code's own `/sandbox` (`sandbox.enabled`) is forced **off** in the sandbox's `settings.json` every launch, even if your host settings turn it on — sandy's container is the boundary and its egress proxy the one policy chokepoint, so an inner sandbox would only add a second, uncoordinated proxy. Your other `sandbox.*` settings are left as they are, and a repository's own `.claude/settings.json` can still turn it on (Claude Code gives project settings precedence)
 - The working directory is bind-mounted read/write — Claude can modify your files there (that's the point)
 ### Protected files and directories
 
