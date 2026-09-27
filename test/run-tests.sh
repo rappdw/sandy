@@ -18399,6 +18399,104 @@ check "§162(15) a failed project build names the probe scope -- sandy's own hos
 rm -rf "$_S162_DIR"
 unset _S162_SANDY _S162_DIR _S162_FN _S162_OUT _S162_RC _S162_HA _S162_HB _S162_HD
 unset -f _s162_mk _s162_pre _s162_hash _s162_approval _s162_diag _s162_sup
+echo "§165: SANDY_EXTRA_ENV name lists compose — host, approved workspace and env are unioned (#388)"
+# ============================================================
+# Last-wins used to replace the host list with the workspace one (and an env
+# list replaced both), silently dropping every host-forwarded name the moment a
+# workspace forwarded one of its own. Driven for real: the whole config-load
+# region of sandy -- snapshot, the four _load_sandy_config calls, the approval
+# resolver and _load_sandy_extra_env -- is extracted and run against fixture
+# files, and the assertions are on the names that come out, not on the code.
+_S165_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S165_REGION="$(sed -n '/^_PASSIVE_PRIVILEGED_PENDING=()$/,/^_load_sandy_extra_env$/p' "$SANDY_SCRIPT")"
+check "§165(0) extracted the config-load region (mutation: a rename empties it and must fail HERE, not make every check below vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "^_resolve_passive_privileged_approval$" && printf "%s" "$1" | grep -q "^_load_sandy_extra_env() {"' _ "$_S165_REGION"
+# _s165_run REGION HOST_CFG HOST_SEC WS_CFG WS_SEC [VAR=VALUE...]
+# Each *_CFG/*_SEC is the file body ("" = no file). Prints one line per
+# forwarded name as NAME=value, then list=<composed SANDY_EXTRA_ENV>, then the
+# loader's stderr. stdin is /dev/null, so an approval that is not auto-granted
+# is dropped exactly as headless drops it.
+_s165_run() {
+    # A fresh fixture per call: callers run this inside $( ), so a counter
+    # incremented here would be lost and every case would share one directory.
+    local _region="$1" _c _h _w
+    _c="$(mktemp -d "$_S165_DIR/c.XXXXXX")"; _h="$_c/home"; _w="$_c/ws"
+    mkdir -p "$_h" "$_w/.sandy"
+    [ -n "$2" ] && printf '%s\n' "$2" > "$_h/config"
+    [ -n "$3" ] && printf '%s\n' "$3" > "$_h/.secrets"
+    [ -n "$4" ] && printf '%s\n' "$4" > "$_w/.sandy/config"
+    [ -n "$5" ] && printf '%s\n' "$5" > "$_w/.sandy/.secrets"
+    shift 5
+    env -i PATH="$PATH" HOME="$_S165_DIR" SANDY_HOME="$_h" WORK_DIR="$_w" "$@" bash -c '
+        set -euo pipefail
+        _key_in_list() { local t="$1"; shift; local k; for k in "$@"; do [ "$k" = "$t" ] && return 0; done; return 1; }
+        _sandy_passive_value_privileged() { return 1; }
+        sha256() { shasum -a 256 2>/dev/null || sha256sum; }
+        warn() { echo "[warn] $*" >&2; }
+        info() { echo "[info] $*" >&2; }
+        SANDY_PRIVILEGED_KEYS=(SANDY_SSH SANDY_EXTRA_ENV)
+        SANDY_PASSIVE_KEYS=(SANDY_MODEL SANDY_RELAY SANDY_VERBOSE)
+        eval "$1"
+        for _n in "${_SANDY_EXTRA_ENV_NAMES[@]+"${_SANDY_EXTRA_ENV_NAMES[@]}"}"; do
+            printf "%s=%s\n" "$_n" "${!_n-<unset>}"
+        done
+        printf "list=%s\n" "${SANDY_EXTRA_ENV:-}"
+    ' _ "$_region" </dev/null 2>&1 || echo "rc=$?"
+}
+_S165_HOSTC='SANDY_EXTRA_ENV=A_TOK,B_TOK'
+_S165_HOSTS=$'A_TOK=a-from-host\nB_TOK=b-from-host'
+_S165_WSC='SANDY_EXTRA_ENV=B_TOK,C_TOK'
+_S165_WSS='C_TOK=c-from-ws'
+# (1) The acceptance case from #388: host A,B + approved workspace B,C.
+_S165_OUT1="$(_s165_run "$_S165_REGION" "$_S165_HOSTC" "$_S165_HOSTS" "$_S165_WSC" "$_S165_WSS" SANDY_AUTO_APPROVE_PRIVILEGED=1)"
+check "§165(1) host A,B + approved workspace B,C forwards exactly A,B,C in that order, B once (mutation: the old last-wins forwards B,C and drops A)" \
+    bash -c 'test "$(printf "%s\n" "$1" | grep -E "^[A-Z]_TOK=" | cut -d= -f1 | tr "\n" ,)" = "A_TOK,B_TOK,C_TOK,"' _ "$_S165_OUT1"
+check "§165(2) ...each value still resolves per name: A and B from host .secrets, C from workspace .secrets" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "A_TOK=a-from-host" && printf "%s\n" "$1" | grep -qx "B_TOK=b-from-host" && printf "%s\n" "$1" | grep -qx "C_TOK=c-from-ws"' _ "$_S165_OUT1"
+check "§165(3) ...and SANDY_EXTRA_ENV itself (forwarded to the container) is the composed list, so in-container echo names every forwarded name" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=A_TOK,B_TOK,C_TOK"' _ "$_S165_OUT1"
+check "§165(4) ...and the launch says where the names came from when two sources contribute" \
+    bash -c 'printf "%s\n" "$1" | grep -qF "forwarding A_TOK,B_TOK,C_TOK (host: A_TOK,B_TOK; workspace: B_TOK,C_TOK; env: -)"' _ "$_S165_OUT1"
+# (5) Env ADDS (maintainer decision on #388) -- it does not replace.
+_S165_OUT5="$(_s165_run "$_S165_REGION" "$_S165_HOSTC" "$_S165_HOSTS" "$_S165_WSC" "$_S165_WSS" SANDY_AUTO_APPROVE_PRIVILEGED=1 SANDY_EXTRA_ENV="D_TOK, A_TOK" D_TOK=d-from-env)"
+check "§165(5) an env-set list is unioned after host and workspace: A,B,C,D, with the env duplicate A collapsed (mutation: env-as-override forwards D,A only)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=A_TOK,B_TOK,C_TOK,D_TOK" && printf "%s\n" "$1" | grep -qx "D_TOK=d-from-env"' _ "$_S165_OUT5"
+# (6) Unapproved workspace list: dropped, as today -- but host names survive.
+_S165_OUT6="$(_s165_run "$_S165_REGION" "$_S165_HOSTC" "$_S165_HOSTS" "$_S165_WSC" "$_S165_WSS")"
+check "§165(6) an UNAPPROVED workspace list contributes nothing and the host names are still forwarded (approval still gates the workspace names)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=A_TOK,B_TOK" && ! printf "%s\n" "$1" | grep -q "^C_TOK=" && printf "%s\n" "$1" | grep -qF "dropping these keys"' _ "$_S165_OUT6"
+# (7) Unapproved workspace list with env set: env names still join, workspace
+# names still do not -- the env exception must not become an approval bypass.
+_S165_OUT7="$(_s165_run "$_S165_REGION" "$_S165_HOSTC" "$_S165_HOSTS" "$_S165_WSC" "$_S165_WSS" SANDY_EXTRA_ENV=D_TOK)"
+check "§165(7) env set + unapproved workspace: host and env names forwarded, workspace names still refused" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=A_TOK,B_TOK,D_TOK"' _ "$_S165_OUT7"
+# (8)/(9) Single-source cases are unchanged.
+_S165_OUT8="$(_s165_run "$_S165_REGION" "" "" "$_S165_WSC" "$_S165_WSS" SANDY_AUTO_APPROVE_PRIVILEGED=1)"
+check "§165(8) workspace-only (approved) forwards the workspace list, silently (one source, nothing to explain)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=B_TOK,C_TOK" && ! printf "%s\n" "$1" | grep -qF "forwarding"' _ "$_S165_OUT8"
+_S165_OUT9="$(_s165_run "$_S165_REGION" "$_S165_HOSTC" "$_S165_HOSTS" "" "")"
+check "§165(9) host-only forwards the host list" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=A_TOK,B_TOK"' _ "$_S165_OUT9"
+# (10) Host config and host .secrets both naming lists compose too.
+_S165_OUT10="$(_s165_run "$_S165_REGION" "$_S165_HOSTC" "SANDY_EXTRA_ENV=E_TOK" "" "")"
+check "§165(10) host config and host .secrets lists compose as well (the same last-wins existed between those two files)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=A_TOK,B_TOK,E_TOK"' _ "$_S165_OUT10"
+# (11) Mutation self-test (§89-style): the same harness against the region
+# with the approved workspace value EXPORTED (the pre-#388 last-wins) must fail
+# (1), proving the harness can tell the two apart and is not vacuous.
+_S165_MUT="$(printf '%s' "$_S165_REGION" | sed 's/SANDY_EXTRA_ENV=\*) _SANDY_EXTRA_ENV_WS_APPROVED=1 ;;/SANDY_EXTRA_ENV=*) _SANDY_EXTRA_ENV_WS_APPROVED=1; export "$1"; _SANDY_EXTRA_ENV_HOST_LISTS=() ;;/')"
+_S165_OUTM="$(_s165_run "$_S165_MUT" "$_S165_HOSTC" "$_S165_HOSTS" "$_S165_WSC" "$_S165_WSS" SANDY_AUTO_APPROVE_PRIVILEGED=1)"
+check "§165(11) mutation self-test: a last-wins mutant of the region does NOT produce A,B,C (the mutant was built, and the harness sees the difference)" \
+    bash -c '[ "$1" != "$2" ] && ! printf "%s\n" "$3" | grep -qx "list=A_TOK,B_TOK,C_TOK"' _ "$_S165_MUT" "$_S165_REGION" "$_S165_OUTM"
+# (12) --validate-config tells a workspace author the names are ADDED.
+printf 'SANDY_EXTRA_ENV=HA_TOKEN\n' > "$_S165_DIR/ws.config"
+_S165_VAL="$(bash "$SANDY_SCRIPT" --validate-config "$_S165_DIR/ws.config" 2>/dev/null || true)"
+check "§165(12) --validate-config on a workspace SANDY_EXTRA_ENV says its names are ADDED to the host list, not a replacement" \
+    bash -c 'printf "%s" "$1" | grep -qF "names are ADDED to the host"' _ "$_S165_VAL"
+rm -rf "$_S165_DIR"
+unset _S165_DIR _S165_REGION _S165_HOSTC _S165_HOSTS _S165_WSC _S165_WSS _S165_MUT _S165_VAL
+unset _S165_OUT1 _S165_OUT5 _S165_OUT6 _S165_OUT7 _S165_OUT8 _S165_OUT9 _S165_OUT10 _S165_OUTM
+unset -f _s165_run
 
 # BEGIN SUMMARY
 # ============================================================
