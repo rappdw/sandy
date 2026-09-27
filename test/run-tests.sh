@@ -17692,6 +17692,87 @@ else
 fi
 rm -rf "$_S161_DIR"
 unset _S161_DIR _S161_KEYS _s161_kd _s161_k _s161_d
+echo "§157: Linux iptables isolation is VERIFIED after insertion, not assumed (#299)"
+# ============================================================
+# apply_network_isolation (the `off` egress posture, Linux) inserted every DROP
+# with `|| true` and then printed "Network isolation rules applied."
+# unconditionally, so a chain that was readable but refused an insert produced
+# a session claiming isolation it did not have. These checks drive the REAL
+# function against a stub iptables that keeps its chain in a file, and assert
+# the outcome -- refused or not, what was said, whether the --start fast-fail
+# marker was dropped -- never that the code contains `-C`.
+_S157_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S157_DIR/bin"
+cat > "$_S157_DIR/bin/sudo" <<'STUB'
+#!/bin/sh
+exec "$@"
+STUB
+# The chain lives in $S157_RULES, one rule per line, spelled exactly as the
+# caller passed it after the chain name. S157_FAIL_LIST fails -L;
+# S157_FAIL_INSERT fails -I for a rule naming that range; S157_LOSE_INSERT
+# makes -I exit 0 WITHOUT recording the rule -- the nft-backend-mismatch shape,
+# where the insert reports success and nothing lands.
+cat > "$_S157_DIR/bin/iptables" <<'STUB'
+#!/bin/sh
+op="$1"; shift
+if [ "$op" = -L ]; then [ -n "${S157_FAIL_LIST:-}" ] && exit 1; exit 0; fi
+shift
+rule="$*"
+if [ "$op" = -I ]; then
+    case " $rule " in *" ${S157_FAIL_INSERT:-@none@} "*) exit 1 ;; esac
+    case " $rule " in *" ${S157_LOSE_INSERT:-@none@} "*) exit 0 ;; esac
+    printf '%s\n' "$rule" >> "$S157_RULES"
+    exit 0
+fi
+if [ "$op" = -C ]; then grep -qxF -- "$rule" "$S157_RULES"; exit $?; fi
+exit 0
+STUB
+chmod +x "$_S157_DIR/bin/sudo" "$_S157_DIR/bin/iptables"
+_S157_FN="$(awk '/^_sandy_daemon_fatal\(\)/,/^}/' "$SANDY_SCRIPT"; awk '/^PRIVATE_RANGES=\(/,/^\)/' "$SANDY_SCRIPT"; awk '/^apply_network_isolation\(\)/,/^}/' "$SANDY_SCRIPT")"
+check "§157(pre) apply_network_isolation, PRIVATE_RANGES and _sandy_daemon_fatal were all extracted (mutation: a rename makes every check below vacuous)" \
+    bash -c 'case "$1" in *"_sandy_daemon_fatal()"*"PRIVATE_RANGES=("*"apply_network_isolation()"*) exit 0 ;; esac; exit 1' _ "$_S157_FN"
+# _s157_run OS [VAR=value...] -> rc in _S157_RC, output in _S157_OUT. The
+# daemon log is $_S157_DIR/daemon.log; its .fatal is the --start fast-fail
+# marker. Runs under set -euo pipefail, as sandy does.
+_s157_run() {
+    _s157_os="$1"; shift
+    rm -f "$_S157_DIR/daemon.log.fatal"; : > "$_S157_DIR/rules"
+    _S157_OUT="$(env -u SANDY_ALLOW_NO_ISOLATION -u SANDY_ALLOW_LAN_HOSTS -u SANDY_LOCAL_LLM_HOST \
+        -u S157_FAIL_LIST -u S157_FAIL_INSERT -u S157_LOSE_INSERT \
+        PATH="$_S157_DIR/bin:$PATH" S157_RULES="$_S157_DIR/rules" SANDY_DAEMON_LOG="$_S157_DIR/daemon.log" "$@" \
+        bash -c 'set -euo pipefail; info() { echo "INFO $*"; }; warn() { echo "WARN $*"; }; error() { echo "ERROR $*"; }; OS="$2"; BRIDGE_NAME=br-s157; CONTAINER_SUBNET=172.31.0.0/16; CONTAINER_GATEWAY=""; eval "$1"; apply_network_isolation; echo RETURNED' _ "$_S157_FN" "$_s157_os" 2>&1)" && _S157_RC=0 || _S157_RC=$?
+}
+_s157_run Linux
+check "§157(1) every insert lands: the launch proceeds and says isolation was applied (rc=$_S157_RC)" \
+    bash -c 'test "$1" -eq 0 && case "$2" in *"rules applied"*RETURNED*) exit 0 ;; esac; exit 1' _ "$_S157_RC" "$_S157_OUT"
+check "§157(2) ...and all five DROPs really are in the stub chain (the harness itself is sound)" \
+    test "$({ grep -c -- '-j DROP$' "$_S157_DIR/rules" || true; })" -eq 5
+_s157_run Linux S157_FAIL_INSERT=192.168.0.0/16
+check "§157(3) an insert that FAILS refuses the launch, naming the missing range (rc=$_S157_RC)" \
+    bash -c 'test "$1" -ne 0 && case "$2" in *RETURNED*) exit 1 ;; *"ERROR"*"192.168.0.0/16"*) exit 0 ;; esac; exit 1' _ "$_S157_RC" "$_S157_OUT"
+check "§157(4) ...and never claims isolation was applied" \
+    bash -c 'case "$1" in *"rules applied"*) exit 1 ;; esac; exit 0' _ "$_S157_OUT"
+check "§157(5) ...and drops the .fatal marker, so a --start client fails in ~1s instead of polling out 600s" \
+    test -f "$_S157_DIR/daemon.log.fatal"
+_s157_run Linux S157_LOSE_INSERT=100.64.0.0/10
+check "§157(6) an insert that exits 0 but LANDS NOTHING (nft-backend mismatch) is refused too -- the chain is asked, the exit code is not trusted (rc=$_S157_RC)" \
+    bash -c 'test "$1" -ne 0 && case "$2" in *RETURNED*|*"rules applied"*) exit 1 ;; *"ERROR"*"100.64.0.0/10"*) exit 0 ;; esac; exit 1' _ "$_S157_RC" "$_S157_OUT"
+_s157_run Linux S157_FAIL_INSERT=10.0.0.0/8 SANDY_ALLOW_NO_ISOLATION=1
+check "§157(7) SANDY_ALLOW_NO_ISOLATION=1 still lets the launch proceed -- the documented override keeps working (rc=$_S157_RC)" \
+    bash -c 'test "$1" -eq 0 && case "$2" in *RETURNED*) exit 0 ;; esac; exit 1' _ "$_S157_RC" "$_S157_OUT"
+check "§157(8) ...but it says isolation is INCOMPLETE and names the range, never that it was applied" \
+    bash -c 'case "$1" in *"rules applied"*) exit 1 ;; *"WARN"*"INCOMPLETE"*"10.0.0.0/8"*) exit 0 ;; esac; exit 1' _ "$_S157_OUT"
+check "§157(9) ...and drops no .fatal marker (the launch was not refused)" \
+    test ! -e "$_S157_DIR/daemon.log.fatal"
+_s157_run Linux S157_FAIL_LIST=1
+check "§157(10) an unreadable DOCKER-USER chain refuses (rc=$_S157_RC) AND drops the .fatal marker -- the pre-existing refusal had none" \
+    bash -c 'case "$3" in *RETURNED*) exit 1 ;; esac; test "$1" -ne 0 && test -f "$2"' _ "$_S157_RC" "$_S157_DIR/daemon.log.fatal" "$_S157_OUT"
+_s157_run Darwin
+check "§157(11) the non-Linux banner names SANDY_EGRESS=permissive|strict, not the deprecated SANDY_EGRESS_PROXY tri-state" \
+    bash -c 'case "$1" in *SANDY_EGRESS_PROXY*) exit 1 ;; *"SANDY_EGRESS=permissive"*"=strict"*) exit 0 ;; esac; exit 1' _ "$_S157_OUT"
+rm -rf "$_S157_DIR"
+unset _S157_DIR _S157_FN _S157_OUT _S157_RC _s157_os
+unset -f _s157_run
 
 # BEGIN SUMMARY
 # ============================================================

@@ -436,7 +436,7 @@ Sandy wraps four third-party agents at **floating-latest** (`npm install -g @ant
 
 ## Network Isolation and the Egress Proxy
 
-Per-instance Docker bridge networks are keyed on PID (`sandy_net_$$`) to avoid races. On Linux, iptables DROP rules block RFC 1918, link-local (`169.254.0.0/16`), and CGNAT/Tailscale (`100.64.0.0/10`) while allowing the container's own subnet; rules are cleaned up on exit.
+Per-instance Docker bridge networks are keyed on PID (`sandy_net_$$`) to avoid races. On Linux, iptables DROP rules block RFC 1918, link-local (`169.254.0.0/16`), and CGNAT/Tailscale (`100.64.0.0/10`) while allowing the container's own subnet; rules are cleaned up on exit. **Each DROP is verified with `iptables -C` after insertion (2.4.0, #299)** — the inserts are `|| true` and a *readable* chain can still refuse an insert, so a missing rule refuses the launch (with the `.fatal` marker) instead of printing "applied"; `SANDY_ALLOW_NO_ISOLATION=1` downgrades that to an "INCOMPLETE" warning. Guarded by §157.
 
 **macOS, proxy off only.** Docker Desktop's VM provides no LAN isolation and iptables cannot be applied from macOS: containers reach `host.docker.internal`, host `localhost` services, and the whole physical LAN. Sandy nullifies the magic hostnames (`gateway.docker.internal`, `metadata.google.internal`, and `host.docker.internal` when `SANDY_SSH!=agent`) via `--add-host … :127.0.0.1`, but raw-IP access is unaffected, and it prints a warning banner. **With the proxy off, treat macOS sandy as process and filesystem isolation only.**
 

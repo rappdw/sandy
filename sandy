@@ -13268,6 +13268,7 @@ apply_network_isolation() {
             fi
             error "Cannot apply network isolation (iptables DOCKER-USER chain not accessible)."
             error "Refusing to start without LAN isolation. To override: SANDY_ALLOW_NO_ISOLATION=1"
+            _sandy_daemon_fatal
             exit 1
         fi
 
@@ -13306,21 +13307,49 @@ apply_network_isolation() {
         fi
         # Inserted last → lands at top → evaluated first: allow container's own subnet
         sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d "$CONTAINER_SUBNET" -j ACCEPT 2>/dev/null || true
+        # Verify, do not assume (#299). The DROP inserts above are `|| true`, and a
+        # chain that is READABLE (the -L preflight passed) can still refuse an
+        # INSERT: an nft-backend mismatch, a sudo policy that allows -L but not -I,
+        # a malformed range. This line used to print "applied" unconditionally, so
+        # that produced a session announcing isolation it did not have -- a warning
+        # nobody gets is a control nobody applied. `-C` asks the kernel whether each
+        # DROP is actually in the chain; the first one missing refuses the launch
+        # (cleanup's EXIT trap removes whatever DID land). Only the DROPs are
+        # verified: they are the isolation. The ACCEPTs are holes, and a missing
+        # hole fails closed on its own.
+        local _ni_missing=""
+        for range in "${PRIVATE_RANGES[@]}"; do
+            if ! sudo iptables -C DOCKER-USER -i "$BRIDGE_NAME" -d "$range" -j DROP >/dev/null 2>&1; then
+                _ni_missing="$range"
+                break
+            fi
+        done
+        if [ -n "$_ni_missing" ]; then
+            if [[ "${SANDY_ALLOW_NO_ISOLATION:-}" == "1" ]]; then
+                warn "WARNING: LAN isolation INCOMPLETE -- the DROP rule for ${_ni_missing} is not in DOCKER-USER (SANDY_ALLOW_NO_ISOLATION=1)."
+                return
+            fi
+            error "Network isolation rule not applied: DROP ${_ni_missing} on ${BRIDGE_NAME} is missing from the DOCKER-USER chain."
+            error "Refusing to start without LAN isolation. To override: SANDY_ALLOW_NO_ISOLATION=1"
+            _sandy_daemon_fatal
+            exit 1
+        fi
         info "Network isolation rules applied."
     else
         # Non-Linux (macOS, etc.): iptables is unreachable — the rules above
         # cannot be applied, and Docker Desktop's VM does NOT filter LAN
         # traffic. The container can reach host.docker.internal, host
-        # localhost services, and any device on the physical LAN. This is a
-        # known gap scheduled for a real fix in sandy 1.1 (egress proxy
-        # sidecar). Until then, warn loudly so users understand the posture.
+        # localhost services, and any device on the physical LAN. Reached only
+        # in the `off` egress posture -- the proxy postures close this gap with
+        # the --internal topology -- so the fix to name is SANDY_EGRESS, not the
+        # deprecated SANDY_EGRESS_PROXY tri-state this banner used to recommend.
         warn "═══════════════════════════════════════════════════════════════"
         warn " Network isolation is NOT active on $OS."
         warn " sandy cannot block LAN access from the container on this OS."
         warn " The container can reach your host's localhost services,"
         warn " host.docker.internal, and any device on your physical LAN."
-        warn " Fix: set SANDY_EGRESS_PROXY=1 (proxy sidecar, blocks LAN/host"
-        warn " but allows internet) or =2 (strict allowlist). Works on $OS."
+        warn " Fix: set SANDY_EGRESS=permissive (proxy sidecar, blocks LAN/host"
+        warn " but allows internet) or =strict (allowlist). Works on $OS."
         warn "═══════════════════════════════════════════════════════════════"
     fi
 }

@@ -706,7 +706,7 @@ The container's own subnet is allowed. Additional hosts/CIDRs can be allowed via
 
 **Cleanup**: Rules and network removed on exit via trap handler.
 
-**Fail-closed**: If `iptables` is not available, sandy aborts unless `SANDY_ALLOW_NO_ISOLATION=1`.
+**Fail-closed**: If `iptables` is not available, sandy aborts unless `SANDY_ALLOW_NO_ISOLATION=1`. **Verified, not assumed (2.4.0, #299)**: the DROP inserts are `|| true`, and a chain that is readable can still refuse an insert (nft-backend mismatch, a sudo policy allowing `-L` but not `-I`, a malformed range), so after inserting sandy re-checks each DROP with `sudo iptables -C DOCKER-USER -i $BRIDGE -d <range> -j DROP`. The first one missing refuses the launch, naming the range (with the `.fatal` marker, so a `--start` client fails in ~1s); under `SANDY_ALLOW_NO_ISOLATION=1` it warns that isolation is **incomplete** instead. "Network isolation rules applied." is printed only when every DROP is present. The ACCEPT rules are not verified: they are holes, and a missing hole fails closed on its own.
 
 ### `SANDY_LOCAL_LLM_HOST` — local LLM passthrough
 
@@ -731,7 +731,7 @@ The container's own subnet is allowed. Additional hosts/CIDRs can be allowed via
 
 **Network isolation is NOT active on macOS when the egress proxy is explicitly turned off (`SANDY_EGRESS_PROXY=0`).** (The default is `1` — permissive — so this applies only when a user opts out.) Docker Desktop's VM does *not* provide LAN isolation. Containers can reach `host.docker.internal` (→ host gateway), the host's `localhost` services, and any device on the user's physical LAN (`192.168.x.x`, home router, NAS, printers, internal dashboards). Linux iptables DROP rules do not apply and cannot be applied from macOS. (Stress test April 2026 opened a live TCP connection to host SSHD and read its banner — see `ISOLATION_STRESS.md` finding F2.) **Setting `SANDY_EGRESS_PROXY=1` (or `=2`) applies real isolation on macOS** — see "Egress Proxy" below.
 
-**Launch warning**: On non-Linux hosts with the proxy off, `apply_network_isolation` prints a warning banner informing the user that network isolation is not active and pointing at `SANDY_EGRESS_PROXY=1`. In proxy mode `apply_network_isolation` is not called (the `--internal` topology is the isolation), so no banner fires.
+**Launch warning**: On non-Linux hosts with the proxy off, `apply_network_isolation` prints a warning banner informing the user that network isolation is not active and pointing at `SANDY_EGRESS=permissive|strict` (it named the deprecated `SANDY_EGRESS_PROXY=1/2` before 2.4.0). In proxy mode `apply_network_isolation` is not called (the `--internal` topology is the isolation), so no banner fires.
 
 **Defense-in-depth (`--add-host`)**: sandy appends the following flags to `RUN_FLAGS` on macOS to nullify Docker Desktop's magic hostnames:
 
@@ -2241,7 +2241,7 @@ Sandy runs on both Linux and macOS. The following sections document every point 
 |---|---|---|
 | Mechanism | iptables `DOCKER-USER` chain | **None** (only under opt-out `=0`; Docker Desktop does *not* provide LAN isolation) |
 | Rules applied | DROP for 5 private ranges; ACCEPT for container subnet and allowed hosts | None — LAN, `host.docker.internal`, and host `localhost` are all reachable |
-| Fail-closed | Aborts if iptables unavailable (unless `SANDY_ALLOW_NO_ISOLATION=1`) | Prints loud launch warning banner; proceeds without isolation |
+| Fail-closed | Aborts if iptables unavailable, **or if any DROP rule is missing after insertion** (`iptables -C`, 2.4.0, #299) — unless `SANDY_ALLOW_NO_ISOLATION=1`, which warns instead | Prints loud launch warning banner naming `SANDY_EGRESS=permissive\|strict`; proceeds without isolation |
 | Defense-in-depth | n/a | `--add-host gateway.docker.internal:127.0.0.1`, `--add-host metadata.google.internal:127.0.0.1`, and (conditionally) `--add-host host.docker.internal:127.0.0.1` |
 | Cleanup | Rules and bridge network deleted on exit | Bridge network deleted on exit |
 
@@ -2254,7 +2254,8 @@ Sandy runs on both Linux and macOS. The following sections document every point 
 2. Insert DROP rules for each private range (inserted first = evaluated last)
 3. Insert ACCEPT for `SANDY_ALLOW_LAN_HOSTS` entries (if set)
 4. Insert ACCEPT for container's own subnet (inserted last = evaluated first)
-5. On exit: delete rules in reverse, remove Docker network
+5. Verify each DROP with `sudo iptables -C DOCKER-USER -i $BRIDGE -d <range> -j DROP`; the first missing one aborts, naming it (or warns "INCOMPLETE" under `SANDY_ALLOW_NO_ISOLATION=1`). Only then print "Network isolation rules applied." (2.4.0, #299)
+6. On exit: delete rules in reverse, remove Docker network
 
 ### D.2 SSH Agent Relay
 

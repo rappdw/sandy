@@ -693,7 +693,7 @@ Sandy automatically inserts `iptables` rules into the `DOCKER-USER` chain that b
 | `169.254.0.0/16` | Link-local |
 | `100.64.0.0/10` | CGNAT, Tailscale |
 
-Rules are automatically cleaned up when sandy exits. Stale rules from a previous unclean exit are cleaned up on startup. If `iptables` is not accessible, sandy warns that LAN isolation is not active.
+Rules are automatically cleaned up when sandy exits. Stale rules from a previous unclean exit are cleaned up on startup. If `iptables` is not accessible, sandy **refuses to launch**. Each DROP rule is then re-checked with `iptables -C` after insertion, and if any is missing — a readable chain can still refuse an insert — sandy refuses too, naming the range, rather than reporting isolation it does not have. `SANDY_ALLOW_NO_ISOLATION=1` overrides both refusals with a warning instead.
 
 ## Verifying Isolation
 
