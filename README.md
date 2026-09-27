@@ -224,7 +224,6 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_SKIP_PERMISSIONS` | `true` | Set to `false` to keep Claude Code's permission system active |
 | `SANDY_HOME` | `~/.sandy` | Sandy config/build/sandbox directory |
 | `SANDY_VERBOSE` | `0` | Verbosity: `0` quiet, `1` verbose, `2` debug, `3` full trace |
-| `TZ` | _(host zone)_ | Not a sandy config key — read from your own environment (or `/etc/localtime`/`/etc/timezone` if unset) and passed to the container so its clock follows your zone (#384). Sandy's own recorded timestamps stay UTC regardless. Set it before launching to override |
 | `SANDY_HOST_ID` | _(hostname)_ | Advisory host identity reported by `--print-state` for multi-host fleet aggregation (sandbox names hash only the workspace path, so the same path on two hosts collides). **Env-only** — a committed config can't forge it |
 | `SANDY_CPUS` | auto-detected | CPU limit for the container |
 | `SANDY_MEM` | auto-detected | Memory limit for the container |
@@ -892,7 +891,6 @@ Sandy checks your project on startup and handles common issues:
 - **Host `.venv/`** — shadowed with a sandbox-owned overlay (see above). The host venv is never modified; the container gets its own materialized venv matching the host's Python version, auto-activated via `VIRTUAL_ENV` + `PATH`. Drift between the overlay and `.python-version` triggers a warning on relaunch
 - **Foreign native modules** — if `node_modules/` contains native addons compiled for a different platform (e.g. macOS), sandy warns with `npm rebuild` as the fix
 - **Orphaned pip user-site** — if persistent `pip install --user` packages were installed under a different Python minor version than the image now ships (e.g. after a base-image Python bump), sandy warns with the old path and a reinstall/cleanup pointer
-- **Host timezone** — the container clock (`date`, `ls -l`, git's displayed times, the tmux status-bar clock) follows the host's zone via `TZ`, passed at container start (not baked into the image). Resolved from `TZ` in your environment, else `/etc/localtime`, else `/etc/timezone`; set `TZ` yourself before launching to override. Sandy's own recorded timestamps (session marker, `--print-state`, `WORKSPACE.json`) always stay UTC regardless of `TZ`
 
 These checks run on every session start and add negligible overhead.
 

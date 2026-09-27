@@ -318,15 +318,6 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 }
 ```
 
-> **`created_at` / `last_used_at` are UTC unconditionally (#384, no
-> `schema_version` bump).** Before #384, on a host whose zone was not UTC,
-> these two fields carried **host-local** time with a literal `Z` appended:
-> the underlying mtime formatters (`stat -c '%y'`, `stat -f '%Sm'`) render
-> in the caller's `TZ`, and nothing forced UTC before the container itself
-> gained a real `TZ` to be wrong under. That was a bug fix, not a schema
-> change — a consumer that already assumed these were UTC was always meant
-> to be right, and now unconditionally is.
-
 > **`host_id` / `host_id_source`** (top-level, added additively in `1.8.0`,
 > #179 — no `schema_version` bump). Advisory host identity for multi-host
 > fleet aggregation: sandbox names are `basename-<hash-of-workspace-path>`,
