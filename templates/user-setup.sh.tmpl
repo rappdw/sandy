@@ -974,65 +974,63 @@ _sandy_build_agent_cmd() {
     esac
 }
 
-# ---- handoff relay supervisor (SANDY_HANDOFF_RELAY, 1.10.0) -------------------
-# Container-level process: a sibling of the tmux server, never a pane, never a
-# child of an agent. Singleton via flock on the tmpfs home; restart-on-death with
-# backoff; never overlaps; never gives up. Headless (-p) and --remote runs never
-# start it (the launcher also never forwards the key for those).
+# ---- per-feature supervised entries (SANDY_HANDOFF_RELAY, SANDY_FEATURE_ENTRIES, 1.10.0 / #381) ----
+# Container-level processes: each a sibling of the tmux server, never a pane,
+# never a child of an agent. Singleton via flock on the tmpfs home;
+# restart-on-death with backoff; never overlaps; never gives up. Headless (-p)
+# and --remote runs never start any of them (the launcher also never forwards
+# the entries for those).
 #
-# A configured relay that cannot start FAILS THE SESSION (exit 1 from
+# A configured entry that cannot start FAILS THE SESSION (exit 1 from
 # user-setup.sh, so the container dies) — never "warn and proceed". The
-# launcher resolved crossSessionInbound=accept on the strength of this key;
-# proceeding without the relay would leave that surface open with nothing
-# delivering. The launcher already fails host-side for any path it can see;
-# these checks are the in-container remainder (image-only absolute paths,
-# the mount, flock).
-_sandy_start_handoff_relay() {
-    [ -n "${SANDY_HANDOFF_RELAY:-}" ] || return 0
-    # Relay state lives at /opt/sandy/relay-state since 2.2.0 (#353), not under
-    # ~/.handoff. It is PRODUCER-AGNOSTIC by design: an earlier draft proposed
-    # the feature's own instance tree, which relay.source (#345) disproved --
-    # two of the three producers had no feature to own it. The deciding reason
-    # outlives even that: .state and supervisor.log are SANDY'S SUPERVISOR'S
-    # files, not the relay's, so putting them inside a feature's tree would
-    # make sandy's own bookkeeping a tenant of the thing it supervises.
-    #
-    # Under /opt/sandy, not the agent home: /opt/sandy is already sandy's
-    # in-container namespace (features mount there), it is not swept by
-    # home-directory tooling, and ~/.sandy would read as the HOST config root.
-    # SANDY_RELAY_STATE is set HOST-SIDE, next to the mount that creates it, so
-    # the path has exactly ONE source rather than being spelled here and there.
-    # The fallback is the same literal, for a container started before the host
-    # began setting it.
-    local _r="$SANDY_HANDOFF_RELAY" _st="${SANDY_RELAY_STATE:-/opt/sandy/relay-state}" _lock="$HOME/.sandy-handoff-relay.lock"
+# launcher resolved crossSessionInbound=accept on the strength of the
+# relay-designated entry; proceeding without it would leave that surface open
+# with nothing delivering. The launcher already fails host-side for any path
+# it can see; these checks are the in-container remainder (image-only
+# absolute paths, the mount, flock) -- now run once PER ENTRY rather than
+# once total, so a second feature's entry gets the same guarantee as the
+# first instead of being silently dropped.
+#
+# _sandy_supervise_entry is the single-entry primitive (used for every entry,
+# designated or not); the entries starter below resolves SANDY_FEATURE_ENTRIES
+# (or falls back to a lone SANDY_HANDOFF_RELAY for a launcher that predates
+# #381) and calls it once per entry; _sandy_await_entries is the ONE shared
+# startup window covering all of them (D9) -- N sequential windows would add
+# 5s per already-healthy long-running entry, which does not scale with the
+# number of installed features.
+_sandy_supervise_entry() {
+    # $1=label (log prefix and error attribution -- "sandy-relay" for the
+    #    relay-designated entry, "sandy-entry <feature>" for every other one)
+    # $2=executable path (absolute, or workspace-relative)
+    # $3=state dir (mounted rw; holds .startup, .state, supervisor.log)
+    # $4=lock file (the singleton: $HOME/.sandy-handoff-relay.lock for the
+    #    designated entry, $HOME/.sandy-entry-<feature>.lock for every other)
+    # $5=SANDY_FEATURE_STATE value for the entry's OWN child process, or
+    #    empty. Exported inside the subshell only -- never leaks into the
+    #    parent shell or any pane, so each entry sees only its own value.
+    local _label="$1" _r="$2" _st="$3" _lock="$4" _fst="${5:-}"
     case "$_r" in /*) ;; *) _r="$WORKSPACE/$_r" ;; esac
     if [ ! -f "$_r" ] || [ ! -x "$_r" ]; then
-        sandy_err "SANDY_HANDOFF_RELAY=$SANDY_HANDOFF_RELAY resolves to $_r, which is not an executable file inside the container. A configured relay that cannot start fails the session (unset SANDY_HANDOFF_RELAY to launch without one)."
+        sandy_err "$_label: $_r is not an executable file inside the container. A configured relay that cannot start fails the session (unset SANDY_HANDOFF_RELAY, or remove the feature's entry, to launch without it)."
         exit 1
     fi
     if [ ! -d "$_st" ]; then
-        sandy_err "a relay is configured but its state directory ($_st) is not mounted. A configured relay that cannot start fails the session."
+        sandy_err "$_label: its state directory ($_st) is not mounted. A configured relay that cannot start fails the session."
         exit 1
     fi
     if ! command -v flock >/dev/null 2>&1; then
-        sandy_err "SANDY_HANDOFF_RELAY is configured but flock is not available in this image, so the relay singleton cannot be enforced. A configured relay that cannot start fails the session."
+        sandy_err "$_label: flock is not available in this image, so the entry's singleton cannot be enforced. A configured relay that cannot start fails the session."
         exit 1
     fi
-    # SANDY_RELAY_STATE replaces SANDY_HANDOFF_RELAY_STATE, which is removed
-    # with the rest of the SANDY_HANDOFF_* container contract (#352 took the
-    # other three). A relay locates its state directory by reading this, never
-    # by constructing a path sandy owns -- that construction has been the fault
-    # line three times now (#248 moved the home, #345 derived a path from the
-    # slot, #353 moved this one).
-    export SANDY_RELAY_STATE="$_st"   # idempotent when the host already set it
     # A verdict or state file left by an earlier container must not be read as
     # this one's — the sandbox directory outlives the container.
     rm -f "$_st/.startup" "$_st/.state"
     (
-        set +e; trap - ERR; trap '' HUP     # user-setup runs set -e + an ERR trap; the loop must survive relay exits
+        set +e; trap - ERR; trap '' HUP     # user-setup runs set -e + an ERR trap; the loop must survive the entry's own exits
+        [ -n "$_fst" ] && export SANDY_FEATURE_STATE="$_fst"
         exec 9>"$_lock"
         if ! flock -n 9; then
-            echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor already running (lock held); not starting a second" >> "$_st/supervisor.log"
+            echo "[$_label] $(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor already running (lock held); not starting a second" >> "$_st/supervisor.log"
             echo "already-running" > "$_st/.startup"
             exit 0
         fi
@@ -1040,17 +1038,17 @@ _sandy_start_handoff_relay() {
         # the caller before backgrounding — the caller cannot yet know whether this
         # attempt is the singleton winner or the "already running" loser above, and
         # logging unconditionally on the caller's side would claim success for both.
-        echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor started ($_r)" >> "$_st/supervisor.log"
+        echo "[$_label] $(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor started ($_r)" >> "$_st/supervisor.log"
         # A small, FIXED-SIZE state file beside the log (#258). `sandy
         # --print-state` reads this rather than parsing supervisor.log: the log
-        # is append-only and a crash-looping relay grows it without bound, so
+        # is append-only and a crash-looping entry grows it without bound, so
         # counting exits in it would put an unbounded read in a polling path.
         # The supervisor is anyway the authority on its own restart count —
         # deriving it by re-parsing its own output would be a second source.
         #
-        # It is DIAGNOSTICS, never a security signal: ~/.handoff/relay is
-        # mounted rw (the relay needs to write state there), so the agent can
-        # write this file too. Nothing may make a trust decision on it.
+        # It is DIAGNOSTICS, never a security signal: the state dir is mounted
+        # rw (the entry needs to write state there), so the agent can write
+        # this file too. Nothing may make a trust decision on it.
         restarts=0
         # Written to a temp and moved, so a reader never sees a half-written
         # file. An explicit if rather than `A && B || C`: that form is not
@@ -1068,11 +1066,11 @@ _sandy_start_handoff_relay() {
         backoff=1
         first=1
         while :; do
-            echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) start $_r" >> "$_st/supervisor.log"
+            echo "[$_label] $(date -u +%Y-%m-%dT%H:%M:%SZ) start $_r" >> "$_st/supervisor.log"
             t0=$(date +%s)
-            # 9>&- closes the lock fd in the relay's own process: the lock is held by
-            # THIS loop shell, not by the relay child, so a kill of the loop alone
-            # (without the relay) releases the lock instead of stranding it with an
+            # 9>&- closes the lock fd in the entry's own process: the lock is held by
+            # THIS loop shell, not by the entry's child, so a kill of the loop alone
+            # (without the entry) releases the lock instead of stranding it with an
             # orphaned holder that would make every future supervisor see a false
             # "already running".
             "$_r" 9>&- >> "$_st/supervisor.log" 2>&1 </dev/null
@@ -1084,47 +1082,121 @@ _sandy_start_handoff_relay() {
             restarts=$((restarts + 1))
             _relay_state looping "$rc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             [ "$up" -gt 60 ] && backoff=1
-            echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) exit rc=$rc uptime=${up}s; restart in ${backoff}s" >> "$_st/supervisor.log"
+            echo "[$_label] $(date -u +%Y-%m-%dT%H:%M:%SZ) exit rc=$rc uptime=${up}s; restart in ${backoff}s" >> "$_st/supervisor.log"
             sleep "$backoff"
             backoff=$(( backoff * 2 )); [ "$backoff" -gt 60 ] && backoff=60
         done
     ) </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
-    # ---- bounded startup window (#258) --------------------------------------
-    #
-    # Two failure shapes were conflated before this, and only one was covered:
-    #
-    #   - CANNOT START  — missing, not executable, no mount, no flock. Detected
-    #     above, before exec, and it fails the session (criterion 7).
-    #   - STARTS, THEN EXITS — the reported case: a delivery daemon died at
-    #     startup on every launch for 35 hours while the supervisor restarted it
-    #     forever and the session marker read handoff_relay:true. The launch had
-    #     already succeeded, so nothing could fail it and nothing surfaced it.
-    #
-    # This window bridges them. "Died at startup on every launch" lands inside
-    # it, so that case now fails the session with the relay's own exit code.
-    # Past the window it is a runtime loop: the launch already succeeded and is
-    # NOT retroactively un-succeeded — it is reported by `sandy --print-state`,
-    # which reads the supervisor log host-side.
-    #
-    # rc=0 inside the window is NOT a failure: a relay is allowed to be a
-    # one-shot that does its work and exits. Only a non-zero first exit is.
-    _w=0
-    while [ "$_w" -lt 50 ]; do
-        if [ -f "$_st/.startup" ]; then
-            _v="$(cat "$_st/.startup" 2>/dev/null || true)"
-            case "$_v" in
-                already-running) break ;;
-                rc=0)            break ;;
-                rc=*)
-                    sandy_err "the relay ($_r) exited ${_v#rc=} within 5s of starting, on every launch this reproduces. An installed relay that cannot stay up fails the session; see /opt/sandy/relay-state/supervisor.log for its own output."
-                    exit 1 ;;
-            esac
-        fi
-        sleep 0.1
+}
+
+# ---- bounded startup window (#258), shared across every entry (D9) --------
+#
+# Two failure shapes were conflated before this, and only one was covered:
+#
+#   - CANNOT START  — missing, not executable, no mount, no flock. Detected
+#     in _sandy_supervise_entry above, before exec, and it fails the session
+#     (criterion 7).
+#   - STARTS, THEN EXITS — the reported case: a delivery daemon died at
+#     startup on every launch for 35 hours while the supervisor restarted it
+#     forever and the session marker read handoff_relay:true. The launch had
+#     already succeeded, so nothing could fail it and nothing surfaced it.
+#
+# This window bridges them, for every entry at once. "Died at startup on
+# every launch" lands inside it, so that case now fails the session with the
+# entry's own exit code, naming which entry. Past the window it is a runtime
+# loop: the launch already succeeded and is NOT retroactively un-succeeded —
+# it is reported by `sandy --print-state`, which reads each entry's own
+# supervisor log host-side.
+#
+# rc=0 inside the window is NOT a failure: an entry is allowed to be a
+# one-shot that does its work and exits. Only a non-zero first exit is.
+_sandy_await_entries() {
+    # $@ = "<state_dir>=<label>" ... one entry per positional argument, so a
+    # label containing a space (e.g. "sandy-entry alpha") is never re-split.
+    local _pending=("$@") _next _pair _st _label _w=0 _v
+    while [ "$_w" -lt 50 ] && [ "${#_pending[@]}" -gt 0 ]; do
+        _next=()
+        for _pair in "${_pending[@]}"; do
+            _st="${_pair%%=*}"; _label="${_pair#*=}"
+            if [ -f "$_st/.startup" ]; then
+                _v="$(cat "$_st/.startup" 2>/dev/null || true)"
+                case "$_v" in
+                    already-running|rc=0) ;;   # settled: drop from the pending set
+                    rc=*)
+                        sandy_err "$_label exited ${_v#rc=} within 5s of starting, on every launch this reproduces. An installed relay that cannot stay up fails the session; see $_st/supervisor.log for its own output."
+                        exit 1 ;;
+                    *) _next+=("$_pair") ;;
+                esac
+            else
+                _next+=("$_pair")
+            fi
+        done
+        _pending=("${_next[@]}")
+        if [ "${#_pending[@]}" -gt 0 ]; then sleep 0.1; fi
         _w=$((_w + 1))
     done
-    sandy_log "Handoff relay supervisor requested ($_r); outcome (started vs. already running) is in /opt/sandy/relay-state/supervisor.log"
+}
+
+# ---- resolve SANDY_FEATURE_ENTRIES (or the legacy lone relay) and start each
+_sandy_start_entries() {
+    local _tok _f _p _wait_args=() _designated_seen=false _legacy_fallback=false
+    # Legacy/back-compat (D10 of #381): a launcher that only ever forwarded
+    # SANDY_HANDOFF_RELAY (predating #381, or an image whose build was
+    # deferred per #218 while the host moved on) still gets exactly today's
+    # single-entry behaviour.
+    if [ -z "${SANDY_FEATURE_ENTRIES:-}" ] && [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
+        SANDY_FEATURE_ENTRIES="legacy=$SANDY_HANDOFF_RELAY"
+        _legacy_fallback=true
+    fi
+    [ -n "${SANDY_FEATURE_ENTRIES:-}" ] || return 0
+    for _tok in $SANDY_FEATURE_ENTRIES; do
+        [ -n "$_tok" ] || continue
+        case "$_tok" in
+            *[!A-Za-z0-9._/=-]*)
+                sandy_err "SANDY_FEATURE_ENTRIES contains an invalid token ($_tok). A configured relay that cannot start fails the session."
+                exit 1 ;;
+        esac
+        _f="${_tok%%=*}"; _p="${_tok#*=}"
+        if [ "$_p" = "${SANDY_HANDOFF_RELAY:-}" ] && [ "$_designated_seen" = false ]; then
+            _designated_seen=true
+            # SANDY_RELAY_STATE replaces SANDY_HANDOFF_RELAY_STATE, which is
+            # removed with the rest of the SANDY_HANDOFF_* container contract
+            # (#352 took the other three). A relay locates its state
+            # directory by reading this, never by constructing a path sandy
+            # owns -- that construction has been the fault line three times
+            # now (#248 moved the home, #345 derived a path from the slot,
+            # #353 moved this one).
+            export SANDY_RELAY_STATE="${SANDY_RELAY_STATE:-/opt/sandy/relay-state}"
+            # D3's designated-entry SANDY_FEATURE_STATE is
+            # /opt/sandy/feature-state/<f> -- the SAME host directory as
+            # relay-state, just mounted at a second path (see the host-side
+            # mount block), so it is a real directory in the normal case.
+            # The legacy fallback above is the one exception: its feature
+            # name ("legacy") was never a real feature, so no
+            # feature-state/legacy mount exists -- only /opt/sandy/relay-state
+            # does. Pointing this entry at SANDY_RELAY_STATE there, instead,
+            # keeps it reading a directory that actually exists.
+            if [ "$_legacy_fallback" = true ]; then
+                _sandy_supervise_entry "sandy-relay" "$_p" "$SANDY_RELAY_STATE" \
+                    "$HOME/.sandy-handoff-relay.lock" \
+                    "$SANDY_RELAY_STATE"
+            else
+                _sandy_supervise_entry "sandy-relay" "$_p" "$SANDY_RELAY_STATE" \
+                    "$HOME/.sandy-handoff-relay.lock" \
+                    "${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}/$_f"
+            fi
+            _wait_args+=("$SANDY_RELAY_STATE=sandy-relay")
+        else
+            _sandy_supervise_entry "sandy-entry $_f" "$_p" \
+                "${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}/$_f" \
+                "$HOME/.sandy-entry-$_f.lock" \
+                "${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}/$_f"
+            _wait_args+=("${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}/$_f=sandy-entry $_f")
+        fi
+    done
+    _sandy_await_entries "${_wait_args[@]}"
+    sandy_log "Feature entries requested (${SANDY_FEATURE_ENTRIES}); outcome (started vs. already running) is in each entry's own supervisor.log"
 }
 
 cd "$WORKSPACE"
@@ -1132,9 +1204,9 @@ cd "$WORKSPACE"
 # Relay slot: skipped for headless (-p) and for --remote (criterion 8 — under
 # remote-control there is no tmux session, so sandy-handoff-sessions has no rows
 # and a helper-driven relay would be restarted every 60s for the container's
-# life with nothing to target). The launcher also unsets the key for both, so
-# this gate is the in-container half of the same decision, not the only half.
-if [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then _sandy_start_handoff_relay; fi
+# life with nothing to target). The launcher also unsets the entries for both,
+# so this gate is the in-container half of the same decision, not the only half.
+if [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then _sandy_start_entries; fi
 
 if [ "$_SANDY_IS_MULTI" = false ]; then
     # --- Single-agent launch ---

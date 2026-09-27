@@ -11651,8 +11651,10 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # contributors of the same non-repeatable flag. It sits beside `agent_args`
 # deliberately and answers a different question: that one records what was
 # PASSED, this one whether it can have taken EFFECT.
-check "§114(13g) marker printf format/arg count line up (18 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 18
+# 19 as of 2.4.0: `feature_entries` (#381) -- per-feature launch intent
+# (path/relay_alias/disabled_by), additive; schema_version does not move.
+check "§114(13g) marker printf format/arg count line up (19 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 19
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -11724,12 +11726,18 @@ check "§114(14f) oversized cmdline with the match FIRST still recognizes the ag
 
 # --- (15) relay supervisor: static checks against the TEMPLATE (mirror of the heredoc) --
 if [ -f "$_S114_TMPL" ]; then
-    _S114_SUP_FN="$(awk '/^_sandy_start_handoff_relay\(\) \{/,/^}$/' "$_S114_TMPL")"
-    check "§114(15pre) extracted _sandy_start_handoff_relay from templates/user-setup.sh.tmpl (proves the heredoc/template mirror stayed in sync, and regen-template.sh --check is the drift gate)" \
-        bash -c 'printf "%s" "$1" | grep -q SANDY_HANDOFF_RELAY' -- "$_S114_SUP_FN"
+    _S114_SUP_FN="$(awk '/^_sandy_supervise_entry\(\) \{/,/^}$/' "$_S114_TMPL")"
+    # Combined three-function extraction (#381): _sandy_supervise_entry,
+    # _sandy_await_entries and _sandy_start_entries together, for the dynamic
+    # tests below that need the whole call chain (start_entries calls both of
+    # the others). Bounded by the third column-0 closing brace after the
+    # first function's opener, since the three are adjacent in the heredoc.
+    _S114_ENTRY_FNS="$(awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$_S114_TMPL")"
+    check "§114(15pre) extracted _sandy_supervise_entry from templates/user-setup.sh.tmpl (proves the heredoc/template mirror stayed in sync, and regen-template.sh --check is the drift gate; SANDY_FEATURE_STATE is the #381 marker that this is the generalized function, not a stale copy)" \
+        bash -c 'printf "%s" "$1" | grep -q SANDY_FEATURE_STATE' -- "$_S114_SUP_FN"
     check "§114(15a) single column-0 closing brace (clean extraction)" \
         bash -c '[ "$(printf "%s\n" "$1" | grep -c "^}\$")" -eq 1 ]' -- "$_S114_SUP_FN"
-    check "§114(15b) survives its own relay's nonzero exit (set +e; trap - ERR under the caller's set -e/ERR trap)" \
+    check "§114(15b) survives its own entry's nonzero exit (set +e; trap - ERR under the caller's set -e/ERR trap)" \
         bash -c 'printf "%s" "$1" | grep -q "set +e; trap - ERR"' -- "$_S114_SUP_FN"
     check "§114(15c) singleton via flock -n on a lock fd" \
         bash -c 'printf "%s" "$1" | grep -q "flock -n 9"' -- "$_S114_SUP_FN"
@@ -11739,21 +11747,21 @@ if [ -f "$_S114_TMPL" ]; then
         bash -c 'printf "%s" "$1" | grep -q "up.*-gt 60.*&&.*backoff=1"' -- "$_S114_SUP_FN"
     check "§114(15f) call site precedes the first tmux new-session by line order" \
         bash -c '
-            c=$(grep -m1 -n "_sandy_start_handoff_relay;" "$1" | cut -d: -f1)
+            c=$(grep -m1 -n "_sandy_start_entries;" "$1" | cut -d: -f1)
             t=$(grep -m1 -n "tmux new-session" "$1" | cut -d: -f1)
             [ -n "$c" ] && [ -n "$t" ] && [ "$c" -lt "$t" ]
         ' -- "$_S114_TMPL"
-    check "§114(15g) call site is gated on headless (never starts the relay for -p/--print/--prompt)" \
-        bash -c 'grep -B1 "_sandy_start_handoff_relay;" "$1" | grep -q "_sandy_is_headless"' -- "$_S114_TMPL"
+    check "§114(15g) call site is gated on headless (never starts any entry for -p/--print/--prompt)" \
+        bash -c 'grep -B1 "_sandy_start_entries;" "$1" | grep -q "_sandy_is_headless"' -- "$_S114_TMPL"
     # Exactly ONE call site: the definition line plus one invocation. A second
     # invocation (e.g. added inside the multi-agent branch) would not be caught
     # by 15g, which only checks that SOME call site is headless-gated.
-    check "§114(15h) exactly one _sandy_start_handoff_relay call site (definition + 1 invocation = 2 mentions)" \
-        bash -c '[ "$(grep -c "_sandy_start_handoff_relay" "$1")" -eq 2 ]' -- "$_S114_TMPL"
+    check "§114(15h) exactly one _sandy_start_entries call site (definition + 1 invocation = 2 mentions)" \
+        bash -c '[ "$(grep -c "_sandy_start_entries" "$1")" -eq 2 ]' -- "$_S114_TMPL"
     # --- criterion 8, in-container half: the call site is gated on --remote as
     # well as headless. Belt-and-suspenders with the host-side unset (11p) --
     # the host is the only half that can log the reason, this half is what
-    # holds if a caller ever forwards the key anyway.
+    # holds if a caller ever forwards an entry anyway.
     # --- fatal in-container errors must be VISIBLE AT DEFAULT VERBOSITY ------
     #
     # user-setup.sh defines sandy_log as `{ :; }` -- a NO-OP -- unless
@@ -11777,27 +11785,27 @@ if [ -f "$_S114_TMPL" ]; then
         set +e
         _d="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$_d/h/ws"
         sed -n '1,20p' "$_S114_TMPL" > "$_d/hdr.sh"
-        sed -n '/^_sandy_start_handoff_relay() {/,/^}$/p' "$_S114_TMPL" > "$_d/fn.sh"
+        printf '%s\n' "$_S114_SUP_FN" > "$_d/fn.sh"
         ( unset SANDY_VERBOSE
-          HOME="$_d/h"; WORKSPACE="$_d/h/ws"; SANDY_HANDOFF_RELAY=/nonexistent/relay
+          HOME="$_d/h"; WORKSPACE="$_d/h/ws"
           . "$_d/hdr.sh" 2>/dev/null
           . "$_d/fn.sh"
-          _sandy_start_handoff_relay ) 2>&1
+          _sandy_supervise_entry "sandy-relay" /nonexistent/relay "$_d/h/st" "$_d/h/lock" "" ) 2>&1
         rm -rf "$_d"
     )"
-    check "§114(15l) a relay that cannot start PRINTS its reason with SANDY_VERBOSE unset — the behavioural half, not just the grep (got: ${_S114_ERRV:0:60})" \
+    check "§114(15l) an entry that cannot start PRINTS its reason with SANDY_VERBOSE unset — the behavioural half, not just the grep (got: ${_S114_ERRV:0:60})" \
         bash -c 'printf "%s" "$1" | grep -q "not an executable file inside the container"' -- "$_S114_ERRV"
     unset _S114_ERRV
-    check "§114(15i) call site is ALSO gated on SANDY_REMOTE_CONTROL (criterion 8: --remote has no panes for the relay to target, and the supervisor never gives up)" \
-        bash -c 'grep -q "_sandy_is_headless.*!=.*true.*SANDY_REMOTE_CONTROL.*!=.*true.*_sandy_start_handoff_relay" "$1"' -- "$_S114_TMPL"
+    check "§114(15i) call site is ALSO gated on SANDY_REMOTE_CONTROL (criterion 8: --remote has no panes for any entry to target, and the supervisor never gives up)" \
+        bash -c 'grep -q "_sandy_is_headless.*!=.*true.*SANDY_REMOTE_CONTROL.*!=.*true.*_sandy_start_entries" "$1"' -- "$_S114_TMPL"
     # --- criterion 7, in-container half: three preconditions the host cannot
-    # check (an image-only path, the /opt/sandy/relay-state mount, flock in the
+    # check (an image-only path, the entry's own state-dir mount, flock in the
     # image) each `exit 1` so the container dies before any tmux session
     # exists, rather than logging and leaving crossSessionInbound=accept with
     # nothing delivering.
-    check "§114(15i-2) env contract: the supervisor exports ONLY SANDY_RELAY_STATE — the SANDY_HANDOFF_* container vars went with their directories (#352, #353). A variable naming a path that is not mounted is worse than no variable" \
-        bash -c 'printf "%s\n" "$1" | grep -q "export SANDY_RELAY_STATE=" && ! printf "%s\n" "$1" | grep -qE "^ *export .*SANDY_HANDOFF_(INBOX|OUTBOX|PEER|RELAY_STATE)"' -- "$_S114_SUP_FN"
-    check "§114(15j) exactly three ERROR+exit-1 preconditions in the supervisor (relay not executable, relay state dir not mounted, flock missing)" \
+    check "§114(15i-2) env contract, GENERALIZED (#381): _sandy_start_entries exports SANDY_RELAY_STATE for the relay-designated entry only, and no SANDY_HANDOFF_* container var (#352, #353) is exported anywhere -- a variable naming a path that is not mounted is worse than no variable" \
+        bash -c 'grep -q "export SANDY_RELAY_STATE=" "$1" && ! grep -qE "^ *export .*SANDY_HANDOFF_(INBOX|OUTBOX|PEER|RELAY_STATE)" "$1"' -- "$_S114_TMPL"
+    check "§114(15j) exactly three ERROR+exit-1 preconditions in the supervisor (entry not executable, its state dir not mounted, flock missing)" \
         bash -c '[ "$(printf "%s\n" "$1" | grep -c "^        exit 1\$")" -eq 3 ]' -- "$_S114_SUP_FN"
     check "§114(15k) each of the three names the fail-the-session rule in its ERROR line" \
         bash -c '[ "$(printf "%s\n" "$1" | grep -c "A configured relay that cannot start fails the session")" -eq 3 ]' -- "$_S114_SUP_FN"
@@ -11814,7 +11822,7 @@ if [ -f "$_S114_TMPL" ]; then
 fi
 
 # --- (16) dynamic supervisor test (local loop, no Docker) --------------------
-if command -v flock >/dev/null 2>&1 && [ -n "${_S114_SUP_FN:-}" ]; then
+if command -v flock >/dev/null 2>&1 && [ -n "${_S114_ENTRY_FNS:-}" ]; then
     _S114_RF="$_S114/relayfix"
     mkdir -p "$_S114_RF/opt/sandy/relay-state" "$_S114_RF/home" "$_S114_RF/ws/.sandy"
     # The fixture relay records $PPID (the supervisor loop's OWN pid) on every
@@ -11833,26 +11841,31 @@ exit 7
 S114_RELAY_EOF
     chmod +x "$_S114_RF/ws/.sandy/relay-fail.sh"
     # As of 1.11.0 (#258) this fixture relay — which exits 7 immediately — trips
-    # the bounded STARTUP WINDOW, so _sandy_start_handoff_relay now returns
-    # non-zero instead of returning 0 and leaving the session up. That is the
-    # point of the window (a relay that dies at startup on every launch must
-    # fail the session rather than crash-loop unnoticed for 35 hours), and it is
+    # the bounded STARTUP WINDOW, so _sandy_start_entries now returns non-zero
+    # instead of returning 0 and leaving the session up. That is the point of
+    # the window (a relay that dies at startup on every launch must fail the
+    # session rather than crash-loop unnoticed for 35 hours), and it is
     # asserted as a property in (16z) below rather than merely tolerated here.
     # The `sleep 4` moved OUT of the subshell: the function no longer reaches
     # it, and the backgrounded supervisor loop — disowned, so it outlives the
     # subshell — still needs wall-clock time to accumulate the restarts (16a)
     # measures.
+    #
+    # SANDY_FEATURE_ENTRIES is left UNSET here deliberately (#381's legacy
+    # fallback): a single SANDY_HANDOFF_RELAY with no entries list still
+    # resolves to exactly one designated entry, so this fixture proves the
+    # generalized code reduces to the pre-#381 behaviour it replaces.
     _S114_RF_RC=0
     ( HOME="$_S114_RF/home" WORKSPACE="$_S114_RF/ws" SANDY_RELAY_STATE="$_S114_RF/opt/sandy/relay-state" bash -c "
         # unset EXPLICITLY: a sandy session still exports the retired
         # SANDY_HANDOFF_* vars until it relaunches, so this fixture inherited a
         # real /home/sandy/.handoff/inbox from the surrounding container, and the
         # is-it-unset assertion measured the developer machine, not the code.
-        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE
+        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE SANDY_FEATURE_ENTRIES
         sandy_log(){ :; }
         SANDY_HANDOFF_RELAY='.sandy/relay-fail.sh'
-        $_S114_SUP_FN
-        _sandy_start_handoff_relay
+        $_S114_ENTRY_FNS
+        _sandy_start_entries
     " ) >/dev/null 2>&1 || _S114_RF_RC=$?
     sleep 4
     check "§114(16z) a relay that dies at startup makes the supervisor function FAIL, so the session does not come up with nothing delivering (#258 startup window; got rc=$_S114_RF_RC)" \
@@ -11885,7 +11898,7 @@ fi
 # relay instance. Mutation-verified: `if flock -n 9 && false` leaves 15c green
 # but makes (16c) and (16d) below fail (three instances/zero "already running"
 # lines instead of one/two).
-if command -v flock >/dev/null 2>&1 && [ -n "${_S114_SUP_FN:-}" ]; then
+if command -v flock >/dev/null 2>&1 && [ -n "${_S114_ENTRY_FNS:-}" ]; then
     _S114_RF2="$_S114/relaylong"
     mkdir -p "$_S114_RF2/opt/sandy/relay-state" "$_S114_RF2/home" "$_S114_RF2/ws/.sandy"
     cat > "$_S114_RF2/ws/.sandy/relay-long.sh" <<'S114_RELAY_LONG_EOF'
@@ -11900,13 +11913,13 @@ S114_RELAY_LONG_EOF
         # SANDY_HANDOFF_* vars until it relaunches, so this fixture inherited a
         # real /home/sandy/.handoff/inbox from the surrounding container, and the
         # is-it-unset assertion measured the developer machine, not the code.
-        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE
+        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE SANDY_FEATURE_ENTRIES
         sandy_log(){ :; }
         SANDY_HANDOFF_RELAY='.sandy/relay-long.sh'
-        $_S114_SUP_FN
-        _sandy_start_handoff_relay
-        _sandy_start_handoff_relay
-        _sandy_start_handoff_relay
+        $_S114_ENTRY_FNS
+        _sandy_start_entries
+        _sandy_start_entries
+        _sandy_start_entries
         sleep 2
     " ) >/dev/null 2>&1
     _S114_LOCK="$_S114_RF2/home/.sandy-handoff-relay.lock"
@@ -12021,7 +12034,7 @@ unset _S114_SANDY _S114_TMPL _S114 _S114_PVP_FN _S114_VC_ACCEPT _S114_VC_HOLD _S
     _S114_NUDGE_OUT _S114_NUDGE_OUT2 _S114_END_LINE _S114_MOUNT_LINE _S114_SNAP_LINE _S114_RELAY_BEGIN_LINE _S114_PKGDIR_LINE _S114_HANDOFFDIR_LINE \
     _S114_RELAY_BLK _S114_RELAY_RC _S114_FMT_LINE _S114_CONV_COUNT _S114_HS_HELPER _S114_HS _S114_HS_OUT _S114_HS_OUT2 \
     _S114_HS_OUT2_L1 _S114_HS_OUT2_L2 _S114_HS_BIG_OUT \
-    _S114_HS_EMPTY_RC _S114_HS_EMPTY_OUT _S114_SUP_FN _S114_RF _S114_TAB _S114_RF2 _S114_LOCK _S114_FLOCK_RC \
+    _S114_HS_EMPTY_RC _S114_HS_EMPTY_OUT _S114_SUP_FN _S114_ENTRY_FNS _S114_RF _S114_TAB _S114_RF2 _S114_LOCK _S114_FLOCK_RC \
     _S114_RW _S114_RELAY_OUT _S114_COLL_BLK _S114_COLL_RC _S114_COLL_OUT _S114_D8_OUT \
     _S114_ACC _S114_ACC_E _S114_START_PAT _S114_UDS \
     2>/dev/null || true
@@ -12744,7 +12757,14 @@ _S123_DIR="$(mktemp -d)"
 # Extract the two units under test rather than re-implementing their logic: a
 # paraphrase in a test asserts the paraphrase, not the shipped code.
 sed -n '/^# BEGIN relay capability/,/^# END relay capability/p' "$SANDY_SCRIPT" > "$_S123_DIR/resolve.sh"
-sed -n '/^_sandy_start_handoff_relay() {/,/^}$/p'                "$SANDY_SCRIPT" > "$_S123_DIR/supervisor.sh"
+# #381 split the single supervisor function into three: _sandy_supervise_entry
+# (the flock/backoff loop), _sandy_await_entries (the shared startup window)
+# and _sandy_start_entries (resolves SANDY_FEATURE_ENTRIES, or a lone
+# SANDY_HANDOFF_RELAY, and calls the other two). This section drives the whole
+# chain through the legacy single-relay path, so all three are extracted
+# together, bounded by the third column-0 closing brace after the first
+# function's opener (they are adjacent in the heredoc).
+awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$SANDY_SCRIPT" > "$_S123_DIR/supervisor.sh"
 
 check "§123(pre-a) the resolution block was extracted (mutation: renaming the BEGIN/END markers empties it and would make every resolution check below vacuous)" \
     bash -c 'grep -q "_sandy_relay_slot=" "$1" && [ "$(grep -c . "$1")" -gt 20 ]' -- "$_S123_DIR/resolve.sh"
@@ -12969,6 +12989,7 @@ if command -v flock >/dev/null 2>&1; then
             set +e
             sandy_log() { :; }
             HOME="$h"; WORKSPACE="$h/ws"; SANDY_HANDOFF_RELAY="$h/r.sh"
+            unset SANDY_FEATURE_ENTRIES   # legacy fallback path (#381): one relay, no entries list
             # The state dir is an ABSOLUTE container path now (#353), so the
             # harness cannot relocate it via HOME. Sandy sets it host-side next
             # to the mount and the supervisor reads it, which is what makes the
@@ -12978,7 +12999,7 @@ if command -v flock >/dev/null 2>&1; then
             # Same capture rule as _s123_resolve: the function's refusal is an
             # `exit 1` that kills this subshell, so the status is read outside
             # it rather than echoed from within (which would never run).
-            _sandy_start_handoff_relay
+            _sandy_start_entries
         ) >/dev/null 2>&1 || rc=$?
         pkill -f "$h/r.sh" >/dev/null 2>&1 || true
         echo "rc=$rc"
@@ -16945,7 +16966,7 @@ check "§151(4) relay state is mounted READ-WRITE at /opt/sandy/relay-state — 
     bash -c 'grep -q "relay-state:/opt/sandy/relay-state\")" "$1" && ! grep -q "relay-state:/opt/sandy/relay-state:ro" "$1"' _ "$_S151_SANDY"
 check "§151(5) the container path has ONE source: the host sets SANDY_RELAY_STATE beside the mount and the supervisor reads it, rather than both spelling the literal (mutation: hardcode it in the supervisor and the harnesses that relocate it break)" \
     bash -c 'grep -q -- "-e \"SANDY_RELAY_STATE=/opt/sandy/relay-state\"" "$1" \
-             && grep -q "_st=\"\${SANDY_RELAY_STATE:-/opt/sandy/relay-state}\"" "$1"' _ "$_S151_SANDY"
+             && grep -q "export SANDY_RELAY_STATE=\"\${SANDY_RELAY_STATE:-/opt/sandy/relay-state}\"" "$1"' _ "$_S151_SANDY"
 check "§151(6) the relay-state mount is gated on a relay being configured and on nothing else — it was never part of the handoff tree, and tying it to that tree's opt-out would have made a relay stop starting for a reason nobody could find (SANDY_HANDOFF_DIRS is now gone entirely, #355)" \
     bash -c 'grep -B3 "relay-state:/opt/sandy/relay-state\")" "$1" | grep -q "if \[ -n \"\${SANDY_HANDOFF_RELAY:-}\" \]" \
 ' _ "$_S151_SANDY"
@@ -17207,6 +17228,7 @@ _S153_BANOUT="$(bash -c '
     SANDY_RELAY=1; SANDBOX_NAME=amap-router-11112222; WORK_DIR=/w/amap-router; SANDY_AGENT=claude
     _sandy_fm_root="$3"; _sandy_fm_out=""; _sandy_fm_rc=0; _sandy_fm_ran=false
     _SANDY_FM_AA_RECORDS=""; _SANDY_FM_AA_JSON=""; _SANDY_RELAY_SOURCE=""; _sandy_relay_source=""
+    _sandy_fe_list=""; _sandy_fe_disabled=""; _sandy_fe_relay_feature=""; SANDY_FEATURE_ENTRIES=""
     eval "$2"
 ' _ "$_S153_APPLYBLK" "$_S153_BAN" "$_S153_DIR/root" 2>&1)"
 check "§153(27) an APPLIED feature is named at launch with what it contributed — no SANDY_VERBOSE required (got: $(printf '%s' "$_S153_BANOUT" | grep -m1 '^INFO features:'))" \
@@ -17300,12 +17322,13 @@ _s154_mk() {
     _H8="$(printf '%s' "$_W" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-8)"
     _NAME="$(basename "$_W" | tr -cd 'a-zA-Z0-9._-')-$_H8"; _SB="$_SH/sandboxes/$_NAME"
     _CWS="/home/sandy/$2"; _PD="$(printf '%s' "$_CWS" | sed 's/[^a-zA-Z0-9]/-/g')"
-    mkdir -p "$_SB/claude/projects/$_PD" "$_SB/claude/sessions" "$_SB/codex" "$_SB/venv/bin" "$_SB/cargo/bin" "$_SB/relay-state"
+    mkdir -p "$_SB/claude/projects/$_PD" "$_SB/claude/sessions" "$_SB/codex" "$_SB/venv/bin" "$_SB/cargo/bin" "$_SB/relay-state" "$_SB/feature-state/beta"
     printf 'TRANSCRIPT\n' > "$_SB/claude/projects/$_PD/s1.jsonl"
     printf 'key\n' > "$_SB/claude/sessions/1.a.key"
     printf '{"t":"CODEX"}\n' > "$_SB/codex/auth.json"
     printf 'py\n' > "$_SB/venv/bin/python"; printf 'bin\n' > "$_SB/cargo/bin/tool"
     printf '{}\n' > "$_SB/sandy-session.json"; printf 'started\n' > "$_SB/relay-state/.state"
+    printf 'started\n' > "$_SB/feature-state/beta/.state"   # #381: supervisor state, regenerated -- never copied
     printf '2.3.0\n' > "$_SB/.sandy_created_version"
     printf '{\n  "schema_version": 1,\n  "sandbox_name": "%s",\n  "workspace_path": "%s",\n  "first_seen_at": "2026-01-01T00:00:00Z",\n  "last_seen_at": "2026-09-01T00:00:00Z",\n  "sandy_version_first": "2.0.0",\n  "sandy_version_last": "2.3.0"\n}\n' "$_NAME" "$_W" > "$_SB/WORKSPACE.json"
     printf '{"projects":{"%s":{"trusted":true}}}\n' "$_CWS" > "$_SH/sandboxes/$_NAME.claude.json"
@@ -17361,8 +17384,8 @@ check "§154(8) the sibling .claude.json arrives under the destination name -- a
     test -f "$_S154_D.claude.json"
 check "§154(9) history is copied unrenamed when the container path is unchanged" \
     test -f "$_S154_D/claude/projects/-home-sandy-dev-proj/s1.jsonl"
-check "§154(10) per-process and per-launch state is NOT copied (claude/sessions keys, sandy-session.json, relay-state)" \
-    bash -c 'test ! -e "$1/claude/sessions" && test ! -e "$1/sandy-session.json" && test ! -e "$1/relay-state"' _ "$_S154_D"
+check "§154(10) per-process and per-launch state is NOT copied (claude/sessions keys, sandy-session.json, relay-state, feature-state (#381))" \
+    bash -c 'test ! -e "$1/claude/sessions" && test ! -e "$1/sandy-session.json" && test ! -e "$1/relay-state" && test ! -e "$1/feature-state"' _ "$_S154_D"
 check "§154(11) same arch and same container path: venv/ and cargo/ are copied" \
     bash -c 'test -f "$1/venv/bin/python" && test -f "$1/cargo/bin/tool"' _ "$_S154_D"
 check "§154(12) credential files ARE copied (#374 decision 2)..." test -f "$_S154_D/codex/auth.json"
@@ -17594,6 +17617,373 @@ unset _S155_SANDY _S155_TMPL _S155_TAB _S155_DIR _S155_HS_HELPER _S155_HS _S155_
     _S155_OUT1_L1 _S155_OUT1_L2 _S155_OUT2_L1 _S155_OUT2_L2 _S155_OUT2_L3 _S155_OUT2_L4 \
     _S155_TMPL_SESSIONS _S155_TMPL_OPTS _S155_TMPL_OPT_COUNT _S155_HS_SESSION _S155_HS_OPT
 unset -f _s155_match _s155_run _s155_stat
+
+# ============================================================
+echo "§156: per-feature supervised entries — every selected feature's entry runs (#381)"
+# ============================================================
+# WHY THIS SECTION EXISTS. The adoption loop used to take the FIRST manifest
+# `entry` in sorted feature-directory order and silently drop every later one
+# via `elif [ -z "${SANDY_HANDOFF_RELAY:-}" ]` -- a second feature's entry was
+# mounted, selected, and never run, with nothing anywhere saying so (the #363
+# failure shape again). #381 makes every selected feature's entry run, each
+# independently supervised, while keeping relay{} and every relay-named
+# surface byte-identical for the single-entry case (D2): the FIRST entry
+# adopted (unchanged sorted order) becomes the relay-DESIGNATED entry.
+_S156_SANDY="$SANDY_SCRIPT"
+_S156_TMPL="$(cd "$(dirname "$0")" && pwd)/../templates/user-setup.sh.tmpl"
+
+# --- (1)-(3) the adoption loop, extracted exactly as §149 extracts it -------
+_S156_ADOPT="$(awk '/^    while IFS= read -r _fm_l; do/,/^    done <<< "\$_sandy_fm_out"/' "$_S156_SANDY")"
+check "§156(pre) the adoption loop was extracted (mutation: a rename empties this and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_fe_list="' _ "$_S156_ADOPT"
+
+# _s156_adopt SANDY_RELAY WARNFILE ENTRY1 [ENTRY2 ...] -> "source|path|fe_list|fe_relay_feature|fe_disabled"
+# on stdout; anything the loop itself warn()s is appended to WARNFILE.
+# A global var set INSIDE a function called via $(...) never escapes that
+# command substitution's subshell -- routing warnings through a file instead
+# of a second global sidesteps that trap.
+_s156_adopt() {
+    local _relay="$1" _warnfile="$2"; shift 2
+    bash -c '
+        set -uo pipefail
+        info(){ :; }; warn(){ echo "WARN:$*" >&2; }
+        _loop="$1"
+        unset SANDY_HANDOFF_RELAY SANDY_FEATURE_ENTRIES
+        SANDY_RELAY="$2"; _SANDY_RELAY_SOURCE="workspace"
+        _sandy_relay_source="none"; _sandy_relay_from_slot="false"
+        _sandy_fe_list=""; _sandy_fe_disabled=""; _sandy_fe_relay_feature=""
+        shift 2
+        _sandy_fm_out=""
+        for _e in "$@"; do
+            printf -v _fmline "entry\t%s\n" "$_e"
+            _sandy_fm_out="${_sandy_fm_out}${_fmline}"
+        done
+        eval "$_loop"
+        echo "$_sandy_relay_source|${SANDY_HANDOFF_RELAY:-}|$_sandy_fe_list|$_sandy_fe_relay_feature|$_sandy_fe_disabled"
+    ' _ "$_S156_ADOPT" "$_relay" "$@" 2>>"$_warnfile"
+}
+_S156_WF="$(mktemp)"
+_S156_A1="$(_s156_adopt 1 "$_S156_WF" /opt/sandy/features/alpha/r /opt/sandy/features/beta/s)"
+check "§156(1a) two entries: SANDY_HANDOFF_RELAY resolves to the FIRST (alpha)'s path (got: $_S156_A1)" \
+    bash -c 'case "$1" in manifest\|/opt/sandy/features/alpha/r\|*) exit 0;; esac; exit 1' _ "$_S156_A1"
+check "§156(1b) ...and _sandy_fe_list contains BOTH features, not just the designated one (got: $_S156_A1)" \
+    bash -c 'printf "%s" "$1" | grep -q "alpha=/opt/sandy/features/alpha/r" && printf "%s" "$1" | grep -q "beta=/opt/sandy/features/beta/s"' _ "$_S156_A1"
+check "§156(1c) ...and _sandy_fe_relay_feature names the designated feature (alpha) (got: $_S156_A1)" \
+    bash -c 'printf "%s" "$1" | cut -d"|" -f4 | grep -qx alpha' _ "$_S156_A1"
+
+: > "$_S156_WF"
+_S156_A2="$(_s156_adopt 0 "$_S156_WF" /opt/sandy/features/alpha/r /opt/sandy/features/beta/s)"
+check "§156(2a) SANDY_RELAY=0 with two entries: fe_list is EMPTY -- nothing runs (got: $_S156_A2)" \
+    bash -c '[ "$(printf "%s" "$1" | cut -d"|" -f3)" = "" ]' _ "$_S156_A2"
+check "§156(2b) ...and fe_disabled names BOTH (got: $_S156_A2)" \
+    bash -c 'printf "%s" "$1" | cut -d"|" -f5 | grep -q "alpha=/opt/sandy/features/alpha/r" && printf "%s" "$1" | cut -d"|" -f5 | grep -q "beta=/opt/sandy/features/beta/s"' _ "$_S156_A2"
+check "§156(2c) ...and the warning names BOTH paths -- silence here is the 'fleet goes dark' failure #381 exists to retire" \
+    bash -c 'printf "%s" "$(cat "$1")" | grep -q "alpha/r" && printf "%s" "$(cat "$1")" | grep -q "beta/s"' _ "$_S156_WF"
+
+: > "$_S156_WF"
+_S156_A3="$(_s156_adopt 1 "$_S156_WF" /opt/sandy/features/amap/relay)"
+check "§156(3) single entry: relay source/path match §149(11)'s pre-#381 value exactly -- the single-entry case is byte-identical (got: $_S156_A3)" \
+    bash -c '[ "$(printf "%s" "$1" | cut -d"|" -f1-2)" = "manifest|/opt/sandy/features/amap/relay" ]' _ "$_S156_A3"
+rm -f "$_S156_WF"; unset _S156_A1 _S156_A2 _S156_A3 _S156_WF
+
+# --- (4)-(5) dynamic: two entries, each independently supervised -----------
+# Needs flock (the supervisor refuses without it); skipped loudly otherwise,
+# same discipline as §114(16).
+if command -v flock >/dev/null 2>&1 && [ -f "$_S156_TMPL" ]; then
+    _S156_FNS="$(awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$_S156_TMPL")"
+    _S156_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+    mkdir -p "$_S156_D/relay-state" "$_S156_D/fs/beta" "$_S156_D/home" "$_S156_D/ws" "$_S156_D/a" "$_S156_D/b"
+    cat > "$_S156_D/a/entry.sh" <<EOF
+#!/bin/sh
+echo "\$\$" >> "$_S156_D/pid-a"
+printf '%s\n' "\${SANDY_FEATURE_STATE:-unset}" >> "$_S156_D/env-a"
+sleep 30
+EOF
+    cat > "$_S156_D/b/entry.sh" <<EOF
+#!/bin/sh
+echo "\$\$" >> "$_S156_D/pid-b"
+printf '%s\n' "\${SANDY_FEATURE_STATE:-unset}" >> "$_S156_D/env-b"
+sleep 30
+EOF
+    chmod +x "$_S156_D/a/entry.sh" "$_S156_D/b/entry.sh"
+    _S156_RC=0
+    ( HOME="$_S156_D/home" WORKSPACE="$_S156_D/ws" bash -c '
+        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE
+        sandy_log(){ :; }; sandy_err(){ echo "ERR:$*" >&2; }
+        SANDY_FEATURE_ENTRIES="alpha='"$_S156_D"'/a/entry.sh beta='"$_S156_D"'/b/entry.sh"
+        SANDY_HANDOFF_RELAY="'"$_S156_D"'/a/entry.sh"
+        SANDY_RELAY_STATE="'"$_S156_D"'/relay-state"
+        SANDY_FEATURE_STATE_ROOT="'"$_S156_D"'/fs"
+        '"$_S156_FNS"'
+        _sandy_start_entries
+    ' ) >/dev/null 2>&1 || _S156_RC=$?
+    sleep 0.5
+    check "§156(4a) _sandy_start_entries returns 0 when both entries start cleanly (got rc=$_S156_RC)" \
+        test "$_S156_RC" -eq 0
+    check "§156(4b) both entries' pidfiles got a pid" \
+        bash -c 'test -s "$1" && test -s "$2"' _ "$_S156_D/pid-a" "$_S156_D/pid-b"
+    check "§156(4c) relay-state/.state (alpha, the designated entry) reports started" \
+        bash -c 'grep -q "^state=started" "$1"' _ "$_S156_D/relay-state/.state"
+    check "§156(4d) fs/beta/.state (the non-designated entry) ALSO reports started -- this is the check that fails on the silently-dropped-second-entry bug" \
+        bash -c 'grep -q "^state=started" "$1"' _ "$_S156_D/fs/beta/.state"
+    check "§156(4e) each entry's own process sees its OWN SANDY_FEATURE_STATE" \
+        bash -c 'grep -qF "/fs/alpha" "$1" && grep -qF "/fs/beta" "$2"' _ "$_S156_D/env-a" "$_S156_D/env-b"
+    check "§156(4f) two DISTINCT lock files are genuinely held (a foreign flock -n on each fails)" \
+        bash -c '
+            r1=0; flock -n "$1" true >/dev/null 2>&1 || r1=$?
+            r2=0; flock -n "$2" true >/dev/null 2>&1 || r2=$?
+            [ "$r1" -ne 0 ] && [ "$r2" -ne 0 ]
+        ' _ "$_S156_D/home/.sandy-handoff-relay.lock" "$_S156_D/home/.sandy-entry-beta.lock"
+
+    _S156_PIDA1="$(head -1 "$_S156_D/pid-a" 2>/dev/null || true)"
+    _S156_PIDB1="$(head -1 "$_S156_D/pid-b" 2>/dev/null || true)"
+    [ -n "$_S156_PIDA1" ] && kill "$_S156_PIDA1" >/dev/null 2>&1
+    sleep 3
+    _S156_PIDA2="$(tail -1 "$_S156_D/pid-a" 2>/dev/null || true)"
+    check "§156(4g) killing alpha's entry: it restarts with a NEW pid" \
+        bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$2" ]' _ "$_S156_PIDA1" "$_S156_PIDA2"
+    check "§156(4h) ...alpha's restart is recorded" \
+        bash -c 'grep -q "^restarts=[1-9]" "$1"' _ "$_S156_D/relay-state/.state"
+    check "§156(4i) ...and beta is COMPLETELY untouched: same pid, restarts=0 (killing one entry must not affect the other)" \
+        bash -c 'test "$(wc -l < "$1" | tr -d " ")" -eq 1 && grep -q "^restarts=0" "$2"' _ "$_S156_D/pid-b" "$_S156_D/fs/beta/.state"
+
+    # cleanup: kill everything under this fixture's own path -- pkill -f on the
+    # unique tmpdir path, which exists on macOS too.
+    command -v pkill >/dev/null 2>&1 && pkill -9 -f "$_S156_D/" >/dev/null 2>&1 || true
+    rm -rf "$_S156_D"
+    unset _S156_RC _S156_PIDA1 _S156_PIDA2 _S156_PIDB1
+
+    # --- (5) startup failure of the SECOND entry --------------------------
+    _S156_D2="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$_S156_D2/relay-state" "$_S156_D2/fs/beta" "$_S156_D2/home" "$_S156_D2/ws" "$_S156_D2/a" "$_S156_D2/b"
+    printf '#!/bin/sh\nsleep 30\n' > "$_S156_D2/a/entry.sh"
+    printf '#!/bin/sh\nexit 3\n' > "$_S156_D2/b/entry.sh"
+    chmod +x "$_S156_D2/a/entry.sh" "$_S156_D2/b/entry.sh"
+    _S156_OUT5F="$(mktemp)"
+    _S156_RC5=0
+    ( HOME="$_S156_D2/home" WORKSPACE="$_S156_D2/ws" bash -c '
+        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE
+        sandy_log(){ :; }; sandy_err(){ echo "ERR:$*" >&2; }
+        SANDY_FEATURE_ENTRIES="alpha='"$_S156_D2"'/a/entry.sh beta='"$_S156_D2"'/b/entry.sh"
+        SANDY_HANDOFF_RELAY="'"$_S156_D2"'/a/entry.sh"
+        SANDY_RELAY_STATE="'"$_S156_D2"'/relay-state"
+        SANDY_FEATURE_STATE_ROOT="'"$_S156_D2"'/fs"
+        '"$_S156_FNS"'
+        _sandy_start_entries
+    ' ) > "$_S156_OUT5F" 2>&1 || _S156_RC5=$?
+    _S156_OUT5="$(cat "$_S156_OUT5F")"; rm -f "$_S156_OUT5F"
+    check "§156(5a) the SECOND entry dying at startup fails the whole session (got rc=$_S156_RC5)" \
+        test "$_S156_RC5" -ne 0
+    check "§156(5b) ...and names beta, not alpha, as the one that failed" \
+        bash -c 'printf "%s" "$1" | grep -q beta' _ "$_S156_OUT5"
+    command -v pkill >/dev/null 2>&1 && pkill -9 -f "$_S156_D2/" >/dev/null 2>&1 || true
+    rm -rf "$_S156_D2"
+    unset _S156_OUT5 _S156_RC5 _S156_FNS _S156_OUT5F
+else
+    skip "§156(4)-(5) dynamic per-feature supervision (flock or templates/user-setup.sh.tmpl unavailable)"
+fi
+
+# --- (6) the marker printf, with feature_entries populated ------------------
+_S156_MKFN="$(awk '/^_sandy_fm_jesc\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$_S156_SANDY")"
+_S156_FEFN="$(awk '/^_sandy_fe_marker_body\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$_S156_SANDY")"
+check "§156(pre-6) both marker helpers were extracted" \
+    bash -c 'printf "%s" "$1" | grep -q jesc && printf "%s" "$2" | grep -q relay_alias' _ "$_S156_MKFN" "$_S156_FEFN"
+
+# --- (6d) THE REAL CALL SITE, under set -euo pipefail, with an empty list ---
+# A verifier caught what (6a)-(6c) above all miss: `_s156_marker_fe` runs
+# `_sandy_fe_marker_body` inside a bare `( ... )` subshell with no `set -e`,
+# and §134's marker harness stubs `_sandy_fe_json` directly rather than
+# calling the function at all -- so nothing exercised the ACTUAL assignment
+# line (`_sandy_fe_json="$(_sandy_fe_marker_body ...)"`) under errexit. That
+# line runs on every real launch, under the script's own `set -euo pipefail`,
+# and the original bug (`[ -n "$_out" ] && printf ...`, whose failing test
+# returns 1 with no `printf` to override it) aborted the marker write on
+# EVERY sandbox with no feature entry -- which was every sandbox, since the
+# feature is opt-in. This check extracts the exact assignment line, not a
+# hand-written equivalent, so a regression to that shape is caught here even
+# if every other §156(6) check stays green (they do, since none of them run
+# under errexit).
+_S156_CALLLINE="$(awk '/^_sandy_fe_json="\$\(_sandy_fe_marker_body/{print; exit}' "$_S156_SANDY")"
+check "§156(pre-6d) the real _sandy_fe_json assignment line was found (mutation: renaming the target empties this and (6d) goes vacuous)" \
+    bash -c '[ -n "$1" ]' _ "$_S156_CALLLINE"
+_s156_real_callsite() {
+    # $1=fe_list $2=fe_disabled $3=relay_feature $4=disabled_by_json
+    # Runs the REAL assignment line, verbatim, under set -euo pipefail --
+    # prints "RC=<n> OUT=<value>" so a caller sees both the exit status the
+    # script would have had (0 = kept running, 1 = aborted right here) and
+    # what the variable held when it didn't abort.
+    bash -c '
+        set -euo pipefail
+        eval "$1"; eval "$2"
+        _sandy_fe_list="$3"; _sandy_fe_disabled="$4"; _sandy_fe_relay_feature="$5"
+        _sandy_relay_disabled_by_json="${6:-null}"
+        eval "$7"
+        printf "RC=0 OUT=%s" "$_sandy_fe_json"
+    ' _ "$_S156_MKFN" "$_S156_FEFN" "$1" "$2" "$3" "${4:-null}" "$_S156_CALLLINE"
+    printf ' ACTUALRC=%s' "$?"
+}
+_S156_RCS_EMPTY="$(_s156_real_callsite "" "" "" null)"
+check "§156(6d) the real call-site line does NOT abort the launch when no feature entry is selected -- the regression this whole verify round was about (got: $_S156_RCS_EMPTY)" \
+    bash -c 'case "$1" in "RC=0 OUT= ACTUALRC=0") exit 0;; esac; exit 1' _ "$_S156_RCS_EMPTY"
+_S156_RCS_TWO="$(_s156_real_callsite "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" "" alpha null)"
+check "§156(6e) ...and still runs correctly with entries present (got: $_S156_RCS_TWO)" \
+    bash -c 'printf "%s" "$1" | grep -q "ACTUALRC=0" && printf "%s" "$1" | grep -q "relay_alias.: true"' _ "$_S156_RCS_TWO"
+unset _S156_CALLLINE _S156_RCS_EMPTY _S156_RCS_TWO
+unset -f _s156_real_callsite
+
+_S156_MKBLK="$(awk '/^printf .\{.n  "schema": 1,/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$_S156_SANDY")"
+_s156_marker_fe() {
+    # $1=fe_list $2=fe_disabled $3=relay_feature $4=disabled_by_json -> full marker JSON on stdout
+    (
+        eval "$_S156_MKFN"; eval "$_S156_FEFN"
+        sandy_full_version() { echo "9.9.9"; }
+        _sandy_egress_mode=off; SANDY_WORKSPACE=/home/sandy/ws; SANDBOX_NAME=ws-abc12345
+        _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
+        _sandy_agents_json=null; _sandy_relay_source_json=null; _sandy_relay_path_json=null
+        _sandy_relay_disabled_by_json="${4:-null}"
+        _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""
+        CRED_MODE=none; _sandy_session_nonce=deadbeef; _sandy_session_file=/dev/stdout
+        _sandy_fe_list="$1"; _sandy_fe_disabled="$2"; _sandy_fe_relay_feature="$3"
+        _sandy_fe_json="$(_sandy_fe_marker_body "$1" "$2" "$3" "${4:-null}")"
+        eval "$_S156_MKBLK"
+    ) 2>/dev/null
+}
+_S156_MK2="$(_s156_marker_fe "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" "" alpha null)"
+if command -v python3 >/dev/null 2>&1; then
+    check "§156(6a) two entries (one disabled: none): the marker is valid JSON (mutation m5: dropping the \${_sandy_fe_json:-} arg breaks this under set -u)" \
+        bash -c 'printf "%s" "$1" | python3 -c "import json,sys; json.load(sys.stdin)"' _ "$_S156_MK2"
+    check "§156(6b) feature_entries has BOTH features, relay_alias true only for the designated one (alpha)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)[\"feature_entries\"]
+assert set(d.keys())=={\"alpha\",\"beta\"}, d
+assert d[\"alpha\"][\"relay_alias\"] is True
+assert d[\"beta\"][\"relay_alias\"] is False
+"' _ "$_S156_MK2"
+    _S156_MK3="$(_s156_marker_fe "" "" "" null)"
+    check "§156(6c) empty list -> feature_entries is the empty object {}, never null (the marker always knows the answer once #381 has shipped)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+assert d[\"feature_entries\"]==dict(), d[\"feature_entries\"]
+"' _ "$_S156_MK3"
+    unset _S156_MK3
+else
+    skip "§156(6) needs python3 to validate the marker JSON"
+fi
+unset _S156_MK2 _S156_MKFN _S156_FEFN _S156_MKBLK
+
+# --- (7) --print-state, feature_entries + dual reporting with relay{} ------
+if command -v python3 >/dev/null 2>&1; then
+    # Fixture A: two entries (alpha designated, beta not), separate from every
+    # other case (§88b: never share a fixture across assertions that must not
+    # collide).
+    _S156_H1="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$_S156_H1/sandboxes/two-11112222/relay-state" "$_S156_H1/sandboxes/two-11112222/feature-state/beta" \
+        "$_S156_H1/features/alpha/payload"
+    printf '#!/bin/sh\n' > "$_S156_H1/features/alpha/payload/r"; chmod +x "$_S156_H1/features/alpha/payload/r"
+    # beta's payload is deliberately ABSENT -> executable_present must be false
+    printf 'state=started\nrestarts=2\nlast_exit_code=0\nlast_restart_at=2026-01-01T00:00:00Z\n' \
+        > "$_S156_H1/sandboxes/two-11112222/relay-state/.state"
+    printf 'state=started\nrestarts=0\n' > "$_S156_H1/sandboxes/two-11112222/feature-state/beta/.state"
+    cat > "$_S156_H1/sandboxes/two-11112222/sandy-session.json" <<'S156EOF'
+{
+  "schema": 1,
+  "relay": { "source": "manifest", "path": "/opt/sandy/features/alpha/r", "disabled_by": null },
+  "feature_entries": {
+    "alpha": {"path": "/opt/sandy/features/alpha/r", "relay_alias": true, "disabled_by": null},
+    "beta": {"path": "/opt/sandy/features/beta/s", "relay_alias": false, "disabled_by": null}
+  },
+  "cred_mode": "full"
+}
+S156EOF
+    _S156_PS1="$(SANDY_HOME="$_S156_H1" bash "$_S156_SANDY" --print-state 2>/dev/null)"
+    check "§156(7a) feature_entries.alpha.restarts equals relay.restarts -- the dual report of the SAME entry must agree" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+sb=json.load(sys.stdin)[\"sandboxes\"][0]
+assert sb[\"feature_entries\"][\"alpha\"][\"restarts\"]==2==sb[\"relay\"][\"restarts\"]
+"' _ "$_S156_PS1"
+    check "§156(7b) alpha state_dir ends /relay-state, beta ends /feature-state/beta (D3, mutation m4: reading relay-state for every entry breaks this)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+fe=json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"]
+assert fe[\"alpha\"][\"state_dir\"].endswith(\"/relay-state\"), fe[\"alpha\"]
+assert fe[\"beta\"][\"state_dir\"].endswith(\"/feature-state/beta\"), fe[\"beta\"]
+"' _ "$_S156_PS1"
+    check "§156(7c) alpha executable_present true (payload exists), beta false (payload absent)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+fe=json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"]
+assert fe[\"alpha\"][\"executable_present\"] is True
+assert fe[\"beta\"][\"executable_present\"] is False
+"' _ "$_S156_PS1"
+    check "§156(7d) beta.restarts is 0, independent of alpha's 2" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+fe=json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"]
+assert fe[\"beta\"][\"restarts\"]==0
+"' _ "$_S156_PS1"
+    rm -rf "$_S156_H1"; unset _S156_PS1
+
+    # Fixture B: no feature_entries field at all (a pre-#381 marker) -> null,
+    # never {} (§88b / None-vs-[] rule: an old sandy cannot answer the question).
+    _S156_H2="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$_S156_H2/sandboxes/old-33334444"
+    printf '{\n  "schema": 1,\n  "relay": {"source":"none","path":null,"disabled_by":null},\n  "cred_mode":"full"\n}\n' \
+        > "$_S156_H2/sandboxes/old-33334444/sandy-session.json"
+    _S156_PS2="$(SANDY_HOME="$_S156_H2" bash "$_S156_SANDY" --print-state 2>/dev/null)"
+    check "§156(7e) a marker with no feature_entries field reports null, not {} -- an old sandy cannot answer, and {} would falsely claim 'zero entries'" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+assert json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"] is None
+"' _ "$_S156_PS2"
+    rm -rf "$_S156_H2"; unset _S156_PS2
+
+    # Fixture C: a disabled entry with NO .state file -> state "disabled",
+    # and relay.disabled_by must be read from the relay object ONLY (mutation
+    # m6: reverting the anchored disabled_by reader misreads this).
+    _S156_H3="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$_S156_H3/sandboxes/dis-55556666"
+    printf '{\n  "schema": 1,\n  "relay": {"source":"none","path":null,"disabled_by":null},\n  "feature_entries": {\n    "gamma": {"path": "/opt/sandy/features/gamma/r", "relay_alias": false, "disabled_by": "workspace"}\n  },\n  "cred_mode":"full"\n}\n' \
+        > "$_S156_H3/sandboxes/dis-55556666/sandy-session.json"
+    _S156_PS3="$(SANDY_HOME="$_S156_H3" bash "$_S156_SANDY" --print-state 2>/dev/null)"
+    check "§156(7f) a feature disabled by SANDY_RELAY=0, no .state file: state is 'disabled' (mirrors relay's own disabled convention)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+fe=json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"]
+assert fe[\"gamma\"][\"state\"]==\"disabled\", fe[\"gamma\"]
+"' _ "$_S156_PS3"
+    check "§156(7g) ...and relay.disabled_by stays null -- it must NOT read the feature-entry line's disabled_by (§88b; mutation m6 reddens this)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+assert json.load(sys.stdin)[\"sandboxes\"][0][\"relay\"][\"disabled_by\"] is None
+"' _ "$_S156_PS3"
+    rm -rf "$_S156_H3"; unset _S156_PS3
+
+    # Fixture D: exactly one entry -> relay{} must equal the pre-#381 shape
+    # exactly (frozen from the emitter as it stands after this change).
+    _S156_H4="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$_S156_H4/sandboxes/one-77778888/relay-state" "$_S156_H4/features/amap/payload"
+    printf '#!/bin/sh\n' > "$_S156_H4/features/amap/payload/relay"; chmod +x "$_S156_H4/features/amap/payload/relay"
+    printf 'state=started\nrestarts=0\n' > "$_S156_H4/sandboxes/one-77778888/relay-state/.state"
+    printf '{\n  "schema": 1,\n  "relay": {\n    "source": "manifest",\n    "path": "/opt/sandy/features/amap/relay",\n    "disabled_by": null\n  },\n  "feature_entries": {\n    "amap": {"path": "/opt/sandy/features/amap/relay", "relay_alias": true, "disabled_by": null}\n  },\n  "cred_mode":"full"\n}\n' \
+        > "$_S156_H4/sandboxes/one-77778888/sandy-session.json"
+    _S156_PS4="$(SANDY_HOME="$_S156_H4" bash "$_S156_SANDY" --print-state 2>/dev/null)"
+    check "§156(7h) single entry: relay{} is unchanged -- state=started, source=manifest, executable_present=true, restarts=0" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)[\"sandboxes\"][0][\"relay\"]
+assert r[\"state\"]==\"started\" and r[\"source\"]==\"manifest\" and r[\"executable_present\"] is True and r[\"restarts\"]==0, r
+"' _ "$_S156_PS4"
+    rm -rf "$_S156_H4"; unset _S156_PS4
+else
+    skip "§156(7) needs python3 to validate --print-state JSON"
+fi
+
+unset _S156_SANDY _S156_TMPL _S156_ADOPT
+unset -f _s156_adopt _s156_marker_fe 2>/dev/null || true
+
 
 # BEGIN SUMMARY
 # ============================================================

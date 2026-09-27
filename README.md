@@ -522,7 +522,7 @@ A **feature** is something you deploy into sandboxes that is not sandy's — a c
 
 Sandy computes every container path — you name a mount, sandy decides where it lands (`payload` at `/opt/sandy/features/<name>`, anything else under `~/.<name>/`) and exports it if you ask. Mounts are **read-only unless you say `rw`**.
 
-**`entry` is the relay**: sandy runs it as a supervised, container-level process — see "Installing a relay" below. `SANDY_RELAY=0` stops it (since 2.2.0), and the launch says so by name rather than running without it silently.
+**`entry` names a supervised, container-level process** — sandy runs it as a sibling of the tmux server, restarted on death, held to one instance; see "Installing a relay" below. **One `entry` per feature** (2.4.0) — a feature declares at most one, but a sandbox can have several features each with their own, and every one of them runs independently. `SANDY_RELAY=0` stops all of them (since 2.2.0/2.4.0), and the launch says so by name rather than running without them silently.
 
 **Selection is enrolment.** A sandbox gets the feature only if an include matches in both blocks and no exclude matches in either. A sandbox that is not selected gets nothing at all — no mount, no export, no entry. Check what applied:
 
@@ -586,6 +586,14 @@ A *relay* is a program sandy runs as a container-level process — a sibling of 
 `SANDY_RELAY` is the capability toggle. It is on by default and means *"run the installed relay if there is one"* — safe as a default because it is inert without host-side state a repository cannot create: no feature, no entry, nothing to run.
 
 Setting `SANDY_RELAY=0` disables the relay capability for that host or workspace. **Since 2.2.0 that covers a manifest `entry` too** — previously it stopped only the `relay-bin` slot, so `=0` could mean "no relay" while a relay ran. A launch that declines to start a declared entry **says so by name**, and records `disabled_by` in `--print-state` and the session marker, so a cloned repo shipping `0` is visible rather than forbidden.
+
+**More than one feature, more than one entry (2.4.0, #381).** Each selected feature's `entry` runs, independently supervised — its own lock, its own backoff, its own state directory. The **first** one adopted (sorted feature-directory order) is the *relay-designated* entry: it is the one `relay{}`, `SANDY_RELAY_STATE` and `/opt/sandy/relay-state` describe, so a sandbox with a single feature entry — the common case — behaves exactly as before. Every entry, designated or not, is additionally reported per feature:
+
+```sh
+sandy --print-state | jq '.sandboxes[] | .feature_entries'
+```
+
+Each value carries `state`, `restarts`, `executable_present`, `path`, `state_dir` and `relay_alias` (whether it is the one `relay{}` also describes). `{}` means no feature declared an entry; `null` means the sandbox last launched under a sandy too old to answer.
 
 **Read-only by construction.** An `entry` lives on the feature payload, which the manifest mounts `:ro`. That matters because the container process runs as *your* uid and owns the file, so permission bits bind nothing — `chmod` would succeed against a normal mount and the agent could rewrite its own relay. Under `:ro` the write returns `EROFS`, because the mount flag is checked above the permission check. An adapter can write files; only sandy can create a mount.
 
@@ -1024,7 +1032,7 @@ An entry may also be **withdrawn** in any release — it is struck through and m
 | ~~`SANDY_HANDOFF_DIRS`, and the `~/.handoff/{inbox,outbox,peer,relay}` tree it mounts~~ **— REMOVED in 2.2.0** | 2.0.0 | a feature manifest's `mounts` — it names its own directories instead of using sandy's four fixed ones |
 | ~~`SANDY_HANDOFF_*` container env vars (`_INBOX`, `_OUTBOX`, `_PEER`, `_RELAY_STATE`)~~ **— REMOVED in 2.2.0** | 2.0.0 | a mount's `export`, which names the variable the feature wants |
 | ~~`SANDY_HANDOFF_RELAY` and the `relay-bin/` slot~~ **— REMOVED in 2.2.0** | 2.0.0 | a feature manifest's `entry`. Setting the key, or leaving an executable in the slot, is now a **hard error** naming the replacement. The *variable* survives as the manifest entry's internal channel; only the operator-facing key is gone |
-| ~~`relay{}` in `/etc/sandy-session.json` and `--print-state`~~ **— WITHDRAWN, kept** · `handoff_relay`, `relay.slot`, `relay.disabled_by` **— REMOVED in 2.2.0, `schema_version` 3** | 2.0.0 | **`relay{}` stays.** Its stated replacement, "the feature's own entry in `--print-state`", was never built, and the premise for it disappeared with the other producers: a sandbox runs exactly **one** relay, so nesting a singular fact inside a per-feature collection would add a level for no gain. What went is the dead fields inside it — `slot` and `disabled_by` both described the `relay-bin` slot, removed in 2.2.0 |
+| ~~`relay{}` in `/etc/sandy-session.json` and `--print-state`~~ **— WITHDRAWN, kept** · `handoff_relay`, `relay.slot` **— REMOVED in 2.2.0, `schema_version` 3** (`relay.disabled_by` is NOT removed — it survives) | 2.0.0 | **`relay{}` stays.** Its stated replacement, "the feature's own entry in `--print-state`", was never built when 2.2.0 shipped, and the premise for it — a sandbox runs exactly one relay — no longer holds now that a sandbox can adopt more than one feature entry (2.4.0, #381): `relay{}` dual-reports the first entry in sorted feature-directory order, byte-identical to before #381, and every entry (including that one) is additionally reported under `feature_entries.<name>`. What went in 2.2.0 is the dead field inside it — `slot` described the `relay-bin` slot, removed that release |
 | ~~`handoff_enabled` and `handoff{}` in `--print-state`~~ **— REMOVED in 2.2.0, `schema_version` 3** | 2.0.0 | they report on the handoff tree above, so they go with it — and their removal bumps `schema_version` for the same reason |
 | ~~the `.handoff-enabled` sandbox marker~~ **— REMOVED in 2.2.0** | 2.0.0 | nothing: it forces the handoff tree on for one sandbox, and the tree is what is going. A feature manifest selects per sandbox instead |
 | `SANDY_SCREENSHOT_DIR` | 2.0.0 | intended to become a feature manifest; the design is not settled (#317), and the key stays until it is |

@@ -1188,6 +1188,46 @@ _sandy_fm_jesc() {
     _s="${_s//\"/\\\"}"
     printf '%s' "$_s"
 }
+_sandy_fe_marker_body() {
+    # feature_entries (#381): renders the BODY of the marker's "feature_entries"
+    # object -- the caller wraps it in {%s}. $1 = adopted list ("<f>=<p> ..."),
+    # $2 = disabled list (same shape), $3 = the relay-designated feature name,
+    # $4 = the JSON literal for disabled_by (null or "\"<source>\"", mirroring
+    # relay.disabled_by -- SANDY_RELAY=0 disables every entry for the same
+    # reason at once, so one value applies to every disabled entry here).
+    #
+    # Defined near _sandy_fm_jesc, not beside the marker printf far below, so
+    # a test can extract just this function rather than the whole marker body.
+    #
+    # Empty input renders as nothing, so the caller's "{%s}" collapses to the
+    # valid, empty object "{}" -- never a bare "{" from an unterminated body.
+    local _list="$1" _disabled="$2" _relay_feat="$3" _disabled_by_json="${4:-null}"
+    local _out="" _tok _f _p _relay
+    for _tok in $_list; do
+        [ -n "$_tok" ] || continue
+        _f="${_tok%%=*}"; _p="${_tok#*=}"
+        [ -n "$_f" ] || continue
+        _relay=false
+        [ "$_f" = "$_relay_feat" ] && _relay=true
+        _out="${_out}${_out:+,}"$'\n'"    \"$(_sandy_fm_jesc "$_f")\": {\"path\": \"$(_sandy_fm_jesc "$_p")\", \"relay_alias\": $_relay, \"disabled_by\": null}"
+    done
+    for _tok in $_disabled; do
+        [ -n "$_tok" ] || continue
+        _f="${_tok%%=*}"; _p="${_tok#*=}"
+        [ -n "$_f" ] || continue
+        _out="${_out}${_out:+,}"$'\n'"    \"$(_sandy_fm_jesc "$_f")\": {\"path\": \"$(_sandy_fm_jesc "$_p")\", \"relay_alias\": false, \"disabled_by\": $_disabled_by_json}"
+    done
+    # An `if`, not `[ -n "$_out" ] && printf ...` -- the caller assigns this
+    # function's stdout under `set -euo pipefail`, and every sandbox WITHOUT a
+    # feature entry (the overwhelming majority) hits the empty-$_out case: a
+    # `&&` there returns the test's own exit status (1) when $_out is empty,
+    # since no printf ever runs to supply one, which would abort the launch at
+    # the session-marker write on every ordinary sandbox. An `if` with no else
+    # is 0 whichever branch is (or is not) taken.
+    if [ -n "$_out" ]; then
+        printf '%s\n  ' "$_out"
+    fi
+}
 _sandy_fm_record() {
     # $1 = feature dir, $2 = slug, $3 = "" when selected, else the reason
     local _d="$1/.selected"
@@ -1574,8 +1614,8 @@ SANDY_CLAUDE_CONNECTORS|bool|0||1.9.0|stable|Expose the claude.ai ACCOUNT connec
 SANDY_SUSPICIOUS|bool|0||1.9.0|experimental|Hardened-credential posture for a workspace you actively distrust (#130) -- the pre-broker slice of #121. When 1: (a) the mounted Claude .credentials.json is REWRITTEN to drop claudeAiOauth.refreshToken, so an exfiltrated copy is worth only the remaining access-token lifetime (hours) instead of permanent renewable account access; the strip is verified after the rewrite and FAILS CLOSED -- if it cannot be performed or verified, no credentials file is mounted at all; (b) if ANTHROPIC_API_KEY is set and no long-lived CLAUDE_CODE_OAUTH_TOKEN is, the API key is used and OAuth credentials are not mounted (clean, instantly-revocable compartmentalization); (c) claude.ai account connectors are forced off, overriding an approved SANDY_CLAUDE_CONNECTORS=1; (d) egress DEFAULTS to strict -- an explicit egress setting still wins but is named loudly. Since 1.12.0 this also covers SANDY_CLAUDE_AUTH=profile (#252): the ephemeral copy of the Console profile has its refresh_token stripped (the host profile is never touched) and cred_mode becomes profile-access-only; a strip that cannot be performed or verified mounts NO profile at all. The resolved posture is recorded as cred_mode in /etc/sandy-session.json so a run protection level is provable after the fact. Passive-safe to turn ON from a committed .sandy/config (a repo may make itself tighter); =0 from a workspace is approval-gated (never looser). HONEST LIMITS: in-session token refresh stops working once the access token expires (rerun sandy or /login -- acceptable for a deliberately short suspicious session); a long-lived CLAUDE_CODE_OAUTH_TOKEN is NOT shrunk by this (recorded honestly as cred_mode oauth-token, with a warning); Claude-only for the credential specifics; real prevention (token never in-container) is #121.
 SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|Claude-only. Pins Claude Code crossSessionInbound (accept = deliver messages from other sessions on this container without a prompt; hold = queue for approval; refuse = drop with a sender-visible status) by writing the SAME resolved value into TWO places every launch, merge-preserving and idempotent: the sandbox's own claude/settings.json (mounted RW as the container's ~/.claude/settings.json, i.e. Claude Code userSettings) and the WORKSPACE project file .claude/settings.local.json (mounted :ro). This split is measured, not assumed, against Claude Code 2.1.251: accept only takes effect when present in userSettings (workspace-file accept alone is a no-op there); hold/refuse are honored from either, and the workspace file's copy is tighten-only so it cannot be loosened by a stale accept and still wins over userSettings when a repo hand-edits it stricter. Never writes ~/.claude/settings.json on the HOST. Default is CONDITIONAL, which is why the schema default is empty: accept iff SANDY_HANDOFF_RELAY is set AND the relay will actually be started this launch, else refuse — headless (-p) and --remote runs never start a relay, so they default to refuse even with the key set, and a configured relay that cannot start fails the launch rather than leaving accept in place with nothing delivering. Value-aware tier: hold and refuse are passive-safe wherever set; accept set via a workspace .sandy/config is approval-gated (it lets any process at the workspace uid inside the container inject a turn). Residual: the userSettings target is RW in-container (required for /plugin install), so unlike the :ro workspace copy it is agent-mutable mid-session; sandy resets it on the next launch, not mid-session. Recorded in /etc/sandy-session.json as cross_session_inbound. See docs/security/CROSS_SESSION_INBOUND.md.
 ANTHROPIC_PROFILE|string||^[A-Za-z0-9._-]+$|1.11.0|experimental|Privileged. Name of the Anthropic Console profile to use when SANDY_CLAUDE_AUTH=profile (overrides the host active_config); forwarded into the container so Claude Code selects it explicitly (its /status shows the Profile row as profile-explicit). Privileged on purpose: it chooses WHICH profile's token enters the box, and a profile logged in with --scope org:admin carries organization-wide access, so a committed .sandy/config must not be able to select it. Ignored with a notice unless SANDY_CLAUDE_AUTH=profile.
-SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|REMOVED AS A CONFIGURATION KEY in 2.2.0 (#354): setting it from the environment or any config file is a HARD ERROR naming the replacement -- declare the executable as an 'entry' in a feature manifest. THE VARIABLE IS NOT REMOVED and must not be: it is the internal channel a manifest entry travels through to the container-side supervisor, so a change that deletes the variable deletes the entry mechanism with it. What an entry gets: a container-level process (a sibling of the tmux server, not a pane, not a child of any agent session), started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote, never under --provision), held to one instance by flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never given up on. Its state (.state, supervisor.log) lives at $SANDBOX_DIR/relay-state, mounted rw at /opt/sandy/relay-state and exported as SANDY_RELAY_STATE -- a relay reads that variable rather than constructing the path (#353). Env contract: SANDY_RELAY_STATE, SANDY_AGENT, SANDY_WORKSPACE; enumerate live sessions with /usr/local/bin/sandy-handoff-sessions. An entry that cannot start FAILS THE LAUNCH, never warn-and-proceed: missing or not executable, no relay-state mount, or no flock (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7). SANDY_RELAY=0 stops it, loudly, and records relay.disabled_by. Reported in /etc/sandy-session.json as relay.source/path/disabled_by (launch intent) and live in --print-state as relay.state. In daemon mode the relay (and anything else planted at the uid) outlives sessions until the container is recreated -- run sandy --update-sessions --yes on a 24h cron.
-SANDY_RELAY|bool|1||1.11.0|experimental|Relay CAPABILITY toggle (#258), RE-SCOPED in 2.2.0 (#354). Names no path and asserts no payload: it means 'run the installed relay if there is one'. That meaning was never slot-specific, so with the relay-bin slot removed the key now gates the only remaining producer -- a feature manifest's entry. BEHAVIOUR CHANGE, in the tightening direction: =0 used to disable a slot relay and silently NOT stop a manifest entry; it now stops both, which is what the key always claimed. Because a fleet going silently dark is the failure the entry/relay-bin coexistence window existed to prevent, the suppression is LOUD -- a launch that declines to start a declared entry says so by name, and the resolved state records disabled_by (env, host or workspace) in /etc/sandy-session.json and --print-state, so a CLONED repo shipping 0 is visible rather than forbidden. Default 1, safe because the capability is INERT without host-side state a repository cannot create: no feature, no entry, nothing to run. Both values are passive-safe: 0 only tightens. Skipped, not failed, in headless (-p) and --remote runs. Reported as relay.slot (absent or disabled; 'present' retired with the slot) in the session marker -- launch INTENT, since the marker is written before docker run and the relay starts in-container -- and as live relay.state (absent, started, failed, looping or disabled) in --print-state, alongside relay.source (#345) which names the producer.
+SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|REMOVED AS A CONFIGURATION KEY in 2.2.0 (#354): setting it from the environment or any config file is a HARD ERROR naming the replacement -- declare the executable as an 'entry' in a feature manifest. THE VARIABLE IS NOT REMOVED and must not be: it is the internal channel the relay-DESIGNATED entry travels through to the container-side supervisor, so a change that deletes the variable deletes the entry mechanism with it. As of 2.4.0 (#381) it names only ONE of possibly several adopted entries -- the first in sorted feature-directory order -- with every entry (designated or not) started, supervised and reported; see SANDY_FEATURE_ENTRIES (internal, no metadata row) and 'feature_entries' below. What an entry gets: a container-level process (a sibling of the tmux server, not a pane, not a child of any agent session), started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote, never under --provision), held to one instance by flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never given up on. The designated entry's state (.state, supervisor.log) lives at $SANDBOX_DIR/relay-state, mounted rw at /opt/sandy/relay-state and exported as SANDY_RELAY_STATE (#353); every other entry gets its own $SANDBOX_DIR/feature-state/<feature>, mounted rw at /opt/sandy/feature-state/<feature>. A relay/entry reads its own directory from SANDY_FEATURE_STATE rather than constructing the path -- uniform across every entry, designated or not. Env contract: SANDY_FEATURE_STATE (plus, for the designated entry only, SANDY_RELAY_STATE), SANDY_AGENT, SANDY_WORKSPACE; enumerate live sessions with /usr/local/bin/sandy-handoff-sessions. An entry that cannot start FAILS THE LAUNCH, never warn-and-proceed: missing or not executable, its state dir not mounted, or no flock (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) -- one shared 5s startup window covers every entry at once. SANDY_RELAY=0 stops ALL of them, loudly, naming each by feature, and records disabled_by for every one. Reported in /etc/sandy-session.json as relay.source/path/disabled_by (the designated entry's launch intent) and feature_entries.<feature>.{path,relay_alias,disabled_by} (every entry's), and live in --print-state as relay.state (designated) and feature_entries.<feature>.state (every entry). In daemon mode an entry (and anything else planted at the uid) outlives sessions until the container is recreated -- run sandy --update-sessions --yes on a 24h cron.
+SANDY_RELAY|bool|1||1.11.0|experimental|Relay CAPABILITY toggle (#258), RE-SCOPED in 2.2.0 (#354) and GENERALIZED in 2.4.0 (#381). Names no path and asserts no payload: it means 'run every installed entry'. That meaning was never slot-specific and, since #381, was never single-entry-specific either -- with the relay-bin slot removed the key gates every feature manifest's entry, not just one. BEHAVIOUR CHANGE, in the tightening direction: =0 used to disable a slot relay and silently NOT stop a manifest entry; it now stops every adopted entry, which is what the key always claimed. Because a fleet going silently dark is the failure the entry/relay-bin coexistence window existed to prevent, the suppression is LOUD -- a launch that declines to start a declared entry says so BY FEATURE NAME, for every one it declines, and the resolved state records disabled_by (env, host or workspace) in /etc/sandy-session.json and --print-state for each. Default 1, safe because the capability is INERT without host-side state a repository cannot create: no feature, no entry, nothing to run. Both values are passive-safe: 0 only tightens. Skipped, not failed, in headless (-p) and --remote runs. With exactly one entry, relay{} and feature_entries describe the same thing and every existing consumer sees byte-identical behaviour; with more than one, relay{} is DUAL-REPORTED for the first entry in sorted feature-directory order only (the 'relay-designated' entry -- see SANDY_HANDOFF_RELAY above), and feature_entries.<name> reports every entry, including the designated one. Reported as relay.slot (absent or disabled; 'present' retired with the slot) in the session marker -- launch INTENT, since the marker is written before docker run and entries start in-container -- and as live relay.state (absent, started, failed, looping or disabled) in --print-state, alongside relay.source (#345) which names the producer.
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
 SANDY_HOST_ID|string||^[A-Za-z0-9._-]{1,128}$|1.8.0|stable|Operator override for the host_id reported by --print-state (#179), advisory identity for multi-host fleet aggregation (sandbox names hash only the workspace path, so the same path on two hosts collides). ENV-ONLY -- a committed .sandy/config can never set it, which would otherwise forge the identity of whatever machine the repo is cloned onto. Default is uname -n (host_id_source: hostname); a valid override reports host_id_source: env. Invalid or empty values are silently ignored and fall back to uname -n -- no warning, ever, since --print-state guarantees 0 bytes of stderr.
@@ -1614,6 +1654,30 @@ _json_escape() {
 # Emit a `"key": <value>` pair (value already JSON-formatted — caller's job
 # to wrap strings via _json_escape and pass booleans/nulls literally).
 _json_kv() { printf '"%s":%s' "$1" "$2"; }
+
+# executable_present for a manifest entry's container path (#344, generalized
+# for #381's feature_entries so relay{} and feature_entries can never
+# disagree about the SAME entry). A FACT, not a health verdict: true/false
+# when the path resolves under this host's feature payload tree, null when it
+# cannot be answered at all -- which is the honest value for an explicit
+# SANDY_HANDOFF_RELAY, resolved INSIDE the container against a path the host
+# may have nothing corresponding to.
+_sandy_entry_exe_present() {
+    local _p="$1" _rest _feat _sub
+    _rest="${_p#/opt/sandy/features/}"
+    if [ "$_rest" = "$_p" ] || [ -z "$_rest" ]; then
+        printf 'null'; return 0
+    fi
+    _feat="${_rest%%/*}"; _sub="${_rest#*/}"
+    if [ -z "$_feat" ] || [ "$_feat" = "$_rest" ]; then
+        printf 'null'; return 0
+    fi
+    if [ -f "$SANDY_HOME/features/$_feat/payload/$_sub" ]; then
+        printf 'true'
+    else
+        printf 'false'
+    fi
+}
 
 # Shared suffix pipeline for skill-pack image names (sandy-skills-base-<suffix>,
 # sandy-skills-<suffix>): comma-separated pack list -> sorted, trimmed,
@@ -2853,7 +2917,6 @@ _sandy_emit_state() {
             local sb_r_line sb_r_k sb_r_v sb_r_raw=''
             local sb_r_src='null' sb_r_exe='null' sb_r_mk='' sb_r_srcraw='' sb_r_pathraw=''
             local sb_r_dir=''
-            local sb_r_rest sb_r_feat sb_r_sub
             # An `if`, not `[ -f … ] && var=…`: under `set -e` that form is a
             # statement-level list whose failure (the common case — no relay
             # installed) is the shell's to act on. It happens to be survivable
@@ -2931,17 +2994,9 @@ EOF_RELAY_MARKER
                 slot)
                     if [ -f "$sb/relay-bin/relay" ]; then sb_r_exe='true'; else sb_r_exe='false'; fi ;;
                 manifest)
-                    sb_r_rest="${sb_r_pathraw#/opt/sandy/features/}"
-                    if [ "$sb_r_rest" != "$sb_r_pathraw" ]; then
-                        sb_r_feat="${sb_r_rest%%/*}"; sb_r_sub="${sb_r_rest#*/}"
-                        if [ -n "$sb_r_feat" ] && [ "$sb_r_feat" != "$sb_r_rest" ]; then
-                            if [ -f "$SANDY_HOME/features/$sb_r_feat/payload/$sb_r_sub" ]; then
-                                sb_r_exe='true'
-                            else
-                                sb_r_exe='false'
-                            fi
-                        fi
-                    fi ;;
+                    # Shared with feature_entries below (_sandy_entry_exe_present)
+                    # so the two surfaces can never disagree about the SAME entry.
+                    sb_r_exe="$(_sandy_entry_exe_present "$sb_r_pathraw")" ;;
             esac
             # relay.disabled_by SURVIVES (#355), and the reason is worth writing
             # down: the plan was to remove it with relay.slot, because both
@@ -2953,7 +3008,15 @@ EOF_RELAY_MARKER
             # silently disabled a fleet connector, which is the hazard #258 put
             # it there for. Visible, not forbidden.
             if [ -f "$sb/sandy-session.json" ]; then
-                sb_r_line="$(sed -n 's/.*"disabled_by": "\([a-z]*\)".*/\1/p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                # Anchored on column 0 (#381): feature_entries now adds lines
+                # like `    "<f>": {"path": ..., "disabled_by": ...}` at the
+                # same 4-space indent, and those also contain the literal text
+                # `"disabled_by":` -- just not as the first thing on the line.
+                # The old unanchored `.*"disabled_by": ...` matched either, so
+                # relay.disabled_by could read a PER-ENTRY value instead of the
+                # relay object's own (§88b: never anchor on a neighbour, and a
+                # sibling top-level object is exactly that neighbour here).
+                sb_r_line="$(sed -n 's/^    "disabled_by": "\([a-z]*\)".*/\1/p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
                 if [ -n "$sb_r_line" ]; then
                     sb_r_by="\"$sb_r_line\""
                     [ -z "$sb_r_raw" ] && sb_r_state='"disabled"'
@@ -2974,6 +3037,65 @@ EOF_RELAY_MARKER
             # to say so costs a schema_version move and is on the table for the
             # bundled one.
             printf ','; _json_kv relay "{\"state\":$sb_r_state,\"source\":$sb_r_src,\"executable_present\":$sb_r_exe,\"path\":$sb_r_path,\"state_dir\":$(_json_escape "$sb_r_dir"),\"last_exit_code\":$sb_r_rc,\"restarts\":$sb_r_restarts,\"last_restart_at\":$sb_r_at,\"disabled_by\":$sb_r_by}"
+            # feature_entries (#381): per-feature LIVE reporting -- the same
+            # split relay{} documents above: the marker records launch INTENT
+            # (feature_entries there has {path, relay_alias, disabled_by}
+            # only), this reads what actually happened, host-side, at query
+            # time. ONE sed pass with two expressions (stays inside the
+            # light-mode poll budget): `P` marks PRESENCE of the field at all,
+            # `E` extracts one entry per feature. No marker, or no `P` line,
+            # means a sandy too old to know the question -- reported as
+            # `null`, never silently collapsed with `{}` (a real, empty
+            # answer), the same None-vs-[] rule agent_args_files carries.
+            # Each expression is anchored to the exact shape this sandy
+            # writes, never to a neighbouring field (§88b).
+            local sb_fe_raw='' sb_fe_obj='' sb_fe_tag sb_fe_f sb_fe_p sb_fe_alias sb_fe_by
+            local sb_fe_dir sb_fe_state sb_fe_restarts sb_fe_rc sb_fe_at sb_fe_k sb_fe_v sb_fe_exe sb_fe_entry
+            if [ -f "$sb/sandy-session.json" ]; then
+                sb_fe_raw="$(sed -n \
+                    -e 's/^  "feature_entries": .*/P/p' \
+                    -e 's/^    "\([A-Za-z0-9._-]*\)": {"path": "\([^"]*\)", "relay_alias": \([a-z]*\), "disabled_by": \([a-z"]*\)}.*/E \1 \2 \3 \4/p' \
+                    "$sb/sandy-session.json" 2>/dev/null || true)"
+            fi
+            if ! printf '%s\n' "$sb_fe_raw" | grep -q '^P$'; then
+                printf ','; _json_kv feature_entries 'null'
+            else
+                while IFS=' ' read -r sb_fe_tag sb_fe_f sb_fe_p sb_fe_alias sb_fe_by; do
+                    [ "$sb_fe_tag" = "E" ] || continue
+                    [ -n "$sb_fe_f" ] || continue
+                    # D3: the relay-designated entry's state dir is
+                    # $SANDBOX_DIR/relay-state ITSELF (unchanged, so
+                    # relay.state_dir and this field agree by construction —
+                    # the (7) dual-report check pins that); every other entry
+                    # gets its own feature-state/<feature>.
+                    if [ "$sb_fe_alias" = "true" ]; then
+                        sb_fe_dir="$sb/relay-state"
+                    else
+                        sb_fe_dir="$sb/feature-state/$sb_fe_f"
+                    fi
+                    sb_fe_state='"absent"'; sb_fe_restarts='0'; sb_fe_rc='null'; sb_fe_at='null'
+                    if [ -f "$sb_fe_dir/.state" ]; then
+                        while IFS='=' read -r sb_fe_k sb_fe_v; do
+                            case "$sb_fe_k" in
+                                state)           [ -n "$sb_fe_v" ] && sb_fe_state="\"$sb_fe_v\"" ;;
+                                restarts)        [ -n "$sb_fe_v" ] && sb_fe_restarts="$sb_fe_v" ;;
+                                last_exit_code)  [ -n "$sb_fe_v" ] && sb_fe_rc="$sb_fe_v" ;;
+                                last_restart_at) [ -n "$sb_fe_v" ] && sb_fe_at="\"$sb_fe_v\"" ;;
+                            esac
+                        done < "$sb_fe_dir/.state" 2>/dev/null
+                    elif [ "$sb_fe_by" != "null" ]; then
+                        sb_fe_state='"disabled"'
+                    fi
+                    # Shared with relay's own manifest branch above, so the two
+                    # surfaces can never disagree about the SAME entry.
+                    sb_fe_exe="$(_sandy_entry_exe_present "$sb_fe_p")"
+                    sb_fe_entry="{\"state\":$sb_fe_state,\"restarts\":$sb_fe_restarts,\"last_exit_code\":$sb_fe_rc,\"last_restart_at\":$sb_fe_at,\"executable_present\":$sb_fe_exe,\"path\":\"$sb_fe_p\",\"state_dir\":$(_json_escape "$sb_fe_dir"),\"relay_alias\":$sb_fe_alias,\"disabled_by\":$sb_fe_by}"
+                    sb_fe_obj="${sb_fe_obj:+$sb_fe_obj,}\"$sb_fe_f\":$sb_fe_entry"
+                done <<EOF_FEATURE_ENTRIES
+$sb_fe_raw
+EOF_FEATURE_ENTRIES
+                printf ','; _json_kv feature_entries "{$sb_fe_obj}"
+            fi
             # agents (#sixth-ask): which agent(s) this sandbox RESOLVED to on its
             # last launch, read back from the session marker — the same file, and
             # the same one-line read, that disabled_by above comes from, so this
@@ -4266,7 +4388,8 @@ PROBE
     fi
 
     # --- what moves, and what is rewritten -----------------------------------
-    _rsy_excl=(--exclude=/sandy-session.json --exclude=/relay-state/ --exclude=/agent-args-composed/
+    _rsy_excl=(--exclude=/sandy-session.json --exclude=/relay-state/ --exclude=/feature-state/
+               --exclude=/agent-args-composed/
                --exclude=/proxy.log --exclude=/.protected-existed-at-launch --exclude=/claude/sessions/
                --exclude=/WORKSPACE.json)
     _rsy_skipnote=""
@@ -4341,7 +4464,7 @@ PROBE
     else
         printf '  Credentials     none matched by name (codex/, grok/, gemini/, opencode/ are copied as they are)\n'
     fi
-    printf '  Not copied      sandy-session.json relay-state/ agent-args-composed/ proxy.log claude/sessions/ (regenerated each launch)\n'
+    printf '  Not copied      sandy-session.json relay-state/ feature-state/ agent-args-composed/ proxy.log claude/sessions/ (regenerated each launch)\n'
     [ -n "$_rsy_skipnote" ] && printf '  Skipped         %s\n' "$_rsy_skipnote"
     if [ -n "$_rsy_dver" ]; then
         printf '  Destination     sandy %s, %s\n' "$_rsy_dver" "$_rsy_darch"
@@ -8170,65 +8293,63 @@ _sandy_build_agent_cmd() {
     esac
 }
 
-# ---- handoff relay supervisor (SANDY_HANDOFF_RELAY, 1.10.0) -------------------
-# Container-level process: a sibling of the tmux server, never a pane, never a
-# child of an agent. Singleton via flock on the tmpfs home; restart-on-death with
-# backoff; never overlaps; never gives up. Headless (-p) and --remote runs never
-# start it (the launcher also never forwards the key for those).
+# ---- per-feature supervised entries (SANDY_HANDOFF_RELAY, SANDY_FEATURE_ENTRIES, 1.10.0 / #381) ----
+# Container-level processes: each a sibling of the tmux server, never a pane,
+# never a child of an agent. Singleton via flock on the tmpfs home;
+# restart-on-death with backoff; never overlaps; never gives up. Headless (-p)
+# and --remote runs never start any of them (the launcher also never forwards
+# the entries for those).
 #
-# A configured relay that cannot start FAILS THE SESSION (exit 1 from
+# A configured entry that cannot start FAILS THE SESSION (exit 1 from
 # user-setup.sh, so the container dies) — never "warn and proceed". The
-# launcher resolved crossSessionInbound=accept on the strength of this key;
-# proceeding without the relay would leave that surface open with nothing
-# delivering. The launcher already fails host-side for any path it can see;
-# these checks are the in-container remainder (image-only absolute paths,
-# the mount, flock).
-_sandy_start_handoff_relay() {
-    [ -n "${SANDY_HANDOFF_RELAY:-}" ] || return 0
-    # Relay state lives at /opt/sandy/relay-state since 2.2.0 (#353), not under
-    # ~/.handoff. It is PRODUCER-AGNOSTIC by design: an earlier draft proposed
-    # the feature's own instance tree, which relay.source (#345) disproved --
-    # two of the three producers had no feature to own it. The deciding reason
-    # outlives even that: .state and supervisor.log are SANDY'S SUPERVISOR'S
-    # files, not the relay's, so putting them inside a feature's tree would
-    # make sandy's own bookkeeping a tenant of the thing it supervises.
-    #
-    # Under /opt/sandy, not the agent home: /opt/sandy is already sandy's
-    # in-container namespace (features mount there), it is not swept by
-    # home-directory tooling, and ~/.sandy would read as the HOST config root.
-    # SANDY_RELAY_STATE is set HOST-SIDE, next to the mount that creates it, so
-    # the path has exactly ONE source rather than being spelled here and there.
-    # The fallback is the same literal, for a container started before the host
-    # began setting it.
-    local _r="$SANDY_HANDOFF_RELAY" _st="${SANDY_RELAY_STATE:-/opt/sandy/relay-state}" _lock="$HOME/.sandy-handoff-relay.lock"
+# launcher resolved crossSessionInbound=accept on the strength of the
+# relay-designated entry; proceeding without it would leave that surface open
+# with nothing delivering. The launcher already fails host-side for any path
+# it can see; these checks are the in-container remainder (image-only
+# absolute paths, the mount, flock) -- now run once PER ENTRY rather than
+# once total, so a second feature's entry gets the same guarantee as the
+# first instead of being silently dropped.
+#
+# _sandy_supervise_entry is the single-entry primitive (used for every entry,
+# designated or not); the entries starter below resolves SANDY_FEATURE_ENTRIES
+# (or falls back to a lone SANDY_HANDOFF_RELAY for a launcher that predates
+# #381) and calls it once per entry; _sandy_await_entries is the ONE shared
+# startup window covering all of them (D9) -- N sequential windows would add
+# 5s per already-healthy long-running entry, which does not scale with the
+# number of installed features.
+_sandy_supervise_entry() {
+    # $1=label (log prefix and error attribution -- "sandy-relay" for the
+    #    relay-designated entry, "sandy-entry <feature>" for every other one)
+    # $2=executable path (absolute, or workspace-relative)
+    # $3=state dir (mounted rw; holds .startup, .state, supervisor.log)
+    # $4=lock file (the singleton: $HOME/.sandy-handoff-relay.lock for the
+    #    designated entry, $HOME/.sandy-entry-<feature>.lock for every other)
+    # $5=SANDY_FEATURE_STATE value for the entry's OWN child process, or
+    #    empty. Exported inside the subshell only -- never leaks into the
+    #    parent shell or any pane, so each entry sees only its own value.
+    local _label="$1" _r="$2" _st="$3" _lock="$4" _fst="${5:-}"
     case "$_r" in /*) ;; *) _r="$WORKSPACE/$_r" ;; esac
     if [ ! -f "$_r" ] || [ ! -x "$_r" ]; then
-        sandy_err "SANDY_HANDOFF_RELAY=$SANDY_HANDOFF_RELAY resolves to $_r, which is not an executable file inside the container. A configured relay that cannot start fails the session (unset SANDY_HANDOFF_RELAY to launch without one)."
+        sandy_err "$_label: $_r is not an executable file inside the container. A configured relay that cannot start fails the session (unset SANDY_HANDOFF_RELAY, or remove the feature's entry, to launch without it)."
         exit 1
     fi
     if [ ! -d "$_st" ]; then
-        sandy_err "a relay is configured but its state directory ($_st) is not mounted. A configured relay that cannot start fails the session."
+        sandy_err "$_label: its state directory ($_st) is not mounted. A configured relay that cannot start fails the session."
         exit 1
     fi
     if ! command -v flock >/dev/null 2>&1; then
-        sandy_err "SANDY_HANDOFF_RELAY is configured but flock is not available in this image, so the relay singleton cannot be enforced. A configured relay that cannot start fails the session."
+        sandy_err "$_label: flock is not available in this image, so the entry's singleton cannot be enforced. A configured relay that cannot start fails the session."
         exit 1
     fi
-    # SANDY_RELAY_STATE replaces SANDY_HANDOFF_RELAY_STATE, which is removed
-    # with the rest of the SANDY_HANDOFF_* container contract (#352 took the
-    # other three). A relay locates its state directory by reading this, never
-    # by constructing a path sandy owns -- that construction has been the fault
-    # line three times now (#248 moved the home, #345 derived a path from the
-    # slot, #353 moved this one).
-    export SANDY_RELAY_STATE="$_st"   # idempotent when the host already set it
     # A verdict or state file left by an earlier container must not be read as
     # this one's — the sandbox directory outlives the container.
     rm -f "$_st/.startup" "$_st/.state"
     (
-        set +e; trap - ERR; trap '' HUP     # user-setup runs set -e + an ERR trap; the loop must survive relay exits
+        set +e; trap - ERR; trap '' HUP     # user-setup runs set -e + an ERR trap; the loop must survive the entry's own exits
+        [ -n "$_fst" ] && export SANDY_FEATURE_STATE="$_fst"
         exec 9>"$_lock"
         if ! flock -n 9; then
-            echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor already running (lock held); not starting a second" >> "$_st/supervisor.log"
+            echo "[$_label] $(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor already running (lock held); not starting a second" >> "$_st/supervisor.log"
             echo "already-running" > "$_st/.startup"
             exit 0
         fi
@@ -8236,17 +8357,17 @@ _sandy_start_handoff_relay() {
         # the caller before backgrounding — the caller cannot yet know whether this
         # attempt is the singleton winner or the "already running" loser above, and
         # logging unconditionally on the caller's side would claim success for both.
-        echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor started ($_r)" >> "$_st/supervisor.log"
+        echo "[$_label] $(date -u +%Y-%m-%dT%H:%M:%SZ) supervisor started ($_r)" >> "$_st/supervisor.log"
         # A small, FIXED-SIZE state file beside the log (#258). `sandy
         # --print-state` reads this rather than parsing supervisor.log: the log
-        # is append-only and a crash-looping relay grows it without bound, so
+        # is append-only and a crash-looping entry grows it without bound, so
         # counting exits in it would put an unbounded read in a polling path.
         # The supervisor is anyway the authority on its own restart count —
         # deriving it by re-parsing its own output would be a second source.
         #
-        # It is DIAGNOSTICS, never a security signal: ~/.handoff/relay is
-        # mounted rw (the relay needs to write state there), so the agent can
-        # write this file too. Nothing may make a trust decision on it.
+        # It is DIAGNOSTICS, never a security signal: the state dir is mounted
+        # rw (the entry needs to write state there), so the agent can write
+        # this file too. Nothing may make a trust decision on it.
         restarts=0
         # Written to a temp and moved, so a reader never sees a half-written
         # file. An explicit if rather than `A && B || C`: that form is not
@@ -8264,11 +8385,11 @@ _sandy_start_handoff_relay() {
         backoff=1
         first=1
         while :; do
-            echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) start $_r" >> "$_st/supervisor.log"
+            echo "[$_label] $(date -u +%Y-%m-%dT%H:%M:%SZ) start $_r" >> "$_st/supervisor.log"
             t0=$(date +%s)
-            # 9>&- closes the lock fd in the relay's own process: the lock is held by
-            # THIS loop shell, not by the relay child, so a kill of the loop alone
-            # (without the relay) releases the lock instead of stranding it with an
+            # 9>&- closes the lock fd in the entry's own process: the lock is held by
+            # THIS loop shell, not by the entry's child, so a kill of the loop alone
+            # (without the entry) releases the lock instead of stranding it with an
             # orphaned holder that would make every future supervisor see a false
             # "already running".
             "$_r" 9>&- >> "$_st/supervisor.log" 2>&1 </dev/null
@@ -8280,47 +8401,121 @@ _sandy_start_handoff_relay() {
             restarts=$((restarts + 1))
             _relay_state looping "$rc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             [ "$up" -gt 60 ] && backoff=1
-            echo "[sandy-relay] $(date -u +%Y-%m-%dT%H:%M:%SZ) exit rc=$rc uptime=${up}s; restart in ${backoff}s" >> "$_st/supervisor.log"
+            echo "[$_label] $(date -u +%Y-%m-%dT%H:%M:%SZ) exit rc=$rc uptime=${up}s; restart in ${backoff}s" >> "$_st/supervisor.log"
             sleep "$backoff"
             backoff=$(( backoff * 2 )); [ "$backoff" -gt 60 ] && backoff=60
         done
     ) </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
-    # ---- bounded startup window (#258) --------------------------------------
-    #
-    # Two failure shapes were conflated before this, and only one was covered:
-    #
-    #   - CANNOT START  — missing, not executable, no mount, no flock. Detected
-    #     above, before exec, and it fails the session (criterion 7).
-    #   - STARTS, THEN EXITS — the reported case: a delivery daemon died at
-    #     startup on every launch for 35 hours while the supervisor restarted it
-    #     forever and the session marker read handoff_relay:true. The launch had
-    #     already succeeded, so nothing could fail it and nothing surfaced it.
-    #
-    # This window bridges them. "Died at startup on every launch" lands inside
-    # it, so that case now fails the session with the relay's own exit code.
-    # Past the window it is a runtime loop: the launch already succeeded and is
-    # NOT retroactively un-succeeded — it is reported by `sandy --print-state`,
-    # which reads the supervisor log host-side.
-    #
-    # rc=0 inside the window is NOT a failure: a relay is allowed to be a
-    # one-shot that does its work and exits. Only a non-zero first exit is.
-    _w=0
-    while [ "$_w" -lt 50 ]; do
-        if [ -f "$_st/.startup" ]; then
-            _v="$(cat "$_st/.startup" 2>/dev/null || true)"
-            case "$_v" in
-                already-running) break ;;
-                rc=0)            break ;;
-                rc=*)
-                    sandy_err "the relay ($_r) exited ${_v#rc=} within 5s of starting, on every launch this reproduces. An installed relay that cannot stay up fails the session; see /opt/sandy/relay-state/supervisor.log for its own output."
-                    exit 1 ;;
-            esac
-        fi
-        sleep 0.1
+}
+
+# ---- bounded startup window (#258), shared across every entry (D9) --------
+#
+# Two failure shapes were conflated before this, and only one was covered:
+#
+#   - CANNOT START  — missing, not executable, no mount, no flock. Detected
+#     in _sandy_supervise_entry above, before exec, and it fails the session
+#     (criterion 7).
+#   - STARTS, THEN EXITS — the reported case: a delivery daemon died at
+#     startup on every launch for 35 hours while the supervisor restarted it
+#     forever and the session marker read handoff_relay:true. The launch had
+#     already succeeded, so nothing could fail it and nothing surfaced it.
+#
+# This window bridges them, for every entry at once. "Died at startup on
+# every launch" lands inside it, so that case now fails the session with the
+# entry's own exit code, naming which entry. Past the window it is a runtime
+# loop: the launch already succeeded and is NOT retroactively un-succeeded —
+# it is reported by `sandy --print-state`, which reads each entry's own
+# supervisor log host-side.
+#
+# rc=0 inside the window is NOT a failure: an entry is allowed to be a
+# one-shot that does its work and exits. Only a non-zero first exit is.
+_sandy_await_entries() {
+    # $@ = "<state_dir>=<label>" ... one entry per positional argument, so a
+    # label containing a space (e.g. "sandy-entry alpha") is never re-split.
+    local _pending=("$@") _next _pair _st _label _w=0 _v
+    while [ "$_w" -lt 50 ] && [ "${#_pending[@]}" -gt 0 ]; do
+        _next=()
+        for _pair in "${_pending[@]}"; do
+            _st="${_pair%%=*}"; _label="${_pair#*=}"
+            if [ -f "$_st/.startup" ]; then
+                _v="$(cat "$_st/.startup" 2>/dev/null || true)"
+                case "$_v" in
+                    already-running|rc=0) ;;   # settled: drop from the pending set
+                    rc=*)
+                        sandy_err "$_label exited ${_v#rc=} within 5s of starting, on every launch this reproduces. An installed relay that cannot stay up fails the session; see $_st/supervisor.log for its own output."
+                        exit 1 ;;
+                    *) _next+=("$_pair") ;;
+                esac
+            else
+                _next+=("$_pair")
+            fi
+        done
+        _pending=("${_next[@]}")
+        if [ "${#_pending[@]}" -gt 0 ]; then sleep 0.1; fi
         _w=$((_w + 1))
     done
-    sandy_log "Handoff relay supervisor requested ($_r); outcome (started vs. already running) is in /opt/sandy/relay-state/supervisor.log"
+}
+
+# ---- resolve SANDY_FEATURE_ENTRIES (or the legacy lone relay) and start each
+_sandy_start_entries() {
+    local _tok _f _p _wait_args=() _designated_seen=false _legacy_fallback=false
+    # Legacy/back-compat (D10 of #381): a launcher that only ever forwarded
+    # SANDY_HANDOFF_RELAY (predating #381, or an image whose build was
+    # deferred per #218 while the host moved on) still gets exactly today's
+    # single-entry behaviour.
+    if [ -z "${SANDY_FEATURE_ENTRIES:-}" ] && [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
+        SANDY_FEATURE_ENTRIES="legacy=$SANDY_HANDOFF_RELAY"
+        _legacy_fallback=true
+    fi
+    [ -n "${SANDY_FEATURE_ENTRIES:-}" ] || return 0
+    for _tok in $SANDY_FEATURE_ENTRIES; do
+        [ -n "$_tok" ] || continue
+        case "$_tok" in
+            *[!A-Za-z0-9._/=-]*)
+                sandy_err "SANDY_FEATURE_ENTRIES contains an invalid token ($_tok). A configured relay that cannot start fails the session."
+                exit 1 ;;
+        esac
+        _f="${_tok%%=*}"; _p="${_tok#*=}"
+        if [ "$_p" = "${SANDY_HANDOFF_RELAY:-}" ] && [ "$_designated_seen" = false ]; then
+            _designated_seen=true
+            # SANDY_RELAY_STATE replaces SANDY_HANDOFF_RELAY_STATE, which is
+            # removed with the rest of the SANDY_HANDOFF_* container contract
+            # (#352 took the other three). A relay locates its state
+            # directory by reading this, never by constructing a path sandy
+            # owns -- that construction has been the fault line three times
+            # now (#248 moved the home, #345 derived a path from the slot,
+            # #353 moved this one).
+            export SANDY_RELAY_STATE="${SANDY_RELAY_STATE:-/opt/sandy/relay-state}"
+            # D3's designated-entry SANDY_FEATURE_STATE is
+            # /opt/sandy/feature-state/<f> -- the SAME host directory as
+            # relay-state, just mounted at a second path (see the host-side
+            # mount block), so it is a real directory in the normal case.
+            # The legacy fallback above is the one exception: its feature
+            # name ("legacy") was never a real feature, so no
+            # feature-state/legacy mount exists -- only /opt/sandy/relay-state
+            # does. Pointing this entry at SANDY_RELAY_STATE there, instead,
+            # keeps it reading a directory that actually exists.
+            if [ "$_legacy_fallback" = true ]; then
+                _sandy_supervise_entry "sandy-relay" "$_p" "$SANDY_RELAY_STATE" \
+                    "$HOME/.sandy-handoff-relay.lock" \
+                    "$SANDY_RELAY_STATE"
+            else
+                _sandy_supervise_entry "sandy-relay" "$_p" "$SANDY_RELAY_STATE" \
+                    "$HOME/.sandy-handoff-relay.lock" \
+                    "${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}/$_f"
+            fi
+            _wait_args+=("$SANDY_RELAY_STATE=sandy-relay")
+        else
+            _sandy_supervise_entry "sandy-entry $_f" "$_p" \
+                "${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}/$_f" \
+                "$HOME/.sandy-entry-$_f.lock" \
+                "${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}/$_f"
+            _wait_args+=("${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}/$_f=sandy-entry $_f")
+        fi
+    done
+    _sandy_await_entries "${_wait_args[@]}"
+    sandy_log "Feature entries requested (${SANDY_FEATURE_ENTRIES}); outcome (started vs. already running) is in each entry's own supervisor.log"
 }
 
 cd "$WORKSPACE"
@@ -8328,9 +8523,9 @@ cd "$WORKSPACE"
 # Relay slot: skipped for headless (-p) and for --remote (criterion 8 — under
 # remote-control there is no tmux session, so sandy-handoff-sessions has no rows
 # and a helper-driven relay would be restarted every 60s for the container's
-# life with nothing to target). The launcher also unsets the key for both, so
-# this gate is the in-container half of the same decision, not the only half.
-if [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then _sandy_start_handoff_relay; fi
+# life with nothing to target). The launcher also unsets the entries for both,
+# so this gate is the in-container half of the same decision, not the only half.
+if [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then _sandy_start_entries; fi
 
 if [ "$_SANDY_IS_MULTI" = false ]; then
     # --- Single-agent launch ---
@@ -12168,12 +12363,12 @@ fi
 
 # BEGIN relay capability (SANDY_RELAY + the host-owned :ro slot, 1.11.0, #258)
 #
-# The problem this solves: installing a connector used to mean setting a
-# PRIVILEGED key (SANDY_HANDOFF_RELAY) that names a path, which costs a
-# per-workspace approval prompt and cannot be turned on by default -- a global
-# default would name a file sandy does not install, and a configured relay that
-# cannot start fails the launch, so every unprovisioned sandbox would refuse to
-# launch.
+# The problem this solves: installing a feature's supervised entry used to
+# mean setting a PRIVILEGED key (SANDY_HANDOFF_RELAY) that names a path, which
+# costs a per-workspace approval prompt and cannot be turned on by default --
+# a global default would name a file sandy does not install, and a configured
+# relay that cannot start fails the launch, so every unprovisioned sandbox
+# would refuse to launch.
 #
 # SANDY_RELAY is a CAPABILITY toggle instead: it names no path and asserts no
 # payload. It means "run the installed relay if there is one". That is safe to
@@ -12202,16 +12397,20 @@ fi
 # out of a writable directory (~/.claude/... say) is replaceable at the second
 # link. "The agent cannot replace its own relay" is true of the entry point only.
 #
-# Exactly one entry, not a relay.d/*: a second consumer on one notice directory
-# is refused by a connector's claim lock, so the slot must resolve to a single
-# executable rather than a set.
+# One supervised process PER FEATURE (#381). Exclusivity between consumers is
+# the consumer's own business, enforced where it already is; sandy's job is
+# that each declared entry runs -- or the launch fails -- and that each is
+# reported. A second feature's entry used to be silently dropped by the
+# adoption loop below; it is now adopted, supervised and reported exactly like
+# the first (see "feature_entries" further down).
 #
 # Source attribution for disabled_by: the config loader does not keep per-key
 # provenance (it exports and moves on), so this records it for THIS key only,
 # narrowly, rather than growing a general mechanism nothing else needs. It
 # matters because SANDY_RELAY=0 is passive-safe -- only tightening -- but a
-# CLONED repo shipping it would silently disable an operator's fleet connector,
-# which is the hazard .handoff-enabled exists to answer. Visible, not forbidden.
+# CLONED repo shipping it would silently disable every one of a workspace's
+# feature entries, which is the hazard .handoff-enabled exists to answer.
+# Visible, not forbidden.
 if [ -z "${_SANDY_RELAY_SOURCE:-}" ]; then _SANDY_RELAY_SOURCE=""; fi
 SANDY_RELAY="${SANDY_RELAY:-1}"
 _sandy_relay_slot_dir="$SANDBOX_DIR/relay-bin"
@@ -12303,6 +12502,18 @@ _sandy_fm_out=""; _sandy_fm_rc=0; _sandy_fm_ran=false
 # features/ directory at all.
 _SANDY_FM_AA_RECORDS=""
 _SANDY_FM_AA_JSON=""
+# Per-feature supervised entries (#381). INITIALIZED here, never inherited --
+# a test or a developer session runs INSIDE a sandy sandbox and could
+# otherwise carry an ambient value in from the surrounding container.
+#   _sandy_fe_list          "<feature>=<container-path> ..." -- every ADOPTED entry
+#   _sandy_fe_disabled      same shape, entries SANDY_RELAY=0 suppressed
+#   _sandy_fe_relay_feature which feature's entry is the relay-designated one (D2)
+#   SANDY_FEATURE_ENTRIES   the container-facing copy of _sandy_fe_list (D5);
+#                           invariant: non-empty iff SANDY_HANDOFF_RELAY is
+_sandy_fe_list=""
+_sandy_fe_disabled=""
+_sandy_fe_relay_feature=""
+SANDY_FEATURE_ENTRIES=""
 if [ -d "$_sandy_fm_root" ]; then
     _sandy_fm_ran=true
     _fm_applied=""; _fm_applied_names=""; _fm_skipped=""
@@ -12333,14 +12544,39 @@ if [ -d "$_sandy_fm_root" ]; then
         [ -n "$_fm_l" ] || continue
         case "$_fm_l" in
             entry*)
-                # SANDY_RELAY=0 suppresses it, and says so. Silence here is the
-                # "fleet goes dark" failure: the entry is declared, the feature
-                # is mounted, and nothing would run.
+                _fm_ep="${_fm_l#entry	}"
+                _fm_ef="${_fm_ep#/opt/sandy/features/}"; _fm_ef="${_fm_ef%%/*}"
+                # SANDY_RELAY=0 suppresses EVERY entry (#381), and says so by
+                # name. Silence here is the "fleet goes dark" failure: the
+                # entry is declared, the feature is mounted, and nothing would
+                # run.
                 if [ "$SANDY_RELAY" != "1" ]; then
-                    warn "a feature manifest declares an entry, but SANDY_RELAY=0${_SANDY_RELAY_SOURCE:+ (set in $_SANDY_RELAY_SOURCE config)} disables the relay capability -- NO relay will run this launch. Unset it, or set SANDY_RELAY=1, to run '${_fm_l#*	}'."
-                elif [ -z "${SANDY_HANDOFF_RELAY:-}" ]; then
-                    SANDY_HANDOFF_RELAY="${_fm_l#*	}"
-                    _sandy_relay_source="manifest"
+                    warn "a feature manifest declares an entry, but SANDY_RELAY=0${_SANDY_RELAY_SOURCE:+ (set in $_SANDY_RELAY_SOURCE config)} disables the relay capability -- NO entry will run this launch. Unset it, or set SANDY_RELAY=1, to run '$_fm_ep'."
+                    _sandy_fe_disabled="${_sandy_fe_disabled:+$_sandy_fe_disabled }$_fm_ef=$_fm_ep"
+                else
+                    # Every selected feature's entry is adopted (#381) -- this
+                    # used to be an `elif [ -z SANDY_HANDOFF_RELAY ]`, which
+                    # silently dropped every entry after the first. The FIRST
+                    # one adopted here (sorted feature-directory glob order,
+                    # unchanged) becomes the relay-DESIGNATED entry (D2):
+                    # relay{}, SANDY_HANDOFF_RELAY, SANDY_RELAY_STATE and
+                    # /opt/sandy/relay-state describe only it, so a consumer
+                    # of those surfaces sees byte-identical behaviour when
+                    # exactly one entry exists. Every entry -- designated or
+                    # not -- is additionally reported under feature_entries.
+                    #
+                    # The test guarding the designation is still `-z
+                    # SANDY_HANDOFF_RELAY`, not "first iteration", so an
+                    # explicit operator-set SANDY_HANDOFF_RELAY (refused two
+                    # blocks up as a config key, but still possibly true here
+                    # via some other path) or a relay-bin slot value would
+                    # still win the designation over a manifest entry.
+                    _sandy_fe_list="${_sandy_fe_list:+$_sandy_fe_list }$_fm_ef=$_fm_ep"
+                    if [ -z "${SANDY_HANDOFF_RELAY:-}" ]; then
+                        SANDY_HANDOFF_RELAY="$_fm_ep"
+                        _sandy_relay_source="manifest"
+                        _sandy_fe_relay_feature="$_fm_ef"
+                    fi
                 fi ;;
             agent_args*)
                 _SANDY_FM_AA_RECORDS="${_SANDY_FM_AA_RECORDS}${_fm_l#agent_args	}"$'\n' ;;
@@ -12358,7 +12594,30 @@ if [ -d "$_sandy_fm_root" ]; then
                 _fm_skipped="${_fm_skipped}${_fm_l#skip	}"$'\n' ;;
         esac
     done <<< "$_sandy_fm_out"
-    unset _fm_l _fm_rest _fm_n _fm_c _fm_a _fm_e _fm_what
+    unset _fm_l _fm_rest _fm_n _fm_c _fm_a _fm_e _fm_what _fm_ep _fm_ef
+    # SANDY_FEATURE_ENTRIES (D5): the container-facing copy of _sandy_fe_list.
+    # Not a config key -- no metadata row, never read from env/config -- the
+    # HOST assigns it here, below the point any operator or workspace value
+    # could reach it. Invariant: non-empty iff SANDY_HANDOFF_RELAY is non-empty
+    # (both cleared together below on the criterion-8 skip, and by SANDY_RELAY=0
+    # leaving both empty above).
+    SANDY_FEATURE_ENTRIES="$_sandy_fe_list"
+    # D8: SAY there is more than one, every launch, without SANDY_VERBOSE --
+    # info, not warn, because nothing is being dropped any more and a warning
+    # every launch trains people to stop reading warnings.
+    if [ -n "$_sandy_fe_list" ] && [ "$(printf '%s\n' "$_sandy_fe_list" | wc -w | tr -d ' ')" -gt 1 ]; then
+        _fm_fe_names=""
+        for _fm_fe in $_sandy_fe_list; do
+            _fm_fe_f="${_fm_fe%%=*}"
+            if [ "$_fm_fe_f" = "$_sandy_fe_relay_feature" ]; then
+                _fm_fe_names="${_fm_fe_names:+$_fm_fe_names, }$_fm_fe_f (reported as relay{})"
+            else
+                _fm_fe_names="${_fm_fe_names:+$_fm_fe_names, }$_fm_fe_f"
+            fi
+        done
+        info "feature entries: $_fm_fe_names"
+        unset _fm_fe_names _fm_fe _fm_fe_f
+    fi
 
     # #363: SAY what applied, every launch, without SANDY_VERBOSE.
     #
@@ -12479,6 +12738,14 @@ if [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
     if [ -n "$_sandy_hr_skip" ]; then
         info "SANDY_HANDOFF_RELAY not started ($_sandy_hr_skip); crossSessionInbound will default to refuse"
         unset SANDY_HANDOFF_RELAY
+        # Every entry is skipped for the same reason the designated one is
+        # (headless / --remote / --provision all leave no tmux session for any
+        # of them to target) -- so the whole list, and the relay designation
+        # that points into it, are cleared together, keeping the invariant
+        # "SANDY_FEATURE_ENTRIES non-empty iff SANDY_HANDOFF_RELAY non-empty".
+        _sandy_fe_list=""
+        _sandy_fe_relay_feature=""
+        SANDY_FEATURE_ENTRIES=""
     fi
 fi
 # END handoff relay
@@ -12512,6 +12779,18 @@ if [ ! -d "$SANDBOX_DIR/relay-state" ] && [ -d "$SANDBOX_DIR/handoff/relay" ]; t
     mv "$SANDBOX_DIR/handoff/relay" "$SANDBOX_DIR/relay-state" 2>/dev/null || true
 fi
 mkdir -p "$SANDBOX_DIR/relay-state"
+
+# Feature-state directories (#381): one per NON-designated entry. The
+# designated entry (D2, first in sorted feature-directory order) keeps using
+# $SANDBOX_DIR/relay-state itself -- unchanged, so relay.state_dir, the
+# --rsync exclude, --provision's health check and any consumer already
+# following relay.state_dir see the same directory they always have. Every
+# other adopted entry gets its own $SANDBOX_DIR/feature-state/<feature>.
+for _sandy_fe in $_sandy_fe_list; do
+    _sandy_fe_f="${_sandy_fe%%=*}"
+    [ "$_sandy_fe_f" = "$_sandy_fe_relay_feature" ] || mkdir -p "$SANDBOX_DIR/feature-state/$_sandy_fe_f"
+done
+unset _sandy_fe _sandy_fe_f
 
 if [ -n "${SANDY_HANDOFF_RELAY:-}" ] && [ "${SANDY_HANDOFF_DIRS:-1}" != "1" ]; then
     # Same rule as the host-side existence check above (criterion 7): the relay
@@ -14561,6 +14840,25 @@ if [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
     # supervisor with no relay to start, silently, on every launch. The test
     # that pins "exactly one emission" caught it.
     RUN_FLAGS+=(-e "SANDY_HANDOFF_RELAY=$SANDY_HANDOFF_RELAY")
+    # Per-feature entries (#381): SANDY_FEATURE_ENTRIES forwards the full list
+    # (D5) so the container-side supervisor can start and report every one,
+    # not just the designated one. Each entry also gets its own state-dir
+    # mount at /opt/sandy/feature-state/<feature>, uniform across entries --
+    # the designated entry's directory is $SANDBOX_DIR/relay-state itself
+    # (D3), mounted at BOTH paths, so SANDY_FEATURE_STATE is spelled the same
+    # way for every entry's process regardless of which one is designated.
+    # Mount targets never collide with the :ro payload at
+    # /opt/sandy/features/<feature> -- a different tree entirely.
+    RUN_FLAGS+=(-e "SANDY_FEATURE_ENTRIES=$_sandy_fe_list")
+    for _sandy_fe in $_sandy_fe_list; do
+        _sandy_fe_f="${_sandy_fe%%=*}"
+        if [ "$_sandy_fe_f" = "$_sandy_fe_relay_feature" ]; then
+            RUN_FLAGS+=(-v "$SANDBOX_DIR/relay-state:/opt/sandy/feature-state/$_sandy_fe_f")
+        else
+            RUN_FLAGS+=(-v "$SANDBOX_DIR/feature-state/$_sandy_fe_f:/opt/sandy/feature-state/$_sandy_fe_f")
+        fi
+    done
+    unset _sandy_fe _sandy_fe_f
 fi
 
 # --- Feature mounts, from the manifest (2.0.0) ------------------------------
@@ -15188,12 +15486,26 @@ fi
 # will run, whatever was resolved earlier.
 [ -n "${SANDY_HANDOFF_RELAY:-}" ] || _sandy_relay_source="none"
 _sandy_relay_source_json="\"${_sandy_relay_source:-none}\""
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "relay": {\n    "source": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "cred_mode": "%s"\n}\n' \
+# feature_entries (#381): every ADOPTED and SANDY_RELAY=0-disabled entry, keyed
+# by feature name -- the marker records LAUNCH INTENT ONLY (it is written
+# before `docker run`), so state/restarts/executable_present/state_dir are
+# NOT here; they are LIVE, and live only in `sandy --print-state`, the same
+# split relay{} above documents. `relay_alias` is spelled that way, never
+# `relay`, so it cannot collide with any existing `"relay":` reader.
+# disabled_by mirrors relay.disabled_by exactly: SANDY_RELAY=0 disables every
+# entry for the same reason at the same moment, so one value applies to all
+# of them. Computed as its own variable, THEN passed positionally --
+# §134's harness evals this printf under `set -u` with only the vars it
+# stubs, so the `${_sandy_fe_json:-}` default on the argument (not here) is
+# what keeps that harness working; this assignment can safely rely on every
+# variable it reads being defined by the code above.
+_sandy_fe_json="$(_sandy_fe_marker_body "$_sandy_fe_list" "$_sandy_fe_disabled" "$_sandy_fe_relay_feature" "$_sandy_relay_disabled_by_json")"
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "agents": %s,\n  "relay": {\n    "source": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "feature_entries": {%s},\n  "cred_mode": "%s"\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
     "$_sandy_perm_mode_json" "$_sandy_csi_json" "$_sandy_agents_json" \
     "$_sandy_relay_source_json" "$_sandy_relay_path_json" "$_sandy_relay_disabled_by_json" \
-    "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${CRED_MODE:-none}" \
+    "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${_sandy_fe_json:-}" "${CRED_MODE:-none}" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
 

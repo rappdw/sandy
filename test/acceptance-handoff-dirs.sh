@@ -198,7 +198,7 @@ _envcount="$(docker inspect -f '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' "$C3"
 ck "the resolved entry is forwarded into the container exactly once (SANDY_HANDOFF_RELAY survives as the INTERNAL channel a manifest entry travels through -- only the config key was removed)" "[ \"$_envcount\" = 1 ]"
 
 echo "-- E2. relay is running, as a sibling of tmux (not a pane, not a session child) --"
-# The subshell that runs _sandy_start_handoff_relay's loop is backgrounded
+# The subshell that runs _sandy_supervise_entry's loop is backgrounded
 # (&) before tmux new-session runs, so --start's own readiness gate (which
 # only waits on the inner tmux session) can return before the relay has
 # actually flock'd and written its first log line. Poll rather than assert
