@@ -1542,7 +1542,7 @@ SANDY_ALLOW_NO_ISOLATION|bool|0||0.1.0|stable|Allow launch when iptables rules c
 SANDY_ALLOW_LAN_HOSTS|string|||0.7.9|stable|Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
 SANDY_LOCAL_LLM_HOST|string||^[^[:space:]]+:[0-9]+$|0.12.0|stable|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. With the egress proxy on (default) the proxy's forward listener relays host.docker.internal:<port> to the host; with the proxy off (=0, Linux) it inserts one iptables ACCEPT and maps host.docker.internal.
 SANDY_ALLOW_HOSTS|string|||0.14.0|stable|Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval.
-SANDY_EXTRA_ENV|string|||0.12.0|stable|Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values resolve env > workspace .sandy/.secrets > workspace .sandy/config > ~/.sandy/.secrets > ~/.sandy/config. The privileged tier gates the NAME list (workspace config setting SANDY_EXTRA_ENV itself requires approval); once approved, values may come from any source.
+SANDY_EXTRA_ENV|string|||0.12.0|stable|Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). The name lists COMPOSE (2.4.0): the effective list is the union of the host lists, any approved workspace list, and an env-set list (env ADDS, it does not replace), deduplicated in that order. Values resolve env > workspace .sandy/.secrets > workspace .sandy/config > ~/.sandy/.secrets > ~/.sandy/config. The privileged tier gates the NAME list (workspace config setting SANDY_EXTRA_ENV itself requires approval); once approved, values may come from any source.
 SANDY_AGENT_ARGS|string|||1.3.0|stable|Extra command-line arguments appended to the agent command (claude/codex/gemini/opencode) on EVERY launch — bare sandy, headless -p, the --start daemon, and sandy-ui alike. Whitespace-split into argv (no embedded-space/quoting support in v1) and forwarded through the same per-agent translation as command-line pass-through args, ordered AFTER sandy's own flags and BEFORE any command-line args. Privileged tier: free from host ~/.sandy/config, but from a workspace .sandy/config it triggers the per-workspace approval prompt (headless/non-TTY drops it). Never eval'd. Typical use: a fixed --mcp-config <path> or project feature flags. Applies to every selected agent (each pane in a multi-agent combo) unless overridden per agent by an operator file $SANDBOX_DIR/agent-args.<agent> (sandbox top level, agent-unwritable, privileged by location — no prompt); when both are present the sandbox file wins for that agent, values are never merged, and sandy prints a one-line notice.
 ANTHROPIC_API_KEY|secret|||0.1.0|stable|Anthropic API key for Claude Code. Not required when using Claude Max OAuth.
 CLAUDE_CODE_OAUTH_TOKEN|secret|||0.7.0|stable|Claude Code OAuth token (alternative to ANTHROPIC_API_KEY).
@@ -3402,7 +3402,13 @@ _sandy_validate_config() {
                || { [ "$tier" = "passive" ] && _sandy_passive_value_privileged "$key" "$value"; }; then
                 privileged_keys+=("$key")
                 if [ "$tier" = "passive" ]; then
-                    warnings+=("$key|weakens isolation / privileged key set from workspace — requires explicit approval|warning")
+                    if [ "$key" = "SANDY_EXTRA_ENV" ]; then
+                        # The name list composes (#388), so say what approving
+                        # it does: it adds names, it never replaces the host's.
+                        warnings+=("$key|privileged key set from workspace — requires explicit approval; once approved its names are ADDED to the host (and env) SANDY_EXTRA_ENV list, not a replacement for it|warning")
+                    else
+                        warnings+=("$key|weakens isolation / privileged key set from workspace — requires explicit approval|warning")
+                    fi
                 fi
             elif _key_in_list "$key" "${SANDY_PASSIVE_KEYS[@]}"; then
                 :  # allowed in any tier
@@ -9652,6 +9658,15 @@ _sandy_reap_stranded_proxies || true
 # _resolve_passive_privileged_approval() below.
 _PASSIVE_PRIVILEGED_PENDING=()
 _PASSIVE_PRIVILEGED_SOURCES=()
+# SANDY_EXTRA_ENV name lists, per source, in load order (#388). This one key
+# COMPOSES rather than last-wins: host lists, then APPROVED workspace lists,
+# then the env value, unioned by _load_sandy_extra_env. The loader records the
+# raw values here instead of exporting them, because an export per file is
+# exactly the last-wins that silently dropped every host-forwarded name the
+# moment a workspace forwarded one of its own.
+_SANDY_EXTRA_ENV_HOST_LISTS=()
+_SANDY_EXTRA_ENV_WS_LISTS=()
+_SANDY_EXTRA_ENV_WS_APPROVED=0
 
 # Snapshot which keys were already set in the process environment before any
 # config file was read. Subsequent _load_sandy_config calls skip these — env
@@ -9690,7 +9705,12 @@ _load_sandy_config() {
         # Env wins: skip keys that were already set in the process env before
         # any config loading. Honors `SANDY_AGENT=foo sandy ...`, `export …`
         # in user shellrc, and CI/test harnesses that override via env.
-        if _key_in_list "$key" "${_SANDY_ENV_SET_KEYS[@]+"${_SANDY_ENV_SET_KEYS[@]}"}"; then
+        # SANDY_EXTRA_ENV is the one exception (#388): an env-set list ADDS to
+        # the file lists rather than replacing them, so the files are still
+        # read — and a workspace list still goes through approval — when the
+        # environment names some too.
+        if [ "$key" != "SANDY_EXTRA_ENV" ] \
+           && _key_in_list "$key" "${_SANDY_ENV_SET_KEYS[@]+"${_SANDY_ENV_SET_KEYS[@]}"}"; then
             continue
         fi
         # Strip a trailing CR so a Windows/CRLF-edited config isn't silently
@@ -9703,7 +9723,10 @@ _load_sandy_config() {
         case "$tier" in
             privileged)
                 # Full allowlist — privileged + passive keys permitted
-                if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; then
+                if [ "$key" = "SANDY_EXTRA_ENV" ]; then
+                    # Recorded, not exported — composed later (#388).
+                    _SANDY_EXTRA_ENV_HOST_LISTS+=("$value")
+                elif _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; then
                     export "$key=$value"
                     # Narrow provenance, for SANDY_RELAY's disabled_by only
                     # (#258). The loader keeps no per-key source — it exports
@@ -9723,6 +9746,11 @@ _load_sandy_config() {
                    || _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}"; then
                     _PASSIVE_PRIVILEGED_PENDING+=("$key=$value")
                     _PASSIVE_PRIVILEGED_SOURCES+=("$file")
+                    # Kept in FILE order for the union (#388); it joins only if
+                    # the approval below sets _SANDY_EXTRA_ENV_WS_APPROVED.
+                    if [ "$key" = "SANDY_EXTRA_ENV" ]; then
+                        _SANDY_EXTRA_ENV_WS_LISTS+=("$value")
+                    fi
                 elif _key_in_list "$key" "${SANDY_PASSIVE_KEYS[@]}"; then
                     export "$key=$value"
                     if [ "$key" = "SANDY_RELAY" ]; then _SANDY_RELAY_SOURCE="workspace"; fi
@@ -9792,10 +9820,23 @@ fi
 # SANDY_EXTRA_ENV: user-defined passthrough of arbitrary env-var names into
 # the container (e.g. tokens for MCP servers sandy doesn't know about).
 #
-# Source resolution: env wins absolutely. Among files, workspace overrides
-# host (matching the standard loader's precedence: workspace passive beats
-# host privileged for keys both sources set). Within each tier, .secrets
-# beats config (last-match-wins iteration order):
+# The NAME list composes (#388): the effective list is the union of every
+# host list (~/.sandy/config, then ~/.sandy/.secrets), every APPROVED
+# workspace list (.sandy/config, then .sandy/.secrets), then the env value —
+# deduplicated, the first occurrence keeping its position. An env-set list
+# ADDS; it does not replace (maintainer decision on #388 — the one key where
+# env is not a complete override, because a replacement is exactly the silent
+# drop being fixed). Last-wins used to drop every host-forwarded name the
+# moment a workspace forwarded one of its own, with no warning; the only
+# symptom was a tool failing inside the container, far from the cause. The
+# union grants nothing new: host names were set in a privileged source and
+# meant to apply everywhere, and a workspace's names still need approval to
+# join (headless drops them, as before).
+#
+# VALUE resolution is per name and unchanged. Env wins absolutely. Among
+# files, workspace overrides host (matching the standard loader's precedence:
+# workspace passive beats host privileged for keys both sources set). Within
+# each tier, .secrets beats config (last-match-wins iteration order):
 #
 #   env  >  workspace/.sandy/.secrets  >  workspace/.sandy/config
 #         >  ~/.sandy/.secrets          >  ~/.sandy/config
@@ -9810,7 +9851,58 @@ fi
 # the user sees before any value is forwarded.
 _SANDY_EXTRA_ENV_NAMES=()
 _load_sandy_extra_env() {
-    [ -z "${SANDY_EXTRA_ENV:-}" ] && return 0
+    # Compose the union (#388). The env contribution is whatever
+    # SANDY_EXTRA_ENV holds here: neither the config loader nor the approval
+    # exports this key any more, so only the environment can have set it.
+    # Each list is tagged with its source so the launch can say where every
+    # name came from. Self-contained on purpose — tests extract this function
+    # alone and drive it.
+    local _ee_lists=() _ee_l _ee_src _ee_part _ee_parts=() _ee_seen="," _ee_joined=""
+    local _ee_host="" _ee_ws="" _ee_env=""
+    for _ee_l in "${_SANDY_EXTRA_ENV_HOST_LISTS[@]+"${_SANDY_EXTRA_ENV_HOST_LISTS[@]}"}"; do
+        _ee_lists+=("host	$_ee_l")
+    done
+    if [ "${_SANDY_EXTRA_ENV_WS_APPROVED:-0}" = 1 ]; then
+        for _ee_l in "${_SANDY_EXTRA_ENV_WS_LISTS[@]+"${_SANDY_EXTRA_ENV_WS_LISTS[@]}"}"; do
+            _ee_lists+=("workspace	$_ee_l")
+        done
+    fi
+    if [ -n "${SANDY_EXTRA_ENV:-}" ]; then
+        _ee_lists+=("env	$SANDY_EXTRA_ENV")
+    fi
+    for _ee_l in "${_ee_lists[@]+"${_ee_lists[@]}"}"; do
+        _ee_src="${_ee_l%%	*}"
+        IFS=',' read -ra _ee_parts <<< "${_ee_l#*	}"
+        for _ee_part in "${_ee_parts[@]+"${_ee_parts[@]}"}"; do
+            _ee_part="${_ee_part#"${_ee_part%%[![:space:]]*}"}"
+            _ee_part="${_ee_part%"${_ee_part##*[![:space:]]}"}"
+            [ -z "$_ee_part" ] && continue
+            if [ "$_ee_src" = host ]; then _ee_host="${_ee_host:+$_ee_host,}$_ee_part"
+            elif [ "$_ee_src" = workspace ]; then _ee_ws="${_ee_ws:+$_ee_ws,}$_ee_part"
+            else _ee_env="${_ee_env:+$_ee_env,}$_ee_part"
+            fi
+            # Dedupe, first occurrence keeping its position. A delimiter-
+            # wrapped string rather than an associative array: bash 3.2 has
+            # none.
+            case "$_ee_seen" in *",$_ee_part,"*) continue ;; esac
+            _ee_seen="$_ee_seen$_ee_part,"
+            _ee_joined="${_ee_joined:+$_ee_joined,}$_ee_part"
+        done
+    done
+    [ -z "$_ee_joined" ] && return 0
+    # The composed list is what the container is told it received (the
+    # `-e SANDY_EXTRA_ENV=` forward at launch), so `echo $SANDY_EXTRA_ENV` in
+    # the agent names every forwarded name, not whichever source loaded last.
+    export SANDY_EXTRA_ENV="$_ee_joined"
+    # Say where the names came from whenever more than one source contributed
+    # (the case no reader of a single file can predict), or when verbose.
+    local _ee_nsrc=0
+    [ -n "$_ee_host" ] && _ee_nsrc=$((_ee_nsrc+1))
+    [ -n "$_ee_ws" ] && _ee_nsrc=$((_ee_nsrc+1))
+    [ -n "$_ee_env" ] && _ee_nsrc=$((_ee_nsrc+1))
+    if [ "$_ee_nsrc" -gt 1 ] || [ "${SANDY_VERBOSE:-0}" != 0 ]; then
+        info "SANDY_EXTRA_ENV: forwarding ${_ee_joined} (host: ${_ee_host:--}; workspace: ${_ee_ws:--}; env: ${_ee_env:--})"
+    fi
     local _raw _name _file _key _value
     IFS=',' read -ra _raw <<< "$SANDY_EXTRA_ENV"
     for _name in "${_raw[@]}"; do
@@ -9895,6 +9987,16 @@ _load_sandy_extra_env() {
 #
 # Approval is keyed on the absolute workspace path AND the exact KEY=VALUE set,
 # so editing .sandy/config always re-triggers the prompt.
+# Export one approved KEY=VALUE — except SANDY_EXTRA_ENV, whose approval only
+# admits the workspace name lists (recorded in file order by the loader) into
+# the union _load_sandy_extra_env builds (#388). Exporting it would replace
+# the host list and any env-set list: the last-wins this key no longer has.
+_sandy_export_approved_kv() {
+    case "$1" in
+        SANDY_EXTRA_ENV=*) _SANDY_EXTRA_ENV_WS_APPROVED=1 ;;
+        *) export "$1" ;;
+    esac
+}
 _resolve_passive_privileged_approval() {
     [ ${#_PASSIVE_PRIVILEGED_PENDING[@]} -eq 0 ] && return 0
 
@@ -9918,7 +10020,7 @@ _resolve_passive_privileged_approval() {
     if [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ]; then
         while IFS= read -r _kv; do
             [ -z "$_kv" ] && continue
-            export "$_kv"
+            _sandy_export_approved_kv "$_kv"
         done <<< "$sorted"
         return 0
     fi
@@ -9930,7 +10032,7 @@ _resolve_passive_privileged_approval() {
         if [ "$stored" = "$set_hash" ]; then
             while IFS= read -r _kv; do
                 [ -z "$_kv" ] && continue
-                export "$_kv"
+                _sandy_export_approved_kv "$_kv"
             done <<< "$sorted"
             return 0
         fi
@@ -9992,7 +10094,7 @@ _resolve_passive_privileged_approval() {
             chmod 600 "$approval_file" 2>/dev/null || true
             while IFS= read -r _kv; do
                 [ -z "$_kv" ] && continue
-                export "$_kv"
+                _sandy_export_approved_kv "$_kv"
             done <<< "$sorted"
             echo "[sandy] Approved. Future launches from this directory will proceed silently" >&2
             echo "[sandy] unless you edit the set. Revoke via: rm $approval_file" >&2

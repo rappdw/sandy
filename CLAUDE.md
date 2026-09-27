@@ -684,7 +684,9 @@ SANDY_EXTRA_ENV=HA_TOKEN,LINEAR_API_KEY   # ~/.sandy/config (privileged)
 HA_TOKEN=ey...                            # ~/.sandy/.secrets, or the shell env
 ```
 
-Value resolution: `env > workspace/.sandy/.secrets > workspace/.sandy/config > ~/.sandy/.secrets > ~/.sandy/config`. Env wins absolutely; among files workspace beats host, and within a tier `.secrets` beats `config`.
+**The name lists compose (2.4.0, #388)**: the effective list is the union of the host lists, any **approved** workspace list, and an env-set list — deduplicated, host names first, then names the workspace adds, then names env adds. An env-set `SANDY_EXTRA_ENV` **adds** rather than replaces; it is the one key where env is not a complete override, because replacement is the silent drop being fixed — under last-wins a workspace forwarding one token of its own silently dropped every host-forwarded name. The config loader records the per-source lists instead of exporting them, and the approval step only marks the workspace lists admitted, so neither can re-introduce last-wins. The launch names the sources when more than one contributes. Guarded by §165.
+
+Value resolution (per name, unchanged): `env > workspace/.sandy/.secrets > workspace/.sandy/config > ~/.sandy/.secrets > ~/.sandy/config`. Env wins absolutely; among files workspace beats host, and within a tier `.secrets` beats `config`.
 
 **The security boundary is on the names, not the values** — `SANDY_EXTRA_ENV` is privileged, so a workspace setting it triggers the approval prompt; once `HA_TOKEN` is approved the value may come from anywhere. Names must match `[A-Z_][A-Z0-9_]*`; names matching a sandy-recognized key are skipped (they have their own typed path); a listed name with no value warns but does not fail the launch.
 
