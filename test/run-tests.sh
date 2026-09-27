@@ -17356,7 +17356,7 @@ if [ "$1" = -m ]; then
   if [ "${FAKE_REMOTE:-}" = 1 ]; then echo "${REMOTE_ARCH:-x86_64}"; else echo "${LOCAL_ARCH:-x86_64}"; fi
   exit 0
 fi
-exec /bin/uname "$@"
+exec /usr/bin/uname "$@"
 STUB
 chmod +x "$_S154_DIR/bin/ssh" "$_S154_DIR/bin/rsync" "$_S154_DIR/bin/uname"
 
@@ -17465,7 +17465,11 @@ check "§154(19) arm64 and aarch64 are the SAME architecture -- nothing skipped"
 # --- refusals: each leaves the destination exactly as it was -----------------
 _s154_mk R1 dev/proj; mkdir -p "$_S154_DIR/R1/rhome/dev/proj"
 _s154_run R1 --workspace "$_S154_DIR/R1/lhome/dev/proj" --yes
-printf 'PRECIOUS\n' > "$(_s154_dest R1)/marker"
+# Guarded: when the first copy fails there is no destination, and an unguarded
+# write lands on "/marker" -- a read-only root on macOS -- and the ERR trap
+# aborts the WHOLE suite here, so no later section runs. (20) still fails.
+_S154_R1D="$(_s154_dest R1)"
+if [ -n "$_S154_R1D" ]; then printf 'PRECIOUS\n' > "$_S154_R1D/marker"; fi
 _s154_run R1 --workspace "$_S154_DIR/R1/lhome/dev/proj" --yes
 check "§154(20) an existing sandbox on the destination is never overwritten (rc=$_S154_RC, its contents intact)" \
     bash -c 'test "$1" -eq 1 && grep -q PRECIOUS "$2/marker"' _ "$_S154_RC" "$(_s154_dest R1)"
@@ -17501,7 +17505,7 @@ check "§154(25) an option-shaped host is refused and ssh is NEVER invoked -- a 
     bash -c 'test "$1" -eq 1 && test ! -s "$2"' _ "$_S154_RC" "$_S154_DIR/ssh.log"
 fi
 rm -rf "$_S154_DIR"
-unset _S154_SANDY _S154_DIR _S154_HLP _S154_LAUNCH _S154_LCWS _S154_D _S154_OUT _S154_RC _S154_RC_REAL _S154_PID _s154_p _s154_c
+unset _S154_R1D _S154_SANDY _S154_DIR _S154_HLP _S154_LAUNCH _S154_LCWS _S154_D _S154_OUT _S154_RC _S154_RC_REAL _S154_PID _s154_p _s154_c
 unset _F _LH _W _SH _H8 _NAME _SB _CWS _PD _dw
 unset -f _s154_mk _s154_run _s154_dest _s154_expect
 
@@ -18782,6 +18786,40 @@ fi
 rm -rf "$_S169_DIR"
 unset _S169_DIR _S169_BLOCK _S169_HOST _C _s169_t
 unset -f _s169_seed
+
+echo "§170: a config-key metadata lookup survives a table larger than the pipe buffer"
+# ============================================================
+# _sandy_key_meta_field pipes the whole _sandy_key_metadata heredoc into awk.
+# It used to `exit` on the first match; once the table outgrew the pipe buffer
+# the heredoc's cat was still writing, died of SIGPIPE, and pipefail made the
+# lookup exit 141 -- surfacing on macOS (whose pipe buffer is far smaller than
+# Linux's 64K) as a failed `--print-schema` in §92(b), once #391 grew the table
+# from 22.6K to 25.5K. Linux CI never saw it. Reproduced here on ANY host by
+# serving a 2 MB table with the key on the FIRST row, under the real script's
+# set -euo pipefail.
+_S170_FN="$(sed -n '/^_sandy_key_meta_field() {/,/^}/p' "$SANDY_SCRIPT")"
+check "§170(0) extracted _sandy_key_meta_field" \
+    bash -c 'case "$1" in *_sandy_key_metadata*) exit 0 ;; esac; exit 1' _ "$_S170_FN"
+_S170_OUT="$(bash -c '
+    set -euo pipefail
+    _sandy_key_metadata() {
+        printf "SANDY_FIRST|bool|0||1.0.0|stable|first row\n"
+        awk "BEGIN { for (i = 0; i < 40000; i++) printf \"SANDY_PAD_%d|string|||1.0.0|stable|padding row to outgrow any pipe buffer ....\n\", i }"
+    }
+    eval "$1"
+    # Called DIRECTLY, not inside $( ): errexit does not reach into a command
+    # substitution, so a 141 there is swallowed and the check would pass
+    # against the broken code. Here set -e aborts on it, and "done" is missing.
+    printf "type="; _sandy_key_meta_field SANDY_FIRST type
+    printf "desc="; _sandy_key_meta_field SANDY_FIRST description
+    printf "last="; _sandy_key_meta_field SANDY_PAD_39999 since
+    printf "done\n"
+' _ "$_S170_FN" 2>&1)" || true
+check "§170(1) a key on the FIRST row of a 2 MB table resolves, and the lookup does not die of SIGPIPE under pipefail (mutation: restore the early exit in the awk and this exits 141)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "type=bool" && printf "%s\n" "$1" | grep -qx "desc=first row" && printf "%s\n" "$1" | grep -qx done' _ "$_S170_OUT"
+check "§170(2) ...and a key on the LAST row still resolves (reading to EOF must not lose the match)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "last=1.0.0"' _ "$_S170_OUT"
+unset _S170_FN _S170_OUT
 
 # BEGIN SUMMARY
 # ============================================================

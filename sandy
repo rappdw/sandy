@@ -1608,7 +1608,12 @@ EOF
 _sandy_key_meta_field() {
     local key="$1" field="$2"
     local line
-    line="$(_sandy_key_metadata | awk -F'|' -v k="$key" '$1==k {print; exit}')"
+    # Read to EOF, never `exit` on the match: an early exit closes the pipe while
+    # the heredoc's cat is still writing, cat dies of SIGPIPE, and pipefail
+    # turns that into exit 141 for the whole lookup. Only once the table
+    # outgrows the pipe buffer -- macOS's is far smaller than Linux's 64K, so
+    # it surfaced there first, as a failed --print-schema (§92b, §170).
+    line="$(_sandy_key_metadata | awk -F'|' -v k="$key" '$1==k && !f {print; f=1}')"
     [ -z "$line" ] && return 0
     case "$field" in
         type)        echo "$line" | awk -F'|' '{print $2}' ;;

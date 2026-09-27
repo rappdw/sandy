@@ -214,7 +214,12 @@ _cred_refresh_if_due() {
     # be recorded and keep the previous token, not silently vanish or abort
     # the suite. The subshell cd scopes the directory change to the refresh.
     local _rc=0 _tok=""
-    _tok="$(cd "$_INT_LAUNCH_DIR" && bash -c "$SANDY_INTEG_CRED_REFRESH_CMD")" || _rc=$?
+    # `exec`: bash 3.2 forks the last command of a && list inside $( ), and
+    # under the suite's set -E the inherited ERR trap then fires IN the
+    # subshell on a failed refresh -- noise the rc guard below cannot stop,
+    # and exactly what §103(b1) forbids. bash 5 execs it implicitly, so only
+    # macOS saw it (and the pre-#257 bare $(bash -c ...) had it too).
+    _tok="$(cd "$_INT_LAUNCH_DIR" && exec bash -c "$SANDY_INTEG_CRED_REFRESH_CMD")" || _rc=$?
     if [ "$_rc" -eq 0 ] && [ -n "$_tok" ]; then
         export ANTHROPIC_AUTH_TOKEN="$_tok"
         _CRED_LAST_REFRESH=$SECONDS
