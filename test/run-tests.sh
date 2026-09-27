@@ -17553,6 +17553,7 @@ _S155_SRC="$_S155_D/launch.sh"
     sed -n '/^_key_in_list()/,/^}$/p' "$_S155_SANDY"
     grep -m1 '^sha256() {' "$_S155_SANDY"
     sed -n '/^_load_sandy_config() {/,/^}$/p' "$_S155_SANDY"
+    sed -n '/^_sandy_export_approved_kv() {/,/^}$/p' "$_S155_SANDY"
     sed -n '/^_resolve_passive_privileged_approval() {/,/^}$/p' "$_S155_SANDY"
 } > "$_S155_SRC"
 _S155_EG="$(awk '/^_SANDY_PROXY_ON=false$/{f=1} f{print} f&&/permissive.*default-on/{print "fi"; exit}' "$_S155_SANDY")"
@@ -18434,6 +18435,9 @@ _s165_run() {
         sha256() { shasum -a 256 2>/dev/null || sha256sum; }
         warn() { echo "[warn] $*" >&2; }
         info() { echo "[info] $*" >&2; }
+        # The region also carries the #219 offline block, which reads the
+        # parsed --no-update-check flag and calls the update check.
+        SANDY_NO_UPDATE_CHECK=false; sandy_check_update() { :; }
         SANDY_PRIVILEGED_KEYS=(SANDY_SSH SANDY_EXTRA_ENV)
         SANDY_PASSIVE_KEYS=(SANDY_MODEL SANDY_RELAY SANDY_VERBOSE)
         eval "$1"
