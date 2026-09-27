@@ -864,6 +864,31 @@ build_codex_cmd() {
     if [ -n "${CODEX_MODEL:-}" ]; then
         cmd+=" --model $(printf "%q" "$CODEX_MODEL")"
     fi
+    # SANDY_EFFORT (#116) -> codex's `model_reasoning_effort`, as a `-c`
+    # override (accepted by both `codex` and `codex exec`; the value is parsed
+    # as TOML and falls back to a literal string, so a bare word is fine).
+    # Verified against codex 0.157.1 (codex-rs/protocol/src/openai_models.rs,
+    # ReasoningEffort::from_str): none|minimal|low|medium|high|xhigh|max|ultra|
+    # persistent. Every sandy level therefore has an exact namesake, and the
+    # mapping is the identity -- including max->max, codex's own "maximum
+    # reasoning depth". NOT ultra, though it sorts higher: ultra is "maximum
+    # reasoning with automatic task delegation" (multi-agent), a behaviour
+    # change rather than an effort level. The mapping is a case, not a
+    # pass-through, so a future divergence is one arm here and an unmapped
+    # level omits the flag rather than inventing a value. Whether a given MODEL
+    # offers the level is codex's catalog's business (0.157.1's gpt-5.4/5.5 top
+    # out at xhigh). printf %q because this string reaches `bash -c` (R1).
+    local _sandy_codex_effort=""
+    case "${SANDY_EFFORT:-}" in
+        low) _sandy_codex_effort=low ;;
+        medium) _sandy_codex_effort=medium ;;
+        high) _sandy_codex_effort=high ;;
+        xhigh) _sandy_codex_effort=xhigh ;;
+        max) _sandy_codex_effort=max ;;
+    esac
+    if [ -n "$_sandy_codex_effort" ]; then
+        cmd+=" -c $(printf "%q" "model_reasoning_effort=$_sandy_codex_effort")"
+    fi
     cmd+="$(_sandy_translate_args codex "$@")"
     _sandy_wrap_cmd_exit_pause "Codex CLI" "$cmd"
 }

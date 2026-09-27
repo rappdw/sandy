@@ -1554,7 +1554,7 @@ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Cod
 SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
 SANDY_MODEL|string|claude-opus-5|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
 SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched.
-SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for the Claude agent (claude only), applied as 'claude --effort <level>'. Empty leaves Claude Code's own default (currently 'high'). Levels are model-dependent; an unsupported level falls back to the highest supported at or below it. Passive-safe (effort does not affect isolation). Recorded in sandy-session.json.
+SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude and (2.4.0) codex. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Empty leaves each agent's own default. Ignored, with a notice, for a launch with neither claude nor codex (gemini, opencode and grok have no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json.
 SANDY_CPUS|int|||0.1.0|stable|CPU limit for container (default: auto-detected).
 SANDY_MEM|string|||0.1.0|stable|Memory limit for container (e.g. '8g'; default: auto-detected).
 SANDY_GPU|string|||0.7.5|stable|GPU passthrough: 'all', or device IDs like '0' / '0,1'.
@@ -6263,8 +6263,8 @@ Usage:
 
 Environment variables:
   SANDY_MODEL        Model to use (default: claude-opus-5)
-  SANDY_EFFORT       Reasoning effort for claude: low|medium|high|xhigh|max
-                     (default: Claude Code's own, currently high)
+  SANDY_EFFORT       Reasoning effort for claude and codex:
+                     low|medium|high|xhigh|max (default: each agent's own)
   ANTHROPIC_API_KEY  API key (not needed with Claude Max / OAuth)
   SANDY_HOME         Sandy config directory (default: ~/.sandy)
   SANDY_SSH          Git SSH method: "token" (default) uses gh CLI token
@@ -8166,6 +8166,31 @@ build_codex_cmd() {
     fi
     if [ -n "${CODEX_MODEL:-}" ]; then
         cmd+=" --model $(printf "%q" "$CODEX_MODEL")"
+    fi
+    # SANDY_EFFORT (#116) -> codex's `model_reasoning_effort`, as a `-c`
+    # override (accepted by both `codex` and `codex exec`; the value is parsed
+    # as TOML and falls back to a literal string, so a bare word is fine).
+    # Verified against codex 0.157.1 (codex-rs/protocol/src/openai_models.rs,
+    # ReasoningEffort::from_str): none|minimal|low|medium|high|xhigh|max|ultra|
+    # persistent. Every sandy level therefore has an exact namesake, and the
+    # mapping is the identity -- including max->max, codex's own "maximum
+    # reasoning depth". NOT ultra, though it sorts higher: ultra is "maximum
+    # reasoning with automatic task delegation" (multi-agent), a behaviour
+    # change rather than an effort level. The mapping is a case, not a
+    # pass-through, so a future divergence is one arm here and an unmapped
+    # level omits the flag rather than inventing a value. Whether a given MODEL
+    # offers the level is codex's catalog's business (0.157.1's gpt-5.4/5.5 top
+    # out at xhigh). printf %q because this string reaches `bash -c` (R1).
+    local _sandy_codex_effort=""
+    case "${SANDY_EFFORT:-}" in
+        low) _sandy_codex_effort=low ;;
+        medium) _sandy_codex_effort=medium ;;
+        high) _sandy_codex_effort=high ;;
+        xhigh) _sandy_codex_effort=xhigh ;;
+        max) _sandy_codex_effort=max ;;
+    esac
+    if [ -n "$_sandy_codex_effort" ]; then
+        cmd+=" -c $(printf "%q" "model_reasoning_effort=$_sandy_codex_effort")"
     fi
     cmd+="$(_sandy_translate_args codex "$@")"
     _sandy_wrap_cmd_exit_pause "Codex CLI" "$cmd"
@@ -15481,12 +15506,16 @@ if [ -n "${CLAUDE_CODE_SUBAGENT_MODEL:-}" ] && ! [[ "$CLAUDE_CODE_SUBAGENT_MODEL
     error "  Note: .sandy/config does not strip inline comments — put '# ...' on its own line, not after a value."
     exit 1
 fi
-# Validate SANDY_EFFORT — Claude Code reasoning effort (claude only), applied as
-# `claude --effort <level>` in build_claude_cmd. Empty = Claude Code's own default
-# (currently 'high'). Cleared when claude isn't in the agent set so it's never a
-# meaningless forward. An invalid level fails loud rather than silently running at
-# default — the whole point is a provable, pinned effort.
-if _sandy_agent_has claude; then
+# Validate SANDY_EFFORT — reasoning effort for claude (`claude --effort <level>`,
+# build_claude_cmd) and, since 2.4.0 (#116), codex (`-c model_reasoning_effort=`,
+# mapped per level in build_codex_cmd). Empty = each agent's own default. Cleared
+# when neither is in the agent set so it's never a meaningless forward (and the
+# marker's `effort` stays null for a launch nothing applied it to). An invalid
+# level fails loud rather than silently running at default — the whole point is
+# a provable, pinned effort. gemini, opencode and grok have no effort surface
+# sandy drives; in a combo that includes claude or codex those panes simply do
+# not receive it.
+if _sandy_agent_has claude || _sandy_agent_has codex; then
     if [ -n "${SANDY_EFFORT:-}" ]; then
         case "$SANDY_EFFORT" in
             low|medium|high|xhigh|max) ;;
@@ -15494,6 +15523,9 @@ if _sandy_agent_has claude; then
         esac
     fi
 else
+    if [ -n "${SANDY_EFFORT:-}" ]; then
+        info "SANDY_EFFORT=$SANDY_EFFORT ignored: it applies to claude and codex only (agents: $SANDY_AGENT)."
+    fi
     SANDY_EFFORT=""
 fi
 RUN_FLAGS+=(-e "SANDY_AGENT=$SANDY_AGENT")
