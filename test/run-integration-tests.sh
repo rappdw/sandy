@@ -1780,7 +1780,11 @@ if [ "$HAS_CLAUDE" = true ]; then
         # (a) Below-floor marker → sandy must refuse with the recreation hint.
         echo "0.5.0" > "$_marker"
         _out="$(run_sandy_headless -- -p "should not run")"
-        if echo "$_out" | grep -q "below the" && echo "$_out" | grep -q "refuses to launch against it"; then
+        # The 2.0 message names the rename, not a generic floor (#248), so it
+        # no longer says "below the ... refuses to launch against it"; this
+        # grepped the 1.x wording and failed against a correct refusal. Anchor
+        # on the refusal line and on the migration command it prints.
+        if echo "$_out" | grep -q "cannot be used by" && echo "$_out" | grep -q "reset-sandbox"; then
             pass "below-floor sandbox is hard-refused at launch"
         else
             fail "below-floor sandbox is hard-refused at launch"
@@ -1796,7 +1800,9 @@ if [ "$HAS_CLAUDE" = true ]; then
         # (b) Restore an above-floor marker → sandy proceeds (no refuse message).
         echo "${_orig_ver:-$("$SANDY_SCRIPT" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)}" > "$_marker"
         _out2="$(run_sandy_headless -- -p "reply with exactly one word: ok")"
-        if echo "$_out2" | grep -q "refuses to launch against it"; then
+        # Same message as (a). With the 1.x wording this negative check could
+        # never fail -- the string no longer exists -- so it proved nothing.
+        if echo "$_out2" | grep -q "cannot be used by"; then
             fail "above-floor sandbox launches without the floor refusal"
             echo "    (output: $(echo "$_out2" | head -4 | tr '\n' ' '))" >&2
         else
