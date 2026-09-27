@@ -17942,6 +17942,138 @@ check "§159(6) SANDY_RELAY=0: no entry runs, and the features line says so rath
 rm -rf "$_S159_DIR"
 unset _S159_SANDY _S159_DIR _S159_FM _S159_EVAL _S159_TWO _S159_ONE _S159_OFF
 unset -f _s159_mk _s159_run
+echo "§163: the container clock follows the host zone; sandy's own data stays UTC (#384)"
+# ============================================================
+# WHY. The container had no TZ and /etc/localtime -> Etc/UTC, so every
+# in-container clock read UTC whatever the host said, and every time an agent
+# reported had to be converted by hand before it matched a host-side log.
+# Sandy now resolves the host zone at LAUNCH and passes it as -e TZ=<zone>.
+#
+# Three things are asserted, each against the real code:
+#   (1-10)  the resolver, on fixture roots: macOS link, Linux link,
+#           /etc/timezone, nothing, $TZ precedence, and the values it must
+#           refuse -- a refusal falls through to the next source, never fatal;
+#   (11-12) the REAL RUN_FLAGS block emits `-e TZ=<zone>` into the argv, in
+#           the region both the foreground and the daemon paths run through;
+#   (13-15) the entrypoint drops a zone the IMAGE does not have (glibc would
+#           otherwise print UTC labelled with a made-up abbreviation);
+#   (16-17) the regression this change could introduce: every timestamp sandy
+#           emits as data is produced UTC even when the process TZ is
+#           Pacific/Kiritimati (UTC+14), which is now the normal case in-
+#           container. Mutation: drop -u from any `date` call and (17) fails.
+_S163_SANDY="$SANDY_SCRIPT"
+_S163_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S163_FNS="$(sed -n '/^_sandy_tz_valid()/,/^}$/p;/^_sandy_host_tz()/,/^}$/p' "$_S163_SANDY")"
+mkdir -p "$_S163_DIR/mac/etc" "$_S163_DIR/lin/etc" "$_S163_DIR/deb/etc" "$_S163_DIR/none/etc" "$_S163_DIR/evil/etc"
+ln -s /var/db/timezone/zoneinfo/America/Denver "$_S163_DIR/mac/etc/localtime"
+ln -s ../usr/share/zoneinfo/Europe/Berlin "$_S163_DIR/lin/etc/localtime"
+printf 'Asia/Tokyo\n' > "$_S163_DIR/deb/etc/timezone"
+printf 'TZif2-not-a-link\n' > "$_S163_DIR/deb/etc/localtime"   # a COPY, as Debian may ship it
+ln -s /usr/share/zoneinfo/../../../etc/passwd "$_S163_DIR/evil/etc/localtime"
+printf 'Asia/Kolkata\n' > "$_S163_DIR/evil/etc/timezone"
+# $1 = TZ value ("-" = unset), $2 = fixture root. Prints the resolved zone.
+_s163_tz() {
+    (
+        warn() { :; }
+        eval "$_S163_FNS"
+        if [ "$1" = "-" ]; then unset TZ; else TZ="$1"; fi
+        _sandy_host_tz "$2"
+    ) 2>/dev/null
+}
+check "§163(pre) both resolver functions were extracted (mutation: a rename empties this and every resolver check goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "^_sandy_host_tz()" && printf "%s" "$1" | grep -q "^_sandy_tz_valid()"' _ "$_S163_FNS"
+check "§163(1) macOS: /etc/localtime -> /var/db/timezone/zoneinfo/America/Denver resolves America/Denver (got: $(_s163_tz - "$_S163_DIR/mac"))" \
+    test "$(_s163_tz - "$_S163_DIR/mac")" = "America/Denver"
+check "§163(2) Linux: a RELATIVE ../usr/share/zoneinfo/Europe/Berlin link resolves Europe/Berlin (got: $(_s163_tz - "$_S163_DIR/lin"))" \
+    test "$(_s163_tz - "$_S163_DIR/lin")" = "Europe/Berlin"
+check "§163(3) /etc/localtime a regular file: /etc/timezone is read (got: $(_s163_tz - "$_S163_DIR/deb"))" \
+    test "$(_s163_tz - "$_S163_DIR/deb")" = "Asia/Tokyo"
+check "§163(4) no source at all: nothing is resolved, so TZ stays unset -- the pre-#384 behaviour" \
+    test -z "$(_s163_tz - "$_S163_DIR/none")"
+check "§163(5) the host's own \$TZ wins over /etc -- it is the override, since this is deliberately not a config key" \
+    test "$(_s163_tz America/New_York "$_S163_DIR/mac")" = "America/New_York"
+check "§163(6) a POSIX rule string is accepted (glibc honours it)" \
+    test "$(_s163_tz 'EST5EDT,M3.2.0,M11.1.0' "$_S163_DIR/none")" = "EST5EDT,M3.2.0,M11.1.0"
+check "§163(7) a leading ':' (POSIX implementation-defined marker) is dropped" \
+    test "$(_s163_tz ':America/New_York' "$_S163_DIR/none")" = "America/New_York"
+check "§163(8) TZ=:/etc/localtime (a PATH, not a zone) is not forwarded; the resolver falls through to the link it names" \
+    test "$(_s163_tz ':/etc/localtime' "$_S163_DIR/lin")" = "Europe/Berlin"
+_S163_BAD_OK=1
+for _s163_v in '../../etc/passwd' 'America/../../../etc/shadow' '/etc/localtime' 'America/New York' 'x$(id)' 'a;b' "$(printf 'A%.0s' $(seq 1 65))"; do
+    [ "$(_s163_tz "$_s163_v" "$_S163_DIR/lin")" = "Europe/Berlin" ] || _S163_BAD_OK=0
+done
+check "§163(9) a TZ that fails validation (.., leading /, space, shell metacharacters, >64 chars) is skipped and the next source used -- never forwarded, never fatal" \
+    test "$_S163_BAD_OK" = 1
+check "§163(10) a /etc/localtime link whose stripped name contains .. is refused and /etc/timezone used instead (got: $(_s163_tz - "$_S163_DIR/evil"))" \
+    test "$(_s163_tz - "$_S163_DIR/evil")" = "Asia/Kolkata"
+
+# The argv. The REAL block, from its banner to its unset, evaluated with a
+# controlled TZ -- the same shape §134(4) uses for SANDY_SANDBOX_NAME.
+_S163_BLK="$(sed -n '/^# --- Host timezone -> container TZ (#384) ---$/,/^unset _sandy_tz$/p' "$_S163_SANDY")"
+_S163_ARGV="$(bash -c '
+    warn() { :; }
+    RUN_FLAGS=(); TZ=Pacific/Kiritimati
+    eval "$1"
+    printf "%s\n" "${RUN_FLAGS[@]}"
+' _ "$_S163_BLK" 2>/dev/null || true)"
+check "§163(11) the launch argv carries -e TZ=<zone> as ONE adjacent pair (got: $(printf '%s' "$_S163_ARGV" | tr '\n' ' '))" \
+    test "$_S163_ARGV" = "$(printf '%s\n%s' -e TZ=Pacific/Kiritimati)"
+# Both RUN_FLAGS initialisations (daemon -d, foreground --rm -it) precede the
+# block, and it is not inside either branch -- so both paths emit it.
+_S163_L_BLK="$(grep -n '^# --- Host timezone -> container TZ (#384) ---$' "$_S163_SANDY" | cut -d: -f1)"
+_S163_L_D="$(grep -n '^    RUN_FLAGS=(-d --restart unless-stopped' "$_S163_SANDY" | cut -d: -f1)"
+_S163_L_F="$(grep -n '^    RUN_FLAGS=(--rm -it' "$_S163_SANDY" | cut -d: -f1)"
+check "§163(12) the TZ block runs after BOTH the daemon and foreground RUN_FLAGS initialisations, at top level (block ${_S163_L_BLK:-?} > ${_S163_L_D:-?}, ${_S163_L_F:-?})" \
+    bash -c 'test -n "$1" && test -n "$2" && test -n "$3" && test "$1" -gt "$2" && test "$1" -gt "$3"' _ "$_S163_L_BLK" "$_S163_L_D" "$_S163_L_F"
+
+# The entrypoint half: whether the zone EXISTS is the image's question.
+_S163_EP="$(sed -n '/^if \[ -n "\${TZ:-}" \] && \[ ! -f "\/usr\/share\/zoneinfo\/\$TZ" \]; then$/,/^fi$/p' "$_S163_SANDY")"
+_s163_ep() {
+    bash -c 'TZ="$1"; eval "$2"; printf "%s" "${TZ-<unset>}"' _ "$1" "$_S163_EP" 2>/dev/null
+}
+if [ -f /usr/share/zoneinfo/UTC ] && [ -n "$_S163_EP" ]; then
+    check "§163(13) entrypoint: a zone the image does not have is UNSET (plain UTC), not left for glibc to mislabel" \
+        test "$(_s163_ep Mars/Olympus_Mons)" = "<unset>"
+    check "§163(14) entrypoint: a zone the image has is kept" \
+        test "$(_s163_ep UTC)" = "UTC"
+    check "§163(15) entrypoint: a POSIX rule string has no zoneinfo file and is kept" \
+        test "$(_s163_ep 'EST5EDT,M3.2.0,M11.1.0')" = "EST5EDT,M3.2.0,M11.1.0"
+else
+    skip "§163(13-15) this host has no /usr/share/zoneinfo/UTC (or the entrypoint block was not found: ${#_S163_EP} bytes)"
+fi
+
+# The UTC-emission property. Every `$(date ...)` in sandy -- host-side and the
+# container-side heredocs alike -- that formats a calendar time (anything but
+# epoch seconds) is RUN under TZ=Pacific/Kiritimati and under TZ=UTC; the two
+# must agree. A local-time producer differs by 14 hours.
+_S163_DATES="$(grep -o '\$(date [^)]*)' "$_S163_SANDY" | grep -v '+%s' | sort -u || true)"
+_S163_NDATES="$(printf '%s\n' "$_S163_DATES" | grep -c 'date' || true)"
+if [ "$(TZ=Pacific/Kiritimati date +%H)" != "$(TZ=UTC date +%H)" ]; then
+    check "§163(16) the date-producer extraction found the known producers (got ${_S163_NDATES}; launched_at, started_at, WORKSPACE.json, relay-state and the approval stamp are at least 5)" \
+        test "${_S163_NDATES:-0}" -ge 5
+    _S163_LOCAL=""
+    while IFS= read -r _s163_l; do
+        [ -n "$_s163_l" ] || continue
+        _s163_c="${_s163_l#\$(}"; _s163_c="${_s163_c%)}"
+        _s163_a="$(TZ=Pacific/Kiritimati bash -c "$_s163_c" 2>/dev/null || true)"
+        _s163_b="$(TZ=UTC bash -c "$_s163_c" 2>/dev/null || true)"
+        if [ "$_s163_a" != "$_s163_b" ]; then   # a second boundary: once more
+            _s163_a="$(TZ=Pacific/Kiritimati bash -c "$_s163_c" 2>/dev/null || true)"
+            _s163_b="$(TZ=UTC bash -c "$_s163_c" 2>/dev/null || true)"
+        fi
+        [ "$_s163_a" = "$_s163_b" ] || _S163_LOCAL="$_S163_LOCAL [$_s163_c]"
+    done <<EOF
+$_S163_DATES
+EOF
+    check "§163(17) every calendar timestamp sandy produces is UTC even under TZ=Pacific/Kiritimati (local-time producers:${_S163_LOCAL:- none})" \
+        test -z "$_S163_LOCAL"
+else
+    skip "§163(16-17) this host has no Pacific/Kiritimati zone, so a local-time producer cannot be told from a UTC one"
+fi
+rm -rf "$_S163_DIR"
+unset _S163_SANDY _S163_DIR _S163_FNS _S163_BAD_OK _s163_v _S163_BLK _S163_ARGV _S163_L_BLK _S163_L_D _S163_L_F
+unset _S163_EP _S163_DATES _S163_NDATES _S163_LOCAL _s163_l _s163_c _s163_a _s163_b
+unset -f _s163_tz _s163_ep
 
 # BEGIN SUMMARY
 # ============================================================
