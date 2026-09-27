@@ -1627,6 +1627,11 @@ The entrypoint runs as root and performs:
 # Verbose tracing at level 3+
 if [ "${SANDY_VERBOSE:-0}" -ge 3 ]; then set -x; fi
 
+# 0. Host timezone (#384): the host resolved TZ and checked its shape; only the
+#    image knows whether the zone exists. No /usr/share/zoneinfo/$TZ and not a
+#    POSIX rule string (^[A-Za-z]{3,}[+-]?[0-9]) -> print one line and `unset TZ`
+#    (plain UTC), instead of letting glibc label UTC with a made-up abbreviation.
+
 # UID/GID from host (default 1001)
 RUN_UID="${HOST_UID:-1001}"
 RUN_GID="${HOST_GID:-1001}"
@@ -2300,6 +2305,24 @@ sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 
 (The container user is `sandy` since 2.0.0, #248; it was `claude` before.)
 
+### D.5a Host Timezone Resolution (2.4.0, #384)
+
+`_sandy_host_tz` resolves the zone passed as `-e TZ=` (E.11a-tz). First match wins; a candidate that fails validation is **skipped** and the next source tried, never fatal.
+
+| Step | Source | macOS | Linux |
+|---|---|---|---|
+| 1 | `$TZ` in sandy's environment (a leading `:` dropped) | same | same |
+| 2 | `readlink /etc/localtime`, everything up to and including the last `zoneinfo/` stripped | `/var/db/timezone/zoneinfo/America/Denver` → `America/Denver` | `/usr/share/zoneinfo/Europe/Berlin` (absolute or relative) → `Europe/Berlin` |
+| 3 | first line of `/etc/timezone` | absent | Debian/Ubuntu, where `/etc/localtime` may be a copy rather than a link |
+| 4 | nothing — `TZ` stays unset (UTC, the pre-2.4.0 behaviour) | | |
+
+- Plain `readlink` (no `-f`, which is GNU-only): only the link's text is wanted.
+- Validation: `^[A-Za-z0-9_+:,./-]{1,64}$`, no leading `/`, no `..`. POSIX rule strings (`EST5EDT,M3.2.0,M11.1.0`) pass. `TZ=:/etc/localtime` fails the leading-`/` rule after the `:` is dropped and falls through to step 2, which reads that same file.
+- An invalid `$TZ` warns only at `SANDY_VERBOSE>=1`.
+- Existence is checked **container-side** by `entrypoint.sh` (A.5 step 0) against the image's zoneinfo, not the host's.
+- `tzdata` is not named in `Dockerfile.base`; it arrives transitively in the trixie base, which is what makes the runtime-only design free (no base rebuild). If it ever stops arriving, step 0 unsets `TZ` and the container reads UTC again, which is safe.
+- Everything sandy **emits as data** stays UTC regardless: every calendar-time producer is `date -u`, epoch seconds, or jq `todateiso8601` (pinned by `run-tests.sh` §163(17), which runs each one under `TZ=Pacific/Kiritimati`).
+
 ### D.6 Error Recovery & Fallback Chains
 
 **settings.json merge** (3 tiers, tried in order — target is `$SANDBOX_DIR/claude/settings.json`, rebuilt every launch with merge-preserving semantics):
@@ -2585,6 +2608,15 @@ Validation (run at launch, before any `docker run`):
 
 `SANDY_SCREENSHOT_DIR` has no default. Unset = no mount, no env var, no skill files generated. See §7 step 4a (`user-setup.sh`) for the per-agent skill file generation that runs container-side once the mount is in place.
 
+### E.11a-tz Host Timezone (conditional, 2.4.0, #384)
+
+When the host zone resolves (D.5a):
+```bash
+-e "TZ=<zone>"      # e.g. America/Denver, or a POSIX rule string
+```
+
+A runtime flag, never a build input: the agent image is shared by every sandbox and cached on `BUILD_HASH`, so baking the zone in would force a rebuild after travel or a DST-policy change and carry one host's zone into an image `--rsync` moves elsewhere. Not a config key — the host's own `$TZ` is the override. Emitted in the shared `RUN_FLAGS` assembly after both the foreground (`--rm -it`) and daemon (`-d --restart unless-stopped`) initialisations, so both paths carry it; the `--start` supervisor resolves it in its own process, which inherits the client's environment. The egress proxy container does not get it. Unresolved → no flag, and the container reads UTC as before. Visible effects: `date`, `ls -l`, git's local display, and the tmux status-bar clock follow the host.
+
 ### E.11b User-defined Env Passthrough (conditional)
 
 If `SANDY_EXTRA_ENV` is set (privileged tier; comma-separated env-var names):
@@ -2828,6 +2860,7 @@ HOST_UID=<uid>
 HOST_GID=<gid>
 SANDY_AGENT=<agent[,agent…]>        # resolved agent selection (drives entrypoint pane layout)
 SANDY_EGRESS_MODE=<off|permissive|strict>  # posture introspection — forwarded in ALL modes (informational)
+TZ=<zone>                           # host timezone, only when one resolves (2.4.0, #384; E.11a-tz, D.5a)
 SANDY_HANDOFF_RELAY=<path>          # only when a relay starts this launch (E.12a). Internal channel since 2.2.0: set only from a feature manifest `entry`; an operator-set value is a hard error
 SANDY_RELAY_STATE=/opt/sandy/relay-state  # beside it, with the rw relay-state mount (2.2.0, #353); a relay reads this rather than constructing the path
 

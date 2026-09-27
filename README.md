@@ -908,6 +908,7 @@ Sandy checks your project on startup and handles common issues:
 - **Host `.venv/`** — shadowed with a sandbox-owned overlay (see above). The host venv is never modified; the container gets its own materialized venv matching the host's Python version, auto-activated via `VIRTUAL_ENV` + `PATH`. Drift between the overlay and `.python-version` triggers a warning on relaunch
 - **Foreign native modules** — if `node_modules/` contains native addons compiled for a different platform (e.g. macOS), sandy warns with `npm rebuild` as the fix
 - **Orphaned pip user-site** — if persistent `pip install --user` packages were installed under a different Python minor version than the image now ships (e.g. after a base-image Python bump), sandy warns with the old path and a reinstall/cleanup pointer
+- **Host timezone** (2.4.0) — the container clock follows the host: sandy passes your zone as `TZ` at launch (from `$TZ` if set, else `/etc/localtime`, else `/etc/timezone`), so `date`, `ls -l`, git and the tmux status clock read local time. Set `TZ` before launching to override it. Nothing to rebuild when you travel — it is re-read every launch. Timestamps sandy itself records (`sandy-session.json`, `WORKSPACE.json`, container labels) stay UTC
 
 These checks run on every session start and add negligible overhead.
 
