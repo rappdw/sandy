@@ -12490,6 +12490,21 @@ if _sandy_agent_has claude; then
     # a :ro sidecar at $SANDBOX_DIR/.seed-settings.json; 0.11.3+ writes directly
     # to the rw sandbox settings.json. The old sidecar is dead state.
     [ -f "$SANDBOX_DIR/.seed-settings.json" ] && rm -f "$SANDBOX_DIR/.seed-settings.json"
+    # $SANDBOX_DIR/claude is the container's ~/.claude, mounted RW, so every
+    # name below is one the agent can plant a symlink at between sessions -- and
+    # this block runs HOST-side. Following one is an escape: a relative link
+    # (settings.json -> ../../../../.claude/settings.json) made the merge read the
+    # host's own settings.json and write it back WITH the bypassPermissions pin,
+    # connectors off and the native sandbox off, so the host's unsandboxed
+    # claude then ran in bypass mode. Same class as R2's settings.local.json,
+    # but here nothing legitimate ever creates a link (sandy regenerates the
+    # file every launch), so the link is removed rather than refused, and named.
+    for _ss in "$SEED_SETTINGS" "$SEED_SETTINGS.tmp" "$SEED_SETTINGS.base"; do
+        if [ -L "$_ss" ]; then
+            warn "Removed a symlink at ${_ss#"$SANDBOX_DIR"/} (pointing to '$(readlink "$_ss" 2>/dev/null || true)') -- sandy writes this file host-side and will not follow a link planted in the agent-writable ~/.claude. If you did not create it, a previous session did."
+            rm -f "$_ss"
+        fi
+    done
     SEED_HOST_SRC=""
     if [ -f "$HOME/.claude/settings.json" ]; then
         SEED_HOST_SRC="$HOME/.claude/settings.json"
@@ -12623,11 +12638,17 @@ if _sandy_agent_has claude; then
         # managed key (the bypassPermissions pin, #129 connectors off, #126
         # sandbox off) was silently missing on a jq-only host with no host
         # settings. Found by §168, whose clean-host jq case read back nothing.
+        # The {} is PIPED, never staged as a file next to settings.json: that
+        # directory is agent-writable, and a redirect into a planted
+        # settings.json.base symlink truncated whatever host file it named.
+        # Output goes through mktemp (O_EXCL, never follows a link) and mv,
+        # which replaces a link rather than writing through it.
+        _seed_empty=false
         if [ -z "$_base_src" ] || [ ! -s "$_base_src" ]; then
-            _base_src="$SEED_SETTINGS.base"
-            printf '{}\n' > "$_base_src"
+            _seed_empty=true
         fi
-        jq --arg skip "$skip_perm" --arg connectors "${SANDY_CLAUDE_CONNECTORS:-0}" --argjson prev "$_prev_plugins" '
+        _seed_tmp="$(mktemp "$SEED_SETTINGS.XXXXXX" 2>/dev/null)" || _seed_tmp=""
+        [ -n "$_seed_tmp" ] && { if [ "$_seed_empty" = true ]; then printf '{}\n'; else cat "$_base_src"; fi; } | jq --arg skip "$skip_perm" --arg connectors "${SANDY_CLAUDE_CONNECTORS:-0}" --argjson prev "$_prev_plugins" '
             (if . == null then {} else . end) |
             # only-if-absent for the BOOLEAN keys via has(), not //=. The //=
             # operator treats an explicit false as unset, so it would overwrite a
@@ -12666,8 +12687,8 @@ if _sandy_agent_has claude; then
             (if (.enabledPlugins | type) == "object"
                 then .enabledPlugins |= (del(.synthkit) | del(."synthkit@sandy-plugins") | del(."synthkit@thinkkit"))
                 else . end)
-        ' "$_base_src" > "$SEED_SETTINGS.tmp" 2>/dev/null && mv "$SEED_SETTINGS.tmp" "$SEED_SETTINGS"
-        rm -f "$SEED_SETTINGS.base"
+        ' > "$_seed_tmp" 2>/dev/null && mv "$_seed_tmp" "$SEED_SETTINGS"
+        if [ -n "$_seed_tmp" ]; then rm -f "$_seed_tmp"; fi
     else
         # Last resort: write defaults only if no file exists yet.
         if [ ! -f "$SEED_SETTINGS" ]; then

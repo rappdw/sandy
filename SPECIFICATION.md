@@ -1964,7 +1964,7 @@ The file is only written on first run — if it already exists, it's preserved t
 
 ### C.2 `settings.json` (Claude Code Configuration)
 
-**Destination.** As of 0.11.3, the seeded settings file lives at `$SANDBOX_DIR/claude/settings.json` — inside the rw sandbox mount, no `:ro` overlay. It is regenerated from the host on every launch with merge-preserving semantics (agent-owned `enabledPlugins` is carried over from the previous sandbox session). The pre-0.11.3 approach used a `:ro` sidecar at `$SANDBOX_DIR/.seed-settings.json`, but that blocked `/plugin install` with EROFS and was reverted. See §4 Seeding for the full flow.
+**Destination.** As of 0.11.3, the seeded settings file lives at `$SANDBOX_DIR/claude/settings.json` — inside the rw sandbox mount, no `:ro` overlay. It is regenerated from the host on every launch with merge-preserving semantics (agent-owned `enabledPlugins` is carried over from the previous sandbox session). The pre-0.11.3 approach used a `:ro` sidecar at `$SANDBOX_DIR/.seed-settings.json`, but that blocked `/plugin install` with EROFS and was reverted. See §4 Seeding for the full flow. Because the directory is agent-writable and the merge runs host-side, a symlink at `settings.json`, `settings.json.tmp` or `settings.json.base` is removed (with a warning naming its target) before the merge, the jq branch pipes its empty-base `{}` instead of staging a file, and its output is written via `mktemp` + `mv` — never through a planted link (§169).
 
 **Marketplace structure** (added idempotently to `extraKnownMarketplaces`):
 ```json
