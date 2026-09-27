@@ -1061,14 +1061,14 @@ sandy --reset-sandbox --all --dry-run                  # see what it will do
 sandy --reset-sandbox --all --keep-history --yes       # migrate
 ```
 
-`--keep-history` preserves `claude/projects/` — every session transcript and all auto-memory. **It is not the default and `--yes` does not choose it**, because the same command is also how you remediate a sandbox you distrust, and there memory is the thing you most want gone: it reaches the agent's context every session, so a compromised session writing to it is persistent injection with no expiry. Run interactively and sandy asks; run non-interactively and it requires `--keep-history` or `--purge-history` rather than guessing.
+`--keep-history` preserves `claude/projects/` — every Claude session transcript and all auto-memory — **and nothing else**. Other agents' own history (`codex/`, `gemini/`, …), anything else under `claude/`, and any directory a host-side tool keeps in the sandbox are destroyed even with it; the reset plan **names each of them** under *NOT kept by --keep-history* (derived from what is actually in the sandbox), so stash anything you need first. **It is not the default and `--yes` does not choose it**, because the same command is also how you remediate a sandbox you distrust, and there memory is the thing you most want gone: it reaches the agent's context every session, so a compromised session writing to it is persistent injection with no expiry. Run interactively and sandy asks; run non-interactively and it requires `--keep-history` or `--purge-history` rather than guessing.
 
 | destroyed (rebuilt on next launch) | preserved |
 |---|---|
 | `pip/`, `uv/`, `npm-global/`, `go/`, `cargo/` package caches | `WORKSPACE.json` (lineage) |
 | the `venv/` overlay | — |
 | per-agent state: `claude/`, `gemini/`, `codex/`, `opencode/`, `grok/` | `agent-args.<agent>` (per-agent launch args) |
-| `.claude.json`, installed plugins, approvals | `.handoff-enabled` |
+| `.claude.json`, installed plugins, approvals | — |
 | `claude/projects/` — transcripts and auto-memory, **unless `--keep-history`** | `claude/projects/` **with `--keep-history`** |
 
 ### Back up anyway

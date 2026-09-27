@@ -1876,7 +1876,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--update-sessions"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Fleet image refresh + rolling restart across every daemon session on the host; scope to one session with --workspace PATH. Sub-options: --dry-run, --yes, --idle-for <minutes>, --rebuild, --workspace."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-history / --purge-history (session transcripts and auto-memory in claude/projects/ — asked interactively, REQUIRED non-interactively, deliberately NOT answered by --yes, and never asked at all under --dry-run, which reports the question as unanswered), --keep-approvals, --dry-run, --yes."'; printf '}'
+    printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-history / --purge-history (keep or wipe claude/projects/ — Claude session transcripts and auto-memory — and NOTHING else: the plan names every other non-regenerable entry the reset destroys even with --keep-history; asked interactively, REQUIRED non-interactively, deliberately NOT answered by --yes, and never asked at all under --dry-run, which reports the question as unanswered), --keep-approvals, --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"COPY this workspace sandbox to another host over ssh + rsync (the source is never modified), renamed for the destination workspace path, since the sandbox name hashes it. Rewrites the path-keyed state a hand copy gets wrong: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json (so --remove-sandbox --orphans there cannot mistake it for an orphan). The destination workspace defaults to the same path relative to $HOME and must already exist there. Credential-bearing files are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. Refuses while a live session holds the workspace and never overwrites a sandbox already on the destination. Takes the destination host as its argument. Sub-options: --workspace PATH, --dest-workspace PATH, --dest-sandy-home PATH, --dry-run, --yes."'; printf '}'
@@ -3950,25 +3950,61 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         exit 1
     fi
 
-    # Everything in the sandbox dir is destroyed EXCEPT WORKSPACE.json (lineage)
-    # and, with --keep-approvals, the approved-symlinks list. The next launch
-    # re-materializes pip/uv/npm/go/cargo + agent state from scratch.
+    # Everything in the sandbox dir is destroyed EXCEPT WORKSPACE.json (lineage),
+    # agent-args.<agent> files, and, with --keep-approvals, the approved-symlinks
+    # list. The next launch re-materializes pip/uv/npm/go/cargo + agent state
+    # from scratch. What survives is what an operator set and nothing else
+    # recreates: agent-args.<agent> files are operator state (see sandy's
+    # "per-agent args" block) -- destroying them would silently un-configure a
+    # sandbox's per-agent launch args with no error, so they are preserved
+    # unconditionally. One consequence: a sandbox holding only WORKSPACE.json
+    # plus agent-args files correctly reports "already minimal" with those files
+    # named on the Preserved: line, so an operator does not mistake
+    # visible-files-plus-nothing-to-reset for a bug.
     # .handoff-enabled and relay-bin/ are NO LONGER preserved (2.2.0): the
     # handoff tree the marker forced on is gone (#355), and a surviving slot
-    # entry blocks the next launch (#354). What survives is what an operator set
-    # and nothing else recreates.
-    # agent-args.<agent> files are exactly that kind of
-    # marker exists to avoid. agent-args.<agent> files are the same kind of
-    # operator state (see sandy's "per-agent args" block) — destroying them on a
-    # reset would silently un-configure a sandbox's per-agent launch args with no
-    # error, so they are preserved unconditionally too. One consequence: a
-    # sandbox holding only WORKSPACE.json plus agent-args files now correctly
-    # reports "already minimal" with those files named on the Preserved: line, so
-    # an operator does not mistake visible-files-plus-nothing-to-reset for a bug.
-    # relay-bin/ is NO LONGER preserved (#354): the slot is removed and a
-    # surviving entry blocks the next launch, so keeping it across a reset would
+    # entry blocks the next launch (#354), so keeping it across a reset would
     # preserve the one thing the reset is most likely being run to clear.
+    # claude/projects/ is not here either: --keep-history keeps it by emptying
+    # claude/ AROUND it in the destroy loop below, not through this predicate.
     _rs_keep() { case "$1" in WORKSPACE.json|agent-args.*) return 0 ;; .sandy-approved-symlinks.list) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
+    # #333: --keep-history keeps claude/projects/ and NOTHING else, and an
+    # operator who chose it "in order not to lose history" was not told what it
+    # does not reach -- a daemon's delivery ledger under claude/, another
+    # agent's own history under codex/ or gemini/, a consumer's spool -- because
+    # all of it sat in the destroy list beside the package caches. So the plan
+    # now NAMES what the flag does not keep. It is derived from what is actually
+    # in this sandbox, never from a list of anyone's directory names: the only
+    # names sandy knows here are its OWN regenerable ones (_rs_regen), and every
+    # destroyed entry that is not one of those is named. That keeps sandy
+    # uncoupled from consumers (the reason option 1 on #333 was declined) while
+    # still naming a directory nobody here has heard of.
+    _rs_regen() { case "$1" in pip|uv|npm-global|go|cargo|venv|sandy-session.json|sandy-proxy.json|proxy.log|relay-state|agent-args-composed|relay-bin|.sandy_created_version|.sandy_last_version|.project_build_hash|.protected-existed-at-launch|.session-created-stubs|.head-at-launch|.claude-perm-mode-at-launch|.seed-settings.json|.sandy-approved-symlinks.list) return 0 ;; esac; return 1; }
+    _rs_not_kept() {
+        local _e _c _bn _n=0
+        for _e in "$_rs_dir"/* "$_rs_dir"/.[!.]*; do
+            [ -e "$_e" ] || continue
+            _bn="$(basename "$_e")"
+            _rs_keep "$_bn" && continue
+            _rs_regen "$_bn" && continue
+            if [ "$_bn" = claude ] && [ -d "$_e" ]; then
+                for _c in "$_e"/* "$_e"/.[!.]*; do
+                    [ -e "$_c" ] || continue
+                    [ "$(basename "$_c")" = projects ] && continue
+                    [ "$_n" -eq 0 ] && printf '%s\n' "$1"
+                    printf '  - %-30s %s\n' "claude/$(basename "$_c")" "$(du -sh "$_c" 2>/dev/null | cut -f1 || echo '?')"
+                    _n=$((_n + 1))
+                done
+                continue
+            fi
+            [ "$_n" -eq 0 ] && printf '%s\n' "$1"
+            printf '  - %-30s %s\n' "$_bn" "$(du -sh "$_e" 2>/dev/null | cut -f1 || echo '?')"
+            _n=$((_n + 1))
+        done
+        [ "$_n" -eq 0 ] || printf '\n'
+        return 0
+    }
+    _rs_nk_shown=0
     printf '\nsandy --reset-sandbox: %s\n' "$_rs_name"
     printf 'Workspace: %s\n' "$_rs_wd"
     printf 'Will destroy (next launch re-materializes them):\n'
@@ -4005,9 +4041,13 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         # not ask, and must not print an answer nobody gave.
         info "History (claude/projects/): NOT ANSWERED — a real run asks."
         info "  Pass --keep-history or --purge-history to see it in this plan."
+        _rs_not_kept "--keep-history would keep claude/projects/ ONLY; even with it, this reset destroys:"
     elif [ -z "$_rs_history" ]; then
         if [ -t 0 ]; then
-            printf '[sandy] Keep session history and memory (claude/projects/)? [Y/n] ' >&2
+            # Named BEFORE the question, so the answer is an informed one.
+            _rs_not_kept "--keep-history keeps claude/projects/ ONLY; even with it, this reset destroys:"
+            _rs_nk_shown=1
+            printf '[sandy] Keep session history and memory (claude/projects/ only)? [Y/n] ' >&2
             IFS= read -r _rs_hc </dev/tty || _rs_hc=""
             case "$_rs_hc" in n|N|no|NO|No) _rs_history=purge ;; *) _rs_history=keep ;; esac
             unset _rs_hc
@@ -4025,6 +4065,9 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     if [ "$_rs_history" = keep ] && [ -d "$_rs_dir/claude/projects" ]; then
         printf 'Keeping: claude/projects/ (session history + memory, %s)\n\n' \
             "$(du -sh "$_rs_dir/claude/projects" 2>/dev/null | cut -f1 || echo '?')"
+    fi
+    if [ "$_rs_history" = keep ] && [ "$_rs_nk_shown" != 1 ]; then
+        _rs_not_kept "NOT kept by --keep-history (it keeps claude/projects/ only) -- destroyed:"
     fi
 
     [ "$_rs_n" -eq 0 ] && { info "Sandbox already minimal — nothing to reset."; exit 0; }
@@ -4052,8 +4095,10 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # which is why this makes it impossible rather than documenting it.
     #
     # Safe on the preserved set: _rs_keep is what protects WORKSPACE.json,
-    # relay-bin/, agent-args.* and claude/projects/, and it never consults mode
-    # bits. Verified after the fix -- exit 0, full reset, preserved set intact.
+    # agent-args.* and (with --keep-approvals) the approval list, the claude/
+    # branch below is what protects claude/projects/, and neither consults mode
+    # bits. (relay-bin/ is no longer preserved -- #354 -- so it is not listed.)
+    # Verified after the fix -- exit 0, full reset, preserved set intact.
     # The chmod touches only a directory sandy owns and is about to empty.
     chmod -R u+w "$_rs_dir" 2>/dev/null || true
     for _rs_e in "$_rs_dir"/* "$_rs_dir"/.[!.]*; do
@@ -6309,8 +6354,10 @@ Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
                      WORKSPACE.json lineage), refusing while a live session holds
                      it. Filesystem-only (no Docker). Sub-options: --workspace
                      PATH (default cwd), --all (every known sandbox),
-                     --keep-history / --purge-history (session transcripts and
-                     auto-memory in claude/projects/: asked interactively,
+                     --keep-history / --purge-history (keep or wipe
+                     claude/projects/ -- Claude session transcripts and
+                     auto-memory -- and NOTHING else; the plan names what
+                     --keep-history does not keep. Asked interactively,
                      REQUIRED non-interactively, and NOT answered by --yes),
                      --keep-approvals, --dry-run, --yes
   --remove-sandbox   Permanently DELETE a sandbox directory (preserves nothing,
@@ -12003,7 +12050,8 @@ else
             error "  first with: sandy --doctor"
             error ""
             error "  --keep-history preserves claude/projects/ -- session transcripts and"
-            error "  auto-memory, which nothing recreates. It is not the default and --yes"
+            error "  auto-memory, which nothing recreates -- and only that; the reset plan"
+            error "  names what else it destroys. It is not the default and --yes"
             error "  does not choose it. The reset also PRESERVES agent-args.* (operator"
             error "  state nothing recreates), which is why you should use it rather than"
             error "  rm -rf on the sandbox directory."

@@ -18498,6 +18498,85 @@ unset _S165_DIR _S165_REGION _S165_HOSTC _S165_HOSTS _S165_WSC _S165_WSS _S165_M
 unset _S165_OUT1 _S165_OUT5 _S165_OUT6 _S165_OUT7 _S165_OUT8 _S165_OUT9 _S165_OUT10 _S165_OUTM
 unset -f _s165_run
 
+echo "§166: --reset-sandbox names what --keep-history does NOT keep (#333)"
+# ============================================================
+# --keep-history keeps claude/projects/ and nothing else. A connector's
+# at-most-once ledger under claude/, another agent's history, a host-side
+# tool's spool: all destroyed, and the plan used to list them beside the
+# package caches as if they were the same kind of thing. The plan now names
+# them. The property asserted is the strong one: the set the plan NAMES equals
+# the set a real --keep-history reset actually DESTROYS, minus sandy's own
+# regenerable entries -- so a name that is listed but survives, or one that is
+# destroyed but unlisted, both fail. One fixture entry is a made-up name, so a
+# plan built from a hard-coded list of known consumer directories cannot pass.
+_S166_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+# _s166_mk TAG -> echoes "<workspace>\n<sandbox dir>" for a populated sandbox
+_s166_mk() {
+    local fh="$_S166_DIR/$1" ws sb h b
+    ws="$_S166_DIR/$1-ws"; mkdir -p "$ws" "$fh"
+    h="$(printf '%s' "$ws" | { shasum -a 256 2>/dev/null || sha256sum; })"; h="${h%% *}"; h="${h:0:8}"
+    b="$(basename "$ws" | tr -cd 'a-zA-Z0-9._-')"
+    sb="$fh/sandboxes/$b-$h"
+    mkdir -p "$sb/claude/projects/-ws" "$sb/pip/lib" "$sb/venv/bin"
+    echo t > "$sb/claude/projects/-ws/a.jsonl"
+    printf '{"workspace_path":"%s"}\n' "$ws" > "$sb/WORKSPACE.json"
+    echo "--x" > "$sb/agent-args.claude"
+    echo 2.4.0 > "$sb/.sandy_last_version"
+    echo '{}' > "$sb/sandy-session.json"
+    echo log > "$sb/proxy.log"
+    printf '%s\n%s\n' "$ws" "$sb"
+}
+_s166_named() { # the entries listed under the NOT-kept header, one per line
+    printf '%s\n' "$1" | awk -v h="$2" 'index($0,h)==1{f=1;next} f&&/^$/{exit} f{print $2}' | sort
+}
+{ read -r _S166_WS; read -r _S166_SB; } <<<"$(_s166_mk A)"
+mkdir -p "$_S166_SB/claude/connector/delivery-state" "$_S166_SB/claude/zz-spool-nobody-knows" "$_S166_SB/codex/sessions" "$_S166_SB/handoff/inbox"
+echo n1 > "$_S166_SB/claude/connector/delivery-state/ledger"
+echo m > "$_S166_SB/claude/zz-spool-nobody-knows/msg"
+echo '{}' > "$_S166_SB/claude/settings.json"
+echo h > "$_S166_SB/codex/sessions/s.jsonl"
+echo b > "$_S166_SB/handoff/inbox/body"
+_S166_HDR="NOT kept by --keep-history"
+_S166_DRY="$(SANDY_HOME="$_S166_DIR/A" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$_S166_WS" --keep-history --dry-run </dev/null 2>&1 || true)"
+_S166_NAMED="$(_s166_named "$_S166_DRY" "$_S166_HDR")"
+check "§166(1) the --keep-history plan names what it will NOT keep: the connector ledger under claude/, a claude/ entry nobody hard-coded, another agent's home, a leftover spool" \
+    bash -c 'for n in claude/connector claude/zz-spool-nobody-knows claude/settings.json codex handoff; do printf "%s\n" "$1" | grep -qx "$n" || exit 1; done' _ "$_S166_NAMED"
+check "§166(2) ...and does not name what it keeps (claude/projects, WORKSPACE.json, agent-args.*) or sandy's own regenerable caches and bookkeeping (pip, venv, launch markers)" \
+    bash -c '! printf "%s\n" "$1" | grep -qxE "claude/projects|WORKSPACE.json|agent-args.claude|pip|venv|.sandy_last_version|sandy-session.json|proxy.log"' _ "$_S166_NAMED"
+check "§166(3) --dry-run removed nothing (the ledger is still there)" test -f "$_S166_SB/claude/connector/delivery-state/ledger"
+# The property: named == destroyed-and-not-regenerable, by a real reset.
+_s166_inventory() { (cd "$1" && { ls -A | grep -vx claude; ls -A claude | sed 's|^|claude/|'; } | sort); }
+_S166_BEFORE="$(_s166_inventory "$_S166_SB")"
+SANDY_HOME="$_S166_DIR/A" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$_S166_WS" --keep-history --yes </dev/null >/dev/null 2>&1 || true
+_S166_AFTER="$(_s166_inventory "$_S166_SB")"
+_S166_GONE="$(comm -23 <(printf '%s\n' "$_S166_BEFORE") <(printf '%s\n' "$_S166_AFTER") | grep -vxE 'pip|venv|.sandy_last_version|sandy-session.json|proxy.log' || true)"
+check "§166(4) PROPERTY: the plan named exactly what a real --keep-history reset destroyed (sandy's own regenerable entries aside) -- nothing listed survives, nothing destroyed was unlisted" \
+    bash -c 'test -n "$1" && test "$1" = "$2"' _ "$_S166_NAMED" "$_S166_GONE"
+check "§166(5) ...and claude/projects/ really was kept" test -f "$_S166_SB/claude/projects/-ws/a.jsonl"
+# (6) the dry-run with the question unanswered shows the same list, so the
+# operator deciding sees what the flag would not save.
+{ read -r _S166_WS2; read -r _S166_SB2; } <<<"$(_s166_mk B)"
+mkdir -p "$_S166_SB2/claude/connector"
+_S166_DRY2="$(SANDY_HOME="$_S166_DIR/B" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$_S166_WS2" --dry-run </dev/null 2>&1 || true)"
+_S166_NAMED2="$(_s166_named "$_S166_DRY2" "--keep-history would keep")"
+check "§166(6) a --dry-run with the history question unanswered still names what --keep-history would not keep" \
+    test "$_S166_NAMED2" = claude/connector
+# (7) nothing to name -> no section (it must not cry wolf over caches)
+{ read -r _S166_WS3; read -r _S166_SB3; } <<<"$(_s166_mk C)"
+_S166_DRY3="$(SANDY_HOME="$_S166_DIR/C" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$_S166_WS3" --keep-history --dry-run </dev/null 2>&1 || true)"
+check "§166(7) a sandbox holding only claude/projects/ and regenerable caches prints no NOT-kept section" \
+    bash -c 'printf "%s" "$1" | grep -q "Will destroy" && ! printf "%s" "$1" | grep -qF "NOT kept by --keep-history"' _ "$_S166_DRY3"
+# (8) --purge-history asked for everything gone: no list to surprise anyone with.
+_S166_DRY4="$(SANDY_HOME="$_S166_DIR/B" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$_S166_WS2" --purge-history --dry-run </dev/null 2>&1 || true)"
+check "§166(8) --purge-history prints no NOT-kept section (the operator chose to destroy it all)" \
+    bash -c 'printf "%s" "$1" | grep -q "Will destroy" && ! printf "%s" "$1" | grep -qF "keep-history"' _ "$_S166_DRY4"
+check "§166(9) the stale comment claiming _rs_keep protects relay-bin/ is gone (#354 destroys it)" \
+    bash -c '! grep -q "relay-bin/, agent-args.\* and claude/projects/" "$1"' _ "$SANDY_SCRIPT"
+rm -rf "$_S166_DIR"
+unset _S166_DIR _S166_WS _S166_SB _S166_WS2 _S166_SB2 _S166_WS3 _S166_SB3 _S166_HDR _S166_DRY _S166_DRY2 _S166_DRY3 _S166_DRY4
+unset _S166_NAMED _S166_NAMED2 _S166_BEFORE _S166_AFTER _S166_GONE
+unset -f _s166_mk _s166_named _s166_inventory
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
