@@ -661,11 +661,13 @@ done
 # SKIP on these rather than FAIL. One variable, because the same regex was
 # previously pasted at every site and drifted as one: a real host ran dry of
 # OpenAI credits and the resulting "You have no credits remaining" stream error
-# matched nothing, failing two codex sections as if sandy were broken.
+# matched nothing, failing two codex sections as if sandy were broken. It
+# happened again with codex's "ERROR: Quota exceeded. Check your plan and
+# billing details." (PR #391's integration run), hence the reversed phrasing.
 # Deliberately tight: billing/quota/rate/auth phrasings only — never a bare
 # "billing" or "error", which would mask genuine sandy faults that merely
 # mention them.
-_API_ERR_RE='HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota|no credits remaining|exceeded your current quota'
+_API_ERR_RE='HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota|no credits remaining|exceeded your current quota|quota exceeded'
 
 HAS_CLAUDE_WIF=false
 if [ -n "${ANTHROPIC_FEDERATION_RULE_ID:-}" ] && [ -n "${ANTHROPIC_IDENTITY_TOKEN:-}" ]; then

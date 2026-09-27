@@ -11127,6 +11127,8 @@ check "§113(1) SKIPS the no-credits stream error (the reported false-FAIL, verb
     _s113 'ERROR: stream disconnected before completion: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.'
 check "§113(2) SKIPS the exceeded-quota phrasing" \
     _s113 'You exceeded your current quota, please check your plan and billing details'
+check "§113(2b) SKIPS codex's 'Quota exceeded' phrasing (a real false-FAIL on #391's integration run, verbatim)" \
+    _s113 'ERROR: Quota exceeded. Check your plan and billing details.'
 check "§113(3) SKIPS an HTTP 401" _s113 'HTTP error: 401'
 check "§113(4) SKIPS a rate limit" _s113 'Rate limit reached for gpt-5.5'
 check "§113(5) still FAILS a usage banner (mutation: an over-broad recognizer masks the agent-args class of sandy fault that produced exactly this output once)" \
