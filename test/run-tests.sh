@@ -17774,6 +17774,43 @@ rm -rf "$_S157_DIR"
 unset _S157_DIR _S157_FN _S157_OUT _S157_RC _s157_os
 unset -f _s157_run
 
+# ============================================================
+echo ""
+echo "§158: --print-state created_at/last_used_at are genuinely UTC, whole seconds"
+# ============================================================
+# _stat_mtime_iso (--print-state) and _rms_mtime_iso (--remove-sandbox's plan)
+# rendered the mtime in LOCAL time and appended `Z`, so on any host not on UTC
+# the timestamps were off by the offset while claiming to be UTC -- and GNU
+# stat added nanoseconds BSD never had. The fixture pins each mtime in UTC
+# (`TZ=UTC touch -t`), then runs sandy under UTC+14, where a local-time
+# rendering is off by fourteen hours and cannot pass by coincidence. CI hosts
+# are on UTC, which is exactly why this shipped: the check has to move the zone.
+_S158_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S158_SB="$_S158_DIR/home/.sandy/sandboxes/tz-aaaaaaaa"
+mkdir -p "$_S158_SB"
+printf '2.0.0\n' > "$_S158_SB/.sandy_created_version"
+printf '2.3.0\n' > "$_S158_SB/.sandy_last_version"
+printf '{\n  "workspace_path": "%s/gone",\n  "sandbox_name": "tz-aaaaaaaa"\n}\n' "$_S158_DIR" > "$_S158_SB/WORKSPACE.json"
+TZ=UTC touch -t 202601020304.05 "$_S158_SB/.sandy_created_version"
+TZ=UTC touch -t 202602030405.06 "$_S158_SB/.sandy_last_version"
+_S158_TZ=Pacific/Kiritimati
+[ "$(TZ="$_S158_TZ" date +%z 2>/dev/null || true)" = "+1400" ] || _S158_TZ='<+14>-14'
+check "§158(pre) the zone used below really is UTC+14 -- a zone the host cannot resolve falls back to UTC silently and every check below would pass vacuously" \
+    test "$(TZ="$_S158_TZ" date +%z 2>/dev/null || true)" = "+1400"
+_S158_STATE="$(env -u SANDY_WORKSPACE -u SANDY_SANDBOX_NAME TZ="$_S158_TZ" HOME="$_S158_DIR/home" SANDY_HOME="$_S158_DIR/home/.sandy" \
+    bash "$SANDY_SCRIPT" --print-state light 2>/dev/null || true)"
+check "§158(1) created_at is the file's mtime in UTC, whole seconds, under TZ=UTC+14 (mutation: dropping TZ=UTC from _stat_mtime_iso reports 17:04:05)" \
+    bash -c 'case "$1" in *"\"created_at\":\"2026-01-02T03:04:05Z\""*) exit 0 ;; esac; exit 1' _ "$_S158_STATE"
+check "§158(2) last_used_at likewise" \
+    bash -c 'case "$1" in *"\"last_used_at\":\"2026-02-03T04:05:06Z\""*) exit 0 ;; esac; exit 1' _ "$_S158_STATE"
+_S158_RMS="$(env -u SANDY_WORKSPACE -u SANDY_SANDBOX_NAME TZ="$_S158_TZ" HOME="$_S158_DIR/home" SANDY_HOME="$_S158_DIR/home/.sandy" \
+    bash "$SANDY_SCRIPT" --remove-sandbox --orphans --dry-run </dev/null 2>&1 || true)"
+check "§158(3) --remove-sandbox's plan (the duplicated _rms_mtime_iso) prints the same UTC instant" \
+    bash -c 'case "$1" in *"last used: 2026-02-03T04:05:06Z"*) exit 0 ;; esac; exit 1' _ "$_S158_RMS"
+check "§158(4) ...and the dry run removed nothing" test -d "$_S158_SB"
+rm -rf "$_S158_DIR"
+unset _S158_DIR _S158_SB _S158_TZ _S158_STATE _S158_RMS
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

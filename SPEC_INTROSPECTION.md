@@ -826,7 +826,7 @@ A single new function `_sandy_emit_schema()` that:
 
 `_sandy_emit_state()`:
 - Walks `$SANDY_HOME/sandboxes/*/` for directory listing
-- Reads each sandbox's `.sandy_created_version` and `.sandy_last_version` files
+- Reads each sandbox's `.sandy_created_version` and `.sandy_last_version` files; `created_at` / `last_used_at` are those files' **mtimes in UTC**, `YYYY-MM-DDTHH:MM:SSZ` (whole seconds) on both GNU and BSD `stat`. Before 2.4.0 they were rendered in the host's **local** time with a `Z` appended — off by the UTC offset on any non-UTC host — and the GNU branch carried nanoseconds (`…T14:45:00.123456789Z`). A consumer that compensated for either should stop; `--remove-sandbox`'s "last used" plan line shares the fix.
 - Walks `$SANDY_HOME/approvals/passive-*.list` for approval entries
 - Calls `docker ps --filter label=sandy --format json` for running containers (if Docker is reachable; silent skip if not)
 - Calls `stat` for directory sizes (portable — macOS `stat -f %z`, Linux `stat -c %s`)

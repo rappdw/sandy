@@ -2655,12 +2655,18 @@ _sandy_emit_state() {
     # (`x="$(_stat_mtime_iso ...)"`) aborts the caller and trips the ERR trap.
     # Sandboxes frequently have .sandy_created_version but no .sandy_last_version
     # (first launch), so stat failure for one field is a normal expected case.
+    # TZ=UTC on BOTH branches, or the `Z` is a lie: GNU %y and BSD %Sm both
+    # render the mtime in LOCAL time, and this used to append `Z` to that --
+    # so created_at/last_used_at were off by the host's UTC offset while
+    # claiming to be UTC. Whole seconds on both, too: GNU %y carries
+    # nanoseconds that BSD never had, so the same field had two shapes.
     local _stat_mtime_iso
     if stat -c '%y' / >/dev/null 2>&1; then
-        # GNU stat: %y is "2006-01-02 15:04:05.000000000 -0700"; take date/time and append Z.
-        _stat_mtime_iso() { [ -e "$1" ] || return 0; stat -c '%y' "$1" 2>/dev/null | awk '{print $1"T"$2"Z"}' || true; }
+        # GNU stat: %y is "2006-01-02 15:04:05.000000000 +0000" under TZ=UTC;
+        # keep date and whole-second time, append Z.
+        _stat_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC stat -c '%y' "$1" 2>/dev/null | awk '{split($2,t,"."); print $1"T"t[1]"Z"}' || true; }
     elif stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' / >/dev/null 2>&1; then
-        _stat_mtime_iso() { [ -e "$1" ] || return 0; stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
+        _stat_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
     else
         _stat_mtime_iso() { return 0; }
     fi
@@ -4534,12 +4540,13 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
     # a valid DIFFERENT command, not a usage error, so probing -f first
     # would misdetect) and the same always-exit-0 discipline (a failing
     # command substitution under set -euo pipefail would abort this fast
-    # path via the ERR trap).
+    # path via the ERR trap). And the same TZ=UTC + whole-seconds rendering,
+    # so the `Z` it prints is true (see _stat_mtime_iso).
     _rms_mtime_iso() { return 0; }
     if stat -c '%y' / >/dev/null 2>&1; then
-        _rms_mtime_iso() { [ -e "$1" ] || return 0; stat -c '%y' "$1" 2>/dev/null | awk '{print $1"T"$2"Z"}' || true; }
+        _rms_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC stat -c '%y' "$1" 2>/dev/null | awk '{split($2,t,"."); print $1"T"t[1]"Z"}' || true; }
     elif stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' / >/dev/null 2>&1; then
-        _rms_mtime_iso() { [ -e "$1" ] || return 0; stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
+        _rms_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
     fi
 
     # workspace_path of one sandbox dir, parsed the same lightweight way
