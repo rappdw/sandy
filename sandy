@@ -8493,6 +8493,19 @@ set -g set-clipboard on
 # Better redraw behavior
 set -g focus-events on
 setw -g aggressive-resize on
+
+# Pane resize: prefix + H/J/K/L, repeatable (-r), so prefix H H H keeps going
+# within repeat-time (#161). tmux's own resize keys are prefix + Ctrl-Arrow,
+# which macOS Mission Control takes at the system level before any terminal
+# sees it, and prefix + M-Arrow, which needs the terminal's Option-as-Meta
+# setting -- so on macOS out of the box no resize key worked at all, in a
+# layout (2-4 agent panes) that needs one most. Binding L shadows stock
+# prefix L (switch-client -l, "last session") -- harmless here, since sandy
+# runs a single tmux session.
+bind -r H resize-pane -L 5
+bind -r J resize-pane -D 5
+bind -r K resize-pane -U 5
+bind -r L resize-pane -R 5
 TMUXCONF
 }
 

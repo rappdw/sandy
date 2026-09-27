@@ -17544,6 +17544,49 @@ rm -rf "$_S160_DIR"
 unset _S160_DIR _S160_A4
 unset -f _s160_route
 
+# ============================================================
+echo "§161: tmux.conf binds a pane-resize key that works on macOS (#161)"
+# ============================================================
+# WHY. generate_tmux_conf() emitted options only, so pane resizing fell to
+# tmux's defaults: prefix + Ctrl-Arrow, which macOS Mission Control takes at
+# the system level before any terminal sees it, and prefix + M-Arrow, which
+# needs Option-as-Meta. On macOS out of the box no resize key worked, in a
+# layout (2-4 agent panes) that needs one most. Sandy now binds prefix +
+# H/J/K/L, repeatable.
+#
+# The static half reads the generated file; the behavioural half loads it into
+# a PRIVATE tmux server (its own -S socket in a temp dir, never the default
+# server, so it cannot touch a live session) and asks tmux what it bound --
+# which also proves the file still parses.
+_S161_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+awk '/^    cat > "\$SANDY_HOME\/tmux.conf.new" <<.TMUXCONF.$/{f=1;next} /^TMUXCONF$/{f=0} f' \
+    "$SANDY_SCRIPT" > "$_S161_DIR/tmux.conf"
+check "§161(pre) the tmux.conf heredoc was extracted (mutation: a rename empties it and the checks below go vacuous)" \
+    grep -q "^set -g mouse on$" "$_S161_DIR/tmux.conf"
+for _s161_kd in "H -L" "J -D" "K -U" "L -R"; do
+    _s161_k="${_s161_kd%% *}"; _s161_d="${_s161_kd#* }"
+    check "§161(1) tmux.conf binds prefix + ${_s161_k} to resize-pane ${_s161_d} 5, repeatable" \
+        grep -qx "bind -r ${_s161_k} resize-pane ${_s161_d} 5" "$_S161_DIR/tmux.conf"
+done
+if [ -f /etc/sandy-session.json ]; then
+    skip "§161(2) behavioural check: running inside sandy, so no tmux server is started here (CLAUDE.md)"
+elif ! command -v tmux >/dev/null 2>&1; then
+    skip "§161(2) behavioural check: tmux is not installed on this host"
+else
+    _S161_KEYS=""
+    if tmux -S "$_S161_DIR/sock" -f "$_S161_DIR/tmux.conf" new-session -d -s s161 "sleep 30" >/dev/null 2>&1; then
+        _S161_KEYS="$(tmux -S "$_S161_DIR/sock" list-keys -T prefix 2>/dev/null || true)"
+    fi
+    tmux -S "$_S161_DIR/sock" kill-server >/dev/null 2>&1 || true
+    for _s161_kd in "H -L" "J -D" "K -U" "L -R"; do
+        _s161_k="${_s161_kd%% *}"; _s161_d="${_s161_kd#* }"
+        check "§161(2) a tmux server loading this tmux.conf really binds prefix + ${_s161_k} -> resize-pane ${_s161_d} 5 with -r" \
+            bash -c 'printf "%s\n" "$1" | grep -Eq "^bind-key +-r +-T prefix +$2 +resize-pane $3 5$"' -- "$_S161_KEYS" "$_s161_k" "$_s161_d"
+    done
+fi
+rm -rf "$_S161_DIR"
+unset _S161_DIR _S161_KEYS _s161_kd _s161_k _s161_d
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

@@ -1742,7 +1742,22 @@ set -g allow-passthrough on
 set -g set-clipboard on
 set -g focus-events on
 setw -g aggressive-resize on
+
+bind -r H resize-pane -L 5
+bind -r J resize-pane -D 5
+bind -r K resize-pane -U 5
+bind -r L resize-pane -R 5
 ```
+
+The four `bind -r` lines are the only key bindings sandy adds (#161, 2.4.0);
+everything else is tmux's defaults. They give `prefix` + `H`/`J`/`K`/`L` a
+5-cell pane resize, repeatable within tmux's `repeat-time`. They exist because
+tmux's stock resize keys do not work on macOS out of the box: `prefix` +
+Ctrl-Arrow is taken by Mission Control at the system level, and `prefix` +
+M-Arrow needs the terminal's Option-as-Meta setting. `L` shadows the stock
+`prefix L` (`switch-client -l`, "last session"), which has nothing to switch to
+in sandy's single session. Because `tmux.conf` is part of the agent image
+hash (see Phase 2 "Rebuild trigger" above), changing it causes one image rebuild.
 
 The status-left/status-right fields read runtime env at *display* time via
 tmux's `#{E:VAR}` interpolation (not baked in at heredoc-generation time —
