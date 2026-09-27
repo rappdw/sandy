@@ -2374,7 +2374,7 @@ sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 - Everything up to and including the **last** `zoneinfo/` is stripped (`##` glob, not `#`) — this single rule covers macOS (`/var/db/timezone/zoneinfo/America/Denver`), ordinary Linux (`/usr/share/zoneinfo/America/Denver`), systemd's relative form (`../usr/share/zoneinfo/America/Denver`), and NixOS (`/etc/zoneinfo/America/Denver`).
 - A leading `posix/` or `right/` path segment is then stripped — Debian trixie ships no `posix/` directory, so the plain zone name is the one that actually resolves.
 
-**Validation** (`_sandy_tz_check VALUE [ZONEINFO_DIR]`) is a single function used identically in three places (sandy's resolver, sandy's own copy, and a byte-identical copy inside the generated entrypoint — `run-tests.sh` §159(8) pins the two copies equal):
+**Validation** (`_sandy_tz_check VALUE [ZONEINFO_DIR]`) is a single function body kept as two byte-identical copies: sandy's own (called by the resolver, host-side syntax-only) and one inside the generated entrypoint (called with `/usr/share/zoneinfo`, in-container) — `run-tests.sh` §159(8) pins the two copies equal:
 - Syntax: `^[A-Za-z0-9_+:,./-]{1,64}$`, and rejects a leading `/` or an embedded `..` (so `/etc/passwd` and `../../etc/passwd` are refused before any filesystem check).
 - With no zoneinfo directory given (host-side syntax-only use), a syntactically valid candidate passes.
 - With a zoneinfo directory given: an IANA name passes if `<dir>/<name>` is a regular **file** (`-f`, not `-e`/`-d` — a bare region like `America` is a directory in every zoneinfo tree and must be rejected, not accepted as a zone). Otherwise it is checked against a POSIX TZ string pattern (e.g. `EST5EDT,M3.2.0,M11.1.0`, `UTC0`), which needs no file at all.
@@ -2453,7 +2453,9 @@ docker rm -f "sandy-<SANDBOX_NAME>" 2>/dev/null || true
 -e TZ=<zone>          # only when resolved (#384); see Appendix D.7
 ```
 
-The `-e TZ=<zone>` flag is emitted immediately after `--network`, ahead of the manifest `expose` block and the `SANDY_EXTRA_ENV` `-e`s assembled later — so under docker's last-wins rule for repeated `-e` flags, an operator's own explicit `TZ` forward (via `SANDY_EXTRA_ENV` or a manifest) still wins over sandy's resolved value.
+The `-e TZ=<zone>` flag is emitted immediately after `--network`, ahead of the feature-manifest `expose`/`export` block assembled later (`RUN_FLAGS+=(-e "NAME=value")`, same as this one). Docker applies repeated `-e NAME=...` flags last-wins **by position**, so a manifest that explicitly exposes `TZ` — privileged by construction of living under `$SANDY_HOME` (see "Features") — overrides sandy's own resolved value, because its `-e TZ=...` is appended later in `RUN_FLAGS`.
+
+`SANDY_EXTRA_ENV` reaches the container by a **different** mechanism (`--env-file`, not `-e` — see E.16's `_sandy_add_secret_env`/`_load_sandy_extra_env`), and docker gives any `-e` precedence over `--env-file` for the same name **regardless of flag order**, so position doesn't decide that case at all. What actually happens when an operator lists `TZ` in `SANDY_EXTRA_ENV`: `_load_sandy_extra_env` runs early (before the RUN_FLAGS are assembled) and, if `TZ` isn't already set in sandy's own process environment, exports it there from whichever config file supplied it. `_sandy_host_tz` then reads that exported value as its **first** resolution step (source `env`) and validates it exactly as it would an inherited shell `TZ` — so the operator's configured value is not competing with sandy's resolved value at the `-e`/`--env-file` layer, it **is** sandy's resolved value by the time `RUN_FLAGS` is built. (The later `SANDY_EXTRA_ENV` forwarding loop then also writes the same already-resolved value to the env-file, redundantly but harmlessly.)
 
 ### E.3 GPU Passthrough (conditional)
 

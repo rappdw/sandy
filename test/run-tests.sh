@@ -18691,6 +18691,20 @@ _S159_EP_KEEP="$(
 check "§159(10b) a recognized TZ (America/Denver) is kept by the entrypoint block (got: $_S159_EP_KEEP)" \
     bash -c '[ "$1" = "America/Denver" ]' -- "$_S159_EP_KEEP"
 
+# --- 10c: structural -- the block actually RUNS before the gosu privilege
+#         drop, inside generate_entrypoint()'s heredoc. (10a)/(10b) above
+#         only prove the block's TEXT behaves correctly when eval'd in
+#         isolation; they cannot see WHERE it sits in the real heredoc, so a
+#         mutation that moves it to dead code (e.g. after `exec gosu`, which
+#         never returns) still passed both. Anchor on three line-unique
+#         patterns: the heredoc opener, the TZ-check `if` line itself, and
+#         the exec-gosu line, then assert opener < if-line < exec-gosu. ----
+_S159_LN_EP_OPEN="$(grep -n "<<'ENTRYPOINT'\$" "$SANDY_SCRIPT" | grep -F 'entrypoint.sh.new' | tail -1 | cut -d: -f1)" || true
+_S159_LN_EP_IF="$(grep -n '^if \[ -n "\${TZ:-}" \] && ! _sandy_tz_check "\$TZ" /usr/share/zoneinfo; then$' "$SANDY_SCRIPT" | tail -1 | cut -d: -f1)" || true
+_S159_LN_EP_GOSU="$(grep -n '^exec gosu "\$RUN_UID:\$RUN_GID" /usr/local/bin/user-setup.sh "\$@"$' "$SANDY_SCRIPT" | tail -1 | cut -d: -f1)" || true
+check "§159(10c) [structural] the entrypoint TZ-check if-line ($_S159_LN_EP_IF) sits after the entrypoint heredoc opener ($_S159_LN_EP_OPEN) and before exec gosu ($_S159_LN_EP_GOSU) -- catches the block being moved to dead code after the privilege drop, which (10a)/(10b)'s isolated eval cannot see" \
+    bash -c '[ -n "${1:-}" ] && [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ "$1" -gt "$2" ] && [ "$1" -lt "$3" ]' -- "$_S159_LN_EP_IF" "$_S159_LN_EP_OPEN" "$_S159_LN_EP_GOSU"
+
 # --- 11: the RUN_FLAGS -e TZ=... wiring -----------------------------------
 _S159_RUNFLAGS_BLOCK="$(sed -n '/^_sandy_host_tz$/,/^fi$/p' "$SANDY_SCRIPT")"
 check "§159(pre6) the RUN_FLAGS -e TZ=... block was extracted" \
@@ -18724,6 +18738,19 @@ _S159_LN_NETWORK="$(grep -n '^RUN_FLAGS+=(--network "\$NETWORK_NAME")$' "$SANDY_
 _S159_LN_DOCKERRUN="$(grep -n '^docker run "\${RUN_FLAGS\[@\]}" "\$IMAGE_NAME" "\$@"' "$SANDY_SCRIPT" | tail -1 | cut -d: -f1)" || true
 check "§159(12) [structural] the _sandy_host_tz call sits after --network ($_S159_LN_NETWORK) and before the single docker run ($_S159_LN_DOCKERRUN) -- got line $_S159_LN_HOSTTZ_CALL" \
     bash -c '[ -n "${1:-}" ] && [ -n "${2:-}" ] && [ -n "${3:-}" ] && [ "$1" -gt "$2" ] && [ "$1" -lt "$3" ]' -- "$_S159_LN_HOSTTZ_CALL" "$_S159_LN_NETWORK" "$_S159_LN_DOCKERRUN"
+
+# --- 12b: structural -- the unguarded claim (SPEC E.2 / the sandy comment)
+#         is that the -e TZ block sits AHEAD of the feature-manifest
+#         export block (also -e NAME=value), so THAT block's later position
+#         is what lets a manifest's own explicit TZ export win under
+#         docker's last-wins-among-repeated--e rule. Assert the ordering
+#         the claim depends on, not just "somewhere before docker run" --
+#         (12) alone does not catch the block being moved to just before
+#         `docker run` (after the manifest export and the --env-file line),
+#         which still satisfies (12) but silently inverts this precedence. -
+_S159_LN_FM_EXPORT="$(grep -n 'RUN_FLAGS+=(-e "\${_fm_v%%' "$SANDY_SCRIPT" | tail -1 | cut -d: -f1)" || true
+check "§159(12b) [structural] the _sandy_host_tz call ($_S159_LN_HOSTTZ_CALL) sits before the feature-manifest export's RUN_FLAGS -e line ($_S159_LN_FM_EXPORT)" \
+    bash -c '[ -n "${1:-}" ] && [ -n "${2:-}" ] && [ "$1" -lt "$2" ]' -- "$_S159_LN_HOSTTZ_CALL" "$_S159_LN_FM_EXPORT"
 
 # --- 13/14/15/16: the UTC-emission property under a host TZ far from UTC ---
 # Pacific/Kiritimati is UTC+14 (no DST, so the offset never coincides with
@@ -18786,20 +18813,26 @@ check "§159(16b) ...and last_used_at likewise (got: $_S159_PS_LASTUSED; the BSD
 #         single-quoted multi-line argument -- the program's own literal
 #         single quotes, needed to match '%y' etc., would otherwise have to
 #         fight bash's quote tracking for no benefit; a heredoc is a
-#         different, unaffected parsing path). ---------------------------
+#         different, unaffected parsing path). The invocation boundary is a
+#         prefix class (what can precede "date": start-of-line, space, `(`,
+#         `|`, `;`, `&`, or a backtick opening a command substitution) and a
+#         terminator class (what can end the call's args: `)`, `|`, `;`,
+#         `&`, `>`, `<`, a closing backtick, or end-of-line) -- both classes
+#         include backtick and `>`/`<` so `` `date +%H` `` and `date>file`
+#         are caught too (§159(18) self-tests both). ---------------------
 _S159_RATCHET_AWK="$_S159_ROOT/ratchet.awk"
 cat > "$_S159_RATCHET_AWK" <<'RATCHET_AWK_EOF'
 {
     line = $0
     if (line ~ /^[ \t]*#/) next
     rest = line
-    while (match(rest, /(^|[ \t(|;&])date([ \t]+[-+'"]|[ \t]*[)|;&]|[ \t]*$)/)) {
+    while (match(rest, /(^|[ \t(|;&`])date([ \t]+[-+'"]|[ \t]*[)|;&><`]|[ \t]*$)/)) {
         seg = substr(rest, RSTART, RLENGTH)
         dpos = index(seg, "date")
         dstart = RSTART + dpos - 1
         astart = dstart + 4
         tail = substr(rest, astart)
-        if (match(tail, /[)|;&]/)) {
+        if (match(tail, /[)|;&><`]/)) {
             aend = RSTART - 1
         } else {
             aend = length(tail)
@@ -18846,6 +18879,8 @@ date +%s
 date -u +%F
 TZ=UTC0 stat -c '%y' f
 echo "image up to date with base"
+y=`date +%H`
+date>file
 FIXTURE_EOF
 _S159_RATCHET_SELFTEST="$(awk -f "$_S159_RATCHET_AWK" "$_S159_RATCHET_FIXTURE" 2>&1 || true)"
 check "§159(18a) self-test: flags 'x=\$(date +%H)'" \
@@ -18854,9 +18889,13 @@ check "§159(18b) self-test: flags '|| date)'" \
     bash -c 'printf "%s" "$1" | grep -qF "|| date)"' -- "$_S159_RATCHET_SELFTEST"
 check "§159(18c) self-test: flags \"stat -c '%y' f\"" \
     bash -c "printf '%s' \"\$1\" | grep -qF \"stat -c '%y' f\"" -- "$_S159_RATCHET_SELFTEST"
+check "§159(18f) self-test: flags a backtick invocation 'y=\`date +%H\`'" \
+    bash -c 'printf "%s" "$1" | grep -qF "y=\`date +%H\`"' -- "$_S159_RATCHET_SELFTEST"
+check "§159(18g) self-test: flags 'date>file' (redirection, no space)" \
+    bash -c 'printf "%s" "$1" | grep -qF "date>file"' -- "$_S159_RATCHET_SELFTEST"
 _S159_RATCHET_SELFTEST_LC="$(printf '%s' "$_S159_RATCHET_SELFTEST" | grep -c . || true)"
-check "§159(18d) self-test: does NOT flag 'date +%s' (exactly 3 findings total, not 4)" \
-    bash -c '[ "$1" = "3" ]' -- "$_S159_RATCHET_SELFTEST_LC"
+check "§159(18d) self-test: does NOT flag 'date +%s' (exactly 5 findings total, not 6)" \
+    bash -c '[ "$1" = "5" ]' -- "$_S159_RATCHET_SELFTEST_LC"
 check "§159(18e) self-test: does NOT flag 'date -u +%F' or 'TZ=UTC0 stat' or the up-to-date prose line" \
     bash -c '! printf "%s" "$1" | grep -qE "date -u|TZ=UTC0 stat|up to date with base"' -- "$_S159_RATCHET_SELFTEST"
 
