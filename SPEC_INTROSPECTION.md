@@ -86,11 +86,11 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "sandy": {
-    "version": "0.12.0",
+    "version": "2.4.0",
     "commit": "abc1234",
-    "sandbox_min_compat": "0.7.10"
+    "sandbox_min_compat": "2.0.0"
   },
   "config": {
     "privileged_keys": [
@@ -141,7 +141,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       {
         "name": "SANDY_AUTO_APPROVE_PRIVILEGED",
         "type": "bool",
-        "description": "Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.",
+        "description": "Bypass TWO of the three launch approval gates: the passive-privileged config-key prompt AND the per-project .sandy/Dockerfile build prompt ... It does NOT bypass the dangerous-symlink gate, deliberately ... Intended for CI / test harnesses only.",
         "sources": ["env"]
       },
       {
@@ -217,7 +217,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
   ],
   "protected_paths": {
     "files": [".bashrc", ".bash_profile", ".zshrc", ".envrc", ".npmrc", "..."],
-    "git_files": [".git/config", ".gitmodules", ".git/HEAD", ".git/packed-refs"],
+    "git_files": [".git/config", ".gitmodules", ".git/packed-refs"],
     "dirs_always_mount": [".git/hooks", ".git/info", ".vscode", ".idea", ".circleci", ".devcontainer", ".github/workflows"],
     "dirs_workflow_edit_conditional": [".github/workflows"]
   },
@@ -229,9 +229,17 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
     }
   ],
   "compatibility": {
-    "current_schema_version": 2,
-    "supported_schema_versions": [2],
+    "current_schema_version": 3,
+    "supported_schema_versions": [3],
     "deprecated_schema_versions": []
+  },
+  "manifest": {
+    "top_level_keys": ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature", "agent_args"],
+    "mount_keys": ["name", "from", "mode", "export"],
+    "agent_args_compose": [
+      {"agent": "claude", "flag": "--append-system-prompt-file", "policy": "concat"},
+      {"agent": "claude", "flag": "--system-prompt-file", "policy": "report"}
+    ]
   }
 }
 ```
@@ -240,14 +248,14 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > *name* kept for schema stability (`schema_version` 1). Semantics since 0.13:
 > these directories are **existence-gated** — bind-mounted `:ro` only when
 > present on the host, with session-end detection covering absent paths. Only
-> the name is stale; a rename would be a breaking schema change and waits for
-> `schema_version` 2.
+> the name is stale; a rename would be a breaking schema change, and it was
+> not bundled into either bump so far (`2` in 2.0.0, `3` in 2.2.0).
 
 ### `--print-state`
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "sandy_home": "/Users/drapp/.sandy",
   "host_id": "drapp-mbp",
   "host_id_source": "hostname",
@@ -266,17 +274,17 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "created_at": "2026-04-15T10:00:00Z",
       "last_used_at": "2026-04-20T14:45:00Z",
       "size_bytes": 123456789,
+      "relay": {"state": "started", "source": "manifest", "executable_present": true, "path": "/opt/sandy/features/notify/relay", "state_dir": "/Users/drapp/.sandy/sandboxes/zork-3dfda686/relay-state", "last_exit_code": null, "restarts": 0, "last_restart_at": null, "disabled_by": null},
       "agents": ["claude"],
-      "handoff_enabled": false,
-      "handoff": {"state": "ok", "dirs": {"inbox": true, "outbox": true, "peer": true, "relay": true}, "problems": []},
-      "relay": {"state": "absent", "source": null, "executable_present": null, "path": null, "last_exit_code": null, "restarts": 0, "last_restart_at": null, "disabled_by": null},
       "feature_entries": {"notify": {"state": "started", "restarts": 0, "last_exit_code": null, "last_restart_at": null, "executable_present": true, "path": "/opt/sandy/features/notify/relay", "state_dir": "/Users/drapp/.sandy/sandboxes/zork-3dfda686/relay-state", "relay_alias": true, "disabled_by": null}},
       "agent_args_files": {"claude": false, "gemini": false, "codex": false, "opencode": false, "grok": false},
       "features": ["notify"],
       "feature_problems": [],
-      "lock_held": false,
-      "lock_holder_pid": null,
-      "lock_holder_alive": null
+      "agent_args": {},
+      "agent_args_composed": {},
+      "lock_held": true,
+      "lock_holder_pid": "48211",
+      "lock_holder_alive": true
     }
   ],
   "approvals": [
@@ -449,6 +457,62 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 >   --yes` on a host where workspaces live on removable or intermittently
 >   mounted media.
 
+> **`lock_held` / `lock_holder_pid` / `lock_holder_alive`** (per sandbox,
+> emitted identically in both modes). **One fact, three views**: the state of
+> this sandbox's workspace mutex, the lock `sandy` takes before a launch so
+> that only one sandy runs per workspace (CLAUDE.md "Concurrent launches").
+> **Read `lock_holder_alive`**; the other two are context for it.
+>
+> | `lock_held` | `lock_holder_pid` | `lock_holder_alive` | meaning |
+> |---|---|---|---|
+> | `false` | `null` | `null` | no lock — nothing holds this workspace |
+> | `true` | a numeric string, e.g. `"48211"` | `true` | held by a live process |
+> | `true` | a numeric string | `false` | **stale**: the recorded holder is gone (SIGKILL, OOM, a reboot) |
+> | `true` | `""` or a non-numeric string | `null` | holder unknowable: the pid file is missing or corrupt, or the lock was taken a moment ago and its pid not yet written |
+>
+> Exact types: `lock_held` is a JSON bool; `lock_holder_pid` is a JSON
+> **string** whenever the lock exists — the pid file's contents passed through
+> `_json_escape` verbatim, never a number and never validated — and `null`
+> only when it does not; `lock_holder_alive` is `true`/`false` only when that
+> string is an integer, else `null`. So a consumer that wants the pid parses
+> it itself, and must not treat `lock_holder_pid != null` as "someone is
+> running".
+>
+> **Liveness is `kill -0 <pid>` from the process running `--print-state`** —
+> the same predicate the launch path uses to decide a lock is stale (and that
+> `sandy --doctor` lists), so `false` here is exactly the verdict under which
+> a launch clears the lock rather than refusing. Two consequences follow from it. PID reuse errs safe: a recycled pid
+> reads `true`, and neither this field nor the launch will call it stale. And
+> a holder owned by a **different user** reads `false`, because `kill -0`
+> fails with `EPERM` as well as `ESRCH` — the launch path judges it the same
+> way, so the two still agree, but a consumer that distinguishes the two
+> errnos will disagree with sandy on a shared host.
+>
+> **What it does not tell you: whether a session exists.** The lock is the
+> live-operation guard, not the session's identity (daemon-mode D9). A daemon
+> session's lock is held by its host-side supervisor, and after a reboot
+> `--restart unless-stopped` resurrects the container but not the supervisor,
+> so a **running** daemon session can report `lock_holder_alive: false`. For
+> "is there a session", read `running_containers[]` with `daemon: true` and a
+> matching `sandbox`.
+>
+> **Clearing a stale lock is also contract, so no consumer needs the lock's
+> path.** Where the lock lives on disk, its name and its pid file are private
+> and may change in any release; do not glob for them. Two supported paths
+> remove a lock whose holder is provably dead (numeric pid, `kill -0` fails —
+> this field's `false`):
+> - **any launch in that workspace** clears it automatically, with an info line;
+> - **`sandy --doctor --fix --yes`** clears every such lock on the host (and
+>   reaps orphaned networks, its only other remediation). `sandy --doctor`
+>   alone lists them.
+>
+> A lock whose holder is **unknowable** (`null` with `lock_held: true`) is
+> cleared by neither, deliberately: a pid file sandy cannot read proves
+> nothing about the holder. The launch refuses and prints the exact `rm -rf`
+> for the operator to run after checking; that is the one case that stays
+> manual. `sandy --remove-sandbox` also removes the lock with the sandbox, and
+> refuses while it is live.
+
 > **`agent_args_files`** (per sandbox, added additively in `1.8.0`,
 > #210 — no `schema_version` bump). One fixed JSON object with all
 > five agent names (`claude`, `gemini`, `codex`, `opencode`, `grok`) as
@@ -462,8 +526,8 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > presence only, explicitly not effective launch args**: a workspace or host
 > `SANDY_AGENT_ARGS` also supplies args for that agent, and `--print-state`
 > never reads config files, so `false` does not mean "no extra args will
-> apply next launch" (the same caveat `handoff_enabled` carries for
-> `SANDY_HANDOFF_DIRS`). File **contents** are never read or reported here —
+> apply next launch" (`--print-state` reads no configs, which is also why
+> `agents` reports the last launch rather than the next). File **contents** are never read or reported here —
 > reading N files per sandbox is unbounded I/O relative to the light-mode
 > poll budget, and it would leak operator-placed argument values (which may
 > include things like MCP config paths) to every `--print-state` consumer.
@@ -567,7 +631,7 @@ Takes a path to a `.sandy/config`-style file. Emits:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "path": "/Users/drapp/dev/foo/zork/.sandy/config",
   "source_tier": "workspace",
   "errors": [],
@@ -590,7 +654,7 @@ Exit code: `0` on schemas that load cleanly (even with warnings), `1` on fatal e
 ### `--print-version` (1.7.0, #159)
 
 ```json
-{"schema_version":1,"version":"1.7.0-dev","commit":"d89aaba","full_version":"1.7.0-dev-d89aaba"}
+{"schema_version":3,"version":"2.4.0-dev","commit":"d89aaba","full_version":"2.4.0-dev-d89aaba"}
 ```
 
 The standalone, minimal-payload version probe. It exists to unblock a consumer (`sandy-ui`) that needs to know sandy's version *before* it can safely call `--print-schema` — keying a schema cache off `--print-schema`'s own `sandy.version` field is chicken-and-egg, since that field is inside the payload being cached.
@@ -626,8 +690,9 @@ Reading identity from `pane_index`, a scrollback marker, or the pane title is un
 - **`2.4.0` (#381):** one new `sandboxes[]` field, `feature_entries` (an object keyed by feature name, emitted in BOTH modes), plus the matching `feature_entries` field in the session marker (`sandy-session.json`, §C.9 of SPECIFICATION.md). Additive, so `schema_version` stays `3`. It generalizes the single relay supervisor into one supervised process **per selected feature's `entry`** — the adoption loop used to silently drop every entry after the first, which is now fixed as well. **`relay{}` is DUAL-REPORTED, unchanged in shape, for exactly the first entry in sorted feature-directory order** (the "relay-designated" entry) — a consumer reading only `relay{}` sees byte-identical behaviour whether one entry exists or several. Every entry, including the designated one, additionally appears under `feature_entries.<name>`, whose live object is `{state, restarts, last_exit_code, last_restart_at, executable_present, path, state_dir, relay_alias, disabled_by}` — the same shape `relay{}` uses, plus `relay_alias` (bool: is this the entry `relay{}` also describes). **`state: "absent"` also covers a stale image**: one built before the `sandy.feature_entries=1` Dockerfile label existed only ever starts the relay-designated entry, so every other adopted entry never gets a `.state` file to report and reads `absent` — the same value a feature that never declared an entry gets, distinguished only by the launch-time warning naming the affected entries and pointing at `sandy --rebuild`. `relay{}` is expected to be **listed for deprecation** in README's `## Deprecated` table at the next `X.0.0` (tracked as #382), once its consumer migrates to reading `feature_entries` directly — not removed here, and not yet announced, per the add-only rule on that table.
 - **`2.4.0` (#378):** documents the pane-identity contract (tmux session `sandy`, the `@sandy_pane_agent` pane option, `SANDY_AGENT` spawn order), and extends it: the launcher now sets `@sandy_pane_agent` in single-agent mode too (both daemon and foreground launch paths), not multi-agent only, and `sandy-handoff-sessions`' untagged-pane fallback is narrowed to the single-agent/single-pane shape a pre-2.4.0 sandy could actually produce. Neither change touches `--print-schema` or `--print-state` output — this stays a fast-path/introspection no-op even though it is not, this time, a no-op for the in-container mechanism itself (2.4.0 also ships `--rsync`, #374) — so `schema_version` is unchanged.
 - **`2.4.0` (#380):** `manifest.top_level_keys` gains `receives`, and `--print-schema`'s `manifest` object gains a new field, `manifest.receives_values` (the closed set `receives` accepts — `["cross_session"]` today). One new field in the session marker, `cross_session_inbound_source` (`"explicit"` \| `"feature:<name>"` \| `"relay-legacy"` \| `"default"`, or JSON `null` mirroring `cross_session_inbound`'s own null convention — see §C.9 of SPECIFICATION.md). All additive, so `schema_version` stays `3`. It decouples `SANDY_CROSS_SESSION_INBOUND`'s unset default from the relay: the default now resolves `accept` iff a SELECTED feature manifest declares `"receives": ["cross_session"]`, with the pre-2.4.0 relay-conditional rule surviving, additive-only, as a DEPRECATED legacy path (`#382` will list it in README's `## Deprecated` table at the next `X.0.0`; nothing is removed by `#380` itself). No `--print-state` field — the marker is the record for this one, matching `agent_args`'s own precedent of `--print-state` not mirroring every marker field.
-- Current: `schema_version: 1`
+- Current: `schema_version: 3` (moved to `2` in 2.0.0 and to `3` in 2.2.0 — both entries below). `--print-schema`, `--print-state`, `--validate-config` and `--print-version` all emit the same number.
 - **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal`), `description`, `sources`, and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
+- **`2.4.0` (#219)**: one new `config.passive_keys` entry, `SANDY_OFFLINE`, one new `cli_flags` entry, `--no-update-check`, and one new field in the session marker, `offline` (bool). Additive, so `schema_version` stays `3`. Probe `SANDY_OFFLINE`'s presence in `passive_keys` to learn whether this sandy honours it — an older sandy forwards an unknown `--no-update-check` to the agent instead of rejecting it.
 - **`2.0.0` — `schema_version` moves to `2`, the first bump.** Not additive: `sandboxes[].features` keeps its name and changes its SOURCE. It reported `$SANDBOX_DIR/features/<name>` markers (1.15.0); it now reports which features a sandbox was **selected** for by each feature's own manifest, evaluated at every launch. A consumer that kept parsing the field would silently have a different question answered, which is worse than a break, so the version says so. `feature_problems` likewise becomes `"<feature>: <why this sandbox was not selected>"`.
 
   **Gate on `schema_version`**, not on the sandy version string and not on probing for a field: `X.Y.Z-dev` compares equal to `X.Y.Z` (see the `--print-version` guidance above), so a version gate admits builds that predate the change.
@@ -654,7 +719,7 @@ Reading identity from `pane_index`, a scrollback marker, or the pane title is un
   **`sandbox_name`** in `/etc/sandy-session.json` is the sandbox slug, `<basename>-<sha8>`. It was previously unavailable in-container and **not derivable**: `SANDY_PROJECT_NAME` is the raw basename while the slug is `tr -cd 'a-zA-Z0-9._-'`-filtered, so it is lossy in both directions, and sandy passes no `--hostname`. Spelled to match `WORKSPACE.json`'s long-standing host-side field. `SANDY_SANDBOX_NAME` is also exported, but the `:ro` marker is the authoritative copy.
 
 - **`1.13.0`**: one new `sandboxes[]` field, `agents` (a JSON array, emitted in BOTH modes), plus the matching `agents` field in the session marker. Additive, so `schema_version` stays `1`. It is the agent list the sandbox **resolved** to on its last launch — not what any config declares. A consumer cannot derive it: `SANDY_AGENT` settles from env, host config, workspace config or the `--agent` flag, so a workspace naming nothing may still launch as anything. **`null` means unknown and must never be read as `claude`** — `claude` is the default, so inferring it rebuilds the guess this field exists to retire, invisibly, because most sandboxes really are claude. **Last launch, not next launch**: a sandbox whose `SANDY_AGENT` changes reports the old value until relaunched, exactly as `handoff_enabled` and `handoff.state` do.
-- **`1.12.0` (#265)**: one new `sandboxes[]` field, `handoff` (an object, emitted in BOTH modes), and one new `--provision` sub-option, `--all`. Additive, so `schema_version` stays `1`. `handoff.state` is `ok` / `missing` / `wrong`, classified from four host-side directory tests; `problems[]` names what is wrong and is empty otherwise. **It is read-only and must stay so** — the consumer it was built for relies on a hand-made pair remaining distinguishable from one a launch created, so a field that repaired would defeat its own purpose. **`ok` is a host-side statement**: the directories are present and well-formed. It does NOT mean the tree is mounted in any container — `--print-state` reads no configs and inspects no running container, exactly as `handoff_enabled` has always cautioned. `--provision --all` consumes the same predicate, so the set it provisions is exactly the set this field does not call `ok`.
+- **`1.12.0` (#265)**: one new `sandboxes[]` field, `handoff` (an object, emitted in BOTH modes), and one new `--provision` sub-option, `--all`. Additive, so `schema_version` stays `1`. `handoff.state` is `ok` / `missing` / `wrong`, classified from four host-side directory tests; `problems[]` names what is wrong and is empty otherwise. **It is read-only and must stay so** — the consumer it was built for relies on a hand-made pair remaining distinguishable from one a launch created, so a field that repaired would defeat its own purpose. **`ok` is a host-side statement**: the directories are present and well-formed. It does NOT mean the tree is mounted in any container — `--print-state` reads no configs and inspects no running container, exactly as `handoff_enabled` has always cautioned. `--provision --all` consumes the same predicate, so the set it provisions is exactly the set this field does not call `ok`. *(`handoff{}` was removed in 2.2.0 (#355); `--provision --all` now keys on the `relay-state/` directory a launch creates.)*
 - **`2.1.0` (#345, #344)**: two new `relay` sub-fields, `source` and `executable_present`, plus a **fix** to `relay.path`. Additive, so `schema_version` stays `2`.
 
   **`source`** — `explicit` \| `slot` \| `manifest` \| `none`: WHICH producer supplied the relay. `relay.slot` could never answer this and was being read as if it could: it is written only by the relay-bin slot block, so an explicit `SANDY_HANDOFF_RELAY`, a manifest `entry` and no relay at all all report `absent`. A consumer shipped a check on it that reported **every correctly-migrated sandbox as broken**, and would have called one still running a shim healthy. `slot` keeps its old meaning unchanged.
@@ -679,9 +744,9 @@ Reading identity from `pane_index`, a scrollback marker, or the pane title is un
 
 - **`2.2.0` (#352)**: `handoff.dirs` now reports **one** key, `relay`, instead of four. The `inbox`, `outbox` and `peer` lanes were removed along with their container env vars; a feature manifest names its own directories via `mounts`. **`schema_version` is unchanged** — no field was removed, and `handoff.dirs` was always an object whose keys describe the directories that exist. A consumer that hardcoded four keys should read whatever keys are present. `handoff{}` and `handoff_enabled` themselves are removed in the bundled `schema_version: 3` move, not here.
 
-- **`1.11.0` (#258)**: one new `sandboxes[]` field, `relay` (an object, emitted in BOTH modes), and one new `config_keys.passive` entry, `SANDY_RELAY`. Additive, so `schema_version` stays `1`. `relay.state` is one of `absent`, `started`, `failed`, `looping`, `disabled`; the counters come from a small fixed-size `$SANDBOX_DIR/handoff/relay/.state` file the in-container supervisor rewrites — **not** from parsing `supervisor.log`, which is append-only and unbounded under a crash loop. **This is the only surface carrying LIVE relay state.** The session marker's `relay.slot` records launch INTENT and cannot record anything else: the marker is bind-mounted `:ro` and therefore written before `docker run`, while the relay starts in-container. A consumer asking "is the entry working?" must read `--print-state`, never the marker and never the deprecated `handoff_relay` boolean, which has always meant intent. Both are **diagnostics, not a security signal** — `~/.handoff/relay` is mounted rw, so the agent can write the state file.
-- **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. In `1.7.0`, one new `sandboxes[]` field: `handoff_enabled` (bool — whether `$SANDBOX_DIR/.handoff-enabled`, the operator-side handoff marker, is present; reports the marker only, not a workspace `SANDY_HANDOFF_DIRS` value). In `1.10.0` the handoff tree became **on by default** (`SANDY_HANDOFF_DIRS` default `1`, `0` opts out), which narrows what the marker *means* — "forced on for this sandbox over any opt-out" rather than "enrolled" — but not the field's name, type, or source: still marker presence only, no bump. Consumers wanting to know whether a sandbox actually has the tree should check the container's mounts (`~/.handoff/{inbox,outbox,peer}`), not this field. Clients ignore unknown fields. Three additive changes shipped this way: `since`/`stability` on config-key objects (`0.15.0`, PR 4.1, above); in `1.1.0` (#17), three new `cli_flags` entries (`--start`, `--attach`, `--stop` — daemon-mode flags) plus three new `running_containers[]` fields (`sandbox`, `daemon`, `attached_clients` — see `--print-state` below); and, also in `1.1.0` (#26), one more `cli_flags` entry (`--prune-orphans` — reap orphaned sandy networks and exit) plus one new top-level `--print-state` field (`orphan_networks` — see above). In `1.2.0`, one more `cli_flags` entry (`--update-sessions` — fleet image refresh + rolling restart across every daemon session on the host, scopeable to a single session with `--workspace PATH`, #41) plus two new `running_containers[]` fields: `image_stale` (FULL MODE ONLY, #41 — see above) and `updated_at` (both modes, #44 — see above). In `1.3.0`, one more `cli_flags` entry (`--gc` — unified reclaim of dead-owner containers, orphaned networks, orphaned per-project/skill images, and dangling sandy images, with `--dry-run`/`--yes` sub-options, #36) plus two new top-level `--print-state` fields: `dangling_images` and `orphaned_containers` (both FULL MODE ONLY — see above). In `1.7.0`, one more `cli_flags` entry (`--workspace` — the parsers have accepted this flag since `1.1.0` (#17); only the schema advertisement was missing, #156) plus the guaranteed stream contract for `--print-schema`/`--print-state`/`--validate-config` documented above (#160) — the stream contract formalizes and test-pins behavior every one of these handlers already had, so it carries no field or shape change and needs no `schema_version` bump either. Also in `1.7.0` (#159), a new `cli_flags` entry (`--print-version`) plus the new `--print-version` flag itself (see the `### --print-version` section above) — a wholly new, additive introspection surface, not a change to any existing emitted shape, so it needs no `schema_version` bump either; it does, however, extend the 1.7.0 stream contract (above) to cover this fourth flag. In `1.8.0` (#176), one new `sandboxes[]` field: `size_bytes` (FULL MODE ONLY, always `null` in `--print-state light` — see above) — the allocated-disk-usage figure for each sandbox, computed via `du -skx`. Also in `1.8.0` (#178), one more `cli_flags` entry (`--remove-sandbox` — permanently delete a sandbox directory, with three mutually exclusive selectors: default/`--workspace PATH`, `--sandbox NAME`, `--orphans`; sub-options `--dry-run`/`--yes`) plus one new `sandboxes[]` field: `workspace_exists` (tri-state, emitted identically in BOTH `--print-state` modes since it costs no extra process spawn — see above). The existing `--workspace` `cli_flags` entry's description was also updated to name `--remove-sandbox` among the flags it honors, per the drift discipline #156 established. Also in `1.8.0` (#179), two new top-level `--print-state` fields: `host_id` and `host_id_source` (see above) — advisory host identity for multi-host fleet aggregation, sourced from `uname -n` by default with an env-only `SANDY_HOST_ID` override, emitted identically in both `--print-state` modes. `SANDY_HOST_ID` also appears as a new `env_only_keys` entry in `--print-schema`. Also in `1.8.0` (#210), one new `sandboxes[]` field: `agent_args_files` (an object of five fixed agent-name booleans — see above — reporting per-agent `$SANDBOX_DIR/agent-args.<agent>` operator-file presence, emitted identically in both `--print-state` modes). No new `cli_flags` entry — the existing `--remove-sandbox` and `--reset-sandbox` selectors are unchanged; the former now also names any `agent-args.<agent>` files it will destroy in its printed plan, and the latter preserves them unconditionally.
-- **Deprecations** (existing key changes semantics): bump to `schema_version: 2`. Sandy publishes both versions in parallel via `--print-schema --schema-version 1` for one minor release, then drops v1 with a release-note callout.
+- **`1.11.0` (#258)**: one new `sandboxes[]` field, `relay` (an object, emitted in BOTH modes), and one new `config_keys.passive` entry, `SANDY_RELAY`. Additive, so `schema_version` stays `1`. `relay.state` is one of `absent`, `started`, `failed`, `looping`, `disabled`; the counters come from a small fixed-size `$SANDBOX_DIR/handoff/relay/.state` file (`$SANDBOX_DIR/relay-state/.state` since 2.2.0, #353) the in-container supervisor rewrites — **not** from parsing `supervisor.log`, which is append-only and unbounded under a crash loop. **This is the only surface carrying LIVE relay state.** The session marker's `relay.slot` records launch INTENT and cannot record anything else: the marker is bind-mounted `:ro` and therefore written before `docker run`, while the relay starts in-container. A consumer asking "is the entry working?" must read `--print-state`, never the marker and never the deprecated `handoff_relay` boolean, which has always meant intent. Both are **diagnostics, not a security signal** — the state directory is mounted rw (`~/.handoff/relay` then, `/opt/sandy/relay-state` since 2.2.0), so the agent can write the state file.
+- **Additive changes** (new keys in existing objects, new flags in `cli_flags`): no version bump. In `1.7.0`, one new `sandboxes[]` field: `handoff_enabled` (bool — whether `$SANDBOX_DIR/.handoff-enabled`, the operator-side handoff marker, is present; reports the marker only, not a workspace `SANDY_HANDOFF_DIRS` value). In `1.10.0` the handoff tree became **on by default** (`SANDY_HANDOFF_DIRS` default `1`, `0` opts out), which narrows what the marker *means* — "forced on for this sandbox over any opt-out" rather than "enrolled" — but not the field's name, type, or source: still marker presence only, no bump. Consumers wanting to know whether a sandbox actually has the tree should check the container's mounts (`~/.handoff/{inbox,outbox,peer}`), not this field. *(The tree, the marker and this field were all removed in 2.2.0 — see the `schema_version: 3` entry above.)* Clients ignore unknown fields. Three additive changes shipped this way: `since`/`stability` on config-key objects (`0.15.0`, PR 4.1, above); in `1.1.0` (#17), three new `cli_flags` entries (`--start`, `--attach`, `--stop` — daemon-mode flags) plus three new `running_containers[]` fields (`sandbox`, `daemon`, `attached_clients` — see `--print-state` below); and, also in `1.1.0` (#26), one more `cli_flags` entry (`--prune-orphans` — reap orphaned sandy networks and exit) plus one new top-level `--print-state` field (`orphan_networks` — see above). In `1.2.0`, one more `cli_flags` entry (`--update-sessions` — fleet image refresh + rolling restart across every daemon session on the host, scopeable to a single session with `--workspace PATH`, #41) plus two new `running_containers[]` fields: `image_stale` (FULL MODE ONLY, #41 — see above) and `updated_at` (both modes, #44 — see above). In `1.3.0`, one more `cli_flags` entry (`--gc` — unified reclaim of dead-owner containers, orphaned networks, orphaned per-project/skill images, and dangling sandy images, with `--dry-run`/`--yes` sub-options, #36) plus two new top-level `--print-state` fields: `dangling_images` and `orphaned_containers` (both FULL MODE ONLY — see above). In `1.7.0`, one more `cli_flags` entry (`--workspace` — the parsers have accepted this flag since `1.1.0` (#17); only the schema advertisement was missing, #156) plus the guaranteed stream contract for `--print-schema`/`--print-state`/`--validate-config` documented above (#160) — the stream contract formalizes and test-pins behavior every one of these handlers already had, so it carries no field or shape change and needs no `schema_version` bump either. Also in `1.7.0` (#159), a new `cli_flags` entry (`--print-version`) plus the new `--print-version` flag itself (see the `### --print-version` section above) — a wholly new, additive introspection surface, not a change to any existing emitted shape, so it needs no `schema_version` bump either; it does, however, extend the 1.7.0 stream contract (above) to cover this fourth flag. In `1.8.0` (#176), one new `sandboxes[]` field: `size_bytes` (FULL MODE ONLY, always `null` in `--print-state light` — see above) — the allocated-disk-usage figure for each sandbox, computed via `du -skx`. Also in `1.8.0` (#178), one more `cli_flags` entry (`--remove-sandbox` — permanently delete a sandbox directory, with three mutually exclusive selectors: default/`--workspace PATH`, `--sandbox NAME`, `--orphans`; sub-options `--dry-run`/`--yes`) plus one new `sandboxes[]` field: `workspace_exists` (tri-state, emitted identically in BOTH `--print-state` modes since it costs no extra process spawn — see above). The existing `--workspace` `cli_flags` entry's description was also updated to name `--remove-sandbox` among the flags it honors, per the drift discipline #156 established. Also in `1.8.0` (#179), two new top-level `--print-state` fields: `host_id` and `host_id_source` (see above) — advisory host identity for multi-host fleet aggregation, sourced from `uname -n` by default with an env-only `SANDY_HOST_ID` override, emitted identically in both `--print-state` modes. `SANDY_HOST_ID` also appears as a new `env_only_keys` entry in `--print-schema`. Also in `1.8.0` (#210), one new `sandboxes[]` field: `agent_args_files` (an object of five fixed agent-name booleans — see above — reporting per-agent `$SANDBOX_DIR/agent-args.<agent>` operator-file presence, emitted identically in both `--print-state` modes). No new `cli_flags` entry — the existing `--remove-sandbox` and `--reset-sandbox` selectors are unchanged; the former now also names any `agent-args.<agent>` files it will destroy in its printed plan, and the latter preserves them unconditionally.
+- **Breaking changes** (an emitted field changes semantics or is removed): bump `schema_version`. Sandy emits only the current version — there is no parallel `--schema-version N` output, and `supported_schema_versions` lists exactly one value. The bump is the signal: it may move in a minor, and it is the only way a consumer learns a field is gone (CLAUDE.md "Versioning"). `2.0.0` (`features` changed source) and `2.2.0` (the handoff and relay-slot removals) are the two bumps so far.
 - **Compatibility range**: each sandy version declares `supported_schema_versions` and `deprecated_schema_versions` so clients can decide to warn/refuse.
 
 Clients should:
@@ -779,7 +844,7 @@ A single new function `_sandy_emit_schema()` that:
 
 `_sandy_emit_state()`:
 - Walks `$SANDY_HOME/sandboxes/*/` for directory listing
-- Reads each sandbox's `.sandy_created_version` and `.sandy_last_version` files
+- Reads each sandbox's `.sandy_created_version` and `.sandy_last_version` files; `created_at` / `last_used_at` are those files' **mtimes in UTC**, `YYYY-MM-DDTHH:MM:SSZ` (whole seconds) on both GNU and BSD `stat`. Before 2.4.0 they were rendered in the host's **local** time with a `Z` appended — off by the UTC offset on any non-UTC host — and the GNU branch carried nanoseconds (`…T14:45:00.123456789Z`). A consumer that compensated for either should stop; `--remove-sandbox`'s "last used" plan line shares the fix.
 - Walks `$SANDY_HOME/approvals/passive-*.list` for approval entries
 - Calls `docker ps --filter label=sandy --format json` for running containers (if Docker is reachable; silent skip if not)
 - Calls `stat` for directory sizes (portable — macOS `stat -f %z`, Linux `stat -c %s`)

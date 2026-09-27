@@ -151,6 +151,38 @@ session (`5` is a `--stop` code, unreachable on `--attach`). `--stop`: `0` = sto
 This is what [`sandy-ui`](https://github.com/rappdw/sandy-ui) uses to keep a
 session alive across a VSCode quit/relaunch.
 
+#### Remote access: what sandy covers, and what sits below it
+
+Three things get conflated when sandy runs on a remote machine (an always-on
+workstation or GPU box you reach from a laptop). Sandy owns exactly one of them.
+
+- **Session persistence — sandy's layer.** A daemon session lives on the host
+  that ran `sandy --start`, independent of any client. When your SSH or VS Code
+  Remote connection drops, only the *client* is gone: the container and its tmux
+  session keep running. Reconnect however you like, then `sandy --attach` (from
+  the workspace, or with `--workspace PATH`) and carry on. If your client was
+  killed mid-attach (a `SIGHUP` from a closed terminal), just run `--attach`
+  again; it exits `4` if the session is genuinely gone. A foreground `sandy`
+  (no `--start`) is the exception: it is tied to the terminal that launched it
+  and cannot be reattached.
+- **Connection resilience — below sandy.** Keeping the client link itself alive
+  across laptop sleep or a flaky network is a transport problem: Remote-SSH, VS
+  Code Remote Tunnels, mosh, Eternal Terminal, autossh and the like. Sandy needs,
+  and takes, **zero changes** for any of them — it neither bundles nor checks
+  for one, and there is no `sandy --tunnel`. Pick whichever you already trust.
+- **Session mobility — not a sandy feature.** Reaching a session *from* another
+  device is just the two above: get a shell on the host (SSH, over Tailscale or
+  any VPN) and `sandy --attach`. Moving a running session *to* a different
+  machine is something sandy does not do; the session stays on the host that
+  started it. `sandy --rsync <host>` copies a sandbox's state to another host so
+  a new session can start there, and it refuses while a session is live.
+
+These transports run on the **host**, outside sandy's containers, so they are
+orthogonal to its isolation: sandy's network blocking applies to what the
+*agent* can reach from inside the container (the `--internal` sidecar and egress
+proxy), and a host-side `sshd`, `etserver` or tunnel is neither weakened by it
+nor governed by it. Securing the path to your host is the host's business.
+
 ### Fleet updates (`--update-sessions`)
 
 Daemon sessions can sit up for days, running an ever-staler image. `sandy --update-sessions` is a **global** maintenance command (ignores cwd — it operates on every daemon session on the host) that refreshes each session's images and rolling-restarts the ones that came out stale:
@@ -199,7 +231,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 |---|---|---|
 | `SANDY_AGENT` | `claude` | AI agent(s) to run. Single: `claude`, `gemini`, `codex`, `opencode`. Multi (comma-separated, 2–4 panes in tmux): e.g. `claude,gemini` or `claude,gemini,codex,opencode`. Alias: `all` = `claude,gemini,codex,opencode` |
 | `SANDY_MODEL` | `claude-opus-5` | Claude model to use (applies whenever `claude` is in `SANDY_AGENT`) |
-| `SANDY_EFFORT` | _(Claude Code default, currently `high`)_ | Reasoning effort for claude: `low`\|`medium`\|`high`\|`xhigh`\|`max`. Applied as `claude --effort`; recorded in `sandy-session.json` so a run's effort is provable |
+| `SANDY_EFFORT` | _(each agent's own default)_ | Reasoning effort for claude and codex: `low`\|`medium`\|`high`\|`xhigh`\|`max`. Applied as `claude --effort` and (2.4.0) codex `-c model_reasoning_effort=<level>` (each level maps to its codex namesake); ignored with a notice for gemini/opencode/grok. Recorded in `sandy-session.json` so a run's effort is provable |
 | `SANDY_TEAMMATE_MODE` | (unset) | Value passed to `claude --teammate-mode` (claude only). Empty = sandy passes nothing and Claude Code uses its own default; set e.g. `tmux` to opt in. Passive-safe |
 | `GEMINI_API_KEY` | (unset) | Google API key for Gemini CLI. Put in `.sandy/.secrets` |
 | `GEMINI_MODEL` | (unset) | Gemini model override |
@@ -213,12 +245,12 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `XAI_API_KEY` | (unset) | xAI API key for Grok Build. Fully-headless auth; put in `.sandy/.secrets`. Privileged tier |
 | `GROK_MODEL` | `grok-4.5` | Grok Build model (passed as `-m`) |
 | `SANDY_GROK_AUTH` | `auto` | Force Grok auth path: `auto`, `api_key`, or `oauth` |
-| `SANDY_LOCAL_LLM_HOST` | (unset) | `host:port` to allow through LAN isolation, typically for a local LLM (e.g. `127.0.0.1:11434` for Ollama). With the egress proxy on (default), the proxy's forward listener relays `host.docker.internal:<port>` to the host; with the proxy off (`SANDY_EGRESS_NO_ISOLATION=1`, Linux), inserts a single iptables ACCEPT rule and maps `host.docker.internal`. Privileged tier |
+| `SANDY_LOCAL_LLM_HOST` | (unset) | `host:port` to allow through LAN isolation, typically for a local LLM (e.g. `127.0.0.1:11434` for Ollama). With the egress proxy on (default), the proxy's forward listener relays `host.docker.internal:<port>` to the host; with the proxy off (`SANDY_EGRESS=off`, Linux), inserts a single iptables ACCEPT rule and maps `host.docker.internal`. Privileged tier |
 | `GOOGLE_CLOUD_PROJECT` | (unset) | GCP project ID (Vertex AI) |
 | `GOOGLE_CLOUD_LOCATION` | (unset) | GCP region (Vertex AI) |
 | `GOOGLE_GENAI_USE_VERTEXAI` | (unset) | Set `true` to route Gemini through Vertex AI |
 | `GOOGLE_API_KEY` | (unset) | Google API key for Vertex AI / ADC |
-| `SANDY_CHANNEL_TARGET_PANE` | `0` | tmux pane target for Telegram relay in multi-agent mode. `0` = first agent in `SANDY_AGENT`, `1` = second, `2` = third, `3` = fourth |
+| `SANDY_CHANNEL_TARGET_PANE` | `0` | Which agent receives Telegram relay messages in multi-agent mode. `0` = first agent in `SANDY_AGENT`, `1` = second, `2` = third, `3` = fourth — routed to that agent's pane by name, not by raw tmux pane index |
 | `SANDY_SSH` | `token` | Git auth method: `token` (gh CLI + HTTPS) or `agent` (SSH agent forwarding) |
 | `SANDY_SSH_KEYS` | (unset) | Comma-separated **filenames** under `~/.ssh` that may be staged into the container, in **any** `SANDY_SSH` mode. Default empty = **no private key material is staged**. `config`, `known_hosts` and `*.pub` come with them. Privileged tier |
 | `SANDY_SKIP_PERMISSIONS` | `true` | Set to `false` to keep Claude Code's permission system active |
@@ -228,8 +260,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_CPUS` | auto-detected | CPU limit for the container |
 | `SANDY_MEM` | auto-detected | Memory limit for the container |
 | `SANDY_VENV_OVERLAY` | `1` | Set `0` to disable the sandbox-owned `.venv` overlay (see "Using host virtual environments") |
-| `SANDY_EGRESS_STRICT` | `0` | `1` = strict egress: reach only the built-in allowlist + `SANDY_ALLOW_HOSTS`. Strengthens isolation — safe to commit in a workspace `.sandy/config`. See "How Network Isolation Works" |
-| `SANDY_EGRESS_NO_ISOLATION` | `0` | `1` = turn the egress proxy **off** (legacy: iptables-only on Linux, no isolation on macOS). Weakens isolation, so a workspace `.sandy/config` setting it triggers an approval prompt |
+| `SANDY_EGRESS` | `permissive` | Egress posture: `off` (proxy off — legacy iptables-only on Linux, **no** isolation on macOS), `permissive` (block private/LAN/cloud-metadata, allow the internet), or `strict` (built-in allowlist + `SANDY_ALLOW_HOSTS` only). `strict` is safe to commit in a workspace `.sandy/config`; `off` **and `permissive`** set there trigger an approval prompt, because a workspace value outranks your host config and could otherwise downgrade a host that chose strict. Replaces the deprecated `SANDY_EGRESS_STRICT` / `SANDY_EGRESS_NO_ISOLATION` booleans. See "How Network Isolation Works" |
 | `SANDY_ALLOW_HOSTS` | (unset) | Comma-separated extra egress-**proxy** allowlist entries (`host`, `*.suffix`, or `host:port`), appended to the built-in default set. This is the way to widen reach when the proxy is on (the default). Privileged tier |
 | `SANDY_ALLOW_LAN_HOSTS` | (unset) | **Legacy (proxy-off, Linux only).** Comma-separated IPs/CIDRs to poke through the iptables LAN block. Ignored when the egress proxy is on — use `SANDY_ALLOW_HOSTS` instead |
 | `SANDY_ALLOW_NO_ISOLATION` | `0` | **Legacy (proxy-off, Linux only).** `1` = allow launch when iptables rules can't be applied. *Not* the same as `SANDY_EGRESS_NO_ISOLATION` (which turns the proxy off) |
@@ -246,10 +277,11 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `CLAUDE_CODE_SUBAGENT_MODEL` | (unset) | Model for **subagents** — the parallel researchers a skill fans out. Subagents do *not* inherit the orchestrator's model, so unset they run on their own default tier: a session pinned to a gated model (e.g. `claude-mythos-5-1`) silently does its fan-out on a different one. Set it alongside `SANDY_MODEL` |
 | `SANDY_CLAUDE_CONNECTORS` | `0` | `1` = expose claude.ai **account connectors** (Gmail, Drive, …) inside the sandbox. Default `0` suppresses them — the account-scoped OAuth token would otherwise make every connector reachable from every sandbox. Weakens isolation, so a workspace `.sandy/config` setting it triggers an approval prompt. Claude-only |
 | `SANDY_SUSPICIOUS` | `0` | `1` = hardened posture for a workspace you distrust: strip the OAuth **refresh token** (mount only the short-TTL access token — fails closed if it can't), prefer a disposable `ANTHROPIC_API_KEY` over mounting OAuth at all, force connectors off, default egress to strict. Records `cred_mode` in the session marker. **Strengthens** isolation — safe to commit in a workspace config. In-session token refresh stops at the access token's expiry (relaunch or `/login`) |
+| `SANDY_OFFLINE` | `0` | `1` = "use what you have": skip the agent, skill-pack and sandy **update checks** for this launch — for a plane, a captive portal or an air-gapped host, where a detected update would force a rebuild that cannot succeed. Images that are missing or whose inputs changed are **still built**. The trade-off is visible: a line at launch, one at session end, and `"offline": true` in `sandy-session.json`; the next launch without it picks up patches as usual. One-shot form: `--no-update-check`. Passive-safe |
 | `SANDY_SKILL_PACKS` | (unset) | Comma-separated skill packs to install (e.g. `gstack`). Built as a cached Docker layer |
 | `SANDY_GPU` | (disabled) | GPU passthrough: `all` for all GPUs, or device IDs like `0` or `0,1`. Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
 | `SANDY_SCREENSHOT_DIR` | (unset) | Host directory of screenshots to mount into the container (read-only at `/home/sandy/screenshots`). When set, sandy generates a `/ss` slash command for Claude/Gemini and a screenshot skill for Codex — type `/ss huh` to have the agent describe your latest screenshot, `/ss 3 explain` for the last three, etc. See "Screenshot skill" below. Privileged tier |
-| `SANDY_EXTRA_ENV` | (unset) | Comma-separated env-var names to forward into the container (e.g. `HA_TOKEN,LINEAR_API_KEY`). Values come from env (wins) or any of the four config files (workspace overrides host). Lets you wire up tokens for user-installed MCP servers without patching sandy. Privileged tier; workspace usage requires approval |
+| `SANDY_EXTRA_ENV` | (unset) | Comma-separated env-var names to forward into the container (e.g. `HA_TOKEN,LINEAR_API_KEY`). The name lists **compose** (2.4.0): host, approved workspace, and env lists are unioned (deduplicated), so a workspace adding a name never drops the host's. Values come from env (wins) or any of the four config files (workspace overrides host). Lets you wire up tokens for user-installed MCP servers without patching sandy. Privileged tier; workspace usage requires approval |
 | `SANDY_AGENT_ARGS` | (unset) | Extra CLI args appended to the agent command on **every** launch (bare, `-p`, `--start`, sandy-ui). Whitespace-split, never `eval`'d, ordered after sandy's flags and before command-line args. Privileged tier; workspace usage requires approval. For agent-specific flags prefer a per-sandbox `$SANDBOX_DIR/agent-args.<agent>` file (scoped to one agent) |
 | `SANDY_CHANNELS` | (unset) | Channel plugins to enable (e.g. `plugin:telegram@claude-plugins-official`) |
 | `TELEGRAM_BOT_TOKEN` | (unset) | Telegram bot token (from BotFather). Put in `.sandy/.secrets`, not `.sandy/config`. Privileged tier |
@@ -267,6 +299,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--remote` | Start in [remote-control](https://code.claude.com/docs/en/remote-control) server mode (connect from browser/phone) |
 | `--rebuild` | Force rebuild of the Docker image |
 | `--build-only` | Build images and exit (for CI) |
+| `--no-update-check` | Skip update checks for this launch (one-shot `SANDY_OFFLINE=1`; wins over config). Works with a bare launch, `-p`, `--build-only` and `--start` |
 | `--upgrade` | Update sandy to the latest version from GitHub |
 | `--agent <list>` | Agent(s) to launch — overrides `SANDY_AGENT` and `.sandy/config` (e.g. `--agent claude,gemini`) |
 | `-p "prompt"` | One-shot prompt (no interactive session) |
@@ -286,6 +319,8 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--print-state` / `--print-schema` / `--print-version` / `--validate-config` | Machine-readable JSON introspection (runtime state / static schema / version). Fast-path, no Docker needed for schema/version. See [`SPEC_INTROSPECTION.md`](SPEC_INTROSPECTION.md) |
 
 **`--start` exit codes:** `0` = ready, `6` = refused before launch (an approval couldn't be granted — answer it once interactively), `7` = container crash-looping, `8` = timed out waiting for the session.
+
+**Approvals under `--start`.** Run from a terminal, `--start` asks every launch approval — privileged keys in a workspace config, symlinks that escape the workspace, and a `.sandy/Dockerfile` build — on *that* terminal before it detaches, and only then starts the background session. Declining a symlink stops `--start` with `6`; declining the Dockerfile does not — the session starts on the base agent image, as it would in the foreground. A client with no terminal at all can't be asked, so each gate fails closed unless approved earlier; `SANDY_AUTO_APPROVE_PRIVILEGED=1` (env-only, for CI) bypasses the config-key and Dockerfile gates but **not** the symlink gate, deliberately.
 
 All other arguments are forwarded to `claude`.
 
@@ -407,7 +442,7 @@ OpenCode (sst/opencode) is a provider-agnostic agent — sandy doesn't bind it t
 
 Sandy seeds `~/.config/opencode/opencode.json` from the host's copy on first launch — point it at any provider OpenCode supports, including a local LLM.
 
-**Local LLM passthrough.** Pair OpenCode with `SANDY_LOCAL_LLM_HOST=<ip>:<port>` (e.g. `127.0.0.1:11434` for Ollama, `localhost:8000` for vLLM, etc.) to allow the container to reach a local LLM running on the Docker host. With the egress proxy on (default), the proxy's dedicated forward listener relays `host.docker.internal:<port>` to the real host; with the proxy off (`SANDY_EGRESS_NO_ISOLATION=1`, Linux) sandy instead inserts a single narrow `iptables ACCEPT` for that exact `host:port` and maps `host.docker.internal` to the bridge gateway (Linux Docker doesn't auto-resolve it). Either way sandy rejects world-open IPs (`0.0.0.0`) and bare IPs without ports. Edit `~/.config/opencode/opencode.json` to set the provider's `baseURL` to `http://host.docker.internal:<port>/v1`. The rule is removed on session exit. The rest of LAN remains blocked.
+**Local LLM passthrough.** Pair OpenCode with `SANDY_LOCAL_LLM_HOST=<ip>:<port>` (e.g. `127.0.0.1:11434` for Ollama, `localhost:8000` for vLLM, etc.) to allow the container to reach a local LLM running on the Docker host. With the egress proxy on (default), the proxy's dedicated forward listener relays `host.docker.internal:<port>` to the real host; with the proxy off (`SANDY_EGRESS=off`, Linux) sandy instead inserts a single narrow `iptables ACCEPT` for that exact `host:port` and maps `host.docker.internal` to the bridge gateway (Linux Docker doesn't auto-resolve it). Either way sandy rejects world-open IPs (`0.0.0.0`) and bare IPs without ports. Edit `~/.config/opencode/opencode.json` to set the provider's `baseURL` to `http://host.docker.internal:<port>/v1`. The rule is removed on session exit. The rest of LAN remains blocked.
 
 Headless mode (`-p` / `--print` / `--prompt "..."`) translates to `opencode run` — the prompt is positional. `--continue` / `-c` is silently dropped (no headless resume flag yet).
 
@@ -440,7 +475,9 @@ SANDY_AGENT=all                        # alias for claude,gemini,codex,opencode
 
 Panes appear in the order listed. Each agent has its own config dir(s): `~/.claude`, `~/.gemini`, `~/.codex`, and `~/.config/opencode` + `~/.local/share/opencode`. All panes share the same workspace mount. Exiting one pane leaves the others running. Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, `sandy-opencode`, `sandy-grok`); any multi-agent combo uses the `sandy-full` image, which bundles all five CLIs. **Note:** in the 4-agent 2×2 grid, tmux's pane-index numbering does not match the order panes were spawned in — sandy publishes a stable pane-identity contract for anything that needs to tell agents apart in-container (session name, pane option, spawn order); see "Pane-identity contract" in `SPECIFICATION.md`.
 
-**Feature support in multi-agent mode**: skill packs apply to the Claude pane only. Telegram channels use the host-side relay and are routed to pane 0 by default — override with `SANDY_CHANNEL_TARGET_PANE=0|1|2|3`. `--remote` is not supported in any multi-agent combo. `SANDY_LOCAL_LLM_HOST` works in any combo that includes opencode (or any agent that wants to reach a host-side service over the gateway).
+**Resizing panes**: `prefix` + `H` / `J` / `K` / `L` (the prefix is tmux's default, `Ctrl-b`) resizes the active pane by 5 cells, moving its border left / down / up / right, and repeats — press the prefix once, then tap the letter as many times as you need. Sandy adds these because tmux's own resize keys do not work on macOS out of the box: `prefix` + Ctrl-Arrow is captured by Mission Control, and `prefix` + Option-Arrow needs the terminal's "Option as Meta" setting. Dragging a pane border with the mouse also works.
+
+**Feature support in multi-agent mode**: skill packs apply to the Claude pane only. Telegram channels use the host-side relay and are routed to the first agent in `SANDY_AGENT` by default — override with `SANDY_CHANNEL_TARGET_PANE=0|1|2|3` (the Nth agent, 0-based; sandy finds that agent's pane by name, so the 2×2 grid routes correctly). `--remote` is not supported in any multi-agent combo. `SANDY_LOCAL_LLM_HOST` works in any combo that includes opencode (or any agent that wants to reach a host-side service over the gateway).
 
 ### Screenshot skill (`/ss`)
 
@@ -628,19 +665,23 @@ The session marker (`/etc/sandy-session.json`) carries `relay.source`, `relay.pa
 
 ### Egress proxy — cross-platform isolation
 
-The egress proxy is the recommended isolation mechanism and the **only** one that works on macOS. It routes the agent through a small proxy sidecar on a Docker `--internal` network (no route off the bridge except through the proxy), so it behaves identically on macOS and Linux. The posture is set by two mutually-exclusive boolean knobs (default **permissive**):
+The egress proxy is the recommended isolation mechanism and the **only** one that works on macOS. It routes the agent through a small proxy sidecar on a Docker `--internal` network (no route off the bridge except through the proxy), so it behaves identically on macOS and Linux. The posture is one key, `SANDY_EGRESS` (default **permissive**):
 
 | Setting | Mode | Behavior |
 |---|---|---|
-| *(neither set)* | permissive (default) | Blocks private/LAN/host/cloud-metadata destinations, allows all internet. Closes the macOS LAN gap with ~zero friction. |
-| `SANDY_EGRESS_STRICT=1` | strict | Allows only a built-in default allowlist (model providers, GitHub incl. SSH, npm/PyPI/crates/Go/Debian) plus `SANDY_ALLOW_HOSTS`. Fails closed on everything else. **Strengthens isolation — safe to commit in a workspace config.** |
-| `SANDY_EGRESS_NO_ISOLATION=1` | off | Linux iptables only; macOS has no network isolation (see below). **Weakens isolation — a workspace `.sandy/config` setting it triggers an approval prompt** so a cloned repo can't silently disable your sandbox. |
+| `SANDY_EGRESS=permissive` *(or unset)* | permissive (default) | Blocks private/LAN/host/cloud-metadata destinations and well-known DNS-over-HTTPS resolvers, allows all other internet. Closes the macOS LAN gap with ~zero friction. |
+| `SANDY_EGRESS=strict` | strict | Allows only a built-in default allowlist (model providers, GitHub incl. SSH, npm/PyPI/crates/Go/Debian) plus `SANDY_ALLOW_HOSTS`. Fails closed on everything else. **Strengthens isolation — safe to commit in a workspace config.** |
+| `SANDY_EGRESS=off` | off | Linux iptables only; macOS has no network isolation (see below). **Weakens isolation — a workspace `.sandy/config` setting it triggers an approval prompt** so a cloned repo can't silently disable your sandbox. |
 
 ```sh
-SANDY_EGRESS_STRICT=1   # in ~/.sandy/config or a workspace .sandy/config
+SANDY_EGRESS=strict   # in ~/.sandy/config or a workspace .sandy/config
 ```
 
-> The older `SANDY_EGRESS_PROXY=0|1|2` still works as a **deprecated alias** (`0`→off, `1`→permissive, `2`→strict) with a migration warning; its `=0` is approval-gated from a workspace config just like `SANDY_EGRESS_NO_ISOLATION=1`.
+**A workspace `SANDY_EGRESS=permissive` also triggers the approval prompt.** A workspace `.sandy/config` outranks `~/.sandy/config` for the same key, so on a host that chose `strict`, a cloned repository's one-line `SANDY_EGRESS=permissive` would otherwise re-open the whole internet with no prompt (#371; sandy 2.0.0–2.3.x gated only `off`). Only `strict` — the tightening value — is free from a workspace. The prompt appears even when your host is already permissive, because the gate judges the value, not what your host resolved; approving it once for that workspace silences it.
+
+**Permissive mode refuses well-known DNS-over-HTTPS resolvers** (`dns.google`, `cloudflare-dns.com`, `dns.quad9.net`, `doh.opendns.com`, `dns.nextdns.io`, … — the list is in `proxy/doh.go`). A tool that resolves names over HTTPS instead of DNS would otherwise take resolution off the path sandy observes, so `SANDY_EGRESS_LOG`'s "what did this session reach" summary would be incomplete. The refusal is logged in `proxy.log` like any other denial. If you genuinely route DNS that way, add the resolver to `SANDY_ALLOW_HOSTS` — an allowlisted provider is reachable again. The list is **best-effort and enumerable, not complete**: an unlisted or self-hosted resolver, or one addressed by raw IP through the proxy, is not caught. For a real guarantee use `SANDY_EGRESS=strict`, which already denies every resolver you have not allowlisted.
+
+> The pre-2.0 keys still work and are listed under **Deprecated**: `SANDY_EGRESS_STRICT=1`/`=0` (strict/permissive), `SANDY_EGRESS_NO_ISOLATION=1` (off), and the older `SANDY_EGRESS_PROXY=0|1|2` alias (`0`→off, `1`→permissive, `2`→strict). If `SANDY_EGRESS` is set it wins and the old values are ignored with a notice. Their weakening values are approval-gated from a workspace the same way: `SANDY_EGRESS_STRICT=0`, `SANDY_EGRESS_NO_ISOLATION=1`, `SANDY_EGRESS_PROXY=0` and `=1`.
 
 Add extra reachable hosts with `SANDY_ALLOW_HOSTS` (privileged; comma-separated `host`, `*.suffix`, or `host:port`). git-over-SSH (`SANDY_SSH=agent`) is tunneled through the proxy automatically on both platforms; on macOS, host-agent *key signing* is unavailable under the proxy (use `SANDY_SSH=token` for a fully-supported HTTPS path). A local LLM (`SANDY_LOCAL_LLM_HOST`) is forwarded through the proxy rather than an iptables hole. See `CLAUDE.md` → "Egress Proxy" for the full topology.
 
@@ -659,11 +700,11 @@ This works in **any** `SANDY_SSH` mode. If your workspace reaches other machines
 
 ### macOS (Docker Desktop) — not isolated when the proxy is off
 
-**Warning:** if you turn the proxy off with `SANDY_EGRESS_NO_ISOLATION=1` (the proxy is on by default), Docker Desktop does *not* provide LAN isolation. The container *can* reach `host.docker.internal` (→ your Mac's gateway), your host's `localhost` services, and any device on your physical LAN — your home router at `192.168.1.1`, a NAS, a printer, an internal dashboard, your SSH daemon. A stress test in April 2026 opened a live TCP connection from inside the container to the host's SSHD and read its banner (see `ISOLATION_STRESS.md`, finding F2).
+**Warning:** if you turn the proxy off with `SANDY_EGRESS=off` (the proxy is on by default), Docker Desktop does *not* provide LAN isolation. The container *can* reach `host.docker.internal` (→ your Mac's gateway), your host's `localhost` services, and any device on your physical LAN — your home router at `192.168.1.1`, a NAS, a printer, an internal dashboard, your SSH daemon. A stress test in April 2026 opened a live TCP connection from inside the container to the host's SSHD and read its banner (see `ISOLATION_STRESS.md`, finding F2).
 
 As defense-in-depth, sandy nullifies the Docker Desktop magic hostnames (`gateway.docker.internal`, `metadata.google.internal`, and — when `SANDY_SSH != agent` — `host.docker.internal`) via `--add-host`, and prints a launch-time warning banner on macOS. But **raw-IP access is unaffected**, and the banner is a warning, not a fix.
 
-**Fix:** leave the proxy on (the default) or set `SANDY_EGRESS_STRICT=1` — both apply real isolation on macOS. Otherwise treat proxy-off macOS sandy as "process and filesystem isolation only; no network isolation."
+**Fix:** leave the proxy on (the default) or set `SANDY_EGRESS=strict` — both apply real isolation on macOS. Otherwise treat proxy-off macOS sandy as "process and filesystem isolation only; no network isolation."
 
 ### Linux
 Sandy automatically inserts `iptables` rules into the `DOCKER-USER` chain that block all RFC 1918 traffic from the container's bridge interface:
@@ -676,7 +717,7 @@ Sandy automatically inserts `iptables` rules into the `DOCKER-USER` chain that b
 | `169.254.0.0/16` | Link-local |
 | `100.64.0.0/10` | CGNAT, Tailscale |
 
-Rules are automatically cleaned up when sandy exits. Stale rules from a previous unclean exit are cleaned up on startup. If `iptables` is not accessible, sandy warns that LAN isolation is not active.
+Rules are automatically cleaned up when sandy exits. Stale rules from a previous unclean exit are cleaned up on startup. If `iptables` is not accessible, sandy **refuses to launch**. Each DROP rule is then re-checked with `iptables -C` after insertion, and if any is missing — a readable chain can still refuse an insert — sandy refuses too, naming the range, rather than reporting isolation it does not have. `SANDY_ALLOW_NO_ISOLATION=1` overrides both refusals with a warning instead.
 
 ## Verifying Isolation
 
@@ -881,7 +922,11 @@ Sandy detects this file and builds a project-specific image layered on top of th
 
 This is the right approach for system packages (`apt-get`), large binary tools, or anything that needs root to install. See [`examples/`](examples/) for ready-to-use configurations.
 
-**Approval gate.** Because the build runs its `RUN` commands on your **host** Docker daemon with **unfiltered network** (build-time is not behind the egress proxy) and takes the whole `.sandy/` directory as context, sandy will not build a `.sandy/Dockerfile` it hasn't seen approved. The first time it appears — or after any change to the Dockerfile or a file it `COPY`s — sandy prints it and asks `y/N` before building; the approval is remembered per workspace (`~/.sandy/approvals/dockerfile-<hash>.list`, revoke by deleting it). In a non-interactive session (`-p`, `--start`, sandy-ui, no TTY) sandy **fails closed**: it skips the project build and launches the base agent image, so you need to approve it once interactively from that directory first. `.sandy/` is itself mounted read-only during a session, so the agent can't edit the Dockerfile mid-run.
+**Approval gate.** Because the build runs its `RUN` commands on your **host** Docker daemon with **unfiltered network** (build-time is not behind the egress proxy) and takes the whole `.sandy/` directory as context, sandy will not build a `.sandy/Dockerfile` it hasn't seen approved. The first time it appears — or after any change to the Dockerfile or a file it `COPY`s — sandy prints it and asks `y/N` before building; the approval is remembered per workspace (`~/.sandy/approvals/dockerfile-<hash>.list`, revoke by deleting it). `sandy --start` from a terminal asks this on that terminal before the session detaches (2.4.0, #296); answering `N` there means "use the base image", not "don't start". Where nobody can answer — `-p`, a `--start` with no terminal, no TTY — sandy **fails closed**: it skips the project build and launches the base agent image, so you need to approve it once interactively from that directory first. `SANDY_AUTO_APPROVE_PRIVILEGED=1` skips this prompt entirely — it exists for sandy's own test harnesses, and it means an unreviewed Dockerfile builds on your host. The prompt says which question it is asking — **no prior approval** for this workspace, or **changed since you approved it on <date>** — and gives a reading rule: a `RUN` line that fetches and installs from a package registry is expected; one that does anything else (pipes a URL to a shell, writes outside the image, reads from the build context) is what deserves your attention.
+
+**What stops an agent planting one.** `.sandy/` is mounted read-only during a session **only if it already existed when the session started** — like every protected directory, the mount is existence-gated (see [Protected files](#protected-files-and-directories)). In a workspace with no `.sandy/`, an agent *can* create `.sandy/Dockerfile`; sandy reports it at session end as a newly-appeared protected path. What keeps such a file from building is this approval: the next launch sees a context it has no approval for and asks, saying so — nothing builds unreviewed unless `SANDY_AUTO_APPROVE_PRIVILEGED=1` is set.
+
+**Network check scope.** Before any build sandy checks that its **own** build hosts (`deb.debian.org`, `registry.npmjs.org`) are reachable, so a captive portal defers a rebuild instead of breaking the launch. That check knows nothing about what *your* Dockerfile fetches (`rubygems.org`, `pypi.org`, a vendor CDN): on a partly reachable network the check can pass and the project build still fail at its own download step. Sandy says so when the project build fails.
 
 ### Automatic environment detection
 
@@ -891,6 +936,7 @@ Sandy checks your project on startup and handles common issues:
 - **Host `.venv/`** — shadowed with a sandbox-owned overlay (see above). The host venv is never modified; the container gets its own materialized venv matching the host's Python version, auto-activated via `VIRTUAL_ENV` + `PATH`. Drift between the overlay and `.python-version` triggers a warning on relaunch
 - **Foreign native modules** — if `node_modules/` contains native addons compiled for a different platform (e.g. macOS), sandy warns with `npm rebuild` as the fix
 - **Orphaned pip user-site** — if persistent `pip install --user` packages were installed under a different Python minor version than the image now ships (e.g. after a base-image Python bump), sandy warns with the old path and a reinstall/cleanup pointer
+- **Host timezone** (2.4.0) — the container clock follows the host: sandy passes your zone as `TZ` at launch (from `$TZ` if set, else `/etc/localtime`, else `/etc/timezone`), so `date`, `ls -l`, git and the tmux status clock read local time. Set `TZ` before launching to override it. Nothing to rebuild when you travel — it is re-read every launch. Timestamps sandy itself records (`sandy-session.json`, `WORKSPACE.json`, container labels) stay UTC
 
 These checks run on every session start and add negligible overhead.
 
@@ -955,7 +1001,7 @@ SANDY_CHANNELS=plugin:telegram@claude-plugins-official plugin:discord@claude-plu
 
 ### Channels with Gemini / Codex / multi-agent mode
 
-For any `SANDY_AGENT` value other than single-agent `claude`, sandy uses a **host-side Telegram relay** instead of the in-container plugin — it long-polls the Telegram Bot API on the host and injects messages into the container's tmux session via `docker exec … tmux send-keys`. This is agent-agnostic but lower-fidelity: no chat threading, no edit-message updates, no attachments. Set `SANDY_CHANNEL_TARGET_PANE=0|1|2|3` to route messages to a specific pane in multi-agent mode (default is pane 0 = the first agent listed in `SANDY_AGENT`). Discord via relay is not supported yet — use single-agent `SANDY_AGENT=claude` for Discord.
+For any `SANDY_AGENT` value other than single-agent `claude`, sandy uses a **host-side Telegram relay** instead of the in-container plugin — it long-polls the Telegram Bot API on the host and injects messages into the container's tmux session via `docker exec … tmux send-keys`. This is agent-agnostic but lower-fidelity: no chat threading, no edit-message updates, no attachments. Set `SANDY_CHANNEL_TARGET_PANE=0|1|2|3` to route messages to a specific agent in multi-agent mode — `N` is the Nth agent listed in `SANDY_AGENT`, 0-based (default `0` = the first); the relay looks up that agent's pane by its tag rather than trusting the tmux pane number. Discord via relay is not supported yet — use single-agent `SANDY_AGENT=claude` for Discord.
 
 > ⚠️ **`SANDY_CHANNELS` format for the relay is different.** The relay matches the **bare channel name** — `SANDY_CHANNELS=telegram` — *not* the `plugin:telegram@claude-plugins-official` form used for single-agent `claude` above (that qualified form is what `claude --channels` needs, but it won't trigger the relay). Use bare names when the relay is in play (any non-single-`claude` `SANDY_AGENT`). This dual-format wart is tracked in [#30](https://github.com/rappdw/sandy/issues/30) and will be unified.
 
@@ -966,6 +1012,55 @@ For any `SANDY_AGENT` value other than single-agent `claude`, sandy uses a **hos
 ```
 .sandy/.secrets
 ```
+
+## Troubleshooting
+
+### The build hangs at "Building sandbox image" on a VM (generic CPU model)
+
+**Symptom.** On a QEMU/KVM virtual machine — Proxmox is the common case — the
+first launch stops at `[sandy] Building sandbox image (may take a few
+minutes)...` and never finishes. The build makes no further progress, and one process
+sits at ~90–100% CPU indefinitely, typically
+`/home/sandy/.claude/downloads/claude-<version>-linux-x64 install` (or the Grok
+Build binary being installed the same way).
+
+**Cause.** Claude Code and Grok Build ship as **native binaries** with an
+embedded JavaScript runtime, and the image build runs each one's own installer
+(Claude Code's installer ends by executing the downloaded binary's `install`
+step). On a VM that uses the hypervisor's **generic CPU model** — `kvm64` or
+`qemu64`, which `lscpu` reports as *Common KVM processor* / *QEMU Virtual CPU*
+— the guest is offered only the x86-64 baseline feature set: no `sse4_2`,
+`popcnt`, `avx` or `avx2`. The runtime then spins in userspace instead of
+failing. It is not a network or egress stall, and not cross-architecture
+emulation (both sides are x86_64); the same build works in CI and on real
+hardware because those expose the full feature set.
+
+**How to tell.** On the VM:
+
+```bash
+lscpu | grep 'Model name'                        # "Common KVM processor" / "QEMU Virtual CPU" is the tell
+grep -oE 'sse4_2|popcnt|avx2' /proc/cpuinfo | sort -u   # empty, or missing entries, means a generic model
+/lib64/ld-linux-x86-64.so.2 --help | grep x86-64-v      # glibc >= 2.33: is x86-64-v2 "supported"?
+```
+
+And, to rule out the network: find the spinning process (`ps aux | grep
+'downloads/claude'` on the VM — `docker build` steps are ordinary host
+processes on Linux) and run `sudo strace -f -p <pid>`. A process in state `R`
+making **no syscalls at all** is a pure userspace spin; a network stall would
+be blocked in `connect`/`recv`/`poll`.
+
+**Fix.** Give the VM real CPU features — the agent binaries need at least an
+**x86-64-v2** feature level:
+
+- **Proxmox**: VM → Hardware → Processors → Type → `host` (or `x86-64-v2-AES`
+  / `x86-64-v3` if live migration between different hosts rules out `host`).
+- **libvirt / virt-manager**: `<cpu mode='host-passthrough'/>`, or tick "Copy
+  host CPU configuration". **Plain QEMU**: `-cpu host`.
+- **Cold-boot the VM** — stop it, then start it. A reboot from inside the guest
+  keeps the old CPU model; the type only changes on a fresh power cycle.
+- Re-check with the `grep` above (the flags should now appear), then run
+  `sandy` again. An interrupted build is retried on the next launch; no
+  `--rebuild` is needed.
 
 ## Upgrading to 2.0
 
@@ -986,14 +1081,14 @@ sandy --reset-sandbox --all --dry-run                  # see what it will do
 sandy --reset-sandbox --all --keep-history --yes       # migrate
 ```
 
-`--keep-history` preserves `claude/projects/` — every session transcript and all auto-memory. **It is not the default and `--yes` does not choose it**, because the same command is also how you remediate a sandbox you distrust, and there memory is the thing you most want gone: it reaches the agent's context every session, so a compromised session writing to it is persistent injection with no expiry. Run interactively and sandy asks; run non-interactively and it requires `--keep-history` or `--purge-history` rather than guessing.
+`--keep-history` preserves `claude/projects/` — every Claude session transcript and all auto-memory — **and nothing else**. Other agents' own history (`codex/`, `gemini/`, …), anything else under `claude/`, and any directory a host-side tool keeps in the sandbox are destroyed even with it; the reset plan **names each of them** under *NOT kept by --keep-history* (derived from what is actually in the sandbox), so stash anything you need first. **It is not the default and `--yes` does not choose it**, because the same command is also how you remediate a sandbox you distrust, and there memory is the thing you most want gone: it reaches the agent's context every session, so a compromised session writing to it is persistent injection with no expiry. Run interactively and sandy asks; run non-interactively and it requires `--keep-history` or `--purge-history` rather than guessing.
 
 | destroyed (rebuilt on next launch) | preserved |
 |---|---|
 | `pip/`, `uv/`, `npm-global/`, `go/`, `cargo/` package caches | `WORKSPACE.json` (lineage) |
 | the `venv/` overlay | — |
 | per-agent state: `claude/`, `gemini/`, `codex/`, `opencode/`, `grok/` | `agent-args.<agent>` (per-agent launch args) |
-| `.claude.json`, installed plugins, approvals | `.handoff-enabled` |
+| `.claude.json`, installed plugins, approvals | — |
 | `claude/projects/` — transcripts and auto-memory, **unless `--keep-history`** | `claude/projects/` **with `--keep-history`** |
 
 ### Back up anyway
@@ -1064,6 +1159,7 @@ Removals are loud where sandy can see them: a removed config key is a hard error
 - `no-new-privileges` prevents privilege escalation
 - Credentials are seeded into per-project sandboxes, not shared across projects
 - claude.ai account connectors are suppressed by default (`SANDY_CLAUDE_CONNECTORS=1` to opt in); `SANDY_SUSPICIOUS=1` additionally strips the OAuth refresh token so a distrusted workspace only ever sees a short-lived access token
+- Claude Code's own `/sandbox` (`sandbox.enabled`) is forced **off** in the sandbox's `settings.json` every launch, even if your host settings turn it on — sandy's container is the boundary and its egress proxy the one policy chokepoint, so an inner sandbox would only add a second, uncoordinated proxy. Your other `sandbox.*` settings are left as they are, and a repository's own `.claude/settings.json` can still turn it on (Claude Code gives project settings precedence)
 - The working directory is bind-mounted read/write — Claude can modify your files there (that's the point)
 ### Protected files and directories
 
@@ -1089,7 +1185,7 @@ The workspace is bind-mounted read/write so Claude can modify your project files
 | `.github/workflows/` | Blocks CI pipeline escape (opt-out via `SANDY_ALLOW_WORKFLOW_EDIT=1`) |
 | `.circleci/`, `.devcontainer/` | Blocks CircleCI and devcontainer escape |
 | `.claude/settings.json`, `.claude/settings.local.json`, `.claude/hooks/` | Blocks agent→host Claude Code hook injection (a host `claude` run in the same dir would otherwise execute an agent-written hook) |
-| `.sandy/` | Blocks tampering with sandy's own build inputs; a per-project `.sandy/Dockerfile` build is additionally approval-gated |
+| `.sandy/` | Blocks tampering with sandy's own build inputs **when `.sandy/` exists at launch** (existence-gated, like every row here — a session that starts without one can create it, and is warned about at session end). A per-project `.sandy/Dockerfile` build is additionally approval-gated by a hash of the whole build context, which is what stops a planted one from building unreviewed |
 
 A redirected `core.hooksPath` (e.g. `.githooks/`) is resolved at launch and its target directory is mounted read-only too, so the protection follows git's actual hook path rather than only the default `.git/hooks/`.
 

@@ -195,6 +195,15 @@ _SECTION_ON=true
 # -9999 as the initial "last refresh" so the very first eligible section
 # always refreshes (age is trivially >= 60).
 _CRED_LAST_REFRESH=-9999
+# The directory the suite was LAUNCHED from, captured when this block is
+# sourced -- before setup_project() or any section `cd`s into a scratch
+# workspace. The refresh command is a string the caller wrote relative to
+# where they launched us (CI: `bash test/ci-wif-access-token.sh`, from the
+# repo root), so it has to run there. It used to run in whatever directory
+# the suite happened to be in: the first section's refresh worked, and every
+# one after the first setup_project() failed `No such file or directory`,
+# rc=127 (#257). The token then silently stopped refreshing.
+_INT_LAUNCH_DIR="${_INT_LAUNCH_DIR:-$PWD}"
 _cred_refresh_if_due() {
     [ -n "${SANDY_INTEG_CRED_REFRESH_CMD:-}" ] || return 0
     [ "$_SECTION_ON" = true ] || return 0
@@ -202,9 +211,15 @@ _cred_refresh_if_due() {
     _age=$(( SECONDS - _CRED_LAST_REFRESH ))
     [ "$_age" -ge 60 ] || return 0
     # RC-guarded, never `|| true` before the rc read: a refresh failure must
-    # warn and keep the previous token, not silently vanish or abort the suite.
+    # be recorded and keep the previous token, not silently vanish or abort
+    # the suite. The subshell cd scopes the directory change to the refresh.
     local _rc=0 _tok=""
-    _tok="$(bash -c "$SANDY_INTEG_CRED_REFRESH_CMD")" || _rc=$?
+    # `exec`: bash 3.2 forks the last command of a && list inside $( ), and
+    # under the suite's set -E the inherited ERR trap then fires IN the
+    # subshell on a failed refresh -- noise the rc guard below cannot stop,
+    # and exactly what §103(b1) forbids. bash 5 execs it implicitly, so only
+    # macOS saw it (and the pre-#257 bare $(bash -c ...) had it too).
+    _tok="$(cd "$_INT_LAUNCH_DIR" && exec bash -c "$SANDY_INTEG_CRED_REFRESH_CMD")" || _rc=$?
     if [ "$_rc" -eq 0 ] && [ -n "$_tok" ]; then
         export ANTHROPIC_AUTH_TOKEN="$_tok"
         _CRED_LAST_REFRESH=$SECONDS
@@ -214,8 +229,17 @@ _cred_refresh_if_due() {
             printf '::add-mask::%s\n' "$_tok"
         fi
     else
-        printf "  \033[0;33m! credential refresh failed for section %s (rc=%d) -- keeping previous token\033[0m\n" \
-            "$_CUR_SECTION_ID" "$_rc"
+        # A FAILURE, not a yellow `!` (#257). That line sat mid-log for an
+        # unknown number of runs while the mechanism was inert, and the run
+        # was green. The section still proceeds on the previous token -- it
+        # may well be valid -- but the run is red at the end, and under
+        # GitHub Actions the failure is an annotation on the run page rather
+        # than one line in a hundred sections of log.
+        fail "credential refresh failed for section $_CUR_SECTION_ID (rc=$_rc) -- keeping previous token"
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then
+            printf '::error title=Credential refresh failed::section %s: SANDY_INTEG_CRED_REFRESH_CMD exited %d (run from %s); continuing on the previous token\n' \
+                "$_CUR_SECTION_ID" "$_rc" "$_INT_LAUNCH_DIR"
+        fi
     fi
 }
 
@@ -642,11 +666,13 @@ done
 # SKIP on these rather than FAIL. One variable, because the same regex was
 # previously pasted at every site and drifted as one: a real host ran dry of
 # OpenAI credits and the resulting "You have no credits remaining" stream error
-# matched nothing, failing two codex sections as if sandy were broken.
+# matched nothing, failing two codex sections as if sandy were broken. It
+# happened again with codex's "ERROR: Quota exceeded. Check your plan and
+# billing details." (PR #391's integration run), hence the reversed phrasing.
 # Deliberately tight: billing/quota/rate/auth phrasings only — never a bare
 # "billing" or "error", which would mask genuine sandy faults that merely
 # mention them.
-_API_ERR_RE='HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota|no credits remaining|exceeded your current quota'
+_API_ERR_RE='HTTP error: [45][0-9][0-9]|[45][0-9][0-9] (Unauthorized|Forbidden|Too Many Requests)|rate.?limit|insufficient.?quota|no credits remaining|exceeded your current quota|quota exceeded'
 
 HAS_CLAUDE_WIF=false
 if [ -n "${ANTHROPIC_FEDERATION_RULE_ID:-}" ] && [ -n "${ANTHROPIC_IDENTITY_TOKEN:-}" ]; then
@@ -1754,7 +1780,11 @@ if [ "$HAS_CLAUDE" = true ]; then
         # (a) Below-floor marker → sandy must refuse with the recreation hint.
         echo "0.5.0" > "$_marker"
         _out="$(run_sandy_headless -- -p "should not run")"
-        if echo "$_out" | grep -q "below the" && echo "$_out" | grep -q "refuses to launch against it"; then
+        # The 2.0 message names the rename, not a generic floor (#248), so it
+        # no longer says "below the ... refuses to launch against it"; this
+        # grepped the 1.x wording and failed against a correct refusal. Anchor
+        # on the refusal line and on the migration command it prints.
+        if echo "$_out" | grep -q "cannot be used by" && echo "$_out" | grep -q "reset-sandbox"; then
             pass "below-floor sandbox is hard-refused at launch"
         else
             fail "below-floor sandbox is hard-refused at launch"
@@ -1770,7 +1800,9 @@ if [ "$HAS_CLAUDE" = true ]; then
         # (b) Restore an above-floor marker → sandy proceeds (no refuse message).
         echo "${_orig_ver:-$("$SANDY_SCRIPT" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)}" > "$_marker"
         _out2="$(run_sandy_headless -- -p "reply with exactly one word: ok")"
-        if echo "$_out2" | grep -q "refuses to launch against it"; then
+        # Same message as (a). With the 1.x wording this negative check could
+        # never fail -- the string no longer exists -- so it proved nothing.
+        if echo "$_out2" | grep -q "cannot be used by"; then
             fail "above-floor sandbox launches without the floor refusal"
             echo "    (output: $(echo "$_out2" | head -4 | tr '\n' ' '))" >&2
         else

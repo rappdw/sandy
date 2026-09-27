@@ -54,10 +54,10 @@
 # GEOMETRIC ROLE from its actual left/top coordinates and checks agent
 # identity against that role — robust to the indexing quirk, and testing the
 # real promise made to users rather than an incidental index coincidence that
-# only happens to hold for the 2- and 3-pane layouts. If a maintainer also
-# wants pane_index itself to track spawn order (relevant to
-# SANDY_CHANNEL_TARGET_PANE, which selects a pane by raw index), that is a
-# separate concern from this issue's "does the topology look right" scope.
+# only happens to hold for the 2- and 3-pane layouts. SANDY_CHANNEL_TARGET_PANE
+# used to select a pane by raw index and misrouted on exactly this quirk; since
+# #65 the Telegram relay resolves N -> agent name -> the pane carrying that
+# @sandy_pane_agent tag (run-tests.sh §160), so pane_index is never assumed.
 set -uo pipefail
 
 SANDY="${SANDY:-./sandy}"

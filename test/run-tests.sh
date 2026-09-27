@@ -9913,6 +9913,12 @@ set -euo pipefail
 trap 'printf "[err-trap] line %d: %s exited %d\n" "$LINENO" "$BASH_COMMAND" "$?" >&2' ERR
 set -E
 
+# The real suite defines these before the hook block; fail() needs them.
+PASS=0; FAIL=0; SKIP=0; ERRORS=()
+# Source the block from the LAUNCH directory ($2, a fake repo root carrying
+# test/refresh-rel.sh), exactly as the workflow launches the suite from the
+# repo root -- the block captures its launch dir at source time.
+cd "$2"
 # shellcheck source=/dev/null
 . "$1"
 
@@ -9927,7 +9933,9 @@ printf 'SCEN2_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-<unset>}"
 
 # SCEN3: force due, but the refresh command FAILS -- must warn, must NOT
 # abort the harness (proves the RC-guard, not `|| true`), must keep the
-# previous token.
+# previous token. GITHUB_ACTIONS is unset first: CI sets it, and this
+# scenario asserts the plain-terminal shape (no annotation).
+unset GITHUB_ACTIONS 2>/dev/null || true
 export ANTHROPIC_AUTH_TOKEN="tok-A"
 _CRED_LAST_REFRESH=-9999
 _scen3_out="$(mktemp)"
@@ -9939,7 +9947,43 @@ if grep -q "credential refresh failed" "$_scen3_out"; then
 else
     printf 'SCEN3_WARNED=no\n'
 fi
+# #257: the failure is RECORDED (the run ends red), not a yellow line.
+printf 'SCEN3_FAILS=%s\n' "$FAIL"
+if grep -q '^::error' "$_scen3_out"; then
+    printf 'SCEN3_ANNOTATED=yes\n'
+else
+    printf 'SCEN3_ANNOTATED=no\n'
+fi
 rm -f "$_scen3_out"
+FAIL=0; ERRORS=()
+
+# SCEN3b: the same failure under GITHUB_ACTIONS is an ::error annotation.
+_CRED_LAST_REFRESH=-9999
+_scen3b_out="$(mktemp)"
+GITHUB_ACTIONS=true SANDY_INTEG_CRED_REFRESH_CMD='exit 7' section "3b. Third-b" >"$_scen3b_out"
+if grep -q '^::error title=Credential refresh failed::section 3b: .*exited 7' "$_scen3b_out"; then
+    printf 'SCEN3B_ANNOTATED=yes\n'
+else
+    printf 'SCEN3B_ANNOTATED=no\n'
+fi
+rm -f "$_scen3b_out"
+FAIL=0; ERRORS=()
+
+# SCEN3c (#257): a RELATIVE refresh command, run after the suite has cd-ed
+# into a scratch workspace (what setup_project() does) -- the CI shape,
+# `bash test/ci-wif-access-token.sh`, that failed rc=127 on every section
+# after the first. It must still resolve against the launch directory.
+_scen3c_ws="$(mktemp -d)"
+cd "$_scen3c_ws"
+_CRED_LAST_REFRESH=-9999
+export ANTHROPIC_AUTH_TOKEN="tok-OLD"
+SANDY_INTEG_CRED_REFRESH_CMD='bash test/refresh-rel.sh' section "3c. Third-c" >/dev/null
+printf 'SCEN3C_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-<unset>}"
+printf 'SCEN3C_FAILS=%s\n' "$FAIL"
+printf 'SCEN3C_CWD_UNCHANGED=%s\n' "$([ "$(pwd -P)" = "$(cd "$_scen3c_ws" && pwd -P)" ] && echo yes || echo no)"
+cd "$2"
+rm -rf "$_scen3c_ws"
+FAIL=0; ERRORS=()
 
 # SCEN4: force due, GITHUB_ACTIONS set -- ::add-mask:: must be emitted.
 _CRED_LAST_REFRESH=-9999
@@ -9992,8 +10036,13 @@ S103DRIVER
 chmod +x "$_S103_DRIVER"
 
 _S103_DRIVER_OUT="$(mktemp)"
+# A fake repo root to launch from, carrying the relative refresh script SCEN3c
+# names -- the stand-in for test/ci-wif-access-token.sh.
+_S103_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S103_ROOT/test"
+printf '#!/bin/sh\necho tok-REL\n' > "$_S103_ROOT/test/refresh-rel.sh"
 _s103_rc=0
-bash "$_S103_DRIVER" "$_S103_HOOKSRC" >"$_S103_DRIVER_OUT" 2>&1 && _s103_rc=0 || _s103_rc=$?
+bash "$_S103_DRIVER" "$_S103_HOOKSRC" "$_S103_ROOT" >"$_S103_DRIVER_OUT" 2>&1 && _s103_rc=0 || _s103_rc=$?
 
 check "§103(b1) the driver harness completed all scenarios without the ERR trap firing (mutation: an unguarded \`|| true\` swallowing a real error would let this pass even on broken code -- exit code AND the completion marker are both asserted)" \
     bash -c 'test "$1" -eq 0 && grep -q "ALL_SCENARIOS_COMPLETE=yes" "$2" && ! grep -q "err-trap" "$2"' \
@@ -10008,6 +10057,18 @@ check "§103(b5) a FAILING refresh command warns" \
     bash -c 'grep -q "^SCEN3_WARNED=yes$" "$1"' -- "$_S103_DRIVER_OUT"
 check "§103(b6) a FAILING refresh command keeps the previous token (mutation: exporting an empty/garbage token on failure)" \
     bash -c 'grep -q "^SCEN3_TOKEN=tok-A$" "$1"' -- "$_S103_DRIVER_OUT"
+check "§103(b6a) a FAILING refresh is RECORDED as a failure, so the run ends red -- a yellow line mid-log hid an inert refresh for an unknown number of runs (#257; mutation: printing instead of fail())" \
+    grep -qx 'SCEN3_FAILS=1' "$_S103_DRIVER_OUT"
+check "§103(b6b) ...and emits no ::error annotation outside GitHub Actions" \
+    grep -qx 'SCEN3_ANNOTATED=no' "$_S103_DRIVER_OUT"
+check "§103(b6c) under GITHUB_ACTIONS a failing refresh is an ::error annotation naming the section and rc, visible on the run page (#257; mutation: dropping the annotation)" \
+    grep -qx 'SCEN3B_ANNOTATED=yes' "$_S103_DRIVER_OUT"
+check "§103(b6d) a RELATIVE refresh command still resolves after the suite has cd-ed into a scratch workspace -- the CI shape that failed rc=127 on every section after the first setup_project() (#257; mutation: dropping the cd to the launch dir)" \
+    grep -qx 'SCEN3C_TOKEN=tok-REL' "$_S103_DRIVER_OUT"
+check "§103(b6e) ...recording no failure" \
+    grep -qx 'SCEN3C_FAILS=0' "$_S103_DRIVER_OUT"
+check "§103(b6f) ...and the directory change is scoped to the refresh: the suite is still in its workspace afterwards (mutation: a cd outside the subshell would move every later section)" \
+    grep -qx 'SCEN3C_CWD_UNCHANGED=yes' "$_S103_DRIVER_OUT"
 check "§103(b7) ::add-mask:: IS emitted under GITHUB_ACTIONS (SCEN4)" \
     bash -c 'grep -q "^SCEN4_MASKED=yes$" "$1"' -- "$_S103_DRIVER_OUT"
 check "§103(b8) ::add-mask:: is NOT emitted without GITHUB_ACTIONS (SCEN5, mutation: emitting it unconditionally would leak the marker into a plain terminal run)" \
@@ -10020,7 +10081,7 @@ check "§103(b10) age 61s IS due — the section gets a fresh token (pins the 60
 check "§103(b11) age 59s is NOT due — the previous token is kept (pins the other side of the same threshold)" \
     grep -qx 'SCEN8_TOKEN=tok-KEEP' "$_S103_DRIVER_OUT"
 
-rm -f "$_S103_HOOKSRC" "$_S103_DRIVER" "$_S103_DRIVER_OUT"
+rm -f "$_S103_HOOKSRC" "$_S103_DRIVER" "$_S103_DRIVER_OUT"; rm -rf "$_S103_ROOT"
 
 # --- (c) structural: HAS_CLAUDE credential detection names ANTHROPIC_AUTH_TOKEN ---
 
@@ -11066,6 +11127,8 @@ check "§113(1) SKIPS the no-credits stream error (the reported false-FAIL, verb
     _s113 'ERROR: stream disconnected before completion: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.'
 check "§113(2) SKIPS the exceeded-quota phrasing" \
     _s113 'You exceeded your current quota, please check your plan and billing details'
+check "§113(2b) SKIPS codex's 'Quota exceeded' phrasing (a real false-FAIL on #391's integration run, verbatim)" \
+    _s113 'ERROR: Quota exceeded. Check your plan and billing details.'
 check "§113(3) SKIPS an HTTP 401" _s113 'HTTP error: 401'
 check "§113(4) SKIPS a rate limit" _s113 'Rate limit reached for gpt-5.5'
 check "§113(5) still FAILS a usage banner (mutation: an over-broad recognizer masks the agent-args class of sandy fault that produced exactly this output once)" \
@@ -11735,8 +11798,10 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # 20 as of 2.4.0 (#380): `cross_session_inbound_source` -- WHY the resolved
 # crossSessionInbound value is what it is (explicit/feature:<name>/
 # relay-legacy/default), additive; schema_version does not move.
-check "§114(13g) marker printf format/arg count line up (20 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 20
+# 21 as of 2.4.0: `offline` (#219) -- the launch skipped the update lookups
+# by choice (SANDY_OFFLINE / --no-update-check), provable after the fact.
+check "§114(13g) marker printf format/arg count line up (21 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 21
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -15469,15 +15534,18 @@ check "§139(11) SANDY_SUSPICIOUS=1 still defaults the posture to strict" \
 check "§139(12) ...and an explicit SANDY_EGRESS=off still WINS over it (the explicit choice went through its own approval gate)" \
     bash -c '[ "$1" = "off|false" ]' _ "$(_s139 'SANDY_SUSPICIOUS=1 SANDY_EGRESS=off')"
 
-# The tier. `off` weakens the sandbox, so a repository must not be able to set
-# it without an approval prompt -- the property the two booleans had and that a
-# rename could silently drop.
+# The tier. `off` AND `permissive` weaken the sandbox relative to a host that
+# chose strict, so a repository must not be able to set either without an
+# approval prompt -- the property the two booleans had (NO_ISOLATION=1 and
+# STRICT=0 were both gated) and that the 2.0.0 rename silently dropped for the
+# downgrade half. This check ASSERTED THE BUG (permissive:free) until #371;
+# the end-to-end property is §155.
 _S139_TIER="$(bash -c 'eval "$(awk "/^_sandy_passive_value_privileged\(\) \{/,/^\}/" "$1")"
     for v in off permissive strict; do
         if _sandy_passive_value_privileged SANDY_EGRESS "$v"; then printf "%s:gated " "$v"; else printf "%s:free " "$v"; fi
     done' _ "$SANDY_SCRIPT" 2>/dev/null)"
-check "§139(13) SANDY_EGRESS=off is approval-gated from a workspace while permissive and strict are free — a repo may tighten the sandbox, never loosen it (got: $_S139_TIER)" \
-    bash -c '[ "$1" = "off:gated permissive:free strict:free " ]' _ "$_S139_TIER"
+check "§139(13) SANDY_EGRESS=off and =permissive are approval-gated from a workspace while strict is free — a repo may tighten the sandbox, never loosen it (#371) (got: $_S139_TIER)" \
+    bash -c '[ "$1" = "off:gated permissive:gated strict:free " ]' _ "$_S139_TIER"
 
 unset _S139_BLK _S139_TIER _S139_WARN
 
@@ -17392,7 +17460,7 @@ if [ "$1" = -m ]; then
   if [ "${FAKE_REMOTE:-}" = 1 ]; then echo "${REMOTE_ARCH:-x86_64}"; else echo "${LOCAL_ARCH:-x86_64}"; fi
   exit 0
 fi
-exec /bin/uname "$@"
+exec /usr/bin/uname "$@"
 STUB
 chmod +x "$_S154_DIR/bin/ssh" "$_S154_DIR/bin/rsync" "$_S154_DIR/bin/uname"
 
@@ -17502,7 +17570,11 @@ check "§154(19) arm64 and aarch64 are the SAME architecture -- nothing skipped"
 # --- refusals: each leaves the destination exactly as it was -----------------
 _s154_mk R1 dev/proj; mkdir -p "$_S154_DIR/R1/rhome/dev/proj"
 _s154_run R1 --workspace "$_S154_DIR/R1/lhome/dev/proj" --yes
-printf 'PRECIOUS\n' > "$(_s154_dest R1)/marker"
+# Guarded: when the first copy fails there is no destination, and an unguarded
+# write lands on "/marker" -- a read-only root on macOS -- and the ERR trap
+# aborts the WHOLE suite here, so no later section runs. (20) still fails.
+_S154_R1D="$(_s154_dest R1)"
+if [ -n "$_S154_R1D" ]; then printf 'PRECIOUS\n' > "$_S154_R1D/marker"; fi
 _s154_run R1 --workspace "$_S154_DIR/R1/lhome/dev/proj" --yes
 check "§154(20) an existing sandbox on the destination is never overwritten (rc=$_S154_RC, its contents intact)" \
     bash -c 'test "$1" -eq 1 && grep -q PRECIOUS "$2/marker"' _ "$_S154_RC" "$(_s154_dest R1)"
@@ -17538,9 +17610,1335 @@ check "§154(25) an option-shaped host is refused and ssh is NEVER invoked -- a 
     bash -c 'test "$1" -eq 1 && test ! -s "$2"' _ "$_S154_RC" "$_S154_DIR/ssh.log"
 fi
 rm -rf "$_S154_DIR"
-unset _S154_SANDY _S154_DIR _S154_HLP _S154_LAUNCH _S154_LCWS _S154_D _S154_OUT _S154_RC _S154_RC_REAL _S154_PID _s154_p _s154_c
+unset _S154_R1D _S154_SANDY _S154_DIR _S154_HLP _S154_LAUNCH _S154_LCWS _S154_D _S154_OUT _S154_RC _S154_RC_REAL _S154_PID _s154_p _s154_c
 unset _F _LH _W _SH _H8 _NAME _SB _CWS _PD _dw
 unset -f _s154_mk _s154_run _s154_dest _s154_expect
+
+# ============================================================
+echo ""
+echo "§155: a workspace cannot DOWNGRADE a host-strict egress posture without approval (#371)"
+# ============================================================
+# 2.0.0 replaced the booleans with SANDY_EGRESS=off|permissive|strict and gave
+# the value-aware gate one entry for it, `off`. The downgrade half -- the
+# reason SANDY_EGRESS_STRICT=0 is gated -- was dropped in translation, so on a
+# host that chose strict, one committed `SANDY_EGRESS=permissive` re-opened the
+# public internet with no prompt (a workspace source outranks the host config
+# for the same key). §139(13) asserted that bug as correct until #371.
+#
+# The classifier and --validate-config checks below are the mechanism; (6)-(10)
+# are the PROPERTY: the real loader, the real approval resolver and the real
+# egress resolution, composed exactly as the launch composes them, run
+# non-interactively (the case `gh pr checkout N && sandy -p ...` hits), and the
+# EFFECTIVE posture is asserted -- not merely that an approval is pending.
+_S155_SANDY="$SANDY_SCRIPT"
+_s155_pvp() {
+    bash -c "$(sed -n '/^_sandy_passive_value_privileged()/,/^}$/p' "$_S155_SANDY")
+    if _sandy_passive_value_privileged \"\$1\" \"\$2\"; then echo gated; else echo free; fi" _ "$1" "$2"
+}
+check "§155(1) classifier gates SANDY_EGRESS=permissive — the strict -> permissive downgrade, exactly what SANDY_EGRESS_STRICT=0 is gated for (mutation: drop the permissive arm and this reads free)" \
+    test "$(_s155_pvp SANDY_EGRESS permissive)" = gated
+check "§155(2) classifier gates the deprecated alias SANDY_EGRESS_PROXY=1 — the same downgrade when the host set the alias to 2" \
+    test "$(_s155_pvp SANDY_EGRESS_PROXY 1)" = gated
+check "§155(3) ...while SANDY_EGRESS=strict and SANDY_EGRESS_PROXY=2 stay FREE — a repo may tighten the sandbox without a prompt" \
+    bash -c '[ "$1" = free ] && [ "$2" = free ]' _ "$(_s155_pvp SANDY_EGRESS strict)" "$(_s155_pvp SANDY_EGRESS_PROXY 2)"
+
+_S155_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S155_D/vc/.sandy"
+_s155_vc() {  # $1 = workspace config line -> gated|free, per --validate-config
+    printf '%s\n' "$1" > "$_S155_D/vc/.sandy/config"
+    bash "$_S155_SANDY" --validate-config "$_S155_D/vc/.sandy/config" 2>/dev/null \
+        | python3 -c 'import json,sys; print("gated" if json.load(sys.stdin)["privileged_keys_requiring_approval"] else "free")'
+}
+check "§155(4) --validate-config: a workspace SANDY_EGRESS=permissive requires approval (and so does SANDY_EGRESS_PROXY=1)" \
+    bash -c '[ "$1" = gated ] && [ "$2" = gated ]' _ "$(_s155_vc SANDY_EGRESS=permissive)" "$(_s155_vc SANDY_EGRESS_PROXY=1)"
+check "§155(5) --validate-config: a workspace SANDY_EGRESS=strict does NOT (the tightening direction stays frictionless)" \
+    test "$(_s155_vc SANDY_EGRESS=strict)" = free
+
+# The launch composition, extracted from sandy rather than re-typed: key arrays
+# + value-aware classifier, _key_in_list, sha256, the loader, the approval
+# resolver, then the egress region up to its resolution (the same awk range
+# §65 uses). Written to a file and sourced, never `source <(...)` (SRCSUB).
+_S155_SRC="$_S155_D/launch.sh"
+{
+    sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^}$/p' "$_S155_SANDY"
+    sed -n '/^_key_in_list()/,/^}$/p' "$_S155_SANDY"
+    grep -m1 '^sha256() {' "$_S155_SANDY"
+    sed -n '/^_load_sandy_config() {/,/^}$/p' "$_S155_SANDY"
+    sed -n '/^_sandy_export_approved_kv() {/,/^}$/p' "$_S155_SANDY"
+    sed -n '/^_resolve_passive_privileged_approval() {/,/^}$/p' "$_S155_SANDY"
+} > "$_S155_SRC"
+_S155_EG="$(awk '/^_SANDY_PROXY_ON=false$/{f=1} f{print} f&&/permissive.*default-on/{print "fi"; exit}' "$_S155_SANDY")"
+# $1 host ~/.sandy/config line, $2 workspace .sandy/config line, $3 = 1 to
+# auto-approve (the CI hatch) or empty for none -> "<mode>|<n>", where n is the
+# number of fail-closed "dropping these keys" notices the resolver printed.
+# stdin is /dev/null and _sandy_is_headless=true: nobody can answer a prompt.
+# The suite exports SANDY_AUTO_APPROVE_PRIVILEGED=1, so it MUST be unset here
+# or every case below would pass the downgrade straight through.
+_S155_N=0
+_s155_launch() {
+    _S155_N=$((_S155_N + 1))
+    local d="$_S155_D/case$_S155_N"
+    mkdir -p "$d/home" "$d/ws/.sandy"
+    printf '%s\n' "$1" > "$d/home/config"
+    printf '%s\n' "$2" > "$d/ws/.sandy/config"
+    env -u SANDY_EGRESS -u SANDY_EGRESS_NO_ISOLATION -u SANDY_EGRESS_STRICT -u SANDY_EGRESS_PROXY \
+        -u SANDY_SUSPICIOUS -u SANDY_AUTO_APPROVE_PRIVILEGED ${3:+SANDY_AUTO_APPROVE_PRIVILEGED=$3} \
+        SANDY_HOME="$d/home" WORK_DIR="$d/ws" bash -c '
+            warn(){ :; }; info(){ :; }
+            source "$1"
+            _SANDY_ENV_SET_KEYS=(); _PASSIVE_PRIVILEGED_PENDING=(); _PASSIVE_PRIVILEGED_SOURCES=()
+            _sandy_is_headless=true
+            _load_sandy_config "$SANDY_HOME/config" privileged
+            _load_sandy_config "$WORK_DIR/.sandy/config" passive
+            _resolve_passive_privileged_approval
+            eval "$2"
+            printf "%s" "${_SANDY_PROXY_MODE:-off}"
+        ' _ "$_S155_SRC" "$_S155_EG" </dev/null >"$d/out" 2>"$d/err" || true
+    printf '%s|%s' "$(cat "$d/out")" "$(grep -c 'dropping these keys' "$d/err" || true)"
+}
+_S155_R1="$(_s155_launch SANDY_EGRESS=strict SANDY_EGRESS=permissive '')"
+check "§155(6) PROPERTY: host strict + committed workspace SANDY_EGRESS=permissive, non-interactive -> the EFFECTIVE posture is still strict and the key was dropped fail-closed (got: $_S155_R1; mutation: remove the permissive arm from the gate and this resolves permissive with no notice)" \
+    test "$_S155_R1" = "strict|1"
+_S155_R2="$(_s155_launch SANDY_EGRESS_PROXY=2 SANDY_EGRESS_PROXY=1 '')"
+check "§155(7) PROPERTY: the deprecated-alias route (host SANDY_EGRESS_PROXY=2, workspace =1) is closed the same way (got: $_S155_R2; mutation: drop the =1 arm and this resolves permissive)" \
+    test "$_S155_R2" = "strict|1"
+_S155_R3="$(_s155_launch SANDY_EGRESS=strict SANDY_EGRESS=off '')"
+check "§155(8) PROPERTY: host strict + workspace off -> still strict (the value 2.0.0 did gate)" \
+    test "$_S155_R3" = "strict|1"
+_S155_R4="$(_s155_launch '' SANDY_EGRESS=strict '')"
+check "§155(9) PROPERTY: a workspace TIGHTENING to strict takes effect with no prompt at all — the fix must not tax the direction that is free (got: $_S155_R4)" \
+    test "$_S155_R4" = "strict|0"
+# Non-vacuity control: the fixture CAN express the downgrade. Were the harness
+# unable to make a workspace value win at all, (6) and (7) would pass against
+# the unfixed gate. With an approval in hand (the env-only CI hatch) the
+# workspace value must win -- the gate is a prompt, not a ban.
+_S155_R5="$(_s155_launch SANDY_EGRESS=strict SANDY_EGRESS=permissive 1)"
+check "§155(10) control: once APPROVED, the workspace permissive does win over host strict — so (6) measures the gate, not a harness that ignores the workspace (got: $_S155_R5)" \
+    test "$_S155_R5" = "permissive|0"
+
+rm -rf "$_S155_D"
+unset _S155_SANDY _S155_D _S155_SRC _S155_EG _S155_N _S155_R1 _S155_R2 _S155_R3 _S155_R4 _S155_R5
+unset -f _s155_pvp _s155_vc _s155_launch
+echo "§160: SANDY_CHANNEL_TARGET_PANE=N reaches the Nth AGENT, not tmux pane N (#65)"
+# ============================================================
+# WHY. The Telegram host relay did `tmux send-keys -t "sandy.${TARGET_PANE}"`,
+# while README and SPECIFICATION promised N = "the Nth agent in SANDY_AGENT".
+# Those agree for 1-3 agents and NOT for four: the 2x2 grid's last split
+# re-splits pane 0, and tmux numbers the new pane right after the one it split,
+# so the real map is sandy.0=agent0, sandy.1=agent3, sandy.2=agent1,
+# sandy.3=agent2. "Send to agent 1" went to agent 3 -- a message delivered,
+# confidently, to the wrong agent, which nothing on the host could notice.
+#
+# The fix routes N -> agent name (the launcher passes the resolved list as
+# SANDY_CHANNEL_AGENTS) -> the pane whose @sandy_pane_agent tag matches. This
+# section drives the relay's REAL _inject with a stub `docker` that serves a
+# pane map in the true grid order and records where send-keys was aimed, so it
+# asserts the delivery target -- not that a lookup function exists. (Mutation:
+# restoring `-t "sandy.${TARGET_PANE}"` in _inject fails (2)-(4).)
+_S160_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S160_DIR/bin"
+awk '/^    cat > "\$SANDY_HOME\/channel-relay.sh.new" <<.RELAY.$/{f=1;next} /^RELAY$/{f=0} f' \
+    "$SANDY_SCRIPT" > "$_S160_DIR/relay.sh"
+# The stub docker: `list-panes` prints $S160_PANES (a file) if set, else fails
+# like an unreachable container; `has-session` succeeds; `send-keys` records
+# its -t argument to $S160_OUT. Any exec WITHOUT `-u <uid>` fails, as it does
+# for real: root cannot see the host-uid tmux socket (#48), so a lookup that
+# dropped -u would silently find no panes -- this makes that a failure here.
+cat > "$_S160_DIR/bin/docker" <<'S160_DOCKER'
+#!/usr/bin/env bash
+[ "${1:-} ${2:-} ${3:-}" = "exec -u $(id -u)" ] || exit 1
+case " $* " in
+    *" list-panes "*)
+        if [ -n "${S160_PANES:-}" ]; then cat "$S160_PANES"; exit 0; fi
+        exit 1 ;;
+    *" has-session "*) exit 0 ;;
+    *" send-keys "*)
+        while [ $# -gt 0 ]; do
+            if [ "$1" = "-t" ]; then printf '%s\n' "$2" > "$S160_OUT"; fi
+            shift
+        done
+        exit 0 ;;
+esac
+exit 1
+S160_DOCKER
+chmod +x "$_S160_DIR/bin/docker"
+# Pane maps as `tmux list-panes -F '#{pane_index} #{@sandy_pane_agent}'`
+# prints them. grid4 is the REAL 2x2 order for SANDY_AGENT=claude,gemini,codex,
+# opencode (verified empirically by acceptance-pane-topology.sh, #22).
+printf '0 claude\n1 opencode\n2 gemini\n3 codex\n' > "$_S160_DIR/grid4"
+printf '0 claude\n1 gemini\n2 codex\n'             > "$_S160_DIR/grid3"
+# An image predating the tag, or a single-agent session from before 2.4.0
+# (#378 tags that pane too now): the option is unset, so tmux prints an empty
+# field.
+printf '0 \n1 \n2 \n3 \n'                          > "$_S160_DIR/untagged"
+# A single-agent session as 2.4.0 creates it (#378): the agent pane is tagged
+# -- here after a `split-window -b` user split pushed it to index 1, which is
+# the one case where the tag decides something the raw index would get wrong.
+printf '0 \n1 codex\n'                            > "$_S160_DIR/single-tagged"
+check "§160(pre) the relay was extracted, parses, and still carries both functions this section drives (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'bash -n "$1/relay.sh" && grep -q "^_target() {" "$1/relay.sh" && grep -q "^_inject() {" "$1/relay.sh"' -- "$_S160_DIR"
+# _s160_route <agents-csv> <N> <panemap-file|""> -> the send-keys target.
+# The relay's own TARGET_PANE= / AGENTS= lines are evaluated rather than the
+# variables set directly, so the env var NAMES the launcher exports are part of
+# what is tested.
+_s160_route() {
+    (
+        trap - ERR; set +e
+        PATH="$_S160_DIR/bin:$PATH"
+        SANDY_CONTAINER_NAME=c160
+        SANDY_CHANNEL_AGENTS="$1"; SANDY_CHANNEL_TARGET_PANE="$2"
+        export S160_PANES="$3" S160_OUT="$_S160_DIR/out"
+        rm -f "$S160_OUT"
+        eval "$(grep -E '^(TARGET_PANE|AGENTS)=' "$_S160_DIR/relay.sh")"
+        eval "$(sed -n '/^_target() {/,/^}$/p' "$_S160_DIR/relay.sh")"
+        eval "$(sed -n '/^_inject() {/,/^}$/p' "$_S160_DIR/relay.sh")"
+        _inject "hello from telegram" >/dev/null 2>&1
+        cat "$S160_OUT" 2>/dev/null
+    )
+    return 0
+}
+_S160_A4="claude,gemini,codex,opencode"
+check "§160(1) 4-agent grid: N=0 reaches the first agent (sandy.0 — the one index that always coincides)" \
+    test "$(trap - ERR; _s160_route "$_S160_A4" 0 "$_S160_DIR/grid4")" = "sandy.0"
+check "§160(2) 4-agent grid: N=1 reaches gemini at sandy.2, NOT sandy.1 (which holds the fourth agent) — the bug" \
+    test "$(trap - ERR; _s160_route "$_S160_A4" 1 "$_S160_DIR/grid4")" = "sandy.2"
+check "§160(3) 4-agent grid: N=2 reaches codex at sandy.3" \
+    test "$(trap - ERR; _s160_route "$_S160_A4" 2 "$_S160_DIR/grid4")" = "sandy.3"
+check "§160(4) 4-agent grid: N=3 reaches opencode at sandy.1" \
+    test "$(trap - ERR; _s160_route "$_S160_A4" 3 "$_S160_DIR/grid4")" = "sandy.1"
+check "§160(5) 3-agent layout (index == spawn order there) still routes N=2 to sandy.2 — the fix changes nothing that was already right" \
+    test "$(trap - ERR; _s160_route "claude,gemini,codex" 2 "$_S160_DIR/grid3")" = "sandy.2"
+check "§160(6) fallback: untagged panes (an image predating @sandy_pane_agent) -> raw sandy.N, the pre-#65 behaviour" \
+    test "$(trap - ERR; _s160_route "$_S160_A4" 1 "$_S160_DIR/untagged")" = "sandy.1"
+check "§160(7) fallback: no agent list passed (an older launcher) -> raw sandy.N" \
+    test "$(trap - ERR; _s160_route "" 3 "$_S160_DIR/grid4")" = "sandy.3"
+check "§160(8) fallback: the pane lookup itself fails -> raw sandy.N, and the message is still sent rather than dropped" \
+    test "$(trap - ERR; _s160_route "$_S160_A4" 2 "")" = "sandy.2"
+check "§160(9) single non-claude agent (the other case that runs this relay): N=0 -> sandy.0" \
+    test "$(trap - ERR; _s160_route "codex" 0 "$_S160_DIR/untagged")" = "sandy.0"
+check "§160(9b) single-agent pane TAGGED (#378, 2.4.0) behind an untagged user split: N=0 follows the tag to sandy.1, not the raw sandy.0 the split now occupies" \
+    test "$(trap - ERR; _s160_route "codex" 0 "$_S160_DIR/single-tagged")" = "sandy.1"
+# The launcher half, structural and labelled as such: the behavioural half
+# needs Docker and a Telegram bot. Without this the relay silently falls back
+# to raw sandy.N on every launch and (1)-(5) keep passing.
+check "§160(10) the launch site passes the resolved agent list to the relay as SANDY_CHANNEL_AGENTS (structural; mutation: dropping it reverts every real launch to raw sandy.N)" \
+    bash -c 'awk "/^# Launch host-side channel relay/,/^fi\$/" "$1" | grep -q "SANDY_CHANNEL_AGENTS=\"\$SANDY_AGENT\""' -- "$SANDY_SCRIPT"
+# channel-relay.sh lives in $SANDY_HOME, so a stale copy there would keep the
+# old routing after an upgrade. It is regenerated by every launch through
+# ensure_build_files; this pins that it stays in the replace-on-diff loop.
+check "§160(11) channel-relay.sh is in ensure_build_files' replace-on-change list, so an upgrade replaces a stale on-disk relay" \
+    bash -c 'awk "/^ensure_build_files\\(\\)/,/^}\$/" "$1" | grep -q "for f in .*channel-relay.sh"' -- "$SANDY_SCRIPT"
+rm -rf "$_S160_DIR"
+unset _S160_DIR _S160_A4
+unset -f _s160_route
+
+# ============================================================
+echo "§161: tmux.conf binds a pane-resize key that works on macOS (#161)"
+# ============================================================
+# WHY. generate_tmux_conf() emitted options only, so pane resizing fell to
+# tmux's defaults: prefix + Ctrl-Arrow, which macOS Mission Control takes at
+# the system level before any terminal sees it, and prefix + M-Arrow, which
+# needs Option-as-Meta. On macOS out of the box no resize key worked, in a
+# layout (2-4 agent panes) that needs one most. Sandy now binds prefix +
+# H/J/K/L, repeatable.
+#
+# The static half reads the generated file; the behavioural half loads it into
+# a PRIVATE tmux server (its own -S socket in a temp dir, never the default
+# server, so it cannot touch a live session) and asks tmux what it bound --
+# which also proves the file still parses.
+_S161_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+awk '/^    cat > "\$SANDY_HOME\/tmux.conf.new" <<.TMUXCONF.$/{f=1;next} /^TMUXCONF$/{f=0} f' \
+    "$SANDY_SCRIPT" > "$_S161_DIR/tmux.conf"
+check "§161(pre) the tmux.conf heredoc was extracted (mutation: a rename empties it and the checks below go vacuous)" \
+    grep -q "^set -g mouse on$" "$_S161_DIR/tmux.conf"
+for _s161_kd in "H -L" "J -D" "K -U" "L -R"; do
+    _s161_k="${_s161_kd%% *}"; _s161_d="${_s161_kd#* }"
+    check "§161(1) tmux.conf binds prefix + ${_s161_k} to resize-pane ${_s161_d} 5, repeatable" \
+        grep -qx "bind -r ${_s161_k} resize-pane ${_s161_d} 5" "$_S161_DIR/tmux.conf"
+done
+if [ -f /etc/sandy-session.json ]; then
+    skip "§161(2) behavioural check: running inside sandy, so no tmux server is started here (CLAUDE.md)"
+elif ! command -v tmux >/dev/null 2>&1; then
+    skip "§161(2) behavioural check: tmux is not installed on this host"
+else
+    _S161_KEYS=""
+    if tmux -S "$_S161_DIR/sock" -f "$_S161_DIR/tmux.conf" new-session -d -s s161 "sleep 30" >/dev/null 2>&1; then
+        _S161_KEYS="$(tmux -S "$_S161_DIR/sock" list-keys -T prefix 2>/dev/null || true)"
+    fi
+    tmux -S "$_S161_DIR/sock" kill-server >/dev/null 2>&1 || true
+    for _s161_kd in "H -L" "J -D" "K -U" "L -R"; do
+        _s161_k="${_s161_kd%% *}"; _s161_d="${_s161_kd#* }"
+        check "§161(2) a tmux server loading this tmux.conf really binds prefix + ${_s161_k} -> resize-pane ${_s161_d} 5 with -r" \
+            bash -c 'printf "%s\n" "$1" | grep -Eq "^bind-key +-r +-T prefix +$2 +resize-pane $3 5$"' -- "$_S161_KEYS" "$_s161_k" "$_s161_d"
+    done
+fi
+rm -rf "$_S161_DIR"
+unset _S161_DIR _S161_KEYS _s161_kd _s161_k _s161_d
+echo "§157: Linux iptables isolation is VERIFIED after insertion, not assumed (#299)"
+# ============================================================
+# apply_network_isolation (the `off` egress posture, Linux) inserted every DROP
+# with `|| true` and then printed "Network isolation rules applied."
+# unconditionally, so a chain that was readable but refused an insert produced
+# a session claiming isolation it did not have. These checks drive the REAL
+# function against a stub iptables that keeps its chain in a file, and assert
+# the outcome -- refused or not, what was said, whether the --start fast-fail
+# marker was dropped -- never that the code contains `-C`.
+_S157_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S157_DIR/bin"
+cat > "$_S157_DIR/bin/sudo" <<'STUB'
+#!/bin/sh
+exec "$@"
+STUB
+# The chain lives in $S157_RULES, one rule per line, spelled exactly as the
+# caller passed it after the chain name. S157_FAIL_LIST fails -L;
+# S157_FAIL_INSERT fails -I for a rule naming that range; S157_LOSE_INSERT
+# makes -I exit 0 WITHOUT recording the rule -- the nft-backend-mismatch shape,
+# where the insert reports success and nothing lands.
+cat > "$_S157_DIR/bin/iptables" <<'STUB'
+#!/bin/sh
+op="$1"; shift
+if [ "$op" = -L ]; then [ -n "${S157_FAIL_LIST:-}" ] && exit 1; exit 0; fi
+shift
+rule="$*"
+if [ "$op" = -I ]; then
+    case " $rule " in *" ${S157_FAIL_INSERT:-@none@} "*) exit 1 ;; esac
+    case " $rule " in *" ${S157_LOSE_INSERT:-@none@} "*) exit 0 ;; esac
+    printf '%s\n' "$rule" >> "$S157_RULES"
+    exit 0
+fi
+if [ "$op" = -C ]; then grep -qxF -- "$rule" "$S157_RULES"; exit $?; fi
+exit 0
+STUB
+chmod +x "$_S157_DIR/bin/sudo" "$_S157_DIR/bin/iptables"
+_S157_FN="$(awk '/^_sandy_daemon_fatal\(\)/,/^}/' "$SANDY_SCRIPT"; awk '/^PRIVATE_RANGES=\(/,/^\)/' "$SANDY_SCRIPT"; awk '/^apply_network_isolation\(\)/,/^}/' "$SANDY_SCRIPT")"
+check "§157(pre) apply_network_isolation, PRIVATE_RANGES and _sandy_daemon_fatal were all extracted (mutation: a rename makes every check below vacuous)" \
+    bash -c 'case "$1" in *"_sandy_daemon_fatal()"*"PRIVATE_RANGES=("*"apply_network_isolation()"*) exit 0 ;; esac; exit 1' _ "$_S157_FN"
+# _s157_run OS [VAR=value...] -> rc in _S157_RC, output in _S157_OUT. The
+# daemon log is $_S157_DIR/daemon.log; its .fatal is the --start fast-fail
+# marker. Runs under set -euo pipefail, as sandy does.
+_s157_run() {
+    _s157_os="$1"; shift
+    rm -f "$_S157_DIR/daemon.log.fatal"; : > "$_S157_DIR/rules"
+    _S157_OUT="$(env -u SANDY_ALLOW_NO_ISOLATION -u SANDY_ALLOW_LAN_HOSTS -u SANDY_LOCAL_LLM_HOST \
+        -u S157_FAIL_LIST -u S157_FAIL_INSERT -u S157_LOSE_INSERT \
+        PATH="$_S157_DIR/bin:$PATH" S157_RULES="$_S157_DIR/rules" SANDY_DAEMON_LOG="$_S157_DIR/daemon.log" "$@" \
+        bash -c 'set -euo pipefail; info() { echo "INFO $*"; }; warn() { echo "WARN $*"; }; error() { echo "ERROR $*"; }; OS="$2"; BRIDGE_NAME=br-s157; CONTAINER_SUBNET=172.31.0.0/16; CONTAINER_GATEWAY=""; eval "$1"; apply_network_isolation; echo RETURNED' _ "$_S157_FN" "$_s157_os" 2>&1)" && _S157_RC=0 || _S157_RC=$?
+}
+_s157_run Linux
+check "§157(1) every insert lands: the launch proceeds and says isolation was applied (rc=$_S157_RC)" \
+    bash -c 'test "$1" -eq 0 && case "$2" in *"rules applied"*RETURNED*) exit 0 ;; esac; exit 1' _ "$_S157_RC" "$_S157_OUT"
+check "§157(2) ...and all five DROPs really are in the stub chain (the harness itself is sound)" \
+    test "$({ grep -c -- '-j DROP$' "$_S157_DIR/rules" || true; })" -eq 5
+_s157_run Linux S157_FAIL_INSERT=192.168.0.0/16
+check "§157(3) an insert that FAILS refuses the launch, naming the missing range (rc=$_S157_RC)" \
+    bash -c 'test "$1" -ne 0 && case "$2" in *RETURNED*) exit 1 ;; *"ERROR"*"192.168.0.0/16"*) exit 0 ;; esac; exit 1' _ "$_S157_RC" "$_S157_OUT"
+check "§157(4) ...and never claims isolation was applied" \
+    bash -c 'case "$1" in *"rules applied"*) exit 1 ;; esac; exit 0' _ "$_S157_OUT"
+check "§157(5) ...and drops the .fatal marker, so a --start client fails in ~1s instead of polling out 600s" \
+    test -f "$_S157_DIR/daemon.log.fatal"
+_s157_run Linux S157_LOSE_INSERT=100.64.0.0/10
+check "§157(6) an insert that exits 0 but LANDS NOTHING (nft-backend mismatch) is refused too -- the chain is asked, the exit code is not trusted (rc=$_S157_RC)" \
+    bash -c 'test "$1" -ne 0 && case "$2" in *RETURNED*|*"rules applied"*) exit 1 ;; *"ERROR"*"100.64.0.0/10"*) exit 0 ;; esac; exit 1' _ "$_S157_RC" "$_S157_OUT"
+_s157_run Linux S157_FAIL_INSERT=10.0.0.0/8 SANDY_ALLOW_NO_ISOLATION=1
+check "§157(7) SANDY_ALLOW_NO_ISOLATION=1 still lets the launch proceed -- the documented override keeps working (rc=$_S157_RC)" \
+    bash -c 'test "$1" -eq 0 && case "$2" in *RETURNED*) exit 0 ;; esac; exit 1' _ "$_S157_RC" "$_S157_OUT"
+check "§157(8) ...but it says isolation is INCOMPLETE and names the range, never that it was applied" \
+    bash -c 'case "$1" in *"rules applied"*) exit 1 ;; *"WARN"*"INCOMPLETE"*"10.0.0.0/8"*) exit 0 ;; esac; exit 1' _ "$_S157_OUT"
+check "§157(9) ...and drops no .fatal marker (the launch was not refused)" \
+    test ! -e "$_S157_DIR/daemon.log.fatal"
+_s157_run Linux S157_FAIL_LIST=1
+check "§157(10) an unreadable DOCKER-USER chain refuses (rc=$_S157_RC) AND drops the .fatal marker -- the pre-existing refusal had none" \
+    bash -c 'case "$3" in *RETURNED*) exit 1 ;; esac; test "$1" -ne 0 && test -f "$2"' _ "$_S157_RC" "$_S157_DIR/daemon.log.fatal" "$_S157_OUT"
+_s157_run Darwin
+check "§157(11) the non-Linux banner names SANDY_EGRESS=permissive|strict, not the deprecated SANDY_EGRESS_PROXY tri-state" \
+    bash -c 'case "$1" in *SANDY_EGRESS_PROXY*) exit 1 ;; *"SANDY_EGRESS=permissive"*"=strict"*) exit 0 ;; esac; exit 1' _ "$_S157_OUT"
+rm -rf "$_S157_DIR"
+unset _S157_DIR _S157_FN _S157_OUT _S157_RC _s157_os
+unset -f _s157_run
+
+# ============================================================
+echo ""
+echo "§158: --print-state created_at/last_used_at are genuinely UTC, whole seconds"
+# ============================================================
+# _stat_mtime_iso (--print-state) and _rms_mtime_iso (--remove-sandbox's plan)
+# rendered the mtime in LOCAL time and appended `Z`, so on any host not on UTC
+# the timestamps were off by the offset while claiming to be UTC -- and GNU
+# stat added nanoseconds BSD never had. The fixture pins each mtime in UTC
+# (`TZ=UTC touch -t`), then runs sandy under UTC+14, where a local-time
+# rendering is off by fourteen hours and cannot pass by coincidence. CI hosts
+# are on UTC, which is exactly why this shipped: the check has to move the zone.
+_S158_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S158_SB="$_S158_DIR/home/.sandy/sandboxes/tz-aaaaaaaa"
+mkdir -p "$_S158_SB"
+printf '2.0.0\n' > "$_S158_SB/.sandy_created_version"
+printf '2.3.0\n' > "$_S158_SB/.sandy_last_version"
+printf '{\n  "workspace_path": "%s/gone",\n  "sandbox_name": "tz-aaaaaaaa"\n}\n' "$_S158_DIR" > "$_S158_SB/WORKSPACE.json"
+TZ=UTC touch -t 202601020304.05 "$_S158_SB/.sandy_created_version"
+TZ=UTC touch -t 202602030405.06 "$_S158_SB/.sandy_last_version"
+_S158_TZ=Pacific/Kiritimati
+[ "$(TZ="$_S158_TZ" date +%z 2>/dev/null || true)" = "+1400" ] || _S158_TZ='<+14>-14'
+check "§158(pre) the zone used below really is UTC+14 -- a zone the host cannot resolve falls back to UTC silently and every check below would pass vacuously" \
+    test "$(TZ="$_S158_TZ" date +%z 2>/dev/null || true)" = "+1400"
+_S158_STATE="$(env -u SANDY_WORKSPACE -u SANDY_SANDBOX_NAME TZ="$_S158_TZ" HOME="$_S158_DIR/home" SANDY_HOME="$_S158_DIR/home/.sandy" \
+    bash "$SANDY_SCRIPT" --print-state light 2>/dev/null || true)"
+check "§158(1) created_at is the file's mtime in UTC, whole seconds, under TZ=UTC+14 (mutation: dropping TZ=UTC from _stat_mtime_iso reports 17:04:05)" \
+    bash -c 'case "$1" in *"\"created_at\":\"2026-01-02T03:04:05Z\""*) exit 0 ;; esac; exit 1' _ "$_S158_STATE"
+check "§158(2) last_used_at likewise" \
+    bash -c 'case "$1" in *"\"last_used_at\":\"2026-02-03T04:05:06Z\""*) exit 0 ;; esac; exit 1' _ "$_S158_STATE"
+_S158_RMS="$(env -u SANDY_WORKSPACE -u SANDY_SANDBOX_NAME TZ="$_S158_TZ" HOME="$_S158_DIR/home" SANDY_HOME="$_S158_DIR/home/.sandy" \
+    bash "$SANDY_SCRIPT" --remove-sandbox --orphans --dry-run </dev/null 2>&1 || true)"
+check "§158(3) --remove-sandbox's plan (the duplicated _rms_mtime_iso) prints the same UTC instant" \
+    bash -c 'case "$1" in *"last used: 2026-02-03T04:05:06Z"*) exit 0 ;; esac; exit 1' _ "$_S158_RMS"
+check "§158(4) ...and the dry run removed nothing" test -d "$_S158_SB"
+rm -rf "$_S158_DIR"
+unset _S158_DIR _S158_SB _S158_TZ _S158_STATE _S158_RMS
+
+# ============================================================
+echo ""
+echo "§159: every selected feature's entry is ADOPTED, and the launch says so for each -- nothing dropped (#381)"
+# ============================================================
+# History. An interim patch on this dev line (#391) kept "at most ONE entry
+# per container" and made the drop LOUD: a second feature's entry was named in
+# a warning and the features line said `entry NOT run: '<winner>' won`. #381
+# proper (amap-decouple, integrated on top) removed the drop itself -- every
+# selected feature's entry runs, the first in feature-directory name order is
+# the relay-DESIGNATED one -- so the checks here were rewritten to assert THAT
+# property on the same fixtures, rather than deleted: a loser that is named is
+# still a loser, and the failure this section exists for is an installed
+# feature silently not running. The supervisor half (each entry really
+# started, its own lock/backoff/state) is §172; this is the host-side half,
+# driving the manifest reader, _sandy_fm_apply and the real evaluation span in
+# file order (as §142 does) with info/warn captured.
+_S159_SANDY="$SANDY_SCRIPT"
+_S159_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S159_FM="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$_S159_SANDY")
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$_S159_SANDY")"
+_S159_EVAL="$(awk '/^_sandy_relay_slot="absent"/,/^# BEGIN handoff relay/' "$_S159_SANDY")"
+check "§159(pre) the spans were extracted, parse, and the evaluation span carries the features line (mutation: a rename makes every check below vacuous)" \
+    bash -c 'case "$2" in *"features: "*) ;; *) exit 1 ;; esac; printf "%s\n%s\n" "$1" "$2" | bash -n' _ "$_S159_FM" "$_S159_EVAL"
+# _s159_mk HOME FEATURE: a selected feature that declares an entry.
+_s159_mk() {
+    mkdir -p "$1/features/$2/payload"
+    printf '#!/bin/sh\n' > "$1/features/$2/payload/relay"; chmod +x "$1/features/$2/payload/relay"
+    printf '{ "sandboxes": { "include": ["*"] }, "agents": { "include": ["claude"] }, "mounts": [ { "name": "payload", "from": "payload", "mode": "ro" } ], "entry": "payload/relay" }\n' \
+        > "$1/features/$2/feature.json"
+}
+# Created in REVERSE name order, so a pass cannot be an accident of creation
+# order: the designated entry must be the first in name order.
+_s159_mk "$_S159_DIR/two" beta
+_s159_mk "$_S159_DIR/two" alpha
+_s159_mk "$_S159_DIR/one" alpha
+cat > "$_S159_DIR/drive.sh" <<'S159_DRV'
+set -uo pipefail
+# Hermetic for the reason §142 records: a sandy container with a relay exports
+# SANDY_HANDOFF_RELAY (and SANDY_FEATURE_ENTRIES) into every process, and
+# inheriting them would measure the developer container instead of the fixture.
+unset SANDY_HANDOFF_RELAY SANDY_FEATURE_ENTRIES
+info() { printf 'INFO %s\n' "$*"; }; warn() { printf 'WARN %s\n' "$*"; }; error() { printf 'ERROR %s\n' "$*"; }
+_sandy_daemon_fatal() { :; }
+_sandy_agent_has() { case ",$SANDY_AGENT," in *",$1,"*) return 0 ;; esac; return 1; }
+eval "$FM_BLOCK"
+eval "$EVAL_BLOCK"
+printf 'relay=%s\n' "${SANDY_HANDOFF_RELAY:-EMPTY}"
+printf 'entries=%s\n' "${SANDY_FEATURE_ENTRIES:-EMPTY}"
+S159_DRV
+_s159_run() {  # _s159_run HOME SANDY_RELAY -> output
+    ( cd "$_S159_DIR" && SANDY_HOME="$1" SANDBOX_DIR="$_S159_DIR/sb" WORK_DIR="$_S159_DIR/ws" \
+        SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY="$2" \
+        FM_BLOCK="$_S159_FM" EVAL_BLOCK="$_S159_EVAL" _sandy_relay_slot_dir="$_S159_DIR/slot" \
+        bash "$_S159_DIR/drive.sh" 2>&1 ) || echo "DRIVER-FAILED"
+}
+_S159_TWO="$(_s159_run "$_S159_DIR/two" 1)"
+_S159_ONE="$(_s159_run "$_S159_DIR/one" 1)"
+_S159_OFF="$(_s159_run "$_S159_DIR/two" 0)"
+check "§159(0) the driver RAN in all three cases (a dead probe would make every negative check below pass)" \
+    bash -c 'for o in "$@"; do case "$o" in *DRIVER-FAILED*) exit 1 ;; *"entries="*) ;; *) exit 1 ;; esac; done' _ "$_S159_TWO" "$_S159_ONE" "$_S159_OFF"
+check "§159(1) with two entries BOTH are adopted, in feature-name order (alpha, although beta was created first) -- nothing is dropped (mutation: restoring the elif skip leaves beta out)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "entries=alpha=/opt/sandy/features/alpha/relay beta=/opt/sandy/features/beta/relay"' _ "$_S159_TWO"
+check "§159(2) the relay-DESIGNATED entry is the first in name order (relay{} and SANDY_HANDOFF_RELAY describe alpha only)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "relay=/opt/sandy/features/alpha/relay"' _ "$_S159_TWO"
+check "§159(3) no launch warning claims either entry will not run (mutation: restoring the interim one-entry else-branch warning fails this)" \
+    bash -c 'case "$1" in *"will NOT run"*|*"only ONE entry"*) exit 1 ;; esac; ! printf "%s\n" "$1" | grep "^WARN " | grep -qF "beta"' _ "$_S159_TWO"
+check "§159(4) the features line says entry for EACH feature, not only the designated one (mutation: restoring the NOT-run branch fails this)" \
+    bash -c 'l="$(printf "%s\n" "$1" | grep "^INFO features: ")" && printf "%s" "$l" | grep -qF "alpha (1 mount, entry)" && printf "%s" "$l" | grep -qF "beta (1 mount, entry)" && ! printf "%s" "$l" | grep -qF "NOT run"' _ "$_S159_TWO"
+check "§159(5) two entries: one info line names them both and which one relay{} reports" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "INFO feature entries: alpha (reported as relay{}), beta"' _ "$_S159_TWO"
+check "§159(6) one entry: adopted and designated, the features line says entry, and no multi-entry line (the common case costs nothing)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "entries=alpha=/opt/sandy/features/alpha/relay" && printf "%s\n" "$1" | grep -qx "relay=/opt/sandy/features/alpha/relay" && printf "%s\n" "$1" | grep "^INFO features: " | grep -qF "alpha (1 mount, entry)" && ! printf "%s\n" "$1" | grep -q "^INFO feature entries: "' _ "$_S159_ONE"
+check "§159(7) SANDY_RELAY=0: no entry runs, and the features line says so for each rather than claiming either" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "relay=EMPTY" && printf "%s\n" "$1" | grep -qx "entries=EMPTY" && printf "%s\n" "$1" | grep "^INFO features: " | grep -F "alpha (1 mount, entry disabled by SANDY_RELAY=0)" | grep -qF "beta (1 mount, entry disabled by SANDY_RELAY=0)"' _ "$_S159_OFF"
+rm -rf "$_S159_DIR"
+unset _S159_SANDY _S159_DIR _S159_FM _S159_EVAL _S159_TWO _S159_ONE _S159_OFF
+unset -f _s159_mk _s159_run
+echo "§163: the container clock follows the host zone; sandy's own data stays UTC (#384)"
+# ============================================================
+# WHY. The container had no TZ and /etc/localtime -> Etc/UTC, so every
+# in-container clock read UTC whatever the host said, and every time an agent
+# reported had to be converted by hand before it matched a host-side log.
+# Sandy now resolves the host zone at LAUNCH and passes it as -e TZ=<zone>.
+#
+# Three things are asserted, each against the real code:
+#   (1-10)  the resolver, on fixture roots: macOS link, Linux link,
+#           /etc/timezone, nothing, $TZ precedence, and the values it must
+#           refuse -- a refusal falls through to the next source, never fatal;
+#   (11-12) the REAL RUN_FLAGS block emits `-e TZ=<zone>` into the argv, in
+#           the region both the foreground and the daemon paths run through;
+#   (13-15) the entrypoint drops a zone the IMAGE does not have (glibc would
+#           otherwise print UTC labelled with a made-up abbreviation);
+#   (16-17) the regression this change could introduce: every timestamp sandy
+#           emits as data is produced UTC even when the process TZ is
+#           Pacific/Kiritimati (UTC+14), which is now the normal case in-
+#           container. Mutation: drop -u from any `date` call and (17) fails.
+_S163_SANDY="$SANDY_SCRIPT"
+_S163_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S163_FNS="$(sed -n '/^_sandy_tz_valid()/,/^}$/p;/^_sandy_host_tz()/,/^}$/p' "$_S163_SANDY")"
+mkdir -p "$_S163_DIR/mac/etc" "$_S163_DIR/lin/etc" "$_S163_DIR/deb/etc" "$_S163_DIR/none/etc" "$_S163_DIR/evil/etc"
+ln -s /var/db/timezone/zoneinfo/America/Denver "$_S163_DIR/mac/etc/localtime"
+ln -s ../usr/share/zoneinfo/Europe/Berlin "$_S163_DIR/lin/etc/localtime"
+printf 'Asia/Tokyo\n' > "$_S163_DIR/deb/etc/timezone"
+printf 'TZif2-not-a-link\n' > "$_S163_DIR/deb/etc/localtime"   # a COPY, as Debian may ship it
+ln -s /usr/share/zoneinfo/../../../etc/passwd "$_S163_DIR/evil/etc/localtime"
+printf 'Asia/Kolkata\n' > "$_S163_DIR/evil/etc/timezone"
+# $1 = TZ value ("-" = unset), $2 = fixture root. Prints the resolved zone.
+_s163_tz() {
+    (
+        warn() { :; }
+        eval "$_S163_FNS"
+        if [ "$1" = "-" ]; then unset TZ; else TZ="$1"; fi
+        _sandy_host_tz "$2"
+    ) 2>/dev/null
+}
+check "§163(pre) both resolver functions were extracted (mutation: a rename empties this and every resolver check goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "^_sandy_host_tz()" && printf "%s" "$1" | grep -q "^_sandy_tz_valid()"' _ "$_S163_FNS"
+check "§163(1) macOS: /etc/localtime -> /var/db/timezone/zoneinfo/America/Denver resolves America/Denver (got: $(_s163_tz - "$_S163_DIR/mac"))" \
+    test "$(_s163_tz - "$_S163_DIR/mac")" = "America/Denver"
+check "§163(2) Linux: a RELATIVE ../usr/share/zoneinfo/Europe/Berlin link resolves Europe/Berlin (got: $(_s163_tz - "$_S163_DIR/lin"))" \
+    test "$(_s163_tz - "$_S163_DIR/lin")" = "Europe/Berlin"
+check "§163(3) /etc/localtime a regular file: /etc/timezone is read (got: $(_s163_tz - "$_S163_DIR/deb"))" \
+    test "$(_s163_tz - "$_S163_DIR/deb")" = "Asia/Tokyo"
+check "§163(4) no source at all: nothing is resolved, so TZ stays unset -- the pre-#384 behaviour" \
+    test -z "$(_s163_tz - "$_S163_DIR/none")"
+check "§163(5) the host's own \$TZ wins over /etc -- it is the override, since this is deliberately not a config key" \
+    test "$(_s163_tz America/New_York "$_S163_DIR/mac")" = "America/New_York"
+check "§163(6) a POSIX rule string is accepted (glibc honours it)" \
+    test "$(_s163_tz 'EST5EDT,M3.2.0,M11.1.0' "$_S163_DIR/none")" = "EST5EDT,M3.2.0,M11.1.0"
+check "§163(7) a leading ':' (POSIX implementation-defined marker) is dropped" \
+    test "$(_s163_tz ':America/New_York' "$_S163_DIR/none")" = "America/New_York"
+check "§163(8) TZ=:/etc/localtime (a PATH, not a zone) is not forwarded; the resolver falls through to the link it names" \
+    test "$(_s163_tz ':/etc/localtime' "$_S163_DIR/lin")" = "Europe/Berlin"
+_S163_BAD_OK=1
+for _s163_v in '../../etc/passwd' 'America/../../../etc/shadow' '/etc/localtime' 'America/New York' 'x$(id)' 'a;b' "$(printf 'A%.0s' $(seq 1 65))"; do
+    [ "$(_s163_tz "$_s163_v" "$_S163_DIR/lin")" = "Europe/Berlin" ] || _S163_BAD_OK=0
+done
+check "§163(9) a TZ that fails validation (.., leading /, space, shell metacharacters, >64 chars) is skipped and the next source used -- never forwarded, never fatal" \
+    test "$_S163_BAD_OK" = 1
+check "§163(10) a /etc/localtime link whose stripped name contains .. is refused and /etc/timezone used instead (got: $(_s163_tz - "$_S163_DIR/evil"))" \
+    test "$(_s163_tz - "$_S163_DIR/evil")" = "Asia/Kolkata"
+
+# The argv. The REAL block, from its banner to its unset, evaluated with a
+# controlled TZ -- the same shape §134(4) uses for SANDY_SANDBOX_NAME.
+_S163_BLK="$(sed -n '/^# --- Host timezone -> container TZ (#384) ---$/,/^unset _sandy_tz$/p' "$_S163_SANDY")"
+_S163_ARGV="$(bash -c '
+    warn() { :; }
+    RUN_FLAGS=(); TZ=Pacific/Kiritimati
+    eval "$1"
+    printf "%s\n" "${RUN_FLAGS[@]}"
+' _ "$_S163_BLK" 2>/dev/null || true)"
+check "§163(11) the launch argv carries -e TZ=<zone> as ONE adjacent pair (got: $(printf '%s' "$_S163_ARGV" | tr '\n' ' '))" \
+    test "$_S163_ARGV" = "$(printf '%s\n%s' -e TZ=Pacific/Kiritimati)"
+# Both RUN_FLAGS initialisations (daemon -d, foreground --rm -it) precede the
+# block, and it is not inside either branch -- so both paths emit it.
+_S163_L_BLK="$(grep -n '^# --- Host timezone -> container TZ (#384) ---$' "$_S163_SANDY" | cut -d: -f1)"
+_S163_L_D="$(grep -n '^    RUN_FLAGS=(-d --restart unless-stopped' "$_S163_SANDY" | cut -d: -f1)"
+_S163_L_F="$(grep -n '^    RUN_FLAGS=(--rm -it' "$_S163_SANDY" | cut -d: -f1)"
+check "§163(12) the TZ block runs after BOTH the daemon and foreground RUN_FLAGS initialisations, at top level (block ${_S163_L_BLK:-?} > ${_S163_L_D:-?}, ${_S163_L_F:-?})" \
+    bash -c 'test -n "$1" && test -n "$2" && test -n "$3" && test "$1" -gt "$2" && test "$1" -gt "$3"' _ "$_S163_L_BLK" "$_S163_L_D" "$_S163_L_F"
+
+# The entrypoint half: whether the zone EXISTS is the image's question.
+_S163_EP="$(sed -n '/^if \[ -n "\${TZ:-}" \] && \[ ! -f "\/usr\/share\/zoneinfo\/\$TZ" \]; then$/,/^fi$/p' "$_S163_SANDY")"
+_s163_ep() {
+    bash -c 'TZ="$1"; eval "$2"; printf "%s" "${TZ-<unset>}"' _ "$1" "$_S163_EP" 2>/dev/null
+}
+if [ -f /usr/share/zoneinfo/UTC ] && [ -n "$_S163_EP" ]; then
+    check "§163(13) entrypoint: a zone the image does not have is UNSET (plain UTC), not left for glibc to mislabel" \
+        test "$(_s163_ep Mars/Olympus_Mons)" = "<unset>"
+    check "§163(14) entrypoint: a zone the image has is kept" \
+        test "$(_s163_ep UTC)" = "UTC"
+    check "§163(15) entrypoint: a POSIX rule string has no zoneinfo file and is kept" \
+        test "$(_s163_ep 'EST5EDT,M3.2.0,M11.1.0')" = "EST5EDT,M3.2.0,M11.1.0"
+else
+    skip "§163(13-15) this host has no /usr/share/zoneinfo/UTC (or the entrypoint block was not found: ${#_S163_EP} bytes)"
+fi
+
+# The UTC-emission property. Every `$(date ...)` in sandy -- host-side and the
+# container-side heredocs alike -- that formats a calendar time (anything but
+# epoch seconds) is RUN under TZ=Pacific/Kiritimati and under TZ=UTC; the two
+# must agree. A local-time producer differs by 14 hours.
+_S163_DATES="$(grep -o '\$(date [^)]*)' "$_S163_SANDY" | grep -v '+%s' | sort -u || true)"
+_S163_NDATES="$(printf '%s\n' "$_S163_DATES" | grep -c 'date' || true)"
+if [ "$(TZ=Pacific/Kiritimati date +%H)" != "$(TZ=UTC date +%H)" ]; then
+    check "§163(16) the date-producer extraction found the known producers (got ${_S163_NDATES}; launched_at, started_at, WORKSPACE.json, relay-state and the approval stamp are at least 5)" \
+        test "${_S163_NDATES:-0}" -ge 5
+    _S163_LOCAL=""
+    while IFS= read -r _s163_l; do
+        [ -n "$_s163_l" ] || continue
+        _s163_c="${_s163_l#\$(}"; _s163_c="${_s163_c%)}"
+        _s163_a="$(TZ=Pacific/Kiritimati bash -c "$_s163_c" 2>/dev/null || true)"
+        _s163_b="$(TZ=UTC bash -c "$_s163_c" 2>/dev/null || true)"
+        if [ "$_s163_a" != "$_s163_b" ]; then   # a second boundary: once more
+            _s163_a="$(TZ=Pacific/Kiritimati bash -c "$_s163_c" 2>/dev/null || true)"
+            _s163_b="$(TZ=UTC bash -c "$_s163_c" 2>/dev/null || true)"
+        fi
+        [ "$_s163_a" = "$_s163_b" ] || _S163_LOCAL="$_S163_LOCAL [$_s163_c]"
+    done <<EOF
+$_S163_DATES
+EOF
+    check "§163(17) every calendar timestamp sandy produces is UTC even under TZ=Pacific/Kiritimati (local-time producers:${_S163_LOCAL:- none})" \
+        test -z "$_S163_LOCAL"
+else
+    skip "§163(16-17) this host has no Pacific/Kiritimati zone, so a local-time producer cannot be told from a UTC one"
+fi
+rm -rf "$_S163_DIR"
+unset _S163_SANDY _S163_DIR _S163_FNS _S163_BAD_OK _s163_v _S163_BLK _S163_ARGV _S163_L_BLK _S163_L_D _S163_L_F
+unset _S163_EP _S163_DATES _S163_NDATES _S163_LOCAL _s163_l _s163_c _s163_a _s163_b
+unset -f _s163_tz _s163_ep
+
+# ============================================================
+echo ""
+echo "§164: SANDY_OFFLINE=1 / --no-update-check — no update lookup leaves the host, required builds still run (#219)"
+# ============================================================
+# WHY. On a degraded network every launch ran the agent version check, a hit
+# forced a --no-cache rebuild, and the rebuild died at apt. #218 made that
+# survivable; this is the explicit "I know I am on a plane, just launch".
+#
+# THE PROPERTY IS "NO REQUEST", so it is asserted on requests: the REAL sandy
+# runs `--build-only` against a stub curl that logs every URL it is handed and
+# a stub docker that reports every image present at agent version 1.0.0 (the
+# stub curl says 9.9.9 is out, so an unsuppressed check ALWAYS fires and
+# ALWAYS triggers a rebuild). A priming run writes the hash files, so the
+# measured runs reach the update check with nothing else to build. Each
+# measured run first deletes sandy's 24h release-check cache, so its own
+# check would hit the network too. (1) is the positive control: without it,
+# "no request was made" would pass against a fixture where nothing ever runs.
+_S164_SANDY="$SANDY_SCRIPT"
+_S164_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+mkdir -p "$_S164_D/bin" "$_S164_D/home/ws/.sandy" "$_S164_D/sh"
+cat > "$_S164_D/bin/curl" <<'EOF'
+#!/bin/bash
+for a in "$@"; do case "$a" in http*) printf '%s\n' "$a" >> "$S164_CURL_LOG" ;; esac; done
+case "$*" in
+    *claude-code-releases/latest*) echo "9.9.9" ;;
+    *repos/rappdw/sandy/releases/latest*) echo '{"tag_name":"v99.0.0"}' ;;
+    *commits*) echo '[{"sha":"abcdef1234567890"}]' ;;
+esac
+exit 0
+EOF
+cat > "$_S164_D/bin/docker" <<'EOF'
+#!/bin/bash
+printf 'docker %s\n' "$*" >> "$S164_DOCKER_LOG"
+case "$1" in
+    image) case "$*" in *'{{.Id}}'*) echo sha256:0000 ;; esac ;;
+    run) case "$*" in *.version*) echo "1.0.0" ;; esac ;;
+esac
+exit 0
+EOF
+chmod +x "$_S164_D/bin/curl" "$_S164_D/bin/docker"
+export S164_CURL_LOG="$_S164_D/curl.log" S164_DOCKER_LOG="$_S164_D/docker.log"
+_S164_OUT=""; _S164_RC=0
+# $@ = extra env assignments, then `--` and sandy's own args
+_s164_run() {
+    local _envs=()
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do _envs+=("$1"); shift; done
+    [ "${1:-}" = "--" ] && shift
+    rm -f "$_S164_D/sh/.update_check"
+    : > "$S164_CURL_LOG"; : > "$S164_DOCKER_LOG"
+    _S164_RC=0
+    # env: every -u must precede every NAME=VALUE, so the extras go first.
+    _S164_OUT="$(cd "$_S164_D/home/ws" && env -u SANDY_OFFLINE ${_envs[@]+"${_envs[@]}"} HOME="$_S164_D/home" \
+        SANDY_HOME="$_S164_D/sh" PATH="$_S164_D/bin:$PATH" bash "$_S164_SANDY" --build-only "$@" </dev/null 2>&1)" || _S164_RC=$?
+}
+_S164_AGENT_URL="claude-code-releases/latest"
+_S164_SELF_URL="repos/rappdw/sandy/releases/latest"
+
+_s164_run -- ; _S164_PRIME_RC="$_S164_RC"
+check "§164(pre) the priming run completed (rc=$_S164_PRIME_RC), so the measured runs below reach the update check" \
+    test "$_S164_PRIME_RC" -eq 0
+
+_s164_run -- ; _S164_C1="$(cat "$S164_CURL_LOG")"; _S164_B1="$(grep -c '^docker build' "$S164_DOCKER_LOG" || true)"
+check "§164(1) CONTROL: with no offline setting, both the agent version check and sandy's release check are requested (got: $(printf '%s' "$_S164_C1" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -qF "$2" && printf "%s" "$1" | grep -qF "$3"' _ "$_S164_C1" "$_S164_AGENT_URL" "$_S164_SELF_URL"
+check "§164(1b) CONTROL: ...and the detected update forces an agent rebuild (${_S164_B1} docker build)" \
+    test "${_S164_B1:-0}" -ge 1
+
+_s164_run -- --no-update-check
+check "§164(2) --no-update-check: NO request leaves the host at all (rc=$_S164_RC; got: $(tr '\n' ' ' < "$S164_CURL_LOG"))" \
+    bash -c 'test "$1" -eq 0 && test ! -s "$2"' _ "$_S164_RC" "$S164_CURL_LOG"
+check "§164(3) --no-update-check: nothing is rebuilt, because nothing was looked up" \
+    bash -c '! grep -q "^docker build" "$1"' _ "$S164_DOCKER_LOG"
+check "§164(4) offline is SAID, once, at launch -- the CVE-freshness trade-off is visible" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c "Offline mode")" -eq 1 ]' _ "$_S164_OUT"
+
+_s164_run SANDY_OFFLINE=1 --
+check "§164(5) SANDY_OFFLINE=1 in the environment: no update request" \
+    bash -c 'test "$1" -eq 0 && ! grep -qF "$3" "$2" && ! grep -qF "$4" "$2"' _ "$_S164_RC" "$S164_CURL_LOG" "$_S164_AGENT_URL" "$_S164_SELF_URL"
+
+# PASSIVE-SAFE (maintainer decision): a WORKSPACE config sets it with no
+# approval. The suite exports SANDY_AUTO_APPROVE_PRIVILEGED=1, which would
+# mask an approval gate, so this run removes it -- a privileged or
+# value-gated key would be dropped here (non-TTY fails closed) and the checks
+# would fire.
+printf 'SANDY_OFFLINE=1\n' > "$_S164_D/home/ws/.sandy/config"
+_s164_run -u SANDY_AUTO_APPROVE_PRIVILEGED --
+check "§164(6) SANDY_OFFLINE=1 in a WORKSPACE .sandy/config is honoured with no approval (passive-safe): no update request (rc=$_S164_RC)" \
+    bash -c 'test "$1" -eq 0 && ! grep -qF "$3" "$2" && ! grep -qF "$4" "$2"' _ "$_S164_RC" "$S164_CURL_LOG" "$_S164_AGENT_URL" "$_S164_SELF_URL"
+printf 'SANDY_OFFLINE=0\n' > "$_S164_D/home/ws/.sandy/config"
+_s164_run -- --no-update-check
+check "§164(7) the flag wins over SANDY_OFFLINE=0 in config, like --agent" \
+    bash -c '! grep -qF "$2" "$1"' _ "$S164_CURL_LOG" "$_S164_AGENT_URL"
+rm -f "$_S164_D/home/ws/.sandy/config"
+
+# A REQUIRED build is not an update check. Remove the agent hash so its
+# inputs read as changed: the build must still run under offline mode.
+rm -f "$_S164_D/sh/.build_hash"
+_s164_run -- --no-update-check
+check "§164(8) offline does NOT skip a REQUIRED build: a changed-inputs agent image is still built (rc=$_S164_RC)" \
+    bash -c 'test "$1" -eq 0 && grep -q "^docker build.*sandy-claude-code" "$2"' _ "$_S164_RC" "$S164_DOCKER_LOG"
+check "§164(8b) ...while still making no UPDATE request (only the build-reachability probe may run)" \
+    bash -c '! grep -qF "$3" "$2" && ! grep -qF "$4" "$2"' _ "$_S164_RC" "$S164_CURL_LOG" "$_S164_AGENT_URL" "$_S164_SELF_URL"
+
+_s164_run SANDY_OFFLINE=yes --
+check "§164(9) an invalid SANDY_OFFLINE is refused, not read as either value (rc=$_S164_RC)" \
+    bash -c 'test "$1" -eq 1 && printf "%s" "$2" | grep -q "SANDY_OFFLINE=.yes. invalid"' _ "$_S164_RC" "$_S164_OUT"
+
+# Skill packs resolve their version after --build-only exits, so the REAL
+# resolver is driven directly, against the same stub curl.
+_S164_SP="$(sed -n '/^SKILL_PACK_NAMES=/,/^SKILL_PACK_TAG_PREFIXES=/p;/^skill_pack_lookup()/,/^}$/p;/^skill_pack_latest_release()/,/^}$/p;/^skill_pack_resolve_versions()/,/^}$/p' "$_S164_SANDY")"
+_s164_sp() {
+    : > "$S164_CURL_LOG"
+    rm -f "$_S164_D/sh/.skill_version_gstack"
+    PATH="$_S164_D/bin:$PATH" SANDY_HOME="$_S164_D/sh" SANDY_OFFLINE="$1" bash -c '
+        info() { :; }
+        eval "$1"
+        skill_pack_resolve_versions gstack
+        printf "%s" "${SKILL_PACK_VERSIONS[0]}"
+    ' _ "$_S164_SP" 2>/dev/null || true
+}
+_s164_sp 0 >/dev/null
+check "§164(10) CONTROL: skill-pack resolution asks GitHub when online" \
+    grep -qF "api.github.com/repos/garrytan/gstack" "$S164_CURL_LOG"
+_S164_SPV="$(_s164_sp 1)"
+check "§164(11) SANDY_OFFLINE=1: skill-pack resolution asks nothing and falls back to the built-in pin (got: ${_S164_SPV:-none})" \
+    bash -c 'test ! -s "$1" && test "$2" = main' _ "$S164_CURL_LOG" "$_S164_SPV"
+
+# The --start supervisor is a fresh process: the flag must survive the re-exec.
+_S164_RX="$(sed -n '/^    _sandy_reexec_args=(--start --workspace/,/^    _sandy_reexec_args+=("\$@")$/p' "$_S164_SANDY")"
+_S164_RXA="$(bash -c '
+    WORK_DIR=/w SANDY_REBUILD=false SANDY_BUILD_ONLY=false SANDY_NEW_SESSION=false
+    SANDY_REMOTE_CONTROL=false SANDY_AGENT_OVERRIDE="" SANDY_VERBOSE=0
+    SANDY_NO_UPDATE_CHECK=true
+    _blk="$1"; shift   # the block ends by appending "$@", which must be empty
+    eval "$_blk"
+    printf "%s " "${_sandy_reexec_args[@]}"
+' _ "$_S164_RX" 2>/dev/null || true)"
+check "§164(12) --start hands --no-update-check to the supervisor it re-execs (got: ${_S164_RXA:-none})" \
+    bash -c 'case " $1" in *" --no-update-check "*) exit 0 ;; esac; exit 1' _ "$_S164_RXA"
+
+# Provable after the fact: the session marker records it.
+_S164_MK="$(awk '/^printf .\{.n  "schema": 1,/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$_S164_SANDY")"
+_s164_mk() {
+    bash -c '
+        sandy_full_version() { echo 9.9.9; }
+        _sandy_egress_mode=off SANDY_WORKSPACE=/w SANDBOX_NAME=w-1 _sandy_effort_json=null
+        _sandy_perm_mode_json=null _sandy_csi_json=null _sandy_agents_json=null
+        _sandy_relay_source_json=null _sandy_relay_path_json=null _sandy_relay_disabled_by_json=null
+        CRED_MODE=none _sandy_session_nonce=x _sandy_session_file=/dev/stdout
+        SANDY_OFFLINE="$2"
+        eval "$1"
+    ' _ "$_S164_MK" "$1" 2>/dev/null | grep '"offline"' || true
+}
+check "§164(13) /etc/sandy-session.json records \"offline\": true for an offline launch (got: $(_s164_mk 1))" \
+    bash -c 'printf "%s" "$1" | grep -q "\"offline\": true,"' _ "$(_s164_mk 1)"
+check "§164(14) ...and \"offline\": false otherwise -- a boolean, never absent on a sandy that knows the field" \
+    bash -c 'printf "%s" "$1" | grep -q "\"offline\": false,"' _ "$(_s164_mk 0)"
+rm -rf "$_S164_D"
+unset S164_CURL_LOG S164_DOCKER_LOG
+unset _S164_SANDY _S164_D _S164_OUT _S164_RC _S164_AGENT_URL _S164_SELF_URL _S164_PRIME_RC _S164_C1 _S164_B1
+unset _S164_SP _S164_SPV _S164_RX _S164_RXA _S164_MK
+unset -f _s164_run _s164_sp _s164_mk
+echo ""
+echo "§162: the --start pre-pass answers the .sandy/Dockerfile gate too; SANDY_AUTO_APPROVE_PRIVILEGED covers two gates of three; the prompt names its provenance (#296, #295)"
+# WHY. `--start` answers launch approvals on the CLIENT tty in a SANDY_APPROVE_ONLY
+# pre-pass, because the supervisor it forks has stdin on /dev/null. That pass
+# covered the config keys and the symlinks but exited ~2500 lines before the
+# per-project Dockerfile gate, which was therefore reached only in the
+# supervisor and could only fail closed: no way to approve a project image in
+# daemon mode at all. Declining there is NOT a refusal (maintainer decision): N
+# means "use the base image", so the pass exits 0 and hands the decline to the
+# supervisor bound to the context hash.
+#
+# The pre-pass is driven for real under a pty (python3 pty.fork), because the
+# gate branches on [ -t 0 ] and reads its answer from /dev/tty; the driver
+# answers the [y/N] prompt when it appears. This harness exports
+# SANDY_AUTO_APPROVE_PRIVILEGED=1 globally, which the gate honours as a bypass,
+# so every run that must reach the prompt strips it with env -u.
+_S162_SANDY="$(cd "$(dirname "$0")/.." && pwd -P)/sandy"
+_S162_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+# Not named pty.py: a script of that name shadows the pty module it imports.
+cat > "$_S162_DIR/ptydrive.py" <<'PY'
+import os, pty, sys, select, time, signal
+answer = sys.argv[1]
+argv = sys.argv[2:]
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        os.execvp(argv[0], argv)
+    finally:
+        os._exit(127)
+buf = b''
+sent = False
+deadline = time.time() + 90
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try:
+            d = os.read(fd, 4096)
+        except OSError:
+            break
+        if not d:
+            break
+        buf += d
+        if not sent and answer and b'[y/N]' in buf:
+            os.write(fd, (answer + '\n').encode())
+            sent = True
+else:
+    os.kill(pid, signal.SIGKILL)
+_, st = os.waitpid(pid, 0)
+rc = os.WEXITSTATUS(st) if os.WIFEXITED(st) else 128 + os.WTERMSIG(st)
+sys.stdout.write(buf.decode('utf-8', 'replace'))
+sys.stdout.write('\nPTYDRIVE_RC=%d\n' % rc)
+PY
+# Same extraction 38c uses, so the hash the checks expect is computed by the
+# real _sandy_context_hash rather than re-derived here.
+_S162_FN="$(awk '
+    /^sha256\(\)/ {print; next}
+    /^_sandy_context_hash\(\)/,/^}/ {print; next}
+    /^_sandy_project_dockerfile_approved\(\)/,/^}/ {print; next}
+' "$_S162_SANDY")"
+_s162_mk() {   # $1 = fixture name; a workspace with a .sandy/Dockerfile and a stub docker
+    local T="$_S162_DIR/$1"
+    mkdir -p "$T/bin" "$T/home" "$T/ws/.sandy"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/docker"; chmod +x "$T/bin/docker"
+    printf 'ARG BASE_IMAGE\nFROM $BASE_IMAGE\nRUN echo hi\n' > "$T/ws/.sandy/Dockerfile"
+}
+_s162_pre() {   # $1 = fixture  $2 = answer (y|n); runs the pre-pass on a pty, sets _S162_OUT / _S162_RC
+    local T="$_S162_DIR/$1"
+    _S162_OUT="$( cd "$T/ws" && env -u SANDY_AUTO_APPROVE_PRIVILEGED PATH="$T/bin:$PATH" SANDY_HOME="$T/home" HOME="$T" SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$T/result" python3 "$_S162_DIR/ptydrive.py" "$2" bash "$_S162_SANDY" 2>&1 || true )"
+    _S162_RC="$(printf '%s\n' "$_S162_OUT" | sed -n 's/^PTYDRIVE_RC=\([0-9][0-9]*\).*/\1/p')"
+}
+_s162_hash() { bash -c "$_S162_FN"$'\n'"_sandy_context_hash '$1'"; }
+_s162_approval() {   # $1 = fixture; path of its dockerfile approval file
+    local T="$_S162_DIR/$1" wh
+    wh="$(printf '%s' "$T/ws" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16)"
+    printf '%s' "$T/home/approvals/dockerfile-$wh.list"
+}
+_s162_diag() {   # $1 = label; show what the pty run produced when a check is about to fail
+    printf '    \033[0;33m^ %s: rc=%s, captured (last 300 bytes): %s\033[0m\n' \
+        "$1" "${_S162_RC:-?}" "$(printf '%s' "$_S162_OUT" | tail -c 300 | tr '\n\r' '  ' | cat -v)"
+}
+
+if ! command -v python3 >/dev/null 2>&1; then
+    skip "§162(1-6) python3 not available to drive a pty"
+else
+# --- A1: approving in the pre-pass persists the SAME approval file a foreground launch writes
+_s162_mk A
+_s162_pre A y
+_S162_HA="$(_s162_hash "$_S162_DIR/A/ws/.sandy")"
+printf '%s' "$_S162_OUT" | grep -q "Build this .sandy/Dockerfile" || _s162_diag "§162(1) pre-pass y"
+check "§162(1) the APPROVE_ONLY pre-pass REACHES the Dockerfile prompt (mutation: dropping the call from _sandy_approve_only_finish restores the unanswerable-in-daemon-mode bug)" \
+    bash -c 'printf "%s" "$1" | grep -q "Build this .sandy/Dockerfile"' _ "$_S162_OUT"
+check "§162(2) answering y writes the approval file, keyed on the build-context hash, and the pass exits 0" \
+    bash -c 'test "$1" = 0 && test "$(head -n1 "$2" 2>/dev/null)" = "$3"' _ "$_S162_RC" "$(_s162_approval A)" "$_S162_HA"
+
+# --- A2: declining is NOT a refusal (the maintainer decision), and the decline is handed on
+_s162_mk B
+_s162_pre B n
+_S162_HB="$(_s162_hash "$_S162_DIR/B/ws/.sandy")"
+[ "$_S162_RC" = 0 ] || _s162_diag "§162(3) pre-pass n"
+check "§162(3) answering N exits 0 -- use the base image, do not stop --start (mutation: treating it like a declined symlink makes --start exit 6)" \
+    test "$_S162_RC" = 0
+check "§162(4) ...after SHOWING the prompt, and writes NO approval file" \
+    bash -c 'printf "%s" "$1" | grep -q "Build this .sandy/Dockerfile" && test ! -e "$2"' _ "$_S162_OUT" "$(_s162_approval B)"
+check "§162(5) ...and records the decline for the supervisor, bound to the context hash (mutation: dropping the result write makes the supervisor re-print a review nobody can answer)" \
+    bash -c 'test "$(sed -n "s/^dockerfile_declined=//p" "$1" 2>/dev/null)" = "$2"' _ "$_S162_DIR/B/result" "$_S162_HB"
+
+# --- A3: the bypass covers the Dockerfile gate but deliberately NOT the symlink gate
+_s162_mk C
+mkdir -p "$_S162_DIR/C/outside"; ln -s "$_S162_DIR/C/outside" "$_S162_DIR/C/ws/escape"
+_S162_OUT="$( cd "$_S162_DIR/C/ws" && PATH="$_S162_DIR/C/bin:$PATH" SANDY_HOME="$_S162_DIR/C/home" HOME="$_S162_DIR/C" SANDY_APPROVE_ONLY=1 SANDY_AUTO_APPROVE_PRIVILEGED=1 bash "$_S162_SANDY" </dev/null 2>&1 || true )"
+check "§162(6) SANDY_AUTO_APPROVE_PRIVILEGED=1 does NOT approve an escaping symlink -- the documented asymmetry is real (mutation: honouring the bypass in _sandy_resolve_symlinks silently mounts every future escape)" \
+    bash -c 'printf "%s" "$1" | grep -q "need interactive approval"' _ "$_S162_OUT"
+fi
+
+# --- A4: the supervisor side of the hand-off (no tty, as under nohup </dev/null)
+_s162_sup() {   # $1 = fixture  $2 = SANDY_DOCKERFILE_DECLINED_HASH; prints output then RC=<n>
+    local T="$_S162_DIR/$1"
+    bash -c "$_S162_FN"$'\n'"WORK_DIR='$T/ws' SANDY_HOME='$T/home' SANDY_AUTO_APPROVE_PRIVILEGED=0 SANDY_DOCKERFILE_DECLINED_HASH='$2'"$'\n''_sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile"; echo "RC=$?"' </dev/null 2>&1 || true
+}
+_s162_mk D
+_S162_HD="$(_s162_hash "$_S162_DIR/D/ws/.sandy")"
+_S162_OUT="$(_s162_sup D "$_S162_HD")"
+check "§162(7) a matching declined hash skips the build (rc 1) with ONE line, not the whole review again (mutation: removing the hand-off re-prints the Dockerfile and advises approving a prompt the user just answered)" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && printf "%s" "$1" | grep -q "not approved at the --start prompt" && ! printf "%s" "$1" | grep -q "Review it"' _ "$_S162_OUT"
+_S162_OUT="$(_s162_sup D "0000000000000000000000000000000000000000000000000000000000000000")"
+check "§162(8) a declined hash for OTHER content falls through to the normal fail-closed path (mutation: honouring any non-empty value would let a stale decline describe bytes nobody reviewed)" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && printf "%s" "$1" | grep -q "Non-interactive session"' _ "$_S162_OUT"
+_S162_OUT="$(_s162_sup D "")"
+check "§162(9) no hand-off at all keeps the pre-#296 fail-closed behaviour" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && printf "%s" "$1" | grep -q "Non-interactive session"' _ "$_S162_OUT"
+check "§162(10) the --start client forwards the decline into the supervisor env (the one step the pty runs above cannot reach without forking a real supervisor)" \
+    grep -q '"SANDY_DOCKERFILE_DECLINED_HASH=\$_sandy_df_declined"' "$_S162_SANDY"
+check "§162(11) --print-schema describes the bypass as covering the Dockerfile gate and NOT the symlink gate (#296 item 3; R8 in the 2026-09-04 review)" \
+    bash -c '"$1" --print-schema | python3 -c "import json,sys; d=[k for k in json.load(sys.stdin)[\"config\"][\"env_only_keys\"] if k[\"name\"]==\"SANDY_AUTO_APPROVE_PRIVILEGED\"][0][\"description\"]; assert \".sandy/Dockerfile\" in d and \"NOT bypass the dangerous-symlink\" in d"' _ "$_S162_SANDY"
+
+# --- B (#295 items 4-6): the prompt says WHICH question it is asking --------
+# "Is this content acceptable" is half the question; "did you put this here"
+# is the other half, and the operator can only answer it knowing whether the
+# content is new to this workspace or changed since a review they already did.
+# Both fixtures reach the prompt through the no-tty path, which prints the full
+# review before failing closed; the wording is the same one a tty user sees.
+_S162_OUT="$(_s162_sup D "")"
+check "§162(12) no approval file: the prompt says NO prior approval, and does not claim a change (mutation: a single undifferentiated prompt loses the provenance)" \
+    bash -c 'printf "%s" "$1" | grep -q "NO prior approval for this workspace" && ! printf "%s" "$1" | grep -q "CHANGED since"' _ "$_S162_OUT"
+_s162_mk E
+mkdir -p "$_S162_DIR/E/home/approvals"
+printf '%s\n# workspace: %s\n# approved:  2026-01-02T03:04:05Z\n' "0000000000000000000000000000000000000000000000000000000000000000" "$_S162_DIR/E/ws" > "$(_s162_approval E)"
+_S162_OUT="$(_s162_sup E "")"
+check "§162(13) an approval for OTHER content: the prompt says the context CHANGED and names the earlier approval date (mutation: reading the date from the wrong line, or not at all, drops the when)" \
+    bash -c 'printf "%s" "$1" | grep -q "CHANGED since you approved it on 2026-01-02T03:04:05Z" && ! printf "%s" "$1" | grep -q "NO prior approval"' _ "$_S162_OUT"
+check "§162(14) the prompt carries a reading rule, not just the risk (#295 item 5)" \
+    bash -c 'printf "%s" "$1" | grep -q "fetches and installs from a package registry is expected" && printf "%s" "$1" | grep -q "piping a URL to a shell"' _ "$_S162_OUT"
+# Item 6 is structural: exercising it for real means running the whole launch
+# up to Phase 3 with a docker that fails only the project build.
+check "§162(15) a failed project build names the probe scope -- sandy's own hosts only (mutation: a bare docker build under set -e fails with no hint and reads like a sandy fault)" \
+    bash -c 'grep -F -A12 -e "-f \"\$PROJECT_DOCKERFILE\" \"\$WORK_DIR/.sandy\" || _sandy_proj_build_rc=\$?" "$1" | grep -q "covers only its OWN build hosts"' _ "$_S162_SANDY"
+
+rm -rf "$_S162_DIR"
+unset _S162_SANDY _S162_DIR _S162_FN _S162_OUT _S162_RC _S162_HA _S162_HB _S162_HD
+unset -f _s162_mk _s162_pre _s162_hash _s162_approval _s162_diag _s162_sup
+echo "§165: SANDY_EXTRA_ENV name lists compose — host, approved workspace and env are unioned (#388)"
+# ============================================================
+# Last-wins used to replace the host list with the workspace one (and an env
+# list replaced both), silently dropping every host-forwarded name the moment a
+# workspace forwarded one of its own. Driven for real: the whole config-load
+# region of sandy -- snapshot, the four _load_sandy_config calls, the approval
+# resolver and _load_sandy_extra_env -- is extracted and run against fixture
+# files, and the assertions are on the names that come out, not on the code.
+_S165_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S165_REGION="$(sed -n '/^_PASSIVE_PRIVILEGED_PENDING=()$/,/^_load_sandy_extra_env$/p' "$SANDY_SCRIPT")"
+check "§165(0) extracted the config-load region (mutation: a rename empties it and must fail HERE, not make every check below vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "^_resolve_passive_privileged_approval$" && printf "%s" "$1" | grep -q "^_load_sandy_extra_env() {"' _ "$_S165_REGION"
+# _s165_run REGION HOST_CFG HOST_SEC WS_CFG WS_SEC [VAR=VALUE...]
+# Each *_CFG/*_SEC is the file body ("" = no file). Prints one line per
+# forwarded name as NAME=value, then list=<composed SANDY_EXTRA_ENV>, then the
+# loader's stderr. stdin is /dev/null, so an approval that is not auto-granted
+# is dropped exactly as headless drops it.
+_s165_run() {
+    # A fresh fixture per call: callers run this inside $( ), so a counter
+    # incremented here would be lost and every case would share one directory.
+    local _region="$1" _c _h _w
+    _c="$(mktemp -d "$_S165_DIR/c.XXXXXX")"; _h="$_c/home"; _w="$_c/ws"
+    mkdir -p "$_h" "$_w/.sandy"
+    [ -n "$2" ] && printf '%s\n' "$2" > "$_h/config"
+    [ -n "$3" ] && printf '%s\n' "$3" > "$_h/.secrets"
+    [ -n "$4" ] && printf '%s\n' "$4" > "$_w/.sandy/config"
+    [ -n "$5" ] && printf '%s\n' "$5" > "$_w/.sandy/.secrets"
+    shift 5
+    env -i PATH="$PATH" HOME="$_S165_DIR" SANDY_HOME="$_h" WORK_DIR="$_w" "$@" bash -c '
+        set -euo pipefail
+        _key_in_list() { local t="$1"; shift; local k; for k in "$@"; do [ "$k" = "$t" ] && return 0; done; return 1; }
+        _sandy_passive_value_privileged() { return 1; }
+        sha256() { shasum -a 256 2>/dev/null || sha256sum; }
+        warn() { echo "[warn] $*" >&2; }
+        info() { echo "[info] $*" >&2; }
+        # The region also carries the #219 offline block, which reads the
+        # parsed --no-update-check flag and calls the update check.
+        SANDY_NO_UPDATE_CHECK=false; sandy_check_update() { :; }
+        SANDY_PRIVILEGED_KEYS=(SANDY_SSH SANDY_EXTRA_ENV)
+        SANDY_PASSIVE_KEYS=(SANDY_MODEL SANDY_RELAY SANDY_VERBOSE)
+        eval "$1"
+        for _n in "${_SANDY_EXTRA_ENV_NAMES[@]+"${_SANDY_EXTRA_ENV_NAMES[@]}"}"; do
+            printf "%s=%s\n" "$_n" "${!_n-<unset>}"
+        done
+        printf "list=%s\n" "${SANDY_EXTRA_ENV:-}"
+    ' _ "$_region" </dev/null 2>&1 || echo "rc=$?"
+}
+_S165_HOSTC='SANDY_EXTRA_ENV=A_TOK,B_TOK'
+_S165_HOSTS=$'A_TOK=a-from-host\nB_TOK=b-from-host'
+_S165_WSC='SANDY_EXTRA_ENV=B_TOK,C_TOK'
+_S165_WSS='C_TOK=c-from-ws'
+# (1) The acceptance case from #388: host A,B + approved workspace B,C.
+_S165_OUT1="$(_s165_run "$_S165_REGION" "$_S165_HOSTC" "$_S165_HOSTS" "$_S165_WSC" "$_S165_WSS" SANDY_AUTO_APPROVE_PRIVILEGED=1)"
+check "§165(1) host A,B + approved workspace B,C forwards exactly A,B,C in that order, B once (mutation: the old last-wins forwards B,C and drops A)" \
+    bash -c 'test "$(printf "%s\n" "$1" | grep -E "^[A-Z]_TOK=" | cut -d= -f1 | tr "\n" ,)" = "A_TOK,B_TOK,C_TOK,"' _ "$_S165_OUT1"
+check "§165(2) ...each value still resolves per name: A and B from host .secrets, C from workspace .secrets" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "A_TOK=a-from-host" && printf "%s\n" "$1" | grep -qx "B_TOK=b-from-host" && printf "%s\n" "$1" | grep -qx "C_TOK=c-from-ws"' _ "$_S165_OUT1"
+check "§165(3) ...and SANDY_EXTRA_ENV itself (forwarded to the container) is the composed list, so in-container echo names every forwarded name" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=A_TOK,B_TOK,C_TOK"' _ "$_S165_OUT1"
+check "§165(4) ...and the launch says where the names came from when two sources contribute" \
+    bash -c 'printf "%s\n" "$1" | grep -qF "forwarding A_TOK,B_TOK,C_TOK (host: A_TOK,B_TOK; workspace: B_TOK,C_TOK; env: -)"' _ "$_S165_OUT1"
+# (5) Env ADDS (maintainer decision on #388) -- it does not replace.
+_S165_OUT5="$(_s165_run "$_S165_REGION" "$_S165_HOSTC" "$_S165_HOSTS" "$_S165_WSC" "$_S165_WSS" SANDY_AUTO_APPROVE_PRIVILEGED=1 SANDY_EXTRA_ENV="D_TOK, A_TOK" D_TOK=d-from-env)"
+check "§165(5) an env-set list is unioned after host and workspace: A,B,C,D, with the env duplicate A collapsed (mutation: env-as-override forwards D,A only)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=A_TOK,B_TOK,C_TOK,D_TOK" && printf "%s\n" "$1" | grep -qx "D_TOK=d-from-env"' _ "$_S165_OUT5"
+# (6) Unapproved workspace list: dropped, as today -- but host names survive.
+_S165_OUT6="$(_s165_run "$_S165_REGION" "$_S165_HOSTC" "$_S165_HOSTS" "$_S165_WSC" "$_S165_WSS")"
+check "§165(6) an UNAPPROVED workspace list contributes nothing and the host names are still forwarded (approval still gates the workspace names)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=A_TOK,B_TOK" && ! printf "%s\n" "$1" | grep -q "^C_TOK=" && printf "%s\n" "$1" | grep -qF "dropping these keys"' _ "$_S165_OUT6"
+# (7) Unapproved workspace list with env set: env names still join, workspace
+# names still do not -- the env exception must not become an approval bypass.
+_S165_OUT7="$(_s165_run "$_S165_REGION" "$_S165_HOSTC" "$_S165_HOSTS" "$_S165_WSC" "$_S165_WSS" SANDY_EXTRA_ENV=D_TOK)"
+check "§165(7) env set + unapproved workspace: host and env names forwarded, workspace names still refused" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=A_TOK,B_TOK,D_TOK"' _ "$_S165_OUT7"
+# (8)/(9) Single-source cases are unchanged.
+_S165_OUT8="$(_s165_run "$_S165_REGION" "" "" "$_S165_WSC" "$_S165_WSS" SANDY_AUTO_APPROVE_PRIVILEGED=1)"
+check "§165(8) workspace-only (approved) forwards the workspace list, silently (one source, nothing to explain)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=B_TOK,C_TOK" && ! printf "%s\n" "$1" | grep -qF "forwarding"' _ "$_S165_OUT8"
+_S165_OUT9="$(_s165_run "$_S165_REGION" "$_S165_HOSTC" "$_S165_HOSTS" "" "")"
+check "§165(9) host-only forwards the host list" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=A_TOK,B_TOK"' _ "$_S165_OUT9"
+# (10) Host config and host .secrets both naming lists compose too.
+_S165_OUT10="$(_s165_run "$_S165_REGION" "$_S165_HOSTC" "SANDY_EXTRA_ENV=E_TOK" "" "")"
+check "§165(10) host config and host .secrets lists compose as well (the same last-wins existed between those two files)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "list=A_TOK,B_TOK,E_TOK"' _ "$_S165_OUT10"
+# (11) Mutation self-test (§89-style): the same harness against the region
+# with the approved workspace value EXPORTED (the pre-#388 last-wins) must fail
+# (1), proving the harness can tell the two apart and is not vacuous.
+_S165_MUT="$(printf '%s' "$_S165_REGION" | sed 's/SANDY_EXTRA_ENV=\*) _SANDY_EXTRA_ENV_WS_APPROVED=1 ;;/SANDY_EXTRA_ENV=*) _SANDY_EXTRA_ENV_WS_APPROVED=1; export "$1"; _SANDY_EXTRA_ENV_HOST_LISTS=() ;;/')"
+_S165_OUTM="$(_s165_run "$_S165_MUT" "$_S165_HOSTC" "$_S165_HOSTS" "$_S165_WSC" "$_S165_WSS" SANDY_AUTO_APPROVE_PRIVILEGED=1)"
+check "§165(11) mutation self-test: a last-wins mutant of the region does NOT produce A,B,C (the mutant was built, and the harness sees the difference)" \
+    bash -c '[ "$1" != "$2" ] && ! printf "%s\n" "$3" | grep -qx "list=A_TOK,B_TOK,C_TOK"' _ "$_S165_MUT" "$_S165_REGION" "$_S165_OUTM"
+# (12) --validate-config tells a workspace author the names are ADDED.
+printf 'SANDY_EXTRA_ENV=HA_TOKEN\n' > "$_S165_DIR/ws.config"
+_S165_VAL="$(bash "$SANDY_SCRIPT" --validate-config "$_S165_DIR/ws.config" 2>/dev/null || true)"
+check "§165(12) --validate-config on a workspace SANDY_EXTRA_ENV says its names are ADDED to the host list, not a replacement" \
+    bash -c 'printf "%s" "$1" | grep -qF "names are ADDED to the host"' _ "$_S165_VAL"
+rm -rf "$_S165_DIR"
+unset _S165_DIR _S165_REGION _S165_HOSTC _S165_HOSTS _S165_WSC _S165_WSS _S165_MUT _S165_VAL
+unset _S165_OUT1 _S165_OUT5 _S165_OUT6 _S165_OUT7 _S165_OUT8 _S165_OUT9 _S165_OUT10 _S165_OUTM
+unset -f _s165_run
+
+echo "§166: --reset-sandbox names what --keep-history does NOT keep (#333)"
+# ============================================================
+# --keep-history keeps claude/projects/ and nothing else. A connector's
+# at-most-once ledger under claude/, another agent's history, a host-side
+# tool's spool: all destroyed, and the plan used to list them beside the
+# package caches as if they were the same kind of thing. The plan now names
+# them. The property asserted is the strong one: the set the plan NAMES equals
+# the set a real --keep-history reset actually DESTROYS, minus sandy's own
+# regenerable entries -- so a name that is listed but survives, or one that is
+# destroyed but unlisted, both fail. One fixture entry is a made-up name, so a
+# plan built from a hard-coded list of known consumer directories cannot pass.
+_S166_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+# _s166_mk TAG -> echoes "<workspace>\n<sandbox dir>" for a populated sandbox
+_s166_mk() {
+    local fh="$_S166_DIR/$1" ws sb h b
+    ws="$_S166_DIR/$1-ws"; mkdir -p "$ws" "$fh"
+    h="$(printf '%s' "$ws" | { shasum -a 256 2>/dev/null || sha256sum; })"; h="${h%% *}"; h="${h:0:8}"
+    b="$(basename "$ws" | tr -cd 'a-zA-Z0-9._-')"
+    sb="$fh/sandboxes/$b-$h"
+    mkdir -p "$sb/claude/projects/-ws" "$sb/pip/lib" "$sb/venv/bin"
+    echo t > "$sb/claude/projects/-ws/a.jsonl"
+    printf '{"workspace_path":"%s"}\n' "$ws" > "$sb/WORKSPACE.json"
+    echo "--x" > "$sb/agent-args.claude"
+    echo 2.4.0 > "$sb/.sandy_last_version"
+    echo '{}' > "$sb/sandy-session.json"
+    echo log > "$sb/proxy.log"
+    printf '%s\n%s\n' "$ws" "$sb"
+}
+_s166_named() { # the entries listed under the NOT-kept header, one per line
+    printf '%s\n' "$1" | awk -v h="$2" 'index($0,h)==1{f=1;next} f&&/^$/{exit} f{print $2}' | sort
+}
+{ read -r _S166_WS; read -r _S166_SB; } <<<"$(_s166_mk A)"
+mkdir -p "$_S166_SB/claude/connector/delivery-state" "$_S166_SB/claude/zz-spool-nobody-knows" "$_S166_SB/codex/sessions" "$_S166_SB/handoff/inbox"
+echo n1 > "$_S166_SB/claude/connector/delivery-state/ledger"
+echo m > "$_S166_SB/claude/zz-spool-nobody-knows/msg"
+echo '{}' > "$_S166_SB/claude/settings.json"
+echo h > "$_S166_SB/codex/sessions/s.jsonl"
+echo b > "$_S166_SB/handoff/inbox/body"
+_S166_HDR="NOT kept by --keep-history"
+_S166_DRY="$(SANDY_HOME="$_S166_DIR/A" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$_S166_WS" --keep-history --dry-run </dev/null 2>&1 || true)"
+_S166_NAMED="$(_s166_named "$_S166_DRY" "$_S166_HDR")"
+check "§166(1) the --keep-history plan names what it will NOT keep: the connector ledger under claude/, a claude/ entry nobody hard-coded, another agent's home, a leftover spool" \
+    bash -c 'for n in claude/connector claude/zz-spool-nobody-knows claude/settings.json codex handoff; do printf "%s\n" "$1" | grep -qx "$n" || exit 1; done' _ "$_S166_NAMED"
+check "§166(2) ...and does not name what it keeps (claude/projects, WORKSPACE.json, agent-args.*) or sandy's own regenerable caches and bookkeeping (pip, venv, launch markers)" \
+    bash -c '! printf "%s\n" "$1" | grep -qxE "claude/projects|WORKSPACE.json|agent-args.claude|pip|venv|.sandy_last_version|sandy-session.json|proxy.log"' _ "$_S166_NAMED"
+check "§166(3) --dry-run removed nothing (the ledger is still there)" test -f "$_S166_SB/claude/connector/delivery-state/ledger"
+# The property: named == destroyed-and-not-regenerable, by a real reset.
+_s166_inventory() { (cd "$1" && { ls -A | grep -vx claude; ls -A claude | sed 's|^|claude/|'; } | sort); }
+_S166_BEFORE="$(_s166_inventory "$_S166_SB")"
+SANDY_HOME="$_S166_DIR/A" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$_S166_WS" --keep-history --yes </dev/null >/dev/null 2>&1 || true
+_S166_AFTER="$(_s166_inventory "$_S166_SB")"
+_S166_GONE="$(comm -23 <(printf '%s\n' "$_S166_BEFORE") <(printf '%s\n' "$_S166_AFTER") | grep -vxE 'pip|venv|.sandy_last_version|sandy-session.json|proxy.log' || true)"
+check "§166(4) PROPERTY: the plan named exactly what a real --keep-history reset destroyed (sandy's own regenerable entries aside) -- nothing listed survives, nothing destroyed was unlisted" \
+    bash -c 'test -n "$1" && test "$1" = "$2"' _ "$_S166_NAMED" "$_S166_GONE"
+check "§166(5) ...and claude/projects/ really was kept" test -f "$_S166_SB/claude/projects/-ws/a.jsonl"
+# (6) the dry-run with the question unanswered shows the same list, so the
+# operator deciding sees what the flag would not save.
+{ read -r _S166_WS2; read -r _S166_SB2; } <<<"$(_s166_mk B)"
+mkdir -p "$_S166_SB2/claude/connector"
+_S166_DRY2="$(SANDY_HOME="$_S166_DIR/B" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$_S166_WS2" --dry-run </dev/null 2>&1 || true)"
+_S166_NAMED2="$(_s166_named "$_S166_DRY2" "--keep-history would keep")"
+check "§166(6) a --dry-run with the history question unanswered still names what --keep-history would not keep" \
+    test "$_S166_NAMED2" = claude/connector
+# (7) nothing to name -> no section (it must not cry wolf over caches)
+{ read -r _S166_WS3; read -r _S166_SB3; } <<<"$(_s166_mk C)"
+_S166_DRY3="$(SANDY_HOME="$_S166_DIR/C" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$_S166_WS3" --keep-history --dry-run </dev/null 2>&1 || true)"
+check "§166(7) a sandbox holding only claude/projects/ and regenerable caches prints no NOT-kept section" \
+    bash -c 'printf "%s" "$1" | grep -q "Will destroy" && ! printf "%s" "$1" | grep -qF "NOT kept by --keep-history"' _ "$_S166_DRY3"
+# (8) --purge-history asked for everything gone: no list to surprise anyone with.
+_S166_DRY4="$(SANDY_HOME="$_S166_DIR/B" bash "$SANDY_SCRIPT" --reset-sandbox --workspace "$_S166_WS2" --purge-history --dry-run </dev/null 2>&1 || true)"
+check "§166(8) --purge-history prints no NOT-kept section (the operator chose to destroy it all)" \
+    bash -c 'printf "%s" "$1" | grep -q "Will destroy" && ! printf "%s" "$1" | grep -qF "keep-history"' _ "$_S166_DRY4"
+check "§166(9) the stale comment claiming _rs_keep protects relay-bin/ is gone (#354 destroys it)" \
+    bash -c '! grep -q "relay-bin/, agent-args.\* and claude/projects/" "$1"' _ "$SANDY_SCRIPT"
+rm -rf "$_S166_DIR"
+unset _S166_DIR _S166_WS _S166_SB _S166_WS2 _S166_SB2 _S166_WS3 _S166_SB3 _S166_HDR _S166_DRY _S166_DRY2 _S166_DRY3 _S166_DRY4
+unset _S166_NAMED _S166_NAMED2 _S166_BEFORE _S166_AFTER _S166_GONE
+unset -f _s166_mk _s166_named _s166_inventory
+
+echo "§167: SANDY_EFFORT reaches codex as model_reasoning_effort (#116)"
+# ============================================================
+# Before 2.4.0 SANDY_EFFORT was claude-only and CLEARED for any launch without
+# claude, so a codex run was silently at its default and recorded as unpinned.
+# Driven for real: build_codex_cmd is extracted, the command it builds is RUN
+# through `bash -c` the way the pane runs it, against a stub `codex` that prints
+# its argv -- so the assertion is on the argv codex would receive.
+_S167_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S167_DIR/bin"
+for _s167_a in codex gemini; do
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "ARGV:"; printf " [%s]" "$@"; printf "\n"' > "$_S167_DIR/bin/$_s167_a"
+done
+printf '%s\n' '#!/usr/bin/env bash' 'echo S167_PWNED' > "$_S167_DIR/bin/S167_PWNED_CMD"
+chmod +x "$_S167_DIR/bin/codex" "$_S167_DIR/bin/gemini" "$_S167_DIR/bin/S167_PWNED_CMD"
+sed -n '/^build_codex_cmd() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S167_DIR/codex.sh"
+sed -n '/^build_gemini_cmd() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S167_DIR/gemini.sh"
+check "§167(0) build_codex_cmd and build_gemini_cmd were extracted and parse (mutation: a rename empties them and every check below goes vacuous)" \
+    bash -c 'grep -q "danger-full-access" "$1" && bash -n "$1" && grep -q "gemini" "$2" && bash -n "$2"' _ "$_S167_DIR/codex.sh" "$_S167_DIR/gemini.sh"
+_s167_run() { # _s167_run <builder> <effort> [args...] -> argv line of the stub
+    local _b="$1" _e="$2"; shift 2
+    (
+        trap - ERR; set +e; set +u
+        _sandy_translate_args() { :; }
+        _sandy_wrap_cmd_exit_pause() { printf '%s' "$2"; }
+        CODEX_MODEL=""; GEMINI_MODEL=""; SANDY_EFFORT="$_e"
+        . "$_S167_DIR/codex.sh"; . "$_S167_DIR/gemini.sh"
+        _c="$("$_b" "$@" 2>/dev/null)"
+        PATH="$_S167_DIR/bin:$PATH" bash -c "$_c 2>&1"
+    ) 2>/dev/null
+    return 0
+}
+# Each sandy level must reach codex as its exact codex namesake (verified
+# against codex 0.157.1: max is codex's own top non-delegating level; ultra is
+# multi-agent delegation, a behaviour change, and must NOT be what max maps to).
+for _s167_l in low:low medium:medium high:high xhigh:xhigh max:max; do
+    _S167_OUT="$(trap - ERR; _s167_run build_codex_cmd "${_s167_l%%:*}")"
+    check "§167(1:${_s167_l%%:*}) SANDY_EFFORT=${_s167_l%%:*} reaches codex as -c model_reasoning_effort=${_s167_l#*:} (got: $_S167_OUT)" \
+        bash -c 'case "$1" in "ARGV:"*" [-c] [model_reasoning_effort=$2]"*) exit 0 ;; esac; exit 1' _ "$_S167_OUT" "${_s167_l#*:}"
+done
+_S167_HL="$(trap - ERR; _s167_run build_codex_cmd high -p)"
+check "§167(2) the headless path (codex exec) carries it too (got: $_S167_HL)" \
+    bash -c 'case "$1" in "ARGV: [exec]"*" [-c] [model_reasoning_effort=high]"*) exit 0 ;; esac; exit 1' _ "$_S167_HL"
+_S167_NONE="$(trap - ERR; _s167_run build_codex_cmd "")"
+check "§167(3) no SANDY_EFFORT -> no override: codex keeps its own default (got: $_S167_NONE)" \
+    bash -c 'case "$1" in "ARGV:"*reasoning*) exit 1 ;; "ARGV:"*) exit 0 ;; esac; exit 1' _ "$_S167_NONE"
+_S167_GEM="$(trap - ERR; _s167_run build_gemini_cmd high)"
+check "§167(4) gemini does not receive it -- no effort surface sandy drives (got: $_S167_GEM)" \
+    bash -c 'case "$1" in "ARGV:"*effort*) exit 1 ;; "ARGV:"*) exit 0 ;; esac; exit 1' _ "$_S167_GEM"
+# The sink is `bash -c`. Host-side validation already rejects anything but the
+# five levels, but the builder must be safe on its own (R1): an unvalidated
+# value neither executes nor reaches codex as an invented level.
+_S167_INJ="$(trap - ERR; _s167_run build_codex_cmd 'high;S167_PWNED_CMD;x')"
+check "§167(5) an injected SANDY_EFFORT neither executes nor reaches codex (got: $_S167_INJ)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^ARGV:" && ! printf "%s\n" "$1" | grep -q "^S167_PWNED" && ! printf "%s\n" "$1" | grep -q reasoning' _ "$_S167_INJ"
+# Host-side: the validation block keeps the pinned value for a codex launch
+# (so the marker records it) and still clears it -- now with a message -- for a
+# launch with neither claude nor codex.
+_S167_VAL="$(awk '/^# Validate SANDY_EFFORT/{f=1} f{print} f&&/^fi$/{exit}' "$SANDY_SCRIPT")"
+_S167_HAS="$(grep -m1 '^_sandy_agent_has() {' "$SANDY_SCRIPT" || true)"
+_s167_val() { # _s167_val <agents> <effort> -> "rc=<n> effort=<v>" plus messages
+    bash -c 'error() { echo "ERR $*"; }; info() { echo "INFO $*"; }; eval "$3"; SANDY_AGENT="$1"; SANDY_EFFORT="$2"; ( eval "$4"; echo "rc=0 effort=$SANDY_EFFORT" ) || echo "rc=$?"' _ "$1" "$2" "$_S167_HAS" "$_S167_VAL" 2>&1
+}
+check "§167(6) the validation block and _sandy_agent_has were extracted (mutation: a rename empties them)" \
+    bash -c 'printf "%s" "$1" | grep -q "Invalid SANDY_EFFORT" && test -n "$2"' _ "$_S167_VAL" "$_S167_HAS"
+check "§167(7) a codex-only launch KEEPS SANDY_EFFORT (it used to be cleared, so codex ran unpinned and the marker said null)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=max"' _ "$(_s167_val codex max)"
+check "§167(8) a gemini-only launch clears it and SAYS so (it applies to claude and codex only)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=" && printf "%s\n" "$1" | grep -q "INFO SANDY_EFFORT=high ignored"' _ "$(_s167_val gemini high)"
+check "§167(9) a codex launch still fails loud on an invalid level" \
+    bash -c 'printf "%s\n" "$1" | grep -q "ERR Invalid SANDY_EFFORT" && printf "%s\n" "$1" | grep -qx "rc=1"' _ "$(_s167_val codex extreme)"
+check "§167(10) claude-only is unchanged: kept" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=high"' _ "$(_s167_val claude high)"
+rm -rf "$_S167_DIR"
+unset _S167_DIR _S167_OUT _S167_HL _S167_NONE _S167_GEM _S167_INJ _S167_VAL _S167_HAS _s167_a _s167_l
+unset -f _s167_run _s167_val
+
+echo "§168: Claude Code's native /sandbox is forced off in every seeding branch (#126)"
+# ============================================================
+# Claude Code ships its own sandbox (settings key sandbox.enabled) with its own
+# egress proxy. Inside sandy that is a second, uncoordinated proxy behind the
+# one policy chokepoint, and the host settings.json is the merge base -- so a
+# host sandbox.enabled:true used to ride straight into every sandbox. It is now
+# a MANAGED key: forced false every launch, other sandbox.* keys preserved.
+# Driven for real: sandy's whole settings-seeding block is extracted and run
+# three times -- with node, with only jq, and with neither -- and the resulting
+# settings.json is read back. A seed that differs by installed tools is how the
+# #129 hole looked, so every branch is exercised, not just the one CI has.
+_S168_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S168_BLOCK="$(awk '/^if _sandy_agent_has claude; then$/{b=$0; getline; if ($0 ~ /SEED_SETTINGS=/) {f=1; print b}} f{print} f&&/^fi  # end Claude settings seeding/{exit}' "$SANDY_SCRIPT")"
+check "§168(0) extracted the settings-seeding block (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "node -e" && printf "%s" "$1" | grep -q "command -v jq" && printf "%s" "$1" | grep -q "end Claude settings seeding"' _ "$_S168_BLOCK"
+# A PATH holding only what the block needs, so a branch can be selected by
+# which of node/jq exist. $1 = node|jq|none.
+_s168_seed() { # _s168_seed <tools> <host settings.json body or ""> -> resulting settings.json
+    local _t="$1" _c _b
+    _c="$(mktemp -d "$_S168_DIR/c.XXXXXX")"; _b="$_c/bin"
+    mkdir -p "$_b" "$_c/home/.claude" "$_c/sb/claude"
+    for _x in mv rm cp cat mktemp readlink; do ln -s "$(command -v "$_x")" "$_b/$_x"; done
+    if [ "$_t" = node ] && command -v node >/dev/null 2>&1; then ln -s "$(command -v node)" "$_b/node"; fi
+    if [ "$_t" != none ] && command -v jq >/dev/null 2>&1; then ln -s "$(command -v jq)" "$_b/jq"; fi
+    [ -n "$2" ] && printf '%s\n' "$2" > "$_c/home/.claude/settings.json"
+    env -i PATH="$_b" HOME="$_c/home" SANDBOX_DIR="$_c/sb" "$BASH" -c '
+        _sandy_agent_has() { return 0; }
+        info() { :; }; warn() { :; }
+        SANDBOX_IS_NEW=false
+        eval "$1"
+        cat "$SANDBOX_DIR/claude/settings.json"
+    ' _ "$_S168_BLOCK" 2>/dev/null || true
+}
+_S168_HOST='{"sandbox":{"enabled":true,"enableWeakerNestedSandbox":true,"excludedCommands":["docker *"]},"theme":"dark"}'
+# (jq reads the result in every case, independent of the branch under test)
+_s168_q() { printf '%s' "$1" | jq -c "$2" 2>/dev/null || echo "PARSE-ERROR"; }
+if ! command -v jq >/dev/null 2>&1; then
+    skip "§168 needs jq to read the seeded settings.json"
+else
+    for _s168_t in node jq; do
+        if [ "$_s168_t" = node ] && ! command -v node >/dev/null 2>&1; then skip "§168 node branch needs node"; continue; fi
+        _S168_OUT="$(_s168_seed "$_s168_t" "$_S168_HOST")"
+        check "§168(1:$_s168_t) a host sandbox.enabled:true is forced to false (mutation: only-if-absent, or not seeding at all, lets the host value start Claude Code's own proxy inside sandy's)" \
+            test "$(_s168_q "$_S168_OUT" '.sandbox.enabled')" = "false"
+        check "§168(2:$_s168_t) ...and only enabled is forced: the host's other sandbox.* keys survive" \
+            test "$(_s168_q "$_S168_OUT" '[.sandbox.enableWeakerNestedSandbox, .sandbox.excludedCommands]')" = '[true,["docker *"]]'
+        check "§168(3:$_s168_t) ...and the rest of the host settings still merge (theme kept, connectors still managed)" \
+            test "$(_s168_q "$_S168_OUT" '[.theme, .disableClaudeAiConnectors]')" = '["dark",true]'
+        _S168_CLEAN="$(_s168_seed "$_s168_t" "")"
+        check "§168(4:$_s168_t) a host with no settings.json still gets sandbox.enabled:false -- and the other managed keys (the jq branch used to write a 0-byte file here: jq over /dev/null emits nothing)" \
+            test "$(_s168_q "$_S168_CLEAN" '[.sandbox.enabled, .disableClaudeAiConnectors, .permissions.defaultMode]')" = '[false,true,"bypassPermissions"]'
+        _S168_ODD="$(_s168_seed "$_s168_t" '{"sandbox":true}')"
+        check "§168(5:$_s168_t) a non-object host sandbox value is replaced, not crashed on" \
+            test "$(_s168_q "$_S168_ODD" '.sandbox')" = '{"enabled":false}'
+    done
+    _S168_NONE="$(_s168_seed none "$_S168_HOST")"
+    check "§168(6:none) the no-tool literal branch seeds sandbox.enabled:false too (it never reads the host file, so this is the whole of its answer)" \
+        test "$(_s168_q "$_S168_NONE" '.sandbox.enabled')" = "false"
+fi
+rm -rf "$_S168_DIR"
+unset _S168_DIR _S168_BLOCK _S168_HOST _S168_OUT _S168_CLEAN _S168_ODD _S168_NONE _s168_t
+unset -f _s168_seed _s168_q
+
+echo "§169: the settings seed never writes THROUGH a link the agent planted in its rw ~/.claude"
+# ============================================================
+# $SANDBOX_DIR/claude is the container's ~/.claude, mounted rw, and the seeding
+# block runs HOST-side at the next launch. A relative link planted there
+# resolves on the host: settings.json -> ../../home/.claude/settings.json made
+# the node merge write the host's own settings.json back with the
+# bypassPermissions pin and the native sandbox off (pre-existing; #126 added
+# sandbox.enabled:false to what leaked), and the jq branch's staged
+# settings.json.base (added with #126) truncated whatever file a planted link
+# named. Driven for real through the same extraction §168 uses; each case
+# asserts the VICTIM is byte-identical afterwards.
+_S169_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S169_BLOCK="$(awk '/^if _sandy_agent_has claude; then$/{b=$0; getline; if ($0 ~ /SEED_SETTINGS=/) {f=1; print b}} f{print} f&&/^fi  # end Claude settings seeding/{exit}' "$SANDY_SCRIPT")"
+# _s169_seed <node|jq> <link-name> <link-target relative to sb/claude> <host settings body or ""> -> case dir
+_s169_seed() {
+    local _c _b
+    _c="$(mktemp -d "$_S169_DIR/c.XXXXXX")"; _b="$_c/bin"
+    mkdir -p "$_b" "$_c/home/.claude" "$_c/sb/claude"
+    for _x in mv rm cp cat mktemp readlink; do ln -s "$(command -v "$_x")" "$_b/$_x"; done
+    if [ "$1" = node ]; then ln -s "$(command -v node)" "$_b/node"; fi
+    ln -s "$(command -v jq)" "$_b/jq"
+    [ -n "$4" ] && printf '%s\n' "$4" > "$_c/home/.claude/settings.json"
+    printf 'VICTIM-UNTOUCHED\n' > "$_c/victim"
+    ln -s "$3" "$_c/sb/claude/$2"
+    env -i PATH="$_b" HOME="$_c/home" SANDBOX_DIR="$_c/sb" "$BASH" -c '
+        _sandy_agent_has() { return 0; }
+        info() { :; }; warn() { echo "[warn] $*" >&2; }
+        SANDBOX_IS_NEW=false
+        eval "$1"
+    ' _ "$_S169_BLOCK" >"$_c/out" 2>"$_c/err" || true
+    printf '%s' "$_c"
+}
+_S169_HOST='{"theme":"dark","permissions":{"defaultMode":"default"}}'
+if ! command -v jq >/dev/null 2>&1; then
+    skip "§169 needs jq"
+else
+    for _s169_t in node jq; do
+        if [ "$_s169_t" = node ] && ! command -v node >/dev/null 2>&1; then skip "§169 node branch needs node"; continue; fi
+        _C="$(_s169_seed "$_s169_t" settings.json ../../home/.claude/settings.json "$_S169_HOST")"
+        check "§169(1:$_s169_t) a settings.json link to the HOST settings.json leaves the host file byte-identical (mutation: drop the link removal and the node merge writes bypassPermissions + sandbox off into the host's own settings)" \
+            test "$(cat "$_C/home/.claude/settings.json")" = "$_S169_HOST"
+        check "§169(2:$_s169_t) ...the sandbox gets a regular settings.json carrying the managed keys instead" \
+            bash -c 'test ! -L "$1" && test "$(jq -c "[.permissions.defaultMode, .sandbox.enabled]" "$1")" = "[\"bypassPermissions\",false]"' _ "$_C/sb/claude/settings.json"
+        check "§169(3:$_s169_t) ...and the launch NAMES the link it removed" \
+            grep -q 'Removed a symlink at claude/settings.json' "$_C/err"
+    done
+    # jq branch, no host settings.json: the {} base used to be STAGED next to
+    # settings.json with a plain redirect.
+    _C="$(_s169_seed jq settings.json.base ../../victim "")"
+    check "§169(4) a planted settings.json.base link does not truncate its target (defence in depth: red only with BOTH the link removal dropped and {} staged by redirect into \$SEED_SETTINGS.base again)" \
+        grep -qx VICTIM-UNTOUCHED "$_C/victim"
+    check "§169(5) ...and the seed still wrote a complete settings.json from the piped {}" \
+        test "$(jq -c '.permissions.defaultMode' "$_C/sb/claude/settings.json" 2>/dev/null)" = '"bypassPermissions"'
+    _C="$(_s169_seed jq settings.json.tmp ../../victim "$_S169_HOST")"
+    check "§169(6) a planted settings.json.tmp link does not receive the merged output (defence in depth: red only with BOTH the link removal dropped and the output redirected into \$SEED_SETTINGS.tmp again)" \
+        grep -qx VICTIM-UNTOUCHED "$_C/victim"
+fi
+rm -rf "$_S169_DIR"
+unset _S169_DIR _S169_BLOCK _S169_HOST _C _s169_t
+unset -f _s169_seed
+
+echo "§170: a config-key metadata lookup survives a table larger than the pipe buffer"
+# ============================================================
+# _sandy_key_meta_field pipes the whole _sandy_key_metadata heredoc into awk.
+# It used to `exit` on the first match; once the table outgrew the pipe buffer
+# the heredoc's cat was still writing, died of SIGPIPE, and pipefail made the
+# lookup exit 141 -- surfacing on macOS (whose pipe buffer is far smaller than
+# Linux's 64K) as a failed `--print-schema` in §92(b), once #391 grew the table
+# from 22.6K to 25.5K. Linux CI never saw it. Reproduced here on ANY host by
+# serving a 2 MB table with the key on the FIRST row, under the real script's
+# set -euo pipefail.
+_S170_FN="$(sed -n '/^_sandy_key_meta_field() {/,/^}/p' "$SANDY_SCRIPT")"
+check "§170(0) extracted _sandy_key_meta_field" \
+    bash -c 'case "$1" in *_sandy_key_metadata*) exit 0 ;; esac; exit 1' _ "$_S170_FN"
+_S170_OUT="$(bash -c '
+    set -euo pipefail
+    _sandy_key_metadata() {
+        printf "SANDY_FIRST|bool|0||1.0.0|stable|first row\n"
+        awk "BEGIN { for (i = 0; i < 40000; i++) printf \"SANDY_PAD_%d|string|||1.0.0|stable|padding row to outgrow any pipe buffer ....\n\", i }"
+    }
+    eval "$1"
+    # Called DIRECTLY, not inside $( ): errexit does not reach into a command
+    # substitution, so a 141 there is swallowed and the check would pass
+    # against the broken code. Here set -e aborts on it, and "done" is missing.
+    printf "type="; _sandy_key_meta_field SANDY_FIRST type
+    printf "desc="; _sandy_key_meta_field SANDY_FIRST description
+    printf "last="; _sandy_key_meta_field SANDY_PAD_39999 since
+    printf "done\n"
+' _ "$_S170_FN" 2>&1)" || true
+check "§170(1) a key on the FIRST row of a 2 MB table resolves, and the lookup does not die of SIGPIPE under pipefail (mutation: restore the early exit in the awk and this exits 141)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "type=bool" && printf "%s\n" "$1" | grep -qx "desc=first row" && printf "%s\n" "$1" | grep -qx done' _ "$_S170_OUT"
+check "§170(2) ...and a key on the LAST row still resolves (reading to EOF must not lose the match)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "last=1.0.0"' _ "$_S170_OUT"
+unset _S170_FN _S170_OUT
 
 # ============================================================
 echo ""

@@ -106,6 +106,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_SUSPICIOUS
     SANDY_CROSS_SESSION_INBOUND
     SANDY_RELAY
+    SANDY_OFFLINE
 )
 
 # SANDY_ENV_ONLY_KEYS: honored only when set in the process environment.
@@ -120,7 +121,8 @@ SANDY_PASSIVE_KEYS=(
 #       not meant to be operator-discoverable — SANDY_DEBUG_CLEANUP, and
 #       (elsewhere, listed nowhere in this array either)
 #       SANDY_DAEMON_SUPERVISOR / SANDY_UPDATE_RESTART / SANDY_PROVISION /
-#       SANDY_PROVISION_ID /
+#       SANDY_PROVISION_ID / SANDY_APPROVE_ONLY / SANDY_APPROVE_ONLY_RESULT /
+#       SANDY_DOCKERFILE_DECLINED_HASH /
 #       SANDY_TEST_PANE_TAGS.
 #   SANDY_SESSION_NONCE stays fully unregistered (not even in this array) for
 #   trust-root reasons specific to it — see "Self-Attestation Marker" in
@@ -142,10 +144,25 @@ SANDY_ENV_ONLY_KEYS=(
 # config and env are trusted and set these directly.
 _sandy_passive_value_privileged() {
     case "$1" in
-        SANDY_EGRESS)              [ "$2" = "off" ] && return 0 ;;  # proxy OFF (2.0.0; the enum that replaces the two booleans below)
+        # SANDY_EGRESS (2.0.0) is the enum that replaces the booleans below, so
+        # it must gate EVERY value its booleans gated: `off` is proxy-off
+        # (NO_ISOLATION=1) and `permissive` is the strict -> permissive
+        # downgrade (STRICT=0). 2.0.0 translated only the first, so one
+        # committed `SANDY_EGRESS=permissive` re-opened the public internet on a
+        # host that had chosen strict, with no prompt (#371) -- a workspace
+        # source outranks the host config for the same key. Only `strict` is
+        # free. Like STRICT=0, this prompts even where the host is already
+        # permissive (a no-op prompt); an ORDERED gate that compares against
+        # what the privileged sources resolved is the better shape once a
+        # fourth value exists (#244), and is deliberately not built here.
+        SANDY_EGRESS)              { [ "$2" = "off" ] || [ "$2" = "permissive" ]; } && return 0 ;;
         SANDY_EGRESS_NO_ISOLATION) [ "$2" = "1" ] && return 0 ;;  # proxy OFF
         SANDY_EGRESS_STRICT)       [ "$2" = "0" ] && return 0 ;;  # strict -> permissive downgrade
-        SANDY_EGRESS_PROXY)        [ "$2" = "0" ] && return 0 ;;  # deprecated alias: =0 == proxy off
+        # Deprecated alias: =0 is proxy off, and =1 is permissive -- the same
+        # strict -> permissive downgrade as STRICT=0 when the host set the
+        # alias to 2 (the workspace value replaces the host one for the same
+        # key). Gated since #371; only =2 is free.
+        SANDY_EGRESS_PROXY)        { [ "$2" = "0" ] || [ "$2" = "1" ]; } && return 0 ;;
         SANDY_ALLOW_WORKFLOW_EDIT) [ "$2" = "1" ] && return 0 ;;  # drops .github/workflows protection
         SANDY_CLAUDE_CONNECTORS)   [ "$2" = "1" ] && return 0 ;;  # exposes claude.ai ACCOUNT connectors (Gmail/Drive)
         SANDY_SUSPICIOUS)          [ "$2" = "0" ] && return 0 ;;  # downgrades a host-set hardened posture
@@ -276,8 +293,11 @@ skill_pack_resolve_versions() {
         # Read cached version
         [ -f "$cache_file" ] && cached="$(cat "$cache_file")"
 
-        # Check GitHub for latest release
-        latest="$(skill_pack_latest_release "$pack")"
+        # Check GitHub for latest release -- unless SANDY_OFFLINE (#219), in
+        # which case the cache/pin fallback below is the whole answer.
+        if [ "${SANDY_OFFLINE:-0}" != 1 ]; then
+            latest="$(skill_pack_latest_release "$pack")"
+        fi
 
         if [ -n "$latest" ]; then
             resolved="$latest"
@@ -1609,7 +1629,7 @@ SANDY_ALLOW_NO_ISOLATION|bool|0||0.1.0|stable|Allow launch when iptables rules c
 SANDY_ALLOW_LAN_HOSTS|string|||0.7.9|stable|Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
 SANDY_LOCAL_LLM_HOST|string||^[^[:space:]]+:[0-9]+$|0.12.0|stable|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. With the egress proxy on (default) the proxy's forward listener relays host.docker.internal:<port> to the host; with the proxy off (=0, Linux) it inserts one iptables ACCEPT and maps host.docker.internal.
 SANDY_ALLOW_HOSTS|string|||0.14.0|stable|Comma-separated extra egress-proxy allowlist entries (exact host, '*.suffix' wildcard, or 'host:port' for CONNECT/SSH). Appended to the built-in default allowlist. In strict mode (SANDY_EGRESS_PROXY=2) these are the only hosts reachable beyond defaults; in permissive mode (=1) they are LAN-exceptions reachable despite the private-IP block. Privileged tier so workspace config requires approval.
-SANDY_EXTRA_ENV|string|||0.12.0|stable|Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). Values resolve env > workspace .sandy/.secrets > workspace .sandy/config > ~/.sandy/.secrets > ~/.sandy/config. The privileged tier gates the NAME list (workspace config setting SANDY_EXTRA_ENV itself requires approval); once approved, values may come from any source.
+SANDY_EXTRA_ENV|string|||0.12.0|stable|Comma-separated env-var names to forward into the container (e.g. 'HA_TOKEN,FOO_API_KEY'). The name lists COMPOSE (2.4.0): the effective list is the union of the host lists, any approved workspace list, and an env-set list (env ADDS, it does not replace), deduplicated in that order. Values resolve env > workspace .sandy/.secrets > workspace .sandy/config > ~/.sandy/.secrets > ~/.sandy/config. The privileged tier gates the NAME list (workspace config setting SANDY_EXTRA_ENV itself requires approval); once approved, values may come from any source.
 SANDY_AGENT_ARGS|string|||1.3.0|stable|Extra command-line arguments appended to the agent command (claude/codex/gemini/opencode) on EVERY launch — bare sandy, headless -p, the --start daemon, and sandy-ui alike. Whitespace-split into argv (no embedded-space/quoting support in v1) and forwarded through the same per-agent translation as command-line pass-through args, ordered AFTER sandy's own flags and BEFORE any command-line args. Privileged tier: free from host ~/.sandy/config, but from a workspace .sandy/config it triggers the per-workspace approval prompt (headless/non-TTY drops it). Never eval'd. Typical use: a fixed --mcp-config <path> or project feature flags. Applies to every selected agent (each pane in a multi-agent combo) unless overridden per agent by an operator file $SANDBOX_DIR/agent-args.<agent> (sandbox top level, agent-unwritable, privileged by location — no prompt); when both are present the sandbox file wins for that agent, values are never merged, and sandy prints a one-line notice.
 ANTHROPIC_API_KEY|secret|||0.1.0|stable|Anthropic API key for Claude Code. Not required when using Claude Max OAuth.
 CLAUDE_CODE_OAUTH_TOKEN|secret|||0.7.0|stable|Claude Code OAuth token (alternative to ANTHROPIC_API_KEY).
@@ -1621,19 +1641,19 @@ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Cod
 SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
 SANDY_MODEL|string|claude-opus-5|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
 SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched.
-SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for the Claude agent (claude only), applied as 'claude --effort <level>'. Empty leaves Claude Code's own default (currently 'high'). Levels are model-dependent; an unsupported level falls back to the highest supported at or below it. Passive-safe (effort does not affect isolation). Recorded in sandy-session.json.
+SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude and (2.4.0) codex. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Empty leaves each agent's own default. Ignored, with a notice, for a launch with neither claude nor codex (gemini, opencode and grok have no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json.
 SANDY_CPUS|int|||0.1.0|stable|CPU limit for container (default: auto-detected).
 SANDY_MEM|string|||0.1.0|stable|Memory limit for container (e.g. '8g'; default: auto-detected).
 SANDY_GPU|string|||0.7.5|stable|GPU passthrough: 'all', or device IDs like '0' / '0,1'.
 SANDY_SKILL_PACKS|string|||0.7.10|stable|Comma-separated skill pack names (e.g. 'gstack').
 SANDY_CHANNELS|string|||0.7.6|stable|Comma-separated channel names (e.g. 'telegram,discord').
-SANDY_CHANNEL_TARGET_PANE|int|0||0.9.0|stable|Which tmux pane in multi-agent mode receives channel messages.
+SANDY_CHANNEL_TARGET_PANE|int|0||0.9.0|stable|Which agent's pane receives Telegram host-relay messages in multi-agent mode: a 0-based position in SANDY_AGENT (0 = first agent, up to 3), resolved to the pane tagged with that agent -- not a raw tmux pane index, which differs from spawn order in the 2x2 grid.
 SANDY_VERBOSE|int|0||0.8.0|stable|Verbosity (0=quiet, 1=verbose, 2=debug, 3=full trace).
 SANDY_VENV_OVERLAY|bool|1||0.10.0|stable|Bind-mount a sandbox-owned .venv over the workspace's .venv inside the container.
 SANDY_EGRESS_NO_ISOLATION|bool|0||1.0.0|stable|Turn the egress proxy OFF — legacy path (Linux iptables-only; NO network isolation on macOS). WEAKENS isolation, so from a workspace .sandy/config it is quarantined to the per-workspace approval prompt (a committed config cannot silently disable isolation). Mutually exclusive with SANDY_EGRESS_STRICT. Default 0 (proxy on).
 SANDY_EGRESS_STRICT|bool|0||1.0.0|stable|Run the egress proxy in strict mode (allow only the built-in default allowlist + SANDY_ALLOW_HOSTS; deny all other internet). STRENGTHENS isolation, so =1 is passive-safe from any source; =0 (downgrading a host-configured strict) is approval-gated from a workspace source. Mutually exclusive with SANDY_EGRESS_NO_ISOLATION. Default 0 (permissive).
-SANDY_EGRESS|enum:off,permissive,strict|permissive||2.0.0|stable|Egress posture, ONE key as of 2.0.0. off = proxy off (legacy: Linux iptables only, NO network isolation on macOS). permissive (default) = proxy on, blocking private/LAN/link-local/CGNAT/cloud-metadata destinations while allowing the internet. strict = proxy on with an allowlist only (model providers, GitHub, npm, PyPI, crates, Go, Debian) plus SANDY_ALLOW_HOSTS. Replaces a three-way choice encoded as TWO MUTUALLY EXCLUSIVE BOOLEANS (SANDY_EGRESS_NO_ISOLATION, SANDY_EGRESS_STRICT) plus a deprecated tri-state whose 0/1/2 were opaque (SANDY_EGRESS_PROXY) -- all three still work, are listed in README's Deprecated section, and are IGNORED WITH A NOTICE when this key is set (never merged; the winner is named). Value-aware tier: permissive and strict are passive-safe, while off WEAKENS the sandbox and is therefore approval-gated from a workspace .sandy/config, exactly as SANDY_EGRESS_NO_ISOLATION=1 was. SANDY_SUSPICIOUS=1 still defaults the posture to strict; an explicit choice wins and a weaker one is named loudly.
-SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|DEPRECATED — use SANDY_EGRESS_NO_ISOLATION / SANDY_EGRESS_STRICT. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 is approval-gated (weakening), matching the new keys.
+SANDY_EGRESS|enum:off,permissive,strict|permissive||2.0.0|stable|Egress posture, ONE key as of 2.0.0. off = proxy off (legacy: Linux iptables only, NO network isolation on macOS). permissive (default) = proxy on, blocking private/LAN/link-local/CGNAT/cloud-metadata destinations while allowing the internet. strict = proxy on with an allowlist only (model providers, GitHub, npm, PyPI, crates, Go, Debian) plus SANDY_ALLOW_HOSTS. Replaces a three-way choice encoded as TWO MUTUALLY EXCLUSIVE BOOLEANS (SANDY_EGRESS_NO_ISOLATION, SANDY_EGRESS_STRICT) plus a deprecated tri-state whose 0/1/2 were opaque (SANDY_EGRESS_PROXY) -- all three still work, are listed in README's Deprecated section, and are IGNORED WITH A NOTICE when this key is set (never merged; the winner is named). Value-aware tier: only strict is passive-safe. off and permissive are approval-gated from a workspace .sandy/config, exactly as SANDY_EGRESS_NO_ISOLATION=1 and SANDY_EGRESS_STRICT=0 are -- a workspace value outranks the host config for the same key, so an ungated permissive would silently downgrade a host that chose strict (#371, fixed in 2.4.0; 2.0.0-2.3.x gated only off). Like STRICT=0 it prompts even where the host is already permissive. SANDY_SUSPICIOUS=1 still defaults the posture to strict; an explicit choice wins and a weaker one is named loudly.
+SANDY_EGRESS_PROXY|enum:0,1,2|1||0.14.0|stable|DEPRECATED — use SANDY_EGRESS=off,permissive,strict. Kept as a back-compat alias: 0->NO_ISOLATION=1 (off), 1->permissive (default), 2->STRICT=1 (strict). From a workspace .sandy/config, =0 (off) and =1 (permissive: a downgrade of a host-set =2) are approval-gated, matching SANDY_EGRESS; only =2 is free (#371).
 SANDY_EGRESS_LOG|enum:0,1,summary|0||1.4.0|stable|Log which hosts the agent's egress actually reached (HF-incident Issue 4). The proxy logs each DISTINCT allowed host:port once (deduped) to proxy.log; at session end sandy prints an egress summary (distinct hosts reached + denial count). 0=off (deny-only, the pre-1.4 behavior); 1=per-connection allow lines + session-end summary; summary=session-end summary only (the proxy still records allows to build it). Passive-safe: it only ADDS visibility. Hostnames only — TLS is never terminated, no payload; the log stays in $SANDBOX_DIR.
 SANDY_ALLOW_WORKFLOW_EDIT|bool|0||0.11.1|stable|Remove .github/workflows from the read-only protection list.
 SANDY_SCREENSHOT_DIR|path|||0.12.0|stable|Host directory containing screenshots; mounted read-only at /home/sandy/screenshots and exposed as $SANDY_SCREENSHOTS_PATH inside the container. Enables /ss skill across agents.
@@ -1663,7 +1683,8 @@ SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|Claude
 ANTHROPIC_PROFILE|string||^[A-Za-z0-9._-]+$|1.11.0|experimental|Privileged. Name of the Anthropic Console profile to use when SANDY_CLAUDE_AUTH=profile (overrides the host active_config); forwarded into the container so Claude Code selects it explicitly (its /status shows the Profile row as profile-explicit). Privileged on purpose: it chooses WHICH profile's token enters the box, and a profile logged in with --scope org:admin carries organization-wide access, so a committed .sandy/config must not be able to select it. Ignored with a notice unless SANDY_CLAUDE_AUTH=profile.
 SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|REMOVED AS A CONFIGURATION KEY in 2.2.0 (#354): setting it from the environment or any config file is a HARD ERROR naming the replacement -- declare the executable as an 'entry' in a feature manifest. THE VARIABLE IS NOT REMOVED and must not be: it is the internal channel the relay-DESIGNATED entry travels through to the container-side supervisor, so a change that deletes the variable deletes the entry mechanism with it. As of 2.4.0 (#381) it names only ONE of possibly several adopted entries -- the first in sorted feature-directory order -- with every entry (designated or not) started, supervised and reported; see SANDY_FEATURE_ENTRIES (internal, no metadata row) and 'feature_entries' below. What an entry gets: a container-level process (a sibling of the tmux server, not a pane, not a child of any agent session), started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote, never under --provision), held to one instance by flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never given up on. The designated entry's state (.state, supervisor.log) lives at $SANDBOX_DIR/relay-state, mounted rw at /opt/sandy/relay-state and exported as SANDY_RELAY_STATE (#353); every other entry gets its own $SANDBOX_DIR/feature-state/<feature>, mounted rw at /opt/sandy/feature-state/<feature>. A relay/entry reads its own directory from SANDY_FEATURE_STATE rather than constructing the path -- uniform across every entry, designated or not. Env contract: SANDY_FEATURE_STATE (plus, for the designated entry only, SANDY_RELAY_STATE), SANDY_AGENT, SANDY_WORKSPACE; enumerate live sessions with /usr/local/bin/sandy-handoff-sessions. An entry that cannot start FAILS THE LAUNCH, never warn-and-proceed: missing or not executable, its state dir not mounted, or no flock (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) -- one shared 5s startup window covers every entry at once. DOCUMENTED EXCEPTION: a stale image predating per-feature entries (a deferred build per #218, or any other image built before the sandy.feature_entries=1 Dockerfile label existed) runs only the relay-designated entry and does not fail -- sandy warns at launch, naming every entry that will not start, and --print-state reports those as state absent. SANDY_RELAY=0 stops ALL of them, loudly, naming each by feature, and records disabled_by for every one. Reported in /etc/sandy-session.json as relay.source/path/disabled_by (the designated entry's launch intent) and feature_entries.<feature>.{path,relay_alias,disabled_by} (every entry's), and live in --print-state as relay.state (designated) and feature_entries.<feature>.state (every entry). In daemon mode an entry (and anything else planted at the uid) outlives sessions until the container is recreated -- run sandy --update-sessions --yes on a 24h cron.
 SANDY_RELAY|bool|1||1.11.0|experimental|Relay CAPABILITY toggle (#258), RE-SCOPED in 2.2.0 (#354) and GENERALIZED in 2.4.0 (#381). Names no path and asserts no payload: it means 'run every installed entry'. That meaning was never slot-specific and, since #381, was never single-entry-specific either -- with the relay-bin slot removed the key gates every feature manifest's entry, not just one. BEHAVIOUR CHANGE, in the tightening direction: =0 used to disable a slot relay and silently NOT stop a manifest entry; it now stops every adopted entry, which is what the key always claimed. Because a fleet going silently dark is the failure the entry/relay-bin coexistence window existed to prevent, the suppression is LOUD -- a launch that declines to start a declared entry says so BY FEATURE NAME, for every one it declines, and the resolved state records disabled_by (env, host or workspace) in /etc/sandy-session.json and --print-state for each. Default 1, safe because the capability is INERT without host-side state a repository cannot create: no feature, no entry, nothing to run. Both values are passive-safe: 0 only tightens. Skipped, not failed, in headless (-p) and --remote runs. With exactly one entry, relay{} and feature_entries describe the same thing and every existing consumer sees byte-identical behaviour; with more than one, relay{} is DUAL-REPORTED for the first entry in sorted feature-directory order only (the 'relay-designated' entry -- see SANDY_HANDOFF_RELAY above), and feature_entries.<name> reports every entry, including the designated one. Reported as relay.slot (absent or disabled; 'present' retired with the slot) in the session marker -- launch INTENT, since the marker is written before docker run and entries start in-container -- and as live relay.state (absent, started, failed, looping or disabled) in --print-state, alongside relay.source (#345) which names the producer.
-SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
+SANDY_OFFLINE|bool|0||2.4.0|stable|Offline mode (#219): skip the lookups a launch makes only to learn whether something NEWER exists -- the per-agent version checks (a hit forces a --no-cache agent rebuild), skill-pack version resolution from GitHub (falls back to the local cache, then the built-in pin), and sandy's own release nag. Builds that are REQUIRED still run: a missing image or a changed Dockerfile builds through the build-reachability gate and fails there as it always has. For a known-bad network (in-flight wifi, captive portal) or an air-gapped host, where the checks cost latency and a detected update would force a rebuild that cannot succeed. The one-shot CLI form is --no-update-check, which wins over this key. Passive-safe: it defers the auto-patch pickup the wrapped-agent CVE posture relies on, but only until the next launch without it -- equivalent to not relaunching -- and it is never silent: one line at launch, one at session end, and 'offline': true in /etc/sandy-session.json. Default 0.
+SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass TWO of the three launch approval gates: the passive-privileged config-key prompt AND the per-project .sandy/Dockerfile build prompt (an unreviewed project image then builds, running its RUN commands on the host docker daemon with unfiltered network). It does NOT bypass the dangerous-symlink gate, deliberately: that gate is built so no approval of a new escaping symlink can happen without a deliberate human act (a new escape is a hard error, never a re-prompt), and a blanket bypass would silently mount every future escape read-write. Env-only, so a committed config cannot set it. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
 SANDY_HOST_ID|string||^[A-Za-z0-9._-]{1,128}$|1.8.0|stable|Operator override for the host_id reported by --print-state (#179), advisory identity for multi-host fleet aggregation (sandbox names hash only the workspace path, so the same path on two hosts collides). ENV-ONLY -- a committed .sandy/config can never set it, which would otherwise forge the identity of whatever machine the repo is cloned onto. Default is uname -n (host_id_source: hostname); a valid override reports host_id_source: env. Invalid or empty values are silently ignored and fall back to uname -n -- no warning, ever, since --print-state guarantees 0 bytes of stderr.
 EOF
@@ -1674,7 +1695,12 @@ EOF
 _sandy_key_meta_field() {
     local key="$1" field="$2"
     local line
-    line="$(_sandy_key_metadata | awk -F'|' -v k="$key" '$1==k {print; exit}')"
+    # Read to EOF, never `exit` on the match: an early exit closes the pipe while
+    # the heredoc's cat is still writing, cat dies of SIGPIPE, and pipefail
+    # turns that into exit 141 for the whole lookup. Only once the table
+    # outgrows the pipe buffer -- macOS's is far smaller than Linux's 64K, so
+    # it surfaced there first, as a failed --print-schema (§92b, §170).
+    line="$(_sandy_key_metadata | awk -F'|' -v k="$key" '$1==k && !f {print; f=1}')"
     [ -z "$line" ] && return 0
     case "$field" in
         type)        echo "$line" | awk -F'|' '{print $2}' ;;
@@ -1926,6 +1952,8 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--build-only"';   printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Build images and exit (for CI)."'; printf '}'
     printf ','
+    printf '{'; _json_kv name '"--no-update-check"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"One-shot SANDY_OFFLINE=1 (#219): skip the agent, skill-pack and sandy release lookups for this launch. Builds that are REQUIRED (missing image, changed inputs) still run. Honored by the bare launch path, -p, --build-only and --start; wins over SANDY_OFFLINE=0 in any config file."'; printf '}'
+    printf ','
     printf '{'; _json_kv name '"--new"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Start a fresh session (default: resume last)."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--resume"';       printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Open session picker."'; printf '}'
@@ -1964,7 +1992,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--update-sessions"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Fleet image refresh + rolling restart across every daemon session on the host; scope to one session with --workspace PATH. Sub-options: --dry-run, --yes, --idle-for <minutes>, --rebuild, --workspace."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-history / --purge-history (session transcripts and auto-memory in claude/projects/ — asked interactively, REQUIRED non-interactively, deliberately NOT answered by --yes, and never asked at all under --dry-run, which reports the question as unanswered), --keep-approvals, --dry-run, --yes."'; printf '}'
+    printf '{'; _json_kv name '"--reset-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Rebuild one project sandbox from a known-good skeleton: destroy its persistent package/agent state (preserving WORKSPACE.json lineage), refusing while a live session holds it. Sub-options: --workspace PATH, --all (every known sandbox, composing the per-workspace form verbatim; the one command for a major upgrade), --keep-history / --purge-history (keep or wipe claude/projects/ — Claude session transcripts and auto-memory — and NOTHING else: the plan names every other non-regenerable entry the reset destroys even with --keep-history; asked interactively, REQUIRED non-interactively, deliberately NOT answered by --yes, and never asked at all under --dry-run, which reports the question as unanswered), --keep-approvals, --dry-run, --yes."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--remove-sandbox"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Permanently delete a sandbox directory (preserves NOTHING, unlike --reset-sandbox). Three mutually exclusive selectors: default/--workspace PATH (workspace must still exist), --sandbox NAME (a sandbox whose workspace is gone), --orphans (every sandbox whose recorded workspace_path no longer exists). Filesystem-only. Sub-options: --workspace PATH, --sandbox NAME, --orphans, --dry-run, --yes."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--rsync"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"COPY this workspace sandbox to another host over ssh + rsync (the source is never modified), renamed for the destination workspace path, since the sandbox name hashes it. Rewrites the path-keyed state a hand copy gets wrong: session history and auto-memory in claude/projects/ (renamed when the container path changes), the sibling .claude.json projects key, and WORKSPACE.json (so --remove-sandbox --orphans there cannot mistake it for an orphan). The destination workspace defaults to the same path relative to $HOME and must already exist there. Credential-bearing files are copied and named in the plan; on a CPU architecture mismatch cargo/go/npm-global/pip/uv/venv are skipped. Refuses while a live session holds the workspace and never overwrites a sandbox already on the destination. Takes the destination host as its argument. Sub-options: --workspace PATH, --dest-workspace PATH, --dest-sandy-home PATH, --dry-run, --yes."'; printf '}'
@@ -2755,12 +2783,18 @@ _sandy_emit_state() {
     # (`x="$(_stat_mtime_iso ...)"`) aborts the caller and trips the ERR trap.
     # Sandboxes frequently have .sandy_created_version but no .sandy_last_version
     # (first launch), so stat failure for one field is a normal expected case.
+    # TZ=UTC on BOTH branches, or the `Z` is a lie: GNU %y and BSD %Sm both
+    # render the mtime in LOCAL time, and this used to append `Z` to that --
+    # so created_at/last_used_at were off by the host's UTC offset while
+    # claiming to be UTC. Whole seconds on both, too: GNU %y carries
+    # nanoseconds that BSD never had, so the same field had two shapes.
     local _stat_mtime_iso
     if stat -c '%y' / >/dev/null 2>&1; then
-        # GNU stat: %y is "2006-01-02 15:04:05.000000000 -0700"; take date/time and append Z.
-        _stat_mtime_iso() { [ -e "$1" ] || return 0; stat -c '%y' "$1" 2>/dev/null | awk '{print $1"T"$2"Z"}' || true; }
+        # GNU stat: %y is "2006-01-02 15:04:05.000000000 +0000" under TZ=UTC;
+        # keep date and whole-second time, append Z.
+        _stat_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC stat -c '%y' "$1" 2>/dev/null | awk '{split($2,t,"."); print $1"T"t[1]"Z"}' || true; }
     elif stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' / >/dev/null 2>&1; then
-        _stat_mtime_iso() { [ -e "$1" ] || return 0; stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
+        _stat_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
     else
         _stat_mtime_iso() { return 0; }
     fi
@@ -3547,7 +3581,13 @@ _sandy_validate_config() {
                || { [ "$tier" = "passive" ] && _sandy_passive_value_privileged "$key" "$value"; }; then
                 privileged_keys+=("$key")
                 if [ "$tier" = "passive" ]; then
-                    warnings+=("$key|weakens isolation / privileged key set from workspace — requires explicit approval|warning")
+                    if [ "$key" = "SANDY_EXTRA_ENV" ]; then
+                        # The name list composes (#388), so say what approving
+                        # it does: it adds names, it never replaces the host's.
+                        warnings+=("$key|privileged key set from workspace — requires explicit approval; once approved its names are ADDED to the host (and env) SANDY_EXTRA_ENV list, not a replacement for it|warning")
+                    else
+                        warnings+=("$key|weakens isolation / privileged key set from workspace — requires explicit approval|warning")
+                    fi
                 fi
             elif _key_in_list "$key" "${SANDY_PASSIVE_KEYS[@]}"; then
                 :  # allowed in any tier
@@ -4089,25 +4129,61 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         exit 1
     fi
 
-    # Everything in the sandbox dir is destroyed EXCEPT WORKSPACE.json (lineage)
-    # and, with --keep-approvals, the approved-symlinks list. The next launch
-    # re-materializes pip/uv/npm/go/cargo + agent state from scratch.
+    # Everything in the sandbox dir is destroyed EXCEPT WORKSPACE.json (lineage),
+    # agent-args.<agent> files, and, with --keep-approvals, the approved-symlinks
+    # list. The next launch re-materializes pip/uv/npm/go/cargo + agent state
+    # from scratch. What survives is what an operator set and nothing else
+    # recreates: agent-args.<agent> files are operator state (see sandy's
+    # "per-agent args" block) -- destroying them would silently un-configure a
+    # sandbox's per-agent launch args with no error, so they are preserved
+    # unconditionally. One consequence: a sandbox holding only WORKSPACE.json
+    # plus agent-args files correctly reports "already minimal" with those files
+    # named on the Preserved: line, so an operator does not mistake
+    # visible-files-plus-nothing-to-reset for a bug.
     # .handoff-enabled and relay-bin/ are NO LONGER preserved (2.2.0): the
     # handoff tree the marker forced on is gone (#355), and a surviving slot
-    # entry blocks the next launch (#354). What survives is what an operator set
-    # and nothing else recreates.
-    # agent-args.<agent> files are exactly that kind of
-    # marker exists to avoid. agent-args.<agent> files are the same kind of
-    # operator state (see sandy's "per-agent args" block) — destroying them on a
-    # reset would silently un-configure a sandbox's per-agent launch args with no
-    # error, so they are preserved unconditionally too. One consequence: a
-    # sandbox holding only WORKSPACE.json plus agent-args files now correctly
-    # reports "already minimal" with those files named on the Preserved: line, so
-    # an operator does not mistake visible-files-plus-nothing-to-reset for a bug.
-    # relay-bin/ is NO LONGER preserved (#354): the slot is removed and a
-    # surviving entry blocks the next launch, so keeping it across a reset would
+    # entry blocks the next launch (#354), so keeping it across a reset would
     # preserve the one thing the reset is most likely being run to clear.
+    # claude/projects/ is not here either: --keep-history keeps it by emptying
+    # claude/ AROUND it in the destroy loop below, not through this predicate.
     _rs_keep() { case "$1" in WORKSPACE.json|agent-args.*) return 0 ;; .sandy-approved-symlinks.list) [ "$_rs_keep_approvals" = "true" ] && return 0 ;; esac; return 1; }
+    # #333: --keep-history keeps claude/projects/ and NOTHING else, and an
+    # operator who chose it "in order not to lose history" was not told what it
+    # does not reach -- a daemon's delivery ledger under claude/, another
+    # agent's own history under codex/ or gemini/, a consumer's spool -- because
+    # all of it sat in the destroy list beside the package caches. So the plan
+    # now NAMES what the flag does not keep. It is derived from what is actually
+    # in this sandbox, never from a list of anyone's directory names: the only
+    # names sandy knows here are its OWN regenerable ones (_rs_regen), and every
+    # destroyed entry that is not one of those is named. That keeps sandy
+    # uncoupled from consumers (the reason option 1 on #333 was declined) while
+    # still naming a directory nobody here has heard of.
+    _rs_regen() { case "$1" in pip|uv|npm-global|go|cargo|venv|sandy-session.json|sandy-proxy.json|proxy.log|relay-state|agent-args-composed|relay-bin|.sandy_created_version|.sandy_last_version|.project_build_hash|.protected-existed-at-launch|.session-created-stubs|.head-at-launch|.claude-perm-mode-at-launch|.seed-settings.json|.sandy-approved-symlinks.list) return 0 ;; esac; return 1; }
+    _rs_not_kept() {
+        local _e _c _bn _n=0
+        for _e in "$_rs_dir"/* "$_rs_dir"/.[!.]*; do
+            [ -e "$_e" ] || continue
+            _bn="$(basename "$_e")"
+            _rs_keep "$_bn" && continue
+            _rs_regen "$_bn" && continue
+            if [ "$_bn" = claude ] && [ -d "$_e" ]; then
+                for _c in "$_e"/* "$_e"/.[!.]*; do
+                    [ -e "$_c" ] || continue
+                    [ "$(basename "$_c")" = projects ] && continue
+                    [ "$_n" -eq 0 ] && printf '%s\n' "$1"
+                    printf '  - %-30s %s\n' "claude/$(basename "$_c")" "$(du -sh "$_c" 2>/dev/null | cut -f1 || echo '?')"
+                    _n=$((_n + 1))
+                done
+                continue
+            fi
+            [ "$_n" -eq 0 ] && printf '%s\n' "$1"
+            printf '  - %-30s %s\n' "$_bn" "$(du -sh "$_e" 2>/dev/null | cut -f1 || echo '?')"
+            _n=$((_n + 1))
+        done
+        [ "$_n" -eq 0 ] || printf '\n'
+        return 0
+    }
+    _rs_nk_shown=0
     printf '\nsandy --reset-sandbox: %s\n' "$_rs_name"
     printf 'Workspace: %s\n' "$_rs_wd"
     printf 'Will destroy (next launch re-materializes them):\n'
@@ -4144,9 +4220,13 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         # not ask, and must not print an answer nobody gave.
         info "History (claude/projects/): NOT ANSWERED — a real run asks."
         info "  Pass --keep-history or --purge-history to see it in this plan."
+        _rs_not_kept "--keep-history would keep claude/projects/ ONLY; even with it, this reset destroys:"
     elif [ -z "$_rs_history" ]; then
         if [ -t 0 ]; then
-            printf '[sandy] Keep session history and memory (claude/projects/)? [Y/n] ' >&2
+            # Named BEFORE the question, so the answer is an informed one.
+            _rs_not_kept "--keep-history keeps claude/projects/ ONLY; even with it, this reset destroys:"
+            _rs_nk_shown=1
+            printf '[sandy] Keep session history and memory (claude/projects/ only)? [Y/n] ' >&2
             IFS= read -r _rs_hc </dev/tty || _rs_hc=""
             case "$_rs_hc" in n|N|no|NO|No) _rs_history=purge ;; *) _rs_history=keep ;; esac
             unset _rs_hc
@@ -4164,6 +4244,9 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     if [ "$_rs_history" = keep ] && [ -d "$_rs_dir/claude/projects" ]; then
         printf 'Keeping: claude/projects/ (session history + memory, %s)\n\n' \
             "$(du -sh "$_rs_dir/claude/projects" 2>/dev/null | cut -f1 || echo '?')"
+    fi
+    if [ "$_rs_history" = keep ] && [ "$_rs_nk_shown" != 1 ]; then
+        _rs_not_kept "NOT kept by --keep-history (it keeps claude/projects/ only) -- destroyed:"
     fi
 
     [ "$_rs_n" -eq 0 ] && { info "Sandbox already minimal — nothing to reset."; exit 0; }
@@ -4191,8 +4274,10 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # which is why this makes it impossible rather than documenting it.
     #
     # Safe on the preserved set: _rs_keep is what protects WORKSPACE.json,
-    # relay-bin/, agent-args.* and claude/projects/, and it never consults mode
-    # bits. Verified after the fix -- exit 0, full reset, preserved set intact.
+    # agent-args.* and (with --keep-approvals) the approval list, the claude/
+    # branch below is what protects claude/projects/, and neither consults mode
+    # bits. (relay-bin/ is no longer preserved -- #354 -- so it is not listed.)
+    # Verified after the fix -- exit 0, full reset, preserved set intact.
     # The chmod touches only a directory sandy owns and is about to empty.
     chmod -R u+w "$_rs_dir" 2>/dev/null || true
     for _rs_e in "$_rs_dir"/* "$_rs_dir"/.[!.]*; do
@@ -4694,12 +4779,13 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
     # a valid DIFFERENT command, not a usage error, so probing -f first
     # would misdetect) and the same always-exit-0 discipline (a failing
     # command substitution under set -euo pipefail would abort this fast
-    # path via the ERR trap).
+    # path via the ERR trap). And the same TZ=UTC + whole-seconds rendering,
+    # so the `Z` it prints is true (see _stat_mtime_iso).
     _rms_mtime_iso() { return 0; }
     if stat -c '%y' / >/dev/null 2>&1; then
-        _rms_mtime_iso() { [ -e "$1" ] || return 0; stat -c '%y' "$1" 2>/dev/null | awk '{print $1"T"$2"Z"}' || true; }
+        _rms_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC stat -c '%y' "$1" 2>/dev/null | awk '{split($2,t,"."); print $1"T"t[1]"Z"}' || true; }
     elif stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' / >/dev/null 2>&1; then
-        _rms_mtime_iso() { [ -e "$1" ] || return 0; stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
+        _rms_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
     fi
 
     # workspace_path of one sandbox dir, parsed the same lightweight way
@@ -6357,8 +6443,8 @@ Usage:
 
 Environment variables:
   SANDY_MODEL        Model to use (default: claude-opus-5)
-  SANDY_EFFORT       Reasoning effort for claude: low|medium|high|xhigh|max
-                     (default: Claude Code's own, currently high)
+  SANDY_EFFORT       Reasoning effort for claude and codex:
+                     low|medium|high|xhigh|max (default: each agent's own)
   ANTHROPIC_API_KEY  API key (not needed with Claude Max / OAuth)
   SANDY_HOME         Sandy config directory (default: ~/.sandy)
   SANDY_SSH          Git SSH method: "token" (default) uses gh CLI token
@@ -6395,6 +6481,9 @@ Flags:
   --version          Show version
   --rebuild          Force rebuild of the sandbox Docker image
   --build-only       Build images and exit (for CI)
+  --no-update-check  Skip agent/skill-pack/sandy update checks for this
+                     launch (one-shot SANDY_OFFLINE=1). Required builds
+                     (missing image, changed inputs) still run.
   --new              Start a fresh session (default: resume last)
   --resume           Open session picker
   --remote           Start in remote-control server mode
@@ -6445,8 +6534,10 @@ Maintenance (no config/mutex/build — needs only a reachable Docker daemon):
                      WORKSPACE.json lineage), refusing while a live session holds
                      it. Filesystem-only (no Docker). Sub-options: --workspace
                      PATH (default cwd), --all (every known sandbox),
-                     --keep-history / --purge-history (session transcripts and
-                     auto-memory in claude/projects/: asked interactively,
+                     --keep-history / --purge-history (keep or wipe
+                     claude/projects/ -- Claude session transcripts and
+                     auto-memory -- and NOTHING else; the plan names what
+                     --keep-history does not keep. Asked interactively,
                      REQUIRED non-interactively, and NOT answered by --yes),
                      --keep-approvals, --dry-run, --yes
   --remove-sandbox   Permanently DELETE a sandbox directory (preserves nothing,
@@ -6518,6 +6609,10 @@ fi
 # --- Parse sandy flags (order-independent, consumed before forwarding to claude) ---
 SANDY_REBUILD=false
 SANDY_BUILD_ONLY=false
+# --no-update-check (#219) is the one-shot form of SANDY_OFFLINE=1. Stashed
+# here, like --agent, and applied after config loading, so a flag on the
+# command line beats a SANDY_OFFLINE=0 in any config file.
+SANDY_NO_UPDATE_CHECK=false
 SANDY_NEW_SESSION=false
 SANDY_REMOTE_CONTROL=false
 # Daemon-mode (milestone 1.1.0, #17). SANDY_START=true, SANDY_ATTACH=true, and
@@ -6555,6 +6650,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --rebuild)    SANDY_REBUILD=true ;;
         --build-only) SANDY_BUILD_ONLY=true ;;
+        --no-update-check) SANDY_NO_UPDATE_CHECK=true ;;
         --new)        SANDY_NEW_SESSION=true ;;
         --remote)     SANDY_REMOTE_CONTROL=true ;;
         --start)      SANDY_START=true ;;
@@ -6626,8 +6722,9 @@ for _sandy_headless_arg in "$@"; do
     esac
 done
 
-# --- Check for sandy updates (non-blocking, cached 24h) ---
-sandy_check_update
+# The sandy self-update check used to run here. It moved below config loading
+# (#219), because SANDY_OFFLINE may come from a config file and only the loaded
+# configuration can say whether the check is wanted at all.
 
 # --- Preflight checks ---
 if ! command -v docker &>/dev/null; then
@@ -7287,6 +7384,21 @@ generate_entrypoint() {
 # --- Root-only setup (runs before dropping to user claude) ---
 if [ "${SANDY_VERBOSE:-0}" -ge 3 ]; then
     set -x
+fi
+
+# Host timezone (#384). The host resolved TZ and checked its SHAPE; only the
+# image can say whether the zone EXISTS, because the host's zoneinfo is not the
+# image's. glibc does not fail on an unknown name -- it reads the leading
+# letters as a POSIX abbreviation at offset 0, so `date` would print UTC
+# labelled with a fake zone name. Unset it instead: plain UTC, which is the
+# pre-#384 behaviour. A POSIX rule string (EST5EDT,M3.2.0,M11.1.0) has no file
+# and is kept. Done here, before gosu, so every process below inherits the
+# decision.
+if [ -n "${TZ:-}" ] && [ ! -f "/usr/share/zoneinfo/$TZ" ]; then
+    if ! [[ "$TZ" =~ ^[A-Za-z]{3,}[+-]?[0-9] ]]; then
+        echo "[sandy] TZ='$TZ' is not a zone in this image (no /usr/share/zoneinfo/$TZ) -- the container clock stays UTC." >&2
+        unset TZ
+    fi
 fi
 
 # Determine runtime UID/GID (match host user for bind-mount permissions on Linux)
@@ -8277,6 +8389,31 @@ build_codex_cmd() {
     if [ -n "${CODEX_MODEL:-}" ]; then
         cmd+=" --model $(printf "%q" "$CODEX_MODEL")"
     fi
+    # SANDY_EFFORT (#116) -> codex's `model_reasoning_effort`, as a `-c`
+    # override (accepted by both `codex` and `codex exec`; the value is parsed
+    # as TOML and falls back to a literal string, so a bare word is fine).
+    # Verified against codex 0.157.1 (codex-rs/protocol/src/openai_models.rs,
+    # ReasoningEffort::from_str): none|minimal|low|medium|high|xhigh|max|ultra|
+    # persistent. Every sandy level therefore has an exact namesake, and the
+    # mapping is the identity -- including max->max, codex's own "maximum
+    # reasoning depth". NOT ultra, though it sorts higher: ultra is "maximum
+    # reasoning with automatic task delegation" (multi-agent), a behaviour
+    # change rather than an effort level. The mapping is a case, not a
+    # pass-through, so a future divergence is one arm here and an unmapped
+    # level omits the flag rather than inventing a value. Whether a given MODEL
+    # offers the level is codex's catalog's business (0.157.1's gpt-5.4/5.5 top
+    # out at xhigh). printf %q because this string reaches `bash -c` (R1).
+    local _sandy_codex_effort=""
+    case "${SANDY_EFFORT:-}" in
+        low) _sandy_codex_effort=low ;;
+        medium) _sandy_codex_effort=medium ;;
+        high) _sandy_codex_effort=high ;;
+        xhigh) _sandy_codex_effort=xhigh ;;
+        max) _sandy_codex_effort=max ;;
+    esac
+    if [ -n "$_sandy_codex_effort" ]; then
+        cmd+=" -c $(printf "%q" "model_reasoning_effort=$_sandy_codex_effort")"
+    fi
     cmd+="$(_sandy_translate_args codex "$@")"
     _sandy_wrap_cmd_exit_pause "Codex CLI" "$cmd"
 }
@@ -8742,11 +8879,13 @@ else
     fi
 
     # Fourth agent (if present): split the left pane vertically → 2x2 grid.
-    # On-screen layout BY AGENT (spawn order): agent1 top-left, agent2
-    # top-right, agent3 bottom-right, agent4 bottom-left. pane_index is NOT
-    # this order -- this split re-splits pane 0, so tmux numbers the new pane
-    # (agent4, bottom-left) pane_index 1, pushing agent2/agent3 to 2/3. See
-    # "Pane-identity contract" in SPECIFICATION.md for the full mapping.
+    # On screen, by SPAWN order: agent 0 top-left, agent 1 top-right, agent 2
+    # bottom-right, agent 3 bottom-left. The tmux pane INDICES do not follow:
+    # this split re-splits pane 0 and tmux numbers the new pane right after the
+    # one it split, so sandy.0 = agent 0, sandy.1 = agent 3, sandy.2 = agent 1,
+    # sandy.3 = agent 2. Anything addressing "the Nth agent" must resolve it
+    # through @sandy_pane_agent, never as sandy.N (#65) -- see "Pane-identity
+    # contract" in SPECIFICATION.md for the full mapping.
     if [ "$_SANDY_AGENT_COUNT" -ge 4 ]; then
         _cmd3="$(_sandy_build_agent_cmd "${_SANDY_AGENTS[3]}" "$@")"
         [ "${SANDY_TEST_PANE_TAGS:-0}" = "1" ] && _cmd3="printf '[sandy:pane-agent] %s\n' '${_SANDY_AGENTS[3]}'; $_cmd3"
@@ -8811,6 +8950,19 @@ set -g set-clipboard on
 # Better redraw behavior
 set -g focus-events on
 setw -g aggressive-resize on
+
+# Pane resize: prefix + H/J/K/L, repeatable (-r), so prefix H H H keeps going
+# within repeat-time (#161). tmux's own resize keys are prefix + Ctrl-Arrow,
+# which macOS Mission Control takes at the system level before any terminal
+# sees it, and prefix + M-Arrow, which needs the terminal's Option-as-Meta
+# setting -- so on macOS out of the box no resize key worked at all, in a
+# layout (2-4 agent panes) that needs one most. Binding L shadows stock
+# prefix L (switch-client -l, "last session") -- harmless here, since sandy
+# runs a single tmux session.
+bind -r H resize-pane -L 5
+bind -r J resize-pane -D 5
+bind -r K resize-pane -U 5
+bind -r L resize-pane -R 5
 TMUXCONF
 }
 
@@ -8822,11 +8974,13 @@ generate_channel_relay() {
 # tmux session via `docker exec ... tmux send-keys`. Stateless, agent-agnostic.
 #
 # Required env: TELEGRAM_BOT_TOKEN, SANDY_CONTAINER_NAME
-# Optional:     TELEGRAM_ALLOWED_SENDERS (csv of user IDs), SANDY_CHANNEL_TARGET_PANE (default 0)
+# Optional:     TELEGRAM_ALLOWED_SENDERS (csv of user IDs), SANDY_CHANNEL_TARGET_PANE (default 0),
+#               SANDY_CHANNEL_AGENTS (the resolved SANDY_AGENT list, csv, in pane-spawn order)
 set -u
 : "${TELEGRAM_BOT_TOKEN:?}"
 : "${SANDY_CONTAINER_NAME:?}"
 TARGET_PANE="${SANDY_CHANNEL_TARGET_PANE:-0}"
+AGENTS="${SANDY_CHANNEL_AGENTS:-}"
 ALLOWED="${TELEGRAM_ALLOWED_SENDERS:-}"
 # Refuse to run with no allowlist, rather than run and drop everything. A relay
 # that starts and silently delivers nothing reads as "channels are broken" and
@@ -8865,6 +9019,36 @@ _is_allowed() {
     return 1
 }
 
+# SANDY_CHANNEL_TARGET_PANE=N means "the Nth agent in SANDY_AGENT" (0-based),
+# which is NOT tmux pane_index N (#65). In the 4-agent 2x2 grid the last split
+# re-splits pane 0 and tmux numbers the new pane right after the one it split,
+# so sandy.1 holds the FOURTH agent, sandy.2 the second, sandy.3 the third --
+# raw `sandy.N` sent "pane 1" to the wrong agent. So resolve N -> agent name
+# (SANDY_CHANNEL_AGENTS, passed by the launcher) -> the pane whose
+# @sandy_pane_agent tag carries that name. Agent names are unique within a
+# combo (duplicates are refused at launch), so the match is unambiguous.
+# Falls back to raw sandy.N when there is no tag to match -- an image that
+# predates the tag, or one from before 2.4.0, which tagged multi-agent panes
+# only (#378 tags the single-agent pane too, so there the tag now matches).
+_target() {
+    local want="" rest="$AGENTS," a i=0 idx tag
+    case "$TARGET_PANE" in ''|*[!0-9]*) rest="" ;; esac
+    while [ -n "$rest" ]; do
+        a="${rest%%,*}"; rest="${rest#*,}"
+        if [ "$i" = "$TARGET_PANE" ]; then want="$a"; break; fi
+        i=$((i+1))
+    done
+    if [ -n "$want" ]; then
+        while read -r idx tag; do
+            case "$idx" in ''|*[!0-9]*) continue ;; esac
+            if [ "$tag" = "$want" ]; then
+                printf 'sandy.%s\n' "$idx"; return 0
+            fi
+        done < <(docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux list-panes -t sandy -F '#{pane_index} #{@sandy_pane_agent}' 2>/dev/null || true)
+    fi
+    printf 'sandy.%s\n' "$TARGET_PANE"
+}
+
 _inject() {
     local text="$1"
     # Wait for container tmux session to exist (up to 30s)
@@ -8876,7 +9060,7 @@ _inject() {
         sleep 0.5
         tries=$((tries+1))
     done
-    docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux send-keys -t "sandy.${TARGET_PANE}" "$text" Enter 2>/dev/null || true
+    docker exec -u "$(id -u)" "$SANDY_CONTAINER_NAME" tmux send-keys -t "$(_target)" "$text" Enter 2>/dev/null || true
 }
 
 # Drain stale updates once at startup
@@ -9176,6 +9360,7 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     _sandy_reexec_args=(--start --workspace "$WORK_DIR")
     [ "$SANDY_REBUILD" = "true" ] && _sandy_reexec_args+=(--rebuild)
     [ "$SANDY_BUILD_ONLY" = "true" ] && _sandy_reexec_args+=(--build-only)
+    [ "$SANDY_NO_UPDATE_CHECK" = "true" ] && _sandy_reexec_args+=(--no-update-check)
     [ "$SANDY_NEW_SESSION" = "true" ] && _sandy_reexec_args+=(--new)
     [ "$SANDY_REMOTE_CONTROL" = "true" ] && _sandy_reexec_args+=(--remote)
     [ -n "$SANDY_AGENT_OVERRIDE" ] && _sandy_reexec_args+=(--agent "$SANDY_AGENT_OVERRIDE")
@@ -9202,7 +9387,11 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     # then honors. Only when we actually have a TTY; a non-TTY client (sandy-ui
     # / scripted) still can't prompt, so there approval must be pre-granted
     # (run `sandy --start` once from a terminal) or SANDY_AUTO_APPROVE_PRIVILEGED
-    # set.
+    # set -- which covers the passive-privileged and .sandy/Dockerfile gates but
+    # NOT the dangerous-symlink gate, so a new escaping symlink still needs a
+    # terminal once. The pass resolves all three gates (#221 added symlinks,
+    # #296 the Dockerfile).
+    _sandy_df_declined=""
     if [ -t 0 ] && [ -t 2 ]; then
         # $SANDY_SELF, not "$0" and not "$(_sandy_self_path)": this subshell cd's
         # to the workspace, so a relative invocation (./sandy) resolves to nothing
@@ -9211,7 +9400,17 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # block exists to perform. Calling the helper HERE would not help: the
         # substitution is expanded after the cd. It must already be resolved.
         _sandy_approve_rc=0
-        ( cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$SANDY_SELF" ) </dev/tty >/dev/tty 2>&1 || _sandy_approve_rc=$?
+        # #296: the pass also answers the .sandy/Dockerfile gate. A decline there
+        # is not a refusal (rc stays 0), so it comes back through this file
+        # instead, and is forwarded to the supervisor below.
+        _sandy_approve_result="${_sandy_daemon_log}.approve"
+        rm -f "$_sandy_approve_result" 2>/dev/null || true
+        ( export SANDY_APPROVE_ONLY_RESULT="$_sandy_approve_result"; cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$SANDY_SELF" ) </dev/tty >/dev/tty 2>&1 || _sandy_approve_rc=$?
+        if [ -f "$_sandy_approve_result" ]; then
+            _sandy_df_declined="$(sed -n 's/^dockerfile_declined=//p' "$_sandy_approve_result" 2>/dev/null || true)"
+            rm -f "$_sandy_approve_result" 2>/dev/null || true
+            [[ "$_sandy_df_declined" =~ ^[0-9a-f]{64}$ ]] || _sandy_df_declined=""
+        fi
         # #221: the rc is no longer swallowed. Now that this pass also resolves
         # the dangerous-symlink approval, it can fail for a REAL reason -- the
         # user declined, or a new escaping symlink appeared since the last
@@ -9252,7 +9451,13 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     # exported it) reaches the supervisor via ordinary env inheritance —
     # `env` only ADDS the two vars named below, it doesn't clear the rest of
     # this process's exported environment.
+    #
+    # SANDY_DOCKERFILE_DECLINED_HASH (#296) carries a pre-pass N on the
+    # .sandy/Dockerfile gate, bound to the context hash; always passed, empty
+    # when there was no decline, so a stray value in the caller's env cannot
+    # reach the supervisor.
     nohup env SANDY_DAEMON_SUPERVISOR=1 "SANDY_DAEMON_LOG=$_sandy_daemon_log" \
+        "SANDY_DOCKERFILE_DECLINED_HASH=$_sandy_df_declined" \
         "$0" "${_sandy_reexec_args[@]}" </dev/null >>"$_sandy_daemon_log" 2>&1 &
     disown 2>/dev/null || true
 
@@ -9850,6 +10055,15 @@ _sandy_reap_stranded_proxies || true
 # _resolve_passive_privileged_approval() below.
 _PASSIVE_PRIVILEGED_PENDING=()
 _PASSIVE_PRIVILEGED_SOURCES=()
+# SANDY_EXTRA_ENV name lists, per source, in load order (#388). This one key
+# COMPOSES rather than last-wins: host lists, then APPROVED workspace lists,
+# then the env value, unioned by _load_sandy_extra_env. The loader records the
+# raw values here instead of exporting them, because an export per file is
+# exactly the last-wins that silently dropped every host-forwarded name the
+# moment a workspace forwarded one of its own.
+_SANDY_EXTRA_ENV_HOST_LISTS=()
+_SANDY_EXTRA_ENV_WS_LISTS=()
+_SANDY_EXTRA_ENV_WS_APPROVED=0
 
 # Snapshot which keys were already set in the process environment before any
 # config file was read. Subsequent _load_sandy_config calls skip these — env
@@ -9888,7 +10102,12 @@ _load_sandy_config() {
         # Env wins: skip keys that were already set in the process env before
         # any config loading. Honors `SANDY_AGENT=foo sandy ...`, `export …`
         # in user shellrc, and CI/test harnesses that override via env.
-        if _key_in_list "$key" "${_SANDY_ENV_SET_KEYS[@]+"${_SANDY_ENV_SET_KEYS[@]}"}"; then
+        # SANDY_EXTRA_ENV is the one exception (#388): an env-set list ADDS to
+        # the file lists rather than replacing them, so the files are still
+        # read — and a workspace list still goes through approval — when the
+        # environment names some too.
+        if [ "$key" != "SANDY_EXTRA_ENV" ] \
+           && _key_in_list "$key" "${_SANDY_ENV_SET_KEYS[@]+"${_SANDY_ENV_SET_KEYS[@]}"}"; then
             continue
         fi
         # Strip a trailing CR so a Windows/CRLF-edited config isn't silently
@@ -9901,7 +10120,10 @@ _load_sandy_config() {
         case "$tier" in
             privileged)
                 # Full allowlist — privileged + passive keys permitted
-                if _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; then
+                if [ "$key" = "SANDY_EXTRA_ENV" ]; then
+                    # Recorded, not exported — composed later (#388).
+                    _SANDY_EXTRA_ENV_HOST_LISTS+=("$value")
+                elif _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}" "${SANDY_PASSIVE_KEYS[@]}"; then
                     export "$key=$value"
                     # Narrow provenance, for SANDY_RELAY's disabled_by only
                     # (#258). The loader keeps no per-key source — it exports
@@ -9921,6 +10143,11 @@ _load_sandy_config() {
                    || _key_in_list "$key" "${SANDY_PRIVILEGED_KEYS[@]}"; then
                     _PASSIVE_PRIVILEGED_PENDING+=("$key=$value")
                     _PASSIVE_PRIVILEGED_SOURCES+=("$file")
+                    # Kept in FILE order for the union (#388); it joins only if
+                    # the approval below sets _SANDY_EXTRA_ENV_WS_APPROVED.
+                    if [ "$key" = "SANDY_EXTRA_ENV" ]; then
+                        _SANDY_EXTRA_ENV_WS_LISTS+=("$value")
+                    fi
                 elif _key_in_list "$key" "${SANDY_PASSIVE_KEYS[@]}"; then
                     export "$key=$value"
                     if [ "$key" = "SANDY_RELAY" ]; then _SANDY_RELAY_SOURCE="workspace"; fi
@@ -9946,13 +10173,67 @@ _load_sandy_config "$SANDY_HOME/.secrets"          privileged
 _load_sandy_config "$WORK_DIR/.sandy/config"       passive
 _load_sandy_config "$WORK_DIR/.sandy/.secrets"     passive
 
+# --- Offline mode: SANDY_OFFLINE=1 / --no-update-check (#219) ---
+# "Use what you have, do not check for updates." Skips the three things a launch
+# fetches only to decide whether something NEWER exists: the per-agent version
+# checks (a hit forces a --no-cache rebuild), skill-pack version resolution
+# from GitHub (falls back to the local cache, then the built-in pin), and
+# sandy's own release nag. It does NOT skip a build that is REQUIRED -- a
+# missing image or a changed Dockerfile still builds, through the #218
+# reachability gate, and fails there as it always did.
+#
+# Why an explicit switch when #218 already degrades gracefully: the probe costs
+# latency, detection can be wrong in both directions, and "I know I am on a
+# plane, just launch" should not depend on a heuristic.
+#
+# PASSIVE-SAFE (maintainer decision). It defers the auto-patch pickup the
+# wrapped-agent CVE posture relies on, which is a mild weakening -- but it is
+# time-bounded (the next launch without it checks as normal), equivalent to
+# simply not relaunching, and a committed .sandy/config gains no capability
+# from it. What keeps it honest is that it is never SILENT: one line at launch
+# and one at session end, and the marker records it.
+#
+# The flag wins over any config value, like --agent. Deliberately not exported:
+# the --start supervisor gets the flag back through its re-exec argv and reads
+# the same config files itself, while a child launched for ANOTHER workspace
+# must resolve that workspace's own setting, not inherit this one's.
+if [ "$SANDY_NO_UPDATE_CHECK" = true ]; then SANDY_OFFLINE=1; fi
+if [ "${SANDY_OFFLINE:-0}" != 0 ] && [ "${SANDY_OFFLINE:-0}" != 1 ]; then
+    echo "[sandy] ERROR: SANDY_OFFLINE='${SANDY_OFFLINE}' invalid (want 0 or 1)" >&2
+    exit 1
+fi
+SANDY_OFFLINE="${SANDY_OFFLINE:-0}"
+if [ "$SANDY_OFFLINE" = 1 ] && [ "${SANDY_APPROVE_ONLY:-0}" != "1" ]; then
+    info "Offline mode (SANDY_OFFLINE=1 / --no-update-check): skipping update checks — agent, skill-pack and sandy releases are not looked up this launch. Images that must be built still are."
+fi
+
+# --- Check for sandy updates (non-blocking, cached 24h) ---
+# Not in the SANDY_APPROVE_ONLY pre-pass: the --start supervisor that follows
+# runs this same line, and the nag would otherwise print twice.
+if [ "$SANDY_OFFLINE" != 1 ] && [ "${SANDY_APPROVE_ONLY:-0}" != "1" ]; then
+    sandy_check_update
+fi
+
 # SANDY_EXTRA_ENV: user-defined passthrough of arbitrary env-var names into
 # the container (e.g. tokens for MCP servers sandy doesn't know about).
 #
-# Source resolution: env wins absolutely. Among files, workspace overrides
-# host (matching the standard loader's precedence: workspace passive beats
-# host privileged for keys both sources set). Within each tier, .secrets
-# beats config (last-match-wins iteration order):
+# The NAME list composes (#388): the effective list is the union of every
+# host list (~/.sandy/config, then ~/.sandy/.secrets), every APPROVED
+# workspace list (.sandy/config, then .sandy/.secrets), then the env value —
+# deduplicated, the first occurrence keeping its position. An env-set list
+# ADDS; it does not replace (maintainer decision on #388 — the one key where
+# env is not a complete override, because a replacement is exactly the silent
+# drop being fixed). Last-wins used to drop every host-forwarded name the
+# moment a workspace forwarded one of its own, with no warning; the only
+# symptom was a tool failing inside the container, far from the cause. The
+# union grants nothing new: host names were set in a privileged source and
+# meant to apply everywhere, and a workspace's names still need approval to
+# join (headless drops them, as before).
+#
+# VALUE resolution is per name and unchanged. Env wins absolutely. Among
+# files, workspace overrides host (matching the standard loader's precedence:
+# workspace passive beats host privileged for keys both sources set). Within
+# each tier, .secrets beats config (last-match-wins iteration order):
 #
 #   env  >  workspace/.sandy/.secrets  >  workspace/.sandy/config
 #         >  ~/.sandy/.secrets          >  ~/.sandy/config
@@ -9967,7 +10248,58 @@ _load_sandy_config "$WORK_DIR/.sandy/.secrets"     passive
 # the user sees before any value is forwarded.
 _SANDY_EXTRA_ENV_NAMES=()
 _load_sandy_extra_env() {
-    [ -z "${SANDY_EXTRA_ENV:-}" ] && return 0
+    # Compose the union (#388). The env contribution is whatever
+    # SANDY_EXTRA_ENV holds here: neither the config loader nor the approval
+    # exports this key any more, so only the environment can have set it.
+    # Each list is tagged with its source so the launch can say where every
+    # name came from. Self-contained on purpose — tests extract this function
+    # alone and drive it.
+    local _ee_lists=() _ee_l _ee_src _ee_part _ee_parts=() _ee_seen="," _ee_joined=""
+    local _ee_host="" _ee_ws="" _ee_env=""
+    for _ee_l in "${_SANDY_EXTRA_ENV_HOST_LISTS[@]+"${_SANDY_EXTRA_ENV_HOST_LISTS[@]}"}"; do
+        _ee_lists+=("host	$_ee_l")
+    done
+    if [ "${_SANDY_EXTRA_ENV_WS_APPROVED:-0}" = 1 ]; then
+        for _ee_l in "${_SANDY_EXTRA_ENV_WS_LISTS[@]+"${_SANDY_EXTRA_ENV_WS_LISTS[@]}"}"; do
+            _ee_lists+=("workspace	$_ee_l")
+        done
+    fi
+    if [ -n "${SANDY_EXTRA_ENV:-}" ]; then
+        _ee_lists+=("env	$SANDY_EXTRA_ENV")
+    fi
+    for _ee_l in "${_ee_lists[@]+"${_ee_lists[@]}"}"; do
+        _ee_src="${_ee_l%%	*}"
+        IFS=',' read -ra _ee_parts <<< "${_ee_l#*	}"
+        for _ee_part in "${_ee_parts[@]+"${_ee_parts[@]}"}"; do
+            _ee_part="${_ee_part#"${_ee_part%%[![:space:]]*}"}"
+            _ee_part="${_ee_part%"${_ee_part##*[![:space:]]}"}"
+            [ -z "$_ee_part" ] && continue
+            if [ "$_ee_src" = host ]; then _ee_host="${_ee_host:+$_ee_host,}$_ee_part"
+            elif [ "$_ee_src" = workspace ]; then _ee_ws="${_ee_ws:+$_ee_ws,}$_ee_part"
+            else _ee_env="${_ee_env:+$_ee_env,}$_ee_part"
+            fi
+            # Dedupe, first occurrence keeping its position. A delimiter-
+            # wrapped string rather than an associative array: bash 3.2 has
+            # none.
+            case "$_ee_seen" in *",$_ee_part,"*) continue ;; esac
+            _ee_seen="$_ee_seen$_ee_part,"
+            _ee_joined="${_ee_joined:+$_ee_joined,}$_ee_part"
+        done
+    done
+    [ -z "$_ee_joined" ] && return 0
+    # The composed list is what the container is told it received (the
+    # `-e SANDY_EXTRA_ENV=` forward at launch), so `echo $SANDY_EXTRA_ENV` in
+    # the agent names every forwarded name, not whichever source loaded last.
+    export SANDY_EXTRA_ENV="$_ee_joined"
+    # Say where the names came from whenever more than one source contributed
+    # (the case no reader of a single file can predict), or when verbose.
+    local _ee_nsrc=0
+    [ -n "$_ee_host" ] && _ee_nsrc=$((_ee_nsrc+1))
+    [ -n "$_ee_ws" ] && _ee_nsrc=$((_ee_nsrc+1))
+    [ -n "$_ee_env" ] && _ee_nsrc=$((_ee_nsrc+1))
+    if [ "$_ee_nsrc" -gt 1 ] || [ "${SANDY_VERBOSE:-0}" != 0 ]; then
+        info "SANDY_EXTRA_ENV: forwarding ${_ee_joined} (host: ${_ee_host:--}; workspace: ${_ee_ws:--}; env: ${_ee_env:--})"
+    fi
     local _raw _name _file _key _value
     IFS=',' read -ra _raw <<< "$SANDY_EXTRA_ENV"
     for _name in "${_raw[@]}"; do
@@ -10052,6 +10384,16 @@ _load_sandy_extra_env() {
 #
 # Approval is keyed on the absolute workspace path AND the exact KEY=VALUE set,
 # so editing .sandy/config always re-triggers the prompt.
+# Export one approved KEY=VALUE — except SANDY_EXTRA_ENV, whose approval only
+# admits the workspace name lists (recorded in file order by the loader) into
+# the union _load_sandy_extra_env builds (#388). Exporting it would replace
+# the host list and any env-set list: the last-wins this key no longer has.
+_sandy_export_approved_kv() {
+    case "$1" in
+        SANDY_EXTRA_ENV=*) _SANDY_EXTRA_ENV_WS_APPROVED=1 ;;
+        *) export "$1" ;;
+    esac
+}
 _resolve_passive_privileged_approval() {
     [ ${#_PASSIVE_PRIVILEGED_PENDING[@]} -eq 0 ] && return 0
 
@@ -10075,7 +10417,7 @@ _resolve_passive_privileged_approval() {
     if [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ]; then
         while IFS= read -r _kv; do
             [ -z "$_kv" ] && continue
-            export "$_kv"
+            _sandy_export_approved_kv "$_kv"
         done <<< "$sorted"
         return 0
     fi
@@ -10087,7 +10429,7 @@ _resolve_passive_privileged_approval() {
         if [ "$stored" = "$set_hash" ]; then
             while IFS= read -r _kv; do
                 [ -z "$_kv" ] && continue
-                export "$_kv"
+                _sandy_export_approved_kv "$_kv"
             done <<< "$sorted"
             return 0
         fi
@@ -10149,7 +10491,7 @@ _resolve_passive_privileged_approval() {
             chmod 600 "$approval_file" 2>/dev/null || true
             while IFS= read -r _kv; do
                 [ -z "$_kv" ] && continue
-                export "$_kv"
+                _sandy_export_approved_kv "$_kv"
             done <<< "$sorted"
             echo "[sandy] Approved. Future launches from this directory will proceed silently" >&2
             echo "[sandy] unless you edit the set. Revoke via: rm $approval_file" >&2
@@ -10392,6 +10734,8 @@ fi
 # write, no docker), so traversing it keeps the "touches nothing on disk but the
 # approval file" property this mode is built on -- in particular it still exits
 # BEFORE the workspace mutex, the bare-sandy busy-gate, image builds, and launch.
+# (#296 extends the same exit point to the .sandy/Dockerfile approval, whose
+# file is the one other thing it may write -- see _sandy_approve_only_finish.)
 
 # Sanity: reject world-open SANDY_ALLOW_LAN_HOSTS values. Even from a
 # privileged source, "0.0.0.0/0" negates the whole point of LAN isolation and
@@ -10462,8 +10806,10 @@ SANDY_EGRESS_STRICT_WAS="${SANDY_EGRESS_STRICT:-}"
 # a contradiction check, two entries in the value-aware tier gate, and a
 # separate deprecated tri-state (SANDY_EGRESS_PROXY, whose 0/1/2 were opaque)
 # to express what one enum says plainly. Both old keys still work and are
-# listed in README's Deprecated section; `off` is the weakening value and is
-# approval-gated from a workspace exactly as SANDY_EGRESS_NO_ISOLATION=1 was.
+# listed in README's Deprecated section. `off` and `permissive` are the
+# weakening values and are approval-gated from a workspace exactly as
+# SANDY_EGRESS_NO_ISOLATION=1 and SANDY_EGRESS_STRICT=0 were (#371 -- 2.0.0
+# gated only `off`, dropping the downgrade case in translation).
 #
 # NOTE FOR ANYONE EDITING THIS REGION: run-tests.sh §53 extracts it as
 # sed -n '/^_SANDY_PROXY_ON=false/,/^esac/p', so a column-0 `esac` before the
@@ -10785,6 +11131,146 @@ DIR_BASE="${DIR_BASE:-project}"
 SANDBOX_NAME="${DIR_BASE}-${SHORT_HASH}"
 SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
 
+# --- Per-project .sandy/Dockerfile approval (HF-incident Issue 7, #296) ------
+# Defined here rather than at the Phase 3 build site because the SANDY_APPROVE_ONLY
+# pre-pass below calls it too. It needs only WORK_DIR, SANDY_HOME, sha256 and
+# _sandy_is_headless, all settled by this point.
+# Deterministic hash of the entire .sandy/ build context — every file `docker
+# build` could COPY/ADD/RUN, not just the Dockerfile text. Hashing only the
+# Dockerfile would leave the payload-in-a-helper hole: a Dockerfile that
+# `COPY setup.sh` + `RUN /tmp/setup.sh` is approved once, then a later edit to
+# setup.sh (Dockerfile unchanged) would rebuild and execute it on the host
+# unattended with the stored approval still matching. config/.secrets are
+# sandy's own control files (not build inputs), so they're excluded — routine
+# credential/model edits must not re-trigger the build prompt. Path is made
+# location-independent (relative to the context dir) so it's stable across
+# equivalent workspaces. Output is a single hex hash.
+_sandy_context_hash() {
+    local dir="$1" f h out=""
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        h="$(sha256 < "$f" | awk '{print $1}')"
+        out="$out$h  ${f#"$dir"/}
+"
+    done < <(find "$dir" -type f ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
+    printf '%s' "$out" | sha256 | awk '{print $1}'
+}
+
+# Gate a per-project .sandy/Dockerfile build behind explicit per-workspace
+# approval (HF-incident Issue 7). Building it runs arbitrary RUN commands on the
+# HOST docker daemon with UNFILTERED network (build-time is NOT behind the egress
+# proxy) and takes all of .sandy/ as build context — so an agent that writes
+# $WORKSPACE/.sandy/Dockerfile in one session would get host code-execution on
+# the next launch. Approval is content-hash based over the WHOLE build context
+# (not just the Dockerfile — see _sandy_context_hash), persists per workspace
+# (same machinery as the passive-privileged config gate), re-prompts on any edit
+# to any context file, and fails closed when non-interactive (skips the build,
+# uses the base image).
+# Returns 0 = approved (build/use), 1 = declined or unapproved-headless (skip).
+# Leaves the context hash it judged in the global _SANDY_DF_HASH, so the
+# APPROVE_ONLY pre-pass can hand a decline to the supervisor bound to exactly
+# that content (#296).
+_sandy_project_dockerfile_approved() {
+    local dockerfile="$1" df_hash wd_hash approval_file stored _ans _line _ctx _other _prov_date
+    _ctx="$(dirname "$dockerfile")"
+    df_hash="$(_sandy_context_hash "$_ctx")"
+    _SANDY_DF_HASH="$df_hash"
+    wd_hash="$(printf '%s' "$WORK_DIR" | sha256 | awk '{print $1}' | cut -c1-16)"
+    approval_file="$SANDY_HOME/approvals/dockerfile-$wd_hash.list"
+    mkdir -p "$SANDY_HOME/approvals"
+    # CI / test-harness escape hatch — env-only, same as the passive gate. It
+    # covers THIS gate as well as the passive-privileged one; the symlink gate
+    # deliberately does not honour it (see its _sandy_key_metadata row).
+    [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ] && return 0
+    # Already approved and unchanged? (first line of the file is the hash)
+    if [ -f "$approval_file" ]; then
+        stored="$(head -n1 "$approval_file" 2>/dev/null)"
+        [ "$stored" = "$df_hash" ] && return 0
+    fi
+    # #296: the operator already answered N at the `--start` pre-pass for THIS
+    # content. The supervisor has no tty, so without this it would re-print the
+    # whole review and then advise "launch interactively once to approve" --
+    # guidance for a question the user just answered. Bound to the hash, so a
+    # context edited between the pre-pass and here falls through to the normal
+    # fail-closed path instead of inheriting a decision about other bytes.
+    # Only ever SKIPS the build (returns 1), so an env var is a safe carrier:
+    # setting it by hand can make sandy build less, never more. Internal and
+    # env-only, like SANDY_APPROVE_ONLY; never a config key.
+    if [ -n "${SANDY_DOCKERFILE_DECLINED_HASH:-}" ] && [ "$SANDY_DOCKERFILE_DECLINED_HASH" = "$df_hash" ]; then
+        echo "[sandy] .sandy/Dockerfile not approved at the --start prompt — using the base agent image." >&2
+        return 1
+    fi
+    echo "[sandy]" >&2
+    echo "[sandy] This project ships a .sandy/Dockerfile:  $dockerfile" >&2
+    # #295 item 4: say WHICH question this is. "Is this content acceptable" is
+    # only half of it; the other half is "did you put this here", and the
+    # operator cannot answer that without knowing whether the content is new
+    # to this workspace or changed since a review they already did. The
+    # approval file already tells the two apart -- absent vs. a first line
+    # that no longer matches -- and records the date of the earlier approval.
+    # .sandy/ is :ro in-session only when it EXISTED at launch, so a session
+    # that started without one could have written this one (#295 item 1).
+    if [ -f "$approval_file" ]; then
+        _prov_date="$(awk '/^# approved:/ { sub(/^# approved: */, ""); print; exit }' "$approval_file" 2>/dev/null || true)"
+        echo "[sandy] PROVENANCE: the build context CHANGED since you approved it on ${_prov_date:-an unrecorded date}." >&2
+        echo "[sandy] If you did not change it yourself (an edit, a pull, a branch you checked out)," >&2
+        echo "[sandy] find out what did before answering y." >&2
+    else
+        echo "[sandy] PROVENANCE: NO prior approval for this workspace is on record. If you did" >&2
+        echo "[sandy] not write it, or take it from a repository you trust, treat it as planted:" >&2
+        echo "[sandy] an agent session that started without a .sandy/ directory can create one." >&2
+    fi
+    echo "[sandy] Building it runs its RUN commands on your HOST docker daemon with" >&2
+    echo "[sandy] UNFILTERED network (build-time is NOT behind the egress proxy), and the" >&2
+    echo "[sandy] whole .sandy/ dir is the build context. A committed or agent-written" >&2
+    echo "[sandy] Dockerfile could run host code or exfiltrate here. Review it:" >&2
+    # #295 item 5: a reading strategy, not just the risk. "Review it carefully"
+    # leaves the operator to invent one for an arbitrary Dockerfile.
+    echo "[sandy]   A RUN line that fetches and installs from a package registry is expected." >&2
+    echo "[sandy]   A RUN line doing anything ELSE -- piping a URL to a shell, writing outside" >&2
+    echo "[sandy]   the image, reading from the build context -- is what deserves your attention." >&2
+    echo "[sandy]" >&2
+    # Strip control chars (incl. ESC) per line — the Dockerfile is untrusted and
+    # raw terminal escapes could spoof what the reviewer sees vs. what's approved.
+    sed -n '1,200p' "$dockerfile" | while IFS= read -r _line; do
+        printf '[sandy]   | %s\n' "$(printf '%s' "$_line" | LC_ALL=C tr -d '[:cntrl:]')" >&2
+    done
+    [ "$(wc -l < "$dockerfile" 2>/dev/null || echo 0)" -gt 200 ] && echo "[sandy]   | ... (truncated — review the full file)" >&2
+    # The approval covers the WHOLE build context, not just the Dockerfile above.
+    # Any COPY/ADD/RUN-able sibling is hashed too, so name them — their contents
+    # aren't shown but a change to any of them re-triggers this prompt.
+    while IFS= read -r _other; do
+        [ -n "$_other" ] || continue
+        echo "[sandy]   + build-context file (contents not shown): ${_other#"$_ctx"/}" >&2
+    done < <(find "$_ctx" -type f ! -name Dockerfile ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
+    echo "[sandy]" >&2
+    # Headless / non-interactive: fail closed.
+    if [ "${_sandy_is_headless:-false}" = "true" ] || [ ! -t 0 ]; then
+        echo "[sandy] Non-interactive session — NOT building the project image; using the" >&2
+        echo "[sandy] base agent image. Launch sandy interactively once from this directory" >&2
+        echo "[sandy] to review and approve the .sandy/Dockerfile." >&2
+        echo "[sandy]" >&2
+        return 1
+    fi
+    printf '[sandy] Build this .sandy/Dockerfile for %s? [y/N] ' "$WORK_DIR" >&2
+    IFS= read -r _ans </dev/tty || _ans=""
+    case "$_ans" in
+        y|Y|yes|YES|Yes)
+            {
+                printf '%s\n' "$df_hash"
+                printf '# workspace: %s\n' "$WORK_DIR"
+                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
+            } > "$approval_file"
+            chmod 600 "$approval_file" 2>/dev/null || true
+            echo "[sandy] Approved. Future launches build it silently until the Dockerfile" >&2
+            echo "[sandy] changes. Revoke via: rm $approval_file" >&2
+            return 0 ;;
+        *)
+            echo "[sandy] Not approved — using the base agent image for this launch." >&2
+            return 1 ;;
+    esac
+}
+
 # --- Dangerous-symlink scan + approval (#221) ------------------------------
 # Extracted into a function so the `--start` CLIENT can resolve this approval
 # on ITS tty BEFORE forking the non-TTY supervisor. Container bring-up runs in
@@ -10798,9 +11284,28 @@ SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
 # build. Creating SANDBOX_DIR is the one added side effect and it is the same
 # mkdir the launch a moment later performs anyway; the approval list has to live
 # somewhere, and this is the directory that owns it.
+#
+# #296: it also resolves the per-project .sandy/Dockerfile approval, the third
+# gate, which the build site further down would otherwise reach only in the
+# supervisor -- where it can only fail closed, leaving no way to approve a
+# project image in daemon mode at all. Writing that approval file is a second
+# side effect, and it is the same file the interactive path writes, at the same
+# path. DECLINING is not a refusal: N means "use the base image", exactly as it
+# does in a foreground launch, so the pass still exits 0 (a declined symlink
+# approval, by contrast, exits nonzero and stops --start with 6). The decline is
+# handed to the supervisor through SANDY_APPROVE_ONLY_RESULT, bound to the
+# context hash, so it skips the build quietly instead of re-printing a review
+# nobody can answer.
 _sandy_approve_only_finish() {
     mkdir -p "$SANDBOX_DIR"
     _sandy_resolve_symlinks
+    if [ -f "$WORK_DIR/.sandy/Dockerfile" ]; then
+        if ! _sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile"; then
+            if [ -n "${SANDY_APPROVE_ONLY_RESULT:-}" ] && [ -n "${_SANDY_DF_HASH:-}" ]; then
+                printf 'dockerfile_declined=%s\n' "$_SANDY_DF_HASH" > "$SANDY_APPROVE_ONLY_RESULT" 2>/dev/null || true
+            fi
+        fi
+    fi
     exit 0
 }
 
@@ -11108,6 +11613,11 @@ _sandy_build_allowed() {
     fi
     error "Build resources unreachable ($_SANDY_BUILD_NET_WHY), and no $2 exists to fall back to."
     error "  sandy cannot build $1 without network access. Reconnect and retry."
+    # #219: offline mode reads as "never touch the network", so name the
+    # boundary rather than let the user wonder why it did not apply here.
+    if [ "${SANDY_OFFLINE:-0}" = 1 ]; then
+        error "  SANDY_OFFLINE=1 / --no-update-check skips update CHECKS only; an image that does not exist yet still has to be built."
+    fi
     exit 1
 }
 
@@ -11235,7 +11745,9 @@ _check_opencode_update() {
     fi
     return 1
 }
-if [ "$NEEDS_BUILD" = false ]; then
+# SANDY_OFFLINE (#219) skips only this lookup. A build already required above
+# (missing image, changed inputs, rebuilt base) is not a check and still runs.
+if [ "$NEEDS_BUILD" = false ] && [ "${SANDY_OFFLINE:-0}" != 1 ]; then
     _sandy_agent_has claude   && _check_claude_update   && NEEDS_BUILD=true
     _sandy_agent_has gemini   && [ "$NEEDS_BUILD" = false ] && _check_gemini_update   && NEEDS_BUILD=true
     _sandy_agent_has codex    && [ "$NEEDS_BUILD" = false ] && _check_codex_update    && NEEDS_BUILD=true
@@ -11888,7 +12400,8 @@ else
             error "  first with: sandy --doctor"
             error ""
             error "  --keep-history preserves claude/projects/ -- session transcripts and"
-            error "  auto-memory, which nothing recreates. It is not the default and --yes"
+            error "  auto-memory, which nothing recreates -- and only that; the reset plan"
+            error "  names what else it destroys. It is not the default and --yes"
             error "  does not choose it. The reset also PRESERVES agent-args.* (operator"
             error "  state nothing recreates), which is why you should use it rather than"
             error "  rm -rf on the sandbox directory."
@@ -12302,6 +12815,21 @@ if _sandy_agent_has claude; then
     # a :ro sidecar at $SANDBOX_DIR/.seed-settings.json; 0.11.3+ writes directly
     # to the rw sandbox settings.json. The old sidecar is dead state.
     [ -f "$SANDBOX_DIR/.seed-settings.json" ] && rm -f "$SANDBOX_DIR/.seed-settings.json"
+    # $SANDBOX_DIR/claude is the container's ~/.claude, mounted RW, so every
+    # name below is one the agent can plant a symlink at between sessions -- and
+    # this block runs HOST-side. Following one is an escape: a relative link
+    # (settings.json -> ../../../../.claude/settings.json) made the merge read the
+    # host's own settings.json and write it back WITH the bypassPermissions pin,
+    # connectors off and the native sandbox off, so the host's unsandboxed
+    # claude then ran in bypass mode. Same class as R2's settings.local.json,
+    # but here nothing legitimate ever creates a link (sandy regenerates the
+    # file every launch), so the link is removed rather than refused, and named.
+    for _ss in "$SEED_SETTINGS" "$SEED_SETTINGS.tmp" "$SEED_SETTINGS.base"; do
+        if [ -L "$_ss" ]; then
+            warn "Removed a symlink at ${_ss#"$SANDBOX_DIR"/} (pointing to '$(readlink "$_ss" 2>/dev/null || true)') -- sandy writes this file host-side and will not follow a link planted in the agent-writable ~/.claude. If you did not create it, a previous session did."
+            rm -f "$_ss"
+        fi
+    done
     SEED_HOST_SRC=""
     if [ -f "$HOME/.claude/settings.json" ]; then
         SEED_HOST_SRC="$HOME/.claude/settings.json"
@@ -12362,6 +12890,22 @@ if _sandy_agent_has claude; then
             // creation with: //: is a directory. It is syntactically valid
             // bash, so bash -n and CI both passed it.
             s.disableClaudeAiConnectors = (process.env.SANDY_CLAUDE_CONNECTORS || '0') !== '1';
+            // #126 -- Claude Code's OWN sandbox (/sandbox, the sandbox object in
+            // settings). Verified against code.claude.com/docs settings-reference
+            // (sandbox.enabled: Boolean, default unset = no sandbox) and the
+            // sandboxing page: it brings its own HTTP/SOCKS egress proxy and, in
+            // an unprivileged container, needs enableWeakerNestedSandbox -- whose
+            // own caveat is that it is only for when an outer container already
+            // provides the boundary. Sandy IS that boundary, and its egress proxy
+            // is the one policy chokepoint; a second, uncoordinated proxy inside
+            // it double-prompts and muddies which posture is in force. So this
+            // is a MANAGED key like disableClaudeAiConnectors: forced false every
+            // launch, because the host settings.json is the merge base and a host
+            // sandbox.enabled true would otherwise ride in. Only enabled is
+            // forced -- every other key under sandbox the host set is kept, so
+            // turning it back on elsewhere is one edit, not a reconstruction.
+            if (!s.sandbox || typeof s.sandbox !== 'object' || Array.isArray(s.sandbox)) s.sandbox = {};
+            s.sandbox.enabled = false;
             if (skip) {
                 if (!s.permissions || typeof s.permissions !== 'object') s.permissions = {};
                 s.permissions.defaultMode = 'bypassPermissions';
@@ -12413,8 +12957,23 @@ if _sandy_agent_has claude; then
             _prev_plugins="$(jq -c '.enabledPlugins // null' "$SEED_SETTINGS" 2>/dev/null || echo 'null')"
         fi
         _base_src="$SEED_HOST_SRC"
-        [ -z "$_base_src" ] && _base_src=/dev/null
-        jq --arg skip "$skip_perm" --arg connectors "${SANDY_CLAUDE_CONNECTORS:-0}" --argjson prev "$_prev_plugins" '
+        # No (or an empty) host settings.json: feed jq a literal {} rather than
+        # /dev/null. jq over an empty input emits NOTHING -- the null guard below
+        # never runs -- so the redirect wrote a 0-byte settings.json and every
+        # managed key (the bypassPermissions pin, #129 connectors off, #126
+        # sandbox off) was silently missing on a jq-only host with no host
+        # settings. Found by §168, whose clean-host jq case read back nothing.
+        # The {} is PIPED, never staged as a file next to settings.json: that
+        # directory is agent-writable, and a redirect into a planted
+        # settings.json.base symlink truncated whatever host file it named.
+        # Output goes through mktemp (O_EXCL, never follows a link) and mv,
+        # which replaces a link rather than writing through it.
+        _seed_empty=false
+        if [ -z "$_base_src" ] || [ ! -s "$_base_src" ]; then
+            _seed_empty=true
+        fi
+        _seed_tmp="$(mktemp "$SEED_SETTINGS.XXXXXX" 2>/dev/null)" || _seed_tmp=""
+        [ -n "$_seed_tmp" ] && { if [ "$_seed_empty" = true ]; then printf '{}\n'; else cat "$_base_src"; fi; } | jq --arg skip "$skip_perm" --arg connectors "${SANDY_CLAUDE_CONNECTORS:-0}" --argjson prev "$_prev_plugins" '
             (if . == null then {} else . end) |
             # only-if-absent for the BOOLEAN keys via has(), not //=. The //=
             # operator treats an explicit false as unset, so it would overwrite a
@@ -12432,6 +12991,10 @@ if _sandy_agent_has claude; then
             # settings.json would win. Assignment (not //=) is what makes the
             # opt-in actually work.
             .disableClaudeAiConnectors = ($connectors != "1") |
+            # #126: Claude Code native sandbox -- managed, forced off every
+            # launch (sandy is the boundary; see the node branch). Only enabled
+            # is forced; other keys under sandbox the host set are kept.
+            .sandbox = ((if (.sandbox | type) == "object" then .sandbox else {} end) | .enabled = false) |
             (if $skip == "true"
                 then .permissions = ((.permissions // {}) | .defaultMode = "bypassPermissions")
                 elif (.permissions.defaultMode? // "") == "bypassPermissions"
@@ -12449,7 +13012,8 @@ if _sandy_agent_has claude; then
             (if (.enabledPlugins | type) == "object"
                 then .enabledPlugins |= (del(.synthkit) | del(."synthkit@sandy-plugins") | del(."synthkit@thinkkit"))
                 else . end)
-        ' "$_base_src" > "$SEED_SETTINGS.tmp" 2>/dev/null && mv "$SEED_SETTINGS.tmp" "$SEED_SETTINGS"
+        ' > "$_seed_tmp" 2>/dev/null && mv "$_seed_tmp" "$SEED_SETTINGS"
+        if [ -n "$_seed_tmp" ]; then rm -f "$_seed_tmp"; fi
     else
         # Last resort: write defaults only if no file exists yet.
         if [ ! -f "$SEED_SETTINGS" ]; then
@@ -12460,12 +13024,16 @@ if _sandy_agent_has claude; then
             # connectors ON for exactly the hosts with the fewest tools -- a
             # security default that silently varies by what is installed is not a
             # default at all.
+            # #126: Claude Code's native sandbox is seeded off here too. This
+            # branch never reads the host settings.json, so nothing can carry a
+            # host true in -- but a seed that differs by installed tools is how
+            # the #129 hole looked, so all three branches say the same thing.
             _conn_off="true"
             [ "${SANDY_CLAUDE_CONNECTORS:-0}" = "1" ] && _conn_off="false"
             if [ "$skip_perm" = "true" ]; then
-                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"skipAutoPermissionPrompt":true,"disableClaudeAiConnectors":%s,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' "$_conn_off" > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"skipAutoPermissionPrompt":true,"disableClaudeAiConnectors":%s,"sandbox":{"enabled":false},"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' "$_conn_off" > "$SEED_SETTINGS"
             else
-                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"skipAutoPermissionPrompt":false,"disableClaudeAiConnectors":%s,"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' "$_conn_off" > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"skipAutoPermissionPrompt":false,"disableClaudeAiConnectors":%s,"sandbox":{"enabled":false},"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' "$_conn_off" > "$SEED_SETTINGS"
             fi
         fi
     fi
@@ -12730,6 +13298,15 @@ if [ -d "$_sandy_fm_root" ]; then
                 _fm_applied_names="$_fm_applied_names $_fm_n"
                 _fm_what="$_fm_c mount$([ "$_fm_c" = 1 ] || printf 's')"
                 [ -n "$_fm_a" ] && _fm_what="$_fm_what, args:$_fm_a"
+                # "entry" only for an entry that will actually run: the summary
+                # record says the manifest DECLARED one, which is not the same
+                # thing. Since #381 every selected feature's entry is adopted,
+                # so the one case left to say is the capability being off.
+                # This feature's `entry` record precedes its summary in the
+                # stream, so the adoption above has already been decided.
+                if [ -n "$_fm_e" ] && [ "$SANDY_RELAY" != "1" ]; then
+                    _fm_e="entry disabled by SANDY_RELAY=0"
+                fi
                 [ -n "$_fm_e" ] && _fm_what="$_fm_what, $_fm_e"
                 _fm_applied="${_fm_applied:+$_fm_applied, }$_fm_n ($_fm_what)" ;;
             skip*)
@@ -13506,101 +14083,10 @@ CMUXHOOK
     fi
 fi
 
-# Phase 3: Per-project image (optional — extends sandy-claude-code with project tools)
-# Deterministic hash of the entire .sandy/ build context — every file `docker
-# build` could COPY/ADD/RUN, not just the Dockerfile text. Hashing only the
-# Dockerfile would leave the payload-in-a-helper hole: a Dockerfile that
-# `COPY setup.sh` + `RUN /tmp/setup.sh` is approved once, then a later edit to
-# setup.sh (Dockerfile unchanged) would rebuild and execute it on the host
-# unattended with the stored approval still matching. config/.secrets are
-# sandy's own control files (not build inputs), so they're excluded — routine
-# credential/model edits must not re-trigger the build prompt. Path is made
-# location-independent (relative to the context dir) so it's stable across
-# equivalent workspaces. Output is a single hex hash.
-_sandy_context_hash() {
-    local dir="$1" f h out=""
-    while IFS= read -r f; do
-        [ -n "$f" ] || continue
-        h="$(sha256 < "$f" | awk '{print $1}')"
-        out="$out$h  ${f#"$dir"/}
-"
-    done < <(find "$dir" -type f ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
-    printf '%s' "$out" | sha256 | awk '{print $1}'
-}
-
-# Gate a per-project .sandy/Dockerfile build behind explicit per-workspace
-# approval (HF-incident Issue 7). Building it runs arbitrary RUN commands on the
-# HOST docker daemon with UNFILTERED network (build-time is NOT behind the egress
-# proxy) and takes all of .sandy/ as build context — so an agent that writes
-# $WORKSPACE/.sandy/Dockerfile in one session would get host code-execution on
-# the next launch. Approval is content-hash based over the WHOLE build context
-# (not just the Dockerfile — see _sandy_context_hash), persists per workspace
-# (same machinery as the passive-privileged config gate), re-prompts on any edit
-# to any context file, and fails closed when non-interactive (skips the build,
-# uses the base image).
-# Returns 0 = approved (build/use), 1 = declined or unapproved-headless (skip).
-_sandy_project_dockerfile_approved() {
-    local dockerfile="$1" df_hash wd_hash approval_file stored _ans _line _ctx _other
-    _ctx="$(dirname "$dockerfile")"
-    df_hash="$(_sandy_context_hash "$_ctx")"
-    wd_hash="$(printf '%s' "$WORK_DIR" | sha256 | awk '{print $1}' | cut -c1-16)"
-    approval_file="$SANDY_HOME/approvals/dockerfile-$wd_hash.list"
-    mkdir -p "$SANDY_HOME/approvals"
-    # CI / test-harness escape hatch — env-only, same as the passive gate.
-    [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ] && return 0
-    # Already approved and unchanged? (first line of the file is the hash)
-    if [ -f "$approval_file" ]; then
-        stored="$(head -n1 "$approval_file" 2>/dev/null)"
-        [ "$stored" = "$df_hash" ] && return 0
-    fi
-    echo "[sandy]" >&2
-    echo "[sandy] This project ships a .sandy/Dockerfile:  $dockerfile" >&2
-    echo "[sandy] Building it runs its RUN commands on your HOST docker daemon with" >&2
-    echo "[sandy] UNFILTERED network (build-time is NOT behind the egress proxy), and the" >&2
-    echo "[sandy] whole .sandy/ dir is the build context. A committed or agent-written" >&2
-    echo "[sandy] Dockerfile could run host code or exfiltrate here. Review it:" >&2
-    echo "[sandy]" >&2
-    # Strip control chars (incl. ESC) per line — the Dockerfile is untrusted and
-    # raw terminal escapes could spoof what the reviewer sees vs. what's approved.
-    sed -n '1,200p' "$dockerfile" | while IFS= read -r _line; do
-        printf '[sandy]   | %s\n' "$(printf '%s' "$_line" | LC_ALL=C tr -d '[:cntrl:]')" >&2
-    done
-    [ "$(wc -l < "$dockerfile" 2>/dev/null || echo 0)" -gt 200 ] && echo "[sandy]   | ... (truncated — review the full file)" >&2
-    # The approval covers the WHOLE build context, not just the Dockerfile above.
-    # Any COPY/ADD/RUN-able sibling is hashed too, so name them — their contents
-    # aren't shown but a change to any of them re-triggers this prompt.
-    while IFS= read -r _other; do
-        [ -n "$_other" ] || continue
-        echo "[sandy]   + build-context file (contents not shown): ${_other#"$_ctx"/}" >&2
-    done < <(find "$_ctx" -type f ! -name Dockerfile ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
-    echo "[sandy]" >&2
-    # Headless / non-interactive: fail closed.
-    if [ "${_sandy_is_headless:-false}" = "true" ] || [ ! -t 0 ]; then
-        echo "[sandy] Non-interactive session — NOT building the project image; using the" >&2
-        echo "[sandy] base agent image. Launch sandy interactively once from this directory" >&2
-        echo "[sandy] to review and approve the .sandy/Dockerfile." >&2
-        echo "[sandy]" >&2
-        return 1
-    fi
-    printf '[sandy] Build this .sandy/Dockerfile for %s? [y/N] ' "$WORK_DIR" >&2
-    IFS= read -r _ans </dev/tty || _ans=""
-    case "$_ans" in
-        y|Y|yes|YES|Yes)
-            {
-                printf '%s\n' "$df_hash"
-                printf '# workspace: %s\n' "$WORK_DIR"
-                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
-            } > "$approval_file"
-            chmod 600 "$approval_file" 2>/dev/null || true
-            echo "[sandy] Approved. Future launches build it silently until the Dockerfile" >&2
-            echo "[sandy] changes. Revoke via: rm $approval_file" >&2
-            return 0 ;;
-        *)
-            echo "[sandy] Not approved — using the base agent image for this launch." >&2
-            return 1 ;;
-    esac
-}
-
+# Phase 3: Per-project image (optional — extends sandy-claude-code with project tools).
+# _sandy_context_hash and _sandy_project_dockerfile_approved are defined further
+# UP, beside _sandy_approve_only_finish, because the `--start` pre-pass (#296)
+# resolves this approval on the client tty and exits long before this point.
 PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"
 if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_DOCKERFILE"; then
     PROJECT_IMAGE_NAME="$(echo "sandy-project-${SANDBOX_NAME}" | tr '[:upper:]' '[:lower:]')"
@@ -13631,13 +14117,30 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
         # The per-project Dockerfile is arbitrary user RUN commands, so it needs
         # the network at least as much as sandy's own images do -- and it is the
         # LAST build, so an unreachable mirror here wastes everything above it.
+        #
+        # SCOPE (#295 item 6): _sandy_build_allowed probes SANDY'S OWN build
+        # dependencies (deb.debian.org, registry.npmjs.org) and nothing else.
+        # A project layer can fetch from anywhere -- rubygems.org, pypi.org, a
+        # vendor CDN -- and sandy cannot parse an arbitrary Dockerfile for its
+        # network needs. So on a partially reachable network the gate can pass
+        # and this build still die at its own download step; that is the
+        # project's dependency, not a sandy fault, and the failure message says
+        # so rather than leaving it to read like one.
         if _sandy_build_allowed "$PROJECT_IMAGE_NAME" "project image"; then
         info "Building project image from .sandy/Dockerfile..."
+        _sandy_proj_build_rc=0
         docker build -q --no-cache \
             --label sandy.managed=1 \
             --build-arg BASE_IMAGE="$IMAGE_NAME" \
             -t "$PROJECT_IMAGE_NAME" \
-            -f "$PROJECT_DOCKERFILE" "$WORK_DIR/.sandy"
+            -f "$PROJECT_DOCKERFILE" "$WORK_DIR/.sandy" || _sandy_proj_build_rc=$?
+        if [ "$_sandy_proj_build_rc" -ne 0 ]; then
+            error "The .sandy/Dockerfile build failed (exit $_sandy_proj_build_rc)."
+            error "Note: sandy's reachability probe covers only its OWN build hosts (deb.debian.org,"
+            error "registry.npmjs.org), not whatever this Dockerfile fetches. If the failure is a"
+            error "download, check that the hosts this Dockerfile uses are reachable from here."
+            exit "$_sandy_proj_build_rc"
+        fi
         echo "$PROJECT_HASH" > "$PROJECT_HASH_FILE"
         fi
     else
@@ -13668,6 +14171,7 @@ apply_network_isolation() {
             fi
             error "Cannot apply network isolation (iptables DOCKER-USER chain not accessible)."
             error "Refusing to start without LAN isolation. To override: SANDY_ALLOW_NO_ISOLATION=1"
+            _sandy_daemon_fatal
             exit 1
         fi
 
@@ -13706,21 +14210,49 @@ apply_network_isolation() {
         fi
         # Inserted last → lands at top → evaluated first: allow container's own subnet
         sudo iptables -I DOCKER-USER -i "$BRIDGE_NAME" -d "$CONTAINER_SUBNET" -j ACCEPT 2>/dev/null || true
+        # Verify, do not assume (#299). The DROP inserts above are `|| true`, and a
+        # chain that is READABLE (the -L preflight passed) can still refuse an
+        # INSERT: an nft-backend mismatch, a sudo policy that allows -L but not -I,
+        # a malformed range. This line used to print "applied" unconditionally, so
+        # that produced a session announcing isolation it did not have -- a warning
+        # nobody gets is a control nobody applied. `-C` asks the kernel whether each
+        # DROP is actually in the chain; the first one missing refuses the launch
+        # (cleanup's EXIT trap removes whatever DID land). Only the DROPs are
+        # verified: they are the isolation. The ACCEPTs are holes, and a missing
+        # hole fails closed on its own.
+        local _ni_missing=""
+        for range in "${PRIVATE_RANGES[@]}"; do
+            if ! sudo iptables -C DOCKER-USER -i "$BRIDGE_NAME" -d "$range" -j DROP >/dev/null 2>&1; then
+                _ni_missing="$range"
+                break
+            fi
+        done
+        if [ -n "$_ni_missing" ]; then
+            if [[ "${SANDY_ALLOW_NO_ISOLATION:-}" == "1" ]]; then
+                warn "WARNING: LAN isolation INCOMPLETE -- the DROP rule for ${_ni_missing} is not in DOCKER-USER (SANDY_ALLOW_NO_ISOLATION=1)."
+                return
+            fi
+            error "Network isolation rule not applied: DROP ${_ni_missing} on ${BRIDGE_NAME} is missing from the DOCKER-USER chain."
+            error "Refusing to start without LAN isolation. To override: SANDY_ALLOW_NO_ISOLATION=1"
+            _sandy_daemon_fatal
+            exit 1
+        fi
         info "Network isolation rules applied."
     else
         # Non-Linux (macOS, etc.): iptables is unreachable — the rules above
         # cannot be applied, and Docker Desktop's VM does NOT filter LAN
         # traffic. The container can reach host.docker.internal, host
-        # localhost services, and any device on the physical LAN. This is a
-        # known gap scheduled for a real fix in sandy 1.1 (egress proxy
-        # sidecar). Until then, warn loudly so users understand the posture.
+        # localhost services, and any device on the physical LAN. Reached only
+        # in the `off` egress posture -- the proxy postures close this gap with
+        # the --internal topology -- so the fix to name is SANDY_EGRESS, not the
+        # deprecated SANDY_EGRESS_PROXY tri-state this banner used to recommend.
         warn "═══════════════════════════════════════════════════════════════"
         warn " Network isolation is NOT active on $OS."
         warn " sandy cannot block LAN access from the container on this OS."
         warn " The container can reach your host's localhost services,"
         warn " host.docker.internal, and any device on your physical LAN."
-        warn " Fix: set SANDY_EGRESS_PROXY=1 (proxy sidecar, blocks LAN/host"
-        warn " but allows internet) or =2 (strict allowlist). Works on $OS."
+        warn " Fix: set SANDY_EGRESS=permissive (proxy sidecar, blocks LAN/host"
+        warn " but allows internet) or =strict (allowlist). Works on $OS."
         warn "═══════════════════════════════════════════════════════════════"
     fi
 }
@@ -13925,6 +14457,13 @@ cleanup() {
     if [ "${_SANDY_BUILD_DEFERRED:-false}" = "true" ]; then
         printf "${YELLOW}[sandy]${NC} An image refresh was deferred this session (build resources were unreachable).\n" >&2
         printf "${YELLOW}[sandy]${NC} You ran on the existing image. It rebuilds on the next launch from a healthy network.\n" >&2
+    fi
+    # #219: the same erosion, chosen rather than suffered. SANDY_OFFLINE skips
+    # the lookups that would have found a patched agent release, so say so at
+    # the end too -- the launch line has long scrolled away by now.
+    if [ "${SANDY_OFFLINE:-0}" = "1" ]; then
+        printf "${YELLOW}[sandy]${NC} Update checks were skipped this session (SANDY_OFFLINE=1 / --no-update-check); a newer agent release may exist.\n" >&2
+        printf "${YELLOW}[sandy]${NC} Launch without it to pick up patches.\n" >&2
     fi
     # HF-incident Issue 4: session-end egress summary. When allowed-egress logging
     # is on, roll up proxy.log into "what hosts did the agent actually reach" — the
@@ -15490,12 +16029,16 @@ if [ -n "${CLAUDE_CODE_SUBAGENT_MODEL:-}" ] && ! [[ "$CLAUDE_CODE_SUBAGENT_MODEL
     error "  Note: .sandy/config does not strip inline comments — put '# ...' on its own line, not after a value."
     exit 1
 fi
-# Validate SANDY_EFFORT — Claude Code reasoning effort (claude only), applied as
-# `claude --effort <level>` in build_claude_cmd. Empty = Claude Code's own default
-# (currently 'high'). Cleared when claude isn't in the agent set so it's never a
-# meaningless forward. An invalid level fails loud rather than silently running at
-# default — the whole point is a provable, pinned effort.
-if _sandy_agent_has claude; then
+# Validate SANDY_EFFORT — reasoning effort for claude (`claude --effort <level>`,
+# build_claude_cmd) and, since 2.4.0 (#116), codex (`-c model_reasoning_effort=`,
+# mapped per level in build_codex_cmd). Empty = each agent's own default. Cleared
+# when neither is in the agent set so it's never a meaningless forward (and the
+# marker's `effort` stays null for a launch nothing applied it to). An invalid
+# level fails loud rather than silently running at default — the whole point is
+# a provable, pinned effort. gemini, opencode and grok have no effort surface
+# sandy drives; in a combo that includes claude or codex those panes simply do
+# not receive it.
+if _sandy_agent_has claude || _sandy_agent_has codex; then
     if [ -n "${SANDY_EFFORT:-}" ]; then
         case "$SANDY_EFFORT" in
             low|medium|high|xhigh|max) ;;
@@ -15503,6 +16046,9 @@ if _sandy_agent_has claude; then
         esac
     fi
 else
+    if [ -n "${SANDY_EFFORT:-}" ]; then
+        info "SANDY_EFFORT=$SANDY_EFFORT ignored: it applies to claude and codex only (agents: $SANDY_AGENT)."
+    fi
     SANDY_EFFORT=""
 fi
 RUN_FLAGS+=(-e "SANDY_AGENT=$SANDY_AGENT")
@@ -15647,6 +16193,10 @@ _sandy_relay_json=false; [ -n "${SANDY_HANDOFF_RELAY:-}" ] && _sandy_relay_json=
 #
 # Like every other marker field this is LAST LAUNCH, never next launch: a
 # sandbox whose manifest changed reports the old value until it relaunches.
+#
+# offline (#219): true when SANDY_OFFLINE / --no-update-check skipped the
+# update lookups, so "this run was launched on a possibly-unpatched agent by
+# choice" is provable after the fact -- the effort/permission_mode precedent.
 _sandy_agents_json=""
 _sandy_agents_ifs="$IFS"; IFS=','
 for _sandy_a in ${SANDY_AGENT:-claude}; do
@@ -15685,12 +16235,13 @@ _sandy_relay_source_json="\"${_sandy_relay_source:-none}\""
 # what keeps that harness working; this assignment can safely rely on every
 # variable it reads being defined by the code above.
 _sandy_fe_json="$(_sandy_fe_marker_body "$_sandy_fe_list" "$_sandy_fe_disabled" "$_sandy_fe_relay_feature" "$_sandy_relay_disabled_by_json")"
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "cross_session_inbound_source": %s,\n  "agents": %s,\n  "relay": {\n    "source": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "feature_entries": {%s},\n  "cred_mode": "%s"\n}\n' \
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "cross_session_inbound_source": %s,\n  "agents": %s,\n  "relay": {\n    "source": %s,\n    "path": %s,\n    "disabled_by": %s\n  },\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "feature_entries": {%s},\n  "offline": %s,\n  "cred_mode": "%s"\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
     "$_sandy_perm_mode_json" "${_sandy_csi_json:-null}" "${_sandy_csi_src_json:-null}" "$_sandy_agents_json" \
     "$_sandy_relay_source_json" "$_sandy_relay_path_json" "$_sandy_relay_disabled_by_json" \
-    "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${_sandy_fe_json:-}" "${CRED_MODE:-none}" \
+    "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${_sandy_fe_json:-}" \
+    "$(if [ "${SANDY_OFFLINE:-0}" = 1 ]; then echo true; else echo false; fi)" "${CRED_MODE:-none}" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
 
@@ -15870,6 +16421,76 @@ if [ -n "${SANDY_SCREENSHOT_DIR:-}" ]; then
     RUN_FLAGS+=(-v "$SANDY_SCREENSHOT_DIR:/home/sandy/screenshots:ro")
     RUN_FLAGS+=(-e "SANDY_SCREENSHOTS_PATH=/home/sandy/screenshots")
 fi
+
+# --- Host timezone -> container TZ (#384) ---
+# The image's /etc/localtime is Etc/UTC and nothing set TZ, so every in-container
+# clock read UTC whatever the host said: `date`, `ls -l`, git's local display,
+# the tmux status clock, and every time an agent reported to the operator --
+# each of which then had to be converted by hand before it could be compared
+# with a host-side log.
+#
+# A RUNTIME env var, never a build input: the agent image is shared by every
+# sandbox and cached on BUILD_HASH, so baking the zone in would rebuild it after
+# travel or a DST-policy change, and would carry one host's zone into an image
+# --rsync moves to another. Not a config key either: the host's own TZ is
+# already the override (step 1).
+#
+# First match wins:
+#   1. $TZ, if it validates (an IANA name, or a POSIX rule string, which glibc
+#      also accepts). A leading ':' is POSIX's "implementation-defined" marker
+#      and is dropped; `TZ=:/etc/localtime` then fails the no-leading-slash rule
+#      and falls through to step 2, which reads that very file.
+#   2. readlink /etc/localtime, everything up to and including the LAST
+#      `zoneinfo/` stripped -- macOS /var/db/timezone/zoneinfo/America/Denver,
+#      Linux /usr/share/zoneinfo/America/Denver. Plain `readlink`, no -f:
+#      only the text of the link is wanted, and -f is GNU-only.
+#   3. /etc/timezone (Debian/Ubuntu, where /etc/localtime may be a copy).
+#   4. Nothing: TZ stays unset -- the pre-#384 behaviour.
+# A value that fails validation is SKIPPED, never fatal: the next source is
+# tried. Whether the zone exists is checked container-side (entrypoint.sh),
+# against the image's zoneinfo rather than the host's.
+#
+# $1 is a root prefix for the /etc lookups, for the test suite's fixtures only;
+# production passes nothing.
+#
+# Everything sandy EMITS AS DATA stays UTC regardless -- launched_at, the
+# labels, WORKSPACE.json, relay-state -- because every producer uses `date -u`
+# (or epoch seconds, or jq's todateiso8601). run-tests.sh §163 pins that.
+_sandy_tz_valid() {
+    local _re='^[A-Za-z0-9_+:,./-]{1,64}$'
+    [[ "$1" =~ $_re ]] || return 1
+    case "$1" in /*|*..*) return 1 ;; esac
+    return 0
+}
+_sandy_host_tz() {
+    local _root="${1:-}" _v=""
+    if [ -n "${TZ:-}" ]; then
+        _v="${TZ#:}"
+        if _sandy_tz_valid "$_v"; then printf '%s' "$_v"; return 0; fi
+        [ "${SANDY_VERBOSE:-0}" -ge 1 ] && warn "TZ='$TZ' is not a zone name sandy forwards — resolving the host zone from /etc instead." >&2
+    fi
+    if [ -L "$_root/etc/localtime" ]; then
+        _v="$(readlink "$_root/etc/localtime" 2>/dev/null || true)"
+        case "$_v" in
+            *zoneinfo/*)
+                _v="${_v##*zoneinfo/}"
+                if _sandy_tz_valid "$_v"; then printf '%s' "$_v"; return 0; fi
+                ;;
+        esac
+    fi
+    if [ -f "$_root/etc/timezone" ]; then
+        _v=""
+        IFS= read -r _v < "$_root/etc/timezone" 2>/dev/null || true
+        _v="${_v%$'\r'}"
+        if [ -n "$_v" ] && _sandy_tz_valid "$_v"; then printf '%s' "$_v"; return 0; fi
+    fi
+    return 0
+}
+_sandy_tz="$(_sandy_host_tz)"
+if [ -n "$_sandy_tz" ]; then
+    RUN_FLAGS+=(-e "TZ=$_sandy_tz")
+fi
+unset _sandy_tz
 
 # SANDY_EXTRA_ENV passthrough: forward each user-listed env-var into the
 # container. Names were validated and resolved by _load_sandy_extra_env above.
@@ -16361,9 +16982,24 @@ if { [ "$_SANDY_IS_MULTI" = true ] || ! _sandy_agent_has claude; } && [ -n "${SA
                 TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
                 TELEGRAM_ALLOWED_SENDERS="${TELEGRAM_ALLOWED_SENDERS:-}" \
                 SANDY_CHANNEL_TARGET_PANE="${SANDY_CHANNEL_TARGET_PANE:-0}" \
+                SANDY_CHANNEL_AGENTS="$SANDY_AGENT" \
                 bash "$SANDY_HOME/channel-relay.sh" &
                 CHANNEL_RELAY_PID=$!
-                info "Telegram channel relay started (PID $CHANNEL_RELAY_PID → $CONTAINER_NAME pane ${SANDY_CHANNEL_TARGET_PANE:-0})"
+                # Name the AGENT, not just the number: N is a position in
+                # SANDY_AGENT (#65), which is what the relay now routes by.
+                _relay_n="${SANDY_CHANNEL_TARGET_PANE:-0}"
+                _relay_agent=""
+                case "$_relay_n" in
+                    ''|*[!0-9]*) ;;
+                    *) if [ "$_relay_n" -lt "$_SANDY_AGENT_COUNT" ]; then _relay_agent="${_SANDY_AGENTS[$_relay_n]}"; fi ;;
+                esac
+                if [ -n "$_relay_agent" ]; then
+                    info "Telegram channel relay started (PID $CHANNEL_RELAY_PID → $CONTAINER_NAME, agent $_relay_n = $_relay_agent)"
+                else
+                    info "Telegram channel relay started (PID $CHANNEL_RELAY_PID → $CONTAINER_NAME pane $_relay_n)"
+                    warn "SANDY_CHANNEL_TARGET_PANE=$_relay_n names no agent in SANDY_AGENT=$SANDY_AGENT (valid: 0..$((_SANDY_AGENT_COUNT - 1))); messages will likely reach no pane"
+                fi
+                unset _relay_n _relay_agent
             else
                 warn "SANDY_CHANNELS=telegram but TELEGRAM_BOT_TOKEN is not set"
             fi
