@@ -17549,9 +17549,9 @@ echo "§155: the pane-identity contract (#378) — identity comes from @sandy_pa
 # WHY. #378 step 1 publishes tmux session "sandy", the @sandy_pane_agent pane
 # option, and SANDY_AGENT spawn order (SPECIFICATION.md "Pane-identity
 # contract") as a STABLE surface external tooling is now allowed to depend on
-# -- amap-deploy-sandy ships its own copy of sandy-handoff-sessions against
-# exactly these three facts. A grep for the option name does not pin a
-# contract; this section asserts the PROPERTY the acceptance criterion names:
+# -- an external consumer's own copy of sandy-handoff-sessions is built
+# against exactly these three facts. A grep for the option name does not pin
+# a contract; this section asserts the PROPERTY the acceptance criterion names:
 # a fixture where @sandy_pane_agent DISAGREES with pane_index still yields the
 # correct agent per row, in SANDY_AGENT order.
 #

@@ -6967,8 +6967,12 @@ for a in "${ORDER[@]}"; do
   while IFS="$TAB" read -r idx ppid tag; do
     [ -n "${idx:-}" ] || continue
     if [ -z "$tag" ]; then
-        # Mirrors the reference consumer's own guard:
-        # [ "${#ORDER[@]}" -eq 1 ] && [ "$count" -eq 1 ] || continue
+        # Sandy's own fallback rule (not any consumer's): an untagged pane
+        # counts as SANDY_AGENT only when there is exactly one agent AND
+        # exactly one pane in the session -- the only shape a pre-2.4.0
+        # single-agent sandy could have produced. Any other untagged pane
+        # (a user split, a teammate pane, more than one untagged pane) is
+        # skipped rather than guessed.
         if [ "${#ORDER[@]}" -eq 1 ] && [ "$row_count" -eq 1 ]; then
             tag="${SANDY_AGENT:-claude}"
         else
@@ -8818,22 +8822,29 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
         exec tail -f /dev/null
     else
         # Foreground: create detached, tag the pane, THEN attach in this
-        # process. Chaining `set-option` onto the same `new-session`
-        # invocation via `\; set-option ...` was considered and rejected: once
-        # `--` ends new-session's own option parsing, everything after it
-        # (here, `bash -c "$AGENT_CMD 2>&1"`) is consumed as that command's own
-        # argv, not re-split by tmux on a later `;` — the same reason this
-        # form was chosen originally over a single quoted shell-command
-        # string. So a trailing `\; set-option ...` would be swallowed as
-        # extra arguments to `bash -c`, not parsed as a second tmux command.
-        # create-detached-then-attach sidesteps that: it is the exact pattern
-        # the multi-agent path below already uses and relies on, so it is
-        # proven rather than speculative. `exec tmux attach` preserves the
-        # attach-and-block-until-session-ends behavior the previous single
-        # foreground `tmux new-session` (no `-d`) call had.
+        # process — the exact pattern the multi-agent path below already
+        # uses and relies on, so it is proven rather than speculative, and
+        # the option is set before any client attaches (decision: #378).
+        # A chained `\; set-option ...` on the same `new-session` invocation
+        # was considered instead. Note this is NOT ruled out by `--`: tmux's
+        # argument parser (`cmd_parse_from_arguments`) splits the whole
+        # argument list on any argument that is exactly `;` before any
+        # command parses its own options, with no `--`-awareness — so a
+        # trailing `\; set-option ...` *would* be parsed as a second tmux
+        # command, not swallowed into `bash -c`'s argv. create-detached-then-
+        # attach was kept anyway because it matches the already-proven
+        # multi-agent pattern exactly, rather than introducing a second,
+        # unexercised form of the same tag-before-attach guarantee.
+        #
+        # Do NOT `exec` the attach: this process still needs its EXIT trap
+        # (the ANSI color-4 palette remap earlier in this script) to run
+        # after the session ends, and `exec` replaces the shell without
+        # running EXIT traps. Plain `tmux attach -t sandy` returns instead of
+        # replacing the process — same as the multi-agent branch below —
+        # which is what lets that trap fire and restore the palette.
         _p_id="$(tmux new-session -d -P -F '#{pane_id}' -s sandy -n "sandy: ${SANDY_PROJECT_NAME:-$(basename "$WORKSPACE")}" -- bash -c "$AGENT_CMD 2>&1")"
         tmux set-option -p -t "$_p_id" @sandy_pane_agent "$SANDY_AGENT" 2>/dev/null
-        exec tmux attach -t sandy
+        tmux attach -t sandy
     fi
 else
     # --- Multi-agent launch (2-4 panes) ---

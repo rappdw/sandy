@@ -73,9 +73,9 @@ ck "daemon: a second, user-split pane has NO @sandy_pane_agent" \
 TM kill-session -t sandy >/dev/null 2>&1
 
 # ------------------------------------------------------------------
-echo "== foreground form (create detached, tag, exec tmux attach) =="
+echo "== foreground form (create detached, tag, then attach -- matches sandy's actual form, no exec) =="
 # ------------------------------------------------------------------
-# `exec tmux attach` needs a real controlling terminal to behave like a live
+# tmux's attach needs a real controlling terminal to behave like a live
 # foreground launch, not just error out immediately for lack of one. Rather
 # than depend on `script`, whose flag syntax diverges between BSD (macOS) and
 # util-linux (Linux) -- exactly the portability trap this repo's own
@@ -84,12 +84,24 @@ echo "== foreground form (create detached, tag, exec tmux attach) =="
 # pane it creates, so the wrapper gets one with no human attached and no
 # platform-specific tool needed. This is the "with the client detached"
 # alternative to `script`.
+#
+# `unset TMUX` is load-bearing, not decoration: the wrapper's own process is
+# itself the command of a pane on THIS SAME private tmux server (the "driver"
+# session below), so tmux has already exported $TMUX into it. tmux's attach
+# refuses a client whose tty belongs to one of that server's own panes when
+# $TMUX is set ("sessions should be nested with care, unset $TMUX to force"),
+# which fails at once and would tear the driver session down immediately --
+# making "the launching command returns" pass without proving anything (the
+# fix-pass verifier caught exactly this). Sandy's real launch does not need
+# this: user-setup.sh runs as PID 1 of a container with no enclosing tmux
+# client, so $TMUX is never set there.
 _fg_wrapper="$WSTMP/fg-wrapper.sh"
 cat > "$_fg_wrapper" <<EOF
 #!/bin/sh
+unset TMUX
 _p_id="\$(tmux -L "$SOCK" new-session -d -P -F '#{pane_id}' -s sandy -n "$NAME" -- bash -c "$AGENT_CMD 2>&1")"
 tmux -L "$SOCK" set-option -p -t "\$_p_id" @sandy_pane_agent "$FAKE_AGENT" 2>/dev/null
-exec tmux -L "$SOCK" attach -t sandy
+tmux -L "$SOCK" attach -t sandy
 EOF
 chmod +x "$_fg_wrapper"
 
@@ -102,6 +114,15 @@ ck "foreground: the session comes up" "TM has-session -t sandy"
 _fg_pane="$(TM list-panes -t sandy -F '#{pane_id}' 2>/dev/null | sed -n '1p')"
 ck "foreground: @sandy_pane_agent is set on the pane sandy created" \
     "[ -n \"$_fg_pane\" ] && [ \"\$(_pane_tag \"$_fg_pane\")\" = \"$FAKE_AGENT\" ]"
+
+# Proof the attach really BLOCKED rather than having already errored out and
+# torn the driver session down before the agent's `sleep 3` had a chance to
+# finish: check the driver session is still alive right here, well before the
+# agent exits. Without this, an attach that failed instantly (e.g. the $TMUX
+# nesting refusal above, if it regressed) would make the later "driver session
+# ends" check pass immediately for the wrong reason, proving nothing.
+ck "foreground: the driver session is still alive right after the tag check (attach really blocked, did not already exit)" \
+    "TM has-session -t driver"
 
 # Fall: once the trivial agent's `sleep 3` exits, both the inner "sandy"
 # session AND the driver session (whose sole pane IS the attach client) are
