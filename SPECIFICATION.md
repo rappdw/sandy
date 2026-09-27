@@ -1050,7 +1050,7 @@ For 2- and 3-agent layouts `pane_index` and spawn order coincide; the trap is sp
 
 **Not a security boundary.** A process inside the session can rewrite or clear the option (`tmux set-option -p`). The worst it can do is stop delivery within its own sandbox: the helper reports an ambiguous target, or delivery waits. It can never redirect delivery elsewhere. It is not a security boundary.
 
-A property test pins this contract in `test/run-tests.sh` §155: a fixture where the option disagrees with `pane_index`-as-spawn-order must still yield the correct agent per row, and the real 4-agent mapping table above is asserted directly. `test/host-check-pane-tag.sh` (host-only, live tmux, not wired into any automated suite) additionally proves the single-agent daemon and foreground launch forms actually tag their pane against a real tmux server.
+A property test pins this contract in `test/run-tests.sh` §171: a fixture where the option disagrees with `pane_index`-as-spawn-order must still yield the correct agent per row, and the real 4-agent mapping table above is asserted directly. `test/host-check-pane-tag.sh` (host-only, live tmux, not wired into any automated suite) additionally proves the single-agent daemon and foreground launch forms actually tag their pane against a real tmux server.
 
 ### Codex Headless Translation (`SANDY_AGENT=codex`)
 

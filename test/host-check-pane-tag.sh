@@ -2,7 +2,7 @@
 # test/host-check-pane-tag.sh — host-only, live-tmux acceptance for #378's
 # single-agent pane tagging (decisions.md, fix pass on u378).
 #
-# WHAT THIS PROVES that a fixture-based unit test (run-tests.sh §155) cannot:
+# WHAT THIS PROVES that a fixture-based unit test (run-tests.sh §171) cannot:
 # that the EXACT tmux command forms sandy's daemon and foreground single-agent
 # launch paths now use really do set @sandy_pane_agent on the pane sandy
 # itself creates, that a pane sandy did NOT create (a user split) is left

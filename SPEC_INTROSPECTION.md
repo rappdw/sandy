@@ -619,7 +619,7 @@ Not a flag on this list — it is read from live tmux state **inside** the conta
 | Pane order | `SANDY_AGENT`, in-container, is in **spawn order** — the same order the session marker's `agents` field and `--print-state`'s `sandboxes[].agents` report |
 | `pane_index` | **Not** spawn order in the 4-agent grid (the fourth split re-splits pane 0, and tmux inserts the new pane's index right after the one it split) — see SPECIFICATION.md for the exact mapping |
 
-Reading identity from `pane_index`, a scrollback marker, or the pane title is unsupported and unreliable for the reasons in SPECIFICATION.md; read the pane option. **Not a security boundary**: a process inside the session can rewrite or clear the option, and the worst that buys it is stopping delivery within its own sandbox — it can never redirect delivery elsewhere. A property test pins the contract in `test/run-tests.sh` §155.
+Reading identity from `pane_index`, a scrollback marker, or the pane title is unsupported and unreliable for the reasons in SPECIFICATION.md; read the pane option. **Not a security boundary**: a process inside the session can rewrite or clear the option, and the worst that buys it is stopping delivery within its own sandbox — it can never redirect delivery elsewhere. A property test pins the contract in `test/run-tests.sh` §171.
 
 ## Schema versioning
 

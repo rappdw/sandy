@@ -104,7 +104,7 @@
 #
 # Structural coverage (existence, sourcing lib-isolated-home.sh, the
 # peerToken/CLAUDE_CODE_MESSAGING_TOKEN properties, lint-bash32 cleanliness)
-# is pinned by test/run-tests.sh §158, which — like this file — needs no
+# is pinned by test/run-tests.sh §174, which — like this file — needs no
 # Docker and asserts none of the actual measurement.
 set -uo pipefail
 
@@ -361,7 +361,7 @@ def settings_argv():
 
 
 def _msi_classify(debug_log, pre_off, iters=30, sleep_s=0.5):
-    # Isolated on purpose: test/run-tests.sh section 158(a5) extracts and
+    # Isolated on purpose: test/run-tests.sh section 174(a5) extracts and
     # EXECUTES this exact function against fixture debug logs (one with no
     # signature line, one with the ROUTED signature) to prove the
     # no-signature fallback really is UNKNOWN -- rather than grepping this
