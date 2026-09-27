@@ -121,7 +121,8 @@ SANDY_PASSIVE_KEYS=(
 #       not meant to be operator-discoverable — SANDY_DEBUG_CLEANUP, and
 #       (elsewhere, listed nowhere in this array either)
 #       SANDY_DAEMON_SUPERVISOR / SANDY_UPDATE_RESTART / SANDY_PROVISION /
-#       SANDY_PROVISION_ID /
+#       SANDY_PROVISION_ID / SANDY_APPROVE_ONLY / SANDY_APPROVE_ONLY_RESULT /
+#       SANDY_DOCKERFILE_DECLINED_HASH /
 #       SANDY_TEST_PANE_TAGS.
 #   SANDY_SESSION_NONCE stays fully unregistered (not even in this array) for
 #   trust-root reasons specific to it — see "Self-Attestation Marker" in
@@ -1596,7 +1597,7 @@ ANTHROPIC_PROFILE|string||^[A-Za-z0-9._-]+$|1.11.0|experimental|Privileged. Name
 SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|REMOVED AS A CONFIGURATION KEY in 2.2.0 (#354): setting it from the environment or any config file is a HARD ERROR naming the replacement -- declare the executable as an 'entry' in a feature manifest. THE VARIABLE IS NOT REMOVED and must not be: it is the internal channel a manifest entry travels through to the container-side supervisor, so a change that deletes the variable deletes the entry mechanism with it. At most ONE entry runs per container: the first selected feature to declare one, in feature-directory name order, wins, and each later one is named in a launch warning rather than dropped silently (#381). What an entry gets: a container-level process (a sibling of the tmux server, not a pane, not a child of any agent session), started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote, never under --provision), held to one instance by flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never given up on. Its state (.state, supervisor.log) lives at $SANDBOX_DIR/relay-state, mounted rw at /opt/sandy/relay-state and exported as SANDY_RELAY_STATE -- a relay reads that variable rather than constructing the path (#353). Env contract: SANDY_RELAY_STATE, SANDY_AGENT, SANDY_WORKSPACE; enumerate live sessions with /usr/local/bin/sandy-handoff-sessions. An entry that cannot start FAILS THE LAUNCH, never warn-and-proceed: missing or not executable, no relay-state mount, or no flock (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7). SANDY_RELAY=0 stops it, loudly, and records relay.disabled_by. Reported in /etc/sandy-session.json as relay.source/path/disabled_by (launch intent) and live in --print-state as relay.state. In daemon mode the relay (and anything else planted at the uid) outlives sessions until the container is recreated -- run sandy --update-sessions --yes on a 24h cron.
 SANDY_RELAY|bool|1||1.11.0|experimental|Relay CAPABILITY toggle (#258), RE-SCOPED in 2.2.0 (#354). Names no path and asserts no payload: it means 'run the installed relay if there is one'. That meaning was never slot-specific, so with the relay-bin slot removed the key now gates the only remaining producer -- a feature manifest's entry. BEHAVIOUR CHANGE, in the tightening direction: =0 used to disable a slot relay and silently NOT stop a manifest entry; it now stops both, which is what the key always claimed. Because a fleet going silently dark is the failure the entry/relay-bin coexistence window existed to prevent, the suppression is LOUD -- a launch that declines to start a declared entry says so by name, and the resolved state records disabled_by (env, host or workspace) in /etc/sandy-session.json and --print-state, so a CLONED repo shipping 0 is visible rather than forbidden. Default 1, safe because the capability is INERT without host-side state a repository cannot create: no feature, no entry, nothing to run. Both values are passive-safe: 0 only tightens. Skipped, not failed, in headless (-p) and --remote runs. Reported as relay.slot (absent or disabled; 'present' retired with the slot) in the session marker -- launch INTENT, since the marker is written before docker run and the relay starts in-container -- and as live relay.state (absent, started, failed, looping or disabled) in --print-state, alongside relay.source (#345) which names the producer.
 SANDY_OFFLINE|bool|0||2.4.0|stable|Offline mode (#219): skip the lookups a launch makes only to learn whether something NEWER exists -- the per-agent version checks (a hit forces a --no-cache agent rebuild), skill-pack version resolution from GitHub (falls back to the local cache, then the built-in pin), and sandy's own release nag. Builds that are REQUIRED still run: a missing image or a changed Dockerfile builds through the build-reachability gate and fails there as it always has. For a known-bad network (in-flight wifi, captive portal) or an air-gapped host, where the checks cost latency and a detected update would force a rebuild that cannot succeed. The one-shot CLI form is --no-update-check, which wins over this key. Passive-safe: it defers the auto-patch pickup the wrapped-agent CVE posture relies on, but only until the next launch without it -- equivalent to not relaunching -- and it is never silent: one line at launch, one at session end, and 'offline': true in /etc/sandy-session.json. Default 0.
-SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass the passive-privileged approval prompt. Intended for CI / test harnesses only.
+SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass TWO of the three launch approval gates: the passive-privileged config-key prompt AND the per-project .sandy/Dockerfile build prompt (an unreviewed project image then builds, running its RUN commands on the host docker daemon with unfiltered network). It does NOT bypass the dangerous-symlink gate, deliberately: that gate is built so no approval of a new escaping symlink can happen without a deliberate human act (a new escape is a hard error, never a re-prompt), and a blanket bypass would silently mount every future escape read-write. Env-only, so a committed config cannot set it. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
 SANDY_HOST_ID|string||^[A-Za-z0-9._-]{1,128}$|1.8.0|stable|Operator override for the host_id reported by --print-state (#179), advisory identity for multi-host fleet aggregation (sandbox names hash only the workspace path, so the same path on two hosts collides). ENV-ONLY -- a committed .sandy/config can never set it, which would otherwise forge the identity of whatever machine the repo is cloned onto. Default is uname -n (host_id_source: hostname); a valid override reports host_id_source: env. Invalid or empty values are silently ignored and fall back to uname -n -- no warning, ever, since --print-state guarantees 0 bytes of stderr.
 EOF
@@ -8983,7 +8984,11 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     # then honors. Only when we actually have a TTY; a non-TTY client (sandy-ui
     # / scripted) still can't prompt, so there approval must be pre-granted
     # (run `sandy --start` once from a terminal) or SANDY_AUTO_APPROVE_PRIVILEGED
-    # set.
+    # set -- which covers the passive-privileged and .sandy/Dockerfile gates but
+    # NOT the dangerous-symlink gate, so a new escaping symlink still needs a
+    # terminal once. The pass resolves all three gates (#221 added symlinks,
+    # #296 the Dockerfile).
+    _sandy_df_declined=""
     if [ -t 0 ] && [ -t 2 ]; then
         # $SANDY_SELF, not "$0" and not "$(_sandy_self_path)": this subshell cd's
         # to the workspace, so a relative invocation (./sandy) resolves to nothing
@@ -8992,7 +8997,17 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # block exists to perform. Calling the helper HERE would not help: the
         # substitution is expanded after the cd. It must already be resolved.
         _sandy_approve_rc=0
-        ( cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$SANDY_SELF" ) </dev/tty >/dev/tty 2>&1 || _sandy_approve_rc=$?
+        # #296: the pass also answers the .sandy/Dockerfile gate. A decline there
+        # is not a refusal (rc stays 0), so it comes back through this file
+        # instead, and is forwarded to the supervisor below.
+        _sandy_approve_result="${_sandy_daemon_log}.approve"
+        rm -f "$_sandy_approve_result" 2>/dev/null || true
+        ( export SANDY_APPROVE_ONLY_RESULT="$_sandy_approve_result"; cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$SANDY_SELF" ) </dev/tty >/dev/tty 2>&1 || _sandy_approve_rc=$?
+        if [ -f "$_sandy_approve_result" ]; then
+            _sandy_df_declined="$(sed -n 's/^dockerfile_declined=//p' "$_sandy_approve_result" 2>/dev/null || true)"
+            rm -f "$_sandy_approve_result" 2>/dev/null || true
+            [[ "$_sandy_df_declined" =~ ^[0-9a-f]{64}$ ]] || _sandy_df_declined=""
+        fi
         # #221: the rc is no longer swallowed. Now that this pass also resolves
         # the dangerous-symlink approval, it can fail for a REAL reason -- the
         # user declined, or a new escaping symlink appeared since the last
@@ -9033,7 +9048,13 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     # exported it) reaches the supervisor via ordinary env inheritance —
     # `env` only ADDS the two vars named below, it doesn't clear the rest of
     # this process's exported environment.
+    #
+    # SANDY_DOCKERFILE_DECLINED_HASH (#296) carries a pre-pass N on the
+    # .sandy/Dockerfile gate, bound to the context hash; always passed, empty
+    # when there was no decline, so a stray value in the caller's env cannot
+    # reach the supervisor.
     nohup env SANDY_DAEMON_SUPERVISOR=1 "SANDY_DAEMON_LOG=$_sandy_daemon_log" \
+        "SANDY_DOCKERFILE_DECLINED_HASH=$_sandy_df_declined" \
         "$0" "${_sandy_reexec_args[@]}" </dev/null >>"$_sandy_daemon_log" 2>&1 &
     disown 2>/dev/null || true
 
@@ -10214,6 +10235,8 @@ fi
 # write, no docker), so traversing it keeps the "touches nothing on disk but the
 # approval file" property this mode is built on -- in particular it still exits
 # BEFORE the workspace mutex, the bare-sandy busy-gate, image builds, and launch.
+# (#296 extends the same exit point to the .sandy/Dockerfile approval, whose
+# file is the one other thing it may write -- see _sandy_approve_only_finish.)
 
 # Sanity: reject world-open SANDY_ALLOW_LAN_HOSTS values. Even from a
 # privileged source, "0.0.0.0/0" negates the whole point of LAN isolation and
@@ -10609,6 +10632,123 @@ DIR_BASE="${DIR_BASE:-project}"
 SANDBOX_NAME="${DIR_BASE}-${SHORT_HASH}"
 SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
 
+# --- Per-project .sandy/Dockerfile approval (HF-incident Issue 7, #296) ------
+# Defined here rather than at the Phase 3 build site because the SANDY_APPROVE_ONLY
+# pre-pass below calls it too. It needs only WORK_DIR, SANDY_HOME, sha256 and
+# _sandy_is_headless, all settled by this point.
+# Deterministic hash of the entire .sandy/ build context — every file `docker
+# build` could COPY/ADD/RUN, not just the Dockerfile text. Hashing only the
+# Dockerfile would leave the payload-in-a-helper hole: a Dockerfile that
+# `COPY setup.sh` + `RUN /tmp/setup.sh` is approved once, then a later edit to
+# setup.sh (Dockerfile unchanged) would rebuild and execute it on the host
+# unattended with the stored approval still matching. config/.secrets are
+# sandy's own control files (not build inputs), so they're excluded — routine
+# credential/model edits must not re-trigger the build prompt. Path is made
+# location-independent (relative to the context dir) so it's stable across
+# equivalent workspaces. Output is a single hex hash.
+_sandy_context_hash() {
+    local dir="$1" f h out=""
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        h="$(sha256 < "$f" | awk '{print $1}')"
+        out="$out$h  ${f#"$dir"/}
+"
+    done < <(find "$dir" -type f ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
+    printf '%s' "$out" | sha256 | awk '{print $1}'
+}
+
+# Gate a per-project .sandy/Dockerfile build behind explicit per-workspace
+# approval (HF-incident Issue 7). Building it runs arbitrary RUN commands on the
+# HOST docker daemon with UNFILTERED network (build-time is NOT behind the egress
+# proxy) and takes all of .sandy/ as build context — so an agent that writes
+# $WORKSPACE/.sandy/Dockerfile in one session would get host code-execution on
+# the next launch. Approval is content-hash based over the WHOLE build context
+# (not just the Dockerfile — see _sandy_context_hash), persists per workspace
+# (same machinery as the passive-privileged config gate), re-prompts on any edit
+# to any context file, and fails closed when non-interactive (skips the build,
+# uses the base image).
+# Returns 0 = approved (build/use), 1 = declined or unapproved-headless (skip).
+# Leaves the context hash it judged in the global _SANDY_DF_HASH, so the
+# APPROVE_ONLY pre-pass can hand a decline to the supervisor bound to exactly
+# that content (#296).
+_sandy_project_dockerfile_approved() {
+    local dockerfile="$1" df_hash wd_hash approval_file stored _ans _line _ctx _other
+    _ctx="$(dirname "$dockerfile")"
+    df_hash="$(_sandy_context_hash "$_ctx")"
+    _SANDY_DF_HASH="$df_hash"
+    wd_hash="$(printf '%s' "$WORK_DIR" | sha256 | awk '{print $1}' | cut -c1-16)"
+    approval_file="$SANDY_HOME/approvals/dockerfile-$wd_hash.list"
+    mkdir -p "$SANDY_HOME/approvals"
+    # CI / test-harness escape hatch — env-only, same as the passive gate. It
+    # covers THIS gate as well as the passive-privileged one; the symlink gate
+    # deliberately does not honour it (see its _sandy_key_metadata row).
+    [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ] && return 0
+    # Already approved and unchanged? (first line of the file is the hash)
+    if [ -f "$approval_file" ]; then
+        stored="$(head -n1 "$approval_file" 2>/dev/null)"
+        [ "$stored" = "$df_hash" ] && return 0
+    fi
+    # #296: the operator already answered N at the `--start` pre-pass for THIS
+    # content. The supervisor has no tty, so without this it would re-print the
+    # whole review and then advise "launch interactively once to approve" --
+    # guidance for a question the user just answered. Bound to the hash, so a
+    # context edited between the pre-pass and here falls through to the normal
+    # fail-closed path instead of inheriting a decision about other bytes.
+    # Only ever SKIPS the build (returns 1), so an env var is a safe carrier:
+    # setting it by hand can make sandy build less, never more. Internal and
+    # env-only, like SANDY_APPROVE_ONLY; never a config key.
+    if [ -n "${SANDY_DOCKERFILE_DECLINED_HASH:-}" ] && [ "$SANDY_DOCKERFILE_DECLINED_HASH" = "$df_hash" ]; then
+        echo "[sandy] .sandy/Dockerfile not approved at the --start prompt — using the base agent image." >&2
+        return 1
+    fi
+    echo "[sandy]" >&2
+    echo "[sandy] This project ships a .sandy/Dockerfile:  $dockerfile" >&2
+    echo "[sandy] Building it runs its RUN commands on your HOST docker daemon with" >&2
+    echo "[sandy] UNFILTERED network (build-time is NOT behind the egress proxy), and the" >&2
+    echo "[sandy] whole .sandy/ dir is the build context. A committed or agent-written" >&2
+    echo "[sandy] Dockerfile could run host code or exfiltrate here. Review it:" >&2
+    echo "[sandy]" >&2
+    # Strip control chars (incl. ESC) per line — the Dockerfile is untrusted and
+    # raw terminal escapes could spoof what the reviewer sees vs. what's approved.
+    sed -n '1,200p' "$dockerfile" | while IFS= read -r _line; do
+        printf '[sandy]   | %s\n' "$(printf '%s' "$_line" | LC_ALL=C tr -d '[:cntrl:]')" >&2
+    done
+    [ "$(wc -l < "$dockerfile" 2>/dev/null || echo 0)" -gt 200 ] && echo "[sandy]   | ... (truncated — review the full file)" >&2
+    # The approval covers the WHOLE build context, not just the Dockerfile above.
+    # Any COPY/ADD/RUN-able sibling is hashed too, so name them — their contents
+    # aren't shown but a change to any of them re-triggers this prompt.
+    while IFS= read -r _other; do
+        [ -n "$_other" ] || continue
+        echo "[sandy]   + build-context file (contents not shown): ${_other#"$_ctx"/}" >&2
+    done < <(find "$_ctx" -type f ! -name Dockerfile ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
+    echo "[sandy]" >&2
+    # Headless / non-interactive: fail closed.
+    if [ "${_sandy_is_headless:-false}" = "true" ] || [ ! -t 0 ]; then
+        echo "[sandy] Non-interactive session — NOT building the project image; using the" >&2
+        echo "[sandy] base agent image. Launch sandy interactively once from this directory" >&2
+        echo "[sandy] to review and approve the .sandy/Dockerfile." >&2
+        echo "[sandy]" >&2
+        return 1
+    fi
+    printf '[sandy] Build this .sandy/Dockerfile for %s? [y/N] ' "$WORK_DIR" >&2
+    IFS= read -r _ans </dev/tty || _ans=""
+    case "$_ans" in
+        y|Y|yes|YES|Yes)
+            {
+                printf '%s\n' "$df_hash"
+                printf '# workspace: %s\n' "$WORK_DIR"
+                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
+            } > "$approval_file"
+            chmod 600 "$approval_file" 2>/dev/null || true
+            echo "[sandy] Approved. Future launches build it silently until the Dockerfile" >&2
+            echo "[sandy] changes. Revoke via: rm $approval_file" >&2
+            return 0 ;;
+        *)
+            echo "[sandy] Not approved — using the base agent image for this launch." >&2
+            return 1 ;;
+    esac
+}
+
 # --- Dangerous-symlink scan + approval (#221) ------------------------------
 # Extracted into a function so the `--start` CLIENT can resolve this approval
 # on ITS tty BEFORE forking the non-TTY supervisor. Container bring-up runs in
@@ -10622,9 +10762,28 @@ SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
 # build. Creating SANDBOX_DIR is the one added side effect and it is the same
 # mkdir the launch a moment later performs anyway; the approval list has to live
 # somewhere, and this is the directory that owns it.
+#
+# #296: it also resolves the per-project .sandy/Dockerfile approval, the third
+# gate, which the build site further down would otherwise reach only in the
+# supervisor -- where it can only fail closed, leaving no way to approve a
+# project image in daemon mode at all. Writing that approval file is a second
+# side effect, and it is the same file the interactive path writes, at the same
+# path. DECLINING is not a refusal: N means "use the base image", exactly as it
+# does in a foreground launch, so the pass still exits 0 (a declined symlink
+# approval, by contrast, exits nonzero and stops --start with 6). The decline is
+# handed to the supervisor through SANDY_APPROVE_ONLY_RESULT, bound to the
+# context hash, so it skips the build quietly instead of re-printing a review
+# nobody can answer.
 _sandy_approve_only_finish() {
     mkdir -p "$SANDBOX_DIR"
     _sandy_resolve_symlinks
+    if [ -f "$WORK_DIR/.sandy/Dockerfile" ]; then
+        if ! _sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile"; then
+            if [ -n "${SANDY_APPROVE_ONLY_RESULT:-}" ] && [ -n "${_SANDY_DF_HASH:-}" ]; then
+                printf 'dockerfile_declined=%s\n' "$_SANDY_DF_HASH" > "$SANDY_APPROVE_ONLY_RESULT" 2>/dev/null || true
+            fi
+        fi
+    fi
     exit 0
 }
 
@@ -13222,101 +13381,10 @@ CMUXHOOK
     fi
 fi
 
-# Phase 3: Per-project image (optional — extends sandy-claude-code with project tools)
-# Deterministic hash of the entire .sandy/ build context — every file `docker
-# build` could COPY/ADD/RUN, not just the Dockerfile text. Hashing only the
-# Dockerfile would leave the payload-in-a-helper hole: a Dockerfile that
-# `COPY setup.sh` + `RUN /tmp/setup.sh` is approved once, then a later edit to
-# setup.sh (Dockerfile unchanged) would rebuild and execute it on the host
-# unattended with the stored approval still matching. config/.secrets are
-# sandy's own control files (not build inputs), so they're excluded — routine
-# credential/model edits must not re-trigger the build prompt. Path is made
-# location-independent (relative to the context dir) so it's stable across
-# equivalent workspaces. Output is a single hex hash.
-_sandy_context_hash() {
-    local dir="$1" f h out=""
-    while IFS= read -r f; do
-        [ -n "$f" ] || continue
-        h="$(sha256 < "$f" | awk '{print $1}')"
-        out="$out$h  ${f#"$dir"/}
-"
-    done < <(find "$dir" -type f ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
-    printf '%s' "$out" | sha256 | awk '{print $1}'
-}
-
-# Gate a per-project .sandy/Dockerfile build behind explicit per-workspace
-# approval (HF-incident Issue 7). Building it runs arbitrary RUN commands on the
-# HOST docker daemon with UNFILTERED network (build-time is NOT behind the egress
-# proxy) and takes all of .sandy/ as build context — so an agent that writes
-# $WORKSPACE/.sandy/Dockerfile in one session would get host code-execution on
-# the next launch. Approval is content-hash based over the WHOLE build context
-# (not just the Dockerfile — see _sandy_context_hash), persists per workspace
-# (same machinery as the passive-privileged config gate), re-prompts on any edit
-# to any context file, and fails closed when non-interactive (skips the build,
-# uses the base image).
-# Returns 0 = approved (build/use), 1 = declined or unapproved-headless (skip).
-_sandy_project_dockerfile_approved() {
-    local dockerfile="$1" df_hash wd_hash approval_file stored _ans _line _ctx _other
-    _ctx="$(dirname "$dockerfile")"
-    df_hash="$(_sandy_context_hash "$_ctx")"
-    wd_hash="$(printf '%s' "$WORK_DIR" | sha256 | awk '{print $1}' | cut -c1-16)"
-    approval_file="$SANDY_HOME/approvals/dockerfile-$wd_hash.list"
-    mkdir -p "$SANDY_HOME/approvals"
-    # CI / test-harness escape hatch — env-only, same as the passive gate.
-    [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ] && return 0
-    # Already approved and unchanged? (first line of the file is the hash)
-    if [ -f "$approval_file" ]; then
-        stored="$(head -n1 "$approval_file" 2>/dev/null)"
-        [ "$stored" = "$df_hash" ] && return 0
-    fi
-    echo "[sandy]" >&2
-    echo "[sandy] This project ships a .sandy/Dockerfile:  $dockerfile" >&2
-    echo "[sandy] Building it runs its RUN commands on your HOST docker daemon with" >&2
-    echo "[sandy] UNFILTERED network (build-time is NOT behind the egress proxy), and the" >&2
-    echo "[sandy] whole .sandy/ dir is the build context. A committed or agent-written" >&2
-    echo "[sandy] Dockerfile could run host code or exfiltrate here. Review it:" >&2
-    echo "[sandy]" >&2
-    # Strip control chars (incl. ESC) per line — the Dockerfile is untrusted and
-    # raw terminal escapes could spoof what the reviewer sees vs. what's approved.
-    sed -n '1,200p' "$dockerfile" | while IFS= read -r _line; do
-        printf '[sandy]   | %s\n' "$(printf '%s' "$_line" | LC_ALL=C tr -d '[:cntrl:]')" >&2
-    done
-    [ "$(wc -l < "$dockerfile" 2>/dev/null || echo 0)" -gt 200 ] && echo "[sandy]   | ... (truncated — review the full file)" >&2
-    # The approval covers the WHOLE build context, not just the Dockerfile above.
-    # Any COPY/ADD/RUN-able sibling is hashed too, so name them — their contents
-    # aren't shown but a change to any of them re-triggers this prompt.
-    while IFS= read -r _other; do
-        [ -n "$_other" ] || continue
-        echo "[sandy]   + build-context file (contents not shown): ${_other#"$_ctx"/}" >&2
-    done < <(find "$_ctx" -type f ! -name Dockerfile ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
-    echo "[sandy]" >&2
-    # Headless / non-interactive: fail closed.
-    if [ "${_sandy_is_headless:-false}" = "true" ] || [ ! -t 0 ]; then
-        echo "[sandy] Non-interactive session — NOT building the project image; using the" >&2
-        echo "[sandy] base agent image. Launch sandy interactively once from this directory" >&2
-        echo "[sandy] to review and approve the .sandy/Dockerfile." >&2
-        echo "[sandy]" >&2
-        return 1
-    fi
-    printf '[sandy] Build this .sandy/Dockerfile for %s? [y/N] ' "$WORK_DIR" >&2
-    IFS= read -r _ans </dev/tty || _ans=""
-    case "$_ans" in
-        y|Y|yes|YES|Yes)
-            {
-                printf '%s\n' "$df_hash"
-                printf '# workspace: %s\n' "$WORK_DIR"
-                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
-            } > "$approval_file"
-            chmod 600 "$approval_file" 2>/dev/null || true
-            echo "[sandy] Approved. Future launches build it silently until the Dockerfile" >&2
-            echo "[sandy] changes. Revoke via: rm $approval_file" >&2
-            return 0 ;;
-        *)
-            echo "[sandy] Not approved — using the base agent image for this launch." >&2
-            return 1 ;;
-    esac
-}
-
+# Phase 3: Per-project image (optional — extends sandy-claude-code with project tools).
+# _sandy_context_hash and _sandy_project_dockerfile_approved are defined further
+# UP, beside _sandy_approve_only_finish, because the `--start` pre-pass (#296)
+# resolves this approval on the client tty and exits long before this point.
 PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"
 if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_DOCKERFILE"; then
     PROJECT_IMAGE_NAME="$(echo "sandy-project-${SANDBOX_NAME}" | tr '[:upper:]' '[:lower:]')"

@@ -320,6 +320,8 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 
 **`--start` exit codes:** `0` = ready, `6` = refused before launch (an approval couldn't be granted — answer it once interactively), `7` = container crash-looping, `8` = timed out waiting for the session.
 
+**Approvals under `--start`.** Run from a terminal, `--start` asks every launch approval — privileged keys in a workspace config, symlinks that escape the workspace, and a `.sandy/Dockerfile` build — on *that* terminal before it detaches, and only then starts the background session. Declining a symlink stops `--start` with `6`; declining the Dockerfile does not — the session starts on the base agent image, as it would in the foreground. A client with no terminal at all can't be asked, so each gate fails closed unless approved earlier; `SANDY_AUTO_APPROVE_PRIVILEGED=1` (env-only, for CI) bypasses the config-key and Dockerfile gates but **not** the symlink gate, deliberately.
+
 All other arguments are forwarded to `claude`.
 
 ### Headless / remote servers
@@ -900,7 +902,7 @@ Sandy detects this file and builds a project-specific image layered on top of th
 
 This is the right approach for system packages (`apt-get`), large binary tools, or anything that needs root to install. See [`examples/`](examples/) for ready-to-use configurations.
 
-**Approval gate.** Because the build runs its `RUN` commands on your **host** Docker daemon with **unfiltered network** (build-time is not behind the egress proxy) and takes the whole `.sandy/` directory as context, sandy will not build a `.sandy/Dockerfile` it hasn't seen approved. The first time it appears — or after any change to the Dockerfile or a file it `COPY`s — sandy prints it and asks `y/N` before building; the approval is remembered per workspace (`~/.sandy/approvals/dockerfile-<hash>.list`, revoke by deleting it). In a non-interactive session (`-p`, `--start`, sandy-ui, no TTY) sandy **fails closed**: it skips the project build and launches the base agent image, so you need to approve it once interactively from that directory first. `.sandy/` is itself mounted read-only during a session, so the agent can't edit the Dockerfile mid-run.
+**Approval gate.** Because the build runs its `RUN` commands on your **host** Docker daemon with **unfiltered network** (build-time is not behind the egress proxy) and takes the whole `.sandy/` directory as context, sandy will not build a `.sandy/Dockerfile` it hasn't seen approved. The first time it appears — or after any change to the Dockerfile or a file it `COPY`s — sandy prints it and asks `y/N` before building; the approval is remembered per workspace (`~/.sandy/approvals/dockerfile-<hash>.list`, revoke by deleting it). `sandy --start` from a terminal asks this on that terminal before the session detaches (2.4.0, #296); answering `N` there means "use the base image", not "don't start". Where nobody can answer — `-p`, a `--start` with no terminal, no TTY — sandy **fails closed**: it skips the project build and launches the base agent image, so you need to approve it once interactively from that directory first. `SANDY_AUTO_APPROVE_PRIVILEGED=1` skips this prompt entirely — it exists for sandy's own test harnesses, and it means an unreviewed Dockerfile builds on your host. `.sandy/` is itself mounted read-only during a session, so the agent can't edit the Dockerfile mid-run.
 
 ### Automatic environment detection
 
