@@ -488,7 +488,7 @@ If you were using it: `inbox`, `outbox` and `peer` become manifest `mounts` (`mo
 
 ### Re-provisioning sandboxes after a reset
 
-Some per-sandbox state is created **by the launch**, deliberately: it exists only because the thing that mounts it made it, so hand-made state can never pass for working state. Today that is `relay-state/` (see "Installing a relay" below). The cost is that a sandbox can sit without it — most often after `sandy --reset-sandbox`, which keeps the sandbox but destroys everything a launch re-creates, and also after any launch that failed part-way.
+Some per-sandbox state is created **by the launch**, deliberately: it exists only because the thing that mounts it made it, so hand-made state can never pass for working state. Today that is `relay-state/`, plus `feature-state/<feature>` for every non-designated feature entry (see "Installing a relay" below). The cost is that a sandbox can sit without it — most often after `sandy --reset-sandbox`, which keeps the sandbox but destroys everything a launch re-creates, and also after any launch that failed part-way.
 
 To bring every sandbox back in one pass:
 

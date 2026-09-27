@@ -17970,17 +17970,25 @@ if command -v flock >/dev/null 2>&1 && [ -f "$_S156_TMPL" ]; then
     _S156_FNS="$(awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$_S156_TMPL")"
     _S156_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
     mkdir -p "$_S156_D/relay-state" "$_S156_D/fs/beta" "$_S156_D/home" "$_S156_D/ws" "$_S156_D/a" "$_S156_D/b"
+    # `exec sleep 30` as the LAST line, not a plain `sleep 30`: a plain sleep
+    # forks a CHILD of this script's own /bin/sh interpreter, whose command
+    # line is just "sleep 30" -- no reference to $_S156_D -- so the pkill -f
+    # "$_S156_D/" cleanup below cannot find it, and killing the recorded pid
+    # (the interpreter, $$) leaves that child orphaned for up to 30s. `exec`
+    # replaces the interpreter with sleep IN THE SAME PROCESS (same pid, the
+    # one already written to pid-a/pid-b), so there is no child to leak and
+    # killing the recorded pid is killing the actual sleep.
     cat > "$_S156_D/a/entry.sh" <<EOF
 #!/bin/sh
 echo "\$\$" >> "$_S156_D/pid-a"
 printf '%s\n' "\${SANDY_FEATURE_STATE:-unset}" >> "$_S156_D/env-a"
-sleep 30
+exec sleep 30
 EOF
     cat > "$_S156_D/b/entry.sh" <<EOF
 #!/bin/sh
 echo "\$\$" >> "$_S156_D/pid-b"
 printf '%s\n' "\${SANDY_FEATURE_STATE:-unset}" >> "$_S156_D/env-b"
-sleep 30
+exec sleep 30
 EOF
     chmod +x "$_S156_D/a/entry.sh" "$_S156_D/b/entry.sh"
     _S156_RC=0
@@ -18024,16 +18032,28 @@ EOF
     check "§156(4i) ...and beta is COMPLETELY untouched: same pid, restarts=0 (killing one entry must not affect the other)" \
         bash -c 'test "$(wc -l < "$1" | tr -d " ")" -eq 1 && grep -q "^restarts=0" "$2"' _ "$_S156_D/pid-b" "$_S156_D/fs/beta/.state"
 
-    # cleanup: kill everything under this fixture's own path -- pkill -f on the
-    # unique tmpdir path, which exists on macOS too.
+    # cleanup: kill every recorded pid directly first (pid-a/pid-b accumulate
+    # one line per (re)start, including alpha's post-restart pid the (4g) kill
+    # above never explicitly targeted, and beta's, which nothing above killed
+    # at all) -- these are the fixture's own `exec sleep 30` processes, so
+    # killing the recorded pid IS killing the sleep, no orphan. Then pkill -f
+    # on the unique tmpdir path (exists on macOS too) for the supervisor LOOP
+    # processes, whose command line still carries it (they never exec).
+    for _s156_p in $(cat "$_S156_D/pid-a" "$_S156_D/pid-b" 2>/dev/null); do
+        kill -9 "$_s156_p" >/dev/null 2>&1 || true
+    done
     command -v pkill >/dev/null 2>&1 && pkill -9 -f "$_S156_D/" >/dev/null 2>&1 || true
     rm -rf "$_S156_D"
-    unset _S156_RC _S156_PIDA1 _S156_PIDA2 _S156_PIDB1
+    unset _S156_RC _S156_PIDA1 _S156_PIDA2 _S156_PIDB1 _s156_p
 
     # --- (5) startup failure of the SECOND entry --------------------------
     _S156_D2="$(cd "$(mktemp -d)" && pwd -P)"
     mkdir -p "$_S156_D2/relay-state" "$_S156_D2/fs/beta" "$_S156_D2/home" "$_S156_D2/ws" "$_S156_D2/a" "$_S156_D2/b"
-    printf '#!/bin/sh\nsleep 30\n' > "$_S156_D2/a/entry.sh"
+    # alpha starts cleanly and keeps running (its supervisor loop is
+    # independent of beta's startup failure below) -- record its pid and
+    # `exec` into the sleep so cleanup can kill it directly by pid, same
+    # reasoning as (4)'s fixtures. beta exits immediately; nothing to leak.
+    printf '#!/bin/sh\necho "$$" >> "%s/pid-a"\nexec sleep 30\n' "$_S156_D2" > "$_S156_D2/a/entry.sh"
     printf '#!/bin/sh\nexit 3\n' > "$_S156_D2/b/entry.sh"
     chmod +x "$_S156_D2/a/entry.sh" "$_S156_D2/b/entry.sh"
     _S156_OUT5F="$(mktemp)"
@@ -18053,9 +18073,12 @@ EOF
         test "$_S156_RC5" -ne 0
     check "§156(5b) ...and names beta, not alpha, as the one that failed" \
         bash -c 'printf "%s" "$1" | grep -q beta' _ "$_S156_OUT5"
+    for _s156_p in $(cat "$_S156_D2/pid-a" 2>/dev/null); do
+        kill -9 "$_s156_p" >/dev/null 2>&1 || true
+    done
     command -v pkill >/dev/null 2>&1 && pkill -9 -f "$_S156_D2/" >/dev/null 2>&1 || true
     rm -rf "$_S156_D2"
-    unset _S156_OUT5 _S156_RC5 _S156_FNS _S156_OUT5F
+    unset _S156_OUT5 _S156_RC5 _S156_FNS _S156_OUT5F _s156_p
 else
     skip "§156(4)-(5) dynamic per-feature supervision (flock or templates/user-setup.sh.tmpl unavailable)"
 fi
@@ -18257,6 +18280,134 @@ assert r[\"state\"]==\"started\" and r[\"source\"]==\"manifest\" and r[\"executa
 else
     skip "§156(7) needs python3 to validate --print-state JSON"
 fi
+
+# --- (8) the host-to-container HAND-OFF: RUN_FLAGS relay/feature-state -----
+# The adoption loop (1)-(3) proves _sandy_fe_list is right; the marker (6)-(7)
+# proves it is REPORTED right. Neither proves it ever reaches the container:
+# a Docker-free property test needs the actual RUN_FLAGS-assembly block run
+# standalone, the way §114(13e) already does for the (now-superseded) handoff
+# mounts gate -- an inline re-typed copy of the logic would keep passing after
+# the real code changed, which is exactly the failure mode this guards.
+_S156_RFBLK="$(awk '/^# Relay state \(#353\)\./,/^fi$/' "$_S156_SANDY")"
+check "§156(8pre) the RUN_FLAGS relay-state block was extracted (mutation: a rename empties this and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_FEATURE_ENTRIES="' _ "$_S156_RFBLK"
+
+# _s156_runflags BLOCK SANDBOX_DIR HANDOFF_RELAY FE_LIST RELAY_FEATURE -> one
+# RUN_FLAGS element per line on stdout (so "-v" and its value are adjacent
+# lines, exactly as `RUN_FLAGS+=(-v "...")` appends two array elements).
+_s156_runflags() {
+    bash -c '
+        set -uo pipefail
+        RUN_FLAGS=()
+        SANDBOX_DIR="$2"
+        SANDY_HANDOFF_RELAY="$3"
+        _sandy_fe_list="$4"
+        _sandy_fe_relay_feature="$5"
+        eval "$1"
+        printf "%s\n" "${RUN_FLAGS[@]}"
+    ' _ "$1" "$2" "$3" "$4" "$5"
+}
+
+_S156_RF2="$(_s156_runflags "$_S156_RFBLK" /sb /opt/sandy/features/alpha/r \
+    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
+check "§156(8a) exactly ONE -e SANDY_FEATURE_ENTRIES flag, carrying BOTH adopted tokens (mutation: dropping this line -- the pre-#381 legacy fallback the container would then take -- is caught here, not just in-container)" \
+    bash -c '
+        c=$(printf "%s\n" "$1" | grep -c "^SANDY_FEATURE_ENTRIES=")
+        [ "$c" -eq 1 ] || exit 1
+        printf "%s\n" "$1" | grep -q "^SANDY_FEATURE_ENTRIES=alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s$"
+    ' _ "$_S156_RF2"
+check "§156(8b) the DESIGNATED feature (alpha)'s /opt/sandy/feature-state mount sources relay-state, rw" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "/sb/relay-state:/opt/sandy/feature-state/alpha"' _ "$_S156_RF2"
+check "§156(8c) the OTHER feature (beta)'s /opt/sandy/feature-state mount sources feature-state/beta, rw (mutation: a no-op ':' in place of this -v is caught here)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "/sb/feature-state/beta:/opt/sandy/feature-state/beta"' _ "$_S156_RF2"
+check "§156(8d) neither feature-state mount carries :ro -- the supervisor writes .state/supervisor.log into both" \
+    bash -c '! printf "%s\n" "$1" | grep -q "/opt/sandy/feature-state/.*:ro$"' _ "$_S156_RF2"
+check "§156(8e) the relay-state mount itself is still emitted once, at /opt/sandy/relay-state (unchanged by #381)" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -cx "/sb/relay-state:/opt/sandy/relay-state")" -eq 1 ]' _ "$_S156_RF2"
+
+# Single entry: byte-identical to pre-#381 (D2) -- no feature-state/<name>
+# mount beyond the designated one's own two paths, no surprise second entry.
+_S156_RF1="$(_s156_runflags "$_S156_RFBLK" /sb /opt/sandy/features/amap/relay \
+    "amap=/opt/sandy/features/amap/relay" amap)"
+check "§156(8f) single entry: exactly TWO -v mount lines total (relay-state at both its own path and feature-state/<name>), no third" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c "^/sb/relay-state:")" -eq 2 ]' _ "$_S156_RF1"
+unset _S156_RFBLK _S156_RF1 _S156_RF2
+unset -f _s156_runflags
+
+# --- (9) the host-to-container HAND-OFF: mkdir for feature-state/<feature> --
+_S156_MKBLK="$(awk '/^# Feature-state directories \(#381\)/,/^unset _sandy_fe _sandy_fe_f$/' "$_S156_SANDY")"
+check "§156(9pre) the host mkdir block was extracted (mutation: a rename empties this and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "mkdir -p"' _ "$_S156_MKBLK"
+_S156_MKD="$(mktemp -d)"
+bash -c '
+    set -uo pipefail
+    SANDBOX_DIR="$2"
+    _sandy_fe_list="$3"
+    _sandy_fe_relay_feature="$4"
+    eval "$1"
+' _ "$_S156_MKBLK" "$_S156_MKD" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha
+check "§156(9a) the NON-designated feature's state dir IS created host-side (mutation: dropping this mkdir leaves nothing for beta's -v mount to source, failing the launch in a real container)" \
+    bash -c 'test -d "$1/feature-state/beta"' _ "$_S156_MKD"
+check "§156(9b) the DESIGNATED feature gets NO separate feature-state/<name> dir -- it uses relay-state, which is created unconditionally elsewhere" \
+    bash -c '[ ! -e "$1/feature-state/alpha" ]' _ "$_S156_MKD"
+rm -rf "$_S156_MKD"
+unset _S156_MKBLK _S156_MKD
+
+# --- (10) stale-image feature-entries warning (#381 decisions, docker stubbed) --
+# Run the REAL launch-assembly block standalone with `docker` replaced by a
+# shell function (a "stub" -- a function definition shadows the external
+# command for any unqualified call inside the same eval'd scope, no PATH
+# tricks needed) so this is a Docker-free property test.
+_S156_IMGBLK="$(awk '/^# --- BEGIN stale-image feature-entries warning \(#381\)/,/^# --- END stale-image feature-entries warning \(#381\)/' "$_S156_SANDY")"
+check "§156(10pre) the stale-image warning block was extracted (mutation: a rename empties this and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "sandy.feature_entries"' _ "$_S156_IMGBLK"
+
+# _s156_imgwarn BLOCK LABEL_VALUE FE_LIST RELAY_FEATURE -> every warn() call's
+# argument, one per line, on stdout. LABEL_VALUE is what the stubbed `docker
+# image inspect` prints (e.g. "1", "", or "<no value>") -- threaded through as
+# a positional param to the nested `bash -c`, which has its own $1.. and
+# cannot see the outer function's locals.
+_s156_imgwarn() {
+    local _blk="$1" _label="$2" _fe="$3" _relf="$4"
+    bash -c '
+        set -uo pipefail
+        _lbl="$2"
+        docker() { printf "%s" "$_lbl"; }
+        IMAGE_NAME="stub-image"
+        _sandy_fe_list="$3"
+        _sandy_fe_relay_feature="$4"
+        warn() { printf "WARN:%s\n" "$*"; }
+        eval "$1"
+    ' _ "$_blk" "$_label" "$_fe" "$_relf"
+}
+
+_S156_W1="$(_s156_imgwarn "$_S156_IMGBLK" "" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
+check "§156(10a) label ABSENT (empty) + 2 entries: warns, naming exactly the non-designated feature (beta), not alpha" \
+    bash -c '
+        printf "%s\n" "$1" | grep -q "WARN:.*beta" || exit 1
+        ! printf "%s\n" "$1" | grep -q "WARN:.*NOT started.*alpha"
+    ' _ "$_S156_W1"
+check "§156(10a-2) ...and points at sandy --rebuild" \
+    bash -c 'printf "%s\n" "$1" | grep -q "sandy --rebuild"' _ "$_S156_W1"
+
+_S156_W2="$(_s156_imgwarn "$_S156_IMGBLK" "<no value>" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
+check "§156(10b) label the literal docker string '<no value>' + 2 entries: ALSO warns (empty and <no value> both count as lacking it)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "WARN:.*beta"' _ "$_S156_W2"
+
+_S156_W3="$(_s156_imgwarn "$_S156_IMGBLK" "1" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
+check "§156(10c) label PRESENT (1) + 2 entries: silent (mutation: inverting the case match would warn here instead)" \
+    bash -c '[ -z "$1" ]' _ "$_S156_W3"
+
+_S156_W4="$(_s156_imgwarn "$_S156_IMGBLK" "" "amap=/opt/sandy/features/amap/relay" amap)"
+check "§156(10d) label ABSENT + only 1 entry: silent (nothing a stale image would drop)" \
+    bash -c '[ -z "$1" ]' _ "$_S156_W4"
+
+_S156_W5="$(_s156_imgwarn "$_S156_IMGBLK" "" "" "")"
+check "§156(10e) label ABSENT + zero entries: silent" \
+    bash -c '[ -z "$1" ]' _ "$_S156_W5"
+
+unset _S156_IMGBLK _S156_W1 _S156_W2 _S156_W3 _S156_W4 _S156_W5
+unset -f _s156_imgwarn
 
 unset _S156_SANDY _S156_TMPL _S156_ADOPT
 unset -f _s156_adopt _s156_marker_fe 2>/dev/null || true
