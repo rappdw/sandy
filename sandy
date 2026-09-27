@@ -2755,14 +2755,11 @@ _sandy_emit_state() {
     # (`x="$(_stat_mtime_iso ...)"`) aborts the caller and trips the ERR trap.
     # Sandboxes frequently have .sandy_created_version but no .sandy_last_version
     # (first launch), so stat failure for one field is a normal expected case.
-    # #384: force UTC0 on both stat forms. This code runs HOST-SIDE
-    # (--print-state), not in the container, so #384's container TZ never
-    # touches it -- without this, %y/%Sm render in the HOST's own local TZ
-    # (whatever it always was) with a LOCAL offset, and the awk below
-    # discards that offset while a literal Z is appended regardless, so
-    # created_at/last_used_at were silently wrong -- host-local time under a
-    # false "Z" label -- on any non-UTC host, before and independent of
-    # #384. The #384 audit is what surfaced this pre-existing bug.
+    # #384: force UTC0 on both stat forms. Without it %y/%Sm render in the
+    # CALLER's TZ (now the host's, once #384 sets it) with a LOCAL offset,
+    # and the awk below discards that offset while a literal Z is appended
+    # regardless -- so once a host TZ reaches the container, created_at /
+    # last_used_at would silently drift from UTC into host-local-labelled-Z.
     # UTC0 (not "UTC") is a POSIX TZ string needing no zoneinfo file lookup.
     local _stat_mtime_iso
     if TZ=UTC0 stat -c '%y' / >/dev/null 2>&1; then
@@ -4347,12 +4344,6 @@ _sandy_host_tz() {
             [ "${SANDY_VERBOSE:-0}" -ge 1 ] && info "Container timezone: ${_SANDY_HOST_TZ} (from ${_SANDY_HOST_TZ_SRC})"
             return 0
         else
-            # %q renders control/non-printable bytes visibly rather than
-            # inlining them raw -- it does NOT make this fully safe from
-            # escape-sequence interpretation, since warn() itself prints via
-            # `echo -e`, which re-interprets a %q-rendered $'\E...' escape.
-            # Low risk: the only inputs here are the operator's own env and
-            # /etc files, not attacker-controlled data.
             warn "Ignoring host TZ=$(printf '%q' "$TZ") (not a valid zone name or POSIX TZ string); the container clock stays UTC."
             return 0
         fi
@@ -4830,10 +4821,8 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
     # command substitution under set -euo pipefail would abort this fast
     # path via the ERR trap).
     # #384: TZ=UTC0 on both forms, same reason as _stat_mtime_iso above --
-    # this runs HOST-SIDE (--remove-sandbox), so #384's container TZ is not
-    # involved: without this, this "last used" reading was already wrong on
-    # any non-UTC host (host-local time under a false "Z" label), and the
-    # #384 audit is what surfaced it.
+    # otherwise this "last used" reading would drift into host-local time
+    # once a host TZ reaches the container.
     _rms_mtime_iso() { return 0; }
     if TZ=UTC0 stat -c '%y' / >/dev/null 2>&1; then
         _rms_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC0 stat -c '%y' "$1" 2>/dev/null | awk '{print $1"T"$2"Z"}' || true; }
@@ -15077,17 +15066,9 @@ RUN_FLAGS+=(--network "$NETWORK_NAME")
 # Everything sandy itself EMITS AS DATA still uses `date -u` / `TZ=UTC0 stat`
 # regardless (run-tests.sh §159 ratchets that across every heredoc) -- this
 # only changes what an agent's OWN `date`, `ls -l`, git's displayed times, and
-# the tmux status-bar clock show. Placed ahead of the feature-manifest
-# `expose`/`export` block below, which also emits `-e NAME=value` -- docker's
-# last-wins rule for REPEATED -e flags then means a manifest that explicitly
-# exposes TZ (privileged: it lives under $SANDY_HOME) overrides this one,
-# because its -e is appended later. SANDY_EXTRA_ENV is a DIFFERENT mechanism
-# (--env-file, not -e -- see _sandy_add_secret_env below), where any -e always
-# beats --env-file regardless of position, so ordering here doesn't decide
-# that case; what actually happens is _load_sandy_extra_env (which runs long
-# before this point) exports an operator-configured TZ into sandy's OWN env
-# first, so _sandy_host_tz picks it up as its "env" source and IS the
-# resolved value below -- there is no separate flag-level race to win.
+# the tmux status-bar clock show. Placed ahead of the manifest `expose` block
+# and the SANDY_EXTRA_ENV `-e`s below, so an operator's own explicit TZ
+# forward still wins under docker's last-wins rule for repeated -e flags.
 _sandy_host_tz
 if [ -n "$_SANDY_HOST_TZ" ]; then
     RUN_FLAGS+=(-e "TZ=$_SANDY_HOST_TZ")
