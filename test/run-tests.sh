@@ -11300,7 +11300,22 @@ _s114_csi_block() {
     # claude/settings.json lives under here — the userSettings/accept-delivering
     # seam; _sandy_csi_write creates claude/settings.json itself if absent, so
     # $5 need not be pre-populated).
-    env SANDY_CROSS_SESSION_INBOUND="$1" SANDY_HANDOFF_RELAY="$2" SANDY_AGENT="$3" WORK_DIR="$4" SANDBOX_DIR="$5" bash -c "
+    # #380: $6=_sandy_csi_need (space-separated feature names declaring
+    # receives cross_session; may be empty) $7=nostart reason token, one of
+    # "headless"|"remote"|"provision"|"" -- mapped onto the same
+    # _sandy_is_headless/SANDY_REMOTE_CONTROL/SANDY_PROVISION vars the real
+    # launch sets. Both default empty so every existing 5-arg call is
+    # byte-unchanged.
+    local _s114_need="${6:-}" _s114_nostart="${7:-}"
+    local _s114_headless=false _s114_remote=false _s114_provision=0
+    case "$_s114_nostart" in
+        headless)  _s114_headless=true ;;
+        remote)    _s114_remote=true ;;
+        provision) _s114_provision=1 ;;
+    esac
+    env SANDY_CROSS_SESSION_INBOUND="$1" SANDY_HANDOFF_RELAY="$2" SANDY_AGENT="$3" WORK_DIR="$4" SANDBOX_DIR="$5" \
+        _sandy_csi_need="$_s114_need" _sandy_is_headless="$_s114_headless" \
+        SANDY_REMOTE_CONTROL="$_s114_remote" SANDY_PROVISION="$_s114_provision" bash -c "
         _sandy_agent_has(){ case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0;; esac; return 1; }
         info(){ printf '%s\n' \"\$*\"; }
         warn(){ printf '%s\n' \"\$*\"; }
@@ -11321,7 +11336,7 @@ _s114_csi_block() {
 rm -rf "$_S114/ws-d1" "$_S114/sbx-d1"; mkdir -p "$_S114/ws-d1/.claude" "$_S114/sbx-d1"
 _S114_D1_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d1" "$_S114/sbx-d1" 2>&1)" || true
 check "§114(7a) unset + no relay -> refuse, both files named, correct reason string" \
-    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no relay configured)"' -- "$_S114_D1_OUT"
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no selected feature declares receives cross_session and no entry will start)"' -- "$_S114_D1_OUT"
 check "§114(7a-user) refuse actually landed in the sandbox userSettings file (the seam that gates delivery)" \
     bash -c 'grep -q "\"crossSessionInbound\": *\"refuse\"" "$1/claude/settings.json"' -- "$_S114/sbx-d1"
 check "§114(7a-ws) refuse ALSO landed in the workspace project file (the seam that is honored for hold/refuse)" \
@@ -11329,8 +11344,8 @@ check "§114(7a-ws) refuse ALSO landed in the workspace project file (the seam t
 
 rm -rf "$_S114/ws-d2" "$_S114/sbx-d2"; mkdir -p "$_S114/ws-d2/.claude" "$_S114/sbx-d2"
 _S114_D2_OUT="$(_s114_csi_block '' x claude "$_S114/ws-d2" "$_S114/sbx-d2" 2>&1)" || true
-check "§114(7b) unset + relay configured -> accept, both files named, correct reason string (naming criterion 7's disposition: the launch fails if the relay cannot start)" \
-    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=accept written to claude/settings.json (sandbox) and .claude/settings.local.json (default: relay configured; the launch fails if it cannot start)"' -- "$_S114_D2_OUT"
+check "§114(7b) unset + relay configured, no declared need -> accept via the DEPRECATED LEGACY PATH, correct reason string (naming criterion 7's disposition: the launch fails if the relay cannot start)" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=accept written to claude/settings.json (sandbox) and .claude/settings.local.json (default (legacy rule): a feature entry will start and no feature declares receives cross_session; the launch fails if it cannot start)"' -- "$_S114_D2_OUT"
 check "§114(7b-user) accept actually landed in the sandbox userSettings file — this is the ONLY placement measured to make accept deliver (probe case E); accept in the workspace file alone is a measured no-op (probe cases A/A2)" \
     bash -c 'grep -q "\"crossSessionInbound\": *\"accept\"" "$1/claude/settings.json"' -- "$_S114/sbx-d2"
 
@@ -11370,6 +11385,48 @@ check "§114(7h) userSettings write blocked -> workspace-only wording, correct w
         printf "%s\n" "$1" | grep -q "NOT to the sandbox settings.json" &&
         printf "%s\n" "$1" | grep -q "will still be held"
     ' -- "$_S114_D7_OUT"
+
+# --- (7i)-(7o) #380: the default is keyed on a DECLARED NEED, not the relay --
+# _s114_csi_block's new $6 (_sandy_csi_need) and $7 (nostart reason token) let
+# these compose the precedence directly, with no manifest or feature-manifest
+# evaluation required -- that half (a manifest actually producing
+# _sandy_csi_need) is §157(d)'s job; this is the resolution logic alone, the
+# same split §142 draws between manifest evaluation and csi resolution.
+rm -rf "$_S114/ws-d9" "$_S114/sbx-d9"; mkdir -p "$_S114/ws-d9/.claude" "$_S114/sbx-d9"
+_S114_D9_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d9" "$_S114/sbx-d9" amap 2>&1)" || true
+check "§114(7i) declared need, no entry -> accept, reason names the declaring feature" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=accept written to claude/settings.json (sandbox) and .claude/settings.local.json (default: feature amap declares receives cross_session)"' -- "$_S114_D9_OUT"
+
+rm -rf "$_S114/ws-d10" "$_S114/sbx-d10"; mkdir -p "$_S114/ws-d10/.claude" "$_S114/sbx-d10"
+_S114_D10_OUT="$(_s114_csi_block refuse '' claude "$_S114/ws-d10" "$_S114/sbx-d10" amap 2>&1)" || true
+check "§114(7j) declared need + explicit refuse -> explicit wins, refuse" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (explicit SANDY_CROSS_SESSION_INBOUND)"' -- "$_S114_D10_OUT"
+
+rm -rf "$_S114/ws-d11" "$_S114/sbx-d11"; mkdir -p "$_S114/ws-d11/.claude" "$_S114/sbx-d11"
+_S114_D11_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d11" "$_S114/sbx-d11" 2>&1)" || true
+check "§114(7k) no declared need, no entry -> refuse (default)" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no selected feature declares receives cross_session and no entry will start)"' -- "$_S114_D11_OUT"
+
+rm -rf "$_S114/ws-d12" "$_S114/sbx-d12"; mkdir -p "$_S114/ws-d12/.claude" "$_S114/sbx-d12"
+_S114_D12_OUT="$(_s114_csi_block '' x claude "$_S114/ws-d12" "$_S114/sbx-d12" 2>&1)" || true
+check "§114(7l) legacy: no declared need, entry present -> accept, reason explicitly says 'legacy rule'" \
+    bash -c 'printf "%s" "$1" | grep -q "(default (legacy rule): a feature entry will start"' -- "$_S114_D12_OUT"
+
+rm -rf "$_S114/ws-d13" "$_S114/sbx-d13"; mkdir -p "$_S114/ws-d13/.claude" "$_S114/sbx-d13"
+_S114_D13_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d13" "$_S114/sbx-d13" amap headless 2>&1)" || true
+check "§114(7m) declared need + headless run -> refuse, reason names BOTH the feature and the headless reason (criterion 8 still applies to a declared need)" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: feature amap declares receives cross_session, but a headless run has no session to deliver into)"' -- "$_S114_D13_OUT"
+
+check "§114(7n) accept for the declared-need case actually lands in the sandbox userSettings file -- the same delivering seam probed for the legacy path at (7b-user)" \
+    bash -c 'grep -q "\"crossSessionInbound\": *\"accept\"" "$1/claude/settings.json"' -- "$_S114/sbx-d9"
+
+# §114(2a) already established that the value-aware gate keys on the VALUE
+# "accept" alone -- it takes only a key and a value, never a reason -- so a
+# declared-need accept is gated exactly like a relay-legacy or explicit one.
+# Restated here as the property #380 must not have disturbed, rather than
+# re-deriving it: reusing (2a)'s own extracted gate function and call.
+check "§114(7o) the value-aware approval gate on accept is unchanged by #380 -- it cannot see WHY sandy would resolve to accept, only that the value IS accept (reuses §114(2a)'s gate)" \
+    _s114_pvp SANDY_CROSS_SESSION_INBOUND accept
 
 # --- (8) gitignore nudge ------------------------------------------------------
 if command -v git >/dev/null 2>&1; then
@@ -11549,7 +11606,7 @@ _S114_D8_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d8" "$_S114/sbx-d8" 2>&1
 check "§114(11r) after a criterion-8 skip has unset the key, the default resolves to refuse (not accept) and lands in the sandbox userSettings seam" \
     bash -c '
         printf "%s\n" "$1" | grep -q "crossSessionInbound=refuse" || exit 1
-        printf "%s\n" "$1" | grep -q "(default: no relay configured)" || exit 1
+        printf "%s\n" "$1" | grep -q "(default: no selected feature declares receives cross_session and no entry will start)" || exit 1
         grep -q "\"crossSessionInbound\": *\"refuse\"" "$2/claude/settings.json"
     ' -- "$_S114_D8_OUT" "$_S114/sbx-d8"
 
@@ -11653,8 +11710,11 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # PASSED, this one whether it can have taken EFFECT.
 # 19 as of 2.4.0: `feature_entries` (#381) -- per-feature launch intent
 # (path/relay_alias/disabled_by), additive; schema_version does not move.
-check "§114(13g) marker printf format/arg count line up (19 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 19
+# 20 as of 2.4.0 (#380): `cross_session_inbound_source` -- WHY the resolved
+# crossSessionInbound value is what it is (explicit/feature:<name>/
+# relay-legacy/default), additive; schema_version does not move.
+check "§114(13g) marker printf format/arg count line up (20 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 20
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -14807,9 +14867,9 @@ check "§136(2) ...its declared exports, including the one attached to a mount a
     bash -c 'printf "%s" "$1" | grep -q "^export	AMAP_PAYLOAD_DIR	/opt/sandy/features/amap$" &&
              printf "%s" "$1" | grep -q "^export	AMAP_FLEET_DOMAIN	agents.internal$"' _ "$_S136_SEL"
 # THE SECURITY CHECK.
-check "§136(3) an UNSELECTED sandbox gets NO mount, NO export and NO entry — only a named skip (mutation: drop the selection gate and this goes red while (1) passes)" \
+check "§136(3) an UNSELECTED sandbox gets NO mount, NO export, NO entry and NO receives — only a named skip (mutation: drop the selection gate and this goes red while (1) passes)" \
     bash -c 'printf "%s" "$1" | grep -qv "^mount	" &&
-             ! printf "%s" "$1" | grep -qE "^(mount|export|entry)	" &&
+             ! printf "%s" "$1" | grep -qE "^(mount|export|entry|receives)	" &&
              printf "%s" "$1" | grep -q "^skip	amap	"' _ "$_S136_UNSEL"
 check "§136(4) mode defaults to ro and rw is honoured only where declared (D7: the router refuses to publish into an agent-writable tree)" \
     bash -c 'printf "%s" "$1" | grep -q "/home/sandy/.amap/inbox	ro$" &&
@@ -17983,6 +18043,273 @@ fi
 
 unset _S156_SANDY _S156_TMPL _S156_ADOPT
 unset -f _s156_adopt _s156_marker_fe 2>/dev/null || true
+
+# ============================================================
+echo ""
+echo "§157: receives — the default keyed on a DECLARED NEED, not the relay (#380)"
+# ============================================================
+# #380 (option B): the unset SANDY_CROSS_SESSION_INBOUND default now resolves
+# from a feature manifest's own `"receives": ["cross_session"]` rather than
+# from "an entry will start". The old rule survives as a DEPRECATED LEGACY
+# PATH (additive; #382 lists it in README's Deprecated table at the next
+# X.0.0), so this section proves BOTH: the new declared-need path, and that
+# the legacy path still works unchanged when no feature declares the need.
+#
+# Precedence under test: explicit > declared need > legacy relay rule >
+# refuse. §114(7i)-(7o) already covers the CSI RESOLUTION LOGIC in isolation
+# (a hand-fed _sandy_csi_need, no manifest involved); this section covers the
+# other half -- a real manifest producing _sandy_csi_need -- and the parts of
+# #380 that are not the resolution logic at all: projector parity, the
+# published schema, and D4 (an unselected feature declares nothing).
+_S157_SANDY="$SANDY_SCRIPT"
+_S157_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+
+# --- (a) the projectors + _sandy_fm_load, for the receives corpus ----------
+# Same span §135 extracts (manifest reader through _sandy_fm_dest): enough for
+# _sandy_fm_load, _sandy_fm_selected, both projectors, and the receives-known
+# list, without needing _sandy_fm_apply at all.
+_S157_FM="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Computed mount destinations/' "$_S157_SANDY")
+$(awk '/^_sandy_fm_dest\(\) \{/,/^\}/' "$_S157_SANDY")
+_SANDY_FM_HOME=\"\${_SANDY_FM_HOME:-/home/sandy}\""
+check "§157(pre-a) the manifest block was extracted and parses (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_fm_load" && printf "%s\n" "$1" | bash -n' _ "$_S157_FM"
+
+mkdir -p "$_S157_D/f"
+_s157_load() {   # $1 = manifest JSON -> "OK:<space-joined receives>" or "REFUSED:<err>"
+    printf '%s' "$1" > "$_S157_D/f/feature.json"
+    bash -c '
+        set -uo pipefail
+        eval "$1"
+        if ! _sandy_fm_load "$2/f" "someslug-a1b2c3d4"; then printf "REFUSED:%s" "$_SANDY_FM_ERR"; exit 0; fi
+        printf "OK:%s" "${_SANDY_FM_RECEIVES[*]:-}"
+    ' _ "$_S157_FM" "$_S157_D" 2>/dev/null || true
+}
+_S157_BASE='"sandboxes":{"include":["*"]},"agents":{"include":["claude"]}'
+check "§157(a1) a valid [\"cross_session\"] loads as a record" \
+    bash -c '[ "$1" = "OK:cross_session" ]' _ "$(_s157_load "{$_S157_BASE,\"receives\":[\"cross_session\"]}")"
+check "§157(a2) an empty [] declares nothing, and is not an error" \
+    bash -c '[ "$1" = "OK:" ]' _ "$(_s157_load "{$_S157_BASE,\"receives\":[]}")"
+check "§157(a3) a bare string (not an array) is REFUSED naming 'is not an array'" \
+    bash -c 'case "$1" in REFUSED:*"receives is not an array"*) : ;; *) exit 1 ;; esac' _ "$(_s157_load "{$_S157_BASE,\"receives\":\"cross_session\"}")"
+check "§157(a4) a non-string element is REFUSED naming 'contains a non-string'" \
+    bash -c 'case "$1" in REFUSED:*"receives contains a non-string"*) : ;; *) exit 1 ;; esac' _ "$(_s157_load "{$_S157_BASE,\"receives\":[1]}")"
+check "§157(a5) an unknown value is REFUSED, naming the offending value (a typo cannot silently resolve to refuse OR to the need being declared)" \
+    bash -c 'case "$1" in REFUSED:*"unknown value '"'"'cross_sesion'"'"'"*) : ;; *) exit 1 ;; esac' _ "$(_s157_load "{$_S157_BASE,\"receives\":[\"cross_sesion\"]}")"
+
+# node/jq PARITY over the same five fixtures -- §135(20)'s discipline, one
+# clause later. A divergence here is the same class of security bug: a
+# jq-only host accepting (or refusing) something the node host does not.
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    _S157_PJS="$_S157_D/p.js"; _S157_PJQ="$_S157_D/p.jq"
+    awk '/^_sandy_fm_projector_js\(\) \{$/{f=1;next} f&&/^SANDY_FM_JS$/{exit} f&&!/^cat <</{print}' "$_S157_SANDY" > "$_S157_PJS"
+    awk '/^_sandy_fm_projector_jq\(\) \{$/{f=1;next} f&&/^SANDY_FM_JQ$/{exit} f&&!/^cat <</{print}' "$_S157_SANDY" > "$_S157_PJQ"
+    _S157_PAR_FAIL=""
+    for _s157_j in \
+        "{$_S157_BASE,\"receives\":[\"cross_session\"]}" \
+        "{$_S157_BASE,\"receives\":[]}" \
+        "{$_S157_BASE,\"receives\":\"cross_session\"}" \
+        "{$_S157_BASE,\"receives\":[1]}" \
+        "{$_S157_BASE,\"receives\":[\"cross_sesion\"]}" ; do
+        printf '%s' "$_s157_j" > "$_S157_D/f/feature.json"
+        _s157_a="$(node "$_S157_PJS" "$_S157_D/f/feature.json" 2>&1)"
+        _s157_b="$(jq -r -f "$_S157_PJQ" "$_S157_D/f/feature.json" 2>&1)"
+        [ "$_s157_a" = "$_s157_b" ] || _S157_PAR_FAIL="$_S157_PAR_FAIL|$_s157_j"
+    done
+    check "§157(a6) node and jq projectors agree EXACTLY across the receives corpus, records and error messages both (diverged on:${_S157_PAR_FAIL:-nothing})" \
+        bash -c '[ -z "$1" ]' _ "$_S157_PAR_FAIL"
+    unset _S157_PAR_FAIL _s157_j _s157_a _s157_b
+else
+    skip "§157(a6) node/jq projector parity needs BOTH node and jq on the host"
+fi
+
+# --- (b) the three key lists agree, plus the receives value list -----------
+# §148(13)-(15) already diffs top_level_keys across --print-schema/JS
+# KNOWN/jq known generically, so "receives" landing in all three is already
+# covered there without any edit. This adds the FOURTH list #380 introduces:
+# the closed set receives itself accepts.
+_S157_SCHEMA_RV="$(bash "$_S157_SANDY" --print-schema 2>/dev/null | sed -n 's/.*"receives_values":\[\([^]]*\)\].*/\1/p' | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S157_JS_RV="$(sed -n 's/^const RECEIVES = \[\(.*\)\];$/\1/p' "$_S157_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S157_JQ_RV="$(sed -n 's/^def receives_known: \[\(.*\)\];$/\1/p' "$_S157_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S157_SH_RV="$(_sandy_fm_receives_known 2>/dev/null || awk '/^_sandy_fm_receives_known\(\) \{/{f=1;next} f&&/^EOF$/{exit} f&&!/^    cat <</{print}' "$_S157_SANDY" | tr '\n' ' ' | sed 's/ *$//')"
+check "§157(b1) --print-schema publishes manifest.receives_values (got: $_S157_SCHEMA_RV)" \
+    test -n "$_S157_SCHEMA_RV"
+check "§157(b2) ...equal to the JS RECEIVES const (mutation: add a value to one and this goes red)" \
+    test "$_S157_SCHEMA_RV" = "$_S157_JS_RV"
+check "§157(b3) ...equal to the jq receives_known def" \
+    test "$_S157_JS_RV" = "$_S157_JQ_RV"
+check "§157(b4) ...equal to the _sandy_fm_receives_known() shell heredoc (the fourth copy the schema is published FROM)" \
+    test "$_S157_JS_RV" = "$_S157_SH_RV"
+
+# --- (c) D4 still holds: an UNSELECTED feature declares NOTHING -------------
+# Extends §136(3)'s property (already regex-extended above to include
+# `receives`) with a fixture that actually DECLARES the need, so this is not
+# vacuously true of a manifest with no receives key at all.
+_S157_APPLY_BLK="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$_S157_SANDY")
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$_S157_SANDY")"
+_S157_CR="$_S157_D/creceives"; mkdir -p "$_S157_CR/needer/payload"
+cat > "$_S157_CR/needer/feature.json" <<'S157_CJSON'
+{ "sandboxes": { "include": ["*"], "exclude": ["scratch-*"] },
+  "agents":    { "include": ["claude"] },
+  "receives":  ["cross_session"] }
+S157_CJSON
+_s157_apply() {   # $1=slug $2=ws $3=agents -> record stream
+    bash -c 'set -uo pipefail; eval "$1"; _sandy_fm_apply "$2" "$3" "$4" "$5" 1 2>&1' \
+        _ "$_S157_APPLY_BLK" "$_S157_CR" "$1" "$2" "$3" 2>/dev/null || true
+}
+_S157_SEL="$(_s157_apply myrepo-a1b2c3d4 /Users/x/dev/myrepo claude)"
+_S157_UNSEL="$(_s157_apply scratch-a1b2c3d4 /Users/x/dev/myrepo claude)"
+check "§157(c1) a SELECTED sandbox gets the declared receives record" \
+    bash -c 'printf "%s" "$1" | grep -qx "receives	needer	cross_session"' _ "$_S157_SEL"
+check "§157(c2) an UNSELECTED sandbox (matched by the exclude glob) gets NO receives record at all — only a named skip (mutation: emitting receives before the selection gate turns this red)" \
+    bash -c '! printf "%s" "$1" | grep -qE "^(mount|export|entry|receives)	" &&
+             printf "%s" "$1" | grep -q "^skip	needer	"' _ "$_S157_UNSEL"
+
+# --- (d) end-to-end resolution, composed FM_BLOCK + EVAL_BLOCK + CSI_BLOCK --
+# Same driver PATTERN §142 uses (extract the manifest apply/eval spans and the
+# csi resolution span, in FILE ORDER, and run them composed) -- this is the
+# join #142 exists to prove stays a join: a real manifest, evaluated the real
+# way, has to reach the real crossSessionInbound resolution.
+_S157_FM2="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$_S157_SANDY")
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$_S157_SANDY")"
+_S157_EVAL="$(awk '/^_sandy_relay_slot="absent"/,/^# BEGIN handoff relay/' "$_S157_SANDY")"
+_S157_CSI="$(awk '/^_sandy_csi_json="null"/,/^    _sandy_csi_user_written=0/' "$_S157_SANDY" | sed '$d')
+fi"
+check "§157(pre-d) all three spans extracted and parse together (mutation: a rename empties one and every (d) check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_fm_apply" &&
+             printf "%s" "$2" | grep -q "_sandy_fm_ran=true" &&
+             printf "%s" "$3" | grep -q "_sandy_csi_val" &&
+             printf "%s\n%s\n%s\n" "$1" "$2" "$3" | bash -n' _ "$_S157_FM2" "$_S157_EVAL" "$_S157_CSI"
+
+cat > "$_S157_D/drive.sh" <<'S157_DRV'
+set -uo pipefail
+# HERMETIC BY CONSTRUCTION -- the §142 lesson: this suite is routinely run
+# INSIDE sandy, and a live sandbox exports SANDY_HANDOFF_RELAY and may have
+# SANDY_FEATURE_ENTRIES set. Unset first; the spans under test set them.
+unset SANDY_HANDOFF_RELAY SANDY_CROSS_SESSION_INBOUND SANDY_FEATURE_ENTRIES
+[ -n "${T_CSI:-}" ] && SANDY_CROSS_SESSION_INBOUND="$T_CSI"
+info() { :; }; warn() { :; }; error() { :; }
+_sandy_daemon_fatal() { :; }
+_sandy_agent_has() { case ",$SANDY_AGENT," in *",$1,"*) return 0 ;; esac; return 1; }
+_sandy_csi_write() { return 0; }
+eval "$FM_BLOCK"
+eval "$EVAL_BLOCK"
+eval "$CSI_BLOCK"
+printf 'csi=%s\nsrc=%s\n' "${_sandy_csi_val:-UNSET}" "${_sandy_csi_src:-UNSET}"
+S157_DRV
+
+# Two feature homes: one whose feature declares the need with NO entry, one
+# whose feature ships an entry with NO declared need (the legacy shape).
+_S157_HN="$_S157_D/home-needer"; mkdir -p "$_S157_HN/features/needer/payload"
+cat > "$_S157_HN/features/needer/feature.json" <<'S157_N'
+{ "sandboxes": { "include": ["*"], "exclude": ["excluded-*"] },
+  "agents":    { "include": ["claude"] },
+  "receives":  ["cross_session"] }
+S157_N
+_S157_HL="$_S157_D/home-legacy"; mkdir -p "$_S157_HL/features/legacy/payload"
+printf '#!/bin/sh\n' > "$_S157_HL/features/legacy/payload/relay"; chmod +x "$_S157_HL/features/legacy/payload/relay"
+cat > "$_S157_HL/features/legacy/feature.json" <<'S157_L'
+{ "sandboxes": { "include": ["*"] },
+  "agents":    { "include": ["claude"] },
+  "entry":     "payload/relay" }
+S157_L
+# A THIRD home whose single feature declares BOTH -- the only fixture that can
+# observe the precedence between the declared-need branch and the legacy-relay
+# branch: every other scenario has at most one of the two conditions true, so
+# swapping their order in the resolver would not visibly change d1-d6 at all.
+_S157_HH="$_S157_D/home-hybrid"; mkdir -p "$_S157_HH/features/hybrid/payload"
+printf '#!/bin/sh\n' > "$_S157_HH/features/hybrid/payload/relay"; chmod +x "$_S157_HH/features/hybrid/payload/relay"
+cat > "$_S157_HH/features/hybrid/feature.json" <<'S157_H'
+{ "sandboxes": { "include": ["*"] },
+  "agents":    { "include": ["claude"] },
+  "receives":  ["cross_session"],
+  "entry":     "payload/relay" }
+S157_H
+
+_s157_drive() {   # $1=SANDY_HOME $2=slug $3..=extra env "NAME=value" assignments
+    local _home="$1" _slug="$2"; shift 2
+    env SANDY_HOME="$_home" SANDBOX_DIR="$_S157_D/sb" WORK_DIR="$_S157_D/ws" \
+        SANDBOX_NAME="$_slug" SANDY_AGENT=claude SANDY_RELAY=1 \
+        FM_BLOCK="$_S157_FM2" EVAL_BLOCK="$_S157_EVAL" CSI_BLOCK="$_S157_CSI" \
+        _sandy_relay_slot_dir="$_S157_D/noslot" \
+        "$@" bash "$_S157_D/drive.sh" 2>/dev/null || echo "DRIVER-FAILED"
+}
+
+_S157_D1="$(_s157_drive "$_S157_HN" myrepo-a1b2c3d4)"
+check "§157(d1) a feature declaring receives, with NO entry, resolves accept, src=feature:<name> (got: $(printf '%s' "$_S157_D1" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=accept$" && printf "%s" "$1" | grep -q "^src=feature:needer$"' _ "$_S157_D1"
+
+_S157_D2="$(_s157_drive "$_S157_HL" myrepo-a1b2c3d4)"
+check "§157(d2) a feature with an entry and NO declared receives resolves accept via the LEGACY path, src=relay-legacy (got: $(printf '%s' "$_S157_D2" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=accept$" && printf "%s" "$1" | grep -q "^src=relay-legacy$"' _ "$_S157_D2"
+
+_S157_D3="$(_s157_drive "$_S157_HL" myrepo-a1b2c3d4 env SANDY_RELAY=0)"
+check "§157(d3) ...and with SANDY_RELAY=0 the SAME feature resolves refuse, src=default — the entry never starts, so the legacy rule must not fire (got: $(printf '%s' "$_S157_D3" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=refuse$" && printf "%s" "$1" | grep -q "^src=default$"' _ "$_S157_D3"
+
+_S157_D4="$(_s157_drive "$_S157_HN" excluded-a1b2c3d4)"
+check "§157(d4) a feature declaring receives but EXCLUDED by sandboxes.exclude resolves refuse — a declared need from an unselected feature must not count (got: $(printf '%s' "$_S157_D4" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=refuse$" && printf "%s" "$1" | grep -q "^src=default$"' _ "$_S157_D4"
+
+_S157_D5="$(_s157_drive "$_S157_HN" myrepo-a1b2c3d4 env T_CSI=hold)"
+check "§157(d5) a declared need does not override an EXPLICIT value — hold wins, src=explicit (got: $(printf '%s' "$_S157_D5" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=hold$" && printf "%s" "$1" | grep -q "^src=explicit$"' _ "$_S157_D5"
+
+_S157_D6="$(_s157_drive "$_S157_HN" myrepo-a1b2c3d4 env _sandy_is_headless=true)"
+check "§157(d6) a declared need under a HEADLESS run still resolves refuse (criterion 8 applies to a declared need exactly as it did to the legacy rule) (got: $(printf '%s' "$_S157_D6" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=refuse$"' _ "$_S157_D6"
+
+_S157_D7="$(_s157_drive "$_S157_HH" myrepo-a1b2c3d4)"
+check "§157(d7) THE ORDER: a feature declaring BOTH receives and an entry resolves via the DECLARED-NEED branch, not the legacy one — src=feature:<name>, never relay-legacy (mutation: swapping the two elif branches turns this into src=relay-legacy while csi stays accept, so only THIS check would catch it) (got: $(printf '%s' "$_S157_D7" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=accept$" && printf "%s" "$1" | grep -q "^src=feature:hybrid$"' _ "$_S157_D7"
+
+unset -f _s157_drive
+unset _S157_D1 _S157_D2 _S157_D3 _S157_D4 _S157_D5 _S157_D6 _S157_D7 _S157_HN _S157_HL _S157_HH
+
+# --- (e) the marker carries cross_session_inbound_source --------------------
+# Same extraction §134 uses for the marker printf, stubbing the same globals
+# it already stubs, plus the two new ones #380 adds.
+_S157_MKBLK="$(awk '/^printf .\{.n  "schema": 1,/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$_S157_SANDY")"
+_s157_marker() {   # $1 = _sandy_csi_src_json literal ("null" or "\"feature:x\"")
+    (
+        sandy_full_version() { echo "9.9.9"; }
+        _sandy_egress_mode=off
+        SANDY_WORKSPACE="/home/sandy/myrepo"
+        SANDBOX_NAME="myrepo-abc12345"
+        _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json='"accept"'
+        _sandy_csi_src_json="$1"
+        _sandy_agents_json=null; _sandy_relay_source_json=null
+        _sandy_relay_path_json=null; _sandy_relay_disabled_by_json=null
+        _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""; _sandy_fe_json=""
+        CRED_MODE=none; _sandy_session_nonce=deadbeef; _sandy_session_file=/dev/stdout
+        eval "$_S157_MKBLK"
+    ) 2>/dev/null
+}
+if command -v python3 >/dev/null 2>&1; then
+    _S157_MK1="$(_s157_marker '"feature:needer"')"
+    check "§157(e1) cross_session_inbound_source carries the resolved source, and the marker is valid JSON" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+assert d[\"cross_session_inbound_source\"]==\"feature:needer\", d
+"' _ "$_S157_MK1"
+    _S157_MK2="$(_s157_marker null)"
+    check "§157(e2) ...and when the resolution variable was never set (mirroring _sandy_csi_json's own null convention), it is JSON null, not the string \"null\"" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+assert d[\"cross_session_inbound_source\"] is None, d
+"' _ "$_S157_MK2"
+else
+    skip "§157(e) needs python3 to validate marker JSON"
+fi
+unset -f _s157_marker
+unset _S157_MKBLK _S157_MK1 _S157_MK2
+
+rm -rf "$_S157_D"
+unset _S157_SANDY _S157_D _S157_FM _S157_BASE _S157_APPLY_BLK _S157_CR _S157_SEL _S157_UNSEL
+unset _S157_FM2 _S157_EVAL _S157_CSI
+unset _S157_SCHEMA_RV _S157_JS_RV _S157_JQ_RV _S157_SH_RV
+unset -f _s157_load _s157_apply 2>/dev/null || true
 
 
 # BEGIN SUMMARY

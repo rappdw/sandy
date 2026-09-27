@@ -237,7 +237,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_EGRESS_LOG` | `0` | `1`/`summary` = log which hosts the agent's egress actually reached (each distinct allowed `host:port` once) and print a session-end summary. Hostnames only — TLS is never terminated. Passive-safe (adds visibility) |
 | `SANDY_TOOL_AUDIT` | `0` | `1` = seed a Claude Code `PreToolUse` hook that appends `{ts,tool,args}` JSONL to `~/.claude/tool-audit.jsonl`. Claude-only, passive-safe (adds visibility); a user's own `PreToolUse` hook is never clobbered |
 | `SANDY_RELAY` | `1` | Run the installed relay if there is one — since 2.2.0 that means a feature manifest `entry`. A **capability** toggle naming no path: inert when nothing is installed. `0` disables the relay capability entirely (including an `entry`, which it did not before), loudly. Passive-safe. See "Installing a relay" |
-| `SANDY_CROSS_SESSION_INBOUND` | _(conditional)_ | Whether another local session may inject a turn into this one (Claude Code's `crossSessionInbound`): `accept` (delivered, no prompt), `hold` (interactive approval), `refuse` (sender told it was not accepted). Unset resolves to `accept` **only** when a `SANDY_HANDOFF_RELAY` is configured *and will actually start this launch* — otherwise `refuse`, so a workspace with no relay has no open receive surface. `hold`/`refuse` are passive-safe; `accept` from a workspace `.sandy/config` triggers an approval prompt. Claude-only |
+| `SANDY_CROSS_SESSION_INBOUND` | _(conditional)_ | Whether another local session may inject a turn into this one (Claude Code's `crossSessionInbound`): `accept` (delivered, no prompt), `hold` (interactive approval), `refuse` (sender told it was not accepted). Unset resolves to `accept` when a **selected feature manifest declares `"receives": ["cross_session"]`** (2.4.0) — or, for a manifest that has not migrated to that yet, when a feature `entry` is configured *and will actually start this launch* (the deprecated legacy rule) — otherwise `refuse`, so a workspace with neither has no open receive surface. `hold`/`refuse` are passive-safe; `accept` from a workspace `.sandy/config` triggers an approval prompt. Claude-only. See "Features" and `cross_session_inbound_source` in the session marker |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth). **Not forwarded when a Claude OAuth credential is already going into the container** (Claude Code resolves an env key ahead of the account credentials, so forwarding both either bills per-use or parks the session on Claude Code's custom-API-key startup prompt). Set `SANDY_CLAUDE_AUTH=api_key` to use it anyway |
 | `SANDY_CLAUDE_AUTH` | `auto` | Force Claude auth path: `auto`, `api_key`, `oauth`, or `profile`. `api_key` withholds **both** the OAuth credentials file and a long-lived token, so one revocable key is the only Claude credential in the container; `oauth` never forwards the API key; `profile` uses an Anthropic Console profile from `ant auth login` — the route to workspace-bound entitlements such as **Claude Mythos** (see "Using a Console profile" below). `api_key` and `profile` are passive-safe (each reduces what is in the box); `oauth` from a workspace `.sandy/config` triggers an approval prompt |
@@ -563,6 +563,18 @@ sandy --print-state | jq '.sandboxes[] | {name, agent_args_composed}'
 ```
 
 `{}` means no collision; an entry with `composed: false` means sandy **found** a collision and deliberately did not merge it — either the flag replaces rather than appends, or it named a file sandy cannot read — and `from` says which contributors were involved. The launch prints this too, alongside a line naming every feature that applied and what it contributed.
+
+**`receives` declares a need, not a mechanism (2.4.0).** A feature that needs another local session to be able to inject a turn into a session running in its sandbox says so directly:
+
+```json
+{
+  "sandboxes": { "include": ["*"] },
+  "agents":    { "include": ["claude"] },
+  "receives":  ["cross_session"]
+}
+```
+
+`receives` is an array from a closed, published set (today just `cross_session`; `sandy --print-schema | jq '.manifest.receives_values'`) — an unknown value refuses the whole manifest, the same as an unknown top-level key. It names no consumer and no mechanism: a feature can declare this need with **no `entry` at all**, and it is **not** affected by `SANDY_RELAY` — that key gates whether an entry *process* runs, while `receives` is a separate statement of what the feature needs to receive. When a selected feature declares it, `SANDY_CROSS_SESSION_INBOUND`'s unset default resolves to `accept` (unless this is a headless, `--remote` or `--provision` run, which have no session to deliver into). See `SANDY_CROSS_SESSION_INBOUND` above and `docs/security/CROSS_SESSION_INBOUND.md` for the full precedence and residual risks.
 
 Reading a manifest needs `node` or `jq` on the host. If neither is there, a launch that would use one **refuses** rather than mounting a guess — see `sandy --doctor`.
 
