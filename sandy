@@ -10482,7 +10482,7 @@ _resolve_passive_privileged_approval() {
             {
                 printf '%s\n' "$set_hash"
                 printf '# workspace: %s\n' "$WORK_DIR"
-                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
+                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')"
                 while IFS= read -r _kv; do
                     [ -z "$_kv" ] && continue
                     printf '%s\n' "${_kv%%=*}"
@@ -11259,7 +11259,7 @@ _sandy_project_dockerfile_approved() {
             {
                 printf '%s\n' "$df_hash"
                 printf '# workspace: %s\n' "$WORK_DIR"
-                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
+                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')"
             } > "$approval_file"
             chmod 600 "$approval_file" 2>/dev/null || true
             echo "[sandy] Approved. Future launches build it silently until the Dockerfile" >&2
@@ -15432,6 +15432,93 @@ RUN_FLAGS+=(--read-only)
 RUN_FLAGS+=(--tmpfs /tmp:exec,size=1G)
 RUN_FLAGS+=(--tmpfs /home/sandy:exec,size=2G,uid=1001,gid=1001)
 RUN_FLAGS+=(--network "$NETWORK_NAME")
+
+# --- Host timezone -> container TZ (#384) ---
+# The image's /etc/localtime is Etc/UTC and nothing set TZ, so every in-container
+# clock read UTC whatever the host said: `date`, `ls -l`, git's local display,
+# the tmux status clock, and every time an agent reported to the operator --
+# each of which then had to be converted by hand before it could be compared
+# with a host-side log.
+#
+# A RUNTIME env var, never a build input: the agent image is shared by every
+# sandbox and cached on BUILD_HASH, so baking the zone in would rebuild it after
+# travel or a DST-policy change, and would carry one host's zone into an image
+# --rsync moves to another. Not a config key either: the host's own TZ is
+# already the override (step 1).
+#
+# First match wins:
+#   1. $TZ, if it validates (an IANA name, or a POSIX rule string, which glibc
+#      also accepts). A leading ':' is POSIX's "implementation-defined" marker
+#      and is dropped; `TZ=:/etc/localtime` then fails the no-leading-slash rule
+#      and falls through to step 2, which reads that very file.
+#   2. readlink /etc/localtime, everything up to and including the LAST
+#      `zoneinfo/` stripped -- macOS /var/db/timezone/zoneinfo/America/Denver,
+#      Linux /usr/share/zoneinfo/America/Denver. Plain `readlink`, no -f:
+#      only the text of the link is wanted, and -f is GNU-only. A leading
+#      `posix/` or `right/` is stripped too: some hosts link into those
+#      variant trees, and the image ships neither (trixie moved them to
+#      tzdata-legacy), so forwarding `posix/Europe/Berlin` would be unset by
+#      the entrypoint and the container would read UTC.
+#   3. /etc/timezone (Debian/Ubuntu, where /etc/localtime may be a copy),
+#      trailing whitespace dropped (a space fails validation).
+#   4. Nothing: TZ stays unset -- the pre-#384 behaviour.
+# A value that fails validation is SKIPPED, never fatal: the next source is
+# tried. Whether the zone exists is checked container-side (entrypoint.sh),
+# against the image's zoneinfo rather than the host's.
+#
+# $1 is a root prefix for the /etc lookups, for the test suite's fixtures only;
+# production passes nothing.
+#
+# Placed right after --network, BEFORE the feature-manifest export loop:
+# docker applies repeated -e last-wins, so a feature manifest that `expose`s
+# TZ deliberately -- an operator's explicit choice, in $SANDY_HOME -- must
+# come later and win, not be silently replaced by the resolved host zone.
+# (An operator's SANDY_EXTRA_ENV=TZ never races this: _load_sandy_extra_env
+# exports it into sandy's own environment, so step 1 resolves to it.)
+#
+# Everything sandy EMITS AS DATA stays UTC regardless -- launched_at, the
+# labels, WORKSPACE.json, relay-state -- because every producer uses `date -u`
+# (or epoch seconds, or jq's todateiso8601). run-tests.sh §163 pins that,
+# both by running every $(date ...) under two zones (17) and by a static
+# ratchet over every date and mtime-stat call, heredocs included (18).
+_sandy_tz_valid() {
+    local _re='^[A-Za-z0-9_+:,./-]{1,64}$'
+    [[ "$1" =~ $_re ]] || return 1
+    case "$1" in /*|*..*) return 1 ;; esac
+    return 0
+}
+_sandy_host_tz() {
+    local _root="${1:-}" _v=""
+    if [ -n "${TZ:-}" ]; then
+        _v="${TZ#:}"
+        if _sandy_tz_valid "$_v"; then printf '%s' "$_v"; return 0; fi
+        [ "${SANDY_VERBOSE:-0}" -ge 1 ] && warn "TZ='$TZ' is not a zone name sandy forwards — resolving the host zone from /etc instead." >&2
+    fi
+    if [ -L "$_root/etc/localtime" ]; then
+        _v="$(readlink "$_root/etc/localtime" 2>/dev/null || true)"
+        case "$_v" in
+            *zoneinfo/*)
+                _v="${_v##*zoneinfo/}"
+                case "$_v" in posix/*|right/*) _v="${_v#*/}" ;; esac
+                if _sandy_tz_valid "$_v"; then printf '%s' "$_v"; return 0; fi
+                ;;
+        esac
+    fi
+    if [ -f "$_root/etc/timezone" ]; then
+        _v=""
+        IFS= read -r _v < "$_root/etc/timezone" 2>/dev/null || true
+        _v="${_v%$'\r'}"
+        _v="${_v%"${_v##*[![:space:]]}"}"
+        if [ -n "$_v" ] && _sandy_tz_valid "$_v"; then printf '%s' "$_v"; return 0; fi
+    fi
+    return 0
+}
+_sandy_tz="$(_sandy_host_tz)"
+if [ -n "$_sandy_tz" ]; then
+    RUN_FLAGS+=(-e "TZ=$_sandy_tz")
+fi
+unset _sandy_tz
+
 if [ "$_SANDY_PROXY_ON" = true ]; then
     # Egress-proxy mode: the agent is on the --internal sidecar with no route
     # off it. Point its resolver at the proxy's DNS responder, which redirects
@@ -16421,76 +16508,6 @@ if [ -n "${SANDY_SCREENSHOT_DIR:-}" ]; then
     RUN_FLAGS+=(-v "$SANDY_SCREENSHOT_DIR:/home/sandy/screenshots:ro")
     RUN_FLAGS+=(-e "SANDY_SCREENSHOTS_PATH=/home/sandy/screenshots")
 fi
-
-# --- Host timezone -> container TZ (#384) ---
-# The image's /etc/localtime is Etc/UTC and nothing set TZ, so every in-container
-# clock read UTC whatever the host said: `date`, `ls -l`, git's local display,
-# the tmux status clock, and every time an agent reported to the operator --
-# each of which then had to be converted by hand before it could be compared
-# with a host-side log.
-#
-# A RUNTIME env var, never a build input: the agent image is shared by every
-# sandbox and cached on BUILD_HASH, so baking the zone in would rebuild it after
-# travel or a DST-policy change, and would carry one host's zone into an image
-# --rsync moves to another. Not a config key either: the host's own TZ is
-# already the override (step 1).
-#
-# First match wins:
-#   1. $TZ, if it validates (an IANA name, or a POSIX rule string, which glibc
-#      also accepts). A leading ':' is POSIX's "implementation-defined" marker
-#      and is dropped; `TZ=:/etc/localtime` then fails the no-leading-slash rule
-#      and falls through to step 2, which reads that very file.
-#   2. readlink /etc/localtime, everything up to and including the LAST
-#      `zoneinfo/` stripped -- macOS /var/db/timezone/zoneinfo/America/Denver,
-#      Linux /usr/share/zoneinfo/America/Denver. Plain `readlink`, no -f:
-#      only the text of the link is wanted, and -f is GNU-only.
-#   3. /etc/timezone (Debian/Ubuntu, where /etc/localtime may be a copy).
-#   4. Nothing: TZ stays unset -- the pre-#384 behaviour.
-# A value that fails validation is SKIPPED, never fatal: the next source is
-# tried. Whether the zone exists is checked container-side (entrypoint.sh),
-# against the image's zoneinfo rather than the host's.
-#
-# $1 is a root prefix for the /etc lookups, for the test suite's fixtures only;
-# production passes nothing.
-#
-# Everything sandy EMITS AS DATA stays UTC regardless -- launched_at, the
-# labels, WORKSPACE.json, relay-state -- because every producer uses `date -u`
-# (or epoch seconds, or jq's todateiso8601). run-tests.sh §163 pins that.
-_sandy_tz_valid() {
-    local _re='^[A-Za-z0-9_+:,./-]{1,64}$'
-    [[ "$1" =~ $_re ]] || return 1
-    case "$1" in /*|*..*) return 1 ;; esac
-    return 0
-}
-_sandy_host_tz() {
-    local _root="${1:-}" _v=""
-    if [ -n "${TZ:-}" ]; then
-        _v="${TZ#:}"
-        if _sandy_tz_valid "$_v"; then printf '%s' "$_v"; return 0; fi
-        [ "${SANDY_VERBOSE:-0}" -ge 1 ] && warn "TZ='$TZ' is not a zone name sandy forwards — resolving the host zone from /etc instead." >&2
-    fi
-    if [ -L "$_root/etc/localtime" ]; then
-        _v="$(readlink "$_root/etc/localtime" 2>/dev/null || true)"
-        case "$_v" in
-            *zoneinfo/*)
-                _v="${_v##*zoneinfo/}"
-                if _sandy_tz_valid "$_v"; then printf '%s' "$_v"; return 0; fi
-                ;;
-        esac
-    fi
-    if [ -f "$_root/etc/timezone" ]; then
-        _v=""
-        IFS= read -r _v < "$_root/etc/timezone" 2>/dev/null || true
-        _v="${_v%$'\r'}"
-        if [ -n "$_v" ] && _sandy_tz_valid "$_v"; then printf '%s' "$_v"; return 0; fi
-    fi
-    return 0
-}
-_sandy_tz="$(_sandy_host_tz)"
-if [ -n "$_sandy_tz" ]; then
-    RUN_FLAGS+=(-e "TZ=$_sandy_tz")
-fi
-unset _sandy_tz
 
 # SANDY_EXTRA_ENV passthrough: forward each user-listed env-var into the
 # container. Names were validated and resolved by _load_sandy_extra_env above.

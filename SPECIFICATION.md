@@ -2409,16 +2409,17 @@ sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 | Step | Source | macOS | Linux |
 |---|---|---|---|
 | 1 | `$TZ` in sandy's environment (a leading `:` dropped) | same | same |
-| 2 | `readlink /etc/localtime`, everything up to and including the last `zoneinfo/` stripped | `/var/db/timezone/zoneinfo/America/Denver` → `America/Denver` | `/usr/share/zoneinfo/Europe/Berlin` (absolute or relative) → `Europe/Berlin` |
-| 3 | first line of `/etc/timezone` | absent | Debian/Ubuntu, where `/etc/localtime` may be a copy rather than a link |
+| 2 | `readlink /etc/localtime`, everything up to and including the last `zoneinfo/` stripped, then a leading `posix/` or `right/` | `/var/db/timezone/zoneinfo/America/Denver` → `America/Denver` | `/usr/share/zoneinfo/Europe/Berlin` (absolute or relative) → `Europe/Berlin` |
+| 3 | first line of `/etc/timezone`, trailing whitespace dropped | absent | Debian/Ubuntu, where `/etc/localtime` may be a copy rather than a link |
 | 4 | nothing — `TZ` stays unset (UTC, the pre-2.4.0 behaviour) | | |
 
 - Plain `readlink` (no `-f`, which is GNU-only): only the link's text is wanted.
 - Validation: `^[A-Za-z0-9_+:,./-]{1,64}$`, no leading `/`, no `..`. POSIX rule strings (`EST5EDT,M3.2.0,M11.1.0`) pass. `TZ=:/etc/localtime` fails the leading-`/` rule after the `:` is dropped and falls through to step 2, which reads that same file.
 - An invalid `$TZ` warns only at `SANDY_VERBOSE>=1`.
+- `posix/` and `right/` are stripped because the image ships neither variant tree (trixie moved both to `tzdata-legacy`): forwarding `posix/Europe/Berlin` verbatim would be unset by step 0 and the container would read UTC.
 - Existence is checked **container-side** by `entrypoint.sh` (A.5 step 0) against the image's zoneinfo, not the host's.
 - `tzdata` is not named in `Dockerfile.base`; it arrives transitively in the trixie base, which is what makes the runtime-only design free (no base rebuild). If it ever stops arriving, step 0 unsets `TZ` and the container reads UTC again, which is safe.
-- Everything sandy **emits as data** stays UTC regardless: every calendar-time producer is `date -u`, epoch seconds, or jq `todateiso8601` (pinned by `run-tests.sh` §163(17), which runs each one under `TZ=Pacific/Kiritimati`).
+- Everything sandy **emits as data** stays UTC regardless: every calendar-time producer is `date -u`, epoch seconds, or jq `todateiso8601` (pinned by `run-tests.sh` §163(17), which runs each one under `TZ=Pacific/Kiritimati`, and by §163(18), a static ratchet over every `date` and human-readable mtime `stat` call in the script, heredocs included — it catches what (17) cannot run, such as a `|| date` fallback behind a `date -u` that succeeds, a backtick `date`, or a `stat -c %y` without `TZ=UTC`).
 
 ### D.6 Error Recovery & Fallback Chains
 
@@ -2730,7 +2731,7 @@ When the host zone resolves (D.5a):
 -e "TZ=<zone>"      # e.g. America/Denver, or a POSIX rule string
 ```
 
-A runtime flag, never a build input: the agent image is shared by every sandbox and cached on `BUILD_HASH`, so baking the zone in would force a rebuild after travel or a DST-policy change and carry one host's zone into an image `--rsync` moves elsewhere. Not a config key — the host's own `$TZ` is the override. Emitted in the shared `RUN_FLAGS` assembly after both the foreground (`--rm -it`) and daemon (`-d --restart unless-stopped`) initialisations, so both paths carry it; the `--start` supervisor resolves it in its own process, which inherits the client's environment. The egress proxy container does not get it. Unresolved → no flag, and the container reads UTC as before. Visible effects: `date`, `ls -l`, git's local display, and the tmux status-bar clock follow the host.
+A runtime flag, never a build input: the agent image is shared by every sandbox and cached on `BUILD_HASH`, so baking the zone in would force a rebuild after travel or a DST-policy change and carry one host's zone into an image `--rsync` moves elsewhere. Not a config key — the host's own `$TZ` is the override. Emitted in the shared `RUN_FLAGS` assembly after both the foreground (`--rm -it`) and daemon (`-d --restart unless-stopped`) initialisations, so both paths carry it — right after `--network`, **before** the feature-manifest export loop: docker applies repeated `-e` last-wins, so a manifest that `expose`s `TZ` (an operator's explicit choice) wins over the resolved host zone. An operator's `SANDY_EXTRA_ENV=TZ` does not race it either: `_load_sandy_extra_env` exports the value into sandy's own environment, so step 1 of D.5a resolves to it; the `--start` supervisor resolves it in its own process, which inherits the client's environment. The egress proxy container does not get it. Unresolved → no flag, and the container reads UTC as before. Visible effects: `date`, `ls -l`, git's local display, and the tmux status-bar clock follow the host.
 
 ### E.11b User-defined Env Passthrough (conditional)
 

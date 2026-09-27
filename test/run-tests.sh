@@ -18134,6 +18134,21 @@ check "§163(9) a TZ that fails validation (.., leading /, space, shell metachar
     test "$_S163_BAD_OK" = 1
 check "§163(10) a /etc/localtime link whose stripped name contains .. is refused and /etc/timezone used instead (got: $(_s163_tz - "$_S163_DIR/evil"))" \
     test "$(_s163_tz - "$_S163_DIR/evil")" = "Asia/Kolkata"
+# (10b-10d) ported from amap-decouple's #384 (see the port commit): the image
+# ships neither zoneinfo/posix/ nor zoneinfo/right/ (trixie moved both to
+# tzdata-legacy), so forwarding `posix/X` or `right/X` verbatim would be unset
+# by the entrypoint and the container would read UTC; and a trailing space in
+# /etc/timezone fails validation, so it must be trimmed rather than skipped.
+mkdir -p "$_S163_DIR/px/etc" "$_S163_DIR/rt/etc" "$_S163_DIR/ws/etc"
+ln -s /usr/share/zoneinfo/posix/America/Chicago "$_S163_DIR/px/etc/localtime"
+ln -s ../usr/share/zoneinfo/right/Europe/Paris "$_S163_DIR/rt/etc/localtime"
+printf 'Asia/Tokyo \t\n' > "$_S163_DIR/ws/etc/timezone"
+check "§163(10b) a link into zoneinfo/posix/ resolves the plain zone, America/Chicago (got: $(_s163_tz - "$_S163_DIR/px"))" \
+    test "$(_s163_tz - "$_S163_DIR/px")" = "America/Chicago"
+check "§163(10c) a link into zoneinfo/right/ resolves the plain zone, Europe/Paris (got: $(_s163_tz - "$_S163_DIR/rt"))" \
+    test "$(_s163_tz - "$_S163_DIR/rt")" = "Europe/Paris"
+check "§163(10d) /etc/timezone with trailing whitespace resolves Asia/Tokyo rather than being skipped (got: $(_s163_tz - "$_S163_DIR/ws"))" \
+    test "$(_s163_tz - "$_S163_DIR/ws")" = "Asia/Tokyo"
 
 # The argv. The REAL block, from its banner to its unset, evaluated with a
 # controlled TZ -- the same shape §134(4) uses for SANDY_SANDBOX_NAME.
@@ -18153,6 +18168,14 @@ _S163_L_D="$(grep -n '^    RUN_FLAGS=(-d --restart unless-stopped' "$_S163_SANDY
 _S163_L_F="$(grep -n '^    RUN_FLAGS=(--rm -it' "$_S163_SANDY" | cut -d: -f1)"
 check "§163(12) the TZ block runs after BOTH the daemon and foreground RUN_FLAGS initialisations, at top level (block ${_S163_L_BLK:-?} > ${_S163_L_D:-?}, ${_S163_L_F:-?})" \
     bash -c 'test -n "$1" && test -n "$2" && test -n "$3" && test "$1" -gt "$2" && test "$1" -gt "$3"' _ "$_S163_L_BLK" "$_S163_L_D" "$_S163_L_F"
+# (12b) ported from amap-decouple's #384: docker applies repeated -e
+# last-wins, so the resolved host zone must be emitted BEFORE the feature-
+# manifest export loop -- a manifest that `expose`s TZ is an operator's explicit
+# choice and must win, not be silently replaced. (Mutation: moving the block
+# back below the screenshot mount, where it first landed, fails this.)
+_S163_L_EXP="$(grep -n '^                RUN_FLAGS+=(-e "\${_fm_v%%' "$_S163_SANDY" | cut -d: -f1)"
+check "§163(12b) the TZ block precedes the feature-manifest export's -e (block ${_S163_L_BLK:-?} < export ${_S163_L_EXP:-?}), so a manifest's own TZ wins" \
+    bash -c 'test -n "$1" && test -n "$2" && test "$1" -lt "$2"' _ "$_S163_L_BLK" "$_S163_L_EXP"
 
 # The entrypoint half: whether the zone EXISTS is the image's question.
 _S163_EP="$(sed -n '/^if \[ -n "\${TZ:-}" \] && \[ ! -f "\/usr\/share\/zoneinfo\/\$TZ" \]; then$/,/^fi$/p' "$_S163_SANDY")"
@@ -18198,9 +18221,80 @@ EOF
 else
     skip "§163(16-17) this host has no Pacific/Kiritimati zone, so a local-time producer cannot be told from a UTC one"
 fi
+# (18-19) ported from amap-decouple's #384: a STATIC ratchet beside (17)'s
+# dynamic one. (17) runs every `$(date ...)` it can extract, which cannot see
+# a local-time `date` that never runs in the probe (the `|| date` fallback
+# after a `date -u` that succeeds -- exactly the two approval stamps this
+# ratchet caught), one outside `$( )` (backticks, `date>file`), or a
+# human-readable mtime `stat` (%y / %Sm are LOCAL time; created_at/
+# last_used_at shipped that way, fixed by §158). Every `date` invocation must
+# say -u or be epoch seconds; every lowercase-%[xyzw] / %S[amcB] stat must run
+# under TZ=UTC; a capability probe whose output goes to /dev/null is exempt.
+# One clause per line in an awk FILE, not an inline program (the pattern needs
+# literal single quotes).
+_S163_RATCHET="$_S163_DIR/ratchet.awk"
+cat > "$_S163_RATCHET" <<'S163_RATCHET_AWK'
+{
+    line = $0
+    if (line ~ /^[ \t]*#/) next
+    rest = line
+    while (match(rest, /(^|[ \t(|;&`])date([ \t]+[-+'"]|[ \t]*[)|;&><`]|[ \t]*$)/)) {
+        seg = substr(rest, RSTART, RLENGTH)
+        dpos = index(seg, "date")
+        astart = RSTART + dpos - 1 + 4
+        tail = substr(rest, astart)
+        if (match(tail, /[)|;&><`]/)) aend = RSTART - 1
+        else aend = length(tail)
+        args = substr(tail, 1, aend)
+        gsub(/^[ \t]+/, "", args)
+        gsub(/[ \t]+$/, "", args)
+        if (index(args, "-u") == 0 && args != "+%s" && args != "'+%s'") {
+            print NR ": DATE-NO-U: " line
+            found++
+        }
+        consumed = astart + aend
+        if (consumed < 1) consumed = 1
+        rest = substr(rest, consumed)
+    }
+    if (line ~ /stat -[cf] .* \/ >\/dev\/null/) next
+    if (line ~ /stat -c .%[xyzw]./ && line !~ /TZ=UTC0? stat -c .%[xyzw]./) {
+        print NR ": STAT-NO-TZ: " line
+        found++
+    }
+    if (line ~ /stat -f .%S[amcB]./ && line !~ /TZ=UTC0? stat -f .%S[amcB]./) {
+        print NR ": STAT-NO-TZ: " line
+        found++
+    }
+}
+END { exit (found > 0) ? 1 : 0 }
+S163_RATCHET_AWK
+_S163_RRC=0
+_S163_ROUT="$(awk -f "$_S163_RATCHET" "$_S163_SANDY" 2>&1)" || _S163_RRC=$?
+check "§163(18) no date or mtime-stat call anywhere in sandy (host side AND every heredoc) can render local time (findings:${_S163_ROUT:+ }$(printf '%s' "$_S163_ROUT" | tr '\n' ' '))" \
+    test "$_S163_RRC" = 0
+cat > "$_S163_DIR/ratchet-fixture" <<'S163_FIXTURE'
+x=$(date +%H)
+foo || date)
+stat -c '%y' f
+y=`date +%H`
+date>file
+stat -f '%Sm' -t '%FT%TZ' f
+date +%s
+date -u +%F
+TZ=UTC stat -c '%y' f
+TZ=UTC0 stat -f '%Sm' f
+if stat -c '%y' / >/dev/null 2>&1; then
+echo "image up to date with base"
+S163_FIXTURE
+_S163_RSELF="$(awk -f "$_S163_RATCHET" "$_S163_DIR/ratchet-fixture" 2>&1 || true)"
+check "§163(19a) ratchet self-test: flags \$(date +%H), the '|| date' fallback, a backtick date, date>file, and both local-time stat forms" \
+    bash -c 'for n in 1 2 3 4 5 6; do printf "%s\n" "$1" | grep -q "^$n: " || exit 1; done' _ "$_S163_RSELF"
+check "§163(19b) ratchet self-test: flags NOTHING else -- epoch seconds, date -u, TZ=UTC(0) stat, a /dev/null capability probe and prose are all clean (exactly 6 findings)" \
+    test "$(printf '%s\n' "$_S163_RSELF" | grep -c ': ' || true)" = 6
 rm -rf "$_S163_DIR"
 unset _S163_SANDY _S163_DIR _S163_FNS _S163_BAD_OK _s163_v _S163_BLK _S163_ARGV _S163_L_BLK _S163_L_D _S163_L_F
 unset _S163_EP _S163_DATES _S163_NDATES _S163_LOCAL _s163_l _s163_c _s163_a _s163_b
+unset _S163_L_EXP _S163_RATCHET _S163_RRC _S163_ROUT _S163_RSELF
 unset -f _s163_tz _s163_ep
 
 # ============================================================
