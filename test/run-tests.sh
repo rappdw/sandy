@@ -17872,6 +17872,77 @@ check "§158(4) ...and the dry run removed nothing" test -d "$_S158_SB"
 rm -rf "$_S158_DIR"
 unset _S158_DIR _S158_SB _S158_TZ _S158_STATE _S158_RMS
 
+# ============================================================
+echo ""
+echo "§159: a second feature entry is NAMED when it is dropped, not skipped in silence (#381)"
+# ============================================================
+# At most one manifest `entry` runs per container: the first selected feature
+# to declare one wins, and every later one was skipped by an `elif` with no
+# else -- two features installed, one of them inert, nothing saying so (the
+# #363 shape). And the launch "features:" line printed `entry` for BOTH, so the
+# one line meant to say what applied claimed two relays. Same composition as
+# §142: the manifest reader, _sandy_fm_apply and the real evaluation span,
+# extracted in file order and driven against fixture features, with info/warn
+# captured -- the assertions are on what the operator is told.
+_S159_SANDY="$SANDY_SCRIPT"
+_S159_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S159_FM="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$_S159_SANDY")
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$_S159_SANDY")"
+_S159_EVAL="$(awk '/^_sandy_relay_slot="absent"/,/^# BEGIN handoff relay/' "$_S159_SANDY")"
+check "§159(pre) the spans were extracted, parse, and the evaluation span carries the features line (mutation: a rename makes every check below vacuous)" \
+    bash -c 'case "$2" in *"features: "*) ;; *) exit 1 ;; esac; printf "%s\n%s\n" "$1" "$2" | bash -n' _ "$_S159_FM" "$_S159_EVAL"
+# _s159_mk HOME FEATURE: a selected feature that declares an entry.
+_s159_mk() {
+    mkdir -p "$1/features/$2/payload"
+    printf '#!/bin/sh\n' > "$1/features/$2/payload/relay"; chmod +x "$1/features/$2/payload/relay"
+    printf '{ "sandboxes": { "include": ["*"] }, "agents": { "include": ["claude"] }, "mounts": [ { "name": "payload", "from": "payload", "mode": "ro" } ], "entry": "payload/relay" }\n' \
+        > "$1/features/$2/feature.json"
+}
+# Created in REVERSE name order, so a pass cannot be an accident of creation
+# order: the winner must be the first in name order.
+_s159_mk "$_S159_DIR/two" beta
+_s159_mk "$_S159_DIR/two" alpha
+_s159_mk "$_S159_DIR/one" alpha
+cat > "$_S159_DIR/drive.sh" <<'S159_DRV'
+set -uo pipefail
+# Hermetic for the reason §142 records: a sandy container with a relay exports
+# SANDY_HANDOFF_RELAY into every process, and inheriting it would measure the
+# developer container instead of the fixture.
+unset SANDY_HANDOFF_RELAY
+info() { printf 'INFO %s\n' "$*"; }; warn() { printf 'WARN %s\n' "$*"; }; error() { printf 'ERROR %s\n' "$*"; }
+_sandy_daemon_fatal() { :; }
+_sandy_agent_has() { case ",$SANDY_AGENT," in *",$1,"*) return 0 ;; esac; return 1; }
+eval "$FM_BLOCK"
+eval "$EVAL_BLOCK"
+printf 'relay=%s\n' "${SANDY_HANDOFF_RELAY:-EMPTY}"
+S159_DRV
+_s159_run() {  # _s159_run HOME SANDY_RELAY -> output
+    ( cd "$_S159_DIR" && SANDY_HOME="$1" SANDBOX_DIR="$_S159_DIR/sb" WORK_DIR="$_S159_DIR/ws" \
+        SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY="$2" \
+        FM_BLOCK="$_S159_FM" EVAL_BLOCK="$_S159_EVAL" _sandy_relay_slot_dir="$_S159_DIR/slot" \
+        bash "$_S159_DIR/drive.sh" 2>&1 ) || echo "DRIVER-FAILED"
+}
+_S159_TWO="$(_s159_run "$_S159_DIR/two" 1)"
+_S159_ONE="$(_s159_run "$_S159_DIR/one" 1)"
+_S159_OFF="$(_s159_run "$_S159_DIR/two" 0)"
+check "§159(0) the driver RAN in all three cases (a dead probe would make every negative check below pass)" \
+    bash -c 'for o in "$@"; do case "$o" in *DRIVER-FAILED*) exit 1 ;; *"relay="*) ;; *) exit 1 ;; esac; done' _ "$_S159_TWO" "$_S159_ONE" "$_S159_OFF"
+check "§159(1) with two entries, the FIRST in feature-name order is the one that runs (alpha, although beta was created first)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "relay=/opt/sandy/features/alpha/relay"' _ "$_S159_TWO"
+check "§159(2) the dropped entry is WARNED about by feature name and path, naming the winner (mutation: removing the else branch restores the silent skip)" \
+    bash -c 'printf "%s\n" "$1" | grep "^WARN " | grep -F "'"'"'beta'"'"'" | grep -F "/opt/sandy/features/beta/relay" | grep -F "will NOT run" | grep -qF "'"'"'alpha'"'"'"' _ "$_S159_TWO"
+check "§159(3) the features line says the winner runs its entry..." \
+    bash -c 'printf "%s\n" "$1" | grep "^INFO features: " | grep -qF "alpha (1 mount, entry)"' _ "$_S159_TWO"
+check "§159(4) ...and does NOT claim an entry for the loser -- it says it was not run and who won (mutation: printing the raw summary field restores the double claim)" \
+    bash -c 'printf "%s\n" "$1" | grep "^INFO features: " | grep -F "beta (1 mount, entry NOT run" | grep -qF "alpha"' _ "$_S159_TWO"
+check "§159(5) one entry: no dropped-entry warning, and the features line still says entry (the fix must not cost the common case)" \
+    bash -c 'case "$1" in *"will NOT run"*) exit 1 ;; esac; printf "%s\n" "$1" | grep "^INFO features: " | grep -qF "alpha (1 mount, entry)"' _ "$_S159_ONE"
+check "§159(6) SANDY_RELAY=0: no entry runs, and the features line says so rather than claiming either" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "relay=EMPTY" && printf "%s\n" "$1" | grep "^INFO features: " | grep -F "alpha (1 mount, entry disabled by SANDY_RELAY=0)" | grep -qF "beta (1 mount, entry disabled by SANDY_RELAY=0)"' _ "$_S159_OFF"
+rm -rf "$_S159_DIR"
+unset _S159_SANDY _S159_DIR _S159_FM _S159_EVAL _S159_TWO _S159_ONE _S159_OFF
+unset -f _s159_mk _s159_run
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
