@@ -26,9 +26,10 @@ type Policy struct {
 	// hard call to net.DefaultResolver) so tests can inject a fake resolver to
 	// exercise the permissive private-IP / rebinding logic deterministically.
 	lookupIP func(host string) ([]net.IP, error)
-	// dial opens the final TCP connection to an already-screened resolved IP
-	// (strict-mode re-check path below). A field (mirrors lookupIP) so tests
-	// can substitute a local listener instead of exercising a live socket.
+	// dial opens every upstream TCP connection Egress makes: an already-
+	// screened resolved IP (both modes) or an allowlisted host:port as-is
+	// (dialOrDeny). A field (mirrors lookupIP) so tests can substitute a local
+	// listener, or a recorder, instead of exercising a live socket.
 	dial func(network, address string) (net.Conn, error)
 }
 
@@ -53,6 +54,14 @@ func newPolicy(cfg *Config) *Policy {
 //     LAN block happens later, at forward time, once we know the
 //     real address — so a name that resolves only to a private IP
 //     still funnels here and is then refused on egress.
+//
+// A well-known DoH resolver name (#154) is deliberately ANSWERED here in
+// permissive mode and refused later, in Egress. NXDOMAIN-ing it would give the
+// agent a slightly cleaner failure, but the DNS responder logs nothing, so the
+// attempt would never reach proxy.log — and the egress log's completeness is
+// the whole reason the block exists. Deciding in one place also covers a
+// client that reaches the proxy without asking this responder (a hardcoded
+// /etc/hosts line, curl --resolve, an explicit CONNECT).
 func (p *Policy) PermitDNS(name string) bool {
 	if p.mode == modeStrict {
 		return p.allow.AllowedName(name)
@@ -81,7 +90,7 @@ func (p *Policy) Egress(host string, port int) (net.Conn, string) {
 		// have its RESOLVED address screened, so a poisoned allowlisted domain
 		// (or DNS rebinding) can't reach 169.254.169.254 / an RFC1918 host.
 		if isIP || p.allow.AllowedExactHostPort(h, port) {
-			return dialOrDeny(h, port)
+			return p.dialOrDeny(h, port)
 		}
 		r, err := p.lookupIP(h)
 		if err != nil {
@@ -102,7 +111,17 @@ func (p *Policy) Egress(host string, port int) (net.Conn, string) {
 	// even if it points at a private address (e.g. a local registry the user
 	// opted into, or host.docker.internal:port for a local LLM).
 	if p.allow.AllowedHostPort(h, port) {
-		return dialOrDeny(h, port)
+		return p.dialOrDeny(h, port)
+	}
+
+	// A well-known DNS-over-HTTPS resolver is refused (#154): it would move
+	// name resolution off the path sandy observes (see doh.go). Checked AFTER
+	// the allowlist on purpose, so SANDY_ALLOW_HOSTS re-allows a listed
+	// provider, and on every port, so CONNECT to the same name (including DoT
+	// on :853) is refused too. Strict mode needs no such check: a resolver
+	// that is not allowlisted is already denied above.
+	if !isIP && isDoHProvider(h) {
+		return nil, "known DNS-over-HTTPS resolver blocked in permissive mode (add to SANDY_ALLOW_HOSTS to allow)"
 	}
 
 	// Otherwise: resolve and refuse private/LAN/metadata destinations. Doing
@@ -124,7 +143,7 @@ func (p *Policy) Egress(host string, port int) (net.Conn, string) {
 	if !ok {
 		return nil, "private/LAN address blocked (add to SANDY_ALLOW_HOSTS to allow)"
 	}
-	c, err := net.DialTimeout("tcp", net.JoinHostPort(chosen.String(), itoa(port)), dialTimeout)
+	c, err := p.dial("tcp", net.JoinHostPort(chosen.String(), itoa(port)))
 	if err != nil {
 		return nil, "dial failed: " + err.Error()
 	}
@@ -145,8 +164,13 @@ func selectEgressIP(ips []net.IP) (net.IP, bool) {
 	return nil, false
 }
 
-func dialOrDeny(host string, port int) (net.Conn, string) {
-	c, err := dialUpstream(host, port)
+// dialOrDeny dials an allowlisted host:port as-is. It goes through p.dial
+// (whose default is exactly dialUpstream's net.DialTimeout) rather than
+// dialUpstream directly, so a test can prove WHICH path an allowlisted name
+// took -- e.g. that SANDY_ALLOW_HOSTS re-allows a listed DoH provider (#154) --
+// without a live socket.
+func (p *Policy) dialOrDeny(host string, port int) (net.Conn, string) {
+	c, err := p.dial("tcp", net.JoinHostPort(host, itoa(port)))
 	if err != nil {
 		return nil, "dial failed: " + err.Error()
 	}

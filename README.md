@@ -613,7 +613,7 @@ The egress proxy is the recommended isolation mechanism and the **only** one tha
 
 | Setting | Mode | Behavior |
 |---|---|---|
-| `SANDY_EGRESS=permissive` *(or unset)* | permissive (default) | Blocks private/LAN/host/cloud-metadata destinations, allows all internet. Closes the macOS LAN gap with ~zero friction. |
+| `SANDY_EGRESS=permissive` *(or unset)* | permissive (default) | Blocks private/LAN/host/cloud-metadata destinations and well-known DNS-over-HTTPS resolvers, allows all other internet. Closes the macOS LAN gap with ~zero friction. |
 | `SANDY_EGRESS=strict` | strict | Allows only a built-in default allowlist (model providers, GitHub incl. SSH, npm/PyPI/crates/Go/Debian) plus `SANDY_ALLOW_HOSTS`. Fails closed on everything else. **Strengthens isolation — safe to commit in a workspace config.** |
 | `SANDY_EGRESS=off` | off | Linux iptables only; macOS has no network isolation (see below). **Weakens isolation — a workspace `.sandy/config` setting it triggers an approval prompt** so a cloned repo can't silently disable your sandbox. |
 
@@ -622,6 +622,8 @@ SANDY_EGRESS=strict   # in ~/.sandy/config or a workspace .sandy/config
 ```
 
 **A workspace `SANDY_EGRESS=permissive` also triggers the approval prompt.** A workspace `.sandy/config` outranks `~/.sandy/config` for the same key, so on a host that chose `strict`, a cloned repository's one-line `SANDY_EGRESS=permissive` would otherwise re-open the whole internet with no prompt (#371; sandy 2.0.0–2.3.x gated only `off`). Only `strict` — the tightening value — is free from a workspace. The prompt appears even when your host is already permissive, because the gate judges the value, not what your host resolved; approving it once for that workspace silences it.
+
+**Permissive mode refuses well-known DNS-over-HTTPS resolvers** (`dns.google`, `cloudflare-dns.com`, `dns.quad9.net`, `doh.opendns.com`, `dns.nextdns.io`, … — the list is in `proxy/doh.go`). A tool that resolves names over HTTPS instead of DNS would otherwise take resolution off the path sandy observes, so `SANDY_EGRESS_LOG`'s "what did this session reach" summary would be incomplete. The refusal is logged in `proxy.log` like any other denial. If you genuinely route DNS that way, add the resolver to `SANDY_ALLOW_HOSTS` — an allowlisted provider is reachable again. The list is **best-effort and enumerable, not complete**: an unlisted or self-hosted resolver, or one addressed by raw IP through the proxy, is not caught. For a real guarantee use `SANDY_EGRESS=strict`, which already denies every resolver you have not allowlisted.
 
 > The pre-2.0 keys still work and are listed under **Deprecated**: `SANDY_EGRESS_STRICT=1`/`=0` (strict/permissive), `SANDY_EGRESS_NO_ISOLATION=1` (off), and the older `SANDY_EGRESS_PROXY=0|1|2` alias (`0`→off, `1`→permissive, `2`→strict). If `SANDY_EGRESS` is set it wins and the old values are ignored with a notice. Their weakening values are approval-gated from a workspace the same way: `SANDY_EGRESS_STRICT=0`, `SANDY_EGRESS_NO_ISOLATION=1`, `SANDY_EGRESS_PROXY=0` and `=1`.
 
