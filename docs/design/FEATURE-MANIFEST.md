@@ -105,6 +105,8 @@ It is per-sandbox state and the command already enumerates what it will destroy.
 
 A flag day on the mechanism that starts a delivery daemon is how a fleet goes silently dark.
 
+*2.4.0 (#381):* with `relay-bin` gone (#354), the remaining precedence question is between two **features** that both declare `entry`. At most one runs per container: the first selected feature in feature-directory name order. Each later one is named in a launch warning together with the winner, and the `features:` line reports it as not run — it used to be skipped silently while that line claimed `entry` for both.
+
 ### D10 — A feature directory with no manifest
 
 - **flat directory, no manifest** → 1.15.0 behaviour, mounted whole `:ro` at `/opt/sandy/features/<name>`.
