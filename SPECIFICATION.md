@@ -623,7 +623,8 @@ Optional: `--gpus <SANDY_GPU>` if GPU passthrough is enabled.
 5. Fix ownership of sandbox-backed persistent mount directories (pip, uv, npm, go, cargo). `~/.gstack/` is intentionally **not** chowned here — it's a workspace bind, so chown'ing inside the container would write through to the host workspace's ownership.
 6. Symlink Claude Code binary and data dir into home
 7. Create pip/pip3 wrapper scripts (auto-add `--user` when outside virtualenvs)
-8. Drop privileges: `exec gosu $RUN_UID:$RUN_GID /usr/local/bin/user-setup.sh "$@"`
+8. **Host timezone existence check (#384)**: if `TZ` is set (from the host, forwarded as `-e TZ=...`) but is not a zone this image's `/usr/share/zoneinfo` actually ships (nor a valid POSIX TZ string), warn to stderr and `unset TZ` — glibc silently runs UTC with a bogus abbreviation on an unrecognized zone, so unsetting is the only safe response. Runs before the privilege drop so the sanitized value (or its absence) is what `user-setup.sh`, the tmux server, and every agent pane see.
+9. Drop privileges: `exec gosu $RUN_UID:$RUN_GID /usr/local/bin/user-setup.sh "$@"`
 
 ### User Setup Flow (User Phase)
 
@@ -1682,7 +1683,18 @@ chown "$RUN_UID:$RUN_GID" /home/sandy
 #       exec python3 -m pip install --user "$@"
 #   fi
 
-# 8. Drop privileges
+# 8. Host timezone existence check (#384)
+# _sandy_tz_check (byte-identical to sandy's own copy — see D.7) validates
+# $TZ against THIS image's /usr/share/zoneinfo (host tzdata differs, and
+# macOS keeps its copy at a different path entirely). An unrecognized zone
+# is unset with a stderr warning rather than left in place, because glibc
+# silently runs UTC with a bogus abbreviation on one it doesn't recognize:
+#   if [ -n "${TZ:-}" ] && ! _sandy_tz_check "$TZ" /usr/share/zoneinfo; then
+#       printf '[sandy] WARN: TZ=%s is not a zone in this image; ...\n' "$TZ" >&2
+#       unset TZ
+#   fi
+
+# 9. Drop privileges
 exec gosu "$RUN_UID:$RUN_GID" /usr/local/bin/user-setup.sh "$@"
 ```
 
@@ -1794,6 +1806,8 @@ in the status bar would be dead chrome. See CLAUDE.md "Status Lines" for how
 this outer bar (launch/session-scoped) complements Claude Code's own native
 `statusLine` (Appendix C.2, live per-request model/effort/context%).
 
+**`%H:%M` renders in whatever `TZ` the container has (#384)** — tmux's clock format is a libc `strftime` call, so once the host's zone reaches the container as `-e TZ=...` (D.7), the status-bar clock follows it; with no resolved `TZ` it stays UTC, the pre-#384 behaviour. This is the intended, visible benefit of the change — it is sandy's own **emitted timestamps** (the marker, `WORKSPACE.json`, container labels, `--print-state`) that are pinned to UTC regardless, not this display.
+
 ---
 
 ## Appendix B: Runtime Parameters
@@ -1810,6 +1824,7 @@ All magic numbers, thresholds, timeouts, and limits used in the sandy script.
 | tmpfs `/tmp` | 1 GB, exec | `--tmpfs /tmp:exec,size=1G` |
 | tmpfs `/home/sandy` | 2 GB, exec | `--tmpfs /home/sandy:exec,size=2G,uid=1001,gid=1001` |
 | tmux history | 10,000 lines | `set -g history-limit 10000` |
+| Container `TZ` | Host-derived, `-e` at runtime (#384) | Validation `^[A-Za-z0-9_+:,./-]{1,64}$`, no leading `/`, no `..`; re-checked in-container against the image's own `/usr/share/zoneinfo`. See Appendix D.7. |
 
 ### B.2 Timeouts
 
@@ -2132,6 +2147,8 @@ docker exec [-i|-i -t] -u <host-uid>:<host-gid> -w <container-workspace> -e HOME
 
 Sub-options: `--workspace PATH`, `--dry-run` (print the command, execute nothing), and `-- CMD...` (default `/bin/bash`). A bare first non-option token also begins the command; an unrecognized `-…` is refused with a pointer to `--`. Guarded by `run-tests.sh §120`.
 
+**No `TZ` handling here (#384).** `docker exec` inherits the running container's `Config.Env`, so `--exec` and `--attach` both see whatever `TZ` was fixed at `docker run` time — no separate resolution or forwarding is needed. A daemon container keeps its start-time `TZ` across a `--restart unless-stopped` resurrection; a host zone change (e.g. travel) takes effect only on the next `--start` or `--update-sessions` restart.
+
 ### C.7b Codex `config.toml` (seeded by sandy)
 
 Written to `$SANDBOX_DIR/codex/config.toml` on first launch of a new sandbox with `SANDY_AGENT=codex`. Mounted into the container at `/home/sandy/.codex/config.toml`.
@@ -2341,6 +2358,33 @@ sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 3. **Local cache file**: `$SANDY_HOME/.skill_version_<pack>`
 4. **Hardcoded fallback**: `SKILL_PACK_VERSIONS` array entry
 
+### D.7 Host Timezone Resolution (#384)
+
+`TZ` is passed as a **runtime** `-e` flag (E.2), never baked into an image: the agent image is shared by every sandbox and cached by `BUILD_HASH`, so the host's zone would otherwise force a rebuild after travel or a DST-policy change, and would bake one host's zone into an image that `--rsync`-style workflows move between hosts (docs/DESIGN-NOTES.md has the full rationale).
+
+**Resolution order** (`_sandy_host_tz`, sandy:~4270, called host-side just before the `-e` is appended):
+
+1. **`TZ` in sandy's own environment**, if set. Normalized (below), then validated. If it normalizes to the literal string `/etc/localtime` (the `TZ=:/etc/localtime` idiom), it is treated as unset and resolution falls through to step 2. Otherwise: valid → used, source `env`; invalid → `warn` once and **stop** — the operator chose `TZ` explicitly, so falling through to `/etc/localtime` would substitute a zone they did not choose, which is a surprise rather than a courtesy.
+2. **`/etc/localtime`**, if it is a symlink: `readlink` (plain, never `-f` — BSD lacks the flag and the bash-3.2 lint does not catch it) gives the raw target, which is normalized then validated. Valid → used, source is the localtime path; invalid → remembered for a single warning and resolution falls through to step 3.
+3. **`/etc/timezone`**, if readable: the first line, trimmed of whitespace (so a CRLF-terminated file still resolves), normalized then validated. Valid → used, source is the timezone-file path; invalid → remembered for a warning.
+4. **Otherwise unset.** A rejected candidate from step 2 or 3 gets exactly one `warn` naming it and suggesting `export TZ=Area/City`; a host with neither a localtime symlink nor a timezone file (e.g. `/etc/localtime` is a regular file, as on some minimal/container-derived hosts) is silent, matching current (pre-#384) behaviour.
+
+**Normalization** (`_sandy_tz_norm`) handles the ways different platforms spell a localtime target:
+- A leading `:` is stripped (the `TZ=:Area/City` idiom).
+- Everything up to and including the **last** `zoneinfo/` is stripped (`##` glob, not `#`) — this single rule covers macOS (`/var/db/timezone/zoneinfo/America/Denver`), ordinary Linux (`/usr/share/zoneinfo/America/Denver`), systemd's relative form (`../usr/share/zoneinfo/America/Denver`), and NixOS (`/etc/zoneinfo/America/Denver`).
+- A leading `posix/` or `right/` path segment is then stripped — Debian trixie ships no `posix/` directory, so the plain zone name is the one that actually resolves.
+
+**Validation** (`_sandy_tz_check VALUE [ZONEINFO_DIR]`) is a single function used identically in three places (sandy's resolver, sandy's own copy, and a byte-identical copy inside the generated entrypoint — `run-tests.sh` §159(8) pins the two copies equal):
+- Syntax: `^[A-Za-z0-9_+:,./-]{1,64}$`, and rejects a leading `/` or an embedded `..` (so `/etc/passwd` and `../../etc/passwd` are refused before any filesystem check).
+- With no zoneinfo directory given (host-side syntax-only use), a syntactically valid candidate passes.
+- With a zoneinfo directory given: an IANA name passes if `<dir>/<name>` is a regular **file** (`-f`, not `-e`/`-d` — a bare region like `America` is a directory in every zoneinfo tree and must be rejected, not accepted as a zone). Otherwise it is checked against a POSIX TZ string pattern (e.g. `EST5EDT,M3.2.0,M11.1.0`, `UTC0`), which needs no file at all.
+
+**The in-container existence check is authoritative and independent of the host-side resolution.** Host tzdata differs in coverage from the image's, and macOS keeps it at an entirely different path, so a `TZ` that validated host-side is **re-validated inside the entrypoint** against `/usr/share/zoneinfo` in the image. Glibc given an unrecognized zone (e.g. `TZ=Mars/Olympus`) does not error — it silently runs UTC with a bogus abbreviation — so an unrecognized value is `unset` in the entrypoint (with a `stderr` warning) rather than left in place; `unset` happens before the `gosu` privilege drop, so it also removes `TZ` from `user-setup.sh`, the tmux server, and every agent pane. A `docker exec` shell still inherits the raw (un-re-checked) value from `Config.Env` — see E.13.
+
+**Never fails the launch.** Every step is guarded (`|| true` on external commands); an unresolvable or rejected zone simply leaves `TZ` unset, which is the pre-#384 behaviour.
+
+**What stays UTC regardless of `TZ`**: anything sandy itself **emits as data** — the session marker's `launched_at`, `WORKSPACE.json` timestamps, container labels (`sandy.started_at`/`updated_at`/`provisioned_at`), feature-manifest `selected.json` rows, and `--print-state`'s `created_at`/`last_used_at` — uses `date -u` (or, for the two `stat`-derived mtime fields, `TZ=UTC0 stat`) regardless of the container's own `TZ`. `run-tests.sh` §159(17) is a static ratchet over the whole script (host-side code and every heredoc) asserting this property holds everywhere a `date`/mtime-`stat` call appears.
+
 ---
 
 ## Appendix E: Container Launch Assembly
@@ -2406,7 +2450,10 @@ docker rm -f "sandy-<SANDBOX_NAME>" 2>/dev/null || true
 --tmpfs /tmp:exec,size=1G
 --tmpfs /home/sandy:exec,size=2G,uid=1001,gid=1001
 --network <NETWORK_NAME>
+-e TZ=<zone>          # only when resolved (#384); see Appendix D.7
 ```
+
+The `-e TZ=<zone>` flag is emitted immediately after `--network`, ahead of the manifest `expose` block and the `SANDY_EXTRA_ENV` `-e`s assembled later — so under docker's last-wins rule for repeated `-e` flags, an operator's own explicit `TZ` forward (via `SANDY_EXTRA_ENV` or a manifest) still wins over sandy's resolved value.
 
 ### E.3 GPU Passthrough (conditional)
 
@@ -2866,6 +2913,7 @@ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=<0|1>
 # System
 HOST_UID=<uid>
 HOST_GID=<gid>
+TZ=<Area/City|POSIX string>         # host zone (#384); omitted when unresolved; the entrypoint re-checks it against the image's own /usr/share/zoneinfo and unsets it (with a stderr warning) if the image doesn't ship that zone
 SANDY_AGENT=<agent[,agent…]>        # resolved agent selection (drives entrypoint pane layout)
 SANDY_EGRESS_MODE=<off|permissive|strict>  # posture introspection — forwarded in ALL modes (informational)
 SANDY_HANDOFF_RELAY=<path>          # only when set (1.10.0); host-validated (no shell metacharacters, no '..'); forces SANDY_HANDOFF_DIRS=1 over an opt-out (the tree, relay/ included, is on by default since 1.10.0; E.12a)

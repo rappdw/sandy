@@ -2755,12 +2755,18 @@ _sandy_emit_state() {
     # (`x="$(_stat_mtime_iso ...)"`) aborts the caller and trips the ERR trap.
     # Sandboxes frequently have .sandy_created_version but no .sandy_last_version
     # (first launch), so stat failure for one field is a normal expected case.
+    # #384: force UTC0 on both stat forms. Without it %y/%Sm render in the
+    # CALLER's TZ (now the host's, once #384 sets it) with a LOCAL offset,
+    # and the awk below discards that offset while a literal Z is appended
+    # regardless -- so once a host TZ reaches the container, created_at /
+    # last_used_at would silently drift from UTC into host-local-labelled-Z.
+    # UTC0 (not "UTC") is a POSIX TZ string needing no zoneinfo file lookup.
     local _stat_mtime_iso
-    if stat -c '%y' / >/dev/null 2>&1; then
+    if TZ=UTC0 stat -c '%y' / >/dev/null 2>&1; then
         # GNU stat: %y is "2006-01-02 15:04:05.000000000 -0700"; take date/time and append Z.
-        _stat_mtime_iso() { [ -e "$1" ] || return 0; stat -c '%y' "$1" 2>/dev/null | awk '{print $1"T"$2"Z"}' || true; }
-    elif stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' / >/dev/null 2>&1; then
-        _stat_mtime_iso() { [ -e "$1" ] || return 0; stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
+        _stat_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC0 stat -c '%y' "$1" 2>/dev/null | awk '{print $1"T"$2"Z"}' || true; }
+    elif TZ=UTC0 stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' / >/dev/null 2>&1; then
+        _stat_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC0 stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
     else
         _stat_mtime_iso() { return 0; }
     fi
@@ -4260,6 +4266,125 @@ _sandy_container_ws_for() {
         *)      printf '%s' "$1" ;;
     esac
 }
+
+# --- Host timezone (#384) ---
+# Runtime -e TZ=..., never a build input: the agent image is shared by every
+# sandbox and cached by BUILD_HASH, so baking the host's zone in would make
+# travel or a DST-policy change trigger a rebuild, and would bake one host's
+# zone into an image that --rsync-style workflows move between hosts. A
+# runtime env var costs nothing and follows the host on every launch.
+#
+# Normalize a raw /etc/localtime target or TZ value: strip a leading ':',
+# strip everything through the LAST "zoneinfo/" (handles macOS
+# /var/db/timezone/zoneinfo/X, Linux /usr/share/zoneinfo/X, systemd's
+# relative ../usr/share/zoneinfo/X, and NixOS's /etc/zoneinfo/X -- `##` takes
+# the last occurrence, which is what makes the relative case work), then
+# strip a leading posix/ or right/ (trixie ships no posix/ dir, so the plain
+# name is the one that actually resolves under the image's zoneinfo). Sets
+# _SANDY_TZ_NORM; prints nothing, so it is safe to call before warn/info
+# exist and safe to use inside a value a caller may still validate.
+_sandy_tz_norm() {
+    local _v="$1"
+    _v="${_v#:}"
+    case "$_v" in
+        (*zoneinfo/*) _v="${_v##*zoneinfo/}" ;;
+    esac
+    case "$_v" in
+        (posix/*|right/*) _v="${_v#*/}" ;;
+    esac
+    _SANDY_TZ_NORM="$_v"
+}
+# Validate a TZ candidate: is it a plausible IANA zone name or POSIX TZ
+# string, and (when a zoneinfo dir is given) does it actually exist in that
+# image? This exact body is duplicated BYTE-IDENTICALLY into the entrypoint
+# heredoc (generate_entrypoint) below, because only the container's OWN
+# zoneinfo is authoritative -- host tzdata differs in coverage and macOS
+# keeps it at a different path entirely, so the existence check must run
+# in-container against /usr/share/zoneinfo, not here against the host's copy.
+# run-tests.sh §159 pins the two copies equal. Bash-3.2-safe: the regexes
+# live in variables and the right-hand side of =~ is left unquoted.
+_sandy_tz_check() {
+    # $1 = normalized TZ candidate; $2 = zoneinfo dir, or empty for syntax only.
+    local _v="$1" _zd="${2:-}"
+    local _re='^[A-Za-z0-9_+:,./-]{1,64}$'
+    local _px='^[A-Za-z]{3,}[-+]?[0-9]{1,2}(:[0-9]{2}){0,2}([A-Za-z]{3,}([-+]?[0-9]{1,2}(:[0-9]{2}){0,2})?(,[^,]+,[^,]+)?)?$'
+    [[ "$_v" =~ $_re ]] || return 1
+    case "$_v" in (/*|*..*) return 1 ;; esac
+    [ -n "$_zd" ] || return 0
+    [ -f "$_zd/$_v" ] && return 0
+    [[ "$_v" =~ $_px ]] && return 0
+    return 1
+}
+# Resolve the host's timezone. Sets _SANDY_HOST_TZ (the zone, or empty) and
+# _SANDY_HOST_TZ_SRC (env / the localtime path / the timezone-file path / empty)
+# and prints NOTHING to stdout -- sandy's warn()/info() write to stdout via
+# `echo -e`, so calling this inside $(...) would capture the warning into the
+# resolved value. Every external command is guarded so this ALWAYS returns 0:
+# an unresolvable zone is never a launch failure, only the current behaviour
+# (container clock stays UTC). $1/$2 exist only for fixtures; real callers
+# take the defaults.
+#
+# Order: TZ env (the operator's explicit choice -- if it's invalid we STOP
+# rather than falling through to /etc/localtime, since substituting a zone
+# the operator didn't choose would be a surprise, not a courtesy) then
+# /etc/localtime (macOS and most Linux distros) then /etc/timezone (Debian/
+# Ubuntu) then unset.
+_sandy_host_tz() {
+    local _lt="${1:-/etc/localtime}" _tf="${2:-/etc/timezone}"
+    local _v _rejected=""
+    _SANDY_HOST_TZ=""
+    _SANDY_HOST_TZ_SRC=""
+
+    if [ -n "${TZ:-}" ]; then
+        _sandy_tz_norm "$TZ"; _v="$_SANDY_TZ_NORM"
+        if [ "$_v" = "/etc/localtime" ]; then
+            : # the `TZ=:/etc/localtime` idiom -- treat as unset, fall through
+        elif _sandy_tz_check "$_v" ""; then
+            _SANDY_HOST_TZ="$_v"; _SANDY_HOST_TZ_SRC="env"
+            [ "${SANDY_VERBOSE:-0}" -ge 1 ] && info "Container timezone: ${_SANDY_HOST_TZ} (from ${_SANDY_HOST_TZ_SRC})"
+            return 0
+        else
+            warn "Ignoring host TZ=$(printf '%q' "$TZ") (not a valid zone name or POSIX TZ string); the container clock stays UTC."
+            return 0
+        fi
+    fi
+
+    if [ -L "$_lt" ]; then
+        _v="$(readlink "$_lt" 2>/dev/null || true)"
+        if [ -n "$_v" ]; then
+            _sandy_tz_norm "$_v"; _v="$_SANDY_TZ_NORM"
+            if _sandy_tz_check "$_v" ""; then
+                _SANDY_HOST_TZ="$_v"; _SANDY_HOST_TZ_SRC="$_lt"
+                [ "${SANDY_VERBOSE:-0}" -ge 1 ] && info "Container timezone: ${_SANDY_HOST_TZ} (from ${_SANDY_HOST_TZ_SRC})"
+                return 0
+            else
+                _rejected="$_v"
+            fi
+        fi
+    fi
+
+    if [ -z "$_SANDY_HOST_TZ" ] && [ -r "$_tf" ]; then
+        _v=""
+        IFS= read -r _v < "$_tf" 2>/dev/null || true
+        _v="${_v//[[:space:]]/}"
+        if [ -n "$_v" ]; then
+            _sandy_tz_norm "$_v"; _v="$_SANDY_TZ_NORM"
+            if _sandy_tz_check "$_v" ""; then
+                _SANDY_HOST_TZ="$_v"; _SANDY_HOST_TZ_SRC="$_tf"
+                [ "${SANDY_VERBOSE:-0}" -ge 1 ] && info "Container timezone: ${_SANDY_HOST_TZ} (from ${_SANDY_HOST_TZ_SRC})"
+                return 0
+            else
+                _rejected="$_v"
+            fi
+        fi
+    fi
+
+    if [ -n "$_rejected" ]; then
+        warn "Ignoring host TZ candidate $(printf '%q' "$_rejected") (not a valid zone name); the container clock stays UTC. Set TZ=Area/City to override."
+    fi
+    return 0
+}
+
 # Claude Code's projects-dir name for a path. Measured from the 2.1.278 bundle:
 # `function k(e){return e.replace(/[^a-zA-Z0-9]/g,"-")}`, which reproduces the
 # live directories exactly. That is a JavaScript regex over UTF-16 code units,
@@ -4695,11 +4820,14 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
     # would misdetect) and the same always-exit-0 discipline (a failing
     # command substitution under set -euo pipefail would abort this fast
     # path via the ERR trap).
+    # #384: TZ=UTC0 on both forms, same reason as _stat_mtime_iso above --
+    # otherwise this "last used" reading would drift into host-local time
+    # once a host TZ reaches the container.
     _rms_mtime_iso() { return 0; }
-    if stat -c '%y' / >/dev/null 2>&1; then
-        _rms_mtime_iso() { [ -e "$1" ] || return 0; stat -c '%y' "$1" 2>/dev/null | awk '{print $1"T"$2"Z"}' || true; }
-    elif stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' / >/dev/null 2>&1; then
-        _rms_mtime_iso() { [ -e "$1" ] || return 0; stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
+    if TZ=UTC0 stat -c '%y' / >/dev/null 2>&1; then
+        _rms_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC0 stat -c '%y' "$1" 2>/dev/null | awk '{print $1"T"$2"Z"}' || true; }
+    elif TZ=UTC0 stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' / >/dev/null 2>&1; then
+        _rms_mtime_iso() { [ -e "$1" ] || return 0; TZ=UTC0 stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%SZ' "$1" 2>/dev/null || true; }
     fi
 
     # workspace_path of one sandbox dir, parsed the same lightweight way
@@ -6001,6 +6129,10 @@ if [[ "${1:-}" == "--exec" ]]; then
     # Pass through the command's own exit status; `|| rc=$?` because set -e
     # would otherwise swallow a non-zero command result before we can return it.
     _ex_rc=0
+    # No TZ here (#384): `docker exec` inherits the container's Config.Env,
+    # so this and --attach see whatever TZ was fixed at `docker run` -- a
+    # daemon keeps its start-time TZ across a --restart resurrection until
+    # the next --start/--update-sessions relaunch resolves it again.
     docker exec "${_ex_tty[@]}" -u "${_ex_uid}:${_ex_gid}" -w "$_ex_cwd" -e "HOME=$_ex_home" \
         "$_ex_container" "${_ex_cmd[@]}" || _ex_rc=$?
     exit "$_ex_rc"
@@ -7361,6 +7493,36 @@ PIPWRAP
 cp /home/sandy/.local/bin/pip /home/sandy/.local/bin/pip3
 chmod +x /home/sandy/.local/bin/pip /home/sandy/.local/bin/pip3
 chown "$RUN_UID:$RUN_GID" /home/sandy/.local/bin/pip /home/sandy/.local/bin/pip3
+
+# --- Host timezone existence check (#384) ---
+# Only the IMAGE's own zoneinfo is authoritative: host tzdata differs in
+# coverage, and macOS keeps it at a different path than Linux entirely, so a
+# TZ value that validated host-side must still be re-checked here against
+# what THIS image actually ships. Measured: glibc given an unknown zone
+# (TZ=Mars/Olympus) does not error -- it silently runs UTC with a bogus
+# abbreviation ("Mars") -- so unset is the only safe response to a miss.
+# Byte-identical to sandy's own _sandy_tz_check (run-tests.sh §159 pins the
+# two copies equal); no `set -e` here, but kept failure-proof regardless.
+_sandy_tz_check() {
+    # $1 = normalized TZ candidate; $2 = zoneinfo dir, or empty for syntax only.
+    local _v="$1" _zd="${2:-}"
+    local _re='^[A-Za-z0-9_+:,./-]{1,64}$'
+    local _px='^[A-Za-z]{3,}[-+]?[0-9]{1,2}(:[0-9]{2}){0,2}([A-Za-z]{3,}([-+]?[0-9]{1,2}(:[0-9]{2}){0,2})?(,[^,]+,[^,]+)?)?$'
+    [[ "$_v" =~ $_re ]] || return 1
+    case "$_v" in (/*|*..*) return 1 ;; esac
+    [ -n "$_zd" ] || return 0
+    [ -f "$_zd/$_v" ] && return 0
+    [[ "$_v" =~ $_px ]] && return 0
+    return 1
+}
+if [ -n "${TZ:-}" ] && ! _sandy_tz_check "$TZ" /usr/share/zoneinfo; then
+    printf '[sandy] WARN: TZ=%s is not a zone in this image; the container clock stays UTC.\n' "$TZ" >&2
+    unset TZ
+fi
+# Residual: unset here removes TZ from user-setup.sh, the tmux server and
+# every pane (all spawned after the gosu drop below), but a later `docker
+# exec` shell still inherits the RAW value from Config.Env, unsanitized;
+# glibc treats an unrecognized TZ there as UTC too, same as above.
 
 # Drop privileges to host user's UID/GID
 exec gosu "$RUN_UID:$RUN_GID" /usr/local/bin/user-setup.sh "$@"
@@ -10068,7 +10230,10 @@ _resolve_passive_privileged_approval() {
             {
                 printf '%s\n' "$set_hash"
                 printf '# workspace: %s\n' "$WORK_DIR"
-                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
+                # #384: "|| date" fell back to LOCAL time on a date(1) that
+                # rejects -u; match _sandy_fm_record's "|| echo '?'" instead.
+                # This comment line is not part of the sha256 first line.
+                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')"
                 while IFS= read -r _kv; do
                     [ -z "$_kv" ] && continue
                     printf '%s\n' "${_kv%%=*}"
@@ -13517,7 +13682,10 @@ _sandy_project_dockerfile_approved() {
             {
                 printf '%s\n' "$df_hash"
                 printf '# workspace: %s\n' "$WORK_DIR"
-                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date)"
+                # #384: "|| date" fell back to LOCAL time on a date(1) that
+                # rejects -u; match _sandy_fm_record's "|| echo '?'" instead.
+                # This comment line is not part of the sha256 first line.
+                printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')"
             } > "$approval_file"
             chmod 600 "$approval_file" 2>/dev/null || true
             echo "[sandy] Approved. Future launches build it silently until the Dockerfile" >&2
@@ -14821,6 +14989,18 @@ RUN_FLAGS+=(--read-only)
 RUN_FLAGS+=(--tmpfs /tmp:exec,size=1G)
 RUN_FLAGS+=(--tmpfs /home/sandy:exec,size=2G,uid=1001,gid=1001)
 RUN_FLAGS+=(--network "$NETWORK_NAME")
+# --- Host timezone (#384) ---  runtime -e, not a build input (BUILD_HASH is
+# shared across sandboxes; see the resolver's header comment above for why).
+# Everything sandy itself EMITS AS DATA still uses `date -u` / `TZ=UTC0 stat`
+# regardless (run-tests.sh §159 ratchets that across every heredoc) -- this
+# only changes what an agent's OWN `date`, `ls -l`, git's displayed times, and
+# the tmux status-bar clock show. Placed ahead of the manifest `expose` block
+# and the SANDY_EXTRA_ENV `-e`s below, so an operator's own explicit TZ
+# forward still wins under docker's last-wins rule for repeated -e flags.
+_sandy_host_tz
+if [ -n "$_SANDY_HOST_TZ" ]; then
+    RUN_FLAGS+=(-e "TZ=$_SANDY_HOST_TZ")
+fi
 if [ "$_SANDY_PROXY_ON" = true ]; then
     # Egress-proxy mode: the agent is on the --internal sidecar with no route
     # off it. Point its resolver at the proxy's DNS responder, which redirects
