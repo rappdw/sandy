@@ -11,9 +11,9 @@
 # unchanged from before 2.4.0.
 #
 # PRIVATE SERVER. Every tmux command below goes through a private socket
-# (`-L sandy-pane-tag-check-$$`), so this can never touch the operator's own
-# tmux server or collide with a live sandy session that might be hosting this
-# very shell.
+# (`-L sandy-pane-tag-check-$$`) AND `-f /dev/null`, so this can never touch
+# the operator's own tmux server or config, nor collide with a live sandy
+# session that might be hosting this very shell.
 #
 # ⚠️ DO NOT RUN THIS INSIDE A SANDY SANDBOX. tmux inside a sandy container
 # shares that container's tmux server with the live agent session — see
@@ -38,7 +38,14 @@ ck() { if eval "$2" >/dev/null 2>&1; then printf '  PASS %s\n' "$1"; PASS=$((PAS
        else printf '  FAIL %s\n' "$1"; FAIL=$((FAIL + 1)); fi; }
 
 SOCK="sandy-pane-tag-check-$$"
-TM() { tmux -L "$SOCK" "$@"; }
+# -f /dev/null on every private-server invocation: without it a NEW server
+# (the first tmux -L "$SOCK" call, which starts it) loads the OPERATOR's own
+# ~/.tmux.conf, and settings there (remain-on-exit on, destroy-unattached,
+# exit-empty off) can make the "session ends" / "driver session ends" checks
+# below fail spuriously, or pass for the wrong reason (#378 fix-pass
+# verifier finding). -f is a client/server startup option and is harmless on
+# a call that only attaches to an already-running private server.
+TM() { tmux -L "$SOCK" -f /dev/null "$@"; }
 
 WSTMP="$(mktemp -d)"
 cleanup() {
@@ -99,9 +106,9 @@ _fg_wrapper="$WSTMP/fg-wrapper.sh"
 cat > "$_fg_wrapper" <<EOF
 #!/bin/sh
 unset TMUX
-_p_id="\$(tmux -L "$SOCK" new-session -d -P -F '#{pane_id}' -s sandy -n "$NAME" -- bash -c "$AGENT_CMD 2>&1")"
-tmux -L "$SOCK" set-option -p -t "\$_p_id" @sandy_pane_agent "$FAKE_AGENT" 2>/dev/null
-tmux -L "$SOCK" attach -t sandy
+_p_id="\$(tmux -L "$SOCK" -f /dev/null new-session -d -P -F '#{pane_id}' -s sandy -n "$NAME" -- bash -c "$AGENT_CMD 2>&1")"
+tmux -L "$SOCK" -f /dev/null set-option -p -t "\$_p_id" @sandy_pane_agent "$FAKE_AGENT" 2>/dev/null
+tmux -L "$SOCK" -f /dev/null attach -t sandy
 EOF
 chmod +x "$_fg_wrapper"
 

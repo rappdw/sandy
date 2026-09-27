@@ -1024,7 +1024,7 @@ The previous `both` alias (= `claude,gemini`) was removed in `v0.12` once the co
 
 ### Pane-identity contract (stable, 2.4.0, #378)
 
-Anything inside the container that needs to know which pane runs which agent — today that means an external consumer's own copy of the session helper described in Appendix A.1 (`/usr/local/bin/sandy-handoff-sessions`) — depends on four facts. As of 2.4.0 these are a **published, stable contract**: renaming or removing any of them is a breaking change governed by README's `## Deprecated` table (announced in an `X.0.0`, removed no earlier than a later `X.Y.0` — see "Versioning" in CLAUDE.md), not a free refactor. This fix pass (#378) narrowed the helper's own untagged-pane fallback (fact 2's last sentence, below) to a single-agent, single-pane session only; the four contract facts themselves are unchanged.
+Anything inside the container that needs to know which pane runs which agent — today that means an external consumer's own copy of the session helper described in Appendix A.1 (`/usr/local/bin/sandy-handoff-sessions`) — depends on four facts. As of 2.4.0 these are a **published, stable contract**: renaming or removing any of them is a breaking change governed by README's `## Deprecated` table (announced in an `X.0.0`, removed no earlier than a later `X.Y.0` — see "Versioning" in CLAUDE.md), not a free refactor. As of 2.4.0, fact 2 covers single-agent panes too — sandy tags the sole pane of a single-agent session, not just multi-agent panes — and the helper's own untagged-pane fallback narrowed to match: an untagged pane counts as `$SANDY_AGENT` only when `SANDY_AGENT` names exactly one agent AND the session has exactly one pane (the only shape a pre-2.4.0 single-agent sandy could have produced); any other untagged pane is skipped rather than guessed.
 
 | # | Fact | Detail |
 |---|---|---|
@@ -1489,26 +1489,25 @@ RUN cat > /usr/local/bin/sandy-ss-paths <<'SS_HELPER' \
 # (body — see Appendix E.11a for the host-side mount that defines $SANDY_SCREENSHOTS_PATH)
 SS_HELPER
 
-# sandy-handoff-sessions: enumerate live agent sessions in this container, for a
-# SANDY_HANDOFF_RELAY to discover its delivery target(s) (1.10.0). A convenience
-# built on the pane-identity contract ("Pane-identity contract" in section 12
-# above) — sandy publishes the contract, and this helper is one consumer of it
-# (an external consumer ships its own copy against the same facts, #378).
-# Output columns (tab-separated): agent, pane_index, pane_pid, agent_pid, socket,
-# keyfile ("-" = n/a). Identity is read from the @sandy_pane_agent tmux pane
-# option (never assumes pane_index == spawn order — see the 4-agent-grid
-# mapping table in "Pane-identity contract" above), walked via a /proc BFS to
-# find the claude/codex/gemini/opencode/grok process under each pane and, for
-# claude, its /tmp/cc-socks/<pid>.sock and ~/.claude/sessions/<pid>.*.key. An
-# untagged pane counts as SANDY_AGENT only when exactly one agent is configured
-# AND exactly one pane exists (the only shape a pre-2.4.0 sandy could have
-# produced); any other untagged pane is skipped rather than guessed.
-# Test hooks (env-only, no _sandy_key_metadata row): SANDY_SESSIONS_PANES_FILE,
-# SANDY_SESSIONS_PROC, SANDY_SESSIONS_SOCK_DIR, SANDY_SESSIONS_KEY_DIR.
+# sandy-handoff-sessions: enumerate live agent sessions in this container, for
+# a SANDY_HANDOFF_RELAY to discover its delivery target(s) (1.10.0).
 RUN cat > /usr/local/bin/sandy-handoff-sessions <<'HS_HELPER' \
     && chmod +x /usr/local/bin/sandy-handoff-sessions
 #!/bin/bash
-# (body — see CLAUDE.md "Handoff relay" for the output contract and targeting rule)
+# sandy-handoff-sessions — enumerate live agent sessions in this container.
+# Output: agent<TAB>pane_index<TAB>pane_pid<TAB>agent_pid<TAB>socket<TAB>keyfile   ("-" = n/a)
+# Default target rule for relays: the first row whose agent is claude, in SANDY_AGENT order.
+# Untagged panes (@sandy_pane_agent unset) count as SANDY_AGENT only when
+# SANDY_AGENT names exactly one agent AND the session has exactly one pane --
+# the only shape a pre-2.4.0 single-agent sandy could have produced. Any other
+# untagged pane (a user split, a teammate an agent opened, a second untagged
+# pane) is skipped rather than guessed.
+# Test hooks (env-only): SANDY_SESSIONS_PANES_FILE, SANDY_SESSIONS_PROC, SANDY_SESSIONS_SOCK_DIR, SANDY_SESSIONS_KEY_DIR.
+# (rest of body omitted here — identity is read from the @sandy_pane_agent
+# option above per "Pane-identity contract" in section 12, walked via a /proc
+# BFS to find the claude/codex/gemini/opencode/grok process under each pane
+# and, for claude, its /tmp/cc-socks/<pid>.sock and
+# ~/.claude/sessions/<pid>.*.key)
 HS_HELPER
 
 # sandy-claude-statusline: Claude Code native statusLine command (#67).

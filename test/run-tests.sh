@@ -17562,6 +17562,7 @@ echo "§155: the pane-identity contract (#378) — identity comes from @sandy_pa
 # when two sections' fixtures collide.
 _S155_SANDY="$SANDY_SCRIPT"
 _S155_TMPL="$(dirname "$0")/../templates/user-setup.sh.tmpl"
+_S155_SPEC="$(dirname "$0")/../SPECIFICATION.md"
 _S155_TAB="$(printf '\t')"
 _S155_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
 
@@ -17586,6 +17587,55 @@ _S155_HS="$_S155_DIR/hs"
 printf '%s\n' "$_S155_HS_HELPER" > "$_S155_HS"
 chmod +x "$_S155_HS"
 check "§155(pre2) helper is syntactically valid bash" bash -n "$_S155_HS"
+
+# --- (10) Appendix A's copy of the sandy-handoff-sessions header comment must
+# be BYTE-IDENTICAL to the real heredoc's (decisions.md #378 item 4 and the
+# Boundary rule, both flagged by the fix-pass verifier as unmet: the
+# SPECIFICATION.md copy used to be a paraphrase, and its body placeholder
+# pointed at a CLAUDE.md "Handoff relay" heading that no longer exists). This
+# extracts sandy's own pre-RUN 2-line comment plus the heredoc's leading
+# '#'-comment block (everything between the `#!/bin/bash` shebang and the
+# first non-comment line -- i.e. the real code, which Appendix A elides) and
+# does the same against SPECIFICATION.md's copy, then diffs them as TEXT, not
+# by grepping for a mechanism's presence: a paraphrase that mentions the same
+# facts in different words would pass a presence check and must fail this one.
+_s155_hs_header_sandy() {  # $1=file -> 2-line pre-RUN comment + heredoc's leading comment block (stops at the first non-'#' line, which is real code in sandy's own heredoc)
+    { grep -B2 -F 'RUN cat > /usr/local/bin/sandy-handoff-sessions' "$1" | sed '$d';
+      awk '
+          /RUN cat > \/usr\/local\/bin\/sandy-handoff-sessions/ { f=1; next }
+          f && /^#!\/bin\/bash$/ { c=1; next }
+          c && /^#/ { print; next }
+          c { exit }
+      ' "$1"; }
+}
+# Appendix A elides the real body behind its OWN placeholder comment (see the
+# SS_HELPER entry just above for the established precedent) -- unlike sandy's
+# heredoc, SPECIFICATION.md's comment run does not end where the real header
+# ends, so it cannot be bounded by "first non-'#' line" the way sandy's can.
+# Bound it instead by sandy's own LAST header line (an exact-text anchor
+# taken from sandy itself, not hardcoded here) -- this still fails correctly
+# on a reworded paraphrase, which will not contain that exact line and so
+# runs on to the heredoc's closing HS_HELPER delimiter, producing a blob that
+# cannot match sandy's short header either way.
+_s155_hs_header_bounded() {  # $1=file $2=exact last line to stop at (inclusive) -> same shape as _s155_hs_header_sandy
+    { grep -B2 -F 'RUN cat > /usr/local/bin/sandy-handoff-sessions' "$1" | sed '$d';
+      awk -v last="$2" '
+          /RUN cat > \/usr\/local\/bin\/sandy-handoff-sessions/ { f=1; next }
+          f && /^#!\/bin\/bash$/ { c=1; next }
+          c { print }
+          c && $0==last { exit }
+          c && !/^#/ { exit }
+      ' "$1"; }
+}
+_S155_HS_HEADER_SANDY="$(_s155_hs_header_sandy "$_S155_SANDY")"
+_S155_HS_LAST_LINE="$(printf '%s\n' "$_S155_HS_HEADER_SANDY" | tail -1)"
+_S155_HS_HEADER_SPEC="$(_s155_hs_header_bounded "$_S155_SPEC" "$_S155_HS_LAST_LINE")"
+check "§155(10pre) extracted a non-empty sandy-handoff-sessions header comment from both sandy and SPECIFICATION.md" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ]' _ "$_S155_HS_HEADER_SANDY" "$_S155_HS_HEADER_SPEC"
+check "§155(10) SPECIFICATION.md Appendix A's sandy-handoff-sessions header comment is byte-identical to the heredoc's" \
+    bash -c '[ "$1" = "$2" ]' _ "$_S155_HS_HEADER_SANDY" "$_S155_HS_HEADER_SPEC"
+unset -f _s155_hs_header_sandy _s155_hs_header_bounded
+unset _S155_HS_HEADER_SANDY _S155_HS_HEADER_SPEC _S155_HS_LAST_LINE
 
 # _s155_run PANES_FILE PROC_DIR AGENT_LIST -> stdout in _S155_OUT, exit code in
 # _S155_RC. SOCK_DIR and KEY_DIR always point at guaranteed-empty, non-existent
@@ -17774,13 +17824,72 @@ if [ -f "$_S155_TMPL" ]; then
         bash -c '[ "$1" -eq 2 ]' _ "$_S155_SA_NS_COUNT"
     check "§155(8b) the single-agent block sets @sandy_pane_agent exactly once per new-session -- both paths tag their pane, neither is missed" \
         bash -c '[ "$1" -eq "$2" ] && [ "$1" -ge 2 ]' _ "$_S155_SA_OPT_COUNT" "$_S155_SA_NS_COUNT"
+
+    # --- (9) ORDER, not just presence (#378 fix-pass verifier finding): (8a)/
+    # (8b) count tagged new-session invocations but never check WHERE the
+    # set-option line sits relative to the path's terminal tmux call. Each of
+    # the following mutations holds every (8) count unchanged while breaking
+    # the pane tag: (a) moving the daemon path's set-option after `exec tail
+    # -f /dev/null` (dead code -- the pane is never tagged), (b) moving the
+    # foreground path's set-option after `tmux attach -t sandy` (only
+    # attempted once the session has already ended), (c) reintroducing `exec
+    # tmux attach` (the exact EXIT-trap/palette regression d164091 fixed,
+    # which then has no guard at all). Isolated by literal markers within the
+    # single-agent block, not by indentation, so a reformatting that keeps the
+    # keywords intact does not break this.
+    _S155_SA_FILE="$_S155_DIR/sa_block.txt"
+    printf '%s\n' "$_S155_SA_BLOCK" > "$_S155_SA_FILE"
+    _s155_row_exact() {  # $1=file $2=exact-line $3=search-after-row(default 0) -> row, or 0
+        awk -v s="$2" -v start="${3:-0}" 'NR>start && $0==s { print NR; f=1; exit } END { if (!f) print 0 }' "$1"
+    }
+    _s155_row_contains() {  # $1=file $2=substring $3=after(default 0) $4=before(default 0=none) -> row of first CODE (non-comment) match, or 0
+        # Skips comment lines: the daemon/foreground code is prose-documented
+        # right above it (see e.g. "Plain `tmux attach -t sandy` returns
+        # instead of..."), and a plain substring search over the whole line
+        # would match the WORDS inside that prose before it ever reaches the
+        # real call -- a false positive this check must not have (#378
+        # fix-pass verifier's own review target).
+        awk -v s="$2" -v start="${3:-0}" -v stop="${4:-0}" '
+            NR>start && (stop==0 || NR<stop) && $0 !~ /^[ \t]*#/ && index($0,s) { print NR; f=1; exit }
+            END { if (!f) print 0 }
+        ' "$1"
+    }
+    _S155_ROW_ELIF="$(_s155_row_contains "$_S155_SA_FILE" 'SANDY_DAEMON:-0}" = "1" ]; then')"
+    _S155_ROW_ELSE="$(_s155_row_exact "$_S155_SA_FILE" '    else')"
+    _S155_ROW_FI="$(_s155_row_exact "$_S155_SA_FILE" '    fi' "$_S155_ROW_ELSE")"
+    check "§155(9pre) located the daemon/foreground boundaries (elif SANDY_DAEMON, else, fi) inside the single-agent block, in order" \
+        bash -c '[ "$1" -gt 0 ] && [ "$2" -gt "$1" ] && [ "$3" -gt "$2" ]' \
+        _ "$_S155_ROW_ELIF" "$_S155_ROW_ELSE" "$_S155_ROW_FI"
+
+    _S155_D_NS="$(_s155_row_contains "$_S155_SA_FILE" 'tmux new-session' "$_S155_ROW_ELIF" "$_S155_ROW_ELSE")"
+    _S155_D_OPT="$(_s155_row_contains "$_S155_SA_FILE" 'set-option -p' "$_S155_ROW_ELIF" "$_S155_ROW_ELSE")"
+    _S155_D_EXIT="$(_s155_row_contains "$_S155_SA_FILE" 'exec tail -f /dev/null' "$_S155_ROW_ELIF" "$_S155_ROW_ELSE")"
+    check "§155(9a) daemon path: new-session (capturing the pane id) precedes set-option -p @sandy_pane_agent, which precedes exec tail -f /dev/null -- mutation (a)" \
+        bash -c '[ "$1" -gt 0 ] && [ "$2" -gt "$1" ] && [ "$3" -gt "$2" ]' \
+        _ "$_S155_D_NS" "$_S155_D_OPT" "$_S155_D_EXIT"
+
+    _S155_F_NS="$(_s155_row_contains "$_S155_SA_FILE" 'tmux new-session' "$_S155_ROW_ELSE" "$_S155_ROW_FI")"
+    _S155_F_OPT="$(_s155_row_contains "$_S155_SA_FILE" 'set-option -p' "$_S155_ROW_ELSE" "$_S155_ROW_FI")"
+    _S155_F_ATTACH="$(_s155_row_contains "$_S155_SA_FILE" 'tmux attach -t sandy' "$_S155_ROW_ELSE" "$_S155_ROW_FI")"
+    check "§155(9b) foreground path: new-session (capturing the pane id) precedes set-option -p @sandy_pane_agent, which precedes tmux attach -t sandy -- mutation (b)" \
+        bash -c '[ "$1" -gt 0 ] && [ "$2" -gt "$1" ] && [ "$3" -gt "$2" ]' \
+        _ "$_S155_F_NS" "$_S155_F_OPT" "$_S155_F_ATTACH"
+
+    check "§155(9c) the single-agent block never execs the attach directly -- mutation (c), the exact EXIT-trap/palette regression d164091 fixed" \
+        bash -c '! grep -q "exec tmux attach" "$1"' _ "$_S155_SA_FILE"
+
+    unset -f _s155_row_exact _s155_row_contains
+    rm -f "$_S155_SA_FILE"
+    unset _S155_SA_FILE _S155_ROW_ELIF _S155_ROW_ELSE _S155_ROW_FI \
+        _S155_D_NS _S155_D_OPT _S155_D_EXIT _S155_F_NS _S155_F_OPT _S155_F_ATTACH
 else
     skip "§155(4) templates/user-setup.sh.tmpl not found -- producer/consumer agreement not checked"
     skip "§155(8) templates/user-setup.sh.tmpl not found -- single-agent pane-tagging structure not checked"
+    skip "§155(9) templates/user-setup.sh.tmpl not found -- single-agent pane-tag ORDER not checked"
 fi
 
 rm -rf "$_S155_DIR"
-unset _S155_SANDY _S155_TMPL _S155_TAB _S155_DIR _S155_HS_HELPER _S155_HS _S155_OUT _S155_RC \
+unset _S155_SANDY _S155_TMPL _S155_SPEC _S155_TAB _S155_DIR _S155_HS_HELPER _S155_HS _S155_OUT _S155_RC \
     _S155_OUT1_L1 _S155_OUT1_L2 _S155_OUT2_L1 _S155_OUT2_L2 _S155_OUT2_L3 _S155_OUT2_L4 \
     _S155_TMPL_SESSIONS _S155_TMPL_OPTS _S155_TMPL_OPT_COUNT _S155_HS_SESSION _S155_HS_OPT \
     _S155_SA_BLOCK _S155_SA_NS_COUNT _S155_SA_OPT_COUNT
