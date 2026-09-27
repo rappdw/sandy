@@ -16,25 +16,38 @@
 # agent pane sandy's own launch would seed) so each layer can be set on its
 # own:
 #
-#   Q1/Q2   does --settings (Claude Code's "flagSettings" layer) deliver
-#           `accept` the way userSettings does, or is it tighten-only like
-#           the workspace files (§6a of the doc)?
+#   Q1/Q2   does --settings (Claude Code's "flagSettings" layer) still rank
+#           where §6a's single-layer probe measured it (able to deliver
+#           `accept`) once the OTHER layers are also set to something that
+#           disagrees, or is it tighten-only like the workspace files once
+#           they are in the mix?
 #   Q3a/b   is --settings repeatable, and if two occurrences disagree, does
 #           the LAST one win, or do all of them apply?
 #   Q3c     if --settings is repeatable, is a second occurrence a per-key
-#           MERGE onto the first, or does it REPLACE the whole object?
+#           MERGE onto the first, or does it REPLACE the whole object? (Q0,
+#           below, is the control this reading depends on.)
 #   Q3d     the #363 file-existence method: pass an existing settings file
 #           and a nonexistent one, in both orders, and see which order (if
 #           either) errors on the missing path. This tells you whether a
 #           flag consults every occurrence or silently only the last, WITHOUT
-#           needing to inspect Claude Code's resolved config at all.
+#           needing to inspect Claude Code's resolved config at all -- unless
+#           NEITHER order errors, which this harness reports as INCONCLUSIVE
+#           rather than as evidence either way (`--version` may short-circuit
+#           before --settings is fully parsed).
 #
-# K1/K2 are RIG-VALIDITY controls, not questions about Claude Code: K1 proves
-# the whole apparatus (container, --exec, seeded config, socket wait, the
-# inject frame) can deliver at all; K2 proves the workspace `refuse` layer
-# still blocks in this same rig. If K1 does not ROUTE, every Q result below it
-# is meaningless and the run prints RIG-INVALID and stops rather than
-# reporting Q-results that would look like real findings.
+# K1/K2/Q0 are RIG-VALIDITY / baseline controls, not questions about Claude
+# Code's own precedence: K1 proves the whole apparatus (container, --exec,
+# seeded config, socket wait, the inject frame) can deliver at all; K2 proves
+# the workspace `refuse` layer still blocks in this same rig -- several Q
+# cases depend on that layer actually tightening to isolate --settings from
+# userSettings, so K2 gates exactly like K1 does; Q0 measures the unset
+# default (no crossSessionInbound key in ANY layer) so Q3c's "does a later
+# --settings file MERGE or REPLACE" reading has something to compare against
+# other than a guess about what "unset" resolves to. If K1 or K2 does not
+# come back as expected, every Q result below it is meaningless and the run
+# prints RIG-INVALID, dumps whatever diagnostic evidence it captured (never
+# silently discarded), and stops rather than reporting Q-results that would
+# look like real findings.
 #
 # RESULTS ARE MEASURED, NEVER INFERRED. Every case is classified from the
 # receiver's own `--debug --debug-file` log, using the SAME success
@@ -274,24 +287,40 @@ cat > "$WS/.sandy/probe/driver.py" <<'MSI_DRIVER_PY'
 # Never run this file on the host directly -- it execs `claude` and opens the
 # cross-session UDS socket, which is meaningful only inside the sandbox.
 #
-# argv: driver.py <case_dir> <mode> [order]
-#   case_dir/spec.json describes the layers for this case (written by the
-#   host-side bash below). mode is "deliver" or "argcheck". "argcheck"
-#   additionally takes an order token, "AB" or "BA".
+# argv: driver.py <spec_dir> <run_dir> <mode> [order]
+#   spec_dir/spec.json describes the layers for this case (written by the
+#   host-side bash below, straight to the HOST filesystem before this
+#   process ever runs). spec_dir lives under $WS/.sandy/probe/<case> --
+#   `.sandy` is a protected workspace directory (CLAUDE.md "Protected
+#   Files"), mounted READ-ONLY in-container, so this process only ever
+#   READS spec.json (and the sibling driver.py/inject.py) from there; it
+#   never writes into spec_dir. (An earlier version of this file wrote
+#   cfg/, proj/, debug.log etc. straight into spec_dir and every one of
+#   those os.makedirs/open(..., "w") calls raised EROFS the first time it
+#   ran against a real container -- every case came back empty, which
+#   _msi_case's own `2>/dev/null` then hid, so it read as a broken frame
+#   rather than a read-only filesystem.)
+#   run_dir is a container-only path (NOT under the workspace mount, so it
+#   is writable) where every file this run actually CREATES lives: the
+#   seeded CLAUDE_CONFIG_DIR (cfg/), the receiver's project dir (proj/),
+#   debug.log, inject.log, and any --settings files this case writes.
+#   mode is "deliver" or "argcheck". "argcheck" additionally takes an
+#   order token, "AB" or "BA".
 #
 # Prints exactly one final line to stdout:
 #   deliver:  OUTCOME:<ROUTED|HELD|REFUSED|UNKNOWN|TRANSPORT-FAIL> signature=<...>
 #   argcheck: RC=<n> STDERR=<first non-empty stderr line, or (none)>
 import glob, json, os, pty, shutil, signal, subprocess, sys, time
 
-CASE_DIR, MODE = sys.argv[1], sys.argv[2]
-ORDER = sys.argv[3] if len(sys.argv) > 3 else ""
+SPEC_DIR, RUN_DIR, MODE = sys.argv[1], sys.argv[2], sys.argv[3]
+ORDER = sys.argv[4] if len(sys.argv) > 4 else ""
 
-with open(os.path.join(CASE_DIR, "spec.json")) as fh:
+with open(os.path.join(SPEC_DIR, "spec.json")) as fh:
     SPEC = json.load(fh)
 
-CFG = os.path.join(CASE_DIR, "cfg")
-PROJ = os.path.join(CASE_DIR, "proj")
+os.makedirs(RUN_DIR, exist_ok=True)
+CFG = os.path.join(RUN_DIR, "cfg")
+PROJ = os.path.join(RUN_DIR, "proj")
 os.makedirs(CFG, exist_ok=True)
 os.makedirs(PROJ, exist_ok=True)
 os.makedirs(os.path.join(PROJ, ".claude"), exist_ok=True)
@@ -324,17 +353,53 @@ def seed_config():
 def settings_argv():
     args = []
     for f in SPEC.get("settings_flags", []):
-        path = os.path.join(CASE_DIR, f["name"] + ".json")
+        path = os.path.join(RUN_DIR, f["name"] + ".json")
         with open(path, "w") as fh:
             json.dump(f["content"], fh)
         args += ["--settings", path]
     return args
 
 
+def _msi_classify(debug_log, pre_off, iters=30, sleep_s=0.5):
+    # Isolated on purpose: test/run-tests.sh section 158(a5) extracts and
+    # EXECUTES this exact function against fixture debug logs (one with no
+    # signature line, one with the ROUTED signature) to prove the
+    # no-signature fallback really is UNKNOWN -- rather than grepping this
+    # file's TEXT for the string "UNKNOWN", which a mutated default of
+    # "ROUTED" would still satisfy (the string still appears, in this very
+    # comment). That grep-only check shipped once and was shown not to
+    # catch this exact mutation.
+    outcome, sig = "UNKNOWN", "(no decision line within poll window)"
+    for _ in range(iters):
+        with open(debug_log) as fh:
+            fh.seek(pre_off)
+            tail = fh.read()
+        if "Routed user message to queue" in tail:
+            for line in tail.splitlines():
+                if "Routed user message to queue" in line:
+                    outcome, sig = "ROUTED", line.strip()[:160]
+                    break
+            break
+        if "held inbound peer message" in tail:
+            for line in tail.splitlines():
+                if "held inbound peer message" in line:
+                    outcome, sig = "HELD", line.strip()[:160]
+                    break
+            break
+        if "refused inbound peer message" in tail:
+            for line in tail.splitlines():
+                if "refused inbound peer message" in line:
+                    outcome, sig = "REFUSED", line.strip()[:160]
+                    break
+            break
+        time.sleep(sleep_s)
+    return outcome, sig
+
+
 def run_deliver():
     seed_config()
     args = settings_argv()
-    debug_log = os.path.join(CASE_DIR, "debug.log")
+    debug_log = os.path.join(RUN_DIR, "debug.log")
     open(debug_log, "a").close()
     pre_off = os.path.getsize(debug_log)
 
@@ -389,9 +454,9 @@ def run_deliver():
             pass
         return
 
-    inject_log = os.path.join(CASE_DIR, "inject.log")
+    inject_log = os.path.join(RUN_DIR, "inject.log")
     open(inject_log, "w").close()
-    marker = "MSI-%s-%d" % (os.path.basename(CASE_DIR), os.getpid())
+    marker = "MSI-%s-%d" % (os.path.basename(RUN_DIR), os.getpid())
     subprocess.run([
         "python3", os.path.join(os.path.dirname(os.path.abspath(__file__)), "inject.py"),
         sock_path, keyfile, marker, inject_log,
@@ -415,30 +480,7 @@ def run_deliver():
             pass
         return
 
-    outcome, sig = "UNKNOWN", "(no decision line within poll window)"
-    for _ in range(30):
-        with open(debug_log) as fh:
-            fh.seek(pre_off)
-            tail = fh.read()
-        if "Routed user message to queue" in tail:
-            for line in tail.splitlines():
-                if "Routed user message to queue" in line:
-                    outcome, sig = "ROUTED", line.strip()[:160]
-                    break
-            break
-        if "held inbound peer message" in tail:
-            for line in tail.splitlines():
-                if "held inbound peer message" in line:
-                    outcome, sig = "HELD", line.strip()[:160]
-                    break
-            break
-        if "refused inbound peer message" in tail:
-            for line in tail.splitlines():
-                if "refused inbound peer message" in line:
-                    outcome, sig = "REFUSED", line.strip()[:160]
-                    break
-            break
-        time.sleep(0.5)
+    outcome, sig = _msi_classify(debug_log, pre_off)
 
     print("OUTCOME:%s signature=%s" % (outcome, sig))
     try:
@@ -449,10 +491,10 @@ def run_deliver():
 
 def run_argcheck():
     seed_config()
-    exists_path = os.path.join(CASE_DIR, "exists.json")
+    exists_path = os.path.join(RUN_DIR, "exists.json")
     with open(exists_path, "w") as fh:
         json.dump({}, fh)
-    missing_path = os.path.join(CASE_DIR, "definitely-missing.json")
+    missing_path = os.path.join(RUN_DIR, "definitely-missing.json")
     if ORDER == "AB":
         flags = ["--settings", exists_path, "--settings", missing_path]
     else:
@@ -486,16 +528,26 @@ MSI_DRIVER_PY
 
 # ---------------------------------------------------------------------------
 # _msi_case <case> <mode> [order] [user_json] [local_json] [settings_json...]
-# Writes CASE_DIR/spec.json from the layer arguments (any of user/local may be
-# the literal string "-" for "not set"), runs the driver via `sandy --exec`,
+# Writes SPEC_DIR/spec.json (spec_dir is the READ-ONLY-in-container
+# $WS/.sandy/probe/<case> -- see driver.py's own header for why) from the
+# layer arguments (any of user/local may be the literal string "-" for "not
+# set"), runs the driver via `sandy --exec` against a container-only,
+# WRITABLE run_dir (/tmp/msi-probe/<case>, never under the workspace mount),
 # and echoes its one result line back to the caller. --settings files are
 # named ext0, ext1, ... in ARGUMENT order, which is the ORDER passed on the
 # claude command line -- the thing Q3a/Q3b/Q3c/Q3d are measuring.
+#
+# The driver's stderr goes to spec_dir/stderr.log rather than /dev/null --
+# this redirect runs in the HOST shell (it is the host-side `sandy --exec`
+# invocation's own stderr), so it lands on the host filesystem regardless of
+# what is read-only inside the container, and gives a RIG-INVALID something
+# to show instead of a bare refusal.
 _msi_case() {
     local case="$1" mode="$2" order="$3" user_json="$4" local_json="$5"
     shift 5
-    local case_dir="$WS/.sandy/probe/$case"
-    mkdir -p "$case_dir"
+    local spec_dir="$WS/.sandy/probe/$case"
+    local run_dir="/tmp/msi-probe/$case"
+    mkdir -p "$spec_dir"
 
     local spec="{"
     if [ "$user_json" != "-" ]; then spec="${spec}\"user_settings\":$user_json,"; fi
@@ -509,10 +561,72 @@ _msi_case() {
         i=$((i + 1))
     done
     spec="${spec}]}"
-    printf '%s' "$spec" > "$case_dir/spec.json"
+    printf '%s' "$spec" > "$spec_dir/spec.json"
 
     "$SANDY" --exec --workspace "$WS" -- \
-        python3 "$WS/.sandy/probe/driver.py" "$case_dir" "$mode" "$order" 2>/dev/null
+        python3 "$WS/.sandy/probe/driver.py" "$spec_dir" "$run_dir" "$mode" "$order" \
+        2>"$spec_dir/stderr.log"
+}
+
+# _msi_dump_evidence <case> -- prints the driver's own stderr and whatever is
+# in the in-container debug.log for a case, so a RIG-INVALID leaves something
+# to read instead of nothing. Best-effort: both sources may be empty or
+# gone, and that is reported as such rather than treated as an error.
+_msi_dump_evidence() {
+    local case="$1"
+    echo "  -- driver stderr ($case), from $WS/.sandy/probe/$case/stderr.log --"
+    sed 's/^/    | /' "$WS/.sandy/probe/$case/stderr.log" 2>/dev/null
+    echo "  -- in-container debug.log ($case), from /tmp/msi-probe/$case/debug.log, if any --"
+    "$SANDY" --exec --workspace "$WS" -- cat "/tmp/msi-probe/$case/debug.log" 2>/dev/null | sed 's/^/    | /'
+}
+
+# _msi_row <label> <layers> <raw> -- splits a raw "OUTCOME:<X> signature=<...>"
+# (or "RC=<n> STDERR=<...>") result string into real outcome/signature table
+# columns, rather than putting the whole raw string in one column next to a
+# static placeholder in the other.
+_msi_row() {
+    local label="$1" layers="$2" raw="$3"
+    local outcome sig rest
+    case "$raw" in
+        OUTCOME:*)
+            rest="${raw#OUTCOME:}"
+            outcome="${rest%% signature=*}"
+            sig="${rest#*signature=}"
+            ;;
+        *)
+            outcome="UNPARSED"
+            sig="$raw"
+            ;;
+    esac
+    printf '| %s | %s | %s | %s |\n' "$label" "$layers" "$outcome" "$sig"
+}
+
+# _msi_q3d_reading <ab_raw> <ba_raw> -- COMPUTES the Q3d conclusion from the
+# two argcheck exit codes instead of leaving static prose that assumes one
+# of only two possible shapes. A third shape is real: `--version` may
+# short-circuit before --settings is fully parsed, in which case NEITHER
+# order errors on the missing file and the case is inconclusive rather than
+# evidence of repeatability either way.
+_msi_q3d_reading() {
+    local ab="$1" ba="$2" ab_rc ba_rc
+    ab_rc="${ab#RC=}"; ab_rc="${ab_rc%% *}"
+    ba_rc="${ba#RC=}"; ba_rc="${ba_rc%% *}"
+    if [ "$ab_rc" = "0" ] && [ "$ba_rc" = "0" ]; then
+        echo "INCONCLUSIVE: neither order errored on the missing file. --version likely"
+        echo "short-circuits before --settings is fully parsed on this build -- rerun Q3d"
+        echo "with a subcommand that forces full settings resolution instead of --version"
+        echo "before reading this either way."
+    elif [ "$ab_rc" != "0" ] && [ "$ba_rc" != "0" ]; then
+        echo "Both orders errored on the missing file -- --settings is REPEATABLE (every"
+        echo "occurrence is read, not only the last one); see Q3c for merge-vs-replace."
+    elif [ "$ab_rc" != "0" ]; then
+        echo "Only exists-then-missing (AB) errored -- --settings is LAST-WINS (only the"
+        echo "final occurrence is ever consulted)."
+    else
+        echo "Only missing-then-exists (BA) errored -- --settings is LAST-WINS (only the"
+        echo "final occurrence is ever consulted); the missing file surfaces only when it"
+        echo "is that final occurrence."
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -531,12 +645,30 @@ case "$_MSI_K1" in
         echo "  inject-frame), not that sandy's own posture regressed -- re-derive the frame"
         echo "  against the current Claude Code build the way docs/security/"
         echo "  CROSS_SESSION_INBOUND.md §6a did, before assuming a Claude Code change."
+        _msi_dump_evidence k1
         exit 2
         ;;
 esac
 
 _MSI_K2="$(_msi_case k2 deliver "" - '{"crossSessionInbound":"refuse"}' )"
 echo "  K2 (no userSettings key, local refuse): $_MSI_K2"
+case "$_MSI_K2" in
+    OUTCOME:REFUSED*) ;;
+    *)
+        echo ""
+        echo "RIG-INVALID: K2 (no userSettings key, local refuse) did not REFUSE."
+        echo "  Several Q cases below rely on the workspace tighten-only layer actually"
+        echo "  blocking so that --settings can be isolated from userSettings -- if it does"
+        echo "  not block here, those readings cannot be trusted either, so nothing further ran."
+        _msi_dump_evidence k2
+        exit 2
+        ;;
+esac
+
+echo ""
+echo "-- baseline: no crossSessionInbound key in ANY layer --"
+_MSI_Q0="$(_msi_case q0 deliver "" '{}' - )"
+echo "  Q0 (no key anywhere): $_MSI_Q0"
 
 echo ""
 echo "-- running Q1/Q2/Q3 --"
@@ -560,20 +692,24 @@ echo "Measured: $_MSI_DATE"
 echo ""
 echo "| case | layers | outcome | signature line |"
 echo "|---|---|---|---|"
-echo "| K1 | userSettings=accept | see above | $_MSI_K1 |"
-echo "| K2 | userSettings=(absent), local=refuse | see above | $_MSI_K2 |"
-echo "| Q1 | userSettings={}, local=refuse, --settings=accept | measured | $_MSI_Q1 |"
-echo "| Q2 | userSettings=refuse, --settings=accept | measured | $_MSI_Q2 |"
-echo "| Q3a | --settings accept, --settings refuse (A then B) | measured | $_MSI_Q3A |"
-echo "| Q3b | --settings refuse, --settings accept (B then A) | measured | $_MSI_Q3B |"
-echo "| Q3c | --settings accept, --settings {cleanupPeriodDays:30} | measured | $_MSI_Q3C |"
+_msi_row "K1" "userSettings=accept" "$_MSI_K1"
+_msi_row "K2" "userSettings=(absent), local=refuse" "$_MSI_K2"
+_msi_row "Q0" "baseline: no crossSessionInbound key in any layer" "$_MSI_Q0"
+_msi_row "Q1" "userSettings={}, local=refuse, --settings=accept" "$_MSI_Q1"
+_msi_row "Q2" "userSettings=refuse, --settings=accept" "$_MSI_Q2"
+_msi_row "Q3a" "--settings accept, --settings refuse (A then B)" "$_MSI_Q3A"
+_msi_row "Q3b" "--settings refuse, --settings accept (B then A)" "$_MSI_Q3B"
+_msi_row "Q3c" "--settings accept, --settings {cleanupPeriodDays:30}" "$_MSI_Q3C"
 echo "| Q3d-AB | --settings exists --settings /nonexistent --version | $_MSI_Q3D_AB | n/a |"
 echo "| Q3d-BA | --settings /nonexistent --settings exists --version | $_MSI_Q3D_BA | n/a |"
 echo ""
-echo "Reading Q3d: if only Q3d-AB reports a nonzero RC naming the missing file,"
-echo "--settings is LAST-WINS (only the final occurrence's file is ever consulted)."
-echo "If BOTH orders error, every occurrence is read (repeatable) -- see Q3c for"
-echo "whether repeated occurrences then MERGE per-key or REPLACE wholesale."
+echo "Reading Q0: it is the unset-default control the Q3c reading depends on -- if Q0"
+echo "does NOT route, the unset default here is not accept, which is what makes a"
+echo "ROUTED Q3c legible as 'merge onto the earlier file', not 'replaced by the unset"
+echo "default'."
+echo ""
+echo "Reading Q3d:"
+_msi_q3d_reading "$_MSI_Q3D_AB" "$_MSI_Q3D_BA"
 echo "==================================================="
 
 exit 0

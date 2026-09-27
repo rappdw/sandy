@@ -18373,8 +18373,73 @@ check "§158(a4) no non-comment line references CLAUDE_CODE_MESSAGING_TOKEN (mut
 check "§158(a4-mut) ...and the check above actually fires on an injected non-comment line naming the token (self-test of (a4), not a repo assertion)" \
     bash -c 'printf "%s\ntoken = CLAUDE_CODE_MESSAGING_TOKEN\n" "$(cat "$1")" | grep -vE "^[[:space:]]*#" | grep -q "CLAUDE_CODE_MESSAGING_TOKEN"' -- "$_S158_MSI"
 
-check "§158(a5) prints UNKNOWN when a send is confirmed but no decision signature appears within the poll window (never silently reads absence as a verdict)" \
-    bash -c 'grep -q "UNKNOWN" "$1" && grep -q "no decision line within poll window" "$1" && grep -q "OUTCOME:%s signature=%s" "$1"' -- "$_S158_MSI"
+# (a5) the fallback classification really IS UNKNOWN, not merely that the
+# STRING "UNKNOWN" appears somewhere in the file. A verifier mutated
+# driver.py's fallback default from `outcome, sig = "UNKNOWN", ...` to
+# `outcome, sig = "ROUTED", ...` and the previous version of this check
+# (three `grep -q` calls on literal substrings) stayed green, because every
+# one of those substrings still appears -- two of them in the very comment
+# that DESCRIBES the property rather than in code that enforces it. So this
+# extracts driver.py's own `_msi_classify` function out of the harness (a
+# plain regex slice of the real source, not a reimplementation that could
+# quietly drift from it) and EXECUTES it against two fixture debug logs:
+# one with no signature line at all, one containing the ROUTED signature.
+# Written to scratch files, never the tracked script.
+_S158_CLASSIFY_TEST="$(mktemp)"
+cat > "$_S158_CLASSIFY_TEST" <<'PY'
+import re, sys, tempfile, os
+
+path = sys.argv[1]
+expect = sys.argv[2]  # "ok": the fallback must read UNKNOWN; "mutated": it must NOT
+
+src = open(path).read()
+m = re.search(r"\ndef _msi_classify\(.*?\n(?=\ndef )", src, re.S)
+if not m:
+    print("EXTRACT-FAIL: _msi_classify not found in %s" % path, file=sys.stderr)
+    sys.exit(3)
+
+ns = {}
+exec("import time\n" + m.group(0), ns)
+classify = ns["_msi_classify"]
+
+fds = []
+
+
+def _fixture(text):
+    fd, p = tempfile.mkstemp(suffix=".log")
+    os.write(fd, text.encode())
+    os.close(fd)
+    fds.append(p)
+    return p
+
+
+empty_log = _fixture("nothing interesting here\n")
+routed_log = _fixture("... Routed user message to queue ...\n")
+try:
+    outcome_empty, _ = classify(empty_log, 0, iters=1, sleep_s=0)
+    outcome_routed, _ = classify(routed_log, 0, iters=1, sleep_s=0)
+finally:
+    for p in fds:
+        os.unlink(p)
+
+if expect == "ok":
+    sys.exit(0 if (outcome_empty == "UNKNOWN" and outcome_routed == "ROUTED") else 1)
+else:
+    # expect == "mutated": the property must be BROKEN -- the no-signature
+    # fixture must no longer read UNKNOWN.
+    sys.exit(0 if outcome_empty != "UNKNOWN" else 1)
+PY
+
+check "§158(a5) the driver's OWN _msi_classify function (extracted and executed, not grepped for) reports UNKNOWN for a fixture debug.log with no signature line, and ROUTED for one with the ROUTED signature" \
+    python3 "$_S158_CLASSIFY_TEST" "$_S158_MSI" ok
+
+_S158_MUT_MSI="$(mktemp)"
+sed 's/outcome, sig = "UNKNOWN", "(no decision line within poll window)"/outcome, sig = "ROUTED", "(no decision line within poll window)"/' "$_S158_MSI" > "$_S158_MUT_MSI"
+check "§158(a5-mut) ...and mutating that fallback default to ROUTED in a scratch copy makes the no-signature fixture misreport ROUTED (self-test of (a5): the exact mutation a verifier applied, which the old string-grep check missed)" \
+    python3 "$_S158_CLASSIFY_TEST" "$_S158_MUT_MSI" mutated
+
+rm -f "$_S158_CLASSIFY_TEST" "$_S158_MUT_MSI"
+unset _S158_CLASSIFY_TEST _S158_MUT_MSI
 
 check "§158(a6) lint-bash32's default target set picks up this file with no wiring (test/*.sh, confirmed via --list rather than assumed)" \
     bash -c 'bash "$1" --list | grep -qF "measure-settings-inbound.sh"' -- "$(cd "$(dirname "$0")" && pwd)/lint-bash32.sh"
@@ -18384,11 +18449,23 @@ check "§158(a7) ...and the file itself is clean under lint-bash32" \
 check "§158(a8) NOT wired into run-integration-tests.sh (it is a measurement with no pass/fail verdict, and says so in its own header)" \
     bash -c '! grep -q "measure-settings-inbound" "$1"' -- "$(cd "$(dirname "$0")/.." && pwd)/test/run-integration-tests.sh"
 
+# (a9) the exact BLOCKER a verifier hit live: an earlier version of this
+# harness put a case's writable run-time state (CFG/PROJ -- the seeded
+# CLAUDE_CONFIG_DIR, the receiver's project dir) under $WS/.sandy/probe/,
+# which is `.sandy`, a protected workspace directory mounted READ-ONLY
+# in-container (CLAUDE.md "Protected Files"). Every os.makedirs/open(...,
+# "w") in there raised EROFS, silenced by _msi_case's own `2>/dev/null`, so
+# K1 came back empty and every run printed RIG-INVALID. This pins that the
+# writable state lives under RUN_DIR (a container-only /tmp path) and never
+# under the read-only spec directory.
+check "§158(a9) writable per-case state (CFG/PROJ) is built from RUN_DIR, a container-only /tmp path -- never from the read-only-in-container spec directory under \$WS/.sandy/probe" \
+    bash -c 'grep -q "CFG = os.path.join(RUN_DIR" "$1" && grep -q "PROJ = os.path.join(RUN_DIR" "$1" && grep -q "run_dir=\"/tmp/" "$1"' -- "$_S158_MSI"
+
 unset _S158_MSI
 
 # --- (b) the #383 consumer-boundary rule: sandy code and docs name no
-# consumer's protocol (docs/DESIGN-NOTES.md / CLAUDE.md "Consumer boundary").
-# u381 replaced the single-entry rationale that used to cite "a connector's
+# consumer's protocol (CLAUDE.md "Consumer boundary", directly after "What
+# This Is"). u381 replaced the single-entry rationale that used to cite "a connector's
 # claim lock"; this is the ratchet that keeps it from coming back. Tested
 # against a COPY of the file (a temp file, never the tracked script) so a
 # mutation self-test never leaves the working tree dirty if interrupted
