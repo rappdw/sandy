@@ -9913,6 +9913,12 @@ set -euo pipefail
 trap 'printf "[err-trap] line %d: %s exited %d\n" "$LINENO" "$BASH_COMMAND" "$?" >&2' ERR
 set -E
 
+# The real suite defines these before the hook block; fail() needs them.
+PASS=0; FAIL=0; SKIP=0; ERRORS=()
+# Source the block from the LAUNCH directory ($2, a fake repo root carrying
+# test/refresh-rel.sh), exactly as the workflow launches the suite from the
+# repo root -- the block captures its launch dir at source time.
+cd "$2"
 # shellcheck source=/dev/null
 . "$1"
 
@@ -9927,7 +9933,9 @@ printf 'SCEN2_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-<unset>}"
 
 # SCEN3: force due, but the refresh command FAILS -- must warn, must NOT
 # abort the harness (proves the RC-guard, not `|| true`), must keep the
-# previous token.
+# previous token. GITHUB_ACTIONS is unset first: CI sets it, and this
+# scenario asserts the plain-terminal shape (no annotation).
+unset GITHUB_ACTIONS 2>/dev/null || true
 export ANTHROPIC_AUTH_TOKEN="tok-A"
 _CRED_LAST_REFRESH=-9999
 _scen3_out="$(mktemp)"
@@ -9939,7 +9947,43 @@ if grep -q "credential refresh failed" "$_scen3_out"; then
 else
     printf 'SCEN3_WARNED=no\n'
 fi
+# #257: the failure is RECORDED (the run ends red), not a yellow line.
+printf 'SCEN3_FAILS=%s\n' "$FAIL"
+if grep -q '^::error' "$_scen3_out"; then
+    printf 'SCEN3_ANNOTATED=yes\n'
+else
+    printf 'SCEN3_ANNOTATED=no\n'
+fi
 rm -f "$_scen3_out"
+FAIL=0; ERRORS=()
+
+# SCEN3b: the same failure under GITHUB_ACTIONS is an ::error annotation.
+_CRED_LAST_REFRESH=-9999
+_scen3b_out="$(mktemp)"
+GITHUB_ACTIONS=true SANDY_INTEG_CRED_REFRESH_CMD='exit 7' section "3b. Third-b" >"$_scen3b_out"
+if grep -q '^::error title=Credential refresh failed::section 3b: .*exited 7' "$_scen3b_out"; then
+    printf 'SCEN3B_ANNOTATED=yes\n'
+else
+    printf 'SCEN3B_ANNOTATED=no\n'
+fi
+rm -f "$_scen3b_out"
+FAIL=0; ERRORS=()
+
+# SCEN3c (#257): a RELATIVE refresh command, run after the suite has cd-ed
+# into a scratch workspace (what setup_project() does) -- the CI shape,
+# `bash test/ci-wif-access-token.sh`, that failed rc=127 on every section
+# after the first. It must still resolve against the launch directory.
+_scen3c_ws="$(mktemp -d)"
+cd "$_scen3c_ws"
+_CRED_LAST_REFRESH=-9999
+export ANTHROPIC_AUTH_TOKEN="tok-OLD"
+SANDY_INTEG_CRED_REFRESH_CMD='bash test/refresh-rel.sh' section "3c. Third-c" >/dev/null
+printf 'SCEN3C_TOKEN=%s\n' "${ANTHROPIC_AUTH_TOKEN:-<unset>}"
+printf 'SCEN3C_FAILS=%s\n' "$FAIL"
+printf 'SCEN3C_CWD_UNCHANGED=%s\n' "$([ "$(pwd -P)" = "$(cd "$_scen3c_ws" && pwd -P)" ] && echo yes || echo no)"
+cd "$2"
+rm -rf "$_scen3c_ws"
+FAIL=0; ERRORS=()
 
 # SCEN4: force due, GITHUB_ACTIONS set -- ::add-mask:: must be emitted.
 _CRED_LAST_REFRESH=-9999
@@ -9992,8 +10036,13 @@ S103DRIVER
 chmod +x "$_S103_DRIVER"
 
 _S103_DRIVER_OUT="$(mktemp)"
+# A fake repo root to launch from, carrying the relative refresh script SCEN3c
+# names -- the stand-in for test/ci-wif-access-token.sh.
+_S103_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S103_ROOT/test"
+printf '#!/bin/sh\necho tok-REL\n' > "$_S103_ROOT/test/refresh-rel.sh"
 _s103_rc=0
-bash "$_S103_DRIVER" "$_S103_HOOKSRC" >"$_S103_DRIVER_OUT" 2>&1 && _s103_rc=0 || _s103_rc=$?
+bash "$_S103_DRIVER" "$_S103_HOOKSRC" "$_S103_ROOT" >"$_S103_DRIVER_OUT" 2>&1 && _s103_rc=0 || _s103_rc=$?
 
 check "§103(b1) the driver harness completed all scenarios without the ERR trap firing (mutation: an unguarded \`|| true\` swallowing a real error would let this pass even on broken code -- exit code AND the completion marker are both asserted)" \
     bash -c 'test "$1" -eq 0 && grep -q "ALL_SCENARIOS_COMPLETE=yes" "$2" && ! grep -q "err-trap" "$2"' \
@@ -10008,6 +10057,18 @@ check "§103(b5) a FAILING refresh command warns" \
     bash -c 'grep -q "^SCEN3_WARNED=yes$" "$1"' -- "$_S103_DRIVER_OUT"
 check "§103(b6) a FAILING refresh command keeps the previous token (mutation: exporting an empty/garbage token on failure)" \
     bash -c 'grep -q "^SCEN3_TOKEN=tok-A$" "$1"' -- "$_S103_DRIVER_OUT"
+check "§103(b6a) a FAILING refresh is RECORDED as a failure, so the run ends red -- a yellow line mid-log hid an inert refresh for an unknown number of runs (#257; mutation: printing instead of fail())" \
+    grep -qx 'SCEN3_FAILS=1' "$_S103_DRIVER_OUT"
+check "§103(b6b) ...and emits no ::error annotation outside GitHub Actions" \
+    grep -qx 'SCEN3_ANNOTATED=no' "$_S103_DRIVER_OUT"
+check "§103(b6c) under GITHUB_ACTIONS a failing refresh is an ::error annotation naming the section and rc, visible on the run page (#257; mutation: dropping the annotation)" \
+    grep -qx 'SCEN3B_ANNOTATED=yes' "$_S103_DRIVER_OUT"
+check "§103(b6d) a RELATIVE refresh command still resolves after the suite has cd-ed into a scratch workspace -- the CI shape that failed rc=127 on every section after the first setup_project() (#257; mutation: dropping the cd to the launch dir)" \
+    grep -qx 'SCEN3C_TOKEN=tok-REL' "$_S103_DRIVER_OUT"
+check "§103(b6e) ...recording no failure" \
+    grep -qx 'SCEN3C_FAILS=0' "$_S103_DRIVER_OUT"
+check "§103(b6f) ...and the directory change is scoped to the refresh: the suite is still in its workspace afterwards (mutation: a cd outside the subshell would move every later section)" \
+    grep -qx 'SCEN3C_CWD_UNCHANGED=yes' "$_S103_DRIVER_OUT"
 check "§103(b7) ::add-mask:: IS emitted under GITHUB_ACTIONS (SCEN4)" \
     bash -c 'grep -q "^SCEN4_MASKED=yes$" "$1"' -- "$_S103_DRIVER_OUT"
 check "§103(b8) ::add-mask:: is NOT emitted without GITHUB_ACTIONS (SCEN5, mutation: emitting it unconditionally would leak the marker into a plain terminal run)" \
@@ -10020,7 +10081,7 @@ check "§103(b10) age 61s IS due — the section gets a fresh token (pins the 60
 check "§103(b11) age 59s is NOT due — the previous token is kept (pins the other side of the same threshold)" \
     grep -qx 'SCEN8_TOKEN=tok-KEEP' "$_S103_DRIVER_OUT"
 
-rm -f "$_S103_HOOKSRC" "$_S103_DRIVER" "$_S103_DRIVER_OUT"
+rm -f "$_S103_HOOKSRC" "$_S103_DRIVER" "$_S103_DRIVER_OUT"; rm -rf "$_S103_ROOT"
 
 # --- (c) structural: HAS_CLAUDE credential detection names ANTHROPIC_AUTH_TOKEN ---
 
