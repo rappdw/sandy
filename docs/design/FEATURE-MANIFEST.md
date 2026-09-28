@@ -222,7 +222,7 @@ Sandy detects this at the host, rather than leaving it to `--print-state` alone:
 
 ## 11. `receives` — declaring a need, not a mechanism (2.4.0, #380)
 
-**The problem it replaces.** `SANDY_CROSS_SESSION_INBOUND`'s unset default used to resolve `accept` iff a feature manifest `entry` would actually start this launch — tying sandy's receive posture to one mechanism (the supervised entry) that exists because of #383's decoupling umbrella. A feature that needs to receive cross-session messages but ships no entry — or whose entry `SANDY_RELAY=0` has stopped — had no way to say so, and the coupling meant "is an entry running" was standing in for a question it does not actually answer ("does anything need delivery").
+**The problem it replaces.** `SANDY_CROSS_SESSION_INBOUND`'s unset default used to resolve `accept` iff a feature manifest `entry` would actually start this launch — tying sandy's receive posture to one mechanism (the supervised entry) that exists because of one consumer's needs (see #383's decoupling umbrella). A feature that needs to receive cross-session messages but ships no entry — or whose entry `SANDY_RELAY=0` has stopped — had no way to say so, and the coupling meant "is an entry running" was standing in for a question it does not actually answer ("does anything need delivery").
 
 **The shape: `"receives": ["cross_session"]`, a closed set of enums, not a string and not a boolean.**
 
