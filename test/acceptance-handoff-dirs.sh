@@ -265,16 +265,23 @@ done
 ck "tmux list-panes -s -t sandy reports a pane tagged @sandy_pane_agent=claude" \
    "printf '%s\n' \"\$_pt\" | grep -qx claude"
 
-echo "-- E6. crossSessionInbound pin lands in both measured-working files --"
-_marker="$(docker exec -u "$(id -u)" "$C3" cat /etc/sandy-session.json 2>/dev/null)"
+echo "-- E6. crossSessionInbound: decision 6 (#382, 2.6.0) -- an entry alone, with no declared receives, now resolves refuse --"
+# The acc-relay fixture (above) ships an `entry` and declares NO `receives`.
+# Through 2.5.x that shape resolved crossSessionInbound to accept via the
+# (now-removed) relay-conditional default; this is the runtime proof that it
+# no longer does, WITH a real supervised entry running (E2-E4 above already
+# proved the process is alive) -- refuse is not merely "nothing was running".
 ck "session marker reports relay.source=manifest -- handoff_relay was REMOVED in #355 and relay.source replaced it, so asserting the old field would be asserting a mechanism that no longer exists" \
    "docker exec \"$C3\" grep -q '\"source\": \"manifest\"' /etc/sandy-session.json"
-ck "session marker reports cross_session_inbound=\"accept\" (default: relay configured)" \
-   "printf '%s' \"\$_marker\" | grep -q '\"cross_session_inbound\": \"accept\"'"
-ck "userSettings (sandbox claude/settings.json, RW) carries the accept pin" \
-   "grep -q '\"crossSessionInbound\": *\"accept\"' \"$SBX3/claude/settings.json\""
-ck "workspace .claude/settings.local.json ALSO carries the pin (harmless no-op there, clears staleness)" \
-   "grep -q '\"crossSessionInbound\": *\"accept\"' \"$WS3/.claude/settings.local.json\""
+_marker="$(docker exec -u "$(id -u)" "$C3" cat /etc/sandy-session.json 2>/dev/null)"
+ck "session marker reports cross_session_inbound=\"refuse\" (an entry alone no longer buys accept)" \
+   "printf '%s' \"\$_marker\" | grep -q '\"cross_session_inbound\": \"refuse\"'"
+ck "session marker reports cross_session_inbound_source=\"default\", never \"relay-legacy\" (that source value is retired)" \
+   "printf '%s' \"\$_marker\" | grep -q '\"cross_session_inbound_source\": \"default\"'"
+ck "userSettings (sandbox claude/settings.json, RW) carries the refuse pin" \
+   "grep -q '\"crossSessionInbound\": *\"refuse\"' \"$SBX3/claude/settings.json\""
+ck "workspace .claude/settings.local.json ALSO carries the pin" \
+   "grep -q '\"crossSessionInbound\": *\"refuse\"' \"$WS3/.claude/settings.local.json\""
 # WS3 is under /tmp, outside $HOME, so sandy's workspace-mount fallback mounts
 # it at its own real host path verbatim -- the container path equals $WS3.
 ck "the workspace settings.local.json is genuinely :ro in-container" \

@@ -127,9 +127,13 @@ mkdir -p "$WS/.sandy" && (cd "$WS" && git init -q)
 WS="$(cd "$WS" && pwd -P)"   # sandy.workspace_path labels hold the canonical form
 cid() { docker ps -q --filter label=sandy.daemon=true --filter "label=sandy.workspace_path=$WS" 2>/dev/null | head -1; }
 
-# A relay that does nothing but stay alive. Its ONLY job here is to make
-# SANDY_HANDOFF_RELAY resolve, which is what drives the conditional default to
-# `accept` — this harness measures the setting, not the relay.
+# A relay that does nothing but stay alive. Its job here is TWO THINGS,
+# deliberately separated since decision 6 (#382, 2.6.0) removed the
+# entry-alone default: the manifest DECLARES the need (`receives:
+# ["cross_session"]`), which is what drives the resolution to `accept` --
+# this harness measures the setting, not the relay -- and the `entry` keeps a
+# real supervised process alive in the loop so the delivery path is exercised
+# against a genuine feature entry, not a bare declaration.
 #
 # Installed as a feature manifest `entry`. The config key it used to use was
 # REMOVED in 2.2.0 (#354) and setting it is now a hard error before launch, so
@@ -149,7 +153,8 @@ cat > "$_UDS_FEAT/feature.json" <<'UDS_MANIFEST'
 { "sandboxes": { "include": ["*"] },
   "agents": { "include": ["*"] },
   "mounts": [ { "name": "payload", "from": "payload" } ],
-  "entry": "payload/relay" }
+  "entry": "payload/relay",
+  "receives": ["cross_session"] }
 UDS_MANIFEST
 # Run the receiver under Claude Code's own debug log. This is the authoritative
 # artifact the original probe (docs/security/CROSS_SESSION_INBOUND.md §6) read
@@ -466,6 +471,11 @@ run_case() {
     if [ "$expect" != no ]; then
         ck "[$label] marker reports cross_session_inbound=accept" \
            "printf '%s' \"\$marker_json\" | grep -q '\"cross_session_inbound\": \"accept\"'"
+        # Decision 6 (#382, 2.6.0): accept must come from the DECLARED NEED,
+        # never the removed entry-alone default. Its own field, no neighbours
+        # (§88b) -- a single grep -q on the field's own line.
+        ck "[$label] marker reports cross_session_inbound_source=feature:udsrelay (the declared need, not the removed entry-alone default)" \
+           "printf '%s' \"\$marker_json\" | grep -q '\"cross_session_inbound_source\": \"feature:udsrelay\"'"
     else
         ck "[$label] marker reports cross_session_inbound=refuse" \
            "printf '%s' \"\$marker_json\" | grep -q '\"cross_session_inbound\": \"refuse\"'"
@@ -720,7 +730,7 @@ echo "=== criterion 7.4: does sandy's \`accept\` actually lift the hold, in a re
 # under /tmp (outside $HOME), so it lands at its own real path verbatim.
 SANDY_WS_IN_CONTAINER="$WS"
 
-echo "-- 1. relay configured -> conditional default resolves to accept --"
+echo "-- 1. a feature declares receives cross_session -> default resolves to accept --"
 run_case "accept" yes ""
 
 echo "-- 2. negative control: explicit refuse, identical injection --"

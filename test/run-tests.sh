@@ -11358,7 +11358,13 @@ _S114_CSI_BLK="$(sed -n '/^# BEGIN cross-session inbound/,/^# END cross-session 
 check "§114(7pre) extracted the full cross-session-inbound block" \
     bash -c 'printf "%s" "$1" | grep -q "SANDY_CROSS_SESSION_INBOUND"' -- "$_S114_CSI_BLK"
 _s114_csi_block() {
-    # $1=SANDY_CROSS_SESSION_INBOUND(may be empty) $2=SANDY_HANDOFF_RELAY(may be empty)
+    # $1=SANDY_CROSS_SESSION_INBOUND(may be empty) $2=an entry-signal token
+    # (may be empty) -- decision 6 (#382, 2.6.0) removed the relay-legacy rule
+    # that used to key off SANDY_HANDOFF_RELAY alone, so $2 now sets EVERY
+    # entry-presence signal the real launch produces at this point
+    # (SANDY_HANDOFF_RELAY, _sandy_fe_list, SANDY_FEATURE_ENTRIES) -- proving
+    # the resolution block ignores all of them, not merely the one that used
+    # to matter.
     # $3=SANDY_AGENT $4=target WORK_DIR $5=target SANDBOX_DIR (the sandbox's own
     # claude/settings.json lives under here — the userSettings/accept-delivering
     # seam; _sandy_csi_write creates claude/settings.json itself if absent, so
@@ -11378,7 +11384,8 @@ _s114_csi_block() {
     esac
     env SANDY_CROSS_SESSION_INBOUND="$1" SANDY_HANDOFF_RELAY="$2" SANDY_AGENT="$3" WORK_DIR="$4" SANDBOX_DIR="$5" \
         _sandy_csi_need="$_s114_need" _sandy_is_headless="$_s114_headless" \
-        SANDY_REMOTE_CONTROL="$_s114_remote" SANDY_PROVISION="$_s114_provision" bash -c "
+        SANDY_REMOTE_CONTROL="$_s114_remote" SANDY_PROVISION="$_s114_provision" \
+        _sandy_fe_list="${2:+f=$2}" SANDY_FEATURE_ENTRIES="${2:+f=$2}" bash -c "
         _sandy_agent_has(){ case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0;; esac; return 1; }
         info(){ printf '%s\n' \"\$*\"; }
         warn(){ printf '%s\n' \"\$*\"; }
@@ -11399,8 +11406,8 @@ _s114_csi_block() {
 # explicitly instead, for the one case that's supposed to be nonzero.
 rm -rf "$_S114/ws-d1" "$_S114/sbx-d1"; mkdir -p "$_S114/ws-d1/.claude" "$_S114/sbx-d1"
 _S114_D1_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d1" "$_S114/sbx-d1" 2>&1)" || true
-check "§114(7a) unset + no relay -> refuse, both files named, correct reason string" \
-    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no selected feature declares receives cross_session and no entry will start)"' -- "$_S114_D1_OUT"
+check "§114(7a) unset + no entry -> refuse, both files named, correct reason string" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no selected feature declares receives cross_session)"' -- "$_S114_D1_OUT"
 # A verifier found the gap this closes: the resolution block sets BOTH
 # _sandy_csi_json and _sandy_csi_src_json in each of its three "written"
 # branches (both files / userSettings-only / workspace-only), but nothing
@@ -11421,12 +11428,12 @@ check "§114(7a-ws) refuse ALSO landed in the workspace project file (the seam t
 
 rm -rf "$_S114/ws-d2" "$_S114/sbx-d2"; mkdir -p "$_S114/ws-d2/.claude" "$_S114/sbx-d2"
 _S114_D2_OUT="$(_s114_csi_block '' x claude "$_S114/ws-d2" "$_S114/sbx-d2" 2>&1)" || true
-check "§114(7b) unset + relay configured, no declared need -> accept via the DEPRECATED LEGACY PATH, correct reason string (naming criterion 7's disposition: the launch fails if the relay cannot start)" \
-    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=accept written to claude/settings.json (sandbox) and .claude/settings.local.json (default (legacy rule): a feature entry will start and no feature declares receives cross_session; the launch fails if it cannot start)"' -- "$_S114_D2_OUT"
-check "§114(7b-user) accept actually landed in the sandbox userSettings file — this is the ONLY placement measured to make accept deliver (probe case E); accept in the workspace file alone is a measured no-op (probe cases A/A2)" \
-    bash -c 'grep -q "\"crossSessionInbound\": *\"accept\"" "$1/claude/settings.json"' -- "$_S114/sbx-d2"
-check "§114(7b-json) ...and src_json is \"relay-legacy\" (the legacy path's own resolution branch also sets it) (got: $(printf '%s' "$_S114_D2_OUT" | tail -1))" \
-    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"relay-legacy\""' -- "$_S114_D2_OUT"
+check "§114(7b) INVERTED for decision 6 (#382, 2.6.0): unset + an entry present (SANDY_HANDOFF_RELAY, _sandy_fe_list AND SANDY_FEATURE_ENTRIES all set by \$2), no declared need -> REFUSE, the same default reason as (7a) -- an entry alone no longer buys accept" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no selected feature declares receives cross_session)"' -- "$_S114_D2_OUT"
+check "§114(7b-user) refuse actually landed in the sandbox userSettings file, not the accept the legacy rule used to deliver there" \
+    bash -c 'grep -q "\"crossSessionInbound\": *\"refuse\"" "$1/claude/settings.json"' -- "$_S114/sbx-d2"
+check "§114(7b-json) ...and src_json is \"default\", never \"relay-legacy\" -- that source value is no longer produced (got: $(printf '%s' "$_S114_D2_OUT" | tail -1))" \
+    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"default\""' -- "$_S114_D2_OUT"
 
 rm -rf "$_S114/ws-d3" "$_S114/sbx-d3"; mkdir -p "$_S114/ws-d3/.claude" "$_S114/sbx-d3"
 _S114_D3_OUT="$(_s114_csi_block hold '' claude "$_S114/ws-d3" "$_S114/sbx-d3" 2>&1)" || true
@@ -11488,21 +11495,24 @@ check "§114(7j) declared need + explicit refuse -> explicit wins, refuse" \
 rm -rf "$_S114/ws-d11" "$_S114/sbx-d11"; mkdir -p "$_S114/ws-d11/.claude" "$_S114/sbx-d11"
 _S114_D11_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d11" "$_S114/sbx-d11" 2>&1)" || true
 check "§114(7k) no declared need, no entry -> refuse (default)" \
-    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no selected feature declares receives cross_session and no entry will start)"' -- "$_S114_D11_OUT"
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no selected feature declares receives cross_session)"' -- "$_S114_D11_OUT"
 
 rm -rf "$_S114/ws-d12" "$_S114/sbx-d12"; mkdir -p "$_S114/ws-d12/.claude" "$_S114/sbx-d12"
 _S114_D12_OUT="$(_s114_csi_block '' x claude "$_S114/ws-d12" "$_S114/sbx-d12" 2>&1)" || true
-check "§114(7l) legacy: no declared need, entry present -> accept, reason explicitly says 'legacy rule'" \
-    bash -c 'printf "%s" "$1" | grep -q "(default (legacy rule): a feature entry will start"' -- "$_S114_D12_OUT"
-check "§114(7l-json) ...and src_json is \"relay-legacy\", not \"default\" or a stale value from a prior case (got: $(printf '%s' "$_S114_D12_OUT" | tail -1))" \
-    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"relay-legacy\""' -- "$_S114_D12_OUT"
+check "§114(7l) no declared need, entry present -> STILL refuse (same as 7b/7k -- decision 6 removed the entry-alone default), and the reason string never says 'legacy' anywhere" \
+    bash -c '
+        printf "%s\n" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no selected feature declares receives cross_session)" || exit 1
+        ! printf "%s\n" "$1" | grep -qi legacy
+    ' -- "$_S114_D12_OUT"
+check "§114(7l-json) ...and src_json is \"default\", never \"relay-legacy\" -- that source value is no longer produced (got: $(printf '%s' "$_S114_D12_OUT" | tail -1))" \
+    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"default\""' -- "$_S114_D12_OUT"
 
 rm -rf "$_S114/ws-d13" "$_S114/sbx-d13"; mkdir -p "$_S114/ws-d13/.claude" "$_S114/sbx-d13"
 _S114_D13_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d13" "$_S114/sbx-d13" amap headless 2>&1)" || true
 check "§114(7m) declared need + headless run -> refuse, reason names BOTH the feature and the headless reason (criterion 8 still applies to a declared need)" \
     bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: feature amap declares receives cross_session, but a headless run has no session to deliver into)"' -- "$_S114_D13_OUT"
 
-check "§114(7n) accept for the declared-need case actually lands in the sandbox userSettings file -- the same delivering seam probed for the legacy path at (7b-user)" \
+check "§114(7n) accept for the declared-need case actually lands in the sandbox userSettings file -- the same delivering seam probed for refuse at (7b-user)" \
     bash -c 'grep -q "\"crossSessionInbound\": *\"accept\"" "$1/claude/settings.json"' -- "$_S114/sbx-d9"
 
 # §114(2a) already established that the value-aware gate keys on the VALUE
@@ -11513,20 +11523,23 @@ check "§114(7n) accept for the declared-need case actually lands in the sandbox
 check "§114(7o) the value-aware approval gate on accept is unchanged by #380 -- it cannot see WHY sandy would resolve to accept, only that the value IS accept (reuses §114(2a)'s gate)" \
     _s114_pvp SANDY_CROSS_SESSION_INBOUND accept
 
-# (7w) #382 (2.5.0): the relay-conditional default is DEPRECATED and must say so
-# at launch -- but ONLY when it is what resolved accept. A warning that fired on
-# every launch would train operators to ignore it; one that never fired would
-# leave an unknown consumer to discover the removal by breakage. Property, both
-# directions, against the real resolution block (warn is stubbed to stdout).
-_S114_W="SANDY_CROSS_SESSION_INBOUND's relay-conditional default is deprecated"
-check "§114(7w1) the legacy rule resolving accept WARNS that it is deprecated, naming the replacement (receives)" \
-    bash -c 'printf "%s" "$1" | grep -F "$2" | grep -q "receives"' -- "$_S114_D12_OUT" "$_S114_W"
-check "§114(7w2) ...a DECLARED need resolving accept does NOT warn (the migrated case must be quiet)" \
-    bash -c '! printf "%s" "$1" | grep -qF "$2"' -- "$_S114_D9_OUT" "$_S114_W"
-check "§114(7w3) ...no need and no entry (refuse by default) does NOT warn" \
-    bash -c '! printf "%s" "$1" | grep -qF "$2"' -- "$_S114_D11_OUT" "$_S114_W"
-check "§114(7w4) ...an EXPLICIT value with an entry present does NOT warn -- explicit wins before the legacy rule is ever consulted" \
-    bash -c '! printf "%s" "$1" | grep -qF "$2"' -- "$_S114_D4_OUT" "$_S114_W"
+# (7w) decision 6 (#382, 2.6.0): the 2.5.0 deprecation warning for the
+# relay-conditional default is REMOVED along with the rule it warned about --
+# there is no longer a resolution path that can print it. Property over every
+# D1..D13 output collected so far (warn is stubbed to stdout in every case),
+# rather than one output at a time, so a re-added warning anywhere in the
+# block is caught regardless of which branch it was tacked onto. (D6/D8 do
+# not exist as harness variables; D8, the criterion-8-join case, is added to
+# this same property check at (11r) below once it is collected.) Mutation:
+# re-add the warn() call to any branch and this goes red.
+check "§114(7w) no resolution path prints a deprecation warning (the relay-conditional default and its 2.5.0 warning are both gone)" \
+    bash -c '
+        for out in "$@"; do
+            printf "%s\n" "$out" | grep -qi deprecated && exit 1
+        done
+        exit 0
+    ' -- "$_S114_D1_OUT" "$_S114_D2_OUT" "$_S114_D3_OUT" "$_S114_D4_OUT" \
+       "$_S114_D9_OUT" "$_S114_D10_OUT" "$_S114_D11_OUT" "$_S114_D12_OUT" "$_S114_D13_OUT"
 
 # --- (8) gitignore nudge ------------------------------------------------------
 if command -v git >/dev/null 2>&1; then
@@ -11706,9 +11719,13 @@ _S114_D8_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d8" "$_S114/sbx-d8" 2>&1
 check "§114(11r) after a criterion-8 skip has unset the key, the default resolves to refuse (not accept) and lands in the sandbox userSettings seam" \
     bash -c '
         printf "%s\n" "$1" | grep -q "crossSessionInbound=refuse" || exit 1
-        printf "%s\n" "$1" | grep -q "(default: no selected feature declares receives cross_session and no entry will start)" || exit 1
+        printf "%s\n" "$1" | grep -q "(default: no selected feature declares receives cross_session)" || exit 1
         grep -q "\"crossSessionInbound\": *\"refuse\"" "$2/claude/settings.json"
     ' -- "$_S114_D8_OUT" "$_S114/sbx-d8"
+# (7w) continued: D8 (the criterion-8-join case) is collected only here, so
+# it joins the "no deprecation warning anywhere" property at this point.
+check "§114(7w-d8) the criterion-8 join case ALSO prints no deprecation warning" \
+    bash -c '! printf "%s" "$1" | grep -qi deprecated' -- "$_S114_D8_OUT"
 
 # --- (11s-u) every host-side relay refusal must fast-fail a waiting --start
 # client. WHY: the launch path runs INSIDE the detached supervisor under
@@ -11812,7 +11829,10 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # (path/relay_alias/disabled_by), additive; schema_version does not move.
 # 20 as of 2.4.0 (#380): `cross_session_inbound_source` -- WHY the resolved
 # crossSessionInbound value is what it is (explicit/feature:<name>/
-# relay-legacy/default), additive; schema_version does not move.
+# relay-legacy/default), additive; schema_version does not move. The
+# relay-legacy value was announced for removal in 2.5.0 (#382) and REMOVED in
+# 2.6.0 (decision 6): as of here the field's values are explicit/
+# feature:<name>/default only, still the same field, same slot, same count.
 # 21 as of 2.4.0: `offline` (#219) -- the launch skipped the update lookups
 # by choice (SANDY_OFFLINE / --no-update-check), provable after the fact.
 check "§114(13g) marker printf format/arg count line up (21 %s/%d conversions)" \
@@ -16206,8 +16226,13 @@ cat > "$_S142_H/features/amap/feature.json" <<'S142_JSON'
 { "sandboxes": { "include": ["*"] },
   "agents":    { "include": ["claude"] },
   "mounts":    [ { "name": "payload", "from": "payload", "mode": "ro" } ],
-  "entry":     "payload/relay" }
+  "entry":     "payload/relay",
+  "receives": ["cross_session"] }
 S142_JSON
+# receives (#380) is required here as of decision 6 (#382, 2.6.0): an entry
+# alone no longer resolves crossSessionInbound to accept, so without this key
+# check (4) below would go red for a reason unrelated to what it tests --
+# whether a manifest EVALUATED THE REAL WAY reaches the real csi resolution.
 
 # The driver composes the two spans IN FILE ORDER with only the stubs the spans
 # themselves call. _sandy_csi_write is stubbed to a no-op success: this measures
@@ -16245,7 +16270,7 @@ check "§142(2) the driver RAN (a silently dead probe would make every check bel
     bash -c 'printf "%s" "$1" | grep -q "^csi="' _ "$_S142_OUT"
 check "§142(3) a manifest entry is adopted into SANDY_HANDOFF_RELAY at EVALUATION time" \
     bash -c 'printf "%s" "$1" | grep -q "^relay=/opt/sandy/features/amap/relay$"' _ "$_S142_OUT"
-check "§142(4) THE BUG: crossSessionInbound resolves to ACCEPT for a manifest-supplied relay (it resolved to refuse before #321 — a healthy relay delivering into a session that refuses everything)" \
+check "§142(4) a manifest-declared need reaches crossSessionInbound at evaluation time (a manifest evaluated the REAL WAY, not a hand-typed _sandy_csi_need, still joins into the real csi resolution and resolves accept; originally THE BUG this section was written for was a manifest-supplied relay alone resolving accept before #321 fixed ordering -- decision 6, #382, then removed that entry-alone path in 2.6.0, so this fixture now proves the join via the declared receives key instead)" \
     bash -c 'printf "%s" "$1" | grep -q "^csi=accept$"' _ "$_S142_OUT"
 
 # An explicit value must still win over the manifest-supplied relay.
@@ -19916,17 +19941,19 @@ echo "§173: receives — the default keyed on a DECLARED NEED, not the relay (#
 # ============================================================
 # #380 (option B): the unset SANDY_CROSS_SESSION_INBOUND default now resolves
 # from a feature manifest's own `"receives": ["cross_session"]` rather than
-# from "an entry will start". The old rule survives as a DEPRECATED LEGACY
-# PATH (announced in README's Deprecated table in 2.5.0, #382, and warned
-# about at launch), so this section proves BOTH: the new declared-need path, and that
-# the legacy path still works unchanged when no feature declares the need.
+# from "an entry will start". The old rule ("an entry will start" alone
+# resolving accept, tagged src=relay-legacy) was announced for removal in
+# README's Deprecated table in 2.5.0 (#382) and REMOVED in 2.6.0 (decision
+# 6): (d2)/(d7) below now prove an entry-only feature resolves refuse, not
+# accept, and that the declared-need branch is the ONLY branch that can ever
+# produce accept from an unset default.
 #
-# Precedence under test: explicit > declared need > legacy relay rule >
-# refuse. §114(7i)-(7o) already covers the CSI RESOLUTION LOGIC in isolation
-# (a hand-fed _sandy_csi_need, no manifest involved); this section covers the
-# other half -- a real manifest producing _sandy_csi_need -- and the parts of
-# #380 that are not the resolution logic at all: projector parity, the
-# published schema, and D4 (an unselected feature declares nothing).
+# Precedence under test: explicit > declared need > refuse. §114(7i)-(7o)
+# already covers the CSI RESOLUTION LOGIC in isolation (a hand-fed
+# _sandy_csi_need, no manifest involved); this section covers the other half
+# -- a real manifest producing _sandy_csi_need -- and the parts of #380 that
+# are not the resolution logic at all: projector parity, the published
+# schema, and D4 (an unselected feature declares nothing).
 _S173_SANDY="$SANDY_SCRIPT"
 _S173_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
 
@@ -20116,11 +20143,16 @@ check "§173(d1) a feature declaring receives, with NO entry, resolves accept, s
     bash -c 'printf "%s" "$1" | grep -q "^csi=accept$" && printf "%s" "$1" | grep -q "^src=feature:needer$"' _ "$_S173_D1"
 
 _S173_D2="$(_s173_drive "$_S173_HL" myrepo-a1b2c3d4)"
-check "§173(d2) a feature with an entry and NO declared receives resolves accept via the LEGACY path, src=relay-legacy (got: $(printf '%s' "$_S173_D2" | tr '\n' ' '))" \
-    bash -c 'printf "%s" "$1" | grep -q "^csi=accept$" && printf "%s" "$1" | grep -q "^src=relay-legacy$"' _ "$_S173_D2"
+check "§173(d2) INVERTED for decision 6 (#382, 2.6.0): a feature with an entry and NO declared receives resolves REFUSE, src=default — an entry alone no longer buys accept via the (now-removed) legacy path (got: $(printf '%s' "$_S173_D2" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=refuse$" && printf "%s" "$1" | grep -q "^src=default$"' _ "$_S173_D2"
 
+# (d3) still passes after decision 6 -- with the entry-alone path gone,
+# SANDY_RELAY=0 changes nothing observable here (the same feature already
+# resolves refuse/default at (d2) with SANDY_RELAY unset). Left as a
+# regression guard for r3, which removes SANDY_RELAY itself (decision 3) and
+# will need to delete or rewrite this case as a hard-error check instead.
 _S173_D3="$(_s173_drive "$_S173_HL" myrepo-a1b2c3d4 env SANDY_RELAY=0)"
-check "§173(d3) ...and with SANDY_RELAY=0 the SAME feature resolves refuse, src=default — the entry never starts, so the legacy rule must not fire (got: $(printf '%s' "$_S173_D3" | tr '\n' ' '))" \
+check "§173(d3) ...and with SANDY_RELAY=0 the SAME feature still resolves refuse, src=default (got: $(printf '%s' "$_S173_D3" | tr '\n' ' '))" \
     bash -c 'printf "%s" "$1" | grep -q "^csi=refuse$" && printf "%s" "$1" | grep -q "^src=default$"' _ "$_S173_D3"
 
 _S173_D4="$(_s173_drive "$_S173_HN" excluded-a1b2c3d4)"
@@ -20136,7 +20168,7 @@ check "§173(d6) a declared need under a HEADLESS run still resolves refuse (cri
     bash -c 'printf "%s" "$1" | grep -q "^csi=refuse$"' _ "$_S173_D6"
 
 _S173_D7="$(_s173_drive "$_S173_HH" myrepo-a1b2c3d4)"
-check "§173(d7) THE ORDER: a feature declaring BOTH receives and an entry resolves via the DECLARED-NEED branch, not the legacy one — src=feature:<name>, never relay-legacy (mutation: swapping the two elif branches turns this into src=relay-legacy while csi stays accept, so only THIS check would catch it) (got: $(printf '%s' "$_S173_D7" | tr '\n' ' '))" \
+check "§173(d7) a feature declaring BOTH receives and an entry resolves via the DECLARED-NEED branch — src=feature:<name> (the entry-alone branch this used to also satisfy no longer exists, so there is no second branch left to race against) (got: $(printf '%s' "$_S173_D7" | tr '\n' ' '))" \
     bash -c 'printf "%s" "$1" | grep -q "^csi=accept$" && printf "%s" "$1" | grep -q "^src=feature:hybrid$"' _ "$_S173_D7"
 
 unset -f _s173_drive
@@ -21219,13 +21251,89 @@ echo "§176: 2.6.0 — the relay-era surfaces announced in 2.5.0 are REMOVED (#3
 #   (c) schema_version is 4, consistently, in --print-schema, --print-state
 #       and --print-version.
 #   (d) an entry alone now resolves SANDY_CROSS_SESSION_INBOUND to refuse --
-#       the relay-legacy default is gone.
+#       the relay-legacy default is gone (r2, decision 6).
 #   (e) every entry's state dir is feature-state/<f>; a leftover relay-state/
 #       is removed at launch with one info line.
 #   (f) the stale-image warning names EVERY entry, not "all but the
 #       designated one".
 #   (g) the image no longer installs /usr/local/bin/sandy-handoff-sessions
 #       (r1, decision 7).
+
+# --- (d) an entry alone now resolves refuse — the relay-legacy default and
+# its 2.5.0 warning are both gone (decision 6, #382). Same driver PATTERN
+# §142/§173(d) use: extract the manifest apply/eval spans and the csi
+# resolution span, in FILE ORDER, and run them composed against a REAL
+# manifest -- proving the end-to-end join, not a hand-fed variable. Hermetic
+# by construction (the §142 lesson: this suite runs routinely INSIDE sandy,
+# whose own container exports several of the names under test).
+_S176_SANDY="$SANDY_SCRIPT"
+_S176_D_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+
+_S176_D_FM="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$_S176_SANDY")
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$_S176_SANDY")"
+_S176_D_EVAL="$(awk '/^_sandy_relay_slot="absent"/,/^# BEGIN handoff relay/' "$_S176_SANDY")"
+_S176_D_CSI="$(awk '/^_sandy_csi_json="null"/,/^    _sandy_csi_user_written=0/' "$_S176_SANDY" | sed '$d')
+fi"
+check "§176(d-pre) all three spans extracted and parse together (mutation: a rename empties one and every (d) check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_fm_apply" &&
+             printf "%s" "$2" | grep -q "_sandy_fm_ran=true" &&
+             printf "%s" "$3" | grep -q "_sandy_csi_val" &&
+             printf "%s\n%s\n%s\n" "$1" "$2" "$3" | bash -n' _ "$_S176_D_FM" "$_S176_D_EVAL" "$_S176_D_CSI"
+
+cat > "$_S176_D_DIR/drive.sh" <<'S176_DRV'
+set -uo pipefail
+# HERMETIC BY CONSTRUCTION -- the §142 lesson, restated per the plan's own
+# instruction: this suite runs routinely INSIDE a live sandy container, which
+# exports several of these into every process it starts.
+unset SANDY_HANDOFF_RELAY SANDY_FEATURE_ENTRIES SANDY_RELAY_STATE SANDY_CROSS_SESSION_INBOUND
+info() { :; }; warn() { printf 'WARN:%s\n' "$*"; }; error() { :; }
+_sandy_daemon_fatal() { :; }
+_sandy_agent_has() { case ",$SANDY_AGENT," in *",$1,"*) return 0 ;; esac; return 1; }
+_sandy_csi_write() { return 0; }
+eval "$FM_BLOCK"
+eval "$EVAL_BLOCK"
+eval "$CSI_BLOCK"
+printf 'csi=%s\nsrc=%s\nfe_list=%s\n' "${_sandy_csi_val:-UNSET}" "${_sandy_csi_src:-UNSET}" "${_sandy_fe_list:-EMPTY}"
+S176_DRV
+
+# A feature that ships an entry and declares NO receives -- the exact shape
+# the removed legacy rule used to resolve to accept.
+_S176_D_HOME="$_S176_D_DIR/home"; mkdir -p "$_S176_D_HOME/features/entryonly/payload"
+printf '#!/bin/sh\n' > "$_S176_D_HOME/features/entryonly/payload/relay"
+chmod +x "$_S176_D_HOME/features/entryonly/payload/relay"
+cat > "$_S176_D_HOME/features/entryonly/feature.json" <<'S176_JSON'
+{ "sandboxes": { "include": ["*"] },
+  "agents":    { "include": ["claude"] },
+  "mounts":    [ { "name": "payload", "from": "payload", "mode": "ro" } ],
+  "entry":     "payload/relay" }
+S176_JSON
+
+_S176_D_OUT="$(cd "$_S176_D_DIR" && SANDY_HOME="$_S176_D_HOME" SANDBOX_DIR="$_S176_D_DIR/sb" WORK_DIR="$_S176_D_DIR/ws" \
+    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY=1 \
+    FM_BLOCK="$_S176_D_FM" EVAL_BLOCK="$_S176_D_EVAL" CSI_BLOCK="$_S176_D_CSI" \
+    _sandy_relay_slot_dir="$_S176_D_DIR/slot" \
+    bash "$_S176_D_DIR/drive.sh" 2>&1)" || _S176_D_OUT="DRIVER-FAILED"
+
+check "§176(d0) the driver RAN (a silently dead probe would make every check below vacuously pass)" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi="' _ "$_S176_D_OUT"
+check "§176(d1) a real manifest with an entry and NO declared receives resolves csi=refuse, src=default -- an entry alone no longer buys accept (got: $(printf '%s' "$_S176_D_OUT" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=refuse$" && printf "%s" "$1" | grep -q "^src=default$"' _ "$_S176_D_OUT"
+check "§176(d1b) ...and the entry WAS adopted (fe_list non-empty) -- this proves the resolution block IGNORES a present entry, not that no entry was ever evaluated (got: $(printf '%s' "$_S176_D_OUT" | tr '\n' ' '))" \
+    bash -c '! printf "%s" "$1" | grep -q "^fe_list=EMPTY$"' _ "$_S176_D_OUT"
+check "§176(d2) the resolution prints no warning containing 'deprecated' -- the 2.5.0 warning for the legacy default is gone along with the rule it warned about (got: $(printf '%s' "$_S176_D_OUT" | tr '\n' ' '))" \
+    bash -c '! printf "%s" "$1" | grep -qi deprecated' _ "$_S176_D_OUT"
+
+# --- (d3) static: 'relay-legacy' does not appear in sandy outside a comment.
+# Filtered to a FILE, not an argv string: sandy is ~500KB, and passing that
+# much text as a bash -c positional argument hit "Argument list too long"
+# (E2BIG) -- a real failure found running this section, not a hypothetical --
+# which check() then reports as a FAIL indistinguishable from a real match.
+grep -v '^[[:space:]]*#' "$_S176_SANDY" > "$_S176_D_DIR/noncomment.txt"
+check "§176(d3) sandy itself no longer contains the string 'relay-legacy' outside a comment (the source value is retired, not merely unreachable)" \
+    bash -c '! grep -q "relay-legacy" "$1"' _ "$_S176_D_DIR/noncomment.txt"
+
+rm -rf "$_S176_D_DIR"
+unset _S176_D_DIR _S176_D_FM _S176_D_EVAL _S176_D_CSI _S176_D_HOME _S176_D_OUT
 
 # --- (g) sandy-handoff-sessions is no longer installed (decision 7) ---
 _S176_SANDY="$SANDY_SCRIPT"

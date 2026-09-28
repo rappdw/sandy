@@ -1007,14 +1007,18 @@ _sandy_build_agent_cmd() {
 # the entries for those).
 #
 # A configured entry that cannot start FAILS THE SESSION (exit 1 from
-# user-setup.sh, so the container dies) — never "warn and proceed". The
-# launcher resolved crossSessionInbound=accept on the strength of the
-# relay-designated entry; proceeding without it would leave that surface open
-# with nothing delivering. The launcher already fails host-side for any path
-# it can see; these checks are the in-container remainder (image-only
-# absolute paths, the mount, flock) -- now run once PER ENTRY rather than
-# once total, so a second feature's entry gets the same guarantee as the
-# first instead of being silently dropped.
+# user-setup.sh, so the container dies) — never "warn and proceed". A
+# feature that ships an entry expects it running; proceeding without it
+# would silently leave that feature's supervised process absent. (Before
+# 2.6.0, when a lone entry alone could resolve crossSessionInbound=accept,
+# this fail-fast was also what kept that surface from being open with
+# nothing delivering -- decision 6 (#382) removed the entry-alone default,
+# but the fail-the-session rule stands regardless of what the entry is for.)
+# The launcher already fails host-side for any path it can see; these checks
+# are the in-container remainder (image-only absolute paths, the mount,
+# flock) -- now run once PER ENTRY rather than once total, so a second
+# feature's entry gets the same guarantee as the first instead of being
+# silently dropped.
 #
 # _sandy_supervise_entry is the single-entry primitive (used for every entry,
 # designated or not); the entries starter below resolves SANDY_FEATURE_ENTRIES
