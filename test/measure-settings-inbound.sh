@@ -30,10 +30,17 @@
 #           and a nonexistent one, in both orders, and see which order (if
 #           either) errors on the missing path. This tells you whether a
 #           flag consults every occurrence or silently only the last, WITHOUT
-#           needing to inspect Claude Code's resolved config at all -- unless
-#           NEITHER order errors, which this harness reports as INCONCLUSIVE
-#           rather than as evidence either way (`--version` may short-circuit
-#           before --settings is fully parsed).
+#           needing to inspect Claude Code's resolved config at all. Two
+#           shapes read INCONCLUSIVE rather than as evidence either way: (1)
+#           NEITHER order errors (`--version` may short-circuit before
+#           --settings is fully parsed), and (2) EITHER side's result is not
+#           itself trustworthy -- an empty result, run_argcheck's own RC=-1
+#           timeout sentinel, or an unrelated crash whose stderr never names
+#           the missing file -- in which case the pair is inconclusive even
+#           when the OTHER side looks like a real error, rather than letting
+#           the untrustworthy side's silence drive a verdict it never earned.
+#           See _msi_q3d_classify/_msi_q3d_reading below for exactly which
+#           shapes count as trustworthy.
 #
 # K1/K2/Q0 are RIG-VALIDITY / baseline controls, not questions about Claude
 # Code's own precedence: K1 proves the whole apparatus (container, --exec,

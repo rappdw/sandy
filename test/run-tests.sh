@@ -20402,8 +20402,18 @@ check "§174(a3-mut) ...and mutating inject.py's selection from peerToken to chi
 # used to escape a slice that stopped at the try/except's own five lines,
 # so (a3) stayed green with the injector silently reading childToken at
 # runtime. Confirms the widened slice above actually closes that gap.
+#
+# The mutation-SETUP step below is deliberately guarded (`|| _S174_A3MUT2_RC=$?`)
+# rather than left as a bare top-level command: under this file's own
+# `set -euo pipefail`, any drift in inject.py's except-block text away from
+# the exact string this setup matches verbatim -- a real risk, since it is
+# reproduced byte-for-byte here -- makes the python3 call exit 3, and an
+# unguarded exit 3 would abort the WHOLE SUITE via set -e before §174(a3-mut2)
+# or any later section ever ran, rather than failing this one check. Same
+# class bf4a979 fixed for §172(11pre)'s unguarded grep.
 _S174_MUT_INJECT2="$(mktemp)"
-python3 - "$_S174_MSI" "$_S174_MUT_INJECT2" <<'PY'
+_S174_A3MUT2_RC=0
+python3 - "$_S174_MSI" "$_S174_MUT_INJECT2" <<'PY' || _S174_A3MUT2_RC=$?
 import sys
 
 src_path, dst_path = sys.argv[1], sys.argv[2]
@@ -20415,11 +20425,93 @@ if src.count(old) != 1:
     sys.exit(3)
 open(dst_path, "w").write(src.replace(old, new, 1))
 PY
-check "§174(a3-mut2) ...and inserting a SECOND reassignment of \`token\` right after the try/except (leaving the peerToken selection line itself untouched) is also caught (self-test of (a3): the exact gap a verifier found in a slice that stopped at the try/except's five lines)" \
-    python3 "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT2" mutated
+check "§174(a3-mut2-setup) the except-block mutation target still matches inject.py verbatim (guarded: a mismatch here fails (a3-mut2) below rather than aborting the whole suite)" \
+    bash -c '[ "$1" -eq 0 ]' -- "$_S174_A3MUT2_RC"
+if [ "$_S174_A3MUT2_RC" -eq 0 ]; then
+    check "§174(a3-mut2) ...and inserting a SECOND reassignment of \`token\` right after the try/except (leaving the peerToken selection line itself untouched) is also caught (self-test of (a3): the exact gap a verifier found in a slice that stopped at the try/except's five lines)" \
+        python3 "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT2" mutated
+else
+    fail "§174(a3-mut2) ...and inserting a SECOND reassignment of \`token\` right after the try/except (skipped: mutation-setup above failed, so no mutated file was produced to test against)"
+fi
+unset _S174_A3MUT2_RC
 
-rm -f "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT" "$_S174_MUT_INJECT2"
-unset _S174_TOKENSEL_TEST _S174_MUT_INJECT _S174_MUT_INJECT2
+# (a3b) the auth frame the injector actually SENDS embeds the SAME variable
+# (a3) proved holds the peerToken value -- extracted from the real
+# `s.sendall(... {"type": "auth", "token": <var>} ...)` call itself, never
+# hardcoded, so a mutation that swaps in a *different* field (e.g. `_raw`,
+# the raw un-selected key-file contents, never parsed for peerToken at all)
+# is caught even though the token-SELECTION code (a3)/(a3-mut)/(a3-mut2)
+# extract and execute a few lines earlier is left completely untouched. A
+# verifier found this gap: (a3)'s snippet only proves what `token` holds at
+# the moment it stops extracting (immediately before `os.fork()`), never
+# what the auth frame actually names.
+#
+# (a3c) no line between the completed double-fork (`os._exit(0)`, the
+# second fork's child branch) and the auth-frame `sendall()` reassigns
+# `token` -- the same verifier finding, one step further out: a mutation
+# that leaves BOTH the selection code and the frame's variable NAME
+# untouched can still swap in the wrong credential by inserting a fresh
+# `token = json.loads(_raw)["childToken"]` line somewhere in that span
+# (e.g. right before `s.connect`). Neither (a3) (stops before the fork) nor
+# (a3b) (checks only the variable NAME referenced in the frame, not its
+# runtime value) can see a reassignment placed there.
+_S174_FRAME_TEST="$(mktemp)"
+cat > "$_S174_FRAME_TEST" <<'PY'
+import re, sys
+
+path = sys.argv[1]
+prop = sys.argv[2]    # "frame_var" (a3b) or "no_reassign" (a3c)
+expect = sys.argv[3]  # "ok": the property must HOLD; "mutated": it must NOT
+
+src = open(path).read()
+m = re.search(r"<<'MSI_INJECT_PY'\n(.*?)\nMSI_INJECT_PY\n", src, re.S)
+if not m:
+    print("EXTRACT-FAIL: inject.py heredoc not found in %s" % path, file=sys.stderr)
+    sys.exit(3)
+inject_src = m.group(1)
+
+if prop == "frame_var":
+    fm = re.search(r'\{"type": "auth", "token": (\w+)\}', inject_src)
+    if not fm:
+        print("EXTRACT-FAIL: auth-frame sendall() call not found in inject.py source", file=sys.stderr)
+        sys.exit(3)
+    ok = fm.group(1) == "token"
+elif prop == "no_reassign":
+    fk = re.search(r'os\._exit\(0\)\n(.*?)\{"type": "auth"', inject_src, re.S)
+    if not fk:
+        print("EXTRACT-FAIL: post-fork-to-auth-frame span not found in inject.py source", file=sys.stderr)
+        sys.exit(3)
+    ok = re.search(r'\btoken\s*=(?!=)', fk.group(1)) is None
+else:
+    print("BAD-ARG: unknown prop %r" % prop, file=sys.stderr)
+    sys.exit(3)
+
+if expect == "ok":
+    sys.exit(0 if ok else 1)
+else:
+    # expect == "mutated": the property must be BROKEN.
+    sys.exit(0 if not ok else 1)
+PY
+
+check "§174(a3b) the auth frame's OWN sendall() call (extracted, not grepped for) names the same \`token\` variable (a3) proved holds the peerToken value" \
+    python3 "$_S174_FRAME_TEST" "$_S174_MSI" frame_var ok
+
+_S174_MUT_FRAME_B="$(mktemp)"
+sed 's/"token": token})/"token": _raw})/' "$_S174_MSI" > "$_S174_MUT_FRAME_B"
+check "§174(a3b-mut) ...and mutating the frame to send the raw, un-selected key-file contents (\`_raw\`) instead of \`token\` is caught (self-test of (a3b))" \
+    python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_B" frame_var mutated
+
+check "§174(a3c) no line between the completed double-fork and the auth-frame send reassigns \`token\` (extracted span, not grepped for the whole file, so an unrelated 'token' elsewhere in inject.py cannot hide a real reassignment here)" \
+    python3 "$_S174_FRAME_TEST" "$_S174_MSI" no_reassign ok
+
+_S174_MUT_FRAME_C="$(mktemp)"
+sed '/^    os\._exit(0)$/a\
+token = json.loads(_raw).get("childToken", token)' "$_S174_MSI" > "$_S174_MUT_FRAME_C"
+check "§174(a3c-mut) ...and inserting a reassignment of \`token\` right after the completed double-fork (leaving both the selection code and the frame's variable name untouched) is caught (self-test of (a3c): the exact gap a verifier found one step further out than (a3-mut2))" \
+    python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_C" no_reassign mutated
+
+rm -f "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT" "$_S174_MUT_INJECT2" "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_B" "$_S174_MUT_FRAME_C"
+unset _S174_TOKENSEL_TEST _S174_MUT_INJECT _S174_MUT_INJECT2 _S174_FRAME_TEST _S174_MUT_FRAME_B _S174_MUT_FRAME_C
 
 # NEVER a repo assertion on run-time behavior -- CLAUDE_CODE_MESSAGING_TOKEN is
 # the receiver's OWN childToken (handed to its children), and sending it
@@ -20545,7 +20637,15 @@ _S174_Q3D_EXTRACT="$(mktemp)"
 
 # _s174_q3d_check <path-to-file-defining-both-functions> -- sources it into a
 # FRESH bash (never this suite's own shell) and asserts every fixture pair
-# reads the conclusion its evidence supports.
+# reads the conclusion its evidence supports. `assert_reading` matches its
+# "want" string as a SUBSTRING anywhere in the (multi-line) reading, never
+# just a `head -n1` prefix -- a verifier found the prior form compared only
+# the first-line prefix ('Only missing-then-exists (BA) errored', etc.),
+# which merely restates the INPUT ordering rather than the CONCLUSION, so a
+# "want" string never had to contain the verdict word at all. Every "want"
+# below now spells out the actual verdict token (REPEATABLE/LAST-WINS/
+# FIRST-WINS) as part of the required substring, so reverting any one of
+# them -- see (a10-mut-reading) -- turns this red.
 _s174_q3d_check() {
     bash -c '
         set -uo pipefail
@@ -20553,9 +20653,9 @@ _s174_q3d_check() {
         fail=0
         assert_reading() {
             local want="$1" ab="$2" ba="$3" got
-            got="$(_msi_q3d_reading "$ab" "$ba" | head -n1)"
+            got="$(_msi_q3d_reading "$ab" "$ba")"
             case "$got" in
-                "$want"*) ;;
+                *"$want"*) ;;
                 *) printf "MISMATCH ab=[%s] ba=[%s] want=[%s] got=[%s]\n" "$ab" "$ba" "$want" "$got" >&2; fail=1 ;;
             esac
         }
@@ -20566,10 +20666,11 @@ _s174_q3d_check() {
         assert_reading "INCONCLUSIVE" "RC=-1 STDERR=(timed out)" "RC=-1 STDERR=(timed out)"
         assert_reading "INCONCLUSIVE" "RC=127 STDERR=claude: not found" "RC=127 STDERR=claude: not found"
         assert_reading "INCONCLUSIVE" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json" "RC=127 STDERR=claude: not found"
-        # Real, trustworthy results still read correctly.
-        assert_reading "Both orders errored" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json"
-        assert_reading "Only exists-then-missing (AB) errored" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json" "RC=0 STDERR=(none)"
-        assert_reading "Only missing-then-exists (BA) errored" "RC=0 STDERR=(none)" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json"
+        # Real, trustworthy results read the CONCLUSION the evidence
+        # supports, not merely a restatement of which order was fed in.
+        assert_reading "Both orders errored on the missing file -- --settings is REPEATABLE" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json"
+        assert_reading "Only exists-then-missing (AB) errored -- --settings is LAST-WINS" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json" "RC=0 STDERR=(none)"
+        assert_reading "Only missing-then-exists (BA) errored -- --settings is FIRST-WINS" "RC=0 STDERR=(none)" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json"
         assert_reading "INCONCLUSIVE: neither order errored" "RC=0 STDERR=(none)" "RC=0 STDERR=(none)"
         exit "$fail"
     ' -- "$1"
@@ -20578,13 +20679,20 @@ _s174_q3d_check() {
 check "§174(a10) the harness's OWN _msi_q3d_classify/_msi_q3d_reading (extracted and executed against rc/stderr fixtures, not grepped for) reports INCONCLUSIVE for every bogus or untrustworthy result -- empty, a negative timeout sentinel, an unrelated RC=127, or one bogus side paired with one real one -- and reads REPEATABLE/LAST-WINS/FIRST-WINS only from a pair where BOTH sides are real, non-negative exit codes whose stderr actually names the missing file" \
     _s174_q3d_check "$_S174_Q3D_EXTRACT"
 
+_s174_q3d_check_neg() { ! _s174_q3d_check "$1"; }
+
 # (a10-mut) self-test: reverting _msi_q3d_classify to the PRIOR shape a
 # verifier found broken (any non-"0" rc is "errored", stderr never
 # consulted, no check that rc is even a real exit code) in a scratch copy
 # makes the bogus-input fixtures above misreport a real verdict -- the exact
 # regression this check exists to catch.
+#
+# Guarded (`|| _S174_A10MUT_RC=$?`) for the same reason (a3-mut2-setup) is:
+# an unguarded exit 3 here, under this file's `set -euo pipefail`, would
+# abort the whole suite instead of failing just (a10-mut).
 _S174_Q3D_MUT="$(mktemp)"
-python3 - "$_S174_Q3D_EXTRACT" "$_S174_Q3D_MUT" <<'PY'
+_S174_A10MUT_RC=0
+python3 - "$_S174_Q3D_EXTRACT" "$_S174_Q3D_MUT" <<'PY' || _S174_A10MUT_RC=$?
 import sys
 
 src_path, dst_path = sys.argv[1], sys.argv[2]
@@ -20623,15 +20731,35 @@ if src.count(old) != 1:
     sys.exit(3)
 open(dst_path, "w").write(src.replace(old, new, 1))
 PY
+check "§174(a10-mut-setup) the _msi_q3d_classify mutation target still matches the extracted function verbatim (guarded: a mismatch here fails (a10-mut) below rather than aborting the whole suite)" \
+    bash -c '[ "$1" -eq 0 ]' -- "$_S174_A10MUT_RC"
+if [ "$_S174_A10MUT_RC" -eq 0 ]; then
+    check "§174(a10-mut) ...and reverting _msi_q3d_classify to the prior any-nonzero-rc-is-errored shape (ignoring STDERR, not validating rc) in a scratch copy makes the bogus-input fixtures misreport a real verdict (self-test of (a10): the exact regression a verifier found by hand)" \
+        _s174_q3d_check_neg "$_S174_Q3D_MUT"
+else
+    fail "§174(a10-mut) ...and reverting _msi_q3d_classify to the prior any-nonzero-rc-is-errored shape (skipped: mutation-setup above failed, so no mutated file was produced to test against)"
+fi
+unset _S174_A10MUT_RC
 
-_s174_q3d_check_neg() { ! _s174_q3d_check "$1"; }
+# (a10-mut-reading) a DIFFERENT self-test: reverting _msi_q3d_reading's
+# BA-only branch text from 'FIRST-WINS' back to 'LAST-WINS' -- the exact
+# original bug (BA passes `--settings <missing> --settings <exists>`, so the
+# missing file is the FIRST occurrence; if only BA errors, only the first
+# occurrence was read, which is FIRST-WINS, not LAST-WINS) -- in a scratch
+# copy must make (a10)'s BA assertion above fail. This is the self-test of
+# `assert_reading` itself: before it compared only the first-line PREFIX
+# ('Only missing-then-exists (BA) errored', which merely restates the input
+# ordering), this exact same text mutation kept every §174(a10) check green.
+_S174_Q3D_MUT_BA="$(mktemp)"
+sed 's/(BA) errored -- --settings is FIRST-WINS/(BA) errored -- --settings is LAST-WINS/' "$_S174_Q3D_EXTRACT" > "$_S174_Q3D_MUT_BA"
+check "§174(a10-mut-reading-setup) the BA-branch mutation target ('(BA) errored -- --settings is FIRST-WINS') still matches the extracted _msi_q3d_reading verbatim (guarded: an unmatched sed here would silently leave the ORIGINAL, correct text in place, which (a10-mut-reading) below would then read as an unexpected PASS rather than the setup failing loudly)" \
+    bash -c 'grep -qF "(BA) errored -- --settings is LAST-WINS" "$1"' -- "$_S174_Q3D_MUT_BA"
+check "§174(a10-mut-reading) ...and reverting the BA-only branch's verdict word to LAST-WINS (the exact original bug) in a scratch copy is caught (self-test of assert_reading's own precision: the exact vacuity a verifier found, where comparing only the input-restating PREFIX let this exact mutation keep every check green)" \
+    _s174_q3d_check_neg "$_S174_Q3D_MUT_BA"
 
-check "§174(a10-mut) ...and reverting _msi_q3d_classify to the prior any-nonzero-rc-is-errored shape (ignoring STDERR, not validating rc) in a scratch copy makes the bogus-input fixtures misreport a real verdict (self-test of (a10): the exact regression a verifier found by hand)" \
-    _s174_q3d_check_neg "$_S174_Q3D_MUT"
-
-rm -f "$_S174_Q3D_EXTRACT" "$_S174_Q3D_MUT"
+rm -f "$_S174_Q3D_EXTRACT" "$_S174_Q3D_MUT" "$_S174_Q3D_MUT_BA"
 unset -f _s174_q3d_check _s174_q3d_check_neg
-unset _S174_Q3D_EXTRACT _S174_Q3D_MUT
+unset _S174_Q3D_EXTRACT _S174_Q3D_MUT _S174_Q3D_MUT_BA
 
 unset _S174_MSI
 
