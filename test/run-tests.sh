@@ -19983,7 +19983,16 @@ unset -f _s172_imgwarn
 # run it into a temp SANDY_HOME, read the file). The label KEY is read from
 # the same docker-image-inspect line (10) stubs, not hardcoded a second time,
 # so the two sides cannot independently drift.
-_S172_LBLKEY="$(grep "docker image inspect -f '{{index \.Config\.Labels" "$_S172_SANDY" | sed -E 's/.*Labels "([^"]*)".*/\1/')"
+#
+# The grep is deliberately guarded (`|| true`): under this file's own
+# `set -euo pipefail`, a `docker image inspect` line that no longer matches
+# this exact text (e.g. an equivalent refactor to `docker inspect --type
+# image -f ...`) would make grep exit 1, pipefail would propagate that
+# through the pipeline, and the bare assignment would abort the WHOLE SUITE
+# via set -e -- exactly the GREPM/CASESUB failure mode CLAUDE.md warns about,
+# with §172(11) and every section after it never running. Guarding it turns
+# that into an empty _S172_LBLKEY, which (11pre) below fails loudly instead.
+_S172_LBLKEY="$( { grep "docker image inspect -f '{{index \.Config\.Labels" "$_S172_SANDY" || true; } | sed -E 's/.*Labels "([^"]*)".*/\1/')"
 check "§172(11pre) the stale-image label KEY was read from the docker-image-inspect line (10) stubs (mutation: if that line stops naming a bare 'sandy.something' label, this and every (11) check below goes vacuous)" \
     bash -c '[ -n "$1" ]' _ "$_S172_LBLKEY"
 
