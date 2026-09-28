@@ -3629,7 +3629,7 @@ echo "1.0.1" > "$_PS_FIX/sandboxes/zork-3dfda686/.sandy_last_version"
 _PS_FIX_JSON="$_INTRO_TMP/ps-fixture.json"
 SANDY_HOME="$_PS_FIX" bash "$SANDY_SCRIPT_PATH" --print-state > "$_PS_FIX_JSON" 2>/dev/null || true
 
-check "--print-state sandbox entry carries all documented per-sandbox fields, and NONE of the ones #355 removed"
+check "--print-state sandbox entry carries all documented per-sandbox fields, and NONE of the ones #355 removed" \
     bash -c 'python3 -c "
 import json,sys
 d=json.load(open(sys.argv[1]))
@@ -16823,22 +16823,24 @@ check "§149(10) an operator-set SANDY_HANDOFF_RELAY REFUSES too — removed as 
 _S149_ADOPT="$(awk '/^    while IFS= read -r _fm_l; do/,/^    done <<< "\$_sandy_fm_out"/' "$_S149_SANDY")"
 check "§149(pre-11) the manifest entry-adoption loop was extracted (2.6.0, #382: it no longer sets _sandy_relay_source -- every entry is identical now, adopted only into _sandy_fe_list)" \
     bash -c 'printf "%s" "$1" | grep -q "_sandy_fe_list="' _ "$_S149_ADOPT"
-# $1 = the source the capability block already resolved (simulates what the
-# relay-capability block above would have set before the adoption loop runs).
+# The adoption loop no longer references _sandy_relay_source at all (r5,
+# #382 decisions 1-2 finished removing the notion of a "resolved source"), so
+# this helper takes no source argument -- seeding one and asserting it comes
+# back unchanged would just be asserting that a removed variable stays
+# removed, which is vacuous.
 _s149_adopt() {
     bash -c '
         set -uo pipefail
         info(){ :; }; warn(){ echo "WARN:$*" >&2; }
         unset SANDY_HANDOFF_RELAY   # inherited from the surrounding sandy session otherwise
-        _sandy_relay_source="$2"
         _sandy_fe_list=""
         _sandy_fm_out="$(printf "entry\t/opt/sandy/features/amap/relay\n")"
         eval "$1"
-        echo "$_sandy_fe_list $_sandy_relay_source ${SANDY_HANDOFF_RELAY:-<none>}"
-    ' _ "$_S149_ADOPT" "$1" 2>/dev/null
+        echo "$_sandy_fe_list ${SANDY_HANDOFF_RELAY:-<none>}"
+    ' _ "$_S149_ADOPT" 2>/dev/null
 }
-check "§149(11) a manifest entry is adopted into _sandy_fe_list, and the relay capability's own source/variable are left UNTOUCHED (2.6.0, #382 decisions 4-5: there is no designated entry to claim them any more) (got: $(_s149_adopt none))" \
-    test "$(_s149_adopt none)" = "amap=/opt/sandy/features/amap/relay none <none>"
+check "§149(11) a manifest entry is adopted into _sandy_fe_list, and SANDY_HANDOFF_RELAY is left UNTOUCHED (2.6.0, #382 decisions 4-5: there is no designated entry or internal channel any more) (got: $(_s149_adopt))" \
+    test "$(_s149_adopt)" = "amap=/opt/sandy/features/amap/relay <none>"
 
 # (12)/(13), "SANDY_RELAY=0 now suppresses a MANIFEST entry too" and its
 # warning, are GONE (r3, decision 3, #382, 2.6.0): the behaviour they asserted
@@ -17239,8 +17241,8 @@ _S153_BANOUT="$(bash -c '
     eval "$1"
     SANDBOX_NAME=amap-router-11112222; WORK_DIR=/w/amap-router; SANDY_AGENT=claude
     _sandy_fm_root="$3"; _sandy_fm_out=""; _sandy_fm_rc=0; _sandy_fm_ran=false
-    _SANDY_FM_AA_RECORDS=""; _SANDY_FM_AA_JSON=""; _sandy_relay_source=""
-    _sandy_fe_list=""; _sandy_fe_relay_feature=""; SANDY_FEATURE_ENTRIES=""
+    _SANDY_FM_AA_RECORDS=""; _SANDY_FM_AA_JSON=""
+    _sandy_fe_list=""; SANDY_FEATURE_ENTRIES=""
     eval "$2"
 ' _ "$_S153_APPLYBLK" "$_S153_BAN" "$_S153_DIR/root" 2>&1)"
 check "§153(27) an APPLIED feature is named at launch with what it contributed — no SANDY_VERBOSE required (got: $(printf '%s' "$_S153_BANOUT" | grep -m1 '^INFO features:'))" \
@@ -19197,7 +19199,6 @@ _s172_adopt() {
         info(){ :; }; warn(){ echo "WARN:$*" >&2; }
         _loop="$1"
         unset SANDY_HANDOFF_RELAY SANDY_FEATURE_ENTRIES
-        _sandy_relay_source="none"
         _sandy_fe_list=""
         shift 1
         _sandy_fm_out=""
@@ -19667,7 +19668,7 @@ _S172_IMGBLK="$(awk '/^# --- BEGIN stale-image feature-entries warning \(#381\)/
 check "§172(10pre) the stale-image warning block was extracted (mutation: a rename empties this and every check below goes vacuous)" \
     bash -c 'printf "%s" "$1" | grep -q "sandy.feature_entries"' _ "$_S172_IMGBLK"
 
-# _s172_imgwarn BLOCK LABEL_VALUE FE_LIST RELAY_FEATURE [WANT_KEY] [WANT_IMAGE]
+# _s172_imgwarn BLOCK LABEL_VALUE FE_LIST [WANT_KEY] [WANT_IMAGE]
 # -> every warn() call's argument, one per line, on stdout. LABEL_VALUE is
 # what the stubbed `docker image inspect` prints (e.g. "1", "", or
 # "<no value>") -- but ONLY when it is actually invoked as `docker image
@@ -19681,14 +19682,18 @@ check "§172(10pre) the stale-image warning block was extracted (mutation: a ren
 # passing a different value simulates the block being fed a mismatch.
 # Threaded through as positional params to the nested `bash -c`, which has
 # its own $1.. and cannot see the outer function's locals.
+# There is no RELAY_FEATURE parameter -- 2.6.0 (#382, decisions 1-2) removed
+# _sandy_fe_relay_feature along with the designation concept it named, so
+# seeding it here would only be asserting that a removed variable stays
+# removed.
 _s172_imgwarn() {
-    local _blk="$1" _label="$2" _fe="$3" _relf="$4"
-    local _want_key="${5:-sandy.feature_entries}" _want_img="${6:-stub-image}"
+    local _blk="$1" _label="$2" _fe="$3"
+    local _want_key="${4:-sandy.feature_entries}" _want_img="${5:-stub-image}"
     bash -c '
         set -uo pipefail
         _lbl="$2"
-        _want_key="$5"
-        _want_img="$6"
+        _want_key="$4"
+        _want_img="$5"
         docker() {
             if [ "$1" = "image" ] && [ "$2" = "inspect" ] && [ "$3" = "-f" ] \
                && [[ "$4" == *"\"$_want_key\""* ]] && [ "$5" = "$_want_img" ]; then
@@ -19697,13 +19702,12 @@ _s172_imgwarn() {
         }
         IMAGE_NAME="stub-image"
         _sandy_fe_list="$3"
-        _sandy_fe_relay_feature="$4"
         warn() { printf "WARN:%s\n" "$*"; }
         eval "$1"
-    ' _ "$_blk" "$_label" "$_fe" "$_relf" "$_want_key" "$_want_img"
+    ' _ "$_blk" "$_label" "$_fe" "$_want_key" "$_want_img"
 }
 
-_S172_W1="$(_s172_imgwarn "$_S172_IMGBLK" "" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
+_S172_W1="$(_s172_imgwarn "$_S172_IMGBLK" "" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s")"
 check "§172(10a) label ABSENT (empty) + 2 entries: warns, naming BOTH (2.6.0, #382: there is no designated entry to exempt any more)" \
     bash -c '
         printf "%s\n" "$1" | grep -q "WARN:.*alpha" || exit 1
@@ -19712,19 +19716,19 @@ check "§172(10a) label ABSENT (empty) + 2 entries: warns, naming BOTH (2.6.0, #
 check "§172(10a-2) ...and points at sandy --rebuild" \
     bash -c 'printf "%s\n" "$1" | grep -q "sandy --rebuild"' _ "$_S172_W1"
 
-_S172_W2="$(_s172_imgwarn "$_S172_IMGBLK" "<no value>" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
+_S172_W2="$(_s172_imgwarn "$_S172_IMGBLK" "<no value>" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s")"
 check "§172(10b) label the literal docker string '<no value>' + 2 entries: ALSO warns (empty and <no value> both count as lacking it)" \
     bash -c 'printf "%s\n" "$1" | grep -q "WARN:.*beta"' _ "$_S172_W2"
 
-_S172_W3="$(_s172_imgwarn "$_S172_IMGBLK" "1" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
+_S172_W3="$(_s172_imgwarn "$_S172_IMGBLK" "1" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s")"
 check "§172(10c) label PRESENT (1) + 2 entries: silent (mutation: inverting the case match would warn here instead)" \
     bash -c '[ -z "$1" ]' _ "$_S172_W3"
 
-_S172_W4="$(_s172_imgwarn "$_S172_IMGBLK" "" "amap=/opt/sandy/features/amap/relay" amap)"
+_S172_W4="$(_s172_imgwarn "$_S172_IMGBLK" "" "amap=/opt/sandy/features/amap/relay")"
 check "§172(10d) INVERTED (2.6.0, #382 decisions 4-5): label ABSENT + only 1 entry now WARNS, naming it -- a stale image starts NONE of the entries, including the only one, so there is no longer a single-entry exemption" \
     bash -c 'printf "%s\n" "$1" | grep -q "WARN:.*amap"' _ "$_S172_W4"
 
-_S172_W5="$(_s172_imgwarn "$_S172_IMGBLK" "" "" "")"
+_S172_W5="$(_s172_imgwarn "$_S172_IMGBLK" "" "")"
 check "§172(10e) label ABSENT + zero entries: silent" \
     bash -c '[ -z "$1" ]' _ "$_S172_W5"
 
@@ -19736,13 +19740,13 @@ check "§172(10e) label ABSENT + zero entries: silent" \
 # point of view the label is absent (docker prints nothing for its actual
 # query), and it must warn even though a label value of "1" exists somewhere.
 _S172_W6="$(_s172_imgwarn "$_S172_IMGBLK" "1" \
-    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha \
+    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" \
     sandy.feature_entries not-the-real-image)"
 check "§172(10f) a block inspecting the WRONG IMAGE (stub only answers for a name the block never passes) warns, naming both, same as a genuinely absent label" \
     bash -c 'printf "%s\n" "$1" | grep -q "WARN:.*alpha" && printf "%s\n" "$1" | grep -q "WARN:.*beta"' _ "$_S172_W6"
 
 _S172_W7="$(_s172_imgwarn "$_S172_IMGBLK" "1" \
-    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha \
+    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" \
     not.the.real.key stub-image)"
 check "§172(10g) a block inspecting the WRONG LABEL KEY (stub only answers for a key the block never passes) warns, naming both, same as a genuinely absent label" \
     bash -c 'printf "%s\n" "$1" | grep -q "WARN:.*alpha" && printf "%s\n" "$1" | grep -q "WARN:.*beta"' _ "$_S172_W7"
@@ -19755,7 +19759,7 @@ unset _S172_W6 _S172_W7
 # instead of appending) would pass every check above and still be the #381
 # failure class: a never-started entry with nothing saying so.
 _S172_W8="$(_s172_imgwarn "$_S172_IMGBLK" "" \
-    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s gamma=/opt/sandy/features/gamma/t" alpha)"
+    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s gamma=/opt/sandy/features/gamma/t")"
 check "§172(10h) label ABSENT + 3 entries: warns, naming ALL THREE (alpha, beta AND gamma) -- not just the first one (mutation: collapsing the accumulator to 'first missing only' fails this)" \
     bash -c '
         printf "%s\n" "$1" | grep -q "WARN:.*NOT started this launch:.*alpha" || exit 1
@@ -20074,8 +20078,7 @@ _s173_marker() {   # $1 = _sandy_csi_src_json literal ("null" or "\"feature:x\""
         SANDBOX_NAME="myrepo-abc12345"
         _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json='"accept"'
         _sandy_csi_src_json="$1"
-        _sandy_agents_json=null; _sandy_relay_source_json=null
-        _sandy_relay_path_json=null; _sandy_relay_disabled_by_json=null
+        _sandy_agents_json=null
         _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""; _sandy_fe_json=""
         CRED_MODE=none; _sandy_session_nonce=deadbeef; _sandy_session_file=/dev/stdout
         eval "$_S173_MKBLK"
@@ -21288,9 +21291,6 @@ if command -v python3 >/dev/null 2>&1; then
     )"
     check "§176(b1) the real marker composer emits NO top-level 'relay' key, and every feature_entries value's key set is exactly {'path'} (mutation M2: re-adding the relay printf reddens this)" \
         bash -c 'printf "%s" "$1" | python3 -c "
-import json,sys
-d=json.loads(sys.argv[1])
-" 2>/dev/null; printf "%s" "$1" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 assert \"relay\" not in d, d

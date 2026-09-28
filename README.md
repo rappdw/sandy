@@ -511,7 +511,7 @@ No default — leaving `SANDY_SCREENSHOT_DIR` unset disables the feature entirel
 
 **The `~/.handoff` tree was removed in 2.2.0.** A feature manifest names its own directories instead — see "Features" above — which is more flexible and does not require every sandbox to carry four fixed directories it may not use.
 
-If you were using it: `inbox`, `outbox` and `peer` become manifest `mounts` (`mode: ro` for host-written inbound lanes). Relay state moved to `$SANDBOX_DIR/relay-state`, mounted at `/opt/sandy/relay-state`, and sandy reports that path as `relay.state_dir` in `--print-state` so nothing has to construct it. `SANDY_HANDOFF_DIRS` and the `.handoff-enabled` marker are gone; setting the key is a hard error naming the replacement.
+If you were using it: `inbox`, `outbox` and `peer` become manifest `mounts` (`mode: ro` for host-written inbound lanes). Relay state moved to `$SANDBOX_DIR/relay-state`, mounted at `/opt/sandy/relay-state`, in 2.2.0 — that path was itself removed in 2.6.0 (#382): every entry now gets its own `$SANDBOX_DIR/feature-state/<feature>`, mounted at `/opt/sandy/feature-state/<feature>` and reported per entry as `feature_entries.<name>.state_dir` in `--print-state`, so nothing has to construct it. `SANDY_HANDOFF_DIRS` and the `.handoff-enabled` marker are gone; setting the key is a hard error naming the replacement.
 
 ## How Network Isolation Works
 
@@ -651,13 +651,13 @@ Two failure shapes, handled differently:
 - **Starts, then exits**: if the first run exits non-zero within ~5s the session fails with that exit code. Past that window it is a runtime loop, which cannot un-succeed a launch that already completed — it is reported instead:
 
 ```sh
-sandy --print-state | jq '.sandboxes[] | {name, relay}'
-# {"name":"myproj-1a2b3c4d","relay":{"state":"looping","restarts":417,"last_exit_code":3, ...}}
+sandy --print-state | jq '.sandboxes[] | .feature_entries'
+# {"myfeature":{"state":"looping","restarts":417,"last_exit_code":3,"executable_present":true,"path":"/opt/sandy/features/myfeature/relay","state_dir":"/home/you/.sandy/sandboxes/myproj-1a2b3c4d/feature-state/myfeature"}}
 ```
 
-`state` is one of `absent`, `started`, `looping`, `failed`, `disabled`. `--print-state` also reports `source` (who supplied the relay: `manifest`, or `none`), `path` (a **container** path), `executable_present` (checked on the host at query time — a fact, not a health verdict), `disabled_by`, and `state_dir` — the **host** path of `$SANDBOX_DIR/relay-state`, where the relay's `.state` and `supervisor.log` live. Inside the container that directory is `/opt/sandy/relay-state`; a relay finds it through `SANDY_RELAY_STATE` rather than by building the path.
+`state` is one of `absent`, `started`, `looping`, `failed` — there is no `disabled` state, because there is no per-feature off switch to disable it with (`SANDY_RELAY` is a hard error, not a toggle). Each entry's `state_dir` is the **host** path `$SANDBOX_DIR/feature-state/<feature>`, mounted rw at `/opt/sandy/feature-state/<feature>` inside the container; that entry's own process finds it through `SANDY_FEATURE_STATE` rather than by building the path.
 
-The session marker (`/etc/sandy-session.json`) carries `relay.source`, `relay.path` and `relay.disabled_by` — launch **intent**, because it is written **before** the container starts and cannot know whether the relay ran; live state comes from `--print-state`. Treat all of it as diagnostics: `relay-state/` is mounted read-write, so the agent can write it.
+The session marker (`/etc/sandy-session.json`) carries `feature_entries.<name>: {"path": "..."}` — launch **intent**, because it is written **before** the container starts and cannot know whether the entry ran; live state comes from `--print-state`. Treat all of it as diagnostics: `feature-state/<feature>` is mounted read-write, so the entry's own process can write it.
 
 
 ### Egress proxy — cross-platform isolation
@@ -1119,7 +1119,7 @@ sandy --exec -- cat /etc/sandy-session.json   # workspace, sandbox_name, posture
 
 ### Also in 2.0
 
-- `--print-state`'s `schema_version` was **`2`** in the 2.0 line and is **`3`** as of 2.2.0 (see **Deprecated**). Gate on that number, not on sandy's version string — `2.0.0-dev` compares equal to `2.0.0`. Treat it as an **opaque token**: compare against a reviewed set, not with `>=`, so a future bump is something you read rather than something you silently accept.
+- `--print-state`'s `schema_version` was **`2`** in the 2.0 line, moved to **`3`** in 2.2.0, and is **`4`** as of 2.6.0 (see **Deprecated**). Gate on that number, not on sandy's version string — `2.0.0-dev` compares equal to `2.0.0`. Treat it as an **opaque token**: compare against a reviewed set, not with `>=`, so a future bump is something you read rather than something you silently accept.
 - `sandboxes[].features` now reports **manifest selection** rather than per-sandbox markers; `SANDY_FEATURES_DIR` is removed with an error naming its replacement.
 - `SANDY_EGRESS=off|permissive|strict` replaces two booleans. The old keys still work — see **Deprecated** below.
 
