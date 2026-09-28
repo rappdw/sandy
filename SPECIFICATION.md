@@ -1941,7 +1941,7 @@ Capabilities SETUID/SETGID are needed for `gosu` privilege drop. CHOWN/DAC_OVERR
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `128000` | Max tokens per response |
 | `HOST_UID` / `HOST_GID` | `1001` | Default container user if not remapped |
 | Container user | `claude` | UID 1001, shell `/bin/bash` |
-| `SANDY_CROSS_SESSION_INBOUND` | *(conditional)* | Unset resolves to `accept` iff a feature manifest **selected for this launch** declares `"receives": ["cross_session"]` (2.4.0, #380); failing that, by the deprecated legacy rule, iff a feature manifest `entry` selected for this sandbox — carried host-side in the internal `SANDY_HANDOFF_RELAY`/`SANDY_FEATURE_ENTRIES` variables — **will actually be started this launch**; else `refuse` — never a plain static default (§C.2a). Headless `-p`, `--remote` and `--provision` runs have no live session to deliver into, so they resolve to `refuse` under either rule. A configured entry that cannot start fails the launch rather than leaving `accept` in place with nothing delivering (§A.6, §E.12a). |
+| `SANDY_CROSS_SESSION_INBOUND` | *(conditional)* | Unset resolves to `accept` iff a feature manifest **selected for this launch** declares `"receives": ["cross_session"]` (2.4.0, #380) and this is not a headless `-p`, `--remote` or `--provision` run (none of those leave a live session to deliver into); else `refuse` — never a plain static default (§C.2a). A feature `entry` alone, with no declared `receives`, resolves `refuse` (the entry-alone default was announced for removal in 2.5.0 and removed in 2.6.0, decision 6). Separately and unconditionally, a configured entry that cannot start still fails the launch (§A.6, §E.12a). |
 | Per-entry restart backoff | `1s`, ×2 per restart, cap `60s`, reset to `1s` after a run staying up `>60s` | `_sandy_supervise_entry` in `user-setup.sh` (Appendix A.6) |
 
 ### B.9 Tool Versions
@@ -2843,9 +2843,12 @@ session exists. Every **host-side** refusal also drops the
 launch) in about a second. Without it the supervisor dies immediately while
 the client waits out its full 600s timeout — indistinguishable from a hang, and
 the reason `acceptance-handoff-dirs.sh` E10 once appeared to stall. The option
-of falling back to `refuse` was considered and rejected — it would keep the
-launch alive on a posture that was never measured from userSettings, and it
-would make a non-`none` `relay.source` in the marker ambiguous. Three cases
+of silently dropping a relay that cannot start rather than failing the launch
+was considered and rejected — it would keep the launch alive with a
+supervised entry the launch claimed to run silently absent, and it would make
+a non-`none` `relay.source` in the marker ambiguous with an entry that was
+never configured at all (this rule is unconditional and does not depend on
+what `crossSessionInbound` resolves to — see §C.2a, decision 6). Three cases
 are deliberate **skips**, not failures: headless (`-p`/`--print`/`--prompt`),
 `sandy --remote` (no tmux session for a relay to target) and `--provision`
 (a launch stopped as soon as it is verified, so a relay would live seconds and

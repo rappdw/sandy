@@ -13340,10 +13340,12 @@ if [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
             _sandy_daemon_fatal; exit 1 ;;
     esac
     # Acceptance criterion 7: a configured relay that cannot start FAILS THE
-    # LAUNCH — never "one warning and proceed". The crossSessionInbound default
-    # below resolves to `accept` on the strength of this key, so a relay that is
-    # configured but not running would leave that surface open with nothing
-    # delivering. Two detection points, one rule:
+    # LAUNCH — never "one warning and proceed". This key no longer drives the
+    # crossSessionInbound default by itself (removed in 2.6.0, decision 6: an
+    # entry alone resolves refuse; only a feature's declared `receives` does).
+    # The rule stays regardless — a configured entry that silently failed to
+    # start would still be a supervised process the launch claimed to run and
+    # did not. Two detection points, one rule:
     #   - here, host-side, BEFORE docker run, for any path the host can see:
     #     workspace-relative, or absolute under the container workspace mount
     #     (mapped back to $WORK_DIR);

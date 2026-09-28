@@ -11919,8 +11919,8 @@ if [ -f "$_S114_TMPL" ]; then
     # --- criterion 7, in-container half: three preconditions the host cannot
     # check (an image-only path, the entry's own state-dir mount, flock in the
     # image) each `exit 1` so the container dies before any tmux session
-    # exists, rather than logging and leaving crossSessionInbound=accept with
-    # nothing delivering.
+    # exists, rather than logging and leaving a supervised entry the launch
+    # claimed to run silently absent.
     check "§114(15i-2) env contract, GENERALIZED (#381): _sandy_start_entries exports SANDY_RELAY_STATE for the relay-designated entry only, and no SANDY_HANDOFF_* container var (#352, #353) is exported anywhere -- a variable naming a path that is not mounted is worse than no variable" \
         bash -c 'grep -q "export SANDY_RELAY_STATE=" "$1" && ! grep -qE "^ *export .*SANDY_HANDOFF_(INBOX|OUTBOX|PEER|RELAY_STATE)" "$1"' -- "$_S114_TMPL"
     check "§114(15j) exactly three ERROR+exit-1 preconditions in the supervisor (entry not executable, its state dir not mounted, flock missing)" \
@@ -11928,10 +11928,10 @@ if [ -f "$_S114_TMPL" ]; then
     check "§114(15k) each of the three names the fail-the-session rule in its ERROR line" \
         bash -c '[ "$(printf "%s\n" "$1" | grep -c "A configured relay that cannot start fails the session")" -eq 3 ]' -- "$_S114_SUP_FN"
     # A flock check INSIDE the backgrounded subshell could only exit that
-    # subshell, never the session -- the container would come up with
-    # crossSessionInbound=accept and no relay. Ordering is the property, so it
-    # is asserted as ordering, not as presence.
-    check "§114(15l) the flock availability check precedes the backgrounded supervisor subshell (inside it, exit 1 would kill only the subshell and the session would survive with accept and no relay)" \
+    # subshell, never the session -- the container would come up with the
+    # entry silently absent. Ordering is the property, so it is asserted as
+    # ordering, not as presence.
+    check "§114(15l) the flock availability check precedes the backgrounded supervisor subshell (inside it, exit 1 would kill only the subshell and the session would survive with the entry silently absent)" \
         bash -c '
             f=$(printf "%s\n" "$1" | grep -n -m1 "command -v flock" | cut -d: -f1)
             b=$(printf "%s\n" "$1" | grep -n -m1 "^    ($" | cut -d: -f1)
