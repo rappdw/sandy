@@ -1661,12 +1661,16 @@ section "13. Egress proxy (M2.7) — end-to-end through the sidecar"
 if [ "$_SECTION_ON" = true ]; then
 # Proves the agent reaches the model API THROUGH the proxy on the --internal
 # two-network topology (the macOS F2 fix; identical on Linux). Requires Claude
-# credentials. Until M2.7 merges to main, the proxy image builds from the
-# current branch, so pin SANDY_PROXY_REF to it (a release pins its version tag).
+# credentials. The proxy image builds from THIS checkout's proxy/ (the local
+# COPY path), which is exactly the source under test. Do NOT pin
+# SANDY_PROXY_REF here: an explicit ref forces the `git clone ... && git
+# checkout <ref>` path, which fails outright on any unpushed branch -- the
+# normal state of a branch under test -- and even when it succeeds it builds
+# GitHub's copy of that branch, not the working tree. (This used to pin the
+# current branch name, from before the local COPY path existed.)
 # NOTE: the macOS-specific LAN-block behavior is covered by the manual checklist
 # in TESTING_PLAN.md §6 (CI can't reach Docker Desktop's VM networking).
 if [ "$HAS_CLAUDE" = true ]; then
-    _PX_REF="$(git -C "$(dirname "$SANDY_SCRIPT")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
     setup_project claude "integ-proxy"
 
     # Clear any networks leaked by an earlier section / a previous suite run that
@@ -1683,7 +1687,7 @@ if [ "$HAS_CLAUDE" = true ]; then
     _pre_nets="$(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' || true)"
 
     # Permissive (=1): the agent must reach api.anthropic.com via the proxy.
-    _out="$(run_sandy_headless "SANDY_EGRESS_PROXY=1" "SANDY_PROXY_REF=$_PX_REF" -- -p "reply with exactly one word: proxied")"
+    _out="$(run_sandy_headless "SANDY_EGRESS_PROXY=1" -- -p "reply with exactly one word: proxied")"
 
     if echo "$_out" | grep -q "Creating egress-proxy networks (mode=permissive)"; then
         pass "proxy mode 1 stands up the egress-proxy networks + sidecar"
