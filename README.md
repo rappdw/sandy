@@ -1154,7 +1154,7 @@ An entry may also be **withdrawn** in any release — it is struck through and m
 | `SANDY_RELAY_STATE` and the `/opt/sandy/relay-state` mount | 2.5.0 (exception) | `SANDY_FEATURE_STATE` (exported to each entry's own process) and `/opt/sandy/feature-state/<feature>` |
 | `SANDY_CROSS_SESSION_INBOUND`: the relay-conditional unset default (`cross_session_inbound_source: "relay-legacy"`) | 2.5.0 (exception) | declare `"receives": ["cross_session"]` in the feature's manifest (2.4.0, #380), or set the key explicitly. The key itself is **not** deprecated — only this way of defaulting it. Warns at launch whenever it is what resolved `accept` |
 | `SANDY_HANDOFF_RELAY` as the internal channel a manifest `entry` travels through | 2.5.0 (exception) | the per-feature entry plumbing (`SANDY_FEATURE_ENTRIES`). Already a hard error as a configuration key since 2.2.0; this row is about the internal variable |
-| `/usr/local/bin/sandy-handoff-sessions` | 2.5.0 (exception) | a consumer's own copy, built on the published pane-identity contract (`SPECIFICATION.md`, #378) |
+| ~~`/usr/local/bin/sandy-handoff-sessions`~~ **— REMOVED in 2.6.0** | 2.5.0 (exception) | a consumer's own copy, built on the published pane-identity contract (`SPECIFICATION.md`, #378) |
 
 Removals are loud where sandy can see them: a removed config key is a hard error naming its replacement, a removed mechanism warns first, and a removed introspection field bumps `schema_version`.
 

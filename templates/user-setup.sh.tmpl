@@ -1233,10 +1233,11 @@ _sandy_start_entries() {
 cd "$WORKSPACE"
 
 # Relay slot: skipped for headless (-p) and for --remote (criterion 8 — under
-# remote-control there is no tmux session, so sandy-handoff-sessions has no rows
-# and a helper-driven relay would be restarted every 60s for the container's
-# life with nothing to target). The launcher also unsets the entries for both,
-# so this gate is the in-container half of the same decision, not the only half.
+# remote-control there is no tmux session, so there is no pane for any entry to
+# target and a supervised entry would be restarted every 60s for the
+# container's life with nothing to do). The launcher also unsets the entries
+# for both, so this gate is the in-container half of the same decision, not
+# the only half.
 if [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then _sandy_start_entries; fi
 
 if [ "$_SANDY_IS_MULTI" = false ]; then

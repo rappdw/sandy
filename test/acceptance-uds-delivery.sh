@@ -318,6 +318,100 @@ INJECT
 # file it would hit the approval prompt, fail closed under a non-TTY `--start`,
 # and be silently DROPPED -- the case would then run against a bypass receiver
 # and pass while testing nothing. The marker assertion below is the backstop.
+# --- Embedded consumer copy of the pane-identity contract (#378) -----------
+# sandy shipped this as /usr/local/bin/sandy-handoff-sessions through 2.5.x;
+# it was REMOVED in 2.6.0 (#382, decision 7). SPECIFICATION.md's "Pane-
+# identity contract" is what stays published, and this is an EXTERNAL
+# CONSUMER'S OWN COPY of a helper built on it -- moved verbatim from the
+# removed heredoc body -- not sandy's own tooling. It keeps this harness's
+# row-format-based wait-for-a-bound-socket logic unchanged. Written straight
+# to a temp FILE, not captured via "$(cat <<TAG ... TAG)" -- a heredoc nested
+# inside a multi-line $( ) is the APOSCS/CASESUB bash-3.2 parser trap
+# (test/lint-bash32.sh), and the body below has apostrophes in its comments.
+_UDS_SESSIONS_FILE="$(mktemp)"
+cat > "$_UDS_SESSIONS_FILE" <<'UDS_SESSIONS'
+#!/bin/bash
+# sandy-handoff-sessions — enumerate live agent sessions in this container.
+# Output: agent<TAB>pane_index<TAB>pane_pid<TAB>agent_pid<TAB>socket<TAB>keyfile   ("-" = n/a)
+# Default target rule for relays: the first row whose agent is claude, in SANDY_AGENT order.
+# Untagged panes (@sandy_pane_agent unset) count as SANDY_AGENT only when
+# SANDY_AGENT names exactly one agent AND the session has exactly one pane --
+# the only shape a pre-2.4.0 single-agent sandy could have produced. Any other
+# untagged pane (a user split, a teammate an agent opened, a second untagged
+# pane) is skipped rather than guessed.
+# Test hooks (env-only): SANDY_SESSIONS_PANES_FILE, SANDY_SESSIONS_PROC, SANDY_SESSIONS_SOCK_DIR, SANDY_SESSIONS_KEY_DIR.
+set -uo pipefail
+PROC="${SANDY_SESSIONS_PROC:-/proc}"
+SOCK_DIR="${SANDY_SESSIONS_SOCK_DIR:-/tmp/cc-socks}"
+KEY_DIR="${SANDY_SESSIONS_KEY_DIR:-$HOME/.claude/sessions}"
+TAB="$(printf '\t')"
+panes() {
+    if [ -n "${SANDY_SESSIONS_PANES_FILE:-}" ]; then cat "$SANDY_SESSIONS_PANES_FILE"; return; fi
+    tmux list-panes -t sandy -F "#{pane_index}${TAB}#{pane_pid}${TAB}#{@sandy_pane_agent}" 2>/dev/null || true
+ }
+ppid_of() { local l; l="$(cat "$PROC/$1/stat" 2>/dev/null)" || return 1; l="${l##*) }"; set -- $l; echo "$2"; }
+comm_of() { local l; l="$(cat "$PROC/$1/stat" 2>/dev/null)" || return 1; l="${l#*(}"; echo "${l%%)*}"; }
+is_agent() {  # $1 pid $2 agent
+    [ "$(comm_of "$1")" = "$2" ] && return 0
+    # Process substitution, NOT a `tr | grep -q` pipe: under this script's own
+    # `set -o pipefail`, grep -q can match and exit 0 while `tr` is still mid
+    # write and dies of SIGPIPE (141) -- with pipefail that 141 becomes the
+    # PIPELINE's exit status even though the match was real, so is_agent()
+    # would wrongly report no-match on a large cmdline. `< <(...)` runs tr in
+    # a substituted-input subshell outside this simple command's own exit
+    # status, so only grep's own result is ever returned.
+    grep -qxE "(.*/)?$2" < <(tr '\0' '\n' < "$PROC/$1/cmdline" 2>/dev/null)
+ }
+descendants() {  # BFS over /proc, prints pids in depth order
+    local q="$1" cur d
+    while [ -n "$q" ]; do
+        cur="${q%% *}"; q="${q#"$cur"}"; q="${q# }"
+        for d in "$PROC"/[0-9]*; do
+            d="${d##*/}"; [ "$(ppid_of "$d" 2>/dev/null)" = "$cur" ] || continue
+            echo "$d"; q="$q $d"
+        done
+    done
+ }
+# SANDY_AGENT order for stable output
+IFS=',' read -ra ORDER <<< "${SANDY_AGENT:-claude}"
+rows="$(panes)"; [ -n "$rows" ] || exit 0
+row_count="$(printf '%s\n' "$rows" | grep -c '.')"
+for a in "${ORDER[@]}"; do
+  while IFS="$TAB" read -r idx ppid tag; do
+    [ -n "${idx:-}" ] || continue
+    if [ -z "$tag" ]; then
+        # Sandy's own fallback rule (not any consumer's): an untagged pane
+        # counts as SANDY_AGENT only when there is exactly one agent AND
+        # exactly one pane in the session -- the only shape a pre-2.4.0
+        # single-agent sandy could have produced. Any other untagged pane
+        # (a user split, a teammate pane, more than one untagged pane) is
+        # skipped rather than guessed.
+        if [ "${#ORDER[@]}" -eq 1 ] && [ "$row_count" -eq 1 ]; then
+            tag="${SANDY_AGENT:-claude}"
+        else
+            continue
+        fi
+    fi
+    [ "$tag" = "$a" ] || continue
+    apid="-"; sock="-"; key="-"
+    for d in $(descendants "$ppid"); do
+        is_agent "$d" "$a" || continue
+        if [ "$a" = "claude" ] && [ -S "$SOCK_DIR/$d.sock" ]; then apid="$d"; break; fi
+        [ "$apid" = "-" ] && apid="$d"
+    done
+    if [ "$a" = "claude" ] && [ "$apid" != "-" ]; then
+        [ -S "$SOCK_DIR/$apid.sock" ] && sock="$SOCK_DIR/$apid.sock"
+        for k in "$KEY_DIR/$apid".*.key; do [ -f "$k" ] && { key="$k"; break; }; done
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$a" "$idx" "$ppid" "$apid" "$sock" "$key"
+  done <<< "$rows"
+done
+UDS_SESSIONS
+_uds_sessions() {  # $1=container -> tab-delimited rows, same shape the removed helper produced
+    docker exec -i -u "$(id -u)" -e HOME=/home/sandy "$1" bash -s < "$_UDS_SESSIONS_FILE"
+}
+
+
 run_case() {
     local label="$1" expect="$2" extra="${3:-}" host_extra="${4:-}"
     local marker="ACC74-$expect-$$-$RANDOM"
@@ -379,9 +473,11 @@ run_case() {
            "! printf '%s' \"\$marker_json\" | grep -q '\"permission_mode\": \"bypassPermissions\"'"
     fi
 
-    # Wait for a claude row whose socket is actually bound. sandy-handoff-sessions
-    # emits '-' until the agent has created it; injecting before then would
-    # measure the race, not the setting.
+    # Wait for a claude row whose socket is actually bound. _uds_sessions (this
+    # harness's own consumer copy, built on the published pane-identity
+    # contract -- sandy's own sandy-handoff-sessions was removed in 2.6.0,
+    # #382 decision 7) emits '-' until the agent has created it; injecting
+    # before then would measure the race, not the setting.
     # 120s, not the original 60s, and the elapsed time is REPORTED. Two
     # different cases have now failed here on different runs -- once
     # accept/non-bypass, once refuse, which is a plain bypass case -- so this is
@@ -391,7 +487,7 @@ run_case() {
     # honest about having been slow.
     local row="" sock="" keyf="" i _waited=0
     for i in $(seq 1 60); do
-        row="$(docker exec -u "$(id -u)" "$c" sandy-handoff-sessions 2>/dev/null | awk -F'\t' '$1=="claude"{print; exit}')"
+        row="$(_uds_sessions "$c" 2>/dev/null | awk -F'\t' '$1=="claude"{print; exit}')"
         sock="$(printf '%s' "$row" | awk -F'\t' '{print $5}')"
         keyf="$(printf '%s' "$row" | awk -F'\t' '{print $6}')"
         [ -n "$sock" ] && [ "$sock" != "-" ] && [ -n "$keyf" ] && [ "$keyf" != "-" ] && break
@@ -436,8 +532,8 @@ run_case() {
         echo "    -- [$label] .claude.json dialog/trust state --"
         docker exec -u "$(id -u)" "$c" sh -c 'for k in hasCompletedOnboarding theme hasTrustDialogAccepted bypassPermissionsModeAccepted projects; do printf "%s: " "$k"; grep -o "\"$k\"[^,]*" "$HOME/.claude.json" 2>/dev/null | head -1 || true; echo; done' 2>&1 \
             | sed 's/^/          | /' || echo "          | <unreadable>"
-        echo "    -- [$label] sandy-handoff-sessions rows --"
-        docker exec -u "$(id -u)" "$c" sandy-handoff-sessions 2>&1 \
+        echo "    -- [$label] _uds_sessions rows (this harness's consumer copy) --"
+        _uds_sessions "$c" 2>&1 \
             | sed 's/^/          | /' || echo "          | <none>"
         "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1; return 0
     fi
@@ -634,6 +730,7 @@ run_case "accept/non-bypass" routed "" "SANDY_SKIP_PERMISSIONS=false"
 
 "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true
 rm -rf "$(dirname "$WS")"
+rm -f "${_UDS_SESSIONS_FILE:-}" 2>/dev/null || true
 _cleanup_sandy_home || true
 
 echo

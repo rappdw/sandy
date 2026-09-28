@@ -51,7 +51,9 @@
 #      env forwarding, the supervisor actually running as a sibling of tmux
 #      (not a pane, not a session child), singleton-via-flock, restart on
 #      death with a fresh pid, survival of an --update-sessions recreation
-#      (state persists), sandy-handoff-sessions producing a real socket path,
+#      (state persists), a claude pane carrying the @sandy_pane_agent tag the
+#      pane-identity contract (#378) promises (sandy's own former consumer of
+#      it, sandy-handoff-sessions, was removed in 2.6.0 -- #382, decision 7),
 #      the crossSessionInbound pin landing in both measured-working files and
 #      the workspace copy being genuinely :ro, and that headless (-p) runs
 #      never start a relay.
@@ -248,18 +250,20 @@ ck "the supervisor lock is HELD (a second flock -n attempt fails)" \
 ck "still exactly one relay process (no second supervisor was spawned)" \
    "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f 'acc-relay/relay' 2>/dev/null)\" = 1 ]"
 
-echo "-- E5. sandy-handoff-sessions --"
-_hs=""
+echo "-- E5. pane-identity contract (#378): a claude pane is tagged @sandy_pane_agent --"
+# sandy-handoff-sessions (the in-image consumer of the pane-identity contract
+# that used to be asserted here) was REMOVED in 2.6.0 (#382, decision 7). The
+# contract itself -- tmux session "sandy", the @sandy_pane_agent pane option,
+# SANDY_AGENT spawn order -- is unchanged and is what this now checks
+# directly, the same way an external consumer's own copy would.
+_pt=""
 for _i in 1 2 3 4 5 6; do
-    _hs="$(docker exec -u "$(id -u)" "$C3" sandy-handoff-sessions 2>/dev/null)"
-    printf '%s\n' "$_hs" | awk -F'\t' '$1=="claude"{f=1} END{exit !f}' && break
+    _pt="$(docker exec -u "$(id -u)" -e HOME=/home/sandy "$C3" tmux list-panes -s -t sandy -F '#{@sandy_pane_agent}' 2>/dev/null)"
+    printf '%s\n' "$_pt" | grep -qx claude && break
     sleep 5
 done
-ck "sandy-handoff-sessions lists a claude row" \
-   "printf '%s\n' \"\$_hs\" | awk -F'\t' '\$1==\"claude\"{f=1} END{exit !f}'"
-_sock="$(printf '%s\n' "$_hs" | awk -F'\t' '$1=="claude"{print $5; exit}')"
-ck "the listed socket path is a real socket in the container" \
-   "[ -n \"$_sock\" ] && [ \"$_sock\" != \"-\" ] && docker exec -u \"\$(id -u)\" \"$C3\" test -S \"$_sock\""
+ck "tmux list-panes -s -t sandy reports a pane tagged @sandy_pane_agent=claude" \
+   "printf '%s\n' \"\$_pt\" | grep -qx claude"
 
 echo "-- E6. crossSessionInbound pin lands in both measured-working files --"
 _marker="$(docker exec -u "$(id -u)" "$C3" cat /etc/sandy-session.json 2>/dev/null)"

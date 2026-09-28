@@ -11818,73 +11818,9 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 check "§114(13g) marker printf format/arg count line up (21 %s/%d conversions)" \
     test "$_S114_CONV_COUNT" -eq 21
 
-# --- (14) sandy-handoff-sessions helper: extraction + local functional test --
-# _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
-# tab-delimited row matcher via bash's own `case` glob matching. $1=text $2=glob
-# pattern (built with $_S114_TAB between fields; '*' wildcards allowed in $2).
-_S114_TAB="$(printf '\t')"
-_s114_hs_match() {
-    case "$1" in
-        $2) return 0 ;;
-    esac
-    return 1
-}
-_S114_HS_HELPER="$(sed -n "/<<'HS_HELPER'/,/^HS_HELPER\$/p" "$_S114_SANDY" | sed '1,2d;$d')"
-check "§114(14pre) extracted the sandy-handoff-sessions helper body" \
-    bash -c 'printf "%s" "$1" | grep -q "sandy-handoff-sessions"' -- "$_S114_HS_HELPER"
-_S114_HS="$_S114/hs"
-printf '%s\n' "$_S114_HS_HELPER" > "$_S114_HS"
-chmod +x "$_S114_HS"
-check "§114(14a) helper is syntactically valid bash" bash -n "$_S114_HS"
-
-mkdir -p "$_S114/proc/100" "$_S114/proc/101" "$_S114/socks" "$_S114/keys"
-printf '100 (bash) S 1 100 100 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' > "$_S114/proc/100/stat"
-printf '101 (claude) S 100 100 100 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' > "$_S114/proc/101/stat"
-printf 'node\0/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js\0' > "$_S114/proc/101/cmdline"
-touch "$_S114/keys/101.abc.key"
-printf '0\t100\t\n' > "$_S114/panes.tsv"
-_S114_HS_OUT="$(SANDY_SESSIONS_PANES_FILE="$_S114/panes.tsv" SANDY_SESSIONS_PROC="$_S114/proc" SANDY_SESSIONS_SOCK_DIR="$_S114/socks" SANDY_SESSIONS_KEY_DIR="$_S114/keys" SANDY_AGENT=claude "$_S114_HS" 2>&1)"
-check "§114(14b) single-agent: one row, correct agent/pane/pid/keyfile, socket '-' (none bound)" \
-    _s114_hs_match "$_S114_HS_OUT" "claude${_S114_TAB}0${_S114_TAB}100${_S114_TAB}101${_S114_TAB}-${_S114_TAB}*/keys/101.abc.key"
-
-mkdir -p "$_S114/proc/200" "$_S114/proc/202"
-printf '200 (bash) S 1 200 200 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' > "$_S114/proc/200/stat"
-printf '202 (codex) S 200 200 200 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' > "$_S114/proc/202/stat"
-printf 'node\0/usr/local/bin/codex\0' > "$_S114/proc/202/cmdline"
-printf '0\t100\tclaude\n2\t200\tcodex\n' > "$_S114/panes-multi.tsv"
-_S114_HS_OUT2="$(SANDY_SESSIONS_PANES_FILE="$_S114/panes-multi.tsv" SANDY_SESSIONS_PROC="$_S114/proc" SANDY_SESSIONS_SOCK_DIR="$_S114/socks" SANDY_SESSIONS_KEY_DIR="$_S114/keys" SANDY_AGENT=codex,claude "$_S114_HS" 2>&1)"
-_S114_HS_OUT2_L1="$(printf '%s\n' "$_S114_HS_OUT2" | sed -n '1p')"
-_S114_HS_OUT2_L2="$(printf '%s\n' "$_S114_HS_OUT2" | sed -n '2p')"
-check "§114(14c) multi-agent: rows follow SANDY_AGENT order (codex first), proving pane_index is NOT assumed to equal spawn order" \
-    _s114_hs_match "$_S114_HS_OUT2_L1" "codex${_S114_TAB}2${_S114_TAB}200${_S114_TAB}202${_S114_TAB}-${_S114_TAB}-"
-check "§114(14d) ...and the claude row still resolves correctly second" \
-    _s114_hs_match "$_S114_HS_OUT2_L2" "claude${_S114_TAB}0${_S114_TAB}100${_S114_TAB}101${_S114_TAB}-${_S114_TAB}*"
-
-_S114_HS_EMPTY_RC=0
-SANDY_SESSIONS_PANES_FILE="$_S114/empty.tsv" SANDY_SESSIONS_PROC="$_S114/proc" >/dev/null 2>&1
-: > "$_S114/empty.tsv"
-_S114_HS_EMPTY_OUT="$(SANDY_SESSIONS_PANES_FILE="$_S114/empty.tsv" SANDY_SESSIONS_PROC="$_S114/proc" SANDY_AGENT=claude "$_S114_HS" 2>&1)" || _S114_HS_EMPTY_RC=$?
-check "§114(14e) no panes -> empty output, rc 0 (never invokes tmux when the test-hook file is given, even empty)" \
-    bash -c 'test -z "$1" -a "$2" -eq 0' -- "$_S114_HS_EMPTY_OUT" "$_S114_HS_EMPTY_RC"
-
-# --- (14f) SIGPIPE regression guard: is_agent()'s cmdline check must not use a
-# raw `tr | grep -q` pipe under this helper's own `set -o pipefail` -- a match
-# near the FRONT of an oversized cmdline lets grep -q exit before tr finishes
-# writing, tr dies of SIGPIPE (141), and pipefail turns that into the whole
-# pipeline's exit status even though the match was real. Fresh pid namespace
-# (500/501) so this doesn't collide with the 100/101/200/202 fixtures above --
-# descendants() walks the WHOLE $PROC tree filtering by ppid, so a reused pane
-# pid could pick up an unrelated sibling and mask the bug. comm is "node" (a
-# node-installed claude, the live case), forcing the fallback into the
-# cmdline check rather than short-circuiting on comm_of.
-mkdir -p "$_S114/proc/500" "$_S114/proc/501"
-printf '500 (bash) S 1 500 500 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' > "$_S114/proc/500/stat"
-printf '501 (node) S 500 500 500 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' > "$_S114/proc/501/stat"
-{ printf 'claude\0'; head -c 200000 /dev/zero | tr '\0' 'x'; printf '\0'; } > "$_S114/proc/501/cmdline"
-printf '0\t500\t\n' > "$_S114/panes-big.tsv"
-_S114_HS_BIG_OUT="$(SANDY_SESSIONS_PANES_FILE="$_S114/panes-big.tsv" SANDY_SESSIONS_PROC="$_S114/proc" SANDY_SESSIONS_SOCK_DIR="$_S114/socks" SANDY_SESSIONS_KEY_DIR="$_S114/keys" SANDY_AGENT=claude "$_S114_HS" 2>&1)"
-check "§114(14f) oversized cmdline with the match FIRST still recognizes the agent (agent_pid resolves, not '-')" \
-    _s114_hs_match "$_S114_HS_BIG_OUT" "claude${_S114_TAB}0${_S114_TAB}500${_S114_TAB}501${_S114_TAB}*"
+# (14) sandy-handoff-sessions helper: REMOVED in 2.6.0 (#382, decision 7) along
+# with the helper itself; the pane-identity contract it was built on stays
+# published and guarded below, and §176(g) guards the removal.
 
 # --- (15) relay supervisor: static checks against the TEMPLATE (mirror of the heredoc) --
 if [ -f "$_S114_TMPL" ]; then
@@ -12194,9 +12130,8 @@ unset _S114_SANDY _S114_TMPL _S114 _S114_PVP_FN _S114_VC_ACCEPT _S114_VC_HOLD _S
     _S114_NOJQ_HAS_JQ _S114_NONODE _S114_NOTOOL \
     _S114_CSI_BLK _S114_D1_OUT _S114_D2_OUT _S114_D3_OUT _S114_D4_OUT _S114_D5_RC _S114_D5B_RC _S114_D6_OUT \
     _S114_NUDGE_OUT _S114_NUDGE_OUT2 _S114_END_LINE _S114_MOUNT_LINE _S114_SNAP_LINE _S114_RELAY_BEGIN_LINE _S114_PKGDIR_LINE _S114_HANDOFFDIR_LINE \
-    _S114_RELAY_BLK _S114_RELAY_RC _S114_FMT_LINE _S114_CONV_COUNT _S114_HS_HELPER _S114_HS _S114_HS_OUT _S114_HS_OUT2 \
-    _S114_HS_OUT2_L1 _S114_HS_OUT2_L2 _S114_HS_BIG_OUT \
-    _S114_HS_EMPTY_RC _S114_HS_EMPTY_OUT _S114_SUP_FN _S114_ENTRY_FNS _S114_RF _S114_TAB _S114_RF2 _S114_LOCK _S114_FLOCK_RC \
+    _S114_RELAY_BLK _S114_RELAY_RC _S114_FMT_LINE _S114_CONV_COUNT \
+    _S114_SUP_FN _S114_ENTRY_FNS _S114_RF _S114_RF2 _S114_LOCK _S114_FLOCK_RC \
     _S114_RW _S114_RELAY_OUT _S114_COLL_BLK _S114_COLL_RC _S114_COLL_OUT _S114_D8_OUT \
     _S114_ACC _S114_ACC_E _S114_START_PAT _S114_UDS \
     2>/dev/null || true
@@ -19053,230 +18988,33 @@ unset _S170_FN _S170_OUT
 echo ""
 echo "§171: the pane-identity contract (#378) — identity comes from @sandy_pane_agent, order from SANDY_AGENT"
 # ============================================================
-# WHY. #378 step 1 publishes tmux session "sandy", the @sandy_pane_agent pane
+# WHY. #378 step 1 published tmux session "sandy", the @sandy_pane_agent pane
 # option, and SANDY_AGENT spawn order (SPECIFICATION.md "Pane-identity
-# contract") as a STABLE surface external tooling is now allowed to depend on
-# -- an external consumer's own copy of sandy-handoff-sessions is built
-# against exactly these three facts. A grep for the option name does not pin
-# a contract; this section asserts the PROPERTY the acceptance criterion names:
-# a fixture where @sandy_pane_agent DISAGREES with pane_index still yields the
-# correct agent per row, in SANDY_AGENT order.
-#
-# Reuses §114(14)'s extraction mechanics (sed out the HS_HELPER heredoc body,
-# write it to a temp file, chmod +x) but with this section's OWN canonical
-# temp dir and a FRESH fake /proc tree -- descendants() walks the WHOLE $PROC
-# tree by ppid, so reusing §114's pids would mask a bug that only shows up
-# when two sections' fixtures collide.
-_S171_SANDY="$SANDY_SCRIPT"
+# contract") as a STABLE surface external tooling is allowed to depend on.
+# Sandy shipped its own consumer of that contract, /usr/local/bin/
+# sandy-handoff-sessions, through 2.5.x; it was REMOVED in 2.6.0 (#382,
+# decision 7 -- see §176(g)). The contract itself is NOT removed: it is now
+# the published basis an external consumer builds its OWN copy of that
+# helper on, so this section asserts the PRODUCER side only -- that the
+# facts the contract promises stay true in the launcher and in the published
+# doc -- rather than any one consumer's reading of them.
 _S171_TMPL="$(dirname "$0")/../templates/user-setup.sh.tmpl"
 _S171_SPEC="$(dirname "$0")/../SPECIFICATION.md"
-_S171_TAB="$(printf '\t')"
 _S171_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
 
 # Hermetic by construction (the §142 lesson): this suite is routinely run
-# INSIDE a sandy sandbox, whose live session exports SANDY_AGENT and could in
-# principle export SANDY_SESSIONS_* test hooks. Every invocation below passes
-# all five explicitly, but unset first too so nothing here can silently read
-# the developer's own container.
-unset SANDY_AGENT SANDY_SESSIONS_PANES_FILE SANDY_SESSIONS_PROC SANDY_SESSIONS_SOCK_DIR SANDY_SESSIONS_KEY_DIR
+# INSIDE a sandy sandbox, whose live session exports SANDY_AGENT. Unset it
+# first so nothing here can silently read the developer's own container.
+unset SANDY_AGENT
 
-_s171_match() {  # $1=text $2=glob -- case, not grep -P (BSD grep rejects it)
-    case "$1" in
-        $2) return 0 ;;
-    esac
-    return 1
-}
-
-_S171_HS_HELPER="$(sed -n "/<<'HS_HELPER'/,/^HS_HELPER\$/p" "$_S171_SANDY" | sed '1,2d;$d')"
-check "§171(pre) extracted the sandy-handoff-sessions helper body" \
-    bash -c 'printf "%s" "$1" | grep -q "sandy-handoff-sessions"' -- "$_S171_HS_HELPER"
-_S171_HS="$_S171_DIR/hs"
-printf '%s\n' "$_S171_HS_HELPER" > "$_S171_HS"
-chmod +x "$_S171_HS"
-check "§171(pre2) helper is syntactically valid bash" bash -n "$_S171_HS"
-
-# --- (10) Appendix A's copy of the sandy-handoff-sessions header comment must
-# be BYTE-IDENTICAL to the real heredoc's (decisions.md #378 item 4 and the
-# Boundary rule, both flagged by the fix-pass verifier as unmet: the
-# SPECIFICATION.md copy used to be a paraphrase, and its body placeholder
-# pointed at a CLAUDE.md "Handoff relay" heading that no longer exists). This
-# extracts sandy's own pre-RUN 2-line comment plus the heredoc's leading
-# '#'-comment block (everything between the `#!/bin/bash` shebang and the
-# first non-comment line -- i.e. the real code, which Appendix A elides) and
-# does the same against SPECIFICATION.md's copy, then diffs them as TEXT, not
-# by grepping for a mechanism's presence: a paraphrase that mentions the same
-# facts in different words would pass a presence check and must fail this one.
-_s171_hs_header_sandy() {  # $1=file -> 2-line pre-RUN comment + heredoc's leading comment block (stops at the first non-'#' line, which is real code in sandy's own heredoc)
-    { grep -B2 -F 'RUN cat > /usr/local/bin/sandy-handoff-sessions' "$1" | sed '$d';
-      awk '
-          /RUN cat > \/usr\/local\/bin\/sandy-handoff-sessions/ { f=1; next }
-          f && /^#!\/bin\/bash$/ { c=1; next }
-          c && /^#/ { print; next }
-          c { exit }
-      ' "$1"; }
-}
-# Appendix A elides the real body behind its OWN placeholder comment (see the
-# SS_HELPER entry just above for the established precedent) -- unlike sandy's
-# heredoc, SPECIFICATION.md's comment run does not end where the real header
-# ends, so it cannot be bounded by "first non-'#' line" the way sandy's can.
-# Bound it instead by sandy's own LAST header line (an exact-text anchor
-# taken from sandy itself, not hardcoded here) -- this still fails correctly
-# on a reworded paraphrase, which will not contain that exact line and so
-# runs on to the heredoc's closing HS_HELPER delimiter, producing a blob that
-# cannot match sandy's short header either way.
-_s171_hs_header_bounded() {  # $1=file $2=exact last line to stop at (inclusive) -> same shape as _s171_hs_header_sandy
-    { grep -B2 -F 'RUN cat > /usr/local/bin/sandy-handoff-sessions' "$1" | sed '$d';
-      awk -v last="$2" '
-          /RUN cat > \/usr\/local\/bin\/sandy-handoff-sessions/ { f=1; next }
-          f && /^#!\/bin\/bash$/ { c=1; next }
-          c { print }
-          c && $0==last { exit }
-          c && !/^#/ { exit }
-      ' "$1"; }
-}
-_S171_HS_HEADER_SANDY="$(_s171_hs_header_sandy "$_S171_SANDY")"
-_S171_HS_LAST_LINE="$(printf '%s\n' "$_S171_HS_HEADER_SANDY" | tail -1)"
-_S171_HS_HEADER_SPEC="$(_s171_hs_header_bounded "$_S171_SPEC" "$_S171_HS_LAST_LINE")"
-check "§171(10pre) extracted a non-empty sandy-handoff-sessions header comment from both sandy and SPECIFICATION.md" \
-    bash -c '[ -n "$1" ] && [ -n "$2" ]' _ "$_S171_HS_HEADER_SANDY" "$_S171_HS_HEADER_SPEC"
-check "§171(10) SPECIFICATION.md Appendix A's sandy-handoff-sessions header comment is byte-identical to the heredoc's" \
-    bash -c '[ "$1" = "$2" ]' _ "$_S171_HS_HEADER_SANDY" "$_S171_HS_HEADER_SPEC"
-unset -f _s171_hs_header_sandy _s171_hs_header_bounded
-unset _S171_HS_HEADER_SANDY _S171_HS_HEADER_SPEC _S171_HS_LAST_LINE
-
-# _s171_run PANES_FILE PROC_DIR AGENT_LIST -> stdout in _S171_OUT, exit code in
-# _S171_RC. SOCK_DIR and KEY_DIR always point at guaranteed-empty, non-existent
-# directories under this section's own temp dir so a real /tmp/cc-socks or
-# ~/.claude/sessions on the host running this suite can never leak a
-# socket/keyfile into a fixture row.
-#
-# The `|| _S171_RC=$?` is load-bearing, not decorative: under this suite's
-# `set -euo pipefail`, a bare `_S171_OUT="$(... "$_S171_HS" 2>&1)"` assignment
-# whose helper exits non-zero fails the ASSIGNMENT itself, which trips the ERR
-# trap and aborts the WHOLE SUITE -- silently skipping every section appended
-# after §171 (a verifier finding against the first cut of this section, which
-# had exactly this gap). Reset _S171_RC to 0 before every call so a check that
-# only reads it (rather than calling _s171_run again first) can't read a stale
-# value from a previous fixture.
-_s171_run() {
-    _S171_RC=0
-    _S171_OUT="$(SANDY_SESSIONS_PANES_FILE="$1" SANDY_SESSIONS_PROC="$2" \
-        SANDY_SESSIONS_SOCK_DIR="$_S171_DIR/nosock" SANDY_SESSIONS_KEY_DIR="$_S171_DIR/nokey" \
-        SANDY_AGENT="$3" "$_S171_HS" 2>&1)" || _S171_RC=$?
-}
-# _s171_stat PID COMM PPID -> a /proc/<pid>/stat line in the same shape §114
-# uses (comm in parens; ppid is the field right after the state char).
-_s171_stat() {
-    printf '%s (%s) S %s %s %s 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' \
-        "$1" "$2" "$3" "$1" "$1"
-}
-
-# --- (1) TWO-AGENT DISAGREEMENT: the option disagrees with index-as-spawn-order ---
-mkdir -p "$_S171_DIR/proc1/301" "$_S171_DIR/proc1/401"
-_s171_stat 301 codex 300 > "$_S171_DIR/proc1/301/stat"
-_s171_stat 401 claude 400 > "$_S171_DIR/proc1/401/stat"
-printf '0%s300%scodex\n1%s400%sclaude\n' "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" > "$_S171_DIR/panes1.tsv"
-_s171_run "$_S171_DIR/panes1.tsv" "$_S171_DIR/proc1" claude,codex
-_S171_OUT1_L1="$(printf '%s\n' "$_S171_OUT" | sed -n '1p')"
-_S171_OUT1_L2="$(printf '%s\n' "$_S171_OUT" | sed -n '2p')"
-check "§171(1rc) helper exited 0" \
-    bash -c '[ "$1" -eq 0 ]' _ "$_S171_RC"
-check "§171(1pre) exactly 2 rows" \
-    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 2 ]' _ "$_S171_OUT"
-check "§171(1a) row 1 is claude at pane_index 1 / pane_pid 400 / agent_pid 401 -- SANDY_AGENT order (claude,codex), not pane order (pane 0 is codex)" \
-    _s171_match "$_S171_OUT1_L1" "claude${_S171_TAB}1${_S171_TAB}400${_S171_TAB}401${_S171_TAB}*"
-check "§171(1b) row 2 is codex at pane_index 0 / pane_pid 300 / agent_pid 301 -- the row the @sandy_pane_agent option identifies, not the one pane_index would suggest" \
-    _s171_match "$_S171_OUT1_L2" "codex${_S171_TAB}0${_S171_TAB}300${_S171_TAB}301${_S171_TAB}-${_S171_TAB}-"
-
-# --- (2) the real 4-agent grid mapping: pane_index != spawn order ---
-# The tmux order the launcher actually produces (SPECIFICATION.md's mapping
-# table): pane_index 0=agent1, 1=agent4, 2=agent2, 3=agent3.
-mkdir -p "$_S171_DIR/proc2/610" "$_S171_DIR/proc2/611" "$_S171_DIR/proc2/612" "$_S171_DIR/proc2/613"
-_s171_stat 610 claude   600 > "$_S171_DIR/proc2/610/stat"
-_s171_stat 611 opencode 601 > "$_S171_DIR/proc2/611/stat"
-_s171_stat 612 gemini   602 > "$_S171_DIR/proc2/612/stat"
-_s171_stat 613 codex    603 > "$_S171_DIR/proc2/613/stat"
-printf '0%s600%sclaude\n1%s601%sopencode\n2%s602%sgemini\n3%s603%scodex\n' \
-    "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" \
-    > "$_S171_DIR/panes2.tsv"
-_s171_run "$_S171_DIR/panes2.tsv" "$_S171_DIR/proc2" claude,gemini,codex,opencode
-_S171_OUT2_L1="$(printf '%s\n' "$_S171_OUT" | sed -n '1p')"
-_S171_OUT2_L2="$(printf '%s\n' "$_S171_OUT" | sed -n '2p')"
-_S171_OUT2_L3="$(printf '%s\n' "$_S171_OUT" | sed -n '3p')"
-_S171_OUT2_L4="$(printf '%s\n' "$_S171_OUT" | sed -n '4p')"
-check "§171(2rc) helper exited 0" \
-    bash -c '[ "$1" -eq 0 ]' _ "$_S171_RC"
-check "§171(2pre) exactly 4 rows" \
-    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 4 ]' _ "$_S171_OUT"
-check "§171(2a) claude: pane_index 0 (the split root)" \
-    _s171_match "$_S171_OUT2_L1" "claude${_S171_TAB}0${_S171_TAB}600${_S171_TAB}610${_S171_TAB}*"
-check "§171(2b) gemini: pane_index 2 -- the THIRD split, not the second" \
-    _s171_match "$_S171_OUT2_L2" "gemini${_S171_TAB}2${_S171_TAB}602${_S171_TAB}612${_S171_TAB}*"
-check "§171(2c) codex: pane_index 3" \
-    _s171_match "$_S171_OUT2_L3" "codex${_S171_TAB}3${_S171_TAB}603${_S171_TAB}613${_S171_TAB}*"
-check "§171(2d) opencode: pane_index 1 -- the FOURTH agent lands at index 1 because the last split re-splits pane 0 and tmux inserts the new pane right after it (the trap this contract exists to name)" \
-    _s171_match "$_S171_OUT2_L4" "opencode${_S171_TAB}1${_S171_TAB}601${_S171_TAB}611${_S171_TAB}*"
-
-# --- (3) PRE-2.4.0 SHAPE: one untagged pane, one agent -- falls back to SANDY_AGENT ---
-# As of 2.4.0 sandy tags the single-agent pane too (#378 fix pass), so this
-# shape (@sandy_pane_agent unset entirely) is now specifically the LEGACY one
-# a pre-2.4.0 image could have produced, not the current default. The helper
-# still has to resolve it, which is exactly what the fallback rule below
-# checks it does -- and does NOT overreach into.
-mkdir -p "$_S171_DIR/proc3/501"
-_s171_stat 501 codex 500 > "$_S171_DIR/proc3/501/stat"
-printf '0%s500%s\n' "$_S171_TAB" "$_S171_TAB" > "$_S171_DIR/panes3.tsv"
-_s171_run "$_S171_DIR/panes3.tsv" "$_S171_DIR/proc3" codex
-check "§171(3rc) helper exited 0" \
-    bash -c '[ "$1" -eq 0 ]' _ "$_S171_RC"
-check "§171(3) single-agent, ONE untagged pane (pre-2.4.0 shape): one row, labelled \$SANDY_AGENT" \
-    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 1 ] && case "$1" in $2) exit 0 ;; esac; exit 1' \
-    _ "$_S171_OUT" "codex${_S171_TAB}0${_S171_TAB}500${_S171_TAB}501${_S171_TAB}*"
-
-# --- (5) single-agent, tagged agent pane PLUS an untagged user split: the
-# fallback must NOT fire (row_count is 2, not 1) -- exactly one row, the
-# TAGGED pane, regardless of its pane_index. Proc entry only for the tagged
-# pane's agent_pid: the untagged row is skipped before descendants() would
-# ever need the untagged pane's own pid to resolve to anything. ---
-mkdir -p "$_S171_DIR/proc5/801"
-_s171_stat 801 codex 800 > "$_S171_DIR/proc5/801/stat"
-printf '0%s700%s\n1%s800%scodex\n' "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" > "$_S171_DIR/panes5.tsv"
-_s171_run "$_S171_DIR/panes5.tsv" "$_S171_DIR/proc5" codex
-check "§171(5rc) helper exited 0" \
-    bash -c '[ "$1" -eq 0 ]' _ "$_S171_RC"
-check "§171(5) single-agent, tagged pane (idx1) + untagged user split (idx0): exactly one row, the tagged pane, whatever its pane_index" \
-    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 1 ] && case "$1" in $2) exit 0 ;; esac; exit 1' \
-    _ "$_S171_OUT" "codex${_S171_TAB}1${_S171_TAB}800${_S171_TAB}801${_S171_TAB}*"
-
-# --- (6) single-agent, tagged lead PLUS two untagged teammate panes (e.g.
-# agent-teams): the fallback must NOT fire (row_count is 3) -- exactly one
-# claude row, the two untagged teammates skipped rather than guessed. ---
-mkdir -p "$_S171_DIR/proc6/901"
-_s171_stat 901 claude 900 > "$_S171_DIR/proc6/901/stat"
-printf '0%s900%sclaude\n1%s910%s\n2%s920%s\n' \
-    "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" > "$_S171_DIR/panes6.tsv"
-_s171_run "$_S171_DIR/panes6.tsv" "$_S171_DIR/proc6" claude
-check "§171(6rc) helper exited 0" \
-    bash -c '[ "$1" -eq 0 ]' _ "$_S171_RC"
-check "§171(6) single-agent, tagged lead + two untagged teammate panes: exactly one claude row" \
-    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 1 ] && case "$1" in $2) exit 0 ;; esac; exit 1' \
-    _ "$_S171_OUT" "claude${_S171_TAB}0${_S171_TAB}900${_S171_TAB}901${_S171_TAB}*"
-
-# --- (7) single-agent, TWO untagged panes: the fallback's own row-count==1
-# requirement fails, so NEITHER row is guessed -- no output at all. No /proc
-# fixtures needed: both rows are skipped before any pid is ever resolved. ---
-printf '0%s800%s\n1%s801%s\n' "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" > "$_S171_DIR/panes7.tsv"
-_s171_run "$_S171_DIR/panes7.tsv" "$_S171_DIR/proc7-nonexistent" codex
-check "§171(7rc) helper exited 0" \
-    bash -c '[ "$1" -eq 0 ]' _ "$_S171_RC"
-check "§171(7) single-agent, TWO untagged panes: no rows (nothing is guessed)" \
-    bash -c '[ -z "$1" ]' _ "$_S171_OUT"
-
-# --- (4) producer/consumer AGREEMENT, not a presence grep ---
+# --- (4) producer/doc AGREEMENT, not a presence grep ---
 # Extract from the user-setup TEMPLATE (the launcher's mirror, same discipline
 # as §114(15)) which session name every `tmux new-session ... -s X` targets and
-# which option name every `set-option -p ... @X` sets; extract from the HELPER
-# which session `tmux list-panes -t X` targets and which option `#{@X}` reads.
+# which option name every `set-option -p ... @X` sets. Since 2.6.0 (#382)
+# there is no in-image consumer to cross-check against, so the agreement side
+# is checked against the PUBLISHED contract in SPECIFICATION.md instead: an
+# external consumer builds its own copy against exactly those two facts, so
+# the doc naming them correctly is what "the contract holds" now means.
 # grep -oE captures only lines that actually match (a bare grep+sed pipeline
 # would echo a non-matching line unchanged and poison the set -- this bit).
 if [ -f "$_S171_TMPL" ]; then
@@ -19292,22 +19030,30 @@ if [ -f "$_S171_TMPL" ]; then
     _S171_TMPL_SESSIONS="$(grep 'tmux new-session' "$_S171_TMPL" | grep -oE ' -s [A-Za-z0-9_.-]+' | sed -E 's/^ -s //' | sort -u)" || true
     _S171_TMPL_OPTS="$(grep 'set-option -p' "$_S171_TMPL" | grep -oE '@[A-Za-z0-9_]+' | sed 's/^@//' | sort -u)" || true
     _S171_TMPL_OPT_COUNT="$(grep -c 'set-option -p.*@sandy_pane_agent' "$_S171_TMPL")" || true
-    _S171_HS_SESSION="$(grep 'tmux list-panes -t' "$_S171_HS" | grep -oE ' -t [A-Za-z0-9_.-]+' | sed -E 's/^ -t //' | sort -u)" || true
-    _S171_HS_OPT="$(grep -oE '#\{@[A-Za-z0-9_]+\}' "$_S171_HS" | sed -E 's/#\{@([A-Za-z0-9_]+)\}/\1/' | sort -u)" || true
 
-    check "§171(4pre) all four extractions produced exactly one candidate each (mutation: a rename that empties one makes every check below vacuous)" \
-        bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$3" -ge 1 ] && [ -n "$4" ] && [ -n "$5" ]' \
-        _ "$_S171_TMPL_SESSIONS" "$_S171_TMPL_OPTS" "$_S171_TMPL_OPT_COUNT" "$_S171_HS_SESSION" "$_S171_HS_OPT"
+    # Slice SPECIFICATION.md down to the "Pane-identity contract" section
+    # alone (its heading to the next `###` heading), via awk index() line
+    # matching rather than a regex range -- no BRE/ERE question, and the
+    # slice cannot run on past a heading it did not anchor to.
+    _S171_SPEC_SECTION="$(awk -v beg='### Pane-identity contract' -v endh='### Codex Headless Translation' '
+        index($0, beg) == 1 { f = 1 }
+        f { print }
+        index($0, endh) == 1 { exit }
+    ' "$_S171_SPEC")" || true
+
+    check "§171(4pre) all extractions produced a non-empty candidate (mutation: a rename that empties one makes a check below vacuous)" \
+        bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$3" -ge 1 ] && [ -n "$4" ]' \
+        _ "$_S171_TMPL_SESSIONS" "$_S171_TMPL_OPTS" "$_S171_TMPL_OPT_COUNT" "$_S171_SPEC_SECTION"
     check "§171(4a) the launcher's every tmux new-session targets a single session name, 'sandy'" \
         bash -c '[ "$1" = "sandy" ]' _ "$_S171_TMPL_SESSIONS"
     check "§171(4b) the launcher's every set-option -p sets a single option name, '@sandy_pane_agent'" \
         bash -c '[ "$1" = "sandy_pane_agent" ]' _ "$_S171_TMPL_OPTS"
     check "§171(4c) exactly 6 set-option -p ... @sandy_pane_agent lines -- 4 multi-agent slots + 2 single-agent paths (daemon, foreground; #378 fix pass)" \
         bash -c '[ "$1" -eq 6 ]' _ "$_S171_TMPL_OPT_COUNT"
-    check "§171(4d) the helper's tmux list-panes targets the SAME session name" \
-        bash -c '[ "$1" = "$2" ]' _ "$_S171_HS_SESSION" "$_S171_TMPL_SESSIONS"
-    check "§171(4e) the helper's pane-format reads the SAME option name -- producer and consumer agree; a rename on one side only fails this pair" \
-        bash -c '[ "$1" = "$2" ]' _ "$_S171_HS_OPT" "$_S171_TMPL_OPTS"
+    check "§171(4d') SPECIFICATION.md's Pane-identity contract section names the session name the launcher's tmux new-session uses ('sandy')" \
+        bash -c 'printf "%s" "$1" | grep -qF -- "$2"' _ "$_S171_SPEC_SECTION" "$_S171_TMPL_SESSIONS"
+    check "§171(4e') ...and the option name the launcher's set-option -p sets ('sandy_pane_agent') -- a rename on either side (code or doc) fails this pair" \
+        bash -c 'printf "%s" "$1" | grep -qF -- "$2"' _ "$_S171_SPEC_SECTION" "$_S171_TMPL_OPTS"
 
     # --- (8) STRUCTURAL: both single-agent new-session paths tag their pane ---
     # (#378 fix pass: before this, only multi-agent mode ever set the option.)
@@ -19487,11 +19233,9 @@ else
 fi
 
 rm -rf "$_S171_DIR"
-unset _S171_SANDY _S171_TMPL _S171_SPEC _S171_TAB _S171_DIR _S171_HS_HELPER _S171_HS _S171_OUT _S171_RC \
-    _S171_OUT1_L1 _S171_OUT1_L2 _S171_OUT2_L1 _S171_OUT2_L2 _S171_OUT2_L3 _S171_OUT2_L4 \
-    _S171_TMPL_SESSIONS _S171_TMPL_OPTS _S171_TMPL_OPT_COUNT _S171_HS_SESSION _S171_HS_OPT \
+unset _S171_TMPL _S171_SPEC _S171_DIR \
+    _S171_TMPL_SESSIONS _S171_TMPL_OPTS _S171_TMPL_OPT_COUNT _S171_SPEC_SECTION \
     _S171_SA_BLOCK _S171_SA_NS_COUNT _S171_SA_OPT_COUNT
-unset -f _s171_match _s171_run _s171_stat
 
 # ============================================================
 echo "§172: per-feature supervised entries — every selected feature's entry runs (#381)"
@@ -21452,6 +21196,52 @@ _S175_L_PIDS="$(grep -m1 -n '^RUN_FLAGS+=(--pids-limit 512)$' "$_S175_SANDY" | c
 check "§175(6) --init is an unconditional column-0 RUN_FLAGS append after every per-mode RUN_FLAGS=(...) reset, beside --pids-limit (init=${_S175_L_INIT:-?} last-reset=${_S175_L_LASTSET:-?} pids=${_S175_L_PIDS:-?})" \
     bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$1" -gt "$2" ] && [ "$1" -gt "$3" ] && [ $(( $1 - $3 )) -lt 20 ]' _ "$_S175_L_INIT" "$_S175_L_LASTSET" "$_S175_L_PIDS"
 unset _S175_OK _S175_MISS _s175_src _s175_out _s175_t
+
+# ============================================================
+echo "§176: 2.6.0 — the relay-era surfaces announced in 2.5.0 are REMOVED (#382)"
+# ============================================================
+# Companion units fill in (a)-(g) as they land, each an inversion of the
+# corresponding 2.5.0 announcement (§175) into "it is gone":
+#   (a) relay{} and its two companion fields (relay_alias, disabled_by) are
+#       gone from the marker and --print-state.
+#   (b) schema_version is 4, consistently, in --print-schema, --print-state
+#       and --print-version.
+#   (c) SANDY_RELAY is a hard error naming the replacement (sandboxes.exclude).
+#   (d) an entry alone now resolves SANDY_CROSS_SESSION_INBOUND to refuse --
+#       the relay-legacy default is gone.
+#   (e) every entry's state dir is feature-state/<f>; a leftover relay-state/
+#       is removed at launch with one info line.
+#   (f) the stale-image warning names EVERY entry, not "all but the
+#       designated one".
+#   (g) the image no longer installs /usr/local/bin/sandy-handoff-sessions
+#       (r1, decision 7).
+
+# --- (g) sandy-handoff-sessions is no longer installed (decision 7) ---
+_S176_SANDY="$SANDY_SCRIPT"
+_S176_GDB_FN="$(awk '/^generate_dockerfile_base\(\) \{/,/^}$/' "$_S176_SANDY")"
+check "§176(g-pre) extracted generate_dockerfile_base (mutation M2: renaming it empties this, not a vacuous pass)" \
+    bash -c 'printf "%s" "$1" | grep -qF '\''cat > "$SANDY_HOME/Dockerfile.base.new"'\''' _ "$_S176_GDB_FN"
+_S176_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+SANDY_HOME="$_S176_D" bash -c 'eval "$1"; generate_dockerfile_base' _ "$_S176_GDB_FN" >/dev/null 2>&1 || true
+check "§176(g-pre) generate_dockerfile_base actually RAN: Dockerfile.base.new exists and contains sandy-ss-paths (positive control)" \
+    bash -c '[ -f "$1/Dockerfile.base.new" ] && grep -q "/usr/local/bin/sandy-ss-paths" "$1/Dockerfile.base.new"' _ "$_S176_D"
+check "§176(g1) the generated Dockerfile.base contains no 'sandy-handoff-sessions' and no 'HS_HELPER'" \
+    bash -c '! grep -q "sandy-handoff-sessions" "$1" && ! grep -q "HS_HELPER" "$1"' _ "$_S176_D/Dockerfile.base.new"
+rm -rf "$_S176_D"
+
+check "§176(g2) static: sandy itself no longer generates or references /usr/local/bin/sandy-handoff-sessions" \
+    bash -c '! grep -q "sandy-handoff-sessions" "$1"' _ "$_S176_SANDY"
+
+_S176_SPEC="$(dirname "$0")/../SPECIFICATION.md"
+_S176_APPA="$(awk -v beg='## Appendix A' -v endh='## Appendix B' '
+    index($0, beg) == 1 { f = 1 }
+    f { print }
+    index($0, endh) == 1 { exit }
+' "$_S176_SPEC")"
+check "§176(g3) SPECIFICATION.md Appendix A no longer contains the sandy-handoff-sessions RUN line" \
+    bash -c '! printf "%s" "$1" | grep -qF "RUN cat > /usr/local/bin/sandy-handoff-sessions"' _ "$_S176_APPA"
+
+unset _S176_SANDY _S176_GDB_FN _S176_D _S176_SPEC _S176_APPA
 
 # BEGIN SUMMARY
 # ============================================================
