@@ -190,7 +190,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `TELEGRAM_ALLOWED_SENDERS` | privileged | unset | 0.7.6 | stable | Comma-separated Telegram user IDs allowed to send messages. |
 | `DISCORD_BOT_TOKEN` | privileged | unset | 0.7.6 | stable | Discord bot token for the channel relay. |
 | `DISCORD_ALLOWED_SENDERS` | privileged | unset | 0.7.6 | stable | Comma-separated Discord user IDs allowed to send messages. |
-| `SANDY_HANDOFF_RELAY` | privileged | unset | 1.10.0 | deprecated | REMOVED AS A CONFIGURATION KEY in 2.2.0 (#354) -- setting it from the environment or any config file is a HARD ERROR naming the replacement (declare the executable as an 'entry' in a feature manifest). The INTERNAL CHANNEL it later served -- carrying the relay-designated entry's path from host to container-side supervisor -- was itself removed in 2.6.0 (#382, decisions 4-5): the host now passes every adopted entry to the container only via SANDY_FEATURE_ENTRIES (internal, no metadata row; see 'feature_entries' below), and no entry is designated any more -- every entry is supervised and reported identically. What an entry gets: a container-level process (a sibling of the tmux server, not a pane, not a child of any agent session), started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote, never under --provision), held to one instance by flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never given up on. Every entry's state (.state, supervisor.log) lives at its own $SANDBOX_DIR/feature-state/<feature>, mounted rw at /opt/sandy/feature-state/<feature> and exported to that entry's own process as SANDY_FEATURE_STATE -- an entry reads its own directory from that variable rather than constructing the path, uniform across every entry. Env contract: SANDY_FEATURE_STATE, SANDY_AGENT, SANDY_WORKSPACE. An entry that cannot start FAILS THE LAUNCH, never warn-and-proceed: missing or not executable, its state dir not mounted, or no flock (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) -- one shared 5s startup window covers every entry at once. DOCUMENTED EXCEPTION: a stale image predating per-feature entries (a deferred build per #218, or any other image built before the sandy.feature_entries=1 Dockerfile label existed) knows only the removed SANDY_HANDOFF_RELAY channel and so starts NONE of the entries -- sandy warns at launch, naming every one, and --print-state reports them all as state absent. There is no runtime toggle to stop them: SANDY_RELAY is a HARD ERROR as of 2.6.0 (see its own row below) with no per-feature replacement, so every adopted entry always runs. Reported in /etc/sandy-session.json as feature_entries.<feature>.{path} (this unit, #382 r4, leaves relay_alias:false and disabled_by:null emitting for every entry; the next unit removes both fields along with relay{}) and live in --print-state as feature_entries.<feature>.state (every entry, identically). In daemon mode an entry (and anything else planted at the uid) outlives sessions until the container is recreated -- run sandy --update-sessions --yes on a 24h cron. |
+| `SANDY_HANDOFF_RELAY` | privileged | unset | 1.10.0 | deprecated | REMOVED AS A CONFIGURATION KEY in 2.2.0 (#354) -- setting it from the environment or any config file is a HARD ERROR naming the replacement (declare the executable as an 'entry' in a feature manifest). The INTERNAL CHANNEL it later served -- carrying the relay-designated entry's path from host to container-side supervisor -- was itself removed in 2.6.0 (#382, decisions 4-5): the host now passes every adopted entry to the container only via SANDY_FEATURE_ENTRIES (internal, no metadata row; see 'feature_entries' below), and no entry is designated any more -- every entry is supervised and reported identically. What an entry gets: a container-level process (a sibling of the tmux server, not a pane, not a child of any agent session), started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote, never under --provision), held to one instance by flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never given up on. Every entry's state (.state, supervisor.log) lives at its own $SANDBOX_DIR/feature-state/<feature>, mounted rw at /opt/sandy/feature-state/<feature> and exported to that entry's own process as SANDY_FEATURE_STATE -- an entry reads its own directory from that variable rather than constructing the path, uniform across every entry. Env contract: SANDY_FEATURE_STATE, SANDY_AGENT, SANDY_WORKSPACE. An entry that cannot start FAILS THE LAUNCH, never warn-and-proceed: missing or not executable, its state dir not mounted, or no flock (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) -- one shared 5s startup window covers every entry at once. DOCUMENTED EXCEPTION: a stale image predating per-feature entries (a deferred build per #218, or any other image built before the sandy.feature_entries=1 Dockerfile label existed) knows only the removed SANDY_HANDOFF_RELAY channel and so starts NONE of the entries -- sandy warns at launch, naming every one, and --print-state reports them all as state absent. There is no runtime toggle to stop them: SANDY_RELAY is a HARD ERROR as of 2.6.0 (see its own row below) with no per-feature replacement, so every adopted entry always runs. Reported in /etc/sandy-session.json as feature_entries.<feature>.{path} (as of 2.6.0, relay_alias:false and disabled_by:null still emit for every entry, kept byte-identical for a reader gating on their presence; both fields are removed, along with relay{} itself, in a later minor) and live in --print-state as feature_entries.<feature>.state (every entry, identically). In daemon mode an entry (and anything else planted at the uid) outlives sessions until the container is recreated -- run sandy --update-sessions --yes on a 24h cron. |
 | `ANTHROPIC_PROFILE` | privileged | unset | 1.11.0 | experimental | Privileged. Name of the Anthropic Console profile to use when SANDY_CLAUDE_AUTH=profile (overrides the host active_config); forwarded into the container so Claude Code selects it explicitly (its /status shows the Profile row as profile-explicit). Privileged on purpose: it chooses WHICH profile's token enters the box, and a profile logged in with --scope org:admin carries organization-wide access, so a committed .sandy/config must not be able to select it. Ignored with a notice unless SANDY_CLAUDE_AUTH=profile. |
 | `SANDY_AGENT` | passive | `claude` | 0.9.0 | stable | Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'. |
 | `SANDY_MODEL` | passive | `claude-opus-5` | 0.1.0 | stable | Model ID for the Claude agent. |
@@ -314,22 +314,24 @@ As of v0.9.0, the sandbox directory contains **sibling** per-agent subdirs (`cla
 ├── npm-global/                # → /home/sandy/.npm-global
 ├── go/                        # → /home/sandy/go
 ├── cargo/                     # → /home/sandy/.cargo
-├── relay-state/               # → /opt/sandy/relay-state (rw, mounted only when a relay runs this launch)
-│                              #   — the relay supervisor's .state, .startup and supervisor.log (2.2.0,
-│                              #   #353). Created every launch. Producer-agnostic: these are SANDY'S
-│                              #   files, not the relay's. Path is set host-side as SANDY_RELAY_STATE,
-│                              #   read by the supervisor, and reported as relay.state_dir.
+├── relay-state/               # REMOVED in 2.6.0 (#382, decisions 4-5). Was → /opt/sandy/relay-state
+│                              #   (rw), the relay-designated entry's shared .state/.startup/
+│                              #   supervisor.log (2.2.0, #353). No longer created by any launch; a
+│                              #   leftover from a pre-2.6.0 sandbox is `rm -rf`'d at launch (a symlink
+│                              #   is unlinked, never followed) with one info line, then never
+│                              #   reappears. SANDY_RELAY_STATE is no longer exported, mounted or read.
 ├── handoff/                   # REMOVED in 2.2.0 (#352/#355) with the ~/.handoff tree. Never created
 │                              #   now; a pre-2.2.0 sandbox has its handoff/relay moved to relay-state/
 │                              #   on first launch and the rest left behind inert. --reset-sandbox
 │                              #   destroys it.
 ├── relay-bin/                 # REMOVED in 2.2.0 (#354). A leftover entry here is now a hard
 │                              #   error naming the manifest `entry` that replaces it; --reset-sandbox destroys it.
-├── feature-state/             # only when more than one feature entry is adopted (2.4.0, #381); one
-│   └── <feature>/             #   subdir per NON-designated entry → /opt/sandy/feature-state/<feature>
-│                              #   (rw) — that entry's own .state + supervisor.log. The designated
-│                              #   entry's directory is relay-state/ above, mounted at BOTH container
-│                              #   paths, so it never gets a subdir here.
+├── feature-state/             # created for EVERY adopted feature entry (2.4.0, #381; every entry
+│   └── <feature>/             #   identical since 2.6.0, #382) — one subdir per entry →
+│                              #   /opt/sandy/feature-state/<feature> (rw), exported to that entry's
+│                              #   own process as SANDY_FEATURE_STATE. There is no longer a
+│                              #   "designated" entry sharing relay-state/ above; every entry gets its
+│                              #   own subdir here, uniformly.
 ├── features/                  # REMOVED in 2.0.0: the per-sandbox feature marker directory (1.15.0) is
 │                              #   retired and never created. Feature enrolment is decided by each
 │                              #   $SANDY_HOME/features/<name>/feature.json manifest (docs/design/FEATURE-MANIFEST.md).
@@ -1538,8 +1540,9 @@ ENV PATH="/home/sandy/.local/bin:/usr/local/cargo/bin:/usr/local/go/bin:$PATH"
 ```dockerfile
 FROM ${BASE_IMAGE_NAME}
 # sandy.feature_entries (#381): every entry supported by this image's
-# user-setup.sh/entrypoint.sh; a stale image predating this label runs only
-# the relay-designated entry, and sandy warns at launch naming the rest.
+# user-setup.sh/entrypoint.sh; a stale image predating this label knows only
+# the removed SANDY_HANDOFF_RELAY channel, so it starts NONE of them, and
+# sandy warns at launch naming every one (#382, 2.6.0).
 LABEL sandy.feature_entries=1
 
 RUN HOME=/home/sandy su -s /bin/bash sandy -c \
@@ -1578,8 +1581,9 @@ Key details:
 ```dockerfile
 FROM ${BASE_IMAGE_NAME}
 # sandy.feature_entries (#381): every entry supported by this image's
-# user-setup.sh/entrypoint.sh; a stale image predating this label runs only
-# the relay-designated entry, and sandy warns at launch naming the rest.
+# user-setup.sh/entrypoint.sh; a stale image predating this label knows only
+# the removed SANDY_HANDOFF_RELAY channel, so it starts NONE of them, and
+# sandy warns at launch naming every one (#382, 2.6.0).
 LABEL sandy.feature_entries=1
 # Install Codex CLI as a global npm package. The @openai/codex package ships
 # a prebuilt Rust binary per platform; Node is only the installation vehicle.
@@ -1756,7 +1760,7 @@ On success `_sandy_supervise_entry` deletes any `.startup`/`.state` an earlier c
 
 `SANDY_FEATURE_STATE_ROOT` is an env-only test hook (no metadata row) overriding the `/opt/sandy/feature-state` root used to resolve an entry's state directory when it is not passed explicitly.
 
-**Documented exception: a stale image (#381; wording updated 2.6.0 #382 decision 5).** "A configured entry that cannot start fails the session" (acceptance criterion 7, above) has one carve-out. Every generated agent Dockerfile carries `LABEL sandy.feature_entries=1` — inherited through `FROM` into per-project and skill-pack images — so the host can tell a current image from one built before per-feature entries existed (`docker image inspect -f '{{index .Config.Labels "sandy.feature_entries"}}'`; empty or the literal `<no value>` both count as lacking it). With **one or more** entries adopted and the image about to run lacking the label, sandy prints a launch-time `warn` naming **every** entry that will not start and pointing at `sandy --rebuild`; it does not refuse. With zero entries there is nothing a stale image would drop, so nothing is printed. A stale image's `user-setup.sh` only ever knew the removed `SANDY_HANDOFF_RELAY` channel (there is no legacy fallback left for it to fall into, per above), so it starts **none** of the entries — before this unit it started the one relay-designated entry and only warned about the rest; there is no longer a designated entry for it to fall back to. `--print-state`'s `feature_entries.<name>.state` reports every one of them `absent` for as long as that image is in use.
+**Documented exception: a stale image (#381; wording updated 2.6.0 #382 decision 5).** "A configured entry that cannot start fails the session" (acceptance criterion 7, above) has one carve-out. Every generated agent Dockerfile carries `LABEL sandy.feature_entries=1` — inherited through `FROM` into per-project and skill-pack images — so the host can tell a current image from one built before per-feature entries existed (`docker image inspect -f '{{index .Config.Labels "sandy.feature_entries"}}'`; empty or the literal `<no value>` both count as lacking it). With **one or more** entries adopted and the image about to run lacking the label, sandy prints a launch-time `warn` naming **every** entry that will not start and pointing at `sandy --rebuild`; it does not refuse. With zero entries there is nothing a stale image would drop, so nothing is printed. A stale image's `user-setup.sh` only ever knew the removed `SANDY_HANDOFF_RELAY` channel (there is no legacy fallback left for it to fall into, per above), so it starts **none** of the entries — before 2.6.0 it started the one relay-designated entry and only warned about the rest; there is no longer a designated entry for it to fall back to. `--print-state`'s `feature_entries.<name>.state` reports every one of them `absent` for as long as that image is in use.
 
 ### A.7 tmux.conf
 

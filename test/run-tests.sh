@@ -16918,7 +16918,7 @@ check "§149(8) no slot entry and no operator key -> source is 'none' (got: $(_s
 # REFUSES rather than silently resolving to something else.
 check "§149(9) a leftover relay-bin entry REFUSES the launch — the slot was removed in 2.2.0, and ignoring an entry would start the wrong relay, or none, without saying so (got: $(_s149_src install ''))" \
     test "$(_s149_src install '')" = ""
-check "§149(10) an operator-set SANDY_HANDOFF_RELAY REFUSES too — removed as a configuration key. The VARIABLE survives as the manifest's internal channel, which is why a value present at THIS point can only be an operator's (got: $(_s149_src noinstall /x/relay))" \
+check "§149(10) an operator-set SANDY_HANDOFF_RELAY REFUSES too — removed as a configuration key. Since 2.6.0 (#382) the host never sets the variable itself (entries pass via SANDY_FEATURE_ENTRIES), so a value present at THIS point can only be an operator's (got: $(_s149_src noinstall /x/relay))" \
     test "$(_s149_src noinstall /x/relay)" = ""
 
 # The manifest producer is claimed in the entry-adoption loop, not in the block
@@ -17082,7 +17082,7 @@ _s151_mig() {   # $1 = "populated" | "fresh" | "symlink"
     _S151_OUT="$(bash -c 'SANDBOX_DIR="$2"; info(){ printf "INFO:%s\n" "$*"; }; eval "$1"' _ "$_S151_MIG" "$d" 2>&1)"
     printf '%s|%s|%s|%s' \
         "$([ -e "$d/relay-state" ] || [ -L "$d/relay-state" ] && echo PRESENT || echo GONE)" \
-        "$(printf '%s' "$_S151_OUT" | grep -c '^INFO:Removed leftover relay-state/')" \
+        "$(printf '%s' "$_S151_OUT" | grep -c '^INFO:Removed leftover relay-state/' || true)" \
         "$([ -d "$d/elsewhere" ] && [ -f "$d/elsewhere/keep" ] && echo TARGET-INTACT || echo TARGET-GONE)" \
         "$([ -f "$d/elsewhere/keep" ] && [ "$(cat "$d/elsewhere/keep")" = TARGETFILE ] && echo FILE-INTACT || echo FILE-GONE)"
     rm -rf "$d"
