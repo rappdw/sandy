@@ -12884,7 +12884,7 @@ sed -n '/^# BEGIN relay capability/,/^# END relay capability/p' "$SANDY_SCRIPT" 
 awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$SANDY_SCRIPT" > "$_S123_DIR/supervisor.sh"
 
 check "§123(pre-a) the resolution block was extracted (mutation: renaming the BEGIN/END markers empties it and would make every resolution check below vacuous)" \
-    bash -c 'grep -q "_sandy_relay_slot=" "$1" && [ "$(grep -c . "$1")" -gt 20 ]' -- "$_S123_DIR/resolve.sh"
+    bash -c 'grep -q "_sandy_relay_source=" "$1" && [ "$(grep -c . "$1")" -gt 20 ]' -- "$_S123_DIR/resolve.sh"
 check "§123(pre-b) the supervisor function was extracted" \
     bash -c 'grep -q "flock -n 9" "$1" && [ "$(grep -c . "$1")" -gt 30 ]' -- "$_S123_DIR/supervisor.sh"
 
@@ -12895,8 +12895,13 @@ check "§123(pre-b) the supervisor function was extracted" \
 # that are SUPPOSED to exit non-zero (§92-class — an unguarded failure inside
 # `$( )` would abort the whole suite rather than being measured).
 _s123_resolve() {
-    # _s123_resolve <entry: none|exec|noexec> <SANDY_RELAY> <override> -> "slot from_slot relayvar" or "EXIT <n>"
-    local entry="$1" relayval="$2" override="$3" sb
+    # _s123_resolve <entry: none|exec|noexec> <override> -> "source relayvar" or
+    # "EXIT <n>". No SANDY_RELAY param any more (r3, decision 3, #382, 2.6.0):
+    # the capability toggle this block used to read is gone -- setting the key
+    # is now a hard error, handled entirely OUTSIDE this block (§176(a)), so
+    # inside it there is nothing left keyed on it. `$_sandy_relay_source`
+    # replaces the old `$_sandy_relay_slot`/`$_sandy_relay_from_slot` pair.
+    local entry="$1" override="$2" sb
     sb="$_S123_DIR/sb.$$.$RANDOM"; mkdir -p "$sb"
     case "$entry" in
         exec)   mkdir -p "$sb/relay-bin"; printf '#!/bin/sh\nexit 0\n' > "$sb/relay-bin/relay"; chmod +x "$sb/relay-bin/relay" ;;
@@ -12912,56 +12917,54 @@ _s123_resolve() {
         trap - ERR
         set +e
         warn() { :; }; info() { :; }; _sandy_daemon_fatal() { :; }
-        # CLEAR THE AMBIENT VALUES FIRST. A developer running this suite from
+        # CLEAR THE AMBIENT VALUE FIRST. A developer running this suite from
         # inside a sandbox that has a relay installed inherits
         # SANDY_HANDOFF_RELAY=/opt/sandy/relay/relay, and the "no relay
         # configured" cases below then silently test the opposite of what they
-        # claim. Discovered exactly that way: §123(1)/(2)/(3) failed on a
+        # claim. Discovered exactly that way: §123(1)/(2) failed on a
         # one developer machine and passed in CI, which is the SANDY_VERBOSE bug
         # (#249) wearing different clothes -- the environment supplying what the
         # code should.
-        unset SANDY_HANDOFF_RELAY SANDY_RELAY
+        unset SANDY_HANDOFF_RELAY
         SANDBOX_DIR="$sb"
-        [ -n "$relayval" ] && SANDY_RELAY="$relayval"
         [ -n "$override" ] && SANDY_HANDOFF_RELAY="$override"
         . "$_S123_DIR/resolve.sh"
-        echo "$_sandy_relay_slot $_sandy_relay_from_slot ${SANDY_HANDOFF_RELAY:-<unset>}"
+        echo "$_sandy_relay_source ${SANDY_HANDOFF_RELAY:-<unset>}"
     2>/dev/null )" || rc=$?
     if [ "$rc" -ne 0 ]; then echo "EXIT $rc"; else echo "$out"; fi
     return 0
 }
 
-_S123_A="$(trap - ERR; _s123_resolve none   '' '')"
-check "§123(1) no entry in the slot is 'absent' and starts nothing — the state that lets SANDY_RELAY default to 1 without breaking unprovisioned sandboxes (got: $_S123_A)" \
-    bash -c '[ "$1" = "absent false <unset>" ]' -- "$_S123_A"
+_S123_A="$(trap - ERR; _s123_resolve none   '')"
+check "§123(1) no entry in the slot resolves 'none', starting nothing (got: $_S123_A)" \
+    bash -c '[ "$1" = "none <unset>" ]' -- "$_S123_A"
 
-_S123_B="$(trap - ERR; _s123_resolve exec   '' '')"
+_S123_B="$(trap - ERR; _s123_resolve exec   '')"
 check "§123(2) an executable entry now FAILS THE LAUNCH — the slot was removed in 2.2.0 (#354) and a leftover entry is a migration that never finished, so ignoring it would start the wrong relay, or none, without saying so (got: $_S123_B)" \
     bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_B"
 
-_S123_C="$(trap - ERR; _s123_resolve exec   0  '')"
-check "§123(3) SANDY_RELAY=0 does NOT excuse a leftover slot entry — the entry is a blocking error either way, so the opt-out cannot hide an unfinished migration (got: $_S123_C)" \
-    bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_C"
+# (3), "SANDY_RELAY=0 does NOT excuse a leftover slot entry", is GONE (r3,
+# decision 3, #382, 2.6.0): SANDY_RELAY is no longer a parameter this block
+# reads at all -- the key is refused before this code runs, from ANY value --
+# so there is no opt-out left to test not excusing anything.
 
-_S123_D="$(trap - ERR; _s123_resolve noexec '' '')"
+_S123_D="$(trap - ERR; _s123_resolve noexec '')"
 check "§123(4) an entry that exists but is NOT executable FAILS THE LAUNCH — never silently 'absent', which is the no-op this design exists to retire (got: $_S123_D)" \
     bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_D"
 
-_S123_E="$(trap - ERR; _s123_resolve exec   '' '/workspace/.sandy/relay.sh')"
+_S123_E="$(trap - ERR; _s123_resolve exec   '/workspace/.sandy/relay.sh')"
 check "§123(5) an operator-set SANDY_HANDOFF_RELAY now FAILS THE LAUNCH — removed as a configuration key in 2.2.0 (#354), naming the manifest entry that replaces it. The VARIABLE survives: the manifest sets it below this block, which is why a non-empty value HERE can only have come from an operator (got: $_S123_E)" \
     bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_E"
 
-# Anti-vacuity for 1-5: the five cases must not all be the same string, which is
-# what a resolve.sh that failed to source would produce.
-# Anti-vacuity. Four of the five cases are now refusals, so "all distinct" is
-# no longer the right shape -- it would be satisfied by a block that failed to
-# source at all, which is the failure this guards. The property that survives:
-# exactly ONE case resolves, the rest refuse, and the one that resolves is the
-# empty slot.
-check "§123(6) exactly ONE of the five cases resolves (the empty slot) and the other four REFUSE — a block that failed to source would make all five identical, and a block that ignored the removals would make all five resolve" \
-    bash -c '_ok=0; for v in "$2" "$3" "$4" "$5"; do case "$v" in "EXIT "*) _ok=$((_ok+1)) ;; esac; done
-             [ "$_ok" -eq 4 ] && [ "$1" = "absent false <unset>" ]' \
-    -- "$_S123_A" "$_S123_B" "$_S123_C" "$_S123_D" "$_S123_E"
+# Anti-vacuity. Three of the four remaining cases are refusals, so "all
+# distinct" is not the right shape -- it would be satisfied by a block that
+# failed to source at all, which is the failure this guards. The property
+# that survives: exactly ONE case resolves, the rest refuse, and the one that
+# resolves is the empty slot.
+check "§123(6) exactly ONE of the four cases resolves (the empty slot) and the other three REFUSE — a block that failed to source would make all four identical, and a block that ignored the removals would make all four resolve" \
+    bash -c '_ok=0; for v in "$2" "$3" "$4"; do case "$v" in "EXIT "*) _ok=$((_ok+1)) ;; esac; done
+             [ "$_ok" -eq 3 ] && [ "$1" = "none <unset>" ]' \
+    -- "$_S123_A" "$_S123_B" "$_S123_D" "$_S123_E"
 
 # --- the mount: right target, right flag, present exactly when it should be --
 # This asserts the flag is attached to the SLOT mount specifically. It cannot
@@ -12996,7 +12999,7 @@ _S123_MARKER="$(
     _sandy_session_nonce=deadbeef; _sandy_effort_json=null
     _sandy_perm_mode_json='"bypassPermissions"'; _sandy_csi_json='"accept"'; CRED_MODE=full
     _sandy_session_file="$_S123_DIR/marker.json"
-    _sandy_relay_slot=present; SANDY_HANDOFF_RELAY=/opt/sandy/relay/relay; _SANDY_RELAY_SOURCE=""
+    SANDY_HANDOFF_RELAY=/opt/sandy/relay/relay
     . "$_S123_DIR/marker.sh" >/dev/null 2>&1
     cat "$_S123_DIR/marker.json" 2>/dev/null
 )"
@@ -13142,7 +13145,7 @@ else
     skip "§123(26-30) startup-window behaviour — no flock on this host, so the supervisor cannot run"
 fi
 rm -rf "$_S123_DIR"
-unset _S123_MARKER _S123_DIR _S123_A _S123_B _S123_C _S123_D _S123_E _S123_PS _S123_PSH _S123_MOUNTBLK _S123_W1 _S123_W2 _S123_W3
+unset _S123_MARKER _S123_DIR _S123_A _S123_B _S123_D _S123_E _S123_PS _S123_PSH _S123_MOUNTBLK _S123_W1 _S123_W2 _S123_W3
 
 # ============================================================
 echo "§124: the handoff pair — classification, --print-state reporting, and --provision --all (#265)"
@@ -16195,7 +16198,7 @@ $(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$_S142_SANDY")"
 # because precedence is part of what is under test: slot > manifest entry, and
 # an explicit SANDY_HANDOFF_RELAY over both. Extracting only the manifest half
 # would test adoption in isolation and miss exactly the interaction (6) covers.
-_S142_EVAL="$(awk '/^_sandy_relay_slot="absent"/,/^# BEGIN handoff relay/' "$_S142_SANDY")"
+_S142_EVAL="$(awk '/^_sandy_relay_slot_dir="\$SANDBOX_DIR\/relay-bin"$/,/^# BEGIN handoff relay/' "$_S142_SANDY")"
 # The csi span ends INSIDE `if _sandy_agent_has claude; then`, so the extraction
 # drops its trailing marker line and closes the block explicitly. Ending the
 # range on a balanced point instead would have to swallow the settings-file
@@ -16261,9 +16264,8 @@ eval "$CSI_BLOCK"
 printf 'csi=%s\nrelay=%s\n' "${_sandy_csi_val:-UNSET}" "${SANDY_HANDOFF_RELAY:-EMPTY}"
 S142_DRV
 _S142_OUT="$(cd "$_S142_DIR" && SANDY_HOME="$_S142_H" SANDBOX_DIR="$_S142_DIR/sb" WORK_DIR="$_S142_DIR/ws" \
-    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY=1 \
+    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude \
     FM_BLOCK="$_S142_FM" EVAL_BLOCK="$_S142_EVAL" CSI_BLOCK="$_S142_CSI" \
-    _sandy_relay_slot_dir="$_S142_DIR/slot" \
     bash "$_S142_DIR/drive.sh" 2>/dev/null)" || _S142_OUT="DRIVER-FAILED"
 
 check "§142(2) the driver RAN (a silently dead probe would make every check below vacuously pass — the §128 lesson)" \
@@ -16275,9 +16277,8 @@ check "§142(4) a manifest-declared need reaches crossSessionInbound at evaluati
 
 # An explicit value must still win over the manifest-supplied relay.
 _S142_OUT2="$(cd "$_S142_DIR" && SANDY_HOME="$_S142_H" SANDBOX_DIR="$_S142_DIR/sb" WORK_DIR="$_S142_DIR/ws" \
-    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY=1 T_CSI=hold \
+    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude T_CSI=hold \
     FM_BLOCK="$_S142_FM" EVAL_BLOCK="$_S142_EVAL" CSI_BLOCK="$_S142_CSI" \
-    _sandy_relay_slot_dir="$_S142_DIR/slot" \
     bash "$_S142_DIR/drive.sh" 2>/dev/null)" || _S142_OUT2="DRIVER-FAILED"
 check "§142(5) an EXPLICIT SANDY_CROSS_SESSION_INBOUND still wins over the manifest-supplied relay (tighten-only must keep working)" \
     bash -c 'printf "%s" "$1" | grep -q "^csi=hold$"' _ "$_S142_OUT2"
@@ -16288,10 +16289,9 @@ check "§142(5) an EXPLICIT SANDY_CROSS_SESSION_INBOUND still wins over the mani
 # false) was OVERWRITTEN by a manifest entry. The emptiness test gives one
 # order for all three sources.
 _S142_OUT3="$(cd "$_S142_DIR" && SANDY_HOME="$_S142_H" SANDBOX_DIR="$_S142_DIR/sb" WORK_DIR="$_S142_DIR/ws" \
-    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY=1 \
+    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude \
     T_RELAY=/opt/explicit/relay \
     FM_BLOCK="$_S142_FM" EVAL_BLOCK="$_S142_EVAL" CSI_BLOCK="$_S142_CSI" \
-    _sandy_relay_slot_dir="$_S142_DIR/slot" \
     bash "$_S142_DIR/drive.sh" 2>/dev/null)" || _S142_OUT3="DRIVER-FAILED"
 check "§142(6) an operator-set SANDY_HANDOFF_RELAY now REFUSES THE LAUNCH rather than winning — removed as a configuration key in 2.2.0 (#354). The precedence it used to win is gone because the contender is gone (got: $(printf '%s' "$_S142_OUT3" | tr '\n' ' '))" \
     bash -c '[ "$1" = "DRIVER-FAILED" ] || ! printf "%s" "$1" | grep -q "^relay=/opt/explicit/relay$"' _ "$_S142_OUT3"
@@ -16307,12 +16307,15 @@ check "§142(6) an operator-set SANDY_HANDOFF_RELAY now REFUSES THE LAUNCH rathe
 # launch naming `entry`, rather than being ignored while the manifest relay
 # quietly takes over -- which is the same "silently dark" failure wearing the
 # opposite coat.
-mkdir -p "$_S142_DIR/slot2"
-printf '#!/bin/sh\n' > "$_S142_DIR/slot2/relay"; chmod +x "$_S142_DIR/slot2/relay"
-_S142_OUT4="$(cd "$_S142_DIR" && SANDY_HOME="$_S142_H" SANDBOX_DIR="$_S142_DIR/sb" WORK_DIR="$_S142_DIR/ws" \
-    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY=1 \
+# _sandy_relay_slot_dir is now computed INSIDE the eval span as
+# "$SANDBOX_DIR/relay-bin" (2.6.0, #382, decision 3 -- see the SPAN ANCHORS
+# note), so the leftover entry must be planted under a SANDBOX_DIR of its own
+# rather than passed in via an env override the span no longer reads.
+mkdir -p "$_S142_DIR/sb4/relay-bin"
+printf '#!/bin/sh\n' > "$_S142_DIR/sb4/relay-bin/relay"; chmod +x "$_S142_DIR/sb4/relay-bin/relay"
+_S142_OUT4="$(cd "$_S142_DIR" && SANDY_HOME="$_S142_H" SANDBOX_DIR="$_S142_DIR/sb4" WORK_DIR="$_S142_DIR/ws" \
+    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude \
     FM_BLOCK="$_S142_FM" EVAL_BLOCK="$_S142_EVAL" CSI_BLOCK="$_S142_CSI" \
-    _sandy_relay_slot_dir="$_S142_DIR/slot2" \
     bash "$_S142_DIR/drive.sh" 2>/dev/null)" || _S142_OUT4="DRIVER-FAILED"
 check "§142(7) a leftover relay-bin/relay no longer WINS — it refuses the launch, so a sandbox mid-migration is told rather than silently served the wrong relay (got: $(printf '%s' "$_S142_OUT4" | tr '\n' ' '))" \
     bash -c '[ "$1" = "DRIVER-FAILED" ] || ! printf "%s" "$1" | grep -q "^relay=/opt/sandy/relay/relay$"' _ "$_S142_OUT4"
@@ -16884,7 +16887,7 @@ _s149_src() {   # $1 = install slot entry?  $2 = explicit value
         # is a host-dependent test -- green on a clean CI runner, red on a
         # developer machine inside sandy, or the reverse.
         unset SANDY_HANDOFF_RELAY
-        SANDBOX_DIR="$2"; SANDY_RELAY=1
+        SANDBOX_DIR="$2"
         mkdir -p "$SANDBOX_DIR"
         if [ "$3" = install ]; then mkdir -p "$SANDBOX_DIR/relay-bin"; printf "#!/bin/sh\n" > "$SANDBOX_DIR/relay-bin/relay"; chmod +x "$SANDBOX_DIR/relay-bin/relay"; fi
         [ -n "$4" ] && SANDY_HANDOFF_RELAY="$4"
@@ -16910,45 +16913,33 @@ check "§149(10) an operator-set SANDY_HANDOFF_RELAY REFUSES too — removed as 
 _S149_ADOPT="$(awk '/^    while IFS= read -r _fm_l; do/,/^    done <<< "\$_sandy_fm_out"/' "$_S149_SANDY")"
 check "§149(pre-11) the manifest entry-adoption loop was extracted" \
     bash -c 'printf "%s" "$1" | grep -q "_sandy_relay_source=\"manifest\""' _ "$_S149_ADOPT"
-# $1 = SANDY_RELAY, $2 = the source the capability block already resolved.
+# $1 = the source the capability block already resolved (simulates what the
+# relay-capability block above would have set before the adoption loop runs).
 _s149_adopt() {
     bash -c '
         set -uo pipefail
-        # warn() to STDERR here: this helper captures STDOUT to read the
-        # resolved source, and a warning landing there would be prepended to
-        # the value. The warning itself is asserted separately by (13).
         info(){ :; }; warn(){ echo "WARN:$*" >&2; }
         unset SANDY_HANDOFF_RELAY   # inherited from the surrounding sandy session otherwise
-        SANDY_RELAY="$2"; _SANDY_RELAY_SOURCE="workspace"
-        _sandy_relay_source="$3"; _sandy_relay_from_slot="false"
+        _sandy_relay_source="$2"
         _sandy_fm_out="$(printf "entry\t/opt/sandy/features/amap/relay\n")"
         eval "$1"
         echo "$_sandy_relay_source ${SANDY_HANDOFF_RELAY:-<none>}"
-    ' _ "$_S149_ADOPT" "$1" "$2" 2>/dev/null
+    ' _ "$_S149_ADOPT" "$1" 2>/dev/null
 }
-check "§149(11) a manifest entry claims the relay and names itself 'manifest' — the only producer left, and the value #345 says slot could never produce (got: $(_s149_adopt 1 none))" \
-    test "$(_s149_adopt 1 none)" = "manifest /opt/sandy/features/amap/relay"
+check "§149(11) a manifest entry claims the relay and names itself 'manifest' — the only producer left, and the value #345 says slot could never produce (got: $(_s149_adopt none))" \
+    test "$(_s149_adopt none)" = "manifest /opt/sandy/features/amap/relay"
 
-# (12) is the behaviour change #354 makes to SANDY_RELAY, and the one the
-# maintainer has to be able to veto: =0 used to disable a SLOT relay and
-# silently NOT stop a manifest entry. It now stops both.
-_S149_OFF="$(_s149_adopt 0 none)"
-_S149_OFFW="$(bash -c '
-    set -uo pipefail
-    info(){ :; }; warn(){ echo "WARN:$*"; }
-    unset SANDY_HANDOFF_RELAY
-    SANDY_RELAY=0; _SANDY_RELAY_SOURCE="workspace"
-    _sandy_relay_source="none"; _sandy_relay_from_slot="false"
-    _sandy_fm_out="$(printf "entry\t/opt/sandy/features/amap/relay\n")"
-    eval "$1"
-' _ "$_S149_ADOPT" 2>/dev/null)"
-check "§149(12) SANDY_RELAY=0 now suppresses a MANIFEST entry too (#354) — previously it stopped only the slot, so =0 meant 'no relay' while a relay ran (got: $_S149_OFF)" \
-    test "$_S149_OFF" = "none <none>"
-check "§149(13) ...and the suppression is LOUD, naming the entry it declined to run and where the 0 came from — a silent suppression here is the 'fleet goes dark' failure the coexistence window existed to prevent (got: $(printf '%s' "$_S149_OFFW" | tr '\n' ' '))" \
-    bash -c 'printf "%s" "$1" | grep -q "^WARN:" && printf "%s" "$1" | grep -q "amap/relay" && printf "%s" "$1" | grep -q "workspace"' _ "$_S149_OFFW"
+# (12)/(13), "SANDY_RELAY=0 now suppresses a MANIFEST entry too" and its
+# warning, are GONE (r3, decision 3, #382, 2.6.0): the behaviour they asserted
+# -- the adoption loop's own SANDY_RELAY=0 branch -- no longer exists. The key
+# is now a hard error before any of this code runs at all, which is a stronger
+# property than "suppresses loudly": there is no launch left in which a
+# manifest entry gets adopted and then silently (or loudly) dropped by this
+# key. §176(a) covers the replacement (the hard error itself, driven through
+# the real config loader).
 
 rm -rf "$_S149_H"
-unset _S149_SANDY _S149_H _S149_PS _S149_UNIQ _S149_SRCS _S149_EXE _S149_DISTINCT _S149_BLK _S149_ADOPT _S149_OFF _S149_OFFW
+unset _S149_SANDY _S149_H _S149_PS _S149_UNIQ _S149_SRCS _S149_EXE _S149_DISTINCT _S149_BLK _S149_ADOPT
 unset -f _s149_mk _s149_src _s149_adopt
 
 # ============================================================
@@ -17343,17 +17334,17 @@ printf '{"sandboxes":{"include":["nomatch-*"]},"agents":{"include":["*"]}}\n' > 
 printf '{"sandboxes":{"include":["*"]},"agents":{"include":["*"]},"mounts":[{"name":"payload","from":"payload"}]}\n' > "$_S153_DIR/root/badmount/feature.json"
 _S153_BANOUT="$(bash -c '
     set -uo pipefail
-    unset SANDY_HANDOFF_RELAY SANDY_RELAY 2>/dev/null || true
+    unset SANDY_HANDOFF_RELAY 2>/dev/null || true
     warn() { printf "WARN %s\n" "$*"; }
     info() { printf "INFO %s\n" "$*"; }
     error() { printf "ERR %s\n" "$*"; }
     _sandy_daemon_fatal() { :; }
     _SANDY_FM_HOME=/home/sandy
     eval "$1"
-    SANDY_RELAY=1; SANDBOX_NAME=amap-router-11112222; WORK_DIR=/w/amap-router; SANDY_AGENT=claude
+    SANDBOX_NAME=amap-router-11112222; WORK_DIR=/w/amap-router; SANDY_AGENT=claude
     _sandy_fm_root="$3"; _sandy_fm_out=""; _sandy_fm_rc=0; _sandy_fm_ran=false
-    _SANDY_FM_AA_RECORDS=""; _SANDY_FM_AA_JSON=""; _SANDY_RELAY_SOURCE=""; _sandy_relay_source=""
-    _sandy_fe_list=""; _sandy_fe_disabled=""; _sandy_fe_relay_feature=""; SANDY_FEATURE_ENTRIES=""
+    _SANDY_FM_AA_RECORDS=""; _SANDY_FM_AA_JSON=""; _sandy_relay_source=""
+    _sandy_fe_list=""; _sandy_fe_relay_feature=""; SANDY_FEATURE_ENTRIES=""
     eval "$2"
 ' _ "$_S153_APPLYBLK" "$_S153_BAN" "$_S153_DIR/root" 2>&1)"
 check "§153(27) an APPLIED feature is named at launch with what it contributed — no SANDY_VERBOSE required (got: $(printf '%s' "$_S153_BANOUT" | grep -m1 '^INFO features:'))" \
@@ -17988,7 +17979,7 @@ _S159_SANDY="$SANDY_SCRIPT"
 _S159_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 _S159_FM="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$_S159_SANDY")
 $(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$_S159_SANDY")"
-_S159_EVAL="$(awk '/^_sandy_relay_slot="absent"/,/^# BEGIN handoff relay/' "$_S159_SANDY")"
+_S159_EVAL="$(awk '/^_sandy_relay_slot_dir="\$SANDBOX_DIR\/relay-bin"$/,/^# BEGIN handoff relay/' "$_S159_SANDY")"
 check "§159(pre) the spans were extracted, parse, and the evaluation span carries the features line (mutation: a rename makes every check below vacuous)" \
     bash -c 'case "$2" in *"features: "*) ;; *) exit 1 ;; esac; printf "%s\n%s\n" "$1" "$2" | bash -n' _ "$_S159_FM" "$_S159_EVAL"
 # _s159_mk HOME FEATURE: a selected feature that declares an entry.
@@ -18017,17 +18008,16 @@ eval "$EVAL_BLOCK"
 printf 'relay=%s\n' "${SANDY_HANDOFF_RELAY:-EMPTY}"
 printf 'entries=%s\n' "${SANDY_FEATURE_ENTRIES:-EMPTY}"
 S159_DRV
-_s159_run() {  # _s159_run HOME SANDY_RELAY -> output
+_s159_run() {  # _s159_run HOME -> output
     ( cd "$_S159_DIR" && SANDY_HOME="$1" SANDBOX_DIR="$_S159_DIR/sb" WORK_DIR="$_S159_DIR/ws" \
-        SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY="$2" \
-        FM_BLOCK="$_S159_FM" EVAL_BLOCK="$_S159_EVAL" _sandy_relay_slot_dir="$_S159_DIR/slot" \
+        SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude \
+        FM_BLOCK="$_S159_FM" EVAL_BLOCK="$_S159_EVAL" \
         bash "$_S159_DIR/drive.sh" 2>&1 ) || echo "DRIVER-FAILED"
 }
-_S159_TWO="$(_s159_run "$_S159_DIR/two" 1)"
-_S159_ONE="$(_s159_run "$_S159_DIR/one" 1)"
-_S159_OFF="$(_s159_run "$_S159_DIR/two" 0)"
-check "§159(0) the driver RAN in all three cases (a dead probe would make every negative check below pass)" \
-    bash -c 'for o in "$@"; do case "$o" in *DRIVER-FAILED*) exit 1 ;; *"entries="*) ;; *) exit 1 ;; esac; done' _ "$_S159_TWO" "$_S159_ONE" "$_S159_OFF"
+_S159_TWO="$(_s159_run "$_S159_DIR/two")"
+_S159_ONE="$(_s159_run "$_S159_DIR/one")"
+check "§159(0) the driver RAN in both cases (a dead probe would make every negative check below pass)" \
+    bash -c 'for o in "$@"; do case "$o" in *DRIVER-FAILED*) exit 1 ;; *"entries="*) ;; *) exit 1 ;; esac; done' _ "$_S159_TWO" "$_S159_ONE"
 check "§159(1) with two entries BOTH are adopted, in feature-name order (alpha, although beta was created first) -- nothing is dropped (mutation: restoring the elif skip leaves beta out)" \
     bash -c 'printf "%s\n" "$1" | grep -qx "entries=alpha=/opt/sandy/features/alpha/relay beta=/opt/sandy/features/beta/relay"' _ "$_S159_TWO"
 check "§159(2) the relay-DESIGNATED entry is the first in name order (relay{} and SANDY_HANDOFF_RELAY describe alpha only)" \
@@ -18040,10 +18030,13 @@ check "§159(5) two entries: one info line names them both and which one relay{}
     bash -c 'printf "%s\n" "$1" | grep -qx "INFO feature entries: alpha (reported as relay{}), beta"' _ "$_S159_TWO"
 check "§159(6) one entry: adopted and designated, the features line says entry, and no multi-entry line (the common case costs nothing)" \
     bash -c 'printf "%s\n" "$1" | grep -qx "entries=alpha=/opt/sandy/features/alpha/relay" && printf "%s\n" "$1" | grep -qx "relay=/opt/sandy/features/alpha/relay" && printf "%s\n" "$1" | grep "^INFO features: " | grep -qF "alpha (1 mount, entry)" && ! printf "%s\n" "$1" | grep -q "^INFO feature entries: "' _ "$_S159_ONE"
-check "§159(7) SANDY_RELAY=0: no entry runs, and the features line says so for each rather than claiming either" \
-    bash -c 'printf "%s\n" "$1" | grep -qx "relay=EMPTY" && printf "%s\n" "$1" | grep -qx "entries=EMPTY" && printf "%s\n" "$1" | grep "^INFO features: " | grep -F "alpha (1 mount, entry disabled by SANDY_RELAY=0)" | grep -qF "beta (1 mount, entry disabled by SANDY_RELAY=0)"' _ "$_S159_OFF"
+# (7), "SANDY_RELAY=0: no entry runs", is GONE: the capability toggle that
+# case exercised no longer exists -- SANDY_RELAY is a hard error before this
+# span ever runs (2.6.0, #382, decision 3), so there is no "disabled" case
+# left for the entry-adoption loop to take. §176(a) covers the replacement
+# behaviour (the hard error itself, driven through the real config loader).
 rm -rf "$_S159_DIR"
-unset _S159_SANDY _S159_DIR _S159_FM _S159_EVAL _S159_TWO _S159_ONE _S159_OFF
+unset _S159_SANDY _S159_DIR _S159_FM _S159_EVAL _S159_TWO _S159_ONE
 unset -f _s159_mk _s159_run
 echo "§163: the container clock follows the host zone; sandy's own data stays UTC (#384)"
 # ============================================================
@@ -18633,7 +18626,7 @@ _s165_run() {
         # parsed --no-update-check flag and calls the update check.
         SANDY_NO_UPDATE_CHECK=false; sandy_check_update() { :; }
         SANDY_PRIVILEGED_KEYS=(SANDY_SSH SANDY_EXTRA_ENV)
-        SANDY_PASSIVE_KEYS=(SANDY_MODEL SANDY_RELAY SANDY_VERBOSE)
+        SANDY_PASSIVE_KEYS=(SANDY_MODEL SANDY_OFFLINE SANDY_VERBOSE)
         eval "$1"
         for _n in "${_SANDY_EXTRA_ENV_NAMES[@]+"${_SANDY_EXTRA_ENV_NAMES[@]}"}"; do
             printf "%s=%s\n" "$_n" "${!_n-<unset>}"
@@ -19290,33 +19283,37 @@ _S172_ADOPT="$(awk '/^    while IFS= read -r _fm_l; do/,/^    done <<< "\$_sandy
 check "§172(pre) the adoption loop was extracted (mutation: a rename empties this and every check below goes vacuous)" \
     bash -c 'printf "%s" "$1" | grep -q "_sandy_fe_list="' _ "$_S172_ADOPT"
 
-# _s172_adopt SANDY_RELAY WARNFILE ENTRY1 [ENTRY2 ...] -> "source|path|fe_list|fe_relay_feature|fe_disabled"
-# on stdout; anything the loop itself warn()s is appended to WARNFILE.
+# _s172_adopt WARNFILE ENTRY1 [ENTRY2 ...] -> "source|path|fe_list|fe_relay_feature"
+# on stdout; anything the loop itself warn()s is appended to WARNFILE. There is
+# no SANDY_RELAY param and no fe_disabled output field any more (r3, decision
+# 3, #382, 2.6.0): the loop's own SANDY_RELAY=0 branch is gone, so there is no
+# "disabled" case left for this driver to exercise -- every entry the loop
+# sees is adopted, unconditionally. §176(a) covers the hard error that now
+# stands in front of this code entirely.
 # A global var set INSIDE a function called via $(...) never escapes that
 # command substitution's subshell -- routing warnings through a file instead
 # of a second global sidesteps that trap.
 _s172_adopt() {
-    local _relay="$1" _warnfile="$2"; shift 2
+    local _warnfile="$1"; shift
     bash -c '
         set -uo pipefail
         info(){ :; }; warn(){ echo "WARN:$*" >&2; }
         _loop="$1"
         unset SANDY_HANDOFF_RELAY SANDY_FEATURE_ENTRIES
-        SANDY_RELAY="$2"; _SANDY_RELAY_SOURCE="workspace"
-        _sandy_relay_source="none"; _sandy_relay_from_slot="false"
-        _sandy_fe_list=""; _sandy_fe_disabled=""; _sandy_fe_relay_feature=""
-        shift 2
+        _sandy_relay_source="none"
+        _sandy_fe_list=""; _sandy_fe_relay_feature=""
+        shift 1
         _sandy_fm_out=""
         for _e in "$@"; do
             printf -v _fmline "entry\t%s\n" "$_e"
             _sandy_fm_out="${_sandy_fm_out}${_fmline}"
         done
         eval "$_loop"
-        echo "$_sandy_relay_source|${SANDY_HANDOFF_RELAY:-}|$_sandy_fe_list|$_sandy_fe_relay_feature|$_sandy_fe_disabled"
-    ' _ "$_S172_ADOPT" "$_relay" "$@" 2>>"$_warnfile"
+        echo "$_sandy_relay_source|${SANDY_HANDOFF_RELAY:-}|$_sandy_fe_list|$_sandy_fe_relay_feature"
+    ' _ "$_S172_ADOPT" "$@" 2>>"$_warnfile"
 }
 _S172_WF="$(mktemp)"
-_S172_A1="$(_s172_adopt 1 "$_S172_WF" /opt/sandy/features/alpha/r /opt/sandy/features/beta/s)"
+_S172_A1="$(_s172_adopt "$_S172_WF" /opt/sandy/features/alpha/r /opt/sandy/features/beta/s)"
 check "§172(1a) two entries: SANDY_HANDOFF_RELAY resolves to the FIRST (alpha)'s path (got: $_S172_A1)" \
     bash -c 'case "$1" in manifest\|/opt/sandy/features/alpha/r\|*) exit 0;; esac; exit 1' _ "$_S172_A1"
 check "§172(1b) ...and _sandy_fe_list contains BOTH features, not just the designated one (got: $_S172_A1)" \
@@ -19324,20 +19321,17 @@ check "§172(1b) ...and _sandy_fe_list contains BOTH features, not just the desi
 check "§172(1c) ...and _sandy_fe_relay_feature names the designated feature (alpha) (got: $_S172_A1)" \
     bash -c 'printf "%s" "$1" | cut -d"|" -f4 | grep -qx alpha' _ "$_S172_A1"
 
-: > "$_S172_WF"
-_S172_A2="$(_s172_adopt 0 "$_S172_WF" /opt/sandy/features/alpha/r /opt/sandy/features/beta/s)"
-check "§172(2a) SANDY_RELAY=0 with two entries: fe_list is EMPTY -- nothing runs (got: $_S172_A2)" \
-    bash -c '[ "$(printf "%s" "$1" | cut -d"|" -f3)" = "" ]' _ "$_S172_A2"
-check "§172(2b) ...and fe_disabled names BOTH (got: $_S172_A2)" \
-    bash -c 'printf "%s" "$1" | cut -d"|" -f5 | grep -q "alpha=/opt/sandy/features/alpha/r" && printf "%s" "$1" | cut -d"|" -f5 | grep -q "beta=/opt/sandy/features/beta/s"' _ "$_S172_A2"
-check "§172(2c) ...and the warning names BOTH paths -- silence here is the 'fleet goes dark' failure #381 exists to retire" \
-    bash -c 'printf "%s" "$(cat "$1")" | grep -q "alpha/r" && printf "%s" "$(cat "$1")" | grep -q "beta/s"' _ "$_S172_WF"
+# (2a)/(2b)/(2c), "SANDY_RELAY=0 with two entries", are GONE (r3, decision 3,
+# #382, 2.6.0): the loop's own SANDY_RELAY=0 branch no longer exists, so there
+# is no way to feed this driver a value that suppresses adoption -- the hard
+# error now fires long before any of this code runs. §176(a) is the guard on
+# that replacement behaviour.
 
 : > "$_S172_WF"
-_S172_A3="$(_s172_adopt 1 "$_S172_WF" /opt/sandy/features/amap/relay)"
+_S172_A3="$(_s172_adopt "$_S172_WF" /opt/sandy/features/amap/relay)"
 check "§172(3) single entry: relay source/path match §149(11)'s pre-#381 value exactly -- the single-entry case is byte-identical (got: $_S172_A3)" \
     bash -c '[ "$(printf "%s" "$1" | cut -d"|" -f1-2)" = "manifest|/opt/sandy/features/amap/relay" ]' _ "$_S172_A3"
-rm -f "$_S172_WF"; unset _S172_A1 _S172_A2 _S172_A3 _S172_WF
+rm -f "$_S172_WF"; unset _S172_A1 _S172_A3 _S172_WF
 
 # _s172_kill_loops PATTERN -- kills every supervisor LOOP process whose
 # cmdline matches PATTERN (the fixture's own tmpdir path), INCLUDING each
@@ -19516,25 +19510,27 @@ _S172_CALLLINE="$(awk '/^_sandy_fe_json="\$\(_sandy_fe_marker_body/{print; exit}
 check "§172(pre-6d) the real _sandy_fe_json assignment line was found (mutation: renaming the target empties this and (6d) goes vacuous)" \
     bash -c '[ -n "$1" ]' _ "$_S172_CALLLINE"
 _s172_real_callsite() {
-    # $1=fe_list $2=fe_disabled $3=relay_feature $4=disabled_by_json
+    # $1=fe_list $2=relay_feature
     # Runs the REAL assignment line, verbatim, under set -euo pipefail --
     # prints "RC=<n> OUT=<value>" so a caller sees both the exit status the
     # script would have had (0 = kept running, 1 = aborted right here) and
-    # what the variable held when it didn't abort.
+    # what the variable held when it didn't abort. Two positional args, not
+    # four (r3, decision 3, #382, 2.6.0): the real call-site line dropped the
+    # fe_disabled and disabled_by_json arguments along with the "disabled"
+    # concept they described.
     bash -c '
         set -euo pipefail
         eval "$1"; eval "$2"
-        _sandy_fe_list="$3"; _sandy_fe_disabled="$4"; _sandy_fe_relay_feature="$5"
-        _sandy_relay_disabled_by_json="${6:-null}"
-        eval "$7"
+        _sandy_fe_list="$3"; _sandy_fe_relay_feature="$4"
+        eval "$5"
         printf "RC=0 OUT=%s" "$_sandy_fe_json"
-    ' _ "$_S172_MKFN" "$_S172_FEFN" "$1" "$2" "$3" "${4:-null}" "$_S172_CALLLINE"
+    ' _ "$_S172_MKFN" "$_S172_FEFN" "$1" "$2" "$_S172_CALLLINE"
     printf ' ACTUALRC=%s' "$?"
 }
-_S172_RCS_EMPTY="$(_s172_real_callsite "" "" "" null)"
+_S172_RCS_EMPTY="$(_s172_real_callsite "" "")"
 check "§172(6d) the real call-site line does NOT abort the launch when no feature entry is selected -- the regression this whole verify round was about (got: $_S172_RCS_EMPTY)" \
     bash -c 'case "$1" in "RC=0 OUT= ACTUALRC=0") exit 0;; esac; exit 1' _ "$_S172_RCS_EMPTY"
-_S172_RCS_TWO="$(_s172_real_callsite "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" "" alpha null)"
+_S172_RCS_TWO="$(_s172_real_callsite "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
 check "§172(6e) ...and still runs correctly with entries present (got: $_S172_RCS_TWO)" \
     bash -c 'printf "%s" "$1" | grep -q "ACTUALRC=0" && printf "%s" "$1" | grep -q "relay_alias.: true"' _ "$_S172_RCS_TWO"
 unset _S172_CALLLINE _S172_RCS_EMPTY _S172_RCS_TWO
@@ -19542,24 +19538,27 @@ unset -f _s172_real_callsite
 
 _S172_MKBLK="$(awk '/^printf .\{.n  "schema": 1,/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$_S172_SANDY")"
 _s172_marker_fe() {
-    # $1=fe_list $2=fe_disabled $3=relay_feature $4=disabled_by_json -> full marker JSON on stdout
+    # $1=fe_list $2=relay_feature -> full marker JSON on stdout. Two args, not
+    # four (r3, decision 3, #382, 2.6.0): disabled_by is now the JSON literal
+    # `null` unconditionally, computed rather than threaded through as a
+    # parameter -- there is no "disabled" fe_list any more.
     (
         eval "$_S172_MKFN"; eval "$_S172_FEFN"
         sandy_full_version() { echo "9.9.9"; }
         _sandy_egress_mode=off; SANDY_WORKSPACE=/home/sandy/ws; SANDBOX_NAME=ws-abc12345
         _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
         _sandy_agents_json=null; _sandy_relay_source_json=null; _sandy_relay_path_json=null
-        _sandy_relay_disabled_by_json="${4:-null}"
+        _sandy_relay_disabled_by_json="null"
         _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""
         CRED_MODE=none; _sandy_session_nonce=deadbeef; _sandy_session_file=/dev/stdout
-        _sandy_fe_list="$1"; _sandy_fe_disabled="$2"; _sandy_fe_relay_feature="$3"
-        _sandy_fe_json="$(_sandy_fe_marker_body "$1" "$2" "$3" "${4:-null}")"
+        _sandy_fe_list="$1"; _sandy_fe_relay_feature="$2"
+        _sandy_fe_json="$(_sandy_fe_marker_body "$1" "$2")"
         eval "$_S172_MKBLK"
     ) 2>/dev/null
 }
-_S172_MK2="$(_s172_marker_fe "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" "" alpha null)"
+_S172_MK2="$(_s172_marker_fe "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
 if command -v python3 >/dev/null 2>&1; then
-    check "§172(6a) two entries (one disabled: none): the marker is valid JSON (mutation m5: dropping the \${_sandy_fe_json:-} arg breaks this under set -u)" \
+    check "§172(6a) two entries: the marker is valid JSON (mutation m5: dropping the \${_sandy_fe_json:-} arg breaks this under set -u)" \
         bash -c 'printf "%s" "$1" | python3 -c "import json,sys; json.load(sys.stdin)"' _ "$_S172_MK2"
     check "§172(6b) feature_entries has BOTH features, relay_alias true only for the designated one (alpha)" \
         bash -c 'printf "%s" "$1" | python3 -c "
@@ -19569,7 +19568,7 @@ assert set(d.keys())=={\"alpha\",\"beta\"}, d
 assert d[\"alpha\"][\"relay_alias\"] is True
 assert d[\"beta\"][\"relay_alias\"] is False
 "' _ "$_S172_MK2"
-    _S172_MK3="$(_s172_marker_fe "" "" "" null)"
+    _S172_MK3="$(_s172_marker_fe "" "")"
     check "§172(6c) empty list -> feature_entries is the empty object {}, never null (the marker always knows the answer once #381 has shipped)" \
         bash -c 'printf "%s" "$1" | python3 -c "
 import json,sys
@@ -20075,7 +20074,7 @@ check "§173(c2) an UNSELECTED sandbox (matched by the exclude glob) gets NO rec
 # way, has to reach the real crossSessionInbound resolution.
 _S173_FM2="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$_S173_SANDY")
 $(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$_S173_SANDY")"
-_S173_EVAL="$(awk '/^_sandy_relay_slot="absent"/,/^# BEGIN handoff relay/' "$_S173_SANDY")"
+_S173_EVAL="$(awk '/^_sandy_relay_slot_dir="\$SANDBOX_DIR\/relay-bin"$/,/^# BEGIN handoff relay/' "$_S173_SANDY")"
 _S173_CSI="$(awk '/^_sandy_csi_json="null"/,/^    _sandy_csi_user_written=0/' "$_S173_SANDY" | sed '$d')
 fi"
 check "§173(pre-d) all three spans extracted and parse together (mutation: a rename empties one and every (d) check below goes vacuous)" \
@@ -20132,9 +20131,8 @@ S173_H
 _s173_drive() {   # $1=SANDY_HOME $2=slug $3..=extra env "NAME=value" assignments
     local _home="$1" _slug="$2"; shift 2
     env SANDY_HOME="$_home" SANDBOX_DIR="$_S173_D/sb" WORK_DIR="$_S173_D/ws" \
-        SANDBOX_NAME="$_slug" SANDY_AGENT=claude SANDY_RELAY=1 \
+        SANDBOX_NAME="$_slug" SANDY_AGENT=claude \
         FM_BLOCK="$_S173_FM2" EVAL_BLOCK="$_S173_EVAL" CSI_BLOCK="$_S173_CSI" \
-        _sandy_relay_slot_dir="$_S173_D/noslot" \
         "$@" bash "$_S173_D/drive.sh" 2>/dev/null || echo "DRIVER-FAILED"
 }
 
@@ -20146,14 +20144,10 @@ _S173_D2="$(_s173_drive "$_S173_HL" myrepo-a1b2c3d4)"
 check "§173(d2) INVERTED for decision 6 (#382, 2.6.0): a feature with an entry and NO declared receives resolves REFUSE, src=default — an entry alone no longer buys accept via the (now-removed) legacy path (got: $(printf '%s' "$_S173_D2" | tr '\n' ' '))" \
     bash -c 'printf "%s" "$1" | grep -q "^csi=refuse$" && printf "%s" "$1" | grep -q "^src=default$"' _ "$_S173_D2"
 
-# (d3) still passes after decision 6 -- with the entry-alone path gone,
-# SANDY_RELAY=0 changes nothing observable here (the same feature already
-# resolves refuse/default at (d2) with SANDY_RELAY unset). Left as a
-# regression guard for r3, which removes SANDY_RELAY itself (decision 3) and
-# will need to delete or rewrite this case as a hard-error check instead.
-_S173_D3="$(_s173_drive "$_S173_HL" myrepo-a1b2c3d4 env SANDY_RELAY=0)"
-check "§173(d3) ...and with SANDY_RELAY=0 the SAME feature still resolves refuse, src=default (got: $(printf '%s' "$_S173_D3" | tr '\n' ' '))" \
-    bash -c 'printf "%s" "$1" | grep -q "^csi=refuse$" && printf "%s" "$1" | grep -q "^src=default$"' _ "$_S173_D3"
+# (d3), "...and with SANDY_RELAY=0 the SAME feature still resolves refuse", is
+# GONE (r3, decision 3, #382, 2.6.0): SANDY_RELAY is now a hard error before
+# this span ever runs, so a case that fed it a value would test a launch that
+# never reaches here at all. §176(a) covers the replacement behaviour.
 
 _S173_D4="$(_s173_drive "$_S173_HN" excluded-a1b2c3d4)"
 check "§173(d4) a feature declaring receives but EXCLUDED by sandboxes.exclude resolves refuse — a declared need from an unselected feature must not count (got: $(printf '%s' "$_S173_D4" | tr '\n' ' '))" \
@@ -20172,7 +20166,7 @@ check "§173(d7) a feature declaring BOTH receives and an entry resolves via the
     bash -c 'printf "%s" "$1" | grep -q "^csi=accept$" && printf "%s" "$1" | grep -q "^src=feature:hybrid$"' _ "$_S173_D7"
 
 unset -f _s173_drive
-unset _S173_D1 _S173_D2 _S173_D3 _S173_D4 _S173_D5 _S173_D6 _S173_D7 _S173_HN _S173_HL _S173_HH
+unset _S173_D1 _S173_D2 _S173_D4 _S173_D5 _S173_D6 _S173_D7 _S173_HN _S173_HL _S173_HH
 
 # --- (e) the marker carries cross_session_inbound_source --------------------
 # Same extraction §134 uses for the marker printf, stubbing the same globals
@@ -21175,44 +21169,25 @@ rm -f "$_S174_MUT_COPY"
 unset _S174_MUT_COPY
 
 # ============================================================
-echo "§175: 2.5.0 — the relay-era deprecations announce themselves (#382), and --init (#392)"
+echo "§175: 2.5.0 — the relay-era deprecations announced themselves (#382), and --init (#392)"
 # ============================================================
 # #382 announced consumer-shaped surfaces in a MINOR, under CLAUDE.md's written
-# exception. The exception's price is that every surface sandy can detect in
-# use WARNS at launch for at least one minor -- the README list reaches only
-# people who read it. §138 already forces every runtime deprecation warning to
-# be listed; this section asserts the warnings actually FIRE when (and only
-# when) the deprecated path is used, and that the rows sandy cannot warn about
-# are at least listed.
+# exception. The exception's price was that every surface sandy could detect
+# in use WARNED at launch for at least one minor -- the README list reaches
+# only people who read it. §138 already forces every runtime deprecation
+# warning to be listed.
+#
+# SANDY_RELAY's own warn-on-use checks ((pre)/(1)/(2)/(3) in earlier releases)
+# are GONE from this section, not merely inverted: the surface they asserted
+# -- _sandy_warn_relay_key_deprecated, called at launch when the key was set
+# -- no longer exists at all. It was replaced in 2.6.0 by a hard error (§176(a)
+# asserts THAT). What remains here is the half of #382 that is not
+# SANDY_RELAY-specific: the README table still had to carry every 2.5.0
+# surface during the announcement window, including the ones sandy could never
+# warn about at runtime (an emitted field, a mount path, a helper nobody's
+# launch reveals) -- and §176 is where each of those is asserted GONE.
 _S175_SANDY="$SANDY_SCRIPT"
 _S175_README="$(cd "$(dirname "$0")/.." && pwd)/README.md"
-_S175_FN="$(awk '/^_sandy_warn_relay_key_deprecated\(\) \{/,/^\}/' "$_S175_SANDY")"
-check "§175(pre) _sandy_warn_relay_key_deprecated was extracted (mutation: a rename empties it and (1)-(2) go vacuous)" \
-    bash -c 'printf "%s" "$1" | grep -q "SANDY_RELAY is deprecated"' _ "$_S175_FN"
-_s175_relay_warn() {   # $1 = _SANDY_RELAY_SOURCE -> the warning text, or nothing
-    bash -c 'warn(){ printf "%s\n" "$*"; }; eval "$1"; _SANDY_RELAY_SOURCE="$2"; _sandy_warn_relay_key_deprecated' _ "$_S175_FN" "$1" 2>&1 || true
-}
-_S175_OK=""
-for _s175_src in env host workspace; do
-    _s175_out="$(_s175_relay_warn "$_s175_src")"
-    case "$_s175_out" in *"SANDY_RELAY is deprecated"*"set in $_s175_src"*"exclude"*) ;; *) _S175_OK="$_S175_OK $_s175_src" ;; esac
-done
-check "§175(1) SANDY_RELAY set from env, host OR workspace config WARNS, naming where it was set and the replacement (sandboxes.exclude) (failed for:${_S175_OK:- none})" \
-    bash -c '[ -z "$1" ]' _ "$_S175_OK"
-check "§175(2) ...and an UNSET SANDY_RELAY (the default everyone gets) says nothing (got: '$(_s175_relay_warn '')')" \
-    bash -c '[ -z "$1" ]' _ "$(_s175_relay_warn '')"
-# Each line-number capture below ends in `|| true`: a missing line must turn
-# its CHECK red, never abort the suite under pipefail + the ERR trap (a grep
-# that finds nothing exits 1 -- mutation M2, removing the call, did exactly
-# that before these guards).
-# The call site: the warning must run in the launch path, after the config
-# loader has recorded the source and before the key is defaulted to 1 (after
-# which "was it set?" can no longer be answered from the value).
-_S175_L_LOAD="$(grep -m1 -n '^_load_sandy_config "\$WORK_DIR/.sandy/.secrets"' "$_S175_SANDY" | cut -d: -f1 || true)"
-_S175_L_CALL="$(grep -m1 -n '^_sandy_warn_relay_key_deprecated$' "$_S175_SANDY" | cut -d: -f1 || true)"
-_S175_L_DEF="$(grep -m1 -n '^SANDY_RELAY="\${SANDY_RELAY:-1}"$' "$_S175_SANDY" | cut -d: -f1 || true)"
-check "§175(3) the warning is CALLED at top level, after config loading and before SANDY_RELAY is defaulted (lines load=${_S175_L_LOAD:-?} call=${_S175_L_CALL:-?} default=${_S175_L_DEF:-?})" \
-    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] && [ "$1" -lt "$2" ] && [ "$2" -lt "$3" ]' _ "$_S175_L_LOAD" "$_S175_L_CALL" "$_S175_L_DEF"
 # Rows sandy CANNOT warn about at launch (an emitted field, a mount path, a
 # helper nobody's launch reveals) -- the list is their only notice, so it must
 # carry them. §138 covers only the SANDY_* keys that do warn.
@@ -21236,7 +21211,7 @@ _S175_L_LASTSET="$(grep -nE '^[[:space:]]*RUN_FLAGS=\(' "$_S175_SANDY" | tail -1
 _S175_L_PIDS="$(grep -m1 -n '^RUN_FLAGS+=(--pids-limit 512)$' "$_S175_SANDY" | cut -d: -f1 || true)"
 check "§175(6) --init is an unconditional column-0 RUN_FLAGS append after every per-mode RUN_FLAGS=(...) reset, beside --pids-limit (init=${_S175_L_INIT:-?} last-reset=${_S175_L_LASTSET:-?} pids=${_S175_L_PIDS:-?})" \
     bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$1" -gt "$2" ] && [ "$1" -gt "$3" ] && [ $(( $1 - $3 )) -lt 20 ]' _ "$_S175_L_INIT" "$_S175_L_LASTSET" "$_S175_L_PIDS"
-unset _S175_OK _S175_MISS _s175_src _s175_out _s175_t
+unset _S175_MISS _s175_t
 
 # ============================================================
 echo "§176: 2.6.0 — the relay-era surfaces announced in 2.5.0 are REMOVED (#382)"
@@ -21259,6 +21234,130 @@ echo "§176: 2.6.0 — the relay-era surfaces announced in 2.5.0 are REMOVED (#3
 #   (g) the image no longer installs /usr/local/bin/sandy-handoff-sessions
 #       (r1, decision 7).
 
+
+# --- (a) SANDY_RELAY is a hard error naming the replacement (decision 3, r3).
+# Driven through the REAL config loader, not a hand-fed variable: the failure
+# mode this guards against is the loader silently dropping the key (if it were
+# ever removed from SANDY_PASSIVE_KEYS) rather than reaching the refusal, so
+# what matters is that the shipped array + loader + refusal block, composed IN
+# FILE ORDER, actually produce the error for env, host config AND workspace
+# config alike.
+_S176A_SANDY="$SANDY_SCRIPT"
+_S176A_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+
+_S176A_KEYS="$(sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^}$/p' "$_S176A_SANDY")"
+_S176A_KIL="$(sed -n '/^_key_in_list() {/,/^}$/p' "$_S176A_SANDY")"
+_S176A_SNAP="$(sed -n '/^_sandy_snapshot_env_keys() {/,/^}$/p' "$_S176A_SANDY")"
+_S176A_LOAD="$(sed -n '/^_load_sandy_config() {/,/^}$/p' "$_S176A_SANDY")"
+_S176A_LAUNCH="$(awk '/^_SANDY_RELAY_SOURCE=""$/,/^_load_sandy_config "\$WORK_DIR\/\.sandy\/\.secrets"/' "$_S176A_SANDY")"
+_S176A_BLOCK="$(awk '/^# BEGIN removed key: SANDY_RELAY/,/^# END removed key: SANDY_RELAY/' "$_S176A_SANDY")"
+_S176A_FATAL="$(sed -n '/^_sandy_daemon_fatal() {/,/^}$/p' "$_S176A_SANDY")"
+
+check "§176(a-pre) all six pieces were extracted and parse together (mutation: a rename empties one and every (a) check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_PRIVILEGED_KEYS=(" &&
+             printf "%s" "$2" | grep -q "for k in" &&
+             printf "%s" "$3" | grep -q "_SANDY_ENV_SET_KEYS+=" &&
+             printf "%s" "$4" | grep -q "SANDY_EXTRA_ENV" &&
+             printf "%s" "$5" | grep -q "_SANDY_RELAY_SOURCE=\"env\"" &&
+             printf "%s" "$6" | grep -q "sandboxes.*exclude" &&
+             printf "%s" "$7" | grep -q "fatal" &&
+             printf "%s\n%s\n%s\n%s\n%s\n%s\n%s\n" "$1" "$2" "$3" "$4" "$5" "$6" "$7" | bash -n' \
+    _ "$_S176A_KEYS" "$_S176A_KIL" "$_S176A_SNAP" "$_S176A_LOAD" "$_S176A_LAUNCH" "$_S176A_BLOCK" "$_S176A_FATAL"
+
+cat > "$_S176A_DIR/drive.sh" <<'S176A_DRV'
+set -uo pipefail
+eval "$FATAL_FN"
+eval "$KEYS_ARR"
+eval "$KIL_FN"
+eval "$SNAP_FN"
+eval "$LOAD_FN"
+_SANDY_ENV_SET_KEYS=()
+_SANDY_EXTRA_ENV_HOST_LISTS=()
+_SANDY_EXTRA_ENV_WS_LISTS=()
+_PASSIVE_PRIVILEGED_PENDING=()
+_PASSIVE_PRIVILEGED_SOURCES=()
+_SANDY_VERBOSE_EXPLICIT=0
+_sandy_snapshot_env_keys
+eval "$LAUNCH_BLOCK"
+eval "$REMOVED_KEY_BLOCK"
+echo "REACHED-END"
+S176A_DRV
+
+# _s176a_case <casedir-name> <extra-env-assignment-or-empty> -- creates a fresh
+# fixture dir with SANDY_HOME=<d>/home and WORK_DIR=<d>/ws, runs the driver
+# under `env -i` (hermetic: none of this suite's own SANDY_* leak in), and
+# leaves $d/rc, $d/stdout, $d/stderr, $d/log.fatal (if any) on disk for the
+# checks below to read directly -- no round-tripping multi-line output through
+# a single captured string.
+_s176a_case() {
+    local d="$_S176A_DIR/$1"; shift
+    mkdir -p "$d/home" "$d/ws"
+    # The launch block is EXPECTED to exit non-zero in most cases here (that
+    # is what is under test) -- captured via `|| rc=$?` rather than left bare,
+    # so a real refusal does not trip run-tests.sh's own `set -e` + ERR trap
+    # and abort the whole suite (the exact §92-class trap this repo has hit
+    # repeatedly; see §123's _s123_resolve for the same pattern).
+    local rc=0
+    ( cd "$d" && env -i HOME="$d" PATH="/usr/local/bin:/usr/bin:/bin" \
+        SANDY_HOME="$d/home" WORK_DIR="$d/ws" SANDY_DAEMON_LOG="$d/log" \
+        FATAL_FN="$_S176A_FATAL" KEYS_ARR="$_S176A_KEYS" KIL_FN="$_S176A_KIL" \
+        SNAP_FN="$_S176A_SNAP" LOAD_FN="$_S176A_LOAD" LAUNCH_BLOCK="$_S176A_LAUNCH" \
+        REMOVED_KEY_BLOCK="$_S176A_BLOCK" "$@" \
+        bash "$_S176A_DIR/drive.sh" > "$d/stdout" 2> "$d/stderr" ) || rc=$?
+    echo "$rc" > "$d/rc"
+}
+
+# (a1) env
+_s176a_case case1 SANDY_RELAY=0
+check "§176(a1) SANDY_RELAY=0 in the ENVIRONMENT is a hard error naming sandboxes.exclude and the source (rc=$(cat "$_S176A_DIR/case1/rc") stderr='$(tr '\n' ' ' < "$_S176A_DIR/case1/stderr")')" \
+    bash -c '[ "$(cat "$1/rc")" = 1 ] && [ -f "$1/log.fatal" ] &&
+             grep -q "sandboxes.*exclude" "$1/stderr" && grep -qi "env" "$1/stderr"' \
+    _ "$_S176A_DIR/case1"
+
+# (a2) host config -- value 1 must error too, not only 0
+mkdir -p "$_S176A_DIR/case2/home"
+printf 'SANDY_RELAY=1\n' > "$_S176A_DIR/case2/home/config"
+_s176a_case case2
+check "§176(a2) SANDY_RELAY=1 in HOST config (\$SANDY_HOME/config) is ALSO a hard error -- both values, not only 0 (rc=$(cat "$_S176A_DIR/case2/rc") stderr='$(tr '\n' ' ' < "$_S176A_DIR/case2/stderr")')" \
+    bash -c '[ "$(cat "$1/rc")" = 1 ] && [ -f "$1/log.fatal" ] &&
+             grep -q "sandboxes.*exclude" "$1/stderr" && grep -qi "host" "$1/stderr"' \
+    _ "$_S176A_DIR/case2"
+
+# (a3) workspace config -- passive tier, so no approval path saves it either
+mkdir -p "$_S176A_DIR/case3/ws/.sandy"
+printf 'SANDY_RELAY=0\n' > "$_S176A_DIR/case3/ws/.sandy/config"
+_s176a_case case3
+check "§176(a3) SANDY_RELAY=0 in WORKSPACE config (\$WORK_DIR/.sandy/config) is ALSO a hard error, unapproved -- the key is passive, not privileged (rc=$(cat "$_S176A_DIR/case3/rc") stderr='$(tr '\n' ' ' < "$_S176A_DIR/case3/stderr")')" \
+    bash -c '[ "$(cat "$1/rc")" = 1 ] && [ -f "$1/log.fatal" ] &&
+             grep -q "sandboxes.*exclude" "$1/stderr" && grep -qi "workspace" "$1/stderr"' \
+    _ "$_S176A_DIR/case3"
+
+# (a4) control: nothing sets SANDY_RELAY anywhere -- must succeed with no ERROR.
+_s176a_case case4
+check "§176(a4) control: no SANDY_RELAY set anywhere reaches REACHED-END with rc=0, no stderr ERROR line, and no .fatal marker (rc=$(cat "$_S176A_DIR/case4/rc") stderr='$(tr '\n' ' ' < "$_S176A_DIR/case4/stderr")')" \
+    bash -c '[ "$(cat "$1/rc")" = 0 ] && grep -q "REACHED-END" "$1/stdout" &&
+             ! grep -q "ERROR" "$1/stderr" && [ ! -f "$1/log.fatal" ]' \
+    _ "$_S176A_DIR/case4"
+
+# (a5) ORDER: the removed-key block must run after config loading finishes and
+# before the SANDY_APPROVE_ONLY pre-pass exits -- otherwise `--start` cannot
+# refuse fast (a workspace-only refusal reaching the supervisor instead of the
+# client burns the full readiness timeout instead of failing in ~1s).
+_S176A_L_LOAD="$(grep -m1 -n '^_load_sandy_config "\$WORK_DIR/\.sandy/\.secrets"' "$_S176A_SANDY" | cut -d: -f1 || true)"
+_S176A_L_BLOCK="$(grep -m1 -n '^# BEGIN removed key: SANDY_RELAY' "$_S176A_SANDY" | cut -d: -f1 || true)"
+_S176A_L_APPROVE="$(grep -m1 -n '^if \[ "\${SANDY_APPROVE_ONLY:-0}" = "1" \]' "$_S176A_SANDY" | cut -d: -f1 || true)"
+check "§176(a5) the removed-key block runs AFTER workspace config loading and BEFORE the SANDY_APPROVE_ONLY pre-pass exit (load=${_S176A_L_LOAD:-?} block=${_S176A_L_BLOCK:-?} approve=${_S176A_L_APPROVE:-?})" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] && [ "$1" -lt "$2" ] && [ "$2" -lt "$3" ]' \
+    _ "$_S176A_L_LOAD" "$_S176A_L_BLOCK" "$_S176A_L_APPROVE"
+
+# (a6) STATIC no-gating ratchet: none of the retired gating spellings survive.
+check "§176(a6) sandy no longer contains any SANDY_RELAY gating spelling (\"\$SANDY_RELAY\" != \"1\", SANDY_RELAY:-1, or the retired warn function)" \
+    bash -c '! grep -qE "\"\\\$SANDY_RELAY\" != \"1\"|SANDY_RELAY:-1|_sandy_warn_relay_key_deprecated" "$1"' \
+    _ "$_S176A_SANDY"
+
+rm -rf "$_S176A_DIR"
+unset _S176A_SANDY _S176A_DIR _S176A_KEYS _S176A_KIL _S176A_SNAP _S176A_LOAD _S176A_LAUNCH _S176A_BLOCK _S176A_FATAL
+unset _S176A_L_LOAD _S176A_L_BLOCK _S176A_L_APPROVE
 # --- (d) an entry alone now resolves refuse — the relay-legacy default and
 # its 2.5.0 warning are both gone (decision 6, #382). Same driver PATTERN
 # §142/§173(d) use: extract the manifest apply/eval spans and the csi
@@ -21271,7 +21370,7 @@ _S176_D_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a syml
 
 _S176_D_FM="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$_S176_SANDY")
 $(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$_S176_SANDY")"
-_S176_D_EVAL="$(awk '/^_sandy_relay_slot="absent"/,/^# BEGIN handoff relay/' "$_S176_SANDY")"
+_S176_D_EVAL="$(awk '/^_sandy_relay_slot_dir="\$SANDBOX_DIR\/relay-bin"$/,/^# BEGIN handoff relay/' "$_S176_SANDY")"
 _S176_D_CSI="$(awk '/^_sandy_csi_json="null"/,/^    _sandy_csi_user_written=0/' "$_S176_SANDY" | sed '$d')
 fi"
 check "§176(d-pre) all three spans extracted and parse together (mutation: a rename empties one and every (d) check below goes vacuous)" \
