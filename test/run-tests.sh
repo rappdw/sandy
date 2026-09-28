@@ -20060,7 +20060,25 @@ check "§172(10g) a block inspecting the WRONG LABEL KEY (stub only answers for 
 
 unset _S172_W6 _S172_W7
 
-unset _S172_IMGBLK _S172_W1 _S172_W2 _S172_W3 _S172_W4 _S172_W5
+# (10h) every fixture above has exactly TWO entries, so there is only ever
+# ONE non-designated feature to name -- a regression that names just the
+# FIRST missing entry (e.g. collapsing the accumulator to a plain "set if
+# unset" instead of appending) would pass every check above and still be
+# the #381 failure class: a never-started entry with nothing saying so.
+# Three entries, one designated (alpha), makes "only the first" and "all
+# but the last" both observable, and also re-covers "the designated entry
+# must still be skipped" with a non-trivial (i.e. more-than-one-candidate)
+# list.
+_S172_W8="$(_s172_imgwarn "$_S172_IMGBLK" "" \
+    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s gamma=/opt/sandy/features/gamma/t" alpha)"
+check "§172(10h) label ABSENT + 3 entries: warns, naming BOTH non-designated features (beta AND gamma) -- not just the first one, and not the designated alpha (mutation: collapsing the accumulator to 'first missing only', or dropping the designated-entry skip, both fail this)" \
+    bash -c '
+        printf "%s\n" "$1" | grep -q "WARN:.*NOT started this launch:.*beta" || exit 1
+        printf "%s\n" "$1" | grep -q "WARN:.*NOT started this launch:.*gamma" || exit 1
+        ! printf "%s\n" "$1" | grep -q "WARN:.*NOT started this launch:.*alpha"
+    ' _ "$_S172_W8"
+
+unset _S172_IMGBLK _S172_W1 _S172_W2 _S172_W3 _S172_W4 _S172_W5 _S172_W8
 unset -f _s172_imgwarn
 
 # --- (11) the OTHER half of the stale-image contract: every generated agent
