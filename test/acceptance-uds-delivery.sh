@@ -14,7 +14,7 @@
 #
 # WHAT IS ASSERTED, and why it is a measurement rather than a vibe:
 #   1. SENDER CONTROL — inject.py logs each step (connect / auth / user-frame
-#      sent) to a file in the rw relay dir. "the frame reached the socket" is
+#      sent) to a file in the entry's own rw feature-state dir. "the frame reached the socket" is
 #      asserted in BOTH cases. This is the control the first cut lacked: without
 #      it, "no sentinel" is unattributable — a silently-failed send looks
 #      identical to a blocked one. If the transport itself fails, the case is
@@ -164,7 +164,7 @@ UDS_MANIFEST
 # layer" (a harness-frame problem). SANDY_AGENT_ARGS is privileged and set here
 # from the HOST config (a privileged source → no approval prompt); --debug-file
 # writes to a file, not the pane, so the marker-in-pane diagnostic stays clean.
-echo 'SANDY_AGENT_ARGS=--debug --debug-file /opt/sandy/relay-state/cc-debug.log' >> "$SANDY_HOME_DIR/config"
+echo 'SANDY_AGENT_ARGS=--debug --debug-file /opt/sandy/feature-state/udsrelay/cc-debug.log' >> "$SANDY_HOME_DIR/config"
 
 # The injector. Runs INSIDE the container, detached (setsid + double fork) so
 # it is provably out of the receiving session's ancestry — the same property
@@ -196,7 +196,7 @@ except Exception:
 # detached-sender threat model. `docker exec` alone would already be out of the
 # agent's ancestry, but this keeps the method faithful. Because the detached
 # grandchild's stdout/exit are unobservable to the harness, it records each
-# step to LOGFILE in the rw relay dir; the harness reads that to tell a
+# step to LOGFILE in the entry's own rw feature-state dir; the harness reads that to tell a
 # transport failure apart from a delivered-but-no-effect turn. docker exec
 # returns when the first parent exits; "user-frame: sent" is written before any
 # sleep, so it is present within a fraction of a second of the injection.
@@ -426,7 +426,7 @@ _uds_sessions() {  # $1=container -> tab-delimited rows, same shape the removed 
 run_case() {
     local label="$1" expect="$2" extra="${3:-}" host_extra="${4:-}"
     local marker="ACC74-$expect-$$-$RANDOM"
-    local sentinel="/opt/sandy/relay-state/delivered-$marker"
+    local sentinel="/opt/sandy/feature-state/udsrelay/delivered-$marker"
 
     rm -f "$WS/.sandy/config"
     [ -n "$extra" ] && printf '%s\n' "$extra" > "$WS/.sandy/config"
@@ -558,7 +558,7 @@ run_case() {
     # The claude receiver holds cc-debug.log open from launch, so do NOT unlink
     # it here (that would orphan the inode it keeps writing to). This injection's
     # decision is found by grepping the log for THIS case's unique marker below.
-    local dbg_log="/opt/sandy/relay-state/cc-debug.log"
+    local dbg_log="/opt/sandy/feature-state/udsrelay/cc-debug.log"
     docker exec -u "$(id -u)" "$c" rm -f "$sentinel" "$inject_log" 2>/dev/null || true
     # Byte offset of the receiver's debug log BEFORE the injection. The refusal
     # line carries no marker, so scoping by marker cannot work for the negative
