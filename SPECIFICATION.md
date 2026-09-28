@@ -1056,7 +1056,7 @@ For 2- and 3-agent layouts `pane_index` and spawn order coincide; the trap is sp
 
 **Read identity from the option, never from `pane_index`, a scrollback marker, or the pane title.** `pane_index` is wrong for the reason above; a scrollback marker is wiped the moment a real credentialed agent redraws or clears its pane; `select-pane -T` (the pane title) is OSC-2-clobberable by anything running inside the pane. `@sandy_pane_agent` is the identity source which the agent's redraws and OSC-2 title writes do not touch, and it binds correctly regardless of the pane-index shuffle.
 
-**Not a security boundary.** A process inside the session can rewrite or clear the option (`tmux set-option -p`). The worst it can do is stop delivery within its own sandbox: the helper reports an ambiguous target, or delivery waits. It can never redirect delivery elsewhere. It is not a security boundary.
+**Not a security boundary.** A process inside the session can rewrite or clear the option (`tmux set-option -p`). The worst it can do is stop delivery within its own sandbox: the helper reports an ambiguous target, or delivery waits. It can never redirect delivery elsewhere.
 
 A property test pins this contract in `test/run-tests.sh` §171: a fixture where the option disagrees with `pane_index`-as-spawn-order must still yield the correct agent per row, and the real 4-agent mapping table above is asserted directly. `test/host-check-pane-tag.sh` (host-only, live tmux, not wired into any automated suite) additionally proves the single-agent daemon and foreground launch forms actually tag their pane against a real tmux server.
 

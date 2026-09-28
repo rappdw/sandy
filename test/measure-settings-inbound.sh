@@ -127,7 +127,6 @@ SANDY="${SANDY:-./sandy}"
 # shellcheck source=/dev/null
 . "$(dirname "$0")/lib-isolated-home.sh"
 [ "${SANDY_TEST_NO_ISOLATE:-0}" = "1" ] || _isolate_sandy_home
-SANDY_HOME_DIR="${SANDY_HOME:-$HOME/.sandy}"
 
 # ---------------------------------------------------------------------------
 # Credential gate — identical to test/acceptance-uds-delivery.sh's, and for
