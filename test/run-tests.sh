@@ -20180,19 +20180,30 @@ _s173_load() {   # $1 = manifest JSON -> "OK:<space-joined receives>" or "REFUSE
         eval "$1"
         if ! _sandy_fm_load "$2/f" "someslug-a1b2c3d4"; then printf "REFUSED:%s" "$_SANDY_FM_ERR"; exit 0; fi
         printf "OK:%s" "${_SANDY_FM_RECEIVES[*]:-}"
-    ' _ "$_S173_FM" "$_S173_D" 2>/dev/null || true
+    ' _ "$_S173_FM" "$_S173_D" 2>"$_S173_D/err" || true
 }
+# _s173_got <result>: the label suffix every (a) check carries -- the result AND
+# the child's stderr, which used to go to /dev/null. These five failed on the
+# maintainer's macOS run while the identical steps passed standalone there, so
+# a failure must be able to say WHY without another round trip.
+_s173_got() { printf '(got: %s; stderr: %s)' "$1" "$(tr '\n' ' ' < "$_S173_D/err" 2>/dev/null | cut -c1-300)"; }
 _S173_BASE='"sandboxes":{"include":["*"]},"agents":{"include":["claude"]}'
-check "§173(a1) a valid [\"cross_session\"] loads as a record" \
-    bash -c '[ "$1" = "OK:cross_session" ]' _ "$(_s173_load "{$_S173_BASE,\"receives\":[\"cross_session\"]}")"
-check "§173(a2) an empty [] declares nothing, and is not an error" \
-    bash -c '[ "$1" = "OK:" ]' _ "$(_s173_load "{$_S173_BASE,\"receives\":[]}")"
-check "§173(a3) a bare string (not an array) is REFUSED naming 'is not an array'" \
-    bash -c 'case "$1" in REFUSED:*"receives is not an array"*) : ;; *) exit 1 ;; esac' _ "$(_s173_load "{$_S173_BASE,\"receives\":\"cross_session\"}")"
-check "§173(a4) a non-string element is REFUSED naming 'contains a non-string'" \
-    bash -c 'case "$1" in REFUSED:*"receives contains a non-string"*) : ;; *) exit 1 ;; esac' _ "$(_s173_load "{$_S173_BASE,\"receives\":[1]}")"
-check "§173(a5) an unknown value is REFUSED, naming the offending value (a typo cannot silently resolve to refuse OR to the need being declared)" \
-    bash -c 'case "$1" in REFUSED:*"unknown value '"'"'cross_sesion'"'"'"*) : ;; *) exit 1 ;; esac' _ "$(_s173_load "{$_S173_BASE,\"receives\":[\"cross_sesion\"]}")"
+_S173_R="$(_s173_load "{$_S173_BASE,\"receives\":[\"cross_session\"]}")"
+check "§173(a1) a valid [\"cross_session\"] loads as a record $(_s173_got "$_S173_R")" \
+    bash -c '[ "$1" = "OK:cross_session" ]' _ "$_S173_R"
+_S173_R="$(_s173_load "{$_S173_BASE,\"receives\":[]}")"
+check "§173(a2) an empty [] declares nothing, and is not an error $(_s173_got "$_S173_R")" \
+    bash -c '[ "$1" = "OK:" ]' _ "$_S173_R"
+_S173_R="$(_s173_load "{$_S173_BASE,\"receives\":\"cross_session\"}")"
+check "§173(a3) a bare string (not an array) is REFUSED naming 'is not an array' $(_s173_got "$_S173_R")" \
+    bash -c 'case "$1" in REFUSED:*"receives is not an array"*) : ;; *) exit 1 ;; esac' _ "$_S173_R"
+_S173_R="$(_s173_load "{$_S173_BASE,\"receives\":[1]}")"
+check "§173(a4) a non-string element is REFUSED naming 'contains a non-string' $(_s173_got "$_S173_R")" \
+    bash -c 'case "$1" in REFUSED:*"receives contains a non-string"*) : ;; *) exit 1 ;; esac' _ "$_S173_R"
+_S173_R="$(_s173_load "{$_S173_BASE,\"receives\":[\"cross_sesion\"]}")"
+check "§173(a5) an unknown value is REFUSED, naming the offending value (a typo cannot silently resolve to refuse OR to the need being declared) $(_s173_got "$_S173_R")" \
+    bash -c 'case "$1" in REFUSED:*"unknown value '"'"'cross_sesion'"'"'"*) : ;; *) exit 1 ;; esac' _ "$_S173_R"
+unset _S173_R
 
 # node/jq PARITY over the same five fixtures -- §135(20)'s discipline, one
 # clause later. A divergence here is the same class of security bug: a
