@@ -1259,8 +1259,8 @@ _sandy_fe_marker_body() {
     # `null`: SANDY_RELAY is a hard error before this block runs, so an entry
     # the manifest declared was always adopted. Both shapes (the keys
     # themselves) are kept byte-identical rather than dropped, so a reader
-    # gating on their presence sees no change this unit; the NEXT unit (r5)
-    # removes both fields along with relay{} itself, under schema_version 4.
+    # gating on their presence sees no change here; both fields are removed
+    # along with relay{} itself when schema_version becomes 4.
     #
     # Defined near _sandy_fm_jesc, not beside the marker printf far below, so
     # a test can extract just this function rather than the whole marker body.
@@ -16065,7 +16065,8 @@ _sandy_relay_path_json="null"
 # of a non-null value was SANDY_RELAY=0, and that key is now a hard error
 # before this block runs, so there is no source left to name. Kept as a
 # variable (not inlined into the printf) so the shape and the arity below are
-# unchanged from before the removal -- r5 drops the field along with relay{}.
+# unchanged from before the removal -- a later change drops the field along
+# with relay{} itself, once schema_version becomes 4.
 _sandy_relay_disabled_by_json="null"
 # Headless and --remote drop the key host-side AFTER a producer may have
 # claimed it, so the final state is what gets recorded -- "none" means nothing

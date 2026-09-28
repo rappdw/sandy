@@ -11757,7 +11757,7 @@ check "§114(13d) the handoff mkdir is gone entirely (#355) — that line, not t
 
 # Re-anchored (2.6.0, #382): the "Handoff directories mounts" awk pattern the
 # two checks below used to extract had not matched anything in this file for
-# releases -- the block it named was removed long before this unit, so the
+# releases -- the block it named was removed long before this removal, so the
 # extraction was EMPTY, eval was a no-op, and both checks passed VACUOUSLY on
 # an untouched RUN_FLAGS=() rather than exercising any real code. The current
 # per-entry mount block is "# Feature entries (#381; every entry identical
@@ -17109,10 +17109,10 @@ check "§151(6) INVERTED: SANDY_HANDOFF_RELAY no longer gates any mount decision
     bash -c '! grep -B3 "relay-state:/opt/sandy/relay-state" "$1" | grep -q "SANDY_HANDOFF_RELAY"' _ "$_S151_SANDY"
 
 # --- (7-9) state_dir: the fact a consumer reads instead of constructing -----
-# (r5's territory covers relay{} removal; until then --print-state's relay.
-# state_dir reader is UNCHANGED, and a sandbox that has not relaunched since
-# before 2.2.0 still reports its last launch honestly from the pre-2.2.0
-# location.)
+# (relay{} removal is a later change, once schema_version becomes 4; until
+# then --print-state's relay.state_dir reader is UNCHANGED, and a sandbox
+# that has not relaunched since before 2.2.0 still reports its last launch
+# honestly from the pre-2.2.0 location.)
 _S151_H="$_S151_DIR/home"
 mkdir -p "$_S151_H/sandboxes/new-11111111/relay-state" "$_S151_H/sandboxes/old-22222222/handoff/relay"
 printf 'state=started\nrestarts=2\n' > "$_S151_H/sandboxes/new-11111111/relay-state/.state"
@@ -21590,6 +21590,33 @@ check "§176(e3b) a SECOND run against the same (now-clean) sandbox prints NOTHI
     bash -c '[ -z "$1" ]' _ "$_S176E_OUT2"
 rm -rf "$_S176E_LD"
 unset _S176E_LEFT _S176E_LD _S176E_OUT1 _S176E_OUT2
+
+# (e4) STATIC, WHOLE-FILE: nothing OUTSIDE the leftover-removal block creates
+# or writes $SANDBOX_DIR/relay-state again. (e1) only exercises the RUN_FLAGS
+# block in isolation and (e3) only exercises the leftover-removal block in
+# isolation, so neither sees a stray line elsewhere in sandy's host launch
+# path -- e.g. a "mkdir -p $SANDBOX_DIR/relay-state" re-added right after the
+# removal block -- that would recreate the directory the removal block just
+# deleted, on every launch, before anything reads it back as "absent".
+#
+# The extraction is nearly the whole file (~900KB), so it goes to a TEMP FILE
+# rather than a bash -c positional argument: Linux caps a single argv/envp
+# string at MAX_ARG_STRLEN (32 pages, 128KB on the common page size), well
+# under this file's size, and a content that large blew past it silently
+# turning both checks below into hard "Argument list too long" failures
+# rather than a real assertion (measured while validating this section).
+_S176E_RESTF="$(mktemp)"
+awk '/^# --- Leftover relay-state \(retired 2\.6\.0, #382\) ---/{skip=1} skip && /^fi$/{skip=0; next} skip{next} {print}' "$_S176E_SANDY" > "$_S176E_RESTF"
+check "§176(e4-pre) the whole-file-minus-block extraction actually dropped the leftover-removal block's own rm (a broken skip range would leave it in and (e4) below would fail closed on a false negative rather than proving anything)" \
+    bash -c '! grep -q "rm -rf -- \"\$SANDBOX_DIR/relay-state\"" "$1"' _ "$_S176E_RESTF"
+check "§176(e4) no host-side line OUTSIDE the leftover-removal block creates or writes \$SANDBOX_DIR/relay-state — no mkdir, no -v mount source, no write redirect (mutation MF: adding 'mkdir -p \"\$SANDBOX_DIR/relay-state\"' anywhere else in sandy reddens this)" \
+    bash -c '
+        ! grep -E "mkdir[^#]*relay-state" "$1" >/dev/null &&
+        ! grep -E "\-v \"[^\"]*relay-state[^\"]*:/opt/sandy" "$1" >/dev/null &&
+        ! grep -E ">[[:space:]]*\"?\\\$SANDBOX_DIR[^\"]*relay-state" "$1" >/dev/null
+    ' _ "$_S176E_RESTF"
+rm -f "$_S176E_RESTF"
+unset _S176E_RESTF
 
 unset _S176E_SANDY _S176E_TMPL
 
