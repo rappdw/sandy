@@ -11600,7 +11600,13 @@ printf '#!/bin/sh\nexit 0\n' > "$_S114_RW/.sandy/relay.sh"
 chmod +x "$_S114_RW/.sandy/relay.sh"
 printf '#!/bin/sh\nexit 0\n' > "$_S114_RW/.sandy/noexec.sh"   # deliberately NOT chmod +x
 _s114_relay_validate() {
-    # $1=SANDY_HANDOFF_RELAY $2=SANDY_HANDOFF_DIRS $3=headless(true|"") $4=remote(true|false) $5=provision(1|0)
+    # $1=SANDY_HANDOFF_RELAY $2=inert positional arg (was SANDY_HANDOFF_DIRS; the
+    #   block no longer reads OR sets that key -- SANDY_HANDOFF_DIRS itself has
+    #   hard-errored on any set value since 2.2.0, and the branch here that used
+    #   to force it to 1 was unreachable dead code, removed 2.6.0 #382 decision 3.
+    #   Kept as a positional arg only so 11c below still has two inputs to vary
+    #   while proving the message that branch used to print is gone for both.
+    # $3=headless(true|"") $4=remote(true|false) $5=provision(1|0)
     env SANDY_HANDOFF_RELAY="$1" SANDY_HANDOFF_DIRS="${2:-0}" \
         WORK_DIR="$_S114_RW" SANDY_WORKSPACE="/home/sandy/relayws" \
         _sandy_is_headless="${3:-false}" SANDY_REMOTE_CONTROL="${4:-false}" \
@@ -11610,14 +11616,30 @@ _s114_relay_validate() {
         printf 'DIRS=%s RELAY=%s\n' \"\${SANDY_HANDOFF_DIRS:-0}\" \"\${SANDY_HANDOFF_RELAY:-UNSET}\"
     "
 }
-check "§114(11a) absolute image-only path OK, enables SANDY_HANDOFF_DIRS (regression guard: an earlier version double-prepended '/' and rejected EVERY absolute path as containing '//')" \
-    bash -c 'printf "%s" "$1" | grep -q "DIRS=1"' -- "$(_s114_relay_validate /opt/relay 0 2>&1)"
-check "§114(11b) workspace-relative path that EXISTS and is executable on the host is accepted" \
-    bash -c 'printf "%s" "$1" | grep -q "DIRS=1"' -- "$(_s114_relay_validate .sandy/relay.sh 0 2>&1)"
-check "§114(11c) already-enabled dirs: no duplicate info line" \
-    bash -c '! printf "%s" "$1" | grep -q "Handoff dirs enabled"' -- "$(_s114_relay_validate /opt/relay 1 2>&1)"
-check "§114(11c-2) relay over an explicit opt-out (SANDY_HANDOFF_DIRS=0): forced to 1 AND the info line says it is an override, not a default" \
-    bash -c 'printf "%s" "$1" | grep -q "DIRS=1" && printf "%s" "$1" | grep -q "Handoff dirs enabled by SANDY_HANDOFF_RELAY (overrides SANDY_HANDOFF_DIRS=0"' -- "$(_s114_relay_validate /opt/relay 0 2>&1)"
+check "§114(11a) absolute image-only path OK, retained as RELAY=/opt/relay unchanged (regression guard: an earlier version double-prepended '/' and rejected EVERY absolute path as containing '//')" \
+    bash -c 'printf "%s" "$1" | grep -q "RELAY=/opt/relay"' -- "$(_s114_relay_validate /opt/relay 0 2>&1)"
+check "§114(11b) workspace-relative path that EXISTS and is executable on the host is accepted, retained as RELAY=.sandy/relay.sh unchanged" \
+    bash -c 'printf "%s" "$1" | grep -q "RELAY=.sandy/relay.sh"' -- "$(_s114_relay_validate .sandy/relay.sh 0 2>&1)"
+# §114(11c) was formerly two checks (11c, 11c-2) pinning the "dirs forced to 1,
+# with an override info line" behaviour of the SANDY_HANDOFF_DIRS branch this
+# block used to carry. That branch was unreachable dead code (SANDY_HANDOFF_DIRS
+# hard-errors on any set value since 2.2.0, so its own `${SANDY_HANDOFF_DIRS:-1}`
+# read could never see anything but the default) and was removed in 2.6.0 (#382,
+# decision 3) along with the info line it printed. This is the "it is gone"
+# check the obsolete-mechanism trap calls for: the message never appears for
+# either value of the now-inert positional arg, and the relay path itself is
+# retained unchanged either way (mutation: reintroduce the branch/message and
+# this goes red).
+_S114_RELAY_OUT_D0="$(_s114_relay_validate /opt/relay 0 2>&1)"
+_S114_RELAY_OUT_D1="$(_s114_relay_validate /opt/relay 1 2>&1)"
+check "§114(11c) the dead 'Handoff dirs enabled ... overrides SANDY_HANDOFF_DIRS=0' message never appears (its only producer was removed as unreachable dead code, 2.6.0 #382 decision 3); RELAY retained unchanged regardless" \
+    bash -c '
+        printf "%s\n" "$1" | grep -q "Handoff dirs enabled" && exit 1
+        printf "%s\n" "$2" | grep -q "Handoff dirs enabled" && exit 1
+        printf "%s\n" "$1" | grep -q "RELAY=/opt/relay" || exit 1
+        printf "%s\n" "$2" | grep -q "RELAY=/opt/relay" || exit 1
+        exit 0
+    ' -- "$_S114_RELAY_OUT_D0" "$_S114_RELAY_OUT_D1"
 _S114_RELAY_RC=0
 _s114_relay_validate 'a b' 0 >/dev/null 2>&1 || _S114_RELAY_RC=$?
 check "§114(11d) whitespace rejected, exit 1" test "$_S114_RELAY_RC" -eq 1
@@ -11656,8 +11678,8 @@ _S114_RELAY_RC=0
 _S114_RELAY_OUT="$(_s114_relay_validate .sandy/noexec.sh 0 2>&1)" || _S114_RELAY_RC=$?
 check "§114(11k) relay present but NOT executable -> exit 1 (existence alone is not enough)" \
     bash -c '[ "$1" -eq 1 ] && printf "%s\n" "$2" | grep -q "not an executable file"' -- "$_S114_RELAY_RC" "$_S114_RELAY_OUT"
-check "§114(11l) container-absolute path UNDER \$SANDY_WORKSPACE is mapped back to \$WORK_DIR and accepted when it exists there" \
-    bash -c 'printf "%s" "$1" | grep -q "DIRS=1"' -- "$(_s114_relay_validate /home/sandy/relayws/.sandy/relay.sh 0 2>&1)"
+check "§114(11l) container-absolute path UNDER \$SANDY_WORKSPACE is mapped back to \$WORK_DIR and accepted when it exists there, RELAY retained unchanged" \
+    bash -c 'printf "%s" "$1" | grep -q "RELAY=/home/sandy/relayws/.sandy/relay.sh"' -- "$(_s114_relay_validate /home/sandy/relayws/.sandy/relay.sh 0 2>&1)"
 _S114_RELAY_RC=0
 _S114_RELAY_OUT="$(_s114_relay_validate /home/sandy/relayws/.sandy/missing.sh 0 2>&1)" || _S114_RELAY_RC=$?
 check "§114(11m) ...and the same mapping catches a MISSING one, exit 1 (the workspace-absolute form is not an escape hatch)" \
@@ -11670,10 +11692,9 @@ check "§114(11n) an image-only absolute path is NOT rejected host-side (the hos
 # refuse), while SANDY_HANDOFF_DIRS stays enabled -- the directory pair is not
 # what is being skipped.
 _S114_RELAY_OUT="$(_s114_relay_validate .sandy/relay.sh 0 true false 2>&1)"
-check "§114(11o) headless: key unset, DIRS still 1, info line names the reason and the refuse consequence" \
+check "§114(11o) headless: key unset, info line names the reason and the refuse consequence" \
     bash -c '
         printf "%s\n" "$1" | grep -q "RELAY=UNSET" || exit 1
-        printf "%s\n" "$1" | grep -q "DIRS=1" || exit 1
         printf "%s\n" "$1" | grep -q "SANDY_HANDOFF_RELAY not started (headless run); crossSessionInbound will default to refuse"
     ' -- "$_S114_RELAY_OUT"
 # --provision is the THIRD criterion-8 skip (1.12.1). It starts a session only to
@@ -11686,10 +11707,9 @@ check "§114(11o) headless: key unset, DIRS still 1, info line names the reason 
 # `--provision --all` target crash-loop (--start rc=7). 44 of 52 failed in a row
 # for a reason unrelated to provisioning them.
 _S114_RELAY_OUT="$(_s114_relay_validate .sandy/relay.sh 0 false false 1 2>&1)"
-check "§114(11p2) --provision: key unset, DIRS still 1, info line names the verify-then-stop reason (criterion 8)" \
+check "§114(11p2) --provision: key unset, info line names the verify-then-stop reason (criterion 8)" \
     bash -c '
         printf "%s\n" "$1" | grep -q "RELAY=UNSET" || exit 1
-        printf "%s\n" "$1" | grep -q "DIRS=1" || exit 1
         printf "%s\n" "$1" | grep -q "SANDY_HANDOFF_RELAY not started (--provision starts a session only to verify it, then stops it); crossSessionInbound will default to refuse"
     ' -- "$_S114_RELAY_OUT"
 # The skip is also the SAFER resolution, and that is the half worth pinning: with
@@ -11699,10 +11719,9 @@ _S114_RELAY_OUT="$(_s114_relay_validate .sandy/relay.sh 0 false false 0 2>&1)"
 check "§114(11p3) ...and WITHOUT --provision the same relay is still honoured, so the skip is scoped rather than a blanket disable" \
     bash -c 'printf "%s\n" "$1" | grep -q "RELAY=.sandy/relay.sh"' -- "$_S114_RELAY_OUT"
 _S114_RELAY_OUT="$(_s114_relay_validate .sandy/relay.sh 0 false true 2>&1)"
-check "§114(11p) --remote: key unset, DIRS still 1, info line names the no-tmux-session reason (criterion 8; a relay there would restart every 60s for the life of the container)" \
+check "§114(11p) --remote: key unset, info line names the no-tmux-session reason (criterion 8; a relay there would restart every 60s for the life of the container)" \
     bash -c '
         printf "%s\n" "$1" | grep -q "RELAY=UNSET" || exit 1
-        printf "%s\n" "$1" | grep -q "DIRS=1" || exit 1
         printf "%s\n" "$1" | grep -q "SANDY_HANDOFF_RELAY not started (--remote has no tmux session to target); crossSessionInbound will default to refuse"
     ' -- "$_S114_RELAY_OUT"
 _S114_RELAY_RC=0
@@ -13644,7 +13663,7 @@ _s127_marker() {   # _s127_marker <SANDY_AGENT or empty> -> the agents value, or
         sandy_full_version() { echo "1.13.0-test"; }
         _sandy_egress_mode=permissive; SANDY_WORKSPACE=/w; _sandy_session_nonce=deadbeef
         _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
-        CRED_MODE=none; _sandy_relay_slot=absent; _sandy_relay_json=false
+        CRED_MODE=none
         SANDBOX_NAME=w-deadbeef          # required by the composer since 1.15.0 (#303)
         _sandy_session_file="$_S127_DIR/m.json"
         unset SANDY_HANDOFF_RELAY SANDY_AGENT
@@ -13680,7 +13699,7 @@ _S127_IFS="$(
     ( sandy_full_version() { echo x; }
       _sandy_egress_mode=p; SANDY_WORKSPACE=/w; _sandy_session_nonce=n
       _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
-      CRED_MODE=none; _sandy_relay_slot=absent; _sandy_relay_json=false
+      CRED_MODE=none
       SANDBOX_NAME=w-deadbeef            # required by the composer since 1.15.0 (#303)
       _sandy_session_file="$_S127_DIR/m2.json"; unset SANDY_HANDOFF_RELAY
       SANDY_AGENT="claude,codex"
@@ -21309,27 +21328,27 @@ _s176a_case() {
 
 # (a1) env
 _s176a_case case1 SANDY_RELAY=0
-check "§176(a1) SANDY_RELAY=0 in the ENVIRONMENT is a hard error naming sandboxes.exclude and the source (rc=$(cat "$_S176A_DIR/case1/rc") stderr='$(tr '\n' ' ' < "$_S176A_DIR/case1/stderr")')" \
+check "§176(a1) SANDY_RELAY=0 in the ENVIRONMENT is a hard error naming sandboxes.exclude and the EXACT source phrase (not just the substring 'env', which the message's own trailing 'config/env' would satisfy for any source; rc=$(cat "$_S176A_DIR/case1/rc") stderr='$(tr '\n' ' ' < "$_S176A_DIR/case1/stderr")')" \
     bash -c '[ "$(cat "$1/rc")" = 1 ] && [ -f "$1/log.fatal" ] &&
-             grep -q "sandboxes.*exclude" "$1/stderr" && grep -qi "env" "$1/stderr"' \
+             grep -q "sandboxes.*exclude" "$1/stderr" && grep -q "set in the environment" "$1/stderr"' \
     _ "$_S176A_DIR/case1"
 
 # (a2) host config -- value 1 must error too, not only 0
 mkdir -p "$_S176A_DIR/case2/home"
 printf 'SANDY_RELAY=1\n' > "$_S176A_DIR/case2/home/config"
 _s176a_case case2
-check "§176(a2) SANDY_RELAY=1 in HOST config (\$SANDY_HOME/config) is ALSO a hard error -- both values, not only 0 (rc=$(cat "$_S176A_DIR/case2/rc") stderr='$(tr '\n' ' ' < "$_S176A_DIR/case2/stderr")')" \
+check "§176(a2) SANDY_RELAY=1 in HOST config (\$SANDY_HOME/config) is ALSO a hard error -- both values, not only 0 -- and names the EXACT source phrase (rc=$(cat "$_S176A_DIR/case2/rc") stderr='$(tr '\n' ' ' < "$_S176A_DIR/case2/stderr")')" \
     bash -c '[ "$(cat "$1/rc")" = 1 ] && [ -f "$1/log.fatal" ] &&
-             grep -q "sandboxes.*exclude" "$1/stderr" && grep -qi "host" "$1/stderr"' \
+             grep -q "sandboxes.*exclude" "$1/stderr" && grep -q "set in host config" "$1/stderr"' \
     _ "$_S176A_DIR/case2"
 
 # (a3) workspace config -- passive tier, so no approval path saves it either
 mkdir -p "$_S176A_DIR/case3/ws/.sandy"
 printf 'SANDY_RELAY=0\n' > "$_S176A_DIR/case3/ws/.sandy/config"
 _s176a_case case3
-check "§176(a3) SANDY_RELAY=0 in WORKSPACE config (\$WORK_DIR/.sandy/config) is ALSO a hard error, unapproved -- the key is passive, not privileged (rc=$(cat "$_S176A_DIR/case3/rc") stderr='$(tr '\n' ' ' < "$_S176A_DIR/case3/stderr")')" \
+check "§176(a3) SANDY_RELAY=0 in WORKSPACE config (\$WORK_DIR/.sandy/config) is ALSO a hard error, unapproved -- the key is passive, not privileged -- and names the EXACT source phrase (rc=$(cat "$_S176A_DIR/case3/rc") stderr='$(tr '\n' ' ' < "$_S176A_DIR/case3/stderr")')" \
     bash -c '[ "$(cat "$1/rc")" = 1 ] && [ -f "$1/log.fatal" ] &&
-             grep -q "sandboxes.*exclude" "$1/stderr" && grep -qi "workspace" "$1/stderr"' \
+             grep -q "sandboxes.*exclude" "$1/stderr" && grep -q "set in workspace config" "$1/stderr"' \
     _ "$_S176A_DIR/case3"
 
 # (a4) control: nothing sets SANDY_RELAY anywhere -- must succeed with no ERROR.
@@ -21408,9 +21427,8 @@ cat > "$_S176_D_HOME/features/entryonly/feature.json" <<'S176_JSON'
 S176_JSON
 
 _S176_D_OUT="$(cd "$_S176_D_DIR" && SANDY_HOME="$_S176_D_HOME" SANDBOX_DIR="$_S176_D_DIR/sb" WORK_DIR="$_S176_D_DIR/ws" \
-    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude SANDY_RELAY=1 \
+    SANDBOX_NAME=box-a1b2c3d4 SANDY_AGENT=claude \
     FM_BLOCK="$_S176_D_FM" EVAL_BLOCK="$_S176_D_EVAL" CSI_BLOCK="$_S176_D_CSI" \
-    _sandy_relay_slot_dir="$_S176_D_DIR/slot" \
     bash "$_S176_D_DIR/drive.sh" 2>&1)" || _S176_D_OUT="DRIVER-FAILED"
 
 check "§176(d0) the driver RAN (a silently dead probe would make every check below vacuously pass)" \
