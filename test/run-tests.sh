@@ -19050,10 +19050,19 @@ if [ -f "$_S171_TMPL" ]; then
         bash -c '[ "$1" = "sandy_pane_agent" ]' _ "$_S171_TMPL_OPTS"
     check "§171(4c) exactly 6 set-option -p ... @sandy_pane_agent lines -- 4 multi-agent slots + 2 single-agent paths (daemon, foreground; #378 fix pass)" \
         bash -c '[ "$1" -eq 6 ]' _ "$_S171_TMPL_OPT_COUNT"
-    check "§171(4d') SPECIFICATION.md's Pane-identity contract section names the session name the launcher's tmux new-session uses ('sandy')" \
-        bash -c 'printf "%s" "$1" | grep -qF -- "$2"' _ "$_S171_SPEC_SECTION" "$_S171_TMPL_SESSIONS"
-    check "§171(4e') ...and the option name the launcher's set-option -p sets ('sandy_pane_agent') -- a rename on either side (code or doc) fails this pair" \
-        bash -c 'printf "%s" "$1" | grep -qF -- "$2"' _ "$_S171_SPEC_SECTION" "$_S171_TMPL_OPTS"
+    # Match the backticked LITERAL, not the bare substring: "sandy" and
+    # "sandy_pane_agent" both occur constantly throughout this section (e.g.
+    # "@sandy_pane_agent", "sandy.0", "SANDY_AGENT") in prose that has nothing
+    # to do with naming the contract's two facts, so a bare grep -qF would
+    # still pass after the doc's table was rewritten to name something else
+    # entirely (verifier finding: a mutation to 'always the literal `sbx`'
+    # left this green). The doc renders fact 1 as "the literal `sandy`" and
+    # fact 2 as "`@sandy_pane_agent`" (with the leading @), so the option
+    # check allows an optional "@" inside the backticks.
+    check "§171(4d') SPECIFICATION.md's Pane-identity contract section names the session name the launcher's tmux new-session uses, as the backticked literal \`sandy\`" \
+        bash -c 'printf "%s" "$1" | grep -qE -- "\`$2\`"' _ "$_S171_SPEC_SECTION" "$_S171_TMPL_SESSIONS"
+    check "§171(4e') ...and the option name the launcher's set-option -p sets, as the backticked literal \`@sandy_pane_agent\` -- a rename on either side (code or doc) fails this pair" \
+        bash -c 'printf "%s" "$1" | grep -qE -- "\`@?$2\`"' _ "$_S171_SPEC_SECTION" "$_S171_TMPL_OPTS"
 
     # --- (8) STRUCTURAL: both single-agent new-session paths tag their pane ---
     # (#378 fix pass: before this, only multi-agent mode ever set the option.)
@@ -21201,12 +21210,14 @@ unset _S175_OK _S175_MISS _s175_src _s175_out _s175_t
 echo "§176: 2.6.0 — the relay-era surfaces announced in 2.5.0 are REMOVED (#382)"
 # ============================================================
 # Companion units fill in (a)-(g) as they land, each an inversion of the
-# corresponding 2.5.0 announcement (§175) into "it is gone":
-#   (a) relay{} and its two companion fields (relay_alias, disabled_by) are
+# corresponding 2.5.0 announcement (§175) into "it is gone". Lettering
+# follows decisions.md verbatim (not the order §175's checks happen to run
+# in), so a companion unit filling one of these in cannot mislabel it:
+#   (a) SANDY_RELAY is a hard error naming the replacement (sandboxes.exclude).
+#   (b) relay{} and its two companion fields (relay_alias, disabled_by) are
 #       gone from the marker and --print-state.
-#   (b) schema_version is 4, consistently, in --print-schema, --print-state
+#   (c) schema_version is 4, consistently, in --print-schema, --print-state
 #       and --print-version.
-#   (c) SANDY_RELAY is a hard error naming the replacement (sandboxes.exclude).
 #   (d) an entry alone now resolves SANDY_CROSS_SESSION_INBOUND to refuse --
 #       the relay-legacy default is gone.
 #   (e) every entry's state dir is feature-state/<f>; a leftover relay-state/
@@ -21238,6 +21249,15 @@ _S176_APPA="$(awk -v beg='## Appendix A' -v endh='## Appendix B' '
     f { print }
     index($0, endh) == 1 { exit }
 ' "$_S176_SPEC")"
+# Positive control (verifier finding): without this, renaming the "## Appendix
+# A" heading (or otherwise breaking the slice) makes the awk extraction come
+# back empty, and (g3)'s negation of an empty haystack passes vacuously --
+# mutation-tested: renaming '## Appendix A:' to '## Annex A:' in a copy whose
+# Appendix A still had the RUN line left the un-guarded (g3) green. Assert the
+# slice is non-empty and contains a known anchor unrelated to the removal,
+# the same way (g-pre) guards the generator extraction.
+check "§176(g3-pre) the Appendix A slice is non-empty and contains a known anchor (mutation: a broken heading match empties it, not a vacuous pass)" \
+    bash -c 'printf "%s" "$1" | grep -qF "RUN cat > /usr/local/bin/sandy-ss-paths"' _ "$_S176_APPA"
 check "§176(g3) SPECIFICATION.md Appendix A no longer contains the sandy-handoff-sessions RUN line" \
     bash -c '! printf "%s" "$1" | grep -qF "RUN cat > /usr/local/bin/sandy-handoff-sessions"' _ "$_S176_APPA"
 

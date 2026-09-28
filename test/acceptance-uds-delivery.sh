@@ -329,6 +329,12 @@ INJECT
 # inside a multi-line $( ) is the APOSCS/CASESUB bash-3.2 parser trap
 # (test/lint-bash32.sh), and the body below has apostrophes in its comments.
 _UDS_SESSIONS_FILE="$(mktemp)"
+# Belt-and-suspenders: the explicit rm near the bottom of the script covers
+# the normal exit path, but an aborted run (Ctrl-C, an unexpected early exit)
+# would otherwise leak this file. The trap covers every exit path; the
+# explicit rm stays too, since it documents intent at the point cleanup was
+# expected to happen.
+trap 'rm -f "$_UDS_SESSIONS_FILE"' EXIT
 cat > "$_UDS_SESSIONS_FILE" <<'UDS_SESSIONS'
 #!/bin/bash
 # sandy-handoff-sessions — enumerate live agent sessions in this container.
