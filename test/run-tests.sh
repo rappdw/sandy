@@ -19370,14 +19370,105 @@ if [ -f "$_S171_TMPL" ]; then
     check "§171(9c) the single-agent block never execs the attach directly -- mutation (c), the exact EXIT-trap/palette regression d164091 fixed" \
         bash -c '! grep -q "exec tmux attach" "$1"' _ "$_S171_SA_FILE"
 
-    unset -f _s171_row_exact _s171_row_contains
-    rm -f "$_S171_SA_FILE"
+    # --- (11) DYNAMIC PROPERTY: RUN the single-agent block, don't just read
+    # it as text. (8)/(9) only prove a `set-option` line exists and sits in
+    # the right place; they never check what it TAGS or which pane it TAGS.
+    # Two mutations hold every (8)/(9) count and ORDER unchanged while
+    # breaking the contract, and both pass (8)/(9) at 35/35 (#378 fix-pass
+    # verifier finding): M3 hard-codes the tag value to the literal `claude`
+    # (breaks every codex/gemini/opencode/grok single-agent sandbox); M4
+    # drops `-t "$_p_id"` so the option lands on tmux's "current" pane
+    # instead of the pane just created. Isolate lines 1..FI of the SAME
+    # _S171_SA_FILE (8)/(9) already isolated -- everything through the `fi`
+    # that closes the daemon/foreground `if` -- because that prefix is
+    # standalone-runnable bash; the full (8)/(9) block trails into the next
+    # branch's dangling `else` (the start of "Multi-agent launch"), which is
+    # not.
+    _S171_SA_RUN="$_S171_DIR/sa_run.sh"
+    sed -n "1,${_S171_ROW_FI}p" "$_S171_SA_FILE" > "$_S171_SA_RUN"
+    check "§171(11pre) the sliced single-agent snippet (through the closing daemon/foreground fi) is syntactically valid on its own" \
+        bash -n "$_S171_SA_RUN"
+
+    # A stubbed tmux/exec, as plain shell FUNCTIONS -- measured (see the
+    # commit) that a function of the same name wins over both a builtin
+    # (`exec`) and an on-PATH binary (`tmux`) for a bare invocation, so this
+    # never touches the real tmux, which this suite must not run. `new-
+    # session` echoes a fake pane id ('%42') to stdout, mirroring the real
+    # `-P -F '#{pane_id}'` capture. Every call is appended to a LOG FILE, not
+    # a shell variable: `_p_id="$(tmux new-session ...)"` forks a subshell
+    # for the command substitution, and a variable tmux/exec wrote there
+    # would vanish with it -- a file append survives it. SANDY_AGENT=codex
+    # throughout, deliberately non-claude, so M3's hard-coded "claude"
+    # cannot coincidentally match.
+    cat > "$_S171_DIR/sa_harness.sh" <<'S171HARNESS'
+#!/bin/bash
+set -eu
+_SNIPPET="$1"; _AGENT="$2"; _DAEMON="$3"; _CALL_LOG_FILE="$4"
+: > "$_CALL_LOG_FILE"
+tmux() {
+    case "$1" in
+        new-session) printf 'new-session\n' >> "$_CALL_LOG_FILE"; printf '%s\n' '%42' ;;
+        set-option)  printf 'set-option:%s\n' "$*" >> "$_CALL_LOG_FILE" ;;
+        attach)      printf 'attach\n' >> "$_CALL_LOG_FILE" ;;
+        *)           printf 'tmux:%s\n' "$1" >> "$_CALL_LOG_FILE" ;;
+    esac
+    return 0
+}
+exec() {
+    if [ "${1:-}" = "tail" ]; then printf 'exectail\n' >> "$_CALL_LOG_FILE"
+    else printf 'exec:%s\n' "${1:-}" >> "$_CALL_LOG_FILE"; fi
+    return 0
+}
+sandy_log() { :; }
+_sandy_build_agent_cmd() { printf 'fakecmd'; }
+_SANDY_AGENTS=("$_AGENT")
+_sandy_is_headless=false
+SANDY_PROJECT_NAME=testproj
+WORKSPACE=/nonexistent/sandy-s171-fixture
+SANDY_AGENT="$_AGENT"
+SANDY_DAEMON="$_DAEMON"
+SANDY_REMOTE_CONTROL=false
+# shellcheck disable=SC1090
+. "$_SNIPPET"
+S171HARNESS
+
+    # $1=calls-text (this fixture's harness log) $2=expected terminal marker
+    # (exectail|attach) -> true iff new-session precedes the EXACT tag call
+    # precedes the terminal call. Single-pass awk over the WHOLE input (never
+    # exits early), so there is no reader-closes-early/writer-still-writing
+    # ordering to get wrong on either bash or a BSD/mawk-family awk.
+    _s171_calls_ok() {
+        printf '%s\n' "$1" | awk -v term="$2" '$0=="new-session"{ns=NR} $0=="set-option:set-option -p -t %42 @sandy_pane_agent codex"{so=NR} $0==term{tm=NR} END{exit !(ns && so && tm && ns<so && so<tm)}'
+    }
+
+    _S171_D_LOG="$_S171_DIR/sa_calls_daemon.log"
+    _S171_D_HRC=0
+    bash "$_S171_DIR/sa_harness.sh" "$_S171_SA_RUN" codex 1 "$_S171_D_LOG" || _S171_D_HRC=$?
+    _S171_D_CALLS="$(cat "$_S171_D_LOG" 2>/dev/null)" || true
+    check "§171(11a-rc) daemon harness ran cleanly (SANDY_DAEMON=1)" \
+        bash -c '[ "$1" -eq 0 ]' _ "$_S171_D_HRC"
+    check "§171(11a) daemon PROPERTY: the pane the daemon path CREATED (new-session -> pane %42) is tagged, on that SAME pane id, with SANDY_AGENT's real value (codex) -- not a literal 'claude' (M3) and not missing '-t' (M4) -- before exec tail -f /dev/null" \
+        _s171_calls_ok "$_S171_D_CALLS" exectail
+
+    _S171_F_LOG="$_S171_DIR/sa_calls_fg.log"
+    _S171_F_HRC=0
+    bash "$_S171_DIR/sa_harness.sh" "$_S171_SA_RUN" codex 0 "$_S171_F_LOG" || _S171_F_HRC=$?
+    _S171_F_CALLS="$(cat "$_S171_F_LOG" 2>/dev/null)" || true
+    check "§171(11b-rc) foreground harness ran cleanly (SANDY_DAEMON=0)" \
+        bash -c '[ "$1" -eq 0 ]' _ "$_S171_F_HRC"
+    check "§171(11b) foreground PROPERTY: same as (11a), but the terminal call is tmux attach -t sandy, not exec tail -- M3/M4 fail this the same way" \
+        _s171_calls_ok "$_S171_F_CALLS" attach
+
+    unset -f _s171_row_exact _s171_row_contains _s171_calls_ok
+    rm -f "$_S171_SA_FILE" "$_S171_SA_RUN" "$_S171_DIR/sa_harness.sh" "$_S171_D_LOG" "$_S171_F_LOG"
     unset _S171_SA_FILE _S171_ROW_ELIF _S171_ROW_ELSE _S171_ROW_FI \
-        _S171_D_NS _S171_D_OPT _S171_D_EXIT _S171_F_NS _S171_F_OPT _S171_F_ATTACH
+        _S171_D_NS _S171_D_OPT _S171_D_EXIT _S171_F_NS _S171_F_OPT _S171_F_ATTACH \
+        _S171_SA_RUN _S171_D_LOG _S171_D_HRC _S171_D_CALLS _S171_F_LOG _S171_F_HRC _S171_F_CALLS
 else
     skip "§171(4) templates/user-setup.sh.tmpl not found -- producer/consumer agreement not checked"
     skip "§171(8) templates/user-setup.sh.tmpl not found -- single-agent pane-tagging structure not checked"
     skip "§171(9) templates/user-setup.sh.tmpl not found -- single-agent pane-tag ORDER not checked"
+    skip "§171(11) templates/user-setup.sh.tmpl not found -- single-agent pane-tag VALUE/TARGET property not checked"
 fi
 
 rm -rf "$_S171_DIR"
