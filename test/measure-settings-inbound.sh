@@ -105,7 +105,8 @@
 #   bash test/measure-settings-inbound.sh
 #
 # Structural coverage (existence, sourcing lib-isolated-home.sh, the
-# peerToken/CLAUDE_CODE_MESSAGING_TOKEN properties, lint-bash32 cleanliness)
+# peerToken/CLAUDE_CODE_MESSAGING_TOKEN properties, the _msi_classify and
+# _msi_q3d_classify/_msi_q3d_reading properties, lint-bash32 cleanliness)
 # is pinned by test/run-tests.sh §174, which — like this file — needs no
 # Docker and asserts none of the actual measurement.
 set -uo pipefail
@@ -603,25 +604,76 @@ _msi_row() {
     printf '| %s | %s | %s | %s |\n' "$label" "$layers" "$outcome" "$sig"
 }
 
+# _msi_q3d_classify <raw> -- classifies ONE argcheck result ("RC=<n>
+# STDERR=<...>", or a garbled/empty string) as exactly one of:
+#   clean          rc is 0 -- the process ran and did NOT error.
+#   errored        rc is a real, non-negative integer, is non-zero, AND the
+#                  captured stderr actually names the missing --settings
+#                  file -- the only shape that counts as "this order
+#                  surfaced the missing file".
+#   indeterminate  anything else: an empty string (the `sandy --exec` in
+#                  _msi_case itself failed and printed nothing), a negative
+#                  sentinel (run_argcheck's own RC=-1 timeout marker), a
+#                  non-numeric rc, or a real nonzero rc whose stderr says
+#                  nothing about the missing file (a crash, a missing
+#                  `claude` binary, ...). None of these is evidence either
+#                  way. Isolated in its own function, extracted and EXECUTED
+#                  by test/run-tests.sh §174(a10) against rc/stderr
+#                  fixtures -- the (a5) method -- rather than grepped for,
+#                  because the bug this replaces was only ever caught by a
+#                  verifier running the function by hand: an earlier version
+#                  read ANY rc other than the literal string "0" as
+#                  "errored on the missing file", so a bogus result on ONE
+#                  side alone (an empty string, RC=-1, or an unrelated
+#                  RC=127) was enough to print a REPEATABLE, LAST-WINS or
+#                  FIRST-WINS verdict the evidence never supported.
+_msi_q3d_classify() {
+    local raw="$1" rc stderr_msg
+    rc="${raw#RC=}"; rc="${rc%% *}"
+    case "$rc" in
+        ''|*[!0-9]*) echo indeterminate; return ;;
+    esac
+    if [ "$rc" = "0" ]; then
+        echo clean
+        return
+    fi
+    stderr_msg="${raw#*STDERR=}"
+    case "$stderr_msg" in
+        *definitely-missing.json*) echo errored ;;
+        *) echo indeterminate ;;
+    esac
+}
+
 # _msi_q3d_reading <ab_raw> <ba_raw> -- COMPUTES the Q3d conclusion from the
-# two argcheck exit codes instead of leaving static prose that assumes one
-# of only two possible shapes. A third shape is real: `--version` may
-# short-circuit before --settings is fully parsed, in which case NEITHER
-# order errors on the missing file and the case is inconclusive rather than
-# evidence of repeatability either way.
+# two argcheck results via _msi_q3d_classify (never from a bare exit code),
+# instead of leaving static prose that assumes one of only two possible
+# shapes. Two shapes are real and neither is "repeatable"/"last-wins"/
+# "first-wins": (1) `--version` may short-circuit before --settings is
+# fully parsed, in which case NEITHER order errors on the missing file and
+# the case is inconclusive rather than evidence of repeatability either
+# way; (2) either side's result may simply not be trustworthy (a timeout, a
+# transport failure, an unrelated crash), in which case the whole pair is
+# inconclusive rather than letting the OTHER side's real result drive a
+# verdict the missing side never earned.
 _msi_q3d_reading() {
-    local ab="$1" ba="$2" ab_rc ba_rc
-    ab_rc="${ab#RC=}"; ab_rc="${ab_rc%% *}"
-    ba_rc="${ba#RC=}"; ba_rc="${ba_rc%% *}"
-    if [ "$ab_rc" = "0" ] && [ "$ba_rc" = "0" ]; then
+    local ab="$1" ba="$2" ab_cls ba_cls
+    ab_cls="$(_msi_q3d_classify "$ab")"
+    ba_cls="$(_msi_q3d_classify "$ba")"
+    if [ "$ab_cls" = "indeterminate" ] || [ "$ba_cls" = "indeterminate" ]; then
+        echo "INCONCLUSIVE: at least one order did not produce a trustworthy result (not a"
+        echo "real non-negative exit code, or an error that never named the missing"
+        echo "--settings file -- a timeout, a transport failure, or an unrelated crash)."
+        echo "Raw: AB=[$ab] BA=[$ba]. Re-run and inspect the driver's own stderr/debug.log"
+        echo "before drawing any Q3d conclusion from this pair."
+    elif [ "$ab_cls" = "clean" ] && [ "$ba_cls" = "clean" ]; then
         echo "INCONCLUSIVE: neither order errored on the missing file. --version likely"
         echo "short-circuits before --settings is fully parsed on this build -- rerun Q3d"
         echo "with a subcommand that forces full settings resolution instead of --version"
         echo "before reading this either way."
-    elif [ "$ab_rc" != "0" ] && [ "$ba_rc" != "0" ]; then
+    elif [ "$ab_cls" = "errored" ] && [ "$ba_cls" = "errored" ]; then
         echo "Both orders errored on the missing file -- --settings is REPEATABLE (every"
         echo "occurrence is read, not only the last one); see Q3c for merge-vs-replace."
-    elif [ "$ab_rc" != "0" ]; then
+    elif [ "$ab_cls" = "errored" ]; then
         echo "Only exists-then-missing (AB) errored -- --settings is LAST-WINS (only the"
         echo "final occurrence is ever consulted)."
     else

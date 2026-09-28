@@ -20323,17 +20323,24 @@ check "§174(a1) test/measure-settings-inbound.sh exists, is executable-by-bash,
 check "§174(a2) sources lib-isolated-home.sh and calls _isolate_sandy_home (no fixture sandbox leaking into the operator's real \$SANDY_HOME -- the §105 lesson)" \
     bash -c 'grep -q "lib-isolated-home.sh" "$1" && grep -q "_isolate_sandy_home" "$1"' -- "$_S174_MSI"
 
-# (a3) the injector's token-SELECTION CODE, not the word "peerToken" appearing
-# anywhere in the file -- a verifier found the old `grep -q "peerToken"` stays
-# green even after inject.py is mutated to read the wrong field entirely
-# (`json.loads(_raw)["childToken"]` still contains no literal "peerToken", but
-# so does every comment describing the property, which is exactly why a plain
-# grep for the word proves nothing about which field the code actually reads).
-# This extracts inject.py's own `_raw = ... / try: token = ... / except ...`
-# block out of its heredoc (a plain regex slice of the real source, never a
-# reimplementation) and EXECUTES it against a fixture key file carrying both
-# peerToken and childToken with distinct values, then asserts the selected
-# token is the peerToken one. Same method as (a5).
+# (a3) the injector's token-SELECTION CODE, not merely the word "peerToken"
+# appearing somewhere in the file. A verifier found the OLD check --
+# `grep -q "peerToken"` -- stayed green even after inject.py was mutated to
+# select the wrong field entirely (e.g. `json.loads(_raw)["childToken"]`),
+# because the literal string "peerToken" still appears elsewhere in the
+# file -- in the very comments that describe this property -- so a plain
+# grep for the word proves nothing about which field the running code
+# actually selects. This extracts inject.py's own token-selection code --
+# from `_raw = open(key_path)...` through the line immediately before
+# `if os.fork() > 0:` (never executing the fork itself) -- out of its
+# heredoc (a plain regex slice of the real source, never a reimplementation)
+# and EXECUTES it against a fixture key file carrying both peerToken and
+# childToken with distinct values, then asserts the selected token is the
+# peerToken one. Same method as (a5). Capturing through the line before
+# os.fork(), rather than stopping at the try/except block, is itself a
+# second verifier finding fixed here: a later reassignment of `token`
+# anywhere in that span used to go unseen by a slice that stopped at the
+# try/except -- see (a3-mut2).
 _S174_TOKENSEL_TEST="$(mktemp)"
 cat > "$_S174_TOKENSEL_TEST" <<'PY'
 import re, sys, os, json, tempfile
@@ -20348,15 +20355,19 @@ if not m:
     sys.exit(3)
 inject_src = m.group(1)
 
+# Captures everything from `_raw = ...` through the line BEFORE
+# `if os.fork() > 0:` (exclusive) -- never the fork line itself, so exec'ing
+# this snippet never actually forks the test process. Anything reassigning
+# `token` between the try/except and the fork (comments, blank lines, or a
+# later mutated line) is included, not just the five-line try/except block.
 m2 = re.search(
-    r"\n_raw = open\(key_path\)\.read\(\)\.strip\(\)\ntry:\n    token = .*\n"
-    r"except Exception:\n    token = _raw\n",
-    inject_src,
+    r"\n(_raw = open\(key_path\)\.read\(\)\.strip\(\)\n.*?)\nif os\.fork\(\) > 0:\n",
+    inject_src, re.S,
 )
 if not m2:
     print("EXTRACT-FAIL: token-selection block not found in inject.py source", file=sys.stderr)
     sys.exit(3)
-snippet = m2.group(0)
+snippet = m2.group(1)
 
 fd, key_path = tempfile.mkstemp()
 os.write(fd, json.dumps({"peerToken": "PEER-XYZ", "childToken": "CHILD-ABC"}).encode())
@@ -20381,11 +20392,34 @@ check "§174(a3) the injector's OWN token-selection code (extracted and executed
 
 _S174_MUT_INJECT="$(mktemp)"
 sed 's/\["peerToken"\]/["childToken"]/' "$_S174_MSI" > "$_S174_MUT_INJECT"
-check "§174(a3-mut) ...and mutating inject.py's selection from peerToken to childToken in a scratch copy makes it select the wrong field (self-test of (a3): the exact regression a plain 'grep -q peerToken' missed, since the mutated line still contains no such grep-worthy absence)" \
+check "§174(a3-mut) ...and mutating inject.py's selection from peerToken to childToken in a scratch copy makes it select the wrong field (self-test of (a3): the exact regression a plain 'grep -q peerToken' missed, because the word 'peerToken' still appears elsewhere in the file even once this line stops reading it)" \
     python3 "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT" mutated
 
-rm -f "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT"
-unset _S174_TOKENSEL_TEST _S174_MUT_INJECT
+# (a3-mut2) a DIFFERENT shape of the same regression, found by a verifier
+# against the (a3) extraction above before it was widened to run through
+# os.fork(): inserting a SECOND reassignment of `token` right after the
+# try/except -- never touching the `["peerToken"]` selection line itself --
+# used to escape a slice that stopped at the try/except's own five lines,
+# so (a3) stayed green with the injector silently reading childToken at
+# runtime. Confirms the widened slice above actually closes that gap.
+_S174_MUT_INJECT2="$(mktemp)"
+python3 - "$_S174_MSI" "$_S174_MUT_INJECT2" <<'PY'
+import sys
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+src = open(src_path).read()
+old = "except Exception:\n    token = _raw\n"
+new = old + "token = json.loads(_raw).get(\"childToken\", token)\n"
+if src.count(old) != 1:
+    print("MUTATION-SETUP-FAIL: expected exactly one match for the except block", file=sys.stderr)
+    sys.exit(3)
+open(dst_path, "w").write(src.replace(old, new, 1))
+PY
+check "§174(a3-mut2) ...and inserting a SECOND reassignment of \`token\` right after the try/except (leaving the peerToken selection line itself untouched) is also caught (self-test of (a3): the exact gap a verifier found in a slice that stopped at the try/except's five lines)" \
+    python3 "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT2" mutated
+
+rm -f "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT" "$_S174_MUT_INJECT2"
+unset _S174_TOKENSEL_TEST _S174_MUT_INJECT _S174_MUT_INJECT2
 
 # NEVER a repo assertion on run-time behavior -- CLAUDE_CODE_MESSAGING_TOKEN is
 # the receiver's OWN childToken (handed to its children), and sending it
@@ -20488,6 +20522,116 @@ check "§174(a8) NOT wired into run-integration-tests.sh (it is a measurement wi
 # under the read-only spec directory.
 check "§174(a9) writable per-case state (CFG/PROJ) is built from RUN_DIR, a container-only /tmp path -- never from the read-only-in-container spec directory under \$WS/.sandy/probe" \
     bash -c 'grep -q "CFG = os.path.join(RUN_DIR" "$1" && grep -q "PROJ = os.path.join(RUN_DIR" "$1" && grep -q "run_dir=\"/tmp/" "$1"' -- "$_S174_MSI"
+
+# (a10) the harness's OWN _msi_q3d_classify/_msi_q3d_reading (extracted --
+# sliced from the tracked bash file by function name, never reimplemented --
+# and EXECUTED in a fresh bash against rc/stderr fixtures), not grepped for.
+# A verifier found the PRIOR _msi_q3d_reading read ANY rc other than the
+# literal string "0" as "errored on the missing file": it ignored the
+# captured STDERR entirely and never checked that the rc was a real,
+# non-negative exit code. So an empty result (the `sandy --exec` in
+# _msi_case itself failing and printing nothing), run_argcheck's own RC=-1
+# timeout sentinel, and an unrelated RC=127 "claude: not found" all printed
+# "Both orders errored on the missing file -- REPEATABLE" -- and a bogus rc
+# on only ONE side printed LAST-WINS or FIRST-WINS instead, whichever side
+# happened to be the real one. The original bug was only caught by a
+# verifier running the function by hand; this pins it the (a5) way.
+_S174_Q3D_EXTRACT="$(mktemp)"
+{
+    sed -n '/^_msi_q3d_classify() {/,/^}/p' "$_S174_MSI"
+    echo ""
+    sed -n '/^_msi_q3d_reading() {/,/^}/p' "$_S174_MSI"
+} > "$_S174_Q3D_EXTRACT"
+
+# _s174_q3d_check <path-to-file-defining-both-functions> -- sources it into a
+# FRESH bash (never this suite's own shell) and asserts every fixture pair
+# reads the conclusion its evidence supports.
+_s174_q3d_check() {
+    bash -c '
+        set -uo pipefail
+        . "$1"
+        fail=0
+        assert_reading() {
+            local want="$1" ab="$2" ba="$3" got
+            got="$(_msi_q3d_reading "$ab" "$ba" | head -n1)"
+            case "$got" in
+                "$want"*) ;;
+                *) printf "MISMATCH ab=[%s] ba=[%s] want=[%s] got=[%s]\n" "$ab" "$ba" "$want" "$got" >&2; fail=1 ;;
+            esac
+        }
+        # Bogus / untrustworthy on one or both sides must never read as a
+        # real REPEATABLE/LAST-WINS/FIRST-WINS verdict -- the exact bug a
+        # verifier found by hand.
+        assert_reading "INCONCLUSIVE" "" ""
+        assert_reading "INCONCLUSIVE" "RC=-1 STDERR=(timed out)" "RC=-1 STDERR=(timed out)"
+        assert_reading "INCONCLUSIVE" "RC=127 STDERR=claude: not found" "RC=127 STDERR=claude: not found"
+        assert_reading "INCONCLUSIVE" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json" "RC=127 STDERR=claude: not found"
+        # Real, trustworthy results still read correctly.
+        assert_reading "Both orders errored" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json"
+        assert_reading "Only exists-then-missing (AB) errored" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json" "RC=0 STDERR=(none)"
+        assert_reading "Only missing-then-exists (BA) errored" "RC=0 STDERR=(none)" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json"
+        assert_reading "INCONCLUSIVE: neither order errored" "RC=0 STDERR=(none)" "RC=0 STDERR=(none)"
+        exit "$fail"
+    ' -- "$1"
+}
+
+check "§174(a10) the harness's OWN _msi_q3d_classify/_msi_q3d_reading (extracted and executed against rc/stderr fixtures, not grepped for) reports INCONCLUSIVE for every bogus or untrustworthy result -- empty, a negative timeout sentinel, an unrelated RC=127, or one bogus side paired with one real one -- and reads REPEATABLE/LAST-WINS/FIRST-WINS only from a pair where BOTH sides are real, non-negative exit codes whose stderr actually names the missing file" \
+    _s174_q3d_check "$_S174_Q3D_EXTRACT"
+
+# (a10-mut) self-test: reverting _msi_q3d_classify to the PRIOR shape a
+# verifier found broken (any non-"0" rc is "errored", stderr never
+# consulted, no check that rc is even a real exit code) in a scratch copy
+# makes the bogus-input fixtures above misreport a real verdict -- the exact
+# regression this check exists to catch.
+_S174_Q3D_MUT="$(mktemp)"
+python3 - "$_S174_Q3D_EXTRACT" "$_S174_Q3D_MUT" <<'PY'
+import sys
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+src = open(src_path).read()
+old = (
+    '_msi_q3d_classify() {\n'
+    '    local raw="$1" rc stderr_msg\n'
+    '    rc="${raw#RC=}"; rc="${rc%% *}"\n'
+    '    case "$rc" in\n'
+    "        ''|*[!0-9]*) echo indeterminate; return ;;\n"
+    '    esac\n'
+    '    if [ "$rc" = "0" ]; then\n'
+    '        echo clean\n'
+    '        return\n'
+    '    fi\n'
+    '    stderr_msg="${raw#*STDERR=}"\n'
+    '    case "$stderr_msg" in\n'
+    '        *definitely-missing.json*) echo errored ;;\n'
+    '        *) echo indeterminate ;;\n'
+    '    esac\n'
+    '}'
+)
+new = (
+    '_msi_q3d_classify() {\n'
+    '    local raw="$1" rc\n'
+    '    rc="${raw#RC=}"; rc="${rc%% *}"\n'
+    '    if [ "$rc" = "0" ]; then\n'
+    '        echo clean\n'
+    '    else\n'
+    '        echo errored\n'
+    '    fi\n'
+    '}'
+)
+if src.count(old) != 1:
+    print("MUTATION-SETUP-FAIL: _msi_q3d_classify body not found verbatim in %s" % src_path, file=sys.stderr)
+    sys.exit(3)
+open(dst_path, "w").write(src.replace(old, new, 1))
+PY
+
+_s174_q3d_check_neg() { ! _s174_q3d_check "$1"; }
+
+check "§174(a10-mut) ...and reverting _msi_q3d_classify to the prior any-nonzero-rc-is-errored shape (ignoring STDERR, not validating rc) in a scratch copy makes the bogus-input fixtures misreport a real verdict (self-test of (a10): the exact regression a verifier found by hand)" \
+    _s174_q3d_check_neg "$_S174_Q3D_MUT"
+
+rm -f "$_S174_Q3D_EXTRACT" "$_S174_Q3D_MUT"
+unset -f _s174_q3d_check _s174_q3d_check_neg
+unset _S174_Q3D_EXTRACT _S174_Q3D_MUT
 
 unset _S174_MSI
 
