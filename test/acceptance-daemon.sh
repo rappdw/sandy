@@ -135,6 +135,22 @@ DPID="$(docker inspect -f '{{index .Config.Labels "sandy.daemon_pid"}}' "$C" 2>/
 SESS="$(docker inspect -f '{{index .Config.Labels "sandy.session"}}' "$C" 2>/dev/null)"
 LOCK="$SANDY_HOME_DIR/sandboxes/.$SESS.lock"
 
+echo "== 6.7 --init: PID 1 reaps orphans (#392) =="
+# The property #392 is about. Without --init, PID 1 was the entrypoint chain --
+# in daemon mode `tail -f /dev/null`, which never calls wait() -- so a process
+# orphaned in the container stayed a zombie holding a --pids-limit slot until
+# the container was recreated. Orphans reparent to the namespace's PID 1, so an
+# orphan made via `docker exec` exercises exactly that path.
+P1="$(docker exec "$C" cat /proc/1/comm 2>/dev/null)"
+ck "PID 1 is docker-init, not the entrypoint chain (got: ${P1:-?})" "[ \"$P1\" = docker-init ]"
+_zombies() { docker exec "$C" sh -c 'grep -l "^State:[[:space:]]*Z" /proc/[0-9]*/status 2>/dev/null | wc -l' 2>/dev/null | tr -d ' '; }
+Z_BEFORE="$(_zombies)"
+docker exec "$C" sh -c '(sleep 1 &) ; exit 0' >/dev/null 2>&1
+sleep 3
+Z_AFTER="$(_zombies)"
+ck "an orphan that exits leaves NO zombie behind (zombies before=${Z_BEFORE:-?} after=${Z_AFTER:-?})" \
+   "[ -n \"$Z_AFTER\" ] && [ \"$Z_AFTER\" -le \"${Z_BEFORE:-0}\" ]"
+
 echo "== 7. sandy --stop — full teardown =="
 "$SANDY" --stop --workspace "$WS"; ck "--stop exits 0" "[ $? -eq 0 ]"
 sleep 2

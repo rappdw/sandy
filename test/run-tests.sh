@@ -11513,6 +11513,21 @@ check "§114(7n) accept for the declared-need case actually lands in the sandbox
 check "§114(7o) the value-aware approval gate on accept is unchanged by #380 -- it cannot see WHY sandy would resolve to accept, only that the value IS accept (reuses §114(2a)'s gate)" \
     _s114_pvp SANDY_CROSS_SESSION_INBOUND accept
 
+# (7w) #382 (2.5.0): the relay-conditional default is DEPRECATED and must say so
+# at launch -- but ONLY when it is what resolved accept. A warning that fired on
+# every launch would train operators to ignore it; one that never fired would
+# leave an unknown consumer to discover the removal by breakage. Property, both
+# directions, against the real resolution block (warn is stubbed to stdout).
+_S114_W="SANDY_CROSS_SESSION_INBOUND's relay-conditional default is deprecated"
+check "§114(7w1) the legacy rule resolving accept WARNS that it is deprecated, naming the replacement (receives)" \
+    bash -c 'printf "%s" "$1" | grep -F "$2" | grep -q "receives"' -- "$_S114_D12_OUT" "$_S114_W"
+check "§114(7w2) ...a DECLARED need resolving accept does NOT warn (the migrated case must be quiet)" \
+    bash -c '! printf "%s" "$1" | grep -qF "$2"' -- "$_S114_D9_OUT" "$_S114_W"
+check "§114(7w3) ...no need and no entry (refuse by default) does NOT warn" \
+    bash -c '! printf "%s" "$1" | grep -qF "$2"' -- "$_S114_D11_OUT" "$_S114_W"
+check "§114(7w4) ...an EXPLICIT value with an entry present does NOT warn -- explicit wins before the legacy rule is ever consulted" \
+    bash -c '! printf "%s" "$1" | grep -qF "$2"' -- "$_S114_D4_OUT" "$_S114_W"
+
 # --- (8) gitignore nudge ------------------------------------------------------
 if command -v git >/dev/null 2>&1; then
     rm -rf "$_S114/ws-nudge" "$_S114/sbx-nudge"; mkdir -p "$_S114/ws-nudge/.claude" "$_S114/sbx-nudge"
@@ -20149,8 +20164,8 @@ echo "§173: receives — the default keyed on a DECLARED NEED, not the relay (#
 # #380 (option B): the unset SANDY_CROSS_SESSION_INBOUND default now resolves
 # from a feature manifest's own `"receives": ["cross_session"]` rather than
 # from "an entry will start". The old rule survives as a DEPRECATED LEGACY
-# PATH (additive; #382 lists it in README's Deprecated table at the next
-# X.0.0), so this section proves BOTH: the new declared-need path, and that
+# PATH (announced in README's Deprecated table in 2.5.0, #382, and warned
+# about at launch), so this section proves BOTH: the new declared-need path, and that
 # the legacy path still works unchanged when no feature declares the need.
 #
 # Precedence under test: explicit > declared need > legacy relay rule >
@@ -21373,6 +21388,70 @@ check "§174(b2) mutation: injecting a consumer-named comment ('# for AMAP') int
     bash -c 'grep -qiE "amap|claim lock" "$1"' -- "$_S174_MUT_COPY"
 rm -f "$_S174_MUT_COPY"
 unset _S174_MUT_COPY
+
+# ============================================================
+echo "§175: 2.5.0 — the relay-era deprecations announce themselves (#382), and --init (#392)"
+# ============================================================
+# #382 announced consumer-shaped surfaces in a MINOR, under CLAUDE.md's written
+# exception. The exception's price is that every surface sandy can detect in
+# use WARNS at launch for at least one minor -- the README list reaches only
+# people who read it. §138 already forces every runtime deprecation warning to
+# be listed; this section asserts the warnings actually FIRE when (and only
+# when) the deprecated path is used, and that the rows sandy cannot warn about
+# are at least listed.
+_S175_SANDY="$SANDY_SCRIPT"
+_S175_README="$(cd "$(dirname "$0")/.." && pwd)/README.md"
+_S175_FN="$(awk '/^_sandy_warn_relay_key_deprecated\(\) \{/,/^\}/' "$_S175_SANDY")"
+check "§175(pre) _sandy_warn_relay_key_deprecated was extracted (mutation: a rename empties it and (1)-(2) go vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_RELAY is deprecated"' _ "$_S175_FN"
+_s175_relay_warn() {   # $1 = _SANDY_RELAY_SOURCE -> the warning text, or nothing
+    bash -c 'warn(){ printf "%s\n" "$*"; }; eval "$1"; _SANDY_RELAY_SOURCE="$2"; _sandy_warn_relay_key_deprecated' _ "$_S175_FN" "$1" 2>&1 || true
+}
+_S175_OK=""
+for _s175_src in env host workspace; do
+    _s175_out="$(_s175_relay_warn "$_s175_src")"
+    case "$_s175_out" in *"SANDY_RELAY is deprecated"*"set in $_s175_src"*"exclude"*) ;; *) _S175_OK="$_S175_OK $_s175_src" ;; esac
+done
+check "§175(1) SANDY_RELAY set from env, host OR workspace config WARNS, naming where it was set and the replacement (sandboxes.exclude) (failed for:${_S175_OK:- none})" \
+    bash -c '[ -z "$1" ]' _ "$_S175_OK"
+check "§175(2) ...and an UNSET SANDY_RELAY (the default everyone gets) says nothing (got: '$(_s175_relay_warn '')')" \
+    bash -c '[ -z "$1" ]' _ "$(_s175_relay_warn '')"
+# Each line-number capture below ends in `|| true`: a missing line must turn
+# its CHECK red, never abort the suite under pipefail + the ERR trap (a grep
+# that finds nothing exits 1 -- mutation M2, removing the call, did exactly
+# that before these guards).
+# The call site: the warning must run in the launch path, after the config
+# loader has recorded the source and before the key is defaulted to 1 (after
+# which "was it set?" can no longer be answered from the value).
+_S175_L_LOAD="$(grep -m1 -n '^_load_sandy_config "\$WORK_DIR/.sandy/.secrets"' "$_S175_SANDY" | cut -d: -f1 || true)"
+_S175_L_CALL="$(grep -m1 -n '^_sandy_warn_relay_key_deprecated$' "$_S175_SANDY" | cut -d: -f1 || true)"
+_S175_L_DEF="$(grep -m1 -n '^SANDY_RELAY="\${SANDY_RELAY:-1}"$' "$_S175_SANDY" | cut -d: -f1 || true)"
+check "§175(3) the warning is CALLED at top level, after config loading and before SANDY_RELAY is defaulted (lines load=${_S175_L_LOAD:-?} call=${_S175_L_CALL:-?} default=${_S175_L_DEF:-?})" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] && [ "$1" -lt "$2" ] && [ "$2" -lt "$3" ]' _ "$_S175_L_LOAD" "$_S175_L_CALL" "$_S175_L_DEF"
+# Rows sandy CANNOT warn about at launch (an emitted field, a mount path, a
+# helper nobody's launch reveals) -- the list is their only notice, so it must
+# carry them. §138 covers only the SANDY_* keys that do warn.
+_S175_TABLE="$(awk '/^## Deprecated$/{f=1} f&&/^## /&&!/^## Deprecated$/{exit} f' "$_S175_README")"
+_S175_MISS=""
+for _s175_t in 'relay{}' 'SANDY_RELAY_STATE' '/opt/sandy/relay-state' '/usr/local/bin/sandy-handoff-sessions' 'relay-conditional unset default' 'SANDY_HANDOFF_RELAY` as the internal channel'; do
+    printf '%s' "$_S175_TABLE" | grep -F "$_s175_t" | grep -qF '2.5.0 (exception)' || _S175_MISS="$_S175_MISS [$_s175_t]"
+done
+check "§175(4) README's Deprecated table lists every 2.5.0 surface with since '2.5.0 (exception)' (missing:${_S175_MISS:- none})" \
+    bash -c '[ -z "$1" ]' _ "$_S175_MISS"
+check "§175(5) ...and README states the written exception itself, so a 2.5.0 row is not read as a violation of the add-only rule" \
+    bash -c 'grep -q "One written exception (2.5.0, #382)" "$1"' _ "$_S175_README"
+# --init (#392). The PROPERTY -- an orphan leaves no zombie, PID 1 is
+# docker-init -- needs a live container and is asserted by
+# test/acceptance-daemon.sh phase 6.7 (integration §19). What can be checked
+# here is that the flag reaches BOTH launch modes: it must be an unconditional,
+# column-0 append placed AFTER the per-mode `RUN_FLAGS=(...)` assignments
+# (an append before them is silently discarded) and before the run.
+_S175_L_INIT="$(grep -m1 -n '^RUN_FLAGS+=(--init)$' "$_S175_SANDY" | cut -d: -f1 || true)"
+_S175_L_LASTSET="$(grep -nE '^[[:space:]]*RUN_FLAGS=\(' "$_S175_SANDY" | tail -1 | cut -d: -f1 || true)"
+_S175_L_PIDS="$(grep -m1 -n '^RUN_FLAGS+=(--pids-limit 512)$' "$_S175_SANDY" | cut -d: -f1 || true)"
+check "§175(6) --init is an unconditional column-0 RUN_FLAGS append after every per-mode RUN_FLAGS=(...) reset, beside --pids-limit (init=${_S175_L_INIT:-?} last-reset=${_S175_L_LASTSET:-?} pids=${_S175_L_PIDS:-?})" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$1" -gt "$2" ] && [ "$1" -gt "$3" ] && [ $(( $1 - $3 )) -lt 20 ]' _ "$_S175_L_INIT" "$_S175_L_LASTSET" "$_S175_L_PIDS"
+unset _S175_OK _S175_MISS _s175_src _s175_out _s175_t
 
 # BEGIN SUMMARY
 # ============================================================
