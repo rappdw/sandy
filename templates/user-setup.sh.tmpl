@@ -1273,9 +1273,10 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
     elif [ "${SANDY_DAEMON:-0}" = "1" ]; then
         # Daemon mode: the container IS the daemon (host-side supervisor owns
         # the lock/lifecycle — see sandy's --start dispatcher). Create the
-        # session detached and keep PID 1 alive without attaching; a client
+        # session detached and keep the container's main process alive
+        # without attaching (PID 1 itself is docker-init under --init, #392); a client
         # attaches later via `docker exec ... tmux attach` (--attach, Batch 2).
-        # On failure, exit loudly: a dead PID 1 puts the error in `docker
+        # On failure, exit loudly: a dead main process puts the error in `docker
         # logs` (where --start's failure path surfaces it) instead of leaving
         # a session-less container that hangs the readiness gate.
         #
@@ -1386,7 +1387,7 @@ else
     tmux select-pane -t sandy.0
     if [ "${SANDY_DAEMON:-0}" = "1" ]; then
         # Daemon mode: session already created detached above (-d); keep
-        # PID 1 alive without attaching. See the single-agent branch above
+        # the container's main process alive without attaching. See the single-agent branch above
         # for the full explanation.
         exec tail -f /dev/null
     else
