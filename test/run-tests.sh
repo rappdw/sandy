@@ -20555,30 +20555,36 @@ unset _S174_A3MUT2_RC
 # the moment it stops extracting (immediately before `os.fork()`), never
 # what the auth frame actually names.
 #
-# (a3c) no line between the FIRST fork check (`if os.fork() > 0:`) and the
-# auth-frame `sendall()` reassigns `token` -- the same verifier finding, one
-# step further out: a mutation that leaves BOTH the selection code and the
-# frame's variable NAME untouched can still swap in the wrong credential by
-# inserting a fresh `token = json.loads(_raw)["childToken"]` line somewhere
-# in that span (e.g. right before `s.connect`, or between the two forks).
-# Neither (a3) (stops before the FIRST fork) nor (a3b) (checks only the
-# variable NAME referenced in the frame, not its runtime value) can see a
-# reassignment placed there.
+# (a3c) no binding of `token` anywhere in inject.py OUTSIDE the selection
+# try/except -- the same verifier finding, one step further out: a mutation
+# that leaves BOTH the selection code and the frame's variable NAME
+# untouched can still swap in the wrong credential by inserting a fresh
+# `token = json.loads(_raw)["childToken"]` line somewhere else in the file
+# (e.g. right before `s.connect`, or between the two forks). Neither (a3)
+# (stops before the FIRST fork) nor (a3b) (checks only the variable NAME
+# referenced in the frame, not its runtime value) can see a reassignment
+# placed there.
 #
-# #383: the span used to start at the SECOND fork's `os._exit(0)`, leaving a
-# gap between (a3)'s end (immediately before the first `if os.fork() > 0:`)
-# and (a3c)'s old start (immediately after the second `if os.fork() > 0:
-# os._exit(0)`) -- i.e. `sys.exit(0)`, `os.setsid()`, and the second fork
-# check itself were covered by NEITHER check. A verifier confirmed on a
-# scratch copy that inserting the childToken reassignment right after
-# `os.setsid()` -- squarely inside that gap -- left every §174 check green.
-# Starting the span at the FIRST fork check instead closes it: the entire
-# double-fork region is now inside the extracted, never-executed span
-# (a3c)'s "no_reassign" property scans textually, so still never forks the
-# test process. See (a3c-mut2) below for the regression test.
+# #383, twice over: first the span used to start at the SECOND fork's
+# `os._exit(0)`, leaving a gap between (a3)'s end (immediately before the
+# first `if os.fork() > 0:`) and (a3c)'s old start -- `sys.exit(0)`,
+# `os.setsid()`, and the second fork check itself were covered by NEITHER
+# check, and a verifier confirmed on a scratch copy that inserting the
+# childToken reassignment right after `os.setsid()` left every §174 check
+# green. Widening the span to start at the FIRST fork check closed that gap,
+# but the span was still scanned with the regex `\btoken\s*=(?!=)` -- and a
+# SECOND verifier pass found that regex itself blind to any rebinding of
+# `token` that isn't a bare `Name = value` line: tuple/list unpacking
+# (`token, _ = json.loads(_raw)["childToken"], None`), an annotated
+# assignment (`token: str = ...`), a walrus, or a `for`/`with`/`except ...
+# as`/`global` target. (a3c) is now `ast`-based (see the heredoc above) and
+# checks the WHOLE file for any `token` binding outside the selection
+# try/except, which retires the span question entirely -- there is no
+# "where does the span start" left to get wrong. See (a3c-mut)/(a3c-mut2)/
+# (a3c-mut3) below for the regression tests.
 _S174_FRAME_TEST="$(mktemp)"
 cat > "$_S174_FRAME_TEST" <<'PY'
-import re, sys
+import ast, re, sys
 
 path = sys.argv[1]
 prop = sys.argv[2]    # "frame_var" (a3b) or "no_reassign" (a3c)
@@ -20598,17 +20604,132 @@ if prop == "frame_var":
         sys.exit(3)
     ok = fm.group(1) == "token"
 elif prop == "no_reassign":
-    # Starts at the FIRST `if os.fork() > 0:` (never the second/inner one --
-    # re.search takes the leftmost match), so the captured span covers both
-    # forks, the setsid() between them, and everything after, up to the
-    # auth-frame send. Textual only: this snippet is never exec'd, so
-    # widening it to include the fork lines still never forks the test
-    # process. See #383's comment above (a3c) for the gap this closes.
-    fk = re.search(r'if os\.fork\(\) > 0:\n(.*?)\{"type": "auth"', inject_src, re.S)
-    if not fk:
-        print("EXTRACT-FAIL: post-first-fork-to-auth-frame span not found in inject.py source", file=sys.stderr)
+    # Whole-file property (#383, closing the a3c gap for good): the ONLY
+    # places anywhere in inject.py that bind the name `token` are the two
+    # lines inside the selection try/except (`token =
+    # json.loads(_raw)["peerToken"]` and its `except Exception: token =
+    # _raw` fallback). Parsed with `ast`, never grepped/regexed for
+    # `token\s*=`, because a verifier found that regex misses every
+    # non-`Name = value` way Python can bind a name: tuple/list unpacking
+    # (`token, _ = json.loads(_raw)["childToken"], None`), an annotated
+    # assignment (`token: str = ...`), a walrus, a `for`/`with`/`except ...
+    # as` target, or `global token`. `\btoken\s*=(?!=)` -- the PRIOR shape
+    # of this check, restricted to the span between the first fork and the
+    # auth-frame send -- caught neither: after "token" the next character is
+    # "," or ":", never "=". Operating on the WHOLE file (not a span) also
+    # retires the need to track exactly which span the double-fork gap
+    # occupies; a binding anywhere outside the selection try/except is
+    # caught regardless of where it is textually.
+    try:
+        tree = ast.parse(inject_src)
+    except SyntaxError as e:
+        print("PARSE-FAIL: %s" % e, file=sys.stderr)
         sys.exit(3)
-    ok = re.search(r'\btoken\s*=(?!=)', fk.group(1)) is None
+
+    def _target_names(target):
+        # Yields every bare Name node a single assignment target can bind,
+        # recursing through tuple/list unpacking and a starred target.
+        # ast.Attribute / ast.Subscript targets (obj.token, d["token"]) can
+        # never bind a bare name `token`, so they are not walked.
+        if isinstance(target, ast.Name):
+            yield target
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                yield from _target_names(elt)
+        elif isinstance(target, ast.Starred):
+            yield from _target_names(target.value)
+
+    class TokenBindings(ast.NodeVisitor):
+        def __init__(self):
+            self.lines = []
+
+        def _add(self, target):
+            for n in _target_names(target):
+                if n.id == "token":
+                    self.lines.append(n.lineno)
+
+        def visit_Assign(self, node):
+            for t in node.targets:
+                self._add(t)
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node):
+            self._add(node.target)
+            self.generic_visit(node)
+
+        def visit_AugAssign(self, node):
+            self._add(node.target)
+            self.generic_visit(node)
+
+        def visit_NamedExpr(self, node):
+            self._add(node.target)
+            self.generic_visit(node)
+
+        def visit_For(self, node):
+            self._add(node.target)
+            self.generic_visit(node)
+
+        def visit_AsyncFor(self, node):
+            self._add(node.target)
+            self.generic_visit(node)
+
+        def visit_With(self, node):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    self._add(item.optional_vars)
+            self.generic_visit(node)
+
+        def visit_AsyncWith(self, node):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    self._add(item.optional_vars)
+            self.generic_visit(node)
+
+        def visit_ExceptHandler(self, node):
+            if node.name == "token":
+                self.lines.append(node.lineno)
+            self.generic_visit(node)
+
+        def visit_Global(self, node):
+            if "token" in node.names:
+                self.lines.append(node.lineno)
+            self.generic_visit(node)
+
+        def visit_Nonlocal(self, node):
+            if "token" in node.names:
+                self.lines.append(node.lineno)
+            self.generic_visit(node)
+
+    finder = TokenBindings()
+    finder.visit(tree)
+    all_lines = sorted(finder.lines)
+
+    # The selection try/except: the first ast.Try in the module, which must
+    # be the `_raw = ...` / `try: token = ...["peerToken"] / except: token
+    # = _raw` block this property exists to isolate. Its own binding lines
+    # (found the SAME way, restricted to that one node) are the expected
+    # set -- never hardcoded line numbers, since the extracted heredoc's own
+    # line numbering shifts with its position in the tracked file.
+    try_node = next((n for n in ast.walk(tree) if isinstance(n, ast.Try)), None)
+    if try_node is None:
+        print("EXTRACT-FAIL: no try/except found in inject.py source", file=sys.stderr)
+        sys.exit(3)
+    selection_finder = TokenBindings()
+    for stmt in try_node.body:
+        selection_finder.visit(stmt)
+    for handler in try_node.handlers:
+        selection_finder.visit(handler)
+    expected_lines = sorted(selection_finder.lines)
+
+    if len(expected_lines) != 2:
+        print(
+            "EXTRACT-FAIL: expected exactly 2 token bindings in the selection try/except, found %d"
+            % len(expected_lines),
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
+    ok = all_lines == expected_lines
 else:
     print("BAD-ARG: unknown prop %r" % prop, file=sys.stderr)
     sys.exit(3)
@@ -20651,8 +20772,24 @@ token = json.loads(_raw).get("childToken", token)' "$_S174_MSI" > "$_S174_MUT_FR
 check "§174(a3c-mut2) ...and inserting a reassignment of \`token\` BETWEEN the two forks, right after os.setsid() (leaving (a3c-mut)'s own mutation point, the selection code, and the frame's variable name all untouched) is caught (self-test of (a3c)'s widened span: the exact fork-span gap a verifier found between (a3)'s end and (a3c)'s old start, #383)" \
     python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_D" no_reassign mutated
 
-rm -f "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT" "$_S174_MUT_INJECT2" "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_B" "$_S174_MUT_FRAME_C" "$_S174_MUT_FRAME_D"
-unset _S174_TOKENSEL_TEST _S174_MUT_INJECT _S174_MUT_INJECT2 _S174_FRAME_TEST _S174_MUT_FRAME_B _S174_MUT_FRAME_C _S174_MUT_FRAME_D
+# (a3c-mut3, #383) a SECOND verifier pass on (a3c) itself: the same
+# between-forks insertion point as (a3c-mut2), but as a TUPLE-UNPACK
+# assignment (`token, _unused = json.loads(_raw)["childToken"], None`)
+# rather than a bare `Name = value` line. The regex this check used to run
+# (`\btoken\s*=(?!=)`) requires an `=` to immediately follow "token" (modulo
+# whitespace) -- here the next character is a comma, so the regex saw
+# nothing while the injector still ends up sending childToken at runtime.
+# The `ast`-based rewrite above walks Assign targets through tuple/list
+# unpacking, so it sees this binding regardless of where the "=" ends up
+# relative to the name "token".
+_S174_MUT_FRAME_E="$(mktemp)"
+sed '/^os\.setsid()$/a\
+token, _unused = json.loads(_raw)["childToken"], None' "$_S174_MSI" > "$_S174_MUT_FRAME_E"
+check "§174(a3c-mut3) ...and inserting the SAME between-forks reassignment as a tuple-unpack (\`token, _unused = ...\`, never a bare \`token = ...\` line) is caught (self-test of (a3c)'s ast-based rewrite: the exact form a plain \`token\\s*=\` regex cannot see, #383)" \
+    python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_E" no_reassign mutated
+
+rm -f "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT" "$_S174_MUT_INJECT2" "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_B" "$_S174_MUT_FRAME_C" "$_S174_MUT_FRAME_D" "$_S174_MUT_FRAME_E"
+unset _S174_TOKENSEL_TEST _S174_MUT_INJECT _S174_MUT_INJECT2 _S174_FRAME_TEST _S174_MUT_FRAME_B _S174_MUT_FRAME_C _S174_MUT_FRAME_D _S174_MUT_FRAME_E
 
 # NEVER a repo assertion on run-time behavior -- CLAUDE_CODE_MESSAGING_TOKEN is
 # the receiver's OWN childToken (handed to its children), and sending it
@@ -20998,6 +21135,166 @@ unset _S174_A10B_MUT_RC
 
 rm -f "$_S174_ARGORDER_TEST" "$_S174_MUT_ARGORDER"
 unset _S174_ARGORDER_TEST _S174_MUT_ARGORDER
+
+# (a10c, #379/#383) (a10b) pins run_argcheck's OWN flags construction in
+# isolation, but a verifier found that textual pinning does not reach the
+# mapping (a10)'s fixture labels actually depend on: the harness's real call
+# sites (the case labels `_msi_case q3d-ab argcheck AB` / `_msi_case q3d-ba
+# argcheck BA`, and the argument ORDER passed to `_msi_q3d_reading
+# "$_MSI_Q3D_AB" "$_MSI_Q3D_BA"`) are themselves part of that mapping and
+# (a10b) never executes or even reads them. Confirmed on a scratch copy:
+# swapping the order tokens at the two `_msi_case` call sites, swapping the
+# two arguments to `_msi_q3d_reading`, or reordering `flags` AFTER
+# run_argcheck's if/else (invisible to (a10b), which only reads the two
+# `flags = [...]` assignment lines themselves) all leave every §174 check
+# green while the harness would print LAST-WINS for FIRST-WINS evidence, or
+# the reverse.
+#
+# This closes the whole class with one END-TO-END run instead of another
+# textual slice: it extracts driver.py, `_msi_case`, `_msi_q3d_classify`,
+# `_msi_q3d_reading`, and the THREE real call-site lines straight out of the
+# tracked file (never reimplemented), replaces only `_msi_case`'s one
+# docker-specific step (`"$SANDY" --exec ...`, which this host-only suite
+# cannot run) with a direct local invocation of the SAME extracted
+# driver.py, puts a stub `claude` on PATH that decides pass/fail from real
+# file existence at either the FIRST or the LAST `--settings` occurrence,
+# and asserts the actual printed Q3d reading names the verdict that stub
+# implies. Because every piece the (a10b) mapping depends on is now
+# exercised for real -- run_argcheck's flags construction, the case-label ->
+# ORDER wiring, and the argument order into `_msi_q3d_reading` -- a mutation
+# to any one of them changes what gets printed, not merely what a slice of
+# source text says.
+_S174_Q3DE2E_TEST="$(mktemp)"
+cat > "$_S174_Q3DE2E_TEST" <<'PY'
+import os, re, subprocess, sys, tempfile, shutil, stat
+
+msi_path = sys.argv[1]
+stub_mode = sys.argv[2]      # "last" or "first" -- which --settings occurrence the stub claude consults
+expect_word = sys.argv[3]    # "LAST-WINS" or "FIRST-WINS"
+verdict = sys.argv[4]        # "ok": printed reading must CONTAIN expect_word; "mutated": must NOT
+
+src = open(msi_path).read()
+
+
+def extract(pattern, label, flags=re.S):
+    m = re.search(pattern, src, flags)
+    if not m:
+        print("EXTRACT-FAIL: %s not found" % label, file=sys.stderr)
+        sys.exit(3)
+    return m.group(1)
+
+
+driver_src = extract(r"<<'MSI_DRIVER_PY'\n(.*?)\nMSI_DRIVER_PY\n", "driver.py heredoc")
+msi_case_src = extract(r"\n(_msi_case\(\) \{\n.*?\n\})\n", "_msi_case function")
+q3d_classify_src = extract(r"\n(_msi_q3d_classify\(\) \{\n.*?\n\})\n", "_msi_q3d_classify function")
+q3d_reading_src = extract(r"\n(_msi_q3d_reading\(\) \{\n.*?\n\})\n", "_msi_q3d_reading function")
+ab_line = extract(r'\n(_MSI_Q3D_AB="\$\(_msi_case [^\n]*\)")\n', "Q3d-AB case-invocation line")
+ba_line = extract(r'\n(_MSI_Q3D_BA="\$\(_msi_case [^\n]*\)")\n', "Q3d-BA case-invocation line")
+reading_line = extract(r'\n(_msi_q3d_reading "\$_MSI_Q3D_\w+" "\$_MSI_Q3D_\w+")\n', "Q3d reading-invocation line")
+
+# _msi_case's ONLY docker-execution step -- the one thing this host-only
+# suite cannot run -- is replaced with a direct local invocation of the SAME
+# driver.py extracted above. Nothing else in _msi_case's body (the
+# case/mode/order -> spec.json construction (a10c)'s attack shapes actually
+# target) is touched, and the swap is guarded: a drift in the real
+# invocation text away from this exact string fails the extraction rather
+# than silently running stale logic.
+old_invoke = (
+    '    "$SANDY" --exec --workspace "$WS" -- \\\n'
+    '        python3 "$WS/.sandy/probe/driver.py" "$spec_dir" "$run_dir" "$mode" "$order" \\\n'
+    '        2>"$spec_dir/stderr.log"\n'
+)
+new_invoke = (
+    '    python3 "$_S174_Q3DE2E_DRIVER" "$spec_dir" "$run_dir" "$mode" "$order" \\\n'
+    '        2>"$spec_dir/stderr.log"\n'
+)
+if msi_case_src.count(old_invoke) != 1:
+    print("EXTRACT-FAIL: _msi_case's docker-invocation block not found verbatim", file=sys.stderr)
+    sys.exit(3)
+msi_case_local = msi_case_src.replace(old_invoke, new_invoke, 1)
+
+tmp = tempfile.mkdtemp(prefix="msi-q3de2e-")
+try:
+    driver_path = os.path.join(tmp, "driver.py")
+    open(driver_path, "w").write(driver_src)
+
+    # The stub `claude`: it does not simulate Claude Code's parser, it
+    # simulates the GROUND TRUTH a real one of the two possible resolvers
+    # would produce, decided from which of the two real `--settings` files
+    # (one written by run_argcheck, one deliberately never created) sits at
+    # the position this stub consults. That keeps the expected verdict a
+    # property of stub_mode alone, independent of anything the harness
+    # itself gets right or wrong.
+    stub_dir = os.path.join(tmp, "bin")
+    os.makedirs(stub_dir)
+    stub_path = os.path.join(stub_dir, "claude")
+    pick = "paths[-1]" if stub_mode == "last" else "paths[0]"
+    stub_src = (
+        "#!/usr/bin/env python3\n"
+        "import sys, os\n"
+        "args = sys.argv[1:]\n"
+        "paths = [args[i + 1] for i in range(len(args) - 1) if args[i] == '--settings']\n"
+        "target = %s if paths else None\n"
+        "if target and not os.path.exists(target):\n"
+        "    sys.stderr.write(\"Error: ENOENT no such file or directory, open '%%s'\\n\" %% target)\n"
+        "    sys.exit(1)\n"
+        "print('2.1.278 (Claude Code)')\n"
+        "sys.exit(0)\n"
+    ) % pick
+    open(stub_path, "w").write(stub_src)
+    st = os.stat(stub_path)
+    os.chmod(stub_path, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    ws_dir = os.path.join(tmp, "ws")
+    os.makedirs(ws_dir)
+
+    script = "\n".join([msi_case_local, q3d_classify_src, q3d_reading_src, ab_line, ba_line, reading_line, ""])
+
+    env = dict(os.environ)
+    env["PATH"] = stub_dir + os.pathsep + env.get("PATH", "")
+    env["WS"] = ws_dir
+    env["_S174_Q3DE2E_DRIVER"] = driver_path
+    env.pop("SANDY", None)
+
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+found = expect_word in proc.stdout
+
+if verdict == "ok":
+    sys.exit(0 if found else 1)
+else:
+    sys.exit(0 if not found else 1)
+PY
+
+check "§174(a10c) driving the harness's REAL run_argcheck, case labels, and _msi_q3d_reading call order end to end against a stub claude that only errors on the LAST --settings occurrence prints LAST-WINS" \
+    python3 "$_S174_Q3DE2E_TEST" "$_S174_MSI" last LAST-WINS ok
+check "§174(a10c) ...and the same wiring against a stub claude that only errors on the FIRST --settings occurrence prints FIRST-WINS" \
+    python3 "$_S174_Q3DE2E_TEST" "$_S174_MSI" first FIRST-WINS ok
+
+_S174_MUT_Q3DE2E_A="$(mktemp)"
+sed -e 's/_msi_case q3d-ab argcheck AB/_msi_case q3d-ab argcheck BA/' \
+    -e 's/_msi_case q3d-ba argcheck BA/_msi_case q3d-ba argcheck AB/' \
+    "$_S174_MSI" > "$_S174_MUT_Q3DE2E_A"
+check "§174(a10c-mut1) ...and swapping the ORDER token at the two \`_msi_case\` call sites (q3d-ab now runs BA, q3d-ba now runs AB -- (a10b)'s own flags assignments untouched) is caught: the LAST-only stub no longer prints LAST-WINS (self-test of (a10c): the exact call-site swap a verifier found (a10b) cannot see)" \
+    python3 "$_S174_Q3DE2E_TEST" "$_S174_MUT_Q3DE2E_A" last LAST-WINS mutated
+
+_S174_MUT_Q3DE2E_B="$(mktemp)"
+sed 's/_msi_q3d_reading "\$_MSI_Q3D_AB" "\$_MSI_Q3D_BA"/_msi_q3d_reading "\$_MSI_Q3D_BA" "\$_MSI_Q3D_AB"/' \
+    "$_S174_MSI" > "$_S174_MUT_Q3DE2E_B"
+check "§174(a10c-mut2) ...and swapping the two arguments to the final \`_msi_q3d_reading\` call (the case labels and run_argcheck untouched) is caught the same way (self-test of (a10c): the reading-call-order half of the same gap)" \
+    python3 "$_S174_Q3DE2E_TEST" "$_S174_MUT_Q3DE2E_B" last LAST-WINS mutated
+
+_S174_MUT_Q3DE2E_C="$(mktemp)"
+sed '/^        flags = \["--settings", missing_path, "--settings", exists_path\]$/a\
+    flags = flags[2:] + flags[:2]' \
+    "$_S174_MSI" > "$_S174_MUT_Q3DE2E_C"
+check "§174(a10c-mut3) ...and reordering \`flags\` AFTER run_argcheck's if/else (the two \`flags = [...]\` assignments (a10b) checks are left byte-identical) is caught the same way (self-test of (a10c): the exact mutation invisible to (a10b), which only reads those two assignment lines)" \
+    python3 "$_S174_Q3DE2E_TEST" "$_S174_MUT_Q3DE2E_C" last LAST-WINS mutated
+
+rm -f "$_S174_Q3DE2E_TEST" "$_S174_MUT_Q3DE2E_A" "$_S174_MUT_Q3DE2E_B" "$_S174_MUT_Q3DE2E_C"
+unset _S174_Q3DE2E_TEST _S174_MUT_Q3DE2E_A _S174_MUT_Q3DE2E_B _S174_MUT_Q3DE2E_C
 
 rm -f "$_S174_Q3D_EXTRACT" "$_S174_Q3D_MUT" "$_S174_Q3D_MUT_BA"
 unset -f _s174_q3d_check _s174_q3d_check_neg

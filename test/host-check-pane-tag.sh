@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test/host-check-pane-tag.sh — host-only, live-tmux acceptance for #378's
-# single-agent pane tagging (decisions.md, fix pass on u378).
+# single-agent pane tagging (decisions.md, fix pass on #378).
 #
 # WHAT THIS PROVES that a fixture-based unit test (run-tests.sh §171) cannot:
 # that the EXACT tmux command forms sandy's daemon and foreground single-agent

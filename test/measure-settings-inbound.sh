@@ -29,7 +29,8 @@
 #   Q3d     the #363 file-existence method: pass an existing settings file
 #           and a nonexistent one, in both orders, and see which order (if
 #           either) errors on the missing path. This tells you whether a
-#           flag consults every occurrence or silently only the last, WITHOUT
+#           flag consults every occurrence (REPEATABLE), only the first
+#           (FIRST-WINS), or silently only the last (LAST-WINS), WITHOUT
 #           needing to inspect Claude Code's resolved config at all. Two
 #           shapes read INCONCLUSIVE rather than as evidence either way: (1)
 #           NEITHER order errors (`--version` may short-circuit before
