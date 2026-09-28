@@ -20323,8 +20323,69 @@ check "§174(a1) test/measure-settings-inbound.sh exists, is executable-by-bash,
 check "§174(a2) sources lib-isolated-home.sh and calls _isolate_sandy_home (no fixture sandbox leaking into the operator's real \$SANDY_HOME -- the §105 lesson)" \
     bash -c 'grep -q "lib-isolated-home.sh" "$1" && grep -q "_isolate_sandy_home" "$1"' -- "$_S174_MSI"
 
-check "§174(a3) the injector authenticates with the session key file's peerToken" \
-    bash -c 'grep -q "peerToken" "$1"' -- "$_S174_MSI"
+# (a3) the injector's token-SELECTION CODE, not the word "peerToken" appearing
+# anywhere in the file -- a verifier found the old `grep -q "peerToken"` stays
+# green even after inject.py is mutated to read the wrong field entirely
+# (`json.loads(_raw)["childToken"]` still contains no literal "peerToken", but
+# so does every comment describing the property, which is exactly why a plain
+# grep for the word proves nothing about which field the code actually reads).
+# This extracts inject.py's own `_raw = ... / try: token = ... / except ...`
+# block out of its heredoc (a plain regex slice of the real source, never a
+# reimplementation) and EXECUTES it against a fixture key file carrying both
+# peerToken and childToken with distinct values, then asserts the selected
+# token is the peerToken one. Same method as (a5).
+_S174_TOKENSEL_TEST="$(mktemp)"
+cat > "$_S174_TOKENSEL_TEST" <<'PY'
+import re, sys, os, json, tempfile
+
+path = sys.argv[1]
+expect = sys.argv[2]  # "ok": must select peerToken; "mutated": must NOT
+
+src = open(path).read()
+m = re.search(r"<<'MSI_INJECT_PY'\n(.*?)\nMSI_INJECT_PY\n", src, re.S)
+if not m:
+    print("EXTRACT-FAIL: inject.py heredoc not found in %s" % path, file=sys.stderr)
+    sys.exit(3)
+inject_src = m.group(1)
+
+m2 = re.search(
+    r"\n_raw = open\(key_path\)\.read\(\)\.strip\(\)\ntry:\n    token = .*\n"
+    r"except Exception:\n    token = _raw\n",
+    inject_src,
+)
+if not m2:
+    print("EXTRACT-FAIL: token-selection block not found in inject.py source", file=sys.stderr)
+    sys.exit(3)
+snippet = m2.group(0)
+
+fd, key_path = tempfile.mkstemp()
+os.write(fd, json.dumps({"peerToken": "PEER-XYZ", "childToken": "CHILD-ABC"}).encode())
+os.close(fd)
+try:
+    ns = {"key_path": key_path, "json": json}
+    exec(compile(snippet, "<inject-token-snippet>", "exec"), ns)
+    token = ns.get("token")
+finally:
+    os.unlink(key_path)
+
+if expect == "ok":
+    sys.exit(0 if token == "PEER-XYZ" else 1)
+else:
+    # expect == "mutated": the property must be BROKEN -- the selected token
+    # must no longer be the peerToken value.
+    sys.exit(0 if token != "PEER-XYZ" else 1)
+PY
+
+check "§174(a3) the injector's OWN token-selection code (extracted and executed against a fixture key file carrying both fields, not grepped for) selects the peerToken value, never childToken" \
+    python3 "$_S174_TOKENSEL_TEST" "$_S174_MSI" ok
+
+_S174_MUT_INJECT="$(mktemp)"
+sed 's/\["peerToken"\]/["childToken"]/' "$_S174_MSI" > "$_S174_MUT_INJECT"
+check "§174(a3-mut) ...and mutating inject.py's selection from peerToken to childToken in a scratch copy makes it select the wrong field (self-test of (a3): the exact regression a plain 'grep -q peerToken' missed, since the mutated line still contains no such grep-worthy absence)" \
+    python3 "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT" mutated
+
+rm -f "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT"
+unset _S174_TOKENSEL_TEST _S174_MUT_INJECT
 
 # NEVER a repo assertion on run-time behavior -- CLAUDE_CODE_MESSAGING_TOKEN is
 # the receiver's OWN childToken (handed to its children), and sending it

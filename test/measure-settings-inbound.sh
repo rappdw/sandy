@@ -93,8 +93,10 @@
 # container's own bash 5 / python3, where GNU semantics are correct.
 #
 # EXIT: 0 whenever the rig ran far enough to print a result table (this is a
-# measurement, not a pass/fail suite) or to print a loud, honest SKIP; 2 only
-# for RIG-INVALID (K1 did not route, so nothing after it can be trusted).
+# measurement, not a pass/fail suite) or to print a loud, honest SKIP; 2 for
+# every case that means "the rest of this run cannot be trusted": RIG-INVALID
+# on either K1 (did not route) or K2 (did not refuse), and the two FATAL setup
+# failures (`sandy --start`, `sandy --exec`) that precede them.
 #
 # NOT wired into run-integration-tests.sh: it has no pass/fail verdict to
 # aggregate, only a table meant to be pasted into
@@ -623,9 +625,9 @@ _msi_q3d_reading() {
         echo "Only exists-then-missing (AB) errored -- --settings is LAST-WINS (only the"
         echo "final occurrence is ever consulted)."
     else
-        echo "Only missing-then-exists (BA) errored -- --settings is LAST-WINS (only the"
-        echo "final occurrence is ever consulted); the missing file surfaces only when it"
-        echo "is that final occurrence."
+        echo "Only missing-then-exists (BA) errored -- --settings is FIRST-WINS (only the"
+        echo "first occurrence is ever consulted); the missing file surfaces only when it"
+        echo "is that first occurrence."
     fi
 }
 
