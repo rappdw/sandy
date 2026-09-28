@@ -11176,7 +11176,7 @@ check "§114(1b) SANDY_HANDOFF_RELAY is a recognized privileged key" \
     bash -c 'grep -q "^    SANDY_HANDOFF_RELAY$" "$1"' -- "$_S114_SANDY"
 check "§114(1c) metadata row: SANDY_CROSS_SESSION_INBOUND is enum:accept,hold,refuse, since 1.10.0, experimental" \
     bash -c 'grep -q "^SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|" "$1"' -- "$_S114_SANDY"
-check "§114(1d) metadata row: SANDY_HANDOFF_RELAY is type path, since 1.10.0, and now marked DEPRECATED — removed as a configuration key in 2.2.0 (#354) while the variable survives as the manifest entry's internal channel" \
+check "§114(1d) metadata row: SANDY_HANDOFF_RELAY is type path, since 1.10.0, and now marked DEPRECATED — removed as a configuration key in 2.2.0 (#354); its last use, the internal entry channel, was removed in 2.6.0 (#382)" \
     bash -c 'grep -q "^SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|" "$1"' -- "$_S114_SANDY"
 check "§114(1e) --print-schema carries both keys in the right tier with the right type" \
     bash -c '
@@ -12957,7 +12957,7 @@ check "§123(4) an entry that exists but is NOT executable FAILS THE LAUNCH — 
     bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_D"
 
 _S123_E="$(trap - ERR; _s123_resolve exec   '/workspace/.sandy/relay.sh')"
-check "§123(5) an operator-set SANDY_HANDOFF_RELAY now FAILS THE LAUNCH — removed as a configuration key in 2.2.0 (#354), naming the manifest entry that replaces it. The VARIABLE survives: the manifest sets it below this block, which is why a non-empty value HERE can only have come from an operator (got: $_S123_E)" \
+check "§123(5) an operator-set SANDY_HANDOFF_RELAY now FAILS THE LAUNCH — removed as a configuration key in 2.2.0 (#354), naming the manifest entry that replaces it. Since 2.6.0 sandy never sets the variable itself (the internal channel is gone, #382), so any value can only have come from an operator (got: $_S123_E)" \
     bash -c 'case "$1" in "EXIT "*) [ "$1" != "EXIT 0" ] ;; *) false ;; esac' -- "$_S123_E"
 
 # Anti-vacuity. Three of the four remaining cases are refusals, so "all

@@ -321,8 +321,8 @@ As of v0.9.0, the sandbox directory contains **sibling** per-agent subdirs (`cla
 │                              #   is unlinked, never followed) with one info line, then never
 │                              #   reappears. SANDY_RELAY_STATE is no longer exported, mounted or read.
 ├── handoff/                   # REMOVED in 2.2.0 (#352/#355) with the ~/.handoff tree. Never created
-│                              #   now; a pre-2.2.0 sandbox has its handoff/relay moved to relay-state/
-│                              #   on first launch and the rest left behind inert. --reset-sandbox
+│                              #   now and never migrated (since 2.6.0 nothing reads handoff/relay or
+│                              #   relay-state/); a pre-2.2.0 sandbox keeps it inert. --reset-sandbox
 │                              #   destroys it.
 ├── relay-bin/                 # REMOVED in 2.2.0 (#354). A leftover entry here is now a hard
 │                              #   error naming the manifest `entry` that replaces it; --reset-sandbox destroys it.
@@ -2055,7 +2055,7 @@ Note the double-nested `source` — the outer key is the `extraKnownMarketplaces
 1. **`$SANDBOX_DIR/claude/settings.json`** — the sandbox's own settings file, already seeded/regenerated every launch by the C.2 pipeline above and mounted **RW** as the container's `~/.claude/settings.json` (Claude Code's userSettings). This is the placement that actually makes `accept` deliver (probe case E). Writing here is a *second*, independent write on top of whatever the C.2 seeding pipeline already produced for that launch — `_sandy_csi_write` merges the one key in without touching anything C.2 set.
 2. **`$WORK_DIR/.claude/settings.local.json`** — the workspace's own project file, distinct from the sandbox mount, and mounted `:ro` in-container (protected-files list, §9). `hold`/`refuse` are honored here (probe cases B/C) and win over a userSettings `accept` even when the two disagree (probe case H — "a repo may only tighten"). `accept` written here is a no-op for delivery, but is written anyway: it overwrites any stale `hold`/`refuse` sandy itself wrote on an earlier launch (e.g. before a relay was configured), so neither of sandy's own two targets can ever disagree with the current launch's resolution — only a human hand-editing a file afterward can still tighten it, which is the intended "repo may tighten" escape hatch.
 
-Both writes run host-side, after the relay block has resolved `SANDY_HANDOFF_RELAY` (the internal channel a manifest `entry` travels through) and validated it. The workspace-file write specifically runs before the protected-files `:ro` mount loop and the `.protected-existed-at-launch` snapshot (§9), so that file is immediately read-only in-container and never misreported as a newly-appeared protected file; the sandbox-file write has no such ordering constraint since that file is never `:ro`.
+Both writes run host-side, after the feature-manifest evaluation (#321) has produced this launch's selected features — their `receives` declarations and their `entry` list (`SANDY_FEATURE_ENTRIES`). The workspace-file write specifically runs before the protected-files `:ro` mount loop and the `.protected-existed-at-launch` snapshot (§9), so that file is immediately read-only in-container and never misreported as a newly-appeared protected file; the sandbox-file write has no such ordering constraint since that file is never `:ro`.
 
 **Gate.** Only runs when `claude` is in `SANDY_AGENT`. `SANDY_CROSS_SESSION_INBOUND` is validated first (`accept`/`hold`/`refuse`/unset; anything else is a hard launch error) — before the agent check, so an invalid value errors regardless of which agent is selected.
 

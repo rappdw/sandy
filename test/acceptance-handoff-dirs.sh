@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end handoff directories + relay acceptance (#132 slice 1, plus
-# SANDY_HANDOFF_RELAY 1.10.0).
+# End-to-end handoff directories + supervised feature-entry acceptance (#132
+# slice 1; since 2.6.0, #382, the entry is installed by a feature manifest).
 #
 # ⚠️ RUN ON A HOST WITH DOCKER. This cannot run inside sandy (no Docker). It
 # proves the real container-level behavior that the static run-tests.sh §86
@@ -46,9 +46,10 @@
 #      config anywhere, pre-marker the tree is off; post-marker it is on,
 #      repeating the EROFS-beats-ownership assertions on THAT path — phase B
 #      only proves them for the SANDY_HANDOFF_DIRS=1 path.
-#   E. SANDY_HANDOFF_RELAY (1.10.0, privileged, set via the isolated host's
-#      OWN ~/.sandy/config so no approval prompt applies): the relay mount +
-#      env forwarding, the supervisor actually running as a sibling of tmux
+#   E. a feature-manifest entry installed in the isolated host's OWN
+#      $SANDY_HOME/features (privileged by location, so no approval prompt
+#      applies): the feature-state mount + SANDY_FEATURE_ENTRIES forwarding,
+#      the supervisor actually running as a sibling of tmux
 #      (not a pane, not a session child), singleton-via-flock, restart on
 #      death with a fresh pid, survival of an --update-sessions recreation
 #      (state persists), a claude pane carrying the @sandy_pane_agent tag the

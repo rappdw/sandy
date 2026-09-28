@@ -12888,12 +12888,12 @@ fi
 # needs to know where a leftover slot would be, to refuse it.
 _sandy_relay_slot_dir="$SANDBOX_DIR/relay-bin"
 
-# SANDY_HANDOFF_RELAY as an OPERATOR KEY is removed (deprecated 2.0.0, listed in
-# README's table since). The VARIABLE is not, and that distinction is the thing
-# most likely to cause a wrong edit here: it is still the internal channel a
-# manifest `entry` travels through, and the manifest sets it BELOW this point --
-# so a non-empty value HERE can only have come from the environment or a config
-# file, i.e. from an operator.
+# SANDY_HANDOFF_RELAY as an OPERATOR KEY was removed in 2.2.0 (#354), and the
+# variable's last use -- the internal channel a manifest `entry` travelled
+# through -- was removed in 2.6.0 (#382, decision 5): entries now reach the
+# container only via SANDY_FEATURE_ENTRIES, and sandy never sets this variable.
+# So ANY non-empty value here came from the environment or a config file, i.e.
+# from an operator, and is refused naming the replacement.
 if [ -n "${SANDY_HANDOFF_RELAY:-}" ]; then
     echo "[sandy] ERROR: SANDY_HANDOFF_RELAY was removed as a configuration key in 2.2.0." >&2
     echo "[sandy]        Declare the executable as an \"entry\" in a feature manifest instead:" >&2
@@ -12921,8 +12921,9 @@ fi
 
 # --- Feature manifest: EVALUATED HERE, APPLIED LATER (#321) ------------------
 # This pass used to sit ~2200 lines below, next to the mounts it produces. That
-# read naturally and was wrong: a manifest `entry` supplies SANDY_HANDOFF_RELAY,
-# and FOUR decisions between here and there are gated on that key --
+# read naturally and was wrong. HISTORY (#321, pre-2.6.0): a manifest `entry`
+# then supplied SANDY_HANDOFF_RELAY, and FOUR decisions between here and there
+# were gated on that key --
 #
 #   the host-side path validation (immediately below)
 #   SANDY_HANDOFF_DIRS forced on, "the relay cannot run without its mounts"
@@ -12936,6 +12937,11 @@ fi
 # tmux has-session succeeded, --print-state reported relay.state=started and the
 # marker said handoff_relay: true. Every structural signal green, nothing
 # delivered -- the same class as #151's API-key modal and #256's theme picker.
+#
+# Since 2.6.0 (#382) the entries this pass produces travel as _sandy_fe_list /
+# SANDY_FEATURE_ENTRIES and the relay-conditional inbound default is gone, but
+# the ordering lesson stands: every decision that depends on a manifest must
+# run after this evaluation.
 #
 # It CANNOT be applied here: RUN_FLAGS does not exist yet (it is built ~1900
 # lines below). So the record stream is BUFFERED and consumed once, later,
