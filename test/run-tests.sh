@@ -20577,7 +20577,7 @@ unset _S174_A3MUT2_RC
 # `token` that isn't a bare `Name = value` line: tuple/list unpacking
 # (`token, _ = json.loads(_raw)["childToken"], None`), an annotated
 # assignment (`token: str = ...`), a walrus, or a `for`/`with`/`except ...
-# as`/`global` target. (a3c) is now `ast`-based (see the heredoc above) and
+# as`/`global` target. (a3c) is now `ast`-based (see the heredoc below) and
 # checks the WHOLE file for any `token` binding outside the selection
 # try/except, which retires the span question entirely -- there is no
 # "where does the span start" left to get wrong. See (a3c-mut)/(a3c-mut2)/
@@ -20749,7 +20749,7 @@ sed 's/"token": token})/"token": _raw})/' "$_S174_MSI" > "$_S174_MUT_FRAME_B"
 check "§174(a3b-mut) ...and mutating the frame to send the raw, un-selected key-file contents (\`_raw\`) instead of \`token\` is caught (self-test of (a3b))" \
     python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_B" frame_var mutated
 
-check "§174(a3c) no line between the FIRST fork check and the auth-frame send reassigns \`token\` (extracted span -- both forks, setsid(), and everything after -- not grepped for the whole file, so an unrelated 'token' elsewhere in inject.py cannot hide a real reassignment here)" \
+check "§174(a3c) the ONLY bindings of \`token\` anywhere in inject.py (whole-file ast walk -- Assign/AnnAssign/AugAssign/tuple-unpack/NamedExpr/for/with/except-as/global/nonlocal targets, never a span and never grepped for) are the two inside the selection try/except, so an unrelated 'token' elsewhere in the file cannot hide a real reassignment and there is no span boundary left to get wrong" \
     python3 "$_S174_FRAME_TEST" "$_S174_MSI" no_reassign ok
 
 _S174_MUT_FRAME_C="$(mktemp)"
@@ -20763,13 +20763,14 @@ check "§174(a3c-mut) ...and inserting a reassignment of \`token\` right after t
 # selection code, the frame's variable name, or the second fork's
 # `os._exit(0)` line (a3c-mut)'s mutation targets -- used to leave every
 # §174 check green, because neither (a3) (stops before the FIRST fork) nor
-# the OLD (a3c) (started at the SECOND fork's `os._exit(0)`) covered this
-# span at all. Confirms starting (a3c)'s span at the first fork check closes
-# it.
+# the OLD (a3c) (a textual span that started at the SECOND fork's
+# `os._exit(0)`) covered this span at all. Confirms the whole-file ast check
+# (a3c) is now built from -- not any hand-tracked span, since there is no
+# span left to start anywhere -- closes it.
 _S174_MUT_FRAME_D="$(mktemp)"
 sed '/^os\.setsid()$/a\
 token = json.loads(_raw).get("childToken", token)' "$_S174_MSI" > "$_S174_MUT_FRAME_D"
-check "§174(a3c-mut2) ...and inserting a reassignment of \`token\` BETWEEN the two forks, right after os.setsid() (leaving (a3c-mut)'s own mutation point, the selection code, and the frame's variable name all untouched) is caught (self-test of (a3c)'s widened span: the exact fork-span gap a verifier found between (a3)'s end and (a3c)'s old start, #383)" \
+check "§174(a3c-mut2) ...and inserting a reassignment of \`token\` BETWEEN the two forks, right after os.setsid() (leaving (a3c-mut)'s own mutation point, the selection code, and the frame's variable name all untouched) is caught (self-test of (a3c)'s whole-file ast check: the exact fork-span gap a verifier found between (a3)'s end and (a3c)'s old textual-span start, #383)" \
     python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_D" no_reassign mutated
 
 # (a3c-mut3, #383) a SECOND verifier pass on (a3c) itself: the same
@@ -21260,12 +21261,23 @@ try:
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
+# A verifier found the "mutated" branch below used to require only that
+# expect_word be ABSENT from stdout -- which a CRASHED driver also
+# satisfies: a syntax error or an uncaught exception prints no verdict word
+# at all, the wiring's own INCONCLUSIVE fallback (AB=[] BA=[]) included, so
+# a mutation that merely broke the driver -- proving nothing about whether
+# the reading actually flipped -- passed this self-test vacuously. Requiring
+# the OPPOSITE definite verdict word instead means the driver must have run
+# to completion AND produced a different, still-trustworthy reading; a crash
+# leaves BOTH words absent and now fails loudly (#383).
+opposite_word = "FIRST-WINS" if expect_word == "LAST-WINS" else "LAST-WINS"
 found = expect_word in proc.stdout
+found_opposite = opposite_word in proc.stdout
 
 if verdict == "ok":
     sys.exit(0 if found else 1)
 else:
-    sys.exit(0 if not found else 1)
+    sys.exit(0 if found_opposite else 1)
 PY
 
 check "§174(a10c) driving the harness's REAL run_argcheck, case labels, and _msi_q3d_reading call order end to end against a stub claude that only errors on the LAST --settings occurrence prints LAST-WINS" \
@@ -21286,12 +21298,43 @@ sed 's/_msi_q3d_reading "\$_MSI_Q3D_AB" "\$_MSI_Q3D_BA"/_msi_q3d_reading "\$_MSI
 check "§174(a10c-mut2) ...and swapping the two arguments to the final \`_msi_q3d_reading\` call (the case labels and run_argcheck untouched) is caught the same way (self-test of (a10c): the reading-call-order half of the same gap)" \
     python3 "$_S174_Q3DE2E_TEST" "$_S174_MUT_Q3DE2E_B" last LAST-WINS mutated
 
+# Built with python3's own string replace, deliberately never a sed `a\`
+# insertion: the appended line needs to land DEDENTED one level below the
+# `else:` block (at run_argcheck's own statement indent, so it applies
+# unconditionally to both AB and BA rather than only to the branch it
+# follows) -- and BSD/macOS sed strips ALL leading whitespace from a/i/c
+# text, which would have collapsed that indentation to column 0 and broken
+# the mutated driver.py's parse entirely. A verifier ran exactly that
+# stripped text on a scratch copy and found the driver then crashes with an
+# IndentationError, reading INCONCLUSIVE -- which the OLD "expect_word
+# absent" verdict logic above accepted as "mutated" even though the
+# mutation never took effect. Fixed on both sides: this construction has no
+# sed at all, so there is no a/i/c whitespace behavior to diverge on, and
+# the verdict logic above now requires the OPPOSITE definite word rather
+# than mere absence (#383).
 _S174_MUT_Q3DE2E_C="$(mktemp)"
-sed '/^        flags = \["--settings", missing_path, "--settings", exists_path\]$/a\
-    flags = flags[2:] + flags[:2]' \
-    "$_S174_MSI" > "$_S174_MUT_Q3DE2E_C"
-check "§174(a10c-mut3) ...and reordering \`flags\` AFTER run_argcheck's if/else (the two \`flags = [...]\` assignments (a10b) checks are left byte-identical) is caught the same way (self-test of (a10c): the exact mutation invisible to (a10b), which only reads those two assignment lines)" \
-    python3 "$_S174_Q3DE2E_TEST" "$_S174_MUT_Q3DE2E_C" last LAST-WINS mutated
+_S174_A10C_MUT3_RC=0
+python3 - "$_S174_MSI" "$_S174_MUT_Q3DE2E_C" <<'PY' || _S174_A10C_MUT3_RC=$?
+import sys
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+src = open(src_path).read()
+old = '        flags = ["--settings", missing_path, "--settings", exists_path]\n'
+if src.count(old) != 1:
+    print("MUTATION-SETUP-FAIL: run_argcheck's BA flags line not found verbatim", file=sys.stderr)
+    sys.exit(3)
+new = old + "    flags = flags[2:] + flags[:2]\n"
+open(dst_path, "w").write(src.replace(old, new, 1))
+PY
+check "§174(a10c-mut3-setup) the run_argcheck mutation target still matches driver.py verbatim (guarded: a mismatch here fails (a10c-mut3) below rather than aborting the whole suite)" \
+    bash -c '[ "$1" -eq 0 ]' -- "$_S174_A10C_MUT3_RC"
+if [ "$_S174_A10C_MUT3_RC" -eq 0 ]; then
+    check "§174(a10c-mut3) ...and reordering \`flags\` AFTER run_argcheck's if/else (the two \`flags = [...]\` assignments (a10b) checks are left byte-identical) is caught the same way (self-test of (a10c): the exact mutation invisible to (a10b), which only reads those two assignment lines)" \
+        python3 "$_S174_Q3DE2E_TEST" "$_S174_MUT_Q3DE2E_C" last LAST-WINS mutated
+else
+    fail "§174(a10c-mut3) ...and reordering \`flags\` AFTER run_argcheck's if/else (skipped: mutation-setup above failed, so no mutated file was produced to test against)"
+fi
+unset _S174_A10C_MUT3_RC
 
 rm -f "$_S174_Q3DE2E_TEST" "$_S174_MUT_Q3DE2E_A" "$_S174_MUT_Q3DE2E_B" "$_S174_MUT_Q3DE2E_C"
 unset _S174_Q3DE2E_TEST _S174_MUT_Q3DE2E_A _S174_MUT_Q3DE2E_B _S174_MUT_Q3DE2E_C
