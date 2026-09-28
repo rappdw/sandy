@@ -124,7 +124,7 @@ STATE_JSON="$("$SANDY" --print-state)"
 python3 -c "
 import json, sys
 d = json.loads(sys.argv[1])
-assert d['schema_version'] == 3, d['schema_version']   # 3 since 2.2.0 (#355)
+assert d['schema_version'] == 4, d['schema_version']   # 4 since 2.6.0 (#382)
 rc = d['running_containers']
 def find(cid):
     for c in rc:

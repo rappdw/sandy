@@ -284,8 +284,8 @@ echo "-- E6. crossSessionInbound: decision 6 (#382, 2.6.0) -- an entry alone, wi
 # no longer does, WITH a real supervised entry running (E2-E4 above already
 # proved the process is alive) -- refuse is not merely "nothing was running".
 #
-# relay{} itself is retired in a later removal (schema_version becomes 4
-# then); this checks the surviving, per-entry-identical surface instead --
+# relay{} itself was retired in 2.6.0 (#382, decisions 1-2, schema_version
+# 4); this checks the surviving, per-entry-identical surface instead --
 # feature_entries.acc-relay.path in the marker, anchored on its own key so a
 # neighbouring field can never be mistaken for it (§88b).
 ck "session marker reports feature_entries.acc-relay.path" \

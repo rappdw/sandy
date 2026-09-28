@@ -3511,9 +3511,13 @@ check "--print-schema output is valid JSON" \
 # §93(7) separately asserts the emitted value matches SANDY_SCHEMA_VERSION;
 # this one asserts WHICH number that is. 2 as of 2.0.0 (D11): sandboxes[].features
 # kept its name and changed its source, so a consumer that kept parsing would
-# silently get a different question answered.
-check "schema has schema_version=3 (moved by #355: the bundled removal of the handoff reporting fields — a vanished field is otherwise silent, so the bump IS the signal)" \
-    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d[\"schema_version\"]==3" "$1"' \
+# silently get a different question answered. 3 as of 2.2.0 (#355): the bundled
+# removal of the handoff reporting fields. 4 as of 2.6.0 (#382): relay{} (every
+# field) and the two feature_entries.<name> companions relay_alias/disabled_by
+# were removed -- a vanished field is otherwise silent, so the bump IS the
+# signal.
+check "schema has schema_version=4 (moved by #382: relay{} + two companion fields removed)" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d[\"schema_version\"]==4" "$1"' \
     -- "$_SCHEMA_JSON"
 check "schema has sandy.version" \
     bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d[\"sandy\"][\"version\"]" "$1"' \
@@ -3565,11 +3569,11 @@ import json,sys
 d=json.load(open(sys.argv[1]))
 assert \".envrc\" in d[\"protected_paths\"][\"files\"]
 " "$1"' -- "$_SCHEMA_JSON"
-check "schema compatibility.supported_schema_versions contains 3 (sandy emits exactly one schema; it does not offer to speak the old one)" \
+check "schema compatibility.supported_schema_versions contains 4 (sandy emits exactly one schema; it does not offer to speak the old one)" \
     bash -c 'python3 -c "
 import json,sys
 d=json.load(open(sys.argv[1]))
-assert 3 in d[\"compatibility\"][\"supported_schema_versions\"]
+assert d[\"compatibility\"][\"supported_schema_versions\"] == [4], d[\"compatibility\"][\"supported_schema_versions\"]
 " "$1"' -- "$_SCHEMA_JSON"
 
 # --- --print-state ---
@@ -3632,8 +3636,8 @@ d=json.load(open(sys.argv[1]))
 sb=[s for s in d[\"sandboxes\"] if s.get(\"name\")==\"zork-3dfda686\"]
 assert sb, \"fixture sandbox missing from --print-state output\"
 s=sb[0]
-req={\"name\",\"path\",\"workspace_path\",\"workspace_exists\",\"created_version\",\"last_used_version\",\"created_at\",\"last_used_at\",\"size_bytes\",\"relay\",\"agents\",\"agent_args_files\",\"lock_held\",\"lock_holder_pid\",\"lock_holder_alive\"}
-gone={\"handoff_enabled\",\"handoff\"}
+req={\"name\",\"path\",\"workspace_path\",\"workspace_exists\",\"created_version\",\"last_used_version\",\"created_at\",\"last_used_at\",\"size_bytes\",\"feature_entries\",\"agents\",\"agent_args_files\",\"lock_held\",\"lock_holder_pid\",\"lock_holder_alive\"}
+gone={\"handoff_enabled\",\"handoff\",\"relay\"}
 assert not (gone & set(s)), \"removed fields still emitted: \"+repr(sorted(gone & set(s)))
 missing=req-set(s)
 assert not missing, \"missing per-sandbox fields: \"+repr(sorted(missing))
@@ -5642,11 +5646,11 @@ DOCKERSHIM
 chmod +x "$_U71_IS_BIN/docker"
 
 _U71_IS_FULL="$(PATH="$_U71_IS_BIN:$PATH" bash "$_SBX_SCRIPT" --print-state 2>/dev/null)"
-check "image_stale (full mode): true for the stale container, false for the current one; schema_version 3 (mutation: swap the comparison, or compare the wrong ids -> true/false flip or both null)" \
+check "image_stale (full mode): true for the stale container, false for the current one; schema_version 4 since 2.6.0 (#382) (mutation: swap the comparison, or compare the wrong ids -> true/false flip or both null)" \
     bash -c 'python3 -c "
 import json, sys
 d = json.loads(sys.argv[1])
-assert d[\"schema_version\"] == 3, d[\"schema_version\"]
+assert d[\"schema_version\"] == 4, d[\"schema_version\"]
 rc = d[\"running_containers\"]
 stale = next(c for c in rc if c[\"sandbox\"] == \"stale-aaa111\")
 curr  = next(c for c in rc if c[\"sandbox\"] == \"curr-bbb222\")
@@ -11789,7 +11793,7 @@ check "§114(13e-2) one adopted entry: the block emits exactly SANDY_FEATURE_ENT
 
 check "§114(13f) marker printf: cross_session_inbound present, handoff_relay GONE (#355 — the deprecated alias for launch intent, superseded by relay.source)" \
     bash -c 'grep -q "\"cross_session_inbound\": %s" "$1" && ! grep -q "\"handoff_relay\": %s" "$1"' -- "$_S114_SANDY"
-_S114_FMT_LINE="$(grep -m1 -n '"cross_session_inbound": %s' "$_S114_SANDY" | cut -d: -f1)"
+_S114_FMT_LINE="$(grep -m1 -n '"cross_session_inbound": %s' "$_S114_SANDY" | cut -d: -f1 || true)"
 _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]' | wc -l | tr -d ' ')"
 # 15 as of 1.11.0: the relay{} object (#258) added slot, path and disabled_by to
 # the 12 fields this pinned before. The count is a cheap static tripwire for a
@@ -11823,8 +11827,14 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # feature:<name>/default only, still the same field, same slot, same count.
 # 21 as of 2.4.0: `offline` (#219) -- the launch skipped the update lookups
 # by choice (SANDY_OFFLINE / --no-update-check), provable after the fact.
-check "§114(13g) marker printf format/arg count line up (21 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 21
+# 18 as of 2.6.0 (#382, decisions 1-2): relay{} removed in its entirety --
+# `relay.source`, `relay.path` and `relay.disabled_by` (three conversions,
+# the trailing three added at 1.11.0/2.1.0 above) are GONE, not merely
+# constant. The tripwire went DOWN again, same as the 2.2.0 removal noted
+# above: an equality catches a forgotten argument drop exactly as it catches
+# a forgotten add.
+check "§114(13g) marker printf format/arg count line up (18 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 18
 
 # (14) sandy-handoff-sessions helper: REMOVED in 2.6.0 (#382, decision 7) along
 # with the helper itself; the pane-identity contract it was built on stays
@@ -12829,15 +12839,19 @@ check "§115(3) exactly one summary block exists (mutation: a second copy would 
 unset _S115_SELF _S115_SUMMARY_LINE _S115_LAST_SECTION
 
 # ============================================================
-echo "§123: the relay capability — SANDY_RELAY, the :ro relay-bin slot, and honest state (#258)"
+echo "§123: the relay-bin slot mount and operator-key refusals; the entry startup window (#258; relay{} object removed 2.6.0, #382)"
 # ============================================================
 # WHY THIS SECTION EXISTS, and what it deliberately does NOT test.
 #
 # #258 replaced "a relay is a per-workspace CONFIGURATION" (SANDY_HANDOFF_RELAY,
 # privileged, names a path) with "a relay is a sandy CAPABILITY" (SANDY_RELAY,
 # passive, names nothing; the payload is an executable in a host-owned slot).
-# Three properties carry the whole design, and each has a way of passing
-# vacuously that this section is built to prevent:
+# SANDY_RELAY itself is a hard error since 2.6.0 (#382, decision 3; see §149),
+# so what is left here is the surrounding structure: two removed-surface
+# refusals (an operator-set SANDY_HANDOFF_RELAY, a leftover relay-bin/ entry)
+# and the bounded startup window every adopted entry goes through. Two
+# properties carry the whole design, and each has a way of passing vacuously
+# that this section is built to prevent:
 #
 #   1. The slot is READ-ONLY BY MOUNT, not by permission bits. The agent runs
 #      as the host uid and OWNS the entry, so bits bind nothing — it could
@@ -12850,10 +12864,13 @@ echo "§123: the relay capability — SANDY_RELAY, the :ro relay-bin slot, and h
 #      the relay — so the acceptance test has something true to confirm.
 #   2. An installed-but-broken entry must be an ERROR, never "absent". The
 #      silent no-op is the failure mode the whole design exists to retire.
-#   3. The session marker must NEVER claim the relay started. It is bind-mounted
-#      :ro, so it is written before `docker run`, while the relay starts
-#      in-container — it cannot know. Reading `handoff_relay: true` as liveness
-#      is exactly why a relay crash-looped for 35 hours unnoticed.
+#
+# relay{} itself — the session marker's LIVE-state-shaped object, and
+# --print-state's honest reporting of it — is GONE as of 2.6.0 (#382,
+# decisions 1-2): the marker never claimed the relay started (it is written
+# host-side before `docker run`), and now there is nothing named `relay` left
+# to make that claim about. What replaced it, feature_entries.<name>, is
+# covered in §172 and §176(b)/(c).
 _S123_DIR="$(mktemp -d)"
 # Extract the two units under test rather than re-implementing their logic: a
 # paraphrase in a test asserts the paraphrase, not the shipped code.
@@ -12868,7 +12885,7 @@ sed -n '/^# BEGIN relay capability/,/^# END relay capability/p' "$SANDY_SCRIPT" 
 awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$SANDY_SCRIPT" > "$_S123_DIR/supervisor.sh"
 
 check "§123(pre-a) the resolution block was extracted (mutation: renaming the BEGIN/END markers empties it and would make every resolution check below vacuous)" \
-    bash -c 'grep -q "_sandy_relay_source=" "$1" && [ "$(grep -c . "$1")" -gt 20 ]' -- "$_S123_DIR/resolve.sh"
+    bash -c 'grep -q "_sandy_relay_slot_dir=" "$1" && [ "$(grep -c . "$1")" -gt 20 ]' -- "$_S123_DIR/resolve.sh"
 check "§123(pre-b) the supervisor function was extracted" \
     bash -c 'grep -q "flock -n 9" "$1" && [ "$(grep -c . "$1")" -gt 30 ]' -- "$_S123_DIR/supervisor.sh"
 
@@ -12879,12 +12896,15 @@ check "§123(pre-b) the supervisor function was extracted" \
 # that are SUPPOSED to exit non-zero (§92-class — an unguarded failure inside
 # `$( )` would abort the whole suite rather than being measured).
 _s123_resolve() {
-    # _s123_resolve <entry: none|exec|noexec> <override> -> "source relayvar" or
+    # _s123_resolve <entry: none|exec|noexec> <override> -> "ok relayvar" or
     # "EXIT <n>". No SANDY_RELAY param any more (r3, decision 3, #382, 2.6.0):
     # the capability toggle this block used to read is gone -- setting the key
     # is now a hard error, handled entirely OUTSIDE this block (§176(a)), so
-    # inside it there is nothing left keyed on it. `$_sandy_relay_source`
-    # replaces the old `$_sandy_relay_slot`/`$_sandy_relay_from_slot` pair.
+    # inside it there is nothing left keyed on it. `_sandy_relay_source` is
+    # ALSO gone (r5, decisions 1-2, #382): the block no longer computes a
+    # producer name for anything to report (relay{} itself is removed), so a
+    # successful source is reported as the literal "ok" rather than a value
+    # the block no longer sets.
     local entry="$1" override="$2" sb
     sb="$_S123_DIR/sb.$$.$RANDOM"; mkdir -p "$sb"
     case "$entry" in
@@ -12913,15 +12933,15 @@ _s123_resolve() {
         SANDBOX_DIR="$sb"
         [ -n "$override" ] && SANDY_HANDOFF_RELAY="$override"
         . "$_S123_DIR/resolve.sh"
-        echo "$_sandy_relay_source ${SANDY_HANDOFF_RELAY:-<unset>}"
+        echo "ok ${SANDY_HANDOFF_RELAY:-<unset>}"
     2>/dev/null )" || rc=$?
     if [ "$rc" -ne 0 ]; then echo "EXIT $rc"; else echo "$out"; fi
     return 0
 }
 
 _S123_A="$(trap - ERR; _s123_resolve none   '')"
-check "§123(1) no entry in the slot resolves 'none', starting nothing (got: $_S123_A)" \
-    bash -c '[ "$1" = "none <unset>" ]' -- "$_S123_A"
+check "§123(1) no entry in the slot does not refuse, and starts nothing (got: $_S123_A)" \
+    bash -c '[ "$1" = "ok <unset>" ]' -- "$_S123_A"
 
 _S123_B="$(trap - ERR; _s123_resolve exec   '')"
 check "§123(2) an executable entry now FAILS THE LAUNCH — the slot was removed in 2.2.0 (#354) and a leftover entry is a migration that never finished, so ignoring it would start the wrong relay, or none, without saying so (got: $_S123_B)" \
@@ -12947,7 +12967,7 @@ check "§123(5) an operator-set SANDY_HANDOFF_RELAY now FAILS THE LAUNCH — rem
 # resolves is the empty slot.
 check "§123(6) exactly ONE of the four cases resolves (the empty slot) and the other three REFUSE — a block that failed to source would make all four identical, and a block that ignored the removals would make all four resolve" \
     bash -c '_ok=0; for v in "$2" "$3" "$4"; do case "$v" in "EXIT "*) _ok=$((_ok+1)) ;; esac; done
-             [ "$_ok" -eq 3 ] && [ "$1" = "none <unset>" ]' \
+             [ "$_ok" -eq 3 ] && [ "$1" = "ok <unset>" ]' \
     -- "$_S123_A" "$_S123_B" "$_S123_D" "$_S123_E"
 
 # --- the mount: right target, right flag, present exactly when it should be --
@@ -12961,15 +12981,17 @@ check "§123(8) the slot mount site is gone entirely, not merely un-gated — a 
 check "§123(9) the slot mount does NOT reuse the handoff relay STATE dir (relay-bin/ vs handoff/relay/ — one is :ro code, the other rw state)" \
     bash -c '! grep -q "handoff/relay:/opt/sandy/relay" "$1"' -- "$SANDY_SCRIPT"
 
-# --- the marker records INTENT and is structurally unable to record liveness --
-check "§123(10) the session marker no longer emits relay.slot — removed in 2.2.0 (#355) with the slot it described; relay.source replaced it and relay.disabled_by SURVIVES, because #354 re-scoped the key it names" \
-    bash -c '! grep -q "\"slot\": %s" "$1" && grep -q "\"source\": %s" "$1" && grep -q "\"disabled_by\": %s" "$1"' -- "$SANDY_SCRIPT"
-# (11) is BEHAVIOURAL, not a grep: it runs the shipped marker composer with the
-# slot in its "a relay will run" state — the one case where a careless
-# implementation would be tempted to write "started" — and reads the JSON it
-# actually produced. A source-text check can be walked around by moving the
-# literal into the printf format string; this cannot.
-sed -n '/^_sandy_relay_json=false;/,/^    > "\$_sandy_session_file"$/p' "$SANDY_SCRIPT" > "$_S123_DIR/marker.sh"
+# --- the marker records INTENT, and there is no relay{} left to carry it in --
+check "§123(10) the session marker emits no relay{} at all any more (2.6.0, #382, decisions 1-2) — no 'relay': {, no 'source': %s, no 'disabled_by': %s" \
+    bash -c '! grep -q "\"relay\": {" "$1" && ! grep -q "\"source\": %s" "$1" && ! grep -q "\"disabled_by\": %s" "$1"' -- "$SANDY_SCRIPT"
+# (11) is BEHAVIOURAL, not a grep: it runs the shipped marker composer and
+# reads the JSON it actually produced. A source-text check can be walked
+# around by moving a literal into the printf format string; this cannot.
+# Anchored the same way §134 anchors it (the marker printf's own OPENING,
+# not a substring that merely happened to be unique when this was written --
+# the previous anchor, `_sandy_relay_json=false;`, was itself deleted in
+# 2.6.0's removal, which is exactly the trap this anchor style avoids).
+awk '/^printf .\{.n  "schema": 1,/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$SANDY_SCRIPT" > "$_S123_DIR/marker.sh"
 _S123_MARKER="$(
     trap - ERR
     set +e
@@ -12982,75 +13004,39 @@ _S123_MARKER="$(
     SANDBOX_NAME=x-deadbeef
     _sandy_session_nonce=deadbeef; _sandy_effort_json=null
     _sandy_perm_mode_json='"bypassPermissions"'; _sandy_csi_json='"accept"'; CRED_MODE=full
+    # _sandy_agents_json has no default in the printf, unlike csi_json or
+    # csi_src_json, so an unset reference dies on set -u the same way an
+    # absent SANDBOX_NAME used to, above -- re-anchoring this extraction to
+    # the §134-style printf-only span (2.6.0, r5) dropped the agents-building
+    # loop the OLD, wider span used to include, so this stub is now required.
+    _sandy_agents_json=null
     _sandy_session_file="$_S123_DIR/marker.json"
-    SANDY_HANDOFF_RELAY=/opt/sandy/relay/relay
     . "$_S123_DIR/marker.sh" >/dev/null 2>&1
     cat "$_S123_DIR/marker.json" 2>/dev/null
 )"
-check "§123(11a) the marker composer emits parseable JSON carrying relay.source (mutation: a printf/arg mismatch shifts every field after the gap and this goes red)" \
-    bash -c 'echo "$1" | tr -d " \n" | grep -q "\"relay\":{\"source\":" && echo "$1" | grep -q "\"schema\": 1"' -- "$_S123_MARKER"
-check "§123(11b) the marker NEVER says the relay started, even with a relay about to run — it is composed before docker run while the relay starts in-container, so that field would be a claim sandy is structurally unable to make (this is the 35-hour-crash-loop regression)" \
+check "§123(11a) the marker composer emits parseable JSON with NO top-level 'relay' key (mutation: a printf/arg mismatch shifts every field after the gap and this goes red)" \
+    bash -c 'python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+assert \"relay\" not in d, d
+assert d[\"schema\"]==1, d
+" "$1"' -- "$_S123_MARKER"
+check "§123(11b) the marker NEVER says a relay started — it is composed before docker run while every entry starts in-container, so that would be a claim sandy is structurally unable to make (this is the 35-hour-crash-loop regression)" \
     bash -c '! echo "$1" | grep -q "started"' -- "$_S123_MARKER"
 check "§123(11c) the marker carries no live-state fields at all (no restarts/last_exit_code/state) — those belong to --print-state, which can actually observe them" \
     bash -c '! echo "$1" | grep -qE "\"(state|restarts|last_exit_code|last_restart_at)\""' -- "$_S123_MARKER"
-check "§123(12) handoff_relay is GONE from the marker (#355) — the deprecated alias for launch intent, superseded by relay.source; a vanished field is silent unless schema_version moves, which is why it did" \
+check "§123(12) handoff_relay is GONE from the marker (#355) — the deprecated alias for launch intent; a vanished field is silent unless schema_version moves, which is why it did" \
     bash -c '! grep -q "\"handoff_relay\": %s" "$1"' -- "$SANDY_SCRIPT"
 
-# --- --print-state carries the LIVE state, from fixtures of every shape -------
-# Built as real sandbox directories under an isolated SANDY_HOME and read by the
-# real fast-path handler, so this exercises the shipped emitter end to end.
-_S123_PSH="$_S123_DIR/home"; mkdir -p "$_S123_PSH/sandboxes"
-_s123_mksb() { mkdir -p "$_S123_PSH/sandboxes/$1/handoff/relay" "$_S123_PSH/sandboxes/$1/relay-bin"; printf '{"canonical_path":"/nonexistent/%s"}\n' "$1" > "$_S123_PSH/sandboxes/$1/WORKSPACE.json"; }
-_s123_install() { printf '#!/bin/sh\n' > "$_S123_PSH/sandboxes/$1/relay-bin/relay"; chmod +x "$_S123_PSH/sandboxes/$1/relay-bin/relay"; }
-_s123_mksb r-absent
-_s123_mksb r-started;  _s123_install r-started;  printf 'state=started\nrestarts=0\nlast_exit_code=\nlast_restart_at=\n' > "$_S123_PSH/sandboxes/r-started/handoff/relay/.state"
-_s123_mksb r-looping;  _s123_install r-looping;  printf 'state=looping\nrestarts=417\nlast_exit_code=3\nlast_restart_at=2026-09-12T01:02:03Z\n' > "$_S123_PSH/sandboxes/r-looping/handoff/relay/.state"
-_s123_mksb r-failed;   _s123_install r-failed
-_s123_mksb r-disabled; printf '{\n  "schema": 1,\n  "relay": {\n    "slot": "disabled",\n    "path": null,\n    "disabled_by": "workspace"\n  }\n}\n' > "$_S123_PSH/sandboxes/r-disabled/sandy-session.json"
-
-_S123_PS="$(trap - ERR; SANDY_HOME="$_S123_PSH" "$SANDY_SCRIPT" --print-state 2>/dev/null || true)"
-# Each fixture is read from a home containing ONLY that fixture, so "the document
-# says looping" is unambiguous without having to carve one sandbox object out of
-# a five-sandbox document.
-#
-# The previous version anchored on "name":"<fixture>"[^}]*"relay":{ -- and broke
-# the moment #265 inserted a `handoff` OBJECT ahead of `relay`, because the
-# character class cannot span that object's closing brace. Six checks failed
-# against an emitter that was entirely correct. A per-sandbox extractor that
-# encodes the field ORDER of its neighbours is a tripwire for the next person to
-# add a field, not a test of this one; portable per-object splitting is not worth
-# it (BSD sed will not put a newline in a replacement, and BWK awk takes only a
-# single-character RS), so the fixtures are separated instead of the output.
-_s123_one() {   # _s123_one <fixture> -> that fixture's --print-state document
-    local h="$_S123_DIR/one-$1"
-    rm -rf "$h"; mkdir -p "$h/sandboxes"
-    cp -R "$_S123_PSH/sandboxes/$1" "$h/sandboxes/$1"
-    SANDY_HOME="$h" "$SANDY_SCRIPT" --print-state 2>/dev/null | tr -d ' \n'
-}
-_s123_field() { _s123_one "$1"; }
-
-check "§123(13) --print-state reports 'absent' for a sandbox with no relay installed" \
-    bash -c 'echo "$1" | grep -q "\"state\":\"absent\""' -- "$(trap - ERR; _s123_field r-absent)"
-check "§123(14) --print-state reports 'started' when the supervisor recorded a clean start" \
-    bash -c 'echo "$1" | grep -q "\"state\":\"started\""' -- "$(trap - ERR; _s123_field r-started)"
-check "§123(15) --print-state reports 'looping' WITH the restart count and last exit code — the field that would have surfaced a 35-hour crash loop" \
-    bash -c 'echo "$1" | grep -q "\"state\":\"looping\"" && echo "$1" | grep -q "\"restarts\":417" && echo "$1" | grep -q "\"last_exit_code\":3"' \
-    -- "$(trap - ERR; _s123_field r-looping)"
-check "§123(16) --print-state reports 'failed' for a relay that is installed but which no supervisor ever recorded starting" \
-    bash -c 'echo "$1" | grep -q "\"state\":\"failed\""' -- "$(trap - ERR; _s123_field r-failed)"
-check "§123(17) --print-state reports 'disabled' and names WHO disabled it, so a cloned repo cannot silently un-enrol a fleet sandbox" \
-    bash -c 'echo "$1" | grep -q "\"state\":\"disabled\"" && echo "$1" | grep -q "\"disabled_by\":\"workspace\""' \
-    -- "$(trap - ERR; _s123_field r-disabled)"
-check "§123(18) the five fixtures produced five DISTINCT states (mutation: an emitter hardcoding one value passes 13-17 individually and fails here)" \
-    bash -c 'n="$(for v in "$@"; do printf "%s\n" "$v" | sed -n "s/.*\"relay\":{\"state\":\"\([a-z]*\)\".*/\1/p"; done | sort -u | grep -c .)"; [ "$n" -eq 5 ]' -- \
-    "$(trap - ERR; _s123_field r-absent)" "$(trap - ERR; _s123_field r-started)" "$(trap - ERR; _s123_field r-looping)" \
-    "$(trap - ERR; _s123_field r-failed)" "$(trap - ERR; _s123_field r-disabled)"
-check "§123(19) relay is emitted in LIGHT mode too — a fleet poller must not have to pay for a du walk to learn its connectors are down" \
-    bash -c 'SANDY_HOME="$2" "$1" --print-state --light 2>/dev/null | tr -d " \n" | grep -q "\"relay\":{\"state\""' -- "$SANDY_SCRIPT" "$_S123_PSH"
-check "§123(20) --print-state keeps its stream contract with the new field (0 bytes on stderr)" \
-    bash -c 'e="$(SANDY_HOME="$2" "$1" --print-state 2>&1 >/dev/null)"; [ -z "$e" ]' -- "$SANDY_SCRIPT" "$_S123_PSH"
-check "§123(21) live state is read from the fixed-size .state file, NOT by parsing the append-only supervisor.log (which a crash loop grows without bound — an unbounded read in a polling path)" \
-    bash -c '! grep -q "supervisor.log" "$1" || ! grep -n "supervisor.log" "$1" | awk -F: "\$1 > 1900 && \$1 < 2200" | grep -q .' -- "$SANDY_SCRIPT"
+# --- --print-state's LIVE relay{} reporting is GONE with the field itself ----
+# (13)-(21) used to build five sandbox fixtures (absent/started/looping/failed/
+# disabled) and assert --print-state's relay{} read each back correctly,
+# including in light mode and with a stream-contract check. relay{} no longer
+# exists (2.6.0, #382, decisions 1-2), so there is nothing left for any of that
+# to assert against. What replaced it -- feature_entries.<name> LIVE state,
+# including its own light-mode emission and stream-contract coverage -- is
+# §172(6)/(7) and §176(b)/(c); "no top-level relay key, in full AND light mode"
+# is §176(b2)/(b3).
 
 # --- housekeeping: the slot must survive a reset, and be named when destroyed -
 # _rs_keep is EXTRACTED AND CALLED rather than grepped for its literal pattern.
@@ -14663,9 +14649,12 @@ _s134_marker() {
         SANDY_WORKSPACE="/home/sandy/my repo"
         SANDBOX_NAME="myrepo-abc12345"
         _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
-        _sandy_agents_json=null; _sandy_relay_json=false; _sandy_relay_slot_json=null
-        _sandy_relay_path_json=null; _sandy_relay_disabled_by_json=null
-        _sandy_relay_source_json=null            # 2.1.0 (#345)
+        _sandy_agents_json=null
+        # relay{} and its stubs (_sandy_relay_json, _sandy_relay_slot_json,
+        # _sandy_relay_path_json, _sandy_relay_disabled_by_json,
+        # _sandy_relay_source_json (2.1.0, #345)) are gone -- removed from the
+        # printf itself in 2.6.0 (#382, decisions 1-2), so there is nothing
+        # left for this harness to stub.
         _SANDY_FM_AA_JSON=""                     # 2.1.0 (#348)
         CRED_MODE=none; _sandy_session_nonce=deadbeef; _sandy_session_file=/dev/stdout
         eval "$_blk"
@@ -16768,150 +16757,56 @@ unset -f _s148_resolve _s148_mk _s148_field
 
 # ============================================================
 echo ""
-echo "§149: relay reporting — which producer, and is its executable still there (#345, #344)"
+echo "§149: relay-bin/operator-key refusals; entry adoption (#345, #344 — relay{} producer reporting removed 2.6.0, #382)"
 # ============================================================
-# #345: `relay.slot` is written ONLY by the relay-bin slot block, so an explicit
-# SANDY_HANDOFF_RELAY, a manifest `entry` and no relay at all all report
-# "absent". A consumer shipped a check on it that called every correctly
-# migrated sandbox broken and would have called one still running a shim
-# healthy.
-#
-# MEASURED WHILE FIXING, and it is why documentation could not have been the
-# answer: in --print-state the field `path` -- which the issue proposed as the
-# discriminator -- was derived from the slot DIRECTORY alone, so the manifest
-# and explicit producers were BYTE-IDENTICAL there ({"state":"started",
-# "path":null}). The fleet API could not tell them apart at all.
-#
-# #344: migrating off the slot means removing a mounted executable from under a
-# running relay. Every sandbox up at that moment keeps state=started,
-# restarts=0, and nothing anywhere distinguishes it from a correct one.
-#
-# THE GUARDS ASSERT DISCRIMINATION, NOT VALUES. A check that pins
-# source=="manifest" for one fixture passes on an emitter that returns
-# "manifest" for everything; these assert that no two producers collide.
+# #345/#344 used to cover which PRODUCER (slot/explicit/manifest) supplied a
+# relay and whether its executable was still present, read back through
+# relay{} in --print-state. relay{} -- every field -- is GONE as of 2.6.0
+# (#382, decisions 1-2), and with it the very idea of "which producer" --
+# every adopted entry is now reported identically via feature_entries.<name>,
+# which has its own executable_present coverage in §172(6)/(7) and its own
+# discrimination-style coverage in §176(b)/(c). What survives here is the
+# still-live half of the DESIGN #345/#344 sit inside: the relay-bin slot and
+# operator-key refusals (unchanged by this removal), and manifest entry
+# adoption into _sandy_fe_list.
 _S149_SANDY="$SANDY_SCRIPT"
 _S149_H="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S149_H/sandboxes" "$_S149_H/features/amap/payload"
 printf '#!/bin/sh\n' > "$_S149_H/features/amap/payload/relay"; chmod +x "$_S149_H/features/amap/payload/relay"
 
-# _s149_mk <slug> <slot> <source> <path-json> [install-slot-entry]
-_s149_mk() {
-    mkdir -p "$_S149_H/sandboxes/$1/handoff/relay"
-    printf 'state=started\nrestarts=0\n' > "$_S149_H/sandboxes/$1/handoff/relay/.state"
-    printf '{\n  "schema": 1,\n  "relay": {\n    "slot": "%s",\n    "source": "%s",\n    "path": %s,\n    "disabled_by": null\n  },\n  "cred_mode": "full"\n}\n' \
-        "$2" "$3" "$4" > "$_S149_H/sandboxes/$1/sandy-session.json"
-    if [ "${5:-}" = "install" ]; then
-        mkdir -p "$_S149_H/sandboxes/$1/relay-bin"
-        printf '#!/bin/sh\n' > "$_S149_H/sandboxes/$1/relay-bin/relay"
-        chmod +x "$_S149_H/sandboxes/$1/relay-bin/relay"
-    fi
-}
-_s149_mk p1explicit-11111111 absent  explicit '"/home/sandy/dev/x/.sandy/relay.sh"'
-_s149_mk p2slot-22222222     present slot     '"/opt/sandy/relay/relay"'          install
-_s149_mk p3manifest-33333333 absent  manifest '"/opt/sandy/features/amap/relay"'
-_s149_mk p4gone-44444444     absent  manifest '"/opt/sandy/features/ghost/relay"'
-_s149_mk p5slotgone-55555555 present slot     '"/opt/sandy/relay/relay"'
-
-_S149_PS="$(SANDY_HOME="$_S149_H" bash "$_S149_SANDY" --print-state 2>/dev/null)"
-check "§149(pre) --print-state produced a parseable document for the five fixtures" \
-    bash -c 'printf "%s" "$1" | grep -q p3manifest' _ "$_S149_PS"
-
-if command -v node >/dev/null 2>&1; then
-    # --- #345: discrimination, asserted as a property -------------------------
-    # Every producer's (source, path) pair must be UNIQUE across the corpus. The
-    # pre-fix emitter fails this: p1explicit and p3manifest both yielded
-    # (absent, null). Deliberately computed rather than enumerated, so adding a
-    # producer later without a discriminator fails here.
-    _S149_UNIQ="$(printf '%s' "$_S149_PS" | node -e '
-        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
-          const j = JSON.parse(s);
-          const keys = j.sandboxes.map(sb => JSON.stringify([sb.relay.source, sb.relay.path]));
-          const distinct = new Set(keys).size;
-          // p2slot and p5slotgone are the SAME producer with the same path and
-          // are expected to collide on this pair -- they are separated by
-          // executable_present, checked below. So four producers, four pairs.
-          console.log(distinct);
-        });')"
-    check "§149(1) the four DISTINCT producers yield four distinct (source, path) pairs — pre-fix, explicit and manifest both reported (absent, null) (got $_S149_UNIQ distinct pairs across 5 fixtures, 2 of which share a producer)" \
-        test "$_S149_UNIQ" -eq 4
-    _S149_SRCS="$(printf '%s' "$_S149_PS" | node -e '
-        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
-          const j = JSON.parse(s);
-          console.log(j.sandboxes.map(sb => sb.name.slice(0,2) + "=" + sb.relay.source).sort().join(" "));
-        });')"
-    check "§149(2) each producer names ITSELF — not a single value returned for everything (got: $_S149_SRCS)" \
-        bash -c 'printf "%s" "$1" | grep -q "p1=explicit" && printf "%s" "$1" | grep -q "p2=slot" && printf "%s" "$1" | grep -q "p3=manifest"' _ "$_S149_SRCS"
-    check "§149(3) a manifest-entry relay reports its real path in --print-state, not null — this surface derived path from the slot directory alone, so it was blind to two of the three producers" \
-        bash -c 'printf "%s" "$1" | node -e "
-            let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>{
-              const j=JSON.parse(s);
-              const sb=j.sandboxes.find(x=>x.name.startsWith(\"p3manifest\"));
-              process.exit(sb.relay.path === \"/opt/sandy/features/amap/relay\" ? 0 : 1);
-            });"' _ "$_S149_PS"
-
-    # --- #344: the executable fact -------------------------------------------
-    _S149_EXE="$(printf '%s' "$_S149_PS" | node -e '
-        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
-          const j = JSON.parse(s);
-          console.log(j.sandboxes.map(sb => sb.name.slice(0,2) + "=" + String(sb.relay.executable_present)).sort().join(" "));
-        });')"
-    check "§149(4) a relay whose executable is still present reports true (got: $_S149_EXE)" \
-        bash -c 'printf "%s" "$1" | grep -q "p2=true" && printf "%s" "$1" | grep -q "p3=true"' _ "$_S149_EXE"
-    check "§149(5) a relay recorded as STARTED whose executable is gone reports false — for BOTH producers, which is the state the whole fleet lands in when the slot is emptied under running sandboxes" \
-        bash -c 'printf "%s" "$1" | grep -q "p4=false" && printf "%s" "$1" | grep -q "p5=false"' _ "$_S149_EXE"
-    check "§149(6) an EXPLICIT relay path reports null — the host cannot resolve a container path, and saying so beats guessing (a false here would be a fabricated verdict)" \
-        bash -c 'printf "%s" "$1" | grep -q "p1=null"' _ "$_S149_EXE"
-
-    # --- the property #344 actually asks for ---------------------------------
-    # "must not present the sandbox as indistinguishable from a healthy one."
-    # Compared as WHOLE relay objects: a check on executable_present alone would
-    # pass on an emitter that dropped `state`, and the reported complaint was
-    # precisely that two sandboxes were identical in every readable field.
-    _S149_DISTINCT="$(printf '%s' "$_S149_PS" | node -e '
-        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
-          const j = JSON.parse(s);
-          const ok   = j.sandboxes.find(x => x.name.startsWith("p3manifest")).relay;
-          const gone = j.sandboxes.find(x => x.name.startsWith("p4gone")).relay;
-          const okS = {...ok}, goneS = {...gone};
-          delete okS.path; delete goneS.path;   // the path alone always differed
-          console.log(JSON.stringify(okS) === JSON.stringify(goneS) ? "IDENTICAL" : "DISTINCT");
-        });')"
-    check "§149(7) a started-but-orphaned relay is DISTINGUISHABLE from a healthy one even ignoring the path — both report state=started, so without executable_present these objects are identical (got: $_S149_DISTINCT)" \
-        test "$_S149_DISTINCT" = "DISTINCT"
-else
-    skip "§149(1-7) relay producer discrimination needs node to read --print-state back"
-fi
-
-# --- marker side: which producer claims the relay, and in what order ---------
-# Precedence is explicit > slot > manifest, and it is the block itself that is
-# run here rather than a restatement of it.
+# --- marker side: the relay-bin slot / operator-key refusals -----------------
 # The span opens at the slot DIRECTORY assignment, not at _sandy_relay_slot --
 # the directory is set one line earlier and the block dereferences it, so the
 # narrower range produced an unbound-variable abort that the checks below read
 # as an empty result rather than as a red.
 _S149_BLK="$(awk '/^_sandy_relay_slot_dir="\$SANDBOX_DIR\/relay-bin"/,/^# END relay capability/' "$_S149_SANDY")"
 check "§149(pre-8) the relay capability block was extracted (mutation: rename its first line and (8)-(10) go vacuous)" \
-    bash -c 'printf "%s" "$1" | grep -q "_sandy_relay_source="' _ "$_S149_BLK"
-_s149_src() {   # $1 = install slot entry?  $2 = explicit value
+    bash -c 'printf "%s" "$1" | grep -q "relay-bin"' _ "$_S149_BLK"
+_s149_src() {   # $1 = install slot entry?  $2 = explicit value -> "resolved" or ""
     bash -c '
         set -uo pipefail
         warn(){ :; }; info(){ :; }; error(){ :; }
         # unset EXPLICITLY, never "just do not set it": a sandy session exports
         # SANDY_HANDOFF_RELAY, so this helper inherited a real relay path from
-        # the surrounding environment and every case reported "explicit". That
-        # is a host-dependent test -- green on a clean CI runner, red on a
-        # developer machine inside sandy, or the reverse.
+        # the surrounding environment and every case reported resolved when it
+        # should have refused. That is a host-dependent test -- green on a
+        # clean CI runner, red on a developer machine inside sandy, or the
+        # reverse.
         unset SANDY_HANDOFF_RELAY
         SANDBOX_DIR="$2"
         mkdir -p "$SANDBOX_DIR"
         if [ "$3" = install ]; then mkdir -p "$SANDBOX_DIR/relay-bin"; printf "#!/bin/sh\n" > "$SANDBOX_DIR/relay-bin/relay"; chmod +x "$SANDBOX_DIR/relay-bin/relay"; fi
         [ -n "$4" ] && SANDY_HANDOFF_RELAY="$4"
+        # The block no longer computes a producer name (relay{} and
+        # _sandy_relay_source are both gone, r5, #382 decisions 1-2) -- a
+        # successful source now reports the sentinel "resolved" rather than a
+        # value nothing sets any more.
         eval "$1"
-        echo "$_sandy_relay_source"
+        echo resolved
     ' _ "$_S149_BLK" "$_S149_H/probe$$_$RANDOM" "$1" "$2" 2>/dev/null
 }
-check "§149(8) no slot entry and no operator key -> source is 'none' (got: $(_s149_src noinstall ''))" \
-    test "$(_s149_src noinstall '')" = "none"
+check "§149(8) no slot entry and no operator key -> resolves, refusing nothing (got: $(_s149_src noinstall ''))" \
+    test "$(_s149_src noinstall '')" = "resolved"
 # (9) and (10) INVERTED by #354: both producers they asserted are removed, and
 # the replacement behaviour is a refusal rather than a different winner. A
 # deleted check would leave the removal unguarded; these assert that the block
@@ -16921,10 +16816,10 @@ check "§149(9) a leftover relay-bin entry REFUSES the launch — the slot was r
 check "§149(10) an operator-set SANDY_HANDOFF_RELAY REFUSES too — removed as a configuration key. Since 2.6.0 (#382) the host never sets the variable itself (entries pass via SANDY_FEATURE_ENTRIES), so a value present at THIS point can only be an operator's (got: $(_s149_src noinstall /x/relay))" \
     test "$(_s149_src noinstall /x/relay)" = ""
 
-# The manifest producer is claimed in the entry-adoption loop, not in the block
+# Manifest entry adoption happens in the entry-adoption loop, not in the block
 # above, so it is extracted and run separately rather than asserted from a
-# hand-written fixture marker -- (2) reads a marker someone wrote; this runs the
-# code that writes one.
+# hand-written fixture -- this runs the code that adopts an entry, not a
+# restatement of what it should do.
 _S149_ADOPT="$(awk '/^    while IFS= read -r _fm_l; do/,/^    done <<< "\$_sandy_fm_out"/' "$_S149_SANDY")"
 check "§149(pre-11) the manifest entry-adoption loop was extracted (2.6.0, #382: it no longer sets _sandy_relay_source -- every entry is identical now, adopted only into _sandy_fe_list)" \
     bash -c 'printf "%s" "$1" | grep -q "_sandy_fe_list="' _ "$_S149_ADOPT"
@@ -16955,8 +16850,8 @@ check "§149(11) a manifest entry is adopted into _sandy_fe_list, and the relay 
 # the real config loader).
 
 rm -rf "$_S149_H"
-unset _S149_SANDY _S149_H _S149_PS _S149_UNIQ _S149_SRCS _S149_EXE _S149_DISTINCT _S149_BLK _S149_ADOPT
-unset -f _s149_mk _s149_src _s149_adopt
+unset _S149_SANDY _S149_H _S149_BLK _S149_ADOPT
+unset -f _s149_src _s149_adopt
 
 # ============================================================
 echo ""
@@ -17108,40 +17003,16 @@ check "§151(5) INVERTED: SANDY_RELAY_STATE is not EXPORTED or passed as a docke
 check "§151(6) INVERTED: SANDY_HANDOFF_RELAY no longer gates any mount decision — there is no relay-state mount left for it to gate" \
     bash -c '! grep -B3 "relay-state:/opt/sandy/relay-state" "$1" | grep -q "SANDY_HANDOFF_RELAY"' _ "$_S151_SANDY"
 
-# --- (7-9) state_dir: the fact a consumer reads instead of constructing -----
-# (relay{} removal is a later change, once schema_version becomes 4; until
-# then --print-state's relay.state_dir reader is UNCHANGED, and a sandbox
-# that has not relaunched since before 2.2.0 still reports its last launch
-# honestly from the pre-2.2.0 location.)
-_S151_H="$_S151_DIR/home"
-mkdir -p "$_S151_H/sandboxes/new-11111111/relay-state" "$_S151_H/sandboxes/old-22222222/handoff/relay"
-printf 'state=started\nrestarts=2\n' > "$_S151_H/sandboxes/new-11111111/relay-state/.state"
-printf 'state=started\nrestarts=9\n' > "$_S151_H/sandboxes/old-22222222/handoff/relay/.state"
-for _s151_n in new-11111111 old-22222222; do
-    printf '{\n  "schema": 1,\n  "relay": {\n    "slot": "absent",\n    "source": "manifest",\n    "path": "/opt/sandy/features/amap/relay",\n    "disabled_by": null\n  },\n  "cred_mode": "full"\n}\n' \
-        > "$_S151_H/sandboxes/$_s151_n/sandy-session.json"
-done
-_S151_PS="$(SANDY_HOME="$_S151_H" bash "$_S151_SANDY" --print-state 2>/dev/null)"
-if command -v node >/dev/null 2>&1; then
-    _s151_rel() { printf '%s' "$_S151_PS" | node -e '
-        let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
-          const j=JSON.parse(s);
-          const sb=j.sandboxes.find(x=>x.name===process.argv[1]);
-          console.log(sb ? (sb.relay.state_dir||"") + " " + sb.relay.restarts : "NOSANDBOX");
-        });' "$1"; }
-    check "§151(7) --print-state NAMES the relay state directory, so a consumer reads a path sandy owns instead of constructing one (got: $(_s151_rel new-11111111))" \
-        bash -c 'printf "%s" "$1" | grep -q "/relay-state "' _ "$(_s151_rel new-11111111)"
-    check "§151(8) a sandbox that has NOT relaunched since the upgrade still reports its last launch honestly — read from the pre-2.2.0 location, and state_dir names THAT one (got: $(_s151_rel old-22222222))" \
-        bash -c 'printf "%s" "$1" | grep -q "handoff/relay 9$"' _ "$(_s151_rel old-22222222)"
-    check "§151(9) the two sandboxes report DIFFERENT state_dirs — a reader that always emitted the new path would pass (7) and silently mislead every un-relaunched sandbox" \
-        bash -c '[ "$1" != "$2" ]' _ "$(_s151_rel new-11111111)" "$(_s151_rel old-22222222)"
-    unset -f _s151_rel
-else
-    skip "§151(7-9) state_dir reporting needs node to read --print-state back"
-fi
+# --- (7-9) relay.state_dir: RETIRED with relay{} itself (2.6.0, #382, ---------
+# decisions 1-2). The property they proved -- a consumer reads a state
+# directory sandy NAMES rather than constructing, and an un-relaunched sandbox
+# is not misreported -- moved to feature_entries.<name>.state_dir, covered by
+# §176(b3) (an old-shape marker still reports a populated feature_entries) and
+# §176(e) (no host-side line outside the leftover-removal block above creates
+# or writes $SANDBOX_DIR/relay-state).
 
 rm -rf "$_S151_DIR"
-unset _S151_SANDY _S151_DIR _S151_MIG _S151_H _S151_PS _s151_n _S151_OUT
+unset _S151_SANDY _S151_DIR _S151_MIG
 unset -f _s151_mig
 
 # ============================================================
@@ -18438,7 +18309,6 @@ _s164_mk() {
         sandy_full_version() { echo 9.9.9; }
         _sandy_egress_mode=off SANDY_WORKSPACE=/w SANDBOX_NAME=w-1 _sandy_effort_json=null
         _sandy_perm_mode_json=null _sandy_csi_json=null _sandy_agents_json=null
-        _sandy_relay_source_json=null _sandy_relay_path_json=null _sandy_relay_disabled_by_json=null
         CRED_MODE=none _sandy_session_nonce=x _sandy_session_file=/dev/stdout
         SANDY_OFFLINE="$2"
         eval "$1"
@@ -19513,7 +19383,7 @@ unset -f _s172_kill_loops
 _S172_MKFN="$(awk '/^_sandy_fm_jesc\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$_S172_SANDY")"
 _S172_FEFN="$(awk '/^_sandy_fe_marker_body\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$_S172_SANDY")"
 check "§172(pre-6) both marker helpers were extracted" \
-    bash -c 'printf "%s" "$1" | grep -q jesc && printf "%s" "$2" | grep -q relay_alias' _ "$_S172_MKFN" "$_S172_FEFN"
+    bash -c 'printf "%s" "$1" | grep -q jesc && printf "%s" "$2" | grep -q path' _ "$_S172_MKFN" "$_S172_FEFN"
 
 # --- (6d) THE REAL CALL SITE, under set -euo pipefail, with an empty list ---
 # A verifier caught what (6a)-(6c) above all miss: `_s172_marker_fe` runs
@@ -19554,25 +19424,26 @@ _S172_RCS_EMPTY="$(_s172_real_callsite "")"
 check "§172(6d) the real call-site line does NOT abort the launch when no feature entry is selected -- the regression this whole verify round was about (got: $_S172_RCS_EMPTY)" \
     bash -c 'case "$1" in "RC=0 OUT= ACTUALRC=0") exit 0;; esac; exit 1' _ "$_S172_RCS_EMPTY"
 _S172_RCS_TWO="$(_s172_real_callsite "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s")"
-check "§172(6e) ...and still runs correctly with entries present, emitting relay_alias:false for both (2.6.0, #382: no designation any more) (got: $_S172_RCS_TWO)" \
-    bash -c 'printf "%s" "$1" | grep -q "ACTUALRC=0" && [ "$(printf "%s" "$1" | grep -o "relay_alias.: false" | wc -l | tr -d " ")" = 2 ]' _ "$_S172_RCS_TWO"
+check "§172(6e) ...and still runs correctly with entries present, emitting exactly {\"path\": ...} for both -- no relay_alias/disabled_by any more (2.6.0, #382 decisions 1-2) (got: $_S172_RCS_TWO)" \
+    bash -c 'printf "%s" "$1" | grep -q "ACTUALRC=0" && [ "$(printf "%s" "$1" | grep -o "\"path\": \"/opt/sandy/features/[a-z]*/[a-z]*\"" | wc -l | tr -d " ")" = 2 ] && ! printf "%s" "$1" | grep -q relay_alias' _ "$_S172_RCS_TWO"
 unset _S172_CALLLINE _S172_RCS_EMPTY _S172_RCS_TWO
 unset -f _s172_real_callsite
 
 _S172_MKBLK="$(awk '/^printf .\{.n  "schema": 1,/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$_S172_SANDY")"
 _s172_marker_fe() {
-    # $1=fe_list -> full marker JSON on stdout. ONE arg now (2.6.0, #382
-    # decisions 4-5): relay_alias is the JSON literal `false` unconditionally,
-    # and disabled_by stays `null` unconditionally -- neither is threaded
-    # through as a parameter any more, since there is no designated feature
-    # and no "disabled" fe_list left to describe.
+    # $1=fe_list -> full marker JSON on stdout. ONE arg (2.6.0, #382 decisions
+    # 1-2, 4-5): relay_alias and disabled_by are GONE, not just constant --
+    # each entry is now exactly {"path": ...}, so there is nothing left for a
+    # second parameter to describe (no designated feature, no "disabled"
+    # fe_list). The relay{}-stub globals a pre-r5 version of this driver set
+    # (_sandy_relay_source_json etc.) are gone too: the printf itself no
+    # longer references them.
     (
         eval "$_S172_MKFN"; eval "$_S172_FEFN"
         sandy_full_version() { echo "9.9.9"; }
         _sandy_egress_mode=off; SANDY_WORKSPACE=/home/sandy/ws; SANDBOX_NAME=ws-abc12345
         _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
-        _sandy_agents_json=null; _sandy_relay_source_json=null; _sandy_relay_path_json=null
-        _sandy_relay_disabled_by_json="null"
+        _sandy_agents_json=null
         _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""
         CRED_MODE=none; _sandy_session_nonce=deadbeef; _sandy_session_file=/dev/stdout
         _sandy_fe_list="$1"
@@ -19584,13 +19455,13 @@ _S172_MK2="$(_s172_marker_fe "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/
 if command -v python3 >/dev/null 2>&1; then
     check "§172(6a) two entries: the marker is valid JSON (mutation m5: dropping the \${_sandy_fe_json:-} arg breaks this under set -u)" \
         bash -c 'printf "%s" "$1" | python3 -c "import json,sys; json.load(sys.stdin)"' _ "$_S172_MK2"
-    check "§172(6b) feature_entries has BOTH features, relay_alias FALSE for both (2.6.0, #382 decisions 4-5: there is no designated one any more)" \
+    check "§172(6b) feature_entries has BOTH features, and each value's key set is EXACTLY {'path'} -- no relay_alias, no disabled_by (2.6.0, #382 decisions 1-2, 4-5: there is no designated one any more and nothing left to disable)" \
         bash -c 'printf "%s" "$1" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)[\"feature_entries\"]
 assert set(d.keys())=={\"alpha\",\"beta\"}, d
-assert d[\"alpha\"][\"relay_alias\"] is False
-assert d[\"beta\"][\"relay_alias\"] is False
+assert set(d[\"alpha\"].keys())=={\"path\"}, d[\"alpha\"]
+assert set(d[\"beta\"].keys())=={\"path\"}, d[\"beta\"]
 "' _ "$_S172_MK2"
     _S172_MK3="$(_s172_marker_fe "")"
     check "§172(6c) empty list -> feature_entries is the empty object {}, never null (the marker always knows the answer once #381 has shipped)" \
@@ -19605,42 +19476,48 @@ else
 fi
 unset _S172_MK2 _S172_MKFN _S172_FEFN _S172_MKBLK
 
-# --- (7) --print-state, feature_entries + dual reporting with relay{} ------
+# --- (7) --print-state, feature_entries LIVE reporting -- relay{} is GONE --
+# (2.6.0, #382, decisions 1-2). What used to be dual-reported against relay{}
+# (7a/7g) and single-entry relay{} parity (7h) has nothing left to compare
+# against; what used to prove an entry could be "disabled" (7f/7g) cannot
+# happen any more, since SANDY_RELAY=0 is a hard error before any entry is
+# ever adopted (r3, decision 3). What survives: every entry's own state_dir,
+# executable_present and restarts are independent and correctly reported
+# (7b-7d unchanged in substance, fixtures updated to the new {"path": ...}
+# marker shape), a marker with no feature_entries field still reports null
+# (7e, unchanged), and NEW: the RECOMMENDED compat fallback for a sandbox
+# whose running daemon container has not relaunched since before 2.6.0 (item
+# 3 in "NOT IN DECISIONS BUT FORCED BY THEM") -- an old-shape marker's
+# relay_alias:true entry, with no feature-state/<f>/.state of its own, reads
+# the leftover relay-state/.state instead of reporting itself absent.
 if command -v python3 >/dev/null 2>&1; then
-    # Fixture A: two entries (alpha designated, beta not), separate from every
-    # other case (§88b: never share a fixture across assertions that must not
-    # collide).
+    # Fixture A: two entries, NEW marker shape ({"path": ...} only), separate
+    # from every other case (§88b: never share a fixture across assertions
+    # that must not collide).
     _S172_H1="$(cd "$(mktemp -d)" && pwd -P)"
-    mkdir -p "$_S172_H1/sandboxes/two-11112222/relay-state" "$_S172_H1/sandboxes/two-11112222/feature-state/beta" \
+    mkdir -p "$_S172_H1/sandboxes/two-11112222/feature-state/alpha" "$_S172_H1/sandboxes/two-11112222/feature-state/beta" \
         "$_S172_H1/features/alpha/payload"
     printf '#!/bin/sh\n' > "$_S172_H1/features/alpha/payload/r"; chmod +x "$_S172_H1/features/alpha/payload/r"
     # beta's payload is deliberately ABSENT -> executable_present must be false
     printf 'state=started\nrestarts=2\nlast_exit_code=0\nlast_restart_at=2026-01-01T00:00:00Z\n' \
-        > "$_S172_H1/sandboxes/two-11112222/relay-state/.state"
+        > "$_S172_H1/sandboxes/two-11112222/feature-state/alpha/.state"
     printf 'state=started\nrestarts=0\n' > "$_S172_H1/sandboxes/two-11112222/feature-state/beta/.state"
     cat > "$_S172_H1/sandboxes/two-11112222/sandy-session.json" <<'S172EOF'
 {
   "schema": 1,
-  "relay": { "source": "manifest", "path": "/opt/sandy/features/alpha/r", "disabled_by": null },
   "feature_entries": {
-    "alpha": {"path": "/opt/sandy/features/alpha/r", "relay_alias": true, "disabled_by": null},
-    "beta": {"path": "/opt/sandy/features/beta/s", "relay_alias": false, "disabled_by": null}
+    "alpha": {"path": "/opt/sandy/features/alpha/r"},
+    "beta": {"path": "/opt/sandy/features/beta/s"}
   },
   "cred_mode": "full"
 }
 S172EOF
     _S172_PS1="$(SANDY_HOME="$_S172_H1" bash "$_S172_SANDY" --print-state 2>/dev/null)"
-    check "§172(7a) feature_entries.alpha.restarts equals relay.restarts -- the dual report of the SAME entry must agree" \
-        bash -c 'printf "%s" "$1" | python3 -c "
-import json,sys
-sb=json.load(sys.stdin)[\"sandboxes\"][0]
-assert sb[\"feature_entries\"][\"alpha\"][\"restarts\"]==2==sb[\"relay\"][\"restarts\"]
-"' _ "$_S172_PS1"
-    check "§172(7b) alpha state_dir ends /relay-state, beta ends /feature-state/beta (D3, mutation m4: reading relay-state for every entry breaks this)" \
+    check "§172(7b) both state_dirs end /feature-state/<f> -- alpha and beta are reported identically, no producer distinction any more" \
         bash -c 'printf "%s" "$1" | python3 -c "
 import json,sys
 fe=json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"]
-assert fe[\"alpha\"][\"state_dir\"].endswith(\"/relay-state\"), fe[\"alpha\"]
+assert fe[\"alpha\"][\"state_dir\"].endswith(\"/feature-state/alpha\"), fe[\"alpha\"]
 assert fe[\"beta\"][\"state_dir\"].endswith(\"/feature-state/beta\"), fe[\"beta\"]
 "' _ "$_S172_PS1"
     check "§172(7c) alpha executable_present true (payload exists), beta false (payload absent)" \
@@ -19655,6 +19532,7 @@ assert fe[\"beta\"][\"executable_present\"] is False
 import json,sys
 fe=json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"]
 assert fe[\"beta\"][\"restarts\"]==0
+assert fe[\"alpha\"][\"restarts\"]==2
 "' _ "$_S172_PS1"
     rm -rf "$_S172_H1"; unset _S172_PS1
 
@@ -19662,7 +19540,7 @@ assert fe[\"beta\"][\"restarts\"]==0
     # never {} (§88b / None-vs-[] rule: an old sandy cannot answer the question).
     _S172_H2="$(cd "$(mktemp -d)" && pwd -P)"
     mkdir -p "$_S172_H2/sandboxes/old-33334444"
-    printf '{\n  "schema": 1,\n  "relay": {"source":"none","path":null,"disabled_by":null},\n  "cred_mode":"full"\n}\n' \
+    printf '{\n  "schema": 1,\n  "cred_mode":"full"\n}\n' \
         > "$_S172_H2/sandboxes/old-33334444/sandy-session.json"
     _S172_PS2="$(SANDY_HOME="$_S172_H2" bash "$_S172_SANDY" --print-state 2>/dev/null)"
     check "§172(7e) a marker with no feature_entries field reports null, not {} -- an old sandy cannot answer, and {} would falsely claim 'zero entries'" \
@@ -19672,43 +19550,34 @@ assert json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"] is None
 "' _ "$_S172_PS2"
     rm -rf "$_S172_H2"; unset _S172_PS2
 
-    # Fixture C: a disabled entry with NO .state file -> state "disabled",
-    # and relay.disabled_by must be read from the relay object ONLY (mutation
-    # m6: reverting the anchored disabled_by reader misreads this).
+    # Fixture C: the RECOMMENDED relay-state compat fallback. An OLD-shape
+    # marker (relay_alias:true, the pre-2.6.0 designated entry) with NO
+    # feature-state/amap/.state of its own -- only the leftover
+    # relay-state/.state a still-running pre-2.6.0 daemon container keeps
+    # writing until it relaunches. --print-state must read THAT rather than
+    # reporting the entry absent.
     _S172_H3="$(cd "$(mktemp -d)" && pwd -P)"
-    mkdir -p "$_S172_H3/sandboxes/dis-55556666"
-    printf '{\n  "schema": 1,\n  "relay": {"source":"none","path":null,"disabled_by":null},\n  "feature_entries": {\n    "gamma": {"path": "/opt/sandy/features/gamma/r", "relay_alias": false, "disabled_by": "workspace"}\n  },\n  "cred_mode":"full"\n}\n' \
-        > "$_S172_H3/sandboxes/dis-55556666/sandy-session.json"
+    mkdir -p "$_S172_H3/sandboxes/compat-99990000/relay-state" "$_S172_H3/features/amap/payload"
+    printf '#!/bin/sh\n' > "$_S172_H3/features/amap/payload/relay"; chmod +x "$_S172_H3/features/amap/payload/relay"
+    printf 'state=started\nrestarts=7\nlast_exit_code=\nlast_restart_at=\n' \
+        > "$_S172_H3/sandboxes/compat-99990000/relay-state/.state"
+    printf '{\n  "schema": 1,\n  "feature_entries": {\n    "amap": {"path": "/opt/sandy/features/amap/relay", "relay_alias": true, "disabled_by": null}\n  },\n  "cred_mode":"full"\n}\n' \
+        > "$_S172_H3/sandboxes/compat-99990000/sandy-session.json"
     _S172_PS3="$(SANDY_HOME="$_S172_H3" bash "$_S172_SANDY" --print-state 2>/dev/null)"
-    check "§172(7f) a feature disabled by SANDY_RELAY=0, no .state file: state is 'disabled' (mirrors relay's own disabled convention)" \
+    check "§172(7i) an old-shape relay_alias:true entry with no feature-state of its own reads the leftover relay-state/.state instead (state=started, restarts=7)" \
         bash -c 'printf "%s" "$1" | python3 -c "
 import json,sys
 fe=json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"]
-assert fe[\"gamma\"][\"state\"]==\"disabled\", fe[\"gamma\"]
+assert fe[\"amap\"][\"state\"]==\"started\", fe[\"amap\"]
+assert fe[\"amap\"][\"restarts\"]==7, fe[\"amap\"]
 "' _ "$_S172_PS3"
-    check "§172(7g) ...and relay.disabled_by stays null -- it must NOT read the feature-entry line's disabled_by (§88b; mutation m6 reddens this)" \
+    check "§172(7j) ...and its state_dir names the relay-state directory it actually read (a consumer reads a path sandy owns, never constructs one)" \
         bash -c 'printf "%s" "$1" | python3 -c "
 import json,sys
-assert json.load(sys.stdin)[\"sandboxes\"][0][\"relay\"][\"disabled_by\"] is None
+fe=json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"]
+assert fe[\"amap\"][\"state_dir\"].endswith(\"/relay-state\"), fe[\"amap\"]
 "' _ "$_S172_PS3"
     rm -rf "$_S172_H3"; unset _S172_PS3
-
-    # Fixture D: exactly one entry -> relay{} must equal the pre-#381 shape
-    # exactly (frozen from the emitter as it stands after this change).
-    _S172_H4="$(cd "$(mktemp -d)" && pwd -P)"
-    mkdir -p "$_S172_H4/sandboxes/one-77778888/relay-state" "$_S172_H4/features/amap/payload"
-    printf '#!/bin/sh\n' > "$_S172_H4/features/amap/payload/relay"; chmod +x "$_S172_H4/features/amap/payload/relay"
-    printf 'state=started\nrestarts=0\n' > "$_S172_H4/sandboxes/one-77778888/relay-state/.state"
-    printf '{\n  "schema": 1,\n  "relay": {\n    "source": "manifest",\n    "path": "/opt/sandy/features/amap/relay",\n    "disabled_by": null\n  },\n  "feature_entries": {\n    "amap": {"path": "/opt/sandy/features/amap/relay", "relay_alias": true, "disabled_by": null}\n  },\n  "cred_mode":"full"\n}\n' \
-        > "$_S172_H4/sandboxes/one-77778888/sandy-session.json"
-    _S172_PS4="$(SANDY_HOME="$_S172_H4" bash "$_S172_SANDY" --print-state 2>/dev/null)"
-    check "§172(7h) single entry: relay{} is unchanged -- state=started, source=manifest, executable_present=true, restarts=0" \
-        bash -c 'printf "%s" "$1" | python3 -c "
-import json,sys
-r=json.load(sys.stdin)[\"sandboxes\"][0][\"relay\"]
-assert r[\"state\"]==\"started\" and r[\"source\"]==\"manifest\" and r[\"executable_present\"] is True and r[\"restarts\"]==0, r
-"' _ "$_S172_PS4"
-    rm -rf "$_S172_H4"; unset _S172_PS4
 else
     skip "§172(7) needs python3 to validate --print-state JSON"
 fi
@@ -21194,13 +21063,18 @@ rm -f "$_S174_MUT_COPY"
 unset _S174_MUT_COPY
 
 # ============================================================
-echo "§175: 2.5.0 — the relay-era deprecations announced themselves (#382), and --init (#392)"
+echo "§175: 2.5.0 — the relay-era deprecations WERE announced (#382, now removed in 2.6.0), and --init (#392)"
 # ============================================================
 # #382 announced consumer-shaped surfaces in a MINOR, under CLAUDE.md's written
 # exception. The exception's price was that every surface sandy could detect
 # in use WARNED at launch for at least one minor -- the README list reaches
 # only people who read it. §138 already forces every runtime deprecation
-# warning to be listed.
+# warning to be listed. That announcement window is now CLOSED: 2.6.0 (#382,
+# decisions 1-2) removed relay{} and its two companion fields, and this
+# section's job is now only to prove the 2.5.0 announcement itself is still
+# on record (struck through, not deleted -- §176(h) asserts the strike-
+# through and the REMOVED marker; §138 asserts nothing removed here was ever
+# unlisted).
 #
 # SANDY_RELAY's own warn-on-use checks ((pre)/(1)/(2)/(3) in earlier releases)
 # are GONE from this section, not merely inverted: the surface they asserted
@@ -21241,15 +21115,15 @@ unset _S175_MISS _s175_t
 # ============================================================
 echo "§176: 2.6.0 — the relay-era surfaces announced in 2.5.0 are REMOVED (#382)"
 # ============================================================
-# Companion units fill in (a)-(g) as they land, each an inversion of the
+# Companion units fill in (a)-(h) as they land, each an inversion of the
 # corresponding 2.5.0 announcement (§175) into "it is gone". Lettering
 # follows decisions.md verbatim (not the order §175's checks happen to run
 # in), so a companion unit filling one of these in cannot mislabel it:
 #   (a) SANDY_RELAY is a hard error naming the replacement (sandboxes.exclude).
 #   (b) relay{} and its two companion fields (relay_alias, disabled_by) are
-#       gone from the marker and --print-state.
-#   (c) schema_version is 4, consistently, in --print-schema, --print-state
-#       and --print-version.
+#       gone from the marker and --print-state (r5, decisions 1-2).
+#   (c) schema_version is 4, consistently, in --print-schema, --print-state,
+#       --print-version and --validate-config (r5, decisions 1-2).
 #   (d) an entry alone now resolves SANDY_CROSS_SESSION_INBOUND to refuse --
 #       the relay-legacy default is gone (r2, decision 6).
 #   (e) every entry's state dir is feature-state/<f>; a leftover relay-state/
@@ -21258,6 +21132,9 @@ echo "§176: 2.6.0 — the relay-era surfaces announced in 2.5.0 are REMOVED (#3
 #       designated one".
 #   (g) the image no longer installs /usr/local/bin/sandy-handoff-sessions
 #       (r1, decision 7).
+#   (h) docs ratchet: the README table strikes every 2.5.0-exception row as
+#       REMOVED in 2.6.0, and SPEC_INTROSPECTION carries the matching
+#       schema_version 4 changelog bullet (r5, decisions 1-2).
 
 
 # --- (a) SANDY_RELAY is a hard error naming the replacement (decision 3, r3).
@@ -21383,6 +21260,144 @@ check "§176(a6) sandy no longer contains any SANDY_RELAY gating spelling (\"\$S
 rm -rf "$_S176A_DIR"
 unset _S176A_SANDY _S176A_DIR _S176A_KEYS _S176A_KIL _S176A_SNAP _S176A_LOAD _S176A_LAUNCH _S176A_BLOCK _S176A_FATAL
 unset _S176A_L_LOAD _S176A_L_BLOCK _S176A_L_APPROVE
+
+# --- (b) relay{} and its two companion fields (relay_alias, disabled_by) are
+#     gone from the marker and --print-state (decisions 1-2, r5). ----------
+if command -v python3 >/dev/null 2>&1; then
+    # (b1) the REAL marker composer, anchored the way §134/§123(11) anchor it,
+    # driven with two feature entries adopted via the REAL _sandy_fe_marker_body
+    # (not a hand-written JSON fragment) so a regression in either function is
+    # caught here.
+    _S176B_MKFN="$(awk '/^_sandy_fm_jesc\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$SANDY_SCRIPT")"
+    _S176B_FEFN="$(awk '/^_sandy_fe_marker_body\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$SANDY_SCRIPT")"
+    _S176B_MKBLK="$(awk '/^printf .\{.n  "schema": 1,/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$SANDY_SCRIPT")"
+    check "§176(b1-pre) all three marker pieces were extracted (mutation: a rename empties one and every (b1) check below goes vacuous)" \
+        bash -c 'printf "%s" "$1" | grep -q jesc && printf "%s" "$2" | grep -q path && printf "%s" "$3" | grep -q session_nonce' \
+        _ "$_S176B_MKFN" "$_S176B_FEFN" "$_S176B_MKBLK"
+    _S176B_MK="$(
+        eval "$_S176B_MKFN"; eval "$_S176B_FEFN"
+        sandy_full_version() { echo "9.9.9"; }
+        _sandy_egress_mode=off; SANDY_WORKSPACE=/home/sandy/ws; SANDBOX_NAME=ws-abc12345
+        _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
+        _sandy_agents_json=null
+        _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""
+        CRED_MODE=none; _sandy_session_nonce=deadbeef; _sandy_session_file=/dev/stdout
+        _sandy_fe_list="alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s"
+        _sandy_fe_json="$(_sandy_fe_marker_body "$_sandy_fe_list")"
+        eval "$_S176B_MKBLK"
+    )"
+    check "§176(b1) the real marker composer emits NO top-level 'relay' key, and every feature_entries value's key set is exactly {'path'} (mutation M2: re-adding the relay printf reddens this)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+" 2>/dev/null; printf "%s" "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+assert \"relay\" not in d, d
+fe=d[\"feature_entries\"]
+assert set(fe.keys())=={\"alpha\",\"beta\"}, fe
+for k,v in fe.items():
+    assert set(v.keys())=={\"path\"}, (k,v)
+"' _ "$_S176B_MK"
+    unset _S176B_MKFN _S176B_FEFN _S176B_MKBLK _S176B_MK
+
+    # (b2) --print-state against a SANDY_HOME containing exactly ONE sandbox,
+    # a NEW-shape (2.6.0+) marker -- no 'relay' key anywhere, feature_entries
+    # carries the full live-state key set with none of the removed two.
+    _S176B_H2="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$_S176B_H2/sandboxes/new-11112222/feature-state/alpha" "$_S176B_H2/features/alpha/payload"
+    printf '#!/bin/sh\n' > "$_S176B_H2/features/alpha/payload/r"; chmod +x "$_S176B_H2/features/alpha/payload/r"
+    printf 'state=started\nrestarts=0\n' > "$_S176B_H2/sandboxes/new-11112222/feature-state/alpha/.state"
+    printf '{\n  "schema": 1,\n  "feature_entries": {\n    "alpha": {"path": "/opt/sandy/features/alpha/r"}\n  },\n  "cred_mode": "full"\n}\n' \
+        > "$_S176B_H2/sandboxes/new-11112222/sandy-session.json"
+    _S176B_PSFULL="$(SANDY_HOME="$_S176B_H2" bash "$SANDY_SCRIPT" --print-state 2>/dev/null)"
+    _S176B_PSLIGHT="$(SANDY_HOME="$_S176B_H2" bash "$SANDY_SCRIPT" --print-state --light 2>/dev/null)"
+    check "§176(b2) a new-shape sandbox reports no 'relay' key and feature_entries.alpha has the full live-state key set with no relay_alias/disabled_by, in FULL mode (mutation M1: re-adding relay_alias to the emitted entry reddens this)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+sb=json.load(sys.stdin)[\"sandboxes\"][0]
+assert \"relay\" not in sb, sb
+a=sb[\"feature_entries\"][\"alpha\"]
+assert set(a.keys())=={\"state\",\"restarts\",\"last_exit_code\",\"last_restart_at\",\"executable_present\",\"path\",\"state_dir\"}, a
+"' _ "$_S176B_PSFULL"
+    check "§176(b2-light) ...and the same holds in LIGHT mode too" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+sb=json.load(sys.stdin)[\"sandboxes\"][0]
+assert \"relay\" not in sb, sb
+a=sb[\"feature_entries\"][\"alpha\"]
+assert \"relay_alias\" not in a and \"disabled_by\" not in a, a
+"' _ "$_S176B_PSLIGHT"
+    rm -rf "$_S176B_H2"; unset _S176B_H2 _S176B_PSFULL _S176B_PSLIGHT
+
+    # (b3) an OLD 2.5-shape marker (relay{} + feature_entries.<name> carrying
+    # relay_alias/disabled_by) -- output must STILL have no relay/relay_alias/
+    # disabled_by, and feature_entries must be POPULATED, not {}, so a sandbox
+    # that has not relaunched since 2.6.0 is not misreported as having no
+    # entries at all.
+    _S176B_H3="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$_S176B_H3/sandboxes/old-33334444/feature-state/amap" "$_S176B_H3/features/amap/payload"
+    printf '#!/bin/sh\n' > "$_S176B_H3/features/amap/payload/relay"; chmod +x "$_S176B_H3/features/amap/payload/relay"
+    printf 'state=started\nrestarts=1\n' > "$_S176B_H3/sandboxes/old-33334444/feature-state/amap/.state"
+    printf '{\n  "schema": 1,\n  "relay": {\n    "source": "manifest",\n    "path": "/opt/sandy/features/amap/relay",\n    "disabled_by": null\n  },\n  "feature_entries": {\n    "amap": {"path": "/opt/sandy/features/amap/relay", "relay_alias": true, "disabled_by": null}\n  },\n  "cred_mode": "full"\n}\n' \
+        > "$_S176B_H3/sandboxes/old-33334444/sandy-session.json"
+    _S176B_PS3="$(SANDY_HOME="$_S176B_H3" bash "$SANDY_SCRIPT" --print-state 2>/dev/null)"
+    check "§176(b3) an OLD 2.5-shape marker's output carries NO relay/relay_alias/disabled_by, and feature_entries is populated (not {}) -- an un-relaunched sandbox is not misreported as entry-less (mutation M3: dropping the old-shape sed expression reddens this)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+sb=json.load(sys.stdin)[\"sandboxes\"][0]
+assert \"relay\" not in sb, sb
+fe=sb[\"feature_entries\"]
+assert fe not in (None, {}), fe
+a=fe[\"amap\"]
+assert \"relay_alias\" not in a and \"disabled_by\" not in a, a
+assert a[\"state\"]==\"started\" and a[\"restarts\"]==1, a
+"' _ "$_S176B_PS3"
+    rm -rf "$_S176B_H3"; unset _S176B_H3 _S176B_PS3
+else
+    skip "§176(b) needs python3 to validate marker/--print-state JSON"
+fi
+
+# --- (c) schema_version is 4, consistently, across every introspection flag
+#     (decisions 1-2, r5). Hardcoded to 4, the same discipline SECTION 45's
+#     own schema_version check uses: the number is what a consumer pins, so a
+#     drift must cost a deliberate edit here, never be absorbed by reading it
+#     back out of the source under test. ------------------------------------
+if command -v python3 >/dev/null 2>&1; then
+    _S176C_SCHEMA="$(bash "$SANDY_SCRIPT" --print-schema 2>/dev/null)"
+    check "§176(c1) --print-schema: schema_version is 4" \
+        bash -c 'printf "%s" "$1" | python3 -c "import json,sys; assert json.load(sys.stdin)[\"schema_version\"]==4"' _ "$_S176C_SCHEMA"
+    check "§176(c2) --print-schema: compatibility.current_schema_version==4, supported==[4], deprecated==[]" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+c=json.load(sys.stdin)[\"compatibility\"]
+assert c[\"current_schema_version\"]==4, c
+assert c[\"supported_schema_versions\"]==[4], c
+assert c[\"deprecated_schema_versions\"]==[], c
+"' _ "$_S176C_SCHEMA"
+    unset _S176C_SCHEMA
+
+    _S176C_STATE_HOME="$(cd "$(mktemp -d)" && pwd -P)"
+    _S176C_STATE="$(SANDY_HOME="$_S176C_STATE_HOME" bash "$SANDY_SCRIPT" --print-state 2>/dev/null)"
+    check "§176(c3) --print-state (isolated SANDY_HOME): schema_version is 4" \
+        bash -c 'printf "%s" "$1" | python3 -c "import json,sys; assert json.load(sys.stdin)[\"schema_version\"]==4"' _ "$_S176C_STATE"
+    rm -rf "$_S176C_STATE_HOME"; unset _S176C_STATE_HOME _S176C_STATE
+
+    _S176C_VER="$(bash "$SANDY_SCRIPT" --print-version 2>/dev/null)"
+    check "§176(c4) --print-version: schema_version is 4" \
+        bash -c 'printf "%s" "$1" | python3 -c "import json,sys; assert json.load(sys.stdin)[\"schema_version\"]==4"' _ "$_S176C_VER"
+    unset _S176C_VER
+
+    _S176C_CFG="$(mktemp)"
+    printf 'SANDY_MODEL=claude-opus-4-7\n' > "$_S176C_CFG"
+    _S176C_VAL="$(bash "$SANDY_SCRIPT" --validate-config "$_S176C_CFG" 2>/dev/null)"
+    check "§176(c5) --validate-config on a temp passive-safe config: schema_version is 4" \
+        bash -c 'printf "%s" "$1" | python3 -c "import json,sys; assert json.load(sys.stdin)[\"schema_version\"]==4"' _ "$_S176C_VAL"
+    rm -f "$_S176C_CFG"; unset _S176C_CFG _S176C_VAL
+else
+    skip "§176(c) needs python3 to validate introspection JSON"
+fi
+
 # --- (d) an entry alone now resolves refuse — the relay-legacy default and
 # its 2.5.0 warning are both gone (decision 6, #382). Same driver PATTERN
 # §142/§173(d) use: extract the manifest apply/eval spans and the csi
@@ -21665,6 +21680,34 @@ check "§176(f4) zero entries: silent regardless of label (nothing a stale image
     bash -c '[ -z "$1" ]' _ "$_S176F_W0"
 unset _S176F_SANDY _S176F_IMGBLK _S176F_W1 _S176F_W3 _S176F_W1P _S176F_W0
 unset -f _s176f_imgwarn
+
+# --- (h) docs ratchet: the 2.5.0-exception README rows are struck through and
+#     named REMOVED in 2.6.0; SPEC_INTROSPECTION has the matching changelog
+#     bullet (recommended, decisions 1-2 documentation requirements). --------
+_S176H_README="$(cd "$(dirname "$0")/.." && pwd)/README.md"
+_S176H_SPECINTRO="$(cd "$(dirname "$0")/.." && pwd)/SPEC_INTROSPECTION.md"
+_S176H_TABLE="$(awk '/^## Deprecated$/{f=1} f&&/^## /&&!/^## Deprecated$/{exit} f' "$_S176H_README")"
+_S176H_MISS=""
+for _s176h_t in 'relay{}' 'SANDY_RELAY_STATE' '/opt/sandy/relay-state' '/usr/local/bin/sandy-handoff-sessions' 'relay-conditional unset default' 'SANDY_HANDOFF_RELAY` as the internal channel'; do
+    _s176h_row="$(printf '%s' "$_S176H_TABLE" | grep -F "$_s176h_t" | grep -F '2.5.0 (exception)' || true)"
+    case "$_s176h_row" in
+        '| ~~'*) case "$_s176h_row" in *'REMOVED in 2.6.0'*) : ;; *) _S176H_MISS="$_S176H_MISS [$_s176h_t:no-REMOVED-text]" ;; esac ;;
+        *) _S176H_MISS="$_S176H_MISS [$_s176h_t:not-struck]" ;;
+    esac
+done
+check "§176(h1) every README ## Deprecated row whose since column is '2.5.0 (exception)' starts with '| ~~' and contains 'REMOVED in 2.6.0' (missing:${_S176H_MISS:- none})" \
+    bash -c '[ -z "$1" ]' _ "$_S176H_MISS"
+_S176H_RELAYROW="$(printf '%s' "$_S176H_TABLE" | grep -F 'relay{}' | grep -F '2.5.0 (exception)' || true)"
+check "§176(h2) the struck relay{} row names BOTH companion fields, relay_alias and disabled_by" \
+    bash -c 'printf "%s" "$1" | grep -q "relay_alias" && printf "%s" "$1" | grep -q "disabled_by"' _ "$_S176H_RELAYROW"
+check "§176(h3) SPEC_INTROSPECTION.md carries a 2.6.0 changelog bullet naming schema_version, relay_alias and disabled_by" \
+    bash -c '
+        b="$(awk "/\`2\\.6\\.0\`/{f=1} f{print} f&&/^\$/{c++} c>15{exit}" "$1")"
+        printf "%s" "$b" | grep -q "schema_version" &&
+        printf "%s" "$b" | grep -q "relay_alias" &&
+        printf "%s" "$b" | grep -q "disabled_by"
+    ' _ "$_S176H_SPECINTRO"
+unset _S176H_README _S176H_SPECINTRO _S176H_TABLE _S176H_MISS _s176h_t _s176h_row _S176H_RELAYROW
 
 unset _S176_SANDY _S176_GDB_FN _S176_D _S176_SPEC _S176_APPA
 
