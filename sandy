@@ -8682,7 +8682,13 @@ _sandy_await_entries() {
                 _next+=("$_pair")
             fi
         done
-        _pending=("${_next[@]}")
+        # Guarded copy: once every entry has settled _next is EMPTY, and a bare
+        # "${_next[@]}" of an empty array is an unbound-variable error under
+        # set -u on bash 3.2. The container runs bash 5, but run-tests.sh sources
+        # this supervisor into the host shell, which on macOS is /bin/bash 3.2 --
+        # so without the guard an entry that exits 0 inside the window looked,
+        # host-side, exactly like one that failed (§123(27)).
+        _pending=(${_next[@]+"${_next[@]}"})
         if [ "${#_pending[@]}" -gt 0 ]; then sleep 0.1; fi
         _w=$((_w + 1))
     done
@@ -8745,7 +8751,7 @@ _sandy_start_entries() {
             _wait_args+=("${SANDY_FEATURE_STATE_ROOT:-/opt/sandy/feature-state}/$_f=sandy-entry $_f")
         fi
     done
-    _sandy_await_entries "${_wait_args[@]}"
+    _sandy_await_entries ${_wait_args[@]+"${_wait_args[@]}"}
     sandy_log "Feature entries requested (${SANDY_FEATURE_ENTRIES}); outcome (started vs. already running) is in each entry's own supervisor.log"
 }
 
