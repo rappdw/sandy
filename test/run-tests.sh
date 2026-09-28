@@ -20555,15 +20555,27 @@ unset _S174_A3MUT2_RC
 # the moment it stops extracting (immediately before `os.fork()`), never
 # what the auth frame actually names.
 #
-# (a3c) no line between the completed double-fork (`os._exit(0)`, the
-# second fork's child branch) and the auth-frame `sendall()` reassigns
-# `token` -- the same verifier finding, one step further out: a mutation
-# that leaves BOTH the selection code and the frame's variable NAME
-# untouched can still swap in the wrong credential by inserting a fresh
-# `token = json.loads(_raw)["childToken"]` line somewhere in that span
-# (e.g. right before `s.connect`). Neither (a3) (stops before the fork) nor
-# (a3b) (checks only the variable NAME referenced in the frame, not its
-# runtime value) can see a reassignment placed there.
+# (a3c) no line between the FIRST fork check (`if os.fork() > 0:`) and the
+# auth-frame `sendall()` reassigns `token` -- the same verifier finding, one
+# step further out: a mutation that leaves BOTH the selection code and the
+# frame's variable NAME untouched can still swap in the wrong credential by
+# inserting a fresh `token = json.loads(_raw)["childToken"]` line somewhere
+# in that span (e.g. right before `s.connect`, or between the two forks).
+# Neither (a3) (stops before the FIRST fork) nor (a3b) (checks only the
+# variable NAME referenced in the frame, not its runtime value) can see a
+# reassignment placed there.
+#
+# #383: the span used to start at the SECOND fork's `os._exit(0)`, leaving a
+# gap between (a3)'s end (immediately before the first `if os.fork() > 0:`)
+# and (a3c)'s old start (immediately after the second `if os.fork() > 0:
+# os._exit(0)`) -- i.e. `sys.exit(0)`, `os.setsid()`, and the second fork
+# check itself were covered by NEITHER check. A verifier confirmed on a
+# scratch copy that inserting the childToken reassignment right after
+# `os.setsid()` -- squarely inside that gap -- left every §174 check green.
+# Starting the span at the FIRST fork check instead closes it: the entire
+# double-fork region is now inside the extracted, never-executed span
+# (a3c)'s "no_reassign" property scans textually, so still never forks the
+# test process. See (a3c-mut2) below for the regression test.
 _S174_FRAME_TEST="$(mktemp)"
 cat > "$_S174_FRAME_TEST" <<'PY'
 import re, sys
@@ -20586,9 +20598,15 @@ if prop == "frame_var":
         sys.exit(3)
     ok = fm.group(1) == "token"
 elif prop == "no_reassign":
-    fk = re.search(r'os\._exit\(0\)\n(.*?)\{"type": "auth"', inject_src, re.S)
+    # Starts at the FIRST `if os.fork() > 0:` (never the second/inner one --
+    # re.search takes the leftmost match), so the captured span covers both
+    # forks, the setsid() between them, and everything after, up to the
+    # auth-frame send. Textual only: this snippet is never exec'd, so
+    # widening it to include the fork lines still never forks the test
+    # process. See #383's comment above (a3c) for the gap this closes.
+    fk = re.search(r'if os\.fork\(\) > 0:\n(.*?)\{"type": "auth"', inject_src, re.S)
     if not fk:
-        print("EXTRACT-FAIL: post-fork-to-auth-frame span not found in inject.py source", file=sys.stderr)
+        print("EXTRACT-FAIL: post-first-fork-to-auth-frame span not found in inject.py source", file=sys.stderr)
         sys.exit(3)
     ok = re.search(r'\btoken\s*=(?!=)', fk.group(1)) is None
 else:
@@ -20610,7 +20628,7 @@ sed 's/"token": token})/"token": _raw})/' "$_S174_MSI" > "$_S174_MUT_FRAME_B"
 check "§174(a3b-mut) ...and mutating the frame to send the raw, un-selected key-file contents (\`_raw\`) instead of \`token\` is caught (self-test of (a3b))" \
     python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_B" frame_var mutated
 
-check "§174(a3c) no line between the completed double-fork and the auth-frame send reassigns \`token\` (extracted span, not grepped for the whole file, so an unrelated 'token' elsewhere in inject.py cannot hide a real reassignment here)" \
+check "§174(a3c) no line between the FIRST fork check and the auth-frame send reassigns \`token\` (extracted span -- both forks, setsid(), and everything after -- not grepped for the whole file, so an unrelated 'token' elsewhere in inject.py cannot hide a real reassignment here)" \
     python3 "$_S174_FRAME_TEST" "$_S174_MSI" no_reassign ok
 
 _S174_MUT_FRAME_C="$(mktemp)"
@@ -20619,8 +20637,22 @@ token = json.loads(_raw).get("childToken", token)' "$_S174_MSI" > "$_S174_MUT_FR
 check "§174(a3c-mut) ...and inserting a reassignment of \`token\` right after the completed double-fork (leaving both the selection code and the frame's variable name untouched) is caught (self-test of (a3c): the exact gap a verifier found one step further out than (a3-mut2))" \
     python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_C" no_reassign mutated
 
-rm -f "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT" "$_S174_MUT_INJECT2" "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_B" "$_S174_MUT_FRAME_C"
-unset _S174_TOKENSEL_TEST _S174_MUT_INJECT _S174_MUT_INJECT2 _S174_FRAME_TEST _S174_MUT_FRAME_B _S174_MUT_FRAME_C
+# (a3c-mut2, #383) the fork-SPAN gap itself: inserting the same reassignment
+# BETWEEN the two forks, right after `os.setsid()` -- never touching the
+# selection code, the frame's variable name, or the second fork's
+# `os._exit(0)` line (a3c-mut)'s mutation targets -- used to leave every
+# §174 check green, because neither (a3) (stops before the FIRST fork) nor
+# the OLD (a3c) (started at the SECOND fork's `os._exit(0)`) covered this
+# span at all. Confirms starting (a3c)'s span at the first fork check closes
+# it.
+_S174_MUT_FRAME_D="$(mktemp)"
+sed '/^os\.setsid()$/a\
+token = json.loads(_raw).get("childToken", token)' "$_S174_MSI" > "$_S174_MUT_FRAME_D"
+check "§174(a3c-mut2) ...and inserting a reassignment of \`token\` BETWEEN the two forks, right after os.setsid() (leaving (a3c-mut)'s own mutation point, the selection code, and the frame's variable name all untouched) is caught (self-test of (a3c)'s widened span: the exact fork-span gap a verifier found between (a3)'s end and (a3c)'s old start, #383)" \
+    python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_D" no_reassign mutated
+
+rm -f "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT" "$_S174_MUT_INJECT2" "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_B" "$_S174_MUT_FRAME_C" "$_S174_MUT_FRAME_D"
+unset _S174_TOKENSEL_TEST _S174_MUT_INJECT _S174_MUT_INJECT2 _S174_FRAME_TEST _S174_MUT_FRAME_B _S174_MUT_FRAME_C _S174_MUT_FRAME_D
 
 # NEVER a repo assertion on run-time behavior -- CLAUDE_CODE_MESSAGING_TOKEN is
 # the receiver's OWN childToken (handed to its children), and sending it
@@ -20866,6 +20898,107 @@ check "§174(a10-mut-reading-setup) the BA-branch mutation target ('(BA) errored
 check "§174(a10-mut-reading) ...and reverting the BA-only branch's verdict word to LAST-WINS (the exact original bug) in a scratch copy is caught (self-test of assert_reading's own precision: the exact vacuity a verifier found, where comparing only the input-restating PREFIX let this exact mutation keep every check green)" \
     _s174_q3d_check_neg "$_S174_Q3D_MUT_BA"
 
+# (a10b, #379/#383) (a10) pins _msi_q3d_reading's OWN interpretation of an
+# "AB" / "BA" pair, but that pinning assumed a mapping -- AB means
+# `--settings <exists> --settings <missing>`, BA the reverse -- that lived
+# only in run_argcheck's OWN flags construction, never checked against it.
+# A verifier confirmed on a scratch copy: swapping run_argcheck's two
+# `flags = [...]` lists (AB becomes missing-then-exists, BA becomes
+# exists-then-missing) leaves every (a10) check green, because (a10) tests
+# _msi_q3d_reading generically against hand-labeled "ab"/"ba" fixtures that
+# never touch run_argcheck at all -- while the harness's OWN real run would
+# now print LAST-WINS for what is actually FIRST-WINS evidence, and vice
+# versa. Same order-confusion shape as the original (a10-mut-reading) bug,
+# from the other side: there the VERDICT WORD drifted from the evidence;
+# here the INPUT LABELS could drift from what the code actually constructs.
+# This extracts run_argcheck's own two `flags = [...]` assignments (a plain
+# regex slice of the real source, never reimplemented) and asserts textually
+# that the AB branch names `exists_path` before `missing_path`, and the BA
+# (else) branch names `missing_path` before `exists_path` -- exactly the
+# mapping (a10)'s fixture labels and _msi_q3d_reading's "(AB)"/"(BA)" prose
+# both assume.
+_S174_ARGORDER_TEST="$(mktemp)"
+cat > "$_S174_ARGORDER_TEST" <<'PY'
+import re, sys
+
+path = sys.argv[1]
+expect = sys.argv[2]  # "ok": AB=exists-first/BA=missing-first; "mutated": swapped
+
+src = open(path).read()
+m = re.search(r"<<'MSI_DRIVER_PY'\n(.*?)\nMSI_DRIVER_PY\n", src, re.S)
+if not m:
+    print("EXTRACT-FAIL: driver.py heredoc not found in %s" % path, file=sys.stderr)
+    sys.exit(3)
+driver_src = m.group(1)
+
+m2 = re.search(
+    r'if ORDER == "AB":\n(\s*flags = \[.*?\])\n\s*else:\n(\s*flags = \[.*?\])\n',
+    driver_src,
+)
+if not m2:
+    print("EXTRACT-FAIL: run_argcheck's AB/BA flags assignments not found in driver.py source", file=sys.stderr)
+    sys.exit(3)
+ab_flags, ba_flags = m2.group(1), m2.group(2)
+
+
+def exists_before_missing(text):
+    ei, mi = text.find("exists_path"), text.find("missing_path")
+    if ei == -1 or mi == -1:
+        print("EXTRACT-FAIL: exists_path/missing_path not both found in a flags assignment", file=sys.stderr)
+        sys.exit(3)
+    return ei < mi
+
+
+ok = exists_before_missing(ab_flags) and not exists_before_missing(ba_flags)
+
+if expect == "ok":
+    sys.exit(0 if ok else 1)
+else:
+    # expect == "mutated": the property must be BROKEN -- AB no longer puts
+    # exists_path first (or BA no longer puts missing_path first).
+    sys.exit(0 if not ok else 1)
+PY
+
+check "§174(a10b) run_argcheck's OWN AB/BA \`flags = [...]\` assignments (extracted, not assumed) put exists_path first for AB and missing_path first for BA -- the exact mapping (a10)'s fixture labels and _msi_q3d_reading's '(AB)'/'(BA)' prose both depend on" \
+    python3 "$_S174_ARGORDER_TEST" "$_S174_MSI" ok
+
+_S174_MUT_ARGORDER="$(mktemp)"
+_S174_A10B_MUT_RC=0
+python3 - "$_S174_MSI" "$_S174_MUT_ARGORDER" <<'PY' || _S174_A10B_MUT_RC=$?
+import sys
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+src = open(src_path).read()
+old = (
+    '    if ORDER == "AB":\n'
+    '        flags = ["--settings", exists_path, "--settings", missing_path]\n'
+    '    else:\n'
+    '        flags = ["--settings", missing_path, "--settings", exists_path]\n'
+)
+new = (
+    '    if ORDER == "AB":\n'
+    '        flags = ["--settings", missing_path, "--settings", exists_path]\n'
+    '    else:\n'
+    '        flags = ["--settings", exists_path, "--settings", missing_path]\n'
+)
+if src.count(old) != 1:
+    print("MUTATION-SETUP-FAIL: run_argcheck's AB/BA flags block not found verbatim", file=sys.stderr)
+    sys.exit(3)
+open(dst_path, "w").write(src.replace(old, new, 1))
+PY
+check "§174(a10b-mut-setup) the run_argcheck mutation target still matches driver.py verbatim (guarded: a mismatch here fails (a10b-mut) below rather than aborting the whole suite)" \
+    bash -c '[ "$1" -eq 0 ]' -- "$_S174_A10B_MUT_RC"
+if [ "$_S174_A10B_MUT_RC" -eq 0 ]; then
+    check "§174(a10b-mut) ...and swapping run_argcheck's two flags lists (AB becomes missing-then-exists, BA becomes exists-then-missing) is caught (self-test of (a10b): the exact order-confusion a verifier found, where (a10)'s fixtures assumed a mapping nothing tied to the real code)" \
+        python3 "$_S174_ARGORDER_TEST" "$_S174_MUT_ARGORDER" mutated
+else
+    fail "§174(a10b-mut) ...and swapping run_argcheck's two flags lists (skipped: mutation-setup above failed, so no mutated file was produced to test against)"
+fi
+unset _S174_A10B_MUT_RC
+
+rm -f "$_S174_ARGORDER_TEST" "$_S174_MUT_ARGORDER"
+unset _S174_ARGORDER_TEST _S174_MUT_ARGORDER
+
 rm -f "$_S174_Q3D_EXTRACT" "$_S174_Q3D_MUT" "$_S174_Q3D_MUT_BA"
 unset -f _s174_q3d_check _s174_q3d_check_neg
 unset _S174_Q3D_EXTRACT _S174_Q3D_MUT _S174_Q3D_MUT_BA
@@ -20874,7 +21007,7 @@ unset _S174_MSI
 
 # --- (b) the #383 consumer-boundary rule: sandy code and docs name no
 # consumer's protocol (CLAUDE.md "Consumer boundary", directly after "What
-# This Is"). u381 replaced the single-entry rationale that used to cite "a connector's
+# This Is"). #381 replaced the single-entry rationale that used to cite "a connector's
 # claim lock"; this is the ratchet that keeps it from coming back. Tested
 # against a COPY of the file (a temp file, never the tracked script) so a
 # mutation self-test never leaves the working tree dirty if interrupted
