@@ -11363,12 +11363,28 @@ _s114_csi_block() {
     # claude/settings.json lives under here — the userSettings/accept-delivering
     # seam; _sandy_csi_write creates claude/settings.json itself if absent, so
     # $5 need not be pre-populated).
-    env SANDY_CROSS_SESSION_INBOUND="$1" SANDY_HANDOFF_RELAY="$2" SANDY_AGENT="$3" WORK_DIR="$4" SANDBOX_DIR="$5" bash -c "
+    # #380: $6=_sandy_csi_need (space-separated feature names declaring
+    # receives cross_session; may be empty) $7=nostart reason token, one of
+    # "headless"|"remote"|"provision"|"" -- mapped onto the same
+    # _sandy_is_headless/SANDY_REMOTE_CONTROL/SANDY_PROVISION vars the real
+    # launch sets. Both default empty so every existing 5-arg call is
+    # byte-unchanged.
+    local _s114_need="${6:-}" _s114_nostart="${7:-}"
+    local _s114_headless=false _s114_remote=false _s114_provision=0
+    case "$_s114_nostart" in
+        headless)  _s114_headless=true ;;
+        remote)    _s114_remote=true ;;
+        provision) _s114_provision=1 ;;
+    esac
+    env SANDY_CROSS_SESSION_INBOUND="$1" SANDY_HANDOFF_RELAY="$2" SANDY_AGENT="$3" WORK_DIR="$4" SANDBOX_DIR="$5" \
+        _sandy_csi_need="$_s114_need" _sandy_is_headless="$_s114_headless" \
+        SANDY_REMOTE_CONTROL="$_s114_remote" SANDY_PROVISION="$_s114_provision" bash -c "
         _sandy_agent_has(){ case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0;; esac; return 1; }
         info(){ printf '%s\n' \"\$*\"; }
         warn(){ printf '%s\n' \"\$*\"; }
         $_S114_CSI_FN
         $_S114_CSI_BLK
+        printf 'src_json=%s\n' \"\${_sandy_csi_src_json:-UNSET}\"
     "
 }
 # NOTE on the trailing `|| true` below: the real "BEGIN cross-session inbound"
@@ -11384,7 +11400,20 @@ _s114_csi_block() {
 rm -rf "$_S114/ws-d1" "$_S114/sbx-d1"; mkdir -p "$_S114/ws-d1/.claude" "$_S114/sbx-d1"
 _S114_D1_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d1" "$_S114/sbx-d1" 2>&1)" || true
 check "§114(7a) unset + no relay -> refuse, both files named, correct reason string" \
-    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no relay configured)"' -- "$_S114_D1_OUT"
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no selected feature declares receives cross_session and no entry will start)"' -- "$_S114_D1_OUT"
+# A verifier found the gap this closes: the resolution block sets BOTH
+# _sandy_csi_json and _sandy_csi_src_json in each of its three "written"
+# branches (both files / userSettings-only / workspace-only), but nothing
+# before this asserted the SECOND assignment survives -- a mutation reverting
+# it to set only _sandy_csi_json left every normal launch recording
+# cross_session_inbound_source: null (the marker printf's own `:-null`
+# fallback) while cross_session_inbound was populated, and all existing
+# checks (which only look at the info/warn TEXT, never this variable) still
+# passed. §114(7a-json)/(7b-json)/(7h-json) below cover the three write
+# branches directly; the rest of (7c)-(7m) below add one more assertion each
+# so the whole precedence table is covered, not just one branch.
+check "§114(7a-json) ...and _sandy_csi_src_json (the value the marker printf reads) is populated by the SAME both-files-written branch (mutation: dropping that assignment leaves this UNSET) (got: $(printf '%s' "$_S114_D1_OUT" | tail -1))" \
+    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"default\""' -- "$_S114_D1_OUT"
 check "§114(7a-user) refuse actually landed in the sandbox userSettings file (the seam that gates delivery)" \
     bash -c 'grep -q "\"crossSessionInbound\": *\"refuse\"" "$1/claude/settings.json"' -- "$_S114/sbx-d1"
 check "§114(7a-ws) refuse ALSO landed in the workspace project file (the seam that is honored for hold/refuse)" \
@@ -11392,10 +11421,12 @@ check "§114(7a-ws) refuse ALSO landed in the workspace project file (the seam t
 
 rm -rf "$_S114/ws-d2" "$_S114/sbx-d2"; mkdir -p "$_S114/ws-d2/.claude" "$_S114/sbx-d2"
 _S114_D2_OUT="$(_s114_csi_block '' x claude "$_S114/ws-d2" "$_S114/sbx-d2" 2>&1)" || true
-check "§114(7b) unset + relay configured -> accept, both files named, correct reason string (naming criterion 7's disposition: the launch fails if the relay cannot start)" \
-    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=accept written to claude/settings.json (sandbox) and .claude/settings.local.json (default: relay configured; the launch fails if it cannot start)"' -- "$_S114_D2_OUT"
+check "§114(7b) unset + relay configured, no declared need -> accept via the DEPRECATED LEGACY PATH, correct reason string (naming criterion 7's disposition: the launch fails if the relay cannot start)" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=accept written to claude/settings.json (sandbox) and .claude/settings.local.json (default (legacy rule): a feature entry will start and no feature declares receives cross_session; the launch fails if it cannot start)"' -- "$_S114_D2_OUT"
 check "§114(7b-user) accept actually landed in the sandbox userSettings file — this is the ONLY placement measured to make accept deliver (probe case E); accept in the workspace file alone is a measured no-op (probe cases A/A2)" \
     bash -c 'grep -q "\"crossSessionInbound\": *\"accept\"" "$1/claude/settings.json"' -- "$_S114/sbx-d2"
+check "§114(7b-json) ...and src_json is \"relay-legacy\" (the legacy path's own resolution branch also sets it) (got: $(printf '%s' "$_S114_D2_OUT" | tail -1))" \
+    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"relay-legacy\""' -- "$_S114_D2_OUT"
 
 rm -rf "$_S114/ws-d3" "$_S114/sbx-d3"; mkdir -p "$_S114/ws-d3/.claude" "$_S114/sbx-d3"
 _S114_D3_OUT="$(_s114_csi_block hold '' claude "$_S114/ws-d3" "$_S114/sbx-d3" 2>&1)" || true
@@ -11433,6 +11464,54 @@ check "§114(7h) userSettings write blocked -> workspace-only wording, correct w
         printf "%s\n" "$1" | grep -q "NOT to the sandbox settings.json" &&
         printf "%s\n" "$1" | grep -q "will still be held"
     ' -- "$_S114_D7_OUT"
+check "§114(7h-json) ...and the THIRD write branch (workspace-only) also sets src_json, not just the other two (got: $(printf '%s' "$_S114_D7_OUT" | tail -1))" \
+    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"explicit\""' -- "$_S114_D7_OUT"
+
+# --- (7i)-(7o) #380: the default is keyed on a DECLARED NEED, not the relay --
+# _s114_csi_block's new $6 (_sandy_csi_need) and $7 (nostart reason token) let
+# these compose the precedence directly, with no manifest or feature-manifest
+# evaluation required -- that half (a manifest actually producing
+# _sandy_csi_need) is §173(d)'s job; this is the resolution logic alone, the
+# same split §142 draws between manifest evaluation and csi resolution.
+rm -rf "$_S114/ws-d9" "$_S114/sbx-d9"; mkdir -p "$_S114/ws-d9/.claude" "$_S114/sbx-d9"
+_S114_D9_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d9" "$_S114/sbx-d9" amap 2>&1)" || true
+check "§114(7i) declared need, no entry -> accept, reason names the declaring feature" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=accept written to claude/settings.json (sandbox) and .claude/settings.local.json (default: feature amap declares receives cross_session)"' -- "$_S114_D9_OUT"
+check "§114(7i-json) ...and src_json names the feature: \"feature:amap\" (got: $(printf '%s' "$_S114_D9_OUT" | tail -1))" \
+    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"feature:amap\""' -- "$_S114_D9_OUT"
+
+rm -rf "$_S114/ws-d10" "$_S114/sbx-d10"; mkdir -p "$_S114/ws-d10/.claude" "$_S114/sbx-d10"
+_S114_D10_OUT="$(_s114_csi_block refuse '' claude "$_S114/ws-d10" "$_S114/sbx-d10" amap 2>&1)" || true
+check "§114(7j) declared need + explicit refuse -> explicit wins, refuse" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (explicit SANDY_CROSS_SESSION_INBOUND)"' -- "$_S114_D10_OUT"
+
+rm -rf "$_S114/ws-d11" "$_S114/sbx-d11"; mkdir -p "$_S114/ws-d11/.claude" "$_S114/sbx-d11"
+_S114_D11_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d11" "$_S114/sbx-d11" 2>&1)" || true
+check "§114(7k) no declared need, no entry -> refuse (default)" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: no selected feature declares receives cross_session and no entry will start)"' -- "$_S114_D11_OUT"
+
+rm -rf "$_S114/ws-d12" "$_S114/sbx-d12"; mkdir -p "$_S114/ws-d12/.claude" "$_S114/sbx-d12"
+_S114_D12_OUT="$(_s114_csi_block '' x claude "$_S114/ws-d12" "$_S114/sbx-d12" 2>&1)" || true
+check "§114(7l) legacy: no declared need, entry present -> accept, reason explicitly says 'legacy rule'" \
+    bash -c 'printf "%s" "$1" | grep -q "(default (legacy rule): a feature entry will start"' -- "$_S114_D12_OUT"
+check "§114(7l-json) ...and src_json is \"relay-legacy\", not \"default\" or a stale value from a prior case (got: $(printf '%s' "$_S114_D12_OUT" | tail -1))" \
+    bash -c 'printf "%s" "$1" | grep -qx "src_json=\"relay-legacy\""' -- "$_S114_D12_OUT"
+
+rm -rf "$_S114/ws-d13" "$_S114/sbx-d13"; mkdir -p "$_S114/ws-d13/.claude" "$_S114/sbx-d13"
+_S114_D13_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d13" "$_S114/sbx-d13" amap headless 2>&1)" || true
+check "§114(7m) declared need + headless run -> refuse, reason names BOTH the feature and the headless reason (criterion 8 still applies to a declared need)" \
+    bash -c 'printf "%s" "$1" | grep -qx "crossSessionInbound=refuse written to claude/settings.json (sandbox) and .claude/settings.local.json (default: feature amap declares receives cross_session, but a headless run has no session to deliver into)"' -- "$_S114_D13_OUT"
+
+check "§114(7n) accept for the declared-need case actually lands in the sandbox userSettings file -- the same delivering seam probed for the legacy path at (7b-user)" \
+    bash -c 'grep -q "\"crossSessionInbound\": *\"accept\"" "$1/claude/settings.json"' -- "$_S114/sbx-d9"
+
+# §114(2a) already established that the value-aware gate keys on the VALUE
+# "accept" alone -- it takes only a key and a value, never a reason -- so a
+# declared-need accept is gated exactly like a relay-legacy or explicit one.
+# Restated here as the property #380 must not have disturbed, rather than
+# re-deriving it: reusing (2a)'s own extracted gate function and call.
+check "§114(7o) the value-aware approval gate on accept is unchanged by #380 -- it cannot see WHY sandy would resolve to accept, only that the value IS accept (reuses §114(2a)'s gate)" \
+    _s114_pvp SANDY_CROSS_SESSION_INBOUND accept
 
 # --- (8) gitignore nudge ------------------------------------------------------
 if command -v git >/dev/null 2>&1; then
@@ -11612,7 +11691,7 @@ _S114_D8_OUT="$(_s114_csi_block '' '' claude "$_S114/ws-d8" "$_S114/sbx-d8" 2>&1
 check "§114(11r) after a criterion-8 skip has unset the key, the default resolves to refuse (not accept) and lands in the sandbox userSettings seam" \
     bash -c '
         printf "%s\n" "$1" | grep -q "crossSessionInbound=refuse" || exit 1
-        printf "%s\n" "$1" | grep -q "(default: no relay configured)" || exit 1
+        printf "%s\n" "$1" | grep -q "(default: no selected feature declares receives cross_session and no entry will start)" || exit 1
         grep -q "\"crossSessionInbound\": *\"refuse\"" "$2/claude/settings.json"
     ' -- "$_S114_D8_OUT" "$_S114/sbx-d8"
 
@@ -11714,10 +11793,15 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # contributors of the same non-repeatable flag. It sits beside `agent_args`
 # deliberately and answers a different question: that one records what was
 # PASSED, this one whether it can have taken EFFECT.
-# 19 as of 2.4.0: `offline` (#219) -- the launch skipped the update lookups
+# 19 as of 2.4.0: `feature_entries` (#381) -- per-feature launch intent
+# (path/relay_alias/disabled_by), additive; schema_version does not move.
+# 20 as of 2.4.0 (#380): `cross_session_inbound_source` -- WHY the resolved
+# crossSessionInbound value is what it is (explicit/feature:<name>/
+# relay-legacy/default), additive; schema_version does not move.
+# 21 as of 2.4.0: `offline` (#219) -- the launch skipped the update lookups
 # by choice (SANDY_OFFLINE / --no-update-check), provable after the fact.
-check "§114(13g) marker printf format/arg count line up (19 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 19
+check "§114(13g) marker printf format/arg count line up (21 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 21
 
 # --- (14) sandy-handoff-sessions helper: extraction + local functional test --
 # _s114_hs_match: portable (no grep -P, a GNU/PCRE-only extension BSD grep rejects)
@@ -11789,12 +11873,18 @@ check "§114(14f) oversized cmdline with the match FIRST still recognizes the ag
 
 # --- (15) relay supervisor: static checks against the TEMPLATE (mirror of the heredoc) --
 if [ -f "$_S114_TMPL" ]; then
-    _S114_SUP_FN="$(awk '/^_sandy_start_handoff_relay\(\) \{/,/^}$/' "$_S114_TMPL")"
-    check "§114(15pre) extracted _sandy_start_handoff_relay from templates/user-setup.sh.tmpl (proves the heredoc/template mirror stayed in sync, and regen-template.sh --check is the drift gate)" \
-        bash -c 'printf "%s" "$1" | grep -q SANDY_HANDOFF_RELAY' -- "$_S114_SUP_FN"
+    _S114_SUP_FN="$(awk '/^_sandy_supervise_entry\(\) \{/,/^}$/' "$_S114_TMPL")"
+    # Combined three-function extraction (#381): _sandy_supervise_entry,
+    # _sandy_await_entries and _sandy_start_entries together, for the dynamic
+    # tests below that need the whole call chain (start_entries calls both of
+    # the others). Bounded by the third column-0 closing brace after the
+    # first function's opener, since the three are adjacent in the heredoc.
+    _S114_ENTRY_FNS="$(awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$_S114_TMPL")"
+    check "§114(15pre) extracted _sandy_supervise_entry from templates/user-setup.sh.tmpl (proves the heredoc/template mirror stayed in sync, and regen-template.sh --check is the drift gate; SANDY_FEATURE_STATE is the #381 marker that this is the generalized function, not a stale copy)" \
+        bash -c 'printf "%s" "$1" | grep -q SANDY_FEATURE_STATE' -- "$_S114_SUP_FN"
     check "§114(15a) single column-0 closing brace (clean extraction)" \
         bash -c '[ "$(printf "%s\n" "$1" | grep -c "^}\$")" -eq 1 ]' -- "$_S114_SUP_FN"
-    check "§114(15b) survives its own relay's nonzero exit (set +e; trap - ERR under the caller's set -e/ERR trap)" \
+    check "§114(15b) survives its own entry's nonzero exit (set +e; trap - ERR under the caller's set -e/ERR trap)" \
         bash -c 'printf "%s" "$1" | grep -q "set +e; trap - ERR"' -- "$_S114_SUP_FN"
     check "§114(15c) singleton via flock -n on a lock fd" \
         bash -c 'printf "%s" "$1" | grep -q "flock -n 9"' -- "$_S114_SUP_FN"
@@ -11804,21 +11894,21 @@ if [ -f "$_S114_TMPL" ]; then
         bash -c 'printf "%s" "$1" | grep -q "up.*-gt 60.*&&.*backoff=1"' -- "$_S114_SUP_FN"
     check "§114(15f) call site precedes the first tmux new-session by line order" \
         bash -c '
-            c=$(grep -m1 -n "_sandy_start_handoff_relay;" "$1" | cut -d: -f1)
+            c=$(grep -m1 -n "_sandy_start_entries;" "$1" | cut -d: -f1)
             t=$(grep -m1 -n "tmux new-session" "$1" | cut -d: -f1)
             [ -n "$c" ] && [ -n "$t" ] && [ "$c" -lt "$t" ]
         ' -- "$_S114_TMPL"
-    check "§114(15g) call site is gated on headless (never starts the relay for -p/--print/--prompt)" \
-        bash -c 'grep -B1 "_sandy_start_handoff_relay;" "$1" | grep -q "_sandy_is_headless"' -- "$_S114_TMPL"
+    check "§114(15g) call site is gated on headless (never starts any entry for -p/--print/--prompt)" \
+        bash -c 'grep -B1 "_sandy_start_entries;" "$1" | grep -q "_sandy_is_headless"' -- "$_S114_TMPL"
     # Exactly ONE call site: the definition line plus one invocation. A second
     # invocation (e.g. added inside the multi-agent branch) would not be caught
     # by 15g, which only checks that SOME call site is headless-gated.
-    check "§114(15h) exactly one _sandy_start_handoff_relay call site (definition + 1 invocation = 2 mentions)" \
-        bash -c '[ "$(grep -c "_sandy_start_handoff_relay" "$1")" -eq 2 ]' -- "$_S114_TMPL"
+    check "§114(15h) exactly one _sandy_start_entries call site (definition + 1 invocation = 2 mentions)" \
+        bash -c '[ "$(grep -c "_sandy_start_entries" "$1")" -eq 2 ]' -- "$_S114_TMPL"
     # --- criterion 8, in-container half: the call site is gated on --remote as
     # well as headless. Belt-and-suspenders with the host-side unset (11p) --
     # the host is the only half that can log the reason, this half is what
-    # holds if a caller ever forwards the key anyway.
+    # holds if a caller ever forwards an entry anyway.
     # --- fatal in-container errors must be VISIBLE AT DEFAULT VERBOSITY ------
     #
     # user-setup.sh defines sandy_log as `{ :; }` -- a NO-OP -- unless
@@ -11842,27 +11932,27 @@ if [ -f "$_S114_TMPL" ]; then
         set +e
         _d="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$_d/h/ws"
         sed -n '1,20p' "$_S114_TMPL" > "$_d/hdr.sh"
-        sed -n '/^_sandy_start_handoff_relay() {/,/^}$/p' "$_S114_TMPL" > "$_d/fn.sh"
+        printf '%s\n' "$_S114_SUP_FN" > "$_d/fn.sh"
         ( unset SANDY_VERBOSE
-          HOME="$_d/h"; WORKSPACE="$_d/h/ws"; SANDY_HANDOFF_RELAY=/nonexistent/relay
+          HOME="$_d/h"; WORKSPACE="$_d/h/ws"
           . "$_d/hdr.sh" 2>/dev/null
           . "$_d/fn.sh"
-          _sandy_start_handoff_relay ) 2>&1
+          _sandy_supervise_entry "sandy-relay" /nonexistent/relay "$_d/h/st" "$_d/h/lock" "" ) 2>&1
         rm -rf "$_d"
     )"
-    check "§114(15l) a relay that cannot start PRINTS its reason with SANDY_VERBOSE unset — the behavioural half, not just the grep (got: ${_S114_ERRV:0:60})" \
+    check "§114(15l) an entry that cannot start PRINTS its reason with SANDY_VERBOSE unset — the behavioural half, not just the grep (got: ${_S114_ERRV:0:60})" \
         bash -c 'printf "%s" "$1" | grep -q "not an executable file inside the container"' -- "$_S114_ERRV"
     unset _S114_ERRV
-    check "§114(15i) call site is ALSO gated on SANDY_REMOTE_CONTROL (criterion 8: --remote has no panes for the relay to target, and the supervisor never gives up)" \
-        bash -c 'grep -q "_sandy_is_headless.*!=.*true.*SANDY_REMOTE_CONTROL.*!=.*true.*_sandy_start_handoff_relay" "$1"' -- "$_S114_TMPL"
+    check "§114(15i) call site is ALSO gated on SANDY_REMOTE_CONTROL (criterion 8: --remote has no panes for any entry to target, and the supervisor never gives up)" \
+        bash -c 'grep -q "_sandy_is_headless.*!=.*true.*SANDY_REMOTE_CONTROL.*!=.*true.*_sandy_start_entries" "$1"' -- "$_S114_TMPL"
     # --- criterion 7, in-container half: three preconditions the host cannot
-    # check (an image-only path, the /opt/sandy/relay-state mount, flock in the
+    # check (an image-only path, the entry's own state-dir mount, flock in the
     # image) each `exit 1` so the container dies before any tmux session
     # exists, rather than logging and leaving crossSessionInbound=accept with
     # nothing delivering.
-    check "§114(15i-2) env contract: the supervisor exports ONLY SANDY_RELAY_STATE — the SANDY_HANDOFF_* container vars went with their directories (#352, #353). A variable naming a path that is not mounted is worse than no variable" \
-        bash -c 'printf "%s\n" "$1" | grep -q "export SANDY_RELAY_STATE=" && ! printf "%s\n" "$1" | grep -qE "^ *export .*SANDY_HANDOFF_(INBOX|OUTBOX|PEER|RELAY_STATE)"' -- "$_S114_SUP_FN"
-    check "§114(15j) exactly three ERROR+exit-1 preconditions in the supervisor (relay not executable, relay state dir not mounted, flock missing)" \
+    check "§114(15i-2) env contract, GENERALIZED (#381): _sandy_start_entries exports SANDY_RELAY_STATE for the relay-designated entry only, and no SANDY_HANDOFF_* container var (#352, #353) is exported anywhere -- a variable naming a path that is not mounted is worse than no variable" \
+        bash -c 'grep -q "export SANDY_RELAY_STATE=" "$1" && ! grep -qE "^ *export .*SANDY_HANDOFF_(INBOX|OUTBOX|PEER|RELAY_STATE)" "$1"' -- "$_S114_TMPL"
+    check "§114(15j) exactly three ERROR+exit-1 preconditions in the supervisor (entry not executable, its state dir not mounted, flock missing)" \
         bash -c '[ "$(printf "%s\n" "$1" | grep -c "^        exit 1\$")" -eq 3 ]' -- "$_S114_SUP_FN"
     check "§114(15k) each of the three names the fail-the-session rule in its ERROR line" \
         bash -c '[ "$(printf "%s\n" "$1" | grep -c "A configured relay that cannot start fails the session")" -eq 3 ]' -- "$_S114_SUP_FN"
@@ -11879,7 +11969,7 @@ if [ -f "$_S114_TMPL" ]; then
 fi
 
 # --- (16) dynamic supervisor test (local loop, no Docker) --------------------
-if command -v flock >/dev/null 2>&1 && [ -n "${_S114_SUP_FN:-}" ]; then
+if command -v flock >/dev/null 2>&1 && [ -n "${_S114_ENTRY_FNS:-}" ]; then
     _S114_RF="$_S114/relayfix"
     mkdir -p "$_S114_RF/opt/sandy/relay-state" "$_S114_RF/home" "$_S114_RF/ws/.sandy"
     # The fixture relay records $PPID (the supervisor loop's OWN pid) on every
@@ -11898,26 +11988,31 @@ exit 7
 S114_RELAY_EOF
     chmod +x "$_S114_RF/ws/.sandy/relay-fail.sh"
     # As of 1.11.0 (#258) this fixture relay — which exits 7 immediately — trips
-    # the bounded STARTUP WINDOW, so _sandy_start_handoff_relay now returns
-    # non-zero instead of returning 0 and leaving the session up. That is the
-    # point of the window (a relay that dies at startup on every launch must
-    # fail the session rather than crash-loop unnoticed for 35 hours), and it is
+    # the bounded STARTUP WINDOW, so _sandy_start_entries now returns non-zero
+    # instead of returning 0 and leaving the session up. That is the point of
+    # the window (a relay that dies at startup on every launch must fail the
+    # session rather than crash-loop unnoticed for 35 hours), and it is
     # asserted as a property in (16z) below rather than merely tolerated here.
     # The `sleep 4` moved OUT of the subshell: the function no longer reaches
     # it, and the backgrounded supervisor loop — disowned, so it outlives the
     # subshell — still needs wall-clock time to accumulate the restarts (16a)
     # measures.
+    #
+    # SANDY_FEATURE_ENTRIES is left UNSET here deliberately (#381's legacy
+    # fallback): a single SANDY_HANDOFF_RELAY with no entries list still
+    # resolves to exactly one designated entry, so this fixture proves the
+    # generalized code reduces to the pre-#381 behaviour it replaces.
     _S114_RF_RC=0
     ( HOME="$_S114_RF/home" WORKSPACE="$_S114_RF/ws" SANDY_RELAY_STATE="$_S114_RF/opt/sandy/relay-state" bash -c "
         # unset EXPLICITLY: a sandy session still exports the retired
         # SANDY_HANDOFF_* vars until it relaunches, so this fixture inherited a
         # real /home/sandy/.handoff/inbox from the surrounding container, and the
         # is-it-unset assertion measured the developer machine, not the code.
-        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE
+        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE SANDY_FEATURE_ENTRIES
         sandy_log(){ :; }
         SANDY_HANDOFF_RELAY='.sandy/relay-fail.sh'
-        $_S114_SUP_FN
-        _sandy_start_handoff_relay
+        $_S114_ENTRY_FNS
+        _sandy_start_entries
     " ) >/dev/null 2>&1 || _S114_RF_RC=$?
     sleep 4
     check "§114(16z) a relay that dies at startup makes the supervisor function FAIL, so the session does not come up with nothing delivering (#258 startup window; got rc=$_S114_RF_RC)" \
@@ -11950,7 +12045,7 @@ fi
 # relay instance. Mutation-verified: `if flock -n 9 && false` leaves 15c green
 # but makes (16c) and (16d) below fail (three instances/zero "already running"
 # lines instead of one/two).
-if command -v flock >/dev/null 2>&1 && [ -n "${_S114_SUP_FN:-}" ]; then
+if command -v flock >/dev/null 2>&1 && [ -n "${_S114_ENTRY_FNS:-}" ]; then
     _S114_RF2="$_S114/relaylong"
     mkdir -p "$_S114_RF2/opt/sandy/relay-state" "$_S114_RF2/home" "$_S114_RF2/ws/.sandy"
     cat > "$_S114_RF2/ws/.sandy/relay-long.sh" <<'S114_RELAY_LONG_EOF'
@@ -11965,13 +12060,13 @@ S114_RELAY_LONG_EOF
         # SANDY_HANDOFF_* vars until it relaunches, so this fixture inherited a
         # real /home/sandy/.handoff/inbox from the surrounding container, and the
         # is-it-unset assertion measured the developer machine, not the code.
-        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE
+        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE SANDY_FEATURE_ENTRIES
         sandy_log(){ :; }
         SANDY_HANDOFF_RELAY='.sandy/relay-long.sh'
-        $_S114_SUP_FN
-        _sandy_start_handoff_relay
-        _sandy_start_handoff_relay
-        _sandy_start_handoff_relay
+        $_S114_ENTRY_FNS
+        _sandy_start_entries
+        _sandy_start_entries
+        _sandy_start_entries
         sleep 2
     " ) >/dev/null 2>&1
     _S114_LOCK="$_S114_RF2/home/.sandy-handoff-relay.lock"
@@ -12086,7 +12181,7 @@ unset _S114_SANDY _S114_TMPL _S114 _S114_PVP_FN _S114_VC_ACCEPT _S114_VC_HOLD _S
     _S114_NUDGE_OUT _S114_NUDGE_OUT2 _S114_END_LINE _S114_MOUNT_LINE _S114_SNAP_LINE _S114_RELAY_BEGIN_LINE _S114_PKGDIR_LINE _S114_HANDOFFDIR_LINE \
     _S114_RELAY_BLK _S114_RELAY_RC _S114_FMT_LINE _S114_CONV_COUNT _S114_HS_HELPER _S114_HS _S114_HS_OUT _S114_HS_OUT2 \
     _S114_HS_OUT2_L1 _S114_HS_OUT2_L2 _S114_HS_BIG_OUT \
-    _S114_HS_EMPTY_RC _S114_HS_EMPTY_OUT _S114_SUP_FN _S114_RF _S114_TAB _S114_RF2 _S114_LOCK _S114_FLOCK_RC \
+    _S114_HS_EMPTY_RC _S114_HS_EMPTY_OUT _S114_SUP_FN _S114_ENTRY_FNS _S114_RF _S114_TAB _S114_RF2 _S114_LOCK _S114_FLOCK_RC \
     _S114_RW _S114_RELAY_OUT _S114_COLL_BLK _S114_COLL_RC _S114_COLL_OUT _S114_D8_OUT \
     _S114_ACC _S114_ACC_E _S114_START_PAT _S114_UDS \
     2>/dev/null || true
@@ -12809,7 +12904,14 @@ _S123_DIR="$(mktemp -d)"
 # Extract the two units under test rather than re-implementing their logic: a
 # paraphrase in a test asserts the paraphrase, not the shipped code.
 sed -n '/^# BEGIN relay capability/,/^# END relay capability/p' "$SANDY_SCRIPT" > "$_S123_DIR/resolve.sh"
-sed -n '/^_sandy_start_handoff_relay() {/,/^}$/p'                "$SANDY_SCRIPT" > "$_S123_DIR/supervisor.sh"
+# #381 split the single supervisor function into three: _sandy_supervise_entry
+# (the flock/backoff loop), _sandy_await_entries (the shared startup window)
+# and _sandy_start_entries (resolves SANDY_FEATURE_ENTRIES, or a lone
+# SANDY_HANDOFF_RELAY, and calls the other two). This section drives the whole
+# chain through the legacy single-relay path, so all three are extracted
+# together, bounded by the third column-0 closing brace after the first
+# function's opener (they are adjacent in the heredoc).
+awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$SANDY_SCRIPT" > "$_S123_DIR/supervisor.sh"
 
 check "§123(pre-a) the resolution block was extracted (mutation: renaming the BEGIN/END markers empties it and would make every resolution check below vacuous)" \
     bash -c 'grep -q "_sandy_relay_slot=" "$1" && [ "$(grep -c . "$1")" -gt 20 ]' -- "$_S123_DIR/resolve.sh"
@@ -13034,6 +13136,7 @@ if command -v flock >/dev/null 2>&1; then
             set +e
             sandy_log() { :; }
             HOME="$h"; WORKSPACE="$h/ws"; SANDY_HANDOFF_RELAY="$h/r.sh"
+            unset SANDY_FEATURE_ENTRIES   # legacy fallback path (#381): one relay, no entries list
             # The state dir is an ABSOLUTE container path now (#353), so the
             # harness cannot relocate it via HOME. Sandy sets it host-side next
             # to the mount and the supervisor reads it, which is what makes the
@@ -13043,7 +13146,7 @@ if command -v flock >/dev/null 2>&1; then
             # Same capture rule as _s123_resolve: the function's refusal is an
             # `exit 1` that kills this subshell, so the status is read outside
             # it rather than echoed from within (which would never run).
-            _sandy_start_handoff_relay
+            _sandy_start_entries
         ) >/dev/null 2>&1 || rc=$?
         pkill -f "$h/r.sh" >/dev/null 2>&1 || true
         echo "rc=$rc"
@@ -14851,9 +14954,9 @@ check "§136(2) ...its declared exports, including the one attached to a mount a
     bash -c 'printf "%s" "$1" | grep -q "^export	AMAP_PAYLOAD_DIR	/opt/sandy/features/amap$" &&
              printf "%s" "$1" | grep -q "^export	AMAP_FLEET_DOMAIN	agents.internal$"' _ "$_S136_SEL"
 # THE SECURITY CHECK.
-check "§136(3) an UNSELECTED sandbox gets NO mount, NO export and NO entry — only a named skip (mutation: drop the selection gate and this goes red while (1) passes)" \
+check "§136(3) an UNSELECTED sandbox gets NO mount, NO export, NO entry and NO receives — only a named skip (mutation: drop the selection gate and this goes red while (1) passes)" \
     bash -c 'printf "%s" "$1" | grep -qv "^mount	" &&
-             ! printf "%s" "$1" | grep -qE "^(mount|export|entry)	" &&
+             ! printf "%s" "$1" | grep -qE "^(mount|export|entry|receives)	" &&
              printf "%s" "$1" | grep -q "^skip	amap	"' _ "$_S136_UNSEL"
 check "§136(4) mode defaults to ro and rw is honoured only where declared (D7: the router refuses to publish into an agent-writable tree)" \
     bash -c 'printf "%s" "$1" | grep -q "/home/sandy/.amap/inbox	ro$" &&
@@ -17013,7 +17116,7 @@ check "§151(4) relay state is mounted READ-WRITE at /opt/sandy/relay-state — 
     bash -c 'grep -q "relay-state:/opt/sandy/relay-state\")" "$1" && ! grep -q "relay-state:/opt/sandy/relay-state:ro" "$1"' _ "$_S151_SANDY"
 check "§151(5) the container path has ONE source: the host sets SANDY_RELAY_STATE beside the mount and the supervisor reads it, rather than both spelling the literal (mutation: hardcode it in the supervisor and the harnesses that relocate it break)" \
     bash -c 'grep -q -- "-e \"SANDY_RELAY_STATE=/opt/sandy/relay-state\"" "$1" \
-             && grep -q "_st=\"\${SANDY_RELAY_STATE:-/opt/sandy/relay-state}\"" "$1"' _ "$_S151_SANDY"
+             && grep -q "export SANDY_RELAY_STATE=\"\${SANDY_RELAY_STATE:-/opt/sandy/relay-state}\"" "$1"' _ "$_S151_SANDY"
 check "§151(6) the relay-state mount is gated on a relay being configured and on nothing else — it was never part of the handoff tree, and tying it to that tree's opt-out would have made a relay stop starting for a reason nobody could find (SANDY_HANDOFF_DIRS is now gone entirely, #355)" \
     bash -c 'grep -B3 "relay-state:/opt/sandy/relay-state\")" "$1" | grep -q "if \[ -n \"\${SANDY_HANDOFF_RELAY:-}\" \]" \
 ' _ "$_S151_SANDY"
@@ -17275,6 +17378,7 @@ _S153_BANOUT="$(bash -c '
     SANDY_RELAY=1; SANDBOX_NAME=amap-router-11112222; WORK_DIR=/w/amap-router; SANDY_AGENT=claude
     _sandy_fm_root="$3"; _sandy_fm_out=""; _sandy_fm_rc=0; _sandy_fm_ran=false
     _SANDY_FM_AA_RECORDS=""; _SANDY_FM_AA_JSON=""; _SANDY_RELAY_SOURCE=""; _sandy_relay_source=""
+    _sandy_fe_list=""; _sandy_fe_disabled=""; _sandy_fe_relay_feature=""; SANDY_FEATURE_ENTRIES=""
     eval "$2"
 ' _ "$_S153_APPLYBLK" "$_S153_BAN" "$_S153_DIR/root" 2>&1)"
 check "§153(27) an APPLIED feature is named at launch with what it contributed — no SANDY_VERBOSE required (got: $(printf '%s' "$_S153_BANOUT" | grep -m1 '^INFO features:'))" \
@@ -17368,12 +17472,13 @@ _s154_mk() {
     _H8="$(printf '%s' "$_W" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-8)"
     _NAME="$(basename "$_W" | tr -cd 'a-zA-Z0-9._-')-$_H8"; _SB="$_SH/sandboxes/$_NAME"
     _CWS="/home/sandy/$2"; _PD="$(printf '%s' "$_CWS" | sed 's/[^a-zA-Z0-9]/-/g')"
-    mkdir -p "$_SB/claude/projects/$_PD" "$_SB/claude/sessions" "$_SB/codex" "$_SB/venv/bin" "$_SB/cargo/bin" "$_SB/relay-state"
+    mkdir -p "$_SB/claude/projects/$_PD" "$_SB/claude/sessions" "$_SB/codex" "$_SB/venv/bin" "$_SB/cargo/bin" "$_SB/relay-state" "$_SB/feature-state/beta"
     printf 'TRANSCRIPT\n' > "$_SB/claude/projects/$_PD/s1.jsonl"
     printf 'key\n' > "$_SB/claude/sessions/1.a.key"
     printf '{"t":"CODEX"}\n' > "$_SB/codex/auth.json"
     printf 'py\n' > "$_SB/venv/bin/python"; printf 'bin\n' > "$_SB/cargo/bin/tool"
     printf '{}\n' > "$_SB/sandy-session.json"; printf 'started\n' > "$_SB/relay-state/.state"
+    printf 'started\n' > "$_SB/feature-state/beta/.state"   # #381: supervisor state, regenerated -- never copied
     printf '2.3.0\n' > "$_SB/.sandy_created_version"
     printf '{\n  "schema_version": 1,\n  "sandbox_name": "%s",\n  "workspace_path": "%s",\n  "first_seen_at": "2026-01-01T00:00:00Z",\n  "last_seen_at": "2026-09-01T00:00:00Z",\n  "sandy_version_first": "2.0.0",\n  "sandy_version_last": "2.3.0"\n}\n' "$_NAME" "$_W" > "$_SB/WORKSPACE.json"
     printf '{"projects":{"%s":{"trusted":true}}}\n' "$_CWS" > "$_SH/sandboxes/$_NAME.claude.json"
@@ -17429,8 +17534,8 @@ check "§154(8) the sibling .claude.json arrives under the destination name -- a
     test -f "$_S154_D.claude.json"
 check "§154(9) history is copied unrenamed when the container path is unchanged" \
     test -f "$_S154_D/claude/projects/-home-sandy-dev-proj/s1.jsonl"
-check "§154(10) per-process and per-launch state is NOT copied (claude/sessions keys, sandy-session.json, relay-state)" \
-    bash -c 'test ! -e "$1/claude/sessions" && test ! -e "$1/sandy-session.json" && test ! -e "$1/relay-state"' _ "$_S154_D"
+check "§154(10) per-process and per-launch state is NOT copied (claude/sessions keys, sandy-session.json, relay-state, feature-state (#381))" \
+    bash -c 'test ! -e "$1/claude/sessions" && test ! -e "$1/sandy-session.json" && test ! -e "$1/relay-state" && test ! -e "$1/feature-state"' _ "$_S154_D"
 check "§154(11) same arch and same container path: venv/ and cargo/ are copied" \
     bash -c 'test -f "$1/venv/bin/python" && test -f "$1/cargo/bin/tool"' _ "$_S154_D"
 check "§154(12) credential files ARE copied (#374 decision 2)..." test -f "$_S154_D/codex/auth.json"
@@ -17662,9 +17767,14 @@ chmod +x "$_S160_DIR/bin/docker"
 # opencode (verified empirically by acceptance-pane-topology.sh, #22).
 printf '0 claude\n1 opencode\n2 gemini\n3 codex\n' > "$_S160_DIR/grid4"
 printf '0 claude\n1 gemini\n2 codex\n'             > "$_S160_DIR/grid3"
-# An image predating the tag, or a single-agent session: the option is unset,
-# so tmux prints an empty field.
+# An image predating the tag, or a single-agent session from before 2.4.0
+# (#378 tags that pane too now): the option is unset, so tmux prints an empty
+# field.
 printf '0 \n1 \n2 \n3 \n'                          > "$_S160_DIR/untagged"
+# A single-agent session as 2.4.0 creates it (#378): the agent pane is tagged
+# -- here after a `split-window -b` user split pushed it to index 1, which is
+# the one case where the tag decides something the raw index would get wrong.
+printf '0 \n1 codex\n'                            > "$_S160_DIR/single-tagged"
 check "§160(pre) the relay was extracted, parses, and still carries both functions this section drives (mutation: a rename empties it and every check below goes vacuous)" \
     bash -c 'bash -n "$1/relay.sh" && grep -q "^_target() {" "$1/relay.sh" && grep -q "^_inject() {" "$1/relay.sh"' -- "$_S160_DIR"
 # _s160_route <agents-csv> <N> <panemap-file|""> -> the send-keys target.
@@ -17706,6 +17816,8 @@ check "§160(8) fallback: the pane lookup itself fails -> raw sandy.N, and the m
     test "$(trap - ERR; _s160_route "$_S160_A4" 2 "")" = "sandy.2"
 check "§160(9) single non-claude agent (the other case that runs this relay): N=0 -> sandy.0" \
     test "$(trap - ERR; _s160_route "codex" 0 "$_S160_DIR/untagged")" = "sandy.0"
+check "§160(9b) single-agent pane TAGGED (#378, 2.4.0) behind an untagged user split: N=0 follows the tag to sandy.1, not the raw sandy.0 the split now occupies" \
+    test "$(trap - ERR; _s160_route "codex" 0 "$_S160_DIR/single-tagged")" = "sandy.1"
 # The launcher half, structural and labelled as such: the behavioural half
 # needs Docker and a Telegram bot. Without this the relay silently falls back
 # to raw sandy.N on every launch and (1)-(5) keep passing.
@@ -17883,16 +17995,20 @@ unset _S158_DIR _S158_SB _S158_TZ _S158_STATE _S158_RMS
 
 # ============================================================
 echo ""
-echo "§159: a second feature entry is NAMED when it is dropped, not skipped in silence (#381)"
+echo "§159: every selected feature's entry is ADOPTED, and the launch says so for each -- nothing dropped (#381)"
 # ============================================================
-# At most one manifest `entry` runs per container: the first selected feature
-# to declare one wins, and every later one was skipped by an `elif` with no
-# else -- two features installed, one of them inert, nothing saying so (the
-# #363 shape). And the launch "features:" line printed `entry` for BOTH, so the
-# one line meant to say what applied claimed two relays. Same composition as
-# §142: the manifest reader, _sandy_fm_apply and the real evaluation span,
-# extracted in file order and driven against fixture features, with info/warn
-# captured -- the assertions are on what the operator is told.
+# History. An interim patch on this dev line (#391) kept "at most ONE entry
+# per container" and made the drop LOUD: a second feature's entry was named in
+# a warning and the features line said `entry NOT run: '<winner>' won`. #381
+# proper (amap-decouple, integrated on top) removed the drop itself -- every
+# selected feature's entry runs, the first in feature-directory name order is
+# the relay-DESIGNATED one -- so the checks here were rewritten to assert THAT
+# property on the same fixtures, rather than deleted: a loser that is named is
+# still a loser, and the failure this section exists for is an installed
+# feature silently not running. The supervisor half (each entry really
+# started, its own lock/backoff/state) is §172; this is the host-side half,
+# driving the manifest reader, _sandy_fm_apply and the real evaluation span in
+# file order (as §142 does) with info/warn captured.
 _S159_SANDY="$SANDY_SCRIPT"
 _S159_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 _S159_FM="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$_S159_SANDY")
@@ -17908,22 +18024,23 @@ _s159_mk() {
         > "$1/features/$2/feature.json"
 }
 # Created in REVERSE name order, so a pass cannot be an accident of creation
-# order: the winner must be the first in name order.
+# order: the designated entry must be the first in name order.
 _s159_mk "$_S159_DIR/two" beta
 _s159_mk "$_S159_DIR/two" alpha
 _s159_mk "$_S159_DIR/one" alpha
 cat > "$_S159_DIR/drive.sh" <<'S159_DRV'
 set -uo pipefail
 # Hermetic for the reason §142 records: a sandy container with a relay exports
-# SANDY_HANDOFF_RELAY into every process, and inheriting it would measure the
-# developer container instead of the fixture.
-unset SANDY_HANDOFF_RELAY
+# SANDY_HANDOFF_RELAY (and SANDY_FEATURE_ENTRIES) into every process, and
+# inheriting them would measure the developer container instead of the fixture.
+unset SANDY_HANDOFF_RELAY SANDY_FEATURE_ENTRIES
 info() { printf 'INFO %s\n' "$*"; }; warn() { printf 'WARN %s\n' "$*"; }; error() { printf 'ERROR %s\n' "$*"; }
 _sandy_daemon_fatal() { :; }
 _sandy_agent_has() { case ",$SANDY_AGENT," in *",$1,"*) return 0 ;; esac; return 1; }
 eval "$FM_BLOCK"
 eval "$EVAL_BLOCK"
 printf 'relay=%s\n' "${SANDY_HANDOFF_RELAY:-EMPTY}"
+printf 'entries=%s\n' "${SANDY_FEATURE_ENTRIES:-EMPTY}"
 S159_DRV
 _s159_run() {  # _s159_run HOME SANDY_RELAY -> output
     ( cd "$_S159_DIR" && SANDY_HOME="$1" SANDBOX_DIR="$_S159_DIR/sb" WORK_DIR="$_S159_DIR/ws" \
@@ -17935,19 +18052,21 @@ _S159_TWO="$(_s159_run "$_S159_DIR/two" 1)"
 _S159_ONE="$(_s159_run "$_S159_DIR/one" 1)"
 _S159_OFF="$(_s159_run "$_S159_DIR/two" 0)"
 check "§159(0) the driver RAN in all three cases (a dead probe would make every negative check below pass)" \
-    bash -c 'for o in "$@"; do case "$o" in *DRIVER-FAILED*) exit 1 ;; *"relay="*) ;; *) exit 1 ;; esac; done' _ "$_S159_TWO" "$_S159_ONE" "$_S159_OFF"
-check "§159(1) with two entries, the FIRST in feature-name order is the one that runs (alpha, although beta was created first)" \
+    bash -c 'for o in "$@"; do case "$o" in *DRIVER-FAILED*) exit 1 ;; *"entries="*) ;; *) exit 1 ;; esac; done' _ "$_S159_TWO" "$_S159_ONE" "$_S159_OFF"
+check "§159(1) with two entries BOTH are adopted, in feature-name order (alpha, although beta was created first) -- nothing is dropped (mutation: restoring the elif skip leaves beta out)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "entries=alpha=/opt/sandy/features/alpha/relay beta=/opt/sandy/features/beta/relay"' _ "$_S159_TWO"
+check "§159(2) the relay-DESIGNATED entry is the first in name order (relay{} and SANDY_HANDOFF_RELAY describe alpha only)" \
     bash -c 'printf "%s\n" "$1" | grep -qx "relay=/opt/sandy/features/alpha/relay"' _ "$_S159_TWO"
-check "§159(2) the dropped entry is WARNED about by feature name and path, naming the winner (mutation: removing the else branch restores the silent skip)" \
-    bash -c 'printf "%s\n" "$1" | grep "^WARN " | grep -F "'"'"'beta'"'"'" | grep -F "/opt/sandy/features/beta/relay" | grep -F "will NOT run" | grep -qF "'"'"'alpha'"'"'"' _ "$_S159_TWO"
-check "§159(3) the features line says the winner runs its entry..." \
-    bash -c 'printf "%s\n" "$1" | grep "^INFO features: " | grep -qF "alpha (1 mount, entry)"' _ "$_S159_TWO"
-check "§159(4) ...and does NOT claim an entry for the loser -- it says it was not run and who won (mutation: printing the raw summary field restores the double claim)" \
-    bash -c 'printf "%s\n" "$1" | grep "^INFO features: " | grep -F "beta (1 mount, entry NOT run" | grep -qF "alpha"' _ "$_S159_TWO"
-check "§159(5) one entry: no dropped-entry warning, and the features line still says entry (the fix must not cost the common case)" \
-    bash -c 'case "$1" in *"will NOT run"*) exit 1 ;; esac; printf "%s\n" "$1" | grep "^INFO features: " | grep -qF "alpha (1 mount, entry)"' _ "$_S159_ONE"
-check "§159(6) SANDY_RELAY=0: no entry runs, and the features line says so rather than claiming either" \
-    bash -c 'printf "%s\n" "$1" | grep -qx "relay=EMPTY" && printf "%s\n" "$1" | grep "^INFO features: " | grep -F "alpha (1 mount, entry disabled by SANDY_RELAY=0)" | grep -qF "beta (1 mount, entry disabled by SANDY_RELAY=0)"' _ "$_S159_OFF"
+check "§159(3) no launch warning claims either entry will not run (mutation: restoring the interim one-entry else-branch warning fails this)" \
+    bash -c 'case "$1" in *"will NOT run"*|*"only ONE entry"*) exit 1 ;; esac; ! printf "%s\n" "$1" | grep "^WARN " | grep -qF "beta"' _ "$_S159_TWO"
+check "§159(4) the features line says entry for EACH feature, not only the designated one (mutation: restoring the NOT-run branch fails this)" \
+    bash -c 'l="$(printf "%s\n" "$1" | grep "^INFO features: ")" && printf "%s" "$l" | grep -qF "alpha (1 mount, entry)" && printf "%s" "$l" | grep -qF "beta (1 mount, entry)" && ! printf "%s" "$l" | grep -qF "NOT run"' _ "$_S159_TWO"
+check "§159(5) two entries: one info line names them both and which one relay{} reports" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "INFO feature entries: alpha (reported as relay{}), beta"' _ "$_S159_TWO"
+check "§159(6) one entry: adopted and designated, the features line says entry, and no multi-entry line (the common case costs nothing)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "entries=alpha=/opt/sandy/features/alpha/relay" && printf "%s\n" "$1" | grep -qx "relay=/opt/sandy/features/alpha/relay" && printf "%s\n" "$1" | grep "^INFO features: " | grep -qF "alpha (1 mount, entry)" && ! printf "%s\n" "$1" | grep -q "^INFO feature entries: "' _ "$_S159_ONE"
+check "§159(7) SANDY_RELAY=0: no entry runs, and the features line says so for each rather than claiming either" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "relay=EMPTY" && printf "%s\n" "$1" | grep -qx "entries=EMPTY" && printf "%s\n" "$1" | grep "^INFO features: " | grep -F "alpha (1 mount, entry disabled by SANDY_RELAY=0)" | grep -qF "beta (1 mount, entry disabled by SANDY_RELAY=0)"' _ "$_S159_OFF"
 rm -rf "$_S159_DIR"
 unset _S159_SANDY _S159_DIR _S159_FM _S159_EVAL _S159_TWO _S159_ONE _S159_OFF
 unset -f _s159_mk _s159_run
@@ -18015,6 +18134,21 @@ check "§163(9) a TZ that fails validation (.., leading /, space, shell metachar
     test "$_S163_BAD_OK" = 1
 check "§163(10) a /etc/localtime link whose stripped name contains .. is refused and /etc/timezone used instead (got: $(_s163_tz - "$_S163_DIR/evil"))" \
     test "$(_s163_tz - "$_S163_DIR/evil")" = "Asia/Kolkata"
+# (10b-10d) ported from amap-decouple's #384 (see the port commit): the image
+# ships neither zoneinfo/posix/ nor zoneinfo/right/ (trixie moved both to
+# tzdata-legacy), so forwarding `posix/X` or `right/X` verbatim would be unset
+# by the entrypoint and the container would read UTC; and a trailing space in
+# /etc/timezone fails validation, so it must be trimmed rather than skipped.
+mkdir -p "$_S163_DIR/px/etc" "$_S163_DIR/rt/etc" "$_S163_DIR/ws/etc"
+ln -s /usr/share/zoneinfo/posix/America/Chicago "$_S163_DIR/px/etc/localtime"
+ln -s ../usr/share/zoneinfo/right/Europe/Paris "$_S163_DIR/rt/etc/localtime"
+printf 'Asia/Tokyo \t\n' > "$_S163_DIR/ws/etc/timezone"
+check "§163(10b) a link into zoneinfo/posix/ resolves the plain zone, America/Chicago (got: $(_s163_tz - "$_S163_DIR/px"))" \
+    test "$(_s163_tz - "$_S163_DIR/px")" = "America/Chicago"
+check "§163(10c) a link into zoneinfo/right/ resolves the plain zone, Europe/Paris (got: $(_s163_tz - "$_S163_DIR/rt"))" \
+    test "$(_s163_tz - "$_S163_DIR/rt")" = "Europe/Paris"
+check "§163(10d) /etc/timezone with trailing whitespace resolves Asia/Tokyo rather than being skipped (got: $(_s163_tz - "$_S163_DIR/ws"))" \
+    test "$(_s163_tz - "$_S163_DIR/ws")" = "Asia/Tokyo"
 
 # The argv. The REAL block, from its banner to its unset, evaluated with a
 # controlled TZ -- the same shape §134(4) uses for SANDY_SANDBOX_NAME.
@@ -18034,6 +18168,14 @@ _S163_L_D="$(grep -n '^    RUN_FLAGS=(-d --restart unless-stopped' "$_S163_SANDY
 _S163_L_F="$(grep -n '^    RUN_FLAGS=(--rm -it' "$_S163_SANDY" | cut -d: -f1)"
 check "§163(12) the TZ block runs after BOTH the daemon and foreground RUN_FLAGS initialisations, at top level (block ${_S163_L_BLK:-?} > ${_S163_L_D:-?}, ${_S163_L_F:-?})" \
     bash -c 'test -n "$1" && test -n "$2" && test -n "$3" && test "$1" -gt "$2" && test "$1" -gt "$3"' _ "$_S163_L_BLK" "$_S163_L_D" "$_S163_L_F"
+# (12b) ported from amap-decouple's #384: docker applies repeated -e
+# last-wins, so the resolved host zone must be emitted BEFORE the feature-
+# manifest export loop -- a manifest that `expose`s TZ is an operator's explicit
+# choice and must win, not be silently replaced. (Mutation: moving the block
+# back below the screenshot mount, where it first landed, fails this.)
+_S163_L_EXP="$(grep -n '^                RUN_FLAGS+=(-e "\${_fm_v%%' "$_S163_SANDY" | cut -d: -f1)"
+check "§163(12b) the TZ block precedes the feature-manifest export's -e (block ${_S163_L_BLK:-?} < export ${_S163_L_EXP:-?}), so a manifest's own TZ wins" \
+    bash -c 'test -n "$1" && test -n "$2" && test "$1" -lt "$2"' _ "$_S163_L_BLK" "$_S163_L_EXP"
 
 # The entrypoint half: whether the zone EXISTS is the image's question.
 _S163_EP="$(sed -n '/^if \[ -n "\${TZ:-}" \] && \[ ! -f "\/usr\/share\/zoneinfo\/\$TZ" \]; then$/,/^fi$/p' "$_S163_SANDY")"
@@ -18079,9 +18221,80 @@ EOF
 else
     skip "§163(16-17) this host has no Pacific/Kiritimati zone, so a local-time producer cannot be told from a UTC one"
 fi
+# (18-19) ported from amap-decouple's #384: a STATIC ratchet beside (17)'s
+# dynamic one. (17) runs every `$(date ...)` it can extract, which cannot see
+# a local-time `date` that never runs in the probe (the `|| date` fallback
+# after a `date -u` that succeeds -- exactly the two approval stamps this
+# ratchet caught), one outside `$( )` (backticks, `date>file`), or a
+# human-readable mtime `stat` (%y / %Sm are LOCAL time; created_at/
+# last_used_at shipped that way, fixed by §158). Every `date` invocation must
+# say -u or be epoch seconds; every lowercase-%[xyzw] / %S[amcB] stat must run
+# under TZ=UTC; a capability probe whose output goes to /dev/null is exempt.
+# One clause per line in an awk FILE, not an inline program (the pattern needs
+# literal single quotes).
+_S163_RATCHET="$_S163_DIR/ratchet.awk"
+cat > "$_S163_RATCHET" <<'S163_RATCHET_AWK'
+{
+    line = $0
+    if (line ~ /^[ \t]*#/) next
+    rest = line
+    while (match(rest, /(^|[ \t(|;&`])date([ \t]+[-+'"]|[ \t]*[)|;&><`]|[ \t]*$)/)) {
+        seg = substr(rest, RSTART, RLENGTH)
+        dpos = index(seg, "date")
+        astart = RSTART + dpos - 1 + 4
+        tail = substr(rest, astart)
+        if (match(tail, /[)|;&><`]/)) aend = RSTART - 1
+        else aend = length(tail)
+        args = substr(tail, 1, aend)
+        gsub(/^[ \t]+/, "", args)
+        gsub(/[ \t]+$/, "", args)
+        if (index(args, "-u") == 0 && args != "+%s" && args != "'+%s'") {
+            print NR ": DATE-NO-U: " line
+            found++
+        }
+        consumed = astart + aend
+        if (consumed < 1) consumed = 1
+        rest = substr(rest, consumed)
+    }
+    if (line ~ /stat -[cf] .* \/ >\/dev\/null/) next
+    if (line ~ /stat -c .%[xyzw]./ && line !~ /TZ=UTC0? stat -c .%[xyzw]./) {
+        print NR ": STAT-NO-TZ: " line
+        found++
+    }
+    if (line ~ /stat -f .%S[amcB]./ && line !~ /TZ=UTC0? stat -f .%S[amcB]./) {
+        print NR ": STAT-NO-TZ: " line
+        found++
+    }
+}
+END { exit (found > 0) ? 1 : 0 }
+S163_RATCHET_AWK
+_S163_RRC=0
+_S163_ROUT="$(awk -f "$_S163_RATCHET" "$_S163_SANDY" 2>&1)" || _S163_RRC=$?
+check "§163(18) no date or mtime-stat call anywhere in sandy (host side AND every heredoc) can render local time (findings:${_S163_ROUT:+ }$(printf '%s' "$_S163_ROUT" | tr '\n' ' '))" \
+    test "$_S163_RRC" = 0
+cat > "$_S163_DIR/ratchet-fixture" <<'S163_FIXTURE'
+x=$(date +%H)
+foo || date)
+stat -c '%y' f
+y=`date +%H`
+date>file
+stat -f '%Sm' -t '%FT%TZ' f
+date +%s
+date -u +%F
+TZ=UTC stat -c '%y' f
+TZ=UTC0 stat -f '%Sm' f
+if stat -c '%y' / >/dev/null 2>&1; then
+echo "image up to date with base"
+S163_FIXTURE
+_S163_RSELF="$(awk -f "$_S163_RATCHET" "$_S163_DIR/ratchet-fixture" 2>&1 || true)"
+check "§163(19a) ratchet self-test: flags \$(date +%H), the '|| date' fallback, a backtick date, date>file, and both local-time stat forms" \
+    bash -c 'for n in 1 2 3 4 5 6; do printf "%s\n" "$1" | grep -q "^$n: " || exit 1; done' _ "$_S163_RSELF"
+check "§163(19b) ratchet self-test: flags NOTHING else -- epoch seconds, date -u, TZ=UTC(0) stat, a /dev/null capability probe and prose are all clean (exactly 6 findings)" \
+    test "$(printf '%s\n' "$_S163_RSELF" | grep -c ': ' || true)" = 6
 rm -rf "$_S163_DIR"
 unset _S163_SANDY _S163_DIR _S163_FNS _S163_BAD_OK _s163_v _S163_BLK _S163_ARGV _S163_L_BLK _S163_L_D _S163_L_F
 unset _S163_EP _S163_DATES _S163_NDATES _S163_LOCAL _s163_l _s163_c _s163_a _s163_b
+unset _S163_L_EXP _S163_RATCHET _S163_RRC _S163_ROUT _S163_RSELF
 unset -f _s163_tz _s163_ep
 
 # ============================================================
@@ -18820,6 +19033,2346 @@ check "§170(1) a key on the FIRST row of a 2 MB table resolves, and the lookup 
 check "§170(2) ...and a key on the LAST row still resolves (reading to EOF must not lose the match)" \
     bash -c 'printf "%s\n" "$1" | grep -qx "last=1.0.0"' _ "$_S170_OUT"
 unset _S170_FN _S170_OUT
+
+# ============================================================
+echo ""
+echo "§171: the pane-identity contract (#378) — identity comes from @sandy_pane_agent, order from SANDY_AGENT"
+# ============================================================
+# WHY. #378 step 1 publishes tmux session "sandy", the @sandy_pane_agent pane
+# option, and SANDY_AGENT spawn order (SPECIFICATION.md "Pane-identity
+# contract") as a STABLE surface external tooling is now allowed to depend on
+# -- an external consumer's own copy of sandy-handoff-sessions is built
+# against exactly these three facts. A grep for the option name does not pin
+# a contract; this section asserts the PROPERTY the acceptance criterion names:
+# a fixture where @sandy_pane_agent DISAGREES with pane_index still yields the
+# correct agent per row, in SANDY_AGENT order.
+#
+# Reuses §114(14)'s extraction mechanics (sed out the HS_HELPER heredoc body,
+# write it to a temp file, chmod +x) but with this section's OWN canonical
+# temp dir and a FRESH fake /proc tree -- descendants() walks the WHOLE $PROC
+# tree by ppid, so reusing §114's pids would mask a bug that only shows up
+# when two sections' fixtures collide.
+_S171_SANDY="$SANDY_SCRIPT"
+_S171_TMPL="$(dirname "$0")/../templates/user-setup.sh.tmpl"
+_S171_SPEC="$(dirname "$0")/../SPECIFICATION.md"
+_S171_TAB="$(printf '\t')"
+_S171_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+
+# Hermetic by construction (the §142 lesson): this suite is routinely run
+# INSIDE a sandy sandbox, whose live session exports SANDY_AGENT and could in
+# principle export SANDY_SESSIONS_* test hooks. Every invocation below passes
+# all five explicitly, but unset first too so nothing here can silently read
+# the developer's own container.
+unset SANDY_AGENT SANDY_SESSIONS_PANES_FILE SANDY_SESSIONS_PROC SANDY_SESSIONS_SOCK_DIR SANDY_SESSIONS_KEY_DIR
+
+_s171_match() {  # $1=text $2=glob -- case, not grep -P (BSD grep rejects it)
+    case "$1" in
+        $2) return 0 ;;
+    esac
+    return 1
+}
+
+_S171_HS_HELPER="$(sed -n "/<<'HS_HELPER'/,/^HS_HELPER\$/p" "$_S171_SANDY" | sed '1,2d;$d')"
+check "§171(pre) extracted the sandy-handoff-sessions helper body" \
+    bash -c 'printf "%s" "$1" | grep -q "sandy-handoff-sessions"' -- "$_S171_HS_HELPER"
+_S171_HS="$_S171_DIR/hs"
+printf '%s\n' "$_S171_HS_HELPER" > "$_S171_HS"
+chmod +x "$_S171_HS"
+check "§171(pre2) helper is syntactically valid bash" bash -n "$_S171_HS"
+
+# --- (10) Appendix A's copy of the sandy-handoff-sessions header comment must
+# be BYTE-IDENTICAL to the real heredoc's (decisions.md #378 item 4 and the
+# Boundary rule, both flagged by the fix-pass verifier as unmet: the
+# SPECIFICATION.md copy used to be a paraphrase, and its body placeholder
+# pointed at a CLAUDE.md "Handoff relay" heading that no longer exists). This
+# extracts sandy's own pre-RUN 2-line comment plus the heredoc's leading
+# '#'-comment block (everything between the `#!/bin/bash` shebang and the
+# first non-comment line -- i.e. the real code, which Appendix A elides) and
+# does the same against SPECIFICATION.md's copy, then diffs them as TEXT, not
+# by grepping for a mechanism's presence: a paraphrase that mentions the same
+# facts in different words would pass a presence check and must fail this one.
+_s171_hs_header_sandy() {  # $1=file -> 2-line pre-RUN comment + heredoc's leading comment block (stops at the first non-'#' line, which is real code in sandy's own heredoc)
+    { grep -B2 -F 'RUN cat > /usr/local/bin/sandy-handoff-sessions' "$1" | sed '$d';
+      awk '
+          /RUN cat > \/usr\/local\/bin\/sandy-handoff-sessions/ { f=1; next }
+          f && /^#!\/bin\/bash$/ { c=1; next }
+          c && /^#/ { print; next }
+          c { exit }
+      ' "$1"; }
+}
+# Appendix A elides the real body behind its OWN placeholder comment (see the
+# SS_HELPER entry just above for the established precedent) -- unlike sandy's
+# heredoc, SPECIFICATION.md's comment run does not end where the real header
+# ends, so it cannot be bounded by "first non-'#' line" the way sandy's can.
+# Bound it instead by sandy's own LAST header line (an exact-text anchor
+# taken from sandy itself, not hardcoded here) -- this still fails correctly
+# on a reworded paraphrase, which will not contain that exact line and so
+# runs on to the heredoc's closing HS_HELPER delimiter, producing a blob that
+# cannot match sandy's short header either way.
+_s171_hs_header_bounded() {  # $1=file $2=exact last line to stop at (inclusive) -> same shape as _s171_hs_header_sandy
+    { grep -B2 -F 'RUN cat > /usr/local/bin/sandy-handoff-sessions' "$1" | sed '$d';
+      awk -v last="$2" '
+          /RUN cat > \/usr\/local\/bin\/sandy-handoff-sessions/ { f=1; next }
+          f && /^#!\/bin\/bash$/ { c=1; next }
+          c { print }
+          c && $0==last { exit }
+          c && !/^#/ { exit }
+      ' "$1"; }
+}
+_S171_HS_HEADER_SANDY="$(_s171_hs_header_sandy "$_S171_SANDY")"
+_S171_HS_LAST_LINE="$(printf '%s\n' "$_S171_HS_HEADER_SANDY" | tail -1)"
+_S171_HS_HEADER_SPEC="$(_s171_hs_header_bounded "$_S171_SPEC" "$_S171_HS_LAST_LINE")"
+check "§171(10pre) extracted a non-empty sandy-handoff-sessions header comment from both sandy and SPECIFICATION.md" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ]' _ "$_S171_HS_HEADER_SANDY" "$_S171_HS_HEADER_SPEC"
+check "§171(10) SPECIFICATION.md Appendix A's sandy-handoff-sessions header comment is byte-identical to the heredoc's" \
+    bash -c '[ "$1" = "$2" ]' _ "$_S171_HS_HEADER_SANDY" "$_S171_HS_HEADER_SPEC"
+unset -f _s171_hs_header_sandy _s171_hs_header_bounded
+unset _S171_HS_HEADER_SANDY _S171_HS_HEADER_SPEC _S171_HS_LAST_LINE
+
+# _s171_run PANES_FILE PROC_DIR AGENT_LIST -> stdout in _S171_OUT, exit code in
+# _S171_RC. SOCK_DIR and KEY_DIR always point at guaranteed-empty, non-existent
+# directories under this section's own temp dir so a real /tmp/cc-socks or
+# ~/.claude/sessions on the host running this suite can never leak a
+# socket/keyfile into a fixture row.
+#
+# The `|| _S171_RC=$?` is load-bearing, not decorative: under this suite's
+# `set -euo pipefail`, a bare `_S171_OUT="$(... "$_S171_HS" 2>&1)"` assignment
+# whose helper exits non-zero fails the ASSIGNMENT itself, which trips the ERR
+# trap and aborts the WHOLE SUITE -- silently skipping every section appended
+# after §171 (a verifier finding against the first cut of this section, which
+# had exactly this gap). Reset _S171_RC to 0 before every call so a check that
+# only reads it (rather than calling _s171_run again first) can't read a stale
+# value from a previous fixture.
+_s171_run() {
+    _S171_RC=0
+    _S171_OUT="$(SANDY_SESSIONS_PANES_FILE="$1" SANDY_SESSIONS_PROC="$2" \
+        SANDY_SESSIONS_SOCK_DIR="$_S171_DIR/nosock" SANDY_SESSIONS_KEY_DIR="$_S171_DIR/nokey" \
+        SANDY_AGENT="$3" "$_S171_HS" 2>&1)" || _S171_RC=$?
+}
+# _s171_stat PID COMM PPID -> a /proc/<pid>/stat line in the same shape §114
+# uses (comm in parens; ppid is the field right after the state char).
+_s171_stat() {
+    printf '%s (%s) S %s %s %s 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' \
+        "$1" "$2" "$3" "$1" "$1"
+}
+
+# --- (1) TWO-AGENT DISAGREEMENT: the option disagrees with index-as-spawn-order ---
+mkdir -p "$_S171_DIR/proc1/301" "$_S171_DIR/proc1/401"
+_s171_stat 301 codex 300 > "$_S171_DIR/proc1/301/stat"
+_s171_stat 401 claude 400 > "$_S171_DIR/proc1/401/stat"
+printf '0%s300%scodex\n1%s400%sclaude\n' "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" > "$_S171_DIR/panes1.tsv"
+_s171_run "$_S171_DIR/panes1.tsv" "$_S171_DIR/proc1" claude,codex
+_S171_OUT1_L1="$(printf '%s\n' "$_S171_OUT" | sed -n '1p')"
+_S171_OUT1_L2="$(printf '%s\n' "$_S171_OUT" | sed -n '2p')"
+check "§171(1rc) helper exited 0" \
+    bash -c '[ "$1" -eq 0 ]' _ "$_S171_RC"
+check "§171(1pre) exactly 2 rows" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 2 ]' _ "$_S171_OUT"
+check "§171(1a) row 1 is claude at pane_index 1 / pane_pid 400 / agent_pid 401 -- SANDY_AGENT order (claude,codex), not pane order (pane 0 is codex)" \
+    _s171_match "$_S171_OUT1_L1" "claude${_S171_TAB}1${_S171_TAB}400${_S171_TAB}401${_S171_TAB}*"
+check "§171(1b) row 2 is codex at pane_index 0 / pane_pid 300 / agent_pid 301 -- the row the @sandy_pane_agent option identifies, not the one pane_index would suggest" \
+    _s171_match "$_S171_OUT1_L2" "codex${_S171_TAB}0${_S171_TAB}300${_S171_TAB}301${_S171_TAB}-${_S171_TAB}-"
+
+# --- (2) the real 4-agent grid mapping: pane_index != spawn order ---
+# The tmux order the launcher actually produces (SPECIFICATION.md's mapping
+# table): pane_index 0=agent1, 1=agent4, 2=agent2, 3=agent3.
+mkdir -p "$_S171_DIR/proc2/610" "$_S171_DIR/proc2/611" "$_S171_DIR/proc2/612" "$_S171_DIR/proc2/613"
+_s171_stat 610 claude   600 > "$_S171_DIR/proc2/610/stat"
+_s171_stat 611 opencode 601 > "$_S171_DIR/proc2/611/stat"
+_s171_stat 612 gemini   602 > "$_S171_DIR/proc2/612/stat"
+_s171_stat 613 codex    603 > "$_S171_DIR/proc2/613/stat"
+printf '0%s600%sclaude\n1%s601%sopencode\n2%s602%sgemini\n3%s603%scodex\n' \
+    "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" \
+    > "$_S171_DIR/panes2.tsv"
+_s171_run "$_S171_DIR/panes2.tsv" "$_S171_DIR/proc2" claude,gemini,codex,opencode
+_S171_OUT2_L1="$(printf '%s\n' "$_S171_OUT" | sed -n '1p')"
+_S171_OUT2_L2="$(printf '%s\n' "$_S171_OUT" | sed -n '2p')"
+_S171_OUT2_L3="$(printf '%s\n' "$_S171_OUT" | sed -n '3p')"
+_S171_OUT2_L4="$(printf '%s\n' "$_S171_OUT" | sed -n '4p')"
+check "§171(2rc) helper exited 0" \
+    bash -c '[ "$1" -eq 0 ]' _ "$_S171_RC"
+check "§171(2pre) exactly 4 rows" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 4 ]' _ "$_S171_OUT"
+check "§171(2a) claude: pane_index 0 (the split root)" \
+    _s171_match "$_S171_OUT2_L1" "claude${_S171_TAB}0${_S171_TAB}600${_S171_TAB}610${_S171_TAB}*"
+check "§171(2b) gemini: pane_index 2 -- the THIRD split, not the second" \
+    _s171_match "$_S171_OUT2_L2" "gemini${_S171_TAB}2${_S171_TAB}602${_S171_TAB}612${_S171_TAB}*"
+check "§171(2c) codex: pane_index 3" \
+    _s171_match "$_S171_OUT2_L3" "codex${_S171_TAB}3${_S171_TAB}603${_S171_TAB}613${_S171_TAB}*"
+check "§171(2d) opencode: pane_index 1 -- the FOURTH agent lands at index 1 because the last split re-splits pane 0 and tmux inserts the new pane right after it (the trap this contract exists to name)" \
+    _s171_match "$_S171_OUT2_L4" "opencode${_S171_TAB}1${_S171_TAB}601${_S171_TAB}611${_S171_TAB}*"
+
+# --- (3) PRE-2.4.0 SHAPE: one untagged pane, one agent -- falls back to SANDY_AGENT ---
+# As of 2.4.0 sandy tags the single-agent pane too (#378 fix pass), so this
+# shape (@sandy_pane_agent unset entirely) is now specifically the LEGACY one
+# a pre-2.4.0 image could have produced, not the current default. The helper
+# still has to resolve it, which is exactly what the fallback rule below
+# checks it does -- and does NOT overreach into.
+mkdir -p "$_S171_DIR/proc3/501"
+_s171_stat 501 codex 500 > "$_S171_DIR/proc3/501/stat"
+printf '0%s500%s\n' "$_S171_TAB" "$_S171_TAB" > "$_S171_DIR/panes3.tsv"
+_s171_run "$_S171_DIR/panes3.tsv" "$_S171_DIR/proc3" codex
+check "§171(3rc) helper exited 0" \
+    bash -c '[ "$1" -eq 0 ]' _ "$_S171_RC"
+check "§171(3) single-agent, ONE untagged pane (pre-2.4.0 shape): one row, labelled \$SANDY_AGENT" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 1 ] && case "$1" in $2) exit 0 ;; esac; exit 1' \
+    _ "$_S171_OUT" "codex${_S171_TAB}0${_S171_TAB}500${_S171_TAB}501${_S171_TAB}*"
+
+# --- (5) single-agent, tagged agent pane PLUS an untagged user split: the
+# fallback must NOT fire (row_count is 2, not 1) -- exactly one row, the
+# TAGGED pane, regardless of its pane_index. Proc entry only for the tagged
+# pane's agent_pid: the untagged row is skipped before descendants() would
+# ever need the untagged pane's own pid to resolve to anything. ---
+mkdir -p "$_S171_DIR/proc5/801"
+_s171_stat 801 codex 800 > "$_S171_DIR/proc5/801/stat"
+printf '0%s700%s\n1%s800%scodex\n' "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" > "$_S171_DIR/panes5.tsv"
+_s171_run "$_S171_DIR/panes5.tsv" "$_S171_DIR/proc5" codex
+check "§171(5rc) helper exited 0" \
+    bash -c '[ "$1" -eq 0 ]' _ "$_S171_RC"
+check "§171(5) single-agent, tagged pane (idx1) + untagged user split (idx0): exactly one row, the tagged pane, whatever its pane_index" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 1 ] && case "$1" in $2) exit 0 ;; esac; exit 1' \
+    _ "$_S171_OUT" "codex${_S171_TAB}1${_S171_TAB}800${_S171_TAB}801${_S171_TAB}*"
+
+# --- (6) single-agent, tagged lead PLUS two untagged teammate panes (e.g.
+# agent-teams): the fallback must NOT fire (row_count is 3) -- exactly one
+# claude row, the two untagged teammates skipped rather than guessed. ---
+mkdir -p "$_S171_DIR/proc6/901"
+_s171_stat 901 claude 900 > "$_S171_DIR/proc6/901/stat"
+printf '0%s900%sclaude\n1%s910%s\n2%s920%s\n' \
+    "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" > "$_S171_DIR/panes6.tsv"
+_s171_run "$_S171_DIR/panes6.tsv" "$_S171_DIR/proc6" claude
+check "§171(6rc) helper exited 0" \
+    bash -c '[ "$1" -eq 0 ]' _ "$_S171_RC"
+check "§171(6) single-agent, tagged lead + two untagged teammate panes: exactly one claude row" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c .)" -eq 1 ] && case "$1" in $2) exit 0 ;; esac; exit 1' \
+    _ "$_S171_OUT" "claude${_S171_TAB}0${_S171_TAB}900${_S171_TAB}901${_S171_TAB}*"
+
+# --- (7) single-agent, TWO untagged panes: the fallback's own row-count==1
+# requirement fails, so NEITHER row is guessed -- no output at all. No /proc
+# fixtures needed: both rows are skipped before any pid is ever resolved. ---
+printf '0%s800%s\n1%s801%s\n' "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" "$_S171_TAB" > "$_S171_DIR/panes7.tsv"
+_s171_run "$_S171_DIR/panes7.tsv" "$_S171_DIR/proc7-nonexistent" codex
+check "§171(7rc) helper exited 0" \
+    bash -c '[ "$1" -eq 0 ]' _ "$_S171_RC"
+check "§171(7) single-agent, TWO untagged panes: no rows (nothing is guessed)" \
+    bash -c '[ -z "$1" ]' _ "$_S171_OUT"
+
+# --- (4) producer/consumer AGREEMENT, not a presence grep ---
+# Extract from the user-setup TEMPLATE (the launcher's mirror, same discipline
+# as §114(15)) which session name every `tmux new-session ... -s X` targets and
+# which option name every `set-option -p ... @X` sets; extract from the HELPER
+# which session `tmux list-panes -t X` targets and which option `#{@X}` reads.
+# grep -oE captures only lines that actually match (a bare grep+sed pipeline
+# would echo a non-matching line unchanged and poison the set -- this bit).
+if [ -f "$_S171_TMPL" ]; then
+    # Each of these must survive a mutation that empties it -- e.g. renaming
+    # @sandy_pane_agent in every launcher set-option line -- rather than
+    # aborting the whole suite. Under this suite's `set -euo pipefail` a
+    # $(...) assignment whose pipeline's last-nonzero stage is a non-matching
+    # grep still fails the assignment itself (an empty result from `sort -u`
+    # does not rescue it), which trips the ERR trap and would silently skip
+    # every section appended after this one (#378 verifier finding). `|| true`
+    # on each assignment turns "no candidate" into an empty variable, which
+    # (4pre) below is the check that catches.
+    _S171_TMPL_SESSIONS="$(grep 'tmux new-session' "$_S171_TMPL" | grep -oE ' -s [A-Za-z0-9_.-]+' | sed -E 's/^ -s //' | sort -u)" || true
+    _S171_TMPL_OPTS="$(grep 'set-option -p' "$_S171_TMPL" | grep -oE '@[A-Za-z0-9_]+' | sed 's/^@//' | sort -u)" || true
+    _S171_TMPL_OPT_COUNT="$(grep -c 'set-option -p.*@sandy_pane_agent' "$_S171_TMPL")" || true
+    _S171_HS_SESSION="$(grep 'tmux list-panes -t' "$_S171_HS" | grep -oE ' -t [A-Za-z0-9_.-]+' | sed -E 's/^ -t //' | sort -u)" || true
+    _S171_HS_OPT="$(grep -oE '#\{@[A-Za-z0-9_]+\}' "$_S171_HS" | sed -E 's/#\{@([A-Za-z0-9_]+)\}/\1/' | sort -u)" || true
+
+    check "§171(4pre) all four extractions produced exactly one candidate each (mutation: a rename that empties one makes every check below vacuous)" \
+        bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$3" -ge 1 ] && [ -n "$4" ] && [ -n "$5" ]' \
+        _ "$_S171_TMPL_SESSIONS" "$_S171_TMPL_OPTS" "$_S171_TMPL_OPT_COUNT" "$_S171_HS_SESSION" "$_S171_HS_OPT"
+    check "§171(4a) the launcher's every tmux new-session targets a single session name, 'sandy'" \
+        bash -c '[ "$1" = "sandy" ]' _ "$_S171_TMPL_SESSIONS"
+    check "§171(4b) the launcher's every set-option -p sets a single option name, '@sandy_pane_agent'" \
+        bash -c '[ "$1" = "sandy_pane_agent" ]' _ "$_S171_TMPL_OPTS"
+    check "§171(4c) exactly 6 set-option -p ... @sandy_pane_agent lines -- 4 multi-agent slots + 2 single-agent paths (daemon, foreground; #378 fix pass)" \
+        bash -c '[ "$1" -eq 6 ]' _ "$_S171_TMPL_OPT_COUNT"
+    check "§171(4d) the helper's tmux list-panes targets the SAME session name" \
+        bash -c '[ "$1" = "$2" ]' _ "$_S171_HS_SESSION" "$_S171_TMPL_SESSIONS"
+    check "§171(4e) the helper's pane-format reads the SAME option name -- producer and consumer agree; a rename on one side only fails this pair" \
+        bash -c '[ "$1" = "$2" ]' _ "$_S171_HS_OPT" "$_S171_TMPL_OPTS"
+
+    # --- (8) STRUCTURAL: both single-agent new-session paths tag their pane ---
+    # (#378 fix pass: before this, only multi-agent mode ever set the option.)
+    # Isolate the single-agent branch (bounded by its own start/end comments,
+    # inclusive) and count `tmux new-session` invocations against
+    # `set-option -p ... @sandy_pane_agent` lines within that SAME span, rather
+    # than trusting (4c)'s whole-file count to imply pairing -- a mutation
+    # that moved one set-option line into the multi-agent branch while adding
+    # an unrelated one elsewhere could hold the whole-file count at 6 without
+    # every single-agent new-session actually being paired.
+    _S171_SA_BLOCK="$(awk '
+        /^    # --- Single-agent launch ---$/ { on=1 }
+        on { print }
+        /^    # --- Multi-agent launch \(2-4 panes\) ---$/ { exit }
+    ' "$_S171_TMPL")"
+    _S171_SA_NS_COUNT="$(printf '%s\n' "$_S171_SA_BLOCK" | grep -c 'tmux new-session -d -P -F')" || true
+    _S171_SA_OPT_COUNT="$(printf '%s\n' "$_S171_SA_BLOCK" | grep -c 'set-option -p.*@sandy_pane_agent')" || true
+    check "§171(8pre) isolated the single-agent block (mutation: renaming either boundary comment empties it, which the next two checks then fail on)" \
+        bash -c '[ -n "$1" ]' _ "$_S171_SA_BLOCK"
+    check "§171(8a) the single-agent block has exactly 2 tagged tmux new-session invocations (daemon + foreground)" \
+        bash -c '[ "$1" -eq 2 ]' _ "$_S171_SA_NS_COUNT"
+    check "§171(8b) the single-agent block sets @sandy_pane_agent exactly once per new-session -- both paths tag their pane, neither is missed" \
+        bash -c '[ "$1" -eq "$2" ] && [ "$1" -ge 2 ]' _ "$_S171_SA_OPT_COUNT" "$_S171_SA_NS_COUNT"
+
+    # --- (9) ORDER, not just presence (#378 fix-pass verifier finding): (8a)/
+    # (8b) count tagged new-session invocations but never check WHERE the
+    # set-option line sits relative to the path's terminal tmux call. Each of
+    # the following mutations holds every (8) count unchanged while breaking
+    # the pane tag: (a) moving the daemon path's set-option after `exec tail
+    # -f /dev/null` (dead code -- the pane is never tagged), (b) moving the
+    # foreground path's set-option after `tmux attach -t sandy` (only
+    # attempted once the session has already ended), (c) reintroducing `exec
+    # tmux attach` (the exact EXIT-trap/palette regression d164091 fixed,
+    # which then has no guard at all). Isolated by literal markers within the
+    # single-agent block, not by indentation, so a reformatting that keeps the
+    # keywords intact does not break this.
+    _S171_SA_FILE="$_S171_DIR/sa_block.txt"
+    printf '%s\n' "$_S171_SA_BLOCK" > "$_S171_SA_FILE"
+    _s171_row_exact() {  # $1=file $2=exact-line $3=search-after-row(default 0) -> row, or 0
+        awk -v s="$2" -v start="${3:-0}" 'NR>start && $0==s { print NR; f=1; exit } END { if (!f) print 0 }' "$1"
+    }
+    _s171_row_contains() {  # $1=file $2=substring $3=after(default 0) $4=before(default 0=none) -> row of first CODE (non-comment) match, or 0
+        # Skips comment lines: the daemon/foreground code is prose-documented
+        # right above it (see e.g. "Plain `tmux attach -t sandy` returns
+        # instead of..."), and a plain substring search over the whole line
+        # would match the WORDS inside that prose before it ever reaches the
+        # real call -- a false positive this check must not have (#378
+        # fix-pass verifier's own review target).
+        awk -v s="$2" -v start="${3:-0}" -v stop="${4:-0}" '
+            NR>start && (stop==0 || NR<stop) && $0 !~ /^[ \t]*#/ && index($0,s) { print NR; f=1; exit }
+            END { if (!f) print 0 }
+        ' "$1"
+    }
+    _S171_ROW_ELIF="$(_s171_row_contains "$_S171_SA_FILE" 'SANDY_DAEMON:-0}" = "1" ]; then')"
+    _S171_ROW_ELSE="$(_s171_row_exact "$_S171_SA_FILE" '    else')"
+    _S171_ROW_FI="$(_s171_row_exact "$_S171_SA_FILE" '    fi' "$_S171_ROW_ELSE")"
+    check "§171(9pre) located the daemon/foreground boundaries (elif SANDY_DAEMON, else, fi) inside the single-agent block, in order" \
+        bash -c '[ "$1" -gt 0 ] && [ "$2" -gt "$1" ] && [ "$3" -gt "$2" ]' \
+        _ "$_S171_ROW_ELIF" "$_S171_ROW_ELSE" "$_S171_ROW_FI"
+
+    _S171_D_NS="$(_s171_row_contains "$_S171_SA_FILE" 'tmux new-session' "$_S171_ROW_ELIF" "$_S171_ROW_ELSE")"
+    _S171_D_OPT="$(_s171_row_contains "$_S171_SA_FILE" 'set-option -p' "$_S171_ROW_ELIF" "$_S171_ROW_ELSE")"
+    _S171_D_EXIT="$(_s171_row_contains "$_S171_SA_FILE" 'exec tail -f /dev/null' "$_S171_ROW_ELIF" "$_S171_ROW_ELSE")"
+    check "§171(9a) daemon path: new-session (capturing the pane id) precedes set-option -p @sandy_pane_agent, which precedes exec tail -f /dev/null -- mutation (a)" \
+        bash -c '[ "$1" -gt 0 ] && [ "$2" -gt "$1" ] && [ "$3" -gt "$2" ]' \
+        _ "$_S171_D_NS" "$_S171_D_OPT" "$_S171_D_EXIT"
+
+    _S171_F_NS="$(_s171_row_contains "$_S171_SA_FILE" 'tmux new-session' "$_S171_ROW_ELSE" "$_S171_ROW_FI")"
+    _S171_F_OPT="$(_s171_row_contains "$_S171_SA_FILE" 'set-option -p' "$_S171_ROW_ELSE" "$_S171_ROW_FI")"
+    _S171_F_ATTACH="$(_s171_row_contains "$_S171_SA_FILE" 'tmux attach -t sandy' "$_S171_ROW_ELSE" "$_S171_ROW_FI")"
+    check "§171(9b) foreground path: new-session (capturing the pane id) precedes set-option -p @sandy_pane_agent, which precedes tmux attach -t sandy -- mutation (b)" \
+        bash -c '[ "$1" -gt 0 ] && [ "$2" -gt "$1" ] && [ "$3" -gt "$2" ]' \
+        _ "$_S171_F_NS" "$_S171_F_OPT" "$_S171_F_ATTACH"
+
+    check "§171(9c) the single-agent block never execs the attach directly -- mutation (c), the exact EXIT-trap/palette regression d164091 fixed" \
+        bash -c '! grep -q "exec tmux attach" "$1"' _ "$_S171_SA_FILE"
+
+    # --- (11) DYNAMIC PROPERTY: RUN the single-agent block, don't just read
+    # it as text. (8)/(9) only prove a `set-option` line exists and sits in
+    # the right place; they never check what it TAGS or which pane it TAGS.
+    # Two mutations hold every (8)/(9) count and ORDER unchanged while
+    # breaking the contract, and both pass (8)/(9) at 35/35 (#378 fix-pass
+    # verifier finding): M3 hard-codes the tag value to the literal `claude`
+    # (breaks every codex/gemini/opencode/grok single-agent sandbox); M4
+    # drops `-t "$_p_id"` so the option lands on tmux's "current" pane
+    # instead of the pane just created. Isolate lines 1..FI of the SAME
+    # _S171_SA_FILE (8)/(9) already isolated -- everything through the `fi`
+    # that closes the daemon/foreground `if` -- because that prefix is
+    # standalone-runnable bash; the full (8)/(9) block trails into the next
+    # branch's dangling `else` (the start of "Multi-agent launch"), which is
+    # not.
+    _S171_SA_RUN="$_S171_DIR/sa_run.sh"
+    sed -n "1,${_S171_ROW_FI}p" "$_S171_SA_FILE" > "$_S171_SA_RUN"
+    check "§171(11pre) the sliced single-agent snippet (through the closing daemon/foreground fi) is syntactically valid on its own" \
+        bash -n "$_S171_SA_RUN"
+
+    # A stubbed tmux/exec, as plain shell FUNCTIONS -- measured (see the
+    # commit) that a function of the same name wins over both a builtin
+    # (`exec`) and an on-PATH binary (`tmux`) for a bare invocation, so this
+    # never touches the real tmux, which this suite must not run. `new-
+    # session` echoes a fake pane id ('%42') to stdout, mirroring the real
+    # `-P -F '#{pane_id}'` capture. Every call is appended to a LOG FILE, not
+    # a shell variable: `_p_id="$(tmux new-session ...)"` forks a subshell
+    # for the command substitution, and a variable tmux/exec wrote there
+    # would vanish with it -- a file append survives it. SANDY_AGENT=codex
+    # throughout, deliberately non-claude, so M3's hard-coded "claude"
+    # cannot coincidentally match.
+    cat > "$_S171_DIR/sa_harness.sh" <<'S171HARNESS'
+#!/bin/bash
+set -eu
+_SNIPPET="$1"; _AGENT="$2"; _DAEMON="$3"; _CALL_LOG_FILE="$4"
+: > "$_CALL_LOG_FILE"
+tmux() {
+    case "$1" in
+        new-session) printf 'new-session\n' >> "$_CALL_LOG_FILE"; printf '%s\n' '%42' ;;
+        set-option)  printf 'set-option:%s\n' "$*" >> "$_CALL_LOG_FILE" ;;
+        attach)      printf 'attach\n' >> "$_CALL_LOG_FILE" ;;
+        *)           printf 'tmux:%s\n' "$1" >> "$_CALL_LOG_FILE" ;;
+    esac
+    return 0
+}
+exec() {
+    if [ "${1:-}" = "tail" ]; then printf 'exectail\n' >> "$_CALL_LOG_FILE"
+    else printf 'exec:%s\n' "${1:-}" >> "$_CALL_LOG_FILE"; fi
+    return 0
+}
+sandy_log() { :; }
+_sandy_build_agent_cmd() { printf 'fakecmd'; }
+_SANDY_AGENTS=("$_AGENT")
+_sandy_is_headless=false
+SANDY_PROJECT_NAME=testproj
+WORKSPACE=/nonexistent/sandy-s171-fixture
+SANDY_AGENT="$_AGENT"
+SANDY_DAEMON="$_DAEMON"
+SANDY_REMOTE_CONTROL=false
+# shellcheck disable=SC1090
+. "$_SNIPPET"
+S171HARNESS
+
+    # $1=calls-text (this fixture's harness log) $2=expected terminal marker
+    # (exectail|attach) -> true iff new-session precedes the EXACT tag call
+    # precedes the terminal call. Single-pass awk over the WHOLE input (never
+    # exits early), so there is no reader-closes-early/writer-still-writing
+    # ordering to get wrong on either bash or a BSD/mawk-family awk.
+    _s171_calls_ok() {
+        printf '%s\n' "$1" | awk -v term="$2" '$0=="new-session"{ns=NR} $0=="set-option:set-option -p -t %42 @sandy_pane_agent codex"{so=NR} $0==term{tm=NR} END{exit !(ns && so && tm && ns<so && so<tm)}'
+    }
+
+    _S171_D_LOG="$_S171_DIR/sa_calls_daemon.log"
+    _S171_D_HRC=0
+    bash "$_S171_DIR/sa_harness.sh" "$_S171_SA_RUN" codex 1 "$_S171_D_LOG" || _S171_D_HRC=$?
+    _S171_D_CALLS="$(cat "$_S171_D_LOG" 2>/dev/null)" || true
+    check "§171(11a-rc) daemon harness ran cleanly (SANDY_DAEMON=1)" \
+        bash -c '[ "$1" -eq 0 ]' _ "$_S171_D_HRC"
+    check "§171(11a) daemon PROPERTY: the pane the daemon path CREATED (new-session -> pane %42) is tagged, on that SAME pane id, with SANDY_AGENT's real value (codex) -- not a literal 'claude' (M3) and not missing '-t' (M4) -- before exec tail -f /dev/null" \
+        _s171_calls_ok "$_S171_D_CALLS" exectail
+
+    _S171_F_LOG="$_S171_DIR/sa_calls_fg.log"
+    _S171_F_HRC=0
+    bash "$_S171_DIR/sa_harness.sh" "$_S171_SA_RUN" codex 0 "$_S171_F_LOG" || _S171_F_HRC=$?
+    _S171_F_CALLS="$(cat "$_S171_F_LOG" 2>/dev/null)" || true
+    check "§171(11b-rc) foreground harness ran cleanly (SANDY_DAEMON=0)" \
+        bash -c '[ "$1" -eq 0 ]' _ "$_S171_F_HRC"
+    check "§171(11b) foreground PROPERTY: same as (11a), but the terminal call is tmux attach -t sandy, not exec tail -- M3/M4 fail this the same way" \
+        _s171_calls_ok "$_S171_F_CALLS" attach
+
+    unset -f _s171_row_exact _s171_row_contains _s171_calls_ok
+    rm -f "$_S171_SA_FILE" "$_S171_SA_RUN" "$_S171_DIR/sa_harness.sh" "$_S171_D_LOG" "$_S171_F_LOG"
+    unset _S171_SA_FILE _S171_ROW_ELIF _S171_ROW_ELSE _S171_ROW_FI \
+        _S171_D_NS _S171_D_OPT _S171_D_EXIT _S171_F_NS _S171_F_OPT _S171_F_ATTACH \
+        _S171_SA_RUN _S171_D_LOG _S171_D_HRC _S171_D_CALLS _S171_F_LOG _S171_F_HRC _S171_F_CALLS
+else
+    skip "§171(4) templates/user-setup.sh.tmpl not found -- producer/consumer agreement not checked"
+    skip "§171(8) templates/user-setup.sh.tmpl not found -- single-agent pane-tagging structure not checked"
+    skip "§171(9) templates/user-setup.sh.tmpl not found -- single-agent pane-tag ORDER not checked"
+    skip "§171(11) templates/user-setup.sh.tmpl not found -- single-agent pane-tag VALUE/TARGET property not checked"
+fi
+
+rm -rf "$_S171_DIR"
+unset _S171_SANDY _S171_TMPL _S171_SPEC _S171_TAB _S171_DIR _S171_HS_HELPER _S171_HS _S171_OUT _S171_RC \
+    _S171_OUT1_L1 _S171_OUT1_L2 _S171_OUT2_L1 _S171_OUT2_L2 _S171_OUT2_L3 _S171_OUT2_L4 \
+    _S171_TMPL_SESSIONS _S171_TMPL_OPTS _S171_TMPL_OPT_COUNT _S171_HS_SESSION _S171_HS_OPT \
+    _S171_SA_BLOCK _S171_SA_NS_COUNT _S171_SA_OPT_COUNT
+unset -f _s171_match _s171_run _s171_stat
+
+# ============================================================
+echo "§172: per-feature supervised entries — every selected feature's entry runs (#381)"
+# ============================================================
+# WHY THIS SECTION EXISTS. The adoption loop used to take the FIRST manifest
+# `entry` in sorted feature-directory order and silently drop every later one
+# via `elif [ -z "${SANDY_HANDOFF_RELAY:-}" ]` -- a second feature's entry was
+# mounted, selected, and never run, with nothing anywhere saying so (the #363
+# failure shape again). #381 makes every selected feature's entry run, each
+# independently supervised, while keeping relay{} and every relay-named
+# surface byte-identical for the single-entry case (D2): the FIRST entry
+# adopted (unchanged sorted order) becomes the relay-DESIGNATED entry.
+_S172_SANDY="$SANDY_SCRIPT"
+_S172_TMPL="$(cd "$(dirname "$0")" && pwd)/../templates/user-setup.sh.tmpl"
+
+# --- (1)-(3) the adoption loop, extracted exactly as §149 extracts it -------
+_S172_ADOPT="$(awk '/^    while IFS= read -r _fm_l; do/,/^    done <<< "\$_sandy_fm_out"/' "$_S172_SANDY")"
+check "§172(pre) the adoption loop was extracted (mutation: a rename empties this and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_fe_list="' _ "$_S172_ADOPT"
+
+# _s172_adopt SANDY_RELAY WARNFILE ENTRY1 [ENTRY2 ...] -> "source|path|fe_list|fe_relay_feature|fe_disabled"
+# on stdout; anything the loop itself warn()s is appended to WARNFILE.
+# A global var set INSIDE a function called via $(...) never escapes that
+# command substitution's subshell -- routing warnings through a file instead
+# of a second global sidesteps that trap.
+_s172_adopt() {
+    local _relay="$1" _warnfile="$2"; shift 2
+    bash -c '
+        set -uo pipefail
+        info(){ :; }; warn(){ echo "WARN:$*" >&2; }
+        _loop="$1"
+        unset SANDY_HANDOFF_RELAY SANDY_FEATURE_ENTRIES
+        SANDY_RELAY="$2"; _SANDY_RELAY_SOURCE="workspace"
+        _sandy_relay_source="none"; _sandy_relay_from_slot="false"
+        _sandy_fe_list=""; _sandy_fe_disabled=""; _sandy_fe_relay_feature=""
+        shift 2
+        _sandy_fm_out=""
+        for _e in "$@"; do
+            printf -v _fmline "entry\t%s\n" "$_e"
+            _sandy_fm_out="${_sandy_fm_out}${_fmline}"
+        done
+        eval "$_loop"
+        echo "$_sandy_relay_source|${SANDY_HANDOFF_RELAY:-}|$_sandy_fe_list|$_sandy_fe_relay_feature|$_sandy_fe_disabled"
+    ' _ "$_S172_ADOPT" "$_relay" "$@" 2>>"$_warnfile"
+}
+_S172_WF="$(mktemp)"
+_S172_A1="$(_s172_adopt 1 "$_S172_WF" /opt/sandy/features/alpha/r /opt/sandy/features/beta/s)"
+check "§172(1a) two entries: SANDY_HANDOFF_RELAY resolves to the FIRST (alpha)'s path (got: $_S172_A1)" \
+    bash -c 'case "$1" in manifest\|/opt/sandy/features/alpha/r\|*) exit 0;; esac; exit 1' _ "$_S172_A1"
+check "§172(1b) ...and _sandy_fe_list contains BOTH features, not just the designated one (got: $_S172_A1)" \
+    bash -c 'printf "%s" "$1" | grep -q "alpha=/opt/sandy/features/alpha/r" && printf "%s" "$1" | grep -q "beta=/opt/sandy/features/beta/s"' _ "$_S172_A1"
+check "§172(1c) ...and _sandy_fe_relay_feature names the designated feature (alpha) (got: $_S172_A1)" \
+    bash -c 'printf "%s" "$1" | cut -d"|" -f4 | grep -qx alpha' _ "$_S172_A1"
+
+: > "$_S172_WF"
+_S172_A2="$(_s172_adopt 0 "$_S172_WF" /opt/sandy/features/alpha/r /opt/sandy/features/beta/s)"
+check "§172(2a) SANDY_RELAY=0 with two entries: fe_list is EMPTY -- nothing runs (got: $_S172_A2)" \
+    bash -c '[ "$(printf "%s" "$1" | cut -d"|" -f3)" = "" ]' _ "$_S172_A2"
+check "§172(2b) ...and fe_disabled names BOTH (got: $_S172_A2)" \
+    bash -c 'printf "%s" "$1" | cut -d"|" -f5 | grep -q "alpha=/opt/sandy/features/alpha/r" && printf "%s" "$1" | cut -d"|" -f5 | grep -q "beta=/opt/sandy/features/beta/s"' _ "$_S172_A2"
+check "§172(2c) ...and the warning names BOTH paths -- silence here is the 'fleet goes dark' failure #381 exists to retire" \
+    bash -c 'printf "%s" "$(cat "$1")" | grep -q "alpha/r" && printf "%s" "$(cat "$1")" | grep -q "beta/s"' _ "$_S172_WF"
+
+: > "$_S172_WF"
+_S172_A3="$(_s172_adopt 1 "$_S172_WF" /opt/sandy/features/amap/relay)"
+check "§172(3) single entry: relay source/path match §149(11)'s pre-#381 value exactly -- the single-entry case is byte-identical (got: $_S172_A3)" \
+    bash -c '[ "$(printf "%s" "$1" | cut -d"|" -f1-2)" = "manifest|/opt/sandy/features/amap/relay" ]' _ "$_S172_A3"
+rm -f "$_S172_WF"; unset _S172_A1 _S172_A2 _S172_A3 _S172_WF
+
+# _s172_kill_loops PATTERN -- kills every supervisor LOOP process whose
+# cmdline matches PATTERN (the fixture's own tmpdir path), INCLUDING each
+# loop's currently-forked `sleep "$backoff"` child, which a plain `pkill -f
+# PATTERN` cannot see: that child's own cmdline is just "sleep N", with no
+# reference to the fixture path, so killing only the loop process orphans it
+# for up to 60s. Freezing each matching loop (SIGSTOP) before touching its
+# children closes the race where it forks a NEW backoff child between the
+# two kill steps below; SIGKILL still terminates a stopped process.
+_s172_kill_loops() {
+    if ! command -v pgrep >/dev/null 2>&1; then
+        if command -v pkill >/dev/null 2>&1; then
+            pkill -9 -f "$1" >/dev/null 2>&1 || true
+        fi
+        return 0
+    fi
+    local _lp _lps
+    _lps="$(pgrep -f "$1" 2>/dev/null || true)"
+    if [ -n "$_lps" ]; then
+        for _lp in $_lps; do kill -STOP "$_lp" >/dev/null 2>&1 || true; done
+        for _lp in $_lps; do pkill -9 -P "$_lp" >/dev/null 2>&1 || true; done
+    fi
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -9 -f "$1" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# --- (4)-(5) dynamic: two entries, each independently supervised -----------
+# Needs flock (the supervisor refuses without it); skipped loudly otherwise,
+# same discipline as §114(16).
+if command -v flock >/dev/null 2>&1 && [ -f "$_S172_TMPL" ]; then
+    _S172_FNS="$(awk '/^_sandy_supervise_entry\(\) \{/{f=1} f{print; if ($0=="}") n++} f&&n==3{exit}' "$_S172_TMPL")"
+    _S172_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+    mkdir -p "$_S172_D/relay-state" "$_S172_D/fs/beta" "$_S172_D/home" "$_S172_D/ws" "$_S172_D/a" "$_S172_D/b"
+    # `exec sleep 30` as the LAST line, not a plain `sleep 30`: a plain sleep
+    # forks a CHILD of this script's own /bin/sh interpreter, whose command
+    # line is just "sleep 30" -- no reference to $_S172_D -- so the pkill -f
+    # "$_S172_D/" cleanup below cannot find it, and killing the recorded pid
+    # (the interpreter, $$) leaves that child orphaned for up to 30s. `exec`
+    # replaces the interpreter with sleep IN THE SAME PROCESS (same pid, the
+    # one already written to pid-a/pid-b), so there is no child to leak and
+    # killing the recorded pid is killing the actual sleep.
+    cat > "$_S172_D/a/entry.sh" <<EOF
+#!/bin/sh
+echo "\$\$" >> "$_S172_D/pid-a"
+printf '%s\n' "\${SANDY_FEATURE_STATE:-unset}" >> "$_S172_D/env-a"
+exec sleep 30
+EOF
+    cat > "$_S172_D/b/entry.sh" <<EOF
+#!/bin/sh
+echo "\$\$" >> "$_S172_D/pid-b"
+printf '%s\n' "\${SANDY_FEATURE_STATE:-unset}" >> "$_S172_D/env-b"
+exec sleep 30
+EOF
+    chmod +x "$_S172_D/a/entry.sh" "$_S172_D/b/entry.sh"
+    _S172_RC=0
+    ( HOME="$_S172_D/home" WORKSPACE="$_S172_D/ws" bash -c '
+        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE
+        sandy_log(){ :; }; sandy_err(){ echo "ERR:$*" >&2; }
+        SANDY_FEATURE_ENTRIES="alpha='"$_S172_D"'/a/entry.sh beta='"$_S172_D"'/b/entry.sh"
+        SANDY_HANDOFF_RELAY="'"$_S172_D"'/a/entry.sh"
+        SANDY_RELAY_STATE="'"$_S172_D"'/relay-state"
+        SANDY_FEATURE_STATE_ROOT="'"$_S172_D"'/fs"
+        '"$_S172_FNS"'
+        _sandy_start_entries
+    ' ) >/dev/null 2>&1 || _S172_RC=$?
+    sleep 0.5
+    check "§172(4a) _sandy_start_entries returns 0 when both entries start cleanly (got rc=$_S172_RC)" \
+        test "$_S172_RC" -eq 0
+    check "§172(4b) both entries' pidfiles got a pid" \
+        bash -c 'test -s "$1" && test -s "$2"' _ "$_S172_D/pid-a" "$_S172_D/pid-b"
+    check "§172(4c) relay-state/.state (alpha, the designated entry) reports started" \
+        bash -c 'grep -q "^state=started" "$1"' _ "$_S172_D/relay-state/.state"
+    check "§172(4d) fs/beta/.state (the non-designated entry) ALSO reports started -- this is the check that fails on the silently-dropped-second-entry bug" \
+        bash -c 'grep -q "^state=started" "$1"' _ "$_S172_D/fs/beta/.state"
+    check "§172(4e) each entry's own process sees its OWN SANDY_FEATURE_STATE" \
+        bash -c 'grep -qF "/fs/alpha" "$1" && grep -qF "/fs/beta" "$2"' _ "$_S172_D/env-a" "$_S172_D/env-b"
+    check "§172(4f) two DISTINCT lock files are genuinely held (a foreign flock -n on each fails)" \
+        bash -c '
+            r1=0; flock -n "$1" true >/dev/null 2>&1 || r1=$?
+            r2=0; flock -n "$2" true >/dev/null 2>&1 || r2=$?
+            [ "$r1" -ne 0 ] && [ "$r2" -ne 0 ]
+        ' _ "$_S172_D/home/.sandy-handoff-relay.lock" "$_S172_D/home/.sandy-entry-beta.lock"
+
+    _S172_PIDA1="$(head -1 "$_S172_D/pid-a" 2>/dev/null || true)"
+    _S172_PIDB1="$(head -1 "$_S172_D/pid-b" 2>/dev/null || true)"
+    [ -n "$_S172_PIDA1" ] && kill "$_S172_PIDA1" >/dev/null 2>&1
+    sleep 3
+    _S172_PIDA2="$(tail -1 "$_S172_D/pid-a" 2>/dev/null || true)"
+    check "§172(4g) killing alpha's entry: it restarts with a NEW pid" \
+        bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$2" ]' _ "$_S172_PIDA1" "$_S172_PIDA2"
+    check "§172(4h) ...alpha's restart is recorded" \
+        bash -c 'grep -q "^restarts=[1-9]" "$1"' _ "$_S172_D/relay-state/.state"
+    check "§172(4i) ...and beta is COMPLETELY untouched: same pid, restarts=0 (killing one entry must not affect the other)" \
+        bash -c 'test "$(wc -l < "$1" | tr -d " ")" -eq 1 && grep -q "^restarts=0" "$2"' _ "$_S172_D/pid-b" "$_S172_D/fs/beta/.state"
+
+    # cleanup: kill every recorded pid directly first (pid-a/pid-b accumulate
+    # one line per (re)start, including alpha's post-restart pid the (4g) kill
+    # above never explicitly targeted, and beta's, which nothing above killed
+    # at all) -- these are the fixture's own `exec sleep 30` processes, so
+    # killing the recorded pid IS killing the sleep, no orphan. Then reap the
+    # supervisor LOOP processes (and their own backoff-sleep children) via
+    # _s172_kill_loops -- the unique tmpdir path is on their cmdline too
+    # (they never exec, they only fork/exec the entry and `sleep`).
+    for _s172_p in $(cat "$_S172_D/pid-a" "$_S172_D/pid-b" 2>/dev/null); do
+        kill -9 "$_s172_p" >/dev/null 2>&1 || true
+    done
+    _s172_kill_loops "$_S172_D/"
+    rm -rf "$_S172_D"
+    unset _S172_RC _S172_PIDA1 _S172_PIDA2 _S172_PIDB1 _s172_p
+
+    # --- (5) startup failure of the SECOND entry --------------------------
+    _S172_D2="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$_S172_D2/relay-state" "$_S172_D2/fs/beta" "$_S172_D2/home" "$_S172_D2/ws" "$_S172_D2/a" "$_S172_D2/b"
+    # alpha starts cleanly and keeps running (its supervisor loop is
+    # independent of beta's startup failure below) -- record its pid and
+    # `exec` into the sleep so cleanup can kill it directly by pid, same
+    # reasoning as (4)'s fixtures. beta exits immediately; nothing to leak.
+    printf '#!/bin/sh\necho "$$" >> "%s/pid-a"\nexec sleep 30\n' "$_S172_D2" > "$_S172_D2/a/entry.sh"
+    printf '#!/bin/sh\nexit 3\n' > "$_S172_D2/b/entry.sh"
+    chmod +x "$_S172_D2/a/entry.sh" "$_S172_D2/b/entry.sh"
+    _S172_OUT5F="$(mktemp)"
+    _S172_RC5=0
+    ( HOME="$_S172_D2/home" WORKSPACE="$_S172_D2/ws" bash -c '
+        unset SANDY_HANDOFF_INBOX SANDY_HANDOFF_OUTBOX SANDY_HANDOFF_PEER SANDY_HANDOFF_RELAY_STATE
+        sandy_log(){ :; }; sandy_err(){ echo "ERR:$*" >&2; }
+        SANDY_FEATURE_ENTRIES="alpha='"$_S172_D2"'/a/entry.sh beta='"$_S172_D2"'/b/entry.sh"
+        SANDY_HANDOFF_RELAY="'"$_S172_D2"'/a/entry.sh"
+        SANDY_RELAY_STATE="'"$_S172_D2"'/relay-state"
+        SANDY_FEATURE_STATE_ROOT="'"$_S172_D2"'/fs"
+        '"$_S172_FNS"'
+        _sandy_start_entries
+    ' ) > "$_S172_OUT5F" 2>&1 || _S172_RC5=$?
+    _S172_OUT5="$(cat "$_S172_OUT5F")"; rm -f "$_S172_OUT5F"
+    check "§172(5a) the SECOND entry dying at startup fails the whole session (got rc=$_S172_RC5)" \
+        test "$_S172_RC5" -ne 0
+    check "§172(5b) ...and names beta, not alpha, as the one that failed" \
+        bash -c 'printf "%s" "$1" | grep -q beta' _ "$_S172_OUT5"
+    for _s172_p in $(cat "$_S172_D2/pid-a" 2>/dev/null); do
+        kill -9 "$_s172_p" >/dev/null 2>&1 || true
+    done
+    # Both alpha's and beta's loops are live here -- beta's own entry exits
+    # immediately every time, but its supervisor loop keeps retrying with
+    # backoff regardless of the overall session having already failed, so
+    # it needs the same loop+backoff-child reaping as alpha's.
+    _s172_kill_loops "$_S172_D2/"
+    rm -rf "$_S172_D2"
+    unset _S172_OUT5 _S172_RC5 _S172_FNS _S172_OUT5F _s172_p
+else
+    skip "§172(4)-(5) dynamic per-feature supervision (flock or templates/user-setup.sh.tmpl unavailable)"
+fi
+unset -f _s172_kill_loops
+
+# --- (6) the marker printf, with feature_entries populated ------------------
+_S172_MKFN="$(awk '/^_sandy_fm_jesc\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$_S172_SANDY")"
+_S172_FEFN="$(awk '/^_sandy_fe_marker_body\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$_S172_SANDY")"
+check "§172(pre-6) both marker helpers were extracted" \
+    bash -c 'printf "%s" "$1" | grep -q jesc && printf "%s" "$2" | grep -q relay_alias' _ "$_S172_MKFN" "$_S172_FEFN"
+
+# --- (6d) THE REAL CALL SITE, under set -euo pipefail, with an empty list ---
+# A verifier caught what (6a)-(6c) above all miss: `_s172_marker_fe` runs
+# `_sandy_fe_marker_body` inside a bare `( ... )` subshell with no `set -e`,
+# and §134's marker harness stubs `_sandy_fe_json` directly rather than
+# calling the function at all -- so nothing exercised the ACTUAL assignment
+# line (`_sandy_fe_json="$(_sandy_fe_marker_body ...)"`) under errexit. That
+# line runs on every real launch, under the script's own `set -euo pipefail`,
+# and the original bug (`[ -n "$_out" ] && printf ...`, whose failing test
+# returns 1 with no `printf` to override it) aborted the marker write on
+# EVERY sandbox with no feature entry -- which was every sandbox, since the
+# feature is opt-in. This check extracts the exact assignment line, not a
+# hand-written equivalent, so a regression to that shape is caught here even
+# if every other §172(6) check stays green (they do, since none of them run
+# under errexit).
+_S172_CALLLINE="$(awk '/^_sandy_fe_json="\$\(_sandy_fe_marker_body/{print; exit}' "$_S172_SANDY")"
+check "§172(pre-6d) the real _sandy_fe_json assignment line was found (mutation: renaming the target empties this and (6d) goes vacuous)" \
+    bash -c '[ -n "$1" ]' _ "$_S172_CALLLINE"
+_s172_real_callsite() {
+    # $1=fe_list $2=fe_disabled $3=relay_feature $4=disabled_by_json
+    # Runs the REAL assignment line, verbatim, under set -euo pipefail --
+    # prints "RC=<n> OUT=<value>" so a caller sees both the exit status the
+    # script would have had (0 = kept running, 1 = aborted right here) and
+    # what the variable held when it didn't abort.
+    bash -c '
+        set -euo pipefail
+        eval "$1"; eval "$2"
+        _sandy_fe_list="$3"; _sandy_fe_disabled="$4"; _sandy_fe_relay_feature="$5"
+        _sandy_relay_disabled_by_json="${6:-null}"
+        eval "$7"
+        printf "RC=0 OUT=%s" "$_sandy_fe_json"
+    ' _ "$_S172_MKFN" "$_S172_FEFN" "$1" "$2" "$3" "${4:-null}" "$_S172_CALLLINE"
+    printf ' ACTUALRC=%s' "$?"
+}
+_S172_RCS_EMPTY="$(_s172_real_callsite "" "" "" null)"
+check "§172(6d) the real call-site line does NOT abort the launch when no feature entry is selected -- the regression this whole verify round was about (got: $_S172_RCS_EMPTY)" \
+    bash -c 'case "$1" in "RC=0 OUT= ACTUALRC=0") exit 0;; esac; exit 1' _ "$_S172_RCS_EMPTY"
+_S172_RCS_TWO="$(_s172_real_callsite "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" "" alpha null)"
+check "§172(6e) ...and still runs correctly with entries present (got: $_S172_RCS_TWO)" \
+    bash -c 'printf "%s" "$1" | grep -q "ACTUALRC=0" && printf "%s" "$1" | grep -q "relay_alias.: true"' _ "$_S172_RCS_TWO"
+unset _S172_CALLLINE _S172_RCS_EMPTY _S172_RCS_TWO
+unset -f _s172_real_callsite
+
+_S172_MKBLK="$(awk '/^printf .\{.n  "schema": 1,/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$_S172_SANDY")"
+_s172_marker_fe() {
+    # $1=fe_list $2=fe_disabled $3=relay_feature $4=disabled_by_json -> full marker JSON on stdout
+    (
+        eval "$_S172_MKFN"; eval "$_S172_FEFN"
+        sandy_full_version() { echo "9.9.9"; }
+        _sandy_egress_mode=off; SANDY_WORKSPACE=/home/sandy/ws; SANDBOX_NAME=ws-abc12345
+        _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json=null
+        _sandy_agents_json=null; _sandy_relay_source_json=null; _sandy_relay_path_json=null
+        _sandy_relay_disabled_by_json="${4:-null}"
+        _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""
+        CRED_MODE=none; _sandy_session_nonce=deadbeef; _sandy_session_file=/dev/stdout
+        _sandy_fe_list="$1"; _sandy_fe_disabled="$2"; _sandy_fe_relay_feature="$3"
+        _sandy_fe_json="$(_sandy_fe_marker_body "$1" "$2" "$3" "${4:-null}")"
+        eval "$_S172_MKBLK"
+    ) 2>/dev/null
+}
+_S172_MK2="$(_s172_marker_fe "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" "" alpha null)"
+if command -v python3 >/dev/null 2>&1; then
+    check "§172(6a) two entries (one disabled: none): the marker is valid JSON (mutation m5: dropping the \${_sandy_fe_json:-} arg breaks this under set -u)" \
+        bash -c 'printf "%s" "$1" | python3 -c "import json,sys; json.load(sys.stdin)"' _ "$_S172_MK2"
+    check "§172(6b) feature_entries has BOTH features, relay_alias true only for the designated one (alpha)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)[\"feature_entries\"]
+assert set(d.keys())=={\"alpha\",\"beta\"}, d
+assert d[\"alpha\"][\"relay_alias\"] is True
+assert d[\"beta\"][\"relay_alias\"] is False
+"' _ "$_S172_MK2"
+    _S172_MK3="$(_s172_marker_fe "" "" "" null)"
+    check "§172(6c) empty list -> feature_entries is the empty object {}, never null (the marker always knows the answer once #381 has shipped)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+assert d[\"feature_entries\"]==dict(), d[\"feature_entries\"]
+"' _ "$_S172_MK3"
+    unset _S172_MK3
+else
+    skip "§172(6) needs python3 to validate the marker JSON"
+fi
+unset _S172_MK2 _S172_MKFN _S172_FEFN _S172_MKBLK
+
+# --- (7) --print-state, feature_entries + dual reporting with relay{} ------
+if command -v python3 >/dev/null 2>&1; then
+    # Fixture A: two entries (alpha designated, beta not), separate from every
+    # other case (§88b: never share a fixture across assertions that must not
+    # collide).
+    _S172_H1="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$_S172_H1/sandboxes/two-11112222/relay-state" "$_S172_H1/sandboxes/two-11112222/feature-state/beta" \
+        "$_S172_H1/features/alpha/payload"
+    printf '#!/bin/sh\n' > "$_S172_H1/features/alpha/payload/r"; chmod +x "$_S172_H1/features/alpha/payload/r"
+    # beta's payload is deliberately ABSENT -> executable_present must be false
+    printf 'state=started\nrestarts=2\nlast_exit_code=0\nlast_restart_at=2026-01-01T00:00:00Z\n' \
+        > "$_S172_H1/sandboxes/two-11112222/relay-state/.state"
+    printf 'state=started\nrestarts=0\n' > "$_S172_H1/sandboxes/two-11112222/feature-state/beta/.state"
+    cat > "$_S172_H1/sandboxes/two-11112222/sandy-session.json" <<'S172EOF'
+{
+  "schema": 1,
+  "relay": { "source": "manifest", "path": "/opt/sandy/features/alpha/r", "disabled_by": null },
+  "feature_entries": {
+    "alpha": {"path": "/opt/sandy/features/alpha/r", "relay_alias": true, "disabled_by": null},
+    "beta": {"path": "/opt/sandy/features/beta/s", "relay_alias": false, "disabled_by": null}
+  },
+  "cred_mode": "full"
+}
+S172EOF
+    _S172_PS1="$(SANDY_HOME="$_S172_H1" bash "$_S172_SANDY" --print-state 2>/dev/null)"
+    check "§172(7a) feature_entries.alpha.restarts equals relay.restarts -- the dual report of the SAME entry must agree" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+sb=json.load(sys.stdin)[\"sandboxes\"][0]
+assert sb[\"feature_entries\"][\"alpha\"][\"restarts\"]==2==sb[\"relay\"][\"restarts\"]
+"' _ "$_S172_PS1"
+    check "§172(7b) alpha state_dir ends /relay-state, beta ends /feature-state/beta (D3, mutation m4: reading relay-state for every entry breaks this)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+fe=json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"]
+assert fe[\"alpha\"][\"state_dir\"].endswith(\"/relay-state\"), fe[\"alpha\"]
+assert fe[\"beta\"][\"state_dir\"].endswith(\"/feature-state/beta\"), fe[\"beta\"]
+"' _ "$_S172_PS1"
+    check "§172(7c) alpha executable_present true (payload exists), beta false (payload absent)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+fe=json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"]
+assert fe[\"alpha\"][\"executable_present\"] is True
+assert fe[\"beta\"][\"executable_present\"] is False
+"' _ "$_S172_PS1"
+    check "§172(7d) beta.restarts is 0, independent of alpha's 2" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+fe=json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"]
+assert fe[\"beta\"][\"restarts\"]==0
+"' _ "$_S172_PS1"
+    rm -rf "$_S172_H1"; unset _S172_PS1
+
+    # Fixture B: no feature_entries field at all (a pre-#381 marker) -> null,
+    # never {} (§88b / None-vs-[] rule: an old sandy cannot answer the question).
+    _S172_H2="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$_S172_H2/sandboxes/old-33334444"
+    printf '{\n  "schema": 1,\n  "relay": {"source":"none","path":null,"disabled_by":null},\n  "cred_mode":"full"\n}\n' \
+        > "$_S172_H2/sandboxes/old-33334444/sandy-session.json"
+    _S172_PS2="$(SANDY_HOME="$_S172_H2" bash "$_S172_SANDY" --print-state 2>/dev/null)"
+    check "§172(7e) a marker with no feature_entries field reports null, not {} -- an old sandy cannot answer, and {} would falsely claim 'zero entries'" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+assert json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"] is None
+"' _ "$_S172_PS2"
+    rm -rf "$_S172_H2"; unset _S172_PS2
+
+    # Fixture C: a disabled entry with NO .state file -> state "disabled",
+    # and relay.disabled_by must be read from the relay object ONLY (mutation
+    # m6: reverting the anchored disabled_by reader misreads this).
+    _S172_H3="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$_S172_H3/sandboxes/dis-55556666"
+    printf '{\n  "schema": 1,\n  "relay": {"source":"none","path":null,"disabled_by":null},\n  "feature_entries": {\n    "gamma": {"path": "/opt/sandy/features/gamma/r", "relay_alias": false, "disabled_by": "workspace"}\n  },\n  "cred_mode":"full"\n}\n' \
+        > "$_S172_H3/sandboxes/dis-55556666/sandy-session.json"
+    _S172_PS3="$(SANDY_HOME="$_S172_H3" bash "$_S172_SANDY" --print-state 2>/dev/null)"
+    check "§172(7f) a feature disabled by SANDY_RELAY=0, no .state file: state is 'disabled' (mirrors relay's own disabled convention)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+fe=json.load(sys.stdin)[\"sandboxes\"][0][\"feature_entries\"]
+assert fe[\"gamma\"][\"state\"]==\"disabled\", fe[\"gamma\"]
+"' _ "$_S172_PS3"
+    check "§172(7g) ...and relay.disabled_by stays null -- it must NOT read the feature-entry line's disabled_by (§88b; mutation m6 reddens this)" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+assert json.load(sys.stdin)[\"sandboxes\"][0][\"relay\"][\"disabled_by\"] is None
+"' _ "$_S172_PS3"
+    rm -rf "$_S172_H3"; unset _S172_PS3
+
+    # Fixture D: exactly one entry -> relay{} must equal the pre-#381 shape
+    # exactly (frozen from the emitter as it stands after this change).
+    _S172_H4="$(cd "$(mktemp -d)" && pwd -P)"
+    mkdir -p "$_S172_H4/sandboxes/one-77778888/relay-state" "$_S172_H4/features/amap/payload"
+    printf '#!/bin/sh\n' > "$_S172_H4/features/amap/payload/relay"; chmod +x "$_S172_H4/features/amap/payload/relay"
+    printf 'state=started\nrestarts=0\n' > "$_S172_H4/sandboxes/one-77778888/relay-state/.state"
+    printf '{\n  "schema": 1,\n  "relay": {\n    "source": "manifest",\n    "path": "/opt/sandy/features/amap/relay",\n    "disabled_by": null\n  },\n  "feature_entries": {\n    "amap": {"path": "/opt/sandy/features/amap/relay", "relay_alias": true, "disabled_by": null}\n  },\n  "cred_mode":"full"\n}\n' \
+        > "$_S172_H4/sandboxes/one-77778888/sandy-session.json"
+    _S172_PS4="$(SANDY_HOME="$_S172_H4" bash "$_S172_SANDY" --print-state 2>/dev/null)"
+    check "§172(7h) single entry: relay{} is unchanged -- state=started, source=manifest, executable_present=true, restarts=0" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)[\"sandboxes\"][0][\"relay\"]
+assert r[\"state\"]==\"started\" and r[\"source\"]==\"manifest\" and r[\"executable_present\"] is True and r[\"restarts\"]==0, r
+"' _ "$_S172_PS4"
+    rm -rf "$_S172_H4"; unset _S172_PS4
+else
+    skip "§172(7) needs python3 to validate --print-state JSON"
+fi
+
+# --- (8) the host-to-container HAND-OFF: RUN_FLAGS relay/feature-state -----
+# The adoption loop (1)-(3) proves _sandy_fe_list is right; the marker (6)-(7)
+# proves it is REPORTED right. Neither proves it ever reaches the container:
+# a Docker-free property test needs the actual RUN_FLAGS-assembly block run
+# standalone, the way §114(13e) already does for the (now-superseded) handoff
+# mounts gate -- an inline re-typed copy of the logic would keep passing after
+# the real code changed, which is exactly the failure mode this guards.
+_S172_RFBLK="$(awk '/^# Relay state \(#353\)\./,/^fi$/' "$_S172_SANDY")"
+check "§172(8pre) the RUN_FLAGS relay-state block was extracted (mutation: a rename empties this and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_FEATURE_ENTRIES="' _ "$_S172_RFBLK"
+
+# _s172_runflags BLOCK SANDBOX_DIR HANDOFF_RELAY FE_LIST RELAY_FEATURE -> one
+# RUN_FLAGS element per line on stdout (so "-v" and its value are adjacent
+# lines, exactly as `RUN_FLAGS+=(-v "...")` appends two array elements).
+_s172_runflags() {
+    bash -c '
+        set -uo pipefail
+        RUN_FLAGS=()
+        SANDBOX_DIR="$2"
+        SANDY_HANDOFF_RELAY="$3"
+        _sandy_fe_list="$4"
+        _sandy_fe_relay_feature="$5"
+        eval "$1"
+        printf "%s\n" "${RUN_FLAGS[@]}"
+    ' _ "$1" "$2" "$3" "$4" "$5"
+}
+
+_S172_RF2="$(_s172_runflags "$_S172_RFBLK" /sb /opt/sandy/features/alpha/r \
+    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
+check "§172(8a) exactly ONE -e SANDY_FEATURE_ENTRIES flag, carrying BOTH adopted tokens (mutation: dropping this line -- the pre-#381 legacy fallback the container would then take -- is caught here, not just in-container)" \
+    bash -c '
+        c=$(printf "%s\n" "$1" | grep -c "^SANDY_FEATURE_ENTRIES=")
+        [ "$c" -eq 1 ] || exit 1
+        printf "%s\n" "$1" | grep -q "^SANDY_FEATURE_ENTRIES=alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s$"
+    ' _ "$_S172_RF2"
+check "§172(8b) the DESIGNATED feature (alpha)'s /opt/sandy/feature-state mount sources relay-state, rw" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "/sb/relay-state:/opt/sandy/feature-state/alpha"' _ "$_S172_RF2"
+check "§172(8c) the OTHER feature (beta)'s /opt/sandy/feature-state mount sources feature-state/beta, rw (mutation: a no-op ':' in place of this -v is caught here)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "/sb/feature-state/beta:/opt/sandy/feature-state/beta"' _ "$_S172_RF2"
+check "§172(8d) neither feature-state mount carries :ro -- the supervisor writes .state/supervisor.log into both" \
+    bash -c '! printf "%s\n" "$1" | grep -q "/opt/sandy/feature-state/.*:ro$"' _ "$_S172_RF2"
+check "§172(8e) the relay-state mount itself is still emitted once, at /opt/sandy/relay-state (unchanged by #381)" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -cx "/sb/relay-state:/opt/sandy/relay-state")" -eq 1 ]' _ "$_S172_RF2"
+
+# Single entry: byte-identical to pre-#381 (D2) -- no feature-state/<name>
+# mount beyond the designated one's own two paths, no surprise second entry.
+_S172_RF1="$(_s172_runflags "$_S172_RFBLK" /sb /opt/sandy/features/amap/relay \
+    "amap=/opt/sandy/features/amap/relay" amap)"
+check "§172(8f) single entry: exactly TWO -v mount lines total (relay-state at both its own path and feature-state/<name>), no third" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c "^/sb/relay-state:")" -eq 2 ]' _ "$_S172_RF1"
+unset _S172_RFBLK _S172_RF1 _S172_RF2
+unset -f _s172_runflags
+
+# --- (9) the host-to-container HAND-OFF: mkdir for feature-state/<feature> --
+_S172_MKBLK="$(awk '/^# Feature-state directories \(#381\)/,/^unset _sandy_fe _sandy_fe_f$/' "$_S172_SANDY")"
+check "§172(9pre) the host mkdir block was extracted (mutation: a rename empties this and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "mkdir -p"' _ "$_S172_MKBLK"
+_S172_MKD="$(mktemp -d)"
+bash -c '
+    set -uo pipefail
+    SANDBOX_DIR="$2"
+    _sandy_fe_list="$3"
+    _sandy_fe_relay_feature="$4"
+    eval "$1"
+' _ "$_S172_MKBLK" "$_S172_MKD" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha
+check "§172(9a) the NON-designated feature's state dir IS created host-side (mutation: dropping this mkdir leaves nothing for beta's -v mount to source, failing the launch in a real container)" \
+    bash -c 'test -d "$1/feature-state/beta"' _ "$_S172_MKD"
+check "§172(9b) the DESIGNATED feature gets NO separate feature-state/<name> dir -- it uses relay-state, which is created unconditionally elsewhere" \
+    bash -c '[ ! -e "$1/feature-state/alpha" ]' _ "$_S172_MKD"
+rm -rf "$_S172_MKD"
+unset _S172_MKBLK _S172_MKD
+
+# --- (10) stale-image feature-entries warning (#381 decisions, docker stubbed) --
+# Run the REAL launch-assembly block standalone with `docker` replaced by a
+# shell function (a "stub" -- a function definition shadows the external
+# command for any unqualified call inside the same eval'd scope, no PATH
+# tricks needed) so this is a Docker-free property test.
+_S172_IMGBLK="$(awk '/^# --- BEGIN stale-image feature-entries warning \(#381\)/,/^# --- END stale-image feature-entries warning \(#381\)/' "$_S172_SANDY")"
+check "§172(10pre) the stale-image warning block was extracted (mutation: a rename empties this and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "sandy.feature_entries"' _ "$_S172_IMGBLK"
+
+# _s172_imgwarn BLOCK LABEL_VALUE FE_LIST RELAY_FEATURE [WANT_KEY] [WANT_IMAGE]
+# -> every warn() call's argument, one per line, on stdout. LABEL_VALUE is
+# what the stubbed `docker image inspect` prints (e.g. "1", "", or
+# "<no value>") -- but ONLY when it is actually invoked as `docker image
+# inspect -f '{{index .Config.Labels "<WANT_KEY>"}}' <WANT_IMAGE>`; any other
+# invocation (wrong subcommand, wrong label key, wrong image argument) prints
+# nothing, exactly like docker rendering an absent label. This is what
+# catches a block that inspects a hard-coded image name or the wrong label
+# key instead of "$IMAGE_NAME"/sandy.feature_entries -- a stub that ignored
+# its arguments could never fail on either mutation. WANT_KEY/WANT_IMAGE
+# default to the real key and to IMAGE_NAME itself (the no-mismatch case);
+# passing a different value simulates the block being fed a mismatch.
+# Threaded through as positional params to the nested `bash -c`, which has
+# its own $1.. and cannot see the outer function's locals.
+_s172_imgwarn() {
+    local _blk="$1" _label="$2" _fe="$3" _relf="$4"
+    local _want_key="${5:-sandy.feature_entries}" _want_img="${6:-stub-image}"
+    bash -c '
+        set -uo pipefail
+        _lbl="$2"
+        _want_key="$5"
+        _want_img="$6"
+        docker() {
+            if [ "$1" = "image" ] && [ "$2" = "inspect" ] && [ "$3" = "-f" ] \
+               && [[ "$4" == *"\"$_want_key\""* ]] && [ "$5" = "$_want_img" ]; then
+                printf "%s" "$_lbl"
+            fi
+        }
+        IMAGE_NAME="stub-image"
+        _sandy_fe_list="$3"
+        _sandy_fe_relay_feature="$4"
+        warn() { printf "WARN:%s\n" "$*"; }
+        eval "$1"
+    ' _ "$_blk" "$_label" "$_fe" "$_relf" "$_want_key" "$_want_img"
+}
+
+_S172_W1="$(_s172_imgwarn "$_S172_IMGBLK" "" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
+check "§172(10a) label ABSENT (empty) + 2 entries: warns, naming exactly the non-designated feature (beta), not alpha" \
+    bash -c '
+        printf "%s\n" "$1" | grep -q "WARN:.*beta" || exit 1
+        ! printf "%s\n" "$1" | grep -q "WARN:.*NOT started.*alpha"
+    ' _ "$_S172_W1"
+check "§172(10a-2) ...and points at sandy --rebuild" \
+    bash -c 'printf "%s\n" "$1" | grep -q "sandy --rebuild"' _ "$_S172_W1"
+
+_S172_W2="$(_s172_imgwarn "$_S172_IMGBLK" "<no value>" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
+check "§172(10b) label the literal docker string '<no value>' + 2 entries: ALSO warns (empty and <no value> both count as lacking it)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "WARN:.*beta"' _ "$_S172_W2"
+
+_S172_W3="$(_s172_imgwarn "$_S172_IMGBLK" "1" "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha)"
+check "§172(10c) label PRESENT (1) + 2 entries: silent (mutation: inverting the case match would warn here instead)" \
+    bash -c '[ -z "$1" ]' _ "$_S172_W3"
+
+_S172_W4="$(_s172_imgwarn "$_S172_IMGBLK" "" "amap=/opt/sandy/features/amap/relay" amap)"
+check "§172(10d) label ABSENT + only 1 entry: silent (nothing a stale image would drop)" \
+    bash -c '[ -z "$1" ]' _ "$_S172_W4"
+
+_S172_W5="$(_s172_imgwarn "$_S172_IMGBLK" "" "" "")"
+check "§172(10e) label ABSENT + zero entries: silent" \
+    bash -c '[ -z "$1" ]' _ "$_S172_W5"
+
+# The stub's own args-checking is what makes (10c) mean anything: without it,
+# a block that inspects the WRONG image (a hard-coded name instead of
+# "$IMAGE_NAME") or the WRONG label key would still see "1" come back and
+# stay silent. Simulate exactly that by making the stub answer "1" only for
+# an image/key the real block does NOT pass -- so from the block's own
+# point of view the label is absent (docker prints nothing for its actual
+# query), and it must warn even though a label value of "1" exists somewhere.
+_S172_W6="$(_s172_imgwarn "$_S172_IMGBLK" "1" \
+    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha \
+    sandy.feature_entries not-the-real-image)"
+check "§172(10f) a block inspecting the WRONG IMAGE (stub only answers for a name the block never passes) warns, same as a genuinely absent label" \
+    bash -c 'printf "%s\n" "$1" | grep -q "WARN:.*beta"' _ "$_S172_W6"
+
+_S172_W7="$(_s172_imgwarn "$_S172_IMGBLK" "1" \
+    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s" alpha \
+    not.the.real.key stub-image)"
+check "§172(10g) a block inspecting the WRONG LABEL KEY (stub only answers for a key the block never passes) warns, same as a genuinely absent label" \
+    bash -c 'printf "%s\n" "$1" | grep -q "WARN:.*beta"' _ "$_S172_W7"
+
+unset _S172_W6 _S172_W7
+
+# (10h) every fixture above has exactly TWO entries, so there is only ever
+# ONE non-designated feature to name -- a regression that names just the
+# FIRST missing entry (e.g. collapsing the accumulator to a plain "set if
+# unset" instead of appending) would pass every check above and still be
+# the #381 failure class: a never-started entry with nothing saying so.
+# Three entries, one designated (alpha), makes "only the first" and "all
+# but the last" both observable, and also re-covers "the designated entry
+# must still be skipped" with a non-trivial (i.e. more-than-one-candidate)
+# list.
+_S172_W8="$(_s172_imgwarn "$_S172_IMGBLK" "" \
+    "alpha=/opt/sandy/features/alpha/r beta=/opt/sandy/features/beta/s gamma=/opt/sandy/features/gamma/t" alpha)"
+check "§172(10h) label ABSENT + 3 entries: warns, naming BOTH non-designated features (beta AND gamma) -- not just the first one, and not the designated alpha (mutation: collapsing the accumulator to 'first missing only', or dropping the designated-entry skip, both fail this)" \
+    bash -c '
+        printf "%s\n" "$1" | grep -q "WARN:.*NOT started this launch:.*beta" || exit 1
+        printf "%s\n" "$1" | grep -q "WARN:.*NOT started this launch:.*gamma" || exit 1
+        ! printf "%s\n" "$1" | grep -q "WARN:.*NOT started this launch:.*alpha"
+    ' _ "$_S172_W8"
+
+unset _S172_IMGBLK _S172_W1 _S172_W2 _S172_W3 _S172_W4 _S172_W5 _S172_W8
+unset -f _s172_imgwarn
+
+# --- (11) the OTHER half of the stale-image contract: every generated agent
+# Dockerfile must actually emit the label (10) inspects for. (10) only ever
+# stubs `docker image inspect`, so nothing before this ran the six
+# generate_dockerfile* functions and looked at their OUTPUT -- renaming or
+# dropping `LABEL sandy.feature_entries=1` in a single generator left every
+# section, including (10), green (verifier finding: renaming it in all six
+# generators to `sandy.feature-entries` was undetected). Docker-free, same
+# pattern the codex agent-dispatch checks already use (extract the function,
+# run it into a temp SANDY_HOME, read the file). The label KEY is read from
+# the same docker-image-inspect line (10) stubs, not hardcoded a second time,
+# so the two sides cannot independently drift.
+#
+# The grep is deliberately guarded (`|| true`): under this file's own
+# `set -euo pipefail`, a `docker image inspect` line that no longer matches
+# this exact text (e.g. an equivalent refactor to `docker inspect --type
+# image -f ...`) would make grep exit 1, pipefail would propagate that
+# through the pipeline, and the bare assignment would abort the WHOLE SUITE
+# via set -e -- exactly the GREPM/CASESUB failure mode CLAUDE.md warns about,
+# with §172(11) and every section after it never running. Guarding it turns
+# that into an empty _S172_LBLKEY, which (11pre) below fails loudly instead.
+_S172_LBLKEY="$( { grep "docker image inspect -f '{{index \.Config\.Labels" "$_S172_SANDY" || true; } | sed -E 's/.*Labels "([^"]*)".*/\1/')"
+check "§172(11pre) the stale-image label KEY was read from the docker-image-inspect line (10) stubs (mutation: if that line stops naming a bare 'sandy.something' label, this and every (11) check below goes vacuous)" \
+    bash -c '[ -n "$1" ]' _ "$_S172_LBLKEY"
+
+_s172_gen_label() {
+    # _s172_gen_label FUNC_NAME OUTFILE DESTDIR -> 0 if OUTFILE, generated
+    # fresh by FUNC_NAME into DESTDIR, contains "LABEL <key>=1".
+    local _fn="$1" _out="$2" _dir="$3"
+    local _body; _body="$(sed -n "/^${_fn}()/,/^}\$/p" "$_S172_SANDY")"
+    [ -n "$_body" ] || return 1
+    rm -f "$_dir/$_out"
+    bash -c "
+        SANDY_HOME='$_dir'
+        BASE_IMAGE_NAME='sandy-base'
+        $_body
+        $_fn
+    " >/dev/null 2>&1
+    [ -f "$_dir/$_out" ] && grep -qF "LABEL ${_S172_LBLKEY}=1" "$_dir/$_out"
+}
+
+_S172_DFTMP="$(cd "$(mktemp -d)" && pwd -P)"
+for _s172_g in \
+    "generate_dockerfile:Dockerfile.new" \
+    "generate_dockerfile_gemini:Dockerfile.gemini.new" \
+    "generate_dockerfile_codex:Dockerfile.codex.new" \
+    "generate_dockerfile_grok:Dockerfile.grok.new" \
+    "generate_dockerfile_opencode:Dockerfile.opencode.new" \
+    "generate_dockerfile_full:Dockerfile.full.new"
+do
+    _s172_fn="${_s172_g%%:*}"
+    _s172_out="${_s172_g##*:}"
+    check "§172(11) $_s172_fn emits LABEL ${_S172_LBLKEY:-sandy.feature_entries}=1 in $_s172_out (a stale image lacking this makes (10)'s warning fire even for a launcher and generator that are perfectly in sync)" \
+        _s172_gen_label "$_s172_fn" "$_s172_out" "$_S172_DFTMP"
+done
+rm -rf "$_S172_DFTMP"
+unset _s172_g _s172_fn _s172_out _S172_DFTMP _S172_LBLKEY
+unset -f _s172_gen_label
+
+unset _S172_SANDY _S172_TMPL _S172_ADOPT
+unset -f _s172_adopt _s172_marker_fe 2>/dev/null || true
+
+# ============================================================
+echo ""
+echo "§173: receives — the default keyed on a DECLARED NEED, not the relay (#380)"
+# ============================================================
+# #380 (option B): the unset SANDY_CROSS_SESSION_INBOUND default now resolves
+# from a feature manifest's own `"receives": ["cross_session"]` rather than
+# from "an entry will start". The old rule survives as a DEPRECATED LEGACY
+# PATH (additive; #382 lists it in README's Deprecated table at the next
+# X.0.0), so this section proves BOTH: the new declared-need path, and that
+# the legacy path still works unchanged when no feature declares the need.
+#
+# Precedence under test: explicit > declared need > legacy relay rule >
+# refuse. §114(7i)-(7o) already covers the CSI RESOLUTION LOGIC in isolation
+# (a hand-fed _sandy_csi_need, no manifest involved); this section covers the
+# other half -- a real manifest producing _sandy_csi_need -- and the parts of
+# #380 that are not the resolution logic at all: projector parity, the
+# published schema, and D4 (an unselected feature declares nothing).
+_S173_SANDY="$SANDY_SCRIPT"
+_S173_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+
+# --- (a) the projectors + _sandy_fm_load, for the receives corpus ----------
+# Same span §135 extracts (manifest reader through _sandy_fm_dest): enough for
+# _sandy_fm_load, _sandy_fm_selected, both projectors, and the receives-known
+# list, without needing _sandy_fm_apply at all.
+_S173_FM="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Computed mount destinations/' "$_S173_SANDY")
+$(awk '/^_sandy_fm_dest\(\) \{/,/^\}/' "$_S173_SANDY")
+_SANDY_FM_HOME=\"\${_SANDY_FM_HOME:-/home/sandy}\""
+check "§173(pre-a) the manifest block was extracted and parses (mutation: a rename empties it and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_fm_load" && printf "%s\n" "$1" | bash -n' _ "$_S173_FM"
+
+mkdir -p "$_S173_D/f"
+_s173_load() {   # $1 = manifest JSON -> "OK:<space-joined receives>" or "REFUSED:<err>"
+    printf '%s' "$1" > "$_S173_D/f/feature.json"
+    bash -c '
+        set -uo pipefail
+        eval "$1"
+        if ! _sandy_fm_load "$2/f" "someslug-a1b2c3d4"; then printf "REFUSED:%s" "$_SANDY_FM_ERR"; exit 0; fi
+        printf "OK:%s" "${_SANDY_FM_RECEIVES[*]:-}"
+    ' _ "$_S173_FM" "$_S173_D" 2>"$_S173_D/err" || true
+}
+# _s173_got <result>: the label suffix every (a) check carries -- the result AND
+# the child's stderr, which used to go to /dev/null. These five failed on the
+# maintainer's macOS run while the identical steps passed standalone there, so
+# a failure must be able to say WHY without another round trip.
+_s173_got() { printf '(got: %s; stderr: %s)' "$1" "$(tr '\n' ' ' < "$_S173_D/err" 2>/dev/null | cut -c1-300)"; }
+_S173_BASE='"sandboxes":{"include":["*"]},"agents":{"include":["claude"]}'
+_S173_R="$(_s173_load "{$_S173_BASE,\"receives\":[\"cross_session\"]}")"
+check "§173(a1) a valid [\"cross_session\"] loads as a record $(_s173_got "$_S173_R")" \
+    bash -c '[ "$1" = "OK:cross_session" ]' _ "$_S173_R"
+_S173_R="$(_s173_load "{$_S173_BASE,\"receives\":[]}")"
+check "§173(a2) an empty [] declares nothing, and is not an error $(_s173_got "$_S173_R")" \
+    bash -c '[ "$1" = "OK:" ]' _ "$_S173_R"
+_S173_R="$(_s173_load "{$_S173_BASE,\"receives\":\"cross_session\"}")"
+check "§173(a3) a bare string (not an array) is REFUSED naming 'is not an array' $(_s173_got "$_S173_R")" \
+    bash -c 'case "$1" in REFUSED:*"receives is not an array"*) : ;; *) exit 1 ;; esac' _ "$_S173_R"
+_S173_R="$(_s173_load "{$_S173_BASE,\"receives\":[1]}")"
+check "§173(a4) a non-string element is REFUSED naming 'contains a non-string' $(_s173_got "$_S173_R")" \
+    bash -c 'case "$1" in REFUSED:*"receives contains a non-string"*) : ;; *) exit 1 ;; esac' _ "$_S173_R"
+_S173_R="$(_s173_load "{$_S173_BASE,\"receives\":[\"cross_sesion\"]}")"
+check "§173(a5) an unknown value is REFUSED, naming the offending value (a typo cannot silently resolve to refuse OR to the need being declared) $(_s173_got "$_S173_R")" \
+    bash -c 'case "$1" in REFUSED:*"unknown value '"'"'cross_sesion'"'"'"*) : ;; *) exit 1 ;; esac' _ "$_S173_R"
+unset _S173_R
+
+# node/jq PARITY over the same five fixtures -- §135(20)'s discipline, one
+# clause later. A divergence here is the same class of security bug: a
+# jq-only host accepting (or refusing) something the node host does not.
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    _S173_PJS="$_S173_D/p.js"; _S173_PJQ="$_S173_D/p.jq"
+    awk '/^_sandy_fm_projector_js\(\) \{$/{f=1;next} f&&/^SANDY_FM_JS$/{exit} f&&!/^cat <</{print}' "$_S173_SANDY" > "$_S173_PJS"
+    awk '/^_sandy_fm_projector_jq\(\) \{$/{f=1;next} f&&/^SANDY_FM_JQ$/{exit} f&&!/^cat <</{print}' "$_S173_SANDY" > "$_S173_PJQ"
+    _S173_PAR_FAIL=""
+    for _s173_j in \
+        "{$_S173_BASE,\"receives\":[\"cross_session\"]}" \
+        "{$_S173_BASE,\"receives\":[]}" \
+        "{$_S173_BASE,\"receives\":\"cross_session\"}" \
+        "{$_S173_BASE,\"receives\":[1]}" \
+        "{$_S173_BASE,\"receives\":[\"cross_sesion\"]}" ; do
+        printf '%s' "$_s173_j" > "$_S173_D/f/feature.json"
+        _s173_a="$(node "$_S173_PJS" "$_S173_D/f/feature.json" 2>&1)"
+        _s173_b="$(jq -r -f "$_S173_PJQ" "$_S173_D/f/feature.json" 2>&1)"
+        [ "$_s173_a" = "$_s173_b" ] || _S173_PAR_FAIL="$_S173_PAR_FAIL|$_s173_j"
+    done
+    check "§173(a6) node and jq projectors agree EXACTLY across the receives corpus, records and error messages both (diverged on:${_S173_PAR_FAIL:-nothing})" \
+        bash -c '[ -z "$1" ]' _ "$_S173_PAR_FAIL"
+    unset _S173_PAR_FAIL _s173_j _s173_a _s173_b
+else
+    skip "§173(a6) node/jq projector parity needs BOTH node and jq on the host"
+fi
+
+# --- (b) the three key lists agree, plus the receives value list -----------
+# §148(13)-(15) already diffs top_level_keys across --print-schema/JS
+# KNOWN/jq known generically, so "receives" landing in all three is already
+# covered there without any edit. This adds the FOURTH list #380 introduces:
+# the closed set receives itself accepts.
+_S173_SCHEMA_RV="$(bash "$_S173_SANDY" --print-schema 2>/dev/null | sed -n 's/.*"receives_values":\[\([^]]*\)\].*/\1/p' | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S173_JS_RV="$(sed -n 's/^const RECEIVES = \[\(.*\)\];$/\1/p' "$_S173_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S173_JQ_RV="$(sed -n 's/^def receives_known: \[\(.*\)\];$/\1/p' "$_S173_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S173_SH_RV="$(_sandy_fm_receives_known 2>/dev/null || awk '/^_sandy_fm_receives_known\(\) \{/{f=1;next} f&&/^EOF$/{exit} f&&!/^    cat <</{print}' "$_S173_SANDY" | tr '\n' ' ' | sed 's/ *$//')"
+check "§173(b1) --print-schema publishes manifest.receives_values (got: $_S173_SCHEMA_RV)" \
+    test -n "$_S173_SCHEMA_RV"
+check "§173(b2) ...equal to the JS RECEIVES const (mutation: add a value to one and this goes red)" \
+    test "$_S173_SCHEMA_RV" = "$_S173_JS_RV"
+check "§173(b3) ...equal to the jq receives_known def" \
+    test "$_S173_JS_RV" = "$_S173_JQ_RV"
+check "§173(b4) ...equal to the _sandy_fm_receives_known() shell heredoc (the fourth copy the schema is published FROM)" \
+    test "$_S173_JS_RV" = "$_S173_SH_RV"
+
+# --- (c) D4 still holds: an UNSELECTED feature declares NOTHING -------------
+# Extends §136(3)'s property (already regex-extended above to include
+# `receives`) with a fixture that actually DECLARES the need, so this is not
+# vacuously true of a manifest with no receives key at all.
+_S173_APPLY_BLK="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$_S173_SANDY")
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$_S173_SANDY")"
+_S173_CR="$_S173_D/creceives"; mkdir -p "$_S173_CR/needer/payload"
+cat > "$_S173_CR/needer/feature.json" <<'S173_CJSON'
+{ "sandboxes": { "include": ["*"], "exclude": ["scratch-*"] },
+  "agents":    { "include": ["claude"] },
+  "receives":  ["cross_session"] }
+S173_CJSON
+_s173_apply() {   # $1=slug $2=ws $3=agents -> record stream
+    bash -c 'set -uo pipefail; eval "$1"; _sandy_fm_apply "$2" "$3" "$4" "$5" 1 2>&1' \
+        _ "$_S173_APPLY_BLK" "$_S173_CR" "$1" "$2" "$3" 2>/dev/null || true
+}
+_S173_SEL="$(_s173_apply myrepo-a1b2c3d4 /Users/x/dev/myrepo claude)"
+_S173_UNSEL="$(_s173_apply scratch-a1b2c3d4 /Users/x/dev/myrepo claude)"
+check "§173(c1) a SELECTED sandbox gets the declared receives record" \
+    bash -c 'printf "%s" "$1" | grep -qx "receives	needer	cross_session"' _ "$_S173_SEL"
+check "§173(c2) an UNSELECTED sandbox (matched by the exclude glob) gets NO receives record at all — only a named skip (mutation: emitting receives before the selection gate turns this red)" \
+    bash -c '! printf "%s" "$1" | grep -qE "^(mount|export|entry|receives)	" &&
+             printf "%s" "$1" | grep -q "^skip	needer	"' _ "$_S173_UNSEL"
+
+# --- (d) end-to-end resolution, composed FM_BLOCK + EVAL_BLOCK + CSI_BLOCK --
+# Same driver PATTERN §142 uses (extract the manifest apply/eval spans and the
+# csi resolution span, in FILE ORDER, and run them composed) -- this is the
+# join #142 exists to prove stays a join: a real manifest, evaluated the real
+# way, has to reach the real crossSessionInbound resolution.
+_S173_FM2="$(awk '/^# --- Feature manifest \(2.0.0\)/,/^# --- Applying a feature/' "$_S173_SANDY")
+$(awk '/^_sandy_fm_apply\(\) \{/,/^\}/' "$_S173_SANDY")"
+_S173_EVAL="$(awk '/^_sandy_relay_slot="absent"/,/^# BEGIN handoff relay/' "$_S173_SANDY")"
+_S173_CSI="$(awk '/^_sandy_csi_json="null"/,/^    _sandy_csi_user_written=0/' "$_S173_SANDY" | sed '$d')
+fi"
+check "§173(pre-d) all three spans extracted and parse together (mutation: a rename empties one and every (d) check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_fm_apply" &&
+             printf "%s" "$2" | grep -q "_sandy_fm_ran=true" &&
+             printf "%s" "$3" | grep -q "_sandy_csi_val" &&
+             printf "%s\n%s\n%s\n" "$1" "$2" "$3" | bash -n' _ "$_S173_FM2" "$_S173_EVAL" "$_S173_CSI"
+
+cat > "$_S173_D/drive.sh" <<'S173_DRV'
+set -uo pipefail
+# HERMETIC BY CONSTRUCTION -- the §142 lesson: this suite is routinely run
+# INSIDE sandy, and a live sandbox exports SANDY_HANDOFF_RELAY and may have
+# SANDY_FEATURE_ENTRIES set. Unset first; the spans under test set them.
+unset SANDY_HANDOFF_RELAY SANDY_CROSS_SESSION_INBOUND SANDY_FEATURE_ENTRIES
+[ -n "${T_CSI:-}" ] && SANDY_CROSS_SESSION_INBOUND="$T_CSI"
+info() { :; }; warn() { :; }; error() { :; }
+_sandy_daemon_fatal() { :; }
+_sandy_agent_has() { case ",$SANDY_AGENT," in *",$1,"*) return 0 ;; esac; return 1; }
+_sandy_csi_write() { return 0; }
+eval "$FM_BLOCK"
+eval "$EVAL_BLOCK"
+eval "$CSI_BLOCK"
+printf 'csi=%s\nsrc=%s\n' "${_sandy_csi_val:-UNSET}" "${_sandy_csi_src:-UNSET}"
+S173_DRV
+
+# Two feature homes: one whose feature declares the need with NO entry, one
+# whose feature ships an entry with NO declared need (the legacy shape).
+_S173_HN="$_S173_D/home-needer"; mkdir -p "$_S173_HN/features/needer/payload"
+cat > "$_S173_HN/features/needer/feature.json" <<'S173_N'
+{ "sandboxes": { "include": ["*"], "exclude": ["excluded-*"] },
+  "agents":    { "include": ["claude"] },
+  "receives":  ["cross_session"] }
+S173_N
+_S173_HL="$_S173_D/home-legacy"; mkdir -p "$_S173_HL/features/legacy/payload"
+printf '#!/bin/sh\n' > "$_S173_HL/features/legacy/payload/relay"; chmod +x "$_S173_HL/features/legacy/payload/relay"
+cat > "$_S173_HL/features/legacy/feature.json" <<'S173_L'
+{ "sandboxes": { "include": ["*"] },
+  "agents":    { "include": ["claude"] },
+  "entry":     "payload/relay" }
+S173_L
+# A THIRD home whose single feature declares BOTH -- the only fixture that can
+# observe the precedence between the declared-need branch and the legacy-relay
+# branch: every other scenario has at most one of the two conditions true, so
+# swapping their order in the resolver would not visibly change d1-d6 at all.
+_S173_HH="$_S173_D/home-hybrid"; mkdir -p "$_S173_HH/features/hybrid/payload"
+printf '#!/bin/sh\n' > "$_S173_HH/features/hybrid/payload/relay"; chmod +x "$_S173_HH/features/hybrid/payload/relay"
+cat > "$_S173_HH/features/hybrid/feature.json" <<'S173_H'
+{ "sandboxes": { "include": ["*"] },
+  "agents":    { "include": ["claude"] },
+  "receives":  ["cross_session"],
+  "entry":     "payload/relay" }
+S173_H
+
+_s173_drive() {   # $1=SANDY_HOME $2=slug $3..=extra env "NAME=value" assignments
+    local _home="$1" _slug="$2"; shift 2
+    env SANDY_HOME="$_home" SANDBOX_DIR="$_S173_D/sb" WORK_DIR="$_S173_D/ws" \
+        SANDBOX_NAME="$_slug" SANDY_AGENT=claude SANDY_RELAY=1 \
+        FM_BLOCK="$_S173_FM2" EVAL_BLOCK="$_S173_EVAL" CSI_BLOCK="$_S173_CSI" \
+        _sandy_relay_slot_dir="$_S173_D/noslot" \
+        "$@" bash "$_S173_D/drive.sh" 2>/dev/null || echo "DRIVER-FAILED"
+}
+
+_S173_D1="$(_s173_drive "$_S173_HN" myrepo-a1b2c3d4)"
+check "§173(d1) a feature declaring receives, with NO entry, resolves accept, src=feature:<name> (got: $(printf '%s' "$_S173_D1" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=accept$" && printf "%s" "$1" | grep -q "^src=feature:needer$"' _ "$_S173_D1"
+
+_S173_D2="$(_s173_drive "$_S173_HL" myrepo-a1b2c3d4)"
+check "§173(d2) a feature with an entry and NO declared receives resolves accept via the LEGACY path, src=relay-legacy (got: $(printf '%s' "$_S173_D2" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=accept$" && printf "%s" "$1" | grep -q "^src=relay-legacy$"' _ "$_S173_D2"
+
+_S173_D3="$(_s173_drive "$_S173_HL" myrepo-a1b2c3d4 env SANDY_RELAY=0)"
+check "§173(d3) ...and with SANDY_RELAY=0 the SAME feature resolves refuse, src=default — the entry never starts, so the legacy rule must not fire (got: $(printf '%s' "$_S173_D3" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=refuse$" && printf "%s" "$1" | grep -q "^src=default$"' _ "$_S173_D3"
+
+_S173_D4="$(_s173_drive "$_S173_HN" excluded-a1b2c3d4)"
+check "§173(d4) a feature declaring receives but EXCLUDED by sandboxes.exclude resolves refuse — a declared need from an unselected feature must not count (got: $(printf '%s' "$_S173_D4" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=refuse$" && printf "%s" "$1" | grep -q "^src=default$"' _ "$_S173_D4"
+
+_S173_D5="$(_s173_drive "$_S173_HN" myrepo-a1b2c3d4 env T_CSI=hold)"
+check "§173(d5) a declared need does not override an EXPLICIT value — hold wins, src=explicit (got: $(printf '%s' "$_S173_D5" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=hold$" && printf "%s" "$1" | grep -q "^src=explicit$"' _ "$_S173_D5"
+
+_S173_D6="$(_s173_drive "$_S173_HN" myrepo-a1b2c3d4 env _sandy_is_headless=true)"
+check "§173(d6) a declared need under a HEADLESS run still resolves refuse (criterion 8 applies to a declared need exactly as it did to the legacy rule) (got: $(printf '%s' "$_S173_D6" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=refuse$"' _ "$_S173_D6"
+
+_S173_D7="$(_s173_drive "$_S173_HH" myrepo-a1b2c3d4)"
+check "§173(d7) THE ORDER: a feature declaring BOTH receives and an entry resolves via the DECLARED-NEED branch, not the legacy one — src=feature:<name>, never relay-legacy (mutation: swapping the two elif branches turns this into src=relay-legacy while csi stays accept, so only THIS check would catch it) (got: $(printf '%s' "$_S173_D7" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^csi=accept$" && printf "%s" "$1" | grep -q "^src=feature:hybrid$"' _ "$_S173_D7"
+
+unset -f _s173_drive
+unset _S173_D1 _S173_D2 _S173_D3 _S173_D4 _S173_D5 _S173_D6 _S173_D7 _S173_HN _S173_HL _S173_HH
+
+# --- (e) the marker carries cross_session_inbound_source --------------------
+# Same extraction §134 uses for the marker printf, stubbing the same globals
+# it already stubs, plus the two new ones #380 adds.
+_S173_MKBLK="$(awk '/^printf .\{.n  "schema": 1,/{f=1} f{print} f&&/> "\$_sandy_session_file"/{exit}' "$_S173_SANDY")"
+_s173_marker() {   # $1 = _sandy_csi_src_json literal ("null" or "\"feature:x\"")
+    (
+        sandy_full_version() { echo "9.9.9"; }
+        _sandy_egress_mode=off
+        SANDY_WORKSPACE="/home/sandy/myrepo"
+        SANDBOX_NAME="myrepo-abc12345"
+        _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_csi_json='"accept"'
+        _sandy_csi_src_json="$1"
+        _sandy_agents_json=null; _sandy_relay_source_json=null
+        _sandy_relay_path_json=null; _sandy_relay_disabled_by_json=null
+        _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""; _sandy_fe_json=""
+        CRED_MODE=none; _sandy_session_nonce=deadbeef; _sandy_session_file=/dev/stdout
+        eval "$_S173_MKBLK"
+    ) 2>/dev/null
+}
+if command -v python3 >/dev/null 2>&1; then
+    _S173_MK1="$(_s173_marker '"feature:needer"')"
+    check "§173(e1) cross_session_inbound_source carries the resolved source, and the marker is valid JSON" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+assert d[\"cross_session_inbound_source\"]==\"feature:needer\", d
+"' _ "$_S173_MK1"
+    _S173_MK2="$(_s173_marker null)"
+    check "§173(e2) ...and when the resolution variable was never set (mirroring _sandy_csi_json's own null convention), it is JSON null, not the string \"null\"" \
+        bash -c 'printf "%s" "$1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+assert d[\"cross_session_inbound_source\"] is None, d
+"' _ "$_S173_MK2"
+else
+    skip "§173(e) needs python3 to validate marker JSON"
+fi
+unset -f _s173_marker
+unset _S173_MKBLK _S173_MK1 _S173_MK2
+
+rm -rf "$_S173_D"
+unset _S173_SANDY _S173_D _S173_FM _S173_BASE _S173_APPLY_BLK _S173_CR _S173_SEL _S173_UNSEL
+unset _S173_FM2 _S173_EVAL _S173_CSI
+unset _S173_SCHEMA_RV _S173_JS_RV _S173_JQ_RV _S173_SH_RV
+unset -f _s173_load _s173_apply 2>/dev/null || true
+
+# ============================================================
+echo ""
+echo "§174: #379 measurement harness structural checks; #383 consumer-boundary ratchet"
+# ============================================================
+# Two unrelated properties, one section, because both belong to the same unit
+# (#383's umbrella): the #379 harness this section pins needs no Docker, and
+# neither does the boundary rule below.
+#
+# --- (a) test/measure-settings-inbound.sh: STRUCTURAL only. It measures
+# Claude Code's own --settings resolver on a real Docker host with real
+# credentials, neither of which this suite can assume -- so this section
+# proves the harness is well-formed and honors its own safety properties,
+# never that its measurement came out any particular way. See the harness's
+# own header and docs/security/CROSS_SESSION_INBOUND.md §9 for what it
+# measures and why it cannot be run here.
+_S174_MSI="$(cd "$(dirname "$0")" && pwd)/measure-settings-inbound.sh"
+
+check "§174(a1) test/measure-settings-inbound.sh exists, is executable-by-bash, and is bash -n clean" \
+    bash -c '[ -f "$1" ] && bash -n "$1"' -- "$_S174_MSI"
+
+check "§174(a2) sources lib-isolated-home.sh and calls _isolate_sandy_home (no fixture sandbox leaking into the operator's real \$SANDY_HOME -- the §105 lesson)" \
+    bash -c 'grep -q "lib-isolated-home.sh" "$1" && grep -q "_isolate_sandy_home" "$1"' -- "$_S174_MSI"
+
+# (a3) the injector's token-SELECTION CODE, not merely the word "peerToken"
+# appearing somewhere in the file. A verifier found the OLD check --
+# `grep -q "peerToken"` -- stayed green even after inject.py was mutated to
+# select the wrong field entirely (e.g. `json.loads(_raw)["childToken"]`),
+# because the literal string "peerToken" still appears elsewhere in the
+# file -- in the very comments that describe this property -- so a plain
+# grep for the word proves nothing about which field the running code
+# actually selects. This extracts inject.py's own token-selection code --
+# from `_raw = open(key_path)...` through the line immediately before
+# `if os.fork() > 0:` (never executing the fork itself) -- out of its
+# heredoc (a plain regex slice of the real source, never a reimplementation)
+# and EXECUTES it against a fixture key file carrying both peerToken and
+# childToken with distinct values, then asserts the selected token is the
+# peerToken one. Same method as (a5). Capturing through the line before
+# os.fork(), rather than stopping at the try/except block, is itself a
+# second verifier finding fixed here: a later reassignment of `token`
+# anywhere in that span used to go unseen by a slice that stopped at the
+# try/except -- see (a3-mut2).
+_S174_TOKENSEL_TEST="$(mktemp)"
+cat > "$_S174_TOKENSEL_TEST" <<'PY'
+import re, sys, os, json, tempfile
+
+path = sys.argv[1]
+expect = sys.argv[2]  # "ok": must select peerToken; "mutated": must NOT
+
+src = open(path).read()
+m = re.search(r"<<'MSI_INJECT_PY'\n(.*?)\nMSI_INJECT_PY\n", src, re.S)
+if not m:
+    print("EXTRACT-FAIL: inject.py heredoc not found in %s" % path, file=sys.stderr)
+    sys.exit(3)
+inject_src = m.group(1)
+
+# Captures everything from `_raw = ...` through the line BEFORE
+# `if os.fork() > 0:` (exclusive) -- never the fork line itself, so exec'ing
+# this snippet never actually forks the test process. Anything reassigning
+# `token` between the try/except and the fork (comments, blank lines, or a
+# later mutated line) is included, not just the five-line try/except block.
+m2 = re.search(
+    r"\n(_raw = open\(key_path\)\.read\(\)\.strip\(\)\n.*?)\nif os\.fork\(\) > 0:\n",
+    inject_src, re.S,
+)
+if not m2:
+    print("EXTRACT-FAIL: token-selection block not found in inject.py source", file=sys.stderr)
+    sys.exit(3)
+snippet = m2.group(1)
+
+fd, key_path = tempfile.mkstemp()
+os.write(fd, json.dumps({"peerToken": "PEER-XYZ", "childToken": "CHILD-ABC"}).encode())
+os.close(fd)
+try:
+    ns = {"key_path": key_path, "json": json}
+    exec(compile(snippet, "<inject-token-snippet>", "exec"), ns)
+    token = ns.get("token")
+finally:
+    os.unlink(key_path)
+
+if expect == "ok":
+    sys.exit(0 if token == "PEER-XYZ" else 1)
+else:
+    # expect == "mutated": the property must be BROKEN -- the selected token
+    # must no longer be the peerToken value.
+    sys.exit(0 if token != "PEER-XYZ" else 1)
+PY
+
+check "§174(a3) the injector's OWN token-selection code (extracted and executed against a fixture key file carrying both fields, not grepped for) selects the peerToken value, never childToken" \
+    python3 "$_S174_TOKENSEL_TEST" "$_S174_MSI" ok
+
+_S174_MUT_INJECT="$(mktemp)"
+sed 's/\["peerToken"\]/["childToken"]/' "$_S174_MSI" > "$_S174_MUT_INJECT"
+check "§174(a3-mut) ...and mutating inject.py's selection from peerToken to childToken in a scratch copy makes it select the wrong field (self-test of (a3): the exact regression a plain 'grep -q peerToken' missed, because the word 'peerToken' still appears elsewhere in the file even once this line stops reading it)" \
+    python3 "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT" mutated
+
+# (a3-mut2) a DIFFERENT shape of the same regression, found by a verifier
+# against the (a3) extraction above before it was widened to run through
+# os.fork(): inserting a SECOND reassignment of `token` right after the
+# try/except -- never touching the `["peerToken"]` selection line itself --
+# used to escape a slice that stopped at the try/except's own five lines,
+# so (a3) stayed green with the injector silently reading childToken at
+# runtime. Confirms the widened slice above actually closes that gap.
+#
+# The mutation-SETUP step below is deliberately guarded (`|| _S174_A3MUT2_RC=$?`)
+# rather than left as a bare top-level command: under this file's own
+# `set -euo pipefail`, any drift in inject.py's except-block text away from
+# the exact string this setup matches verbatim -- a real risk, since it is
+# reproduced byte-for-byte here -- makes the python3 call exit 3, and an
+# unguarded exit 3 would abort the WHOLE SUITE via set -e before §174(a3-mut2)
+# or any later section ever ran, rather than failing this one check. Same
+# class bf4a979 fixed for §172(11pre)'s unguarded grep.
+_S174_MUT_INJECT2="$(mktemp)"
+_S174_A3MUT2_RC=0
+python3 - "$_S174_MSI" "$_S174_MUT_INJECT2" <<'PY' || _S174_A3MUT2_RC=$?
+import sys
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+src = open(src_path).read()
+old = "except Exception:\n    token = _raw\n"
+new = old + "token = json.loads(_raw).get(\"childToken\", token)\n"
+if src.count(old) != 1:
+    print("MUTATION-SETUP-FAIL: expected exactly one match for the except block", file=sys.stderr)
+    sys.exit(3)
+open(dst_path, "w").write(src.replace(old, new, 1))
+PY
+check "§174(a3-mut2-setup) the except-block mutation target still matches inject.py verbatim (guarded: a mismatch here fails (a3-mut2) below rather than aborting the whole suite)" \
+    bash -c '[ "$1" -eq 0 ]' -- "$_S174_A3MUT2_RC"
+if [ "$_S174_A3MUT2_RC" -eq 0 ]; then
+    check "§174(a3-mut2) ...and inserting a SECOND reassignment of \`token\` right after the try/except (leaving the peerToken selection line itself untouched) is also caught (self-test of (a3): the exact gap a verifier found in a slice that stopped at the try/except's five lines)" \
+        python3 "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT2" mutated
+else
+    fail "§174(a3-mut2) ...and inserting a SECOND reassignment of \`token\` right after the try/except (skipped: mutation-setup above failed, so no mutated file was produced to test against)"
+fi
+unset _S174_A3MUT2_RC
+
+# (a3b) the auth frame the injector actually SENDS embeds the SAME variable
+# (a3) proved holds the peerToken value -- extracted from the real
+# `s.sendall(... {"type": "auth", "token": <var>} ...)` call itself, never
+# hardcoded, so a mutation that swaps in a *different* field (e.g. `_raw`,
+# the raw un-selected key-file contents, never parsed for peerToken at all)
+# is caught even though the token-SELECTION code (a3)/(a3-mut)/(a3-mut2)
+# extract and execute a few lines earlier is left completely untouched. A
+# verifier found this gap: (a3)'s snippet only proves what `token` holds at
+# the moment it stops extracting (immediately before `os.fork()`), never
+# what the auth frame actually names.
+#
+# (a3c) no binding of `token` anywhere in inject.py OUTSIDE the selection
+# try/except -- the same verifier finding, one step further out: a mutation
+# that leaves BOTH the selection code and the frame's variable NAME
+# untouched can still swap in the wrong credential by inserting a fresh
+# `token = json.loads(_raw)["childToken"]` line somewhere else in the file
+# (e.g. right before `s.connect`, or between the two forks). Neither (a3)
+# (stops before the FIRST fork) nor (a3b) (checks only the variable NAME
+# referenced in the frame, not its runtime value) can see a reassignment
+# placed there.
+#
+# #383, twice over: first the span used to start at the SECOND fork's
+# `os._exit(0)`, leaving a gap between (a3)'s end (immediately before the
+# first `if os.fork() > 0:`) and (a3c)'s old start -- `sys.exit(0)`,
+# `os.setsid()`, and the second fork check itself were covered by NEITHER
+# check, and a verifier confirmed on a scratch copy that inserting the
+# childToken reassignment right after `os.setsid()` left every §174 check
+# green. Widening the span to start at the FIRST fork check closed that gap,
+# but the span was still scanned with the regex `\btoken\s*=(?!=)` -- and a
+# SECOND verifier pass found that regex itself blind to any rebinding of
+# `token` that isn't a bare `Name = value` line: tuple/list unpacking
+# (`token, _ = json.loads(_raw)["childToken"], None`), an annotated
+# assignment (`token: str = ...`), a walrus, or a `for`/`with`/`except ...
+# as`/`global` target. (a3c) is now `ast`-based (see the heredoc below) and
+# checks the WHOLE file for any `token` binding outside the selection
+# try/except, which retires the span question entirely -- there is no
+# "where does the span start" left to get wrong. See (a3c-mut)/(a3c-mut2)/
+# (a3c-mut3) below for the regression tests.
+_S174_FRAME_TEST="$(mktemp)"
+cat > "$_S174_FRAME_TEST" <<'PY'
+import ast, re, sys
+
+path = sys.argv[1]
+prop = sys.argv[2]    # "frame_var" (a3b) or "no_reassign" (a3c)
+expect = sys.argv[3]  # "ok": the property must HOLD; "mutated": it must NOT
+
+src = open(path).read()
+m = re.search(r"<<'MSI_INJECT_PY'\n(.*?)\nMSI_INJECT_PY\n", src, re.S)
+if not m:
+    print("EXTRACT-FAIL: inject.py heredoc not found in %s" % path, file=sys.stderr)
+    sys.exit(3)
+inject_src = m.group(1)
+
+if prop == "frame_var":
+    fm = re.search(r'\{"type": "auth", "token": (\w+)\}', inject_src)
+    if not fm:
+        print("EXTRACT-FAIL: auth-frame sendall() call not found in inject.py source", file=sys.stderr)
+        sys.exit(3)
+    ok = fm.group(1) == "token"
+elif prop == "no_reassign":
+    # Whole-file property (#383, closing the a3c gap for good): the ONLY
+    # places anywhere in inject.py that bind the name `token` are the two
+    # lines inside the selection try/except (`token =
+    # json.loads(_raw)["peerToken"]` and its `except Exception: token =
+    # _raw` fallback). Parsed with `ast`, never grepped/regexed for
+    # `token\s*=`, because a verifier found that regex misses every
+    # non-`Name = value` way Python can bind a name: tuple/list unpacking
+    # (`token, _ = json.loads(_raw)["childToken"], None`), an annotated
+    # assignment (`token: str = ...`), a walrus, a `for`/`with`/`except ...
+    # as` target, or `global token`. `\btoken\s*=(?!=)` -- the PRIOR shape
+    # of this check, restricted to the span between the first fork and the
+    # auth-frame send -- caught neither: after "token" the next character is
+    # "," or ":", never "=". Operating on the WHOLE file (not a span) also
+    # retires the need to track exactly which span the double-fork gap
+    # occupies; a binding anywhere outside the selection try/except is
+    # caught regardless of where it is textually.
+    try:
+        tree = ast.parse(inject_src)
+    except SyntaxError as e:
+        print("PARSE-FAIL: %s" % e, file=sys.stderr)
+        sys.exit(3)
+
+    def _target_names(target):
+        # Yields every bare Name node a single assignment target can bind,
+        # recursing through tuple/list unpacking and a starred target.
+        # ast.Attribute / ast.Subscript targets (obj.token, d["token"]) can
+        # never bind a bare name `token`, so they are not walked.
+        if isinstance(target, ast.Name):
+            yield target
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                yield from _target_names(elt)
+        elif isinstance(target, ast.Starred):
+            yield from _target_names(target.value)
+
+    class TokenBindings(ast.NodeVisitor):
+        def __init__(self):
+            self.lines = []
+
+        def _add(self, target):
+            for n in _target_names(target):
+                if n.id == "token":
+                    self.lines.append(n.lineno)
+
+        def visit_Assign(self, node):
+            for t in node.targets:
+                self._add(t)
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node):
+            self._add(node.target)
+            self.generic_visit(node)
+
+        def visit_AugAssign(self, node):
+            self._add(node.target)
+            self.generic_visit(node)
+
+        def visit_NamedExpr(self, node):
+            self._add(node.target)
+            self.generic_visit(node)
+
+        def visit_For(self, node):
+            self._add(node.target)
+            self.generic_visit(node)
+
+        def visit_AsyncFor(self, node):
+            self._add(node.target)
+            self.generic_visit(node)
+
+        def visit_With(self, node):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    self._add(item.optional_vars)
+            self.generic_visit(node)
+
+        def visit_AsyncWith(self, node):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    self._add(item.optional_vars)
+            self.generic_visit(node)
+
+        def visit_ExceptHandler(self, node):
+            if node.name == "token":
+                self.lines.append(node.lineno)
+            self.generic_visit(node)
+
+        def visit_Global(self, node):
+            if "token" in node.names:
+                self.lines.append(node.lineno)
+            self.generic_visit(node)
+
+        def visit_Nonlocal(self, node):
+            if "token" in node.names:
+                self.lines.append(node.lineno)
+            self.generic_visit(node)
+
+    finder = TokenBindings()
+    finder.visit(tree)
+    all_lines = sorted(finder.lines)
+
+    # The selection try/except: the first ast.Try in the module, which must
+    # be the `_raw = ...` / `try: token = ...["peerToken"] / except: token
+    # = _raw` block this property exists to isolate. Its own binding lines
+    # (found the SAME way, restricted to that one node) are the expected
+    # set -- never hardcoded line numbers, since the extracted heredoc's own
+    # line numbering shifts with its position in the tracked file.
+    try_node = next((n for n in ast.walk(tree) if isinstance(n, ast.Try)), None)
+    if try_node is None:
+        print("EXTRACT-FAIL: no try/except found in inject.py source", file=sys.stderr)
+        sys.exit(3)
+    selection_finder = TokenBindings()
+    for stmt in try_node.body:
+        selection_finder.visit(stmt)
+    for handler in try_node.handlers:
+        selection_finder.visit(handler)
+    expected_lines = sorted(selection_finder.lines)
+
+    if len(expected_lines) != 2:
+        print(
+            "EXTRACT-FAIL: expected exactly 2 token bindings in the selection try/except, found %d"
+            % len(expected_lines),
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
+    ok = all_lines == expected_lines
+else:
+    print("BAD-ARG: unknown prop %r" % prop, file=sys.stderr)
+    sys.exit(3)
+
+if expect == "ok":
+    sys.exit(0 if ok else 1)
+else:
+    # expect == "mutated": the property must be BROKEN.
+    sys.exit(0 if not ok else 1)
+PY
+
+check "§174(a3b) the auth frame's OWN sendall() call (extracted, not grepped for) names the same \`token\` variable (a3) proved holds the peerToken value" \
+    python3 "$_S174_FRAME_TEST" "$_S174_MSI" frame_var ok
+
+_S174_MUT_FRAME_B="$(mktemp)"
+sed 's/"token": token})/"token": _raw})/' "$_S174_MSI" > "$_S174_MUT_FRAME_B"
+check "§174(a3b-mut) ...and mutating the frame to send the raw, un-selected key-file contents (\`_raw\`) instead of \`token\` is caught (self-test of (a3b))" \
+    python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_B" frame_var mutated
+
+check "§174(a3c) the ONLY bindings of \`token\` anywhere in inject.py (whole-file ast walk -- Assign/AnnAssign/AugAssign/tuple-unpack/NamedExpr/for/with/except-as/global/nonlocal targets, never a span and never grepped for) are the two inside the selection try/except, so an unrelated 'token' elsewhere in the file cannot hide a real reassignment and there is no span boundary left to get wrong" \
+    python3 "$_S174_FRAME_TEST" "$_S174_MSI" no_reassign ok
+
+_S174_MUT_FRAME_C="$(mktemp)"
+sed '/^    os\._exit(0)$/a\
+token = json.loads(_raw).get("childToken", token)' "$_S174_MSI" > "$_S174_MUT_FRAME_C"
+check "§174(a3c-mut) ...and inserting a reassignment of \`token\` right after the completed double-fork (leaving both the selection code and the frame's variable name untouched) is caught (self-test of (a3c): the exact gap a verifier found one step further out than (a3-mut2))" \
+    python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_C" no_reassign mutated
+
+# (a3c-mut2, #383) the fork-SPAN gap itself: inserting the same reassignment
+# BETWEEN the two forks, right after `os.setsid()` -- never touching the
+# selection code, the frame's variable name, or the second fork's
+# `os._exit(0)` line (a3c-mut)'s mutation targets -- used to leave every
+# §174 check green, because neither (a3) (stops before the FIRST fork) nor
+# the OLD (a3c) (a textual span that started at the SECOND fork's
+# `os._exit(0)`) covered this span at all. Confirms the whole-file ast check
+# (a3c) is now built from -- not any hand-tracked span, since there is no
+# span left to start anywhere -- closes it.
+_S174_MUT_FRAME_D="$(mktemp)"
+sed '/^os\.setsid()$/a\
+token = json.loads(_raw).get("childToken", token)' "$_S174_MSI" > "$_S174_MUT_FRAME_D"
+check "§174(a3c-mut2) ...and inserting a reassignment of \`token\` BETWEEN the two forks, right after os.setsid() (leaving (a3c-mut)'s own mutation point, the selection code, and the frame's variable name all untouched) is caught (self-test of (a3c)'s whole-file ast check: the exact fork-span gap a verifier found between (a3)'s end and (a3c)'s old textual-span start, #383)" \
+    python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_D" no_reassign mutated
+
+# (a3c-mut3, #383) a SECOND verifier pass on (a3c) itself: the same
+# between-forks insertion point as (a3c-mut2), but as a TUPLE-UNPACK
+# assignment (`token, _unused = json.loads(_raw)["childToken"], None`)
+# rather than a bare `Name = value` line. The regex this check used to run
+# (`\btoken\s*=(?!=)`) requires an `=` to immediately follow "token" (modulo
+# whitespace) -- here the next character is a comma, so the regex saw
+# nothing while the injector still ends up sending childToken at runtime.
+# The `ast`-based rewrite above walks Assign targets through tuple/list
+# unpacking, so it sees this binding regardless of where the "=" ends up
+# relative to the name "token".
+_S174_MUT_FRAME_E="$(mktemp)"
+sed '/^os\.setsid()$/a\
+token, _unused = json.loads(_raw)["childToken"], None' "$_S174_MSI" > "$_S174_MUT_FRAME_E"
+check "§174(a3c-mut3) ...and inserting the SAME between-forks reassignment as a tuple-unpack (\`token, _unused = ...\`, never a bare \`token = ...\` line) is caught (self-test of (a3c)'s ast-based rewrite: the exact form a plain \`token\\s*=\` regex cannot see, #383)" \
+    python3 "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_E" no_reassign mutated
+
+rm -f "$_S174_TOKENSEL_TEST" "$_S174_MUT_INJECT" "$_S174_MUT_INJECT2" "$_S174_FRAME_TEST" "$_S174_MUT_FRAME_B" "$_S174_MUT_FRAME_C" "$_S174_MUT_FRAME_D" "$_S174_MUT_FRAME_E"
+unset _S174_TOKENSEL_TEST _S174_MUT_INJECT _S174_MUT_INJECT2 _S174_FRAME_TEST _S174_MUT_FRAME_B _S174_MUT_FRAME_C _S174_MUT_FRAME_D _S174_MUT_FRAME_E
+
+# NEVER a repo assertion on run-time behavior -- CLAUDE_CODE_MESSAGING_TOKEN is
+# the receiver's OWN childToken (handed to its children), and sending it
+# instead of peerToken BYPASSES crossSessionInbound entirely (CROSS_SESSION_
+# INBOUND.md §6a "Correction 2" -- the exact bug the acceptance harness this
+# file is modeled on had and fixed). The property is textual: the harness must
+# never even reference the name outside a comment, so nobody can wire it in
+# later without this going red. `grep -v '^\s*#'` strips comment-only lines;
+# a mid-line comment after real code would still be caught because the whole
+# line still matches the token substring.
+check "§174(a4) no non-comment line references CLAUDE_CODE_MESSAGING_TOKEN (mutation: adding it as real code goes red -- see a4-mut)" \
+    bash -c '! grep -vE "^[[:space:]]*#" "$1" | grep -q "CLAUDE_CODE_MESSAGING_TOKEN"' -- "$_S174_MSI"
+check "§174(a4-mut) ...and the check above actually fires on an injected non-comment line naming the token (self-test of (a4), not a repo assertion)" \
+    bash -c 'printf "%s\ntoken = CLAUDE_CODE_MESSAGING_TOKEN\n" "$(cat "$1")" | grep -vE "^[[:space:]]*#" | grep -q "CLAUDE_CODE_MESSAGING_TOKEN"' -- "$_S174_MSI"
+
+# (a5) the fallback classification really IS UNKNOWN, not merely that the
+# STRING "UNKNOWN" appears somewhere in the file. A verifier mutated
+# driver.py's fallback default from `outcome, sig = "UNKNOWN", ...` to
+# `outcome, sig = "ROUTED", ...` and the previous version of this check
+# (three `grep -q` calls on literal substrings) stayed green, because every
+# one of those substrings still appears -- two of them in the very comment
+# that DESCRIBES the property rather than in code that enforces it. So this
+# extracts driver.py's own `_msi_classify` function out of the harness (a
+# plain regex slice of the real source, not a reimplementation that could
+# quietly drift from it) and EXECUTES it against two fixture debug logs:
+# one with no signature line at all, one containing the ROUTED signature.
+# Written to scratch files, never the tracked script.
+_S174_CLASSIFY_TEST="$(mktemp)"
+cat > "$_S174_CLASSIFY_TEST" <<'PY'
+import re, sys, tempfile, os
+
+path = sys.argv[1]
+expect = sys.argv[2]  # "ok": the fallback must read UNKNOWN; "mutated": it must NOT
+
+src = open(path).read()
+m = re.search(r"\ndef _msi_classify\(.*?\n(?=\ndef )", src, re.S)
+if not m:
+    print("EXTRACT-FAIL: _msi_classify not found in %s" % path, file=sys.stderr)
+    sys.exit(3)
+
+ns = {}
+exec("import time\n" + m.group(0), ns)
+classify = ns["_msi_classify"]
+
+fds = []
+
+
+def _fixture(text):
+    fd, p = tempfile.mkstemp(suffix=".log")
+    os.write(fd, text.encode())
+    os.close(fd)
+    fds.append(p)
+    return p
+
+
+empty_log = _fixture("nothing interesting here\n")
+routed_log = _fixture("... Routed user message to queue ...\n")
+try:
+    outcome_empty, _ = classify(empty_log, 0, iters=1, sleep_s=0)
+    outcome_routed, _ = classify(routed_log, 0, iters=1, sleep_s=0)
+finally:
+    for p in fds:
+        os.unlink(p)
+
+if expect == "ok":
+    sys.exit(0 if (outcome_empty == "UNKNOWN" and outcome_routed == "ROUTED") else 1)
+else:
+    # expect == "mutated": the property must be BROKEN -- the no-signature
+    # fixture must no longer read UNKNOWN.
+    sys.exit(0 if outcome_empty != "UNKNOWN" else 1)
+PY
+
+check "§174(a5) the driver's OWN _msi_classify function (extracted and executed, not grepped for) reports UNKNOWN for a fixture debug.log with no signature line, and ROUTED for one with the ROUTED signature" \
+    python3 "$_S174_CLASSIFY_TEST" "$_S174_MSI" ok
+
+_S174_MUT_MSI="$(mktemp)"
+sed 's/outcome, sig = "UNKNOWN", "(no decision line within poll window)"/outcome, sig = "ROUTED", "(no decision line within poll window)"/' "$_S174_MSI" > "$_S174_MUT_MSI"
+check "§174(a5-mut) ...and mutating that fallback default to ROUTED in a scratch copy makes the no-signature fixture misreport ROUTED (self-test of (a5): the exact mutation a verifier applied, which the old string-grep check missed)" \
+    python3 "$_S174_CLASSIFY_TEST" "$_S174_MUT_MSI" mutated
+
+rm -f "$_S174_CLASSIFY_TEST" "$_S174_MUT_MSI"
+unset _S174_CLASSIFY_TEST _S174_MUT_MSI
+
+check "§174(a6) lint-bash32's default target set picks up this file with no wiring (test/*.sh, confirmed via --list rather than assumed)" \
+    bash -c 'bash "$1" --list | grep -qF "measure-settings-inbound.sh"' -- "$(cd "$(dirname "$0")" && pwd)/lint-bash32.sh"
+check "§174(a7) ...and the file itself is clean under lint-bash32" \
+    bash -c 'bash "$1" "$2" >/dev/null 2>&1' -- "$(cd "$(dirname "$0")" && pwd)/lint-bash32.sh" "$_S174_MSI"
+
+check "§174(a8) NOT wired into run-integration-tests.sh (it is a measurement with no pass/fail verdict, and says so in its own header)" \
+    bash -c '! grep -q "measure-settings-inbound" "$1"' -- "$(cd "$(dirname "$0")/.." && pwd)/test/run-integration-tests.sh"
+
+# (a9) the exact BLOCKER a verifier hit live: an earlier version of this
+# harness put a case's writable run-time state (CFG/PROJ -- the seeded
+# CLAUDE_CONFIG_DIR, the receiver's project dir) under $WS/.sandy/probe/,
+# which is `.sandy`, a protected workspace directory mounted READ-ONLY
+# in-container (CLAUDE.md "Protected Files"). Every os.makedirs/open(...,
+# "w") in there raised EROFS, silenced by _msi_case's own `2>/dev/null`, so
+# K1 came back empty and every run printed RIG-INVALID. This pins that the
+# writable state lives under RUN_DIR (a container-only /tmp path) and never
+# under the read-only spec directory.
+check "§174(a9) writable per-case state (CFG/PROJ) is built from RUN_DIR, a container-only /tmp path -- never from the read-only-in-container spec directory under \$WS/.sandy/probe" \
+    bash -c 'grep -q "CFG = os.path.join(RUN_DIR" "$1" && grep -q "PROJ = os.path.join(RUN_DIR" "$1" && grep -q "run_dir=\"/tmp/" "$1"' -- "$_S174_MSI"
+
+# (a10) the harness's OWN _msi_q3d_classify/_msi_q3d_reading (extracted --
+# sliced from the tracked bash file by function name, never reimplemented --
+# and EXECUTED in a fresh bash against rc/stderr fixtures), not grepped for.
+# A verifier found the PRIOR _msi_q3d_reading read ANY rc other than the
+# literal string "0" as "errored on the missing file": it ignored the
+# captured STDERR entirely and never checked that the rc was a real,
+# non-negative exit code. So an empty result (the `sandy --exec` in
+# _msi_case itself failing and printing nothing), run_argcheck's own RC=-1
+# timeout sentinel, and an unrelated RC=127 "claude: not found" all printed
+# "Both orders errored on the missing file -- REPEATABLE" -- and a bogus rc
+# on only ONE side printed LAST-WINS or FIRST-WINS instead, whichever side
+# happened to be the real one. The original bug was only caught by a
+# verifier running the function by hand; this pins it the (a5) way.
+_S174_Q3D_EXTRACT="$(mktemp)"
+{
+    sed -n '/^_msi_q3d_classify() {/,/^}/p' "$_S174_MSI"
+    echo ""
+    sed -n '/^_msi_q3d_reading() {/,/^}/p' "$_S174_MSI"
+} > "$_S174_Q3D_EXTRACT"
+
+# _s174_q3d_check <path-to-file-defining-both-functions> -- sources it into a
+# FRESH bash (never this suite's own shell) and asserts every fixture pair
+# reads the conclusion its evidence supports. `assert_reading` matches its
+# "want" string as a SUBSTRING anywhere in the (multi-line) reading, never
+# just a `head -n1` prefix -- a verifier found the prior form compared only
+# the first-line prefix ('Only missing-then-exists (BA) errored', etc.),
+# which merely restates the INPUT ordering rather than the CONCLUSION, so a
+# "want" string never had to contain the verdict word at all. Every "want"
+# below now spells out the actual verdict token (REPEATABLE/LAST-WINS/
+# FIRST-WINS) as part of the required substring, so reverting any one of
+# them -- see (a10-mut-reading) -- turns this red.
+_s174_q3d_check() {
+    bash -c '
+        set -uo pipefail
+        . "$1"
+        fail=0
+        assert_reading() {
+            local want="$1" ab="$2" ba="$3" got
+            got="$(_msi_q3d_reading "$ab" "$ba")"
+            case "$got" in
+                *"$want"*) ;;
+                *) printf "MISMATCH ab=[%s] ba=[%s] want=[%s] got=[%s]\n" "$ab" "$ba" "$want" "$got" >&2; fail=1 ;;
+            esac
+        }
+        # Bogus / untrustworthy on one or both sides must never read as a
+        # real REPEATABLE/LAST-WINS/FIRST-WINS verdict -- the exact bug a
+        # verifier found by hand.
+        assert_reading "INCONCLUSIVE" "" ""
+        assert_reading "INCONCLUSIVE" "RC=-1 STDERR=(timed out)" "RC=-1 STDERR=(timed out)"
+        assert_reading "INCONCLUSIVE" "RC=127 STDERR=claude: not found" "RC=127 STDERR=claude: not found"
+        assert_reading "INCONCLUSIVE" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json" "RC=127 STDERR=claude: not found"
+        # Real, trustworthy results read the CONCLUSION the evidence
+        # supports, not merely a restatement of which order was fed in.
+        assert_reading "Both orders errored on the missing file -- --settings is REPEATABLE" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json"
+        assert_reading "Only exists-then-missing (AB) errored -- --settings is LAST-WINS" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json" "RC=0 STDERR=(none)"
+        assert_reading "Only missing-then-exists (BA) errored -- --settings is FIRST-WINS" "RC=0 STDERR=(none)" "RC=1 STDERR=Error: ENOENT .../definitely-missing.json"
+        assert_reading "INCONCLUSIVE: neither order errored" "RC=0 STDERR=(none)" "RC=0 STDERR=(none)"
+        exit "$fail"
+    ' -- "$1"
+}
+
+check "§174(a10) the harness's OWN _msi_q3d_classify/_msi_q3d_reading (extracted and executed against rc/stderr fixtures, not grepped for) reports INCONCLUSIVE for every bogus or untrustworthy result -- empty, a negative timeout sentinel, an unrelated RC=127, or one bogus side paired with one real one -- and reads REPEATABLE/LAST-WINS/FIRST-WINS only from a pair where BOTH sides are real, non-negative exit codes whose stderr actually names the missing file" \
+    _s174_q3d_check "$_S174_Q3D_EXTRACT"
+
+_s174_q3d_check_neg() { ! _s174_q3d_check "$1"; }
+
+# (a10-mut) self-test: reverting _msi_q3d_classify to the PRIOR shape a
+# verifier found broken (any non-"0" rc is "errored", stderr never
+# consulted, no check that rc is even a real exit code) in a scratch copy
+# makes the bogus-input fixtures above misreport a real verdict -- the exact
+# regression this check exists to catch.
+#
+# Guarded (`|| _S174_A10MUT_RC=$?`) for the same reason (a3-mut2-setup) is:
+# an unguarded exit 3 here, under this file's `set -euo pipefail`, would
+# abort the whole suite instead of failing just (a10-mut).
+_S174_Q3D_MUT="$(mktemp)"
+_S174_A10MUT_RC=0
+python3 - "$_S174_Q3D_EXTRACT" "$_S174_Q3D_MUT" <<'PY' || _S174_A10MUT_RC=$?
+import sys
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+src = open(src_path).read()
+old = (
+    '_msi_q3d_classify() {\n'
+    '    local raw="$1" rc stderr_msg\n'
+    '    rc="${raw#RC=}"; rc="${rc%% *}"\n'
+    '    case "$rc" in\n'
+    "        ''|*[!0-9]*) echo indeterminate; return ;;\n"
+    '    esac\n'
+    '    if [ "$rc" = "0" ]; then\n'
+    '        echo clean\n'
+    '        return\n'
+    '    fi\n'
+    '    stderr_msg="${raw#*STDERR=}"\n'
+    '    case "$stderr_msg" in\n'
+    '        *definitely-missing.json*) echo errored ;;\n'
+    '        *) echo indeterminate ;;\n'
+    '    esac\n'
+    '}'
+)
+new = (
+    '_msi_q3d_classify() {\n'
+    '    local raw="$1" rc\n'
+    '    rc="${raw#RC=}"; rc="${rc%% *}"\n'
+    '    if [ "$rc" = "0" ]; then\n'
+    '        echo clean\n'
+    '    else\n'
+    '        echo errored\n'
+    '    fi\n'
+    '}'
+)
+if src.count(old) != 1:
+    print("MUTATION-SETUP-FAIL: _msi_q3d_classify body not found verbatim in %s" % src_path, file=sys.stderr)
+    sys.exit(3)
+open(dst_path, "w").write(src.replace(old, new, 1))
+PY
+check "§174(a10-mut-setup) the _msi_q3d_classify mutation target still matches the extracted function verbatim (guarded: a mismatch here fails (a10-mut) below rather than aborting the whole suite)" \
+    bash -c '[ "$1" -eq 0 ]' -- "$_S174_A10MUT_RC"
+if [ "$_S174_A10MUT_RC" -eq 0 ]; then
+    check "§174(a10-mut) ...and reverting _msi_q3d_classify to the prior any-nonzero-rc-is-errored shape (ignoring STDERR, not validating rc) in a scratch copy makes the bogus-input fixtures misreport a real verdict (self-test of (a10): the exact regression a verifier found by hand)" \
+        _s174_q3d_check_neg "$_S174_Q3D_MUT"
+else
+    fail "§174(a10-mut) ...and reverting _msi_q3d_classify to the prior any-nonzero-rc-is-errored shape (skipped: mutation-setup above failed, so no mutated file was produced to test against)"
+fi
+unset _S174_A10MUT_RC
+
+# (a10-mut-reading) a DIFFERENT self-test: reverting _msi_q3d_reading's
+# BA-only branch text from 'FIRST-WINS' back to 'LAST-WINS' -- the exact
+# original bug (BA passes `--settings <missing> --settings <exists>`, so the
+# missing file is the FIRST occurrence; if only BA errors, only the first
+# occurrence was read, which is FIRST-WINS, not LAST-WINS) -- in a scratch
+# copy must make (a10)'s BA assertion above fail. This is the self-test of
+# `assert_reading` itself: before it compared only the first-line PREFIX
+# ('Only missing-then-exists (BA) errored', which merely restates the input
+# ordering), this exact same text mutation kept every §174(a10) check green.
+_S174_Q3D_MUT_BA="$(mktemp)"
+sed 's/(BA) errored -- --settings is FIRST-WINS/(BA) errored -- --settings is LAST-WINS/' "$_S174_Q3D_EXTRACT" > "$_S174_Q3D_MUT_BA"
+check "§174(a10-mut-reading-setup) the BA-branch mutation target ('(BA) errored -- --settings is FIRST-WINS') still matches the extracted _msi_q3d_reading verbatim (guarded: an unmatched sed here would silently leave the ORIGINAL, correct text in place, which (a10-mut-reading) below would then read as an unexpected PASS rather than the setup failing loudly)" \
+    bash -c 'grep -qF "(BA) errored -- --settings is LAST-WINS" "$1"' -- "$_S174_Q3D_MUT_BA"
+check "§174(a10-mut-reading) ...and reverting the BA-only branch's verdict word to LAST-WINS (the exact original bug) in a scratch copy is caught (self-test of assert_reading's own precision: the exact vacuity a verifier found, where comparing only the input-restating PREFIX let this exact mutation keep every check green)" \
+    _s174_q3d_check_neg "$_S174_Q3D_MUT_BA"
+
+# (a10b, #379/#383) (a10) pins _msi_q3d_reading's OWN interpretation of an
+# "AB" / "BA" pair, but that pinning assumed a mapping -- AB means
+# `--settings <exists> --settings <missing>`, BA the reverse -- that lived
+# only in run_argcheck's OWN flags construction, never checked against it.
+# A verifier confirmed on a scratch copy: swapping run_argcheck's two
+# `flags = [...]` lists (AB becomes missing-then-exists, BA becomes
+# exists-then-missing) leaves every (a10) check green, because (a10) tests
+# _msi_q3d_reading generically against hand-labeled "ab"/"ba" fixtures that
+# never touch run_argcheck at all -- while the harness's OWN real run would
+# now print LAST-WINS for what is actually FIRST-WINS evidence, and vice
+# versa. Same order-confusion shape as the original (a10-mut-reading) bug,
+# from the other side: there the VERDICT WORD drifted from the evidence;
+# here the INPUT LABELS could drift from what the code actually constructs.
+# This extracts run_argcheck's own two `flags = [...]` assignments (a plain
+# regex slice of the real source, never reimplemented) and asserts textually
+# that the AB branch names `exists_path` before `missing_path`, and the BA
+# (else) branch names `missing_path` before `exists_path` -- exactly the
+# mapping (a10)'s fixture labels and _msi_q3d_reading's "(AB)"/"(BA)" prose
+# both assume.
+_S174_ARGORDER_TEST="$(mktemp)"
+cat > "$_S174_ARGORDER_TEST" <<'PY'
+import re, sys
+
+path = sys.argv[1]
+expect = sys.argv[2]  # "ok": AB=exists-first/BA=missing-first; "mutated": swapped
+
+src = open(path).read()
+m = re.search(r"<<'MSI_DRIVER_PY'\n(.*?)\nMSI_DRIVER_PY\n", src, re.S)
+if not m:
+    print("EXTRACT-FAIL: driver.py heredoc not found in %s" % path, file=sys.stderr)
+    sys.exit(3)
+driver_src = m.group(1)
+
+m2 = re.search(
+    r'if ORDER == "AB":\n(\s*flags = \[.*?\])\n\s*else:\n(\s*flags = \[.*?\])\n',
+    driver_src,
+)
+if not m2:
+    print("EXTRACT-FAIL: run_argcheck's AB/BA flags assignments not found in driver.py source", file=sys.stderr)
+    sys.exit(3)
+ab_flags, ba_flags = m2.group(1), m2.group(2)
+
+
+def exists_before_missing(text):
+    ei, mi = text.find("exists_path"), text.find("missing_path")
+    if ei == -1 or mi == -1:
+        print("EXTRACT-FAIL: exists_path/missing_path not both found in a flags assignment", file=sys.stderr)
+        sys.exit(3)
+    return ei < mi
+
+
+ok = exists_before_missing(ab_flags) and not exists_before_missing(ba_flags)
+
+if expect == "ok":
+    sys.exit(0 if ok else 1)
+else:
+    # expect == "mutated": the property must be BROKEN -- AB no longer puts
+    # exists_path first (or BA no longer puts missing_path first).
+    sys.exit(0 if not ok else 1)
+PY
+
+check "§174(a10b) run_argcheck's OWN AB/BA \`flags = [...]\` assignments (extracted, not assumed) put exists_path first for AB and missing_path first for BA -- the exact mapping (a10)'s fixture labels and _msi_q3d_reading's '(AB)'/'(BA)' prose both depend on" \
+    python3 "$_S174_ARGORDER_TEST" "$_S174_MSI" ok
+
+_S174_MUT_ARGORDER="$(mktemp)"
+_S174_A10B_MUT_RC=0
+python3 - "$_S174_MSI" "$_S174_MUT_ARGORDER" <<'PY' || _S174_A10B_MUT_RC=$?
+import sys
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+src = open(src_path).read()
+old = (
+    '    if ORDER == "AB":\n'
+    '        flags = ["--settings", exists_path, "--settings", missing_path]\n'
+    '    else:\n'
+    '        flags = ["--settings", missing_path, "--settings", exists_path]\n'
+)
+new = (
+    '    if ORDER == "AB":\n'
+    '        flags = ["--settings", missing_path, "--settings", exists_path]\n'
+    '    else:\n'
+    '        flags = ["--settings", exists_path, "--settings", missing_path]\n'
+)
+if src.count(old) != 1:
+    print("MUTATION-SETUP-FAIL: run_argcheck's AB/BA flags block not found verbatim", file=sys.stderr)
+    sys.exit(3)
+open(dst_path, "w").write(src.replace(old, new, 1))
+PY
+check "§174(a10b-mut-setup) the run_argcheck mutation target still matches driver.py verbatim (guarded: a mismatch here fails (a10b-mut) below rather than aborting the whole suite)" \
+    bash -c '[ "$1" -eq 0 ]' -- "$_S174_A10B_MUT_RC"
+if [ "$_S174_A10B_MUT_RC" -eq 0 ]; then
+    check "§174(a10b-mut) ...and swapping run_argcheck's two flags lists (AB becomes missing-then-exists, BA becomes exists-then-missing) is caught (self-test of (a10b): the exact order-confusion a verifier found, where (a10)'s fixtures assumed a mapping nothing tied to the real code)" \
+        python3 "$_S174_ARGORDER_TEST" "$_S174_MUT_ARGORDER" mutated
+else
+    fail "§174(a10b-mut) ...and swapping run_argcheck's two flags lists (skipped: mutation-setup above failed, so no mutated file was produced to test against)"
+fi
+unset _S174_A10B_MUT_RC
+
+rm -f "$_S174_ARGORDER_TEST" "$_S174_MUT_ARGORDER"
+unset _S174_ARGORDER_TEST _S174_MUT_ARGORDER
+
+# (a10c, #379/#383) (a10b) pins run_argcheck's OWN flags construction in
+# isolation, but a verifier found that textual pinning does not reach the
+# mapping (a10)'s fixture labels actually depend on: the harness's real call
+# sites (the case labels `_msi_case q3d-ab argcheck AB` / `_msi_case q3d-ba
+# argcheck BA`, and the argument ORDER passed to `_msi_q3d_reading
+# "$_MSI_Q3D_AB" "$_MSI_Q3D_BA"`) are themselves part of that mapping and
+# (a10b) never executes or even reads them. Confirmed on a scratch copy:
+# swapping the order tokens at the two `_msi_case` call sites, swapping the
+# two arguments to `_msi_q3d_reading`, or reordering `flags` AFTER
+# run_argcheck's if/else (invisible to (a10b), which only reads the two
+# `flags = [...]` assignment lines themselves) all leave every §174 check
+# green while the harness would print LAST-WINS for FIRST-WINS evidence, or
+# the reverse.
+#
+# This closes the whole class with one END-TO-END run instead of another
+# textual slice: it extracts driver.py, `_msi_case`, `_msi_q3d_classify`,
+# `_msi_q3d_reading`, and the THREE real call-site lines straight out of the
+# tracked file (never reimplemented), replaces only `_msi_case`'s one
+# docker-specific step (`"$SANDY" --exec ...`, which this host-only suite
+# cannot run) with a direct local invocation of the SAME extracted
+# driver.py, puts a stub `claude` on PATH that decides pass/fail from real
+# file existence at either the FIRST or the LAST `--settings` occurrence,
+# and asserts the actual printed Q3d reading names the verdict that stub
+# implies. Because every piece the (a10b) mapping depends on is now
+# exercised for real -- run_argcheck's flags construction, the case-label ->
+# ORDER wiring, and the argument order into `_msi_q3d_reading` -- a mutation
+# to any one of them changes what gets printed, not merely what a slice of
+# source text says.
+_S174_Q3DE2E_TEST="$(mktemp)"
+cat > "$_S174_Q3DE2E_TEST" <<'PY'
+import os, re, subprocess, sys, tempfile, shutil, stat
+
+msi_path = sys.argv[1]
+stub_mode = sys.argv[2]      # "last" or "first" -- which --settings occurrence the stub claude consults
+expect_word = sys.argv[3]    # "LAST-WINS" or "FIRST-WINS"
+verdict = sys.argv[4]        # "ok": printed reading must CONTAIN expect_word; "mutated": must NOT
+
+src = open(msi_path).read()
+
+
+def extract(pattern, label, flags=re.S):
+    m = re.search(pattern, src, flags)
+    if not m:
+        print("EXTRACT-FAIL: %s not found" % label, file=sys.stderr)
+        sys.exit(3)
+    return m.group(1)
+
+
+driver_src = extract(r"<<'MSI_DRIVER_PY'\n(.*?)\nMSI_DRIVER_PY\n", "driver.py heredoc")
+msi_case_src = extract(r"\n(_msi_case\(\) \{\n.*?\n\})\n", "_msi_case function")
+q3d_classify_src = extract(r"\n(_msi_q3d_classify\(\) \{\n.*?\n\})\n", "_msi_q3d_classify function")
+q3d_reading_src = extract(r"\n(_msi_q3d_reading\(\) \{\n.*?\n\})\n", "_msi_q3d_reading function")
+ab_line = extract(r'\n(_MSI_Q3D_AB="\$\(_msi_case [^\n]*\)")\n', "Q3d-AB case-invocation line")
+ba_line = extract(r'\n(_MSI_Q3D_BA="\$\(_msi_case [^\n]*\)")\n', "Q3d-BA case-invocation line")
+reading_line = extract(r'\n(_msi_q3d_reading "\$_MSI_Q3D_\w+" "\$_MSI_Q3D_\w+")\n', "Q3d reading-invocation line")
+
+# _msi_case's ONLY docker-execution step -- the one thing this host-only
+# suite cannot run -- is replaced with a direct local invocation of the SAME
+# driver.py extracted above. Nothing else in _msi_case's body (the
+# case/mode/order -> spec.json construction (a10c)'s attack shapes actually
+# target) is touched, and the swap is guarded: a drift in the real
+# invocation text away from this exact string fails the extraction rather
+# than silently running stale logic.
+old_invoke = (
+    '    "$SANDY" --exec --workspace "$WS" -- \\\n'
+    '        python3 "$WS/.sandy/probe/driver.py" "$spec_dir" "$run_dir" "$mode" "$order" \\\n'
+    '        2>"$spec_dir/stderr.log"\n'
+)
+new_invoke = (
+    '    python3 "$_S174_Q3DE2E_DRIVER" "$spec_dir" "$run_dir" "$mode" "$order" \\\n'
+    '        2>"$spec_dir/stderr.log"\n'
+)
+if msi_case_src.count(old_invoke) != 1:
+    print("EXTRACT-FAIL: _msi_case's docker-invocation block not found verbatim", file=sys.stderr)
+    sys.exit(3)
+msi_case_local = msi_case_src.replace(old_invoke, new_invoke, 1)
+
+tmp = tempfile.mkdtemp(prefix="msi-q3de2e-")
+try:
+    driver_path = os.path.join(tmp, "driver.py")
+    open(driver_path, "w").write(driver_src)
+
+    # The stub `claude`: it does not simulate Claude Code's parser, it
+    # simulates the GROUND TRUTH a real one of the two possible resolvers
+    # would produce, decided from which of the two real `--settings` files
+    # (one written by run_argcheck, one deliberately never created) sits at
+    # the position this stub consults. That keeps the expected verdict a
+    # property of stub_mode alone, independent of anything the harness
+    # itself gets right or wrong.
+    stub_dir = os.path.join(tmp, "bin")
+    os.makedirs(stub_dir)
+    stub_path = os.path.join(stub_dir, "claude")
+    pick = "paths[-1]" if stub_mode == "last" else "paths[0]"
+    stub_src = (
+        "#!/usr/bin/env python3\n"
+        "import sys, os\n"
+        "args = sys.argv[1:]\n"
+        "paths = [args[i + 1] for i in range(len(args) - 1) if args[i] == '--settings']\n"
+        "target = %s if paths else None\n"
+        "if target and not os.path.exists(target):\n"
+        "    sys.stderr.write(\"Error: ENOENT no such file or directory, open '%%s'\\n\" %% target)\n"
+        "    sys.exit(1)\n"
+        "print('2.1.278 (Claude Code)')\n"
+        "sys.exit(0)\n"
+    ) % pick
+    open(stub_path, "w").write(stub_src)
+    st = os.stat(stub_path)
+    os.chmod(stub_path, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    ws_dir = os.path.join(tmp, "ws")
+    os.makedirs(ws_dir)
+
+    script = "\n".join([msi_case_local, q3d_classify_src, q3d_reading_src, ab_line, ba_line, reading_line, ""])
+
+    env = dict(os.environ)
+    env["PATH"] = stub_dir + os.pathsep + env.get("PATH", "")
+    env["WS"] = ws_dir
+    env["_S174_Q3DE2E_DRIVER"] = driver_path
+    env.pop("SANDY", None)
+
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+
+# A verifier found the "mutated" branch below used to require only that
+# expect_word be ABSENT from stdout -- which a CRASHED driver also
+# satisfies: a syntax error or an uncaught exception prints no verdict word
+# at all, the wiring's own INCONCLUSIVE fallback (AB=[] BA=[]) included, so
+# a mutation that merely broke the driver -- proving nothing about whether
+# the reading actually flipped -- passed this self-test vacuously. Requiring
+# the OPPOSITE definite verdict word instead means the driver must have run
+# to completion AND produced a different, still-trustworthy reading; a crash
+# leaves BOTH words absent and now fails loudly (#383).
+opposite_word = "FIRST-WINS" if expect_word == "LAST-WINS" else "LAST-WINS"
+found = expect_word in proc.stdout
+found_opposite = opposite_word in proc.stdout
+
+if verdict == "ok":
+    sys.exit(0 if found else 1)
+else:
+    sys.exit(0 if found_opposite else 1)
+PY
+
+check "§174(a10c) driving the harness's REAL run_argcheck, case labels, and _msi_q3d_reading call order end to end against a stub claude that only errors on the LAST --settings occurrence prints LAST-WINS" \
+    python3 "$_S174_Q3DE2E_TEST" "$_S174_MSI" last LAST-WINS ok
+check "§174(a10c) ...and the same wiring against a stub claude that only errors on the FIRST --settings occurrence prints FIRST-WINS" \
+    python3 "$_S174_Q3DE2E_TEST" "$_S174_MSI" first FIRST-WINS ok
+
+_S174_MUT_Q3DE2E_A="$(mktemp)"
+sed -e 's/_msi_case q3d-ab argcheck AB/_msi_case q3d-ab argcheck BA/' \
+    -e 's/_msi_case q3d-ba argcheck BA/_msi_case q3d-ba argcheck AB/' \
+    "$_S174_MSI" > "$_S174_MUT_Q3DE2E_A"
+check "§174(a10c-mut1) ...and swapping the ORDER token at the two \`_msi_case\` call sites (q3d-ab now runs BA, q3d-ba now runs AB -- (a10b)'s own flags assignments untouched) is caught: the LAST-only stub no longer prints LAST-WINS (self-test of (a10c): the exact call-site swap a verifier found (a10b) cannot see)" \
+    python3 "$_S174_Q3DE2E_TEST" "$_S174_MUT_Q3DE2E_A" last LAST-WINS mutated
+
+_S174_MUT_Q3DE2E_B="$(mktemp)"
+sed 's/_msi_q3d_reading "\$_MSI_Q3D_AB" "\$_MSI_Q3D_BA"/_msi_q3d_reading "\$_MSI_Q3D_BA" "\$_MSI_Q3D_AB"/' \
+    "$_S174_MSI" > "$_S174_MUT_Q3DE2E_B"
+check "§174(a10c-mut2) ...and swapping the two arguments to the final \`_msi_q3d_reading\` call (the case labels and run_argcheck untouched) is caught the same way (self-test of (a10c): the reading-call-order half of the same gap)" \
+    python3 "$_S174_Q3DE2E_TEST" "$_S174_MUT_Q3DE2E_B" last LAST-WINS mutated
+
+# Built with python3's own string replace, deliberately never a sed `a\`
+# insertion: the appended line needs to land DEDENTED one level below the
+# `else:` block (at run_argcheck's own statement indent, so it applies
+# unconditionally to both AB and BA rather than only to the branch it
+# follows) -- and BSD/macOS sed strips ALL leading whitespace from a/i/c
+# text, which would have collapsed that indentation to column 0 and broken
+# the mutated driver.py's parse entirely. A verifier ran exactly that
+# stripped text on a scratch copy and found the driver then crashes with an
+# IndentationError, reading INCONCLUSIVE -- which the OLD "expect_word
+# absent" verdict logic above accepted as "mutated" even though the
+# mutation never took effect. Fixed on both sides: this construction has no
+# sed at all, so there is no a/i/c whitespace behavior to diverge on, and
+# the verdict logic above now requires the OPPOSITE definite word rather
+# than mere absence (#383).
+_S174_MUT_Q3DE2E_C="$(mktemp)"
+_S174_A10C_MUT3_RC=0
+python3 - "$_S174_MSI" "$_S174_MUT_Q3DE2E_C" <<'PY' || _S174_A10C_MUT3_RC=$?
+import sys
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+src = open(src_path).read()
+old = '        flags = ["--settings", missing_path, "--settings", exists_path]\n'
+if src.count(old) != 1:
+    print("MUTATION-SETUP-FAIL: run_argcheck's BA flags line not found verbatim", file=sys.stderr)
+    sys.exit(3)
+new = old + "    flags = flags[2:] + flags[:2]\n"
+open(dst_path, "w").write(src.replace(old, new, 1))
+PY
+check "§174(a10c-mut3-setup) the run_argcheck mutation target still matches driver.py verbatim (guarded: a mismatch here fails (a10c-mut3) below rather than aborting the whole suite)" \
+    bash -c '[ "$1" -eq 0 ]' -- "$_S174_A10C_MUT3_RC"
+if [ "$_S174_A10C_MUT3_RC" -eq 0 ]; then
+    check "§174(a10c-mut3) ...and reordering \`flags\` AFTER run_argcheck's if/else (the two \`flags = [...]\` assignments (a10b) checks are left byte-identical) is caught the same way (self-test of (a10c): the exact mutation invisible to (a10b), which only reads those two assignment lines)" \
+        python3 "$_S174_Q3DE2E_TEST" "$_S174_MUT_Q3DE2E_C" last LAST-WINS mutated
+else
+    fail "§174(a10c-mut3) ...and reordering \`flags\` AFTER run_argcheck's if/else (skipped: mutation-setup above failed, so no mutated file was produced to test against)"
+fi
+unset _S174_A10C_MUT3_RC
+
+rm -f "$_S174_Q3DE2E_TEST" "$_S174_MUT_Q3DE2E_A" "$_S174_MUT_Q3DE2E_B" "$_S174_MUT_Q3DE2E_C"
+unset _S174_Q3DE2E_TEST _S174_MUT_Q3DE2E_A _S174_MUT_Q3DE2E_B _S174_MUT_Q3DE2E_C
+
+rm -f "$_S174_Q3D_EXTRACT" "$_S174_Q3D_MUT" "$_S174_Q3D_MUT_BA"
+unset -f _s174_q3d_check _s174_q3d_check_neg
+unset _S174_Q3D_EXTRACT _S174_Q3D_MUT _S174_Q3D_MUT_BA
+
+unset _S174_MSI
+
+# --- (b) the #383 consumer-boundary rule: sandy code and docs name no
+# consumer's protocol (CLAUDE.md "Consumer boundary", directly after "What
+# This Is"). #381 replaced the single-entry rationale that used to cite "a connector's
+# claim lock"; this is the ratchet that keeps it from coming back. Tested
+# against a COPY of the file (a temp file, never the tracked script) so a
+# mutation self-test never leaves the working tree dirty if interrupted
+# mid-run -- the same reason no check here ever edits $SANDY_SCRIPT in place.
+check "§174(b1) sandy names no consumer's protocol: no 'amap' or 'claim lock', case-insensitive, anywhere in the shipped script" \
+    bash -c '! grep -qiE "amap|claim lock" "$1"' -- "$SANDY_SCRIPT"
+
+_S174_MUT_COPY="$(mktemp)"
+cat "$SANDY_SCRIPT" > "$_S174_MUT_COPY"
+printf '# for AMAP\n' >> "$_S174_MUT_COPY"
+check "§174(b2) mutation: injecting a consumer-named comment ('# for AMAP') into a COPY makes (b1)'s property fail on that copy (self-test of (b1), not a repo assertion)" \
+    bash -c 'grep -qiE "amap|claim lock" "$1"' -- "$_S174_MUT_COPY"
+rm -f "$_S174_MUT_COPY"
+unset _S174_MUT_COPY
 
 # BEGIN SUMMARY
 # ============================================================

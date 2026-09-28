@@ -268,7 +268,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `SANDY_EGRESS_LOG` | `0` | `1`/`summary` = log which hosts the agent's egress actually reached (each distinct allowed `host:port` once) and print a session-end summary. Hostnames only — TLS is never terminated. Passive-safe (adds visibility) |
 | `SANDY_TOOL_AUDIT` | `0` | `1` = seed a Claude Code `PreToolUse` hook that appends `{ts,tool,args}` JSONL to `~/.claude/tool-audit.jsonl`. Claude-only, passive-safe (adds visibility); a user's own `PreToolUse` hook is never clobbered |
 | `SANDY_RELAY` | `1` | Run the installed relay if there is one — since 2.2.0 that means a feature manifest `entry`. A **capability** toggle naming no path: inert when nothing is installed. `0` disables the relay capability entirely (including an `entry`, which it did not before), loudly. Passive-safe. See "Installing a relay" |
-| `SANDY_CROSS_SESSION_INBOUND` | _(conditional)_ | Whether another local session may inject a turn into this one (Claude Code's `crossSessionInbound`): `accept` (delivered, no prompt), `hold` (interactive approval), `refuse` (sender told it was not accepted). Unset resolves to `accept` **only** when a `SANDY_HANDOFF_RELAY` is configured *and will actually start this launch* — otherwise `refuse`, so a workspace with no relay has no open receive surface. `hold`/`refuse` are passive-safe; `accept` from a workspace `.sandy/config` triggers an approval prompt. Claude-only |
+| `SANDY_CROSS_SESSION_INBOUND` | _(conditional)_ | Whether another local session may inject a turn into this one (Claude Code's `crossSessionInbound`): `accept` (delivered, no prompt), `hold` (interactive approval), `refuse` (sender told it was not accepted). Unset resolves to `accept` when a **selected feature manifest declares `"receives": ["cross_session"]`** (2.4.0) — or, for a manifest that has not migrated to that yet, when a feature `entry` is configured *and will actually start this launch* (the deprecated legacy rule) — otherwise `refuse`, so a workspace with neither has no open receive surface. `hold`/`refuse` are passive-safe; `accept` from a workspace `.sandy/config` triggers an approval prompt. Claude-only. See "Features" and `cross_session_inbound_source` in the session marker |
 | `CLAUDE_CODE_OAUTH_TOKEN` | (unset) | Long-lived OAuth token from `claude setup-token`. Put in `.sandy/.secrets`. Recommended for headless servers |
 | `ANTHROPIC_API_KEY` | (unset) | API key — not needed with Claude Pro/Max (OAuth). **Not forwarded when a Claude OAuth credential is already going into the container** (Claude Code resolves an env key ahead of the account credentials, so forwarding both either bills per-use or parks the session on Claude Code's custom-API-key startup prompt). Set `SANDY_CLAUDE_AUTH=api_key` to use it anyway |
 | `SANDY_CLAUDE_AUTH` | `auto` | Force Claude auth path: `auto`, `api_key`, `oauth`, or `profile`. `api_key` withholds **both** the OAuth credentials file and a long-lived token, so one revocable key is the only Claude credential in the container; `oauth` never forwards the API key; `profile` uses an Anthropic Console profile from `ant auth login` — the route to workspace-bound entitlements such as **Claude Mythos** (see "Using a Console profile" below). `api_key` and `profile` are passive-safe (each reduces what is in the box); `oauth` from a workspace `.sandy/config` triggers an approval prompt |
@@ -473,7 +473,7 @@ SANDY_AGENT=claude,gemini,codex,opencode  # four panes
 SANDY_AGENT=all                        # alias for claude,gemini,codex,opencode
 ```
 
-Panes appear in the order listed. Each agent has its own config dir(s): `~/.claude`, `~/.gemini`, `~/.codex`, and `~/.config/opencode` + `~/.local/share/opencode`. All panes share the same workspace mount. Exiting one pane leaves the others running. Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, `sandy-opencode`, `sandy-grok`); any multi-agent combo uses the `sandy-full` image, which bundles all five CLIs.
+Panes appear in the order listed. Each agent has its own config dir(s): `~/.claude`, `~/.gemini`, `~/.codex`, and `~/.config/opencode` + `~/.local/share/opencode`. All panes share the same workspace mount. Exiting one pane leaves the others running. Single-agent modes use their own Docker images (`sandy-claude-code`, `sandy-gemini-cli`, `sandy-codex`, `sandy-opencode`, `sandy-grok`); any multi-agent combo uses the `sandy-full` image, which bundles all five CLIs. **Note:** in the 4-agent 2×2 grid, tmux's pane-index numbering does not match the order panes were spawned in — sandy publishes a stable pane-identity contract for anything that needs to tell agents apart in-container (session name, pane option, spawn order); see "Pane-identity contract" in `SPECIFICATION.md`.
 
 **Resizing panes**: `prefix` + `H` / `J` / `K` / `L` (the prefix is tmux's default, `Ctrl-b`) resizes the active pane by 5 cells, moving its border left / down / up / right, and repeats — press the prefix once, then tap the letter as many times as you need. Sandy adds these because tmux's own resize keys do not work on macOS out of the box: `prefix` + Ctrl-Arrow is captured by Mission Control, and `prefix` + Option-Arrow needs the terminal's "Option as Meta" setting. Dragging a pane border with the mouse also works.
 
@@ -524,7 +524,7 @@ If you were using it: `inbox`, `outbox` and `peer` become manifest `mounts` (`mo
 
 ### Re-provisioning sandboxes after a reset
 
-Some per-sandbox state is created **by the launch**, deliberately: it exists only because the thing that mounts it made it, so hand-made state can never pass for working state. Today that is `relay-state/` (see "Installing a relay" below). The cost is that a sandbox can sit without it — most often after `sandy --reset-sandbox`, which keeps the sandbox but destroys everything a launch re-creates, and also after any launch that failed part-way.
+Some per-sandbox state is created **by the launch**, deliberately: it exists only because the thing that mounts it made it, so hand-made state can never pass for working state. Today that is `relay-state/`, plus `feature-state/<feature>` for every non-designated feature entry (see "Installing a relay" below). The cost is that a sandbox can sit without it — most often after `sandy --reset-sandbox`, which keeps the sandbox but destroys everything a launch re-creates, and also after any launch that failed part-way.
 
 To bring every sandbox back in one pass:
 
@@ -559,7 +559,7 @@ A **feature** is something you deploy into sandboxes that is not sandy's — a c
 
 Sandy computes every container path — you name a mount, sandy decides where it lands (`payload` at `/opt/sandy/features/<name>`, anything else under `~/.<name>/`) and exports it if you ask. Mounts are **read-only unless you say `rw`**.
 
-**`entry` is the relay**: sandy runs it as a supervised, container-level process — see "Installing a relay" below. `SANDY_RELAY=0` stops it (since 2.2.0), and the launch says so by name rather than running without it silently.
+**`entry` names a supervised, container-level process** — sandy runs it as a sibling of the tmux server, restarted on death, held to one instance; see "Installing a relay" below. **One `entry` per feature** (2.4.0) — a feature declares at most one, but a sandbox can have several features each with their own, and every one of them runs independently. `SANDY_RELAY=0` stops all of them (since 2.2.0/2.4.0), and the launch says so by name rather than running without them silently.
 
 **Selection is enrolment.** A sandbox gets the feature only if an include matches in both blocks and no exclude matches in either. A sandbox that is not selected gets nothing at all — no mount, no export, no entry. Check what applied:
 
@@ -601,6 +601,18 @@ sandy --print-state | jq '.sandboxes[] | {name, agent_args_composed}'
 
 `{}` means no collision; an entry with `composed: false` means sandy **found** a collision and deliberately did not merge it — either the flag replaces rather than appends, or it named a file sandy cannot read — and `from` says which contributors were involved. The launch prints this too, alongside a line naming every feature that applied and what it contributed.
 
+**`receives` declares a need, not a mechanism (2.4.0).** A feature that needs another local session to be able to inject a turn into a session running in its sandbox says so directly:
+
+```json
+{
+  "sandboxes": { "include": ["*"] },
+  "agents":    { "include": ["claude"] },
+  "receives":  ["cross_session"]
+}
+```
+
+`receives` is an array from a closed, published set (today just `cross_session`; `sandy --print-schema | jq '.manifest.receives_values'`) — an unknown value refuses the whole manifest, the same as an unknown top-level key. It names no consumer and no mechanism: a feature can declare this need with **no `entry` at all**, and it is **not** affected by `SANDY_RELAY` — that key gates whether an entry *process* runs, while `receives` is a separate statement of what the feature needs to receive. When a selected feature declares it, `SANDY_CROSS_SESSION_INBOUND`'s unset default resolves to `accept` (unless this is a headless, `--remote` or `--provision` run, which have no session to deliver into). See `SANDY_CROSS_SESSION_INBOUND` above and `docs/security/CROSS_SESSION_INBOUND.md` for the full precedence and residual risks.
+
 Reading a manifest needs `node` or `jq` on the host. If neither is there, a launch that would use one **refuses** rather than mounting a guess — see `sandy --doctor`.
 
 ### Installing a relay (`SANDY_RELAY`)
@@ -624,13 +636,21 @@ A *relay* is a program sandy runs as a container-level process — a sibling of 
 
 Setting `SANDY_RELAY=0` disables the relay capability for that host or workspace. **Since 2.2.0 that covers a manifest `entry` too** — previously it stopped only the `relay-bin` slot, so `=0` could mean "no relay" while a relay ran. A launch that declines to start a declared entry **says so by name**, and records `disabled_by` in `--print-state` and the session marker, so a cloned repo shipping `0` is visible rather than forbidden.
 
+**More than one feature, more than one entry (2.4.0, #381).** Each selected feature's `entry` runs, independently supervised — its own lock, its own backoff, its own state directory. The **first** one adopted (sorted feature-directory order) is the *relay-designated* entry: it is the one `relay{}`, `SANDY_RELAY_STATE` and `/opt/sandy/relay-state` describe, so a sandbox with a single feature entry — the common case — behaves exactly as before. Every entry, designated or not, is additionally reported per feature:
+
+```sh
+sandy --print-state | jq '.sandboxes[] | .feature_entries'
+```
+
+Each value carries `state`, `restarts`, `executable_present`, `path`, `state_dir` and `relay_alias` (whether it is the one `relay{}` also describes). `{}` means no feature declared an entry; `null` means the sandbox last launched under a sandy too old to answer.
+
 **Read-only by construction.** An `entry` lives on the feature payload, which the manifest mounts `:ro`. That matters because the container process runs as *your* uid and owns the file, so permission bits bind nothing — `chmod` would succeed against a normal mount and the agent could rewrite its own relay. Under `:ro` the write returns `EROFS`, because the mount flag is checked above the permission check. An adapter can write files; only sandy can create a mount.
 
 **The honest limit**: sandy guarantees the *first* executable. It cannot guarantee the chain — a relay that execs a daemon out of a writable directory is replaceable at that second link.
 
 Two failure shapes, handled differently:
 
-- **Cannot start** (missing, not executable, no `relay-state` mount, no `flock`): fails the launch, before or during container start.
+- **Cannot start** (missing, not executable, no `relay-state` mount, no `flock`): fails the launch, before or during container start. **One documented exception**: a stale image built before the `sandy.feature_entries=1` Dockerfile label existed (a build deferred by #218's reachability gate, or any other old cached image) only ever knew the pre-#381 single-relay path, so with more than one entry adopted it starts the relay-designated entry and never sees the rest — that is not a broken entry, so it does not fail the launch. Sandy warns at launch instead, naming every entry that will not start and pointing at `sandy --rebuild`; `--print-state` reports those entries as `state: "absent"`.
 - **Starts, then exits**: if the first run exits non-zero within ~5s the session fails with that exit code. Past that window it is a runtime loop, which cannot un-succeed a launch that already completed — it is reported instead:
 
 ```sh
@@ -1119,7 +1139,7 @@ An entry may also be **withdrawn** in any release — it is struck through and m
 | ~~`SANDY_HANDOFF_DIRS`, and the `~/.handoff/{inbox,outbox,peer,relay}` tree it mounts~~ **— REMOVED in 2.2.0** | 2.0.0 | a feature manifest's `mounts` — it names its own directories instead of using sandy's four fixed ones |
 | ~~`SANDY_HANDOFF_*` container env vars (`_INBOX`, `_OUTBOX`, `_PEER`, `_RELAY_STATE`)~~ **— REMOVED in 2.2.0** | 2.0.0 | a mount's `export`, which names the variable the feature wants |
 | ~~`SANDY_HANDOFF_RELAY` and the `relay-bin/` slot~~ **— REMOVED in 2.2.0** | 2.0.0 | a feature manifest's `entry`. Setting the key, or leaving an executable in the slot, is now a **hard error** naming the replacement. The *variable* survives as the manifest entry's internal channel; only the operator-facing key is gone |
-| ~~`relay{}` in `/etc/sandy-session.json` and `--print-state`~~ **— WITHDRAWN, kept** · `handoff_relay`, `relay.slot`, `relay.disabled_by` **— REMOVED in 2.2.0, `schema_version` 3** | 2.0.0 | **`relay{}` stays.** Its stated replacement, "the feature's own entry in `--print-state`", was never built, and the premise for it disappeared with the other producers: a sandbox runs exactly **one** relay, so nesting a singular fact inside a per-feature collection would add a level for no gain. What went is the dead fields inside it — `slot` and `disabled_by` both described the `relay-bin` slot, removed in 2.2.0 |
+| ~~`relay{}` in `/etc/sandy-session.json` and `--print-state`~~ **— WITHDRAWN, kept** · `handoff_relay`, `relay.slot` **— REMOVED in 2.2.0, `schema_version` 3** (`relay.disabled_by` is NOT removed — it survives) | 2.0.0 | **`relay{}` stays.** Its stated replacement, "the feature's own entry in `--print-state`", was never built when 2.2.0 shipped, and the premise for it — a sandbox runs exactly one relay — no longer holds now that a sandbox can adopt more than one feature entry (2.4.0, #381): `relay{}` dual-reports the first entry in sorted feature-directory order, byte-identical to before #381, and every entry (including that one) is additionally reported under `feature_entries.<name>`. What went in 2.2.0 is the dead field inside it — `slot` described the `relay-bin` slot, removed that release |
 | ~~`handoff_enabled` and `handoff{}` in `--print-state`~~ **— REMOVED in 2.2.0, `schema_version` 3** | 2.0.0 | they report on the handoff tree above, so they go with it — and their removal bumps `schema_version` for the same reason |
 | ~~the `.handoff-enabled` sandbox marker~~ **— REMOVED in 2.2.0** | 2.0.0 | nothing: it forces the handoff tree on for one sandbox, and the tree is what is going. A feature manifest selects per sandbox instead |
 | `SANDY_SCREENSHOT_DIR` | 2.0.0 | intended to become a feature manifest; the design is not settled (#317), and the key stays until it is |
