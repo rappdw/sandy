@@ -1294,8 +1294,9 @@ if [ "$_SANDY_IS_MULTI" = false ]; then
         # the whole argument list into separate commands at any argument
         # ENDING in an unescaped `;` — the text before that `;` is kept as
         # the current command's last argument, and only a trailing literal
-        # backslash immediately before it (`\;` as the raw two-byte argv
-        # suffix, i.e. what the shell's OWN escaping of `;` leaves behind)
+        # backslash immediately before it (a raw two-byte `\;` argv suffix
+        # — reached by quoting it in the shell, e.g. `'\;'`, never by the
+        # shell's own escaping of a bare `;`, which strips to one byte)
         # turns it back into a literal semicolon instead of a split. This
         # split pass runs before any command parses its own options, so `--`
         # never protects a later argument from it — a trailing `\; set-option
