@@ -11841,8 +11841,10 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # constant. The tripwire went DOWN again, same as the 2.2.0 removal noted
 # above: an equality catches a forgotten argument drop exactly as it catches
 # a forgotten add.
-check "§114(13g) marker printf format/arg count line up (18 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 18
+# 19 as of 2.7.0: `image` (#295) -- which image the launch ran, one
+# pre-composed object passed as ONE argument (name/id/project_layer), additive.
+check "§114(13g) marker printf format/arg count line up (19 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 19
 
 # (14) sandy-handoff-sessions helper: REMOVED in 2.6.0 (#382, decision 7) along
 # with the helper itself; the pane-identity contract it was built on stays
@@ -21813,7 +21815,9 @@ _H="$(_s177_home codex)";  _s177_write_marker "$_H/sandboxes/sb-codex" codex uns
 _S177_OUT_CODEX="$(_s177_state "$_H")"
 check "§177(2a) a claude launch's marker reads back as marker.state=present with the writer's own version" \
     bash -c 'printf "%s" "$1" | grep -qF "\"marker\":{\"state\":\"present\",\"sandy_version\":\"9.9.9-test\","' -- "$_S177_OUT_CLAUDE"
-for _s177_f in agents agent_args agent_args_composed feature_entries; do
+# `image` (#295, 2.7.0) joined the list: docker-cannot-answer is id:null
+# INSIDE the object, so the field itself is never a deliberate null.
+for _s177_f in agents image agent_args agent_args_composed feature_entries; do
     check "§177(2b) INVARIANT: the current writer never leaves $_s177_f null (claude launch) -- a null here would read as 'predates the field'" \
         bash -c 'printf "%s" "$1" | grep -q "\"$2\":" && ! printf "%s" "$1" | grep -q "\"$2\":null"' -- "$_S177_OUT_CLAUDE" "$_s177_f"
     check "§177(2b) INVARIANT: ...nor $_s177_f on a codex-only launch" \
@@ -22297,6 +22301,135 @@ check "§179(7) ...and none of them still carries its own kill -0 copy" \
 rm -rf "$_S179_D"
 unset _S179_SANDY _S179_D _S179_REALCAT _S179_OUT1 _S179_OUT2 _S179_OUT3 _S179_OUT4 _S179_M4 _S179_FNS _S179_PS_STALE _S179_PS_LIVE _S179_PS_UNK _H
 unset -f _s179_run _s179_owner _s179_reaps _s179_ps 2>/dev/null || true
+echo "§180: the session marker records WHICH image ran, and --print-state reads it back (#295)"
+# ============================================================
+# WHY. The per-project gate FALLS BACK to the agent image on a decline or an
+# unanswerable prompt -- which is every non-TTY `--start` supervisor that meets
+# an unapproved .sandy/Dockerfile -- and nothing recorded which of the two ran.
+# "Did my project layer land?" had no answer in-container except observing its
+# effects (`ruby -v`), and none host-side at all. The marker now carries
+# image{name,id,project_layer}.
+#
+# The Phase 3 gate and the marker composer are EXTRACTED AND RUN together, so
+# (3) is the real property -- a declined Dockerfile really reads
+# project_layer:false -- not a grep for an assignment. Stubs cover only docker,
+# the gate's own verdict, and what the launch sets above each fragment.
+_S180_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+python3 - "$SANDY_SCRIPT" "$_S180_DIR/phase3.sh" "$_S180_DIR/marker.sh" <<'S180_EXTRACT'
+import sys
+s = open(sys.argv[1]).read()
+i = s.index('PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"\n')
+j = s.index('\n# --- Platform already detected', i)
+open(sys.argv[2], 'w').write(s[i:j] + '\n')
+i = s.index('# image (#295): WHICH image this launch runs')
+j = s.index('> "$_sandy_session_file"', i) + len('> "$_sandy_session_file"')
+open(sys.argv[3], 'w').write(s[i:j] + '\n')
+S180_EXTRACT
+check "§180(pre) the Phase 3 gate and the marker composer were extracted as balanced fragments" \
+    bash -c 'bash -n "$1" && bash -n "$2" && grep -q "_SANDY_PROJECT_LAYER=true" "$1" && grep -q "_sandy_image_json" "$2"' \
+    -- "$_S180_DIR/phase3.sh" "$_S180_DIR/marker.sh"
+
+_S180_A="sha256:$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12)"
+_S180_B="sha256:$(printf 'b%.0s' 1 2 3 4 5 6 7 8 9 10 11 12)"
+# The approval stub records the context hash the way the real gate does, so
+# the REAL _sandy_context_hash is needed.
+eval "$(awk '/^_sandy_context_hash\(\) \{/,/^}$/' "$SANDY_SCRIPT")"
+# _s180_run <case> <dockerfile:y|n> <approve:y|n> <docker:up|down>
+# Runs gate + composer; prints the marker's image value (sorted keys), or
+# PARSE-FAIL. The marker file is left at $_S180_DIR/sb-<case>/sandy-session.json.
+_s180_run() {
+    (
+        trap - ERR
+        set +e
+        _c="$1"; _df="$2"; _S180_APPROVE="$3"; _S180_DOCKER="$4"
+        WORK_DIR="$_S180_DIR/ws-$_c"; rm -rf "$WORK_DIR"; mkdir -p "$WORK_DIR"
+        if [ "$_df" = y ]; then
+            mkdir -p "$WORK_DIR/.sandy"
+            printf 'ARG BASE_IMAGE\nFROM $BASE_IMAGE\nRUN true\n' > "$WORK_DIR/.sandy/Dockerfile"
+        fi
+        SANDBOX_DIR="$_S180_DIR/sb-$_c"; rm -rf "$SANDBOX_DIR"; mkdir -p "$SANDBOX_DIR"
+        SANDBOX_NAME="Ws-deadbeef"; IMAGE_NAME=sandy-claude-code
+        NEEDS_BUILD=false; SKILLS_REBUILT=false
+        info() { :; }; warn() { :; }; error() { :; }
+        sha256() { shasum -a 256 2>/dev/null || sha256sum; }
+        _sandy_build_allowed() { return 0; }
+        _sandy_project_dockerfile_approved() { _SANDY_DF_HASH="$(_sandy_context_hash "$(dirname "$1")")"; [ "$_S180_APPROVE" = y ]; }
+        docker() {
+            local _a _n=""
+            for _a in "$@"; do _n="$_a"; done
+            [ "$_S180_DOCKER" = up ] || return 1
+            if [ "$1" = image ]; then
+                case "$_n" in
+                    (sandy-project-*) echo "$_S180_B" ;;
+                    (*)               echo "$_S180_A" ;;
+                esac
+            fi
+            return 0
+        }
+        . "$_S180_DIR/phase3.sh" >/dev/null 2>&1
+        sandy_full_version() { echo "2.7.0-test"; }
+        _sandy_egress_mode=permissive; SANDY_WORKSPACE=/w; _sandy_session_nonce=deadbeef
+        _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_agents_json='["claude"]'
+        CRED_MODE=none
+        _sandy_session_file="$SANDBOX_DIR/sandy-session.json"
+        . "$_S180_DIR/marker.sh" >/dev/null 2>&1
+        python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["image"], sort_keys=True))' \
+            "$_sandy_session_file" 2>/dev/null || echo PARSE-FAIL
+    ) 2>/dev/null
+    return 0
+}
+_S180_NONE="$(trap - ERR; _s180_run none n n up)"
+_S180_YES="$(trap - ERR;  _s180_run yes y y up)"
+_S180_NO="$(trap - ERR;   _s180_run no y n up)"
+_S180_DOWN="$(trap - ERR; _s180_run down n n down)"
+check "§180(1) no .sandy/Dockerfile: the agent image, its id, project_layer false (got: $_S180_NONE)" \
+    bash -c '[ "$1" = "{\"id\": \"$2\", \"name\": \"sandy-claude-code\", \"project_layer\": false}" ]' -- "$_S180_NONE" "$_S180_A"
+check "§180(2) an APPROVED Dockerfile: the project image by name, ITS id (not the parent's), project_layer true (got: $_S180_YES)" \
+    bash -c '[ "$1" = "{\"id\": \"$2\", \"name\": \"sandy-project-ws-deadbeef\", \"project_layer\": true}" ]' -- "$_S180_YES" "$_S180_B"
+# THE motivating case: a Dockerfile is present and the gate said no.
+check "§180(3) a DECLINED/unapproved Dockerfile falls back to the agent image, and the marker SAYS so: project_layer false (got: $_S180_NO)" \
+    bash -c '[ "$1" = "{\"id\": \"$2\", \"name\": \"sandy-claude-code\", \"project_layer\": false}" ]' -- "$_S180_NO" "$_S180_A"
+check "§180(4) docker cannot answer: id is null, never a guess, and the marker still parses (got: $_S180_DOWN)" \
+    bash -c '[ "$1" = "{\"id\": null, \"name\": \"sandy-claude-code\", \"project_layer\": false}" ]' -- "$_S180_DOWN"
+check "§180(5) the image value is ONE line in the marker, so a host reader takes it with one anchored match (§88b)" \
+    bash -c 'grep -q "^  \"image\": {\"name\": \"sandy-project-ws-deadbeef\", \"id\": \"sha256:b*\", \"project_layer\": true},$" "$1"' \
+    -- "$_S180_DIR/sb-yes/sandy-session.json"
+
+# --- --print-state reads it back, from the composer's REAL output ----------
+# One $SANDY_HOME per fixture, so the document is unambiguous without carving.
+_s180_ps() {   # _s180_ps <fixture> <marker-file-or-empty> [--light] -> sandboxes[0].image, or PARSE-FAIL
+    local h="$_S180_DIR/home-$1"
+    rm -rf "$h"; mkdir -p "$h/sandboxes/$1"
+    printf '{"workspace_path":"/nonexistent/%s"}\n' "$1" > "$h/sandboxes/$1/WORKSPACE.json"
+    [ -n "$2" ] && cp "$2" "$h/sandboxes/$1/sandy-session.json"
+    SANDY_HOME="$h" "$SANDY_SCRIPT" --print-state ${3:-} 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["sandboxes"][0]["image"], sort_keys=True))' 2>/dev/null \
+        || echo PARSE-FAIL
+    return 0
+}
+# A marker from before the field existed: everything but the image line.
+grep -v '^  "image": ' "$_S180_DIR/sb-yes/sandy-session.json" > "$_S180_DIR/old.json" || true
+# A marker whose image line is not the shape sandy writes (truncated/foreign).
+sed 's/^  "image": .*/  "image": {"name": "x\\"}, "evil": 1,/' "$_S180_DIR/sb-yes/sandy-session.json" > "$_S180_DIR/bad.json"
+check "§180(6) --print-state reports the project image a launch recorded" \
+    bash -c '[ "$1" = "$2" ]' -- "$(trap - ERR; _s180_ps rt-yes "$_S180_DIR/sb-yes/sandy-session.json")" "$_S180_YES"
+check "§180(7) ...and the fallback, so a host-side consumer can see a declined layer" \
+    bash -c '[ "$1" = "$2" ]' -- "$(trap - ERR; _s180_ps rt-no "$_S180_DIR/sb-no/sandy-session.json")" "$_S180_NO"
+check "§180(8) a marker that PREDATES the field reads null (unknown), never the agent image" \
+    bash -c '[ "$1" = "null" ]' -- "$(trap - ERR; _s180_ps rt-old "$_S180_DIR/old.json")"
+check "§180(9) no marker at all reads null" \
+    bash -c '[ "$1" = "null" ]' -- "$(trap - ERR; _s180_ps rt-never "")"
+check "§180(10) an image line of a foreign shape reads null and the document still parses (stream contract)" \
+    bash -c '[ "$1" = "null" ]' -- "$(trap - ERR; _s180_ps rt-bad "$_S180_DIR/bad.json")"
+check "§180(11) emitted in LIGHT mode too (a marker read, no docker spawn)" \
+    bash -c '[ "$1" = "$2" ]' -- "$(trap - ERR; _s180_ps rt-light "$_S180_DIR/sb-yes/sandy-session.json" --light)" "$_S180_YES"
+check "§180(12) 0 bytes on stderr with a foreign image line (stream contract, §92/§93)" \
+    bash -c 'e="$(SANDY_HOME="$2" "$1" --print-state 2>&1 >/dev/null)"; [ -z "$e" ]' -- "$SANDY_SCRIPT" "$_S180_DIR/home-rt-bad"
+check "§180(13) the marker WRITES the key --print-state READS (mutation: rename either side and every sandbox reports null)" \
+    bash -c 'grep -qF "\\n  \"image\": %s," "$1" && grep -qF "s/^  \"image\": //p" "$1"' -- "$SANDY_SCRIPT"
+rm -rf "$_S180_DIR"
+unset _S180_DIR _S180_A _S180_B _S180_NONE _S180_YES _S180_NO _S180_DOWN
+unset -f _s180_run _s180_ps _sandy_context_hash 2>/dev/null || true
 
 
 # BEGIN SUMMARY
