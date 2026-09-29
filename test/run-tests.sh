@@ -22153,7 +22153,11 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$_S178_BIN/curl"
 chmod +x "$_S178_BIN/curl"
 
 # Prime the shared build cache once, so the per-session children no-op.
+# SANDY_PROXY_REF/GITHUB_HEAD_REF are cleared here and in the refresh below:
+# (7)-(9) assert the LOCAL-checkout identity (`# proxy-src:`), and PR CI's
+# ambient GITHUB_HEAD_REF forces the clone path, which has no content hash.
 (cd "$_S178_WSP" && PATH="$_S178_BIN:$PATH" SANDY_HOME="$_S178_HOME" \
+    SANDY_PROXY_REF="" GITHUB_HEAD_REF= \
     SANDY_AUTO_APPROVE_PRIVILEGED=1 bash "$SANDY_SCRIPT" --build-only) >/dev/null 2>&1 \
     && _S178_PRIME_RC=0 || _S178_PRIME_RC=$?
 check "§178(0) fixture: priming --build-only (proxy on) succeeds" test "$_S178_PRIME_RC" -eq 0
@@ -22164,6 +22168,7 @@ rm -f "$_S178_HOME/.build_hash_proxy"
 : > "$_S178_CALLS"
 _S178_OUT="$(mktemp)"
 PATH="$_S178_BIN:$PATH" SANDY_HOME="$_S178_HOME" SANDY_AUTO_APPROVE_PRIVILEGED=1 \
+    SANDY_PROXY_REF="" GITHUB_HEAD_REF= \
     bash "$SANDY_SCRIPT" --update-sessions --dry-run >"$_S178_OUT" 2>&1 \
     && _S178_RC=0 || _S178_RC=$?
 check "§178(1) --update-sessions --dry-run exits 0" test "$_S178_RC" -eq 0
@@ -22790,7 +22795,10 @@ _s185_run() {
     : > "$S185_DOCKER_LOG"
     rm -f "$_S185_D/daemon.log.fatal"
     _S185_RC=0
-    _S185_OUT="$(cd "$_S185_D/home/ws" && env -u SANDY_OFFLINE "$@" HOME="$_S185_D/home" \
+    # SANDY_PROXY_REF/GITHUB_HEAD_REF cleared: the fixture reads the LOCAL-checkout
+    # `# proxy-src:` identity, and PR CI's ambient GITHUB_HEAD_REF forces the
+    # clone path. Set before "$@" so a case can still pin one.
+    _S185_OUT="$(cd "$_S185_D/home/ws" && env -u SANDY_OFFLINE SANDY_PROXY_REF= GITHUB_HEAD_REF= "$@" HOME="$_S185_D/home" \
         SANDY_HOME="$_S185_D/sh" SANDY_DAEMON_LOG="$_S185_D/daemon.log" PATH="$_S185_D/bin:$PATH" \
         bash "$SANDY_SCRIPT" --build-only </dev/null 2>&1)" || _S185_RC=$?
 }
