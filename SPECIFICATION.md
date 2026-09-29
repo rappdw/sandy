@@ -337,6 +337,8 @@ Other `sandy.*` labels (`sandy.managed`, `sandy.provision_id`, `sandy.provisione
 ~/.sandy/sandboxes/
 ├── <name>-<hash>/                 # one per workspace; <name>-<hash> is sandboxes[].name
 │   ├── claude/                    # CONTRACT → ~/.claude (settings.json, projects/, plugins/, hooks/, …)
+│   │                              #   sessions/<pid>.json|.key: Claude Code's live-session registry; every
+│   │                              #   launch prunes these once no container can exist (#407)
 │   ├── gemini/                    # CONTRACT → ~/.gemini
 │   ├── codex/                     # CONTRACT → ~/.codex (config.toml, auth.json when seeded)
 │   ├── grok/                      # CONTRACT → ~/.grok
@@ -2542,6 +2544,8 @@ Each message is asserted by `run-tests.sh §53` (validator unit test + source-le
 ```bash
 docker rm -f "sandy-<SANDBOX_NAME>" 2>/dev/null || true
 ```
+
+**Stale session-registry prune (#407)**: immediately after that removal, if `$SANDBOX_DIR/claude` exists and `docker ps -a --format '{{.Names}}'` succeeds and lists no line exactly equal to `sandy-<SANDBOX_NAME>`, sandy removes every **regular file** in `$SANDBOX_DIR/claude/sessions/` whose name matches `^[0-9]+\.json$` or `^[0-9]+\.[0-9a-f]{64}\.key(\.tmp\.[0-9a-f]+)?$`. Those files are Claude Code's live-session registry and messaging keys, stamped with a pid-namespace `pidDomain` that no later container can ever match. Other names, symlinks, and a symlinked `claude/` or `sessions/` (warned) are left alone. The count is printed under `SANDY_VERBOSE=1`. Guarded by `run-tests.sh` §186.
 
 ### E.1a Approval pre-pass under `--start` (#221, #296)
 

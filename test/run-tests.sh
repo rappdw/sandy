@@ -23483,6 +23483,78 @@ check "§183(19) an unknown argument: one JSON document naming it, exit 1, 0 byt
 rm -rf "$_S183_D"
 unset _S183_D _S183_SECRET _S183_H _S183_W _S183_TREE0 _S183_TREE1 _S183_H16 _S183_SLIST _S183_SLIST_SUM _S183_RC
 unset -f _s183_ws _s183_run _s183_q _s183_status _s183_tree 2>/dev/null || true
+echo "§186: #407 — stale Claude Code session registry entries are pruned at launch"
+# ============================================================
+# Claude Code can prove a ~/.claude/sessions/<pid>.json entry dead only from
+# the same pid namespace, and every sandy launch is a new container, so entries
+# from earlier containers otherwise live forever and eventually block
+# `claude --continue`. The REAL prune block (the function and its docker
+# guard) is run against fixtures, with docker stubbed as a shell function.
+_S186_SANDY="$SANDY_SCRIPT"
+_S186_D="$(cd "$(mktemp -d)" && pwd -P)"
+_S186_BLOCK="$(awk '/^_sandy_prune_session_registry\(\) \{/{p=1} p{print} p&&/^    unset _sandy_left _sandy_nl$/{getline; print; exit}' "$_S186_SANDY")"
+_S186_SYM="$(sed -n '/^_sandy_path_symlink_component() {/,/^}$/p' "$_S186_SANDY")"
+check "§186(pre) the prune block and the symlink helper were extracted (mutation: a moved anchor empties them)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_prune_session_registry \"\$SANDBOX_DIR\"" && printf "%s" "$1" | grep -q "^fi$" && printf "%s" "$2" | grep -q "_rest"' -- "$_S186_BLOCK" "$_S186_SYM"
+# $1 sandbox dir, $2 what `docker ps -a --format` prints ("FAIL" = docker errors)
+_s186_run() {
+    env -i PATH="$PATH" SB="$1" DOUT="$2" bash -c '
+        set -euo pipefail
+        info() { printf "INFO %s\n" "$*"; }; warn() { printf "WARN %s\n" "$*"; }
+        docker() { [ "$DOUT" = FAIL ] && return 1; [ -n "$DOUT" ] && printf "%s\n" "$DOUT"; return 0; }
+        eval "$1"
+        SANDBOX_DIR="$SB"; CONTAINER_NAME="sandy-x"; SANDY_VERBOSE=1
+        eval "$2"
+        echo "RAN"' _ "$_S186_SYM" "$_S186_BLOCK" 2>&1 || true
+}
+_s186_fixture() {  # $1 name -> a sandbox with stale and unrelated entries
+    local sb="$_S186_D/$1" s
+    s="$sb/claude/sessions"; mkdir -p "$s"
+    : > "$s/258.json"; : > "$s/258.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.key"
+    : > "$s/31.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.key.tmp.9f"
+    : > "$s/notes.txt"; : > "$s/abc.json"
+    printf 'keep' > "$_S186_D/$1-target"; ln -s "$_S186_D/$1-target" "$s/77.json"
+    printf '%s' "$sb"
+}
+_SB="$(_s186_fixture prune)"; _S186_OUT="$(_s186_run "$_SB" "sandy-proxy-x
+other")"
+check "§186(1) with no container of this name, Claude Code's own stale records are removed (json, key, key.tmp)" \
+    bash -c '[ ! -e "$1/258.json" ] && [ ! -e "$1/258.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.key" ] && [ ! -e "$1/31.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.key.tmp.9f" ] && printf "%s" "$2" | grep -q "^RAN"' -- "$_SB/claude/sessions" "$_S186_OUT"
+check "§186(2) ...and ONLY those: an unrelated file, a non-numeric .json and a symlink are left, the link target untouched" \
+    bash -c '[ -f "$1/notes.txt" ] && [ -f "$1/abc.json" ] && [ -L "$1/77.json" ] && [ "$(cat "$2")" = keep ]' -- "$_SB/claude/sessions" "$_S186_D/prune-target"
+check "§186(3) the count is reported under SANDY_VERBOSE (3 records)" \
+    bash -c 'printf "%s" "$1" | grep -q "INFO Pruned 3 Claude Code session record"' -- "$_S186_OUT"
+_SB="$(_s186_fixture live)"; _s186_run "$_SB" "unrelated
+sandy-x" >/dev/null
+check "§186(4) a container of THIS name still present (exact line, among others) -> nothing pruned" \
+    bash -c '[ -e "$1/258.json" ]' -- "$_SB/claude/sessions"
+_SB="$(_s186_fixture near)"; _s186_run "$_SB" "sandy-xy
+sandy-proxy-x" >/dev/null
+check "§186(5) ...but a name that merely CONTAINS it (sandy-xy, sandy-proxy-x) does not block the prune" \
+    bash -c '[ ! -e "$1/258.json" ]' -- "$_SB/claude/sessions"
+_SB="$(_s186_fixture dockerfail)"; _s186_run "$_SB" FAIL >/dev/null
+check "§186(6) docker failing to answer counts as 'cannot confirm' -> nothing pruned" \
+    bash -c '[ -e "$1/258.json" ]' -- "$_SB/claude/sessions"
+_SB="$_S186_D/linked"; mkdir -p "$_SB/claude" "$_S186_D/elsewhere"; : > "$_S186_D/elsewhere/258.json"
+ln -s "$_S186_D/elsewhere" "$_SB/claude/sessions"
+_S186_OUT="$(_s186_run "$_SB" "")"
+check "§186(7) claude/sessions as a symlink: nothing behind it is touched, and the refusal is named" \
+    bash -c '[ -e "$1/258.json" ] && printf "%s" "$2" | grep -q "WARN .*session registry NOT pruned"' -- "$_S186_D/elsewhere" "$_S186_OUT"
+_SB="$_S186_D/noclaude"; mkdir -p "$_SB"
+check "§186(8) a sandbox with no claude/ is a silent no-op (codex-only sandboxes)" \
+    bash -c 'o="$1"; printf "%s" "$o" | grep -q "^RAN$" && ! printf "%s" "$o" | grep -q "WARN\|INFO"' -- "$(_s186_run "$_SB" "")"
+# Placement: the prune must come after the workspace lock and the force-removal
+# of any leftover container of this name (the two facts that make "no container
+# exists" true), and before the container is started.
+_S186_L_LOCK="$(grep -n -m1 '^if ! mkdir "\$SANDY_WORKSPACE_LOCK"' "$_S186_SANDY" | cut -d: -f1)"
+_S186_L_RM="$(grep -n -m1 '^docker rm -f "\$CONTAINER_NAME"' "$_S186_SANDY" | cut -d: -f1)"
+_S186_L_CALL="$(grep -n -m1 '^        _sandy_prune_session_registry "\$SANDBOX_DIR"' "$_S186_SANDY" | cut -d: -f1)"
+_S186_L_RUN="$(grep -n -m1 'docker run "\${RUN_FLAGS\[@\]}"' "$_S186_SANDY" | cut -d: -f1)"
+check "§186(9) placement: lock ($_S186_L_LOCK) < leftover removal ($_S186_L_RM) < prune ($_S186_L_CALL) < docker run ($_S186_L_RUN)" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] && [ -n "$4" ] && [ "$1" -lt "$2" ] && [ "$2" -lt "$3" ] && [ "$3" -lt "$4" ]' -- "$_S186_L_LOCK" "$_S186_L_RM" "$_S186_L_CALL" "$_S186_L_RUN"
+rm -rf "$_S186_D"
+unset _S186_SANDY _S186_D _S186_BLOCK _S186_SYM _S186_OUT _SB _S186_L_LOCK _S186_L_RM _S186_L_CALL _S186_L_RUN
+unset -f _s186_run _s186_fixture 2>/dev/null || true
 
 
 # BEGIN SUMMARY

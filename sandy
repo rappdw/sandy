@@ -16026,6 +16026,61 @@ fi
 # handles normal exits; a SIGKILL leaves the container behind).
 CONTAINER_NAME="sandy-${SANDBOX_NAME}"
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+# Stale Claude Code session registry (#407). Claude Code records each live
+# session in ~/.claude/sessions/<pid>.json (beside its messaging key,
+# <pid>.<sha256>.key), stamped with a pidDomain = the pid-namespace inode. It
+# trusts an entry to be dead only if it can check the pid in the SAME
+# pidDomain -- and every sandy launch is a new container, a new pid namespace.
+# So nothing an earlier container wrote can ever be proven dead or ever goes
+# away; once the newest conversation "continued in" a background session that
+# is still registered, `claude --continue` refuses for good ("registered from
+# another machine or container, so this one can't tell whether it is still
+# running"), and sandy launches with --continue.
+#
+# HERE, and only here, no container for this sandbox can exist: the workspace
+# lock is held, the line above force-removed any leftover of this name, and
+# the daemon paths arrive only after DEC-B or --start's own D9 check found no
+# live session. So every entry describes a dead process by construction.
+# docker must also confirm nothing of this name remains, or nothing is pruned.
+# Removes ONLY regular files with Claude Code's own names; the directory is
+# the container's rw ~/.claude, so a symlink anywhere on the path means
+# nothing is touched (§169's rule for host-side writes into it).
+_sandy_prune_session_registry() {   # $1 = sandbox dir -> sets _SANDY_PRUNED (count)
+    local _d="$1/claude/sessions" _f _n _re_json='^[0-9]+\.json$' _re_key='^[0-9]+\.[0-9a-f]{64}\.key(\.tmp\.[0-9a-f]+)?$' _bad
+    _SANDY_PRUNED=0
+    [ -e "$_d" ] || [ -L "$_d" ] || return 0
+    if _bad="$(_sandy_path_symlink_component "$1" "$_d")"; then
+        warn "Claude Code session registry NOT pruned: $_bad is a symlink -- refusing to follow it"
+        return 0
+    fi
+    [ -d "$_d" ] || return 0
+    for _f in "$_d"/*; do
+        [ -f "$_f" ] && [ ! -L "$_f" ] || continue
+        _n="${_f##*/}"
+        if [[ "$_n" =~ $_re_json ]] || [[ "$_n" =~ $_re_key ]]; then
+            rm -f "$_f" && _SANDY_PRUNED=$((_SANDY_PRUNED + 1))
+        fi
+    done
+    return 0
+}
+if [ -d "$SANDBOX_DIR/claude" ] || [ -L "$SANDBOX_DIR/claude" ]; then
+    # Exact whole-line match on the names, as elsewhere (a name filter is a
+    # regex, and whether it sees the leading "/" has varied across docker
+    # versions). docker failing to answer counts as "cannot confirm": no prune.
+    # Matched in bash, not `printf | grep -q`: under pipefail an early-exiting
+    # grep can SIGPIPE the printf, and the negated pipeline would then read a
+    # FOUND name as absent and prune anyway (GREPM, test/lint-bash32.sh).
+    _sandy_nl=$'\n'
+    if _sandy_left="$(docker ps -a --format '{{.Names}}' 2>/dev/null)" \
+       && [[ "$_sandy_nl$_sandy_left$_sandy_nl" != *"$_sandy_nl$CONTAINER_NAME$_sandy_nl"* ]]; then
+        _sandy_prune_session_registry "$SANDBOX_DIR"
+        if [ "$_SANDY_PRUNED" -gt 0 ] && [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
+            info "Pruned $_SANDY_PRUNED Claude Code session record(s) left by earlier containers (#407)"
+        fi
+    fi
+    unset _sandy_left _sandy_nl
+fi
 # TTY/stdin handling differs by mode:
 #   - Interactive: -it. tmux requires a TTY.
 #   - Headless (-p): NO -t — a pseudo-TTY makes Ink/React CLIs (gemini) think
