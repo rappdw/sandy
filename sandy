@@ -2269,6 +2269,134 @@ _sandy_emit_container_daemon_fields() {
     fi
 }
 
+# #158 (2.7.0) — ONE workspace-lock staleness predicate. The #14 lock is a DIR
+# ($SANDY_HOME/sandboxes/.<name>.lock) holding the owner's pid. The launch
+# path, --print-state (lock_holder_alive), --doctor and --stop's direct
+# teardown each used to carry their own copy of "numeric pid AND kill -0
+# fails"; they happened to agree, and nothing held them together. One helper
+# now answers for all four, so "doctor says stale", "--print-state says
+# lock_holder_alive=false" and "the launch would auto-clear it" cannot drift.
+#
+# Sets two globals rather than printing (no command-substitution fork: this
+# runs per locked sandbox inside --print-state's light-mode budget) and is
+# silent on stderr (--print-state's 0-bytes-of-stderr stream contract):
+#   _SANDY_LOCK_PID    the pid file's contents ("" when missing/unreadable)
+#   _SANDY_LOCK_STATE  stale   -- numeric pid, kill -0 FAILS
+#                      live    -- numeric pid, kill -0 succeeds
+#                      unknown -- empty or non-numeric pid: corrupt, or a
+#                                 launch between its mkdir and its pid write;
+#                                 never provably stale, always left for a human
+# EPERM reads as NOT alive, exactly as every copy did before (kill -0 cannot
+# tell "no such process" from "not yours" without parsing its message); a pid
+# reused by an unrelated live process reads as live -- the conservative side.
+# Always returns 0.
+_sandy_lock_state() {
+    _SANDY_LOCK_STATE="unknown"
+    _SANDY_LOCK_PID="$(cat "$1/pid" 2>/dev/null || true)"
+    if [ -n "$_SANDY_LOCK_PID" ] && [ "$_SANDY_LOCK_PID" -eq "$_SANDY_LOCK_PID" ] 2>/dev/null; then
+        if kill -0 "$_SANDY_LOCK_PID" 2>/dev/null; then
+            _SANDY_LOCK_STATE="live"
+        else
+            _SANDY_LOCK_STATE="stale"
+        fi
+    fi
+    return 0
+}
+
+# True iff the lock dir $1 is provably stale (see _sandy_lock_state).
+_sandy_lock_is_stale() {
+    _sandy_lock_state "$1"
+    [ "$_SANDY_LOCK_STATE" = "stale" ]
+}
+
+# #158 (2.7.0) — remove a stale lock WITHOUT ever removing a live one. Shared
+# by the launch path's auto-clear, --doctor --fix and --stop's direct teardown.
+#
+# The bug it closes: --doctor listed stale locks, then (possibly after an
+# interactive y/N) `rm -rf`d each one with no re-check. A launch in between
+# could clear the same stale lock by its own takeover and re-take the name
+# with a LIVE pid; doctor then deleted a live lock, and a second sandy could
+# start on the same workspace. The launch's own takeover had the same hole in
+# miniature -- its `mv` is atomic, but what it moves is whatever holds the
+# name at that instant, which is not necessarily what it checked.
+#
+# The fix is check -> atomic rename -> re-check WHAT WAS MOVED:
+#   1. re-check $L now (never trust a list made earlier)          -> else rc 1
+#   2. mv $L $M  ($M = $L.reap.<pid>[.<n>], a name nothing else    -> fail: rc 4
+#      reads: the doctor glob is `.*.lock`, --print-state and the
+#      launch look up `.<name>.lock` exactly). After the rename we
+#      are the only party that can see $M.
+#   3. re-read the pid FROM $M and re-check it:
+#        stale   -> rm -rf $M                                      -> rc 0
+#        otherwise we moved a lock that was re-taken between 1 and 2:
+#        put it back, but only if the name is still free           -> rc 2
+#        if the name was re-taken meanwhile, leave $M (and its live
+#        owner) alone and report it                                -> rc 3
+#
+# Interleavings, R = this reaper, B/C = launches:
+#   - B clears and re-takes $L (pid written) BEFORE step 1: step 1 sees live,
+#     rc 1, nothing moved. This is the list-then-apply race doctor had.
+#   - B clears and re-takes $L between steps 1 and 2: step 2 moves B's lock,
+#     step 3 reads B's live pid and moves it back. B's lock is absent only for
+#     the two renames; B's _sandy_release_lock keys on the pid in $L, which is
+#     back by the time it could run.
+#   - B's mkdir lands but its pid write has not yet (the unknown window): step
+#     3 reads no pid -> unknown -> restored, never deleted. If B's `echo > pid`
+#     ran while $L was absent it fails and B exits under set -e -- a loud
+#     failed launch, not a second session; the restored lock is then pid-less
+#     and needs the documented manual `rm -rf`.
+#   - B re-takes, R moves it, and C mkdirs $L before R can restore (rc 3): B
+#     and C both hold "a" lock. Not recoverable by R without deleting a live
+#     lock, so R reports the displaced path and the pid instead. The window is
+#     two stat calls plus one rename wide; before this fix it was the whole
+#     doctor run and the outcome was silent.
+#   - Another reaper R2 moves $L first: R's mv fails, rc 4, R touches nothing.
+#   - $L was genuinely stale throughout: moved, re-checked stale, removed.
+#   - `mv $M $L` racing a fresh mkdir of $L can nest $M INSIDE $L (mv into an
+#     existing directory); that is detected and undone, and reported as rc 3.
+# On rc 3 _SANDY_LOCK_REAP_PATH names the displaced dir. Callers print; this
+# helper is silent.
+_sandy_lock_reap_stale() {
+    local _l="$1" _m _n=0
+    _SANDY_LOCK_REAP_PATH=""
+    # Containment: only ever operate on a #14 lock-dir shaped path.
+    case "$_l" in
+        */.*.lock) : ;;
+        *) return 1 ;;
+    esac
+    _sandy_lock_is_stale "$_l" || return 1
+    # A leftover $M (same pid, earlier crashed run) would make `mv $L $M`
+    # move $L INTO it -- pick a name that does not exist.
+    _m="$_l.reap.$$"
+    while [ -e "$_m" ] || [ -L "$_m" ]; do
+        _n=$((_n + 1))
+        _m="$_l.reap.$$.$_n"
+    done
+    mv "$_l" "$_m" 2>/dev/null || return 4
+    if _sandy_lock_is_stale "$_m"; then
+        case "$_m" in
+            "$_l".reap.*) rm -rf "$_m" ;;
+        esac
+        return 0
+    fi
+    # Moved a lock that is no longer stale: restore it.
+    if [ -e "$_l" ] || [ -L "$_l" ]; then
+        _SANDY_LOCK_REAP_PATH="$_m"
+        return 3
+    fi
+    if ! mv "$_m" "$_l" 2>/dev/null; then
+        _SANDY_LOCK_REAP_PATH="$_m"
+        return 3
+    fi
+    if [ -d "$_l/${_m##*/}" ]; then
+        # $L appeared between the test and the mv, which nested $M inside it.
+        mv "$_l/${_m##*/}" "$_m" 2>/dev/null || true
+        _SANDY_LOCK_REAP_PATH="$_m"
+        return 3
+    fi
+    return 2
+}
+
 # #41 (milestone 1.2.0) — tri-state image-staleness check, shared by
 # --print-state FULL mode (DEC-U6, `_sandy_emit_state`'s full-mode branch
 # below) and `sandy --update-sessions`'s step-3 staleness check (dispatcher
@@ -2977,7 +3105,7 @@ _sandy_emit_state() {
         for sb in "$SANDY_HOME/sandboxes"/*/; do
             [ -d "$sb" ] || continue
             sb="${sb%/}"
-            local sb_name sb_created_ver sb_last_ver sb_created_at sb_last_at sb_lock_dir sb_lock_pid sb_ws_path
+            local sb_name sb_created_ver sb_last_ver sb_created_at sb_last_at sb_lock_dir sb_lock_pid sb_lock_state sb_ws_path
             local sb_aa sb_aa_agent
             sb_name="$(basename "$sb")"
             sb_created_ver="$(cat "$sb/.sandy_created_version" 2>/dev/null || true)"
@@ -2993,8 +3121,11 @@ _sandy_emit_state() {
             sb_last_at="$(_stat_mtime_iso "$sb/.sandy_last_version")"
             sb_lock_dir="$SANDY_HOME/sandboxes/.${sb_name}.lock"
             sb_lock_pid=""
+            sb_lock_state="unknown"
             if [ -d "$sb_lock_dir" ]; then
-                sb_lock_pid="$(cat "$sb_lock_dir/pid" 2>/dev/null || true)"
+                _sandy_lock_state "$sb_lock_dir"
+                sb_lock_pid="$_SANDY_LOCK_PID"
+                sb_lock_state="$_SANDY_LOCK_STATE"
             fi
 
             [ $first -eq 0 ] && printf ','
@@ -3349,15 +3480,14 @@ EOF_FEATURE_ENTRIES
                 # lock_holder_alive: distinguishes "real lock" from "stale
                 # lock waiting to be cleared on next launch". true/false when
                 # we have a numeric PID; null when the file is missing or
-                # corrupt (and thus liveness is unknowable).
+                # corrupt (and thus liveness is unknowable). The verdict is
+                # _sandy_lock_state's -- the same predicate the launch,
+                # --doctor and --stop use (#158).
                 local sb_lock_alive='null'
-                if [ -n "$sb_lock_pid" ] && [ "$sb_lock_pid" -eq "$sb_lock_pid" ] 2>/dev/null; then
-                    if kill -0 "$sb_lock_pid" 2>/dev/null; then
-                        sb_lock_alive='true'
-                    else
-                        sb_lock_alive='false'
-                    fi
-                fi
+                case "$sb_lock_state" in
+                    live)  sb_lock_alive='true' ;;
+                    stale) sb_lock_alive='false' ;;
+                esac
                 printf ','; _json_kv lock_holder_alive "$sb_lock_alive"
             else
                 printf ','; _json_kv lock_held 'false'
@@ -5726,18 +5856,17 @@ _sandy_rekey_home() {
 # no-op rather than an abort under sandy's own `set -euo pipefail`.
 
 # Stale workspace locks (one lock DIR path per line): the recorded pid is
-# numeric and PROVABLY dead. Identical predicate to the launch path's own
-# stale-lock auto-clear (sandy:~7184) — re-derived here, not re-implemented
-# differently, so "doctor says stale" and "launch would auto-clear it" can
-# never disagree. Read-only lister; only --fix's applier below ever removes
-# what this reports.
+# numeric and PROVABLY dead. The SAME predicate as the launch path's own
+# stale-lock auto-clear -- _sandy_lock_is_stale, one function (#158) -- so
+# "doctor says stale" and "launch would auto-clear it" can never disagree.
+# Read-only lister; only --fix's applier below ever removes what this
+# reports, and it re-checks at removal time (the list is advisory by then).
 _sandy_doctor_stale_locks_list() {
-    local _d _pid
+    local _d
     [ -d "$SANDY_HOME/sandboxes" ] || return 0
     for _d in "$SANDY_HOME/sandboxes"/.*.lock; do
         [ -d "$_d" ] || continue
-        _pid="$(cat "$_d/pid" 2>/dev/null || true)"
-        if [ -n "$_pid" ] && [ "$_pid" -eq "$_pid" ] 2>/dev/null && ! kill -0 "$_pid" 2>/dev/null; then
+        if _sandy_lock_is_stale "$_d"; then
             printf '%s\n' "$_d"
         fi
     done
@@ -5916,8 +6045,8 @@ _sandy_doctor_runtime() {
     fi
 
     # --fix: EXACTLY two remediations, both delegated verbatim to existing
-    # code paths (never reimplemented): stale-lock removal (identical
-    # predicate to the launch path's own auto-clear) and
+    # code paths (never reimplemented): stale-lock removal (the launch path's
+    # own predicate and remover, _sandy_lock_reap_stale -- #158) and
     # _sandy_reap_orphan_networks (the same reaper --gc/--prune-orphans use).
     # Nothing else — no sandbox, image, or container is ever removed here.
     if [ "$_fix" = "true" ]; then
@@ -5938,11 +6067,22 @@ _sandy_doctor_runtime() {
                     *) printf '\n  %sAborted -- nothing fixed.%s\n' "$YELLOW" "$NC"; return 0 ;;
                 esac
             fi
-            local _fixed_locks=0 _d
+            # The list above is ADVISORY by now -- possibly a y/N ago. Each
+            # entry goes through _sandy_lock_reap_stale, which re-checks at
+            # removal time and re-checks again what its atomic rename actually
+            # moved, so a lock a launch re-took since the listing is never
+            # removed (#158; the interleavings are in the helper's header).
+            local _fixed_locks=0 _d _reap_rc
             if [ "$_n_stale" -gt 0 ]; then
                 while IFS= read -r _d; do
                     [ -n "$_d" ] || continue
-                    rm -rf "$_d" && _fixed_locks=$((_fixed_locks + 1))
+                    _reap_rc=0
+                    _sandy_lock_reap_stale "$_d" || _reap_rc=$?
+                    case "$_reap_rc" in
+                        0) _fixed_locks=$((_fixed_locks + 1)) ;;
+                        3) printf '  %s!%s %s\n' "$YELLOW" "$NC" "$_d: re-taken by a live sandy while being cleared, and the name was taken again before it could be restored -- left at $_SANDY_LOCK_REAP_PATH (pid ${_SANDY_LOCK_PID:-unknown}); check for two sandy sessions on that workspace" ;;
+                        *) printf '      - %s\n' "$_d: no longer stale (re-taken since it was listed) -- left alone" ;;
+                    esac
                 done <<< "$_stale_locks"
             fi
             local _fixed_nets="none to reap"
@@ -9688,11 +9828,14 @@ if [ "$SANDY_STOP" = "true" ]; then
         _sandy_stop_session="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$_sandy_stop_container" 2>/dev/null || true)"
         if [ -n "$_sandy_stop_session" ]; then
             _sandy_stop_lock="$SANDY_HOME/sandboxes/.${_sandy_stop_session}.lock"
+            # Same predicate and same check-rename-recheck removal as the
+            # launch and --doctor --fix (#158): a launch that re-took this
+            # lock in between keeps it.
             if [ -d "$_sandy_stop_lock" ]; then
-                _sandy_lock_pid="$(cat "$_sandy_stop_lock/pid" 2>/dev/null || true)"
-                if [ -n "$_sandy_lock_pid" ] && [ "$_sandy_lock_pid" -eq "$_sandy_lock_pid" ] 2>/dev/null \
-                   && ! kill -0 "$_sandy_lock_pid" 2>/dev/null; then
-                    rm -rf "$_sandy_stop_lock" 2>/dev/null || true
+                _sandy_stop_reap_rc=0
+                _sandy_lock_reap_stale "$_sandy_stop_lock" || _sandy_stop_reap_rc=$?
+                if [ "$_sandy_stop_reap_rc" -eq 3 ]; then
+                    warn "Workspace lock was re-taken while being cleared and could not be restored -- left at $_SANDY_LOCK_REAP_PATH (pid ${_SANDY_LOCK_PID:-unknown})."
                 fi
             fi
         fi
@@ -12366,7 +12509,8 @@ fi
 mkdir -p "$SANDY_HOME/sandboxes"
 SANDY_WORKSPACE_LOCK="$SANDY_HOME/sandboxes/.${SANDBOX_NAME}.lock"
 if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
-    _holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || true)"
+    _sandy_lock_state "$SANDY_WORKSPACE_LOCK"
+    _holder_pid="$_SANDY_LOCK_PID"
     # Auto-recover from stale locks: if we have a numeric PID and `kill -0`
     # confirms it's not running, clear the lock and retry once. PID reuse is
     # a theoretical concern (the OS could have recycled the PID to an
@@ -12376,14 +12520,16 @@ if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
     # negative there is safer than a false positive that clobbers an active
     # session. A non-numeric or empty PID file means the lock is corrupt
     # (sandy died mid-write); leave it for the user to inspect manually.
-    if [ -n "$_holder_pid" ] && [ "$_holder_pid" -eq "$_holder_pid" ] 2>/dev/null \
-       && ! kill -0 "$_holder_pid" 2>/dev/null; then
+    # The predicate is _sandy_lock_state -- the one --print-state, --doctor
+    # and --stop use too (#158).
+    if [ "$_SANDY_LOCK_STATE" = "stale" ]; then
         info "Stale lock detected (pid $_holder_pid not running) — clearing."
-        # Atomic takeover: only one concurrent reaper can win the rename. A racer
-        # whose mv fails (source already moved) errors out instead of clobbering.
-        _lock_reap="$SANDY_WORKSPACE_LOCK.reap.$$"
-        if mv "$SANDY_WORKSPACE_LOCK" "$_lock_reap" 2>/dev/null; then
-            rm -rf "$_lock_reap"
+        # Atomic takeover: only one concurrent reaper can win the rename, and
+        # what the rename moved is re-checked before it is removed, so a lock a
+        # racer re-took in between is put back rather than deleted (#158).
+        _lock_reap_rc=0
+        _sandy_lock_reap_stale "$SANDY_WORKSPACE_LOCK" || _lock_reap_rc=$?
+        if [ "$_lock_reap_rc" -eq 0 ]; then
             if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
                 _holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || echo unknown)"
                 error "Another sandy concurrently acquired the lock (pid $_holder_pid)"
@@ -12394,6 +12540,9 @@ if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
             _holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || echo unknown)"
             error "Another sandy concurrently acquired the lock (pid $_holder_pid)"
             error "  Workspace: $WORK_DIR"
+            if [ "$_lock_reap_rc" -eq 3 ]; then
+                error "  Its lock could not be restored and was left at $_SANDY_LOCK_REAP_PATH"
+            fi
             exit 1
         fi
     else

@@ -487,8 +487,10 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 >
 > **Liveness is `kill -0 <pid>` from the process running `--print-state`** —
 > the same predicate the launch path uses to decide a lock is stale (and that
-> `sandy --doctor` lists), so `false` here is exactly the verdict under which
-> a launch clears the lock rather than refusing. Two consequences follow from it. PID reuse errs safe: a recycled pid
+> `sandy --doctor` lists and `--stop` reaps), so `false` here is exactly the
+> verdict under which a launch clears the lock rather than refusing. Since
+> 2.7.0 (#158) that is one function in sandy, not four copies that happened to
+> agree. Two consequences follow from it. PID reuse errs safe: a recycled pid
 > reads `true`, and neither this field nor the launch will call it stale. And
 > a holder owned by a **different user** reads `false`, because `kill -0`
 > fails with `EPERM` as well as `ESRCH` — the launch path judges it the same
@@ -512,6 +514,21 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > - **`sandy --doctor --fix --yes`** clears every such lock on the host (and
 >   reaps orphaned networks, its only other remediation). `sandy --doctor`
 >   alone lists them.
+>
+> **Removal re-checks, so it can never take a live lock (2.7.0, #158).** A
+> listing is advisory the moment it is printed — `--doctor --fix` may sit at a
+> y/N, and a launch can clear the same stale lock and re-take the workspace in
+> the meantime. Before 2.7.0 the fixer removed what it had listed with no
+> second look, so a lock re-taken that way was deleted **live** and a second
+> sandy could start on the workspace. Every remover (the launch, `--doctor
+> --fix`, `--stop`'s direct teardown) now re-checks at removal time, takes the
+> lock over with an atomic rename, and re-checks **what the rename moved**
+> before deleting it; a lock that turns out to be live is put back. The one
+> residual: if a *third* launch takes the name in the instant between that
+> rename and the restore, both live locks are kept (neither is deleted) and
+> `--doctor` names where the displaced one was left. For a consumer this means
+> `--doctor --fix --yes` is safe to run at any time, including against a host
+> with launches in flight.
 >
 > A lock whose holder is **unknowable** (`null` with `lock_held: true`) is
 > cleared by neither, deliberately: a pid file sandy cannot read proves

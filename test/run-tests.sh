@@ -22135,6 +22135,169 @@ unset -f _s178_state _s178_px_fields
 rm -rf "$_S178_BIN" "$_S178_HOME" "$_S178_WSP" "$_S178_WSF" "$_S178_WSN"
 rm -f "$_S178_CALLS"
 unset _S178_BIN _S178_HOME _S178_WSP _S178_WSF _S178_WSN _S178_CALLS _S178_OUT _S178_RC _S178_PRIME_RC
+echo "§179: #158 — --doctor --fix re-checks a stale lock at removal time; one staleness predicate"
+# ============================================================
+# --doctor lists stale workspace locks early and removes them later, possibly
+# after a y/N. A launch in between can clear the same stale lock and re-take
+# the name with a LIVE pid; the old applier then rm -rf'd that live lock and a
+# second sandy could start on the workspace. The property asserted here is
+# that a lock which is live AT REMOVAL TIME survives --doctor --fix, however
+# the swap is timed.
+#
+# The swap is driven through the real `sandy --doctor --fix --yes` by a PATH
+# stub `cat` that watches reads of the lock's pid file (the lock predicate
+# reads it with cat; every other cat call is passed straight through). A
+# doctor --fix run reads the lock pid exactly three times: (1) the lister,
+# (2) the applier's re-check, (3) the re-check of what the atomic rename
+# moved -- the probe that produced this was recorded while writing §179, and
+# (1-pre) below re-proves the count, so a change in it fails loudly rather
+# than silently moving every swap to the wrong moment.
+#   pre    -- swap in a live lock BEFORE read 2 (list-then-apply race)
+#   mid    -- swap in a live lock AFTER read 2, before the rename (the rename
+#             then moves a live lock; only the post-rename re-check saves it)
+#   retake -- as mid, and a third launch takes the name before the moved
+#             lock can be restored: both live locks must survive
+# Each case has its OWN $SANDY_HOME (fixtures separated, §88b).
+_S179_SANDY="$SANDY_SCRIPT"
+_S179_D="$(cd "$(mktemp -d)" && pwd -P)"
+_S179_REALCAT="$(command -v cat)"
+mkdir -p "$_S179_D/bin"
+printf '#!/bin/sh\nexit 0\n' > "$_S179_D/bin/docker"
+chmod +x "$_S179_D/bin/docker"
+# The real cat path is baked in, so the stub still works under env -i (6).
+printf '#!/bin/sh\nS179_REALCAT="%s"\n' "$_S179_REALCAT" > "$_S179_D/bin/cat"
+cat >> "$_S179_D/bin/cat" <<'STUB'
+# Test stub: counts reads of $S179_L/pid and swaps the lock per $S179_MODE.
+_live() { rm -rf "$1"; mkdir "$1"; printf '%s\n' "$S179_LIVE" > "$1/pid"; printf '%s\n' "$2" > "$1/owner"; }
+if [ "$#" -eq 1 ] && [ -n "${S179_L:-}" ]; then
+    case "$1" in
+        "$S179_L/pid")
+            n=$(( $("$S179_REALCAT" "$S179_COUNT" 2>/dev/null || echo 0) + 1 ))
+            printf '%s\n' "$n" > "$S179_COUNT"
+            printf 'L%s\n' "$n" >> "$S179_COUNT.log"
+            if [ "$n" -eq 2 ] && [ "$S179_MODE" = "pre" ]; then
+                _live "$S179_L" B
+            fi
+            if [ "$n" -eq 2 ] && { [ "$S179_MODE" = "mid" ] || [ "$S179_MODE" = "retake" ]; }; then
+                "$S179_REALCAT" "$1"; rc=$?
+                _live "$S179_L" B
+                exit "$rc"
+            fi
+            ;;
+        "$S179_L".reap.*/pid)
+            printf 'M\n' >> "$S179_COUNT.log"
+            if [ "$S179_MODE" = "retake" ]; then
+                mkdir "$S179_L" && printf '%s\n' "$S179_LIVE" > "$S179_L/pid" && printf 'C\n' > "$S179_L/owner"
+            fi
+            ;;
+    esac
+fi
+exec "$S179_REALCAT" "$@"
+STUB
+chmod +x "$_S179_D/bin/cat"
+
+_s179_run() {  # $1 case (dir name) $2 mode -> doctor --fix --yes output; $1 is the home
+    local h="$_S179_D/$1"
+    mkdir -p "$h/sandboxes/.ws-$1.lock"
+    echo 999999 > "$h/sandboxes/.ws-$1.lock/pid"
+    printf 'A\n' > "$h/sandboxes/.ws-$1.lock/owner"
+    env PATH="$_S179_D/bin:$PATH" SANDY_HOME="$h" S179_L="$h/sandboxes/.ws-$1.lock" \
+        S179_MODE="$2" S179_LIVE="$$" S179_COUNT="$h.count" \
+        bash "$_S179_SANDY" --doctor --fix --yes 2>&1 || true
+}
+_s179_owner() { "$_S179_REALCAT" "$1/owner" 2>/dev/null || echo none; }
+_s179_reaps() { find "$1/sandboxes" -name '.*.lock.reap.*' -type d 2>/dev/null | wc -l | tr -d ' '; }
+
+# --- (1) the ordinary case: a stale lock is removed, nothing left behind ---
+_S179_OUT1="$(_s179_run plain none)"
+_H="$_S179_D/plain"
+check "§179(1-pre) doctor --fix reads the lock pid exactly list/re-check/moved (L1 L2 M) -- the swap timing below depends on it" \
+    bash -c '[ "$(tr "\n" " " < "$1")" = "L1 L2 M " ]' -- "$_H.count.log"
+check "§179(1) a provably stale lock is removed by --doctor --fix" \
+    test ! -e "$_H/sandboxes/.ws-plain.lock"
+check "§179(1) ...and no .reap.* takeover dir is left behind" \
+    test "$(_s179_reaps "$_H")" -eq 0
+check "§179(1) ...and it is counted as fixed" \
+    bash -c 'printf "%s" "$1" | grep -q "Fixed: 1 stale lock"' -- "$_S179_OUT1"
+
+# --- (2) pre: live lock swapped in between list and apply ---
+_S179_OUT2="$(_s179_run pre pre)"
+_H="$_S179_D/pre"
+check "§179(2) a lock re-taken by a live sandy between list and apply SURVIVES --doctor --fix" \
+    bash -c '[ "$(cat "$1/pid")" = "$2" ] && [ "$(cat "$1/owner")" = B ]' -- "$_H/sandboxes/.ws-pre.lock" "$$"
+check "§179(2) ...is reported as no longer stale, not as fixed" \
+    bash -c 'printf "%s" "$1" | grep -q "no longer stale" && printf "%s" "$1" | grep -q "Fixed: 0 stale lock"' -- "$_S179_OUT2"
+check "§179(2) ...and no .reap.* dir is left behind" \
+    test "$(_s179_reaps "$_H")" -eq 0
+
+# --- (3) mid: live lock swapped in after the re-check, before the rename ---
+_S179_OUT3="$(_s179_run mid mid)"
+_H="$_S179_D/mid"
+check "§179(3) the swap really landed between re-check and rename (the moved dir was read: L1 L2 M)" \
+    bash -c '[ "$(tr "\n" " " < "$1")" = "L1 L2 M " ]' -- "$_H.count.log"
+check "§179(3) a live lock the atomic rename moved is re-checked and PUT BACK, not deleted" \
+    bash -c '[ "$(cat "$1/pid")" = "$2" ] && [ "$(cat "$1/owner")" = B ]' -- "$_H/sandboxes/.ws-mid.lock" "$$"
+check "§179(3) ...no .reap.* dir left behind, and nothing counted as fixed" \
+    bash -c '[ "$2" -eq 0 ] && printf "%s" "$1" | grep -q "Fixed: 0 stale lock"' -- "$_S179_OUT3" "$(_s179_reaps "$_H")"
+
+# --- (4) retake: the name is taken again before the moved lock can go back ---
+_S179_OUT4="$(_s179_run retake retake)"
+_H="$_S179_D/retake"
+_S179_M4="$(find "$_H/sandboxes" -name '.ws-retake.lock.reap.*' -type d 2>/dev/null | head -n 1)"
+check "§179(4) the third launch's lock holds the name, untouched" \
+    bash -c '[ "$(cat "$1/owner")" = C ]' -- "$_H/sandboxes/.ws-retake.lock"
+check "§179(4) the displaced LIVE lock is left intact, not deleted, and not nested inside the new one" \
+    bash -c '[ -n "$1" ] && [ "$(cat "$1/pid")" = "$2" ] && [ "$(cat "$1/owner")" = B ] && [ -z "$(ls -A "$3" | grep reap)" ]' -- "$_S179_M4" "$$" "$_H/sandboxes/.ws-retake.lock"
+check "§179(4) ...and doctor names where it left it" \
+    bash -c 'printf "%s" "$1" | grep -qF "left at $2"' -- "$_S179_OUT4" "$_S179_M4"
+
+# --- (5) the helper, driven directly ---
+_S179_FNS="$(sed -n '/^_sandy_lock_state() {/,/^}$/p; /^_sandy_lock_is_stale() {/,/^}$/p; /^_sandy_lock_reap_stale() {/,/^}$/p' "$_S179_SANDY")"
+check "§179(5-pre) the three lock helpers were extracted and parse" \
+    bash -c 'printf "%s" "$1" | grep -q "^_sandy_lock_reap_stale() {" && bash -n -c "$1"' -- "$_S179_FNS"
+# A leftover takeover dir under this reaper pid must not swallow the lock
+# (mv into an existing directory nests); the leftover is left alone.
+check "§179(5a) a leftover .reap.<pid> dir is neither reused nor touched; the stale lock is still removed" \
+    bash -c 'set -euo pipefail; eval "$1"; d="$2/h5a"; mkdir -p "$d/.w.lock" "$d/.w.lock.reap.$$"; echo 999999 > "$d/.w.lock/pid"; : > "$d/.w.lock.reap.$$/keep"; rc=0; _sandy_lock_reap_stale "$d/.w.lock" || rc=$?; [ "$rc" -eq 0 ] && [ ! -e "$d/.w.lock" ] && [ -f "$d/.w.lock.reap.$$/keep" ] && [ "$(ls -d "$d"/.w.lock.reap.* | wc -l | tr -d " ")" -eq 1 ]' -- "$_S179_FNS" "$_S179_D"
+check "§179(5b) containment: a path that is not lock-dir shaped is never touched" \
+    bash -c 'set -euo pipefail; eval "$1"; d="$2/h5b/notalock"; mkdir -p "$d"; echo 999999 > "$d/pid"; rc=0; _sandy_lock_reap_stale "$d" || rc=$?; [ "$rc" -eq 1 ] && [ -f "$d/pid" ]' -- "$_S179_FNS" "$_S179_D"
+check "§179(5c) an unknown (pid-less) lock is never provably stale -- the launch mid-write window" \
+    bash -c 'set -euo pipefail; eval "$1"; d="$2/h5c/.w.lock"; mkdir -p "$d"; rc=0; _sandy_lock_reap_stale "$d" || rc=$?; _sandy_lock_state "$d"; [ "$rc" -eq 1 ] && [ -d "$d" ] && [ "$_SANDY_LOCK_STATE" = unknown ]' -- "$_S179_FNS" "$_S179_D"
+# The restore races a fresh mkdir of the name: `mv M L` into an existing L
+# NESTS M inside it. An mv shim lands that mkdir exactly between the helper's
+# existence test and its restoring rename; the nest must be undone (rc 3).
+check "§179(5d) a restore that lands inside a freshly re-taken lock dir is undone and reported (rc 3), never left nested" \
+    bash -c 'set -euo pipefail; eval "$1"; d="$2/h5d"; LIVE="$3"; mkdir -p "$d"; L="$d/.w.lock"; mkdir "$L"; echo 999999 > "$L/pid"; n=0; mv() { n=$((n+1)); if [ "$n" -eq 1 ]; then command mv "$@"; echo "$LIVE" > "$2/pid"; elif [ "$n" -eq 2 ]; then mkdir "$L"; echo C > "$L/owner"; command mv "$@"; else command mv "$@"; fi; }; rc=0; _sandy_lock_reap_stale "$L" || rc=$?; M="$_SANDY_LOCK_REAP_PATH"; [ "$rc" -eq 3 ] && [ "$(cat "$L/owner")" = C ] && [ -z "$(ls -A "$L" | grep reap || true)" ] && [ -n "$M" ] && [ "$(cat "$M/pid")" = "$3" ]' -- "$_S179_FNS" "$_S179_D" "$$"
+
+# --- (6) --print-state reports through the same predicate, stream contract intact ---
+_s179_ps() {  # $1 case $2 pid-file content ("" = no pid file) -> --print-state doc
+    local h="$_S179_D/ps-$1"
+    mkdir -p "$h/sandboxes/sb-$1/claude" "$h/sandboxes/.sb-$1.lock"
+    [ -z "$2" ] || printf '%s\n' "$2" > "$h/sandboxes/.sb-$1.lock/pid"
+    env -i PATH="$_S179_D/bin:$PATH" HOME="$_S179_D/nohome" SANDY_HOME="$h" bash "$_S179_SANDY" --print-state 2>"$h.err" || true
+}
+_S179_PS_STALE="$(_s179_ps stale 999999)"
+_S179_PS_LIVE="$(_s179_ps live "$$")"
+_S179_PS_UNK="$(_s179_ps unk "")"
+check "§179(6) --print-state: stale lock -> lock_holder_alive=false" \
+    bash -c 'printf "%s" "$1" | grep -q "\"lock_holder_alive\":false"' -- "$_S179_PS_STALE"
+check "§179(6) --print-state: live lock -> lock_holder_alive=true" \
+    bash -c 'printf "%s" "$1" | grep -q "\"lock_holder_alive\":true"' -- "$_S179_PS_LIVE"
+check "§179(6) --print-state: pid-less lock -> lock_holder_alive=null" \
+    bash -c 'printf "%s" "$1" | grep -q "\"lock_holder_alive\":null" && printf "%s" "$1" | grep -q "\"lock_held\":true"' -- "$_S179_PS_UNK"
+check "§179(6) --print-state wrote 0 bytes of stderr in all three cases" \
+    bash -c '[ ! -s "$1/ps-stale.err" ] && [ ! -s "$1/ps-live.err" ] && [ ! -s "$1/ps-unk.err" ]' -- "$_S179_D"
+
+# --- (7) SECONDARY, structural: all four sites go through the one helper ---
+check "§179(7) launch, --print-state, --doctor and --stop call the lock helpers (secondary to the property checks above)" \
+    bash -c 'grep -qF "_sandy_lock_state \"\$SANDY_WORKSPACE_LOCK\"" "$1" && grep -qF "_sandy_lock_reap_stale \"\$SANDY_WORKSPACE_LOCK\"" "$1" && grep -qF "_sandy_lock_state \"\$sb_lock_dir\"" "$1" && grep -qF "_sandy_lock_is_stale \"\$_d\"" "$1" && grep -qF "_sandy_lock_reap_stale \"\$_d\"" "$1" && grep -qF "_sandy_lock_reap_stale \"\$_sandy_stop_lock\"" "$1"' -- "$_S179_SANDY"
+check "§179(7) ...and none of them still carries its own kill -0 copy" \
+    bash -c '! grep -qE "kill -0 \"\\\$(sb_lock_pid|_holder_pid|_sandy_lock_pid|_pid)\"" "$1"' -- "$_S179_SANDY"
+
+rm -rf "$_S179_D"
+unset _S179_SANDY _S179_D _S179_REALCAT _S179_OUT1 _S179_OUT2 _S179_OUT3 _S179_OUT4 _S179_M4 _S179_FNS _S179_PS_STALE _S179_PS_LIVE _S179_PS_UNK _H
+unset -f _s179_run _s179_owner _s179_reaps _s179_ps 2>/dev/null || true
+
 
 # BEGIN SUMMARY
 # ============================================================
