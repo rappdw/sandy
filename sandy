@@ -1637,7 +1637,7 @@ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Cod
 SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
 SANDY_MODEL|string|claude-opus-5|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
 SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched.
-SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex and (2.7.0) grok. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Empty leaves each agent's own default. Ignored, with a notice, for a launch with none of claude, codex or grok (gemini and opencode have no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
+SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex, and (2.7.0) grok and gemini. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Gemini (no flag): a sandy-generated, read-only system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, holding only modelConfigs.customOverrides -- Gemini 3 thinkingLevel LOW for low and HIGH otherwise, Gemini 2.5 thinkingBudget 1024/8192/24576 for low/medium/high-and-above; it outranks user and workspace gemini settings and shadows a user's own modelConfigs.customOverrides while set. Empty leaves each agent's own default. Ignored, with a notice, for a launch with none of claude, codex, grok or gemini (opencode has no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
 SANDY_CPUS|int|||0.1.0|stable|CPU limit for container (default: auto-detected).
 SANDY_MEM|string|||0.1.0|stable|Memory limit for container (e.g. '8g'; default: auto-detected).
 SANDY_GPU|string|||0.7.5|stable|GPU passthrough: 'all', or device IDs like '0' / '0,1'.
@@ -4398,7 +4398,7 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # destroyed entry that is not one of those is named. That keeps sandy
     # uncoupled from consumers (the reason option 1 on #333 was declined) while
     # still naming a directory nobody here has heard of.
-    _rs_regen() { case "$1" in pip|uv|npm-global|go|cargo|venv|sandy-session.json|sandy-proxy.json|proxy.log|relay-state|feature-state|agent-args-composed|relay-bin|.sandy_created_version|.sandy_last_version|.project_build_hash|.protected-existed-at-launch|.session-created-stubs|.head-at-launch|.claude-perm-mode-at-launch|.seed-settings.json|.sandy-approved-symlinks.list) return 0 ;; esac; return 1; }
+    _rs_regen() { case "$1" in pip|uv|npm-global|go|cargo|venv|sandy-session.json|gemini-system-settings.json|sandy-proxy.json|proxy.log|relay-state|feature-state|agent-args-composed|relay-bin|.sandy_created_version|.sandy_last_version|.project_build_hash|.protected-existed-at-launch|.session-created-stubs|.head-at-launch|.claude-perm-mode-at-launch|.seed-settings.json|.sandy-approved-symlinks.list) return 0 ;; esac; return 1; }
     _rs_not_kept() {
         local _e _c _bn _n=0
         for _e in "$_rs_dir"/* "$_rs_dir"/.[!.]*; do
@@ -4765,7 +4765,7 @@ PROBE
     fi
 
     # --- what moves, and what is rewritten -----------------------------------
-    _rsy_excl=(--exclude=/sandy-session.json --exclude=/relay-state/ --exclude=/feature-state/
+    _rsy_excl=(--exclude=/sandy-session.json --exclude=/gemini-system-settings.json --exclude=/relay-state/ --exclude=/feature-state/
                --exclude=/agent-args-composed/
                --exclude=/proxy.log --exclude=/.protected-existed-at-launch --exclude=/claude/sessions/
                --exclude=/WORKSPACE.json)
@@ -4841,7 +4841,7 @@ PROBE
     else
         printf '  Credentials     none matched by name (codex/, grok/, gemini/, opencode/ are copied as they are)\n'
     fi
-    printf '  Not copied      sandy-session.json relay-state/ feature-state/ agent-args-composed/ proxy.log claude/sessions/ (regenerated each launch)\n'
+    printf '  Not copied      sandy-session.json gemini-system-settings.json relay-state/ feature-state/ agent-args-composed/ proxy.log claude/sessions/ (regenerated each launch)\n'
     [ -n "$_rsy_skipnote" ] && printf '  Skipped         %s\n' "$_rsy_skipnote"
     if [ -n "$_rsy_dver" ]; then
         printf '  Destination     sandy %s, %s\n' "$_rsy_dver" "$_rsy_darch"
@@ -6697,7 +6697,7 @@ Usage:
 
 Environment variables:
   SANDY_MODEL        Model to use (default: claude-opus-5)
-  SANDY_EFFORT       Reasoning effort for claude, codex and grok:
+  SANDY_EFFORT       Reasoning effort for claude, codex, grok, gemini:
                      low|medium|high|xhigh|max (default: each agent's own)
   ANTHROPIC_API_KEY  API key (not needed with Claude Max / OAuth)
   SANDY_HOME         Sandy config directory (default: ~/.sandy)
@@ -16532,14 +16532,17 @@ fi
 # Validate SANDY_EFFORT — reasoning effort for claude (`claude --effort <level>`,
 # build_claude_cmd), since 2.4.0 (#116) codex (`-c model_reasoning_effort=`,
 # mapped per level in build_codex_cmd), and since 2.7.0 (#116) grok
-# (`--reasoning-effort`, build_grok_cmd; max clamps to xhigh). Empty = each
-# agent's own default. Cleared when none of them is in the agent set so it's
-# never a meaningless forward (and the marker's `effort` stays null for a launch
-# nothing applied it to). An invalid level fails loud rather than silently
-# running at default — the whole point is a provable, pinned effort. gemini and
-# opencode have no effort surface sandy drives; in a combo that includes one of
-# the others those panes simply do not receive it.
-if _sandy_agent_has claude || _sandy_agent_has codex || _sandy_agent_has grok; then
+# (`--reasoning-effort`, build_grok_cmd; max clamps to xhigh) and gemini (a
+# read-only system settings file, generated just below). Empty = each agent's own
+# default. Cleared when none of them is in the agent set so it's never a
+# meaningless forward (and the marker's `effort` stays null for a launch nothing
+# applied it to). An invalid level fails loud rather than silently running at
+# default — the whole point is a provable, pinned effort. opencode has no effort
+# surface sandy drives: its TUI takes no flag, and `opencode run --variant`
+# silently ignores a name the model does not define, so no mapping could be
+# shown to have applied. In a combo that includes one of the others, the
+# opencode pane simply does not receive it.
+if _sandy_agent_has claude || _sandy_agent_has codex || _sandy_agent_has grok || _sandy_agent_has gemini; then
     if [ -n "${SANDY_EFFORT:-}" ]; then
         case "$SANDY_EFFORT" in
             low|medium|high|xhigh|max) ;;
@@ -16554,13 +16557,85 @@ if _sandy_agent_has claude || _sandy_agent_has codex || _sandy_agent_has grok; t
     fi
 else
     if [ -n "${SANDY_EFFORT:-}" ]; then
-        info "SANDY_EFFORT=$SANDY_EFFORT ignored: it applies to claude, codex and grok only (agents: $SANDY_AGENT)."
+        info "SANDY_EFFORT=$SANDY_EFFORT ignored: it applies to claude, codex, grok and gemini only (agents: $SANDY_AGENT)."
     fi
     SANDY_EFFORT=""
 fi
 RUN_FLAGS+=(-e "SANDY_AGENT=$SANDY_AGENT")
 RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
 RUN_FLAGS+=(-e "SANDY_EFFORT=${SANDY_EFFORT:-}")
+# SANDY_EFFORT -> gemini (2.7.0, #116). gemini-cli has no effort FLAG; its
+# surface is the settings key modelConfigs, whose overrides layer a
+# thinkingConfig onto the chat model by alias. Verified against gemini-cli
+# 0.61.0 (@google/gemini-cli + -core, npm): DEFAULT_MODEL_CONFIGS has every
+# Gemini 3 chat model extend `chat-base-3` (thinkingLevel HIGH) and every 2.5
+# one extend `chat-base-2.5` (thinkingBudget 8192); ModelConfigService matches
+# an override's `model` against the whole alias chain, so one override per base
+# covers the family and touches no helper config (web-search, classifier, ...
+# extend `base`, not `chat-base`).
+#
+# Mechanism: a sandy-owned SYSTEM settings file, named by
+# GEMINI_CLI_SYSTEM_SETTINGS_PATH (settings.ts getSystemSettingsPath), because
+# system settings merge LAST -- over user and workspace -- so neither the rw
+# ~/.gemini nor a committed .gemini/settings.json can quietly undo the pin. The
+# file is generated host-side at the sandbox TOP LEVEL, which no container
+# mount exposes -- never under $SANDBOX_DIR/gemini/, the agent-writable
+# ~/.gemini -- and bind-mounted :ro, so the agent cannot edit it either.
+#
+# What it may clobber, stated: the merge REPLACES arrays (no mergeStrategy on
+# modelConfigs.*), so a system value for a key wins wholesale. The file
+# therefore holds ONE key, modelConfigs.customOverrides, and nothing else.
+# `overrides` -- the key gemini-cli's own docs use in their examples -- is left
+# entirely to the user; a user's own `customOverrides` IS shadowed while
+# SANDY_EFFORT is set. At equal match depth a sandy entry sorts after a user
+# `overrides` entry (customOverrides come later) and wins; a user override that
+# names a concrete model (e.g. gemini-2.5-pro) sits deeper in the chain and
+# wins over sandy's -- an explicit per-model choice beats the fleet default.
+# A model outside gemini-cli's alias table resolves through `chat-base` only,
+# so neither override reaches it: that model runs at its own default.
+#
+# Mapping. Gemini 3: thinkingLevel, and the bundled @google/genai enum has only
+# LOW and HIGH, so low -> LOW and every other level -> HIGH (gemini-cli's own
+# default). Gemini 2.5: thinkingBudget, low -> 1024, medium -> 8192 (gemini-cli's
+# DEFAULT_THINKING_MODE), high/xhigh/max -> 24576 -- the largest budget every 2.5
+# model accepts (Flash and Flash-Lite cap at 24576; Pro would take 32768, but a
+# single override covers the family and must be valid for all of it).
+_sandy_gemini_settings_file="$SANDBOX_DIR/gemini-system-settings.json"
+# Nothing legitimate links here, and the write below goes through mktemp + mv,
+# which replaces a link rather than following it (§169's discipline).
+if [ -L "$_sandy_gemini_settings_file" ]; then
+    warn "Removed a symlink at ${_sandy_gemini_settings_file#"$SANDBOX_DIR"/} -- sandy regenerates this file every launch and will not write through a link."
+    rm -f "$_sandy_gemini_settings_file"
+fi
+_sandy_gemini_level=""; _sandy_gemini_budget=""
+if _sandy_agent_has gemini; then
+    case "${SANDY_EFFORT:-}" in
+        low)            _sandy_gemini_level=LOW;  _sandy_gemini_budget=1024 ;;
+        medium)         _sandy_gemini_level=HIGH; _sandy_gemini_budget=8192 ;;
+        high|xhigh|max) _sandy_gemini_level=HIGH; _sandy_gemini_budget=24576 ;;
+    esac
+fi
+if [ -n "$_sandy_gemini_level" ]; then
+    _sandy_gemini_tmp="$(mktemp "$_sandy_gemini_settings_file.XXXXXX" 2>/dev/null)" || _sandy_gemini_tmp=""
+    if [ -n "$_sandy_gemini_tmp" ] && printf '{\n  "modelConfigs": {\n    "customOverrides": [\n      {\n        "match": { "model": "chat-base-3" },\n        "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingLevel": "%s" } } }\n      },\n      {\n        "match": { "model": "chat-base-2.5" },\n        "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingBudget": %s } } }\n      }\n    ]\n  }\n}\n' \
+            "$_sandy_gemini_level" "$_sandy_gemini_budget" > "$_sandy_gemini_tmp" \
+        && chmod 644 "$_sandy_gemini_tmp" && mv -f "$_sandy_gemini_tmp" "$_sandy_gemini_settings_file"; then
+        # gemini-cli takes any file name here. Not `settings.json`: the suite
+        # ratchets that no read-only settings.json overlay exists (the pre-0.11.3
+        # Claude approach), and the derived system-defaults path lands at
+        # /etc/sandy-gemini/system-defaults.json, which does not exist.
+        RUN_FLAGS+=(-v "$_sandy_gemini_settings_file:/etc/sandy-gemini/effort.json:ro")
+        RUN_FLAGS+=(-e "GEMINI_CLI_SYSTEM_SETTINGS_PATH=/etc/sandy-gemini/effort.json")
+    else
+        [ -n "$_sandy_gemini_tmp" ] && rm -f "$_sandy_gemini_tmp"
+        warn "SANDY_EFFORT=$SANDY_EFFORT not applied to gemini: could not write ${_sandy_gemini_settings_file#"$SANDBOX_DIR"/}"
+    fi
+else
+    # Not applicable this launch: leave no stale pin lying around for a reader
+    # to mistake for the one in effect.
+    rm -f "$_sandy_gemini_settings_file"
+fi
+unset _sandy_gemini_settings_file _sandy_gemini_level _sandy_gemini_budget _sandy_gemini_tmp
 # SANDY_AGENT_ARGS_<AGENT> (per-agent operator args, #210):
 # _sandy_build_agent_cmd runs CONTAINER-side (it lives in the user-setup.sh
 # heredoc), so these five resolved values have to cross the boundary or the

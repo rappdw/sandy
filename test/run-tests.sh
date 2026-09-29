@@ -18860,7 +18860,7 @@ _S167_NONE="$(trap - ERR; _s167_run build_codex_cmd "")"
 check "§167(3) no SANDY_EFFORT -> no override: codex keeps its own default (got: $_S167_NONE)" \
     bash -c 'case "$1" in "ARGV:"*reasoning*) exit 1 ;; "ARGV:"*) exit 0 ;; esac; exit 1' _ "$_S167_NONE"
 _S167_GEM="$(trap - ERR; _s167_run build_gemini_cmd high)"
-check "§167(4) gemini does not receive it -- no effort surface sandy drives (got: $_S167_GEM)" \
+check "§167(4) gemini's ARGV carries no effort flag -- it has none; since 2.7.0 its surface is a read-only system settings file, checked in §184 (got: $_S167_GEM)" \
     bash -c 'case "$1" in "ARGV:"*effort*) exit 1 ;; "ARGV:"*) exit 0 ;; esac; exit 1' _ "$_S167_GEM"
 # The sink is `bash -c`. Host-side validation already rejects anything but the
 # five levels, but the builder must be safe on its own (R1): an unvalidated
@@ -18880,8 +18880,8 @@ check "§167(6) the validation block and _sandy_agent_has were extracted (mutati
     bash -c 'printf "%s" "$1" | grep -q "Invalid SANDY_EFFORT" && test -n "$2"' _ "$_S167_VAL" "$_S167_HAS"
 check "§167(7) a codex-only launch KEEPS SANDY_EFFORT (it used to be cleared, so codex ran unpinned and the marker said null)" \
     bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=max"' _ "$(_s167_val codex max)"
-check "§167(8) a gemini-only launch clears it and SAYS so (it applies to claude and codex only)" \
-    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=" && printf "%s\n" "$1" | grep -q "INFO SANDY_EFFORT=high ignored"' _ "$(_s167_val gemini high)"
+check "§167(8) an opencode-only launch clears it and SAYS so (opencode has no effort surface sandy drives; gemini gained one in 2.7.0, §184)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=" && printf "%s\n" "$1" | grep -q "INFO SANDY_EFFORT=high ignored"' _ "$(_s167_val opencode high)"
 check "§167(9) a codex launch still fails loud on an invalid level" \
     bash -c 'printf "%s\n" "$1" | grep -q "ERR Invalid SANDY_EFFORT" && printf "%s\n" "$1" | grep -qx "rc=1"' _ "$(_s167_val codex extreme)"
 check "§167(10) claude-only is unchanged: kept" \
@@ -23074,7 +23074,7 @@ rm -rf "$_S182_D"
 unset _S182_SANDY _S182_D _S182_OUT _S182_HA _S182_DATE _S182_SLUG
 unset -f _s182_mk _s182_run _s182_pty _s182_rec _s182_approval _s182_hash _s182_df _s182_created
 
-echo "§184: SANDY_EFFORT reaches grok (--reasoning-effort, max clamps to xhigh) and claude's --effort is quoted (#116)"
+echo "§184: SANDY_EFFORT reaches grok (--reasoning-effort, max clamps to xhigh) and gemini (a read-only system settings file); claude's --effort is quoted (#116)"
 # ============================================================
 # Before 2.7.0 SANDY_EFFORT was cleared for a grok-only launch, so grok ran at
 # its default and the marker said null. grok's flag, its alias and its TUI+
@@ -23170,12 +23170,83 @@ check "§184(12) ...and the notice in a combo that includes grok (got: $_S184_V)
 _S184_V="$(_s184_val grok extreme)"
 check "§184(13) a grok launch fails loud on an invalid level (got: $_S184_V)" \
     bash -c 'printf "%s\n" "$1" | grep -q "ERR Invalid SANDY_EFFORT" && printf "%s\n" "$1" | grep -qx "rc=1"' _ "$_S184_V"
+_S184_V="$(_s184_val gemini xhigh)"
+check "§184(14a) a gemini-only launch KEEPS SANDY_EFFORT now (it used to be cleared; gemini gets it through its settings file below) (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=xhigh" && ! printf "%s\n" "$1" | grep -q "^INFO"' _ "$_S184_V"
 _S184_V="$(_s184_val opencode high)"
 check "§184(14) an opencode-only launch still clears it and SAYS so (got: $_S184_V)" \
     bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=" && printf "%s\n" "$1" | grep -q "INFO SANDY_EFFORT=high ignored"' _ "$_S184_V"
+# gemini (2.7.0): no flag -- the surface is a sandy-owned SYSTEM settings file
+# (GEMINI_CLI_SYSTEM_SETTINGS_PATH), generated host-side and mounted :ro. The
+# generation block is extracted and run against a scratch $SANDBOX_DIR, and the
+# checks read back what it wrote and what it added to RUN_FLAGS -- the file is
+# what gemini-cli will merge OVER user and workspace settings, so its exact
+# content is the property, not the presence of a printf.
+_S184_GBLK="$(awk '/^# SANDY_EFFORT -> gemini \(2\.7\.0/{f=1} f{print} f&&/^unset _sandy_gemini_settings_file/{exit}' "$SANDY_SCRIPT")"
+check "§184(15) the gemini settings block was extracted (mutation: a rename empties it and every gemini check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q GEMINI_CLI_SYSTEM_SETTINGS_PATH && printf "%s" "$1" | grep -q "^unset _sandy_gemini_settings_file"' _ "$_S184_GBLK"
+_s184_gem() { # _s184_gem <sandbox dir> <agents> <effort> -> one "FLAG <x>" line per RUN_FLAGS element, plus warnings
+    bash -c 'warn() { echo "WARN $*"; }; eval "$3"; SANDBOX_DIR="$1"; SANDY_AGENT="$2"; SANDY_EFFORT="$4"; RUN_FLAGS=(); set -u; eval "$5"; for _f in ${RUN_FLAGS[@]+"${RUN_FLAGS[@]}"}; do echo "FLAG $_f"; done' \
+        _ "$1" "$2" "$_S184_HAS" "$3" "$_S184_GBLK" 2>&1
+}
+# The whole document, compared as parsed JSON: exactly one key, the two
+# overrides, nothing else -- a system file wins wholesale over the user and
+# workspace layers, so anything extra here would be imposed on the user too.
+_s184_doc() { # _s184_doc <file> <level> <budget> -> exit 0 iff the file is exactly the expected document
+    python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+f, lvl, bud = sys.argv[1], sys.argv[2], int(sys.argv[3])
+want = {"modelConfigs": {"customOverrides": [
+    {"match": {"model": "chat-base-3"}, "modelConfig": {"generateContentConfig": {"thinkingConfig": {"thinkingLevel": lvl}}}},
+    {"match": {"model": "chat-base-2.5"}, "modelConfig": {"generateContentConfig": {"thinkingConfig": {"thinkingBudget": bud}}}},
+]}}
+got = json.load(open(f))
+sys.exit(0 if got == want else 1)
+PY
+}
+if ! command -v python3 >/dev/null 2>&1; then
+    skip "§184(16-22) need python3 to read the generated gemini settings back"
+else
+for _s184_l in low:LOW:1024 medium:HIGH:8192 high:HIGH:24576 xhigh:HIGH:24576 max:HIGH:24576; do
+    _s184_e="${_s184_l%%:*}"; _s184_r="${_s184_l#*:}"
+    _S184_SB="$(cd "$(mktemp -d)" && pwd -P)"
+    _S184_V="$(_s184_gem "$_S184_SB" gemini "$_s184_e")"
+    check "§184(16:$_s184_e) SANDY_EFFORT=$_s184_e -> gemini system settings thinkingLevel ${_s184_r%%:*} (Gemini 3) and thinkingBudget ${_s184_r#*:} (2.5), and NOTHING else in the file" \
+        _s184_doc "$_S184_SB/gemini-system-settings.json" "${_s184_r%%:*}" "${_s184_r#*:}"
+    rm -rf "$_S184_SB"
+done
+_S184_SB="$(cd "$(mktemp -d)" && pwd -P)"
+_S184_V="$(_s184_gem "$_S184_SB" gemini high)"
+check "§184(17) the file is mounted READ-ONLY and GEMINI_CLI_SYSTEM_SETTINGS_PATH names exactly the mount destination (got: $_S184_V)" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c "^FLAG ")" = 4 ] && printf "%s\n" "$1" | grep -qx "FLAG $2/gemini-system-settings.json:/etc/sandy-gemini/effort.json:ro" && printf "%s\n" "$1" | grep -qx "FLAG GEMINI_CLI_SYSTEM_SETTINGS_PATH=/etc/sandy-gemini/effort.json"' _ "$_S184_V" "$_S184_SB"
+# Not agent-writable: the source sits at the sandbox TOP LEVEL, which is never
+# mounted whole -- unlike $SANDBOX_DIR/gemini, the container's rw ~/.gemini,
+# where an agent could rewrite its own pin for the next launch.
+check "§184(18) the source is at the sandbox top level, NOT under the agent-writable gemini/ (~/.gemini), and sandy never mounts the sandbox dir itself" \
+    bash -c 'src="$(printf "%s\n" "$1" | sed -n "s/^FLAG \(.*\):\/etc\/sandy-gemini\/effort.json:ro$/\1/p")"; [ -n "$src" ] || exit 1; [ "${src%/*}" = "$2" ] || exit 1; case "$src" in "$2"/gemini/*) exit 1 ;; esac; ! grep -qE -- "-v \"?\\\$SANDBOX_DIR\"?:" "$3"' _ "$_S184_V" "$_S184_SB" "$SANDY_SCRIPT"
+# Only when it applies: effort set AND gemini selected. And a stale pin from
+# an earlier launch does not survive one where it does not apply.
+_S184_V="$(_s184_gem "$_S184_SB" gemini "")"
+check "§184(19) gemini selected but no SANDY_EFFORT -> no file, no mount, no env, and the previous launch's file is removed (got: $_S184_V)" \
+    bash -c '[ ! -e "$2/gemini-system-settings.json" ] && ! printf "%s\n" "$1" | grep -q "^FLAG"' _ "$_S184_V" "$_S184_SB"
+_S184_V="$(_s184_gem "$_S184_SB" claude,codex max)"
+check "§184(20) SANDY_EFFORT set but gemini not selected -> no file, no mount, no env (got: $_S184_V)" \
+    bash -c '[ ! -e "$2/gemini-system-settings.json" ] && ! printf "%s\n" "$1" | grep -q "^FLAG"' _ "$_S184_V" "$_S184_SB"
+_S184_V="$(_s184_gem "$_S184_SB" claude,gemini low)"
+check "§184(21) a combo that includes gemini gets it (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "FLAG GEMINI_CLI_SYSTEM_SETTINGS_PATH=/etc/sandy-gemini/effort.json"' _ "$_S184_V"
+# §169's discipline: a link planted at the path is never written through.
+printf 'HOST-FILE-UNTOUCHED\n' > "$_S184_DIR/victim"
+rm -f "$_S184_SB/gemini-system-settings.json"
+ln -s "$_S184_DIR/victim" "$_S184_SB/gemini-system-settings.json"
+_S184_V="$(_s184_gem "$_S184_SB" gemini high)"
+check "§184(22) a symlink at the path is removed and named, its target is untouched, and a regular file replaces it (got: $_S184_V)" \
+    bash -c '[ "$(cat "$2/victim")" = HOST-FILE-UNTOUCHED ] && [ ! -L "$3/gemini-system-settings.json" ] && [ -f "$3/gemini-system-settings.json" ] && printf "%s\n" "$1" | grep -q "^WARN Removed a symlink"' _ "$_S184_V" "$_S184_DIR" "$_S184_SB"
+rm -rf "$_S184_SB"
+fi
 rm -rf "$_S184_DIR"
-unset _S184_DIR _S184_OUT _S184_MAX _S184_NONE _S184_GINJ _S184_CL _S184_CINJ _S184_CAN _S184_VAL _S184_HAS _S184_V _s184_a _s184_l
-unset -f _s184_run _s184_val
+unset _S184_DIR _S184_OUT _S184_MAX _S184_NONE _S184_GINJ _S184_CL _S184_CINJ _S184_CAN _S184_VAL _S184_HAS _S184_V _S184_GBLK _S184_SB _s184_a _s184_l _s184_e _s184_r
+unset -f _s184_run _s184_val _s184_gem _s184_doc
 
 # BEGIN SUMMARY
 # ============================================================
