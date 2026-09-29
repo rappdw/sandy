@@ -23248,6 +23248,223 @@ rm -rf "$_S184_DIR"
 unset _S184_DIR _S184_OUT _S184_MAX _S184_NONE _S184_GINJ _S184_CL _S184_CINJ _S184_CAN _S184_VAL _S184_HAS _S184_V _S184_GBLK _S184_SB _s184_a _s184_l _s184_e _s184_r
 unset -f _s184_run _s184_val _s184_gem _s184_doc
 
+# ============================================================
+echo "§183: sandy --approvals reports what each approval gate would refuse, and grants nothing (#296)"
+# ============================================================
+# WHY. A client with no terminal (CI, cron, a pty-less UI) gets a silently
+# weaker session: privileged workspace keys dropped, the project Dockerfile not
+# built, `--start` still exiting 0. `--approvals` shows that before launching.
+# Read-only by decision: there is no grant path, so the properties pinned here
+# are (a) the report is the LAUNCH's verdict -- the combined config+.secrets
+# set, minus keys the environment sets, hashed exactly as the writer hashes it
+# -- and (b) nothing is ever written, not even by the symlink gate's per-launch
+# list refresh.
+#
+# Approvals for the "approved" fixture are granted by the REAL `--start`
+# pre-pass (SANDY_APPROVE_ONLY=1), answered `y` on a pty, so the report is held
+# to the writer's actual hashes rather than to its own. Docker and curl are
+# logging stubs: the report must call neither.
+_S183_D="$(cd "$(mktemp -d)" && pwd -P)"
+_S183_SECRET="s183-SECRET-VALUE-do-not-print"
+mkdir -p "$_S183_D/stub" "$_S183_D/uh"
+printf '#!/bin/sh\necho "$*" >> "%s/docker.log"\nexit 0\n' "$_S183_D" > "$_S183_D/stub/docker"
+printf '#!/bin/sh\necho "$*" >> "%s/curl.log"\nexit 1\n' "$_S183_D" > "$_S183_D/stub/curl"
+chmod +x "$_S183_D/stub/docker" "$_S183_D/stub/curl"
+: > "$_S183_D/uh/target.txt"
+cat > "$_S183_D/q.py" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(json.dumps(eval(sys.argv[2]), sort_keys=True))
+except Exception:
+    print("PARSE-FAIL")
+PY
+cat > "$_S183_D/ptyyes.py" <<'PY'
+import os, pty, sys, select, time, signal
+res = sys.argv[1]
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        os.execvp(sys.argv[2], sys.argv[2:])
+    finally:
+        os._exit(127)
+buf = b''
+answered = 0
+deadline = time.time() + 120
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try:
+            d = os.read(fd, 4096)
+        except OSError:
+            break
+        if not d:
+            break
+        buf += d
+        while buf.count(b'[y/N]') > answered:
+            os.write(fd, b'y\n')
+            answered += 1
+else:
+    os.kill(pid, signal.SIGKILL)
+_, st = os.waitpid(pid, 0)
+rc = os.WEXITSTATUS(st) if os.WIFEXITED(st) else 255
+open(res, 'w').write('%d %d\n' % (answered, rc))
+PY
+# _s183_ws <dir>: a workspace asking for all three gates. The privileged keys
+# are SPLIT across config and .secrets (the launch hashes the combined set);
+# SANDY_MODEL is passive-safe and must not be reported.
+_s183_ws() {
+    mkdir -p "$1/.sandy"
+    printf 'SANDY_SSH=agent\nSANDY_MODEL=s183-model\n' > "$1/.sandy/config"
+    printf 'ANTHROPIC_API_KEY=%s\n' "$_S183_SECRET" > "$1/.sandy/.secrets"
+    printf 'ARG BASE_IMAGE\nFROM $BASE_IMAGE\nCOPY helper.sh /h.sh\n' > "$1/.sandy/Dockerfile"
+    echo 'echo one' > "$1/.sandy/helper.sh"
+    ln -s "$_S183_D/uh/target.txt" "$1/escape"
+}
+# _s183_env: the environment every run gets -- the suite's global
+# SANDY_AUTO_APPROVE_PRIVILEGED=1 pinned off, and the two keys the fixture
+# sets cleared, so only the files decide (empty counts as unset for sandy).
+_s183_run() { # <label> <home> <ws> [VAR=value...]
+    local _l="$1" _h="$2" _w="$3"; shift 3
+    : > "$_S183_D/docker.log"; : > "$_S183_D/curl.log"
+    _S183_RC=0
+    env HOME="$_S183_D/uh" SANDY_HOME="$_h" PATH="$_S183_D/stub:$PATH" \
+        SANDY_AUTO_APPROVE_PRIVILEGED=0 ANTHROPIC_API_KEY= SANDY_SSH= "$@" \
+        "$SANDY_SCRIPT" --approvals --workspace "$_w" \
+        > "$_S183_D/$_l.out" 2> "$_S183_D/$_l.err" || _S183_RC=$?
+    echo "$_S183_RC" > "$_S183_D/$_l.rc"
+    cat "$_S183_D/docker.log" "$_S183_D/curl.log" > "$_S183_D/$_l.calls" 2>/dev/null || true
+    return 0
+}
+_s183_q() { python3 "$_S183_D/q.py" "$_S183_D/$1.out" "$2" 2>/dev/null || echo PARSE-FAIL; }
+_s183_status() { _s183_q "$1" '{g["gate"]: g["status"] for g in d["gates"]}'; }
+_s183_tree() { find "$1" 2>/dev/null | LC_ALL=C sort; }
+
+_S183_H="$_S183_D/home"; _S183_W="$_S183_D/ws"
+mkdir -p "$_S183_H"; _s183_ws "$_S183_W"
+# Every sandy invocation, introspection included, creates the two empty
+# bind-mount fixtures at the top of SANDY_HOME; take the baseline after one.
+SANDY_HOME="$_S183_H" "$SANDY_SCRIPT" --print-version >/dev/null 2>&1 || true
+_S183_TREE0="$(_s183_tree "$_S183_H")"
+
+# --- pending: nothing approved yet --------------------------------------------
+_s183_run p "$_S183_H" "$_S183_W"
+check "§183(1) nothing approved: every gate reports pending, exit 2, complete, all three unresolved (got: $(_s183_status p), rc $(cat "$_S183_D/p.rc"))" \
+    bash -c '[ "$1" = "{\"dockerfile\": \"pending\", \"passive_privileged\": \"pending\", \"symlinks\": \"pending\"}" ] && [ "$2" = 2 ] && [ "$3" = true ] && [ "$4" = "[\"passive_privileged\", \"symlinks\", \"dockerfile\"]" ]' \
+    _ "$(_s183_status p)" "$(cat "$_S183_D/p.rc")" "$(_s183_q p 'd["complete"]')" "$(_s183_q p 'd["unresolved"]')"
+check "§183(2) stream contract: stdout is exactly one JSON document carrying schema_version, stderr is 0 bytes" \
+    bash -c '[ "$1" = 4 ] && [ ! -s "$2" ]' _ "$(_s183_q p 'd["schema_version"]')" "$_S183_D/p.err"
+check "§183(3) the privileged keys are reported by NAME from BOTH files (the combined set a launch hashes); the passive-safe SANDY_MODEL is not (got: $(_s183_q p '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["keys"]'))" \
+    bash -c '[ "$1" = "[\"ANTHROPIC_API_KEY\", \"SANDY_SSH\"]" ] && [ "$2" = "[\".sandy/.secrets\", \".sandy/config\"]" ]' \
+    _ "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["keys"]')" \
+      "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["sources"]')"
+check "§183(4) no key VALUE reaches the output (the secret, the model string)" \
+    bash -c '! grep -qF -e "$1" -e s183-model "$2" "$3"' _ "$_S183_SECRET" "$_S183_D/p.out" "$_S183_D/p.err"
+check "§183(5) the Dockerfile gate names the context the approval would cover, and the symlink gate the escape" \
+    bash -c '[ "$1" = "[\"Dockerfile\", \"helper.sh\"]" ] && [ "$2" = "[\"escape -> $3\"]" ]' \
+    _ "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="dockerfile"][0]["context_files"]')" \
+      "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="symlinks"][0]["symlinks"]')" "$_S183_D/uh/target.txt"
+check "§183(6) nothing written: SANDY_HOME is byte-for-byte the tree it was (no approvals/, no sandbox dir, no build files)" \
+    test "$(_s183_tree "$_S183_H")" = "$_S183_TREE0"
+check "§183(7) no Docker and no network: the docker and curl stubs were never invoked" \
+    test ! -s "$_S183_D/p.calls"
+
+# A key the ENVIRONMENT sets is not part of the set a launch asks about --
+# the half --validate-config (one file at a time) cannot reproduce.
+_s183_run e "$_S183_H" "$_S183_W" ANTHROPIC_API_KEY=s183-from-env
+check "§183(8) a key already set in the environment drops out of the reported set and its hash (got: $(_s183_q e '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["keys"]'))" \
+    bash -c '[ "$1" = "[\"SANDY_SSH\"]" ] && [ "$2" = "[\".sandy/config\"]" ] && [ "$3" != "$4" ] && ! grep -qF s183-from-env "$5"' \
+    _ "$(_s183_q e '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["keys"]')" \
+      "$(_s183_q e '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["sources"]')" \
+      "$(_s183_q e '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["hash"]')" \
+      "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["hash"]')" "$_S183_D/e.out"
+
+# SANDY_AUTO_APPROVE_PRIVILEGED covers two gates, never the symlink one.
+_s183_run a "$_S183_H" "$_S183_W" SANDY_AUTO_APPROVE_PRIVILEGED=1
+check "§183(9) under SANDY_AUTO_APPROVE_PRIVILEGED=1 the key and Dockerfile gates read approved (by auto_approve), the symlink gate stays pending" \
+    bash -c '[ "$1" = "{\"dockerfile\": \"approved\", \"passive_privileged\": \"approved\", \"symlinks\": \"pending\"}" ] && [ "$2" = "[\"auto_approve\", null, \"auto_approve\"]" ] && [ "$3" = 2 ]' \
+    _ "$(_s183_status a)" "$(_s183_q a '[g["approved_by"] for g in d["gates"]]')" "$(cat "$_S183_D/a.rc")"
+
+# The report mode must hold even WITH a terminal: run the report child itself
+# on a pty that answers y to anything. A report that fell through to a prompt
+# would be answered and would write the approval.
+if command -v python3 >/dev/null 2>&1; then
+    ( cd "$_S183_W" && env HOME="$_S183_D/uh" SANDY_HOME="$_S183_H" PATH="$_S183_D/stub:$PATH" \
+        SANDY_AUTO_APPROVE_PRIVILEGED=0 ANTHROPIC_API_KEY= SANDY_SSH= \
+        SANDY_APPROVE_ONLY=1 SANDY_APPROVE_REPORT="$_S183_D/tty.rep" \
+        python3 "$_S183_D/ptyyes.py" "$_S183_D/tty.res" "$SANDY_SCRIPT" ) >/dev/null 2>&1 || true
+fi
+check "§183(10) on a TTY that answers y, report mode still asks nothing and writes nothing (mutation: a report branch that falls through to the prompt or writer)" \
+    bash -c '[ "$(cat "$1" 2>/dev/null)" = "0 0" ] && grep -q "^done" "$2" && [ "$3" = "$4" ]' \
+    _ "$_S183_D/tty.res" "$_S183_D/tty.rep" "$(_s183_tree "$_S183_H")" "$_S183_TREE0"
+
+# --- approved: granted by the REAL pre-pass, answered y on a pty --------------
+if command -v python3 >/dev/null 2>&1; then
+    ( cd "$_S183_W" && env HOME="$_S183_D/uh" SANDY_HOME="$_S183_H" PATH="$_S183_D/stub:$PATH" \
+        SANDY_AUTO_APPROVE_PRIVILEGED=0 ANTHROPIC_API_KEY= SANDY_SSH= SANDY_APPROVE_ONLY=1 \
+        python3 "$_S183_D/ptyyes.py" "$_S183_D/grant.res" "$SANDY_SCRIPT" ) >/dev/null 2>&1 || true
+fi
+_S183_H16="$(printf '%s' "$_S183_W" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16)"
+_S183_SLIST="$_S183_H/sandboxes/ws-$(printf '%s' "$_S183_H16" | cut -c1-8)/.sandy-approved-symlinks.list"
+check "§183(pre) the real pre-pass answered three prompts and wrote all three approvals" \
+    bash -c '[ "$(cat "$1" 2>/dev/null)" = "3 0" ] && [ -f "$2/approvals/passive-$3.list" ] && [ -f "$2/approvals/dockerfile-$3.list" ] && [ -f "$4" ]' \
+    _ "$_S183_D/grant.res" "$_S183_H" "$_S183_H16" "$_S183_SLIST"
+# A stale entry the launch's list refresh would prune -- so a report that
+# reached the refresh changes the file, and (13) sees it.
+if [ -f "$_S183_SLIST" ]; then printf 'gone -> /nowhere\n' >> "$_S183_SLIST"; fi
+_S183_TREE1="$(_s183_tree "$_S183_H")"
+_S183_SLIST_SUM="$(cksum < "$_S183_SLIST" 2>/dev/null || echo none)"
+_s183_run g "$_S183_H" "$_S183_W"
+check "§183(11) after the real grant: every gate approved (by approval_file), exit 0, nothing unresolved (got: $(_s183_status g), rc $(cat "$_S183_D/g.rc"))" \
+    bash -c '[ "$1" = "{\"dockerfile\": \"approved\", \"passive_privileged\": \"approved\", \"symlinks\": \"approved\"}" ] && [ "$2" = 0 ] && [ "$3" = "[]" ] && [ "$4" = "[\"approval_file\", \"approval_file\", \"approval_file\"]" ]' \
+    _ "$(_s183_status g)" "$(cat "$_S183_D/g.rc")" "$(_s183_q g 'd["unresolved"]')" "$(_s183_q g '[g["approved_by"] for g in d["gates"]]')"
+check "§183(12) the reported hashes ARE the ones the real writer stored (first line of each approval file), and approved_at is its UTC stamp" \
+    bash -c '[ "$1" = "$(head -n1 "$3/approvals/passive-$5.list")" ] && [ "$2" = "$(head -n1 "$3/approvals/dockerfile-$5.list")" ] && printf "%s" "$4" | grep -Eq "^\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\"$"' \
+    _ "$(_s183_q g '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["hash"]' | tr -d '"')" \
+      "$(_s183_q g '[g for g in d["gates"] if g["gate"]=="dockerfile"][0]["hash"]' | tr -d '"')" \
+      "$_S183_H" "$(_s183_q g '[g for g in d["gates"] if g["gate"]=="dockerfile"][0]["approved_at"]')" "$_S183_H16"
+check "§183(13) an approved report writes nothing either -- not even the symlink list refresh every approved LAUNCH performs (the stale entry survives)" \
+    bash -c '[ "$1" = "$2" ] && [ "$3" = "$4" ] && grep -qxF "gone -> /nowhere" "$5"' \
+    _ "$(_s183_tree "$_S183_H")" "$_S183_TREE1" "$(cksum < "$_S183_SLIST" 2>/dev/null || echo none)" "$_S183_SLIST_SUM" "$_S183_SLIST"
+
+# --- changed / refused: edits after approval ----------------------------------
+printf 'ANTHROPIC_API_KEY=%s-rotated\n' "$_S183_SECRET" > "$_S183_W/.sandy/.secrets"
+echo 'echo two' > "$_S183_W/.sandy/helper.sh"
+ln -s "$_S183_D/uh/target.txt" "$_S183_W/escape2"
+_s183_run c "$_S183_H" "$_S183_W"
+check "§183(14) a changed VALUE (same key names) and a changed context helper read changed; a new escape reads refused; exit 2 (got: $(_s183_status c))" \
+    bash -c '[ "$1" = "{\"dockerfile\": \"changed\", \"passive_privileged\": \"changed\", \"symlinks\": \"refused\"}" ] && [ "$2" = 2 ] && [ "$3" = "[\"escape2 -> $4\"]" ]' \
+    _ "$(_s183_status c)" "$(cat "$_S183_D/c.rc")" "$(_s183_q c '[g for g in d["gates"] if g["gate"]=="symlinks"][0]["new"]')" "$_S183_D/uh/target.txt"
+check "§183(15) ...still naming no value, still writing nothing, still 0 bytes of stderr" \
+    bash -c '! grep -qF "$1" "$2" && [ ! -s "$3" ] && [ "$4" = "$5" ]' \
+    _ "$_S183_SECRET" "$_S183_D/c.out" "$_S183_D/c.err" "$(_s183_tree "$_S183_H")" "$_S183_TREE1"
+
+# --- not applicable, and the no-report cases -----------------------------------
+mkdir -p "$_S183_D/plain"
+_s183_run n "$_S183_H" "$_S183_D/plain"
+check "§183(16) a workspace asking for nothing: every gate not_applicable, exit 0" \
+    bash -c '[ "$1" = "{\"dockerfile\": \"not_applicable\", \"passive_privileged\": \"not_applicable\", \"symlinks\": \"not_applicable\"}" ] && [ "$2" = 0 ]' \
+    _ "$(_s183_status n)" "$(cat "$_S183_D/n.rc")"
+_s183_run x "$_S183_H" "$_S183_D/does-not-exist"
+check "§183(17) a missing workspace: one JSON document (complete false, an error), exit 1, 0 bytes of stderr" \
+    bash -c '[ "$1" = false ] && [ "$2" = true ] && [ "$3" = 1 ] && [ ! -s "$4" ]' \
+    _ "$(_s183_q x 'd["complete"]')" "$(_s183_q x 'isinstance(d["error"], str)')" "$(cat "$_S183_D/x.rc")" "$_S183_D/x.err"
+mkdir -p "$_S183_D/relay/.sandy"
+printf 'SANDY_RELAY=1\n' > "$_S183_D/relay/.sandy/config"
+_s183_run r "$_S183_H" "$_S183_D/relay"
+check "§183(18) a launch path that refuses before the gates (SANDY_RELAY hard error) is complete:false, exit 1 -- never a partial report read as clean" \
+    bash -c '[ "$1" = false ] && [ "$2" = 1 ] && [ ! -s "$3" ]' \
+    _ "$(_s183_q r 'd["complete"]')" "$(cat "$_S183_D/r.rc")" "$_S183_D/r.err"
+_S183_RC=0
+env SANDY_HOME="$_S183_H" "$SANDY_SCRIPT" --approvals --bogus > "$_S183_D/u.out" 2> "$_S183_D/u.err" || _S183_RC=$?
+check "§183(19) an unknown argument: one JSON document naming it, exit 1, 0 bytes of stderr" \
+    bash -c '[ "$1" = 1 ] && [ ! -s "$2" ] && grep -q -- "--bogus" "$3"' _ "$_S183_RC" "$_S183_D/u.err" "$_S183_D/u.out"
+
+rm -rf "$_S183_D"
+unset _S183_D _S183_SECRET _S183_H _S183_W _S183_TREE0 _S183_TREE1 _S183_H16 _S183_SLIST _S183_SLIST_SUM _S183_RC
+unset -f _s183_ws _s183_run _s183_q _s183_status _s183_tree 2>/dev/null || true
+
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

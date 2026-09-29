@@ -2527,7 +2527,7 @@ Rationale: two agents editing the same codebase would step on each other's edits
 
 ### E.1 Pre-Launch
 
-**Preflight failure-mode guards (M4 PR 4.4).** After the no-Docker-needed fast paths (`--version`/`--help`/`--upgrade`/`--print-*`/`--validate-config`) have exited, the launch path fails fast with a *specific, actionable* message (non-zero exit) rather than dying later with a raw error:
+**Preflight failure-mode guards (M4 PR 4.4).** After the no-Docker-needed fast paths (`--version`/`--help`/`--upgrade`/`--print-*`/`--validate-config`/`--approvals`) have exited, the launch path fails fast with a *specific, actionable* message (non-zero exit) rather than dying later with a raw error:
 
 | Condition | Check | Message (substring) |
 |---|---|---|
@@ -2560,6 +2560,8 @@ Side effects of the pass are limited to `mkdir -p "$SANDBOX_DIR"` and the approv
 **Why the symlink gate ignores the bypass.** The symlink approval is designed so that a *new* escaping link is a hard error, never a re-prompt: no approval of new content happens without a deliberate human act. An env-wide bypass would silently mount every future escape read-write. The other two gates were built with the bypass for test harnesses, and it remains the only answer for a client that has no terminal at all.
 
 A client with no TTY skips the pre-pass entirely; every gate then fails closed in the supervisor unless its approval was granted earlier or the bypass applies.
+
+**`sandy --approvals [--workspace P]` — the same pass as a report (2.7.0, #296).** Because a client with no TTY cannot be asked, it previously learned nothing either: keys were dropped and the project image skipped with `--start` still exiting `0`. `--approvals` is an introspection fast path that re-execs `cd <workspace> && SANDY_APPROVE_ONLY=1 SANDY_APPROVE_REPORT=<tmpfile> <sandy>` with stdin `/dev/null` and stdout/stderr discarded. With both variables set, each of the three gate functions — `_resolve_passive_privileged_approval`, `_sandy_resolve_symlinks`, `_sandy_project_dockerfile_approved` — appends one record (`status`, gate, one-line JSON) to the file and returns **before** its `mkdir`, prompt, writer and (for symlinks) the approved-list refresh; `_sandy_approve_only_finish` then appends the sandbox name and a `done` line and exits without creating `$SANDBOX_DIR`. The same mode skips the Docker/`SANDY_HOME`-writable preflight, `ensure_build_files`, the network/proxy reapers and `ensure_agent_dockerfile`, so it writes nothing and needs no Docker. The handler assembles one JSON document (`SPEC_INTROSPECTION.md`); a missing `done` line means the launch path exited before the gates and is reported `complete: false`, exit `1`. Statuses: `approved` / `pending` / `changed` / `refused` (symlinks only: a new escape the launch hard-errors on) / `not_applicable`. **Read-only by decision** — there is no grant counterpart. `SANDY_APPROVE_REPORT` alone does nothing, and the `--start` client unsets it for its own pre-pass so an inherited value cannot turn the approval pass into a report. Guarded by `run-tests.sh §183`.
 
 ### E.2 Base Flags
 

@@ -124,7 +124,7 @@ SANDY_PASSIVE_KEYS=(
 #       (elsewhere, listed nowhere in this array either)
 #       SANDY_DAEMON_SUPERVISOR / SANDY_UPDATE_RESTART / SANDY_PROVISION /
 #       SANDY_PROVISION_ID / SANDY_APPROVE_ONLY / SANDY_APPROVE_ONLY_RESULT /
-#       SANDY_DOCKERFILE_DECLINED_HASH /
+#       SANDY_DOCKERFILE_DECLINED_HASH / SANDY_APPROVE_REPORT /
 #       SANDY_TEST_PANE_TAGS.
 #   SANDY_SESSION_NONCE stays fully unregistered (not even in this array) for
 #   trust-root reasons specific to it — see "Self-Attestation Marker" in
@@ -552,6 +552,21 @@ SANDY_SELF="$(_sandy_self_path)"
 if [[ "${1:-}" == "-v" || "${1:-}" == "--version" ]]; then
     echo "sandy $(sandy_full_version)"
     exit 0
+fi
+
+# --- `sandy --approvals` report mode (#296 item 2) -------------------------
+# `--approvals` re-execs sandy as the SANDY_APPROVE_ONLY pre-pass with
+# SANDY_APPROVE_REPORT=<file>. In that mode each of the three approval gates
+# APPENDS ONE RECORD to the file instead of prompting, and never writes an
+# approval: the gates are judged by the launch's own code (the combined
+# workspace config+.secrets set, minus keys the environment already sets --
+# which --validate-config, judging one file, cannot reproduce), and nothing is
+# granted. Both variables are required: SANDY_APPROVE_REPORT alone means
+# nothing, so it can never alter a real launch. Internal and env-only, like
+# SANDY_APPROVE_ONLY; never a config key.
+_SANDY_APPROVE_REPORT=""
+if [ -n "${SANDY_APPROVE_REPORT:-}" ] && [ "${SANDY_APPROVE_ONLY:-0}" = "1" ]; then
+    _SANDY_APPROVE_REPORT="$SANDY_APPROVE_REPORT"
 fi
 
 # --- Protected path lists (single source of truth) ---
@@ -2065,6 +2080,8 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--print-version"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Emit machine-readable version JSON (schema_version, version, commit, full_version). full_version is the stable cache key for --print-schema consumers — unlike version, it changes on every commit."'; printf '}'
     printf ','
+    printf '{'; _json_kv name '"--approvals"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Report, as one JSON document, what each launch approval gate (privileged workspace config keys, symlinks escaping the workspace, the .sandy/Dockerfile build) would decide for a workspace: approved, pending, changed, refused or not_applicable. Judged by the launch path itself (the combined workspace config and .secrets, minus keys the environment sets); key names only, never values. Read-only: grants nothing, writes nothing, needs no Docker. Exit 0 when nothing is unresolved, 2 when a gate would be withheld or refused, 1 when no report could be produced. Sub-options: --workspace PATH."'; printf '}'
+    printf ','
     printf '{'; _json_kv name '"--start"';         printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Start a detached daemon session for the workspace and return once attachable."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--attach"';        printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Attach an interactive client to a running daemon session."'; printf '}'
@@ -2090,7 +2107,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--provision"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Non-interactively materialize one workspace sandbox by running the REAL launch path once (start a detached daemon session, confirm it is up, then stop it) — never a flag that fabricates sandbox state directly. Safe no-op (exit 0) against a workspace that already has a live session (foreground lock holder or running daemon container). --all provisions every sandbox sandy already KNOWS about that is missing the per-sandbox state a launch creates -- pip/ since 2.6.0 (#382; relay-state/ was the target from 2.2.0 through 2.5.x, but a launch no longer creates it), which is what --reset-sandbox leaves behind, and what any launch that failed part-way leaves behind; it enumerates $SANDY_HOME/sandboxes, so a workspace that has never been launched has no directory and cannot be reached by it -- enrolling a new workspace stays a deliberate single --workspace call. A sandbox whose recorded workspace no longer exists cannot be provisioned: it is named, counted as unprepared, and makes the run exit non-zero rather than being skipped silently. Exit 0 iff every known sandbox ends with that state in place. Sub-options: --workspace PATH, --all, --dry-run, --yes."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --update-sessions, --reset-sandbox, --remove-sandbox, and --provision. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
+    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --update-sessions, --reset-sandbox, --remove-sandbox, --provision, and --approvals. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the other introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -2569,6 +2586,9 @@ _sandy_orphan_networks_list() {
 # dispatchers below. Returns 0 if it freed at least one network, 1 otherwise.
 _sandy_reap_orphan_networks() {
     local net freed=1
+    # `--approvals` report mode (#296) touches no Docker state (see the
+    # SANDY_APPROVE_REPORT note at the top). Empty in every other invocation.
+    [ -z "${_SANDY_APPROVE_REPORT:-}" ] || return 1
     for net in $(_sandy_orphan_networks_list); do
         docker network rm "$net" >/dev/null 2>&1 && freed=0
     done
@@ -2923,6 +2943,7 @@ ${_sbname}"
 # which was a real pre-1.3.0 --gc regression. Only containers whose image is
 # sandy-proxy are considered, so that agent is never mistaken for a sidecar.
 _sandy_reap_stranded_proxies() {
+    [ -z "${_SANDY_APPROVE_REPORT:-}" ] || return 0   # --approvals: no Docker (#296)
     command -v docker >/dev/null 2>&1 || return 0
     local _rows _name _img _sb
     _rows="$(trap - ERR; docker ps -a --filter 'name=^/sandy-proxy-' \
@@ -3938,6 +3959,136 @@ _sandy_validate_config() {
     _SANDY_VALIDATE_RC=$fatal
 }
 
+# --- `sandy --approvals [--workspace P]` (#296 item 2) ----------------------
+# What each launch approval gate would do for this workspace, WITHOUT granting
+# anything. A client with no terminal (CI, cron, a UI without a pty) gets a
+# silently weaker session today: privileged workspace keys dropped (said only
+# in the daemon log), the project Dockerfile not built (the base image runs and
+# --start still exits 0); only the symlink gate fails loudly. This makes all
+# three visible before launching. READ-ONLY BY DECISION: there is no --approve;
+# granting stays an interactive act (or SANDY_AUTO_APPROVE_PRIVILEGED).
+#
+# The gates are judged by the LAUNCH'S OWN CODE, not re-derived here: the
+# handler re-execs sandy as the SANDY_APPROVE_ONLY pre-pass in report mode
+# (_SANDY_APPROVE_REPORT, defined at the top), with stdin </dev/null so a gate
+# that somehow reached its prompt would still fail closed. Re-deriving would
+# repeat --validate-config's mistake for this question: it judges one FILE,
+# while a launch hashes the COMBINED workspace config+.secrets set and skips
+# keys the environment already sets -- so the report is only true if it comes
+# from the loader itself. The child's stdout and stderr (info/warn/error lines)
+# are discarded; this handler writes the one JSON document.
+#
+# Exit: 0 = every gate approved or not applicable; 2 = something is pending,
+# changed or refused (the report is complete, the launch would be weaker or
+# refused); 1 = no report (bad argument, missing workspace, or the launch path
+# stopped before reaching the gates -- the same "could not evaluate" meaning 1
+# has for --validate-config). 2 is unused by the other introspection flags, so
+# it cannot be mistaken for their failure.
+_sandy_json_str() {
+    # Control characters other than tab/newline/CR are dropped: _json_escape
+    # does not encode them, and a symlink NAME may contain anything.
+    _json_escape "$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177')"
+}
+_sandy_json_or_null() { if [ -n "$1" ]; then _sandy_json_str "$1"; else printf 'null'; fi; }
+_sandy_json_str_array() {
+    local _it _first=1
+    printf '['
+    while IFS= read -r _it; do
+        [ -n "$_it" ] || continue
+        [ $_first -eq 1 ] || printf ','
+        _first=0
+        _sandy_json_str "$_it"
+    done <<< "$1"
+    printf ']'
+}
+# _sandy_approve_report_add <gate> <status> <hash> <approval_file> <approved_by>
+#                           <approved_at> <if_unanswered> <extra-json-members>
+# One TAB-separated record per gate: status, gate, then a one-line JSON object.
+# Every string goes through _sandy_json_str, so a record can never span lines.
+_sandy_approve_report_add() {
+    local _j
+    _j="{\"gate\":\"$1\",\"status\":\"$2\",\"hash\":$(_sandy_json_or_null "$3")"
+    _j="$_j,\"approval_file\":$(_sandy_json_or_null "$4")"
+    _j="$_j,\"approved_by\":$(_sandy_json_or_null "$5")"
+    _j="$_j,\"approved_at\":$(_sandy_json_or_null "$6")"
+    _j="$_j,\"if_unanswered\":\"$7\"${8:+,$8}}"
+    printf '%s\t%s\t%s\n' "$2" "$1" "$_j" >> "${_SANDY_APPROVE_REPORT:-}"
+}
+# The `# approved:` date an approval file recorded, or "" (same reader as the
+# Dockerfile gate's provenance line).
+_sandy_approval_file_date() {
+    [ -f "$1" ] || return 0
+    awk '/^# approved:/ { sub(/^# approved: */, ""); print; exit }' "$1" 2>/dev/null || true
+}
+_sandy_emit_approvals() {
+    local ws="" err="" wd="" rep="" rc=0 self="$SANDY_SELF" tab=$'\t' nl=$'\n'
+    local line status gate json gates="" unresolved="" ngates=0 done_seen=0 sb=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workspace)
+                if [ $# -lt 2 ] || [ -z "$2" ]; then err="--workspace requires a PATH"; break; fi
+                ws="$2"; shift 2 ;;
+            --workspace=*) ws="${1#--workspace=}"; shift ;;
+            *) err="unrecognized argument: $1 (--approvals accepts only --workspace PATH)"; break ;;
+        esac
+    done
+    if [ -z "$err" ]; then
+        [ -n "$ws" ] || ws="$(pwd)"
+        if [ -d "$ws" ]; then wd="$(cd "$ws" 2>/dev/null && pwd -P)" || wd=""; fi
+        [ -n "$wd" ] || err="workspace does not exist or is not a directory: $ws"
+    fi
+    if [ -z "$err" ]; then
+        rep="$(mktemp "${TMPDIR:-/tmp}/sandy-approvals.XXXXXX" 2>/dev/null)" || rep=""
+        [ -n "$rep" ] || err="could not create a temporary file for the report"
+    fi
+    if [ -z "$err" ]; then
+        # `bash sandy` leaves a bare $0 that PATH would resolve to some OTHER
+        # sandy; pin it to the file in the invoking directory when one is there.
+        case "$self" in */*) ;; *) if [ -f "$self" ]; then self="$(pwd -P)/$self"; fi ;; esac
+        ( unset SANDY_APPROVE_ONLY_RESULT; cd "$wd" && SANDY_APPROVE_ONLY=1 SANDY_APPROVE_REPORT="$rep" exec "${BASH:-bash}" "$self" ) </dev/null >/dev/null 2>&1 || rc=$?
+        while IFS= read -r line || [ -n "$line" ]; do
+            status="${line%%"$tab"*}"
+            line="${line#*"$tab"}"
+            gate="${line%%"$tab"*}"
+            json="${line#*"$tab"}"
+            case "$status" in
+                done) done_seen=1 ;;
+                sandbox) sb="$gate" ;;
+                approved|not_applicable|pending|changed|refused)
+                    gates="${gates:+$gates,}$json"
+                    ngates=$((ngates + 1))
+                    case "$status" in
+                        pending|changed|refused) unresolved="${unresolved:+$unresolved$nl}$gate" ;;
+                    esac ;;
+            esac
+        done < "$rep"
+        rm -f "$rep" 2>/dev/null || true
+        if [ "$done_seen" -ne 1 ] || [ "$ngates" -ne 3 ]; then
+            err="the launch path stopped before reaching the approval gates (exit $rc); run sandy in this workspace to see why"
+        fi
+    fi
+    printf '{'
+    _json_kv schema_version "$SANDY_SCHEMA_VERSION"
+    printf ','; _json_kv workspace "$(_sandy_json_or_null "${wd:-$ws}")"
+    printf ','; _json_kv sandbox_name "$(_sandy_json_or_null "$sb")"
+    if [ -n "$err" ]; then
+        printf ','; _json_kv complete false
+        printf ','; _json_kv error "$(_sandy_json_str "$err")"
+    else
+        printf ','; _json_kv complete true
+        printf ','; _json_kv error null
+    fi
+    printf ','; _json_kv unresolved "$(_sandy_json_str_array "$unresolved")"
+    printf ',"gates":[%s]' "$gates"
+    printf '}\n'
+    if [ -n "$err" ]; then
+        _SANDY_APPROVALS_RC=1
+    elif [ -n "$unresolved" ]; then
+        _SANDY_APPROVALS_RC=2
+    fi
+    return 0
+}
+
 # Introspection fast-path handlers. Each is wrapped in an ERR trap so that
 # if `set -euo pipefail` trips a subtle failure inside the emit function
 # (which would otherwise produce silent partial output and a non-zero exit),
@@ -3973,6 +4124,13 @@ if [[ "${1:-}" == "--validate-config" ]]; then
     _SANDY_VALIDATE_RC=0
     _sandy_validate_config "${2:-}"
     exit "$_SANDY_VALIDATE_RC"
+fi
+if [[ "${1:-}" == "--approvals" ]]; then
+    set -E; trap _sandy_introspect_err_trap ERR
+    _SANDY_APPROVALS_RC=0
+    shift
+    _sandy_emit_approvals "$@"
+    exit "$_SANDY_APPROVALS_RC"
 fi
 if [[ "${1:-}" == "--prune-orphans" ]]; then
     # DEC-4d (#26) — maintenance fast-path: reap orphaned sandy_* networks and
@@ -6749,8 +6907,8 @@ Flags:
   --workspace <path> Target workspace directory (defaults to the current
                      directory). Honored by the bare launch path (including
                      -p/--rebuild/--build-only), --start, --attach, --stop,
-                     --update-sessions, --reset-sandbox, --remove-sandbox, and
-                     --provision.
+                     --update-sessions, --reset-sandbox, --remove-sandbox,
+                     --provision, and --approvals.
   -v                 Verbose: show startup sections, pause on exit
   -vv                Debug: add bash trace to user-setup.sh
   -vvv               Full trace: also trace entrypoint.sh and show docker flags
@@ -6853,6 +7011,11 @@ Introspection (machine-readable JSON; no Docker required):
                           with errors, unknowns, and passive-approval status.
   --print-version         Emit {schema_version, version, commit, full_version}
                           as JSON. full_version is the stable cache key.
+  --approvals             Report what each launch approval gate (workspace
+                          privileged keys, escaping symlinks, .sandy/Dockerfile)
+                          would decide for this workspace, as JSON. Grants
+                          nothing. Exit 0 all clear, 2 something withheld or
+                          refused, 1 no report. Sub-options: --workspace PATH
 
 All other arguments are forwarded to the agent (claude, gemini, codex,
 opencode, or grok).
@@ -6981,30 +7144,34 @@ done
 # configuration can say whether the check is wanted at all.
 
 # --- Preflight checks ---
-if ! command -v docker &>/dev/null; then
-    error "Docker is not installed or not in PATH."
-    exit 1
+# `--approvals` report mode (#296) skips the Docker and SANDY_HOME-writability
+# preflight: it must answer with no Docker at all, and it writes nothing.
+if [ -z "${_SANDY_APPROVE_REPORT:-}" ]; then
+    if ! command -v docker &>/dev/null; then
+        error "Docker is not installed or not in PATH."
+        exit 1
+    fi
+    # `command -v` only proves the client binary exists. If the daemon isn't running,
+    # sandy would otherwise slip past here and die later with a raw Docker error mid-
+    # launch. Fail fast with a clear, actionable message. (Fast-path handlers —
+    # --version/--help/--upgrade/--print-*/--validate-config — have already exited
+    # above, so this never blocks the no-Docker-needed paths.)
+    if ! docker info >/dev/null 2>&1; then
+        error "Docker is installed but the daemon isn't responding."
+        error "  Start Docker (Docker Desktop, or 'sudo systemctl start docker') and retry."
+        exit 1
+    fi
+    # SANDY_HOME must be writable from here on — sandy writes sandbox state, generated
+    # build files, and proxy/session configs there. The introspection fast-paths above
+    # tolerate a read-only home (they write nothing) and have already exited.
+    if ! ( : > "$SANDY_HOME/.sandy-write-test" ) 2>/dev/null; then
+        error "SANDY_HOME ($SANDY_HOME) is not writable (or could not be created)."
+        error "  Sandy must write sandbox state and build files there. Fix with:"
+        error "    chmod u+rwx \"$SANDY_HOME\"   — or set SANDY_HOME to a writable path."
+        exit 1
+    fi
+    rm -f "$SANDY_HOME/.sandy-write-test" 2>/dev/null || true
 fi
-# `command -v` only proves the client binary exists. If the daemon isn't running,
-# sandy would otherwise slip past here and die later with a raw Docker error mid-
-# launch. Fail fast with a clear, actionable message. (Fast-path handlers —
-# --version/--help/--upgrade/--print-*/--validate-config — have already exited
-# above, so this never blocks the no-Docker-needed paths.)
-if ! docker info >/dev/null 2>&1; then
-    error "Docker is installed but the daemon isn't responding."
-    error "  Start Docker (Docker Desktop, or 'sudo systemctl start docker') and retry."
-    exit 1
-fi
-# SANDY_HOME must be writable from here on — sandy writes sandbox state, generated
-# build files, and proxy/session configs there. The introspection fast-paths above
-# tolerate a read-only home (they write nothing) and have already exited.
-if ! ( : > "$SANDY_HOME/.sandy-write-test" ) 2>/dev/null; then
-    error "SANDY_HOME ($SANDY_HOME) is not writable (or could not be created)."
-    error "  Sandy must write sandbox state and build files there. Fix with:"
-    error "    chmod u+rwx \"$SANDY_HOME\"   — or set SANDY_HOME to a writable path."
-    exit 1
-fi
-rm -f "$SANDY_HOME/.sandy-write-test" 2>/dev/null || true
 
 # --- Build file generators ---
 generate_dockerfile_base() {
@@ -9526,7 +9693,9 @@ ensure_agent_dockerfile() {
 }
 
 # --- Initialize ---
-ensure_build_files
+# Not in `--approvals` report mode (#296): it generates build files, and that
+# mode writes nothing.
+[ -n "${_SANDY_APPROVE_REPORT:-}" ] || ensure_build_files
 
 # --- Per-project sandbox directory ---
 # Use `pwd -P` to canonicalize: resolves symlinks AND folds case-collisions
@@ -9656,7 +9825,9 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # instead, and is forwarded to the supervisor below.
         _sandy_approve_result="${_sandy_daemon_log}.approve"
         rm -f "$_sandy_approve_result" 2>/dev/null || true
-        ( export SANDY_APPROVE_ONLY_RESULT="$_sandy_approve_result"; cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$SANDY_SELF" ) </dev/tty >/dev/tty 2>&1 || _sandy_approve_rc=$?
+        # SANDY_APPROVE_REPORT is unset: inherited, it would turn this pass into
+        # the --approvals report, which grants nothing (#296).
+        ( unset SANDY_APPROVE_REPORT; export SANDY_APPROVE_ONLY_RESULT="$_sandy_approve_result"; cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$SANDY_SELF" ) </dev/tty >/dev/tty 2>&1 || _sandy_approve_rc=$?
         if [ -f "$_sandy_approve_result" ]; then
             _sandy_df_declined="$(sed -n 's/^dockerfile_declined=//p' "$_sandy_approve_result" 2>/dev/null || true)"
             rm -f "$_sandy_approve_result" 2>/dev/null || true
@@ -10703,7 +10874,12 @@ _sandy_export_approved_kv() {
     esac
 }
 _resolve_passive_privileged_approval() {
-    [ ${#_PASSIVE_PRIVILEGED_PENDING[@]} -eq 0 ] && return 0
+    if [ ${#_PASSIVE_PRIVILEGED_PENDING[@]} -eq 0 ]; then
+        if [ -n "${_SANDY_APPROVE_REPORT:-}" ]; then
+            _sandy_approve_report_add passive_privileged not_applicable "" "" "" "" keys_dropped '"keys":[],"sources":[]'
+        fi
+        return 0
+    fi
 
     # Sort + dedupe the KEY=VALUE set for deterministic hashing.
     local sorted
@@ -10715,6 +10891,38 @@ _resolve_passive_privileged_approval() {
 
     local approvals_dir="$SANDY_HOME/approvals"
     local approval_file="$approvals_dir/passive-$wd_hash.list"
+
+    # `--approvals` report mode (#296): judge exactly the set a launch from
+    # here would hash, record it, and return BEFORE the mkdir, the prompt and
+    # the writer. Key NAMES only in the record -- the values are credentials
+    # (the hash still encodes them, as the approval file's first line does).
+    # Approved keys are still exported and pending ones dropped, exactly as a
+    # launch that cannot ask would do, so the rest of the pass sees the
+    # configuration that launch would.
+    if [ -n "${_SANDY_APPROVE_REPORT:-}" ]; then
+        local _rs="pending" _rby="" _rnames _rsrcs _kv _f
+        if [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ]; then
+            _rs="approved"; _rby="auto_approve"
+        elif [ -f "$approval_file" ]; then
+            if [ "$(head -n1 "$approval_file" 2>/dev/null)" = "$set_hash" ]; then
+                _rs="approved"; _rby="approval_file"
+            else
+                _rs="changed"
+            fi
+        fi
+        _rnames="$(while IFS= read -r _kv; do if [ -n "$_kv" ]; then printf '%s\n' "${_kv%%=*}"; fi; done <<< "$sorted" | sort -u)"
+        _rsrcs="$(for _f in "${_PASSIVE_PRIVILEGED_SOURCES[@]}"; do printf '%s\n' "${_f#"$WORK_DIR"/}"; done | sort -u)"
+        _sandy_approve_report_add passive_privileged "$_rs" "$set_hash" "$approval_file" "$_rby" \
+            "$(_sandy_approval_file_date "$approval_file")" keys_dropped \
+            "\"keys\":$(_sandy_json_str_array "$_rnames"),\"sources\":$(_sandy_json_str_array "$_rsrcs")"
+        if [ "$_rs" = "approved" ]; then
+            while IFS= read -r _kv; do
+                [ -z "$_kv" ] && continue
+                _sandy_export_approved_kv "$_kv"
+            done <<< "$sorted"
+        fi
+        return 0
+    fi
     mkdir -p "$approvals_dir"
 
     # Escape hatch for CI / test harnesses: SANDY_AUTO_APPROVE_PRIVILEGED=1
@@ -11451,7 +11659,7 @@ if [ "$SANDY_REMOTE_CONTROL" = true ]; then
 fi
 export SANDY_AGENT
 
-ensure_agent_dockerfile
+[ -n "${_SANDY_APPROVE_REPORT:-}" ] || ensure_agent_dockerfile
 if [ "$_SANDY_IS_MULTI" = true ]; then
     DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.full"
     BUILD_HASH_FILE_NAME=".build_hash_full"
@@ -11640,6 +11848,30 @@ _sandy_project_dockerfile_approved() {
     wd_hash="$(printf '%s' "$WORK_DIR" | sha256 | awk '{print $1}' | cut -c1-16)"
     approval_file="$SANDY_HOME/approvals/dockerfile-$wd_hash.list"
     session_rec="$(_sandy_df_session_record "$WORK_DIR")"
+    # `--approvals` report mode (#296): the same three outcomes this function
+    # decides below, recorded instead of acted on, BEFORE the mkdir, the review
+    # and the writer. The context file list is what the approval hashes and
+    # what the build is sent (_sandy_context_hash --list); contents are not
+    # reported. session_created says a sandy session created this .sandy/ (#295:
+    # the flag the next approval prompt leads with); reading it clears nothing.
+    # Returns as the gate would, so no caller can tell the modes apart.
+    if [ -n "${_SANDY_APPROVE_REPORT:-}" ]; then
+        local _rs="pending" _rby=""
+        if [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ]; then
+            _rs="approved"; _rby="auto_approve"
+        elif [ -f "$approval_file" ]; then
+            if [ "$(head -n1 "$approval_file" 2>/dev/null)" = "$df_hash" ]; then
+                _rs="approved"; _rby="approval_file"
+            else
+                _rs="changed"
+            fi
+        fi
+        _sandy_approve_report_add dockerfile "$_rs" "$df_hash" "$approval_file" "$_rby" \
+            "$(_sandy_approval_file_date "$approval_file")" base_image \
+            "\"dockerfile\":$(_sandy_json_str "$dockerfile"),\"context_files\":$(_sandy_json_str_array "$(_sandy_context_hash "$_ctx" --list)"),\"session_created\":$([ -f "$session_rec" ] && echo true || echo false)"
+        if [ "$_rs" = "approved" ]; then return 0; fi
+        return 1
+    fi
     mkdir -p "$SANDY_HOME/approvals"
     # Already approved and unchanged? (first line of the file is the hash)
     # Checked ahead of the bypass below only so that a session-created record
@@ -11830,6 +12062,21 @@ _sandy_project_dockerfile_approved() {
 # context hash, so it skips the build quietly instead of re-printing a review
 # nobody can answer.
 _sandy_approve_only_finish() {
+    # `--approvals` report mode (#296): the passive-privileged record was
+    # written during config load; these add the other two, then the sandbox
+    # name and a `done` line, which is how the handler tells a finished report
+    # from a pass that exited early. No mkdir: the symlink list is only read.
+    if [ -n "${_SANDY_APPROVE_REPORT:-}" ]; then
+        _sandy_resolve_symlinks
+        if [ -f "$WORK_DIR/.sandy/Dockerfile" ]; then
+            _sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile" || true
+        else
+            _sandy_approve_report_add dockerfile not_applicable "" "" "" "" base_image '"dockerfile":null,"context_files":[]'
+        fi
+        printf 'sandbox\t%s\t\n' "$SANDBOX_NAME" >> "${_SANDY_APPROVE_REPORT:-}"
+        printf 'done\t\t\n' >> "${_SANDY_APPROVE_REPORT:-}"
+        exit 0
+    fi
     mkdir -p "$SANDBOX_DIR"
     _sandy_resolve_symlinks
     if [ -f "$WORK_DIR/.sandy/Dockerfile" ]; then
@@ -11921,6 +12168,34 @@ _sandy_resolve_symlinks() {
         -not -path '*/.venv*/*' \
         -not -path '*/.git/*' \
         -print0 2>/dev/null)
+
+    # `--approvals` report mode (#296): the verdict this gate reaches below,
+    # without its writes -- the approved-list refresh (`cp`) runs on EVERY
+    # approved launch, so this must return before it, not merely before the
+    # prompt. `refused` is the new-escape-since-approval case, which the launch
+    # hard-errors on and no prompt can answer; `pending` is a first encounter,
+    # which a terminal launch would ask about and a non-TTY one refuses. The
+    # entries are reported in the list's own `link -> target` form.
+    if [ -n "${_SANDY_APPROVE_REPORT:-}" ]; then
+        local _rl="$SANDBOX_DIR/.sandy-approved-symlinks.list" _rs="not_applicable" _cur="" _new="" _e _rh="" _rby=""
+        if [ ${#DANGEROUS_SYMLINKS[@]} -gt 0 ]; then
+            _cur="$(printf '%s\n' "${DANGEROUS_SYMLINKS[@]}" | sort -u)"
+            _rh="$(printf '%s' "$_cur" | sha256 | awk '{print $1}')"
+            if [ ! -f "$_rl" ]; then
+                _rs="pending"
+            else
+                while IFS= read -r _e; do
+                    [ -n "$_e" ] || continue
+                    if ! grep -Fxq -- "$_e" "$_rl" 2>/dev/null; then _new="${_new}${_e}
+"; fi
+                done <<< "$_cur"
+                if [ -n "$_new" ]; then _rs="refused"; else _rs="approved"; _rby="approval_file"; fi
+            fi
+        fi
+        _sandy_approve_report_add symlinks "$_rs" "$_rh" "$_rl" "$_rby" "" launch_refused \
+            "\"symlinks\":$(_sandy_json_str_array "$_cur"),\"new\":$(_sandy_json_str_array "$_new")"
+        return 0
+    fi
 
     if [ ${#DANGEROUS_SYMLINKS[@]} -gt 0 ]; then
         # Persistent symlink approval (S2.2). Once the user has approved a specific

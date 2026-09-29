@@ -37,7 +37,7 @@ This spec defines a JSON introspection surface emitted by sandy itself as the si
 
 ## Invocation
 
-Four flags added to sandy's existing flat CLI (matching the `--print-protected-paths` debug flag that already exists — `--print-version` joined the other three in 1.7.0, #159):
+Four flags added to sandy's existing flat CLI (matching the `--print-protected-paths` debug flag that already exists — `--print-version` joined the other three in 1.7.0, #159), and a fifth, `--approvals` (2.7.0, #296), which carries the same stream contract but has its own exit codes (`0`/`2`/`1`, see its section):
 
 | Flag | Purpose | Reads | Writes |
 |---|---|---|---|
@@ -45,6 +45,7 @@ Four flags added to sandy's existing flat CLI (matching the `--print-protected-p
 | `--print-state` | Runtime state: sandboxes, approvals, locks | `$SANDY_HOME/` | stdout |
 | `--validate-config PATH` | Check a config file against the schema | the path given | stdout + exit code |
 | `--print-version` | Machine-readable version probe (`schema_version`, `version`, `commit`, `full_version`) | nothing on disk | stdout |
+| `--approvals [--workspace PATH]` (2.7.0) | What each launch approval gate would decide for a workspace; grants nothing | the workspace's `.sandy/`, `$SANDY_HOME/approvals/`, the symlink list | stdout + exit code |
 
 All four:
 - Emit exactly one JSON document to stdout; diagnostics go to stderr only. See "Stream contract (guaranteed, 1.7.0)" below for the precise, test-pinned guarantee.
@@ -862,6 +863,49 @@ The standalone, minimal-payload version probe. It exists to unblock a consumer (
 
 No exit-code surprises: always `0` (see the stream contract above — this flag carries the same guarantee as `--print-schema`/`--print-state`).
 
+### `--approvals [--workspace PATH]` (2.7.0, #296)
+
+What each **launch approval gate** would decide for one workspace, without granting anything. It exists for the client that cannot answer a prompt — CI, cron, a UI with no pty — which otherwise gets a *silently weaker* session: privileged workspace keys dropped (said only in the daemon log), the `.sandy/Dockerfile` not built (the base image runs and `--start` still exits `0`). Only the symlink gate fails loudly. **Read-only by decision**: there is no `--approve`; granting stays an interactive act (a terminal launch, or the `--start` pre-pass on a tty) or the env-only `SANDY_AUTO_APPROVE_PRIVILEGED`.
+
+```json
+{
+  "schema_version": 4,
+  "workspace": "/Users/drapp/dev/foo/zork",
+  "sandbox_name": "zork-a1b2c3d4",
+  "complete": true,
+  "error": null,
+  "unresolved": ["dockerfile"],
+  "gates": [
+    {"gate": "passive_privileged", "status": "approved", "hash": "9e0f…", "approval_file": "/Users/drapp/.sandy/approvals/passive-abc123….list",
+     "approved_by": "approval_file", "approved_at": "2026-04-15T10:00:00Z", "if_unanswered": "keys_dropped",
+     "keys": ["ANTHROPIC_API_KEY", "SANDY_SSH"], "sources": [".sandy/.secrets", ".sandy/config"]},
+    {"gate": "symlinks", "status": "not_applicable", "hash": null, "approval_file": "/Users/drapp/.sandy/sandboxes/zork-a1b2c3d4/.sandy-approved-symlinks.list",
+     "approved_by": null, "approved_at": null, "if_unanswered": "launch_refused", "symlinks": [], "new": []},
+    {"gate": "dockerfile", "status": "changed", "hash": "51c2…", "approval_file": "/Users/drapp/.sandy/approvals/dockerfile-abc123….list",
+     "approved_by": null, "approved_at": "2026-04-16T09:30:00Z", "if_unanswered": "base_image",
+     "dockerfile": "/Users/drapp/dev/foo/zork/.sandy/Dockerfile", "context_files": ["Dockerfile", "setup.sh"], "session_created": false}
+  ]
+}
+```
+
+**Judged by the launch's own code, not re-derived.** The handler re-execs sandy as the `SANDY_APPROVE_ONLY` pre-pass (SPECIFICATION.md Appendix E.1a) in a report mode where each gate records its verdict instead of prompting. That matters for the key gate, which `--validate-config` cannot answer for a workspace: it judges one *file*, while a launch hashes the **combined** `.sandy/config` + `.sandy/.secrets` set and skips every key the **environment** already sets. So the report reflects the environment `--approvals` itself runs in — run it with the environment the launch will have.
+
+- **`gates`** — always exactly three, in this order. `status` is one of:
+  - `approved` — the launch proceeds with it; `approved_by` says why: `approval_file` (the stored hash matches) or `auto_approve` (`SANDY_AUTO_APPROVE_PRIVILEGED=1` in this environment — the key and Dockerfile gates only; the symlink gate never honours it).
+  - `pending` — no approval on record. A terminal launch would ask; one without a terminal applies `if_unanswered`.
+  - `changed` — an approval exists for **different content** (a key value, or any build-context file, changed since). Same consequence as `pending`; `approved_at` is the date of the approval that no longer matches.
+  - `refused` — symlinks only: an escape **not** in the approved list. The launch hard-errors on it and no prompt can answer it (by design — see "Persistent symlink approval"); `new` names the entries.
+  - `not_applicable` — the workspace asks for nothing this gate governs.
+- **`if_unanswered`** — what a launch that cannot ask does: `keys_dropped` (the session runs without them), `launch_refused` (exit `1`; `--start` exit `6`), `base_image` (the agent image runs instead of the project image).
+- **`hash`** — what the approval is keyed on, exactly as the writer stores it as the approval file's first line: the key set's hash (it encodes the values, as the stored one does), the build-context hash (`_sandy_context_hash`), and for symlinks the sha256 of the sorted `link -> target` list. `null` when not applicable.
+- **Gate-specific members.** `passive_privileged`: `keys` (NAMES only — values are credentials and never appear) and `sources` (workspace-relative). `symlinks`: `symlinks` and `new`, in the approved list's own `link -> target` form. `dockerfile`: `dockerfile` (path), `context_files` (what the approval covers and the build is sent; contents not reported), and `session_created` (bool: a sandy session created this `.sandy/` — #295's flag, which the next approval prompt leads with; the report reads it and never clears it).
+- **`unresolved`** — the gates whose status is `pending`, `changed` or `refused`. `[]` means an unattended launch gets everything this workspace asks for.
+- **`complete: false`** — no report: a bad argument, a missing workspace, or the launch path stopped **before reaching the gates** (an invalid config value, a removed key such as `SANDY_RELAY`). `error` says which; `gates` is then `[]` or partial and must not be read as a verdict. Run `sandy` in the workspace to see the launch's own message.
+
+**Exit codes.** `0` — complete, nothing unresolved. `2` — complete, something unresolved. `1` — no report (`complete: false`). `1` keeps the meaning it has for `--validate-config` ("could not evaluate"); `2` is used by no other introspection flag, so a caller can gate on it (`sandy --approvals || …`) and still tell "would be weaker" from "could not tell". Unlike `--validate-config`, whose `approval_status: "pending"` exits `0`, this flag's whole purpose is that verdict, so it is in the exit code.
+
+**Stream contract and side effects.** The same guarantee as the four flags above — exactly one JSON document on stdout, 0 bytes of stderr, in every case including the error ones (the child's own `[sandy]` output is discarded). It writes **nothing**: no approval file, no sandbox directory (the ordinary pre-pass's `mkdir -p "$SANDBOX_DIR"` is skipped), no generated build files, not even the symlink gate's per-launch refresh of its approved list. It needs **no Docker**: the report mode skips the Docker preflight and the network reapers. (The two empty bind-mount fixtures every sandy invocation creates at the top of `$SANDY_HOME` are the only exception, as for every other flag.) Guarded by `test/run-tests.sh` §183, which grants the "approved" fixture through the real pre-pass on a pty and asserts the report's hashes equal the stored ones.
+
 ## In-container pane identity (stable, 2.4.0)
 
 Not a flag on this list — it is read from live tmux state **inside** the container, not from a fast-path handler that runs before Docker, so `--print-state` (a host-side, no-container-required probe) cannot report it and never will. It is documented here anyway because, as of 2.4.0, it is a **published, stable contract** an in-container consumer may depend on: full rationale and the 4-agent mapping table live in SPECIFICATION.md's "Pane-identity contract" (section 12).
@@ -878,6 +922,7 @@ Reading identity from `pane_index`, a scrollback marker, or the pane title is un
 ## Schema versioning
 
 - **`2.7.0` (#299):** two new top-level fields, `proxy_image_src` and `proxy_image_epoch` — the proxy image's identity labels, full mode only, `null` when absent. Additive, so `schema_version` stays `4`.
+- **`2.7.0` (#296):** a new flag, `--approvals [--workspace PATH]` — a separate document with its own shape (above), carrying the same `schema_version`; nothing in the other outputs changes.
 - **`2.7.0` (#296):** one new top-level array, `dockerfile_approvals` (`{workspace_hash, workspace_path_hint, context_sha256, approved_at}` per `.sandy/Dockerfile` approval file, both modes). Additive, so `schema_version` stays `4`; `approvals` is unchanged.
 - **`2.7.0` (#295):** one new `sandboxes[]` field, `image` (`{name, id, project_layer}`, both modes), read back from a new session-marker field of the same name. Additive, so `schema_version` stays `4`; it is marker-derived and follows the `marker` rule, and the writer never emits it as `null`.
 - **`2.7.0` (#386):** two new `sandboxes[]` fields, `marker` (`{state, sandy_version, launched_at}`, both modes) and `cross_session_inbound` (`{pinned, user_settings, workspace_settings}`; the two file objects are `not_computed` in light mode). Additive, so `schema_version` stays `4`. `marker` defines, once for every marker-derived field, what a `null` means, backed by the invariant that a current sandy never writes a deliberate `null` in one. `agent_args` (2.1.0) is now documented here as the supported source for that value. Consumers gate on field presence.
