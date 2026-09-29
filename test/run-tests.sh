@@ -23379,6 +23379,18 @@ check "§183(8) a key already set in the environment drops out of the reported s
       "$(_s183_q e '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["hash"]')" \
       "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["hash"]')" "$_S183_D/e.out"
 
+# #295's session-created record is part of the Dockerfile gate's state: the
+# report must SAY it (the next approval prompt leads with it) and must not
+# clear it -- reading is not reviewing.
+_S183_SREC="$_S183_H/approvals/dockerfile-$(printf '%s' "$_S183_W" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16).session-created"
+check "§183(8b) no session record: the dockerfile gate reports session_created false" \
+    test "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="dockerfile"][0]["session_created"]')" = false
+mkdir -p "$_S183_H/approvals"; printf 'deadbeef\n# recorded:  2026-09-29T00:00:00Z\n# by:        session-end\n' > "$_S183_SREC"
+_s183_run sc "$_S183_H" "$_S183_W"
+check "§183(8c) a session-created record is reported as session_created true, and the report leaves it in place (mutation: a report that consults the record but clears it)" \
+    bash -c '[ "$1" = true ] && [ -f "$2" ]' _ "$(_s183_q sc '[g for g in d["gates"] if g["gate"]=="dockerfile"][0]["session_created"]')" "$_S183_SREC"
+rm -f "$_S183_SREC"; rmdir "$_S183_H/approvals" 2>/dev/null || true
+
 # SANDY_AUTO_APPROVE_PRIVILEGED covers two gates, never the symlink one.
 _s183_run a "$_S183_H" "$_S183_W" SANDY_AUTO_APPROVE_PRIVILEGED=1
 check "§183(9) under SANDY_AUTO_APPROVE_PRIVILEGED=1 the key and Dockerfile gates read approved (by auto_approve), the symlink gate stays pending" \
