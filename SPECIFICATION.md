@@ -285,64 +285,92 @@ Each launch also writes `$SANDBOX_DIR/WORKSPACE.json` (non-hidden) — a structu
 
 On launch, sandy scans sibling sandbox directories: any whose `workspace_path` field matches the current `WORK_DIR` is reported as a likely duplicate via `warn`. For legacy sandboxes lacking `WORKSPACE.json` entirely, sandy falls back to a heuristic: case-insensitive `<NAME>` match with a different `<HASH>`. Detection is read-only — sandy never auto-merges sandbox state, since accumulated settings/plugins/package caches make manual review the right call.
 
+### Host-side path contract (stable, 2.7.0, #386)
+
+Host-side tools (fleet adapters, UIs, dashboards) need some way to find what runs inside a sandbox. This section is the **only** part of the sandbox directory they may depend on. Everything else under `$SANDY_HOME` is private and may change in any release (see "Directory Layout" below). Stable here means the same as for the "Pane-identity contract" in §12: renaming or removing any of these facts is a breaking change, governed by README's `## Deprecated` table (announced in an `X.0.0`, removed no earlier than a later `X.Y.0`).
+
+**Find a sandbox from `--print-state`, never by constructing its path.** Every path below is relative to that sandbox's `sandboxes[].path`. The slug, the hash and `$SANDY_HOME`'s own layout are not part of the contract. "A consumer constructs a path sandy owns" has broken three times already (#248, #345, #353), which is why this contract publishes as few paths as possible.
+
+**1. Agent home mapping.** Each selected agent's home directory inside the container is a bind mount of one directory in the sandbox. Anything an in-container process writes under that home is therefore readable on the host at the mapped path.
+
+| host (under `sandboxes[].path`) | container | mounted when |
+|---|---|---|
+| `claude/` | `~/.claude/` | `claude` is among the launch's agents |
+| `gemini/` | `~/.gemini/` | `gemini` is among them |
+| `codex/` | `~/.codex/` | `codex` is among them |
+| `grok/` | `~/.grok/` | `grok` is among them |
+| `opencode/config/` | `~/.config/opencode/` | `opencode` is among them |
+| `opencode/share/` | `~/.local/share/opencode/` | `opencode` is among them |
+
+Sandy promises the **mapping, not the contents**. Files Claude Code, another agent or a third-party daemon writes there belong to their writer. The files sandy itself seeds there (for example `claude/settings.json`) are not part of this contract; read what sandy resolved from `--print-state` instead (`cross_session_inbound`, `agent_args`). The container home is `/home/sandy` (2.0.0). Pinned by `run-tests.sh` §177(1), which runs the real mount assembly for each agent alone and asserts these pairs exactly.
+
+**2. Feature mount destinations.** A feature manifest's mount `name` determines its container path (FEATURE-MANIFEST.md D5):
+- `payload` → `/opt/sandy/features/<feature>` (read-only by default);
+- `.` → `~/.<feature>/`;
+- `<name>` → `~/.<feature>/<name>`.
+
+A supervised entry's own state directory is `/opt/sandy/feature-state/<feature>`, exported to that entry as `SANDY_FEATURE_STATE`. An entry reads the variable; it never constructs the path.
+
+**3. Daemon container labels.** A daemon-mode agent container carries:
+
+| label | value |
+|---|---|
+| `sandy.daemon` | `true` |
+| `sandy.workspace_path` | the canonical workspace path |
+| `sandy.session` | the sandbox name (`sandboxes[].name`) |
+| `sandy.started_at` | UTC launch time |
+| `sandy.daemon_pid` | the host supervisor's pid |
+| `sandy.updated_at` | UTC time, present only on a restart made by `--update-sessions` |
+
+Other `sandy.*` labels (`sandy.managed`, `sandy.provision_id`, `sandy.provisioned_at`, the image label `sandy.feature_entries`) are internal.
+
+**Also a contract, but documented elsewhere:**
+- the in-container session marker at `/etc/sandy-session.json` (its host copy is private; use `--print-state`);
+- the pane-identity contract (§12);
+- the `--print-state` document itself (`SPEC_INTROSPECTION.md`).
+
 ### Directory Layout
 
-As of v0.9.0, the sandbox directory contains **sibling** per-agent subdirs (`claude/`, `gemini/`, `codex/` — the last added in v0.10.0 — and `opencode/` — added in v0.13.0) so any multi-agent combo can coexist in the same sandbox. The first three are mounted at `~/.claude`, `~/.gemini`, and `~/.codex` inside the container; OpenCode straddles two XDG paths and uses sibling `opencode/config/` and `opencode/share/` subdirs mounted at `~/.config/opencode` and `~/.local/share/opencode` respectively.
+**Private.** This tree describes the current implementation, for maintainers and debugging. Only the paths in "Host-side path contract" above are stable; everything else here may move, be renamed or disappear in any release. A host tool that needs a value from one of these files should get it from `--print-state`; if `--print-state` doesn't carry it, ask for a field, not a path.
 
 ```
-~/.sandy/sandboxes/<name>-<hash>/
-├── claude/                    # → /home/sandy/.claude
-│   ├── settings.json
-│   ├── projects/
-│   ├── plugins/
-│   ├── statsig/
-│   ├── channels/
-│   ├── hooks/
-│   └── history.jsonl
-├── gemini/                    # → /home/sandy/.gemini
-│   ├── settings.json
-│   ├── commands/              # TOML slash commands
-│   ├── extensions/
-│   └── tmp/                   # session history
-├── codex/                     # → /home/sandy/.codex
-│   ├── config.toml            # sandbox_mode + [notice] + [projects] trust
-│   ├── log/
-│   ├── memories/
-│   └── skills/                # SKILL.md files (synthkit seeds md2pdf etc.)
-├── pip/                       # → /home/sandy/.pip-packages
-├── uv/                        # → /home/sandy/.local/share/uv
-├── npm-global/                # → /home/sandy/.npm-global
-├── go/                        # → /home/sandy/go
-├── cargo/                     # → /home/sandy/.cargo
-├── relay-state/               # REMOVED in 2.6.0 (#382, decisions 4-5). Was → /opt/sandy/relay-state
-│                              #   (rw), the relay-designated entry's shared .state/.startup/
-│                              #   supervisor.log (2.2.0, #353). No longer created by any launch; a
-│                              #   leftover from a pre-2.6.0 sandbox is `rm -rf`'d at launch (a symlink
-│                              #   is unlinked, never followed) with one info line, then never
-│                              #   reappears. SANDY_RELAY_STATE is no longer exported, mounted or read.
-├── handoff/                   # REMOVED in 2.2.0 (#352/#355) with the ~/.handoff tree. Never created
-│                              #   now and never migrated (since 2.6.0 nothing reads handoff/relay or
-│                              #   relay-state/); a pre-2.2.0 sandbox keeps it inert. --reset-sandbox
-│                              #   destroys it.
-├── relay-bin/                 # REMOVED in 2.2.0 (#354). A leftover entry here is now a hard
-│                              #   error naming the manifest `entry` that replaces it; --reset-sandbox destroys it.
-├── feature-state/             # created for EVERY adopted feature entry (2.4.0, #381; every entry
-│   └── <feature>/             #   identical since 2.6.0, #382) — one subdir per entry →
-│                              #   /opt/sandy/feature-state/<feature> (rw), exported to that entry's
-│                              #   own process as SANDY_FEATURE_STATE. There is no longer a
-│                              #   "designated" entry sharing relay-state/ above; every entry gets its
-│                              #   own subdir here, uniformly.
-├── features/                  # REMOVED in 2.0.0: the per-sandbox feature marker directory (1.15.0) is
-│                              #   retired and never created. Feature enrolment is decided by each
-│                              #   $SANDY_HOME/features/<name>/feature.json manifest (docs/design/FEATURE-MANIFEST.md).
-├── gstack/                    # legacy gstack state location; renamed to gstack.migrated/ on first 0.12+ launch
-├── gstack.migrated/           # post-migration breadcrumb — safe to delete after verifying $WORK_DIR/.gstack/ works
-├── workspace-commands/        # → .claude/commands/ (writable overlay)
-├── workspace-agents/          # → .claude/agents/
-└── workspace-plugins/         # → .claude/plugins/
+~/.sandy/sandboxes/
+├── <name>-<hash>/                 # one per workspace; <name>-<hash> is sandboxes[].name
+│   ├── claude/                    # CONTRACT → ~/.claude (settings.json, projects/, plugins/, hooks/, …)
+│   ├── gemini/                    # CONTRACT → ~/.gemini
+│   ├── codex/                     # CONTRACT → ~/.codex (config.toml, auth.json when seeded)
+│   ├── grok/                      # CONTRACT → ~/.grok
+│   ├── opencode/
+│   │   ├── config/                # CONTRACT → ~/.config/opencode
+│   │   └── share/                 # CONTRACT → ~/.local/share/opencode
+│   ├── pip/                       # → ~/.pip-packages (PYTHONUSERBASE)
+│   ├── uv/                        # → ~/.local/share/uv
+│   ├── npm-global/                # → ~/.npm-global
+│   ├── go/                        # → ~/go (GOPATH)
+│   ├── cargo/                     # → ~/.cargo
+│   ├── venv/                      # → <workspace>/.venv overlay (when the workspace has a .venv/)
+│   ├── feature-state/<feature>/   # → /opt/sandy/feature-state/<feature> (rw), one per adopted entry
+│   ├── agent-args-composed/       # → /opt/sandy/agent-args (ro), merged agent_args files (#363)
+│   ├── workspace-*/               # writable overlays: .claude/commands|agents|plugins, gemini commands
+│   ├── agent-args.<agent>         # operator per-agent args (privileged by location)
+│   ├── sandy-session.json         # host copy of /etc/sandy-session.json (read it via --print-state)
+│   ├── WORKSPACE.json             # workspace lineage (see "Naming")
+│   ├── proxy.log, sandy-proxy.json # egress proxy log and state (when the proxy is on)
+│   ├── .sandy_created_version     # version tracking (see CLAUDE.md "Sandbox version tracking")
+│   ├── .sandy_last_version
+│   ├── .sandy-approved-symlinks.list, .protected-existed-at-launch, .head-at-launch,
+│   │   .claude-perm-mode-at-launch, .project_build_hash, …   # launch bookkeeping
+│   └── .v1-backup/                # only on a sandbox migrated from the v1 layout
+├── <name>-<hash>.claude.json      # → ~/.claude.json (single-file mount; may move, see #400)
+└── .<name>-<hash>.lock/           # the per-workspace launch mutex
 ```
 
-`<NAME>.claude.json` is stored at `~/.sandy/sandboxes/<NAME>.claude.json` (outside the sandbox dir) to avoid mount conflicts.
+**Legacy leftovers.** Older sandboxes may still carry directories that no current launch creates:
+- `relay-state/` (2.2.0–2.5.x): removed at the next launch, with one info line.
+- `handoff/` (≤2.1.x): inert; `--reset-sandbox` destroys it.
+- `relay-bin/` (≤2.1.x): a leftover entry is a hard error naming the manifest `entry`.
+- `features/` (1.15.x): never read.
+- `gstack/` becomes `gstack.migrated/` on the first 0.12+ launch.
 
 **Layout migration (v1 → v1.5)**: On each launch, sandy detects the v1 layout marker (`settings.json` at the sandbox top level with no `claude/` subdir) and moves Claude-owned entries into `claude/`. Idempotent; pre-existing pkg-persistence and workspace-* directories are untouched.
 

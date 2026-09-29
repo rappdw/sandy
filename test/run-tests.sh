@@ -21719,6 +21719,192 @@ unset _S176H_README _S176H_SPECINTRO _S176H_TABLE _S176H_MISS _s176h_t _s176h_ro
 
 unset _S176_SANDY _S176_GDB_FN _S176_D _S176_SPEC _S176_APPA
 
+# ============================================================
+echo "§177: #386 — host-side path contract; --print-state marker and cross_session_inbound"
+# ============================================================
+# (1) The agent-home mapping is a published contract (SPECIFICATION.md
+#     "Host-side path contract"). Asserted as a PROPERTY: the real mount
+#     assembly block is run once per agent with that agent alone selected, and
+#     the -v pairs whose SOURCE is under $SANDBOX_DIR must be EXACTLY the
+#     contract's pairs -- no more (another agent's home leaking in), no fewer.
+#     The SPEC table is then checked to state the same pairs, so the document
+#     and the code cannot drift apart silently.
+# (2) marker{} and the no-deliberate-null invariant, round-tripped through the
+#     REAL marker writer and the REAL --print-state reader.
+# (3) cross_session_inbound file statuses, light mode, and the hostile-input
+#     guards. Each case lives in its OWN $SANDY_HOME (§88b: separate the
+#     fixtures, not the output).
+_S177_SANDY="$SANDY_SCRIPT"
+_S177_D="$(cd "$(mktemp -d)" && pwd -P)"
+
+# --- (1) agent-home mapping --------------------------------------------------
+_S177_MNT="$(awk '/^    RUN_FLAGS\+=\(-v "\$SANDBOX_DIR\/claude:\/home\/sandy\/\.claude"\)$/{p=1} p&&/^# Feature entries \(#381/{exit} p' "$_S177_SANDY")"
+_S177_MNT="if _sandy_agent_has claude; then
+$_S177_MNT"
+check "§177(1-pre) the agent-home mount block was extracted and parses (mutation: a moved anchor empties it and (1) goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDBOX_DIR/opencode/share" && bash -n -c "$1"' -- "$_S177_MNT"
+_s177_pairs() {  # $1 agent -> the SANDBOX_DIR-sourced -v pairs, sorted (AG rides env, not argv)
+    env -i PATH="$PATH" HOME="$_S177_D/nohome" AG="$1" bash -c '
+        set -u
+        _sandy_agent_has() { [ "$1" = "$AG" ]; }
+        SANDBOX_DIR=/SB; CLAUDE_JSON=/SB.claude.json; CRED_TMPDIR=""; PROFILE_TMPDIR=""
+        RUN_FLAGS=()
+        eval "$1"
+        i=0
+        while [ "$i" -lt "${#RUN_FLAGS[@]}" ]; do
+            if [ "${RUN_FLAGS[$i]}" = "-v" ]; then
+                v="${RUN_FLAGS[$((i+1))]}"
+                case "$v" in /SB/*) printf "%s\n" "$v" ;; esac
+            fi
+            i=$((i+1))
+        done | sort' _ "$_S177_MNT" 2>/dev/null || true
+}
+_S177_EXP_claude='/SB/claude:/home/sandy/.claude'
+_S177_EXP_gemini='/SB/gemini:/home/sandy/.gemini'
+_S177_EXP_codex='/SB/codex:/home/sandy/.codex'
+_S177_EXP_grok='/SB/grok:/home/sandy/.grok'
+_S177_EXP_opencode='/SB/opencode/config:/home/sandy/.config/opencode
+/SB/opencode/share:/home/sandy/.local/share/opencode'
+for _s177_ag in claude gemini codex grok opencode; do
+    eval "_s177_exp=\"\$_S177_EXP_$_s177_ag\""
+    _s177_got="$(_s177_pairs "$_s177_ag")"
+    check "§177(1) $_s177_ag alone mounts exactly its contracted home(s) from the sandbox (got: $(printf '%s' "$_s177_got" | tr '\n' ' '))" \
+        bash -c '[ "$1" = "$(printf "%s\n" "$2" | sort)" ]' -- "$_s177_got" "$_s177_exp"
+done
+_S177_SPEC_CONTRACT="$(awk '/^### Host-side path contract/{p=1;next} p&&/^##/{exit} p' "${_S177_SANDY%/sandy}/SPECIFICATION.md" 2>/dev/null || true)"
+check "§177(1-spec) SPECIFICATION.md has a 'Host-side path contract' section" \
+    bash -c '[ -n "$1" ]' -- "$_S177_SPEC_CONTRACT"
+for _s177_pair in 'claude/|~/.claude/' 'gemini/|~/.gemini/' 'codex/|~/.codex/' 'grok/|~/.grok/' 'opencode/config/|~/.config/opencode/' 'opencode/share/|~/.local/share/opencode/'; do
+    _s177_src="${_s177_pair%%|*}"; _s177_dst="${_s177_pair#*|}"
+    check "§177(1-spec) the contract table maps $_s177_src to $_s177_dst" \
+        bash -c 'printf "%s\n" "$1" | grep -F "\`$2\`" | grep -qF "\`$3\`"' -- "$_S177_SPEC_CONTRACT" "$_s177_src" "$_s177_dst"
+done
+unset _s177_ag _s177_exp _s177_got _s177_pair _s177_src _s177_dst
+
+# --- (2) marker{} and the no-deliberate-null invariant --------------------------
+# The REAL writer (effort .. the printf into $_sandy_session_file), with the
+# REAL _sandy_fe_marker_body, run for a claude launch and a codex-only launch.
+_S177_WRITER="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/> "\$_sandy_session_file"$/{exit}' "$_S177_SANDY")"
+_S177_FEBODY="$(sed -n '/^_sandy_fe_marker_body() {/,/^}$/p' "$_S177_SANDY")"
+check "§177(2-pre) the marker writer and _sandy_fe_marker_body were extracted (mutation: a moved anchor empties them)" \
+    bash -c 'printf "%s" "$1" | grep -q "cross_session_inbound" && printf "%s" "$2" | grep -q "_sandy_fe_marker_body"' -- "$_S177_WRITER" "$_S177_FEBODY"
+_s177_write_marker() {  # $1 sandbox dir, $2 SANDY_AGENT, $3 csi json, $4 src json
+    env -i PATH="$PATH" SANDY_AGENT="$2" CSI="$3" SRC="$4" OUT="$1/sandy-session.json" bash -c '
+        _sandy_agent_has() { case ",$SANDY_AGENT," in *",$1,"*) return 0 ;; esac; return 1; }
+        sandy_full_version() { printf "9.9.9-test"; }
+        eval "$1"
+        _sandy_egress_mode=permissive; SANDY_WORKSPACE=/w; SANDBOX_NAME=x; _sandy_session_nonce=n
+        _sandy_fe_list=""; _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""
+        _sandy_csi_json="$CSI"; _sandy_csi_src_json="$SRC"
+        [ "$CSI" = unset ] && unset _sandy_csi_json _sandy_csi_src_json
+        _sandy_session_file="$OUT"
+        eval "$2"' _ "$_S177_FEBODY" "$_S177_WRITER" 2>/dev/null
+}
+_s177_state() {  # $1 SANDY_HOME [$2 light] -> the --print-state document
+    env -i PATH="$PATH" HOME="$_S177_D/nohome" SANDY_HOME="$1" bash "$_S177_SANDY" --print-state ${2:-} 2>"$1.err" || true
+}
+_s177_home() {  # $1 case name -> a fresh SANDY_HOME with one sandbox dir, printed
+    mkdir -p "$_S177_D/$1/sandboxes/sb-$1/claude"
+    printf '%s' "$_S177_D/$1"
+}
+_H="$(_s177_home claude)"; _s177_write_marker "$_H/sandboxes/sb-claude" claude '"accept"' '"feature:acc"'
+_S177_OUT_CLAUDE="$(_s177_state "$_H")"
+_H="$(_s177_home codex)";  _s177_write_marker "$_H/sandboxes/sb-codex" codex unset unset
+_S177_OUT_CODEX="$(_s177_state "$_H")"
+check "§177(2a) a claude launch's marker reads back as marker.state=present with the writer's own version" \
+    bash -c 'printf "%s" "$1" | grep -qF "\"marker\":{\"state\":\"present\",\"sandy_version\":\"9.9.9-test\","' -- "$_S177_OUT_CLAUDE"
+for _s177_f in agents agent_args agent_args_composed feature_entries; do
+    check "§177(2b) INVARIANT: the current writer never leaves $_s177_f null (claude launch) -- a null here would read as 'predates the field'" \
+        bash -c 'printf "%s" "$1" | grep -q "\"$2\":" && ! printf "%s" "$1" | grep -q "\"$2\":null"' -- "$_S177_OUT_CLAUDE" "$_s177_f"
+    check "§177(2b) INVARIANT: ...nor $_s177_f on a codex-only launch" \
+        bash -c 'printf "%s" "$1" | grep -q "\"$2\":" && ! printf "%s" "$1" | grep -q "\"$2\":null"' -- "$_S177_OUT_CODEX" "$_s177_f"
+done
+check "§177(2c) pinned round-trips the writer's value and source with status ok" \
+    bash -c 'printf "%s" "$1" | grep -qF "\"pinned\":{\"value\":\"accept\",\"source\":\"feature:acc\",\"status\":\"ok\"}"' -- "$_S177_OUT_CLAUDE"
+check "§177(2d) INVARIANT: the writer's deliberate null (claude not launched) is NOT a null pinned -- it is status not_claude" \
+    bash -c 'printf "%s" "$1" | grep -qF "\"pinned\":{\"value\":null,\"source\":null,\"status\":\"not_claude\"}"' -- "$_S177_OUT_CODEX"
+_H="$(_s177_home unwritten)"; _s177_write_marker "$_H/sandboxes/sb-unwritten" claude unset unset
+check "§177(2e) ...and a claude launch whose writes were refused is status not_written" \
+    bash -c 'printf "%s" "$1" | grep -qF "\"pinned\":{\"value\":null,\"source\":null,\"status\":\"not_written\"}"' -- "$(_s177_state "$_H")"
+# predates: the same real marker with the field's lines removed.
+_H="$(_s177_home predates)"; _s177_write_marker "$_H/sandboxes/sb-predates" claude '"hold"' '"explicit"'
+grep -v '"cross_session_inbound' "$_H/sandboxes/sb-predates/sandy-session.json" > "$_H/m" && mv "$_H/m" "$_H/sandboxes/sb-predates/sandy-session.json"
+_S177_OUT_PRE="$(_s177_state "$_H")"
+check "§177(2f) a marker WITHOUT the field (an older writer) gives pinned=null with marker.state=present -- the 'predates' reading" \
+    bash -c 'printf "%s" "$1" | grep -qF "\"pinned\":null" && printf "%s" "$1" | grep -qF "\"marker\":{\"state\":\"present\""' -- "$_S177_OUT_PRE"
+_H="$(_s177_home absent)"
+check "§177(2g) no marker -> marker.state=absent with null version and time, and pinned null" \
+    bash -c 'printf "%s" "$1" | grep -qF "\"marker\":{\"state\":\"absent\",\"sandy_version\":null,\"launched_at\":null}" && printf "%s" "$1" | grep -qF "\"pinned\":null"' -- "$(_s177_state "$_H")"
+_H="$(_s177_home torn)"; printf '{\n  "sche' > "$_H/sandboxes/sb-torn/sandy-session.json"
+check "§177(2h) a torn marker is 'unreadable' (unknown), never 'present' -- which would turn every null into a false 'predates'" \
+    bash -c 'printf "%s" "$1" | grep -qF "\"marker\":{\"state\":\"unreadable\""' -- "$(_s177_state "$_H")"
+
+# --- (3) cross_session_inbound file objects -----------------------------------
+if command -v node >/dev/null 2>&1 || command -v jq >/dev/null 2>&1; then
+    _s177_csi_case() {  # $1 name, $2 settings.json content ("" = no file), $3 workspace file content
+        local h; h="$(_s177_home "$1")"
+        mkdir -p "$h/ws/.claude"
+        printf '{\n  "workspace_path": "%s"\n}\n' "$h/ws" > "$h/sandboxes/sb-$1/WORKSPACE.json"
+        [ -n "$2" ] && printf '%s' "$2" > "$h/sandboxes/sb-$1/claude/settings.json"
+        [ -n "$3" ] && printf '%s' "$3" > "$h/ws/.claude/settings.local.json"
+        printf '%s' "$h"
+    }
+    _H="$(_s177_csi_case ok '{"crossSessionInbound":"accept","x":1}' '{"crossSessionInbound":"refuse"}')"
+    _S177_OUT_OK="$(_s177_state "$_H")"
+    check "§177(3a) both files read at query time: user_settings ok/accept, workspace_settings ok/refuse" \
+        bash -c 'printf "%s" "$1" | grep -qF "\"user_settings\":{\"value\":\"accept\",\"status\":\"ok\"},\"workspace_settings\":{\"value\":\"refuse\",\"status\":\"ok\"}"' -- "$_S177_OUT_OK"
+    check "§177(3a) --print-state stays valid JSON with 0 bytes of stderr (stream contract)" \
+        bash -c '[ ! -s "$2.err" ] && printf "%s" "$1" | { if command -v node >/dev/null 2>&1; then node -e "JSON.parse(require(\"fs\").readFileSync(0,\"utf8\"))"; else jq -e . >/dev/null; fi; }' -- "$_S177_OUT_OK" "$_H"
+    check "§177(3b) NO effective value is emitted (decision 3: precedence is Claude Code rule, and these files are not all of its inputs)" \
+        bash -c '! printf "%s" "$1" | grep -q "\"effective\""' -- "$_S177_OUT_OK"
+    _H="$(_s177_csi_case keyabs '{"other":1}' '')"
+    check "§177(3c) key_absent vs file_absent are distinct answers" \
+        bash -c 'printf "%s" "$1" | grep -qF "\"user_settings\":{\"value\":null,\"status\":\"key_absent\"},\"workspace_settings\":{\"value\":null,\"status\":\"file_absent\"}"' -- "$(_s177_state "$_H")"
+    _H="$(_s177_csi_case tornfile '{"crossSessionInb' '[1,2]')"
+    check "§177(3d) a torn file and a JSON non-object are both not_object (never key_absent -- #400's signature)" \
+        bash -c 'printf "%s" "$1" | grep -qF "\"user_settings\":{\"value\":null,\"status\":\"not_object\"},\"workspace_settings\":{\"value\":null,\"status\":\"not_object\"}"' -- "$(_s177_state "$_H")"
+    _H="$(_s177_csi_case link '' '')"
+    printf '{"crossSessionInbound":"accept"}' > "$_S177_D/secret.json"
+    ln -s "$_S177_D/secret.json" "$_H/sandboxes/sb-link/claude/settings.json"
+    mv "$_H/ws/.claude" "$_H/ws/real-claude"; ln -s "$_H/ws/real-claude" "$_H/ws/.claude"
+    printf '{"crossSessionInbound":"accept"}' > "$_H/ws/real-claude/settings.local.json"
+    check "§177(3e) a symlink at the file OR at its directory is unreadable, never followed (the rw ~/.claude and the workspace are untrusted)" \
+        bash -c 'printf "%s" "$1" | grep -qF "\"user_settings\":{\"value\":null,\"status\":\"unreadable\"},\"workspace_settings\":{\"value\":null,\"status\":\"unreadable\"}"' -- "$(_s177_state "$_H")"
+    _H="$(_s177_csi_case big '' '')"
+    { printf '{"crossSessionInbound":"accept","pad":"'; head -c 1100000 /dev/zero | tr '\0' 'x'; printf '"}'; } > "$_H/sandboxes/sb-big/claude/settings.json"
+    check "§177(3f) a file over 1 MiB is unreadable without being parsed" \
+        bash -c 'printf "%s" "$1" | grep -qF "\"user_settings\":{\"value\":null,\"status\":\"unreadable\"}"' -- "$(_s177_state "$_H")"
+    _H="$(_s177_csi_case light '{"crossSessionInbound":"accept"}' '{"crossSessionInbound":"refuse"}')"
+    _s177_write_marker "$_H/sandboxes/sb-light" claude '"accept"' '"explicit"'
+    _S177_OUT_LIGHT="$(_s177_state "$_H" light)"
+    check "§177(3g) light mode: pinned still reported (marker, no parse), both files not_computed -- never a deliberate null" \
+        bash -c 'printf "%s" "$1" | grep -qF "\"cross_session_inbound\":{\"pinned\":{\"value\":\"accept\",\"source\":\"explicit\",\"status\":\"ok\"},\"user_settings\":{\"value\":null,\"status\":\"not_computed\"},\"workspace_settings\":{\"value\":null,\"status\":\"not_computed\"}}"' -- "$_S177_OUT_LIGHT"
+else
+    skip "§177(3) cross_session_inbound file statuses need node or jq on this host"
+fi
+# --- (4) the SPEC tree lists every directory a launch creates -----------------
+# Derived from the code, not from a list kept in this test: every
+# `mkdir -p "$SANDBOX_DIR/<top>` in sandy must name a <top> that the
+# "Directory Layout" tree shows. A launch that starts creating a new directory
+# without the private-layout doc knowing fails here.
+_S177_TREE="$(awk '/^### Directory Layout/{p=1;next} p&&/^##/{exit} p' "${_S177_SANDY%/sandy}/SPECIFICATION.md" 2>/dev/null || true)"
+_S177_TOPS="$(grep -o 'mkdir -p "\$SANDBOX_DIR/[A-Za-z0-9._-]*' "$_S177_SANDY" | sed 's#.*SANDBOX_DIR/##' | sort -u)"
+check "§177(4-pre) both the SPEC tree and the code's sandbox mkdirs were read (mutation: a renamed heading empties the tree)" \
+    bash -c 'printf "%s" "$1" | grep -q "feature-state" && printf "%s" "$2" | grep -q "^pip$"' -- "$_S177_TREE" "$_S177_TOPS"
+_S177_MISS=""
+for _s177_t in $_S177_TOPS; do
+    case "$_s177_t" in workspace-*) _s177_t="workspace-*" ;; esac
+    printf '%s\n' "$_S177_TREE" | grep -qF -- "── $_s177_t/" || _S177_MISS="$_S177_MISS $_s177_t"
+done
+check "§177(4) every directory a launch creates under the sandbox is in the SPEC Directory Layout tree (missing:${_S177_MISS:- none})" \
+    bash -c '[ -z "$1" ]' -- "$_S177_MISS"
+unset _S177_TREE _S177_TOPS _S177_MISS _s177_t
+
+rm -rf "$_S177_D"
+unset _S177_SANDY _S177_D _S177_MNT _S177_SPEC_CONTRACT _S177_WRITER _S177_FEBODY _S177_OUT_CLAUDE _S177_OUT_CODEX _S177_OUT_PRE _S177_OUT_OK _S177_OUT_LIGHT _H _s177_f
+unset -f _s177_pairs _s177_write_marker _s177_state _s177_home _s177_csi_case 2>/dev/null || true
+
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

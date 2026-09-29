@@ -261,6 +261,15 @@ Two gates, deliberately: the relay **refuses to start**, and `_is_allowed` denie
 
 ## Per-project Sandboxes
 
+**Host-side path contract (2.7.0, #386).** Only three things about the sandbox are a contract for host tools (SPECIFICATION.md §4 "Host-side path contract"):
+- the **agent-home mapping** (`claude/` → `~/.claude/`, and likewise for gemini, codex, grok and opencode's `config/`/`share/`);
+- the **feature mount destinations**;
+- the **daemon container labels**.
+
+Everything else under `$SANDY_HOME`, including the host copy of `sandy-session.json` and the settings files sandy seeds, is **private** and may change in any release. A consumer finds the sandbox root from `--print-state`'s `sandboxes[].path`, never from the slug. When a host tool needs a sandy-written value, the answer is a `--print-state` field, not a published path. That is how `marker` and `cross_session_inbound` landed.
+
+`marker` carries an invariant any new marker-derived field must keep: **a current sandy never writes a marker-derived field as a deliberate `null`** (give "not applicable" its own encoding, as `pinned.status: not_claude` does). Otherwise `null` + `marker.state: present` stops meaning "predates the field". Guarded by §177.
+
 Each project gets an isolated sandbox under `~/.sandy/sandboxes/`, named `<mnemonic>-<8-char-hash>`. The hash is over the workspace path canonicalized with `pwd -P` (resolves symlinks, folds case-collisions on APFS). Each launch writes `WORKSPACE.json` (canonical path, user-typed path when different, first/last launch timestamps and sandy versions) and warns when a sibling sandbox records the same workspace — manual cleanup only.
 
 **`settings.json` is regenerated at `$SANDBOX_DIR/claude/settings.json` on every launch**, merge-preserving: the host copy is re-read so host edits propagate, but `enabledPlugins` survives from the previous session so `/plugin install` persists. The file is **rw** in-container (the stricter `:ro` sidecar broke plugin installs with EROFS). Sandy-managed keys are re-overwritten every launch: `extraKnownMarketplaces`, `spinnerTipsEnabled`, `skipDangerousModePermissionPrompt`, `skipAutoPermissionPrompt`, `permissions.defaultMode`, `disableClaudeAiConnectors` (#129), `sandbox.enabled` (#126), cmux hooks. `skipAutoPermissionPrompt` suppresses 2.1.x's auto-mode offer and tracks `SANDY_SKIP_PERMISSIONS`; 2.1.x ships a migration that **deletes** that key whenever `defaultMode != "auto"` — re-seeding every launch is what makes it stick. As of 1.7.0 `teammateMode` is **not seeded at all** and `SANDY_TEAMMATE_MODE` is **empty by default** (set it to e.g. `tmux` to opt in).
