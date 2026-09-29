@@ -22649,8 +22649,13 @@ assert re.match(r\"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$\", e
 " "$1"' _ "$_S181_ENTRY"
 check "§181(3) the two gates stay in separate arrays: approvals holds only the passive list, unchanged in shape (mutation: globbing *.list into either array mixes them)" \
     bash -c '[ "$1" = "[\"1234567890abcdef\"]" ]' _ "$(_s181_q "$_S181_H" '[a["workspace_hash"] for a in d["approvals"]]')"
+# `light` is POSITIONAL: `--print-state --light` is read as full mode, so the
+# first draft of this check never exercised light mode. (4b) proves the mode
+# (light reports dangling_images as null; full counts them).
 check "§181(4) emitted in LIGHT mode too (a directory glob, no docker)" \
-    bash -c '[ "$1" = "$2" ]' _ "$(_s181_q "$_S181_H" 'd["dockerfile_approvals"]' --light)" "$_S181_ENTRY"
+    bash -c '[ "$1" = "$2" ]' _ "$(_s181_q "$_S181_H" 'd["dockerfile_approvals"]' light)" "$_S181_ENTRY"
+check "§181(4b) ...and that output really was light mode (dangling_images is null only there)" \
+    bash -c '[ "$1" = null ]' _ "$(_s181_q "$_S181_H" 'd["dangling_images"]' light)"
 mkdir -p "$_S181_DIR/empty/approvals" "$_S181_DIR/none"
 check "§181(5) an approvals dir with no Dockerfile approval reports [] -- present, not null" \
     bash -c '[ "$1" = "[]" ]' _ "$(_s181_q "$_S181_DIR/empty" 'd["dockerfile_approvals"]')"
