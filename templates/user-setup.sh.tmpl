@@ -769,7 +769,11 @@ build_claude_cmd() {
     # SANDY_EFFORT (#effort): pin Claude Code's reasoning effort so a run isn't
     # silently at the model default. Validated host-side; a separate axis from
     # --model. Empty → omit the flag → Claude Code's own default applies.
-    [ -n "${SANDY_EFFORT:-}" ] && cmd+=" --effort ${SANDY_EFFORT}"
+    # printf %q even though the value is validated host-side (#116, R1): the
+    # sink is `bash -c`, and quoting at the sink is the rule precisely so that
+    # no builder's safety rests on remembering which keys some other block
+    # happens to validate.
+    [ -n "${SANDY_EFFORT:-}" ] && cmd+=" --effort $(printf "%q" "$SANDY_EFFORT")"
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
         # Use --permission-mode (the documented modern flag) instead of the
         # legacy --dangerously-skip-permissions. Claude 2.1.x added runtime
@@ -924,6 +928,31 @@ build_grok_cmd() {
     local cmd="grok --no-auto-update"
     if [ -n "${GROK_MODEL:-}" ]; then
         cmd+=" -m $(printf "%q" "$GROK_MODEL")"
+    fi
+    # SANDY_EFFORT (#116) -> grok's `--reasoning-effort`. VERIFIED FIRST-HAND
+    # (maintainer, `grok --help` on the sandy-grok image): the flag exists as
+    # `--reasoning-effort <EFFORT>` with alias `--effort`, and it is a TOP-LEVEL
+    # option of `grok [OPTIONS] [PROMPT] [COMMAND]` listed beside
+    # `-p, --single`, so it applies to the interactive TUI and to headless
+    # alike. The canonical spelling is used. `--help` does NOT enumerate the
+    # accepted values, so the value set below still rests on third-party
+    # probes: xhigh|high|medium|low accepted, and `max` a HARD ERROR ("unknown
+    # effort level 'max'") that would kill the pane at launch -- the #109 grok
+    # lesson, a wrong flag value hard-breaks the agent. So max CLAMPS to xhigh
+    # (grok's top level) and is never passed; the host names the clamp once at
+    # launch. The sandy-level value is what the marker records. A case, not a
+    # pass-through, so an unmapped value omits the flag rather than inventing
+    # one; printf %q because this string reaches `bash -c` (R1).
+    local _sandy_grok_effort=""
+    case "${SANDY_EFFORT:-}" in
+        low) _sandy_grok_effort=low ;;
+        medium) _sandy_grok_effort=medium ;;
+        high) _sandy_grok_effort=high ;;
+        xhigh) _sandy_grok_effort=xhigh ;;
+        max) _sandy_grok_effort=xhigh ;;
+    esac
+    if [ -n "$_sandy_grok_effort" ]; then
+        cmd+=" --reasoning-effort $(printf "%q" "$_sandy_grok_effort")"
     fi
     cmd+="$(_sandy_translate_args grok "$@")"
     _sandy_wrap_cmd_exit_pause "Grok" "$cmd"
