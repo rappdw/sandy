@@ -782,8 +782,11 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > rebuilt, which the monthly epoch guarantees within a month. Treat the
 > values as opaque identities to compare, not to parse beyond the prefix.
 > The labels are inherited by every sidecar container created from the
-> image. Sandy itself only **reports** them today; it does not compare a
-> running sidecar against them.
+> image. Sandy itself compares them only at **launch** (2.7.0, #299): a proxy
+> image whose labels are missing or differ from what that launch computed is
+> warned about (never refused) before the sidecar starts -- see
+> SPECIFICATION.md "Proxy identity labels". `--print-state` does no comparison;
+> a consumer that wants one compares these values itself.
 
 > **Light mode — `sandy --print-state light`.** A second positional arg selects
 > a cheap variant for pollers: its steady-state budget is **exactly two** docker

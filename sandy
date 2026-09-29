@@ -7565,6 +7565,62 @@ ENTRYPOINT ["/usr/local/bin/sandy-proxy"]
 DOCKERFILE
 }
 
+# #299: is the proxy image about to run the one THIS sandy would build?
+# $1 image, $2 expected sandy.proxy_src, $3 expected sandy.proxy_epoch -- the
+# values generate_dockerfile_proxy just computed (_SANDY_PROXY_SRC_ID /
+# _SANDY_PROXY_EPOCH), never recomputed here, so "expected" is by construction
+# what a build this launch would stamp.
+#
+# A mismatch means a rebuild did not happen: #218's reachability gate deferred
+# it (build resources unreachable, which is also where SANDY_OFFLINE=1 users
+# land), or the image predates the labels. MAINTAINER DECISION: WARN AND
+# PROCEED, never refuse -- the same trade #218/#219 made for every other image:
+# refusing would lock the user out on exactly the network where the existing
+# image is most wanted, and the old proxy still enforces a policy, just an
+# older build of it. What must not happen is that it is SILENT, because the
+# proxy is the egress policy chokepoint and nothing else would say it is stale.
+# So: one yellow warning naming what differs, old vs expected, and the fix;
+# the session-end #218 notice repeats it (_SANDY_PROXY_IDENTITY_STALE).
+#
+# One `docker image inspect`, on the LAUNCH path only (the caller runs it
+# only when no proxy build ran this launch; the introspection fast paths never
+# reach it). A missing label reads as empty or "<no value>" depending on
+# whether the image carries any labels at all; both mean missing. An image
+# docker cannot inspect is left alone: the build gate above already refused
+# a launch with no proxy image. Always returns 0 -- it must never be the thing
+# that changes an exit status under set -e.
+_SANDY_PROXY_IDENTITY_STALE=""
+_sandy_proxy_identity_check() {
+    local _img="$1" _want_src="$2" _want_epoch="$3" _m _src _epoch _what=""
+    _m="$(docker image inspect -f '{{with .Config.Labels}}{{index . "sandy.proxy_src"}}|{{index . "sandy.proxy_epoch"}}{{end}}' "$_img" 2>/dev/null)" || return 0
+    _src="${_m%%|*}"
+    _epoch=""
+    [ "$_m" != "$_src" ] && _epoch="${_m#*|}"
+    [ "$_src" = "<no value>" ] && _src=""
+    [ "$_epoch" = "<no value>" ] && _epoch=""
+    if [ -z "$_src" ] && [ -z "$_epoch" ]; then
+        _what="it carries no identity labels (built before 2.7.0, #299); expected source ${_want_src}, epoch ${_want_epoch}"
+    else
+        if [ "$_src" != "$_want_src" ]; then
+            _what="source ${_src:-<missing>} (expected ${_want_src})"
+        fi
+        if [ "$_epoch" != "$_want_epoch" ]; then
+            [ -n "$_what" ] && _what="${_what}; "
+            _what="${_what}epoch ${_epoch:-<missing>} (expected ${_want_epoch})"
+        fi
+    fi
+    [ -n "$_what" ] || return 0
+    _SANDY_PROXY_IDENTITY_STALE="$_what"
+    warn "The egress proxy image ${_img} is NOT the one this sandy would build: ${_what}."
+    warn "  The proxy is the egress policy chokepoint, so this session enforces the policy of that older proxy build. Continuing (a deferred rebuild is not a refusal)."
+    if [ "${SANDY_OFFLINE:-0}" = 1 ]; then
+        warn "  Fix: reconnect, then sandy --rebuild without SANDY_OFFLINE=1 / --no-update-check."
+    else
+        warn "  Fix: reconnect, then sandy --rebuild."
+    fi
+    return 0
+}
+
 generate_entrypoint() {
     cat > "$SANDY_HOME/entrypoint.sh.new" <<'ENTRYPOINT'
 #!/bin/bash
@@ -11994,6 +12050,7 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
     fi
     PROXY_HASH="$(sha256 < "$SANDY_HOME/Dockerfile.proxy" | cut -d' ' -f1)"
     PROXY_HASH_FILE="$SANDY_HOME/.build_hash_proxy"
+    _proxy_built=false
     if [ ! -f "$PROXY_HASH_FILE" ] || [ "$(cat "$PROXY_HASH_FILE")" != "$PROXY_HASH" ] || ! docker image inspect "$PROXY_IMAGE_NAME" &>/dev/null; then
         if _sandy_build_allowed "$PROXY_IMAGE_NAME" "egress proxy image"; then
         # Build context: for the local-checkout path (generate_dockerfile_proxy
@@ -12026,10 +12083,18 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
             --label "sandy.proxy_epoch=${_SANDY_PROXY_EPOCH:-}" \
             -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$_proxy_ctx"
         echo "$PROXY_HASH" > "$PROXY_HASH_FILE"
+        _proxy_built=true
         _sandy_prune_old_image "$_old_proxy_id" "$PROXY_IMAGE_NAME"
         fi
     else
         info "Egress proxy image up to date."
+    fi
+    # #299: the image start_proxy_sidecar is about to run must be the one this
+    # sandy computed. A build that just ran stamped exactly these values, so
+    # only an image this launch did NOT build (up to date by hash, or its
+    # rebuild deferred by #218) is inspected. Warns, never refuses.
+    if [ "$_proxy_built" = false ]; then
+        _sandy_proxy_identity_check "$PROXY_IMAGE_NAME" "${_SANDY_PROXY_SRC_ID:-}" "${_SANDY_PROXY_EPOCH:-}"
     fi
 fi
 
@@ -14644,6 +14709,16 @@ cleanup() {
     if [ "${_SANDY_BUILD_DEFERRED:-false}" = "true" ]; then
         printf "${YELLOW}[sandy]${NC} An image refresh was deferred this session (build resources were unreachable).\n" >&2
         printf "${YELLOW}[sandy]${NC} You ran on the existing image. It rebuilds on the next launch from a healthy network.\n" >&2
+    fi
+    # #299: the same notice, for the one image whose staleness is a policy
+    # question rather than a patch-level one -- the egress proxy. Set by
+    # _sandy_proxy_identity_check at launch; repeated here because the launch
+    # warning has long scrolled away. Its own line, not folded into the one
+    # above: a proxy image predating the identity labels is stale WITHOUT any
+    # build having been deferred.
+    if [ -n "${_SANDY_PROXY_IDENTITY_STALE:-}" ]; then
+        printf "${YELLOW}[sandy]${NC} The egress proxy (the egress policy chokepoint) ran on an image this sandy would not build: %s.\n" "$_SANDY_PROXY_IDENTITY_STALE" >&2
+        printf "${YELLOW}[sandy]${NC} Reconnect, then run sandy --rebuild.\n" >&2
     fi
     # #219: the same erosion, chosen rather than suffered. SANDY_OFFLINE skips
     # the lookups that would have found a patched agent release, so say so at

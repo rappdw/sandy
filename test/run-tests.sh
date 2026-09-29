@@ -22665,6 +22665,193 @@ check "§181(7) a hand-edited approval file keeps the one-document stream contra
 rm -rf "$_S181_DIR"
 unset _S181_DIR _S181_FN _S181_H _S181_W _S181_H16 _S181_CTX _S181_ENTRY
 unset -f _s181_q 2>/dev/null || true
+echo "§185: #299 — the proxy image about to run is checked against the identity this sandy computed; a mismatch WARNS, never refuses"
+# ============================================================
+# WHY. The proxy is the egress policy chokepoint, and its image only changes
+# when sandy rebuilds it. #218 (build resources unreachable) and #219
+# (SANDY_OFFLINE) both let a launch proceed on an older image rather than
+# lock the user out -- which for the proxy means the session enforces an OLDER
+# BUILD OF THE POLICY with nothing saying so. Commit ea92267 stamped the image
+# with sandy.proxy_src / sandy.proxy_epoch; this section is the half that
+# reads them back at launch. MAINTAINER DECISION: warn and proceed, never
+# refuse, consistent with #218/#219. So the properties asserted are:
+#   - a mismatch (either label) or a missing label is SAID, naming old vs
+#     expected, the chokepoint, and the fix;
+#   - a match is silent;
+#   - the launch is NOT refused: the helper returns 0 under set -e, and the
+#     real --build-only exits 0 and drops no .fatal marker;
+#   - the realistic path -- a #218-deferred proxy rebuild -- reaches it;
+#   - the session-end #218 notice repeats it;
+#   - no docker spawn is added to the introspection fast paths.
+# Each check was mutation-tested (see the commit).
+
+# --- (0)-(6): the REAL helper, extracted, under set -euo pipefail ----------
+_S185_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S185_FN="$(awk '/^_sandy_proxy_identity_check\(\) \{/,/^}$/' "$SANDY_SCRIPT")"
+check "§185(0) extracted _sandy_proxy_identity_check from sandy (mutation: a rename empties it and must fail HERE, not silently pass (1)-(6))" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^_sandy_proxy_identity_check() {" && printf "%s\n" "$1" | grep -q "^}$"' _ "$_S185_FN"
+mkdir -p "$_S185_D/ubin"
+cat > "$_S185_D/ubin/docker" <<'EOF'
+#!/bin/bash
+case "${S185_U:-}" in
+    match)    printf '%s\n' 'sha256:aaa|2026-09' ;;
+    src)      printf '%s\n' 'sha256:0ld|2026-09' ;;
+    epoch)    printf '%s\n' 'sha256:aaa|2026-08' ;;
+    nolabels) printf '\n' ;;
+    novalue)  printf '%s\n' '<no value>|<no value>' ;;
+    absent)   exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$_S185_D/ubin/docker"
+# _s185_unit <mode> -> "rc=N stale=<...>" then the warn lines
+_s185_unit() {
+    PATH="$_S185_D/ubin:$PATH" S185_U="$1" SANDY_OFFLINE="${2:-0}" bash -c '
+        set -euo pipefail
+        warn() { printf "WARN %s\n" "$*"; }
+        eval "$1"
+        _SANDY_PROXY_IDENTITY_STALE=""
+        RC=0
+        _sandy_proxy_identity_check sandy-proxy sha256:aaa 2026-09 || RC=$?
+        printf "rc=%s stale=%s\n" "$RC" "$_SANDY_PROXY_IDENTITY_STALE"
+    ' _ "$_S185_FN" 2>&1 || printf 'rc=ABORT\n'
+}
+_S185_U="$(_s185_unit match)"
+check "§185(1) labels MATCH -> silent, rc 0, nothing recorded for the session-end notice (mutation: warn unconditionally -> a WARN line)" \
+    bash -c '[ "$1" = "rc=0 stale=" ]' _ "$_S185_U"
+_S185_U="$(_s185_unit src)"
+check "§185(2) SOURCE differs -> one warning naming old vs expected source, the chokepoint and sandy --rebuild; rc 0 (mutation: drop the src comparison -> silent)" \
+    bash -c 'printf "%s" "$1" | grep -qF "source sha256:0ld (expected sha256:aaa)" && printf "%s" "$1" | grep -qF "egress policy chokepoint" && printf "%s" "$1" | grep -qF "sandy --rebuild" && ! printf "%s" "$1" | grep -qF "epoch 2026" && printf "%s" "$1" | grep -q "^rc=0 stale=source sha256:0ld"' _ "$_S185_U"
+_S185_U="$(_s185_unit epoch)"
+check "§185(3) EPOCH differs -> the warning names old vs expected epoch, and not the (matching) source; rc 0 (mutation: drop the epoch comparison -> silent)" \
+    bash -c 'printf "%s" "$1" | grep -qF "epoch 2026-08 (expected 2026-09)" && ! printf "%s" "$1" | grep -qF "source sha256" && printf "%s" "$1" | grep -q "^rc=0 stale=epoch 2026-08"' _ "$_S185_U"
+_S185_U="$(_s185_unit nolabels)"
+check "§185(4) NO labels (an image built before #299) -> warns that it carries no identity, naming what is expected; rc 0" \
+    bash -c 'printf "%s" "$1" | grep -qF "no identity labels" && printf "%s" "$1" | grep -qF "expected source sha256:aaa, epoch 2026-09" && printf "%s" "$1" | grep -q "^rc=0 stale=it carries no identity labels"' _ "$_S185_U"
+_S185_U="$(_s185_unit novalue)"
+check "§185(5) a '<no value>' template answer is read as MISSING, never compared as a value (mutation: drop the fold -> it reports source <no value>)" \
+    bash -c 'printf "%s" "$1" | grep -qF "no identity labels" && ! printf "%s" "$1" | grep -qF "source <no value>" && printf "%s" "$1" | grep -q "^rc=0 "' _ "$_S185_U"
+_S185_U="$(_s185_unit absent)"
+check "§185(6) an image docker cannot inspect -> silent, rc 0 (the build gate owns the no-image case; mutation: return the inspect status -> rc=1 aborts set -e)" \
+    bash -c '[ "$1" = "rc=0 stale=" ]' _ "$_S185_U"
+_S185_U="$(_s185_unit src 1)"
+check "§185(6b) under SANDY_OFFLINE=1 the fix names the offline setting too (#219)" \
+    bash -c 'printf "%s" "$1" | grep -qF "without SANDY_OFFLINE=1 / --no-update-check"' _ "$_S185_U"
+
+# --- (7)-(13): the REAL launch path (--build-only), behind stub docker/curl --
+# The proxy phase runs before --build-only exits and before start_proxy_sidecar
+# would run the image, so --build-only exercises exactly the launch-site check.
+# SANDY_DAEMON_LOG is set so a refusal would drop its .fatal marker (the
+# supervisor fast-fail signal) -- the "not refused" property is asserted on
+# that marker as well as on the exit code.
+mkdir -p "$_S185_D/bin" "$_S185_D/home/ws" "$_S185_D/sh"
+cat > "$_S185_D/bin/curl" <<'EOF'
+#!/bin/bash
+[ "${S185_NET:-ok}" = ok ] || exit 7
+exit 0
+EOF
+cat > "$_S185_D/bin/docker" <<'EOF'
+#!/bin/bash
+printf 'docker %s\n' "$*" >> "$S185_DOCKER_LOG"
+[ "$1" = build ] && exit 0
+case "$*" in
+    *'-f {{with .Config.Labels}}{{index . "sandy.proxy_src"}}'*)
+        case "${S185_PX:-}" in
+            match)    printf '%s|%s\n' "$S185_SRC" "$S185_EPOCH" ;;
+            src)      printf '%s|%s\n' 'sha256:0ld' "$S185_EPOCH" ;;
+            epoch)    printf '%s|%s\n' "$S185_SRC" '2000-01' ;;
+            nolabels) printf '\n' ;;
+            *) exit 1 ;;
+        esac
+        exit 0
+        ;;
+esac
+case "$1" in
+    image) case "$*" in *'{{.Id}}'*) echo sha256:0000 ;; esac ;;
+esac
+exit 0
+EOF
+chmod +x "$_S185_D/bin/curl" "$_S185_D/bin/docker"
+export S185_DOCKER_LOG="$_S185_D/docker.log"
+_S185_OUT=""; _S185_RC=0
+# $@ = extra env assignments (NAME=VALUE) for this run
+_s185_run() {
+    : > "$S185_DOCKER_LOG"
+    rm -f "$_S185_D/daemon.log.fatal"
+    _S185_RC=0
+    _S185_OUT="$(cd "$_S185_D/home/ws" && env -u SANDY_OFFLINE "$@" HOME="$_S185_D/home" \
+        SANDY_HOME="$_S185_D/sh" SANDY_DAEMON_LOG="$_S185_D/daemon.log" PATH="$_S185_D/bin:$PATH" \
+        bash "$SANDY_SCRIPT" --build-only </dev/null 2>&1)" || _S185_RC=$?
+}
+_s185_run S185_PX=absent
+check "§185(7) priming --build-only (proxy on, every image built) succeeds (rc=$_S185_RC)" \
+    bash -c 'test "$1" -eq 0 && grep -q -- "-t sandy-proxy " "$2"' _ "$_S185_RC" "$S185_DOCKER_LOG"
+check "§185(7b) a proxy image this launch just BUILT is not re-inspected -- it carries these labels by construction (mutation: check unconditionally -> a label inspect after the build)" \
+    bash -c '! grep -qF "{{with .Config.Labels}}{{index . \"sandy.proxy_src\"}}" "$1"' _ "$S185_DOCKER_LOG"
+# The identity this sandy computes, read from the Dockerfile the build used
+# (the same values generate_dockerfile_proxy handed to the build as labels).
+S185_SRC="sha256:$(sed -n 's/^# proxy-src: \([0-9a-f]*\) .*/\1/p' "$_S185_D/sh/Dockerfile.proxy")"
+S185_EPOCH="$(sed -n 's/^# freshness-epoch: \([^ ]*\) .*/\1/p' "$_S185_D/sh/Dockerfile.proxy")"
+export S185_SRC S185_EPOCH
+check "§185(7c) fixture: read both identities from the generated Dockerfile.proxy" \
+    bash -c '[ "${#1}" -eq 71 ] && printf "%s" "$2" | grep -Eq "^[0-9]{4}-[0-9]{2}$"' _ "$S185_SRC" "$S185_EPOCH"
+_S185_WARN="is NOT the one this sandy would build"
+
+_s185_run S185_PX=match
+check "§185(8) launch path, labels MATCH -> the image is inspected and nothing is said (rc=$_S185_RC)" \
+    bash -c 'test "$1" -eq 0 && ! printf "%s" "$2" | grep -qF "$3" && grep -qF "sandy.proxy_src" "$4"' _ "$_S185_RC" "$_S185_OUT" "$_S185_WARN" "$S185_DOCKER_LOG"
+_s185_run S185_PX=src
+check "§185(9) launch path, SOURCE mismatch -> warns with old vs the source this sandy computed, and is NOT refused: rc 0, no .fatal (rc=$_S185_RC; mutation: remove the call site -> no warning)" \
+    bash -c 'test "$1" -eq 0 && [ ! -e "$5" ] && printf "%s" "$2" | grep -qF "$3" && printf "%s" "$2" | grep -qF "source sha256:0ld (expected $4)"' _ "$_S185_RC" "$_S185_OUT" "$_S185_WARN" "$S185_SRC" "$_S185_D/daemon.log.fatal"
+_s185_run S185_PX=nolabels
+check "§185(10) launch path, labels MISSING -> warns, rc 0, no .fatal (rc=$_S185_RC; mutation: exit 1 on mismatch -> rc 1)" \
+    bash -c 'test "$1" -eq 0 && [ ! -e "$4" ] && printf "%s" "$2" | grep -qF "$3" && printf "%s" "$2" | grep -qF "no identity labels"' _ "$_S185_RC" "$_S185_OUT" "$_S185_WARN" "$_S185_D/daemon.log.fatal"
+
+# The realistic path: the epoch moved (hash file stale), and the #218 gate
+# DEFERS the proxy rebuild because build resources are unreachable. The old
+# image is kept -- and must be named as not what this sandy would build.
+rm -f "$_S185_D/sh/.build_hash_proxy"
+_s185_run S185_PX=epoch S185_NET=no
+check "§185(11) a #218-DEFERRED proxy rebuild runs on the old image WITH the warning naming the epoch; rc 0, no .fatal (rc=$_S185_RC)" \
+    bash -c 'test "$1" -eq 0 && [ ! -e "$5" ] && printf "%s" "$2" | grep -qF "skipping the egress proxy image rebuild" && printf "%s" "$2" | grep -qF "$3" && printf "%s" "$2" | grep -qF "epoch 2000-01 (expected $4)" && ! grep -q -- "^docker build .*-t sandy-proxy " "$6"' _ "$_S185_RC" "$_S185_OUT" "$_S185_WARN" "$S185_EPOCH" "$_S185_D/daemon.log.fatal" "$S185_DOCKER_LOG"
+_s185_run S185_PX=epoch S185_NET=no SANDY_OFFLINE=1
+check "§185(12) ...and under SANDY_OFFLINE=1 the same warning names the offline setting in its fix (rc=$_S185_RC)" \
+    bash -c 'test "$1" -eq 0 && printf "%s" "$2" | grep -qF "$3" && printf "%s" "$2" | grep -qF "without SANDY_OFFLINE=1"' _ "$_S185_RC" "$_S185_OUT" "$_S185_WARN"
+
+# --- (13): no docker spawn added to the introspection fast paths ----------
+# --print-state full mode reads the same labels, but inside its single
+# `{{.Created}}|...` inspect; the launch-time check's own format must never
+# appear there, nor anywhere in the light mode or --print-schema.
+_S185_FP=0
+for _s185_args in "--print-state" "--print-state light" "--print-schema" "--print-version"; do
+    : > "$S185_DOCKER_LOG"
+    # shellcheck disable=SC2086
+    (cd "$_S185_D/home/ws" && HOME="$_S185_D/home" SANDY_HOME="$_S185_D/sh" PATH="$_S185_D/bin:$PATH" S185_PX=src \
+        bash "$SANDY_SCRIPT" $_s185_args >/dev/null 2>&1) || true
+    grep -qF -- '-f {{with .Config.Labels}}{{index . "sandy.proxy_src"}}' "$S185_DOCKER_LOG" && _S185_FP=$((_S185_FP + 1))
+done
+check "§185(13) the introspection fast paths (--print-state full/light, --print-schema, --print-version) never run the launch-time identity inspect ($_S185_FP did)" \
+    test "$_S185_FP" -eq 0
+
+# --- (14): the session-end #218 notice repeats it -------------------------
+# Extracted from the REAL cleanup body: from the #218 comment to the #219 one.
+_S185_END="$(sed -n '/^    # #218: if a build was skipped or fell back this launch/,/^    # #219: the same erosion/p' "$SANDY_SCRIPT")"
+check "§185(14pre) extracted the session-end deferred-refresh notice (mutation: a reworded anchor empties it)" \
+    bash -c 'printf "%s" "$1" | grep -qF "_SANDY_PROXY_IDENTITY_STALE"' _ "$_S185_END"
+_s185_end() {
+    bash -c 'YELLOW=""; NC=""; _SANDY_BUILD_DEFERRED="$2"; _SANDY_PROXY_IDENTITY_STALE="$3"; eval "$1"' _ "$_S185_END" "$1" "$2" 2>&1
+}
+_S185_E="$(_s185_end false "epoch 2026-08 (expected 2026-09)")"
+check "§185(14a) session end: a stale proxy is repeated, with what differed and sandy --rebuild -- even when no build was deferred (a pre-label image; mutation: fold it under the deferred branch -> nothing)" \
+    bash -c 'printf "%s" "$1" | grep -qF "epoch 2026-08 (expected 2026-09)" && printf "%s" "$1" | grep -qF "chokepoint" && printf "%s" "$1" | grep -qF "sandy --rebuild"' _ "$_S185_E"
+_S185_E="$(_s185_end true "")"
+check "§185(14b) session end: a deferral with a MATCHING proxy says nothing about the proxy (mutation: print the proxy line unconditionally)" \
+    bash -c 'printf "%s" "$1" | grep -qF "An image refresh was deferred" && ! printf "%s" "$1" | grep -qF "egress proxy"' _ "$_S185_E"
+
+rm -rf "$_S185_D"
+unset _S185_D _S185_FN _S185_U _S185_OUT _S185_RC _S185_WARN _S185_FP _s185_args _S185_END _S185_E
+unset S185_DOCKER_LOG S185_SRC S185_EPOCH
+unset -f _s185_unit _s185_run _s185_end 2>/dev/null || true
 
 
 # BEGIN SUMMARY
