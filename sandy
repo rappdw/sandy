@@ -1747,6 +1747,100 @@ _sandy_entry_exe_present() {
     fi
 }
 
+# --print-state `marker` (#386, decision 1): the ONE place a consumer learns why
+# a marker-derived field is null. Sets three globals (no subshell, no parsing
+# by the caller):
+#   _SANDY_PSM_STATE  absent | present | unreadable
+#   _SANDY_PSM_VER    JSON string or null -- that launch's own sandy version
+#   _SANDY_PSM_AT     JSON string or null -- that launch's launched_at (UTC)
+# The rule it supports, documented in SPEC_INTROSPECTION.md: a marker-derived
+# field that is null while state is "present" means the launch that wrote the
+# marker PREDATES the field. That holds only because a current sandy never
+# writes a marker-derived field as a deliberate null -- "not applicable" gets
+# its own non-null encoding (see cross_session_inbound.pinned). run-tests.sh
+# pins that invariant.
+# "present" requires the marker's own `"schema":` line, so a truncated or
+# foreign file reads "unreadable" (unknown), never "present" (which would turn
+# every field null into a false "predates" verdict).
+_sandy_ps_marker() {
+    local _m="$1/sandy-session.json" _v
+    _SANDY_PSM_STATE="absent"; _SANDY_PSM_VER="null"; _SANDY_PSM_AT="null"
+    [ -e "$_m" ] || [ -L "$_m" ] || return 0
+    if [ ! -f "$_m" ] || [ ! -r "$_m" ] || ! grep -q '^  "schema": ' "$_m" 2>/dev/null; then
+        _SANDY_PSM_STATE="unreadable"; return 0
+    fi
+    _SANDY_PSM_STATE="present"
+    _v="$(sed -n 's/^  "sandy_version": "\([^"]*\)",$/\1/p' "$_m" 2>/dev/null | tail -n 1 || true)"
+    [ -n "$_v" ] && _SANDY_PSM_VER="$(_json_escape "$_v")"
+    _v="$(sed -n 's/^  "launched_at": "\([^"]*\)",$/\1/p' "$_m" 2>/dev/null | tail -n 1 || true)"
+    [ -n "$_v" ] && _SANDY_PSM_AT="$(_json_escape "$_v")"
+    return 0
+}
+
+# --print-state cross_session_inbound file objects (#386, decision 2): prints
+# {"value":...,"status":...} for ONE settings file sandy writes.
+#   $1 anchor dir (the sandbox, or the workspace)   $2 the one intermediate dir
+#   (claude, or .claude)                            $3 the file name
+# Statuses: ok | key_absent | file_absent | not_object | unreadable. value is
+# non-null only for ok -- the string that is there, even an unexpected one; a
+# non-string value is reported as its JSON text, as a string.
+# The file is read at QUERY time with a real parse (node, else jq), never in
+# bash: "not_object" (a torn or non-object file, e.g. #400) and "key_absent"
+# can only be told apart by parsing. No parser -> "unreadable", never a guess.
+# HOSTILE-INPUT GUARDS, because <sandbox>/claude/ is the container's rw
+# ~/.claude and the workspace file is repository content: a symlink at either
+# component, anything that is not a regular file (a FIFO would block the read
+# -- and --print-state -- forever), and anything over 1 MiB all report
+# "unreadable" without being opened by a parser.
+_sandy_ps_settings_file() {
+    local _dir="$1/$2" _f="$1/$2/$3" _n _out _st _val
+    if [ -L "$_dir" ] || [ -L "$_f" ]; then
+        printf '{"value":null,"status":"unreadable"}'; return 0
+    fi
+    if [ ! -e "$_f" ]; then
+        printf '{"value":null,"status":"file_absent"}'; return 0
+    fi
+    if [ ! -f "$_f" ] || [ ! -r "$_f" ]; then
+        printf '{"value":null,"status":"unreadable"}'; return 0
+    fi
+    _n="$(head -c 1048577 "$_f" 2>/dev/null | wc -c | tr -d ' ' || true)"
+    if [ -z "$_n" ] || [ "$_n" -gt 1048576 ] 2>/dev/null; then
+        printf '{"value":null,"status":"unreadable"}'; return 0
+    fi
+    if command -v node >/dev/null 2>&1; then
+        _out="$(node -e '
+const fs = require("fs");
+let d;
+try { d = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); }
+catch (e) { console.log("not_object"); process.exit(0); }
+if (d === null || typeof d !== "object" || Array.isArray(d)) { console.log("not_object"); process.exit(0); }
+if (!Object.prototype.hasOwnProperty.call(d, "crossSessionInbound")) { console.log("key_absent"); process.exit(0); }
+const v = d.crossSessionInbound;
+console.log("ok\t" + (typeof v === "string" ? JSON.stringify(v) : JSON.stringify(JSON.stringify(v))));
+' "$_f" 2>/dev/null || true)"
+    elif command -v jq >/dev/null 2>&1; then
+        _out="$(jq -r 'if type != "object" then "not_object"
+                       elif has("crossSessionInbound") | not then "key_absent"
+                       else "ok\t" + (.crossSessionInbound | if type == "string" then tojson else (tojson | tojson) end)
+                       end' "$_f" 2>/dev/null)" || _out="not_object"
+        # jq accepts a stream of documents; a settings file is exactly one.
+        case "$_out" in *"
+"*) _out="not_object" ;; esac
+    else
+        printf '{"value":null,"status":"unreadable"}'; return 0
+    fi
+    _st="${_out%%	*}"
+    case "$_st" in
+        ok)
+            _val="${_out#*	}"
+            printf '{"value":%s,"status":"ok"}' "$_val" ;;
+        key_absent|not_object)
+            printf '{"value":null,"status":"%s"}' "$_st" ;;
+        *)  # empty output (jq on an empty file, a parser that died): not an object
+            printf '{"value":null,"status":"not_object"}' ;;
+    esac
+}
+
 # Shared suffix pipeline for skill-pack image names (sandy-skills-base-<suffix>,
 # sandy-skills-<suffix>): comma-separated pack list -> sorted, trimmed,
 # hyphen-joined, lowercased suffix. Extracted (#36) from two build-path call
@@ -3184,6 +3278,71 @@ EOF_FEATURE_ENTRIES
                 [ -n "$sb_fc_line" ] && sb_facomp="$sb_fc_line"
             fi
             printf ','; _json_kv agent_args_composed "$sb_facomp"
+            # marker (#386, decision 1): why any marker-derived field above or
+            # below is null. See _sandy_ps_marker. Both modes (two seds, no
+            # parser).
+            _sandy_ps_marker "$sb"
+            printf ','; _json_kv marker "{\"state\":\"$_SANDY_PSM_STATE\",\"sandy_version\":$_SANDY_PSM_VER,\"launched_at\":$_SANDY_PSM_AT}"
+            # cross_session_inbound (#386, decision 2). pinned is what the LAST
+            # LAUNCH resolved, from its marker, and is never a deliberate null:
+            # the marker's own null (claude not launched, or both writes
+            # refused) becomes status not_claude / not_written here, so a null
+            # pinned keeps meaning only what `marker` says it means. The two
+            # file objects are read at QUERY time, so in-session drift of the
+            # rw userSettings copy is visible -- full mode only; light mode
+            # reports them not_computed (a parse per file is the cost class
+            # light mode exists to avoid). NO `effective` value, deliberately
+            # (decision 3): precedence is Claude Code's rule, and these two
+            # files are not all of its inputs.
+            local sb_csi_pin='null' sb_csi_v sb_csi_s sb_csi_src_in sb_csi_user sb_csi_ws
+            if [ "$_SANDY_PSM_STATE" = "present" ]; then
+                sb_csi_v="$(sed -n 's/^  "cross_session_inbound": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_csi_v="${sb_csi_v%,}"
+                sb_csi_s="$(sed -n 's/^  "cross_session_inbound_source": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_csi_s="${sb_csi_s%,}"
+                # source is sandy's own token (explicit|feature:<name>|default,
+                # or a 2.4-2.5 relay-legacy). Anything else -- including JSON
+                # null and a pre-2.4 marker with no such line -- is null.
+                sb_csi_src_in="${sb_csi_s#\"}"; sb_csi_src_in="${sb_csi_src_in%\"}"
+                if [ "\"$sb_csi_src_in\"" != "$sb_csi_s" ]; then
+                    sb_csi_s='null'
+                else
+                    case "$sb_csi_src_in" in
+                        ""|*[!A-Za-z0-9:._-]*) sb_csi_s='null' ;;
+                    esac
+                fi
+                if [ -z "$sb_csi_v" ]; then
+                    sb_csi_pin='null'
+                elif [ "$sb_csi_v" = "null" ]; then
+                    if [ "$sb_agents" = "null" ]; then
+                        sb_csi_pin='{"value":null,"source":null,"status":"unknown"}'
+                    elif printf '%s' "$sb_agents" | grep -q '"claude"'; then
+                        sb_csi_pin='{"value":null,"source":null,"status":"not_written"}'
+                    else
+                        sb_csi_pin='{"value":null,"source":null,"status":"not_claude"}'
+                    fi
+                else
+                    case "$sb_csi_v" in
+                        \"accept\"|\"hold\"|\"refuse\")
+                            sb_csi_pin="{\"value\":$sb_csi_v,\"source\":$sb_csi_s,\"status\":\"ok\"}" ;;
+                        *)  sb_csi_pin='{"value":null,"source":null,"status":"unknown"}' ;;
+                    esac
+                fi
+            fi
+            if [ "$_mode" = "light" ]; then
+                sb_csi_user='{"value":null,"status":"not_computed"}'
+                sb_csi_ws='{"value":null,"status":"not_computed"}'
+            else
+                sb_csi_user="$(_sandy_ps_settings_file "$sb" claude settings.json)"
+                if [ -n "$sb_ws_path" ]; then
+                    sb_csi_ws="$(_sandy_ps_settings_file "$sb_ws_path" .claude settings.local.json)"
+                else
+                    # No WORKSPACE.json: the file cannot be located, so its
+                    # answer is unknown -- never file_absent.
+                    sb_csi_ws='{"value":null,"status":"unreadable"}'
+                fi
+            fi
+            printf ','; _json_kv cross_session_inbound "{\"pinned\":$sb_csi_pin,\"user_settings\":$sb_csi_user,\"workspace_settings\":$sb_csi_ws}"
             if [ -d "$sb_lock_dir" ]; then
                 printf ','; _json_kv lock_held 'true'
                 printf ','; _json_kv lock_holder_pid "$(_json_escape "$sb_lock_pid")"

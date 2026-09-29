@@ -281,6 +281,12 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "feature_problems": [],
       "agent_args": {},
       "agent_args_composed": {},
+      "marker": {"state": "present", "sandy_version": "2.7.0", "launched_at": "2026-04-20T14:00:00Z"},
+      "cross_session_inbound": {
+        "pinned":             {"value": "accept", "source": "feature:notify", "status": "ok"},
+        "user_settings":      {"value": "accept", "status": "ok"},
+        "workspace_settings": {"value": null, "status": "file_absent"}
+      },
       "lock_held": true,
       "lock_holder_pid": "48211",
       "lock_holder_alive": true
@@ -562,6 +568,104 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > `manifest.agent_args_compose`; a consumer deciding whether two features may
 > each ship a given flag should read that rather than infer it.
 
+> **`agent_args`** (per sandbox, added additively in `2.1.0`, #348). What the
+> **last launch** passed to each agent on behalf of a feature, read back from
+> that launch's own marker: an object keyed by agent, each value an array of
+> `{feature, args}`. `{}` means the launch recorded the field and applied none.
+> It is the supported source for this value; do not read the host copy of the
+> session marker (see "Host-side path contract" in SPECIFICATION.md §4). It is
+> never re-evaluated from the manifests, so it can lag a manifest that changed
+> since; a consumer comparing the two should report that as *relaunch needed*,
+> not as drift. What a `null` means is answered by `marker`, below.
+
+> **`marker`** (per sandbox, added additively in `2.7.0`, #386, no
+> `schema_version` bump). The one place a consumer learns **why a
+> marker-derived field is `null`**. The marker-derived fields are `agents`,
+> `agent_args`, `agent_args_composed`, `feature_entries` and
+> `cross_session_inbound.pinned`.
+>
+> ```json
+> "marker": {"state": "absent" | "present" | "unreadable",
+>            "sandy_version": "<that launch's version>" | null,
+>            "launched_at": "<UTC>" | null}
+> ```
+>
+> Read a marker-derived `null` against `marker.state`:
+>
+> | `marker.state` | a marker-derived field is `null` because… | what fixes it |
+> |---|---|---|
+> | `absent` | the sandbox has not been launched, or was `--reset-sandbox`'d since | a launch |
+> | `present` | the launch that wrote the marker used a sandy that **predates the field** | a relaunch on a sandy that has it |
+> | `unreadable` | the marker exists but is not one sandy wrote in full (truncated, foreign, unreadable) | unknown; never either answer above |
+>
+> **The invariant that makes `present` safe to read that way: a current sandy
+> never writes a marker-derived field as a deliberate `null`.** `agents` is
+> always an array, and `agent_args`, `agent_args_composed` and
+> `feature_entries` are always objects, even when empty. A case where nothing
+> applies gets its own non-null encoding, as `cross_session_inbound.pinned`
+> does for a sandbox that didn't launch claude. So a missing key can only mean
+> an older writer. `run-tests.sh` §177(2) pins this by round-tripping the real
+> marker writer through the real reader. Any new marker-derived field must
+> keep the invariant. `sandy_version` and `launched_at` are that launch's own,
+> for a consumer that reports lag.
+
+> **`cross_session_inbound`** (per sandbox, added additively in `2.7.0`,
+> #386, no `schema_version` bump). What sandy pinned for Claude Code's
+> `crossSessionInbound`, and what the two files sandy writes say **now**.
+> Every object here carries a `status`, so an unreadable file and a file
+> without the key are never the same answer. A consumer must treat a
+> `status` it doesn't recognise as "can't tell"; the vocabulary may grow.
+>
+> - **`pinned`**: what the **last launch** resolved, from its marker, as
+>   `{value, source, status}`. `null` only under the `marker` rule above.
+>   `status` is one of:
+>   - `ok`: `value` is `accept`, `hold` or `refuse`, and `source` is `explicit`,
+>     `feature:<name>` or `default`. A 2.4.x–2.5.x marker may say
+>     `relay-legacy`; a pre-2.4.0 marker has no source, so `null`.
+>   - `not_claude`: claude was not among the launched agents, so nothing is
+>     pinned. The cross-session surface does not exist in that sandbox.
+>   - `not_written`: claude was launched, but sandy refused both writes (a
+>     symlinked or non-object settings file; see CLAUDE.md "Cross-session
+>     inbound").
+>   - `unknown`: the marker's value is one sandy does not write, or a
+>     pre-1.13.0 marker records a null value without the `agents` needed to
+>     classify it.
+> - **`user_settings`** is `<sandbox>/claude/settings.json`, the container's
+>   `~/.claude/settings.json` (Claude Code userSettings). It is rw
+>   in-container, so it can drift mid-session. **`workspace_settings`** is
+>   `<workspace>/.claude/settings.local.json`, the tighten-only copy. Each is
+>   `{value, status}`, read at query time with a real JSON parse (`node`,
+>   else `jq`; never bash). `status` is one of:
+>   - `ok`: `value` is the string that is there, including an unexpected
+>     one. A non-string value is reported as its JSON text, as a string.
+>   - `key_absent`: a JSON object without `crossSessionInbound`.
+>   - `file_absent`: also covers a workspace that is gone.
+>   - `not_object`: unparseable, truncated, or a JSON non-object. A torn
+>     userSettings file (#400) reports this, never `key_absent`.
+>   - `unreadable`: permission denied; no `node` or `jq` on the host; the
+>     workspace path is unknown (no `WORKSPACE.json`); a symlink at the file
+>     or at its `claude/` or `.claude/` directory (both locations are
+>     writable by something sandy does not trust, so neither is followed); a
+>     non-regular file (a FIFO would block the read forever); or a file over
+>     1 MiB.
+>   - `not_computed`: light mode, below.
+>
+>   `value` is non-null only for `ok`.
+>
+> **There is deliberately no `effective` value.** Which value Claude Code
+> applies is **Claude Code's** rule, not sandy's. Sandy has measured it (see
+> `docs/security/CROSS_SESSION_INBOUND.md`, last against Claude Code
+> 2.1.283):
+> - a workspace file can tighten (`hold`, `refuse`) but not loosen;
+> - `accept` takes effect only from userSettings or `--settings`;
+> - since 2.1.283, Claude Code's own **unset** default delivers.
+>
+> That rule has already changed once, and these two files are **not all of
+> its inputs**: Claude Code also reads the committed workspace
+> `.claude/settings.json` (tighten-only), and a `--settings` flag (last-wins,
+> #393; a feature- or operator-supplied one appears in `agent_args`). A
+> consumer that computes a verdict should say which inputs it covered.
+
 > **`orphan_networks`** (top-level, added additively in `1.1.0`, #26 — no
 > `schema_version` bump). Integer count of `sandy_(sidecar|egress|net)_<pid>`
 > networks that are reap-eligible right now: the owning `<pid>` is dead (or
@@ -618,7 +722,11 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > diverge between the two modes — it is always `null` in light mode, because
 > the `du` walk it requires costs the same class of latency the light-mode
 > budget exists to avoid, even though computing it needs no docker spawn at
-> all. Every other non-docker field is still identical between modes. The
+> all. `cross_session_inbound`'s two file objects (2.7.0, #386) are the
+> second: each needs a JSON parse per file, so light mode reports them as
+> `{"value": null, "status": "not_computed"}`. `pinned` and `marker` come from
+> the marker with no parse and are identical in both modes. Every other
+> non-docker field is still identical between modes. The
 > arg is **forward-compatible**: any value other than `light` (including
 > none, and an older sandy that ignored `$2`) yields full mode, so a
 > consumer may pass `light` unconditionally. No `schema_version` bump — the
@@ -686,6 +794,7 @@ Reading identity from `pane_index`, a scrollback marker, or the pane title is un
 
 ## Schema versioning
 
+- **`2.7.0` (#386):** two new `sandboxes[]` fields, `marker` (`{state, sandy_version, launched_at}`, both modes) and `cross_session_inbound` (`{pinned, user_settings, workspace_settings}`; the two file objects are `not_computed` in light mode). Additive, so `schema_version` stays `4`. `marker` defines, once for every marker-derived field, what a `null` means, backed by the invariant that a current sandy never writes a deliberate `null` in one. `agent_args` (2.1.0) is now documented here as the supported source for that value. Consumers gate on field presence.
 - **`2.6.0` (#382) — `schema_version` moves to `4`.** Removed, together, as one operator decision to avoid a second bump: `relay{}` in its entirety from both the session marker and `--print-state` (`source`, `path`, `disabled_by` in the marker; `state`, `source`, `executable_present`, `path`, `state_dir`, `last_exit_code`, `restarts`, `last_restart_at`, `disabled_by` in `--print-state`) — and its two companion fields, `feature_entries.<name>.relay_alias` and `feature_entries.<name>.disabled_by`, in both the marker and `--print-state`. Those two were never listed separately in README's `## Deprecated` table: they existed only as companions of `relay{}` (`relay_alias` pointed at the entry `relay{}` described; `disabled_by` recorded `SANDY_RELAY=0`), so removing them alongside it kept the announcement honest without forcing a second `X.Y.0`. Every `feature_entries.<name>` value is now exactly `{path}` in the marker and `{state, restarts, last_exit_code, last_restart_at, executable_present, path, state_dir}` in `--print-state` — every entry reported identically, since there is no longer a designated one. **`state` no longer produces `"disabled"`.** For an un-relaunched sandbox whose marker still carries the old `relay_alias`/`disabled_by` shape, `disabled_by` is simply not read any more (there is nothing left to read it into): an entry that was suppressed via the now-hard-error `SANDY_RELAY=0` never wrote a `.state` file, so it reads `"absent"` — the same value a feature that declared no entry at all gets, and the only value `state` reports absent a live `.state` file, `disabled` included. Also removed in this release, none of them emitted-field changes so none independently move `schema_version`: `cross_session_inbound_source` can no longer produce `"relay-legacy"` (the legacy default itself was removed in decision 6, a prior unit); `SANDY_RELAY` is now a hard error naming a feature manifest's `"sandboxes": {"exclude": [...]}` (decision 3); `SANDY_RELAY_STATE`, the `/opt/sandy/relay-state` mount and the internal `SANDY_HANDOFF_RELAY` channel are gone, replaced by `SANDY_FEATURE_STATE` and `/opt/sandy/feature-state/<feature>` per entry (decisions 4-5); and `/usr/local/bin/sandy-handoff-sessions` is no longer installed in the image (decision 7) — the published pane-identity contract (`SPECIFICATION.md`, #378) is what a consumer now builds its own copy on.
 - **`2.4.0` (#381):** one new `sandboxes[]` field, `feature_entries` (an object keyed by feature name, emitted in BOTH modes), plus the matching `feature_entries` field in the session marker (`sandy-session.json`, §C.9 of SPECIFICATION.md). Additive, so `schema_version` stays `3`. It generalizes the single relay supervisor into one supervised process **per selected feature's `entry`** — the adoption loop used to silently drop every entry after the first, which is now fixed as well. **`relay{}` is DUAL-REPORTED, unchanged in shape, for exactly the first entry in sorted feature-directory order** (the "relay-designated" entry) — a consumer reading only `relay{}` sees byte-identical behaviour whether one entry exists or several. Every entry, including the designated one, additionally appears under `feature_entries.<name>`, whose live object is `{state, restarts, last_exit_code, last_restart_at, executable_present, path, state_dir, relay_alias, disabled_by}` — the same shape `relay{}` uses, plus `relay_alias` (bool: is this the entry `relay{}` also describes). **`state: "absent"` also covers a stale image**: one built before the `sandy.feature_entries=1` Dockerfile label existed only ever starts the relay-designated entry, so every other adopted entry never gets a `.state` file to report and reads `absent` — the same value a feature that never declared an entry gets, distinguished only by the launch-time warning naming the affected entries and pointing at `sandy --rebuild`. `relay{}` was **listed for deprecation** in README's `## Deprecated` table in 2.5.0 and **removed in 2.6.0** (tracked as #382, decisions 1-2) once its consumer released its migration to reading `feature_entries` directly.
 - **`2.4.0` (#378):** documents the pane-identity contract (tmux session `sandy`, the `@sandy_pane_agent` pane option, `SANDY_AGENT` spawn order), and extends it: the launcher now sets `@sandy_pane_agent` in single-agent mode too (both daemon and foreground launch paths), not multi-agent only, and `sandy-handoff-sessions`' untagged-pane fallback is narrowed to the single-agent/single-pane shape a pre-2.4.0 sandy could actually produce. Neither change touches `--print-schema` or `--print-state` output — this stays a fast-path/introspection no-op even though it is not, this time, a no-op for the in-container mechanism itself (2.4.0 also ships `--rsync`, #374) — so `schema_version` is unchanged. (`sandy-handoff-sessions` itself was removed from the image in 2.6.0, #382 decision 7; the contract this bullet documents is unaffected and is what a consumer's own copy is now built on.)
