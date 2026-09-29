@@ -18490,11 +18490,145 @@ check "§162(14) the prompt carries a reading rule, not just the risk (#295 item
 # Item 6 is structural: exercising it for real means running the whole launch
 # up to Phase 3 with a docker that fails only the project build.
 check "§162(15) a failed project build names the probe scope -- sandy's own hosts only (mutation: a bare docker build under set -e fails with no hint and reads like a sandy fault)" \
-    bash -c 'grep -F -A12 -e "-f \"\$PROJECT_DOCKERFILE\" \"\$WORK_DIR/.sandy\" || _sandy_proj_build_rc=\$?" "$1" | grep -q "covers only its OWN build hosts"' _ "$_S162_SANDY"
+    bash -c 'grep -F -A12 -e "-f \"\$_sandy_proj_ctx/Dockerfile\" \"\$_sandy_proj_ctx\" || _sandy_proj_build_rc=\$?" "$1" | grep -q "covers only its OWN build hosts"' _ "$_S162_SANDY"
+
+# --- C (#295, R8): the review shows the WHOLE Dockerfile, and the build is sent
+# exactly what the approval hashed -- never .sandy/config or .sandy/.secrets.
+# The two gaps composed: the review stopped at line 200 while the context hash
+# excluded config/.secrets yet docker was handed the raw .sandy/ dir, so a
+# `COPY .secrets` below line 200 was approved unseen and baked the workspace's
+# credentials into an image layer.
+_S162_ST="$(awk '/^_sandy_stage_project_context\(\) \{/,/^}$/' "$_S162_SANDY")"
+check "§162(16-pre) extracted _sandy_stage_project_context (mutation: a rename empties it and must fail HERE)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_context_hash \"\$ctx\" --list"' _ "$_S162_ST"
+_s162_mk F
+{ printf 'ARG BASE_IMAGE\nFROM $BASE_IMAGE\n'
+  _s162_i=3; while [ "$_s162_i" -lt 300 ]; do printf 'RUN echo line-%s\n' "$_s162_i"; _s162_i=$((_s162_i + 1)); done
+  printf 'COPY .secrets /TAIL-LINE-300\n'; } > "$_S162_DIR/F/ws/.sandy/Dockerfile"
+printf 'SECRET=1\n' > "$_S162_DIR/F/ws/.sandy/.secrets"
+_S162_OUT="$(_s162_sup F "")"
+check "§162(16) the review prints line 300 of a 300-line Dockerfile, says how many lines there are, and never truncates (mutation: restoring sed -n 1,200p hides exactly the line that matters)" \
+    bash -c 'printf "%s" "$1" | grep -q "| COPY .secrets /TAIL-LINE-300" && printf "%s" "$1" | grep -q "all 300 lines" && ! printf "%s" "$1" | grep -q "truncated"' _ "$_S162_OUT"
+check "§162(17) ...and says config/.secrets are NOT sent to the build, when the workspace has them" \
+    bash -c 'printf "%s" "$1" | grep -q "NOT sent to the build"' _ "$_S162_OUT"
+printf 'FROM x\nRUN true\nCOPY . /no-trailing-newline' > "$_S162_DIR/F/ws/.sandy/Dockerfile"
+_S162_OUT="$(_s162_sup F "")"
+check "§162(18) a last line with no trailing newline is still shown (read loop keeps a partial final line)" \
+    bash -c 'printf "%s" "$1" | grep -q "| COPY . /no-trailing-newline" && printf "%s" "$1" | grep -q "all 3 lines"' _ "$_S162_OUT"
+
+# Staging, driven through the REAL helper and the REAL hash.
+_s162_ctx() {   # $1 = dir; a context with every kind of file the rules distinguish
+    mkdir -p "$1/sub"
+    printf 'FROM x\nCOPY helper.sh sub/config /\n' > "$1/Dockerfile"
+    printf 'echo hi\n' > "$1/helper.sh"
+    printf 'nested helper that is really a build input\n' > "$1/sub/config"
+    printf 'SANDY_MODEL=x\n' > "$1/config"
+    printf 'ANTHROPIC_API_KEY=sk-secret\n' > "$1/.secrets"
+}
+_s162_stage() {   # $1 ctx  $2 expected hash  $3 TMPDIR -> stdout of the helper, then RC=<n>
+    TMPDIR="$3" bash -c "$_S162_FN"$'\n'"$_S162_ST"$'\n''_sandy_stage_project_context "$1" "$2"; echo "RC=$?"' _ "$1" "$2" 2>/dev/null
+}
+_S162_G="$_S162_DIR/G"; mkdir -p "$_S162_G/tmp"; _s162_ctx "$_S162_G/ctx"
+_S162_HG="$(_s162_hash "$_S162_G/ctx")"
+_S162_OUT="$(_s162_stage "$_S162_G/ctx" "$_S162_HG" "$_S162_G/tmp")"
+_S162_STG="$(printf '%s\n' "$_S162_OUT" | sed -n '1p')"
+check "§162(19) the staged context carries every build input -- Dockerfile, helper.sh, and a NESTED file named config (got: $(cd "$_S162_STG" 2>/dev/null && find . -type f | LC_ALL=C sort | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=0" && [ -f "$2/Dockerfile" ] && [ -f "$2/helper.sh" ] && [ -f "$2/sub/config" ]' _ "$_S162_OUT" "$_S162_STG"
+check "§162(20) ...and NEITHER top-level config nor .secrets (mutation: staging the raw dir, or copying them, puts credentials in reach of a COPY)" \
+    bash -c '[ -d "$1" ] && [ ! -e "$1/.secrets" ] && [ ! -e "$1/config" ]' _ "$_S162_STG"
+check "§162(21) what is staged hashes to exactly what the gate approved -- one file set, not two enumerations" \
+    test "$(_s162_hash "$_S162_STG")" = "$_S162_HG"
+rm -rf "$_S162_STG"
+printf 'edited after approval\n' >> "$_S162_G/ctx/helper.sh"
+_S162_OUT="$(_s162_stage "$_S162_G/ctx" "$_S162_HG" "$_S162_G/tmp")"
+check "§162(22) a context edited after its approval is NOT staged, and nothing is left behind in TMPDIR (mutation: dropping the hash re-check builds bytes nobody reviewed)" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && [ -z "$(ls -A "$2")" ]' _ "$_S162_OUT" "$_S162_G/tmp"
+_S162_OUT="$(_s162_stage "$_S162_G/ctx" "" "$_S162_G/tmp")"
+check "§162(23) ...nor with no recorded approval hash at all (an empty hash never matches)" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && [ -z "$(ls -A "$2")" ]' _ "$_S162_OUT" "$_S162_G/tmp"
+_S162_H="$_S162_DIR/H"; mkdir -p "$_S162_H/tmp" "$_S162_H/ctx"; printf 'FROM x\n' > "$_S162_H/real"
+ln -s "$_S162_H/real" "$_S162_H/ctx/Dockerfile"
+_S162_OUT="$(_s162_stage "$_S162_H/ctx" "$(_s162_hash "$_S162_H/ctx")" "$_S162_H/tmp")"
+check "§162(24) a SYMLINKED .sandy/Dockerfile is refused -- the hash (-type f) never covered its content, so its target could change after approval and still build" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && [ -z "$(ls -A "$2")" ]' _ "$_S162_OUT" "$_S162_H/tmp"
+
+# The hash itself: which edits re-prompt.
+_S162_H0="$(_s162_hash "$_S162_G/ctx")"
+printf 'SANDY_MODEL=y\n' > "$_S162_G/ctx/config"; printf 'ANTHROPIC_API_KEY=sk-other\n' > "$_S162_G/ctx/.secrets"
+check "§162(25) editing the top-level config or .secrets does NOT change the approval hash (routine credential edits must not re-prompt)" \
+    test "$(_s162_hash "$_S162_G/ctx")" = "$_S162_H0"
+printf 'changed\n' >> "$_S162_G/ctx/sub/config"
+check "§162(26) editing a NESTED file named config DOES change it -- it is a build input docker is sent (mutation: the old '! -name config' skipped it at any depth, so a RUN could execute it unreviewed)" \
+    test "$(_s162_hash "$_S162_G/ctx")" != "$_S162_H0"
+
+# The launch path: the REAL Phase 3 block hands docker the staged dir.
+_S162_P3="$_S162_DIR/phase3.sh"
+python3 - "$_S162_SANDY" "$_S162_P3" <<'S162_EXTRACT'
+import sys
+s = open(sys.argv[1]).read()
+i = s.index('PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"\n')
+j = s.index('\n# --- Platform already detected', i)
+open(sys.argv[2], 'w').write(s[i:j] + '\n')
+S162_EXTRACT
+_S162_P="$_S162_DIR/P"; mkdir -p "$_S162_P/sb" "$_S162_P/tmp"; _s162_ctx "$_S162_P/ws/.sandy"
+# docker stub: records -f and the context argument of `docker build`, and what
+# that context held WHILE the build ran; everything else succeeds.
+cat > "$_S162_P/docker" <<'S162_DOCKER'
+#!/usr/bin/env bash
+if [ "$1" = build ]; then
+    f=""; last=""; prev=""
+    for a in "$@"; do [ "$prev" = "-f" ] && f="$a"; prev="$a"; last="$a"; done
+    { echo "F=$f"; echo "CTX=$last"; ( cd "$last" && find . -type f | LC_ALL=C sort ); } > "$S162_LOG"
+fi
+exit 0
+S162_DOCKER
+chmod +x "$_S162_P/docker"
+_S162_OUT="$(
+    trap - ERR
+    set +e
+    S162_LOG="$_S162_P/build.log"; export S162_LOG
+    PATH="$_S162_P:$PATH"; TMPDIR="$_S162_P/tmp"
+    WORK_DIR="$_S162_P/ws"; SANDBOX_DIR="$_S162_P/sb"; SANDBOX_NAME=p-deadbeef; IMAGE_NAME=sandy-claude-code
+    NEEDS_BUILD=false; SKILLS_REBUILT=false
+    info() { :; }; warn() { :; }; error() { echo "ERROR: $*"; }
+    _sandy_build_allowed() { return 0; }
+    eval "$_S162_FN"; eval "$_S162_ST"
+    _sandy_project_dockerfile_approved() { _SANDY_DF_HASH="$(_sandy_context_hash "$(dirname "$1")")"; return 0; }
+    ( . "$_S162_P3" ) 2>&1
+    echo "RC=$?"
+)"
+check "§162(27) the launch builds from a STAGED copy, not the workspace's .sandy/ (got: $(tr '\n' ' ' < "$_S162_P/build.log" 2>/dev/null))" \
+    bash -c 'c="$(sed -n "s/^CTX=//p" "$1")"; f="$(sed -n "s/^F=//p" "$1")"; [ -n "$c" ] && [ "$c" != "$2" ] && [ "$f" = "$c/Dockerfile" ] && printf "%s" "$3" | grep -q "RC=0"' \
+    _ "$_S162_P/build.log" "$_S162_P/ws/.sandy" "$_S162_OUT"
+check "§162(28) ...which, while docker read it, held the build inputs and NOT .secrets or config (mutation: building \"\$WORK_DIR/.sandy\" sends both)" \
+    bash -c 'grep -qx "./Dockerfile" "$1" && grep -qx "./sub/config" "$1" && ! grep -qx "./.secrets" "$1" && ! grep -qx "./config" "$1"' _ "$_S162_P/build.log"
+check "§162(29) ...and the staged copy is removed after the build" \
+    bash -c '[ -z "$(ls -A "$1")" ]' _ "$_S162_P/tmp"
+
+# Real docker, where there is one: the property as the user would meet it. The
+# positive control builds the same Dockerfile from the RAW dir -- the pre-fix
+# behaviour -- and must succeed, or the negative proves nothing.
+if docker info >/dev/null 2>&1; then
+    _S162_R="$_S162_DIR/R"; mkdir -p "$_S162_R/ctx" "$_S162_R/tmp"
+    printf 'FROM scratch\nCOPY .secrets /baked-in\n' > "$_S162_R/ctx/Dockerfile"
+    printf 'ANTHROPIC_API_KEY=sk-secret\n' > "$_S162_R/ctx/.secrets"
+    _S162_RSTG="$(_s162_stage "$_S162_R/ctx" "$(_s162_hash "$_S162_R/ctx")" "$_S162_R/tmp" | sed -n '1p')"
+    _S162_RAW=0; docker build -q --no-cache -t sandy-s162-probe:raw "$_S162_R/ctx" >/dev/null 2>&1 || _S162_RAW=$?
+    _S162_STGRC=0; docker build -q --no-cache -t sandy-s162-probe:staged -f "$_S162_RSTG/Dockerfile" "$_S162_RSTG" >/dev/null 2>&1 || _S162_STGRC=$?
+    docker rmi sandy-s162-probe:raw sandy-s162-probe:staged >/dev/null 2>&1 || true
+    check "§162(30) positive control: the raw .sandy/ dir DOES let \`COPY .secrets\` bake the secret into a layer (rc $_S162_RAW)" \
+        test "$_S162_RAW" -eq 0
+    check "§162(31) the staged context makes that same Dockerfile FAIL to build -- the secret cannot reach a layer (rc $_S162_STGRC)" \
+        test "$_S162_STGRC" -ne 0
+    rm -rf "$_S162_RSTG"
+else
+    skip "§162(30-31) docker not reachable -- the real-build check of the staged context did not run"
+fi
 
 rm -rf "$_S162_DIR"
 unset _S162_SANDY _S162_DIR _S162_FN _S162_OUT _S162_RC _S162_HA _S162_HB _S162_HD
-unset -f _s162_mk _s162_pre _s162_hash _s162_approval _s162_diag _s162_sup
+unset _S162_ST _S162_G _S162_HG _S162_STG _S162_H _S162_H0 _S162_P3 _S162_P _S162_R _S162_RSTG _S162_RAW _S162_STGRC _s162_i
+unset -f _s162_mk _s162_pre _s162_hash _s162_approval _s162_diag _s162_sup _s162_ctx _s162_stage
 echo "§165: SANDY_EXTRA_ENV name lists compose — host, approved workspace and env are unioned (#388)"
 # ============================================================
 # Last-wins used to replace the host list with the workspace one (and an env
@@ -22331,9 +22465,11 @@ check "§180(pre) the Phase 3 gate and the marker composer were extracted as bal
 
 _S180_A="sha256:$(printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12)"
 _S180_B="sha256:$(printf 'b%.0s' 1 2 3 4 5 6 7 8 9 10 11 12)"
-# The approval stub records the context hash the way the real gate does, so
-# the REAL _sandy_context_hash is needed.
+# The approval stub records the context hash the way the real gate does, and
+# an approved build stages its context (§181), so the REAL _sandy_context_hash
+# and _sandy_stage_project_context are needed.
 eval "$(awk '/^_sandy_context_hash\(\) \{/,/^}$/' "$SANDY_SCRIPT")"
+eval "$(awk '/^_sandy_stage_project_context\(\) \{/,/^}$/' "$SANDY_SCRIPT")"
 # _s180_run <case> <dockerfile:y|n> <approve:y|n> <docker:up|down>
 # Runs gate + composer; prints the marker's image value (sorted keys), or
 # PARSE-FAIL. The marker file is left at $_S180_DIR/sb-<case>/sandy-session.json.
@@ -22429,7 +22565,7 @@ check "§180(13) the marker WRITES the key --print-state READS (mutation: rename
     bash -c 'grep -qF "\\n  \"image\": %s," "$1" && grep -qF "s/^  \"image\": //p" "$1"' -- "$SANDY_SCRIPT"
 rm -rf "$_S180_DIR"
 unset _S180_DIR _S180_A _S180_B _S180_NONE _S180_YES _S180_NO _S180_DOWN
-unset -f _s180_run _s180_ps _sandy_context_hash 2>/dev/null || true
+unset -f _s180_run _s180_ps _sandy_context_hash _sandy_stage_project_context 2>/dev/null || true
 
 
 # BEGIN SUMMARY

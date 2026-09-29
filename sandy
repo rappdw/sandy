@@ -11370,20 +11370,80 @@ SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
 # Dockerfile would leave the payload-in-a-helper hole: a Dockerfile that
 # `COPY setup.sh` + `RUN /tmp/setup.sh` is approved once, then a later edit to
 # setup.sh (Dockerfile unchanged) would rebuild and execute it on the host
-# unattended with the stored approval still matching. config/.secrets are
-# sandy's own control files (not build inputs), so they're excluded — routine
-# credential/model edits must not re-trigger the build prompt. Path is made
-# location-independent (relative to the context dir) so it's stable across
-# equivalent workspaces. Output is a single hex hash.
+# unattended with the stored approval still matching. The TOP-LEVEL config and
+# .secrets are sandy's own control files (not build inputs), so they're
+# excluded — routine credential/model edits must not re-trigger the build
+# prompt. Path is made location-independent (relative to the context dir) so
+# it's stable across equivalent workspaces. Output is a single hex hash.
+#
+# `--list` (#295) prints the relative paths it would hash, one per line, and no
+# hash. That list is ALSO the build context: _sandy_stage_project_context copies
+# exactly these files and nothing else, so what the approval covered and what
+# docker is sent are one set by construction, not two enumerations that must
+# be kept in step. It used to be two: `docker build` was handed the raw
+# .sandy/ dir, so config and .secrets -- excluded here -- were still SENT, and a
+# `COPY .secrets` placed where the review did not show it baked the workspace's
+# credentials into an image layer. The exclusions are anchored to the top
+# level for the same reason: `! -name config` also skipped a helper named
+# `config` in a subdirectory, which docker sent and a RUN could execute while
+# edits to it never re-prompted. Regular files only (`-type f`): a symlink is
+# neither hashed nor staged, so it cannot carry unreviewed content in.
 _sandy_context_hash() {
     local dir="$1" f h out=""
     while IFS= read -r f; do
         [ -n "$f" ] || continue
+        [ "$f" = "$dir/config" ] && continue
+        [ "$f" = "$dir/.secrets" ] && continue
+        if [ "${2:-}" = "--list" ]; then
+            printf '%s\n' "${f#"$dir"/}"
+            continue
+        fi
         h="$(sha256 < "$f" | awk '{print $1}')"
         out="$out$h  ${f#"$dir"/}
 "
-    done < <(find "$dir" -type f ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
+    done < <(find "$dir" -type f 2>/dev/null | LC_ALL=C sort)
+    [ "${2:-}" = "--list" ] && return 0
     printf '%s' "$out" | sha256 | awk '{print $1}'
+}
+
+# Stage the per-project build context (#295) into a fresh temp dir holding
+# EXACTLY the files _sandy_context_hash covers, and print its path. Refuses
+# (nonzero, reason on stderr, nothing left behind) when:
+#   - .sandy/Dockerfile is a symlink: `-f` follows it, the hash (-type f) does
+#     not, so a linked Dockerfile's CONTENT was never part of any approval --
+#     its target could change after approval and still build unattended;
+#   - a file cannot be copied;
+#   - the staged set does not hash to $2, the hash the approval gate judged.
+#     That binds the build to the reviewed bytes: a context edited between the
+#     prompt and the build is not built. An empty $2 never matches.
+# config and .secrets are never staged, so a Dockerfile that COPYs them fails
+# the build instead of putting credentials in a layer.
+_sandy_stage_project_context() {
+    local ctx="$1" want="${2:-}" stage rel got
+    if [ -L "$ctx/Dockerfile" ] || [ ! -f "$ctx/Dockerfile" ]; then
+        echo "[sandy] .sandy/Dockerfile is a symlink or not a regular file. Its content is not part" >&2
+        echo "[sandy] of what the approval hashed, so sandy will not build it; replace the link" >&2
+        echo "[sandy] with the file itself." >&2
+        return 1
+    fi
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/sandy-project-ctx.XXXXXX")" || return 1
+    while IFS= read -r rel; do
+        [ -n "$rel" ] || continue
+        if ! { mkdir -p "$stage/$(dirname "$rel")" && cp -p "$ctx/$rel" "$stage/$rel"; }; then
+            rm -rf "$stage"
+            echo "[sandy] Could not stage .sandy/$rel into the build context." >&2
+            return 1
+        fi
+    done < <(_sandy_context_hash "$ctx" --list)
+    got="$(_sandy_context_hash "$stage")"
+    if [ -z "$want" ] || [ "$got" != "$want" ]; then
+        rm -rf "$stage"
+        echo "[sandy] The .sandy/ build context is not the content that was approved (it changed" >&2
+        echo "[sandy] after the review, or no review hash was recorded); not building it. Relaunch" >&2
+        echo "[sandy] to review the current content." >&2
+        return 1
+    fi
+    printf '%s\n' "$stage"
 }
 
 # Gate a per-project .sandy/Dockerfile build behind explicit per-workspace
@@ -11460,19 +11520,34 @@ _sandy_project_dockerfile_approved() {
     echo "[sandy]   A RUN line doing anything ELSE -- piping a URL to a shell, writing outside" >&2
     echo "[sandy]   the image, reading from the build context -- is what deserves your attention." >&2
     echo "[sandy]" >&2
+    # The WHOLE Dockerfile, never a prefix (#295). The approval hashes every
+    # byte of it, so a review that shows part and approves all is not a review:
+    # the old 200-line cut plus a "(truncated)" note was an invitation to
+    # approve line 201 unseen -- e.g. a `COPY .secrets` parked below the fold.
+    # Showing everything is the simpler honest option than refusing long files
+    # (which would need its own override, i.e. a second way to approve); an
+    # operator who does not want to scroll it answers N. The line count up
+    # front says how much there is to read.
     # Strip control chars (incl. ESC) per line — the Dockerfile is untrusted and
     # raw terminal escapes could spoof what the reviewer sees vs. what's approved.
-    sed -n '1,200p' "$dockerfile" | while IFS= read -r _line; do
+    # `|| [ -n "$_line" ]` keeps a final line with no trailing newline.
+    echo "[sandy]   .sandy/Dockerfile, all $(awk 'END { print NR }' "$dockerfile" 2>/dev/null || echo '?') lines:" >&2
+    while IFS= read -r _line || [ -n "$_line" ]; do
         printf '[sandy]   | %s\n' "$(printf '%s' "$_line" | LC_ALL=C tr -d '[:cntrl:]')" >&2
-    done
-    [ "$(wc -l < "$dockerfile" 2>/dev/null || echo 0)" -gt 200 ] && echo "[sandy]   | ... (truncated — review the full file)" >&2
-    # The approval covers the WHOLE build context, not just the Dockerfile above.
-    # Any COPY/ADD/RUN-able sibling is hashed too, so name them — their contents
-    # aren't shown but a change to any of them re-triggers this prompt.
+    done < "$dockerfile"
+    # The approval covers the WHOLE build context, not just the Dockerfile above,
+    # and the build is sent exactly this list (_sandy_stage_project_context), so
+    # name every other file -- contents not shown, but a change to any of them
+    # re-triggers this prompt.
     while IFS= read -r _other; do
         [ -n "$_other" ] || continue
-        echo "[sandy]   + build-context file (contents not shown): ${_other#"$_ctx"/}" >&2
-    done < <(find "$_ctx" -type f ! -name Dockerfile ! -name config ! -name .secrets 2>/dev/null | LC_ALL=C sort)
+        [ "$_other" = "Dockerfile" ] && continue
+        echo "[sandy]   + build-context file (contents not shown): $_other" >&2
+    done < <(_sandy_context_hash "$_ctx" --list)
+    if [ -e "$_ctx/config" ] || [ -e "$_ctx/.secrets" ]; then
+        echo "[sandy]   (.sandy/config and .sandy/.secrets are sandy's own settings: not part of this" >&2
+        echo "[sandy]    approval and NOT sent to the build, so a COPY of either fails.)" >&2
+    fi
     echo "[sandy]" >&2
     # Headless / non-interactive: fail closed.
     if [ "${_sandy_is_headless:-false}" = "true" ] || [ ! -t 0 ]; then
@@ -14193,17 +14268,28 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
         # so rather than leaving it to read like one.
         if _sandy_build_allowed "$PROJECT_IMAGE_NAME" "project image"; then
         info "Building project image from .sandy/Dockerfile..."
+        # The context docker is sent is a STAGED copy of exactly the files the
+        # approval hashed (#295) -- never the raw .sandy/ dir, which also holds
+        # config and .secrets. _SANDY_DF_HASH is the hash the gate above judged;
+        # staging refuses a context that no longer matches it.
+        _sandy_proj_ctx=""
+        if ! _sandy_proj_ctx="$(_sandy_stage_project_context "$WORK_DIR/.sandy" "${_SANDY_DF_HASH:-}")"; then
+            error "Not building the project image: its build context could not be staged as approved."
+            exit 1
+        fi
         _sandy_proj_build_rc=0
         docker build -q --no-cache \
             --label sandy.managed=1 \
             --build-arg BASE_IMAGE="$IMAGE_NAME" \
             -t "$PROJECT_IMAGE_NAME" \
-            -f "$PROJECT_DOCKERFILE" "$WORK_DIR/.sandy" || _sandy_proj_build_rc=$?
+            -f "$_sandy_proj_ctx/Dockerfile" "$_sandy_proj_ctx" || _sandy_proj_build_rc=$?
+        rm -rf "$_sandy_proj_ctx"
         if [ "$_sandy_proj_build_rc" -ne 0 ]; then
             error "The .sandy/Dockerfile build failed (exit $_sandy_proj_build_rc)."
             error "Note: sandy's reachability probe covers only its OWN build hosts (deb.debian.org,"
             error "registry.npmjs.org), not whatever this Dockerfile fetches. If the failure is a"
             error "download, check that the hosts this Dockerfile uses are reachable from here."
+            error "The build is sent .sandy/ WITHOUT config and .secrets; a COPY of either fails here."
             exit "$_sandy_proj_build_rc"
         fi
         echo "$PROJECT_HASH" > "$PROJECT_HASH_FILE"
