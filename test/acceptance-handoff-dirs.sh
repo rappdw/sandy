@@ -227,14 +227,20 @@ ck "relay process is running in the container" "[ -n \"$_pid1\" ]"
 ck "exactly one relay process" \
    "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f 'acc-relay/relay' 2>/dev/null)\" = 1 ]"
 # Two /proc/<pid>/status hops: relay's parent is the supervisor loop shell;
-# the loop shell's parent must be PID 1 (tail -f /dev/null in daemon mode,
-# which the loop was backgrounded under BEFORE PID 1 exec'd into tail --
-# exec preserves the pid, so children reparent to nothing across it).
+# the loop shell's parent must be the container's MAIN process (tail -f
+# /dev/null in daemon mode, which the loop was backgrounded under BEFORE the
+# entrypoint exec'd into tail -- exec preserves the pid). That main process
+# is PID 1 only without an init: since 2.5.0 (#392) the agent container runs
+# with --init, so PID 1 is docker-init and the main process is ITS child.
+# The property is "the loop hangs off the main process, not a pane or the
+# tmux server", so resolve the main process rather than hardcoding 1.
 _ppid1="$(docker exec -u "$(id -u)" "$C3" sh -c "awk '/^PPid:/{print \$2}' /proc/$_pid1/status" 2>/dev/null)"
 ck "relay's immediate parent resolved (the supervisor loop shell)" "[ -n \"$_ppid1\" ]"
 _ppid2="$(docker exec -u "$(id -u)" "$C3" sh -c "awk '/^PPid:/{print \$2}' /proc/$_ppid1/status" 2>/dev/null)"
-ck "the supervisor loop's parent is PID 1 -- sibling of tmux, not a pane, not a session child" \
-   "[ \"$_ppid2\" = 1 ]"
+_main_info="$(docker exec -u "$(id -u)" "$C3" sh -c "awk '/^PPid:/{print \$2}' /proc/$_ppid2/status; cat /proc/$_ppid2/comm" 2>/dev/null | tr '\n' ' ')"
+echo "  supervisor loop parent: pid=$_ppid2 ppid+comm=$_main_info"
+ck "the supervisor loop's parent is the container's main process (tail, PID 1 or docker-init's child) -- sibling of tmux, not a pane, not a session child" \
+   "case \"$_main_info\" in '0 tail '|'1 tail ') true ;; *) false ;; esac"
 
 echo "-- E3. restart on death --"
 _pid_before="$_pid1"
