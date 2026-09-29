@@ -5339,6 +5339,8 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
             _rms_h16="$(printf '%s' "$_rms_wp" | sha256 | awk '{print $1}' | cut -c1-16)"
             rm -f "$SANDY_HOME/approvals/passive-$_rms_h16.list" 2>/dev/null || true
             rm -f "$SANDY_HOME/approvals/dockerfile-$_rms_h16.list" 2>/dev/null || true
+            # ...and the created-by-a-session record that qualifies it (#295).
+            rm -f "$SANDY_HOME/approvals/dockerfile-$_rms_h16.session-created" 2>/dev/null || true
         fi
     done <<< "$_rms_ok"
     # Reap the strays enumerated in the --orphans plan above. Same containment
@@ -11537,6 +11539,55 @@ _sandy_stage_project_context() {
     printf '%s\n' "$stage"
 }
 
+# --- A .sandy/ that a SESSION created (#295 item 3) --------------------------
+# .sandy/ is protected against modification, not creation: like every protected
+# directory it is mounted :ro only when it EXISTED at launch, so a session that
+# started without one can write .sandy/Dockerfile through the rw workspace bind.
+# For every other protected path the session-end warning precedes the harm; for
+# this one sandy is the actor, offering to run its RUN lines on the host daemon
+# at the NEXT launch. Always-mounting .sandy/ :ro was declined (maintainer
+# decision, option C): it would bring back the workspace stubs the existence
+# gate was introduced to remove. Instead the creation is RECORDED, and the next
+# Dockerfile approval prompt says so -- the strongest provenance sandy can give.
+#
+# The record lives in $SANDY_HOME/approvals/, beside the approval it qualifies,
+# because that is the one place neither a repository (not under the workspace)
+# nor the session (not under any directory mounted into the container) can
+# write -- a record the agent could forge or delete would be worthless. Keyed
+# on the same 16-char workspace hash as the approval file, so --remove-sandbox
+# reaps both together.
+_sandy_df_session_record() {   # $1 = workspace (canonical)
+    printf '%s/approvals/dockerfile-%s.session-created' "$SANDY_HOME" \
+        "$(printf '%s' "$1" | sha256 | awk '{print $1}' | cut -c1-16)"
+}
+
+# Write that record when $WORK_DIR/.sandy exists now (with content) and the
+# launch snapshot $1 ($SANDBOX_DIR/.protected-existed-at-launch) says it did
+# not exist at launch. $2 says who noticed: "session-end" (cleanup, including
+# the daemon supervisor's own cleanup on --stop) or "next-launch" (a snapshot
+# left behind by a session whose cleanup never ran -- SIGKILL, a reboot under
+# --restart unless-stopped, a --stop that found the supervisor dead; picked up
+# by the approval gate below before the launch clears stale snapshots). The
+# first line is the context hash as it stood at that moment, so the prompt can
+# say whether the content is still what the session left. Returns 0 only when
+# it wrote a record.
+_sandy_note_session_created_sandy_dir() {
+    local snap="$1" by="${2:-session-end}" rec
+    [ -n "${WORK_DIR:-}" ] && [ -n "${SANDY_HOME:-}" ] && [ -f "$snap" ] || return 1
+    grep -qFx ".sandy" "$snap" 2>/dev/null && return 1
+    [ -d "$WORK_DIR/.sandy" ] && [ -n "$(ls -A "$WORK_DIR/.sandy" 2>/dev/null)" ] || return 1
+    rec="$(_sandy_df_session_record "$WORK_DIR")"
+    mkdir -p "$SANDY_HOME/approvals" 2>/dev/null || return 1
+    {
+        printf '%s\n' "$(_sandy_context_hash "$WORK_DIR/.sandy")"
+        printf '# workspace: %s\n' "$WORK_DIR"
+        printf '# recorded:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')"
+        printf '# by:        %s\n' "$by"
+    } > "$rec" 2>/dev/null || return 1
+    chmod 600 "$rec" 2>/dev/null || true
+    return 0
+}
+
 # Gate a per-project .sandy/Dockerfile build behind explicit per-workspace
 # approval (HF-incident Issue 7). Building it runs arbitrary RUN commands on the
 # HOST docker daemon with UNFILTERED network (build-time is NOT behind the egress
@@ -11553,21 +11604,45 @@ _sandy_stage_project_context() {
 # that content (#296).
 _sandy_project_dockerfile_approved() {
     local dockerfile="$1" df_hash wd_hash approval_file stored _ans _line _ctx _other _prov_date
+    local session_rec _sess_date _sess_hash=""
     _ctx="$(dirname "$dockerfile")"
     df_hash="$(_sandy_context_hash "$_ctx")"
     _SANDY_DF_HASH="$df_hash"
     wd_hash="$(printf '%s' "$WORK_DIR" | sha256 | awk '{print $1}' | cut -c1-16)"
     approval_file="$SANDY_HOME/approvals/dockerfile-$wd_hash.list"
+    session_rec="$(_sandy_df_session_record "$WORK_DIR")"
     mkdir -p "$SANDY_HOME/approvals"
-    # CI / test-harness escape hatch — env-only, same as the passive gate. It
-    # covers THIS gate as well as the passive-privileged one; the symlink gate
-    # deliberately does not honour it (see its _sandy_key_metadata row).
-    [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ] && return 0
     # Already approved and unchanged? (first line of the file is the hash)
+    # Checked ahead of the bypass below only so that a session-created record
+    # is never cleared SILENTLY: this content was reviewed and approved, so the
+    # "created by a session" flag no longer describes anything unreviewed (a
+    # session that recreated bytes the operator had already approved, or the
+    # supervisor meeting a record its --start pre-pass just approved). Both
+    # branches return 0, so the bypass's behaviour is unchanged.
     if [ -f "$approval_file" ]; then
         stored="$(head -n1 "$approval_file" 2>/dev/null)"
-        [ "$stored" = "$df_hash" ] && return 0
+        if [ "$stored" = "$df_hash" ]; then
+            if [ -f "$session_rec" ]; then
+                rm -f "$session_rec" 2>/dev/null || true
+                echo "[sandy] .sandy/ had been flagged as created by a sandy session, but its content is" >&2
+                echo "[sandy] exactly what you approved for this workspace; flag cleared." >&2
+            fi
+            return 0
+        fi
     fi
+    # A snapshot a crashed or killed session left behind (its cleanup never
+    # ran) still says whether .sandy/ existed when it launched; read it before
+    # this launch's stale-snapshot sweep deletes it. Harmless when that session
+    # is live (the --start pre-pass runs before the busy-gate): it then records
+    # what the live session has created so far, which is also true.
+    if [ -n "${SANDBOX_DIR:-}" ]; then
+        _sandy_note_session_created_sandy_dir "$SANDBOX_DIR/.protected-existed-at-launch" next-launch || true
+    fi
+    # CI / test-harness escape hatch — env-only, same as the passive gate. It
+    # covers THIS gate as well as the passive-privileged one; the symlink gate
+    # deliberately does not honour it (see its _sandy_key_metadata row). It
+    # leaves a session-created record in place: nobody reviewed anything.
+    [ "${SANDY_AUTO_APPROVE_PRIVILEGED:-0}" = "1" ] && return 0
     # #296: the operator already answered N at the `--start` pre-pass for THIS
     # content. The supervisor has no tty, so without this it would re-print the
     # whole review and then advise "launch interactively once to approve" --
@@ -11591,7 +11666,31 @@ _sandy_project_dockerfile_approved() {
     # that no longer matches -- and records the date of the earlier approval.
     # .sandy/ is :ro in-session only when it EXISTED at launch, so a session
     # that started without one could have written this one (#295 item 1).
-    if [ -f "$approval_file" ]; then
+    #
+    # Highest priority (#295 item 3): a record that a sandy SESSION created
+    # .sandy/. That is not "no approval on record" -- it is positive evidence
+    # of who wrote the directory, so it outranks both other lines. It stays
+    # until the operator approves (y below, which clears it and says so) or the
+    # content matches an approval (above); a decline or an unanswerable
+    # headless prompt leaves it, so the next prompt says the same thing.
+    if [ -f "$session_rec" ]; then
+        _sess_hash="$(head -n1 "$session_rec" 2>/dev/null || true)"
+        _sess_date="$(awk '/^# recorded:/ { sub(/^# recorded: */, ""); print; exit }' "$session_rec" 2>/dev/null || true)"
+        echo "[sandy] PROVENANCE: this build context was CREATED BY A SANDY SESSION (recorded ${_sess_date:-on an unrecorded date})." >&2
+        echo "[sandy] .sandy/ did not exist when that session launched and did when it ended, so" >&2
+        echo "[sandy] nothing kept the agent from writing it. REVIEW IT AS AGENT-WRITTEN: approve" >&2
+        echo "[sandy] only if you asked for it and every line below is what you asked for." >&2
+        if [ "$_sess_hash" = "$df_hash" ]; then
+            echo "[sandy] It is byte-for-byte what that session left behind." >&2
+        else
+            echo "[sandy] It has CHANGED since that session ended (an edit, a pull, a checkout) -- the" >&2
+            echo "[sandy] change does not make the rest of it yours." >&2
+        fi
+        if [ -f "$approval_file" ]; then
+            _prov_date="$(awk '/^# approved:/ { sub(/^# approved: */, ""); print; exit }' "$approval_file" 2>/dev/null || true)"
+            echo "[sandy] (An earlier approval, on ${_prov_date:-an unrecorded date}, covered different content.)" >&2
+        fi
+    elif [ -f "$approval_file" ]; then
         _prov_date="$(awk '/^# approved:/ { sub(/^# approved: */, ""); print; exit }' "$approval_file" 2>/dev/null || true)"
         echo "[sandy] PROVENANCE: the build context CHANGED since you approved it on ${_prov_date:-an unrecorded date}." >&2
         echo "[sandy] If you did not change it yourself (an edit, a pull, a branch you checked out)," >&2
@@ -11656,10 +11755,19 @@ _sandy_project_dockerfile_approved() {
                 printf '%s\n' "$df_hash"
                 printf '# workspace: %s\n' "$WORK_DIR"
                 printf '# approved:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')"
+                # Keep the provenance the operator approved over, so clearing
+                # the session-created record below loses nothing.
+                if [ -f "$session_rec" ]; then
+                    printf '# provenance: created by a sandy session (recorded %s); approved after review\n' "${_sess_date:-?}"
+                fi
             } > "$approval_file"
             chmod 600 "$approval_file" 2>/dev/null || true
             echo "[sandy] Approved. Future launches build it silently until the Dockerfile" >&2
             echo "[sandy] changes. Revoke via: rm $approval_file" >&2
+            if [ -f "$session_rec" ]; then
+                rm -f "$session_rec" 2>/dev/null || true
+                echo "[sandy] The created-by-a-sandy-session flag is cleared: you have reviewed this content." >&2
+            fi
             return 0 ;;
         *)
             echo "[sandy] Not approved — using the base agent image for this launch." >&2
@@ -14639,6 +14747,15 @@ cleanup() {
                 && [ -d "$WORK_DIR/$_cfg_hooks" ] && [ -n "$(ls -A "$WORK_DIR/$_cfg_hooks" 2>/dev/null)" ]; then
             _new_protected+=("$_cfg_hooks")
         fi
+        # #295 item 3: a .sandy/ this session created is the one appearance
+        # sandy itself acts on -- the next launch offers to build its
+        # Dockerfile on the host daemon. Record it where neither the workspace
+        # nor the container can reach, so that approval prompt can say who
+        # wrote it. Runs in the daemon supervisor's cleanup too (--stop).
+        _sandy_df_flagged=false
+        if _sandy_note_session_created_sandy_dir "$SANDBOX_DIR/.protected-existed-at-launch" session-end; then
+            _sandy_df_flagged=true
+        fi
         if [ ${#_new_protected[@]} -gt 0 ]; then
             printf "\n${YELLOW}[sandy]${NC} Protected paths appeared during this session:\n" >&2
             for _p in "${_new_protected[@]}"; do
@@ -14662,6 +14779,12 @@ cleanup() {
                 fi
             done
             printf "${YELLOW}[sandy]${NC}   (cd %q && rm -rf%s)\n\n" "$WORK_DIR" "$_rm_args" >&2
+        fi
+        if [ "$_sandy_df_flagged" = true ]; then
+            printf "${YELLOW}[sandy]${NC} .sandy/ was CREATED during this session. Sandy runs a .sandy/Dockerfile's RUN\n" >&2
+            printf "${YELLOW}[sandy]${NC} lines on your host docker daemon, so the next launch that would build one will\n" >&2
+            printf "${YELLOW}[sandy]${NC} flag it in the approval prompt as CREATED BY A SANDY SESSION. Record:\n" >&2
+            printf "${YELLOW}[sandy]${NC}   %s\n\n" "$(_sandy_df_session_record "$WORK_DIR")" >&2
         fi
         rm -f "$SANDBOX_DIR/.protected-existed-at-launch"
     fi

