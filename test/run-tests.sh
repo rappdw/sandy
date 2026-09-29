@@ -13067,7 +13067,7 @@ check "§123(23) --reset-sandbox NAMES the relay it destroys, so the change from
     bash -c 'grep -q "AND DESTROYS relay-bin/relay" "$1"' -- "$SANDY_SCRIPT"
 check "§123(24) --remove-sandbox names the relay it will destroy in its printed plan" \
     bash -c 'grep -q "an installed relay (relay-bin/relay) will be destroyed" "$1"' -- "$SANDY_SCRIPT"
-check "§123(25) SANDY_EXTRA_ENV REFUSES SANDY_HANDOFF_* — the one route by which those derived exports were settable; a forwarded name lands last-wins in the -e order and makes the environment and the marker disagree" \
+check "§123(25) SANDY_EXTRA_ENV still REFUSES SANDY_HANDOFF_* — a stale pre-entries image reads SANDY_HANDOFF_RELAY and would start what it names, so forwarding one would route round the manifest (the only producer of an entry since 2.6.0)" \
     bash -c 'grep -q "SANDY_HANDOFF_\*)" "$1"' -- "$SANDY_SCRIPT"
 
 # --- the bounded startup window, driven by REAL relays that really exit -------
@@ -13317,7 +13317,7 @@ mkdir -p "$_S124_ALLOK/sandboxes/a/pip"
 printf '{\n  "workspace_path": "%s"\n}\n' "$_S124_DIR/ws" > "$_S124_ALLOK/sandboxes/a/WORKSPACE.json"
 _S124_NOOP="$(trap - ERR; _s124_pv "$_S124_ALLOK" --yes)"
 check "§124(17) every pair already correct exits 0 and does no work (C1: skip when the goal is ALREADY MET)" \
-    bash -c 'printf "%s" "$1" | grep -q "already has a correct handoff pair" && printf "%s" "$1" | grep -q "rc=0"' -- "$_S124_NOOP"
+    bash -c 'printf "%s" "$1" | grep -q "already has the per-sandbox state a launch creates" && printf "%s" "$1" | grep -q "rc=0"' -- "$_S124_NOOP"
 
 # an orphan cannot be provisioned: named, counted unprepared, exit NON-ZERO.
 # The consumer was explicit that an exit 0 with one sandbox silently unprepared
