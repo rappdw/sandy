@@ -3548,6 +3548,41 @@ EOF_FEATURE_ENTRIES
     fi
     printf ']'
 
+    # dockerfile_approvals (#296): the per-project .sandy/Dockerfile approvals,
+    # $SANDY_HOME/approvals/dockerfile-*.list -- the third gate's record, which
+    # `approvals` above never read, so a UI or fleet tool could list which
+    # workspaces had approved config keys but not which had approved a HOST-side
+    # build. Same file shape as the passive lists: the first line is the
+    # build-context hash as stored (_sandy_context_hash, reported verbatim, so
+    # a consumer can compare it with a later review), then `# workspace:` and
+    # `# approved:`. Missing comment lines read "" exactly as they do above.
+    # A separate array rather than a `kind` on `approvals` keeps that array's
+    # element shape unchanged for existing consumers (additive).
+    printf ',"dockerfile_approvals":['
+    first=1
+    if [ -d "$SANDY_HOME/approvals" ]; then
+        for app in "$SANDY_HOME/approvals"/dockerfile-*.list; do
+            [ -f "$app" ] || continue
+            local dfa_hash dfa_workspace dfa_time dfa_wd_hash
+            dfa_hash="$(head -n1 "$app" 2>/dev/null || true)"
+            dfa_workspace="$(grep -m1 '^# workspace:' "$app" 2>/dev/null | sed 's/^# workspace:[[:space:]]*//' || true)"
+            dfa_time="$(grep -m1 '^# approved:' "$app" 2>/dev/null | sed 's/^# approved:[[:space:]]*//' || true)"
+            dfa_wd_hash="$(basename "$app")"
+            dfa_wd_hash="${dfa_wd_hash#dockerfile-}"
+            dfa_wd_hash="${dfa_wd_hash%.list}"
+
+            [ $first -eq 0 ] && printf ','
+            first=0
+            printf '{'
+            _json_kv workspace_hash       "$(_json_escape "$dfa_wd_hash")"
+            printf ','; _json_kv workspace_path_hint  "$(_json_escape "$dfa_workspace")"
+            printf ','; _json_kv context_sha256       "$(_json_escape "$dfa_hash")"
+            printf ','; _json_kv approved_at          "$(_json_escape "$dfa_time")"
+            printf '}'
+        done
+    fi
+    printf ']'
+
     # running_containers + docker_reachable.
     # Light mode: a single `docker ps` — its exit status IS the reachability
     # signal (fails when the CLI is missing or the daemon is down), replacing

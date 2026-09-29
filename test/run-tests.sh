@@ -22568,6 +22568,105 @@ unset _S180_DIR _S180_A _S180_B _S180_NONE _S180_YES _S180_NO _S180_DOWN
 unset -f _s180_run _s180_ps _sandy_context_hash _sandy_stage_project_context 2>/dev/null || true
 
 
+# ============================================================
+echo "§181: --print-state reports the .sandy/Dockerfile approvals (#296)"
+# ============================================================
+# WHY. `approvals` reads only passive-*.list, so of the three launch gates a
+# consumer could see the config-key approvals and not the one that authorizes
+# a HOST-side build with unfiltered network. dockerfile_approvals is additive:
+# a separate array, so `approvals` keeps its element shape.
+#
+# The fixture approval is written by the REAL gate, answered `y` on a pty
+# (it reads /dev/tty), so the reader is held to the writer's actual format
+# rather than to a hand-written imitation of it.
+_S181_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S181_FN="$(awk '
+    /^sha256\(\)/ {print; next}
+    /^_sandy_context_hash\(\)/,/^}/ {print; next}
+    /^_sandy_project_dockerfile_approved\(\)/,/^}/ {print; next}
+' "$SANDY_SCRIPT")"
+cat > "$_S181_DIR/ptyyes.py" <<'PY'
+import os, pty, sys, select, time, signal
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        os.execvp(sys.argv[1], sys.argv[1:])
+    finally:
+        os._exit(127)
+buf = b''
+sent = False
+deadline = time.time() + 60
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if fd in r:
+        try:
+            d = os.read(fd, 4096)
+        except OSError:
+            break
+        if not d:
+            break
+        buf += d
+        if not sent and b'[y/N]' in buf:
+            os.write(fd, b'y\n')
+            sent = True
+else:
+    os.kill(pid, signal.SIGKILL)
+os.waitpid(pid, 0)
+PY
+_S181_H="$_S181_DIR/home"; _S181_W="$_S181_DIR/ws"
+mkdir -p "$_S181_H" "$_S181_W/.sandy"
+printf 'ARG BASE_IMAGE\nFROM $BASE_IMAGE\nRUN true\n' > "$_S181_W/.sandy/Dockerfile"
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$_S181_DIR/ptyyes.py" bash -c "$_S181_FN"$'\n''WORK_DIR="$1" SANDY_HOME="$2" SANDY_AUTO_APPROVE_PRIVILEGED=0 _sandy_project_dockerfile_approved "$1/.sandy/Dockerfile"' _ "$_S181_W" "$_S181_H" >/dev/null 2>&1 || true
+fi
+_S181_H16="$(printf '%s' "$_S181_W" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print $1}' | cut -c1-16)"
+_S181_CTX="$(bash -c "$_S181_FN"$'\n''_sandy_context_hash "$1"' _ "$_S181_W/.sandy")"
+check "§181(pre) the REAL gate, answered y on a pty, wrote the approval this section reads" \
+    test "$(head -n1 "$_S181_H/approvals/dockerfile-$_S181_H16.list" 2>/dev/null)" = "$_S181_CTX"
+# A passive-key approval beside it, to prove the two arrays stay separate.
+printf '%s\n# workspace: %s\n# approved:  2026-01-01T00:00:00Z\n' "$(printf 'k%.0s' 1 2 3)" "/elsewhere" > "$_S181_H/approvals/passive-1234567890abcdef.list"
+# _s181_q <home> <python expr over d> [--light] -> the expression's JSON, or PARSE-FAIL
+_s181_q() {
+    SANDY_HOME="$1" "$SANDY_SCRIPT" --print-state ${3:-} 2>/dev/null \
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(eval(sys.argv[1]), sort_keys=True))' "$2" 2>/dev/null \
+        || echo PARSE-FAIL
+    return 0
+}
+_S181_ENTRY="$(_s181_q "$_S181_H" 'd["dockerfile_approvals"]')"
+check "§181(1) the approval is reported with the workspace hash, path hint and the context hash AS STORED (got: $_S181_ENTRY)" \
+    bash -c 'python3 -c "
+import json,sys
+a=json.loads(sys.argv[1]); assert len(a)==1, a; e=a[0]
+assert e[\"workspace_hash\"]==sys.argv[2], e
+assert e[\"workspace_path_hint\"]==sys.argv[3], e
+assert e[\"context_sha256\"]==sys.argv[4], e
+" "$1" "$2" "$3" "$4"' _ "$_S181_ENTRY" "$_S181_H16" "$_S181_W" "$_S181_CTX"
+check "§181(2) ...with the approval time the writer recorded, in UTC" \
+    bash -c 'python3 -c "
+import json,re,sys
+e=json.loads(sys.argv[1])[0]
+assert re.match(r\"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$\", e[\"approved_at\"]), e
+" "$1"' _ "$_S181_ENTRY"
+check "§181(3) the two gates stay in separate arrays: approvals holds only the passive list, unchanged in shape (mutation: globbing *.list into either array mixes them)" \
+    bash -c '[ "$1" = "[\"1234567890abcdef\"]" ]' _ "$(_s181_q "$_S181_H" '[a["workspace_hash"] for a in d["approvals"]]')"
+check "§181(4) emitted in LIGHT mode too (a directory glob, no docker)" \
+    bash -c '[ "$1" = "$2" ]' _ "$(_s181_q "$_S181_H" 'd["dockerfile_approvals"]' --light)" "$_S181_ENTRY"
+mkdir -p "$_S181_DIR/empty/approvals" "$_S181_DIR/none"
+check "§181(5) an approvals dir with no Dockerfile approval reports [] -- present, not null" \
+    bash -c '[ "$1" = "[]" ]' _ "$(_s181_q "$_S181_DIR/empty" 'd["dockerfile_approvals"]')"
+check "§181(6) ...and so does a home with no approvals dir at all" \
+    bash -c '[ "$1" = "[]" ]' _ "$(_s181_q "$_S181_DIR/none" 'd["dockerfile_approvals"]')"
+# A hand-edited file with JSON metacharacters in every field.
+mkdir -p "$_S181_DIR/odd/approvals"
+printf 'ab"c\\d\n# workspace: /w "q" \\ x\n' > "$_S181_DIR/odd/approvals/dockerfile-ffffffffffffffff.list"
+check "§181(7) a hand-edited approval file keeps the one-document stream contract: parses, 0 bytes of stderr, missing approved_at reads \"\" like approvals does (§92/§93)" \
+    bash -c 'e="$(SANDY_HOME="$2" "$1" --print-state 2>&1 >/dev/null)"; [ -z "$e" ] && [ "$3" = "{\"approved_at\": \"\", \"context_sha256\": \"ab\\\"c\\\\d\", \"workspace_hash\": \"ffffffffffffffff\", \"workspace_path_hint\": \"/w \\\"q\\\" \\\\ x\"}" ]' \
+    _ "$SANDY_SCRIPT" "$_S181_DIR/odd" "$(_s181_q "$_S181_DIR/odd" 'd["dockerfile_approvals"][0]')"
+rm -rf "$_S181_DIR"
+unset _S181_DIR _S181_FN _S181_H _S181_W _S181_H16 _S181_CTX _S181_ENTRY
+unset -f _s181_q 2>/dev/null || true
+
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

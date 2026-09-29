@@ -301,6 +301,14 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "approved_at": "2026-04-15T10:00:00Z"
     }
   ],
+  "dockerfile_approvals": [
+    {
+      "workspace_hash": "abc123...",
+      "workspace_path_hint": "/Users/drapp/dev/foo/zork",
+      "context_sha256": "9e0f12...",
+      "approved_at": "2026-04-16T09:30:00Z"
+    }
+  ],
   "running_containers": [
     {
       "id": "abc123",
@@ -703,6 +711,22 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > #393; a feature- or operator-supplied one appears in `agent_args`). A
 > consumer that computes a verdict should say which inputs it covered.
 
+> **`dockerfile_approvals`** (top-level, added additively in `2.7.0`, #296 —
+> no `schema_version` bump; both modes). One entry per
+> `$SANDY_HOME/approvals/dockerfile-<workspace_hash>.list`: the per-project
+> `.sandy/Dockerfile` build approvals, the third launch gate's record, which
+> `approvals` (the passive-privileged config keys only) never read. Each is
+> `{workspace_hash, workspace_path_hint, context_sha256, approved_at}` —
+> `workspace_hash` is the 16-char hash of the canonical workspace path (the
+> one in the file name), `context_sha256` is the approved build-context hash
+> **as stored**, reported verbatim; a consumer that recomputes the context
+> hash can tell "approved, unchanged" from "changed since approval" without
+> launching. `workspace_path_hint` and `approved_at` read `""` when the file
+> lacks the line, exactly as in `approvals`. A separate array rather than a
+> kind field on `approvals`, so that array's element shape is unchanged. `[]`
+> (never `null`) when there are none. Revoking an approval is still `rm` of
+> the file; this field only reports.
+
 > **`orphan_networks`** (top-level, added additively in `1.1.0`, #26 — no
 > `schema_version` bump). Integer count of `sandy_(sidecar|egress|net)_<pid>`
 > networks that are reap-eligible right now: the owning `<pid>` is dead (or
@@ -851,6 +875,7 @@ Reading identity from `pane_index`, a scrollback marker, or the pane title is un
 ## Schema versioning
 
 - **`2.7.0` (#299):** two new top-level fields, `proxy_image_src` and `proxy_image_epoch` — the proxy image's identity labels, full mode only, `null` when absent. Additive, so `schema_version` stays `4`.
+- **`2.7.0` (#296):** one new top-level array, `dockerfile_approvals` (`{workspace_hash, workspace_path_hint, context_sha256, approved_at}` per `.sandy/Dockerfile` approval file, both modes). Additive, so `schema_version` stays `4`; `approvals` is unchanged.
 - **`2.7.0` (#295):** one new `sandboxes[]` field, `image` (`{name, id, project_layer}`, both modes), read back from a new session-marker field of the same name. Additive, so `schema_version` stays `4`; it is marker-derived and follows the `marker` rule, and the writer never emits it as `null`.
 - **`2.7.0` (#386):** two new `sandboxes[]` fields, `marker` (`{state, sandy_version, launched_at}`, both modes) and `cross_session_inbound` (`{pinned, user_settings, workspace_settings}`; the two file objects are `not_computed` in light mode). Additive, so `schema_version` stays `4`. `marker` defines, once for every marker-derived field, what a `null` means, backed by the invariant that a current sandy never writes a deliberate `null` in one. `agent_args` (2.1.0) is now documented here as the supported source for that value. Consumers gate on field presence.
 - **`2.6.0` (#382) — `schema_version` moves to `4`.** Removed, together, as one operator decision to avoid a second bump: `relay{}` in its entirety from both the session marker and `--print-state` (`source`, `path`, `disabled_by` in the marker; `state`, `source`, `executable_present`, `path`, `state_dir`, `last_exit_code`, `restarts`, `last_restart_at`, `disabled_by` in `--print-state`) — and its two companion fields, `feature_entries.<name>.relay_alias` and `feature_entries.<name>.disabled_by`, in both the marker and `--print-state`. Those two were never listed separately in README's `## Deprecated` table: they existed only as companions of `relay{}` (`relay_alias` pointed at the entry `relay{}` described; `disabled_by` recorded `SANDY_RELAY=0`), so removing them alongside it kept the announcement honest without forcing a second `X.Y.0`. Every `feature_entries.<name>` value is now exactly `{path}` in the marker and `{state, restarts, last_exit_code, last_restart_at, executable_present, path, state_dir}` in `--print-state` — every entry reported identically, since there is no longer a designated one. **`state` no longer produces `"disabled"`.** For an un-relaunched sandbox whose marker still carries the old `relay_alias`/`disabled_by` shape, `disabled_by` is simply not read any more (there is nothing left to read it into): an entry that was suppressed via the now-hard-error `SANDY_RELAY=0` never wrote a `.state` file, so it reads `"absent"` — the same value a feature that declared no entry at all gets, and the only value `state` reports absent a live `.state` file, `disabled` included. Also removed in this release, none of them emitted-field changes so none independently move `schema_version`: `cross_session_inbound_source` can no longer produce `"relay-legacy"` (the legacy default itself was removed in decision 6, a prior unit); `SANDY_RELAY` is now a hard error naming a feature manifest's `"sandboxes": {"exclude": [...]}` (decision 3); `SANDY_RELAY_STATE`, the `/opt/sandy/relay-state` mount and the internal `SANDY_HANDOFF_RELAY` channel are gone, replaced by `SANDY_FEATURE_STATE` and `/opt/sandy/feature-state/<feature>` per entry (decisions 4-5); and `/usr/local/bin/sandy-handoff-sessions` is no longer installed in the image (decision 7) — the published pane-identity contract (`SPECIFICATION.md`, #378) is what a consumer now builds its own copy on.
@@ -1013,7 +1038,7 @@ A single new function `_sandy_emit_schema()` that:
 `_sandy_emit_state()`:
 - Walks `$SANDY_HOME/sandboxes/*/` for directory listing
 - Reads each sandbox's `.sandy_created_version` and `.sandy_last_version` files; `created_at` / `last_used_at` are those files' **mtimes in UTC**, `YYYY-MM-DDTHH:MM:SSZ` (whole seconds) on both GNU and BSD `stat`. Before 2.4.0 they were rendered in the host's **local** time with a `Z` appended — off by the UTC offset on any non-UTC host — and the GNU branch carried nanoseconds (`…T14:45:00.123456789Z`). A consumer that compensated for either should stop; `--remove-sandbox`'s "last used" plan line shares the fix.
-- Walks `$SANDY_HOME/approvals/passive-*.list` for approval entries
+- Walks `$SANDY_HOME/approvals/passive-*.list` for approval entries, and `$SANDY_HOME/approvals/dockerfile-*.list` for `dockerfile_approvals` (2.7.0, #296)
 - Calls `docker ps --filter label=sandy --format json` for running containers (if Docker is reachable; silent skip if not)
 - Calls `stat` for directory sizes (portable — macOS `stat -f %z`, Linux `stat -c %s`)
 
