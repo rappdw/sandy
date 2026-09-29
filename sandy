@@ -9700,6 +9700,45 @@ _sandy_update_idle_age_seconds() {
     printf '%s' "$((_now - _activity))"
 }
 
+# #299 — staleness of a daemon session's egress-proxy SIDECAR. The enumeration
+# above lists only sandy.daemon=true containers, which are the AGENT containers;
+# the sidecar (`sandy-proxy-<sandbox>`) is never daemon-labelled. So a proxy
+# image that moved on its own — the monthly freshness epoch, a proxy/ source
+# change, a Go stdlib CVE fix — while the agent image did not left every live
+# session on the old sidecar forever: its agent read "current", it was skipped,
+# and the security chokepoint was the one component nothing refreshed.
+#
+# Arg: the session's sandbox name (its sandy.session label). Prints "true",
+# "false" or "null" exactly as _sandy_image_stale does, or "none" when the
+# session has no proxy sidecar to judge (egress off, or no such container).
+#
+# The name is built from the FULL sandbox name and resolved with a typed
+# `docker inspect --type container`, which matches a container name exactly —
+# never a prefix, and never an image or network that happens to share it. The
+# result is then accepted only if its create-time image REFERENCE is the proxy
+# image: agent-vs-proxy is decided by image, never by name (the --gc rule), so
+# an agent container that happened to carry this exact name — a workspace whose
+# basename is `proxy` yields agent `sandy-proxy-<hash>` beside sidecar
+# `sandy-proxy-proxy-<hash>` — reads as "none", not as this session's proxy.
+# `.Config.Image` rather than `.Image`/`docker ps` for the reason spelled out
+# at _sandy_image_stale: once the tag moves, the running image is reported by
+# raw sha, which would hide exactly the stale sidecars this exists to find.
+_sandy_update_proxy_stale() {
+    local _sess="$1" _pair _pid _pref
+    if [ -z "$_sess" ]; then
+        printf 'none'
+        return 0
+    fi
+    _pair="$(trap - ERR; docker inspect --type container -f '{{.Id}}|{{.Config.Image}}' "sandy-proxy-$_sess" 2>/dev/null)" || _pair=""
+    _pid="${_pair%%|*}"
+    _pref="${_pair#*|}"
+    if [ -z "$_pair" ] || [ -z "$_pid" ] || [ "${_pref%%:*}" != "sandy-proxy" ]; then
+        printf 'none'
+        return 0
+    fi
+    _sandy_image_stale "$_pid"
+}
+
 if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
     # DEC-U7 — global maintenance command: does NOT resolve WORK_DIR (it's
     # already resolved above as an unconditional side effect of reaching this
@@ -9810,6 +9849,15 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
     # Steps 3+4 — staleness check, then (only when --idle-for was given) the
     # idle gate. DEC-U5: with no --idle-for, every stale session is a restart
     # candidate — no activity heuristic is applied by default.
+    #
+    # #299: a session is stale when EITHER half of the pair is — the agent
+    # container or its egress-proxy sidecar (see _sandy_update_proxy_stale).
+    # The reason names which: "stale" keeps its long-standing meaning (the
+    # agent image moved; the restart recreates the sidecar too, so a stale
+    # proxy beside it needs no separate mention), and "proxy stale" is the case
+    # that used to be skipped as "current". A provably stale proxy restarts the
+    # session even when the agent's own staleness is unknown — the restart is
+    # justified by the half that can be judged.
     _upd_stale=() _upd_idle_age=() _upd_action=() _upd_reason=()
     for ((_upd_i = 0; _upd_i < _upd_n; _upd_i++)); do
         if [ "${_upd_build_failed[$_upd_i]:-0}" = "1" ]; then
@@ -9818,19 +9866,21 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
             continue
         fi
         _upd_stale[$_upd_i]="$(_sandy_image_stale "${_upd_cids[$_upd_i]}")"
-        case "${_upd_stale[$_upd_i]}" in
-            true) : ;;
-            null)
-                _upd_action[$_upd_i]="skip"
-                _upd_reason[$_upd_i]="staleness unknown"
-                continue
-                ;;
-            *)
-                _upd_action[$_upd_i]="skip"
-                _upd_reason[$_upd_i]="current"
-                continue
-                ;;
-        esac
+        _upd_pstale="$(_sandy_update_proxy_stale "${_upd_sessions[$_upd_i]}")"
+        _upd_why=""
+        if [ "${_upd_stale[$_upd_i]}" = "true" ]; then
+            _upd_why="stale"
+        elif [ "$_upd_pstale" = "true" ]; then
+            _upd_why="proxy stale"
+        elif [ "${_upd_stale[$_upd_i]}" = "null" ]; then
+            _upd_action[$_upd_i]="skip"
+            _upd_reason[$_upd_i]="staleness unknown"
+            continue
+        else
+            _upd_action[$_upd_i]="skip"
+            _upd_reason[$_upd_i]="current"
+            continue
+        fi
         if [ -n "$SANDY_UPDATE_IDLE_FOR" ]; then
             if ! _upd_age="$(_sandy_update_idle_age_seconds "${_upd_cids[$_upd_i]}")"; then
                 _upd_action[$_upd_i]="skip"
@@ -9846,7 +9896,7 @@ if [ "$SANDY_UPDATE_SESSIONS" = "true" ]; then
             fi
         fi
         _upd_action[$_upd_i]="restart"
-        _upd_reason[$_upd_i]="stale"
+        _upd_reason[$_upd_i]="$_upd_why"
     done
 
     # Step 5 — plan table (human-readable, like --prune-orphans — this is an

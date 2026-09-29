@@ -21905,6 +21905,142 @@ unset _S177_SANDY _S177_D _S177_MNT _S177_SPEC_CONTRACT _S177_WRITER _S177_FEBOD
 unset -f _s177_pairs _s177_write_marker _s177_state _s177_home _s177_csi_case 2>/dev/null || true
 
 
+# ============================================================
+echo "§178: #299 — --update-sessions judges the proxy sidecar too; the proxy image carries its identity"
+# ============================================================
+# --update-sessions enumerates sandy.daemon=true containers, which are the
+# AGENT containers only — the proxy sidecar is never daemon-labelled. Before
+# #299 a proxy image that moved on its own (monthly freshness epoch, a proxy/
+# source change, a Go stdlib fix) while the agent image stood still left every
+# live session on the old sidecar indefinitely: the agent read "current" and
+# the session was skipped. Asserted end to end through the REAL dispatcher and
+# REAL --build-only children behind a stub docker (the §71 pattern), with
+# three fixture sessions, each in its own workspace:
+#   P — fresh agent, STALE proxy   -> must restart, reason naming the proxy
+#   F — fresh agent, fresh proxy   -> skip (current)
+#   N — fresh agent; the container that answers to sandy-proxy-<session> is an
+#       AGENT image running a stale sha (the workspace-named-`proxy` trap: an
+#       agent can carry a sandy-proxy-* name) -> NOT this session's proxy,
+#       skip (current). Agent-vs-proxy is decided by image, never by name.
+# The egress proxy is left ON (the default posture) so the children really
+# build it: a comparison against a proxy image the refresh step never rebuilt
+# would be meaningless.
+_S178_BIN="$(cd "$(mktemp -d)" && pwd -P)"
+_S178_HOME="$(cd "$(mktemp -d)" && pwd -P)"
+_S178_WSP="$(cd "$(mktemp -d)" && pwd -P)"
+_S178_WSF="$(cd "$(mktemp -d)" && pwd -P)"
+_S178_WSN="$(cd "$(mktemp -d)" && pwd -P)"
+_S178_CALLS="$(mktemp)"
+: > "$_S178_CALLS"
+export _S178_WSP _S178_WSF _S178_WSN _S178_CALLS
+cat > "$_S178_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+echo "$*" >> "$_S178_CALLS"
+case "$1" in
+    info) exit 0 ;;
+    ps)
+        printf 'agentP111|P-session|%s|sandy-claude-code\n' "$_S178_WSP"
+        printf 'agentF222|F-session|%s|sandy-claude-code\n' "$_S178_WSF"
+        printf 'agentN333|N-session|%s|sandy-claude-code\n' "$_S178_WSN"
+        exit 0
+        ;;
+    inspect)
+        shift
+        fmt="" tgt="" typ=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -f) shift; fmt="$1" ;;
+                --type) shift; typ="$1" ;;
+                *) tgt="$1" ;;
+            esac
+            shift
+        done
+        case "$fmt" in
+            '{{.Id}}|{{.Config.Image}}')
+                # Only a TYPED container lookup answers — an untyped inspect
+                # could resolve an image or network sharing the name.
+                [ "$typ" = "container" ] || exit 1
+                case "$tgt" in
+                    sandy-proxy-P-session) echo "proxyP111|sandy-proxy" ;;
+                    sandy-proxy-F-session) echo "proxyF222|sandy-proxy" ;;
+                    sandy-proxy-N-session) echo "agentNX444|sandy-claude-code" ;;
+                    *) exit 1 ;;
+                esac
+                ;;
+            '{{.Image}}|{{.Config.Image}}')
+                case "$tgt" in
+                    agentP111|agentF222|agentN333) echo "sha256:current-sandy-claude-code|sandy-claude-code" ;;
+                    proxyP111)  echo "sha256:old|sandy-proxy" ;;
+                    proxyF222)  echo "sha256:current-sandy-proxy|sandy-proxy" ;;
+                    agentNX444) echo "sha256:old|sandy-claude-code" ;;
+                    *) exit 1 ;;
+                esac
+                ;;
+        esac
+        exit 0
+        ;;
+    image)
+        case "$2" in
+            inspect)
+                shift 2
+                fmt="" name=""
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -f) shift; fmt="$1" ;;
+                        *) name="$1" ;;
+                    esac
+                    shift
+                done
+                [ -n "$fmt" ] && echo "sha256:current-$name"
+                exit 0
+                ;;
+            *) exit 0 ;;
+        esac
+        ;;
+    build) exit 0 ;;
+    run) exit 1 ;;
+    network) exit 0 ;;
+    *) exit 0 ;;
+esac
+DOCKERSHIM
+chmod +x "$_S178_BIN/docker"
+# curl succeeds with an empty body: the #218 build-reachability probe passes
+# (so a proxy rebuild is really attempted, not deferred), and every version
+# check reads "no newer version" (no spurious agent rebuild).
+printf '#!/usr/bin/env bash\nexit 0\n' > "$_S178_BIN/curl"
+chmod +x "$_S178_BIN/curl"
+
+# Prime the shared build cache once, so the per-session children no-op.
+(cd "$_S178_WSP" && PATH="$_S178_BIN:$PATH" SANDY_HOME="$_S178_HOME" \
+    SANDY_AUTO_APPROVE_PRIVILEGED=1 bash "$SANDY_SCRIPT" --build-only) >/dev/null 2>&1 \
+    && _S178_PRIME_RC=0 || _S178_PRIME_RC=$?
+check "§178(0) fixture: priming --build-only (proxy on) succeeds" test "$_S178_PRIME_RC" -eq 0
+
+# Move the proxy's build input so --update-sessions' own refresh step has to
+# rebuild it (what a new freshness epoch or a proxy/ edit does).
+rm -f "$_S178_HOME/.build_hash_proxy"
+: > "$_S178_CALLS"
+_S178_OUT="$(mktemp)"
+PATH="$_S178_BIN:$PATH" SANDY_HOME="$_S178_HOME" SANDY_AUTO_APPROVE_PRIVILEGED=1 \
+    bash "$SANDY_SCRIPT" --update-sessions --dry-run >"$_S178_OUT" 2>&1 \
+    && _S178_RC=0 || _S178_RC=$?
+check "§178(1) --update-sessions --dry-run exits 0" test "$_S178_RC" -eq 0
+check "§178(2) the refresh step REBUILDS the proxy image (a staleness comparison against a proxy nothing rebuilt would be meaningless) (mutation: gate the proxy phase off under --build-only -> no sandy-proxy build in the call log)" \
+    bash -c 'grep -E "^build " "$1" | grep -q -- "-t sandy-proxy "' -- "$_S178_CALLS"
+check "§178(3) a fresh agent beside a STALE proxy is planned for restart, and the reason names the proxy (mutation: drop the _sandy_update_proxy_stale branch -> P reads skip (current))" \
+    bash -c 'grep "^P-session " "$1" | grep -qF "restart (proxy stale)"' -- "$_S178_OUT"
+check "§178(4) a fresh agent beside a fresh proxy is NOT restarted (mutation: treat any present proxy as stale -> F restarts)" \
+    bash -c 'grep "^F-session " "$1" | grep -qF "skip (current)"' -- "$_S178_OUT"
+check "§178(5) an AGENT-imaged container answering to sandy-proxy-<session> is not taken for the session proxy (mutation: drop the image gate in _sandy_update_proxy_stale -> its stale sha restarts N)" \
+    bash -c 'grep "^N-session " "$1" | grep -qF "skip (current)"' -- "$_S178_OUT"
+check "§178(6) the restart count is exactly the one stale-proxy session" \
+    bash -c 'grep -qF "(1 restart candidate(s))" "$1"' -- "$_S178_OUT"
+rm -f "$_S178_OUT"
+
+rm -rf "$_S178_BIN" "$_S178_HOME" "$_S178_WSP" "$_S178_WSF" "$_S178_WSN"
+rm -f "$_S178_CALLS"
+unset _S178_BIN _S178_HOME _S178_WSP _S178_WSF _S178_WSN _S178_CALLS _S178_OUT _S178_RC _S178_PRIME_RC
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
