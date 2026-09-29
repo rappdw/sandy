@@ -22037,6 +22037,101 @@ check "§178(6) the restart count is exactly the one stale-proxy session" \
     bash -c 'grep -qF "(1 restart candidate(s))" "$1"' -- "$_S178_OUT"
 rm -f "$_S178_OUT"
 
+# --- (7)-(12) identity labels on the proxy image (#299 item 1) -------------
+# The generated Dockerfile.proxy already records two content-derived
+# identities as comments (`# freshness-epoch:` and, on the local-checkout
+# path, `# proxy-src:`). The build now stamps the SAME values as image labels
+# (a sidecar container inherits them). Asserted against the Dockerfile the
+# build actually used, so a label computed differently from the build input
+# fails -- not merely a label that is absent. The build line under test is the
+# one the --update-sessions refresh above really ran.
+_S178_BUILD="$(grep -E '^build ' "$_S178_CALLS" | grep -- '-t sandy-proxy ' | tail -n 1 || true)"
+_S178_DF_SRC="$(sed -n 's/^# proxy-src: \([0-9a-f]*\) .*/\1/p' "$_S178_HOME/Dockerfile.proxy")"
+_S178_DF_EPOCH="$(sed -n 's/^# freshness-epoch: \([^ ]*\) .*/\1/p' "$_S178_HOME/Dockerfile.proxy")"
+check "§178(7) the proxy build line and both Dockerfile identities were read (mutation: a reworded comment empties them and (8)/(9) go vacuous)" \
+    bash -c '[ -n "$1" ] && [ "${#2}" -eq 64 ] && [ -n "$3" ]' -- "$_S178_BUILD" "$_S178_DF_SRC" "$_S178_DF_EPOCH"
+check "§178(8) the proxy image is labelled sandy.proxy_src=sha256:<the Dockerfile proxy-src hash> (mutation: drop the label, or hash the source differently -> no exact token)" \
+    bash -c 'printf " %s \n" "$1" | grep -qF -- " --label sandy.proxy_src=sha256:$2 "' -- "$_S178_BUILD" "$_S178_DF_SRC"
+check "§178(9) the proxy image is labelled sandy.proxy_epoch=<the Dockerfile freshness epoch>, a YYYY-MM month (mutation: drop the label, or recompute the epoch in another format)" \
+    bash -c 'printf " %s \n" "$1" | grep -qF -- " --label sandy.proxy_epoch=$2 " && printf "%s" "$2" | grep -Eq "^[0-9]{4}-[0-9]{2}$"' -- "$_S178_BUILD" "$_S178_DF_EPOCH"
+
+# The clone path (installed single-file copies; forced by SANDY_PROXY_REF) has
+# no content hash -- its identity is the git ref, recorded as `git:<ref>`.
+rm -f "$_S178_HOME/.build_hash_proxy"
+: > "$_S178_CALLS"
+(cd "$_S178_WSP" && PATH="$_S178_BIN:$PATH" SANDY_HOME="$_S178_HOME" SANDY_PROXY_REF=v9.8.7 \
+    SANDY_AUTO_APPROVE_PRIVILEGED=1 bash "$SANDY_SCRIPT" --build-only) >/dev/null 2>&1 \
+    && _S178_RC=0 || _S178_RC=$?
+_S178_BUILD="$(grep -E '^build ' "$_S178_CALLS" | grep -- '-t sandy-proxy ' | tail -n 1 || true)"
+check "§178(10) clone path: the source label is git:<the ref the Dockerfile pins> (mutation: label the clone path with an empty or unprefixed value)" \
+    bash -c '[ "$1" -eq 0 ] && grep -qF "ARG SANDY_PROXY_REF=v9.8.7" "$3" && printf " %s \n" "$2" | grep -qF -- " --label sandy.proxy_src=git:v9.8.7 "' -- "$_S178_RC" "$_S178_BUILD" "$_S178_HOME/Dockerfile.proxy"
+
+# --print-state full mode reports them, additively, beside proxy_image_created.
+# One stub, one mode per case, each in its OWN empty $SANDY_HOME (§88b).
+cat > "$_S178_BIN/docker" <<'DOCKERSHIM'
+#!/usr/bin/env bash
+[ "${S178_PX:-}" = unreachable ] && exit 1
+case "$1 ${2:-}" in
+    "image inspect")
+        case "$*" in
+            *Created*sandy-proxy*)
+                case "${S178_PX:-}" in
+                    labels)   echo '2026-09-01T00:00:00Z|sha256:0123abcd|2026-09' ;;
+                    nolabels) echo '2026-09-01T00:00:00Z|' ;;
+                    novalue)  echo '2026-09-01T00:00:00Z|<no value>|<no value>' ;;
+                    *) exit 1 ;;
+                esac
+                ;;
+        esac
+        exit 0
+        ;;
+esac
+exit 0
+DOCKERSHIM
+chmod +x "$_S178_BIN/docker"
+_s178_state() {  # $1 S178_PX mode, $2 print-state mode arg ("" = full) -> JSON on stdout; stderr to $_S178_ERR
+    local _h; _h="$(cd "$(mktemp -d)" && pwd -P)"
+    PATH="$_S178_BIN:$PATH" SANDY_HOME="$_h" S178_PX="$1" bash "$SANDY_SCRIPT" --print-state ${2:+"$2"} 2>"$_S178_ERR" || true
+    rm -rf "$_h"
+}
+_s178_px_fields() {  # $1 JSON, $2 expected created, $3 src, $4 epoch ("null" = JSON null); stderr file $5 must be empty
+    python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json, os, sys
+doc, c, s, e, errf = sys.argv[1:6]
+d = json.loads(doc)
+assert os.path.getsize(errf) == 0, open(errf).read()
+want = lambda v: None if v == "null" else v
+assert d["proxy_image_created"] == want(c), d["proxy_image_created"]
+assert d["proxy_image_src"] == want(s), d["proxy_image_src"]
+assert d["proxy_image_epoch"] == want(e), d["proxy_image_epoch"]
+PY
+}
+_S178_ERR="$(mktemp)"
+_S178_J="$(_s178_state labels "")"
+check "§178(11a) full mode: a labelled proxy image reports proxy_image_src and proxy_image_epoch beside proxy_image_created; one JSON document, 0 bytes of stderr (mutation: drop the fields, or read the labels in a separate spawn that the stub does not answer)" \
+    _s178_px_fields "$_S178_J" 2026-09-01T00:00:00Z sha256:0123abcd 2026-09 "$_S178_ERR"
+_S178_J="$(_s178_state nolabels "")"
+check "§178(11b) full mode: an image with NO labels (built before #299) -> both fields null, date still reported (mutation: gate the src emission on the date instead of on the src -> an empty-string src instead of null)" \
+    _s178_px_fields "$_S178_J" 2026-09-01T00:00:00Z null null "$_S178_ERR"
+_S178_J="$(_s178_state novalue "")"
+check "§178(11c) full mode: a '<no value>' template answer is read as absent, never reported as a value" \
+    _s178_px_fields "$_S178_J" 2026-09-01T00:00:00Z null null "$_S178_ERR"
+_S178_J="$(_s178_state absent "")"
+check "§178(11d) full mode: no proxy image at all -> all three null" \
+    _s178_px_fields "$_S178_J" null null null "$_S178_ERR"
+_S178_J="$(_s178_state labels light)"
+check "§178(12a) light mode: both keys PRESENT and null (shape parity with proxy_image_created; no image inspect in the light budget)" \
+    _s178_px_fields "$_S178_J" null null null "$_S178_ERR"
+_S178_J="$(_s178_state unreachable "")"
+check "§178(12b) docker unreachable (full): both keys present and null" \
+    _s178_px_fields "$_S178_J" null null null "$_S178_ERR"
+_S178_J="$(_s178_state unreachable light)"
+check "§178(12c) docker unreachable (light): both keys present and null" \
+    _s178_px_fields "$_S178_J" null null null "$_S178_ERR"
+rm -f "$_S178_ERR"
+unset _S178_BUILD _S178_DF_SRC _S178_DF_EPOCH _S178_J _S178_ERR
+unset -f _s178_state _s178_px_fields
+
 rm -rf "$_S178_BIN" "$_S178_HOME" "$_S178_WSP" "$_S178_WSF" "$_S178_WSN"
 rm -f "$_S178_CALLS"
 unset _S178_BIN _S178_HOME _S178_WSP _S178_WSF _S178_WSN _S178_CALLS _S178_OUT _S178_RC _S178_PRIME_RC

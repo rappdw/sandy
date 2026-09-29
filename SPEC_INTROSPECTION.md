@@ -327,7 +327,9 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
   "orphan_networks": 0,
   "dangling_images": 1,
   "orphaned_containers": 0,
-  "proxy_image_created": "2026-07-28T12:00:00Z"
+  "proxy_image_created": "2026-07-28T12:00:00Z",
+  "proxy_image_src": "sha256:9f2c…",
+  "proxy_image_epoch": "2026-07"
 }
 ```
 
@@ -705,6 +707,25 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > epoch in `Dockerfile.proxy` + `--pull`, so the golang base + Go stdlib get
 > security fixes between sandy releases), and this date makes that visible.
 
+> **`proxy_image_src` / `proxy_image_epoch`** (top-level, added additively in
+> `2.7.0`, #299 — no `schema_version` bump). **FULL MODE ONLY**, read in the
+> same `docker image inspect` as `proxy_image_created` (so the full-mode spawn
+> count does not move); light mode and `docker_reachable: false` report both
+> `null`, keys present. They are the `sandy.proxy_src` and
+> `sandy.proxy_epoch` labels the proxy build stamps on the `sandy-proxy`
+> image, from the same two identities the generated `Dockerfile.proxy` records
+> as comments: `proxy_image_src` is `"sha256:<content hash of proxy/>"` when
+> the image was built from a checkout's `proxy/` source, or
+> `"git:<ref>"` when it was built by the clone path (installed single-file
+> copies, `SANDY_PROXY_REF`, CI); `proxy_image_epoch` is the monthly
+> freshness epoch, `"YYYY-MM"`. Each is `null` when the image does not exist
+> **or predates the labels** — an image is relabelled only when it is
+> rebuilt, which the monthly epoch guarantees within a month. Treat the
+> values as opaque identities to compare, not to parse beyond the prefix.
+> The labels are inherited by every sidecar container created from the
+> image. Sandy itself only **reports** them today; it does not compare a
+> running sidecar against them.
+
 > **Light mode — `sandy --print-state light`.** A second positional arg selects
 > a cheap variant for pollers: its steady-state budget is **exactly two** docker
 > invocations (vs. ~nine) by (a) skipping `installed_images` — the key stays
@@ -794,6 +815,7 @@ Reading identity from `pane_index`, a scrollback marker, or the pane title is un
 
 ## Schema versioning
 
+- **`2.7.0` (#299):** two new top-level fields, `proxy_image_src` and `proxy_image_epoch` — the proxy image's identity labels, full mode only, `null` when absent. Additive, so `schema_version` stays `4`.
 - **`2.7.0` (#386):** two new `sandboxes[]` fields, `marker` (`{state, sandy_version, launched_at}`, both modes) and `cross_session_inbound` (`{pinned, user_settings, workspace_settings}`; the two file objects are `not_computed` in light mode). Additive, so `schema_version` stays `4`. `marker` defines, once for every marker-derived field, what a `null` means, backed by the invariant that a current sandy never writes a deliberate `null` in one. `agent_args` (2.1.0) is now documented here as the supported source for that value. Consumers gate on field presence.
 - **`2.6.0` (#382) — `schema_version` moves to `4`.** Removed, together, as one operator decision to avoid a second bump: `relay{}` in its entirety from both the session marker and `--print-state` (`source`, `path`, `disabled_by` in the marker; `state`, `source`, `executable_present`, `path`, `state_dir`, `last_exit_code`, `restarts`, `last_restart_at`, `disabled_by` in `--print-state`) — and its two companion fields, `feature_entries.<name>.relay_alias` and `feature_entries.<name>.disabled_by`, in both the marker and `--print-state`. Those two were never listed separately in README's `## Deprecated` table: they existed only as companions of `relay{}` (`relay_alias` pointed at the entry `relay{}` described; `disabled_by` recorded `SANDY_RELAY=0`), so removing them alongside it kept the announcement honest without forcing a second `X.Y.0`. Every `feature_entries.<name>` value is now exactly `{path}` in the marker and `{state, restarts, last_exit_code, last_restart_at, executable_present, path, state_dir}` in `--print-state` — every entry reported identically, since there is no longer a designated one. **`state` no longer produces `"disabled"`.** For an un-relaunched sandbox whose marker still carries the old `relay_alias`/`disabled_by` shape, `disabled_by` is simply not read any more (there is nothing left to read it into): an entry that was suppressed via the now-hard-error `SANDY_RELAY=0` never wrote a `.state` file, so it reads `"absent"` — the same value a feature that declared no entry at all gets, and the only value `state` reports absent a live `.state` file, `disabled` included. Also removed in this release, none of them emitted-field changes so none independently move `schema_version`: `cross_session_inbound_source` can no longer produce `"relay-legacy"` (the legacy default itself was removed in decision 6, a prior unit); `SANDY_RELAY` is now a hard error naming a feature manifest's `"sandboxes": {"exclude": [...]}` (decision 3); `SANDY_RELAY_STATE`, the `/opt/sandy/relay-state` mount and the internal `SANDY_HANDOFF_RELAY` channel are gone, replaced by `SANDY_FEATURE_STATE` and `/opt/sandy/feature-state/<feature>` per entry (decisions 4-5); and `/usr/local/bin/sandy-handoff-sessions` is no longer installed in the image (decision 7) — the published pane-identity contract (`SPECIFICATION.md`, #378) is what a consumer now builds its own copy on.
 - **`2.4.0` (#381):** one new `sandboxes[]` field, `feature_entries` (an object keyed by feature name, emitted in BOTH modes), plus the matching `feature_entries` field in the session marker (`sandy-session.json`, §C.9 of SPECIFICATION.md). Additive, so `schema_version` stays `3`. It generalizes the single relay supervisor into one supervised process **per selected feature's `entry`** — the adoption loop used to silently drop every entry after the first, which is now fixed as well. **`relay{}` is DUAL-REPORTED, unchanged in shape, for exactly the first entry in sorted feature-directory order** (the "relay-designated" entry) — a consumer reading only `relay{}` sees byte-identical behaviour whether one entry exists or several. Every entry, including the designated one, additionally appears under `feature_entries.<name>`, whose live object is `{state, restarts, last_exit_code, last_restart_at, executable_present, path, state_dir, relay_alias, disabled_by}` — the same shape `relay{}` uses, plus `relay_alias` (bool: is this the entry `relay{}` also describes). **`state: "absent"` also covers a stale image**: one built before the `sandy.feature_entries=1` Dockerfile label existed only ever starts the relay-designated entry, so every other adopted entry never gets a `.state` file to report and reads `absent` — the same value a feature that never declared an entry gets, distinguished only by the launch-time warning naming the affected entries and pointing at `sandy --rebuild`. `relay{}` was **listed for deprecation** in README's `## Deprecated` table in 2.5.0 and **removed in 2.6.0** (tracked as #382, decisions 1-2) once its consumer released its migration to reading `feature_entries` directly.

@@ -3458,6 +3458,8 @@ EOF_FEATURE_ENTRIES
             printf ',"dangling_images":null'
             printf ',"orphaned_containers":null'
             printf ',"proxy_image_created":null'
+            printf ',"proxy_image_src":null'
+            printf ',"proxy_image_epoch":null'
         else
             printf ',"docker_reachable":false'
             printf ',"running_containers":null'
@@ -3465,6 +3467,8 @@ EOF_FEATURE_ENTRIES
             printf ',"dangling_images":null'
             printf ',"orphaned_containers":null'
             printf ',"proxy_image_created":null'
+            printf ',"proxy_image_src":null'
+            printf ',"proxy_image_epoch":null'
         fi
     else   # full mode
         local _ps_out
@@ -3535,11 +3539,40 @@ EOF_FEATURE_ENTRIES
             # can see proxy staleness at a glance (the proxy now auto-refreshes
             # ~monthly, but the date makes it auditable). FULL MODE ONLY — one
             # extra `docker image inspect`, over the light-mode two-spawn budget.
-            local _proxy_created; _proxy_created="$(docker image inspect -f '{{.Created}}' sandy-proxy 2>/dev/null || true)"
+            #
+            # #299: proxy_image_src / proxy_image_epoch -- the sandy.proxy_src
+            # and sandy.proxy_epoch LABELS the proxy build stamps (see the
+            # proxy build phase), read in the SAME `docker image inspect` as
+            # the date, so the full-mode spawn count is unchanged. null when
+            # the image is absent or predates the labels (an image is only
+            # relabelled when it is rebuilt -- at most a month away, given the
+            # freshness epoch). The with-guard covers an image carrying no
+            # labels at all; "<no value>" is folded to absent defensively.
+            # Additive, so no schema_version bump.
+            local _proxy_meta _proxy_created _proxy_rest _proxy_src _proxy_epoch
+            _proxy_meta="$(docker image inspect -f '{{.Created}}|{{with .Config.Labels}}{{index . "sandy.proxy_src"}}|{{index . "sandy.proxy_epoch"}}{{end}}' sandy-proxy 2>/dev/null || true)"
+            _proxy_created="${_proxy_meta%%|*}"
+            _proxy_rest=""
+            [ "$_proxy_meta" != "$_proxy_created" ] && _proxy_rest="${_proxy_meta#*|}"
+            _proxy_src="${_proxy_rest%%|*}"
+            _proxy_epoch=""
+            [ "$_proxy_rest" != "$_proxy_src" ] && _proxy_epoch="${_proxy_rest#*|}"
+            [ "$_proxy_src" = "<no value>" ] && _proxy_src=""
+            [ "$_proxy_epoch" = "<no value>" ] && _proxy_epoch=""
             if [ -n "$_proxy_created" ]; then
                 printf ',"proxy_image_created":"%s"' "$_proxy_created"
             else
                 printf ',"proxy_image_created":null'
+            fi
+            if [ -n "$_proxy_src" ]; then
+                printf ','; _json_kv proxy_image_src "$(_json_escape "$_proxy_src")"
+            else
+                printf ',"proxy_image_src":null'
+            fi
+            if [ -n "$_proxy_epoch" ]; then
+                printf ','; _json_kv proxy_image_epoch "$(_json_escape "$_proxy_epoch")"
+            else
+                printf ',"proxy_image_epoch":null'
             fi
         else
             printf ',"docker_reachable":false'
@@ -3548,6 +3581,8 @@ EOF_FEATURE_ENTRIES
             printf ',"dangling_images":null'
             printf ',"orphaned_containers":null'
             printf ',"proxy_image_created":null'
+            printf ',"proxy_image_src":null'
+            printf ',"proxy_image_epoch":null'
         fi
     fi
 
@@ -7266,6 +7301,15 @@ generate_dockerfile_proxy() {
     # golang:1.26-trixie to the current digest and picks up Go stdlib / Debian
     # security fixes. Bound to one refresh/month so it's not per-launch churn.
     epoch="$(date -u +%Y-%m 2>/dev/null || echo static)"
+    # #299: the two identities this Dockerfile records as comments are also
+    # handed to the image build as LABELS (sandy.proxy_epoch/sandy.proxy_src),
+    # so a built image -- and every sidecar container created from it, which
+    # inherits image labels -- says which proxy it is. Set HERE, from the very
+    # values written into the Dockerfile, so a label can never disagree with
+    # the build input that produced it. The source is prefixed with its kind:
+    # `sha256:<content hash>` (local checkout) or `git:<ref>` (clone path).
+    _SANDY_PROXY_EPOCH="$epoch"
+    _SANDY_PROXY_SRC_ID=""
 
     src="$(_sandy_proxy_local_src)"
     if [ -n "$src" ]; then
@@ -7281,6 +7325,7 @@ generate_dockerfile_proxy() {
         src_hash="$( { cd "$src" && find . -type f ! -name proxy ! -name '*.test' \
             | LC_ALL=C sort | while IFS= read -r _f; do sha256 < "$_f"; done; } \
             | sha256 | cut -d' ' -f1 )"
+        _SANDY_PROXY_SRC_ID="sha256:${src_hash}"
         cat > "$SANDY_HOME/Dockerfile.proxy.new" <<DOCKERFILE
 # freshness-epoch: ${epoch} (monthly proxy base/stdlib refresh — HF-incident Issue 3)
 # proxy-src: ${src_hash} (built from the local checkout's proxy/; rebuilds when it changes)
@@ -7304,6 +7349,7 @@ DOCKERFILE
     # release/rc pins. The git ref is a build-arg so the build hash (and thus
     # rebuilds) track the pinned version.
     ref="$(_sandy_proxy_ref)"
+    _SANDY_PROXY_SRC_ID="git:${ref}"
     cat > "$SANDY_HOME/Dockerfile.proxy.new" <<DOCKERFILE
 # syntax pinned implicitly by the golang base tag
 # freshness-epoch: ${epoch} (monthly proxy base/stdlib refresh — HF-incident Issue 3)
@@ -11702,7 +11748,13 @@ if [ "$_SANDY_PROXY_ON" = true ]; then
         # proxy (re)build so the base + Go stdlib get security updates — the
         # monthly freshness epoch (HF-incident Issue 3) makes this fire ~monthly
         # without a sandy release. --no-cache already rebuilds the binary itself.
-        docker build -q --no-cache --pull --label sandy.managed=1 -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$_proxy_ctx"
+        # #299: identity labels, from the values generate_dockerfile_proxy
+        # wrote into this very Dockerfile (see there). Reported by
+        # --print-state full as proxy_image_src / proxy_image_epoch.
+        docker build -q --no-cache --pull --label sandy.managed=1 \
+            --label "sandy.proxy_src=${_SANDY_PROXY_SRC_ID:-}" \
+            --label "sandy.proxy_epoch=${_SANDY_PROXY_EPOCH:-}" \
+            -t "$PROXY_IMAGE_NAME" -f "$SANDY_HOME/Dockerfile.proxy" "$_proxy_ctx"
         echo "$PROXY_HASH" > "$PROXY_HASH_FILE"
         _sandy_prune_old_image "$_old_proxy_id" "$PROXY_IMAGE_NAME"
         fi
