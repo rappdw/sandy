@@ -23074,6 +23074,109 @@ rm -rf "$_S182_D"
 unset _S182_SANDY _S182_D _S182_OUT _S182_HA _S182_DATE _S182_SLUG
 unset -f _s182_mk _s182_run _s182_pty _s182_rec _s182_approval _s182_hash _s182_df _s182_created
 
+echo "§184: SANDY_EFFORT reaches grok (--reasoning-effort, max clamps to xhigh) and claude's --effort is quoted (#116)"
+# ============================================================
+# Before 2.7.0 SANDY_EFFORT was cleared for a grok-only launch, so grok ran at
+# its default and the marker said null. grok's flag, its alias and its TUI+
+# headless scope are verified first-hand from `grok --help`; its value set is
+# not (the help does not list it), and third-party probes report `max` as a
+# HARD ERROR -- passing it would kill the pane at launch, the #109 grok lesson.
+# So the property that matters most here is that `max` NEVER reaches grok.
+# Driven for real, like §167: the builder is extracted, the command it builds is
+# RUN through `bash -c` the way the pane runs it, against a stub that prints its
+# argv -- so every assertion is on the argv the agent would receive.
+_S184_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S184_DIR/bin"
+for _s184_a in grok claude; do
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "ARGV:"; printf " [%s]" "$@"; printf "\n"' > "$_S184_DIR/bin/$_s184_a"
+done
+printf '%s\n' '#!/usr/bin/env bash' 'echo S184_PWNED' > "$_S184_DIR/bin/S184_PWNED_CMD"
+chmod +x "$_S184_DIR/bin/grok" "$_S184_DIR/bin/claude" "$_S184_DIR/bin/S184_PWNED_CMD"
+sed -n '/^build_grok_cmd() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S184_DIR/grok.sh"
+sed -n '/^build_claude_cmd() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S184_DIR/claude.sh"
+check "§184(0) build_grok_cmd and build_claude_cmd were extracted and parse (mutation: a rename empties them and every check below goes vacuous)" \
+    bash -c 'grep -q "no-auto-update" "$1" && bash -n "$1" && grep -q "permission-mode" "$2" && bash -n "$2"' _ "$_S184_DIR/grok.sh" "$_S184_DIR/claude.sh"
+_s184_run() { # _s184_run <builder-file> <builder> <effort> [args...] -> argv line of the stub
+    local _f="$1" _b="$2" _e="$3"; shift 3
+    (
+        trap - ERR; set +e; set +u
+        _sandy_translate_args() { :; }
+        _sandy_wrap_cmd_exit_pause() { printf '%s' "$2"; }
+        GROK_MODEL=""; SANDY_MODEL=claude-opus-5; SANDY_TEAMMATE_MODE=""; SANDY_CHANNELS=""
+        SANDY_NEW_SESSION=true; SANDY_EFFORT="$_e"
+        . "$_f"
+        _c="$("$_b" "$@" 2>/dev/null)"
+        PATH="$_S184_DIR/bin:$PATH" bash -c "$_c 2>&1"
+    ) 2>/dev/null
+    return 0
+}
+# Each sandy level reaches grok as the mapped value, in the canonical spelling,
+# exactly once -- and max arrives as xhigh.
+for _s184_l in low:low medium:medium high:high xhigh:xhigh max:xhigh; do
+    _S184_OUT="$(trap - ERR; _s184_run "$_S184_DIR/grok.sh" build_grok_cmd "${_s184_l%%:*}")"
+    check "§184(1:${_s184_l%%:*}) SANDY_EFFORT=${_s184_l%%:*} reaches grok as --reasoning-effort ${_s184_l#*:} (got: $_S184_OUT)" \
+        bash -c '[ "$1" = "ARGV: [--no-auto-update] [--reasoning-effort] [$2]" ]' _ "$_S184_OUT" "${_s184_l#*:}"
+done
+_S184_MAX="$(trap - ERR; _s184_run "$_S184_DIR/grok.sh" build_grok_cmd max)"
+check "§184(2) max NEVER reaches grok -- no argv token is max (grok rejects it outright; mutation: a pass-through arm for max)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^ARGV:" && ! printf "%s\n" "$1" | grep -qF "[max]"' _ "$_S184_MAX"
+_S184_NONE="$(trap - ERR; _s184_run "$_S184_DIR/grok.sh" build_grok_cmd "")"
+check "§184(3) no SANDY_EFFORT -> no flag: grok keeps its own default (got: $_S184_NONE)" \
+    bash -c '[ "$1" = "ARGV: [--no-auto-update]" ]' _ "$_S184_NONE"
+# The sink is `bash -c`. Host-side validation rejects anything but the five
+# levels, but each builder must be safe on its own (R1): an unvalidated value
+# neither executes nor reaches grok as an invented level.
+_S184_GINJ="$(trap - ERR; _s184_run "$_S184_DIR/grok.sh" build_grok_cmd 'high;S184_PWNED_CMD;x')"
+check "§184(4) an injected SANDY_EFFORT neither executes nor reaches grok (got: $_S184_GINJ)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^ARGV:" && ! printf "%s\n" "$1" | grep -q "^S184_PWNED" && ! printf "%s\n" "$1" | grep -q effort' _ "$_S184_GINJ"
+# claude's --effort used to be interpolated unquoted; safe only because the value
+# was validated elsewhere. Quoting at the sink is the rule (R1), so the builder
+# is exercised with a value validation would have stopped: it must arrive as ONE
+# literal argument and nothing may run.
+_S184_CL="$(trap - ERR; _s184_run "$_S184_DIR/claude.sh" build_claude_cmd xhigh)"
+check "§184(5) claude still gets --effort <level> for a valid level (got: $_S184_CL)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^ARGV:" && printf "%s\n" "$1" | grep -qF "[--effort] [xhigh]"' _ "$_S184_CL"
+_S184_CINJ="$(trap - ERR; _s184_run "$_S184_DIR/claude.sh" build_claude_cmd 'high;S184_PWNED_CMD;x')"
+check "§184(6) an injected SANDY_EFFORT reaches claude as ONE literal --effort argument and executes nothing (got: $_S184_CINJ)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^ARGV:" && ! printf "%s\n" "$1" | grep -q "^S184_PWNED" && printf "%s\n" "$1" | grep -qF "[--effort] [high;S184_PWNED_CMD;x]"' _ "$_S184_CINJ"
+# ANTI-VACUITY: the same harness against the pre-2.7.0 unquoted line must SEE
+# the injection, or (6) proves nothing.
+sed 's/--effort $(printf "%q" "$SANDY_EFFORT")/--effort ${SANDY_EFFORT}/' "$_S184_DIR/claude.sh" > "$_S184_DIR/claude-unquoted.sh"
+_S184_CAN="$(trap - ERR; _s184_run "$_S184_DIR/claude-unquoted.sh" build_claude_cmd 'high;S184_PWNED_CMD;x')"
+check "§184(7) anti-vacuity: the harness sees the injection against the old unquoted --effort (got: $_S184_CAN)" \
+    bash -c '! cmp -s "$2" "$3" && printf "%s\n" "$1" | grep -q "^S184_PWNED"' _ "$_S184_CAN" "$_S184_DIR/claude.sh" "$_S184_DIR/claude-unquoted.sh"
+# Host-side: the validation block keeps the pinned value for a grok launch (so
+# the marker records it), names the max clamp once, and still clears it -- with
+# a message -- for a launch with none of the wired agents.
+_S184_VAL="$(awk '/^# Validate SANDY_EFFORT/{f=1} f{print} f&&/^fi$/{exit}' "$SANDY_SCRIPT")"
+_S184_HAS="$(grep -m1 '^_sandy_agent_has() {' "$SANDY_SCRIPT" || true)"
+_s184_val() { # _s184_val <agents> <effort> -> "rc=<n> effort=<v>" plus messages
+    bash -c 'error() { echo "ERR $*"; }; info() { echo "INFO $*"; }; eval "$3"; SANDY_AGENT="$1"; SANDY_EFFORT="$2"; ( eval "$4"; echo "rc=0 effort=$SANDY_EFFORT" ) || echo "rc=$?"' _ "$1" "$2" "$_S184_HAS" "$_S184_VAL" 2>&1
+}
+check "§184(8) the validation block and _sandy_agent_has were extracted (mutation: a rename empties them)" \
+    bash -c 'printf "%s" "$1" | grep -q "Invalid SANDY_EFFORT" && test -n "$2"' _ "$_S184_VAL" "$_S184_HAS"
+_S184_V="$(_s184_val grok max)"
+check "§184(9) a grok-only launch KEEPS SANDY_EFFORT=max (the marker records the sandy level) and names the clamp to xhigh once (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=max" && [ "$(printf "%s\n" "$1" | grep -c "reaches grok as xhigh")" = 1 ]' _ "$_S184_V"
+_S184_V="$(_s184_val grok high)"
+check "§184(10) ...and says nothing about a clamp for a level grok accepts (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=high" && ! printf "%s\n" "$1" | grep -q "^INFO"' _ "$_S184_V"
+_S184_V="$(_s184_val claude,codex max)"
+check "§184(11) no clamp notice when grok is not in the agent set (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=max" && ! printf "%s\n" "$1" | grep -q "^INFO"' _ "$_S184_V"
+_S184_V="$(_s184_val claude,grok max)"
+check "§184(12) ...and the notice in a combo that includes grok (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=max" && printf "%s\n" "$1" | grep -q "reaches grok as xhigh"' _ "$_S184_V"
+_S184_V="$(_s184_val grok extreme)"
+check "§184(13) a grok launch fails loud on an invalid level (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "ERR Invalid SANDY_EFFORT" && printf "%s\n" "$1" | grep -qx "rc=1"' _ "$_S184_V"
+_S184_V="$(_s184_val opencode high)"
+check "§184(14) an opencode-only launch still clears it and SAYS so (got: $_S184_V)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "rc=0 effort=" && printf "%s\n" "$1" | grep -q "INFO SANDY_EFFORT=high ignored"' _ "$_S184_V"
+rm -rf "$_S184_DIR"
+unset _S184_DIR _S184_OUT _S184_MAX _S184_NONE _S184_GINJ _S184_CL _S184_CINJ _S184_CAN _S184_VAL _S184_HAS _S184_V _s184_a _s184_l
+unset -f _s184_run _s184_val
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

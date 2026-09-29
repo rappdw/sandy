@@ -231,7 +231,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 |---|---|---|
 | `SANDY_AGENT` | `claude` | AI agent(s) to run. Single: `claude`, `gemini`, `codex`, `opencode`. Multi (comma-separated, 2–4 panes in tmux): e.g. `claude,gemini` or `claude,gemini,codex,opencode`. Alias: `all` = `claude,gemini,codex,opencode` |
 | `SANDY_MODEL` | `claude-opus-5` | Claude model to use (applies whenever `claude` is in `SANDY_AGENT`) |
-| `SANDY_EFFORT` | _(each agent's own default)_ | Reasoning effort for claude and codex: `low`\|`medium`\|`high`\|`xhigh`\|`max`. Applied as `claude --effort` and (2.4.0) codex `-c model_reasoning_effort=<level>` (each level maps to its codex namesake); ignored with a notice for gemini/opencode/grok. Recorded in `sandy-session.json` so a run's effort is provable |
+| `SANDY_EFFORT` | _(each agent's own default)_ | Reasoning effort for claude, codex and grok: `low`\|`medium`\|`high`\|`xhigh`\|`max`. Applied as `claude --effort`, (2.4.0) codex `-c model_reasoning_effort=<level>` (each level maps to its codex namesake) and (2.7.0) grok `--reasoning-effort <level>` (`max` is clamped to `xhigh`, grok's top level, with a launch notice — grok rejects `max`); ignored with a notice for gemini/opencode. Recorded in `sandy-session.json` so a run's effort is provable |
 | `SANDY_TEAMMATE_MODE` | (unset) | Value passed to `claude --teammate-mode` (claude only). Empty = sandy passes nothing and Claude Code uses its own default; set e.g. `tmux` to opt in. Passive-safe |
 | `GEMINI_API_KEY` | (unset) | Google API key for Gemini CLI. Put in `.sandy/.secrets` |
 | `GEMINI_MODEL` | (unset) | Gemini model override |

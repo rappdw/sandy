@@ -1637,7 +1637,7 @@ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Cod
 SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
 SANDY_MODEL|string|claude-opus-5|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
 SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched.
-SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude and (2.4.0) codex. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Empty leaves each agent's own default. Ignored, with a notice, for a launch with neither claude nor codex (gemini, opencode and grok have no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json.
+SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex and (2.7.0) grok. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Empty leaves each agent's own default. Ignored, with a notice, for a launch with none of claude, codex or grok (gemini and opencode have no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
 SANDY_CPUS|int|||0.1.0|stable|CPU limit for container (default: auto-detected).
 SANDY_MEM|string|||0.1.0|stable|Memory limit for container (e.g. '8g'; default: auto-detected).
 SANDY_GPU|string|||0.7.5|stable|GPU passthrough: 'all', or device IDs like '0' / '0,1'.
@@ -6697,7 +6697,7 @@ Usage:
 
 Environment variables:
   SANDY_MODEL        Model to use (default: claude-opus-5)
-  SANDY_EFFORT       Reasoning effort for claude and codex:
+  SANDY_EFFORT       Reasoning effort for claude, codex and grok:
                      low|medium|high|xhigh|max (default: each agent's own)
   ANTHROPIC_API_KEY  API key (not needed with Claude Max / OAuth)
   SANDY_HOME         Sandy config directory (default: ~/.sandy)
@@ -8539,7 +8539,11 @@ build_claude_cmd() {
     # SANDY_EFFORT (#effort): pin Claude Code's reasoning effort so a run isn't
     # silently at the model default. Validated host-side; a separate axis from
     # --model. Empty → omit the flag → Claude Code's own default applies.
-    [ -n "${SANDY_EFFORT:-}" ] && cmd+=" --effort ${SANDY_EFFORT}"
+    # printf %q even though the value is validated host-side (#116, R1): the
+    # sink is `bash -c`, and quoting at the sink is the rule precisely so that
+    # no builder's safety rests on remembering which keys some other block
+    # happens to validate.
+    [ -n "${SANDY_EFFORT:-}" ] && cmd+=" --effort $(printf "%q" "$SANDY_EFFORT")"
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
         # Use --permission-mode (the documented modern flag) instead of the
         # legacy --dangerously-skip-permissions. Claude 2.1.x added runtime
@@ -8694,6 +8698,31 @@ build_grok_cmd() {
     local cmd="grok --no-auto-update"
     if [ -n "${GROK_MODEL:-}" ]; then
         cmd+=" -m $(printf "%q" "$GROK_MODEL")"
+    fi
+    # SANDY_EFFORT (#116) -> grok's `--reasoning-effort`. VERIFIED FIRST-HAND
+    # (maintainer, `grok --help` on the sandy-grok image): the flag exists as
+    # `--reasoning-effort <EFFORT>` with alias `--effort`, and it is a TOP-LEVEL
+    # option of `grok [OPTIONS] [PROMPT] [COMMAND]` listed beside
+    # `-p, --single`, so it applies to the interactive TUI and to headless
+    # alike. The canonical spelling is used. `--help` does NOT enumerate the
+    # accepted values, so the value set below still rests on third-party
+    # probes: xhigh|high|medium|low accepted, and `max` a HARD ERROR ("unknown
+    # effort level 'max'") that would kill the pane at launch -- the #109 grok
+    # lesson, a wrong flag value hard-breaks the agent. So max CLAMPS to xhigh
+    # (grok's top level) and is never passed; the host names the clamp once at
+    # launch. The sandy-level value is what the marker records. A case, not a
+    # pass-through, so an unmapped value omits the flag rather than inventing
+    # one; printf %q because this string reaches `bash -c` (R1).
+    local _sandy_grok_effort=""
+    case "${SANDY_EFFORT:-}" in
+        low) _sandy_grok_effort=low ;;
+        medium) _sandy_grok_effort=medium ;;
+        high) _sandy_grok_effort=high ;;
+        xhigh) _sandy_grok_effort=xhigh ;;
+        max) _sandy_grok_effort=xhigh ;;
+    esac
+    if [ -n "$_sandy_grok_effort" ]; then
+        cmd+=" --reasoning-effort $(printf "%q" "$_sandy_grok_effort")"
     fi
     cmd+="$(_sandy_translate_args grok "$@")"
     _sandy_wrap_cmd_exit_pause "Grok" "$cmd"
@@ -16501,24 +16530,31 @@ if [ -n "${CLAUDE_CODE_SUBAGENT_MODEL:-}" ] && ! [[ "$CLAUDE_CODE_SUBAGENT_MODEL
     exit 1
 fi
 # Validate SANDY_EFFORT — reasoning effort for claude (`claude --effort <level>`,
-# build_claude_cmd) and, since 2.4.0 (#116), codex (`-c model_reasoning_effort=`,
-# mapped per level in build_codex_cmd). Empty = each agent's own default. Cleared
-# when neither is in the agent set so it's never a meaningless forward (and the
-# marker's `effort` stays null for a launch nothing applied it to). An invalid
-# level fails loud rather than silently running at default — the whole point is
-# a provable, pinned effort. gemini, opencode and grok have no effort surface
-# sandy drives; in a combo that includes claude or codex those panes simply do
-# not receive it.
-if _sandy_agent_has claude || _sandy_agent_has codex; then
+# build_claude_cmd), since 2.4.0 (#116) codex (`-c model_reasoning_effort=`,
+# mapped per level in build_codex_cmd), and since 2.7.0 (#116) grok
+# (`--reasoning-effort`, build_grok_cmd; max clamps to xhigh). Empty = each
+# agent's own default. Cleared when none of them is in the agent set so it's
+# never a meaningless forward (and the marker's `effort` stays null for a launch
+# nothing applied it to). An invalid level fails loud rather than silently
+# running at default — the whole point is a provable, pinned effort. gemini and
+# opencode have no effort surface sandy drives; in a combo that includes one of
+# the others those panes simply do not receive it.
+if _sandy_agent_has claude || _sandy_agent_has codex || _sandy_agent_has grok; then
     if [ -n "${SANDY_EFFORT:-}" ]; then
         case "$SANDY_EFFORT" in
             low|medium|high|xhigh|max) ;;
             *) error "Invalid SANDY_EFFORT: $SANDY_EFFORT (allowed: low, medium, high, xhigh, max)"; exit 1 ;;
         esac
+        # grok rejects `max` outright, so build_grok_cmd clamps it to xhigh.
+        # Said once, here, because the marker records the sandy-level value
+        # (`max`) and nothing else would tell the operator grok ran one below.
+        if [ "$SANDY_EFFORT" = max ] && _sandy_agent_has grok; then
+            info "SANDY_EFFORT=max reaches grok as xhigh (grok's top level; it rejects max)."
+        fi
     fi
 else
     if [ -n "${SANDY_EFFORT:-}" ]; then
-        info "SANDY_EFFORT=$SANDY_EFFORT ignored: it applies to claude and codex only (agents: $SANDY_AGENT)."
+        info "SANDY_EFFORT=$SANDY_EFFORT ignored: it applies to claude, codex and grok only (agents: $SANDY_AGENT)."
     fi
     SANDY_EFFORT=""
 fi
