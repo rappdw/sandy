@@ -643,29 +643,24 @@ _sandy_perm_mode_drift() {
     fi
     return 1
 }
-# --- handoff pair classification (#265) --------------------------------------
+# --- sandbox launch-state classification (#265) ---------------------------
 #
-# ONE predicate, TWO callers: `--print-state` reports it and `--provision --all`
-# acts on it. They must never disagree about what "this sandbox has a correct
-# pair" means -- a reporter that says ok while the provisioner still provisions
-# (or worse, the reverse) is the drift this repo keeps paying for. Same rule as
-# _sandy_reap_orphan_networks serving both --gc and --prune-orphans.
+# ONE predicate, used by `--provision --all` to decide which known sandboxes
+# lack the per-sandbox state a launch creates. It started life (#265) as the
+# "handoff pair" check shared with --print-state; see the history below.
 #
-# WHAT IS CHECKED, and deliberately what is not. Sandy creates these with a bare
-# `mkdir -p` -- it sets no mode and no owner. So this asserts only what sandy
-# actually guarantees, and inventing a mode standard here would be reporting a
-# rule nothing enforces:
+# WHAT IS CHECKED, and deliberately what is not. Sandy creates the directory
+# with a bare `mkdir -p` -- it sets no mode and no owner. So this asserts only
+# what sandy actually guarantees, and inventing a mode standard here would be
+# reporting a rule nothing enforces:
 #
-#   - all four directories exist                    -> else "missing"
-#   - each is a real directory, not a file          -> a file where a mount
-#                                                      target belongs
-#   - each is NOT a symlink. `mkdir -p` never makes one, so a symlink here was
-#     placed by something else, and inbox/ and peer/ are the host-written,
-#     :ro-mounted halves of the pair -- a redirected one is an integrity problem,
-#     not a cosmetic one.
-#   - each is owned by the invoking user (`-O`), and r/w/x by them. The container
-#     process runs as the host uid, so an outbox owned by somebody else is one
-#     the agent cannot write.
+#   - the directory exists                          -> else "missing"
+#   - it is a real directory, not a file            -> else "wrong"
+#   - it is NOT a symlink. `mkdir -p` never makes one, so a symlink here was
+#     placed by something else.
+#   - it is owned by the invoking user (`-O`), and r/w/x by them. The container
+#     process runs as the host uid, so a directory owned by somebody else is
+#     one the agent cannot write.
 #
 # Implemented with bash builtins only (-d -L -O -r -w -x). `stat` would need the
 # GNU `-c` / BSD `-f` split that test/lint-bash32.sh exists to catch, for a
@@ -5830,7 +5825,7 @@ fi
 # rejected treating handoff-directory PRESENCE as sufficient), and a
 # fabricating flag would carry sandy's own authority while being a second
 # code path free to drift from the real one. The ask is the opposite: run
-# the real launch path, non-interactively, so the handoff pair, the settings
+# the real launch path, non-interactively, so the per-sandbox dirs, the settings
 # seed, and WORKSPACE.json all come from the paths that normally produce
 # them. Mechanism (DEC-U2 composition, no new lifecycle surface — mirrors
 # --stop-all/--update-sessions): SANDY_PROVISION=1 "$0" --start --workspace
@@ -5987,11 +5982,13 @@ if [[ "${1:-}" == "--provision" ]]; then
         exit 1
     fi
 
-    # --- --all: every KNOWN sandbox whose handoff pair is missing or wrong -----
+    # --- --all: every KNOWN sandbox missing the state a launch creates --------
+    # (Named for the handoff pair it once checked; since 2.6.0 the predicate,
+    # _sandy_sandbox_state_classify, checks pip/ -- see its header.)
     #
     # The population is real and it REGENERATES, which is why this is a command
     # and not a one-off script. `--reset-sandbox` is the documented recovery from
-    # a poisoned session and it destroys handoff/ while keeping the sandbox
+    # a poisoned session and it destroys that state while keeping the sandbox
     # directory, so every reset puts a sandbox back into this state. So does a
     # --start refused at the approval pre-pass (the directory is created, the
     # launch dies long before the pair is), and any launch that fails in the gap
@@ -6100,17 +6097,17 @@ if [[ "${1:-}" == "--provision" ]]; then
         done
         echo ""
 
-        # C1: the goal is "every known sandbox has a correct pair". Nothing to do
+        # C1: the goal is "every known sandbox has its launch state". Nothing to do
         # AND no orphans means it already holds -> 0. Orphans mean it does not,
         # and no amount of work here can make it hold -> 1, said up front rather
         # than after a run that could not have fixed them.
         if [ "${#_pva_todo_name[@]}" -eq 0 ]; then
             if [ "${#_pva_orphan_name[@]}" -eq 0 ] && [ "${#_pva_live_name[@]}" -eq 0 ]; then
-                info "Every known sandbox already has a correct handoff pair."
+                info "Every known sandbox already has the per-sandbox state a launch creates."
                 exit 0
             fi
-            # C1: the goal is "every known sandbox has a correct pair". A live
-            # sandbox with a bad pair leaves it UNMET and no work here can fix
+            # C1: the goal is "every known sandbox has its launch state". A live
+            # sandbox without it leaves it UNMET and no work here can fix
             # it, exactly like an orphan -- so it is named and counted, never
             # skipped into a false 0. Unlike an orphan it is trivially
             # clearable: stop the session and re-run.
@@ -10103,20 +10100,19 @@ _load_sandy_extra_env() {
         # sandy's own resolved per-agent args. A workspace config could then
         # inject arbitrary agent flags behind an approval prompt that names only
         # SANDY_EXTRA_ENV and says nothing about agent args.
-        # SANDY_HANDOFF_* are likewise DERIVED internals in none of the key
-        # lists — sandy exports INBOX/OUTBOX/PEER/RELAY_STATE in user-setup.sh
-        # from the mounts it actually created. Forwarding one here would land
-        # in the same last-wins `-e` position as above and point a relay at a
-        # directory that is not the mounted one: the environment and the
-        # session marker would then disagree about where the handoff tree is,
-        # which is the two-sources-of-truth defect #258 exists to close. They
-        # are guaranteed exports, not settable values.
+        # SANDY_HANDOFF_* stay refused although the handoff tree (2.2.0) and
+        # the internal SANDY_HANDOFF_RELAY channel (2.6.0, #382) are both gone.
+        # A stale image built before per-feature entries still reads
+        # SANDY_HANDOFF_RELAY in its user-setup.sh and would START whatever it
+        # names, so forwarding one through here would be a way round the
+        # hard error an operator-set SANDY_HANDOFF_RELAY gets and round the
+        # feature manifest that is now the only producer of an entry.
         case "$_name" in
             SANDY_AGENT_ARGS_*)
                 warn "SANDY_EXTRA_ENV: refusing '$_name' — per-agent args are resolved by sandy (use \$SANDBOX_DIR/agent-args.<agent> or SANDY_AGENT_ARGS)"
                 continue ;;
             SANDY_HANDOFF_*)
-                warn "SANDY_EXTRA_ENV: refusing '$_name' — the handoff paths are resolved by sandy from the mounts it creates, and are not settable"
+                warn "SANDY_EXTRA_ENV: refusing '$_name' — SANDY_HANDOFF_* names were removed (2.2.0/2.6.0); declare an 'entry' in a feature manifest instead"
                 continue ;;
         esac
         _SANDY_EXTRA_ENV_NAMES+=("$_name")
