@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end handoff directories + relay acceptance (#132 slice 1, plus
-# SANDY_HANDOFF_RELAY 1.10.0).
+# End-to-end handoff directories + supervised feature-entry acceptance (#132
+# slice 1; since 2.6.0, #382, the entry is installed by a feature manifest).
 #
 # ⚠️ RUN ON A HOST WITH DOCKER. This cannot run inside sandy (no Docker). It
 # proves the real container-level behavior that the static run-tests.sh §86
@@ -46,12 +46,15 @@
 #      config anywhere, pre-marker the tree is off; post-marker it is on,
 #      repeating the EROFS-beats-ownership assertions on THAT path — phase B
 #      only proves them for the SANDY_HANDOFF_DIRS=1 path.
-#   E. SANDY_HANDOFF_RELAY (1.10.0, privileged, set via the isolated host's
-#      OWN ~/.sandy/config so no approval prompt applies): the relay mount +
-#      env forwarding, the supervisor actually running as a sibling of tmux
+#   E. a feature-manifest entry installed in the isolated host's OWN
+#      $SANDY_HOME/features (privileged by location, so no approval prompt
+#      applies): the feature-state mount + SANDY_FEATURE_ENTRIES forwarding,
+#      the supervisor actually running as a sibling of tmux
 #      (not a pane, not a session child), singleton-via-flock, restart on
 #      death with a fresh pid, survival of an --update-sessions recreation
-#      (state persists), sandy-handoff-sessions producing a real socket path,
+#      (state persists), a claude pane carrying the @sandy_pane_agent tag the
+#      pane-identity contract (#378) promises (sandy's own former consumer of
+#      it, sandy-handoff-sessions, was removed in 2.6.0 -- #382, decision 7),
 #      the crossSessionInbound pin landing in both measured-working files and
 #      the workspace copy being genuinely :ro, and that headless (-p) runs
 #      never start a relay.
@@ -144,7 +147,7 @@ _ps_obj() {   # _ps_obj <print-state-output-with-whitespace-stripped> <sandbox-n
 # ro` -- the only :ro mount sandy still makes. run-tests.sh §97(16) is the
 # tripwire that fails if it ever has no runtime home at all.
 
-echo "== E. handoff relay (SANDY_HANDOFF_RELAY, 1.10.0) =="
+echo "== E. per-feature supervised entry (SANDY_FEATURE_ENTRIES, 1.10.0 / 2.4.0 #381 / 2.6.0 #382) =="
 # Fresh workspace: relay fixtures shouldn't share state with A-D.
 WS3="$(mktemp -d)/mbx-relay-$$"
 mkdir -p "$WS3/.sandy" && (cd "$WS3" && git init -q)
@@ -164,7 +167,11 @@ cat > "$_E_FEAT/payload/relay" <<'RELAYFIX'
 # (re)start, then blocks. Deliberately NOT `exec sleep` -- pgrep -f below
 # matches on this script's own path, and `exec` would replace this process's
 # argv with "sleep 3600", losing that match the instant it ran.
-echo "$$ $SANDY_RELAY_STATE" >> "$SANDY_RELAY_STATE/seen"
+#
+# 2.6.0 (#382, decisions 4-5): every entry is identical now, so this fixture
+# reads SANDY_FEATURE_STATE -- the same variable every other entry gets --
+# rather than SANDY_RELAY_STATE, which no entry receives any more.
+echo "$$ $SANDY_FEATURE_STATE" >> "$SANDY_FEATURE_STATE/seen"
 sleep 3600
 RELAYFIX
 chmod +x "$_E_FEAT/payload/relay"
@@ -187,15 +194,22 @@ SBX3="$SANDY_HOME_DIR/sandboxes/$SESS3"
 
 echo "-- E1. mount + env forwarding --"
 _m3="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$C3" 2>/dev/null)"
-echo "  mounts:"; printf '%s\n' "$_m3" | grep -iE 'handoff|relay-state' | sed 's/^/    /'
-ck "relay STATE mount is RW=true at its 2.2.0 path (#353)" \
-   "printf '%s\n' \"\$_m3\" | grep -qE '^/opt/sandy/relay-state true\$'"
-ck "no removed lane is mounted alongside the relay (#352)" \
+echo "  mounts:"; printf '%s\n' "$_m3" | grep -iE 'handoff|relay-state|feature-state' | sed 's/^/    /'
+ck "the entry's own feature-state mount is RW=true (2.6.0, #382 decisions 4-5)" \
+   "printf '%s\n' \"\$_m3\" | grep -qE '^/opt/sandy/feature-state/acc-relay true\$'"
+ck "NO /opt/sandy/relay-state mount exists any more -- there is no designated entry" \
+   "! printf '%s\n' \"\$_m3\" | grep -q '/opt/sandy/relay-state'"
+ck "no removed lane is mounted alongside the entry (#352)" \
    "! printf '%s\n' \"\$_m3\" | grep -qE '^/home/sandy/.handoff/(inbox|outbox|peer) '"
 # Never dump the whole env -- it carries CLAUDE_CODE_OAUTH_TOKEN and friends.
-# Count occurrences of the one var under test instead of printing anything.
-_envcount="$(docker inspect -f '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' "$C3" 2>/dev/null | grep -c '^SANDY_HANDOFF_RELAY=/opt/sandy/features/acc-relay/relay$' || true)"
-ck "the resolved entry is forwarded into the container exactly once (SANDY_HANDOFF_RELAY survives as the INTERNAL channel a manifest entry travels through -- only the config key was removed)" "[ \"$_envcount\" = 1 ]"
+# Count occurrences (never print) of the vars under test instead.
+_envraw="$(docker inspect -f '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' "$C3" 2>/dev/null)"
+_hr_count="$(printf '%s\n' "$_envraw" | grep -c '^SANDY_HANDOFF_RELAY=' || true)"
+_rs_count="$(printf '%s\n' "$_envraw" | grep -c '^SANDY_RELAY_STATE=' || true)"
+_fe_count="$(printf '%s\n' "$_envraw" | grep -c '^SANDY_FEATURE_ENTRIES=acc-relay=/opt/sandy/features/acc-relay/relay$' || true)"
+ck "SANDY_HANDOFF_RELAY is forwarded ZERO times (the internal channel is gone, 2.6.0 #382)" "[ \"${_hr_count:-0}\" = 0 ]"
+ck "SANDY_RELAY_STATE is forwarded ZERO times" "[ \"${_rs_count:-0}\" = 0 ]"
+ck "the resolved entry is forwarded exactly once via SANDY_FEATURE_ENTRIES" "[ \"${_fe_count:-0}\" = 1 ]"
 
 echo "-- E2. relay is running, as a sibling of tmux (not a pane, not a session child) --"
 # The subshell that runs _sandy_supervise_entry's loop is backgrounded
@@ -213,14 +227,20 @@ ck "relay process is running in the container" "[ -n \"$_pid1\" ]"
 ck "exactly one relay process" \
    "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f 'acc-relay/relay' 2>/dev/null)\" = 1 ]"
 # Two /proc/<pid>/status hops: relay's parent is the supervisor loop shell;
-# the loop shell's parent must be PID 1 (tail -f /dev/null in daemon mode,
-# which the loop was backgrounded under BEFORE PID 1 exec'd into tail --
-# exec preserves the pid, so children reparent to nothing across it).
+# the loop shell's parent must be the container's MAIN process (tail -f
+# /dev/null in daemon mode, which the loop was backgrounded under BEFORE the
+# entrypoint exec'd into tail -- exec preserves the pid). That main process
+# is PID 1 only without an init: since 2.5.0 (#392) the agent container runs
+# with --init, so PID 1 is docker-init and the main process is ITS child.
+# The property is "the loop hangs off the main process, not a pane or the
+# tmux server", so resolve the main process rather than hardcoding 1.
 _ppid1="$(docker exec -u "$(id -u)" "$C3" sh -c "awk '/^PPid:/{print \$2}' /proc/$_pid1/status" 2>/dev/null)"
 ck "relay's immediate parent resolved (the supervisor loop shell)" "[ -n \"$_ppid1\" ]"
 _ppid2="$(docker exec -u "$(id -u)" "$C3" sh -c "awk '/^PPid:/{print \$2}' /proc/$_ppid1/status" 2>/dev/null)"
-ck "the supervisor loop's parent is PID 1 -- sibling of tmux, not a pane, not a session child" \
-   "[ \"$_ppid2\" = 1 ]"
+_main_info="$(docker exec -u "$(id -u)" "$C3" sh -c "awk '/^PPid:/{print \$2}' /proc/$_ppid2/status; cat /proc/$_ppid2/comm" 2>/dev/null | tr '\n' ' ')"
+echo "  supervisor loop parent: pid=$_ppid2 ppid+comm=$_main_info"
+ck "the supervisor loop's parent is the container's main process (tail, PID 1 or docker-init's child) -- sibling of tmux, not a pane, not a session child" \
+   "case \"$_main_info\" in '0 tail '|'1 tail ') true ;; *) false ;; esac"
 
 echo "-- E3. restart on death --"
 _pid_before="$_pid1"
@@ -233,44 +253,59 @@ for _i in 1 2 3 4 5 6 7 8; do
 done
 ck "relay came back with a NEW pid after being killed" \
    "[ -n \"$_pid_after\" ] && [ \"$_pid_after\" != \"$_pid_before\" ]"
-_exits="$(docker exec -u "$(id -u)" "$C3" grep -c 'exit rc=' /opt/sandy/relay-state/supervisor.log 2>/dev/null || echo 0)"
+_exits="$(docker exec -u "$(id -u)" "$C3" grep -c 'exit rc=' /opt/sandy/feature-state/acc-relay/supervisor.log 2>/dev/null || echo 0)"
 ck "supervisor.log recorded the exit" "[ \"${_exits:-0}\" -ge 1 ]"
-# The log line is "[sandy-relay] <ISO ts> start <path>", so the timestamp sits
-# between the bracket and the word -- the old '\] start ' pattern required them
-# adjacent and therefore never matched, making this check fail even on a
-# perfectly working restart (which E3s own new-pid assertion had just proved).
-_starts="$(docker exec -u "$(id -u)" "$C3" grep -c ' start /' /opt/sandy/relay-state/supervisor.log 2>/dev/null || echo 0)"
+# The log line is "[sandy-entry acc-relay] <ISO ts> start <path>", so the
+# timestamp sits between the bracket and the word -- the old '\] start '
+# pattern required them adjacent and therefore never matched, making this
+# check fail even on a perfectly working restart (which E3s own new-pid
+# assertion had just proved).
+_starts="$(docker exec -u "$(id -u)" "$C3" grep -c ' start /' /opt/sandy/feature-state/acc-relay/supervisor.log 2>/dev/null || echo 0)"
 ck "supervisor.log shows at least 2 starts (initial + restart)" "[ \"${_starts:-0}\" -ge 2 ]"
 
 echo "-- E4. never started twice --"
 ck "the supervisor lock is HELD (a second flock -n attempt fails)" \
-   "! docker exec -u \"\$(id -u)\" \"$C3\" flock -n /home/sandy/.sandy-handoff-relay.lock true"
+   "! docker exec -u \"\$(id -u)\" \"$C3\" flock -n /home/sandy/.sandy-entry-acc-relay.lock true"
 ck "still exactly one relay process (no second supervisor was spawned)" \
    "[ \"\$(docker exec -u \"\$(id -u)\" \"$C3\" pgrep -c -f 'acc-relay/relay' 2>/dev/null)\" = 1 ]"
 
-echo "-- E5. sandy-handoff-sessions --"
-_hs=""
+echo "-- E5. pane-identity contract (#378): a claude pane is tagged @sandy_pane_agent --"
+# sandy-handoff-sessions (the in-image consumer of the pane-identity contract
+# that used to be asserted here) was REMOVED in 2.6.0 (#382, decision 7). The
+# contract itself -- tmux session "sandy", the @sandy_pane_agent pane option,
+# SANDY_AGENT spawn order -- is unchanged and is what this now checks
+# directly, the same way an external consumer's own copy would.
+_pt=""
 for _i in 1 2 3 4 5 6; do
-    _hs="$(docker exec -u "$(id -u)" "$C3" sandy-handoff-sessions 2>/dev/null)"
-    printf '%s\n' "$_hs" | awk -F'\t' '$1=="claude"{f=1} END{exit !f}' && break
+    _pt="$(docker exec -u "$(id -u)" -e HOME=/home/sandy "$C3" tmux list-panes -s -t sandy -F '#{@sandy_pane_agent}' 2>/dev/null)"
+    printf '%s\n' "$_pt" | grep -qx claude && break
     sleep 5
 done
-ck "sandy-handoff-sessions lists a claude row" \
-   "printf '%s\n' \"\$_hs\" | awk -F'\t' '\$1==\"claude\"{f=1} END{exit !f}'"
-_sock="$(printf '%s\n' "$_hs" | awk -F'\t' '$1=="claude"{print $5; exit}')"
-ck "the listed socket path is a real socket in the container" \
-   "[ -n \"$_sock\" ] && [ \"$_sock\" != \"-\" ] && docker exec -u \"\$(id -u)\" \"$C3\" test -S \"$_sock\""
+ck "tmux list-panes -s -t sandy reports a pane tagged @sandy_pane_agent=claude" \
+   "printf '%s\n' \"\$_pt\" | grep -qx claude"
 
-echo "-- E6. crossSessionInbound pin lands in both measured-working files --"
+echo "-- E6. crossSessionInbound: decision 6 (#382, 2.6.0) -- an entry alone, with no declared receives, now resolves refuse --"
+# The acc-relay fixture (above) ships an `entry` and declares NO `receives`.
+# Through 2.5.x that shape resolved crossSessionInbound to accept via the
+# (now-removed) relay-conditional default; this is the runtime proof that it
+# no longer does, WITH a real supervised entry running (E2-E4 above already
+# proved the process is alive) -- refuse is not merely "nothing was running".
+#
+# relay{} itself was retired in 2.6.0 (#382, decisions 1-2, schema_version
+# 4); this checks the surviving, per-entry-identical surface instead --
+# feature_entries.acc-relay.path in the marker, anchored on its own key so a
+# neighbouring field can never be mistaken for it (§88b).
+ck "session marker reports feature_entries.acc-relay.path" \
+   "docker exec \"$C3\" grep -qF '\"acc-relay\": {\"path\": \"/opt/sandy/features/acc-relay/relay\"' /etc/sandy-session.json"
 _marker="$(docker exec -u "$(id -u)" "$C3" cat /etc/sandy-session.json 2>/dev/null)"
-ck "session marker reports relay.source=manifest -- handoff_relay was REMOVED in #355 and relay.source replaced it, so asserting the old field would be asserting a mechanism that no longer exists" \
-   "docker exec \"$C3\" grep -q '\"source\": \"manifest\"' /etc/sandy-session.json"
-ck "session marker reports cross_session_inbound=\"accept\" (default: relay configured)" \
-   "printf '%s' \"\$_marker\" | grep -q '\"cross_session_inbound\": \"accept\"'"
-ck "userSettings (sandbox claude/settings.json, RW) carries the accept pin" \
-   "grep -q '\"crossSessionInbound\": *\"accept\"' \"$SBX3/claude/settings.json\""
-ck "workspace .claude/settings.local.json ALSO carries the pin (harmless no-op there, clears staleness)" \
-   "grep -q '\"crossSessionInbound\": *\"accept\"' \"$WS3/.claude/settings.local.json\""
+ck "session marker reports cross_session_inbound=\"refuse\" (an entry alone no longer buys accept)" \
+   "printf '%s' \"\$_marker\" | grep -q '\"cross_session_inbound\": \"refuse\"'"
+ck "session marker reports cross_session_inbound_source=\"default\", never \"relay-legacy\" (that source value is retired)" \
+   "printf '%s' \"\$_marker\" | grep -q '\"cross_session_inbound_source\": \"default\"'"
+ck "userSettings (sandbox claude/settings.json, RW) carries the refuse pin" \
+   "grep -q '\"crossSessionInbound\": *\"refuse\"' \"$SBX3/claude/settings.json\""
+ck "workspace .claude/settings.local.json ALSO carries the pin" \
+   "grep -q '\"crossSessionInbound\": *\"refuse\"' \"$WS3/.claude/settings.local.json\""
 # WS3 is under /tmp, outside $HOME, so sandy's workspace-mount fallback mounts
 # it at its own real host path verbatim -- the container path equals $WS3.
 ck "the workspace settings.local.json is genuinely :ro in-container" \
@@ -292,11 +327,20 @@ _cid_before="$C3"
 env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --update-sessions --yes --workspace "$WS3" >/dev/null 2>&1; RC=$?
 ck "--update-sessions exits 0 (whether it restarted a stale session or correctly no-opped)" "[ $RC -eq 0 ]"
 
-_seen_before="$(wc -l < "$SBX3/relay-state/seen" 2>/dev/null | tr -d ' ')"
+_seen_before="$(wc -l < "$SBX3/feature-state/acc-relay/seen" 2>/dev/null | tr -d ' ')"
 _cid_before="$(cid3)"
 "$SANDY" --stop --workspace "$WS3" >/dev/null 2>&1
-env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS3" >/dev/null 2>&1; RC=$?
+# Runtime half of §176(e): a leftover relay-state/ from an older sandy must be
+# removed at the NEXT launch, with one info line naming it -- planted here,
+# right before the deterministic re-`--start` this phase already needed.
+mkdir -p "$SBX3/relay-state" && : > "$SBX3/relay-state/supervisor.log"
+_e7_start_out="$(mktemp)"
+env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS3" > "$_e7_start_out" 2>&1; RC=$?
 ck "--start after --stop exits 0 (deterministic recreation)" "[ $RC -eq 0 ]"
+ck "the leftover relay-state/ is gone after --start" "[ ! -e \"$SBX3/relay-state\" ]"
+ck "--start named the removal (one info line)" \
+   "grep -q 'Removed leftover relay-state/' \"$_e7_start_out\""
+rm -f "$_e7_start_out"
 C3="$(cid3)"
 ck "container id changed (a real recreation happened)" \
    "[ -n \"$C3\" ] && [ \"$C3\" != \"$_cid_before\" ]"
@@ -310,7 +354,7 @@ ck "relay is running again in the NEW container" "[ -n \"$_pid_new\" ]"
 # Asserted as GROWTH against the pre-recreation count, not a bare ">= 2":
 # the sandbox dir survives recreation, so a fixed threshold would be satisfied
 # by lines an earlier phase wrote and would prove nothing about this step.
-_seen_after="$(wc -l < "$SBX3/relay-state/seen" 2>/dev/null | tr -d ' ')"
+_seen_after="$(wc -l < "$SBX3/feature-state/acc-relay/seen" 2>/dev/null | tr -d ' ')"
 ck "relay state persisted across recreation AND the new instance appended to it" \
    "[ \"${_seen_after:-0}\" -gt \"${_seen_before:-0}\" ]"
 
@@ -319,7 +363,7 @@ echo "-- E8. headless (-p) never starts a relay --"
 # is still live would just be refused by the workspace mutex, proving nothing
 # about the relay gate specifically.
 "$SANDY" --stop --workspace "$WS3" >/dev/null 2>&1
-_lines_before="$(wc -l < "$SBX3/relay-state/supervisor.log" 2>/dev/null | tr -d ' ')"
+_lines_before="$(wc -l < "$SBX3/feature-state/acc-relay/supervisor.log" 2>/dev/null | tr -d ' ')"
 # `timeout` is GNU coreutils and is NOT present on a stock macOS (homebrew
 # installs it as `gtimeout`). Invoking it unconditionally made the -p launch
 # exit 127, which this phase then reported as "the launch did not succeed" --
@@ -345,14 +389,14 @@ if [ "$_e8_rc" -ne 0 ]; then
     # move on without touching either, rather than counting it as a pass.
     [ -n "$_e8_to" ] && printf '  \033[33mSKIP\033[0m %s\n' "E8 headless relay gate (the -p launch itself did not succeed, rc=$_e8_rc -- cannot conclude anything about the relay gate from it)"
 else
-    _lines_after="$(wc -l < "$SBX3/relay-state/supervisor.log" 2>/dev/null | tr -d ' ')"
+    _lines_after="$(wc -l < "$SBX3/feature-state/acc-relay/supervisor.log" 2>/dev/null | tr -d ' ')"
     ck "supervisor.log line count unchanged after a successful headless run (no relay was started)" \
        "[ \"${_lines_before:-0}\" = \"${_lines_after:-0}\" ]"
     # Acceptance criterion 8: the skip is announced, and the announcement names
     # the consequence for the receive surface -- a silent skip would leave the
     # operator unable to tell "no relay because headless" from "relay died".
-    ck "headless launch prints the criterion-8 skip line naming the refuse consequence" \
-       "grep -q 'SANDY_HANDOFF_RELAY not started (headless run); crossSessionInbound will default to refuse' \"$_e8_out\""
+    ck "headless launch prints the criterion-8 skip line naming the reason and every entry" \
+       "grep -q 'feature entries not started (headless run): acc-relay' \"$_e8_out\""
 fi
 rm -f "$_e8_out"
 
