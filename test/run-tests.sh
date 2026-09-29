@@ -957,9 +957,13 @@ SSH_RELAY="$(grep -n 'SANDY_SSH=.*token' "$SCRIPT" | tail -1 | cut -d: -f1)"
 check ".sandy/config loaded before SSH relay setup" \
     test "$CONFIG_SOURCE" -lt "$SSH_RELAY"
 
-# Verify config parser does NOT use source (prevents code injection from untrusted repos)
+# Verify config parser does NOT use source (prevents code injection from untrusted repos).
+# Match a source/. COMMAND (at line start, or after ; & | or a subshell paren),
+# not the words: a prose line such as a key description mentioning "any source
+# ... a workspace .sandy/config" is not code execution, and the old substring
+# grep failed on exactly that.
 check "config parser does not use source" \
-    bash -c '! grep -q "source.*\.sandy/config" "$1"' -- "$SCRIPT"
+    bash -c '! grep -Eq "(^|[;&|(])[[:space:]]*(source|\.)[[:space:]]+[^#]*\.sandy/config" "$1"' -- "$SCRIPT"
 
 # Verify config parser uses allowlist. v0.12+: keys live in named arrays
 # (SANDY_PRIVILEGED_KEYS, SANDY_PASSIVE_KEYS) instead of inline case-statement
@@ -2364,8 +2368,12 @@ _LLM_VALIDATOR="$(sed -n '/^_SANDY_LLM_HOST=""$/,/^# --- Resolve agent ---/p' "$
 if [ -z "$_LLM_VALIDATOR" ]; then
     fail "could not extract SANDY_LOCAL_LLM_HOST validator"
 else
-    # Valid input
-    if SANDY_LOCAL_LLM_HOST=127.0.0.1:11434 bash -c "$_LLM_VALIDATOR; echo OK" 2>/dev/null | grep -q OK; then
+    # Valid input. The probe is appended on its OWN LINE, never as "$BLOCK; echo":
+    # command substitution strips the block's trailing newline, so if the
+    # extracted span ends in a comment line the "; echo" lands inside that
+    # comment and never runs -- the check then fails with a validator that is
+    # entirely correct (2.6.0 put a "# END removed key" comment at this span's end).
+    if SANDY_LOCAL_LLM_HOST=127.0.0.1:11434 bash -c "$_LLM_VALIDATOR"$'\n'"echo OK" 2>/dev/null | grep -q OK; then
         pass "SANDY_LOCAL_LLM_HOST validator accepts 127.0.0.1:11434"
     else
         fail "SANDY_LOCAL_LLM_HOST validator accepts 127.0.0.1:11434"
@@ -3885,7 +3893,7 @@ check "validation rejects \$HOME as SANDY_SCREENSHOT_DIR" \
 # `${VAR:-unset}` substitution always yields literal "unset" — single-pattern
 # grep, no BRE alternation (BSD grep doesn't always honor `\|`).
 _SS_NONEXIST="$(mktemp -u /tmp/sandy-ss-noexist.XXXXXX)"
-_SS_VAL_OUT3="$(SANDY_SCREENSHOT_DIR="$_SS_NONEXIST" bash -c "$_SS_VAL_BLOCK; echo final=\${SANDY_SCREENSHOT_DIR:-unset}" 2>&1)" && _SS_VAL_RC3=0 || _SS_VAL_RC3=$?
+_SS_VAL_OUT3="$(SANDY_SCREENSHOT_DIR="$_SS_NONEXIST" bash -c "$_SS_VAL_BLOCK"$'\n'"echo final=\${SANDY_SCREENSHOT_DIR:-unset}" 2>&1)" && _SS_VAL_RC3=0 || _SS_VAL_RC3=$?
 check "missing dir warns rather than hard-errors" \
     bash -c 'echo "$1" | grep -qF "does not exist"' -- "$_SS_VAL_OUT3"
 check "missing dir leaves SANDY_SCREENSHOT_DIR empty" \
@@ -3896,7 +3904,7 @@ check "missing dir leaves SANDY_SCREENSHOT_DIR empty" \
 # against the canonicalized expectation, not the raw mktemp output.
 _SS_GOOD="$(mktemp -d /tmp/sandy-ss-good.XXXXXX)"
 _SS_GOOD_REAL="$(cd "$_SS_GOOD" && pwd -P)"
-_SS_VAL_OUT4="$(SANDY_SCREENSHOT_DIR="$_SS_GOOD" bash -c "$_SS_VAL_BLOCK; echo final=\$SANDY_SCREENSHOT_DIR" 2>&1)" && _SS_VAL_RC4=0 || _SS_VAL_RC4=$?
+_SS_VAL_OUT4="$(SANDY_SCREENSHOT_DIR="$_SS_GOOD" bash -c "$_SS_VAL_BLOCK"$'\n'"echo final=\$SANDY_SCREENSHOT_DIR" 2>&1)" && _SS_VAL_RC4=0 || _SS_VAL_RC4=$?
 check "valid dir passes validation" test "$_SS_VAL_RC4" -eq 0
 check "valid dir is preserved (canonicalized)" \
     bash -c 'echo "$2" | grep -qFx "final=$1"' -- "$_SS_GOOD_REAL" "$_SS_VAL_OUT4"
