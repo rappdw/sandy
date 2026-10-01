@@ -17,8 +17,12 @@
 #   rename    A rewrites f.json via temp + rename, 5 times (Claude Code's usual path)
 #   rename-nohost  as rename, but the host does NOT touch f.json in step 2;
 #             B should read A's last version (tests whether step 2 is the trigger)
+#   host-stage  as rename, but in step 2 the host writes a FRESH name,
+#             f.json.sandy-launch.<i>, and B renames it over f.json itself
+#             before reading -- the protocol sandy 2.7.0 uses (#400)
 #
-# SPIKE_MODES picks a subset, e.g. SPIKE_MODES="rename rename-nohost".
+# Default modes: readonly rename host-stage. SPIKE_MODES picks others, e.g.
+# SPIKE_MODES="inplace rename-nohost".
 #
 # Each read is classified:
 #   ok      parses, and it is the host's version for this iteration
@@ -26,11 +30,11 @@
 #   BAD     does not parse (the #400 symptom)
 #
 # Prints counts only, never file content. Leaves nothing behind.
-# Takes ~10s per relaunch (the reader alone waits 7.5s), so ~8 min at N=15;
+# Takes ~5s per relaunch, so ~5 min for the three default modes at N=20;
 # a progress line per relaunch goes to stderr, the table rows to stdout.
 set -euo pipefail
 
-N="${1:-15}"
+N="${1:-20}"
 IMG="${SPIKE_IMAGE:-sandy-base}"
 docker image inspect "$IMG" >/dev/null 2>&1 || { echo "image $IMG not found (set SPIKE_IMAGE to any local image with node)"; exit 1; }
 
@@ -51,16 +55,18 @@ for (let k = 0; k < 5 && mode !== 'readonly'; k++) {
 }
 fs.writeFileSync('/d/next.src', doc('host', 50000 + ((i * 31337) % 12000)));
 fs.writeFileSync('/d/expect', mode === 'rename-nohost' ? 'guest' : 'host');
+fs.writeFileSync('/d/mode', mode);
 JS
 
 cat > "$D/b.js" <<'JS'
 const fs = require('fs');
 const i = +process.argv[2];
 const who = fs.readFileSync('/d/expect', 'utf8');
+if (fs.readFileSync('/d/mode', 'utf8') === 'host-stage') fs.renameSync('/d/f.json.sandy-launch.' + i, '/d/f.json');
 const sleep = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const out = [];
 let t = 0;
-for (const at of [0, 500, 2000, 5000]) {
+for (const at of [0, 500, 2000]) {
   sleep(at - t); t = at;
   let r;
   try {
@@ -78,22 +84,24 @@ run() {
 
 seed() { printf '{"who":"seed","ver":-1}\n' > "$D/f.json"; }
 
-printf '%-9s %-6s %-6s %-6s %-6s\n' mode 0s 0.5s 2s 5s
-for mode in ${SPIKE_MODES:-readonly inplace rename rename-nohost}; do
+printf '%-10s %-7s %-7s %-7s\n' mode 0s 0.5s 2s
+for mode in ${SPIKE_MODES:-readonly rename host-stage}; do
     seed
-    c0=""; c1=""; c2=""; c3=""
+    c0=""; c1=""; c2=""
     i=0
     while [ "$i" -lt "$N" ]; do
         run /d/a.js "$i" "$mode" >/dev/null
-        if [ "$mode" != rename-nohost ]; then
-            cp "$D/next.src" "$D/f.json.h.$$" && mv -f "$D/f.json.h.$$" "$D/f.json"
-        fi
+        case "$mode" in
+            (rename-nohost) ;;
+            (host-stage) cp "$D/next.src" "$D/f.json.sandy-launch.$i" ;;
+            (*) cp "$D/next.src" "$D/f.json.h.$$" && mv -f "$D/f.json.h.$$" "$D/f.json" ;;
+        esac
         set -- $(run /d/b.js "$i")
-        c0="$c0 $1"; c1="$c1 $2"; c2="$c2 $3"; c3="$c3 $4"
-        printf '  %s %2d/%d: %s %s %s %s\n' "$mode" "$((i + 1))" "$N" "$1" "$2" "$3" "$4" >&2
+        c0="$c0 $1"; c1="$c1 $2"; c2="$c2 $3"
+        printf '  %s %2d/%d: %s %s %s\n' "$mode" "$((i + 1))" "$N" "$1" "$2" "$3" >&2
         i=$((i + 1))
     done
     tally() { local ok=0 st=0 bad=0 w; for w in $1; do case "$w" in (ok) ok=$((ok+1));; (stale) st=$((st+1));; (*) bad=$((bad+1));; esac; done; printf '%s/%s/%s' "$ok" "$st" "$bad"; }
-    printf '%-9s %-6s %-6s %-6s %-6s\n' "$mode" "$(tally "$c0")" "$(tally "$c1")" "$(tally "$c2")" "$(tally "$c3")"
+    printf '%-10s %-7s %-7s %-7s\n' "$mode" "$(tally "$c0")" "$(tally "$c1")" "$(tally "$c2")"
 done
 echo "(each cell: ok/stale/BAD over $N relaunches)"
