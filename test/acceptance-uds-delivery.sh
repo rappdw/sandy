@@ -480,6 +480,23 @@ if [ -n "$C" ]; then
     else
         echo "VERDICT: the corrupted file is a prefix of NO backup -- consistent with interleaved writers (or a version no backup captured)"
     fi
+
+    # Against the LIVE file (#400): the corrupted read has had the live size
+    # every time, and the live file parses. WHERE the bytes differ separates
+    # the remaining causes, without printing any content: differences confined
+    # to whole 4096-byte pages = stale cached pages; a run of NULs = a read
+    # racing a truncate+rewrite; differences across the file = another version.
+    if [ -f "$f" ]; then
+        nd="$(cmp -l "$C" "$f" 2>/dev/null | wc -l | tr -d ' ')"
+        echo "vs live file: ${nd:-?} differing byte(s) (live $(stat -c %s "$f") bytes)"
+        if [ "${nd:-0}" -gt 0 ] 2>/dev/null; then
+            first="$(cmp -l "$C" "$f" 2>/dev/null | head -1 | awk '{print $1-1}')"
+            last="$(cmp -l "$C" "$f" 2>/dev/null | tail -1 | awk '{print $1-1}')"
+            echo "  first differing offset $first (page $((first / 4096))), last $last (page $((last / 4096)))"
+            echo "  pages with differences: $(cmp -l "$C" "$f" 2>/dev/null | awk '{print int(($1-1)/4096)}' | uniq | tr '\n' ' ')"
+        fi
+    fi
+    echo "NUL bytes: corrupted $(tr -cd '\000' < "$C" | wc -c | tr -d ' '), live $( [ -f "$f" ] && tr -cd '\000' < "$f" | wc -c | tr -d ' ')"
 fi
 UDS_CJ
 _uds_sessions() {  # $1=container -> tab-delimited rows, same shape the removed helper produced
