@@ -573,11 +573,12 @@ _sandy_stage_commit() {   # $1 = target path
 # What user-setup.sh does inside the container. Host-side it is only the
 # fallback for an image whose user-setup.sh predates the protocol (and the
 # test suite), and it is then exactly the old behaviour, hazard included.
-_sandy_launch_apply_staged() {   # $1 = sandbox dir
-    local _f _t
-    for _f in "$1"/claude/.*.sandy-launch.* "$1"/claude/*.sandy-launch.* "$1"/claude/hooks/*.sandy-launch.* \
-              "$1"/gemini/*.sandy-launch.* "$1"/codex/*.sandy-launch.*; do
-        [ -e "$_f" ] && [ ! -L "$_f" ] || continue
+_sandy_launch_apply_staged() {   # $1 = sandbox dir; applies THIS launch's id only
+    local _f _t _i="$_sandy_launch_id"
+    case "$_i" in ""|*[!A-Za-z0-9]*) return 0 ;; esac
+    for _f in "$1"/claude/.*.sandy-launch."$_i" "$1"/claude/*.sandy-launch."$_i" "$1"/claude/hooks/*.sandy-launch."$_i" \
+              "$1"/gemini/*.sandy-launch."$_i" "$1"/codex/*.sandy-launch."$_i"; do
+        if [ ! -e "$_f" ] || [ -L "$_f" ]; then continue; fi
         _t="${_f%.sandy-launch.*}"
         if [ -d "$_f" ]; then rm -rf "$_t"; fi
         mv -f "$_f" "$_t"
@@ -8500,14 +8501,22 @@ fi
 # Claude Code's ".claude.json contains invalid JSON" dialog parked daemon
 # sessions. A rename done here goes through the kernel and server that serve
 # the next read. Before anything below touches an agent home.
-for _sl in "$HOME"/.claude/.*.sandy-launch.* "$HOME"/.claude/*.sandy-launch.* "$HOME"/.claude/hooks/*.sandy-launch.* \
-           "$HOME"/.gemini/*.sandy-launch.* "$HOME"/.codex/*.sandy-launch.*; do
-    [ -e "$_sl" ] && [ ! -L "$_sl" ] || continue
-    _slt="${_sl%.sandy-launch.*}"
-    if [ -d "$_sl" ]; then rm -rf "$_slt"; fi
-    mv -f "$_sl" "$_slt" || sandy_err "could not install $_slt from its staged copy $_sl"
-done
-unset _sl _slt
+# Only THIS launch's id (SANDY_LAUNCH_ID, [A-Za-z0-9]+): a writer's temp
+# (<staged>.XXXXXX, <staged>.sandy-tmp.<pid>) never matches, and neither does
+# anything an earlier launch left behind.
+case "${SANDY_LAUNCH_ID:-}" in
+    ""|*[!A-Za-z0-9]*) ;;
+    *)
+        for _sl in "$HOME"/.claude/.*.sandy-launch."$SANDY_LAUNCH_ID" "$HOME"/.claude/*.sandy-launch."$SANDY_LAUNCH_ID" \
+                   "$HOME"/.claude/hooks/*.sandy-launch."$SANDY_LAUNCH_ID" "$HOME"/.gemini/*.sandy-launch."$SANDY_LAUNCH_ID" \
+                   "$HOME"/.codex/*.sandy-launch."$SANDY_LAUNCH_ID"; do
+            if [ ! -e "$_sl" ] || [ -L "$_sl" ]; then continue; fi
+            _slt="${_sl%.sandy-launch.*}"
+            if [ -d "$_sl" ]; then rm -rf "$_slt"; fi
+            mv -f "$_sl" "$_slt" || sandy_err "could not install $_slt from its staged copy $_sl"
+        done
+        unset _sl _slt ;;
+esac
 
 sandy_log "Setting up language toolchains"
 # Cargo: writable registry cache + cargo-install binaries
@@ -17842,6 +17851,8 @@ if ! { mkdir -p "$(_sandy_launch_dir)" && cp "$_sandy_session_file" "$_sandy_ses
     _sandy_session_mount="$_sandy_session_file"
 fi
 RUN_FLAGS+=(-v "$_sandy_session_mount":/etc/sandy-session.json:ro)
+# Which staged files user-setup.sh may apply: exactly this launch's (#400).
+RUN_FLAGS+=(-e "SANDY_LAUNCH_ID=$_sandy_launch_id")
 
 # --- Auto-mode opt-in prompt suppression, at the POLICY layer (#129 follow-up)
 # Claude Code 2.1.x offers "Make auto mode your default permission mode?" on

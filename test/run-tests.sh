@@ -1798,11 +1798,18 @@ if [ -z "$_CODEX_SEED_BLOCK" ]; then
     fail "could not extract codex sandbox seeding block from sandy"
 else
     _CSEED_TMP="$(mktemp -d)"
+    # The block stages config.toml for the container to move into place
+    # (#400): load the handoff helpers, run it, then apply the staged copy as
+    # user-setup.sh does in-container, so the assertions read what ships.
+    _CSEED_HLP="$(sed -n '/^# --- Host-to-container handoff (#400)/,/^# Merge JSON keys into a file/p' "$SANDY_SCRIPT" | sed '$d')"
     SANDBOX_DIR="$_CSEED_TMP" bash -c "
         info() { :; }; warn() { :; }; error() { :; }
         _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
         SANDY_AGENT=codex
+        $_CSEED_HLP
+        _sandy_launch_id=t28c
         $_CODEX_SEED_BLOCK
+        _sandy_launch_apply_staged \"\$SANDBOX_DIR\"
     "
 
     if [ -f "$_CSEED_TMP/codex/config.toml" ]; then
@@ -1836,7 +1843,10 @@ else
         info() { :; }; warn() { :; }; error() { :; }
         _sandy_agent_has() { case \",\$SANDY_AGENT,\" in *,\"\$1\",*) return 0 ;; esac; return 1; }
         SANDY_AGENT=codex
+        $_CSEED_HLP
+        _sandy_launch_id=t28c2
         $_CODEX_SEED_BLOCK
+        _sandy_launch_apply_staged \"\$SANDBOX_DIR\"
     "
     if grep -q '^# user edit$' "$_CSEED_TMP/codex/config.toml"; then
         pass "codex/config.toml re-run preserves user edits (idempotent)"
@@ -1844,7 +1854,7 @@ else
         fail "codex/config.toml re-run preserves user edits (idempotent)"
     fi
 
-    rm -rf "$_CSEED_TMP"
+    rm -rf "$_CSEED_TMP"; unset _CSEED_HLP
 fi
 
 # ============================================================
@@ -23912,7 +23922,7 @@ echo "§190: #400 — host-to-container handoff: the host never replaces a path 
 # side (user-setup.sh), the marker mount and the image label.
 _S190_SANDY="$SANDY_SCRIPT"
 _S190_D="$(cd "$(mktemp -d)" && pwd -P)"
-_s190_ino() { ls -i "$1" 2>/dev/null | awk '{print $1}'; }
+_s190_ino() { { ls -i "$1" 2>/dev/null || true; } | awk '{print $1}'; }   # empty for a missing file, never an abort
 _S190_HLP="$(sed -n '/^# --- Host-to-container handoff (#400)/,/^# Merge JSON keys into a file/p' "$_S190_SANDY" | sed '$d')"
 _S190_JM="$(sed -n '/^json_merge() {/,/^}$/p' "$_S190_SANDY")"
 check "§190(pre) the handoff helpers and json_merge were extracted (mutation: a rename empties them)" \
@@ -23997,7 +24007,7 @@ _s190_st() {   # _s190_st <sandbox dir> <SANDY_SKIP_PERMISSIONS> -> prints _SAND
 }
 if command -v node >/dev/null 2>&1; then
     mkdir -p "$_S190_D/s7/claude"; _T="$_S190_D/s7/claude/settings.json"
-    _s190_st "$_S190_D/s7" true >/dev/null; _s190 "$_S190_D/s7" '_sandy_launch_apply_staged "$SANDBOX_DIR"'
+    _s190_st "$_S190_D/s7" true >/dev/null; _s190 "$_S190_D/s7" '_sandy_launch_id=t3; _sandy_launch_apply_staged "$SANDBOX_DIR"'
     check "§190(7-pre) the first launch installed settings.json through the staged copy" \
         bash -c '[ -f "$1" ] && grep -q bypassPermissions "$1"' _ "$_T"
     _I0="$(_s190_ino "$_T")"; _S190_R="$(_s190_st "$_S190_D/s7" true)"
@@ -24017,8 +24027,18 @@ _S190_US="$(sed -n "/^generate_user_setup() {/,/^USERSETUP\$/p" "$_S190_SANDY")"
 # awk reads to the end (no early exit), so the printf feeding it never takes a SIGPIPE under pipefail.
 _S190_US_APPLY="$(printf '%s\n' "$_S190_US" | awk '!n && index($0, "sandy-launch") { n = NR } END { print n + 0 }')"
 _S190_US_FIRST="$(printf '%s\n' "$_S190_US" | awk '!n && (index($0, "Setting up language toolchains") || index($0, "tmux new-session")) { n = NR } END { print n + 0 }')"
+# (8b) only THIS launch's id is applied: a writer's temp and an earlier launch's leftover never are.
+mkdir -p "$_S190_D/s8/claude"; printf 'LIVE\n' > "$_S190_D/s8/claude/x.json"
+printf 'THIS\n' > "$_S190_D/s8/claude/y.json.sandy-launch.t1"
+printf 'TEMP\n' > "$_S190_D/s8/claude/x.json.sandy-launch.t1.Ab12Cd"
+printf 'OLD\n'  > "$_S190_D/s8/claude/x.json.sandy-launch.zz9"
+_s190 "$_S190_D/s8" '_sandy_launch_apply_staged "$SANDBOX_DIR"'
+check "§190(8b) the apply installs only this launch's id: its file lands; a writer's temp and an earlier id are left alone and never installed" \
+    bash -c '[ "$(cat "$1/y.json")" = THIS ] && [ "$(cat "$1/x.json")" = LIVE ] && [ -f "$1/x.json.sandy-launch.t1.Ab12Cd" ] && [ -f "$1/x.json.sandy-launch.zz9" ]' _ "$_S190_D/s8/claude"
+check "§190(8c) the container is told its id (SANDY_LAUNCH_ID), and user-setup.sh applies exactly that id after validating it" \
+    bash -c 'grep -qF "RUN_FLAGS+=(-e \"SANDY_LAUNCH_ID=\$_sandy_launch_id\")" "$1" && grep -qF "\"\$HOME\"/.claude/.*.sandy-launch.\"\$SANDY_LAUNCH_ID\"" "$1" && grep -qF "\"\"|*[!A-Za-z0-9]*) ;;" "$1"' _ "$_S190_SANDY"
 check "§190(9) user-setup.sh moves every <target>.sandy-launch.<id> onto its target BEFORE anything else touches an agent home (apply at line ${_S190_US_APPLY:-?}, first other touch at ${_S190_US_FIRST:-?}), handling dotfiles and directories" \
-    bash -c '[ "$2" -gt 0 ] && [ "$3" -gt 0 ] && [ "$2" -lt "$3" ] && printf "%s" "$1" | grep -q "/.claude/\.\*\.sandy-launch\.\*" && printf "%s" "$1" | grep -q "if \[ -d \"\$_sl\" \]; then rm -rf \"\$_slt\"; fi" && printf "%s" "$1" | grep -q "mv -f \"\$_sl\" \"\$_slt\""' _ "$_S190_US" "$_S190_US_APPLY" "$_S190_US_FIRST"
+    bash -c '[ "$2" -gt 0 ] && [ "$3" -gt 0 ] && [ "$2" -lt "$3" ] && printf "%s" "$1" | grep -q "/.claude/\.\*\.sandy-launch\." && printf "%s" "$1" | grep -q "if \[ -d \"\$_sl\" \]; then rm -rf \"\$_slt\"; fi" && printf "%s" "$1" | grep -q "mv -f \"\$_sl\" \"\$_slt\""' _ "$_S190_US" "$_S190_US_APPLY" "$_S190_US_FIRST"
 check "§190(9b) the template mirror carries the same apply loop (regen-template)" \
     bash -c 'grep -q "sandy-launch" "$1"' _ "$(cd "$(dirname "$0")/.." && pwd)/templates/user-setup.sh.tmpl"
 # (10) the image says it can apply the staging; a launch whose image cannot falls back host-side, loudly.

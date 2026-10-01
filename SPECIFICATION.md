@@ -630,7 +630,7 @@ The resolved version is embedded in the generated Dockerfile. A new version = di
 ### Container Activation
 
 At container startup, `user-setup.sh`:
-0. First of all, moves every `<target>.sandy-launch.<id>` the host staged for this launch onto its target (`.claude.json`, `settings.json`, `statsig/`, the cmux hook, gemini `settings.json`, codex `config.toml`), so that the container, never the host, replaces a path a container has used (#400, C.3)
+0. First of all, moves every `<target>.sandy-launch.$SANDY_LAUNCH_ID` the host staged for this launch onto its target (only that id: a writer's temp or an earlier launch's leftover never matches) (`.claude.json`, `settings.json`, `statsig/`, the cmux hook, gemini `settings.json`, codex `config.toml`), so that the container, never the host, replaces a path a container has used (#400, C.3)
 1. Symlinks `/opt/skills/<pack>/` → `~/.claude/skills/<pack>`
 2. Symlinks individual skill directories (those containing `SKILL.md`) into `~/.claude/skills/`
 3. Adds `/opt/skills/<pack>/bin` to PATH
@@ -708,6 +708,8 @@ Optional: `--gpus <SANDY_GPU>` if GPU passthrough is enabled.
 If the host UID differs from the image default (1001), sandy generates custom `passwd` and `group` files with the host UID/GID and mounts them read-only. The entrypoint then uses `gosu` with the remapped UID/GID.
 
 ### Environment Variables Passed to Container
+
+**Launch handoff** (#400): `SANDY_LAUNCH_ID` — this launch's random `[A-Za-z0-9]+` id; `user-setup.sh` moves exactly the `<target>.sandy-launch.<id>` files carrying it onto their targets before anything else touches an agent home (C.3), and nothing else.
 
 **Claude Code config**: `SANDY_WORKSPACE`, `SANDY_PROJECT_NAME`, `SANDY_SANDBOX_NAME` (the sandbox slug `<basename>-<sha8>`, 1.15.0/#303 — convenience only; the authoritative copy is `sandbox_name` in the `:ro` `/etc/sandy-session.json`), `SANDY_MODEL`, `SANDY_SKIP_PERMISSIONS`, `SANDY_NEW_SESSION`, `SANDY_REMOTE_CONTROL`, `SANDY_VERBOSE`, `SANDY_CHANNELS`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
 
