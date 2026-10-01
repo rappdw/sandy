@@ -23842,6 +23842,47 @@ unset _S188_SANDY _S188_D _S188_MNT _S188_C _S188_MIG _S188_OUT _C _SB _s188_hf
 unset -f _s188_flags _s188_mig _s188_case _s188_reset 2>/dev/null || true
 
 
+# ============================================================
+echo "§189: #412 — the uds harness separates 'delivered, model did not act' from a sandy failure"
+# ============================================================
+# acceptance-uds-delivery.sh needs docker and a model, so its positive
+# verdict is a pure function, _uds_positive_outcome, and THAT is exercised
+# here against every outcome the issue names: a NOTE only when delivery is
+# PROVEN, a FAIL for anything that is not.
+_S189_H="$(cd "$(dirname "$0")" && pwd)/acceptance-uds-delivery.sh"
+_S189_FN="$(sed -n '/^_uds_positive_outcome() {/,/^}$/p' "$_S189_H")"
+check "§189(pre) _uds_positive_outcome was extracted (mutation: a rename empties it and every case below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "Routed user message to queue"' _ "$_S189_FN"
+_s189() { env -i PATH="$PATH" bash -c 'set -uo pipefail; eval "$1"; _uds_positive_outcome "$2" "$3" "$4" "$5"' _ "$_S189_FN" "$@" 2>&1; }
+_S189_R='2026 [DEBUG] [uds-messaging] Routed user message to queue (priority=next): ACC74-yes-1-2: if you can'
+_S189_P='> ACC74-yes-1-2: if you can read this, create a file'
+for _s189_c in \
+    "acted|yes|$_S189_R|$_S189_P|ACC74-yes-1-2|the sentinel appeared" \
+    "delivered|no|$_S189_R|$_S189_P|ACC74-yes-1-2|routed, not held, marker in the pane: delivery PROVEN" \
+    "fail|no||$_S189_P|ACC74-yes-1-2|no routing decision at all" \
+    "fail|no|$_S189_R
+x [cross-session-inbound] held inbound peer message (1 held, cause=explicit-setting)|$_S189_P|ACC74-yes-1-2|routed AND held" \
+    "fail|no|x [cross-session-inbound] refused inbound peer message (uds: dropped)|$_S189_P|ACC74-yes-1-2|refused" \
+    "fail|no|$_S189_R|an empty pane|ACC74-yes-1-2|routed but the marker never reached the pane" \
+    "fail|no|$_S189_R|$_S189_P||no marker to look for"; do
+    _s189_want="${_s189_c%%|*}"; _s189_rest="${_s189_c#*|}"
+    _s189_found="${_s189_rest%%|*}"; _s189_rest="${_s189_rest#*|}"
+    _s189_dslice="${_s189_rest%%|*}"; _s189_rest="${_s189_rest#*|}"
+    _s189_pane="${_s189_rest%%|*}"; _s189_rest="${_s189_rest#*|}"
+    _s189_mk="${_s189_rest%%|*}"; _s189_why="${_s189_rest#*|}"
+    _s189_got="$(_s189 "$_s189_found" "$_s189_dslice" "$_s189_pane" "$_s189_mk")"
+    check "§189(1) $_s189_why -> $_s189_want (got: $_s189_got)" test "$_s189_got" = "$_s189_want"
+done
+check "§189(2) the harness NOTEs only the 'delivered' outcome; anything else still reaches a FAIL-able ck" \
+    bash -c 'grep -q "if \[ \"\$outcome\" = delivered \]; then" "$1" && grep -q "ck \"\[\$label\] POSITIVE: injected turn delivered AND acted on.*\[ .\$outcome. = acted \]" "$1"' _ "$_S189_H"
+check "§189(3) positive and negative cases poll on the SAME budget (UDS_POLL_S), now 180s" \
+    bash -c 'grep -q "^UDS_POLL_S=180$" "$1" && [ "$(grep -c "seq 1 \$((UDS_POLL_S / 2))" "$1")" -ge 1 ] && ! grep -q "seq 1 45" "$1"' _ "$_S189_H"
+check "§189(4) the RESULT line carries the NOTE count, and run-integration-tests.sh keeps it in the summary" \
+    bash -c 'grep -q "noted: delivered, model did not act" "$1" && r="$(printf "RESULT: 21 passed, 0 failed (1 noted: delivered, model did not act)\n" | grep -oE "RESULT: [0-9]+ passed, [0-9]+ failed( \([0-9]+ skipped\))?( \([0-9]+ noted[^)]*\))?")" && case "$r" in *"1 noted"*) grep -qF "( \\([0-9]+ noted[^)]*\\))?" "$2" ;; *) exit 1 ;; esac' _ "$_S189_H" "$(cd "$(dirname "$0")" && pwd)/run-integration-tests.sh"
+unset _S189_H _S189_FN _S189_R _S189_P _s189_c _s189_want _s189_rest _s189_found _s189_dslice _s189_pane _s189_mk _s189_why _s189_got
+unset -f _s189 2>/dev/null || true
+
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

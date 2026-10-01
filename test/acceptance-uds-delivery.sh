@@ -75,10 +75,41 @@ SANDY="${SANDY:-./sandy}"
 # writes to the isolated one.
 SANDY_HOME_DIR="${SANDY_HOME:-$HOME/.sandy}"
 
-PASS=0; FAIL=0; SKIPPED=0
+PASS=0; FAIL=0; SKIPPED=0; NOTED=0
 ck()   { if eval "$2" >/dev/null 2>&1; then printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS+1));
          else printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); fi; }
 skipm(){ printf '  \033[33mSKIP\033[0m %s\n' "$1"; SKIPPED=$((SKIPPED+1)); }
+# A NOTE is an outcome that is neither sandy passing nor sandy failing (#412):
+# counted, printed in the RESULT line, and surfaced in the suite summary, so it
+# can never silently become permanent -- but it does not fail the section.
+note() { printf '  \033[36mNOTE\033[0m %s\n' "$1"; NOTED=$((NOTED+1)); }
+# Poll budget for the sentinel, in seconds (#412: 90 -> 180). The SAME budget
+# applies to the negative control, so its "did not appear" can never just mean
+# "did not wait long enough".
+UDS_POLL_S=180
+# One line per 30s inside a long wait, so a wait never reads as a hang.
+_uds_tick() { [ $(( $2 % 30 )) -eq 0 ] && [ "$2" -gt 0 ] && echo "    ... [$1] still waiting for $3 (${2}s)"; return 0; }
+
+# The positive case's verdict (#412), separated from the model's behaviour.
+# The sentinel needs the MODEL to act on the delivered turn, which sandy does
+# not control; whether the turn was DELIVERED is sandy's question. So:
+#   acted     -- the sentinel appeared                              -> PASS
+#   delivered -- no sentinel, but delivery is PROVEN: the receiver
+#                logged "Routed user message to queue" for this
+#                send, logged no hold/refuse, and this case's marker
+#                is in the agent pane                                -> NOTE
+#   fail      -- anything else: delivery not proven                  -> FAIL
+# Pure string tests (case, not grep in a pipe: under pipefail an early-exiting
+# grep -q can SIGPIPE its writer and invert a negated test). run-tests.sh
+# exercises and mutation-tests this function without docker.
+_uds_positive_outcome() {   # $1 found(yes|no) $2 decision slice $3 agent pane $4 marker
+    [ "$1" = yes ] && { echo acted; return 0; }
+    case "$2" in *'Routed user message to queue'*) ;; *) echo fail; return 0 ;; esac
+    case "$2" in *'held inbound peer message'*|*'refused inbound peer message'*) echo fail; return 0 ;; esac
+    [ -n "$4" ] || { echo fail; return 0; }
+    case "$3" in *"$4"*) echo delivered ;; *) echo fail ;; esac
+    return 0
+}
 
 # ANTHROPIC_API_KEY MUST NOT REACH THE RECEIVER. Sandy forwards it, and Claude
 # Code then blocks at a startup modal -- "Detected a custom API key in your
@@ -339,7 +370,6 @@ _UDS_SESSIONS_FILE="$(mktemp)"
 # would otherwise leak this file. The trap covers every exit path; the
 # explicit rm stays too, since it documents intent at the point cleanup was
 # expected to happen.
-trap 'rm -f "$_UDS_SESSIONS_FILE"' EXIT
 cat > "$_UDS_SESSIONS_FILE" <<'UDS_SESSIONS'
 #!/bin/bash
 # sandy-handoff-sessions — enumerate live agent sessions in this container.
@@ -418,6 +448,40 @@ for a in "${ORDER[@]}"; do
   done <<< "$rows"
 done
 UDS_SESSIONS
+# #400 forensics, run in-container on a socket-wait failure (see run_case).
+# A FILE, not a $( ) heredoc, for the same bash-3.2 reason as the sessions copy.
+_UDS_CJ_FORENSICS="$(mktemp)"
+trap 'rm -f "$_UDS_SESSIONS_FILE" "$_UDS_CJ_FORENSICS"' EXIT
+cat > "$_UDS_CJ_FORENSICS" <<'UDS_CJ'
+D="${CLAUDE_CONFIG_DIR:-$HOME}"
+echo "config dir: $D  (CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-unset})"
+awk -v d="$D" '$2==d {print "mount: " $1 " " $3 " " $4}' /proc/mounts
+f="$D/.claude.json"
+if [ -f "$f" ]; then
+    echo "current: $(stat -c '%s bytes, inode %i, mtime %y' "$f")"
+    if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$f" 2>/dev/null; then echo "current parses: yes"; else echo "current parses: NO"; fi
+fi
+for t in "$D"/.claude.json.*; do [ -e "$t" ] && echo "stray: $(basename "$t") $(stat -c '%s bytes, mtime %y' "$t")"; done
+echo "backups (newest first):"
+ls -At "$D"/backups/ 2>/dev/null | head -12 | while IFS= read -r b; do echo "  $b  $(stat -c '%s bytes, mtime %y' "$D/backups/$b")"; done
+C="$(ls -t "$D"/backups/.claude.json.corrupted.* 2>/dev/null | head -1)"
+if [ -n "$C" ]; then
+    cs="$(stat -c %s "$C")"
+    echo "newest corrupted: $(basename "$C") ($cs bytes)"
+    hit=""
+    for B in $(ls -t "$D"/backups/.claude.json.backup.* 2>/dev/null); do
+        bs="$(stat -c %s "$B")"
+        if [ "$bs" -ge "$cs" ] && cmp -s -n "$cs" "$C" "$B"; then
+            hit="$(basename "$B") ($bs bytes)"; break
+        fi
+    done
+    if [ -n "$hit" ]; then
+        echo "VERDICT: the corrupted file is a byte-exact PREFIX of $hit -- a TRUNCATED write or a SHORT read, not two writers"
+    else
+        echo "VERDICT: the corrupted file is a prefix of NO backup -- consistent with interleaved writers (or a version no backup captured)"
+    fi
+fi
+UDS_CJ
 _uds_sessions() {  # $1=container -> tab-delimited rows, same shape the removed helper produced
     docker exec -i -u "$(id -u)" -e HOME=/home/sandy "$1" bash -s < "$_UDS_SESSIONS_FILE"
 }
@@ -509,6 +573,7 @@ run_case() {
         [ -n "$sock" ] && [ "$sock" != "-" ] && [ -n "$keyf" ] && [ "$keyf" != "-" ] && break
         sleep 2
         _waited=$((_waited + 2))
+        _uds_tick "$label" "$_waited" "the agent socket"
     done
     if [ "$_waited" -gt 60 ]; then
         echo "    -- [$label] NOTE: the socket bound only after ${_waited}s, past the original 60s budget --"
@@ -548,6 +613,15 @@ run_case() {
         echo "    -- [$label] .claude.json dialog/trust state --"
         docker exec -u "$(id -u)" "$c" sh -c 'for k in hasCompletedOnboarding theme hasTrustDialogAccepted bypassPermissionsModeAccepted projects; do printf "%s: " "$k"; grep -o "\"$k\"[^,]*" "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json" 2>/dev/null | head -1 || true; echo; done' 2>&1 \
             | sed 's/^/          | /' || echo "          | <unreadable>"
+        # #400 is NOT fixed by moving the file (the safe write works on the new
+        # mount, measured), so capture what the torn file IS before the
+        # container goes: sizes, timestamps, and whether it is a byte-exact
+        # PREFIX of a good backup (a truncated write or a short read) or not
+        # (two writers). Structure only -- never file contents, which can carry
+        # an account email.
+        echo "    -- [$label] .claude.json forensics (#400) --"
+        docker exec -i -u "$(id -u)" "$c" sh -s < "$_UDS_CJ_FORENSICS" 2>&1 \
+            | sed 's/^/          | /' || echo "          | <forensics failed>"
         echo "    -- [$label] _uds_sessions rows (this harness's consumer copy) --"
         _uds_sessions "$c" 2>&1 \
             | sed 's/^/          | /' || echo "          | <none>"
@@ -575,9 +649,10 @@ run_case() {
     # "we did not wait long enough".
     local found=no
     if [ "$expect" != routed ]; then
-        for i in $(seq 1 45); do
+        for i in $(seq 1 $((UDS_POLL_S / 2))); do
             if docker exec -u "$(id -u)" "$c" test -f "$sentinel" 2>/dev/null; then found=yes; break; fi
             sleep 2
+            _uds_tick "$label" "$((i * 2))" "the sentinel"
         done
     else
         # No sentinel is reachable without an approver, so there is nothing to
@@ -612,7 +687,14 @@ run_case() {
     dslice="$(docker exec -u "$(id -u)" "$c" sh -c 'tail -c +'"$((dbg_pre + 1))"' "'"$dbg_log"'" 2>/dev/null | grep -E "uds-messaging\] Routed user message|cross-session-inbound\]" | head -20' 2>/dev/null || true)"
 
     if [ "$expect" = yes ]; then
-        ck "[$label] POSITIVE: injected turn delivered AND acted on (sentinel exists; frame confirmed sent)" "[ '$found' = yes ]"
+        local opane outcome
+        opane="$(docker exec -u "$(id -u)" "$c" tmux capture-pane -p -t sandy -S -400 2>/dev/null || true)"
+        outcome="$(_uds_positive_outcome "$found" "$dslice" "$opane" "$marker")"
+        if [ "$outcome" = delivered ]; then
+            note "[$label] DELIVERED, but the model did not act within ${UDS_POLL_S}s (no sentinel). Delivery is proven (routed, not held/refused, marker in the pane) -- NOT a sandy failure (#412)"
+        else
+            ck "[$label] POSITIVE: injected turn delivered AND acted on (sentinel exists; frame confirmed sent)" "[ '$outcome' = acted ]"
+        fi
         # Independent of the model actually acting: did the receiver ROUTE it?
         # This separates "accept failed to deliver" (a sandy/Claude finding) from
         # "delivered, model no-op" (not a posture result) without reading a pane.
@@ -648,6 +730,15 @@ run_case() {
             dpane="$(docker exec -u "$(id -u)" "$c" tmux capture-pane -p -t sandy -S -400 2>/dev/null || true)"
             if printf '%s' "$dpane" | grep -qF "$marker"; then
                 echo "          -> corroboration: the marker IS in the agent pane (it reached the agent)."
+                # #412: printed even when the marker arrived, because "reached
+                # the agent, no sentinel" says nothing about WHY -- the model
+                # may have asked a question, refused, hit a permission prompt,
+                # or sat idle, and only the pane shows which. Same redaction.
+                echo "          -> agent pane, last 25 non-blank lines (what the model did with the turn):"
+                printf '%s\n' "$dpane" | grep -v '^[[:space:]]*$' | tail -25 \
+                    | sed -e 's/sk-ant-[.]*[A-Za-z0-9_-]*/sk-ant-<redacted>/g' \
+                          -e 's/sk-[A-Za-z0-9_-]\{16,\}/sk-<redacted>/g' \
+                    | sed 's/^/             | /'
             else
                 echo "          -> corroboration: the marker is NOT in the agent pane."
                 # A routed-but-never-rendered turn means the receiving claude
@@ -746,13 +837,14 @@ run_case "accept/non-bypass" routed "" "SANDY_SKIP_PERMISSIONS=false"
 
 "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true
 rm -rf "$(dirname "$WS")"
-rm -f "${_UDS_SESSIONS_FILE:-}" 2>/dev/null || true
+rm -f "${_UDS_SESSIONS_FILE:-}" "${_UDS_CJ_FORENSICS:-}" 2>/dev/null || true
 _cleanup_sandy_home || true
 
 echo
 echo "==================================================="
 printf 'RESULT: %d passed, %d failed' "$PASS" "$FAIL"
 [ "$SKIPPED" -gt 0 ] && printf ' (%d skipped)' "$SKIPPED"
+[ "$NOTED" -gt 0 ] && printf ' (%d noted: delivered, model did not act)' "$NOTED"
 printf '\n'
 echo "==================================================="
 [ "$FAIL" -eq 0 ]
