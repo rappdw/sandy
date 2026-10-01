@@ -2389,7 +2389,10 @@ if [ -f "$_acc_uds" ]; then
     SANDY="$SANDY_SCRIPT" bash "$_acc_uds" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
     set -e
-    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed( \([0-9]+ skipped\))?' "$_acc_out" | tail -1 || true)"
+    # (N noted ...) is #412: delivered but the model did not act. It does not
+    # fail the section, so it is carried into the summary line, where it stays
+    # visible instead of becoming a silent permanent state.
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed( \([0-9]+ skipped\))?( \([0-9]+ noted[^)]*\))?' "$_acc_out" | tail -1 || true)"
     if grep -q 'RESULT: 0 passed, 0 failed' "$_acc_out"; then
         skip "uds-delivery cross-session delivery acceptance (${_acc_res:-skipped}) — no Claude credentials"
     elif [ "$_acc_rc" -eq 0 ]; then
