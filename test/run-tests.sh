@@ -23933,9 +23933,13 @@ if command -v node >/dev/null 2>&1; then
     env -i PATH="$PATH" CLAUDE_JSON="$_F" SANDY_WORKSPACE=/home/sandy/w bash -c 'eval "$1"' _ "$_S190_TR"
     check "§190(5) the .claude.json trust-entry writer leaves a NEW inode and records the trust" \
         bash -c '[ -n "$3" ] && [ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ] && grep -q "hasTrustDialogAccepted" "$1"' _ "$_F" "$_I0" "$_S190_TR"
+    # What the next launch really finds: Claude Code DROPS
+    # hasCompletedProjectOnboarding from the file (observed on a live sandbox),
+    # so a writer that re-adds it writes every launch -- the #400 trigger.
+    node -e 'const fs=require("fs"),f=process.argv[1];const d=JSON.parse(fs.readFileSync(f,"utf8"));delete d.projects["/home/sandy/w"].hasCompletedProjectOnboarding;fs.writeFileSync(f,JSON.stringify(d))' "$_F"
     _I0="$(_s190_ino "$_F")"
     env -i PATH="$PATH" CLAUDE_JSON="$_F" SANDY_WORKSPACE=/home/sandy/w bash -c 'eval "$1"' _ "$_S190_TR"
-    check "§190(5b) the trust-entry writer on an already-trusted workspace does NOT write (same inode)" \
+    check "§190(5b) the trust-entry writer on an already-trusted workspace does NOT write, even after Claude Code dropped hasCompletedProjectOnboarding (same inode)" \
         bash -c '[ -n "$2" ] && [ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ]' _ "$_F" "$_I0"
 else
     skip "§190(4-5) need node"

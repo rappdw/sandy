@@ -2159,7 +2159,7 @@ Stored at `$SANDY_HOME/sandboxes/<NAME>/claude/.claude.json` since 2.7.0 (#400).
 
 The cause was the **host replacing a file the previous container had written**: on macOS, the next container's first read of such a file can fail to parse (2 of 20 relaunches in `test/spike/virtiofs-host-rewrite-spike.sh`; 0 of 20 with no host write in between), whether the host rewrote it in place or by rename. Sandy merged the same keys into `.claude.json` at every launch, so every relaunch set this up.
 
-Since 2.7.0 every host-side writer into a container-read file **skips the write when the content would not change** (semantic JSON comparison in node, byte comparison in `_sandy_write_atomic`), so after a sandbox's first launch the per-launch merges write nothing. A write that does change something goes to an exclusively created temp file and is renamed into place (`run-tests.sh` §190).
+Since 2.7.0 every host-side writer into a container-read file **skips the write when the content would not change** (semantic JSON comparison in node, byte comparison in `_sandy_write_atomic`), so after a sandbox's first launch the per-launch merges write nothing. The trust entry is written only while `projects[<ws>].hasTrustDialogAccepted` is not yet `true`, because Claude Code drops the `hasCompletedProjectOnboarding` flag sandy sets beside it. A write that does change something goes to an exclusively created temp file and is renamed into place (`run-tests.sh` §190).
 
 **Migration (each launch with claude selected):**
 - a symlink at `claude/.claude.json` is removed and named;

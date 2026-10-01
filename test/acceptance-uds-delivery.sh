@@ -82,6 +82,20 @@ skipm(){ printf '  \033[33mSKIP\033[0m %s\n' "$1"; SKIPPED=$((SKIPPED+1)); }
 # A NOTE is an outcome that is neither sandy passing nor sandy failing (#412):
 # counted, printed in the RESULT line, and surfaced in the suite summary, so it
 # can never silently become permanent -- but it does not fail the section.
+# #400 attribution: the host's claude/.claude.json as "inode mtime", taken just
+# before --start and just after it returns. A change across the launch means the
+# launch (sandy, or the first second of Claude Code) replaced the file -- the
+# precondition for #400's bad first read. Structure only, never content.
+_uds_cj_host_stat() {
+    local f
+    for f in "$SANDY_HOME_DIR"/sandboxes/*/claude/.claude.json; do
+        [ -f "$f" ] || continue
+        stat -c '%i %Y' "$f" 2>/dev/null || stat -f '%i %m' "$f" 2>/dev/null
+        return 0
+    done
+    echo absent
+}
+
 # #400 forensics: the container read of /etc/sandy-session.json (a single-file
 # bind mount) against the host file it is mounted from. Different
 # launched_at/session_nonce means the container saw an EARLIER launch's marker,
@@ -551,8 +565,15 @@ run_case() {
     # only as three identical "daemon container is running" failures with no
     # cause anywhere in the log.
     local _start_log; _start_log="$(mktemp)"
+    local _cj_before _cj_after; _cj_before="$(_uds_cj_host_stat)"
     env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS" >"$_start_log" 2>&1
     local _start_rc=$?
+    _cj_after="$(_uds_cj_host_stat)"
+    if [ "$_cj_before" = "$_cj_after" ]; then
+        echo "    -- [$label] host claude/.claude.json across --start: unchanged ($_cj_after)"
+    else
+        echo "    -- [$label] host claude/.claude.json across --start: REPLACED ($_cj_before -> $_cj_after)"
+    fi
     # Restore immediately: the config has already been read, and every later
     # `return` in this function would otherwise leak it into the next case.
     if [ -n "$_host_cfg_bak" ]; then

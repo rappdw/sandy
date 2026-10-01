@@ -15879,8 +15879,13 @@ if _sandy_agent_has claude; then
         try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { d = {}; }
         if (!d.projects) d.projects = {};
         if (!d.projects[w]) d.projects[w] = {};
-        d.projects[w].hasTrustDialogAccepted = true;
-        d.projects[w].hasCompletedProjectOnboarding = true;
+        // Only when not yet trusted (#400). Claude Code DROPS the project
+        // onboarding flag set below from the file, so re-adding it every
+        // launch made this a write every launch -- the host replacing a file
+        // the last container wrote, which the next container can misread.
+        // Kept on ONE line, and the flag named nowhere above it: run-tests.sh
+        // section 87 extracts this program up to the first line naming it.
+        if (d.projects[w].hasTrustDialogAccepted !== true) { d.projects[w].hasTrustDialogAccepted = true; d.projects[w].hasCompletedProjectOnboarding = true; }
         { let __same = false; try { __same = JSON.stringify(JSON.parse(fs.readFileSync(f, "utf8"))) === JSON.stringify(d); } catch (e) {} if (!__same) { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); } }  // unchanged: no write (#400)
     ' "$CLAUDE_JSON" "$SANDY_WORKSPACE" 2>/dev/null || true
 fi
