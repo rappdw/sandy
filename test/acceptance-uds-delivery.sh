@@ -82,6 +82,27 @@ skipm(){ printf '  \033[33mSKIP\033[0m %s\n' "$1"; SKIPPED=$((SKIPPED+1)); }
 # A NOTE is an outcome that is neither sandy passing nor sandy failing (#412):
 # counted, printed in the RESULT line, and surfaced in the suite summary, so it
 # can never silently become permanent -- but it does not fail the section.
+# #400 forensics: the container read of /etc/sandy-session.json (a single-file
+# bind mount) against the host file it is mounted from. Different
+# launched_at/session_nonce means the container saw an EARLIER launch's marker,
+# i.e. a stale read across the host/VM boundary rather than a wrong write.
+# Marker fields only (no credentials live in the marker).
+_uds_mf() { printf '%s' "$1" | sed -E -n "s/.*\"$2\": *\"?([^\",]*)\"?.*/\1/p" | head -1; }
+_uds_marker_forensics() {
+    local label="$1" c="$2" in_json="$3" src host_json
+    src="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/etc/sandy-session.json"}}{{.Source}}{{end}}{{end}}' "$c" 2>/dev/null)"
+    host_json=""; [ -n "$src" ] && [ -f "$src" ] && host_json="$(cat "$src" 2>/dev/null)"
+    local k v_in v_host verdict=match
+    echo "    -- [$label] marker: container read vs host file (${src:-mount source unknown})"
+    for k in launched_at session_nonce cross_session_inbound cross_session_inbound_source permission_mode; do
+        v_in="$(_uds_mf "$in_json" "$k")"; v_host="$(_uds_mf "$host_json" "$k")"
+        [ "$v_in" = "$v_host" ] || verdict=DIFFERS
+        printf '       %-30s in=%-34s host=%s\n' "$k" "${v_in:-<none>}" "${v_host:-<none>}"
+    done
+    printf '       %-30s in=%-34s host=%s\n' bytes "$(printf '%s' "$in_json" | wc -c | tr -d ' ')" "$(printf '%s' "$host_json" | wc -c | tr -d ' ')"
+    echo "       VERDICT: $verdict"
+}
+
 note() { printf '  \033[36mNOTE\033[0m %s\n' "$1"; NOTED=$((NOTED+1)); }
 # Poll budget for the sentinel, in seconds (#412: 90 -> 180). The SAME budget
 # applies to the negative control, so its "did not appear" can never just mean
@@ -549,6 +570,7 @@ run_case() {
     # The marker is the authority on what sandy actually resolved — asserting
     # the input config would only prove we wrote a file.
     local marker_json; marker_json="$(docker exec -u "$(id -u)" "$c" cat /etc/sandy-session.json 2>/dev/null)"
+    _uds_marker_forensics "$label" "$c" "$marker_json"
     if [ "$expect" != no ]; then
         ck "[$label] marker reports cross_session_inbound=accept" \
            "printf '%s' \"\$marker_json\" | grep -q '\"cross_session_inbound\": \"accept\"'"
