@@ -87,7 +87,7 @@ skipm(){ printf '  \033[33mSKIP\033[0m %s\n' "$1"; SKIPPED=$((SKIPPED+1)); }
 # launched_at/session_nonce means the container saw an EARLIER launch's marker,
 # i.e. a stale read across the host/VM boundary rather than a wrong write.
 # Marker fields only (no credentials live in the marker).
-_uds_mf() { printf '%s' "$1" | sed -E -n "s/.*\"$2\": *\"?([^\",]*)\"?.*/\1/p" | head -1; }
+_uds_mf() { printf '%s' "$1" | sed -E -n "s/.*\"$2\": *\"?([^\",}]*)\"?.*/\1/p" | head -1; }
 _uds_marker_forensics() {
     local label="$1" c="$2" in_json="$3" src host_json
     src="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/etc/sandy-session.json"}}{{.Source}}{{end}}{{end}}' "$c" 2>/dev/null)"
