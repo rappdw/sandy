@@ -7476,7 +7476,7 @@ _S91_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Curated exception lists -- each entry is an intentional, hand-verified
 # exception to the parser<->cli_flags identity, not a loophole papering over
 # drift. See the independently-verified framing facts this PR was built on.
-_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --keep-history --purge-history --sandbox --orphans --fix --all --dest-workspace --dest-sandy-home"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor/--provision/--rsync); not standalone cli_flags entries, must instead appear in >=1 description
+_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --keep-history --purge-history --sandbox --orphans --fix --all --dest-workspace --dest-sandy-home --src-workspace --src-sandy-home"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor/--provision/--rsync/--rsync-from); not standalone cli_flags entries, must instead appear in >=1 description
 _S91_PRIVATE="--print-protected-paths"                        # real, private/debug fast-path flag; deliberately unadvertised
 _S91_FORWARDED="--resume"                                     # a real cli_flags entry with ZERO parser cases (forwarded verbatim to the agent, sandy:4103/4127)
 
@@ -23555,6 +23555,189 @@ check "§186(9) placement: lock ($_S186_L_LOCK) < leftover removal ($_S186_L_RM)
 rm -rf "$_S186_D"
 unset _S186_SANDY _S186_D _S186_BLOCK _S186_SYM _S186_OUT _SB _S186_L_LOCK _S186_L_RM _S186_L_CALL _S186_L_RUN
 unset -f _s186_run _s186_fixture 2>/dev/null || true
+
+
+# ============================================================
+echo "§187: sandy --rsync-from pulls a sandbox from another host (#409)"
+# ============================================================
+# The source is simulated on this machine, exactly as §154 simulates the
+# destination: an `ssh` stub runs commands under a separate fake remote $HOME,
+# and an `rsync` stub implements the subset sandy uses (anchored excludes,
+# SRC/ = contents, host:path). So this drives the REAL command end to end and
+# asserts what arrives HERE: the name this host computes, the rewritten files,
+# what was left behind, and that a failed pull installs nothing.
+_S187_SANDY="$SANDY_SCRIPT"
+_S187_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+if ! command -v python3 >/dev/null 2>&1; then
+    skip "§187 needs python3 for the rsync stub"
+else
+mkdir -p "$_S187_DIR/bin"
+cat > "$_S187_DIR/bin/ssh" <<'STUB'
+#!/bin/bash
+host="$1"; shift
+echo "$host" >> "${SSH_STUB_LOG:-/dev/null}"
+if [ "$1" = sh ] && [ "$2" = -s ]; then exec env -u SANDY_HOME HOME="$REMOTE_HOME" FAKE_REMOTE=1 sh -s; fi
+exec env -u SANDY_HOME HOME="$REMOTE_HOME" FAKE_REMOTE=1 sh -c "$*"
+STUB
+cat > "$_S187_DIR/bin/rsync" <<'STUB'
+#!/usr/bin/env python3
+import os, sys, shutil
+ex, paths = [], []
+for a in sys.argv[1:]:
+    if a == "-a": continue
+    if a.startswith("--exclude="): ex.append(a[len("--exclude="):]); continue
+    if a.startswith("-"): sys.exit("rsync stub: unsupported flag " + a)
+    paths.append(a)
+src, dst = paths
+fail = os.environ.get("RSYNC_FAIL_MATCH", "")
+if fail and (fail in src or fail in dst): sys.exit("rsync stub: injected failure")
+def strip(p): return p.split(":", 1)[1] if (":" in p and not p.startswith("/")) else p
+src, dst = strip(src), strip(dst)
+def excluded(rel, isdir):
+    for p in ex:
+        dironly = p.endswith("/"); q = p.strip("/")
+        if dironly and not isdir: continue
+        if p.startswith("/"):
+            if rel == q: return True
+        elif os.path.basename(rel) == q: return True
+    return False
+if src.endswith("/"):
+    root = src.rstrip("/"); os.makedirs(dst, exist_ok=True)
+    for d, dirs, files in os.walk(root):
+        reld = os.path.relpath(d, root); reld = "" if reld == "." else reld
+        dirs[:] = [x for x in dirs if not excluded(os.path.join(reld, x), True)]
+        for x in dirs: os.makedirs(os.path.join(dst, reld, x), exist_ok=True)
+        for f in files:
+            r = os.path.join(reld, f)
+            if not excluded(r, False): shutil.copy2(os.path.join(d, f), os.path.join(dst, r))
+else:
+    if dst.endswith("/"): dst = os.path.join(dst, os.path.basename(src))
+    os.makedirs(os.path.dirname(dst), exist_ok=True); shutil.copy2(src, dst)
+STUB
+cat > "$_S187_DIR/bin/uname" <<'STUB'
+#!/bin/sh
+if [ "$1" = -m ]; then
+  if [ "${FAKE_REMOTE:-}" = 1 ]; then echo "${REMOTE_ARCH:-x86_64}"; else echo "${LOCAL_ARCH:-x86_64}"; fi
+  exit 0
+fi
+exec /usr/bin/uname "$@"
+STUB
+chmod +x "$_S187_DIR/bin/ssh" "$_S187_DIR/bin/rsync" "$_S187_DIR/bin/uname"
+
+_s187_h8() { printf '%s' "$1" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-8; }
+# _s187_mk NAME SRC_REL [DST_REL] -> a REMOTE host (rhome) with one populated
+# sandbox for ~/SRC_REL, and this host (lhome) with the workspace ~/DST_REL
+# (default: the same relative path) and no sandbox. Names are computed
+# independently of sandy, so a drifting helper disagrees here.
+_s187_mk() {
+    _F="$_S187_DIR/$1"; _DR="${3:-$2}"
+    mkdir -p "$_F/rhome/$2" "$_F/lhome/$_DR"
+    _W="$(cd "$_F/rhome/$2" && pwd -P)"; _SH="$_F/rhome/.sandy"
+    _NAME="$(basename "$_W" | tr -cd 'a-zA-Z0-9._-')-$(_s187_h8 "$_W")"; _SB="$_SH/sandboxes/$_NAME"
+    _CWS="/home/sandy/$2"; _PD="$(printf '%s' "$_CWS" | sed 's/[^a-zA-Z0-9]/-/g')"
+    mkdir -p "$_SB/claude/projects/$_PD" "$_SB/claude/sessions" "$_SB/codex" "$_SB/venv/bin" "$_SB/cargo/bin" "$_SB/relay-state" "$_SB/feature-state/beta"
+    printf 'TRANSCRIPT\n' > "$_SB/claude/projects/$_PD/s1.jsonl"
+    printf 'key\n' > "$_SB/claude/sessions/1.a.key"
+    printf '{"t":"CODEX"}\n' > "$_SB/codex/auth.json"
+    printf 'py\n' > "$_SB/venv/bin/python"; printf 'bin\n' > "$_SB/cargo/bin/tool"
+    printf '{}\n' > "$_SB/sandy-session.json"; printf '{}\n' > "$_SB/gemini-system-settings.json"
+    printf 'started\n' > "$_SB/relay-state/.state"; printf 'started\n' > "$_SB/feature-state/beta/.state"
+    printf '2.3.0\n' > "$_SB/.sandy_created_version"
+    printf '{\n  "schema_version": 1,\n  "sandbox_name": "%s",\n  "workspace_path": "%s",\n  "first_seen_at": "2026-01-01T00:00:00Z",\n  "last_seen_at": "2026-09-01T00:00:00Z",\n  "sandy_version_first": "2.0.0",\n  "sandy_version_last": "2.3.0"\n}\n' "$_NAME" "$_W" > "$_SB/WORKSPACE.json"
+    printf '{"projects":{"%s":{"trusted":true}}}\n' "$_CWS" > "$_SH/sandboxes/$_NAME.claude.json"
+}
+_s187_run() {   # FIXTURE [args...] -> _S187_RC, _S187_OUT
+    _F="$_S187_DIR/$1"; shift
+    _S187_OUT="$(env -u SANDY_WORKSPACE -u SANDY_SANDBOX_NAME -u SANDY_HANDOFF_RELAY -u SANDY_RELAY_STATE \
+        PATH="$_S187_DIR/bin:$PATH" HOME="$_F/lhome" SANDY_HOME="$_F/lhome/.sandy" REMOTE_HOME="$_F/rhome" \
+        bash "$_S187_SANDY" --rsync-from srchost "$@" </dev/null 2>&1)" && _S187_RC=0 || _S187_RC=$?
+}
+_s187_here() { { find "$_S187_DIR/$1/lhome/.sandy/sandboxes" -mindepth 1 -maxdepth 1 2>/dev/null || true; } | sort; }
+_s187_expect() { _dw="$(cd "$1" && pwd -P)"; printf '%s-%s' "$(basename "$_dw" | tr -cd 'a-zA-Z0-9._-')" "$(_s187_h8 "$_dw")"; }
+
+# --- A: same $HOME-relative path, different $HOME ---------------------------
+_s187_mk A dev/proj
+_s187_run A --workspace "$_S187_DIR/A/lhome/dev/proj" --yes
+_S187_D="$_S187_DIR/A/lhome/.sandy/sandboxes/$(_s187_expect "$_S187_DIR/A/lhome/dev/proj")"
+check "§187(1) pull succeeds (rc=$_S187_RC)" test "$_S187_RC" -eq 0
+check "§187(2) it lands under the name THIS host computes for its own canonical path" test -d "$_S187_D"
+check "§187(3) WORKSPACE.json names THIS host's path, with its lineage kept" \
+    bash -c 'grep -qF "\"workspace_path\": \"$2\"," "$1" && grep -qF "\"first_seen_at\": \"2026-01-01T00:00:00Z\"" "$1" && grep -qF "\"sandbox_name\": \"$3\"," "$1"' _ "$_S187_D/WORKSPACE.json" "$(cd "$_S187_DIR/A/lhome/dev/proj" && pwd -P)" "$(basename "$_S187_D")"
+check "§187(4) the sibling .claude.json arrives under this host's name" test -f "$_S187_D.claude.json"
+check "§187(5) history arrives unrenamed when the container path is unchanged" test -f "$_S187_D/claude/projects/-home-sandy-dev-proj/s1.jsonl"
+check "§187(6) per-launch and per-process state is NOT copied (sessions, sandy-session.json, gemini-system-settings.json, relay-state, feature-state)" \
+    bash -c 'for p in claude/sessions sandy-session.json gemini-system-settings.json relay-state feature-state; do test ! -e "$1/$p" || exit 1; done' _ "$_S187_D"
+check "§187(7) credential files are copied AND named in the plan" \
+    bash -c 'test -f "$1/codex/auth.json" && case "$2" in *"Credentials     COPIED"*"codex/auth.json"*) exit 0 ;; esac; exit 1' _ "$_S187_D" "$_S187_OUT"
+check "§187(8) no staging directory is left behind" \
+    bash -c '! ls -a "$1" | grep -q "^\.rsync-from\."' _ "$_S187_DIR/A/lhome/.sandy/sandboxes"
+check "§187(9) the source is untouched" test -f "$_S187_DIR/A/rhome/.sandy/sandboxes/$(_s187_expect "$_S187_DIR/A/rhome/dev/proj")/claude/sessions/1.a.key"
+
+# --- B: the container path changes (different $HOME-relative location) -----
+_s187_mk B dev/proj work/proj2
+_s187_run B --workspace "$_S187_DIR/B/lhome/work/proj2" --src-workspace '~/dev/proj' --yes
+_S187_D="$_S187_DIR/B/lhome/.sandy/sandboxes/$(_s187_expect "$_S187_DIR/B/lhome/work/proj2")"
+check "§187(10) --src-workspace pull with a moved container path succeeds (rc=$_S187_RC)" test "$_S187_RC" -eq 0
+check "§187(11) history is RENAMED to this host's container path, not left under the old one" \
+    bash -c 'test -f "$1/claude/projects/-home-sandy-work-proj2/s1.jsonl" && test ! -e "$1/claude/projects/-home-sandy-dev-proj"' _ "$_S187_D"
+check "§187(12) .claude.json's projects key moved to the new container path" \
+    bash -c 'grep -q "/home/sandy/work/proj2" "$1" && ! grep -q "/home/sandy/dev/proj\"" "$1"' _ "$_S187_D.claude.json"
+check "§187(13) venv/ is skipped (its scripts hardcode the old path); cargo/ still copied" \
+    bash -c 'test ! -e "$1/venv" && test -f "$1/cargo/bin/tool"' _ "$_S187_D"
+
+# --- C: architecture mismatch -------------------------------------------------
+_s187_mk C dev/proj
+REMOTE_ARCH=aarch64 LOCAL_ARCH=x86_64 _s187_run C --workspace "$_S187_DIR/C/lhome/dev/proj" --yes
+_S187_D="$_S187_DIR/C/lhome/.sandy/sandboxes/$(_s187_expect "$_S187_DIR/C/lhome/dev/proj")"
+check "§187(14) aarch64 -> x86_64: package dirs skipped, history and credentials not" \
+    bash -c 'test "$2" -eq 0 && test ! -e "$1/cargo" && test ! -e "$1/venv" && test -f "$1/codex/auth.json" && test -f "$1/claude/projects/-home-sandy-dev-proj/s1.jsonl"' _ "$_S187_D" "$_S187_RC"
+
+# --- refusals: each must leave this host exactly as it was ---------------------
+_s187_mk D dev/proj; mkdir -p "$_S187_DIR/D/lhome/.sandy/sandboxes/$(_s187_expect "$_S187_DIR/D/lhome/dev/proj")/claude"
+: > "$_S187_DIR/D/lhome/.sandy/sandboxes/$(_s187_expect "$_S187_DIR/D/lhome/dev/proj")/claude/MINE"
+_s187_run D --workspace "$_S187_DIR/D/lhome/dev/proj" --yes
+check "§187(15) refuses when a sandbox for this workspace already exists HERE, and leaves it untouched" \
+    bash -c 'test "$1" -ne 0 && test -f "$2/claude/MINE" && test ! -e "$2/WORKSPACE.json"' _ "$_S187_RC" "$_S187_DIR/D/lhome/.sandy/sandboxes/$(_s187_expect "$_S187_DIR/D/lhome/dev/proj")"
+_s187_mk E dev/proj
+_S187_RN="$(_s187_expect "$_S187_DIR/E/rhome/dev/proj")"
+mkdir -p "$_S187_DIR/E/rhome/.sandy/sandboxes/.$_S187_RN.lock"; printf '%s\n' "$$" > "$_S187_DIR/E/rhome/.sandy/sandboxes/.$_S187_RN.lock/pid"
+_s187_run E --workspace "$_S187_DIR/E/lhome/dev/proj" --yes
+check "§187(16) refuses while a LIVE session holds the source on the remote (rc=$_S187_RC), installing nothing" \
+    bash -c 'test "$1" -ne 0 && test -z "$2" && case "$3" in *"live sandy session"*) exit 0 ;; esac; exit 1' _ "$_S187_RC" "$(_s187_here E)" "$_S187_OUT"
+_s187_run E --workspace "$_S187_DIR/E/lhome/dev/proj" --dry-run
+check "§187(17) ...but --dry-run still prints the plan, says a real run would refuse, and copies nothing" \
+    bash -c 'test "$1" -eq 0 && test -z "$2" && case "$3" in *"sandy --rsync-from:"*"would REFUSE"*) exit 0 ;; esac; exit 1' _ "$_S187_RC" "$(_s187_here E)" "$_S187_OUT"
+_s187_mk F dev/proj work/p2   # a moved container path, so the history is fetched in a second, separate transfer
+RSYNC_FAIL_MATCH=/claude/projects/ _s187_run F --workspace "$_S187_DIR/F/lhome/work/p2" --src-workspace '~/dev/proj' --yes
+check "§187(18) a failure in the SECOND transfer (after the bulk copy landed in staging) installs NOTHING -- no sandbox, no .claude.json, no staging left (rc=$_S187_RC)" \
+    bash -c 'test "$1" -ne 0 && test -z "$2" && case "$3" in *"nothing was installed here"*) exit 0 ;; esac; exit 1' _ "$_S187_RC" "$(_s187_here F)" "$_S187_OUT"
+_s187_mk G dev/proj
+_s187_run G --workspace "$_S187_DIR/G/lhome/dev/proj" --src-workspace '~/nowhere' --yes
+check "§187(19) a source workspace missing on the remote is refused before anything moves" \
+    bash -c 'test "$1" -ne 0 && test -z "$2" && case "$3" in *"workspace not found on srchost"*) exit 0 ;; esac; exit 1' _ "$_S187_RC" "$(_s187_here G)" "$_S187_OUT"
+_s187_mk H dev/proj
+_s187_run H --workspace "$_S187_DIR/H/lhome/dev/proj"
+check "§187(20) non-TTY without --yes is refused (rc=$_S187_RC) and copies nothing" \
+    bash -c 'test "$1" -ne 0 && test -z "$2"' _ "$_S187_RC" "$(_s187_here H)"
+_s187_mk I dev/proj; printf '9.0.0\n' > "$_S187_DIR/I/rhome/.sandy/sandboxes/$(_s187_expect "$_S187_DIR/I/rhome/dev/proj")/.sandy_created_version"
+_s187_run I --workspace "$_S187_DIR/I/lhome/dev/proj" --yes
+check "§187(21) a sandbox created by a NEWER sandy major is refused (this sandy could not run it)" \
+    bash -c 'test "$1" -ne 0 && test -z "$2"' _ "$_S187_RC" "$(_s187_here I)"
+for _s187_h in '-oProxyCommand=x' 'a:b' 'a b'; do
+    rm -f "$_S187_DIR/ssh.log"
+    _S187_OUT="$(env PATH="$_S187_DIR/bin:$PATH" HOME="$_S187_DIR/A/lhome" SANDY_HOME="$_S187_DIR/A/lhome/.sandy" SSH_STUB_LOG="$_S187_DIR/ssh.log" bash "$_S187_SANDY" --rsync-from "$_s187_h" --yes </dev/null 2>&1)" && _S187_RC=0 || _S187_RC=$?
+    # A leading "-" never even reaches host validation -- the parser rejects it
+    # as an unrecognized argument. Either refusal is correct; ssh must not run.
+    check "§187(22) source host '$_s187_h' is refused before ssh ever runs (an ssh option, or rsync's host:path separator)" \
+        bash -c 'test "$1" -ne 0 && test ! -e "$3" && case "$2" in *"source host"*|*"unrecognized argument"*) exit 0 ;; esac; exit 1' _ "$_S187_RC" "$_S187_OUT" "$_S187_DIR/ssh.log"
+done
+# --- one copy of each rule: push and pull share them -------------------------
+check "§187(23) push and pull use the SAME never-copied list, arch dirs and rewrite helpers (not two copies that can drift)" \
+    bash -c 'for s in "--rsync" "--rsync-from"; do x="$(awk -v s="if [[ \"\${1:-}\" == \"$s\" ]]; then" "index(\$0,s)==1{p=1;next} p&&index(\$0,\"# --- sandy --\")==1{exit} p{print}" "$1")"; [ -n "$x" ] || exit 1; for h in _SANDY_RSY_NEVER _SANDY_RSY_ARCH_DIRS _sandy_rsy_ws_rewrite _sandy_rsy_cj_rewrite _sandy_rsy_host_ok; do case "$x" in *"$h"*) ;; *) exit 1 ;; esac; done; done' _ "$_S187_SANDY"
+fi
+rm -rf "$_S187_DIR"
+unset _S187_SANDY _S187_DIR _S187_OUT _S187_RC _S187_D _S187_RN _F _DR _W _SH _NAME _SB _CWS _PD _dw _s187_h
+unset -f _s187_h8 _s187_mk _s187_run _s187_here _s187_expect 2>/dev/null || true
 
 
 # BEGIN SUMMARY
