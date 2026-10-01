@@ -22,6 +22,8 @@
 #   BAD     does not parse (the #400 symptom)
 #
 # Prints counts only, never file content. Leaves nothing behind.
+# Takes ~10s per relaunch (the reader alone waits 7.5s), so ~8 min at N=15;
+# a progress line per relaunch goes to stderr, the table rows to stdout.
 set -euo pipefail
 
 N="${1:-15}"
@@ -80,6 +82,7 @@ for mode in readonly inplace rename; do
         cp "$D/next.src" "$D/f.json.h.$$" && mv -f "$D/f.json.h.$$" "$D/f.json"
         set -- $(run /d/b.js "$i")
         c0="$c0 $1"; c1="$c1 $2"; c2="$c2 $3"; c3="$c3 $4"
+        printf '  %s %2d/%d: %s %s %s %s\n' "$mode" "$((i + 1))" "$N" "$1" "$2" "$3" "$4" >&2
         i=$((i + 1))
     done
     tally() { local ok=0 st=0 bad=0 w; for w in $1; do case "$w" in (ok) ok=$((ok+1));; (stale) st=$((st+1));; (*) bad=$((bad+1));; esac; done; printf '%s/%s/%s' "$ok" "$st" "$bad"; }
