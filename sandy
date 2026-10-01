@@ -4569,6 +4569,7 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
                 for _c in "$_e"/* "$_e"/.[!.]*; do
                     [ -e "$_c" ] || continue
                     [ "$(basename "$_c")" = projects ] && continue
+                    _rs_keep_claude_child "$_c" && continue
                     [ "$_n" -eq 0 ] && printf '%s\n' "$1"
                     printf '  - %-30s %s\n' "claude/$(basename "$_c")" "$(du -sh "$_c" 2>/dev/null | cut -f1 || echo '?')"
                     _n=$((_n + 1))
@@ -4583,6 +4584,23 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         return 0
     }
     _rs_nk_shown=0
+    # claude/.claude.json is ALWAYS kept (#400 decision 3). Until 2.6.x it was a
+    # sibling file outside the sandbox dir, so no reset ever reached it -- and
+    # operators provision fleet-wide MCP servers by writing a top-level
+    # MCP server block into it (§87). Moving it inside claude/ must not make a
+    # reset start wiping that. Only a regular file: a link planted there is
+    # destroyed like anything else under claude/.
+    _rs_keep_claude_child() { [ "$(basename "$1")" = .claude.json ] && [ -f "$1" ] && [ ! -L "$1" ]; }
+    # claude/ holding nothing but the preserved file is nothing to destroy.
+    _rs_claude_has_more() {
+        local _c
+        for _c in "$1"/* "$1"/.[!.]*; do
+            [ -e "$_c" ] || [ -L "$_c" ] || continue
+            _rs_keep_claude_child "$_c" && continue
+            return 0
+        done
+        return 1
+    }
     printf '\nsandy --reset-sandbox: %s\n' "$_rs_name"
     printf 'Workspace: %s\n' "$_rs_wd"
     printf 'Will destroy (next launch re-materializes them):\n'
@@ -4591,12 +4609,13 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         [ -e "$_rs_e" ] || continue
         _rs_bn="$(basename "$_rs_e")"
         _rs_keep "$_rs_bn" && continue
+        if [ "$_rs_bn" = claude ] && [ -d "$_rs_e" ] && ! _rs_claude_has_more "$_rs_e"; then continue; fi
         _rs_sz="$(du -sh "$_rs_e" 2>/dev/null | cut -f1 || echo '?')"
         printf '  - %-30s %s\n' "$_rs_bn" "$_rs_sz"
         _rs_n=$((_rs_n + 1))
     done
     printf 'Preserved: WORKSPACE.json (lineage)%s%s%s%s\n\n' \
-        "$([ -e "$_rs_dir/relay-bin/relay" ] && printf ', AND DESTROYS relay-bin/relay (the slot was removed in 2.2.0; it would block the next launch)')" \
+        "$(_rs_keep_claude_child "$_rs_dir/claude/.claude.json" && printf ', claude/.claude.json (Claude Code config, including any operator MCP server block)')$([ -e "$_rs_dir/relay-bin/relay" ] && printf ', AND DESTROYS relay-bin/relay (the slot was removed in 2.2.0; it would block the next launch)')" \
         "$(set -- "$_rs_dir"/agent-args.*; [ -e "$1" ] && printf ', agent-args.* (per-agent launch args)')" \
         "$([ "$_rs_keep_approvals" = "true" ] && printf ', approval list')"
 
@@ -4683,14 +4702,16 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
         [ -e "$_rs_e" ] || continue
         _rs_bn2="$(basename "$_rs_e")"
         _rs_keep "$_rs_bn2" && continue
-        # claude/ is the only entry with a SPLIT answer: its caches and config
-        # are regenerated, but claude/projects/ holds session transcripts and
-        # auto-memory, which nothing recreates. When history is preserved the
-        # directory is emptied around projects/ rather than removed.
-        if [ "$_rs_bn2" = claude ] && [ "$_rs_history" = keep ]; then
+        # claude/ is the only entry with a SPLIT answer: its caches are
+        # regenerated, but claude/projects/ holds session transcripts and
+        # auto-memory, which nothing recreates, and claude/.claude.json is
+        # ALWAYS kept (#400 decision 3, see _rs_keep_claude_child). So the
+        # directory is emptied around them rather than removed.
+        if [ "$_rs_bn2" = claude ] && [ -d "$_rs_e" ] && [ ! -L "$_rs_e" ]; then
             for _rs_c2 in "$_rs_e"/* "$_rs_e"/.[!.]*; do
-                [ -e "$_rs_c2" ] || continue
-                [ "$(basename "$_rs_c2")" = projects ] && continue
+                [ -e "$_rs_c2" ] || [ -L "$_rs_c2" ] || continue
+                [ "$_rs_history" = keep ] && [ "$(basename "$_rs_c2")" = projects ] && continue
+                _rs_keep_claude_child "$_rs_c2" && continue
                 rm -rf "$_rs_c2"
             done
             continue
@@ -4851,13 +4872,22 @@ _sandy_rsy_cj_rewrite() {   # $1 src, $2 dst, $3 old container path, $4 new
     fi
 }
 # The plan line for .claude.json, identical in both directions.
-_sandy_rsy_cj_note() {   # $1 old container path, $2 new, $3 new sandbox name
+_sandy_rsy_cj_note() {   # $1 old container path, $2 new, $3 where it lands (a path label)
     if [ "$1" = "$2" ]; then
-        printf 'copied unchanged, renamed to %s.claude.json' "$3"
+        printf 'copied unchanged, as %s' "$3"
     elif command -v node >/dev/null 2>&1 || command -v jq >/dev/null 2>&1; then
-        printf 'copied as %s.claude.json, projects key %s -> %s' "$3" "$1" "$2"
+        printf 'copied as %s, projects key %s -> %s' "$3" "$1" "$2"
     else
-        printf 'copied as %s.claude.json UNCHANGED -- neither node nor jq to rewrite its projects key, so Claude Code will treat it as a new project' "$3"
+        printf 'copied as %s UNCHANGED -- neither node nor jq to rewrite its projects key, so Claude Code will treat it as a new project' "$3"
+    fi
+}
+# Where a sandbox keeps its .claude.json (#400): inside claude/ since 2.7.0, a
+# sibling file before. Prints the path to read, preferring the new location.
+_sandy_rsy_cj_src() {   # $1 sandbox dir (local)
+    if [ -f "$1/claude/.claude.json" ] && [ ! -L "$1/claude/.claude.json" ]; then
+        printf '%s' "$1/claude/.claude.json"
+    elif [ -f "$1.claude.json" ]; then
+        printf '%s' "$1.claude.json"
     fi
 }
 
@@ -5004,7 +5034,10 @@ PROBE
     fi
 
     # --- what moves, and what is rewritten -----------------------------------
-    _rsy_excl=(--exclude=/WORKSPACE.json)
+    # .claude.json travels separately, rewritten, as the SIBLING file (#400
+    # decision 4): any destination sandy reads that layout, and one that is
+    # 2.7.0 or later moves it into claude/ at its first launch.
+    _rsy_excl=(--exclude=/WORKSPACE.json --exclude=/claude/.claude.json)
     for _rsy_d in "${_SANDY_RSY_NEVER[@]}"; do _rsy_excl+=("--exclude=/$_rsy_d"); done
     _rsy_skipnote=""
     _rsy_larch="$(_sandy_norm_arch "$(uname -m)")"; _rsy_rarch="$(_sandy_norm_arch "$_rsy_darch")"
@@ -5040,9 +5073,9 @@ PROBE
     fi
 
     # .claude.json -- the sibling file a directory copy misses.
-    _rsy_cj="$SANDY_HOME/sandboxes/$_rsy_name.claude.json"
+    _rsy_cj="$(_sandy_rsy_cj_src "$_rsy_src")"
     _rsy_cjnote="absent (Claude Code creates it on first launch)"
-    [ -f "$_rsy_cj" ] && _rsy_cjnote="$(_sandy_rsy_cj_note "$_rsy_scws" "$_rsy_dcws" "$_rsy_dname")"
+    [ -n "$_rsy_cj" ] && _rsy_cjnote="$(_sandy_rsy_cj_note "$_rsy_scws" "$_rsy_dcws" "$_rsy_dname.claude.json")"
 
     # Credential-bearing files, named in the plan (#374 decision 2).
     _rsy_creds=()
@@ -5105,7 +5138,7 @@ PROBE
     if [ -f "$_rsy_src/WORKSPACE.json" ]; then
         _sandy_rsy_ws_rewrite "$_rsy_src/WORKSPACE.json" "$_rsy_tmp/WORKSPACE.json" "$_rsy_dname" "$_rsy_dwd"
     fi
-    if [ -f "$_rsy_cj" ]; then
+    if [ -n "$_rsy_cj" ]; then
         _sandy_rsy_cj_rewrite "$_rsy_cj" "$_rsy_tmp/claude.json" "$_rsy_scws" "$_rsy_dcws" \
             || { error "--rsync: could not rewrite .claude.json; nothing was copied."; exit 1; }
     fi
@@ -5276,7 +5309,8 @@ PROBE
             "$(_sandy_sq "$_rsf_sname")" "$(_sandy_sq "$_rsf_oldp")"
         cat <<'DETAIL'
 if [ -d "$SDIR" ]; then echo "exists=yes"; else echo "exists=no"; exit 0; fi
-[ -f "$SDIR.claude.json" ] && echo "cj=yes"
+if [ -f "$SDIR/claude/.claude.json" ] && [ ! -L "$SDIR/claude/.claude.json" ]; then echo "cj=in"
+elif [ -f "$SDIR.claude.json" ]; then echo "cj=sibling"; fi
 [ -f "$SDIR/WORKSPACE.json" ] && echo "wsj=yes"
 echo "created=$(head -n 1 "$SDIR/.sandy_created_version" 2>/dev/null | tr -d '[:space:]')"
 P="$(cat "$SHOME/sandboxes/.$NAME.lock/pid" 2>/dev/null || true)"
@@ -5300,7 +5334,8 @@ DETAIL
     while IFS= read -r _rsf_l; do
         case "$_rsf_l" in
             exists=*)         _rsf_exists="${_rsf_l#exists=}" ;;
-            cj=yes)           _rsf_hascj=yes ;;
+            cj=in)            _rsf_hascj=in ;;
+            cj=sibling)       _rsf_hascj=sibling ;;
             wsj=yes)          _rsf_haswsj=yes ;;
             created=*)        _rsf_created="${_rsf_l#created=}" ;;
             live_pid=*)       _rsf_livepid="${_rsf_l#live_pid=}" ;;
@@ -5336,7 +5371,9 @@ DETAIL
     fi
 
     # --- what moves, and what is rewritten -----------------------------------
-    _rsf_excl=(--exclude=/WORKSPACE.json)
+    # .claude.json is fetched separately from whichever layout the source has,
+    # rewritten, and installed as claude/.claude.json (#400 decision 4).
+    _rsf_excl=(--exclude=/WORKSPACE.json --exclude=/claude/.claude.json)
     for _rsf_d in "${_SANDY_RSY_NEVER[@]}"; do _rsf_excl+=("--exclude=/$_rsf_d"); done
     _rsf_skipnote=""
     _rsf_larch="$(_sandy_norm_arch "$(uname -m)")"; _rsf_rarch="$(_sandy_norm_arch "$_rsf_sarch")"
@@ -5361,7 +5398,7 @@ DETAIL
         fi
     fi
     _rsf_cjnote="absent (Claude Code creates it on first launch)"
-    [ "$_rsf_hascj" = yes ] && _rsf_cjnote="$(_sandy_rsy_cj_note "$_rsf_scws" "$_rsf_dcws" "$_rsf_dname")"
+    [ -n "$_rsf_hascj" ] && _rsf_cjnote="$(_sandy_rsy_cj_note "$_rsf_scws" "$_rsf_dcws" "claude/.claude.json")"
 
     printf '\nsandy --rsync-from: %s:%s  ->  %s\n' "$_rsf_host" "$_rsf_sdir" "$_rsf_ddir"
     printf '  Workspace       %s  ->  %s\n' "$_rsf_swd" "$_rsf_wd"
@@ -5415,10 +5452,12 @@ DETAIL
             || { error "--rsync-from: copying WORKSPACE.json failed; nothing was installed here."; exit 1; }
         _sandy_rsy_ws_rewrite "$_rsf_tmp/WORKSPACE.src.json" "$_rsf_stage/WORKSPACE.json" "$_rsf_dname" "$_rsf_wd"
     fi
-    if [ "$_rsf_hascj" = yes ]; then
-        rsync -a "$_rsf_host:$_rsf_sdir.claude.json" "$_rsf_tmp/claude.src.json" \
+    if [ -n "$_rsf_hascj" ]; then
+        if [ "$_rsf_hascj" = in ]; then _rsf_cjrem="$_rsf_sdir/claude/.claude.json"; else _rsf_cjrem="$_rsf_sdir.claude.json"; fi
+        rsync -a "$_rsf_host:$_rsf_cjrem" "$_rsf_tmp/claude.src.json" \
             || { error "--rsync-from: copying .claude.json failed; nothing was installed here."; exit 1; }
-        _sandy_rsy_cj_rewrite "$_rsf_tmp/claude.src.json" "$_rsf_tmp/claude.json" "$_rsf_scws" "$_rsf_dcws" \
+        mkdir -p "$_rsf_stage/claude"
+        _sandy_rsy_cj_rewrite "$_rsf_tmp/claude.src.json" "$_rsf_stage/claude/.claude.json" "$_rsf_scws" "$_rsf_dcws" \
             || { error "--rsync-from: could not rewrite .claude.json; nothing was installed here."; exit 1; }
     fi
     # The destination was checked absent above; re-check at the last moment,
@@ -5427,9 +5466,7 @@ DETAIL
         error "--rsync-from: $_rsf_ddir appeared while copying; nothing was installed here."
         exit 1
     fi
-    [ -f "$_rsf_tmp/claude.json" ] && { mv "$_rsf_tmp/claude.json" "$_rsf_ddir.claude.json" \
-        || { error "--rsync-from: could not install .claude.json"; exit 1; }; }
-    mv "$_rsf_stage" "$_rsf_ddir" || { rm -f "$_rsf_ddir.claude.json"; error "--rsync-from: could not move the copy into place"; exit 1; }
+    mv "$_rsf_stage" "$_rsf_ddir" || { error "--rsync-from: could not move the copy into place"; exit 1; }
     _rsf_stage=""
 
     # C1: exit 0 only when the goal state holds.
@@ -15666,9 +15703,44 @@ if [ "$_SANDY_PROXY_ON" != true ]; then
 fi
 
 # --- Ensure .claude.json exists (setup state: theme, terms acceptance, etc.) ---
-# Stored outside SANDBOX_DIR to avoid overlapping Docker bind mounts.
 # Claude-only: Gemini stores equivalent state inside its config dir.
-CLAUDE_JSON="$SANDY_HOME/sandboxes/${SANDBOX_NAME}.claude.json"
+#
+# It lives INSIDE the claude/ directory mount (#400, 2.7.0), and the container
+# gets CLAUDE_CONFIG_DIR=/home/sandy/.claude so Claude Code reads it from
+# there: its global config is join(CLAUDE_CONFIG_DIR || homedir(),
+# ".claude.json"), and settings.json / .credentials.json keep their paths.
+# Until 2.6.x it was a SIBLING file, $SANDY_HOME/sandboxes/<name>.claude.json,
+# bind-mounted as a SINGLE FILE at ~/.claude.json. Claude Code writes the file
+# by temp+rename; a rename onto a mount point fails, so it fell back to
+# rewriting in place, and the file tore -- at --stop, and mid-session too --
+# parking the agent on its "Configuration error" dialog while --start
+# reported ready. Inside a directory mount the rename works.
+CLAUDE_JSON="$SANDBOX_DIR/claude/.claude.json"
+_sandy_cj_legacy="$SANDY_HOME/sandboxes/${SANDBOX_NAME}.claude.json"
+if _sandy_agent_has claude; then
+    # claude/ is the container's rw ~/.claude, so a link planted at the file
+    # would turn every host-side write below into a write through it (§169's
+    # rule): remove and name it. Nothing legitimate creates one.
+    if [ -L "$CLAUDE_JSON" ]; then
+        rm -f "$CLAUDE_JSON"
+        warn "Removed a symlink at claude/.claude.json -- sandy never writes through a link the agent could have planted (#400)."
+    fi
+    # Move a pre-2.7 sibling in, once (#400 decision 2). If one REAPPEARS
+    # after that -- something still writes the old path, e.g. an operator
+    # script provisioning MCP servers -- it is never moved over the live file
+    # and never deleted: it is left untouched and named at every launch, so a
+    # write to the old path is never dropped silently.
+    if [ ! -e "$CLAUDE_JSON" ] && [ -f "$_sandy_cj_legacy" ] && [ ! -L "$_sandy_cj_legacy" ]; then
+        if mv "$_sandy_cj_legacy" "$CLAUDE_JSON" 2>/dev/null; then
+            info "Moved this sandbox's .claude.json into claude/ (#400; Claude Code now reads it from there)"
+        else
+            warn "Could not move $_sandy_cj_legacy into claude/; Claude Code starts from a fresh .claude.json"
+        fi
+    elif [ -e "$_sandy_cj_legacy" ] || [ -L "$_sandy_cj_legacy" ]; then
+        warn "Ignoring $_sandy_cj_legacy: Claude Code reads $CLAUDE_JSON now (#400)."
+        warn "  Move anything you still need from the old file (e.g. an MCP server block) into the new one, then delete the old one."
+    fi
+fi
 if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
     # Seed from host's ~/.claude.json (contains onboarding, theme, OAuth, etc.)
     if [ -f "$HOME/.claude.json" ]; then
@@ -16712,7 +16784,9 @@ if _sandy_agent_has claude; then
         # the refreshed token never reaches the host's copy (rm -rf on exit).
         RUN_FLAGS+=(-v "$PROFILE_TMPDIR:/home/sandy/.config/anthropic")
     fi
-    RUN_FLAGS+=(-v "$CLAUDE_JSON:/home/sandy/.claude.json")
+    # No mount for .claude.json any more (#400): it is inside the claude/
+    # directory mount above, found there through CLAUDE_CONFIG_DIR.
+    RUN_FLAGS+=(-e CLAUDE_CONFIG_DIR=/home/sandy/.claude)
     # Mount host Claude Code hooks (read-only) for terminal notifications (cmux, iTerm2, etc.)
     if [ -d "$HOME/.claude/hooks" ]; then
         RUN_FLAGS+=(-v "$HOME/.claude/hooks:/home/sandy/.claude/hooks:ro")

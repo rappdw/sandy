@@ -7118,13 +7118,11 @@ else
     skip "mcpServers preservation behavioral checks (node not available)"
 fi
 
-# (f) --reset-sandbox iterates the sandbox DIRECTORY, so the sibling
-#     <slug>.claude.json (which holds the operator block) is out of its scope.
-#     If this ever changes, fleet MCP provisioning silently resets.
-check "--reset-sandbox scopes to the sandbox dir, not the sibling .claude.json" \
-    bash -c '_f="$(awk "/^if \[\[ \"\\\$\{1:-\}\" == \"--reset-sandbox\" \]\]/,/^fi\$/" "$1")"
-             printf "%s" "$_f" | grep -q "_rs_dir=\"\$SANDY_HOME/sandboxes/" \
-             && ! printf "%s" "$_f" | grep -q "claude.json"' -- "$_S87"
+# (f) --reset-sandbox must not wipe the file holding the operator block, or
+#     fleet MCP provisioning silently resets. Until 2.6.x that held because the
+#     file was a sibling outside the sandbox dir; since #400 it lives INSIDE
+#     claude/ and the reset keeps it explicitly. Asserted for real, against a
+#     real reset, in §188(8).
 
 # ============================================================
 echo ""
@@ -17484,6 +17482,16 @@ _s154_mk R6 dev/proj; mkdir -p "$_S154_DIR/R6/rhome/dev/proj"
 SSH_STUB_LOG="$_S154_DIR/ssh.log" _s154_run R6 --workspace "$_S154_DIR/R6/lhome/dev/proj" -oProxyCommand=true --yes
 check "§154(25) an option-shaped host is refused and ssh is NEVER invoked -- a leading '-' reaches ssh as an option, and -oProxyCommand is command execution" \
     bash -c 'test "$1" -eq 1 && test ! -s "$2"' _ "$_S154_RC" "$_S154_DIR/ssh.log"
+# #400 decision 4: a source already in the 2.7 layout (.claude.json INSIDE
+# claude/) still arrives as the legacy SIBLING -- the one layout every
+# destination sandy reads -- rewritten, and never ALSO inside claude/, where a
+# 2.7 destination would find both and warn at every launch.
+_s154_mk L7 dev/proj; mkdir -p "$_S154_DIR/L7/rhome/work/p7"
+mv "$_SH/sandboxes/$_NAME.claude.json" "$_SB/claude/.claude.json"
+_s154_run L7 --workspace "$_S154_DIR/L7/lhome/dev/proj" --dest-workspace '~/work/p7' --yes
+_S154_D="$(_s154_dest L7)"
+check "§154(26) a 2.7-layout source (claude/.claude.json) is sent as the sibling, rewritten, and NOT also inside claude/ (rc=$_S154_RC)" \
+    bash -c 'test "$1" -eq 0 && grep -qF "\"/home/sandy/work/p7\"" "$2.claude.json" && test ! -e "$2/claude/.claude.json"' _ "$_S154_RC" "$_S154_D"
 fi
 rm -rf "$_S154_DIR"
 unset _S154_R1D _S154_SANDY _S154_DIR _S154_HLP _S154_LAUNCH _S154_LCWS _S154_D _S154_OUT _S154_RC _S154_RC_REAL _S154_PID _s154_p _s154_c
@@ -23663,7 +23671,8 @@ check "§187(1) pull succeeds (rc=$_S187_RC)" test "$_S187_RC" -eq 0
 check "§187(2) it lands under the name THIS host computes for its own canonical path" test -d "$_S187_D"
 check "§187(3) WORKSPACE.json names THIS host's path, with its lineage kept" \
     bash -c 'grep -qF "\"workspace_path\": \"$2\"," "$1" && grep -qF "\"first_seen_at\": \"2026-01-01T00:00:00Z\"" "$1" && grep -qF "\"sandbox_name\": \"$3\"," "$1"' _ "$_S187_D/WORKSPACE.json" "$(cd "$_S187_DIR/A/lhome/dev/proj" && pwd -P)" "$(basename "$_S187_D")"
-check "§187(4) the sibling .claude.json arrives under this host's name" test -f "$_S187_D.claude.json"
+check "§187(4) .claude.json is installed INSIDE claude/ (#400), never as a sibling here" \
+    bash -c 'test -f "$1/claude/.claude.json" && test ! -e "$1.claude.json"' _ "$_S187_D"
 check "§187(5) history arrives unrenamed when the container path is unchanged" test -f "$_S187_D/claude/projects/-home-sandy-dev-proj/s1.jsonl"
 check "§187(6) per-launch and per-process state is NOT copied (sessions, sandy-session.json, gemini-system-settings.json, relay-state, feature-state)" \
     bash -c 'for p in claude/sessions sandy-session.json gemini-system-settings.json relay-state feature-state; do test ! -e "$1/$p" || exit 1; done' _ "$_S187_D"
@@ -23681,7 +23690,7 @@ check "§187(10) --src-workspace pull with a moved container path succeeds (rc=$
 check "§187(11) history is RENAMED to this host's container path, not left under the old one" \
     bash -c 'test -f "$1/claude/projects/-home-sandy-work-proj2/s1.jsonl" && test ! -e "$1/claude/projects/-home-sandy-dev-proj"' _ "$_S187_D"
 check "§187(12) .claude.json's projects key moved to the new container path" \
-    bash -c 'grep -q "/home/sandy/work/proj2" "$1" && ! grep -q "/home/sandy/dev/proj\"" "$1"' _ "$_S187_D.claude.json"
+    bash -c 'grep -q "/home/sandy/work/proj2" "$1" && ! grep -q "/home/sandy/dev/proj\"" "$1"' _ "$_S187_D/claude/.claude.json"
 check "§187(13) venv/ is skipped (its scripts hardcode the old path); cargo/ still copied" \
     bash -c 'test ! -e "$1/venv" && test -f "$1/cargo/bin/tool"' _ "$_S187_D"
 
@@ -23731,6 +23740,13 @@ for _s187_h in '-oProxyCommand=x' 'a:b' 'a b'; do
     check "§187(22) source host '$_s187_h' is refused before ssh ever runs (an ssh option, or rsync's host:path separator)" \
         bash -c 'test "$1" -ne 0 && test ! -e "$3" && case "$2" in *"source host"*|*"unrecognized argument"*) exit 0 ;; esac; exit 1' _ "$_S187_RC" "$_S187_OUT" "$_S187_DIR/ssh.log"
 done
+# --- #400 decision 4: a 2.7-layout source is read from claude/.claude.json ---
+_s187_mk J dev/proj work/pj
+mv "$_SH/sandboxes/$_NAME.claude.json" "$_SB/claude/.claude.json"
+_s187_run J --workspace "$_S187_DIR/J/lhome/work/pj" --src-workspace '~/dev/proj' --yes
+_S187_D="$_S187_DIR/J/lhome/.sandy/sandboxes/$(_s187_expect "$_S187_DIR/J/lhome/work/pj")"
+check "§187(24) a 2.7-layout source (claude/.claude.json) is read, rewritten and installed in claude/ here (rc=$_S187_RC)" \
+    bash -c 'test "$1" -eq 0 && grep -q "/home/sandy/work/pj" "$2/claude/.claude.json" && test ! -e "$2.claude.json"' _ "$_S187_RC" "$_S187_D"
 # --- one copy of each rule: push and pull share them -------------------------
 check "§187(23) push and pull use the SAME never-copied list, arch dirs and rewrite helpers (not two copies that can drift)" \
     bash -c 'for s in "--rsync" "--rsync-from"; do x="$(awk -v s="if [[ \"\${1:-}\" == \"$s\" ]]; then" "index(\$0,s)==1{p=1;next} p&&index(\$0,\"# --- sandy --\")==1{exit} p{print}" "$1")"; [ -n "$x" ] || exit 1; for h in _SANDY_RSY_NEVER _SANDY_RSY_ARCH_DIRS _sandy_rsy_ws_rewrite _sandy_rsy_cj_rewrite _sandy_rsy_host_ok; do case "$x" in *"$h"*) ;; *) exit 1 ;; esac; done; done' _ "$_S187_SANDY"
@@ -23738,6 +23754,92 @@ fi
 rm -rf "$_S187_DIR"
 unset _S187_SANDY _S187_DIR _S187_OUT _S187_RC _S187_D _S187_RN _F _DR _W _SH _NAME _SB _CWS _PD _dw _s187_h
 unset -f _s187_h8 _s187_mk _s187_run _s187_here _s187_expect 2>/dev/null || true
+
+
+# ============================================================
+echo "§188: #400 — .claude.json lives inside claude/ (CLAUDE_CONFIG_DIR), never as a single-file mount"
+# ============================================================
+# Claude Code writes .claude.json by temp+rename. A single-file bind mount
+# makes the rename fail (EBUSY onto a mount point), so it rewrote the file in
+# place and tore it -- mid-session included -- parking the agent on its
+# "Configuration error" dialog while --start reported ready. Each check below
+# runs a REAL block of sandy against a fixture.
+_S188_SANDY="$SANDY_SCRIPT"
+_S188_D="$(cd "$(mktemp -d)" && pwd -P)"
+
+# --- (1) the mount: no single-file .claude.json mount; CLAUDE_CONFIG_DIR set iff claude
+_S188_MNT="$(awk '/^    RUN_FLAGS\+=\(-v "\$SANDBOX_DIR\/claude:\/home\/sandy\/\.claude"\)$/{p=1} p&&/^# Feature entries \(#381/{exit} p' "$_S188_SANDY")"
+_S188_MNT="if _sandy_agent_has claude; then
+$_S188_MNT"
+_s188_flags() {  # $1 agent -> every RUN_FLAGS word, one per line
+    env -i PATH="$PATH" HOME="$_S188_D/nohome" AG="$1" bash -c '
+        set -u
+        _sandy_agent_has() { [ "$1" = "$AG" ]; }
+        SANDBOX_DIR=/SB; CLAUDE_JSON=/SB/claude/.claude.json; CRED_TMPDIR=""; PROFILE_TMPDIR=""
+        RUN_FLAGS=()
+        eval "$1"
+        printf "%s\n" "${RUN_FLAGS[@]}"' _ "$_S188_MNT" 2>/dev/null || true
+}
+_S188_C="$(_s188_flags claude)"
+check "§188(1) claude: no bind mount targets /home/sandy/.claude.json (the single-file mount is what tore the file)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "^/SB/claude:/home/sandy/.claude$" && ! printf "%s\n" "$1" | grep -q ":/home/sandy/.claude.json"' _ "$_S188_C"
+check "§188(2) claude: CLAUDE_CONFIG_DIR=/home/sandy/.claude, so Claude Code reads ~/.claude/.claude.json inside the directory mount" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "CLAUDE_CONFIG_DIR=/home/sandy/.claude"' _ "$_S188_C"
+check "§188(3) a codex-only launch gets no CLAUDE_CONFIG_DIR" \
+    bash -c '! printf "%s\n" "$1" | grep -q CLAUDE_CONFIG_DIR' _ "$(_s188_flags codex)"
+
+# --- (2) the launch-time move of a pre-2.7 sibling (#400 decision 2) --------
+_S188_MIG="$(awk '/^CLAUDE_JSON="\$SANDBOX_DIR\/claude\/\.claude\.json"$/{p=1} p{print} p&&/^fi$/{exit}' "$_S188_SANDY")"
+check "§188(4-pre) the migration block was extracted (mutation: a moved anchor empties it)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_cj_legacy" && printf "%s" "$1" | grep -q "^fi$"' _ "$_S188_MIG"
+_s188_mig() {  # $1 case dir -> output; runs the block with claude selected
+    env -i PATH="$PATH" CASE="$1" bash -c '
+        set -euo pipefail
+        info() { printf "INFO %s\n" "$*"; }; warn() { printf "WARN %s\n" "$*"; }
+        _sandy_agent_has() { [ "$1" = claude ]; }
+        SANDY_HOME="$CASE/home"; SANDBOX_NAME=box-1; SANDBOX_DIR="$CASE/home/sandboxes/box-1"
+        eval "$1"
+        echo RAN' _ "$_S188_MIG" 2>&1 || true
+}
+_s188_case() { mkdir -p "$_S188_D/$1/home/sandboxes/box-1/claude"; printf '%s' "$_S188_D/$1"; }
+_C="$(_s188_case move)"; printf '{"mcpServers":{"op":{"command":"x"}}}\n' > "$_C/home/sandboxes/box-1.claude.json"
+_S188_OUT="$(_s188_mig "$_C")"
+check "§188(4) a pre-2.7 sibling is MOVED into claude/ once, byte-identical (operator mcpServers intact), and named" \
+    bash -c 'test ! -e "$1/home/sandboxes/box-1.claude.json" && grep -q "\"op\"" "$1/home/sandboxes/box-1/claude/.claude.json" && printf "%s" "$2" | grep -q "INFO Moved"' _ "$_C" "$_S188_OUT"
+_C="$(_s188_case both)"; printf '{"live":1}\n' > "$_C/home/sandboxes/box-1/claude/.claude.json"; printf '{"mcpServers":{"late":{}}}\n' > "$_C/home/sandboxes/box-1.claude.json"
+_S188_OUT="$(_s188_mig "$_C")"
+check "§188(5) a sibling that REAPPEARS is never moved over the live file and never deleted -- both untouched, and named in a warning" \
+    bash -c 'grep -q "\"live\"" "$1/home/sandboxes/box-1/claude/.claude.json" && grep -q "\"late\"" "$1/home/sandboxes/box-1.claude.json" && printf "%s" "$2" | grep -q "WARN Ignoring .*box-1.claude.json"' _ "$_C" "$_S188_OUT"
+_C="$(_s188_case link)"; printf 'HOST-SECRET\n' > "$_S188_D/victim"; ln -s "$_S188_D/victim" "$_C/home/sandboxes/box-1/claude/.claude.json"
+_S188_OUT="$(_s188_mig "$_C")"
+check "§188(6) a symlink planted at claude/.claude.json is removed and named -- never written through -- and its target is untouched" \
+    bash -c 'test ! -L "$1/home/sandboxes/box-1/claude/.claude.json" && [ "$(cat "$2")" = HOST-SECRET ] && printf "%s" "$3" | grep -q "WARN Removed a symlink"' _ "$_C" "$_S188_D/victim" "$_S188_OUT"
+_C="$(_s188_case none)"
+check "§188(7) no sibling and no file: a silent no-op (the seed below creates it)" \
+    bash -c 'o="$(printf "%s" "$1")"; printf "%s" "$o" | grep -q "^RAN$" && ! printf "%s" "$o" | grep -q "WARN\|INFO"' _ "$(_s188_mig "$_C")"
+
+# --- (3) --reset-sandbox keeps claude/.claude.json (#400 decision 3; was §87(f)) --
+_s188_reset() {  # $1 case name, $2 history flag -> sandbox dir, after a real reset
+    local h="$_S188_D/r-$1" w sb
+    mkdir -p "$h/ws"; w="$(cd "$h/ws" && pwd -P)"
+    sb="$h/sandboxes/$(basename "$w" | tr -cd 'a-zA-Z0-9._-')-$(printf '%s' "$w" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-8)"
+    mkdir -p "$sb/claude/projects/p" "$sb/claude/plugins" "$sb/pip"
+    printf '{"mcpServers":{"op":{"command":"x"}}}\n' > "$sb/claude/.claude.json"
+    printf 'T\n' > "$sb/claude/projects/p/s.jsonl"; printf 'x\n' > "$sb/claude/plugins/junk"
+    env -u SANDY_WORKSPACE PATH="$PATH" HOME="$h" SANDY_HOME="$h" bash "$_S188_SANDY" --reset-sandbox --workspace "$w" "$2" --yes </dev/null >"$h/out" 2>&1 || true
+    printf '%s' "$sb"
+}
+for _s188_hf in --purge-history --keep-history; do
+    _SB="$(_s188_reset "${_s188_hf#--}" "$_s188_hf")"
+    check "§188(8) --reset-sandbox $_s188_hf KEEPS claude/.claude.json with its operator mcpServers block, and still destroys the rest of claude/" \
+        bash -c 'grep -q "\"op\"" "$1/claude/.claude.json" && test ! -e "$1/claude/plugins" && test ! -e "$1/pip"' _ "$_SB"
+done
+check "§188(9) ...and its plan says so" \
+    bash -c 'grep -q "Preserved: .*claude/.claude.json" "$1/../../out"' _ "$_SB"
+
+rm -rf "$_S188_D"
+unset _S188_SANDY _S188_D _S188_MNT _S188_C _S188_MIG _S188_OUT _C _SB _s188_hf
+unset -f _s188_flags _s188_mig _s188_case _s188_reset 2>/dev/null || true
 
 
 # BEGIN SUMMARY
