@@ -338,6 +338,8 @@ Other `sandy.*` labels (`sandy.managed`, `sandy.provision_id`, `sandy.provisione
 ~/.sandy/sandboxes/
 ├── <name>-<hash>/                 # one per workspace; <name>-<hash> is sandboxes[].name
 │   ├── claude/                    # CONTRACT → ~/.claude (settings.json, projects/, plugins/, hooks/, …)
+│   │                              #   .claude.json: Claude Code's global config (CLAUDE_CONFIG_DIR, #400);
+│   │                              #   an operator MCP server block goes here
 │   │                              #   sessions/<pid>.json|.key: Claude Code's live-session registry; every
 │   │                              #   launch prunes these once no container can exist (#407)
 │   ├── gemini/                    # CONTRACT → ~/.gemini
@@ -365,7 +367,7 @@ Other `sandy.*` labels (`sandy.managed`, `sandy.provision_id`, `sandy.provisione
 │   ├── .sandy-approved-symlinks.list, .protected-existed-at-launch, .head-at-launch,
 │   │   .claude-perm-mode-at-launch, .project_build_hash, …   # launch bookkeeping
 │   └── .v1-backup/                # only on a sandbox migrated from the v1 layout
-├── <name>-<hash>.claude.json      # → ~/.claude.json (single-file mount; may move, see #400)
+├── <name>-<hash>.claude.json      # LEGACY (≤2.6.x): moved into <name>-<hash>/claude/.claude.json at the next launch (#400)
 └── .<name>-<hash>.lock/           # the per-workspace launch mutex
 ```
 
@@ -387,7 +389,7 @@ Whenever `claude` is in `SANDY_AGENT`, sandy regenerates `<NAME>/claude/settings
 3. Merge sandy-required defaults (`spinnerTipsEnabled`, `skipDangerousModePermissionPrompt`, `skipAutoPermissionPrompt`) if not already present. `skipAutoPermissionPrompt` suppresses the 2.1.x auto-mode default offer and tracks `SANDY_SKIP_PERMISSIONS`. **`teammateMode` is deliberately NOT seeded** (1.7.0): the `--teammate-mode` CLI flag governs the session, so seeding the file too only created a second, divergable source of truth. `SANDY_TEAMMATE_MODE` is also empty by default, so sandy passes no `--teammate-mode` flag at all unless a user opts in; a host `settings.json` value is left untouched. When `SANDY_SKIP_PERMISSIONS=true` (the default), also set `permissions.defaultMode = "bypassPermissions"` (overwrite, not merge — toggling `SANDY_SKIP_PERMISSIONS` between launches reliably propagates). When `SANDY_SKIP_PERMISSIONS=false`, the key is removed if previously sandy-set. `permissions.disableBypassPermissionsMode` (host policy) is left alone.
 4. Merge `extraKnownMarketplaces` entries for `claude-plugins-official` and `sandy-plugins`; scrub deprecated entries (`thinkkit`, `ait`, `pka-skills`).
 5. Write the merged result back to `<NAME>/claude/settings.json`.
-6. (First run only) Copy host `~/.claude/.claude.json` → sandbox `<NAME>.claude.json`, stripping the `projects` key.
+6. (First run only) Copy host `~/.claude.json` → sandbox `<NAME>/claude/.claude.json`, stripping the `projects` key. Before that, a pre-2.7 sibling `<NAME>.claude.json` is moved in (#400).
 7. (First run only) Copy host `~/.claude/statsig/` → sandbox `claude/statsig/` (refreshed on every launch from a separate "always-refresh statsig" block).
 8. (First run only) Create all persistent subdirectories.
 
@@ -2151,7 +2153,18 @@ The refusal is reported through the same `_written` flags as any other failure, 
 
 ### C.3 `.claude.json` (User Setup State)
 
-Stored at `$SANDY_HOME/sandboxes/<NAME>.claude.json` (outside the sandbox dir to avoid mount conflicts). Mounted into the container at `/home/sandy/.claude.json`.
+Stored at `$SANDY_HOME/sandboxes/<NAME>/claude/.claude.json` since 2.7.0 (#400). It is **not mounted on its own**: it is inside the `claude/` directory mount, and the container gets `CLAUDE_CONFIG_DIR=/home/sandy/.claude`, so Claude Code reads it from `~/.claude/.claude.json`. Claude Code computes its global config as `join(CLAUDE_CONFIG_DIR || homedir(), ".claude.json")`, and `settings.json`/`.credentials.json` keep their paths.
+
+**Why it moved.** Through 2.6.x it was a sibling file, `$SANDY_HOME/sandboxes/<NAME>.claude.json`, bind-mounted as a **single file** at `/home/sandy/.claude.json`. Claude Code writes the file by writing a temp file and renaming it into place. A rename onto a mount point fails, so it fell back to rewriting the file in place and tore it, both at `--stop` and mid-session. The agent then sat on its "Configuration error" dialog while `--start` reported ready.
+
+**Migration (each launch with claude selected):**
+- a symlink at `claude/.claude.json` is removed and named;
+- a pre-2.7 sibling is moved in **once**, when `claude/.claude.json` does not exist yet;
+- a sibling that reappears later is **left untouched** and named in a warning at every launch, so a write to the old path is never dropped silently.
+
+**`--reset-sandbox` always keeps it.** That matches 2.6.x, where the sibling sat outside the reset's reach.
+
+**Operators** who provision MCP servers by writing a top-level MCP server block into the file (§87) write `<sandboxes[].path>/claude/.claude.json`. It falls under the `claude/` → `~/.claude/` mapping in the host-side path contract (§4); sandy never touches that block.
 
 **Seeding from host** (Node.js):
 ```javascript
@@ -2613,13 +2626,13 @@ The temporary directory is created per-launch and cleaned up on exit. The mount 
 
 **Cleanup trap**: the `cleanup` function that removes `*_CRED_TMPDIR` directories is registered on `EXIT INT TERM HUP QUIT ABRT`. `SIGKILL` cannot be trapped, so a residual cleanup window exists in that case alone.
 
-### E.5 .claude.json Mount
+### E.5 .claude.json (no mount; `CLAUDE_CONFIG_DIR`)
 
 ```bash
--v "<SANDY_HOME>/sandboxes/<NAME>.claude.json:/home/sandy/.claude.json"
+-e CLAUDE_CONFIG_DIR=/home/sandy/.claude      # claude selected only
 ```
 
-Always mounted — this file is seeded on first run and persists across sessions.
+There is **no** `.claude.json` mount since 2.7.0 (#400): the file is `<NAME>/claude/.claude.json`, inside the `claude/` directory mount, so Claude Code can replace it atomically. See C.3. Through 2.6.x this was `-v "<SANDY_HOME>/sandboxes/<NAME>.claude.json:/home/sandy/.claude.json"`, a single-file mount that forced Claude Code into in-place writes and tore the file.
 
 ### E.6 Host Hooks Mount (conditional)
 

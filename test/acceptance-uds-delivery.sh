@@ -546,7 +546,7 @@ run_case() {
         # Targeted keys only. Printing the head of the file buried the answer
         # under a screenful of tipsHistory on the first attempt.
         echo "    -- [$label] .claude.json dialog/trust state --"
-        docker exec -u "$(id -u)" "$c" sh -c 'for k in hasCompletedOnboarding theme hasTrustDialogAccepted bypassPermissionsModeAccepted projects; do printf "%s: " "$k"; grep -o "\"$k\"[^,]*" "$HOME/.claude.json" 2>/dev/null | head -1 || true; echo; done' 2>&1 \
+        docker exec -u "$(id -u)" "$c" sh -c 'for k in hasCompletedOnboarding theme hasTrustDialogAccepted bypassPermissionsModeAccepted projects; do printf "%s: " "$k"; grep -o "\"$k\"[^,]*" "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json" 2>/dev/null | head -1 || true; echo; done' 2>&1 \
             | sed 's/^/          | /' || echo "          | <unreadable>"
         echo "    -- [$label] _uds_sessions rows (this harness's consumer copy) --"
         _uds_sessions "$c" 2>&1 \
