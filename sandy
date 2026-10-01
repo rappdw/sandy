@@ -16991,6 +16991,23 @@ if [ -n "${SANDY_GPU:-}" ]; then
         warn "SANDY_GPU=$SANDY_GPU but NVIDIA Container Toolkit not detected — skipping GPU passthrough"
     fi
 fi
+# Persistent package installs (pip --user, uv-managed Pythons, npm -g, go
+# install, cargo install). The language environment ASSUMES these persist:
+# user-setup.sh points PYTHONUSERBASE, NPM_CONFIG_PREFIX, GOPATH and CARGO_HOME
+# here, pip.conf sets user=true, and session start auto-runs `uv python
+# install` for a workspace .python-version. Without the mounts all of it lands
+# on the 2G tmpfs home: re-downloaded every launch, and a heavy uv sync can hit
+# ENOSPC mid-build. #355 (2daee73, 2.2.0) dropped these five lines by accident,
+# in the same hunk as the handoff-mount removal; restored in 2.7.1. The
+# cross-session carryover they allow (THREAT_MODEL R5) is bounded by
+# --reset-sandbox, which clears all five. Unconditional and column-0, after
+# the per-mode RUN_FLAGS=( resets above: an append before a reset is
+# discarded (run-tests.sh §191).
+RUN_FLAGS+=(-v "$SANDBOX_DIR/pip:/home/sandy/.pip-packages")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/uv:/home/sandy/.local/share/uv")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/npm-global:/home/sandy/.npm-global")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/go:/home/sandy/go")
+RUN_FLAGS+=(-v "$SANDBOX_DIR/cargo:/home/sandy/.cargo")
 if _sandy_agent_has claude; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/claude:/home/sandy/.claude")
     # settings.json lives inside the rw sandbox mount above — no separate child

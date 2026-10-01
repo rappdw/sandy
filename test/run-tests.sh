@@ -24078,6 +24078,40 @@ rm -rf "$_S190_D"
 unset _S190_SANDY _S190_D _S190_HLP _S190_JM _S190_R _S190_CJ _S190_SB _S190_US _S190_US_APPLY _S190_US_FIRST _T _I0
 unset -f _s190_ino _s190 _s190_cj _s190_st 2>/dev/null || true
 
+echo "§191: the five persistent package-cache mounts reach every launch mode (restored after #355 dropped them)"
+# ============================================================
+# 2daee73 (#355, 2.2.0) deleted the pip/uv/npm-global/go/cargo -v lines in the
+# same hunk as the handoff-mount removal. The launch kept mkdir-ing the dirs, so
+# every install landed on the 2G tmpfs home and vanished, while the docs, the
+# env (PYTHONUSERBASE, NPM_CONFIG_PREFIX, GOPATH, CARGO_HOME) and the auto
+# `uv python install` all assumed persistence. CI never saw it: the harness at
+# the top of this file builds its OWN docker run with these mounts, so it tested
+# itself. Asserted here on sandy's launch: each mount is an unconditional
+# column-0 append AFTER the last per-mode RUN_FLAGS=( reset (an append before a
+# reset is silently discarded, as §175(6) argues for --init) and before the run,
+# with the exact destination -- and that destination is where user-setup.sh
+# points the matching tool, so the mount and the installs agree.
+_S191_SANDY="$SANDY_SCRIPT"
+_s191_ln() { awk -v p="$1" '$0 == p { print NR; exit }' "$_S191_SANDY"; }
+_S191_LASTSET="$(awk '/^[[:space:]]*RUN_FLAGS=\(/ { n = NR } END { print n + 0 }' "$_S191_SANDY")"
+_S191_RUN="$(awk 'index($0, "docker run \"${RUN_FLAGS[@]}\"") == 1 { print NR; exit }' "$_S191_SANDY")"
+for _s191_m in 'pip:/home/sandy/.pip-packages' 'uv:/home/sandy/.local/share/uv' 'npm-global:/home/sandy/.npm-global' 'go:/home/sandy/go' 'cargo:/home/sandy/.cargo'; do
+    _S191_L="$(_s191_ln "RUN_FLAGS+=(-v \"\$SANDBOX_DIR/${_s191_m}\")")"
+    _S191_N="$(awk -v p="RUN_FLAGS+=(-v \"\$SANDBOX_DIR/${_s191_m}\")" 'index($0, p) { n++ } END { print n + 0 }' "$_S191_SANDY")"
+    check "§191(1) ${_s191_m%%:*}/ is mounted at ${_s191_m#*:}: one unconditional column-0 append, after the last RUN_FLAGS=( reset (${_S191_LASTSET}) and before docker run (${_S191_RUN:-?}) -- at ${_S191_L:-missing}" \
+        bash -c '[ -n "$1" ] && [ "$4" = 1 ] && [ "$1" -gt "$2" ] && [ -n "$3" ] && [ "$1" -lt "$3" ]' _ "$_S191_L" "$_S191_LASTSET" "$_S191_RUN" "$_S191_N"
+done
+# (2) the destinations are where the tools actually install. user-setup.sh
+# exports these with HOME=/home/sandy; a mount at any other path persists nothing.
+_S191_US="$(sed -n '/^generate_user_setup() {/,/^USERSETUP$/p' "$_S191_SANDY")"
+for _s191_e in 'PYTHONUSERBASE:.pip-packages:pip' 'NPM_CONFIG_PREFIX:.npm-global:npm-global' 'GOPATH:go:go' 'CARGO_HOME:.cargo:cargo'; do
+    _s191_var="${_s191_e%%:*}"; _s191_rest="${_s191_e#*:}"; _s191_rel="${_s191_rest%%:*}"; _s191_dir="${_s191_rest#*:}"
+    check "§191(2) user-setup.sh points ${_s191_var} at \$HOME/${_s191_rel}, the destination of the ${_s191_dir}/ mount" \
+        bash -c 'printf "%s\n" "$1" | grep -qxF "export $2=\"\$HOME/$3\"" && grep -qxF "RUN_FLAGS+=(-v \"\$SANDBOX_DIR/$4:/home/sandy/$3\")" "$5"' _ "$_S191_US" "$_s191_var" "$_s191_rel" "$_s191_dir" "$_S191_SANDY"
+done
+unset _S191_SANDY _S191_LASTSET _S191_RUN _S191_L _S191_N _S191_US _s191_m _s191_e _s191_var _s191_rest _s191_rel _s191_dir
+unset -f _s191_ln 2>/dev/null || true
+
 
 # BEGIN SUMMARY
 # ============================================================
