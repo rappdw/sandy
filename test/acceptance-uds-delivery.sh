@@ -87,6 +87,8 @@ note() { printf '  \033[36mNOTE\033[0m %s\n' "$1"; NOTED=$((NOTED+1)); }
 # applies to the negative control, so its "did not appear" can never just mean
 # "did not wait long enough".
 UDS_POLL_S=180
+# One line per 30s inside a long wait, so a wait never reads as a hang.
+_uds_tick() { [ $(( $2 % 30 )) -eq 0 ] && [ "$2" -gt 0 ] && echo "    ... [$1] still waiting for $3 (${2}s)"; return 0; }
 
 # The positive case's verdict (#412), separated from the model's behaviour.
 # The sentinel needs the MODEL to act on the delivered turn, which sandy does
@@ -571,6 +573,7 @@ run_case() {
         [ -n "$sock" ] && [ "$sock" != "-" ] && [ -n "$keyf" ] && [ "$keyf" != "-" ] && break
         sleep 2
         _waited=$((_waited + 2))
+        _uds_tick "$label" "$_waited" "the agent socket"
     done
     if [ "$_waited" -gt 60 ]; then
         echo "    -- [$label] NOTE: the socket bound only after ${_waited}s, past the original 60s budget --"
@@ -649,6 +652,7 @@ run_case() {
         for i in $(seq 1 $((UDS_POLL_S / 2))); do
             if docker exec -u "$(id -u)" "$c" test -f "$sentinel" 2>/dev/null; then found=yes; break; fi
             sleep 2
+            _uds_tick "$label" "$((i * 2))" "the sentinel"
         done
     else
         # No sentinel is reachable without an approver, so there is nothing to
@@ -726,6 +730,15 @@ run_case() {
             dpane="$(docker exec -u "$(id -u)" "$c" tmux capture-pane -p -t sandy -S -400 2>/dev/null || true)"
             if printf '%s' "$dpane" | grep -qF "$marker"; then
                 echo "          -> corroboration: the marker IS in the agent pane (it reached the agent)."
+                # #412: printed even when the marker arrived, because "reached
+                # the agent, no sentinel" says nothing about WHY -- the model
+                # may have asked a question, refused, hit a permission prompt,
+                # or sat idle, and only the pane shows which. Same redaction.
+                echo "          -> agent pane, last 25 non-blank lines (what the model did with the turn):"
+                printf '%s\n' "$dpane" | grep -v '^[[:space:]]*$' | tail -25 \
+                    | sed -e 's/sk-ant-[.]*[A-Za-z0-9_-]*/sk-ant-<redacted>/g' \
+                          -e 's/sk-[A-Za-z0-9_-]\{16,\}/sk-<redacted>/g' \
+                    | sed 's/^/             | /'
             else
                 echo "          -> corroboration: the marker is NOT in the agent pane."
                 # A routed-but-never-rendered turn means the receiving claude
