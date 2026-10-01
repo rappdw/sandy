@@ -282,6 +282,10 @@ That in-session mutability is what let Claude Code 2.1.232 overwrite the `bypass
 
 Credentials (`.credentials.json`) are read fresh from the host each launch and mounted **ephemerally** — never persisted to the sandbox.
 
+**Claude Code's session registry is pruned at launch (#407).** Claude Code records each live session in `~/.claude/sessions/<pid>.json`, beside its messaging key `<pid>.<sha256>.key`. Each record is stamped with a `pidDomain`, the pid-namespace inode (sandy images have no `/etc/machine-id`). Claude Code only trusts a record to be dead if it can check the pid in the **same** pidDomain, and every sandy launch is a new container. So records from earlier containers could never be proven dead and never went away. Once the newest conversation had "continued in" a background session that was still registered, `claude --continue` refused for good: "registered from another machine or container, so this one can't tell whether it is still running". Sandy launches with `--continue`, so there was no way back in from sandy-ui.
+
+The launch now removes those records right after it force-removes any leftover `sandy-<name>` container. That is the one point where no container for the sandbox can exist: the workspace lock is held, and the daemon paths arrive only after DEC-B or `--start`'s D9 check. It removes **only regular files with Claude Code's own names**, prunes nothing if `docker ps` does not confirm the name is gone, and refuses if `claude/` or `sessions/` is a symlink. This is sandy deleting files it did not write, the one exception to "the agent home's contents belong to their writer". It's justified because sandy is the only party that knows the pid namespace those records name no longer exists. Guarded by §186.
+
 ### Sandbox version tracking and the X.x forward-compat promise
 
 Each sandbox records `.sandy_created_version` on creation and `.sandy_last_version` per launch. `_sandbox_compat_classify()` grades the created-version against `SANDY_SANDBOX_MIN_COMPAT` (currently `2.0.0`):
