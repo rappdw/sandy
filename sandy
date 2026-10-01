@@ -492,6 +492,111 @@ sandy_check_update() {
     fi
 }
 
+# --- Host-to-container handoff (#400) ---------------------------------------
+# THE RULE: the host never replaces a path a container has used. It creates a
+# fresh path, and the CONTAINER renames it into place.
+#
+# Measured on macOS (test/spike/virtiofs-host-rewrite-spike.sh): when a
+# container had USED a file -- merely read it: 3 of 20 relaunches; written it:
+# 16 of 60 -- and the host then replaced it, the next container's FIRST read
+# came back short, the new bytes at the old length, and every read half a
+# second later was fine. In place or by rename on the host made no
+# difference; with no host write in between, 0 of 20; with the host writing a
+# fresh name that the next container renamed over the file itself, 0 of 60
+# (one-sided Fisher exact against 16 of 60: p ~ 5e-6).
+# Claude Code's ".claude.json contains invalid JSON" dialog in daemon sessions
+# was that short read. Whether the stale length sits in the guest kernel or in
+# the file-sharing server is not determined and does not matter: a path the
+# guest has never seen has no cached length anywhere, and a rename the guest
+# performs goes through the same kernel and server that serve its next read.
+#
+# So every per-launch file the host prepares for an agent home is written to
+# <target>.sandy-launch.<id> beside its target (<id> is random per launch, so
+# no name ever repeats), and user-setup.sh moves each one onto its target
+# before any agent starts. Files only the container reads (the session
+# marker, composed agent args, the gemini effort file) get a fresh path under
+# $SANDBOX_DIR/launch/<id>/ instead. The one exception is a file that does
+# not exist yet: no container has seen it, so the seed may create it in place.
+#
+# Pipeline shape: _sandy_stage_begin T  -> echoes the working path W (a copy
+# of T when T exists); every writer this launch writes W, through
+# _sandy_write_atomic or the same temp+rename in node; _sandy_stage_commit T
+# removes W when it ended up identical to T (so an unchanged launch hands the
+# container nothing) and otherwise leaves it for the container. A write that
+# does change something is thereby always a NEW file, created exclusively
+# (noclobber / wx), never written through a link planted in the agent home.
+_sandy_launch_id=""   # minted once per launch, right after the sandbox dir exists
+_sandy_staged_name() { printf '%s.sandy-launch.%s' "$1" "$_sandy_launch_id"; }
+_sandy_launch_dir()  { printf '%s/launch/%s' "$SANDBOX_DIR" "$_sandy_launch_id"; }
+_sandy_stage_begin() {   # $1 = target path -> prints the working path
+    local _t="$1" _w
+    _w="$(_sandy_staged_name "$_t")"
+    rm -f "$_w"
+    if [ -f "$_t" ] && [ ! -L "$_t" ]; then
+        ( set -C; cat "$_t" > "$_w" ) 2>/dev/null || return 1
+    fi
+    printf '%s' "$_w"
+}
+# Same content? Bytes first; for .json, the same document in any formatting
+# (Claude Code reformats the files it writes), when node can tell.
+_sandy_same_content() {
+    cmp -s "$1" "$2" && return 0
+    case "$1" in
+        *.json|*.json.sandy-launch.*)
+            command -v node >/dev/null 2>&1 || return 1
+            node -e '
+                const fs = require("fs");
+                const norm = v => (v && typeof v === "object" && !Array.isArray(v))
+                    ? "{" + Object.keys(v).sort().map(k => JSON.stringify(k) + ":" + norm(v[k])).join(",") + "}"
+                    : Array.isArray(v) ? "[" + v.map(norm).join(",") + "]" : JSON.stringify(v);
+                try { process.exit(norm(JSON.parse(fs.readFileSync(process.argv[1], "utf8"))) === norm(JSON.parse(fs.readFileSync(process.argv[2], "utf8"))) ? 0 : 1); }
+                catch (e) { process.exit(1); }
+            ' "$1" "$2" 2>/dev/null ;;
+        *) return 1 ;;
+    esac
+}
+_SANDY_STAGED=""      # targets left for the container this launch, space-separated
+_sandy_stage_commit() {   # $1 = target path
+    local _t="$1" _w
+    _w="$(_sandy_staged_name "$_t")"
+    if [ -d "$_w" ] && [ ! -L "$_w" ]; then   # a staged DIRECTORY (claude/statsig)
+        if [ -d "$_t" ] && [ ! -L "$_t" ] && diff -rq "$_w" "$_t" >/dev/null 2>&1; then
+            rm -rf "$_w"; return 0
+        fi
+        _SANDY_STAGED="${_SANDY_STAGED:+$_SANDY_STAGED }$_t"; return 0
+    fi
+    [ -f "$_w" ] || return 0
+    if [ -f "$_t" ] && [ ! -L "$_t" ] && _sandy_same_content "$_w" "$_t"; then
+        rm -f "$_w"; return 0
+    fi
+    _SANDY_STAGED="${_SANDY_STAGED:+$_SANDY_STAGED }$_t"
+}
+# What user-setup.sh does inside the container. Host-side it is only the
+# fallback for an image whose user-setup.sh predates the protocol (and the
+# test suite), and it is then exactly the old behaviour, hazard included.
+_sandy_launch_apply_staged() {   # $1 = sandbox dir; applies THIS launch's id only
+    local _f _t _i="$_sandy_launch_id"
+    case "$_i" in ""|*[!A-Za-z0-9]*) return 0 ;; esac
+    for _f in "$1"/claude/.*.sandy-launch."$_i" "$1"/claude/*.sandy-launch."$_i" "$1"/claude/hooks/*.sandy-launch."$_i" \
+              "$1"/gemini/*.sandy-launch."$_i" "$1"/codex/*.sandy-launch."$_i"; do
+        if [ ! -e "$_f" ] || [ -L "$_f" ]; then continue; fi
+        _t="${_f%.sandy-launch.*}"
+        if [ -d "$_f" ]; then rm -rf "$_t"; fi
+        mv -f "$_f" "$_t"
+    done
+}
+# Write stdin to $1 as a NEW file renamed into place: the temp is created
+# exclusively, so a link planted in an agent-writable dir is never written
+# through. Under the rule above $1 is a working/staged path, never a path a
+# container has read -- except for a file that does not exist yet.
+_sandy_write_atomic() {   # $1 = destination path; content on stdin
+    local _t="$1.sandy-tmp.$$"
+    rm -f "$_t"
+    ( set -C; cat > "$_t" ) || { rm -f "$_t"; return 1; }
+    if mv -f "$_t" "$1"; then return 0; fi
+    rm -f "$_t"; return 1
+}
+
 # Merge JSON keys into a file. Usage: json_merge <file> '{"key":"value"}'
 json_merge() {
     command -v node &>/dev/null || return 0
@@ -501,7 +606,7 @@ json_merge() {
         try { s=JSON.parse(fs.readFileSync(f,"utf8")); }
         catch(e) { console.error("[sandy] WARN: could not parse "+f+", starting fresh"); s={}; }
         Object.assign(s,m);
-        fs.writeFileSync(f, JSON.stringify(s,null,2)+"\n");
+        { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // exclusive temp, renamed in (#400)
     ' "$1" "$2"
 }
 
@@ -4557,7 +4662,7 @@ if [[ "${1:-}" == "--reset-sandbox" ]]; then
     # destroyed entry that is not one of those is named. That keeps sandy
     # uncoupled from consumers (the reason option 1 on #333 was declined) while
     # still naming a directory nobody here has heard of.
-    _rs_regen() { case "$1" in pip|uv|npm-global|go|cargo|venv|sandy-session.json|gemini-system-settings.json|sandy-proxy.json|proxy.log|relay-state|feature-state|agent-args-composed|relay-bin|.sandy_created_version|.sandy_last_version|.project_build_hash|.protected-existed-at-launch|.session-created-stubs|.head-at-launch|.claude-perm-mode-at-launch|.seed-settings.json|.sandy-approved-symlinks.list) return 0 ;; esac; return 1; }
+    _rs_regen() { case "$1" in pip|uv|npm-global|go|cargo|venv|sandy-session.json|gemini-system-settings.json|sandy-proxy.json|proxy.log|relay-state|feature-state|agent-args-composed|launch|relay-bin|.sandy_created_version|.sandy_last_version|.project_build_hash|.protected-existed-at-launch|.session-created-stubs|.head-at-launch|.claude-perm-mode-at-launch|.seed-settings.json|.sandy-approved-symlinks.list) return 0 ;; esac; return 1; }
     _rs_not_kept() {
         local _e _c _bn _n=0
         for _e in "$_rs_dir"/* "$_rs_dir"/.[!.]*; do
@@ -4814,7 +4919,7 @@ _sandy_rsy_host_ok() {   # $1 host, $2 flag name, $3 role (destination|source)
 _sandy_rsy_path_ok() { printf '%s' "$1" | grep -qE '^/[A-Za-z0-9._/@+-]+$'; }
 # Everything regenerated per launch or per process; never copied either way.
 _SANDY_RSY_NEVER=(sandy-session.json gemini-system-settings.json relay-state/ feature-state/
-                  agent-args-composed/ proxy.log .protected-existed-at-launch claude/sessions/)
+                  agent-args-composed/ launch/ proxy.log .protected-existed-at-launch claude/sessions/)
 _SANDY_RSY_ARCH_DIRS=(cargo go npm-global pip uv venv)
 # Credential-bearing files, named in the plan (#374 decision 2). Matched BY
 # NAME, so the plan says so: anything else in these directories is copied too.
@@ -7754,6 +7859,9 @@ FROM ${BASE_IMAGE_NAME}
 # the removed SANDY_HANDOFF_RELAY channel, so it starts NONE of them, and
 # sandy warns at launch naming every one (#382, 2.6.0).
 LABEL sandy.feature_entries=1
+# sandy.launch_staging (#400): this image's user-setup.sh moves the files the
+# host staged for a launch (<target>.sandy-launch.<id>) into place itself.
+LABEL sandy.launch_staging=1
 # Install Claude Code natively. The installer places files under
 # /home/sandy/.local/{bin,share}/claude.  Since /home/sandy gets a
 # tmpfs overlay at runtime, we relocate the binary to /usr/local/bin
@@ -7785,6 +7893,9 @@ FROM ${BASE_IMAGE_NAME}
 # the removed SANDY_HANDOFF_RELAY channel, so it starts NONE of them, and
 # sandy warns at launch naming every one (#382, 2.6.0).
 LABEL sandy.feature_entries=1
+# sandy.launch_staging (#400): this image's user-setup.sh moves the files the
+# host staged for a launch (<target>.sandy-launch.<id>) into place itself.
+LABEL sandy.launch_staging=1
 # Install Gemini CLI as a global npm package. Unlike Claude Code, no binary
 # relocation is needed — npm -g places \`gemini\` directly into PATH.
 RUN npm install -g @google/gemini-cli \\
@@ -7817,6 +7928,9 @@ FROM ${BASE_IMAGE_NAME}
 # the removed SANDY_HANDOFF_RELAY channel, so it starts NONE of them, and
 # sandy warns at launch naming every one (#382, 2.6.0).
 LABEL sandy.feature_entries=1
+# sandy.launch_staging (#400): this image's user-setup.sh moves the files the
+# host staged for a launch (<target>.sandy-launch.<id>) into place itself.
+LABEL sandy.launch_staging=1
 # Install Codex CLI as a global npm package. The @openai/codex package ships
 # a prebuilt Rust binary per platform; Node is only the installation vehicle.
 RUN npm install -g @openai/codex \\
@@ -7844,6 +7958,9 @@ FROM ${BASE_IMAGE_NAME}
 # the removed SANDY_HANDOFF_RELAY channel, so it starts NONE of them, and
 # sandy warns at launch naming every one (#382, 2.6.0).
 LABEL sandy.feature_entries=1
+# sandy.launch_staging (#400): this image's user-setup.sh moves the files the
+# host staged for a launch (<target>.sandy-launch.<id>) into place itself.
+LABEL sandy.launch_staging=1
 # Install the Grok Build CLI (xAI). The installer downloads the real binary to
 # ~/.grok/downloads/grok-<platform> and leaves only SYMLINKS (grok, agent) in
 # ~/.grok/bin — all under the home dir, which is a tmpfs at runtime, so nothing
@@ -7881,6 +7998,9 @@ FROM ${BASE_IMAGE_NAME}
 # the removed SANDY_HANDOFF_RELAY channel, so it starts NONE of them, and
 # sandy warns at launch naming every one (#382, 2.6.0).
 LABEL sandy.feature_entries=1
+# sandy.launch_staging (#400): this image's user-setup.sh moves the files the
+# host staged for a launch (<target>.sandy-launch.<id>) into place itself.
+LABEL sandy.launch_staging=1
 # Install OpenCode as a global npm package. The opencode-ai package selects
 # a prebuilt platform binary via optionalDependencies + postinstall.
 RUN npm install -g opencode-ai \\
@@ -7908,6 +8028,9 @@ FROM ${BASE_IMAGE_NAME}
 # the removed SANDY_HANDOFF_RELAY channel, so it starts NONE of them, and
 # sandy warns at launch naming every one (#382, 2.6.0).
 LABEL sandy.feature_entries=1
+# sandy.launch_staging (#400): this image's user-setup.sh moves the files the
+# host staged for a launch (<target>.sandy-launch.<id>) into place itself.
+LABEL sandy.launch_staging=1
 # Install all five agents. Used for any multi-agent combo.
 # Claude Code
 RUN HOME=/home/sandy su -s /bin/bash sandy -c "curl -fsSL https://claude.ai/install.sh | bash" \\
@@ -8371,6 +8494,30 @@ if _sandy_has_claude; then
     export DISABLE_AUTOUPDATER=1
     export FORCE_AUTOUPDATE_PLUGINS=true
 fi
+
+# #400: files the host prepared for THIS launch sit beside their targets as
+# <target>.sandy-launch.<id>. The container moves them into place -- never the
+# host: on macOS file sharing a host-side replacement of a path a container has
+# used can be served to the next container at the old length, which is how
+# Claude Code's ".claude.json contains invalid JSON" dialog parked daemon
+# sessions. A rename done here goes through the kernel and server that serve
+# the next read. Before anything below touches an agent home.
+# Only THIS launch's id (SANDY_LAUNCH_ID, [A-Za-z0-9]+): a writer's temp
+# (<staged>.XXXXXX, <staged>.sandy-tmp.<pid>) never matches, and neither does
+# anything an earlier launch left behind.
+case "${SANDY_LAUNCH_ID:-}" in
+    ""|*[!A-Za-z0-9]*) ;;
+    *)
+        for _sl in "$HOME"/.claude/.*.sandy-launch."$SANDY_LAUNCH_ID" "$HOME"/.claude/*.sandy-launch."$SANDY_LAUNCH_ID" \
+                   "$HOME"/.claude/hooks/*.sandy-launch."$SANDY_LAUNCH_ID" "$HOME"/.gemini/*.sandy-launch."$SANDY_LAUNCH_ID" \
+                   "$HOME"/.codex/*.sandy-launch."$SANDY_LAUNCH_ID"; do
+            if [ ! -e "$_sl" ] || [ -L "$_sl" ]; then continue; fi
+            _slt="${_sl%.sandy-launch.*}"
+            if [ -d "$_sl" ]; then rm -rf "$_slt"; fi
+            mv -f "$_sl" "$_slt" || sandy_err "could not install $_slt from its staged copy $_sl"
+        done
+        unset _sl _slt ;;
+esac
 
 sandy_log "Setting up language toolchains"
 # Cargo: writable registry cache + cargo-install binaries
@@ -11590,9 +11737,14 @@ _sandy_aa_compose() {
         fi
 
         _slug="${_flag#--}"
-        _out="$_sbdir/agent-args-composed/$_agent.$_slug.md"
-        mkdir -p "$_sbdir/agent-args-composed" 2>/dev/null || true
-        : > "$_out" 2>/dev/null || { warn "$_agent: cannot write $_out; leaving $_flag to the agent (last wins)"; continue; }
+        # Under this launch's own directory (#400): the container reads it, so a
+        # rewrite at a fixed name would be a host replacement of a path it has used.
+        _out="$_sbdir/launch/$_sandy_launch_id/agent-args/$_agent.$_slug.md"
+        mkdir -p "$_sbdir/launch/$_sandy_launch_id/agent-args" 2>/dev/null || true
+        # Built in a temp file and renamed into place, so a reader never sees a
+        # half-written file. Mounted :ro, so no container writes it and #400's
+        # stale first read (host replacing a file the guest wrote) cannot occur.
+        : > "$_out.sandy-tmp.$$" 2>/dev/null || { warn "$_agent: cannot write $_out; leaving $_flag to the agent (last wins)"; continue; }
         {
             printf '<!-- Composed by sandy from %s contributors for %s. Do not edit: rewritten every launch. -->\n' "$_cnt" "$_flag"
             # Walk the ORIGINAL indices, so provenance and content cannot
@@ -11602,7 +11754,8 @@ _sandy_aa_compose() {
                 cat "$(_sandy_aa_host_path "${_toks[$((_i + 1))]}" "$_tbl")" 2>/dev/null || true
                 printf '\n'
             done
-        } >> "$_out" 2>/dev/null || true
+        } >> "$_out.sandy-tmp.$$" 2>/dev/null || true
+        mv -f "$_out.sandy-tmp.$$" "$_out" 2>/dev/null || rm -f "$_out.sandy-tmp.$$"
 
         _dest="/opt/sandy/agent-args/$_agent.$_slug.md"
         _drop=" "; for _i in $_idx; do _drop="$_drop$_i $((_i + 1)) "; done
@@ -13140,7 +13293,8 @@ start_proxy_sidecar() {
     # with a SIGKILL'd orphan on relaunch.
     PROXY_CONTAINER="sandy-proxy-${SANDBOX_NAME}"
     docker rm -f "$PROXY_CONTAINER" >/dev/null 2>&1 || true
-    PROXY_CONFIG_FILE="$SANDBOX_DIR/sandy-proxy.json"
+    PROXY_CONFIG_FILE="$(_sandy_launch_dir)/sandy-proxy.json"   # a fresh path per launch (#400)
+    mkdir -p "$(_sandy_launch_dir)" 2>/dev/null || true
 
     # Build the JSON allowlist array from the effective host list.
     local allow_json="" h
@@ -13575,6 +13729,18 @@ if [ ! -d "$SANDBOX_DIR" ]; then
     mkdir -p "$SANDBOX_DIR"
     SANDBOX_IS_NEW=true
 fi
+# #400: one id per launch for every file the host hands the container (see
+# _sandy_stage_begin). Leftovers from a launch that never reached its container
+# go first: a host DELETE of a path a container has seen is harmless -- only a
+# host REPLACEMENT is not -- and rm never follows a link. The lock is held, so
+# no other launch, and no container of this sandbox, is using any of it.
+rm -rf "$SANDBOX_DIR/launch" "$SANDBOX_DIR"/claude/.*.sandy-launch.* "$SANDBOX_DIR"/claude/*.sandy-launch.* \
+       "$SANDBOX_DIR"/claude/hooks/*.sandy-launch.* "$SANDBOX_DIR"/gemini/*.sandy-launch.* \
+       "$SANDBOX_DIR"/codex/*.sandy-launch.* 2>/dev/null || true
+_sandy_launch_id="$( (openssl rand -hex 8 2>/dev/null) \
+    || (head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
+    || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
+mkdir -p "$SANDBOX_DIR/launch/$_sandy_launch_id"
 
 # Sandbox version marker. Written once on creation so future sandy launches
 # can detect sandboxes that pre-date breaking changes to the container layout.
@@ -13781,6 +13947,9 @@ if _sandy_agent_has grok; then
     mkdir -p "$SANDBOX_DIR/grok"
 fi
 if _sandy_agent_has codex; then
+    # #400: the seed, the sandbox_mode repair and the model migration below all
+    # work on a staged copy; the container moves it onto config.toml itself.
+    _codex_cfg_w="$(_sandy_stage_begin "$SANDBOX_DIR/codex/config.toml")" || _codex_cfg_w="$SANDBOX_DIR/codex/config.toml"
     mkdir -p "$SANDBOX_DIR/codex"
     # Clean up empty auth.json left by a previous codex session. Codex creates
     # this file on first run but leaves it empty when using API key auth. On
@@ -13793,9 +13962,9 @@ if _sandy_agent_has codex; then
     # Docker container and either fail weirdly or over-restrict the agent.
     # sandbox_mode here plus --sandbox danger-full-access on the CLI is
     # belt-and-suspenders. The [notice] block suppresses all first-run prompts.
-    if [ ! -f "$SANDBOX_DIR/codex/config.toml" ] || [ ! -s "$SANDBOX_DIR/codex/config.toml" ] \
-       || ! grep -q 'sandbox_mode' "$SANDBOX_DIR/codex/config.toml" 2>/dev/null; then
-        cat > "$SANDBOX_DIR/codex/config.toml" <<'CODEX_TOML'
+    if [ ! -f "$_codex_cfg_w" ] || [ ! -s "$_codex_cfg_w" ] \
+       || ! grep -q 'sandbox_mode' "$_codex_cfg_w" 2>/dev/null; then
+        cat > "$_codex_cfg_w" <<'CODEX_TOML'
 # Written by sandy on first launch. Safe to edit, but sandbox_mode must stay
 # "danger-full-access" — sandy provides outer isolation; codex's Landlock
 # sandbox does not nest cleanly in Docker containers.
@@ -13827,9 +13996,9 @@ CODEX_TOML
     # A profile-scoped sandbox_mode is deliberately left alone -- it applies only
     # when that profile is selected, and silently rewriting a user's profile is a
     # bigger liberty than this repair is entitled to take.
-    if [ -f "$SANDBOX_DIR/codex/config.toml" ]; then
+    if [ -f "$_codex_cfg_w" ]; then
         _codex_sbx_line="$(awk '/^[[:space:]]*\[/{exit} /^[[:space:]]*sandbox_mode[[:space:]]*=/{print; exit}' \
-                           "$SANDBOX_DIR/codex/config.toml" 2>/dev/null || true)"
+                           "$_codex_cfg_w" 2>/dev/null || true)"
         case "$_codex_sbx_line" in
             *danger-full-access*) : ;;   # correct, nothing to do
             "")                   : ;;   # absent at top level; the seed gate owns that case
@@ -13842,11 +14011,11 @@ CODEX_TOML
                             }
                             print
                         }
-                    ' "$SANDBOX_DIR/codex/config.toml" > "$SANDBOX_DIR/codex/config.toml.new" 2>/dev/null \
-                   && mv "$SANDBOX_DIR/codex/config.toml.new" "$SANDBOX_DIR/codex/config.toml"; then
+                    ' "$_codex_cfg_w" > "$_codex_cfg_w.new" 2>/dev/null \
+                   && mv "$_codex_cfg_w.new" "$_codex_cfg_w"; then
                     warn "Repaired .codex/config.toml: top-level sandbox_mode was not \"danger-full-access\" (found: ${_codex_sbx_line# }). Codex's own sandbox does not nest inside sandy's container; the rest of your config is untouched."
                 else
-                    rm -f "$SANDBOX_DIR/codex/config.toml.new" 2>/dev/null || true
+                    rm -f "$_codex_cfg_w.new" 2>/dev/null || true
                     warn "Could not repair .codex/config.toml (top-level sandbox_mode is not \"danger-full-access\"). Codex may fail to spawn commands inside the container; fix it by hand or delete the file to reseed."
                 fi
                 ;;
@@ -13857,14 +14026,15 @@ CODEX_TOML
     # (gpt-5.4) to the current default (gpt-5.5). Only updates the exact
     # previous default string — any user-customized model is left alone.
     # Portable in-place edit (no `sed -i` — BSD/GNU diverge on the syntax).
-    if [ -f "$SANDBOX_DIR/codex/config.toml" ] \
-       && grep -qx 'model = "gpt-5.4"' "$SANDBOX_DIR/codex/config.toml" 2>/dev/null; then
+    if [ -f "$_codex_cfg_w" ] \
+       && grep -qx 'model = "gpt-5.4"' "$_codex_cfg_w" 2>/dev/null; then
         info "  Migrating codex model: gpt-5.4 -> gpt-5.5"
         sed 's/^model = "gpt-5\.4"$/model = "gpt-5.5"/' \
-            "$SANDBOX_DIR/codex/config.toml" \
-            > "$SANDBOX_DIR/codex/config.toml.new" \
-            && mv "$SANDBOX_DIR/codex/config.toml.new" "$SANDBOX_DIR/codex/config.toml"
+            "$_codex_cfg_w" \
+            > "$_codex_cfg_w.new" \
+            && mv "$_codex_cfg_w.new" "$_codex_cfg_w"
     fi
+    _sandy_stage_commit "$SANDBOX_DIR/codex/config.toml"
 fi
 
 if _sandy_agent_has gemini; then
@@ -13877,13 +14047,16 @@ if _sandy_agent_has gemini; then
     #   filesystem; invalid after image rebuild.
     rm -f "$SANDBOX_DIR/gemini/gemini-credentials.json" \
           "$SANDBOX_DIR/gemini/extension_integrity.json"
-    # Seed settings.json from host's ~/.gemini/ if present (first run only)
-    if [ ! -f "$SANDBOX_DIR/gemini/settings.json" ]; then
+    # Seed settings.json from host's ~/.gemini/ if present (first run only).
+    # #400: on a staged copy, which _gemini_write_auth_type extends and the
+    # container moves onto settings.json itself (committed after that write).
+    _gemini_cfg_w="$(_sandy_stage_begin "$SANDBOX_DIR/gemini/settings.json")" || _gemini_cfg_w="$SANDBOX_DIR/gemini/settings.json"
+    if [ ! -f "$_gemini_cfg_w" ]; then
         if [ -f "$HOME/.gemini/settings.json" ]; then
-            cp "$HOME/.gemini/settings.json" "$SANDBOX_DIR/gemini/settings.json"
+            cp "$HOME/.gemini/settings.json" "$_gemini_cfg_w"
             info "  Seeded .gemini/settings.json"
         else
-            echo '{}' > "$SANDBOX_DIR/gemini/settings.json"
+            echo '{}' > "$_gemini_cfg_w"
         fi
         # Merge sandy defaults: disable Gemini's own sandbox (sandy provides isolation)
         if command -v node &>/dev/null; then
@@ -13894,8 +14067,8 @@ if _sandy_agent_has gemini; then
                 try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { s = {}; }
                 if (!s.tools) s.tools = {};
                 if (!("sandbox" in s.tools)) s.tools.sandbox = "none";
-                fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
-            ' "$SANDBOX_DIR/gemini/settings.json" 2>/dev/null || true
+                { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // exclusive temp, renamed in (#400)
+            ' "$_gemini_cfg_w" 2>/dev/null || true
         fi
     fi
 fi
@@ -14059,6 +14232,11 @@ if _sandy_agent_has claude; then
             rm -f "$_ss"
         fi
     done
+    # #400: every writer this launch (the three branches below, the cmux hook
+    # merge, crossSessionInbound) works on a staged copy; the container moves
+    # it onto settings.json before Claude Code starts (see _sandy_stage_begin).
+    SEED_SETTINGS_LIVE="$SEED_SETTINGS"
+    SEED_SETTINGS="$(_sandy_stage_begin "$SEED_SETTINGS_LIVE")" || SEED_SETTINGS="$SEED_SETTINGS_LIVE"
     SEED_HOST_SRC=""
     if [ -f "$HOME/.claude/settings.json" ]; then
         SEED_HOST_SRC="$HOME/.claude/settings.json"
@@ -14174,7 +14352,7 @@ if _sandy_agent_has claude; then
                     s.hooks.PreToolUse = [{ matcher: '*', hooks: [{ type: 'command', command: '/usr/local/bin/sandy-tool-audit' }] }];
                 }
             }
-            fs.writeFileSync(dst, JSON.stringify(s, null, 2) + '\n');
+            { const __t = dst + '.sandy-tmp.' + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + '\n', { flag: 'wx' }); fs.renameSync(__t, dst); }  // exclusive temp, renamed in (#400)
         " "$SEED_SETTINGS"
     elif command -v jq &>/dev/null; then
         # jq fallback: preserve enabledPlugins from existing sandbox settings
@@ -14260,9 +14438,9 @@ if _sandy_agent_has claude; then
             _conn_off="true"
             [ "${SANDY_CLAUDE_CONNECTORS:-0}" = "1" ] && _conn_off="false"
             if [ "$skip_perm" = "true" ]; then
-                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"skipAutoPermissionPrompt":true,"disableClaudeAiConnectors":%s,"sandbox":{"enabled":false},"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' "$_conn_off" > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"skipAutoPermissionPrompt":true,"disableClaudeAiConnectors":%s,"sandbox":{"enabled":false},"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' "$_conn_off" | _sandy_write_atomic "$SEED_SETTINGS"
             else
-                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"skipAutoPermissionPrompt":false,"disableClaudeAiConnectors":%s,"sandbox":{"enabled":false},"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' "$_conn_off" > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"skipAutoPermissionPrompt":false,"disableClaudeAiConnectors":%s,"sandbox":{"enabled":false},"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' "$_conn_off" | _sandy_write_atomic "$SEED_SETTINGS"
             fi
         fi
     fi
@@ -14669,17 +14847,22 @@ _sandy_csi_write() {
   if (fs.existsSync(f) && fs.statSync(f).size>0) {
     try { s=JSON.parse(fs.readFileSync(f,"utf8")); } catch (e) { process.exit(3); }
     if (s===null || typeof s!=="object" || Array.isArray(s)) process.exit(3);
+    if (s.crossSessionInbound===v) process.exit(4);
   }
   s.crossSessionInbound=v;
   fs.writeFileSync(t, JSON.stringify(s,null,2)+"\n");
 ' "$_f" "$_v" "$_t"; _rc=$?
-        if [ "$_rc" -eq 3 ]; then
+        if [ "$_rc" -eq 4 ]; then
+            rm -f "$_t"; return 0   # value already set: leave the file alone (#400)
+        elif [ "$_rc" -eq 3 ]; then
             rm -f "$_t"; warn "crossSessionInbound NOT written: $_rel is not a JSON object — fix or remove it"; return 1
         elif [ "$_rc" -ne 0 ]; then
             rm -f "$_t"; warn "crossSessionInbound NOT written: node failed (rc=$_rc) on $_rel"; return 1
         fi
     elif command -v jq >/dev/null 2>&1; then
-        if [ -s "$_f" ]; then
+        if [ -s "$_f" ] && jq -e --arg v "$_v" 'type == "object" and .crossSessionInbound == $v' "$_f" >/dev/null 2>&1; then
+            rm -f "$_t"; return 0   # value already set: leave the file alone (#400)
+        elif [ -s "$_f" ]; then
             jq --arg v "$_v" 'if type != "object" then error("not an object") else .crossSessionInbound = $v end' "$_f" > "$_t" 2>/dev/null; _rc=$?
         else
             jq -n --arg v "$_v" '{crossSessionInbound: $v}' > "$_t" 2>/dev/null; _rc=$?
@@ -14701,7 +14884,11 @@ _sandy_csi_write() {
             esac
         fi
     fi
-    # Idempotence: byte-identical content leaves mtime alone (matters for IDE watchers + tests).
+    # Idempotence: an unchanged value leaves the file alone -- not just its
+    # mtime (IDE watchers, tests) but its identity: the container may have
+    # written claude/settings.json in its own formatting, and the host
+    # replacing a file the guest wrote is #400's stale first read. So the node
+    # and jq branches return before writing when the value already matches.
     if [ -f "$_f" ] && cmp -s "$_t" "$_f"; then rm -f "$_t"; else mv -f "$_t" "$_f"; fi
 }
 
@@ -14712,7 +14899,7 @@ esac
 _sandy_csi_json="null"
 _sandy_csi_src_json="null"
 _sandy_csi_ws_rel=".claude/settings.local.json"          # tighten-only seam (hold/refuse); measured
-_sandy_csi_user_target="$SANDBOX_DIR/claude/settings.json"  # accept-delivering seam (userSettings); measured
+_sandy_csi_user_target="${SEED_SETTINGS:-$SANDBOX_DIR/claude/settings.json}"  # accept-delivering seam (userSettings); measured -- the staged copy (#400)
 if _sandy_agent_has claude; then
     # #380/#382 (decision 6, 2.6.0): the unset default resolves from a
     # DECLARED NEED -- a selected feature manifest's `receives:
@@ -15077,16 +15264,22 @@ case ",${SANDY_SKILL_PACKS:-}," in
 esac
 
 # Always refresh statsig cache (feature flags may have changed since sandbox was created)
+# Staged as a directory (#400): Claude Code writes these files constantly, so a
+# host replacement is exactly the hazard; the container swaps the directory in.
 if _sandy_agent_has claude && [ -d "$HOME/.claude/statsig" ]; then
-    rm -rf "$SANDBOX_DIR/claude/statsig"
-    cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/claude/statsig"
+    _sandy_statsig_w="$(_sandy_staged_name "$SANDBOX_DIR/claude/statsig")"
+    rm -rf "$_sandy_statsig_w"
+    cp -r "$HOME/.claude/statsig" "$_sandy_statsig_w"
+    _sandy_stage_commit "$SANDBOX_DIR/claude/statsig"
+    unset _sandy_statsig_w
 fi
 
 # cmux auto-setup: if running inside cmux, install notification hook (Claude-only)
 if _sandy_agent_has claude && [ -n "${CMUX_WORKSPACE_ID:-}" ] && [ ! -d "$HOME/.claude/hooks" ]; then
     info "cmux detected — installing notification hook"
     mkdir -p "$SANDBOX_DIR/claude/hooks"
-    cat > "$SANDBOX_DIR/claude/hooks/cmux-notify.sh" <<'CMUXHOOK'
+    _sandy_cmux_w="$(_sandy_staged_name "$SANDBOX_DIR/claude/hooks/cmux-notify.sh")"   # #400: staged
+    _sandy_write_atomic "$_sandy_cmux_w" <<'CMUXHOOK'
 #!/bin/bash
 # Auto-generated by sandy for cmux terminal notification support.
 # Emits OSC 777 escape sequences that cmux renders as notification rings,
@@ -15100,7 +15293,9 @@ case "$EVENT_TYPE" in
         printf '\e]777;notify;Claude Code;Waiting for input\a' ;;
 esac
 CMUXHOOK
-    chmod +x "$SANDBOX_DIR/claude/hooks/cmux-notify.sh"
+    chmod +x "$_sandy_cmux_w"
+    _sandy_stage_commit "$SANDBOX_DIR/claude/hooks/cmux-notify.sh"
+    unset _sandy_cmux_w
     # Merge notification hook into the sandbox settings.json (now rw). The seed
     # block above is idempotent, and this runs every launch so the hook is
     # always registered if cmux is detected.
@@ -15125,9 +15320,14 @@ CMUXHOOK
                     }]
                 });
             }
-            fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
+            { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // exclusive temp, renamed in (#400)
         ' "$SEED_SETTINGS"
     fi
+fi
+# #400: the last writer of settings.json this launch has run; hand the staged
+# copy to the container, or drop it when nothing changed.
+if _sandy_agent_has claude; then
+    _sandy_stage_commit "$SANDBOX_DIR/claude/settings.json"
 fi
 
 # Phase 3: Per-project image (optional — extends sandy-claude-code with project tools).
@@ -15741,6 +15941,12 @@ if _sandy_agent_has claude; then
         warn "  Move anything you still need from the old file (e.g. an MCP server block) into the new one, then delete the old one."
     fi
 fi
+# #400: this launch's writers (seed, heal, merge, trust) work on a staged copy;
+# the container moves it onto .claude.json before Claude Code starts.
+CLAUDE_JSON_LIVE="$CLAUDE_JSON"
+if _sandy_agent_has claude; then
+    CLAUDE_JSON="$(_sandy_stage_begin "$CLAUDE_JSON_LIVE")" || CLAUDE_JSON="$CLAUDE_JSON_LIVE"
+fi
 if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
     # Seed from host's ~/.claude.json (contains onboarding, theme, OAuth, etc.)
     if [ -f "$HOME/.claude.json" ]; then
@@ -15781,7 +15987,7 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
             // the rest -- one of each has already shipped as an outage).
             if (d.hasSeenAutoDefaultNudge !== true) d.hasSeenAutoDefaultNudge = true;
             if (d.hasSeenAutoDefaultNotice !== true) d.hasSeenAutoDefaultNotice = true;
-            fs.writeFileSync(process.argv[2], JSON.stringify(d, null, 2) + "\n");
+            { const __t = process.argv[2] + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, process.argv[2]); }  // exclusive temp, renamed in (#400)
         ' "$HOME/.claude.json" "$CLAUDE_JSON" 2>/dev/null \
             || {
                 # node absent or the parse failed: the raw copy carries BOTH the
@@ -15804,7 +16010,7 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
         # Same failure class as the auto-mode nudge below and the custom-API-key
         # modal: a first-run prompt that turns a daemon session inert while every
         # structural check passes. Measured against 2.1.263 and again on 2.1.270.
-        printf '{"tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding":true,"theme":"dark"}\n' > "$CLAUDE_JSON"
+        printf '{"tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding":true,"theme":"dark"}\n' | _sandy_write_atomic "$CLAUDE_JSON"
     fi
 fi
 # #338: heal a sandbox crossed from 1.x, BEFORE the container starts. That
@@ -15841,11 +16047,20 @@ if _sandy_agent_has claude; then
         try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { d = {}; }
         if (!d.projects) d.projects = {};
         if (!d.projects[w]) d.projects[w] = {};
-        d.projects[w].hasTrustDialogAccepted = true;
-        d.projects[w].hasCompletedProjectOnboarding = true;
-        fs.writeFileSync(f, JSON.stringify(d, null, 2) + "\n");
+        // Only when not yet trusted (#400). Claude Code DROPS the project
+        // onboarding flag set below from the file, so re-adding it every
+        // launch made this a write every launch -- the host replacing a file
+        // the last container wrote, which the next container can misread.
+        // Kept on ONE line, and the flag named nowhere above it: run-tests.sh
+        // section 87 extracts this program up to the first line naming it.
+        if (d.projects[w].hasTrustDialogAccepted !== true) { d.projects[w].hasTrustDialogAccepted = true; d.projects[w].hasCompletedProjectOnboarding = true; }
+        { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // exclusive temp, renamed in (#400)
     ' "$CLAUDE_JSON" "$SANDY_WORKSPACE" 2>/dev/null || true
 fi
+if _sandy_agent_has claude; then
+    _sandy_stage_commit "$CLAUDE_JSON_LIVE"
+fi
+CLAUDE_JSON="$CLAUDE_JSON_LIVE"
 
 # --- Ephemeral credential loading (fresh each launch, never persisted in sandbox) ---
 # Helper: read credentials JSON from file or macOS Keychain
@@ -16038,8 +16253,15 @@ load_gemini_credentials() {
 # skips its first-run auth picker. Called from load_gemini_credentials().
 _gemini_write_auth_type() {
     [ -z "$GEMINI_SELECTED_AUTH" ] && return 0
-    local f="$SANDBOX_DIR/gemini/settings.json"
-    [ -f "$f" ] || echo '{}' > "$f"
+    # #400: the staged copy the seed block began (committed by the caller).
+    local f; f="$(_sandy_staged_name "$SANDBOX_DIR/gemini/settings.json")"
+    if [ ! -f "$f" ]; then
+        if [ -f "$SANDBOX_DIR/gemini/settings.json" ] && [ ! -L "$SANDBOX_DIR/gemini/settings.json" ]; then
+            cp "$SANDBOX_DIR/gemini/settings.json" "$f"
+        else
+            echo '{}' > "$f"
+        fi
+    fi
     if command -v node &>/dev/null; then
         SANDY_GEMINI_AUTH_TYPE="$GEMINI_SELECTED_AUTH" node -e '
             const fs = require("fs");
@@ -16051,7 +16273,7 @@ _gemini_write_auth_type() {
             if (!s.security) s.security = {};
             if (!s.security.auth) s.security.auth = {};
             s.security.auth.selectedType = process.env.SANDY_GEMINI_AUTH_TYPE;
-            fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
+            { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // exclusive temp, renamed in (#400)
         ' "$f" 2>/dev/null || true
     fi
 }
@@ -16150,6 +16372,7 @@ load_opencode_credentials() {
 
 if _sandy_agent_has gemini; then
     load_gemini_credentials
+    _sandy_stage_commit "$SANDBOX_DIR/gemini/settings.json"
 fi
 
 if _sandy_agent_has codex; then
@@ -16896,7 +17119,7 @@ unset _sandy_fm_out _sandy_fm_rc _sandy_fm_ran _sandy_fm_root
 # derivation from several features and belongs to none of them, the same
 # argument that moved relay state out of a feature tree in #353.
 if [ "${_SANDY_AA_COMPOSE_MOUNT:-0}" = 1 ]; then
-    RUN_FLAGS+=(-v "$SANDBOX_DIR/agent-args-composed:/opt/sandy/agent-args:ro")
+    RUN_FLAGS+=(-v "$(_sandy_launch_dir)/agent-args:/opt/sandy/agent-args:ro")
 fi
 # Skill pack persistent state mounts. gstack mounts from the workspace (not
 # the sandbox) — see the migration block above where $WORK_DIR/.gstack is
@@ -17161,10 +17384,14 @@ fi
 # in-container. This runs after every host-side settings.json writer (the seed
 # merge and the cmux hook block, both earlier in this section) and before
 # `docker run`, so it captures the mode as it actually ships into the container.
-if _sandy_agent_has claude && [ -f "$SANDBOX_DIR/claude/settings.json" ]; then
-    _sandy_settings_default_mode "$SANDBOX_DIR/claude/settings.json" \
+# #400: read the copy that ships -- the staged one when this launch changed it.
+_sandy_pm_src="$(_sandy_staged_name "$SANDBOX_DIR/claude/settings.json")"
+[ -f "$_sandy_pm_src" ] || _sandy_pm_src="$SANDBOX_DIR/claude/settings.json"
+if _sandy_agent_has claude && [ -f "$_sandy_pm_src" ]; then
+    _sandy_settings_default_mode "$_sandy_pm_src" \
         > "$SANDBOX_DIR/.claude-perm-mode-at-launch"
 fi
+unset _sandy_pm_src
 
 # --- Submodule gitdir protection (S1.1) ---
 # git stores each submodule's real gitdir under .git/modules/<path>/ (or under
@@ -17367,7 +17594,7 @@ RUN_FLAGS+=(-e "SANDY_EFFORT=${SANDY_EFFORT:-}")
 # DEFAULT_THINKING_MODE), high/xhigh/max -> 24576 -- the largest budget every 2.5
 # model accepts (Flash and Flash-Lite cap at 24576; Pro would take 32768, but a
 # single override covers the family and must be valid for all of it).
-_sandy_gemini_settings_file="$SANDBOX_DIR/gemini-system-settings.json"
+_sandy_gemini_settings_file="$(_sandy_launch_dir)/gemini-system-settings.json"   # a fresh path per launch (#400)
 # Nothing legitimate links here, and the write below goes through mktemp + mv,
 # which replaces a link rather than following it (§169's discipline).
 if [ -L "$_sandy_gemini_settings_file" ]; then
@@ -17383,6 +17610,7 @@ if _sandy_agent_has gemini; then
     esac
 fi
 if [ -n "$_sandy_gemini_level" ]; then
+    mkdir -p "$(_sandy_launch_dir)" 2>/dev/null || true
     _sandy_gemini_tmp="$(mktemp "$_sandy_gemini_settings_file.XXXXXX" 2>/dev/null)" || _sandy_gemini_tmp=""
     if [ -n "$_sandy_gemini_tmp" ] && printf '{\n  "modelConfigs": {\n    "customOverrides": [\n      {\n        "match": { "model": "chat-base-3" },\n        "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingLevel": "%s" } } }\n      },\n      {\n        "match": { "model": "chat-base-2.5" },\n        "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingBudget": %s } } }\n      }\n    ]\n  }\n}\n' \
             "$_sandy_gemini_level" "$_sandy_gemini_budget" > "$_sandy_gemini_tmp" \
@@ -17476,7 +17704,16 @@ else
         || (head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
         || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
 fi
-_sandy_session_file="$SANDBOX_DIR/sandy-session.json"
+# The marker is composed into a TEMP and renamed into place below. It changes
+# every launch (nonce, launched_at), unlike the files #400 is about, and that is
+# safe: #400's bad read needs a file the PREVIOUS container wrote, and the marker
+# is mounted :ro, so no container ever writes it (the #400 harness compares the
+# in-container read with the host file every case). The rename keeps a reader
+# from ever seeing a half-written marker. (The sandbox top level is not mounted
+# into the container, so the temp name is nowhere an agent could have planted
+# a link.)
+_sandy_session_file="$SANDBOX_DIR/sandy-session.json.sandy-tmp.$$"
+rm -f "$_sandy_session_file"
 # effort (#effort): the reasoning effort sandy PINNED for this run, so it's
 # provable after the fact rather than inferred from a live statusline. A JSON
 # string when set; null when sandy did not pin it (the agent ran at Claude
@@ -17598,7 +17835,25 @@ printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "
     "${_sandy_image_json:-null}" "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${_sandy_fe_json:-}" \
     "$(if [ "${SANDY_OFFLINE:-0}" = 1 ]; then echo true; else echo false; fi)" "${CRED_MODE:-none}" \
     > "$_sandy_session_file"
-RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
+# Rename the composed temp into place (#400, see where it is assigned). The
+# final path is derived, so a caller that set the variable to a plain path
+# (the test suite does) simply wrote it directly.
+_sandy_session_final="${_sandy_session_file%.sandy-tmp.*}"
+if [ "$_sandy_session_final" != "$_sandy_session_file" ]; then
+    mv -f "$_sandy_session_file" "$_sandy_session_final"
+    _sandy_session_file="$_sandy_session_final"
+fi
+# The container reads the marker through a single-file bind mount whose source
+# is this launch's own copy under launch/<id>/ -- a path no container has seen
+# (#400). $SANDBOX_DIR/sandy-session.json stays the host-side copy that
+# --print-state and host tools read.
+_sandy_session_mount="$(_sandy_launch_dir)/sandy-session.json"
+if ! { mkdir -p "$(_sandy_launch_dir)" && cp "$_sandy_session_file" "$_sandy_session_mount"; } 2>/dev/null; then
+    _sandy_session_mount="$_sandy_session_file"
+fi
+RUN_FLAGS+=(-v "$_sandy_session_mount":/etc/sandy-session.json:ro)
+# Which staged files user-setup.sh may apply: exactly this launch's (#400).
+RUN_FLAGS+=(-e "SANDY_LAUNCH_ID=$_sandy_launch_id")
 
 # --- Auto-mode opt-in prompt suppression, at the POLICY layer (#129 follow-up)
 # Claude Code 2.1.x offers "Make auto mode your default permission mode?" on
@@ -18213,6 +18468,25 @@ if [ -n "$_sandy_fe_list" ]; then
     unset _sandy_fe_img_label
 fi
 # --- END stale-image feature-entries warning (#381) -------------------------
+
+# --- BEGIN stale-image launch-staging fallback (#400) -----------------------
+# The files this launch changed in the agent homes are staged beside their
+# targets for user-setup.sh to move into place. An image whose user-setup.sh
+# predates that (a deferred rebuild, #218) would leave them unapplied -- this
+# launch's settings silently not in effect -- so sandy applies them host-side,
+# which is the old behaviour with its old hazard, and says so.
+if [ -n "$_SANDY_STAGED" ]; then
+    _sandy_ls_label="$(trap - ERR; docker image inspect -f '{{index .Config.Labels "sandy.launch_staging"}}' "$IMAGE_NAME" 2>/dev/null)" || _sandy_ls_label=""
+    case "$_sandy_ls_label" in
+        1) : ;;
+        *)
+            warn "image $IMAGE_NAME predates the host-to-container handoff (#400): its user-setup.sh would leave this launch's files unapplied, so they were applied host-side, and the container's first read of them may be stale. Rebuild once build resources are reachable: sandy --rebuild"
+            _sandy_launch_apply_staged "$SANDBOX_DIR"
+            ;;
+    esac
+    unset _sandy_ls_label
+fi
+# --- END stale-image launch-staging fallback (#400) -------------------------
 
 if [ "$SANDY_VERBOSE" -ge 3 ]; then
     info "Docker run flags:"

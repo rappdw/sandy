@@ -355,13 +355,16 @@ Other `sandy.*` labels (`sandy.managed`, `sandy.provision_id`, `sandy.provisione
 │   ├── cargo/                     # → ~/.cargo
 │   ├── venv/                      # → <workspace>/.venv overlay (when the workspace has a .venv/)
 │   ├── feature-state/<feature>/   # → /opt/sandy/feature-state/<feature> (rw), one per adopted entry
-│   ├── agent-args-composed/       # → /opt/sandy/agent-args (ro), merged agent_args files (#363)
+│   ├── launch/<id>/               # what THIS launch hands its container (#400): deleted at the next launch
+│   │   ├── sandy-session.json     #   → /etc/sandy-session.json (ro), the mount source of the marker
+│   │   ├── agent-args/            #   → /opt/sandy/agent-args (ro), merged agent_args files (#363)
+│   │   ├── gemini-system-settings.json # → /etc/sandy-gemini/effort.json (ro), only with gemini + SANDY_EFFORT (B.10)
+│   │   └── sandy-proxy.json       #   → the proxy's /etc/sandy-proxy.json (when the proxy is on)
 │   ├── workspace-*/               # writable overlays: .claude/commands|agents|plugins, gemini commands
 │   ├── agent-args.<agent>         # operator per-agent args (privileged by location)
 │   ├── sandy-session.json         # host copy of /etc/sandy-session.json (read it via --print-state)
-│   ├── gemini-system-settings.json # → /etc/sandy-gemini/effort.json (ro), only with gemini + SANDY_EFFORT (B.10)
 │   ├── WORKSPACE.json             # workspace lineage (see "Naming")
-│   ├── proxy.log, sandy-proxy.json # egress proxy log and state (when the proxy is on)
+│   ├── proxy.log                  # egress proxy log (when the proxy is on)
 │   ├── .sandy_created_version     # version tracking (see CLAUDE.md "Sandbox version tracking")
 │   ├── .sandy_last_version
 │   ├── .sandy-approved-symlinks.list, .protected-existed-at-launch, .head-at-launch,
@@ -627,6 +630,7 @@ The resolved version is embedded in the generated Dockerfile. A new version = di
 ### Container Activation
 
 At container startup, `user-setup.sh`:
+0. First of all, moves every `<target>.sandy-launch.$SANDY_LAUNCH_ID` the host staged for this launch onto its target (only that id: a writer's temp or an earlier launch's leftover never matches) (`.claude.json`, `settings.json`, `statsig/`, the cmux hook, gemini `settings.json`, codex `config.toml`), so that the container, never the host, replaces a path a container has used (#400, C.3)
 1. Symlinks `/opt/skills/<pack>/` → `~/.claude/skills/<pack>`
 2. Symlinks individual skill directories (those containing `SKILL.md`) into `~/.claude/skills/`
 3. Adds `/opt/skills/<pack>/bin` to PATH
@@ -704,6 +708,8 @@ Optional: `--gpus <SANDY_GPU>` if GPU passthrough is enabled.
 If the host UID differs from the image default (1001), sandy generates custom `passwd` and `group` files with the host UID/GID and mounts them read-only. The entrypoint then uses `gosu` with the remapped UID/GID.
 
 ### Environment Variables Passed to Container
+
+**Launch handoff** (#400): `SANDY_LAUNCH_ID` — this launch's random `[A-Za-z0-9]+` id; `user-setup.sh` moves exactly the `<target>.sandy-launch.<id>` files carrying it onto their targets before anything else touches an agent home (C.3), and nothing else.
 
 **Claude Code config**: `SANDY_WORKSPACE`, `SANDY_PROJECT_NAME`, `SANDY_SANDBOX_NAME` (the sandbox slug `<basename>-<sha8>`, 1.15.0/#303 — convenience only; the authoritative copy is `sandbox_name` in the `:ro` `/etc/sandy-session.json`), `SANDY_MODEL`, `SANDY_SKIP_PERMISSIONS`, `SANDY_NEW_SESSION`, `SANDY_REMOTE_CONTROL`, `SANDY_VERBOSE`, `SANDY_CHANNELS`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
 
@@ -2155,7 +2161,11 @@ The refusal is reported through the same `_written` flags as any other failure, 
 
 Stored at `$SANDY_HOME/sandboxes/<NAME>/claude/.claude.json` since 2.7.0 (#400). It is **not mounted on its own**: it is inside the `claude/` directory mount, and the container gets `CLAUDE_CONFIG_DIR=/home/sandy/.claude`, so Claude Code reads it from `~/.claude/.claude.json`. Claude Code computes its global config as `join(CLAUDE_CONFIG_DIR || homedir(), ".claude.json")`, and `settings.json`/`.credentials.json` keep their paths.
 
-**Why it moved.** Through 2.6.x it was a sibling file, `$SANDY_HOME/sandboxes/<NAME>.claude.json`, bind-mounted as a **single file** at `/home/sandy/.claude.json`. Claude Code writes the file by writing a temp file and renaming it into place. A rename onto a mount point fails, so it fell back to rewriting the file in place and tore it, both at `--stop` and mid-session. The agent then sat on its "Configuration error" dialog while `--start` reported ready.
+**Why it moved, and what actually fixed #400.** Through 2.6.x the file was a sibling, `$SANDY_HOME/sandboxes/<NAME>.claude.json`, bind-mounted as a single file. It now lives under the documented `claude/` mapping. The torn-file symptom ("Configuration error … contains invalid JSON" while `--start` reported ready) was **not** caused by that mount; measured, Claude Code's safe write works on both.
+
+The cause was the **host replacing a file the previous container had used**: on macOS, the next container's first read of such a file can come back short, the new bytes at the old length (`test/spike/virtiofs-host-rewrite-spike.sh`: 3 of 20 relaunches after the container had merely read the file, 16 of 60 after it had written it; 0 of 20 with no host write in between; 0 of 60 when the host wrote a fresh name and the next container renamed it over the file itself), whether the host rewrote in place or by rename. Sandy merged keys into `.claude.json` at every launch, so every relaunch set this up.
+
+Since 2.7.0 the host **never replaces a path a container has used**. Every per-launch change to a file in an agent home is written to `<target>.sandy-launch.<id>` beside it (`<id>` random per launch), dropped again when it turns out identical to the target in any JSON formatting, and otherwise moved onto the target by `user-setup.sh` inside the container before any agent starts. This covers `claude/.claude.json`, `claude/settings.json` (including the `crossSessionInbound` pin and the cmux hook merge), `claude/hooks/cmux-notify.sh`, `claude/statsig/`, `gemini/settings.json` and `codex/config.toml`. Files only the container reads (the marker's mount source, the composed agent args, the gemini effort file, the proxy config) get a fresh path under `$SANDBOX_DIR/launch/<id>/` instead; that directory and any staged leftovers are deleted at the start of the next launch. The generated agent images carry `LABEL sandy.launch_staging=1`; against an image without it (a deferred rebuild) the launch applies the staged files host-side, warns, and names `sandy --rebuild`. The one host-written file outside this rule is the workspace's `.claude/settings.local.json` (`:ro`, tighten-only). `run-tests.sh` §190 asserts the properties on the real pipelines.
 
 **Migration (each launch with claude selected):**
 - a symlink at `claude/.claude.json` is removed and named;
@@ -2330,7 +2340,7 @@ Example: `a1b2c3d4e5f6` (commit SHA) or `v1.2.3` (release tag). Updated whenever
 
 ### C.9 `sandy-session.json` (Self-Attestation Marker)
 
-Written to `$SANDBOX_DIR/sandy-session.json` on every launch and bind-mounted read-only at `/etc/sandy-session.json` (see Appendix E.16a). The single authoritative in-container proof that the agent is inside sandy:
+Written to `$SANDBOX_DIR/sandy-session.json` on every launch (the host-side copy `--print-state` reads) and bind-mounted read-only at `/etc/sandy-session.json` from a per-launch copy, `$SANDBOX_DIR/launch/<id>/sandy-session.json` (#400: a path no container has seen; see Appendix E.16a). The single authoritative in-container proof that the agent is inside sandy:
 
 ```json
 {
@@ -2632,7 +2642,7 @@ The temporary directory is created per-launch and cleaned up on exit. The mount 
 -e CLAUDE_CONFIG_DIR=/home/sandy/.claude      # claude selected only
 ```
 
-There is **no** `.claude.json` mount since 2.7.0 (#400): the file is `<NAME>/claude/.claude.json`, inside the `claude/` directory mount, so Claude Code can replace it atomically. See C.3. Through 2.6.x this was `-v "<SANDY_HOME>/sandboxes/<NAME>.claude.json:/home/sandy/.claude.json"`, a single-file mount that forced Claude Code into in-place writes and tore the file.
+There is **no** `.claude.json` mount since 2.7.0 (#400): the file is `<NAME>/claude/.claude.json`, inside the `claude/` directory mount. See C.3. Through 2.6.x this was `-v "<SANDY_HOME>/sandboxes/<NAME>.claude.json:/home/sandy/.claude.json"`, a single-file mount. Removing it was not what fixed #400; see C.3.
 
 ### E.6 Host Hooks Mount (conditional)
 
@@ -3110,7 +3120,7 @@ GOOGLE_APPLICATION_CREDENTIALS=/home/sandy/.config/gcloud/application_default_cr
 GEMINI_CLI_SYSTEM_SETTINGS_PATH=/etc/sandy-gemini/effort.json  # only when SANDY_EFFORT is set (2.7.0, #116; B.10)
 ```
 
-When `SANDY_EFFORT` is set and gemini is selected, sandy also mounts `$SANDBOX_DIR/gemini-system-settings.json` → `/etc/sandy-gemini/effort.json:ro` — generated host-side every launch (removed on a launch where it does not apply), at the sandbox **top level**, never under the agent-writable `gemini/` (`~/.gemini`); a symlink at the path is removed and named, and the write is `mktemp` + `mv`. Content and rationale: Appendix B.10.
+When `SANDY_EFFORT` is set and gemini is selected, sandy also mounts `$SANDBOX_DIR/launch/<id>/gemini-system-settings.json` → `/etc/sandy-gemini/effort.json:ro` — generated host-side every launch under this launch's own directory (a fresh path per launch, #400; the previous launch's is deleted), never under the agent-writable `gemini/` (`~/.gemini`); a symlink at the path is removed and named, and the write is `mktemp` + `mv`. Content and rationale: Appendix B.10.
 
 **Codex-specific env** (`SANDY_AGENT=codex`):
 ```bash
@@ -3161,8 +3171,9 @@ Immediately after forwarding `SANDY_EGRESS_MODE`, sandy writes a marker file and
 ```bash
 _sandy_egress_mode=<off|permissive|strict>        # captured once, reused for the env var + marker
 _sandy_session_nonce=$(openssl rand -hex 16 || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
-printf '{...}' > "$SANDBOX_DIR/sandy-session.json"  # schema in Appendix C.9
-RUN_FLAGS+=(-v "$SANDBOX_DIR/sandy-session.json:/etc/sandy-session.json:ro)
+printf '{...}' > "$SANDBOX_DIR/sandy-session.json"  # schema in Appendix C.9; the host-side copy
+cp "$SANDBOX_DIR/sandy-session.json" "$SANDBOX_DIR/launch/$id/sandy-session.json"   # a path no container has seen (#400)
+RUN_FLAGS+=(-v "$SANDBOX_DIR/launch/$id/sandy-session.json:/etc/sandy-session.json:ro)
 ```
 
 The nonce is printed host-side only under `SANDY_VERBOSE!=0` and is **not** exported as an env var — the read-only file is the trust root. This is the one authoritative in-container signal of "running inside sandy, at egress mode X." Rationale in `CLAUDE.md` → *Self-Attestation Marker*.

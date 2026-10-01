@@ -82,6 +82,41 @@ skipm(){ printf '  \033[33mSKIP\033[0m %s\n' "$1"; SKIPPED=$((SKIPPED+1)); }
 # A NOTE is an outcome that is neither sandy passing nor sandy failing (#412):
 # counted, printed in the RESULT line, and surfaced in the suite summary, so it
 # can never silently become permanent -- but it does not fail the section.
+# #400 attribution: the host's claude/.claude.json as "inode mtime", taken just
+# before --start and just after it returns. A change across the launch means the
+# launch (sandy, or the first second of Claude Code) replaced the file -- the
+# precondition for #400's bad first read. Structure only, never content.
+_uds_cj_host_stat() {
+    local f
+    for f in "$SANDY_HOME_DIR"/sandboxes/*/claude/.claude.json; do
+        [ -f "$f" ] || continue
+        stat -c '%i %Y' "$f" 2>/dev/null || stat -f '%i %m' "$f" 2>/dev/null
+        return 0
+    done
+    echo absent
+}
+
+# #400 forensics: the container read of /etc/sandy-session.json (a single-file
+# bind mount) against the host file it is mounted from. Different
+# launched_at/session_nonce means the container saw an EARLIER launch's marker,
+# i.e. a stale read across the host/VM boundary rather than a wrong write.
+# Marker fields only (no credentials live in the marker).
+_uds_mf() { printf '%s' "$1" | sed -E -n "s/.*\"$2\": *\"?([^\",}]*)\"?.*/\1/p" | head -1; }
+_uds_marker_forensics() {
+    local label="$1" c="$2" in_json="$3" src host_json
+    src="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/etc/sandy-session.json"}}{{.Source}}{{end}}{{end}}' "$c" 2>/dev/null)"
+    host_json=""; [ -n "$src" ] && [ -f "$src" ] && host_json="$(cat "$src" 2>/dev/null)"
+    local k v_in v_host verdict=match
+    echo "    -- [$label] marker: container read vs host file (${src:-mount source unknown})"
+    for k in launched_at session_nonce cross_session_inbound cross_session_inbound_source permission_mode; do
+        v_in="$(_uds_mf "$in_json" "$k")"; v_host="$(_uds_mf "$host_json" "$k")"
+        [ "$v_in" = "$v_host" ] || verdict=DIFFERS
+        printf '       %-30s in=%-34s host=%s\n' "$k" "${v_in:-<none>}" "${v_host:-<none>}"
+    done
+    printf '       %-30s in=%-34s host=%s\n' bytes "$(printf '%s' "$in_json" | wc -c | tr -d ' ')" "$(printf '%s' "$host_json" | wc -c | tr -d ' ')"
+    echo "       VERDICT: $verdict"
+}
+
 note() { printf '  \033[36mNOTE\033[0m %s\n' "$1"; NOTED=$((NOTED+1)); }
 # Poll budget for the sentinel, in seconds (#412: 90 -> 180). The SAME budget
 # applies to the negative control, so its "did not appear" can never just mean
@@ -480,6 +515,23 @@ if [ -n "$C" ]; then
     else
         echo "VERDICT: the corrupted file is a prefix of NO backup -- consistent with interleaved writers (or a version no backup captured)"
     fi
+
+    # Against the LIVE file (#400): the corrupted read has had the live size
+    # every time, and the live file parses. WHERE the bytes differ separates
+    # the remaining causes, without printing any content: differences confined
+    # to whole 4096-byte pages = stale cached pages; a run of NULs = a read
+    # racing a truncate+rewrite; differences across the file = another version.
+    if [ -f "$f" ]; then
+        nd="$(cmp -l "$C" "$f" 2>/dev/null | wc -l | tr -d ' ')"
+        echo "vs live file: ${nd:-?} differing byte(s) (live $(stat -c %s "$f") bytes)"
+        if [ "${nd:-0}" -gt 0 ] 2>/dev/null; then
+            first="$(cmp -l "$C" "$f" 2>/dev/null | head -1 | awk '{print $1-1}')"
+            last="$(cmp -l "$C" "$f" 2>/dev/null | tail -1 | awk '{print $1-1}')"
+            echo "  first differing offset $first (page $((first / 4096))), last $last (page $((last / 4096)))"
+            echo "  pages with differences: $(cmp -l "$C" "$f" 2>/dev/null | awk '{print int(($1-1)/4096)}' | uniq | tr '\n' ' ')"
+        fi
+    fi
+    echo "NUL bytes: corrupted $(tr -cd '\000' < "$C" | wc -c | tr -d ' '), live $( [ -f "$f" ] && tr -cd '\000' < "$f" | wc -c | tr -d ' ')"
 fi
 UDS_CJ
 _uds_sessions() {  # $1=container -> tab-delimited rows, same shape the removed helper produced
@@ -513,8 +565,20 @@ run_case() {
     # only as three identical "daemon container is running" failures with no
     # cause anywhere in the log.
     local _start_log; _start_log="$(mktemp)"
+    local _cj_before _cj_after; _cj_before="$(_uds_cj_host_stat)"
     env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS" >"$_start_log" 2>&1
     local _start_rc=$?
+    _cj_after="$(_uds_cj_host_stat)"
+    # Since 2.7.0 the host never replaces this file: it stages changes beside
+    # it and the CONTAINER renames them in (#400). So the inode may move once
+    # the container is up -- that is the container's own rename -- but no
+    # staged file may be left behind once --start reports ready.
+    local _cj_left; _cj_left="$(ls -d "$SANDY_HOME_DIR"/sandboxes/*/claude/.*.sandy-launch.* "$SANDY_HOME_DIR"/sandboxes/*/claude/*.sandy-launch.* 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$_cj_before" = "$_cj_after" ]; then
+        echo "    -- [$label] host claude/.claude.json across --start: same inode ($_cj_after); staged files left unapplied: $_cj_left"
+    else
+        echo "    -- [$label] host claude/.claude.json across --start: inode changed ($_cj_before -> $_cj_after; the container's own rename, or Claude Code); staged files left unapplied: $_cj_left"
+    fi
     # Restore immediately: the config has already been read, and every later
     # `return` in this function would otherwise leak it into the next case.
     if [ -n "$_host_cfg_bak" ]; then
@@ -532,6 +596,7 @@ run_case() {
     # The marker is the authority on what sandy actually resolved — asserting
     # the input config would only prove we wrote a file.
     local marker_json; marker_json="$(docker exec -u "$(id -u)" "$c" cat /etc/sandy-session.json 2>/dev/null)"
+    _uds_marker_forensics "$label" "$c" "$marker_json"
     if [ "$expect" != no ]; then
         ck "[$label] marker reports cross_session_inbound=accept" \
            "printf '%s' \"\$marker_json\" | grep -q '\"cross_session_inbound\": \"accept\"'"
