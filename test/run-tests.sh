@@ -23883,14 +23883,15 @@ check "§189(4) the RESULT line carries the NOTE count, and run-integration-test
     bash -c 'grep -q "noted: delivered, model did not act" "$1" && r="$(printf "RESULT: 21 passed, 0 failed (1 noted: delivered, model did not act)\n" | grep -oE "RESULT: [0-9]+ passed, [0-9]+ failed( \([0-9]+ skipped\))?( \([0-9]+ noted[^)]*\))?")" && case "$r" in *"1 noted"*) grep -qF "( \\([0-9]+ noted[^)]*\\))?" "$2" ;; *) exit 1 ;; esac' _ "$_S189_H" "$(cd "$(dirname "$0")" && pwd)/run-integration-tests.sh"
 unset _S189_H _S189_FN _S189_R _S189_P _s189_c _s189_want _s189_rest _s189_found _s189_dslice _s189_pane _s189_mk _s189_why _s189_got
 unset -f _s189 2>/dev/null || true
-echo "§190: #400 — host-side writes into container-read files are write-then-rename (a new inode), never in place"
+echo "§190: #400 — host-side writes into container-read files are skipped when unchanged, else write-then-rename"
 # ============================================================
-# #400's forensics: a 60986-byte .claude.json failed to parse in-container and
-# parsed fine host-side -- Docker Desktop's virtiofs cache (in its VM, outliving
-# containers) served the NEW size with the OLD cached content, because sandy had
-# rewritten the same inode in place at launch. A rename gives a new inode no
-# stale page can belong to. Asserted as a PROPERTY: run the real writers, compare
-# inodes, and check a link at the destination or the temp name is never followed.
+# #400, measured by test/spike/virtiofs-host-rewrite-spike.sh on macOS: when a
+# container wrote a file and the HOST then replaced it, the NEXT container's first
+# read failed to parse ~1 in 10 (2/20); with no host write in between, 0/20. In
+# place or by rename made no difference. So the fix is to NOT write when nothing
+# changes -- sandy's per-launch merges are idempotent. A write that does change
+# something still goes to an exclusive temp and is renamed in (no link followed).
+# Asserted as a PROPERTY: run the real writers twice and compare inodes.
 _S190_SANDY="$SANDY_SCRIPT"
 _S190_D="$(cd "$(mktemp -d)" && pwd -P)"
 _s190_ino() { ls -i "$1" 2>/dev/null | awk '{print $1}'; }
@@ -23902,6 +23903,10 @@ _F="$_S190_D/a.json"; printf 'OLD\n' > "$_F"; _I0="$(_s190_ino "$_F")"
 env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; printf "NEW\n" | _sandy_write_atomic "$2"' _ "$_S190_HLP" "$_F"
 check "§190(1) _sandy_write_atomic replaces the file with a NEW inode and the new content" \
     bash -c '[ "$(cat "$1")" = NEW ] && [ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ] && [ -n "$2" ]' _ "$_F" "$_I0"
+_I1="$(_s190_ino "$_F")"
+env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; printf "NEW\n" | _sandy_write_atomic "$2"' _ "$_S190_HLP" "$_F"
+check "§190(1b) _sandy_write_atomic with IDENTICAL content leaves the file alone (same inode, no temp left)" \
+    bash -c '[ "$(cat "$1")" = NEW ] && [ -n "$2" ] && [ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ] && [ -z "$(ls -A "$3" | grep sandy-tmp)" ]' _ "$_F" "$_I1" "$_S190_D"
 printf 'HOST\n' > "$_S190_D/victim"; ln -s "$_S190_D/victim" "$_S190_D/b.json"
 env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; printf "NEW\n" | _sandy_write_atomic "$2"' _ "$_S190_HLP" "$_S190_D/b.json"
 check "§190(2) a symlink AT the destination is replaced, never written through (its target is untouched)" \
@@ -23916,12 +23921,22 @@ if command -v node >/dev/null 2>&1; then
     env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; json_merge "$2" "{\"tipsDisabled\":true}"' _ "$_S190_HLP" "$_F"
     check "§190(4) json_merge (run on .claude.json every launch) leaves a NEW inode, merged, operator keys intact" \
         bash -c '[ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ] && grep -q "\"tipsDisabled\": true" "$1" && grep -q "\"op\"" "$1" && grep -q "\"keep\": 1" "$1"' _ "$_F" "$_I0"
+    # The second launch: the keys are already there -- in Claude Code's own
+    # (compact) formatting, so the comparison must be semantic, not byte-wise.
+    printf '{"keep":1,"mcpServers":{"op":{}},"tipsDisabled":true}' > "$_F"; _I0="$(_s190_ino "$_F")"
+    env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; json_merge "$2" "{\"tipsDisabled\":true}"' _ "$_S190_HLP" "$_F"
+    check "§190(4b) json_merge with nothing to change does NOT write (same inode, even though the formatting differs)" \
+        bash -c '[ -n "$2" ] && [ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ] && [ -z "$(ls -A "$3" | grep sandy-tmp)" ]' _ "$_F" "$_I0" "$_S190_D"
     # (3) the .claude.json trust-entry block, run for real
     _S190_TR="$(awk '/^    # Pre-trust the workspace so Claude Code/{p=1} p{print} p&&/"\$CLAUDE_JSON" "\$SANDY_WORKSPACE" 2>\/dev\/null \|\| true$/{exit}' "$_S190_SANDY")"
     _F="$_S190_D/cj2.json"; printf '{"a":1}\n' > "$_F"; _I0="$(_s190_ino "$_F")"
     env -i PATH="$PATH" CLAUDE_JSON="$_F" SANDY_WORKSPACE=/home/sandy/w bash -c 'eval "$1"' _ "$_S190_TR"
     check "§190(5) the .claude.json trust-entry writer leaves a NEW inode and records the trust" \
         bash -c '[ -n "$3" ] && [ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ] && grep -q "hasTrustDialogAccepted" "$1"' _ "$_F" "$_I0" "$_S190_TR"
+    _I0="$(_s190_ino "$_F")"
+    env -i PATH="$PATH" CLAUDE_JSON="$_F" SANDY_WORKSPACE=/home/sandy/w bash -c 'eval "$1"' _ "$_S190_TR"
+    check "§190(5b) the trust-entry writer on an already-trusted workspace does NOT write (same inode)" \
+        bash -c '[ -n "$2" ] && [ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ]' _ "$_F" "$_I0"
 else
     skip "§190(4-5) need node"
 fi
@@ -23961,8 +23976,28 @@ _S190_INPLACE="$(grep -n 'fs.writeFileSync(' "$_S190_SANDY" | grep -v 'writeFile
 _S190_TF="$(grep -n -A1 'd\[w\] = "TRUST_FOLDER";' "$_S190_SANDY" | grep -c 'fs.writeFileSync(f,' || true)"
 check "§190(7) ratchet: every host-side fs.writeFileSync targets a temp that is then renamed (found ${_S190_INPLACE} unexpected in-place writer line(s); the two known exceptions accounted for)" \
     bash -c '[ "$(grep -c "fs.writeFileSync(" "$1")" -eq "$(( $(grep -c "writeFileSync(__t,\|writeFileSync(tmp,\|writeFileSync(t," "$1") + 1 + $2 ))" ]' _ "$_S190_SANDY" "$_S190_TF"
+# (7) the crossSessionInbound writer on claude/settings.json the container may
+# have rewritten in its own (compact) formatting: an unchanged value is no write.
+if command -v node >/dev/null 2>&1; then
+    _S190_CSI="$(sed -n '/^_sandy_csi_write() {/,/^}$/p' "$_S190_SANDY")"
+    mkdir -p "$_S190_D/csb/claude"; _F="$_S190_D/csb/claude/settings.json"
+    printf '{"a":1,"crossSessionInbound":"accept"}' > "$_F"; _I0="$(_s190_ino "$_F")"
+    env -i PATH="$PATH" bash -c 'warn() { :; }; _sandy_path_symlink_component() { return 1; }; WORK_DIR=/x; eval "$1"; _sandy_csi_write accept "$2" "$3"' _ "$_S190_CSI" "$_F" "$_S190_D/csb" || true
+    check "§190(9) the crossSessionInbound writer with the value already set does NOT write (same inode, bytes kept)" \
+        bash -c '[ -n "$3" ] && [ -n "$2" ] && [ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ] && [ "$(cat "$1")" = "{\"a\":1,\"crossSessionInbound\":\"accept\"}" ]' _ "$_F" "$_I0" "$_S190_CSI"
+    env -i PATH="$PATH" bash -c 'warn() { :; }; _sandy_path_symlink_component() { return 1; }; WORK_DIR=/x; eval "$1"; _sandy_csi_write refuse "$2" "$3"' _ "$_S190_CSI" "$_F" "$_S190_D/csb" || true
+    check "§190(9b) ...and with a different value it does write it" \
+        bash -c 'grep -q "\"crossSessionInbound\": \"refuse\"" "$1" && grep -q "\"a\": 1" "$1"' _ "$_F"
+else
+    skip "§190(9) needs node"
+fi
+# (6) ratchet: every node temp+rename writer is behind the unchanged-content guard.
+_S190_NT="$(grep -c 'writeFileSync(__t,' "$_S190_SANDY" || true)"
+_S190_NG="$(grep -c 'if (!__same) { const __t = ' "$_S190_SANDY" || true)"
+check "§190(8) ratchet: every node writer that renames a temp into place first skips an unchanged write (${_S190_NG} guarded of ${_S190_NT})" \
+    bash -c '[ "$1" -ge 7 ] && [ "$1" = "$2" ]' _ "$_S190_NT" "$_S190_NG"
 rm -rf "$_S190_D"
-unset _S190_DEF _S190_SANDY _S190_D _S190_HLP _S190_OUT _S190_TR _S190_WR _S190_WR_OK _S190_FB _S190_INPLACE _S190_TF _F _I0
+unset _S190_NT _S190_NG _S190_CSI _I1 _S190_DEF _S190_SANDY _S190_D _S190_HLP _S190_OUT _S190_TR _S190_WR _S190_WR_OK _S190_FB _S190_INPLACE _S190_TF _F _I0
 unset -f _s190_ino _s190_marker 2>/dev/null || true
 
 

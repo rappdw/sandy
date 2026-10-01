@@ -492,24 +492,32 @@ sandy_check_update() {
     fi
 }
 
-# Merge JSON keys into a file. Usage: json_merge <file> '{"key":"value"}'
-# Write stdin to $1 as a NEW FILE renamed into place, never by rewriting the
-# existing inode (#400). Docker Desktop's virtiofs cache lives in its VM and
-# outlives containers: a host-side in-place rewrite keeps the inode, so the
-# NEXT container could read the new size with the old cached content -- that
-# is the torn ".claude.json" #400 measured (a 60986-byte file that failed to
-# parse in-container and parsed fine host-side). A rename gives a new inode,
-# which no stale page can belong to. Every host-side write into a file a
-# container reads goes through this (or the same write-then-rename in node).
+# Write stdin to $1, but ONLY when the content changes (#400); when it does,
+# write a new file and rename it into place.
+# Measured on macOS Docker Desktop/OrbStack (test/spike/virtiofs-host-rewrite-
+# spike.sh): when one container wrote a file and the HOST then replaced it, the
+# NEXT container's first read failed to parse about one time in ten, and every
+# read half a second later was fine (2 of 20). With no host write in between:
+# 0 of 20. Whether the host rewrote in place or renamed made no difference --
+# skipping the write is the fix. Sandy's per-launch merges are idempotent, so
+# after a sandbox's first launch they change nothing and now write nothing.
+# The rename is kept for a different reason: the temp is created exclusively,
+# so a link planted in an agent-writable dir is never written through.
+# Every host-side write into a file a container reads goes through this (or
+# the same compare-then-rename in node).
 _sandy_write_atomic() {   # $1 = destination path; content on stdin
     local _t="$1.sandy-tmp.$$"
     rm -f "$_t"
     # noclobber: the temp name sits in a dir the agent can write (claude/), so
     # create it exclusively -- never through a link planted there earlier.
-    if ( set -C; cat > "$_t" ) && mv -f "$_t" "$1"; then return 0; fi
+    ( set -C; cat > "$_t" ) || { rm -f "$_t"; return 1; }
+    # Unchanged: leave the file alone (#400). See the comment above.
+    if [ -f "$1" ] && [ ! -L "$1" ] && cmp -s "$_t" "$1"; then rm -f "$_t"; return 0; fi
+    if mv -f "$_t" "$1"; then return 0; fi
     rm -f "$_t"; return 1
 }
 
+# Merge JSON keys into a file. Usage: json_merge <file> '{"key":"value"}'
 json_merge() {
     command -v node &>/dev/null || return 0
     node -e '
@@ -518,7 +526,7 @@ json_merge() {
         try { s=JSON.parse(fs.readFileSync(f,"utf8")); }
         catch(e) { console.error("[sandy] WARN: could not parse "+f+", starting fresh"); s={}; }
         Object.assign(s,m);
-        { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s,null,2)+"\n", { flag: "wx" }); fs.renameSync(__t, f); }  // new inode: #400
+        { let __same = false; try { __same = JSON.stringify(JSON.parse(fs.readFileSync(f, "utf8"))) === JSON.stringify(s); } catch (e) {} if (!__same) { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); } }  // unchanged: no write (#400)
     ' "$1" "$2"
 }
 
@@ -11609,8 +11617,9 @@ _sandy_aa_compose() {
         _slug="${_flag#--}"
         _out="$_sbdir/agent-args-composed/$_agent.$_slug.md"
         mkdir -p "$_sbdir/agent-args-composed" 2>/dev/null || true
-        # Built in a temp file and renamed into place: a new inode each launch
-        # (#400), never an in-place rewrite of what the last container read.
+        # Built in a temp file and renamed into place, so a reader never sees a
+        # half-written file. Mounted :ro, so no container writes it and #400's
+        # stale first read (host replacing a file the guest wrote) cannot occur.
         : > "$_out.sandy-tmp.$$" 2>/dev/null || { warn "$_agent: cannot write $_out; leaving $_flag to the agent (last wins)"; continue; }
         {
             printf '<!-- Composed by sandy from %s contributors for %s. Do not edit: rewritten every launch. -->\n' "$_cnt" "$_flag"
@@ -13914,7 +13923,7 @@ if _sandy_agent_has gemini; then
                 try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { s = {}; }
                 if (!s.tools) s.tools = {};
                 if (!("sandbox" in s.tools)) s.tools.sandbox = "none";
-                { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // new inode: #400
+                { let __same = false; try { __same = JSON.stringify(JSON.parse(fs.readFileSync(f, "utf8"))) === JSON.stringify(s); } catch (e) {} if (!__same) { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); } }  // unchanged: no write (#400)
             ' "$SANDBOX_DIR/gemini/settings.json" 2>/dev/null || true
         fi
     fi
@@ -14194,7 +14203,7 @@ if _sandy_agent_has claude; then
                     s.hooks.PreToolUse = [{ matcher: '*', hooks: [{ type: 'command', command: '/usr/local/bin/sandy-tool-audit' }] }];
                 }
             }
-            { const __t = dst + '.sandy-tmp.' + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + '\n', { flag: 'wx' }); fs.renameSync(__t, dst); }  // new inode: #400
+            { let __same = false; try { __same = JSON.stringify(JSON.parse(fs.readFileSync(dst, 'utf8'))) === JSON.stringify(s); } catch (e) {} if (!__same) { const __t = dst + '.sandy-tmp.' + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + '\n', { flag: 'wx' }); fs.renameSync(__t, dst); } }  // unchanged: no write (#400)
         " "$SEED_SETTINGS"
     elif command -v jq &>/dev/null; then
         # jq fallback: preserve enabledPlugins from existing sandbox settings
@@ -14689,17 +14698,22 @@ _sandy_csi_write() {
   if (fs.existsSync(f) && fs.statSync(f).size>0) {
     try { s=JSON.parse(fs.readFileSync(f,"utf8")); } catch (e) { process.exit(3); }
     if (s===null || typeof s!=="object" || Array.isArray(s)) process.exit(3);
+    if (s.crossSessionInbound===v) process.exit(4);
   }
   s.crossSessionInbound=v;
   fs.writeFileSync(t, JSON.stringify(s,null,2)+"\n");
 ' "$_f" "$_v" "$_t"; _rc=$?
-        if [ "$_rc" -eq 3 ]; then
+        if [ "$_rc" -eq 4 ]; then
+            rm -f "$_t"; return 0   # value already set: leave the file alone (#400)
+        elif [ "$_rc" -eq 3 ]; then
             rm -f "$_t"; warn "crossSessionInbound NOT written: $_rel is not a JSON object — fix or remove it"; return 1
         elif [ "$_rc" -ne 0 ]; then
             rm -f "$_t"; warn "crossSessionInbound NOT written: node failed (rc=$_rc) on $_rel"; return 1
         fi
     elif command -v jq >/dev/null 2>&1; then
-        if [ -s "$_f" ]; then
+        if [ -s "$_f" ] && jq -e --arg v "$_v" 'type == "object" and .crossSessionInbound == $v' "$_f" >/dev/null 2>&1; then
+            rm -f "$_t"; return 0   # value already set: leave the file alone (#400)
+        elif [ -s "$_f" ]; then
             jq --arg v "$_v" 'if type != "object" then error("not an object") else .crossSessionInbound = $v end' "$_f" > "$_t" 2>/dev/null; _rc=$?
         else
             jq -n --arg v "$_v" '{crossSessionInbound: $v}' > "$_t" 2>/dev/null; _rc=$?
@@ -14721,7 +14735,11 @@ _sandy_csi_write() {
             esac
         fi
     fi
-    # Idempotence: byte-identical content leaves mtime alone (matters for IDE watchers + tests).
+    # Idempotence: an unchanged value leaves the file alone -- not just its
+    # mtime (IDE watchers, tests) but its identity: the container may have
+    # written claude/settings.json in its own formatting, and the host
+    # replacing a file the guest wrote is #400's stale first read. So the node
+    # and jq branches return before writing when the value already matches.
     if [ -f "$_f" ] && cmp -s "$_t" "$_f"; then rm -f "$_t"; else mv -f "$_t" "$_f"; fi
 }
 
@@ -15145,7 +15163,7 @@ CMUXHOOK
                     }]
                 });
             }
-            { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // new inode: #400
+            { let __same = false; try { __same = JSON.stringify(JSON.parse(fs.readFileSync(f, "utf8"))) === JSON.stringify(s); } catch (e) {} if (!__same) { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); } }  // unchanged: no write (#400)
         ' "$SEED_SETTINGS"
     fi
 fi
@@ -15801,7 +15819,7 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
             // the rest -- one of each has already shipped as an outage).
             if (d.hasSeenAutoDefaultNudge !== true) d.hasSeenAutoDefaultNudge = true;
             if (d.hasSeenAutoDefaultNotice !== true) d.hasSeenAutoDefaultNotice = true;
-            { const __t = process.argv[2] + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, process.argv[2]); }  // new inode: #400
+            { let __same = false; try { __same = JSON.stringify(JSON.parse(fs.readFileSync(process.argv[2], "utf8"))) === JSON.stringify(d); } catch (e) {} if (!__same) { const __t = process.argv[2] + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, process.argv[2]); } }  // unchanged: no write (#400)
         ' "$HOME/.claude.json" "$CLAUDE_JSON" 2>/dev/null \
             || {
                 # node absent or the parse failed: the raw copy carries BOTH the
@@ -15863,7 +15881,7 @@ if _sandy_agent_has claude; then
         if (!d.projects[w]) d.projects[w] = {};
         d.projects[w].hasTrustDialogAccepted = true;
         d.projects[w].hasCompletedProjectOnboarding = true;
-        { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // new inode: #400
+        { let __same = false; try { __same = JSON.stringify(JSON.parse(fs.readFileSync(f, "utf8"))) === JSON.stringify(d); } catch (e) {} if (!__same) { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); } }  // unchanged: no write (#400)
     ' "$CLAUDE_JSON" "$SANDY_WORKSPACE" 2>/dev/null || true
 fi
 
@@ -16071,7 +16089,7 @@ _gemini_write_auth_type() {
             if (!s.security) s.security = {};
             if (!s.security.auth) s.security.auth = {};
             s.security.auth.selectedType = process.env.SANDY_GEMINI_AUTH_TYPE;
-            { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // new inode: #400
+            { let __same = false; try { __same = JSON.stringify(JSON.parse(fs.readFileSync(f, "utf8"))) === JSON.stringify(s); } catch (e) {} if (!__same) { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); } }  // unchanged: no write (#400)
         ' "$f" 2>/dev/null || true
     fi
 }
@@ -17496,12 +17514,14 @@ else
         || (head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
         || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
 fi
-# #400: the marker is composed into a TEMP and renamed into place below, so
-# each launch's marker is a NEW inode. It is bind-mounted :ro as a single
-# file, and Docker Desktop's virtiofs cache outlives containers: an in-place
-# rewrite could reach the next container as the new size over the previous
-# launch's cached bytes. (The sandbox top level is not mounted into the
-# container, so the temp name is nowhere an agent could have planted a link.)
+# The marker is composed into a TEMP and renamed into place below. It changes
+# every launch (nonce, launched_at), unlike the files #400 is about, and that is
+# safe: #400's bad read needs a file the PREVIOUS container wrote, and the marker
+# is mounted :ro, so no container ever writes it (the #400 harness compares the
+# in-container read with the host file every case). The rename keeps a reader
+# from ever seeing a half-written marker. (The sandbox top level is not mounted
+# into the container, so the temp name is nowhere an agent could have planted
+# a link.)
 _sandy_session_file="$SANDBOX_DIR/sandy-session.json.sandy-tmp.$$"
 rm -f "$_sandy_session_file"
 # effort (#effort): the reasoning effort sandy PINNED for this run, so it's

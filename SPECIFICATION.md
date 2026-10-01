@@ -2157,9 +2157,9 @@ Stored at `$SANDY_HOME/sandboxes/<NAME>/claude/.claude.json` since 2.7.0 (#400).
 
 **Why it moved, and what actually fixed #400.** Through 2.6.x the file was a sibling, `$SANDY_HOME/sandboxes/<NAME>.claude.json`, bind-mounted as a single file. It now lives under the documented `claude/` mapping. The torn-file symptom ("Configuration error … contains invalid JSON" while `--start` reported ready) was **not** caused by that mount; measured, Claude Code's safe write works on both.
 
-The cause was sandy's **host-side in-place rewrites**: `json_merge` and the trust entry used `fs.writeFileSync`, which keeps the inode. Docker Desktop's `virtiofs` cache outlives containers, so the next container read the new size with stale content.
+The cause was the **host replacing a file the previous container had written**: on macOS, the next container's first read of such a file can fail to parse (2 of 20 relaunches in `test/spike/virtiofs-host-rewrite-spike.sh`; 0 of 20 with no host write in between), whether the host rewrote it in place or by rename. Sandy merged the same keys into `.claude.json` at every launch, so every relaunch set this up.
 
-Since 2.7.0, every host-side write into a container-read file goes to an exclusively created temp file and is renamed into place, giving it a new inode (`_sandy_write_atomic`, or the same pattern in node; `run-tests.sh` §190).
+Since 2.7.0 every host-side writer into a container-read file **skips the write when the content would not change** (semantic JSON comparison in node, byte comparison in `_sandy_write_atomic`), so after a sandbox's first launch the per-launch merges write nothing. A write that does change something goes to an exclusively created temp file and is renamed into place (`run-tests.sh` §190).
 
 **Migration (each launch with claude selected):**
 - a symlink at `claude/.claude.json` is removed and named;
@@ -2636,7 +2636,7 @@ The temporary directory is created per-launch and cleaned up on exit. The mount 
 -e CLAUDE_CONFIG_DIR=/home/sandy/.claude      # claude selected only
 ```
 
-There is **no** `.claude.json` mount since 2.7.0 (#400): the file is `<NAME>/claude/.claude.json`, inside the `claude/` directory mount, so Claude Code can replace it atomically. See C.3. Through 2.6.x this was `-v "<SANDY_HOME>/sandboxes/<NAME>.claude.json:/home/sandy/.claude.json"`, a single-file mount that forced Claude Code into in-place writes and tore the file.
+There is **no** `.claude.json` mount since 2.7.0 (#400): the file is `<NAME>/claude/.claude.json`, inside the `claude/` directory mount. See C.3. Through 2.6.x this was `-v "<SANDY_HOME>/sandboxes/<NAME>.claude.json:/home/sandy/.claude.json"`, a single-file mount. Removing it was not what fixed #400; see C.3.
 
 ### E.6 Host Hooks Mount (conditional)
 
