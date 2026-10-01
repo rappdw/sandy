@@ -15,6 +15,10 @@
 #   readonly  A only reads f.json (control: the guest never wrote it)
 #   inplace   A rewrites f.json in place, 5 times
 #   rename    A rewrites f.json via temp + rename, 5 times (Claude Code's usual path)
+#   rename-nohost  as rename, but the host does NOT touch f.json in step 2;
+#             B should read A's last version (tests whether step 2 is the trigger)
+#
+# SPIKE_MODES picks a subset, e.g. SPIKE_MODES="rename rename-nohost".
 #
 # Each read is classified:
 #   ok      parses, and it is the host's version for this iteration
@@ -46,11 +50,13 @@ for (let k = 0; k < 5 && mode !== 'readonly'; k++) {
   JSON.parse(fs.readFileSync('/d/f.json', 'utf8'));
 }
 fs.writeFileSync('/d/next.src', doc('host', 50000 + ((i * 31337) % 12000)));
+fs.writeFileSync('/d/expect', mode === 'rename-nohost' ? 'guest' : 'host');
 JS
 
 cat > "$D/b.js" <<'JS'
 const fs = require('fs');
 const i = +process.argv[2];
+const who = fs.readFileSync('/d/expect', 'utf8');
 const sleep = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const out = [];
 let t = 0;
@@ -59,7 +65,7 @@ for (const at of [0, 500, 2000, 5000]) {
   let r;
   try {
     const j = JSON.parse(fs.readFileSync('/d/f.json', 'utf8'));
-    r = (j.who === 'host' && j.ver === i) ? 'ok' : 'stale';
+    r = (j.who === who && j.ver === i) ? 'ok' : 'stale';
   } catch (e) { r = 'BAD'; }
   out.push(r);
 }
@@ -73,13 +79,15 @@ run() {
 seed() { printf '{"who":"seed","ver":-1}\n' > "$D/f.json"; }
 
 printf '%-9s %-6s %-6s %-6s %-6s\n' mode 0s 0.5s 2s 5s
-for mode in readonly inplace rename; do
+for mode in ${SPIKE_MODES:-readonly inplace rename rename-nohost}; do
     seed
     c0=""; c1=""; c2=""; c3=""
     i=0
     while [ "$i" -lt "$N" ]; do
         run /d/a.js "$i" "$mode" >/dev/null
-        cp "$D/next.src" "$D/f.json.h.$$" && mv -f "$D/f.json.h.$$" "$D/f.json"
+        if [ "$mode" != rename-nohost ]; then
+            cp "$D/next.src" "$D/f.json.h.$$" && mv -f "$D/f.json.h.$$" "$D/f.json"
+        fi
         set -- $(run /d/b.js "$i")
         c0="$c0 $1"; c1="$c1 $2"; c2="$c2 $3"; c3="$c3 $4"
         printf '  %s %2d/%d: %s %s %s %s\n' "$mode" "$((i + 1))" "$N" "$1" "$2" "$3" "$4" >&2
