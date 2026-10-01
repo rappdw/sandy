@@ -24053,6 +24053,27 @@ check "§190(12) crossSessionInbound is written into the staged settings.json (t
 # (13) leftovers from a launch that never reached its container are deleted before a new id is minted; launch/ is never rsynced.
 check "§190(13) a launch deletes stale launch/ and *.sandy-launch.* leftovers first, mints a fresh id, and --rsync never copies launch/" \
     bash -c 'grep -q "^rm -rf \"\$SANDBOX_DIR/launch\" \"\$SANDBOX_DIR\"/claude/\.\*\.sandy-launch\.\*" "$1" && grep -q "^_sandy_launch_id=\"\$( (openssl rand -hex 8" "$1" && grep -q "^mkdir -p \"\$SANDBOX_DIR/launch/\$_sandy_launch_id\"" "$1" && sed -n "/^_SANDY_RSY_NEVER=(/,/)$/p" "$1" | grep -q " launch/ "' _ "$_S190_SANDY"
+# (14) ORDER. Deleting launch/ removes the previous launch's mount sources, so
+#      it may run only where no container of this sandbox can still need them:
+#      after the approval pre-pass and --build-only have exited (both run
+#      against LIVE sessions), after DEC-B, and after the workspace lock. Every
+#      launch/<id> writer must then run after the id is minted.
+_s190_ln() { awk -v p="$1" -v m="$2" '(m == "start" && index($0, p) == 1) || (m == "any" && index($0, p) > 0) { print NR; exit }' "$_S190_SANDY"; }
+_S190_O_APPROVE="$(_s190_ln 'if [ "${SANDY_APPROVE_ONLY:-0}" = "1" ]; then' start)"
+_S190_O_BUILD="$(_s190_ln 'info "Build complete. Exiting (--build-only)."' any)"
+_S190_O_DECB="$(_s190_ln 'if [ "$SANDY_START" != "true" ] && [ "$SANDY_ATTACH" != "true" ] && [ "$SANDY_STOP" != "true" ]' start)"
+_S190_O_LOCK="$(_s190_ln 'if ! mkdir "$SANDY_WORKSPACE_LOCK" 2>/dev/null; then' start)"
+_S190_O_RM="$(_s190_ln 'rm -rf "$SANDBOX_DIR/launch"' start)"
+_S190_O_MINT="$(_s190_ln '_sandy_launch_id="$( (openssl rand -hex 8' start)"
+_S190_O_NET="$(awk '$0 == "ensure_network" { print NR; exit }' "$_S190_SANDY")"
+_S190_O_AA="$(_s190_ln '_sandy_aa_compose "$_sandy_aa_agent"' any)"
+_S190_O_GEM="$(_s190_ln '_sandy_gemini_settings_file=' start)"
+_S190_O_MK="$(_s190_ln '_sandy_session_mount=' start)"
+check "§190(14) launch/ is deleted only after the approval pre-pass (${_S190_O_APPROVE:-?}), --build-only (${_S190_O_BUILD:-?}), DEC-B (${_S190_O_DECB:-?}) and the lock (${_S190_O_LOCK:-?}) -- at ${_S190_O_RM:-?} -- and every launch/<id> writer (proxy ${_S190_O_NET:-?}, agent args ${_S190_O_AA:-?}, gemini ${_S190_O_GEM:-?}, marker ${_S190_O_MK:-?}) runs after the id is minted (${_S190_O_MINT:-?})" \
+    bash -c 'for v in "$@"; do [ -n "$v" ] || exit 1; done; [ "$1" -lt "$5" ] && [ "$2" -lt "$5" ] && [ "$3" -lt "$4" ] && [ "$4" -lt "$5" ] && [ "$5" -lt "$6" ] && [ "$6" -lt "$7" ] && [ "$6" -lt "$8" ] && [ "$6" -lt "$9" ] && [ "$6" -lt "${10}" ]' _ \
+    "$_S190_O_APPROVE" "$_S190_O_BUILD" "$_S190_O_DECB" "$_S190_O_LOCK" "$_S190_O_RM" "$_S190_O_MINT" "$_S190_O_NET" "$_S190_O_AA" "$_S190_O_GEM" "$_S190_O_MK"
+unset _S190_O_APPROVE _S190_O_BUILD _S190_O_DECB _S190_O_LOCK _S190_O_RM _S190_O_MINT _S190_O_NET _S190_O_AA _S190_O_GEM _S190_O_MK
+unset -f _s190_ln 2>/dev/null || true
 rm -rf "$_S190_D"
 unset _S190_SANDY _S190_D _S190_HLP _S190_JM _S190_R _S190_CJ _S190_SB _S190_US _S190_US_APPLY _S190_US_FIRST _T _I0
 unset -f _s190_ino _s190 _s190_cj _s190_st 2>/dev/null || true
