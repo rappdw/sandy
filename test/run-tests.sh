@@ -21933,7 +21933,7 @@ unset _s177_ag _s177_exp _s177_got _s177_pair _s177_src _s177_dst
 # --- (2) marker{} and the no-deliberate-null invariant --------------------------
 # The REAL writer (effort .. the printf into $_sandy_session_file), with the
 # REAL _sandy_fe_marker_body, run for a claude launch and a codex-only launch.
-_S177_WRITER="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/_sandy_write_atomic "\$_sandy_session_file"/{exit}' "$_S177_SANDY")"
+_S177_WRITER="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/^_sandy_session_final="\$\{_sandy_session_file%\.sandy-tmp\.\*\}"$/{exit}' "$_S177_SANDY")"
 _S177_ATOMIC="$(sed -n '/^_sandy_write_atomic() {/,/^}$/p' "$_S177_SANDY")"
 _S177_FEBODY="$(sed -n '/^_sandy_fe_marker_body() {/,/^}$/p' "$_S177_SANDY")"
 check "§177(2-pre) the marker writer and _sandy_fe_marker_body were extracted (mutation: a moved anchor empties them)" \
@@ -23926,28 +23926,33 @@ else
     skip "§190(4-5) need node"
 fi
 # (4) the session marker, rewritten every launch and bind-mounted :ro
-_S190_WR="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/_sandy_write_atomic "\$_sandy_session_file"/{exit}' "$_S190_SANDY")"
+_S190_WR="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/^fi$/&&seen{exit} p&&/^_sandy_session_final=/{seen=1}' "$_S190_SANDY")"
 _S190_FB="$(sed -n '/^_sandy_fe_marker_body() {/,/^}$/p' "$_S190_SANDY")"
 # The block must END at the atomic marker write. If that line stops being the
 # atomic form, the range runs to the end of the file -- refuse to eval it.
 _S190_WR_OK=false
-case "$_S190_WR" in *'_sandy_write_atomic "$_sandy_session_file"'*) [ "$(printf '%s\n' "$_S190_WR" | wc -l | tr -d ' ')" -lt 200 ] && _S190_WR_OK=true ;; esac
-check "§190(6-pre) the marker writer was extracted and ends at its atomic write (mutation: an in-place '> file' write breaks this anchor)" \
+case "$_S190_WR" in *'mv -f "$_sandy_session_file" "$_sandy_session_final"'*) [ "$(printf '%s\n' "$_S190_WR" | wc -l | tr -d ' ')" -lt 200 ] && _S190_WR_OK=true ;; esac
+check "§190(6-pre) the marker writer was extracted and ends at its rename into place (mutation: an in-place write breaks this anchor)" \
     test "$_S190_WR_OK" = true
-_s190_marker() {
-    env -i PATH="$PATH" OUT="$1" bash -c '
+# The launch's OWN assignment of the marker path, evaluated against the fixture
+# -- supplying a temp name here would test the harness, not sandy.
+_S190_DEF="$(grep -m1 '^_sandy_session_file=' "$_S190_SANDY")"
+_s190_marker() {   # $1 sandbox dir
+    env -i PATH="$PATH" SANDBOX_DIR="$1" DEF="$_S190_DEF" bash -c '
         _sandy_agent_has() { [ "$1" = claude ]; }; sandy_full_version() { printf x; }
         eval "$1"; eval "$2"
         _sandy_egress_mode=permissive; SANDY_WORKSPACE=/w; SANDBOX_NAME=x; _sandy_session_nonce=n
-        _sandy_fe_list=""; _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""; _sandy_session_file="$OUT"
+        _sandy_fe_list=""; _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""
+        eval "$DEF"
         eval "$3"' _ "$_S190_HLP" "$_S190_FB" "$_S190_WR" 2>/dev/null
 }
 _I0=""
 if [ "$_S190_WR_OK" = true ]; then
-    _s190_marker "$_S190_D/m.json" || true; _I0="$(_s190_ino "$_S190_D/m.json")"; _s190_marker "$_S190_D/m.json" || true
+    mkdir -p "$_S190_D/msb"
+    _s190_marker "$_S190_D/msb" || true; _I0="$(_s190_ino "$_S190_D/msb/sandy-session.json")"; _s190_marker "$_S190_D/msb" || true
 fi
-check "§190(6) the session marker is written as a NEW inode each launch (a :ro single-file mount reads it)" \
-    bash -c '[ -n "$2" ] && grep -q "\"schema\": 1" "$1" && [ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ]' _ "$_S190_D/m.json" "$_I0"
+check "§190(6) the session marker is written as a NEW inode each launch (a :ro single-file mount reads it), with no temp left behind" \
+    bash -c '[ -n "$2" ] && grep -q "\"schema\": 1" "$1" && [ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ] && [ -z "$(ls -A "$3" | grep sandy-tmp)" ]' _ "$_S190_D/msb/sandy-session.json" "$_I0" "$_S190_D/msb"
 # (5) ratchet: no host-side node writer rewrites a file in place. The only
 # writeFileSync calls left that do not target a temp are the --rsync staging
 # copy (dst is a fresh temp path) and gemini trustedFolders, which runs INSIDE
@@ -23957,7 +23962,7 @@ _S190_TF="$(grep -n -A1 'd\[w\] = "TRUST_FOLDER";' "$_S190_SANDY" | grep -c 'fs.
 check "§190(7) ratchet: every host-side fs.writeFileSync targets a temp that is then renamed (found ${_S190_INPLACE} unexpected in-place writer line(s); the two known exceptions accounted for)" \
     bash -c '[ "$(grep -c "fs.writeFileSync(" "$1")" -eq "$(( $(grep -c "writeFileSync(__t,\|writeFileSync(tmp,\|writeFileSync(t," "$1") + 1 + $2 ))" ]' _ "$_S190_SANDY" "$_S190_TF"
 rm -rf "$_S190_D"
-unset _S190_SANDY _S190_D _S190_HLP _S190_OUT _S190_TR _S190_WR _S190_WR_OK _S190_FB _S190_INPLACE _S190_TF _F _I0
+unset _S190_DEF _S190_SANDY _S190_D _S190_HLP _S190_OUT _S190_TR _S190_WR _S190_WR_OK _S190_FB _S190_INPLACE _S190_TF _F _I0
 unset -f _s190_ino _s190_marker 2>/dev/null || true
 
 

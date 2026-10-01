@@ -17496,7 +17496,14 @@ else
         || (head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n') \
         || printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM" )"
 fi
-_sandy_session_file="$SANDBOX_DIR/sandy-session.json"
+# #400: the marker is composed into a TEMP and renamed into place below, so
+# each launch's marker is a NEW inode. It is bind-mounted :ro as a single
+# file, and Docker Desktop's virtiofs cache outlives containers: an in-place
+# rewrite could reach the next container as the new size over the previous
+# launch's cached bytes. (The sandbox top level is not mounted into the
+# container, so the temp name is nowhere an agent could have planted a link.)
+_sandy_session_file="$SANDBOX_DIR/sandy-session.json.sandy-tmp.$$"
+rm -f "$_sandy_session_file"
 # effort (#effort): the reasoning effort sandy PINNED for this run, so it's
 # provable after the fact rather than inferred from a live statusline. A JSON
 # string when set; null when sandy did not pin it (the agent ran at Claude
@@ -17617,7 +17624,15 @@ printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "
     "$_sandy_perm_mode_json" "${_sandy_csi_json:-null}" "${_sandy_csi_src_json:-null}" "$_sandy_agents_json" \
     "${_sandy_image_json:-null}" "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${_sandy_fe_json:-}" \
     "$(if [ "${SANDY_OFFLINE:-0}" = 1 ]; then echo true; else echo false; fi)" "${CRED_MODE:-none}" \
-    | _sandy_write_atomic "$_sandy_session_file"   # a new inode each launch: #400
+    > "$_sandy_session_file"
+# Rename the composed temp into place (#400, see where it is assigned). The
+# final path is derived, so a caller that set the variable to a plain path
+# (the test suite does) simply wrote it directly.
+_sandy_session_final="${_sandy_session_file%.sandy-tmp.*}"
+if [ "$_sandy_session_final" != "$_sandy_session_file" ]; then
+    mv -f "$_sandy_session_file" "$_sandy_session_final"
+    _sandy_session_file="$_sandy_session_final"
+fi
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
 
 # --- Auto-mode opt-in prompt suppression, at the POLICY layer (#129 follow-up)
