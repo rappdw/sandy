@@ -493,6 +493,23 @@ sandy_check_update() {
 }
 
 # Merge JSON keys into a file. Usage: json_merge <file> '{"key":"value"}'
+# Write stdin to $1 as a NEW FILE renamed into place, never by rewriting the
+# existing inode (#400). Docker Desktop's virtiofs cache lives in its VM and
+# outlives containers: a host-side in-place rewrite keeps the inode, so the
+# NEXT container could read the new size with the old cached content -- that
+# is the torn ".claude.json" #400 measured (a 60986-byte file that failed to
+# parse in-container and parsed fine host-side). A rename gives a new inode,
+# which no stale page can belong to. Every host-side write into a file a
+# container reads goes through this (or the same write-then-rename in node).
+_sandy_write_atomic() {   # $1 = destination path; content on stdin
+    local _t="$1.sandy-tmp.$$"
+    rm -f "$_t"
+    # noclobber: the temp name sits in a dir the agent can write (claude/), so
+    # create it exclusively -- never through a link planted there earlier.
+    if ( set -C; cat > "$_t" ) && mv -f "$_t" "$1"; then return 0; fi
+    rm -f "$_t"; return 1
+}
+
 json_merge() {
     command -v node &>/dev/null || return 0
     node -e '
@@ -501,7 +518,7 @@ json_merge() {
         try { s=JSON.parse(fs.readFileSync(f,"utf8")); }
         catch(e) { console.error("[sandy] WARN: could not parse "+f+", starting fresh"); s={}; }
         Object.assign(s,m);
-        fs.writeFileSync(f, JSON.stringify(s,null,2)+"\n");
+        { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s,null,2)+"\n", { flag: "wx" }); fs.renameSync(__t, f); }  // new inode: #400
     ' "$1" "$2"
 }
 
@@ -11592,7 +11609,9 @@ _sandy_aa_compose() {
         _slug="${_flag#--}"
         _out="$_sbdir/agent-args-composed/$_agent.$_slug.md"
         mkdir -p "$_sbdir/agent-args-composed" 2>/dev/null || true
-        : > "$_out" 2>/dev/null || { warn "$_agent: cannot write $_out; leaving $_flag to the agent (last wins)"; continue; }
+        # Built in a temp file and renamed into place: a new inode each launch
+        # (#400), never an in-place rewrite of what the last container read.
+        : > "$_out.sandy-tmp.$$" 2>/dev/null || { warn "$_agent: cannot write $_out; leaving $_flag to the agent (last wins)"; continue; }
         {
             printf '<!-- Composed by sandy from %s contributors for %s. Do not edit: rewritten every launch. -->\n' "$_cnt" "$_flag"
             # Walk the ORIGINAL indices, so provenance and content cannot
@@ -11602,7 +11621,8 @@ _sandy_aa_compose() {
                 cat "$(_sandy_aa_host_path "${_toks[$((_i + 1))]}" "$_tbl")" 2>/dev/null || true
                 printf '\n'
             done
-        } >> "$_out" 2>/dev/null || true
+        } >> "$_out.sandy-tmp.$$" 2>/dev/null || true
+        mv -f "$_out.sandy-tmp.$$" "$_out" 2>/dev/null || rm -f "$_out.sandy-tmp.$$"
 
         _dest="/opt/sandy/agent-args/$_agent.$_slug.md"
         _drop=" "; for _i in $_idx; do _drop="$_drop$_i $((_i + 1)) "; done
@@ -13894,7 +13914,7 @@ if _sandy_agent_has gemini; then
                 try { s = JSON.parse(fs.readFileSync(f, "utf8")); } catch(e) { s = {}; }
                 if (!s.tools) s.tools = {};
                 if (!("sandbox" in s.tools)) s.tools.sandbox = "none";
-                fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
+                { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // new inode: #400
             ' "$SANDBOX_DIR/gemini/settings.json" 2>/dev/null || true
         fi
     fi
@@ -14174,7 +14194,7 @@ if _sandy_agent_has claude; then
                     s.hooks.PreToolUse = [{ matcher: '*', hooks: [{ type: 'command', command: '/usr/local/bin/sandy-tool-audit' }] }];
                 }
             }
-            fs.writeFileSync(dst, JSON.stringify(s, null, 2) + '\n');
+            { const __t = dst + '.sandy-tmp.' + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + '\n', { flag: 'wx' }); fs.renameSync(__t, dst); }  // new inode: #400
         " "$SEED_SETTINGS"
     elif command -v jq &>/dev/null; then
         # jq fallback: preserve enabledPlugins from existing sandbox settings
@@ -14260,9 +14280,9 @@ if _sandy_agent_has claude; then
             _conn_off="true"
             [ "${SANDY_CLAUDE_CONNECTORS:-0}" = "1" ] && _conn_off="false"
             if [ "$skip_perm" = "true" ]; then
-                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"skipAutoPermissionPrompt":true,"disableClaudeAiConnectors":%s,"sandbox":{"enabled":false},"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' "$_conn_off" > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":true,"skipAutoPermissionPrompt":true,"disableClaudeAiConnectors":%s,"sandbox":{"enabled":false},"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0},"permissions":{"defaultMode":"bypassPermissions"}}\n' "$_conn_off" | _sandy_write_atomic "$SEED_SETTINGS"
             else
-                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"skipAutoPermissionPrompt":false,"disableClaudeAiConnectors":%s,"sandbox":{"enabled":false},"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' "$_conn_off" > "$SEED_SETTINGS"
+                printf '{"spinnerTipsEnabled":false,"skipDangerousModePermissionPrompt":false,"skipAutoPermissionPrompt":false,"disableClaudeAiConnectors":%s,"sandbox":{"enabled":false},"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0}}\n' "$_conn_off" | _sandy_write_atomic "$SEED_SETTINGS"
             fi
         fi
     fi
@@ -15086,7 +15106,7 @@ fi
 if _sandy_agent_has claude && [ -n "${CMUX_WORKSPACE_ID:-}" ] && [ ! -d "$HOME/.claude/hooks" ]; then
     info "cmux detected — installing notification hook"
     mkdir -p "$SANDBOX_DIR/claude/hooks"
-    cat > "$SANDBOX_DIR/claude/hooks/cmux-notify.sh" <<'CMUXHOOK'
+    _sandy_write_atomic "$SANDBOX_DIR/claude/hooks/cmux-notify.sh" <<'CMUXHOOK'
 #!/bin/bash
 # Auto-generated by sandy for cmux terminal notification support.
 # Emits OSC 777 escape sequences that cmux renders as notification rings,
@@ -15125,7 +15145,7 @@ CMUXHOOK
                     }]
                 });
             }
-            fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
+            { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // new inode: #400
         ' "$SEED_SETTINGS"
     fi
 fi
@@ -15781,7 +15801,7 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
             // the rest -- one of each has already shipped as an outage).
             if (d.hasSeenAutoDefaultNudge !== true) d.hasSeenAutoDefaultNudge = true;
             if (d.hasSeenAutoDefaultNotice !== true) d.hasSeenAutoDefaultNotice = true;
-            fs.writeFileSync(process.argv[2], JSON.stringify(d, null, 2) + "\n");
+            { const __t = process.argv[2] + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, process.argv[2]); }  // new inode: #400
         ' "$HOME/.claude.json" "$CLAUDE_JSON" 2>/dev/null \
             || {
                 # node absent or the parse failed: the raw copy carries BOTH the
@@ -15804,7 +15824,7 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
         # Same failure class as the auto-mode nudge below and the custom-API-key
         # modal: a first-run prompt that turns a daemon session inert while every
         # structural check passes. Measured against 2.1.263 and again on 2.1.270.
-        printf '{"tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding":true,"theme":"dark"}\n' > "$CLAUDE_JSON"
+        printf '{"tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding":true,"theme":"dark"}\n' | _sandy_write_atomic "$CLAUDE_JSON"
     fi
 fi
 # #338: heal a sandbox crossed from 1.x, BEFORE the container starts. That
@@ -15843,7 +15863,7 @@ if _sandy_agent_has claude; then
         if (!d.projects[w]) d.projects[w] = {};
         d.projects[w].hasTrustDialogAccepted = true;
         d.projects[w].hasCompletedProjectOnboarding = true;
-        fs.writeFileSync(f, JSON.stringify(d, null, 2) + "\n");
+        { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // new inode: #400
     ' "$CLAUDE_JSON" "$SANDY_WORKSPACE" 2>/dev/null || true
 fi
 
@@ -16051,7 +16071,7 @@ _gemini_write_auth_type() {
             if (!s.security) s.security = {};
             if (!s.security.auth) s.security.auth = {};
             s.security.auth.selectedType = process.env.SANDY_GEMINI_AUTH_TYPE;
-            fs.writeFileSync(f, JSON.stringify(s, null, 2) + "\n");
+            { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(s, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // new inode: #400
         ' "$f" 2>/dev/null || true
     fi
 }
@@ -17597,7 +17617,7 @@ printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "
     "$_sandy_perm_mode_json" "${_sandy_csi_json:-null}" "${_sandy_csi_src_json:-null}" "$_sandy_agents_json" \
     "${_sandy_image_json:-null}" "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${_sandy_fe_json:-}" \
     "$(if [ "${SANDY_OFFLINE:-0}" = 1 ]; then echo true; else echo false; fi)" "${CRED_MODE:-none}" \
-    > "$_sandy_session_file"
+    | _sandy_write_atomic "$_sandy_session_file"   # a new inode each launch: #400
 RUN_FLAGS+=(-v "$_sandy_session_file":/etc/sandy-session.json:ro)
 
 # --- Auto-mode opt-in prompt suppression, at the POLICY layer (#129 follow-up)

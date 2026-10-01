@@ -2155,7 +2155,11 @@ The refusal is reported through the same `_written` flags as any other failure, 
 
 Stored at `$SANDY_HOME/sandboxes/<NAME>/claude/.claude.json` since 2.7.0 (#400). It is **not mounted on its own**: it is inside the `claude/` directory mount, and the container gets `CLAUDE_CONFIG_DIR=/home/sandy/.claude`, so Claude Code reads it from `~/.claude/.claude.json`. Claude Code computes its global config as `join(CLAUDE_CONFIG_DIR || homedir(), ".claude.json")`, and `settings.json`/`.credentials.json` keep their paths.
 
-**Why it moved.** Through 2.6.x it was a sibling file, `$SANDY_HOME/sandboxes/<NAME>.claude.json`, bind-mounted as a **single file** at `/home/sandy/.claude.json`. Claude Code writes the file by writing a temp file and renaming it into place. A rename onto a mount point fails, so it fell back to rewriting the file in place and tore it, both at `--stop` and mid-session. The agent then sat on its "Configuration error" dialog while `--start` reported ready.
+**Why it moved, and what actually fixed #400.** Through 2.6.x the file was a sibling, `$SANDY_HOME/sandboxes/<NAME>.claude.json`, bind-mounted as a single file. It now lives under the documented `claude/` mapping. The torn-file symptom ("Configuration error … contains invalid JSON" while `--start` reported ready) was **not** caused by that mount; measured, Claude Code's safe write works on both.
+
+The cause was sandy's **host-side in-place rewrites**: `json_merge` and the trust entry used `fs.writeFileSync`, which keeps the inode. Docker Desktop's `virtiofs` cache outlives containers, so the next container read the new size with stale content.
+
+Since 2.7.0, every host-side write into a container-read file goes to an exclusively created temp file and is renamed into place, giving it a new inode (`_sandy_write_atomic`, or the same pattern in node; `run-tests.sh` §190).
 
 **Migration (each launch with claude selected):**
 - a symlink at `claude/.claude.json` is removed and named;

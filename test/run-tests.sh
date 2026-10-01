@@ -18927,9 +18927,10 @@ _s168_seed() { # _s168_seed <tools> <host settings.json body or ""> -> resulting
         _sandy_agent_has() { return 0; }
         info() { :; }; warn() { :; }
         SANDBOX_IS_NEW=false
+        eval "$2"   # _sandy_write_atomic: the no-tool branch writes through it (#400)
         eval "$1"
         cat "$SANDBOX_DIR/claude/settings.json"
-    ' _ "$_S168_BLOCK" 2>/dev/null || true
+    ' _ "$_S168_BLOCK" "$(sed -n '/^_sandy_write_atomic() {/,/^}$/p' "$SANDY_SCRIPT")" 2>/dev/null || true
 }
 _S168_HOST='{"sandbox":{"enabled":true,"enableWeakerNestedSandbox":true,"excludedCommands":["docker *"]},"theme":"dark"}'
 # (jq reads the result in every case, independent of the branch under test)
@@ -21932,7 +21933,8 @@ unset _s177_ag _s177_exp _s177_got _s177_pair _s177_src _s177_dst
 # --- (2) marker{} and the no-deliberate-null invariant --------------------------
 # The REAL writer (effort .. the printf into $_sandy_session_file), with the
 # REAL _sandy_fe_marker_body, run for a claude launch and a codex-only launch.
-_S177_WRITER="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/> "\$_sandy_session_file"$/{exit}' "$_S177_SANDY")"
+_S177_WRITER="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/_sandy_write_atomic "\$_sandy_session_file"/{exit}' "$_S177_SANDY")"
+_S177_ATOMIC="$(sed -n '/^_sandy_write_atomic() {/,/^}$/p' "$_S177_SANDY")"
 _S177_FEBODY="$(sed -n '/^_sandy_fe_marker_body() {/,/^}$/p' "$_S177_SANDY")"
 check "§177(2-pre) the marker writer and _sandy_fe_marker_body were extracted (mutation: a moved anchor empties them)" \
     bash -c 'printf "%s" "$1" | grep -q "cross_session_inbound" && printf "%s" "$2" | grep -q "_sandy_fe_marker_body"' -- "$_S177_WRITER" "$_S177_FEBODY"
@@ -21946,7 +21948,7 @@ _s177_write_marker() {  # $1 sandbox dir, $2 SANDY_AGENT, $3 csi json, $4 src js
         _sandy_csi_json="$CSI"; _sandy_csi_src_json="$SRC"
         [ "$CSI" = unset ] && unset _sandy_csi_json _sandy_csi_src_json
         _sandy_session_file="$OUT"
-        eval "$2"' _ "$_S177_FEBODY" "$_S177_WRITER" 2>/dev/null
+        eval "$3"; eval "$2"' _ "$_S177_FEBODY" "$_S177_WRITER" "$_S177_ATOMIC" 2>/dev/null
 }
 _s177_state() {  # $1 SANDY_HOME [$2 light] -> the --print-state document
     env -i PATH="$PATH" HOME="$_S177_D/nohome" SANDY_HOME="$1" bash "$_S177_SANDY" --print-state ${2:-} 2>"$1.err" || true
@@ -22051,7 +22053,7 @@ check "§177(4) every directory a launch creates under the sandbox is in the SPE
 unset _S177_TREE _S177_TOPS _S177_MISS _s177_t
 
 rm -rf "$_S177_D"
-unset _S177_SANDY _S177_D _S177_MNT _S177_SPEC_CONTRACT _S177_WRITER _S177_FEBODY _S177_OUT_CLAUDE _S177_OUT_CODEX _S177_OUT_PRE _S177_OUT_OK _S177_OUT_LIGHT _H _s177_f
+unset _S177_ATOMIC _S177_SANDY _S177_D _S177_MNT _S177_SPEC_CONTRACT _S177_WRITER _S177_FEBODY _S177_OUT_CLAUDE _S177_OUT_CODEX _S177_OUT_PRE _S177_OUT_OK _S177_OUT_LIGHT _H _s177_f
 unset -f _s177_pairs _s177_write_marker _s177_state _s177_home _s177_csi_case 2>/dev/null || true
 
 
@@ -23881,6 +23883,82 @@ check "§189(4) the RESULT line carries the NOTE count, and run-integration-test
     bash -c 'grep -q "noted: delivered, model did not act" "$1" && r="$(printf "RESULT: 21 passed, 0 failed (1 noted: delivered, model did not act)\n" | grep -oE "RESULT: [0-9]+ passed, [0-9]+ failed( \([0-9]+ skipped\))?( \([0-9]+ noted[^)]*\))?")" && case "$r" in *"1 noted"*) grep -qF "( \\([0-9]+ noted[^)]*\\))?" "$2" ;; *) exit 1 ;; esac' _ "$_S189_H" "$(cd "$(dirname "$0")" && pwd)/run-integration-tests.sh"
 unset _S189_H _S189_FN _S189_R _S189_P _s189_c _s189_want _s189_rest _s189_found _s189_dslice _s189_pane _s189_mk _s189_why _s189_got
 unset -f _s189 2>/dev/null || true
+echo "§190: #400 — host-side writes into container-read files are write-then-rename (a new inode), never in place"
+# ============================================================
+# #400's forensics: a 60986-byte .claude.json failed to parse in-container and
+# parsed fine host-side -- Docker Desktop's virtiofs cache (in its VM, outliving
+# containers) served the NEW size with the OLD cached content, because sandy had
+# rewritten the same inode in place at launch. A rename gives a new inode no
+# stale page can belong to. Asserted as a PROPERTY: run the real writers, compare
+# inodes, and check a link at the destination or the temp name is never followed.
+_S190_SANDY="$SANDY_SCRIPT"
+_S190_D="$(cd "$(mktemp -d)" && pwd -P)"
+_s190_ino() { ls -i "$1" 2>/dev/null | awk '{print $1}'; }
+_S190_HLP="$(sed -n '/^_sandy_write_atomic() {/,/^}$/p; /^json_merge() {/,/^}$/p' "$_S190_SANDY")"
+check "§190(pre) _sandy_write_atomic and json_merge were extracted (mutation: a rename empties them)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_write_atomic()" && printf "%s" "$1" | grep -q "json_merge()"' _ "$_S190_HLP"
+# (1) the shell helper
+_F="$_S190_D/a.json"; printf 'OLD\n' > "$_F"; _I0="$(_s190_ino "$_F")"
+env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; printf "NEW\n" | _sandy_write_atomic "$2"' _ "$_S190_HLP" "$_F"
+check "§190(1) _sandy_write_atomic replaces the file with a NEW inode and the new content" \
+    bash -c '[ "$(cat "$1")" = NEW ] && [ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ] && [ -n "$2" ]' _ "$_F" "$_I0"
+printf 'HOST\n' > "$_S190_D/victim"; ln -s "$_S190_D/victim" "$_S190_D/b.json"
+env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; printf "NEW\n" | _sandy_write_atomic "$2"' _ "$_S190_HLP" "$_S190_D/b.json"
+check "§190(2) a symlink AT the destination is replaced, never written through (its target is untouched)" \
+    bash -c '[ ! -L "$1" ] && [ "$(cat "$1")" = NEW ] && [ "$(cat "$2")" = HOST ]' _ "$_S190_D/b.json" "$_S190_D/victim"
+# The temp name is $1.sandy-tmp.$$, so plant a link for the PID the subshell will have.
+_S190_OUT="$(env -i PATH="$PATH" D="$_S190_D" bash -c 'set -uo pipefail; eval "$1"; rm -f "$D/c.json.sandy-tmp.$$"; ln -s "$D/victim" "$D/c.json.sandy-tmp.$$"; printf "NEW\n" | _sandy_write_atomic "$D/c.json"; echo "rc=$?"' _ "$_S190_HLP" 2>&1)"
+check "§190(3) a symlink planted at the TEMP name is never written through (the temp is created exclusively)" \
+    bash -c '[ "$(cat "$1")" = HOST ]' _ "$_S190_D/victim"
+# (2) json_merge, the .claude.json key merge every launch runs
+if command -v node >/dev/null 2>&1; then
+    _F="$_S190_D/cj.json"; printf '{"keep":1,"mcpServers":{"op":{}}}\n' > "$_F"; _I0="$(_s190_ino "$_F")"
+    env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; json_merge "$2" "{\"tipsDisabled\":true}"' _ "$_S190_HLP" "$_F"
+    check "§190(4) json_merge (run on .claude.json every launch) leaves a NEW inode, merged, operator keys intact" \
+        bash -c '[ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ] && grep -q "\"tipsDisabled\": true" "$1" && grep -q "\"op\"" "$1" && grep -q "\"keep\": 1" "$1"' _ "$_F" "$_I0"
+    # (3) the .claude.json trust-entry block, run for real
+    _S190_TR="$(awk '/^    # Pre-trust the workspace so Claude Code/{p=1} p{print} p&&/"\$CLAUDE_JSON" "\$SANDY_WORKSPACE" 2>\/dev\/null \|\| true$/{exit}' "$_S190_SANDY")"
+    _F="$_S190_D/cj2.json"; printf '{"a":1}\n' > "$_F"; _I0="$(_s190_ino "$_F")"
+    env -i PATH="$PATH" CLAUDE_JSON="$_F" SANDY_WORKSPACE=/home/sandy/w bash -c 'eval "$1"' _ "$_S190_TR"
+    check "§190(5) the .claude.json trust-entry writer leaves a NEW inode and records the trust" \
+        bash -c '[ -n "$3" ] && [ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ] && grep -q "hasTrustDialogAccepted" "$1"' _ "$_F" "$_I0" "$_S190_TR"
+else
+    skip "§190(4-5) need node"
+fi
+# (4) the session marker, rewritten every launch and bind-mounted :ro
+_S190_WR="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/_sandy_write_atomic "\$_sandy_session_file"/{exit}' "$_S190_SANDY")"
+_S190_FB="$(sed -n '/^_sandy_fe_marker_body() {/,/^}$/p' "$_S190_SANDY")"
+# The block must END at the atomic marker write. If that line stops being the
+# atomic form, the range runs to the end of the file -- refuse to eval it.
+_S190_WR_OK=false
+case "$_S190_WR" in *'_sandy_write_atomic "$_sandy_session_file"'*) [ "$(printf '%s\n' "$_S190_WR" | wc -l | tr -d ' ')" -lt 200 ] && _S190_WR_OK=true ;; esac
+check "§190(6-pre) the marker writer was extracted and ends at its atomic write (mutation: an in-place '> file' write breaks this anchor)" \
+    test "$_S190_WR_OK" = true
+_s190_marker() {
+    env -i PATH="$PATH" OUT="$1" bash -c '
+        _sandy_agent_has() { [ "$1" = claude ]; }; sandy_full_version() { printf x; }
+        eval "$1"; eval "$2"
+        _sandy_egress_mode=permissive; SANDY_WORKSPACE=/w; SANDBOX_NAME=x; _sandy_session_nonce=n
+        _sandy_fe_list=""; _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""; _sandy_session_file="$OUT"
+        eval "$3"' _ "$_S190_HLP" "$_S190_FB" "$_S190_WR" 2>/dev/null
+}
+_I0=""
+if [ "$_S190_WR_OK" = true ]; then
+    _s190_marker "$_S190_D/m.json" || true; _I0="$(_s190_ino "$_S190_D/m.json")"; _s190_marker "$_S190_D/m.json" || true
+fi
+check "§190(6) the session marker is written as a NEW inode each launch (a :ro single-file mount reads it)" \
+    bash -c '[ -n "$2" ] && grep -q "\"schema\": 1" "$1" && [ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ]' _ "$_S190_D/m.json" "$_I0"
+# (5) ratchet: no host-side node writer rewrites a file in place. The only
+# writeFileSync calls left that do not target a temp are the --rsync staging
+# copy (dst is a fresh temp path) and gemini trustedFolders, which runs INSIDE
+# the container (same guest reads and writes it, so no cross-VM cache).
+_S190_INPLACE="$(grep -n 'fs.writeFileSync(' "$_S190_SANDY" | grep -v 'writeFileSync(__t,\|writeFileSync(tmp,\|writeFileSync(t,' | grep -vc 'writeFileSync(dst, JSON.stringify(j,null,2)\|d\[w\] = "TRUST_FOLDER"' || true)"
+_S190_TF="$(grep -n -A1 'd\[w\] = "TRUST_FOLDER";' "$_S190_SANDY" | grep -c 'fs.writeFileSync(f,' || true)"
+check "§190(7) ratchet: every host-side fs.writeFileSync targets a temp that is then renamed (found ${_S190_INPLACE} unexpected in-place writer line(s); the two known exceptions accounted for)" \
+    bash -c '[ "$(grep -c "fs.writeFileSync(" "$1")" -eq "$(( $(grep -c "writeFileSync(__t,\|writeFileSync(tmp,\|writeFileSync(t," "$1") + 1 + $2 ))" ]' _ "$_S190_SANDY" "$_S190_TF"
+rm -rf "$_S190_D"
+unset _S190_SANDY _S190_D _S190_HLP _S190_OUT _S190_TR _S190_WR _S190_WR_OK _S190_FB _S190_INPLACE _S190_TF _F _I0
+unset -f _s190_ino _s190_marker 2>/dev/null || true
 
 
 # BEGIN SUMMARY

@@ -286,17 +286,22 @@ Credentials (`.credentials.json`) are read fresh from the host each launch and m
 
 The launch now removes those records right after it force-removes any leftover `sandy-<name>` container. That is the one point where no container for the sandbox can exist: the workspace lock is held, and the daemon paths arrive only after DEC-B or `--start`'s D9 check. It removes **only regular files with Claude Code's own names**, prunes nothing if `docker ps` does not confirm the name is gone, and refuses if `claude/` or `sessions/` is a symlink. This is sandy deleting files it did not write, the one exception to "the agent home's contents belong to their writer". It's justified because sandy is the only party that knows the pid namespace those records name no longer exists. Guarded by §186.
 
-**`.claude.json` lives inside `claude/`, never as a single-file mount (2.7.0, #400).** Through 2.6.x it was a sibling file, `$SANDY_HOME/sandboxes/<name>.claude.json`, bind-mounted alone at `~/.claude.json`. Claude Code writes it by writing a temp file and renaming it into place. A rename onto a mount point fails (`EBUSY`), so it rewrote the file in place and tore it, both at `--stop` and mid-session: `test/acceptance-uds-delivery.sh` caught a good backup at session start and a torn file 19 seconds later in the same session. The agent then sits on Claude Code's "Configuration error" dialog while `--start` reports ready, the same inert-but-green shape as the theme picker.
+**Host-side writes into a file a container reads are write-then-rename, never in place (2.7.0, #400).** The symptom was a daemon session parked on Claude Code's "Configuration error … `.claude.json` contains invalid JSON" while `--start` reported ready; `test/acceptance-uds-delivery.sh` hit it in case 2 or 3 of most runs.
 
-Now the container gets `CLAUDE_CONFIG_DIR=/home/sandy/.claude`, so the file is `claude/.claude.json`, inside the rw directory mount, where the rename works. Claude Code computes its global config as `join(CLAUDE_CONFIG_DIR || homedir(), ".claude.json")` (2.1.284 bundle), so `settings.json` and `.credentials.json` keep their paths; measured, the file is replaced, not rewritten (new inode).
+**The cause was not the file; it was what the next container read.**
+- Sandy rewrites `.claude.json` host-side at every launch (`json_merge`, the trust entry). It used `fs.writeFileSync`, which truncates and rewrites the **same inode**.
+- Docker Desktop's `virtiofs` cache lives in its VM and **outlives containers**. The previous container had cached that inode's pages, so the next container read the **new size with stale content**.
+- The harness's forensics proved it: a 60986-byte file failed to parse in-container, yet parsed fine afterwards, unchanged since sandy's launch write nine seconds before the failed read. Case 1 never failed, because no earlier container had cached the file.
 
-Four locked decisions:
-1. **CLAUDE_CONFIG_DIR, not a symlink.** A symlink risked the safe write replacing the link and losing the file on the tmpfs home.
-2. **A pre-2.7 sibling is moved in once at launch.** One that reappears later is left untouched and **warned about at every launch**, naming both paths, so an old-path writer is never dropped silently. A symlink at `claude/.claude.json` is removed and named (§169).
-3. **`--reset-sandbox` always keeps `claude/.claude.json`.** That's 2.6.x behaviour, and §87(f)'s point: operators provision fleet MCP servers by writing a top-level MCP server block into this file, and a reset must not wipe them. Their path is now `<sandboxes[].path>/claude/.claude.json`, inside the contracted `claude/` mapping.
-4. **`--rsync` pushes the legacy sibling layout**, which every destination sandy reads and a 2.7 one moves in at first launch. **`--rsync-from` reads either layout** and installs `claude/.claude.json`.
+So every such host-side write now goes to a temp file, created exclusively (an unlinked name plus `wx` in node, `noclobber` in shell, so a link planted in `claude/` is never followed), and is **renamed** into place. A new inode is something no stale page can belong to. This covers `json_merge`, the `.claude.json` seed and trust entry, Claude's `settings.json` (node, no-tool and cmux branches), Gemini's `settings.json`, the session marker, the composed agent args and the cmux hook script, through `_sandy_write_atomic` or the same pattern in node. **Any new host-side writer into a container-read file must do the same.** §190 asserts the new inode for the real writers and ratchets every host-side `fs.writeFileSync`. The one in-place writer left (Gemini's `trustedFolders.json`) runs inside the container, where one kernel both writes and reads.
 
-Guarded by §188 (the mount, the env, migration, reset), §154(26) and §187(4, 24).
+**What #411 changed, and why it stays.** #411 also moved the file from a single-file bind mount of `$SANDY_HOME/sandboxes/<name>.claude.json` to `claude/.claude.json`, through `CLAUDE_CONFIG_DIR=/home/sandy/.claude`. Its stated reason, that the single-file mount forced Claude Code into in-place writes, was **wrong**: measured on the real `virtiofs` mount, Claude Code's safe write works there too. The move stays because the file now lives under the documented `claude/` mapping. Four decisions came with it:
+1. **`CLAUDE_CONFIG_DIR`, not a symlink.**
+2. **A pre-2.7 sibling is moved in once at launch.** One that reappears is left untouched and warned about every launch; a symlink at `claude/.claude.json` is removed and named.
+3. **`--reset-sandbox` always keeps `claude/.claude.json`.** That's 2.6.x behaviour and §87(f): operator MCP server blocks survive, at `<sandboxes[].path>/claude/.claude.json`.
+4. **`--rsync` pushes the legacy sibling; `--rsync-from` reads either layout** and installs `claude/.claude.json`.
+
+Guarded by §188, §154(26) and §187(4, 24).
 
 ### Sandbox version tracking and the X.x forward-compat promise
 
