@@ -29,6 +29,10 @@
 #   stale   parses, but it is an older version
 #   BAD     does not parse (the #400 symptom)
 #
+# Measured 2026-10-01 on the maintainer's Mac (OrbStack), N=20: readonly 3/0/17
+# BAD at 0s, rename 6 BAD at 0s, host-stage 0 -- every BAD read was fine 0.5s
+# later. A prior READ is enough to arm it; the host-stage protocol is clean.
+#
 # Prints counts only, never file content. Leaves nothing behind.
 # Takes ~5s per relaunch, so ~5 min for the three default modes at N=20;
 # a progress line per relaunch goes to stderr, the table rows to stdout.

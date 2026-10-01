@@ -496,18 +496,18 @@ sandy_check_update() {
 # THE RULE: the host never replaces a path a container has used. It creates a
 # fresh path, and the CONTAINER renames it into place.
 #
-# Measured on macOS (test/spike/virtiofs-host-rewrite-spike.sh): when a
-# container had written a file and the host then replaced it, the next
-# container's FIRST read came back short -- the new bytes, the old length --
-# in ~1 relaunch in 10, and every read half a second later was fine. In place
-# or by rename on the host made no difference; with no host write in between,
-# 0 of 20; with the host writing a fresh name that the next container renamed
-# over the file itself, 0 of 20. Claude Code's ".claude.json contains invalid
-# JSON" dialog in daemon sessions was that short read. Whether the stale
-# length sits in the guest kernel or in the file-sharing server is not
-# determined and does not matter: a path the guest has never seen has no
-# cached length anywhere, and a rename the guest performs goes through the
-# same kernel and server that serve its next read.
+# Measured on macOS (test/spike/virtiofs-host-rewrite-spike.sh, 20 relaunches
+# per mode): when a container had USED a file -- merely read it: 3 of 20;
+# written it: 6 of 20 -- and the host then replaced it, the next container's
+# FIRST read came back short, the new bytes at the old length, and every read
+# half a second later was fine. In place or by rename on the host made no
+# difference; with no host write in between, 0 of 20; with the host writing a
+# fresh name that the next container renamed over the file itself, 0 of 20.
+# Claude Code's ".claude.json contains invalid JSON" dialog in daemon sessions
+# was that short read. Whether the stale length sits in the guest kernel or in
+# the file-sharing server is not determined and does not matter: a path the
+# guest has never seen has no cached length anywhere, and a rename the guest
+# performs goes through the same kernel and server that serve its next read.
 #
 # So every per-launch file the host prepares for an agent home is written to
 # <target>.sandy-launch.<id> beside its target (<id> is random per launch, so
