@@ -496,13 +496,14 @@ sandy_check_update() {
 # THE RULE: the host never replaces a path a container has used. It creates a
 # fresh path, and the CONTAINER renames it into place.
 #
-# Measured on macOS (test/spike/virtiofs-host-rewrite-spike.sh, 20 relaunches
-# per mode): when a container had USED a file -- merely read it: 3 of 20;
-# written it: 6 of 20 -- and the host then replaced it, the next container's
-# FIRST read came back short, the new bytes at the old length, and every read
-# half a second later was fine. In place or by rename on the host made no
+# Measured on macOS (test/spike/virtiofs-host-rewrite-spike.sh): when a
+# container had USED a file -- merely read it: 3 of 20 relaunches; written it:
+# 16 of 60 -- and the host then replaced it, the next container's FIRST read
+# came back short, the new bytes at the old length, and every read half a
+# second later was fine. In place or by rename on the host made no
 # difference; with no host write in between, 0 of 20; with the host writing a
-# fresh name that the next container renamed over the file itself, 0 of 20.
+# fresh name that the next container renamed over the file itself, 0 of 60
+# (one-sided Fisher exact against 16 of 60: p ~ 5e-6).
 # Claude Code's ".claude.json contains invalid JSON" dialog in daemon sessions
 # was that short read. Whether the stale length sits in the guest kernel or in
 # the file-sharing server is not determined and does not matter: a path the
