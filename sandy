@@ -14091,6 +14091,16 @@ if _sandy_agent_has opencode; then
     #      model (a Google model; the exact name changes upstream), which
     #      fails confusingly without GOOGLE_GENERATIVE_AI_API_KEY. Warn loudly
     #      so the user knows.
+    # #368: opencode/config is a rw agent-home mount, so a prior session can
+    # plant a symlink here. The `[ ! -f ]` below follows a link and the cp/cat>
+    # seed would write THROUGH it to a host path outside the workspace. Remove a
+    # planted link first (§169's shape, as gemini's seed does) so the existence
+    # test is honest and the seed writes a real path. Nothing legitimate links
+    # here; a real prior config is a regular file this leaves alone.
+    if [ -L "$SANDBOX_DIR/opencode/config/opencode.json" ]; then
+        warn "Removed a symlink at opencode/config/opencode.json -- sandy seeds this host-side and will not write through a link planted in the agent-writable ~/.config/opencode."
+        rm -f "$SANDBOX_DIR/opencode/config/opencode.json"
+    fi
     if [ ! -f "$SANDBOX_DIR/opencode/config/opencode.json" ]; then
         if [ -f "$HOME/.config/opencode/opencode.json" ]; then
             cp "$HOME/.config/opencode/opencode.json" "$SANDBOX_DIR/opencode/config/opencode.json"
@@ -14446,11 +14456,11 @@ if _sandy_agent_has claude; then
     fi
     if [ "$SANDBOX_IS_NEW" = "true" ]; then
         [ -f "$HOME/.claude/settings.json" ] && info "  Seeded settings.json"
-        # Seed statsig cache for feature flags on first run (refreshed every launch below)
-        if [ -d "$HOME/.claude/statsig" ]; then
-            cp -r "$HOME/.claude/statsig" "$SANDBOX_DIR/claude/statsig"
-            info "  Seeded statsig/"
-        fi
+        # statsig cache: NOT seeded here any more (#368). The raw `cp -r` that
+        # used to live here was redundant with the unconditional every-launch
+        # refresh below (search "Always refresh statsig"), which runs on a new
+        # sandbox too and stages the copy through the #400 pipeline. It was also
+        # the last raw host-side writer into an agent home that skipped staging.
         # NOTE: Plugin marketplace catalogs are NOT seeded from host — the sandy-plugins
         # marketplace is configured via extraKnownMarketplaces in user-setup.sh (baked into
         # the image). Claude Code fetches the catalog on first /plugin browse.
@@ -16323,6 +16333,16 @@ load_codex_credentials() {
         # deliberate and more recent act than whatever the host happens to hold.
         # (An EMPTY auth.json -- what codex leaves behind on the api_key path --
         # is already removed earlier in setup, so -s is the right test.)
+        # #368: codex/ is a rw agent-home mount, so a prior session can plant a
+        # symlink at auth.json. Both the -s test below and the host `cp` seed
+        # follow a link -- the cp would write the host's OAuth token THROUGH it
+        # to a path outside the workspace. Remove a planted link first (§169's
+        # shape) so neither the test nor the seed follows it; a real prior login
+        # is a regular file this leaves alone.
+        if [ -L "$SANDBOX_DIR/codex/auth.json" ]; then
+            warn "Removed a symlink at codex/auth.json -- sandy seeds this host-side and will not write through a link planted in the agent-writable ~/.codex."
+            rm -f "$SANDBOX_DIR/codex/auth.json"
+        fi
         if [ -s "$SANDBOX_DIR/codex/auth.json" ]; then
             info "Using Codex credentials from this sandbox (an in-container 'codex login'); the host copy is not used"
             return 0
