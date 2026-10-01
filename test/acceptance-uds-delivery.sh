@@ -569,10 +569,15 @@ run_case() {
     env -u SANDY_AUTO_APPROVE_PRIVILEGED "$SANDY" --start --workspace "$WS" >"$_start_log" 2>&1
     local _start_rc=$?
     _cj_after="$(_uds_cj_host_stat)"
+    # Since 2.7.0 the host never replaces this file: it stages changes beside
+    # it and the CONTAINER renames them in (#400). So the inode may move once
+    # the container is up -- that is the container's own rename -- but no
+    # staged file may be left behind once --start reports ready.
+    local _cj_left; _cj_left="$(ls -d "$SANDY_HOME_DIR"/sandboxes/*/claude/.*.sandy-launch.* "$SANDY_HOME_DIR"/sandboxes/*/claude/*.sandy-launch.* 2>/dev/null | wc -l | tr -d ' ')"
     if [ "$_cj_before" = "$_cj_after" ]; then
-        echo "    -- [$label] host claude/.claude.json across --start: unchanged ($_cj_after)"
+        echo "    -- [$label] host claude/.claude.json across --start: same inode ($_cj_after); staged files left unapplied: $_cj_left"
     else
-        echo "    -- [$label] host claude/.claude.json across --start: REPLACED ($_cj_before -> $_cj_after)"
+        echo "    -- [$label] host claude/.claude.json across --start: inode changed ($_cj_before -> $_cj_after; the container's own rename, or Claude Code); staged files left unapplied: $_cj_left"
     fi
     # Restore immediately: the config has already been read, and every later
     # `return` in this function would otherwise leak it into the next case.

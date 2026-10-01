@@ -35,6 +35,22 @@ if _sandy_has_claude; then
     export FORCE_AUTOUPDATE_PLUGINS=true
 fi
 
+# #400: files the host prepared for THIS launch sit beside their targets as
+# <target>.sandy-launch.<id>. The container moves them into place -- never the
+# host: on macOS file sharing a host-side replacement of a path a container has
+# used can be served to the next container at the old length, which is how
+# Claude Code's ".claude.json contains invalid JSON" dialog parked daemon
+# sessions. A rename done here goes through the kernel and server that serve
+# the next read. Before anything below touches an agent home.
+for _sl in "$HOME"/.claude/.*.sandy-launch.* "$HOME"/.claude/*.sandy-launch.* "$HOME"/.claude/hooks/*.sandy-launch.* \
+           "$HOME"/.gemini/*.sandy-launch.* "$HOME"/.codex/*.sandy-launch.*; do
+    [ -e "$_sl" ] && [ ! -L "$_sl" ] || continue
+    _slt="${_sl%.sandy-launch.*}"
+    if [ -d "$_sl" ]; then rm -rf "$_slt"; fi
+    mv -f "$_sl" "$_slt" || sandy_err "could not install $_slt from its staged copy $_sl"
+done
+unset _sl _slt
+
 sandy_log "Setting up language toolchains"
 # Cargo: writable registry cache + cargo-install binaries
 export CARGO_HOME="$HOME/.cargo"

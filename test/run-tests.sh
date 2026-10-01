@@ -7424,10 +7424,15 @@ check "marker printf still declares schema: 1 (additive, not replaced)" \
 # snapshot write deleted outright (verified: that exact mutation scored 27/27).
 # Require the helper and the redirect to be ADJACENT, which only the write site is.
 check "launch baseline snapshot writes .claude-perm-mode-at-launch via the helper" \
-    bash -c 'grep -A1 -F "_sandy_settings_default_mode \"\$SANDBOX_DIR/claude/settings.json\"" "$1" \
+    bash -c 'grep -A1 -F "_sandy_settings_default_mode \"\$_sandy_pm_src\"" "$1" \
         | grep -qF "> \"\$SANDBOX_DIR/.claude-perm-mode-at-launch\""' -- "$_S90"
 check "launch baseline snapshot is guarded on claude + an existing settings.json" \
-    bash -c 'grep -qF "if _sandy_agent_has claude && [ -f \"\$SANDBOX_DIR/claude/settings.json\" ]; then" "$1"' -- "$_S90"
+    bash -c 'grep -qF "if _sandy_agent_has claude && [ -f \"\$_sandy_pm_src\" ]; then" "$1"' -- "$_S90"
+# #400: the launch stages its settings.json changes for the container to move
+# into place, so the snapshot must read the STAGED copy when there is one --
+# the live file is what the previous session left, not what ships.
+check "launch baseline snapshot reads the staged settings.json when this launch changed it (#400)" \
+    bash -c 'grep -qF "_sandy_pm_src=\"\$(_sandy_staged_name \"\$SANDBOX_DIR/claude/settings.json\")\"" "$1" && grep -qF "[ -f \"\$_sandy_pm_src\" ] || _sandy_pm_src=\"\$SANDBOX_DIR/claude/settings.json\"" "$1"' -- "$_S90"
 check "stale-snapshot rm -f (SIGKILLed prior session) includes .claude-perm-mode-at-launch" \
     bash -c 'grep -qE "^rm -f .*\.session-created-stubs.*\.claude-perm-mode-at-launch" "$1"' -- "$_S90"
 check "cleanup() contains the drift check (_sandy_perm_mode_drift)" \
@@ -10488,7 +10493,7 @@ check "§106(10a2) NEGATIVE: no -v line names an operator agent-args.<agent> fil
 check "§106(10a3) at most ONE -v names agent-args at all, so a second path cannot appear beside the audited one (got $_S106_AAVN)" \
     bash -c 'test "$1" -le 1' -- "$_S106_AAVN"
 check "§106(10a4) ...and if it exists it is the #363 composed directory mounted :ro (mutation: drop :ro and the agent can rewrite the flags sandy passes it next launch)" \
-    bash -c 'test -z "$1" && exit 0; case "$1" in *"SANDBOX_DIR/agent-args-composed:/opt/sandy/agent-args:ro\")"*) exit 0 ;; esac; exit 1' -- "$_S106_AAV"
+    bash -c 'test -z "$1" && exit 0; case "$1" in *"(_sandy_launch_dir)/agent-args:/opt/sandy/agent-args:ro\")"*) exit 0 ;; esac; exit 1' -- "$_S106_AAV"
 
 # (10c) THE SEAM. The five -e forwards are the ONLY bridge between host-side
 # resolution and the container-side dispatcher. Deleting all five -- or renaming
@@ -12438,6 +12443,7 @@ _s118_run() {
     SANDBOX_DIR="$d" S118_FN="$_S118_FN" bash -c '
         set -uo pipefail
         warn() { printf "WARN\n"; }
+        _codex_cfg_w="$SANDBOX_DIR/codex/config.toml"   # the launch stages this (#400); the repair logic is what is under test
         eval "$S118_FN"
     ' 2>/dev/null
     cat "$d/codex/config.toml"
@@ -17109,6 +17115,7 @@ _s153_run() {
         warn() { printf "WARN %s\n" "$*" >&2; }
         info() { printf "INFO %s\n" "$*" >&2; }
         eval "$1"
+        _sandy_launch_id=test   # #400: composed files go under launch/<id>/agent-args
         _sandy_aa_compose claude "$2" "$3" "$4"
         printf "%s|%s|%s\n" "$_SANDY_AA_OUT_TOKENS" "$_SANDY_AA_OUT_MOUNT" "$_SANDY_AA_OUT_JSON"
     ' _ "$_S153_BLK" "$1" "$_S153_TBL" "$_S153_DIR/sb" 2>"$_S153_DIR/err"
@@ -17127,12 +17134,12 @@ check "§153(1) ONE contributor leaves the argv byte-identical — composition m
 check "§153(2) ONE contributor requests no mount" \
     bash -c 'IFS="|" read -r _t _m _j <<< "$1"; test "$_m" = 0' _ "$_S153_R1"
 check "§153(3) ONE contributor writes no composed file — a file nothing references is how 'it is wired' becomes untrue" \
-    bash -c 'test ! -e "$1/sb/agent-args-composed/claude.append-system-prompt-file.md"' _ "$_S153_DIR"
+    bash -c 'test ! -e "$1/sb/launch/test/agent-args/claude.append-system-prompt-file.md"' _ "$_S153_DIR"
 
 # --- two contributors: merged, in order, and actually referenced -------------
 rm -rf "$_S153_DIR/sb"; mkdir -p "$_S153_DIR/sb"
 _S153_R2="$(_s153_run "$_S153_TWO")"
-_S153_OUT="$_S153_DIR/sb/agent-args-composed/claude.append-system-prompt-file.md"
+_S153_OUT="$_S153_DIR/sb/launch/test/agent-args/claude.append-system-prompt-file.md"
 check "§153(4) TWO contributors produce a composed file" test -f "$_S153_OUT"
 check "§153(5) the composed file carries the FIRST contributor's content (this is the contribution the agent was discarding)" \
     grep -q 'ALPHA-MARKER' "$_S153_OUT"
@@ -17181,7 +17188,7 @@ rm -rf "$_S153_DIR/sb"; mkdir -p "$_S153_DIR/sb"
 _S153_R4="$(_s153_run "feature 'a'${_S153_T}--system-prompt-file /home/sandy/.fa/A.md
 feature 'b'${_S153_T}--system-prompt-file /home/sandy/.fb/B.md")"
 check "§153(17) a 'report' flag is never merged — --system-prompt-file REPLACES, so concatenating would invent a prompt neither feature wrote" \
-    bash -c 'test ! -e "$1/sb/agent-args-composed/claude.system-prompt-file.md"' _ "$_S153_DIR"
+    bash -c 'test ! -e "$1/sb/launch/test/agent-args/claude.system-prompt-file.md"' _ "$_S153_DIR"
 check "§153(18) ...the argv is unchanged" \
     test "${_S153_R4%%|*}" = "--system-prompt-file /home/sandy/.fa/A.md --system-prompt-file /home/sandy/.fb/B.md"
 check "§153(19) ...and the operator is told, by name" \
@@ -18927,10 +18934,13 @@ _s168_seed() { # _s168_seed <tools> <host settings.json body or ""> -> resulting
         _sandy_agent_has() { return 0; }
         info() { :; }; warn() { :; }
         SANDBOX_IS_NEW=false
-        eval "$2"   # _sandy_write_atomic: the no-tool branch writes through it (#400)
+        eval "$2"   # the handoff helpers + _sandy_write_atomic (#400)
+        _sandy_launch_id=test
         eval "$1"
+        _sandy_stage_commit "$SANDBOX_DIR/claude/settings.json"
+        _sandy_launch_apply_staged "$SANDBOX_DIR"   # what user-setup.sh does in the container
         cat "$SANDBOX_DIR/claude/settings.json"
-    ' _ "$_S168_BLOCK" "$(sed -n '/^_sandy_write_atomic() {/,/^}$/p' "$SANDY_SCRIPT")" 2>/dev/null || true
+    ' _ "$_S168_BLOCK" "$(sed -n '/^# --- Host-to-container handoff (#400)/,/^# Merge JSON keys into a file/p' "$SANDY_SCRIPT" | sed '$d')" 2>/dev/null || true
 }
 _S168_HOST='{"sandbox":{"enabled":true,"enableWeakerNestedSandbox":true,"excludedCommands":["docker *"]},"theme":"dark"}'
 # (jq reads the result in every case, independent of the branch under test)
@@ -18990,8 +19000,12 @@ _s169_seed() {
         _sandy_agent_has() { return 0; }
         info() { :; }; warn() { echo "[warn] $*" >&2; }
         SANDBOX_IS_NEW=false
+        eval "$2"   # the handoff helpers + _sandy_write_atomic (#400)
+        _sandy_launch_id=test
         eval "$1"
-    ' _ "$_S169_BLOCK" >"$_c/out" 2>"$_c/err" || true
+        _sandy_stage_commit "$SANDBOX_DIR/claude/settings.json"
+        _sandy_launch_apply_staged "$SANDBOX_DIR"   # what user-setup.sh does in the container
+    ' _ "$_S169_BLOCK" "$(sed -n '/^# --- Host-to-container handoff (#400)/,/^# Merge JSON keys into a file/p' "$SANDY_SCRIPT" | sed '$d')" >"$_c/out" 2>"$_c/err" || true
     printf '%s' "$_c"
 }
 _S169_HOST='{"theme":"dark","permissions":{"defaultMode":"default"}}'
@@ -23204,7 +23218,7 @@ _S184_GBLK="$(awk '/^# SANDY_EFFORT -> gemini \(2\.7\.0/{f=1} f{print} f&&/^unse
 check "§184(15) the gemini settings block was extracted (mutation: a rename empties it and every gemini check below goes vacuous)" \
     bash -c 'printf "%s" "$1" | grep -q GEMINI_CLI_SYSTEM_SETTINGS_PATH && printf "%s" "$1" | grep -q "^unset _sandy_gemini_settings_file"' _ "$_S184_GBLK"
 _s184_gem() { # _s184_gem <sandbox dir> <agents> <effort> -> one "FLAG <x>" line per RUN_FLAGS element, plus warnings
-    bash -c 'warn() { echo "WARN $*"; }; eval "$3"; SANDBOX_DIR="$1"; SANDY_AGENT="$2"; SANDY_EFFORT="$4"; RUN_FLAGS=(); set -u; eval "$5"; for _f in ${RUN_FLAGS[@]+"${RUN_FLAGS[@]}"}; do echo "FLAG $_f"; done' \
+    bash -c 'warn() { echo "WARN $*"; }; eval "$3"; SANDBOX_DIR="$1"; SANDY_AGENT="$2"; SANDY_EFFORT="$4"; RUN_FLAGS=(); _sandy_launch_id=test; _sandy_launch_dir() { printf "%s/launch/%s" "$SANDBOX_DIR" "$_sandy_launch_id"; }; set -u; eval "$5"; for _f in ${RUN_FLAGS[@]+"${RUN_FLAGS[@]}"}; do echo "FLAG $_f"; done' \
         _ "$1" "$2" "$_S184_HAS" "$3" "$_S184_GBLK" 2>&1
 }
 # The whole document, compared as parsed JSON: exactly one key, the two
@@ -23230,36 +23244,36 @@ for _s184_l in low:LOW:1024 medium:HIGH:8192 high:HIGH:24576 xhigh:HIGH:24576 ma
     _S184_SB="$(cd "$(mktemp -d)" && pwd -P)"
     _S184_V="$(_s184_gem "$_S184_SB" gemini "$_s184_e")"
     check "§184(16:$_s184_e) SANDY_EFFORT=$_s184_e -> gemini system settings thinkingLevel ${_s184_r%%:*} (Gemini 3) and thinkingBudget ${_s184_r#*:} (2.5), and NOTHING else in the file" \
-        _s184_doc "$_S184_SB/gemini-system-settings.json" "${_s184_r%%:*}" "${_s184_r#*:}"
+        _s184_doc "$_S184_SB/launch/test/gemini-system-settings.json" "${_s184_r%%:*}" "${_s184_r#*:}"
     rm -rf "$_S184_SB"
 done
 _S184_SB="$(cd "$(mktemp -d)" && pwd -P)"
 _S184_V="$(_s184_gem "$_S184_SB" gemini high)"
 check "§184(17) the file is mounted READ-ONLY and GEMINI_CLI_SYSTEM_SETTINGS_PATH names exactly the mount destination (got: $_S184_V)" \
-    bash -c '[ "$(printf "%s\n" "$1" | grep -c "^FLAG ")" = 4 ] && printf "%s\n" "$1" | grep -qx "FLAG $2/gemini-system-settings.json:/etc/sandy-gemini/effort.json:ro" && printf "%s\n" "$1" | grep -qx "FLAG GEMINI_CLI_SYSTEM_SETTINGS_PATH=/etc/sandy-gemini/effort.json"' _ "$_S184_V" "$_S184_SB"
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c "^FLAG ")" = 4 ] && printf "%s\n" "$1" | grep -qx "FLAG $2/launch/test/gemini-system-settings.json:/etc/sandy-gemini/effort.json:ro" && printf "%s\n" "$1" | grep -qx "FLAG GEMINI_CLI_SYSTEM_SETTINGS_PATH=/etc/sandy-gemini/effort.json"' _ "$_S184_V" "$_S184_SB"
 # Not agent-writable: the source sits at the sandbox TOP LEVEL, which is never
 # mounted whole -- unlike $SANDBOX_DIR/gemini, the container's rw ~/.gemini,
 # where an agent could rewrite its own pin for the next launch.
-check "§184(18) the source is at the sandbox top level, NOT under the agent-writable gemini/ (~/.gemini), and sandy never mounts the sandbox dir itself" \
-    bash -c 'src="$(printf "%s\n" "$1" | sed -n "s/^FLAG \(.*\):\/etc\/sandy-gemini\/effort.json:ro$/\1/p")"; [ -n "$src" ] || exit 1; [ "${src%/*}" = "$2" ] || exit 1; case "$src" in "$2"/gemini/*) exit 1 ;; esac; ! grep -qE -- "-v \"?\\\$SANDBOX_DIR\"?:" "$3"' _ "$_S184_V" "$_S184_SB" "$SANDY_SCRIPT"
+check "§184(18) the source is under this launch's own launch/<id>/ (a fresh path per launch, #400), NOT under the agent-writable gemini/ (~/.gemini), and sandy never mounts the sandbox dir itself" \
+    bash -c 'src="$(printf "%s\n" "$1" | sed -n "s/^FLAG \(.*\):\/etc\/sandy-gemini\/effort.json:ro$/\1/p")"; [ -n "$src" ] || exit 1; [ "${src%/*}" = "$2/launch/test" ] || exit 1; case "$src" in "$2"/gemini/*) exit 1 ;; esac; ! grep -qE -- "-v \"?\\\$SANDBOX_DIR\"?:" "$3"' _ "$_S184_V" "$_S184_SB" "$SANDY_SCRIPT"
 # Only when it applies: effort set AND gemini selected. And a stale pin from
 # an earlier launch does not survive one where it does not apply.
 _S184_V="$(_s184_gem "$_S184_SB" gemini "")"
 check "§184(19) gemini selected but no SANDY_EFFORT -> no file, no mount, no env, and the previous launch's file is removed (got: $_S184_V)" \
-    bash -c '[ ! -e "$2/gemini-system-settings.json" ] && ! printf "%s\n" "$1" | grep -q "^FLAG"' _ "$_S184_V" "$_S184_SB"
+    bash -c '[ ! -e "$2/launch/test/gemini-system-settings.json" ] && ! printf "%s\n" "$1" | grep -q "^FLAG"' _ "$_S184_V" "$_S184_SB"
 _S184_V="$(_s184_gem "$_S184_SB" claude,codex max)"
 check "§184(20) SANDY_EFFORT set but gemini not selected -> no file, no mount, no env (got: $_S184_V)" \
-    bash -c '[ ! -e "$2/gemini-system-settings.json" ] && ! printf "%s\n" "$1" | grep -q "^FLAG"' _ "$_S184_V" "$_S184_SB"
+    bash -c '[ ! -e "$2/launch/test/gemini-system-settings.json" ] && ! printf "%s\n" "$1" | grep -q "^FLAG"' _ "$_S184_V" "$_S184_SB"
 _S184_V="$(_s184_gem "$_S184_SB" claude,gemini low)"
 check "§184(21) a combo that includes gemini gets it (got: $_S184_V)" \
     bash -c 'printf "%s\n" "$1" | grep -qx "FLAG GEMINI_CLI_SYSTEM_SETTINGS_PATH=/etc/sandy-gemini/effort.json"' _ "$_S184_V"
 # §169's discipline: a link planted at the path is never written through.
 printf 'HOST-FILE-UNTOUCHED\n' > "$_S184_DIR/victim"
-rm -f "$_S184_SB/gemini-system-settings.json"
-ln -s "$_S184_DIR/victim" "$_S184_SB/gemini-system-settings.json"
+mkdir -p "$_S184_SB/launch/test"; rm -f "$_S184_SB/launch/test/gemini-system-settings.json"
+ln -s "$_S184_DIR/victim" "$_S184_SB/launch/test/gemini-system-settings.json"
 _S184_V="$(_s184_gem "$_S184_SB" gemini high)"
 check "§184(22) a symlink at the path is removed and named, its target is untouched, and a regular file replaces it (got: $_S184_V)" \
-    bash -c '[ "$(cat "$2/victim")" = HOST-FILE-UNTOUCHED ] && [ ! -L "$3/gemini-system-settings.json" ] && [ -f "$3/gemini-system-settings.json" ] && printf "%s\n" "$1" | grep -q "^WARN Removed a symlink"' _ "$_S184_V" "$_S184_DIR" "$_S184_SB"
+    bash -c '[ "$(cat "$2/victim")" = HOST-FILE-UNTOUCHED ] && [ ! -L "$3/launch/test/gemini-system-settings.json" ] && [ -f "$3/launch/test/gemini-system-settings.json" ] && printf "%s\n" "$1" | grep -q "^WARN Removed a symlink"' _ "$_S184_V" "$_S184_DIR" "$_S184_SB"
 rm -rf "$_S184_SB"
 fi
 rm -rf "$_S184_DIR"
@@ -23883,126 +23897,145 @@ check "§189(4) the RESULT line carries the NOTE count, and run-integration-test
     bash -c 'grep -q "noted: delivered, model did not act" "$1" && r="$(printf "RESULT: 21 passed, 0 failed (1 noted: delivered, model did not act)\n" | grep -oE "RESULT: [0-9]+ passed, [0-9]+ failed( \([0-9]+ skipped\))?( \([0-9]+ noted[^)]*\))?")" && case "$r" in *"1 noted"*) grep -qF "( \\([0-9]+ noted[^)]*\\))?" "$2" ;; *) exit 1 ;; esac' _ "$_S189_H" "$(cd "$(dirname "$0")" && pwd)/run-integration-tests.sh"
 unset _S189_H _S189_FN _S189_R _S189_P _s189_c _s189_want _s189_rest _s189_found _s189_dslice _s189_pane _s189_mk _s189_why _s189_got
 unset -f _s189 2>/dev/null || true
-echo "§190: #400 — host-side writes into container-read files are skipped when unchanged, else write-then-rename"
+echo "§190: #400 — host-to-container handoff: the host never replaces a path a container has used; it stages a fresh path and the container renames it in"
 # ============================================================
-# #400, measured by test/spike/virtiofs-host-rewrite-spike.sh on macOS: when a
-# container wrote a file and the HOST then replaced it, the NEXT container's first
-# read failed to parse ~1 in 10 (2/20); with no host write in between, 0/20. In
-# place or by rename made no difference. So the fix is to NOT write when nothing
-# changes -- sandy's per-launch merges are idempotent. A write that does change
-# something still goes to an exclusive temp and is renamed in (no link followed).
-# Asserted as a PROPERTY: run the real writers twice and compare inodes.
+# Measured on macOS (test/spike/virtiofs-host-rewrite-spike.sh): a container
+# wrote a file, the host replaced it, and the next container's FIRST read came
+# back short (new bytes, old length) in ~1 relaunch in 10; 0/20 with no host
+# write in between; 0/20 when the host wrote a FRESH name and the next
+# container renamed it over the file itself. Write-then-rename on the host and
+# skip-when-unchanged were both tried first and both still failed §25: the
+# first changes nothing about which side replaces the path, the second cannot
+# cover a launch that genuinely changes a file. So the rule is about WHO
+# replaces the path. Asserted as properties on the real helpers and the real
+# .claude.json and settings.json pipelines, then ratcheted onto the container
+# side (user-setup.sh), the marker mount and the image label.
 _S190_SANDY="$SANDY_SCRIPT"
 _S190_D="$(cd "$(mktemp -d)" && pwd -P)"
 _s190_ino() { ls -i "$1" 2>/dev/null | awk '{print $1}'; }
-_S190_HLP="$(sed -n '/^_sandy_write_atomic() {/,/^}$/p; /^json_merge() {/,/^}$/p' "$_S190_SANDY")"
-check "§190(pre) _sandy_write_atomic and json_merge were extracted (mutation: a rename empties them)" \
-    bash -c 'printf "%s" "$1" | grep -q "_sandy_write_atomic()" && printf "%s" "$1" | grep -q "json_merge()"' _ "$_S190_HLP"
-# (1) the shell helper
-_F="$_S190_D/a.json"; printf 'OLD\n' > "$_F"; _I0="$(_s190_ino "$_F")"
-env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; printf "NEW\n" | _sandy_write_atomic "$2"' _ "$_S190_HLP" "$_F"
-check "§190(1) _sandy_write_atomic replaces the file with a NEW inode and the new content" \
-    bash -c '[ "$(cat "$1")" = NEW ] && [ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ] && [ -n "$2" ]' _ "$_F" "$_I0"
-_I1="$(_s190_ino "$_F")"
-env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; printf "NEW\n" | _sandy_write_atomic "$2"' _ "$_S190_HLP" "$_F"
-check "§190(1b) _sandy_write_atomic with IDENTICAL content leaves the file alone (same inode, no temp left)" \
-    bash -c '[ "$(cat "$1")" = NEW ] && [ -n "$2" ] && [ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ] && [ -z "$(ls -A "$3" | grep sandy-tmp)" ]' _ "$_F" "$_I1" "$_S190_D"
-printf 'HOST\n' > "$_S190_D/victim"; ln -s "$_S190_D/victim" "$_S190_D/b.json"
-env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; printf "NEW\n" | _sandy_write_atomic "$2"' _ "$_S190_HLP" "$_S190_D/b.json"
-check "§190(2) a symlink AT the destination is replaced, never written through (its target is untouched)" \
-    bash -c '[ ! -L "$1" ] && [ "$(cat "$1")" = NEW ] && [ "$(cat "$2")" = HOST ]' _ "$_S190_D/b.json" "$_S190_D/victim"
-# The temp name is $1.sandy-tmp.$$, so plant a link for the PID the subshell will have.
-_S190_OUT="$(env -i PATH="$PATH" D="$_S190_D" bash -c 'set -uo pipefail; eval "$1"; rm -f "$D/c.json.sandy-tmp.$$"; ln -s "$D/victim" "$D/c.json.sandy-tmp.$$"; printf "NEW\n" | _sandy_write_atomic "$D/c.json"; echo "rc=$?"' _ "$_S190_HLP" 2>&1)"
-check "§190(3) a symlink planted at the TEMP name is never written through (the temp is created exclusively)" \
-    bash -c '[ "$(cat "$1")" = HOST ]' _ "$_S190_D/victim"
-# (2) json_merge, the .claude.json key merge every launch runs
-if command -v node >/dev/null 2>&1; then
-    _F="$_S190_D/cj.json"; printf '{"keep":1,"mcpServers":{"op":{}}}\n' > "$_F"; _I0="$(_s190_ino "$_F")"
-    env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; json_merge "$2" "{\"tipsDisabled\":true}"' _ "$_S190_HLP" "$_F"
-    check "§190(4) json_merge (run on .claude.json every launch) leaves a NEW inode, merged, operator keys intact" \
-        bash -c '[ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ] && grep -q "\"tipsDisabled\": true" "$1" && grep -q "\"op\"" "$1" && grep -q "\"keep\": 1" "$1"' _ "$_F" "$_I0"
-    # The second launch: the keys are already there -- in Claude Code's own
-    # (compact) formatting, so the comparison must be semantic, not byte-wise.
-    printf '{"keep":1,"mcpServers":{"op":{}},"tipsDisabled":true}' > "$_F"; _I0="$(_s190_ino "$_F")"
-    env -i PATH="$PATH" bash -c 'set -euo pipefail; eval "$1"; json_merge "$2" "{\"tipsDisabled\":true}"' _ "$_S190_HLP" "$_F"
-    check "§190(4b) json_merge with nothing to change does NOT write (same inode, even though the formatting differs)" \
-        bash -c '[ -n "$2" ] && [ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ] && [ -z "$(ls -A "$3" | grep sandy-tmp)" ]' _ "$_F" "$_I0" "$_S190_D"
-    # (3) the .claude.json trust-entry block, run for real
-    _S190_TR="$(awk '/^    # Pre-trust the workspace so Claude Code/{p=1} p{print} p&&/"\$CLAUDE_JSON" "\$SANDY_WORKSPACE" 2>\/dev\/null \|\| true$/{exit}' "$_S190_SANDY")"
-    _F="$_S190_D/cj2.json"; printf '{"a":1}\n' > "$_F"; _I0="$(_s190_ino "$_F")"
-    env -i PATH="$PATH" CLAUDE_JSON="$_F" SANDY_WORKSPACE=/home/sandy/w bash -c 'eval "$1"' _ "$_S190_TR"
-    check "§190(5) the .claude.json trust-entry writer leaves a NEW inode and records the trust" \
-        bash -c '[ -n "$3" ] && [ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ] && grep -q "hasTrustDialogAccepted" "$1"' _ "$_F" "$_I0" "$_S190_TR"
-    # What the next launch really finds: Claude Code DROPS
-    # hasCompletedProjectOnboarding from the file (observed on a live sandbox),
-    # so a writer that re-adds it writes every launch -- the #400 trigger.
-    node -e 'const fs=require("fs"),f=process.argv[1];const d=JSON.parse(fs.readFileSync(f,"utf8"));delete d.projects["/home/sandy/w"].hasCompletedProjectOnboarding;fs.writeFileSync(f,JSON.stringify(d))' "$_F"
-    _I0="$(_s190_ino "$_F")"
-    env -i PATH="$PATH" CLAUDE_JSON="$_F" SANDY_WORKSPACE=/home/sandy/w bash -c 'eval "$1"' _ "$_S190_TR"
-    check "§190(5b) the trust-entry writer on an already-trusted workspace does NOT write, even after Claude Code dropped hasCompletedProjectOnboarding (same inode)" \
-        bash -c '[ -n "$2" ] && [ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ]' _ "$_F" "$_I0"
-else
-    skip "§190(4-5) need node"
-fi
-# (4) the session marker, rewritten every launch and bind-mounted :ro
-_S190_WR="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/^fi$/&&seen{exit} p&&/^_sandy_session_final=/{seen=1}' "$_S190_SANDY")"
-_S190_FB="$(sed -n '/^_sandy_fe_marker_body() {/,/^}$/p' "$_S190_SANDY")"
-# The block must END at the atomic marker write. If that line stops being the
-# atomic form, the range runs to the end of the file -- refuse to eval it.
-_S190_WR_OK=false
-case "$_S190_WR" in *'mv -f "$_sandy_session_file" "$_sandy_session_final"'*) [ "$(printf '%s\n' "$_S190_WR" | wc -l | tr -d ' ')" -lt 200 ] && _S190_WR_OK=true ;; esac
-check "§190(6-pre) the marker writer was extracted and ends at its rename into place (mutation: an in-place write breaks this anchor)" \
-    test "$_S190_WR_OK" = true
-# The launch's OWN assignment of the marker path, evaluated against the fixture
-# -- supplying a temp name here would test the harness, not sandy.
-_S190_DEF="$(grep -m1 '^_sandy_session_file=' "$_S190_SANDY")"
-_s190_marker() {   # $1 sandbox dir
-    env -i PATH="$PATH" SANDBOX_DIR="$1" DEF="$_S190_DEF" bash -c '
-        _sandy_agent_has() { [ "$1" = claude ]; }; sandy_full_version() { printf x; }
-        eval "$1"; eval "$2"
-        _sandy_egress_mode=permissive; SANDY_WORKSPACE=/w; SANDBOX_NAME=x; _sandy_session_nonce=n
-        _sandy_fe_list=""; _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""
-        eval "$DEF"
-        eval "$3"' _ "$_S190_HLP" "$_S190_FB" "$_S190_WR" 2>/dev/null
+_S190_HLP="$(sed -n '/^# --- Host-to-container handoff (#400)/,/^# Merge JSON keys into a file/p' "$_S190_SANDY" | sed '$d')"
+_S190_JM="$(sed -n '/^json_merge() {/,/^}$/p' "$_S190_SANDY")"
+check "§190(pre) the handoff helpers and json_merge were extracted (mutation: a rename empties them)" \
+    bash -c 'for f in _sandy_stage_begin _sandy_stage_commit _sandy_launch_apply_staged _sandy_same_content _sandy_write_atomic; do printf "%s" "$1" | grep -q "^$f()" || exit 1; done; printf "%s" "$2" | grep -q "^json_merge()"' _ "$_S190_HLP" "$_S190_JM"
+# One subshell per case: helpers loaded, a sandbox dir, a fixed launch id.
+_s190() {   # _s190 <sandbox dir> <script>
+    env -i PATH="$PATH" SANDBOX_DIR="$1" HLP="$_S190_HLP" JM="$_S190_JM" bash -c 'set -uo pipefail; eval "$HLP"; eval "$JM"; _sandy_launch_id=t1; info() { :; }; warn() { :; }; eval "$1"' _ "$2" 2>/dev/null
 }
-_I0=""
-if [ "$_S190_WR_OK" = true ]; then
-    mkdir -p "$_S190_D/msb"
-    _s190_marker "$_S190_D/msb" || true; _I0="$(_s190_ino "$_S190_D/msb/sandy-session.json")"; _s190_marker "$_S190_D/msb" || true
-fi
-check "§190(6) the session marker is written as a NEW inode each launch (a :ro single-file mount reads it), with no temp left behind" \
-    bash -c '[ -n "$2" ] && grep -q "\"schema\": 1" "$1" && [ "$(ls -i "$1" | awk "{print \$1}")" != "$2" ] && [ -z "$(ls -A "$3" | grep sandy-tmp)" ]' _ "$_S190_D/msb/sandy-session.json" "$_I0" "$_S190_D/msb"
-# (5) ratchet: no host-side node writer rewrites a file in place. The only
-# writeFileSync calls left that do not target a temp are the --rsync staging
-# copy (dst is a fresh temp path) and gemini trustedFolders, which runs INSIDE
-# the container (same guest reads and writes it, so no cross-VM cache).
-_S190_INPLACE="$(grep -n 'fs.writeFileSync(' "$_S190_SANDY" | grep -v 'writeFileSync(__t,\|writeFileSync(tmp,\|writeFileSync(t,' | grep -vc 'writeFileSync(dst, JSON.stringify(j,null,2)\|d\[w\] = "TRUST_FOLDER"' || true)"
-_S190_TF="$(grep -n -A1 'd\[w\] = "TRUST_FOLDER";' "$_S190_SANDY" | grep -c 'fs.writeFileSync(f,' || true)"
-check "§190(7) ratchet: every host-side fs.writeFileSync targets a temp that is then renamed (found ${_S190_INPLACE} unexpected in-place writer line(s); the two known exceptions accounted for)" \
-    bash -c '[ "$(grep -c "fs.writeFileSync(" "$1")" -eq "$(( $(grep -c "writeFileSync(__t,\|writeFileSync(tmp,\|writeFileSync(t," "$1") + 1 + $2 ))" ]' _ "$_S190_SANDY" "$_S190_TF"
-# (7) the crossSessionInbound writer on claude/settings.json the container may
-# have rewritten in its own (compact) formatting: an unchanged value is no write.
+# (1) an existing target is never touched by the host; the staged copy carries
+#     the change and the container-side rename lands it.
+mkdir -p "$_S190_D/s1/claude"; _T="$_S190_D/s1/claude/a.json"; printf '{"v":"OLD"}\n' > "$_T"; _I0="$(_s190_ino "$_T")"
+_S190_R="$(_s190 "$_S190_D/s1" 'W="$(_sandy_stage_begin "$SANDBOX_DIR/claude/a.json")"; printf "{\"v\":\"NEW\"}\n" | _sandy_write_atomic "$W"; _sandy_stage_commit "$SANDBOX_DIR/claude/a.json"; printf "staged=%s\n" "$_SANDY_STAGED"')"
+check "§190(1) a changed file: the live path keeps its content AND its inode (the host replaced nothing), and the change sits beside it as <target>.sandy-launch.<id>" \
+    bash -c '[ "$(cat "$1")" = "{\"v\":\"OLD\"}" ] && [ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ] && [ "$(cat "$1.sandy-launch.t1")" = "{\"v\":\"NEW\"}" ] && printf "%s" "$3" | grep -q "staged=$1\$"' _ "$_T" "$_I0" "$_S190_R"
+_s190 "$_S190_D/s1" '_sandy_launch_apply_staged "$SANDBOX_DIR"'
+check "§190(1b) ...the container-side apply moves it onto the target and leaves no staged file behind" \
+    bash -c '[ "$(cat "$1")" = "{\"v\":\"NEW\"}" ] && [ -z "$(ls -A "$2" | grep sandy-launch)" ]' _ "$_T" "$_S190_D/s1/claude"
+# (2) nothing changed -- in Claude Code's own formatting -- hands the container nothing.
+printf '{"b":2,"a":1}' > "$_T"; _I0="$(_s190_ino "$_T")"
+_S190_R="$(_s190 "$_S190_D/s1" 'W="$(_sandy_stage_begin "$SANDBOX_DIR/claude/a.json")"; printf "{\n  \"a\": 1,\n  \"b\": 2\n}\n" | _sandy_write_atomic "$W"; _sandy_stage_commit "$SANDBOX_DIR/claude/a.json"; printf "staged=[%s]\n" "$_SANDY_STAGED"')"
 if command -v node >/dev/null 2>&1; then
-    _S190_CSI="$(sed -n '/^_sandy_csi_write() {/,/^}$/p' "$_S190_SANDY")"
-    mkdir -p "$_S190_D/csb/claude"; _F="$_S190_D/csb/claude/settings.json"
-    printf '{"a":1,"crossSessionInbound":"accept"}' > "$_F"; _I0="$(_s190_ino "$_F")"
-    env -i PATH="$PATH" bash -c 'warn() { :; }; _sandy_path_symlink_component() { return 1; }; WORK_DIR=/x; eval "$1"; _sandy_csi_write accept "$2" "$3"' _ "$_S190_CSI" "$_F" "$_S190_D/csb" || true
-    check "§190(9) the crossSessionInbound writer with the value already set does NOT write (same inode, bytes kept)" \
-        bash -c '[ -n "$3" ] && [ -n "$2" ] && [ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ] && [ "$(cat "$1")" = "{\"a\":1,\"crossSessionInbound\":\"accept\"}" ]' _ "$_F" "$_I0" "$_S190_CSI"
-    env -i PATH="$PATH" bash -c 'warn() { :; }; _sandy_path_symlink_component() { return 1; }; WORK_DIR=/x; eval "$1"; _sandy_csi_write refuse "$2" "$3"' _ "$_S190_CSI" "$_F" "$_S190_D/csb" || true
-    check "§190(9b) ...and with a different value it does write it" \
-        bash -c 'grep -q "\"crossSessionInbound\": \"refuse\"" "$1" && grep -q "\"a\": 1" "$1"' _ "$_F"
+    check "§190(2) the same JSON document in another formatting and key order stages NOTHING (same inode, no staged file, nothing recorded)" \
+        bash -c '[ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ] && [ ! -e "$1.sandy-launch.t1" ] && printf "%s" "$3" | grep -q "staged=\[\]"' _ "$_T" "$_I0" "$_S190_R"
 else
-    skip "§190(9) needs node"
+    skip "§190(2) needs node for the semantic compare"
 fi
-# (6) ratchet: every node temp+rename writer is behind the unchanged-content guard.
-_S190_NT="$(grep -c 'writeFileSync(__t,' "$_S190_SANDY" || true)"
-_S190_NG="$(grep -c 'if (!__same) { const __t = ' "$_S190_SANDY" || true)"
-check "§190(8) ratchet: every node writer that renames a temp into place first skips an unchanged write (${_S190_NG} guarded of ${_S190_NT})" \
-    bash -c '[ "$1" -ge 7 ] && [ "$1" = "$2" ]' _ "$_S190_NT" "$_S190_NG"
+# (3) an absent target: the seed is staged too, the live path stays absent until the container moves it.
+_S190_R="$(_s190 "$_S190_D/s1" 'W="$(_sandy_stage_begin "$SANDBOX_DIR/claude/new.json")"; [ ! -e "$W" ] || exit 9; printf "{}\n" | _sandy_write_atomic "$W"; _sandy_stage_commit "$SANDBOX_DIR/claude/new.json"; [ ! -e "$SANDBOX_DIR/claude/new.json" ] && printf "ok-%s\n" "$_SANDY_STAGED"')"
+check "§190(3) an absent target gets its seed as a staged copy, live path absent until the apply" \
+    bash -c 'printf "%s" "$1" | grep -q "^ok-$2/claude/new.json\$"' _ "$_S190_R" "$_S190_D/s1"
+# (4) a link planted at the target is never written through, by the host or by the apply.
+printf 'HOST\n' > "$_S190_D/victim"; ln -s "$_S190_D/victim" "$_S190_D/s1/claude/l.json"
+_s190 "$_S190_D/s1" 'W="$(_sandy_stage_begin "$SANDBOX_DIR/claude/l.json")"; printf "NEW\n" | _sandy_write_atomic "$W"; _sandy_stage_commit "$SANDBOX_DIR/claude/l.json"; _sandy_launch_apply_staged "$SANDBOX_DIR"'
+check "§190(4) a symlink at the target: its host target is untouched, the staged copy is not seeded from it, and the apply replaces the link with a regular file" \
+    bash -c '[ "$(cat "$1")" = HOST ] && [ ! -L "$2" ] && [ "$(cat "$2")" = NEW ]' _ "$_S190_D/victim" "$_S190_D/s1/claude/l.json"
+# (5) a staged DIRECTORY (claude/statsig): identical is dropped, different is swapped in whole.
+mkdir -p "$_S190_D/s1/claude/statsig"; printf 'x\n' > "$_S190_D/s1/claude/statsig/f"
+_S190_R="$(_s190 "$_S190_D/s1" 'D="$(_sandy_staged_name "$SANDBOX_DIR/claude/statsig")"; cp -r "$SANDBOX_DIR/claude/statsig" "$D"; _sandy_stage_commit "$SANDBOX_DIR/claude/statsig"; printf "same=[%s] left=%s\n" "$_SANDY_STAGED" "$([ -e "$D" ] && echo yes || echo no)"; cp -r "$SANDBOX_DIR/claude/statsig" "$D"; printf "y\n" > "$D/f"; printf "g\n" > "$D/g"; _sandy_stage_commit "$SANDBOX_DIR/claude/statsig"; printf "diff=[%s]\n" "$_SANDY_STAGED"; _sandy_launch_apply_staged "$SANDBOX_DIR"')"
+check "§190(5) a staged directory: an identical copy is removed unrecorded; a different one is recorded and the apply swaps the whole directory in" \
+    bash -c 'printf "%s" "$1" | grep -q "same=\[\] left=no" && printf "%s" "$1" | grep -q "diff=\[$2/claude/statsig\]" && [ "$(cat "$2/claude/statsig/f")" = y ] && [ -f "$2/claude/statsig/g" ] && [ -z "$(ls -A "$2/claude" | grep sandy-launch)" ]' _ "$_S190_R" "$_S190_D/s1"
+# (6) the REAL .claude.json pipeline (stage, seed, heal, merge, trust, commit)
+#     against the file as Claude Code leaves it after a session: compact, the
+#     merged flags present, the workspace trusted, and
+#     hasCompletedProjectOnboarding DROPPED (Claude Code removes it, which is
+#     how the trust entry used to rewrite the file at every launch).
+_S190_CJ="$(awk '/^CLAUDE_JSON_LIVE="\$CLAUDE_JSON"$/{p=1} p{print} p&&/^CLAUDE_JSON="\$CLAUDE_JSON_LIVE"$/{exit}' "$_S190_SANDY")"
+check "§190(6-pre) the .claude.json pipeline was extracted, stage to commit" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_stage_begin \"\$CLAUDE_JSON_LIVE\"" && printf "%s" "$1" | grep -q "json_merge \"\$CLAUDE_JSON\"" && printf "%s" "$1" | grep -q "_sandy_stage_commit \"\$CLAUDE_JSON_LIVE\"" && [ "$(printf "%s\n" "$1" | wc -l | tr -d " ")" -lt 150 ]' _ "$_S190_CJ"
+_s190_cj() {   # _s190_cj <sandbox dir> -> runs the pipeline; prints _SANDY_STAGED
+    env -i PATH="$PATH" SANDBOX_DIR="$1" HOME="$_S190_D/home" HLP="$_S190_HLP" JM="$_S190_JM" CJ="$_S190_CJ" SANDY_WORKSPACE=/home/sandy/w bash -c '
+        set -uo pipefail; eval "$HLP"; eval "$JM"; _sandy_launch_id=t2
+        info() { :; }; warn() { :; }; _sandy_agent_has() { [ "$1" = claude ]; }; _sandy_rekey_home() { :; }
+        CLAUDE_JSON="$SANDBOX_DIR/claude/.claude.json"
+        eval "$CJ"; printf "%s" "$_SANDY_STAGED"' 2>/dev/null
+}
+if command -v node >/dev/null 2>&1; then
+    mkdir -p "$_S190_D/home" "$_S190_D/s6/claude"
+    _T="$_S190_D/s6/claude/.claude.json"
+    printf '{"numStartups":7,"tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding":true,"hasSeenAutoDefaultNudge":true,"hasSeenAutoDefaultNotice":true,"theme":"dark","mcpServers":{"op":{}},"projects":{"/home/sandy/w":{"hasTrustDialogAccepted":true,"history":[{"display":"hi"}]}}}' > "$_T"
+    _I0="$(_s190_ino "$_T")"; _S190_R="$(_s190_cj "$_S190_D/s6")"
+    check "§190(6) a relaunch over a file Claude Code wrote stages NOTHING: same inode, no staged file, nothing recorded (the #400 trigger is gone)" \
+        bash -c '[ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ] && [ -z "$(ls -A "$3" | grep sandy-launch)" ] && [ -z "$4" ]' _ "$_T" "$_I0" "$_S190_D/s6/claude" "$_S190_R"
+    printf '{"numStartups":7,"tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding":true,"mcpServers":{"op":{}},"projects":{"/home/sandy/w":{"hasTrustDialogAccepted":true}}}' > "$_T"
+    _I0="$(_s190_ino "$_T")"; _S190_R="$(_s190_cj "$_S190_D/s6")"
+    check "§190(6b) a launch that DOES add a key (an upgrade): the live file is untouched, the staged copy carries the merge plus everything operator-owned" \
+        bash -c '[ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ] && [ "$4" = "$1" ] && grep -q "hasSeenAutoDefaultNudge" "$1.sandy-launch.t2" && grep -q "\"op\"" "$1.sandy-launch.t2" && grep -q "\"numStartups\": 7" "$1.sandy-launch.t2" && ! grep -q hasSeenAutoDefaultNudge "$1"' _ "$_T" "$_I0" "$_S190_D/s6/claude" "$_S190_R"
+    rm -f "$_T"; _S190_R="$(_s190_cj "$_S190_D/s6")"
+    check "§190(6c) a fresh sandbox: the seed is staged for the container, the live path stays absent, and it records the trust" \
+        bash -c '[ ! -e "$1" ] && [ "$3" = "$1" ] && grep -q "hasTrustDialogAccepted" "$1.sandy-launch.t2" && grep -q "hasCompletedOnboarding" "$1.sandy-launch.t2"' _ "$_T" "$_I0" "$_S190_R"
+else
+    skip "§190(6) needs node"
+fi
+# (7) the REAL settings.json pipeline: a relaunch with the same inputs over
+#     the file the previous launch installed hands the container nothing; a
+#     changed input stages the change and never touches the live file.
+_S190_SB="$(awk '/^if _sandy_agent_has claude; then$/{b=$0; getline; if ($0 ~ /SEED_SETTINGS=/) {f=1; print b}} f{print} f&&/^fi  # end Claude settings seeding/{exit}' "$_S190_SANDY")"
+_s190_st() {   # _s190_st <sandbox dir> <SANDY_SKIP_PERMISSIONS> -> prints _SANDY_STAGED
+    env -i PATH="$PATH" SANDBOX_DIR="$1" HOME="$_S190_D/home" SANDY_SKIP_PERMISSIONS="$2" HLP="$_S190_HLP" SB="$_S190_SB" bash -c '
+        set -uo pipefail; eval "$HLP"; _sandy_launch_id=t3
+        info() { :; }; warn() { :; }; _sandy_agent_has() { [ "$1" = claude ]; }; SANDBOX_IS_NEW=false
+        eval "$SB"; _sandy_stage_commit "$SANDBOX_DIR/claude/settings.json"; printf "%s" "$_SANDY_STAGED"' 2>/dev/null
+}
+if command -v node >/dev/null 2>&1; then
+    mkdir -p "$_S190_D/s7/claude"; _T="$_S190_D/s7/claude/settings.json"
+    _s190_st "$_S190_D/s7" true >/dev/null; _s190 "$_S190_D/s7" '_sandy_launch_apply_staged "$SANDBOX_DIR"'
+    check "§190(7-pre) the first launch installed settings.json through the staged copy" \
+        bash -c '[ -f "$1" ] && grep -q bypassPermissions "$1"' _ "$_T"
+    _I0="$(_s190_ino "$_T")"; _S190_R="$(_s190_st "$_S190_D/s7" true)"
+    check "§190(7) a relaunch with unchanged inputs stages nothing: same inode, no staged file, nothing recorded" \
+        bash -c '[ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ] && [ ! -e "$1.sandy-launch.t3" ] && [ -z "$3" ]' _ "$_T" "$_I0" "$_S190_R"
+    _S190_R="$(_s190_st "$_S190_D/s7" false)"
+    check "§190(7b) a changed input (SANDY_SKIP_PERMISSIONS flipped) is staged: live file and inode untouched, the staged copy carries the change" \
+        bash -c '[ "$(ls -i "$1" | awk "{print \$1}")" = "$2" ] && grep -q bypassPermissions "$1" && [ "$3" = "$1" ] && ! grep -q bypassPermissions "$1.sandy-launch.t3"' _ "$_T" "$_I0" "$_S190_R"
+else
+    skip "§190(7) needs node"
+fi
+# (8) the session marker reaches the container from this launch's own directory.
+check "§190(8) /etc/sandy-session.json is mounted from launch/<id>/ (a path no container has seen), while the host-side copy keeps its name for --print-state" \
+    bash -c 'grep -qF "_sandy_session_mount=\"\$(_sandy_launch_dir)/sandy-session.json\"" "$1" && grep -qF "RUN_FLAGS+=(-v \"\$_sandy_session_mount\":/etc/sandy-session.json:ro)" "$1" && ! grep -qF "RUN_FLAGS+=(-v \"\$_sandy_session_file\":/etc/sandy-session.json:ro)" "$1" && grep -q "^_sandy_launch_dir()  { printf .%s/launch/%s. \"\$SANDBOX_DIR\" \"\$_sandy_launch_id\"; }\$" "$1"' _ "$_S190_SANDY"
+# (9) the container side: user-setup.sh applies the staged files before it touches anything.
+_S190_US="$(sed -n "/^generate_user_setup() {/,/^USERSETUP\$/p" "$_S190_SANDY")"
+# awk reads to the end (no early exit), so the printf feeding it never takes a SIGPIPE under pipefail.
+_S190_US_APPLY="$(printf '%s\n' "$_S190_US" | awk '!n && index($0, "sandy-launch") { n = NR } END { print n + 0 }')"
+_S190_US_FIRST="$(printf '%s\n' "$_S190_US" | awk '!n && (index($0, "Setting up language toolchains") || index($0, "tmux new-session")) { n = NR } END { print n + 0 }')"
+check "§190(9) user-setup.sh moves every <target>.sandy-launch.<id> onto its target BEFORE anything else touches an agent home (apply at line ${_S190_US_APPLY:-?}, first other touch at ${_S190_US_FIRST:-?}), handling dotfiles and directories" \
+    bash -c '[ "$2" -gt 0 ] && [ "$3" -gt 0 ] && [ "$2" -lt "$3" ] && printf "%s" "$1" | grep -q "/.claude/\.\*\.sandy-launch\.\*" && printf "%s" "$1" | grep -q "if \[ -d \"\$_sl\" \]; then rm -rf \"\$_slt\"; fi" && printf "%s" "$1" | grep -q "mv -f \"\$_sl\" \"\$_slt\""' _ "$_S190_US" "$_S190_US_APPLY" "$_S190_US_FIRST"
+check "§190(9b) the template mirror carries the same apply loop (regen-template)" \
+    bash -c 'grep -q "sandy-launch" "$1"' _ "$(cd "$(dirname "$0")/.." && pwd)/templates/user-setup.sh.tmpl"
+# (10) the image says it can apply the staging; a launch whose image cannot falls back host-side, loudly.
+check "§190(10) every generated agent Dockerfile carries LABEL sandy.launch_staging=1 (one per sandy.feature_entries=1), and the launch checks it before docker run with a host-side fallback" \
+    bash -c '[ "$(grep -c "^LABEL sandy.launch_staging=1$" "$1")" -ge 5 ] && [ "$(grep -c "^LABEL sandy.launch_staging=1$" "$1")" = "$(grep -c "^LABEL sandy.feature_entries=1$" "$1")" ] && grep -qF "index .Config.Labels \"sandy.launch_staging\"" "$1" && grep -q "_sandy_launch_apply_staged \"\$SANDBOX_DIR\"" "$1" && [ "$(grep -n "BEGIN stale-image launch-staging fallback" "$1" | cut -d: -f1)" -lt "$(grep -n "^docker run \"\${RUN_FLAGS\[@\]}\"" "$1" | cut -d: -f1)" ]' _ "$_S190_SANDY"
+# (11) ratchet: every per-launch host write into an agent home goes through the staging.
+check "§190(11) ratchet: .claude.json, settings.json, gemini settings.json, codex config.toml, the cmux hook and statsig are all staged, and no host-side writer replaces claude/statsig or codex/config.toml in place any more" \
+    bash -c 'for lit in "_sandy_stage_begin \"\$CLAUDE_JSON_LIVE\"" "_sandy_stage_begin \"\$SEED_SETTINGS_LIVE\"" "_sandy_stage_begin \"\$SANDBOX_DIR/gemini/settings.json\"" "_sandy_stage_begin \"\$SANDBOX_DIR/codex/config.toml\"" "_sandy_staged_name \"\$SANDBOX_DIR/claude/hooks/cmux-notify.sh\"" "_sandy_staged_name \"\$SANDBOX_DIR/claude/statsig\"" "_sandy_stage_commit \"\$CLAUDE_JSON_LIVE\"" "_sandy_stage_commit \"\$SANDBOX_DIR/claude/settings.json\"" "_sandy_stage_commit \"\$SANDBOX_DIR/gemini/settings.json\"" "_sandy_stage_commit \"\$SANDBOX_DIR/codex/config.toml\"" "_sandy_stage_commit \"\$SANDBOX_DIR/claude/hooks/cmux-notify.sh\"" "_sandy_stage_commit \"\$SANDBOX_DIR/claude/statsig\""; do grep -qF -- "$lit" "$1" || { echo "missing: $lit"; exit 1; }; done; ! grep -qF "rm -rf \"\$SANDBOX_DIR/claude/statsig\"" "$1" && ! grep -qF "mv \"\$SANDBOX_DIR/codex/config.toml.new\" \"\$SANDBOX_DIR/codex/config.toml\"" "$1"' _ "$_S190_SANDY"
+# (12) the crossSessionInbound pin and the permission-mode snapshot use the staged copy.
+check "§190(12) crossSessionInbound is written into the staged settings.json (the copy that ships), and the launch snapshot of the permission mode reads it" \
+    bash -c 'grep -qF "_sandy_csi_user_target=\"\${SEED_SETTINGS:-\$SANDBOX_DIR/claude/settings.json}\"" "$1" && grep -qF "_sandy_pm_src=\"\$(_sandy_staged_name \"\$SANDBOX_DIR/claude/settings.json\")\"" "$1"' _ "$_S190_SANDY"
+# (13) leftovers from a launch that never reached its container are deleted before a new id is minted; launch/ is never rsynced.
+check "§190(13) a launch deletes stale launch/ and *.sandy-launch.* leftovers first, mints a fresh id, and --rsync never copies launch/" \
+    bash -c 'grep -q "^rm -rf \"\$SANDBOX_DIR/launch\" \"\$SANDBOX_DIR\"/claude/\.\*\.sandy-launch\.\*" "$1" && grep -q "^_sandy_launch_id=\"\$( (openssl rand -hex 8" "$1" && grep -q "^mkdir -p \"\$SANDBOX_DIR/launch/\$_sandy_launch_id\"" "$1" && sed -n "/^_SANDY_RSY_NEVER=(/,/)$/p" "$1" | grep -q " launch/ "' _ "$_S190_SANDY"
 rm -rf "$_S190_D"
-unset _S190_NT _S190_NG _S190_CSI _I1 _S190_DEF _S190_SANDY _S190_D _S190_HLP _S190_OUT _S190_TR _S190_WR _S190_WR_OK _S190_FB _S190_INPLACE _S190_TF _F _I0
-unset -f _s190_ino _s190_marker 2>/dev/null || true
+unset _S190_SANDY _S190_D _S190_HLP _S190_JM _S190_R _S190_CJ _S190_SB _S190_US _S190_US_APPLY _S190_US_FIRST _T _I0
+unset -f _s190_ino _s190 _s190_cj _s190_st 2>/dev/null || true
 
 
 # BEGIN SUMMARY
