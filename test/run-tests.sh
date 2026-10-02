@@ -1729,14 +1729,20 @@ check "--print-schema agents[] includes grok (sandy-grok)" \
 # ============================================================
 info "28b. Codex CLI support — agent helpers and flag translation"
 # ============================================================
-_BUILD_CODEX="$(sed -n '/^build_codex_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+# build_codex_cmd calls the #427 resume helpers, so they are extracted with it.
+# Each probe gets an EMPTY CODEX_HOME: the helpers read $CODEX_HOME/sessions,
+# and the developer's own ~/.codex could otherwise turn "no args" into a resume.
+_BUILD_CODEX="$(sed -n '/^_sandy_codex_has_session()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_codex_resume_mode()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^build_codex_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+_CODEX_EMPTY_HOME="$(mktemp -d)"
 
 if [ -z "$_HELPERS" ] || [ -z "$_BUILD_CODEX" ] || [ -z "$_BUILD_SHARED" ]; then
     fail "could not extract codex helpers from sandy script (did they move?)"
 else
     _codex_script_test() {
         local desc="$1"; shift
-        if bash -c "set -e; $_HELPERS
+        if CODEX_HOME="$_CODEX_EMPTY_HOME" SANDY_LOGIN_AGENT= SANDY_NEW_SESSION= bash -c "set -e; $_HELPERS
 $_BUILD_SHARED
 $_BUILD_CODEX
 $*" >/dev/null 2>&1; then
@@ -1784,6 +1790,7 @@ $*" >/dev/null 2>&1; then
     _codex_script_test "build_codex_cmd verbose appends exit-code echo" \
         'out=$(SANDY_VERBOSE=1 build_codex_cmd); echo "$out" | grep -q "Codex CLI exited"'
 fi
+rm -rf "$_CODEX_EMPTY_HOME"
 
 # ============================================================
 info "28c. Codex config.toml seeding"
@@ -24164,6 +24171,186 @@ check "§192(6) ...and the staged every-launch statsig refresh remains" \
     bash -c 'grep -qF "_sandy_staged_name \"\$SANDBOX_DIR/claude/statsig\"" "$1" && grep -qF "_sandy_stage_commit \"\$SANDBOX_DIR/claude/statsig\"" "$1"' _ "$_S192_SANDY"
 unset _S192_SANDY _S192_OC_G _S192_OC_W _S192_OC_GUARD _S192_CX_G _S192_CX_W _S192_CX_GUARD
 unset -f _s192_min_write _s192_guard_ln _s192_run_guard 2>/dev/null || true
+
+echo "§193: #427 — codex resumes this workspace's last interactive session; --new starts fresh, --resume opens codex's picker"
+# ============================================================
+# build_codex_cmd used to start a fresh codex TUI on every launch, and sandy's
+# own --resume reached codex verbatim (codex has no top-level --resume, so the
+# TUI refused to start). Asserted as the PROPERTY, by running the built command
+# against a stub `codex` and reading the argv it actually received, over a
+# CODEX_HOME fixture laid out as codex-cli 0.160.0 lays it out: one
+# sessions/YYYY/MM/DD/rollout-*.jsonl per session, whose FIRST line is a
+# session_meta record carrying "cwd" and "source".
+_S193_FN="$(sed -n '/^_sandy_translate_args()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_wrap_cmd_exit_pause()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_codex_has_session()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_codex_resume_mode()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^build_codex_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+_S193_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S193_D/bin" "$_S193_D/home"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "%s/argv"\n' "$_S193_D" > "$_S193_D/bin/codex"
+chmod +x "$_S193_D/bin/codex"
+_s193_reset() { rm -rf "$_S193_D/ch"; mkdir -p "$_S193_D/ch"; }
+_s193_session() {  # $1 name, $2 cwd, $3 source
+    mkdir -p "$_S193_D/ch/sessions/2026/10/02"
+    printf '{"timestamp":"2026-10-02T14:16:11.173Z","ordinal":0,"type":"session_meta","payload":{"id":"%s","cwd":"%s","runtime_workspace_roots":["%s"],"originator":"codex","cli_version":"0.160.0","source":"%s"}}\n{"type":"event_msg"}\n' "$1" "$2" "$2" "$3" \
+        > "$_S193_D/ch/sessions/2026/10/02/rollout-2026-10-02T14-16-11-$1.jsonl"
+}
+# $1 = extra env (space-separated KEY=VAL, may be empty), rest = sandy args.
+# Prints the argv the stub codex received, after RUNNING the built command.
+_s193_argv() {
+    local envs="$1"; shift
+    rm -f "$_S193_D/argv"
+    # shellcheck disable=SC2086
+    env -i PATH="$_S193_D/bin:$PATH" HOME="$_S193_D/home" CODEX_HOME="$_S193_D/ch" \
+        WORKSPACE=/home/sandy/w _sandy_is_headless=false $envs \
+        bash -c 'set -euo pipefail; eval "$1"; shift; c="$(build_codex_cmd "$@")"; bash -c "$c" </dev/null >/dev/null 2>&1 || true' _ "$_S193_FN" "$@" 2>/dev/null
+    cat "$_S193_D/argv" 2>/dev/null || printf 'NOT-RUN\n'
+}
+
+_s193_reset
+check "§193(1) no codex session in this sandbox -> a fresh codex TUI" \
+    bash -c '[ "$1" = "--sandbox danger-full-access" ]' _ "$(_s193_argv '')"
+_s193_session a /home/sandy/w cli
+check "§193(2) an interactive session for this workspace -> codex resume --last (argv the stub received)" \
+    bash -c '[ "$1" = "resume --last --sandbox danger-full-access" ]' _ "$(_s193_argv '')"
+check "§193(3) ...and the resume form keeps sandy's other codex options after the subcommand" \
+    bash -c '[ "$1" = "resume --last --sandbox danger-full-access --model gpt-x -c model_reasoning_effort=high" ]' _ "$(_s193_argv 'CODEX_MODEL=gpt-x SANDY_EFFORT=high')"
+check "§193(4) --new (SANDY_NEW_SESSION=true) starts fresh even with a session present" \
+    bash -c '[ "$1" = "--sandbox danger-full-access" ]' _ "$(_s193_argv 'SANDY_NEW_SESSION=true')"
+check "§193(5) sandy --resume -> codex's own picker (codex resume, no --last, no literal --resume)" \
+    bash -c '[ "$1" = "resume --sandbox danger-full-access" ]' _ "$(_s193_argv '' --resume)"
+check "§193(6) headless -p is untouched by a session: codex exec, no resume" \
+    bash -c 'case "$1" in "exec --sandbox danger-full-access --skip-git-repo-check"*) case "$1" in *resume*) exit 1 ;; esac ;; *) exit 1 ;; esac' _ "$(_s193_argv '_sandy_is_headless=true' -p hello)"
+_s193_reset
+_s193_session b /home/sandy/w exec
+check "§193(7) a codex exec (non-interactive) session alone does not count -> fresh" \
+    bash -c '[ "$1" = "--sandbox danger-full-access" ]' _ "$(_s193_argv '')"
+_s193_reset
+_s193_session c /home/sandy/w-other cli
+_s193_session d /home/sandy/w/sub cli
+check "§193(8) sessions for a sibling prefix (w-other) or a subdirectory (w/sub) do not count -> fresh" \
+    bash -c '[ "$1" = "--sandbox danger-full-access" ]' _ "$(_s193_argv '')"
+check "§193(9) --resume with no session still opens the picker" \
+    bash -c '[ "$1" = "resume --sandbox danger-full-access" ]' _ "$(_s193_argv '' --resume)"
+_s193_session e /home/sandy/w cli
+check "§193(10) a login session (#428) runs codex login --device-auth, whatever sessions or args exist" \
+    bash -c '[ "$1" = "login --device-auth" ] && [ "$2" = "login --device-auth" ]' _ "$(_s193_argv 'SANDY_LOGIN_AGENT=codex')" "$(_s193_argv 'SANDY_LOGIN_AGENT=codex' --resume)"
+check "§193(11) _sandy_translate_args drops --resume for codex (consumed above) and keeps it for opencode" \
+    bash -c 'eval "$1"; c="$(_sandy_translate_args codex --resume)"; o="$(_sandy_translate_args opencode --resume)"; [ -z "$c" ] && [ "$o" = " --resume" ]' _ "$_S193_FN"
+rm -rf "$_S193_D"
+unset _S193_FN _S193_D
+unset -f _s193_reset _s193_session _s193_argv 2>/dev/null || true
+
+
+echo "§194: #429 — SANDY_CODEX_AUTH=oauth withholds OPENAI_API_KEY from the container (except beside opencode)"
+# ============================================================
+# The launch forwarded OPENAI_API_KEY whenever codex was selected, whatever the
+# auth mode, so an oauth session carried a second Codex credential. Runs the
+# REAL codex and opencode env blocks (extracted) with the secret-forwarding
+# call stubbed to record names, and asserts which names reach the container.
+_S194_BLOCKS="$(awk '/^if _sandy_agent_has (codex|opencode); then$/{f=1;buf=""} f{buf=buf $0 "\n"} f&&/^fi$/{f=0; if (index(buf,"_sandy_codex_mode") || index(buf,"Provider API keys")) printf "%s", buf}' "$SANDY_SCRIPT")"
+_s194_fwd() {  # $1 = SANDY_AGENT, $2 = extra env -> "names|run-flags"
+    # shellcheck disable=SC2086
+    env -i PATH="$PATH" OPENAI_API_KEY=sk-test SANDY_AGENT="$1" $2 bash -c '
+        set -euo pipefail
+        _sandy_add_secret_env() { printf "%s " "$1"; }
+        info() { :; }
+        _sandy_agent_has() { case ",$SANDY_AGENT," in *,"$1",*) return 0 ;; esac; return 1; }
+        RUN_FLAGS=()
+        eval "$1"
+        printf "|%s" "${RUN_FLAGS[*]-}"' _ "$_S194_BLOCKS" 2>/dev/null || printf 'ERROR'
+}
+check "§194(0) both env blocks extracted" \
+    bash -c 'case "$1" in *_sandy_codex_mode*"Provider API keys"*) exit 0 ;; esac; exit 1' _ "$_S194_BLOCKS"
+check "§194(1) oauth, codex alone: OPENAI_API_KEY is withheld" \
+    bash -c 'case "$1" in ERROR|*OPENAI_API_KEY*"|"*) exit 1 ;; esac; case "$1" in *"|"*) exit 0 ;; esac; exit 1' _ "$(_s194_fwd codex SANDY_CODEX_AUTH=oauth)"
+check "§194(2) oauth, codex+opencode: the key is forwarded, exactly once (opencode reads it from env)" \
+    bash -c 'n="${1%%|*}"; [ "$n" = "OPENAI_API_KEY " ]' _ "$(_s194_fwd codex,opencode SANDY_CODEX_AUTH=oauth)"
+check "§194(3) auto and api_key still forward the key (unchanged)" \
+    bash -c '[ "${1%%|*}" = "OPENAI_API_KEY " ] && [ "${2%%|*}" = "OPENAI_API_KEY " ]' _ "$(_s194_fwd codex '')" "$(_s194_fwd codex SANDY_CODEX_AUTH=api_key)"
+check "§194(4) a login session (#428) withholds the key and pins oauth + the login carrier into the container" \
+    bash -c 'case "$1" in ERROR|*OPENAI_API_KEY*"|"*) exit 1 ;; esac; case "$1" in *"SANDY_CODEX_AUTH=oauth"*"SANDY_LOGIN_AGENT=codex"*) exit 0 ;; esac; exit 1' _ "$(_s194_fwd codex SANDY_LOGIN_AGENT=codex)"
+check "§194(5) opencode alone still gets the key (its own block)" \
+    bash -c '[ "${1%%|*}" = "OPENAI_API_KEY " ]' _ "$(_s194_fwd opencode '')"
+# load_codex_credentials in a login session: no :ro api-key overlay, no host seed.
+_S194_LCC="$(sed -n '/^load_codex_credentials()/,/^}$/p' "$SANDY_SCRIPT")"
+_S194_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S194_D/home/.codex" "$_S194_D/sb/codex"
+printf '{"tokens":"HOST"}\n' > "$_S194_D/home/.codex/auth.json"
+_S194_R="$(env -i PATH="$PATH" HOME="$_S194_D/home" SANDBOX_DIR="$_S194_D/sb" OPENAI_API_KEY=sk-test SANDY_LOGIN_AGENT=codex bash -c '
+    set -euo pipefail; info() { :; }; warn() { :; }; CODEX_CRED_TMPDIR=""; eval "$1"; load_codex_credentials
+    printf "overlay=%s seeded=%s" "${CODEX_CRED_TMPDIR:-none}" "$([ -e "$SANDBOX_DIR/codex/auth.json" ] && echo yes || echo no)"' _ "$_S194_LCC" 2>/dev/null)"
+check "§194(6) load_codex_credentials in a login session: no api-key overlay and no host seed (got: $_S194_R)" \
+    bash -c '[ "$1" = "overlay=none seeded=no" ]' _ "$_S194_R"
+rm -rf "$_S194_D"
+# The integration runner uses the real $SANDY_HOME, so a maintainer's
+# SANDY_CODEX_AUTH=oauth would flip the api-key sections; each codex launch pins it.
+_S194_IT="$(dirname "$SANDY_SCRIPT")/test/run-integration-tests.sh"
+check "§194(7) run-integration-tests.sh pins SANDY_CODEX_AUTH=api_key on every launch that passes OPENAI_API_KEY to codex" \
+    bash -c 'n="$(grep -c "run_sandy_headless \"OPENAI_API_KEY=\$OPENAI_API_KEY\"" "$1")"; p="$(grep -c "run_sandy_headless \"OPENAI_API_KEY=\$OPENAI_API_KEY\" \"SANDY_CODEX_AUTH=api_key\"" "$1")"; [ "$n" -ge 4 ] && [ "$n" = "$p" ]' _ "$_S194_IT"
+check "§194(8) ...and the OAuth section (§9) pins SANDY_CODEX_AUTH=oauth" \
+    bash -c 'grep -qF "run_sandy_headless \"OPENAI_API_KEY=\" \"SANDY_CODEX_AUTH=oauth\"" "$1"' _ "$_S194_IT"
+unset _S194_BLOCKS _S194_LCC _S194_D _S194_R _S194_IT
+unset -f _s194_fwd 2>/dev/null || true
+
+
+echo "§195: #428 — sandy --login codex: refusals, both routes, and the login carrier's guards"
+# ============================================================
+# Runs the real dispatcher against a stub `docker` whose answers each case sets,
+# so the route decision (live container vs one-shot) is exercised, not grepped.
+_S195_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S195_D/bin" "$_S195_D/ws"
+cat > "$_S195_D/bin/docker" <<'STUB'
+#!/bin/sh
+case "$1" in
+    ps)      [ "$*" = "ps" ] && exit 0; cat "$STUB_DIR/ps" 2>/dev/null; exit 0 ;;
+    inspect) cat "$STUB_DIR/mounts" 2>/dev/null; exit 0 ;;
+    exec)    exit 0 ;;
+esac
+exit 0
+STUB
+chmod +x "$_S195_D/bin/docker"
+_s195() {  # $1 = ps output ("" = no container), $2 = mounts, rest = sandy args -> "rc|output"
+    local o r=0
+    printf '%s' "$1" > "$_S195_D/ps"; printf '%s' "$2" > "$_S195_D/mounts"
+    shift 2
+    o="$(env -i PATH="$_S195_D/bin:$PATH" HOME="$_S195_D" STUB_DIR="$_S195_D" bash "$SANDY_SCRIPT" "$@" </dev/null 2>&1)" || r=$?
+    printf '%s|%s' "$r" "$o"
+}
+check "§195(1) --login with no agent exits 1" \
+    bash -c 'case "$1" in "1|"*"needs an agent"*) exit 0 ;; esac; exit 1' _ "$(_s195 '' '' --login)"
+check "§195(2) --login claude/grok/gemini/opencode exit 1 naming that agent's own route" \
+    bash -c 'case "$1" in "1|"*"/login"*"on the host"*) ;; *) exit 1 ;; esac; case "$2" in "1|"*"grok login"*) ;; *) exit 1 ;; esac; case "$3" in "1|"*) ;; *) exit 1 ;; esac; case "$4" in "1|"*) ;; *) exit 1 ;; esac' _ \
+    "$(_s195 '' '' --login claude)" "$(_s195 '' '' --login grok)" "$(_s195 '' '' --login gemini)" "$(_s195 '' '' --login opencode)"
+check "§195(3) --login without a terminal is refused (exit 1) -- the device flow needs a person" \
+    bash -c 'case "$1" in "1|"*"interactive terminal"*) exit 0 ;; esac; exit 1' _ "$(_s195 '' '' --login codex --workspace "$_S195_D/ws")"
+check "§195(4) --dry-run, nothing running -> the one-shot route: a codex launch carrying SANDY_LOGIN_AGENT=codex" \
+    bash -c 'case "$1" in "0|SANDY_LOGIN_AGENT=codex "*"--agent codex --workspace "*"codex login --device-auth"*) exit 0 ;; esac; exit 1' _ "$(_s195 '' '' --login codex --dry-run --workspace "$_S195_D/ws")"
+check "§195(5) --dry-run, a live container mounting ~/.codex rw -> runs the login IN it via --exec" \
+    bash -c 'case "$1" in "0|"*"docker exec "*" -u "*"abc123 codex login --device-auth"*) exit 0 ;; esac; exit 1' _ \
+    "$(_s195 'abc123' '/home/sandy/.codex true' --login codex --dry-run --workspace "$_S195_D/ws")"
+check "§195(6) a live container WITHOUT the codex home is refused (the login would not persist)" \
+    bash -c 'case "$1" in "1|"*"does not mount"*) exit 0 ;; esac; exit 1' _ \
+    "$(_s195 'abc123' '/home/sandy/.claude true' --login codex --dry-run --workspace "$_S195_D/ws")"
+check "§195(7) a live container on the api-key path (auth.json :ro overlay) is refused" \
+    bash -c 'case "$1" in "1|"*"read-only overlay"*) exit 0 ;; esac; exit 1' _ \
+    "$(_s195 'abc123' "$(printf '/home/sandy/.codex true\n/home/sandy/.codex/auth.json false')" --login codex --dry-run --workspace "$_S195_D/ws")"
+_s195_carrier() {  # $1 = SANDY_LOGIN_AGENT value, rest = sandy args -> "rc|output"
+    local v="$1" o r=0; shift
+    o="$(cd "$_S195_D/ws" && env -i PATH="$PATH" HOME="$_S195_D" SANDY_LOGIN_AGENT="$v" bash "$SANDY_SCRIPT" "$@" </dev/null 2>&1)" || r=$?
+    printf '%s|%s' "$r" "$o"
+}
+check "§195(8) the internal carrier refuses a value other than codex, before any Docker work" \
+    bash -c 'case "$1" in "1|"*"not supported"*) exit 0 ;; esac; exit 1' _ "$(_s195_carrier gemini --build-only)"
+check "§195(9) ...and refuses a login session combined with -p (a login is foreground and interactive)" \
+    bash -c 'case "$1" in "1|"*"cannot be combined"*) exit 0 ;; esac; exit 1' _ "$(_s195_carrier codex -p hi)"
+check "§195(10) --print-schema advertises --login" \
+    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -qF "\"name\":\"--login\""' _ "$SANDY_SCRIPT"
+rm -rf "$_S195_D"
+unset _S195_D
+unset -f _s195 _s195_carrier 2>/dev/null || true
+
 
 # BEGIN SUMMARY
 # ============================================================

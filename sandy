@@ -125,7 +125,7 @@ SANDY_PASSIVE_KEYS=(
 #       SANDY_DAEMON_SUPERVISOR / SANDY_UPDATE_RESTART / SANDY_PROVISION /
 #       SANDY_PROVISION_ID / SANDY_APPROVE_ONLY / SANDY_APPROVE_ONLY_RESULT /
 #       SANDY_DOCKERFILE_DECLINED_HASH / SANDY_APPROVE_REPORT /
-#       SANDY_TEST_PANE_TAGS.
+#       SANDY_TEST_PANE_TAGS / SANDY_LOGIN_AGENT (#428, set by --login).
 #   SANDY_SESSION_NONCE stays fully unregistered (not even in this array) for
 #   trust-root reasons specific to it — see "Self-Attestation Marker" in
 #   CLAUDE.md.
@@ -2163,9 +2163,9 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--no-update-check"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"One-shot SANDY_OFFLINE=1 (#219): skip the agent, skill-pack and sandy release lookups for this launch. Builds that are REQUIRED (missing image, changed inputs) still run. Honored by the bare launch path, -p, --build-only and --start; wins over SANDY_OFFLINE=0 in any config file."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--new"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Start a fresh session (default: resume last)."'; printf '}'
+    printf '{'; _json_kv name '"--new"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Start a fresh session (default: resume last). Applies to claude and (#427) codex, which resumes with codex resume --last when this sandbox holds an interactive codex session for the workspace."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--resume"';       printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Open session picker."'; printf '}'
+    printf '{'; _json_kv name '"--resume"';       printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Open session picker. For codex (#427) this is codex resume, its own picker."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--remote"';       printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Run as a remote-controlled Claude session."';     printf ','; _json_kv agents '["claude"]'; printf '}'
     printf ','
@@ -2195,6 +2195,8 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--exec"';          printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Open a shell (or run one command) inside this workspace running container, as the HOST uid. Exists because the hand-rolled form is wrong: docker resolves -u <name> against the image, where the user is uid 1001, while sandy bind-mounts a passwd carrying the host uid -- so docker exec -u sandy yields uid 1001, prints I have no name!, and writes to the workspace mount as the wrong owner. Finds a labelled daemon container first, then a foreground one by exact name. Sub-options: --workspace PATH, --dry-run (print the docker exec command, run nothing), -- CMD... (default /bin/bash)."'; printf '}'
     printf ','
+    printf '{'; _json_kv name '"--login"';         printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Log an agent in so its credential persists in this workspace sandbox (#428). Supported: codex, via codex login --device-auth (the plain form waits on a localhost callback a host browser cannot reach). Runs inside the workspace running container when one mounts the sandbox codex home rw, else as a one-shot launch whose only pane runs the login with OPENAI_API_KEY withheld. Other agents get an error naming their own route. Needs a terminal. Sub-options: --workspace PATH, --dry-run (print the route, run nothing)."'; printf '}'
+    printf ','
     printf '{'; _json_kv name '"--prune-orphans"'; printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Reap orphaned sandy_* networks (dead-owner, no attached container) and exit."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--stop-all"';      printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Fleet emergency stop: enumerate every daemon session on the host and stop each via the hardened per-session teardown. Sub-options: --dry-run, --yes."'; printf '}'
@@ -2213,7 +2215,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--provision"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Non-interactively materialize one workspace sandbox by running the REAL launch path once (start a detached daemon session, confirm it is up, then stop it) — never a flag that fabricates sandbox state directly. Safe no-op (exit 0) against a workspace that already has a live session (foreground lock holder or running daemon container). --all provisions every sandbox sandy already KNOWS about that is missing the per-sandbox state a launch creates -- pip/ since 2.6.0 (#382; relay-state/ was the target from 2.2.0 through 2.5.x, but a launch no longer creates it), which is what --reset-sandbox leaves behind, and what any launch that failed part-way leaves behind; it enumerates $SANDY_HOME/sandboxes, so a workspace that has never been launched has no directory and cannot be reached by it -- enrolling a new workspace stays a deliberate single --workspace call. A sandbox whose recorded workspace no longer exists cannot be provisioned: it is named, counted as unprepared, and makes the run exit non-zero rather than being skipped silently. Exit 0 iff every known sandbox ends with that state in place. Sub-options: --workspace PATH, --all, --dry-run, --yes."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --update-sessions, --reset-sandbox, --remove-sandbox, --provision, and --approvals. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the other introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
+    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --login, --update-sessions, --reset-sandbox, --remove-sandbox, --provision, and --approvals. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the other introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -6997,6 +6999,117 @@ if [[ "${1:-}" == "--exec" ]]; then
     exit "$_ex_rc"
 fi
 
+# --login <agent> (#428): log an agent in so the credential persists in THIS
+# workspace's sandbox, without knowing how that agent's login has to be run in
+# a container. Only codex needs this, and codex needs it twice over:
+#   - plain `codex login` binds a callback server on the container's
+#     localhost:1455, which no host browser can reach (and under the egress
+#     proxy the agent is on an --internal network with no inbound path at all);
+#     `codex login --device-auth` binds nothing -- it prints a URL plus a code
+#     and polls (verified on codex-cli 0.160.0);
+#   - the api_key path mounts auth.json :ro, so a login there cannot be written.
+# Two routes, both through existing machinery rather than a second launcher:
+#   live  -- a sandy container already runs for the workspace: run the login
+#            in it via `--exec` (host uid, right HOME). Refused when that
+#            container does not mount the sandbox's codex home rw, because the
+#            login would land on tmpfs or hit the :ro overlay and be lost.
+#   one-shot -- nothing runs: re-exec the normal launch with --agent codex and
+#            SANDY_LOGIN_AGENT=codex, whose single pane runs the device login
+#            and ends. Same image, mounts, egress and approvals as any launch;
+#            the credential lands in <sandbox>/codex/auth.json.
+# Other agents already have a working route, which the error names.
+if [[ "${1:-}" == "--login" ]]; then
+    _lg_agent=""; _lg_workspace=""; _lg_dry_run=false
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --workspace)   shift; _lg_workspace="${1:-}"
+                           [ -z "$_lg_workspace" ] && { error "--login: --workspace needs a PATH"; exit 1; } ;;
+            --workspace=*) _lg_workspace="${1#--workspace=}"
+                           [ -z "$_lg_workspace" ] && { error "--login: --workspace needs a PATH"; exit 1; } ;;
+            --dry-run)     _lg_dry_run=true ;;
+            -*)            error "--login: unrecognized option: $1"; exit 1 ;;
+            *)             [ -n "$_lg_agent" ] && { error "--login: one agent at a time (got '$_lg_agent' and '$1')"; exit 1; }
+                           _lg_agent="$1" ;;
+        esac
+        shift
+    done
+    case "$_lg_agent" in
+        codex) ;;
+        "")       error "--login needs an agent: sandy --login codex"; exit 1 ;;
+        claude)   error "--login claude: not needed. Sandy reads Claude's credential from the host at every launch: log in with 'claude' (/login) on the host, or set SANDY_CLAUDE_AUTH/an API key."; exit 1 ;;
+        grok)     error "--login grok: not needed. Run 'grok login' inside a sandy session; ~/.grok is a rw sandbox mount, so it persists (or set XAI_API_KEY)."; exit 1 ;;
+        gemini)   error "--login gemini: not supported. Authenticate on the host (gemini, or gcloud ADC) or set GEMINI_API_KEY; sandy reads them at each launch."; exit 1 ;;
+        opencode) error "--login opencode: not supported. Set the provider's API key, or run 'opencode auth login' on the host; sandy mounts its auth.json."; exit 1 ;;
+        *)        error "--login: unknown agent '$_lg_agent' (supported: codex)"; exit 1 ;;
+    esac
+
+    # The device flow needs a person to open a URL and type a code, and the
+    # one-shot route is an interactive tmux launch. --dry-run only prints.
+    if [ "$_lg_dry_run" != true ] && { [ ! -t 0 ] || [ ! -t 1 ]; }; then
+        error "--login needs an interactive terminal (the device login shows a URL and a code to enter)."
+        exit 1
+    fi
+
+    _lg_wd="${_lg_workspace:-$PWD}"
+    [ -d "$_lg_wd" ] || { error "--login: workspace not found: $_lg_wd"; exit 1; }
+    _lg_wd="$(cd "$_lg_wd" 2>/dev/null && pwd -P)" || { error "--login: cannot resolve workspace"; exit 1; }
+    _lg_hash="$(printf '%s' "$_lg_wd" | sha256)"; _lg_hash="${_lg_hash%% *}"; _lg_hash="${_lg_hash:0:8}"
+    _lg_base="$(basename "$_lg_wd" | tr -cd 'a-zA-Z0-9._-')"; _lg_base="${_lg_base:-project}"
+    _lg_name="${_lg_base}-${_lg_hash}"
+
+    # Same lookup as --exec: a labelled daemon first, then a foreground one by
+    # exact name. No Docker means nothing can be running, so --dry-run can
+    # still describe the one-shot route; a real run needs Docker either way.
+    _lg_container=""
+    if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1; then
+        _lg_container="$(docker ps -q --filter "label=sandy.daemon=true" --filter "label=sandy.workspace_path=$_lg_wd" 2>/dev/null | head -1)" || true
+        if [ -z "$_lg_container" ]; then
+            _lg_container="$(docker ps -q --filter "name=^sandy-${_lg_name}$" 2>/dev/null | head -1)" || true
+        fi
+    elif [ "$_lg_dry_run" != true ]; then
+        error "--login requires a reachable Docker daemon."
+        exit 1
+    fi
+
+    if [ -n "$_lg_container" ]; then
+        # Live route. The login must reach the sandbox's codex home: a rw bind
+        # at ~/.codex, with no :ro overlay at ~/.codex/auth.json (the api_key
+        # path). A combo without codex has no such mount at all.
+        _lg_mounts="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$_lg_container" 2>/dev/null)" || _lg_mounts=""
+        _lg_home_rw=false; _lg_auth_ro=false
+        while read -r _lg_dst _lg_rw; do
+            case "$_lg_dst" in
+                /home/sandy/.codex)           [ "$_lg_rw" = true ] && _lg_home_rw=true ;;
+                /home/sandy/.codex/auth.json) [ "$_lg_rw" = true ] || _lg_auth_ro=true ;;
+            esac
+        done <<< "$_lg_mounts"
+        if [ "$_lg_home_rw" != true ]; then
+            error "The running session for $_lg_wd does not mount this sandbox's codex home, so a login there would not persist."
+            error "  Stop it ('sandy --stop' for a daemon, or exit the foreground session), then run 'sandy --login codex' again."
+            exit 1
+        fi
+        if [ "$_lg_auth_ro" = true ]; then
+            error "The running session uses OPENAI_API_KEY (auth.json is a read-only overlay), so codex login cannot write it."
+            error "  Stop it, then run 'sandy --login codex' again: a login session withholds the key."
+            exit 1
+        fi
+        info "Logging codex in inside the running session (${_lg_container:0:12}); the credential persists in this sandbox."
+        _lg_exec=("$0" --exec --workspace "$_lg_wd")
+        [ "$_lg_dry_run" = true ] && _lg_exec+=(--dry-run)
+        exec "${_lg_exec[@]}" -- codex login --device-auth
+    fi
+
+    # One-shot route: the normal launch, one codex pane running the login.
+    if [ "$_lg_dry_run" = true ]; then
+        printf 'SANDY_LOGIN_AGENT=codex %q --agent codex --workspace %q\n' "$0" "$_lg_wd"
+        printf '  (one-shot launch; its codex pane runs: codex login --device-auth)\n'
+        exit 0
+    fi
+    info "No sandy session runs for $_lg_wd; starting a one-shot launch whose only job is 'codex login --device-auth'."
+    SANDY_LOGIN_AGENT=codex exec "$0" --agent codex --workspace "$_lg_wd"
+fi
+
 if [[ "${1:-}" == "--provision" ]]; then
     _pv_workspace=""; _pv_dry_run=false; _pv_yes=false; _pv_all=false
     shift
@@ -7391,8 +7504,9 @@ Flags:
   --no-update-check  Skip agent/skill-pack/sandy update checks for this
                      launch (one-shot SANDY_OFFLINE=1). Required builds
                      (missing image, changed inputs) still run.
-  --new              Start a fresh session (default: resume last)
-  --resume           Open session picker
+  --new              Start a fresh session (default: resume last; claude
+                     and codex)
+  --resume           Open session picker (claude, and codex's own picker)
   --remote           Start in remote-control server mode
   --upgrade          Update sandy to the latest version
   --agent <list>     Agent(s) to launch (overrides SANDY_AGENT and
@@ -7402,8 +7516,8 @@ Flags:
   --workspace <path> Target workspace directory (defaults to the current
                      directory). Honored by the bare launch path (including
                      -p/--rebuild/--build-only), --start, --attach, --stop,
-                     --update-sessions, --reset-sandbox, --remove-sandbox,
-                     --provision, and --approvals.
+                     --exec, --login, --update-sessions, --reset-sandbox,
+                     --remove-sandbox, --provision, and --approvals.
   -v                 Verbose: show startup sections, pause on exit
   -vv                Debug: add bash trace to user-setup.sh
   -vvv               Full trace: also trace entrypoint.sh and show docker flags
@@ -7414,12 +7528,16 @@ that started it, so a closed tab/dropped SSH/IDE quit does not end it):
                      return once attachable. Sub-options: --workspace PATH
   --attach           Attach an interactive client to a running daemon
                      session (last-wins: a second attach displaces the
-  --exec [-- CMD]    Shell (or run CMD) inside this workspace's running
-                     container as the host uid -- the hand-rolled
-                     'docker exec -u sandy' silently runs as uid 1001.
                      first). Exit codes: 0 = session ended while attached,
                      3 = clean detach (session lives on), 4 = no such
                      session. Sub-options: --workspace PATH
+  --exec [-- CMD]    Shell (or run CMD) inside this workspace's running
+                     container as the host uid -- the hand-rolled
+                     'docker exec -u sandy' silently runs as uid 1001.
+  --login codex      Log codex in so the credential persists in this
+                     workspace's sandbox (codex's device login): inside the
+                     running session if there is one, else a one-shot
+                     launch. Sub-options: --workspace PATH, --dry-run
   --stop             Stop a running daemon session (full teardown: container,
                      proxy, networks, lock). Sub-options: --workspace PATH
   --update-sessions  Fleet image refresh + rolling restart across every
@@ -7643,6 +7761,25 @@ for _sandy_headless_arg in "$@"; do
         -p|--print|--prompt) _sandy_is_headless=true; break ;;
     esac
 done
+
+# #428: SANDY_LOGIN_AGENT is the internal carrier `sandy --login <agent>` sets
+# when it re-execs this launch as a one-shot login session. Env-only by
+# construction (it is no config key, so the allowlist drops it from every
+# .sandy/config). It only ever makes the launch do LESS -- the pane runs the
+# agent's own login instead of the agent -- but a stray value must still not
+# turn into a half-configured session, so anything but the one supported
+# agent, and any shape that is not a foreground interactive launch, refuses.
+if [ -n "${SANDY_LOGIN_AGENT:-}" ]; then
+    case "$SANDY_LOGIN_AGENT" in
+        codex) ;;
+        *) error "SANDY_LOGIN_AGENT='$SANDY_LOGIN_AGENT' is not supported (only codex). Use 'sandy --login <agent>'."; exit 1 ;;
+    esac
+    if [ "$_sandy_is_headless" = "true" ] || [ "$SANDY_START" = "true" ] || [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ] \
+       || [ "$SANDY_REMOTE_CONTROL" = "true" ] || [ "${SANDY_PROVISION:-0}" = "1" ]; then
+        error "A login session ('sandy --login $SANDY_LOGIN_AGENT') is a foreground interactive launch; it cannot be combined with -p, --start, --remote or --provision."
+        exit 1
+    fi
+fi
 
 # The sandy self-update check used to run here. It moved below config loading
 # (#219), because SANDY_OFFLINE may come from a config file and only the loaded
@@ -9180,11 +9317,16 @@ _sandy_translate_args() {
                 # Headless mode is a subcommand (`codex exec` / `opencode run`)
                 # with the prompt as a positional arg, so the -p flag itself
                 # is dropped (its value remains as a regular positional arg).
-                # No headless resume → --continue / -c dropped.
+                # No headless resume → --continue / -c dropped. For codex,
+                # sandy's --resume is consumed by build_codex_cmd (#427: it
+                # becomes `codex resume`); codex has no top-level --resume, so
+                # passing it through would make the TUI refuse to start.
                 case "$arg" in
                     -p|--print|--prompt) : ;;
                     --continue|-c)       : ;;
-                    *)                   out+=" $(printf '%q' "$arg")" ;;
+                    *)  if [ "$agent" != codex ] || [ "$arg" != --resume ]; then
+                            out+=" $(printf '%q' "$arg")"
+                        fi ;;
                 esac
                 ;;
             grok)
@@ -9329,11 +9471,57 @@ build_claude_cmd() {
     _sandy_wrap_cmd_exit_pause "Claude Code" "$cmd"
 }
 
+# #427: does this sandbox hold an INTERACTIVE codex session for this workspace?
+# Verified against codex-cli 0.160.0: every session writes
+# $CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl whose FIRST line is a
+# session_meta record carrying "cwd" and "source" ("exec" for `codex exec`).
+# `codex resume --last` itself filters by cwd and skips non-interactive
+# sessions unless --include-non-interactive, so this asks exactly the question
+# it answers: is there an interactive session whose cwd is this workspace?
+# The state DB (state_5.sqlite) is NOT evidence -- codex creates it on first
+# start with no session at all. A workspace path codex would JSON-escape (a
+# quote or backslash) never matches, which fails safe: a fresh session.
+_sandy_codex_has_session() {   # $1 = the cwd codex records (the workspace)
+    local d="${CODEX_HOME:-$HOME/.codex}/sessions" f line
+    [ -d "$d" ] || return 1
+    while IFS= read -r f; do
+        line=""
+        IFS= read -r line < "$f" || [ -n "$line" ] || continue
+        case "$line" in *'"source":"exec"'*) continue ;; esac
+        case "$line" in *"\"cwd\":\"$1\""*) return 0 ;; esac
+    done < <(find "$d" -type f -name 'rollout-*.jsonl' 2>/dev/null)
+    return 1
+}
+# #427: which resume form the interactive codex pane gets.
+#   picker -- sandy's --resume (codex's own session picker, `codex resume`)
+#   last   -- a prior interactive session exists for this workspace
+#   ""     -- start fresh: none exists, or --new / SANDY_NEW_SESSION=true
+# Mirrors build_claude_cmd's auto_continue; each pane decides independently.
+_sandy_codex_resume_mode() {
+    local a
+    for a in "$@"; do
+        case "$a" in --resume) printf picker; return 0 ;; esac
+    done
+    [ "${SANDY_NEW_SESSION:-false}" = "true" ] && return 0
+    if _sandy_codex_has_session "${WORKSPACE:-$PWD}"; then printf last; fi
+    return 0
+}
+
 build_codex_cmd() {
     # Headless: codex exec [PROMPT] (positional arg, not a flag)
-    # Interactive: codex (TUI)
+    # Interactive: codex (TUI), or `codex resume --last` / `codex resume` (#427)
     # --sandbox danger-full-access is belt-and-suspenders alongside the
     # sandbox_mode in ~/.codex/config.toml. Do not remove either.
+    #
+    # #428: `sandy --login codex` runs this same launch with SANDY_LOGIN_AGENT
+    # set, and the pane runs the device login instead of the TUI. Device auth
+    # binds no port (plain `codex login` waits on a localhost callback no host
+    # browser can reach), and the result lands in the rw ~/.codex mount, i.e.
+    # $SANDBOX_DIR/codex/auth.json, which wins on every later launch.
+    if [ "${SANDY_LOGIN_AGENT:-}" = "codex" ]; then
+        printf '%s' "codex login --device-auth; _rc=\$?; echo ''; if [ \$_rc -eq 0 ]; then echo '[sandy] codex login saved to this sandbox. Press Enter to exit.'; else echo \"[sandy] codex login failed (code \$_rc). Press Enter to exit.\"; fi; read -p ''"
+        return 0
+    fi
     local headless=false
     for arg in "$@"; do
         case "$arg" in -p|--print|--prompt) headless=true; break ;; esac
@@ -9347,7 +9535,13 @@ build_codex_cmd() {
         # runs from non-git workspaces.
         cmd="codex exec --sandbox danger-full-access --skip-git-repo-check"
     else
-        cmd="codex --sandbox danger-full-access"
+        # #427. `codex resume` takes the same -s/-m/-c options as the bare TUI
+        # (codex-cli 0.160.0 `codex resume --help`), so only the head changes.
+        case "$(_sandy_codex_resume_mode "$@")" in
+            last)   cmd="codex resume --last --sandbox danger-full-access" ;;
+            picker) cmd="codex resume --sandbox danger-full-access" ;;
+            *)      cmd="codex --sandbox danger-full-access" ;;
+        esac
     fi
     if [ -n "${CODEX_MODEL:-}" ]; then
         cmd+=" --model $(printf "%q" "$CODEX_MODEL")"
@@ -12189,6 +12383,12 @@ else
 fi
 # Helper: check if a specific agent is in the resolved agent list
 _sandy_agent_has() { case ",$SANDY_AGENT," in *,"$1",*) return 0 ;; esac; return 1; }
+# #428: a login session runs exactly the agent it logs in. `sandy --login`
+# passes --agent itself; this catches the internal variable set by hand.
+if [ -n "${SANDY_LOGIN_AGENT:-}" ] && [ "$SANDY_AGENT" != "$SANDY_LOGIN_AGENT" ]; then
+    error "A '$SANDY_LOGIN_AGENT' login session must run SANDY_AGENT=$SANDY_LOGIN_AGENT alone (got '$SANDY_AGENT')."
+    exit 1
+fi
 if ! _sandy_agent_has claude && [ -n "${SANDY_SKILL_PACKS:-}" ]; then
     echo "[sandy] ERROR: SANDY_SKILL_PACKS requires claude in SANDY_AGENT (got '$SANDY_AGENT')" >&2
     exit 1
@@ -16310,6 +16510,28 @@ _gemini_write_auth_type() {
 # therefore still refused on this path; that is stated in the launch line.
 load_codex_credentials() {
     local mode="${SANDY_CODEX_AUTH:-auto}"
+    # #368: codex/ is a rw agent-home mount, so a prior session can plant a
+    # symlink at auth.json. The -s test and the host `cp` seed below both
+    # follow a link -- the cp would write the host's OAuth token THROUGH it to
+    # a path outside the workspace -- and so would an in-container `codex
+    # login` (#428). Remove a planted link first (§169's shape), in every mode;
+    # a real prior login is a regular file this leaves alone.
+    if [ -L "$SANDBOX_DIR/codex/auth.json" ]; then
+        warn "Removed a symlink at codex/auth.json -- sandy seeds this host-side and will not write through a link planted in the agent-writable ~/.codex."
+        rm -f "$SANDBOX_DIR/codex/auth.json"
+    fi
+    # #428: a `sandy --login codex` session is oauth by definition. The api_key
+    # overlay would mount auth.json :ro over the very path `codex login` writes,
+    # and the host seed would hand codex a credential it is about to replace.
+    # So: no overlay, no seed. The login writes $SANDBOX_DIR/codex/auth.json
+    # (rw mount), and every later launch finds it via the -s branch below.
+    if [ "${SANDY_LOGIN_AGENT:-}" = "codex" ]; then
+        if [ -s "$SANDBOX_DIR/codex/auth.json" ]; then
+            info "Codex login: this sandbox already holds a credential; a successful login replaces it."
+        fi
+        [ -n "${OPENAI_API_KEY:-}" ] && info "Codex login: OPENAI_API_KEY is set but withheld from this session (oauth)."
+        return 0
+    fi
     if [ "$mode" = "api_key" ] || [ "$mode" = "auto" ]; then
         if [ -n "${OPENAI_API_KEY:-}" ]; then
             # codex 0.139+ no longer reads OPENAI_API_KEY from the environment
@@ -16323,7 +16545,7 @@ load_codex_credentials() {
             CODEX_CRED_TMPDIR="$(mktemp -d)"
             printf '{"OPENAI_API_KEY":"%s"}\n' "$_k" > "$CODEX_CRED_TMPDIR/auth.json"
             chmod 600 "$CODEX_CRED_TMPDIR/auth.json"
-            info "Using OPENAI_API_KEY for Codex (ephemeral auth.json, read-only mount; in-container 'codex login' cannot write it -- unset the key or set SANDY_CODEX_AUTH=oauth to log in interactively)"
+            info "Using OPENAI_API_KEY for Codex (ephemeral auth.json, read-only mount; in-container 'codex login' cannot write it -- to log in instead, run 'sandy --login codex')"
             return 0
         fi
     fi
@@ -16332,17 +16554,8 @@ load_codex_credentials() {
         # someone ran `codex login` inside this container, which is a more
         # deliberate and more recent act than whatever the host happens to hold.
         # (An EMPTY auth.json -- what codex leaves behind on the api_key path --
-        # is already removed earlier in setup, so -s is the right test.)
-        # #368: codex/ is a rw agent-home mount, so a prior session can plant a
-        # symlink at auth.json. Both the -s test below and the host `cp` seed
-        # follow a link -- the cp would write the host's OAuth token THROUGH it
-        # to a path outside the workspace. Remove a planted link first (§169's
-        # shape) so neither the test nor the seed follows it; a real prior login
-        # is a regular file this leaves alone.
-        if [ -L "$SANDBOX_DIR/codex/auth.json" ]; then
-            warn "Removed a symlink at codex/auth.json -- sandy seeds this host-side and will not write through a link planted in the agent-writable ~/.codex."
-            rm -f "$SANDBOX_DIR/codex/auth.json"
-        fi
+        # is already removed earlier in setup, so -s is the right test. A
+        # planted symlink was removed at the top of this function, #368.)
         if [ -s "$SANDBOX_DIR/codex/auth.json" ]; then
             info "Using Codex credentials from this sandbox (an in-container 'codex login'); the host copy is not used"
             return 0
@@ -16357,7 +16570,7 @@ load_codex_credentials() {
             return 0
         fi
     fi
-    warn "No Codex credentials found. Set OPENAI_API_KEY, run 'codex login' on the host, or run it inside the container (it persists in this sandbox)."
+    warn "No Codex credentials found. Run 'sandy --login codex' (persists in this sandbox), set OPENAI_API_KEY, or run 'codex login' on the host."
 }
 
 # OpenCode credential probe. Unlike claude/gemini/codex which each have one
@@ -18111,13 +18324,31 @@ if _sandy_agent_has gemini; then
     done
 fi
 if _sandy_agent_has codex; then
+    # #429: oauth means the account credential is the one Codex credential in
+    # the box -- the one-credential rule Claude already follows. auto with a
+    # key set resolves to the key (load_codex_credentials), so only an explicit
+    # oauth, or a login session (#428), withholds it. The exception is a combo
+    # with opencode, which is provider-agnostic and reads OPENAI_API_KEY from
+    # the environment: withholding it there would break the opencode pane, so
+    # the key stays and the launch says so.
+    _sandy_codex_mode="${SANDY_CODEX_AUTH:-auto}"
+    [ "${SANDY_LOGIN_AGENT:-}" = "codex" ] && _sandy_codex_mode=oauth
     if [ -n "${OPENAI_API_KEY:-}" ]; then
-        _sandy_add_secret_env OPENAI_API_KEY "$OPENAI_API_KEY"
+        if [ "$_sandy_codex_mode" != "oauth" ]; then
+            _sandy_add_secret_env OPENAI_API_KEY "$OPENAI_API_KEY"
+        elif _sandy_agent_has opencode; then
+            _sandy_add_secret_env OPENAI_API_KEY "$OPENAI_API_KEY"
+            info "SANDY_CODEX_AUTH=oauth: OPENAI_API_KEY still reaches the container because opencode is in this combo and reads it from the environment."
+        else
+            info "SANDY_CODEX_AUTH=oauth: OPENAI_API_KEY is withheld from the container (Codex uses its OAuth credential)."
+        fi
     fi
     if [ -n "${CODEX_MODEL:-}" ]; then
         RUN_FLAGS+=(-e "CODEX_MODEL=$CODEX_MODEL")
     fi
-    if [ -n "${SANDY_CODEX_AUTH:-}" ]; then
+    if [ "${SANDY_LOGIN_AGENT:-}" = "codex" ]; then
+        RUN_FLAGS+=(-e "SANDY_CODEX_AUTH=oauth" -e "SANDY_LOGIN_AGENT=codex")
+    elif [ -n "${SANDY_CODEX_AUTH:-}" ]; then
         RUN_FLAGS+=(-e "SANDY_CODEX_AUTH=$SANDY_CODEX_AUTH")
     fi
 fi
