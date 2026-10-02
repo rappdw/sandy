@@ -297,7 +297,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | Flag | Description |
 |---|---|
 | `--new` | Start a fresh session (default: resume last) |
-| `--resume` | Open session picker (forwarded to claude) |
+| `--resume` | Open session picker (claude's, or `codex resume` for codex) |
 | `--remote` | Start in [remote-control](https://code.claude.com/docs/en/remote-control) server mode (connect from browser/phone) |
 | `--rebuild` | Force rebuild of the Docker image |
 | `--build-only` | Build images and exit (for CI) |
@@ -308,6 +308,7 @@ Only allowlisted `KEY=VALUE` lines are parsed (not sourced as a shell script). U
 | `--start` | Start a detached [daemon session](#daemon-mode) and return once attachable |
 | `--attach` | Attach an interactive client to a running daemon session |
 | `--stop` | Stop a running daemon session (full teardown) |
+| `--login codex` | Log codex in so its credential persists in this workspace's sandbox (`codex login --device-auth`), inside the running session if there is one, else in a one-shot launch. Sub-options: `--workspace PATH`, `--dry-run`. See [Running Codex CLI](#running-codex-cli-sandy_agentcodex) |
 | `--exec [-- CMD]` | Shell (or run `CMD`) inside this workspace's running container, **as the host uid**. Do not hand-roll it: `docker exec -u sandy` resolves the name against the *image*, where the user is uid 1001, so it runs as the wrong owner and prints `I have no name!`. Sub-options: `--workspace PATH`, `--dry-run`. See [Getting a shell inside a running sandbox](#getting-a-shell-inside-a-running-sandbox-sandy---exec) |
 | `--stop-all` | **Fleet emergency stop** — stop every daemon session on the host via the hardened per-session teardown. Sub-options: `--dry-run`, `--yes` |
 | `--prune-orphans` | Reap orphaned `sandy_*` Docker networks and exit |
@@ -358,7 +359,7 @@ To automate this as a global keyboard shortcut (e.g., Ctrl+Cmd+U):
 
 ```sh
 sandy --exec                  # interactive shell in this workspace's container
-sandy --exec -- codex login --device-auth
+sandy --exec -- codex login --device-auth   # or simply: sandy --login codex
 sandy --exec --workspace ~/other-project -- git status
 sandy --exec --dry-run        # print the docker exec command, run nothing
 ```
@@ -423,9 +424,13 @@ Sandy supports two Codex auth paths, probed automatically unless `SANDY_CODEX_AU
 | Path | How to set up | When to use |
 |---|---|---|
 | API key | `OPENAI_API_KEY=sk-...` in `.sandy/.secrets` — sandy writes it into an ephemeral `auth.json` (what `codex login --with-api-key` would create) and mounts it **read-only**; codex 0.139+ ignores the bare env var for auth | Simplest; works on headless servers |
-| OAuth (ChatGPT) | Run `codex login` **on the host** once — sandy copies `~/.codex/auth.json` into the container as a **read-only** mount on each launch | ChatGPT Plus/Team/Enterprise accounts |
+| OAuth (ChatGPT) | `sandy --login codex` in the workspace, or `codex login` **on the host** once — sandy seeds `~/.codex/auth.json` into this workspace's sandbox, where in-session refresh and later logins persist | ChatGPT Plus/Team/Enterprise accounts |
 
-Because the OAuth mount is read-only, in-session token refresh will fail — if your token expires, run `codex login` inside the sandy session (or back on the host for next launch). This is intentional: a writable mount would leak refreshed tokens back to the host and open a stale-token race on session exit.
+**`sandy --login codex`** logs codex in for this workspace's sandbox. It runs `codex login --device-auth` — the plain `codex login` waits on a `localhost:1455` callback that a browser on the host can never reach — and the credential lands in the sandbox's own `codex/auth.json`, which wins over the host's on every later launch. If a sandy session already runs for the workspace, the login runs inside it; otherwise sandy starts a one-shot launch whose only pane is the login. The session is OAuth by definition, so `OPENAI_API_KEY` is withheld from it. `--workspace PATH` and `--dry-run` (print the route, run nothing) are accepted; it needs a terminal. Other agents already have a route: claude is read from the host at every launch (log in there), `grok login` works inside the session, gemini and opencode authenticate on the host.
+
+**`SANDY_CODEX_AUTH=oauth` withholds `OPENAI_API_KEY` from the container**, so the account credential is the only Codex credential in the box — except beside opencode (`SANDY_AGENT=codex,opencode`), which reads the key from the environment; there the key still reaches the container and the launch says so.
+
+**Codex resumes where you left off.** An interactive launch runs `codex resume --last` when this sandbox already holds an interactive codex session for the workspace, and a plain `codex` otherwise. `sandy --new` starts fresh, and `sandy --resume` opens codex's own session picker (`codex resume`). Sessions started by `codex exec` (headless `-p`) do not count, and headless runs are never resumed.
 
 Sandy forces `sandbox_mode = "danger-full-access"` in the container's `~/.codex/config.toml` and passes `--sandbox danger-full-access` on the CLI (belt-and-suspenders). Codex's Landlock sandbox does not nest cleanly inside Docker — sandy provides the outer isolation. On first launch sandy also seeds a full `[notice]` block in `config.toml` to suppress all first-run prompts and appends a trusted-project entry for your workspace.
 

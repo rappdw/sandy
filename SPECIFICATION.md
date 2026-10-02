@@ -64,7 +64,8 @@ The previous `both` alias (= `claude,gemini`) was removed in `v0.12`. Using it n
 sandy                          # Interactive session (resume last or start new)
 sandy -p "prompt"              # One-shot prompt (no interactive session)
 sandy --new                    # Force fresh session
-sandy --resume                 # Open session picker (forwarded to claude)
+sandy --resume                 # Open session picker (claude's; codex: codex resume)
+sandy --login codex            # Log codex in for this workspace's sandbox (#428)
 sandy --remote                 # Remote-control server mode (headless)
 ```
 
@@ -117,7 +118,7 @@ See `SPEC_INTROSPECTION.md` for field-by-field documentation and the stability c
 
 ### Argument Forwarding
 
-All unrecognized arguments (including `-p "prompt"`, `--resume`, `--continue`) are forwarded to the `claude` binary inside the container.
+All unrecognized arguments (including `-p "prompt"`, `--resume`, `--continue`) are forwarded to the agent inside the container, through each agent's own translation (`_sandy_translate_args`). For codex, `--resume` is consumed by `build_codex_cmd` and becomes `codex resume` (#427); codex has no top-level `--resume`, so forwarding it verbatim would stop the TUI from starting.
 
 ### Flag Parsing
 
@@ -1033,7 +1034,7 @@ Sandy's `load_codex_credentials()` tries the following sources, controlled by `S
 | Mode | Source | Container mount / env |
 |---|---|---|
 | `api_key` | `OPENAI_API_KEY` env var on host | Materialized as an ephemeral `auth.json` (`{"OPENAI_API_KEY":"…"}` — what `codex login --with-api-key` writes) mounted at `/home/sandy/.codex/auth.json` **read-only**; the env var is also forwarded via `-e OPENAI_API_KEY=…` for other in-container tooling |
-| `oauth` | `$SANDBOX_DIR/codex/auth.json` if present and non-empty, else host `~/.codex/auth.json` | The host copy is **seeded into the sandbox** (`$SANDBOX_DIR/codex/auth.json`, mode 600) and reached through the existing **read-write** `~/.codex` mount — no `:ro` overlay, so an in-container `codex login` can write and persist. The host file is only ever read |
+| `oauth` | `$SANDBOX_DIR/codex/auth.json` if present and non-empty, else host `~/.codex/auth.json` | The host copy is **seeded into the sandbox** (`$SANDBOX_DIR/codex/auth.json`, mode 600) and reached through the existing **read-write** `~/.codex` mount — no `:ro` overlay, so an in-container `codex login` can write and persist. The host file is only ever read. **`OPENAI_API_KEY` is not forwarded** (#429), unless opencode shares the container (below) |
 
 In `auto` mode (default), `OPENAI_API_KEY` wins if set; otherwise this sandbox's own `auth.json` is used if present and non-empty; otherwise the host's is seeded in; otherwise a warning is emitted. The api_key path materializes a file (rather than relying on env passthrough) because codex 0.139+ no longer reads `OPENAI_API_KEY` from the environment for first-party auth — requests go out with no Authorization header at all and fail with 401 "Missing bearer or basic authentication in header".
 
@@ -1054,7 +1055,9 @@ SANDY_CODEX_AUTH=oauth
 codex login --device-auth
 ```
 
-**Precondition, and it is the usual trip-up:** with `OPENAI_API_KEY` set, `auto` selects the **api_key** path, whose `auth.json` is a read-only overlay — `codex login` is refused there by design (previous paragraph). Unset the key or pin `SANDY_CODEX_AUTH=oauth`.
+**Precondition, and it is the usual trip-up:** with `OPENAI_API_KEY` set, `auto` selects the **api_key** path, whose `auth.json` is a read-only overlay — `codex login` is refused there by design (previous paragraph). Unset the key or pin `SANDY_CODEX_AUTH=oauth` — or use `sandy --login codex` (E.13b), which handles both.
+
+**`oauth` withholds `OPENAI_API_KEY` from the container (#429).** It used to be forwarded as `-e OPENAI_API_KEY=…` whatever the mode, so an `oauth` session still carried a second Codex credential — the one-credential rule Claude follows (`SANDY_CLAUDE_AUTH`) was not applied to codex. Now an explicit `oauth`, or a `--login` session, forwards no key and the launch says so in one info line. `auto` is unchanged: with a key set it resolves to `api_key`, which forwards it. **Exception: opencode in the same container** (`SANDY_AGENT=codex,opencode`). Opencode is provider-agnostic and reads `OPENAI_API_KEY` from the environment, and its own forwarding block skips the key when codex is selected (the codex block owned it), so withholding there would silently break the opencode pane; the key still reaches the container and the info line names why. Guarded by `run-tests.sh §194`, which also checks that `run-integration-tests.sh` pins `SANDY_CODEX_AUTH` on every codex launch (`api_key` where it passes the key, `oauth` in its OAuth section) — the runner uses the real `$SANDY_HOME`, so a maintainer's own `SANDY_CODEX_AUTH=oauth` would otherwise flip the api-key sections onto an OAuth credential.
 
 **Egress**: the device flow is outbound-only to `auth.openai.com`, already covered by the `*.openai.com` entry in `SANDY_DEFAULT_ALLOW_HOSTS`, so it works in **strict** mode with no added host. (`chatgpt.com` is *not* in the default allowlist — irrelevant to the device flow, but a candidate if some other codex sign-in path is ever needed.)
 
@@ -1117,6 +1120,18 @@ A property test pins this contract in `test/run-tests.sh` §171: a fixture where
 ### Codex Headless Translation (`SANDY_AGENT=codex`)
 
 `build_codex_cmd()` inspects the positional args for `-p`/`--print`/`--prompt`. If present, it emits `codex exec --sandbox danger-full-access --skip-git-repo-check <prompt>` (interactive becomes headless); otherwise `codex --sandbox danger-full-access` (TUI). `--skip-git-repo-check` is required because codex 0.139+ refuses `exec` outside a trusted directory / git repo ("Not inside a trusted directory and --skip-git-repo-check was not specified"); sandy provides the outer isolation, so the gate is redundant and would break headless runs from non-git workspaces. Interactive mode omits the flag — the `[projects."…"] trust_level = "trusted"` entry in `config.toml` covers the TUI path. The sandy `-p`/`--print`/`--prompt` flags are dropped and the remaining arg is passed as the positional prompt, because `codex exec` takes the prompt as a positional argument, not a flag. `--continue`/`-c` is silently dropped (codex has `codex resume` but no headless `--continue` equivalent — matches the gemini behavior).
+
+**Interactive resume (#427).** The interactive branch mirrors `build_claude_cmd`'s auto-continue. `_sandy_codex_resume_mode` picks the head of the command:
+
+| condition (first match wins) | command head |
+|---|---|
+| `SANDY_LOGIN_AGENT=codex` (a `--login` session, E.13b) | `codex login --device-auth` — the whole pane, then a pause |
+| `--resume` among the args | `codex resume --sandbox danger-full-access` (codex's own picker) |
+| `SANDY_NEW_SESSION=true` (`sandy --new`) | `codex --sandbox danger-full-access` |
+| an interactive session exists for this workspace | `codex resume --last --sandbox danger-full-access` |
+| otherwise | `codex --sandbox danger-full-access` |
+
+`codex resume` accepts the same `-m`/`-c`/`-s` options as the bare TUI, so `--model` and `-c model_reasoning_effort=…` follow unchanged. **Session detection** (`_sandy_codex_has_session`, container-side, so it reads the sandbox's own codex home): codex-cli 0.160.0 writes each session to `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`, whose first line is a `session_meta` record carrying `"cwd"` and `"source"`. A session counts when that first line names `"cwd":"<the workspace>"` exactly (closing quote included, so `w-other` and `w/sub` do not match `w`) and its source is not `exec`. That is the set `codex resume --last` itself considers: by default it filters by cwd and skips non-interactive sessions. The pane's cwd is `$WORKSPACE`, so that is what codex records. `state_5.sqlite` is not evidence — codex creates it on first start with no session. Headless `codex exec` is never resumed. Guarded by `run-tests.sh §193`, which runs the built command against a stub `codex` and asserts the argv it received.
 
 `codex exec` uses only exit codes 0 (success) and 1 (failure). Sandy does not attempt to emulate Claude's richer exit-code semantics (no tool-denied, no context-exhausted signals) for codex. `--sandbox danger-full-access` on the CLI is belt-and-suspenders alongside the `sandbox_mode` in `config.toml`; do not remove either.
 
@@ -1787,7 +1802,7 @@ Key implementation details not covered in the main spec:
   trust_level = "trusted"
   ```
   This must happen container-side because it needs the in-container workspace path.
-- `build_codex_cmd()`: translates sandy's `-p`/`--print`/`--prompt` into `codex exec` with a positional prompt; drops `--continue`/`-c`; injects `--sandbox danger-full-access`, `--skip-git-repo-check` (headless only), optional `--model`, and (2.4.0, #116) `-c model_reasoning_effort=<level>` when `SANDY_EFFORT` is set (Appendix B.10).
+- `build_codex_cmd()`: translates sandy's `-p`/`--print`/`--prompt` into `codex exec` with a positional prompt; drops `--continue`/`-c`; interactive only, resumes with `codex resume --last` / opens `codex resume` for `--resume` (#427), or runs `codex login --device-auth` in a `--login` session (#428); injects `--sandbox danger-full-access`, `--skip-git-repo-check` (headless only), optional `--model`, and (2.4.0, #116) `-c model_reasoning_effort=<level>` when `SANDY_EFFORT` is set (Appendix B.10).
 - Launch dispatch: the `codex` case sits alongside `claude` and `gemini` in the per-agent dispatch; multi-agent combos iterate over the parsed `_SANDY_AGENTS` array and call each `build_*_cmd` in pane order.
 
 **`/ss` screenshot-skill seeding**:
@@ -2276,6 +2291,21 @@ docker exec [-i|-i -t] -u <host-uid>:<host-gid> -w <container-workspace> -e HOME
 | exit | `4` — no running container for the workspace (the `--attach`/`--stop` "no such session" convention); `1` — usage or unreachable docker; otherwise **the command's own status** |
 
 Sub-options: `--workspace PATH`, `--dry-run` (print the command, execute nothing), and `-- CMD...` (default `/bin/bash`). A bare first non-option token also begins the command; an unrecognized `-…` is refused with a pointer to `--`. Guarded by `run-tests.sh §120`.
+
+### E.13b `sandy --login <agent>` (#428)
+
+Logs an agent in so its credential persists in the workspace's sandbox. Only `codex` is supported; the others already have a route, which the error names (claude: read from the host at every launch, so log in there; grok: `grok login` in-session, `~/.grok` is rw; gemini and opencode: host-side auth that sandy reads at each launch). An early dispatcher placed after `--exec`, before config loading and the mutex.
+
+Codex needs it twice over: plain `codex login` binds a callback on the **container's** `localhost:1455`, which a host browser cannot reach (and under the egress proxy the agent has no inbound path at all), so the login must be `codex login --device-auth` (verified on codex-cli 0.160.0); and on the api_key path `auth.json` is a `:ro` overlay that no login can write.
+
+| route | when | what runs |
+|---|---|---|
+| live | a container runs for the workspace (same lookup as `--exec`: daemon label, then the exact foreground name) | `sandy --exec --workspace <wd> -- codex login --device-auth`, after checking the container's mounts: `/home/sandy/.codex` must be a **rw** bind (a combo without codex has none, and the login would land on tmpfs) and `/home/sandy/.codex/auth.json` must not be a `:ro` overlay (the api_key path). Either failure exits `1` naming the fix: stop the session, rerun |
+| one-shot | nothing runs | `SANDY_LOGIN_AGENT=codex sandy --agent codex --workspace <wd>`: the normal launch (image, mounts, egress, approvals all unchanged), whose single pane runs `codex login --device-auth`, reports the result and waits for Enter |
+
+`SANDY_LOGIN_AGENT` is an **internal, env-only** carrier (no config key, so no `.sandy/config` can set it). In a login session `load_codex_credentials` mounts no api-key overlay and seeds nothing from the host (a planted symlink at `codex/auth.json` is still removed first, #368); the launch forwards `SANDY_CODEX_AUTH=oauth` and no `OPENAI_API_KEY`. A value other than `codex`, a resolved agent list other than exactly `codex`, or a combination with `-p`, `--start`, `--remote` or `--provision` is refused before any Docker work. The credential lands in `$SANDBOX_DIR/codex/auth.json`, which the `oauth`/`auto` probe prefers over the host's on every later launch.
+
+Exit: `1` for usage, an unsupported agent, no terminal (the device flow needs a person; `--dry-run` is exempt), unreachable Docker, or a live container that cannot persist the login. Otherwise the route's own status. `--dry-run` prints the route (the `docker exec` line, or the one-shot command) and runs nothing. Guarded by `run-tests.sh §195` (both routes and every refusal, against a stub `docker`) and `§194(4)`/`§194(6)` (the login session's credential handling).
 
 ### C.7b Codex `config.toml` (seeded by sandy)
 
@@ -3124,9 +3154,10 @@ When `SANDY_EFFORT` is set and gemini is selected, sandy also mounts `$SANDBOX_D
 
 **Codex-specific env** (`SANDY_AGENT=codex`):
 ```bash
-OPENAI_API_KEY=<key>                # if set
+OPENAI_API_KEY=<key>                # if set, and the mode is not oauth (#429) -- unless opencode is also selected
 CODEX_MODEL=<model>                 # if set
-SANDY_CODEX_AUTH=<auto|api_key|oauth>
+SANDY_CODEX_AUTH=<auto|api_key|oauth>   # if set; a --login session forwards oauth
+SANDY_LOGIN_AGENT=codex             # only in a `sandy --login codex` session (E.13b)
 ```
 
 `CODEX_HOME` is **not** a sandy config key and is never forwarded — sandy owns the in-container path (`/home/sandy/.codex`) via the sandbox mount, and overriding it would break the mount. (Removed from the passive allowlist in the PR 4.1 surface audit, where it was found declared-but-never-consumed.)
@@ -3134,11 +3165,11 @@ SANDY_CODEX_AUTH=<auto|api_key|oauth>
 **Codex-specific mounts** (`SANDY_AGENT=codex`):
 ```bash
 -v "$SANDBOX_DIR/codex:/home/sandy/.codex"
-# if OAuth path active:
+# api_key path only (never in a --login session):
 -v "$CODEX_CRED_TMPDIR/auth.json:/home/sandy/.codex/auth.json:ro"
 ```
 
-The codex sandbox dir is writable (codex needs `log/`, `memories/`, session rollouts, sqlite state), but the `auth.json` file inside it is shadowed by a read-only overlay bind when either auth path is active (OAuth copy or api-key materialization — see C.7c). See §11 for the rationale of the read-only overlay.
+The codex sandbox dir is writable (codex needs `log/`, `memories/`, session rollouts, sqlite state). On the api_key path the `auth.json` inside it is shadowed by a read-only overlay of the materialized key (see C.7c); the OAuth path seeds the sandbox's own `auth.json` instead, with no overlay, so an in-container login persists.
 
 **OpenCode-specific env** (whenever `opencode` is in `SANDY_AGENT`):
 ```bash

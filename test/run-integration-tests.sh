@@ -45,7 +45,8 @@
 #   ────────────────────────┼──────────────────────────────────────────
 #   (none)                  │ Feature guards only (§1)
 #   OPENAI_API_KEY           │ §1-4: guards, codex build/headless/seeding/container
-#   + ~/.codex/auth.json    │ + §9: OAuth read-only mount detection
+#                           │   (pinned SANDY_CODEX_AUTH=api_key, #429)
+#   + ~/.codex/auth.json    │ + §9: OAuth seeding (pinned SANDY_CODEX_AUTH=oauth)
 #   GEMINI_API_KEY          │ §5-6: gemini build/headless/container
 #   + ~/.gemini/tokens.json │ + §10: OAuth detection
 #   ANTHROPIC_API_KEY       │ §7: claude headless regression
@@ -985,7 +986,11 @@ if [ "$_SECTION_ON" = true ]; then
 if [ "$HAS_OPENAI_API_KEY" = true ]; then
     setup_project codex "integ-codex"
 
-    _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" -- -p "reply with exactly one word: pineapple")"
+    # #429: pin the auth mode. This section tests the api-key path, and a
+    # SANDY_CODEX_AUTH=oauth in the maintainer's ~/.sandy/config (this runner
+    # uses the real $SANDY_HOME) would otherwise withhold the key and run the
+    # section on whatever OAuth credential the host has. Env beats config.
+    _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" "SANDY_CODEX_AUTH=api_key" -- -p "reply with exactly one word: pineapple")"
     _exit=$?
 
     # Image should exist after first run
@@ -1059,7 +1064,7 @@ if [ "$HAS_OPENAI_API_KEY" = true ]; then
         fi
 
         # Idempotency: run again and check trust entry isn't duplicated
-        run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" -- -p "reply one word: test" >/dev/null 2>&1
+        run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" "SANDY_CODEX_AUTH=api_key" -- -p "reply one word: test" >/dev/null 2>&1
         _proj_count="$(grep -c '^\[projects\.' "$_cfg" 2>/dev/null || echo 0)"
         if [ "$_proj_count" -eq 1 ]; then
             pass "trust entry idempotent on relaunch (count=$_proj_count)"
@@ -1069,7 +1074,7 @@ if [ "$HAS_OPENAI_API_KEY" = true ]; then
 
         # Sandbox forcing: delete config.toml, relaunch, verify it's re-seeded
         rm -f "$_cfg"
-        _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" -- -p "reply one word: test")"
+        _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" "SANDY_CODEX_AUTH=api_key" -- -p "reply one word: test")"
         if [ -f "$_cfg" ]; then
             pass "config.toml re-seeded after deletion"
         else
@@ -1341,7 +1346,7 @@ if [ "$HAS_CLAUDE" = true ] && [ "$HAS_OPENAI_API_KEY" = true ]; then
     # logs retryable websocket-401 ERROR lines before its HTTPS fallback
     # succeeds, so bare "error" matching is a false positive; a real codex
     # API error is skipped (not sandy's fault), anything else fails.
-    _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" -- -p "reply one word: first")"
+    _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" "SANDY_CODEX_AUTH=api_key" -- -p "reply one word: first")"
     if [ -n "$_out" ] && echo "$_out" | grep -vi "reply one word" | grep -qi "first"; then
         pass "codex session works in switch test"
     elif [ -n "$_out" ] \
@@ -1423,10 +1428,11 @@ if [ "$_SECTION_ON" = true ]; then
 
 if [ "$HAS_CODEX_OAUTH" = true ]; then
     setup_project codex "integ-codex-oauth"
-    # Unset API key env vars so OAuth path is used
-    _out="$(run_sandy_headless "OPENAI_API_KEY=" -- -p "reply one word: test")"
+    # Unset the API key and pin oauth (#429), so the OAuth path is what runs
+    # regardless of a SANDY_CODEX_AUTH in the maintainer's ~/.sandy/config.
+    _out="$(run_sandy_headless "OPENAI_API_KEY=" "SANDY_CODEX_AUTH=oauth" -- -p "reply one word: test")"
 
-    if echo "$_out" | grep -qi "Loaded Codex OAuth\|read-only mount"; then
+    if echo "$_out" | grep -qi "Seeded Codex OAuth\|Codex credentials from this sandbox"; then
         pass "codex OAuth credentials detected from host"
     else
         # Might still work without the log message

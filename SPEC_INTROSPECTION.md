@@ -921,6 +921,7 @@ Reading identity from `pane_index`, a scrollback marker, or the pane title is un
 
 ## Schema versioning
 
+- **`2.8.0` (#428, #427):** one new `cli_flags` entry, `--login`, whose sub-options are `--workspace` and `--dry-run`; the `--new` and `--resume` descriptions now say they apply to codex too. Additive, so `schema_version` stays `4`. (`--login` is a launch-family flag, not an introspection flag: it has no JSON output.)
 - **`2.7.0` (#299):** two new top-level fields, `proxy_image_src` and `proxy_image_epoch` — the proxy image's identity labels, full mode only, `null` when absent. Additive, so `schema_version` stays `4`.
 - **`2.7.0` (#296):** a new flag, `--approvals [--workspace PATH]` — a separate document with its own shape (above), carrying the same `schema_version`; nothing in the other outputs changes.
 - **`2.7.0` (#296):** one new top-level array, `dockerfile_approvals` (`{workspace_hash, workspace_path_hint, context_sha256, approved_at}` per `.sandy/Dockerfile` approval file, both modes). Additive, so `schema_version` stays `4`; `approvals` is unchanged.

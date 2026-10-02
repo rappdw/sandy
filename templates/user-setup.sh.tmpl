@@ -720,11 +720,16 @@ _sandy_translate_args() {
                 # Headless mode is a subcommand (`codex exec` / `opencode run`)
                 # with the prompt as a positional arg, so the -p flag itself
                 # is dropped (its value remains as a regular positional arg).
-                # No headless resume → --continue / -c dropped.
+                # No headless resume → --continue / -c dropped. For codex,
+                # sandy's --resume is consumed by build_codex_cmd (#427: it
+                # becomes `codex resume`); codex has no top-level --resume, so
+                # passing it through would make the TUI refuse to start.
                 case "$arg" in
                     -p|--print|--prompt) : ;;
                     --continue|-c)       : ;;
-                    *)                   out+=" $(printf '%q' "$arg")" ;;
+                    *)  if [ "$agent" != codex ] || [ "$arg" != --resume ]; then
+                            out+=" $(printf '%q' "$arg")"
+                        fi ;;
                 esac
                 ;;
             grok)
@@ -869,11 +874,57 @@ build_claude_cmd() {
     _sandy_wrap_cmd_exit_pause "Claude Code" "$cmd"
 }
 
+# #427: does this sandbox hold an INTERACTIVE codex session for this workspace?
+# Verified against codex-cli 0.160.0: every session writes
+# $CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl whose FIRST line is a
+# session_meta record carrying "cwd" and "source" ("exec" for `codex exec`).
+# `codex resume --last` itself filters by cwd and skips non-interactive
+# sessions unless --include-non-interactive, so this asks exactly the question
+# it answers: is there an interactive session whose cwd is this workspace?
+# The state DB (state_5.sqlite) is NOT evidence -- codex creates it on first
+# start with no session at all. A workspace path codex would JSON-escape (a
+# quote or backslash) never matches, which fails safe: a fresh session.
+_sandy_codex_has_session() {   # $1 = the cwd codex records (the workspace)
+    local d="${CODEX_HOME:-$HOME/.codex}/sessions" f line
+    [ -d "$d" ] || return 1
+    while IFS= read -r f; do
+        line=""
+        IFS= read -r line < "$f" || [ -n "$line" ] || continue
+        case "$line" in *'"source":"exec"'*) continue ;; esac
+        case "$line" in *"\"cwd\":\"$1\""*) return 0 ;; esac
+    done < <(find "$d" -type f -name 'rollout-*.jsonl' 2>/dev/null)
+    return 1
+}
+# #427: which resume form the interactive codex pane gets.
+#   picker -- sandy's --resume (codex's own session picker, `codex resume`)
+#   last   -- a prior interactive session exists for this workspace
+#   ""     -- start fresh: none exists, or --new / SANDY_NEW_SESSION=true
+# Mirrors build_claude_cmd's auto_continue; each pane decides independently.
+_sandy_codex_resume_mode() {
+    local a
+    for a in "$@"; do
+        case "$a" in --resume) printf picker; return 0 ;; esac
+    done
+    [ "${SANDY_NEW_SESSION:-false}" = "true" ] && return 0
+    if _sandy_codex_has_session "${WORKSPACE:-$PWD}"; then printf last; fi
+    return 0
+}
+
 build_codex_cmd() {
     # Headless: codex exec [PROMPT] (positional arg, not a flag)
-    # Interactive: codex (TUI)
+    # Interactive: codex (TUI), or `codex resume --last` / `codex resume` (#427)
     # --sandbox danger-full-access is belt-and-suspenders alongside the
     # sandbox_mode in ~/.codex/config.toml. Do not remove either.
+    #
+    # #428: `sandy --login codex` runs this same launch with SANDY_LOGIN_AGENT
+    # set, and the pane runs the device login instead of the TUI. Device auth
+    # binds no port (plain `codex login` waits on a localhost callback no host
+    # browser can reach), and the result lands in the rw ~/.codex mount, i.e.
+    # $SANDBOX_DIR/codex/auth.json, which wins on every later launch.
+    if [ "${SANDY_LOGIN_AGENT:-}" = "codex" ]; then
+        printf '%s' "codex login --device-auth; _rc=\$?; echo ''; if [ \$_rc -eq 0 ]; then echo '[sandy] codex login saved to this sandbox. Press Enter to exit.'; else echo \"[sandy] codex login failed (code \$_rc). Press Enter to exit.\"; fi; read -p ''"
+        return 0
+    fi
     local headless=false
     for arg in "$@"; do
         case "$arg" in -p|--print|--prompt) headless=true; break ;; esac
@@ -887,7 +938,13 @@ build_codex_cmd() {
         # runs from non-git workspaces.
         cmd="codex exec --sandbox danger-full-access --skip-git-repo-check"
     else
-        cmd="codex --sandbox danger-full-access"
+        # #427. `codex resume` takes the same -s/-m/-c options as the bare TUI
+        # (codex-cli 0.160.0 `codex resume --help`), so only the head changes.
+        case "$(_sandy_codex_resume_mode "$@")" in
+            last)   cmd="codex resume --last --sandbox danger-full-access" ;;
+            picker) cmd="codex resume --sandbox danger-full-access" ;;
+            *)      cmd="codex --sandbox danger-full-access" ;;
+        esac
     fi
     if [ -n "${CODEX_MODEL:-}" ]; then
         cmd+=" --model $(printf "%q" "$CODEX_MODEL")"
