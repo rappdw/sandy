@@ -24113,6 +24113,58 @@ unset _S191_SANDY _S191_LASTSET _S191_RUN _S191_L _S191_N _S191_US _s191_m _s191
 unset -f _s191_ln 2>/dev/null || true
 
 
+echo "§192: the seed-once agent-home writers refuse a planted symlink (#368 L1)"
+# ============================================================
+# #400 staged the launch writers that REWRITE agent-home files every launch.
+# Three seed-once writers were left raw and still decided-to-write via a test
+# (-f/-s/-d) that follows a symlink, then cp/cat> wrote THROUGH a link a prior
+# session could plant -- creating a file at a host path outside the workspace
+# (#368 L1). opencode/config/opencode.json and codex/auth.json now remove a
+# planted link first (the §169 shape, as the gemini seed does); the statsig
+# first-run cp -r was redundant with the already-staged every-launch refresh
+# and is gone. Asserted as the PROPERTY: the link-removal guard precedes every
+# write to the target, the guard actually removes a planted link without
+# touching its victim, and the raw statsig seed is gone while the staged
+# refresh remains.
+_S192_SANDY="$SANDY_SCRIPT"
+_s192_min_write() {  # $1 target substring -> lowest line of a cp/cat> to it
+    awk -v t="$1" '(index($0,"cp ")||index($0,"cat >")) && index($0,t) { print NR; exit }' "$_S192_SANDY"
+}
+_s192_guard_ln() {  # $1 target path -> line of the `if [ -L "<target>" ]` guard
+    awk -v t="if [ -L \"$1\" ]; then" 'index($0,t) { print NR; exit }' "$_S192_SANDY"
+}
+_s192_run_guard() {  # $1 extracted guard text, $2 target rel path -> PASS/FAIL
+    local d v; d="$(mktemp -d)"; v="$d/victim"; printf 'VICTIM\n' > "$v"
+    mkdir -p "$(dirname "$d/sb/$2")"
+    ln -s "$v" "$d/sb/$2"
+    env -i PATH="$PATH" SANDBOX_DIR="$d/sb" bash -c 'warn() { :; }; eval "$1"' _ "$1" 2>/dev/null
+    if [ ! -L "$d/sb/$2" ] && [ "$(cat "$v" 2>/dev/null)" = VICTIM ]; then printf PASS; else printf FAIL; fi
+    rm -rf "$d"
+}
+# opencode
+_S192_OC_G="$(_s192_guard_ln '$SANDBOX_DIR/opencode/config/opencode.json')"
+_S192_OC_W="$(_s192_min_write '$SANDBOX_DIR/opencode/config/opencode.json')"
+_S192_OC_GUARD="$(awk 'index($0,"if [ -L \"$SANDBOX_DIR/opencode/config/opencode.json\" ]; then"){f=1} f{print} f && $0 ~ /^[[:space:]]*fi$/ {exit}' "$_S192_SANDY")"
+check "§192(1) opencode seed: the link-removal guard (line ${_S192_OC_G:-?}) precedes every write to the config (first at ${_S192_OC_W:-?})" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$1" -lt "$2" ]' _ "$_S192_OC_G" "$_S192_OC_W"
+check "§192(2) opencode guard removes a planted symlink at the config, victim untouched" \
+    bash -c '[ "$1" = PASS ]' _ "$(_s192_run_guard "$_S192_OC_GUARD" opencode/config/opencode.json)"
+# codex
+_S192_CX_G="$(_s192_guard_ln '$SANDBOX_DIR/codex/auth.json')"
+_S192_CX_W="$(_s192_min_write '$SANDBOX_DIR/codex/auth.json')"
+_S192_CX_GUARD="$(awk 'index($0,"if [ -L \"$SANDBOX_DIR/codex/auth.json\" ]; then"){f=1} f{print} f && $0 ~ /^[[:space:]]*fi$/ {exit}' "$_S192_SANDY")"
+check "§192(3) codex seed: the link-removal guard (line ${_S192_CX_G:-?}) precedes every write to auth.json (first at ${_S192_CX_W:-?})" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$1" -lt "$2" ]' _ "$_S192_CX_G" "$_S192_CX_W"
+check "§192(4) codex guard removes a planted symlink at auth.json, victim untouched" \
+    bash -c '[ "$1" = PASS ]' _ "$(_s192_run_guard "$_S192_CX_GUARD" codex/auth.json)"
+# statsig: raw first-run seed gone, staged refresh kept
+check "§192(5) the raw first-run statsig cp -r is gone (it was redundant with the staged refresh and skipped staging)" \
+    bash -c '! grep -qF "cp -r \"\$HOME/.claude/statsig\" \"\$SANDBOX_DIR/claude/statsig\"" "$1"' _ "$_S192_SANDY"
+check "§192(6) ...and the staged every-launch statsig refresh remains" \
+    bash -c 'grep -qF "_sandy_staged_name \"\$SANDBOX_DIR/claude/statsig\"" "$1" && grep -qF "_sandy_stage_commit \"\$SANDBOX_DIR/claude/statsig\"" "$1"' _ "$_S192_SANDY"
+unset _S192_SANDY _S192_OC_G _S192_OC_W _S192_OC_GUARD _S192_CX_G _S192_CX_W _S192_CX_GUARD
+unset -f _s192_min_write _s192_guard_ln _s192_run_guard 2>/dev/null || true
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
