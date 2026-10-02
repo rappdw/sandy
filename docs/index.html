@@ -1,0 +1,776 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>sandy, explained</title>
+<meta name="description" content="Why coding agents should run in a sandbox, what sandy isolates and how, animated walkthroughs of the boundary at work, and how to get running.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:ital,wght@0,400;0,600;1,400&family=Schibsted+Grotesk:wght@600;800&display=swap">
+<style>
+/* Layout: an app frame (chapter bar · one screen at a time · controls), like a guided tour of a container's boundary.
+   Colour roles: host = the side that decides (cobalt), agent = the untrusted side (ochre),
+   ro = read-only mounts (teal), deny = refused, allow = permitted. */
+:root{
+  color-scheme: light;
+  --paper:#eef1f5; --panel:#ffffff; --ink:#131922; --muted:#566173; --rule:#d4dae3;
+  --host:#2747b8; --host-soft:#dfe5f8;
+  --agent:#b4560f; --agent-soft:#f7e6d6;
+  --ro:#0d7680; --ro-soft:#d8eef0;
+  --deny:#bd2740; --deny-soft:#f7dde2;
+  --allow:#2c7a3a; --allow-soft:#dcefdf;
+  --code:#e4e8ee; --term:#121821; --term-ink:#e3e8ef; --term-muted:#8794a7;
+  --display:"Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --body:"IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --paper:#0e1218; --panel:#161c25; --ink:#e4e9f0; --muted:#929cad; --rule:#273040;
+    --host:#86a2ff; --host-soft:#1a2547;
+    --agent:#f09a52; --agent-soft:#3b2614;
+    --ro:#4cc5cf; --ro-soft:#123336;
+    --deny:#ff7086; --deny-soft:#3d1820;
+    --allow:#72cf81; --allow-soft:#15331b;
+    --code:#1d2430; --term:#090c11; --term-ink:#e4e9f0; --term-muted:#7d899b;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --paper:#0e1218; --panel:#161c25; --ink:#e4e9f0; --muted:#929cad; --rule:#273040;
+  --host:#86a2ff; --host-soft:#1a2547;
+  --agent:#f09a52; --agent-soft:#3b2614;
+  --ro:#4cc5cf; --ro-soft:#123336;
+  --deny:#ff7086; --deny-soft:#3d1820;
+  --allow:#72cf81; --allow-soft:#15331b;
+  --code:#1d2430; --term:#090c11; --term-ink:#e4e9f0; --term-muted:#7d899b;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font:16.5px/1.6 var(--body);-webkit-font-smoothing:antialiased;overflow:hidden}
+a{color:var(--host);text-underline-offset:2px}
+a:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid var(--host);outline-offset:2px;border-radius:3px}
+code{font-family:var(--mono);font-size:.86em;background:var(--code);padding:.05em .34em;border-radius:3px}
+h1,h2,h3{font-family:var(--display);line-height:1.08;text-wrap:balance;margin:0}
+h2{font-size:clamp(1.5rem,3vw,2.15rem);font-weight:800;letter-spacing:-.015em}
+h3{font-size:1.02rem;font-weight:800}
+p{margin:0}
+.eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+
+/* ---------- frame ---------- */
+.app{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto}
+.top{padding:12px 24px 10px;display:grid;gap:8px;border-bottom:1px solid var(--rule);background:var(--paper)}
+.top-row{display:flex;justify-content:space-between;align-items:baseline;gap:16px}
+.brand{font-family:var(--display);font-weight:800;font-size:1rem;letter-spacing:-.01em}
+.brand span{color:var(--muted);font-weight:600}
+.where{font-family:var(--mono);font-size:.74rem;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+.chapters{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:4px}
+.chapters button{appearance:none;border:0;background:transparent;padding:6px 0 0;cursor:pointer;text-align:left;display:grid;gap:5px;color:var(--muted);font:600 .74rem/1.2 var(--display);min-width:0}
+.chapters .fill{height:4px;border-radius:2px;background:var(--rule);position:relative;overflow:hidden}
+.chapters .fill i{position:absolute;inset:0;width:0;background:var(--host);transition:width .3s}
+.chapters .lbl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chapters button[aria-current="step"]{color:var(--ink)}
+.stage{min-height:0;overflow:hidden;position:relative}
+.screen{position:absolute;inset:0;overflow:auto;padding:18px 24px;display:flex;align-items:center;justify-content:center}
+.inner{width:100%;max-width:1080px;display:grid;gap:13px;animation:in .35s ease-out;margin:auto 0}
+@keyframes in{from{opacity:.001;transform:translateY(8px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion: reduce){.inner{animation:none}.chapters .fill i{transition:none}}
+.lede{font-size:1.08rem;max-width:68ch}
+.body{max-width:68ch}
+.controls{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 24px;border-top:1px solid var(--rule);background:var(--paper)}
+.controls button{font:800 .95rem/1 var(--display);height:44px;padding:0 20px;border-radius:7px;border:1px solid var(--rule);background:var(--panel);color:var(--ink);cursor:pointer}
+.controls button.next{background:var(--host);border-color:var(--host);color:var(--paper);min-width:140px}
+.controls button:disabled{opacity:.4;cursor:default}
+.hint{font-family:var(--mono);font-size:.72rem;color:var(--muted);text-align:center}
+
+/* ---------- screen furniture ---------- */
+.hero h1{font-size:clamp(2.2rem,5.6vw,4.3rem);font-weight:800;letter-spacing:-.025em;max-width:15ch}
+.hero .a{color:var(--agent)} .hero .h{color:var(--host)}
+.mountline{font-family:var(--mono);font-size:.82rem;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 14px}
+.mountline span b{font-weight:600;color:var(--ro)}
+.invariant{max-width:68ch;border-left:3px solid var(--host);padding:4px 0 4px 18px}
+.invariant b{font-family:var(--mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--host);display:block;margin-bottom:4px;font-weight:600}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}
+.card{background:var(--panel);border:1px solid var(--rule);border-radius:8px;padding:13px 16px;display:grid;gap:6px;align-content:start;min-width:0}
+.card p,.card li{font-size:.94rem;color:var(--muted)}
+.card ul{margin:0;padding-left:1.1em;display:grid;gap:3px}
+.card header{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.tag{font-family:var(--mono);font-size:.66rem;letter-spacing:.07em;text-transform:uppercase;padding:2px 7px;border-radius:4px;white-space:nowrap;justify-self:start}
+.tag.h{background:var(--host-soft);color:var(--host)} .tag.a{background:var(--agent-soft);color:var(--agent)}
+.tag.r{background:var(--ro-soft);color:var(--ro)} .tag.n{background:var(--code);color:var(--muted)}
+.tag.ok{background:var(--allow-soft);color:var(--allow)} .tag.no{background:var(--deny-soft);color:var(--deny)}
+.mech{font-family:var(--mono);font-size:.76rem;color:var(--ink);overflow-wrap:anywhere}
+.note{background:var(--host-soft);border-radius:7px;padding:12px 16px;font-size:.95rem;max-width:76ch}
+.warnote{background:var(--agent-soft);border-radius:7px;padding:12px 16px;font-size:.95rem;max-width:76ch}
+.move{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto minmax(0,1fr);gap:10px}
+.move .step{background:var(--panel);border:1px solid var(--rule);border-radius:8px;padding:14px 16px;display:grid;gap:6px;align-content:start}
+.move .step p{font-size:.95rem;color:var(--muted)}
+.move .arrow{align-self:center;font-family:var(--mono);color:var(--muted)}
+.move .step.a{border-color:var(--agent)} .move .step.h{border-color:var(--host)}
+.tree{font:12.5px/1.55 var(--mono);background:var(--code);border-radius:8px;padding:12px 16px;margin:0;overflow-x:auto;white-space:pre;color:var(--ink)}
+.tree .c{color:var(--muted)}
+.tablewrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:600px;font-size:.92rem}
+th{font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);text-align:left;padding:7px 10px;border-bottom:1px solid var(--rule);font-weight:600}
+td{padding:6px 10px;border-bottom:1px solid var(--rule);vertical-align:top}
+td.path{font-family:var(--mono);font-size:.8rem;white-space:nowrap}
+td.d1{padding-left:28px}
+td.strong{font-family:var(--display);font-weight:800}
+.mode{font-family:var(--mono);font-size:.7rem;padding:1px 6px;border-radius:4px;white-space:nowrap}
+.mode.ro{background:var(--ro-soft);color:var(--ro)} .mode.rw{background:var(--agent-soft);color:var(--agent)}
+.mode.eph{background:var(--code);color:var(--muted)} .mode.no{background:var(--deny-soft);color:var(--deny)}
+.keys{display:flex;flex-wrap:wrap;gap:6px}
+.keys code{font-size:.76rem}
+.keys.loose code{background:var(--deny-soft);color:var(--deny)}
+.keys.tight code{background:var(--allow-soft);color:var(--allow)}
+.gate dl{margin:0;display:grid;gap:4px;font-size:.9rem}
+.gate dt{font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.gate dd{margin:0 0 4px}
+.limits{margin:0;padding:0;list-style:none;display:grid;gap:9px;max-width:80ch}
+.limits li{display:grid;grid-template-columns:minmax(0,13rem) minmax(0,1fr);gap:14px;padding-bottom:9px;border-bottom:1px solid var(--rule);font-size:.95rem}
+.limits li b{font-family:var(--display);font-weight:800}
+.limits li span{color:var(--muted)}
+.agents{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.agents .card h3{font-size:.98rem}
+.grid4{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px;width:180px;aspect-ratio:16/10;max-width:100%}
+.grid4 span{background:var(--panel);border:1px solid var(--rule);font:600 .72rem var(--mono);display:grid;place-items:center;color:var(--ink)}
+.links{display:flex;flex-wrap:wrap;gap:10px}
+.links a{font:800 .92rem/1 var(--display);padding:12px 16px;border-radius:7px;text-decoration:none;border:1px solid var(--rule);color:var(--ink);background:var(--panel)}
+.links a.primary{background:var(--host);border-color:var(--host);color:var(--paper)}
+.ftitle{font-size:clamp(1.9rem,4.5vw,3.2rem);letter-spacing:-.02em}
+
+/* ---------- commands and files ---------- */
+.cmd{background:var(--term);color:var(--term-ink);border-radius:8px;min-width:0}
+.cmd pre{margin:0;padding:12px 16px 14px;overflow-x:auto;font:13px/1.6 var(--mono);white-space:pre}
+.cmd .c{color:var(--term-muted)}
+.cmd .label{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px 0 16px;font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--term-muted)}
+.copy{font:600 .7rem/1 var(--mono);letter-spacing:.04em;padding:6px 9px;border-radius:5px;border:1px solid var(--term-muted);background:transparent;color:var(--term-ink);cursor:pointer}
+.steps2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:13px;align-items:start}
+.small{font-size:.92rem;color:var(--muted)}
+.req{display:flex;flex-wrap:wrap;gap:8px}
+.req span{font-family:var(--mono);font-size:.76rem;background:var(--panel);border:1px solid var(--rule);border-radius:5px;padding:4px 8px}
+.fileview{background:var(--code);border:1px solid var(--rule);border-radius:8px;min-width:0}
+.fileview .label{padding:8px 16px 0;font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.fileview pre{margin:0;padding:8px 16px 14px;overflow-x:auto;font:12.5px/1.6 var(--mono);white-space:pre;color:var(--ink)}
+.fileview .c{color:var(--muted)}
+.fields{display:grid;gap:7px;margin:0;font-size:.92rem}
+.fields div{display:grid;grid-template-columns:minmax(0,14ch) minmax(0,1fr);gap:10px}
+.fields dt{font-family:var(--mono);font-size:.8rem;color:var(--host);overflow-wrap:anywhere}
+.fields dd{margin:0;color:var(--muted)}
+
+/* ---------- flow screens ---------- */
+.flowhead{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 18px;align-items:end}
+.flowhead .count{font-family:var(--mono);font-size:.78rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.caption{font-size:1.04rem;min-height:2.5em;max-width:86ch}
+.scenebox{background:var(--panel);border:1px solid var(--rule);border-radius:9px;overflow-x:auto}
+.scenebox svg{display:block;width:100%;min-width:640px;height:auto;max-height:calc(100vh - 360px)}
+.fsteps{font-size:.86rem;color:var(--muted)}
+.fsteps summary{cursor:pointer;font-family:var(--mono);font-size:.72rem;letter-spacing:.06em;text-transform:uppercase}
+.fsteps ol{margin:8px 0 0;padding-left:1.3em;display:grid;gap:3px}
+.fsteps li.on{color:var(--ink);font-weight:600}
+.swipe{display:none;font-family:var(--mono);font-size:.72rem;color:var(--muted)}
+.sc-box{fill:var(--panel);stroke:var(--rule)}
+.sc-cont{fill:var(--paper);stroke:var(--agent);stroke-dasharray:6 5;stroke-width:1.4}
+.sc-host{fill:var(--host-soft);stroke:var(--host);stroke-width:1.2}
+.sc-proxy{fill:var(--panel);stroke:var(--host);stroke-width:1.4}
+.sc-lane{stroke:var(--rule);fill:var(--panel)}
+.sc-t{font:800 13px var(--display);fill:var(--ink)}
+.sc-s{font:11px var(--mono);fill:var(--muted)}
+.sc-m{font:12px var(--mono);fill:var(--ink)}
+.sc-rw{font:600 11px var(--mono);fill:var(--agent)}
+.sc-ro{font:600 11px var(--mono);fill:var(--ro)}
+.sc-no{font:600 11px var(--mono);fill:var(--muted)}
+.sc-rail{stroke:var(--muted);stroke-dasharray:2 5;stroke-width:1.5}
+.sc-wire{stroke:var(--rule);stroke-width:1.5;fill:none}
+.sc-railt{font:10.5px var(--mono);fill:var(--muted);letter-spacing:.06em}
+.tok rect{stroke-width:1.6}
+.tok text{font:600 11.5px var(--mono);fill:var(--ink)}
+.tok.req rect{fill:var(--agent-soft);stroke:var(--agent)}
+.tok.ok rect{fill:var(--allow-soft);stroke:var(--allow)}
+.tok.bad rect{fill:var(--deny-soft);stroke:var(--deny)}
+.tok.info rect{fill:var(--host-soft);stroke:var(--host)}
+.tok{transition:transform .9s cubic-bezier(.45,.05,.3,1)}
+.sc-dec{font:600 12px var(--mono)}
+.sc-dec.ok{fill:var(--allow)} .sc-dec.bad{fill:var(--deny)}
+.sc-say{font:600 12px var(--mono);fill:var(--agent)}
+.hot{stroke:var(--allow)!important;stroke-width:2.4!important}
+.hotbad{stroke:var(--deny)!important;stroke-width:2.4!important}
+@media (prefers-reduced-motion: reduce){.tok{transition:none}}
+
+@media (max-height: 760px) and (min-width: 821px){
+  body{font-size:15px}
+  h2{font-size:1.6rem} .hero h1{font-size:3rem} .lede{font-size:1rem}
+  .card{padding:10px 14px} .inner{gap:10px} .screen{padding:12px 24px}
+  .cmd pre{padding:9px 14px;font-size:12.5px}
+  .scenebox svg{max-height:calc(100vh - 330px)}
+}
+@media (max-width: 980px){ .agents{grid-template-columns:repeat(2,minmax(0,1fr))} }
+@media (max-width: 820px){
+  body{font-size:15.5px}
+  .top{padding-inline:16px} .screen{padding:18px 16px;align-items:flex-start} .controls{padding-inline:16px}
+  .chapters .lbl{display:none}
+  .grid3,.grid2,.steps2,.agents{grid-template-columns:minmax(0,1fr)}
+  .move{grid-template-columns:minmax(0,1fr)} .move .arrow{justify-self:center;transform:rotate(90deg)}
+  .limits li{grid-template-columns:minmax(0,1fr);gap:2px}
+  .fields div{grid-template-columns:minmax(0,1fr);gap:2px}
+  .hint{display:none} .swipe{display:block}
+  .controls button.next{min-width:0}
+}
+
+/* standalone (GitHub Pages): what the artifact host's skeleton provided */
+[hidden]{display:none!important}
+.top{padding-top:calc(12px + env(safe-area-inset-top,0px))}
+.controls{padding-bottom:calc(12px + env(safe-area-inset-bottom,0px))}
+</style>
+</head>
+<body>
+
+<div class="app">
+  <header class="top">
+    <div class="top-row"><span class="brand">sandy <span>explained</span></span><span class="where" id="where" aria-live="polite"></span></div>
+    <nav class="chapters" id="chapters" aria-label="Chapters"></nav>
+  </header>
+
+  <main class="stage" id="stage">
+
+    <!-- 0 · Start -->
+    <section class="screen hero" data-id="start" data-ch="0">
+      <div class="inner">
+        <p class="eyebrow">sandy · an isolated sibling for your coding agents</p>
+        <h1><span class="a">Turn the permission prompts off.</span> <span class="h">Keep the boundary on.</span></h1>
+        <p class="lede">sandy runs Claude Code, Gemini CLI, Codex, OpenCode and Grok in a per-project Docker sandbox with their permission prompts switched off. The agent works without stopping to ask, and the operating system, not the agent, decides what it can touch. Press <strong>Next</strong> to see what that means, watch the boundary turn things away, and get it running.</p>
+        <p class="invariant"><b>The invariant</b>The sandbox's guarantees do not depend on the agent behaving. With the default settings, an agent that has been prompt-injected, and holds every permission it asks for, still cannot plant a git hook, reach your home network, or read a credential it was not given.</p>
+        <p class="mountline" aria-label="Example mounts"><span>~/dev/myapp <b>rw</b></span><span>.git/hooks <b>ro</b></span><span>.github/workflows <b>ro</b></span><span>~/.ssh <b>not mounted</b></span><span>192.168.0.0/16 <b>no route</b></span></p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="two-jobs" data-ch="0">
+      <div class="inner">
+        <p class="eyebrow">What it is</p>
+        <h2>Two jobs, one command</h2>
+        <div class="grid2">
+          <article class="card"><header><h3>A security sandbox</h3><span class="tag h">the boundary</span></header><p>Keeps a prompt-injected or simply wrong agent off the rest of your machine: your other projects, your SSH keys, your LAN, your shell startup files.</p></article>
+          <article class="card"><header><h3>A per-project environment</h3><span class="tag n">the venv model</span></header><p>Each project gets its own agent home: plugins, memory, history, credentials and installed packages. Nothing bleeds between projects. This half is useful even if you trust the agent completely.</p></article>
+        </div>
+        <pre class="tree"><span class="c">~/.sandy/sandboxes/</span>
+├── webapp-a1b2c3d4/       <span class="c"># one sandbox per project, named from its path</span>
+│   ├── claude/            <span class="c"># mounted at ~/.claude: plugins, memory, history</span>
+│   ├── codex/             <span class="c"># and one home per agent you use there</span>
+│   ├── pip/  npm-global/  go/  cargo/  uv/   <span class="c"># packages you install persist</span>
+│   └── WORKSPACE.json
+└── data-pipeline-e5f6a7b8/
+    └── claude/            <span class="c"># a different project, a different agent home</span></pre>
+      </div>
+    </section>
+
+    <!-- 1 · The problem -->
+    <section class="screen" data-id="problem" data-ch="1">
+      <div class="inner">
+        <p class="eyebrow">The problem</p>
+        <h2>An agent on your laptop runs as you</h2>
+        <p class="lede">It reads files it did not write, and any of them can carry instructions. Give it autonomy and it acts on them with your user's full reach. Three kinds of reach matter.</p>
+        <div class="grid3">
+          <article class="card"><h3>Files</h3><p>Everything your user can write: other repositories, your shell startup files, git hooks that run on your next checkout, the CI workflow that runs on your next push.</p></article>
+          <article class="card"><h3>Network</h3><p>Your home or office LAN, the router's admin page, a NAS, services on localhost, and cloud metadata endpoints that hand out credentials.</p></article>
+          <article class="card"><h3>Credentials</h3><p>Your SSH keys, your cloud configs, and the agent's own long-lived refresh token. Anything it can read, it can send somewhere.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" data-id="move" data-ch="1">
+      <div class="inner">
+        <p class="eyebrow">The problem</p>
+        <h2>A permission prompt is not a boundary</h2>
+        <p class="lede">Asking before every command protects you only if you read every command. After the fortieth prompt nobody does. sandy moves the decision out of the agent and into the operating system.</p>
+        <div class="move">
+          <div class="step a"><span class="tag a">agent</span><h3>Acts freely</h3><p>Prompts are off, so it reads, edits, builds and tests without waiting on you.</p></div>
+          <span class="arrow" aria-hidden="true">→</span>
+          <div class="step h"><span class="tag h">kernel and Docker</span><h3>Decide what is possible</h3><p>Mounts, network namespaces and dropped capabilities refuse what the sandbox does not allow, however the request was phrased.</p></div>
+          <span class="arrow" aria-hidden="true">→</span>
+          <div class="step h"><span class="tag h">you</span><h3>Review what changed</h3><p>The work lands in your repository, where you review it in git. sandy tells you at session end about anything that needs a look.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2 · The layers -->
+    <section class="screen" data-id="layers" data-ch="2">
+      <div class="inner">
+        <p class="eyebrow">The layers</p>
+        <h2>Six layers, each enforced below the agent</h2>
+        <div class="grid3">
+          <article class="card"><header><h3>Per-project sandbox</h3><span class="tag n">isolation</span></header><p>One sandbox per workspace, one sandy per workspace at a time. Projects never share agent state.</p><span class="mech">~/.sandy/sandboxes/&lt;name&gt;-&lt;hash&gt;</span></article>
+          <article class="card"><header><h3>Filesystem</h3><span class="tag r">read-only</span></header><p>Read-only root filesystem, a throwaway home, and only the project directory mounted from the host. About 25 sensitive paths inside it are read-only too.</p><span class="mech">--read-only · -v …:ro</span></article>
+          <article class="card"><header><h3>Network</h3><span class="tag h">egress proxy</span></header><p>The agent sits on a network with no route out except a small proxy. Private and LAN addresses are refused; non-TCP traffic is dropped by the topology.</p><span class="mech">--internal · SNI proxy</span></article>
+          <article class="card"><header><h3>Credentials</h3><span class="tag h">one per agent</span></header><p>Each agent gets only its own login. Claude's is read fresh from your host at every launch and never stored in the sandbox. No SSH private key enters unless you name it.</p><span class="mech">SANDY_SSH_KEYS · SANDY_SUSPICIOUS</span></article>
+          <article class="card"><header><h3>Process and privilege</h3><span class="tag n">no escalation</span></header><p>Non-root, every capability dropped, no new privileges, Docker's default seccomp and AppArmor profiles, and no Docker socket.</p><span class="mech">--cap-drop ALL · no-new-privileges</span></article>
+          <article class="card"><header><h3>Resources</h3><span class="tag n">limits</span></header><p>CPU, memory, process count and temporary storage are capped, sized from your machine, so a runaway build can't take the host down with it.</p><span class="mech">--cpus · --memory · --pids-limit</span></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" data-id="egress" data-ch="2">
+      <div class="inner">
+        <p class="eyebrow">The layers · network</p>
+        <h2>Three network postures, one setting</h2>
+        <p class="lede">The proxy works the same on macOS and Linux because the isolation comes from Docker's network layout, not from firewall rules on the host. Most people never change the default.</p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>SANDY_EGRESS</th><th>The agent can reach</th><th>From a repo's committed config</th></tr></thead>
+            <tbody>
+              <tr><td class="path">permissive <span class="tag n">default</span></td><td>The public internet. Not your LAN, not the host, not cloud metadata, not well-known DNS-over-HTTPS resolvers.</td><td><span class="mode no">asks you</span> It is looser than strict, and a repo's value outranks yours.</td></tr>
+              <tr><td class="path">strict</td><td>Only an allowlist: the model providers, GitHub, the npm, PyPI, crates, Go and Debian registries, and hosts you add with <code>SANDY_ALLOW_HOSTS</code>.</td><td><span class="mode ro">free</span> It only tightens.</td></tr>
+              <tr><td class="path">off</td><td>Linux: public internet, LAN blocked by iptables. macOS: everything, including your LAN.</td><td><span class="mode no">asks you</span> It loosens.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="body small">The proxy reads the hostname from the TLS handshake and never decrypts. It logs what it refused, and with <code>SANDY_EGRESS_LOG=1</code> every distinct host the session reached, so after a suspicious session you can answer "what did it talk to?"</p>
+      </div>
+    </section>
+
+    <!-- 3 · The seam -->
+    <section class="screen" data-id="seam" data-ch="3">
+      <div class="inner">
+        <p class="eyebrow">The seam</p>
+        <h2>The boundary is a mount table</h2>
+        <p class="lede">This is everything the agent can see of your machine. Anything not in the table is not mounted at all, so there is nothing for the agent to read, however it asks.</p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>In the container</th><th>Comes from</th><th>Mode</th><th>Holds</th></tr></thead>
+            <tbody>
+              <tr><td class="path">/</td><td>the image</td><td><span class="mode ro">read-only</span></td><td>Python 3.13, Node 24, Go 1.26, Rust, C/C++, git, uv and the agent CLIs.</td></tr>
+              <tr><td class="path">~/dev/myapp</td><td>your project</td><td><span class="mode rw">read-write</span></td><td>Your code. The one host directory the agent edits.</td></tr>
+              <tr><td class="path d1">.git/hooks/ .git/config</td><td>your project</td><td><span class="mode ro">read-only</span></td><td>About 25 protected paths: git hooks and config, shell startup files, <code>.github/workflows/</code>, <code>.vscode/</code>, <code>.sandy/</code>, and more.</td></tr>
+              <tr><td class="path">~/.claude, ~/.codex, …</td><td>this project's sandbox</td><td><span class="mode rw">read-write</span></td><td>Plugins, memory and history for this project only.</td></tr>
+              <tr><td class="path">~/.pip-packages, ~/go, …</td><td>this project's sandbox</td><td><span class="mode rw">read-write</span></td><td>Packages you install. They survive relaunches.</td></tr>
+              <tr><td class="path">~/.claude/.credentials.json</td><td>your host, read each launch</td><td><span class="mode eph">ephemeral</span></td><td>The agent's login. Never written into the sandbox.</td></tr>
+              <tr><td class="path">/etc/sandy-session.json</td><td>sandy</td><td><span class="mode ro">read-only</span></td><td>What this session is: version, network posture, credential mode.</td></tr>
+              <tr><td class="path">~/.ssh, ~/.aws, other repos</td><td>—</td><td><span class="mode no">not mounted</span></td><td>Nothing to read. Named SSH keys are the one opt-in.</td></tr>
+              <tr><td class="path">/var/run/docker.sock</td><td>—</td><td><span class="mode no">not mounted</span></td><td>The agent cannot start containers or reach the Docker daemon.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4 · Trust tiers -->
+    <section class="screen" data-id="tiers" data-ch="4">
+      <div class="inner">
+        <p class="eyebrow">Trust tiers</p>
+        <h2>A repository can tighten the sandbox, never loosen it</h2>
+        <p class="lede">A project can commit a <code>.sandy/config</code> so everyone who clones it gets the same setup. Clone someone else's repository and that file is theirs, so sandy treats it accordingly. It is read as <code>KEY=VALUE</code> lines and never run as a script.</p>
+        <div class="grid2">
+          <article class="card"><header><h3>A repo sets these freely</h3><span class="tag ok">tighten or neutral</span></header><div class="keys tight"><code>SANDY_AGENT</code><code>SANDY_MODEL</code><code>SANDY_EFFORT</code><code>SANDY_EGRESS=strict</code><code>SANDY_SUSPICIOUS=1</code><code>SANDY_CPUS</code><code>SANDY_MEM</code><code>SANDY_SKILL_PACKS</code></div></article>
+          <article class="card"><header><h3>These ask you first</h3><span class="tag no">loosen</span></header><div class="keys loose"><code>SANDY_EGRESS=off</code><code>SANDY_EGRESS=permissive</code><code>SANDY_SSH</code><code>SANDY_SSH_KEYS</code><code>SANDY_ALLOW_HOSTS</code><code>SANDY_EXTRA_ENV</code><code>SANDY_AGENT_ARGS</code><code>*_API_KEY</code></div></article>
+        </div>
+        <p class="body small">Settings in your own <code>~/.sandy/config</code> never ask: that file is yours. Approval is per workspace and remembered, and any change to the approved keys asks again.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="gates" data-ch="4">
+      <div class="inner">
+        <p class="eyebrow">Trust tiers</p>
+        <h2>Three approval gates, all before the container starts</h2>
+        <div class="grid3">
+          <article class="card gate"><h3>Loosening config keys</h3><dl><dt>Asks when</dt><dd>A workspace config sets a key or value from the right-hand list.</dd><dt>If you say no</dt><dd>The keys are dropped and the launch goes ahead, tighter.</dd></dl></article>
+          <article class="card gate"><h3>Symlinks out of the workspace</h3><dl><dt>Asks when</dt><dd>A link points from the project into your home directory, or a protected path is a link.</dd><dt>If you say no</dt><dd>The launch stops. A new escaping link later is an error, not another prompt.</dd></dl></article>
+          <article class="card gate"><h3>A project Dockerfile</h3><dl><dt>Asks when</dt><dd><code>.sandy/Dockerfile</code> is new or changed. You see all of it before it builds.</dd><dt>If you say no</dt><dd>The session uses the standard image.</dd></dl></article>
+        </div>
+        <p class="note">When nobody can answer (a one-shot <code>sandy -p</code>, a background start with no terminal), every gate fails closed. <code>sandy --approvals</code> reports what each gate would decide for a workspace without granting anything.</p>
+      </div>
+    </section>
+
+    <!-- 5 · Flows -->
+    <section class="screen" data-id="flow-hook" data-ch="5" data-flow="hook"><div class="inner flowscreen"></div></section>
+    <section class="screen" data-id="flow-egress" data-ch="5" data-flow="egress"><div class="inner flowscreen"></div></section>
+    <section class="screen" data-id="flow-config" data-ch="5" data-flow="config"><div class="inner flowscreen"></div></section>
+    <section class="screen" data-id="flow-symlink" data-ch="5" data-flow="symlink"><div class="inner flowscreen"></div></section>
+    <section class="screen" data-id="flow-dockerfile" data-ch="5" data-flow="dockerfile"><div class="inner flowscreen"></div></section>
+
+    <!-- 6 · Knowing it holds -->
+    <section class="screen" data-id="verify" data-ch="6">
+      <div class="inner">
+        <p class="eyebrow">Knowing it holds</p>
+        <h2>You can check, from inside and out</h2>
+        <div class="grid2">
+          <article class="card"><header><h3>Ask the box</h3><span class="tag r">read-only</span></header><p><code>/etc/sandy-session.json</code> says the session is sandy, which version, which network posture and which kind of credential is present. It is mounted read-only, so a repository cannot forge it. In-container tools should trust it over guesses from uid or environment variables.</p></article>
+          <article class="card"><header><h3>Ask the host</h3><span class="tag h">JSON</span></header><p><code>sandy --print-state</code> lists every sandbox, image and running session as one JSON document, and <code>sandy --doctor</code> checks the host and flags stale locks, orphaned networks and outdated images.</p></article>
+          <article class="card"><header><h3>Told at session end</h3><span class="tag a">notices</span></header><p>A protected file that appeared during the session, a git branch left switched, a permission mode the agent changed, an image refresh that had to wait. Each gets a line when the session ends.</p></article>
+          <article class="card"><header><h3>Try it yourself</h3><span class="tag n">two commands</span></header><p>Inside a session, <code>curl -m 5 http://192.168.1.1</code> should fail and <code>curl -m 5 https://api.anthropic.com</code> should succeed.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen" data-id="limits" data-ch="6">
+      <div class="inner">
+        <p class="eyebrow">Knowing it holds</p>
+        <h2>What sandy does not do</h2>
+        <p class="lede">A sandbox you can trust is one whose limits are written down. These are the main ones; the threat model has the rest.</p>
+        <ul class="limits">
+          <li><b>Your code is writable</b><span>The agent edits your project, which is the point. Commit before a session and review the diff after it.</span></li>
+          <li><b>Some paths are detect, not prevent</b><span>A protected path is locked only if it exists at launch. One the agent creates is reported at session end, before your next git or IDE action would use it.</span></li>
+          <li><b>macOS with the proxy off</b><span><code>SANDY_EGRESS=off</code> on macOS leaves the LAN reachable. Keep the default proxy on.</span></li>
+          <li><b>A container, not a VM</b><span>On Linux the agent shares the host kernel. On macOS, Docker itself runs in a VM.</span></li>
+          <li><b>Credentials it is given</b><span>A login token is usable for its lifetime. For a repository you distrust, <code>SANDY_SUSPICIOUS=1</code> strips the refresh token and defaults to strict egress.</span></li>
+        </ul>
+        <div class="links"><a href="https://github.com/rappdw/sandy/blob/main/docs/security/THREAT_MODEL.md">Read the threat model</a></div>
+      </div>
+    </section>
+
+    <!-- 7 · Many agents -->
+    <section class="screen" data-id="agents" data-ch="7">
+      <div class="inner">
+        <p class="eyebrow">Many agents</p>
+        <h2>Five agents, alone or side by side</h2>
+        <p class="lede">Every agent gets the same boundary and its own home directory and credentials inside the project's sandbox. Pick one per project, or run up to four at once.</p>
+        <div class="agents">
+          <article class="card"><h3>Claude Code</h3><p>Pro or Max login from your host, an API key, or a Console profile.</p></article>
+          <article class="card"><h3>Gemini CLI</h3><p>An API key, your Google login, or gcloud credentials.</p></article>
+          <article class="card"><h3>Codex CLI</h3><p>An API key, or a ChatGPT login that persists per project.</p></article>
+          <article class="card"><h3>OpenCode</h3><p>Any provider, including a local model on your LAN through one narrow opening.</p></article>
+          <article class="card"><h3>Grok Build</h3><p>An xAI API key, or an interactive login.</p></article>
+        </div>
+        <div class="steps2">
+          <div class="cmd"><div class="label"><span>.sandy/config</span><button type="button" class="copy">Copy</button></div>
+<pre>SANDY_AGENT=claude,codex      <span class="c"># two panes, side by side</span>
+SANDY_AGENT=all               <span class="c"># claude, gemini, codex, opencode</span></pre></div>
+          <div class="card"><div class="grid4" aria-label="Four panes in a two by two grid"><span>claude</span><span>gemini</span><span>codex</span><span>opencode</span></div><p>One tmux session, one shared workspace, separate agent homes. Closing one pane leaves the others running.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8 · Run it -->
+    <section class="screen" data-id="ready" data-ch="8">
+      <div class="inner">
+        <p class="eyebrow">Run it · 1 of 4</p>
+        <h2>Check your machine</h2>
+        <div class="req"><span>macOS or Linux</span><span>Docker Desktop, OrbStack, Colima, Rancher or Lima</span><span>git and curl</span><span>gh CLI, for git over HTTPS</span><span>an account or API key for your agent</span></div>
+        <div class="cmd"><div class="label"><span>doctor: checks, installs nothing</span><button type="button" class="copy">Copy</button></div>
+<pre>curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/doctor.sh | bash</pre></div>
+        <p class="body small">The doctor checks that Docker is reachable, that git and curl are present, that your agent credentials can be found and that <code>~/.local/bin</code> is on your PATH. For anything missing it prints a command to copy.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="install" data-ch="8">
+      <div class="inner">
+        <p class="eyebrow">Run it · 2 of 4</p>
+        <h2>Install, then launch in a project</h2>
+        <div class="steps2">
+          <div class="cmd"><div class="label"><span>install</span><button type="button" class="copy">Copy</button></div>
+<pre>curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | bash</pre></div>
+          <div class="cmd"><div class="label"><span>first session</span><button type="button" class="copy">Copy</button></div>
+<pre>cd ~/dev/myapp
+sandy                          <span class="c"># interactive session</span>
+sandy -p "summarise src/"      <span class="c"># or a one-shot prompt</span></pre></div>
+        </div>
+        <p class="body">The installer puts one script in <code>~/.local/bin</code>. The first launch builds the images, which takes a while once; after that, sessions start in seconds and the images rebuild themselves when your agent releases an update. Claude Pro and Max logins are picked up from your host, so there is no API key to set.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="config" data-ch="8">
+      <div class="inner">
+        <p class="eyebrow">Run it · 3 of 4</p>
+        <h2>Make it yours</h2>
+        <div class="steps2">
+          <div class="fileview"><div class="label">~/dev/myapp/.sandy/config · safe to commit</div>
+<pre>SANDY_AGENT=claude
+SANDY_EFFORT=high
+SANDY_EGRESS=strict        <span class="c"># tighter than the default</span>
+SANDY_MEM=8g</pre></div>
+          <dl class="fields">
+            <div><dt>~/.sandy/config</dt><dd>Your defaults for every project. Any key, no prompts.</dd></div>
+            <div><dt>.sandy/config</dt><dd>Per project, shared through git. Loosening keys ask once.</dd></div>
+            <div><dt>.sandy/.secrets</dt><dd>Per-project keys and tokens. Keep it out of git.</dd></div>
+            <div><dt>.sandy/Dockerfile</dt><dd>Extra tools for this project, built on the standard image after you approve it.</dd></div>
+          </dl>
+        </div>
+        <p class="body small">Precedence runs from a command-line flag, to your shell environment, to the project file, to your own defaults.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="keep" data-ch="8">
+      <div class="inner">
+        <p class="eyebrow">Run it · 4 of 4</p>
+        <h2>Keep sessions running, and keep the host tidy</h2>
+        <div class="steps2">
+          <div class="cmd"><div class="label"><span>daemon mode</span><button type="button" class="copy">Copy</button></div>
+<pre>sandy --start     <span class="c"># start detached; survives a closed terminal or a reboot</span>
+sandy --attach    <span class="c"># attach from any terminal or over ssh</span>
+sandy --stop      <span class="c"># tear it down</span></pre></div>
+          <div class="cmd"><div class="label"><span>upkeep</span><button type="button" class="copy">Copy</button></div>
+<pre>sandy --doctor            <span class="c"># host and runtime health</span>
+sandy --gc --dry-run      <span class="c"># show unused images and networks</span>
+sandy --reset-sandbox     <span class="c"># rebuild a sandbox you no longer trust</span>
+sandy --upgrade           <span class="c"># update sandy itself</span></pre></div>
+        </div>
+        <p class="body">Daemon mode is what <a href="https://github.com/rappdw/sandy-ui">sandy-ui</a> uses to keep a session alive across VS Code restarts. Every maintenance command prints its plan first, and <code>--dry-run</code> stops there.</p>
+      </div>
+    </section>
+
+    <section class="screen" data-id="finish" data-ch="8">
+      <div class="inner">
+        <p class="eyebrow">sandy</p>
+        <h2 class="ftitle">Let the agent work. Let the kernel say no.</h2>
+        <p class="lede">sandy is one MIT-licensed bash script. It runs on any Docker-compatible runtime on macOS or Linux and needs no server or account of its own.</p>
+        <div class="links">
+          <a class="primary" href="https://github.com/rappdw/sandy">sandy on GitHub</a>
+          <a href="https://github.com/rappdw/sandy#readme">Read the README</a>
+          <a href="https://github.com/rappdw/sandy/blob/main/docs/security/THREAT_MODEL.md">Threat model</a>
+          <a href="https://github.com/rappdw/sandy/releases">Releases</a>
+          <a href="https://github.com/rappdw/sandy-ui">sandy-ui for VS Code</a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="controls">
+    <button type="button" id="back">Back</button>
+    <span class="hint">← → or space · Home · End</span><span class="swipe">swipe to move</span>
+    <button type="button" class="next" id="next">Next</button>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const CHAPTERS = ["Start","The problem","The layers","The seam","Trust tiers","Watch it work","Knowing it holds","Many agents","Run it"];
+  const screens = [...document.querySelectorAll(".screen")];
+  const nav = document.getElementById("chapters");
+  const whereEl = document.getElementById("where");
+  const bNext = document.getElementById("next"), bBack = document.getElementById("back");
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+  let cur = 0, step = 0;
+
+  CHAPTERS.forEach((name, c) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.innerHTML = '<span class="fill"><i></i></span><span class="lbl"></span>';
+    b.querySelector(".lbl").textContent = name;
+    b.setAttribute("aria-label", "Chapter " + (c + 1) + ": " + name);
+    b.addEventListener("click", () => go(screens.findIndex(s => +s.dataset.ch === c), 0));
+    nav.append(b);
+  });
+
+  document.querySelectorAll(".copy").forEach(btn => btn.addEventListener("click", () => {
+    const pre = btn.closest(".cmd").querySelector("pre");
+    const text = [...pre.childNodes].map(n => n.nodeType === 1 && n.classList.contains("c") ? "" : n.textContent).join("").replace(/[ \t]+$/gm, "").trim();
+    const done = () => { btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1400); };
+    const fallback = () => { const r = document.createRange(); r.selectNodeContents(pre); const s = getSelection(); s.removeAllRanges(); s.addRange(r); btn.textContent = "Selected"; setTimeout(() => btn.textContent = "Copy", 1400); };
+    try { navigator.clipboard.writeText(text).then(done, fallback); } catch (e) { fallback(); }
+  }));
+
+  /* ---------- the scene: one container, one proxy, the host ---------- */
+  const SVGNS = "http://www.w3.org/2000/svg";
+  const scene = document.createElementNS(SVGNS, "svg");
+  scene.setAttribute("viewBox", "0 0 900 380");
+  scene.setAttribute("role", "img");
+  scene.setAttribute("aria-label", "A sandy container with its mounts, the egress proxy, the internet, the LAN, and the host where sandy and you sit");
+  scene.innerHTML = `
+    <rect x="20" y="40" width="400" height="325" rx="10" class="sc-cont"/>
+    <text x="36" y="62" class="sc-t">container</text>
+    <text x="112" y="62" class="sc-s">runs as your uid · read-only root</text>
+    <rect id="n-agent" x="40" y="78" width="200" height="48" rx="7" class="sc-box" style="stroke:var(--agent)"/>
+    <text x="54" y="98" class="sc-t">agent</text>
+    <text x="54" y="115" class="sc-s">permission prompts off</text>
+    <text id="say" x="40" y="148" class="sc-say"></text>
+    <rect id="l-ws" x="40" y="170" width="340" height="32" rx="5" class="sc-lane"/>
+    <text id="m-ws" x="52" y="190" class="sc-rw">rw</text><text id="t-ws" x="80" y="190" class="sc-m">~/dev/myapp</text>
+    <rect id="l-hooks" x="40" y="212" width="340" height="32" rx="5" class="sc-lane"/>
+    <text id="m-hooks" x="52" y="232" class="sc-ro">ro</text><text id="t-hooks" x="80" y="232" class="sc-m">.git/hooks/</text>
+    <rect id="l-sandyd" x="40" y="254" width="340" height="32" rx="5" class="sc-lane"/>
+    <text id="m-sandyd" x="52" y="274" class="sc-ro">ro</text><text id="t-sandyd" x="80" y="274" class="sc-m">.sandy/</text>
+    <rect id="l-marker" x="40" y="296" width="340" height="32" rx="5" class="sc-lane"/>
+    <text x="52" y="316" class="sc-ro">ro</text><text x="80" y="316" class="sc-m">sandy-session.json</text>
+    <line x1="440" y1="56" x2="440" y2="350" class="sc-rail"/>
+    <text x="0" y="0" class="sc-railt" transform="translate(452 360) rotate(-90)">sidecar · --internal · no route out</text>
+    <path d="M630 165 H655 V82 H680 M655 165 V172 H680" class="sc-wire"/>
+    <rect id="n-proxy" x="460" y="120" width="170" height="92" rx="8" class="sc-proxy"/>
+    <text x="474" y="142" class="sc-t">egress proxy</text>
+    <text x="474" y="159" class="sc-s">reads SNI · never decrypts</text>
+    <rect id="n-net" x="680" y="58" width="200" height="46" rx="7" class="sc-box"/>
+    <text x="694" y="78" class="sc-t">api.github.com</text>
+    <text x="694" y="95" class="sc-s">public internet</text>
+    <rect id="n-lan" x="680" y="150" width="200" height="46" rx="7" class="sc-box"/>
+    <text x="694" y="170" class="sc-t">nas.internal</text>
+    <text x="694" y="187" class="sc-s">10.0.0.5 · your LAN</text>
+    <rect x="460" y="240" width="425" height="125" rx="10" class="sc-host"/>
+    <text x="476" y="262" class="sc-t">host</text>
+    <text x="514" y="262" class="sc-s">your machine, outside the container</text>
+    <rect id="n-launcher" x="476" y="274" width="180" height="46" rx="7" class="sc-box"/>
+    <text x="490" y="294" class="sc-t">sandy</text>
+    <text x="490" y="311" class="sc-s">runs before docker run</text>
+    <rect id="n-you" x="690" y="274" width="180" height="46" rx="7" class="sc-box"/>
+    <text x="704" y="294" class="sc-t">you</text>
+    <text x="704" y="311" class="sc-s">at your terminal</text>
+    <text id="dec1" x="464" y="66" class="sc-dec"></text>
+    <text id="dec2" x="464" y="86" class="sc-dec"></text>
+    <text id="dec3" x="464" y="106" class="sc-dec"></text>
+    <g id="toks"></g>`;
+  const toksG = scene.querySelector("#toks");
+  const POS = {
+    agent:[300,102], ws:[300,186], hooks:[300,228], sandyd:[300,270],
+    rail:[440,186], drop:[440,330], proxy:[545,190], net:[780,127], lan:[780,219],
+    launcher:[566,343], you:[780,343]
+  };
+  const DEFAULT_TEXT = { "t-sandyd": ".sandy/", "m-sandyd": "ro" };
+  const DEFAULT_CLASS = { "m-sandyd": "sc-ro" };
+
+  function place(el, pos, animate) {
+    const [x, y] = POS[pos];
+    if (!animate || reduce.matches) { el.style.transition = "none"; el.getBoundingClientRect(); }
+    el.setAttribute("transform", "translate(" + x + " " + y + ")");
+    el.style.transform = "translate(" + x + "px," + y + "px)";
+    if (!animate || reduce.matches) { el.getBoundingClientRect(); el.style.transition = ""; }
+  }
+  function tokEl(id, label, kind, pos) {
+    const g = document.createElementNS(SVGNS, "g");
+    g.dataset.id = id;
+    g.setAttribute("class", "tok " + kind);
+    const w = Math.round(label.length * 7.1 + 20);
+    g.innerHTML = '<rect x="' + (-w / 2) + '" y="-12" width="' + w + '" height="24" rx="5"/><text x="0" y="4" text-anchor="middle"></text>';
+    g.querySelector("text").textContent = label;
+    toksG.append(g);
+    place(g, pos, false);
+  }
+  function clearScene() {
+    toksG.innerHTML = "";
+    scene.querySelector("#say").textContent = "";
+    [1,2,3].forEach(i => { const d = scene.querySelector("#dec" + i); d.textContent = ""; d.setAttribute("class", "sc-dec"); });
+    scene.querySelectorAll(".hot,.hotbad").forEach(n => n.classList.remove("hot","hotbad"));
+    for (const k in DEFAULT_TEXT) scene.querySelector("#" + k).textContent = DEFAULT_TEXT[k];
+    for (const k in DEFAULT_CLASS) scene.querySelector("#" + k).setAttribute("class", DEFAULT_CLASS[k]);
+  }
+
+  const FLOWS = {
+    hook: { name:"A planted git hook", steps:[
+      ["A file the agent read told it to add a git hook. With permission prompts off, it simply tries.", [["say","printf … > .git/hooks/post-checkout"]]],
+      ["The write goes to .git/hooks/, which sandy mounted read-only. The agent runs as your user and owns those files, so permission bits would not stop it. The mount does.", [["tok","w","write hook","req","agent"],["mv","w","hooks"]]],
+      ["The kernel refuses the write with EROFS. Nothing waits to run on your host at the next git checkout.", [["kind","w","bad"],["dec",1,"EROFS · read-only file system","bad"],["hot","l-hooks","bad"]]],
+      ["Edits to your code go through: the project is the one host directory mounted read-write. You review the agent's work the way you review anyone's, in git.", [["say","edit src/app.py"],["tok","e","edit src/app.py","ok","agent"],["mv","e","ws"],["dec",2,"~/dev/myapp · written","ok"],["hot","l-ws","ok"]]]
+    ]},
+    egress: { name:"Where the network goes", steps:[
+      ["The agent fetches from GitHub. Its DNS resolver is the proxy, which answers with its own address, so the connection has to come through it.", [["say","curl https://api.github.com"],["tok","t","TLS · api.github.com","req","agent"],["mv","t","rail"]]],
+      ["The proxy reads the hostname from the TLS handshake. It never decrypts, logs a payload, or caches.", [["mv","t","proxy"],["hot","n-proxy","ok"]]],
+      ["It resolves the name itself and checks the address. The address is public, so the connection goes through.", [["kind","t","ok"],["mv","t","net"],["dec",1,"public address · allowed","ok"],["hot","n-net","ok"]]],
+      ["Now a name that resolves to your LAN. The proxy resolves it too, sees a private address and refuses. The refusal is written to the proxy log.", [["say","curl https://nas.internal"],["tok","l","TLS · nas.internal","req","agent"],["mv","l","proxy"],["kind","l","bad"],["dec",2,"10.0.0.5 · private · refused","bad"],["hot","n-lan","bad"]]],
+      ["QUIC and other UDP never reach the proxy. The agent's network has no route off it, so anything that is not TCP to the proxy is dropped.", [["say","UDP/443 (QUIC)"],["tok","u","UDP/443","req","agent"],["mv","u","drop"],["kind","u","bad"],["dec",3,"not TCP · no route · dropped","bad"]]],
+      ["That is the default posture, permissive. Strict also refuses every public host that is not on the allowlist: model providers, GitHub, the package registries, and hosts you add.", []]
+    ]},
+    config: { name:"A config that loosens", steps:[
+      ["You clone a repository and run sandy. Its committed .sandy/config sets SANDY_EGRESS=off.", [["tok","c","SANDY_EGRESS=off","req","sandyd"],["hot","l-sandyd","bad"]]],
+      ["sandy reads the file before anything starts, as KEY=VALUE lines. It never runs the file as a script.", [["mv","c","launcher"],["hot","n-launcher","ok"]]],
+      ["Turning the proxy off loosens the sandbox, so from a workspace this value needs your approval. A value that tightens, like strict, would not.", [["kind","c","bad"],["dec",1,"loosening value · ask first","bad"]]],
+      ["sandy names the key and asks once for this workspace. A yes is remembered; any later change to those keys asks again.", [["tok","p","approve? [y/N]","info","launcher"],["mv","p","you"],["hot","n-you","ok"]]],
+      ["Say no, or launch with no terminal to answer, and sandy drops the key. The session starts with your own posture, proxy on.", [["dec",2,"no → key dropped · proxy on","ok"]]]
+    ]},
+    symlink: { name:"A link out of the workspace", steps:[
+      ["A repository commits .npmrc as a symlink to ~/.ssh/id_ed25519. Docker follows a symlink when it mounts one, so mounting it would hand over the key.", [["tok","s",".npmrc → ~/.ssh/…","req","ws"],["hot","l-ws","bad"]]],
+      ["sandy scans the workspace before the container starts. A protected path that is a symlink is flagged wherever it points.", [["mv","s","launcher"],["kind","s","bad"],["dec",1,"link leaves the workspace","bad"],["hot","n-launcher","ok"]]],
+      ["It lists each link with its target and asks you.", [["tok","p","proceed? [y/N]","info","launcher"],["mv","p","you"],["hot","n-you","ok"]]],
+      ["Say no and the launch stops. Say yes and sandy remembers the set; a new escaping link later is a hard error, not another prompt to click through.", [["dec",2,"no → launch stops","ok"]]]
+    ]},
+    dockerfile: { name:"A build file the agent wrote", steps:[
+      ["This project had no .sandy/ at launch, so there was nothing to mount read-only. The agent creates .sandy/Dockerfile.", [["lbl","t-sandyd",".sandy/ (absent at launch)"],["lbl","m-sandyd","rw","sc-rw"],["say","write .sandy/Dockerfile"],["tok","d","Dockerfile","req","agent"],["mv","d","sandyd"]]],
+      ["The session ends. sandy compares the protected paths with what existed at launch, warns you, and records the new file outside the project, where the agent cannot edit the record.", [["mv","d","launcher"],["dec",1,"new .sandy/ · recorded","bad"],["hot","n-launcher","ok"]]],
+      ["At the next launch sandy shows you the whole Dockerfile, headed CREATED BY A SANDY SESSION, before anything builds.", [["tok","p","build? [y/N]","info","launcher"],["mv","p","you"],["hot","n-you","ok"]]],
+      ["A build runs on your host's Docker with an unfiltered network, so nothing builds without your yes. Say no and the session uses the standard image.", [["dec",2,"no → standard image","ok"]]]
+    ]}
+  };
+  const FLOW_ORDER = ["hook","egress","config","symlink","dockerfile"];
+
+  document.querySelectorAll(".flowscreen").forEach(el => {
+    const key = el.closest(".screen").dataset.flow, f = FLOWS[key];
+    const n = FLOW_ORDER.indexOf(key) + 1;
+    el.innerHTML = '<div class="flowhead"><div><p class="eyebrow">Watch it work · ' + n + ' of ' + FLOW_ORDER.length + '</p><h2></h2></div><span class="count"></span></div>' +
+      '<p class="caption" aria-live="polite"></p><div class="scenebox"></div>' +
+      '<details class="fsteps"><summary>All steps</summary><ol></ol></details>';
+    el.querySelector("h2").textContent = f.name;
+    const ol = el.querySelector("ol");
+    f.steps.forEach(s => { const li = document.createElement("li"); li.textContent = s[0]; ol.append(li); });
+  });
+
+  function apply(ops, animate) {
+    scene.querySelectorAll(".hot,.hotbad").forEach(n => n.classList.remove("hot","hotbad"));
+    for (const [k, a, b, c, d] of ops) {
+      const tok = () => toksG.querySelector('[data-id="' + a + '"]');
+      if (k === "tok") tokEl(a, b, c, d);
+      else if (k === "mv") { const e = tok(); if (e) place(e, b, animate); }
+      else if (k === "kind") { const e = tok(); if (e) e.setAttribute("class", "tok " + b); }
+      else if (k === "dec") { const e = scene.querySelector("#dec" + a); e.textContent = b; e.setAttribute("class", "sc-dec " + c); }
+      else if (k === "say") scene.querySelector("#say").textContent = a;
+      else if (k === "lbl") { const e = scene.querySelector("#" + a); e.textContent = b; if (c) e.setAttribute("class", c); }
+      else if (k === "hot") scene.querySelector("#" + a)?.classList.add(b === "bad" ? "hotbad" : "hot");
+    }
+  }
+  function renderFlow(s, animate) {
+    const f = FLOWS[s.dataset.flow];
+    s.querySelector(".scenebox").append(scene);
+    clearScene();
+    for (let i = 0; i < step; i++) apply(f.steps[i][1], false);
+    const ops = f.steps[step][1];
+    apply(ops.filter(o => o[0] === "tok"), false);
+    const rest = ops.filter(o => o[0] !== "tok");
+    if (animate && !reduce.matches) requestAnimationFrame(() => requestAnimationFrame(() => apply(rest, true)));
+    else apply(rest, false);
+    s.querySelector(".caption").textContent = f.steps[step][0];
+    s.querySelector(".count").textContent = "step " + (step + 1) + " of " + f.steps.length;
+    [...s.querySelectorAll(".fsteps li")].forEach((li, i) => li.classList.toggle("on", i === step));
+  }
+  const flowLen = s => s.dataset.flow ? FLOWS[s.dataset.flow].steps.length : 1;
+
+  function show(animate) {
+    screens.forEach((s, i) => s.hidden = i !== cur);
+    const s = screens[cur], ch = +s.dataset.ch;
+    if (s.dataset.flow) renderFlow(s, animate);
+    const inCh = screens.filter(x => +x.dataset.ch === ch), pos = inCh.indexOf(s);
+    [...nav.children].forEach((b, c) => {
+      const pct = c < ch ? 100 : c > ch ? 0 : Math.round(100 * (pos + (step + 1) / flowLen(s)) / inCh.length);
+      b.querySelector("i").style.width = pct + "%";
+      if (c === ch) b.setAttribute("aria-current", "step"); else b.removeAttribute("aria-current");
+    });
+    whereEl.textContent = CHAPTERS[ch] + " · " + (cur + 1) + " of " + screens.length;
+    bBack.disabled = cur === 0 && step === 0;
+    bNext.disabled = cur === screens.length - 1;
+    bNext.textContent = s.dataset.flow && step < flowLen(s) - 1 ? "Next step" : "Next";
+    if (location.hash.slice(1) !== s.dataset.id) { try { history.replaceState(null, "", "#" + s.dataset.id); } catch (e) {} }
+  }
+  function go(i, st) { cur = Math.max(0, Math.min(screens.length - 1, i)); step = st; show(false); }
+  function next() {
+    const s = screens[cur];
+    if (s.dataset.flow && step < flowLen(s) - 1) { step++; show(true); }
+    else if (cur < screens.length - 1) { cur++; step = 0; show(false); }
+  }
+  function back() {
+    const s = screens[cur];
+    if (s.dataset.flow && step > 0) { step--; show(false); }
+    else if (cur > 0) { cur--; step = flowLen(screens[cur]) - 1; show(false); }
+  }
+  bNext.addEventListener("click", next);
+  bBack.addEventListener("click", back);
+  document.addEventListener("keydown", e => {
+    if (e.target.closest && e.target.closest("summary,a,button.copy,input,textarea,pre")) return;
+    if (["ArrowRight","PageDown"," "].includes(e.key)) { e.preventDefault(); next(); }
+    else if (["ArrowLeft","PageUp"].includes(e.key)) { e.preventDefault(); back(); }
+    else if (e.key === "Home") go(0, 0);
+    else if (e.key === "End") go(screens.length - 1, 0);
+  });
+  let tx = null;
+  const stage = document.getElementById("stage");
+  stage.addEventListener("touchstart", e => { tx = e.touches[0].clientX; }, { passive: true });
+  stage.addEventListener("touchend", e => {
+    if (tx === null || e.target.closest(".scenebox,.tablewrap,.cmd,.tree")) { tx = null; return; }
+    const dx = e.changedTouches[0].clientX - tx; tx = null;
+    if (dx < -60) next(); else if (dx > 60) back();
+  });
+  window.addEventListener("hashchange", () => {
+    const i = screens.findIndex(s => s.dataset.id === location.hash.slice(1));
+    if (i >= 0 && i !== cur) go(i, 0);
+  });
+  const start = screens.findIndex(s => s.dataset.id === location.hash.slice(1));
+  go(start >= 0 ? start : 0, 0);
+})();
+</script>
+</body>
+</html>

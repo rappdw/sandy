@@ -25,6 +25,8 @@ When you're giving AI agents real autonomy to write code, run tests, and modify 
 
 Sandy is **two things at once**: a **security sandbox** that keeps a rogue or prompt-injected agent off your machine, and a **per-project virtual environment** that keeps each project's agent state — plugins, memory, credentials, installed packages — from bleeding into the others. It's the same `venv` mental model you already use for Python, applied to your whole coding-agent setup — and the second half is useful even if you completely trust the agent.
 
+**New to sandy?** [sandy, explained](https://rappdw.github.io/sandy/) is a short guided walkthrough: what it isolates, animated examples of the boundary at work, and how to get running.
+
 Install it, run it. That's it.
 
 ```bash
