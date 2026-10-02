@@ -4,6 +4,8 @@
 
 # sandy — an isolated sibling for your coding agents
 
+**New to sandy?** [sandy, explained](https://rappdw.github.io/sandy/) is a short guided walkthrough: what it isolates, animated examples of the boundary at work, and how to get running.
+
 > ### ⚠️ Upgrading from 1.x? Migrate your sandboxes first
 >
 > 2.0 renames the container user and home from `claude` to `sandy`. `/home/claude` is baked into virtualenv shebangs, `GOPATH`, `PYTHONUSERBASE` and npm/cargo metadata, so **every sandbox created by 1.x must be migrated** — sandy refuses to launch against one rather than limping into it and failing later in ways that look like broken packages.
@@ -24,8 +26,6 @@
 When you're giving AI agents real autonomy to write code, run tests, and modify systems, the environment needs OS-enforced boundaries, not permission prompts. Sandy is the tool we built to make that work.
 
 Sandy is **two things at once**: a **security sandbox** that keeps a rogue or prompt-injected agent off your machine, and a **per-project virtual environment** that keeps each project's agent state — plugins, memory, credentials, installed packages — from bleeding into the others. It's the same `venv` mental model you already use for Python, applied to your whole coding-agent setup — and the second half is useful even if you completely trust the agent.
-
-**New to sandy?** [sandy, explained](https://rappdw.github.io/sandy/) is a short guided walkthrough: what it isolates, animated examples of the boundary at work, and how to get running.
 
 Install it, run it. That's it.
 
