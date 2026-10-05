@@ -131,6 +131,7 @@ SANDY_PASSIVE_KEYS=(
 #   CLAUDE.md.
 SANDY_ENV_ONLY_KEYS=(
     SANDY_AUTO_APPROVE_PRIVILEGED
+    SANDY_CHANNEL
     SANDY_DEBUG_CLEANUP
     SANDY_HOST_ID
 )
@@ -426,37 +427,98 @@ _sandbox_compat_classify() {
     if _ver_lt "$ver" "$SANDY_SANDBOX_MIN_COMPAT"; then echo "below-floor"; else echo "ok"; fi
 }
 
-SANDY_REPO_URL="https://raw.githubusercontent.com/rappdw/sandy/main/sandy"
+SANDY_REPO_RAW="https://raw.githubusercontent.com/rappdw/sandy"
 SANDY_API_URL="https://api.github.com/repos/rappdw/sandy/releases/latest"
+SANDY_API_MAIN_URL="https://api.github.com/repos/rappdw/sandy/commits/main"
 
-# Self-update: download latest sandy from GitHub and replace the running script
+# The latest RELEASE tag (vX.Y.Z), or nothing. GitHub pretty-prints this
+# response ("tag_name": "v2.7.1", with a space), so the whole body is captured
+# and matched in bash: the old `grep -o '"tag_name":"…'` never matched it, and
+# the update notice it fed never fired. Matching in bash also avoids a pipe a
+# quitting grep would close under curl, which pipefail reports as a failure.
+# Always returns 0, so `x="$(…)"` is safe under set -e.
+_sandy_latest_release_tag() {
+    local body re='"tag_name"[[:space:]]*:[[:space:]]*"(v[0-9]+\.[0-9]+\.[0-9]+)"'
+    body="$(curl -fsSL --max-time "${1:-10}" "$SANDY_API_URL" 2>/dev/null)" || return 0
+    if [[ $body =~ $re ]]; then printf '%s' "${BASH_REMATCH[1]}"; fi
+    return 0
+}
+# The full sha of main's head, or nothing. The sha media type returns just the
+# 40 hex digits, so there is no JSON to read.
+_sandy_main_commit() {
+    local sha
+    sha="$(curl -fsSL --max-time "${1:-10}" -H 'Accept: application/vnd.github.sha' "$SANDY_API_MAIN_URL" 2>/dev/null)" || return 0
+    if [[ $sha =~ ^[0-9a-f]{40}$ ]]; then printf '%s' "$sha"; fi
+    return 0
+}
+
+# Self-update (decision 1, 2026-10-05). The default is the latest RELEASE, the
+# version the update notice names: it used to download main, which moved a
+# stable user onto the dev line, and compared only the version string, so a
+# dev install (every commit is X.Y.Z-dev) never updated. SANDY_CHANNEL=dev
+# installs main's head instead, pinned to its commit and recording it.
+# A failed lookup fails loudly: falling back to main would hand a stable user
+# unreleased code without saying so.
 sandy_self_update() {
-    local script_path
+    local script_path tmp channel="${SANDY_CHANNEL:-}" url tag="" sha="" new_ver cur_commit
     script_path="$(readlink -f "${BASH_SOURCE[0]}")"
-    local tmp
+    case "$channel" in
+        ""|release|dev) ;;
+        *) error "SANDY_CHANNEL must be 'release' or 'dev' (got: $channel)."; exit 1 ;;
+    esac
+    if [ "$channel" = dev ]; then
+        sha="$(_sandy_main_commit 10)"
+        if [ -z "$sha" ]; then
+            error "Could not look up main's latest commit (GitHub API unreachable or rate-limited). Retry later."
+            exit 1
+        fi
+        cur_commit="$(sandy_full_version)"; cur_commit="${cur_commit#"$SANDY_VERSION"}"; cur_commit="${cur_commit#-}"
+        if [ -n "$cur_commit" ] && [ "${sha:0:7}" = "${cur_commit:0:7}" ]; then
+            info "Already on main's latest commit ($SANDY_VERSION-${cur_commit:0:7})."
+            exit 0
+        fi
+        url="$SANDY_REPO_RAW/$sha/sandy"
+    else
+        tag="$(_sandy_latest_release_tag 10)"
+        if [ -z "$tag" ]; then
+            error "Could not find the latest sandy release (GitHub API unreachable or rate-limited). Retry later, or run with SANDY_CHANNEL=dev to install main."
+            exit 1
+        fi
+        if [ "${tag#v}" = "$SANDY_VERSION" ]; then
+            info "Already on the latest release ($SANDY_VERSION)."
+            exit 0
+        fi
+        # A dev or rc build newer than the latest release is not "downgraded"
+        # by a plain --upgrade; only an explicit SANDY_CHANNEL=release does that.
+        if [ -z "$channel" ] && ! _ver_should_update "$SANDY_VERSION" "${tag#v}"; then
+            info "This sandy ($SANDY_VERSION) is newer than the latest release (${tag#v}); not downgrading."
+            info "  Update this dev build: SANDY_CHANNEL=dev sandy --upgrade"
+            info "  Switch to the release:  SANDY_CHANNEL=release sandy --upgrade"
+            exit 0
+        fi
+        url="$SANDY_REPO_RAW/$tag/sandy"
+    fi
     tmp="$(mktemp)"
-    info "Downloading latest sandy..."
-    if ! curl -fsSL "$SANDY_REPO_URL" -o "$tmp"; then
-        error "Failed to download update."
+    info "Downloading sandy ${tag:-main@${sha:0:7}}..."
+    if ! curl -fsSL "$url" -o "$tmp"; then
+        error "Failed to download $url."
         rm -f "$tmp"
         exit 1
     fi
-    local new_ver
-    new_ver="$(grep -m1 '^SANDY_VERSION=' "$tmp" | cut -d'"' -f2)"
-    if [ -z "$new_ver" ]; then
-        error "Downloaded file does not look like sandy."
+    new_ver="$(grep -m1 '^SANDY_VERSION=' "$tmp" | cut -d'"' -f2)" || new_ver=""
+    if [ -z "$new_ver" ] || { [ -n "$tag" ] && [ "$new_ver" != "${tag#v}" ]; }; then
+        error "Downloaded file does not look like sandy ${tag:-from main} (SANDY_VERSION=${new_ver:-none})."
         rm -f "$tmp"
         exit 1
     fi
-    if [ "$new_ver" = "$SANDY_VERSION" ]; then
-        info "Already on latest version ($SANDY_VERSION)."
-        rm -f "$tmp"
-        exit 0
+    if [ -n "$sha" ]; then
+        # Record the commit, so --version and --print-version tell dev builds
+        # apart and the next SANDY_CHANNEL=dev --upgrade can compare commits.
+        sed "s/^SANDY_COMMIT=\"\"/SANDY_COMMIT=\"${sha:0:7}\"/" "$tmp" > "$tmp.c" && mv "$tmp.c" "$tmp"
     fi
     chmod +x "$tmp"
     mv "$tmp" "$script_path"
-    info "Updated sandy: $SANDY_VERSION → $new_ver"
-    # Clear update cache
+    info "Updated sandy: $SANDY_VERSION → $new_ver${sha:+ (${sha:0:7})}"
     rm -f "$SANDY_HOME/.update_check"
 }
 
@@ -477,8 +539,7 @@ sandy_check_update() {
         fi
     fi
     local latest
-    latest="$(curl -fsSL --max-time 3 "$SANDY_API_URL" 2>/dev/null \
-        | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)" || true
+    latest="$(_sandy_latest_release_tag 3)"
     if [ -n "$latest" ]; then
         echo "$now $latest" > "$cache"
         # _ver_should_update, not string inequality: a plain != would nag
@@ -1802,6 +1863,7 @@ SANDY_RELAY|bool|||1.11.0|deprecated|REMOVED in 2.6.0 (#382) after its 2.5.0 ann
 SANDY_OFFLINE|bool|0||2.4.0|stable|Offline mode (#219): skip the lookups a launch makes only to learn whether something NEWER exists -- the per-agent version checks (a hit forces a --no-cache agent rebuild), skill-pack version resolution from GitHub (falls back to the local cache, then the built-in pin), and sandy's own release nag. Builds that are REQUIRED still run: a missing image or a changed Dockerfile builds through the build-reachability gate and fails there as it always has. For a known-bad network (in-flight wifi, captive portal) or an air-gapped host, where the checks cost latency and a detected update would force a rebuild that cannot succeed. The one-shot CLI form is --no-update-check, which wins over this key. Passive-safe: it defers the auto-patch pickup the wrapped-agent CVE posture relies on, but only until the next launch without it -- equivalent to not relaunching -- and it is never silent: one line at launch, one at session end, and 'offline': true in /etc/sandy-session.json. Default 0.
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass TWO of the three launch approval gates: the passive-privileged config-key prompt AND the per-project .sandy/Dockerfile build prompt (an unreviewed project image then builds, running its RUN commands on the host docker daemon with unfiltered network). It does NOT bypass the dangerous-symlink gate, deliberately: that gate is built so no approval of a new escaping symlink can happen without a deliberate human act (a new escape is a hard error, never a re-prompt), and a blanket bypass would silently mount every future escape read-write. Env-only, so a committed config cannot set it. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
+SANDY_CHANNEL|enum:release,dev|release||2.8.0|stable|Which build `sandy --upgrade` installs (install.sh reads the same variable). release (default): the latest GitHub release, the version the update notice names; a dev or rc build newer than that release is left alone unless release is set explicitly. dev: the head of main, pinned to its commit and recording it, so --version tells dev builds apart and the next dev upgrade compares commits. Env-only: it is read before any config file is loaded. A failed release lookup is an error, never a silent fallback to main.
 SANDY_HOST_ID|string||^[A-Za-z0-9._-]{1,128}$|1.8.0|stable|Operator override for the host_id reported by --print-state (#179), advisory identity for multi-host fleet aggregation (sandbox names hash only the workspace path, so the same path on two hosts collides). ENV-ONLY -- a committed .sandy/config can never set it, which would otherwise forge the identity of whatever machine the repo is cloned onto. Default is uname -n (host_id_source: hostname); a valid override reports host_id_source: env. Invalid or empty values are silently ignored and fall back to uname -n -- no warning, ever, since --print-state guarantees 0 bytes of stderr.
 EOF
 }
@@ -2036,6 +2098,15 @@ _emit_key_object() {
             printf ','; _json_kv type "$(_json_escape "$type")"
             ;;
     esac
+    # base_type (decision 3, 2026-10-05): the JSON kind a value of this key
+    # takes, so a consumer meeting a `type` it does not know (path, secret,
+    # agent_combo, anything added later) still renders a working input.
+    # Derived here, never written per key, so it cannot drift from `type`.
+    case "$type" in
+        bool) printf ','; _json_kv base_type '"bool"' ;;
+        int)  printf ','; _json_kv base_type '"int"' ;;
+        *)    printf ','; _json_kv base_type '"string"' ;;
+    esac
 
     [ -n "$default"     ] && { printf ','; _json_kv default     "$(_json_escape "$default")"; }
     [ -n "$pattern"     ] && { printf ','; _json_kv pattern     "$(_json_escape "$pattern")"; }
@@ -2169,7 +2240,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--remote"';       printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Run as a remote-controlled Claude session."';     printf ','; _json_kv agents '["claude"]'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--upgrade"';      printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Self-update sandy to the latest release."'; printf '}'
+    printf '{'; _json_kv name '"--upgrade"';      printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Self-update sandy to the latest GitHub release, the version the update notice names. Does not downgrade a dev or rc build that is newer than that release unless SANDY_CHANNEL=release is set. SANDY_CHANNEL=dev installs the head of main instead, pinned to its commit and recording it. A failed lookup exits 1 and never falls back to main."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--agent"';        printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"LIST"'; printf ','; _json_kv description '"Agent(s) for this run (overrides SANDY_AGENT)."'; printf '}'
     printf ','
@@ -7682,7 +7753,8 @@ Flags:
                      and codex)
   --resume           Open session picker (claude, and codex's own picker)
   --remote           Start in remote-control server mode
-  --upgrade          Update sandy to the latest version
+  --upgrade          Update sandy to the latest release (SANDY_CHANNEL=dev:
+                     the head of main, recording its commit)
   --agent <list>     Agent(s) to launch (overrides SANDY_AGENT and
                      .sandy/config). One of: claude, gemini, codex,
                      opencode, grok. Comma-separated for multi-agent,

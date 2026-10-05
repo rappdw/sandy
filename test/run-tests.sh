@@ -24503,6 +24503,134 @@ unset _S197_SEL _S197_MODE _S197_WARN _S197_FWD _S197_A _S197_B _S197_C _S197_D 
 unset -f _s197 2>/dev/null || true
 
 
+echo "§198: install.sh and --upgrade install the latest RELEASE; SANDY_CHANNEL=dev installs main pinned to its commit"
+# ============================================================
+# Decision 1 (2026-10-05). Both used to download main: a stranger got
+# unreleased code, --upgrade moved a stable user onto the dev line, and a dev
+# install never updated (it compared only the version string). Runs the REAL
+# install.sh and --upgrade against a stub curl serving fixtures, with
+# GitHub's own pretty-printed release JSON ("tag_name": "v…", with a space,
+# which the old update check never matched).
+_S198_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S198_D/bin" "$_S198_D/fx"
+cat > "$_S198_D/bin/curl" <<'STUB'
+#!/bin/sh
+out=""; url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift 2; continue ;;
+        -H|--max-time) shift 2; continue ;;
+        http*) url="$1" ;;
+    esac
+    shift
+done
+echo "$url" >> "$FX/log"
+case "$url" in
+    */releases/latest) f="$FX/release.json" ;;
+    */commits/main)    f="$FX/main.sha" ;;
+    https://raw.githubusercontent.com/rappdw/sandy/*/sandy) r="${url#https://raw.githubusercontent.com/rappdw/sandy/}"; f="$FX/sandy-${r%/sandy}" ;;
+    *) exit 22 ;;
+esac
+[ -f "$f" ] || exit 22
+if [ -n "$out" ]; then cat "$f" > "$out"; else cat "$f"; fi
+STUB
+chmod +x "$_S198_D/bin/curl"
+_S198_SHA=0123456789abcdef0123456789abcdef01234567
+printf '{\n  "url": "x",\n  "tag_name": "v2.9.1",\n  "draft": false\n}\n' > "$_S198_D/fx/release.json"
+printf '%s' "$_S198_SHA" > "$_S198_D/fx/main.sha"
+printf '#!/usr/bin/env bash\nSANDY_VERSION="2.9.1"\nSANDY_COMMIT=""  # baked\n' > "$_S198_D/fx/sandy-v2.9.1"
+printf '#!/usr/bin/env bash\nSANDY_VERSION="2.10.0-dev"\nSANDY_COMMIT=""  # baked\n' > "$_S198_D/fx/sandy-$_S198_SHA"
+# $1 = SANDY_VERSION of the copy, $2 = SANDY_COMMIT baked into it, rest = env -> "rc|version|commit|output"
+_s198_up() {
+    local v="$1" c="$2" o r=0; shift 2
+    rm -f "$_S198_D/fx/log"; mkdir -p "$_S198_D/h"
+    sed -e "s/^SANDY_VERSION=\"[^\"]*\"/SANDY_VERSION=\"$v\"/" -e "s/^SANDY_COMMIT=\"\"/SANDY_COMMIT=\"$c\"/" "$SANDY_SCRIPT" > "$_S198_D/sandy"
+    o="$(env -i PATH="$_S198_D/bin:$PATH" HOME="$_S198_D/h" SANDY_HOME="$_S198_D/h" FX="$_S198_D/fx" "$@" bash "$_S198_D/sandy" --upgrade 2>&1)" || r=$?
+    printf '%s|%s|%s|%s' "$r" "$(grep -m1 '^SANDY_VERSION=' "$_S198_D/sandy" | cut -d'"' -f2)" "$(grep -m1 '^SANDY_COMMIT=' "$_S198_D/sandy" | cut -d'"' -f2)" "$o"
+}
+check "§198(1) --upgrade on an older release installs the latest release, by its tag" \
+    bash -c 'case "$1" in "0|2.9.1||"*) grep -q "/v2.9.1/sandy$" "$2" ;; *) exit 1 ;; esac' _ "$(_s198_up 2.9.0 '')" "$_S198_D/fx/log"
+check "§198(2) --upgrade on the latest release says so and changes nothing" \
+    bash -c 'case "$1" in "0|2.9.1||"*"Already on the latest release"*) exit 0 ;; esac; exit 1' _ "$(_s198_up 2.9.1 '')"
+check "§198(3) a dev build newer than the release is not downgraded by a plain --upgrade" \
+    bash -c 'case "$1" in "0|2.10.0-dev||"*"not downgrading"*) exit 0 ;; esac; exit 1' _ "$(_s198_up 2.10.0-dev '')"
+check "§198(4) ...but SANDY_CHANNEL=release switches it to the release" \
+    bash -c 'case "$1" in "0|2.9.1||"*) exit 0 ;; esac; exit 1' _ "$(_s198_up 2.10.0-dev '' SANDY_CHANNEL=release)"
+check "§198(5) an rc is moved to its own final release (equal cores)" \
+    bash -c 'case "$1" in "0|2.9.1||"*) exit 0 ;; esac; exit 1' _ "$(_s198_up 2.9.1-rc2 '')"
+check "§198(6) SANDY_CHANNEL=dev installs main pinned to its commit, and records the commit" \
+    bash -c 'case "$1" in "0|2.10.0-dev|0123456|"*) grep -q "/$2/sandy$" "$3" ;; *) exit 1 ;; esac' _ "$(_s198_up 2.10.0-dev aaaaaaa SANDY_CHANNEL=dev)" "$_S198_SHA" "$_S198_D/fx/log"
+check "§198(7) SANDY_CHANNEL=dev on main's current commit says so and downloads nothing" \
+    bash -c 'case "$1" in "0|2.10.0-dev|0123456|"*"Already on main"*) ! grep -q "/sandy$" "$2" ;; *) exit 1 ;; esac' _ "$(_s198_up 2.10.0-dev 0123456 SANDY_CHANNEL=dev)" "$_S198_D/fx/log"
+mv "$_S198_D/fx/release.json" "$_S198_D/fx/release.json.off"
+check "§198(8) a failed release lookup is an error and never falls back to main" \
+    bash -c 'case "$1" in "1|2.9.0||"*"Could not find the latest sandy release"*) ! grep -q "/sandy$" "$2" ;; *) exit 1 ;; esac' _ "$(_s198_up 2.9.0 '')" "$_S198_D/fx/log"
+mv "$_S198_D/fx/release.json.off" "$_S198_D/fx/release.json"
+printf '#!/usr/bin/env bash\nSANDY_VERSION="2.9.0"\n' > "$_S198_D/fx/sandy-v2.9.1.bad"; cp "$_S198_D/fx/sandy-v2.9.1" "$_S198_D/fx/sandy-v2.9.1.good"; mv "$_S198_D/fx/sandy-v2.9.1.bad" "$_S198_D/fx/sandy-v2.9.1"
+check "§198(9) a downloaded file whose version is not the tag is refused, and the install is untouched" \
+    bash -c 'case "$1" in "1|2.9.0||"*"does not look like sandy"*) exit 0 ;; esac; exit 1' _ "$(_s198_up 2.9.0 '')"
+mv "$_S198_D/fx/sandy-v2.9.1.good" "$_S198_D/fx/sandy-v2.9.1"
+check "§198(10) an unknown SANDY_CHANNEL is an error" \
+    bash -c 'case "$1" in "1|"*"must be"*) exit 0 ;; esac; exit 1' _ "$(_s198_up 2.9.0 '' SANDY_CHANNEL=nightly)"
+# The update notice: the real check, fed GitHub's pretty-printed JSON.
+_S198_NAG="$(env -i PATH="$_S198_D/bin:$PATH" HOME="$_S198_D/h" FX="$_S198_D/fx" SANDY_HOME="$_S198_D/nag" SRC="$SANDY_SCRIPT" bash -c '
+    set -euo pipefail
+    eval "$(sed -n "/^_ver_lt()/,/^}/p;/^_ver_should_update()/,/^}/p;/^_sandy_latest_release_tag()/,/^}/p;/^sandy_check_update()/,/^}/p;/^SANDY_API_URL=/p" "$SRC")"
+    warn() { printf "%s\n" "$*"; }; SANDY_VERSION=2.9.0; sandy_check_update' 2>&1)"
+check "§198(11) the update notice fires on GitHub's real response shape (it never did)" \
+    bash -c 'case "$1" in *"Update available: 2.9.0 → 2.9.1"*) exit 0 ;; esac; exit 1' _ "$_S198_NAG"
+# install.sh, the same way.
+_s198_inst() {  # env... -> "rc|version|commit"
+    local r=0; rm -rf "$_S198_D/inst" "$_S198_D/fx/log"; mkdir -p "$_S198_D/inst"
+    env -i PATH="$_S198_D/bin:$PATH" HOME="$_S198_D/h" FX="$_S198_D/fx" INSTALL_DIR="$_S198_D/inst" "$@" \
+        bash "$(dirname "$SANDY_SCRIPT")/install.sh" >/dev/null 2>&1 || r=$?
+    printf '%s|%s|%s' "$r" "$(grep -m1 '^SANDY_VERSION=' "$_S198_D/inst/sandy" 2>/dev/null | cut -d'"' -f2)" "$(grep -m1 '^SANDY_COMMIT=' "$_S198_D/inst/sandy" 2>/dev/null | cut -d'"' -f2)"
+}
+check "§198(12) install.sh installs the latest release by default" \
+    bash -c '[ "$1" = "0|2.9.1|" ]' _ "$(_s198_inst)"
+check "§198(13) install.sh with SANDY_CHANNEL=dev installs main pinned to its commit, recording it" \
+    bash -c '[ "$1" = "0|2.10.0-dev|0123456" ] && grep -q "/$2/sandy$" "$3"' _ "$(_s198_inst SANDY_CHANNEL=dev)" "$_S198_SHA" "$_S198_D/fx/log"
+mv "$_S198_D/fx/release.json" "$_S198_D/fx/release.json.off"
+check "§198(14) install.sh with no reachable release fails and installs nothing (no fallback to main)" \
+    bash -c '[ "$1" = "1||" ] && ! grep -q "/sandy$" "$2"' _ "$(_s198_inst)" "$_S198_D/fx/log"
+mv "$_S198_D/fx/release.json.off" "$_S198_D/fx/release.json"
+check "§198(15) SANDY_CHANNEL is registered env-only in --print-schema" \
+    bash -c 'bash "$1" --print-schema 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if \"SANDY_CHANNEL\" in json.dumps(d[\"config\"][\"env_only_keys\"]) else 1)"' _ "$SANDY_SCRIPT"
+rm -rf "$_S198_D"
+unset _S198_D _S198_SHA _S198_NAG
+unset -f _s198_up _s198_inst 2>/dev/null || true
+
+echo "§199: every config key in --print-schema carries a base_type derived from its type"
+# ============================================================
+# Decision 3 (2026-10-05). A consumer rendering keys by `type` broke on the
+# first `path` field it met; base_type gives every key a JSON kind to fall
+# back on (bool, int, or string), so a type added later degrades instead.
+_S199_OUT="$(bash "$SANDY_SCRIPT" --print-schema 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+keys = []
+def walk(o):
+    if isinstance(o, dict):
+        if "name" in o and "sources" in o: keys.append(o)
+        for v in o.values(): walk(v)
+    elif isinstance(o, list):
+        for v in o: walk(v)
+walk(d["config"])
+want = lambda t: t if t in ("bool", "int") else "string"
+missing = [k["name"] for k in keys if "base_type" not in k]
+wrong = [k["name"] for k in keys if "base_type" in k and k["base_type"] != want(k["type"])]
+types = sorted({k["type"] for k in keys})
+print(len(keys), len(missing), len(wrong), ",".join(types))
+' 2>/dev/null)"
+check "§199(1) every config key has a base_type (got: $_S199_OUT)" \
+    bash -c 'set -- $1; [ "${1:-0}" -gt 50 ] && [ "$2" = 0 ]' _ "$_S199_OUT"
+check "§199(2) base_type is bool for bool, int for int, and string for every other type" \
+    bash -c 'set -- $1; [ "$3" = 0 ]' _ "$_S199_OUT"
+check "§199(3) the types emitted are the documented closed set" \
+    bash -c 'f="$2"; set -- $1; [ "$4" = "agent_combo,bool,enum,int,path,secret,string" ] || exit 1; for t in $(printf "%s" "$4" | tr "," " "); do grep -qF "| \`$t\` |" "$f" || exit 1; done' _ "$_S199_OUT" "$(dirname "$SANDY_SCRIPT")/SPEC_INTROSPECTION.md"
+unset _S199_OUT
+
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

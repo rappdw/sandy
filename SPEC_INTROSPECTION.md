@@ -940,8 +940,40 @@ Not a flag on this list — it is read from live tmux state **inside** the conta
 
 Reading identity from `pane_index`, a scrollback marker, or the pane title is unsupported and unreliable for the reasons in SPECIFICATION.md; read the pane option. **Not a security boundary**: a process inside the session can rewrite or clear the option, and the worst that buys it is stopping delivery within its own sandbox — it can never redirect delivery elsewhere. A property test pins the contract in `test/run-tests.sh` §171.
 
+## Config field types
+
+Every config key in `--print-schema` carries a `type` from this closed set, and (since 2.8.0) a `base_type` derived from it:
+
+| `type` | `base_type` | meaning |
+|---|---|---|
+| `agent_combo` | `string` | an agent name, or a comma-separated list of 2 to 4 (`SANDY_AGENT`) |
+| `bool` | `bool` | `0` or `1` |
+| `enum` | `string` | one of the values in the key's `choices` |
+| `int` | `int` | a whole number |
+| `path` | `string` | a host filesystem path |
+| `secret` | `string` | a credential; never echo it back |
+| `string` | `string` | free text, constrained by `pattern` when one is given |
+
+`cli_flags` entries use a separate `type`, `flag` or `string` (a flag that takes an argument).
+
+**A new type is an additive change** and does not move `schema_version`. A consumer that meets a `type` it does not know must render it by its `base_type`: a text input for `string`, a toggle for `bool`, a number for `int`. That rule is why `base_type` exists. A consumer that switched on `type` alone with no default branch broke on the first `path` field it met.
+
+## Known consumers
+
+Tools known to read sandy's machine-readable output. A consumer joins this list by opening an issue in rappdw/sandy that says what it reads. **The list is a courtesy, not a guarantee to every user:** sandy is public, and unlisted tools are not protected by anything here beyond the rules in "Schema versioning" below.
+
+| consumer | reads | compares `schema_version` |
+|---|---|---|
+| [rappdw/sandy-ui](https://github.com/rappdw/sandy-ui) | `--print-state` (light and full), `--print-schema`, `--print-version`, `--validate-config`, `--approvals`; the daemon exit codes | minimum supported; warns above it within a sandy major |
+| [rappdw/lore](https://github.com/rappdw/lore) | `--print-state` | reads known fields only |
+| amap-deploy-sandy | `--print-state`, `--print-schema` (`manifest.*`), the session marker | by equality (3, 4) |
+
+**Notice before a `schema_version` change (2.8.0 policy).** Any change to `schema_version`, at a major release included, first ships in a release candidate (`X.Y.Z-rc1`). When that rc is tagged, an issue is opened in each listed consumer's repo naming what changed. Within a major, a removal must also have been listed in README's `## Deprecated` table, as before. sandy-ui runs its parser and schema gate nightly against sandy's `main` and any rc, and reports a break as a rappdw/sandy issue (decision 4, 2026-10-05): the rc notice covers deliberate changes, the nightly run accidental ones.
+
 ## Schema versioning
 
+- **`2.8.0` (decision 3, 2026-10-05):** every config key object gains `base_type` (`string` | `bool` | `int`), derived from `type`; see "Config field types" above. Additive, so `schema_version` stays `4`.
+- **`2.8.0` (decision 1, 2026-10-05):** one new `config.env_only_keys` entry, `SANDY_CHANNEL` (`release` | `dev`): which build `--upgrade` and `install.sh` install. Additive, so `schema_version` stays `4`.
 - **`2.8.0`:** one new `cli_flags` entry, `--accounts`, whose sub-options are `--json` and `--workspace`. Additive, so `schema_version` stays `4`. Its `--json` document is described under `### --accounts` above; it carries the same `schema_version`.
 - **`2.8.0` (#428, #427):** one new `cli_flags` entry, `--login`, whose sub-options are `--workspace` and `--dry-run`; the `--new` and `--resume` descriptions now say they apply to codex too. Additive, so `schema_version` stays `4`. (`--login` is a launch-family flag, not an introspection flag: it has no JSON output.)
 - **`2.7.0` (#299):** two new top-level fields, `proxy_image_src` and `proxy_image_epoch` — the proxy image's identity labels, full mode only, `null` when absent. Additive, so `schema_version` stays `4`.
@@ -956,7 +988,7 @@ Reading identity from `pane_index`, a scrollback marker, or the pane title is un
 - **`2.4.0` (#380):** `manifest.top_level_keys` gains `receives`, and `--print-schema`'s `manifest` object gains a new field, `manifest.receives_values` (the closed set `receives` accepts — `["cross_session"]` today). One new field in the session marker, `cross_session_inbound_source` (`"explicit"` \| `"feature:<name>"` \| `"relay-legacy"` \| `"default"`, or JSON `null` mirroring `cross_session_inbound`'s own null convention — see §C.9 of SPECIFICATION.md). All additive, so `schema_version` stays `3`. It decouples `SANDY_CROSS_SESSION_INBOUND`'s unset default from the relay: the default now resolves `accept` iff a SELECTED feature manifest declares `"receives": ["cross_session"]`, with the pre-2.4.0 relay-conditional rule surviving, additive-only, as a DEPRECATED legacy path. (`#382` listed it in README's `## Deprecated` table in 2.5.0 and removed the legacy path in 2.6.0 — `cross_session_inbound_source` can no longer produce `"relay-legacy"`; an entry alone now resolves `refuse`.) No `--print-state` field — the marker is the record for this one, matching `agent_args`'s own precedent of `--print-state` not mirroring every marker field.
 - **`2.5.0` (#382):** no field is added, removed or reshaped, so `schema_version` stays `3`. README's `## Deprecated` table now **announces** `relay{}` (every field, in the marker and in `--print-state`) under the written minor-deprecation exception; its replacement is `feature_entries.<name>` (2.4.0), where `relay_alias: true` marks the entry `relay{}` describes. `cross_session_inbound_source: "relay-legacy"` still appears in 2.5.0, but the rule behind it is deprecated and now warns at launch. **Done in 2.6.0**: `relay{}`, `relay_alias` and `disabled_by` are removed, `schema_version` moves to `4` — see the `2.6.0` (#382) entry above.
 - Current: `schema_version: 4` (moved to `2` in 2.0.0 and to `3` in 2.2.0 — entries below — and to `4` in 2.6.0 — the entry above). `--print-schema`, `--print-state`, `--validate-config` and `--print-version` all emit the same number.
-- **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal`), `description`, `sources`, and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
+- **Config-key object fields:** each key object carries `name`, `type` (+ `choices` for enums), `default` (omitted if none), `pattern` (omitted if none), `since` (introduction version, omitted if unknown), `stability` (always present: `stable` | `experimental` | `internal`), `description`, `sources`, `base_type` (since 2.8.0, always present), and `passive_approval_required` (privileged keys only). `since` and `stability` were added additively in `0.15.0` (PR 4.1); per the rule below, older clients ignore them without a version bump.
 - **`2.4.0` (#219)**: one new `config.passive_keys` entry, `SANDY_OFFLINE`, one new `cli_flags` entry, `--no-update-check`, and one new field in the session marker, `offline` (bool). Additive, so `schema_version` stays `3`. Probe `SANDY_OFFLINE`'s presence in `passive_keys` to learn whether this sandy honours it — an older sandy forwards an unknown `--no-update-check` to the agent instead of rejecting it.
 - **`2.0.0` — `schema_version` moves to `2`, the first bump.** Not additive: `sandboxes[].features` keeps its name and changes its SOURCE. It reported `$SANDBOX_DIR/features/<name>` markers (1.15.0); it now reports which features a sandbox was **selected** for by each feature's own manifest, evaluated at every launch. A consumer that kept parsing the field would silently have a different question answered, which is worse than a break, so the version says so. `feature_problems` likewise becomes `"<feature>: <why this sandbox was not selected>"`.
 

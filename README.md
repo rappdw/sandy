@@ -109,6 +109,8 @@ curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/doctor.sh | bash
 curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | bash
 ```
 
+This installs the **latest release**. `sandy --upgrade` later moves you to the newest release, the one the "Update available" notice names. To follow unreleased work on `main` instead, set `SANDY_CHANNEL=dev`, either on the install (`curl … | SANDY_CHANNEL=dev bash`) or on an upgrade (`SANDY_CHANNEL=dev sandy --upgrade`). A dev build records its commit, so `sandy --version` tells two builds of the same `-dev` version apart. A plain `--upgrade` never downgrades a dev build to an older release; `SANDY_CHANNEL=release sandy --upgrade` does that on purpose. If the release can't be looked up (offline, or GitHub's rate limit), both stop with an error rather than installing `main` instead.
+
 Or install locally from a clone:
 
 ```bash
