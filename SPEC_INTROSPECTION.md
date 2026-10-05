@@ -906,6 +906,27 @@ What each **launch approval gate** would decide for one workspace, without grant
 
 **Stream contract and side effects.** The same guarantee as the four flags above — exactly one JSON document on stdout, 0 bytes of stderr, in every case including the error ones (the child's own `[sandy]` output is discarded). It writes **nothing**: no approval file, no sandbox directory (the ordinary pre-pass's `mkdir -p "$SANDBOX_DIR"` is skipped), no generated build files, not even the symlink gate's per-launch refresh of its approved list. It needs **no Docker**: the report mode skips the Docker preflight and the network reapers. (The two empty bind-mount fixtures every sandy invocation creates at the top of `$SANDY_HOME` are the only exception, as for every other flag.) Guarded by `test/run-tests.sh` §183, which grants the "approved" fixture through the real pre-pass on a pty and asserts the report's hashes equal the stored ones.
 
+### `--accounts [--json] [--workspace PATH]` (2.8.0)
+
+Which Anthropic account each sandbox's Claude Code is signed in to. Filesystem only (no Docker, no config load). A human-readable table by default; `--json` emits one document:
+
+```json
+{"schema_version":4,"sandy_home":"/Users/you/.sandy","sandboxes":[
+  {"sandbox":"web-1a2b3c4d","workspace_path":"/Users/you/dev/web","session":"running",
+   "cred_mode":"full","launched_at":"2026-10-02T00:00:00Z",
+   "account":{"email":"you@example.com","organization_name":"Example","organization_type":"claude_max",
+              "organization_role":"admin","billing_type":"stripe_subscription","seat_tier":null,
+              "rate_limit_tier":"default_claude_max_20x","recorded_at":"2026-10-01T10:00:00.000Z"},
+   "plan":"Max 20x","account_file":"claude/.claude.json","problem":null}]}
+```
+
+- **`account`** is copied from the `oauthAccount` block Claude Code writes into the sandbox's `.claude.json` (`claude/.claude.json`, or the pre-2.7 sibling, reported as `account_file: "legacy"`), or `null` when there is none. It is what Claude Code **last recorded**, at `recorded_at`, not a live query. The credential is read from the host at every launch, so a host re-login appears only after the next session runs.
+- **`plan`** is derived for display: `organization_type` without its `claude_` prefix and capitalized, plus the `NNx` suffix of `rate_limit_tier` and the `seat_tier` in parentheses when present. Read the raw fields when you need to branch on them.
+- **`cred_mode`** comes from the sandbox's session marker: what the last launch put in the container. With `api-key` or `none`, the recorded account is not what billed.
+- **`session`** is `running` when a live process holds the workspace lock, otherwise `stopped`, by the same predicate `--print-state` uses.
+- **`problem`** is `"symlink"` when `claude/` or `claude/.claude.json` is a symlink (never followed: it was planted from inside a session), `"unreadable"` when the file is not JSON, else `null`.
+- Contains personal data (email). Errors (an unknown argument, a missing workspace, no jq or node) go to stderr with exit `1`; success is exit `0`, including an empty sandbox list.
+
 ## In-container pane identity (stable, 2.4.0)
 
 Not a flag on this list — it is read from live tmux state **inside** the container, not from a fast-path handler that runs before Docker, so `--print-state` (a host-side, no-container-required probe) cannot report it and never will. It is documented here anyway because, as of 2.4.0, it is a **published, stable contract** an in-container consumer may depend on: full rationale and the 4-agent mapping table live in SPECIFICATION.md's "Pane-identity contract" (section 12).
@@ -921,6 +942,7 @@ Reading identity from `pane_index`, a scrollback marker, or the pane title is un
 
 ## Schema versioning
 
+- **`2.8.0`:** one new `cli_flags` entry, `--accounts`, whose sub-options are `--json` and `--workspace`. Additive, so `schema_version` stays `4`. Its `--json` document is described under `### --accounts` above; it carries the same `schema_version`.
 - **`2.8.0` (#428, #427):** one new `cli_flags` entry, `--login`, whose sub-options are `--workspace` and `--dry-run`; the `--new` and `--resume` descriptions now say they apply to codex too. Additive, so `schema_version` stays `4`. (`--login` is a launch-family flag, not an introspection flag: it has no JSON output.)
 - **`2.7.0` (#299):** two new top-level fields, `proxy_image_src` and `proxy_image_epoch` — the proxy image's identity labels, full mode only, `null` when absent. Additive, so `schema_version` stays `4`.
 - **`2.7.0` (#296):** a new flag, `--approvals [--workspace PATH]` — a separate document with its own shape (above), carrying the same `schema_version`; nothing in the other outputs changes.

@@ -2186,6 +2186,7 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--print-version"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Emit machine-readable version JSON (schema_version, version, commit, full_version). full_version is the stable cache key for --print-schema consumers — unlike version, it changes on every commit."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--approvals"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Report, as one JSON document, what each launch approval gate (privileged workspace config keys, symlinks escaping the workspace, the .sandy/Dockerfile build) would decide for a workspace: approved, pending, changed, refused or not_applicable. Judged by the launch path itself (the combined workspace config and .secrets, minus keys the environment sets); key names only, never values. Read-only: grants nothing, writes nothing, needs no Docker. Exit 0 when nothing is unresolved, 2 when a gate would be withheld or refused, 1 when no report could be produced. Sub-options: --workspace PATH."'; printf '}'
+    printf ','; printf '{'; _json_kv name '"--accounts"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Report which Anthropic account each sandbox Claude Code is signed in to: email, organization and plan (organization type, seat tier and rate-limit tier), plus the credential mode the last launch used and whether a session holds the sandbox now. Read from the oauthAccount block Claude Code records in each sandbox .claude.json, so it is what Claude Code last recorded there, not a live query. Filesystem only: no Docker. A table by default; --json emits one JSON document. Prints personal data (email). Sub-options: --json, --workspace PATH."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--start"';         printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Start a detached daemon session for the workspace and return once attachable."'; printf '}'
     printf ','
@@ -2215,7 +2216,7 @@ _sandy_emit_schema() {
     printf ','
     printf '{'; _json_kv name '"--provision"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Non-interactively materialize one workspace sandbox by running the REAL launch path once (start a detached daemon session, confirm it is up, then stop it) — never a flag that fabricates sandbox state directly. Safe no-op (exit 0) against a workspace that already has a live session (foreground lock holder or running daemon container). --all provisions every sandbox sandy already KNOWS about that is missing the per-sandbox state a launch creates -- pip/ since 2.6.0 (#382; relay-state/ was the target from 2.2.0 through 2.5.x, but a launch no longer creates it), which is what --reset-sandbox leaves behind, and what any launch that failed part-way leaves behind; it enumerates $SANDY_HOME/sandboxes, so a workspace that has never been launched has no directory and cannot be reached by it -- enrolling a new workspace stays a deliberate single --workspace call. A sandbox whose recorded workspace no longer exists cannot be provisioned: it is named, counted as unprepared, and makes the run exit non-zero rather than being skipped silently. Exit 0 iff every known sandbox ends with that state in place. Sub-options: --workspace PATH, --all, --dry-run, --yes."'; printf '}'
     printf ','
-    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --login, --update-sessions, --reset-sandbox, --remove-sandbox, --provision, and --approvals. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the other introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
+    printf '{'; _json_kv name '"--workspace"'; printf ','; _json_kv type '"string"'; printf ','; _json_kv arg_name '"PATH"'; printf ','; _json_kv description '"Target workspace directory (defaults to the current directory). Honored by the bare launch path (including -p/--rebuild/--build-only), --start, --attach, --stop, --exec, --login, --update-sessions, --reset-sandbox, --remove-sandbox, --provision, --approvals, and --accounts. NOT accepted by --gc, --stop-all, --prune-orphans, --doctor, or the other introspection flags (--print-schema/--print-state/--validate-config)."'; printf '}'
     printf ']'
 
     # agents — each with image, features, credential probe order
@@ -4240,6 +4241,171 @@ if [[ "${1:-}" == "--approvals" ]]; then
     _sandy_emit_approvals "$@"
     exit "$_SANDY_APPROVALS_RC"
 fi
+# --- `sandy --accounts [--json] [--workspace P]` ----------------------------
+# Which Anthropic account each sandbox's Claude Code is signed in to: email,
+# organization and plan, one row per sandbox. Filesystem only (no Docker, no
+# config load, no mutex), like --reset-sandbox, so it covers stopped
+# sandboxes too.
+#
+# The account comes from the oauthAccount block Claude Code itself writes into
+# the sandbox's .claude.json. That is what Claude Code LAST RECORDED there, not
+# a live query: the credential is read fresh from the host at every launch, so
+# after a host re-login the row changes only once a session has run. cred_mode
+# (the session marker) says which kind of credential the last launch put in
+# the box; with api-key or none, the recorded account is not what billed.
+#
+# Reads only fixed field paths out of three JSON files with jq or node (sandy
+# never parses JSON itself), and never follows a symlink: claude/ is the
+# container's rw ~/.claude, so a link there was planted from inside a session
+# and would point this report at some host file.
+_sandy_acct_fields() {
+    # $1 = file, $2.. = dotted paths. One US-joined (0x1f) line; "" for a missing,
+    # null or non-scalar-path value. Nonzero when the file is not JSON.
+    local _f="$1"; shift
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '. as $d | [$ARGS.positional[] | split(".") as $p | ($d | try getpath($p) catch null)] | map(if . == null then "" else (tostring | gsub("[\t\n\r\u001f]"; " ")) end) | join("\u001f")' "$_f" --args "$@" 2>/dev/null
+    else
+        node -e 'const fs=require("fs");let d;try{d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch(e){process.exit(3)}console.log(process.argv.slice(2).map(p=>{let v=d;for(const k of p.split(".")){v=(v!==null&&typeof v==="object")?v[k]:undefined}return v==null?"":String(v).replace(/[\t\n\r\x1f]/g," ")}).join("\x1f"))' "$_f" "$@" 2>/dev/null
+    fi
+}
+_sandy_acct_plan() {
+    # $1 organizationType, $2 seatTier, $3 organizationRateLimitTier.
+    # claude_max + default_claude_max_20x -> "Max 20x"; a seat tier is appended.
+    local _t="${1#claude_}" _p
+    [ -n "$1" ] || return 0
+    _p="$(printf '%s' "${_t:0:1}" | tr '[:lower:]' '[:upper:]')${_t:1}"
+    case "$3" in *_[0-9]*x) _p="$_p ${3##*_}" ;; esac
+    [ -n "$2" ] && _p="$_p ($2)"
+    printf '%s' "$_p"
+}
+_sandy_accounts() {
+    # Fields are joined with US (0x1f), not TAB: TAB is IFS whitespace, so
+    # `read` would collapse two adjacent empty fields and shift every column.
+    local _json=false _ws="" _wd="" _sb _name _af _src _prob _line _tab=$'\x1f'
+    local _email _org _otype _orole _billing _seat _rate _asof _cred _launched _wsp _sess _plan
+    local -a _r_name=() _r_sess=() _r_cred=() _r_email=() _r_org=() _r_plan=() _r_asof=() _r_json=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --json) _json=true; shift ;;
+            --workspace)
+                if [ $# -lt 2 ] || [ -z "$2" ]; then error "--accounts: --workspace requires a PATH"; return 1; fi
+                _ws="$2"; shift 2 ;;
+            --workspace=*) _ws="${1#--workspace=}"; shift ;;
+            *) error "--accounts: unrecognized argument: $1 (accepts --json and --workspace PATH)"; return 1 ;;
+        esac
+    done
+    if ! command -v jq >/dev/null 2>&1 && ! command -v node >/dev/null 2>&1; then
+        error "--accounts needs jq or node to read Claude Code's account record."
+        return 1
+    fi
+    local -a _sbs=()
+    if [ -n "$_ws" ]; then
+        _wd="$(cd "$_ws" 2>/dev/null && pwd -P)" || _wd=""
+        if [ -z "$_wd" ]; then error "--accounts: workspace does not exist or is not a directory: $_ws"; return 1; fi
+        _name="$(_sandy_slug_for "$_wd")"
+        if [ ! -d "$SANDY_HOME/sandboxes/$_name" ]; then
+            error "--accounts: no sandbox for $_wd (expected $SANDY_HOME/sandboxes/$_name)."
+            return 1
+        fi
+        _sbs=("$SANDY_HOME/sandboxes/$_name")
+    else
+        for _sb in "$SANDY_HOME/sandboxes"/*/; do
+            [ -d "$_sb" ] || continue
+            _sbs+=("${_sb%/}")
+        done
+    fi
+    for _sb in ${_sbs[@]+"${_sbs[@]}"}; do
+        _name="$(basename "$_sb")"
+        _email="" _org="" _otype="" _orole="" _billing="" _seat="" _rate="" _asof="" _cred="" _launched="" _wsp="" _prob="" _src=""
+        # 2.7+ keeps it inside claude/ (#411); a pre-2.7 sibling still counts.
+        if [ -L "$_sb/claude" ] || [ -L "$_sb/claude/.claude.json" ]; then
+            _prob="symlink"
+        elif [ -f "$_sb/claude/.claude.json" ]; then
+            _af="$_sb/claude/.claude.json"; _src="claude/.claude.json"
+        elif [ -f "$SANDY_HOME/sandboxes/$_name.claude.json" ] && [ ! -L "$SANDY_HOME/sandboxes/$_name.claude.json" ]; then
+            _af="$SANDY_HOME/sandboxes/$_name.claude.json"; _src="legacy"
+        fi
+        if [ -n "$_src" ]; then
+            if _line="$(_sandy_acct_fields "$_af" oauthAccount.emailAddress oauthAccount.organizationName \
+                    oauthAccount.organizationType oauthAccount.organizationRole oauthAccount.billingType \
+                    oauthAccount.seatTier oauthAccount.organizationRateLimitTier oauthAccount.profileFetchedAt)"; then
+                IFS="$_tab" read -r _email _org _otype _orole _billing _seat _rate _asof <<< "$_line" || true
+            else
+                _prob="unreadable"
+            fi
+        fi
+        if [ -f "$_sb/sandy-session.json" ] && [ ! -L "$_sb/sandy-session.json" ]; then
+            _line="$(_sandy_acct_fields "$_sb/sandy-session.json" cred_mode launched_at)" || _line=""
+            IFS="$_tab" read -r _cred _launched <<< "$_line" || true
+        fi
+        if [ -f "$_sb/WORKSPACE.json" ] && [ ! -L "$_sb/WORKSPACE.json" ]; then
+            _wsp="$(_sandy_acct_fields "$_sb/WORKSPACE.json" workspace_path)" || _wsp=""
+        fi
+        _sess="stopped"
+        if [ -d "$SANDY_HOME/sandboxes/.$_name.lock" ]; then
+            _sandy_lock_state "$SANDY_HOME/sandboxes/.$_name.lock"
+            [ "$_SANDY_LOCK_STATE" = "live" ] && _sess="running"
+        fi
+        _plan="$(_sandy_acct_plan "$_otype" "$_seat" "$_rate")"
+        _r_name+=("$_name"); _r_sess+=("$_sess"); _r_cred+=("${_cred:--}")
+        _r_email+=("${_email:--}"); _r_org+=("${_org:--}"); _r_plan+=("${_plan:--}")
+        if [ -n "$_prob" ]; then _r_email[${#_r_email[@]}-1]="($_prob)"; fi
+        _r_asof+=("${_asof%%T*}")
+        if [ "$_json" = true ]; then
+            _jn() { if [ -n "$1" ]; then _json_escape "$1"; else printf 'null'; fi; }
+            _line="{$(_json_kv sandbox "$(_jn "$_name")"),$(_json_kv workspace_path "$(_jn "$_wsp")"),$(_json_kv session "\"$_sess\""),$(_json_kv cred_mode "$(_jn "$_cred")"),$(_json_kv launched_at "$(_jn "$_launched")"),"
+            if [ -n "$_email$_org$_otype" ]; then
+                _line+="$(_json_kv account "{$(_json_kv email "$(_jn "$_email")"),$(_json_kv organization_name "$(_jn "$_org")"),$(_json_kv organization_type "$(_jn "$_otype")"),$(_json_kv organization_role "$(_jn "$_orole")"),$(_json_kv billing_type "$(_jn "$_billing")"),$(_json_kv seat_tier "$(_jn "$_seat")"),$(_json_kv rate_limit_tier "$(_jn "$_rate")"),$(_json_kv recorded_at "$(_jn "$_asof")")}")"
+            else
+                _line+="$(_json_kv account null)"
+            fi
+            _line+=",$(_json_kv plan "$(_jn "$_plan")"),$(_json_kv account_file "$(_jn "$_src")"),$(_json_kv problem "$(_jn "$_prob")")}"
+            _r_json+=("$_line")
+        fi
+    done
+    if [ "$_json" = true ]; then
+        local _i _sep=""
+        printf '{%s,%s,"sandboxes":[' "$(_json_kv schema_version "$SANDY_SCHEMA_VERSION")" "$(_json_kv sandy_home "$(_json_escape "$SANDY_HOME")")"
+        for _i in ${_r_json[@]+"${!_r_json[@]}"}; do printf '%s%s' "$_sep" "${_r_json[$_i]}"; _sep=","; done
+        printf ']}\n'
+        return 0
+    fi
+    if [ ${#_r_name[@]} -eq 0 ]; then
+        echo "No sandboxes under $SANDY_HOME/sandboxes."
+        return 0
+    fi
+    local _w1=7 _w3=4 _w4=5 _w5=12 _w6=4 _i
+    for _i in "${!_r_name[@]}"; do
+        [ ${#_r_name[$_i]} -gt $_w1 ] && _w1=${#_r_name[$_i]}
+        [ ${#_r_cred[$_i]} -gt $_w3 ] && _w3=${#_r_cred[$_i]}
+        [ ${#_r_email[$_i]} -gt $_w4 ] && _w4=${#_r_email[$_i]}
+        [ ${#_r_org[$_i]} -gt $_w5 ] && _w5=${#_r_org[$_i]}
+        [ ${#_r_plan[$_i]} -gt $_w6 ] && _w6=${#_r_plan[$_i]}
+    done
+    # Notes first, then stopped, then running: run from a terminal, the
+    # sessions that are live now end up nearest the prompt.
+    echo "EMAIL, ORGANIZATION and PLAN are what Claude Code last recorded in each sandbox (AS OF)."
+    echo "The credential is read from this host at every launch, so a re-login shows here after the next session."
+    echo "CRED is the credential the last launch used: with api-key or none, the account shown is not what billed."
+    local _want _title _n
+    for _want in stopped running; do
+        _n=0
+        for _i in "${!_r_name[@]}"; do [ "${_r_sess[$_i]}" = "$_want" ] && _n=$((_n + 1)); done
+        [ "$_n" -gt 0 ] || continue
+        _title="Stopped"; [ "$_want" = running ] && _title="Running"
+        echo ""
+        echo "$_title ($_n)"
+        printf "  %-${_w1}s  %-${_w3}s  %-${_w4}s  %-${_w5}s  %-${_w6}s  %s\n" SANDBOX CRED EMAIL ORGANIZATION PLAN "AS OF"
+        for _i in "${!_r_name[@]}"; do
+            [ "${_r_sess[$_i]}" = "$_want" ] || continue
+            printf "  %-${_w1}s  %-${_w3}s  %-${_w4}s  %-${_w5}s  %-${_w6}s  %s\n" \
+                "${_r_name[$_i]}" "${_r_cred[$_i]}" "${_r_email[$_i]}" "${_r_org[$_i]}" "${_r_plan[$_i]}" "${_r_asof[$_i]:--}"
+        done
+    done
+    return 0
+}
+
+
 if [[ "${1:-}" == "--prune-orphans" ]]; then
     # DEC-4d (#26) — maintenance fast-path: reap orphaned sandy_* networks and
     # exit, in the same pre-preflight family as --print-state. It's a global,
@@ -4997,6 +5163,14 @@ _sandy_rsy_cj_src() {   # $1 sandbox dir (local)
         printf '%s' "$1.claude.json"
     fi
 }
+
+# --accounts dispatches here, not beside its helpers above: --workspace needs
+# _sandy_slug_for, which is defined just above this point.
+if [[ "${1:-}" == "--accounts" ]]; then
+    shift
+    _sandy_accounts "$@" || exit 1
+    exit 0
+fi
 
 if [[ "${1:-}" == "--rsync" ]]; then
     shift
@@ -7517,7 +7691,8 @@ Flags:
                      directory). Honored by the bare launch path (including
                      -p/--rebuild/--build-only), --start, --attach, --stop,
                      --exec, --login, --update-sessions, --reset-sandbox,
-                     --remove-sandbox, --provision, and --approvals.
+                     --remove-sandbox, --provision, --approvals, and
+                     --accounts.
   -v                 Verbose: show startup sections, pause on exit
   -vv                Debug: add bash trace to user-setup.sh
   -vvv               Full trace: also trace entrypoint.sh and show docker flags
@@ -7639,6 +7814,11 @@ Introspection (machine-readable JSON; no Docker required):
                           would decide for this workspace, as JSON. Grants
                           nothing. Exit 0 all clear, 2 something withheld or
                           refused, 1 no report. Sub-options: --workspace PATH
+  --accounts              Show which Anthropic account each sandbox's Claude
+                          Code is signed in to: email, organization, plan.
+                          What Claude Code last recorded; no Docker needed.
+                          A table, or JSON with --json. Sub-options: --json,
+                          --workspace PATH
 
 All other arguments are forwarded to the agent (claude, gemini, codex,
 opencode, or grok).

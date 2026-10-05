@@ -380,6 +380,8 @@ Four machine-readable JSON flags run as **fast-path handlers** — they exit bef
 
 As of 1.7.0 all four carry a **stream contract**: exactly one JSON document on stdout, 0 bytes of stderr, even on JSON-shaped failures — the sole exception being no-argument `--validate-config` (0 bytes stdout, one `[sandy] ERROR:` line on stderr). Pinned by `run-tests.sh §92`/`§93`.
 
+**`sandy --accounts [--json] [--workspace P]` (2.8.0)** reports, per sandbox, the email, organization and plan Claude Code last recorded in its `.claude.json` (`oauthAccount`), plus `cred_mode` and whether a session holds it. Filesystem only. It is a record, not a live query: the credential is read from the host each launch, so a re-login shows after the next session. A symlinked `claude/` or `.claude.json` is reported and never followed. Guarded by §196.
+
 **`cli_flags` is hand-curated, not derived.** Any flag added to any parser must either gain a `cli_flags` entry or go on one of the three exception lists (sub-option, private/debug, forwarded-to-agent) in `run-tests.sh §91`, which statically diffs the two and fails on drift in either direction — and also ratchets each flag's own `--help` entry. (`--workspace` was accepted by every daemon-family parser since 1.1.0 but missing from `cli_flags` until 1.7.0.)
 
 ## Self-Attestation Marker

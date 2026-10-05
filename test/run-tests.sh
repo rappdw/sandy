@@ -7496,7 +7496,7 @@ _S91_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Curated exception lists -- each entry is an intentional, hand-verified
 # exception to the parser<->cli_flags identity, not a loophole papering over
 # drift. See the independently-verified framing facts this PR was built on.
-_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --keep-history --purge-history --sandbox --orphans --fix --all --dest-workspace --dest-sandy-home --src-workspace --src-sandy-home"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor/--provision/--rsync/--rsync-from); not standalone cli_flags entries, must instead appear in >=1 description
+_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --keep-history --purge-history --sandbox --orphans --fix --all --dest-workspace --dest-sandy-home --src-workspace --src-sandy-home --json"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor/--provision/--rsync/--rsync-from); not standalone cli_flags entries, must instead appear in >=1 description
 _S91_PRIVATE="--print-protected-paths"                        # real, private/debug fast-path flag; deliberately unadvertised
 _S91_FORWARDED="--resume"                                     # a real cli_flags entry with ZERO parser cases (forwarded verbatim to the agent, sandy:4103/4127)
 
@@ -24350,6 +24350,92 @@ check "§195(10) --print-schema advertises --login" \
 rm -rf "$_S195_D"
 unset _S195_D
 unset -f _s195 _s195_carrier 2>/dev/null || true
+
+
+echo "§196: sandy --accounts — which Anthropic account each sandbox is signed in to"
+# ============================================================
+# Runs the real dispatcher against a fixture SANDY_HOME (env -i, so nothing
+# leaks in from a live sandy session) and asserts what it reports per
+# sandbox, including the cases that went wrong first: an empty field in the
+# middle of the record must not shift the columns after it (TAB is IFS
+# whitespace, so `read` collapsed it), and a planted symlink must not be read.
+if ! command -v jq >/dev/null 2>&1 && ! command -v node >/dev/null 2>&1; then
+    skip "§196 needs jq or node on the host"
+else
+_S196_D="$(cd "$(mktemp -d)" && pwd -P)"
+_S196_H="$_S196_D/home"
+mkdir -p "$_S196_D/bin" "$_S196_D/ws/web" "$_S196_H/sandboxes"
+printf '#!/bin/sh\n: > "%s/docker-called"\nexit 0\n' "$_S196_D" > "$_S196_D/bin/docker"
+chmod +x "$_S196_D/bin/docker"
+eval "$(sed -n '/^sha256()/p;/^_sandy_slug_for()/,/^}/p' "$SANDY_SCRIPT")"
+_S196_WEB="$(_sandy_slug_for "$_S196_D/ws/web")"
+_s196_mk() { mkdir -p "$_S196_H/sandboxes/$1/claude"; }
+_s196_mk "$_S196_WEB"
+printf '%s\n' '{"oauthAccount":{"emailAddress":"dev@example.com","organizationName":"Example Corp","organizationType":"claude_max","organizationRole":"admin","billingType":"stripe_subscription","seatTier":null,"organizationRateLimitTier":"default_claude_max_20x","profileFetchedAt":"2026-10-01T10:00:00.000Z"}}' > "$_S196_H/sandboxes/$_S196_WEB/claude/.claude.json"
+printf '%s\n' '{"cred_mode":"full","launched_at":"2026-10-02T00:00:00Z"}' > "$_S196_H/sandboxes/$_S196_WEB/sandy-session.json"
+mkdir -p "$_S196_H/sandboxes/.$_S196_WEB.lock"; echo "$$" > "$_S196_H/sandboxes/.$_S196_WEB.lock/pid"
+_s196_mk team-22222222
+printf '%s\n' '{"oauthAccount":{"emailAddress":"t@team.example","organizationName":"","organizationType":"claude_team","seatTier":"standard"}}' > "$_S196_H/sandboxes/team-22222222/claude/.claude.json"
+( : ) & _s196_dead=$!; wait "$_s196_dead" 2>/dev/null || true
+mkdir -p "$_S196_H/sandboxes/.team-22222222.lock"; echo "$_s196_dead" > "$_S196_H/sandboxes/.team-22222222.lock/pid"
+mkdir -p "$_S196_H/sandboxes/old-33333333"
+printf '%s\n' '{"oauthAccount":{"emailAddress":"ent@corp.example","organizationName":"Corp","organizationType":"claude_enterprise","seatTier":"premium"}}' > "$_S196_H/sandboxes/old-33333333.claude.json"
+_s196_mk evil-44444444
+printf '%s\n' '{"oauthAccount":{"emailAddress":"leak@host.example","organizationName":"Host"}}' > "$_S196_D/host-file.json"
+ln -s "$_S196_D/host-file.json" "$_S196_H/sandboxes/evil-44444444/claude/.claude.json"
+_s196() { env -i PATH="$_S196_D/bin:$PATH" HOME="$_S196_D" SANDY_HOME="$_S196_H" bash "$SANDY_SCRIPT" --accounts "$@" </dev/null 2>&1; }
+_s196 --json > "$_S196_D/out.json" || true
+_s196 > "$_S196_D/out.txt" || true
+_s196_q() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); S={s["sandbox"]:s for s in d["sandboxes"]}; print(eval(sys.argv[2]))' "$_S196_D/out.json" "$1" 2>/dev/null; }
+check "§196(1) --json is one JSON document listing every sandbox" \
+    bash -c '[ "$1" = 4 ]' _ "$(_s196_q 'len(S)')"
+check "§196(2) a Max account reports its email, organization, plan Max 20x, and the cred_mode and record date" \
+    bash -c '[ "$1" = "dev@example.com|Example Corp|Max 20x|full|2026-10-01T10:00:00.000Z" ]' _ \
+    "$(_s196_q "'|'.join([S['$_S196_WEB']['account']['email'],S['$_S196_WEB']['account']['organization_name'],S['$_S196_WEB']['plan'],S['$_S196_WEB']['cred_mode'],S['$_S196_WEB']['account']['recorded_at']])")"
+check "§196(3) an empty organization name does not shift the fields after it (plan Team (standard))" \
+    bash -c '[ "$1" = "None|Team (standard)|t@team.example" ]' _ \
+    "$(_s196_q "'|'.join([str(S['team-22222222']['account']['organization_name']),S['team-22222222']['plan'],S['team-22222222']['account']['email']])")"
+check "§196(4) a pre-2.7 sibling .claude.json is read, and says so" \
+    bash -c '[ "$1" = "ent@corp.example|Enterprise (premium)|legacy" ]' _ \
+    "$(_s196_q "'|'.join([S['old-33333333']['account']['email'],S['old-33333333']['plan'],S['old-33333333']['account_file']])")"
+check "§196(5) a symlinked .claude.json is reported, never followed" \
+    bash -c '[ "$1" = "symlink|None" ] && ! grep -q "leak@host" "$2" "$3"' _ \
+    "$(_s196_q "S['evil-44444444']['problem']+'|'+str(S['evil-44444444']['account'])")" "$_S196_D/out.json" "$_S196_D/out.txt"
+check "§196(6) session is running for a live lock holder and stopped for a dead one" \
+    bash -c '[ "$1" = "running|stopped" ]' _ \
+    "$(_s196_q "S['$_S196_WEB']['session']+'|'+S['team-22222222']['session']")"
+check "§196(7) the table shows the account row, under Running, after the Stopped section" \
+    bash -c 'grep -q "^  SANDBOX .*EMAIL .*ORGANIZATION .*PLAN" "$1" && grep "^  $2 " "$1" | grep -q "full.*dev@example.com.*Example Corp.*Max 20x.*2026-10-01" && s=$(grep -n "^Stopped (3)$" "$1" | cut -d: -f1) && r=$(grep -n "^Running (1)$" "$1" | cut -d: -f1) && w=$(grep -n "^  $2 " "$1" | cut -d: -f1) && [ "$s" -lt "$r" ] && [ "$r" -lt "$w" ] && [ "$(tail -n 1 "$1" | cut -c3-)" = "$(grep "^  $2 " "$1" | cut -c3-)" ]' _ "$_S196_D/out.txt" "$_S196_WEB"
+check "§196(8) --workspace reports that workspace's sandbox only" \
+    bash -c 'printf "%s" "$1" | python3 -c "import json,sys; s=json.load(sys.stdin)[\"sandboxes\"]; sys.exit(0 if [x[\"sandbox\"] for x in s]==[sys.argv[1]] else 1)" "$2"' _ \
+    "$(_s196 --json --workspace "$_S196_D/ws/web")" "$_S196_WEB"
+_s196_rc=0; _s196 --workspace "$_S196_D/nope" >/dev/null || _s196_rc=$?
+_s196_rc2=0; _s196 --bogus >/dev/null || _s196_rc2=$?
+check "§196(9) a missing workspace and an unknown argument both exit 1" \
+    bash -c '[ "$1" = 1 ] && [ "$2" = 1 ]' _ "$_s196_rc" "$_s196_rc2"
+check "§196(10) it never calls docker" \
+    bash -c '[ ! -e "$1" ]' _ "$_S196_D/docker-called"
+if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+    mkdir -p "$_S196_D/nojq"
+    for _s196_d in $(printf '%s' "$PATH" | tr ':' ' '); do
+        for _s196_f in "$_s196_d"/*; do
+            _s196_n="$(basename "$_s196_f")"
+            [ "$_s196_n" = jq ] && continue
+            [ -e "$_S196_D/nojq/$_s196_n" ] || ln -s "$_s196_f" "$_S196_D/nojq/$_s196_n" 2>/dev/null || true
+        done
+    done
+    env -i PATH="$_S196_D/bin:$_S196_D/nojq" HOME="$_S196_D" SANDY_HOME="$_S196_H" bash "$SANDY_SCRIPT" --accounts --json </dev/null > "$_S196_D/out-node.json" 2>&1 || true
+    check "§196(11) the node projector reports exactly what the jq one does" \
+        cmp -s "$_S196_D/out.json" "$_S196_D/out-node.json"
+else
+    skip "§196(11) needs both jq and node to compare the projectors"
+fi
+check "§196(12) --print-schema advertises --accounts" \
+    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -qF "\"name\":\"--accounts\""' _ "$SANDY_SCRIPT"
+rm -rf "$_S196_D"
+unset _S196_D _S196_H _S196_WEB _s196_dead _s196_rc _s196_rc2 _s196_d _s196_f _s196_n
+unset -f _s196 _s196_mk _s196_q sha256 _sandy_slug_for 2>/dev/null || true
+fi
 
 
 # BEGIN SUMMARY
