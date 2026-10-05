@@ -964,7 +964,7 @@ Tools known to read sandy's machine-readable output. A consumer joins this list 
 
 | consumer | reads | compares `schema_version` |
 |---|---|---|
-| [rappdw/sandy-ui](https://github.com/rappdw/sandy-ui) | `--print-state` (light and full), `--print-schema`, `--print-version`, `--validate-config`, `--approvals`; the daemon exit codes | minimum supported; warns above it within a sandy major |
+| [rappdw/sandy-ui](https://github.com/rappdw/sandy-ui) | `--print-schema` (config keys, `cli_flags`, agents, `schema_version`, `compatibility`); `--print-state light` (`sandboxes`, `running_containers` incl. `daemon`/`attached_clients`/`updated_at`, `orphan_networks`, `lock_held`/`lock_holder_alive`); `--print-version`; `--approvals`; the `--start`/`--attach`/`--stop` exit codes | Minimum supported sandy 2.6.0 / schema 4 (schemas 2–3 best effort). Newer schema within major 2: one-time warning per sandy version. sandy 2.0–2.5: warning. sandy 1.x or a new major: one-time error. None of these ever blocks a launch. |
 | [rappdw/lore](https://github.com/rappdw/lore) | `--print-state` | reads known fields only |
 | amap-deploy-sandy | `--print-state`, `--print-schema` (`manifest.*`), the session marker | by equality (3, 4) |
 
