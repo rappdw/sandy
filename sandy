@@ -1787,7 +1787,7 @@ OPENCODE_MODEL|string|||0.12.0|stable|OpenCode model override (provider/model fo
 SANDY_OPENCODE_AUTH|enum:auto,api_key,oauth|auto||0.12.0|stable|OpenCode credential probe strategy.
 GROK_MODEL|string|||1.5.0|stable|Grok Build model override (passed as -m; default grok-4.5).
 SANDY_GROK_AUTH|enum:auto,api_key,oauth|auto||1.5.0|stable|Grok Build credential probe strategy.
-SANDY_CLAUDE_AUTH|enum:auto,api_key,oauth,profile|auto||1.10.0|stable|Claude Code credential selection. auto (default): a long-lived CLAUDE_CODE_OAUTH_TOKEN wins, else the host OAuth credentials file is mounted and ANTHROPIC_API_KEY is SUPPRESSED (Claude Code resolves an env key ahead of the account credentials, so forwarding both either bills per-use or parks the session on the custom-API-key startup modal). api_key: forward ANTHROPIC_API_KEY and do NOT mount OAuth credentials -- a revocable project key instead of the account refresh token, and the only way to choose per-use billing on a host that has OAuth. oauth: mount OAuth and never forward the API key. profile (1.11.0): use an Anthropic Console profile written by `ant auth login` (the Claude Platform CLI) -- the ONLY way to reach a workspace-bound entitlement such as Claude Mythos. Sandy copies just the selected profile (ANTHROPIC_PROFILE, else the host active_config, else default) from $ANTHROPIC_CONFIG_DIR (default ~/.config/anthropic) into an ephemeral rw mount at ~/.config/anthropic and withholds the OAuth credentials file, CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY, because Claude Code ranks a user_oauth profile BELOW a /login credential and below every env credential -- measured on 2.1.263. Never probed by auto. Value-aware tier: api_key, profile and auto are passive-safe (each REDUCES what is in the container), while oauth from a workspace is approval-gated because it forces the account-scoped credential in even when a revocable key is available.
+SANDY_CLAUDE_AUTH|enum:auto,api_key,oauth,profile|auto||1.10.0|stable|Claude Code credential selection. auto (default): a long-lived CLAUDE_CODE_OAUTH_TOKEN wins, else the host OAuth credentials file is mounted and ANTHROPIC_API_KEY is SUPPRESSED (Claude Code resolves an env key ahead of the account credentials, so forwarding both either bills per-use or parks the session on the custom-API-key startup modal). api_key: forward ANTHROPIC_API_KEY and do NOT mount OAuth credentials -- a revocable project key instead of the account refresh token, and the only way to choose per-use billing on a host that has OAuth. oauth: mount OAuth and never forward the API key or a long-lived CLAUDE_CODE_OAUTH_TOKEN (2.8.0, #437): the account login is the only Claude credential in the box, which is also what claude.ai connectors need; with no account login on the host it falls back to the token, with a warning. profile (1.11.0): use an Anthropic Console profile written by `ant auth login` (the Claude Platform CLI) -- the ONLY way to reach a workspace-bound entitlement such as Claude Mythos. Sandy copies just the selected profile (ANTHROPIC_PROFILE, else the host active_config, else default) from $ANTHROPIC_CONFIG_DIR (default ~/.config/anthropic) into an ephemeral rw mount at ~/.config/anthropic and withholds the OAuth credentials file, CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY, because Claude Code ranks a user_oauth profile BELOW a /login credential and below every env credential -- measured on 2.1.263. Never probed by auto. Value-aware tier: api_key, profile and auto are passive-safe (each REDUCES what is in the container), while oauth from a workspace is approval-gated because it forces the account-scoped credential in even when a revocable key is available.
 TELEGRAM_BOT_TOKEN|secret|||0.7.6|stable|Telegram bot token for the channel relay.
 TELEGRAM_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Telegram user IDs allowed to send messages.
 DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
@@ -16816,6 +16816,24 @@ else
         fi
     fi
 
+    # SANDY_CLAUDE_AUTH=oauth means the ACCOUNT login (/login), and nothing
+    # else: one Claude credential in the box, the rule api_key and profile
+    # already follow (#429 applied the same rule to codex). It used to forward
+    # a long-lived CLAUDE_CODE_OAUTH_TOKEN anyway, and Claude Code resolves that
+    # token ahead of the account login -- which, among other things, keeps it
+    # from loading claude.ai connectors (#437). So withhold the token whenever
+    # an account login is available; it then takes the normal refresh path
+    # below. With no account login on this host there is nothing to switch to:
+    # keep the token, and say so, rather than launch with no credential.
+    if [ "${SANDY_CLAUDE_AUTH:-auto}" = oauth ] && [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+        if [ -n "$CRED_JSON" ]; then
+            info "SANDY_CLAUDE_AUTH=oauth — using the account login; not forwarding CLAUDE_CODE_OAUTH_TOKEN."
+            CLAUDE_CODE_OAUTH_TOKEN=""
+        else
+            warn "SANDY_CLAUDE_AUTH=oauth, but this host has no Claude account login to use; falling back to CLAUDE_CODE_OAUTH_TOKEN. Run 'claude' and /login on the host to use the account login."
+        fi
+    fi
+
     if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
         # Long-lived token handles regular API calls. Still mount the credential
         # file if available and fresh — cloud features (/ultrareview) need the
@@ -17079,6 +17097,26 @@ else
         CRED_MODE="api-key"
     else
         CRED_MODE="none"
+    fi
+
+    # Connectors asked for, but this credential will not load them (#437).
+    # Claude Code fetches claude.ai connectors only for an account login; with
+    # a long-lived token, an API key or a Console profile it silently skips
+    # them, so /mcp just lacks them and nothing says why. Say why, here.
+    if [ "${SANDY_CLAUDE_CONNECTORS:-0}" = 1 ]; then
+        case "$CRED_MODE" in
+            full|access-token-only) : ;;
+            oauth-token)
+                warn "SANDY_CLAUDE_CONNECTORS=1, but this launch uses CLAUDE_CODE_OAUTH_TOKEN, and Claude Code does not load claude.ai connectors with it."
+                warn "  Set SANDY_CLAUDE_AUTH=oauth (with 'claude' /login done on the host) to use the account login instead." ;;
+            api-key)
+                warn "SANDY_CLAUDE_CONNECTORS=1, but this launch uses ANTHROPIC_API_KEY, and Claude Code does not load claude.ai connectors with it."
+                warn "  Set SANDY_CLAUDE_AUTH=oauth (with 'claude' /login done on the host) to use the account login instead." ;;
+            profile|profile-access-only)
+                warn "SANDY_CLAUDE_CONNECTORS=1, but this launch uses a Console profile (SANDY_CLAUDE_AUTH=profile), and Claude Code does not load claude.ai connectors with it." ;;
+            *)
+                warn "SANDY_CLAUDE_CONNECTORS=1, but this launch has no Claude account login, so Claude Code will not load claude.ai connectors. Run 'claude' and /login on the host." ;;
+        esac
     fi
 
     if [ -n "$CRED_JSON" ]; then
