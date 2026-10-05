@@ -24438,6 +24438,71 @@ unset -f _s196 _s196_mk _s196_q sha256 _sandy_slug_for 2>/dev/null || true
 fi
 
 
+echo "§197: #437 — SANDY_CLAUDE_AUTH=oauth withholds CLAUDE_CODE_OAUTH_TOKEN; connectors that cannot load are named at launch"
+# ============================================================
+# Claude Code loads claude.ai connectors only for an account login, and it
+# resolves a long-lived CLAUDE_CODE_OAUTH_TOKEN ahead of that login. oauth used
+# to forward the token anyway, so a host with one in ~/.sandy/.secrets had no
+# per-workspace way to get connectors, and SANDY_CLAUDE_CONNECTORS=1 then did
+# nothing, silently. Runs the REAL blocks (extracted) in launch order: the oauth
+# selection, the cred_mode record plus the connector warning, and the
+# key-forwarding branch §117 extracts, and asserts what reaches the container.
+_S197_SEL="$(awk '/SANDY_CLAUDE_AUTH=oauth means the ACCOUNT login/,/^    fi$/' "$SANDY_SCRIPT")"
+_S197_MODE="$(awk '/Record the WORST credential actually present/,/^    fi$/' "$SANDY_SCRIPT")"
+_S197_WARN="$(awk '/Connectors asked for, but this credential/,/^    fi$/' "$SANDY_SCRIPT")"
+_S197_FWD="if _sandy_agent_has claude; then
+$(awk '/Claude Code.s OWN auth precedence/,/^fi$/' "$SANDY_SCRIPT")"
+check "§197(0) the four blocks are extracted and evaluable" \
+    bash -c 'for b in "$@"; do [ -n "$b" ] && printf "%s\n" "$b" | bash -n || exit 1; done; case "$1" in *CLAUDE_CODE_OAUTH_TOKEN=\"\"*) ;; *) exit 1 ;; esac; case "$3" in *SANDY_CLAUDE_CONNECTORS*) ;; *) exit 1 ;; esac' _ "$_S197_SEL" "$_S197_MODE" "$_S197_WARN" "$_S197_FWD"
+# $1 SANDY_CLAUDE_AUTH, $2 CLAUDE_CODE_OAUTH_TOKEN, $3 CRED_JSON, $4 SANDY_CLAUDE_CONNECTORS, $5 ANTHROPIC_API_KEY
+# -> "mode=<CRED_MODE> fwd=<names forwarded> warn=<warning text>"
+_s197() {
+    env -i PATH="$PATH" SEL="$_S197_SEL" MODE="$_S197_MODE" WARN="$_S197_WARN" FWD="$_S197_FWD" \
+        SANDY_CLAUDE_AUTH="$1" CLAUDE_CODE_OAUTH_TOKEN="$2" CRED_JSON="$3" SANDY_CLAUDE_CONNECTORS="$4" ANTHROPIC_API_KEY="$5" \
+        bash -c '
+        set -euo pipefail
+        _w=""; _f=""
+        info() { :; }; warn() { _w="$_w $*"; }
+        _sandy_agent_has() { [ "$1" = claude ]; }
+        _sandy_add_secret_env() { _f="$_f $1"; }
+        PROFILE_TMPDIR=""; ANTHROPIC_PROFILE=""; _cred_stripped=false; _cred_profile_stripped=false
+        _claude_auth="${SANDY_CLAUDE_AUTH:-auto}"; RUN_FLAGS=()
+        eval "$SEL"; eval "$MODE"; eval "$WARN"
+        CRED_TMPDIR=""; [ -n "$CRED_JSON" ] && CRED_TMPDIR=/tmp/creds
+        eval "$FWD"
+        printf "mode=%s fwd=%s warn=%s" "$CRED_MODE" "${_f# }" "${_w# }"' 2>&1 || printf 'ERROR'
+}
+_S197_A="$(_s197 oauth tok '{"claudeAiOauth":{}}' 0 '')"
+check "§197(1) oauth + token + an account login: the token is withheld and cred_mode is full (got: $_S197_A)" \
+    bash -c 'case "$1" in "mode=full fwd= warn=") exit 0 ;; esac; exit 1' _ "$_S197_A"
+_S197_B="$(_s197 oauth tok '' 0 '')"
+check "§197(2) oauth + token + no account login: falls back to the token, with a warning that says why" \
+    bash -c 'case "$1" in "mode=oauth-token fwd=CLAUDE_CODE_OAUTH_TOKEN warn="*"no Claude account login"*) exit 0 ;; esac; exit 1' _ "$_S197_B"
+_S197_C="$(_s197 auto tok '{"claudeAiOauth":{}}' 0 '')"
+check "§197(3) auto keeps the token ahead of the account login (unchanged)" \
+    bash -c '[ "$1" = "mode=oauth-token fwd=CLAUDE_CODE_OAUTH_TOKEN warn=" ]' _ "$_S197_C"
+_S197_D="$(_s197 oauth tok '{"claudeAiOauth":{}}' 0 sk-key)"
+check "§197(4) oauth + token + API key + account login: neither the token nor the key reaches the container" \
+    bash -c '[ "$1" = "mode=full fwd= warn=" ]' _ "$_S197_D"
+_S197_E="$(_s197 auto tok '{"claudeAiOauth":{}}' 1 '')"
+check "§197(5) connectors on with the token in use: the warning names the token and the fix" \
+    bash -c 'case "$1" in *"warn="*"CLAUDE_CODE_OAUTH_TOKEN"*"SANDY_CLAUDE_AUTH=oauth"*) exit 0 ;; esac; exit 1' _ "$_S197_E"
+_S197_F="$(_s197 oauth tok '{"claudeAiOauth":{}}' 1 '')"
+check "§197(6) connectors on with oauth + an account login: no warning" \
+    bash -c '[ "$1" = "mode=full fwd= warn=" ]' _ "$_S197_F"
+_S197_G="$(_s197 auto '' '' 1 sk-key)"
+_S197_H="$(_s197 auto '' '' 1 '')"
+check "§197(7) connectors on with only an API key, or with no credential: each warns" \
+    bash -c 'case "$1" in *"warn="*ANTHROPIC_API_KEY*) ;; *) exit 1 ;; esac; case "$2" in *"warn="*"no Claude account login"*) exit 0 ;; esac; exit 1' _ "$_S197_G" "$_S197_H"
+_S197_I="$(_s197 auto tok '{"claudeAiOauth":{}}' 0 '')"
+check "§197(8) connectors off: no warning, whatever the credential" \
+    bash -c 'case "$1" in *"warn=") exit 0 ;; esac; exit 1' _ "$_S197_I"
+check "§197(9) --print-schema describes the new oauth behaviour" \
+    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "oauth: mount OAuth and never forward the API key or a long-lived CLAUDE_CODE_OAUTH_TOKEN"' _ "$SANDY_SCRIPT"
+unset _S197_SEL _S197_MODE _S197_WARN _S197_FWD _S197_A _S197_B _S197_C _S197_D _S197_E _S197_F _S197_G _S197_H _S197_I
+unset -f _s197 2>/dev/null || true
+
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
