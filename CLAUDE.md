@@ -28,6 +28,8 @@ curl -fsSL https://raw.githubusercontent.com/rappdw/sandy/main/install.sh | bash
 LOCAL_INSTALL=./sandy ./install.sh   # from a clone
 ```
 
+**`install.sh` and `sandy --upgrade` install the latest RELEASE (2.8.0, decision 1 of `decisions/2026-10-05-distribution-and-consumer-contract.md`).** Both used to download `main`: a stranger got unreleased code, `--upgrade` moved a stable user onto the dev line, and a dev install never updated, because `--upgrade` compared only the version string. Now `SANDY_CHANNEL=dev` (env-only) installs `main`'s head pinned to its commit and records the commit. A plain `--upgrade` never downgrades a dev or rc build that is newer than the latest release (`_ver_should_update`); an explicit `SANDY_CHANNEL=release` does. A failed lookup is an error, never a silent fallback to `main`. **Parse GitHub's API in bash, not with a `grep` pattern**: the response is pretty-printed (`"tag_name": "v2.7.1"`), and the old update check's `grep -o '"tag_name":"…'` never matched, so the "Update available" notice silently never fired. `_sandy_latest_release_tag` and `_sandy_main_commit` are the two lookups. Guarded by §198.
+
 ```sh
 cd ~/my-project
 sandy                        # interactive session
@@ -381,6 +383,10 @@ Four machine-readable JSON flags run as **fast-path handlers** — they exit bef
 As of 1.7.0 all four carry a **stream contract**: exactly one JSON document on stdout, 0 bytes of stderr, even on JSON-shaped failures — the sole exception being no-argument `--validate-config` (0 bytes stdout, one `[sandy] ERROR:` line on stderr). Pinned by `run-tests.sh §92`/`§93`.
 
 **`sandy --accounts [--json] [--workspace P]` (2.8.0)** reports, per sandbox, the email, organization and plan Claude Code last recorded in its `.claude.json` (`oauthAccount`), plus `cred_mode` and whether a session holds it. Filesystem only. It is a record, not a live query: the credential is read from the host each launch, so a re-login shows after the next session. A symlinked `claude/` or `.claude.json` is reported and never followed. Guarded by §196.
+
+**Config field types are a closed, documented set, and every key carries `base_type` (2.8.0, decision 3).** `base_type` (`string`/`bool`/`int`) is derived from `type` in `_emit_key_object`, never written per key, so a consumer meeting a type it does not know still renders a working input. A new type is additive; add it to SPEC_INTROSPECTION's "Config field types" table. Guarded by §199, whose (3) fails if the emitted set and the table drift apart.
+
+**Known consumers and the rc notice (2.8.0, decision 2).** SPEC_INTROSPECTION lists the tools known to read sandy's output, and **any `schema_version` change, at a major included, ships in an rc first, with an issue opened in each listed consumer's repo when the rc is tagged.** This is what makes the written exception's "every known consumer is named" condition checkable.
 
 **`cli_flags` is hand-curated, not derived.** Any flag added to any parser must either gain a `cli_flags` entry or go on one of the three exception lists (sub-option, private/debug, forwarded-to-agent) in `run-tests.sh §91`, which statically diffs the two and fails on drift in either direction — and also ratchets each flag's own `--help` entry. (`--workspace` was accepted by every daemon-family parser since 1.1.0 but missing from `cli_flags` until 1.7.0.)
 
