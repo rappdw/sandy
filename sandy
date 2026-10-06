@@ -7121,7 +7121,7 @@ _sandy_doctor_runtime() {
         printf '      %s\n' "Migrate the fleet, keeping transcripts and memory:"
         printf '      %s\n' "  sandy --reset-sandbox --all --keep-history --yes"
         printf '      %s\n' "Your workspaces are never touched. See the upgrade guide:"
-        printf '      %s\n' "  https://github.com/rappdw/sandy#upgrading-to-20"
+        printf '      %s\n' "  https://github.com/rappdw/sandy/blob/main/docs/guide/upgrading-to-2.0.md"
     fi
 
     # --fix: EXACTLY two remediations, both delegated verbatim to existing
@@ -14384,7 +14384,7 @@ else
             error "  not restore."
             error ""
             error "  Full guide (backups, orphans, scripts that hardcode /home/claude):"
-            error "    https://github.com/rappdw/sandy#upgrading-to-20"
+            error "    https://github.com/rappdw/sandy/blob/main/docs/guide/upgrading-to-2.0.md"
             # A refusal the operator can act on in one step is exit 6, not a
             # generic 1 -- and under `--start` the launch runs in the DETACHED
             # SUPERVISOR, so without the marker the client cannot tell a refusal
