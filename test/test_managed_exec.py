@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import select
 import subprocess
 import sys
 import time
@@ -57,6 +58,7 @@ def test_host_attach_death_preserves_execution_and_stop_reaps_escaped_child(cont
             if control(container,'inspect','orphan')=='running': break
             time.sleep(.1)
         else: pytest.fail('owned execution did not start')
+        assert select.select([attach.stdout],[],[],10)[0], 'escaped child did not report ready'
         assert attach.stdout.readline().strip()==b'escaped-ready'
         attach.kill(); attach.wait(timeout=5)
         assert control(container,'inspect','orphan')=='running'
