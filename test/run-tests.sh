@@ -1575,7 +1575,6 @@ info "28. Gemini CLI support — agent helpers and flag translation"
 # move or are renamed; that's the intended early-warning contract.
 
 SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-
 # Pull the two one-line helpers and the build_gemini_cmd function body.
 # Since M3 PR 3.2, build_*_cmd functions call shared helpers — extract them too.
 _HELPERS="$(grep -E '^_sandy_has_(claude|gemini|codex|opencode)\(\)' "$SANDY_SCRIPT")"
@@ -24635,6 +24634,335 @@ check "§199(2) base_type is bool for bool, int for int, and string for every ot
 check "§199(3) the types emitted are the documented closed set" \
     bash -c 'f="$2"; set -- $1; [ "$4" = "agent_combo,bool,enum,int,path,secret,string" ] || exit 1; for t in $(printf "%s" "$4" | tr "," " "); do grep -qF "| \`$t\` |" "$f" || exit 1; done' _ "$_S199_OUT" "$(dirname "$SANDY_SCRIPT")/SPEC_INTROSPECTION.md"
 unset _S199_OUT
+
+
+# ============================================================
+echo ""
+echo "§200: protected feature submounts — source authority and launch wiring"
+# ============================================================
+# Standard-library driver only; no pip, image pulls or runtime access. Each
+# mutation starts from a fresh scratch copy of sandy. The real launch check
+# invokes the entire script against docker/curl stubs and records actual argv.
+if ! command -v python3 >/dev/null 2>&1; then
+    skip "§200 requires python3 (standard library only)"
+elif ! command -v node >/dev/null 2>&1 && ! command -v jq >/dev/null 2>&1; then
+    skip "§200 needs either existing manifest projector (node or jq)"
+else
+_S200_D="$(cd "$(mktemp -d)" && pwd -P)"
+cat > "$_S200_D/check.py" <<'S200_PY'
+import copy
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+original = Path(sys.argv[1]).read_text()
+
+def block(source):
+    start = source.index('_sandy_fm_projector_js() {')
+    apply = source.index('_sandy_fm_apply() {', start)
+    end = re.search(r'^\}', source[apply:], re.M)
+    assert end, 'missing apply function terminator'
+    return source[start:apply + end.end()]
+
+base = {'sandboxes': {'include': ['*']}, 'agents': {'include': ['*']},
+        'mounts': [{'name': 'work', 'from': 'work', 'mode': 'rw'}],
+        'submounts': [{'parent': 'work', 'path': 'results', 'from': 'protected'}]}
+
+def fixture(root, case):
+    feature = root / 'features/f'
+    for name in ('work/results/nested', 'work/data', 'protected/nested', 'empty', 'work/ext', 'work-more'):
+        (feature / name).mkdir(parents=True, exist_ok=True)
+    (feature / 'trusted.toml').write_text('trusted = true\n')
+    (feature / 'work/config.toml').touch()
+    doc = copy.deepcopy(base)
+    child = doc['submounts'][0]
+    if case == 'array': doc['submounts'] = False
+    elif case == 'object': doc['submounts'] = ['bad']
+    elif case == 'unknown-key': child['to'] = '/arbitrary'
+    elif case == 'fields': child['parent'] = ''
+    elif case == 'controls': child['from'] = 'protected\tbad'
+    elif case == 'mode': child['mode'] = 'rw'
+    elif case == 'agents-type': child['agents'] = 'codex'
+    elif case == 'agents-known': child['agents'] = ['other']
+    elif case == 'agents-unique': child['agents'] = ['codex', 'codex']
+    elif case == 'parent': child['parent'] = 'missing'
+    elif case.startswith('path:'): child['path'] = case[5:]
+    elif case.startswith('from:'): child['from'] = case[5:]
+    elif case == 'duplicate': doc['submounts'].append(copy.deepcopy(child))
+    elif case == 'overlap-down': doc['submounts'].append({**child, 'path': 'results/nested'})
+    elif case == 'overlap-up': doc['submounts'].insert(0, {**child, 'path': 'results/nested'})
+    elif case == 'overlap-root':
+        (feature / 'root-work/work/results').mkdir(parents=True)
+        doc['mounts'].append({'name': '.', 'from': 'root-work', 'mode': 'rw'})
+        doc['submounts'].append({'parent': '.', 'path': 'work/results', 'from': 'empty'})
+    elif case == 'missing-source': child['from'] = 'absent'
+    elif case == 'missing-destination': child['path'] = 'absent'
+    elif case == 'source-symlink':
+        (feature / 'source-link').symlink_to(feature / 'protected'); child['from'] = 'source-link/nested'
+    elif case == 'destination-symlink':
+        (feature / 'work/link').symlink_to(feature / 'work/results'); child['path'] = 'link/nested'
+    elif case == 'source-leaf-symlink':
+        (feature / 'source-link').symlink_to(feature / 'trusted.toml'); child.update(path='config.toml', **{'from': 'source-link'})
+    elif case == 'destination-leaf-symlink':
+        (feature / 'work/link.toml').symlink_to(feature / 'trusted.toml'); child.update(path='link.toml', **{'from': 'trusted.toml'})
+    elif case == 'source-fifo': os.mkfifo(feature / 'fifo'); child.update(path='config.toml', **{'from': 'fifo'})
+    elif case == 'destination-fifo': os.mkfifo(feature / 'work/fifo'); child.update(path='fifo', **{'from': 'trusted.toml'})
+    elif case == 'directory-on-file': child['path'] = 'config.toml'
+    elif case == 'file-on-directory': child['from'] = 'trusted.toml'
+    elif case == 'partial-agents': child['agents'] = ['codex']
+    elif case == 'source-in-parent': child['from'] = 'work/data'  # review's exact regression
+    elif case == 'source-contains-rw': doc['mounts'].append({'name': 'alias', 'from': 'protected/nested', 'mode': 'rw'})
+    elif case == 'source-equal-rw': doc['mounts'].append({'name': 'alias', 'from': 'protected', 'mode': 'rw'})
+    elif case == 'source-canonical-rw':
+        (feature / 'rw-link').symlink_to(feature / 'protected'); doc['mounts'].append({'name': 'alias', 'from': 'rw-link', 'mode': 'rw'})
+    elif case == 'source-canonical-parent':
+        (feature / 'rw-link').symlink_to(feature / 'protected'); doc['mounts'].append({'name': 'alias', 'from': 'rw-link/nested', 'mode': 'rw'})
+    elif case == 'file-canonical-rw':
+        child.update(path='config.toml', **{'from': 'trusted.toml'})
+        (feature / 'rw-link').symlink_to('trusted.toml'); doc['mounts'].append({'name': 'alias', 'from': 'rw-link', 'mode': 'rw'})
+    elif case == 'destination-in-rw': doc['mounts'].append({'name': 'alias', 'from': 'work', 'mode': 'rw'})
+    elif case == 'destination-contains-rw': doc['mounts'].append({'name': 'alias', 'from': 'work/results/nested', 'mode': 'rw'})
+    elif case == 'file': child.update(path='config.toml', **{'from': 'trusted.toml'})
+    elif case == 'profiles': child['agents'] = ['codex']
+    elif case == 'slug':
+        (feature / 'protected-fixture').mkdir(); child['from'] = 'protected-${slug}'
+    elif case == 'prefix': child['from'] = 'work-more'
+    (feature / 'feature.json').write_text(json.dumps(doc))
+    return feature
+
+negative = ['array', 'object', 'unknown-key', 'fields', 'controls', 'mode',
+            'agents-type', 'agents-known', 'agents-unique', 'parent',
+            'path:/absolute', 'path:../escape', 'path:results/../escape',
+            'path:./results', 'path:results//nested', 'path:results/', 'path:.',
+            'path:', 'from:/absolute', 'from:../escape', 'duplicate',
+            'overlap-down', 'overlap-up', 'overlap-root', 'missing-source', 'missing-destination',
+            'source-symlink', 'destination-symlink', 'source-leaf-symlink',
+            'destination-leaf-symlink', 'source-fifo', 'destination-fifo',
+            'directory-on-file', 'file-on-directory', 'partial-agents',
+            'source-in-parent', 'source-contains-rw', 'source-equal-rw',
+            'source-canonical-rw', 'source-canonical-parent', 'file-canonical-rw', 'destination-in-rw',
+            'destination-contains-rw']
+
+def apply(source, case, agents='codex', engine='auto', load_only=False):
+    with tempfile.TemporaryDirectory(prefix='sandy-submount-') as name:
+        root = Path(name); fixture(root, case)
+        text = block(source)
+        if engine != 'auto':
+            # Force the production loader's fallback by hiding only node.
+            text += '\ncommand() { if [ "$*" = "-v node" ]; then return 1; fi; builtin command "$@"; }\n'
+        call = '_sandy_fm_load "$1/features/f" fixture' if load_only else '_sandy_fm_apply "$1/features" fixture /workspace "$2" 1'
+        return subprocess.run(['bash', '-c', text + '\n' + call,
+                               '_', str(root), agents], capture_output=True, text=True, timeout=10)
+
+def refusals(source, engine='auto'):
+    for case in negative:
+        result = apply(source, case, 'codex,claude' if case == 'partial-agents' else 'codex', engine)
+        assert result.returncode != 0, f'{engine}: accepted {case}: {result.stdout}'
+        assert 'err\tf\t' in result.stdout, f'{engine}: no named refusal for {case}: {result.stderr}'
+
+def positives(source, engine='auto'):
+    for case in ('base', 'file', 'slug', 'prefix', 'profiles'):
+        result = apply(source, case, engine=engine)
+        assert result.returncode == 0, result.stdout + result.stderr
+        mounts = [line for line in result.stdout.splitlines() if line.startswith('mount\t')]
+        assert len(mounts) == 2 and mounts[0].endswith('\trw') and mounts[1].endswith('\tro'), mounts
+    result = apply(source, 'profiles', 'claude', engine)
+    assert result.returncode == 0 and len([l for l in result.stdout.splitlines() if l.startswith('mount\t')]) == 1
+
+def parity(source):
+    for case in ['base', 'file', 'slug', 'prefix', 'profiles'] + negative:
+        with tempfile.TemporaryDirectory(prefix='sandy-projectors-') as name:
+            feature = fixture(Path(name), case); outputs = []
+            for function, argv in [('_sandy_fm_projector_js', ['node', '-', str(feature / 'feature.json')]),
+                                   ('_sandy_fm_projector_jq', ['jq', '-r', '-f', '/dev/stdin', str(feature / 'feature.json')])]:
+                program = subprocess.check_output(['bash', '-c', block(source) + '\n' + function], text=True)
+                result = subprocess.run(argv, input=program, text=True, capture_output=True)
+                assert result.returncode == 0, result.stderr
+                outputs.append(result.stdout)
+            assert outputs[0] == outputs[1], f'projector divergence: {case}: {outputs}'
+
+def launch(source, refuse=False):
+    with tempfile.TemporaryDirectory(prefix='sandy-launch-') as name:
+        root = Path(name); feature = fixture(root / 'sh', 'source-in-parent' if refuse else 'base')
+        (root / 'home/ws').mkdir(parents=True); (root / 'bin').mkdir()
+        script = root / 'sandy'; script.write_text(source)
+        # All Docker calls are logged as JSON argv, so order and token boundaries
+        # are asserted, rather than matching a hand-written volume command.
+        docker = root / 'bin/docker'
+        docker.write_text('#!' + sys.executable + '\nimport json,os,sys\nwith open(os.environ["S200_DOCKER_LOG"],"a") as f: f.write(json.dumps(sys.argv[1:])+"\\n")\n')
+        curl = root / 'bin/curl'; curl.write_text('#!/bin/sh\nexit 0\n')
+        sudo = root / 'bin/sudo'; sudo.write_text('#!/bin/sh\nexit 0\n')
+        docker.chmod(0o755); curl.chmod(0o755); sudo.chmod(0o755)
+        env = {k: v for k, v in os.environ.items() if not k.startswith('SANDY_')}
+        env.update(HOME=str(root / 'home'), SANDY_HOME=str(root / 'sh'), SANDY_AGENT='codex',
+                   SANDY_EGRESS='off', SANDY_OFFLINE='1',
+                   SANDY_CODEX_AUTH='openai-api', OPENAI_API_KEY='fixture',
+                   PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'],
+                   S200_DOCKER_LOG=str(root / 'docker.log'))
+        result = subprocess.run(['bash', str(script), '-p', 'fixture'], cwd=root / 'home/ws', env=env,
+                                capture_output=True, text=True, timeout=30)
+        calls = [json.loads(l) for l in (root / 'docker.log').read_text().splitlines()]
+        runs = [args for args in calls if args and args[0] == 'run']
+        if refuse:
+            assert result.returncode != 0 and not runs, result.stdout + result.stderr
+            assert 'no feature was mounted' in result.stderr + result.stdout
+            return
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert runs, 'did not reach docker run: ' + result.stdout
+        args = runs[-1]; volumes = [args[i+1] for i, arg in enumerate(args[:-1]) if arg == '-v']
+        parent = str(feature) + '/work:/home/sandy/.f/work'
+        child = str(feature) + '/protected:/home/sandy/.f/work/results:ro'
+        assert parent in volumes and child in volumes, volumes
+        assert volumes.index(parent) < volumes.index(child), volumes
+
+# Security decisions are disabled individually in a fresh COPY. Each named
+# fixture must fail its refusal assertion; both projectors are exercised.
+mutations = []
+def mutate(label, old, new, case, engine='auto'):
+    mutations.append((label, old, new, case, engine))
+mutate('JS array', 'err("submounts is not an array")', 'void 0', 'array')
+mutate('JS object', 'err("a submount is not an object")', 'void 0', 'object')
+mutate('JS unknown keys', 'err("submount: unknown key " + k)', 'void 0', 'unknown-key')
+mutate('JS required fields', 'err("submount: parent, path and from must be nonempty strings without controls")', 'void 0', 'fields')
+mutate('JS read-only', 'err("submount: mode must be ro")', 'void 0', 'mode')
+mutate('JS agents', 'err("submount: agents must be distinct known agents")', 'void 0', 'agents-known')
+for label, message, case in [('array','submounts is not an array','array'), ('object','a submount is not an object','object'),
+                             ('fields','submount: parent, path and from must be nonempty strings without controls','fields'),
+                             ('read-only','submount: mode must be ro','mode'), ('agents','submount: agents must be distinct known agents','agents-known')]:
+    mutate('jq ' + label, '["ERR\\t' + message + '"]', '[]', case, 'jq')
+mutate('jq unknown keys', '| "ERR\\tsubmount: unknown key \\(.)"', '| empty', 'unknown-key', 'jq')
+for label, message, case in [('parent', 'submount: unknown parent $_parent', 'parent'),
+                             ('child path', 'submount: invalid child path', 'path:./results'),
+                             ('relative source', 'submount: invalid relative path', 'from:../escape'),
+                             ('duplicate', 'submount: duplicate child destination', 'duplicate')]:
+    # Dropping an entire conditional leaves no hidden later return to mask it.
+    line = next(l for l in original.splitlines() if '_SANDY_FM_ERR="' + message + '"' in l)
+    mutate(label, line, '        :', case)
+for label, expression, case in [('overlap down','"$_destination/" in "$_prior/"*','overlap-down'),
+                                ('overlap up','"$_prior/" in "$_destination/"*','overlap-up'),
+                                ('source inside rw','"$_protectedsource/" in "$_sourcecanonical/"*','source-in-parent'),
+                                ('source contains rw','"$_sourcecanonical/" in "$_protectedsource/"*','source-contains-rw'),
+                                ('destination inside rw','"$_protect/" in "$_sourcecanonical/"*','destination-in-rw'),
+                                ('destination contains rw','"$_sourcecanonical/" in "$_protect/"*','destination-contains-rw')]:
+    line = next(l for l in original.splitlines() if 'case ' + expression in l)
+    mutate(label, line, '                :', case)
+mutate('computed destination overlap', '_destination="$(_sandy_fm_dest "$(basename "$_dir")" "$_parent")/$_child"', '_destination="$_parent/$_child"', 'overlap-root')
+mutate('source path safety', '! _sandy_fm_tree_safe "$_fdir" "$_smfrom"', 'false', 'source-symlink')
+mutate('destination path safety', '! _sandy_fm_tree_safe "$_fdir" "$_parentfrom/$_child"', 'false', 'destination-symlink')
+mutate('component symlinks', '[ ! -L "$_cursor" ] && [ -e "$_cursor" ]', '[ -e "$_cursor" ]', 'source-symlink')
+mutate('canonical directory aliases', '(cd "$_path" && pwd -P)', '(cd "$_path" && pwd)', 'source-canonical-parent')
+mutate('canonical file aliases', 'while [ -L "$_path" ]; do', 'while false; do', 'file-canonical-rw')
+mutate('writable mount selection', '[ "${_rest%%\t*}" = rw ] || continue', '[ "${_rest%%\t*}" != rw ] || continue', 'source-in-parent')
+mutate('partial agents', 'if [ "$_miss" = 1 ]; then', 'if false; then', 'partial-agents')
+mutate('directory type', '[ -d "$_protectedsource" ] && [ ! -d "$_protect" ]', 'false', 'directory-on-file')
+mutate('file type', '[ -f "$_protectedsource" ] && [ ! -f "$_protect" ]', 'false', 'file-on-directory')
+# Removing just the dedicated duplicate test is masked by the overlap test;
+# make overlap compare STRICT ancestors in that mutant so duplicate's own
+# refusal is tested independently, rather than accepting a vacuous mutation.
+
+def mutation_checks():
+    active = [m for m in mutations if not (m[0].startswith('JS ') and not shutil.which('node'))
+              and not (m[4] == 'jq' and not shutil.which('jq'))]
+    for label, old, new, case, engine in active:
+        assert old in original, 'missing mutation anchor: ' + label
+        candidate = original.replace(old, new, 1)
+        if label == 'duplicate':
+            candidate = candidate.replace('        _destinations+=("$_destination")', '        :')
+        with tempfile.TemporaryDirectory(prefix='sandy-mutant-') as name:
+            scratch = Path(name) / 'sandy'; scratch.write_text(candidate)
+            assert subprocess.run(['bash', '-n', str(scratch)], capture_output=True).returncode == 0, label
+            result = apply(scratch.read_text(), case, 'codex,claude' if case == 'partial-agents' else 'codex', engine,
+                           load_only=label in ('parent', 'child path', 'relative source', 'duplicate', 'overlap down', 'overlap up', 'computed destination overlap'))
+            assert result.returncode == 0, f'surviving mutation {label}: {result.stdout} {result.stderr}'
+    # Launch rendering has its own mutation, using the identical full-launch check.
+    candidate = original.replace('RUN_FLAGS+=(-v "$_fm_src:$_fm_dst:ro")', 'RUN_FLAGS+=(-v "$_fm_src:$_fm_dst")', 1)
+    assert candidate != original
+    with tempfile.TemporaryDirectory(prefix='sandy-mutant-') as name:
+        scratch = Path(name) / 'sandy'; scratch.write_text(candidate)
+        try: launch(scratch.read_text())
+        except AssertionError: pass
+        else: raise AssertionError('surviving launch mutation: child lost :ro')
+    # Omission and the destination-only parent exemption are positive properties.
+    for label, old in [('unmatched profile', '                [ "$_hit" = 1 ] || continue'),
+                       ('destination parent exemption', '                [ "$_name" != "$_parent" ] || continue')]:
+        assert original.count(old) == 1, label
+        candidate = original.replace(old, '                :', 1)
+        with tempfile.TemporaryDirectory(prefix='sandy-mutant-') as name:
+            scratch = Path(name) / 'sandy'; scratch.write_text(candidate)
+            try: positives(scratch.read_text())
+            except AssertionError: pass
+            else: raise AssertionError('surviving positive mutation: ' + label)
+    # Direct helper checks isolate decisions otherwise masked by later
+    # canonicalization/type validation in apply (defence in depth).
+    helper_mutations = [
+        ('endpoint type', '[ -d "$_cursor" ] || [ -f "$_cursor" ]', 'return 0', 'tree'),
+        ('symlink resolution bound', '[ "$_n" -le 40 ] || return 1', ':', 'cycle'),
+    ]
+    for label, old, new, kind in helper_mutations:
+        with tempfile.TemporaryDirectory(prefix='sandy-mutant-') as name:
+            root = Path(name); scratch = root / 'sandy'
+            os.mkfifo(root / 'fifo'); (root / 'cycle').symlink_to('cycle')
+            command = '_sandy_fm_tree_safe "$1" fifo' if kind == 'tree' else '_sandy_fm_canonical "$1/cycle"'
+            def invoke(source):
+                return subprocess.run(['bash', '-c', block(source) + '\n' + command, '_', str(root)],
+                                      capture_output=True, timeout=2).returncode
+            assert invoke(original) != 0, label + ': baseline did not refuse'
+            assert original.count(old) == 1, label
+            scratch.write_text(original.replace(old, new, 1))
+            try: status = invoke(scratch.read_text())
+            except subprocess.TimeoutExpired:
+                assert kind == 'cycle'
+            else: assert status == 0, 'surviving helper mutation ' + label
+    print(f'{len(active) + 3 + len(helper_mutations)} scratch mutations detected')
+
+mode = sys.argv[2]
+if mode == 'positive': positives(original)
+elif mode == 'negative': refusals(original)
+elif mode == 'jq':
+    refusals(original, 'jq')
+    positives(original, 'jq')
+elif mode == 'parity': parity(original)
+elif mode == 'launch':
+    launch(original)
+    launch(original, refuse=True)
+elif mode == 'mutations': mutation_checks()
+elif mode == 'schema':
+    data = json.loads(subprocess.check_output(['bash', sys.argv[1], '--print-schema'], text=True))
+    assert data['schema_version'] == 4
+    assert 'submounts' in data['manifest']['top_level_keys']
+    assert data['manifest']['submount_keys'] == ['parent', 'path', 'from', 'mode', 'agents']
+assert Path(sys.argv[1]).read_text() == original, 'repository source changed during verification'
+S200_PY
+check "§200(1) directories/files, slug expansion, boundary prefixes and selected profiles" \
+    python3 "$_S200_D/check.py" "$SANDY_SCRIPT" positive
+check "§200(2) all refusals, including work/work/data source writable through its parent" \
+    python3 "$_S200_D/check.py" "$SANDY_SCRIPT" negative
+if command -v jq >/dev/null 2>&1; then
+    check "§200(3) jq fallback: the same positive/refusal corpus" \
+        python3 "$_S200_D/check.py" "$SANDY_SCRIPT" jq
+else
+    skip "§200(3) jq unavailable"
+fi
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    check "§200(3-parity) both projectors emit byte-identical records for the full corpus" \
+        python3 "$_S200_D/check.py" "$SANDY_SCRIPT" parity
+else
+    skip "§200(3-parity) both projectors required; missing projector mutations also skipped"
+fi
+check "§200(4) entire launch: emitted records become ordered parent and child -v argv" \
+    python3 "$_S200_D/check.py" "$SANDY_SCRIPT" launch
+check "§200(5) disable every submount decision on scratch copies and detect each mutation" \
+    python3 "$_S200_D/check.py" "$SANDY_SCRIPT" mutations
+check "§200(6) additive manifest capability, closed submount keys, schema_version still 4" \
+    python3 "$_S200_D/check.py" "$SANDY_SCRIPT" schema
+rm -rf "$_S200_D"
+unset _S200_D
+fi
 
 
 # BEGIN SUMMARY

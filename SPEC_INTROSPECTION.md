@@ -235,7 +235,8 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
     "deprecated_schema_versions": []
   },
   "manifest": {
-    "top_level_keys": ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature", "agent_args"],
+    "top_level_keys": ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature", "agent_args", "receives", "submounts"],
+    "submount_keys": ["parent", "path", "from", "mode", "agents"],
     "mount_keys": ["name", "from", "mode", "export"],
     "agent_args_compose": [
       {"agent": "claude", "flag": "--append-system-prompt-file", "policy": "concat"},
@@ -971,6 +972,8 @@ Tools known to read sandy's machine-readable output. A consumer joins this list 
 **Notice before a `schema_version` change (2.8.0 policy).** Any change to `schema_version`, at a major release included, first ships in a release candidate (`X.Y.Z-rc1`). When that rc is tagged, an issue is opened in each listed consumer's repo naming what changed. Within a major, a removal must also have been listed in README's `## Deprecated` table, as before. sandy-ui runs its parser and schema gate nightly against sandy's `main` and any rc, and reports a break as a rappdw/sandy issue (decision 4, 2026-10-05): the rc notice covers deliberate changes, the nightly run accidental ones.
 
 ## Schema versioning
+
+- **Unreleased (#444):** `manifest.top_level_keys` gains `submounts`; the `manifest` object gains `submount_keys` (`["parent", "path", "from", "mode", "agents"]`), the closed input shape for protected children of feature mounts. Both changes are additive, so `schema_version` stays `4`. Capability-gate on key membership, rather than the Sandy version. Existing mount introspection reports the resulting parent/child binds; no new state field is introduced.
 
 - **`2.8.0` (decision 3, 2026-10-05):** every config key object gains `base_type` (`string` | `bool` | `int`), derived from `type`; see "Config field types" above. Additive, so `schema_version` stays `4`.
 - **`2.8.0` (decision 1, 2026-10-05):** one new `config.env_only_keys` entry, `SANDY_CHANNEL` (`release` | `dev`): which build `--upgrade` and `install.sh` install. Additive, so `schema_version` stays `4`.

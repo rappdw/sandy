@@ -944,7 +944,7 @@ catch (e) { process.stdout.write("ERR\tnot valid JSON: " + e.message + "\n"); pr
 if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
   process.stdout.write("ERR\ttop level is not an object\n"); process.exit(0);
 }
-const KNOWN = ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature", "agent_args", "receives"];
+const KNOWN = ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature", "agent_args", "receives", "submounts"];
 // #380: the closed set of things a feature may declare it NEEDS TO RECEIVE.
 // An array of enums, not a single string or a "cross_session_inbound: true"
 // boolean, because this names the NEED, never a consumer or a mechanism: a
@@ -1006,6 +1006,18 @@ if (doc.mounts !== undefined) {
     OUT.push("mount\t" + m.name + "\t" + m.from + "\t" + mode + "\t" + exp);
   }
 }
+if (doc.submounts !== undefined) {
+  if (!Array.isArray(doc.submounts)) err("submounts is not an array");
+  else for (const m of doc.submounts) {
+    if (m === null || typeof m !== "object" || Array.isArray(m)) { err("a submount is not an object"); continue; }
+    for (const k of Object.keys(m)) if (!["parent","path","from","mode","agents"].includes(k)) err("submount: unknown key " + k);
+    if (["parent","path","from"].some(k => typeof m[k] !== "string" || !m[k] || CTRL.test(m[k]))) { err("submount: parent, path and from must be nonempty strings without controls"); continue; }
+    if ((m.mode === undefined ? "ro" : m.mode) !== "ro") { err("submount: mode must be ro"); continue; }
+    const agents = m.agents === undefined ? [] : m.agents;
+    if (!Array.isArray(agents) || agents.some(a => !AGENTS.includes(a)) || new Set(agents).size !== agents.length) { err("submount: agents must be distinct known agents"); continue; }
+    OUT.push("submount\t" + m.parent + "\t" + m.path + "\t" + m.from + "\tro\t" + agents.join(","));
+  }
+}
 if (doc.entry !== undefined) {
   if (typeof doc.entry !== "string" || doc.entry === "") err("entry is not a non-empty string");
   else OUT.push("entry\t" + doc.entry);
@@ -1050,7 +1062,7 @@ SANDY_FM_JS
 }
 _sandy_fm_projector_jq() {
 cat <<'SANDY_FM_JQ'
-def known: ["schema","sandboxes","agents","create","mounts","entry","expose","feature","agent_args","receives"];
+def known: ["schema","sandboxes","agents","create","mounts","entry","expose","feature","agent_args","receives","submounts"];
 def agents_known: ["claude","gemini","codex","opencode","grok"];
 def receives_known: ["cross_session"];
 def strarr($v; $what):
@@ -1081,6 +1093,14 @@ def mountline:
     elif ((.export // "") | startswith("SANDY_")) then $unk + ["ERR\tmount \(.name): export \(.export) is reserved (sandy owns the SANDY_ prefix)"]
     else $unk + ["mount\t\(.name)\t\(.from)\t\(.mode // "ro")\t\(.export // "")"] end
   end;
+def submountline:
+  if type != "object" then ["ERR\ta submount is not an object"]
+  else ([keys_unsorted[] | select(. != "parent" and . != "path" and . != "from" and . != "mode" and . != "agents") | "ERR\tsubmount: unknown key \(.)"]) as $unk
+  | if ([.parent,.path,.from] | any(if type != "string" then true else . == "" or test("[\n\r\t]") end)) then $unk + ["ERR\tsubmount: parent, path and from must be nonempty strings without controls"]
+    elif (if has("mode") then .mode else "ro" end) != "ro" then $unk + ["ERR\tsubmount: mode must be ro"]
+    elif (if has("agents") then .agents else [] end) as $a | (($a|type) != "array" or ([$a[] | select(. as $x | agents_known | index($x) == null)]|length)>0 or ($a|unique|length) != ($a|length)) then $unk + ["ERR\tsubmount: agents must be distinct known agents"]
+    else $unk + ["submount\t\(.parent)\t\(.path)\t\(.from)\tro\t\((.agents // [])|join(","))"] end
+  end;
 if type != "object" then "ERR\ttop level is not an object"
 else
   ([keys_unsorted[] as $k | select((known | index($k)) == null) | "ERR\tunknown top-level key: \($k)"])
@@ -1089,6 +1109,7 @@ else
   + (if .mounts == null then []
      elif (.mounts|type) != "array" then ["ERR\tmounts is not an array"]
      else [.mounts[] | mountline] | add // [] end)
+  + (if has("submounts")|not then [] elif (.submounts|type) != "array" then ["ERR\tsubmounts is not an array"] else [.submounts[] | submountline] | add // [] end)
   + (if .entry == null then []
      elif ((.entry|type) != "string") or (.entry == "") then ["ERR\tentry is not a non-empty string"]
      else ["entry\t\(.entry)"] end)
@@ -1151,7 +1172,11 @@ expose
 feature
 agent_args
 receives
+submounts
 EOF
+}
+_sandy_fm_submount_keys() {
+    printf "%s\n" parent path from mode agents
 }
 _sandy_fm_mount_keys() {
     cat <<'EOF'
@@ -1245,6 +1270,7 @@ _sandy_fm_load() {
     _SANDY_FM_EXPOSE=(); _SANDY_FM_ENTRY=""; _SANDY_FM_ERR=""
     _SANDY_FM_AGENT_ARGS=()
     _SANDY_FM_RECEIVES=()
+    _SANDY_FM_SUBMOUNT=()
     if [ ! -e "$_mf" ]; then _SANDY_FM_ERR="no-manifest"; return 1; fi
     if [ -L "$_mf" ] || [ ! -f "$_mf" ]; then
         _SANDY_FM_ERR="feature.json is not a regular file"; return 1
@@ -1280,6 +1306,7 @@ _sandy_fm_load() {
             create) _SANDY_FM_CREATE+=("${_line#*	}") ;;
             entry)  _SANDY_FM_ENTRY="${_line#*	}" ;;
             expose) _SANDY_FM_EXPOSE+=("${_line#*	}") ;;
+            submount) _SANDY_FM_SUBMOUNT+=("${_line#*	}") ;;
             mount)  _SANDY_FM_MOUNT+=("${_line#*	}") ;;
             agent_args) _SANDY_FM_AGENT_ARGS+=("${_line#*	}") ;;
             receives) _SANDY_FM_RECEIVES+=("${_line#*	}") ;;
@@ -1302,6 +1329,29 @@ _sandy_fm_load() {
             _SANDY_FM_ERR="mount $_name: from '$_from' escapes the feature directory"; return 1
         fi
         _i=$((_i + 1))
+    done
+    local _sm _parent _child _smfrom _smrest _names="" _seen="" _smagents _prior _destination
+    local _destinations=()
+    for _m in ${_SANDY_FM_MOUNT[@]+"${_SANDY_FM_MOUNT[@]}"}; do
+        _name="${_m%%	*}"; _names="$_names|$_name|"
+    done
+    for _sm in ${_SANDY_FM_SUBMOUNT[@]+"${_SANDY_FM_SUBMOUNT[@]}"}; do
+        _parent="${_sm%%	*}"; _smrest="${_sm#*	}"
+        _child="${_smrest%%	*}"; _smrest="${_smrest#*	}"
+        _smfrom="${_smrest%%	*}"; _smfrom="${_smfrom//\$\{slug\}/$_slug}"
+        case "$_names" in *"|$_parent|"*) ;; *) _SANDY_FM_ERR="submount: unknown parent $_parent"; return 1 ;; esac
+        case "$_child" in /*|*'..'*|./*|*/./*|*/.|*//*|*/|.) _SANDY_FM_ERR="submount: invalid child path"; return 1 ;; esac
+        _sandy_fm_valid_relpath "$_child" && _sandy_fm_valid_relpath "$_smfrom" || { _SANDY_FM_ERR="submount: invalid relative path"; return 1; }
+        # Duplicate destinations are refused even for disjoint profiles: profiles
+        # may converge in a multi-agent container and mount order is not authority.
+        case "$_seen" in *"|$_parent/$_child|"*) _SANDY_FM_ERR="submount: duplicate child destination"; return 1 ;; esac
+        _destination="$(_sandy_fm_dest "$(basename "$_dir")" "$_parent")/$_child"
+        for _prior in ${_destinations[@]+"${_destinations[@]}"}; do
+            case "$_destination/" in "$_prior/"*) _SANDY_FM_ERR="submount: overlapping child destinations"; return 1 ;; esac
+            case "$_prior/" in "$_destination/"*) _SANDY_FM_ERR="submount: overlapping child destinations"; return 1 ;; esac
+        done
+        _destinations+=("$_destination")
+        _seen="$_seen|$_parent/$_child|"
     done
     local _c
     for _c in ${_SANDY_FM_CREATE[@]+"${_SANDY_FM_CREATE[@]}"}; do
@@ -1535,6 +1585,33 @@ _sandy_fm_render_selected() {
 # non-zero one. Records stream as features are processed, so a feature that
 # fails may be preceded by valid mount lines from an earlier one; using them
 # would mount a partial set, which is the thing D2 exists to prevent.
+# Reject symlinks at every component; required projections never silently skip.
+_sandy_fm_tree_safe() {
+    local _base="$1" _relative="$2" _part _cursor="$1"
+    local IFS=/
+    for _part in $_relative; do
+        [ -d "$_cursor" ] || return 1
+        _cursor="$_cursor/$_part"
+        [ ! -L "$_cursor" ] && [ -e "$_cursor" ] || return 1
+    done
+    [ -d "$_cursor" ] || [ -f "$_cursor" ]
+}
+# Canonicalize directories and files portably, including writable aliases.
+# Only the parent directory needs cd; plain readlink also works on macOS.
+_sandy_fm_canonical() {
+    local _path="$1" _link _n=0
+    while [ -L "$_path" ]; do
+        _n=$((_n + 1)); [ "$_n" -le 40 ] || return 1
+        _link="$(readlink "$_path")" || return 1
+        case "$_link" in /*) _path="$_link" ;; *) _path="$(dirname "$_path")/$_link" ;; esac
+    done
+    if [ -d "$_path" ]; then (cd "$_path" && pwd -P)
+    elif [ -f "$_path" ]; then
+        local _directory
+        _directory="$(cd "$(dirname "$_path")" && pwd -P)" || return 1
+        printf '%s/%s\n' "$_directory" "$(basename "$_path")"
+    else return 1; fi
+}
 _sandy_fm_apply() {
     local _root="$1" _slug="$2" _ws="$3" _agents="$4" _dry="${5:-0}"
     local _TAB; _TAB="$(printf '\t')"
@@ -1607,6 +1684,54 @@ _sandy_fm_apply() {
             printf 'mount\t%s\t%s\t%s\n' "$_src" "$_dest" "$_mode"
             _mcount=$((_mcount + 1))
             [ -n "$_exp" ] && printf 'export\t%s\t%s\n' "$_exp" "$_dest"
+        done
+        local _sm _parent _child _smfrom _smrest _wanted _a _hit _miss _parentfrom _sourcecanonical _protectedsource _protect _rwfrom
+        for _sm in ${_SANDY_FM_SUBMOUNT[@]+"${_SANDY_FM_SUBMOUNT[@]}"}; do
+            _parent="${_sm%%	*}"; _smrest="${_sm#*	}"
+            _child="${_smrest%%	*}"; _smrest="${_smrest#*	}"
+            _smfrom="${_smrest%%	*}"; _smrest="${_smrest#*	}"
+            _wanted="${_smrest#*	}"; _hit=0; _miss=0
+            if [ -n "$_wanted" ]; then
+                local IFS=,
+                for _a in $_agents; do
+                    case ",$_wanted," in *",$_a,"*) _hit=1 ;; *) _miss=1 ;; esac
+                done
+                unset IFS
+                [ "$_hit" = 1 ] || continue
+                if [ "$_miss" = 1 ]; then printf 'err\t%s\tsubmount profile conflicts in a multi-agent selection\n' "$_fname"; return 1; fi
+            fi
+            _smfrom="${_smfrom//\$\{slug\}/$_slug}"
+            _parentfrom=""
+            for _m in ${_SANDY_FM_MOUNT[@]+"${_SANDY_FM_MOUNT[@]}"}; do
+                [ "${_m%%	*}" = "$_parent" ] || continue
+                _rest="${_m#*	}"; _parentfrom="${_rest%%	*}"; _parentfrom="${_parentfrom//\$\{slug\}/$_slug}"
+            done
+            if ! _sandy_fm_tree_safe "$_fdir" "$_smfrom" || ! _sandy_fm_tree_safe "$_fdir" "$_parentfrom/$_child"; then
+                printf 'err\t%s\tsubmount source or destination is missing or traverses a symlink\n' "$_fname"; return 1
+            fi
+            _protectedsource="$(_sandy_fm_canonical "$_fdir/$_smfrom")" || return 1
+            _protect="$(_sandy_fm_canonical "$_fdir/$_parentfrom/$_child")" || return 1
+            # A file bind needs a pre-existing file, a directory bind a directory.
+            if { [ -d "$_protectedsource" ] && [ ! -d "$_protect" ]; } || { [ -f "$_protectedsource" ] && [ ! -f "$_protect" ]; }; then
+                printf 'err\t%s\tsubmount source and destination types differ\n' "$_fname"; return 1
+            fi
+            for _m in ${_SANDY_FM_MOUNT[@]+"${_SANDY_FM_MOUNT[@]}"}; do
+                _name="${_m%%	*}"; _rest="${_m#*	}"; _rwfrom="${_rest%%	*}"; _rest="${_rest#*	}"
+                [ "${_rest%%	*}" = rw ] || continue
+                _rwfrom="${_rwfrom//\$\{slug\}/$_slug}"
+                # Missing ordinary mounts are skipped above and expose no alias.
+                [ -e "$_fdir/$_rwfrom" ] || continue
+                _sourcecanonical="$(_sandy_fm_canonical "$_fdir/$_rwfrom")" || return 1
+                case "$_protectedsource/" in "$_sourcecanonical/"*) printf 'err\t%s\twritable mount aliases a protected source\n' "$_fname"; return 1 ;; esac
+                case "$_sourcecanonical/" in "$_protectedsource/"*) printf 'err\t%s\twritable mount aliases a protected source\n' "$_fname"; return 1 ;; esac
+                # The destination naturally belongs to its own parent. Other
+                # writable mounts must not provide an alternate route to it.
+                [ "$_name" != "$_parent" ] || continue
+                case "$_protect/" in "$_sourcecanonical/"*) printf 'err\t%s\twritable mount aliases a protected child\n' "$_fname"; return 1 ;; esac
+                case "$_sourcecanonical/" in "$_protect/"*) printf 'err\t%s\twritable mount aliases a protected child\n' "$_fname"; return 1 ;; esac
+            done
+            printf 'mount\t%s/%s\t%s/%s\tro\n' "$_fdir" "$_smfrom" "$(_sandy_fm_dest "$_fname" "$_parent")" "$_child"
+            _mcount=$((_mcount + 1))
         done
         local _e
         for _e in ${_SANDY_FM_EXPOSE[@]+"${_SANDY_FM_EXPOSE[@]}"}; do
@@ -2356,6 +2481,7 @@ _sandy_emit_schema() {
     printf ',"manifest":{'
     printf '"top_level_keys":'; _sandy_fm_known_keys | _json_str_array
     printf ',"mount_keys":';    _sandy_fm_mount_keys | _json_str_array
+    printf ',"submount_keys":'; _sandy_fm_submount_keys | _json_str_array
     # receives_values (#380): the closed set `receives` accepts, published for
     # the same reason top_level_keys is -- a consumer gates on MEMBERSHIP here,
     # not a sandy version, since a stripped X.Y.Z-dev compares equal to X.Y.Z.
