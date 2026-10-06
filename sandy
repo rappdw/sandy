@@ -1345,7 +1345,7 @@ _sandy_fm_load() {
         # Duplicate destinations are refused even for disjoint profiles: profiles
         # may converge in a multi-agent container and mount order is not authority.
         case "$_seen" in *"|$_parent/$_child|"*) _SANDY_FM_ERR="submount: duplicate child destination"; return 1 ;; esac
-        _destination="$_parent/$_child"
+        _destination="$(_sandy_fm_dest "$(basename "$_dir")" "$_parent")/$_child"
         for _prior in ${_destinations[@]+"${_destinations[@]}"}; do
             case "$_destination/" in "$_prior/"*) _SANDY_FM_ERR="submount: overlapping child destinations"; return 1 ;; esac
             case "$_prior/" in "$_destination/"*) _SANDY_FM_ERR="submount: overlapping child destinations"; return 1 ;; esac

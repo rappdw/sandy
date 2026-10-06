@@ -24645,6 +24645,8 @@ echo "§200: protected feature submounts — source authority and launch wiring"
 # invokes the entire script against docker/curl stubs and records actual argv.
 if ! command -v python3 >/dev/null 2>&1; then
     skip "§200 requires python3 (standard library only)"
+elif ! command -v node >/dev/null 2>&1 && ! command -v jq >/dev/null 2>&1; then
+    skip "§200 needs either existing manifest projector (node or jq)"
 else
 _S200_D="$(cd "$(mktemp -d)" && pwd -P)"
 cat > "$_S200_D/check.py" <<'S200_PY'
@@ -24653,6 +24655,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24693,6 +24696,10 @@ def fixture(root, case):
     elif case == 'duplicate': doc['submounts'].append(copy.deepcopy(child))
     elif case == 'overlap-down': doc['submounts'].append({**child, 'path': 'results/nested'})
     elif case == 'overlap-up': doc['submounts'].insert(0, {**child, 'path': 'results/nested'})
+    elif case == 'overlap-root':
+        (feature / 'root-work/work/results').mkdir(parents=True)
+        doc['mounts'].append({'name': '.', 'from': 'root-work', 'mode': 'rw'})
+        doc['submounts'].append({'parent': '.', 'path': 'work/results', 'from': 'empty'})
     elif case == 'missing-source': child['from'] = 'absent'
     elif case == 'missing-destination': child['path'] = 'absent'
     elif case == 'source-symlink':
@@ -24733,7 +24740,7 @@ negative = ['array', 'object', 'unknown-key', 'fields', 'controls', 'mode',
             'path:/absolute', 'path:../escape', 'path:results/../escape',
             'path:./results', 'path:results//nested', 'path:results/', 'path:.',
             'path:', 'from:/absolute', 'from:../escape', 'duplicate',
-            'overlap-down', 'overlap-up', 'missing-source', 'missing-destination',
+            'overlap-down', 'overlap-up', 'overlap-root', 'missing-source', 'missing-destination',
             'source-symlink', 'destination-symlink', 'source-leaf-symlink',
             'destination-leaf-symlink', 'source-fifo', 'destination-fifo',
             'directory-on-file', 'file-on-directory', 'partial-agents',
@@ -24844,11 +24851,13 @@ for label, expression, case in [('overlap down','"$_destination/" in "$_prior/"*
                                 ('destination contains rw','"$_sourcecanonical/" in "$_protect/"*','destination-contains-rw')]:
     line = next(l for l in original.splitlines() if 'case ' + expression in l)
     mutate(label, line, '                :', case)
+mutate('computed destination overlap', '_destination="$(_sandy_fm_dest "$(basename "$_dir")" "$_parent")/$_child"', '_destination="$_parent/$_child"', 'overlap-root')
 mutate('source path safety', '! _sandy_fm_tree_safe "$_fdir" "$_smfrom"', 'false', 'source-symlink')
 mutate('destination path safety', '! _sandy_fm_tree_safe "$_fdir" "$_parentfrom/$_child"', 'false', 'destination-symlink')
 mutate('component symlinks', '[ ! -L "$_cursor" ] && [ -e "$_cursor" ]', '[ -e "$_cursor" ]', 'source-symlink')
 mutate('canonical directory aliases', '(cd "$_path" && pwd -P)', '(cd "$_path" && pwd)', 'source-canonical-parent')
 mutate('canonical file aliases', 'while [ -L "$_path" ]; do', 'while false; do', 'file-canonical-rw')
+mutate('writable mount selection', '[ "${_rest%%\t*}" = rw ] || continue', '[ "${_rest%%\t*}" != rw ] || continue', 'source-in-parent')
 mutate('partial agents', 'if [ "$_miss" = 1 ]; then', 'if false; then', 'partial-agents')
 mutate('directory type', '[ -d "$_protectedsource" ] && [ ! -d "$_protect" ]', 'false', 'directory-on-file')
 mutate('file type', '[ -f "$_protectedsource" ] && [ ! -f "$_protect" ]', 'false', 'file-on-directory')
@@ -24857,17 +24866,18 @@ mutate('file type', '[ -f "$_protectedsource" ] && [ ! -f "$_protect" ]', 'false
 # refusal is tested independently, rather than accepting a vacuous mutation.
 
 def mutation_checks():
-    for label, old, new, case, engine in mutations:
+    active = [m for m in mutations if not (m[0].startswith('JS ') and not shutil.which('node'))
+              and not (m[4] == 'jq' and not shutil.which('jq'))]
+    for label, old, new, case, engine in active:
         assert old in original, 'missing mutation anchor: ' + label
         candidate = original.replace(old, new, 1)
         if label == 'duplicate':
-            candidate = candidate.replace('        _destination="$_parent/$_child"',
-                                          '        _destination="$_parent/$_child"\n        _destinations=()')
+            candidate = candidate.replace('        _destinations+=("$_destination")', '        :')
         with tempfile.TemporaryDirectory(prefix='sandy-mutant-') as name:
             scratch = Path(name) / 'sandy'; scratch.write_text(candidate)
             assert subprocess.run(['bash', '-n', str(scratch)], capture_output=True).returncode == 0, label
             result = apply(scratch.read_text(), case, 'codex,claude' if case == 'partial-agents' else 'codex', engine,
-                           load_only=label in ('parent', 'child path', 'relative source', 'duplicate', 'overlap down', 'overlap up'))
+                           load_only=label in ('parent', 'child path', 'relative source', 'duplicate', 'overlap down', 'overlap up', 'computed destination overlap'))
             assert result.returncode == 0, f'surviving mutation {label}: {result.stdout} {result.stderr}'
     # Launch rendering has its own mutation, using the identical full-launch check.
     candidate = original.replace('RUN_FLAGS+=(-v "$_fm_src:$_fm_dst:ro")', 'RUN_FLAGS+=(-v "$_fm_src:$_fm_dst")', 1)
@@ -24877,13 +24887,16 @@ def mutation_checks():
         try: launch(scratch.read_text())
         except AssertionError: pass
         else: raise AssertionError('surviving launch mutation: child lost :ro')
-    # Profile omission is a positive property, distinct from partial refusal.
-    candidate = original.replace('                [ "$_hit" = 1 ] || continue', '                :', 1)
-    with tempfile.TemporaryDirectory(prefix='sandy-mutant-') as name:
-        scratch = Path(name) / 'sandy'; scratch.write_text(candidate)
-        try: positives(scratch.read_text())
-        except AssertionError: pass
-        else: raise AssertionError('surviving mutation: unmatched profile emitted a child')
+    # Omission and the destination-only parent exemption are positive properties.
+    for label, old in [('unmatched profile', '                [ "$_hit" = 1 ] || continue'),
+                       ('destination parent exemption', '                [ "$_name" != "$_parent" ] || continue')]:
+        assert original.count(old) == 1, label
+        candidate = original.replace(old, '                :', 1)
+        with tempfile.TemporaryDirectory(prefix='sandy-mutant-') as name:
+            scratch = Path(name) / 'sandy'; scratch.write_text(candidate)
+            try: positives(scratch.read_text())
+            except AssertionError: pass
+            else: raise AssertionError('surviving positive mutation: ' + label)
     # Direct helper checks isolate decisions otherwise masked by later
     # canonicalization/type validation in apply (defence in depth).
     helper_mutations = [
@@ -24905,7 +24918,7 @@ def mutation_checks():
             except subprocess.TimeoutExpired:
                 assert kind == 'cycle'
             else: assert status == 0, 'surviving helper mutation ' + label
-    print(f'{len(mutations) + 2 + len(helper_mutations)} scratch mutations detected')
+    print(f'{len(active) + 3 + len(helper_mutations)} scratch mutations detected')
 
 mode = sys.argv[2]
 if mode == 'positive': positives(original)
@@ -24913,7 +24926,7 @@ elif mode == 'negative': refusals(original)
 elif mode == 'jq':
     refusals(original, 'jq')
     positives(original, 'jq')
-    parity(original)
+elif mode == 'parity': parity(original)
 elif mode == 'launch':
     launch(original)
     launch(original, refuse=True)
@@ -24923,16 +24936,23 @@ elif mode == 'schema':
     assert data['schema_version'] == 4
     assert 'submounts' in data['manifest']['top_level_keys']
     assert data['manifest']['submount_keys'] == ['parent', 'path', 'from', 'mode', 'agents']
+assert Path(sys.argv[1]).read_text() == original, 'repository source changed during verification'
 S200_PY
 check "§200(1) directories/files, slug expansion, boundary prefixes and selected profiles" \
     python3 "$_S200_D/check.py" "$SANDY_SCRIPT" positive
 check "§200(2) all refusals, including work/work/data source writable through its parent" \
     python3 "$_S200_D/check.py" "$SANDY_SCRIPT" negative
 if command -v jq >/dev/null 2>&1; then
-    check "§200(3) jq fallback: positive/refusal corpus and byte-identical projector output" \
+    check "§200(3) jq fallback: the same positive/refusal corpus" \
         python3 "$_S200_D/check.py" "$SANDY_SCRIPT" jq
 else
     skip "§200(3) jq unavailable"
+fi
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    check "§200(3-parity) both projectors emit byte-identical records for the full corpus" \
+        python3 "$_S200_D/check.py" "$SANDY_SCRIPT" parity
+else
+    skip "§200(3-parity) both projectors required; missing projector mutations also skipped"
 fi
 check "§200(4) entire launch: emitted records become ordered parent and child -v argv" \
     python3 "$_S200_D/check.py" "$SANDY_SCRIPT" launch
