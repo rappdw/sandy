@@ -12861,7 +12861,13 @@ check "§122(4) theme is NOT re-merged every launch (a user's /theme choice must
 # ORDERING so a section appended after the summary fails the build instead of
 # silently truncating the report.
 _S115_SELF="$(cd "$(dirname "$0")" && pwd)/run-tests.sh"
-_S115_SUMMARY_LINE="$(grep -n '^# BEGIN SUMMARY$' "$_S115_SELF" | cut -d: -f1)"
+_S115_SUMMARY_LINE="$(grep -n '^# Generic protected mounts and exact execution cleanup use the existing CI
+# entrypoint. Docker is required by this suite's preflight, so missing-runtime
+# skips cannot turn this gate green in CI.
+check "§200 protected submount and managed execution contracts" \
+    bash "$(dirname "$SANDY_SCRIPT")/test/run-isolation-contracts.sh"
+
+# BEGIN SUMMARY$' "$_S115_SELF" | cut -d: -f1)"
 _S115_LAST_SECTION="$(grep -n '^echo "§' "$_S115_SELF" | tail -1 | cut -d: -f1)"
 check "§115(1) the summary carries its BEGIN SUMMARY sentinel (mutation: renaming it empties the line numbers below and must fail HERE, not silently pass)" \
     bash -c '[ -n "$1" ]' -- "$_S115_SUMMARY_LINE"

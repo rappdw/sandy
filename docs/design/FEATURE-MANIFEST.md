@@ -31,7 +31,7 @@ $SANDY_HOME/features/<feature>/
   selected.json                written by sandy; read-only to everyone else
 ```
 
-A manifest declares `schema`, `sandboxes`, `agents`, `create`, `mounts`, `entry`, `expose`, (2.1.0) `agent_args` and (2.4.0) `receives`. `--print-schema` publishes that list as `manifest.top_level_keys` so a consumer can gate on **membership** rather than on a sandy version — see §9.
+A manifest declares `schema`, `sandboxes`, `agents`, `create`, `mounts`, `entry`, `expose`, (2.1.0) `agent_args` and (2.4.0) `receives`, with optional protected `submounts`. `--print-schema` publishes that list as `manifest.top_level_keys` so a consumer can gate on **membership** rather than on a sandy version — see §9.
 
 `$SANDY_HOME` is already the privileged config root, so the whole tree is **privileged by construction of where it lives** — a repository cannot reach it. That is the same argument that carries `.handoff-enabled`, `agent-args.<agent>` and `relay-bin/`, and it is why no new config tier is needed.
 
@@ -236,3 +236,64 @@ Sandy detects this at the host, rather than leaving it to `--print-state` alone:
 **Recorded, not just resolved.** `/etc/sandy-session.json`'s `cross_session_inbound_source` names *why* the resolved value is what it is — `explicit`, `feature:<name>` (the first declaring feature in sorted order), or `default` (JSON `null` when claude was not selected, mirroring `cross_session_inbound`'s own null convention) — so a run's receive posture is provable after the fact without re-deriving it from the manifest tree. (`relay-legacy` was a valid value only in markers written by 2.4.x/2.5.x sandy, for the now-removed legacy path above.)
 
 **Projector and schema surface, same as every other key.** Both projectors (node `RECEIVES`, jq `receives_known`) and the shell copy (`_sandy_fm_receives_known`, published as `--print-schema`'s `manifest.receives_values`) are held to byte-identical output — the same discipline `§135(20)` polices for the rest of the manifest, one clause later (`test/run-tests.sh §173`).
+
+
+## Protected children of feature mounts
+
+Capability-gate on `manifest.top_level_keys` containing `submounts` in
+`--print-schema`; `manifest.submount_keys` publishes its closed entry shape.
+Older launchers reject the unknown key. This extension has no mailbox or model
+vocabulary. A writable parent may contain protected read-only files/directories:
+
+```json
+{
+  "mounts": [{"name":"work","from":"instances/${slug}","mode":"rw"}],
+  "submounts": [
+    {"parent":"work","path":"results","from":"instances/${slug}/results"},
+    {"parent":"work","path":"settings.toml","from":"payload/settings.toml","agents":["codex"]}
+  ]
+}
+```
+
+Each child requires `parent`, relative `path` and feature-relative `from`.
+`${slug}` is expanded by Sandy. `mode` defaults to and must be `ro`. Optional
+`agents` is a distinct list of known agent names; absent/empty applies to every
+selected agent. A profile matching only part of a multi-agent selection refuses
+launch. No caller supplies an absolute sandbox destination.
+
+Parents precede child binds. Missing sources, escaping paths, symlink components,
+duplicate/overlapping child destinations and writable aliases to protected
+sources fail preflight. Files are supported as well as directories. Ensure any
+parent path components exist through normal feature creation. Resolved mounts
+appear through the existing introspection mount list. Node and jq projections
+are tested for parity on Linux and macOS without a runtime.
+
+## Managed execution helper
+
+`managed_exec.py` is an optional generic Linux-container helper installed by a
+deployment in an immutable payload. It is invoked through the existing runtime
+stdio API as root, while the application runs under an explicitly supplied
+unprivileged UID/GID, HOME and cwd. The standard Sandy image capability set
+supports that identity drop; no engine socket is exposed to the application.
+
+```bash
+python3 /readonly/managed_exec.py launch --namespace example --execution-id unique-id \
+  --uid 1000 --gid 1000 --home /home/user --cwd /workspace -- application --stdio
+python3 /readonly/managed_exec.py inspect --namespace example --execution-id unique-id
+python3 /readonly/managed_exec.py stop --namespace example --execution-id unique-id
+```
+
+Inspect/stop return `{"execution_id":"unique-id","state":"running|stopped|unknown"}`.
+Application stdout/stdin pass through untouched; helper errors go to stderr.
+Root-private records bind PID start tokens. A Linux subreaper owns and terminates
+all descendants, including children escaping their initial process group.
+Killing a host attach client does not prove the remote execution stopped.
+Inspecting an absent record is unknown; stopping it records a revocation so a
+late launch cannot use that ID. Killed root supervisors leave unknown until the
+bound container is positively stopped/removed. IDs cannot be reused.
+
+No host service manager, connector policy or container discovery belongs to
+this helper. A deployment binds it to the exact container and wraps its response
+in whatever host lifecycle contract it uses. Neutral Docker tests exercise
+attach-client death, escaped descendants, positive cleanup and delayed-launch
+revocation without invoking any model.
