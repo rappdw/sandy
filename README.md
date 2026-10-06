@@ -959,6 +959,13 @@ Your project directory is bind-mounted read-write, so `node_modules/`, `target/`
 - **Rust `target/`** — reusable if both sides are Linux x86_64. macOS host → Linux container triggers a full rebuild automatically
 - **Go `vendor/`** — pure source, always works
 
+### Protected children of feature mounts (unreleased)
+
+A feature manifest can declare `submounts` to project read-only files or
+directories beneath a writable parent mount. Protected sources must be outside
+every writable mount source, including the parent; both source and destination
+must already exist with matching types. See [the manifest contract](docs/design/FEATURE-MANIFEST.md#protected-children-of-feature-mounts).
+
 ### Per-project tooling (`.sandy/Dockerfile`)
 
 If your project needs system tools beyond the base image, create a `.sandy/Dockerfile` in your project directory:

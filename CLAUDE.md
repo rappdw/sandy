@@ -707,6 +707,27 @@ The rule is now a property of the path, not a containment test: **no component b
 
 ### Features: one manifest per feature (2.0.0, `docs/design/FEATURE-MANIFEST.md`)
 
+**Protected submounts (unreleased, #444).** Optional `submounts` projects a
+read-only file or directory beneath a declared feature mount. Entries require
+`parent` (a declared mount name), relative `path` (beneath its computed container
+destination), and feature-relative `from`; `${slug}` is expanded. `mode` defaults
+to `ro` and accepts only `ro`. Optional `agents` contains distinct known agent
+names; absent/empty applies to all selected agents. A partial match in a
+multi-agent container refuses the whole feature pass. Parents are emitted before
+children. Invalid paths, duplicate/overlapping destinations, symlink components,
+missing sources or destinations, and file/directory type mismatches refuse
+launch. Both endpoints must already exist: no Docker-created destination stub.
+The canonical child **source** must neither lie inside nor contain any writable
+mount source, including its parent. The canonical child **destination** must
+neither lie inside nor contain any other writable mount source; its own parent
+is the necessary exception for that destination check only. Thus `work/data` →
+`work/results` is refused when `work` is writable. Keep protected sources in a
+separate tree, outside writable mount sources. `--print-schema` publishes
+`manifest.submount_keys` and `submounts` in `manifest.top_level_keys`; consumers
+gate on membership, with `schema_version` still `4`. Guarded by §200, including
+the full launch's mount-record-to-`-v` wiring and scratch-copy mutation checks.
+
+
 `$SANDY_HOME/features/<name>/feature.json` declares everything about a feature: which sandboxes it applies to, what to create per sandbox, what to mount, what to export, and what to supervise. **Privileged by construction of where it lives** — a repository cannot reach `$SANDY_HOME` — so there is no new tier and no approval prompt.
 
 **Selection is enrolment, evaluated at every launch.** An include must match in **both** the `sandboxes` and `agents` blocks and no exclude may match in **either**; exclude wins. Default-deny: a block with no include selects nothing. A sandbox that is not selected gets **no mount, no export, no entry** — that is the security property, and §136(3) is the check. `agents` is applied *at* the launch rather than read from last-launch data, which is the caveat it retires. Multi-agent: mounts are per-container, not per-pane, so an include matches if **any** resolved agent matches and an exclude fires if **any** does — exclude is the strict side, because an excluded agent would otherwise share the container with the payload.

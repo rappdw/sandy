@@ -249,7 +249,7 @@ vocabulary. A writable parent may contain protected read-only files/directories:
 {
   "mounts": [{"name":"work","from":"instances/${slug}","mode":"rw"}],
   "submounts": [
-    {"parent":"work","path":"results","from":"instances/${slug}/results"},
+    {"parent":"work","path":"results","from":"protected/${slug}/results"},
     {"parent":"work","path":"settings.toml","from":"payload/settings.toml","agents":["codex"]}
   ]
 }
@@ -261,39 +261,16 @@ Each child requires `parent`, relative `path` and feature-relative `from`.
 selected agent. A profile matching only part of a multi-agent selection refuses
 launch. No caller supplies an absolute sandbox destination.
 
+Both source and destination must already exist as regular files or directories
+of the same type; Sandy never asks Docker to create a destination stub.
 Parents precede child binds. Missing sources, escaping paths, symlink components,
 duplicate/overlapping child destinations and writable aliases to protected
-sources fail preflight. Files are supported as well as directories. Ensure any
-parent path components exist through normal feature creation. Resolved mounts
+sources fail preflight. Files are supported as well as directories. Provision directory destinations with `create`; provision regular file
+destinations before launch. All parent components must exist.
+A protected source must be outside every writable mount source, including its
+parent, and must not contain one. Canonical paths are compared in both
+directions. Other writable mounts must also neither contain nor lie inside the
+child destination. For example, `work/data` cannot be projected read-only onto
+`work/results` while `work` is writable: `work/data` remains a writable alias. Resolved mounts
 appear through the existing introspection mount list. Node and jq projections
 are tested for parity on Linux and macOS without a runtime.
-
-## Managed execution helper
-
-`managed_exec.py` is an optional generic Linux-container helper installed by a
-deployment in an immutable payload. It is invoked through the existing runtime
-stdio API as root, while the application runs under an explicitly supplied
-unprivileged UID/GID, HOME and cwd. The standard Sandy image capability set
-supports that identity drop; no engine socket is exposed to the application.
-
-```bash
-python3 /readonly/managed_exec.py launch --namespace example --execution-id unique-id \
-  --uid 1000 --gid 1000 --home /home/user --cwd /workspace -- application --stdio
-python3 /readonly/managed_exec.py inspect --namespace example --execution-id unique-id
-python3 /readonly/managed_exec.py stop --namespace example --execution-id unique-id
-```
-
-Inspect/stop return `{"execution_id":"unique-id","state":"running|stopped|unknown"}`.
-Application stdout/stdin pass through untouched; helper errors go to stderr.
-Root-private records bind PID start tokens. A Linux subreaper owns and terminates
-all descendants, including children escaping their initial process group.
-Killing a host attach client does not prove the remote execution stopped.
-Inspecting an absent record is unknown; stopping it records a revocation so a
-late launch cannot use that ID. Killed root supervisors leave unknown until the
-bound container is positively stopped/removed. IDs cannot be reused.
-
-No host service manager, connector policy or container discovery belongs to
-this helper. A deployment binds it to the exact container and wraps its response
-in whatever host lifecycle contract it uses. Neutral Docker tests exercise
-attach-client death, escaped descendants, positive cleanup and delayed-launch
-revocation without invoking any model.

@@ -1596,15 +1596,21 @@ _sandy_fm_tree_safe() {
     done
     [ -d "$_cursor" ] || [ -f "$_cursor" ]
 }
-_sandy_fm_target_safe() {
-    local _cursor="$1" _relative="$2" _part
-    local IFS=/
-    for _part in $_relative; do
-        [ -d "$_cursor" ] || return 1
-        _cursor="$_cursor/$_part"
-        [ ! -L "$_cursor" ] || return 1
+# Canonicalize directories and files portably, including writable aliases.
+# Only the parent directory needs cd; plain readlink also works on macOS.
+_sandy_fm_canonical() {
+    local _path="$1" _link _n=0
+    while [ -L "$_path" ]; do
+        _n=$((_n + 1)); [ "$_n" -le 40 ] || return 1
+        _link="$(readlink "$_path")" || return 1
+        case "$_link" in /*) _path="$_link" ;; *) _path="$(dirname "$_path")/$_link" ;; esac
     done
-    return 0
+    if [ -d "$_path" ]; then (cd "$_path" && pwd -P)
+    elif [ -f "$_path" ]; then
+        local _directory
+        _directory="$(cd "$(dirname "$_path")" && pwd -P)" || return 1
+        printf '%s/%s\n' "$_directory" "$(basename "$_path")"
+    else return 1; fi
 }
 _sandy_fm_apply() {
     local _root="$1" _slug="$2" _ws="$3" _agents="$4" _dry="${5:-0}"
@@ -1679,8 +1685,7 @@ _sandy_fm_apply() {
             _mcount=$((_mcount + 1))
             [ -n "$_exp" ] && printf 'export\t%s\t%s\n' "$_exp" "$_dest"
         done
-        local _sm _parent _child _smfrom _smrest _wanted _a _hit _miss _parentfrom _sourcecanonical _rootcanonical _protect _rwfrom
-        _rootcanonical="$(cd "$_fdir" && pwd -P)" || return 1
+        local _sm _parent _child _smfrom _smrest _wanted _a _hit _miss _parentfrom _sourcecanonical _protectedsource _protect _rwfrom
         for _sm in ${_SANDY_FM_SUBMOUNT[@]+"${_SANDY_FM_SUBMOUNT[@]}"}; do
             _parent="${_sm%%	*}"; _smrest="${_sm#*	}"
             _child="${_smrest%%	*}"; _smrest="${_smrest#*	}"
@@ -1701,15 +1706,27 @@ _sandy_fm_apply() {
                 [ "${_m%%	*}" = "$_parent" ] || continue
                 _rest="${_m#*	}"; _parentfrom="${_rest%%	*}"; _parentfrom="${_parentfrom//\$\{slug\}/$_slug}"
             done
-            if ! _sandy_fm_tree_safe "$_fdir" "$_smfrom" || ! _sandy_fm_target_safe "$_fdir" "$_parentfrom/$_child"; then
+            if ! _sandy_fm_tree_safe "$_fdir" "$_smfrom" || ! _sandy_fm_tree_safe "$_fdir" "$_parentfrom/$_child"; then
                 printf 'err\t%s\tsubmount source or destination is missing or traverses a symlink\n' "$_fname"; return 1
             fi
-            _protect="$_rootcanonical/$_parentfrom/$_child"
+            _protectedsource="$(_sandy_fm_canonical "$_fdir/$_smfrom")" || return 1
+            _protect="$(_sandy_fm_canonical "$_fdir/$_parentfrom/$_child")" || return 1
+            # A file bind needs a pre-existing file, a directory bind a directory.
+            if { [ -d "$_protectedsource" ] && [ ! -d "$_protect" ]; } || { [ -f "$_protectedsource" ] && [ ! -f "$_protect" ]; }; then
+                printf 'err\t%s\tsubmount source and destination types differ\n' "$_fname"; return 1
+            fi
             for _m in ${_SANDY_FM_MOUNT[@]+"${_SANDY_FM_MOUNT[@]}"}; do
                 _name="${_m%%	*}"; _rest="${_m#*	}"; _rwfrom="${_rest%%	*}"; _rest="${_rest#*	}"
-                [ "${_rest%%	*}" = rw ] && [ "$_name" != "$_parent" ] || continue
+                [ "${_rest%%	*}" = rw ] || continue
                 _rwfrom="${_rwfrom//\$\{slug\}/$_slug}"
-                _sourcecanonical="$(cd "$_fdir/$_rwfrom" && pwd -P)" || return 1
+                # Missing ordinary mounts are skipped above and expose no alias.
+                [ -e "$_fdir/$_rwfrom" ] || continue
+                _sourcecanonical="$(_sandy_fm_canonical "$_fdir/$_rwfrom")" || return 1
+                case "$_protectedsource/" in "$_sourcecanonical/"*) printf 'err\t%s\twritable mount aliases a protected source\n' "$_fname"; return 1 ;; esac
+                case "$_sourcecanonical/" in "$_protectedsource/"*) printf 'err\t%s\twritable mount aliases a protected source\n' "$_fname"; return 1 ;; esac
+                # The destination naturally belongs to its own parent. Other
+                # writable mounts must not provide an alternate route to it.
+                [ "$_name" != "$_parent" ] || continue
                 case "$_protect/" in "$_sourcecanonical/"*) printf 'err\t%s\twritable mount aliases a protected child\n' "$_fname"; return 1 ;; esac
                 case "$_sourcecanonical/" in "$_protect/"*) printf 'err\t%s\twritable mount aliases a protected child\n' "$_fname"; return 1 ;; esac
             done
