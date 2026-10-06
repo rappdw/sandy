@@ -420,6 +420,30 @@ td.strong{font-family:var(--display);font-weight:800}
     </section>
 
     <!-- 7 · Many agents -->
+    <section class="screen" data-id="compare" data-ch="6">
+      <div class="inner">
+        <p class="eyebrow">Knowing it holds</p>
+        <h2>How it compares</h2>
+        <p class="lede">Other good tools attack the same problem from different angles. Each picks a different trade, as of October 2026.</p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th></th><th>sandy</th><th>Docker Sandboxes</th><th>NVIDIA OpenShell</th><th>Built-in agent sandbox</th></tr></thead>
+            <tbody>
+              <tr><td class="strong">Boundary</td><td>Hardened container, shared kernel</td><td><strong>microVM, its own kernel</strong></td><td>Container or VM, plus Landlock and seccomp</td><td>Shell commands only</td></tr>
+              <tr><td class="strong">You install</td><td>One script, on the Docker you have</td><td>Its CLI and VM runtime</td><td>A gateway and supervisor</td><td>Nothing</td></tr>
+              <tr><td class="strong">Agents</td><td><strong>Five, up to four side by side</strong></td><td>Eleven</td><td>Several, via providers</td><td>Itself</td></tr>
+              <tr><td class="strong">Per-project agent state</td><td><strong>Yes</strong></td><td>Per sandbox</td><td>Per sandbox</td><td>No, global</td></tr>
+              <tr><td class="strong">Credentials</td><td>Mounted per session, never stored</td><td><strong>Injected by a proxy, never inside</strong></td><td><strong>Injected by a proxy, never seen</strong></td><td>The agent's own</td></tr>
+              <tr><td class="strong">Network</td><td>Host allowlist proxy, no TLS decryption</td><td>Default deny, host and method/path rules</td><td>Default deny, L7 rules</td><td>Domain rules for shell commands</td></tr>
+              <tr><td class="strong">A repo you didn't write</td><td><strong>Hooks, CI and shell rc read-only; approval gates</strong></td><td>Clone mode, or review changes</td><td>Filesystem policy</td><td>Partial</td></tr>
+              <tr><td class="strong">Cost</td><td>Free, MIT</td><td>Free locally; paid governance</td><td>Apache 2.0, early</td><td>Free</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="body small">Choose a microVM for a hypervisor boundary, Windows, or Docker inside the sandbox. Choose sandy for your existing Docker, repos you didn't write, several agents, and separate per-project setups. The README's <a href="https://github.com/rappdw/sandy#why-sandy">Why sandy</a> section has the full comparison and its sources.</p>
+      </div>
+    </section>
+
     <section class="screen" data-id="agents" data-ch="7">
       <div class="inner">
         <p class="eyebrow">Many agents</p>

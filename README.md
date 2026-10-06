@@ -48,6 +48,41 @@ Sandy runs Claude Code, Gemini CLI, OpenAI Codex CLI, OpenCode (provider-agnosti
 
 No `ANTHROPIC_API_KEY` required if using a Claude paid account (Pro/Max) — credentials are seeded from the host on first run.
 
+## Why sandy
+
+Coding agents are most useful when they can act without asking first, and most dangerous for the same reason. A prompt-injected or simply mistaken agent runs with your user's reach: your other repositories, your SSH keys, your home network, the git hook that runs on your next checkout. Sandy's answer is that the operating system, not the agent's own judgement, decides what it can touch, and that each project gets its own agent setup so nothing bleeds between them.
+
+Several good tools now attack the same problem from different angles. Here is an honest comparison, as of October 2026. Their docs move fast, so check before relying on a row.
+
+| | **sandy** | **[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/)** | **[NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)** | **The agent's built-in sandbox** (Claude Code `/sandbox`, Codex) |
+|---|---|---|---|---|
+| **Boundary** | Hardened container: shared kernel, all capabilities dropped, read-only root, no Docker socket | **microVM: its own kernel** and its own Docker daemon | Container or VM per sandbox, plus Landlock, seccomp, no capabilities | OS sandbox (bwrap, Seatbelt) around the agent's **shell commands only** |
+| **What you install** | One bash script, on the Docker you already have (Docker Desktop, OrbStack, Colima, Rancher, Lima) | The `sbx` CLI and its own VM runtime | A gateway and supervisor (control plane), Docker/Podman/VM or Kubernetes | Nothing; it ships with the agent |
+| **Platforms** | macOS, Linux | macOS, Linux, Windows | Linux, macOS (Apple Silicon), Windows via WSL 2 (experimental) | Each agent's own |
+| **Agents** | Claude Code, Gemini, Codex, OpenCode, Grok; **up to 4 side by side** in one session | 11, including Claude Code, Codex, Gemini, Copilot, Cursor, OpenCode | Several via providers (Claude Code, Codex, Copilot, Cursor, OpenCode, …) | One: itself |
+| **Per-project agent state** | **Yes**: each project has its own plugins, memory, history, logins and installed packages | Each sandbox persists until removed | Per sandbox | No: global (`~/.claude` and the like) |
+| **Credentials** | Mounted per session from the host, never stored in the sandbox; one credential per agent; SSH keys only if named | **Injected by a host proxy; never enter the VM** | **Injected by the policy proxy; the agent never sees them** | The agent's own, in its own process |
+| **Network** | Egress proxy: permissive (default, blocks LAN and cloud metadata) or strict allowlist; host-level, TLS never decrypted | Presets from open to locked down; the default is deny with a baseline allowlist; host **and HTTP method/path** rules | **Deny by default; L7 rules**, per-binary identity, formally verified policy | Domain allow/deny for shell commands |
+| **A repo you didn't write** | **Git hooks, CI workflows, shell rc and IDE configs mounted read-only**; approval prompts before a repo's config can loosen the sandbox, an escaping symlink is mounted, or a project Dockerfile builds | A clone mode gives the agent a private copy; in direct mode the docs warn the agent can change hooks and CI config | Filesystem policy (Landlock) per sandbox | Partial, shell commands only |
+| **Proof of posture** | Read-only `/etc/sandy-session.json` in every session; `--print-state` and `--accounts` from the host | Not documented | Not documented (its policies are reviewable and formally verified) | No |
+| **Cost and licence** | Free, MIT | Free locally, including commercial use; paid cloud and organization governance | Apache 2.0; 0.1.x, early | Free |
+
+**Choose something else when:**
+- **You need a hypervisor boundary**, for example against an agent that may actively try to escape. Docker Sandboxes gives each agent its own kernel. A container cannot match that.
+- **You want credentials to never enter the sandbox at all.** Docker Sandboxes and OpenShell inject them at a proxy. Sandy mounts a per-session copy; a credential broker is on the roadmap ([#121](https://github.com/rappdw/sandy/issues/121)).
+- **You need HTTP method or path rules, or centrally governed policy for a fleet.** OpenShell and Docker Sandboxes have them. Sandy filters by host and deliberately never decrypts TLS.
+- **Your agent must build and run containers.** Docker Sandboxes gives it a Docker daemon.
+- **You're on Windows.**
+
+**Choose sandy when:**
+- **You want it on the Docker you already have**, with no VM layer, no daemon of its own and no account, on a laptop or a remote Linux box.
+- **You open repositories you didn't write.** Sandy is built for the agent that is wrong rather than evil, and follows an instruction planted in the repo. A committed config can tighten the sandbox but never loosen it without asking you, and the files that run on your next git or IDE action are read-only.
+- **You run several agents.** Claude, Codex, Gemini, OpenCode and Grok run side by side in one workspace, each with its own logins.
+- **You want each project's agent setup kept separate**: a per-project `~/.claude`, the venv model below. That's useful even if you trust the agent completely.
+- **You want to audit the whole thing**: one script, a specification, and a record in every session of what it is running under.
+
+**What sandy does not do, plainly:** the agent shares the host kernel (Docker's VM kernel on macOS), so a kernel exploit is out of scope. Credentials it is given are inside the container for the session. `.env` files in the project are readable by the agent today. With `SANDY_EGRESS=off` on macOS, nothing blocks the LAN. The [threat model](docs/security/THREAT_MODEL.md) has the rest. These tools also combine: a sandy-style per-project setup inside a microVM is stronger than either alone.
+
 ## Virtual Environments for Your Coding Agents
 
 Coding agents like Claude Code store plugins, memory, hooks, credentials, and session history in a single global directory (`~/.claude/`, and the equivalent for Gemini / Codex / OpenCode) — shared across every project on your machine. This means a plugin installed for one project is active in all of them. Credentials are shared. Memory bleeds between contexts.
