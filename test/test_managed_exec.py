@@ -68,3 +68,30 @@ def test_host_attach_death_preserves_execution_and_stop_reaps_escaped_child(cont
     finally:
         if attach.poll() is None: attach.kill(); attach.wait()
         attach.stdout.close(); attach.stderr.close()
+
+
+def test_protected_child_mounts_reject_real_uid_mutations(container, tmp_path):
+    # The fixture establishes a real daemon; the probe uses an inert image and
+    # the host UID that owns the writable parent, so mode bits cannot fake RO.
+    parent=tmp_path/'parent'; parent.mkdir()
+    results=parent/'results'; results.mkdir()
+    (results/'fixture').write_text('retained')
+    config=tmp_path/'trusted.toml'; config.write_text('trusted=true')
+    code='''import os
+open('/data/writable','w').write('parent remains writable')
+for call in [lambda:open('/data/results/new','w'),
+             lambda:os.rename('/data/results/fixture','/data/results/moved'),
+             lambda:os.chmod('/data/results/fixture',0o600),
+             lambda:os.symlink('/tmp','/data/results/link'),
+             lambda:os.open('/data/config.toml',os.O_WRONLY)]:
+ try: call()
+ except OSError: continue
+ raise RuntimeError('protected child allowed mutation')
+print('protected')
+'''
+    result=subprocess.check_output(['docker','run','--rm','--user',str(os.getuid())+':'+str(os.getgid()),
+        '-v',str(parent)+':/data:rw','-v',str(results)+':/data/results:ro',
+        '-v',str(config)+':/data/config.toml:ro','python:3.11-slim','python3','-c',code],text=True)
+    assert result.strip()=='protected'
+    assert (results/'fixture').read_text()=='retained'
+    assert config.read_text()=='trusted=true'
