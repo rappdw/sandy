@@ -70,7 +70,7 @@ these before reporting so we can talk about the same boundary:
 On **macOS with the egress proxy turned off** (`SANDY_EGRESS_PROXY=0` /
 `SANDY_EGRESS_NO_ISOLATION=1`), Docker Desktop provides **no LAN isolation** — the
 container can reach the host's loopback services and the physical LAN. This is
-documented in the [README](README.md#macos-docker-desktop--not-isolated-when-the-proxy-is-off)
+documented in the [network guide](docs/guide/network.md#macos-docker-desktop--not-isolated-when-the-proxy-is-off)
 and the threat model, and the default (`permissive` egress proxy) closes it on
 both platforms. Reports that this specific documented, opt-in configuration is
 unisolated aren't new findings — but reports that the **default** posture leaks,
