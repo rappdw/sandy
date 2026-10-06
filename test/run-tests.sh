@@ -12510,7 +12510,7 @@ check "§118(7) with both, ONLY the top-level one is rewritten" \
     bash -c 'printf "%s" "$1" | grep -q "^sandbox_mode = \"danger-full-access\"$" && printf "%s" "$1" | grep -q "^sandbox_mode = \"read-only\"$"' -- "$_S118_D"
 
 # ============================================================
-echo "§119: every config key in --print-schema is documented in README.md"
+echo "§119: every config key and flag in --print-schema is documented in the configuration guide"
 # ============================================================
 # WHY. CLAUDE.md's own rule is "also update README.md if user-facing behavior
 # changes", and that rule was followed for CLAUDE.md and SPECIFICATION.md and
@@ -12520,11 +12520,17 @@ echo "§119: every config key in --print-schema is documented in README.md"
 # is not a convention; §91 already ratchets cli_flags against --help for exactly
 # this reason, and this is the config-key half of the same idea.
 #
-# Scope: the key must APPEAR in README.md. This cannot judge whether the prose is
-# any good -- it catches the failure that actually happened (a key documented
-# nowhere user-facing), not prose quality.
-_S119_README="$(cd "$(dirname "$SANDY_SCRIPT")" && pwd)/README.md"
-check "§119(pre) README.md is readable (mutation: a bad path would make every check below vacuous)" \
+# Scope: the key must APPEAR in the user reference. That was README.md until the
+# README was split into docs/guide/ (the reference tables moved to
+# docs/guide/configuration.md); the property is unchanged: every key and flag
+# is documented where a user looks it up. This cannot judge whether the prose
+# is any good -- it catches the failure that actually happened (a key
+# documented nowhere user-facing), not prose quality.
+_S119_README="$(cd "$(dirname "$SANDY_SCRIPT")" && pwd)/docs/guide/configuration.md"
+# Deprecated and removed keys are documented in README's ## Deprecated table,
+# which stays in the README by rule (§138), so (1) accepts either file.
+_S119_FRONT="$(cd "$(dirname "$SANDY_SCRIPT")" && pwd)/README.md"
+check "§119(pre) docs/guide/configuration.md is readable (mutation: a bad path would make every check below vacuous)" \
     bash -c '[ -s "$1" ] && grep -q "SANDY_AGENT" "$1"' -- "$_S119_README"
 
 # EXCEPTIONS, deliberately short and justified individually. env-only keys are
@@ -12551,9 +12557,9 @@ _S119_MISSING="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' \
     | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([A-Z][A-Z0-9_]*\)".*/\1/p' | sort -u \
     | grep -vxF "${_S119_EXEMPT_ARGS[@]}" \
     | while IFS= read -r _k; do
-          grep -q "$_k" "$_S119_README" || printf '%s ' "$_k"
+          grep -q "$_k" "$_S119_README" || grep -q "$_k" "$_S119_FRONT" || printf '%s ' "$_k"
       done)"
-check "§119(1) no config key is missing from README.md${_S119_MISSING:+ (missing: $_S119_MISSING)}" \
+check "§119(1) no config key is missing from the configuration guide (or, for a deprecated key, README's Deprecated table)${_S119_MISSING:+ (missing: $_S119_MISSING)}" \
     bash -c '[ -z "$1" ]' -- "$_S119_MISSING"
 
 # Non-vacuity: the extractor must actually be finding keys. Without this a typo
@@ -12587,7 +12593,7 @@ _S119_FLAGS_MISSING="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' 
     | while IFS= read -r _f; do
           printf '%s' "$_S119_FLAGROWS" | grep -q -- "\`$_f" || printf '%s ' "$_f"
       done)"
-check "§119(4) every cli_flag has a row in README.md's flags TABLE (prose does not count)${_S119_FLAGS_MISSING:+ — missing: $_S119_FLAGS_MISSING}" \
+check "§119(4) every cli_flag has a row in the configuration guide's flags TABLE (prose does not count)${_S119_FLAGS_MISSING:+ — missing: $_S119_FLAGS_MISSING}" \
     bash -c '[ -z "$1" ]' -- "$_S119_FLAGS_MISSING"
 check "§119(5) the flag extractor found a plausible number of flags (>15), so (4) cannot pass vacuously" \
     bash -c '[ "$("$2" --print-schema 2>/dev/null | tr "," "\n" | sed -n "s/.*\"name\"[[:space:]]*:[[:space:]]*\"\(--[a-z-]*\)\".*/\1/p" | sort -u | wc -l)" -gt 15 ]' -- "" "$SANDY_SCRIPT"

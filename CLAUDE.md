@@ -48,7 +48,7 @@ When modifying the `sandy` script, update `SPECIFICATION.md` to reflect any chan
 - **D** Platform-Specific Behavior (Linux/macOS divergence)
 - **E** Container Launch Assembly (docker run flags, mounts, env vars)
 
-Also update `README.md` and this file if user-facing behavior changes. Run `test/run-tests.sh` to verify test assertions still match.
+Also update the user docs and this file if user-facing behavior changes. **The README is the short front page** (what sandy is, why, quick start, the most-used keys, agents, the required `## Deprecated` table); **the detail lives in `docs/guide/`** (configuration reference, agents, daemon mode, network, environment, features, channels, security, troubleshooting). A new config key or flag goes in `docs/guide/configuration.md`, which §119 checks has a row for every key and flag. Run `test/run-tests.sh` to verify test assertions still match.
 
 ### Generated artifacts — regenerate, never hand-edit
 
