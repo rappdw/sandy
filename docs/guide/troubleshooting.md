@@ -48,3 +48,20 @@ be blocked in `connect`/`recv`/`poll`.
 - Re-check with the `grep` above (the flags should now appear), then run
   `sandy` again. An interrupted build is retried on the next launch; no
   `--rebuild` is needed.
+
+## An agent pane fails with "Missing optional dependency"
+
+**Symptom.** After an image rebuild, an agent pane exits at once with an error
+like `Error: Missing optional dependency @openai/codex-linux-arm64`.
+
+**Cause.** Codex and OpenCode ship their real binary as a separate
+per-platform npm package. npm publishes the main package first and the
+platform packages over the following minutes, and an install in that window
+silently skips the platform package that does not exist yet. Before 2.8.0 the
+image build did not check that the installed agent runs, so the broken
+agent shipped, and no later launch rebuilt it.
+
+**Fix.** `sandy --rebuild`. Since 2.8.0 a build whose agent cannot report its
+version fails, so a rebuild during a publish window keeps the existing image
+and retries at the next launch. An image already broken this way is rebuilt
+automatically at its next launch.
