@@ -1842,7 +1842,7 @@ SANDY_GEMINI_EXTENSIONS|string|||0.9.0|stable|Comma-separated Gemini extensions 
 GOOGLE_CLOUD_PROJECT|string|||0.9.0|stable|Google Cloud project for Vertex AI.
 GOOGLE_CLOUD_LOCATION|string|||0.9.0|stable|Google Cloud location for Vertex AI.
 GOOGLE_GENAI_USE_VERTEXAI|bool|||0.9.0|stable|Use Vertex AI backend for Gemini.
-CODEX_MODEL|string|||0.10.0|stable|Codex model override.
+CODEX_MODEL|string|||0.10.0|stable|Codex model override, passed as codex -m. Unset: codex uses its own default model (sandy pins none since 2.8.0).
 SANDY_CODEX_AUTH|enum:auto,api_key,oauth|auto||0.10.0|stable|Codex credential probe strategy.
 OPENCODE_MODEL|string|||0.12.0|stable|OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4').
 SANDY_OPENCODE_AUTH|enum:auto,api_key,oauth|auto||0.12.0|stable|OpenCode credential probe strategy.
@@ -14420,7 +14420,6 @@ if _sandy_agent_has codex; then
 # Written by sandy on first launch. Safe to edit, but sandbox_mode must stay
 # "danger-full-access" — sandy provides outer isolation; codex's Landlock
 # sandbox does not nest cleanly in Docker containers.
-model = "gpt-5.5"
 sandbox_mode = "danger-full-access"
 
 [notice]
@@ -14474,17 +14473,22 @@ CODEX_TOML
         esac
         unset _codex_sbx_line
     fi
-    # One-shot model migration: bump existing sandboxes from the old default
-    # (gpt-5.4) to the current default (gpt-5.5). Only updates the exact
-    # previous default string — any user-customized model is left alone.
-    # Portable in-place edit (no `sed -i` — BSD/GNU diverge on the syntax).
+    # Codex picks its own default model (2.8.0). Sandy used to seed a pin
+    # (gpt-5.4, then gpt-5.5) and bump it on each release, which left every
+    # sandbox on a model OpenAI was retiring until sandy itself shipped again.
+    # Un-pin: drop sandy's own former default, and only that -- the exact
+    # TOP-LEVEL line, before the first [section] (a [profiles.*] model is the
+    # user's), and only in a file sandy seeded (its header comment). A model
+    # the user chose is left alone; CODEX_MODEL still pins one per launch.
     if [ -f "$_codex_cfg_w" ] \
-       && grep -qx 'model = "gpt-5.4"' "$_codex_cfg_w" 2>/dev/null; then
-        info "  Migrating codex model: gpt-5.4 -> gpt-5.5"
-        sed 's/^model = "gpt-5\.4"$/model = "gpt-5.5"/' \
-            "$_codex_cfg_w" \
-            > "$_codex_cfg_w.new" \
-            && mv "$_codex_cfg_w.new" "$_codex_cfg_w"
+       && grep -q '^# Written by sandy on first launch' "$_codex_cfg_w" 2>/dev/null \
+       && awk 'BEGIN{top=1} /^\[/{top=0} top && ($0 == "model = \"gpt-5.4\"" || $0 == "model = \"gpt-5.5\"") {found=1} END{exit !found}' "$_codex_cfg_w" 2>/dev/null; then
+        if awk 'BEGIN{top=1} /^\[/{top=0} top && ($0 == "model = \"gpt-5.4\"" || $0 == "model = \"gpt-5.5\"") {next} {print}' "$_codex_cfg_w" > "$_codex_cfg_w.new" 2>/dev/null; then
+            mv "$_codex_cfg_w.new" "$_codex_cfg_w"
+            info "  codex: removed sandy's old default model pin; codex now uses its own default (set CODEX_MODEL to pin one)"
+        else
+            rm -f "$_codex_cfg_w.new" 2>/dev/null || true
+        fi
     fi
     _sandy_stage_commit "$SANDBOX_DIR/codex/config.toml"
 fi
@@ -14639,7 +14643,7 @@ JSON
                         warn "    Add: OPENCODE_MODEL=anthropic/claude-sonnet-4-5" ;;
                     OPENAI_API_KEY)
                         warn "  OPENAI_API_KEY is set — point opencode at it instead:"
-                        warn "    Add: OPENCODE_MODEL=openai/gpt-5.5" ;;
+                        warn "    Add: OPENCODE_MODEL=openai/<model>  (an OpenAI model your key can use)" ;;
                     GEMINI_API_KEY)
                         warn "  GEMINI_API_KEY is set, but opencode's Google default expects a"
                         warn "  DIFFERENT var: GOOGLE_GENERATIVE_AI_API_KEY. Either set that, or"
