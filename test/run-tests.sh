@@ -1831,10 +1831,10 @@ else
         fail "codex/config.toml sets sandbox_mode = danger-full-access"
     fi
 
-    if grep -q 'model = "gpt-5.5"' "$_CSEED_TMP/codex/config.toml" 2>/dev/null; then
-        pass "codex/config.toml sets default model = gpt-5.5"
+    if ! grep -q '^model *=' "$_CSEED_TMP/codex/config.toml" 2>/dev/null; then
+        pass "codex/config.toml pins no model (codex picks its own default, 2.8.0)"
     else
-        fail "codex/config.toml sets default model = gpt-5.5"
+        fail "codex/config.toml pins no model (codex picks its own default, 2.8.0)"
     fi
 
     _notice_count=$(grep -cE '^(hide_|"hide)' "$_CSEED_TMP/codex/config.toml" 2>/dev/null || echo 0)
@@ -24635,6 +24635,77 @@ check "§199(2) base_type is bool for bool, int for int, and string for every ot
 check "§199(3) the types emitted are the documented closed set" \
     bash -c 'f="$2"; set -- $1; [ "$4" = "agent_combo,bool,enum,int,path,secret,string" ] || exit 1; for t in $(printf "%s" "$4" | tr "," " "); do grep -qF "| \`$t\` |" "$f" || exit 1; done' _ "$_S199_OUT" "$(dirname "$SANDY_SCRIPT")/SPEC_INTROSPECTION.md"
 unset _S199_OUT
+
+
+echo "§200: an existing sandbox loses sandy's old codex model pin, and nothing the user chose"
+# ============================================================
+# 2.8.0 stopped seeding `model = "gpt-5.5"`: codex picks its own default, so a
+# sandbox never sits on a model OpenAI is retiring until sandy ships again.
+# Existing sandboxes still carry sandy's former pin (gpt-5.4 or gpt-5.5). Runs
+# the REAL codex seeding block (the same extraction as 28c) over a pre-seeded
+# config.toml, applies the staged copy as user-setup.sh does, and asserts
+# exactly which model lines survive.
+_S200_BLOCK="$(awk '/^if _sandy_agent_has codex; then$/ && !seen {seen=1; printing=1} printing {print} printing && /^fi$/ {exit}' "$SANDY_SCRIPT")"
+_S200_HLP="$(sed -n '/^# --- Host-to-container handoff (#400)/,/^# Merge JSON keys into a file/p' "$SANDY_SCRIPT" | sed '$d')"
+_S200_HDR='# Written by sandy on first launch. Safe to edit, but sandbox_mode must stay'
+# $1 = config.toml content -> the file after one launch, then "|INFO:<lines>"
+_s200() {
+    local d o
+    d="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$d/codex"; printf '%s' "$1" > "$d/codex/config.toml"
+    o="$(env -i PATH="$PATH" SANDBOX_DIR="$d" B="$_S200_BLOCK" H="$_S200_HLP" bash -c '
+        _i=""; info() { _i="$_i$*;"; }; warn() { :; }; error() { :; }
+        _sandy_agent_has() { [ "$1" = codex ]; }
+        SANDY_AGENT=codex
+        eval "$H"; _sandy_launch_id=t200   # after the helpers, which reset it
+        eval "$B"; _sandy_launch_apply_staged "$SANDBOX_DIR"
+        cat "$SANDBOX_DIR/codex/config.toml"; printf "|INFO:%s" "$_i"' 2>&1)"
+    rm -rf "$d"; printf '%s' "$o"
+}
+_S200_A="$(_s200 "$_S200_HDR
+model = \"gpt-5.5\"
+sandbox_mode = \"danger-full-access\"
+
+[notice]
+hide_full_access_warning = true
+")"
+check "§200(1) a sandy-seeded file loses its gpt-5.5 pin, keeps everything else, and says so" \
+    bash -c 'case "$1" in *"model = "*) exit 1 ;; esac; case "$1" in *"sandbox_mode = \"danger-full-access\""*"hide_full_access_warning"*"|INFO:"*"model pin"*) exit 0 ;; esac; exit 1' _ "$_S200_A"
+_S200_B="$(_s200 "$_S200_HDR
+model = \"gpt-5.4\"
+sandbox_mode = \"danger-full-access\"
+")"
+check "§200(2) the older gpt-5.4 pin goes too" \
+    bash -c 'case "$1" in *"model = "*) exit 1 ;; esac; exit 0' _ "$_S200_B"
+_S200_C="$(_s200 "$_S200_HDR
+model = \"o4-mini\"
+sandbox_mode = \"danger-full-access\"
+")"
+check "§200(3) a model the user chose is kept, silently" \
+    bash -c 'case "$1" in *"model = \"o4-mini\""*) ;; *) exit 1 ;; esac; case "$1" in *"model pin"*) exit 1 ;; esac; exit 0' _ "$_S200_C"
+_S200_D="$(_s200 "$_S200_HDR
+sandbox_mode = \"danger-full-access\"
+
+[profiles.fast]
+model = \"gpt-5.5\"
+")"
+check "§200(4) a gpt-5.5 inside a [profiles] section is the user's, and is kept" \
+    bash -c 'case "$1" in *"[profiles.fast]"*"model = \"gpt-5.5\""*) exit 0 ;; esac; exit 1' _ "$_S200_D"
+_S200_E="$(_s200 'model = "gpt-5.5"
+sandbox_mode = "danger-full-access"
+')"
+check "§200(5) a file sandy did not seed (no header) is left alone, gpt-5.5 included" \
+    bash -c 'case "$1" in *"model = \"gpt-5.5\""*) exit 0 ;; esac; exit 1' _ "$_S200_E"
+_S200_F="$(_s200 "$_S200_HDR
+model = \"gpt-5.5\"
+sandbox_mode = \"danger-full-access\"
+
+[profiles.fast]
+model = \"gpt-5.5\"
+")"
+check "§200(6) with both, only the top-level pin goes; the [profiles] one stays" \
+    bash -c 'n=$(printf "%s" "$1" | grep -c "^model = \"gpt-5.5\"$"); [ "$n" = 1 ] && case "$1" in *"[profiles.fast]"*"model = \"gpt-5.5\""*) exit 0 ;; esac; exit 1' _ "$_S200_F"
+unset _S200_BLOCK _S200_HLP _S200_HDR _S200_A _S200_B _S200_C _S200_D _S200_E _S200_F
+unset -f _s200 2>/dev/null || true
 
 
 # BEGIN SUMMARY

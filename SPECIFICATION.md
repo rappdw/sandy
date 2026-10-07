@@ -219,7 +219,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `GOOGLE_CLOUD_PROJECT` | passive | unset | 0.9.0 | stable | Google Cloud project for Vertex AI. |
 | `GOOGLE_CLOUD_LOCATION` | passive | unset | 0.9.0 | stable | Google Cloud location for Vertex AI. |
 | `GOOGLE_GENAI_USE_VERTEXAI` | passive | unset | 0.9.0 | stable | Use Vertex AI backend for Gemini. |
-| `CODEX_MODEL` | passive | unset | 0.10.0 | stable | Codex model override. |
+| `CODEX_MODEL` | passive | unset | 0.10.0 | stable | Codex model override, passed as codex -m. Unset: codex uses its own default model (sandy pins none since 2.8.0). |
 | `SANDY_CODEX_AUTH` | passive | `auto` | 0.10.0 | stable | Codex credential probe strategy. |
 | `OPENCODE_MODEL` | passive | unset | 0.12.0 | stable | OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4'). |
 | `SANDY_OPENCODE_AUTH` | passive | `auto` | 0.12.0 | stable | OpenCode credential probe strategy. |
@@ -407,7 +407,6 @@ Whenever `gemini` is in `SANDY_AGENT`, sandy creates `gemini/` and its `commands
 For `SANDY_AGENT=codex`, sandy creates `codex/` and seeds `codex/config.toml` (first run only; the top-level `sandbox_mode` is then value-checked and repaired on every launch — see C.7b) with:
 
 ```toml
-model = "gpt-5.5"
 sandbox_mode = "danger-full-access"
 
 [notice]
@@ -418,9 +417,9 @@ hide_rate_limit_model_nudge = true
 hide_world_writable_warning = true
 ```
 
-The `model = "gpt-5.5"` line sets a stable default model; users can override via `CODEX_MODEL` env var. The `sandbox_mode = "danger-full-access"` line is required — codex's Landlock sandbox does not nest cleanly inside sandy's Docker container. Sandy provides the outer isolation, and the CLI is additionally invoked with `--sandbox danger-full-access` as belt-and-suspenders in `build_codex_cmd`. The `[notice]` block suppresses first-run prompts; all five documented keys are seeded even if codex adds more over time.
+**No model is pinned (2.8.0)**: codex uses its own default model, so a sandbox never stays on a model OpenAI is retiring until sandy itself ships again. `CODEX_MODEL` pins one per launch (`codex -m`), and a `model` line the user writes in `config.toml` is kept. The `sandbox_mode = "danger-full-access"` line is required — codex's Landlock sandbox does not nest cleanly inside sandy's Docker container. Sandy provides the outer isolation, and the CLI is additionally invoked with `--sandbox danger-full-access` as belt-and-suspenders in `build_codex_cmd`. The `[notice]` block suppresses first-run prompts; all five documented keys are seeded even if codex adds more over time.
 
-**One-shot model migration**: existing sandboxes seeded with the old default (`model = "gpt-5.4"`) are auto-bumped to `gpt-5.5` on next launch. The migration matches the exact previous default line — any user-customized model (anything other than `"gpt-5.4"`) is preserved untouched.
+**Un-pin migration (2.8.0)**: an existing sandbox still carrying sandy's former pin loses it on its next launch. The step removes only an exact top-level `model = "gpt-5.4"` or `model = "gpt-5.5"` line, before the first `[section]` (a `[profiles.*]` model is the user's), and only in a file that carries sandy's seed header (`# Written by sandy on first launch`). It announces the removal in one info line. Any other model line, or a file sandy did not seed, is left alone. Like every launch-time write here it goes through the staged copy (#400). Guarded by `run-tests.sh` §200.
 
 The `[projects."<workspace>"] trust_level = "trusted"` entry is **appended at session start by `user-setup.sh`** (not at host-time) because it needs the container-side `$SANDY_WORKSPACE` path. Re-launches are idempotent: the entry is only appended if a matching line is not already present.
 
@@ -2318,7 +2317,6 @@ Written to `$SANDBOX_DIR/codex/config.toml` on first launch of a new sandbox wit
 # Written by sandy on first launch. Safe to edit, but sandbox_mode must stay
 # "danger-full-access" — sandy provides outer isolation; codex's Landlock
 # sandbox does not nest cleanly in Docker containers.
-model = "gpt-5.5"
 sandbox_mode = "danger-full-access"
 
 [notice]
