@@ -8259,7 +8259,8 @@ LABEL sandy.launch_staging=1
 RUN HOME=/home/sandy su -s /bin/bash sandy -c "curl -fsSL https://claude.ai/install.sh | bash" \\
  && cp -L /home/sandy/.local/bin/claude /usr/local/bin/claude \\
  && mv /home/sandy/.local/share/claude /opt/claude-code \\
- && { /usr/local/bin/claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version || true; }
+ && { /usr/local/bin/claude --version | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version \\
+      || { echo 'sandy: claude was installed but claude --version reports no version (see the error above)' >&2; exit 1; }; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
@@ -8290,7 +8291,8 @@ LABEL sandy.launch_staging=1
 RUN npm install -g @google/gemini-cli \\
  && mkdir -p /opt/gemini-cli \\
  && { npm list -g @google/gemini-cli --depth=0 2>/dev/null \\
-      | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/gemini-cli/.version || true; }
+      | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/gemini-cli/.version \\
+      || { echo 'sandy: gemini-cli was installed but npm reports no version for it' >&2; exit 1; }; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
@@ -8324,7 +8326,8 @@ LABEL sandy.launch_staging=1
 # a prebuilt Rust binary per platform; Node is only the installation vehicle.
 RUN npm install -g @openai/codex \\
  && mkdir -p /opt/codex \\
- && { codex --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/codex/.version || true; }
+ && { codex --version | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/codex/.version \\
+      || { echo 'sandy: codex was installed but codex --version reports no version (see the error above)' >&2; exit 1; }; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
@@ -8364,7 +8367,8 @@ RUN set -eu; \\
     { [ -n "\$_real" ] && [ -f "\$_real" ]; } || { echo 'sandy: grok binary not found after install' >&2; exit 1; }; \\
     install -m 0755 "\$_real" /usr/local/bin/grok; \\
     mkdir -p /opt/grok; \\
-    grok --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/grok/.version || true
+    grok --version | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/grok/.version \\
+      || { echo 'sandy: grok was installed but grok --version reports no version (see the error above)' >&2; exit 1; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
@@ -8394,7 +8398,8 @@ LABEL sandy.launch_staging=1
 # a prebuilt platform binary via optionalDependencies + postinstall.
 RUN npm install -g opencode-ai \\
  && mkdir -p /opt/opencode \\
- && { opencode --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/opencode/.version || true; }
+ && { opencode --version | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/opencode/.version \\
+      || { echo 'sandy: opencode was installed but opencode --version reports no version (see the error above)' >&2; exit 1; }; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
@@ -8425,20 +8430,24 @@ LABEL sandy.launch_staging=1
 RUN HOME=/home/sandy su -s /bin/bash sandy -c "curl -fsSL https://claude.ai/install.sh | bash" \\
  && cp -L /home/sandy/.local/bin/claude /usr/local/bin/claude \\
  && mv /home/sandy/.local/share/claude /opt/claude-code \\
- && { /usr/local/bin/claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version || true; }
+ && { /usr/local/bin/claude --version | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/claude-code/.version \\
+      || { echo 'sandy: claude was installed but claude --version reports no version (see the error above)' >&2; exit 1; }; }
 # Gemini CLI
 RUN npm install -g @google/gemini-cli \\
  && mkdir -p /opt/gemini-cli \\
  && { npm list -g @google/gemini-cli --depth=0 2>/dev/null \\
-      | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/gemini-cli/.version || true; }
+      | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/gemini-cli/.version \\
+      || { echo 'sandy: gemini-cli was installed but npm reports no version for it' >&2; exit 1; }; }
 # Codex CLI
 RUN npm install -g @openai/codex \\
  && mkdir -p /opt/codex \\
- && { codex --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/codex/.version || true; }
+ && { codex --version | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/codex/.version \\
+      || { echo 'sandy: codex was installed but codex --version reports no version (see the error above)' >&2; exit 1; }; }
 # OpenCode
 RUN npm install -g opencode-ai \\
  && mkdir -p /opt/opencode \\
- && { opencode --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/opencode/.version || true; }
+ && { opencode --version | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/opencode/.version \\
+      || { echo 'sandy: opencode was installed but opencode --version reports no version (see the error above)' >&2; exit 1; }; }
 # Grok Build (xAI) — installer downloads the real binary to ~/.grok/downloads and
 # leaves only symlinks in ~/.grok/bin (tmpfs home at runtime); resolve + relocate.
 RUN set -eu; \\
@@ -8449,7 +8458,8 @@ RUN set -eu; \\
     { [ -n "\$_real" ] && [ -f "\$_real" ]; } || { echo 'sandy: grok binary not found after install' >&2; exit 1; }; \\
     install -m 0755 "\$_real" /usr/local/bin/grok; \\
     mkdir -p /opt/grok; \\
-    grok --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/grok/.version || true
+    grok --version | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/grok/.version \\
+      || { echo 'sandy: grok was installed but grok --version reports no version (see the error above)' >&2; exit 1; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
@@ -13524,9 +13534,25 @@ if [ ! -f "$HASH_FILE" ] || [ "$(cat "$HASH_FILE")" != "$BUILD_HASH" ] || [ "$BA
 fi
 
 # Check for newer agent version (skip if already rebuilding)
+# An image whose agent version file is EMPTY holds an agent that installed but
+# cannot run: before 2.8.0 every version probe ended in `|| true`, so a publish
+# race (npm serving a release before its per-platform binary package exists)
+# shipped a broken agent and, because an empty version never compared as
+# older, no later launch rebuilt it. The build now fails on an empty version,
+# so only an image built before that can trip this, and a rebuild cannot loop.
+# Empty means `cat` SUCCEEDED with no output and the file is not non-empty: a
+# failed probe (no docker, no file) is unknown, never broken.
+# $1 cat's exit status, $2 its output, $3 the version file, $4 the agent's name
+_sandy_agent_version_empty() {
+    [ "$1" -eq 0 ] && [ -z "$2" ] || return 1
+    docker run --rm --entrypoint test "$IMAGE_NAME" -s "$3" >/dev/null 2>&1 && return 1
+    warn "$4 in $IMAGE_NAME reports no version (its install failed); rebuilding."
+    return 0
+}
 _check_claude_update() {
-    local inst latest
-    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/claude-code/.version 2>/dev/null || true)"
+    local inst latest rc=0
+    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/claude-code/.version 2>/dev/null)" || rc=$?
+    _sandy_agent_version_empty "$rc" "$inst" /opt/claude-code/.version "Claude Code" && return 0
     latest="$(curl -fsSL --max-time 5 https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null || true)"
     if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Claude Code update available: $inst → $latest"
@@ -13535,8 +13561,9 @@ _check_claude_update() {
     return 1
 }
 _check_gemini_update() {
-    local inst latest
-    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/gemini-cli/.version 2>/dev/null || true)"
+    local inst latest rc=0
+    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/gemini-cli/.version 2>/dev/null)" || rc=$?
+    _sandy_agent_version_empty "$rc" "$inst" /opt/gemini-cli/.version "Gemini CLI" && return 0
     latest="$(curl -fsSL --max-time 5 'https://registry.npmjs.org/@google/gemini-cli/latest' 2>/dev/null \
         | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
         | sed -E 's/.*"([^"]+)"$/\1/' || true)"
@@ -13547,14 +13574,17 @@ _check_gemini_update() {
     return 1
 }
 _check_codex_update() {
-    local inst latest
-    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/codex/.version 2>/dev/null || true)"
-    # Use /releases/latest — upstream flags the stable release; codex ships
-    # 30+ releases/month, most marked as prereleases, and /releases/latest
-    # filters them correctly without sandy inventing its own policy.
-    latest="$(curl -fsSL --max-time 5 'https://api.github.com/repos/openai/codex/releases/latest' 2>/dev/null \
-        | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
-        | sed -E 's/.*"rust-v?([0-9][^"]*)"$/\1/' || true)"
+    local inst latest rc=0
+    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/codex/.version 2>/dev/null)" || rc=$?
+    _sandy_agent_version_empty "$rc" "$inst" /opt/codex/.version "Codex CLI" && return 0
+    # Ask npm, which is what the build installs from. Its `latest` dist-tag
+    # carries only stable releases (prereleases go to `alpha`). This used to
+    # ask GitHub's releases/latest, which announces a release minutes before
+    # npm serves it: in that window every launch saw an update, rebuilt
+    # --no-cache, reinstalled the old version from npm, and did it again.
+    latest="$(curl -fsSL --max-time 5 'https://registry.npmjs.org/@openai/codex/latest' 2>/dev/null \
+        | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
+        | sed -E 's/.*"([^"]+)"$/\1/' || true)"
     if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
         info "Codex CLI update available: $inst → $latest"
         return 0
@@ -13562,8 +13592,9 @@ _check_codex_update() {
     return 1
 }
 _check_opencode_update() {
-    local inst latest
-    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/opencode/.version 2>/dev/null || true)"
+    local inst latest rc=0
+    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/opencode/.version 2>/dev/null)" || rc=$?
+    _sandy_agent_version_empty "$rc" "$inst" /opt/opencode/.version "OpenCode" && return 0
     latest="$(curl -fsSL --max-time 5 'https://registry.npmjs.org/opencode-ai/latest' 2>/dev/null \
         | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
         | sed -E 's/.*"([^"]+)"$/\1/' || true)"
