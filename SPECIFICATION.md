@@ -219,7 +219,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 | `GOOGLE_CLOUD_PROJECT` | passive | unset | 0.9.0 | stable | Google Cloud project for Vertex AI. |
 | `GOOGLE_CLOUD_LOCATION` | passive | unset | 0.9.0 | stable | Google Cloud location for Vertex AI. |
 | `GOOGLE_GENAI_USE_VERTEXAI` | passive | unset | 0.9.0 | stable | Use Vertex AI backend for Gemini. |
-| `CODEX_MODEL` | passive | unset | 0.10.0 | stable | Codex model override. |
+| `CODEX_MODEL` | passive | unset | 0.10.0 | stable | Codex model override, passed as codex -m. Unset: codex uses its own default model (sandy pins none since 2.8.0). |
 | `SANDY_CODEX_AUTH` | passive | `auto` | 0.10.0 | stable | Codex credential probe strategy. |
 | `OPENCODE_MODEL` | passive | unset | 0.12.0 | stable | OpenCode model override (provider/model format, e.g. 'anthropic/claude-sonnet-4'). |
 | `SANDY_OPENCODE_AUTH` | passive | `auto` | 0.12.0 | stable | OpenCode credential probe strategy. |
@@ -407,7 +407,6 @@ Whenever `gemini` is in `SANDY_AGENT`, sandy creates `gemini/` and its `commands
 For `SANDY_AGENT=codex`, sandy creates `codex/` and seeds `codex/config.toml` (first run only; the top-level `sandbox_mode` is then value-checked and repaired on every launch — see C.7b) with:
 
 ```toml
-model = "gpt-5.5"
 sandbox_mode = "danger-full-access"
 
 [notice]
@@ -418,9 +417,9 @@ hide_rate_limit_model_nudge = true
 hide_world_writable_warning = true
 ```
 
-The `model = "gpt-5.5"` line sets a stable default model; users can override via `CODEX_MODEL` env var. The `sandbox_mode = "danger-full-access"` line is required — codex's Landlock sandbox does not nest cleanly inside sandy's Docker container. Sandy provides the outer isolation, and the CLI is additionally invoked with `--sandbox danger-full-access` as belt-and-suspenders in `build_codex_cmd`. The `[notice]` block suppresses first-run prompts; all five documented keys are seeded even if codex adds more over time.
+**No model is pinned (2.8.0)**: codex uses its own default model, so a sandbox never stays on a model OpenAI is retiring until sandy itself ships again. `CODEX_MODEL` pins one per launch (`codex -m`), and a `model` line the user writes in `config.toml` is kept. The `sandbox_mode = "danger-full-access"` line is required — codex's Landlock sandbox does not nest cleanly inside sandy's Docker container. Sandy provides the outer isolation, and the CLI is additionally invoked with `--sandbox danger-full-access` as belt-and-suspenders in `build_codex_cmd`. The `[notice]` block suppresses first-run prompts; all five documented keys are seeded even if codex adds more over time.
 
-**One-shot model migration**: existing sandboxes seeded with the old default (`model = "gpt-5.4"`) are auto-bumped to `gpt-5.5` on next launch. The migration matches the exact previous default line — any user-customized model (anything other than `"gpt-5.4"`) is preserved untouched.
+**Un-pin migration (2.8.0)**: an existing sandbox still carrying sandy's former pin loses it on its next launch. The step removes only an exact top-level `model = "gpt-5.4"` or `model = "gpt-5.5"` line, before the first `[section]` (a `[profiles.*]` model is the user's), and only in a file that carries sandy's seed header (`# Written by sandy on first launch`). It announces the removal in one info line. Any other model line, or a file sandy did not seed, is left alone. Like every launch-time write here it goes through the staged copy (#400). Guarded by `run-tests.sh` §200.
 
 The `[projects."<workspace>"] trust_level = "trusted"` entry is **appended at session start by `user-setup.sh`** (not at host-time) because it needs the container-side `$SANDY_WORKSPACE` path. Re-launches are idempotent: the entry is only appended if a matching line is not already present.
 
@@ -492,7 +491,7 @@ Contents:
 - synthkit deps (libpango/cairo/gdk-pixbuf) + synthkit itself (so `md2pdf`, `md2doc`, `md2html`, `md2email` are on PATH)
 - `COPY`: entrypoint.sh, user-setup.sh, tmux.conf
 
-Used only when `SANDY_AGENT=codex`. The update check hits `https://api.github.com/repos/openai/codex/releases/latest` (not `/releases`) — upstream flags stable releases there, so sandy inherits their judgment rather than inventing a prerelease filter. The tag name `rust-vX.Y.Z` is stripped with `sed -E 's/.*"rust-v?([0-9][^"]*)"$/\1/'`. On parse failure the check returns no-update (stale but working).
+Used only when `SANDY_AGENT=codex`. The update check reads the npm registry's `latest` dist-tag for `@openai/codex` (stable releases only; prereleases go to `alpha`), since npm is what the build installs from (2.8.0). On parse failure the check returns no-update (stale but working).
 
 ### Phase 2 (alt): OpenCode Image (`sandy-opencode`)
 
@@ -1304,9 +1303,15 @@ On each launch, sandy checks the installed Claude Code version (cached at `/opt/
 
 ### Gemini / Codex Updates
 
-For `SANDY_AGENT=gemini`, `_check_gemini_update` compares the in-image `gemini --version` against the npm registry's latest tag for `@google/gemini-cli`.
+For `SANDY_AGENT=gemini`, `_check_gemini_update` compares the in-image `/opt/gemini-cli/.version` (from `npm list -g`) against the npm registry's latest tag for `@google/gemini-cli`.
 
-For `SANDY_AGENT=codex`, `_check_codex_update` compares the in-image `/opt/codex/.version` against `https://api.github.com/repos/openai/codex/releases/latest`. The tag format is `rust-vX.Y.Z`; sandy strips the prefix with `sed -E 's/.*"rust-v?([0-9][^"]*)"$/\1/'`. The `/releases/latest` endpoint returns only the release GitHub marks as "latest" (excludes prereleases by convention), so sandy inherits upstream's stable flagging instead of inventing its own policy — important because codex ships 30+ releases/month, most as prereleases. On parse failure the check returns no-update (stale but working, logged once).
+For `SANDY_AGENT=codex`, `_check_codex_update` compares the in-image `/opt/codex/.version` against the npm registry's `latest` dist-tag for `@openai/codex` (`https://registry.npmjs.org/@openai/codex/latest`), which carries stable releases only; codex's many prereleases go to the `alpha` tag. Before 2.8.0 it asked GitHub's `releases/latest`, which announces a release several minutes before npm serves it; in that window every launch saw an update, rebuilt `--no-cache`, reinstalled the old version from npm, and did it again. On parse failure the check returns no-update (stale but working).
+
+### Agent install verification (2.8.0)
+
+Every agent's install step fails the image build unless the agent reports a version (`<agent> --version`, or `npm list` for gemini-cli), and that version is written to `/opt/<agent>/.version`. The probes used to end in `|| true`, so an agent that installed but could not run shipped in a "successful" image. That happened on 2026-10-07: npm served `@openai/codex@0.161.0` about two minutes before its `linux-arm64` binary package (and twelve before `linux-x64`), npm silently skipped the missing optional dependency, and the codex pane failed with `Missing optional dependency @openai/codex-linux-arm64`. With the probe required, a rebuild during such a window fails, and an update-triggered rebuild then continues on the existing image (#218 Layer 2) and retries at the next launch. A first-ever build in that window fails the launch instead of shipping a broken agent.
+
+An image built before this can still carry an empty version file, and an empty version never compared as older, so no launch rebuilt it. Each `_check_<agent>_update` (claude, gemini, codex, opencode) now treats an empty version file as needing a rebuild (`_sandy_agent_version_empty`). Empty means `cat` succeeded with no output **and** `test -s` confirms the file is empty; a probe that fails (no docker, no file) is unknown and never forces a rebuild. Since a successful build can no longer write an empty file, this cannot loop. Guarded by §201.
 
 ### Sandy Self-Update
 
@@ -1618,8 +1623,8 @@ RUN HOME=/home/sandy su -s /bin/bash sandy -c \
     "curl -fsSL https://claude.ai/install.sh | bash" \
  && cp -L /home/sandy/.local/bin/claude /usr/local/bin/claude \
  && mv /home/sandy/.local/share/claude /opt/claude-code \
- && { /usr/local/bin/claude --version 2>/dev/null \
-    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' > /opt/claude-code/.version || true; }
+ && { /usr/local/bin/claude --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' > /opt/claude-code/.version \
+      || { echo 'sandy: claude was installed but claude --version reports no version (see the error above)' >&2; exit 1; }; }
 
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -1641,7 +1646,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 Key details:
 - Claude Code is installed as user `sandy`, then relocated to `/usr/local/bin/claude` (binary) and `/opt/claude-code` (data) so it survives the tmpfs overlay on `/home/sandy`.
 - `UV_TOOL_DIR=/opt/uv-tools` ensures synthkit's venv goes to an accessible location (not `/root/`).
-- Version is cached at `/opt/claude-code/.version` for update detection.
+- Version is cached at `/opt/claude-code/.version` for update detection. A missing version fails the build (2.8.0; see "Agent install verification").
 
 ### A.2b Dockerfile.codex (Phase 2, alt)
 
@@ -1658,7 +1663,8 @@ LABEL sandy.feature_entries=1
 # a prebuilt Rust binary per platform; Node is only the installation vehicle.
 RUN npm install -g @openai/codex \
  && mkdir -p /opt/codex \
- && { codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' > /opt/codex/.version || true; }
+ && { codex --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' > /opt/codex/.version \
+      || { echo 'sandy: codex was installed but codex --version reports no version (see the error above)' >&2; exit 1; }; }
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \
  && rm -rf /var/lib/apt/lists/*
@@ -1672,7 +1678,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 ```
 
 Key details:
-- Version is cached at `/opt/codex/.version` for update detection.
+- Version is cached at `/opt/codex/.version` for update detection. A missing version fails the build (2.8.0; see "Agent install verification").
 - synthkit deps and synthkit itself are baked in so `md2pdf`/`md2doc`/`md2html`/`md2email` are on PATH regardless of whether Step 7's skill-seeding fires (e.g., if `synthkit` isn't installed at user-setup time).
 
 ### A.3 Dockerfile.skills-base (Phase 2.5a)
@@ -2318,7 +2324,6 @@ Written to `$SANDBOX_DIR/codex/config.toml` on first launch of a new sandbox wit
 # Written by sandy on first launch. Safe to edit, but sandbox_mode must stay
 # "danger-full-access" — sandy provides outer isolation; codex's Landlock
 # sandbox does not nest cleanly in Docker containers.
-model = "gpt-5.5"
 sandbox_mode = "danger-full-access"
 
 [notice]
@@ -2910,7 +2915,7 @@ is the necessary exception for that destination check only. Thus `work/data` →
 `work/results` is refused when `work` is writable. Keep protected sources in a
 separate tree, outside writable mount sources. `--print-schema` publishes
 `manifest.submount_keys` and `submounts` in `manifest.top_level_keys`; consumers
-gate on membership, with `schema_version` still `4`. Guarded by §200, including
+gate on membership, with `schema_version` still `4`. Guarded by §202, including
 the full launch's mount-record-to-`-v` wiring and scratch-copy mutation checks.
 
 For example, with pre-existing `work/results` and `protected/results`:

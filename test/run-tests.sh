@@ -1830,10 +1830,10 @@ else
         fail "codex/config.toml sets sandbox_mode = danger-full-access"
     fi
 
-    if grep -q 'model = "gpt-5.5"' "$_CSEED_TMP/codex/config.toml" 2>/dev/null; then
-        pass "codex/config.toml sets default model = gpt-5.5"
+    if ! grep -q '^model *=' "$_CSEED_TMP/codex/config.toml" 2>/dev/null; then
+        pass "codex/config.toml pins no model (codex picks its own default, 2.8.0)"
     else
-        fail "codex/config.toml sets default model = gpt-5.5"
+        fail "codex/config.toml pins no model (codex picks its own default, 2.8.0)"
     fi
 
     _notice_count=$(grep -cE '^(hide_|"hide)' "$_CSEED_TMP/codex/config.toml" 2>/dev/null || echo 0)
@@ -1955,43 +1955,8 @@ else
     rm -rf "$_DF_TMP"
 fi
 
-# Update check sed regex: feed it sample tag_name JSON fragments and verify
-# the version is extracted correctly. This is the regex from _check_codex_update.
-# The real callsite uses `|| true` to fail-soft on pipeline failures; we do the
-# same here so empty/missing inputs don't trip `set -euo pipefail`.
-_codex_parse_tag() {
-    { echo "$1" \
-        | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' 2>/dev/null | head -1 \
-        | sed -E 's/.*"rust-v?([0-9][^"]*)"$/\1/'; } || true
-}
-
-_r="$(_codex_parse_tag '{"tag_name":"rust-v0.119.0","name":"foo"}')"
-if [ "$_r" = "0.119.0" ]; then
-    pass "update check parses rust-v0.119.0 → 0.119.0"
-else
-    fail "update check parses rust-v0.119.0 (got: $_r)"
-fi
-
-_r="$(_codex_parse_tag '{"tag_name":"rust-v1.0.0-beta.3"}')"
-if [ "$_r" = "1.0.0-beta.3" ]; then
-    pass "update check parses rust-v1.0.0-beta.3 → 1.0.0-beta.3"
-else
-    fail "update check parses rust-v1.0.0-beta.3 (got: $_r)"
-fi
-
-_r="$(_codex_parse_tag '')"
-if [ -z "$_r" ]; then
-    pass "update check returns empty on empty input (fail-soft)"
-else
-    fail "update check returns empty on empty input (got: $_r)"
-fi
-
-_r="$(_codex_parse_tag '{"message":"Not Found"}')"
-if [ -z "$_r" ]; then
-    pass "update check returns empty when tag_name absent (fail-soft)"
-else
-    fail "update check returns empty when tag_name absent (got: $_r)"
-fi
+# The codex update check's npm parsing is exercised against the real
+# function in §201.
 
 # Trust entry block: idempotent append on ~/.codex/config.toml.
 _TRUST_BLOCK="$(awk '
@@ -24638,18 +24603,192 @@ unset _S199_OUT
 
 # ============================================================
 echo ""
-echo "§200: protected feature submounts — source authority and launch wiring"
+echo "§200: an existing sandbox loses sandy's old codex model pin, and nothing the user chose"
+# ============================================================
+# 2.8.0 stopped seeding `model = "gpt-5.5"`: codex picks its own default, so a
+# sandbox never sits on a model OpenAI is retiring until sandy ships again.
+# Existing sandboxes still carry sandy's former pin (gpt-5.4 or gpt-5.5). Runs
+# the REAL codex seeding block (the same extraction as 28c) over a pre-seeded
+# config.toml, applies the staged copy as user-setup.sh does, and asserts
+# exactly which model lines survive.
+_S200_BLOCK="$(awk '/^if _sandy_agent_has codex; then$/ && !seen {seen=1; printing=1} printing {print} printing && /^fi$/ {exit}' "$SANDY_SCRIPT")"
+_S200_HLP="$(sed -n '/^# --- Host-to-container handoff (#400)/,/^# Merge JSON keys into a file/p' "$SANDY_SCRIPT" | sed '$d')"
+_S200_HDR='# Written by sandy on first launch. Safe to edit, but sandbox_mode must stay'
+# $1 = config.toml content -> the file after one launch, then "|INFO:<lines>"
+_s200() {
+    local d o
+    d="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$d/codex"; printf '%s' "$1" > "$d/codex/config.toml"
+    o="$(env -i PATH="$PATH" SANDBOX_DIR="$d" B="$_S200_BLOCK" H="$_S200_HLP" bash -c '
+        _i=""; info() { _i="$_i$*;"; }; warn() { :; }; error() { :; }
+        _sandy_agent_has() { [ "$1" = codex ]; }
+        SANDY_AGENT=codex
+        eval "$H"; _sandy_launch_id=t200   # after the helpers, which reset it
+        eval "$B"; _sandy_launch_apply_staged "$SANDBOX_DIR"
+        cat "$SANDBOX_DIR/codex/config.toml"; printf "|INFO:%s" "$_i"' 2>&1)"
+    rm -rf "$d"; printf '%s' "$o"
+}
+_S200_A="$(_s200 "$_S200_HDR
+model = \"gpt-5.5\"
+sandbox_mode = \"danger-full-access\"
+
+[notice]
+hide_full_access_warning = true
+")"
+check "§200(1) a sandy-seeded file loses its gpt-5.5 pin, keeps everything else, and says so" \
+    bash -c 'case "$1" in *"model = "*) exit 1 ;; esac; case "$1" in *"sandbox_mode = \"danger-full-access\""*"hide_full_access_warning"*"|INFO:"*"model pin"*) exit 0 ;; esac; exit 1' _ "$_S200_A"
+_S200_B="$(_s200 "$_S200_HDR
+model = \"gpt-5.4\"
+sandbox_mode = \"danger-full-access\"
+")"
+check "§200(2) the older gpt-5.4 pin goes too" \
+    bash -c 'case "$1" in *"model = "*) exit 1 ;; esac; exit 0' _ "$_S200_B"
+_S200_C="$(_s200 "$_S200_HDR
+model = \"o4-mini\"
+sandbox_mode = \"danger-full-access\"
+")"
+check "§200(3) a model the user chose is kept, silently" \
+    bash -c 'case "$1" in *"model = \"o4-mini\""*) ;; *) exit 1 ;; esac; case "$1" in *"model pin"*) exit 1 ;; esac; exit 0' _ "$_S200_C"
+_S200_D="$(_s200 "$_S200_HDR
+sandbox_mode = \"danger-full-access\"
+
+[profiles.fast]
+model = \"gpt-5.5\"
+")"
+check "§200(4) a gpt-5.5 inside a [profiles] section is the user's, and is kept" \
+    bash -c 'case "$1" in *"[profiles.fast]"*"model = \"gpt-5.5\""*) exit 0 ;; esac; exit 1' _ "$_S200_D"
+_S200_E="$(_s200 'model = "gpt-5.5"
+sandbox_mode = "danger-full-access"
+')"
+check "§200(5) a file sandy did not seed (no header) is left alone, gpt-5.5 included" \
+    bash -c 'case "$1" in *"model = \"gpt-5.5\""*) exit 0 ;; esac; exit 1' _ "$_S200_E"
+_S200_F="$(_s200 "$_S200_HDR
+model = \"gpt-5.5\"
+sandbox_mode = \"danger-full-access\"
+
+[profiles.fast]
+model = \"gpt-5.5\"
+")"
+check "§200(6) with both, only the top-level pin goes; the [profiles] one stays" \
+    bash -c 'n=$(printf "%s" "$1" | grep -c "^model = \"gpt-5.5\"$"); [ "$n" = 1 ] && case "$1" in *"[profiles.fast]"*"model = \"gpt-5.5\""*) exit 0 ;; esac; exit 1' _ "$_S200_F"
+unset _S200_BLOCK _S200_HLP _S200_HDR _S200_A _S200_B _S200_C _S200_D _S200_E _S200_F
+unset -f _s200 2>/dev/null || true
+
+
+echo "§201: an agent that installed but cannot run fails the build, and an image already broken that way heals"
+# ============================================================
+# 2026-10-07: npm served @openai/codex@0.161.0 before its linux-arm64 binary
+# package, npm skipped the missing optional dependency, and the codex pane
+# died with "Missing optional dependency". Every version probe ended in
+# `|| true`, so the build passed with an EMPTY /opt/codex/.version, and the
+# update checks treat an empty installed version as "no update", so nothing
+# rebuilt it. (A) runs every generated agent install step under sh with stub
+# binaries, a working agent and a broken one. (B) runs the real update checks
+# against stub docker/curl.
+_S201_T="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S201_T/sh" "$_S201_T/bin"
+for _f in generate_dockerfile generate_dockerfile_gemini generate_dockerfile_codex generate_dockerfile_grok generate_dockerfile_opencode generate_dockerfile_full; do
+    _S201_FN="$(sed -n "/^$_f() {/,/^}/p" "$SANDY_SCRIPT")"
+    env -i PATH="$PATH" SANDY_HOME="$_S201_T/sh" BASE_IMAGE_NAME=sandy-base FN="$_S201_FN" F="$_f" bash -c 'eval "$FN"; "$F"' >/dev/null 2>&1 || true
+done
+# Every logical RUN line that writes an agent version file, one per line.
+_S201_RUNS="$(cat "$_S201_T"/sh/Dockerfile*.new 2>/dev/null | awk '{ if (sub(/\\$/, "")) { buf = buf $0 " "; next } line = buf $0; buf = ""; if (line ~ /^RUN / && line ~ /\/opt\/[a-z-]+\/\.version/) print substr(line, 5) }')"
+_S201_N="$(printf '%s\n' "$_S201_RUNS" | grep -c . || true)"
+check "§201(A-pre) found the 10 agent install steps across the six agent Dockerfiles (got $_S201_N; a rename would make every (A) check vacuous)" \
+    test "$_S201_N" -eq 10
+# Stubs: package managers and file moves succeed; each agent binary works or
+# fails by S201_MODE, the way a missing platform package fails.
+for _b in claude codex opencode grok; do
+    printf '#!/bin/sh\nif [ "$S201_MODE" = good ]; then echo "%s 1.2.3"; else echo "Error: Missing optional dependency" >&2; exit 1; fi\n' "$_b" > "$_S201_T/bin/$_b"
+done
+cat > "$_S201_T/bin/npm" <<'EOF'
+#!/bin/sh
+case "$1" in list) if [ "$S201_MODE" = good ]; then echo "/usr/lib"; echo "+-- @google/gemini-cli@1.2.3"; else echo "/usr/lib"; echo "+-- (empty)"; fi ;; esac
+exit 0
+EOF
+printf '#!/bin/sh\nexit 0\n' > "$_S201_T/bin/su"; cp "$_S201_T/bin/su" "$_S201_T/bin/cp"; cp "$_S201_T/bin/su" "$_S201_T/bin/curl"; cp "$_S201_T/bin/su" "$_S201_T/bin/install"
+printf '#!/bin/sh\nfor a; do last="$a"; done; mkdir -p "$last"\n' > "$_S201_T/bin/mv"
+printf '#!/bin/sh\necho "$S201_T/grokreal"\n' > "$_S201_T/bin/readlink"
+chmod +x "$_S201_T"/bin/*; : > "$_S201_T/grokreal"
+_S201_GOOD=0; _S201_BAD=0; _S201_FAILS=""
+while IFS= read -r _r; do
+    [ -n "$_r" ] || continue
+    _v="$(printf '%s' "$_r" | grep -oE '/opt/[a-z-]+/\.version' | head -1)"
+    _r="$(printf '%s' "$_r" | sed -e "s#/usr/local/bin/claude#claude#g" -e "s#/opt/#$_S201_T/opt/#g")"
+    for _m in good bad; do
+        rm -rf "$_S201_T/opt"; _rc=0
+        _err="$(env S201_MODE="$_m" S201_T="$_S201_T" PATH="$_S201_T/bin:$PATH" sh -c "$_r" 2>&1 >/dev/null)" || _rc=$?
+        if [ "$_m" = good ]; then
+            if [ "$_rc" -eq 0 ] && [ "$(cat "$_S201_T$_v" 2>/dev/null)" = 1.2.3 ]; then _S201_GOOD=$((_S201_GOOD + 1)); else _S201_FAILS="$_S201_FAILS good:$_v(rc=$_rc)"; fi
+        else
+            if [ "$_rc" -ne 0 ] && printf '%s' "$_err" | grep -q '^sandy: '; then _S201_BAD=$((_S201_BAD + 1)); else _S201_FAILS="$_S201_FAILS bad:$_v(rc=$_rc)"; fi
+        fi
+    done
+done <<EOF
+$_S201_RUNS
+EOF
+check "§201(A1) CONTROL: with a working agent, every install step succeeds and writes its version (${_S201_GOOD}/10;${_S201_FAILS:- ok})" \
+    test "$_S201_GOOD" -eq 10
+check "§201(A2) with an agent that installed but cannot run, every install step FAILS the build and says why (${_S201_BAD}/10;${_S201_FAILS:- ok})" \
+    test "$_S201_BAD" -eq 10
+
+# (B) The real update checks. Stub docker answers the version probe from
+# S201_CAT_RC/S201_CAT_OUT and the emptiness probe from S201_TEST_RC; stub
+# curl serves an npm `latest` document for S201_LATEST and logs each URL.
+_S201_FNS="$(sed -n '/^_ver_lt() {/,/^}/p' "$SANDY_SCRIPT"; awk '/^_sandy_agent_version_empty\(\) \{/ {on=1} on {print} on && /^_check_opencode_update\(\) \{/ {last=1} on && last && /^}$/ {exit}' "$SANDY_SCRIPT")"
+# $1 check function, then NAME=VALUE overrides -> "rc|warnings|urls". curl
+# runs inside a command substitution, so it logs URLs to a file.
+_s201() {
+    local fn="$1"; shift
+    : > "$_S201_T/urls"
+    env -i PATH="$PATH" FNS="$_S201_FNS" FN="$fn" S201_ULOG="$_S201_T/urls" S201_CAT_RC=0 S201_CAT_OUT="" S201_TEST_RC=1 S201_LATEST="" "$@" bash -c '
+        _w=""; info() { :; }; warn() { _w="$_w$*;"; }
+        IMAGE_NAME=sandy-test
+        docker() { case "$*" in *"--entrypoint cat"*) printf "%s" "$S201_CAT_OUT"; return "$S201_CAT_RC" ;; *"--entrypoint test"*) return "$S201_TEST_RC" ;; esac; return 0; }
+        curl() { local a; for a; do case "$a" in http*) printf "%s;" "$a" >> "$S201_ULOG" ;; esac; done; [ -z "$S201_LATEST" ] || printf "{\"name\":\"x\",\"version\":\"%s\",\"dist\":{}}" "$S201_LATEST"; }
+        eval "$FNS"
+        rc=0; "$FN" || rc=$?
+        printf "%s|%s|%s" "$rc" "$_w" "$(cat "$S201_ULOG")"' 2>&1
+}
+_S201_O="$(_s201 _check_codex_update)"
+check "§201(B1) an image whose codex version file is empty is rebuilt, with a warning (got: $_S201_O)" \
+    bash -c 'case "$1" in "0|"*"reports no version"*) exit 0 ;; esac; exit 1' _ "$_S201_O"
+_S201_ALL=""
+for _f in _check_claude_update _check_gemini_update _check_opencode_update; do
+    _S201_ALL="$_S201_ALL$_f=$(_s201 "$_f" | cut -d'|' -f1) "
+done
+check "§201(B2) ...and so is one whose claude, gemini or opencode version file is empty (got: $_S201_ALL)" \
+    test "$_S201_ALL" = "_check_claude_update=0 _check_gemini_update=0 _check_opencode_update=0 "
+_S201_O="$(_s201 _check_codex_update S201_TEST_RC=0)"
+check "§201(B3) empty output but the file is NOT empty (a docker that answers nothing) is not a broken image: no rebuild (got: $_S201_O)" \
+    bash -c 'case "$1" in "1|"*) exit 0 ;; esac; exit 1' _ "$_S201_O"
+_S201_O="$(_s201 _check_codex_update S201_CAT_RC=1)"
+check "§201(B4) a version probe that FAILED (no docker, no file) is unknown, never broken: no rebuild (got: $_S201_O)" \
+    bash -c 'case "$1" in "1|"*) exit 0 ;; esac; exit 1' _ "$_S201_O"
+_S201_O="$(_s201 _check_codex_update S201_CAT_OUT=0.160.1 S201_LATEST=0.161.0)"
+check "§201(B5) codex's update check asks npm, which the build installs from, not GitHub releases, and sees the update (got: $_S201_O)" \
+    bash -c 'case "$1" in "0||"*"registry.npmjs.org/@openai/codex/latest"*) case "$1" in *github*) exit 1 ;; esac; exit 0 ;; esac; exit 1' _ "$_S201_O"
+_S201_O="$(_s201 _check_codex_update S201_CAT_OUT=0.161.0 S201_LATEST=0.161.0)"
+check "§201(B6) ...and an image already on npm's latest is left alone (got: $_S201_O)" \
+    bash -c 'case "$1" in "1||"*) exit 0 ;; esac; exit 1' _ "$_S201_O"
+rm -rf "$_S201_T"
+unset _S201_T _S201_FN _S201_RUNS _S201_N _S201_GOOD _S201_BAD _S201_FAILS _S201_FNS _S201_O _S201_ALL _r _v _m _rc _err _b _f
+unset -f _s201 2>/dev/null || true
+
+
+# ============================================================
+echo ""
+echo "§202: protected feature submounts — source authority and launch wiring"
 # ============================================================
 # Standard-library driver only; no pip, image pulls or runtime access. Each
 # mutation starts from a fresh scratch copy of sandy. The real launch check
 # invokes the entire script against docker/curl stubs and records actual argv.
 if ! command -v python3 >/dev/null 2>&1; then
-    skip "§200 requires python3 (standard library only)"
+    skip "§202 requires python3 (standard library only)"
 elif ! command -v node >/dev/null 2>&1 && ! command -v jq >/dev/null 2>&1; then
-    skip "§200 needs either existing manifest projector (node or jq)"
+    skip "§202 needs either existing manifest projector (node or jq)"
 else
-_S200_D="$(cd "$(mktemp -d)" && pwd -P)"
-cat > "$_S200_D/check.py" <<'S200_PY'
+_S202_D="$(cd "$(mktemp -d)" && pwd -P)"
+cat > "$_S202_D/check.py" <<'S202_PY'
 import copy
 import json
 import os
@@ -24937,31 +25076,31 @@ elif mode == 'schema':
     assert 'submounts' in data['manifest']['top_level_keys']
     assert data['manifest']['submount_keys'] == ['parent', 'path', 'from', 'mode', 'agents']
 assert Path(sys.argv[1]).read_text() == original, 'repository source changed during verification'
-S200_PY
-check "§200(1) directories/files, slug expansion, boundary prefixes and selected profiles" \
-    python3 "$_S200_D/check.py" "$SANDY_SCRIPT" positive
-check "§200(2) all refusals, including work/work/data source writable through its parent" \
-    python3 "$_S200_D/check.py" "$SANDY_SCRIPT" negative
+S202_PY
+check "§202(1) directories/files, slug expansion, boundary prefixes and selected profiles" \
+    python3 "$_S202_D/check.py" "$SANDY_SCRIPT" positive
+check "§202(2) all refusals, including work/work/data source writable through its parent" \
+    python3 "$_S202_D/check.py" "$SANDY_SCRIPT" negative
 if command -v jq >/dev/null 2>&1; then
-    check "§200(3) jq fallback: the same positive/refusal corpus" \
-        python3 "$_S200_D/check.py" "$SANDY_SCRIPT" jq
+    check "§202(3) jq fallback: the same positive/refusal corpus" \
+        python3 "$_S202_D/check.py" "$SANDY_SCRIPT" jq
 else
-    skip "§200(3) jq unavailable"
+    skip "§202(3) jq unavailable"
 fi
 if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    check "§200(3-parity) both projectors emit byte-identical records for the full corpus" \
-        python3 "$_S200_D/check.py" "$SANDY_SCRIPT" parity
+    check "§202(3-parity) both projectors emit byte-identical records for the full corpus" \
+        python3 "$_S202_D/check.py" "$SANDY_SCRIPT" parity
 else
-    skip "§200(3-parity) both projectors required; missing projector mutations also skipped"
+    skip "§202(3-parity) both projectors required; missing projector mutations also skipped"
 fi
-check "§200(4) entire launch: emitted records become ordered parent and child -v argv" \
-    python3 "$_S200_D/check.py" "$SANDY_SCRIPT" launch
-check "§200(5) disable every submount decision on scratch copies and detect each mutation" \
-    python3 "$_S200_D/check.py" "$SANDY_SCRIPT" mutations
-check "§200(6) additive manifest capability, closed submount keys, schema_version still 4" \
-    python3 "$_S200_D/check.py" "$SANDY_SCRIPT" schema
-rm -rf "$_S200_D"
-unset _S200_D
+check "§202(4) entire launch: emitted records become ordered parent and child -v argv" \
+    python3 "$_S202_D/check.py" "$SANDY_SCRIPT" launch
+check "§202(5) disable every submount decision on scratch copies and detect each mutation" \
+    python3 "$_S202_D/check.py" "$SANDY_SCRIPT" mutations
+check "§202(6) additive manifest capability, closed submount keys, schema_version still 4" \
+    python3 "$_S202_D/check.py" "$SANDY_SCRIPT" schema
+rm -rf "$_S202_D"
+unset _S202_D
 fi
 
 
