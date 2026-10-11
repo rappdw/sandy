@@ -2,7 +2,7 @@
 
 Feature manifests: per-sandbox directories, mounts, supervised entries (relays), and re-provisioning. Part of the [sandy guides](README.md); back to the [project README](../../README.md).
 
-## Protected children of feature mounts (unreleased, #444)
+## Protected children of feature mounts (2.8.0, #444)
 
 A manifest can project read-only files or directories beneath a declared parent
 mount using `submounts`:
