@@ -973,7 +973,7 @@ Tools known to read sandy's machine-readable output. A consumer joins this list 
 
 ## Schema versioning
 
-- **Unreleased (#444):** `manifest.top_level_keys` gains `submounts`; the `manifest` object gains `submount_keys` (`["parent", "path", "from", "mode", "agents"]`), the closed input shape for protected children of feature mounts. Both changes are additive, so `schema_version` stays `4`. Capability-gate on key membership, rather than the Sandy version. Existing mount introspection reports the resulting parent/child binds; no new state field is introduced.
+- **`2.8.0` (#444):** `manifest.top_level_keys` gains `submounts`; the `manifest` object gains `submount_keys` (`["parent", "path", "from", "mode", "agents"]`), the closed input shape for protected children of feature mounts. Both changes are additive, so `schema_version` stays `4`. Capability-gate on key membership, rather than the Sandy version. Existing mount introspection reports the resulting parent/child binds; no new state field is introduced.
 
 - **`2.8.0` (decision 3, 2026-10-05):** every config key object gains `base_type` (`string` | `bool` | `int`), derived from `type`; see "Config field types" above. Additive, so `schema_version` stays `4`.
 - **`2.8.0` (decision 1, 2026-10-05):** one new `config.env_only_keys` entry, `SANDY_CHANNEL` (`release` | `dev`): which build `--upgrade` and `install.sh` install. Additive, so `schema_version` stays `4`.

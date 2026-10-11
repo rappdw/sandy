@@ -101,7 +101,7 @@ All introspection flags are **fast-path handlers**: they run before image builds
 
 | Flag | Behavior |
 |---|---|
-| `--print-schema` | Emit the static sandy schema: version, config keys (by tier with type/default/description), CLI flags, agents and their credential probe orders, protected path lists, skill packs, the feature-manifest **input** contract (`manifest.top_level_keys` / `manifest.mount_keys`, 2.1.0/#348; `manifest.receives_values`, 2.4.0/#380; `manifest.submount_keys`, unreleased/#444), schema compatibility declaration. Always exits 0. |
+| `--print-schema` | Emit the static sandy schema: version, config keys (by tier with type/default/description), CLI flags, agents and their credential probe orders, protected path lists, skill packs, the feature-manifest **input** contract (`manifest.top_level_keys` / `manifest.mount_keys`, 2.1.0/#348; `manifest.receives_values`, 2.4.0/#380; `manifest.submount_keys`, 2.8.0/#444), schema compatibility declaration. Always exits 0. |
 | `--print-state` | Emit runtime state: `sandy_home`, installed sandy images, per-sandbox metadata (`.sandy_created_version`, `.sandy_last_version`, size if cheaply obtainable), approval files (one per workspace hash), `docker_reachable` (bool), running sandy containers (filtered by image name prefix), `orphan_networks` (int, reap-eligible `sandy_*` network count), and — **full mode only** (#36, milestone 1.3.0) — `dangling_images` and `orphaned_containers` (ints; `null` in light mode even when real orphans exist, mirroring `image_stale`'s full-mode-only convention). When Docker is unreachable, `docker_reachable: false`, `running_containers: null`, `orphan_networks: null`, `dangling_images: null`, `orphaned_containers: null`. Always exits 0. |
 | `--validate-config PATH` | Parse a config file, classify it as privileged (path under `$SANDY_HOME/`) or passive (anywhere else), and emit `{schema_version, path, source_tier, errors[], warnings[], unknown_keys[], privileged_keys_requiring_approval[], approval_status, approval_file_path}`. Exits 1 if the file does not exist or the flag was called with no argument; exits 0 otherwise (a "pending" approval is not an error — it's the normal state before first interactive approval). |
 | `--print-version` | (1.7.0, #159) Emit `{schema_version, version, commit, full_version}` — a standalone version probe so a consumer (e.g. sandy-ui) can detect sandy's version without the chicken-and-egg of reading it out of `--print-schema`'s own payload. `commit` is `""` (not `null`) when unknown, matching `--print-schema`'s `sandy.commit` convention; both are computed by the shared `_sandy_commit_hash()` helper. `full_version` — not `version` — is the stable cache key: `version` alone stays unchanged (e.g. `"1.7.0-dev"`) across every commit on the dev/rc channel until the numbered release ships. Always exits 0. **Not recognized by pre-1.7.0 sandy** — the main parser forwards unknown flags to the wrapped agent rather than erroring, so probe with `--version` first (guaranteed `sandy <full_version>` format, safe on every version) and only call `--print-version` once that confirms 1.7.0+. |
@@ -2896,9 +2896,9 @@ Validation rules:
 
 Use case: tokens for user-installed MCP servers / agent tooling that sandy doesn't know about (Home Assistant API, internal corp APIs, etc.). Without this, users would have to hardcode tokens in `<workspace>/.mcp.json` (less secret-management-friendly) or fork the sandy script.
 
-### E.11c Protected feature submounts (unreleased, #444)
+### E.11c Protected feature submounts (2.8.0, #444)
 
-**Protected submounts (unreleased, #444).** Optional `submounts` projects a
+**Protected submounts (2.8.0, #444).** Optional `submounts` projects a
 read-only file or directory beneath a declared feature mount. Entries require
 `parent` (a declared mount name), relative `path` (beneath its computed container
 destination), and feature-relative `from`; `${slug}` is expanded. `mode` defaults

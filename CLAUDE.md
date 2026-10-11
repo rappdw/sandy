@@ -709,7 +709,7 @@ The rule is now a property of the path, not a containment test: **no component b
 
 ### Features: one manifest per feature (2.0.0, `docs/design/FEATURE-MANIFEST.md`)
 
-**Protected submounts (unreleased, #444).** Optional `submounts` projects a
+**Protected submounts (2.8.0, #444).** Optional `submounts` projects a
 read-only file or directory beneath a declared feature mount. Entries require
 `parent` (a declared mount name), relative `path` (beneath its computed container
 destination), and feature-relative `from`; `${slug}` is expanded. `mode` defaults
