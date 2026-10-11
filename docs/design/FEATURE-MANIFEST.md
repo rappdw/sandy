@@ -31,7 +31,7 @@ $SANDY_HOME/features/<feature>/
   selected.json                written by sandy; read-only to everyone else
 ```
 
-A manifest declares `schema`, `sandboxes`, `agents`, `create`, `mounts`, `entry`, `expose`, (2.1.0) `agent_args` and (2.4.0) `receives`. `--print-schema` publishes that list as `manifest.top_level_keys` so a consumer can gate on **membership** rather than on a sandy version — see §9.
+A manifest declares `schema`, `sandboxes`, `agents`, `create`, `mounts`, `entry`, `expose`, (2.1.0) `agent_args` and (2.4.0) `receives`, with optional protected `submounts`. `--print-schema` publishes that list as `manifest.top_level_keys` so a consumer can gate on **membership** rather than on a sandy version — see §9.
 
 `$SANDY_HOME` is already the privileged config root, so the whole tree is **privileged by construction of where it lives** — a repository cannot reach it. That is the same argument that carries `.handoff-enabled`, `agent-args.<agent>` and `relay-bin/`, and it is why no new config tier is needed.
 
@@ -236,3 +236,41 @@ Sandy detects this at the host, rather than leaving it to `--print-state` alone:
 **Recorded, not just resolved.** `/etc/sandy-session.json`'s `cross_session_inbound_source` names *why* the resolved value is what it is — `explicit`, `feature:<name>` (the first declaring feature in sorted order), or `default` (JSON `null` when claude was not selected, mirroring `cross_session_inbound`'s own null convention) — so a run's receive posture is provable after the fact without re-deriving it from the manifest tree. (`relay-legacy` was a valid value only in markers written by 2.4.x/2.5.x sandy, for the now-removed legacy path above.)
 
 **Projector and schema surface, same as every other key.** Both projectors (node `RECEIVES`, jq `receives_known`) and the shell copy (`_sandy_fm_receives_known`, published as `--print-schema`'s `manifest.receives_values`) are held to byte-identical output — the same discipline `§135(20)` polices for the rest of the manifest, one clause later (`test/run-tests.sh §173`).
+
+
+## Protected children of feature mounts
+
+Capability-gate on `manifest.top_level_keys` containing `submounts` in
+`--print-schema`; `manifest.submount_keys` publishes its closed entry shape.
+Older launchers reject the unknown key. This extension has no mailbox or model
+vocabulary. A writable parent may contain protected read-only files/directories:
+
+```json
+{
+  "mounts": [{"name":"work","from":"instances/${slug}","mode":"rw"}],
+  "submounts": [
+    {"parent":"work","path":"results","from":"protected/${slug}/results"},
+    {"parent":"work","path":"settings.toml","from":"payload/settings.toml","agents":["codex"]}
+  ]
+}
+```
+
+Each child requires `parent`, relative `path` and feature-relative `from`.
+`${slug}` is expanded by Sandy. `mode` defaults to and must be `ro`. Optional
+`agents` is a distinct list of known agent names; absent/empty applies to every
+selected agent. A profile matching only part of a multi-agent selection refuses
+launch. No caller supplies an absolute sandbox destination.
+
+Both source and destination must already exist as regular files or directories
+of the same type; Sandy never asks Docker to create a destination stub.
+Parents precede child binds. Missing sources, escaping paths, symlink components,
+duplicate/overlapping child destinations and writable aliases to protected
+sources fail preflight. Files are supported as well as directories. Provision directory destinations with `create`; provision regular file
+destinations before launch. All parent components must exist.
+A protected source must be outside every writable mount source, including its
+parent, and must not contain one. Canonical paths are compared in both
+directions. Other writable mounts must also neither contain nor lie inside the
+child destination. For example, `work/data` cannot be projected read-only onto
+`work/results` while `work` is writable: `work/data` remains a writable alias. Resolved mounts
+appear through the existing introspection mount list. Node and jq projections
+are tested for parity on Linux and macOS without a runtime.

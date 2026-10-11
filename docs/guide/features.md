@@ -2,6 +2,33 @@
 
 Feature manifests: per-sandbox directories, mounts, supervised entries (relays), and re-provisioning. Part of the [sandy guides](README.md); back to the [project README](../../README.md).
 
+## Protected children of feature mounts (unreleased, #444)
+
+A manifest can project read-only files or directories beneath a declared parent
+mount using `submounts`:
+
+```json
+{
+  "mounts": [{"name":"work","from":"work","mode":"rw"}],
+  "submounts": [{"parent":"work","path":"results","from":"protected/results"}]
+}
+```
+
+Provision both `work/results` and `protected/results` before launch. Source and
+destination must exist as regular files or directories of the same type; Sandy
+never creates a destination stub. A protected source must be outside every
+writable mount source, including the parent, and must not contain one. Keeping
+results at `work/data` and mounting them onto `work/results` is therefore refused:
+the writable parent would still expose `work/data`.
+
+`mode` defaults to and must be `ro`; optional `agents` selects distinct known
+agent names. A partial match in a multi-agent container refuses launch. Paths are
+relative and `${slug}` is expanded; destinations remain computed by Sandy.
+Traversal, symlinks, duplicate/overlapping children and alternate writable routes
+to the destination are refused. Capability-gate on `submounts` in
+`--print-schema`'s `manifest.top_level_keys`; `manifest.submount_keys` publishes
+the closed entry shape. See [the full manifest contract](../design/FEATURE-MANIFEST.md#protected-children-of-feature-mounts).
+
 ## Features (`$SANDY_HOME/features/<name>/feature.json`)
 
 A **feature** is something you deploy into sandboxes that is not sandy's — a connector, a fleet agent, a shared toolchain. It lives in one directory with a manifest that says which sandboxes get it and what they get:
