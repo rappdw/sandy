@@ -51,7 +51,11 @@ trap finish EXIT
 
 start() {
     say "sandy --start ($1)"
-    if ! "$SANDY" --start --workspace "$WS" > "$WS.start.$1.log" 2>&1; then
+    # --new: the pane must NOT `claude --continue`. Run 3 showed it reopening
+    # the background session's transcript (the newest one in the workspace),
+    # which then made every resume start a copy. The real feature runs
+    # `claude agents` in the pane instead.
+    if ! "$SANDY" --start --new --workspace "$WS" > "$WS.start.$1.log" 2>&1; then
         echo "FATAL: --start failed; its output:"; tail -40 "$WS.start.$1.log"; exit 2
     fi
     echo "started"
@@ -81,7 +85,7 @@ process.stdin.on("data", d => s += d).on("end", () => {
   let a = [];
   try { a = JSON.parse(s); } catch (e) { console.log("UNPARSEABLE"); return; }
   for (const j of a) if (j.name === process.argv[2])
-    console.log([j.sessionId, j.id || "-", j.kind || "-", j.state || j.status || "-"].join(" "));
+    console.log([j.sessionId, j.id || "-", j.kind || "-", j.state || j.status || "-", j.pid ? "pid=" + j.pid : "nopid"].join(" "));
 });
 JS
 sel() { X "claude agents --json --all 2>/dev/null | node $(printf %q "$WS/.spike-sel.js") $(printf %q "$NAME")" 2>/dev/null; }
@@ -134,15 +138,20 @@ relaunch() {
 }
 # Reading: same id and running = RESUMED; a second entry or a "copy" message = COPY.
 reading() {  # $1 label, $2 output file
-    local r n; r="$(settle)"; n="$(printf '%s\n' "$r" | grep -c .)"
+    local r; r="$(settle)"
     echo "named jobs after $1:"; printf '%s\n' "$r"
     echo "raw agents --json --all:"; X 'claude agents --json --all 2>&1' | head -c 4000; echo
     echo "jobs/$SHORT/state.json now:"; head -c 1500 "$SB/claude/jobs/$SHORT/state.json" 2>&1; echo
+    # Judged on LIVE processes (entries with a pid) carrying the name: every
+    # one must be running $ID. A live one on another sessionId is a copy.
+    local live other
+    live="$(printf '%s\n' "$r" | grep ' pid=' || true)"
+    other="$(printf '%s\n' "$live" | grep -v "^$ID " | grep . || true)"
     if grep -qi 'copy' "$2"; then echo "READING $1: COPY (it said so)"
-    elif grep -qi "can.t open\|another terminal" "$2"; then echo "READING $1: BLOCKED (thinks the session is open elsewhere)"
-    elif [ "$n" -gt 1 ]; then echo "READING $1: COPY? ($n entries carry the name; see raw)"
-    elif printf '%s\n' "$r" | grep -q "^$ID "; then echo "READING $1: SAME ID ($ID), state $(printf '%s\n' "$r" | awk '{print $4}')"
-    else echo "READING $1: UNCLEAR, read the raw output"; fi
+    elif grep -qi "can.t open\|another terminal\|open in another" "$2"; then echo "READING $1: BLOCKED (thinks the session is open elsewhere)"
+    elif [ -n "$other" ]; then echo "READING $1: COPY (a live process carries the name on another session id: $other)"
+    elif [ -n "$live" ]; then echo "READING $1: SAME ID ($ID) and live"
+    else echo "READING $1: NOT LIVE (no process is running $ID; read the raw output)"; fi
 }
 
 # Run 2 (2026-10-12, 2.1.296): a resume WITH flags always starts a copy
