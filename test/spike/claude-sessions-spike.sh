@@ -127,25 +127,41 @@ relaunch() {
     say "relaunch: --stop then --start ($1)"
     "$SANDY" --stop --workspace "$WS" > /dev/null 2>&1 || true
     start "$1"
-    echo "named jobs in the new container, before anything:"; sel
+    echo "claude/ top level, sessions/ and jobs/ in the new container, before anything:"
+    ls -la "$SB/claude" "$SB/claude/sessions" 2>&1 | head -50
+    find "$SB/claude/jobs" -type f 2>/dev/null | sed "s|$SB/||"
+    echo "raw agents --json --all:"; X 'claude agents --json --all 2>&1' | head -c 4000; echo
 }
 # Reading: same id and running = RESUMED; a second entry or a "copy" message = COPY.
 reading() {  # $1 label, $2 output file
     local r n; r="$(settle)"; n="$(printf '%s\n' "$r" | grep -c .)"
     echo "named jobs after $1:"; printf '%s\n' "$r"
+    echo "raw agents --json --all:"; X 'claude agents --json --all 2>&1' | head -c 4000; echo
+    echo "jobs/$SHORT/state.json now:"; head -c 1500 "$SB/claude/jobs/$SHORT/state.json" 2>&1; echo
     if grep -qi 'copy' "$2"; then echo "READING $1: COPY (it said so)"
-    elif [ "$n" -gt 1 ]; then echo "READING $1: COPY ($n jobs carry the name)"
+    elif grep -qi "can.t open\|another terminal" "$2"; then echo "READING $1: BLOCKED (thinks the session is open elsewhere)"
+    elif [ "$n" -gt 1 ]; then echo "READING $1: COPY? ($n entries carry the name; see raw)"
     elif printf '%s\n' "$r" | grep -q "^$ID "; then echo "READING $1: SAME ID ($ID), state $(printf '%s\n' "$r" | awk '{print $4}')"
     else echo "READING $1: UNCLEAR, read the raw output"; fi
 }
 
+# Run 2 (2026-10-12, 2.1.296): a resume WITH flags always starts a copy
+# ("keeps its own saved options"); respawn was blocked by an "interactive"
+# entry left over from the previous container. So: resume with NO flags.
 relaunch 2
-say "M2a: claude --bg --resume <full id> in the new container"
-X "claude --bg --resume $ID $bg_args 'Reply with exactly the word: ok-2'" > "$WS.m2a.out" 2>&1; cat "$WS.m2a.out"
-reading M2a "$WS.m2a.out"
+say "M2c: claude --bg --resume <full id>, NO flags, NO prompt"
+X "claude --bg --resume $ID" > "$WS.m2c.out" 2>&1; cat "$WS.m2c.out"
+reading M2c "$WS.m2c.out"
 
 relaunch 3
-say "M2b: claude respawn <short id> in the new container"
+say "M2d: claude --bg --resume <full id> 'prompt', NO flags (the On resume text)"
+X "claude --bg --resume $ID 'Reply with exactly the word: resumed'" > "$WS.m2d.out" 2>&1; cat "$WS.m2d.out"
+reading M2d "$WS.m2d.out"
+echo "last lines of the transcript (did the prompt land in the SAME conversation?):"
+tail -n 4 "$(find "$SB/claude/projects" -name "$ID.jsonl" | head -1)" 2>/dev/null | cut -c1-400
+
+relaunch 4
+say "M2b: claude respawn <short id>"
 X "claude respawn $SHORT" > "$WS.m2b.out" 2>&1; cat "$WS.m2b.out"
 reading M2b "$WS.m2b.out"
 
