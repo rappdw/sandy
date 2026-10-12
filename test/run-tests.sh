@@ -25138,6 +25138,8 @@ check "§203(3) SANDY_SKIP_PERMISSIONS=false -> no approval override, codex keep
     bash -c '[ "$1" = "--sandbox danger-full-access" ] && [ "$2" = "resume --sandbox danger-full-access" ]' _ "$(_s203_argv 'SANDY_SKIP_PERMISSIONS=false')" "$(_s203_argv 'SANDY_SKIP_PERMISSIONS=false' --resume)"
 check "§203(4) headless codex exec never carries -a/--ask-for-approval (exec rejects it)" \
     bash -c 'case "$1" in "exec --sandbox danger-full-access --skip-git-repo-check"*) case "$1" in *ask-for-approval*|*" -a "*) exit 1 ;; esac ;; *) exit 1 ;; esac' _ "$(_s203_argv '_sandy_is_headless=true' -p hello)"
+check "§203(5) an operator's own approval choice is kept, never doubled (codex rejects a second -a)" \
+    bash -c '[ "$1" = "--sandbox danger-full-access -a on-request" ] && [ "$2" = "--sandbox danger-full-access --ask-for-approval=never" ] && [ "$3" = "--sandbox danger-full-access --dangerously-bypass-approvals-and-sandbox" ]' _ "$(_s203_argv '' -a on-request)" "$(_s203_argv '' --ask-for-approval=never)" "$(_s203_argv '' --dangerously-bypass-approvals-and-sandbox)"
 rm -rf "$_S203_D"
 unset _S203_FN _S203_D
 

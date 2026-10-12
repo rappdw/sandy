@@ -954,7 +954,17 @@ build_codex_cmd() {
         # such flag and never prompts, so headless is left alone. Deliberately
         # not --dangerously-bypass-approvals-and-sandbox: that also overrides
         # sandbox_mode, and the two settings stay separately visible this way.
-        if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+        # An operator who already passes an approval choice (SANDY_AGENT_ARGS,
+        # agent-args.codex, a feature's agent_args, the command line) keeps
+        # it: codex refuses a second -a ("cannot be used multiple times"), so
+        # adding ours would stop codex from starting at all.
+        local _cx_ap=false a
+        for a in "$@"; do
+            case "$a" in
+                -a|-a?*|--ask-for-approval|--ask-for-approval=*|--dangerously-bypass-approvals-and-sandbox) _cx_ap=true ;;
+            esac
+        done
+        if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ] && [ "$_cx_ap" = "false" ]; then
             cmd+=" --ask-for-approval never"
         fi
     fi
