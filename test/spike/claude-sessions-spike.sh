@@ -20,6 +20,21 @@
 #   M2b Whether `claude respawn <id>` is the native way to bring such a
 #       failed job back in a new container, same id.
 #
+# RESULTS, run 5 (2026-10-12, Claude Code 2.1.296, macOS host):
+#   M1  The name is in jobs/<short>/state.json (`name`, `nameSource: user`,
+#       `sessionId`, `respawnFlags`) and in the transcript as
+#       {"type":"custom-title","customTitle":...} + {"type":"agent-name",...}.
+#   M2  After a relaunch, `claude --bg --resume <full id> '<prompt>'` with NO
+#       flags wakes the session "with its saved options" and the prompt lands
+#       in the SAME transcript. Any flag makes a copy ("keeps its own saved
+#       options"), and so does resuming a session that is live (including one
+#       the pane's `claude --continue` reopened). Flags are frozen at creation.
+#       A flag-less resume with no prompt wakes it idle. `respawn` wakes it
+#       too, but a prompted resume after that is a copy (it is live by then).
+#   M3  agents --json carries sessionId and name. A woken process's own
+#       entry shows a TRANSIENT sessionId until it takes a prompt, so key
+#       readiness on the job `id` plus a pid, not on that entry's sessionId.
+#
 # The fourth unknown (a per-session --settings refuse beside a shared accept)
 # is covered by test/measure-settings-inbound.sh Q1/Q2; re-run that too.
 #
