@@ -69,7 +69,11 @@ finish() {
 }
 trap finish EXIT
 
-X() { "$SANDY" --exec --workspace "$WS" -- bash -c "$1"; }
+# stdin from /dev/null, and \r stripped: `sandy --exec` allocates a TTY when its
+# stdin is a terminal (docker exec -t), and a TTY ends every line with \r\n.
+# The first host run printed "alpha: <id> live" and then FAILED comparing it
+# against exactly that string, because the value carried an invisible \r.
+X() { "$SANDY" --exec --workspace "$WS" -- bash -c "$1" </dev/null | tr -d '\r'; }
 sbx() { for d in "$SANDY_HOME_DIR"/sandboxes/named-sess-*; do [ -d "$d" ] && { printf '%s\n' "$d"; return 0; }; done; return 1; }
 # "<sessionId> <pid-or-none>" for the background job named $1, read with the
 # container's node from the workspace (mounted at the same path, outside $HOME).
