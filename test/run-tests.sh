@@ -25116,7 +25116,6 @@ fi
 
 # ============================================================
 echo "§203: SANDY_SKIP_PERMISSIONS reaches codex as --ask-for-approval never (interactive only)"
-# =====================================================
 # ============================================================
 # Codex full access is two settings: sandbox_mode AND the approval policy.
 # Sandy set only the first, so codex kept its default on-request policy and
@@ -25153,7 +25152,9 @@ check "§203(5) an operator's own approval choice is kept, never doubled (codex 
     bash -c '[ "$1" = "--sandbox danger-full-access -a on-request" ] && [ "$2" = "--sandbox danger-full-access --ask-for-approval=never" ] && [ "$3" = "--sandbox danger-full-access --dangerously-bypass-approvals-and-sandbox" ]' _ "$(_s203_argv '' -a on-request)" "$(_s203_argv '' --ask-for-approval=never)" "$(_s203_argv '' --dangerously-bypass-approvals-and-sandbox)"
 rm -rf "$_S203_D"
 unset _S203_FN _S203_D
-=======
+
+
+# ============================================================
 echo "§204: named Claude sessions (.sandy/sessions) — strict files, one flag-less resume, agent view, exit 9, --print-state"
 # ============================================================
 # decisions/2026-10-12-named-claude-sessions.md. Every check runs the REAL code
