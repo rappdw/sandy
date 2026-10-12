@@ -89,14 +89,23 @@ process.stdin.on("data", d => s += d).on("end", () => {
 });
 JS
 sel() { X "claude agents --json --all 2>/dev/null | node $(printf %q "$WS/.spike-sel.js") $(printf %q "$NAME")" 2>/dev/null; }
-# Wait (up to ~90s) until the named job has left state "working".
+# Wait (up to ~120s) until the named job's own record (the entry whose short
+# id is $SHORT, or the first one before $SHORT is known) has settled. Run 4
+# showed this returning at once after a 5th field was added: match the state
+# FIELD, never a line suffix.
 settle() {
-    local r=""
-    for _ in $(seq 1 30); do
+    local r="" st=""
+    for _ in $(seq 1 40); do
         r="$(sel)"
-        case "$r" in *" working"|"") sleep 3 ;; *) break ;; esac
+        st="$(printf '%s\n' "$r" | awk -v s="${SHORT:-}" '(s == "" || $2 == s) && $3 == "background" {print $4; exit}')"
+        case "$st" in working|starting|running|"") sleep 3 ;; *) break ;; esac
     done
     printf '%s\n' "$r"
+}
+# Which transcripts contain WORD (a prompt marker). The proof that a prompted
+# resume continued the SAME conversation: the marker lands in $ID.jsonl only.
+marker_in() {
+    find "$SB/claude/projects" -name '*.jsonl' -exec grep -l "$1" {} + 2>/dev/null | sed "s|.*/||"
 }
 bg_args="--model $(printf %q "$MODEL") --permission-mode bypassPermissions"
 
@@ -164,8 +173,13 @@ reading M2c "$WS.m2c.out"
 
 relaunch 3
 say "M2d: claude --bg --resume <full id> 'prompt', NO flags (the On resume text)"
-X "claude --bg --resume $ID 'Reply with exactly the word: resumed'" > "$WS.m2d.out" 2>&1; cat "$WS.m2d.out"
+X "claude --bg --resume $ID 'Reply with exactly the word: resumed-m2d'" > "$WS.m2d.out" 2>&1; cat "$WS.m2d.out"
 reading M2d "$WS.m2d.out"
+echo "transcripts containing the M2d prompt (want exactly $ID.jsonl):"; marker_in 'resumed-m2d'
+case "$(marker_in 'resumed-m2d' | tr '\n' ' ')" in
+    "$ID.jsonl ") echo "READING M2d-transcript: SAME CONVERSATION" ;;
+    *) echo "READING M2d-transcript: NOT the same conversation (see list above)" ;;
+esac
 echo "last lines of the transcript (did the prompt land in the SAME conversation?):"
 tail -n 4 "$(find "$SB/claude/projects" -name "$ID.jsonl" | head -1)" 2>/dev/null | cut -c1-400
 
@@ -173,6 +187,14 @@ relaunch 4
 say "M2b: claude respawn <short id>"
 X "claude respawn $SHORT" > "$WS.m2b.out" 2>&1; cat "$WS.m2b.out"
 reading M2b "$WS.m2b.out"
+say "M2e: after respawn, a prompted resume of the same id (does respawn keep the conversation?)"
+X "claude --bg --resume $ID 'Reply with exactly the word: resumed-m2e'" > "$WS.m2e.out" 2>&1; cat "$WS.m2e.out"
+reading M2e "$WS.m2e.out"
+echo "transcripts containing the M2e prompt (want exactly $ID.jsonl):"; marker_in 'resumed-m2e'
+case "$(marker_in 'resumed-m2e' | tr '\n' ' ')" in
+    "$ID.jsonl ") echo "READING M2e-transcript: SAME CONVERSATION" ;;
+    *) echo "READING M2e-transcript: NOT the same conversation (see list above)" ;;
+esac
 
 say "transcripts mentioning the name at the end (one = no copies were made)"
 find "$SB/claude/projects" -name '*.jsonl' -exec grep -l "$NAME" {} + 2>/dev/null | sed "s|$SB/||"
