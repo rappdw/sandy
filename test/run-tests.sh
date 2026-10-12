@@ -25313,6 +25313,18 @@ check "§204(4g) every session reports up; the adopted one reports pinned=no and
     bash -c 's="$1"; [ "$(printf "%s\n" "$s" | grep -c "	up	")" = 3 ] && printf "%s\n" "$s" | grep "^operator-liaison	" | grep -q "	no	missing: --settings"' -- "$_S204_ST"
 check "§204(4h) ...and that unpinned adopted session is WARNED about, not hidden" \
     bash -c 'grep -q "without sandy.s inbound refuse pin" "$1"' -- "$_C/stderr"
+_C="$(_s204_case w)"
+printf '[]' > "$_C/agents.json"
+_s204_sess "$_C" solo "Solo" "" "" ""
+_s204_up "$_C" SANDY_AGENT_ARGS_CLAUDE="--settings /ops.json"
+check "§204(4h2) an operator --settings beside the inline refuse pin is WARNED about (--settings is last-wins, so it would silently stop applying)" \
+    bash -c 'grep -q "reads only the LAST --settings" "$1/stderr"' -- "$_C"
+_C="$(_s204_case w2)"
+printf '[]' > "$_C/agents.json"
+_s204_sess "$_C" solo "Solo" "cross_session" "" ""
+_s204_up "$_C" SANDY_AGENT_ARGS_CLAUDE="--settings /ops.json"
+check "§204(4h3) ...and not for the cross_session claimant, which carries no pin (control)" \
+    bash -c '! grep -q "reads only the LAST --settings" "$1/stderr"' -- "$_C"
 _C="$(_s204_case b)"
 printf '[{"id":"11111111","kind":"background","sessionId":"11111111-aaaa","name":"Dup","state":"done"},{"id":"22222222","kind":"background","sessionId":"22222222-bbbb","name":"Dup","state":"done"}]' > "$_C/agents.json"
 _s204_sess "$_C" dup "Dup" "" "" ""

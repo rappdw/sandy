@@ -10041,6 +10041,13 @@ _sandy_claude_sessions_up() {
         _sandy_cs_create_flags "$d" > "$want"
         flags=()
         while IFS= read -r i; do flags+=("$i"); done < "$want"
+        # --settings is LAST-WINS (CROSS_SESSION_INBOUND §9 Q3d, re-measured on
+        # 2.1.296): only the final occurrence is consulted. The inline refuse
+        # pin comes last, so an operator --settings would silently stop
+        # applying to this session. Say so rather than drop it quietly.
+        if [ "$(grep -cx -- --settings "$want")" -gt 1 ]; then
+            echo "[sandy] WARN: named session '$name' ($slug): your claude args pass --settings, and so does sandy's inbound refuse pin for a session that does not claim cross_session. Claude Code reads only the LAST --settings, so yours will not apply to this session if sandy creates it. Move those settings into a settings file, or claim cross_session for this session." >&2
+        fi
         full=""; act=""; st="failed"; reason=""; pinned="-"; drift="-"
         res="$(_sandy_cs_agents | _sandy_cs_js find "$name" "$sid")" || res=""
         case "$res" in
