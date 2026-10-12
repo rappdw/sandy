@@ -1926,7 +1926,7 @@ _sandy_key_metadata() {
     cat <<'EOF'
 SANDY_SSH|enum:token,agent|token||0.1.0|stable|SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent.
 SANDY_SSH_KEYS|string|||1.14.0|stable|Comma-separated FILENAMES under ~/.ssh that may be staged into the container, in ANY SANDY_SSH mode. Default empty = no private key material is staged at all. Only these files, plus config, known_hosts and *.pub, reach the container; everything else in ~/.ssh stays on the host. A name matching no file is warned about rather than silently ignored. Forced empty by SANDY_SUSPICIOUS=1.
-SANDY_SKIP_PERMISSIONS|bool|true||0.1.0|stable|Skip Claude Code's in-session permission prompts (default: true).
+SANDY_SKIP_PERMISSIONS|bool|true||0.1.0|stable|Skip the agents' in-session permission prompts: claude bypassPermissions, gemini --yolo, codex --ask-for-approval never (default: true).
 SANDY_ALLOW_NO_ISOLATION|bool|0||0.1.0|stable|Allow launch when iptables rules cannot be applied (Linux only).
 SANDY_ALLOW_LAN_HOSTS|string|||0.7.9|stable|Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
 SANDY_LOCAL_LLM_HOST|string||^[^[:space:]]+:[0-9]+$|0.12.0|stable|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. With the egress proxy on (default) the proxy's forward listener relays host.docker.internal:<port> to the host; with the proxy off (=0, Linux) it inserts one iptables ACCEPT and maps host.docker.internal.
@@ -7840,8 +7840,9 @@ Environment variables:
   SANDY_HOME         Sandy config directory (default: ~/.sandy)
   SANDY_SSH          Git SSH method: "token" (default) uses gh CLI token
                      with HTTPS; "agent" forwards host SSH agent via relay
-  SANDY_SKIP_PERMISSIONS  Set to "false" to keep Claude Code's permission
-                     system active (default: "true" — bypasses permissions)
+  SANDY_SKIP_PERMISSIONS  Set to "false" to keep the agents' own approval
+                     prompts (default: "true" — claude, gemini and codex
+                     run without asking)
   SANDY_ALLOW_LAN_HOSTS  Comma-separated IPs/CIDRs to allow through
                      LAN isolation (e.g. "192.168.1.50,10.0.0.0/24")
   SANDY_ALLOW_NO_ISOLATION  Set to "1" to allow launch when iptables
@@ -9930,6 +9931,18 @@ build_codex_cmd() {
             picker) cmd="codex resume --sandbox danger-full-access" ;;
             *)      cmd="codex --sandbox danger-full-access" ;;
         esac
+        # SANDY_SKIP_PERMISSIONS covers codex too, as it does claude
+        # (bypassPermissions) and gemini (--yolo). Full access is TWO codex
+        # settings: the sandbox mode above, and the approval policy. With only
+        # the first, codex keeps its default `on-request` policy and the model
+        # still stops to ask before commands. `-a never` is accepted by the TUI
+        # and by `codex resume` (codex-cli 0.162.1 --help); `codex exec` has no
+        # such flag and never prompts, so headless is left alone. Deliberately
+        # not --dangerously-bypass-approvals-and-sandbox: that also overrides
+        # sandbox_mode, and the two settings stay separately visible this way.
+        if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+            cmd+=" --ask-for-approval never"
+        fi
     fi
     if [ -n "${CODEX_MODEL:-}" ]; then
         cmd+=" --model $(printf "%q" "$CODEX_MODEL")"

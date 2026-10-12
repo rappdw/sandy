@@ -945,6 +945,18 @@ build_codex_cmd() {
             picker) cmd="codex resume --sandbox danger-full-access" ;;
             *)      cmd="codex --sandbox danger-full-access" ;;
         esac
+        # SANDY_SKIP_PERMISSIONS covers codex too, as it does claude
+        # (bypassPermissions) and gemini (--yolo). Full access is TWO codex
+        # settings: the sandbox mode above, and the approval policy. With only
+        # the first, codex keeps its default `on-request` policy and the model
+        # still stops to ask before commands. `-a never` is accepted by the TUI
+        # and by `codex resume` (codex-cli 0.162.1 --help); `codex exec` has no
+        # such flag and never prompts, so headless is left alone. Deliberately
+        # not --dangerously-bypass-approvals-and-sandbox: that also overrides
+        # sandbox_mode, and the two settings stay separately visible this way.
+        if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+            cmd+=" --ask-for-approval never"
+        fi
     fi
     if [ -n "${CODEX_MODEL:-}" ]; then
         cmd+=" --model $(printf "%q" "$CODEX_MODEL")"
