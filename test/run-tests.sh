@@ -24180,29 +24180,29 @@ _s193_argv() {
 
 _s193_reset
 check "§193(1) no codex session in this sandbox -> a fresh codex TUI" \
-    bash -c '[ "$1" = "--sandbox danger-full-access" ]' _ "$(_s193_argv '')"
+    bash -c '[ "$1" = "--sandbox danger-full-access --ask-for-approval never" ]' _ "$(_s193_argv '')"
 _s193_session a /home/sandy/w cli
 check "§193(2) an interactive session for this workspace -> codex resume --last (argv the stub received)" \
-    bash -c '[ "$1" = "resume --last --sandbox danger-full-access" ]' _ "$(_s193_argv '')"
+    bash -c '[ "$1" = "resume --last --sandbox danger-full-access --ask-for-approval never" ]' _ "$(_s193_argv '')"
 check "§193(3) ...and the resume form keeps sandy's other codex options after the subcommand" \
-    bash -c '[ "$1" = "resume --last --sandbox danger-full-access --model gpt-x -c model_reasoning_effort=high" ]' _ "$(_s193_argv 'CODEX_MODEL=gpt-x SANDY_EFFORT=high')"
+    bash -c '[ "$1" = "resume --last --sandbox danger-full-access --ask-for-approval never --model gpt-x -c model_reasoning_effort=high" ]' _ "$(_s193_argv 'CODEX_MODEL=gpt-x SANDY_EFFORT=high')"
 check "§193(4) --new (SANDY_NEW_SESSION=true) starts fresh even with a session present" \
-    bash -c '[ "$1" = "--sandbox danger-full-access" ]' _ "$(_s193_argv 'SANDY_NEW_SESSION=true')"
+    bash -c '[ "$1" = "--sandbox danger-full-access --ask-for-approval never" ]' _ "$(_s193_argv 'SANDY_NEW_SESSION=true')"
 check "§193(5) sandy --resume -> codex's own picker (codex resume, no --last, no literal --resume)" \
-    bash -c '[ "$1" = "resume --sandbox danger-full-access" ]' _ "$(_s193_argv '' --resume)"
+    bash -c '[ "$1" = "resume --sandbox danger-full-access --ask-for-approval never" ]' _ "$(_s193_argv '' --resume)"
 check "§193(6) headless -p is untouched by a session: codex exec, no resume" \
     bash -c 'case "$1" in "exec --sandbox danger-full-access --skip-git-repo-check"*) case "$1" in *resume*) exit 1 ;; esac ;; *) exit 1 ;; esac' _ "$(_s193_argv '_sandy_is_headless=true' -p hello)"
 _s193_reset
 _s193_session b /home/sandy/w exec
 check "§193(7) a codex exec (non-interactive) session alone does not count -> fresh" \
-    bash -c '[ "$1" = "--sandbox danger-full-access" ]' _ "$(_s193_argv '')"
+    bash -c '[ "$1" = "--sandbox danger-full-access --ask-for-approval never" ]' _ "$(_s193_argv '')"
 _s193_reset
 _s193_session c /home/sandy/w-other cli
 _s193_session d /home/sandy/w/sub cli
 check "§193(8) sessions for a sibling prefix (w-other) or a subdirectory (w/sub) do not count -> fresh" \
-    bash -c '[ "$1" = "--sandbox danger-full-access" ]' _ "$(_s193_argv '')"
+    bash -c '[ "$1" = "--sandbox danger-full-access --ask-for-approval never" ]' _ "$(_s193_argv '')"
 check "§193(9) --resume with no session still opens the picker" \
-    bash -c '[ "$1" = "resume --sandbox danger-full-access" ]' _ "$(_s193_argv '' --resume)"
+    bash -c '[ "$1" = "resume --sandbox danger-full-access --ask-for-approval never" ]' _ "$(_s193_argv '' --resume)"
 _s193_session e /home/sandy/w cli
 check "§193(10) a login session (#428) runs codex login --device-auth, whatever sessions or args exist" \
     bash -c '[ "$1" = "login --device-auth" ] && [ "$2" = "login --device-auth" ]' _ "$(_s193_argv 'SANDY_LOGIN_AGENT=codex')" "$(_s193_argv 'SANDY_LOGIN_AGENT=codex' --resume)"
@@ -25102,6 +25102,46 @@ check "§202(6) additive manifest capability, closed submount keys, schema_versi
 rm -rf "$_S202_D"
 unset _S202_D
 fi
+
+
+# ============================================================
+echo "§203: SANDY_SKIP_PERMISSIONS reaches codex as --ask-for-approval never (interactive only)"
+# ============================================================
+# Codex full access is two settings: sandbox_mode AND the approval policy.
+# Sandy set only the first, so codex kept its default on-request policy and
+# stopped to ask before commands, while claude and gemini ran unprompted.
+# Asserted on the argv a stub codex actually RECEIVES. `codex exec` has no -a
+# flag (codex-cli 0.162.1), so headless must NOT carry it.
+_S203_FN="$(sed -n '/^_sandy_translate_args()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_wrap_cmd_exit_pause()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_codex_has_session()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_codex_resume_mode()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^build_codex_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+_S203_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S203_D/bin" "$_S203_D/home" "$_S203_D/ch"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "%s/argv"\n' "$_S203_D" > "$_S203_D/bin/codex"
+chmod +x "$_S203_D/bin/codex"
+_s203_argv() {
+    local envs="$1"; shift
+    rm -f "$_S203_D/argv"
+    # shellcheck disable=SC2086
+    env -i PATH="$_S203_D/bin:$PATH" HOME="$_S203_D/home" CODEX_HOME="$_S203_D/ch" \
+        WORKSPACE=/home/sandy/w _sandy_is_headless=false $envs \
+        bash -c 'set -euo pipefail; eval "$1"; shift; c="$(build_codex_cmd "$@")"; bash -c "$c" </dev/null >/dev/null 2>&1 || true' _ "$_S203_FN" "$@" 2>/dev/null
+    cat "$_S203_D/argv" 2>/dev/null || printf 'NOT-RUN\n'
+}
+check "§203(1) default (unset) -> the codex TUI gets --ask-for-approval never" \
+    bash -c '[ "$1" = "--sandbox danger-full-access --ask-for-approval never" ]' _ "$(_s203_argv '')"
+check "§203(2) SANDY_SKIP_PERMISSIONS=true and the --resume picker -> still never" \
+    bash -c '[ "$1" = "resume --sandbox danger-full-access --ask-for-approval never" ]' _ "$(_s203_argv 'SANDY_SKIP_PERMISSIONS=true' --resume)"
+check "§203(3) SANDY_SKIP_PERMISSIONS=false -> no approval override, codex keeps its own prompts" \
+    bash -c '[ "$1" = "--sandbox danger-full-access" ] && [ "$2" = "resume --sandbox danger-full-access" ]' _ "$(_s203_argv 'SANDY_SKIP_PERMISSIONS=false')" "$(_s203_argv 'SANDY_SKIP_PERMISSIONS=false' --resume)"
+check "§203(4) headless codex exec never carries -a/--ask-for-approval (exec rejects it)" \
+    bash -c 'case "$1" in "exec --sandbox danger-full-access --skip-git-repo-check"*) case "$1" in *ask-for-approval*|*" -a "*) exit 1 ;; esac ;; *) exit 1 ;; esac' _ "$(_s203_argv '_sandy_is_headless=true' -p hello)"
+check "§203(5) an operator's own approval choice is kept, never doubled (codex rejects a second -a)" \
+    bash -c '[ "$1" = "--sandbox danger-full-access -a on-request" ] && [ "$2" = "--sandbox danger-full-access --ask-for-approval=never" ] && [ "$3" = "--sandbox danger-full-access --dangerously-bypass-approvals-and-sandbox" ]' _ "$(_s203_argv '' -a on-request)" "$(_s203_argv '' --ask-for-approval=never)" "$(_s203_argv '' --dangerously-bypass-approvals-and-sandbox)"
+rm -rf "$_S203_D"
+unset _S203_FN _S203_D
 
 
 # BEGIN SUMMARY

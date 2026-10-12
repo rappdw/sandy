@@ -172,7 +172,7 @@ The table below is generated from `sandy --print-schema` (the `_sandy_key_metada
 |---|---|---|---|---|---|
 | `SANDY_SSH` | privileged | `token` | 0.1.0 | stable | SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent. |
 | `SANDY_SSH_KEYS` | privileged | unset | 1.14.0 | stable | Comma-separated FILENAMES under ~/.ssh that may be staged into the container, in ANY SANDY_SSH mode. Default empty = no private key material is staged at all. Only these files, plus config, known_hosts and *.pub, reach the container; everything else in ~/.ssh stays on the host. A name matching no file is warned about rather than silently ignored. Forced empty by SANDY_SUSPICIOUS=1. |
-| `SANDY_SKIP_PERMISSIONS` | privileged | `true` | 0.1.0 | stable | Skip Claude Code's in-session permission prompts (default: true). |
+| `SANDY_SKIP_PERMISSIONS` | privileged | `true` | 0.1.0 | stable | Skip the agents' in-session permission prompts: claude bypassPermissions, gemini --yolo, codex --ask-for-approval never (default: true). |
 | `SANDY_ALLOW_NO_ISOLATION` | privileged | `0` | 0.1.0 | stable | Allow launch when iptables rules cannot be applied (Linux only). |
 | `SANDY_ALLOW_LAN_HOSTS` | privileged | unset | 0.7.9 | stable | Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected. |
 | `SANDY_LOCAL_LLM_HOST` | privileged | unset | 0.12.0 | stable | Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. With the egress proxy on (default) the proxy's forward listener relays host.docker.internal:<port> to the host; with the proxy off (=0, Linux) it inserts one iptables ACCEPT and maps host.docker.internal. |
@@ -1121,21 +1121,23 @@ A property test pins this contract in `test/run-tests.sh` §171: a fixture where
 
 ### Codex Headless Translation (`SANDY_AGENT=codex`)
 
-`build_codex_cmd()` inspects the positional args for `-p`/`--print`/`--prompt`. If present, it emits `codex exec --sandbox danger-full-access --skip-git-repo-check <prompt>` (interactive becomes headless); otherwise `codex --sandbox danger-full-access` (TUI). `--skip-git-repo-check` is required because codex 0.139+ refuses `exec` outside a trusted directory / git repo ("Not inside a trusted directory and --skip-git-repo-check was not specified"); sandy provides the outer isolation, so the gate is redundant and would break headless runs from non-git workspaces. Interactive mode omits the flag — the `[projects."…"] trust_level = "trusted"` entry in `config.toml` covers the TUI path. The sandy `-p`/`--print`/`--prompt` flags are dropped and the remaining arg is passed as the positional prompt, because `codex exec` takes the prompt as a positional argument, not a flag. `--continue`/`-c` is silently dropped (codex has `codex resume` but no headless `--continue` equivalent — matches the gemini behavior).
+`build_codex_cmd()` inspects the positional args for `-p`/`--print`/`--prompt`. If present, it emits `codex exec --sandbox danger-full-access --skip-git-repo-check <prompt>` (interactive becomes headless); otherwise `codex --sandbox danger-full-access --ask-for-approval never` (TUI; the approval flag only while `SANDY_SKIP_PERMISSIONS=true`, the default — see below). `--skip-git-repo-check` is required because codex 0.139+ refuses `exec` outside a trusted directory / git repo ("Not inside a trusted directory and --skip-git-repo-check was not specified"); sandy provides the outer isolation, so the gate is redundant and would break headless runs from non-git workspaces. Interactive mode omits the flag — the `[projects."…"] trust_level = "trusted"` entry in `config.toml` covers the TUI path. The sandy `-p`/`--print`/`--prompt` flags are dropped and the remaining arg is passed as the positional prompt, because `codex exec` takes the prompt as a positional argument, not a flag. `--continue`/`-c` is silently dropped (codex has `codex resume` but no headless `--continue` equivalent — matches the gemini behavior).
 
 **Interactive resume (#427).** The interactive branch mirrors `build_claude_cmd`'s auto-continue. `_sandy_codex_resume_mode` picks the head of the command:
 
 | condition (first match wins) | command head |
 |---|---|
 | `SANDY_LOGIN_AGENT=codex` (a `--login` session, E.13b) | `codex login --device-auth` — the whole pane, then a pause |
-| `--resume` among the args | `codex resume --sandbox danger-full-access` (codex's own picker) |
-| `SANDY_NEW_SESSION=true` (`sandy --new`) | `codex --sandbox danger-full-access` |
-| an interactive session exists for this workspace | `codex resume --last --sandbox danger-full-access` |
-| otherwise | `codex --sandbox danger-full-access` |
+| `--resume` among the args | `codex resume --sandbox danger-full-access --ask-for-approval never` (codex's own picker) |
+| `SANDY_NEW_SESSION=true` (`sandy --new`) | `codex --sandbox danger-full-access --ask-for-approval never` |
+| an interactive session exists for this workspace | `codex resume --last --sandbox danger-full-access --ask-for-approval never` |
+| otherwise | `codex --sandbox danger-full-access --ask-for-approval never` |
 
 `codex resume` accepts the same `-m`/`-c`/`-s` options as the bare TUI, so `--model` and `-c model_reasoning_effort=…` follow unchanged. **Session detection** (`_sandy_codex_has_session`, container-side, so it reads the sandbox's own codex home): codex-cli 0.160.0 writes each session to `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`, whose first line is a `session_meta` record carrying `"cwd"` and `"source"`. A session counts when that first line names `"cwd":"<the workspace>"` exactly (closing quote included, so `w-other` and `w/sub` do not match `w`) and its source is not `exec`. That is the set `codex resume --last` itself considers: by default it filters by cwd and skips non-interactive sessions. The pane's cwd is `$WORKSPACE`, so that is what codex records. `state_5.sqlite` is not evidence — codex creates it on first start with no session. Headless `codex exec` is never resumed. Guarded by `run-tests.sh §193`, which runs the built command against a stub `codex` and asserts the argv it received.
 
 `codex exec` uses only exit codes 0 (success) and 1 (failure). Sandy does not attempt to emulate Claude's richer exit-code semantics (no tool-denied, no context-exhausted signals) for codex. `--sandbox danger-full-access` on the CLI is belt-and-suspenders alongside the `sandbox_mode` in `config.toml`; do not remove either.
+
+**Approval policy (2.8.1).** Codex full access is two settings, the sandbox mode and the approval policy. With only the sandbox mode, codex keeps its default `on-request` policy and the model still stops to ask before commands. So every interactive form above carries `--ask-for-approval never` while `SANDY_SKIP_PERMISSIONS=true` (the default), matching claude's `bypassPermissions` and gemini's `--yolo`; `SANDY_SKIP_PERMISSIONS=false` omits it and codex keeps its own prompts. `codex exec` has no such flag and never prompts, so headless carries none (verified against codex-cli 0.162.1). It is a CLI flag rather than a `config.toml` line, so toggling `SANDY_SKIP_PERMISSIONS` takes effect at the next launch with nothing to repair. Guarded by §203.
 
 ### Remote Control Mode
 
@@ -1811,7 +1813,7 @@ Key implementation details not covered in the main spec:
   trust_level = "trusted"
   ```
   This must happen container-side because it needs the in-container workspace path.
-- `build_codex_cmd()`: translates sandy's `-p`/`--print`/`--prompt` into `codex exec` with a positional prompt; drops `--continue`/`-c`; interactive only, resumes with `codex resume --last` / opens `codex resume` for `--resume` (#427), or runs `codex login --device-auth` in a `--login` session (#428); injects `--sandbox danger-full-access`, `--skip-git-repo-check` (headless only), optional `--model`, and (2.4.0, #116) `-c model_reasoning_effort=<level>` when `SANDY_EFFORT` is set (Appendix B.10).
+- `build_codex_cmd()`: translates sandy's `-p`/`--print`/`--prompt` into `codex exec` with a positional prompt; drops `--continue`/`-c`; interactive only, resumes with `codex resume --last` / opens `codex resume` for `--resume` (#427), or runs `codex login --device-auth` in a `--login` session (#428); injects `--sandbox danger-full-access`, `--ask-for-approval never` (interactive, when `SANDY_SKIP_PERMISSIONS=true`), `--skip-git-repo-check` (headless only), optional `--model`, and (2.4.0, #116) `-c model_reasoning_effort=<level>` when `SANDY_EFFORT` is set (Appendix B.10).
 - Launch dispatch: the `codex` case sits alongside `claude` and `gemini` in the per-agent dispatch; multi-agent combos iterate over the parsed `_SANDY_AGENTS` array and call each `build_*_cmd` in pane order.
 
 **`/ss` screenshot-skill seeding**:
