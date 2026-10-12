@@ -12,6 +12,23 @@ Claude Code 2.1.291 documents `claude --bg --resume <session-id>`: it "continues
 | 4 | When session files apply | Interactive launches and `--start` only. `-p`, `--remote` and `--provision` ignore them with one notice line. `--new` never touches named sessions. Env-only `SANDY_CLAUDE_SESSIONS=0` gives a plain claude pane for one launch. | Each launch mode keeps its meaning, and nothing that discards an agent's thread is reachable by accident. Env-only, so a committed config cannot switch the operator's agents off. |
 | 5 | Readiness | `--start` waits (bounded) until every declared session is running under its expected id. Otherwise it exits with a new code `9`, naming the session and the reason (not running, or running as a copy under another id), and leaves the container running. Per-session status is recorded in the session marker and in `--print-state` (`claude_sessions`, additive; `schema_version` stays 4). A foreground launch prints the same as a warning. | Exit `0` keeps meaning "usable", which is the class of bug sandy has fixed repeatedly (#151, the API-key modal, the theme picker). One agent failing must not take a healthy one down. |
 
+## Revised after the host measurements (same day)
+
+`test/spike/claude-sessions-spike.sh`, run 5 against Claude Code 2.1.296, measured the unknowns below. Two facts reopened decisions 2 and 3, which the maintainer re-decided one at a time:
+
+- Claude Code keeps the name-to-id mapping itself: every background job has `claude/jobs/<short>/state.json` (`name`, `nameSource`, `sessionId`), it survives a relaunch, and `claude agents --json --all` lists it with `sessionId` and `name`. A copy takes its prompt as its name, never the user's name.
+- A session's flags are frozen at creation (`respawnFlags`). After a relaunch, `claude --bg --resume <full id> '<prompt>'` with **no flags** wakes it "with its saved options" and the prompt lands in the same transcript. Any flag, or resuming a session that is already live, starts a copy. `respawn` keeps the conversation but leaves it live, so a prompt after it is a copy. Sandy therefore makes exactly one flag-less resume call per session per launch.
+- A woken process's own `agents --json` entry carries a transient `sessionId` until it takes a prompt, so readiness keys on the job's short `id` plus a live pid.
+
+| # | Decision | Revised choice | Deciding reason |
+|---|----------|----------------|-----------------|
+| 2 | Finding the session for a name | Container-side, through `claude agents --json --all`: the file's `session:` id (which must be listed there), else exactly one job whose user-given name equals `name`, else create. Several matches end the launch with `--start` exit `9`. Sandy keeps no record of its own and searches no transcripts. | Claude Code's documented scripting interface, not its private files. Ambiguity needs two deliberately same-named sessions, rare enough that an exit-`9` report is acceptable. |
+| 3 | Shared settings, single receivers | Flags are passed only when sandy creates a session: `--name`, the shared flags, `agent-args.claude`, `agent-args.claude.<slug>`, `--channels` for the `channels` claimant, and an inline `--settings '{"crossSessionInbound":"refuse"}'` for every session that does not claim `cross_session` (inline, so it never names a per-launch path). Sandy writes `accept` to the shared settings files when some session claims `cross_session`. At each launch sandy compares what it would pass with each session's saved flags and warns on a difference, naming the session and the fix. An adopted session that does not receive but lacks the `refuse` pin gets a loud warning, and `--print-state` reports `inbound_pinned: false` for it. | It is what Claude Code allows. Settings files are re-read at every wake; flags are not. Adopting existing sessions stays possible, and the one residual (an adopted session that can receive) is reported, never hidden. |
+
+Revised options not taken: **2** reading `jobs/*/state.json` host-side (a private format, though it would allow a pre-launch refusal); keeping sandy's own record. **3** refusing the launch while an adopted non-receiver lacks the pin (it would block adopting the existing controller); one shared inbound posture for every session.
+
+Still to measure while building: that an inline `--settings` is saved in `respawnFlags` and re-applied on wake, and that it beats a shared `accept` on 2.1.296 (re-run `test/measure-settings-inbound.sh`; Q2 measured that on 2.1.283).
+
 Options considered and not taken:
 - **1:** a config key listing names, with priming files found by a naming convention; a single `.sandy/sessions.json` manifest.
 - **2:** title match each launch, newest wins; title match each launch, refuse on duplicates; plain recorded binding with no `session:` key; a `sandy --bind-session` command.
@@ -20,7 +37,7 @@ Options considered and not taken:
 - **5:** ready when the pane is up, with status reported only; tearing the container down on any failure.
 - **Tier (raised before the shape changed):** an approval gate on the resume prompt text. Dropped once the text moved into `.sandy/sessions/`: a workspace already instructs every session through `CLAUDE.md`, and `.sandy/` is protected in the container.
 
-To measure on the host before building (any result that breaks a decision is raised first):
+Measured on the host before building (results above, under "Revised"):
 1. The record Claude Code writes for a session's name in its `.jsonl` transcript.
 2. Whether `claude --bg --resume <id>` after a container relaunch resumes under the same id or starts a copy, and whether the #407 registry prune is enough to prevent the copy.
 3. Whether `claude agents --json` reports full session ids.
