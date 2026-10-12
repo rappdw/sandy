@@ -284,6 +284,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "feature_problems": [],
       "agent_args": {},
       "agent_args_composed": {},
+      "claude_sessions": {"declared": [], "status": null},
       "marker": {"state": "present", "sandy_version": "2.7.0", "launched_at": "2026-04-20T14:00:00Z"},
       "cross_session_inbound": {
         "pinned":             {"value": "accept", "source": "feature:notify", "status": "ok"},
@@ -567,6 +568,22 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > poll budget, and it would leak operator-placed argument values (which may
 > include things like MCP config paths) to every `--print-state` consumer.
 > See CLAUDE.md "Per-agent override" for the mechanism this field reports on.
+
+> **`claude_sessions`** (per sandbox, added additively in `2.9.0`, no
+> `schema_version` bump). Named Claude sessions (`.sandy/sessions/*.md`; see
+> SPECIFICATION.md §12 "Named Claude sessions"). `null` = cannot answer (no
+> marker, or a marker from a sandy predating the field). Otherwise
+> `{declared, status}`: `declared` is the marker's list of
+> `{slug, name, receives}` the **last launch** declared (`[]` when none
+> applied); `status` is `null` when the container never reported, else
+> `{launch_id, sessions: [{slug, state, session_id, name, inbound_pinned,
+> drift, reason}]}` with `state` one of `up` | `ambiguous` | `missing` |
+> `failed` and `inbound_pinned` one of `yes` | `no` | `receiver` | `-`. The
+> status comes from a file in the agent's own home, so treat it as a report:
+> every value is escaped and stripped of control bytes, and nothing in it is
+> authority for anything. `launch_id` lets a consumer tell a report from the
+> current container apart from a leftover. `--start` exits `9` when a
+> declared session is not `up` (the container is left running).
 
 > **`agent_args_composed`** (per sandbox, added additively in `2.3.0`,
 > #363 — no `schema_version` bump). An object keyed by agent name; each value

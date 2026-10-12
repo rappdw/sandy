@@ -132,6 +132,48 @@ Panes appear in the order listed. Each agent has its own config dir(s): `~/.clau
 **Feature support in multi-agent mode**: skill packs apply to the Claude pane only. Telegram channels use the host-side relay and are routed to the first agent in `SANDY_AGENT` by default — override with `SANDY_CHANNEL_TARGET_PANE=0|1|2|3` (the Nth agent, 0-based; sandy finds that agent's pane by name, so the 2×2 grid routes correctly). `--remote` is not supported in any multi-agent combo. `SANDY_LOCAL_LLM_HOST` works in any combo that includes opencode (or any agent that wants to reach a host-side service over the gateway).
 
 
+## Named Claude sessions (`.sandy/sessions/`)
+
+Some workspaces run long-lived Claude Code agents rather than one conversation: a release captain and a reviewer, say, each with its own thread and memory. Declare each one as a file under `.sandy/sessions/`, and every launch brings them up as **named background sessions** (Claude Code's `claude --bg`), with **Claude Code's agent view** (`claude agents`) in the claude pane. Press Right to open a session, Left on an empty prompt to go back.
+
+```markdown
+<!-- .sandy/sessions/release-captain.md -->
+---
+name: Release Captain
+receives: [cross_session]
+---
+## On create
+You coordinate releases for this repository. Read docs/releasing.md, then …
+
+## On resume
+Re-read your startup files, re-create your crons and watchers, run one cycle, then report.
+```
+
+At each launch, for each file:
+
+- **Found** (a background session with that `name` exists in this sandbox): sandy resumes it, sending the `## On resume` text once. A session's background jobs, crons and watchers don't survive a relaunch, so this is where it re-creates them.
+- **Not found**: sandy creates it with that name and sends the `## On create` text as its first prompt.
+- **Adopting a session you already have**: add `session: <full session id>` to the front matter. Sandy then resumes exactly that session, whatever it is called. Find the id with `claude agents --json --all` inside the container.
+
+**The format is strict.** The front matter allows `name` (required: letters, digits, spaces, `.`, `_`, `-`), `session` and `receives`. The body allows exactly the two headings above; use `###` or deeper inside a section for your own structure. Anything else (an unknown key, another `#`/`##` heading, text outside a section, a symlink, a non-`.md` file) refuses the launch and names the file and line. A typo that silently did nothing would leave an agent un-started while every check looked fine. `## On create` is required unless `session:` is set.
+
+**Flags are fixed when a session is created.** Claude Code saves a background session's options and reuses them every time it wakes the session. Passing any flag on a resume makes Claude Code start a *copy* under a new id (measured on Claude Code 2.1.296), so sandy resumes with no flags at all. A new session is created with sandy's own flags (model, effort, permission mode, teammate mode), your `agent-args.claude` / `SANDY_AGENT_ARGS`, and that session's own args from `~/.sandy/sandboxes/<sandbox>/agent-args.claude.<slug>` (privileged by where it lives, like `agent-args.claude`). If what sandy would pass changes later, the launch warns and names the session; recreate it to apply the change.
+
+**`receives` names the one session that gets each single-receiver thing.** At most one session may claim each value:
+
+| value | what that session gets |
+|---|---|
+| `cross_session` | Cross-session (peer) messages: sandy sets `crossSessionInbound` to `accept`, and every *other* session is created with an inline `refuse`. A feature that declares `receives: ["cross_session"]` sends its `agent_args` (an MCP config, say) to this session only. A selected feature like that with no claiming session refuses the launch. |
+| `channels` | The `SANDY_CHANNELS` plugin (`--channels`). With named sessions, `SANDY_CHANNELS` set and no claiming session refuses the launch, and the host-side Telegram relay stands down (agent view can't take relayed keystrokes). |
+
+A session you **adopt** was created without sandy's inbound `refuse` pin. If it doesn't claim `cross_session`, it can still receive peer messages while another session claims them; the launch warns about it every time, and `--print-state` reports `inbound_pinned: "no"`. Recreate it when its thread is expendable to close that.
+
+**When they apply.** Interactive launches and `--start`, with claude selected. Headless (`-p`), `--remote` and `--provision` ignore the files with one notice. `sandy --new` never touches a named session. `SANDY_CLAUDE_SESSIONS=0` in the environment gives an ordinary claude pane for one launch; it's env-only, so a committed config can't switch your agents off.
+
+**Readiness.** `--start` reports ready (exit `0`) only once every declared session is running. Otherwise it exits **`9`**, names each one and why (ambiguous name, unknown `session:` id, a copy instead of a resume, not running after 60s), and **leaves the container running**, so the sessions that did come up keep working. `--print-state` reports each session's status under `claude_sessions`.
+
+Files under `.sandy/sessions/` are not part of the `.sandy/Dockerfile` build context: editing one never re-prompts the Dockerfile approval or rebuilds the project image. `.sandy/` is read-only inside the container, so an agent can't rewrite its own instructions.
+
 ## Headless / remote servers
 
 **Recommended**: Use a long-lived token (valid 1 year) to avoid OAuth expiry entirely:

@@ -132,6 +132,7 @@ SANDY_PASSIVE_KEYS=(
 SANDY_ENV_ONLY_KEYS=(
     SANDY_AUTO_APPROVE_PRIVILEGED
     SANDY_CHANNEL
+    SANDY_CLAUDE_SESSIONS
     SANDY_DEBUG_CLEANUP
     SANDY_HOST_ID
 )
@@ -1989,6 +1990,7 @@ SANDY_OFFLINE|bool|0||2.4.0|stable|Offline mode (#219): skip the lookups a launc
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass TWO of the three launch approval gates: the passive-privileged config-key prompt AND the per-project .sandy/Dockerfile build prompt (an unreviewed project image then builds, running its RUN commands on the host docker daemon with unfiltered network). It does NOT bypass the dangerous-symlink gate, deliberately: that gate is built so no approval of a new escaping symlink can happen without a deliberate human act (a new escape is a hard error, never a re-prompt), and a blanket bypass would silently mount every future escape read-write. Env-only, so a committed config cannot set it. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
 SANDY_CHANNEL|enum:release,dev|release||2.8.0|stable|Which build `sandy --upgrade` installs (install.sh reads the same variable). release (default): the latest GitHub release, the version the update notice names; a dev or rc build newer than that release is left alone unless release is set explicitly. dev: the head of main, pinned to its commit and recording it, so --version tells dev builds apart and the next dev upgrade compares commits. Env-only: it is read before any config file is loaded. A failed release lookup is an error, never a silent fallback to main.
+SANDY_CLAUDE_SESSIONS|enum:0,1|1||2.9.0|stable|Set to 0 for one launch to ignore the workspace's named Claude sessions (.sandy/sessions/*.md) and get an ordinary claude pane. Default 1: on an interactive or --start launch with claude selected, each session file brings up one named background Claude Code session (created when missing, resumed when found) and the claude pane runs Claude Code's agent view. Env-only, so a committed config cannot switch an operator's agents off.
 SANDY_HOST_ID|string||^[A-Za-z0-9._-]{1,128}$|1.8.0|stable|Operator override for the host_id reported by --print-state (#179), advisory identity for multi-host fleet aggregation (sandbox names hash only the workspace path, so the same path on two hosts collides). ENV-ONLY -- a committed .sandy/config can never set it, which would otherwise forge the identity of whatever machine the repo is cloned onto. Default is uname -n (host_id_source: hostname); a valid override reports host_id_source: env. Invalid or empty values are silently ignored and fall back to uname -n -- no warning, ever, since --print-state guarantees 0 bytes of stderr.
 EOF
 }
@@ -3753,6 +3755,35 @@ EOF_FEATURE_ENTRIES
                 [ -n "$sb_fc_line" ] && sb_facomp="$sb_fc_line"
             fi
             printf ','; _json_kv agent_args_composed "$sb_facomp"
+            # claude_sessions (named sessions, decisions/2026-10-12-*): null =
+            # CANNOT ANSWER (no marker, or one predating the field). Otherwise
+            # {declared, status}: `declared` is what the last launch declared,
+            # from its marker; `status` is what the container reported for
+            # each session (null when it never wrote one). The status file
+            # lives in the agent's own home, so every value is escaped and
+            # stripped of control bytes here: it is a report, not a trust root.
+            sb_cs='null'
+            if [ -f "$sb/sandy-session.json" ]; then
+                sb_cs_decl="$(sed -n 's/^  "claude_sessions": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_cs_decl="${sb_cs_decl%,}"
+                if [ -n "$sb_cs_decl" ]; then
+                    sb_cs_st='null'
+                    sb_cs_f="$sb/claude/.sandy-sessions.tsv"
+                    if [ -f "$sb_cs_f" ] && [ ! -L "$sb_cs_f" ]; then
+                        sb_cs_items=""; sb_cs_lid='null'
+                        while IFS=$'\t' read -r sb_c1 sb_c2 sb_c3 sb_c4 sb_c5 sb_c6 sb_c7; do
+                            if [ "$sb_c1" = launch ]; then
+                                sb_cs_lid="$(_json_escape "$(printf '%s' "$sb_c2" | LC_ALL=C tr -d '\000-\037')")"; continue
+                            fi
+                            [ -n "$sb_c1" ] || continue
+                            sb_cs_items="${sb_cs_items:+$sb_cs_items,}{\"slug\":$(_json_escape "$(printf '%s' "$sb_c1" | LC_ALL=C tr -d '\000-\037')"),\"state\":$(_json_escape "$(printf '%s' "$sb_c2" | LC_ALL=C tr -d '\000-\037')"),\"session_id\":$(_json_escape "$(printf '%s' "$sb_c3" | LC_ALL=C tr -d '\000-\037')"),\"name\":$(_json_escape "$(printf '%s' "$sb_c4" | LC_ALL=C tr -d '\000-\037')"),\"inbound_pinned\":$(_json_escape "$(printf '%s' "$sb_c5" | LC_ALL=C tr -d '\000-\037')"),\"drift\":$(_json_escape "$(printf '%s' "$sb_c6" | LC_ALL=C tr -d '\000-\037')"),\"reason\":$(_json_escape "$(printf '%s' "$sb_c7" | LC_ALL=C tr -d '\000-\037')")}"
+                        done < <(head -n 64 "$sb_cs_f" 2>/dev/null || true)
+                        sb_cs_st="{\"launch_id\":$sb_cs_lid,\"sessions\":[$sb_cs_items]}"
+                    fi
+                    sb_cs="{\"declared\":$sb_cs_decl,\"status\":$sb_cs_st}"
+                fi
+            fi
+            printf ','; _json_kv claude_sessions "$sb_cs"
             # marker (#386, decision 1): why any marker-derived field above or
             # below is null. See _sandy_ps_marker. Both modes (two seds, no
             # parser).
@@ -7900,6 +7931,8 @@ Daemon sessions (survive a closed terminal; a session outlives the client
 that started it, so a closed tab/dropped SSH/IDE quit does not end it):
   --start            Start a detached daemon session for this workspace and
                      return once attachable. Sub-options: --workspace PATH
+                     Exit 9: a named Claude session (.sandy/sessions/) did
+                     not come up; the container is left running.
   --attach           Attach an interactive client to a running daemon
                      session (last-wins: a second attach displaces the
                      first). Exit codes: 0 = session ended while attached,
@@ -9762,7 +9795,28 @@ _sandy_wrap_cmd_exit_pause() {
 }
 
 build_claude_cmd() {
-    local cmd="claude --model ${SANDY_MODEL:-claude-opus-5}"
+    local cmd="claude" _cb_a
+    # The session-wide flags (model, teammate mode, effort, permission mode)
+    # come from _sandy_claude_base_args, the ONE place they are decided, so a
+    # named background session (.sandy/sessions) is created with exactly what
+    # this foreground pane would get. Each token is printf %q'd here, at the
+    # sink -- see the R1 notes kept on the helper.
+    _sandy_claude_base_args
+    for _cb_a in "${_SANDY_CB_ARGS[@]}"; do cmd+=" $(printf "%q" "$_cb_a")"; done
+    if [ -n "${SANDY_CHANNELS:-}" ] && ! [[ "${SANDY_AGENT:-claude}" == *,* ]]; then
+        # Native channels plugin path — only for single-agent claude sessions.
+        # For multi-agent, channels are delivered via the host-side tmux-inject relay.
+        _sandy_claude_channel_args
+        for _cb_a in ${_SANDY_CH_ARGS[@]+"${_SANDY_CH_ARGS[@]}"}; do cmd+=" $(printf "%q" "$_cb_a")"; done
+    fi
+    _sandy_claude_cmd_tail "$cmd" "$@"
+}
+
+# Shared session-wide claude flags, as an ARRAY (one element per argv token).
+# Callers quote at their own sink: build_claude_cmd with printf %q into a
+# `bash -c` string, the session bring-up as a real argv.
+_sandy_claude_base_args() {
+    _SANDY_CB_ARGS=(--model "${SANDY_MODEL:-claude-opus-5}")
     # SANDY_TEAMMATE_MODE (#teammate): was hardcoded to "tmux". Now a passive-safe
     # key, and OPT-IN — empty by default, so sandy passes no --teammate-mode at all
     # and Claude Code applies its own default. "off"/"none" are accepted as
@@ -9779,7 +9833,7 @@ build_claude_cmd() {
         # `gh pr checkout N && sandy` was enough: the payload ran before the
         # agent's first turn, ahead of any prompt-injection defence and
         # invisible to SANDY_TOOL_AUDIT, which instruments agent tool calls only.
-        *) cmd+=" --teammate-mode $(printf "%q" "$_tm")" ;;
+        *) _SANDY_CB_ARGS+=(--teammate-mode "$_tm") ;;
     esac
     # SANDY_EFFORT (#effort): pin Claude Code's reasoning effort so a run isn't
     # silently at the model default. Validated host-side; a separate axis from
@@ -9788,7 +9842,7 @@ build_claude_cmd() {
     # sink is `bash -c`, and quoting at the sink is the rule precisely so that
     # no builder's safety rests on remembering which keys some other block
     # happens to validate.
-    [ -n "${SANDY_EFFORT:-}" ] && cmd+=" --effort $(printf "%q" "$SANDY_EFFORT")"
+    [ -n "${SANDY_EFFORT:-}" ] && _SANDY_CB_ARGS+=(--effort "$SANDY_EFFORT")
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
         # Use --permission-mode (the documented modern flag) instead of the
         # legacy --dangerously-skip-permissions. Claude 2.1.x added runtime
@@ -9796,33 +9850,45 @@ build_claude_cmd() {
         # default mode; --permission-mode sets the session mode directly.
         # We also seed permissions.defaultMode in settings.json (see the
         # settings.json seed block) so /status reflects the same mode.
-        cmd+=" --permission-mode bypassPermissions"
+        _SANDY_CB_ARGS+=(--permission-mode bypassPermissions)
     fi
-    if [ -n "${SANDY_CHANNELS:-}" ] && ! [[ "${SANDY_AGENT:-claude}" == *,* ]]; then
-        # Native channels plugin path — only for single-agent claude sessions.
-        # For multi-agent, channels are delivered via the host-side tmux-inject relay.
-        # Canonical SANDY_CHANNELS is bare + comma-separated (telegram,discord) — the
-        # form the relay and install-loop already use, so one value works in every
-        # mode (#30). Claude's --channels wants space-separated fully-qualified plugin
-        # specs, so translate here. The legacy plugin:<name>@<marketplace> form (and
-        # space separators) are still accepted with a deprecation notice — never break
-        # an existing config.
-        local _ch_specs="" _ch_tok _ch_dep=0
-        for _ch_tok in ${SANDY_CHANNELS//,/ }; do
-            [ -z "$_ch_tok" ] && continue
-            # Quoted PER TOKEN, not once over the whole string: _ch_specs is a
-            # space-separated argument list, so a single %q over it would
-            # collapse the separators and pass one argument. Same injection
-            # sink as --teammate-mode above -- SANDY_CHANNELS is passive and
-            # ungated too.
-            case "$_ch_tok" in
-                plugin:*@*) _ch_specs+=" $(printf "%q" "$_ch_tok")"; _ch_dep=1 ;;
-                *)          _ch_specs+=" $(printf "%q" "plugin:${_ch_tok}@claude-plugins-official")" ;;
-            esac
-        done
-        [ "$_ch_dep" = 1 ] && echo "[sandy] WARN: SANDY_CHANNELS: the plugin:<name>@<marketplace> form is deprecated; use bare comma-separated names (e.g. 'telegram,discord'). Accepted for now." >&2
-        cmd+=" --channels${_ch_specs}"
-    fi
+    return 0
+}
+
+# SANDY_CHANNELS -> --channels <spec>..., as an ARRAY in _SANDY_CH_ARGS (empty
+# when SANDY_CHANNELS is). Shared by the foreground pane and the named session
+# that claims `receives: [channels]`.
+_sandy_claude_channel_args() {
+    _SANDY_CH_ARGS=()
+    [ -n "${SANDY_CHANNELS:-}" ] || return 0
+    # Canonical SANDY_CHANNELS is bare + comma-separated (telegram,discord) — the
+    # form the relay and install-loop already use, so one value works in every
+    # mode (#30). Claude's --channels wants space-separated fully-qualified plugin
+    # specs, so translate here. The legacy plugin:<name>@<marketplace> form (and
+    # space separators) are still accepted with a deprecation notice — never break
+    # an existing config.
+    local _ch_tok _ch_dep=0
+    _SANDY_CH_ARGS=(--channels)
+    for _ch_tok in ${SANDY_CHANNELS//,/ }; do
+        [ -z "$_ch_tok" ] && continue
+        # One ARRAY ELEMENT per token, %q'd per token at the sink: the
+        # spec list is several arguments, so a single %q over a joined
+        # string would collapse the separators and pass one argument.
+        # Same injection sink as --teammate-mode above -- SANDY_CHANNELS
+        # is passive and ungated too.
+        case "$_ch_tok" in
+            plugin:*@*) _SANDY_CH_ARGS+=("$_ch_tok"); _ch_dep=1 ;;
+            *)          _SANDY_CH_ARGS+=("plugin:${_ch_tok}@claude-plugins-official") ;;
+        esac
+    done
+    [ "$_ch_dep" = 1 ] && echo "[sandy] WARN: SANDY_CHANNELS: the plugin:<name>@<marketplace> form is deprecated; use bare comma-separated names (e.g. 'telegram,discord'). Accepted for now." >&2
+    [ "${#_SANDY_CH_ARGS[@]}" -gt 1 ] || _SANDY_CH_ARGS=()
+    return 0
+}
+
+# The tail of build_claude_cmd: auto-continue, pass-through args, exit pause.
+_sandy_claude_cmd_tail() {
+    local cmd="$1"; shift
     local auto_continue=true
     if [ "${SANDY_NEW_SESSION:-false}" = "true" ]; then
         auto_continue=false
@@ -9858,6 +9924,204 @@ build_claude_cmd() {
     fi
     cmd+="$(_sandy_translate_args claude "$@")"
     _sandy_wrap_cmd_exit_pause "Claude Code" "$cmd"
+}
+
+# ---- named Claude sessions (.sandy/sessions; decisions/2026-10-12-named-claude-sessions.md)
+# The host validated the session files and wrote one directory per session to
+# /opt/sandy/sessions/<slug>/ (name, receives, and optionally session, create,
+# resume, args, feature_args). SANDY_CLAUDE_SESSIONS_ACTIVE=1 only when they
+# apply to this launch (interactive or --start, claude selected).
+#
+# Measured against Claude Code 2.1.296 (test/spike/claude-sessions-spike.sh):
+#   - A background job's flags are FROZEN at creation (respawnFlags). After a
+#     relaunch, `claude --bg --resume <full id> [prompt]` with NO flags wakes
+#     it "with its saved options" and the prompt lands in the same transcript.
+#     ANY flag on that call starts a copy, and so does resuming a session that
+#     is already live -- so each session gets exactly ONE flag-less call here.
+#   - `claude agents --json --all` lists every job, stopped ones included, with
+#     its short `id`, full `sessionId` and `name`. A job's sessionId starts with
+#     its id; a woken process's own entry shows a transient sessionId until it
+#     takes a prompt, so liveness keys on the job id plus a pid.
+#   - A copy takes its prompt as its name, never the user's name, so a name
+#     match cannot be made ambiguous by a copy.
+_SANDY_CS_DIR="/opt/sandy/sessions"
+_SANDY_CS_STATUS="$HOME/.claude/.sandy-sessions.tsv"
+_SANDY_CS_REFUSE='{"crossSessionInbound":"refuse"}'
+read -r -d '' _SANDY_CS_JS <<'CSJS' || true
+const [mode, a1, a2] = process.argv.slice(1);
+const fs = require("fs");
+const pairs = t => {
+  const out = [];
+  for (let i = 0; i < t.length; i++) {
+    const x = t[i];
+    if (x.startsWith("-") && i + 1 < t.length && !t[i + 1].startsWith("-")) { out.push(x + " " + t[i + 1]); i++; }
+    else out.push(x);
+  }
+  return out.filter(p => p !== "--name" && !p.startsWith("--name "));
+};
+const refusePinned = t => pairs(t).some(p => {
+  if (!p.startsWith("--settings ")) return false;
+  try { return JSON.parse(p.slice(11)).crossSessionInbound === "refuse"; } catch (e) { return false; }
+});
+if (mode === "drift") {
+  let saved = null;
+  try { saved = JSON.parse(fs.readFileSync(a1, "utf8")).respawnFlags; } catch (e) {}
+  if (!Array.isArray(saved)) { console.log("unknown"); process.exit(0); }
+  const want = fs.readFileSync(a2, "utf8").split("\n").filter(x => x !== "");
+  const w = pairs(want), g = pairs(saved);
+  const missing = w.filter(p => !g.includes(p)), extra = g.filter(p => !w.includes(p));
+  console.log("pinned " + (refusePinned(saved) ? "yes" : "no"));
+  console.log("drift " + (missing.length || extra.length
+    ? (missing.length ? "missing: " + missing.join(" | ") : "") + (missing.length && extra.length ? "; " : "") + (extra.length ? "extra: " + extra.join(" | ") : "")
+    : "none"));
+  process.exit(0);
+}
+let s = "";
+process.stdin.on("data", d => s += d).on("end", () => {
+  let a;
+  try { a = JSON.parse(s); } catch (e) { console.log("error unparseable agents --json output"); return; }
+  if (!Array.isArray(a)) { console.log("error agents --json is not an array"); return; }
+  const jobs = a.filter(e => e && e.kind === "background" && typeof e.id === "string" && typeof e.sessionId === "string" && e.sessionId.startsWith(e.id));
+  if (mode === "find") {
+    if (a2) { console.log(jobs.some(e => e.sessionId === a2) ? "resume " + a2 : "missing " + a2); return; }
+    const ids = [...new Set(jobs.filter(e => e.name === a1).map(e => e.sessionId))];
+    console.log(ids.length === 1 ? "resume " + ids[0] : ids.length ? "ambiguous " + ids.join(",") : "create");
+  } else if (mode === "named") {
+    console.log([...new Set(jobs.filter(e => e.name === a1).map(e => e.sessionId))].join(","));
+  } else if (mode === "live") {
+    const id = a1.slice(0, 8);
+    console.log(a.some(e => e && e.pid && (e.id === id || e.sessionId === a1)) ? "live" : "not-live");
+  }
+});
+CSJS
+_sandy_cs_js() { node -e "$_SANDY_CS_JS" "$@"; }
+_sandy_cs_agents() { claude agents --json --all 2>/dev/null || true; }
+
+# The flags a NEW session is created with, one token per line on stdout:
+# sandy's session-wide flags, the operator's claude args, this session's own
+# operator args, the receiver-only feature args, then the receives routing.
+# A session that does not claim cross_session is pinned `refuse` with an
+# INLINE --settings (never a per-launch path: the flags are frozen at
+# creation and replayed on every later wake).
+_sandy_cs_create_flags() {
+    local d="$1" recv _t
+    local -a _aa=()
+    _sandy_claude_base_args
+    printf '%s\n' "${_SANDY_CB_ARGS[@]}"
+    if [ -n "${SANDY_AGENT_ARGS_CLAUDE:-}" ]; then read -ra _aa <<< "$SANDY_AGENT_ARGS_CLAUDE" || true; fi
+    for _t in ${_aa[@]+"${_aa[@]}"}; do printf '%s\n' "$_t"; done
+    for _t in $(cat "$d/args" 2>/dev/null) $(cat "$d/feature_args" 2>/dev/null); do printf '%s\n' "$_t"; done
+    recv=" $(cat "$d/receives" 2>/dev/null) "
+    case "$recv" in *" channels "*)
+        _sandy_claude_channel_args
+        for _t in ${_SANDY_CH_ARGS[@]+"${_SANDY_CH_ARGS[@]}"}; do printf '%s\n' "$_t"; done ;;
+    esac
+    case "$recv" in *" cross_session "*) ;; *) printf '%s\n%s\n' --settings "$_SANDY_CS_REFUSE" ;; esac
+}
+
+# Bring every declared session up: one call each, then wait for it to be live.
+# Writes $_SANDY_CS_STATUS (TAB-separated, first line `launch <id> done`) for
+# --start's readiness check and --print-state. Never fails the container: a
+# session that does not come up is reported, and --start exits 9. user-setup
+# runs under `set -e` without pipefail, so every pipeline that ends in node
+# carries its own `|| ...`: a node failure must report, never abort setup.
+_sandy_claude_sessions_up() {
+    local d slug name sid res full act st reason pinned drift out i tmp want stf
+    local -a flags
+    [ -d "$_SANDY_CS_DIR" ] || return 0
+    command -v node >/dev/null 2>&1 || { echo "[sandy] WARN: named Claude sessions need node in the image; none were started" >&2; return 0; }
+    mkdir -p "$HOME/.claude" 2>/dev/null || true
+    tmp="$_SANDY_CS_STATUS.tmp.$$"
+    printf 'launch\t%s\tdone\n' "${SANDY_LAUNCH_ID:-}" > "$tmp"
+    for d in "$_SANDY_CS_DIR"/*/; do
+        [ -d "$d" ] || continue
+        d="${d%/}"; slug="${d##*/}"
+        name="$(cat "$d/name")"; sid="$(cat "$d/session" 2>/dev/null || true)"
+        want="$HOME/.sandy-session-flags.$slug"
+        _sandy_cs_create_flags "$d" > "$want"
+        flags=()
+        while IFS= read -r i; do flags+=("$i"); done < "$want"
+        # --settings is LAST-WINS (CROSS_SESSION_INBOUND §9 Q3d, re-measured on
+        # 2.1.296): only the final occurrence is consulted. The inline refuse
+        # pin comes last, so an operator --settings would silently stop
+        # applying to this session. Say so rather than drop it quietly.
+        if [ "$(grep -cx -- --settings "$want")" -gt 1 ]; then
+            echo "[sandy] WARN: named session '$name' ($slug): your claude args pass --settings, and so does sandy's inbound refuse pin for a session that does not claim cross_session. Claude Code reads only the LAST --settings, so yours will not apply to this session if sandy creates it. Move those settings into a settings file, or claim cross_session for this session." >&2
+        fi
+        full=""; act=""; st="failed"; reason=""; pinned="-"; drift="-"
+        res="$(_sandy_cs_agents | _sandy_cs_js find "$name" "$sid")" || res=""
+        case "$res" in
+            "resume "*)
+                full="${res#resume }"; act=resume
+                if [ -s "$d/resume" ]; then
+                    out="$(claude --bg --resume "$full" "$(cat "$d/resume")" 2>&1)" || reason="claude --bg --resume exited non-zero"
+                else
+                    out="$(claude --bg --resume "$full" 2>&1)" || reason="claude --bg --resume exited non-zero"
+                fi ;;
+            create)
+                act=create
+                out="$(claude --bg --name "$name" ${flags[@]+"${flags[@]}"} "$(cat "$d/create")" 2>&1)" || reason="claude --bg exited non-zero" ;;
+            "ambiguous "*) st=ambiguous; reason="several sessions are named '$name' (${res#ambiguous }); pin one with session: in .sandy/sessions/$slug.md" ;;
+            "missing "*) st=missing; reason="session ${res#missing } is not a background session in this sandbox (claude agents --json --all)" ;;
+            *) reason="could not read claude agents --json: $res" ;;
+        esac
+        # A copy is the failure that matters most: it silently changes the id.
+        case "${out:-}" in *"started a copy"*) reason="Claude Code started a copy instead of resuming ($(printf '%s' "$out" | tr '\n\t' '  ' | cut -c1-200))" ;; esac
+        if [ -n "$act" ] && [ -z "$reason" ]; then
+            for i in $(seq 1 30); do
+                [ -n "$full" ] || full="$(_sandy_cs_agents | _sandy_cs_js named "$name")" || full=""
+                case "$full" in *,*) reason="several sessions are named '$name' after creating it ($full)"; break ;; esac
+                if [ -n "$full" ] && [ "$(_sandy_cs_agents | _sandy_cs_js live "$full" || true)" = live ]; then st=up; break; fi
+                sleep 2
+            done
+            [ "$st" = up ] || [ -n "$reason" ] || reason="not running 60s after $act"
+        fi
+        if [ -n "$full" ] && [ -z "${full##*-*}" ] && [ "${full#*,}" = "$full" ]; then
+            stf="$HOME/.claude/jobs/${full:0:8}/state.json"
+            while IFS= read -r i; do
+                case "$i" in pinned\ *) pinned="${i#pinned }" ;; drift\ *) drift="${i#drift }" ;; esac
+            done < <(_sandy_cs_js drift "$stf" "$want" 2>/dev/null || true)
+        fi
+        case " $(cat "$d/receives" 2>/dev/null) " in *" cross_session "*) pinned="receiver" ;; esac
+        if [ "$st" != up ]; then
+            echo "[sandy] WARN: named session '$name' ($slug) did not come up: $reason" >&2
+        fi
+        if [ "$pinned" = no ]; then
+            echo "[sandy] WARN: named session '$name' ($slug) does not claim cross_session but was created without sandy's inbound refuse pin, so it can receive cross-session messages. Recreate it to close this (its flags are fixed at creation)." >&2
+        fi
+        case "$drift" in -|none|unknown) ;; *)
+            echo "[sandy] WARN: named session '$name' ($slug) was created with different flags from what sandy would pass now ($drift). Its flags are fixed at creation; recreate it to apply the change." >&2 ;;
+        esac
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$slug" "$st" "${full:--}" "$(printf '%s' "$name" | tr '\t' ' ')" "$pinned" "$(printf '%s' "$drift" | tr '\t\n' '  ')" "$(printf '%s' "${reason:--}" | tr '\t\n' '  ')" >> "$tmp"
+        rm -f "$want" 2>/dev/null || true
+    done
+    mv -f "$tmp" "$_SANDY_CS_STATUS" || echo "[sandy] WARN: could not write $_SANDY_CS_STATUS; --start will report the named sessions as unconfirmed" >&2
+}
+
+# The claude pane when named sessions apply: Claude Code's agent view, where
+# Right attaches to a session and Left returns. It takes the subset of the
+# session-wide flags it accepts, so a session dispatched from the view by hand
+# matches the declared ones (claude agents --help, 2.1.291).
+build_claude_agents_cmd() {
+    local cmd="claude agents" _i
+    local -a _a=()
+    _sandy_claude_base_args
+    for ((_i = 0; _i < ${#_SANDY_CB_ARGS[@]}; _i++)); do
+        case "${_SANDY_CB_ARGS[$_i]}" in
+            --model|--effort) cmd+=" $(printf "%q" "${_SANDY_CB_ARGS[$_i]}") $(printf "%q" "${_SANDY_CB_ARGS[$((_i + 1))]}")"; _i=$((_i + 1)) ;;
+            "--permission-mode") [ "${_SANDY_CB_ARGS[$((_i + 1))]}" = bypassPermissions ] && cmd+=" --dangerously-skip-permissions"; _i=$((_i + 1)) ;;
+        esac
+    done
+    _a=("$@")
+    for ((_i = 0; _i < ${#_a[@]}; _i++)); do
+        case "${_a[$_i]}" in
+            --mcp-config|--add-dir)
+                if [ $((_i + 1)) -lt ${#_a[@]} ]; then
+                    cmd+=" $(printf "%q" "${_a[$_i]}") $(printf "%q" "${_a[$((_i + 1))]}")"; _i=$((_i + 1))
+                fi ;;
+        esac
+    done
+    _sandy_wrap_cmd_exit_pause "Claude Code agent view" "$cmd"
 }
 
 # #427: does this sandbox hold an INTERACTIVE codex session for this workspace?
@@ -10109,7 +10373,12 @@ _sandy_build_agent_cmd() {
         read -ra _sandy_aa_pre <<< "$_sandy_aa_val" || true
     fi
     case "$1" in
-        claude)   build_claude_cmd   ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
+        claude)
+            if [ "${SANDY_CLAUDE_SESSIONS_ACTIVE:-0}" = "1" ] && [ "$_sandy_is_headless" != "true" ]; then
+                build_claude_agents_cmd ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"}
+            else
+                build_claude_cmd   ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}"
+            fi ;;
         gemini)   build_gemini_cmd   ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
         codex)    build_codex_cmd    ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
         opencode) build_opencode_cmd ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
@@ -10317,6 +10586,14 @@ cd "$WORKSPACE"
 # for both, so this gate is the in-container half of the same decision, not
 # the only half.
 if [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then _sandy_start_entries; fi
+
+# Named Claude sessions come up BEFORE the pane, so `claude agents` shows them
+# and --start's readiness check (which waits for the tmux session) finds the
+# status file already written. The host sets SANDY_CLAUDE_SESSIONS_ACTIVE only
+# for interactive and --start launches; this gate is the in-container half.
+if [ "${SANDY_CLAUDE_SESSIONS_ACTIVE:-0}" = "1" ] && [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then
+    _sandy_claude_sessions_up
+fi
 
 if [ "$_SANDY_IS_MULTI" = false ]; then
     # --- Single-agent launch ---
@@ -10880,6 +11157,45 @@ fi
 # as the supervisor) also skips the block and falls through to the normal
 # launch tail — which itself branches on SANDY_DAEMON_SUPERVISOR further down
 # (RUN_FLAGS assembly, and the block-and-wait launch tail) to run detached.
+# --start readiness for named Claude sessions (decision 5). Reads the status
+# file the container's bring-up wrote BEFORE it created the tmux session, so by
+# the time has-session succeeds it is already there for THIS launch (its first
+# line carries the launch id; a stale file from an earlier container is never
+# trusted). Returns 0 when sessions do not apply or all are up; otherwise
+# prints each failure and returns 1. The file is written inside the agent's
+# own home, so it is a report, not a security boundary: it decides an exit
+# code, never what runs.
+_sandy_cs_start_check() {
+    local c="$1" out line slug st sid name pinned drift reason bad=0 i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        out="$(docker exec -u "$(id -u)" "$c" sh -c '
+            [ "${SANDY_CLAUDE_SESSIONS_ACTIVE:-0}" = 1 ] || { echo inactive; exit 0; }
+            f=/home/sandy/.claude/.sandy-sessions.tsv
+            if head -n 1 "$f" 2>/dev/null | grep -qx "launch	${SANDY_LAUNCH_ID:-none}	done"; then cat "$f"; else echo pending; fi
+        ' 2>/dev/null)" || out="pending"
+        case "$out" in inactive) return 0 ;; pending|"") sleep 3 ;; *) break ;; esac
+    done
+    case "$out" in
+        pending|"")
+            error "Named Claude sessions: the container never reported their status (expected /home/sandy/.claude/.sandy-sessions.tsv for this launch)."
+            error "The container is still running; check it with: sandy --attach"
+            return 1 ;;
+    esac
+    while IFS=$'\t' read -r slug st sid name pinned drift reason; do
+        [ "$slug" = launch ] && continue
+        [ -n "$slug" ] || continue
+        if [ "$st" != up ]; then
+            error "Named Claude session '$name' ($slug) is not up: $st${reason:+ - $reason}"
+            bad=1
+        fi
+    done <<< "$out"
+    if [ "$bad" = 1 ]; then
+        error "The container is left running; the sessions that came up keep working. Fix .sandy/sessions/ and relaunch, or attach with: sandy --attach"
+        return 1
+    fi
+    return 0
+}
+
 if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; then
     # H3 — --start launches a PERSISTENT INTERACTIVE daemon session; a headless
     # one-shot (-p/--print/--prompt) is incompatible: the agent would run once and
@@ -11099,6 +11415,14 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
     rm -f "$_sandy_fatal_marker" 2>/dev/null || true
     if [ "$_sandy_ready" = "true" ]; then
         _sandy_daemon_name="$(docker inspect -f '{{ index .Config.Labels "sandy.session" }}' "$_sandy_daemon_container" 2>/dev/null || true)"
+        # Named Claude sessions (decision 5): "ready" means every declared
+        # session is up under its expected id, not merely that the pane
+        # exists. The container is LEFT RUNNING on a failure, so the sessions
+        # that did come up keep working; exit 9 names the ones that did not.
+        if ! _sandy_cs_start_check "$_sandy_daemon_container"; then
+            rm -f "$_sandy_daemon_log" 2>/dev/null || true
+            exit 9
+        fi
         info "Daemon session ready: ${_sandy_daemon_name:-$_sandy_daemon_container} (container ${_sandy_daemon_container:0:12})"
         rm -f "$_sandy_daemon_log" 2>/dev/null || true
         exit 0
@@ -11116,6 +11440,8 @@ if [ "$SANDY_START" = "true" ] && [ "${SANDY_DAEMON_SUPERVISOR:-0}" != "1" ]; th
         #   6  refused before launch  (unanswerable approval; ACTIONABLE)
         #   7  container crash-looping
         #   8  timed out waiting for the inner session
+        #   9  (above, on the ready path) a declared named Claude session did
+        #      not come up; the container is left running
         # 1 remains the catch-all for anything not classified above.
         _sandy_start_rc=1
         if [ "$_sandy_sup_fatal" = "true" ]; then
@@ -12882,12 +13208,157 @@ SANDBOX_DIR="$SANDY_HOME/sandboxes/${SANDBOX_NAME}"
 # `config` in a subdirectory, which docker sent and a RUN could execute while
 # edits to it never re-prompted. Regular files only (`-type f`): a symlink is
 # neither hashed nor staged, so it cannot carry unreviewed content in.
+# ---- named Claude sessions: .sandy/sessions/<slug>.md -------------------------
+# decisions/2026-10-12-named-claude-sessions.md. Each file declares one
+# long-lived background Claude Code session:
+#
+#   ---
+#   name: Release Captain                       (required)
+#   session: 3ed73c61-cff5-46e2-8e89-1687976c6821   (optional: adopt this id)
+#   receives: [cross_session, channels]         (optional, closed set)
+#   ---
+#   ## On create
+#   <first prompt of a new session>
+#   ## On resume
+#   <sent once each time the session is resumed>
+#
+# STRICT, like a feature manifest: any other front-matter key, any other `#` or
+# `##` heading, text outside the two sections, a duplicate key, a symlink or a
+# non-.md entry REFUSES the launch, naming the file and line. A typo that
+# silently did nothing would leave an agent un-started with every check green.
+# `###` and deeper are body text, so a prompt can carry its own structure.
+#
+# _sandy_sessions_parse DIR [OUT]. Validates every file in DIR; with OUT, also
+# writes OUT/<slug>/{name,session,receives,create,resume} for the container.
+# Sets _SANDY_CS_SLUGS (space-separated), _SANDY_CS_CROSS / _SANDY_CS_CHANNELS
+# (the claimant slug or empty), and on failure _SANDY_CS_ERR (return 1).
+_sandy_sessions_parse() {
+    local dir="$1" out="${2:-}" f base slug ln line state key val trimmed
+    local name sid recv sec create resume seen_keys body_seen r rv
+    local names="" sids="" re_slug='^[a-z0-9][a-z0-9._-]*$'
+    local re_name='^[A-Za-z0-9][A-Za-z0-9 ._-]*$'
+    local re_uuid='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    local re_kv='^([A-Za-z_][A-Za-z0-9_]*):[[:space:]]*(.*)$'
+    local re_head='^##?[[:space:]]'
+    _SANDY_CS_SLUGS=""; _SANDY_CS_CROSS=""; _SANDY_CS_CHANNELS=""; _SANDY_CS_ERR=""
+    if [ -L "$dir" ]; then _SANDY_CS_ERR="$dir is a symlink; sandy reads session files only from a real directory"; return 1; fi
+    [ -d "$dir" ] || return 0
+    for f in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        base="${f##*/}"
+        if [ -L "$f" ]; then _SANDY_CS_ERR="$f is a symlink"; return 1; fi
+        if [ ! -f "$f" ]; then _SANDY_CS_ERR="$f is not a regular file (only <slug>.md files belong in .sandy/sessions/)"; return 1; fi
+        case "$base" in
+            *.md) slug="${base%.md}" ;;
+            *) _SANDY_CS_ERR="$f is not a .md file (only <slug>.md files belong in .sandy/sessions/)"; return 1 ;;
+        esac
+        if ! [[ "$slug" =~ $re_slug ]]; then
+            _SANDY_CS_ERR="$f: the file name must be <slug>.md with a slug of lower-case letters, digits, '.', '_' or '-', starting with a letter or digit"; return 1
+        fi
+        name=""; sid=""; recv=""; create=""; resume=""; sec=""; seen_keys=" "; state=start; ln=0; body_seen=0
+        while IFS= read -r line || [ -n "$line" ]; do
+            ln=$((ln + 1)); line="${line%$'\r'}"
+            case "$state" in
+            start)
+                if [ "$line" != "---" ]; then _SANDY_CS_ERR="$f:$ln: the file must start with a '---' front-matter line"; return 1; fi
+                state=front ;;
+            front)
+                if [ "$line" = "---" ]; then state=body; continue; fi
+                trimmed="${line#"${line%%[![:space:]]*}"}"
+                [ -n "$trimmed" ] || continue
+                if ! [[ "$line" =~ $re_kv ]]; then _SANDY_CS_ERR="$f:$ln: expected 'key: value' in the front matter"; return 1; fi
+                key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
+                val="${val%"${val##*[![:space:]]}"}"
+                case "$seen_keys" in *" $key "*) _SANDY_CS_ERR="$f:$ln: '$key' appears twice"; return 1 ;; esac
+                seen_keys="$seen_keys$key "
+                case "$key" in
+                    name)
+                        if [ "${#val}" -gt 64 ] || ! [[ "$val" =~ $re_name ]]; then
+                            _SANDY_CS_ERR="$f:$ln: name must be 1-64 characters of letters, digits, spaces, '.', '_' or '-', starting with a letter or digit"; return 1
+                        fi
+                        name="$val" ;;
+                    session)
+                        if ! [[ "$val" =~ $re_uuid ]]; then _SANDY_CS_ERR="$f:$ln: session must be a full Claude Code session id (lower-case UUID)"; return 1; fi
+                        sid="$val" ;;
+                    receives)
+                        val="${val#[}"; val="${val%]}"; recv=""
+                        for r in ${val//,/ }; do
+                            case "$r" in
+                                cross_session|channels) ;;
+                                *) _SANDY_CS_ERR="$f:$ln: receives: unknown value '$r' (known: cross_session, channels)"; return 1 ;;
+                            esac
+                            case " $recv " in *" $r "*) _SANDY_CS_ERR="$f:$ln: receives lists '$r' twice"; return 1 ;; esac
+                            recv="${recv:+$recv }$r"
+                        done ;;
+                    *) _SANDY_CS_ERR="$f:$ln: unknown key '$key' (known: name, session, receives)"; return 1 ;;
+                esac ;;
+            body)
+                if [[ "$line" =~ $re_head ]]; then
+                    trimmed="${line%"${line##*[![:space:]]}"}"
+                    case "$trimmed" in
+                        "## On create") rv=create ;;
+                        "## On resume") rv=resume ;;
+                        *) _SANDY_CS_ERR="$f:$ln: unknown heading '$trimmed' (known: '## On create', '## On resume'; use ### or deeper inside a section)"; return 1 ;;
+                    esac
+                    case "$body_seen" in *"$rv"*) _SANDY_CS_ERR="$f:$ln: '$trimmed' appears twice"; return 1 ;; esac
+                    body_seen="$body_seen $rv"; sec="$rv"; continue
+                fi
+                if [ -z "$sec" ]; then
+                    trimmed="${line#"${line%%[![:space:]]*}"}"
+                    [ -z "$trimmed" ] && continue
+                    _SANDY_CS_ERR="$f:$ln: text outside a section (start it with '## On create' or '## On resume')"; return 1
+                fi
+                if [ "$sec" = create ]; then create="$create$line"$'\n'; else resume="$resume$line"$'\n'; fi ;;
+            esac
+        done < "$f"
+        if [ "$state" = start ]; then _SANDY_CS_ERR="$f: empty file"; return 1; fi
+        if [ "$state" = front ]; then _SANDY_CS_ERR="$f: the front matter is never closed with '---'"; return 1; fi
+        # Trim leading and trailing blank lines from each section.
+        create="$(printf '%s' "$create" | awk 'NF{p=1} p' | awk '{a[NR]=$0} NF{last=NR} END{for(i=1;i<=last;i++) print a[i]}')"
+        resume="$(printf '%s' "$resume" | awk 'NF{p=1} p' | awk '{a[NR]=$0} NF{last=NR} END{for(i=1;i<=last;i++) print a[i]}')"
+        if [ -z "$name" ]; then _SANDY_CS_ERR="$f: 'name' is required"; return 1; fi
+        if [ -z "$sid" ] && [ -z "$create" ]; then
+            _SANDY_CS_ERR="$f: '## On create' is required unless 'session:' names an existing session (sandy may have to create it)"; return 1
+        fi
+        case "$names" in *"|$name|"*) _SANDY_CS_ERR="$f: name '$name' is declared by another session file too"; return 1 ;; esac
+        names="${names:-|}$name|"
+        if [ -n "$sid" ]; then
+            case "$sids" in *" $sid "*) _SANDY_CS_ERR="$f: session $sid is declared by another session file too"; return 1 ;; esac
+            sids="$sids $sid "
+        fi
+        for r in $recv; do
+            case "$r" in
+                cross_session)
+                    if [ -n "$_SANDY_CS_CROSS" ]; then _SANDY_CS_ERR="receives: cross_session is claimed by both '$_SANDY_CS_CROSS' and '$slug'; at most one session may claim it"; return 1; fi
+                    _SANDY_CS_CROSS="$slug" ;;
+                channels)
+                    if [ -n "$_SANDY_CS_CHANNELS" ]; then _SANDY_CS_ERR="receives: channels is claimed by both '$_SANDY_CS_CHANNELS' and '$slug'; at most one session may claim it"; return 1; fi
+                    _SANDY_CS_CHANNELS="$slug" ;;
+            esac
+        done
+        _SANDY_CS_SLUGS="${_SANDY_CS_SLUGS:+$_SANDY_CS_SLUGS }$slug"
+        if [ -n "$out" ]; then
+            mkdir -p "$out/$slug" || { _SANDY_CS_ERR="cannot create $out/$slug"; return 1; }
+            printf '%s\n' "$name" > "$out/$slug/name"
+            printf '%s\n' "$recv" > "$out/$slug/receives"
+            [ -n "$sid" ] && printf '%s\n' "$sid" > "$out/$slug/session"
+            [ -n "$create" ] && printf '%s\n' "$create" > "$out/$slug/create"
+            [ -n "$resume" ] && printf '%s\n' "$resume" > "$out/$slug/resume"
+        fi
+    done
+    return 0
+}
+
 _sandy_context_hash() {
     local dir="$1" f h out=""
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         [ "$f" = "$dir/config" ] && continue
         [ "$f" = "$dir/.secrets" ] && continue
+        # Named Claude session files are launch configuration, not build
+        # context: editing one must not re-prompt the Dockerfile approval or
+        # rebuild the project image (decisions/2026-10-12-named-claude-sessions.md).
+        case "$f" in "$dir"/sessions/*) continue ;; esac
         if [ "${2:-}" = "--list" ]; then
             printf '%s\n' "${f#"$dir"/}"
             continue
@@ -15403,6 +15874,71 @@ unset _sandy_fe _sandy_fe_f
 # (#355) and hard-errors on any set value, so `${SANDY_HANDOFF_DIRS:-1}` could
 # never resolve to anything but its default. Removed (2.6.0, #382, decision 3).
 
+# BEGIN named claude sessions (.sandy/sessions; decisions/2026-10-12-named-claude-sessions.md)
+# Decides whether the workspace's session files apply to THIS launch, validates
+# them strictly, and hands the container one directory per session under the
+# launch dir (mounted :ro at /opt/sandy/sessions). Interactive and --start
+# only: headless, --remote and --provision ignore them with one notice, as
+# does SANDY_CLAUDE_SESSIONS=0 (env-only, so a committed config cannot switch
+# an operator's agents off). Must run before the cross-session block (a
+# session claiming cross_session is a declared need) and before the per-agent
+# args block (a receiving feature's args go to that session only).
+_SANDY_CS_ACTIVE=0
+_SANDY_CS_SLUGS=""; _SANDY_CS_CROSS=""; _SANDY_CS_CHANNELS=""
+_sandy_cs_src="$WORK_DIR/.sandy/sessions"
+if [ -e "$_sandy_cs_src" ] || [ -L "$_sandy_cs_src" ]; then
+    _sandy_cs_skip=""
+    if ! _sandy_agent_has claude; then _sandy_cs_skip="claude is not among the selected agents"
+    elif [ "${_sandy_is_headless:-false}" = "true" ]; then _sandy_cs_skip="headless (-p) run"
+    elif [ "${SANDY_REMOTE_CONTROL:-false}" = "true" ]; then _sandy_cs_skip="--remote run"
+    elif [ "${SANDY_PROVISION:-0}" = "1" ]; then _sandy_cs_skip="--provision run"
+    elif [ "${SANDY_CLAUDE_SESSIONS:-1}" = "0" ]; then _sandy_cs_skip="SANDY_CLAUDE_SESSIONS=0"
+    fi
+    if [ -n "$_sandy_cs_skip" ]; then
+        info "Named Claude sessions in .sandy/sessions/ not applied: $_sandy_cs_skip."
+    else
+        _sandy_cs_out="$(_sandy_launch_dir)/sessions"
+        if ! _sandy_sessions_parse "$_sandy_cs_src" "$_sandy_cs_out"; then
+            error "Named Claude sessions: $_SANDY_CS_ERR"
+            error "Fix the file (format: docs/guide/agents.md, \"Named Claude sessions\"), or launch once with SANDY_CLAUDE_SESSIONS=0."
+            _sandy_daemon_fatal
+            exit 1
+        fi
+        if [ -n "$_SANDY_CS_SLUGS" ]; then
+            _SANDY_CS_ACTIVE=1
+            # Per-session operator args: $SANDBOX_DIR/agent-args.claude.<slug>,
+            # privileged by where it lives (a repository cannot reach it), the
+            # same rule and the same filter as agent-args.<agent>. Applied only
+            # when sandy CREATES the session: its flags are fixed after that.
+            for _sandy_cs_slug in $_SANDY_CS_SLUGS; do
+                _sandy_cs_af="$SANDBOX_DIR/agent-args.claude.$_sandy_cs_slug"
+                if [ -f "$_sandy_cs_af" ]; then
+                    _sandy_filter_agent_args "$(cat "$_sandy_cs_af")" "agent-args.claude.$_sandy_cs_slug"
+                    [ -n "$_SANDY_AA_FILTERED" ] && printf '%s\n' "$_SANDY_AA_FILTERED" > "$_sandy_cs_out/$_sandy_cs_slug/args"
+                fi
+            done
+            if [ -n "${SANDY_CHANNELS:-}" ] && [ -z "$_SANDY_CS_CHANNELS" ]; then
+                error "SANDY_CHANNELS is set, but no session in .sandy/sessions/ claims 'receives: [channels]'."
+                error "With named sessions the pane is Claude Code's agent view, so one session must receive the channel; add channels to that session's receives."
+                _sandy_daemon_fatal
+                exit 1
+            fi
+            if [ -n "$_SANDY_CS_CHANNELS" ] && [ -z "${SANDY_CHANNELS:-}" ]; then
+                warn "Session '$_SANDY_CS_CHANNELS' claims 'receives: [channels]', but SANDY_CHANNELS is empty, so there is no channel to receive."
+            fi
+            if [ -n "${_sandy_csi_need:-}" ] && [ -z "$_SANDY_CS_CROSS" ]; then
+                error "Feature ${_sandy_csi_need// /, } declares receives cross_session, but no session in .sandy/sessions/ claims 'receives: [cross_session]'."
+                error "Name the session that should receive cross-session messages (and this feature's agent_args) by adding cross_session to its receives."
+                _sandy_daemon_fatal
+                exit 1
+            fi
+            info "Named Claude sessions: $(printf '%s' "$_SANDY_CS_SLUGS" | sed 's/ /, /g')${_SANDY_CS_CROSS:+ (cross_session -> $_SANDY_CS_CROSS)}${_SANDY_CS_CHANNELS:+ (channels -> $_SANDY_CS_CHANNELS)}; the claude pane is Claude Code's agent view."
+        fi
+    fi
+    unset _sandy_cs_skip _sandy_cs_slug _sandy_cs_af
+fi
+# END named claude sessions
+
 # BEGIN cross-session inbound (crossSessionInbound pin, Claude-only; sandy 1.10.0)
 # Writes ONLY the crossSessionInbound key, merge-preserving and idempotent, every
 # launch, into TWO targets — measured against the real 2.1.251 resolver, not assumed:
@@ -15584,6 +16120,13 @@ if _sandy_agent_has claude; then
     if [ -n "${SANDY_CROSS_SESSION_INBOUND:-}" ]; then
         _sandy_csi_val="$SANDY_CROSS_SESSION_INBOUND"; _sandy_csi_why="explicit SANDY_CROSS_SESSION_INBOUND"
         _sandy_csi_src="explicit"
+    elif [ "${_SANDY_CS_ACTIVE:-0}" = 1 ] && [ -n "${_SANDY_CS_CROSS:-}" ]; then
+        # A named session claims cross_session (decision 3). The shared files
+        # say accept; every other named session was created with an inline
+        # --settings refuse, which outranks userSettings (CROSS_SESSION_INBOUND
+        # §9, Q2), so only the claimant receives.
+        _sandy_csi_val="accept"; _sandy_csi_why="default: named session '$_SANDY_CS_CROSS' claims receives cross_session"
+        _sandy_csi_src="session:$_SANDY_CS_CROSS"
     elif [ -n "$_sandy_csi_need" ] && [ -z "$_sandy_csi_nostart" ]; then
         _sandy_csi_val="accept"; _sandy_csi_why="default: feature $_sandy_csi_need_disp declares receives cross_session"
         _sandy_csi_src="feature:${_sandy_csi_need%% *}"
@@ -15647,6 +16190,11 @@ _sandy_fm_agent_args_for() {
     # cannot answer that -- the same reason the records carry the feature name
     # at all (#348).
     _SANDY_FM_AA_CONTRIB=""
+    # Named sessions (decision 3): a feature that declares receives
+    # cross_session hands its args to the ONE session claiming it, not to the
+    # whole agent. Its tokens go to _SANDY_FM_AA_DIVERTED instead; it is still
+    # recorded in _SANDY_FM_AA_JSON, because it was still passed.
+    _SANDY_FM_AA_DIVERTED=""
     [ -n "$_SANDY_FM_AA_RECORDS" ] || return 0
     local _feats="" _line _f _rest _a
     while IFS= read -r _line; do
@@ -15669,8 +16217,12 @@ _sandy_fm_agent_args_for() {
         [ -n "$_toks" ] || continue
         _sandy_filter_agent_args "$_toks" "agent_args (feature '$_f')"
         [ -n "$_SANDY_AA_FILTERED" ] || continue
-        _SANDY_FM_AA_TOKENS="${_SANDY_FM_AA_TOKENS:+$_SANDY_FM_AA_TOKENS }$_SANDY_AA_FILTERED"
-        _SANDY_FM_AA_CONTRIB="${_SANDY_FM_AA_CONTRIB}feature '$_f'	$_SANDY_AA_FILTERED"$'\n'
+        case " ${_SANDY_FM_AA_DIVERT:-} " in
+            *" $_f "*) _SANDY_FM_AA_DIVERTED="${_SANDY_FM_AA_DIVERTED:+$_SANDY_FM_AA_DIVERTED }$_SANDY_AA_FILTERED" ;;
+            *)
+                _SANDY_FM_AA_TOKENS="${_SANDY_FM_AA_TOKENS:+$_SANDY_FM_AA_TOKENS }$_SANDY_AA_FILTERED"
+                _SANDY_FM_AA_CONTRIB="${_SANDY_FM_AA_CONTRIB}feature '$_f'	$_SANDY_AA_FILTERED"$'\n' ;;
+        esac
         _ajson=""
         for _tok in $_SANDY_AA_FILTERED; do
             _ajson="${_ajson:+$_ajson,}\"$(_sandy_fm_jesc "$_tok")\""
@@ -15763,7 +16315,15 @@ for _sandy_aa_agent in "${_SANDY_AGENTS[@]}"; do
     # prepended -- afterwards the list is merged and attribution is gone, which
     # is precisely what made the original bug unreportable.
     _sandy_aa_operator_val="$_sandy_aa_val"
+    _SANDY_FM_AA_DIVERT=""
+    if [ "$_sandy_aa_agent" = claude ] && [ "${_SANDY_CS_ACTIVE:-0}" = 1 ] && [ -n "${_SANDY_CS_CROSS:-}" ]; then
+        _SANDY_FM_AA_DIVERT="${_sandy_csi_need:-}"
+    fi
     _sandy_fm_agent_args_for "$_sandy_aa_agent"
+    if [ -n "${_SANDY_FM_AA_DIVERTED:-}" ]; then
+        printf '%s\n' "$_SANDY_FM_AA_DIVERTED" > "$(_sandy_launch_dir)/sessions/$_SANDY_CS_CROSS/feature_args"
+        info "Feature agent_args from ${_SANDY_FM_AA_DIVERT// /, } go to named session '$_SANDY_CS_CROSS' only (it claims cross_session)."
+    fi
     if [ -n "$_SANDY_FM_AA_TOKENS" ]; then
         _sandy_aa_val="$_SANDY_FM_AA_TOKENS${_sandy_aa_val:+ $_sandy_aa_val}"
     fi
@@ -18375,6 +18935,13 @@ RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_GEMINI=${SANDY_AGENT_ARGS_GEMINI}")
 RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_CODEX=${SANDY_AGENT_ARGS_CODEX}")
 RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_OPENCODE=${SANDY_AGENT_ARGS_OPENCODE}")
 RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_GROK=${SANDY_AGENT_ARGS_GROK}")
+# Named Claude sessions: the validated per-session data, read-only, from this
+# launch's own directory (a fresh path per launch, #400). Unconditional value,
+# so a forged env from any config source is always overwritten.
+RUN_FLAGS+=(-e "SANDY_CLAUDE_SESSIONS_ACTIVE=${_SANDY_CS_ACTIVE:-0}")
+if [ "${_SANDY_CS_ACTIVE:-0}" = 1 ]; then
+    RUN_FLAGS+=(-v "$(_sandy_launch_dir)/sessions:/opt/sandy/sessions:ro")
+fi
 # SANDY_TEAMMATE_MODE (#teammate): build_claude_cmd runs CONTAINER-side (it lives
 # in the user-setup.sh heredoc), so the value has to cross the boundary or the key
 # would silently do nothing and always fall back to the default.
@@ -18552,13 +19119,27 @@ fi
 _sandy_image_pl=false; [ "${_SANDY_PROJECT_LAYER:-}" = true ] && _sandy_image_pl=true
 _sandy_image_json="{\"name\": \"$_sandy_image_name\", \"id\": $_sandy_image_id, \"project_layer\": $_sandy_image_pl}"
 unset _sandy_image_name _sandy_image_id _sandy_image_pl
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "cross_session_inbound_source": %s,\n  "agents": %s,\n  "image": %s,\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "feature_entries": {%s},\n  "offline": %s,\n  "cred_mode": "%s"\n}\n' \
+# claude_sessions: the named sessions this launch DECLARED (slug, name,
+# receives), [] when none applied -- never null (§177's marker invariant).
+# Whether each came up is runtime state the container reports; --print-state
+# reads it from the status file, not from here. ONE line (§88b).
+_sandy_cs_json=""
+if [ "${_SANDY_CS_ACTIVE:-0}" = 1 ]; then
+    for _sandy_cs_slug in $_SANDY_CS_SLUGS; do
+        _sandy_cs_d="$(_sandy_launch_dir)/sessions/$_sandy_cs_slug"
+        _sandy_cs_rj=""
+        for _sandy_cs_r in $(cat "$_sandy_cs_d/receives" 2>/dev/null); do _sandy_cs_rj="${_sandy_cs_rj:+$_sandy_cs_rj, }\"$_sandy_cs_r\""; done
+        _sandy_cs_json="${_sandy_cs_json:+$_sandy_cs_json, }{\"slug\": \"$_sandy_cs_slug\", \"name\": \"$(_sandy_fm_jesc "$(cat "$_sandy_cs_d/name")")\", \"receives\": [$_sandy_cs_rj]}"
+    done
+fi
+unset _sandy_cs_slug _sandy_cs_d _sandy_cs_rj _sandy_cs_r
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "cross_session_inbound_source": %s,\n  "agents": %s,\n  "image": %s,\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "feature_entries": {%s},\n  "offline": %s,\n  "cred_mode": "%s",\n  "claude_sessions": [%s]\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_sandy_session_nonce" "$_sandy_effort_json" \
     "$_sandy_perm_mode_json" "${_sandy_csi_json:-null}" "${_sandy_csi_src_json:-null}" "$_sandy_agents_json" \
     "${_sandy_image_json:-null}" "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${_sandy_fe_json:-}" \
     "$(if [ "${SANDY_OFFLINE:-0}" = 1 ]; then echo true; else echo false; fi)" "${CRED_MODE:-none}" \
-    > "$_sandy_session_file"
+    "${_sandy_cs_json:-}" > "$_sandy_session_file"
 # Rename the composed temp into place (#400, see where it is assigned). The
 # final path is derived, so a caller that set the variable to a plain path
 # (the test suite does) simply wrote it directly.
@@ -18620,7 +19201,10 @@ if _sandy_agent_has claude; then
     # Channels env vars: for single-agent 'claude' these drive the in-container plugin path;
     # for multi-agent the host-side relay uses the host-side env vars directly, but
     # we still forward them in case plugins are also configured.
-    if [ -n "${SANDY_CHANNELS:-}" ] && [ "$_SANDY_IS_MULTI" = false ]; then
+    if [ -n "${SANDY_CHANNELS:-}" ] && { [ "$_SANDY_IS_MULTI" = false ] || [ "${_SANDY_CS_ACTIVE:-0}" = 1 ]; }; then
+        # With named sessions the channel plugin runs in the session claiming
+        # `receives: [channels]`, in a combo too (the pane is agent view, which
+        # a keystroke relay cannot drive).
         RUN_FLAGS+=(-e "SANDY_CHANNELS=$SANDY_CHANNELS")
     fi
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
@@ -19263,7 +19847,8 @@ fi
 
 # Launch host-side channel relay for non-claude or multi-agent (single claude uses in-container plugin path)
 CHANNEL_RELAY_PID=""
-if { [ "$_SANDY_IS_MULTI" = true ] || ! _sandy_agent_has claude; } && [ -n "${SANDY_CHANNELS:-}" ]; then
+if { [ "$_SANDY_IS_MULTI" = true ] || ! _sandy_agent_has claude; } && [ -n "${SANDY_CHANNELS:-}" ] \
+   && [ "${_SANDY_CS_ACTIVE:-0}" != 1 ]; then
     case ",$SANDY_CHANNELS," in
         *,telegram,*)
             if [ -z "${TELEGRAM_ALLOWED_SENDERS:-}" ]; then

@@ -776,7 +776,28 @@ _sandy_wrap_cmd_exit_pause() {
 }
 
 build_claude_cmd() {
-    local cmd="claude --model ${SANDY_MODEL:-claude-opus-5}"
+    local cmd="claude" _cb_a
+    # The session-wide flags (model, teammate mode, effort, permission mode)
+    # come from _sandy_claude_base_args, the ONE place they are decided, so a
+    # named background session (.sandy/sessions) is created with exactly what
+    # this foreground pane would get. Each token is printf %q'd here, at the
+    # sink -- see the R1 notes kept on the helper.
+    _sandy_claude_base_args
+    for _cb_a in "${_SANDY_CB_ARGS[@]}"; do cmd+=" $(printf "%q" "$_cb_a")"; done
+    if [ -n "${SANDY_CHANNELS:-}" ] && ! [[ "${SANDY_AGENT:-claude}" == *,* ]]; then
+        # Native channels plugin path — only for single-agent claude sessions.
+        # For multi-agent, channels are delivered via the host-side tmux-inject relay.
+        _sandy_claude_channel_args
+        for _cb_a in ${_SANDY_CH_ARGS[@]+"${_SANDY_CH_ARGS[@]}"}; do cmd+=" $(printf "%q" "$_cb_a")"; done
+    fi
+    _sandy_claude_cmd_tail "$cmd" "$@"
+}
+
+# Shared session-wide claude flags, as an ARRAY (one element per argv token).
+# Callers quote at their own sink: build_claude_cmd with printf %q into a
+# `bash -c` string, the session bring-up as a real argv.
+_sandy_claude_base_args() {
+    _SANDY_CB_ARGS=(--model "${SANDY_MODEL:-claude-opus-5}")
     # SANDY_TEAMMATE_MODE (#teammate): was hardcoded to "tmux". Now a passive-safe
     # key, and OPT-IN — empty by default, so sandy passes no --teammate-mode at all
     # and Claude Code applies its own default. "off"/"none" are accepted as
@@ -793,7 +814,7 @@ build_claude_cmd() {
         # `gh pr checkout N && sandy` was enough: the payload ran before the
         # agent's first turn, ahead of any prompt-injection defence and
         # invisible to SANDY_TOOL_AUDIT, which instruments agent tool calls only.
-        *) cmd+=" --teammate-mode $(printf "%q" "$_tm")" ;;
+        *) _SANDY_CB_ARGS+=(--teammate-mode "$_tm") ;;
     esac
     # SANDY_EFFORT (#effort): pin Claude Code's reasoning effort so a run isn't
     # silently at the model default. Validated host-side; a separate axis from
@@ -802,7 +823,7 @@ build_claude_cmd() {
     # sink is `bash -c`, and quoting at the sink is the rule precisely so that
     # no builder's safety rests on remembering which keys some other block
     # happens to validate.
-    [ -n "${SANDY_EFFORT:-}" ] && cmd+=" --effort $(printf "%q" "$SANDY_EFFORT")"
+    [ -n "${SANDY_EFFORT:-}" ] && _SANDY_CB_ARGS+=(--effort "$SANDY_EFFORT")
     if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
         # Use --permission-mode (the documented modern flag) instead of the
         # legacy --dangerously-skip-permissions. Claude 2.1.x added runtime
@@ -810,33 +831,45 @@ build_claude_cmd() {
         # default mode; --permission-mode sets the session mode directly.
         # We also seed permissions.defaultMode in settings.json (see the
         # settings.json seed block) so /status reflects the same mode.
-        cmd+=" --permission-mode bypassPermissions"
+        _SANDY_CB_ARGS+=(--permission-mode bypassPermissions)
     fi
-    if [ -n "${SANDY_CHANNELS:-}" ] && ! [[ "${SANDY_AGENT:-claude}" == *,* ]]; then
-        # Native channels plugin path — only for single-agent claude sessions.
-        # For multi-agent, channels are delivered via the host-side tmux-inject relay.
-        # Canonical SANDY_CHANNELS is bare + comma-separated (telegram,discord) — the
-        # form the relay and install-loop already use, so one value works in every
-        # mode (#30). Claude's --channels wants space-separated fully-qualified plugin
-        # specs, so translate here. The legacy plugin:<name>@<marketplace> form (and
-        # space separators) are still accepted with a deprecation notice — never break
-        # an existing config.
-        local _ch_specs="" _ch_tok _ch_dep=0
-        for _ch_tok in ${SANDY_CHANNELS//,/ }; do
-            [ -z "$_ch_tok" ] && continue
-            # Quoted PER TOKEN, not once over the whole string: _ch_specs is a
-            # space-separated argument list, so a single %q over it would
-            # collapse the separators and pass one argument. Same injection
-            # sink as --teammate-mode above -- SANDY_CHANNELS is passive and
-            # ungated too.
-            case "$_ch_tok" in
-                plugin:*@*) _ch_specs+=" $(printf "%q" "$_ch_tok")"; _ch_dep=1 ;;
-                *)          _ch_specs+=" $(printf "%q" "plugin:${_ch_tok}@claude-plugins-official")" ;;
-            esac
-        done
-        [ "$_ch_dep" = 1 ] && echo "[sandy] WARN: SANDY_CHANNELS: the plugin:<name>@<marketplace> form is deprecated; use bare comma-separated names (e.g. 'telegram,discord'). Accepted for now." >&2
-        cmd+=" --channels${_ch_specs}"
-    fi
+    return 0
+}
+
+# SANDY_CHANNELS -> --channels <spec>..., as an ARRAY in _SANDY_CH_ARGS (empty
+# when SANDY_CHANNELS is). Shared by the foreground pane and the named session
+# that claims `receives: [channels]`.
+_sandy_claude_channel_args() {
+    _SANDY_CH_ARGS=()
+    [ -n "${SANDY_CHANNELS:-}" ] || return 0
+    # Canonical SANDY_CHANNELS is bare + comma-separated (telegram,discord) — the
+    # form the relay and install-loop already use, so one value works in every
+    # mode (#30). Claude's --channels wants space-separated fully-qualified plugin
+    # specs, so translate here. The legacy plugin:<name>@<marketplace> form (and
+    # space separators) are still accepted with a deprecation notice — never break
+    # an existing config.
+    local _ch_tok _ch_dep=0
+    _SANDY_CH_ARGS=(--channels)
+    for _ch_tok in ${SANDY_CHANNELS//,/ }; do
+        [ -z "$_ch_tok" ] && continue
+        # One ARRAY ELEMENT per token, %q'd per token at the sink: the
+        # spec list is several arguments, so a single %q over a joined
+        # string would collapse the separators and pass one argument.
+        # Same injection sink as --teammate-mode above -- SANDY_CHANNELS
+        # is passive and ungated too.
+        case "$_ch_tok" in
+            plugin:*@*) _SANDY_CH_ARGS+=("$_ch_tok"); _ch_dep=1 ;;
+            *)          _SANDY_CH_ARGS+=("plugin:${_ch_tok}@claude-plugins-official") ;;
+        esac
+    done
+    [ "$_ch_dep" = 1 ] && echo "[sandy] WARN: SANDY_CHANNELS: the plugin:<name>@<marketplace> form is deprecated; use bare comma-separated names (e.g. 'telegram,discord'). Accepted for now." >&2
+    [ "${#_SANDY_CH_ARGS[@]}" -gt 1 ] || _SANDY_CH_ARGS=()
+    return 0
+}
+
+# The tail of build_claude_cmd: auto-continue, pass-through args, exit pause.
+_sandy_claude_cmd_tail() {
+    local cmd="$1"; shift
     local auto_continue=true
     if [ "${SANDY_NEW_SESSION:-false}" = "true" ]; then
         auto_continue=false
@@ -872,6 +905,204 @@ build_claude_cmd() {
     fi
     cmd+="$(_sandy_translate_args claude "$@")"
     _sandy_wrap_cmd_exit_pause "Claude Code" "$cmd"
+}
+
+# ---- named Claude sessions (.sandy/sessions; decisions/2026-10-12-named-claude-sessions.md)
+# The host validated the session files and wrote one directory per session to
+# /opt/sandy/sessions/<slug>/ (name, receives, and optionally session, create,
+# resume, args, feature_args). SANDY_CLAUDE_SESSIONS_ACTIVE=1 only when they
+# apply to this launch (interactive or --start, claude selected).
+#
+# Measured against Claude Code 2.1.296 (test/spike/claude-sessions-spike.sh):
+#   - A background job's flags are FROZEN at creation (respawnFlags). After a
+#     relaunch, `claude --bg --resume <full id> [prompt]` with NO flags wakes
+#     it "with its saved options" and the prompt lands in the same transcript.
+#     ANY flag on that call starts a copy, and so does resuming a session that
+#     is already live -- so each session gets exactly ONE flag-less call here.
+#   - `claude agents --json --all` lists every job, stopped ones included, with
+#     its short `id`, full `sessionId` and `name`. A job's sessionId starts with
+#     its id; a woken process's own entry shows a transient sessionId until it
+#     takes a prompt, so liveness keys on the job id plus a pid.
+#   - A copy takes its prompt as its name, never the user's name, so a name
+#     match cannot be made ambiguous by a copy.
+_SANDY_CS_DIR="/opt/sandy/sessions"
+_SANDY_CS_STATUS="$HOME/.claude/.sandy-sessions.tsv"
+_SANDY_CS_REFUSE='{"crossSessionInbound":"refuse"}'
+read -r -d '' _SANDY_CS_JS <<'CSJS' || true
+const [mode, a1, a2] = process.argv.slice(1);
+const fs = require("fs");
+const pairs = t => {
+  const out = [];
+  for (let i = 0; i < t.length; i++) {
+    const x = t[i];
+    if (x.startsWith("-") && i + 1 < t.length && !t[i + 1].startsWith("-")) { out.push(x + " " + t[i + 1]); i++; }
+    else out.push(x);
+  }
+  return out.filter(p => p !== "--name" && !p.startsWith("--name "));
+};
+const refusePinned = t => pairs(t).some(p => {
+  if (!p.startsWith("--settings ")) return false;
+  try { return JSON.parse(p.slice(11)).crossSessionInbound === "refuse"; } catch (e) { return false; }
+});
+if (mode === "drift") {
+  let saved = null;
+  try { saved = JSON.parse(fs.readFileSync(a1, "utf8")).respawnFlags; } catch (e) {}
+  if (!Array.isArray(saved)) { console.log("unknown"); process.exit(0); }
+  const want = fs.readFileSync(a2, "utf8").split("\n").filter(x => x !== "");
+  const w = pairs(want), g = pairs(saved);
+  const missing = w.filter(p => !g.includes(p)), extra = g.filter(p => !w.includes(p));
+  console.log("pinned " + (refusePinned(saved) ? "yes" : "no"));
+  console.log("drift " + (missing.length || extra.length
+    ? (missing.length ? "missing: " + missing.join(" | ") : "") + (missing.length && extra.length ? "; " : "") + (extra.length ? "extra: " + extra.join(" | ") : "")
+    : "none"));
+  process.exit(0);
+}
+let s = "";
+process.stdin.on("data", d => s += d).on("end", () => {
+  let a;
+  try { a = JSON.parse(s); } catch (e) { console.log("error unparseable agents --json output"); return; }
+  if (!Array.isArray(a)) { console.log("error agents --json is not an array"); return; }
+  const jobs = a.filter(e => e && e.kind === "background" && typeof e.id === "string" && typeof e.sessionId === "string" && e.sessionId.startsWith(e.id));
+  if (mode === "find") {
+    if (a2) { console.log(jobs.some(e => e.sessionId === a2) ? "resume " + a2 : "missing " + a2); return; }
+    const ids = [...new Set(jobs.filter(e => e.name === a1).map(e => e.sessionId))];
+    console.log(ids.length === 1 ? "resume " + ids[0] : ids.length ? "ambiguous " + ids.join(",") : "create");
+  } else if (mode === "named") {
+    console.log([...new Set(jobs.filter(e => e.name === a1).map(e => e.sessionId))].join(","));
+  } else if (mode === "live") {
+    const id = a1.slice(0, 8);
+    console.log(a.some(e => e && e.pid && (e.id === id || e.sessionId === a1)) ? "live" : "not-live");
+  }
+});
+CSJS
+_sandy_cs_js() { node -e "$_SANDY_CS_JS" "$@"; }
+_sandy_cs_agents() { claude agents --json --all 2>/dev/null || true; }
+
+# The flags a NEW session is created with, one token per line on stdout:
+# sandy's session-wide flags, the operator's claude args, this session's own
+# operator args, the receiver-only feature args, then the receives routing.
+# A session that does not claim cross_session is pinned `refuse` with an
+# INLINE --settings (never a per-launch path: the flags are frozen at
+# creation and replayed on every later wake).
+_sandy_cs_create_flags() {
+    local d="$1" recv _t
+    local -a _aa=()
+    _sandy_claude_base_args
+    printf '%s\n' "${_SANDY_CB_ARGS[@]}"
+    if [ -n "${SANDY_AGENT_ARGS_CLAUDE:-}" ]; then read -ra _aa <<< "$SANDY_AGENT_ARGS_CLAUDE" || true; fi
+    for _t in ${_aa[@]+"${_aa[@]}"}; do printf '%s\n' "$_t"; done
+    for _t in $(cat "$d/args" 2>/dev/null) $(cat "$d/feature_args" 2>/dev/null); do printf '%s\n' "$_t"; done
+    recv=" $(cat "$d/receives" 2>/dev/null) "
+    case "$recv" in *" channels "*)
+        _sandy_claude_channel_args
+        for _t in ${_SANDY_CH_ARGS[@]+"${_SANDY_CH_ARGS[@]}"}; do printf '%s\n' "$_t"; done ;;
+    esac
+    case "$recv" in *" cross_session "*) ;; *) printf '%s\n%s\n' --settings "$_SANDY_CS_REFUSE" ;; esac
+}
+
+# Bring every declared session up: one call each, then wait for it to be live.
+# Writes $_SANDY_CS_STATUS (TAB-separated, first line `launch <id> done`) for
+# --start's readiness check and --print-state. Never fails the container: a
+# session that does not come up is reported, and --start exits 9. user-setup
+# runs under `set -e` without pipefail, so every pipeline that ends in node
+# carries its own `|| ...`: a node failure must report, never abort setup.
+_sandy_claude_sessions_up() {
+    local d slug name sid res full act st reason pinned drift out i tmp want stf
+    local -a flags
+    [ -d "$_SANDY_CS_DIR" ] || return 0
+    command -v node >/dev/null 2>&1 || { echo "[sandy] WARN: named Claude sessions need node in the image; none were started" >&2; return 0; }
+    mkdir -p "$HOME/.claude" 2>/dev/null || true
+    tmp="$_SANDY_CS_STATUS.tmp.$$"
+    printf 'launch\t%s\tdone\n' "${SANDY_LAUNCH_ID:-}" > "$tmp"
+    for d in "$_SANDY_CS_DIR"/*/; do
+        [ -d "$d" ] || continue
+        d="${d%/}"; slug="${d##*/}"
+        name="$(cat "$d/name")"; sid="$(cat "$d/session" 2>/dev/null || true)"
+        want="$HOME/.sandy-session-flags.$slug"
+        _sandy_cs_create_flags "$d" > "$want"
+        flags=()
+        while IFS= read -r i; do flags+=("$i"); done < "$want"
+        # --settings is LAST-WINS (CROSS_SESSION_INBOUND §9 Q3d, re-measured on
+        # 2.1.296): only the final occurrence is consulted. The inline refuse
+        # pin comes last, so an operator --settings would silently stop
+        # applying to this session. Say so rather than drop it quietly.
+        if [ "$(grep -cx -- --settings "$want")" -gt 1 ]; then
+            echo "[sandy] WARN: named session '$name' ($slug): your claude args pass --settings, and so does sandy's inbound refuse pin for a session that does not claim cross_session. Claude Code reads only the LAST --settings, so yours will not apply to this session if sandy creates it. Move those settings into a settings file, or claim cross_session for this session." >&2
+        fi
+        full=""; act=""; st="failed"; reason=""; pinned="-"; drift="-"
+        res="$(_sandy_cs_agents | _sandy_cs_js find "$name" "$sid")" || res=""
+        case "$res" in
+            "resume "*)
+                full="${res#resume }"; act=resume
+                if [ -s "$d/resume" ]; then
+                    out="$(claude --bg --resume "$full" "$(cat "$d/resume")" 2>&1)" || reason="claude --bg --resume exited non-zero"
+                else
+                    out="$(claude --bg --resume "$full" 2>&1)" || reason="claude --bg --resume exited non-zero"
+                fi ;;
+            create)
+                act=create
+                out="$(claude --bg --name "$name" ${flags[@]+"${flags[@]}"} "$(cat "$d/create")" 2>&1)" || reason="claude --bg exited non-zero" ;;
+            "ambiguous "*) st=ambiguous; reason="several sessions are named '$name' (${res#ambiguous }); pin one with session: in .sandy/sessions/$slug.md" ;;
+            "missing "*) st=missing; reason="session ${res#missing } is not a background session in this sandbox (claude agents --json --all)" ;;
+            *) reason="could not read claude agents --json: $res" ;;
+        esac
+        # A copy is the failure that matters most: it silently changes the id.
+        case "${out:-}" in *"started a copy"*) reason="Claude Code started a copy instead of resuming ($(printf '%s' "$out" | tr '\n\t' '  ' | cut -c1-200))" ;; esac
+        if [ -n "$act" ] && [ -z "$reason" ]; then
+            for i in $(seq 1 30); do
+                [ -n "$full" ] || full="$(_sandy_cs_agents | _sandy_cs_js named "$name")" || full=""
+                case "$full" in *,*) reason="several sessions are named '$name' after creating it ($full)"; break ;; esac
+                if [ -n "$full" ] && [ "$(_sandy_cs_agents | _sandy_cs_js live "$full" || true)" = live ]; then st=up; break; fi
+                sleep 2
+            done
+            [ "$st" = up ] || [ -n "$reason" ] || reason="not running 60s after $act"
+        fi
+        if [ -n "$full" ] && [ -z "${full##*-*}" ] && [ "${full#*,}" = "$full" ]; then
+            stf="$HOME/.claude/jobs/${full:0:8}/state.json"
+            while IFS= read -r i; do
+                case "$i" in pinned\ *) pinned="${i#pinned }" ;; drift\ *) drift="${i#drift }" ;; esac
+            done < <(_sandy_cs_js drift "$stf" "$want" 2>/dev/null || true)
+        fi
+        case " $(cat "$d/receives" 2>/dev/null) " in *" cross_session "*) pinned="receiver" ;; esac
+        if [ "$st" != up ]; then
+            echo "[sandy] WARN: named session '$name' ($slug) did not come up: $reason" >&2
+        fi
+        if [ "$pinned" = no ]; then
+            echo "[sandy] WARN: named session '$name' ($slug) does not claim cross_session but was created without sandy's inbound refuse pin, so it can receive cross-session messages. Recreate it to close this (its flags are fixed at creation)." >&2
+        fi
+        case "$drift" in -|none|unknown) ;; *)
+            echo "[sandy] WARN: named session '$name' ($slug) was created with different flags from what sandy would pass now ($drift). Its flags are fixed at creation; recreate it to apply the change." >&2 ;;
+        esac
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$slug" "$st" "${full:--}" "$(printf '%s' "$name" | tr '\t' ' ')" "$pinned" "$(printf '%s' "$drift" | tr '\t\n' '  ')" "$(printf '%s' "${reason:--}" | tr '\t\n' '  ')" >> "$tmp"
+        rm -f "$want" 2>/dev/null || true
+    done
+    mv -f "$tmp" "$_SANDY_CS_STATUS" || echo "[sandy] WARN: could not write $_SANDY_CS_STATUS; --start will report the named sessions as unconfirmed" >&2
+}
+
+# The claude pane when named sessions apply: Claude Code's agent view, where
+# Right attaches to a session and Left returns. It takes the subset of the
+# session-wide flags it accepts, so a session dispatched from the view by hand
+# matches the declared ones (claude agents --help, 2.1.291).
+build_claude_agents_cmd() {
+    local cmd="claude agents" _i
+    local -a _a=()
+    _sandy_claude_base_args
+    for ((_i = 0; _i < ${#_SANDY_CB_ARGS[@]}; _i++)); do
+        case "${_SANDY_CB_ARGS[$_i]}" in
+            --model|--effort) cmd+=" $(printf "%q" "${_SANDY_CB_ARGS[$_i]}") $(printf "%q" "${_SANDY_CB_ARGS[$((_i + 1))]}")"; _i=$((_i + 1)) ;;
+            "--permission-mode") [ "${_SANDY_CB_ARGS[$((_i + 1))]}" = bypassPermissions ] && cmd+=" --dangerously-skip-permissions"; _i=$((_i + 1)) ;;
+        esac
+    done
+    _a=("$@")
+    for ((_i = 0; _i < ${#_a[@]}; _i++)); do
+        case "${_a[$_i]}" in
+            --mcp-config|--add-dir)
+                if [ $((_i + 1)) -lt ${#_a[@]} ]; then
+                    cmd+=" $(printf "%q" "${_a[$_i]}") $(printf "%q" "${_a[$((_i + 1))]}")"; _i=$((_i + 1))
+                fi ;;
+        esac
+    done
+    _sandy_wrap_cmd_exit_pause "Claude Code agent view" "$cmd"
 }
 
 # #427: does this sandbox hold an INTERACTIVE codex session for this workspace?
@@ -1123,7 +1354,12 @@ _sandy_build_agent_cmd() {
         read -ra _sandy_aa_pre <<< "$_sandy_aa_val" || true
     fi
     case "$1" in
-        claude)   build_claude_cmd   ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
+        claude)
+            if [ "${SANDY_CLAUDE_SESSIONS_ACTIVE:-0}" = "1" ] && [ "$_sandy_is_headless" != "true" ]; then
+                build_claude_agents_cmd ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"}
+            else
+                build_claude_cmd   ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}"
+            fi ;;
         gemini)   build_gemini_cmd   ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
         codex)    build_codex_cmd    ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
         opencode) build_opencode_cmd ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
@@ -1331,6 +1567,14 @@ cd "$WORKSPACE"
 # for both, so this gate is the in-container half of the same decision, not
 # the only half.
 if [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then _sandy_start_entries; fi
+
+# Named Claude sessions come up BEFORE the pane, so `claude agents` shows them
+# and --start's readiness check (which waits for the tmux session) finds the
+# status file already written. The host sets SANDY_CLAUDE_SESSIONS_ACTIVE only
+# for interactive and --start launches; this gate is the in-container half.
+if [ "${SANDY_CLAUDE_SESSIONS_ACTIVE:-0}" = "1" ] && [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then
+    _sandy_claude_sessions_up
+fi
 
 if [ "$_SANDY_IS_MULTI" = false ]; then
     # --- Single-agent launch ---
