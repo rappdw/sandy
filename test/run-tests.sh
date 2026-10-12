@@ -657,7 +657,10 @@ info "9z. PR 1.1 regression tests — resume fallback + codex grep-F"
 # --continue when a session exists, so the fallback is both unnecessary
 # and actively harmful. This test asserts it stays removed.
 _SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-BUILD_CLAUDE_BODY="$(awk '/^build_claude_cmd\(\)/,/^}$/' "$_SANDY_SCRIPT_PATH")"
+# build_claude_cmd plus the helpers it calls since the named-sessions refactor
+# (the session-wide flags and channels are decided once, in helpers, so a
+# background session gets exactly what the pane gets).
+BUILD_CLAUDE_BODY="$(awk '/^(build_claude_cmd|_sandy_claude_base_args|_sandy_claude_channel_args|_sandy_claude_cmd_tail)\(\)/,/^}$/' "$_SANDY_SCRIPT_PATH")"
 FALLBACK_PRESENT="no"
 if echo "$BUILD_CLAUDE_BODY" | grep -qE 'cmd="\$cmd \|\| \$cmd_base"'; then
     FALLBACK_PRESENT="yes"
@@ -6935,7 +6938,7 @@ check "SANDY_EFFORT is a passive-safe key (schema)" \
 check "SANDY_EFFORT has a _sandy_key_metadata row (enum type)" \
     bash -c 'awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -q "^SANDY_EFFORT|enum:low,medium,high,xhigh,max|"' -- "$_S84"
 check "build_claude_cmd applies --effort, gated on SANDY_EFFORT" \
-    bash -c 'awk "/^build_claude_cmd\(\)/,/^}/" "$1" | grep -q "SANDY_EFFORT.*cmd+=.* --effort "' -- "$_S84"
+    bash -c 'awk "/^(build_claude_cmd|_sandy_claude_base_args)\(\)/,/^}/" "$1" | grep -qE "SANDY_EFFORT.*(cmd\+=.* --effort |_SANDY_CB_ARGS\+=\(--effort )"' -- "$_S84"
 check "SANDY_EFFORT validated to low|medium|high|xhigh|max (fails loud on invalid)" \
     bash -c 'grep -q "low|medium|high|xhigh|max)" "$1" && grep -q "Invalid SANDY_EFFORT" "$1"' -- "$_S84"
 check "SANDY_EFFORT forwarded into the container" \
@@ -7274,7 +7277,7 @@ check "seeder (last-resort printf branch) pins permissions.defaultMode=bypassPer
     bash -c 'printf "%s" "$1" | grep -qF "$2"' -- \
     "$_s90_lastresort_branch" '"defaultMode":"bypassPermissions"'
 check "build_claude_cmd applies --permission-mode bypassPermissions (the CLI-flag pin)" \
-    bash -c 'awk "/^build_claude_cmd\(\)/,/^}/" "$1" | grep -qF -- "--permission-mode bypassPermissions"' -- "$_S90"
+    bash -c 'awk "/^(build_claude_cmd|_sandy_claude_base_args)\(\)/,/^}/" "$1" | grep -qF -- "--permission-mode bypassPermissions"' -- "$_S90"
 
 # --- (b) _sandy_settings_default_mode: pure extraction helper, 5 fixtures.
 # Extract-then-eval, NEVER `source <(...)` (bash 3.2 sources nothing from
@@ -8127,7 +8130,7 @@ echo "§94: SANDY_TEAMMATE_MODE + the teammateMode de-seeding (#teammate)"
 #   - the default model drifting between its two independent literals: the
 #     _sandy_key_metadata row and build_claude_cmd's own ${SANDY_MODEL:-...}
 _S94="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-_s94_bcc="$(sed -n '/^build_claude_cmd()/,/^}$/p' "$_S94")"
+_s94_bcc="$(sed -n -e '/^build_claude_cmd()/,/^}$/p' -e '/^_sandy_claude_base_args() {/,/^}$/p' -e '/^_sandy_claude_channel_args() {/,/^}$/p' -e '/^_sandy_claude_cmd_tail() {/,/^}$/p' "$_S94")"
 
 # --- the key exists, in the right tier -------------------------------------
 check "§94(1) SANDY_TEAMMATE_MODE is a PASSIVE key" \
@@ -10440,9 +10443,11 @@ check "§106(9d) NEGATIVE: all env empty -> exactly the CLI arg, no stray empty 
 # only reproduces on bash <4.4 / bash 3.2, which isn't available here. So the
 # portability property is asserted statically: every one of the five dispatch
 # arms must use the ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} idiom, not a
-# bare "${_sandy_aa_pre[@]}".
-check "§106(9e) STATIC: all 5 dispatch arms use the guarded empty-array idiom (bash-3.2 safety)" \
-    bash -c '[ "$(grep -c "sandy_aa_pre\[@\]+\"\${_sandy_aa_pre\[@\]}\"" "$1")" -eq 5 ]' -- "$_S106_C9_SCRIPT"
+# bare "${_sandy_aa_pre[@]}". SIX uses for five arms since 2.9.0: the claude
+# arm has two branches (named sessions -> build_claude_agents_cmd, otherwise
+# build_claude_cmd), and each must be guarded.
+check "§106(9e) STATIC: all 5 dispatch arms (6 calls: claude has two branches) use the guarded empty-array idiom (bash-3.2 safety)" \
+    bash -c '[ "$(grep -c "sandy_aa_pre\[@\]+\"\${_sandy_aa_pre\[@\]}\"" "$1")" -eq 6 ]' -- "$_S106_C9_SCRIPT"
 
 # --- (10) NEGATIVE: no docker-run mount ever references agent-args.* -------
 # (a) the guard itself, exactly as written in the plan (pipefail-free child).
@@ -11829,8 +11834,10 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # a forgotten add.
 # 19 as of 2.7.0: `image` (#295) -- which image the launch ran, one
 # pre-composed object passed as ONE argument (name/id/project_layer), additive.
-check "§114(13g) marker printf format/arg count line up (19 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 19
+# 20 as of 2.9.0: `claude_sessions` -- the named sessions the launch declared,
+# one pre-composed array passed as ONE argument, additive.
+check "§114(13g) marker printf format/arg count line up (20 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 20
 
 # (14) sandy-handoff-sessions helper: REMOVED in 2.6.0 (#382, decision 7) along
 # with the helper itself; the pane-identity contract it was built on stays
@@ -13787,7 +13794,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'printf "CLAUDE-ARGV:"; printf " [%s]" "$@";
 # then the rest.
 printf '%s\n' '#!/usr/bin/env bash' 'echo S128_PWNED' > "$_S128_DIR/bin/S128_PWNED_CMD"
 chmod +x "$_S128_DIR/bin/claude" "$_S128_DIR/bin/S128_PWNED_CMD"
-sed -n '/^build_claude_cmd() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S128_DIR/bcc.sh"
+sed -n -e '/^build_claude_cmd() {/,/^}$/p' -e '/^_sandy_claude_base_args() {/,/^}$/p' -e '/^_sandy_claude_channel_args() {/,/^}$/p' -e '/^_sandy_claude_cmd_tail() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S128_DIR/bcc.sh"
 check "§128(pre) build_claude_cmd was extracted and parses (mutation: a rename empties it and every check below goes vacuous)" \
     bash -c 'grep -q "teammate-mode" "$1" && bash -n "$1"' -- "$_S128_DIR/bcc.sh"
 
@@ -23112,7 +23119,7 @@ done
 printf '%s\n' '#!/usr/bin/env bash' 'echo S184_PWNED' > "$_S184_DIR/bin/S184_PWNED_CMD"
 chmod +x "$_S184_DIR/bin/grok" "$_S184_DIR/bin/claude" "$_S184_DIR/bin/S184_PWNED_CMD"
 sed -n '/^build_grok_cmd() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S184_DIR/grok.sh"
-sed -n '/^build_claude_cmd() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S184_DIR/claude.sh"
+sed -n -e '/^build_claude_cmd() {/,/^}$/p' -e '/^_sandy_claude_base_args() {/,/^}$/p' -e '/^_sandy_claude_channel_args() {/,/^}$/p' -e '/^_sandy_claude_cmd_tail() {/,/^}$/p' "$SANDY_SCRIPT" > "$_S184_DIR/claude.sh"
 check "§184(0) build_grok_cmd and build_claude_cmd were extracted and parse (mutation: a rename empties them and every check below goes vacuous)" \
     bash -c 'grep -q "no-auto-update" "$1" && bash -n "$1" && grep -q "permission-mode" "$2" && bash -n "$2"' _ "$_S184_DIR/grok.sh" "$_S184_DIR/claude.sh"
 _s184_run() { # _s184_run <builder-file> <builder> <effort> [args...] -> argv line of the stub
@@ -23160,7 +23167,10 @@ check "§184(6) an injected SANDY_EFFORT reaches claude as ONE literal --effort 
     bash -c 'printf "%s\n" "$1" | grep -q "^ARGV:" && ! printf "%s\n" "$1" | grep -q "^S184_PWNED" && printf "%s\n" "$1" | grep -qF "[--effort] [high;S184_PWNED_CMD;x]"' _ "$_S184_CINJ"
 # ANTI-VACUITY: the same harness against the pre-2.7.0 unquoted line must SEE
 # the injection, or (6) proves nothing.
-sed 's/--effort $(printf "%q" "$SANDY_EFFORT")/--effort ${SANDY_EFFORT}/' "$_S184_DIR/claude.sh" > "$_S184_DIR/claude-unquoted.sh"
+# Since 2.9.0 the session-wide flags (effort among them) are quoted at ONE sink
+# in build_claude_cmd, the loop over _SANDY_CB_ARGS; unquoting that sink is the
+# pre-2.7.0 shape for --effort.
+sed 's/cmd+=" $(printf "%q" "$_cb_a")"/cmd+=" $_cb_a"/' "$_S184_DIR/claude.sh" > "$_S184_DIR/claude-unquoted.sh"
 _S184_CAN="$(trap - ERR; _s184_run "$_S184_DIR/claude-unquoted.sh" build_claude_cmd 'high;S184_PWNED_CMD;x')"
 check "§184(7) anti-vacuity: the harness sees the injection against the old unquoted --effort (got: $_S184_CAN)" \
     bash -c '! cmp -s "$2" "$3" && printf "%s\n" "$1" | grep -q "^S184_PWNED"' _ "$_S184_CAN" "$_S184_DIR/claude.sh" "$_S184_DIR/claude-unquoted.sh"
@@ -25106,6 +25116,7 @@ fi
 
 # ============================================================
 echo "§203: SANDY_SKIP_PERMISSIONS reaches codex as --ask-for-approval never (interactive only)"
+# =====================================================
 # ============================================================
 # Codex full access is two settings: sandbox_mode AND the approval policy.
 # Sandy set only the first, so codex kept its default on-request policy and
@@ -25142,6 +25153,368 @@ check "§203(5) an operator's own approval choice is kept, never doubled (codex 
     bash -c '[ "$1" = "--sandbox danger-full-access -a on-request" ] && [ "$2" = "--sandbox danger-full-access --ask-for-approval=never" ] && [ "$3" = "--sandbox danger-full-access --dangerously-bypass-approvals-and-sandbox" ]' _ "$(_s203_argv '' -a on-request)" "$(_s203_argv '' --ask-for-approval=never)" "$(_s203_argv '' --dangerously-bypass-approvals-and-sandbox)"
 rm -rf "$_S203_D"
 unset _S203_FN _S203_D
+=======
+echo "§204: named Claude sessions (.sandy/sessions) — strict files, one flag-less resume, agent view, exit 9, --print-state"
+# ============================================================
+# decisions/2026-10-12-named-claude-sessions.md. Every check runs the REAL code
+# (extracted from sandy) against fixtures and stubs and asserts the PROPERTY:
+# what the parser accepts and refuses, the argv a stub `claude` RECEIVES, the
+# exit status of the --start check, the JSON --print-state EMITS. The one fact
+# the design rests on, measured on Claude Code 2.1.296: a resume carrying ANY
+# flag starts a copy, so (4b) asserts the resume argv carries none.
+_S204_D="$(cd "$(mktemp -d)" && pwd -P)"
+_S204_PARSE="$(sed -n '/^_sandy_sessions_parse()/,/^}$/p' "$SANDY_SCRIPT")"
+check "§204(0) the parser was extracted (mutation: a renamed function empties it and every parse check goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "_SANDY_CS_ERR"' -- "$_S204_PARSE"
+
+# --- (1) a valid corpus: what the container is handed ----------------------
+mkdir -p "$_S204_D/ok/sessions" "$_S204_D/ok/out"
+printf '%s\n' '---' 'name: Operator Liaison' 'session: 3ed73c61-cff5-46e2-8e89-1687976c6821' 'receives: [cross_session, channels]' '---' '' '## On resume' 'Re-read your startup files.' '' '### Steps' '1. cron' '' > "$_S204_D/ok/sessions/operator-liaison.md"
+printf '%s\n' '---' 'name: Fleet Controller' '---' '## On create' 'You are the fleet controller.' '## On resume' 'run one cycle' > "$_S204_D/ok/sessions/fleet-controller.md"
+_S204_OK="$(bash -c 'set -eu; eval "$1"; _sandy_sessions_parse "$2" "$3" || { echo "ERR $_SANDY_CS_ERR"; exit 1; }; printf "%s|%s|%s\n" "$_SANDY_CS_SLUGS" "$_SANDY_CS_CROSS" "$_SANDY_CS_CHANNELS"' _ "$_S204_PARSE" "$_S204_D/ok/sessions" "$_S204_D/ok/out" 2>&1)"
+check "§204(1a) a valid pair parses: both slugs, cross_session and channels both claimed by operator-liaison (got: $_S204_OK)" \
+    bash -c '[ "$1" = "fleet-controller operator-liaison|operator-liaison|operator-liaison" ]' -- "$_S204_OK"
+check "§204(1b) the container gets name/receives/session/resume per session, and a '### ' line is body text, not a heading" \
+    bash -c 'd="$1"; [ "$(cat "$d/operator-liaison/name")" = "Operator Liaison" ] && [ "$(cat "$d/operator-liaison/receives")" = "cross_session channels" ] && [ "$(cat "$d/operator-liaison/session")" = "3ed73c61-cff5-46e2-8e89-1687976c6821" ] && [ "$(cat "$d/operator-liaison/resume")" = "$(printf "Re-read your startup files.\n\n### Steps\n1. cron")" ] && [ ! -e "$d/operator-liaison/create" ]' -- "$_S204_D/ok/out"
+check "§204(1c) section text is trimmed of leading/trailing blank lines, and a session without receives gets an empty receives file" \
+    bash -c 'd="$1"; [ "$(cat "$d/fleet-controller/create")" = "You are the fleet controller." ] && [ "$(cat "$d/fleet-controller/resume")" = "run one cycle" ] && [ -f "$d/fleet-controller/receives" ] && [ -z "$(cat "$d/fleet-controller/receives")" ]' -- "$_S204_D/ok/out"
+
+# --- (2) STRICT: every malformed shape refuses, naming the file ----------------
+_s204_refuses() {  # $1 file name, $2 content, $3 expected error fragment
+    local d; d="$(mktemp -d "$_S204_D/bad.XXXXXX")"
+    printf '%s' "$2" > "$d/$1"
+    bash -c 'eval "$1"; if _sandy_sessions_parse "$2" ""; then echo ACCEPTED; else printf "%s\n" "$_SANDY_CS_ERR"; fi' _ "$_S204_PARSE" "$d" 2>&1 | grep -qF "$3"
+}
+_s204_nl=$'\n'
+for _s204_case in \
+    "a.md|---${_s204_nl}name: A${_s204_nl}colour: red${_s204_nl}---${_s204_nl}## On create${_s204_nl}x${_s204_nl}|unknown key 'colour'" \
+    "a.md|---${_s204_nl}name: A${_s204_nl}---${_s204_nl}# Title${_s204_nl}## On create${_s204_nl}x${_s204_nl}|unknown heading '# Title'" \
+    "a.md|---${_s204_nl}name: A${_s204_nl}---${_s204_nl}## On Create${_s204_nl}x${_s204_nl}|unknown heading '## On Create'" \
+    "a.md|---${_s204_nl}name: A${_s204_nl}---${_s204_nl}loose${_s204_nl}## On create${_s204_nl}x${_s204_nl}|text outside a section" \
+    "a.md|---${_s204_nl}name: A${_s204_nl}---${_s204_nl}## On resume${_s204_nl}x${_s204_nl}|'## On create' is required" \
+    "a.md|---${_s204_nl}name: A${_s204_nl}receives: [inbox]${_s204_nl}---${_s204_nl}## On create${_s204_nl}x${_s204_nl}|unknown value 'inbox'" \
+    "a.md|---${_s204_nl}name: A${_s204_nl}name: B${_s204_nl}---${_s204_nl}## On create${_s204_nl}x${_s204_nl}|'name' appears twice" \
+    "a.md|---${_s204_nl}name: A${_s204_nl}session: 3ED73C61-cff5-46e2-8e89-1687976c6821${_s204_nl}---${_s204_nl}|full Claude Code session id" \
+    "a.md|---${_s204_nl}name: A${_s204_nl}---${_s204_nl}## On create${_s204_nl}x${_s204_nl}## On create${_s204_nl}y${_s204_nl}|'## On create' appears twice" \
+    "a.md|name: A${_s204_nl}|must start with a '---'" \
+    "a.md|---${_s204_nl}name: A${_s204_nl}|never closed" \
+    "a.md|---${_s204_nl}---${_s204_nl}## On create${_s204_nl}x${_s204_nl}|'name' is required" \
+    "a.md|---${_s204_nl}name: A;rm${_s204_nl}---${_s204_nl}## On create${_s204_nl}x${_s204_nl}|name must be" \
+    "Bad.md|---${_s204_nl}name: A${_s204_nl}---${_s204_nl}## On create${_s204_nl}x${_s204_nl}|the file name must be" \
+    "a.txt|x|not a .md file"; do
+    _s204_f="${_s204_case%%|*}"; _s204_rest="${_s204_case#*|}"
+    _s204_c="${_s204_rest%|*}"; _s204_e="${_s204_rest##*|}"
+    check "§204(2) refused: $_s204_e" _s204_refuses "$_s204_f" "$_s204_c" "$_s204_e"
+done
+_S204_TWO="$(mktemp -d "$_S204_D/two.XXXXXX")"
+printf '%s\n' '---' 'name: A' 'receives: [cross_session]' '---' '## On create' 'x' > "$_S204_TWO/a.md"
+printf '%s\n' '---' 'name: B' 'receives: [cross_session]' '---' '## On create' 'x' > "$_S204_TWO/b.md"
+check "§204(2) refused: two sessions claiming cross_session (at most one receiver)" \
+    bash -c 'eval "$1"; ! _sandy_sessions_parse "$2" "" && printf "%s" "$_SANDY_CS_ERR" | grep -q "at most one session may claim it"' _ "$_S204_PARSE" "$_S204_TWO"
+_S204_DUPN="$(mktemp -d "$_S204_D/dupn.XXXXXX")"
+printf '%s\n' '---' 'name: Same' '---' '## On create' 'x' > "$_S204_DUPN/a.md"
+cp "$_S204_DUPN/a.md" "$_S204_DUPN/b.md"
+check "§204(2) refused: two files declaring the same name" \
+    bash -c 'eval "$1"; ! _sandy_sessions_parse "$2" "" && printf "%s" "$_SANDY_CS_ERR" | grep -q "declared by another session file"' _ "$_S204_PARSE" "$_S204_DUPN"
+_S204_LNK="$(mktemp -d "$_S204_D/lnk.XXXXXX")"
+ln -s "$_S204_D/ok/sessions/fleet-controller.md" "$_S204_LNK/a.md"
+check "§204(2) refused: a symlinked session file" \
+    bash -c 'eval "$1"; ! _sandy_sessions_parse "$2" "" && printf "%s" "$_SANDY_CS_ERR" | grep -q "is a symlink"' _ "$_S204_PARSE" "$_S204_LNK"
+_S204_CRLF="$(mktemp -d "$_S204_D/crlf.XXXXXX")"
+printf -- '---\r\nname: A\r\n---\r\n## On create\r\nx\r\n' > "$_S204_CRLF/a.md"
+check "§204(2) accepted: CRLF line endings (a file saved on Windows)" \
+    bash -c 'eval "$1"; _sandy_sessions_parse "$2" ""' _ "$_S204_PARSE" "$_S204_CRLF"
+
+# --- (3) session files are not Dockerfile build context -----------------------
+_S204_CH="$(sed -n '/^_sandy_context_hash()/,/^}$/p' "$SANDY_SCRIPT")
+$(grep -m1 '^sha256()' "$SANDY_SCRIPT")"
+mkdir -p "$_S204_D/ctx/.sandy"
+printf 'FROM x\n' > "$_S204_D/ctx/.sandy/Dockerfile"
+_s204_ctx() { bash -c 'eval "$1"; _sandy_context_hash "$2" ${3:-}' _ "$_S204_CH" "$_S204_D/ctx/.sandy" "${1:-}" 2>/dev/null; }
+_S204_H1="$(_s204_ctx)"
+mkdir -p "$_S204_D/ctx/.sandy/sessions"; printf 'edited\n' > "$_S204_D/ctx/.sandy/sessions/a.md"
+_S204_H2="$(_s204_ctx)"; _S204_L2="$(_s204_ctx --list)"
+printf 'x\n' > "$_S204_D/ctx/.sandy/helper.sh"
+_S204_H3="$(_s204_ctx)"
+check "§204(3) adding or editing .sandy/sessions/ leaves the Dockerfile context hash and its file list unchanged (no re-approval, no rebuild)" \
+    bash -c '[ -n "$1" ] && [ "$1" = "$2" ] && ! printf "%s\n" "$3" | grep -q sessions' -- "$_S204_H1" "$_S204_H2" "$_S204_L2"
+check "§204(3) ...while any other new file under .sandy/ still changes it (control: the exclusion is not a blanket one)" \
+    bash -c '[ "$1" != "$2" ]' -- "$_S204_H2" "$_S204_H3"
+
+# --- (4) container-side bring-up against a stub claude ------------------------
+if ! command -v node >/dev/null 2>&1; then
+    skip "§204(4) the bring-up parses agents --json with node; node not on this host"
+else
+_S204_UP="$(sed -n '/^# ---- named Claude sessions (.sandy\/sessions; decisions/,/^# The claude pane when named sessions apply/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_claude_base_args()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_claude_channel_args()/,/^}$/p' "$SANDY_SCRIPT")"
+check "§204(4-pre) the bring-up block was extracted (mutation: a moved anchor empties it)" \
+    bash -c 'printf "%s" "$1" | grep -q "^_sandy_claude_sessions_up()" && printf "%s" "$1" | grep -q "^_sandy_claude_base_args()"' -- "$_S204_UP"
+cat > "$_S204_D/claude-stub" <<'STUB'
+#!/bin/bash
+D="$STUB_DIR"
+printf '%s\n' "$(printf '%q ' "$@")" >> "$D/calls"
+if [ "$1" = agents ]; then cat "$D/agents.json"; exit 0; fi
+if [ "$1" = --bg ]; then
+    shift
+    if [ "$1" = --resume ]; then
+        if [ -f "$D/copy" ]; then echo "note: session ${2:0:8} is already running in the background, so this started a copy as deadbeef."; exit 0; fi
+        node -e 'const fs=require("fs");const f=process.argv[1];const a=JSON.parse(fs.readFileSync(f));const id=process.argv[2];const j=a.find(e=>e.sessionId===id);a.push({pid:99,id:id.slice(0,8),kind:"background",sessionId:"77777777-transient",name:j?j.name:"?",state:"working"});fs.writeFileSync(f,JSON.stringify(a))' "$D/agents.json" "$2"
+        exit 0
+    fi
+    name=""; while [ $# -gt 0 ]; do [ "$1" = --name ] && name="$2"; shift; done
+    node -e 'const fs=require("fs");const f=process.argv[1];const a=JSON.parse(fs.readFileSync(f));a.push({pid:98,id:"abcd1234",kind:"background",sessionId:"abcd1234-1111-4111-8111-111111111111",name:process.argv[2],state:"working"});fs.writeFileSync(f,JSON.stringify(a))' "$D/agents.json" "$name"
+    exit 0
+fi
+exit 0
+STUB
+_s204_case() {  # $1 case name -> a fresh case dir with bin/claude
+    local c="$_S204_D/up-$1"
+    mkdir -p "$c/bin" "$c/home/.claude" "$c/sessions"
+    cp "$_S204_D/claude-stub" "$c/bin/claude"; chmod +x "$c/bin/claude"
+    printf '%s' "$c"
+}
+_s204_sess() {  # $1 case dir, $2 slug, $3 name, $4 receives, $5 session id, $6 resume text
+    mkdir -p "$1/sessions/$2"
+    printf '%s\n' "$3" > "$1/sessions/$2/name"; printf '%s\n' "$4" > "$1/sessions/$2/receives"
+    printf 'You are %s.\n' "$3" > "$1/sessions/$2/create"
+    if [ -n "$5" ]; then printf '%s\n' "$5" > "$1/sessions/$2/session"; fi
+    if [ -n "$6" ]; then printf '%s\n' "$6" > "$1/sessions/$2/resume"; fi
+    return 0
+}
+_s204_up() {  # $1 case dir, rest: extra env assignments
+    local c="$1"; shift
+    env -i PATH="$c/bin:$PATH" HOME="$c/home" STUB_DIR="$c" SANDY_LAUNCH_ID=L204 SANDY_AGENT_ARGS_CLAUDE="--mcp-config /x.json" "$@" \
+        bash -c 'set -e; eval "$1"; _SANDY_CS_DIR="$2"; _SANDY_CS_STATUS="$HOME/.claude/.sandy-sessions.tsv"; sleep() { :; }; _sandy_claude_sessions_up' _ "$_S204_UP" "$c/sessions" 2>"$c/stderr"
+}
+_S204_ID='3ed73c61-cff5-46e2-8e89-1687976c6821'
+_C="$(_s204_case a)"
+printf '[{"id":"3ed73c61","kind":"background","sessionId":"%s","name":"Operator Liaison","state":"failed"},{"pid":5,"kind":"interactive","sessionId":"00000000-pane","name":"pane"}]' "$_S204_ID" > "$_C/agents.json"
+mkdir -p "$_C/home/.claude/jobs/3ed73c61"
+printf '{"respawnFlags":["--permission-mode","bypassPermissions","--name","Operator Liaison","--model","claude-opus-5","--mcp-config","/x.json"]}' > "$_C/home/.claude/jobs/3ed73c61/state.json"
+_s204_sess "$_C" fleet-controller "Fleet Controller" "" "" "run a cycle"
+_s204_sess "$_C" operator-liaison "Operator Liaison" "" "$_S204_ID" "resume: report"
+_s204_sess "$_C" receiver "Receiver" "cross_session channels" "" ""
+_s204_up "$_C" SANDY_CHANNELS=telegram; _S204_RC=$?
+_S204_CALLS="$(cat "$_C/calls" 2>/dev/null)"; _S204_ST="$(cat "$_C/home/.claude/.sandy-sessions.tsv" 2>/dev/null)"
+check "§204(4a) the bring-up returns 0 and writes a status file headed by THIS launch's id" \
+    bash -c '[ "$1" = 0 ] && [ "$(printf "%s\n" "$2" | head -n 1)" = "$(printf "launch\tL204\tdone")" ]' -- "$_S204_RC" "$_S204_ST"
+check "§204(4b) THE PROPERTY: an existing session is resumed with NO flags -- only --bg --resume <id> <On resume text> (any flag makes Claude Code start a copy)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx -- "--bg --resume $2 resume:\\\\ report "' -- "$_S204_CALLS" "$_S204_ID"
+check "§204(4c) a missing session is created with sandy's flags, the operator's args, its name and its On create text" \
+    bash -c 'printf "%s\n" "$1" | grep -- "--name Fleet\\\\ Controller" | grep -- "--model claude-opus-5" | grep -- "--permission-mode bypassPermissions" | grep -- "--mcp-config /x.json" | grep -q "You\\\\ are\\\\ Fleet\\\\ Controller\\.\\s*$"' -- "$_S204_CALLS"
+check "§204(4d) a session that does not claim cross_session is created with the INLINE refuse pin" \
+    bash -c 'printf "%s\n" "$1" | grep -- "--name Fleet\\\\ Controller" | grep -qF -- "--settings \\{\\\"crossSessionInbound\\\":\\\"refuse\\\"\\}"' -- "$_S204_CALLS"
+check "§204(4e) the cross_session claimant is created WITHOUT the pin, and the channels claimant WITH --channels" \
+    bash -c 'l="$(printf "%s\n" "$1" | grep -- "--name Receiver")"; [ -n "$l" ] && ! printf "%s" "$l" | grep -q crossSessionInbound && printf "%s" "$l" | grep -qF -- "--channels plugin:telegram@claude-plugins-official"' -- "$_S204_CALLS"
+check "§204(4f) only the channels claimant gets --channels" \
+    bash -c '[ "$(printf "%s\n" "$1" | grep -c -- "--channels")" = 1 ]' -- "$_S204_CALLS"
+check "§204(4g) every session reports up; the adopted one reports pinned=no and the missing pin as drift" \
+    bash -c 's="$1"; [ "$(printf "%s\n" "$s" | grep -c "	up	")" = 3 ] && printf "%s\n" "$s" | grep "^operator-liaison	" | grep -q "	no	missing: --settings"' -- "$_S204_ST"
+check "§204(4h) ...and that unpinned adopted session is WARNED about, not hidden" \
+    bash -c 'grep -q "without sandy.s inbound refuse pin" "$1"' -- "$_C/stderr"
+_C="$(_s204_case b)"
+printf '[{"id":"11111111","kind":"background","sessionId":"11111111-aaaa","name":"Dup","state":"done"},{"id":"22222222","kind":"background","sessionId":"22222222-bbbb","name":"Dup","state":"done"}]' > "$_C/agents.json"
+_s204_sess "$_C" dup "Dup" "" "" ""
+_s204_sess "$_C" gone "Gone" "" "99999999-cff5-46e2-8e89-1687976c6821" ""
+_s204_up "$_C"
+check "§204(4i) an ambiguous name and a session: id that is not a job start NOTHING and are reported (ambiguous, missing)" \
+    bash -c '! grep -q -- "--bg" "$1/calls" && grep -q "^dup	ambiguous	" "$1/home/.claude/.sandy-sessions.tsv" && grep -q "^gone	missing	" "$1/home/.claude/.sandy-sessions.tsv"' -- "$_C"
+_C="$(_s204_case c)"; : > "$_C/copy"
+printf '[{"id":"3ed73c61","kind":"background","sessionId":"%s","name":"Liaison","state":"failed"}]' "$_S204_ID" > "$_C/agents.json"
+_s204_sess "$_C" liaison "Liaison" "cross_session" "" ""
+_s204_up "$_C"
+check "§204(4j) a resume that Claude Code turned into a COPY is a failure, named as such" \
+    bash -c 'grep "^liaison	failed	" "$1/home/.claude/.sandy-sessions.tsv" | grep -q "started a copy"' -- "$_C"
+fi
+
+# --- (5) the refactor kept the foreground claude command byte-identical -------
+_S204_BC="$(sed -n '/^_sandy_translate_args()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_wrap_cmd_exit_pause()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^build_claude_cmd()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_claude_base_args()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_claude_channel_args()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_claude_cmd_tail()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^build_claude_agents_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+_s204_cmd() {  # $1 builder, rest: env assignments
+    local b="$1"; shift
+    env -i PATH="$PATH" HOME="$_S204_D/h5" WORKSPACE=/w _sandy_is_headless=false "$@" \
+        bash -c 'eval "$1"; "$2" --mcp-config /x.json --foo' _ "$_S204_BC" "$b" 2>/dev/null
+}
+check "§204(5a) build_claude_cmd still emits model, teammate mode, effort, permission mode and channels in the same order and quoting" \
+    bash -c '[ "$1" = "claude --model m1 --teammate-mode tmux --effort high --permission-mode bypassPermissions --channels plugin:telegram@claude-plugins-official --mcp-config /x.json --foo; read -p '"''"'" ]' -- \
+    "$(_s204_cmd build_claude_cmd SANDY_MODEL=m1 SANDY_TEAMMATE_MODE=tmux SANDY_EFFORT=high SANDY_CHANNELS=telegram SANDY_AGENT=claude SANDY_NEW_SESSION=true)"
+check "§204(5b) a hostile passive value is still quoted at the sink (R1): teammate mode with ';' stays one argument" \
+    bash -c 'printf "%s" "$1" | grep -qF -- "--teammate-mode x\\;id"' -- "$(_s204_cmd build_claude_cmd 'SANDY_TEAMMATE_MODE=x;id' SANDY_NEW_SESSION=true)"
+mkdir -p "$_S204_D/h5/.claude/projects/-w"; : > "$_S204_D/h5/.claude/projects/-w/old.jsonl"
+check "§204(6a) the agent-view pane: claude agents with model, bypass, and the operator's --mcp-config -- never --continue, never other flags" \
+    bash -c '[ "$1" = "claude agents --model claude-opus-5 --dangerously-skip-permissions --mcp-config /x.json; read -p '"''"'" ]' -- "$(_s204_cmd build_claude_agents_cmd)"
+_S204_DISP="$(sed -n '/^_sandy_build_agent_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+check "§204(6b) the dispatcher gives the claude pane agent view when sessions are active, and the ordinary claude command otherwise or when headless" \
+    bash -c 'run() { env -i PATH="$PATH" HOME="$4" WORKSPACE=/w SANDY_NEW_SESSION=true "$@" bash -c "eval \"\$1\"; eval \"\$2\"; _sandy_build_agent_cmd claude" _ "$1" "$2" 2>/dev/null; }
+        a="$(env -i PATH="$PATH" HOME="$3" WORKSPACE=/w SANDY_NEW_SESSION=true SANDY_CLAUDE_SESSIONS_ACTIVE=1 _sandy_is_headless=false bash -c "eval \"\$1\"; eval \"\$2\"; _sandy_build_agent_cmd claude" _ "$1" "$2" 2>/dev/null)"
+        b="$(env -i PATH="$PATH" HOME="$3" WORKSPACE=/w SANDY_NEW_SESSION=true SANDY_CLAUDE_SESSIONS_ACTIVE=0 _sandy_is_headless=false bash -c "eval \"\$1\"; eval \"\$2\"; _sandy_build_agent_cmd claude" _ "$1" "$2" 2>/dev/null)"
+        h="$(env -i PATH="$PATH" HOME="$3" WORKSPACE=/w SANDY_NEW_SESSION=true SANDY_CLAUDE_SESSIONS_ACTIVE=1 _sandy_is_headless=true bash -c "eval \"\$1\"; eval \"\$2\"; _sandy_build_agent_cmd claude -p hi" _ "$1" "$2" 2>/dev/null)"
+        case "$a" in "claude agents "*) ;; *) exit 1 ;; esac
+        case "$b" in "claude --model "*) ;; *) exit 1 ;; esac
+        case "$h" in "claude --model "*) ;; *) exit 1 ;; esac' -- "$_S204_BC" "$_S204_DISP" "$_S204_D/h5"
+
+# --- (7) host gating: when the files apply, and the refusals -------------------
+_S204_GATE="$(awk '/^# BEGIN named claude sessions/{p=1} p{print} /^# END named claude sessions/{exit}' "$SANDY_SCRIPT")"
+_S204_FILT="$(sed -n '/^_sandy_filter_agent_args()/,/^}$/p' "$SANDY_SCRIPT")"
+check "§204(7-pre) the host gating block was extracted" \
+    bash -c 'printf "%s" "$1" | grep -q "_SANDY_CS_ACTIVE=1" && printf "%s" "$1" | grep -q "^# END named claude sessions"' -- "$_S204_GATE"
+_s204_gate() {  # $1 workspace, $2 sandbox dir, rest: env assignments. Prints ACTIVE=<n> RC=<rc> FATAL=<n>
+    local w="$1" sb="$2"; shift 2
+    env -i PATH="$PATH" HOME="$_S204_D/h7" WORK_DIR="$w" SANDBOX_DIR="$sb" SANDY_AGENT=claude "$@" bash -c '
+        info() { printf "INFO %s\n" "$*"; }; warn() { printf "WARN %s\n" "$*"; }; error() { printf "ERROR %s\n" "$*"; }
+        FATAL=0; _sandy_daemon_fatal() { FATAL=1; }
+        _sandy_agent_has() { case ",$SANDY_AGENT," in *",$1,"*) return 0 ;; esac; return 1; }
+        _sandy_launch_dir() { printf "%s/launch/L" "$SANDBOX_DIR"; }
+        eval "$1"; eval "$2"
+        trap '"'"'printf "ACTIVE=%s RC=%s FATAL=%s\n" "${_SANDY_CS_ACTIVE:-0}" "$?" "$FATAL"'"'"' EXIT
+        eval "$3"' _ "$_S204_PARSE" "$_S204_FILT" "$_S204_GATE" 2>&1
+}
+_W="$_S204_D/w7"; _SB="$_S204_D/sb7"; mkdir -p "$_W/.sandy" "$_SB/launch/L"
+cp -R "$_S204_D/ok/sessions" "$_W/.sandy/sessions"
+printf -- '--add-dir /extra\n-p\n' > "$_SB/agent-args.claude.fleet-controller"
+check "§204(7a) an interactive claude launch applies them: ACTIVE=1, per-session data in the launch dir, per-session operator args filtered (-p dropped)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "ACTIVE=1 RC=0 FATAL=0" && [ "$(cat "$2/launch/L/sessions/fleet-controller/args")" = "--add-dir /extra" ] && [ -f "$2/launch/L/sessions/operator-liaison/name" ]' -- \
+    "$(_s204_gate "$_W" "$_SB" SANDY_CHANNELS=telegram)" "$_SB"
+for _s204_off in "_sandy_is_headless=true|headless" "SANDY_REMOTE_CONTROL=true|--remote" "SANDY_PROVISION=1|--provision" "SANDY_CLAUDE_SESSIONS=0|SANDY_CLAUDE_SESSIONS=0" "SANDY_AGENT=codex|claude is not among"; do
+    check "§204(7b) not applied, with a notice: ${_s204_off#*|}" \
+        bash -c 'printf "%s\n" "$1" | grep -q "ACTIVE=0 RC=0" && printf "%s\n" "$1" | grep -q "not applied: .*$2"' -- \
+        "$(_s204_gate "$_W" "$_SB" "${_s204_off%%|*}")" "${_s204_off#*|}"
+done
+_W2="$_S204_D/w7b"; mkdir -p "$_W2/.sandy/sessions"
+printf '%s\n' '---' 'name: Solo' '---' '## On create' 'x' > "$_W2/.sandy/sessions/solo.md"
+check "§204(7c) SANDY_CHANNELS with no session claiming channels REFUSES the launch (fatal marker for --start)" \
+    bash -c 'printf "%s\n" "$1" | grep -q "RC=1 FATAL=1" && printf "%s\n" "$1" | grep -q "no session in .sandy/sessions/ claims"' -- \
+    "$(_s204_gate "$_W2" "$_SB" SANDY_CHANNELS=telegram)"
+check "§204(7d) a selected feature declaring receives cross_session with no claiming session REFUSES the launch" \
+    bash -c 'printf "%s\n" "$1" | grep -q "RC=1 FATAL=1" && printf "%s\n" "$1" | grep -q "declares receives cross_session"' -- \
+    "$(_s204_gate "$_W2" "$_SB" _sandy_csi_need=amapfeat)"
+printf 'bogus\n' >> "$_W2/.sandy/sessions/solo.md"
+printf '%s\n' '---' 'name: Solo' 'oops: 1' '---' > "$_W2/.sandy/sessions/solo.md"
+check "§204(7e) a malformed file REFUSES the launch, naming the file and line" \
+    bash -c 'printf "%s\n" "$1" | grep -q "RC=1 FATAL=1" && printf "%s\n" "$1" | grep -q "solo.md:3: unknown key"' -- \
+    "$(_s204_gate "$_W2" "$_SB")"
+
+# --- (8) a claiming session drives the inbound posture -------------------------
+_S204_CSI="$(awk '/^    if \[ -n "\$\{SANDY_CROSS_SESSION_INBOUND:-\}" \]; then$/{p=1} p{print} p&&/^    fi$/{exit}' "$SANDY_SCRIPT")"
+_s204_csi() {
+    env -i PATH="$PATH" "$@" bash -c '_sandy_csi_need="${NEED:-}"; _sandy_csi_nostart=""; _sandy_csi_need_disp="$_sandy_csi_need"; eval "$1"; printf "%s %s\n" "$_sandy_csi_val" "$_sandy_csi_src"' _ "$_S204_CSI" 2>/dev/null
+}
+check "§204(8a) a session claiming cross_session resolves accept with source session:<slug>" \
+    bash -c '[ "$1" = "accept session:liaison" ]' -- "$(_s204_csi _SANDY_CS_ACTIVE=1 _SANDY_CS_CROSS=liaison)"
+check "§204(8b) ...an explicit value still wins over it, and no claimant falls back to the feature/default rules" \
+    bash -c '[ "$1" = "hold explicit" ] && [ "$2" = "refuse default" ]' -- \
+    "$(_s204_csi _SANDY_CS_ACTIVE=1 _SANDY_CS_CROSS=liaison SANDY_CROSS_SESSION_INBOUND=hold)" "$(_s204_csi _SANDY_CS_ACTIVE=1)"
+
+# --- (9) --start readiness: exit 9 when a declared session is not up -----------
+_S204_SC="$(sed -n '/^_sandy_cs_start_check()/,/^}$/p' "$SANDY_SCRIPT")"
+mkdir -p "$_S204_D/bin9"
+# The stub RUNS the script --start sends into the container (the launch-id
+# match lives there), against a fixture file in place of the in-container path.
+cat > "$_S204_D/bin9/docker" <<'STUB'
+#!/bin/sh
+while [ $# -gt 0 ] && [ "$1" != "-c" ]; do shift; done
+shift
+script="$(printf '%s' "$1" | sed "s#/home/sandy/.claude/.sandy-sessions.tsv#$S204_F#")"
+exec sh -c "$script"
+STUB
+chmod +x "$_S204_D/bin9/docker"
+_s204_sc() {  # $1 ACTIVE, $2 container launch id, $3 status file content (or "" for none) -> rc + stderr
+    local f="$_S204_D/st9.$RANDOM"
+    if [ -n "$3" ]; then printf '%s' "$3" > "$f"; fi
+    env -i PATH="$_S204_D/bin9:$PATH" S204_F="$f" SANDY_CLAUDE_SESSIONS_ACTIVE="$1" SANDY_LAUNCH_ID="$2" \
+        bash -c 'error() { printf "%s\n" "$*" >&2; }; sleep() { :; }; eval "$1"; _sandy_cs_start_check c1; echo "rc=$?"' _ "$_S204_SC" 2>&1
+}
+check "§204(9a) sessions inactive -> ready (0), whatever a stale file says" \
+    bash -c 'printf "%s" "$1" | grep -q "rc=0"' -- "$(_s204_sc 0 L2 "$(printf 'launch\tL1\tdone\na\tfailed\tx\tA\t-\t-\t-\n')")"
+check "§204(9b) every session up for THIS launch -> ready (0)" \
+    bash -c 'printf "%s" "$1" | grep -q "rc=0"' -- "$(_s204_sc 1 L2 "$(printf 'launch\tL2\tdone\na\tup\tid\tA\tno\tnone\t-\n')")"
+check "§204(9c) one session not up -> not ready, naming it (the dispatcher turns this into exit 9)" \
+    bash -c 'printf "%s" "$1" | grep -q "rc=1" && printf "%s" "$1" | grep -q "Named Claude session .B. (b) is not up: ambiguous"' -- \
+    "$(_s204_sc 1 L2 "$(printf 'launch\tL2\tdone\na\tup\tid\tA\t-\t-\t-\nb\tambiguous\t-\tB\t-\t-\tseveral\n')")"
+check "§204(9d) a status file left by an EARLIER launch is never trusted, even one reporting every session up" \
+    bash -c 'printf "%s" "$1" | grep -q "rc=1" && printf "%s" "$1" | grep -q "never reported"' -- \
+    "$(_s204_sc 1 L2 "$(printf 'launch\tL1\tdone\na\tup\tid\tA\t-\t-\t-\n')")"
+check "§204(9d) ...nor a missing one" \
+    bash -c 'printf "%s" "$1" | grep -q "rc=1"' -- "$(_s204_sc 1 L2 "")"
+check "§204(9e) the --start dispatcher exits 9 when the check fails, and the container is left running (no --stop on that path)" \
+    bash -c 'b="$(awk "/if ! _sandy_cs_start_check/{p=1} p{print} p&&/^        fi\$/{exit}" "$1")"; printf "%s" "$b" | grep -q "exit 9" && ! printf "%s" "$b" | grep -q -- "--stop"' -- "$SANDY_SCRIPT"
+
+# --- (10) marker + --print-state round trip ----------------------------------
+_S204_WRITER="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/^_sandy_session_final="\$\{_sandy_session_file%\.sandy-tmp\.\*\}"$/{exit}' "$SANDY_SCRIPT")"
+_S204_FEBODY="$(sed -n '/^_sandy_fe_marker_body() {/,/^}$/p' "$SANDY_SCRIPT")"
+_S204_JESC="$(sed -n '/^_sandy_fm_jesc() {/,/^}$/p' "$SANDY_SCRIPT")"
+_s204_marker() {  # $1 sandbox dir, $2 ACTIVE
+    env -i PATH="$PATH" OUT="$1/sandy-session.json" SB="$1" ACT="$2" bash -c '
+        _sandy_agent_has() { [ "$1" = claude ]; }; SANDY_AGENT=claude
+        sandy_full_version() { printf "9.9.9-test"; }
+        _sandy_launch_dir() { printf "%s/launch/L" "$SB"; }
+        eval "$1"; eval "$2"
+        _sandy_egress_mode=permissive; SANDY_WORKSPACE=/w; SANDBOX_NAME=x; _sandy_session_nonce=n
+        _sandy_fe_list=""; _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""
+        _sandy_csi_json="\"accept\""; _sandy_csi_src_json="\"session:liaison\""
+        _SANDY_CS_ACTIVE="$ACT"; _SANDY_CS_SLUGS="liaison"
+        _sandy_session_file="$OUT"
+        eval "$3"' _ "$_S204_FEBODY" "$_S204_JESC" "$_S204_WRITER" 2>/dev/null
+}
+_s204_ps() { env -i PATH="$PATH" HOME="$_S204_D/h10" SANDY_HOME="$1" bash "$SANDY_SCRIPT" --print-state 2>/dev/null || true; }
+_H="$_S204_D/home-off"; mkdir -p "$_H/sandboxes/sb-off/claude"; _s204_marker "$_H/sandboxes/sb-off" 0
+check "§204(10a) INVARIANT: an inactive launch writes claude_sessions as [] (never a deliberate null), one line" \
+    bash -c 'grep -qx "  \"claude_sessions\": \[\]" "$1"' -- "$_H/sandboxes/sb-off/sandy-session.json"
+check "§204(10b) --print-state reads it back as {declared: [], status: null}" \
+    bash -c 'printf "%s" "$1" | grep -qF "\"claude_sessions\":{\"declared\":[],\"status\":null}"' -- "$(_s204_ps "$_H")"
+_H="$_S204_D/home-on"; _SBX="$_H/sandboxes/sb-on"; mkdir -p "$_SBX/claude" "$_SBX/launch/L/sessions/liaison"
+printf 'Operator Liaison\n' > "$_SBX/launch/L/sessions/liaison/name"; printf 'cross_session channels\n' > "$_SBX/launch/L/sessions/liaison/receives"
+_s204_marker "$_SBX" 1
+printf 'launch\tL9\tdone\nliaison\tfailed\t3ed73c61-x\tOperator Liaison\treceiver\tnone\tquote " back\\ ctl \001 end\n' > "$_SBX/claude/.sandy-sessions.tsv"
+_S204_PS="$(_s204_ps "$_H")"
+check "§204(10c) an active launch declares slug, name and receives in the marker" \
+    bash -c 'grep -qF "\"claude_sessions\": [{\"slug\": \"liaison\", \"name\": \"Operator Liaison\", \"receives\": [\"cross_session\", \"channels\"]}]" "$1"' -- "$_SBX/sandy-session.json"
+check "§204(10d) --print-state reports the container's per-session status with its launch id" \
+    bash -c 'printf "%s" "$1" | grep -qF "\"status\":{\"launch_id\":\"L9\",\"sessions\":[{\"slug\":\"liaison\",\"state\":\"failed\",\"session_id\":\"3ed73c61-x\""' -- "$_S204_PS"
+if command -v python3 >/dev/null 2>&1; then
+    check "§204(10e) the agent-writable status file cannot break the document: quotes, backslashes and control bytes still yield valid JSON" \
+        bash -c 'printf "%s" "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); s=[x for x in d[\"sandboxes\"] if x[\"claude_sessions\"]][0][\"claude_sessions\"][\"status\"][\"sessions\"][0][\"reason\"]; assert \"\\x01\" not in s and \"quote\" in s"' -- "$_S204_PS"
+else
+    skip "§204(10e) needs python3 to parse the document"
+fi
+
+# --- (11) a receiving feature's args go to the claimant only --------------------
+_S204_FM="$(sed -n '/^_sandy_fm_agent_args_for() {/,/^}$/p' "$SANDY_SCRIPT")
+$_S204_FILT
+$_S204_JESC"
+_s204_fm() {
+    env -i PATH="$PATH" DIV="$1" bash -c 'warn() { :; }; eval "$1"
+        _SANDY_FM_AA_RECORDS="$(printf "fa\tclaude\t--mcp-config /a.json\nfb\tclaude\t--x\n")"; _SANDY_FM_AA_JSON=""
+        _SANDY_FM_AA_DIVERT="$DIV"; _sandy_fm_agent_args_for claude
+        printf "%s|%s|%s\n" "$_SANDY_FM_AA_TOKENS" "$_SANDY_FM_AA_DIVERTED" "$_SANDY_FM_AA_JSON"' _ "$_S204_FM" 2>/dev/null
+}
+check "§204(11a) with a divert list, the receiving feature's tokens leave the shared args and go to the claimant" \
+    bash -c 'IFS="|" read -r t d j <<< "$1"; [ "$t" = "--x" ] && [ "$d" = "--mcp-config /a.json" ] && printf "%s" "$j" | grep -q "\"fa\"" && printf "%s" "$j" | grep -q "\"fb\""' -- "$(_s204_fm fa)"
+check "§204(11b) ...and without one, nothing changes (control)" \
+    bash -c 'IFS="|" read -r t d j <<< "$1"; [ "$t" = "--mcp-config /a.json --x" ] && [ -z "$d" ]' -- "$(_s204_fm "")"
+
+# --- (12) launch wiring ---------------------------------------------------------
+_S204_RF="$(awk '/^# Named Claude sessions: the validated per-session data, read-only/{p=1} p{print} p&&/^fi$/{exit}' "$SANDY_SCRIPT")"
+_s204_rf() { env -i PATH="$PATH" ACT="$1" bash -c '_SANDY_CS_ACTIVE="$ACT"; SANDBOX_DIR=/SB; _sandy_launch_dir() { printf /SB/launch/L; }; RUN_FLAGS=(); eval "$1"; printf "%s\n" "${RUN_FLAGS[@]}"' _ "$_S204_RF" 2>/dev/null; }
+check "§204(12a) active: the session data is mounted read-only from this launch's dir, and the flag is 1" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "SANDY_CLAUDE_SESSIONS_ACTIVE=1" && printf "%s\n" "$1" | grep -qx "/SB/launch/L/sessions:/opt/sandy/sessions:ro"' -- "$(_s204_rf 1)"
+check "§204(12b) inactive: the flag is still forwarded as 0 (a forged env is always overwritten) and nothing is mounted" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "SANDY_CLAUDE_SESSIONS_ACTIVE=0" && ! printf "%s\n" "$1" | grep -q opt/sandy/sessions' -- "$(_s204_rf 0)"
+_S204_GUARD='if [ "${SANDY_CLAUDE_SESSIONS_ACTIVE:-0}" = "1" ] && [ "$_sandy_is_headless" != "true" ] && [ "${SANDY_REMOTE_CONTROL:-false}" != "true" ]; then'
+check "§204(12c) container side: sessions come up BEFORE the pane is created, gated on the flag and never headless or --remote" \
+    awk -v g="$_S204_GUARD" 'index($0, g) == 1 {gl = NR} $0 == "    _sandy_claude_sessions_up" && gl == NR - 1 {u = NR} index($0, "if [ \"$_SANDY_IS_MULTI\" = false ]; then") == 1 && !m {m = NR} END {exit !(u && m && u < m)}' "$SANDY_SCRIPT"
+check "§204(12d) the host relay stands down while a named session receives channels (agent view cannot take keystrokes)" \
+    bash -c 'grep -A1 "Launch host-side channel relay" "$1" >/dev/null && awk "/^CHANNEL_RELAY_PID=\"\"\$/{p=1} p&&/_SANDY_CS_ACTIVE:-0}\" != 1/{f=1} p&&/^    case /{exit} END{exit !f}" "$1"' -- "$SANDY_SCRIPT"
+rm -rf "$_S204_D"
+unset _S204_D _S204_PARSE _S204_OK _S204_TWO _S204_DUPN _S204_LNK _S204_CRLF _S204_CH _S204_H1 _S204_H2 _S204_H3 _S204_L2
+unset _S204_UP _S204_ID _S204_RC _S204_CALLS _S204_ST _S204_BC _S204_DISP _S204_GATE _S204_FILT _S204_CSI _S204_SC
+unset _S204_WRITER _S204_FEBODY _S204_JESC _S204_PS _S204_FM _S204_RF _S204_GUARD _C _H _W _W2 _SB _SBX _s204_case _s204_f _s204_rest _s204_c _s204_e _s204_off _s204_nl
 
 
 # BEGIN SUMMARY

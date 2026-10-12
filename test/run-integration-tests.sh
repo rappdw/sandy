@@ -2414,6 +2414,35 @@ fi
 fi  # section 25
 
 # ============================================================
+section "26. Named Claude sessions survive a relaunch (2.9.0) — test/acceptance-named-sessions.sh"
+# ============================================================
+if [ "$_SECTION_ON" = true ]; then
+# run-tests.sh §204 proves each piece against stubs; this proves against the
+# Claude Code the image really ships that a relaunch RESUMES each declared
+# session under the same id rather than starting a copy, that the pane is
+# agent view, and that an unknown session: id makes --start exit 9 with the
+# container left running. Needs credentials (each session takes real turns).
+_acc_ns="$_INT_SELF_DIR/acceptance-named-sessions.sh"
+if [ -f "$_acc_ns" ]; then
+    _acc_out="$(mktemp)"
+    set +e
+    SANDY="$SANDY_SCRIPT" bash "$_acc_ns" 2>&1 | tee "$_acc_out"
+    _acc_rc=${PIPESTATUS[0]}
+    set -e
+    _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1 || true)"
+    if [ "$_acc_rc" -eq 0 ]; then
+        pass "named-sessions acceptance (${_acc_res:-all assertions passed})"
+    else
+        fail "named-sessions acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
+    fi
+    rm -f "$_acc_out"
+else
+    skip "named-sessions acceptance (acceptance-named-sessions.sh not found)"
+fi
+
+fi  # section 26
+
+# ============================================================
 # Summary
 # ============================================================
 _section_close
