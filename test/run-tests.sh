@@ -24386,8 +24386,8 @@ check "§196(5) a symlinked .claude.json is reported, never followed" \
 check "§196(6) session is running for a live lock holder and stopped for a dead one" \
     bash -c '[ "$1" = "running|stopped" ]' _ \
     "$(_s196_q "S['$_S196_WEB']['session']+'|'+S['team-22222222']['session']")"
-check "§196(7) the table shows the account row (four columns: no organization, plan or date), under Running, after the Stopped section" \
-    bash -c 'grep -q "^  SANDBOX  *AGENT  *CRED  *ACCOUNT$" "$1" && grep "^  $2 " "$1" | grep -q "claude  *full  *dev@example.com$" && s=$(grep -n "^Stopped (3)$" "$1" | cut -d: -f1) && r=$(grep -n "^Running (1)$" "$1" | cut -d: -f1) && w=$(grep -n "^  $2 " "$1" | cut -d: -f1) && [ "$s" -lt "$r" ] && [ "$r" -lt "$w" ] && [ "$(tail -n 1 "$1" | cut -c3-)" = "$(grep "^  $2 " "$1" | cut -c3-)" ]' _ "$_S196_D/out.txt" "$_S196_WEB"
+check "§196(7) the table shows the account row (SANDBOX AGENT CRED ACCOUNT GITHUB: no organization, plan or date), under Running, after the Stopped section" \
+    bash -c 'grep -q "^  SANDBOX  *AGENT  *CRED  *ACCOUNT  *GITHUB$" "$1" && grep "^  $2 " "$1" | grep -q "claude  *full  *dev@example.com  *-$" && s=$(grep -n "^Stopped (3)$" "$1" | cut -d: -f1) && r=$(grep -n "^Running (1)$" "$1" | cut -d: -f1) && w=$(grep -n "^  $2 " "$1" | cut -d: -f1) && [ "$s" -lt "$r" ] && [ "$r" -lt "$w" ] && [ "$(tail -n 1 "$1" | cut -c3-)" = "$(grep "^  $2 " "$1" | cut -c3-)" ]' _ "$_S196_D/out.txt" "$_S196_WEB"
 check "§196(8) --workspace reports that workspace's sandbox only" \
     bash -c 'printf "%s" "$1" | python3 -c "import json,sys; s=json.load(sys.stdin)[\"sandboxes\"]; sys.exit(0 if [x[\"sandbox\"] for x in s]==[sys.argv[1]] else 1)" "$2"' _ \
     "$(_s196 --json --workspace "$_S196_D/ws/web")" "$_S196_WEB"
@@ -24481,7 +24481,7 @@ check "§196(14) a profileFetchedAt in epoch milliseconds is reported as an ISO 
     bash -c '[ "$1" = "2026-10-12T17:41:12Z|2026-10-12T17:41:12Z" ]' _ \
     "$(_s196b_q "S['multi-11111111']['account']['recorded_at']+'|'+S['multi-11111111']['accounts']['claude']['recorded_at']")"
 check "§196(15) the table gives each agent its own row, with an AGENT column and the login's email under ACCOUNT; plan and dates are --json only" \
-    bash -c 'grep -q "^  SANDBOX  *AGENT  *CRED  *ACCOUNT$" "$1" && grep -q "^  multi-11111111  *claude  *full  *dev@example.com$" "$1" && grep -q "^  *codex  *chatgpt  *cx@example.com$" "$1" && ! grep -q "1791826872758\|Max 20x\|ORGANIZATION\|AS OF" "$1"' _ "$_S196_D/out2.txt"
+    bash -c 'grep -q "^  SANDBOX  *AGENT  *CRED  *ACCOUNT  *GITHUB$" "$1" && grep -q "^  multi-11111111  *claude  *full  *dev@example.com  *-$" "$1" && grep -q "^  *codex  *chatgpt  *cx@example.com$" "$1" && ! grep -q "1791826872758\|Max 20x\|ORGANIZATION\|AS OF" "$1"' _ "$_S196_D/out2.txt"
 check "§196(16) an agent the last launch did not run is not reported (a stale Claude record in a codex-only sandbox)" \
     bash -c '[ "$1" = "codex|False" ] && ! grep -q "stale@example.com" "$2"' _ \
     "$(_s196b_q "','.join(S['cxonly-22222222']['agents'])+'|'+str('claude' in S['cxonly-22222222']['accounts'])")" "$_S196_D/out2.txt"
@@ -24494,16 +24494,16 @@ check "§196(18) a marker with no agents field: agents null, claude plus any age
 check "§196(19) no token or key from auth.json is ever printed" \
     bash -c '! grep -q "S196-SECRET" "$1" "$2"' _ "$_S196_D/out2.json" "$_S196_D/out2.txt"
 check "§196(21) a long-lived token's row reports no account (Anthropic will not name one); the earlier login is kept as last_login_record" \
-    bash -c '[ "$1" = "None|None|None|None|personal@example.com|claude/.claude.json|personal@example.com" ] && grep -q "^  switch-55555555  *claude  *oauth-token  *corp$" "$2" && ! grep -q "personal@example.com" "$2"' _ \
+    bash -c '[ "$1" = "None|None|None|None|personal@example.com|claude/.claude.json|personal@example.com" ] && grep -q "^  switch-55555555  *claude  *oauth-token  *corp  *-$" "$2" && ! grep -q "personal@example.com" "$2"' _ \
     "$(_s196b_q "'|'.join(str(x) for x in [S['switch-55555555']['accounts']['claude'][k] for k in ('email','organization_name','plan','recorded_at')]+[S['switch-55555555']['accounts']['claude']['last_login_record']['email'], S['switch-55555555']['accounts']['claude']['last_login_record']['source'], S['switch-55555555']['account']['email']])")" "$_S196_D/out2.txt"
 check "§196(22) an API key is treated the same; an account login keeps its account and has no last_login_record; the note prints once" \
-    bash -c '[ "$1" = "None|odd@example.com|dev@example.com|None" ] && grep -q "^  odd-66666666  *claude  *api-key  *12345678$" "$2" && [ "$(grep -c "^One row per agent each sandbox" "$2")" = 1 ]' _ \
+    bash -c '[ "$1" = "None|odd@example.com|dev@example.com|None" ] && grep -q "^  odd-66666666  *claude  *api-key  *12345678  *-$" "$2" && [ "$(grep -c "^One row per agent each sandbox" "$2")" = 1 ]' _ \
     "$(_s196b_q "'|'.join(str(x) for x in [S['odd-66666666']['accounts']['claude']['email'], S['odd-66666666']['accounts']['claude']['last_login_record']['email'], S['multi-11111111']['accounts']['claude']['email'], S['multi-11111111']['accounts']['claude']['last_login_record']])")" "$_S196_D/out2.txt"
 check "§196(23) CRED names a token by its label (the rest of the line, spaces kept, trimmed; any case of hex), else by fingerprint; lines that are not labels (no label, bad hex, a control character) are named on stderr" \
-    bash -c '[ "$1" = "3fa1c09e|corp|2026-10-12T00:00:00Z|0badc0de|personal (rappdw)" ] && grep -q "^  switch-55555555  *claude  *oauth-token  *corp$" "$2" && grep -q "^  fresh-77777777  *claude  *oauth-token  *personal (rappdw)$" "$2" && grep -q "credential-labels: ignored line(s) 3 5 6: expected" "$2" && grep -q "^  odd-66666666  *claude  *api-key  *12345678$" "$2"' _ \
+    bash -c '[ "$1" = "3fa1c09e|corp|2026-10-12T00:00:00Z|0badc0de|personal (rappdw)" ] && grep -q "^  switch-55555555  *claude  *oauth-token  *corp  *-$" "$2" && grep -q "^  fresh-77777777  *claude  *oauth-token  *personal (rappdw)  *-$" "$2" && grep -q "credential-labels: ignored line(s) 3 5 6: expected" "$2" && grep -q "^  odd-66666666  *claude  *api-key  *12345678  *-$" "$2"' _ \
     "$(_s196b_q "'|'.join(str(x) for x in [S['switch-55555555']['accounts']['claude']['credential_fingerprint'], S['switch-55555555']['accounts']['claude']['credential_label'], S['switch-55555555']['accounts']['claude']['credential_since'], S['fresh-77777777']['accounts']['claude']['credential_fingerprint'], S['fresh-77777777']['accounts']['claude']['credential_label']])")" "$_S196_D/out2.txt"
 check "§196(24) codex on an API key (per the marker) reports api-key and its fingerprint, not the sandbox's stale ChatGPT login" \
-    bash -c '[ "$1" = "api-key|77b20d14|None|None" ] && grep -q "^  cxkey-88888888  *codex  *api-key  *77b20d14$" "$2"' _ \
+    bash -c '[ "$1" = "api-key|77b20d14|None|None" ] && grep -q "^  cxkey-88888888  *codex  *api-key  *77b20d14  *-$" "$2"' _ \
     "$(_s196b_q "'|'.join(str(S['cxkey-88888888']['accounts']['codex'][k]) for k in ('credential','credential_fingerprint','email','plan'))")" "$_S196_D/out2.txt"
 check "§196(25) a codex plan type is shown with spaces, not underscores" \
     bash -c '[ "$1" = "Self serve business prolite" ]' _ "$(_s196b_q "S['cxonly-22222222']['accounts']['codex']['plan']")"
@@ -25700,16 +25700,18 @@ unset _S204_UP _S204_ID _S204_RC _S204_CALLS _S204_ST _S204_BC _S204_DISP _S204_
 unset _S204_WRITER _S204_FEBODY _S204_JESC _S204_PS _S204_FM _S204_RF _S204_GUARD _C _H _W _W2 _SB _SBX _s204_case _s204_f _s204_rest _s204_c _s204_e _s204_off _s204_nl
 
 
-echo "§205: which forwarded gh account is active in the container"
-# The picker, extracted from the user-setup heredoc and run against a stub gh
-# that answers repos/<r> with push=true only for tokens in STUB_PUSH, logs its
-# argv, and fails every call when STUB_FAIL=1.
-_S205_FN="$(awk '/^_sandy_gh_pick_account\(\) \{$/{p=1} p{print} p&&/^\}$/{exit}' "$SANDY_SCRIPT")"
-_S205_D="$(mktemp -d)"
+echo "§205: which gh account a sandbox uses — chosen on the host, recorded in the marker, shown by --accounts"
+# The host-side picker and its push check, extracted from sandy and run
+# against a stub gh that answers repos/<r> with push=true only for tokens in
+# STUB_PUSH, logs its argv and environment token, fails every call when
+# STUB_FAIL=1, and hangs when STUB_HANG=1.
+_S205_FN="$(awk '/^_sandy_gh_can_push\(\) \{$/{p=1} p{print} p&&/^\}$/{exit}' "$SANDY_SCRIPT"; awk '/^_sandy_gh_pick_account\(\) \{$/{p=1} p{print} p&&/^\}$/{exit}' "$SANDY_SCRIPT")"
+_S205_D="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S205_D/bin"
 cat > "$_S205_D/bin/gh" <<'STUB'
 #!/bin/bash
-printf '%s\n' "$*" >> "$STUB_LOG"
+printf '%s|tok=%s\n' "$*" "${GH_TOKEN:-}" >> "$STUB_LOG"
+[ "${STUB_HANG:-0}" = 1 ] && sleep 30
 [ "${STUB_FAIL:-0}" = 1 ] && exit 1
 [ "$1" = api ] || exit 1
 case " $STUB_PUSH " in *" $GH_TOKEN "*) echo true ;; *) echo false ;; esac
@@ -25720,56 +25722,74 @@ chmod +x "$_S205_D/bin/gh"
 _s205() {
     local _acc="$1" _url="$2"; shift 2
     : > "$_S205_D/log"
-    env -i PATH="$_S205_D/bin:$PATH" STUB_LOG="$_S205_D/log" GH_ACCOUNTS="$_acc" "$@" bash -c '
+    env -i PATH="$_S205_D/bin:$PATH" STUB_LOG="$_S205_D/log" "$@" bash -c '
         set -euo pipefail
+        warn() { echo "W:$*"; }
         eval "$1"
-        IFS="," read -ra _gh_pairs <<< "$GH_ACCOUNTS"
-        _sandy_gh_pick_account "$2" || echo none' _ "$_S205_FN" "$_url" 2>"$_S205_D/err"
+        _sandy_gh_pick_account "$2" "$3" || echo none' _ "$_S205_FN" "$_acc" "$_url" 2>"$_S205_D/err"
     printf '|calls=%s\n' "$(wc -l < "$_S205_D/log" | tr -d ' ')"
 }
+_s205f() { printf '%s' "$1" | tr '\n' ' ' | sed 's/ |/|/'; }
 _S205_A="hostact:tokA,pusher:tokB,lastone:tokC"
-check "§205(0) the picker was extracted (mutation: a renamed function empties it and every check goes vacuous)" \
-    bash -c 'printf "%s" "$1" | grep -q "^_sandy_gh_pick_account() {"' _ "$_S205_FN"
-_s205_r="$(_s205 "$_S205_A" https://github.com/someorg/repo.git GIT_TOKEN=tokA STUB_PUSH="tokB tokC")"
-check "§205(1) an org repo gets the FIRST account that can push, not the last logged in nor the host's active (got: ${_s205_r%%$'\n'*})" \
-    test "$(printf '%s' "$_s205_r" | tr '\n' ' ')" = "pusher|can push to someorg/repo |calls=2"
-_s205_r="$(_s205 "$_S205_A" git@github.com:someorg/repo.git GIT_TOKEN=tokB STUB_PUSH="")"
-check "§205(2) nobody can push: the host's active account (the one whose token is GIT_TOKEN), after asking about every account" \
-    test "$(printf '%s' "$_s205_r" | tr '\n' ' ')" = "pusher|host active account |calls=3"
-_s205_r="$(_s205 "$_S205_A" ssh://git@github.com/someorg/repo GIT_TOKEN=tokC STUB_FAIL=1 STUB_PUSH="tokA")"
-check "§205(3) the push check failing outright falls back to the host's active account" \
-    test "$(printf '%s' "$_s205_r" | tr '\n' ' ')" = "lastone|host active account |calls=3"
-_s205_r="$(_s205 "$_S205_A" https://github.com/LastOne/repo GIT_TOKEN=tokA STUB_PUSH="tokB")"
-check "§205(4) a repo owned by one of the accounts picks it, case-insensitively, with no API call" \
-    test "$(printf '%s' "$_s205_r" | tr '\n' ' ')" = "lastone|owns origin |calls=0"
-_s205_r="$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA SANDY_GH_ACCOUNT=lastone STUB_PUSH="tokB")"
-check "§205(5) SANDY_GH_ACCOUNT naming a forwarded account wins over everything, with no API call and no warning" \
-    bash -c '[ "$1" = "lastone|SANDY_GH_ACCOUNT |calls=0" ] && [ ! -s "$2" ]' _ "$(printf '%s' "$_s205_r" | tr '\n' ' ')" "$_S205_D/err"
-_s205_r="$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA SANDY_GH_ACCOUNT=nobody STUB_PUSH="tokC")"
-check "§205(6) SANDY_GH_ACCOUNT naming no forwarded account warns, naming it and the accounts there are, and picks automatically" \
-    bash -c '[ "$1" = "lastone|can push to someorg/repo |calls=3" ] && grep -q "SANDY_GH_ACCOUNT=nobody is not a gh account" "$2" && grep -q "hostact pusher lastone" "$2"' _ "$(printf '%s' "$_s205_r" | tr '\n' ' ')" "$_S205_D/err"
-_s205_r="$(_s205 "$_S205_A" https://gitlab.com/someorg/repo GIT_TOKEN=tokB STUB_PUSH="tokA")"
-_s205_r2="$(_s205 "$_S205_A" "" GIT_TOKEN=tokB STUB_PUSH="tokA")"
-check "§205(7) a non-GitHub origin, or none, asks GitHub nothing and uses the host's active account" \
-    bash -c '[ "$1" = "pusher|host active account |calls=0" ] && [ "$2" = "$1" ]' _ "$(printf '%s' "$_s205_r" | tr '\n' ' ')" "$(printf '%s' "$_s205_r2" | tr '\n' ' ')"
-_s205_r="$(_s205 "solo:tokS" https://github.com/someorg/repo GIT_TOKEN=other)"
-_s205_r2="$(_s205 "$_S205_A" https://gitlab.com/x/y GIT_TOKEN=unknown)"
-check "§205(8) one account is used with no API call; with no match anywhere nothing is picked (gh keeps its own state)" \
-    bash -c '[ "$1" = "solo|only account |calls=0" ] && [ "$2" = "none |calls=0" ]' _ "$(printf '%s' "$_s205_r" | tr '\n' ' ')" "$(printf '%s' "$_s205_r2" | tr '\n' ' ')"
-_s205_r="$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_PUSH="")"
-check "§205(9) the push check passes each token through GH_TOKEN, never argv, and asks with a timeout" \
-    bash -c '! grep -q "tok[ABC]" "$1" && grep -qx "api repos/someorg/repo --jq .permissions.push" "$1" && printf "%s" "$2" | grep -q "GH_TOKEN=\"\$_t\" timeout 5 gh api"' _ "$_S205_D/log" "$_S205_FN"
-check "§205(10) user-setup switches gh to the pick, and the old owner-only block is gone" \
-    bash -c 'grep -q "^    if _gh_pick=\"\$(_sandy_gh_pick_account \"\$_gh_origin\")\"; then\$" "$1" && grep -q "gh auth switch --user \"\${_gh_pick%%|\*}\"" "$1" && ! grep -q "_repo_owner" "$1"' _ "$SANDY_SCRIPT"
-_s205_rf() { env -i PATH="$PATH" SANDY_GH_ACCOUNT="$1" bash -c 'RUN_FLAGS=(); GH_ACCOUNTS=""; warn() { echo "W:$*"; }; eval "$2"; printf "%s\n" "${RUN_FLAGS[@]}"' _ "$1" "$(awk '/^if \[ -n "\$\{SANDY_GH_ACCOUNT:-\}" \]; then$/{p=1} p{print} p&&/^fi$/{exit}' "$SANDY_SCRIPT")" 2>/dev/null; }
-check "§205(11) the host forwards a valid SANDY_GH_ACCOUNT and refuses anything that is not a GitHub username" \
-    bash -c '[ "$1" = "-e SANDY_GH_ACCOUNT=drapp_pfpt" ] && printf "%s" "$2" | grep -q "^W:Ignoring" && ! printf "%s" "$2" | grep -q "^-e"' _ \
-    "$(_s205_rf drapp_pfpt | tr '\n' ' ' | sed 's/ $//')" "$(_s205_rf 'a b;x')"
-check "§205(12) SANDY_GH_ACCOUNT is passive-safe and in --print-schema" \
-    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"name\":\"SANDY_GH_ACCOUNT\"" && awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)\$/" "$1" | grep -qE "^[[:space:]]+SANDY_GH_ACCOUNT\$"' _ "$SANDY_SCRIPT"
+check "§205(0) the picker and push check were extracted (mutation: a renamed function empties them and every check goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "^_sandy_gh_pick_account() {" && printf "%s" "$1" | grep -q "^_sandy_gh_can_push() {"' _ "$_S205_FN"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" https://github.com/someorg/repo.git GIT_TOKEN=tokA STUB_PUSH="tokB tokC")")"
+check "§205(1) an org repo gets the FIRST account that can push, not the last logged in nor the host's active (got: $_s205_r)" \
+    test "$_s205_r" = "pusher|can push to someorg/repo|calls=2"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" git@github.com:someorg/repo.git GIT_TOKEN=tokB STUB_PUSH="")")"
+check "§205(2) nobody can push: the host's active account (the one whose token is GIT_TOKEN), after asking about every account (got: $_s205_r)" \
+    test "$_s205_r" = "pusher|host active account|calls=3"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" ssh://git@github.com/someorg/repo GIT_TOKEN=tokC STUB_FAIL=1 STUB_PUSH="tokA")")"
+check "§205(3) the push check failing outright falls back to the host's active account (got: $_s205_r)" \
+    test "$_s205_r" = "lastone|host active account|calls=3"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" https://github.com/LastOne/repo GIT_TOKEN=tokA STUB_PUSH="tokB")")"
+check "§205(4) a repo owned by one of the accounts picks it, case-insensitively, with no API call (got: $_s205_r)" \
+    test "$_s205_r" = "lastone|owns origin|calls=0"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA SANDY_GH_ACCOUNT=lastone STUB_PUSH="tokB")")"
+check "§205(5) SANDY_GH_ACCOUNT naming a forwarded account wins over everything, with no API call and no warning (got: $_s205_r)" \
+    bash -c '[ "$1" = "lastone|SANDY_GH_ACCOUNT|calls=0" ] && [ ! -s "$2" ]' _ "$_s205_r" "$_S205_D/err"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA SANDY_GH_ACCOUNT=nobody STUB_PUSH="tokC")")"
+check "§205(6) SANDY_GH_ACCOUNT naming no forwarded account warns on stderr, naming it and the accounts there are, and picks automatically (got: $_s205_r)" \
+    bash -c '[ "$1" = "lastone|can push to someorg/repo|calls=3" ] && grep -q "SANDY_GH_ACCOUNT=nobody is not a gh account" "$2" && grep -q "hostact pusher lastone" "$2"' _ "$_s205_r" "$_S205_D/err"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" https://gitlab.com/someorg/repo GIT_TOKEN=tokB STUB_PUSH="tokA")")"
+_s205_r2="$(_s205f "$(_s205 "$_S205_A" "" GIT_TOKEN=tokB STUB_PUSH="tokA")")"
+_s205_r3="$(_s205f "$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokB SANDY_OFFLINE=1 STUB_PUSH="tokA")")"
+check "§205(7) a non-GitHub origin, no origin, or offline mode asks GitHub nothing and uses the host's active account" \
+    bash -c '[ "$1" = "pusher|host active account|calls=0" ] && [ "$2" = "$1" ] && [ "$3" = "$1" ]' _ "$_s205_r" "$_s205_r2" "$_s205_r3"
+_s205_r="$(_s205f "$(_s205 "solo:tokS" https://github.com/someorg/repo GIT_TOKEN=other)")"
+_s205_r2="$(_s205f "$(_s205 "$_S205_A" https://gitlab.com/x/y GIT_TOKEN=unknown)")"
+check "§205(8) one account is used with no API call; with no match anywhere nothing is picked" \
+    bash -c '[ "$1" = "solo|only account|calls=0" ] && [ "$2" = "none|calls=0" ]' _ "$_s205_r" "$_s205_r2"
+_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_PUSH="" >/dev/null
+check "§205(9) each token reaches gh through GH_TOKEN, never argv" \
+    bash -c 'grep -qx "api repos/someorg/repo --jq .permissions.push|tok=tokB" "$1" && ! cut -d"|" -f1 "$1" | grep -q "tok[ABC]"' _ "$_S205_D/log"
+_s205_t0=$SECONDS
+_s205_r="$(_s205f "$(_s205 "hostact:tokA,pusher:tokB" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_HANG=1)")"
+_s205_dt=$((SECONDS - _s205_t0))
+check "§205(10) a push check that hangs is abandoned after about 5 s per account, then the host's active account is used (took ${_s205_dt}s, got: $_s205_r)" \
+    bash -c '[ "$1" = "hostact|host active account|calls=2" ] && [ "$2" -le 14 ]' _ "$_s205_r" "$_s205_dt"
+# The container side applies the host's choice and decides nothing.
+_S205_CT="$(awk '/^    # Make the account the HOST chose active/{p=1} p{print} p&&/^    fi$/{exit}' "$SANDY_SCRIPT")"
+_s205_ct() { : > "$_S205_D/log"; env -i PATH="$_S205_D/bin:$PATH" STUB_LOG="$_S205_D/log" SANDY_GH_ACTIVE="$1" bash -c 'set -euo pipefail; sandy_log() { :; }; IFS="," read -ra _gh_pairs <<< "a:t1,b:t2"; eval "$1"' _ "$_S205_CT" 2>"$_S205_D/err"; cat "$_S205_D/log"; }
+check "§205(11) the container switches gh to the host's choice, and to nothing when the choice was not forwarded (it says so)" \
+    bash -c '[ "$1" = "auth switch --user b|tok=" ] && [ -z "$2" ] && grep -q "was chosen but not forwarded" "$3" && ! grep -q "_sandy_gh_pick_account\|gh api" <<< "$4"' _ \
+    "$(_s205_ct b)" "$(_s205_ct zz)" "$_S205_D/err" "$_S205_CT"
+check "§205(12) the host decides BEFORE it writes the marker, records github{} there, and passes SANDY_GH_ACTIVE (not SANDY_GH_ACCOUNT) to the container" \
+    bash -c 'p=$(grep -n "^    if _sandy_gh_pick=\"\$(_sandy_gh_pick_account \"\$GH_ACCOUNTS\"" "$1" | cut -d: -f1); m=$(grep -n "^_sandy_launched_at=" "$1" | cut -d: -f1); [ -n "$p" ] && [ "$p" -lt "$m" ] && grep -q "\"credentials\": {%s},\\\\n  \"github\": %s," "$1" && grep -q "RUN_FLAGS+=(-e \"SANDY_GH_ACTIVE=\$_SANDY_GH_ACTIVE\")" "$1" && ! grep -q "RUN_FLAGS+=(-e \"SANDY_GH_ACCOUNT=" "$1"' _ "$SANDY_SCRIPT"
+check "§205(13) SANDY_GH_ACCOUNT is passive-safe and in --print-schema" \
+    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"name\":\"SANDY_GH_ACCOUNT\"" && awk "/^SANDY_PASSIVE_KEYS=\\(/,/^\\)\$/" "$1" | grep -qE "^[[:space:]]+SANDY_GH_ACCOUNT\$"' _ "$SANDY_SCRIPT"
+# --accounts reads the recorded account back.
+_S205_H="$_S205_D/home"
+mkdir -p "$_S205_H/sandboxes/gh-11111111/claude" "$_S205_H/sandboxes/nogh-22222222/claude"
+printf '{"cred_mode":"oauth-token","agents":["claude","codex"],"github":{"account":"rappdw","reason":"can push to org/repo"}}' > "$_S205_H/sandboxes/gh-11111111/sandy-session.json"
+printf '{"cred_mode":"oauth-token","agents":["claude"]}' > "$_S205_H/sandboxes/nogh-22222222/sandy-session.json"
+env -i PATH="$PATH" HOME="$_S205_D" SANDY_HOME="$_S205_H" bash "$SANDY_SCRIPT" --accounts </dev/null > "$_S205_D/acc.txt" 2>&1 || true
+env -i PATH="$PATH" HOME="$_S205_D" SANDY_HOME="$_S205_H" bash "$SANDY_SCRIPT" --accounts --json </dev/null > "$_S205_D/acc.json" 2>/dev/null || true
+check "§205(14) --accounts shows each sandbox's gh account once, on its first row, '-' when none was recorded; --json gives account and reason" \
+    bash -c 'grep -q "^  SANDBOX  *AGENT  *CRED  *ACCOUNT  *GITHUB$" "$1" && grep -q "^  gh-11111111  *claude  *oauth-token  *-  *rappdw$" "$1" && grep -q "^  *codex  *-  *-$" "$1" && grep -q "^  nogh-22222222  *claude  *oauth-token  *-  *-$" "$1" && python3 -c "import json,sys; d={s[\"sandbox\"]: s for s in json.load(open(sys.argv[1]))[\"sandboxes\"]}; sys.exit(0 if d[\"gh-11111111\"][\"github\"]=={\"account\":\"rappdw\",\"reason\":\"can push to org/repo\"} and d[\"nogh-22222222\"][\"github\"] is None else 1)" "$2"' _ "$_S205_D/acc.txt" "$_S205_D/acc.json"
 rm -rf "$_S205_D"
-unset _S205_FN _S205_D _S205_A _s205_r _s205_r2
-unset -f _s205 _s205_rf
+unset _S205_FN _S205_D _S205_A _S205_CT _S205_H _s205_r _s205_r2 _s205_r3 _s205_t0 _s205_dt
+unset -f _s205 _s205f _s205_ct
 
 
 # BEGIN SUMMARY
