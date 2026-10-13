@@ -542,6 +542,59 @@ if [ -n "$_sys_py" ] && [ -d "$PYTHONUSERBASE/lib" ]; then
     done
 fi
 
+# Which of the forwarded gh accounts should be active. Prints "<user>|<why>";
+# returns 1 when there is no account to pick. Reads _gh_pairs ("user:token"),
+# SANDY_GH_ACCOUNT and GIT_TOKEN; $1 is origin's URL (may be empty). In order:
+#   1. SANDY_GH_ACCOUNT, when that account was forwarded (else warn, go on);
+#   2. the only account, when there is one;
+#   3. the account named like origin's owner (a repo owned by a user);
+#   4. the first account GitHub says can push to origin -- what an org-owned
+#      repo needs, since no account is named like the org;
+#   5. the host's active account: the one whose token is GIT_TOKEN, which is
+#      also what git's fallback credential helper sends, so gh and git agree.
+# A token reaches gh through GH_TOKEN in the environment, never argv.
+_sandy_gh_pick_account() {
+    local _url="$1" _pair _u _t _owner="" _repo="" _push
+    if [ -n "${SANDY_GH_ACCOUNT:-}" ]; then
+        for _pair in "${_gh_pairs[@]}"; do
+            if [ "${_pair%%:*}" = "$SANDY_GH_ACCOUNT" ]; then
+                printf '%s|SANDY_GH_ACCOUNT\n' "$SANDY_GH_ACCOUNT"; return 0
+            fi
+        done
+        printf '\033[0;33m⚠ SANDY_GH_ACCOUNT=%s is not a gh account on the host (have: %s); choosing one automatically.\033[0m\n' \
+            "$SANDY_GH_ACCOUNT" "$(for _pair in "${_gh_pairs[@]}"; do printf '%s ' "${_pair%%:*}"; done)" >&2
+    fi
+    [ "${#_gh_pairs[@]}" -gt 0 ] || return 1
+    if [ "${#_gh_pairs[@]}" -eq 1 ]; then
+        printf '%s|only account\n' "${_gh_pairs[0]%%:*}"; return 0
+    fi
+    _repo="$(printf '%s\n' "$_url" | sed -E -n 's#^(https://([^@/]*@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/?$#\3#p')"
+    _repo="${_repo%.git}"
+    if [ -n "$_repo" ]; then
+        _owner="${_repo%%/*}"
+        for _pair in "${_gh_pairs[@]}"; do
+            _u="${_pair%%:*}"
+            if [ "${_u,,}" = "${_owner,,}" ]; then
+                printf '%s|owns origin\n' "$_u"; return 0
+            fi
+        done
+        for _pair in "${_gh_pairs[@]}"; do
+            _u="${_pair%%:*}" _t="${_pair#*:}"
+            _push="$(GH_TOKEN="$_t" timeout 5 gh api "repos/$_repo" --jq .permissions.push 2>/dev/null || true)"
+            if [ "$_push" = true ]; then
+                printf '%s|can push to %s\n' "$_u" "$_repo"; return 0
+            fi
+        done
+    fi
+    if [ -n "${GIT_TOKEN:-}" ]; then
+        for _pair in "${_gh_pairs[@]}"; do
+            if [ "${_pair#*:}" = "$GIT_TOKEN" ]; then
+                printf '%s|host active account\n' "${_pair%%:*}"; return 0
+            fi
+        done
+    fi
+    return 1
+}
 sandy_log "Configuring git auth"
 # Authenticate gh CLI with all available accounts (works in both token and agent modes)
 if [ -n "${GH_ACCOUNTS:-}" ] && command -v gh &>/dev/null; then
@@ -551,22 +604,17 @@ if [ -n "${GH_ACCOUNTS:-}" ] && command -v gh &>/dev/null; then
         _tok="${_pair#*:}"
         echo "$_tok" | gh auth login --with-token 2>/dev/null || true
     done
-    # Detect the repo owner from the workspace remote URL and switch to the
-    # matching account. Without this, the last-logged-in account is active
-    # and pushes fail if it doesn't own the repo.
-    _repo_owner=""
+    # Make one account active on purpose. Left alone, gh keeps whichever
+    # account was logged in LAST, an accident of the order the host's
+    # `gh auth status` printed them in, and that is what every org-owned repo
+    # got: an org's name matches no account.
+    _gh_origin=""
     if [ -d "$WORKSPACE/.git" ] || [ -f "$WORKSPACE/.git" ]; then
-        _repo_owner="$(git -C "$WORKSPACE" remote get-url origin 2>/dev/null \
-            | sed -E 's#.*(github\.com[:/])##; s#/.*##' || true)"
+        _gh_origin="$(git -C "$WORKSPACE" remote get-url origin 2>/dev/null || true)"
     fi
-    if [ -n "$_repo_owner" ]; then
-        for _pair in "${_gh_pairs[@]}"; do
-            _user="${_pair%%:*}"
-            if [ "$_user" = "$_repo_owner" ]; then
-                gh auth switch --user "$_user" 2>/dev/null || true
-                break
-            fi
-        done
+    if _gh_pick="$(_sandy_gh_pick_account "$_gh_origin")"; then
+        gh auth switch --user "${_gh_pick%%|*}" 2>/dev/null || true
+        sandy_log "gh account: ${_gh_pick%%|*} (${_gh_pick#*|})"
     fi
 elif [ -n "${GIT_TOKEN:-}" ] && command -v gh &>/dev/null; then
     echo "${GIT_TOKEN}" | gh auth login --with-token 2>/dev/null || true
