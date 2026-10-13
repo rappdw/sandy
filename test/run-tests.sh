@@ -24420,6 +24420,8 @@ check "§196(12) --print-schema advertises --accounts" \
 #   cxonly  codex only, with a stale Claude record that must not be shown
 #   cxlink  codex/ is a symlink planted from inside a session
 #   old     marker predating the agents field, with a codex api-key auth.json
+#   switch  claude record fetched 2026-10-06, sandbox last launched 2026-10-12:
+#           the credential may have been switched since, so the row is flagged
 _S196_H2="$_S196_D/home2"
 python3 - "$_S196_H2/sandboxes" <<'PY'
 import base64, json, os, sys
@@ -24447,6 +24449,11 @@ put(root + "/cxlink-33333333/sandy-session.json", {"cred_mode": "full", "agents"
 put(root + "/old-44444444/claude/.claude.json", {"oauthAccount": {"emailAddress": "old@example.com", "organizationType": "claude_pro"}})
 put(root + "/old-44444444/codex/auth.json", {"OPENAI_API_KEY": "sk-S196-SECRET-KEY", "auth_mode": "apikey"})
 put(root + "/old-44444444/sandy-session.json", {"cred_mode": "full"})
+put(root + "/switch-55555555/claude/.claude.json", {"oauthAccount": {"emailAddress": "personal@example.com", "organizationType": "claude_max", "profileFetchedAt": 1791319870582}})
+put(root + "/switch-55555555/codex/auth.json", dict(codex_chatgpt, last_refresh="2026-10-01T00:00:00Z"))
+put(root + "/odd-66666666/claude/.claude.json", {"oauthAccount": {"emailAddress": "odd@example.com", "profileFetchedAt": "last tuesday"}})
+put(root + "/odd-66666666/sandy-session.json", {"cred_mode": "full", "launched_at": "2026-10-12T00:00:00Z", "agents": ["claude"]})
+put(root + "/switch-55555555/sandy-session.json", {"cred_mode": "oauth-token", "launched_at": "2026-10-12T00:00:00Z", "agents": ["claude", "codex"]})
 PY
 _s196b() { env -i PATH="$_S196_D/bin:$PATH" HOME="$_S196_D" SANDY_HOME="$_S196_H2" bash "$SANDY_SCRIPT" --accounts "$@" </dev/null 2>&1; }
 _s196b --json > "$_S196_D/out2.json" || true
@@ -24471,6 +24478,11 @@ check "§196(18) a marker with no agents field: agents null, claude plus any age
     "$(_s196b_q "str(S['old-44444444']['agents'])+'|'+','.join(S['old-44444444']['accounts'])+'|'+'|'.join(str(S['old-44444444']['accounts']['codex'][k]) for k in ('credential','plan','email'))")"
 check "§196(19) no token or key from auth.json is ever printed" \
     bash -c '! grep -q "S196-SECRET" "$1" "$2"' _ "$_S196_D/out2.json" "$_S196_D/out2.txt"
+check "§196(21) a Claude record older than the last launch is flagged; a newer one, codex, an unknown launch and a non-ISO record are not" \
+    bash -c '[ "$1" = "True|False|None|None|None" ]' _ \
+    "$(_s196b_q "'|'.join(str(x) for x in [S['switch-55555555']['accounts']['claude']['recorded_before_launch'], S['multi-11111111']['accounts']['claude']['recorded_before_launch'], S['switch-55555555']['accounts']['codex']['recorded_before_launch'], S['old-44444444']['accounts']['claude']['recorded_before_launch'], S['odd-66666666']['accounts']['claude']['recorded_before_launch']])")"
+check "§196(22) the table marks that row's AS OF with * and explains it once; a fresh row is unmarked" \
+    bash -c 'grep -q "^  switch-55555555 .*claude .*personal@example.com .*2026-10-06\*$" "$1" && grep -q "^\* recorded before the sandbox.s last launch" "$1" && [ "$(grep -c "^\* recorded before" "$1")" = 1 ] && grep -q "^  multi-11111111 .*2026-10-12$" "$1" && grep -q "^  *codex .*2026-10-01$" "$1"' _ "$_S196_D/out2.txt"
 if [ -d "$_S196_D/nojq" ]; then
     env -i PATH="$_S196_D/bin:$_S196_D/nojq" HOME="$_S196_D" SANDY_HOME="$_S196_H2" bash "$SANDY_SCRIPT" --accounts --json </dev/null > "$_S196_D/out2-node.json" 2>&1 || true
     check "§196(20) the node projector reports the multi-agent fixtures exactly as the jq one does" \

@@ -939,15 +939,18 @@ Which account each agent in each sandbox is signed in to. Filesystem only (no Do
    "agents":["claude","codex"],
    "accounts":{
      "claude":{"credential":"full","email":"you@example.com","organization_name":"Example","plan":"Max 20x",
-               "recorded_at":"2026-10-01T10:00:00.000Z","source":"claude/.claude.json","problem":null},
+               "recorded_at":"2026-10-01T10:00:00.000Z","recorded_before_launch":true,
+               "source":"claude/.claude.json","problem":null},
      "codex":{"credential":"chatgpt","email":"you@example.com","organization_name":null,"plan":"Pro",
-              "recorded_at":"2026-10-10T01:02:03Z","source":"codex/auth.json","problem":null}}}]}
+              "recorded_at":"2026-10-10T01:02:03Z","recorded_before_launch":null,
+              "source":"codex/auth.json","problem":null}}}]}
 ```
 
-- **`agents`** and **`accounts`** (2.9.0, additive) cover every agent, not only Claude Code. `agents` is the marker's resolved list from the last launch, or `null` when the marker predates it; then `accounts` holds `claude` plus `codex`/`gemini` when their account file exists. `accounts` has one key per agent, in `agents` order, each an object of the same seven fields or `null` when nothing is recorded (grok and opencode today):
+- **`agents`** and **`accounts`** (2.9.0, additive) cover every agent, not only Claude Code. `agents` is the marker's resolved list from the last launch, or `null` when the marker predates it; then `accounts` holds `claude` plus `codex`/`gemini` when their account file exists. `accounts` has one key per agent, in `agents` order, each an object of the same eight fields or `null` when nothing is recorded (grok and opencode today):
   - `credential`: for claude the marker's `cred_mode`; for codex `chatgpt`, `api-key`, or `auth_mode` verbatim; for gemini `null`.
   - `email`, `plan`, `organization_name`: codex reads the `email` and `chatgpt_plan_type` claims of the ID token in `codex/auth.json` (no token is ever printed); gemini reads `active` from `gemini/google_accounts.json`.
   - `recorded_at`: ISO-8601. Claude Code now records `profileFetchedAt` as epoch milliseconds; since 2.9.0 that is converted here and in `account.recorded_at`, which earlier printed the raw number.
+  - `recorded_before_launch`: claude only. `true` when `recorded_at` is earlier than the marker's `launched_at`. Sandy replaces Claude's credential at every launch, but Claude Code rewrites the account record only when it re-fetches the profile, so such a record names the account as it was and a credential switched for that launch may belong to another. `false` when it is not earlier; `null` for other agents (their file is the credential itself) or when either time is missing or not ISO-8601. The table marks such a row's AS OF with `*` and explains it once.
   - `source`, `problem`: as `account_file` and `problem` below, per agent.
 - The top-level `cred_mode`, `account`, `plan`, `account_file` and `problem` stay Claude Code's, unchanged, whether or not the last launch ran claude.
 
