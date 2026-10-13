@@ -11836,8 +11836,10 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # pre-composed object passed as ONE argument (name/id/project_layer), additive.
 # 20 as of 2.9.0: `claude_sessions` -- the named sessions the launch declared,
 # one pre-composed array passed as ONE argument, additive.
-check "§114(13g) marker printf format/arg count line up (20 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 20
+# 21 as of 2.9.0: `credentials` -- which token or key each agent used, by
+# fingerprint, one pre-composed object body passed as ONE argument, additive.
+check "§114(13g) marker printf format/arg count line up (21 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 21
 
 # (14) sandy-handoff-sessions helper: REMOVED in 2.6.0 (#382, decision 7) along
 # with the helper itself; the pane-identity contract it was built on stays
@@ -24412,9 +24414,175 @@ else
 fi
 check "§196(12) --print-schema advertises --accounts" \
     bash -c 'bash "$1" --print-schema 2>/dev/null | grep -qF "\"name\":\"--accounts\""' _ "$SANDY_SCRIPT"
+# Multi-agent sandboxes, in their own SANDY_HOME so the counts above stand.
+# --accounts used to read only Claude Code: a claude,codex sandbox showed one
+# Claude row and nothing of codex, and a profileFetchedAt written as epoch
+# milliseconds printed as a raw number under AS OF.
+#   multi   claude,codex; codex signed in with ChatGPT (ID token carries email + plan)
+#   cxonly  codex only, with a stale Claude record that must not be shown
+#   cxlink  codex/ is a symlink planted from inside a session
+#   old     marker predating the agents field, with a codex api-key auth.json
+#   switch  claude record fetched 2026-10-06; the marker says sandy saw this
+#           token start on 2026-10-12, so the record predates it: flagged, and
+#           the token's fingerprint carries the operator's label "corp"
+#   fresh   record fetched after the token started: not flagged
+#   cxkey   codex ran on an API key (per the marker), beside a stale ChatGPT auth.json
+_S196_H2="$_S196_D/home2"
+python3 - "$_S196_H2/sandboxes" <<'PY'
+import base64, json, os, sys
+root = sys.argv[1]
+def put(path, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(obj if isinstance(obj, str) else json.dumps(obj))
+def jwt(claims):
+    seg = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return "eyJhbGciOiJub25lIn0." + seg + ".c2ln"
+codex_chatgpt = {"OPENAI_API_KEY": None, "auth_mode": "chatgpt", "last_refresh": "2026-10-10T01:02:03Z",
+    "tokens": {"id_token": jwt({"email": "cx@example.com", "https://api.openai.com/auth": {"chatgpt_plan_type": "pro"}}),
+               "access_token": "S196-SECRET-ACCESS", "refresh_token": "S196-SECRET-REFRESH", "account_id": "acct"}}
+put(root + "/multi-11111111/claude/.claude.json", {"oauthAccount": {"emailAddress": "dev@example.com", "organizationName": "Example Corp", "organizationType": "claude_max", "organizationRateLimitTier": "default_claude_max_20x", "profileFetchedAt": 1791826872758}})
+put(root + "/multi-11111111/codex/auth.json", codex_chatgpt)
+put(root + "/multi-11111111/sandy-session.json", {"cred_mode": "oauth-token", "launched_at": "2026-10-12T00:00:00Z", "agents": ["claude", "codex"]})
+put(root + "/cxonly-22222222/claude/.claude.json", {"oauthAccount": {"emailAddress": "stale@example.com", "organizationType": "claude_pro"}})
+put(root + "/cxonly-22222222/codex/auth.json", dict(codex_chatgpt, tokens={"id_token": jwt({"email": "cx@example.com", "https://api.openai.com/auth": {"chatgpt_plan_type": "self_serve_business_prolite"}})}))
+put(root + "/cxonly-22222222/sandy-session.json", {"cred_mode": "none", "agents": ["codex"]})
+put(root + "/../leak/auth.json", dict(codex_chatgpt, tokens={"id_token": jwt({"email": "leak@host.example"})}))
+os.makedirs(root + "/cxlink-33333333", exist_ok=True)
+os.symlink(os.path.abspath(root + "/../leak"), root + "/cxlink-33333333/codex")
+put(root + "/cxlink-33333333/sandy-session.json", {"cred_mode": "full", "agents": ["claude", "codex"]})
+put(root + "/old-44444444/claude/.claude.json", {"oauthAccount": {"emailAddress": "old@example.com", "organizationType": "claude_pro"}})
+put(root + "/old-44444444/codex/auth.json", {"OPENAI_API_KEY": "sk-S196-SECRET-KEY", "auth_mode": "apikey"})
+put(root + "/old-44444444/sandy-session.json", {"cred_mode": "full"})
+put(root + "/switch-55555555/claude/.claude.json", {"oauthAccount": {"emailAddress": "personal@example.com", "organizationType": "claude_max", "profileFetchedAt": 1791319870582}})
+put(root + "/switch-55555555/codex/auth.json", dict(codex_chatgpt, last_refresh="2026-10-01T00:00:00Z"))
+put(root + "/odd-66666666/claude/.claude.json", {"oauthAccount": {"emailAddress": "odd@example.com", "profileFetchedAt": "last tuesday"}})
+put(root + "/odd-66666666/sandy-session.json", {"cred_mode": "oauth-token", "launched_at": "2026-10-12T00:00:00Z", "agents": ["claude"],
+    "credentials": {"claude": {"kind": "oauth-token", "fingerprint": "12345678", "since": "2026-10-12T00:00:00Z"}}})
+put(root + "/switch-55555555/sandy-session.json", {"cred_mode": "oauth-token", "launched_at": "2026-10-12T00:00:00Z", "agents": ["claude", "codex"],
+    "credentials": {"claude": {"kind": "oauth-token", "fingerprint": "3fa1c09e", "since": "2026-10-12T00:00:00Z"}}})
+put(root + "/fresh-77777777/claude/.claude.json", {"oauthAccount": {"emailAddress": "corp@example.com", "organizationType": "claude_team", "profileFetchedAt": 1791826872758}})
+put(root + "/fresh-77777777/sandy-session.json", {"cred_mode": "oauth-token", "launched_at": "2026-10-12T00:00:00Z", "agents": ["claude"],
+    "credentials": {"claude": {"kind": "oauth-token", "fingerprint": "0badc0de", "since": "2026-10-01T00:00:00Z"}}})
+put(root + "/cxkey-88888888/codex/auth.json", codex_chatgpt)
+put(root + "/cxkey-88888888/sandy-session.json", {"cred_mode": "none", "agents": ["codex"],
+    "credentials": {"codex": {"kind": "api-key", "fingerprint": "77b20d14", "since": "2026-10-02T00:00:00Z"}}})
+put(root + "/../credential-labels", "# fingerprint label\n3fa1c09e corp\nnot-hex bogus\n0badc0de has space\n")
+PY
+_s196b() { env -i PATH="$_S196_D/bin:$PATH" HOME="$_S196_D" SANDY_HOME="$_S196_H2" bash "$SANDY_SCRIPT" --accounts "$@" </dev/null 2>&1; }
+_s196b --json > "$_S196_D/out2.json" || true
+_s196b > "$_S196_D/out2.txt" || true
+_s196b_q() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); S={s["sandbox"]:s for s in d["sandboxes"]}; print(eval(sys.argv[2]))' "$_S196_D/out2.json" "$1" 2>/dev/null; }
+check "§196(13) a claude,codex sandbox reports both agents, codex from its ID token (email, plan, credential)" \
+    bash -c '[ "$1" = "claude,codex|cx@example.com|Pro|chatgpt|codex/auth.json|dev@example.com" ]' _ \
+    "$(_s196b_q "','.join(S['multi-11111111']['agents'])+'|'+'|'.join([S['multi-11111111']['accounts']['codex'][k] for k in ('email','plan','credential','source')])+'|'+S['multi-11111111']['accounts']['claude']['email']")"
+check "§196(14) a profileFetchedAt in epoch milliseconds is reported as an ISO date" \
+    bash -c '[ "$1" = "2026-10-12T17:41:12Z|2026-10-12T17:41:12Z" ]' _ \
+    "$(_s196b_q "S['multi-11111111']['account']['recorded_at']+'|'+S['multi-11111111']['accounts']['claude']['recorded_at']")"
+check "§196(15) the table gives each agent its own row, with an AGENT column and a date under AS OF" \
+    bash -c 'grep -q "^  SANDBOX .*AGENT .*CRED .*EMAIL" "$1" && grep -q "^  multi-11111111 .*claude .*oauth-token .*dev@example.com .*Max 20x .*2026-10-12$" "$1" && grep -q "^  *codex .*chatgpt .*cx@example.com .*Pro .*2026-10-10$" "$1" && ! grep -q 1791826872758 "$1"' _ "$_S196_D/out2.txt"
+check "§196(16) an agent the last launch did not run is not reported (a stale Claude record in a codex-only sandbox)" \
+    bash -c '[ "$1" = "codex|False" ] && ! grep -q "stale@example.com" "$2"' _ \
+    "$(_s196b_q "','.join(S['cxonly-22222222']['agents'])+'|'+str('claude' in S['cxonly-22222222']['accounts'])")" "$_S196_D/out2.txt"
+check "§196(17) a symlinked codex/ is reported, never followed" \
+    bash -c '[ "$1" = "symlink|None" ] && ! grep -q "leak@host" "$2" "$3"' _ \
+    "$(_s196b_q "S['cxlink-33333333']['accounts']['codex']['problem']+'|'+str(S['cxlink-33333333']['accounts']['codex']['email'])")" "$_S196_D/out2.json" "$_S196_D/out2.txt"
+check "§196(18) a marker with no agents field: agents null, claude plus any agent with an account file, codex api-key" \
+    bash -c '[ "$1" = "None|claude,codex|api-key|None|None" ]' _ \
+    "$(_s196b_q "str(S['old-44444444']['agents'])+'|'+','.join(S['old-44444444']['accounts'])+'|'+'|'.join(str(S['old-44444444']['accounts']['codex'][k]) for k in ('credential','plan','email'))")"
+check "§196(19) no token or key from auth.json is ever printed" \
+    bash -c '! grep -q "S196-SECRET" "$1" "$2"' _ "$_S196_D/out2.json" "$_S196_D/out2.txt"
+check "§196(21) a Claude record older than when sandy saw its token start is flagged; a newer one, no since, codex and a non-ISO record are not" \
+    bash -c '[ "$1" = "True|False|None|None|None|None" ]' _ \
+    "$(_s196b_q "'|'.join(str(x) for x in [S['switch-55555555']['accounts']['claude']['recorded_before_credential'], S['fresh-77777777']['accounts']['claude']['recorded_before_credential'], S['multi-11111111']['accounts']['claude']['recorded_before_credential'], S['switch-55555555']['accounts']['codex']['recorded_before_credential'], S['old-44444444']['accounts']['claude']['recorded_before_credential'], S['odd-66666666']['accounts']['claude']['recorded_before_credential']])")"
+check "§196(22) the table marks that row's AS OF with * and explains it once; rows without a seen switch are unmarked" \
+    bash -c 'grep -q "^  switch-55555555 .*claude .*personal@example.com .*2026-10-06\*$" "$1" && grep -q "^\* recorded before sandy saw this credential start" "$1" && [ "$(grep -c "^\* recorded before" "$1")" = 1 ] && grep -q "^  multi-11111111 .*2026-10-12$" "$1" && grep -q "^  fresh-77777777 .*2026-10-12$" "$1" && grep -q "^  *codex .*2026-10-01$" "$1"' _ "$_S196_D/out2.txt"
+check "§196(23) CRED names a fingerprinted token by its label, else by fingerprint; malformed label lines are ignored" \
+    bash -c '[ "$1" = "3fa1c09e|corp|2026-10-12T00:00:00Z|0badc0de|None" ] && grep -q "^  switch-55555555 .*oauth-token (corp) " "$2" && grep -q "^  fresh-77777777 .*oauth-token (0badc0de) " "$2"' _ \
+    "$(_s196b_q "'|'.join(str(x) for x in [S['switch-55555555']['accounts']['claude']['credential_fingerprint'], S['switch-55555555']['accounts']['claude']['credential_label'], S['switch-55555555']['accounts']['claude']['credential_since'], S['fresh-77777777']['accounts']['claude']['credential_fingerprint'], S['fresh-77777777']['accounts']['claude']['credential_label']])")" "$_S196_D/out2.txt"
+check "§196(24) codex on an API key (per the marker) reports api-key and its fingerprint, not the sandbox's stale ChatGPT login" \
+    bash -c '[ "$1" = "api-key|77b20d14|None|None" ] && grep -q "^  cxkey-88888888 .*codex .*api-key (77b20d14) " "$2"' _ \
+    "$(_s196b_q "'|'.join(str(S['cxkey-88888888']['accounts']['codex'][k]) for k in ('credential','credential_fingerprint','email','plan'))")" "$_S196_D/out2.txt"
+check "§196(25) a codex plan type is shown with spaces, not underscores" \
+    bash -c '[ "$1" = "Self serve business prolite" ]' _ "$(_s196b_q "S['cxonly-22222222']['accounts']['codex']['plan']")"
+# The marker writer's credentials block, run for real: which credential each
+# agent used, by fingerprint, and since when sandy saw it. Extracted from the
+# launch path and run under env -i against a per-case previous marker.
+_S196_CRED="$(awk '/^_sandy_launched_at="\$\(date -u/{p=1} p{print} p&&/^unset -f _sandy_cred_add$/{exit}' "$SANDY_SCRIPT")"
+_S196_FNS="$(sed -n '/^sha256()/p;/^_sandy_acct_fields() {/,/^}$/p' "$SANDY_SCRIPT")"
+check "§196(26-pre) the credentials block and its helpers were extracted (mutation: a moved anchor empties them)" \
+    bash -c 'printf "%s" "$1" | grep -q "_sandy_cred_add claude oauth-token" && printf "%s" "$2" | grep -q "^_sandy_acct_fields()"' _ "$_S196_CRED" "$_S196_FNS"
+# $1 case dir (its sandy-session.json, if any, is the previous marker),
+# $2 SANDY_AGENT, $3 CRED_MODE, then NAME=VALUE env (tokens, CODEX_CRED_TMPDIR).
+_s196_cred() {
+    local _d="$1" _ag="$2" _cm="$3"; shift 3
+    env -i PATH="$PATH" SANDBOX_DIR="$_d" SANDY_AGENT="$_ag" CRED_MODE="$_cm" "$@" bash -c '
+        set -u
+        _sandy_agent_has() { case ",$SANDY_AGENT," in *",$1,"*) return 0 ;; esac; return 1; }
+        eval "$1"; eval "$2"
+        printf "{%s}|%s\n" "$_sandy_cred_json" "$_sandy_launched_at"' _ "$_S196_FNS" "$_S196_CRED" 2>/dev/null
+}
+_s196_fp() { printf '%s' "$1" | bash "$SANDY_SCRIPT" --fingerprint-token 2>/dev/null; }
+_s196_cq() { printf '%s' "$1" | python3 -c 'import json,sys; raw=sys.stdin.read(); j,now=raw.rsplit("|",1); C=json.loads(j); now=now.strip(); print(eval(sys.argv[1]))' "$2" 2>/dev/null; }
+_S196_T1="s196-token-one-$$" _S196_T2="s196-token-two-$$"
+_S196_FP1="$(_s196_fp "$_S196_T1")" _S196_FP2="$(_s196_fp "$_S196_T2")"
+mkdir -p "$_S196_D/c-new" "$_S196_D/c-same" "$_S196_D/c-other" "$_S196_D/c-pre" "$_S196_D/c-mode"
+printf '{"cred_mode":"oauth-token","credentials":{"claude":{"kind":"oauth-token","fingerprint":"%s","since":"2026-09-01T00:00:00Z"}}}' "$_S196_FP1" > "$_S196_D/c-same/sandy-session.json"
+printf '{"cred_mode":"oauth-token","credentials":{"claude":{"kind":"oauth-token","fingerprint":"%s","since":"2026-09-01T00:00:00Z"}}}' "$_S196_FP2" > "$_S196_D/c-other/sandy-session.json"
+printf '{"cred_mode":"oauth-token","agents":["claude"]}' > "$_S196_D/c-pre/sandy-session.json"
+printf '{"cred_mode":"full","agents":["claude"]}' > "$_S196_D/c-mode/sandy-session.json"
+_s196_c_new="$(_s196_cred "$_S196_D/c-new" claude oauth-token CLAUDE_CODE_OAUTH_TOKEN="$_S196_T1")"
+check "§196(26) a long-lived token is recorded by fingerprint (the same one --fingerprint-token prints), and a first launch dates it now" \
+    bash -c '[ ${#2} = 8 ] && [ "$1" = "oauth-token|$2|True" ] && ! printf "%s" "$3" | grep -q "s196-token"' _ \
+    "$(_s196_cq "$_s196_c_new" "C['claude']['kind']+'|'+C['claude']['fingerprint']+'|'+str(C['claude']['since']==now)")" "$_S196_FP1" "$_s196_c_new"
+check "§196(27) the same token as last launch keeps its since; a different one starts now" \
+    bash -c '[ "$1" = "2026-09-01T00:00:00Z" ] && [ "$2" = True ]' _ \
+    "$(_s196_cq "$(_s196_cred "$_S196_D/c-same" claude oauth-token CLAUDE_CODE_OAUTH_TOKEN="$_S196_T1")" "C['claude']['since']")" \
+    "$(_s196_cq "$(_s196_cred "$_S196_D/c-other" claude oauth-token CLAUDE_CODE_OAUTH_TOKEN="$_S196_T1")" "C['claude']['since']==now")"
+check "§196(28) a previous marker from before the field: since is left out for the same cred_mode, and starts now after a cred_mode change" \
+    bash -c '[ "$1" = "False" ] && [ "$2" = True ]' _ \
+    "$(_s196_cq "$(_s196_cred "$_S196_D/c-pre" claude oauth-token CLAUDE_CODE_OAUTH_TOKEN="$_S196_T1")" "'since' in C['claude']")" \
+    "$(_s196_cq "$(_s196_cred "$_S196_D/c-mode" claude oauth-token CLAUDE_CODE_OAUTH_TOKEN="$_S196_T1")" "C['claude']['since']==now")"
+check "§196(29) an API key is fingerprinted; an account login, a non-claude launch and codex without its key mount record nothing" \
+    bash -c '[ "$1" = "api-key|$4" ] && [ "$2" = "{}" ] && [ "$3" = "[]" ]' _ \
+    "$(_s196_cq "$(_s196_cred "$_S196_D/c-new" claude api-key ANTHROPIC_API_KEY="$_S196_T2")" "C['claude']['kind']+'|'+C['claude']['fingerprint']")" \
+    "$(_s196_cq "$(_s196_cred "$_S196_D/c-new" claude full CLAUDE_CODE_OAUTH_TOKEN="$_S196_T1")" "json.dumps(C)")" \
+    "$(_s196_cq "$(_s196_cred "$_S196_D/c-new" codex oauth-token CLAUDE_CODE_OAUTH_TOKEN="$_S196_T1" OPENAI_API_KEY="$_S196_T2")" "json.dumps(sorted(C))")" "$_S196_FP2"
+check "§196(30) codex on its ephemeral API-key auth.json is recorded as api-key with the key's fingerprint" \
+    bash -c '[ "$1" = "api-key|$2" ]' _ \
+    "$(_s196_cq "$(_s196_cred "$_S196_D/c-new" claude,codex none OPENAI_API_KEY="$_S196_T2" CODEX_CRED_TMPDIR=/x)" "C['codex']['kind']+'|'+C['codex']['fingerprint']")" "$_S196_FP2"
+_s196_rc=0; printf 'x' | bash "$SANDY_SCRIPT" --fingerprint-token extra >/dev/null 2>&1 || _s196_rc=$?
+_s196_rc2=0; bash "$SANDY_SCRIPT" --fingerprint-token </dev/null >/dev/null 2>&1 || _s196_rc2=$?
+check "§196(31) --fingerprint-token refuses an argument (a secret in argv) and empty stdin, and is in --print-schema" \
+    bash -c '[ "$1" = 1 ] && [ "$2" = 1 ] && bash "$3" --print-schema 2>/dev/null | grep -qF "\"name\":\"--fingerprint-token\""' _ "$_s196_rc" "$_s196_rc2" "$SANDY_SCRIPT"
+# ...and end to end through the REAL marker writer (the §177 extraction), so
+# the block's output reaches /etc/sandy-session.json as valid JSON.
+_S196_WRITER="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/^_sandy_session_final="\$\{_sandy_session_file%\.sandy-tmp\.\*\}"$/{exit}' "$SANDY_SCRIPT")"
+_S196_FEBODY="$(sed -n '/^_sandy_fe_marker_body() {/,/^}$/p' "$SANDY_SCRIPT")"
+mkdir -p "$_S196_D/c-mk"
+env -i PATH="$PATH" SANDY_AGENT=claude CRED_MODE=oauth-token CLAUDE_CODE_OAUTH_TOKEN="$_S196_T1" SANDBOX_DIR="$_S196_D/c-mk" OUT="$_S196_D/c-mk/marker.json" bash -c '
+    _sandy_agent_has() { case ",$SANDY_AGENT," in *",$1,"*) return 0 ;; esac; return 1; }
+    sandy_full_version() { printf "9.9.9-test"; }
+    eval "$1"; eval "$2"
+    _sandy_egress_mode=permissive; SANDY_WORKSPACE=/w; SANDBOX_NAME=x; _sandy_session_nonce=n
+    _sandy_fe_list=""; _SANDY_FM_AA_JSON=""; _SANDY_AA_COMPOSED_JSON=""
+    _sandy_session_file="$OUT"
+    eval "$3"' _ "$_S196_FNS" "$_S196_FEBODY" "$_S196_WRITER" >/dev/null 2>&1 || true
+check "§196(32) the real marker writer emits valid JSON carrying credentials.claude (fingerprint, since = launched_at) and no token" \
+    bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); c=d[\"credentials\"][\"claude\"]; sys.exit(0 if c[\"fingerprint\"]==sys.argv[2] and c[\"since\"]==d[\"launched_at\"] else 1)" "$1" "$2" && ! grep -q s196-token "$1"' _ "$_S196_D/c-mk/marker.json" "$_S196_FP1"
+unset _S196_WRITER _S196_FEBODY
+unset _S196_CRED _S196_FNS _S196_T1 _S196_T2 _S196_FP1 _S196_FP2 _s196_c_new
+unset -f _s196_cred _s196_fp _s196_cq
+if [ -d "$_S196_D/nojq" ]; then
+    env -i PATH="$_S196_D/bin:$_S196_D/nojq" HOME="$_S196_D" SANDY_HOME="$_S196_H2" bash "$SANDY_SCRIPT" --accounts --json </dev/null > "$_S196_D/out2-node.json" 2>&1 || true
+    check "§196(20) the node projector reports the multi-agent fixtures exactly as the jq one does" \
+        cmp -s "$_S196_D/out2.json" "$_S196_D/out2-node.json"
+else
+    skip "§196(20) needs both jq and node to compare the projectors"
+fi
 rm -rf "$_S196_D"
-unset _S196_D _S196_H _S196_WEB _s196_dead _s196_rc _s196_rc2 _s196_d _s196_f _s196_n
-unset -f _s196 _s196_mk _s196_q sha256 _sandy_slug_for 2>/dev/null || true
+unset _S196_D _S196_H _S196_H2 _S196_WEB _s196_dead _s196_rc _s196_rc2 _s196_d _s196_f _s196_n
+unset -f _s196 _s196b _s196_mk _s196_q _s196b_q sha256 _sandy_slug_for 2>/dev/null || true
 fi
 
 

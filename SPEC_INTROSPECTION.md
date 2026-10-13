@@ -924,9 +924,9 @@ What each **launch approval gate** would decide for one workspace, without grant
 
 **Stream contract and side effects.** The same guarantee as the four flags above — exactly one JSON document on stdout, 0 bytes of stderr, in every case including the error ones (the child's own `[sandy]` output is discarded). It writes **nothing**: no approval file, no sandbox directory (the ordinary pre-pass's `mkdir -p "$SANDBOX_DIR"` is skipped), no generated build files, not even the symlink gate's per-launch refresh of its approved list. It needs **no Docker**: the report mode skips the Docker preflight and the network reapers. (The two empty bind-mount fixtures every sandy invocation creates at the top of `$SANDY_HOME` are the only exception, as for every other flag.) Guarded by `test/run-tests.sh` §183, which grants the "approved" fixture through the real pre-pass on a pty and asserts the report's hashes equal the stored ones.
 
-### `--accounts [--json] [--workspace PATH]` (2.8.0)
+### `--accounts [--json] [--workspace PATH]` (2.8.0; per agent since 2.9.0)
 
-Which Anthropic account each sandbox's Claude Code is signed in to. Filesystem only (no Docker, no config load). A human-readable table by default; `--json` emits one document:
+Which account each agent in each sandbox is signed in to. Filesystem only (no Docker, no config load). A human-readable table by default; `--json` emits one document:
 
 ```json
 {"schema_version":4,"sandy_home":"/Users/you/.sandy","sandboxes":[
@@ -935,8 +935,27 @@ Which Anthropic account each sandbox's Claude Code is signed in to. Filesystem o
    "account":{"email":"you@example.com","organization_name":"Example","organization_type":"claude_max",
               "organization_role":"admin","billing_type":"stripe_subscription","seat_tier":null,
               "rate_limit_tier":"default_claude_max_20x","recorded_at":"2026-10-01T10:00:00.000Z"},
-   "plan":"Max 20x","account_file":"claude/.claude.json","problem":null}]}
+   "plan":"Max 20x","account_file":"claude/.claude.json","problem":null,
+   "agents":["claude","codex"],
+   "accounts":{
+     "claude":{"credential":"full","email":"you@example.com","organization_name":"Example","plan":"Max 20x",
+               "recorded_at":"2026-10-01T10:00:00.000Z","recorded_before_credential":null,
+               "credential_fingerprint":null,"credential_label":null,"credential_since":null,
+               "source":"claude/.claude.json","problem":null},
+     "codex":{"credential":"chatgpt","email":"you@example.com","organization_name":null,"plan":"Pro",
+              "recorded_at":"2026-10-10T01:02:03Z","recorded_before_credential":null,
+              "credential_fingerprint":null,"credential_label":null,"credential_since":null,
+              "source":"codex/auth.json","problem":null}}}]}
 ```
+
+- **`agents`** and **`accounts`** (2.9.0, additive) cover every agent, not only Claude Code. `agents` is the marker's resolved list from the last launch, or `null` when the marker predates it; then `accounts` holds `claude` plus `codex`/`gemini` when their account file exists. `accounts` has one key per agent, in `agents` order, each an object of the same eleven fields or `null` when nothing is recorded (grok and opencode today):
+  - `credential`: for claude the marker's `cred_mode`; for codex `chatgpt`, `api-key`, or `auth_mode` verbatim; for gemini `null`.
+  - `email`, `plan`, `organization_name`: codex reads the `email` and `chatgpt_plan_type` claims of the ID token in `codex/auth.json` (no token is ever printed); gemini reads `active` from `gemini/google_accounts.json`.
+  - `recorded_at`: ISO-8601. Claude Code now records `profileFetchedAt` as epoch milliseconds; since 2.9.0 that is converted here and in `account.recorded_at`, which earlier printed the raw number.
+  - `credential_fingerprint`, `credential_label`, `credential_since`: for a credential that names no account of its own (a long-lived `CLAUDE_CODE_OAUTH_TOKEN`, an `ANTHROPIC_API_KEY`, codex's `OPENAI_API_KEY`), the marker's `credentials.<agent>`: the first 8 hex digits of its sha256, the operator's name for it from `$SANDY_HOME/credential-labels` (`<fingerprint> <label>` per line, exactly two words, label `[A-Za-z0-9._@+-]`, at most 32 characters), and when sandy saw it start. `null` otherwise. When the marker says codex ran on an API key, `credential` is `api-key` and the email and plan from the sandbox's `auth.json` are not reported, since that file was not what codex used.
+  - `recorded_before_credential`: claude only. `true` when `recorded_at` is earlier than `credential_since`: the account record predates the token sandy saw start, so it may name the account of the credential before. `false` when it is not; `null` when there is no `credential_since` (an account login, or a token sandy has not seen change) or a time is not ISO-8601. Not the launch time: with a long-lived token Claude Code rarely re-reads the account, so nearly every record predates the last launch. The table marks such a row's AS OF with `*` and explains it once.
+  - `source`, `problem`: as `account_file` and `problem` below, per agent.
+- The top-level `cred_mode`, `account`, `plan`, `account_file` and `problem` stay Claude Code's, unchanged, whether or not the last launch ran claude.
 
 - **`account`** is copied from the `oauthAccount` block Claude Code writes into the sandbox's `.claude.json` (`claude/.claude.json`, or the pre-2.7 sibling, reported as `account_file: "legacy"`), or `null` when there is none. It is what Claude Code **last recorded**, at `recorded_at`, not a live query. The credential is read from the host at every launch, so a host re-login appears only after the next session runs.
 - **`plan`** is derived for display: `organization_type` without its `claude_` prefix and capitalized, plus the `NNx` suffix of `rate_limit_tier` and the `seat_tier` in parentheses when present. Read the raw fields when you need to branch on them.
@@ -995,6 +1014,7 @@ Tools known to read sandy's machine-readable output. A consumer joins this list 
 - **`2.8.0` (decision 3, 2026-10-05):** every config key object gains `base_type` (`string` | `bool` | `int`), derived from `type`; see "Config field types" above. Additive, so `schema_version` stays `4`.
 - **`2.8.0` (decision 1, 2026-10-05):** one new `config.env_only_keys` entry, `SANDY_CHANNEL` (`release` | `dev`): which build `--upgrade` and `install.sh` install. Additive, so `schema_version` stays `4`.
 - **`2.8.0`:** one new `cli_flags` entry, `--accounts`, whose sub-options are `--json` and `--workspace`. Additive, so `schema_version` stays `4`. Its `--json` document is described under `### --accounts` above; it carries the same `schema_version`.
+- **`2.9.0`:** additive, so `schema_version` stays `4`: `--print-state` gains `claude_sessions` per sandbox (named Claude sessions), and `--accounts --json` gains `agents` and `accounts` per sandbox, reporting every agent rather than Claude Code alone. The session marker gains `credentials`, and `cli_flags` gains `--fingerprint-token`. `account.recorded_at` is now ISO-8601 when Claude Code recorded epoch milliseconds.
 - **`2.8.0` (#428, #427):** one new `cli_flags` entry, `--login`, whose sub-options are `--workspace` and `--dry-run`; the `--new` and `--resume` descriptions now say they apply to codex too. Additive, so `schema_version` stays `4`. (`--login` is a launch-family flag, not an introspection flag: it has no JSON output.)
 - **`2.7.0` (#299):** two new top-level fields, `proxy_image_src` and `proxy_image_epoch` — the proxy image's identity labels, full mode only, `null` when absent. Additive, so `schema_version` stays `4`.
 - **`2.7.0` (#296):** a new flag, `--approvals [--workspace PATH]` — a separate document with its own shape (above), carrying the same `schema_version`; nothing in the other outputs changes.
