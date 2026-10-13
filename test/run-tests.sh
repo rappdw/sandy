@@ -25698,6 +25698,78 @@ unset _S204_UP _S204_ID _S204_RC _S204_CALLS _S204_ST _S204_BC _S204_DISP _S204_
 unset _S204_WRITER _S204_FEBODY _S204_JESC _S204_PS _S204_FM _S204_RF _S204_GUARD _C _H _W _W2 _SB _SBX _s204_case _s204_f _s204_rest _s204_c _s204_e _s204_off _s204_nl
 
 
+echo "§205: which forwarded gh account is active in the container"
+# The picker, extracted from the user-setup heredoc and run against a stub gh
+# that answers repos/<r> with push=true only for tokens in STUB_PUSH, logs its
+# argv, and fails every call when STUB_FAIL=1.
+_S205_FN="$(awk '/^_sandy_gh_pick_account\(\) \{$/{p=1} p{print} p&&/^\}$/{exit}' "$SANDY_SCRIPT")"
+_S205_D="$(mktemp -d)"
+mkdir -p "$_S205_D/bin"
+cat > "$_S205_D/bin/gh" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$STUB_LOG"
+[ "${STUB_FAIL:-0}" = 1 ] && exit 1
+[ "$1" = api ] || exit 1
+case " $STUB_PUSH " in *" $GH_TOKEN "*) echo true ;; *) echo false ;; esac
+STUB
+chmod +x "$_S205_D/bin/gh"
+# $1 GH_ACCOUNTS, $2 origin URL, then NAME=VALUE env. Prints the pick (or
+# "none"), then "|calls=<n>"; stderr goes to $_S205_D/err.
+_s205() {
+    local _acc="$1" _url="$2"; shift 2
+    : > "$_S205_D/log"
+    env -i PATH="$_S205_D/bin:$PATH" STUB_LOG="$_S205_D/log" GH_ACCOUNTS="$_acc" "$@" bash -c '
+        set -euo pipefail
+        eval "$1"
+        IFS="," read -ra _gh_pairs <<< "$GH_ACCOUNTS"
+        _sandy_gh_pick_account "$2" || echo none' _ "$_S205_FN" "$_url" 2>"$_S205_D/err"
+    printf '|calls=%s\n' "$(wc -l < "$_S205_D/log" | tr -d ' ')"
+}
+_S205_A="hostact:tokA,pusher:tokB,lastone:tokC"
+check "§205(0) the picker was extracted (mutation: a renamed function empties it and every check goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "^_sandy_gh_pick_account() {"' _ "$_S205_FN"
+_s205_r="$(_s205 "$_S205_A" https://github.com/someorg/repo.git GIT_TOKEN=tokA STUB_PUSH="tokB tokC")"
+check "§205(1) an org repo gets the FIRST account that can push, not the last logged in nor the host's active (got: ${_s205_r%%$'\n'*})" \
+    test "$(printf '%s' "$_s205_r" | tr '\n' ' ')" = "pusher|can push to someorg/repo |calls=2"
+_s205_r="$(_s205 "$_S205_A" git@github.com:someorg/repo.git GIT_TOKEN=tokB STUB_PUSH="")"
+check "§205(2) nobody can push: the host's active account (the one whose token is GIT_TOKEN), after asking about every account" \
+    test "$(printf '%s' "$_s205_r" | tr '\n' ' ')" = "pusher|host active account |calls=3"
+_s205_r="$(_s205 "$_S205_A" ssh://git@github.com/someorg/repo GIT_TOKEN=tokC STUB_FAIL=1 STUB_PUSH="tokA")"
+check "§205(3) the push check failing outright falls back to the host's active account" \
+    test "$(printf '%s' "$_s205_r" | tr '\n' ' ')" = "lastone|host active account |calls=3"
+_s205_r="$(_s205 "$_S205_A" https://github.com/LastOne/repo GIT_TOKEN=tokA STUB_PUSH="tokB")"
+check "§205(4) a repo owned by one of the accounts picks it, case-insensitively, with no API call" \
+    test "$(printf '%s' "$_s205_r" | tr '\n' ' ')" = "lastone|owns origin |calls=0"
+_s205_r="$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA SANDY_GH_ACCOUNT=lastone STUB_PUSH="tokB")"
+check "§205(5) SANDY_GH_ACCOUNT naming a forwarded account wins over everything, with no API call and no warning" \
+    bash -c '[ "$1" = "lastone|SANDY_GH_ACCOUNT |calls=0" ] && [ ! -s "$2" ]' _ "$(printf '%s' "$_s205_r" | tr '\n' ' ')" "$_S205_D/err"
+_s205_r="$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA SANDY_GH_ACCOUNT=nobody STUB_PUSH="tokC")"
+check "§205(6) SANDY_GH_ACCOUNT naming no forwarded account warns, naming it and the accounts there are, and picks automatically" \
+    bash -c '[ "$1" = "lastone|can push to someorg/repo |calls=3" ] && grep -q "SANDY_GH_ACCOUNT=nobody is not a gh account" "$2" && grep -q "hostact pusher lastone" "$2"' _ "$(printf '%s' "$_s205_r" | tr '\n' ' ')" "$_S205_D/err"
+_s205_r="$(_s205 "$_S205_A" https://gitlab.com/someorg/repo GIT_TOKEN=tokB STUB_PUSH="tokA")"
+_s205_r2="$(_s205 "$_S205_A" "" GIT_TOKEN=tokB STUB_PUSH="tokA")"
+check "§205(7) a non-GitHub origin, or none, asks GitHub nothing and uses the host's active account" \
+    bash -c '[ "$1" = "pusher|host active account |calls=0" ] && [ "$2" = "$1" ]' _ "$(printf '%s' "$_s205_r" | tr '\n' ' ')" "$(printf '%s' "$_s205_r2" | tr '\n' ' ')"
+_s205_r="$(_s205 "solo:tokS" https://github.com/someorg/repo GIT_TOKEN=other)"
+_s205_r2="$(_s205 "$_S205_A" https://gitlab.com/x/y GIT_TOKEN=unknown)"
+check "§205(8) one account is used with no API call; with no match anywhere nothing is picked (gh keeps its own state)" \
+    bash -c '[ "$1" = "solo|only account |calls=0" ] && [ "$2" = "none |calls=0" ]' _ "$(printf '%s' "$_s205_r" | tr '\n' ' ')" "$(printf '%s' "$_s205_r2" | tr '\n' ' ')"
+_s205_r="$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_PUSH="")"
+check "§205(9) the push check passes each token through GH_TOKEN, never argv, and asks with a timeout" \
+    bash -c '! grep -q "tok[ABC]" "$1" && grep -qx "api repos/someorg/repo --jq .permissions.push" "$1" && printf "%s" "$2" | grep -q "GH_TOKEN=\"\$_t\" timeout 5 gh api"' _ "$_S205_D/log" "$_S205_FN"
+check "§205(10) user-setup switches gh to the pick, and the old owner-only block is gone" \
+    bash -c 'grep -q "^    if _gh_pick=\"\$(_sandy_gh_pick_account \"\$_gh_origin\")\"; then\$" "$1" && grep -q "gh auth switch --user \"\${_gh_pick%%|\*}\"" "$1" && ! grep -q "_repo_owner" "$1"' _ "$SANDY_SCRIPT"
+_s205_rf() { env -i PATH="$PATH" SANDY_GH_ACCOUNT="$1" bash -c 'RUN_FLAGS=(); GH_ACCOUNTS=""; warn() { echo "W:$*"; }; eval "$2"; printf "%s\n" "${RUN_FLAGS[@]}"' _ "$1" "$(awk '/^if \[ -n "\$\{SANDY_GH_ACCOUNT:-\}" \]; then$/{p=1} p{print} p&&/^fi$/{exit}' "$SANDY_SCRIPT")" 2>/dev/null; }
+check "§205(11) the host forwards a valid SANDY_GH_ACCOUNT and refuses anything that is not a GitHub username" \
+    bash -c '[ "$1" = "-e SANDY_GH_ACCOUNT=drapp_pfpt" ] && printf "%s" "$2" | grep -q "^W:Ignoring" && ! printf "%s" "$2" | grep -q "^-e"' _ \
+    "$(_s205_rf drapp_pfpt | tr '\n' ' ' | sed 's/ $//')" "$(_s205_rf 'a b;x')"
+check "§205(12) SANDY_GH_ACCOUNT is passive-safe and in --print-schema" \
+    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"name\":\"SANDY_GH_ACCOUNT\"" && awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)\$/" "$1" | grep -qE "^[[:space:]]+SANDY_GH_ACCOUNT\$"' _ "$SANDY_SCRIPT"
+rm -rf "$_S205_D"
+unset _S205_FN _S205_D _S205_A _s205_r _s205_r2
+unset -f _s205 _s205_rf
+
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
