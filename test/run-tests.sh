@@ -24386,8 +24386,8 @@ check "§196(5) a symlinked .claude.json is reported, never followed" \
 check "§196(6) session is running for a live lock holder and stopped for a dead one" \
     bash -c '[ "$1" = "running|stopped" ]' _ \
     "$(_s196_q "S['$_S196_WEB']['session']+'|'+S['team-22222222']['session']")"
-check "§196(7) the table shows the account row, under Running, after the Stopped section" \
-    bash -c 'grep -q "^  SANDBOX .*EMAIL .*ORGANIZATION .*PLAN" "$1" && grep "^  $2 " "$1" | grep -q "full.*dev@example.com.*Example Corp.*Max 20x.*2026-10-01" && s=$(grep -n "^Stopped (3)$" "$1" | cut -d: -f1) && r=$(grep -n "^Running (1)$" "$1" | cut -d: -f1) && w=$(grep -n "^  $2 " "$1" | cut -d: -f1) && [ "$s" -lt "$r" ] && [ "$r" -lt "$w" ] && [ "$(tail -n 1 "$1" | cut -c3-)" = "$(grep "^  $2 " "$1" | cut -c3-)" ]' _ "$_S196_D/out.txt" "$_S196_WEB"
+check "§196(7) the table shows the account row (four columns: no organization, plan or date), under Running, after the Stopped section" \
+    bash -c 'grep -q "^  SANDBOX  *AGENT  *CRED  *ACCOUNT$" "$1" && grep "^  $2 " "$1" | grep -q "claude  *full  *dev@example.com$" && s=$(grep -n "^Stopped (3)$" "$1" | cut -d: -f1) && r=$(grep -n "^Running (1)$" "$1" | cut -d: -f1) && w=$(grep -n "^  $2 " "$1" | cut -d: -f1) && [ "$s" -lt "$r" ] && [ "$r" -lt "$w" ] && [ "$(tail -n 1 "$1" | cut -c3-)" = "$(grep "^  $2 " "$1" | cut -c3-)" ]' _ "$_S196_D/out.txt" "$_S196_WEB"
 check "§196(8) --workspace reports that workspace's sandbox only" \
     bash -c 'printf "%s" "$1" | python3 -c "import json,sys; s=json.load(sys.stdin)[\"sandboxes\"]; sys.exit(0 if [x[\"sandbox\"] for x in s]==[sys.argv[1]] else 1)" "$2"' _ \
     "$(_s196 --json --workspace "$_S196_D/ws/web")" "$_S196_WEB"
@@ -24468,7 +24468,7 @@ put(root + "/fresh-77777777/sandy-session.json", {"cred_mode": "oauth-token", "l
 put(root + "/cxkey-88888888/codex/auth.json", codex_chatgpt)
 put(root + "/cxkey-88888888/sandy-session.json", {"cred_mode": "none", "agents": ["codex"],
     "credentials": {"codex": {"kind": "api-key", "fingerprint": "77b20d14", "since": "2026-10-02T00:00:00Z"}}})
-put(root + "/../credential-labels", "# fingerprint label\n3fa1c09e corp\nnot-hex bogus\n0badc0de has space\n")
+put(root + "/../credential-labels", "# fingerprint label\n3fa1c09e corp\nnot-hex bogus\n  0BADC0DE   personal (rappdw)  \r\n12345678\ndeadbeef \x1b[31mred\n")
 PY
 _s196b() { env -i PATH="$_S196_D/bin:$PATH" HOME="$_S196_D" SANDY_HOME="$_S196_H2" bash "$SANDY_SCRIPT" --accounts "$@" </dev/null 2>&1; }
 _s196b --json > "$_S196_D/out2.json" || true
@@ -24480,8 +24480,8 @@ check "§196(13) a claude,codex sandbox reports both agents, codex from its ID t
 check "§196(14) a profileFetchedAt in epoch milliseconds is reported as an ISO date" \
     bash -c '[ "$1" = "2026-10-12T17:41:12Z|2026-10-12T17:41:12Z" ]' _ \
     "$(_s196b_q "S['multi-11111111']['account']['recorded_at']+'|'+S['multi-11111111']['accounts']['claude']['recorded_at']")"
-check "§196(15) the table gives each agent its own row, with an AGENT column and a date under AS OF" \
-    bash -c 'grep -q "^  SANDBOX .*AGENT .*CRED .*EMAIL" "$1" && grep -q "^  multi-11111111 .*claude .*full .*dev@example.com .*Max 20x .*2026-10-12$" "$1" && grep -q "^  *codex .*chatgpt .*cx@example.com .*Pro .*2026-10-10$" "$1" && ! grep -q 1791826872758 "$1"' _ "$_S196_D/out2.txt"
+check "§196(15) the table gives each agent its own row, with an AGENT column and the login's email under ACCOUNT; plan and dates are --json only" \
+    bash -c 'grep -q "^  SANDBOX  *AGENT  *CRED  *ACCOUNT$" "$1" && grep -q "^  multi-11111111  *claude  *full  *dev@example.com$" "$1" && grep -q "^  *codex  *chatgpt  *cx@example.com$" "$1" && ! grep -q "1791826872758\|Max 20x\|ORGANIZATION\|AS OF" "$1"' _ "$_S196_D/out2.txt"
 check "§196(16) an agent the last launch did not run is not reported (a stale Claude record in a codex-only sandbox)" \
     bash -c '[ "$1" = "codex|False" ] && ! grep -q "stale@example.com" "$2"' _ \
     "$(_s196b_q "','.join(S['cxonly-22222222']['agents'])+'|'+str('claude' in S['cxonly-22222222']['accounts'])")" "$_S196_D/out2.txt"
@@ -24494,16 +24494,16 @@ check "§196(18) a marker with no agents field: agents null, claude plus any age
 check "§196(19) no token or key from auth.json is ever printed" \
     bash -c '! grep -q "S196-SECRET" "$1" "$2"' _ "$_S196_D/out2.json" "$_S196_D/out2.txt"
 check "§196(21) a long-lived token's row reports no account (Anthropic will not name one); the earlier login is kept as last_login_record" \
-    bash -c '[ "$1" = "None|None|None|None|personal@example.com|claude/.claude.json|personal@example.com" ] && grep -q "^  switch-55555555 .*claude .*oauth-token (corp) *- *- *- *-$" "$2" && ! grep -q "personal@example.com" "$2"' _ \
+    bash -c '[ "$1" = "None|None|None|None|personal@example.com|claude/.claude.json|personal@example.com" ] && grep -q "^  switch-55555555  *claude  *oauth-token  *corp$" "$2" && ! grep -q "personal@example.com" "$2"' _ \
     "$(_s196b_q "'|'.join(str(x) for x in [S['switch-55555555']['accounts']['claude'][k] for k in ('email','organization_name','plan','recorded_at')]+[S['switch-55555555']['accounts']['claude']['last_login_record']['email'], S['switch-55555555']['accounts']['claude']['last_login_record']['source'], S['switch-55555555']['account']['email']])")" "$_S196_D/out2.txt"
 check "§196(22) an API key is treated the same; an account login keeps its account and has no last_login_record; the note prints once" \
-    bash -c '[ "$1" = "None|odd@example.com|dev@example.com|None" ] && grep -q "^  odd-66666666 .*claude .*api-key (12345678) " "$2" && [ "$(grep -c "^A long-lived token (claude setup-token)" "$2")" = 1 ]' _ \
+    bash -c '[ "$1" = "None|odd@example.com|dev@example.com|None" ] && grep -q "^  odd-66666666  *claude  *api-key  *12345678$" "$2" && [ "$(grep -c "^One row per agent each sandbox" "$2")" = 1 ]' _ \
     "$(_s196b_q "'|'.join(str(x) for x in [S['odd-66666666']['accounts']['claude']['email'], S['odd-66666666']['accounts']['claude']['last_login_record']['email'], S['multi-11111111']['accounts']['claude']['email'], S['multi-11111111']['accounts']['claude']['last_login_record']])")" "$_S196_D/out2.txt"
-check "§196(23) CRED names a fingerprinted token by its label, else by fingerprint; malformed label lines are ignored" \
-    bash -c '[ "$1" = "3fa1c09e|corp|2026-10-12T00:00:00Z|0badc0de|None" ] && grep -q "^  switch-55555555 .*oauth-token (corp) " "$2" && grep -q "^  fresh-77777777 .*oauth-token (0badc0de) " "$2"' _ \
+check "§196(23) CRED names a token by its label (the rest of the line, spaces kept, trimmed; any case of hex), else by fingerprint; lines that are not labels (no label, bad hex, a control character) are named on stderr" \
+    bash -c '[ "$1" = "3fa1c09e|corp|2026-10-12T00:00:00Z|0badc0de|personal (rappdw)" ] && grep -q "^  switch-55555555  *claude  *oauth-token  *corp$" "$2" && grep -q "^  fresh-77777777  *claude  *oauth-token  *personal (rappdw)$" "$2" && grep -q "credential-labels: ignored line(s) 3 5 6: expected" "$2" && grep -q "^  odd-66666666  *claude  *api-key  *12345678$" "$2"' _ \
     "$(_s196b_q "'|'.join(str(x) for x in [S['switch-55555555']['accounts']['claude']['credential_fingerprint'], S['switch-55555555']['accounts']['claude']['credential_label'], S['switch-55555555']['accounts']['claude']['credential_since'], S['fresh-77777777']['accounts']['claude']['credential_fingerprint'], S['fresh-77777777']['accounts']['claude']['credential_label']])")" "$_S196_D/out2.txt"
 check "§196(24) codex on an API key (per the marker) reports api-key and its fingerprint, not the sandbox's stale ChatGPT login" \
-    bash -c '[ "$1" = "api-key|77b20d14|None|None" ] && grep -q "^  cxkey-88888888 .*codex .*api-key (77b20d14) " "$2"' _ \
+    bash -c '[ "$1" = "api-key|77b20d14|None|None" ] && grep -q "^  cxkey-88888888  *codex  *api-key  *77b20d14$" "$2"' _ \
     "$(_s196b_q "'|'.join(str(S['cxkey-88888888']['accounts']['codex'][k]) for k in ('credential','credential_fingerprint','email','plan'))")" "$_S196_D/out2.txt"
 check "§196(25) a codex plan type is shown with spaces, not underscores" \
     bash -c '[ "$1" = "Self serve business prolite" ]' _ "$(_s196b_q "S['cxonly-22222222']['accounts']['codex']['plan']")"
