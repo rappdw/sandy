@@ -24422,10 +24422,11 @@ check "§196(12) --print-schema advertises --accounts" \
 #   cxonly  codex only, with a stale Claude record that must not be shown
 #   cxlink  codex/ is a symlink planted from inside a session
 #   old     marker predating the agents field, with a codex api-key auth.json
-#   switch  claude record fetched 2026-10-06; the marker says sandy saw this
-#           token start on 2026-10-12, so the record predates it: flagged, and
-#           the token's fingerprint carries the operator's label "corp"
-#   fresh   record fetched after the token started: not flagged
+#   switch  a long-lived token (the marker's credentials.claude) beside a
+#           personal account record from an earlier login: the record is NOT
+#           the token's account, so the row is blank and named "corp" by label
+#   fresh   another token, no label: named by its fingerprint
+#   odd     an API key beside a login record: blank too
 #   cxkey   codex ran on an API key (per the marker), beside a stale ChatGPT auth.json
 _S196_H2="$_S196_D/home2"
 python3 - "$_S196_H2/sandboxes" <<'PY'
@@ -24443,7 +24444,7 @@ codex_chatgpt = {"OPENAI_API_KEY": None, "auth_mode": "chatgpt", "last_refresh":
                "access_token": "S196-SECRET-ACCESS", "refresh_token": "S196-SECRET-REFRESH", "account_id": "acct"}}
 put(root + "/multi-11111111/claude/.claude.json", {"oauthAccount": {"emailAddress": "dev@example.com", "organizationName": "Example Corp", "organizationType": "claude_max", "organizationRateLimitTier": "default_claude_max_20x", "profileFetchedAt": 1791826872758}})
 put(root + "/multi-11111111/codex/auth.json", codex_chatgpt)
-put(root + "/multi-11111111/sandy-session.json", {"cred_mode": "oauth-token", "launched_at": "2026-10-12T00:00:00Z", "agents": ["claude", "codex"]})
+put(root + "/multi-11111111/sandy-session.json", {"cred_mode": "full", "launched_at": "2026-10-12T00:00:00Z", "agents": ["claude", "codex"]})
 put(root + "/cxonly-22222222/claude/.claude.json", {"oauthAccount": {"emailAddress": "stale@example.com", "organizationType": "claude_pro"}})
 put(root + "/cxonly-22222222/codex/auth.json", dict(codex_chatgpt, tokens={"id_token": jwt({"email": "cx@example.com", "https://api.openai.com/auth": {"chatgpt_plan_type": "self_serve_business_prolite"}})}))
 put(root + "/cxonly-22222222/sandy-session.json", {"cred_mode": "none", "agents": ["codex"]})
@@ -24457,8 +24458,8 @@ put(root + "/old-44444444/sandy-session.json", {"cred_mode": "full"})
 put(root + "/switch-55555555/claude/.claude.json", {"oauthAccount": {"emailAddress": "personal@example.com", "organizationType": "claude_max", "profileFetchedAt": 1791319870582}})
 put(root + "/switch-55555555/codex/auth.json", dict(codex_chatgpt, last_refresh="2026-10-01T00:00:00Z"))
 put(root + "/odd-66666666/claude/.claude.json", {"oauthAccount": {"emailAddress": "odd@example.com", "profileFetchedAt": "last tuesday"}})
-put(root + "/odd-66666666/sandy-session.json", {"cred_mode": "oauth-token", "launched_at": "2026-10-12T00:00:00Z", "agents": ["claude"],
-    "credentials": {"claude": {"kind": "oauth-token", "fingerprint": "12345678", "since": "2026-10-12T00:00:00Z"}}})
+put(root + "/odd-66666666/sandy-session.json", {"cred_mode": "api-key", "launched_at": "2026-10-12T00:00:00Z", "agents": ["claude"],
+    "credentials": {"claude": {"kind": "api-key", "fingerprint": "12345678", "since": "2026-10-12T00:00:00Z"}}})
 put(root + "/switch-55555555/sandy-session.json", {"cred_mode": "oauth-token", "launched_at": "2026-10-12T00:00:00Z", "agents": ["claude", "codex"],
     "credentials": {"claude": {"kind": "oauth-token", "fingerprint": "3fa1c09e", "since": "2026-10-12T00:00:00Z"}}})
 put(root + "/fresh-77777777/claude/.claude.json", {"oauthAccount": {"emailAddress": "corp@example.com", "organizationType": "claude_team", "profileFetchedAt": 1791826872758}})
@@ -24480,7 +24481,7 @@ check "§196(14) a profileFetchedAt in epoch milliseconds is reported as an ISO 
     bash -c '[ "$1" = "2026-10-12T17:41:12Z|2026-10-12T17:41:12Z" ]' _ \
     "$(_s196b_q "S['multi-11111111']['account']['recorded_at']+'|'+S['multi-11111111']['accounts']['claude']['recorded_at']")"
 check "§196(15) the table gives each agent its own row, with an AGENT column and a date under AS OF" \
-    bash -c 'grep -q "^  SANDBOX .*AGENT .*CRED .*EMAIL" "$1" && grep -q "^  multi-11111111 .*claude .*oauth-token .*dev@example.com .*Max 20x .*2026-10-12$" "$1" && grep -q "^  *codex .*chatgpt .*cx@example.com .*Pro .*2026-10-10$" "$1" && ! grep -q 1791826872758 "$1"' _ "$_S196_D/out2.txt"
+    bash -c 'grep -q "^  SANDBOX .*AGENT .*CRED .*EMAIL" "$1" && grep -q "^  multi-11111111 .*claude .*full .*dev@example.com .*Max 20x .*2026-10-12$" "$1" && grep -q "^  *codex .*chatgpt .*cx@example.com .*Pro .*2026-10-10$" "$1" && ! grep -q 1791826872758 "$1"' _ "$_S196_D/out2.txt"
 check "§196(16) an agent the last launch did not run is not reported (a stale Claude record in a codex-only sandbox)" \
     bash -c '[ "$1" = "codex|False" ] && ! grep -q "stale@example.com" "$2"' _ \
     "$(_s196b_q "','.join(S['cxonly-22222222']['agents'])+'|'+str('claude' in S['cxonly-22222222']['accounts'])")" "$_S196_D/out2.txt"
@@ -24492,11 +24493,12 @@ check "§196(18) a marker with no agents field: agents null, claude plus any age
     "$(_s196b_q "str(S['old-44444444']['agents'])+'|'+','.join(S['old-44444444']['accounts'])+'|'+'|'.join(str(S['old-44444444']['accounts']['codex'][k]) for k in ('credential','plan','email'))")"
 check "§196(19) no token or key from auth.json is ever printed" \
     bash -c '! grep -q "S196-SECRET" "$1" "$2"' _ "$_S196_D/out2.json" "$_S196_D/out2.txt"
-check "§196(21) a Claude record older than when sandy saw its token start is flagged; a newer one, no since, codex and a non-ISO record are not" \
-    bash -c '[ "$1" = "True|False|None|None|None|None" ]' _ \
-    "$(_s196b_q "'|'.join(str(x) for x in [S['switch-55555555']['accounts']['claude']['recorded_before_credential'], S['fresh-77777777']['accounts']['claude']['recorded_before_credential'], S['multi-11111111']['accounts']['claude']['recorded_before_credential'], S['switch-55555555']['accounts']['codex']['recorded_before_credential'], S['old-44444444']['accounts']['claude']['recorded_before_credential'], S['odd-66666666']['accounts']['claude']['recorded_before_credential']])")"
-check "§196(22) the table marks that row's AS OF with * and explains it once; rows without a seen switch are unmarked" \
-    bash -c 'grep -q "^  switch-55555555 .*claude .*personal@example.com .*2026-10-06\*$" "$1" && grep -q "^\* recorded before sandy saw this credential start" "$1" && [ "$(grep -c "^\* recorded before" "$1")" = 1 ] && grep -q "^  multi-11111111 .*2026-10-12$" "$1" && grep -q "^  fresh-77777777 .*2026-10-12$" "$1" && grep -q "^  *codex .*2026-10-01$" "$1"' _ "$_S196_D/out2.txt"
+check "§196(21) a long-lived token's row reports no account (Anthropic will not name one); the earlier login is kept as last_login_record" \
+    bash -c '[ "$1" = "None|None|None|None|personal@example.com|claude/.claude.json|personal@example.com" ] && grep -q "^  switch-55555555 .*claude .*oauth-token (corp) *- *- *- *-$" "$2" && ! grep -q "personal@example.com" "$2"' _ \
+    "$(_s196b_q "'|'.join(str(x) for x in [S['switch-55555555']['accounts']['claude'][k] for k in ('email','organization_name','plan','recorded_at')]+[S['switch-55555555']['accounts']['claude']['last_login_record']['email'], S['switch-55555555']['accounts']['claude']['last_login_record']['source'], S['switch-55555555']['account']['email']])")" "$_S196_D/out2.txt"
+check "§196(22) an API key is treated the same; an account login keeps its account and has no last_login_record; the note prints once" \
+    bash -c '[ "$1" = "None|odd@example.com|dev@example.com|None" ] && grep -q "^  odd-66666666 .*claude .*api-key (12345678) " "$2" && [ "$(grep -c "^A long-lived token (claude setup-token)" "$2")" = 1 ]' _ \
+    "$(_s196b_q "'|'.join(str(x) for x in [S['odd-66666666']['accounts']['claude']['email'], S['odd-66666666']['accounts']['claude']['last_login_record']['email'], S['multi-11111111']['accounts']['claude']['email'], S['multi-11111111']['accounts']['claude']['last_login_record']])")" "$_S196_D/out2.txt"
 check "§196(23) CRED names a fingerprinted token by its label, else by fingerprint; malformed label lines are ignored" \
     bash -c '[ "$1" = "3fa1c09e|corp|2026-10-12T00:00:00Z|0badc0de|None" ] && grep -q "^  switch-55555555 .*oauth-token (corp) " "$2" && grep -q "^  fresh-77777777 .*oauth-token (0badc0de) " "$2"' _ \
     "$(_s196b_q "'|'.join(str(x) for x in [S['switch-55555555']['accounts']['claude']['credential_fingerprint'], S['switch-55555555']['accounts']['claude']['credential_label'], S['switch-55555555']['accounts']['claude']['credential_since'], S['fresh-77777777']['accounts']['claude']['credential_fingerprint'], S['fresh-77777777']['accounts']['claude']['credential_label']])")" "$_S196_D/out2.txt"
