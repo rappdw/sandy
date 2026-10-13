@@ -2386,7 +2386,7 @@ _sandy_emit_schema() {
     printf '{'; _json_kv name '"--print-version"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Emit machine-readable version JSON (schema_version, version, commit, full_version). full_version is the stable cache key for --print-schema consumers — unlike version, it changes on every commit."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--approvals"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Report, as one JSON document, what each launch approval gate (privileged workspace config keys, symlinks escaping the workspace, the .sandy/Dockerfile build) would decide for a workspace: approved, pending, changed, refused or not_applicable. Judged by the launch path itself (the combined workspace config and .secrets, minus keys the environment sets); key names only, never values. Read-only: grants nothing, writes nothing, needs no Docker. Exit 0 when nothing is unresolved, 2 when a gate would be withheld or refused, 1 when no report could be produced. Sub-options: --workspace PATH."'; printf '}'
-    printf ','; printf '{'; _json_kv name '"--accounts"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Report which account each agent in each sandbox is signed in to, one row per agent the last launch ran: for Claude Code the email, organization and plan (organization type, seat tier and rate-limit tier) from the oauthAccount block in its .claude.json, for Codex the email and ChatGPT plan from its auth.json ID token, for Gemini the active Google account; plus the credential each used and whether a session holds the sandbox now. It is what each agent last recorded in the sandbox, not a live query. Filesystem only: no Docker. A table by default; --json emits one JSON document. Prints personal data (email). Sub-options: --json, --workspace PATH."'; printf '}'
+    printf ','; printf '{'; _json_kv name '"--accounts"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Report which account each agent in each sandbox is signed in to, one row per agent the last launch ran: for Claude Code the email, organization and plan (organization type, seat tier and rate-limit tier) from the oauthAccount block in its .claude.json, for Codex the email and ChatGPT plan from its auth.json ID token, for Gemini the active Google account; plus the credential each used and whether a session holds the sandbox now. It is what each agent last recorded in the sandbox, not a live query. Filesystem only: no Docker. A table by default (SANDBOX, AGENT, CRED kind, ACCOUNT: an account login email, or a long-lived token or API key by its label from $SANDY_HOME/credential-labels, else its fingerprint; organization, plan and dates are --json only); --json emits one JSON document. Prints personal data (email). Sub-options: --json, --workspace PATH."'; printf '}'
     printf ','; printf '{'; _json_kv name '"--fingerprint-token"'; printf ','; _json_kv type '"flag"'; printf ','; _json_kv description '"Print the 8-hex-digit fingerprint (the first 8 hex digits of its sha256) of a token or API key read from stdin: the value sandy records per launch in the session marker credentials.<agent>.fingerprint for a long-lived CLAUDE_CODE_OAUTH_TOKEN, an ANTHROPIC_API_KEY or a Codex OPENAI_API_KEY, and shows in --accounts. Name it by adding a line <fingerprint> <label> to $SANDY_HOME/credential-labels. Never takes the secret as an argument. No Docker needed."'; printf '}'
     printf ','
     printf '{'; _json_kv name '"--start"';         printf ','; _json_kv type '"flag"';   printf ','; _json_kv description '"Start a detached daemon session for the workspace and return once attachable."'; printf '}'
@@ -4551,20 +4551,30 @@ _sandy_accounts() {
     local _json=false _ws="" _wd="" _sb _name _af _src _prob _line _tab=$'\x1f'
     local _email _org _otype _orole _billing _seat _rate _asof _cred _launched _wsp _sess _plan _agents _ag
     local _cx_mode _cx_email _cx_plan _cx_ref _cx_key _a_cred _a_email _a_org _a_plan _a_asof _a_src _a_prob _a_last _acc _first
-    local _a_fp _a_since _a_label _cl _ckind _cfp _csince _xkind _xfp _xsince _lbl_fp _lbl_name _lbl_rest
+    local _a_fp _a_since _a_label _cl _ckind _cfp _csince _xkind _xfp _xsince _lbl_fp _lbl_name _lbl_line _lbl_n=0 _lbl_bad=""
     # Optional operator labels for fingerprints: $SANDY_HOME/credential-labels,
-    # one "<8 hex> <label>" per line, # comments. Host-only, read here only.
+    # one "<8 hex> <label>" per line, # comments. The label is the REST of the
+    # line, spaces and all ("personal (rappdw)"): an earlier cut took exactly
+    # two words and skipped anything else without a word, so a label with a
+    # space just never showed. A line that is not a label is now named on
+    # stderr (table mode). Host-only, read here only.
     local -a _lbl_fps=() _lbl_names=()
     if [ -f "$SANDY_HOME/credential-labels" ] && [ ! -L "$SANDY_HOME/credential-labels" ]; then
-        while read -r _lbl_fp _lbl_name _lbl_rest; do
-            # Exactly two words; a line that says more is not one we understand.
-            [ -z "$_lbl_rest" ] || continue
-            case "$_lbl_fp" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) continue ;; esac
-            case "$_lbl_name" in ''|*[!A-Za-z0-9._@+-]*) continue ;; esac
-            _lbl_fps+=("$_lbl_fp"); _lbl_names+=("${_lbl_name:0:32}")
+        while IFS= read -r _lbl_line || [ -n "$_lbl_line" ]; do
+            _lbl_n=$((_lbl_n + 1))
+            _lbl_line="${_lbl_line#"${_lbl_line%%[![:space:]]*}"}"
+            case "$_lbl_line" in ''|'#'*) continue ;; esac
+            _lbl_fp="${_lbl_line%%[[:space:]]*}"
+            _lbl_name="${_lbl_line#"$_lbl_fp"}"
+            _lbl_name="${_lbl_name#"${_lbl_name%%[![:space:]]*}"}"
+            _lbl_name="${_lbl_name%"${_lbl_name##*[![:space:]]}"}"
+            case "$_lbl_fp" in [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;; *) _lbl_bad="$_lbl_bad $_lbl_n"; continue ;; esac
+            # Printable only: the label is printed to a terminal.
+            case "$_lbl_name" in ''|*[![:print:]]*) _lbl_bad="$_lbl_bad $_lbl_n"; continue ;; esac
+            _lbl_fps+=("$(printf '%s' "$_lbl_fp" | tr 'A-F' 'a-f')"); _lbl_names+=("${_lbl_name:0:40}")
         done < "$SANDY_HOME/credential-labels"
     fi
-    local -a _r_name=() _r_agent=() _r_sess=() _r_cred=() _r_email=() _r_org=() _r_plan=() _r_asof=() _r_json=() _ags=()
+    local -a _r_name=() _r_agent=() _r_sess=() _r_cred=() _r_email=() _r_json=() _ags=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --json) _json=true; shift ;;
@@ -4575,6 +4585,9 @@ _sandy_accounts() {
             *) error "--accounts: unrecognized argument: $1 (accepts --json and --workspace PATH)"; return 1 ;;
         esac
     done
+    if [ -n "$_lbl_bad" ] && [ "$_json" = false ]; then
+        warn "$SANDY_HOME/credential-labels: ignored line(s)${_lbl_bad}: expected '<8 hex digits> <label>'"  >&2
+    fi
     if ! command -v jq >/dev/null 2>&1 && ! command -v node >/dev/null 2>&1; then
         error "--accounts needs jq or node to read the agents' account records."
         return 1
@@ -4713,10 +4726,11 @@ _sandy_accounts() {
             fi
             if [ "$_first" = true ]; then _r_name+=("$_name"); _first=false; else _r_name+=(""); fi
             _r_agent+=("$_ag"); _r_sess+=("$_sess")
-            if [ -n "$_a_fp" ]; then _r_cred+=("${_a_cred:--} (${_a_label:-$_a_fp})"); else _r_cred+=("${_a_cred:--}"); fi
-            _r_email+=("${_a_email:--}"); _r_org+=("${_a_org:--}"); _r_plan+=("${_a_plan:--}")
+            # ACCOUNT: a token's label (else its fingerprint), or the email
+            # an account login recorded.
+            _r_cred+=("${_a_cred:--}")
+            if [ -n "$_a_fp" ]; then _r_email+=("${_a_label:-$_a_fp}"); else _r_email+=("${_a_email:--}"); fi
             if [ -n "$_a_prob" ]; then _r_email[${#_r_email[@]}-1]="($_a_prob)"; fi
-            _r_asof+=("${_a_asof%%T*}")
             if [ "$_json" = true ]; then
                 [ -n "$_acc" ] && _acc+=","
                 if [ -n "$_a_cred$_a_email$_a_org$_a_plan$_a_src$_a_prob$_a_fp$_a_last" ]; then
@@ -4757,25 +4771,25 @@ _sandy_accounts() {
         echo "No sandboxes under $SANDY_HOME/sandboxes."
         return 0
     fi
-    local _w1=7 _w2=5 _w3=4 _w4=5 _w5=12 _w6=4 _i
+    # Four columns. The table used to carry EMAIL, ORGANIZATION, PLAN and AS
+    # OF too, but almost every row is a long-lived token, which names no
+    # account, so those columns were blank or (before #454) misleading.
+    # ACCOUNT is the one thing that identifies the credential: a token's
+    # label or fingerprint, or the email an account login recorded (a Claude
+    # /login, codex ChatGPT, gemini). Everything else stays in --json.
+    local _w1=7 _w2=5 _w3=4 _i
     for _i in "${!_r_name[@]}"; do
         [ ${#_r_name[$_i]} -gt $_w1 ] && _w1=${#_r_name[$_i]}
         [ ${#_r_agent[$_i]} -gt $_w2 ] && _w2=${#_r_agent[$_i]}
         [ ${#_r_cred[$_i]} -gt $_w3 ] && _w3=${#_r_cred[$_i]}
-        [ ${#_r_email[$_i]} -gt $_w4 ] && _w4=${#_r_email[$_i]}
-        [ ${#_r_org[$_i]} -gt $_w5 ] && _w5=${#_r_org[$_i]}
-        [ ${#_r_plan[$_i]} -gt $_w6 ] && _w6=${#_r_plan[$_i]}
     done
     # Notes first, then stopped, then running: run from a terminal, the
     # sessions that are live now end up nearest the prompt.
-    echo "One row per agent each sandbox's last launch ran. EMAIL, ORGANIZATION and PLAN are what that"
-    echo "agent last recorded in the sandbox (AS OF); credentials are read from this host at every launch,"
-    echo "so a re-login shows here after the next session. CRED is the credential that agent used; with"
-    echo "none, the account shown is not what billed. '-' means nothing is recorded."
-    echo "A long-lived token (claude setup-token) or an API key names no account, and Anthropic will not report"
-    echo "one for it, so those rows leave EMAIL, ORGANIZATION and PLAN blank and CRED names the credential: its"
-    echo "fingerprint, or your label for it from $SANDY_HOME/credential-labels ('<fingerprint> <label>' per"
-    echo "line; sandy --fingerprint-token prints one). --json keeps the sandbox's earlier login as last_login_record."
+    echo "One row per agent each sandbox's last launch ran. CRED is the kind of credential that agent used."
+    echo "ACCOUNT identifies it: for an account login, the email it recorded; for a long-lived token or API key,"
+    echo "which names no account, your label from $SANDY_HOME/credential-labels ('<fingerprint> <label>'"
+    echo "per line; sandy --fingerprint-token prints the fingerprint), else its fingerprint. '-' means none."
+    echo "--json has the rest: organization, plan, record dates, and a token row's earlier login (last_login_record)."
     local _want _title _n
     for _want in stopped running; do
         _n=0
@@ -4784,11 +4798,11 @@ _sandy_accounts() {
         _title="Stopped"; [ "$_want" = running ] && _title="Running"
         echo ""
         echo "$_title ($_n)"
-        printf "  %-${_w1}s  %-${_w2}s  %-${_w3}s  %-${_w4}s  %-${_w5}s  %-${_w6}s  %s\n" SANDBOX AGENT CRED EMAIL ORGANIZATION PLAN "AS OF"
+        printf "  %-${_w1}s  %-${_w2}s  %-${_w3}s  %s\n" SANDBOX AGENT CRED ACCOUNT
         for _i in "${!_r_name[@]}"; do
             [ "${_r_sess[$_i]}" = "$_want" ] || continue
-            printf "  %-${_w1}s  %-${_w2}s  %-${_w3}s  %-${_w4}s  %-${_w5}s  %-${_w6}s  %s\n" \
-                "${_r_name[$_i]}" "${_r_agent[$_i]}" "${_r_cred[$_i]}" "${_r_email[$_i]}" "${_r_org[$_i]}" "${_r_plan[$_i]}" "${_r_asof[$_i]:--}"
+            printf "  %-${_w1}s  %-${_w2}s  %-${_w3}s  %s\n" \
+                "${_r_name[$_i]}" "${_r_agent[$_i]}" "${_r_cred[$_i]}" "${_r_email[$_i]:--}"
         done
     done
     return 0
