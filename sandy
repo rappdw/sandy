@@ -109,6 +109,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_CROSS_SESSION_INBOUND
     SANDY_RELAY
     SANDY_OFFLINE
+    SANDY_GH_ACCOUNT
 )
 
 # SANDY_ENV_ONLY_KEYS: honored only when set in the process environment.
@@ -1987,6 +1988,7 @@ ANTHROPIC_PROFILE|string||^[A-Za-z0-9._-]+$|1.11.0|experimental|Privileged. Name
 SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|REMOVED AS A CONFIGURATION KEY in 2.2.0 (#354) -- setting it from the environment or any config file is a HARD ERROR naming the replacement (declare the executable as an 'entry' in a feature manifest). The INTERNAL CHANNEL it later served -- carrying the relay-designated entry's path from host to container-side supervisor -- was itself removed in 2.6.0 (#382, decisions 4-5): the host now passes every adopted entry to the container only via SANDY_FEATURE_ENTRIES (internal, no metadata row; see 'feature_entries' below), and no entry is designated any more -- every entry is supervised and reported identically. What an entry gets: a container-level process (a sibling of the tmux server, not a pane, not a child of any agent session), started once per container by user-setup.sh before the tmux session exists (never in headless -p runs, never under --remote, never under --provision), held to one instance by flock, restarted on death with exponential backoff (1s doubling to 60s, reset after a 60s+ run), never given up on. Every entry's state (.state, supervisor.log) lives at its own $SANDBOX_DIR/feature-state/<feature>, mounted rw at /opt/sandy/feature-state/<feature> and exported to that entry's own process as SANDY_FEATURE_STATE -- an entry reads its own directory from that variable rather than constructing the path, uniform across every entry. Env contract: SANDY_FEATURE_STATE, SANDY_AGENT, SANDY_WORKSPACE. An entry that cannot start FAILS THE LAUNCH, never warn-and-proceed: missing or not executable, its state dir not mounted, or no flock (user-setup.sh exits 1, the container dies, --start reports crash-looping/exit 7) -- one shared 5s startup window covers every entry at once. DOCUMENTED EXCEPTION: a stale image predating per-feature entries (a deferred build per #218, or any other image built before the sandy.feature_entries=1 Dockerfile label existed) knows only the removed SANDY_HANDOFF_RELAY channel and so starts NONE of the entries -- sandy warns at launch, naming every one, and --print-state reports them all as state absent. There is no runtime toggle to stop them: SANDY_RELAY is a HARD ERROR as of 2.6.0 (see its own row below) with no per-feature replacement, so every adopted entry always runs. Reported in /etc/sandy-session.json as feature_entries.<feature>.{path} -- schema_version 4 (2.6.0, #382, decisions 1-2): relay{} itself, and its two companions relay_alias and disabled_by, are gone from both the marker and --print-state -- and live in --print-state as feature_entries.<feature>.state (every entry, identically). In daemon mode an entry (and anything else planted at the uid) outlives sessions until the container is recreated -- run sandy --update-sessions --yes on a 24h cron.
 SANDY_RELAY|bool|||1.11.0|deprecated|REMOVED in 2.6.0 (#382) after its 2.5.0 announcement: setting it from ANY source (environment, host config or a workspace .sandy/config), to any value, is a HARD ERROR naming the replacement -- add the sandbox to a feature manifest's "sandboxes": {"exclude": [...]}. There is deliberately no per-feature off switch and no replacement key. The key stays in the passive tier only so the loader recognizes it and fails rather than silently ignoring it as unknown.
 SANDY_OFFLINE|bool|0||2.4.0|stable|Offline mode (#219): skip the lookups a launch makes only to learn whether something NEWER exists -- the per-agent version checks (a hit forces a --no-cache agent rebuild), skill-pack version resolution from GitHub (falls back to the local cache, then the built-in pin), and sandy's own release nag. Builds that are REQUIRED still run: a missing image or a changed Dockerfile builds through the build-reachability gate and fails there as it always has. For a known-bad network (in-flight wifi, captive portal) or an air-gapped host, where the checks cost latency and a detected update would force a rebuild that cannot succeed. The one-shot CLI form is --no-update-check, which wins over this key. Passive-safe: it defers the auto-patch pickup the wrapped-agent CVE posture relies on, but only until the next launch without it -- equivalent to not relaunching -- and it is never silent: one line at launch, one at session end, and 'offline': true in /etc/sandy-session.json. Default 0.
+SANDY_GH_ACCOUNT|string||^[A-Za-z0-9][A-Za-z0-9_-]{0,38}$|2.9.0|stable|Which forwarded gh account is active in the container. Sandy forwards every account the host's gh is logged in to; without this it picks: the only account; else the account named like origin's owner; else the first account GitHub says can push to origin (one API call per account at launch -- what an org-owned repo needs, since no account is named like the org); else the host's active gh account. Set it where more than one account can push and the choice is a preference. A name that is not one of the host's accounts warns and falls back to that automatic choice. Passive-safe: it only chooses among tokens already forwarded.
 SANDY_AUTO_APPROVE_PRIVILEGED|bool|||0.11.2|internal|Bypass TWO of the three launch approval gates: the passive-privileged config-key prompt AND the per-project .sandy/Dockerfile build prompt (an unreviewed project image then builds, running its RUN commands on the host docker daemon with unfiltered network). It does NOT bypass the dangerous-symlink gate, deliberately: that gate is built so no approval of a new escaping symlink can happen without a deliberate human act (a new escape is a hard error, never a re-prompt), and a blanket bypass would silently mount every future escape read-write. Env-only, so a committed config cannot set it. Intended for CI / test harnesses only.
 SANDY_DEBUG_CLEANUP|bool|||0.11.4|internal|Print session-stub cleanup diagnostics on exit.
 SANDY_CHANNEL|enum:release,dev|release||2.8.0|stable|Which build `sandy --upgrade` installs (install.sh reads the same variable). release (default): the latest GitHub release, the version the update notice names; a dev or rc build newer than that release is left alone unless release is set explicitly. dev: the head of main, pinned to its commit and recording it, so --version tells dev builds apart and the next dev upgrade compares commits. Env-only: it is read before any config file is loaded. A failed release lookup is an error, never a silent fallback to main.
@@ -9750,6 +9752,59 @@ if [ -n "$_sys_py" ] && [ -d "$PYTHONUSERBASE/lib" ]; then
     done
 fi
 
+# Which of the forwarded gh accounts should be active. Prints "<user>|<why>";
+# returns 1 when there is no account to pick. Reads _gh_pairs ("user:token"),
+# SANDY_GH_ACCOUNT and GIT_TOKEN; $1 is origin's URL (may be empty). In order:
+#   1. SANDY_GH_ACCOUNT, when that account was forwarded (else warn, go on);
+#   2. the only account, when there is one;
+#   3. the account named like origin's owner (a repo owned by a user);
+#   4. the first account GitHub says can push to origin -- what an org-owned
+#      repo needs, since no account is named like the org;
+#   5. the host's active account: the one whose token is GIT_TOKEN, which is
+#      also what git's fallback credential helper sends, so gh and git agree.
+# A token reaches gh through GH_TOKEN in the environment, never argv.
+_sandy_gh_pick_account() {
+    local _url="$1" _pair _u _t _owner="" _repo="" _push
+    if [ -n "${SANDY_GH_ACCOUNT:-}" ]; then
+        for _pair in "${_gh_pairs[@]}"; do
+            if [ "${_pair%%:*}" = "$SANDY_GH_ACCOUNT" ]; then
+                printf '%s|SANDY_GH_ACCOUNT\n' "$SANDY_GH_ACCOUNT"; return 0
+            fi
+        done
+        printf '\033[0;33m⚠ SANDY_GH_ACCOUNT=%s is not a gh account on the host (have: %s); choosing one automatically.\033[0m\n' \
+            "$SANDY_GH_ACCOUNT" "$(for _pair in "${_gh_pairs[@]}"; do printf '%s ' "${_pair%%:*}"; done)" >&2
+    fi
+    [ "${#_gh_pairs[@]}" -gt 0 ] || return 1
+    if [ "${#_gh_pairs[@]}" -eq 1 ]; then
+        printf '%s|only account\n' "${_gh_pairs[0]%%:*}"; return 0
+    fi
+    _repo="$(printf '%s\n' "$_url" | sed -E -n 's#^(https://([^@/]*@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/?$#\3#p')"
+    _repo="${_repo%.git}"
+    if [ -n "$_repo" ]; then
+        _owner="${_repo%%/*}"
+        for _pair in "${_gh_pairs[@]}"; do
+            _u="${_pair%%:*}"
+            if [ "${_u,,}" = "${_owner,,}" ]; then
+                printf '%s|owns origin\n' "$_u"; return 0
+            fi
+        done
+        for _pair in "${_gh_pairs[@]}"; do
+            _u="${_pair%%:*}" _t="${_pair#*:}"
+            _push="$(GH_TOKEN="$_t" timeout 5 gh api "repos/$_repo" --jq .permissions.push 2>/dev/null || true)"
+            if [ "$_push" = true ]; then
+                printf '%s|can push to %s\n' "$_u" "$_repo"; return 0
+            fi
+        done
+    fi
+    if [ -n "${GIT_TOKEN:-}" ]; then
+        for _pair in "${_gh_pairs[@]}"; do
+            if [ "${_pair#*:}" = "$GIT_TOKEN" ]; then
+                printf '%s|host active account\n' "${_pair%%:*}"; return 0
+            fi
+        done
+    fi
+    return 1
+}
 sandy_log "Configuring git auth"
 # Authenticate gh CLI with all available accounts (works in both token and agent modes)
 if [ -n "${GH_ACCOUNTS:-}" ] && command -v gh &>/dev/null; then
@@ -9759,22 +9814,17 @@ if [ -n "${GH_ACCOUNTS:-}" ] && command -v gh &>/dev/null; then
         _tok="${_pair#*:}"
         echo "$_tok" | gh auth login --with-token 2>/dev/null || true
     done
-    # Detect the repo owner from the workspace remote URL and switch to the
-    # matching account. Without this, the last-logged-in account is active
-    # and pushes fail if it doesn't own the repo.
-    _repo_owner=""
+    # Make one account active on purpose. Left alone, gh keeps whichever
+    # account was logged in LAST, an accident of the order the host's
+    # `gh auth status` printed them in, and that is what every org-owned repo
+    # got: an org's name matches no account.
+    _gh_origin=""
     if [ -d "$WORKSPACE/.git" ] || [ -f "$WORKSPACE/.git" ]; then
-        _repo_owner="$(git -C "$WORKSPACE" remote get-url origin 2>/dev/null \
-            | sed -E 's#.*(github\.com[:/])##; s#/.*##' || true)"
+        _gh_origin="$(git -C "$WORKSPACE" remote get-url origin 2>/dev/null || true)"
     fi
-    if [ -n "$_repo_owner" ]; then
-        for _pair in "${_gh_pairs[@]}"; do
-            _user="${_pair%%:*}"
-            if [ "$_user" = "$_repo_owner" ]; then
-                gh auth switch --user "$_user" 2>/dev/null || true
-                break
-            fi
-        done
+    if _gh_pick="$(_sandy_gh_pick_account "$_gh_origin")"; then
+        gh auth switch --user "${_gh_pick%%|*}" 2>/dev/null || true
+        sandy_log "gh account: ${_gh_pick%%|*} (${_gh_pick#*|})"
     fi
 elif [ -n "${GIT_TOKEN:-}" ] && command -v gh &>/dev/null; then
     echo "${GIT_TOKEN}" | gh auth login --with-token 2>/dev/null || true
@@ -19959,6 +20009,13 @@ else
     fi
 fi
 [ -n "$GH_ACCOUNTS" ] && _sandy_add_secret_env GH_ACCOUNTS "$GH_ACCOUNTS"
+if [ -n "${SANDY_GH_ACCOUNT:-}" ]; then
+    if [[ "$SANDY_GH_ACCOUNT" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,38}$ ]]; then
+        RUN_FLAGS+=(-e "SANDY_GH_ACCOUNT=$SANDY_GH_ACCOUNT")
+    else
+        warn "Ignoring SANDY_GH_ACCOUNT=$SANDY_GH_ACCOUNT: not a GitHub username"
+    fi
+fi
 
 # Awareness note: a durable, broadly-scoped GitHub token is being forwarded into
 # a container whose egress posture allows the public internet (permissive — the
