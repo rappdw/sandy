@@ -24412,9 +24412,75 @@ else
 fi
 check "§196(12) --print-schema advertises --accounts" \
     bash -c 'bash "$1" --print-schema 2>/dev/null | grep -qF "\"name\":\"--accounts\""' _ "$SANDY_SCRIPT"
+# Multi-agent sandboxes, in their own SANDY_HOME so the counts above stand.
+# --accounts used to read only Claude Code: a claude,codex sandbox showed one
+# Claude row and nothing of codex, and a profileFetchedAt written as epoch
+# milliseconds printed as a raw number under AS OF.
+#   multi   claude,codex; codex signed in with ChatGPT (ID token carries email + plan)
+#   cxonly  codex only, with a stale Claude record that must not be shown
+#   cxlink  codex/ is a symlink planted from inside a session
+#   old     marker predating the agents field, with a codex api-key auth.json
+_S196_H2="$_S196_D/home2"
+python3 - "$_S196_H2/sandboxes" <<'PY'
+import base64, json, os, sys
+root = sys.argv[1]
+def put(path, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(obj if isinstance(obj, str) else json.dumps(obj))
+def jwt(claims):
+    seg = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return "eyJhbGciOiJub25lIn0." + seg + ".c2ln"
+codex_chatgpt = {"OPENAI_API_KEY": None, "auth_mode": "chatgpt", "last_refresh": "2026-10-10T01:02:03Z",
+    "tokens": {"id_token": jwt({"email": "cx@example.com", "https://api.openai.com/auth": {"chatgpt_plan_type": "pro"}}),
+               "access_token": "S196-SECRET-ACCESS", "refresh_token": "S196-SECRET-REFRESH", "account_id": "acct"}}
+put(root + "/multi-11111111/claude/.claude.json", {"oauthAccount": {"emailAddress": "dev@example.com", "organizationName": "Example Corp", "organizationType": "claude_max", "organizationRateLimitTier": "default_claude_max_20x", "profileFetchedAt": 1791826872758}})
+put(root + "/multi-11111111/codex/auth.json", codex_chatgpt)
+put(root + "/multi-11111111/sandy-session.json", {"cred_mode": "oauth-token", "launched_at": "2026-10-12T00:00:00Z", "agents": ["claude", "codex"]})
+put(root + "/cxonly-22222222/claude/.claude.json", {"oauthAccount": {"emailAddress": "stale@example.com", "organizationType": "claude_pro"}})
+put(root + "/cxonly-22222222/codex/auth.json", codex_chatgpt)
+put(root + "/cxonly-22222222/sandy-session.json", {"cred_mode": "none", "agents": ["codex"]})
+put(root + "/../leak/auth.json", dict(codex_chatgpt, tokens={"id_token": jwt({"email": "leak@host.example"})}))
+os.makedirs(root + "/cxlink-33333333", exist_ok=True)
+os.symlink(os.path.abspath(root + "/../leak"), root + "/cxlink-33333333/codex")
+put(root + "/cxlink-33333333/sandy-session.json", {"cred_mode": "full", "agents": ["claude", "codex"]})
+put(root + "/old-44444444/claude/.claude.json", {"oauthAccount": {"emailAddress": "old@example.com", "organizationType": "claude_pro"}})
+put(root + "/old-44444444/codex/auth.json", {"OPENAI_API_KEY": "sk-S196-SECRET-KEY", "auth_mode": "apikey"})
+put(root + "/old-44444444/sandy-session.json", {"cred_mode": "full"})
+PY
+_s196b() { env -i PATH="$_S196_D/bin:$PATH" HOME="$_S196_D" SANDY_HOME="$_S196_H2" bash "$SANDY_SCRIPT" --accounts "$@" </dev/null 2>&1; }
+_s196b --json > "$_S196_D/out2.json" || true
+_s196b > "$_S196_D/out2.txt" || true
+_s196b_q() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); S={s["sandbox"]:s for s in d["sandboxes"]}; print(eval(sys.argv[2]))' "$_S196_D/out2.json" "$1" 2>/dev/null; }
+check "§196(13) a claude,codex sandbox reports both agents, codex from its ID token (email, plan, credential)" \
+    bash -c '[ "$1" = "claude,codex|cx@example.com|Pro|chatgpt|codex/auth.json|dev@example.com" ]' _ \
+    "$(_s196b_q "','.join(S['multi-11111111']['agents'])+'|'+'|'.join([S['multi-11111111']['accounts']['codex'][k] for k in ('email','plan','credential','source')])+'|'+S['multi-11111111']['accounts']['claude']['email']")"
+check "§196(14) a profileFetchedAt in epoch milliseconds is reported as an ISO date" \
+    bash -c '[ "$1" = "2026-10-12T17:41:12Z|2026-10-12T17:41:12Z" ]' _ \
+    "$(_s196b_q "S['multi-11111111']['account']['recorded_at']+'|'+S['multi-11111111']['accounts']['claude']['recorded_at']")"
+check "§196(15) the table gives each agent its own row, with an AGENT column and a date under AS OF" \
+    bash -c 'grep -q "^  SANDBOX .*AGENT .*CRED .*EMAIL" "$1" && grep -q "^  multi-11111111 .*claude .*oauth-token .*dev@example.com .*Max 20x .*2026-10-12$" "$1" && grep -q "^  *codex .*chatgpt .*cx@example.com .*Pro .*2026-10-10$" "$1" && ! grep -q 1791826872758 "$1"' _ "$_S196_D/out2.txt"
+check "§196(16) an agent the last launch did not run is not reported (a stale Claude record in a codex-only sandbox)" \
+    bash -c '[ "$1" = "codex|False" ] && ! grep -q "stale@example.com" "$2"' _ \
+    "$(_s196b_q "','.join(S['cxonly-22222222']['agents'])+'|'+str('claude' in S['cxonly-22222222']['accounts'])")" "$_S196_D/out2.txt"
+check "§196(17) a symlinked codex/ is reported, never followed" \
+    bash -c '[ "$1" = "symlink|None" ] && ! grep -q "leak@host" "$2" "$3"' _ \
+    "$(_s196b_q "S['cxlink-33333333']['accounts']['codex']['problem']+'|'+str(S['cxlink-33333333']['accounts']['codex']['email'])")" "$_S196_D/out2.json" "$_S196_D/out2.txt"
+check "§196(18) a marker with no agents field: agents null, claude plus any agent with an account file, codex api-key" \
+    bash -c '[ "$1" = "None|claude,codex|api-key|None|None" ]' _ \
+    "$(_s196b_q "str(S['old-44444444']['agents'])+'|'+','.join(S['old-44444444']['accounts'])+'|'+'|'.join(str(S['old-44444444']['accounts']['codex'][k]) for k in ('credential','plan','email'))")"
+check "§196(19) no token or key from auth.json is ever printed" \
+    bash -c '! grep -q "S196-SECRET" "$1" "$2"' _ "$_S196_D/out2.json" "$_S196_D/out2.txt"
+if [ -d "$_S196_D/nojq" ]; then
+    env -i PATH="$_S196_D/bin:$_S196_D/nojq" HOME="$_S196_D" SANDY_HOME="$_S196_H2" bash "$SANDY_SCRIPT" --accounts --json </dev/null > "$_S196_D/out2-node.json" 2>&1 || true
+    check "§196(20) the node projector reports the multi-agent fixtures exactly as the jq one does" \
+        cmp -s "$_S196_D/out2.json" "$_S196_D/out2-node.json"
+else
+    skip "§196(20) needs both jq and node to compare the projectors"
+fi
 rm -rf "$_S196_D"
-unset _S196_D _S196_H _S196_WEB _s196_dead _s196_rc _s196_rc2 _s196_d _s196_f _s196_n
-unset -f _s196 _s196_mk _s196_q sha256 _sandy_slug_for 2>/dev/null || true
+unset _S196_D _S196_H _S196_H2 _S196_WEB _s196_dead _s196_rc _s196_rc2 _s196_d _s196_f _s196_n
+unset -f _s196 _s196b _s196_mk _s196_q _s196b_q sha256 _sandy_slug_for 2>/dev/null || true
 fi
 
 
