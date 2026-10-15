@@ -25772,6 +25772,69 @@ unset _S205_FN _S205_D _S205_A _s205_r _s205_r2
 unset -f _s205 _s205_rf
 
 
+echo "§206: #457 — interactive codex runs without codex's app-server daemon (--no-daemon), when codex has the flag"
+# ============================================================
+# codex-cli 0.163.0 routes the interactive TUI and `codex resume` through a
+# background daemon it installs into ~/.codex (a ~460 MB self-copy plus a
+# network updater), and refuses to start when that copy is incomplete. Sandy
+# passes --no-daemon to the interactive forms only. Asserted on the argv a stub
+# codex RECEIVES; the stub answers `--help` like 0.163.0 (lists --no-daemon) or
+# like an older codex (does not), so the gate is exercised both ways.
+_S206_FN="$(sed -n '/^_sandy_translate_args()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_wrap_cmd_exit_pause()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_codex_has_session()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_codex_resume_mode()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^build_codex_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+_S206_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S206_D/new" "$_S206_D/old" "$_S206_D/home" "$_S206_D/ch"
+for _s206_v in new old; do
+    {
+        printf '#!/bin/sh\n'
+        printf 'if [ "$1" = "--help" ]; then\n'
+        if [ "$_s206_v" = new ]; then
+            printf '  printf "Options:\\n      --no-daemon\\n          Run without the shared background server\\n"\n'
+        else
+            printf '  printf "Options:\\n      --oss\\n"\n'
+        fi
+        printf '  exit 0\nfi\n'
+        printf 'printf "%%s\\n" "$*" > "%s/argv"\n' "$_S206_D"
+    } > "$_S206_D/$_s206_v/codex"
+    chmod +x "$_S206_D/$_s206_v/codex"
+done
+# $1 = stub (new|old), $2 = extra env, rest = sandy args -> argv codex received.
+_s206_argv() {
+    local stub="$1" envs="$2"; shift 2
+    rm -f "$_S206_D/argv"
+    # shellcheck disable=SC2086
+    env -i PATH="$_S206_D/$stub:$PATH" HOME="$_S206_D/home" CODEX_HOME="$_S206_D/ch" \
+        WORKSPACE=/home/sandy/w _sandy_is_headless=false $envs \
+        bash -c 'set -euo pipefail; eval "$1"; shift; c="$(build_codex_cmd "$@")"; bash -c "$c" </dev/null >/dev/null 2>&1 || true' _ "$_S206_FN" "$@" 2>/dev/null
+    cat "$_S206_D/argv" 2>/dev/null || printf 'NOT-RUN\n'
+}
+check "§206(1) a codex that has --no-daemon: the fresh TUI gets it" \
+    bash -c '[ "$1" = "--sandbox danger-full-access --ask-for-approval never --no-daemon" ]' _ "$(_s206_argv new '')"
+check "§206(2) ...so does the --resume picker" \
+    bash -c '[ "$1" = "resume --sandbox danger-full-access --ask-for-approval never --no-daemon" ]' _ "$(_s206_argv new '' --resume)"
+mkdir -p "$_S206_D/ch/sessions/2026/10/15"
+printf '{"type":"session_meta","payload":{"cwd":"/home/sandy/w","source":"cli"}}\n' > "$_S206_D/ch/sessions/2026/10/15/rollout-x.jsonl"
+check "§206(3) ...and codex resume --last" \
+    bash -c '[ "$1" = "resume --last --sandbox danger-full-access --ask-for-approval never --no-daemon" ]' _ "$(_s206_argv new '')"
+rm -rf "$_S206_D/ch/sessions"
+check "§206(4) an older codex without the flag is never handed it (it would refuse to start)" \
+    bash -c '[ "$1" = "--sandbox danger-full-access --ask-for-approval never" ] && [ "$2" = "resume --sandbox danger-full-access --ask-for-approval never" ]' _ "$(_s206_argv old '')" "$(_s206_argv old '' --resume)"
+check "§206(5) headless codex exec never carries --no-daemon (exec has no such flag)" \
+    bash -c 'case "$1" in "exec --sandbox danger-full-access --skip-git-repo-check"*) case "$1" in *no-daemon*) exit 1 ;; esac ;; *) exit 1 ;; esac' _ "$(_s206_argv new '_sandy_is_headless=true' -p hello)"
+check "§206(6) an operator's own --no-daemon is kept and never doubled (a second one is a codex error)" \
+    bash -c '[ "$1" = "--sandbox danger-full-access --ask-for-approval never --no-daemon" ]' _ "$(_s206_argv new '' --no-daemon)"
+check "§206(7) --remote (codex refuses it beside --no-daemon) gets no --no-daemon" \
+    bash -c '[ "$1" = "--sandbox danger-full-access --ask-for-approval never --remote ws://h" ] && [ "$2" = "--sandbox danger-full-access --ask-for-approval never --remote=ws://h" ]' _ "$(_s206_argv new '' --remote ws://h)" "$(_s206_argv new '' --remote=ws://h)"
+check "§206(8) a login session (#428) is untouched" \
+    bash -c '[ "$1" = "login --device-auth" ]' _ "$(_s206_argv new 'SANDY_LOGIN_AGENT=codex')"
+rm -rf "$_S206_D"
+unset _S206_FN _S206_D _s206_v
+unset -f _s206_argv
+
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
