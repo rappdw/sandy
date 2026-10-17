@@ -14673,6 +14673,13 @@ start_proxy_sidecar() {
     printf '{"mode":"%s","proxy_ip":"%s","allow":[%s]%s%s}\n' \
         "$_SANDY_PROXY_MODE" "$PROXY_IP" "$allow_json" "$llm_field" "$egresslog_field" \
         > "$PROXY_CONFIG_FILE"
+    # #461: the proxy runs as root with --cap-drop ALL, so it has no
+    # DAC_OVERRIDE and opens this host file through its OTHER permission bits
+    # only. Written with a plain redirect, its mode came from the operator's
+    # umask: under 077/027 it was 0600/0640, the proxy died on "permission
+    # denied" before binding anything, and the launch failed on the sidecar
+    # attach below. Nothing in it is secret (mode, proxy IP, allow-list).
+    chmod 0644 "$PROXY_CONFIG_FILE"
 
     # Assemble the proxy run as one array so an optional flag can be appended
     # without an empty-array expansion (unsafe under `set -u` on bash 3.2/macOS).
@@ -14731,7 +14738,16 @@ start_proxy_sidecar() {
     "${proxy_run[@]}" >/dev/null
     # Attach the internal sidecar leg with the fixed IP the agent's DNS resolves
     # to. (`--ip` works because the sidecar was created with an explicit subnet.)
-    docker network connect --ip "$PROXY_IP" "$SIDECAR_NETWORK" "$PROXY_CONTAINER" >/dev/null
+    # #461: a proxy that exits at once leaves no network namespace, and the
+    # daemon's error ("network sandbox for container ... not found") names
+    # nothing useful; cleanup's docker rm -f then erases the only logs that do.
+    # So report the container's state and logs here, as the readiness gate does.
+    if ! docker network connect --ip "$PROXY_IP" "$SIDECAR_NETWORK" "$PROXY_CONTAINER" >/dev/null; then
+        error "Could not attach the egress proxy to its sidecar network. Proxy state: $(docker inspect -f '{{.State.Status}} (exit {{.State.ExitCode}}, restarts {{.RestartCount}})' "$PROXY_CONTAINER" 2>/dev/null || echo unknown)"
+        error "Proxy logs:"
+        docker logs "$PROXY_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
+        exit 1
+    fi
 
     # Readiness gate. The agent is about to launch into a network whose ONLY
     # route is this proxy, so it must be up first. A single instantaneous check
