@@ -48,6 +48,7 @@ SANDY_PRIVILEGED_KEYS=(
     GEMINI_API_KEY
     OPENAI_API_KEY
     XAI_API_KEY
+    REFLECTION_API_KEY
     GOOGLE_API_KEY
     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
     SANDY_SCREENSHOT_DIR
@@ -102,6 +103,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_OPENCODE_AUTH
     GROK_MODEL
     SANDY_GROK_AUTH
+    MIRROR_MODEL
     SANDY_CLAUDE_AUTH
     SANDY_TOOL_AUDIT
     SANDY_CLAUDE_CONNECTORS
@@ -972,7 +974,7 @@ const CTRL = /[\n\r\t]/;
 // validation, --print-state's agent_args_files loop, --print-schema's agents[]).
 // run-tests.sh asserts this copy equals --print-schema's agents[].name, so a
 // consumer can validate against that published list rather than hardcoding one.
-const AGENTS = ["claude", "gemini", "codex", "opencode", "grok"];
+const AGENTS = ["claude", "gemini", "codex", "opencode", "grok", "mirror"];
 for (const k of Object.keys(doc)) if (!KNOWN.includes(k)) err("unknown top-level key: " + k);
 const strArr = (v, what) => {
   if (v === undefined) return [];
@@ -1065,7 +1067,7 @@ SANDY_FM_JS
 _sandy_fm_projector_jq() {
 cat <<'SANDY_FM_JQ'
 def known: ["schema","sandboxes","agents","create","mounts","entry","expose","feature","agent_args","receives","submounts"];
-def agents_known: ["claude","gemini","codex","opencode","grok"];
+def agents_known: ["claude","gemini","codex","opencode","grok","mirror"];
 def receives_known: ["cross_session"];
 def strarr($v; $what):
   if $v == null then []
@@ -1789,6 +1791,7 @@ _sandy_protected_dirs() {
 .devcontainer
 .claude/hooks
 .sandy
+.mirror
 EOF
     [ "${SANDY_ALLOW_WORKFLOW_EDIT:-0}" = "1" ] || echo ".github/workflows"
 }
@@ -1928,7 +1931,7 @@ _sandy_key_metadata() {
     cat <<'EOF'
 SANDY_SSH|enum:token,agent|token||0.1.0|stable|SSH auth mode: 'token' uses gh CLI (HTTPS); 'agent' forwards the host SSH agent.
 SANDY_SSH_KEYS|string|||1.14.0|stable|Comma-separated FILENAMES under ~/.ssh that may be staged into the container, in ANY SANDY_SSH mode. Default empty = no private key material is staged at all. Only these files, plus config, known_hosts and *.pub, reach the container; everything else in ~/.ssh stays on the host. A name matching no file is warned about rather than silently ignored. Forced empty by SANDY_SUSPICIOUS=1.
-SANDY_SKIP_PERMISSIONS|bool|true||0.1.0|stable|Skip the agents' in-session permission prompts: claude bypassPermissions, gemini --yolo, codex --ask-for-approval never (default: true).
+SANDY_SKIP_PERMISSIONS|bool|true||0.1.0|stable|Skip the agents' in-session permission prompts: claude bypassPermissions, gemini --yolo, codex --ask-for-approval never, (2.9.0) mirror --approval-mode auto. For mirror, false passes --approval-mode approve, because Mirror remembers the mode across launches (default: true).
 SANDY_ALLOW_NO_ISOLATION|bool|0||0.1.0|stable|Allow launch when iptables rules cannot be applied (Linux only).
 SANDY_ALLOW_LAN_HOSTS|string|||0.7.9|stable|Comma-separated IPs/CIDRs to allow through LAN isolation. World-open entries rejected.
 SANDY_LOCAL_LLM_HOST|string||^[^[:space:]]+:[0-9]+$|0.12.0|stable|Single host:port (e.g. '127.0.0.1:11434') to allow through LAN isolation, typically for a local LLM. With the egress proxy on (default) the proxy's forward listener relays host.docker.internal:<port> to the host; with the proxy off (=0, Linux) it inserts one iptables ACCEPT and maps host.docker.internal.
@@ -1939,13 +1942,14 @@ ANTHROPIC_API_KEY|secret|||0.1.0|stable|Anthropic API key for Claude Code. Not r
 CLAUDE_CODE_OAUTH_TOKEN|secret|||0.7.0|stable|Claude Code OAuth token (alternative to ANTHROPIC_API_KEY).
 GEMINI_API_KEY|secret|||0.9.0|stable|Google API key for Gemini CLI.
 OPENAI_API_KEY|secret|||0.10.0|stable|OpenAI API key for Codex CLI.
+REFLECTION_API_KEY|secret|||2.9.0|experimental|Reflection AI API key for the Mirror CLI (SANDY_AGENT=mirror, #463). Forwarded through the 0600 env-file, never argv; Mirror keeps it out of the commands it runs. Probe order: this variable, then a key saved in the sandbox (an interactive Mirror launch prompts and saves one), then the host ~/.mirror/reflection_api_key, seeded into the sandbox. A --start or headless launch with none of them is refused, since Mirror would wait on its key prompt with nobody attached.
 XAI_API_KEY|secret|||1.5.0|stable|xAI API key for Grok Build (docs.x.ai). Enables fully-headless auth (resolution: model.api_key > env_key > session token > XAI_API_KEY); alternative is an interactive 'grok login' OAuth session inside the container.
 GOOGLE_API_KEY|secret|||0.9.0|stable|Google API key for Vertex AI / ADC.
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS|bool|||0.1.0|experimental|Enable Claude Code experimental agent-teams feature.
 SANDY_AGENT|agent_combo|claude||0.9.0|stable|Agent(s) to launch. Comma-separated (e.g. 'claude,codex'). 'all' = 'claude,gemini,codex,opencode'.
 SANDY_MODEL|string|claude-opus-5|^[a-zA-Z0-9._-]+$|0.1.0|stable|Model ID for the Claude agent.
 SANDY_TEAMMATE_MODE|string|||1.7.0|stable|Value passed to 'claude --teammate-mode' (claude only). Empty by default, so sandy does NOT pass the flag and Claude Code uses its own default. Set e.g. 'tmux' to opt in; 'off' or 'none' are also treated as omit. Passive-safe (teammate mode does not affect isolation). Sandy does not seed teammateMode into settings.json either — this flag governs the session, and a host settings.json value is left untouched.
-SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex, and (2.7.0) grok and gemini. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Gemini (no flag): a sandy-generated, read-only system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, holding only modelConfigs.customOverrides -- Gemini 3 thinkingLevel LOW for low and HIGH otherwise, Gemini 2.5 thinkingBudget 1024/8192/24576 for low/medium/high-and-above; it outranks user and workspace gemini settings and shadows a user's own modelConfigs.customOverrides while set. Empty leaves each agent's own default. Ignored, with a notice, for a launch with none of claude, codex, grok or gemini (opencode has no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
+SANDY_EFFORT|enum:low,medium,high,xhigh,max|||1.6.0|stable|Reasoning effort for claude, (2.4.0) codex, (2.7.0) grok and gemini, and (2.9.0) mirror. Claude: 'claude --effort <level>'; levels are model-dependent and an unsupported level falls back to the highest supported at or below it. Codex: '-c model_reasoning_effort=<level>', each sandy level mapped to its exact codex namesake (max -> max, codex's top non-delegating level; never ultra, which adds multi-agent delegation); whether a codex model offers the level is codex's catalog's business. Grok: '--reasoning-effort <level>' (alias --effort; a top-level option, so TUI and headless alike), low/medium/high/xhigh passed as-is and max CLAMPED to xhigh with a launch notice, because grok rejects max outright. Gemini (no flag): a sandy-generated, read-only system settings file named by GEMINI_CLI_SYSTEM_SETTINGS_PATH, holding only modelConfigs.customOverrides -- Gemini 3 thinkingLevel LOW for low and HIGH otherwise, Gemini 2.5 thinkingBudget 1024/8192/24576 for low/medium/high-and-above; it outranks user and workspace gemini settings and shadows a user's own modelConfigs.customOverrides while set. Mirror: '--reasoning-effort <level>', every sandy level its exact namesake. Empty leaves each agent's own default (Mirror's is max). Ignored, with a notice, for a launch with none of claude, codex, grok, gemini or mirror (opencode has no effort surface sandy drives). Passive-safe (effort does not affect isolation). Recorded in sandy-session.json as the sandy-level value.
 SANDY_CPUS|int|||0.1.0|stable|CPU limit for container (default: auto-detected).
 SANDY_MEM|string|||0.1.0|stable|Memory limit for container (e.g. '8g'; default: auto-detected).
 SANDY_GPU|string|||0.7.5|stable|GPU passthrough: 'all', or device IDs like '0' / '0,1'.
@@ -1975,6 +1979,7 @@ OPENCODE_MODEL|string|||0.12.0|stable|OpenCode model override (provider/model fo
 SANDY_OPENCODE_AUTH|enum:auto,api_key,oauth|auto||0.12.0|stable|OpenCode credential probe strategy.
 GROK_MODEL|string|||1.5.0|stable|Grok Build model override (passed as -m; default grok-4.5).
 SANDY_GROK_AUTH|enum:auto,api_key,oauth|auto||1.5.0|stable|Grok Build credential probe strategy.
+MIRROR_MODEL|string|||2.9.0|experimental|Mirror CLI model override (passed as --model for that launch only; Mirror's own saved /model choice otherwise applies; default Beam-1.0-501B-A23B).
 SANDY_CLAUDE_AUTH|enum:auto,api_key,oauth,profile|auto||1.10.0|stable|Claude Code credential selection. auto (default): a long-lived CLAUDE_CODE_OAUTH_TOKEN wins, else the host OAuth credentials file is mounted and ANTHROPIC_API_KEY is SUPPRESSED (Claude Code resolves an env key ahead of the account credentials, so forwarding both either bills per-use or parks the session on the custom-API-key startup modal). api_key: forward ANTHROPIC_API_KEY and do NOT mount OAuth credentials -- a revocable project key instead of the account refresh token, and the only way to choose per-use billing on a host that has OAuth. oauth: mount OAuth and never forward the API key or a long-lived CLAUDE_CODE_OAUTH_TOKEN (2.8.0, #437): the account login is the only Claude credential in the box, which is also what claude.ai connectors need; with no account login on the host it falls back to the token, with a warning. profile (1.11.0): use an Anthropic Console profile written by `ant auth login` (the Claude Platform CLI) -- the ONLY way to reach a workspace-bound entitlement such as Claude Mythos. Sandy copies just the selected profile (ANTHROPIC_PROFILE, else the host active_config, else default) from $ANTHROPIC_CONFIG_DIR (default ~/.config/anthropic) into an ephemeral rw mount at ~/.config/anthropic and withholds the OAuth credentials file, CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY, because Claude Code ranks a user_oauth profile BELOW a /login credential and below every env credential -- measured on 2.1.263. Never probed by auto. Value-aware tier: api_key, profile and auto are passive-safe (each REDUCES what is in the container), while oauth from a workspace is approval-gated because it forces the account-scoped credential in even when a revocable key is available.
 TELEGRAM_BOT_TOKEN|secret|||0.7.6|stable|Telegram bot token for the channel relay.
 TELEGRAM_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Telegram user IDs allowed to send messages.
@@ -2450,6 +2455,12 @@ _sandy_emit_schema() {
     _json_kv name '"grok"'; printf ','; _json_kv image '"sandy-grok"'
     printf ','; _json_kv features '[]'
     printf ','; _json_kv credentials '{"probe_order":["XAI_API_KEY","host_grok_session"]}'
+    printf '}'
+    printf ','
+    printf '{'
+    _json_kv name '"mirror"'; printf ','; _json_kv image '"sandy-mirror"'
+    printf ','; _json_kv features '[]'
+    printf ','; _json_kv credentials '{"probe_order":["REFLECTION_API_KEY","sandbox_saved_key","host_saved_key"]}'
     printf '}'
     printf ']'
 
@@ -3174,7 +3185,7 @@ ${_cname}"
             continue
         fi
         case "$_img_base" in
-            sandy-base|sandy-claude-code|sandy-gemini-cli|sandy-codex|sandy-opencode|sandy-grok|sandy-full|sandy-project-*|sandy-skills*) : ;;
+            sandy-base|sandy-claude-code|sandy-gemini-cli|sandy-codex|sandy-opencode|sandy-grok|sandy-mirror|sandy-full|sandy-project-*|sandy-skills*) : ;;
             *) continue ;;
         esac
         _sbname="${_cname#sandy-}"
@@ -3408,9 +3419,9 @@ _sandy_emit_state() {
         # names below in original order keeps output byte-identical.
         local _ii_map=""   # newline-joined "name|id|created"
         _ii_map="$(docker image inspect \
-            sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-opencode sandy-grok sandy-full \
+            sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-opencode sandy-grok sandy-mirror sandy-full \
             --format '{{index .RepoTags 0}}|{{.Id}}|{{.Created}}' 2>/dev/null || true)"
-        for img in sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-opencode sandy-grok sandy-full; do
+        for img in sandy-base sandy-claude-code sandy-gemini-cli sandy-codex sandy-opencode sandy-grok sandy-mirror sandy-full; do
             # find the map line whose tag is "<img>:..." (strip the :tag)
             _ii_line="$(printf '%s\n' "$_ii_map" | awk -F'|' -v n="$img" \
                 '{t=$1; sub(/:[^:]*$/,"",t)} t==n {print $2"|"$3; exit}')"
@@ -3664,7 +3675,7 @@ EOF_FEATURE_ENTRIES
             # light-mode poll path, and a leak of operator-placed values to
             # every state consumer.
             sb_aa='{'
-            for sb_aa_agent in claude gemini codex opencode grok; do
+            for sb_aa_agent in claude gemini codex opencode grok mirror; do
                 [ "$sb_aa" = '{' ] || sb_aa="$sb_aa,"
                 if [ -f "$sb/agent-args.$sb_aa_agent" ]; then
                     sb_aa="$sb_aa\"$sb_aa_agent\":true"
@@ -4551,7 +4562,7 @@ _sandy_accounts() {
     local _json=false _ws="" _wd="" _sb _name _af _src _prob _line _tab=$'\x1f'
     local _email _org _otype _orole _billing _seat _rate _asof _cred _launched _wsp _sess _plan _agents _ag
     local _cx_mode _cx_email _cx_plan _cx_ref _cx_key _a_cred _a_email _a_org _a_plan _a_asof _a_src _a_prob _a_last _acc _first
-    local _a_fp _a_since _a_label _cl _ckind _cfp _csince _xkind _xfp _xsince _gha _ghr _lbl_fp _lbl_name _lbl_line _lbl_n=0 _lbl_bad=""
+    local _a_fp _a_since _a_label _cl _ckind _cfp _csince _xkind _xfp _xsince _mkind _mfp _msince _gha _ghr _lbl_fp _lbl_name _lbl_line _lbl_n=0 _lbl_bad=""
     # Optional operator labels for fingerprints: $SANDY_HOME/credential-labels,
     # one "<8 hex> <label>" per line, # comments. The label is the REST of the
     # line, spaces and all ("personal (rappdw)"): an earlier cut took exactly
@@ -4622,7 +4633,7 @@ _sandy_accounts() {
     for _sb in ${_sbs[@]+"${_sbs[@]}"}; do
         _name="$(basename "$_sb")"
         _email="" _org="" _otype="" _orole="" _billing="" _seat="" _rate="" _asof="" _cred="" _launched="" _wsp="" _prob="" _src="" _agents=""
-        _ckind="" _cfp="" _csince="" _xkind="" _xfp="" _xsince="" _gha="" _ghr=""
+        _ckind="" _cfp="" _csince="" _xkind="" _xfp="" _xsince="" _mkind="" _mfp="" _msince="" _gha="" _ghr=""
         # 2.7+ keeps it inside claude/ (#411); a pre-2.7 sibling still counts.
         if [ -L "$_sb/claude" ] || [ -L "$_sb/claude/.claude.json" ]; then
             _prob="symlink"
@@ -4645,8 +4656,9 @@ _sandy_accounts() {
             _line="$(_sandy_acct_fields "$_sb/sandy-session.json" cred_mode launched_at agents \
                 credentials.claude.kind credentials.claude.fingerprint credentials.claude.since \
                 credentials.codex.kind credentials.codex.fingerprint credentials.codex.since \
+                credentials.mirror.kind credentials.mirror.fingerprint credentials.mirror.since \
                 github.account github.reason)" || _line=""
-            IFS="$_tab" read -r _cred _launched _agents _ckind _cfp _csince _xkind _xfp _xsince _gha _ghr <<< "$_line" || true
+            IFS="$_tab" read -r _cred _launched _agents _ckind _cfp _csince _xkind _xfp _xsince _mkind _mfp _msince _gha _ghr <<< "$_line" || true
         fi
         if [ -f "$_sb/WORKSPACE.json" ] && [ ! -L "$_sb/WORKSPACE.json" ]; then
             _wsp="$(_sandy_acct_fields "$_sb/WORKSPACE.json" workspace_path)" || _wsp=""
@@ -4718,6 +4730,12 @@ _sandy_accounts() {
                     elif [ -f "$_sb/gemini/google_accounts.json" ]; then
                         _a_src="gemini/google_accounts.json"
                         _a_email="$(_sandy_acct_fields "$_sb/gemini/google_accounts.json" active)" || _a_prob="unreadable"
+                    fi ;;
+                mirror)
+                    # A Reflection API key names no account: the row is the
+                    # key's label or fingerprint, as for a Claude token.
+                    if [ "$_mkind" = api-key ] && [ -n "$_mfp" ]; then
+                        _a_cred="api-key" _a_fp="$_mfp" _a_since="$_msince"
                     fi ;;
             esac
             if [ -n "$_a_fp" ]; then
@@ -5504,8 +5522,8 @@ _SANDY_RSY_NEVER=(sandy-session.json gemini-system-settings.json relay-state/ fe
 _SANDY_RSY_ARCH_DIRS=(cargo go npm-global pip uv venv)
 # Credential-bearing files, named in the plan (#374 decision 2). Matched BY
 # NAME, so the plan says so: anything else in these directories is copied too.
-_SANDY_RSY_CRED_DIRS=(codex grok gemini opencode)
-_SANDY_RSY_CRED_NAMES=('auth*.json' '*credential*' 'oauth_creds*' '*token*')
+_SANDY_RSY_CRED_DIRS=(codex grok gemini opencode mirror)
+_SANDY_RSY_CRED_NAMES=('auth*.json' '*credential*' 'oauth_creds*' '*token*' '*api_key*')
 # Lists them, one path per line, under sandbox dir $1 -- locally, or (pull)
 # rendered as a POSIX sh command by _sandy_rsy_cred_find_sh for the remote.
 _sandy_rsy_cred_find() {
@@ -5818,7 +5836,7 @@ PROBE
         printf '  Credentials     COPIED -- matched by name; anything else in these directories is copied too:\n'
         for _rsy_c in "${_rsy_creds[@]}"; do printf '                    %s\n' "$_rsy_c"; done
     else
-        printf '  Credentials     none matched by name (codex/, grok/, gemini/, opencode/ are copied as they are)\n'
+        printf '  Credentials     none matched by name (codex/, grok/, gemini/, opencode/, mirror/ are copied as they are)\n'
     fi
     printf '  Not copied      %s (regenerated each launch)\n' "${_SANDY_RSY_NEVER[*]}"
     [ -n "$_rsy_skipnote" ] && printf '  Skipped         %s\n' "$_rsy_skipnote"
@@ -6134,7 +6152,7 @@ DETAIL
         printf '  Credentials     COPIED -- matched by name; anything else in these directories is copied too:\n'
         for _rsf_c in "${_rsf_creds[@]}"; do printf '                    %s\n' "$_rsf_c"; done
     else
-        printf '  Credentials     none matched by name (codex/, grok/, gemini/, opencode/ are copied as they are)\n'
+        printf '  Credentials     none matched by name (codex/, grok/, gemini/, opencode/, mirror/ are copied as they are)\n'
     fi
     printf '  Not copied      %s (regenerated each launch)\n' "${_SANDY_RSY_NEVER[*]}"
     [ -n "$_rsf_skipnote" ] && printf '  Skipped         %s\n' "$_rsf_skipnote"
@@ -7651,6 +7669,7 @@ if [[ "${1:-}" == "--login" ]]; then
         codex) ;;
         "")       error "--login needs an agent: sandy --login codex"; exit 1 ;;
         claude)   error "--login claude: not needed. Sandy reads Claude's credential from the host at every launch: log in with 'claude' (/login) on the host, or set SANDY_CLAUDE_AUTH/an API key."; exit 1 ;;
+        mirror)   error "--login mirror: not needed. Set REFLECTION_API_KEY, or launch 'sandy --agent mirror' interactively and paste the key at Mirror's prompt; it is saved in this sandbox (~/.mirror is a rw sandbox mount)."; exit 1 ;;
         grok)     error "--login grok: not needed. Run 'grok login' inside a sandy session; ~/.grok is a rw sandbox mount, so it persists (or set XAI_API_KEY)."; exit 1 ;;
         gemini)   error "--login gemini: not supported. Authenticate on the host (gemini, or gcloud ADC) or set GEMINI_API_KEY; sandy reads them at each launch."; exit 1 ;;
         opencode) error "--login opencode: not supported. Set the provider's API key, or run 'opencode auth login' on the host; sandy mounts its auth.json."; exit 1 ;;
@@ -8076,7 +8095,7 @@ Usage:
 
 Environment variables:
   SANDY_MODEL        Model to use (default: claude-opus-5)
-  SANDY_EFFORT       Reasoning effort for claude, codex, grok, gemini:
+  SANDY_EFFORT       Reasoning effort for claude, codex, grok, gemini, mirror:
                      low|medium|high|xhigh|max (default: each agent's own)
   ANTHROPIC_API_KEY  API key (not needed with Claude Max / OAuth)
   SANDY_HOME         Sandy config directory (default: ~/.sandy)
@@ -8095,7 +8114,8 @@ Environment variables:
                      like "0" or "0,1" (requires NVIDIA Container Toolkit)
   SANDY_SKILL_PACKS  Comma-separated skill packs to install (e.g. "gstack")
   SANDY_AGENT        AI agent(s): "claude" (default), "gemini", "codex",
-                     "opencode", "grok", or comma-separated combo (max 4)
+                     "opencode", "grok", "mirror" (single-agent only),
+                     or comma-separated combo (max 4)
                      (e.g. "claude,gemini,codex"). Alias: "all" = all four.
   GEMINI_API_KEY     Google API key for Gemini CLI (SANDY_AGENT=gemini only)
   GEMINI_MODEL       Gemini model override (SANDY_AGENT=gemini only)
@@ -8118,15 +8138,16 @@ Flags:
   --no-update-check  Skip agent/skill-pack/sandy update checks for this
                      launch (one-shot SANDY_OFFLINE=1). Required builds
                      (missing image, changed inputs) still run.
-  --new              Start a fresh session (default: resume last; claude
-                     and codex)
+  --new              Start a fresh session (default: resume last; claude,
+                     codex and mirror)
   --resume           Open session picker (claude, and codex's own picker)
   --remote           Start in remote-control server mode
   --upgrade          Update sandy to the latest release (SANDY_CHANNEL=dev:
                      the head of main, recording its commit)
   --agent <list>     Agent(s) to launch (overrides SANDY_AGENT and
                      .sandy/config). One of: claude, gemini, codex,
-                     opencode, grok. Comma-separated for multi-agent,
+                     opencode, grok, mirror. Comma-separated for multi-agent
+                     (mirror runs alone),
                      e.g. --agent claude,gemini or --agent=claude,opencode
   --workspace <path> Target workspace directory (defaults to the current
                      directory). Honored by the bare launch path (including
@@ -8268,7 +8289,7 @@ Introspection (machine-readable JSON; no Docker required):
                           --workspace PATH
 
 All other arguments are forwarded to the agent (claude, gemini, codex,
-opencode, or grok).
+opencode, grok, or mirror).
 EOF
     exit 0
 fi
@@ -8744,6 +8765,42 @@ RUN set -eu; \\
     mkdir -p /opt/grok; \\
     grok --version | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/grok/.version \\
       || { echo 'sandy: grok was installed but grok --version reports no version (see the error above)' >&2; exit 1; }
+# synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
+ && rm -rf /var/lib/apt/lists/*
+RUN UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system synthkit
+COPY tmux.conf /etc/tmux.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY user-setup.sh /usr/local/bin/user-setup.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/user-setup.sh
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+DOCKERFILE
+}
+
+generate_dockerfile_mirror() {
+    cat > "$SANDY_HOME/Dockerfile.mirror.new" <<DOCKERFILE
+FROM ${BASE_IMAGE_NAME}
+# sandy.feature_entries (#381): every entry supported by this image's
+# user-setup.sh/entrypoint.sh; a stale image predating this label knows only
+# the removed SANDY_HANDOFF_RELAY channel, so it starts NONE of them, and
+# sandy warns at launch naming every one (#382, 2.6.0).
+LABEL sandy.feature_entries=1
+# sandy.launch_staging (#400): this image's user-setup.sh moves the files the
+# host staged for a launch (<target>.sandy-launch.<id>) into place itself.
+LABEL sandy.launch_staging=1
+# Install Reflection AI's Mirror CLI (#463) from PyPI with uv, into /opt: the
+# home is a tmpfs at runtime. Mirror needs Python >= 3.12, so the base image's
+# 3.13 serves (--python-preference system). MIRROR_SKIP_UPDATE=1: Mirror's own
+# updater installs a newer release side by side under ~/.local/share/mirror,
+# i.e. on the tmpfs home, outside the image and outside sandy's update check
+# (which rebuilds this image instead); --no-update alone would still select a
+# release cached there. Set as image ENV so 'sandy --exec mirror' gets it too.
+ENV MIRROR_SKIP_UPDATE=1
+RUN UV_TOOL_DIR=/opt/mirror UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python-preference system reflection-mirror \\
+ && { mirror --version | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' > /opt/mirror/.version \\
+      || { echo 'sandy: mirror was installed but mirror --version reports no version (see the error above)' >&2; exit 1; }; }
 # synthkit dependencies (WeasyPrint needs pango/cairo/gdk-pixbuf)
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     libpango1.0-dev libcairo2-dev libgdk-pixbuf-2.0-dev \\
@@ -9256,6 +9313,7 @@ export HOME=/home/sandy
 _sandy_has_claude()   { case ",${SANDY_AGENT:-claude}," in *,claude,*)   return 0 ;; esac; return 1; }
 _sandy_has_gemini()   { case ",${SANDY_AGENT:-claude}," in *,gemini,*)   return 0 ;; esac; return 1; }
 _sandy_has_codex()    { case ",${SANDY_AGENT:-claude}," in *,codex,*)    return 0 ;; esac; return 1; }
+_sandy_has_mirror()   { case ",${SANDY_AGENT:-claude}," in *,mirror,*)   return 0 ;; esac; return 1; }
 _sandy_has_opencode() { case ",${SANDY_AGENT:-claude}," in *,opencode,*) return 0 ;; esac; return 1; }
 # Parse comma-separated agent list for multi-agent dispatch
 IFS=',' read -ra _SANDY_AGENTS <<< "${SANDY_AGENT:-claude}"
@@ -9559,6 +9617,51 @@ if _sandy_has_codex; then
             echo "trust_level = \"trusted\""
         } >> "$_codex_cfg"
     fi
+fi
+
+# Mirror first-run acceptance (#463). Mirror refuses `exec` and opens the TUI
+# on "Continue and trust this folder? [y/N]" (default No) until
+# ~/.mirror/config.json records usage_warning_acknowledged and lists the exact
+# workspace path in trusted_directories (measured, mirror 0.1.0; config.json
+# alone is enough). Under --start nobody can answer that prompt, so the
+# session would sit on it while reporting ready. Seeded HERE, container-side,
+# because it needs the container workspace path, and a container-side write
+# avoids the host-replacement hazard #400 is about. Decision 7: analytics are
+# set false when the key is absent, so a /settings opt-in persists. Every
+# other key is kept; a file that is not a JSON object is left alone, with a
+# warning. Mirror is not running yet, so its config.lock is not contended.
+if _sandy_has_mirror; then
+    mkdir -p "$HOME/.mirror"
+    python3 - "$HOME/.mirror/config.json" "$SANDY_WORKSPACE" <<'MIRRORSEED' || echo "[sandy] WARN: could not seed Mirror's config.json; Mirror will ask to trust this folder" >&2
+import json, os, sys
+path, ws = sys.argv[1], sys.argv[2]
+data = {}
+if os.path.lexists(path):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        print("[sandy] WARN: ~/.mirror/config.json is not a JSON object; left as it is (Mirror may ask to trust this folder)", file=sys.stderr)
+        sys.exit(0)
+before = json.dumps(data, sort_keys=True)
+data["usage_warning_acknowledged"] = True
+trusted = data.get("trusted_directories")
+if not isinstance(trusted, list):
+    trusted = []
+if ws not in trusted:
+    trusted.append(ws)
+data["trusted_directories"] = trusted
+if "analytics" not in data:
+    data["analytics"] = False
+if json.dumps(data, sort_keys=True) != before:
+    tmp = path + ".sandy-tmp.%d" % os.getpid()
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)   # replaces a planted link itself, never its target
+MIRRORSEED
 fi
 
 # Gemini trust entry: seed trustedFolders.json so gemini doesn't prompt
@@ -9973,6 +10076,18 @@ _sandy_translate_args() {
                     -p|--print|--prompt) out+=" -p" ;;
                     --continue|-c)       : ;;
                     *)                   out+=" $(printf '%q' "$arg")" ;;
+                esac
+                ;;
+            mirror)
+                # Headless is a subcommand (`mirror exec PROMPT`, chosen by
+                # build_mirror_cmd), so -p/--print/--prompt is dropped and the
+                # prompt stays a positional. --continue/-c and sandy's --resume
+                # are consumed by build_mirror_cmd: Mirror has no -c (its
+                # argparse would refuse to start), and no --resume flag (its
+                # picker is /resume inside the TUI).
+                case "$arg" in
+                    -p|--print|--prompt|--continue|-c|--resume) : ;;
+                    *) out+=" $(printf '%q' "$arg")" ;;
                 esac
                 ;;
         esac
@@ -10486,6 +10601,65 @@ build_opencode_cmd() {
     _sandy_wrap_cmd_exit_pause "OpenCode" "$cmd"
 }
 
+build_mirror_cmd() {
+    # Reflection AI's Mirror CLI (#463; decisions/2026-10-20-mirror-agent.md).
+    # Headless: `mirror exec PROMPT` (a fresh session, no TUI). Interactive:
+    # `mirror` (TUI). Measured on mirror 0.1.0 by test/spike/mirror-spike.sh.
+    local headless=false a
+    for a in "$@"; do
+        case "$a" in -p|--print|--prompt) headless=true; break ;; esac
+    done
+    local cmd="mirror"
+    [ "$headless" = "true" ] && cmd="mirror exec"
+    # Decision 2: the approval mode is passed on EVERY launch, both values,
+    # interactive and headless. Mirror REMEMBERS an interactive
+    # --approval-mode in ~/.mirror/config.json (the rw sandbox), so passing
+    # only `auto` would leave a sandbox in auto after SANDY_SKIP_PERMISSIONS
+    # turned false. `mirror exec` never grants an approval: without auto it
+    # fails every tool call (exit 1), so headless needs it as much as the TUI.
+    # An operator's own --approval-mode (agent args, the command line) comes
+    # later in the argv and wins: Mirror's argparse keeps the last value.
+    if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+        cmd+=" --approval-mode auto"
+    else
+        cmd+=" --approval-mode approve"
+    fi
+    if [ -n "${MIRROR_MODEL:-}" ]; then
+        cmd+=" --model $(printf "%q" "$MIRROR_MODEL")"
+    fi
+    # SANDY_EFFORT -> --reasoning-effort (mirror 0.1.0 --help: none|low|
+    # medium|high|xhigh|max), so every sandy level is its exact namesake. A
+    # case, not a pass-through, so an unmapped level omits the flag. Unset
+    # passes nothing (decision 5): a flag would override the user's saved
+    # /effort for the launch, and Mirror's own default is max.
+    local _sandy_mirror_effort=""
+    case "${SANDY_EFFORT:-}" in
+        low) _sandy_mirror_effort=low ;;
+        medium) _sandy_mirror_effort=medium ;;
+        high) _sandy_mirror_effort=high ;;
+        xhigh) _sandy_mirror_effort=xhigh ;;
+        max) _sandy_mirror_effort=max ;;
+    esac
+    if [ -n "$_sandy_mirror_effort" ]; then
+        cmd+=" --reasoning-effort $(printf "%q" "$_sandy_mirror_effort")"
+    fi
+    # Interactive auto-continue, like claude and codex (#427): `--continue`
+    # reopens this workspace's most recent conversation and, measured, starts
+    # a fresh one without error when there is none, so no probe is needed.
+    # Skipped for --new, for sandy's --resume (Mirror's picker is /resume in
+    # the TUI), and beside an explicit --conversation-id or --showcase, which
+    # Mirror's argparse refuses alongside --continue.
+    if [ "$headless" = "false" ] && [ "${SANDY_NEW_SESSION:-false}" != "true" ]; then
+        local _mr_cont=true
+        for a in "$@"; do
+            case "$a" in --resume|--conversation-id|--conversation-id=*|--showcase) _mr_cont=false ;; esac
+        done
+        [ "$_mr_cont" = "true" ] && cmd+=" --continue"
+    fi
+    cmd+="$(_sandy_translate_args mirror "$@")"
+    _sandy_wrap_cmd_exit_pause "Mirror" "$cmd"
+}
+
 build_grok_cmd() {
     # Headless: `grok -p "PROMPT"` (a print flag + positional prompt, like Claude —
     # not a subcommand like codex/opencode). Interactive: `grok` (TUI).
@@ -10557,7 +10731,7 @@ _sandy_build_agent_cmd() {
     # file — see sandy's "per-agent args" block) are PREPENDED onto this
     # pane's OWN "${@:2}" before dispatch, one lookup per call so each pane in
     # a multi-agent combo only ever sees its own agent's tokens. Explicit
-    # 5-arm case (no ${var^^}, no indirection — bash-3.2-safe, matches house
+    # 6-arm case (no ${var^^}, no indirection — bash-3.2-safe, matches house
     # style). Prepend-before-dispatch (not appended, not injected elsewhere)
     # reproduces the exact ordering the old top-level `set --` prepend gave:
     # sandy flags → config/file tokens → CLI pass-through args — which matters
@@ -10572,6 +10746,7 @@ _sandy_build_agent_cmd() {
         codex)    _sandy_aa_val="${SANDY_AGENT_ARGS_CODEX:-}" ;;
         opencode) _sandy_aa_val="${SANDY_AGENT_ARGS_OPENCODE:-}" ;;
         grok)     _sandy_aa_val="${SANDY_AGENT_ARGS_GROK:-}" ;;
+        mirror)   _sandy_aa_val="${SANDY_AGENT_ARGS_MIRROR:-}" ;;
     esac
     _sandy_aa_pre=()
     if [ -n "$_sandy_aa_val" ]; then
@@ -10597,6 +10772,7 @@ _sandy_build_agent_cmd() {
         codex)    build_codex_cmd    ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
         opencode) build_opencode_cmd ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
         grok)     build_grok_cmd     ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
+        mirror)   build_mirror_cmd   ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
     esac
 }
 
@@ -11325,6 +11501,7 @@ ensure_agent_dockerfile() {
             codex)    generate_dockerfile_codex;    f="Dockerfile.codex"    ;;
             opencode) generate_dockerfile_opencode; f="Dockerfile.opencode" ;;
             grok)     generate_dockerfile_grok;     f="Dockerfile.grok"     ;;
+            mirror)   generate_dockerfile_mirror;   f="Dockerfile.mirror"   ;;
             *)        generate_dockerfile;          f="Dockerfile"          ;;
         esac
     fi
@@ -13158,6 +13335,10 @@ SANDY_DEFAULT_ALLOW_HOSTS=(
     # Debian (apt, for in-session package needs the agent may hit)
     "deb.debian.org"
     "security.debian.org"
+    # Reflection AI / Mirror (#463): the model API only. Mirror's usage
+    # analytics (events.statsigapi.net) are deliberately absent; sandy also
+    # seeds them off (decision 7).
+    "api.reflection.ai"
 )
 
 # Collect the effective allowlist (defaults + user SANDY_ALLOW_HOSTS). Each
@@ -13299,10 +13480,21 @@ IFS=',' read -ra _SANDY_AGENTS <<< "$SANDY_AGENT"
 _SANDY_AGENT_COUNT="${#_SANDY_AGENTS[@]}"
 for _a in "${_SANDY_AGENTS[@]}"; do
     case "$_a" in
-        claude|gemini|codex|opencode|grok) ;;
-        *) echo "[sandy] ERROR: Invalid agent '$_a' in SANDY_AGENT='$SANDY_AGENT' (valid: claude, gemini, codex, opencode, grok, or comma-separated combo)" >&2; exit 1 ;;
+        claude|gemini|codex|opencode|grok|mirror) ;;
+        *) echo "[sandy] ERROR: Invalid agent '$_a' in SANDY_AGENT='$SANDY_AGENT' (valid: claude, gemini, codex, opencode, grok, mirror, or comma-separated combo)" >&2; exit 1 ;;
     esac
 done
+# Mirror runs alone (#463, decision 1): it is not installed in sandy-full, so a
+# 0.1.0 beta's release churn and PyPI install stay out of the image every
+# combo user shares. Refuse rather than launch a pane whose binary is absent.
+if [ "$_SANDY_AGENT_COUNT" -gt 1 ]; then
+    for _a in "${_SANDY_AGENTS[@]}"; do
+        if [ "$_a" = mirror ]; then
+            echo "[sandy] ERROR: mirror runs alone for now (SANDY_AGENT=mirror); it is not available in a multi-agent combo (got '$SANDY_AGENT'). See https://github.com/rappdw/sandy/issues/464" >&2
+            exit 1
+        fi
+    done
+fi
 # Detect duplicates
 if [ "$_SANDY_AGENT_COUNT" -ge 2 ]; then
     _seen=""
@@ -13330,6 +13522,7 @@ else
         codex)    IMAGE_NAME="sandy-codex" ;;
         opencode) IMAGE_NAME="sandy-opencode" ;;
         grok)     IMAGE_NAME="sandy-grok" ;;
+        mirror)   IMAGE_NAME="sandy-mirror" ;;
     esac
 fi
 # Helper: check if a specific agent is in the resolved agent list
@@ -13381,6 +13574,9 @@ else
         grok)
             DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.grok"
             BUILD_HASH_FILE_NAME=".build_hash_grok" ;;
+        mirror)
+            DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.mirror"
+            BUILD_HASH_FILE_NAME=".build_hash_mirror" ;;
         *)
             DOCKERFILE_PATH="$SANDY_HOME/Dockerfile"
             BUILD_HASH_FILE_NAME=".build_hash" ;;
@@ -14186,7 +14382,7 @@ fi
 
 # Apply --rebuild flag (must come after ensure_build_files creates SANDY_HOME)
 if [ "$SANDY_REBUILD" = true ]; then
-    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_opencode" "$SANDY_HOME/.build_hash_grok" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.build_hash_proxy" "$SANDY_HOME/.skills_build_hash"
+    rm -f "$SANDY_HOME/.base_build_hash" "$SANDY_HOME/.build_hash" "$SANDY_HOME/.build_hash_gemini" "$SANDY_HOME/.build_hash_codex" "$SANDY_HOME/.build_hash_opencode" "$SANDY_HOME/.build_hash_grok" "$SANDY_HOME/.build_hash_mirror" "$SANDY_HOME/.build_hash_full" "$SANDY_HOME/.build_hash_proxy" "$SANDY_HOME/.skills_build_hash"
     info "Build cache cleared. Images will be rebuilt."
 fi
 
@@ -14438,6 +14634,22 @@ _check_opencode_update() {
     fi
     return 1
 }
+_check_mirror_update() {
+    local inst latest rc=0
+    inst="$(docker run --rm --entrypoint cat "$IMAGE_NAME" /opt/mirror/.version 2>/dev/null)" || rc=$?
+    _sandy_agent_version_empty "$rc" "$inst" /opt/mirror/.version "Mirror" && return 0
+    # Ask PyPI, which is what the build installs from. In its JSON the first
+    # "version" key is info.version, the latest release (file entries carry
+    # "python_version", which this pattern does not match).
+    latest="$(curl -fsSL --max-time 5 'https://pypi.org/pypi/reflection-mirror/json' 2>/dev/null \
+        | grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
+        | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+    if [ -n "$latest" ] && [ -n "$inst" ] && _ver_lt "$inst" "$latest"; then
+        info "Mirror update available: $inst → $latest"
+        return 0
+    fi
+    return 1
+}
 # SANDY_OFFLINE (#219) skips only this lookup. A build already required above
 # (missing image, changed inputs, rebuilt base) is not a check and still runs.
 if [ "$NEEDS_BUILD" = false ] && [ "${SANDY_OFFLINE:-0}" != 1 ]; then
@@ -14445,6 +14657,7 @@ if [ "$NEEDS_BUILD" = false ] && [ "${SANDY_OFFLINE:-0}" != 1 ]; then
     _sandy_agent_has gemini   && [ "$NEEDS_BUILD" = false ] && _check_gemini_update   && NEEDS_BUILD=true
     _sandy_agent_has codex    && [ "$NEEDS_BUILD" = false ] && _check_codex_update    && NEEDS_BUILD=true
     _sandy_agent_has opencode && [ "$NEEDS_BUILD" = false ] && _check_opencode_update && NEEDS_BUILD=true
+    _sandy_agent_has mirror   && [ "$NEEDS_BUILD" = false ] && _check_mirror_update   && NEEDS_BUILD=true
 fi
 
 if [ "$NEEDS_BUILD" = true ]; then
@@ -15262,6 +15475,13 @@ if _sandy_agent_has grok; then
     # Auth normally rides XAI_API_KEY (env); host ~/.grok OAuth-session seeding is
     # a possible follow-up (kept out of the persisted mount for now).
     mkdir -p "$SANDBOX_DIR/grok"
+fi
+if _sandy_agent_has mirror; then
+    # Sandbox dir for Mirror's ~/.mirror (#463): config.json, its conversation
+    # databases, logs, and a key saved at Mirror's own prompt. The first-run
+    # acceptances are seeded container-side by user-setup.sh, which knows the
+    # container workspace path and needs no host write into an agent home.
+    mkdir -p "$SANDBOX_DIR/mirror"
 fi
 if _sandy_agent_has codex; then
     # #400: the seed, the sandbox_mode repair and the model migration below all
@@ -16488,6 +16708,7 @@ SANDY_AGENT_ARGS_GEMINI=""
 SANDY_AGENT_ARGS_CODEX=""
 SANDY_AGENT_ARGS_OPENCODE=""
 SANDY_AGENT_ARGS_GROK=""
+SANDY_AGENT_ARGS_MIRROR=""
 _SANDY_AA_COMPOSE_MOUNT=0
 _SANDY_AA_COMPOSED_JSON=""
 for _sandy_aa_agent in "${_SANDY_AGENTS[@]}"; do
@@ -16566,6 +16787,7 @@ for _sandy_aa_agent in "${_SANDY_AGENTS[@]}"; do
         codex)    SANDY_AGENT_ARGS_CODEX="$_sandy_aa_val" ;;
         opencode) SANDY_AGENT_ARGS_OPENCODE="$_sandy_aa_val" ;;
         grok)     SANDY_AGENT_ARGS_GROK="$_sandy_aa_val" ;;
+        mirror)   SANDY_AGENT_ARGS_MIRROR="$_sandy_aa_val" ;;
     esac
 done
 unset _sandy_aa_agent _sandy_aa_val _sandy_aa_file
@@ -17813,6 +18035,46 @@ load_opencode_credentials() {
     # (e.g. ANTHROPIC_API_KEY pointing opencode at Claude).
 }
 
+# Mirror (#463, decision 3): REFLECTION_API_KEY only, never another
+# provider's key. Order: the environment (forwarded through the 0600 env-file
+# with the other secrets, below), then a key saved in this sandbox (Mirror's
+# own prompt writes ~/.mirror/reflection_api_key, i.e. the rw mirror/ mount),
+# then the host's saved key, SEEDED into the sandbox like codex's auth.json so
+# that the sandbox copy wins from then on. Mirror reads the environment first.
+load_mirror_credentials() {
+    local _mk="$SANDBOX_DIR/mirror/reflection_api_key"
+    # mirror/ is an agent-writable mount: the seed below must never write the
+    # host key THROUGH a link a session planted there (#368's shape).
+    if [ -L "$_mk" ]; then
+        warn "Removed a symlink at mirror/reflection_api_key -- sandy seeds this host-side and will not write through a link planted in the agent-writable ~/.mirror."
+        rm -f "$_mk"
+    fi
+    if [ -n "${REFLECTION_API_KEY:-}" ]; then
+        info "Using REFLECTION_API_KEY for Mirror"
+        return 0
+    fi
+    if [ -s "$_mk" ]; then
+        info "Using the Reflection API key saved in this sandbox"
+        return 0
+    fi
+    if [ -s "$HOME/.mirror/reflection_api_key" ] && [ ! -L "$HOME/.mirror/reflection_api_key" ]; then
+        ( umask 077; cp "$HOME/.mirror/reflection_api_key" "$_mk" ) && chmod 600 "$_mk"
+        info "Seeded the host's Reflection API key into this sandbox (~/.mirror/reflection_api_key)"
+        return 0
+    fi
+    # No key anywhere. Mirror's next screen would be its API-key form
+    # (measured, mirror 0.1.0). In the detached supervisor or a headless run
+    # nobody can type into it, so the session would sit there while --start
+    # reported ready: refuse before docker run, the way #261 refuses an
+    # expired Claude token, with the .fatal marker so --start fails in ~1s.
+    if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ] || [ "${_sandy_is_headless:-false}" = "true" ]; then
+        echo "[sandy] ERROR: no Reflection API key for Mirror: set REFLECTION_API_KEY, or launch 'sandy --agent mirror' interactively once and enter the key at Mirror's prompt (it is saved in this sandbox). Refusing rather than starting a session that would wait on Mirror's key prompt with nobody attached." >&2
+        _sandy_daemon_fatal
+        exit 1
+    fi
+    warn "No Reflection API key found (REFLECTION_API_KEY, this sandbox, or ~/.mirror on the host). Mirror will ask for one; it is saved in this sandbox."
+}
+
 if _sandy_agent_has gemini; then
     load_gemini_credentials
     _sandy_stage_commit "$SANDBOX_DIR/gemini/settings.json"
@@ -17824,6 +18086,10 @@ fi
 
 if _sandy_agent_has opencode; then
     load_opencode_credentials
+fi
+
+if _sandy_agent_has mirror; then
+    load_mirror_credentials
 fi
 
 if ! _sandy_agent_has claude; then
@@ -18544,6 +18810,11 @@ if _sandy_agent_has grok; then
     # (env, forwarded above) so — unlike codex — no ephemeral :ro auth mount.
     RUN_FLAGS+=(-v "$SANDBOX_DIR/grok:/home/sandy/.grok")
 fi
+if _sandy_agent_has mirror; then
+    # Mirror keeps everything under ~/.mirror (config.json, state.db, cli.db,
+    # logs, a saved key); the sandbox mount persists it rw across launches.
+    RUN_FLAGS+=(-v "$SANDBOX_DIR/mirror:/home/sandy/.mirror")
+fi
 if _sandy_agent_has opencode; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/opencode/config:/home/sandy/.config/opencode")
     RUN_FLAGS+=(-v "$SANDBOX_DIR/opencode/share:/home/sandy/.local/share/opencode")
@@ -19025,7 +19296,8 @@ fi
 # build_claude_cmd), since 2.4.0 (#116) codex (`-c model_reasoning_effort=`,
 # mapped per level in build_codex_cmd), and since 2.7.0 (#116) grok
 # (`--reasoning-effort`, build_grok_cmd; max clamps to xhigh) and gemini (a
-# read-only system settings file, generated just below). Empty = each agent's own
+# read-only system settings file, generated just below), and since 2.9.0
+# (#463) mirror (`--reasoning-effort`, identity). Empty = each agent's own
 # default. Cleared when none of them is in the agent set so it's never a
 # meaningless forward (and the marker's `effort` stays null for a launch nothing
 # applied it to). An invalid level fails loud rather than silently running at
@@ -19034,7 +19306,7 @@ fi
 # silently ignores a name the model does not define, so no mapping could be
 # shown to have applied. In a combo that includes one of the others, the
 # opencode pane simply does not receive it.
-if _sandy_agent_has claude || _sandy_agent_has codex || _sandy_agent_has grok || _sandy_agent_has gemini; then
+if _sandy_agent_has claude || _sandy_agent_has codex || _sandy_agent_has grok || _sandy_agent_has gemini || _sandy_agent_has mirror; then
     if [ -n "${SANDY_EFFORT:-}" ]; then
         case "$SANDY_EFFORT" in
             low|medium|high|xhigh|max) ;;
@@ -19049,7 +19321,7 @@ if _sandy_agent_has claude || _sandy_agent_has codex || _sandy_agent_has grok ||
     fi
 else
     if [ -n "${SANDY_EFFORT:-}" ]; then
-        info "SANDY_EFFORT=$SANDY_EFFORT ignored: it applies to claude, codex, grok and gemini only (agents: $SANDY_AGENT)."
+        info "SANDY_EFFORT=$SANDY_EFFORT ignored: it applies to claude, codex, grok, gemini and mirror only (agents: $SANDY_AGENT)."
     fi
     SANDY_EFFORT=""
 fi
@@ -19141,7 +19413,7 @@ unset _sandy_gemini_settings_file _sandy_gemini_level _sandy_gemini_budget _sand
 # it did. `set -u` fires only on an UNSET variable; an exported one from the
 # launching shell is SET, so bare expansion would forward a forged value just as
 # silently as `:-` would. The ONLY thing closing that channel is the
-# unconditional five-way initialization above — if that is ever moved, made
+# unconditional six-way initialization above — if that is ever moved, made
 # conditional, or folded into the loop, the forgery channel reopens and nothing
 # here will catch it.
 RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_CLAUDE=${SANDY_AGENT_ARGS_CLAUDE}")
@@ -19149,6 +19421,7 @@ RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_GEMINI=${SANDY_AGENT_ARGS_GEMINI}")
 RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_CODEX=${SANDY_AGENT_ARGS_CODEX}")
 RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_OPENCODE=${SANDY_AGENT_ARGS_OPENCODE}")
 RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_GROK=${SANDY_AGENT_ARGS_GROK}")
+RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_MIRROR=${SANDY_AGENT_ARGS_MIRROR}")
 # Named Claude sessions: the validated per-session data, read-only, from this
 # launch's own directory (a fresh path per launch, #400). Unconditional value,
 # so a forged env from any config source is always overwritten.
@@ -19233,6 +19506,135 @@ _sandy_effort_json="null"; [ -n "${SANDY_EFFORT:-}" ] && _sandy_effort_json="\"$
 _sandy_perm_mode_json="null"
 if _sandy_agent_has claude && [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
     _sandy_perm_mode_json="\"bypassPermissions\""
+fi
+# Whether GitHub says the token in $2 can push to repo $1 ("owner/name").
+# Prints true, false, or nothing (no answer within 5 s, or an error). The
+# token goes to gh in the environment, never argv. Host-side, so no
+# `timeout` (macOS has none): poll the background gh and kill it at 5 s.
+_sandy_gh_can_push() {
+    local _out _gh_bg _i=0
+    _out="$(mktemp)" || return 0
+    GH_TOKEN="$2" gh api "repos/$1" --jq .permissions.push > "$_out" 2>/dev/null &
+    _gh_bg=$!
+    while kill -0 "$_gh_bg" 2>/dev/null; do
+        if [ "$_i" -ge 25 ]; then kill "$_gh_bg" 2>/dev/null || true; break; fi
+        sleep 0.2; _i=$((_i + 1))
+    done
+    wait "$_gh_bg" 2>/dev/null || true
+    cat "$_out" 2>/dev/null || true
+    rm -f "$_out"
+}
+# Which forwarded gh account should be active. $1 is GH_ACCOUNTS
+# ("user:token,..."), $2 origin's URL (may be empty); reads SANDY_GH_ACCOUNT,
+# GIT_TOKEN and SANDY_OFFLINE. Prints "<user>|<why>", or returns 1 when
+# nothing can be picked. First match wins:
+#   1. SANDY_GH_ACCOUNT, when it names a forwarded account (else warn, go on);
+#   2. the only account;
+#   3. the account named like origin's owner (case-insensitive);
+#   4. the first account GitHub says can push to origin -- what an org-owned
+#      repo needs, since no account is named like an org (skipped offline);
+#   5. the host's active account: the one whose token is GIT_TOKEN, which is
+#      also what git's fallback credential helper in the container sends.
+# Before 2.9.0 only rule 3 existed, run in the container, so an org repo got
+# whichever account `gh auth login` ran last there.
+_sandy_gh_pick_account() {
+    local _pair _u _t _owner _repo _lu _lo _names=""
+    local -a _pairs=()
+    IFS=',' read -ra _pairs <<< "$1"
+    [ "${#_pairs[@]}" -gt 0 ] || return 1
+    if [ -n "${SANDY_GH_ACCOUNT:-}" ]; then
+        for _pair in "${_pairs[@]}"; do
+            if [ "${_pair%%:*}" = "$SANDY_GH_ACCOUNT" ]; then
+                printf '%s|SANDY_GH_ACCOUNT\n' "$SANDY_GH_ACCOUNT"; return 0
+            fi
+            _names="${_names:+$_names }${_pair%%:*}"
+        done
+        warn "SANDY_GH_ACCOUNT=$SANDY_GH_ACCOUNT is not a gh account on this host (have: $_names); choosing one automatically." >&2
+    fi
+    if [ "${#_pairs[@]}" -eq 1 ]; then
+        printf '%s|only account\n' "${_pairs[0]%%:*}"; return 0
+    fi
+    _repo="$(printf '%s\n' "$2" | sed -E -n 's#^(https://([^@/]*@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/?$#\3#p')"
+    _repo="${_repo%.git}"
+    if [ -n "$_repo" ]; then
+        _owner="${_repo%%/*}"
+        _lo="$(printf '%s' "$_owner" | tr 'A-Z' 'a-z')"
+        for _pair in "${_pairs[@]}"; do
+            _u="${_pair%%:*}"
+            _lu="$(printf '%s' "$_u" | tr 'A-Z' 'a-z')"
+            if [ "$_lu" = "$_lo" ]; then
+                printf '%s|owns origin\n' "$_u"; return 0
+            fi
+        done
+        if [ "${SANDY_OFFLINE:-0}" != 1 ]; then
+            for _pair in "${_pairs[@]}"; do
+                _u="${_pair%%:*}" _t="${_pair#*:}"
+                if [ "$(_sandy_gh_can_push "$_repo" "$_t")" = true ]; then
+                    printf '%s|can push to %s\n' "$_u" "$_repo"; return 0
+                fi
+            done
+        fi
+    fi
+    if [ -n "${GIT_TOKEN:-}" ]; then
+        for _pair in "${_pairs[@]}"; do
+            if [ "${_pair#*:}" = "$GIT_TOKEN" ]; then
+                printf '%s|host active account\n' "${_pair%%:*}"; return 0
+            fi
+        done
+    fi
+    return 1
+}
+# Collect gh CLI tokens for all authenticated accounts.
+# GIT_TOKEN carries the active account's token (fallback for gh auth when GH_ACCOUNTS is empty).
+# GH_ACCOUNTS carries all accounts as "user:token" pairs (used for gh CLI auth).
+GIT_TOKEN=""
+GH_ACCOUNTS=""
+if command -v gh &>/dev/null; then
+    GIT_TOKEN="$(gh auth token 2>/dev/null || true)"
+    # Enumerate all accounts from gh auth status
+    while IFS= read -r _acct; do
+        _acct="$(echo "$_acct" | tr -d '[:space:]')"
+        [ -z "$_acct" ] && continue
+        _tok="$(gh auth token --user "$_acct" 2>/dev/null || true)"
+        [ -z "$_tok" ] && continue
+        [ -n "$GH_ACCOUNTS" ] && GH_ACCOUNTS="${GH_ACCOUNTS},"
+        GH_ACCOUNTS="${GH_ACCOUNTS}${_acct}:${_tok}"
+    done < <(gh auth status 2>&1 | grep 'account ' | sed 's/.*account //;s/ .*//')
+fi
+if [ -n "$GIT_TOKEN" ]; then
+    _sandy_add_secret_env GIT_TOKEN "$GIT_TOKEN"
+    if [[ "${SANDY_SSH:-token}" != "agent" ]]; then
+        info "Git auth: GitHub token via gh CLI (HTTPS)"
+    fi
+else
+    if [[ "${SANDY_SSH:-token}" != "agent" ]]; then
+        warn "No gh CLI token found. Git push/pull may not work."
+        warn "Install gh (https://cli.github.com) and run 'gh auth login', or use SANDY_SSH=agent."
+    fi
+fi
+[ -n "$GH_ACCOUNTS" ] && _sandy_add_secret_env GH_ACCOUNTS "$GH_ACCOUNTS"
+# Which of those accounts is active in the container is decided HERE, on the
+# host, and recorded in the session marker (github{account,reason}), so
+# --accounts can say which GitHub account each sandbox used. It used to be
+# decided inside the container, where nothing outside could see it.
+_sandy_gh_json=""
+_SANDY_GH_ACTIVE=""
+if [ -n "${SANDY_GH_ACCOUNT:-}" ] && ! [[ "$SANDY_GH_ACCOUNT" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,38}$ ]]; then
+    warn "Ignoring SANDY_GH_ACCOUNT=$SANDY_GH_ACCOUNT: not a GitHub username"
+    SANDY_GH_ACCOUNT=""
+fi
+if [ -n "$GH_ACCOUNTS" ]; then
+    _sandy_gh_origin=""
+    if [ -d "$WORK_DIR/.git" ] || [ -f "$WORK_DIR/.git" ]; then
+        _sandy_gh_origin="$(git -C "$WORK_DIR" remote get-url origin 2>/dev/null || true)"
+    fi
+    if _sandy_gh_pick="$(_sandy_gh_pick_account "$GH_ACCOUNTS" "$_sandy_gh_origin")"; then
+        _SANDY_GH_ACTIVE="${_sandy_gh_pick%%|*}"
+        _sandy_gh_json="\"account\": \"$_SANDY_GH_ACTIVE\", \"reason\": \"$(_sandy_fm_jesc "${_sandy_gh_pick#*|}")\""
+        RUN_FLAGS+=(-e "SANDY_GH_ACTIVE=$_SANDY_GH_ACTIVE")
+        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then info "gh account: $_SANDY_GH_ACTIVE (${_sandy_gh_pick#*|})"; fi
+    fi
+    unset _sandy_gh_origin _sandy_gh_pick
 fi
 # cross_session_inbound (1.10.0): the crossSessionInbound value actually written
 # (see the "BEGIN cross-session inbound" block above); null when not written.
@@ -19347,135 +19749,6 @@ if [ "${_SANDY_CS_ACTIVE:-0}" = 1 ]; then
     done
 fi
 unset _sandy_cs_slug _sandy_cs_d _sandy_cs_rj _sandy_cs_r
-# Whether GitHub says the token in $2 can push to repo $1 ("owner/name").
-# Prints true, false, or nothing (no answer within 5 s, or an error). The
-# token goes to gh in the environment, never argv. Host-side, so no
-# `timeout` (macOS has none): poll the background gh and kill it at 5 s.
-_sandy_gh_can_push() {
-    local _out _pid _i=0
-    _out="$(mktemp)" || return 0
-    GH_TOKEN="$2" gh api "repos/$1" --jq .permissions.push > "$_out" 2>/dev/null &
-    _pid=$!
-    while kill -0 "$_pid" 2>/dev/null; do
-        if [ "$_i" -ge 25 ]; then kill "$_pid" 2>/dev/null || true; break; fi
-        sleep 0.2; _i=$((_i + 1))
-    done
-    wait "$_pid" 2>/dev/null || true
-    cat "$_out" 2>/dev/null || true
-    rm -f "$_out"
-}
-# Which forwarded gh account should be active. $1 is GH_ACCOUNTS
-# ("user:token,..."), $2 origin's URL (may be empty); reads SANDY_GH_ACCOUNT,
-# GIT_TOKEN and SANDY_OFFLINE. Prints "<user>|<why>", or returns 1 when
-# nothing can be picked. First match wins:
-#   1. SANDY_GH_ACCOUNT, when it names a forwarded account (else warn, go on);
-#   2. the only account;
-#   3. the account named like origin's owner (case-insensitive);
-#   4. the first account GitHub says can push to origin -- what an org-owned
-#      repo needs, since no account is named like an org (skipped offline);
-#   5. the host's active account: the one whose token is GIT_TOKEN, which is
-#      also what git's fallback credential helper in the container sends.
-# Before 2.9.0 only rule 3 existed, run in the container, so an org repo got
-# whichever account `gh auth login` ran last there.
-_sandy_gh_pick_account() {
-    local _pair _u _t _owner _repo _lu _lo _names=""
-    local -a _pairs=()
-    IFS=',' read -ra _pairs <<< "$1"
-    [ "${#_pairs[@]}" -gt 0 ] || return 1
-    if [ -n "${SANDY_GH_ACCOUNT:-}" ]; then
-        for _pair in "${_pairs[@]}"; do
-            if [ "${_pair%%:*}" = "$SANDY_GH_ACCOUNT" ]; then
-                printf '%s|SANDY_GH_ACCOUNT\n' "$SANDY_GH_ACCOUNT"; return 0
-            fi
-            _names="${_names:+$_names }${_pair%%:*}"
-        done
-        warn "SANDY_GH_ACCOUNT=$SANDY_GH_ACCOUNT is not a gh account on this host (have: $_names); choosing one automatically." >&2
-    fi
-    if [ "${#_pairs[@]}" -eq 1 ]; then
-        printf '%s|only account\n' "${_pairs[0]%%:*}"; return 0
-    fi
-    _repo="$(printf '%s\n' "$2" | sed -E -n 's#^(https://([^@/]*@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/?$#\3#p')"
-    _repo="${_repo%.git}"
-    if [ -n "$_repo" ]; then
-        _owner="${_repo%%/*}"
-        _lo="$(printf '%s' "$_owner" | tr 'A-Z' 'a-z')"
-        for _pair in "${_pairs[@]}"; do
-            _u="${_pair%%:*}"
-            _lu="$(printf '%s' "$_u" | tr 'A-Z' 'a-z')"
-            if [ "$_lu" = "$_lo" ]; then
-                printf '%s|owns origin\n' "$_u"; return 0
-            fi
-        done
-        if [ "${SANDY_OFFLINE:-0}" != 1 ]; then
-            for _pair in "${_pairs[@]}"; do
-                _u="${_pair%%:*}" _t="${_pair#*:}"
-                if [ "$(_sandy_gh_can_push "$_repo" "$_t")" = true ]; then
-                    printf '%s|can push to %s\n' "$_u" "$_repo"; return 0
-                fi
-            done
-        fi
-    fi
-    if [ -n "${GIT_TOKEN:-}" ]; then
-        for _pair in "${_pairs[@]}"; do
-            if [ "${_pair#*:}" = "$GIT_TOKEN" ]; then
-                printf '%s|host active account\n' "${_pair%%:*}"; return 0
-            fi
-        done
-    fi
-    return 1
-}
-# Collect gh CLI tokens for all authenticated accounts.
-# GIT_TOKEN carries the active account's token (fallback for gh auth when GH_ACCOUNTS is empty).
-# GH_ACCOUNTS carries all accounts as "user:token" pairs (used for gh CLI auth).
-GIT_TOKEN=""
-GH_ACCOUNTS=""
-if command -v gh &>/dev/null; then
-    GIT_TOKEN="$(gh auth token 2>/dev/null || true)"
-    # Enumerate all accounts from gh auth status
-    while IFS= read -r _acct; do
-        _acct="$(echo "$_acct" | tr -d '[:space:]')"
-        [ -z "$_acct" ] && continue
-        _tok="$(gh auth token --user "$_acct" 2>/dev/null || true)"
-        [ -z "$_tok" ] && continue
-        [ -n "$GH_ACCOUNTS" ] && GH_ACCOUNTS="${GH_ACCOUNTS},"
-        GH_ACCOUNTS="${GH_ACCOUNTS}${_acct}:${_tok}"
-    done < <(gh auth status 2>&1 | grep 'account ' | sed 's/.*account //;s/ .*//')
-fi
-if [ -n "$GIT_TOKEN" ]; then
-    _sandy_add_secret_env GIT_TOKEN "$GIT_TOKEN"
-    if [[ "${SANDY_SSH:-token}" != "agent" ]]; then
-        info "Git auth: GitHub token via gh CLI (HTTPS)"
-    fi
-else
-    if [[ "${SANDY_SSH:-token}" != "agent" ]]; then
-        warn "No gh CLI token found. Git push/pull may not work."
-        warn "Install gh (https://cli.github.com) and run 'gh auth login', or use SANDY_SSH=agent."
-    fi
-fi
-[ -n "$GH_ACCOUNTS" ] && _sandy_add_secret_env GH_ACCOUNTS "$GH_ACCOUNTS"
-# Which of those accounts is active in the container is decided HERE, on the
-# host, and recorded in the session marker (github{account,reason}), so
-# --accounts can say which GitHub account each sandbox used. It used to be
-# decided inside the container, where nothing outside could see it.
-_sandy_gh_json="{}"
-_SANDY_GH_ACTIVE=""
-if [ -n "${SANDY_GH_ACCOUNT:-}" ] && ! [[ "$SANDY_GH_ACCOUNT" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,38}$ ]]; then
-    warn "Ignoring SANDY_GH_ACCOUNT=$SANDY_GH_ACCOUNT: not a GitHub username"
-    SANDY_GH_ACCOUNT=""
-fi
-if [ -n "$GH_ACCOUNTS" ]; then
-    _sandy_gh_origin=""
-    if [ -d "$WORK_DIR/.git" ] || [ -f "$WORK_DIR/.git" ]; then
-        _sandy_gh_origin="$(git -C "$WORK_DIR" remote get-url origin 2>/dev/null || true)"
-    fi
-    if _sandy_gh_pick="$(_sandy_gh_pick_account "$GH_ACCOUNTS" "$_sandy_gh_origin")"; then
-        _SANDY_GH_ACTIVE="${_sandy_gh_pick%%|*}"
-        _sandy_gh_json="{\"account\": \"$_SANDY_GH_ACTIVE\", \"reason\": \"$(_sandy_fm_jesc "${_sandy_gh_pick#*|}")\"}"
-        RUN_FLAGS+=(-e "SANDY_GH_ACTIVE=$_SANDY_GH_ACTIVE")
-        if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then info "gh account: $_SANDY_GH_ACTIVE (${_sandy_gh_pick#*|})"; fi
-    fi
-    unset _sandy_gh_origin _sandy_gh_pick
-fi
 # credentials: WHICH credential each agent used, for the ones that carry no
 # identity of their own (a long-lived CLAUDE_CODE_OAUTH_TOKEN, an API key).
 # Claude Code reports only "Auth token: CLAUDE_CODE_OAUTH_TOKEN" for such a
@@ -19526,15 +19799,23 @@ fi
 if _sandy_agent_has codex 2>/dev/null && [ -n "${CODEX_CRED_TMPDIR:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
     _sandy_cred_add codex api-key "$OPENAI_API_KEY"
 fi
+# Mirror reads REFLECTION_API_KEY ahead of a saved key, so that is the one in
+# use when set; otherwise the key saved in the sandbox (seeded or entered).
+if _sandy_agent_has mirror 2>/dev/null; then
+    if [ -n "${REFLECTION_API_KEY:-}" ]; then
+        _sandy_cred_add mirror api-key "$REFLECTION_API_KEY"
+    elif [ -s "${SANDBOX_DIR:-}/mirror/reflection_api_key" ] && [ ! -L "${SANDBOX_DIR:-}/mirror/reflection_api_key" ]; then
+        _sandy_cred_add mirror api-key "$(cat "$SANDBOX_DIR/mirror/reflection_api_key" 2>/dev/null)"
+    fi
+fi
 unset -f _sandy_cred_add
-[ -n "${_sandy_gh_json:-}" ] || _sandy_gh_json='{}'
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "cross_session_inbound_source": %s,\n  "agents": %s,\n  "image": %s,\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "feature_entries": {%s},\n  "offline": %s,\n  "cred_mode": "%s",\n  "credentials": {%s},\n  "github": %s,\n  "claude_sessions": [%s]\n}\n' \
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "cross_session_inbound_source": %s,\n  "agents": %s,\n  "image": %s,\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "feature_entries": {%s},\n  "offline": %s,\n  "cred_mode": "%s",\n  "credentials": {%s},\n  "github": {%s},\n  "claude_sessions": [%s]\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "${_sandy_launched_at:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "$_sandy_session_nonce" "$_sandy_effort_json" \
     "$_sandy_perm_mode_json" "${_sandy_csi_json:-null}" "${_sandy_csi_src_json:-null}" "$_sandy_agents_json" \
     "${_sandy_image_json:-null}" "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${_sandy_fe_json:-}" \
     "$(if [ "${SANDY_OFFLINE:-0}" = 1 ]; then echo true; else echo false; fi)" "${CRED_MODE:-none}" \
-    "${_sandy_cred_json:-}" "$_sandy_gh_json" "${_sandy_cs_json:-}" > "$_sandy_session_file"
+    "${_sandy_cred_json:-}" "${_sandy_gh_json:-}" "${_sandy_cs_json:-}" > "$_sandy_session_file"
 # Rename the composed temp into place (#400, see where it is assigned). The
 # final path is derived, so a caller that set the variable to a plain path
 # (the test suite does) simply wrote it directly.
@@ -19843,6 +20124,17 @@ if _sandy_agent_has grok; then
     fi
     if [ -n "${SANDY_GROK_AUTH:-}" ]; then
         RUN_FLAGS+=(-e "SANDY_GROK_AUTH=$SANDY_GROK_AUTH")
+    fi
+fi
+if _sandy_agent_has mirror; then
+    # REFLECTION_API_KEY through the 0600 env-file, never a -e argv entry. No
+    # other provider key is forwarded for Mirror (decision 3, #429's rule);
+    # FIRECRAWL_API_KEY / OPENROUTER_API_KEY can be added via SANDY_EXTRA_ENV.
+    if [ -n "${REFLECTION_API_KEY:-}" ]; then
+        _sandy_add_secret_env REFLECTION_API_KEY "$REFLECTION_API_KEY"
+    fi
+    if [ -n "${MIRROR_MODEL:-}" ]; then
+        RUN_FLAGS+=(-e "MIRROR_MODEL=$MIRROR_MODEL")
     fi
 fi
 

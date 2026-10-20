@@ -113,9 +113,31 @@ Grok Build is xAI's coding agent. Sandy installs it in the image from `https://x
 - Headless mode (`-p` / `--print` / `--prompt "..."`) runs `grok --no-auto-update -p "<prompt>"` (grok can't self-update against the read-only rootfs). `--continue` / `-c` is dropped.
 - Not supported with `grok` in v0: `--remote`, `SANDY_SKILL_PACKS`, synthkit slash-commands, channels beyond the host-side Telegram relay. Auto-update detection isn't wired (no version API) — `sandy --rebuild` re-fetches the latest grok.
 
+## Running Mirror (`SANDY_AGENT=mirror`, 2.9.0, experimental)
+
+[Mirror](https://github.com/reflection-oss/mirror) is Reflection AI's coding agent. Sandy installs it from PyPI (`reflection-mirror`) with `uv` and runs it **on its own**: Mirror is still beta, so it is not part of the multi-agent image, and a combo such as `claude,mirror` is refused ([#464](https://github.com/rappdw/sandy/issues/464) tracks lifting that). The design decisions are in `decisions/2026-10-20-mirror-agent.md`.
+
+| Auth | How | Notes |
+|---|---|---|
+| API key | `REFLECTION_API_KEY=...` in `~/.sandy/.secrets` or env | Forwarded through the private env-file; Mirror keeps it out of the commands it runs |
+| Saved key | Paste it at Mirror's prompt on an interactive launch | Saved in this sandbox (`~/.mirror/reflection_api_key`) and used on later launches |
+| Host key | `~/.mirror/reflection_api_key` on the host | Copied into the sandbox (mode `0600`) when neither of the above exists |
+
+No other provider key reaches a Mirror sandbox. To use Mirror's web search or OpenRouter, forward those keys yourself with `SANDY_EXTRA_ENV=FIRECRAWL_API_KEY,OPENROUTER_API_KEY`. A `--start` or headless launch with no Reflection key is refused, because Mirror would otherwise sit on its key prompt with nobody there to answer it.
+
+- **Permissions:** `SANDY_SKIP_PERMISSIONS` (default `true`) passes `--approval-mode auto` on every launch, and `false` passes `--approval-mode approve`. Mirror remembers the mode between launches, so sandy always sets it explicitly. Mirror's approval prompts are not a sandbox, by Mirror's own docs; sandy is the boundary.
+- **First run:** sandy accepts Mirror's usage notice and trusts the workspace for you, inside the container, so `--start` and headless runs never stop on Mirror's `[y/N]` prompt. It also turns Mirror's anonymous usage analytics off when you haven't chosen; `/settings` turns them back on, and that choice is kept.
+- **Model and effort:** `MIRROR_MODEL` passes `--model` for one launch (Mirror's saved `/model` choice applies otherwise; its default is `Beam-1.0-501B-A23B`). `SANDY_EFFORT` passes `--reasoning-effort` with the same level name. With `SANDY_EFFORT` unset sandy passes nothing, and **Mirror's own default is `max`**, the most expensive level; use `/effort` in Mirror or set `SANDY_EFFORT` to change it.
+- **Sessions:** an interactive launch reopens the workspace's last conversation (`--continue`); `sandy --new` starts fresh, and `sandy --resume` opens a fresh session where `/resume` picks an older one. Headless (`-p`) runs `mirror exec`, which always starts fresh and exits `0` on success, `1` otherwise.
+- **Updates:** Mirror's own updater is off (`MIRROR_SKIP_UPDATE=1`); sandy checks PyPI at launch and rebuilds `sandy-mirror` when a newer release exists.
+- **Workspace files:** `.mirror/` in a project holds Mirror extensions, which are Python that Mirror runs, so sandy mounts it read-only like `.claude/hooks/`.
+- **A local model:** `SANDY_LOCAL_LLM_HOST` opens the network path; point Mirror at it from `$SANDBOX_DIR/agent-args.mirror`: `--api openai-chat-completions --base-url http://host.docker.internal:<port>/v1 --model <name>`.
+- **Never use `--log-level debug`:** Mirror's debug logs include request headers, with the API key, and they persist in the sandbox.
+- Not supported with `mirror` yet: multi-agent combos, `--remote`, `SANDY_SKILL_PACKS`, synthkit commands, Mirror's `/sandbox` (it needs `/dev/kvm`, which sandy containers do not have). Strict egress allows `api.reflection.ai` only.
+
 ## Multi-agent mode
 
-Sandy runs any combination of Claude, Gemini, Codex, OpenCode, and Grok side-by-side in a single tmux session — **up to 4 at once** (the layout is a 2×2 grid) — selected via comma-separated values in `SANDY_AGENT`:
+Sandy runs any combination of Claude, Gemini, Codex, OpenCode, and Grok (not Mirror, which runs alone) side-by-side in a single tmux session — **up to 4 at once** (the layout is a 2×2 grid) — selected via comma-separated values in `SANDY_AGENT`:
 
 ```bash
 SANDY_AGENT=claude,gemini              # two panes
