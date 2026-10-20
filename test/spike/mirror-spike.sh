@@ -16,8 +16,9 @@
 #       between them. Then the files Mirror wrote, config.json with any
 #       key/token/secret field redacted, and the cli.db schema. This is where
 #       the usage/folder/extension acceptances turn out to be recorded.
-#   M3  Seeding: a fresh home holding ONLY M2's config.json; does
-#       `mirror exec` run with no prompt? Same path, then a different path.
+#   M3  Seeding: a fresh home holding only M2's config.json, only its
+#       cli.db, then both; does `mirror exec` run with no prompt? Same path,
+#       then a different path.
 #   M4  Approval: does --approval-mode approve override a saved auto?
 #   M5  exec exit codes: success, bad key, no network.
 #   M6  --continue with no prior conversation, and with one.
@@ -29,6 +30,18 @@
 # environment; it is passed as `-e REFLECTION_API_KEY` (name only, never in
 # argv) and redacted from every transcript. Without it those parts are
 # skipped and say so. A few cheap one-word prompts only.
+#
+# RESULTS, run 1 (2026-10-20, mirror 0.1.0, macOS host):
+#   M0  Flags as documented, except --reasoning-effort takes
+#       none|low|medium|high|xhigh|max (no `minimal`); `mirror update` exists.
+#   M1  exec before acceptance: "open Mirror interactively in this directory
+#       to review and accept the usage and folder notices before using
+#       exec", exit 1. It already writes ~/.mirror/cli.db.
+#   M8/M2  The usage notice and the folder trust are ONE prompt, "Continue
+#       and trust this folder? [y/N]", default No: Enter declines and exits
+#       1, leaving no config.json, so run 1 never got past it. Run 2 answers
+#       y, and answers the terminal's cursor-position query (prompt_toolkit
+#       warned "your terminal doesn't support cursor position requests").
 #
 # It is a measurement, not a pass/fail suite: it prints raw evidence. Paste
 # the whole output back. SPIKE_KEEP=1 keeps the temp dir and the image.
@@ -88,7 +101,14 @@ if plain:
     sys.exit(0)
 
 cols, rows = 120, 40
-screen = pyte.Screen(cols, rows)
+fd = None
+class Screen(pyte.Screen):
+    # Answer the terminal's own queries (cursor position report, device
+    # status): prompt_toolkit asks for CPR and degrades without an answer.
+    def write_process_input(self, data):
+        if fd is not None:
+            os.write(fd, data.encode())
+screen = Screen(cols, rows)
 stream = pyte.ByteStream(screen)
 pid, fd = pty.fork()
 if pid == 0:
@@ -235,18 +255,18 @@ inventory m1
 # ---------------------------------------------------------------- M8
 say "M8 interactive start with no network at all"
 mkhome m8
-R m8 --network none -t -- "${DRIVE[@]}" stable:20 snap:offline-first-screen -- mirror
+R m8 --network none -t -- "${DRIVE[@]}" stable:20 snap:offline-first-screen \
+    key:'y\r' stable:20 snap:offline-after-y -- mirror
 inventory m8
 
 # ---------------------------------------------------------------- M2
-say "M2 interactive first run (Enter pressed at each stop)"
+say "M2 interactive first run: y at the trust prompt, then Enter"
 mkhome m2
 R m2 -t ${KEY_ENV[@]+"${KEY_ENV[@]}"} -- "${DRIVE[@]}" \
     stable:25 snap:first \
+    key:'y\r' stable:25 snap:after-y \
     key:'\r' stable:15 snap:after-enter-1 \
     key:'\r' stable:15 snap:after-enter-2 \
-    key:'\r' stable:15 snap:after-enter-3 \
-    key:'\r' stable:15 snap:after-enter-4 \
     -- mirror
 inventory m2
 for db in cli.db state.db; do
@@ -257,25 +277,39 @@ if [ "$HAVE_KEY" != true ]; then
     say "M3-M7 SKIPPED: REFLECTION_API_KEY is not set in this shell"
     exit 0
 fi
-if [ ! -f "$D/m2/home/.mirror/config.json" ]; then
-    say "M3-M7 SKIPPED: M2 left no ~/.mirror/config.json to seed from (see M2's screens)"
+if [ ! -f "$D/m2/home/.mirror/config.json" ] && [ ! -f "$D/m2/home/.mirror/cli.db" ]; then
+    say "M3-M7 SKIPPED: M2 left neither config.json nor cli.db to seed from (see M2's screens)"
     exit 0
 fi
+# seed NAME WHAT -- a fresh home holding only M2's config.json, cli.db, or both
+seed() {
+    mkhome "$1"; mkdir -p "$D/$1/home/.mirror"
+    case "$2" in
+        config|both) [ -f "$D/m2/home/.mirror/config.json" ] && cp "$D/m2/home/.mirror/config.json" "$D/$1/home/.mirror/" ;;
+    esac
+    case "$2" in
+        clidb|both) [ -f "$D/m2/home/.mirror/cli.db" ] && cp "$D/m2/home/.mirror/cli.db" "$D/$1/home/.mirror/" ;;
+    esac
+    return 0
+}
 
 # ---------------------------------------------------------------- M3
-say "M3 seeded config.json only, same path"
-mkhome m3
-mkdir -p "$D/m3/home/.mirror" && cp "$D/m2/home/.mirror/config.json" "$D/m3/home/.mirror/"
+for what in config clidb; do
+    say "M3-$what seeded $what only, same path"
+    seed "m3$what" "$what"
+    R "m3$what" "${KEY_ENV[@]}" -- "${DRIVE[@]}" --plain -- timeout 180 mirror exec --approval-mode auto "Reply with the single word PONG"
+done
+say "M3 seeded config.json + cli.db, same path"
+seed m3 both
 R m3 "${KEY_ENV[@]}" -- "${DRIVE[@]}" --plain -- timeout 180 mirror exec --approval-mode auto "Reply with the single word PONG"
-say "M3b seeded config.json only, a DIFFERENT workspace path"
+say "M3b seeded config.json + cli.db, a DIFFERENT workspace path"
 mkdir -p "$D/m3/ws2" && ( cd "$D/m3/ws2" && git init -q )
 R m3 "${KEY_ENV[@]}" -w /w/ws2 -- "${DRIVE[@]}" --plain -- timeout 180 mirror exec --approval-mode auto "Reply with the single word PONG"
 inventory m3
 
 # ---------------------------------------------------------------- M4
 say "M4 approval: saved auto, then --approval-mode approve"
-mkhome m4
-mkdir -p "$D/m4/home/.mirror" && cp "$D/m2/home/.mirror/config.json" "$D/m4/home/.mirror/"
+seed m4 both
 note "4a: exec --approval-mode auto (saves auto?)"
 R m4 "${KEY_ENV[@]}" -- "${DRIVE[@]}" --plain -- timeout 180 mirror exec --approval-mode auto "Reply with the single word OK"
 note "approval-related config after 4a:"; grep -i approv "$D/m4/home/.mirror/config.json" || note "(no approval key in config.json)"
@@ -298,8 +332,7 @@ R m4 "${KEY_ENV[@]}" -- "${DRIVE[@]}" --plain -- timeout 60 mirror exec
 
 # ---------------------------------------------------------------- M6
 say "M6a --continue with NO prior interactive conversation (seeded home)"
-mkhome m6
-mkdir -p "$D/m6/home/.mirror" && cp "$D/m2/home/.mirror/config.json" "$D/m6/home/.mirror/"
+seed m6 both
 R m6 -t "${KEY_ENV[@]}" -- "${DRIVE[@]}" stable:25 snap:continue-empty -- mirror --approval-mode auto --continue
 say "M6b one interactive turn, then --continue"
 R m6 -t "${KEY_ENV[@]}" -- "${DRIVE[@]}" stable:25 snap:before-turn \
