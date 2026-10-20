@@ -26014,6 +26014,70 @@ unset _S206_FN _S206_D _s206_v
 unset -f _s206_argv
 
 
+# ============================================================
+echo "§207: #461 — the egress proxy can read its config under any umask, and a failed sidecar attach names why"
+# ============================================================
+# The proxy runs as root with --cap-drop ALL, so it opens its host-written
+# config through the file's OTHER bits only. Written with a bare redirect, the
+# mode came from the operator's umask: under 077 the proxy died on
+# "permission denied" and the launch failed on `docker network connect` with
+# "network sandbox ... not found" and no logs. Runs the REAL start_proxy_sidecar
+# under umask 077 against a stub docker that records calls and can fail the attach.
+_S207_FN="$(sed -n '/^_sandy_launch_dir()/p' "$SANDY_SCRIPT")
+$(sed -n '/^start_proxy_sidecar() {/,/^}$/p' "$SANDY_SCRIPT")"
+_S207_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S207_D/bin"
+cat > "$_S207_D/bin/docker" <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+    "network connect") [ -n "${S207_ATTACH_FAIL:-}" ] && { echo "Error response from daemon: network sandbox for container x not found" >&2; exit 1; } ; exit 0 ;;
+esac
+case "$1" in
+    inspect)
+        case "$*" in
+            *Health*) echo healthy ;;
+            *RestartCount*"}} ("*|*State.Status*) echo "exited (exit 2, restarts 0)" ;;
+            *RestartCount*) echo 0 ;;
+            *) echo true ;;
+        esac ;;
+    logs) echo "S207-PROXY-LOG: fatal: read config: permission denied" ;;
+esac
+exit 0
+STUB
+chmod +x "$_S207_D/bin/docker"
+# $1 = attach outcome (ok|fail) -> "rc|config-mode-string|stderr"
+_s207() {
+    local sb="$_S207_D/sb-$1"; rm -rf "$sb"; mkdir -p "$sb"
+    env -i PATH="$_S207_D/bin:$PATH" HOME="$_S207_D" S207_ATTACH_FAIL="$([ "$1" = fail ] && echo 1)" \
+        bash -c '
+            umask 077
+            info() { :; }; warn() { echo "WARN: $*" >&2; }; error() { echo "ERROR: $*" >&2; }
+            eval "$1"
+            SANDBOX_DIR="$2"; _sandy_launch_id=L1; SANDBOX_NAME=s207; OS=Linux
+            _SANDY_PROXY_MODE=permissive; PROXY_IP=10.200.0.2; SIDECAR_NETWORK=sc; EGRESS_NETWORK=eg
+            PROXY_IMAGE_NAME=sandy-proxy; _SANDY_ALLOW_EFFECTIVE=()
+            set -euo pipefail
+            rc=0; ( start_proxy_sidecar ) 2>"$2/err" || rc=$?
+            f="$2/launch/L1/sandy-proxy.json"
+            printf "%s|%s|" "$rc" "$(ls -l "$f" 2>/dev/null | cut -c1-10)"
+            tr "\n" " " < "$2/err"
+        ' _ "$_S207_FN" "$sb" 2>/dev/null
+}
+_S207_OK="$(_s207 ok)"
+_S207_FAIL="$(_s207 fail)"
+check "§207(0) start_proxy_sidecar was extracted and ran to completion on a good attach" \
+    bash -c 'case "$1" in 0\|*) exit 0 ;; esac; exit 1' _ "$_S207_OK"
+check "§207(1) under umask 077 the proxy config is world-readable (-rw-r--r--)" \
+    bash -c 'm="$(printf %s "$1" | cut -d"|" -f2)"; [ "$m" = "-rw-r--r--" ]' _ "$_S207_OK"
+check "§207(2) a failed sidecar attach exits non-zero, naming the attach and the proxy state" \
+    bash -c 'case "$1" in 0\|*) exit 1 ;; esac; case "$1" in *"Could not attach the egress proxy"*"exited (exit 2"*) exit 0 ;; esac; exit 1' _ "$_S207_FAIL"
+check "§207(3) ...and prints the proxy logs before cleanup can erase them" \
+    bash -c 'case "$1" in *S207-PROXY-LOG*) exit 0 ;; esac; exit 1' _ "$_S207_FAIL"
+rm -rf "$_S207_D"
+unset _S207_FN _S207_D _S207_OK _S207_FAIL
+unset -f _s207
+
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
