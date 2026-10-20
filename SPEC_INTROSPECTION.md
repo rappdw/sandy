@@ -279,7 +279,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "agents": ["claude"],
       "image": {"name": "sandy-claude-code", "id": "sha256:def...", "project_layer": false},
       "feature_entries": {"notify": {"state": "started", "restarts": 0, "last_exit_code": null, "last_restart_at": null, "executable_present": true, "path": "/opt/sandy/features/notify/relay", "state_dir": "/Users/drapp/.sandy/sandboxes/zork-3dfda686/feature-state/notify"}},
-      "agent_args_files": {"claude": false, "gemini": false, "codex": false, "opencode": false, "grok": false},
+      "agent_args_files": {"claude": false, "gemini": false, "codex": false, "opencode": false, "grok": false, "mirror": false},
       "features": ["notify"],
       "feature_problems": [],
       "agent_args": {},
@@ -551,7 +551,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 
 > **`agent_args_files`** (per sandbox, added additively in `1.8.0`,
 > #210 — no `schema_version` bump). One fixed JSON object with all
-> five agent names (`claude`, `gemini`, `codex`, `opencode`, `grok`) as
+> agent names (`claude`, `gemini`, `codex`, `opencode`, `grok`, and since 2.9.0 `mirror`) as
 > literal boolean keys, regardless of what `SANDY_AGENT` the sandbox was last
 > launched with — this fast-path dispatch cannot read a workspace's
 > `SANDY_AGENT`, and the fixed key set means a consumer never sees a varying

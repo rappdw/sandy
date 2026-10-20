@@ -22,6 +22,7 @@ export HOME=/home/sandy
 _sandy_has_claude()   { case ",${SANDY_AGENT:-claude}," in *,claude,*)   return 0 ;; esac; return 1; }
 _sandy_has_gemini()   { case ",${SANDY_AGENT:-claude}," in *,gemini,*)   return 0 ;; esac; return 1; }
 _sandy_has_codex()    { case ",${SANDY_AGENT:-claude}," in *,codex,*)    return 0 ;; esac; return 1; }
+_sandy_has_mirror()   { case ",${SANDY_AGENT:-claude}," in *,mirror,*)   return 0 ;; esac; return 1; }
 _sandy_has_opencode() { case ",${SANDY_AGENT:-claude}," in *,opencode,*) return 0 ;; esac; return 1; }
 # Parse comma-separated agent list for multi-agent dispatch
 IFS=',' read -ra _SANDY_AGENTS <<< "${SANDY_AGENT:-claude}"
@@ -325,6 +326,51 @@ if _sandy_has_codex; then
             echo "trust_level = \"trusted\""
         } >> "$_codex_cfg"
     fi
+fi
+
+# Mirror first-run acceptance (#463). Mirror refuses `exec` and opens the TUI
+# on "Continue and trust this folder? [y/N]" (default No) until
+# ~/.mirror/config.json records usage_warning_acknowledged and lists the exact
+# workspace path in trusted_directories (measured, mirror 0.1.0; config.json
+# alone is enough). Under --start nobody can answer that prompt, so the
+# session would sit on it while reporting ready. Seeded HERE, container-side,
+# because it needs the container workspace path, and a container-side write
+# avoids the host-replacement hazard #400 is about. Decision 7: analytics are
+# set false when the key is absent, so a /settings opt-in persists. Every
+# other key is kept; a file that is not a JSON object is left alone, with a
+# warning. Mirror is not running yet, so its config.lock is not contended.
+if _sandy_has_mirror; then
+    mkdir -p "$HOME/.mirror"
+    python3 - "$HOME/.mirror/config.json" "$SANDY_WORKSPACE" <<'MIRRORSEED' || echo "[sandy] WARN: could not seed Mirror's config.json; Mirror will ask to trust this folder" >&2
+import json, os, sys
+path, ws = sys.argv[1], sys.argv[2]
+data = {}
+if os.path.lexists(path):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        print("[sandy] WARN: ~/.mirror/config.json is not a JSON object; left as it is (Mirror may ask to trust this folder)", file=sys.stderr)
+        sys.exit(0)
+before = json.dumps(data, sort_keys=True)
+data["usage_warning_acknowledged"] = True
+trusted = data.get("trusted_directories")
+if not isinstance(trusted, list):
+    trusted = []
+if ws not in trusted:
+    trusted.append(ws)
+data["trusted_directories"] = trusted
+if "analytics" not in data:
+    data["analytics"] = False
+if json.dumps(data, sort_keys=True) != before:
+    tmp = path + ".sandy-tmp.%d" % os.getpid()
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)   # replaces a planted link itself, never its target
+MIRRORSEED
 fi
 
 # Gemini trust entry: seed trustedFolders.json so gemini doesn't prompt
@@ -788,6 +834,18 @@ _sandy_translate_args() {
                     -p|--print|--prompt) out+=" -p" ;;
                     --continue|-c)       : ;;
                     *)                   out+=" $(printf '%q' "$arg")" ;;
+                esac
+                ;;
+            mirror)
+                # Headless is a subcommand (`mirror exec PROMPT`, chosen by
+                # build_mirror_cmd), so -p/--print/--prompt is dropped and the
+                # prompt stays a positional. --continue/-c and sandy's --resume
+                # are consumed by build_mirror_cmd: Mirror has no -c (its
+                # argparse would refuse to start), and no --resume flag (its
+                # picker is /resume inside the TUI).
+                case "$arg" in
+                    -p|--print|--prompt|--continue|-c|--resume) : ;;
+                    *) out+=" $(printf '%q' "$arg")" ;;
                 esac
                 ;;
         esac
@@ -1301,6 +1359,65 @@ build_opencode_cmd() {
     _sandy_wrap_cmd_exit_pause "OpenCode" "$cmd"
 }
 
+build_mirror_cmd() {
+    # Reflection AI's Mirror CLI (#463; decisions/2026-10-20-mirror-agent.md).
+    # Headless: `mirror exec PROMPT` (a fresh session, no TUI). Interactive:
+    # `mirror` (TUI). Measured on mirror 0.1.0 by test/spike/mirror-spike.sh.
+    local headless=false a
+    for a in "$@"; do
+        case "$a" in -p|--print|--prompt) headless=true; break ;; esac
+    done
+    local cmd="mirror"
+    [ "$headless" = "true" ] && cmd="mirror exec"
+    # Decision 2: the approval mode is passed on EVERY launch, both values,
+    # interactive and headless. Mirror REMEMBERS an interactive
+    # --approval-mode in ~/.mirror/config.json (the rw sandbox), so passing
+    # only `auto` would leave a sandbox in auto after SANDY_SKIP_PERMISSIONS
+    # turned false. `mirror exec` never grants an approval: without auto it
+    # fails every tool call (exit 1), so headless needs it as much as the TUI.
+    # An operator's own --approval-mode (agent args, the command line) comes
+    # later in the argv and wins: Mirror's argparse keeps the last value.
+    if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
+        cmd+=" --approval-mode auto"
+    else
+        cmd+=" --approval-mode approve"
+    fi
+    if [ -n "${MIRROR_MODEL:-}" ]; then
+        cmd+=" --model $(printf "%q" "$MIRROR_MODEL")"
+    fi
+    # SANDY_EFFORT -> --reasoning-effort (mirror 0.1.0 --help: none|low|
+    # medium|high|xhigh|max), so every sandy level is its exact namesake. A
+    # case, not a pass-through, so an unmapped level omits the flag. Unset
+    # passes nothing (decision 5): a flag would override the user's saved
+    # /effort for the launch, and Mirror's own default is max.
+    local _sandy_mirror_effort=""
+    case "${SANDY_EFFORT:-}" in
+        low) _sandy_mirror_effort=low ;;
+        medium) _sandy_mirror_effort=medium ;;
+        high) _sandy_mirror_effort=high ;;
+        xhigh) _sandy_mirror_effort=xhigh ;;
+        max) _sandy_mirror_effort=max ;;
+    esac
+    if [ -n "$_sandy_mirror_effort" ]; then
+        cmd+=" --reasoning-effort $(printf "%q" "$_sandy_mirror_effort")"
+    fi
+    # Interactive auto-continue, like claude and codex (#427): `--continue`
+    # reopens this workspace's most recent conversation and, measured, starts
+    # a fresh one without error when there is none, so no probe is needed.
+    # Skipped for --new, for sandy's --resume (Mirror's picker is /resume in
+    # the TUI), and beside an explicit --conversation-id or --showcase, which
+    # Mirror's argparse refuses alongside --continue.
+    if [ "$headless" = "false" ] && [ "${SANDY_NEW_SESSION:-false}" != "true" ]; then
+        local _mr_cont=true
+        for a in "$@"; do
+            case "$a" in --resume|--conversation-id|--conversation-id=*|--showcase) _mr_cont=false ;; esac
+        done
+        [ "$_mr_cont" = "true" ] && cmd+=" --continue"
+    fi
+    cmd+="$(_sandy_translate_args mirror "$@")"
+    _sandy_wrap_cmd_exit_pause "Mirror" "$cmd"
+}
+
 build_grok_cmd() {
     # Headless: `grok -p "PROMPT"` (a print flag + positional prompt, like Claude —
     # not a subcommand like codex/opencode). Interactive: `grok` (TUI).
@@ -1372,7 +1489,7 @@ _sandy_build_agent_cmd() {
     # file — see sandy's "per-agent args" block) are PREPENDED onto this
     # pane's OWN "${@:2}" before dispatch, one lookup per call so each pane in
     # a multi-agent combo only ever sees its own agent's tokens. Explicit
-    # 5-arm case (no ${var^^}, no indirection — bash-3.2-safe, matches house
+    # 6-arm case (no ${var^^}, no indirection — bash-3.2-safe, matches house
     # style). Prepend-before-dispatch (not appended, not injected elsewhere)
     # reproduces the exact ordering the old top-level `set --` prepend gave:
     # sandy flags → config/file tokens → CLI pass-through args — which matters
@@ -1387,6 +1504,7 @@ _sandy_build_agent_cmd() {
         codex)    _sandy_aa_val="${SANDY_AGENT_ARGS_CODEX:-}" ;;
         opencode) _sandy_aa_val="${SANDY_AGENT_ARGS_OPENCODE:-}" ;;
         grok)     _sandy_aa_val="${SANDY_AGENT_ARGS_GROK:-}" ;;
+        mirror)   _sandy_aa_val="${SANDY_AGENT_ARGS_MIRROR:-}" ;;
     esac
     _sandy_aa_pre=()
     if [ -n "$_sandy_aa_val" ]; then
@@ -1412,6 +1530,7 @@ _sandy_build_agent_cmd() {
         codex)    build_codex_cmd    ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
         opencode) build_opencode_cmd ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
         grok)     build_grok_cmd     ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
+        mirror)   build_mirror_cmd   ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} "${@:2}" ;;
     esac
 }
 

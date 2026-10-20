@@ -177,8 +177,8 @@ The keys most people use:
 
 | Key | What it does |
 |---|---|
-| `SANDY_AGENT` | `claude` (default), `gemini`, `codex`, `opencode`, `grok`, a comma-separated combination of up to four, or `all` |
-| `SANDY_MODEL` / `SANDY_EFFORT` | Claude's model; reasoning effort (`low` … `max`) for claude, codex, gemini and grok |
+| `SANDY_AGENT` | `claude` (default), `gemini`, `codex`, `opencode`, `grok`, `mirror` (alone), a comma-separated combination of up to four, or `all` |
+| `SANDY_MODEL` / `SANDY_EFFORT` | Claude's model; reasoning effort (`low` … `max`) for claude, codex, gemini, grok and mirror |
 | `SANDY_EGRESS` | `permissive` (default: public internet, no LAN), `strict` (allowlist only) or `off` |
 | `SANDY_ALLOW_HOSTS` | Extra hosts the agent may reach: in strict mode, beyond the built-in allowlist; in permissive mode, LAN hosts despite the block |
 | `SANDY_SSH` / `SANDY_SSH_KEYS` | git over HTTPS with your `gh` token (`token`, default) or SSH agent forwarding (`agent`); which `~/.ssh` keys, if any, enter the container |
@@ -200,6 +200,7 @@ The keys most people use:
 | OpenAI Codex CLI | `codex` | `OPENAI_API_KEY`, or a ChatGPT login kept per project (`sandy --login codex`, 2.8.0) |
 | OpenCode | `opencode` | Any provider's API key, or a local model on your network (`SANDY_LOCAL_LLM_HOST`) |
 | Grok Build | `grok` | `XAI_API_KEY`, or `grok login` |
+| Mirror (Reflection AI, 2.9.0, experimental, runs alone) | `mirror` | `REFLECTION_API_KEY`, or the key you paste at Mirror's prompt |
 
 Each agent gets its own home directory and credentials inside the project's sandbox. [Agents and credentials](docs/guide/agents.md) covers each one in detail, multi-agent sessions, claude.ai connectors, and Console profiles.
 
