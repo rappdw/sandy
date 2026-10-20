@@ -32,3 +32,6 @@ __pycache__
 .mcp.json
 connector-reference
 .sandy/
+
+# gh CLI state a test run can leave in the checkout (it once reached main via #466)
+/.local/
