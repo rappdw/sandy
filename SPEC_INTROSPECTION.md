@@ -279,7 +279,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "agents": ["claude"],
       "image": {"name": "sandy-claude-code", "id": "sha256:def...", "project_layer": false},
       "feature_entries": {"notify": {"state": "started", "restarts": 0, "last_exit_code": null, "last_restart_at": null, "executable_present": true, "path": "/opt/sandy/features/notify/relay", "state_dir": "/Users/drapp/.sandy/sandboxes/zork-3dfda686/feature-state/notify"}},
-      "agent_args_files": {"claude": false, "gemini": false, "codex": false, "opencode": false, "grok": false},
+      "agent_args_files": {"claude": false, "gemini": false, "codex": false, "opencode": false, "grok": false, "mirror": false},
       "features": ["notify"],
       "feature_problems": [],
       "agent_args": {},
@@ -551,7 +551,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 
 > **`agent_args_files`** (per sandbox, added additively in `1.8.0`,
 > #210 — no `schema_version` bump). One fixed JSON object with all
-> five agent names (`claude`, `gemini`, `codex`, `opencode`, `grok`) as
+> agent names (`claude`, `gemini`, `codex`, `opencode`, `grok`, and since 2.9.0 `mirror`) as
 > literal boolean keys, regardless of what `SANDY_AGENT` the sandbox was last
 > launched with — this fast-path dispatch cannot read a workspace's
 > `SANDY_AGENT`, and the fixed key set means a consumer never sees a varying
@@ -955,6 +955,7 @@ Which account each agent in each sandbox is signed in to. Filesystem only (no Do
   - `credential_fingerprint`, `credential_label`, `credential_since`: for a credential that names no account of its own (a long-lived `CLAUDE_CODE_OAUTH_TOKEN`, an `ANTHROPIC_API_KEY`, codex's `OPENAI_API_KEY`), the marker's `credentials.<agent>`: the first 8 hex digits of its sha256, the operator's name for it from `$SANDY_HOME/credential-labels` (`<fingerprint> <label>` per line, `#` comments; the label is the rest of the line, trimmed, printable characters only, at most 40 characters; the fingerprint's hex may be either case; a line that does not parse is skipped and named on stderr in table mode, never in `--json`), and when sandy saw it start. `null` otherwise. When the marker says codex ran on an API key, `credential` is `api-key` and the email and plan from the sandbox's `auth.json` are not reported, since that file was not what codex used.
   - **A long-lived token or an API key names no account.** When the marker's `cred_mode` is `oauth-token` or `api-key`, `accounts.claude` reports `email`, `organization_name`, `plan` and `recorded_at` as `null`, and the credential is identified by `credential_fingerprint`/`credential_label` alone. Anthropic will not name the account for such a token: measured 2026-10-13, `GET /api/oauth/profile` with a `claude setup-token` token is refused with `permission_error` "OAuth token does not meet scope requirement any_of(user:profile, user:office)" (`oauth_scope_insufficient`). Claude Code cannot refresh `oauthAccount` with it either, so the record in `.claude.json` is whatever an earlier account login wrote, which after a switch to another account's token is the wrong account. That record is kept as `last_login_record` (`{email, organization_name, plan, recorded_at, source}`), `null` for every other row.
   - `source`, `problem`: as `account_file` and `problem` below, per agent.
+- **`github`** (2.9.0, additive), per sandbox: `{account, reason}` from the marker's `github`, the gh account sandy made active at the last launch and why (`SANDY_GH_ACCOUNT`, `only account`, `owns origin`, `can push to <owner>/<repo>`, `host active account`). `null` when the marker records none (no gh accounts on the host, or a marker written before the field). The table shows `account` in its GITHUB column, on each sandbox's first row.
 - The top-level `cred_mode`, `account`, `plan`, `account_file` and `problem` stay Claude Code's, unchanged, whether or not the last launch ran claude. Note that for a token or key `account` is that earlier login's record (2.8.0 behaviour, kept for compatibility); read `accounts.claude` for what the launch used.
 
 - **`account`** is copied from the `oauthAccount` block Claude Code writes into the sandbox's `.claude.json` (`claude/.claude.json`, or the pre-2.7 sibling, reported as `account_file: "legacy"`), or `null` when there is none. It is what Claude Code **last recorded**, at `recorded_at`, not a live query. The credential is read from the host at every launch, so a host re-login appears only after the next session runs.

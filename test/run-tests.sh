@@ -1696,7 +1696,7 @@ info "28a2. Grok Build support — selection, image, credentials, headless (#99)
 # ============================================================
 _GROK_S="$SANDY_SCRIPT"
 check "grok is a valid agent (validation case)" \
-    grep -q 'claude|gemini|codex|opencode|grok)' "$_GROK_S"
+    grep -q 'claude|gemini|codex|opencode|grok|mirror)' "$_GROK_S"
 check "invalid-agent error lists grok" \
     grep -q "valid: claude, gemini, codex, opencode, grok" "$_GROK_S"
 check "grok maps to the sandy-grok image" \
@@ -1716,7 +1716,7 @@ check "XAI_API_KEY forwarded for grok" \
 check "grok config dir mounts at ~/.grok" \
     grep -qF 'SANDBOX_DIR/grok:/home/sandy/.grok' "$_GROK_S"
 check "sandy-grok in the image-name lists (GC + rebuild loop)" \
-    bash -c 'grep -q "sandy-opencode|sandy-grok|sandy-full" "$1" && grep -q "sandy-opencode sandy-grok sandy-full" "$1"' -- "$_GROK_S"
+    bash -c 'grep -q "sandy-opencode|sandy-grok|sandy-mirror|sandy-full" "$1" && grep -q "sandy-opencode sandy-grok sandy-mirror sandy-full" "$1"' -- "$_GROK_S"
 check ".build_hash_grok cleared on --rebuild" \
     grep -q '.build_hash_grok' "$_GROK_S"
 check "max-4 agent guard present" \
@@ -3543,12 +3543,12 @@ d=json.load(open(sys.argv[1]))
 for k in d[\"config\"][\"privileged_keys\"]:
     assert k.get(\"passive_approval_required\") is True, k[\"name\"]
 " "$1"' -- "$_SCHEMA_JSON"
-check "schema lists all five agents (claude,gemini,codex,opencode,grok)" \
+check "schema lists all six agents (claude,gemini,codex,opencode,grok,mirror)" \
     bash -c 'python3 -c "
 import json,sys
 d=json.load(open(sys.argv[1]))
 names=[a[\"name\"] for a in d[\"agents\"]]
-assert set(names)=={\"claude\",\"gemini\",\"codex\",\"opencode\",\"grok\"}
+assert set(names)=={\"claude\",\"gemini\",\"codex\",\"opencode\",\"grok\",\"mirror\"}
 " "$1"' -- "$_SCHEMA_JSON"
 check "schema cli_flags includes --print-schema" \
     bash -c 'python3 -c "
@@ -4961,11 +4961,11 @@ check "schema commit derivation strips version prefix, not last dash-field" \
     bash -c 'SANDY_VERSION=1.0.0-rc1; full=1.0.0-rc1; c="${full#"$SANDY_VERSION"}"; c="${c#-}"; [ -z "$c" ]'
 check "schema commit derivation keeps a real hash" \
     bash -c 'SANDY_VERSION=1.0.0-rc1; full=1.0.0-rc1-abc1234; c="${full#"$SANDY_VERSION"}"; c="${c#-}"; [ "$c" = abc1234 ]'
-# All four agent update checks use ordered compare, not string !=.
+# All five agent update checks use ordered compare, not string !=.
 check "no agent update check uses string != (downgrade-nag class)" \
     bash -c '! grep -q "\[ \"\$latest\" != \"\$inst\" \]" "$1"' -- "$_SBX_SCRIPT"
-check "agent update checks use _ver_lt (4 sites)" \
-    bash -c '[ "$(grep -c "_ver_lt \"\$inst\" \"\$latest\"" "$1")" = 4 ]' -- "$_SBX_SCRIPT"
+check "agent update checks use _ver_lt (5 sites)" \
+    bash -c '[ "$(grep -c "_ver_lt \"\$inst\" \"\$latest\"" "$1")" = 5 ]' -- "$_SBX_SCRIPT"
 # -vvv dump redacts secret values.
 check "-vvv RUN_FLAGS print redacts credential-shaped values" \
     grep -qF 'printf '"'"'  %s=<redacted>' "$_SBX_SCRIPT"
@@ -10443,11 +10443,11 @@ check "§106(9d) NEGATIVE: all env empty -> exactly the CLI arg, no stray empty 
 # only reproduces on bash <4.4 / bash 3.2, which isn't available here. So the
 # portability property is asserted statically: every one of the five dispatch
 # arms must use the ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} idiom, not a
-# bare "${_sandy_aa_pre[@]}". SIX uses for five arms since 2.9.0: the claude
+# bare "${_sandy_aa_pre[@]}". SEVEN uses for six arms since 2.9.0: the claude
 # arm has two branches (named sessions -> build_claude_agents_cmd, otherwise
 # build_claude_cmd), and each must be guarded.
-check "§106(9e) STATIC: all 5 dispatch arms (6 calls: claude has two branches) use the guarded empty-array idiom (bash-3.2 safety)" \
-    bash -c '[ "$(grep -c "sandy_aa_pre\[@\]+\"\${_sandy_aa_pre\[@\]}\"" "$1")" -eq 6 ]' -- "$_S106_C9_SCRIPT"
+check "§106(9e) STATIC: all 6 dispatch arms (7 calls: claude has two branches) use the guarded empty-array idiom (bash-3.2 safety)" \
+    bash -c '[ "$(grep -c "sandy_aa_pre\[@\]+\"\${_sandy_aa_pre\[@\]}\"" "$1")" -eq 7 ]' -- "$_S106_C9_SCRIPT"
 
 # --- (10) NEGATIVE: no docker-run mount ever references agent-args.* -------
 # (a) the guard itself, exactly as written in the plan (pipefail-free child).
@@ -10486,9 +10486,9 @@ check "§106(10a4) ...and if it exists it is the #363 composed directory mounted
 # one -- makes the whole feature inert while every other §106 check still
 # passes; the adversarial review confirmed 23/23 green with the seam removed.
 # Assert the count AND each agent by name, so a rename is caught too.
-check "§106(10c) SEAM: exactly five SANDY_AGENT_ARGS_<AGENT> -e forwards exist (mutation: deleting them all makes the feature inert with every other check still green)" \
-    bash -c '[ "$(grep -c "RUN_FLAGS+=(-e \"SANDY_AGENT_ARGS_" "$1" || true)" -eq 5 ]' -- "$_S106_SANDY"
-for _s106_ag in CLAUDE GEMINI CODEX OPENCODE GROK; do
+check "§106(10c) SEAM: exactly six SANDY_AGENT_ARGS_<AGENT> -e forwards exist (mutation: deleting them all makes the feature inert with every other check still green)" \
+    bash -c '[ "$(grep -c "RUN_FLAGS+=(-e \"SANDY_AGENT_ARGS_" "$1" || true)" -eq 6 ]' -- "$_S106_SANDY"
+for _s106_ag in CLAUDE GEMINI CODEX OPENCODE GROK MIRROR; do
     check "§106(10c) SEAM: SANDY_AGENT_ARGS_$_s106_ag is forwarded into the container (mutation: dropping just this one silently disables that agent only)" \
         grep -qF "RUN_FLAGS+=(-e \"SANDY_AGENT_ARGS_$_s106_ag=" "$_S106_SANDY"
 done
@@ -10590,7 +10590,7 @@ check "§106(13a) --print-state: agent_args_files present + correct shape in BOT
 import json,sys
 full=json.loads(sys.argv[1])
 light=json.loads(sys.argv[2])
-want={\"claude\":True,\"gemini\":False,\"codex\":False,\"opencode\":False,\"grok\":False}
+want={\"claude\":True,\"gemini\":False,\"codex\":False,\"opencode\":False,\"grok\":False,\"mirror\":False}
 for d in (full, light):
     sb=[s for s in d[\"sandboxes\"] if s.get(\"name\")==\"demo-aa112233\"]
     assert sb, \"fixture sandbox missing from --print-state output\"
@@ -11838,8 +11838,10 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # one pre-composed array passed as ONE argument, additive.
 # 21 as of 2.9.0: `credentials` -- which token or key each agent used, by
 # fingerprint, one pre-composed object body passed as ONE argument, additive.
-check "§114(13g) marker printf format/arg count line up (21 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 21
+# 22 as of 2.9.0: `github` -- the gh account the host chose and why, one
+# pre-composed object passed as ONE argument, additive.
+check "§114(13g) marker printf format/arg count line up (22 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 22
 
 # (14) sandy-handoff-sessions helper: REMOVED in 2.6.0 (#382, decision 7) along
 # with the helper itself; the pane-identity contract it was built on stays
@@ -24386,8 +24388,8 @@ check "§196(5) a symlinked .claude.json is reported, never followed" \
 check "§196(6) session is running for a live lock holder and stopped for a dead one" \
     bash -c '[ "$1" = "running|stopped" ]' _ \
     "$(_s196_q "S['$_S196_WEB']['session']+'|'+S['team-22222222']['session']")"
-check "§196(7) the table shows the account row (four columns: no organization, plan or date), under Running, after the Stopped section" \
-    bash -c 'grep -q "^  SANDBOX  *AGENT  *CRED  *ACCOUNT$" "$1" && grep "^  $2 " "$1" | grep -q "claude  *full  *dev@example.com$" && s=$(grep -n "^Stopped (3)$" "$1" | cut -d: -f1) && r=$(grep -n "^Running (1)$" "$1" | cut -d: -f1) && w=$(grep -n "^  $2 " "$1" | cut -d: -f1) && [ "$s" -lt "$r" ] && [ "$r" -lt "$w" ] && [ "$(tail -n 1 "$1" | cut -c3-)" = "$(grep "^  $2 " "$1" | cut -c3-)" ]' _ "$_S196_D/out.txt" "$_S196_WEB"
+check "§196(7) the table shows the account row (SANDBOX AGENT CRED ACCOUNT GITHUB: no organization, plan or date), under Running, after the Stopped section" \
+    bash -c 'grep -q "^  SANDBOX  *AGENT  *CRED  *ACCOUNT  *GITHUB$" "$1" && grep "^  $2 " "$1" | grep -q "claude  *full  *dev@example.com  *-$" && s=$(grep -n "^Stopped (3)$" "$1" | cut -d: -f1) && r=$(grep -n "^Running (1)$" "$1" | cut -d: -f1) && w=$(grep -n "^  $2 " "$1" | cut -d: -f1) && [ "$s" -lt "$r" ] && [ "$r" -lt "$w" ] && [ "$(tail -n 1 "$1" | cut -c3-)" = "$(grep "^  $2 " "$1" | cut -c3-)" ]' _ "$_S196_D/out.txt" "$_S196_WEB"
 check "§196(8) --workspace reports that workspace's sandbox only" \
     bash -c 'printf "%s" "$1" | python3 -c "import json,sys; s=json.load(sys.stdin)[\"sandboxes\"]; sys.exit(0 if [x[\"sandbox\"] for x in s]==[sys.argv[1]] else 1)" "$2"' _ \
     "$(_s196 --json --workspace "$_S196_D/ws/web")" "$_S196_WEB"
@@ -24481,7 +24483,7 @@ check "§196(14) a profileFetchedAt in epoch milliseconds is reported as an ISO 
     bash -c '[ "$1" = "2026-10-12T17:41:12Z|2026-10-12T17:41:12Z" ]' _ \
     "$(_s196b_q "S['multi-11111111']['account']['recorded_at']+'|'+S['multi-11111111']['accounts']['claude']['recorded_at']")"
 check "§196(15) the table gives each agent its own row, with an AGENT column and the login's email under ACCOUNT; plan and dates are --json only" \
-    bash -c 'grep -q "^  SANDBOX  *AGENT  *CRED  *ACCOUNT$" "$1" && grep -q "^  multi-11111111  *claude  *full  *dev@example.com$" "$1" && grep -q "^  *codex  *chatgpt  *cx@example.com$" "$1" && ! grep -q "1791826872758\|Max 20x\|ORGANIZATION\|AS OF" "$1"' _ "$_S196_D/out2.txt"
+    bash -c 'grep -q "^  SANDBOX  *AGENT  *CRED  *ACCOUNT  *GITHUB$" "$1" && grep -q "^  multi-11111111  *claude  *full  *dev@example.com  *-$" "$1" && grep -q "^  *codex  *chatgpt  *cx@example.com$" "$1" && ! grep -q "1791826872758\|Max 20x\|ORGANIZATION\|AS OF" "$1"' _ "$_S196_D/out2.txt"
 check "§196(16) an agent the last launch did not run is not reported (a stale Claude record in a codex-only sandbox)" \
     bash -c '[ "$1" = "codex|False" ] && ! grep -q "stale@example.com" "$2"' _ \
     "$(_s196b_q "','.join(S['cxonly-22222222']['agents'])+'|'+str('claude' in S['cxonly-22222222']['accounts'])")" "$_S196_D/out2.txt"
@@ -24494,16 +24496,16 @@ check "§196(18) a marker with no agents field: agents null, claude plus any age
 check "§196(19) no token or key from auth.json is ever printed" \
     bash -c '! grep -q "S196-SECRET" "$1" "$2"' _ "$_S196_D/out2.json" "$_S196_D/out2.txt"
 check "§196(21) a long-lived token's row reports no account (Anthropic will not name one); the earlier login is kept as last_login_record" \
-    bash -c '[ "$1" = "None|None|None|None|personal@example.com|claude/.claude.json|personal@example.com" ] && grep -q "^  switch-55555555  *claude  *oauth-token  *corp$" "$2" && ! grep -q "personal@example.com" "$2"' _ \
+    bash -c '[ "$1" = "None|None|None|None|personal@example.com|claude/.claude.json|personal@example.com" ] && grep -q "^  switch-55555555  *claude  *oauth-token  *corp  *-$" "$2" && ! grep -q "personal@example.com" "$2"' _ \
     "$(_s196b_q "'|'.join(str(x) for x in [S['switch-55555555']['accounts']['claude'][k] for k in ('email','organization_name','plan','recorded_at')]+[S['switch-55555555']['accounts']['claude']['last_login_record']['email'], S['switch-55555555']['accounts']['claude']['last_login_record']['source'], S['switch-55555555']['account']['email']])")" "$_S196_D/out2.txt"
 check "§196(22) an API key is treated the same; an account login keeps its account and has no last_login_record; the note prints once" \
-    bash -c '[ "$1" = "None|odd@example.com|dev@example.com|None" ] && grep -q "^  odd-66666666  *claude  *api-key  *12345678$" "$2" && [ "$(grep -c "^One row per agent each sandbox" "$2")" = 1 ]' _ \
+    bash -c '[ "$1" = "None|odd@example.com|dev@example.com|None" ] && grep -q "^  odd-66666666  *claude  *api-key  *12345678  *-$" "$2" && [ "$(grep -c "^One row per agent each sandbox" "$2")" = 1 ]' _ \
     "$(_s196b_q "'|'.join(str(x) for x in [S['odd-66666666']['accounts']['claude']['email'], S['odd-66666666']['accounts']['claude']['last_login_record']['email'], S['multi-11111111']['accounts']['claude']['email'], S['multi-11111111']['accounts']['claude']['last_login_record']])")" "$_S196_D/out2.txt"
 check "§196(23) CRED names a token by its label (the rest of the line, spaces kept, trimmed; any case of hex), else by fingerprint; lines that are not labels (no label, bad hex, a control character) are named on stderr" \
-    bash -c '[ "$1" = "3fa1c09e|corp|2026-10-12T00:00:00Z|0badc0de|personal (rappdw)" ] && grep -q "^  switch-55555555  *claude  *oauth-token  *corp$" "$2" && grep -q "^  fresh-77777777  *claude  *oauth-token  *personal (rappdw)$" "$2" && grep -q "credential-labels: ignored line(s) 3 5 6: expected" "$2" && grep -q "^  odd-66666666  *claude  *api-key  *12345678$" "$2"' _ \
+    bash -c '[ "$1" = "3fa1c09e|corp|2026-10-12T00:00:00Z|0badc0de|personal (rappdw)" ] && grep -q "^  switch-55555555  *claude  *oauth-token  *corp  *-$" "$2" && grep -q "^  fresh-77777777  *claude  *oauth-token  *personal (rappdw)  *-$" "$2" && grep -q "credential-labels: ignored line(s) 3 5 6: expected" "$2" && grep -q "^  odd-66666666  *claude  *api-key  *12345678  *-$" "$2"' _ \
     "$(_s196b_q "'|'.join(str(x) for x in [S['switch-55555555']['accounts']['claude']['credential_fingerprint'], S['switch-55555555']['accounts']['claude']['credential_label'], S['switch-55555555']['accounts']['claude']['credential_since'], S['fresh-77777777']['accounts']['claude']['credential_fingerprint'], S['fresh-77777777']['accounts']['claude']['credential_label']])")" "$_S196_D/out2.txt"
 check "§196(24) codex on an API key (per the marker) reports api-key and its fingerprint, not the sandbox's stale ChatGPT login" \
-    bash -c '[ "$1" = "api-key|77b20d14|None|None" ] && grep -q "^  cxkey-88888888  *codex  *api-key  *77b20d14$" "$2"' _ \
+    bash -c '[ "$1" = "api-key|77b20d14|None|None" ] && grep -q "^  cxkey-88888888  *codex  *api-key  *77b20d14  *-$" "$2"' _ \
     "$(_s196b_q "'|'.join(str(S['cxkey-88888888']['accounts']['codex'][k]) for k in ('credential','credential_fingerprint','email','plan'))")" "$_S196_D/out2.txt"
 check "§196(25) a codex plan type is shown with spaces, not underscores" \
     bash -c '[ "$1" = "Self serve business prolite" ]' _ "$(_s196b_q "S['cxonly-22222222']['accounts']['codex']['plan']")"
@@ -25700,16 +25702,18 @@ unset _S204_UP _S204_ID _S204_RC _S204_CALLS _S204_ST _S204_BC _S204_DISP _S204_
 unset _S204_WRITER _S204_FEBODY _S204_JESC _S204_PS _S204_FM _S204_RF _S204_GUARD _C _H _W _W2 _SB _SBX _s204_case _s204_f _s204_rest _s204_c _s204_e _s204_off _s204_nl
 
 
-echo "§205: which forwarded gh account is active in the container"
-# The picker, extracted from the user-setup heredoc and run against a stub gh
-# that answers repos/<r> with push=true only for tokens in STUB_PUSH, logs its
-# argv, and fails every call when STUB_FAIL=1.
-_S205_FN="$(awk '/^_sandy_gh_pick_account\(\) \{$/{p=1} p{print} p&&/^\}$/{exit}' "$SANDY_SCRIPT")"
-_S205_D="$(mktemp -d)"
+echo "§205: which gh account a sandbox uses — chosen on the host, recorded in the marker, shown by --accounts"
+# The host-side picker and its push check, extracted from sandy and run
+# against a stub gh that answers repos/<r> with push=true only for tokens in
+# STUB_PUSH, logs its argv and environment token, fails every call when
+# STUB_FAIL=1, and hangs when STUB_HANG=1.
+_S205_FN="$(awk '/^_sandy_gh_can_push\(\) \{$/{p=1} p{print} p&&/^\}$/{exit}' "$SANDY_SCRIPT"; awk '/^_sandy_gh_pick_account\(\) \{$/{p=1} p{print} p&&/^\}$/{exit}' "$SANDY_SCRIPT")"
+_S205_D="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S205_D/bin"
 cat > "$_S205_D/bin/gh" <<'STUB'
 #!/bin/bash
-printf '%s\n' "$*" >> "$STUB_LOG"
+printf '%s|tok=%s\n' "$*" "${GH_TOKEN:-}" >> "$STUB_LOG"
+[ "${STUB_HANG:-0}" = 1 ] && sleep 30
 [ "${STUB_FAIL:-0}" = 1 ] && exit 1
 [ "$1" = api ] || exit 1
 case " $STUB_PUSH " in *" $GH_TOKEN "*) echo true ;; *) echo false ;; esac
@@ -25720,56 +25724,231 @@ chmod +x "$_S205_D/bin/gh"
 _s205() {
     local _acc="$1" _url="$2"; shift 2
     : > "$_S205_D/log"
-    env -i PATH="$_S205_D/bin:$PATH" STUB_LOG="$_S205_D/log" GH_ACCOUNTS="$_acc" "$@" bash -c '
+    env -i PATH="$_S205_D/bin:$PATH" STUB_LOG="$_S205_D/log" "$@" bash -c '
         set -euo pipefail
+        warn() { echo "W:$*"; }
         eval "$1"
-        IFS="," read -ra _gh_pairs <<< "$GH_ACCOUNTS"
-        _sandy_gh_pick_account "$2" || echo none' _ "$_S205_FN" "$_url" 2>"$_S205_D/err"
+        _sandy_gh_pick_account "$2" "$3" || echo none' _ "$_S205_FN" "$_acc" "$_url" 2>"$_S205_D/err"
     printf '|calls=%s\n' "$(wc -l < "$_S205_D/log" | tr -d ' ')"
 }
+_s205f() { printf '%s' "$1" | tr '\n' ' ' | sed 's/ |/|/'; }
 _S205_A="hostact:tokA,pusher:tokB,lastone:tokC"
-check "§205(0) the picker was extracted (mutation: a renamed function empties it and every check goes vacuous)" \
-    bash -c 'printf "%s" "$1" | grep -q "^_sandy_gh_pick_account() {"' _ "$_S205_FN"
-_s205_r="$(_s205 "$_S205_A" https://github.com/someorg/repo.git GIT_TOKEN=tokA STUB_PUSH="tokB tokC")"
-check "§205(1) an org repo gets the FIRST account that can push, not the last logged in nor the host's active (got: ${_s205_r%%$'\n'*})" \
-    test "$(printf '%s' "$_s205_r" | tr '\n' ' ')" = "pusher|can push to someorg/repo |calls=2"
-_s205_r="$(_s205 "$_S205_A" git@github.com:someorg/repo.git GIT_TOKEN=tokB STUB_PUSH="")"
-check "§205(2) nobody can push: the host's active account (the one whose token is GIT_TOKEN), after asking about every account" \
-    test "$(printf '%s' "$_s205_r" | tr '\n' ' ')" = "pusher|host active account |calls=3"
-_s205_r="$(_s205 "$_S205_A" ssh://git@github.com/someorg/repo GIT_TOKEN=tokC STUB_FAIL=1 STUB_PUSH="tokA")"
-check "§205(3) the push check failing outright falls back to the host's active account" \
-    test "$(printf '%s' "$_s205_r" | tr '\n' ' ')" = "lastone|host active account |calls=3"
-_s205_r="$(_s205 "$_S205_A" https://github.com/LastOne/repo GIT_TOKEN=tokA STUB_PUSH="tokB")"
-check "§205(4) a repo owned by one of the accounts picks it, case-insensitively, with no API call" \
-    test "$(printf '%s' "$_s205_r" | tr '\n' ' ')" = "lastone|owns origin |calls=0"
-_s205_r="$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA SANDY_GH_ACCOUNT=lastone STUB_PUSH="tokB")"
-check "§205(5) SANDY_GH_ACCOUNT naming a forwarded account wins over everything, with no API call and no warning" \
-    bash -c '[ "$1" = "lastone|SANDY_GH_ACCOUNT |calls=0" ] && [ ! -s "$2" ]' _ "$(printf '%s' "$_s205_r" | tr '\n' ' ')" "$_S205_D/err"
-_s205_r="$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA SANDY_GH_ACCOUNT=nobody STUB_PUSH="tokC")"
-check "§205(6) SANDY_GH_ACCOUNT naming no forwarded account warns, naming it and the accounts there are, and picks automatically" \
-    bash -c '[ "$1" = "lastone|can push to someorg/repo |calls=3" ] && grep -q "SANDY_GH_ACCOUNT=nobody is not a gh account" "$2" && grep -q "hostact pusher lastone" "$2"' _ "$(printf '%s' "$_s205_r" | tr '\n' ' ')" "$_S205_D/err"
-_s205_r="$(_s205 "$_S205_A" https://gitlab.com/someorg/repo GIT_TOKEN=tokB STUB_PUSH="tokA")"
-_s205_r2="$(_s205 "$_S205_A" "" GIT_TOKEN=tokB STUB_PUSH="tokA")"
-check "§205(7) a non-GitHub origin, or none, asks GitHub nothing and uses the host's active account" \
-    bash -c '[ "$1" = "pusher|host active account |calls=0" ] && [ "$2" = "$1" ]' _ "$(printf '%s' "$_s205_r" | tr '\n' ' ')" "$(printf '%s' "$_s205_r2" | tr '\n' ' ')"
-_s205_r="$(_s205 "solo:tokS" https://github.com/someorg/repo GIT_TOKEN=other)"
-_s205_r2="$(_s205 "$_S205_A" https://gitlab.com/x/y GIT_TOKEN=unknown)"
-check "§205(8) one account is used with no API call; with no match anywhere nothing is picked (gh keeps its own state)" \
-    bash -c '[ "$1" = "solo|only account |calls=0" ] && [ "$2" = "none |calls=0" ]' _ "$(printf '%s' "$_s205_r" | tr '\n' ' ')" "$(printf '%s' "$_s205_r2" | tr '\n' ' ')"
-_s205_r="$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_PUSH="")"
-check "§205(9) the push check passes each token through GH_TOKEN, never argv, and asks with a timeout" \
-    bash -c '! grep -q "tok[ABC]" "$1" && grep -qx "api repos/someorg/repo --jq .permissions.push" "$1" && printf "%s" "$2" | grep -q "GH_TOKEN=\"\$_t\" timeout 5 gh api"' _ "$_S205_D/log" "$_S205_FN"
-check "§205(10) user-setup switches gh to the pick, and the old owner-only block is gone" \
-    bash -c 'grep -q "^    if _gh_pick=\"\$(_sandy_gh_pick_account \"\$_gh_origin\")\"; then\$" "$1" && grep -q "gh auth switch --user \"\${_gh_pick%%|\*}\"" "$1" && ! grep -q "_repo_owner" "$1"' _ "$SANDY_SCRIPT"
-_s205_rf() { env -i PATH="$PATH" SANDY_GH_ACCOUNT="$1" bash -c 'RUN_FLAGS=(); GH_ACCOUNTS=""; warn() { echo "W:$*"; }; eval "$2"; printf "%s\n" "${RUN_FLAGS[@]}"' _ "$1" "$(awk '/^if \[ -n "\$\{SANDY_GH_ACCOUNT:-\}" \]; then$/{p=1} p{print} p&&/^fi$/{exit}' "$SANDY_SCRIPT")" 2>/dev/null; }
-check "§205(11) the host forwards a valid SANDY_GH_ACCOUNT and refuses anything that is not a GitHub username" \
-    bash -c '[ "$1" = "-e SANDY_GH_ACCOUNT=drapp_pfpt" ] && printf "%s" "$2" | grep -q "^W:Ignoring" && ! printf "%s" "$2" | grep -q "^-e"' _ \
-    "$(_s205_rf drapp_pfpt | tr '\n' ' ' | sed 's/ $//')" "$(_s205_rf 'a b;x')"
-check "§205(12) SANDY_GH_ACCOUNT is passive-safe and in --print-schema" \
-    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"name\":\"SANDY_GH_ACCOUNT\"" && awk "/^SANDY_PASSIVE_KEYS=\(/,/^\)\$/" "$1" | grep -qE "^[[:space:]]+SANDY_GH_ACCOUNT\$"' _ "$SANDY_SCRIPT"
+check "§205(0) the picker and push check were extracted (mutation: a renamed function empties them and every check goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "^_sandy_gh_pick_account() {" && printf "%s" "$1" | grep -q "^_sandy_gh_can_push() {"' _ "$_S205_FN"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" https://github.com/someorg/repo.git GIT_TOKEN=tokA STUB_PUSH="tokB tokC")")"
+check "§205(1) an org repo gets the FIRST account that can push, not the last logged in nor the host's active (got: $_s205_r)" \
+    test "$_s205_r" = "pusher|can push to someorg/repo|calls=2"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" git@github.com:someorg/repo.git GIT_TOKEN=tokB STUB_PUSH="")")"
+check "§205(2) nobody can push: the host's active account (the one whose token is GIT_TOKEN), after asking about every account (got: $_s205_r)" \
+    test "$_s205_r" = "pusher|host active account|calls=3"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" ssh://git@github.com/someorg/repo GIT_TOKEN=tokC STUB_FAIL=1 STUB_PUSH="tokA")")"
+check "§205(3) the push check failing outright falls back to the host's active account (got: $_s205_r)" \
+    test "$_s205_r" = "lastone|host active account|calls=3"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" https://github.com/LastOne/repo GIT_TOKEN=tokA STUB_PUSH="tokB")")"
+check "§205(4) a repo owned by one of the accounts picks it, case-insensitively, with no API call (got: $_s205_r)" \
+    test "$_s205_r" = "lastone|owns origin|calls=0"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA SANDY_GH_ACCOUNT=lastone STUB_PUSH="tokB")")"
+check "§205(5) SANDY_GH_ACCOUNT naming a forwarded account wins over everything, with no API call and no warning (got: $_s205_r)" \
+    bash -c '[ "$1" = "lastone|SANDY_GH_ACCOUNT|calls=0" ] && [ ! -s "$2" ]' _ "$_s205_r" "$_S205_D/err"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA SANDY_GH_ACCOUNT=nobody STUB_PUSH="tokC")")"
+check "§205(6) SANDY_GH_ACCOUNT naming no forwarded account warns on stderr, naming it and the accounts there are, and picks automatically (got: $_s205_r)" \
+    bash -c '[ "$1" = "lastone|can push to someorg/repo|calls=3" ] && grep -q "SANDY_GH_ACCOUNT=nobody is not a gh account" "$2" && grep -q "hostact pusher lastone" "$2"' _ "$_s205_r" "$_S205_D/err"
+_s205_r="$(_s205f "$(_s205 "$_S205_A" https://gitlab.com/someorg/repo GIT_TOKEN=tokB STUB_PUSH="tokA")")"
+_s205_r2="$(_s205f "$(_s205 "$_S205_A" "" GIT_TOKEN=tokB STUB_PUSH="tokA")")"
+_s205_r3="$(_s205f "$(_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokB SANDY_OFFLINE=1 STUB_PUSH="tokA")")"
+check "§205(7) a non-GitHub origin, no origin, or offline mode asks GitHub nothing and uses the host's active account" \
+    bash -c '[ "$1" = "pusher|host active account|calls=0" ] && [ "$2" = "$1" ] && [ "$3" = "$1" ]' _ "$_s205_r" "$_s205_r2" "$_s205_r3"
+_s205_r="$(_s205f "$(_s205 "solo:tokS" https://github.com/someorg/repo GIT_TOKEN=other)")"
+_s205_r2="$(_s205f "$(_s205 "$_S205_A" https://gitlab.com/x/y GIT_TOKEN=unknown)")"
+check "§205(8) one account is used with no API call; with no match anywhere nothing is picked" \
+    bash -c '[ "$1" = "solo|only account|calls=0" ] && [ "$2" = "none|calls=0" ]' _ "$_s205_r" "$_s205_r2"
+_s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_PUSH="" >/dev/null
+check "§205(9) each token reaches gh through GH_TOKEN, never argv" \
+    bash -c 'grep -qx "api repos/someorg/repo --jq .permissions.push|tok=tokB" "$1" && ! cut -d"|" -f1 "$1" | grep -q "tok[ABC]"' _ "$_S205_D/log"
+_s205_t0=$SECONDS
+_s205_r="$(_s205f "$(_s205 "hostact:tokA,pusher:tokB" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_HANG=1)")"
+_s205_dt=$((SECONDS - _s205_t0))
+check "§205(10) a push check that hangs is abandoned after about 5 s per account, then the host's active account is used (took ${_s205_dt}s, got: $_s205_r)" \
+    bash -c '[ "$1" = "hostact|host active account|calls=2" ] && [ "$2" -le 14 ]' _ "$_s205_r" "$_s205_dt"
+# The container side applies the host's choice and decides nothing.
+_S205_CT="$(awk '/^    # Make the account the HOST chose active/{p=1} p{print} p&&/^    fi$/{exit}' "$SANDY_SCRIPT")"
+_s205_ct() { : > "$_S205_D/log"; env -i PATH="$_S205_D/bin:$PATH" STUB_LOG="$_S205_D/log" SANDY_GH_ACTIVE="$1" bash -c 'set -euo pipefail; sandy_log() { :; }; IFS="," read -ra _gh_pairs <<< "a:t1,b:t2"; eval "$1"' _ "$_S205_CT" 2>"$_S205_D/err"; cat "$_S205_D/log"; }
+check "§205(11) the container switches gh to the host's choice, and to nothing when the choice was not forwarded (it says so)" \
+    bash -c '[ "$1" = "auth switch --user b|tok=" ] && [ -z "$2" ] && grep -q "was chosen but not forwarded" "$3" && ! grep -q "_sandy_gh_pick_account\|gh api" <<< "$4"' _ \
+    "$(_s205_ct b)" "$(_s205_ct zz)" "$_S205_D/err" "$_S205_CT"
+check "§205(12) the host decides BEFORE it writes the marker, records github{} there, and passes SANDY_GH_ACTIVE (not SANDY_GH_ACCOUNT) to the container" \
+    bash -c 'p=$(grep -n "^    if _sandy_gh_pick=\"\$(_sandy_gh_pick_account \"\$GH_ACCOUNTS\"" "$1" | cut -d: -f1); m=$(grep -n "^_sandy_launched_at=" "$1" | cut -d: -f1); [ -n "$p" ] && [ "$p" -lt "$m" ] && grep -q "\"credentials\": {%s},\\\\n  \"github\": {%s}," "$1" && grep -q "RUN_FLAGS+=(-e \"SANDY_GH_ACTIVE=\$_SANDY_GH_ACTIVE\")" "$1" && ! grep -q "RUN_FLAGS+=(-e \"SANDY_GH_ACCOUNT=" "$1"' _ "$SANDY_SCRIPT"
+check "§205(13) SANDY_GH_ACCOUNT is passive-safe and in --print-schema" \
+    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"name\":\"SANDY_GH_ACCOUNT\"" && awk "/^SANDY_PASSIVE_KEYS=\\(/,/^\\)\$/" "$1" | grep -qE "^[[:space:]]+SANDY_GH_ACCOUNT\$"' _ "$SANDY_SCRIPT"
+# --accounts reads the recorded account back.
+_S205_H="$_S205_D/home"
+mkdir -p "$_S205_H/sandboxes/gh-11111111/claude" "$_S205_H/sandboxes/nogh-22222222/claude"
+printf '{"cred_mode":"oauth-token","agents":["claude","codex"],"github":{"account":"rappdw","reason":"can push to org/repo"}}' > "$_S205_H/sandboxes/gh-11111111/sandy-session.json"
+printf '{"cred_mode":"oauth-token","agents":["claude"]}' > "$_S205_H/sandboxes/nogh-22222222/sandy-session.json"
+env -i PATH="$PATH" HOME="$_S205_D" SANDY_HOME="$_S205_H" bash "$SANDY_SCRIPT" --accounts </dev/null > "$_S205_D/acc.txt" 2>&1 || true
+env -i PATH="$PATH" HOME="$_S205_D" SANDY_HOME="$_S205_H" bash "$SANDY_SCRIPT" --accounts --json </dev/null > "$_S205_D/acc.json" 2>/dev/null || true
+check "§205(14) --accounts shows each sandbox's gh account once, on its first row, '-' when none was recorded; --json gives account and reason" \
+    bash -c 'grep -q "^  SANDBOX  *AGENT  *CRED  *ACCOUNT  *GITHUB$" "$1" && grep -q "^  gh-11111111  *claude  *oauth-token  *-  *rappdw$" "$1" && grep -q "^  *codex  *-  *-$" "$1" && grep -q "^  nogh-22222222  *claude  *oauth-token  *-  *-$" "$1" && python3 -c "import json,sys; d={s[\"sandbox\"]: s for s in json.load(open(sys.argv[1]))[\"sandboxes\"]}; sys.exit(0 if d[\"gh-11111111\"][\"github\"]=={\"account\":\"rappdw\",\"reason\":\"can push to org/repo\"} and d[\"nogh-22222222\"][\"github\"] is None else 1)" "$2"' _ "$_S205_D/acc.txt" "$_S205_D/acc.json"
 rm -rf "$_S205_D"
-unset _S205_FN _S205_D _S205_A _s205_r _s205_r2
-unset -f _s205 _s205_rf
+unset _S205_FN _S205_D _S205_A _S205_CT _S205_H _s205_r _s205_r2 _s205_r3 _s205_t0 _s205_dt
+unset -f _s205 _s205f _s205_ct
+
+
+# ============================================================
+echo "§208: Reflection AI's Mirror CLI as a single-agent (#463)"
+# ============================================================
+# decisions/2026-10-20-mirror-agent.md. Every check runs the REAL code: the
+# command builder against a stub `mirror` that records the argv it receives,
+# the container-side config.json seed under python3, the credential probe,
+# and the agent-list validation, each extracted from the script.
+_S208_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S208_D/bin" "$_S208_D/home"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "%s/argv"\n' "$_S208_D" > "$_S208_D/bin/mirror"
+chmod +x "$_S208_D/bin/mirror"
+_S208_FN="$(sed -n '/^_sandy_translate_args()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_wrap_cmd_exit_pause()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^build_mirror_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+_s208_argv() {
+    local envs="$1"; shift
+    rm -f "$_S208_D/argv" "$_S208_D/PWNED"
+    # shellcheck disable=SC2086
+    env -i PATH="$_S208_D/bin:$PATH" HOME="$_S208_D/home" _sandy_is_headless=false $envs \
+        bash -c 'set -euo pipefail; eval "$1"; shift; c="$(build_mirror_cmd "$@")"; cd "$0"; bash -c "$c" </dev/null >/dev/null 2>&1 || true' "$_S208_D" "$_S208_FN" "$@" 2>/dev/null
+    cat "$_S208_D/argv" 2>/dev/null || printf 'NOT-RUN\n'
+}
+check "§208(1) default: the TUI gets --approval-mode auto and auto-continues" \
+    bash -c '[ "$1" = "--approval-mode auto --continue" ]' _ "$(_s208_argv '')"
+check "§208(2) SANDY_SKIP_PERMISSIONS=false passes approve explicitly (Mirror remembers the mode)" \
+    bash -c '[ "$1" = "--approval-mode approve --continue" ]' _ "$(_s208_argv 'SANDY_SKIP_PERMISSIONS=false')"
+check "§208(3) headless is mirror exec with the approval mode, the prompt positional, no --continue" \
+    bash -c '[ "$1" = "exec --approval-mode auto hello world" ] && [ "$2" = "exec --approval-mode approve hi" ]' _ "$(_s208_argv '_sandy_is_headless=true' -p 'hello world')" "$(_s208_argv '_sandy_is_headless=true SANDY_SKIP_PERMISSIONS=false' --print hi)"
+check "§208(4) no --continue for --new, sandy's --resume, --conversation-id or --showcase; -c and --resume never reach mirror" \
+    bash -c '[ "$1" = "--approval-mode auto" ] && [ "$2" = "--approval-mode auto" ] && [ "$3" = "--approval-mode auto --conversation-id abc" ] && [ "$4" = "--approval-mode auto --showcase" ] && [ "$5" = "--approval-mode auto --continue" ]' _ \
+    "$(_s208_argv 'SANDY_NEW_SESSION=true')" "$(_s208_argv '' --resume)" "$(_s208_argv '' --conversation-id abc)" "$(_s208_argv '' --showcase)" "$(_s208_argv '' -c)"
+check "§208(5) MIRROR_MODEL -> --model; SANDY_EFFORT -> --reasoning-effort by identity; unset effort passes nothing" \
+    bash -c '[ "$1" = "--approval-mode auto --model m1 --reasoning-effort max --continue" ] && [ "$2" = "--approval-mode auto --reasoning-effort low --continue" ] && case "$3" in *reasoning*) exit 1 ;; esac' _ \
+    "$(_s208_argv 'MIRROR_MODEL=m1 SANDY_EFFORT=max')" "$(_s208_argv 'SANDY_EFFORT=low')" "$(_s208_argv '')"
+check "§208(6) an operator --approval-mode comes after sandy's (Mirror's argparse keeps the last)" \
+    bash -c '[ "$1" = "--approval-mode auto --continue --approval-mode approve" ]' _ "$(_s208_argv '' --approval-mode approve)"
+_s208_r1() {
+    rm -f "$_S208_D/PWNED"
+    env -i PATH="$_S208_D/bin:$PATH" HOME="$_S208_D/home" _sandy_is_headless=false MIRROR_MODEL="x;touch $_S208_D/PWNED;x" \
+        bash -c 'set -euo pipefail; eval "$1"; c="$(build_mirror_cmd)"; bash -c "$c" </dev/null >/dev/null 2>&1 || true' _ "$_S208_FN" 2>/dev/null
+    [ -s "$_S208_D/argv" ] && [ ! -e "$_S208_D/PWNED" ]
+}
+check "§208(7) MIRROR_MODEL is quoted at the sink: a metacharacter payload is inert and mirror still runs (R1)" _s208_r1
+
+# --- the container-side config.json seed (user-setup.sh, run by python3) ----
+sed -n "/<<'MIRRORSEED'/,/^MIRRORSEED\$/p" "$SANDY_SCRIPT" | sed '1d;$d' > "$_S208_D/seed.py"
+if ! command -v python3 >/dev/null 2>&1; then
+    skip "§208(8-12) need python3 on the host (the seed runs in the image's python3)"
+else
+_s208_seed() { python3 "$_S208_D/seed.py" "$1" /home/sandy/dev/proj 2>"$_S208_D/seed.err"; }
+_s208_q() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(repr(eval(sys.argv[2])))' "$@"; }
+_s208_s8() {
+    local f="$_S208_D/c8.json"; rm -f "$f"
+    _s208_seed "$f" || return 1
+    [ "$(_s208_q "$f" '(d["usage_warning_acknowledged"], d["trusted_directories"], d["analytics"])')" = "(True, ['/home/sandy/dev/proj'], False)" ]
+}
+check "§208(8) a fresh home gets the two acceptances, this workspace path, analytics false" _s208_s8
+_s208_s9() {
+    local f="$_S208_D/c9.json"
+    printf '%s\n' '{"install_id": "i1", "approval_mode": "auto", "analytics": true, "trusted_directories": ["/other"]}' > "$f"
+    _s208_seed "$f" || return 1
+    [ "$(_s208_q "$f" '(d["install_id"], d["approval_mode"], d["analytics"], d["trusted_directories"])')" = "('i1', 'auto', True, ['/other', '/home/sandy/dev/proj'])" ]
+}
+check "§208(9) merge keeps every other key, other trusted dirs, and a user's analytics opt-in" _s208_s9
+_s208_s10() {
+    local f="$_S208_D/c8.json"
+    cp "$f" "$_S208_D/c8.before" && _s208_seed "$f" && cmp -s "$f" "$_S208_D/c8.before"
+}
+check "§208(10) a second run changes nothing (the path is not duplicated, the file is not rewritten)" _s208_s10
+_s208_s11() {
+    local f="$_S208_D/c11.json"
+    printf '[1, 2]\n' > "$f"; cp "$f" "$_S208_D/c11.before"
+    _s208_seed "$f" && cmp -s "$f" "$_S208_D/c11.before" && grep -q "not a JSON object" "$_S208_D/seed.err"
+}
+check "§208(11) a config.json that is not a JSON object is left byte-identical, with a warning" _s208_s11
+_s208_s12() {
+    local f="$_S208_D/c12.json"
+    printf '{}\n' > "$_S208_D/c12.target"; ln -sf "$_S208_D/c12.target" "$f"
+    _s208_seed "$f" && [ ! -L "$f" ] && [ "$(cat "$_S208_D/c12.target")" = "{}" ] && [ "$(_s208_q "$f" 'd["usage_warning_acknowledged"]')" = True ]
+}
+check "§208(12) a planted symlink at config.json is replaced, never written through" _s208_s12
+fi
+check "§208(13) user-setup.sh runs the seed only for mirror, against the container workspace path" \
+    bash -c 's="$(sed -n "/^if _sandy_has_mirror; then/,/^fi\$/p" "$1")"; echo "$s" | grep -qF "python3 - \"\$HOME/.mirror/config.json\" \"\$SANDY_WORKSPACE\""' _ "$SANDY_SCRIPT"
+
+# --- the credential probe (host-side) ----------------------------------------
+_S208_CR="$(sed -n '/^_sandy_daemon_fatal()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^load_mirror_credentials()/,/^}$/p' "$SANDY_SCRIPT")"
+_s208_cred() {   # $1 case dir; remaining: env assignments. Prints rc.
+    local d="$1"; shift
+    mkdir -p "$d/sb/mirror" "$d/home"
+    env -i PATH="$PATH" HOME="$d/home" SANDBOX_DIR="$d/sb" SANDY_DAEMON_LOG="$d/daemon.log" "$@" \
+        bash -c 'info() { echo "INFO $*"; }; warn() { echo "WARN $*"; }; eval "$1"; load_mirror_credentials; echo rc=$?' _ "$_S208_CR" >"$d/out" 2>&1 || echo "rc=$?" >> "$d/out"
+}
+_s208_c14() {
+    local d="$_S208_D/cr14"; mkdir -p "$d/home/.mirror"; (umask 022; printf 'k-host\n' > "$d/home/.mirror/reflection_api_key")
+    _s208_cred "$d"
+    [ "$(cat "$d/sb/mirror/reflection_api_key")" = k-host ] || return 1
+    case "$(ls -l "$d/sb/mirror/reflection_api_key")" in -rw-------*) : ;; *) return 1 ;; esac
+    grep -q 'rc=0' "$d/out"
+}
+check "§208(14) a host ~/.mirror key is seeded into the sandbox at mode 0600, whatever the umask" _s208_c14
+_s208_c15() {
+    local d="$_S208_D/cr15"; mkdir -p "$d/home/.mirror" "$d/sb/mirror"; printf 'k-host\n' > "$d/home/.mirror/reflection_api_key"
+    printf 'decoy\n' > "$d/outside"; ln -s "$d/outside" "$d/sb/mirror/reflection_api_key"
+    _s208_cred "$d"
+    [ "$(cat "$d/outside")" = decoy ] && [ ! -L "$d/sb/mirror/reflection_api_key" ] && grep -q 'Removed a symlink' "$d/out"
+}
+check "§208(15) a planted link at mirror/reflection_api_key is removed, and the host key is never written through it" _s208_c15
+_s208_c16() {
+    local d="$_S208_D/cr16"; mkdir -p "$d/home/.mirror"; printf 'k-host\n' > "$d/home/.mirror/reflection_api_key"
+    _s208_cred "$d" REFLECTION_API_KEY=k-env
+    [ ! -e "$d/sb/mirror/reflection_api_key" ] && grep -q 'rc=0' "$d/out"
+}
+check "§208(16) REFLECTION_API_KEY wins: nothing is seeded beside it" _s208_c16
+_s208_c17() {
+    local d="$_S208_D/cr17"
+    _s208_cred "$d" SANDY_DAEMON_SUPERVISOR=1
+    grep -q 'rc=1' "$d/out" && [ -e "$d/daemon.log.fatal" ] && grep -q 'no Reflection API key' "$d/out" || return 1
+    d="$_S208_D/cr17h"; _s208_cred "$d" _sandy_is_headless=true
+    grep -q 'rc=1' "$d/out" || return 1
+    d="$_S208_D/cr17i"; _s208_cred "$d"
+    grep -q 'rc=0' "$d/out" && grep -q '^WARN No Reflection API key' "$d/out"
+}
+check "§208(17) no key anywhere: --start and headless refuse (fatal marker), an interactive launch warns and proceeds" _s208_c17
+
+# --- agent selection, schema, egress, protected path, image -------------------
+_S208_SEL="$(sed -n '/^# Parse comma-separated agent list and validate/,/^_SANDY_IS_MULTI=false/p' "$SANDY_SCRIPT")"
+_s208_sel() { env -i PATH="$PATH" SANDY_AGENT="$1" bash -c 'eval "$1" && echo OK' _ "$_S208_SEL" 2>&1 || true; }
+check "§208(18) mirror alone is valid; mirror in any combo is refused, naming the follow-up issue" \
+    bash -c '[ "$1" = OK ] && case "$2" in *"mirror runs alone"*464*) : ;; *) exit 1 ;; esac && case "$3" in *"mirror runs alone"*) : ;; *) exit 1 ;; esac' _ \
+    "$(_s208_sel mirror)" "$(_s208_sel claude,mirror)" "$(_s208_sel mirror,codex)"
+bash "$SANDY_SCRIPT" --print-schema > "$_S208_D/schema.json" 2>/dev/null || true
+check "§208(19) --print-schema: agent mirror (sandy-mirror), REFLECTION_API_KEY privileged, MIRROR_MODEL passive, .mirror protected" \
+    python3 - "$_S208_D/schema.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+ag = {a["name"]: a for a in d["agents"]}
+assert ag["mirror"]["image"] == "sandy-mirror", ag.get("mirror")
+def tier_of(name):
+    for t in ("privileged_keys", "passive_keys", "env_only_keys"):
+        if any(k.get("name") == name for k in d["config"][t]):
+            return t
+assert tier_of("REFLECTION_API_KEY") == "privileged_keys", tier_of("REFLECTION_API_KEY")
+assert tier_of("MIRROR_MODEL") == "passive_keys", tier_of("MIRROR_MODEL")
+assert ".mirror" in d["protected_paths"]["dirs_always_mount"], d["protected_paths"]
+PY
+check "§208(20) strict egress allows api.reflection.ai and NOT Mirror's analytics endpoint" \
+    bash -c 'a="$(sed -n "/^SANDY_DEFAULT_ALLOW_HOSTS=(/,/^)/p" "$1")"; echo "$a" | grep -qx "    \"api.reflection.ai\"" && ! echo "$a" | grep -q "^ *\"[^\"]*statsigapi"' _ "$SANDY_SCRIPT"
+check "§208(21) the image pins MIRROR_SKIP_UPDATE=1 and fails the build on an empty mirror --version (#201)" \
+    bash -c 'f="$(sed -n "/^generate_dockerfile_mirror()/,/^}\$/p" "$1")"; echo "$f" | grep -qx "ENV MIRROR_SKIP_UPDATE=1" && echo "$f" | grep -q "mirror --version .*> /opt/mirror/.version" && echo "$f" | grep -q "reports no version"' _ "$SANDY_SCRIPT"
+check "§208(22) REFLECTION_API_KEY goes through the 0600 env-file, never a -e flag; no other provider key is forwarded for mirror" \
+    bash -c 'b="$(sed -n "/^if _sandy_agent_has mirror; then/,/^fi\$/p" "$1" | grep -v "^ *#")"; echo "$b" | grep -q "_sandy_add_secret_env REFLECTION_API_KEY" && ! echo "$b" | grep -qE "RUN_FLAGS.*REFLECTION_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY"' _ "$SANDY_SCRIPT"
+rm -rf "$_S208_D"
+unset _S208_D _S208_FN _S208_CR _S208_SEL
 
 
 echo "§207: #461 — the egress proxy can read its config under any umask, and a failed sidecar attach names why"
