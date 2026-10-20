@@ -43,6 +43,36 @@
 #       y, and answers the terminal's cursor-position query (prompt_toolkit
 #       warned "your terminal doesn't support cursor position requests").
 #
+# RESULTS, run 2 (2026-10-20, mirror 0.1.0, macOS host):
+#   M2  Answering y writes ~/.mirror/config.json:
+#       {usage_warning_acknowledged: true, trusted_directories: ["/w/ws"],
+#        install_id}. Later also analytics_notice_shown: true (a one-line
+#       inline notice, not a prompt: "Mirror collects anonymous feature
+#       usage ... To turn this off, see /settings"). Source: config key
+#       `analytics`, only an explicit false opts out; events go to
+#       https://events.statsigapi.net/v1/log_event.
+#       With no key, the next screen is "Connect to Reflection ... API key
+#       >" -- an inert screen under --start.
+#   M3  config.json ALONE is enough for exec (cli.db alone is not). The
+#       trust is per exact path: a different workspace path is refused.
+#   M4  exec --approval-mode auto does NOT persist (config unchanged);
+#       interactive --approval-mode auto DOES (approval_mode: "auto", M6).
+#       exec --approval-mode approve and exec with no flag both refuse a tool
+#       call: "tool approval required ... exec never grants an approval",
+#       exit 1.
+#   M5  exec exits 0 on success, 1 on everything else (bad key, no network
+#       -- both "agent ended without a final answer; check run limits" --,
+#       empty prompt, approval needed, notices not accepted).
+#   M6  --continue with no prior conversation starts a fresh one, no error;
+#       after a turn it reopens that conversation.
+#   M7  state.db react_session.workspace and cli.db cli_user_messages.cwd
+#       hold the container workspace path.
+#   M8  Starts offline (MIRROR_SKIP_UPDATE=1), read-only root, non-root uid.
+#   Open: M9 below (exec auto really runs a tool; interactive approve beats
+#   a saved auto; whether --continue reopens a headless exec session).
+#
+# SPIKE_ONLY=M9 runs only the build and M9 (needs the key).
+#
 # It is a measurement, not a pass/fail suite: it prints raw evidence. Paste
 # the whole output back. SPIKE_KEEP=1 keeps the temp dir and the image.
 set -uo pipefail
@@ -238,6 +268,28 @@ for (t,) in c.execute("select name from sqlite_master where type='table' order b
 PY
 }
 
+# M9 -- seeded with only what sandy will write, so it runs standalone
+m9() {
+    say "M9a exec --approval-mode auto runs a tool"
+    mkhome m9; mkdir -p "$D/m9/home/.mirror"
+    # exactly what sandy will seed: the two acceptances, nothing from a real run
+    printf '{"usage_warning_acknowledged": true, "trusted_directories": ["/w/ws"]}\n' > "$D/m9/home/.mirror/config.json"
+    R m9 "${KEY_ENV[@]}" -- "${DRIVE[@]}" --plain -- timeout 180 mirror exec --approval-mode auto "Use your shell tool to run exactly: touch /w/ws/probe-auto . Then reply DONE."
+    if [ -e "$D/m9/ws/probe-auto" ]; then note "probe-auto EXISTS: exec auto ran the tool"; else note "probe-auto absent: exec auto did NOT run the tool"; fi
+    say "M9b --continue when the only conversation is a headless exec one"
+    R m9 -t "${KEY_ENV[@]}" -- "${DRIVE[@]}" stable:25 snap:continue-after-exec -- mirror --approval-mode auto --continue
+    say "M9c interactive auto (saved), then interactive approve"
+    R m9 -t "${KEY_ENV[@]}" -- "${DRIVE[@]}" stable:20 snap:auto -- mirror --approval-mode auto
+    note "approval in config after auto:"; grep -i approv "$D/m9/home/.mirror/config.json" || true
+    R m9 -t "${KEY_ENV[@]}" -- "${DRIVE[@]}" stable:20 snap:approve-status-bar -- mirror --approval-mode approve
+    note "approval in config after approve:"; grep -i approv "$D/m9/home/.mirror/config.json" || true
+}
+
+if [ "${SPIKE_ONLY:-}" = "M9" ]; then
+    [ "$HAVE_KEY" = true ] || { echo "SPIKE_ONLY=M9 needs REFLECTION_API_KEY" >&2; exit 1; }
+    m9; say "done"; exit 0
+fi
+
 # ---------------------------------------------------------------- M0
 say "M0 flag set"
 mkhome m0
@@ -348,4 +400,6 @@ for n in m3 m4 m6; do
     done
 done
 inventory m6
+
+m9
 say "done"
