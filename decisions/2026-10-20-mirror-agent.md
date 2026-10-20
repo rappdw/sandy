@@ -12,6 +12,7 @@ Mirror (`reflection-oss/mirror`, Apache-2.0, PyPI `reflection-mirror`, binary `m
 | 4 | Protected path | All of `.mirror/` joins the protected directories (existence-gated, session-end detection like the rest). | `.mirror/extensions/` is executable Python loaded from the workspace, and the rest of `.mirror/` is undocumented beta surface. Default-deny covers what a later Mirror adds there; the existence gate makes it free in a repository without `.mirror/`. |
 | 5 | Effort | `SANDY_EFFORT` maps to `--reasoning-effort` by identity. Unset passes nothing, and the docs say Mirror's own default is `max`. | A pinned default would override the user's saved `/effort` on every relaunch, since launch flags win for that launch. Every other agent also gets nothing when `SANDY_EFFORT` is unset. |
 | 6 | Local LLM | Not wired. Documented recipe: `--api openai-chat-completions --base-url http://host.docker.internal:<port>/v1 --model <name>` in `$SANDBOX_DIR/agent-args.mirror`. | `SANDY_LOCAL_LLM_HOST` already opens the network path for any agent. Auto-wiring would let a host-wide setting kept for opencode silently switch Mirror off Reflection. |
+| 7 | Usage analytics (decided after spike run 2) | Mirror's container-side `config.json` seed writes `"analytics": false` whenever the key is absent, so a `/settings` opt-in persists. | Privacy by default for a per-project sandbox, and a strict-egress session no longer logs a denial per Statsig event. Mirror-only: sandy sets no other agent's telemetry, and a cross-agent stance would be its own issue. |
 
 Defaults assumed without a round:
 
@@ -31,8 +32,28 @@ Options considered and not taken:
 - **4:** `.mirror/extensions/` only; `.mirror/` plus `.agents/skills/` (a cross-agent policy question, left for the Pi agent, #460).
 - **5:** pin `high` when unset.
 - **6:** auto-wire when `SANDY_LOCAL_LLM_HOST` is set; an opt-in selector value.
+- **7:** leave Mirror's default on (the recommendation, consistent with the other agents); force `false` every launch as a managed key; one opt-in `SANDY_NO_TELEMETRY` for every agent.
 
-To measure before building (`test/spike/mirror-spike.sh`, host-run):
+## Measured (spike runs 1-2, 2026-10-20, mirror 0.1.0)
+
+- The usage notice and folder trust are ONE prompt, `Continue and trust this folder? [y/N]`, default No. Accepting writes `~/.mirror/config.json` `{usage_warning_acknowledged: true, trusted_directories: [<path>], install_id}`. That file alone lets `mirror exec` run with no prompt; `cli.db` alone does not. Trust is per exact path.
+- With no key, the next interactive screen is an API-key entry form: inert under `--start`.
+- Analytics: a non-blocking inline notice (`analytics_notice_shown`). Source (`mirror/config.py`): key `analytics`, only an explicit `false` opts out; events go to `events.statsigapi.net`.
+- `exec --approval-mode auto` does not persist; interactive `--approval-mode auto` does (`approval_mode`). `exec` with `approve` or no flag refuses tool calls and exits 1.
+- `exec` exits 0 on success, 1 otherwise (bad key and no network print the same "check run limits" message).
+- `--continue` with no prior conversation starts fresh, no error.
+- `state.db` `react_session.workspace` and `cli.db` `cli_user_messages.cwd` hold the container workspace path.
+- Starts offline with `MIRROR_SKIP_UPDATE=1`, read-only root, non-root uid.
+
+What that changes (defaults, no locked decision moved):
+
+- The seed is container-side, in `user-setup.sh` with the image's Python: merge `usage_warning_acknowledged: true`, the container workspace path into `trusted_directories`, and (decision 7) `analytics: false` when absent, keeping every other key. A container-side write avoids #400's host-replacement hazard.
+- Interactive launches pass `--continue` unless `sandy --new`; no `state.db` probe.
+- `--start` and headless refuse when no Reflection key is found (env, sandbox, host), with the `.fatal` marker, as #261 does for an expired Claude token. An interactive foreground launch proceeds, since a human can enter the key (it is then saved in the sandbox).
+
+Still open (spike M9, `SPIKE_ONLY=M9`): exec `auto` really runs a tool; interactive `approve` beats a saved `auto`; whether `--continue` reopens a headless `exec` session.
+
+Original measurement list (`test/spike/mirror-spike.sh`, host-run):
 
 - where the usage, folder-trust and extension acceptances are recorded, and whether seeding them lets `mirror exec` and an interactive launch start with no prompt;
 - whether `--approval-mode approve` overrides a saved `auto`;
