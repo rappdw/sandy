@@ -10546,6 +10546,29 @@ build_codex_cmd() {
         if [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ] && [ "$_cx_ap" = "false" ]; then
             cmd+=" --ask-for-approval never"
         fi
+        # #457: codex-cli 0.163.0 runs the interactive TUI (and `codex resume`)
+        # through a shared background "app-server daemon" by default. On first
+        # use it copies its whole package (~460 MB) into
+        # ~/.codex/packages/app-server-daemon/, starts the daemon plus an
+        # updater that replaces that copy from the network, and refuses to
+        # start ("daemon executable not found ... repair the existing
+        # installation") when the copy is incomplete. None of that fits the
+        # sandbox: the image is the only source of the agent binary, ~/.codex
+        # is persistent and agent-writable, and a pane should not leave
+        # long-lived processes behind. So interactive codex runs without it.
+        # Gated on the installed codex advertising the flag, because an older
+        # codex refuses an unknown one. Skipped when the args already carry
+        # --no-daemon (a second one is a clap error) or --remote (codex
+        # refuses the two together). `codex exec` has no such flag.
+        local _cx_nd=true
+        for a in "$@"; do
+            case "$a" in --no-daemon|--remote|--remote=*) _cx_nd=false ;; esac
+        done
+        if [ "$_cx_nd" = "true" ]; then
+            case "$(codex --help 2>/dev/null || true)" in
+                *--no-daemon*) cmd+=" --no-daemon" ;;
+            esac
+        fi
     fi
     if [ -n "${CODEX_MODEL:-}" ]; then
         cmd+=" --model $(printf "%q" "$CODEX_MODEL")"
