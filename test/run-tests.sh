@@ -1696,7 +1696,7 @@ info "28a2. Grok Build support — selection, image, credentials, headless (#99)
 # ============================================================
 _GROK_S="$SANDY_SCRIPT"
 check "grok is a valid agent (validation case)" \
-    grep -q 'claude|gemini|codex|opencode|grok)' "$_GROK_S"
+    grep -q 'claude|gemini|codex|opencode|grok|mirror)' "$_GROK_S"
 check "invalid-agent error lists grok" \
     grep -q "valid: claude, gemini, codex, opencode, grok" "$_GROK_S"
 check "grok maps to the sandy-grok image" \
@@ -1716,7 +1716,7 @@ check "XAI_API_KEY forwarded for grok" \
 check "grok config dir mounts at ~/.grok" \
     grep -qF 'SANDBOX_DIR/grok:/home/sandy/.grok' "$_GROK_S"
 check "sandy-grok in the image-name lists (GC + rebuild loop)" \
-    bash -c 'grep -q "sandy-opencode|sandy-grok|sandy-full" "$1" && grep -q "sandy-opencode sandy-grok sandy-full" "$1"' -- "$_GROK_S"
+    bash -c 'grep -q "sandy-opencode|sandy-grok|sandy-mirror|sandy-full" "$1" && grep -q "sandy-opencode sandy-grok sandy-mirror sandy-full" "$1"' -- "$_GROK_S"
 check ".build_hash_grok cleared on --rebuild" \
     grep -q '.build_hash_grok' "$_GROK_S"
 check "max-4 agent guard present" \
@@ -3543,12 +3543,12 @@ d=json.load(open(sys.argv[1]))
 for k in d[\"config\"][\"privileged_keys\"]:
     assert k.get(\"passive_approval_required\") is True, k[\"name\"]
 " "$1"' -- "$_SCHEMA_JSON"
-check "schema lists all five agents (claude,gemini,codex,opencode,grok)" \
+check "schema lists all six agents (claude,gemini,codex,opencode,grok,mirror)" \
     bash -c 'python3 -c "
 import json,sys
 d=json.load(open(sys.argv[1]))
 names=[a[\"name\"] for a in d[\"agents\"]]
-assert set(names)=={\"claude\",\"gemini\",\"codex\",\"opencode\",\"grok\"}
+assert set(names)=={\"claude\",\"gemini\",\"codex\",\"opencode\",\"grok\",\"mirror\"}
 " "$1"' -- "$_SCHEMA_JSON"
 check "schema cli_flags includes --print-schema" \
     bash -c 'python3 -c "
@@ -4961,11 +4961,11 @@ check "schema commit derivation strips version prefix, not last dash-field" \
     bash -c 'SANDY_VERSION=1.0.0-rc1; full=1.0.0-rc1; c="${full#"$SANDY_VERSION"}"; c="${c#-}"; [ -z "$c" ]'
 check "schema commit derivation keeps a real hash" \
     bash -c 'SANDY_VERSION=1.0.0-rc1; full=1.0.0-rc1-abc1234; c="${full#"$SANDY_VERSION"}"; c="${c#-}"; [ "$c" = abc1234 ]'
-# All four agent update checks use ordered compare, not string !=.
+# All five agent update checks use ordered compare, not string !=.
 check "no agent update check uses string != (downgrade-nag class)" \
     bash -c '! grep -q "\[ \"\$latest\" != \"\$inst\" \]" "$1"' -- "$_SBX_SCRIPT"
-check "agent update checks use _ver_lt (4 sites)" \
-    bash -c '[ "$(grep -c "_ver_lt \"\$inst\" \"\$latest\"" "$1")" = 4 ]' -- "$_SBX_SCRIPT"
+check "agent update checks use _ver_lt (5 sites)" \
+    bash -c '[ "$(grep -c "_ver_lt \"\$inst\" \"\$latest\"" "$1")" = 5 ]' -- "$_SBX_SCRIPT"
 # -vvv dump redacts secret values.
 check "-vvv RUN_FLAGS print redacts credential-shaped values" \
     grep -qF 'printf '"'"'  %s=<redacted>' "$_SBX_SCRIPT"
@@ -10443,11 +10443,11 @@ check "§106(9d) NEGATIVE: all env empty -> exactly the CLI arg, no stray empty 
 # only reproduces on bash <4.4 / bash 3.2, which isn't available here. So the
 # portability property is asserted statically: every one of the five dispatch
 # arms must use the ${_sandy_aa_pre[@]+"${_sandy_aa_pre[@]}"} idiom, not a
-# bare "${_sandy_aa_pre[@]}". SIX uses for five arms since 2.9.0: the claude
+# bare "${_sandy_aa_pre[@]}". SEVEN uses for six arms since 2.9.0: the claude
 # arm has two branches (named sessions -> build_claude_agents_cmd, otherwise
 # build_claude_cmd), and each must be guarded.
-check "§106(9e) STATIC: all 5 dispatch arms (6 calls: claude has two branches) use the guarded empty-array idiom (bash-3.2 safety)" \
-    bash -c '[ "$(grep -c "sandy_aa_pre\[@\]+\"\${_sandy_aa_pre\[@\]}\"" "$1")" -eq 6 ]' -- "$_S106_C9_SCRIPT"
+check "§106(9e) STATIC: all 6 dispatch arms (7 calls: claude has two branches) use the guarded empty-array idiom (bash-3.2 safety)" \
+    bash -c '[ "$(grep -c "sandy_aa_pre\[@\]+\"\${_sandy_aa_pre\[@\]}\"" "$1")" -eq 7 ]' -- "$_S106_C9_SCRIPT"
 
 # --- (10) NEGATIVE: no docker-run mount ever references agent-args.* -------
 # (a) the guard itself, exactly as written in the plan (pipefail-free child).
@@ -10486,9 +10486,9 @@ check "§106(10a4) ...and if it exists it is the #363 composed directory mounted
 # one -- makes the whole feature inert while every other §106 check still
 # passes; the adversarial review confirmed 23/23 green with the seam removed.
 # Assert the count AND each agent by name, so a rename is caught too.
-check "§106(10c) SEAM: exactly five SANDY_AGENT_ARGS_<AGENT> -e forwards exist (mutation: deleting them all makes the feature inert with every other check still green)" \
-    bash -c '[ "$(grep -c "RUN_FLAGS+=(-e \"SANDY_AGENT_ARGS_" "$1" || true)" -eq 5 ]' -- "$_S106_SANDY"
-for _s106_ag in CLAUDE GEMINI CODEX OPENCODE GROK; do
+check "§106(10c) SEAM: exactly six SANDY_AGENT_ARGS_<AGENT> -e forwards exist (mutation: deleting them all makes the feature inert with every other check still green)" \
+    bash -c '[ "$(grep -c "RUN_FLAGS+=(-e \"SANDY_AGENT_ARGS_" "$1" || true)" -eq 6 ]' -- "$_S106_SANDY"
+for _s106_ag in CLAUDE GEMINI CODEX OPENCODE GROK MIRROR; do
     check "§106(10c) SEAM: SANDY_AGENT_ARGS_$_s106_ag is forwarded into the container (mutation: dropping just this one silently disables that agent only)" \
         grep -qF "RUN_FLAGS+=(-e \"SANDY_AGENT_ARGS_$_s106_ag=" "$_S106_SANDY"
 done
@@ -10590,7 +10590,7 @@ check "§106(13a) --print-state: agent_args_files present + correct shape in BOT
 import json,sys
 full=json.loads(sys.argv[1])
 light=json.loads(sys.argv[2])
-want={\"claude\":True,\"gemini\":False,\"codex\":False,\"opencode\":False,\"grok\":False}
+want={\"claude\":True,\"gemini\":False,\"codex\":False,\"opencode\":False,\"grok\":False,\"mirror\":False}
 for d in (full, light):
     sb=[s for s in d[\"sandboxes\"] if s.get(\"name\")==\"demo-aa112233\"]
     assert sb, \"fixture sandbox missing from --print-state output\"
@@ -25770,6 +25770,163 @@ check "§205(12) SANDY_GH_ACCOUNT is passive-safe and in --print-schema" \
 rm -rf "$_S205_D"
 unset _S205_FN _S205_D _S205_A _s205_r _s205_r2
 unset -f _s205 _s205_rf
+
+
+# ============================================================
+echo "§208: Reflection AI's Mirror CLI as a single-agent (#463)"
+# ============================================================
+# decisions/2026-10-20-mirror-agent.md. Every check runs the REAL code: the
+# command builder against a stub `mirror` that records the argv it receives,
+# the container-side config.json seed under python3, the credential probe,
+# and the agent-list validation, each extracted from the script.
+_S208_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S208_D/bin" "$_S208_D/home"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "%s/argv"\n' "$_S208_D" > "$_S208_D/bin/mirror"
+chmod +x "$_S208_D/bin/mirror"
+_S208_FN="$(sed -n '/^_sandy_translate_args()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_wrap_cmd_exit_pause()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^build_mirror_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+_s208_argv() {
+    local envs="$1"; shift
+    rm -f "$_S208_D/argv" "$_S208_D/PWNED"
+    # shellcheck disable=SC2086
+    env -i PATH="$_S208_D/bin:$PATH" HOME="$_S208_D/home" _sandy_is_headless=false $envs \
+        bash -c 'set -euo pipefail; eval "$1"; shift; c="$(build_mirror_cmd "$@")"; cd "$0"; bash -c "$c" </dev/null >/dev/null 2>&1 || true' "$_S208_D" "$_S208_FN" "$@" 2>/dev/null
+    cat "$_S208_D/argv" 2>/dev/null || printf 'NOT-RUN\n'
+}
+check "§208(1) default: the TUI gets --approval-mode auto and auto-continues" \
+    bash -c '[ "$1" = "--approval-mode auto --continue" ]' _ "$(_s208_argv '')"
+check "§208(2) SANDY_SKIP_PERMISSIONS=false passes approve explicitly (Mirror remembers the mode)" \
+    bash -c '[ "$1" = "--approval-mode approve --continue" ]' _ "$(_s208_argv 'SANDY_SKIP_PERMISSIONS=false')"
+check "§208(3) headless is mirror exec with the approval mode, the prompt positional, no --continue" \
+    bash -c '[ "$1" = "exec --approval-mode auto hello world" ] && [ "$2" = "exec --approval-mode approve hi" ]' _ "$(_s208_argv '_sandy_is_headless=true' -p 'hello world')" "$(_s208_argv '_sandy_is_headless=true SANDY_SKIP_PERMISSIONS=false' --print hi)"
+check "§208(4) no --continue for --new, sandy's --resume, --conversation-id or --showcase; -c and --resume never reach mirror" \
+    bash -c '[ "$1" = "--approval-mode auto" ] && [ "$2" = "--approval-mode auto" ] && [ "$3" = "--approval-mode auto --conversation-id abc" ] && [ "$4" = "--approval-mode auto --showcase" ] && [ "$5" = "--approval-mode auto --continue" ]' _ \
+    "$(_s208_argv 'SANDY_NEW_SESSION=true')" "$(_s208_argv '' --resume)" "$(_s208_argv '' --conversation-id abc)" "$(_s208_argv '' --showcase)" "$(_s208_argv '' -c)"
+check "§208(5) MIRROR_MODEL -> --model; SANDY_EFFORT -> --reasoning-effort by identity; unset effort passes nothing" \
+    bash -c '[ "$1" = "--approval-mode auto --model m1 --reasoning-effort max --continue" ] && [ "$2" = "--approval-mode auto --reasoning-effort low --continue" ] && case "$3" in *reasoning*) exit 1 ;; esac' _ \
+    "$(_s208_argv 'MIRROR_MODEL=m1 SANDY_EFFORT=max')" "$(_s208_argv 'SANDY_EFFORT=low')" "$(_s208_argv '')"
+check "§208(6) an operator --approval-mode comes after sandy's (Mirror's argparse keeps the last)" \
+    bash -c '[ "$1" = "--approval-mode auto --continue --approval-mode approve" ]' _ "$(_s208_argv '' --approval-mode approve)"
+_s208_r1() {
+    rm -f "$_S208_D/PWNED"
+    env -i PATH="$_S208_D/bin:$PATH" HOME="$_S208_D/home" _sandy_is_headless=false MIRROR_MODEL="x;touch $_S208_D/PWNED;x" \
+        bash -c 'set -euo pipefail; eval "$1"; c="$(build_mirror_cmd)"; bash -c "$c" </dev/null >/dev/null 2>&1 || true' _ "$_S208_FN" 2>/dev/null
+    [ -s "$_S208_D/argv" ] && [ ! -e "$_S208_D/PWNED" ]
+}
+check "§208(7) MIRROR_MODEL is quoted at the sink: a metacharacter payload is inert and mirror still runs (R1)" _s208_r1
+
+# --- the container-side config.json seed (user-setup.sh, run by python3) ----
+sed -n "/<<'MIRRORSEED'/,/^MIRRORSEED\$/p" "$SANDY_SCRIPT" | sed '1d;$d' > "$_S208_D/seed.py"
+if ! command -v python3 >/dev/null 2>&1; then
+    skip "§208(8-12) need python3 on the host (the seed runs in the image's python3)"
+else
+_s208_seed() { python3 "$_S208_D/seed.py" "$1" /home/sandy/dev/proj 2>"$_S208_D/seed.err"; }
+_s208_q() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(repr(eval(sys.argv[2])))' "$@"; }
+_s208_s8() {
+    local f="$_S208_D/c8.json"; rm -f "$f"
+    _s208_seed "$f" || return 1
+    [ "$(_s208_q "$f" '(d["usage_warning_acknowledged"], d["trusted_directories"], d["analytics"])')" = "(True, ['/home/sandy/dev/proj'], False)" ]
+}
+check "§208(8) a fresh home gets the two acceptances, this workspace path, analytics false" _s208_s8
+_s208_s9() {
+    local f="$_S208_D/c9.json"
+    printf '%s\n' '{"install_id": "i1", "approval_mode": "auto", "analytics": true, "trusted_directories": ["/other"]}' > "$f"
+    _s208_seed "$f" || return 1
+    [ "$(_s208_q "$f" '(d["install_id"], d["approval_mode"], d["analytics"], d["trusted_directories"])')" = "('i1', 'auto', True, ['/other', '/home/sandy/dev/proj'])" ]
+}
+check "§208(9) merge keeps every other key, other trusted dirs, and a user's analytics opt-in" _s208_s9
+_s208_s10() {
+    local f="$_S208_D/c8.json"
+    cp "$f" "$_S208_D/c8.before" && _s208_seed "$f" && cmp -s "$f" "$_S208_D/c8.before"
+}
+check "§208(10) a second run changes nothing (the path is not duplicated, the file is not rewritten)" _s208_s10
+_s208_s11() {
+    local f="$_S208_D/c11.json"
+    printf '[1, 2]\n' > "$f"; cp "$f" "$_S208_D/c11.before"
+    _s208_seed "$f" && cmp -s "$f" "$_S208_D/c11.before" && grep -q "not a JSON object" "$_S208_D/seed.err"
+}
+check "§208(11) a config.json that is not a JSON object is left byte-identical, with a warning" _s208_s11
+_s208_s12() {
+    local f="$_S208_D/c12.json"
+    printf '{}\n' > "$_S208_D/c12.target"; ln -sf "$_S208_D/c12.target" "$f"
+    _s208_seed "$f" && [ ! -L "$f" ] && [ "$(cat "$_S208_D/c12.target")" = "{}" ] && [ "$(_s208_q "$f" 'd["usage_warning_acknowledged"]')" = True ]
+}
+check "§208(12) a planted symlink at config.json is replaced, never written through" _s208_s12
+fi
+check "§208(13) user-setup.sh runs the seed only for mirror, against the container workspace path" \
+    bash -c 's="$(sed -n "/^if _sandy_has_mirror; then/,/^fi\$/p" "$1")"; echo "$s" | grep -qF "python3 - \"\$HOME/.mirror/config.json\" \"\$SANDY_WORKSPACE\""' _ "$SANDY_SCRIPT"
+
+# --- the credential probe (host-side) ----------------------------------------
+_S208_CR="$(sed -n '/^_sandy_daemon_fatal()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^load_mirror_credentials()/,/^}$/p' "$SANDY_SCRIPT")"
+_s208_cred() {   # $1 case dir; remaining: env assignments. Prints rc.
+    local d="$1"; shift
+    mkdir -p "$d/sb/mirror" "$d/home"
+    env -i PATH="$PATH" HOME="$d/home" SANDBOX_DIR="$d/sb" SANDY_DAEMON_LOG="$d/daemon.log" "$@" \
+        bash -c 'info() { echo "INFO $*"; }; warn() { echo "WARN $*"; }; eval "$1"; load_mirror_credentials; echo rc=$?' _ "$_S208_CR" >"$d/out" 2>&1 || echo "rc=$?" >> "$d/out"
+}
+_s208_c14() {
+    local d="$_S208_D/cr14"; mkdir -p "$d/home/.mirror"; (umask 022; printf 'k-host\n' > "$d/home/.mirror/reflection_api_key")
+    _s208_cred "$d"
+    [ "$(cat "$d/sb/mirror/reflection_api_key")" = k-host ] || return 1
+    case "$(ls -l "$d/sb/mirror/reflection_api_key")" in -rw-------*) : ;; *) return 1 ;; esac
+    grep -q 'rc=0' "$d/out"
+}
+check "§208(14) a host ~/.mirror key is seeded into the sandbox at mode 0600, whatever the umask" _s208_c14
+_s208_c15() {
+    local d="$_S208_D/cr15"; mkdir -p "$d/home/.mirror" "$d/sb/mirror"; printf 'k-host\n' > "$d/home/.mirror/reflection_api_key"
+    printf 'decoy\n' > "$d/outside"; ln -s "$d/outside" "$d/sb/mirror/reflection_api_key"
+    _s208_cred "$d"
+    [ "$(cat "$d/outside")" = decoy ] && [ ! -L "$d/sb/mirror/reflection_api_key" ] && grep -q 'Removed a symlink' "$d/out"
+}
+check "§208(15) a planted link at mirror/reflection_api_key is removed, and the host key is never written through it" _s208_c15
+_s208_c16() {
+    local d="$_S208_D/cr16"; mkdir -p "$d/home/.mirror"; printf 'k-host\n' > "$d/home/.mirror/reflection_api_key"
+    _s208_cred "$d" REFLECTION_API_KEY=k-env
+    [ ! -e "$d/sb/mirror/reflection_api_key" ] && grep -q 'rc=0' "$d/out"
+}
+check "§208(16) REFLECTION_API_KEY wins: nothing is seeded beside it" _s208_c16
+_s208_c17() {
+    local d="$_S208_D/cr17"
+    _s208_cred "$d" SANDY_DAEMON_SUPERVISOR=1
+    grep -q 'rc=1' "$d/out" && [ -e "$d/daemon.log.fatal" ] && grep -q 'no Reflection API key' "$d/out" || return 1
+    d="$_S208_D/cr17h"; _s208_cred "$d" _sandy_is_headless=true
+    grep -q 'rc=1' "$d/out" || return 1
+    d="$_S208_D/cr17i"; _s208_cred "$d"
+    grep -q 'rc=0' "$d/out" && grep -q '^WARN No Reflection API key' "$d/out"
+}
+check "§208(17) no key anywhere: --start and headless refuse (fatal marker), an interactive launch warns and proceeds" _s208_c17
+
+# --- agent selection, schema, egress, protected path, image -------------------
+_S208_SEL="$(sed -n '/^# Parse comma-separated agent list and validate/,/^_SANDY_IS_MULTI=false/p' "$SANDY_SCRIPT")"
+_s208_sel() { env -i PATH="$PATH" SANDY_AGENT="$1" bash -c 'eval "$1" && echo OK' _ "$_S208_SEL" 2>&1 || true; }
+check "§208(18) mirror alone is valid; mirror in any combo is refused, naming the follow-up issue" \
+    bash -c '[ "$1" = OK ] && case "$2" in *"mirror runs alone"*464*) : ;; *) exit 1 ;; esac && case "$3" in *"mirror runs alone"*) : ;; *) exit 1 ;; esac' _ \
+    "$(_s208_sel mirror)" "$(_s208_sel claude,mirror)" "$(_s208_sel mirror,codex)"
+bash "$SANDY_SCRIPT" --print-schema > "$_S208_D/schema.json" 2>/dev/null || true
+check "§208(19) --print-schema: agent mirror (sandy-mirror), REFLECTION_API_KEY privileged, MIRROR_MODEL passive, .mirror protected" \
+    python3 - "$_S208_D/schema.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+ag = {a["name"]: a for a in d["agents"]}
+assert ag["mirror"]["image"] == "sandy-mirror", ag.get("mirror")
+def tier_of(name):
+    for t in ("privileged_keys", "passive_keys", "env_only_keys"):
+        if any(k.get("name") == name for k in d["config"][t]):
+            return t
+assert tier_of("REFLECTION_API_KEY") == "privileged_keys", tier_of("REFLECTION_API_KEY")
+assert tier_of("MIRROR_MODEL") == "passive_keys", tier_of("MIRROR_MODEL")
+assert ".mirror" in d["protected_paths"]["dirs_always_mount"], d["protected_paths"]
+PY
+check "§208(20) strict egress allows api.reflection.ai and NOT Mirror's analytics endpoint" \
+    bash -c 'a="$(sed -n "/^SANDY_DEFAULT_ALLOW_HOSTS=(/,/^)/p" "$1")"; echo "$a" | grep -qx "    \"api.reflection.ai\"" && ! echo "$a" | grep -q "^ *\"[^\"]*statsigapi"' _ "$SANDY_SCRIPT"
+check "§208(21) the image pins MIRROR_SKIP_UPDATE=1 and fails the build on an empty mirror --version (#201)" \
+    bash -c 'f="$(sed -n "/^generate_dockerfile_mirror()/,/^}\$/p" "$1")"; echo "$f" | grep -qx "ENV MIRROR_SKIP_UPDATE=1" && echo "$f" | grep -q "mirror --version .*> /opt/mirror/.version" && echo "$f" | grep -q "reports no version"' _ "$SANDY_SCRIPT"
+check "§208(22) REFLECTION_API_KEY goes through the 0600 env-file, never a -e flag; no other provider key is forwarded for mirror" \
+    bash -c 'b="$(sed -n "/^if _sandy_agent_has mirror; then/,/^fi\$/p" "$1" | grep -v "^ *#")"; echo "$b" | grep -q "_sandy_add_secret_env REFLECTION_API_KEY" && ! echo "$b" | grep -qE "RUN_FLAGS.*REFLECTION_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY"' _ "$SANDY_SCRIPT"
+rm -rf "$_S208_D"
+unset _S208_D _S208_FN _S208_CR _S208_SEL
 
 
 # BEGIN SUMMARY

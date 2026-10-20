@@ -5,7 +5,7 @@ The [project README](../../README.md) covers what sandy is, why you'd use it, an
 | Guide | What's in it |
 |---|---|
 | [Configuration](configuration.md) | Every config key and flag, `.sandy/config` and `.sandy/.secrets`, and which settings a repository may change without asking you |
-| [Agents and credentials](agents.md) | Claude, Gemini, Codex, OpenCode and Grok: how each signs in, multi-agent sessions, claude.ai connectors, Console profiles, headless servers |
+| [Agents and credentials](agents.md) | Claude, Gemini, Codex, OpenCode, Grok and Mirror: how each signs in, multi-agent sessions, claude.ai connectors, Console profiles, headless servers |
 | [Daemon mode and maintenance](daemon.md) | `--start`/`--attach`/`--stop`, remote access, `--update-sessions`, `--exec` |
 | [Network isolation](network.md) | The egress proxy and its three postures, macOS and Linux specifics, checking it works |
 | [What's in the box](environment.md) | Toolchains, persistent packages, `.venv`, skill packs, GPU, `.sandy/Dockerfile` |

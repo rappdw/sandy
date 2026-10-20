@@ -32,6 +32,7 @@ The workspace is bind-mounted read/write so Claude can modify your project files
 | `.vscode/`, `.idea/` | Blocks IDE task/launch config injection |
 | `.github/workflows/` | Blocks CI pipeline escape (opt-out via `SANDY_ALLOW_WORKFLOW_EDIT=1`) |
 | `.circleci/`, `.devcontainer/` | Blocks CircleCI and devcontainer escape |
+| `.mirror/` | Blocks Mirror extension injection (Python that Mirror runs), 2.9.0 |
 | `.claude/settings.json`, `.claude/settings.local.json`, `.claude/hooks/` | Blocks agent→host Claude Code hook injection (a host `claude` run in the same dir would otherwise execute an agent-written hook) |
 | `.sandy/` | Blocks tampering with sandy's own build inputs **when `.sandy/` exists at launch** (existence-gated, like every row here — a session that starts without one can create it, and is warned about at session end). A per-project `.sandy/Dockerfile` build is additionally approval-gated by a hash of the whole build context, which is what stops a planted one from building unreviewed |
 
