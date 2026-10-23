@@ -6839,15 +6839,15 @@ _S81_JQ="$(awk '
   infound { print }
 ' "$_S81")"
 
-check "extracted jq expression: no-effort payload -> 'Sonnet  ·  8% ctx'" \
+check "extracted jq expression: no-effort payload -> 'Sonnet · 8% ctx'" \
     bash -c '
         out="$(echo "{\"model\":{\"display_name\":\"Sonnet\"},\"context_window\":{\"used_percentage\":8.2}}" | jq -r "$1")"
-        [ "$out" = "Sonnet  ·  8% ctx" ]
+        [ "$out" = "Sonnet · 8% ctx" ]
     ' -- "$_S81_JQ"
-check "extracted jq expression: effort payload -> 'Opus  ·  effort: high  ·  42% ctx'" \
+check "extracted jq expression: effort payload -> 'Opus · high · 42% ctx'" \
     bash -c '
         out="$(echo "{\"model\":{\"display_name\":\"Opus\"},\"effort\":{\"level\":\"high\"},\"context_window\":{\"used_percentage\":42.7}}" | jq -r "$1")"
-        [ "$out" = "Opus  ·  effort: high  ·  42% ctx" ]
+        [ "$out" = "Opus · high · 42% ctx" ]
     ' -- "$_S81_JQ"
 
 # --- (d) all three settings.json branches add statusLine, only-if-absent. ---
@@ -6865,11 +6865,20 @@ check "last-resort branch: skip-permissions printf JSON includes statusLine" \
 check "last-resort branch: non-skip printf JSON includes statusLine" \
     bash -c 'printf "%s" "$1" | grep "skipDangerousModePermissionPrompt.:false" | grep -q "sandy-claude-statusline"' -- "$_S81_SETTINGS"
 
-# --- (e) negative: no STATUSLINE-family key was added to _sandy_key_metadata
-# (this feature is not a new config key — statusLine is always-on seeding). ---
+# --- (f) SANDY_CLAUDE_USAGE: the usage helper and the wrapping, run for real
+# (both helpers extracted from the Dockerfile.base heredoc by the test file). ---
+
+check "sandy-claude-usage + sandy-claude-statusline behave as specified (test/test_claude_usage_statusline.py)" \
+    python3 "$(dirname "$0")/test_claude_usage_statusline.py"
+check "SANDY_CLAUDE_USAGE is forwarded into the container, and the host statusLine command only when there is one" \
+    bash -c 'grep -qF "RUN_FLAGS+=(-e \"SANDY_CLAUDE_USAGE=\${SANDY_CLAUDE_USAGE:-1}\")" "$1" && grep -qF "RUN_FLAGS+=(-e \"SANDY_STATUSLINE_WRAP=\$_SANDY_SL_WRAP\")" "$1"' -- "$_S81"
+
+# --- (e) negative: no STATUSLINE-family key NAME was added to
+# _sandy_key_metadata (statusLine seeding is always on; SANDY_CLAUDE_USAGE
+# chooses what the line shows, and its description may say statusLine). ---
 
 check "no STATUSLINE key was added to _sandy_key_metadata" \
-    bash -c '! awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -qi "STATUSLINE"' -- "$_S81"
+    bash -c '! awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | cut -d"|" -f1 | grep -qi "STATUSLINE"' -- "$_S81"
 
 # ============================================================
 echo "§82: Tool-use audit hook (SANDY_TOOL_AUDIT, HF-incident Issue 6)"
@@ -18965,6 +18974,47 @@ else
     _S168_NONE="$(_s168_seed none "$_S168_HOST")"
     check "§168(6:none) the no-tool literal branch seeds sandbox.enabled:false too (it never reads the host file, so this is the whole of its answer)" \
         test "$(_s168_q "$_S168_NONE" '.sandbox.enabled')" = "false"
+    # SANDY_CLAUDE_USAGE: the sandy statusLine is managed, and the statusLine
+    # command from the host settings is handed to the helper to wrap
+    # (_SANDY_SL_WRAP -> SANDY_STATUSLINE_WRAP in the container). =0 keeps
+    # the only-if-absent seed.
+    # _s168_sl <tools> <host body> <SANDY_CLAUDE_USAGE> -> "<statusLine>|<wrap>"
+    _s168_sl() {
+        local _c _b
+        _c="$(mktemp -d "$_S168_DIR/u.XXXXXX")"; _b="$_c/bin"
+        mkdir -p "$_b" "$_c/home/.claude" "$_c/sb/claude"
+        for _x in mv rm cp cat mktemp readlink; do ln -s "$(command -v "$_x")" "$_b/$_x"; done
+        # Only the tool under test, so both the seed branch and the host
+        # command extraction take the path for that tool.
+        ln -s "$(command -v "$1")" "$_b/$1"
+        printf '%s\n' "$2" > "$_c/home/.claude/settings.json"
+        env -i PATH="$_b" HOME="$_c/home" SANDBOX_DIR="$_c/sb" SANDY_CLAUDE_USAGE="$3" "$BASH" -c '
+            _sandy_agent_has() { return 0; }
+            info() { :; }; warn() { :; }
+            SANDBOX_IS_NEW=false
+            eval "$2"
+            _sandy_launch_id=test
+            eval "$1"
+            _sandy_stage_commit "$SANDBOX_DIR/claude/settings.json"
+            _sandy_launch_apply_staged "$SANDBOX_DIR"
+            printf "%s\n" "$_SANDY_SL_WRAP"
+            cat "$SANDBOX_DIR/claude/settings.json"
+        ' _ "$_S168_BLOCK" "$(sed -n '/^# --- Host-to-container handoff (#400)/,/^# Merge JSON keys into a file/p' "$SANDY_SCRIPT" | sed '$d')" > "$_c/out" 2>/dev/null || true
+        printf '%s|%s' "$(sed 1d "$_c/out" | jq -c .statusLine 2>/dev/null)" "$(sed -n 1p "$_c/out")"
+    }
+    _S168_SLHOST='{"statusLine":{"type":"command","command":"bash ~/.claude/hooks/host-line.sh","padding":2}}'
+    _S168_SANDYSL='{"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":'
+    for _s168_t in node jq; do
+        if [ "$_s168_t" = node ] && ! command -v node >/dev/null 2>&1; then skip "§168(7-9) node branch needs node"; continue; fi
+        check "§168(7:$_s168_t) usage on: a host statusLine is replaced by the sandy helper (padding kept) and its command is passed on to be wrapped" \
+            test "$(_s168_sl "$_s168_t" "$_S168_SLHOST" 1)" = "${_S168_SANDYSL}2}|bash ~/.claude/hooks/host-line.sh"
+        check "§168(8:$_s168_t) usage off: a host statusLine is left alone and nothing is wrapped" \
+            test "$(_s168_sl "$_s168_t" "$_S168_SLHOST" 0)" = '{"type":"command","command":"bash ~/.claude/hooks/host-line.sh","padding":2}|'
+        check "§168(9:$_s168_t) a host statusLine that already is the sandy helper is never wrapped (it would run itself)" \
+            test "$(_s168_sl "$_s168_t" '{"statusLine":{"type":"command","command":"/usr/local/bin/sandy-claude-statusline"}}' 1)" = "${_S168_SANDYSL}0}|"
+    done
+    unset -f _s168_sl
+    unset _S168_SLHOST _S168_SANDYSL
 fi
 rm -rf "$_S168_DIR"
 unset _S168_DIR _S168_BLOCK _S168_HOST _S168_OUT _S168_CLEAN _S168_ODD _S168_NONE _s168_t
@@ -24575,6 +24625,14 @@ env -i PATH="$PATH" SANDY_AGENT=claude CRED_MODE=oauth-token CLAUDE_CODE_OAUTH_T
 check "§196(32) the real marker writer emits valid JSON carrying credentials.claude (fingerprint, since = launched_at) and no token" \
     bash -c 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); c=d[\"credentials\"][\"claude\"]; sys.exit(0 if c[\"fingerprint\"]==sys.argv[2] and c[\"since\"]==d[\"launched_at\"] else 1)" "$1" "$2" && ! grep -q s196-token "$1"' _ "$_S196_D/c-mk/marker.json" "$_S196_FP1"
 unset _S196_WRITER _S196_FEBODY
+# The operator's label rides in the marker, so an in-container tool (a status
+# line) can name the credential without the host labels file being mounted.
+mkdir -p "$_S196_D/lh" "$_S196_D/c-lbl"
+printf '# labels\n%s  corp "eng" \\ team\n%s other\n' "$(printf '%s' "$_S196_FP1" | tr 'a-f' 'A-F')" "$_S196_FP2" > "$_S196_D/lh/credential-labels"
+check "§196(33) the marker carries the credential's label (any case of hex, trimmed, quotes and backslashes escaped), and no label key without a labels file" \
+    bash -c '[ "$1" = "corp \"eng\" \\ team" ] && [ "$2" = False ]' _ \
+    "$(_s196_cq "$(_s196_cred "$_S196_D/c-lbl" claude oauth-token SANDY_HOME="$_S196_D/lh" CLAUDE_CODE_OAUTH_TOKEN="$_S196_T1")" "C['claude']['label']")" \
+    "$(_s196_cq "$(_s196_cred "$_S196_D/c-lbl" claude oauth-token SANDY_HOME="$_S196_D/none" CLAUDE_CODE_OAUTH_TOKEN="$_S196_T1")" "'label' in C['claude']")"
 unset _S196_CRED _S196_FNS _S196_T1 _S196_T2 _S196_FP1 _S196_FP2 _s196_c_new
 unset -f _s196_cred _s196_fp _s196_cq
 if [ -d "$_S196_D/nojq" ]; then
