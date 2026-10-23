@@ -14849,9 +14849,10 @@ start_proxy_sidecar() {
     PROXY_CONFIG_FILE="$(_sandy_launch_dir)/sandy-proxy.json"   # a fresh path per launch (#400)
     mkdir -p "$(_sandy_launch_dir)" 2>/dev/null || true
 
-    # Build the JSON allowlist array from the effective host list.
+    # Build the JSON allowlist array from the effective host list. The
+    # ${a[@]+...} form: bash 3.2 calls an empty array unbound under set -u.
     local allow_json="" h
-    for h in "${_SANDY_ALLOW_EFFECTIVE[@]}"; do
+    for h in ${_SANDY_ALLOW_EFFECTIVE[@]+"${_SANDY_ALLOW_EFFECTIVE[@]}"}; do
         allow_json="${allow_json:+$allow_json,}\"$h\""
     done
     # local_llm: in proxy mode the LLM is reached via the proxy's forward

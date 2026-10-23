@@ -26055,7 +26055,7 @@ _s207() {
             eval "$1"
             SANDBOX_DIR="$2"; _sandy_launch_id=L1; SANDBOX_NAME=s207; OS=Linux
             _SANDY_PROXY_MODE=permissive; PROXY_IP=10.200.0.2; SIDECAR_NETWORK=sc; EGRESS_NETWORK=eg
-            PROXY_IMAGE_NAME=sandy-proxy; _SANDY_ALLOW_EFFECTIVE=()
+            PROXY_IMAGE_NAME=sandy-proxy; _SANDY_ALLOW_EFFECTIVE=(github.com)
             set -euo pipefail
             rc=0; ( start_proxy_sidecar ) 2>"$2/err" || rc=$?
             f="$2/launch/L1/sandy-proxy.json"
