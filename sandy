@@ -106,6 +106,7 @@ SANDY_PASSIVE_KEYS=(
     MIRROR_MODEL
     SANDY_CLAUDE_AUTH
     SANDY_TOOL_AUDIT
+    SANDY_CLAUDE_USAGE
     SANDY_CLAUDE_CONNECTORS
     SANDY_SUSPICIOUS
     SANDY_CROSS_SESSION_INBOUND
@@ -1986,6 +1987,7 @@ TELEGRAM_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Telegram user IDs
 DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
 DISCORD_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Discord user IDs allowed to send messages.
 SANDY_TOOL_AUDIT|bool|0||1.4.0|stable|Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off).
+SANDY_CLAUDE_USAGE|bool|1||2.9.0|stable|Claude Code status line shows which credential the session bills against (the operator's label from $SANDY_HOME/credential-labels, its fingerprint, or the account login's email), its plan usage (7-day and 5-hour windows) and the last reply's output rate, and records each usage change to ~/.claude/rate-limits/ in the sandbox. Makes sandy's statusLine a managed key; a statusLine command in the host settings.json keeps running, its output printed above sandy's line. 0 restores the earlier behaviour: sandy's model/effort/context line only when no statusLine is configured, and nothing recorded. Claude-only. Passive-safe in both directions (display and a sandbox-local record only). Default 1.
 SANDY_CLAUDE_CONNECTORS|bool|0||1.9.0|stable|Expose the claude.ai ACCOUNT connectors (Gmail, Google Drive, ...) inside the sandbox (#129). Default 0 = SUPPRESSED. The OAuth token sandy mounts is account-scoped, so without this every connector the user ever enabled on claude.ai was reachable from EVERY sandbox -- including untrusted-repo sessions, with no extra prompt -- which is ambient authority crossing the per-project boundary sandy exists to draw. Implemented by seeding Claude Code's disableClaudeAiConnectors as a MANAGED settings.json key (always overwritten, both directions): Claude resolves it true-in-ANY-settings-scope-wins, so writing false is not enough to expose them -- an inherited true from the host settings.json would win. VALUE-AWARE TIER: 0 is passive-safe wherever it is set, but =1 WEAKENS the sandbox, so a workspace .sandy/config setting it triggers the per-workspace approval prompt like SANDY_EGRESS_NO_ISOLATION=1. Claude-only (the account-connector rider is a Claude Code phenomenon); gates AUTO-FETCHED connectors only -- a server passed explicitly via --mcp-config still follows the normal MCP trust flow.
 SANDY_SUSPICIOUS|bool|0||1.9.0|experimental|Hardened-credential posture for a workspace you actively distrust (#130) -- the pre-broker slice of #121. When 1: (a) the mounted Claude .credentials.json is REWRITTEN to drop claudeAiOauth.refreshToken, so an exfiltrated copy is worth only the remaining access-token lifetime (hours) instead of permanent renewable account access; the strip is verified after the rewrite and FAILS CLOSED -- if it cannot be performed or verified, no credentials file is mounted at all; (b) if ANTHROPIC_API_KEY is set and no long-lived CLAUDE_CODE_OAUTH_TOKEN is, the API key is used and OAuth credentials are not mounted (clean, instantly-revocable compartmentalization); (c) claude.ai account connectors are forced off, overriding an approved SANDY_CLAUDE_CONNECTORS=1; (d) egress DEFAULTS to strict -- an explicit egress setting still wins but is named loudly. Since 1.12.0 this also covers SANDY_CLAUDE_AUTH=profile (#252): the ephemeral copy of the Console profile has its refresh_token stripped (the host profile is never touched) and cred_mode becomes profile-access-only; a strip that cannot be performed or verified mounts NO profile at all. The resolved posture is recorded as cred_mode in /etc/sandy-session.json so a run protection level is provable after the fact. Passive-safe to turn ON from a committed .sandy/config (a repo may make itself tighter); =0 from a workspace is approval-gated (never looser). HONEST LIMITS: in-session token refresh stops working once the access token expires (rerun sandy or /login -- acceptable for a deliberately short suspicious session); a long-lived CLAUDE_CODE_OAUTH_TOKEN is NOT shrunk by this (recorded honestly as cred_mode oauth-token, with a warning); Claude-only for the credential specifics; real prevention (token never in-container) is #121.
 SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|Claude-only. Pins Claude Code crossSessionInbound (accept = deliver messages from other sessions on this container without a prompt; hold = queue for approval; refuse = drop with a sender-visible status) by writing the SAME resolved value into TWO places every launch, merge-preserving and idempotent: the sandbox's own claude/settings.json (mounted RW as the container's ~/.claude/settings.json, i.e. Claude Code userSettings) and the WORKSPACE project file .claude/settings.local.json (mounted :ro). This split is measured, not assumed, against Claude Code 2.1.251: accept only takes effect when present in userSettings (workspace-file accept alone is a no-op there); hold/refuse are honored from either, and the workspace file's copy is tighten-only so it cannot be loosened by a stale accept and still wins over userSettings when a repo hand-edits it stricter. Never writes ~/.claude/settings.json on the HOST. Default is CONDITIONAL, which is why the schema default is empty, and as of 2.4.0 (#380) it is keyed on a DECLARED NEED rather than on any entry: accept iff a SELECTED feature manifest declares `"receives": ["cross_session"]` AND this is not a headless (-p), --remote or --provision run (none of those leave a session for anything to deliver into), else refuse. An entry alone, with no feature declaring the need, resolves refuse. (Pre-2.6.0 sandy also accepted on the strength of a feature entry alone -- announced for removal in README's Deprecated table in 2.5.0 (#382) and removed in 2.6.0; see CLAUDE.md "Cross-session inbound".) A declared need is independent of whether any entry process runs at all -- `receives` is its own, separate, privileged statement of what a feature needs to receive, decoupled from whether that feature ships an `entry`. Value-aware tier: hold and refuse are passive-safe wherever set; accept set via a workspace .sandy/config is approval-gated (it lets any process at the workspace uid inside the container inject a turn) -- unchanged, whichever default path resolved it. Residual: the userSettings target is RW in-container (required for /plugin install), so unlike the :ro workspace copy it is agent-mutable mid-session; sandy resets it on the next launch, not mid-session. Recorded in /etc/sandy-session.json as cross_session_inbound, with cross_session_inbound_source (one of explicit, feature:<name> or default) naming WHY. See docs/security/CROSS_SESSION_INBOUND.md.
@@ -8588,23 +8590,184 @@ RUN cat > /usr/local/bin/sandy-claude-statusline <<'STATUSLINE_HELPER' \
 # statusLine. The effort segment is omitted when .effort.level is absent/null
 # (not every model supports effort). Never errors the TUI: empty/whitespace/
 # malformed/wrong-shape stdin all fall back to a bare "sandy" line.
+# Unless SANDY_CLAUDE_USAGE=0 it appends sandy-claude-usage's segment (which
+# credential, plan usage, tok/s), and first runs the statusLine command the
+# host settings configured (SANDY_STATUSLINE_WRAP), printing its output above.
 set -uo pipefail
 _in="$(cat 2>/dev/null || true)"
+_wrapped=""
+if [ -n "${SANDY_STATUSLINE_WRAP:-}" ]; then
+    _wrapped="$(printf '%s' "$_in" | timeout 2 bash -c "$SANDY_STATUSLINE_WRAP" 2>/dev/null)" || _wrapped=""
+fi
 _out="$(printf '%s' "$_in" | jq -r '
     (.model.display_name // "sandy") as $model
     | .effort.level as $effort
     | ((.context_window.used_percentage // 0) | floor) as $pct
     | if ($effort != null and $effort != "")
-      then "\($model)  ·  effort: \($effort)  ·  \($pct)% ctx"
-      else "\($model)  ·  \($pct)% ctx"
+      then "\($model) · \($effort) · \($pct)% ctx"
+      else "\($model) · \($pct)% ctx"
       end
 ' 2>/dev/null)"
-if [ -z "$_out" ]; then
-    printf 'sandy\n'
-else
-    printf '%s\n' "$_out"
+[ -n "$_out" ] || _out="sandy"
+if [ "${SANDY_CLAUDE_USAGE:-1}" != "0" ]; then
+    _usage="$(printf '%s' "$_in" | timeout 2 /usr/local/bin/sandy-claude-usage 2>/dev/null)" || _usage=""
+    [ -n "$_usage" ] && _out="$_out · $_usage"
 fi
+[ -n "$_wrapped" ] && printf '%s\n' "$_wrapped"
+printf '%s\n' "$_out"
 STATUSLINE_HELPER
+
+# sandy-claude-usage: the usage segment of sandy-claude-statusline. Python
+# because it keeps state (the tok/s delta) and records history.
+RUN cat > /usr/local/bin/sandy-claude-usage <<'CLAUDE_USAGE_HELPER' \
+    && chmod +x /usr/local/bin/sandy-claude-usage
+#!/usr/bin/python3 -I
+# sandy-claude-usage: reads Claude Code's statusLine JSON on stdin and prints
+# one segment: which credential this session bills against, its plan usage
+# (7-day and 5-hour windows), and the output rate of the last reply.
+#
+# Records each change of usage to ~/.claude/rate-limits/ (the sandbox's own
+# claude/ dir on the host): rate-limits-latest.json, plus one JSONL line per
+# change in rate-limits-YYYY-MM-DD.jsonl. Timestamps are UTC.
+#
+# tok/s: context_window.total_output_tokens is the LAST reply's output, not a
+# running total, and cost.total_duration_ms is session wall-clock time. So the
+# rate is the last reply's output over the growth of cost.total_api_duration_ms
+# since the previous render, which includes time to first token. It reads low
+# when several API calls (subagents, tool loops) finish between two renders.
+#
+# Never exits non-zero, never prints or records a secret.
+import datetime, json, os, re, sys, tempfile
+from pathlib import Path
+MARKER = Path(os.environ.get("SANDY_USAGE_MARKER", "/etc/sandy-session.json"))
+STATE_DIR = Path(os.environ.get("SANDY_USAGE_STATE_DIR", tempfile.gettempdir())) / ("sandy-usage-%d" % os.getuid())
+def read_json(path):
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        with path.open() as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError, TypeError):
+        return None
+def num(v):
+    return None if isinstance(v, bool) or not isinstance(v, (int, float)) else v
+def credential():
+    # (id, kind, display). A token or API key is named by sandy's marker (the
+    # operator's label, else its fingerprint). An account login is named by the
+    # account Claude Code recorded. For a token that record is an older login,
+    # so it is never used for one.
+    m = read_json(MARKER) or {}
+    creds = m.get("credentials")
+    c = creds.get("claude") if isinstance(creds, dict) else None
+    if isinstance(c, dict) and isinstance(c.get("fingerprint"), str):
+        label = c.get("label") if isinstance(c.get("label"), str) else ""
+        return c["fingerprint"], c.get("kind") or "token", label or c["fingerprint"]
+    if m.get("cred_mode") in ("oauth-token", "api-key"):
+        return "", m["cred_mode"], ""
+    for p in (Path.home() / ".claude" / ".claude.json", Path.home() / ".claude.json"):
+        oa = (read_json(p) or {}).get("oauthAccount")
+        if isinstance(oa, dict) and isinstance(oa.get("accountUuid"), str) and oa["accountUuid"]:
+            email = oa.get("emailAddress") if isinstance(oa.get("emailAddress"), str) else ""
+            return oa["accountUuid"][:8], "login", email or oa["accountUuid"][:8]
+    return "", "", ""
+def window(raw, now):
+    if not isinstance(raw, dict):
+        return None
+    up, ra = num(raw.get("used_percentage")), num(raw.get("resets_at"))
+    if up is None or ra is None or ra < now:
+        return None
+    try:
+        utc = datetime.datetime.fromtimestamp(int(ra), tz=datetime.timezone.utc)
+    except (ValueError, OSError, OverflowError):
+        return None
+    return {"used_percentage": round(float(up), 2), "resets_at": int(ra),
+            "resets_at_utc": utc.isoformat(timespec="seconds").replace("+00:00", "Z")}
+def record(rec):
+    out = Path(os.environ.get("SANDY_USAGE_DIR") or Path.home() / ".claude" / "rate-limits")
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    latest = out / "rate-limits-latest.json"
+    prev = read_json(latest)
+    same = prev is not None and all(prev.get(k) == rec.get(k) for k in ("credential", "seven_day", "five_hour"))
+    if same:
+        return
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".rate-limits-latest.", dir=str(out))
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        os.replace(tmp, latest)
+        tmp = None
+        with (out / ("rate-limits-%s.jsonl" % rec["captured_at"][:10])).open("a") as f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+def tok_per_s(payload):
+    sid = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("session_id") or ""))[:64]
+    cost, cw = payload.get("cost"), payload.get("context_window")
+    api_ms = num(cost.get("total_api_duration_ms")) if isinstance(cost, dict) else None
+    out = num(cw.get("total_output_tokens")) if isinstance(cw, dict) else None
+    if not sid or api_ms is None:
+        return None
+    path = STATE_DIR / (sid + ".json")
+    st = read_json(path) or {}
+    prev_ms, rate = num(st.get("api_ms")), num(st.get("rate"))
+    if prev_ms is not None and api_ms > prev_ms and out:
+        rate = out / ((api_ms - prev_ms) / 1000.0)
+    elif prev_ms is not None and api_ms < prev_ms:
+        rate = None  # the counter went back: a different session reused the id
+    if prev_ms != api_ms:
+        try:
+            STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(STATE_DIR))
+            with os.fdopen(fd, "w") as f:
+                json.dump({"api_ms": api_ms, "rate": rate}, f)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+    return rate
+def main():
+    try:
+        payload = json.loads(sys.stdin.buffer.read().decode("utf-8") or "{}")
+    except (ValueError, UnicodeDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    rl = payload.get("rate_limits") if isinstance(payload.get("rate_limits"), dict) else {}
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
+    cid, kind, name = credential()
+    seven, five = window(rl.get("seven_day"), now.timestamp()), window(rl.get("five_hour"), now.timestamp())
+    if seven or five:
+        record({"captured_at": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "credential": cid, "credential_kind": kind, "seven_day": seven, "five_hour": five})
+    parts = [name] if name else []
+    if seven:
+        local = datetime.datetime.fromtimestamp(seven["resets_at"]).strftime("%a %H:%M")
+        parts.append("7d %.0f%% \u21bb%s" % (seven["used_percentage"], local))
+    if five:
+        local = datetime.datetime.fromtimestamp(five["resets_at"]).strftime("%H:%M")
+        parts.append("5h %.0f%% \u21bb%s" % (five["used_percentage"], local))
+    rate = tok_per_s(payload)
+    if rate is not None:
+        parts.append("~%.0f tok/s" % rate)
+    if parts:
+        sys.stdout.write(" · ".join(parts) + "\n")
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass
+    sys.exit(0)
+CLAUDE_USAGE_HELPER
 
 # sandy-tool-audit: PreToolUse audit hook (HF-incident Issue 6). Seeded into
 # settings.json only when SANDY_TOOL_AUDIT=1. Gives per-session tool-use
@@ -15832,12 +15995,26 @@ if _sandy_agent_has claude; then
     if [ -f "$HOME/.claude/settings.json" ]; then
         SEED_HOST_SRC="$HOME/.claude/settings.json"
     fi
+    # SANDY_CLAUDE_USAGE (default on): sandy's statusLine is a managed key, and
+    # the command the HOST settings configured keeps running, wrapped: the
+    # helper runs it first and prints its output above sandy's line. Read from
+    # the host file only (the sandbox copy is agent-writable), and never
+    # sandy's own helper, which would wrap itself.
+    _SANDY_SL_WRAP=""
+    if [ "${SANDY_CLAUDE_USAGE:-1}" != "0" ] && [ -n "$SEED_HOST_SRC" ]; then
+        if command -v jq &>/dev/null; then
+            _SANDY_SL_WRAP="$(jq -r 'if (.statusLine | type) == "object" and ((.statusLine.type // "command") == "command") then (.statusLine.command // "" | strings) else "" end' "$SEED_HOST_SRC" 2>/dev/null)" || _SANDY_SL_WRAP=""
+        elif command -v node &>/dev/null; then
+            _SANDY_SL_WRAP="$(node -e 'try { const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const l = s && s.statusLine; if (l && typeof l === "object" && (l.type || "command") === "command" && typeof l.command === "string") process.stdout.write(l.command); } catch (e) {}' "$SEED_HOST_SRC" 2>/dev/null)" || _SANDY_SL_WRAP=""
+        fi
+        case "$_SANDY_SL_WRAP" in *sandy-claude-statusline*) _SANDY_SL_WRAP="" ;; esac
+    fi
     # Merge sandy-required defaults into settings.json (idempotent, runs every
     # launch). Base = host settings.json (re-read every launch so host edits
     # propagate). Overlay = `enabledPlugins` preserved from previous sandbox
     # settings.json (so plugin installs survive across launches).
     if command -v node &>/dev/null; then
-        SEED_HOST_SRC="$SEED_HOST_SRC" SANDY_TOOL_AUDIT="${SANDY_TOOL_AUDIT:-0}" node -e "
+        SEED_HOST_SRC="$SEED_HOST_SRC" SANDY_CLAUDE_USAGE="${SANDY_CLAUDE_USAGE:-1}" SANDY_TOOL_AUDIT="${SANDY_TOOL_AUDIT:-0}" node -e "
             const fs = require('fs');
             const dst = process.argv[1];
             const hostSrc = process.env.SEED_HOST_SRC || '';
@@ -15858,6 +16035,13 @@ if _sandy_agent_has claude; then
             const skip = (process.env.SANDY_SKIP_PERMISSIONS || 'true') !== 'false';
             const defaults = {spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:skip, skipAutoPermissionPrompt:skip, statusLine:{ type:'command', command:'/usr/local/bin/sandy-claude-statusline', padding:0 }};
             for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
+            // SANDY_CLAUDE_USAGE: the statusLine becomes managed. The host
+            // command is not lost: the launch passes it to the helper, which
+            // runs it first. Only the padding the user chose is kept.
+            if ((process.env.SANDY_CLAUDE_USAGE || '1') !== '0') {
+                const pad = (s.statusLine && typeof s.statusLine === 'object' && typeof s.statusLine.padding === 'number') ? s.statusLine.padding : 0;
+                s.statusLine = { type:'command', command:'/usr/local/bin/sandy-claude-statusline', padding:pad };
+            }
             // Set permissions.defaultMode = bypassPermissions when SANDY_SKIP_PERMISSIONS=true.
             // Claude 2.1.x runtime gates make the CLI flag insufficient; the settings.json
             // value is the definitive source. We always set it (not //=) so toggling the
@@ -15971,7 +16155,7 @@ if _sandy_agent_has claude; then
             _seed_empty=true
         fi
         _seed_tmp="$(mktemp "$SEED_SETTINGS.XXXXXX" 2>/dev/null)" || _seed_tmp=""
-        [ -n "$_seed_tmp" ] && { if [ "$_seed_empty" = true ]; then printf '{}\n'; else cat "$_base_src"; fi; } | jq --arg skip "$skip_perm" --arg connectors "${SANDY_CLAUDE_CONNECTORS:-0}" --argjson prev "$_prev_plugins" '
+        [ -n "$_seed_tmp" ] && { if [ "$_seed_empty" = true ]; then printf '{}\n'; else cat "$_base_src"; fi; } | jq --arg skip "$skip_perm" --arg connectors "${SANDY_CLAUDE_CONNECTORS:-0}" --arg usage "${SANDY_CLAUDE_USAGE:-1}" --argjson prev "$_prev_plugins" '
             (if . == null then {} else . end) |
             # only-if-absent for the BOOLEAN keys via has(), not //=. The //=
             # operator treats an explicit false as unset, so it would overwrite a
@@ -15983,6 +16167,9 @@ if _sandy_agent_has claude; then
             (if has("skipDangerousModePermissionPrompt") then . else .skipDangerousModePermissionPrompt = ($skip == "true") end) |
             (if has("skipAutoPermissionPrompt") then . else .skipAutoPermissionPrompt = ($skip == "true") end) |
             .statusLine //= {"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0} |
+            # SANDY_CLAUDE_USAGE: managed statusLine, the host command wrapped
+            # by the helper (see the node branch). Padding is kept.
+            (if $usage != "0" then .statusLine = {"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":((.statusLine.padding? | numbers) // 0)} else . end) |
             # #129: managed key, always overwritten in BOTH directions. Claude
             # Code resolves this any-source-true-wins, so writing false is not
             # enough to expose connectors -- an inherited true from the host
@@ -19368,6 +19555,10 @@ fi
 RUN_FLAGS+=(-e "SANDY_AGENT=$SANDY_AGENT")
 RUN_FLAGS+=(-e "SANDY_MODEL=$SANDY_MODEL")
 RUN_FLAGS+=(-e "SANDY_EFFORT=${SANDY_EFFORT:-}")
+RUN_FLAGS+=(-e "SANDY_CLAUDE_USAGE=${SANDY_CLAUDE_USAGE:-1}")
+if [ -n "${_SANDY_SL_WRAP:-}" ]; then
+    RUN_FLAGS+=(-e "SANDY_STATUSLINE_WRAP=$_SANDY_SL_WRAP")
+fi
 # SANDY_EFFORT -> gemini (2.7.0, #116). gemini-cli has no effort FLAG; its
 # surface is the settings key modelConfigs, whose overrides layer a
 # thinkingConfig onto the chat model by alias. Verified against gemini-cli
@@ -19805,9 +19996,29 @@ unset _sandy_cs_slug _sandy_cs_d _sandy_cs_rj _sandy_cs_r
 # {} when there is nothing to record, never null (§177). ONE line (§88b).
 _sandy_launched_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 _sandy_cred_json=""
+# The operator's label for fingerprint $1 from $SANDY_HOME/credential-labels,
+# by the rules --accounts uses (rest of the line, trimmed, printable, at most
+# 40 characters, either case of hex). Recorded in the marker so in-container
+# tools can name the credential without the host file being mounted.
+_sandy_cred_label() {
+    local _f="${SANDY_HOME:-}/credential-labels" _line _lfp _lname
+    [ -n "${SANDY_HOME:-}" ] && [ -f "$_f" ] && [ ! -L "$_f" ] || return 0
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="${_line#"${_line%%[![:space:]]*}"}"
+        case "$_line" in ''|'#'*) continue ;; esac
+        _lfp="${_line%%[[:space:]]*}"
+        [ "$(printf '%s' "$_lfp" | tr 'A-F' 'a-f')" = "$1" ] || continue
+        _lname="${_line#"$_lfp"}"
+        _lname="${_lname#"${_lname%%[![:space:]]*}"}"
+        _lname="${_lname%"${_lname##*[![:space:]]}"}"
+        case "$_lname" in ''|*[![:print:]]*) continue ;; esac
+        printf '%s' "${_lname:0:40}"
+        return 0
+    done < "$_f"
+}
 _sandy_cred_add() {
     # $1 agent, $2 kind, $3 the secret (never printed, never in argv).
-    local _fp _since="" _l _pfp="" _psince="" _pmode="" _prev="${SANDBOX_DIR:-}/sandy-session.json"
+    local _fp _since="" _l _pfp="" _psince="" _pmode="" _lbl _prev="${SANDBOX_DIR:-}/sandy-session.json"
     _fp="$(printf '%s' "$3" | sha256 2>/dev/null | cut -c1-8)" || _fp=""
     case "$_fp" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) return 0 ;; esac
     if [ ! -e "$_prev" ]; then
@@ -19822,10 +20033,15 @@ _sandy_cred_add() {
             _since="$_sandy_launched_at"      # the previous launch used another kind of credential
         fi
     fi
+    _lbl="$(_sandy_cred_label "$_fp")" || _lbl=""
+    if [ -n "$_lbl" ]; then
+        _lbl="${_lbl//\\/\\\\}"; _lbl="${_lbl//\"/\\\"}"
+        _lbl=", \"label\": \"$_lbl\""
+    fi
     if [ -n "$_since" ]; then
-        _sandy_cred_json="${_sandy_cred_json:+$_sandy_cred_json, }\"$1\": {\"kind\": \"$2\", \"fingerprint\": \"$_fp\", \"since\": \"$_since\"}"
+        _sandy_cred_json="${_sandy_cred_json:+$_sandy_cred_json, }\"$1\": {\"kind\": \"$2\", \"fingerprint\": \"$_fp\"$_lbl, \"since\": \"$_since\"}"
     else
-        _sandy_cred_json="${_sandy_cred_json:+$_sandy_cred_json, }\"$1\": {\"kind\": \"$2\", \"fingerprint\": \"$_fp\"}"
+        _sandy_cred_json="${_sandy_cred_json:+$_sandy_cred_json, }\"$1\": {\"kind\": \"$2\", \"fingerprint\": \"$_fp\"$_lbl}"
     fi
 }
 if _sandy_agent_has claude 2>/dev/null; then
@@ -19849,6 +20065,7 @@ if _sandy_agent_has mirror 2>/dev/null; then
     fi
 fi
 unset -f _sandy_cred_add
+unset -f _sandy_cred_label
 printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "cross_session_inbound_source": %s,\n  "agents": %s,\n  "image": %s,\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "feature_entries": {%s},\n  "offline": %s,\n  "cred_mode": "%s",\n  "credentials": {%s},\n  "github": {%s},\n  "claude_sessions": [%s]\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "${_sandy_launched_at:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "$_sandy_session_nonce" "$_sandy_effort_json" \
