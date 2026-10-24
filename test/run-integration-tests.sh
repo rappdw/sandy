@@ -56,6 +56,8 @@
 # ── Notes ──────────────────────────────────────────────────────────────
 #
 #   • Each test creates temp project dirs that are cleaned up on exit.
+#   • Sandy state is isolated; only build cache and discovered credentials are
+#     reused. Host features, config, approvals, and sandboxes are not imported.
 #   • First run with a new agent builds its Docker image (can take minutes).
 #   • API calls are minimal — each headless test sends one short prompt.
 #   • Tests never write credentials to disk or commit anything.
@@ -128,6 +130,7 @@ SANDY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # bare `$(dirname "$0")` at use-site broke because the suite `cd`s into scratch
 # workspaces first (relative $0 → wrong dir → silently skipped).
 _INT_SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$_INT_SELF_DIR/lib-isolated-home.sh"
 SANDY_HOME="${SANDY_HOME:-$HOME/.sandy}"
 PASS=0
 FAIL=0
@@ -329,7 +332,7 @@ _print_timing_table() {
 # came from. macOS/BSD-portable: `date -u` fmt, `git describe`, `git diff --quiet`.
 _run_provenance() {
     local repo ts sha desc tree
-    repo="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+    repo="$(dirname "$SANDY_SCRIPT")"
     ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '?')"
     sha="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo '?')"
     desc="$(git -C "$repo" describe --tags --always 2>/dev/null || echo '?')"
@@ -398,6 +401,7 @@ cleanup() {
     # every section that launches sandy creates these, and a SIGKILLed run leaks
     # them. (Function is defined later in the file but resolved at EXIT time.)
     sweep_leaked_sandy_networks 2>/dev/null || true
+    _cleanup_sandy_home
 }
 trap cleanup EXIT INT TERM HUP
 
@@ -512,6 +516,9 @@ run_sandy_headless() {
     if [ "$VERBOSE" -gt 0 ] || [ "$rc" -ne 0 ]; then
         printf 'Headless launch exit=%s; logs: %s\n' "$rc" "$log_dir" >&2
     fi
+    if [ "$rc" -ne 0 ]; then
+        python3 "$_INT_SELF_DIR/result_checks.py" diagnose "$rc" < "$log_dir/stderr" >&2
+    fi
 
     # When `timeout` fires it SIGTERMs sandy, but sandy is blocked in its
     # foreground `docker run`, which doesn't receive the signal — so sandy's
@@ -527,6 +534,33 @@ run_sandy_headless() {
 # A line containing just the requested answer is positive completion evidence.
 _headless_answer() {
     printf '%s\n' "$3" | python3 "$_INT_SELF_DIR/result_checks.py" answer "$1" "$2"
+}
+
+# Give the smoke project a provider/model pair whose credential is available.
+# OpenCode does not select a provider just because its key is in the environment.
+# Its Google provider also expects a different key name than Gemini CLI; use
+# the documented env reference so no secret is written into the project file.
+_configure_opencode_smoke() {
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+providers = (
+    ('ANTHROPIC_API_KEY', 'anthropic/claude-haiku-4-5'),
+    ('OPENAI_API_KEY', 'openai/gpt-4.1-mini'),
+    ('GEMINI_API_KEY', 'google/gemini-2.5-flash'),
+)
+model = os.environ.get('OPENCODE_MODEL') or next(
+    (model for key, model in providers if os.environ.get(key)), '')
+config = {'$schema': 'https://opencode.ai/config.json'}
+if model:
+    config['model'] = model
+if model.startswith('google/') and os.environ.get('GEMINI_API_KEY'):
+    config['provider'] = {'google': {'options': {'apiKey': '{env:GEMINI_API_KEY}'}}}
+Path('opencode.json').write_text(json.dumps(config, indent=2) + '\n')
+print(model)
+PY
 }
 
 # Force-remove any leftover sandy test containers (named sandy-tmp.*). Safe:
@@ -622,10 +656,10 @@ HAS_CLAUDE=false
 HAS_OPENCODE_OAUTH=false
 HAS_XAI_API_KEY=false
 
-# Source credentials from ~/.sandy/.secrets if it exists (same file sandy reads).
+# Source credentials before isolating SANDY_HOME (same file sandy reads).
 # This is a safe KEY=VALUE file (no shell code) — sandy validates it against an
 # allowlist, so we only extract the variables we care about.
-if [ -f "$HOME/.sandy/.secrets" ]; then
+if [ -f "$SANDY_HOME/.secrets" ]; then
     while IFS='=' read -r _key _val; do
         # Strip leading/trailing whitespace and skip comments/blanks
         _key="$(echo "$_key" | tr -d '[:space:]')"
@@ -638,8 +672,13 @@ if [ -f "$HOME/.sandy/.secrets" ]; then
             CLAUDE_CODE_OAUTH_TOKEN)   [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]   && export CLAUDE_CODE_OAUTH_TOKEN="$_val" ;;
             XAI_API_KEY)               [ -z "${XAI_API_KEY:-}" ]               && export XAI_API_KEY="$_val" ;;
         esac
-    done < "$HOME/.sandy/.secrets"
+    done < "$SANDY_HOME/.secrets"
 fi
+
+# Reuse only build-cache files, never the operator's features/config/sandboxes.
+# Keep HOME unchanged so the normal OAuth credential discovery still works.
+# The exported credentials above survive; no secrets file is copied.
+_isolate_sandy_home
 
 [ -n "${OPENAI_API_KEY:-}" ] && HAS_OPENAI_API_KEY=true
 [ -n "${XAI_API_KEY:-}" ] && HAS_XAI_API_KEY=true
@@ -1478,8 +1517,11 @@ if [ "$_SECTION_ON" = true ]; then
 if [ "$HAS_OPENCODE" = true ]; then
     setup_project opencode "integ-opencode"
 
-    # Forward whichever provider keys the user has — opencode picks one up.
+    # Pair a model with an available credential instead of accepting an
+    # arbitrary built-in default (which may be a different provider).
+    _oc_model="$(_configure_opencode_smoke)"
     _env_args=()
+    [ -n "$_oc_model" ] && _env_args+=("OPENCODE_MODEL=$_oc_model")
     [ -n "${ANTHROPIC_API_KEY:-}" ] && _env_args+=("ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
     [ -n "${OPENAI_API_KEY:-}" ]    && _env_args+=("OPENAI_API_KEY=$OPENAI_API_KEY")
     [ -n "${GEMINI_API_KEY:-}" ]    && _env_args+=("GEMINI_API_KEY=$GEMINI_API_KEY")

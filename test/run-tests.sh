@@ -1980,8 +1980,10 @@ check "Claude credentials mount is rw (no :ro suffix)" \
     bash -c 'grep -q "CRED_TMPDIR/.credentials.json:/home/sandy/.claude/.credentials.json\")" "$1" && ! grep -q "CRED_TMPDIR/.credentials.json:/home/sandy/.claude/.credentials.json:ro" "$1"' -- "$SANDY_SCRIPT_PATH"
 check "Codex credentials mount has :ro (api_key path; CODEX_CRED_TMPDIR is now set only there)" \
     grep -q 'CODEX_CRED_TMPDIR/auth.json:/home/sandy/.codex/auth.json:ro' "$SANDY_SCRIPT_PATH"
-check "Gemini OAuth mount has :ro" \
-    grep -q 'home/sandy/.gemini/.*:ro' "$SANDY_SCRIPT_PATH"
+# Writable private-copy isolation and cleanup execute in the contracts group;
+# the container group proves refresh writes against the actual mount flags.
+check "Gemini ADC host credential mount remains read-only" \
+    grep -q 'application_default_credentials.json:ro' "$SANDY_SCRIPT_PATH"
 check "cleanup trap includes QUIT ABRT" \
     bash -c '
         grep -qF "trap '"'"'_sandy_on_signal 131'"'"' QUIT" "$1" \

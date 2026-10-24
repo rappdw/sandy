@@ -15,12 +15,121 @@ import suite_runner
 import test_container as container_tests
 from log_paths import MARKER, start_run
 
-from result_checks import acceptance_ok, answer_ok, probe_ok, selection_errors
+from result_checks import acceptance_ok, answer_ok, launch_diagnostic, probe_ok, selection_errors
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 class CompletionEvidence(unittest.TestCase):
+    def test_integration_isolates_state_preserves_auth_and_cleans_up_on_failure(self):
+        source = (ROOT / 'test/run-integration-tests.sh').read_text()
+        bootstrap = source[:source.index('# --- Preflight ---')]
+        credentials = source[source.index('# Detect available credentials.'):source.index(
+            '[ -n "${OPENAI_API_KEY:-}" ] && HAS_OPENAI_API_KEY=true')]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            home = root / 'home'
+            host_state = home / '.sandy'
+            host_state.mkdir(parents=True)
+            (host_state / '.secrets').write_text('OPENAI_API_KEY=from-file\nGEMINI_API_KEY=from-default-home\n')
+            custom_state = root / 'custom-state'
+            custom_state.mkdir()
+            for state in (host_state, custom_state):
+                (state / 'features/amap.rollout-backups/old').mkdir(parents=True)
+                (state / 'sandboxes/real-project').mkdir(parents=True)
+                (state / 'config').write_text('SANDY_AGENT=invalid-host-setting\n')
+                (state / '.build_hash_claude').write_text('cached-build')
+                (state / 'Dockerfile').write_text('cached-dockerfile')
+            (custom_state / '.secrets').write_text('OPENAI_API_KEY=from-file\nGEMINI_API_KEY=from-custom-home\n')
+            (home / '.codex').mkdir()
+            (home / '.codex/auth.json').write_text('{"fixture": true}')
+            for configured_state in (None, custom_state):
+                with self.subTest(custom_home=configured_state is not None):
+                    state = configured_state or host_state
+                    before = {str(p): p.read_bytes() for p in home.rglob('*') if p.is_file()}
+                    before.update({str(p): p.read_bytes() for p in custom_state.rglob('*') if p.is_file()})
+                    env = {'PATH': os.environ['PATH'], 'HOME': str(home), 'TMPDIR': str(root),
+                           'OPENAI_API_KEY': 'from-environment', 'SANDY_INTEG_LOG_DIR': str(root / 'logs')}
+                    if configured_state:
+                        env['SANDY_HOME'] = str(configured_state)
+                    program = bootstrap + '\nsweep_leaked_sandy_networks() { :; }\n' + credentials + '''
+test "$HOME" = "$1"
+test "$SANDY_HOME" != "$2"
+test "$OPENAI_API_KEY" = from-environment
+test "$GEMINI_API_KEY" = "$3"
+test -f "$HOME/.codex/auth.json"
+test "$(cat "$SANDY_HOME/.build_hash_claude")" = cached-build
+test "$(cat "$SANDY_HOME/Dockerfile")" = cached-dockerfile
+test ! -e "$SANDY_HOME/features"
+test ! -e "$SANDY_HOME/sandboxes"
+test ! -e "$SANDY_HOME/config"
+test ! -e "$SANDY_HOME/.secrets"
+printf '%s' "$SANDY_HOME" > "$4"
+mkdir -p "$SANDY_HOME/sandboxes/fixture"
+cd "$HOME"
+_run_provenance
+exit 7
+'''
+                    expected_key = 'from-custom-home' if configured_state else 'from-default-home'
+                    run = subprocess.run(['bash', '-c', program, 'test/run-integration-tests.sh',
+                                          str(home), str(state), expected_key, str(root / 'isolated-path')],
+                                         cwd=ROOT, env=env, capture_output=True, text=True, timeout=15)
+                    self.assertEqual(run.returncode, 7, run.stdout + run.stderr)
+                    isolated = Path((root / 'isolated-path').read_text())
+                    self.assertFalse(isolated.exists(), 'fixture state must be removed even after a failure')
+                    for name, data in before.items():
+                        self.assertEqual(Path(name).read_bytes(), data, name)
+                    self.assertTrue((state / 'features/amap.rollout-backups/old').is_dir())
+                    self.assertTrue((state / 'sandboxes/real-project').is_dir())
+                    sha = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', '--short', 'HEAD'], text=True).strip()
+                    self.assertIn('commit ' + sha, run.stdout)
+                    self.assertNotIn('commit ?', run.stdout)
+
+    def test_launch_diagnostics_distinguish_host_state_from_provider_timeout(self):
+        manifest = '[sandy] A feature manifest could not be applied; no feature was mounted.'
+        capacity = 'Attempt 2 failed with status 503: This model is currently experiencing high demand.'
+        self.assertIn('feature manifest', launch_diagnostic(1, manifest))
+        self.assertIn('HTTP 503', launch_diagnostic(124, capacity))
+        self.assertIn('timed out', launch_diagnostic(124, ''))
+        self.assertNotIn('503', launch_diagnostic(124, 'generic fetch failed'))
+        self.assertNotIn('private-token', launch_diagnostic(1, 'private-token'))
+        self.assertEqual(launch_diagnostic(0, capacity), '')
+        self.assertFalse(answer_ok(124, 'banana', capacity))
+        oauth = launch_diagnostic(1, 'IneligibleTierError UNSUPPORTED_CLIENT EROFS')
+        self.assertIn('rejected by the provider', oauth)
+        self.assertIn('read-only mount', oauth)
+        self.assertIn('Google model', launch_diagnostic(1, 'Google Generative AI API key is missing'))
+
+    def test_opencode_smoke_pairs_model_and_credential_without_writing_secrets(self):
+        source = (ROOT / 'test/run-integration-tests.sh').read_text()
+        function = re.search(r'^_configure_opencode_smoke\(\) \{\n.*?^\}', source, re.M | re.S)
+        self.assertIsNotNone(function)
+        cases = (
+            ({'ANTHROPIC_API_KEY': 'fixture-anthropic', 'GEMINI_API_KEY': 'fixture-google'},
+             'anthropic/claude-haiku-4-5'),
+            ({'OPENAI_API_KEY': 'fixture-openai'}, 'openai/gpt-4.1-mini'),
+            ({'GEMINI_API_KEY': 'fixture-google'}, 'google/gemini-2.5-flash'),
+            ({'ANTHROPIC_API_KEY': 'fixture-anthropic', 'GEMINI_API_KEY': 'fixture-google',
+              'OPENCODE_MODEL': 'google/custom-model'}, 'google/custom-model'),
+            ({}, ''),  # OAuth-only users retain their own provider/model choice.
+        )
+        for credentials, model in cases:
+            with self.subTest(model=model), tempfile.TemporaryDirectory() as directory:
+                run = subprocess.run(['bash', '-c', 'set -euo pipefail\n' + function[0]
+                                      + '\n_configure_opencode_smoke\n'], cwd=directory,
+                                     env={'PATH': os.environ['PATH'], **credentials},
+                                     capture_output=True, text=True, timeout=10)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual(run.stdout.strip(), model)
+                text = (Path(directory) / 'opencode.json').read_text()
+                config = json.loads(text)
+                self.assertEqual(config.get('model', ''), model)
+                if model.startswith('google/'):
+                    self.assertEqual(config['provider']['google']['options']['apiKey'], '{env:GEMINI_API_KEY}')
+                for key, value in credentials.items():
+                    if key.endswith('_API_KEY'):
+                        self.assertNotIn(value, text)
+
     def test_overall_result_cannot_hide_a_failed_or_skipped_group(self):
         cases = ((['passed', 'failed', 'partial', 'passed', 'passed'], 1, 'SUITE FAILED'),
                  (['passed', 'partial'], 0, 'SUITE COMPLETE WITH SKIPS'),
@@ -201,6 +310,23 @@ class CompletionEvidence(unittest.TestCase):
         for status in (1, 6, 124, 125, 126, 127, 137):
             self.assertFalse(answer_ok(status, "cherry", "cherry\n"))
         self.assertTrue(answer_ok(0, "cherry", "model metadata\n\x1b[32mCherry.\x1b[0m\n"))
+
+    def test_answers_ignore_terminal_controls_but_not_prompt_or_error_text(self):
+        for terminator in ('\x07', '\x1b\\'):
+            palette = '\x1b]4;4;rgb:61/8f/ff' + terminator
+            for word in ('banana', 'cherry', 'first', 'second'):
+                output = '[sandy] Launching sandbox...\n\n' + palette + word + '\n'
+                self.assertTrue(answer_ok(0, word, output))
+                self.assertFalse(answer_ok(1, word, output))
+                self.assertFalse(answer_ok(124, word, output))
+                self.assertFalse(answer_ok(0, word, palette + 'reply one word: ' + word))
+                self.assertFalse(answer_ok(0, word, palette + 'error: expected ' + word))
+                # An answer hidden inside a title/control payload is not output.
+                self.assertFalse(answer_ok(0, word, '\x1b]0;\n' + word + '\n' + terminator))
+            recovered = palette + 'first\nAttempt 1 failed with status 503: UNAVAILABLE\n'
+            self.assertTrue(answer_ok(0, 'first', recovered))
+        linked = '\x1b]8;;https://example.com\x1b\\\x1b[32mcherry\x1b[0m\x1b]8;;\x1b\\\n'
+        self.assertTrue(answer_ok(0, 'cherry', linked))
 
     def test_isolation_requires_a_completed_probe(self):
         for status, text in ((125, "pull failed"), (127, "command not found"),

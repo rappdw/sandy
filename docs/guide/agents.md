@@ -48,17 +48,21 @@ Sandy supports four Gemini auth paths, probed automatically unless `SANDY_GEMINI
 | **API key** (recommended) | `GEMINI_API_KEY=...` in `.sandy/.secrets` | Simplest; works on headless servers |
 | ADC | `gcloud auth application-default login` on the host | Google Cloud / Vertex AI workflows |
 | Vertex AI | ADC + `GOOGLE_GENAI_USE_VERTEXAI=true`, `GOOGLE_CLOUD_PROJECT=...`, `GOOGLE_CLOUD_LOCATION=...` | Enterprise / Vertex billing |
-| OAuth (browser login) | Run `gemini auth` **on the host** once — sandy copies `~/.gemini/oauth_creds.json` (Gemini CLI ≥0.30; falls back to legacy `tokens.json`) into the container ephemerally on each launch | ⚠️ **See note below — free-tier OAuth is deprecated upstream** |
+| OAuth (browser login) | Run `gemini auth` **on the host** once — sandy copies `~/.gemini/oauth_creds.json` (Gemini CLI ≥0.30; falls back to legacy `tokens.json`) into the container ephemerally on each launch | Subject to Google's client/account eligibility check; see below |
 
-> ⚠️ **Gemini free-tier OAuth is deprecated by Google.** As of mid-2026, Google
-> retired the free-tier `gemini-cli` OAuth login ("Gemini Code Assist for
-> individuals") — a session using it fails with `IneligibleTierError` (redirect
-> to the Antigravity product suite). This is **upstream**, not a sandy issue:
-> sandy loads and forwards the credentials correctly; Google rejects them at the
-> tier check, and the same happens running `gemini-cli` directly. **Use the API
-> key or Vertex/ADC path instead.** (Tracked: issue #21.)
+> **OAuth eligibility can fail independently of credential refresh.** Some
+> launches receive `IneligibleTierError` with `UNSUPPORTED_CLIENT` from Google
+> (tracked in issue #21). That response is an account/client rejection, not proof
+> that all Google OAuth accounts are unsupported. Google's [authentication
+> guide](https://geminicli.com/docs/get-started/authentication/) still documents
+> Google sign-in and the cases requiring a Cloud project. A writable credential
+> copy cannot grant eligibility. Use an eligible account/project or explicitly
+> choose API-key or Vertex/ADC authentication; sandy does not switch billing
+> modes automatically after a failed OAuth launch.
 
 `gemini auth` must be run on the host because the container is headless and cannot open a browser. `--remote` is not supported in any multi-agent combo — only `SANDY_AGENT=claude` (single) works with `--remote`.
+
+Sandy gives Gemini a writable private copy of the OAuth credential file so it can cache refreshed tokens during the session. The copy is discarded on exit; your host credential file and other launches' copies are untouched. This fixes the read-only refresh error, but cannot change a provider-side account or client rejection. ADC credentials remain read-only.
 
 ## Running Codex CLI (`SANDY_AGENT=codex`)
 

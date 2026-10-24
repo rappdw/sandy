@@ -517,6 +517,14 @@ some workloads to need `runc`."
 
 ## rw ephemeral credential copies (fix in-session OAuth-refresh EROFS)
 
+**Update (2026-10-24): implemented for Gemini OAuth.** Its private 0600 copy in
+a fresh 0700 directory is now mounted read-write and discarded on exit; the
+host credential file and ADC mount remain protected. Contract and container
+probes cover refresh writes, separate launch copies, and cleanup. This does
+not resolve Google's independent `UNSUPPORTED_CLIENT` account-tier rejection.
+Codex OAuth already uses persistent sandbox seeding; the discussion below is
+the historical proposal, not its current behavior.
+
 **Target: 1.1+.** Filed 2026-07-03, from the v1.0.0-rc1 manual test plan (§2.5).
 
 ### What

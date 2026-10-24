@@ -1029,12 +1029,12 @@ Sandy's `load_gemini_credentials()` tries the following sources, controlled by `
 | Mode | Source | Container mount / env |
 |---|---|---|
 | `api_key` | `GEMINI_API_KEY` env var on host | Forwarded via `-e GEMINI_API_KEY=…` |
-| `oauth` | Host `~/.gemini/oauth_creds.json` (Gemini CLI ≥0.30), falling back to legacy `~/.gemini/tokens.json` | Ephemeral copy of whichever was found, mounted at the same filename under `/home/sandy/.gemini/` **read-only** (1.0-rc1) |
+| `oauth` | Host `~/.gemini/oauth_creds.json` (Gemini CLI ≥0.30), falling back to legacy `~/.gemini/tokens.json` | Private ephemeral copy, mounted **read-write** at the same filename under `/home/sandy/.gemini/` so in-session token refresh can cache credentials; never the host file |
 | `adc` | `~/.config/gcloud/application_default_credentials.json` | Mounted read-only + `GOOGLE_APPLICATION_CREDENTIALS` env var |
 
-In `auto` mode, all three are probed; a warning is emitted if none are found. OAuth tokens are copied to a tmpdir each launch and discarded on exit (same pattern as Claude credentials). Gemini's OAuth refresh is handled inside the CLI itself, so sandy does not run a refresh check.
+In `auto` mode, all three are probed; a warning is emitted if none are found. OAuth tokens are copied into a fresh 0700 tmpdir as a 0600 file each launch and discarded on exit. The CLI can update that copy during token refresh; writes are never copied back to the host or reused by another launch. The host ADC file remains read-only. Gemini's OAuth refresh is handled inside the CLI itself, so sandy does not run a refresh check.
 
-> **`oauth` free-tier is deprecated upstream (issue #21).** Google retired the free-tier `gemini-cli` OAuth login ("Gemini Code Assist for individuals") in mid-2026; a session using it fails at Google's tier check with `IneligibleTierError` regardless of sandy (sandy loads/forwards the creds correctly — the CLI's own `:ro`-mount refresh-write also EROFS-errors, but the tier error is fatal first). The `oauth` path remains wired for any still-valid refreshing tier, but `api_key` / `adc` (Vertex) are the recommended paths. See also the deferred rw-ephemeral-copy idea in `docs/POST_1.0_IDEAS.md`.
+> **Provider eligibility is separate from credential refresh (issue #21).** An account rejected by Google's tier check with `IneligibleTierError` / `UNSUPPORTED_CLIENT` cannot use that OAuth path merely because the credential copy is writable. Sandy preserves the failure; it does not switch credentials or billing modes silently. Use an eligible OAuth account or explicitly configure `api_key` / `adc` (Vertex).
 
 Vertex AI routing is enabled by setting `GOOGLE_GENAI_USE_VERTEXAI=true` with `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`; all three are forwarded into the container when set.
 

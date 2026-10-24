@@ -11,7 +11,11 @@ def answer_ok(status, word, output):
     """A successful process must emit the answer, not just echo its prompt."""
     if status != 0:
         return False
-    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+    # Sandy can emit an OSC palette sequence immediately before the answer,
+    # even with redirected stdout. Strip the entire OSC payload (terminated by
+    # BEL or ST), then CSI styling; neither is part of the agent's answer.
+    text = re.sub(r"\x1b\].*?(?:\x07|\x1b\\)", "", output, flags=re.S)
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
     return any(line.strip().strip("`* .!\r").casefold() == word.casefold()
                for line in text.splitlines())
 
@@ -29,6 +33,26 @@ def acceptance_ok(status, output):
                          re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output), re.M)
     return (status == 0 and len(results) == 1
             and int(results[0][0]) > 0 and int(results[0][1]) == 0)
+
+
+def launch_diagnostic(status, output):
+    """Explain known failures without echoing credentials or a full trace."""
+    if status == 0:
+        return ''
+    if 'A feature manifest could not be applied' in output:
+        return 'Launch blocked by feature manifest validation; see stderr for the rejected feature.'
+    if 'UNSUPPORTED_CLIENT' in output or 'IneligibleTierError' in output:
+        reason = 'Gemini OAuth was rejected by the provider (unsupported client or account tier).'
+        if 'EROFS' in output:
+            reason += ' Credential refresh also failed on a read-only mount.'
+        return reason
+    if 'Google Generative AI API key is missing' in output:
+        return 'OpenCode selected a Google model without its required provider API key.'
+    if status == 124:
+        if '503' in output and 'This model is currently experiencing high demand' in output:
+            return 'Launch timed out after the provider reported HTTP 503 (model at capacity).'
+        return 'Launch timed out before completing; see stdout and stderr for progress.'
+    return 'Launch failed before successful completion; see stdout and stderr for details.'
 
 
 def selection_errors(source, only, skip):
@@ -73,6 +97,9 @@ if __name__ == "__main__":
         for error in errors:
             print(error, file=sys.stderr)
         sys.exit(2 if errors else 0)
+    if sys.argv[1] == 'diagnose':
+        print(launch_diagnostic(int(sys.argv[2]), sys.stdin.read()))
+        sys.exit(0)
     mode, status, *args = sys.argv[1:]
     text = sys.stdin.read()
     checks = {"answer": answer_ok, "probe": lambda rc, marker, text: probe_ok(rc, text, marker)}

@@ -25,6 +25,25 @@ def function(name, source=SOURCE):
     return match[0] + "\n"
 
 
+def gemini_credential_probe_source():
+    """Run the production loader and mount assembly with synthetic credentials."""
+    staged_name = next(line for line in SOURCE.splitlines() if line.startswith('_sandy_staged_name()'))
+    mount_start = '    RUN_FLAGS+=(-v "$SANDBOX_DIR/gemini:/home/sandy/.gemini")'
+    mount_end = '\nfi\nif _sandy_agent_has codex; then\n    RUN_FLAGS+=(-v "$SANDBOX_DIR/codex:/home/sandy/.codex")'
+    return ('set -euo pipefail\ninfo() { :; }; warn() { echo "$*" >&2; }\n'
+            + staged_name + '\n' + function('_gemini_write_auth_type') + function('load_gemini_credentials')
+            + '\n_sandy_launch_id=credential-probe\nGEMINI_CRED_TMPDIR=""\nGEMINI_ADC_MOUNT=""\n'
+            + 'RUN_FLAGS=()\nmkdir -p "$SANDBOX_DIR/gemini"\nload_gemini_credentials\n'
+            + mount_start + span(mount_start, mount_end)
+            + '\nprintf "%s\\0" "$GEMINI_CRED_TMPDIR" "$GEMINI_SELECTED_AUTH" "${RUN_FLAGS[@]}"\n')
+
+
+def gemini_credential_cleanup_source():
+    start = '    if [ -n "${GEMINI_CRED_TMPDIR:-}" ]; then\n        rm -rf "$GEMINI_CRED_TMPDIR" || true\n'
+    end = '    if [ -n "${CODEX_CRED_TMPDIR:-}" ]; then\n        rm -rf "$CODEX_CRED_TMPDIR" || true\n'
+    return start + span(start, end)
+
+
 class ProductionContracts(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -43,6 +62,54 @@ class ProductionContracts(unittest.TestCase):
         prefix = 'set -euo pipefail\ninfo() { :; }; warn() { echo "$*" >&2; }; error() { echo "$*" >&2; }\n'
         return subprocess.run(["bash", "-c", prefix + code], env={**self.env, **env},
                               stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=20)
+
+    def test_gemini_oauth_refresh_is_private_per_launch_and_cleaned_up(self):
+        host_dir = self.home / '.gemini'
+        host_dir.mkdir()
+        original = '{"access_token":"fixture-old","refresh_token":"fixture-refresh"}'
+        for filename in ('oauth_creds.json', 'tokens.json'):
+            with self.subTest(filename=filename):
+                host = host_dir / filename
+                host.write_text(original)
+                copies = []
+                for _ in range(2):
+                    run = self.run_source(gemini_credential_probe_source(), SANDY_GEMINI_AUTH='oauth',
+                                          TMPDIR=str(self.root))
+                    self.assertEqual(run.returncode, 0, run.stderr)
+                    directory, auth, *flags = run.stdout.rstrip('\0').split('\0')
+                    copy = Path(directory) / filename
+                    copies.append(copy)
+                    self.assertEqual(auth, 'oauth-personal')
+                    self.assertIn(str(copy) + ':/home/sandy/.gemini/' + filename + ':rw', flags)
+                    self.assertEqual(Path(directory).stat().st_mode & 0o777, 0o700)
+                    self.assertEqual(copy.stat().st_mode & 0o777, 0o600)
+                    self.assertFalse(copy.samefile(host))
+                    self.assertEqual(copy.read_text(), original)
+                self.assertNotEqual(copies[0], copies[1])
+                copies[0].write_text('{"access_token":"fixture-refreshed"}')
+                self.assertEqual(host.read_text(), original)
+                self.assertEqual(copies[1].read_text(), original)
+                # Cleanup must unlink a planted symlink without following it.
+                (copies[0].parent / 'planted').symlink_to(host_dir, target_is_directory=True)
+                for copy in copies:
+                    run = self.run_source(gemini_credential_cleanup_source(), GEMINI_CRED_TMPDIR=str(copy.parent))
+                    self.assertEqual(run.returncode, 0, run.stderr)
+                    self.assertFalse(copy.parent.exists())
+                self.assertEqual(host.read_text(), original)
+                host.unlink()
+        # API-key mode must not import OAuth, and the original ADC file stays RO.
+        (host_dir / 'oauth_creds.json').write_text(original)
+        run = self.run_source(gemini_credential_probe_source(), SANDY_GEMINI_AUTH='api_key',
+                              GEMINI_API_KEY='fixture-key', TMPDIR=str(self.root))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.split('\0')[:2], ['', 'gemini-api-key'])
+        self.assertNotIn('oauth_creds.json', run.stdout)
+        adc = self.home / '.config/gcloud/application_default_credentials.json'
+        adc.parent.mkdir(parents=True)
+        adc.write_text('{}')
+        run = self.run_source(gemini_credential_probe_source(), SANDY_GEMINI_AUTH='adc', TMPDIR=str(self.root))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn(str(adc) + ':/home/sandy/.config/gcloud/application_default_credentials.json:ro', run.stdout)
 
     def test_virtualenv_detection_and_version_precedence(self):
         code = "SANDY_VENV_OVERLAY_ACTIVE=false\n" + span(
