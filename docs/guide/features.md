@@ -93,6 +93,23 @@ sandy --print-state | jq '.sandboxes[] | {name, agent_args_composed}'
 
 `{}` means no collision; an entry with `composed: false` means sandy **found** a collision and deliberately did not merge it — either the flag replaces rather than appends, or it named a file sandy cannot read — and `from` says which contributors were involved. The launch prints this too, alongside a line naming every feature that applied and what it contributed.
 
+**`agent_wrapper` puts your launcher in front of the agent** (2.9.0). `agent_args` can only add fixed words to the agent's command line. When a feature needs to *start* the agent itself, for example to check something first or to add arguments it computes at launch, it names an executable on its payload:
+
+```json
+"mounts": [{ "name": "payload", "from": "payload" }],
+"agent_wrapper": { "codex": "payload/codex/launch" }
+```
+
+The agent's interactive pane then runs `/opt/sandy/features/<name>/codex/launch codex <everything sandy would have passed>`. The wrapper receives the complete command, binary first, and should end with `exec "$@"` (plus anything it adds). Model, effort, permission flags, `agent_args` and your own args all still arrive. If the wrapper exits non-zero the agent is not started, and nothing falls back to a plain launch.
+
+- The path must start with `payload/`, and the `payload` mount must be read-only (the default), so the agent cannot edit its own launcher.
+- One wrapper per agent. If two features wrap the same agent, the launch fails and names both.
+- A missing, non-executable or symlinked wrapper fails the launch.
+- Headless (`-p`), `--remote` and `sandy --login` launches are never wrapped.
+- An image built before this feature existed is refused rather than run unwrapped; `sandy --rebuild` fixes it.
+
+Gate on `sandy --print-schema | jq '.manifest.top_level_keys | index("agent_wrapper")'` before writing the key. Check what ran with `sandy --print-state | jq '.sandboxes[] | {name, agent_wrappers}'`.
+
 **`receives` declares a need, not a mechanism (2.4.0).** A feature that needs another local session to be able to inject a turn into a session running in its sandbox says so directly:
 
 ```json

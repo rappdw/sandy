@@ -11849,8 +11849,10 @@ _S114_CONV_COUNT="$(sed -n "${_S114_FMT_LINE}p" "$_S114_SANDY" | grep -o '%[sd]'
 # fingerprint, one pre-composed object body passed as ONE argument, additive.
 # 22 as of 2.9.0: `github` -- the gh account the host chose and why, one
 # pre-composed object passed as ONE argument, additive.
-check "§114(13g) marker printf format/arg count line up (22 %s/%d conversions)" \
-    test "$_S114_CONV_COUNT" -eq 22
+# 23 as of 2.9.0: `agent_wrappers` -- which feature launcher each agent's pane
+# ran through, one pre-composed object body passed as ONE argument, additive.
+check "§114(13g) marker printf format/arg count line up (23 %s/%d conversions)" \
+    test "$_S114_CONV_COUNT" -eq 23
 
 # (14) sandy-handoff-sessions helper: REMOVED in 2.6.0 (#382, decision 7) along
 # with the helper itself; the pane-identity contract it was built on stays
@@ -26134,6 +26136,260 @@ check "§207(3) ...and prints the proxy logs before cleanup can erase them" \
 rm -rf "$_S207_D"
 unset _S207_FN _S207_D _S207_OK _S207_FAIL
 unset -f _s207
+
+
+# ============================================================
+echo "§209: agent_wrapper — a feature's launcher runs in front of an agent's interactive command"
+# ============================================================
+# A feature names an executable on its read-only payload; the agent's
+# interactive pane runs `<wrapper> <agent> <sandy's args...>`. Asserted on what
+# actually runs: a stub wrapper records the argv it RECEIVES and execs it, a
+# stub agent records what reached it. The host half is asserted by running
+# sandy's real resolution block against real apply output.
+_S209_D="$(cd "$(mktemp -d)" && pwd -P)"
+
+# --- the manifest: projector parity, and what the loader refuses -------------
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    awk '/^_sandy_fm_projector_js\(\) \{$/{f=1;next} f&&/^SANDY_FM_JS$/{exit} f&&!/^cat <</{print}' "$SANDY_SCRIPT" > "$_S209_D/p.js"
+    awk '/^_sandy_fm_projector_jq\(\) \{$/{f=1;next} f&&/^SANDY_FM_JQ$/{exit} f&&!/^cat <</{print}' "$SANDY_SCRIPT" > "$_S209_D/p.jq"
+    _S209_PAR=""; _S209_SEEN=0
+    _s209_b='"sandboxes":{"include":["*"]},"agents":{"include":["*"]}'
+    for _s209_j in \
+        '{'"$_s209_b"',"agent_wrapper":{"codex":"payload/bin/w"}}' \
+        '{'"$_s209_b"',"agent_wrapper":{"codex":"payload/a","claude":"payload/b"}}' \
+        '{'"$_s209_b"',"agent_wrapper":{"nope":"payload/a"}}' \
+        '{'"$_s209_b"',"agent_wrapper":{"codex":""}}' \
+        '{'"$_s209_b"',"agent_wrapper":{"codex":5}}' \
+        '{'"$_s209_b"',"agent_wrapper":{"codex":"payload/a b"}}' \
+        '{'"$_s209_b"',"agent_wrapper":["payload/a"]}' \
+        '{'"$_s209_b"',"agent_wrapper":null}' \
+        '{'"$_s209_b"',"agent_wrapper":{}}' ; do
+        printf '%s' "$_s209_j" > "$_S209_D/f.json"
+        _s209_a="$(node "$_S209_D/p.js" "$_S209_D/f.json" 2>&1)"
+        _s209_c="$(jq -r -f "$_S209_D/p.jq" "$_S209_D/f.json" 2>&1)"
+        [ "$_s209_a" = "$_s209_c" ] || _S209_PAR="$_S209_PAR|$_s209_j"
+        case "$_s209_a" in *agent_wrapper*) _S209_SEEN=$((_S209_SEEN + 1)) ;; esac
+    done
+    check "§209(1) node and jq agree exactly across the agent_wrapper corpus, messages included (diverged on:${_S209_PAR:-nothing}; $_S209_SEEN cases mentioned the key)" \
+        bash -c '[ -z "$1" ] && [ "$2" -ge 7 ]' _ "$_S209_PAR" "$_S209_SEEN"
+else
+    skip "§209(1) node/jq agent_wrapper parity needs BOTH node and jq on the host"
+fi
+
+_S209_LIB="$_S209_D/lib.sh"
+{
+    echo 'warn(){ echo "[sandy] WARNING: $*"; }'
+    echo 'info(){ echo "[sandy] $*"; }'
+    echo 'error(){ echo "[sandy] ERROR: $*"; }'
+    echo '_sandy_daemon_fatal(){ :; }'
+    echo '_SANDY_FM_HOME=/home/sandy'
+    awk '/^_sandy_fm_projector_js\(\) \{/,/^# --- Applying a feature/' "$SANDY_SCRIPT"
+    awk '/^_sandy_fm_apply\(\) \{/,/^\}$/' "$SANDY_SCRIPT"
+} > "$_S209_LIB"
+_S209_BLK="$(awk '/^# BEGIN agent wrappers/,/^# END agent wrappers/' "$SANDY_SCRIPT")"
+check "§209(pre) the loader, apply and the host resolution block were extracted (mutation: rename one and every check below goes vacuous instead of red)" \
+    bash -c 'grep -q "^_sandy_fm_apply() {" "$1" && grep -q "^_sandy_fm_load() {" "$1" && printf "%s" "$2" | grep -q "SANDY_AGENT_WRAPPER_CODEX="' _ "$_S209_LIB" "$_S209_BLK"
+
+_s209_mk() {   # <root> <feature> <json> [payload-mode]
+    mkdir -p "$1/$2/payload/bin"
+    printf '%s' "$3" > "$1/$2/feature.json"
+    printf '#!/bin/sh\nexec "$@"\n' > "$1/$2/payload/bin/w"
+    chmod +x "$1/$2/payload/bin/w"
+}
+_s209_m() {    # <payload-mode> <wrapper-value> -> a whole manifest
+    printf '{"sandboxes":{"include":["*"]},"agents":{"include":["*"]},"mounts":[{"name":"payload","from":"payload","mode":"%s"}],"agent_wrapper":{"codex":"%s"}}' "$1" "$2"
+}
+# _s209_host <root> <agents> <extra-shell> -> apply output, then the block's
+# result: RC, the six variables, and the marker JSON.
+_s209_host() {
+    bash -c '
+        set -uo pipefail
+        source "$1"
+        _out="$(_sandy_fm_apply "$2" "myrepo-a1b2c3d4" "/home/sandy/dev/myrepo" "$3" 1)" || { echo "APPLY_RC=$?"; printf "%s\n" "$_out"; exit 0; }
+        _SANDY_FM_AW_RECORDS=""
+        while IFS= read -r _l; do
+            case "$_l" in agent_wrapper*) _SANDY_FM_AW_RECORDS="${_SANDY_FM_AW_RECORDS}${_l#agent_wrapper	}"$'"'"'\n'"'"' ;; esac
+        done <<< "$_out"
+        IFS=, read -ra _SANDY_AGENTS <<< "$3"
+        _sandy_is_headless=false; SANDY_REMOTE_CONTROL=false; _SANDY_CS_ACTIVE=0
+        SANDY_AGENT_WRAPPER_CODEX=/forged/by/the/launching/shell
+        eval "$4"
+        ( eval "$5"
+          echo "CODEX=$SANDY_AGENT_WRAPPER_CODEX"
+          echo "CLAUDE=$SANDY_AGENT_WRAPPER_CLAUDE"
+          echo "JSON={$_SANDY_AW_JSON}" ) || echo "BLOCK_RC=$?"
+    ' _ "$_S209_LIB" "$1" "$2" "${3:-}" "$_S209_BLK" 2>&1
+}
+
+_S209_R1="$_S209_D/r1"; mkdir -p "$_S209_R1"
+_s209_mk "$_S209_R1" amap "$(_s209_m ro payload/bin/w)"
+_S209_O1="$(_s209_host "$_S209_R1" codex)"
+check "§209(2) a declared wrapper resolves to its container path on the payload (got: $(printf '%s' "$_S209_O1" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -qx "CODEX=/opt/sandy/features/amap/bin/w"' _ "$_S209_O1"
+check "§209(3) ...it is recorded in the marker, attributed to the feature" \
+    bash -c 'printf "%s" "$1" | grep -qx "JSON={\"codex\": {\"feature\": \"amap\", \"path\": \"/opt/sandy/features/amap/bin/w\"}}"' _ "$_S209_O1"
+check "§209(4) ...and the launch says so in one line naming the feature" \
+    bash -c 'printf "%s" "$1" | grep -q "agent_wrapper: codex runs through feature .amap."' _ "$_S209_O1"
+
+_S209_O2="$(_s209_host "$_S209_R1" claude)"
+check "§209(5) a codex wrapper does nothing to a claude launch, and a value exported by the launching shell never survives (got: $(printf '%s' "$_S209_O2" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -qx "CODEX=" && printf "%s" "$1" | grep -qx "JSON={}"' _ "$_S209_O2"
+
+_S209_O3="$(_s209_host "$_S209_R1" codex '_sandy_is_headless=true')"
+_S209_O4="$(_s209_host "$_S209_R1" codex 'SANDY_LOGIN_AGENT=codex')"
+_S209_O5="$(_s209_host "$_S209_R1" codex 'SANDY_REMOTE_CONTROL=true')"
+check "§209(6) headless, login and --remote launches are never wrapped, and each says why" \
+    bash -c 'for o in "$1" "$2" "$3"; do printf "%s" "$o" | grep -qx "CODEX=" || exit 1; printf "%s" "$o" | grep -q "not applied:" || exit 1; done' _ "$_S209_O3" "$_S209_O4" "$_S209_O5"
+
+_S209_R2="$_S209_D/r2"; mkdir -p "$_S209_R2"
+_s209_mk "$_S209_R2" amap "$(_s209_m ro payload/bin/w)"
+_s209_mk "$_S209_R2" zeta "$(_s209_m ro payload/bin/w)"
+_S209_O6="$(_s209_host "$_S209_R2" codex)"
+check "§209(7) two features wrapping the same agent fail the launch, naming both (got: $(printf '%s' "$_S209_O6" | tr '\n' ' '))" \
+    bash -c 'printf "%s" "$1" | grep -q "^BLOCK_RC=1" && printf "%s" "$1" | grep "ERROR" | grep -q "amap, zeta"' _ "$_S209_O6"
+
+_S209_R3="$_S209_D/r3"; mkdir -p "$_S209_R3"
+_s209_mk "$_S209_R3" amap "$(_s209_m ro payload/bin/w)"
+chmod -x "$_S209_R3/amap/payload/bin/w"
+_S209_O7="$(_s209_host "$_S209_R3" codex)"
+rm -f "$_S209_R3/amap/payload/bin/w"; ln -s /bin/sh "$_S209_R3/amap/payload/bin/w"
+_S209_O8="$(_s209_host "$_S209_R3" codex)"
+check "§209(8) a wrapper that is not executable, or is a symlink, fails the launch rather than starting the agent unwrapped" \
+    bash -c 'printf "%s" "$1" | grep -q "^BLOCK_RC=1" && printf "%s" "$2" | grep -q "^BLOCK_RC=1" && printf "%s" "$1" | grep -q "not started unwrapped"' _ "$_S209_O7" "$_S209_O8"
+
+_S209_O9="$(_s209_host "$_S209_R1" claude,codex '_SANDY_CS_ACTIVE=1')"
+check "§209(9) named Claude sessions do not block a codex wrapper in a combo" \
+    bash -c 'printf "%s" "$1" | grep -qx "CODEX=/opt/sandy/features/amap/bin/w"' _ "$_S209_O9"
+_S209_R4="$_S209_D/r4"; mkdir -p "$_S209_R4"
+_s209_mk "$_S209_R4" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["*"]},"mounts":[{"name":"payload","from":"payload"}],"agent_wrapper":{"claude":"payload/bin/w"}}'
+_S209_O10="$(_s209_host "$_S209_R4" claude '_SANDY_CS_ACTIVE=1')"
+check "§209(10) ...but a claude wrapper with named sessions active is refused, not half-applied" \
+    bash -c 'printf "%s" "$1" | grep -q "^BLOCK_RC=1" && printf "%s" "$1" | grep -q "named Claude sessions"' _ "$_S209_O10"
+
+_S209_R5="$_S209_D/r5"
+for _s209_case in "rw payload/bin/w" "ro bin/w" "ro payload/../x/w"; do
+    rm -rf "$_S209_R5"; mkdir -p "$_S209_R5"
+    # shellcheck disable=SC2086
+    _s209_mk "$_S209_R5" amap "$(_s209_m $_s209_case)"
+    _S209_OX="$(_s209_host "$_S209_R5" codex)"
+    printf '%s' "$_S209_OX" | grep -q "^APPLY_RC=" || _S209_BAD="${_S209_BAD:-}|$_s209_case"
+done
+_S209_R6="$_S209_D/r6"; mkdir -p "$_S209_R6"
+_s209_mk "$_S209_R6" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["*"]},"agent_wrapper":{"codex":"payload/bin/w"}}'
+_S209_OX="$(_s209_host "$_S209_R6" codex)"
+printf '%s' "$_S209_OX" | grep -q "^APPLY_RC=" || _S209_BAD="${_S209_BAD:-}|no payload mount"
+check "§209(11) the manifest is refused when the wrapper is not on a read-only payload: rw payload, a path off the payload, a .. path, no payload mount (accepted:${_S209_BAD:-nothing})" \
+    bash -c '[ -z "$1" ]' _ "${_S209_BAD:-}"
+
+# --- the container half: what the pane actually runs ------------------------
+# The real builders, with the payload root pointed at a temp dir (the copy is
+# edited, never sandy).
+_S209_FR="$_S209_D/features"
+mkdir -p "$_S209_FR/amap/bin" "$_S209_D/bin" "$_S209_D/home" "$_S209_D/ch"
+_S209_FN="$(sed -n '/^_sandy_translate_args()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_wrap_cmd_exit_pause()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_codex_has_session()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_codex_resume_mode()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^build_codex_cmd()/,/^}$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_sandy_build_agent_cmd()/,/^}$/p' "$SANDY_SCRIPT")"
+_S209_FN="$(printf '%s' "$_S209_FN" | sed "s#/opt/sandy/features/#$_S209_FR/#g")"
+check "§209(pre-12) the container-side builders were extracted, including the wrapper lookup" \
+    bash -c 'printf "%s" "$1" | grep -q "SANDY_AGENT_WRAPPER_CODEX" && printf "%s" "$1" | grep -q "^_sandy_wrap_cmd_exit_pause()"' _ "$_S209_FN"
+printf '#!/bin/sh\nif [ "$1" = "--help" ]; then printf "      --no-daemon\\n"; exit 0; fi\nprintf "%%s\\n" "$*" > "%s/codex.argv"\n' "$_S209_D" > "$_S209_D/bin/codex"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "%s/wrapper.argv"\nexec "$@"\n' "$_S209_D" > "$_S209_FR/amap/bin/w"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" > "%s/wrapper.argv"\necho "refused: supervisor unhealthy" >&2\nexit 3\n' "$_S209_D" > "$_S209_FR/amap/bin/refuse"
+chmod +x "$_S209_D/bin/codex" "$_S209_FR/amap/bin/w" "$_S209_FR/amap/bin/refuse"
+# $1 = extra env; rest = sandy args. Prints "W:<wrapper argv>|C:<codex argv>".
+_s209_run() {
+    local envs="$1"; shift
+    rm -f "$_S209_D/wrapper.argv" "$_S209_D/codex.argv"
+    # shellcheck disable=SC2086
+    env -i PATH="$_S209_D/bin:$PATH" HOME="$_S209_D/home" CODEX_HOME="$_S209_D/ch" \
+        WORKSPACE=/home/sandy/w _sandy_is_headless=false CODEX_MODEL=m SANDY_EFFORT=high \
+        SANDY_AGENT_ARGS_CODEX=--from-agent-args $envs \
+        bash -c 'set -euo pipefail; eval "$1"; shift; c="$(_sandy_build_agent_cmd codex "$@")"; bash -c "$c" </dev/null >/dev/null 2>&1 || true' _ "$_S209_FN" "$@" 2>/dev/null
+    printf 'W:%s|C:%s\n' "$(cat "$_S209_D/wrapper.argv" 2>/dev/null || printf NOT-RUN)" "$(cat "$_S209_D/codex.argv" 2>/dev/null || printf NOT-RUN)"
+}
+_S209_NATIVE="--sandbox danger-full-access --ask-for-approval never --no-daemon --model m -c model_reasoning_effort=high --from-agent-args"
+_S209_C1="$(_s209_run "SANDY_AGENT_WRAPPER_CODEX=$_S209_FR/amap/bin/w" --extra)"
+check "§209(12) the wrapper receives sandy's complete native command, binary first, and the agent it execs gets exactly that (got: $_S209_C1)" \
+    bash -c '[ "$1" = "W:codex $2 --extra|C:$2 --extra" ]' _ "$_S209_C1" "$_S209_NATIVE"
+_S209_C2="$(_s209_run "")"
+check "§209(13) with no wrapper the pane runs codex directly, unchanged (got: $_S209_C2)" \
+    bash -c '[ "$1" = "W:NOT-RUN|C:$2" ]' _ "$_S209_C2" "$_S209_NATIVE"
+_S209_C3="$(_s209_run "SANDY_AGENT_WRAPPER_CODEX=$_S209_FR/amap/bin/refuse")"
+check "§209(14) a wrapper that refuses leaves the agent NOT started — there is no fallback to a bare launch (got: $_S209_C3)" \
+    bash -c 'case "$1" in "W:codex "*"|C:NOT-RUN") exit 0 ;; esac; exit 1' _ "$_S209_C3"
+_S209_C4="$(_s209_run "SANDY_AGENT_WRAPPER_CODEX=$_S209_FR/amap/bin/w _sandy_is_headless=true" -p hi)"
+_S209_C5="$(_s209_run "SANDY_AGENT_WRAPPER_CODEX=$_S209_FR/amap/bin/w SANDY_LOGIN_AGENT=codex")"
+check "§209(15) headless and login panes never run the wrapper, even if one reaches the container (got: $_S209_C4 / $_S209_C5)" \
+    bash -c 'case "$1" in W:NOT-RUN*) ;; *) exit 1 ;; esac; case "$2" in W:NOT-RUN*) ;; *) exit 1 ;; esac' _ "$_S209_C4" "$_S209_C5"
+mkdir -p "$_S209_D/outside"; cp "$_S209_FR/amap/bin/w" "$_S209_D/outside/w"
+_S209_C6="$(_s209_run "SANDY_AGENT_WRAPPER_CODEX=$_S209_D/outside/w")"
+check "§209(16) an executable outside the feature payload root is never run; codex starts as if unwrapped (got: $_S209_C6)" \
+    bash -c '[ "$1" = "W:NOT-RUN|C:$2" ]' _ "$_S209_C6" "$_S209_NATIVE"
+
+# --- the published contract -------------------------------------------------
+check "§209(17) --print-schema lists agent_wrapper among manifest.top_level_keys, the token a feature gates on" \
+    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"top_level_keys\":\[[^]]*\"agent_wrapper\""' _ "$SANDY_SCRIPT"
+_S209_H="$_S209_D/home2"
+mkdir -p "$_S209_H/sandboxes/new-11111111" "$_S209_H/sandboxes/none-22222222" "$_S209_H/sandboxes/old-33333333"
+printf '{\n  "schema": 1,\n  "agents": ["codex"],\n  "agent_wrappers": {"codex": {"feature": "amap", "path": "/opt/sandy/features/amap/bin/w"}},\n  "cred_mode": "full"\n}\n' > "$_S209_H/sandboxes/new-11111111/sandy-session.json"
+printf '{\n  "schema": 1,\n  "agents": ["codex"],\n  "agent_wrappers": {},\n  "cred_mode": "full"\n}\n' > "$_S209_H/sandboxes/none-22222222/sandy-session.json"
+printf '{\n  "schema": 1,\n  "agents": ["codex"],\n  "cred_mode": "full"\n}\n' > "$_S209_H/sandboxes/old-33333333/sandy-session.json"
+if command -v node >/dev/null 2>&1; then
+    _S209_PS="$(SANDY_HOME="$_S209_H" bash "$SANDY_SCRIPT" --print-state 2>/dev/null)"
+    _S209_ST="$(printf '%s' "$_S209_PS" | node -e '
+        let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+          const j = JSON.parse(s), out = [];
+          for (const n of ["new-11111111", "none-22222222", "old-33333333"]) {
+            const sb = j.sandboxes.find(x => x.name === n);
+            out.push(!sb ? "NOSANDBOX" : sb.agent_wrappers === undefined ? "MISSING"
+                     : sb.agent_wrappers === null ? "NULL"
+                     : Object.keys(sb.agent_wrappers).length === 0 ? "EMPTY"
+                     : sb.agent_wrappers.codex.feature);
+          }
+          console.log(out.join(" "));
+        });' 2>&1 || true)"
+    check "§209(18) --print-state reads the last launch's wrappers back: populated, {} when none, null when the marker predates the field (got: $_S209_ST)" \
+        test "$_S209_ST" = "amap EMPTY NULL"
+else
+    skip "§209(18) --print-state agent_wrappers read-back needs node to parse the JSON"
+fi
+# --- a stale image must not run the agent unwrapped ---------------------------
+_S209_SB="$(awk '/^# --- BEGIN stale-image agent wrapper refusal/,/^# --- END stale-image agent wrapper refusal/' "$SANDY_SCRIPT")"
+mkdir -p "$_S209_D/dk"
+# $1 = label the stub docker reports, $2 = codex wrapper value -> "RC=<n>|<output>"
+_s209_stale() {
+    printf '#!/bin/sh\necho called >> "%s/dk/calls"\nprintf "%%s\\n" "%s"\n' "$_S209_D" "$1" > "$_S209_D/dk/docker"
+    chmod +x "$_S209_D/dk/docker"; rm -f "$_S209_D/dk/calls"
+    PATH="$_S209_D/dk:$PATH" bash -c '
+        error(){ echo "ERROR: $*"; }; _sandy_daemon_fatal(){ :; }
+        IMAGE_NAME=sandy-codex
+        SANDY_AGENT_WRAPPER_CLAUDE=""; SANDY_AGENT_WRAPPER_GEMINI=""; SANDY_AGENT_WRAPPER_CODEX="$2"
+        SANDY_AGENT_WRAPPER_OPENCODE=""; SANDY_AGENT_WRAPPER_GROK=""; SANDY_AGENT_WRAPPER_MIRROR=""
+        ( eval "$1" ) && echo "RC=0" || echo "RC=$?"' _ "$_S209_SB" "$2" 2>&1 | tr '\n' '|'
+    [ -f "$_S209_D/dk/calls" ] && printf 'DOCKER' || printf 'NODOCKER'
+}
+_S209_S1="$(_s209_stale "" /opt/sandy/features/amap/bin/w)"
+_S209_S2="$(_s209_stale "<no value>" /opt/sandy/features/amap/bin/w)"
+_S209_S3="$(_s209_stale 1 /opt/sandy/features/amap/bin/w)"
+_S209_S4="$(_s209_stale "" "")"
+check "§209(19) a wrapped agent on an image without the sandy.agent_wrapper label is refused, not started unwrapped (got: $_S209_S1 / $_S209_S2)" \
+    bash -c 'for o in "$1" "$2"; do case "$o" in *"would start the agent unwrapped"*"RC=1|"*) ;; *) exit 1 ;; esac; done' _ "$_S209_S1" "$_S209_S2"
+check "§209(20) ...an image with the label launches, and with no wrapper the image is not even inspected (got: $_S209_S3 / $_S209_S4)" \
+    bash -c 'case "$1" in "RC=0|DOCKER") ;; *) exit 1 ;; esac; case "$2" in "RC=0|NODOCKER") ;; *) exit 1 ;; esac' _ "$_S209_S3" "$_S209_S4"
+_S209_NL="$(grep -c '^LABEL sandy.agent_wrapper=1$' "$SANDY_SCRIPT" || true)"
+_S209_NS="$(grep -c '^LABEL sandy.launch_staging=1$' "$SANDY_SCRIPT" || true)"
+check "§209(21) every generated agent Dockerfile that carries sandy.launch_staging also carries sandy.agent_wrapper ($_S209_NL of $_S209_NS)" \
+    bash -c '[ "$1" -gt 0 ] && [ "$1" = "$2" ]' _ "$_S209_NL" "$_S209_NS"
+unset _S209_SB _S209_S1 _S209_S2 _S209_S3 _S209_S4 _S209_NL _S209_NS
+unset -f _s209_stale
+rm -rf "$_S209_D"
+unset _S209_D _S209_PAR _S209_SEEN _s209_b _s209_j _s209_a _s209_c _S209_LIB _S209_BLK _S209_FN _S209_FR _S209_NATIVE _S209_BAD _s209_case _S209_H _S209_PS _S209_ST
+unset _S209_O1 _S209_O2 _S209_O3 _S209_O4 _S209_O5 _S209_O6 _S209_O7 _S209_O8 _S209_O9 _S209_O10 _S209_OX _S209_C1 _S209_C2 _S209_C3 _S209_C4 _S209_C5 _S209_C6
+unset _S209_R1 _S209_R2 _S209_R3 _S209_R4 _S209_R5 _S209_R6
+unset -f _s209_mk _s209_m _s209_host _s209_run
 
 
 # BEGIN SUMMARY
