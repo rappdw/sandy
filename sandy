@@ -949,7 +949,7 @@ catch (e) { process.stdout.write("ERR\tnot valid JSON: " + e.message + "\n"); pr
 if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
   process.stdout.write("ERR\ttop level is not an object\n"); process.exit(0);
 }
-const KNOWN = ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature", "agent_args", "receives", "submounts"];
+const KNOWN = ["schema", "sandboxes", "agents", "create", "mounts", "entry", "expose", "feature", "agent_args", "receives", "submounts", "agent_wrapper"];
 // #380: the closed set of things a feature may declare it NEEDS TO RECEIVE.
 // An array of enums, not a single string or a "cross_session_inbound: true"
 // boolean, because this names the NEED, never a consumer or a mechanism: a
@@ -1054,6 +1054,19 @@ if (doc.agent_args !== undefined) {
     for (const t of toks) OUT.push("agent_args\t" + a + "\t" + t);
   }
 }
+// agent_wrapper: a feature-relative executable the agent's interactive pane
+// runs IN FRONT OF the agent's own command line. One path per agent, so a
+// string, not a list. Shape only here; containment is checked in bash with
+// the same rule `entry` uses.
+if (doc.agent_wrapper !== undefined) {
+  if (doc.agent_wrapper === null || typeof doc.agent_wrapper !== "object" || Array.isArray(doc.agent_wrapper)) err("agent_wrapper is not an object");
+  else for (const [a, v] of Object.entries(doc.agent_wrapper)) {
+    if (AGENTS.indexOf(a) === -1) { err("agent_wrapper: unknown agent '" + a + "' (valid: " + AGENTS.join(", ") + ")"); continue; }
+    if (typeof v !== "string" || v === "") { err("agent_wrapper " + a + ": path is not a non-empty string"); continue; }
+    if (/[\n\r\t ]/.test(v)) { err("agent_wrapper " + a + ": path contains whitespace"); continue; }
+    OUT.push("agent_wrapper\t" + a + "\t" + v);
+  }
+}
 if (doc.receives !== undefined) {
   const r = strArr(doc.receives, "receives");
   if (r !== null) {
@@ -1067,7 +1080,7 @@ SANDY_FM_JS
 }
 _sandy_fm_projector_jq() {
 cat <<'SANDY_FM_JQ'
-def known: ["schema","sandboxes","agents","create","mounts","entry","expose","feature","agent_args","receives","submounts"];
+def known: ["schema","sandboxes","agents","create","mounts","entry","expose","feature","agent_args","receives","submounts","agent_wrapper"];
 def agents_known: ["claude","gemini","codex","opencode","grok","mirror"];
 def receives_known: ["cross_session"];
 def strarr($v; $what):
@@ -1145,6 +1158,17 @@ else
                    then ["ERR\tagent_args \($a): token '\([$toks[] | select(index(" "))] | .[0])' contains a space (the argument channel is whitespace-separated; use a flag that takes a file)"]
                  else [$toks[] | "agent_args\t\($a)\t\(.)"] end
                end] | add // [] end)
+  + (if has("agent_wrapper")|not then []
+     elif (.agent_wrapper|type) != "object" then ["ERR\tagent_wrapper is not an object"]
+     else [.agent_wrapper | to_entries[]
+           | .key as $a | .value as $v
+           | if (agents_known | index($a)) == null
+             then "ERR\tagent_wrapper: unknown agent '\($a)' (valid: \(agents_known | join(", ")))"
+             elif (($v|type) != "string") or ($v == "")
+             then "ERR\tagent_wrapper \($a): path is not a non-empty string"
+             elif ($v | test("[\n\r\t ]"))
+             then "ERR\tagent_wrapper \($a): path contains whitespace"
+             else "agent_wrapper\t\($a)\t\($v)" end] end)
   + (if .receives == null then []
      else (strarr(.receives; "receives")) as $toks
        | if (($toks[0]? // "") | startswith("ERR\t")) then $toks
@@ -1178,6 +1202,7 @@ feature
 agent_args
 receives
 submounts
+agent_wrapper
 EOF
 }
 _sandy_fm_submount_keys() {
@@ -1276,6 +1301,7 @@ _sandy_fm_load() {
     _SANDY_FM_AGENT_ARGS=()
     _SANDY_FM_RECEIVES=()
     _SANDY_FM_SUBMOUNT=()
+    _SANDY_FM_AGENT_WRAPPER=()
     if [ ! -e "$_mf" ]; then _SANDY_FM_ERR="no-manifest"; return 1; fi
     if [ -L "$_mf" ] || [ ! -f "$_mf" ]; then
         _SANDY_FM_ERR="feature.json is not a regular file"; return 1
@@ -1314,6 +1340,7 @@ _sandy_fm_load() {
             submount) _SANDY_FM_SUBMOUNT+=("${_line#*	}") ;;
             mount)  _SANDY_FM_MOUNT+=("${_line#*	}") ;;
             agent_args) _SANDY_FM_AGENT_ARGS+=("${_line#*	}") ;;
+            agent_wrapper) _SANDY_FM_AGENT_WRAPPER+=("${_line#*	}") ;;
             receives) _SANDY_FM_RECEIVES+=("${_line#*	}") ;;
             *)      _SANDY_FM_ERR="projector emitted an unknown record: $_k"; return 1 ;;
         esac
@@ -1367,6 +1394,30 @@ _sandy_fm_load() {
         _sandy_fm_valid_relpath "$_SANDY_FM_ENTRY" \
             || { _SANDY_FM_ERR="entry '$_SANDY_FM_ENTRY' escapes the feature directory"; return 1; }
     fi
+    # agent_wrapper: the same containment rule as `entry`, plus two more. The
+    # path must be on the payload (payload/...), and the payload mount must be
+    # read-only. A wrapper decides what the agent runs, so the agent must not
+    # be able to edit it, and a rw payload would let it.
+    local _w _wa _wp _wm _wmode
+    for _w in ${_SANDY_FM_AGENT_WRAPPER[@]+"${_SANDY_FM_AGENT_WRAPPER[@]}"}; do
+        _wa="${_w%%	*}"; _wp="${_w#*	}"
+        case "$_wp" in
+            payload/?*) ;;
+            *) _SANDY_FM_ERR="agent_wrapper $_wa '$_wp' is not on the payload (it must start with payload/)"; return 1 ;;
+        esac
+        _sandy_fm_valid_relpath "$_wp" \
+            || { _SANDY_FM_ERR="agent_wrapper $_wa '$_wp' escapes the feature directory"; return 1; }
+        _wmode=""
+        for _wm in ${_SANDY_FM_MOUNT[@]+"${_SANDY_FM_MOUNT[@]}"}; do
+            [ "${_wm%%	*}" = payload ] || continue
+            _wm="${_wm#*	}"; _wm="${_wm#*	}"; _wmode="${_wm%%	*}"
+        done
+        case "$_wmode" in
+            ro) ;;
+            "") _SANDY_FM_ERR="agent_wrapper $_wa needs a mount named payload"; return 1 ;;
+            *)  _SANDY_FM_ERR="agent_wrapper $_wa needs the payload mount to be ro (the agent could otherwise edit its own launcher)"; return 1 ;;
+        esac
+    done
     return 0
 }
 # --- Selection (D4) ---------------------------------------------------------
@@ -1745,6 +1796,20 @@ _sandy_fm_apply() {
         if [ -n "$_SANDY_FM_ENTRY" ]; then
             printf 'entry\t/opt/sandy/features/%s/%s\n' "$_fname" "${_SANDY_FM_ENTRY#payload/}"
         fi
+        # agent_wrapper: container path, then the host path it is mounted
+        # from, so the launch can check the file is executable without
+        # knowing how mounts are laid out.
+        local _aw _awa _awp _awfrom _awm
+        for _aw in ${_SANDY_FM_AGENT_WRAPPER[@]+"${_SANDY_FM_AGENT_WRAPPER[@]}"}; do
+            _awa="${_aw%%	*}"; _awp="${_aw#*	}"; _awp="${_awp#payload/}"
+            _awfrom=""
+            for _awm in ${_SANDY_FM_MOUNT[@]+"${_SANDY_FM_MOUNT[@]}"}; do
+                [ "${_awm%%	*}" = payload ] || continue
+                _awm="${_awm#*	}"; _awfrom="${_awm%%	*}"; _awfrom="${_awfrom//\$\{slug\}/$_slug}"
+            done
+            printf 'agent_wrapper\t%s\t%s\t/opt/sandy/features/%s/%s\t%s/%s/%s\n' \
+                "$_fname" "$_awa" "$_fname" "$_awp" "$_fdir" "$_awfrom" "$_awp"
+        done
         # receives (#380). SELECTED features only -- an unselected sandbox
         # must declare NOTHING, the same D4 property every other record kind
         # here carries (§136(3) extends its regex to include this kind). Named
@@ -3771,6 +3836,17 @@ EOF_FEATURE_ENTRIES
                 [ -n "$sb_fc_line" ] && sb_facomp="$sb_fc_line"
             fi
             printf ','; _json_kv agent_args_composed "$sb_facomp"
+            # agent_wrappers: which feature's launcher the last launch put in
+            # front of each agent. Same reader and the same null contract:
+            # null = cannot answer (no marker, or one predating the field),
+            # {} = looked, nothing wrapped.
+            sb_faw='null'
+            if [ -f "$sb/sandy-session.json" ]; then
+                sb_faw_line="$(sed -n 's/^  "agent_wrappers": //p' "$sb/sandy-session.json" 2>/dev/null | tail -n 1 || true)"
+                sb_faw_line="${sb_faw_line%,}"
+                [ -n "$sb_faw_line" ] && sb_faw="$sb_faw_line"
+            fi
+            printf ','; _json_kv agent_wrappers "$sb_faw"
             # claude_sessions (named sessions, decisions/2026-10-12-*): null =
             # CANNOT ANSWER (no marker, or one predating the field). Otherwise
             # {declared, status}: `declared` is what the last launch declared,
@@ -8810,6 +8886,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install Claude Code natively. The installer places files under
 # /home/sandy/.local/{bin,share}/claude.  Since /home/sandy gets a
 # tmpfs overlay at runtime, we relocate the binary to /usr/local/bin
@@ -8845,6 +8925,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install Gemini CLI as a global npm package. Unlike Claude Code, no binary
 # relocation is needed — npm -g places \`gemini\` directly into PATH.
 RUN npm install -g @google/gemini-cli \\
@@ -8881,6 +8965,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install Codex CLI as a global npm package. The @openai/codex package ships
 # a prebuilt Rust binary per platform; Node is only the installation vehicle.
 RUN npm install -g @openai/codex \\
@@ -8912,6 +9000,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install the Grok Build CLI (xAI). The installer downloads the real binary to
 # ~/.grok/downloads/grok-<platform> and leaves only SYMLINKS (grok, agent) in
 # ~/.grok/bin — all under the home dir, which is a tmpfs at runtime, so nothing
@@ -8953,6 +9045,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install Reflection AI's Mirror CLI (#463) from PyPI with uv, into /opt: the
 # home is a tmpfs at runtime. Mirror needs Python >= 3.12, so the base image's
 # 3.13 serves (--python-preference system). MIRROR_SKIP_UPDATE=1: Mirror's own
@@ -8989,6 +9085,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install OpenCode as a global npm package. The opencode-ai package selects
 # a prebuilt platform binary via optionalDependencies + postinstall.
 RUN npm install -g opencode-ai \\
@@ -9020,6 +9120,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install all five agents. Used for any multi-agent combo.
 # Claude Code
 RUN HOME=/home/sandy su -s /bin/bash sandy -c "curl -fsSL https://claude.ai/install.sh | bash" \\
@@ -10279,6 +10383,13 @@ _sandy_wrap_cmd_exit_pause() {
         printf '%s' "$cmd"
         return 0
     fi
+    # agent_wrapper (set by _sandy_build_agent_cmd for this pane's agent). Every
+    # builder hands over one simple command starting with the agent binary, so
+    # a prefix makes the wrapper's argv exactly that command. No fallback: if
+    # the wrapper fails, the pane shows it and waits, like any agent exit.
+    if [ -n "${_SANDY_AW_PATH:-}" ]; then
+        cmd="$(printf '%q' "$_SANDY_AW_PATH") $cmd"
+    fi
     if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
         printf '%s' "${cmd}; _exit=\$?; echo ''; echo \"[sandy] ${label} exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
     else
@@ -10934,6 +11045,24 @@ _sandy_build_agent_cmd() {
         grok)     _sandy_aa_val="${SANDY_AGENT_ARGS_GROK:-}" ;;
         mirror)   _sandy_aa_val="${SANDY_AGENT_ARGS_MIRROR:-}" ;;
     esac
+    # agent_wrapper: the host resolved at most one path per agent (empty when
+    # none, or when this launch is not wrapped). _sandy_wrap_cmd_exit_pause
+    # puts it in front of the agent command it is handed. Only a path under
+    # the feature payload root is used; anything else is a forged value.
+    _SANDY_AW_PATH=""
+    case "$1" in
+        claude)   _SANDY_AW_PATH="${SANDY_AGENT_WRAPPER_CLAUDE:-}" ;;
+        gemini)   _SANDY_AW_PATH="${SANDY_AGENT_WRAPPER_GEMINI:-}" ;;
+        codex)    _SANDY_AW_PATH="${SANDY_AGENT_WRAPPER_CODEX:-}" ;;
+        opencode) _SANDY_AW_PATH="${SANDY_AGENT_WRAPPER_OPENCODE:-}" ;;
+        grok)     _SANDY_AW_PATH="${SANDY_AGENT_WRAPPER_GROK:-}" ;;
+        mirror)   _SANDY_AW_PATH="${SANDY_AGENT_WRAPPER_MIRROR:-}" ;;
+    esac
+    case "$_SANDY_AW_PATH" in
+        ""|/opt/sandy/features/?*/?*) ;;
+        *) _SANDY_AW_PATH="" ;;
+    esac
+    case "$_SANDY_AW_PATH" in *..*) _SANDY_AW_PATH="" ;; esac
     _sandy_aa_pre=()
     if [ -n "$_sandy_aa_val" ]; then
         # `|| true`: user-setup.sh runs under `set -e` with an ERR trap, and
@@ -16326,6 +16455,9 @@ _sandy_fm_out=""; _sandy_fm_rc=0; _sandy_fm_ran=false
 # features/ directory at all.
 _SANDY_FM_AA_RECORDS=""
 _SANDY_FM_AA_JSON=""
+# agent_wrapper: "<feature>\t<agent>\t<container path>\t<host path>" records,
+# resolved per launched agent after the per-agent args block.
+_SANDY_FM_AW_RECORDS=""
 # Per-feature supervised entries (#381). INITIALIZED here, never inherited --
 # a test or a developer session runs INSIDE a sandy sandbox and could
 # otherwise carry an ambient value in from the surrounding container.
@@ -16376,6 +16508,8 @@ if [ -d "$_sandy_fm_root" ]; then
                 # configuration key two blocks up, so it plays no part here
                 # any more.
                 _sandy_fe_list="${_sandy_fe_list:+$_sandy_fe_list }$_fm_ef=$_fm_ep" ;;
+            agent_wrapper*)
+                _SANDY_FM_AW_RECORDS="${_SANDY_FM_AW_RECORDS}${_fm_l#agent_wrapper	}"$'\n' ;;
             agent_args*)
                 _SANDY_FM_AA_RECORDS="${_SANDY_FM_AA_RECORDS}${_fm_l#agent_args	}"$'\n' ;;
             receives*)
@@ -17023,6 +17157,87 @@ done
 unset _sandy_aa_agent _sandy_aa_val _sandy_aa_file
 unset _sandy_aa_operator_val _sandy_aa_operator_label _sandy_aa_contrib
 # END per-agent args
+
+# BEGIN agent wrappers (agent_wrapper)
+# A feature may name an executable that an agent's interactive pane runs in
+# front of the agent's own command line: the pane runs
+# `<wrapper> <agent> <sandy's args...>` and the wrapper is expected to exec
+# that argv (adding to it if it likes). Sandy still builds the whole native
+# command, so model, effort, permissions and operator args are unchanged; the
+# wrapper only decides how that command is started.
+#
+# One wrapper per agent. Two features wrapping the same agent is a launch
+# error naming both: nesting them would make each one's view of argv depend on
+# sorted feature order, which neither author can see.
+#
+# Not applied where there is no interactive pane to wrap: headless (-p),
+# --remote, and `sandy --login` (whose pane runs a login, not the agent). Not
+# applied to claude while named sessions are active either: that pane is the
+# agent view, and the sessions themselves are started elsewhere, so "wrap
+# claude" would be true for one pane and false for the work. Refused there,
+# rather than half-applied.
+SANDY_AGENT_WRAPPER_CLAUDE=""
+SANDY_AGENT_WRAPPER_GEMINI=""
+SANDY_AGENT_WRAPPER_CODEX=""
+SANDY_AGENT_WRAPPER_OPENCODE=""
+SANDY_AGENT_WRAPPER_GROK=""
+SANDY_AGENT_WRAPPER_MIRROR=""
+_SANDY_AW_JSON=""
+if [ -n "$_SANDY_FM_AW_RECORDS" ]; then
+    _sandy_aw_skip=""
+    if [ "$_sandy_is_headless" = "true" ]; then
+        _sandy_aw_skip="headless run"
+    elif [ "$SANDY_REMOTE_CONTROL" = "true" ]; then
+        _sandy_aw_skip="--remote has no interactive pane"
+    elif [ -n "${SANDY_LOGIN_AGENT:-}" ]; then
+        _sandy_aw_skip="a login session runs the login, not the agent"
+    fi
+    for _sandy_aw_agent in "${_SANDY_AGENTS[@]}"; do
+        _sandy_aw_hit=""; _sandy_aw_feats=""
+        while IFS= read -r _sandy_aw_l; do
+            [ -n "$_sandy_aw_l" ] || continue
+            _sandy_aw_f="${_sandy_aw_l%%	*}"; _sandy_aw_r="${_sandy_aw_l#*	}"
+            [ "${_sandy_aw_r%%	*}" = "$_sandy_aw_agent" ] || continue
+            _sandy_aw_feats="${_sandy_aw_feats:+$_sandy_aw_feats, }$_sandy_aw_f"
+            _sandy_aw_hit="$_sandy_aw_l"
+        done <<< "$_SANDY_FM_AW_RECORDS"
+        [ -n "$_sandy_aw_hit" ] || continue
+        case "$_sandy_aw_feats" in
+            *,*)
+                error "More than one feature wraps $_sandy_aw_agent ($_sandy_aw_feats). An agent can have one agent_wrapper; remove it from all but one feature."
+                _sandy_daemon_fatal
+                exit 1 ;;
+        esac
+        _sandy_aw_f="${_sandy_aw_hit%%	*}"; _sandy_aw_r="${_sandy_aw_hit#*	}"; _sandy_aw_r="${_sandy_aw_r#*	}"
+        _sandy_aw_cpath="${_sandy_aw_r%%	*}"; _sandy_aw_hpath="${_sandy_aw_r#*	}"
+        if [ -n "$_sandy_aw_skip" ]; then
+            info "agent_wrapper for $_sandy_aw_agent (feature '$_sandy_aw_f') not applied: $_sandy_aw_skip"
+            continue
+        fi
+        if [ "$_sandy_aw_agent" = claude ] && [ "${_SANDY_CS_ACTIVE:-0}" = 1 ]; then
+            error "Feature '$_sandy_aw_f' wraps claude, but this workspace runs named Claude sessions (.sandy/sessions), which a wrapper cannot cover. Remove the claude agent_wrapper or the named sessions."
+            _sandy_daemon_fatal
+            exit 1
+        fi
+        if [ -L "$_sandy_aw_hpath" ] || [ ! -f "$_sandy_aw_hpath" ] || [ ! -x "$_sandy_aw_hpath" ]; then
+            error "Feature '$_sandy_aw_f' wraps $_sandy_aw_agent with ${_sandy_aw_cpath}, but the file is missing, a symlink, or not executable on the host ($_sandy_aw_hpath). The agent was not started unwrapped."
+            _sandy_daemon_fatal
+            exit 1
+        fi
+        case "$_sandy_aw_agent" in
+            claude)   SANDY_AGENT_WRAPPER_CLAUDE="$_sandy_aw_cpath" ;;
+            gemini)   SANDY_AGENT_WRAPPER_GEMINI="$_sandy_aw_cpath" ;;
+            codex)    SANDY_AGENT_WRAPPER_CODEX="$_sandy_aw_cpath" ;;
+            opencode) SANDY_AGENT_WRAPPER_OPENCODE="$_sandy_aw_cpath" ;;
+            grok)     SANDY_AGENT_WRAPPER_GROK="$_sandy_aw_cpath" ;;
+            mirror)   SANDY_AGENT_WRAPPER_MIRROR="$_sandy_aw_cpath" ;;
+        esac
+        info "agent_wrapper: $_sandy_aw_agent runs through feature '$_sandy_aw_f' ($_sandy_aw_cpath)"
+        _SANDY_AW_JSON="${_SANDY_AW_JSON:+$_SANDY_AW_JSON, }\"$_sandy_aw_agent\": {\"feature\": \"$(_sandy_fm_jesc "$_sandy_aw_f")\", \"path\": \"$(_sandy_fm_jesc "$_sandy_aw_cpath")\"}"
+    done
+    unset _sandy_aw_skip _sandy_aw_agent _sandy_aw_hit _sandy_aw_feats _sandy_aw_l _sandy_aw_f _sandy_aw_r _sandy_aw_cpath _sandy_aw_hpath
+fi
+# END agent wrappers
 
 # Workspace .venv overlay. If the host workspace has a .venv/, we shadow it
 # with a sandbox-owned venv so (a) the host venv is never touched and
@@ -19656,6 +19871,15 @@ RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_CODEX=${SANDY_AGENT_ARGS_CODEX}")
 RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_OPENCODE=${SANDY_AGENT_ARGS_OPENCODE}")
 RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_GROK=${SANDY_AGENT_ARGS_GROK}")
 RUN_FLAGS+=(-e "SANDY_AGENT_ARGS_MIRROR=${SANDY_AGENT_ARGS_MIRROR}")
+# SANDY_AGENT_WRAPPER_<AGENT> (agent_wrapper): same crossing, same rule. The
+# unconditional six-way initialization in the agent wrappers block is what
+# keeps a value exported by the launching shell from reaching the container.
+RUN_FLAGS+=(-e "SANDY_AGENT_WRAPPER_CLAUDE=${SANDY_AGENT_WRAPPER_CLAUDE}")
+RUN_FLAGS+=(-e "SANDY_AGENT_WRAPPER_GEMINI=${SANDY_AGENT_WRAPPER_GEMINI}")
+RUN_FLAGS+=(-e "SANDY_AGENT_WRAPPER_CODEX=${SANDY_AGENT_WRAPPER_CODEX}")
+RUN_FLAGS+=(-e "SANDY_AGENT_WRAPPER_OPENCODE=${SANDY_AGENT_WRAPPER_OPENCODE}")
+RUN_FLAGS+=(-e "SANDY_AGENT_WRAPPER_GROK=${SANDY_AGENT_WRAPPER_GROK}")
+RUN_FLAGS+=(-e "SANDY_AGENT_WRAPPER_MIRROR=${SANDY_AGENT_WRAPPER_MIRROR}")
 # Named Claude sessions: the validated per-session data, read-only, from this
 # launch's own directory (a fresh path per launch, #400). Unconditional value,
 # so a forged env from any config source is always overwritten.
@@ -20069,11 +20293,11 @@ if _sandy_agent_has mirror 2>/dev/null; then
 fi
 unset -f _sandy_cred_add
 unset -f _sandy_cred_label
-printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "cross_session_inbound_source": %s,\n  "agents": %s,\n  "image": %s,\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "feature_entries": {%s},\n  "offline": %s,\n  "cred_mode": "%s",\n  "credentials": {%s},\n  "github": {%s},\n  "claude_sessions": [%s]\n}\n' \
+printf '{\n  "schema": 1,\n  "sandy_version": "%s",\n  "egress_mode": "%s",\n  "workspace": "%s",\n  "sandbox_name": "%s",\n  "host_uid": %s,\n  "host_gid": %s,\n  "launched_at": "%s",\n  "session_nonce": "%s",\n  "effort": %s,\n  "permission_mode": %s,\n  "cross_session_inbound": %s,\n  "cross_session_inbound_source": %s,\n  "agents": %s,\n  "image": %s,\n  "agent_args": {%s},\n  "agent_args_composed": {%s},\n  "agent_wrappers": {%s},\n  "feature_entries": {%s},\n  "offline": %s,\n  "cred_mode": "%s",\n  "credentials": {%s},\n  "github": {%s},\n  "claude_sessions": [%s]\n}\n' \
     "$(sandy_full_version)" "$_sandy_egress_mode" "$SANDY_WORKSPACE" "$SANDBOX_NAME" \
     "$(id -u)" "$(id -g)" "${_sandy_launched_at:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "$_sandy_session_nonce" "$_sandy_effort_json" \
     "$_sandy_perm_mode_json" "${_sandy_csi_json:-null}" "${_sandy_csi_src_json:-null}" "$_sandy_agents_json" \
-    "${_sandy_image_json:-null}" "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${_sandy_fe_json:-}" \
+    "${_sandy_image_json:-null}" "${_SANDY_FM_AA_JSON:-}" "${_SANDY_AA_COMPOSED_JSON:-}" "${_SANDY_AW_JSON:-}" "${_sandy_fe_json:-}" \
     "$(if [ "${SANDY_OFFLINE:-0}" = 1 ]; then echo true; else echo false; fi)" "${CRED_MODE:-none}" \
     "${_sandy_cred_json:-}" "${_sandy_gh_json:-}" "${_sandy_cs_json:-}" > "$_sandy_session_file"
 # Rename the composed temp into place (#400, see where it is assigned). The
@@ -20712,6 +20936,25 @@ if [ -n "$_sandy_fe_list" ]; then
     unset _sandy_fe_img_label
 fi
 # --- END stale-image feature-entries warning (#381) -------------------------
+
+# --- BEGIN stale-image agent wrapper refusal (agent_wrapper) ----------------
+# A wrapper was adopted, but the image about to run may predate the code that
+# applies it (a deferred rebuild, #218, or another old cached image). That
+# image would start the agent UNWRAPPED with no error, which is the one
+# outcome a wrapper must never have, so this refuses rather than warns -- the
+# opposite call from the entries warning above, where nothing is started
+# instead of something wrong.
+if [ -n "$SANDY_AGENT_WRAPPER_CLAUDE$SANDY_AGENT_WRAPPER_GEMINI$SANDY_AGENT_WRAPPER_CODEX$SANDY_AGENT_WRAPPER_OPENCODE$SANDY_AGENT_WRAPPER_GROK$SANDY_AGENT_WRAPPER_MIRROR" ]; then
+    _sandy_aw_img_label="$(trap - ERR; docker image inspect -f '{{index .Config.Labels "sandy.agent_wrapper"}}' "$IMAGE_NAME" 2>/dev/null)" || _sandy_aw_img_label=""
+    if [ "$_sandy_aw_img_label" != 1 ]; then
+        error "image $IMAGE_NAME predates agent_wrapper (a deferred rebuild, #218, or another old cached image), so it would start the agent unwrapped. Not starting."
+        error "  Rebuild once build resources are reachable: sandy --rebuild"
+        _sandy_daemon_fatal
+        exit 1
+    fi
+    unset _sandy_aw_img_label
+fi
+# --- END stale-image agent wrapper refusal (agent_wrapper) ------------------
 
 # --- BEGIN stale-image launch-staging fallback (#400) -----------------------
 # The files this launch changed in the agent homes are staged beside their

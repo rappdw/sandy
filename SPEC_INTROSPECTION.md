@@ -284,6 +284,7 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
       "feature_problems": [],
       "agent_args": {},
       "agent_args_composed": {},
+      "agent_wrappers": {},
       "claude_sessions": {"declared": [], "status": null},
       "marker": {"state": "present", "sandy_version": "2.7.0", "launched_at": "2026-04-20T14:00:00Z"},
       "cross_session_inbound": {
@@ -642,11 +643,20 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 > since; a consumer comparing the two should report that as *relaunch needed*,
 > not as drift. What a `null` means is answered by `marker`, below.
 
+> **`agent_wrappers`** (per sandbox, added additively in `2.9.0`, no
+> `schema_version` bump). An object keyed by agent name; each value is
+> `{feature, path}`, naming the feature whose `agent_wrapper` the agent's
+> interactive pane ran through at the last launch, and that wrapper's container
+> path. Read back from the session marker like `agent_args`, with the same
+> **LAST LAUNCH** caveat and the same three states: `null` = cannot answer (no
+> marker, or one from a sandy predating the field), `{}` = nothing was wrapped
+> (including a headless, `--remote` or `--login` launch), populated = what ran.
+
 > **`marker`** (per sandbox, added additively in `2.7.0`, #386, no
 > `schema_version` bump). The one place a consumer learns **why a
 > marker-derived field is `null`**. The marker-derived fields are `agents`,
-> `image`, `agent_args`, `agent_args_composed`, `feature_entries` and
-> `cross_session_inbound.pinned`.
+> `image`, `agent_args`, `agent_args_composed`, `agent_wrappers`,
+> `feature_entries` and `cross_session_inbound.pinned`.
 >
 > ```json
 > "marker": {"state": "absent" | "present" | "unreadable",
@@ -664,8 +674,8 @@ Consumers should **reconcile against `--print-state`**, or simply re-run `--atta
 >
 > **The invariant that makes `present` safe to read that way: a current sandy
 > never writes a marker-derived field as a deliberate `null`.** `agents` is
-> always an array, and `image`, `agent_args`, `agent_args_composed` and
-> `feature_entries` are always objects, even when empty. A case where nothing
+> always an array, and `image`, `agent_args`, `agent_args_composed`,
+> `agent_wrappers` and `feature_entries` are always objects, even when empty. A case where nothing
 > applies gets its own non-null encoding, as `cross_session_inbound.pinned`
 > does for a sandbox that didn't launch claude. So a missing key can only mean
 > an older writer. `run-tests.sh` §177(2) pins this by round-tripping the real
