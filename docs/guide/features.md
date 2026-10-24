@@ -106,6 +106,7 @@ The agent's interactive pane then runs `/opt/sandy/features/<name>/codex/launch 
 - One wrapper per agent. If two features wrap the same agent, the launch fails and names both.
 - A missing, non-executable or symlinked wrapper fails the launch.
 - Headless (`-p`), `--remote` and `sandy --login` launches are never wrapped.
+- An image built before this feature existed is refused rather than run unwrapped; `sandy --rebuild` fixes it.
 
 Gate on `sandy --print-schema | jq '.manifest.top_level_keys | index("agent_wrapper")'` before writing the key. Check what ran with `sandy --print-state | jq '.sandboxes[] | {name, agent_wrappers}'`.
 

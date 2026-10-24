@@ -8886,6 +8886,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install Claude Code natively. The installer places files under
 # /home/sandy/.local/{bin,share}/claude.  Since /home/sandy gets a
 # tmpfs overlay at runtime, we relocate the binary to /usr/local/bin
@@ -8921,6 +8925,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install Gemini CLI as a global npm package. Unlike Claude Code, no binary
 # relocation is needed — npm -g places \`gemini\` directly into PATH.
 RUN npm install -g @google/gemini-cli \\
@@ -8957,6 +8965,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install Codex CLI as a global npm package. The @openai/codex package ships
 # a prebuilt Rust binary per platform; Node is only the installation vehicle.
 RUN npm install -g @openai/codex \\
@@ -8988,6 +9000,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install the Grok Build CLI (xAI). The installer downloads the real binary to
 # ~/.grok/downloads/grok-<platform> and leaves only SYMLINKS (grok, agent) in
 # ~/.grok/bin — all under the home dir, which is a tmpfs at runtime, so nothing
@@ -9029,6 +9045,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install Reflection AI's Mirror CLI (#463) from PyPI with uv, into /opt: the
 # home is a tmpfs at runtime. Mirror needs Python >= 3.12, so the base image's
 # 3.13 serves (--python-preference system). MIRROR_SKIP_UPDATE=1: Mirror's own
@@ -9065,6 +9085,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install OpenCode as a global npm package. The opencode-ai package selects
 # a prebuilt platform binary via optionalDependencies + postinstall.
 RUN npm install -g opencode-ai \\
@@ -9096,6 +9120,10 @@ LABEL sandy.feature_entries=1
 # sandy.launch_staging (#400): this image's user-setup.sh moves the files the
 # host staged for a launch (<target>.sandy-launch.<id>) into place itself.
 LABEL sandy.launch_staging=1
+# sandy.agent_wrapper: this image's user-setup.sh runs a feature's
+# agent_wrapper in front of the agent. Without it the agent would start
+# unwrapped, so the launch refuses a wrapped agent on an image lacking it.
+LABEL sandy.agent_wrapper=1
 # Install all five agents. Used for any multi-agent combo.
 # Claude Code
 RUN HOME=/home/sandy su -s /bin/bash sandy -c "curl -fsSL https://claude.ai/install.sh | bash" \\
@@ -20905,6 +20933,25 @@ if [ -n "$_sandy_fe_list" ]; then
     unset _sandy_fe_img_label
 fi
 # --- END stale-image feature-entries warning (#381) -------------------------
+
+# --- BEGIN stale-image agent wrapper refusal (agent_wrapper) ----------------
+# A wrapper was adopted, but the image about to run may predate the code that
+# applies it (a deferred rebuild, #218, or another old cached image). That
+# image would start the agent UNWRAPPED with no error, which is the one
+# outcome a wrapper must never have, so this refuses rather than warns -- the
+# opposite call from the entries warning above, where nothing is started
+# instead of something wrong.
+if [ -n "$SANDY_AGENT_WRAPPER_CLAUDE$SANDY_AGENT_WRAPPER_GEMINI$SANDY_AGENT_WRAPPER_CODEX$SANDY_AGENT_WRAPPER_OPENCODE$SANDY_AGENT_WRAPPER_GROK$SANDY_AGENT_WRAPPER_MIRROR" ]; then
+    _sandy_aw_img_label="$(trap - ERR; docker image inspect -f '{{index .Config.Labels "sandy.agent_wrapper"}}' "$IMAGE_NAME" 2>/dev/null)" || _sandy_aw_img_label=""
+    if [ "$_sandy_aw_img_label" != 1 ]; then
+        error "image $IMAGE_NAME predates agent_wrapper (a deferred rebuild, #218, or another old cached image), so it would start the agent unwrapped. Not starting."
+        error "  Rebuild once build resources are reachable: sandy --rebuild"
+        _sandy_daemon_fatal
+        exit 1
+    fi
+    unset _sandy_aw_img_label
+fi
+# --- END stale-image agent wrapper refusal (agent_wrapper) ------------------
 
 # --- BEGIN stale-image launch-staging fallback (#400) -----------------------
 # The files this launch changed in the agent homes are staged beside their

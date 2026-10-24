@@ -26356,6 +26356,35 @@ if command -v node >/dev/null 2>&1; then
 else
     skip "§209(18) --print-state agent_wrappers read-back needs node to parse the JSON"
 fi
+# --- a stale image must not run the agent unwrapped ---------------------------
+_S209_SB="$(awk '/^# --- BEGIN stale-image agent wrapper refusal/,/^# --- END stale-image agent wrapper refusal/' "$SANDY_SCRIPT")"
+mkdir -p "$_S209_D/dk"
+# $1 = label the stub docker reports, $2 = codex wrapper value -> "RC=<n>|<output>"
+_s209_stale() {
+    printf '#!/bin/sh\necho called >> "%s/dk/calls"\nprintf "%%s\\n" "%s"\n' "$_S209_D" "$1" > "$_S209_D/dk/docker"
+    chmod +x "$_S209_D/dk/docker"; rm -f "$_S209_D/dk/calls"
+    PATH="$_S209_D/dk:$PATH" bash -c '
+        error(){ echo "ERROR: $*"; }; _sandy_daemon_fatal(){ :; }
+        IMAGE_NAME=sandy-codex
+        SANDY_AGENT_WRAPPER_CLAUDE=""; SANDY_AGENT_WRAPPER_GEMINI=""; SANDY_AGENT_WRAPPER_CODEX="$2"
+        SANDY_AGENT_WRAPPER_OPENCODE=""; SANDY_AGENT_WRAPPER_GROK=""; SANDY_AGENT_WRAPPER_MIRROR=""
+        ( eval "$1" ) && echo "RC=0" || echo "RC=$?"' _ "$_S209_SB" "$2" 2>&1 | tr '\n' '|'
+    [ -f "$_S209_D/dk/calls" ] && printf 'DOCKER' || printf 'NODOCKER'
+}
+_S209_S1="$(_s209_stale "" /opt/sandy/features/amap/bin/w)"
+_S209_S2="$(_s209_stale "<no value>" /opt/sandy/features/amap/bin/w)"
+_S209_S3="$(_s209_stale 1 /opt/sandy/features/amap/bin/w)"
+_S209_S4="$(_s209_stale "" "")"
+check "§209(19) a wrapped agent on an image without the sandy.agent_wrapper label is refused, not started unwrapped (got: $_S209_S1 / $_S209_S2)" \
+    bash -c 'for o in "$1" "$2"; do case "$o" in *"would start the agent unwrapped"*"RC=1|"*) ;; *) exit 1 ;; esac; done' _ "$_S209_S1" "$_S209_S2"
+check "§209(20) ...an image with the label launches, and with no wrapper the image is not even inspected (got: $_S209_S3 / $_S209_S4)" \
+    bash -c 'case "$1" in "RC=0|DOCKER") ;; *) exit 1 ;; esac; case "$2" in "RC=0|NODOCKER") ;; *) exit 1 ;; esac' _ "$_S209_S3" "$_S209_S4"
+_S209_NL="$(grep -c '^LABEL sandy.agent_wrapper=1$' "$SANDY_SCRIPT" || true)"
+_S209_NS="$(grep -c '^LABEL sandy.launch_staging=1$' "$SANDY_SCRIPT" || true)"
+check "§209(21) every generated agent Dockerfile that carries sandy.launch_staging also carries sandy.agent_wrapper ($_S209_NL of $_S209_NS)" \
+    bash -c '[ "$1" -gt 0 ] && [ "$1" = "$2" ]' _ "$_S209_NL" "$_S209_NS"
+unset _S209_SB _S209_S1 _S209_S2 _S209_S3 _S209_S4 _S209_NL _S209_NS
+unset -f _s209_stale
 rm -rf "$_S209_D"
 unset _S209_D _S209_PAR _S209_SEEN _s209_b _s209_j _s209_a _s209_c _S209_LIB _S209_BLK _S209_FN _S209_FR _S209_NATIVE _S209_BAD _s209_case _S209_H _S209_PS _S209_ST
 unset _S209_O1 _S209_O2 _S209_O3 _S209_O4 _S209_O5 _S209_O6 _S209_O7 _S209_O8 _S209_O9 _S209_O10 _S209_OX _S209_C1 _S209_C2 _S209_C3 _S209_C4 _S209_C5 _S209_C6

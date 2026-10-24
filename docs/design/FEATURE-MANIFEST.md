@@ -293,5 +293,7 @@ are tested for parity on Linux and macOS without a runtime.
 
 **No fallback.** A wrapper that refuses (exits non-zero) leaves the agent not started, and the pane shows its stderr. A launcher that cannot do its job must not quietly turn into an unwrapped launch.
 
+The same rule covers a stale image. The code that applies the wrapper lives in the image's `user-setup.sh`, so an image built before it (for example a rebuild deferred by #218) would run the agent unwrapped. Generated Dockerfiles carry `LABEL sandy.agent_wrapper=1`, and a wrapped launch on an image without it is refused with a pointer to `sandy --rebuild`. This is unlike `entry`'s stale-image case (§10), which only warns, because there nothing starts, rather than the wrong thing.
+
 **Reporting.** The marker's `agent_wrappers` (`{agent: {feature, path}}`) and `--print-state` record what the last launch actually wrapped, with the usual null / `{}` / populated states. Gate on `--print-schema`'s `manifest.top_level_keys` containing `agent_wrapper`. Older launchers reject the unknown key, and with it the whole manifest.
 

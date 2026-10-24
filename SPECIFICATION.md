@@ -3026,6 +3026,7 @@ Rules, enforced host-side in the `# BEGIN agent wrappers` block (after the per-a
 - **One per agent.** Two selected features wrapping the same launched agent is an error naming both.
 - **The file.** The host path behind the container path must be a regular, executable, non-symlink file.
 - **Not wrapped:** headless (`-p`), `--remote` and `sandy --login` (each prints one `info` line naming why). A claude wrapper while named Claude sessions are active is refused, since the sessions themselves are started elsewhere.
+- **Stale image.** Every generated agent Dockerfile carries `LABEL sandy.agent_wrapper=1`. When a wrapper was adopted and the image about to run lacks the label (a build deferred by #218, or an older cached image), the launch is **refused** (block `# --- BEGIN stale-image agent wrapper refusal`), because that image would start the agent unwrapped. Compare the feature-entries case, which only warns: there, nothing starts, rather than the wrong thing.
 
 All six `SANDY_AGENT_WRAPPER_*` are initialized empty unconditionally, so a value exported by the launching shell never reaches the container. Container-side, `_sandy_build_agent_cmd` takes its own agent's value, ignores anything not under `/opt/sandy/features/<feature>/` or containing `..`, and `_sandy_wrap_cmd_exit_pause` prefixes it `%q`-quoted. Headless commands return before the prefix, and the codex login pane returns before `_sandy_wrap_cmd_exit_pause`. Recorded as `agent_wrappers` in the session marker and `--print-state`. Guarded by `run-tests.sh §209`.
 
