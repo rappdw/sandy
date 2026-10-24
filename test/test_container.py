@@ -13,6 +13,8 @@ import tempfile
 import unittest
 import zipfile
 
+import test_production_contracts as production_contracts
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -27,6 +29,81 @@ def wheel(directory, name):
 
 
 class ContainerContracts(unittest.TestCase):
+    def check_gemini_refresh_mounts(self):
+        """Exercise production mount flags without contacting an OAuth provider."""
+        host_dir = self.home / '.gemini'
+        host_dir.mkdir()
+        original = '{"access_token":"fixture-old","refresh_token":"fixture-refresh"}'
+        probe = '''import errno, json, sys
+from pathlib import Path
+path = Path('/home/sandy/.gemini') / sys.argv[1]
+expected_ro = sys.argv[2] == 'ro'
+assert path.stat().st_mode & 0o777 == 0o600
+credentials = json.loads(path.read_text())
+assert credentials['access_token'] == 'fixture-old'
+credentials['access_token'] = 'fixture-refreshed'
+try:
+    path.write_text(json.dumps(credentials))
+except OSError as error:
+    assert expected_ro and error.errno == errno.EROFS, error
+    print('GEMINI_REFRESH_READONLY_CONTROL_OK')
+else:
+    assert not expected_ro, 'read-only negative control unexpectedly allowed a write'
+    assert json.loads(path.read_text())['refresh_token'] == 'fixture-refresh'
+    # Newer CLI versions try rename first, then direct-write on a file mount.
+    staging = path.with_name('.refresh.tmp')
+    staging.write_text(json.dumps(credentials))
+    try:
+        staging.replace(path)
+    except OSError as error:
+        assert error.errno == errno.EBUSY, error
+        path.write_text(staging.read_text())
+        staging.unlink()
+    print('GEMINI_REFRESH_OK')
+'''
+        for filename in ('oauth_creds.json', 'tokens.json'):
+            host = host_dir / filename
+            host.write_text(original)
+            copies = []
+            try:
+                for index in range(2):
+                    env = {**self.env, 'TMPDIR': str(self.home), 'SANDY_GEMINI_AUTH': 'oauth',
+                           'SANDBOX_DIR': str(self.home / 'gemini-probe' / filename / str(index))}
+                    run = subprocess.run(['bash', '-c', production_contracts.gemini_credential_probe_source()],
+                                         env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
+                    self.assertEqual(run.returncode, 0, run.stderr)
+                    directory, auth, *flags = run.stdout.rstrip('\0').split('\0')
+                    copies.append((Path(directory) / filename, flags))
+                    self.assertEqual(auth, 'oauth-personal')
+                first, flags = copies[0]
+                # This direct probe bypasses Sandy's entrypoint, which normally
+                # chowns the tmpfs home to HOST_UID. The image's own home can be
+                # 0700/UID 1001, so a macOS UID (usually 501) cannot traverse it.
+                # Give the probe its own correctly owned home, as a launch does.
+                home_tmpfs = '/home/sandy:rw,nosuid,nodev,mode=700,uid={},gid={}'.format(os.getuid(), os.getgid())
+                base = ['docker', 'run', '--rm', '--network', 'none', '--read-only',
+                        '--tmpfs', home_tmpfs,
+                        '--user', str(os.getuid()) + ':' + str(os.getgid())]
+                command = ['--entrypoint', 'python3', 'sandy-claude-code', '-c', probe, filename]
+                control = [value[:-3] + ':ro' if value.endswith(':rw') else value for value in flags]
+                out = self.command('gemini-' + filename + '-readonly', base + control + command + ['ro'], self.home)
+                self.assertIn('GEMINI_REFRESH_READONLY_CONTROL_OK', out)
+                out = self.command('gemini-' + filename + '-refresh', base + flags + command + ['rw'], self.home)
+                self.assertIn('GEMINI_REFRESH_OK', out)
+                self.assertEqual(json.loads(first.read_text())['access_token'], 'fixture-refreshed')
+                self.assertEqual(copies[1][0].read_text(), original)
+                self.assertEqual(host.read_text(), original)
+                print('PASS Gemini ' + filename + ': refresh writes only the private launch copy', flush=True)
+            finally:
+                for copy, _ in copies:
+                    run = subprocess.run(['bash', '-c', production_contracts.gemini_credential_cleanup_source()],
+                                         env={**self.env, 'GEMINI_CRED_TMPDIR': str(copy.parent)},
+                                         capture_output=True, text=True, timeout=10)
+                    self.assertEqual(run.returncode, 0, run.stderr)
+                    self.assertFalse(copy.parent.exists())
+                self.assertEqual(host.read_text(), original)
+                host.unlink()
+
     def command(self, name, args, cwd, timeout=600):
         log = self.logs / (name + '.log')
         with log.open('w') as output:
@@ -188,6 +265,7 @@ class ContainerContracts(unittest.TestCase):
         self.launch(project, protected, 'verify')
         other, other_protected = self.project('independent')
         self.launch(other, other_protected, 'isolated')
+        self.check_gemini_refresh_mounts()
 
 
 if __name__ == '__main__':

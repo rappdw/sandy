@@ -19228,9 +19228,12 @@ if _sandy_agent_has gemini; then
     RUN_FLAGS+=(-v "$SANDBOX_DIR/gemini:/home/sandy/.gemini")
     if [ -n "${GEMINI_CRED_TMPDIR:-}" ]; then
         # Mount whichever OAuth file was found (oauth_creds.json or tokens.json)
-        # :ro — same rationale as the Claude/Codex creds mounts above/below.
+        # Writable PRIVATE COPY: Gemini caches refreshed tokens here. This is
+        # never the host credential file; load_gemini_credentials() copies into
+        # a fresh 0700 directory and cleanup() discards it after this launch.
+        # A :ro overlay crashes refresh with EROFS. ADC below remains read-only.
         for _oaf in "$GEMINI_CRED_TMPDIR"/oauth_creds.json "$GEMINI_CRED_TMPDIR"/tokens.json; do
-            [ -f "$_oaf" ] && RUN_FLAGS+=(-v "$_oaf:/home/sandy/.gemini/$(basename "$_oaf"):ro") && break
+            [ -f "$_oaf" ] && RUN_FLAGS+=(-v "$_oaf:/home/sandy/.gemini/$(basename "$_oaf"):rw") && break
         done
     fi
     if [ -n "${GEMINI_ADC_MOUNT:-}" ]; then
