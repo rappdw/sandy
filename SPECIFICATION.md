@@ -2906,7 +2906,7 @@ Read-only by design — the agent must never mutate the host's screenshot folder
 
 Validation (run at launch, before any `docker run`):
 - Reject shell metacharacters (`; $ \` & | < >`).
-- Reject literal `$HOME` and `/` after canonicalization (`pwd -P`).
+- Reject `$HOME` and `/` after canonicalizing both the screenshot path and `$HOME` (`pwd -P`), including symlink aliases of the home directory.
 - Missing directory → warn-and-skip (clear `SANDY_SCREENSHOT_DIR`, no mount). Hard-erroring would be noisy; auto-creating the host dir would silently materialize an empty folder where the user expected content.
 
 `SANDY_SCREENSHOT_DIR` has no default. Unset = no mount, no env var, no skill files generated. See §7 step 4a (`user-setup.sh`) for the per-agent skill file generation that runs container-side once the mount is in place.

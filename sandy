@@ -13692,8 +13692,11 @@ if [ -n "${SANDY_SCREENSHOT_DIR:-}" ]; then
     fi
     # Canonicalize once for comparison; tolerate non-existent path during compare.
     _ssd_real="$(cd "$SANDY_SCREENSHOT_DIR" 2>/dev/null && pwd -P || echo "$SANDY_SCREENSHOT_DIR")"
+    # HOME can itself contain a symlink (macOS /var -> /private/var, or a
+    # relocated home). Compare physical paths on both sides of the guard.
+    _ssd_home_real="$(cd "$HOME" 2>/dev/null && pwd -P || echo "$HOME")"
     case "$_ssd_real" in
-        "$HOME"|/|"")
+        "$HOME"|"$_ssd_home_real"|/|"")
             echo "[sandy] ERROR: SANDY_SCREENSHOT_DIR='$SANDY_SCREENSHOT_DIR' is too broad (resolves to '$_ssd_real'). Pick a specific subdirectory." >&2
             exit 1
             ;;
@@ -13704,7 +13707,7 @@ if [ -n "${SANDY_SCREENSHOT_DIR:-}" ]; then
     else
         SANDY_SCREENSHOT_DIR="$_ssd_real"
     fi
-    unset _ssd_real
+    unset _ssd_real _ssd_home_real
 fi
 
 # D3 (2.0.0): SANDY_FEATURES_DIR is REMOVED. The features root is fixed at

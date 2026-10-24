@@ -1,9 +1,40 @@
-# Sandy — Manual Testing Plan
+# Sandy — Testing Plan
+
+## Automated suite and implementation plan
+
+The test review identified copied implementation logic, failure paths that could count as success, expensive repeated container starts, and acceptance sections omitted from both scheduled and default manual CI runs. The implementation follows this order:
+
+1. Preserve process status and diagnostics; require positive completion evidence. Headless answers require exit zero and an answer line. Acceptance wrappers require a nonempty successful result. Invalid section selectors fail before Docker access. UDP isolation requires a successful public-resolver control before the blocked request can pass.
+2. Replace copied algorithms with production-source contract tests for venv detection, LAN refusal, symlinks, cleanup, settings merges, project paths, and headless routing. Keep distinct parser/platform/security variants. Remove tests for obsolete implicit history migrations; current explicit migration tests remain.
+3. Exercise the real launcher and generated entrypoint through a deterministic agent in an approved project image. Three launches batch toolchain, mount, local package install/persistence, cross-workspace isolation, LFS, native-addon warning, and tmux checks. Protected fixtures remain host-writable; container writes must fail with EROFS. The five persistent package mounts must appear in mountinfo.
+4. Separate selectable groups, isolate fixture state, retain failure output, and record group/section timings. Run the linter self-test once and share its result. Give the dedicated Go CI job ownership of Go race tests.
+5. Run all acceptance sections on Sundays and default manual dispatch, retain the shorter weekday profile, require host tools, add macOS contract coverage, and upload diagnostic artifacts.
+
+Steps 1–4 are implemented in the test scripts. Step 5 is applied in `.github/workflows/test.yml` and `.github/workflows/integration.yml`: separate host, macOS contract, container, and Go jobs; full Sunday/default manual integration runs; and retained diagnostic artifacts. The workflow changes still require CI execution to validate them.
+
+| Group | Command | Dependencies and scope |
+| --- | --- | --- |
+| Harness | `bash test/run-tests.sh --only harness` | Python + Bash; false-pass, logging, and status regressions |
+| Contracts | `bash test/run-tests.sh --only contracts` | Python + Bash + Git; Node and jq for both settings branches |
+| Host | `bash test/run-tests.sh --host-only` | All three host groups; isolated HOME/TMPDIR, Docker/tmux blocked; ShellCheck and other optional tools reported when absent |
+| Container | `bash test/run-tests.sh --only container` | Docker host; production image freshness validation/build; local fixtures, no provider keys |
+| Proxy | `bash test/run-tests.sh --only proxy` | Go toolchain; race-enabled Go tests |
+| Live integration | `bash test/run-integration-tests.sh` | Docker host and applicable provider credentials; acceptance suites and egress modes |
+
+With no flags, `run-tests.sh` runs all five groups. `--list` lists them; `--only` accepts comma-separated names. `--require-tools` makes missing declared tools a hard error. Each group gets a fresh home and scratch directory, so user credentials/config cannot make a test pass. Both runners retain logs in the ignored workspace `.test_output/`, making host-run logs accessible from the mounted container workspace. Each invocation creates a timestamped run directory and removes older managed runs, retaining at most three across both runners. `.test_output/latest/` is a relative symlink to the newest run. Use `--log-dir PATH` for the main suite or `SANDY_INTEG_LOG_DIR=PATH` for integration to override the log root; overrides use the same rotation. `results.json` records main-suite exit codes, durations, skipped counts, and log paths; integration retains its console output as `integration.log` alongside launch/build/acceptance logs. A partial result means checks were skipped; it is not full coverage. Check counts include looped assertions and are not a source coverage percentage.
+
+The main runner prints numbered group headings, individual Python test names and outcomes, and each group's result before continuing. The host group's §207 footer ends only that group. After all selected groups finish, a separate summary ends with `SUITE PASSED`, `SUITE COMPLETE WITH SKIPS`, or `SUITE FAILED`. A failed group keeps the overall run failed even when later groups pass; the final banner names each failed group and its log and exits 1. Full tracebacks stay in the group log; `--verbose` also prints them to the terminal. Automated groups and production-contract probes use noninteractive stdin, so terminal-launched tests cannot hang waiting for approval.
+
+The container fixture overrides only the agent executable through the supported project Dockerfile. It does not reconstruct Docker flags, package wrappers, or entrypoint setup. Production builds may still need the network; fixture package installs use local wheels/modules/packages. Network policy remains in live integration (§13/§13b), with the container fixture explicitly using egress mode 0. Real Docker Desktop, interactive TUI behavior, external provider compatibility, and downloaded Python distributions still require the host/manual runs below. A green host run does not establish these properties.
+
+Replacement map: old runtime §§1–8, 10–11, 13–16, 19, 31–32, 34–35 move to the container group where applicable; the copied Python-download simulation is replaced by a production startup contract. The optional Gemini image smoke checks in §30 are already covered by live integration §6. Copied host algorithms in §§9, 20, 27, 37, 42, 44, 54, 95–96 move to the contracts group. Existing structural, mutation, explicit migration, and distinct security cases remain. §58's Go invocation moves to the proxy group. §161's real tmux check runs inside the container fixture; §162's context exclusion also runs through the real project image build.
+
+## Manual release checks
 
 Tests that require interactive TUI sessions, human observation, or infrastructure not available to automated scripts. Run these after both test suites pass:
 
 ```sh
-bash test/run-tests.sh              # pure-script, no Docker
+bash test/run-tests.sh              # all groups; Docker + Go on the host
 bash test/run-integration-tests.sh  # headless end-to-end, needs Docker + API keys
 ```
 
