@@ -74,15 +74,22 @@ Sources, highest precedence first: `--agent` flag > env set before launch > work
 
 ## Testing
 
-Tests need Docker and built images, so they run **on the host, not inside sandy**. Ask the user to run them and share the output:
+The host groups run with isolated HOME/TMPDIR and Docker/tmux blockers; they are safe inside Sandy. Container, proxy, and keyed integration groups have separate dependencies. Run real Docker/tmux tests **on the host, not inside Sandy**:
 
 ```sh
-bash test/run-tests.sh              # structural + property tests
+bash test/run-tests.sh --host-only  # harness + production contracts + host checks
+bash test/run-tests.sh --only container  # real launcher/entrypoint; Docker host only
+bash test/run-tests.sh --only proxy  # Go race tests
+bash test/run-tests.sh              # all five groups; Docker host only
 bash test/run-integration-tests.sh  # headless end-to-end (API keys); SANDY_INTEG_ONLY / SANDY_INTEG_SKIP
 bash test/lint-bash32.sh            # bash-3.2 / BSD portability lint (also run by §89)
 ```
 
 Acceptance harnesses (`test/acceptance-*.sh`) run against an isolated `$SANDY_HOME` (`test/lib-isolated-home.sh`). Fixtures in a real home look exactly like real sandboxes. `docs/TESTING_PLAN.md` covers manual TUI checks.
+
+Use `--only harness,contracts` for focused feedback and `--list` for groups. Both runners write logs under the ignored workspace `.test_output/`, keeping at most three runs; `.test_output/latest/` points to the newest. `--log-dir PATH` overrides the main suite's log root; `SANDY_INTEG_LOG_DIR` overrides the integration log root, with the same rotation. CI uses `--require-tools` so a missing declared dependency is a failure. A group with skipped checks is reported as partial, not fully passed. Section numbers in the legacy host suite remain stable for incident references; removed sections point to their replacements.
+
+The main runner labels each group and prints individual Python test names and outcomes. Full failure tracebacks are always logged; `--verbose` also prints them to the terminal. Automated groups and production-contract probes receive `/dev/null` on stdin, so running from a terminal cannot turn a refusal test into an approval prompt.
 
 How to write tests here:
 

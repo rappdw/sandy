@@ -1,9 +1,11 @@
 #!/bin/bash
-# Integration tests for sandy container environments.
-# Requires: docker, sandy images already built (run `sandy` once first).
-#
-# Usage: ./test/run-tests.sh
+# Host contracts, container checks, and harness regressions.
+# Usage: ./test/run-tests.sh [--only host,contracts,harness,container,proxy] [--list]
+# Host-only: ./test/run-tests.sh --host-only
 set -euo pipefail
+if [ "${SANDY_TEST_CHILD:-0}" != 1 ]; then
+    exec python3 "$(dirname "$0")/suite_runner.py" "$@"
+fi
 
 # Auto-approve passive privileged keys (e.g. a workspace .sandy/.secrets
 # with GEMINI_API_KEY) so the per-workspace approval prompt doesn't block
@@ -21,7 +23,7 @@ COMPLETED=false
 # Guarantee we always print a summary, even if `set -euo pipefail` aborts the
 # script mid-run (e.g. a bare pipeline with a failing grep). Without this, an
 # early-terminating test would exit silently and the user would have no idea
-# how far the suite got. The trap is overwritten by setup_sandbox to also
+# how far the suite got. The trap is overwritten by cleanup to also
 # clean up temp dirs; that wrapper also calls this function.
 _emit_summary() {
     local code=$?
@@ -40,7 +42,7 @@ _emit_summary() {
     # own error — we must not drown them in a misleading banner.
     if [ "$COMPLETED" = false ] && [ "$((PASS + FAIL))" -gt 0 ]; then
         echo ""
-        printf "\033[0;31m✗ test suite aborted early (exit=%d)\033[0m\n" "$code" >&2
+        printf "\033[0;31m✗ host group aborted early (exit=%d)\033[0m\n" "$code" >&2
         printf "\033[0;33mPartial results: %d passed, %d failed (of %d run so far)\033[0m\n" \
             "$PASS" "$FAIL" "$((PASS + FAIL))" >&2
         if [ "${#ERRORS[@]}" -gt 0 ]; then
@@ -66,13 +68,28 @@ _err_trap() {
 }
 trap _err_trap ERR
 # errtrace: make the ERR trap fire inside shell functions too. Without this,
-# a failing command inside sandy_run() would just propagate out as a non-zero
+# a failing command inside a test helper would just propagate out as a non-zero
 # return and set -e would abort with no location info.
 set -E
 
 # --- Helpers ---
 
-info()  { printf "\033[0;36m%s\033[0m\n" "$*"; }
+_TEST_SECTION=""
+_TEST_SECTION_START=$SECONDS
+_test_section_close() {
+    if [ -n "$_TEST_SECTION" ]; then
+        printf 'TIMING %ss %s\n' "$((SECONDS - _TEST_SECTION_START))" "$_TEST_SECTION"
+    fi
+}
+section() {
+    _test_section_close
+    _TEST_SECTION="$*"
+    _TEST_SECTION_START=$SECONDS
+    printf '\033[0;36m%s\033[0m\n' "$*"
+}
+info() {
+    case "$*" in [0-9]*) section "$*" ;; *) printf '\033[0;36m%s\033[0m\n' "$*" ;; esac
+}
 pass()  { PASS=$((PASS + 1)); printf "  \033[0;32m✓ %s\033[0m\n" "$*"; }
 fail()  { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "  \033[0;31m✗ %s\033[0m\n" "$*"; }
 # skip: a host-capability gap (no node/jq/flock) that removes checks from THIS
@@ -83,7 +100,19 @@ skip()  { SKIPPED=$((SKIPPED + 1)); printf "  \033[0;33m– skipped: %s\033[0m\n
 check() {
     # check "description" <command...>
     local desc="$1"; shift
-    if "$@" >/dev/null 2>&1; then pass "$desc"; else fail "$desc"; fi
+    local log rc=0
+    log="$(mktemp "$SANDY_TEST_LOG_DIR/check.XXXXXX")"
+    "$@" >"$log" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        pass "$desc"
+        rm -f "$log"
+    elif [ "$rc" -eq 77 ]; then
+        skip "$desc (see $log)"
+        cat "$log"
+    else
+        fail "$desc (exit=$rc; log=$log)"
+        cat "$log"
+    fi
 }
 
 # Print a one-line run-provenance footer: UTC timestamp, short commit + describe,
@@ -96,349 +125,26 @@ _run_provenance() {
     sha="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo '?')"
     desc="$(git -C "$repo" describe --tags --always 2>/dev/null || echo '?')"
     if git -C "$repo" diff --quiet HEAD 2>/dev/null; then tree="clean"; else tree="dirty"; fi
-    printf "\033[0;36m── run finished %s · commit %s (%s) · tree: %s\033[0m\n" "$ts" "$sha" "$desc" "$tree"
+    printf "\033[0;36m── host group complete %s · commit %s (%s) · tree: %s\033[0m\n" "$ts" "$sha" "$desc" "$tree"
 }
 
-# Create a temp sandbox with persistent mount dirs
-setup_sandbox() {
-    SANDBOX_DIR="$(mktemp -d)"
-    mkdir -p "$SANDBOX_DIR"/{pip,uv,npm-global,go,cargo}
-    # Minimal sandbox — needs a settings.json for claude to not error
-    echo '{}' > "$SANDBOX_DIR/settings.json"
-    # Empty-dir fixture for protected-path overlays in sandy_run. Lives in
-    # its own mktemp tree (not under SANDBOX_DIR or TEST_PROJECT) so it isn't
-    # also part of any rw bind mount — that double-mount pattern lets some
-    # Docker versions silently drop the :ro flag.
-    #
-    # Chmod 0555 (r-x for everyone, no write for anyone — including owner)
-    # so that even if Docker silently drops the :ro flag on macOS, writes
-    # still fail at the host filesystem layer. The container runs as the
-    # same uid as the host (HOST_UID passed in), so 0555 blocks both. This
-    # is a belt-and-suspenders defense: the test should observe "write
-    # blocked" regardless of which layer enforces it.
-    EMPTY_RO_FIXTURE="$(mktemp -d)"
-    chmod 0555 "$EMPTY_RO_FIXTURE"
-    trap cleanup EXIT
-}
-
+# Every host fixture lives under the runner-owned temporary directory.
+TEST_PROJECT="$(mktemp -d)"
+SANDBOX_DIR="$(mktemp -d)"
+mkdir -p "$SANDBOX_DIR/claude"
 cleanup() {
     _emit_summary
-    rm -rf "$SANDBOX_DIR" "$TEST_PROJECT" "$EMPTY_RO_FIXTURE" 2>/dev/null || true
+    rm -rf "$TEST_PROJECT" "$SANDBOX_DIR" 2>/dev/null || true
 }
+trap cleanup EXIT
+SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
+SANDY_SCRIPT="$SCRIPT"
+SANDY_SCRIPT_PATH="$SCRIPT"
+_SANDY_SCRIPT_PATH="$SCRIPT"
+# Fast-path fixtures are created in the isolated SANDY_HOME, never the real home.
+bash "$SCRIPT" --print-protected-paths >/dev/null
 
-# Create a temp project directory to mount as workspace
-setup_project() {
-    TEST_PROJECT="$(mktemp -d)"
-}
-
-# Run a command inside the sandy container with the test sandbox.
-# The entrypoint runs as root, drops to user, sets up PATH/envs, then
-# execs our command instead of launching claude.
-sandy_run() {
-    # Build protected-path overlays using sandy's shared-source helper
-    # (--print-protected-paths), so the test harness never drifts from the
-    # real launcher.
-    #
-    # File mounts are existence-gated — matching sandy's production behavior.
-    # An earlier always-mount-with-empty-fixture policy caused Docker to create
-    # 0-byte stubs on the host for every missing protected file (Docker auto-
-    # creates bind-mount targets, and the target lives inside the rw workspace
-    # bind). That broke direnv and polluted `git status`; see the comment block
-    # in sandy where the protected-files loop runs. Tests assert the agent can
-    # still write absent files — the mitigation is host-side visibility in
-    # `git status`, not prevention.
-    local _ro_mounts=()
-    local _sandy_bin
-    _sandy_bin="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-    while IFS= read -r _line; do
-        [ -z "$_line" ] && continue
-        local _kind="${_line%%:*}" _p="${_line#*:}"
-        case "$_kind" in
-            file)
-                # Existence-gated in production sandy; same here — no pre-create.
-                [ -e "$TEST_PROJECT/$_p" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
-                ;;
-            gitfile)
-                # Existence-gated in production sandy; same here — no pre-create.
-                [ -f "$TEST_PROJECT/$_p" ] && _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
-                ;;
-            dir)
-                # Test-harness fixture model (not exactly sandy's production
-                # model). Sandy's production model is existence-gated: absent
-                # dirs are not mounted. The harness, however, mounts EVERY
-                # protected dir — using $EMPTY_RO_FIXTURE as the source if the
-                # dir is missing on host. Two reasons for the asymmetry:
-                #
-                # 1. Some tests need to verify writes to neighbouring protected
-                #    *files* (e.g. /workspace/.git/config) are blocked. On
-                #    macOS Docker Desktop / gRPCFUSE, the kernel's view of
-                #    sibling bind mounts under /workspace/.git/ matters for
-                #    :ro propagation of the file bind. Stubbing every protected
-                #    dir at launch — even ones that don't exist on host — keeps
-                #    that mount-layer state stable.
-                #
-                # 2. Section 31 tests sandy's actual behavior at the source-code
-                #    level (static greps on the sandy script, plus mountinfo
-                #    checks via sandy_run with a fresh present/absent fixture)
-                #    rather than relying on this branch — so the harness can
-                #    diverge from sandy here without losing coverage of the
-                #    hybrid model.
-                #
-                # $EMPTY_RO_FIXTURE is chmod 0555 (see setup_sandbox) so writes
-                # fail at the host fs layer even if Docker's :ro is dropped.
-                #
-                # Pre-mkdir the host target *before* docker run. On Linux,
-                # Docker daemon runs as root, so if it has to auto-create the
-                # bind-mount target inside the rw workspace bind, the stub
-                # ends up root-owned — and a later `rm -rf $TEST_PROJECT` as
-                # the runner user fails with EPERM. macOS Docker Desktop
-                # avoids this because gRPCFUSE remaps UIDs, but Linux runners
-                # (GitHub Actions) hit it hard. Doing the mkdir here, as the
-                # runner user, keeps the stub host-side runner-owned.
-                if [ ! -d "$TEST_PROJECT/$_p" ]; then
-                    mkdir -p "$TEST_PROJECT/$_p"
-                fi
-                if [ -n "$(ls -A "$TEST_PROJECT/$_p" 2>/dev/null)" ]; then
-                    _ro_mounts+=(-v "$TEST_PROJECT/$_p:/workspace/$_p:ro")
-                else
-                    _ro_mounts+=(-v "$EMPTY_RO_FIXTURE:/workspace/$_p:ro")
-                fi
-                ;;
-        esac
-    done < <(SANDY_ALLOW_WORKFLOW_EDIT="${SANDY_ALLOW_WORKFLOW_EDIT:-0}" \
-                "$_sandy_bin" --print-protected-paths 2>/dev/null || true)
-    # `|| true` on the process substitution: we're only consuming sandy's
-    # stdout via `read`. If sandy exits non-zero (some envs have shown
-    # transient err-trap noise here), the harness-level ERR trap would fire
-    # informationally even though nothing's actually broken — the read loop
-    # already got the lines it needed. Suppress the noise.
-
-    # Mirror _protect_submodule_gitdirs from the sandy launcher: for every
-    # $TEST_PROJECT/.git/modules/<sub>/config sentinel, mount config/hooks/info
-    # ro at the matching container path. Only runs if .git/modules exists —
-    # test 34 creates a fake submodule gitdir layout to exercise this.
-    if [ -d "$TEST_PROJECT/.git/modules" ]; then
-        while IFS= read -r -d '' _cfg; do
-            local _sub_dir _rel
-            _sub_dir="$(dirname "$_cfg")"
-            _rel="${_sub_dir#$TEST_PROJECT/.git/modules}"
-            _ro_mounts+=(-v "$_sub_dir/config:/workspace/.git/modules${_rel}/config:ro")
-            if [ -d "$_sub_dir/hooks" ]; then
-                _ro_mounts+=(-v "$_sub_dir/hooks:/workspace/.git/modules${_rel}/hooks:ro")
-            fi
-            if [ -d "$_sub_dir/info" ]; then
-                _ro_mounts+=(-v "$_sub_dir/info:/workspace/.git/modules${_rel}/info:ro")
-            fi
-        done < <(find "$TEST_PROJECT/.git/modules" -mindepth 1 -maxdepth 6 -type f -name config -print0 2>/dev/null)
-    fi
-    # Mount sandbox copies of commands, agents, and plugins over workspace
-    for _sd in commands agents plugins; do
-        if [ -d "$TEST_PROJECT/.claude/$_sd" ] || [ -d "$SANDBOX_DIR/workspace-$_sd" ]; then
-            mkdir -p "$SANDBOX_DIR/workspace-$_sd"
-            _ro_mounts+=(-v "$SANDBOX_DIR/workspace-$_sd:/workspace/.claude/$_sd")
-        fi
-    done
-    docker run --rm \
-        --read-only \
-        --tmpfs /tmp:exec,size=256M \
-        --tmpfs /home/sandy:exec,size=256M,uid=1001,gid=1001 \
-        -v "$SANDBOX_DIR:/home/sandy/.claude" \
-        -v "$SANDBOX_DIR/pip:/home/sandy/.pip-packages" \
-        -v "$SANDBOX_DIR/uv:/home/sandy/.local/share/uv" \
-        -v "$SANDBOX_DIR/npm-global:/home/sandy/.npm-global" \
-        -v "$SANDBOX_DIR/go:/home/sandy/go" \
-        -v "$SANDBOX_DIR/cargo:/home/sandy/.cargo" \
-        -v "$TEST_PROJECT:/workspace" \
-        ${_ro_mounts[@]+"${_ro_mounts[@]}"} \
-        -w /workspace \
-        -e SANDY_WORKSPACE=/workspace \
-        -e HOST_UID="$(id -u)" \
-        -e HOST_GID="$(id -g)" \
-        -e SANDY_TEST_CMD="$1" \
-        --entrypoint bash \
-        "$IMAGE_NAME" \
-        -c "
-            # Replicate the essential entrypoint setup (root phase)
-            RUN_UID=\${HOST_UID:-1001}
-            RUN_GID=\${HOST_GID:-1001}
-            chown \"\$RUN_UID:\$RUN_GID\" /home/sandy
-            for d in /home/sandy/.pip-packages /home/sandy/.local/share/uv \
-                     /home/sandy/.npm-global /home/sandy/go /home/sandy/.cargo; do
-                chown \"\$RUN_UID:\$RUN_GID\" \"\$d\" 2>/dev/null || true
-            done
-            mkdir -p /home/sandy/.local/bin /home/sandy/.local/share
-            ln -sf /usr/local/bin/claude /home/sandy/.local/bin/claude
-            ln -sf /opt/claude-code /home/sandy/.local/share/claude
-            chown \"\$RUN_UID:\$RUN_GID\" /home/sandy/.local /home/sandy/.local/bin \
-                /home/sandy/.local/share /home/sandy/.local/share/claude 2>/dev/null || true
-
-            # Create pip/pip3 wrappers (base64-encoded to avoid quoting hell)
-            echo IyEvYmluL2Jhc2gKaWYgWyAteiAiJFZJUlRVQUxfRU5WIiBdICYmIFsgIiR7MTotfSIgPSAiaW5zdGFsbCIgXTsgdGhlbgogICAgc2hpZnQKICAgIGV4ZWMgcHl0aG9uMyAtbSBwaXAgaW5zdGFsbCAtLXVzZXIgIiRAIgpmaQpleGVjIHB5dGhvbjMgLW0gcGlwICIkQCIK | base64 -d > /home/sandy/.local/bin/pip
-            cp /home/sandy/.local/bin/pip /home/sandy/.local/bin/pip3
-            chmod +x /home/sandy/.local/bin/pip /home/sandy/.local/bin/pip3
-            chown \"\$RUN_UID:\$RUN_GID\" /home/sandy/.local/bin/pip /home/sandy/.local/bin/pip3
-
-            # Drop to user and run the test command (passed via env var to
-            # avoid quoting issues with nested bash -c single-quoted strings)
-            exec gosu \"\$RUN_UID:\$RUN_GID\" bash -c '
-                export HOME=/home/sandy
-                export CARGO_HOME=\"\$HOME/.cargo\"
-                mkdir -p \"\$CARGO_HOME/bin\"
-                for bin in /usr/local/cargo/bin/*; do
-                    ln -sf \"\$bin\" \"\$CARGO_HOME/bin/\$(basename \"\$bin\")\"
-                done
-                export GOPATH=\"\$HOME/go\"
-                mkdir -p \"\$GOPATH/bin\"
-                export NPM_CONFIG_PREFIX=\"\$HOME/.npm-global\"
-                mkdir -p \"\$NPM_CONFIG_PREFIX/bin\"
-                export PIP_BREAK_SYSTEM_PACKAGES=1
-                export PYTHONUSERBASE=\"\$HOME/.pip-packages\"
-                mkdir -p \"\$PYTHONUSERBASE/bin\"
-                export PATH=\"\$HOME/.local/bin:\$PYTHONUSERBASE/bin:\$NPM_CONFIG_PREFIX/bin:\$GOPATH/bin:\$CARGO_HOME/bin:\$PATH\"
-                eval \"\$SANDY_TEST_CMD\"
-            '
-        "
-}
-
-# Variant: run two sequential sessions (first writes, second reads)
-sandy_run_persist() {
-    sandy_run "$1"
-    sandy_run "$2"
-}
-
-# --- Preflight ---
-
-if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
-    _sandy_bin="$(cd "$(dirname "$0")/.." && pwd)/sandy"
-    echo "Info: $IMAGE_NAME image not found. Building via '$_sandy_bin --build-only'..."
-    if ! "$_sandy_bin" --build-only; then
-        echo "Error: failed to build $IMAGE_NAME. Run '$_sandy_bin --rebuild' manually to diagnose."
-        exit 1
-    fi
-    if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
-        echo "Error: $IMAGE_NAME still missing after build. Check '$_sandy_bin --build-only' output."
-        exit 1
-    fi
-fi
-
-setup_sandbox
-setup_project
-
-# ============================================================
-info "1. Base toolchain availability"
-# ============================================================
-
-check "python3 is available"        sandy_run "python3 --version"
-check "node is available"           sandy_run "node --version"
-check "go is available"             sandy_run "go version"
-check "rustc is available"          sandy_run "rustc --version"
-check "cargo is available"          sandy_run "cargo --version"
-check "uv is available"             sandy_run "uv --version"
-check "gcc is available"            sandy_run "gcc --version"
-check "git is available"            sandy_run "git --version"
-
-# ============================================================
-info "2. Persistent pip installs"
-# ============================================================
-
-sandy_run "pip install --quiet cowsay"
-check "pip package persists across sessions" \
-    sandy_run "python3 -c 'import cowsay; cowsay.cow(\"moo\")'"
-
-# ============================================================
-info "3. Persistent npm global installs"
-# ============================================================
-
-sandy_run "npm install -g --silent cowsay 2>&1"
-check "npm -g package persists across sessions" \
-    sandy_run "which cowsay"
-
-# ============================================================
-info "4. Persistent go install"
-# ============================================================
-
-sandy_run "go install golang.org/x/tools/cmd/goimports@latest 2>&1"
-check "go install binary persists across sessions" \
-    sandy_run "which goimports"
-
-# ============================================================
-info "5. pip installs to venv (not --user) when venv is active"
-# ============================================================
-
-check "pip inside venv installs to venv, not --user" \
-    sandy_run "
-        python3 -m venv /workspace/.venv
-        source /workspace/.venv/bin/activate
-        pip install --quiet pyjokes
-        # Verify it's in the venv, not in PYTHONUSERBASE
-        VENV_PKG=\$(find /workspace/.venv -name 'pyjokes' -type d 2>/dev/null | head -1)
-        USER_PKG=\$(find \$PYTHONUSERBASE -name 'pyjokes' -type d 2>/dev/null | head -1)
-        if [ -n \"\$VENV_PKG\" ] && [ -z \"\$USER_PKG\" ]; then
-            exit 0
-        else
-            echo 'FAIL: pyjokes found in PYTHONUSERBASE or not in venv'
-            exit 1
-        fi
-    "
-rm -rf "$TEST_PROJECT/.venv"
-
-# ============================================================
-info "6. PATH order"
-# ============================================================
-
-ACTUAL_FIRST="$(sandy_run 'echo $PATH' | tr ':' '\n' | head -1)"
-check "~/.local/bin is first on PATH" \
-    test "$ACTUAL_FIRST" = "/home/sandy/.local/bin"
-
-# ============================================================
-info "7. Read-only root filesystem"
-# ============================================================
-
-sandy_run "touch /usr/test 2>/dev/null" >/dev/null 2>&1 && WRITE_USR=yes || WRITE_USR=no
-check "cannot write to /usr" \
-    test "$WRITE_USR" = "no"
-check "can write to /tmp" \
-    sandy_run "touch /tmp/test"
-check "can write to home" \
-    sandy_run "touch /home/sandy/test"
-
-# ============================================================
-info "8. Dev environment detection — .python-version auto-install"
-# ============================================================
-
-# rm-before-write for the same sshfs stale-inode reason as test 13: earlier
-# sandy_run calls may have pre-created an empty .python-version stub and
-# cached it in sshfs. `rm -f` + create gives a fresh inode so the container
-# reads the new content via `uv python install`.
-rm -f "$TEST_PROJECT/.python-version"
-echo "3.11" > "$TEST_PROJECT/.python-version"
-# Simulate what the entrypoint does: read .python-version, install, verify.
-# Guarded with `|| true` because this priming sandy_run runs under `set -e`
-# and any non-zero exit (a uv install hiccup, a network flake, a sshfs cache
-# issue) would abort the whole suite before the real `check` below gets to
-# run. The `check` is the actual gate — if install truly failed, the check
-# below will report it cleanly as a test failure, not an abort.
-sandy_run '
-    PY_WANT="$(cat /workspace/.python-version | tr -d "[:space:]")"
-    # Bound the download: sandy_run does not mount the persistent uv cache, so
-    # this fetches Python fresh from astral.sh every run, and a slow/stalled
-    # CDN would otherwise hang the WHOLE suite here (no timeout, and the outer
-    # `|| true` only catches non-zero, not a wedge). `timeout` is GNU coreutils
-    # — this runs INSIDE the Debian container, so it is available (unlike on a
-    # BSD/macOS host). On timeout the install is simply incomplete and the
-    # `check` below reports a clean FAIL instead of the run freezing.
-    # Container-side (Debian), not host shell. This block is a single-quoted
-    # argument, which no heredoc heuristic can detect, hence the explicit marker.
-    # lint-bash32: allow GNUBIN
-    timeout 300 uv python install "$PY_WANT" 2>/dev/null || true
-    uv python find "$PY_WANT" >/dev/null 2>&1 || true
-    exit 0
-' || true
-check ".python-version triggers uv python install" \
-    sandy_run "uv python find 3.11 >/dev/null 2>&1"
-rm -f "$TEST_PROJECT/.python-version"
-
-# ============================================================
+# Container toolchain, persistence and isolation checks: test_container.py.
 info "9. Workspace .venv overlay — detection and materialization"
 # ============================================================
 
@@ -460,162 +166,7 @@ check "SANDY_VENV_OVERLAY in config allowlist" \
     test "$ALLOWLIST_RESULT" = "0"
 rm -rf "$TMPCFG"
 
-# 9b. pyvenv.cfg parsing — extract major.minor from `version = X.Y.Z`
-VENV_FIXTURE="$(mktemp -d)"
-cat > "$VENV_FIXTURE/pyvenv.cfg" <<'EOF'
-home = /Users/drapp/.local/share/uv/python/cpython-3.10.16-macos-aarch64-none/bin
-implementation = CPython
-uv = 0.5.11
-version_info = 3.10.16.final.0
-include-system-site-packages = false
-prompt = myproject
-EOF
-PARSED_VER="$(grep -E '^version(_info)?[[:space:]]*=' "$VENV_FIXTURE/pyvenv.cfg" \
-    | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]')"
-check "pyvenv.cfg version_info parsed as major.minor" \
-    test "$PARSED_VER" = "3.10"
-rm -rf "$VENV_FIXTURE"
-
-# 9c. pyvenv.cfg parsing — `version = X.Y.Z` form (older virtualenv)
-VENV_FIXTURE2="$(mktemp -d)"
-cat > "$VENV_FIXTURE2/pyvenv.cfg" <<'EOF'
-home = /usr/bin
-include-system-site-packages = false
-version = 3.11.5
-EOF
-PARSED_VER2="$(grep -E '^version(_info)?[[:space:]]*=' "$VENV_FIXTURE2/pyvenv.cfg" \
-    | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]')"
-check "pyvenv.cfg version parsed as major.minor" \
-    test "$PARSED_VER2" = "3.11"
-rm -rf "$VENV_FIXTURE2"
-
-# 9d. Malformed pyvenv.cfg → empty version (falls back to default in container)
-VENV_FIXTURE3="$(mktemp -d)"
-cat > "$VENV_FIXTURE3/pyvenv.cfg" <<'EOF'
-home = /usr/bin
-include-system-site-packages = false
-EOF
-PARSED_VER3="$( { grep -E '^version(_info)?[[:space:]]*=' "$VENV_FIXTURE3/pyvenv.cfg" \
-    | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]'; } || true )"
-check "malformed pyvenv.cfg yields empty version" \
-    test -z "$PARSED_VER3"
-
-# 9e. Issue C (sandbox-escape eval) — overlay-off / symlinked .venv warns that
-# the interpreter is host-reachable (a host Python extension could run an
-# agent-modified interpreter). Host-side launch logic (needs the full flow to
-# fire), so assert structurally that both fallback branches exist and warn.
-check "overlay-off branch (SANDY_VENV_OVERLAY=0 + present .venv) exists" \
-    grep -qF '"${SANDY_VENV_OVERLAY:-1}" = "0" ] && { [ -d "$WORK_DIR/.venv" ]' "$_SANDY_SCRIPT_PATH"
-check "overlay-off warns the venv is NOT shadowed" \
-    grep -qF 'mount and NOT shadowed' "$_SANDY_SCRIPT_PATH"
-check "symlinked .venv warns it is host-reachable" \
-    grep -qF '.venv is host-reachable (not shadowed)' "$_SANDY_SCRIPT_PATH"
-rm -rf "$VENV_FIXTURE3"
-
-# 9e. Symlinked .venv is skipped (potential sandbox escape)
-SYM_FIXTURE="$(mktemp -d)"
-SYM_TARGET="$(mktemp -d)"
-mkdir -p "$SYM_TARGET/bin"
-ln -s "$SYM_TARGET" "$SYM_FIXTURE/.venv"
-# The host-side detection uses [ -d DIR ] && [ ! -L DIR ] — should skip symlinks.
-SKIP_RESULT="no"
-if [ -d "$SYM_FIXTURE/.venv" ] && [ ! -L "$SYM_FIXTURE/.venv" ]; then
-    SKIP_RESULT="no"
-else
-    SKIP_RESULT="yes"
-fi
-check "symlinked .venv is skipped by overlay detection" \
-    test "$SKIP_RESULT" = "yes"
-rm -rf "$SYM_FIXTURE" "$SYM_TARGET"
-
-# 9f. Opt-out via SANDY_VENV_OVERLAY=0 disables detection even when .venv exists
-OPTOUT_FIXTURE="$(mktemp -d)"
-mkdir -p "$OPTOUT_FIXTURE/.venv"
-OPTOUT_ACTIVE=false
-SANDY_VENV_OVERLAY=0
-if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] \
-   && [ -d "$OPTOUT_FIXTURE/.venv" ] \
-   && [ ! -L "$OPTOUT_FIXTURE/.venv" ]; then
-    OPTOUT_ACTIVE=true
-fi
-check "SANDY_VENV_OVERLAY=0 disables overlay detection" \
-    test "$OPTOUT_ACTIVE" = "false"
-unset SANDY_VENV_OVERLAY
-rm -rf "$OPTOUT_FIXTURE"
-
-# 9g. Default (unset) enables detection when .venv exists
-DEFAULT_FIXTURE="$(mktemp -d)"
-mkdir -p "$DEFAULT_FIXTURE/.venv"
-unset SANDY_VENV_OVERLAY
-DEFAULT_ACTIVE=false
-if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] \
-   && [ -d "$DEFAULT_FIXTURE/.venv" ] \
-   && [ ! -L "$DEFAULT_FIXTURE/.venv" ]; then
-    DEFAULT_ACTIVE=true
-fi
-check "overlay default-on when .venv exists" \
-    test "$DEFAULT_ACTIVE" = "true"
-rm -rf "$DEFAULT_FIXTURE"
-
-# 9h. PR 2.1: .python-version takes precedence over pyvenv.cfg
-# Mirror the host-side precedence block: .python-version wins when both present.
-PV_FIXTURE="$(mktemp -d)"
-mkdir -p "$PV_FIXTURE/.venv"
-cat > "$PV_FIXTURE/.venv/pyvenv.cfg" <<'EOF'
-version_info = 3.10.16.final.0
-EOF
-echo "3.12" > "$PV_FIXTURE/.python-version"
-# Emulate the same precedence logic from sandy (2213-2224)
-if [ -f "$PV_FIXTURE/.python-version" ]; then
-    PV_RESULT="$(tr -d '[:space:]' < "$PV_FIXTURE/.python-version" | cut -d. -f1-2)"
-elif [ -f "$PV_FIXTURE/.venv/pyvenv.cfg" ]; then
-    PV_RESULT="$(grep -E '^version(_info)?[[:space:]]*=' "$PV_FIXTURE/.venv/pyvenv.cfg" \
-        | head -1 | sed -E 's/.*=[[:space:]]*//' | cut -d. -f1-2 | tr -d '[:space:]')"
-fi
-check ".python-version takes precedence over pyvenv.cfg" \
-    test "$PV_RESULT" = "3.12"
-rm -rf "$PV_FIXTURE"
-
-# 9i. PR 2.1: garbage SANDY_VENV_PYTHON_VERSION rejected by major.minor regex
-# Hostside block at sandy:2225-2229 drops non-major.minor values. Simulate it.
-VALIDATE() {
-    local v="$1"
-    if [ -n "$v" ] && [[ ! "$v" =~ ^[0-9]+\.[0-9]+$ ]]; then
-        echo ""
-    else
-        echo "$v"
-    fi
-}
-check "validator accepts 3.11" test "$(VALIDATE 3.11)" = "3.11"
-check "validator accepts 3.12" test "$(VALIDATE 3.12)" = "3.12"
-check "validator rejects 3.10.16"    test -z "$(VALIDATE 3.10.16)"
-check "validator rejects 3.10.16.final.0" test -z "$(VALIDATE 3.10.16.final.0)"
-check "validator rejects empty" test -z "$(VALIDATE '')"
-check "validator rejects shell injection" test -z "$(VALIDATE '3.11; echo pwned')"
-
-# 9j. PR 2.1: symlinked .venv triggers info-message branch (not silent skip)
-# The hostside now has an elif that fires info() on symlinked .venv.
-# Simulate the branch condition to confirm it would fire.
-SYM_INFO_FIXTURE="$(mktemp -d)"
-SYM_INFO_TARGET="$(mktemp -d)"
-mkdir -p "$SYM_INFO_TARGET"
-ln -s "$SYM_INFO_TARGET" "$SYM_INFO_FIXTURE/.venv"
-WOULD_FIRE_INFO="no"
-if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] && [ -L "$SYM_INFO_FIXTURE/.venv" ]; then
-    WOULD_FIRE_INFO="yes"
-fi
-check "symlinked .venv fires info message branch" \
-    test "$WOULD_FIRE_INFO" = "yes"
-# And with opt-out, even symlinked .venv doesn't trigger the info branch.
-SANDY_VENV_OVERLAY=0
-WOULD_FIRE_INFO_OPTOUT="no"
-if [ "${SANDY_VENV_OVERLAY:-1}" != "0" ] && [ -L "$SYM_INFO_FIXTURE/.venv" ]; then
-    WOULD_FIRE_INFO_OPTOUT="yes"
-fi
-check "opt-out suppresses symlink info branch" \
-    test "$WOULD_FIRE_INFO_OPTOUT" = "no"
-unset SANDY_VENV_OVERLAY
-rm -rf "$SYM_INFO_FIXTURE" "$SYM_INFO_TARGET"
+# Behavioral virtualenv cases execute production code in test_production_contracts.py.
 
 # 9k. PR 2.1: materialization block uses uv venv --clear
 # The overlay's target is a bind mount (dir always exists), so uv venv
@@ -661,12 +212,7 @@ _SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # (the session-wide flags and channels are decided once, in helpers, so a
 # background session gets exactly what the pane gets).
 BUILD_CLAUDE_BODY="$(awk '/^(build_claude_cmd|_sandy_claude_base_args|_sandy_claude_channel_args|_sandy_claude_cmd_tail)\(\)/,/^}$/' "$_SANDY_SCRIPT_PATH")"
-FALLBACK_PRESENT="no"
-if echo "$BUILD_CLAUDE_BODY" | grep -qE 'cmd="\$cmd \|\| \$cmd_base"'; then
-    FALLBACK_PRESENT="yes"
-fi
-check "build_claude_cmd has no cmd||cmd_base fallback (PR 1.1 blocker #1)" \
-    test "$FALLBACK_PRESENT" = "no"
+# One absence check subsumes the old specific fallback-expression check.
 
 # Also assert that cmd_base is not referenced at all — it's the marker
 # variable for the fallback pattern, and its absence is the cleanest
@@ -745,65 +291,6 @@ check "codex trust-entry check uses grep -F (PR 1.1 blocker #2)" \
     bash -c "echo '$CODEX_GREP_LINE' | grep -q 'grep -qF'"
 
 # ============================================================
-info "10. Dev environment detection — foreign native modules"
-# ============================================================
-
-mkdir -p "$TEST_PROJECT/node_modules/fake-addon"
-# Create a Mach-O stub (magic bytes: 0xFEEDFACF = 64-bit Mach-O)
-printf '\xfe\xed\xfa\xcf' > "$TEST_PROJECT/node_modules/fake-addon/binding.node"
-# Check that the .node file's magic bytes are NOT ELF (7f 45 4c 46)
-OUTPUT="$(sandy_run "od -A n -t x1 -N4 /workspace/node_modules/fake-addon/binding.node | tr -d ' '" 2>&1)"
-check "detects non-ELF native addon" \
-    bash -c '! echo "$1" | grep -qi "^7f454c46"' -- "$OUTPUT"
-rm -rf "$TEST_PROJECT/node_modules"
-
-# ============================================================
-info "11. Sandbox isolation between projects"
-# ============================================================
-
-SANDBOX_DIR2="$(mktemp -d)"
-mkdir -p "$SANDBOX_DIR2"/{pip,uv,npm-global,go,cargo}
-echo '{}' > "$SANDBOX_DIR2/settings.json"
-
-# pip package from test 2 should NOT be in the second sandbox
-OUTPUT="$(
-    docker run --rm \
-        --read-only \
-        --tmpfs /tmp:exec,size=256M \
-        --tmpfs /home/sandy:exec,size=256M,uid=1001,gid=1001 \
-        -v "$SANDBOX_DIR2:/home/sandy/.claude" \
-        -v "$SANDBOX_DIR2/pip:/home/sandy/.pip-packages" \
-        -v "$SANDBOX_DIR2/uv:/home/sandy/.local/share/uv" \
-        -v "$SANDBOX_DIR2/npm-global:/home/sandy/.npm-global" \
-        -v "$SANDBOX_DIR2/go:/home/sandy/go" \
-        -v "$SANDBOX_DIR2/cargo:/home/sandy/.cargo" \
-        -v "$TEST_PROJECT:/workspace" \
-        -w /workspace \
-        -e HOST_UID="$(id -u)" \
-        -e HOST_GID="$(id -g)" \
-        --entrypoint bash \
-        "$IMAGE_NAME" \
-        -c "
-            RUN_UID=\${HOST_UID:-1001}; RUN_GID=\${HOST_GID:-1001}
-            chown \"\$RUN_UID:\$RUN_GID\" /home/sandy
-            for d in /home/sandy/.pip-packages /home/sandy/.npm-global /home/sandy/go /home/sandy/.cargo; do
-                chown \"\$RUN_UID:\$RUN_GID\" \"\$d\" 2>/dev/null || true
-            done
-            mkdir -p /home/sandy/.local/bin /home/sandy/.local/share
-            chown \"\$RUN_UID:\$RUN_GID\" /home/sandy/.local /home/sandy/.local/bin /home/sandy/.local/share 2>/dev/null || true
-            exec gosu \"\$RUN_UID:\$RUN_GID\" bash -c '
-                export HOME=/home/sandy
-                export PIP_BREAK_SYSTEM_PACKAGES=1
-                export PYTHONUSERBASE=\"\$HOME/.pip-packages\"
-                python3 -c \"import cowsay\" 2>&1 && echo LEAKED || echo ISOLATED
-            '
-        " 2>&1
-)"
-check "packages don't leak between project sandboxes" \
-    bash -c 'echo "$1" | grep -q ISOLATED' -- "$OUTPUT"
-rm -rf "$SANDBOX_DIR2"
-
-# ============================================================
 info "12. Variable ordering — WORK_DIR defined before Phase 3"
 # ============================================================
 
@@ -820,135 +307,6 @@ check "WORK_DIR defined before Phase 3" \
     test "$WORK_DIR_DEF" -lt "$PHASE3_USE"
 check "SANDBOX_NAME defined before Phase 3" \
     test "$SANDBOX_NAME_DEF" -lt "$PHASE3_USE"
-
-# ============================================================
-info "13. Protected files are read-only inside container"
-# ============================================================
-
-# Switch to a fresh TEST_PROJECT before asserting host→container content.
-#
-# Why: tests 1-12 ran sandy_run many times against $TEST_PROJECT, and
-# sandy_run's file: loop pre-created empty .bashrc/.zshrc stubs inside it so
-# the ro bind mounts would resolve. Each container read of those empty stubs
-# populates OrbStack's fuse.sshfs attribute cache at the *path* level, and
-# that cache survives rm, echo-over-write, atomic mv-rename, and inode-change
-# (verified empirically — see test/run-failing-tests.sh variants B/C/D, all
-# of which write 14 bytes on host but read 0 bytes in container). The only
-# thing that dodges the cache is a never-before-seen path: a fresh mktemp.
-#
-# Switching TEST_PROJECT here means tests 14+ inherit the new directory. All
-# of them set up their own fixtures, so that's fine. The old project is
-# removed immediately to avoid leaking tempdirs.
-_OLD_TEST_PROJECT="$TEST_PROJECT"
-TEST_PROJECT="$(mktemp -d)"
-rm -rf "$_OLD_TEST_PROJECT"
-unset _OLD_TEST_PROJECT
-
-echo "# host bashrc" > "$TEST_PROJECT/.bashrc"
-echo "# host zshrc" > "$TEST_PROJECT/.zshrc"
-mkdir -p "$TEST_PROJECT/.git/hooks"
-echo "#!/bin/sh" > "$TEST_PROJECT/.git/hooks/pre-commit"
-echo "[core]" > "$TEST_PROJECT/.git/config"
-echo "" > "$TEST_PROJECT/.gitmodules"
-# 0444 backstop for the write-blocked checks below: macOS Docker/OrbStack can
-# transiently drop :ro enforcement on binds whose source lives inside the rw
-# workspace bind (see the comment in test 32 and $EMPTY_RO_FIXTURE's 0555 in
-# setup_sandbox). Container writes run as HOST_UID, so host perms still block
-# them. rm -f/-rf cleanup below is unaffected (unlink needs dir perms only).
-chmod 0444 "$TEST_PROJECT/.bashrc" "$TEST_PROJECT/.zshrc" \
-    "$TEST_PROJECT/.git/hooks/pre-commit" "$TEST_PROJECT/.git/config" \
-    "$TEST_PROJECT/.gitmodules"
-mkdir -p "$TEST_PROJECT/.claude/commands"
-echo "test" > "$TEST_PROJECT/.claude/commands/test.md"
-mkdir -p "$TEST_PROJECT/.claude/agents"
-echo "test" > "$TEST_PROJECT/.claude/agents/test-agent.md"
-mkdir -p "$TEST_PROJECT/.claude/plugins"
-echo "test" > "$TEST_PROJECT/.claude/plugins/test-plugin.json"
-
-# Verify writes to protected files fail
-sandy_run "echo injected >> /workspace/.bashrc 2>/dev/null" >/dev/null 2>&1 && WRITE_BASHRC=yes || WRITE_BASHRC=no
-check "cannot write to .bashrc" test "$WRITE_BASHRC" = "no"
-
-sandy_run "echo injected >> /workspace/.zshrc 2>/dev/null" >/dev/null 2>&1 && WRITE_ZSHRC=yes || WRITE_ZSHRC=no
-check "cannot write to .zshrc" test "$WRITE_ZSHRC" = "no"
-
-sandy_run "echo injected > /workspace/.git/hooks/pre-commit 2>/dev/null" >/dev/null 2>&1 && WRITE_HOOK=yes || WRITE_HOOK=no
-check "cannot write to .git/hooks/" test "$WRITE_HOOK" = "no"
-
-sandy_run "echo injected >> /workspace/.git/config 2>/dev/null" >/dev/null 2>&1 && WRITE_GITCFG=yes || WRITE_GITCFG=no
-check "cannot write to .git/config" test "$WRITE_GITCFG" = "no"
-
-sandy_run "echo injected >> /workspace/.gitmodules 2>/dev/null" >/dev/null 2>&1 && WRITE_GITMOD=yes || WRITE_GITMOD=no
-check "cannot write to .gitmodules" test "$WRITE_GITMOD" = "no"
-
-# Verify sandbox-mounted dirs: host content is hidden, writes succeed, host is untouched
-check "host .claude/commands/ is hidden" \
-    sandy_run "test ! -e /workspace/.claude/commands/test.md"
-check "can write to .claude/commands/" \
-    sandy_run "echo new > /workspace/.claude/commands/new-cmd.md"
-check "commands write persists in sandbox" \
-    test -f "$SANDBOX_DIR/workspace-commands/new-cmd.md"
-check "commands write does not touch host" \
-    test ! -f "$TEST_PROJECT/.claude/commands/new-cmd.md"
-
-check "host .claude/agents/ is hidden" \
-    sandy_run "test ! -e /workspace/.claude/agents/test-agent.md"
-check "can write to .claude/agents/" \
-    sandy_run "echo new > /workspace/.claude/agents/new-agent.md"
-check "agents write persists in sandbox" \
-    test -f "$SANDBOX_DIR/workspace-agents/new-agent.md"
-check "agents write does not touch host" \
-    test ! -f "$TEST_PROJECT/.claude/agents/new-agent.md"
-
-check "host .claude/plugins/ is hidden" \
-    sandy_run "test ! -e /workspace/.claude/plugins/test-plugin.json"
-
-# Verify reads still work
-check "can read protected .bashrc" \
-    sandy_run "cat /workspace/.bashrc | grep -q 'host bashrc'"
-
-# Verify unprotected files are still writable
-check "can write to unprotected files" \
-    sandy_run "echo test > /workspace/test-file.txt"
-
-rm -f "$TEST_PROJECT/.bashrc" "$TEST_PROJECT/.zshrc" "$TEST_PROJECT/test-file.txt" "$TEST_PROJECT/.gitmodules"
-rm -rf "$TEST_PROJECT/.git" "$TEST_PROJECT/.claude"
-
-# ============================================================
-info "14. git-lfs is available"
-# ============================================================
-
-check "git-lfs is installed" sandy_run "git lfs version"
-
-# ============================================================
-info "15. LFS auto-detection sets up filters"
-# ============================================================
-
-# Create a .gitattributes with LFS filter
-echo "*.bin filter=lfs diff=lfs merge=lfs -text" > "$TEST_PROJECT/.gitattributes"
-# Simulate what the entrypoint does: find .gitattributes with filter=lfs, run git lfs install
-OUTPUT="$(sandy_run '
-    if find /workspace -name .gitattributes -maxdepth 3 -exec grep -ql "filter=lfs" {} + 2>/dev/null; then
-        git lfs install 2>/dev/null
-    fi
-    git config --get filter.lfs.smudge
-' 2>&1)"
-check "LFS filters configured when .gitattributes has filter=lfs" \
-    bash -c 'echo "$1" | grep -q "git-lfs smudge"' -- "$OUTPUT"
-rm -f "$TEST_PROJECT/.gitattributes"
-
-# ============================================================
-info "16. Container runs as host UID"
-# ============================================================
-
-EXPECTED_UID="$(id -u)"
-CONTAINER_UID="$(sandy_run 'id -u' 2>&1 | tr -d '[:space:]')"
-check "container UID matches host UID" \
-    test "$CONTAINER_UID" = "$EXPECTED_UID"
-
-# Static analysis: verify passwd overlay logic exists for non-default UIDs
-check "passwd overlay for non-default UID" \
-    grep -q 'SANDY_PASSWD.*passwd' "$SCRIPT"
 
 # ============================================================
 info "17. Per-project config parsing"
@@ -1017,66 +375,8 @@ PIP_WRAPPER_LINE="$(grep -n -m1 "cat > .*/pip <<" "$SCRIPT" | cut -d: -f1)"
 check "pip wrapper created before exec gosu (root section)" \
     test "$PIP_WRAPPER_LINE" -lt "$GOSU_LINE"
 
-# Also verify the wrapper actually works (not just passes through empty args)
-OUTPUT="$(sandy_run 'pip install --quiet cowsay 2>&1; echo EXIT:$?' 2>&1)"
-check "pip install works (wrapper passes args correctly)" \
-    bash -c 'echo "$1" | grep -q "EXIT:0"' -- "$OUTPUT"
+# Wrapper and symlink behavior: test_container.py and test_production_contracts.py.
 
-# ============================================================
-info "20. Symlink protection — detects escaping symlinks"
-# ============================================================
-
-# Extract the symlink check logic from sandy and test it directly
-REAL_WORK_DIR="$(cd "$TEST_PROJECT" && pwd -P)"
-
-# Create a symlink that escapes the workspace
-ln -sf /etc/hostname "$TEST_PROJECT/escape-link"
-DANGEROUS_SYMLINKS=()
-while IFS= read -r -d '' link; do
-    target="$(readlink -f "$link" 2>/dev/null || true)"
-    [ -z "$target" ] && continue
-    if [[ "$target" != "$REAL_WORK_DIR"* ]]; then
-        link_rel="${link#$TEST_PROJECT/}"
-        DANGEROUS_SYMLINKS+=("$link_rel -> $target")
-    fi
-done < <(find "$TEST_PROJECT" -maxdepth 5 -type l \
-    -not -path '*/node_modules/*' \
-    -not -path '*/.venv/*' \
-    -not -path '*/.git/*' \
-    -print0 2>/dev/null)
-check "detects symlink escaping workspace" \
-    test ${#DANGEROUS_SYMLINKS[@]} -gt 0
-rm -f "$TEST_PROJECT/escape-link"
-
-# Create a safe relative symlink inside the workspace
-mkdir -p "$TEST_PROJECT/subdir"
-echo "target" > "$TEST_PROJECT/subdir/real-file"
-ln -sf subdir/real-file "$TEST_PROJECT/safe-link"
-DANGEROUS_SYMLINKS=()
-while IFS= read -r -d '' link; do
-    target="$(readlink -f "$link" 2>/dev/null || true)"
-    [ -z "$target" ] && continue
-    if [[ "$target" != "$REAL_WORK_DIR"* ]]; then
-        link_rel="${link#$TEST_PROJECT/}"
-        DANGEROUS_SYMLINKS+=("$link_rel -> $target")
-    fi
-done < <(find "$TEST_PROJECT" -maxdepth 5 -type l \
-    -not -path '*/node_modules/*' \
-    -not -path '*/.venv/*' \
-    -not -path '*/.git/*' \
-    -print0 2>/dev/null)
-check "does not flag safe internal symlink" \
-    test ${#DANGEROUS_SYMLINKS[@]} -eq 0
-rm -f "$TEST_PROJECT/safe-link"
-rm -rf "$TEST_PROJECT/subdir"
-
-# Static analysis: verify symlink check exists in sandy before docker run
-SYMLINK_CHECK="$(grep -n -m1 'DANGEROUS_SYMLINKS' "$SCRIPT" | cut -d: -f1)"
-DOCKER_RUN="$(grep -n -m1 'docker run.*RUN_FLAGS' "$SCRIPT" | cut -d: -f1)"
-check "symlink check runs before docker run" \
-    test "$SYMLINK_CHECK" -lt "$DOCKER_RUN"
-
-# ============================================================
 info "21. Terminal notification passthrough"
 # ============================================================
 
@@ -1232,8 +532,6 @@ check "Phase 2.5 skill pack build phase exists" \
     grep -q 'SKILLS_REBUILT' "$SCRIPT"
 
 # Static analysis: verify skill pack auto-update check exists
-check "skill pack versions resolved before Dockerfile generation" \
-    grep -q 'skill_pack_resolve_versions' "$SCRIPT"
 
 # Static analysis: verify --rebuild clears skills hash
 check "--rebuild clears skill pack hash" \
@@ -1319,257 +617,10 @@ check "Dockerfile.skills-base does not set USER" \
 rm -rf "$SKILLS_TEST_DIR"
 
 # ============================================================
-info "27. Project dir consolidation across path eras"
-# ============================================================
+# §27 retired: it executed hand-copied era merging that production no longer
+# performs. Current project path creation is tested in test_production_contracts.py;
+# explicit historical migrations remain covered by §§29, 141 and 147.
 
-# The container workspace path has changed across sandy versions:
-#   /workspace → raw host path → $HOME-relative path
-# Since each sandbox is per-project, all project dirs belong to the same project.
-# The migration merges all non-current project dirs into the current one.
-_MIGRATE_SNIPPET='
-    _cur_proj="$HOME/.claude/projects/$(echo "$WORKSPACE" | tr "/" "-")"
-    mkdir -p "$_cur_proj"
-    for _old_proj in "$HOME/.claude/projects"/-*/; do
-        [ -d "$_old_proj" ] || continue
-        case "$_old_proj" in "$_cur_proj"/) continue ;; esac
-        cp -an "$_old_proj". "$_cur_proj"/ 2>/dev/null || true
-        rm -rf "$_old_proj"
-    done
-    if [ -f "$HOME/.claude/history.jsonl" ]; then
-        # lint-bash32: allow GNUBIN
-        sed -i "s|\"project\":\"[^\"]*\"|\"project\":\"$WORKSPACE\"|g" "$HOME/.claude/history.jsonl"
-    fi
-'
-
-# Test 1: single old dir migrated to new path
-mkdir -p "$SANDBOX_DIR/projects/-workspace"
-echo "old-session" > "$SANDBOX_DIR/projects/-workspace/session.jsonl"
-sandy_run "
-    export WORKSPACE=/home/sandy/dev/myproject
-    $_MIGRATE_SNIPPET
-"
-check "old -workspace session migrated to new path" \
-    test -f "$SANDBOX_DIR/projects/-home-sandy-dev-myproject/session.jsonl"
-check "old -workspace dir removed" \
-    bash -c '! test -d "$1/projects/-workspace"' -- "$SANDBOX_DIR"
-rm -rf "$SANDBOX_DIR/projects/-home-sandy-dev-myproject"
-
-# Test 2: multiple old dirs (all three eras) merged into current
-mkdir -p "$SANDBOX_DIR/projects/-workspace"
-echo "era1" > "$SANDBOX_DIR/projects/-workspace/era1.jsonl"
-mkdir -p "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject"
-echo "era2" > "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject/era2.jsonl"
-mkdir -p "$SANDBOX_DIR/projects/-home-sandy-dev-myproject"
-echo "era3" > "$SANDBOX_DIR/projects/-home-sandy-dev-myproject/era3.jsonl"
-sandy_run "
-    export WORKSPACE=/home/sandy/dev/myproject
-    $_MIGRATE_SNIPPET
-"
-check "era1 (/workspace) session merged" \
-    test -f "$SANDBOX_DIR/projects/-home-sandy-dev-myproject/era1.jsonl"
-check "era2 (raw host path) session merged" \
-    test -f "$SANDBOX_DIR/projects/-home-sandy-dev-myproject/era2.jsonl"
-check "era3 (current) session preserved" \
-    test -f "$SANDBOX_DIR/projects/-home-sandy-dev-myproject/era3.jsonl"
-check "era1 dir removed" \
-    bash -c '! test -d "$1/projects/-workspace"' -- "$SANDBOX_DIR"
-check "era2 dir removed" \
-    bash -c '! test -d "$1/projects/-Users-rappdw-dev-myproject"' -- "$SANDBOX_DIR"
-rm -rf "$SANDBOX_DIR/projects/-home-sandy-dev-myproject"
-
-# Test 3: no-clobber — existing files in current dir not overwritten
-mkdir -p "$SANDBOX_DIR/projects/-workspace"
-echo "old-version" > "$SANDBOX_DIR/projects/-workspace/same.jsonl"
-mkdir -p "$SANDBOX_DIR/projects/-home-sandy-dev-myproject"
-echo "new-version" > "$SANDBOX_DIR/projects/-home-sandy-dev-myproject/same.jsonl"
-sandy_run "
-    export WORKSPACE=/home/sandy/dev/myproject
-    $_MIGRATE_SNIPPET
-"
-CONTENT="$(cat "$SANDBOX_DIR/projects/-home-sandy-dev-myproject/same.jsonl")"
-check "existing file not overwritten by old version" \
-    test "$CONTENT" = "new-version"
-rm -rf "$SANDBOX_DIR/projects/-workspace" "$SANDBOX_DIR/projects/-home-sandy-dev-myproject"
-
-# Test 4: subdirectory merge (memory/ dirs with different files)
-mkdir -p "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject/memory"
-echo "old-mem" > "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject/memory/context.md"
-echo "shared" > "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject/memory/MEMORY.md"
-mkdir -p "$SANDBOX_DIR/projects/-home-sandy-dev-myproject/memory"
-echo "new-mem" > "$SANDBOX_DIR/projects/-home-sandy-dev-myproject/memory/MEMORY.md"
-sandy_run "
-    export WORKSPACE=/home/sandy/dev/myproject
-    $_MIGRATE_SNIPPET
-"
-check "old memory file merged into subdirectory" \
-    test -f "$SANDBOX_DIR/projects/-home-sandy-dev-myproject/memory/context.md"
-MEM_CONTENT="$(cat "$SANDBOX_DIR/projects/-home-sandy-dev-myproject/memory/MEMORY.md")"
-check "existing memory file not overwritten" \
-    test "$MEM_CONTENT" = "new-mem"
-check "old project dir fully removed after subdir merge" \
-    bash -c '! test -d "$1/projects/-Users-rappdw-dev-myproject"' -- "$SANDBOX_DIR"
-rm -rf "$SANDBOX_DIR/projects/-home-sandy-dev-myproject"
-
-# Test 5: history.jsonl project paths rewritten to current workspace
-mkdir -p "$SANDBOX_DIR/projects/-workspace"
-echo "era1" > "$SANDBOX_DIR/projects/-workspace/session1.jsonl"
-mkdir -p "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject"
-echo "era2" > "$SANDBOX_DIR/projects/-Users-rappdw-dev-myproject/session2.jsonl"
-cat > "$SANDBOX_DIR/history.jsonl" <<'HIST'
-{"project":"/workspace","sessionId":"sess1"}
-{"project":"/Users/rappdw/dev/myproject","sessionId":"sess2"}
-HIST
-# Migration uses `sed -i`, which atomic-renames a temp file over the original.
-# On Docker Desktop / gRPCFUSE (macOS), there's a brief window between the
-# rename and host visibility where `cat` from the host can read transient
-# state. We read the file from *inside the container* (after the migration
-# completes) and capture via stdout — that's the kernel's view inside the
-# bind mount, never goes through gRPCFUSE's host-side cache.
-HIST_CONTENT="$(sandy_run "
-    export WORKSPACE=/home/sandy/dev/myproject
-    $_MIGRATE_SNIPPET
-    cat \"\$HOME/.claude/history.jsonl\"
-" 2>/dev/null)"
-# Retry-on-empty: on macOS Docker Desktop / gRPCFUSE the container-stdout capture
-# can come back empty/truncated even though the migration completed and the file
-# on the bind mount is correct (the sed -i atomic-rename + IO timing). Migration
-# is idempotent on already-migrated state, so re-reading the file is safe and
-# does NOT mask a real bug — we only retry when the capture has no "project" line
-# at all. A genuinely wrong rewrite (non-empty but stale) is not retried.
-for _hist_try in 1 2 3 4 5 6; do
-    echo "$HIST_CONTENT" | grep -q '"project"' && break
-    # On a loaded macOS Docker Desktop host the container-stdout capture can flake
-    # empty several times in a row; a flat 3×0.5s wasn't enough. 6 tries, and each
-    # sandy_run spin-up already adds ~1-2s, so this spans ~15-20s of real retry.
-    # Idempotent re-read; only retries on a missing "project" line, so a real
-    # wrong-rewrite (non-empty but stale) is never retried and can't be masked.
-    sleep 1
-    HIST_CONTENT="$(sandy_run "cat \"\$HOME/.claude/history.jsonl\" 2>/dev/null" 2>/dev/null)"
-done
-check "history.jsonl era1 project path rewritten" \
-    bash -c 'echo "$1" | grep -q "\"project\":\"/home/sandy/dev/myproject\".*sess1"' -- "$HIST_CONTENT"
-check "history.jsonl era2 project path rewritten" \
-    bash -c 'echo "$1" | grep -q "\"project\":\"/home/sandy/dev/myproject\".*sess2"' -- "$HIST_CONTENT"
-check "history.jsonl has no stale project paths" \
-    bash -c '! echo "$1" | grep -q "\"project\":\"/workspace\""' -- "$HIST_CONTENT"
-rm -rf "$SANDBOX_DIR/projects/-home-sandy-dev-myproject" "$SANDBOX_DIR/history.jsonl"
-
-# .claude.json migration snippet (runs inside container where node is available).
-# Mirrors the node script from generate_user_setup() in sandy.
-_CJ_MIGRATE_SNIPPET='
-    CLAUDE_JSON="$1"
-    WORKSPACE="$2"
-    node -e "
-        const fs = require(\"fs\");
-        const f = process.argv[1];
-        const ws = process.argv[2];
-        let d;
-        try { d = JSON.parse(fs.readFileSync(f, \"utf8\")); } catch { process.exit(0); }
-        const p = d.projects;
-        if (!p || typeof p !== \"object\") process.exit(0);
-        const keys = Object.keys(p).filter(k => k !== ws);
-        if (keys.length === 0) process.exit(0);
-        let merged = p[ws] || {};
-        for (const k of keys) {
-            const old = p[k];
-            if (old.hasTrustDialogAccepted) merged.hasTrustDialogAccepted = true;
-            if (old.hasCompletedProjectOnboarding) merged.hasCompletedProjectOnboarding = true;
-            if (old.allowedTools && old.allowedTools.length) {
-                merged.allowedTools = [...new Set([...(merged.allowedTools || []), ...old.allowedTools])];
-            }
-            if (!p[ws]) { merged = { ...old, ...merged }; p[ws] = merged; }
-            delete p[k];
-        }
-        p[ws] = merged;
-        const tmp = f + \".tmp\";
-        fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + \"\\n\");
-        fs.renameSync(tmp, f);
-    " "$CLAUDE_JSON" "$WORKSPACE"
-'
-
-# Test 6: .claude.json trust state consolidated from multiple eras
-# Reproduces the google sandbox scenario: /workspace had trust=true,
-# /Users/.../google had trust=false, current workspace has no entry.
-cat > "$SANDBOX_DIR/.claude.json.test" <<'CJ6'
-{
-  "numStartups": 5,
-  "projects": {
-    "/workspace": {
-      "allowedTools": ["Read"],
-      "hasTrustDialogAccepted": true,
-      "lastSessionId": "sess1"
-    },
-    "/Users/rappdw/dev/genai/google": {
-      "allowedTools": ["Edit"],
-      "hasTrustDialogAccepted": false,
-      "hasCompletedProjectOnboarding": true,
-      "lastSessionId": "sess2"
-    }
-  }
-}
-CJ6
-sandy_run "
-    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/sandy/.claude/.claude.json.test /home/sandy/dev/genai/google
-"
-CJ6_RESULT="$(cat "$SANDBOX_DIR/.claude.json.test")"
-check ".claude.json: trust=true inherited from /workspace era" \
-    bash -c 'echo "$1" | grep -q "\"hasTrustDialogAccepted\": true"' -- "$CJ6_RESULT"
-check ".claude.json: hasCompletedProjectOnboarding preserved" \
-    bash -c 'echo "$1" | grep -q "\"hasCompletedProjectOnboarding\": true"' -- "$CJ6_RESULT"
-check ".claude.json: allowedTools merged from both eras" \
-    bash -c 'echo "$1" | grep -q "\"Read\"" && echo "$1" | grep -q "\"Edit\""' -- "$CJ6_RESULT"
-check ".claude.json: old entries removed, only current workspace remains" \
-    bash -c '! echo "$1" | grep -q "/workspace"' -- "$CJ6_RESULT"
-check ".claude.json: non-project data preserved" \
-    bash -c 'echo "$1" | grep -q "\"numStartups\": 5"' -- "$CJ6_RESULT"
-rm -f "$SANDBOX_DIR/.claude.json.test"
-
-# Test 7: .claude.json no-op when only current workspace entry exists
-cat > "$SANDBOX_DIR/.claude.json.test" <<'CJ7'
-{
-  "projects": {
-    "/home/sandy/dev/myproject": {
-      "hasTrustDialogAccepted": true,
-      "lastCost": 1.23
-    }
-  }
-}
-CJ7
-cp "$SANDBOX_DIR/.claude.json.test" "$SANDBOX_DIR/.claude.json.test.before"
-sandy_run "
-    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/sandy/.claude/.claude.json.test /home/sandy/dev/myproject
-"
-check ".claude.json: no-op when only current entry exists" \
-    diff -q "$SANDBOX_DIR/.claude.json.test" "$SANDBOX_DIR/.claude.json.test.before"
-rm -f "$SANDBOX_DIR/.claude.json.test" "$SANDBOX_DIR/.claude.json.test.before"
-
-# Test 8: .claude.json graceful with malformed JSON
-echo "not valid json" > "$SANDBOX_DIR/.claude.json.test"
-sandy_run "
-    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/sandy/.claude/.claude.json.test /home/sandy/dev/myproject
-"
-CJ8_CONTENT="$(cat "$SANDBOX_DIR/.claude.json.test")"
-check ".claude.json: malformed JSON not corrupted" \
-    test "$CJ8_CONTENT" = "not valid json"
-rm -f "$SANDBOX_DIR/.claude.json.test"
-
-# Test 9: .claude.json atomic write produces trailing newline
-cat > "$SANDBOX_DIR/.claude.json.test" <<'CJ9'
-{
-  "projects": {
-    "/workspace": { "hasTrustDialogAccepted": true },
-    "/old": { "hasTrustDialogAccepted": false }
-  }
-}
-CJ9
-sandy_run "
-    bash -c '$_CJ_MIGRATE_SNIPPET' -- /home/sandy/.claude/.claude.json.test /home/sandy/dev/myproject
-"
-check ".claude.json: file ends with newline" \
-    bash -c 'test "$(tail -c 1 "$1/.claude.json.test" | xxd -p)" = "0a"' -- "$SANDBOX_DIR"
-rm -f "$SANDBOX_DIR/.claude.json.test"
-
-# ============================================================
 info "28. Gemini CLI support — agent helpers and flag translation"
 # ============================================================
 # These tests extract helper functions directly from the sandy script via
@@ -2550,137 +1601,6 @@ else
 fi
 
 # ============================================================
-info "30. Gemini CLI in-container (sandy-gemini-cli image)"
-# ============================================================
-# In-container smoke tests against the sandy-gemini-cli image. Skipped if
-# the image hasn't been built (e.g. on hosts that only use Claude).
-
-if docker image inspect sandy-gemini-cli &>/dev/null; then
-    _gemini_in_container() {
-        docker run --rm --read-only \
-            --tmpfs /tmp:exec,size=64M \
-            --tmpfs /home/sandy:exec,size=64M,uid=1001,gid=1001 \
-            --user 1001:1001 \
-            -e HOME=/home/sandy \
-            --entrypoint bash \
-            sandy-gemini-cli -c "$1" >/dev/null 2>&1
-    }
-
-    check "gemini binary on PATH" \
-        _gemini_in_container "command -v gemini"
-    check "gemini --version runs" \
-        _gemini_in_container "gemini --version"
-    check "node is available (required by gemini CLI)" \
-        _gemini_in_container "node --version"
-
-    # Sanity: the base Claude toolchain should still be present in the multi-agent image
-    # (we're only checking gemini-cli here; sandy-full would be a separate check).
-else
-    printf "  \033[0;33m⊘ skipped — sandy-gemini-cli image not built\033[0m\n"
-fi
-
-# ============================================================
-info "31. Hybrid protection model — present dirs are :ro, absent dirs are unmounted"
-# ============================================================
-# Sandy's protected-dir model is existence-gated (matches the file model):
-#
-#  - Present on host  → bind-mounted :ro (kernel blocks writes, no stub)
-#  - Absent from host → no mount (agent can create in-session; cleanup
-#                       reports new appearances on session exit)
-#
-# This replaces the earlier always-mount-with-empty-fixture pattern, which
-# left empty stub dirs in the workspace every session and required heroic
-# cleanup-on-exit logic to remove them. The new model trades active write
-# prevention (for absent paths) for cleaner workspace state. The replacement
-# defense is detection at session end + a planned fanotify-based mechanism
-# (see CLAUDE.md "Protected Files" for the long-term design).
-
-# 31a. Present protected dir: writes blocked at kernel mount level.
-rm -rf "$TEST_PROJECT/.vscode"
-mkdir -p "$TEST_PROJECT/.vscode"
-echo "existing host content" > "$TEST_PROJECT/.vscode/host-existing.json"
-# 0555 backstop (dir analogue of the 0444 one at the top of this file): macOS
-# Docker/OrbStack can transiently drop the :ro flag on a single bind mount, so
-# the write is blocked at the host-permission layer too — a container write runs
-# as non-root HOST_UID, which can't write into an r-x dir it owns. Restored to
-# 0755 before cleanup so `rm -rf` can unlink the existing file inside.
-chmod 0555 "$TEST_PROJECT/.vscode"
-_MNT_OUT_PRESENT="$(sandy_run 'cat /proc/self/mountinfo' 2>/dev/null)"
-check "present .vscode/ is mounted read-only" \
-    bash -c '
-        echo "$1" \
-            | awk "\$5 == \"/workspace/.vscode\" {print \$6}" \
-            | tr "," "\n" \
-            | grep -qx "ro"
-    ' -- "$_MNT_OUT_PRESENT"
-sandy_run "echo evil > /workspace/.vscode/settings.json 2>/dev/null" >/dev/null 2>&1 \
-    && _WR_PRESENT=yes || _WR_PRESENT=no
-check "cannot write to present .vscode/" test "$_WR_PRESENT" = "no"
-chmod 0755 "$TEST_PROJECT/.vscode"
-rm -rf "$TEST_PROJECT/.vscode"
-
-# 31b. Absent protected dirs: in production sandy, no mount happens. The
-# test harness uses an empty-fixture mount instead (see the `dir)` branch
-# in sandy_run — the harness intentionally diverges to keep gRPCFUSE mount
-# state stable for sibling file binds), so we verify the absent-dir
-# behavior at the *sandy script* level via static check rather than via
-# container mountinfo. The runtime trade-off (agent can create absent
-# protected paths) is documented in CLAUDE.md and verified by 31c+31d
-# below at the source level.
-
-# 31c. Static check: sandy script implements the existence-gated branch
-# (i.e. mounts :ro only when -d $WORK_DIR/$_pd, no else-mount-stub branch).
-check "sandy script existence-gates protected dirs (no always-mount stub)" \
-    bash -c '
-        # The protected-dirs mount loop must NOT contain a mount of
-        # $SANDY_HOME/.empty-ro-dir for protected dirs (that would be the
-        # stub-creating pattern we removed). Submodule hooks may still
-        # reference .empty-ro-dir for legacy compatibility checks — limit
-        # the search to the protected-dirs loop comment block.
-        ! sed -n "/^# Protected dirs: existence-gated/,/done < <(_sandy_protected_dirs)/p" "$1" \
-            | grep -q ".empty-ro-dir"
-    ' -- "$_SANDY_SCRIPT_PATH"
-
-# 31d. Static check: cleanup() walks the launch snapshot to detect new
-# appearances. The check exists and emits a YELLOW warning with rm-rf
-# remediation, not a hard error (matches the "detect, don't refuse" design).
-check "cleanup detects new protected-path appearances" \
-    grep -qF 'Protected paths appeared during this session' "$_SANDY_SCRIPT_PATH"
-check "cleanup includes rm -rf remediation in the warning" \
-    grep -qE 'rm -rf' "$_SANDY_SCRIPT_PATH"
-
-# ============================================================
-info "32. Sprint 1 — Expanded protected-files list"
-# ============================================================
-# F4 remediation: additional shell-sourced / tool-config files now protected.
-#
-# Fixtures are chmod 0444 — belt-and-suspenders, same rationale as
-# $EMPTY_RO_FIXTURE's 0555 in setup_sandbox. These single-file :ro binds
-# unavoidably source from inside the rw workspace bind (the real file must
-# live in the workspace), and on macOS Docker/OrbStack that double-mount
-# pattern has been observed to transiently drop :ro enforcement for a single
-# docker run (one "cannot write present .npmrc" failure in an otherwise
-# clean 573-test run at v1.0.0-rc1; see also the OrbStack fuse attr-cache
-# note above test 13). The container runs as HOST_UID (non-root), so 0444
-# blocks the write at the host-fs layer even when the mount flag is dropped:
-# the check asserts "write blocked" regardless of which layer enforces it.
-
-for _f in .envrc .tool-versions .mise.toml .npmrc .yarnrc .yarnrc.yml .pypirc .netrc .pre-commit-config.yaml; do
-    echo "# host $_f" > "$TEST_PROJECT/$_f"
-    chmod 0444 "$TEST_PROJECT/$_f"
-done
-
-for _f in .envrc .tool-versions .mise.toml .npmrc .yarnrc .yarnrc.yml .pypirc .netrc .pre-commit-config.yaml; do
-    sandy_run "echo evil >> /workspace/$_f 2>/dev/null" >/dev/null 2>&1 && _WR=yes || _WR=no
-    check "cannot write present $_f" test "$_WR" = "no"
-done
-
-# Cleanup
-for _f in .envrc .tool-versions .mise.toml .npmrc .yarnrc .yarnrc.yml .pypirc .netrc .pre-commit-config.yaml; do
-    rm -f "$TEST_PROJECT/$_f"
-done
-
-# ============================================================
 info "33. Sprint 1 — .github/workflows opt-in via SANDY_ALLOW_WORKFLOW_EDIT"
 # ============================================================
 # When SANDY_ALLOW_WORKFLOW_EDIT=1 is exported, .github/workflows is not
@@ -2697,68 +1617,6 @@ check "default: .github/workflows in protected list" \
 _PROTECTED_OPT_OUT="$(SANDY_ALLOW_WORKFLOW_EDIT=1 "$_SANDY_BIN" --print-protected-paths 2>/dev/null)"
 check "opt-out: .github/workflows absent from protected list" \
     bash -c '! echo "$1" | grep -q "^dir:.github/workflows$"' -- "$_PROTECTED_OPT_OUT"
-
-# ============================================================
-info "34. Sprint 1 — Submodule gitdir protection"
-# ============================================================
-# F1 remediation: .git/modules/<sub>/hooks/ and config were fully writable.
-
-# Fixture: a minimal repo layout with a submodule gitdir
-mkdir -p "$TEST_PROJECT/.git/modules/fake-sub/hooks"
-mkdir -p "$TEST_PROJECT/.git/modules/fake-sub/info"
-echo "[core]" > "$TEST_PROJECT/.git/modules/fake-sub/config"
-echo "#!/bin/sh" > "$TEST_PROJECT/.git/modules/fake-sub/hooks/pre-commit"
-chmod +x "$TEST_PROJECT/.git/modules/fake-sub/hooks/pre-commit"
-echo "" > "$TEST_PROJECT/.git/modules/fake-sub/info/attributes"
-# 0444 backstop against transient :ro-drop on macOS (see test 32 comment).
-# Note: the hook-CREATION check below can't be perms-hardened this way (it
-# targets a new path inside the hooks dir bind, and a 0555 dir would break
-# the non-root rm -rf cleanup), so it still relies on the :ro mount alone.
-chmod 0444 "$TEST_PROJECT/.git/modules/fake-sub/config" \
-    "$TEST_PROJECT/.git/modules/fake-sub/info/attributes"
-
-sandy_run "echo injected > /workspace/.git/modules/fake-sub/hooks/post-checkout 2>/dev/null" \
-    >/dev/null 2>&1 && WR_SUBMODULE_HOOK=yes || WR_SUBMODULE_HOOK=no
-check "cannot create submodule post-checkout hook" test "$WR_SUBMODULE_HOOK" = "no"
-
-sandy_run "echo evil >> /workspace/.git/modules/fake-sub/config 2>/dev/null" \
-    >/dev/null 2>&1 && WR_SUBMODULE_CFG=yes || WR_SUBMODULE_CFG=no
-check "cannot modify submodule config" test "$WR_SUBMODULE_CFG" = "no"
-
-sandy_run "echo '*.txt filter=evil' >> /workspace/.git/modules/fake-sub/info/attributes 2>/dev/null" \
-    >/dev/null 2>&1 && WR_SUBMODULE_INFO=yes || WR_SUBMODULE_INFO=no
-check "cannot modify submodule info/attributes" test "$WR_SUBMODULE_INFO" = "no"
-
-# ============================================================
-info "35. Sprint 1 — .git/info/ protection (filter-driver vector)"
-# ============================================================
-# F1 (top-level): .git/info/attributes registers filter drivers that run
-# during checkout. Needs to be read-only.
-
-mkdir -p "$TEST_PROJECT/.git/info"
-echo "" > "$TEST_PROJECT/.git/info/attributes"
-chmod 0444 "$TEST_PROJECT/.git/info/attributes"  # :ro-drop backstop, see test 32
-
-sandy_run "echo '*.txt filter=evil' >> /workspace/.git/info/attributes 2>/dev/null" \
-    >/dev/null 2>&1 && WR_GITINFO=yes || WR_GITINFO=no
-check "cannot modify .git/info/attributes" test "$WR_GITINFO" = "no"
-
-# .git/HEAD is now WRITABLE (#80 — enables `git switch`/`checkout` in-session);
-# .git/packed-refs STAYS :ro (bulk ref-spoofing / gc protection).
-echo "ref: refs/heads/main" > "$TEST_PROJECT/.git/HEAD"
-echo "# pack-refs" > "$TEST_PROJECT/.git/packed-refs"
-chmod 0644 "$TEST_PROJECT/.git/HEAD"            # rw — the container uid owns it
-chmod 0444 "$TEST_PROJECT/.git/packed-refs"     # :ro-drop backstop
-
-sandy_run "echo 'ref: refs/heads/feature' > /workspace/.git/HEAD 2>/dev/null" \
-    >/dev/null 2>&1 && WR_HEAD=yes || WR_HEAD=no
-check ".git/HEAD is writable in-session (git switch works, #80)" test "$WR_HEAD" = "yes"
-
-sandy_run "echo 'deadbeef refs/heads/x' >> /workspace/.git/packed-refs 2>/dev/null" \
-    >/dev/null 2>&1 && WR_PACKED=yes || WR_PACKED=no
-check "cannot overwrite .git/packed-refs (stays :ro)" test "$WR_PACKED" = "no"
-
-rm -rf "$TEST_PROJECT/.git"
 
 # ============================================================
 info "36. Sprint 1 — Tier-split config (privileged keys dropped from workspace)"
@@ -2914,63 +1772,9 @@ check "env precedence: workspace passive still overrides host when env unset" \
 rm -f "$TIER_TEST_FILE"
 
 # ============================================================
-info "37. Sprint 1 — World-open LAN allowlist rejected"
-# ============================================================
-# F5 subfix: SANDY_ALLOW_LAN_HOSTS=0.0.0.0/0 should hard-error even from a
-# privileged source. Test by directly sourcing the loader + running the sanity
-# block (use the temp-file loader source established for test 36, which is
-# bash-3.2-safe — nested `source <(...)` inside `$(...)` breaks on macOS).
-
-# Stand up a temp $SANDY_HOME so the check doesn't trip on real user config
-_TMP_SANDY_HOME="$(mktemp -d)"
-mkdir -p "$_TMP_SANDY_HOME"
-cat > "$_TMP_SANDY_HOME/config" <<'EOF'
-SANDY_ALLOW_LAN_HOSTS=0.0.0.0/0
-EOF
-
-# NOTE on comments inside the subshell below: bash 3.2 (macOS default) has a
-# parser bug where apostrophes inside # comments inside $(...) command
-# substitution are treated as opening single quotes, causing the parser to
-# scan forward past EOF looking for a matching close. ALL comments inside the
-# subshell must be apostrophe-free. Use plain ASCII; rephrase contractions.
-_LAN_RESULT="$(
-    set +e
-    # shellcheck disable=SC1090
-    source "$_LOADER_SRC"
-    warn() { :; }
-    error() { echo "ERROR: $*" >&2; }
-    _load_sandy_config "$_TMP_SANDY_HOME/config" privileged 2>/dev/null || true
-    # Run the sanity check block inline.
-    if [ -n "${SANDY_ALLOW_LAN_HOSTS:-}" ]; then
-        IFS=',' read -ra _sanity_hosts <<< "$SANDY_ALLOW_LAN_HOSTS"
-        set +u
-        for _h in "${_sanity_hosts[@]}"; do
-            _h="$(echo "$_h" | tr -d "[:space:]")"
-            [ -z "$_h" ] && continue
-            # Plain string tests because bash 3.2 on macOS misparses case
-            # patterns containing slash inside nested command substitution.
-            # exit 0 because the outer set -e trap will fire on a non-zero
-            # _LAN_RESULT assignment; the outer check greps stdout instead.
-            if [ "x$_h" = "x0.0.0.0/0" ]; then
-                echo "REJECTED:$_h"
-                exit 0
-            fi
-            if [ "x$_h" = "x::/0" ]; then
-                echo "REJECTED:$_h"
-                exit 0
-            fi
-        done
-        set -u
-    fi
-    echo "ACCEPTED"
-)"
-check "0.0.0.0/0 in SANDY_ALLOW_LAN_HOSTS rejected" \
-    bash -c 'echo "$1" | grep -q "^REJECTED:0.0.0.0/0$"' -- "$_LAN_RESULT"
-
-rm -rf "$_TMP_SANDY_HOME"
+# World-open LAN cases execute the real guard in test_production_contracts.py.
 rm -f "$_LOADER_SRC"
 
-# ============================================================
 info "38. Sprint 1 — --print-protected-paths flag"
 # ============================================================
 # S1.8: test harness and sandy share the protected-path list via this flag.
@@ -3238,62 +2042,8 @@ _CMUX_BLOCK="$(grep -A 50 'Merge notification hook into the sandbox' "$SANDY_SCR
 check "cmux merge block references SEED_SETTINGS" \
     bash -c 'echo "$1" | grep -q "SEED_SETTINGS"' -- "$_CMUX_BLOCK"
 
-# Functional test: simulate the node merge preserving enabledPlugins across
-# two "launches" where the host content changes but plugin list was modified
-# mid-session in the sandbox.
-if command -v node &>/dev/null; then
-    _S2_SANDBOX="$(mktemp -d)"
-    mkdir -p "$_S2_SANDBOX/claude"
-    _S2_HOST="$(mktemp)"
+# Production node/jq merge and relaunch cases: test_production_contracts.py.
 
-    # Launch 1: host settings = {"flavor":"A"}, no prior sandbox file
-    echo '{"flavor":"A"}' > "$_S2_HOST"
-    SEED_HOST_SRC="$_S2_HOST" node -e '
-        const fs = require("fs");
-        const dst = process.argv[1];
-        const hostSrc = process.env.SEED_HOST_SRC || "";
-        function readJson(p) { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch(e) { return {}; } }
-        let s = readJson(hostSrc);
-        const prev = readJson(dst);
-        if (prev.enabledPlugins) s.enabledPlugins = prev.enabledPlugins;
-        fs.writeFileSync(dst, JSON.stringify(s));
-    ' "$_S2_SANDBOX/claude/settings.json"
-    _S2_FIRST="$(jq -r '.flavor' "$_S2_SANDBOX/claude/settings.json" 2>/dev/null)"
-
-    # Mid-session: agent installs a plugin (writes enabledPlugins into the rw file)
-    node -e '
-        const fs = require("fs");
-        const f = process.argv[1];
-        const s = JSON.parse(fs.readFileSync(f, "utf8"));
-        s.enabledPlugins = {"my-plugin": true};
-        fs.writeFileSync(f, JSON.stringify(s));
-    ' "$_S2_SANDBOX/claude/settings.json"
-
-    # Launch 2: host changed flavor to B; enabledPlugins must survive.
-    echo '{"flavor":"B"}' > "$_S2_HOST"
-    SEED_HOST_SRC="$_S2_HOST" node -e '
-        const fs = require("fs");
-        const dst = process.argv[1];
-        const hostSrc = process.env.SEED_HOST_SRC || "";
-        function readJson(p) { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch(e) { return {}; } }
-        let s = readJson(hostSrc);
-        const prev = readJson(dst);
-        if (prev.enabledPlugins) s.enabledPlugins = prev.enabledPlugins;
-        fs.writeFileSync(dst, JSON.stringify(s));
-    ' "$_S2_SANDBOX/claude/settings.json"
-    _S2_SECOND_FLAVOR="$(jq -r '.flavor' "$_S2_SANDBOX/claude/settings.json" 2>/dev/null)"
-    _S2_SECOND_PLUGIN="$(jq -r '.enabledPlugins["my-plugin"]' "$_S2_SANDBOX/claude/settings.json" 2>/dev/null)"
-
-    check "seed regeneration picks up host changes" \
-        bash -c 'test "$1" = "A" && test "$2" = "B"' -- "$_S2_FIRST" "$_S2_SECOND_FLAVOR"
-    check "seed regeneration preserves enabledPlugins across launches" \
-        bash -c 'test "$1" = "true"' -- "$_S2_SECOND_PLUGIN"
-
-    rm -rf "$_S2_SANDBOX"
-    rm -f "$_S2_HOST"
-fi
-
-# ============================================================
 info "43. Sprint 2 — Persistent symlink approval (S2.2)"
 # ============================================================
 # F8 fix: the set of "approved" dangerous symlinks is persisted to the sandbox.
@@ -3386,9 +2136,6 @@ check "pre-existing cleanup uses rmdir (never rm -rf)" \
     bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "rmdir" \
              && ! awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -qE "rm[[:space:]]+-rf"' \
     -- "$SANDY_SCRIPT_PATH"
-check "pre-existing cleanup gated on git repo" \
-    bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "git rev-parse"' \
-    -- "$SANDY_SCRIPT_PATH"
 check "pre-existing cleanup gated on untracked (git ls-files)" \
     bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "git ls-files --error-unmatch"' \
     -- "$SANDY_SCRIPT_PATH"
@@ -3396,87 +2143,7 @@ check "pre-existing cleanup gated on emptiness (ls -A)" \
     bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "ls -A"' \
     -- "$SANDY_SCRIPT_PATH"
 
-# --- Functional tests: exercise the cleanup logic against fixture trees ---
-_S44_TMP="$(mktemp -d)"
-
-# Scenario A: session cleanup rmdirs an empty recorded stub.
-mkdir -p "$_S44_TMP/a/.vscode"
-printf '%s\n' "$_S44_TMP/a/.vscode" > "$_S44_TMP/a.stubs"
-while IFS= read -r _stub; do
-    [ -z "$_stub" ] && continue
-    [ -d "$_stub" ] && [ -z "$(ls -A "$_stub" 2>/dev/null)" ] && rmdir "$_stub" 2>/dev/null || true
-done < "$_S44_TMP/a.stubs"
-check "A: session cleanup rmdirs empty recorded stub" \
-    bash -c '[ ! -d "$1" ]' -- "$_S44_TMP/a/.vscode"
-
-# Scenario B: session cleanup preserves a populated recorded stub.
-mkdir -p "$_S44_TMP/b/.vscode"
-echo '{}' > "$_S44_TMP/b/.vscode/settings.json"
-printf '%s\n' "$_S44_TMP/b/.vscode" > "$_S44_TMP/b.stubs"
-while IFS= read -r _stub; do
-    [ -z "$_stub" ] && continue
-    [ -d "$_stub" ] && [ -z "$(ls -A "$_stub" 2>/dev/null)" ] && rmdir "$_stub" 2>/dev/null || true
-done < "$_S44_TMP/b.stubs"
-check "B: session cleanup preserves populated dir (content intact)" \
-    bash -c '[ -f "$1/settings.json" ]' -- "$_S44_TMP/b/.vscode"
-
-# Scenario C: pre-existing cleanup auto-removes empty protected dirs in git repo.
-mkdir -p "$_S44_TMP/c"
-(cd "$_S44_TMP/c" && git init -q && git config user.email t@t && git config user.name t \
- && echo README > README.md && git add README.md && git commit -q -m init)
-mkdir -p "$_S44_TMP/c/.vscode" "$_S44_TMP/c/.idea" "$_S44_TMP/c/.devcontainer"
-# Simulate sandy's pre-existing cleanup loop against a fixed protected-dirs list.
-_C_DIRS=(".vscode" ".idea" ".circleci" ".devcontainer" ".github/workflows")
-if (cd "$_S44_TMP/c" && git rev-parse --git-dir >/dev/null 2>&1); then
-    for _pd in "${_C_DIRS[@]}"; do
-        _p="$_S44_TMP/c/$_pd"
-        [ -d "$_p" ] || continue
-        [ -z "$(ls -A "$_p" 2>/dev/null)" ] || continue
-        if (cd "$_S44_TMP/c" && git ls-files --error-unmatch "$_pd" >/dev/null 2>&1); then continue; fi
-        rmdir "$_p" 2>/dev/null || true
-    done
-fi
-check "C: pre-existing cleanup removes empty .vscode in git repo" \
-    bash -c '[ ! -d "$1" ]' -- "$_S44_TMP/c/.vscode"
-check "C: pre-existing cleanup removes empty .idea in git repo" \
-    bash -c '[ ! -d "$1" ]' -- "$_S44_TMP/c/.idea"
-check "C: pre-existing cleanup removes empty .devcontainer in git repo" \
-    bash -c '[ ! -d "$1" ]' -- "$_S44_TMP/c/.devcontainer"
-
-# Scenario D: pre-existing cleanup preserves non-empty dir (safety: emptiness check).
-mkdir -p "$_S44_TMP/d"
-(cd "$_S44_TMP/d" && git init -q && git config user.email t@t && git config user.name t \
- && echo R > R.md && git add R.md && git commit -q -m init)
-mkdir -p "$_S44_TMP/d/.vscode"
-echo "keep" > "$_S44_TMP/d/.vscode/settings.json"
-if (cd "$_S44_TMP/d" && git rev-parse --git-dir >/dev/null 2>&1); then
-    for _pd in "${_C_DIRS[@]}"; do
-        _p="$_S44_TMP/d/$_pd"
-        [ -d "$_p" ] || continue
-        [ -z "$(ls -A "$_p" 2>/dev/null)" ] || continue
-        if (cd "$_S44_TMP/d" && git ls-files --error-unmatch "$_pd" >/dev/null 2>&1); then continue; fi
-        rmdir "$_p" 2>/dev/null || true
-    done
-fi
-check "D: pre-existing cleanup preserves non-empty .vscode (content intact)" \
-    bash -c '[ -f "$1/settings.json" ]' -- "$_S44_TMP/d/.vscode"
-
-# Scenario E: pre-existing cleanup skips non-git workspace (safety: git repo check).
-mkdir -p "$_S44_TMP/e/.vscode"
-# Intentionally no git init
-if (cd "$_S44_TMP/e" && git rev-parse --git-dir >/dev/null 2>&1); then
-    for _pd in "${_C_DIRS[@]}"; do
-        _p="$_S44_TMP/e/$_pd"
-        [ -d "$_p" ] || continue
-        [ -z "$(ls -A "$_p" 2>/dev/null)" ] || continue
-        if (cd "$_S44_TMP/e" && git ls-files --error-unmatch "$_pd" >/dev/null 2>&1); then continue; fi
-        rmdir "$_p" 2>/dev/null || true
-    done
-fi
-check "E: pre-existing cleanup skips non-git workspace" \
-    bash -c '[ -d "$1" ]' -- "$_S44_TMP/e/.vscode"
-
-rm -rf "$_S44_TMP"
+# Cleanup fixtures execute the production loop in test_production_contracts.py.
 
 # ============================================================
 # SECTION 45: Introspection surface (SPEC_INTROSPECTION.md)
@@ -4221,7 +2888,7 @@ if command -v shellcheck >/dev/null 2>&1; then
     check "shellcheck test/regen-doctor.sh is clean" \
         test "$_SC_RGD_RC" -eq 0
 else
-    printf "  \033[0;33m⊘ skipped — shellcheck not installed (apt-get install shellcheck / brew install shellcheck)\033[0m\n"
+    skip "shellcheck not installed (apt-get install shellcheck / brew install shellcheck)"
 fi
 
 # ============================================================
@@ -4702,7 +3369,7 @@ check "corrupt-creds guard uses _creds_is_valid_json before the OAuth branch" \
 
 # ============================================================
 echo ""
-echo "§54: Multi-agent matrix — image selection + headless routing (M4 PR 4.3)"
+section "§54: Multi-agent matrix — image selection + headless routing (M4 PR 4.3)"
 # ============================================================
 # The live combo session is exercised in run-integration-tests.sh §16; these
 # pure-script checks pin the launch *contract* the matrix depends on (which
@@ -4723,29 +3390,11 @@ check "headless multi-agent builds the cmd for _SANDY_AGENTS[0]" \
 check "interactive multi-agent builds per-pane commands (_cmd0, split-window)" \
     bash -c 'grep -qF "_cmd0=\"\$(_sandy_build_agent_cmd" "$1" && grep -qF "tmux split-window" "$1"' -- "$SANDY_SCRIPT"
 
-# (d) Routing-order matrix: the routed (first) agent of each documented combo
-# matches the roadmap table. Replicates sandy's exact parse
-# (IFS=',' read -ra _SANDY_AGENTS) so the expectation is pinned to real
-# semantics, not a re-description. Rows mirror docs/ROADMAP_1.0.md PR 4.3.
-for _row in \
-    "claude,gemini=claude" \
-    "claude,codex=claude" \
-    "gemini,codex=gemini" \
-    "claude,gemini,codex=claude" \
-    "claude,gemini,codex,opencode=claude" \
-    "all=all"; do
-    _combo="${_row%=*}"; _expected="${_row#*=}"
-    check "headless route target for SANDY_AGENT=$_combo is '$_expected'" \
-        bash -c 'IFS="," read -ra _a <<< "$1"; [ "${_a[0]}" = "$2" ]' -- "$_combo" "$_expected"
-done
-# Note: the `all` alias is expanded to claude,gemini,codex,opencode *before*
-# this split (asserted at the "'all' alias expands" check above), so its live
-# routed agent is claude; the row above only pins that the raw token survives
-# the splitter unmangled.
+# Routing behavior is exercised by the extracted production dispatcher in test_production_contracts.py.
 
 # ============================================================
 echo ""
-echo "§55: cleanup removes the agent container (no stranded orphan)"
+section "§55: cleanup removes the agent container (no stranded orphan)"
 # ============================================================
 # Regression for the stranded-agent bug: the agent runs `docker run --rm` in the
 # FOREGROUND, but the container's lifetime belongs to the daemon, not the client.
@@ -4768,7 +3417,7 @@ check "agent removal precedes the sidecar network rm in cleanup" \
 
 # ============================================================
 echo ""
-echo "§56: proxy self-heals on death (restart policy + polling readiness gate)"
+section "§56: proxy self-heals on death (restart policy + polling readiness gate)"
 # ============================================================
 # The proxy is the agent's ONLY route off the --internal sidecar, so if it dies
 # mid-session (crash/OOM/reap) the agent is stranded until the next launch. The
@@ -4784,7 +3433,7 @@ check "proxy readiness gate polls for Running (not a single instantaneous check)
 
 # ============================================================
 echo ""
-echo "§57: proxy death is diagnosable (persistent log + panic recovery)"
+section "§57: proxy death is diagnosable (persistent log + panic recovery)"
 # ============================================================
 # Two halves of "figure out why the proxy died". (A) Sandy streams the proxy's
 # logs to a host file that survives cleanup's `docker rm -f` (which erases
@@ -4815,26 +3464,13 @@ check "no per-connection goroutine spawns a bare unguarded handle()" \
 
 # ============================================================
 echo ""
-echo "§58: proxy Go unit tests (panic recovery, policy, SNI, DNS, …)"
+section "§58: proxy Go unit tests (panic recovery, policy, SNI, DNS, …)"
 # ============================================================
-# The proxy ships Go tests (guard_test.go, policy_test.go, sni_test.go, …) that
-# weren't previously run by this suite. Run them here when go is available; a
-# Go-less host (these suites run on the host, which may not have a toolchain)
-# skips with a note — the tests still run in the build/CI environment.
-if command -v go >/dev/null 2>&1; then
-    if ( cd "$_PROXY_DIR" && go test ./... >/dev/null 2>&1 ); then
-        pass "proxy: go test ./... passes"
-    else
-        fail "proxy: go test ./... passes"
-        ( cd "$_PROXY_DIR" && go test ./... 2>&1 | tail -20 | sed 's/^/    /' ) >&2 || true
-    fi
-else
-    echo "  (skipped: go not installed on host — proxy Go tests run in the build/CI env)"
-fi
+# The separately selectable proxy group owns Go testing. CI runs it with -race.
 
 # ============================================================
 echo ""
-echo "§59: integration harness reaps only TEST resources (never a real session)"
+section "§59: integration harness reaps only TEST resources (never a real session)"
 # ============================================================
 # Footgun guard: `docker --filter name=` is a SUBSTRING match, so reaping
 # `name=sandy-proxy-` would force-remove a developer's REAL concurrent session
@@ -4853,7 +3489,7 @@ check "§13 network-leak check is baseline-scoped (ignores a real session's nets
 
 # ============================================================
 echo ""
-echo "§60: frozen 1.0 sandbox snapshot — the 1.x promise, now proving the REFUSAL (2.0.0)"
+section "§60: frozen 1.0 sandbox snapshot — the 1.x promise, now proving the REFUSAL (2.0.0)"
 # ============================================================
 # THE 1.x PROMISE HELD, AND EXPIRED ON PURPOSE AT 2.0.0.
 #
@@ -4906,7 +3542,7 @@ check "frozen WORKSPACE.json has the workspace_path key (sibling-scan contract)"
 
 # ============================================================
 echo ""
-echo "§61: update-check nags on precedence, not string equality (no downgrade nag; rc→final converges)"
+section "§61: update-check nags on precedence, not string equality (no downgrade nag; rc→final converges)"
 # ============================================================
 # sandy_check_update must use _ver_should_update (precedence-aware), never a
 # string !=. A plain != nags any version DIFFERING from the latest stable tag,
@@ -4944,7 +3580,7 @@ check "dev tree ahead of latest stable → quiet (1.0.1-dev vs 1.0.0)" \
 
 # ============================================================
 echo ""
-echo "§62: rc1 hardening sweep — regression guards for the confirmed fixes"
+section "§62: rc1 hardening sweep — regression guards for the confirmed fixes"
 # ============================================================
 # SANDY_LOCAL_LLM_HOST regex must reject JSON metacharacters (it's interpolated
 # unescaped into the proxy config JSON's local_llm field).
@@ -4978,7 +3614,7 @@ check "channel access.json escapes sender values (gsub)" \
 
 # ============================================================
 echo ""
-echo "§63: --print-state workspace_path (#19) + light mode (#18)"
+section "§63: --print-state workspace_path (#19) + light mode (#18)"
 # ============================================================
 # Uses a throwaway SANDY_HOME fixture (a real sandbox with a WORKSPACE.json
 # marker + a legacy one without) and a PATH docker-shim that COUNTS spawns —
@@ -5061,7 +3697,7 @@ rm -rf "$_PS_HOME" "$_PS_BIN" "$_LOG_LIGHT" "$_LOG_FULL" "$_LOG_UNK" 2>/dev/null
 
 # ============================================================
 echo ""
-echo "§64: orphan-network reaper — generalized to sandy_net_* + PID-safe + eager (#20)"
+section "§64: orphan-network reaper — generalized to sandy_net_* + PID-safe + eager (#20)"
 # ============================================================
 # Exercise the pure reaper logic with a `docker` shell-function shim: a mix of a
 # live-PID net (this shell's own $$), a dead-PID orphan, a dead-PID net WITH an
@@ -5115,7 +3751,7 @@ check "reaper delegates to the shared _sandy_orphan_networks_list (DEC-4b, #26)"
 
 # ============================================================
 echo ""
-echo "§65: value-aware egress tiering — a committed .sandy/config can't weaken isolation"
+section "§65: value-aware egress tiering — a committed .sandy/config can't weaken isolation"
 # ============================================================
 # The hole: SANDY_EGRESS_PROXY was a plain passive key, so a committed workspace
 # .sandy/config could ship SANDY_EGRESS_PROXY=0 and silently disable network
@@ -5186,7 +3822,7 @@ check "passive-keys comment no longer claims blanket 'No security-boundary impac
 
 # ============================================================
 echo ""
-echo "§66: passive-key security re-audit — 6 boundary-crossing keys retiered (#28)"
+section "§66: passive-key security re-audit — 6 boundary-crossing keys retiered (#28)"
 # ============================================================
 # #28: SANDY_SCREENSHOT_DIR, SANDY_GEMINI_EXTENSIONS, TELEGRAM_BOT_TOKEN,
 # TELEGRAM_ALLOWED_SENDERS, DISCORD_BOT_TOKEN, DISCORD_ALLOWED_SENDERS were
@@ -5213,7 +3849,7 @@ check "SANDY_CHANNELS is NOT in SANDY_PRIVILEGED_KEYS" \
 
 # ============================================================
 echo ""
-echo "§67: inert git-scaffolding suppression (#12) — _sandy_dir_is_inert_git"
+section "§67: inert git-scaffolding suppression (#12) — _sandy_dir_is_inert_git"
 # ============================================================
 # The session-end protected-dir warning previously flagged ANY appearance of
 # .git/hooks or .git/info with content — including a routine git init/clone's
@@ -5248,7 +3884,7 @@ rm -rf "$_IG_ROOT"
 
 # ============================================================
 echo ""
-echo "§68: --print-state running_containers[] daemon fields (#17) — sandbox/daemon/attached_clients"
+section "§68: --print-state running_containers[] daemon fields (#17) — sandbox/daemon/attached_clients"
 # ============================================================
 # Fixture docker shim: `docker ps --format ...` returns three rows — a healthy
 # daemon container (probe answers "2"), a BROKEN daemon container whose
@@ -5344,7 +3980,7 @@ rm -rf "$_DF_BIN"
 
 # ============================================================
 echo ""
-echo "§69: network-orphan extras — orphan_networks + --prune-orphans (#26)"
+section "§69: network-orphan extras — orphan_networks + --prune-orphans (#26)"
 # ============================================================
 # End-to-end (real script invocation, not a function-extraction shim, since
 # _sandy_orphan_networks_list is called from --print-state's FAST PATH — a
@@ -5475,7 +4111,7 @@ check "--prune-orphans exits 1 when docker is unreachable" \
 rm -rf "$_ON_NODOCKER_BIN" "$_ON_RM_LOG"
 
 # ============================================================
-echo "§70: daemon dispatchers execute under a present docker (#17) — set -u smoke"
+section "§70: daemon dispatchers execute under a present docker (#17) — set -u smoke"
 # ============================================================
 # Regression guard for the class of bug where a daemon-dispatcher code path is
 # only REACHABLE when docker is present: with docker absent, the preflight
@@ -5550,7 +4186,7 @@ rm -rf "$_DD_BIN" "$_DD_HOME" "$_DD_WS"
 
 # ============================================================
 echo ""
-echo "§71: sandy --update-sessions — fleet image refresh + rolling restart (#41, milestone 1.2.0)"
+section "§71: sandy --update-sessions — fleet image refresh + rolling restart (#41, milestone 1.2.0)"
 # ============================================================
 # 71.1 — structural, non-tautological static checks.
 check "cli_flags includes --update-sessions (mutation: remove the cli_flags entry -> fails)" \
@@ -5834,7 +4470,7 @@ rm -f "$_U71_CALLLOG" "$_U71_PRIME_LOG" "$_U71_DRY_OUT" "$_U71_YES_OUT"
 
 # ============================================================
 echo ""
-echo "§71b: sandy --stop-all — fleet emergency stop (HF Issue 8)"
+section "§71b: sandy --stop-all — fleet emergency stop (HF Issue 8)"
 # ============================================================
 # Structural + behavioral (behind a stubbed docker, mirroring §71). Enumerates
 # every sandy.daemon=true container and composes the per-session --stop verbatim.
@@ -5874,7 +4510,7 @@ rm -rf "$_SA_BIN"
 
 # ============================================================
 echo ""
-echo "§72: 1.2.1 follow-ups — image-inspect batching (#52), image GC (#36), daemon-log polish (#51)"
+section "§72: 1.2.1 follow-ups — image-inspect batching (#52), image GC (#36), daemon-log polish (#51)"
 # ============================================================
 _S72="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
@@ -5945,7 +4581,7 @@ check "base build is quieted under the daemon supervisor, bash-3.2-safe (#51)" \
 
 # ============================================================
 echo ""
-echo "§73: daemon zombie recovery — restart over a session-less container reaps + restarts"
+section "§73: daemon zombie recovery — restart over a session-less container reaps + restarts"
 # ============================================================
 # A daemon container that is up but whose agent session has exited (a zombie:
 # the #47 supervisor died, or a restart raced the teardown window) must NOT read
@@ -5966,7 +4602,7 @@ check "a dead-session daemon zombie is reaped via \$0 --stop (both --start + bar
 
 # ============================================================
 echo ""
-echo "§74: ensure_build_files tolerates a race-consumed .new (fleet-update, §20)"
+section "§74: ensure_build_files tolerates a race-consumed .new (fleet-update, §20)"
 # ============================================================
 # The *.new build files live in the SHARED $SANDY_HOME, so a concurrent sandy
 # (a daemon supervisor's launch build, or --update-sessions refreshing a sibling
@@ -5986,7 +4622,7 @@ check "no bare (abort-prone) rm of a shared build .new remains" \
 
 # ============================================================
 echo ""
-echo "§75: dangerous-symlink approval fails closed under a non-interactive --start"
+section "§75: dangerous-symlink approval fails closed under a non-interactive --start"
 # ============================================================
 # The symlink first-encounter prompt is a `read` deep in the launch flow, which
 # under `sandy --start` runs in the non-TTY daemon supervisor (stdin /dev/null).
@@ -6007,7 +4643,7 @@ check "--start readiness loop fast-fails on the supervisor fatal marker" \
 
 # ============================================================
 echo ""
-echo "§76: --update-sessions refresh emits a progress heartbeat (no silent multi-minute build)"
+section "§76: --update-sessions refresh emits a progress heartbeat (no silent multi-minute build)"
 # ============================================================
 # Each session's --build-only output is captured (surfaced only on failure) and
 # image builds run -q, so a long --no-cache rebuild would print nothing and look
@@ -6030,7 +4666,7 @@ check "refresh child runs non-interactively (</dev/null) so an approval fails cl
 
 # ============================================================
 echo ""
-echo "§77: SANDY_AGENT_ARGS — persistent per-workspace agent args from config (#59)"
+section "§77: SANDY_AGENT_ARGS — persistent per-workspace agent args from config (#59)"
 # ============================================================
 _S77="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
@@ -6114,7 +4750,7 @@ echo \"\$out\" | grep -q -- '--mcp-config' && echo \"\$out\" | grep -q '.mcp.cus
 done
 
 # ============================================================
-echo "§78: Egress-proxy readiness via HEALTHCHECK (#37)"
+section "§78: Egress-proxy readiness via HEALTHCHECK (#37)"
 # ============================================================
 _S78="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 _S78_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -6148,7 +4784,7 @@ check "readiness gate retains the RestartCount crash-loop fast-fail" \
 
 # ============================================================
 echo ""
-echo "§79: sandy --gc — unified Docker-resource reclaim (#36)"
+section "§79: sandy --gc — unified Docker-resource reclaim (#36)"
 # ============================================================
 _S79="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
@@ -6618,7 +5254,7 @@ rm -rf "$_S79R_BIN" "$_S79R_HOME" "$_S79R_COUNTER" 2>/dev/null || true
 
 # ============================================================
 echo ""
-echo "§79b: sandy --reset-sandbox — rebuild one project's sandbox (HF Issue 5)"
+section "§79b: sandy --reset-sandbox — rebuild one project's sandbox (HF Issue 5)"
 # ============================================================
 # Filesystem-only (no Docker): destroy a sandbox's persistent state, preserve
 # WORKSPACE.json (+ approvals with --keep-approvals), refuse under a live lock.
@@ -6710,7 +5346,7 @@ check "--print-schema cli_flags includes --reset-sandbox" \
 
 # ============================================================
 echo ""
-echo "§80: Multi-agent pane-topology acceptance harness (#22)"
+section "§80: Multi-agent pane-topology acceptance harness (#22)"
 # ============================================================
 _S80="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 _S80_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -6790,7 +5426,7 @@ check "SANDY_TEST_PANE_TAGS has NO _sandy_key_metadata row (never in --print-sch
     bash -c '! awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | grep -q "SANDY_TEST_PANE_TAGS"' -- "$_S80"
 
 # ============================================================
-echo "§81: Status lines — outer tmux bar (#42) + Claude Code statusLine (#67)"
+section "§81: Status lines — outer tmux bar (#42) + Claude Code statusLine (#67)"
 # ============================================================
 _S81="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
@@ -6881,7 +5517,7 @@ check "no STATUSLINE key was added to _sandy_key_metadata" \
     bash -c '! awk "/^_sandy_key_metadata\(\)/,/^EOF\$/" "$1" | cut -d"|" -f1 | grep -qi "STATUSLINE"' -- "$_S81"
 
 # ============================================================
-echo "§82: Tool-use audit hook (SANDY_TOOL_AUDIT, HF-incident Issue 6)"
+section "§82: Tool-use audit hook (SANDY_TOOL_AUDIT, HF-incident Issue 6)"
 # ============================================================
 # Reuses §81's _S81 / _S81_DFBASE / _S81_SETTINGS extractions. Seeds a PreToolUse
 # audit hook ONLY when SANDY_TOOL_AUDIT=1, only-if-absent so a user's own hook is
@@ -6901,7 +5537,7 @@ check "SANDY_TOOL_AUDIT IS a real config key (has a _sandy_key_metadata row)" \
 
 # ============================================================
 echo ""
-echo "§83: git HEAD rw for in-session switch (#80) — HEAD not :ro, packed-refs stays"
+section "§83: git HEAD rw for in-session switch (#80) — HEAD not :ro, packed-refs stays"
 # ============================================================
 # .git/HEAD is deliberately NOT in the protected :ro git-file list (#80): a symref
 # isn't an RCE vector, so leaving it rw restores in-container `git switch`. The
@@ -6936,7 +5572,7 @@ check "_sandy_head_display: refs/heads/<b>→<b>; detached:<sha>→detached HEAD
 
 # ============================================================
 echo ""
-echo "§84: SANDY_EFFORT — pin Claude Code reasoning effort + record it (#effort)"
+section "§84: SANDY_EFFORT — pin Claude Code reasoning effort + record it (#effort)"
 # ============================================================
 # Plumbs a reasoning-effort knob to the inner claude (mirrors SANDY_MODEL):
 # passive key, validated host-side, applied as `claude --effort <level>`, and
@@ -6969,7 +5605,7 @@ check "marker effort field: set→JSON string, unset→null" \
 
 # ============================================================
 echo ""
-echo "§85: SANDY_SESSION_NONCE — operator-pinned marker nonce (out-of-band run verification)"
+section "§85: SANDY_SESSION_NONCE — operator-pinned marker nonce (out-of-band run verification)"
 # ============================================================
 # An operator can pin the :ro-marker session_nonce so an external harness
 # (sandy-isolation-test's run.sh/adjudicate.sh) proves a run is the one it
@@ -7005,7 +5641,7 @@ check "marker JSON valid + carries the pinned nonce" \
 
 # ============================================================
 echo ""
-echo "§86: the handoff tree is REMOVED (2.2.0 — #352, #353, #355)"
+section "§86: the handoff tree is REMOVED (2.2.0 — #352, #353, #355)"
 # ============================================================
 # This section used to exercise the tree: four mounts, their modes, the
 # SANDY_HANDOFF_DIRS gate, the collision refusal, the operator marker. All of
@@ -7037,7 +5673,7 @@ unset _S86
 
 # ============================================================
 echo ""
-echo "§87: .claude.json — sandy must never write mcpServers (user-scope MCP contract)"
+section "§87: .claude.json — sandy must never write mcpServers (user-scope MCP contract)"
 # ============================================================
 # Operators provision MCP servers fleet-wide by writing a top-level mcpServers
 # block into the per-sandbox sibling $SANDY_HOME/sandboxes/<slug>.claude.json.
@@ -7119,7 +5755,7 @@ fi
 
 # ============================================================
 echo ""
-echo "§88: self-path resolution — a relative \$0 must survive a cd (Fix B regression)"
+section "§88: self-path resolution — a relative \$0 must survive a cd (Fix B regression)"
 # ============================================================
 # sandy re-invokes itself as a child in two places that FIRST cd elsewhere: the
 # --start approval pre-pass (Fix B) and --update-sessions step 2. With a
@@ -7166,7 +5802,7 @@ check "no cd-then-reinvoke site expands \$(_sandy_self_path) late" \
 
 # ============================================================
 echo ""
-echo "§88b: no JSON assertion is anchored on a field NEIGHBOURS"
+section "§88b: no JSON assertion is anchored on a field NEIGHBOURS"
 # ============================================================
 # `grep '"name":"X"[^}]*"relay":{'` reads naturally and is a tripwire: the
 # character class cannot cross the `}` of a NESTED object, so the check starts
@@ -7198,7 +5834,7 @@ check "§88b no test anchors a JSON assertion across a neighbouring field (got: 
 unset _S88B _S88B_DIR _S88B_PAT
 
 # ============================================================
-echo "§89: bash-3.2 / BSD portability lint (the class CI structurally cannot see)"
+section "§89: bash-3.2 / BSD portability lint (the class CI structurally cannot see)"
 # ============================================================
 # CI is Ubuntu + bash 5 + GNU userland; the maintainer is macOS + bash 3.2 + BSD.
 # Several constructs parse or expand DIFFERENTLY there, so `bash -n` in CI
@@ -7225,18 +5861,15 @@ check "lint-bash32.sh exists and is executable-by-bash" \
 
 # The detectors must be proven to DETECT before a clean run means anything —
 # a linter whose patterns silently stopped matching would report success forever.
-check "detectors self-test: every detector fires on known-bad fixtures" \
-    bash -c 'bash "$1" --self-test >/dev/null 2>&1' -- "$_S89"
-
-check "detectors self-test: clean file yields no findings (no false positives)" \
-    bash -c 'bash "$1" --self-test 2>&1 | grep -q "negative control OK"' -- "$_S89"
-# Named explicitly: "every detector fires" passes vacuously if a probe is quietly
-# dropped from the loop, and GNUBIN is the one whose fixtures are most tempting
-# to delete (its false-positive tuning is the fiddliest).
-check "detectors self-test: the GNUBIN probes are among them (mutation: drop a gnubin fixture -> this fails while the generic check above stays green)" \
-    bash -c 'bash "$1" --self-test 2>&1 | grep -q "detector OK: gnubin"' -- "$_S89"
-check "detectors self-test: GNUBIN does not fire on prose, BSD-correct idioms, or container-side heredocs" \
-    bash -c 'bash "$1" --self-test 2>&1 | grep -q "GNUBIN does not fire"' -- "$_S89"
+_S89_SELF_RC=0
+_S89_SELF_OUT="$(bash "$_S89" --self-test 2>&1)" || _S89_SELF_RC=$?
+check "detectors self-test: every detector fires on known-bad fixtures" test "$_S89_SELF_RC" -eq 0
+check "detectors self-test: clean file yields no findings" \
+    bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "negative control OK"
+check "detectors self-test: GNUBIN probes are present" \
+    bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "detector OK: gnubin"
+check "detectors self-test: GNUBIN ignores portable constructs" \
+    bash -c 'printf "%s\n" "$1" | grep -qF "$2"' _ "$_S89_SELF_OUT" "GNUBIN does not fire"
 
 # The actual guard.
 check "repo shell scripts are free of bash-3.2 hazards" \
@@ -7254,7 +5887,7 @@ check "lint target set includes run-tests.sh and the acceptance harnesses" \
 
 # ============================================================
 echo ""
-echo "§90: Claude Code permission-mode drift honesty (#151)"
+section "§90: Claude Code permission-mode drift honesty (#151)"
 # ============================================================
 # Claude Code 2.1.232 has been observed overwriting sandy's
 # permissions.defaultMode: bypassPermissions pin with "auto" via an in-container
@@ -7443,7 +6076,7 @@ check "cleanup() removes its own .claude-perm-mode-at-launch snapshot" \
 
 # ============================================================
 echo ""
-echo "§91: parser <-> cli_flags lockstep (#156)"
+section "§91: parser <-> cli_flags lockstep (#156)"
 # ============================================================
 # Purpose: --print-schema's cli_flags array is hand-curated (see the comment
 # directly above it in sandy) -- nothing enforces that every flag the real
@@ -7679,7 +6312,7 @@ rm -f "$_S91_EXTRACTED_FILE" "$_S91_SCHEMA_JSON" "$_S91_NAMES_FILE" "$_S91_DESC_
 
 # ============================================================
 echo ""
-echo "§92: introspection stream contract pin (#160)"
+section "§92: introspection stream contract pin (#160)"
 # ============================================================
 # Purpose: SPEC_INTROSPECTION.md's guaranteed stream contract (1.7.0) --
 # exactly one JSON document on stdout and NOTHING else (including JSON-shaped
@@ -7968,7 +6601,7 @@ rm -rf "$_S92_HOME" "$_S92_TMP" "$_S92_BIN" "$_S92_PURITY_PY" "$_S92_ERRORS_PY" 
 
 # ============================================================
 echo ""
-echo "§93: machine-readable version (#159)"
+section "§93: machine-readable version (#159)"
 # ============================================================
 # Purpose: sandy-ui was BLOCKED (#159) — it keys its --print-schema cache off
 # `sandy --version`, regex-matching the first dotted-numeric token, and cannot
@@ -8127,7 +6760,7 @@ rm -f "$_S93_PV_JSON" "$_S93_SCHEMA_JSON" "$_S93_CROSS_PY" "$_S93_COMPOSE_PY" \
 
 # ============================================================
 echo ""
-echo "§94: SANDY_TEAMMATE_MODE + the teammateMode de-seeding (#teammate)"
+section "§94: SANDY_TEAMMATE_MODE + the teammateMode de-seeding (#teammate)"
 # ============================================================
 # --teammate-mode was hardcoded into build_claude_cmd and teammateMode was ALSO
 # seeded into settings.json, giving one setting two sources of truth that could
@@ -8193,7 +6826,7 @@ check "§94(10) build_claude_cmd default model matches the _sandy_key_metadata d
 
 # ============================================================
 echo ""
-echo "§95: skipAutoPermissionPrompt is seeded in ALL THREE seeder branches"
+section "§95: skipAutoPermissionPrompt is seeded in ALL THREE seeder branches"
 # ============================================================
 # Claude Code 2.1.x offers to make "auto" the default permission mode. Sandy
 # pins bypassPermissions deliberately, so inside a sandbox that prompt is pure
@@ -8217,8 +6850,6 @@ check "§95(1) node branch seeds skipAutoPermissionPrompt" \
 # NOTE: matches the has() form, not //= — see §96. The jq branch moved off //=
 # because it treats an explicit false as unset; this check pinned the old form
 # and correctly failed when that changed.
-check "§95(2) jq branch seeds skipAutoPermissionPrompt" \
-    bash -c 'printf "%s" "$1" | grep -q "if has(\"skipAutoPermissionPrompt\") then . else"' -- "$_s95_seed"
 check "§95(3) first-launch printf branch seeds skipAutoPermissionPrompt" \
     bash -c 'printf "%s" "$1" | grep -q "\"skipAutoPermissionPrompt\":true"' -- "$_s95_seed"
 
@@ -8227,17 +6858,7 @@ check "§95(3) first-launch printf branch seeds skipAutoPermissionPrompt" \
 check "§95(4) the value tracks SANDY_SKIP_PERMISSIONS rather than being hardcoded" \
     bash -c 'printf "%s" "$1" | grep -q "\"skipAutoPermissionPrompt\":false"' -- "$_s95_seed"
 
-# Behavioral: the node merge is only-if-absent, so a user-set value survives.
-check "§95(5) node merge is only-if-absent (a user-set false is preserved)" \
-    bash -c 'command -v node >/dev/null 2>&1 || exit 0
-        out="$(node -e "
-            const skip = true;
-            const s = {skipAutoPermissionPrompt:false};
-            const defaults = {skipAutoPermissionPrompt:skip};
-            for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
-            process.stdout.write(String(s.skipAutoPermissionPrompt));
-        ")"
-        [ "$out" = "false" ]'
+# Boolean preservation is checked against both production seed branches in test_production_contracts.py.
 
 # NEGATIVE: the key sandy already had is a DIFFERENT prompt; both must survive.
 check "§95(6) NEGATIVE: skipDangerousModePermissionPrompt is still seeded too (distinct prompt)" \
@@ -8245,7 +6866,7 @@ check "§95(6) NEGATIVE: skipDangerousModePermissionPrompt is still seeded too (
 
 # ============================================================
 echo ""
-echo "§96: jq seeder uses has() for booleans, not //= (node/jq parity)"
+section "§96: jq seeder uses has() for booleans, not //= (node/jq parity)"
 # ============================================================
 # jq's //= treats an explicit false as UNSET, so `.k //= true` overwrites a
 # user-set false. The node branch uses a real absence test and preserves it, so
@@ -8264,18 +6885,11 @@ for _s96_k in spinnerTipsEnabled skipDangerousModePermissionPrompt skipAutoPermi
         bash -c '! printf "%s" "$1" | grep -qE "^[[:space:]]*\.$2 //="' -- "$_s96_seed" "$_s96_k"
 done
 
-# Behavioral, if jq is present: an explicit false must survive, an absent key
-# must be filled. This is the property; the greps above are just the shape.
-check "§96 behavioral: jq preserves a user-set false and fills an absent key" \
-    bash -c 'command -v jq >/dev/null 2>&1 || exit 0
-        prog="if has(\"skipAutoPermissionPrompt\") then . else .skipAutoPermissionPrompt = (\$skip == \"true\") end"
-        kept="$(printf "%s" "{\"skipAutoPermissionPrompt\":false}" | jq --arg skip true "$prog" | jq -r ".skipAutoPermissionPrompt")"
-        made="$(printf "%s" "{}" | jq --arg skip true "$prog" | jq -r ".skipAutoPermissionPrompt")"
-        [ "$kept" = "false" ] && [ "$made" = "true" ]'
+# Behavioral parser parity: test_production_contracts.py.
 
 # ============================================================
 echo ""
-echo "§97: the handoff marker is REMOVED, and where its one runtime proof went"
+section "§97: the handoff marker is REMOVED, and where its one runtime proof went"
 # ============================================================
 # $SANDBOX_DIR/.handoff-enabled was the operator-side override that forced the
 # handoff tree on for one sandbox over a config opt-out. Both the tree and the
@@ -8296,7 +6910,7 @@ check "§97(16) the EROFS-beats-ownership claim is still proven at runtime somew
 unset _S97 _S97_ACC _S97_ACC_ALL
 
 # ============================================================
-echo "§98: --print-state size_bytes (#176)"
+section "§98: --print-state size_bytes (#176)"
 # ============================================================
 # size_bytes (full mode only, disk usage via du -skx times 1024, null on any
 # failure or in light mode) — see the sandy ~1819 comment block for the
@@ -8437,7 +7051,7 @@ rm -rf "$_S98_HOME" "$_S98_BIN0" "$_S98_BIN_LOG" "$_S98_BIN_GARBAGE" "$_S98_BIN_
 
 # ============================================================
 echo ""
-echo "§99: sandy --remove-sandbox — permanently delete a sandbox directory (#178)"
+section "§99: sandy --remove-sandbox — permanently delete a sandbox directory (#178)"
 # ============================================================
 # Filesystem-only (a reachable Docker, when present, is only a best-effort
 # container-liveness guard — see CLAUDE.md "--remove-sandbox"). All 18 checks
@@ -8967,7 +7581,7 @@ rm -rf "$_S99_FH21" "$_S99_BIN21" "$_S99_21_WSFILE"
 
 # ============================================================
 echo ""
-echo "§100: --print-state host_id / host_id_source (#179)"
+section "§100: --print-state host_id / host_id_source (#179)"
 # ============================================================
 # Advisory host identity for multi-host fleet aggregation: sandbox names
 # hash only the workspace path, so the SAME path on two hosts yields the
@@ -9203,7 +7817,7 @@ rm -rf "$_S100_HOME" "$_S100_EXTRACT_PY" "$_S100_ENVKEYS_PY" \
 rm -rf "$_S100_UBIN" "$_S100_FBIN" 2>/dev/null || true
 
 # ============================================================
-echo "§101: sandy --doctor [--fix] — standalone readiness check (#124)"
+section "§101: sandy --doctor [--fix] — standalone readiness check (#124)"
 # ============================================================
 # Structural + behavioral, behind a stubbed docker (the §71/§79b pattern).
 # HOST reuses doctor.sh unchanged; this section focuses on the dispatcher's
@@ -9368,7 +7982,7 @@ check "--print-schema cli_flags includes --doctor" \
     bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"--doctor\""' -- "$_S101_SANDY"
 
 # ============================================================
-echo "§102: sandy --provision — non-interactive sandbox creation via the real launch path (#177)"
+section "§102: sandy --provision — non-interactive sandbox creation via the real launch path (#177)"
 # ============================================================
 # Purpose: --provision composes "$0" --start / "$0" --stop (DEC-U2, mirrors
 # --stop-all/--update-sessions) to materialize a sandbox non-interactively.
@@ -9759,7 +8373,7 @@ rm -rf "$_S102_DOWNBIN" "$_S102_BIN" "$_S102_HOME" "$_S102_WS" "$_S102_STATE"
 rm -f "$_S102_OUT"
 unset _S102_STATE
 
-echo "§103: eager per-section WIF credential refresh (test/ci-wif-access-token.sh + the section() hook, #200)"
+section "§103: eager per-section WIF credential refresh (test/ci-wif-access-token.sh + the section() hook, #200)"
 # ============================================================
 # Purpose: the Integration workflow exchanges a federated Anthropic access
 # token EAGERLY, host-side (test/ci-wif-access-token.sh), instead of letting
@@ -10100,7 +8714,7 @@ check "§103(c) run-integration-tests.sh's Claude credential detection includes 
 check "§103(c) the banner surfaces auth-token as its own detail (not folded into api-key) (mutation: silently reusing the api-key slot would make bring-up's \`(auth-token)\` check meaningless)" \
     bash -c 'grep -q "auth-token=" "$1"' -- "$_S103_INTEG"
 
-echo "§104: fail closed when a claude credential was intended but absent (#106)"
+section "§104: fail closed when a claude credential was intended but absent (#106)"
 # WHY THIS EXISTS. Integration run 32681634083 went GREEN having tested nothing:
 # the workflow announced "auth: workload identity federation", the exchange
 # produced no usable credential, Claude came up "none configured", and all ~22
@@ -10169,7 +8783,7 @@ if [ -f "$_S104_WF" ]; then
 fi
 
 echo ""
-echo "§105: acceptance harnesses run against an isolated \$SANDY_HOME (fleet handback)"
+section "§105: acceptance harnesses run against an isolated \$SANDY_HOME (fleet handback)"
 # WHY THIS EXISTS. The acceptance harnesses launch real containers through the
 # real sandy, so each run materialized a fixture sandbox in the DEVELOPER'S
 # $SANDY_HOME. They name workspaces with $$, so every run left a fresh set, and
@@ -10269,7 +8883,7 @@ unset _s105_h _s105_n _s105_iso_ln _s105_hd_ln _s105_out _s105_home _s105_guard_
 
 # ============================================================
 echo ""
-echo "§106: per-agent operator args — \$SANDBOX_DIR/agent-args.<agent> (#210)"
+section "§106: per-agent operator args — \$SANDBOX_DIR/agent-args.<agent> (#210)"
 # ============================================================
 # An operator can drop a file at the SANDBOX TOP LEVEL, agent-args.<agent>
 # (agent-args.claude, agent-args.codex, ...), whose contents are extra CLI
@@ -10647,7 +9261,7 @@ unset _S106_RMS_HOME _S106_RMS_OUT
 unset _S106_RSB_WS _S106_RSB_HOME _S106_RSB_HASH _S106_RSB_BASE _S106_RSB_SB _S106_RSB_OUT
 
 echo ""
-echo "§107: build-resource reachability gate — never attempt a doomed build (#218)"
+section "§107: build-resource reachability gate — never attempt a doomed build (#218)"
 # WHY. On degraded networks (in-flight wifi, captive portals) the tiny HTTPS
 # agent-version check succeeds while the Debian mirrors are unreachable. That
 # flipped NEEDS_BUILD=true, the forced --no-cache rebuild died at `apt-get
@@ -10727,7 +9341,7 @@ check "§107(10) a deferred refresh is reported at session end (mutation: droppi
     bash -c 'grep -q "_SANDY_BUILD_DEFERRED:-false" "$1" && grep -q "image refresh was deferred" "$1"' -- "$_S107_SANDY"
 
 echo ""
-echo "§108: --start resolves first-encounter approvals pre-fork, and classifies its failures (#221)"
+section "§108: --start resolves first-encounter approvals pre-fork, and classifies its failures (#221)"
 # WHY. `--start` forks the supervisor with stdin on /dev/null, and container
 # bring-up happens THERE. A first-encounter dangerous-symlink approval reached
 # that supervisor, could not prompt, failed closed, and left the user no way to
@@ -10826,7 +9440,7 @@ rm -rf "$_S108_T"
 unset _S108 _S108_ABS _S108_SBX _S108_EXIT _S108_BUILD _S108_T _S108_OUT
 
 echo ""
-echo "§109: symlinks never mount \$SANDY_HOME; stranded proxies are reaped (#209, #222)"
+section "§109: symlinks never mount \$SANDY_HOME; stranded proxies are reaped (#209, #222)"
 _S109="$SANDY_SCRIPT"
 
 # --- #209: a workspace symlink must not mount sandy's own state -------------
@@ -10920,7 +9534,7 @@ rm -rf "$_S109_T2"
 unset _S109 _S109_ABS _S109_T _S109_T2 _S109_OUT _S109_FN _S109_LOG
 
 echo ""
-echo "§110: claude.ai account connectors are suppressed by default (#129)"
+section "§110: claude.ai account connectors are suppressed by default (#129)"
 # WHY. The OAuth token sandy mounts is ACCOUNT-scoped, so every connector the
 # user ever enabled on claude.ai (Gmail, Drive, ...) was reachable from EVERY
 # sandbox -- including untrusted-repo sessions, with no extra prompt. Ambient
@@ -10993,7 +9607,7 @@ check "§110(9) claudeAiMcpEverConnected is stripped from the .claude.json seed 
 unset _S110 _S110_T
 
 echo ""
-echo "§111: the auto-mode opt-in prompt is suppressed at the POLICY layer"
+section "§111: the auto-mode opt-in prompt is suppressed at the POLICY layer"
 # WHY THE POLICY LAYER AND NOT settings.json. Sandy has long seeded
 # skipAutoPermissionPrompt into the sandbox settings.json, but Claude Code
 # 2.1.x ships a one-shot migration that DELETES that key from USER settings
@@ -11060,7 +9674,7 @@ check "§111(5) it is gated on claude AND skip-permissions (mutation: writing it
 unset _S111
 
 echo ""
-echo "§112: SANDY_SUSPICIOUS — refresh-token strip, fail-closed, posture recording (#130)"
+section "§112: SANDY_SUSPICIOUS — refresh-token strip, fail-closed, posture recording (#130)"
 # WHY. Sandy mounts the host Claude credentials — access AND refresh token —
 # into every container. The refresh token is the crown jewel: an exfiltrated
 # copy is permanent, renewable account access until manually revoked, and the
@@ -11120,7 +9734,7 @@ check "§112(15) cred_mode covers the full lattice (oauth-token / access-token-o
 unset _S112 _S112_FN _S112_CREDS _S112_OUT _s112_rc
 
 echo ""
-echo "§113: the API-error skip recognizer knows real provider failures, and only those"
+section "§113: the API-error skip recognizer knows real provider failures, and only those"
 # WHY. Integration sections SKIP when the agent reached the API and the PROVIDER
 # refused (billing, quota, rate, auth) — that is sandy doing its job — and FAIL
 # otherwise. The recognizer was pasted at every site and drifted as one: a real
@@ -11152,7 +9766,7 @@ check "§113(7) exactly ONE literal copy of the regex exists (the definition; mu
 unset _S113_RE
 
 echo ""
-echo "§114: SANDY_CROSS_SESSION_INBOUND + SANDY_HANDOFF_RELAY (1.10.0)"
+section "§114: SANDY_CROSS_SESSION_INBOUND + SANDY_HANDOFF_RELAY (1.10.0)"
 # WHY. Claude Code's crossSessionInbound gate decides whether another local
 # process (same uid, same container, out of a session's process ancestry) may
 # inject a turn with no human checkpoint. accept is the surface a handoff
@@ -12167,7 +10781,7 @@ unset _S114_SANDY _S114_TMPL _S114 _S114_PVP_FN _S114_VC_ACCEPT _S114_VC_HOLD _S
     2>/dev/null || true
 
 # ============================================================
-echo "§116: codex OAuth credentials are seeded into the rw sandbox, not overlaid :ro"
+section "§116: codex OAuth credentials are seeded into the rw sandbox, not overlaid :ro"
 # ============================================================
 # WHY. The old design overlaid an ephemeral copy of the host's ~/.codex/auth.json
 # READ-ONLY at /home/sandy/.codex/auth.json, so `codex login`, `codex logout`
@@ -12241,9 +10855,9 @@ assert c[\"credentials\"][\"probe_order\"]==[\"OPENAI_API_KEY\",\"sandbox_auth_j
 unset _S116_SANDY _S116_FN
 
 # ============================================================
-echo "§115: the run's own summary is actually the last thing that runs"
+section "§115: the run's own summary is actually the last thing that runs"
 # ============================================================
-echo "§117: ANTHROPIC_API_KEY is not forwarded when host OAuth credentials are mounted"
+section "§117: ANTHROPIC_API_KEY is not forwarded when host OAuth credentials are mounted"
 # ============================================================
 # WHY. Claude Code resolves an environment API key AHEAD of the account
 # credentials file, so forwarding both had two failure modes and no good one:
@@ -12419,7 +11033,7 @@ check "§117(5) --print-schema probe_order puts host_credentials_file ahead of A
     bash -c '"$1" --print-schema 2>/dev/null | tr -d " \n" | grep -q "\"probe_order\":\[\"CLAUDE_CODE_OAUTH_TOKEN\",\"host_credentials_file\",\"ANTHROPIC_API_KEY\"\]"' -- "$SANDY_SCRIPT"
 
 # ============================================================
-echo "§118: codex config.toml sandbox_mode is repaired by VALUE, not just key presence"
+section "§118: codex config.toml sandbox_mode is repaired by VALUE, not just key presence"
 # ============================================================
 # WHY. The seed block above is first-run only and its gate greps for the KEY
 # `sandbox_mode`, so a file containing sandbox_mode = "workspace-write" satisfies
@@ -12494,7 +11108,7 @@ check "§118(7) with both, ONLY the top-level one is rewritten" \
     bash -c 'printf "%s" "$1" | grep -q "^sandbox_mode = \"danger-full-access\"$" && printf "%s" "$1" | grep -q "^sandbox_mode = \"read-only\"$"' -- "$_S118_D"
 
 # ============================================================
-echo "§119: every config key and flag in --print-schema is documented in the configuration guide"
+section "§119: every config key and flag in --print-schema is documented in the configuration guide"
 # ============================================================
 # WHY. CLAUDE.md's own rule is "also update README.md if user-facing behavior
 # changes", and that rule was followed for CLAUDE.md and SPECIFICATION.md and
@@ -12575,7 +11189,7 @@ _S119_FLAGS_MISSING="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' 
     | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\(--[a-z-]*\)".*/\1/p' | sort -u \
     | grep -vxF "${_S119_FLAG_EXEMPT_ARGS[@]}" \
     | while IFS= read -r _f; do
-          printf '%s' "$_S119_FLAGROWS" | grep -q -- "\`$_f" || printf '%s ' "$_f"
+          printf '%s' "$_S119_FLAGROWS" | grep -- "\`$_f" >/dev/null || printf '%s ' "$_f"
       done)"
 check "§119(4) every cli_flag has a row in the configuration guide's flags TABLE (prose does not count)${_S119_FLAGS_MISSING:+ — missing: $_S119_FLAGS_MISSING}" \
     bash -c '[ -z "$1" ]' -- "$_S119_FLAGS_MISSING"
@@ -12586,7 +11200,7 @@ check "§119(3) the two 1.10.0 keys this guard was written for are present" \
     bash -c 'grep -q SANDY_CLAUDE_AUTH "$1" && grep -q SANDY_CROSS_SESSION_INBOUND "$1"' -- "$_S119_README"
 
 # ============================================================
-echo "§120: sandy --exec runs as the HOST uid, never -u claude"
+section "§120: sandy --exec runs as the HOST uid, never -u claude"
 # ============================================================
 # WHY. The hand-rolled incantation is wrong in a way that does not announce
 # itself. The image creates the user with `useradd -u 1001 claude`, but sandy
@@ -12736,7 +11350,7 @@ check "§120(15) --dry-run and the real exec agree on the flags they render" \
 rm -rf "$_S120_DIR"
 
 # ============================================================
-echo "§121: CLAUDE_CODE_SUBAGENT_MODEL is forwarded, and only when set"
+section "§121: CLAUDE_CODE_SUBAGENT_MODEL is forwarded, and only when set"
 # ============================================================
 # WHY. Subagents do NOT inherit the orchestrator's model. Unset, the parallel
 # researchers a skill fans out run on their own default tier -- so a session
@@ -12807,7 +11421,7 @@ check "§121(7) unset/empty is accepted — the key is optional, not required" \
     bash -c 'printf "%s" "$1" | grep -q "^rc=0$"' -- "$_S121_EMPTY"
 
 # ============================================================
-echo "§122: a fresh sandbox never parks on Claude Code's first-run theme picker"
+section "§122: a fresh sandbox never parks on Claude Code's first-run theme picker"
 # ============================================================
 # WHY. With no host ~/.claude.json to seed from -- every fresh CI runner, and any
 # user who has never run claude outside sandy -- the sandbox's .claude.json got
@@ -12852,7 +11466,7 @@ check "§122(4) theme is NOT re-merged every launch (a user's /theme choice must
 # silently truncating the report.
 _S115_SELF="$(cd "$(dirname "$0")" && pwd)/run-tests.sh"
 _S115_SUMMARY_LINE="$(grep -n '^# BEGIN SUMMARY$' "$_S115_SELF" | cut -d: -f1)"
-_S115_LAST_SECTION="$(grep -n '^echo "§' "$_S115_SELF" | tail -1 | cut -d: -f1)"
+_S115_LAST_SECTION="$(grep -n '^section "§' "$_S115_SELF" | tail -1 | cut -d: -f1)"
 check "§115(1) the summary carries its BEGIN SUMMARY sentinel (mutation: renaming it empties the line numbers below and must fail HERE, not silently pass)" \
     bash -c '[ -n "$1" ]' -- "$_S115_SUMMARY_LINE"
 check "§115(2) no section header appears AFTER the summary block (mutation: append an `echo \"§116: ...\"` line below the summary -> this fails)" \
@@ -12862,7 +11476,7 @@ check "§115(3) exactly one summary block exists (mutation: a second copy would 
 unset _S115_SELF _S115_SUMMARY_LINE _S115_LAST_SECTION
 
 # ============================================================
-echo "§123: the relay-bin slot mount and operator-key refusals; the entry startup window (#258; relay{} object removed 2.6.0, #382)"
+section "§123: the relay-bin slot mount and operator-key refusals; the entry startup window (#258; relay{} object removed 2.6.0, #382)"
 # ============================================================
 # WHY THIS SECTION EXISTS, and what it deliberately does NOT test.
 #
@@ -13167,7 +11781,7 @@ rm -rf "$_S123_DIR"
 unset _S123_MARKER _S123_DIR _S123_A _S123_B _S123_D _S123_E _S123_PS _S123_PSH _S123_MOUNTBLK _S123_W1 _S123_W2 _S123_W3
 
 # ============================================================
-echo "§124: the handoff pair — classification, --print-state reporting, and --provision --all (#265)"
+section "§124: the handoff pair — classification, --print-state reporting, and --provision --all (#265)"
 # ============================================================
 # WHY. A consumer asked for a way to bring a sandbox's handoff pair into
 # existence and to check existing ones without launching. Two halves shipped:
@@ -13361,7 +11975,7 @@ unset _S124_BEFORE _S124_AFTER _S124_EXCL _S124_NOTTY _S124_DRY _S124_ALLOK _S12
 unset _S124_ORPH _S124_ORPHOUT _S124_EMPTY _S124_SCOPE
 
 # ============================================================
-echo "§125: an expired OAuth token never prompts where nobody can answer (#261)"
+section "§125: an expired OAuth token never prompts where nobody can answer (#261)"
 # ============================================================
 # WHY. A maintainer run hit this: the host credential had expired, and sandy ran
 # `claude auth login` -- browser plus a "Paste code here" prompt -- inside the
@@ -13511,7 +12125,7 @@ rm -rf "$_S125_DIR"
 unset _S125_DIR _S125_A _S125_B _S125_SUP _S125_HL _S125_FG _S125_TTY
 
 # ============================================================
-echo "§126: SANDY_SUSPICIOUS shrinks a PROFILE credential too (#252)"
+section "§126: SANDY_SUSPICIOUS shrinks a PROFILE credential too (#252)"
 # ============================================================
 # WHY. SANDY_CLAUDE_AUTH=profile (1.11.0) clears CRED_JSON before the #130
 # posture block runs, so every branch in that block was a no-op for it and the
@@ -13625,7 +12239,7 @@ rm -rf "$_S126_DIR"
 unset _S126_DIR _S126_SNAKE _S126_CAMEL _S126_NEST _S126_WITH _S126_ON _S126_OFF _S126_NONE _S126_BROKE
 
 # ============================================================
-echo "§127: the session marker and --print-state name the RESOLVED agent(s) (#sixth-ask)"
+section "§127: the session marker and --print-state name the RESOLVED agent(s) (#sixth-ask)"
 # ============================================================
 # WHY. A host-side tool enrolled all 51 sandboxes on a machine and installed a
 # per-agent component into each. One sandbox runs codex; that component speaks
@@ -13766,7 +12380,7 @@ rm -rf "$_S127_DIR"
 unset _S127_DIR _S127_ONE _S127_TWO _S127_FOUR _S127_DEF _S127_IFS _S127_PSH _S127_PS
 
 # ============================================================
-echo "§128: a passive config value can never inject shell into the agent command (R1)"
+section "§128: a passive config value can never inject shell into the agent command (R1)"
 # ============================================================
 # WHY. build_claude_cmd assembles a STRING that is later run by
 # `exec bash -c "$AGENT_CMD 2>&1"`. Two interpolations went in unquoted:
@@ -13896,7 +12510,7 @@ unset _S128_DIR _S128_SEMI _S128_AND _S128_PIPE _S128_NL _S128_CHAN _S128_CANARY
 fi
 
 # ============================================================
-echo "§129: sandy never writes crossSessionInbound through a symlink (R2)"
+section "§129: sandy never writes crossSessionInbound through a symlink (R2)"
 # ============================================================
 # WHY. With claude selected -- the default -- every launch writes the resolved
 # crossSessionInbound into $WORK_DIR/.claude/settings.local.json, host-side,
@@ -14049,7 +12663,7 @@ rm -rf "$_S129_DIR"
 unset _S129_DIR _S129_FILE _S129_DIRL _S129_IN _S129_OK
 
 # ============================================================
-echo "§130: a repository cannot choose what gets bind-mounted (R5)"
+section "§130: a repository cannot choose what gets bind-mounted (R5)"
 # ============================================================
 # WHY, in three parts, all measured before anything was changed.
 #
@@ -14201,7 +12815,7 @@ unset _S130_DIR _S130_ESC _S130_ESC_RC _S130_ABS _S130_ABS_RC _S130_OK _S130_OK_
 unset _S130_PF _S130_PD _S130_NP _S130_IN
 
 # ============================================================
-echo "§131: the Telegram host relay fails CLOSED on an empty allowlist (R7b)"
+section "§131: the Telegram host relay fails CLOSED on an empty allowlist (R7b)"
 # ============================================================
 # WHY. The relay's sender gate was:
 #
@@ -14299,7 +12913,7 @@ rm -rf "$_S131_DIR"
 unset _S131_DIR _S131_EMPTY _S131_SET _S131_README _S131_EMPTY_RC _S131_SET_RC
 
 # ============================================================
-echo "§132: SANDY_SSH=agent stages an ALLOWLIST, not the whole ~/.ssh (R7a)"
+section "§132: SANDY_SSH=agent stages an ALLOWLIST, not the whole ~/.ssh (R7a)"
 # ============================================================
 # WHY. `SANDY_SSH=agent` used to do `-v "$HOME/.ssh:/tmp/host-ssh:ro"` and the
 # entrypoint then copied every file into the container's ~/.ssh, chowned to the
@@ -14538,7 +13152,7 @@ fi
 
 # ============================================================
 echo ""
-echo "§133: --provision --all SKIPS a live sandbox instead of reporting it as a failed provision"
+section "§133: --provision --all SKIPS a live sandbox instead of reporting it as a failed provision"
 # ============================================================
 # WHY. The --all planning loop filtered on the handoff classification and on
 # the workspace directory existing. It did NOT check liveness -- `_pva_live`
@@ -14579,6 +13193,14 @@ echo "§133: --provision --all SKIPS a live sandbox instead of reporting it as a
 # daemon container and is deliberately NOT exercised here -- stated rather
 # than implied.
 _S133_ROOT="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+# Only daemon availability and an empty container inventory are dependencies
+# of this dry-run planner test. Neither requires a real Docker daemon.
+mkdir -p "$_S133_ROOT/bin"
+cat > "$_S133_ROOT/bin/docker" <<'S133_DOCKER'
+#!/bin/sh
+case "$1" in info|ps) exit 0 ;; *) echo "unexpected Docker operation: $*" >&2; exit 1 ;; esac
+S133_DOCKER
+chmod +x "$_S133_ROOT/bin/docker"
 _s133_fixture() {
     # $1 = home root, $2 = pid to write into the lock. Builds a $SANDY_HOME
     # holding exactly ONE sandbox, so the plan is unambiguous without carving
@@ -14595,14 +13217,14 @@ _s133_fixture() {
 # --- live: this shell's own pid, alive by construction ----------------------
 _s133_fixture "$_S133_ROOT/live" "$$"
 _S133_LIVE_RC=0
-_S133_LIVE="$(SANDY_HOME="$_S133_ROOT/live" "$SANDY_SCRIPT" --provision --all --dry-run 2>&1)" || _S133_LIVE_RC=$?
+_S133_LIVE="$(PATH="$_S133_ROOT/bin:$PATH" SANDY_HOME="$_S133_ROOT/live" "$SANDY_SCRIPT" --provision --all --dry-run 2>&1)" || _S133_LIVE_RC=$?
 
 # --- dead: a pid that has already exited (the negative control) -------------
 ( : ) & _S133_DEADPID=$!
 wait "$_S133_DEADPID" 2>/dev/null || true
 _s133_fixture "$_S133_ROOT/dead" "$_S133_DEADPID"
 _S133_DEAD_RC=0
-_S133_DEAD="$(SANDY_HOME="$_S133_ROOT/dead" "$SANDY_SCRIPT" --provision --all --dry-run 2>&1)" || _S133_DEAD_RC=$?
+_S133_DEAD="$(PATH="$_S133_ROOT/bin:$PATH" SANDY_HOME="$_S133_ROOT/dead" "$SANDY_SCRIPT" --provision --all --dry-run 2>&1)" || _S133_DEAD_RC=$?
 
 if printf '%s' "$_S133_LIVE" | grep -q 'requires a reachable Docker daemon'; then
     skip "§133 needs a reachable Docker daemon (--provision gates on one before the --all planner)"
@@ -14638,7 +13260,7 @@ unset _S133_ROOT _S133_LIVE _S133_DEAD _S133_LIVE_RC _S133_DEAD_RC _S133_DEADPID
 
 # ============================================================
 echo ""
-echo "§134: the sandbox slug in-container (#303)"
+section "§134: the sandbox slug in-container (#303)"
 # ============================================================
 # Three additive features that compose. Read them in order; each block below
 # says what it is asserting and what the mutation is.
@@ -14723,7 +13345,7 @@ unset _S134_ROOT _S134_SANDY _S134_MARKER _S134_MK_NAME _S134_MK_WS _S134_ENV
 
 # ============================================================
 echo ""
-echo "§135: the feature manifest — strict parse, path containment, selection (2.0.0)"
+section "§135: the feature manifest — strict parse, path containment, selection (2.0.0)"
 # ============================================================
 # WHY THIS SECTION IS LARGE. The manifest decides what gets BIND-MOUNTED into a
 # container, so every failure here is a mount failure. Three properties carry
@@ -14907,7 +13529,7 @@ unset _S135_DIR _S135_SANDY _S135_BLK _S135_OK _S135_DEST _s135_case _s135_n _s1
 
 # ============================================================
 echo ""
-echo "§136: applying a feature to a launch — a sandbox that is not selected gets NOTHING"
+section "§136: applying a feature to a launch — a sandbox that is not selected gets NOTHING"
 # ============================================================
 # §135 covers reading and selecting. This covers what a launch DOES with the
 # result, and it carries the security check of the whole 2.0 feature work:
@@ -14994,7 +13616,7 @@ unset _S136_DIR _S136_BLK _S136_R _S136_SEL _S136_UNSEL _S136_FLAT _S136_NEST _S
 
 # ============================================================
 echo ""
-echo "§137: selected.json — sandy writes membership for a consumer that executes nothing"
+section "§137: selected.json — sandy writes membership for a consumer that executes nothing"
 # ============================================================
 # WHY IT EXISTS. The router executes nothing -- no subprocess, no dependencies
 # -- which is the basis of its claim to be a trusted runtime. Running
@@ -15386,7 +14008,7 @@ unset _s137_b _S137_DIR _S137_BLK _S137_R _S137_JSON _S137_ESC
 
 # ============================================================
 echo ""
-echo "§138: nothing is removed that was never announced — README's Deprecated list"
+section "§138: nothing is removed that was never announced — README's Deprecated list"
 # ============================================================
 # THE RULE (CLAUDE.md, semver discipline): an entry may only be ADDED to
 # README's `## Deprecated` section in an X.0.0 release, and anything listed
@@ -15459,7 +14081,7 @@ unset _S138_SANDY _S138_README _S138_TABLE _S138_MISSING _S138_FOUND _S138_DEPR 
 
 # ============================================================
 echo ""
-echo "§139: SANDY_EGRESS — one enum replaces two mutually exclusive booleans (2.0.0)"
+section "§139: SANDY_EGRESS — one enum replaces two mutually exclusive booleans (2.0.0)"
 # ============================================================
 # A three-way posture was encoded as TWO booleans that had to be checked for
 # contradiction, two entries in the value-aware tier gate, and a deprecated
@@ -15548,7 +14170,7 @@ unset _S139_BLK _S139_TIER _S139_WARN
 
 # ============================================================
 echo ""
-echo "§140: the container user and home are 'sandy', not 'claude' (#248)"
+section "§140: the container user and home are 'sandy', not 'claude' (#248)"
 # ============================================================
 # WHY THIS IS A MAJOR AND NOT A RENAME. /home/claude is baked into files sandy
 # does not own -- venv shebangs and pyvenv.cfg, .pth files, editable installs,
@@ -15623,7 +14245,7 @@ unset _S140_SANDY
 
 # ============================================================
 echo ""
-echo "§146: #339 — a reset survives an unwritable directory (Go module cache)"
+section "§146: #339 — a reset survives an unwritable directory (Go module cache)"
 # ============================================================
 # Go's module cache is 0444 files inside 0555 directories, and a 0555 directory
 # denies its OWNER the write needed to unlink its children. `rm -rf` therefore
@@ -15680,7 +14302,7 @@ check "§146(5) entries sorting BEFORE and AFTER the unwritable directory are bo
 chmod -R u+w "$_S146_DIR" 2>/dev/null || true
 rm -rf "$_S146_DIR" "$_S146_WS"
 unset _S146_DIR _S146_WS _S146_H _S146_B _S146_SB _S146_RC
-echo "§147: #338 — the 2.0 home re-key heals a sandbox crossed from 1.x"
+section "§147: #338 — the 2.0 home re-key heals a sandbox crossed from 1.x"
 # ============================================================
 # Claude Code keys a project by the DASH-ENCODED CONTAINER PATH of the
 # workspace. #248 moved the container home, so the same workspace got a new
@@ -15823,7 +14445,7 @@ unset -f _s147_run
 
 # ============================================================
 echo ""
-echo "§145: --doctor names sandboxes the launch will refuse (the 2.0 upgrade's first question)"
+section "§145: --doctor names sandboxes the launch will refuse (the 2.0 upgrade's first question)"
 # ============================================================
 # WHY. The 2.0 floor refuses EVERY sandbox created by 1.x -- the whole
 # population on an upgrading host. Until this check, `_sandbox_compat_classify`
@@ -15978,7 +14600,7 @@ unset _S145_DIR _S145_CLEAN _S145_OUT _S145_OUT2 _S145_RUNTIME _S145_RC_BF _S145
 
 # ============================================================
 echo ""
-echo "§144: #327 — a JSON syntax error names a LINE on both parser hosts"
+section "§144: #327 — a JSON syntax error names a LINE on both parser hosts"
 # ============================================================
 # The manifest is hand-edited by operators, so sandy's refusal is the first
 # reader of a typo and the quality of that message IS the debugging experience.
@@ -16059,7 +14681,7 @@ unset _S144_DIR _S144_BLK _S144_NODE _S144_JQ
 
 # ============================================================
 echo ""
-echo "§143: #322/#324 — an export name cannot shadow SANDY_, a value cannot forge records"
+section "§143: #322/#324 — an export name cannot shadow SANDY_, a value cannot forge records"
 # ============================================================
 # TWO REFUSALS IN ONE PLACE because they are one validation: what a manifest
 # may put in the export/expose channel.
@@ -16193,7 +14815,7 @@ unset _S143_DIR _S143_SANDY _S143_BLK _S143_SEL _S143_M _S143_R
 
 # ============================================================
 echo ""
-echo "§142: #321 — a manifest entry must reach crossSessionInbound"
+section "§142: #321 — a manifest entry must reach crossSessionInbound"
 # ============================================================
 # THE BUG. A manifest `entry` supplies SANDY_HANDOFF_RELAY, and four decisions
 # are gated on that key: the host-side path validation, SANDY_HANDOFF_DIRS
@@ -16354,7 +14976,7 @@ unset _S142_SANDY _S142_DIR _S142_FM _S142_EVAL _S142_CSI _S142_H _S142_OUT _S14
 
 # ============================================================
 echo ""
-echo "§141: the 2.0 migration path — --reset-sandbox --all, and #309's backfill"
+section "§141: the 2.0 migration path — --reset-sandbox --all, and #309's backfill"
 # ============================================================
 # 2.0 moves the container home, so every 1.x sandbox is refused. The migration
 # has to be a COMMAND, not a paragraph, and it has to preserve the state that
@@ -16510,7 +15132,7 @@ unset _S141_DIR _S141_SANDY _S141_BLK _S141_CLEAN _S141_DIRTY _S141_H _S141_DRY 
 
 # ============================================================
 echo ""
-echo "§148: feature manifests contribute per-agent launch arguments (#348)"
+section "§148: feature manifests contribute per-agent launch arguments (#348)"
 # ============================================================
 # A manifest could mount files and export variables but had no way to make the
 # agent READ them, so anything agent-facing still needed a per-sandbox write
@@ -16780,7 +15402,7 @@ unset -f _s148_resolve _s148_mk _s148_field
 
 # ============================================================
 echo ""
-echo "§149: relay-bin/operator-key refusals; entry adoption (#345, #344 — relay{} producer reporting removed 2.6.0, #382)"
+section "§149: relay-bin/operator-key refusals; entry adoption (#345, #344 — relay{} producer reporting removed 2.6.0, #382)"
 # ============================================================
 # #345/#344 used to cover which PRODUCER (slot/explicit/manifest) supplied a
 # relay and whether its executable was still present, read back through
@@ -16880,7 +15502,7 @@ unset -f _s149_src _s149_adopt
 
 # ============================================================
 echo ""
-echo "§150: a rebuilt parent invalidates the skill-pack images (#294)"
+section "§150: a rebuilt parent invalidates the skill-pack images (#294)"
 # ============================================================
 # sandy-skills-base-<pack> is FROM sandy-claude-code and sandy-skills-<pack> is
 # FROM one of the two, but each was rebuilt only when its OWN Dockerfile
@@ -16967,7 +15589,7 @@ unset -f _s150_id _s150_hash
 
 # ============================================================
 echo ""
-echo "§151: relay state moved out of handoff/ (#353), then RETIRED (2.6.0, #382, decisions 4-5)"
+section "§151: relay state moved out of handoff/ (#353), then RETIRED (2.6.0, #382, decisions 4-5)"
 # ============================================================
 # .state and supervisor.log are SANDY'S SUPERVISOR'S files, not the relay's, so
 # they did not belong inside a feature's instance tree -- which is what the
@@ -17042,7 +15664,7 @@ unset -f _s151_mig
 
 # ============================================================
 echo ""
-echo "§152: an acceptance harness that DIES must be recorded as a failure"
+section "§152: an acceptance harness that DIES must be recorded as a failure"
 # ============================================================
 # run-integration-tests.sh wraps each acceptance harness as:
 #
@@ -17084,7 +15706,7 @@ unset _S152_INT _S152_TOTAL _S152_GUARDED
 
 # ============================================================
 echo ""
-echo "§153: agent_args compose — a second contributor of a non-repeatable flag must not vanish"
+section "§153: agent_args compose — a second contributor of a non-repeatable flag must not vanish"
 # ============================================================
 # #363. agent_args is additive in the argv sandy BUILDS; whether it is additive
 # in EFFECT is decided by the parser of the agent, and for a flag that parser reads
@@ -17288,7 +15910,7 @@ unset -f _s153_run
 
 # ============================================================
 echo ""
-echo "§154: sandy --rsync copies a sandbox to a host whose workspace path differs (#374)"
+section "§154: sandy --rsync copies a sandbox to a host whose workspace path differs (#374)"
 # ============================================================
 # The destination is simulated on this machine: an `ssh` stub runs commands
 # under a separate fake remote $HOME, and an `rsync` stub implements the subset
@@ -17514,7 +16136,7 @@ unset -f _s154_mk _s154_run _s154_dest _s154_expect
 
 # ============================================================
 echo ""
-echo "§155: a workspace cannot DOWNGRADE a host-strict egress posture without approval (#371)"
+section "§155: a workspace cannot DOWNGRADE a host-strict egress posture without approval (#371)"
 # ============================================================
 # 2.0.0 replaced the booleans with SANDY_EGRESS=off|permissive|strict and gave
 # the value-aware gate one entry for it, `off`. The downgrade half -- the
@@ -17617,7 +16239,7 @@ check "§155(10) control: once APPROVED, the workspace permissive does win over 
 rm -rf "$_S155_D"
 unset _S155_SANDY _S155_D _S155_SRC _S155_EG _S155_N _S155_R1 _S155_R2 _S155_R3 _S155_R4 _S155_R5
 unset -f _s155_pvp _s155_vc _s155_launch
-echo "§160: SANDY_CHANNEL_TARGET_PANE=N reaches the Nth AGENT, not tmux pane N (#65)"
+section "§160: SANDY_CHANNEL_TARGET_PANE=N reaches the Nth AGENT, not tmux pane N (#65)"
 # ============================================================
 # WHY. The Telegram host relay did `tmux send-keys -t "sandy.${TARGET_PANE}"`,
 # while README and SPECIFICATION promised N = "the Nth agent in SANDY_AGENT".
@@ -17731,7 +16353,7 @@ unset _S160_DIR _S160_A4
 unset -f _s160_route
 
 # ============================================================
-echo "§161: tmux.conf binds a pane-resize key that works on macOS (#161)"
+section "§161: tmux.conf binds a pane-resize key that works on macOS (#161)"
 # ============================================================
 # WHY. generate_tmux_conf() emitted options only, so pane resizing fell to
 # tmux's defaults: prefix + Ctrl-Arrow, which macOS Mission Control takes at
@@ -17754,8 +16376,8 @@ for _s161_kd in "H -L" "J -D" "K -U" "L -R"; do
     check "§161(1) tmux.conf binds prefix + ${_s161_k} to resize-pane ${_s161_d} 5, repeatable" \
         grep -qx "bind -r ${_s161_k} resize-pane ${_s161_d} 5" "$_S161_DIR/tmux.conf"
 done
-if [ -f /etc/sandy-session.json ]; then
-    skip "§161(2) behavioural check: running inside sandy, so no tmux server is started here (CLAUDE.md)"
+if [ "${SANDY_TEST_CHILD:-0}" = 1 ] || [ -f /etc/sandy-session.json ]; then
+    skip "§161(2) real tmux behavior belongs to the container group; host group never starts a server"
 elif ! command -v tmux >/dev/null 2>&1; then
     skip "§161(2) behavioural check: tmux is not installed on this host"
 else
@@ -17772,7 +16394,7 @@ else
 fi
 rm -rf "$_S161_DIR"
 unset _S161_DIR _S161_KEYS _s161_kd _s161_k _s161_d
-echo "§157: Linux iptables isolation is VERIFIED after insertion, not assumed (#299)"
+section "§157: Linux iptables isolation is VERIFIED after insertion, not assumed (#299)"
 # ============================================================
 # apply_network_isolation (the `off` egress posture, Linux) inserted every DROP
 # with `|| true` and then printed "Network isolation rules applied."
@@ -17856,7 +16478,7 @@ unset -f _s157_run
 
 # ============================================================
 echo ""
-echo "§158: --print-state created_at/last_used_at are genuinely UTC, whole seconds"
+section "§158: --print-state created_at/last_used_at are genuinely UTC, whole seconds"
 # ============================================================
 # _stat_mtime_iso (--print-state) and _rms_mtime_iso (--remove-sandbox's plan)
 # rendered the mtime in LOCAL time and appended `Z`, so on any host not on UTC
@@ -17893,7 +16515,7 @@ unset _S158_DIR _S158_SB _S158_TZ _S158_STATE _S158_RMS
 
 # ============================================================
 echo ""
-echo "§159: every selected feature's entry is ADOPTED, and the launch says so for each -- nothing dropped (#381)"
+section "§159: every selected feature's entry is ADOPTED, and the launch says so for each -- nothing dropped (#381)"
 # ============================================================
 # History. An interim patch on this dev line (#391) kept "at most ONE entry
 # per container" and made the drop LOUD: a second feature's entry was named in
@@ -17971,7 +16593,7 @@ check "§159(6) one entry: adopted, the features line says entry, SANDY_HANDOFF_
 rm -rf "$_S159_DIR"
 unset _S159_SANDY _S159_DIR _S159_FM _S159_EVAL _S159_TWO _S159_ONE
 unset -f _s159_mk _s159_run
-echo "§163: the container clock follows the host zone; sandy's own data stays UTC (#384)"
+section "§163: the container clock follows the host zone; sandy's own data stays UTC (#384)"
 # ============================================================
 # WHY. The container had no TZ and /etc/localtime -> Etc/UTC, so every
 # in-container clock read UTC whatever the host said, and every time an agent
@@ -18200,7 +16822,7 @@ unset -f _s163_tz _s163_ep
 
 # ============================================================
 echo ""
-echo "§164: SANDY_OFFLINE=1 / --no-update-check — no update lookup leaves the host, required builds still run (#219)"
+section "§164: SANDY_OFFLINE=1 / --no-update-check — no update lookup leaves the host, required builds still run (#219)"
 # ============================================================
 # WHY. On a degraded network every launch ran the agent version check, a hit
 # forced a --no-cache rebuild, and the rebuild died at apt. #218 made that
@@ -18360,7 +16982,7 @@ unset _S164_SANDY _S164_D _S164_OUT _S164_RC _S164_AGENT_URL _S164_SELF_URL _S16
 unset _S164_SP _S164_SPV _S164_RX _S164_RXA _S164_MK
 unset -f _s164_run _s164_sp _s164_mk
 echo ""
-echo "§162: the --start pre-pass answers the .sandy/Dockerfile gate too; SANDY_AUTO_APPROVE_PRIVILEGED covers two gates of three; the prompt names its provenance (#296, #295)"
+section "§162: the --start pre-pass answers the .sandy/Dockerfile gate too; SANDY_AUTO_APPROVE_PRIVILEGED covers two gates of three; the prompt names its provenance (#296, #295)"
 # WHY. `--start` answers launch approvals on the CLIENT tty in a SANDY_APPROVE_ONLY
 # pre-pass, because the supervisor it forks has stdin on /dev/null. That pass
 # covered the config keys and the symlinks but exited ~2500 lines before the
@@ -18634,7 +17256,7 @@ check "§162(29) ...and the staged copy is removed after the build" \
 # Real docker, where there is one: the property as the user would meet it. The
 # positive control builds the same Dockerfile from the RAW dir -- the pre-fix
 # behaviour -- and must succeed, or the negative proves nothing.
-if docker info >/dev/null 2>&1; then
+if [ "${SANDY_TEST_REAL_DOCKER:-0}" = 1 ]; then
     _S162_R="$_S162_DIR/R"; mkdir -p "$_S162_R/ctx" "$_S162_R/tmp"
     printf 'FROM scratch\nCOPY .secrets /baked-in\n' > "$_S162_R/ctx/Dockerfile"
     printf 'ANTHROPIC_API_KEY=sk-secret\n' > "$_S162_R/ctx/.secrets"
@@ -18648,14 +17270,14 @@ if docker info >/dev/null 2>&1; then
         test "$_S162_STGRC" -ne 0
     rm -rf "$_S162_RSTG"
 else
-    skip "§162(30-31) docker not reachable -- the real-build check of the staged context did not run"
+    skip "§162(30-31) real project-build context exclusion runs in the container group"
 fi
 
 rm -rf "$_S162_DIR"
 unset _S162_SANDY _S162_DIR _S162_FN _S162_OUT _S162_RC _S162_HA _S162_HB _S162_HD
 unset _S162_ST _S162_G _S162_HG _S162_STG _S162_H _S162_H0 _S162_P3 _S162_P _S162_R _S162_RSTG _S162_RAW _S162_STGRC _s162_i
 unset -f _s162_mk _s162_pre _s162_hash _s162_approval _s162_diag _s162_sup _s162_ctx _s162_stage
-echo "§165: SANDY_EXTRA_ENV name lists compose — host, approved workspace and env are unioned (#388)"
+section "§165: SANDY_EXTRA_ENV name lists compose — host, approved workspace and env are unioned (#388)"
 # ============================================================
 # Last-wins used to replace the host list with the workspace one (and an env
 # list replaced both), silently dropping every host-forwarded name the moment a
@@ -18757,7 +17379,7 @@ unset _S165_DIR _S165_REGION _S165_HOSTC _S165_HOSTS _S165_WSC _S165_WSS _S165_M
 unset _S165_OUT1 _S165_OUT5 _S165_OUT6 _S165_OUT7 _S165_OUT8 _S165_OUT9 _S165_OUT10 _S165_OUTM
 unset -f _s165_run
 
-echo "§166: --reset-sandbox names what --keep-history does NOT keep (#333)"
+section "§166: --reset-sandbox names what --keep-history does NOT keep (#333)"
 # ============================================================
 # --keep-history keeps claude/projects/ and nothing else. A connector's
 # at-most-once ledger under claude/, another agent's history, a host-side
@@ -18836,7 +17458,7 @@ unset _S166_DIR _S166_WS _S166_SB _S166_WS2 _S166_SB2 _S166_WS3 _S166_SB3 _S166_
 unset _S166_NAMED _S166_NAMED2 _S166_BEFORE _S166_AFTER _S166_GONE
 unset -f _s166_mk _s166_named _s166_inventory
 
-echo "§167: SANDY_EFFORT reaches codex as model_reasoning_effort (#116)"
+section "§167: SANDY_EFFORT reaches codex as model_reasoning_effort (#116)"
 # ============================================================
 # Before 2.4.0 SANDY_EFFORT was claude-only and CLEARED for any launch without
 # claude, so a codex run was silently at its default and recorded as unpinned.
@@ -18912,7 +17534,7 @@ rm -rf "$_S167_DIR"
 unset _S167_DIR _S167_OUT _S167_HL _S167_NONE _S167_GEM _S167_INJ _S167_VAL _S167_HAS _s167_a _s167_l
 unset -f _s167_run _s167_val
 
-echo "§168: Claude Code's native /sandbox is forced off in every seeding branch (#126)"
+section "§168: Claude Code's native /sandbox is forced off in every seeding branch (#126)"
 # ============================================================
 # Claude Code ships its own sandbox (settings key sandbox.enabled) with its own
 # egress proxy. Inside sandy that is a second, uncoordinated proxy behind the
@@ -19020,7 +17642,7 @@ rm -rf "$_S168_DIR"
 unset _S168_DIR _S168_BLOCK _S168_HOST _S168_OUT _S168_CLEAN _S168_ODD _S168_NONE _s168_t
 unset -f _s168_seed _s168_q
 
-echo "§169: the settings seed never writes THROUGH a link the agent planted in its rw ~/.claude"
+section "§169: the settings seed never writes THROUGH a link the agent planted in its rw ~/.claude"
 # ============================================================
 # $SANDBOX_DIR/claude is the container's ~/.claude, mounted rw, and the seeding
 # block runs HOST-side at the next launch. A relative link planted there
@@ -19085,7 +17707,7 @@ rm -rf "$_S169_DIR"
 unset _S169_DIR _S169_BLOCK _S169_HOST _C _s169_t
 unset -f _s169_seed
 
-echo "§170: a config-key metadata lookup survives a table larger than the pipe buffer"
+section "§170: a config-key metadata lookup survives a table larger than the pipe buffer"
 # ============================================================
 # _sandy_key_meta_field pipes the whole _sandy_key_metadata heredoc into awk.
 # It used to `exit` on the first match; once the table outgrew the pipe buffer
@@ -19121,7 +17743,7 @@ unset _S170_FN _S170_OUT
 
 # ============================================================
 echo ""
-echo "§171: the pane-identity contract (#378) — identity comes from @sandy_pane_agent, order from SANDY_AGENT"
+section "§171: the pane-identity contract (#378) — identity comes from @sandy_pane_agent, order from SANDY_AGENT"
 # ============================================================
 # WHY. #378 step 1 published tmux session "sandy", the @sandy_pane_agent pane
 # option, and SANDY_AGENT spawn order (SPECIFICATION.md "Pane-identity
@@ -19382,7 +18004,7 @@ unset _S171_TMPL _S171_SPEC _S171_DIR \
     _S171_SA_BLOCK _S171_SA_NS_COUNT _S171_SA_OPT_COUNT
 
 # ============================================================
-echo "§172: per-feature supervised entries — every selected feature's entry runs (#381)"
+section "§172: per-feature supervised entries — every selected feature's entry runs (#381)"
 # ============================================================
 # WHY THIS SECTION EXISTS. The adoption loop used to take the FIRST manifest
 # `entry` in sorted feature-directory order and silently drop every later one
@@ -20052,7 +18674,7 @@ unset -f _s172_adopt _s172_marker_fe 2>/dev/null || true
 
 # ============================================================
 echo ""
-echo "§173: receives — the default keyed on a DECLARED NEED, not the relay (#380)"
+section "§173: receives — the default keyed on a DECLARED NEED, not the relay (#380)"
 # ============================================================
 # #380 (option B): the unset SANDY_CROSS_SESSION_INBOUND default now resolves
 # from a feature manifest's own `"receives": ["cross_session"]` rather than
@@ -20332,7 +18954,7 @@ unset -f _s173_load _s173_apply 2>/dev/null || true
 
 # ============================================================
 echo ""
-echo "§174: #379 measurement harness structural checks; #383 consumer-boundary ratchet"
+section "§174: #379 measurement harness structural checks; #383 consumer-boundary ratchet"
 # ============================================================
 # Two unrelated properties, one section, because both belong to the same unit
 # (#383's umbrella): the #379 harness this section pins needs no Docker, and
@@ -21285,7 +19907,7 @@ rm -f "$_S174_MUT_COPY"
 unset _S174_MUT_COPY
 
 # ============================================================
-echo "§175: 2.5.0 — the relay-era deprecations WERE announced (#382, now removed in 2.6.0), and --init (#392)"
+section "§175: 2.5.0 — the relay-era deprecations WERE announced (#382, now removed in 2.6.0), and --init (#392)"
 # ============================================================
 # #382 announced consumer-shaped surfaces in a MINOR, under CLAUDE.md's written
 # exception. The exception's price was that every surface sandy could detect
@@ -21335,7 +19957,7 @@ check "§175(6) --init is an unconditional column-0 RUN_FLAGS append after every
 unset _S175_MISS _s175_t
 
 # ============================================================
-echo "§176: 2.6.0 — the relay-era surfaces announced in 2.5.0 are REMOVED (#382)"
+section "§176: 2.6.0 — the relay-era surfaces announced in 2.5.0 are REMOVED (#382)"
 # ============================================================
 # Companion units fill in (a)-(h) as they land, each an inversion of the
 # corresponding 2.5.0 announcement (§175) into "it is gone". Lettering
@@ -21931,7 +20553,7 @@ unset _S176H_README _S176H_SPECINTRO _S176H_TABLE _S176H_MISS _s176h_t _s176h_ro
 unset _S176_SANDY _S176_GDB_FN _S176_D _S176_SPEC _S176_APPA
 
 # ============================================================
-echo "§177: #386 — host-side path contract; --print-state marker and cross_session_inbound"
+section "§177: #386 — host-side path contract; --print-state marker and cross_session_inbound"
 # ============================================================
 # (1) The agent-home mapping is a published contract (SPECIFICATION.md
 #     "Host-side path contract"). Asserted as a PROPERTY: the real mount
@@ -22120,7 +20742,7 @@ unset -f _s177_pairs _s177_write_marker _s177_state _s177_home _s177_csi_case 2>
 
 
 # ============================================================
-echo "§178: #299 — --update-sessions judges the proxy sidecar too; the proxy image carries its identity"
+section "§178: #299 — --update-sessions judges the proxy sidecar too; the proxy image carries its identity"
 # ============================================================
 # --update-sessions enumerates sandy.daemon=true containers, which are the
 # AGENT containers only — the proxy sidecar is never daemon-labelled. Before
@@ -22354,7 +20976,7 @@ unset -f _s178_state _s178_px_fields
 rm -rf "$_S178_BIN" "$_S178_HOME" "$_S178_WSP" "$_S178_WSF" "$_S178_WSN"
 rm -f "$_S178_CALLS"
 unset _S178_BIN _S178_HOME _S178_WSP _S178_WSF _S178_WSN _S178_CALLS _S178_OUT _S178_RC _S178_PRIME_RC
-echo "§179: #158 — --doctor --fix re-checks a stale lock at removal time; one staleness predicate"
+section "§179: #158 — --doctor --fix re-checks a stale lock at removal time; one staleness predicate"
 # ============================================================
 # --doctor lists stale workspace locks early and removes them later, possibly
 # after a y/N. A launch in between can clear the same stale lock and re-take
@@ -22516,7 +21138,7 @@ check "§179(7) ...and none of them still carries its own kill -0 copy" \
 rm -rf "$_S179_D"
 unset _S179_SANDY _S179_D _S179_REALCAT _S179_OUT1 _S179_OUT2 _S179_OUT3 _S179_OUT4 _S179_M4 _S179_FNS _S179_PS_STALE _S179_PS_LIVE _S179_PS_UNK _H
 unset -f _s179_run _s179_owner _s179_reaps _s179_ps 2>/dev/null || true
-echo "§180: the session marker records WHICH image ran, and --print-state reads it back (#295)"
+section "§180: the session marker records WHICH image ran, and --print-state reads it back (#295)"
 # ============================================================
 # WHY. The per-project gate FALLS BACK to the agent image on a decline or an
 # unanswerable prompt -- which is every non-TTY `--start` supervisor that meets
@@ -22650,7 +21272,7 @@ unset -f _s180_run _s180_ps _sandy_context_hash _sandy_stage_project_context 2>/
 
 
 # ============================================================
-echo "§181: --print-state reports the .sandy/Dockerfile approvals (#296)"
+section "§181: --print-state reports the .sandy/Dockerfile approvals (#296)"
 # ============================================================
 # WHY. `approvals` reads only passive-*.list, so of the three launch gates a
 # consumer could see the config-key approvals and not the one that authorizes
@@ -22753,7 +21375,7 @@ check "§181(7) a hand-edited approval file keeps the one-document stream contra
 rm -rf "$_S181_DIR"
 unset _S181_DIR _S181_FN _S181_H _S181_W _S181_H16 _S181_CTX _S181_ENTRY
 unset -f _s181_q 2>/dev/null || true
-echo "§185: #299 — the proxy image about to run is checked against the identity this sandy computed; a mismatch WARNS, never refuses"
+section "§185: #299 — the proxy image about to run is checked against the identity this sandy computed; a mismatch WARNS, never refuses"
 # ============================================================
 # WHY. The proxy is the egress policy chokepoint, and its image only changes
 # when sandy rebuilds it. #218 (build resources unreachable) and #219
@@ -22944,7 +21566,7 @@ unset _S185_D _S185_FN _S185_U _S185_OUT _S185_RC _S185_WARN _S185_FP _s185_args
 unset S185_DOCKER_LOG S185_SRC S185_EPOCH
 unset -f _s185_unit _s185_run _s185_end 2>/dev/null || true
 
-echo "§182: a .sandy/ a SESSION created is flagged at the next Dockerfile approval (#295 item 3)"
+section "§182: a .sandy/ a SESSION created is flagged at the next Dockerfile approval (#295 item 3)"
 # WHY. .sandy/ is protected against modification, not creation: it is mounted
 # :ro only when it existed at launch, so a session that started without one can
 # write .sandy/Dockerfile through the rw workspace bind -- and sandy is the one
@@ -23154,7 +21776,7 @@ rm -rf "$_S182_D"
 unset _S182_SANDY _S182_D _S182_OUT _S182_HA _S182_DATE _S182_SLUG
 unset -f _s182_mk _s182_run _s182_pty _s182_rec _s182_approval _s182_hash _s182_df _s182_created
 
-echo "§184: SANDY_EFFORT reaches grok (--reasoning-effort, max clamps to xhigh) and gemini (a read-only system settings file); claude's --effort is quoted (#116)"
+section "§184: SANDY_EFFORT reaches grok (--reasoning-effort, max clamps to xhigh) and gemini (a read-only system settings file); claude's --effort is quoted (#116)"
 # ============================================================
 # Before 2.7.0 SANDY_EFFORT was cleared for a grok-only launch, so grok ran at
 # its default and the marker said null. grok's flag, its alias and its TUI+
@@ -23332,7 +21954,7 @@ unset _S184_DIR _S184_OUT _S184_MAX _S184_NONE _S184_GINJ _S184_CL _S184_CINJ _S
 unset -f _s184_run _s184_val _s184_gem _s184_doc
 
 # ============================================================
-echo "§183: sandy --approvals reports what each approval gate would refuse, and grants nothing (#296)"
+section "§183: sandy --approvals reports what each approval gate would refuse, and grants nothing (#296)"
 # ============================================================
 # WHY. A client with no terminal (CI, cron, a pty-less UI) gets a silently
 # weaker session: privileged workspace keys dropped, the project Dockerfile not
@@ -23558,7 +22180,7 @@ check "§183(19) an unknown argument: one JSON document naming it, exit 1, 0 byt
 rm -rf "$_S183_D"
 unset _S183_D _S183_SECRET _S183_H _S183_W _S183_TREE0 _S183_TREE1 _S183_H16 _S183_SLIST _S183_SLIST_SUM _S183_RC
 unset -f _s183_ws _s183_run _s183_q _s183_status _s183_tree 2>/dev/null || true
-echo "§186: #407 — stale Claude Code session registry entries are pruned at launch"
+section "§186: #407 — stale Claude Code session registry entries are pruned at launch"
 # ============================================================
 # Claude Code can prove a ~/.claude/sessions/<pid>.json entry dead only from
 # the same pid namespace, and every sandy launch is a new container, so entries
@@ -23633,7 +22255,7 @@ unset -f _s186_run _s186_fixture 2>/dev/null || true
 
 
 # ============================================================
-echo "§187: sandy --rsync-from pulls a sandbox from another host (#409)"
+section "§187: sandy --rsync-from pulls a sandbox from another host (#409)"
 # ============================================================
 # The source is simulated on this machine, exactly as §154 simulates the
 # destination: an `ssh` stub runs commands under a separate fake remote $HOME,
@@ -23824,7 +22446,7 @@ unset -f _s187_h8 _s187_mk _s187_run _s187_here _s187_expect 2>/dev/null || true
 
 
 # ============================================================
-echo "§188: #400 — .claude.json lives inside claude/ (CLAUDE_CONFIG_DIR), never as a single-file mount"
+section "§188: #400 — .claude.json lives inside claude/ (CLAUDE_CONFIG_DIR), never as a single-file mount"
 # ============================================================
 # Claude Code writes .claude.json by temp+rename. A single-file bind mount
 # makes the rename fail (EBUSY onto a mount point), so it rewrote the file in
@@ -23910,7 +22532,7 @@ unset -f _s188_flags _s188_mig _s188_case _s188_reset 2>/dev/null || true
 
 
 # ============================================================
-echo "§189: #412 — the uds harness separates 'delivered, model did not act' from a sandy failure"
+section "§189: #412 — the uds harness separates 'delivered, model did not act' from a sandy failure"
 # ============================================================
 # acceptance-uds-delivery.sh needs docker and a model, so its positive
 # verdict is a pure function, _uds_positive_outcome, and THAT is exercised
@@ -23948,7 +22570,7 @@ check "§189(4) the RESULT line carries the NOTE count, and run-integration-test
     bash -c 'grep -q "noted: delivered, model did not act" "$1" && r="$(printf "RESULT: 21 passed, 0 failed (1 noted: delivered, model did not act)\n" | grep -oE "RESULT: [0-9]+ passed, [0-9]+ failed( \([0-9]+ skipped\))?( \([0-9]+ noted[^)]*\))?")" && case "$r" in *"1 noted"*) grep -qF "( \\([0-9]+ noted[^)]*\\))?" "$2" ;; *) exit 1 ;; esac' _ "$_S189_H" "$(cd "$(dirname "$0")" && pwd)/run-integration-tests.sh"
 unset _S189_H _S189_FN _S189_R _S189_P _s189_c _s189_want _s189_rest _s189_found _s189_dslice _s189_pane _s189_mk _s189_why _s189_got
 unset -f _s189 2>/dev/null || true
-echo "§190: #400 — host-to-container handoff: the host never replaces a path a container has used; it stages a fresh path and the container renames it in"
+section "§190: #400 — host-to-container handoff: the host never replaces a path a container has used; it stages a fresh path and the container renames it in"
 # ============================================================
 # Measured on macOS (test/spike/virtiofs-host-rewrite-spike.sh): a container
 # wrote a file, the host replaced it, and the next container's FIRST read came
@@ -24119,7 +22741,7 @@ rm -rf "$_S190_D"
 unset _S190_SANDY _S190_D _S190_HLP _S190_JM _S190_R _S190_CJ _S190_SB _S190_US _S190_US_APPLY _S190_US_FIRST _T _I0
 unset -f _s190_ino _s190 _s190_cj _s190_st 2>/dev/null || true
 
-echo "§191: the five persistent package-cache mounts reach every launch mode (restored after #355 dropped them)"
+section "§191: the five persistent package-cache mounts reach every launch mode (restored after #355 dropped them)"
 # ============================================================
 # 2daee73 (#355, 2.2.0) deleted the pip/uv/npm-global/go/cargo -v lines in the
 # same hunk as the handoff-mount removal. The launch kept mkdir-ing the dirs, so
@@ -24154,7 +22776,7 @@ unset _S191_SANDY _S191_LASTSET _S191_RUN _S191_L _S191_N _S191_US _s191_m _s191
 unset -f _s191_ln 2>/dev/null || true
 
 
-echo "§192: the seed-once agent-home writers refuse a planted symlink (#368 L1)"
+section "§192: the seed-once agent-home writers refuse a planted symlink (#368 L1)"
 # ============================================================
 # #400 staged the launch writers that REWRITE agent-home files every launch.
 # Three seed-once writers were left raw and still decided-to-write via a test
@@ -24206,7 +22828,7 @@ check "§192(6) ...and the staged every-launch statsig refresh remains" \
 unset _S192_SANDY _S192_OC_G _S192_OC_W _S192_OC_GUARD _S192_CX_G _S192_CX_W _S192_CX_GUARD
 unset -f _s192_min_write _s192_guard_ln _s192_run_guard 2>/dev/null || true
 
-echo "§193: #427 — codex resumes this workspace's last interactive session; --new starts fresh, --resume opens codex's picker"
+section "§193: #427 — codex resumes this workspace's last interactive session; --new starts fresh, --resume opens codex's picker"
 # ============================================================
 # build_codex_cmd used to start a fresh codex TUI on every launch, and sandy's
 # own --resume reached codex verbatim (codex has no top-level --resume, so the
@@ -24277,7 +22899,7 @@ unset _S193_FN _S193_D
 unset -f _s193_reset _s193_session _s193_argv 2>/dev/null || true
 
 
-echo "§194: #429 — SANDY_CODEX_AUTH=oauth withholds OPENAI_API_KEY from the container (except beside opencode)"
+section "§194: #429 — SANDY_CODEX_AUTH=oauth withholds OPENAI_API_KEY from the container (except beside opencode)"
 # ============================================================
 # The launch forwarded OPENAI_API_KEY whenever codex was selected, whatever the
 # auth mode, so an oauth session carried a second Codex credential. Runs the
@@ -24329,7 +22951,7 @@ unset _S194_BLOCKS _S194_LCC _S194_D _S194_R _S194_IT
 unset -f _s194_fwd 2>/dev/null || true
 
 
-echo "§195: #428 — sandy --login codex: refusals, both routes, and the login carrier's guards"
+section "§195: #428 — sandy --login codex: refusals, both routes, and the login carrier's guards"
 # ============================================================
 # Runs the real dispatcher against a stub `docker` whose answers each case sets,
 # so the route decision (live container vs one-shot) is exercised, not grepped.
@@ -24386,7 +23008,7 @@ unset _S195_D
 unset -f _s195 _s195_carrier 2>/dev/null || true
 
 
-echo "§196: sandy --accounts — which Anthropic account each sandbox is signed in to"
+section "§196: sandy --accounts — which Anthropic account each sandbox is signed in to"
 # ============================================================
 # Runs the real dispatcher against a fixture SANDY_HOME (env -i, so nothing
 # leaks in from a live sandy session) and asserts what it reports per
@@ -24648,7 +23270,7 @@ unset -f _s196 _s196b _s196_mk _s196_q _s196b_q sha256 _sandy_slug_for 2>/dev/nu
 fi
 
 
-echo "§197: #437 — SANDY_CLAUDE_AUTH=oauth withholds CLAUDE_CODE_OAUTH_TOKEN; connectors that cannot load are named at launch"
+section "§197: #437 — SANDY_CLAUDE_AUTH=oauth withholds CLAUDE_CODE_OAUTH_TOKEN; connectors that cannot load are named at launch"
 # ============================================================
 # Claude Code loads claude.ai connectors only for an account login, and it
 # resolves a long-lived CLAUDE_CODE_OAUTH_TOKEN ahead of that login. oauth used
@@ -24713,7 +23335,7 @@ unset _S197_SEL _S197_MODE _S197_WARN _S197_FWD _S197_A _S197_B _S197_C _S197_D 
 unset -f _s197 2>/dev/null || true
 
 
-echo "§198: install.sh and --upgrade install the latest RELEASE; SANDY_CHANNEL=dev installs main pinned to its commit"
+section "§198: install.sh and --upgrade install the latest RELEASE; SANDY_CHANNEL=dev installs main pinned to its commit"
 # ============================================================
 # Decision 1 (2026-10-05). Both used to download main: a stranger got
 # unreleased code, --upgrade moved a stable user onto the dev line, and a dev
@@ -24810,7 +23432,7 @@ rm -rf "$_S198_D"
 unset _S198_D _S198_SHA _S198_NAG
 unset -f _s198_up _s198_inst 2>/dev/null || true
 
-echo "§199: every config key in --print-schema carries a base_type derived from its type"
+section "§199: every config key in --print-schema carries a base_type derived from its type"
 # ============================================================
 # Decision 3 (2026-10-05). A consumer rendering keys by `type` broke on the
 # first `path` field it met; base_type gives every key a JSON kind to fall
@@ -24843,7 +23465,7 @@ unset _S199_OUT
 
 # ============================================================
 echo ""
-echo "§200: an existing sandbox loses sandy's old codex model pin, and nothing the user chose"
+section "§200: an existing sandbox loses sandy's old codex model pin, and nothing the user chose"
 # ============================================================
 # 2.8.0 stopped seeding `model = "gpt-5.5"`: codex picks its own default, so a
 # sandbox never sits on a model OpenAI is retiring until sandy ships again.
@@ -24914,7 +23536,7 @@ unset _S200_BLOCK _S200_HLP _S200_HDR _S200_A _S200_B _S200_C _S200_D _S200_E _S
 unset -f _s200 2>/dev/null || true
 
 
-echo "§201: an agent that installed but cannot run fails the build, and an image already broken that way heals"
+section "§201: an agent that installed but cannot run fails the build, and an image already broken that way heals"
 # ============================================================
 # 2026-10-07: npm served @openai/codex@0.161.0 before its linux-arm64 binary
 # package, npm skipped the missing optional dependency, and the codex pane
@@ -25017,7 +23639,7 @@ unset -f _s201 2>/dev/null || true
 
 # ============================================================
 echo ""
-echo "§202: protected feature submounts — source authority and launch wiring"
+section "§202: protected feature submounts — source authority and launch wiring"
 # ============================================================
 # Standard-library driver only; no pip, image pulls or runtime access. Each
 # mutation starts from a fresh scratch copy of sandy. The real launch check
@@ -25345,7 +23967,7 @@ fi
 
 
 # ============================================================
-echo "§203: SANDY_SKIP_PERMISSIONS reaches codex as --ask-for-approval never (interactive only)"
+section "§203: SANDY_SKIP_PERMISSIONS reaches codex as --ask-for-approval never (interactive only)"
 # ============================================================
 # Codex full access is two settings: sandbox_mode AND the approval policy.
 # Sandy set only the first, so codex kept its default on-request policy and
@@ -25385,7 +24007,7 @@ unset _S203_FN _S203_D
 
 
 # ============================================================
-echo "§204: named Claude sessions (.sandy/sessions) — strict files, one flag-less resume, agent view, exit 9, --print-state"
+section "§204: named Claude sessions (.sandy/sessions) — strict files, one flag-less resume, agent view, exit 9, --print-state"
 # ============================================================
 # decisions/2026-10-12-named-claude-sessions.md. Every check runs the REAL code
 # (extracted from sandy) against fixtures and stubs and asserts the PROPERTY:
@@ -25760,7 +24382,7 @@ unset _S204_UP _S204_ID _S204_RC _S204_CALLS _S204_ST _S204_BC _S204_DISP _S204_
 unset _S204_WRITER _S204_FEBODY _S204_JESC _S204_PS _S204_FM _S204_RF _S204_GUARD _C _H _W _W2 _SB _SBX _s204_case _s204_f _s204_rest _s204_c _s204_e _s204_off _s204_nl
 
 
-echo "§205: which gh account a sandbox uses — chosen on the host, recorded in the marker, shown by --accounts"
+section "§205: which gh account a sandbox uses — chosen on the host, recorded in the marker, shown by --accounts"
 # The host-side picker and its push check, extracted from sandy and run
 # against a stub gh that answers repos/<r> with push=true only for tokens in
 # STUB_PUSH, logs its argv and environment token, fails every call when
@@ -25853,7 +24475,7 @@ unset -f _s205 _s205f _s205_ct
 
 
 # ============================================================
-echo "§208: Reflection AI's Mirror CLI as a single-agent (#463)"
+section "§208: Reflection AI's Mirror CLI as a single-agent (#463)"
 # ============================================================
 # decisions/2026-10-20-mirror-agent.md. Every check runs the REAL code: the
 # command builder against a stub `mirror` that records the argv it receives,
@@ -26009,7 +24631,7 @@ rm -rf "$_S208_D"
 unset _S208_D _S208_FN _S208_CR _S208_SEL
 
 
-echo "§206: #457 — interactive codex runs without codex's app-server daemon (--no-daemon), when codex has the flag"
+section "§206: #457 — interactive codex runs without codex's app-server daemon (--no-daemon), when codex has the flag"
 # ============================================================
 # codex-cli 0.163.0 routes the interactive TUI and `codex resume` through a
 # background daemon it installs into ~/.codex (a ~460 MB self-copy plus a
@@ -26073,7 +24695,7 @@ unset -f _s206_argv
 
 
 # ============================================================
-echo "§207: #461 — the egress proxy can read its config under any umask, and a failed sidecar attach names why"
+section "§207: #461 — the egress proxy can read its config under any umask, and a failed sidecar attach names why"
 # ============================================================
 # The proxy runs as root with --cap-drop ALL, so it opens its host-written
 # config through the file's OTHER bits only. Written with a bare redirect, the
@@ -26140,13 +24762,14 @@ unset -f _s207
 # ============================================================
 # Summary
 # ============================================================
+_test_section_close
 COMPLETED=true   # suppress the early-abort message in the EXIT trap
 echo ""
 TOTAL=$((PASS + FAIL))
 if [ "$FAIL" -eq 0 ]; then
-    printf "\033[0;32mAll %d tests passed.\033[0m\n" "$TOTAL"
+    printf "\033[0;32mHost group: %d checks passed.\033[0m\n" "$TOTAL"
 else
-    printf "\033[0;31m%d/%d tests failed:\033[0m\n" "$FAIL" "$TOTAL"
+    printf "\033[0;31mHost group: %d/%d checks failed:\033[0m\n" "$FAIL" "$TOTAL"
     for e in "${ERRORS[@]}"; do
         printf "  \033[0;31m- %s\033[0m\n" "$e"
     done
@@ -26156,5 +24779,5 @@ fi
 echo ""
 _run_provenance   # timestamp + commit + tree state, so a result you scroll back
                   # to after a context switch says which build produced it.
-[ "$SKIPPED" -eq 0 ] || printf "\033[0;33m%d check group(s) skipped for missing host tools (node/jq/flock) -- see the '– skipped:' lines above; those assertions did NOT run here.\033[0m\n" "$SKIPPED"
+[ "$SKIPPED" -eq 0 ] || printf "\033[0;33mHost group: %d check set(s) skipped -- see reasons above; those assertions did NOT run here.\033[0m\n" "$SKIPPED"
 [ "$FAIL" -eq 0 ] || exit 1

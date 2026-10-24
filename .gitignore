@@ -35,3 +35,6 @@ connector-reference
 
 # gh CLI state a test run can leave in the checkout (it once reached main via #466)
 /.local/
+
+# Test logs shared between the host and the mounted workspace (three runs).
+/.test_output/

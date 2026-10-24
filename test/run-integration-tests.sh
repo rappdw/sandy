@@ -2,7 +2,7 @@
 # Integration tests for sandy — requires Docker, API keys, and real agent sessions.
 #
 # These tests launch real sandy sessions with real API calls. They complement
-# test/run-tests.sh (pure-script, no Docker needed) by verifying end-to-end
+# test/run-tests.sh --host-only by verifying end-to-end
 # behavior that can only be checked with a running container and live credentials.
 #
 # Credentials are auto-detected; sections without credentials are skipped.
@@ -79,6 +79,8 @@
 #
 set -euo pipefail
 
+python3 "$(dirname "$0")/result_checks.py" selection "$0" "${SANDY_INTEG_ONLY:-}" "${SANDY_INTEG_SKIP:-}"
+
 # The integration test harness runs sandy from directories that may legitimately
 # carry privileged-tier keys in workspace .sandy/config (e.g. this repo's own
 # ~/dev/sandy/.sandy/.secrets with GEMINI_API_KEY). Auto-approve them in-memory
@@ -134,14 +136,16 @@ ERRORS=()
 COMPLETED=false
 TEST_DIRS=()
 SANDBOX_DIRS=()
+SANDY_INTEG_LOG_DIR="$(python3 "$_INT_SELF_DIR/log_paths.py" integration "${SANDY_INTEG_LOG_DIR:-}")"
+export SANDY_INTEG_LOG_DIR
+exec > >(tee "$SANDY_INTEG_LOG_DIR/integration.log") 2>&1
+printf 'Integration logs: %s\n' "$SANDY_INTEG_LOG_DIR"
 
-# macOS doesn't have GNU timeout; use perl fallback
-if ! command -v timeout &>/dev/null; then
-    timeout() {
-        local secs="$1"; shift
-        perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
-    }
-fi
+# Identical Linux/macOS status and process-group cleanup. The old Perl exec
+# fallback used SIGALRM's status and could leave grandchildren running.
+timeout() {
+    python3 "$_INT_SELF_DIR/result_checks.py" timeout "$@"
+}
 
 # Verbosity: -v, -vv, -vvv (passed through to sandy)
 VERBOSE=0
@@ -448,21 +452,23 @@ resolve_sandbox() {
 # only need the image, not a running session.
 ensure_image_built() {
     local agent="$1" image="$2"
-    if docker image inspect "$image" &>/dev/null; then
-        return 0
-    fi
-    info "  Building $image on demand (no credentials needed)..."
-    local tmp_dir
+    case "${_VALIDATED_IMAGES:-|}" in *"|$image|"*) return 0 ;; esac
+    info "  Validating $image against current source (no credentials needed)..."
+    local tmp_dir build_log rc=0
     tmp_dir="$(mktemp -d)"
     TEST_DIRS+=("$tmp_dir")
-    # --build-only exits right after docker build; run from a throwaway dir so
-    # sandy's workspace-dependent logic (sandbox creation, trust entries, etc.)
-    # doesn't touch anything real. Ignore failure — the image inspect below is
-    # the authoritative check.
+    build_log="$(mktemp "$SANDY_INTEG_LOG_DIR/build.XXXXXX")"
+    # Production freshness checks decide whether a rebuild is necessary.
+    # An existing stale image must not turn a failed build into a pass.
     (cd "$tmp_dir" && git init -q 2>/dev/null && \
         SANDY_AGENT="$agent" timeout "${SANDY_INTEG_TIMEOUT:-600}" \
-        "$SANDY_SCRIPT" --build-only >/dev/null 2>&1) || true
-    docker image inspect "$image" &>/dev/null
+        "$SANDY_SCRIPT" --build-only >"$build_log" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        warn "Build validation failed (exit=$rc); log: $build_log"
+        return "$rc"
+    fi
+    docker image inspect "$image" &>/dev/null || return 1
+    _VALIDATED_IMAGES="${_VALIDATED_IMAGES:-|}$image|"
 }
 
 # Run sandy headless and capture combined output. Returns the exit code.
@@ -494,24 +500,19 @@ run_sandy_headless() {
     # Timeout: headless sandy should complete within 5 minutes.
     # Image builds can be slow on first run, so this is generous.
     local timeout_sec="${SANDY_INTEG_TIMEOUT:-300}"
-    # When verbose, tee output to stderr so it's visible even when the caller
-    # captures stdout into a variable (e.g. _out="$(run_sandy_headless ...)").
-    # Feed sandy /dev/null on stdin: these are headless prompt-as-arg runs, and
-    # an agent that reads stdin (codex exec) must see EOF, not block on an
-    # inherited terminal. Makes the run identical from a terminal or in CI.
-    if [ "$VERBOSE" -gt 0 ]; then
-        if [ "${#env_args[@]}" -gt 0 ]; then
-            timeout "$timeout_sec" env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" </dev/null 2>&1 | tee /dev/stderr || true
-        else
-            timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" </dev/null 2>&1 | tee /dev/stderr || true
-        fi
-    else
-        if [ "${#env_args[@]}" -gt 0 ]; then
-            timeout "$timeout_sec" env "${env_args[@]}" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" </dev/null 2>&1 || true
-        else
-            timeout "$timeout_sec" "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" </dev/null 2>&1 || true
-        fi
+    # Keep streams and status independently. A timeout or an error message is
+    # never evidence that an agent answered. Logs survive failed runs.
+    local log_dir rc=0
+    log_dir="$(mktemp -d "$SANDY_INTEG_LOG_DIR/launch.XXXXXX")"
+    timeout "$timeout_sec" env "${env_args[@]+"${env_args[@]}"}" \
+        "$SANDY_SCRIPT" $rebuild_flag $verbose_flag "${sandy_args[@]}" \
+        </dev/null >"$log_dir/stdout" 2>"$log_dir/stderr" || rc=$?
+    printf '%s\n' "$rc" > "$log_dir/status"
+    cat "$log_dir/stdout" "$log_dir/stderr"
+    if [ "$VERBOSE" -gt 0 ] || [ "$rc" -ne 0 ]; then
+        printf 'Headless launch exit=%s; logs: %s\n' "$rc" "$log_dir" >&2
     fi
+
     # When `timeout` fires it SIGTERMs sandy, but sandy is blocked in its
     # foreground `docker run`, which doesn't receive the signal — so sandy's
     # cleanup trap can't run and the agent container is orphaned (a wedged
@@ -520,6 +521,12 @@ run_sandy_headless() {
     # the container also makes the orphaned `docker run` exit, which unblocks
     # sandy so its own trap finally runs and tears down networks/sandboxes.
     reap_test_containers
+    return "$rc"
+}
+
+# A line containing just the requested answer is positive completion evidence.
+_headless_answer() {
+    printf '%s\n' "$3" | python3 "$_INT_SELF_DIR/result_checks.py" answer "$1" "$2"
 }
 
 # Force-remove any leftover sandy test containers (named sandy-tmp.*). Safe:
@@ -825,8 +832,8 @@ fi
 #
 # Building up front under a generous timeout means per-test timeouts only ever
 # cover the agent turn, and the timing table separates build cost from test
-# cost. ensure_image_built short-circuits when the image already exists, so on a
-# warm host this whole phase is a no-op costing a few `docker image inspect`s.
+# cost. Production freshness checks run once per image; a present but stale
+# image is rebuilt here before an agent turn starts its shorter timeout.
 #   Skip with SANDY_INTEG_NO_WARM=1; timeout via SANDY_INTEG_BUILD_TIMEOUT.
 if [ "${SANDY_INTEG_NO_WARM:-0}" != "1" ]; then
     _warm_start=$SECONDS
@@ -838,8 +845,7 @@ if [ "${SANDY_INTEG_NO_WARM:-0}" != "1" ]; then
     export SANDY_INTEG_TIMEOUT="${SANDY_INTEG_BUILD_TIMEOUT:-1800}"
     _warm_one() { # $1=flag $2=agent $3=image
         [ "$1" = true ] || return 0
-        if docker image inspect "$3" >/dev/null 2>&1; then return 0; fi
-        info "  building $3 (cold) ..."
+        info "  validating/building $3 ..."
         ensure_image_built "$2" "$3" || warn "  warm-up: $3 did not build; its tests will build it inline"
         _warm_built=$(( _warm_built + 1 ))
     }
@@ -990,8 +996,8 @@ if [ "$HAS_OPENAI_API_KEY" = true ]; then
     # SANDY_CODEX_AUTH=oauth in the maintainer's ~/.sandy/config (this runner
     # uses the real $SANDY_HOME) would otherwise withhold the key and run the
     # section on whatever OAuth credential the host has. Env beats config.
-    _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" "SANDY_CODEX_AUTH=api_key" -- -p "reply with exactly one word: pineapple")"
-    _exit=$?
+    _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" "SANDY_CODEX_AUTH=api_key" -- -p "reply with exactly one word: pineapple")" && _headless_rc=0 || _headless_rc=$?
+    _exit=$_headless_rc
 
     # Image should exist after first run
     if docker image inspect sandy-codex &>/dev/null; then
@@ -1011,9 +1017,9 @@ if [ "$HAS_OPENAI_API_KEY" = true ]; then
     # output or anything else is still sandy's responsibility → FAIL.
     # (strip the echoed prompt line — codex exec prints the prompt in its
     # transcript, which would otherwise satisfy the positive check)
-    if [ -n "$_out" ] && echo "$_out" | grep -vi "reply with exactly one word" | grep -qi "pineapple"; then
+    if _headless_answer "$_headless_rc" pineapple "$_out"; then
         pass "codex headless responds without errors"
-    elif [ -n "$_out" ] \
+    elif [ "$_headless_rc" -lt 124 ] && [ -n "$_out" ] \
          && echo "$_out" | grep -qiE "$_API_ERR_RE"; then
         skip "codex headless responds without errors — codex API error, not a sandy fault ($(echo "$_out" | grep -oiE "$_API_ERR_RE" | head -1))"
     else
@@ -1064,7 +1070,7 @@ if [ "$HAS_OPENAI_API_KEY" = true ]; then
         fi
 
         # Idempotency: run again and check trust entry isn't duplicated
-        run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" "SANDY_CODEX_AUTH=api_key" -- -p "reply one word: test" >/dev/null 2>&1
+        run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" "SANDY_CODEX_AUTH=api_key" -- -p "reply one word: test" >/dev/null 2>&1 || fail "headless fixture launch failed (see launch logs)"
         _proj_count="$(grep -c '^\[projects\.' "$_cfg" 2>/dev/null || echo 0)"
         if [ "$_proj_count" -eq 1 ]; then
             pass "trust entry idempotent on relaunch (count=$_proj_count)"
@@ -1074,7 +1080,7 @@ if [ "$HAS_OPENAI_API_KEY" = true ]; then
 
         # Sandbox forcing: delete config.toml, relaunch, verify it's re-seeded
         rm -f "$_cfg"
-        _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" "SANDY_CODEX_AUTH=api_key" -- -p "reply one word: test")"
+        _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" "SANDY_CODEX_AUTH=api_key" -- -p "reply one word: test")" && _headless_rc=0 || _headless_rc=$?
         if [ -f "$_cfg" ]; then
             pass "config.toml re-seeded after deletion"
         else
@@ -1164,15 +1170,14 @@ if [ "$HAS_GEMINI" = true ]; then
     # Pass GEMINI_API_KEY if available; otherwise let sandy detect OAuth/ADC.
     _gemini_env=()
     [ -n "${GEMINI_API_KEY:-}" ] && _gemini_env+=("GEMINI_API_KEY=$GEMINI_API_KEY")
-    _out="$(run_sandy_headless "${_gemini_env[@]+"${_gemini_env[@]}"}" -- -p "reply with exactly one word: banana")"
-
+    _out="$(run_sandy_headless "${_gemini_env[@]+"${_gemini_env[@]}"}" -- -p "reply with exactly one word: banana")" && _headless_rc=0 || _headless_rc=$?
     if docker image inspect sandy-gemini-cli &>/dev/null; then
         pass "sandy-gemini-cli image exists after build"
     else
         fail "sandy-gemini-cli image exists after build"
     fi
 
-    if [ -n "$_out" ] && ! echo "$_out" | grep -qi "unknown flag\|error.*sandbox"; then
+    if _headless_answer "$_headless_rc" banana "$_out"; then
         pass "gemini headless responds without errors"
     else
         fail "gemini headless responds without errors"
@@ -1245,8 +1250,7 @@ if [ "$HAS_CLAUDE" = true ]; then
     # Canonical default-model test: the ONE launch in this suite that
     # deliberately opts OUT of the Haiku pin above, so the DEFAULT Claude
     # model path is still exercised end to end.
-    _out="$(run_sandy_headless ${_DEFAULT_MODEL_ENV[@]+"${_DEFAULT_MODEL_ENV[@]}"} -- -p "reply with exactly one word: cherry")"
-
+    _out="$(run_sandy_headless ${_DEFAULT_MODEL_ENV[@]+"${_DEFAULT_MODEL_ENV[@]}"} -- -p "reply with exactly one word: cherry")" && _headless_rc=0 || _headless_rc=$?
     # Image should exist after first run
     if docker image inspect sandy-claude-code &>/dev/null; then
         pass "sandy-claude-code image exists after build"
@@ -1255,7 +1259,7 @@ if [ "$HAS_CLAUDE" = true ]; then
     fi
 
     _claude_ok=false
-    if [ -n "$_out" ] && ! echo "$_out" | grep -qi "error.*settings\|layout migration"; then
+    if _headless_answer "$_headless_rc" cherry "$_out"; then
         pass "claude headless responds without errors"
         _claude_ok=true
     else
@@ -1346,10 +1350,10 @@ if [ "$HAS_CLAUDE" = true ] && [ "$HAS_OPENAI_API_KEY" = true ]; then
     # logs retryable websocket-401 ERROR lines before its HTTPS fallback
     # succeeds, so bare "error" matching is a false positive; a real codex
     # API error is skipped (not sandy's fault), anything else fails.
-    _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" "SANDY_CODEX_AUTH=api_key" -- -p "reply one word: first")"
-    if [ -n "$_out" ] && echo "$_out" | grep -vi "reply one word" | grep -qi "first"; then
+    _out="$(run_sandy_headless "OPENAI_API_KEY=$OPENAI_API_KEY" "SANDY_CODEX_AUTH=api_key" -- -p "reply one word: first")" && _headless_rc=0 || _headless_rc=$?
+    if _headless_answer "$_headless_rc" first "$_out"; then
         pass "codex session works in switch test"
-    elif [ -n "$_out" ] \
+    elif [ "$_headless_rc" -lt 124 ] && [ -n "$_out" ] \
          && echo "$_out" | grep -qiE "$_API_ERR_RE"; then
         skip "codex session works in switch test — codex API error, not a sandy fault ($(echo "$_out" | grep -oiE "$_API_ERR_RE" | head -1))"
     else
@@ -1363,8 +1367,8 @@ if [ "$HAS_CLAUDE" = true ] && [ "$HAS_OPENAI_API_KEY" = true ]; then
 
     # Switch to claude
     echo "SANDY_AGENT=claude" > "$PROJECT_DIR/.sandy/config"
-    _out="$(run_sandy_headless -- -p "reply one word: second")"
-    if [ -n "$_out" ] && ! echo "$_out" | grep -qi "codex\|error.*agent"; then
+    _out="$(run_sandy_headless -- -p "reply one word: second")" && _headless_rc=0 || _headless_rc=$?
+    if _headless_answer "$_headless_rc" second "$_out"; then
         pass "claude session works after switching from codex"
     else
         fail "claude session works after switching from codex"
@@ -1376,7 +1380,7 @@ elif [ "$HAS_CLAUDE" = true ] && [ "$HAS_GEMINI" = true ]; then
 
     _gemini_env=()
     [ -n "${GEMINI_API_KEY:-}" ] && _gemini_env+=("GEMINI_API_KEY=$GEMINI_API_KEY")
-    _out="$(run_sandy_headless "${_gemini_env[@]+"${_gemini_env[@]}"}" -- -p "reply one word: first")"
+    _out="$(run_sandy_headless "${_gemini_env[@]+"${_gemini_env[@]}"}" -- -p "reply one word: first")" && _headless_rc=0 || _headless_rc=$?
     # Positive check: model must have responded with the requested word.
     # Negative check: only sandy-level/flag-level failures, NOT bare "error" —
     # gemini-cli logs an _ApiError stack trace on transient 503s before its
@@ -1388,11 +1392,9 @@ elif [ "$HAS_CLAUDE" = true ] && [ "$HAS_GEMINI" = true ]; then
     # (a red suite on a transient Google API blip is a false alarm). A sandy-level
     # failure (empty output = didn't launch, or a flag-translation error) still
     # FAILS, because those are sandy's responsibility.
-    if [ -n "$_out" ] \
-       && echo "$_out" | grep -qi "first" \
-       && ! echo "$_out" | grep -qi "unknown flag"; then
+    if _headless_answer "$_headless_rc" first "$_out"; then
         pass "gemini session works in switch test"
-    elif [ -n "$_out" ] \
+    elif [ "$_headless_rc" -lt 124 ] && [ -n "$_out" ] \
          && ! echo "$_out" | grep -qi "unknown flag" \
          && echo "$_out" | grep -qiE 'status: *[45][0-9][0-9]|critical error|503|500|RESOURCE_EXHAUSTED|quota|UNAVAILABLE|rate.?limit'; then
         skip "gemini session works in switch test — gemini API error, not a sandy fault ($(echo "$_out" | grep -oiE 'status: *[0-9]+|critical error|RESOURCE_EXHAUSTED|quota|UNAVAILABLE|rate.?limit' | head -1))"
@@ -1408,8 +1410,8 @@ elif [ "$HAS_CLAUDE" = true ] && [ "$HAS_GEMINI" = true ]; then
     fi
 
     echo "SANDY_AGENT=claude" > "$PROJECT_DIR/.sandy/config"
-    _out="$(run_sandy_headless -- -p "reply one word: second")"
-    if [ -n "$_out" ]; then
+    _out="$(run_sandy_headless -- -p "reply one word: second")" && _headless_rc=0 || _headless_rc=$?
+    if _headless_answer "$_headless_rc" second "$_out"; then
         pass "claude session works after switching from gemini"
     else
         fail "claude session works after switching from gemini"
@@ -1430,17 +1432,11 @@ if [ "$HAS_CODEX_OAUTH" = true ]; then
     setup_project codex "integ-codex-oauth"
     # Unset the API key and pin oauth (#429), so the OAuth path is what runs
     # regardless of a SANDY_CODEX_AUTH in the maintainer's ~/.sandy/config.
-    _out="$(run_sandy_headless "OPENAI_API_KEY=" "SANDY_CODEX_AUTH=oauth" -- -p "reply one word: test")"
-
-    if echo "$_out" | grep -qi "Seeded Codex OAuth\|Codex credentials from this sandbox"; then
-        pass "codex OAuth credentials detected from host"
+    _out="$(run_sandy_headless "OPENAI_API_KEY=" "SANDY_CODEX_AUTH=oauth" -- -p "reply one word: test")" && _headless_rc=0 || _headless_rc=$?
+    if _headless_answer "$_headless_rc" test "$_out"; then
+        pass "codex OAuth session returns the requested answer"
     else
-        # Might still work without the log message
-        if ! echo "$_out" | grep -qi "No Codex credentials"; then
-            pass "codex session works with OAuth (no credential warning)"
-        else
-            fail "codex OAuth credentials detected from host"
-        fi
+        fail "codex OAuth session did not complete (exit=$_headless_rc; see launch logs)"
     fi
 
     resolve_sandbox
@@ -1461,17 +1457,11 @@ if [ "$HAS_GEMINI_OAUTH" = true ]; then
     # makes load_gemini_credentials skip the api-key branch entirely — and empty the
     # key for this one invocation so it can't shadow OAuth in-container. This lets
     # BOTH gemini auth modes be verified in a single suite run.
-    _out="$(run_sandy_headless "GEMINI_API_KEY=" "SANDY_GEMINI_AUTH=oauth" -- -p "reply one word: test")"
-
-    if echo "$_out" | grep -q "Loaded Gemini OAuth"; then
-        pass "gemini OAuth credentials detected from host (forced via SANDY_GEMINI_AUTH=oauth)"
+    _out="$(run_sandy_headless "GEMINI_API_KEY=" "SANDY_GEMINI_AUTH=oauth" -- -p "reply one word: test")" && _headless_rc=0 || _headless_rc=$?
+    if _headless_answer "$_headless_rc" test "$_out"; then
+        pass "gemini OAuth session returns the requested answer"
     else
-        if ! echo "$_out" | grep -qi "No Gemini credentials"; then
-            pass "gemini session works with OAuth (no credential warning)"
-        else
-            fail "gemini OAuth credentials detected from host"
-            echo "    (tail: $(echo "$_out" | tail -3 | tr '\n' ' '))" >&2
-        fi
+        fail "gemini OAuth session did not complete (exit=$_headless_rc; see launch logs)"
     fi
 
     resolve_sandbox
@@ -1493,15 +1483,14 @@ if [ "$HAS_OPENCODE" = true ]; then
     [ -n "${ANTHROPIC_API_KEY:-}" ] && _env_args+=("ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
     [ -n "${OPENAI_API_KEY:-}" ]    && _env_args+=("OPENAI_API_KEY=$OPENAI_API_KEY")
     [ -n "${GEMINI_API_KEY:-}" ]    && _env_args+=("GEMINI_API_KEY=$GEMINI_API_KEY")
-    _out="$(run_sandy_headless "${_env_args[@]}" -- -p "reply with exactly one word: pineapple")"
-
+    _out="$(run_sandy_headless "${_env_args[@]}" -- -p "reply with exactly one word: pineapple")" && _headless_rc=0 || _headless_rc=$?
     if docker image inspect sandy-opencode &>/dev/null; then
         pass "sandy-opencode image exists after build"
     else
         fail "sandy-opencode image exists after build"
     fi
 
-    if [ -n "$_out" ] && ! echo "$_out" | grep -qi "error.*credential\|no provider configured"; then
+    if _headless_answer "$_headless_rc" pineapple "$_out"; then
         pass "opencode headless responds without errors"
     else
         fail "opencode headless responds without errors"
@@ -1582,15 +1571,14 @@ if [ "$HAS_GROK" = true ]; then
     setup_project grok "integ-grok"
 
     # grok's headless-native auth is XAI_API_KEY, forwarded by the launcher.
-    _out="$(run_sandy_headless "XAI_API_KEY=$XAI_API_KEY" -- -p "reply with exactly one word: pineapple")"
-
+    _out="$(run_sandy_headless "XAI_API_KEY=$XAI_API_KEY" -- -p "reply with exactly one word: pineapple")" && _headless_rc=0 || _headless_rc=$?
     if docker image inspect sandy-grok &>/dev/null; then
         pass "sandy-grok image exists after build"
     else
         fail "sandy-grok image exists after build"
     fi
 
-    if [ -n "$_out" ] && ! echo "$_out" | grep -qi "error.*api.key\|unauthorized\|no.*credential\|XAI_API_KEY.*not"; then
+    if _headless_answer "$_headless_rc" pineapple "$_out"; then
         pass "grok headless responds without auth errors"
     else
         fail "grok headless responds without auth errors"
@@ -1693,8 +1681,7 @@ if [ "$HAS_CLAUDE" = true ]; then
     _pre_nets="$(docker network ls --format '{{.Name}}' | grep -E '^sandy_(sidecar|egress)_' || true)"
 
     # Permissive (=1): the agent must reach api.anthropic.com via the proxy.
-    _out="$(run_sandy_headless "SANDY_EGRESS_PROXY=1" -- -p "reply with exactly one word: proxied")"
-
+    _out="$(run_sandy_headless "SANDY_EGRESS_PROXY=1" -- -p "reply with exactly one word: proxied")" && _headless_rc=0 || _headless_rc=$?
     if echo "$_out" | grep -q "Creating egress-proxy networks (mode=permissive)"; then
         pass "proxy mode 1 stands up the egress-proxy networks + sidecar"
     else
@@ -1702,7 +1689,7 @@ if [ "$HAS_CLAUDE" = true ]; then
         echo "    (output: $(echo "$_out" | head -6 | tr '\n' ' '))" >&2
     fi
 
-    if echo "$_out" | grep -qi "proxied" && ! echo "$_out" | grep -qi "ECONNRESET\|Unable to connect to API"; then
+    if _headless_answer "$_headless_rc" proxied "$_out"; then
         pass "agent reaches the model API through the proxy (no ECONNRESET)"
     else
         fail "agent reaches the model API through the proxy"
@@ -1733,8 +1720,8 @@ if [ "$HAS_CLAUDE" = true ]; then
     fi
 
     # Opt-out (=0): no proxy path; the agent still works (legacy isolation).
-    _out0="$(run_sandy_headless "SANDY_EGRESS_PROXY=0" -- -p "reply with exactly one word: direct")"
-    if echo "$_out0" | grep -qi "direct" && ! echo "$_out0" | grep -q "egress-proxy networks"; then
+    _out0="$(run_sandy_headless "SANDY_EGRESS_PROXY=0" -- -p "reply with exactly one word: direct")" && _headless_rc=0 || _headless_rc=$?
+    if _headless_answer "$_headless_rc" direct "$_out0" && ! echo "$_out0" | grep -q "egress-proxy networks"; then
         pass "SANDY_EGRESS_PROXY=0 opts out of the proxy path"
     else
         fail "SANDY_EGRESS_PROXY=0 opts out of the proxy path"
@@ -1749,24 +1736,38 @@ fi  # section 13
 section "13b. Egress proxy — non-TCP egress backstop (--internal drops UDP/QUIC)"
 # ============================================================
 if [ "$_SECTION_ON" = true ]; then
-# The proxy is TCP-only by design; --internal must drop all non-TCP egress (an L3
-# FORWARD drop), or UDP/QUIC/HTTP-3 would bypass the SNI proxy and DNS could
-# tunnel out. This is deterministic and needs no agent/creds — a throwaway alpine
-# container on a fresh --internal network must NOT get a UDP DNS reply from a
-# public resolver. (Linux coverage; the macOS spike covers Docker Desktop.)
+# A successful request through the normal bridge is the positive control.
+# Repeat that exact UDP DNS request on an internal bridge: only that request
+# must fail. Public resolver unavailability is a control failure, never a pass.
+# A server on a second Docker bridge would be a false control: Docker's own
+# inter-bridge isolation can block it even when --internal has been removed.
 _NTNET="sandy_nontcp_test_$$"
-if docker network create --internal --driver bridge --ipv6=false "$_NTNET" >/dev/null 2>&1; then
-    # nslookup uses UDP/53; a reply means UDP escaped the --internal bridge.
-    if docker run --rm --network "$_NTNET" alpine:3.20 \
-            sh -c "timeout 5 nslookup example.com 8.8.8.8 >/dev/null 2>&1"; then
-        fail "non-TCP backstop: --internal allowed UDP DNS to 8.8.8.8 (egress leak)"
-    else
-        pass "non-TCP backstop: --internal blocks UDP egress (DNS to 8.8.8.8 failed)"
-    fi
-    docker network rm "$_NTNET" >/dev/null 2>&1 || true
+_udp_probe='command -v nslookup >/dev/null && command -v timeout >/dev/null || exit 127
+if timeout 5 nslookup example.com 8.8.8.8 >/dev/null 2>&1; then
+    echo SANDY_UDP_REACHABLE
 else
-    skip "non-TCP backstop (could not create --internal test network)"
+    rc=$?
+    case "$rc" in 1|124|143) echo SANDY_UDP_BLOCKED ;; *) exit "$rc" ;; esac
+fi'
+_udp_control_rc=0
+_udp_control="$(docker run --rm --network bridge alpine:3.20 sh -c "$_udp_probe" 2>&1)" || _udp_control_rc=$?
+if printf '%s\n' "$_udp_control" | python3 "$_INT_SELF_DIR/result_checks.py" probe "$_udp_control_rc" SANDY_UDP_REACHABLE; then
+    pass "non-TCP positive control: normal bridge reaches the UDP resolver"
+    if docker network create --internal --driver bridge --ipv6=false "$_NTNET" >/dev/null; then
+        _udp_rc=0
+        _udp_out="$(docker run --rm --network "$_NTNET" alpine:3.20 sh -c "$_udp_probe" 2>&1)" || _udp_rc=$?
+        if printf '%s\n' "$_udp_out" | python3 "$_INT_SELF_DIR/result_checks.py" probe "$_udp_rc" SANDY_UDP_BLOCKED; then
+            pass "non-TCP backstop: internal bridge blocks the proven UDP request"
+        else
+            fail "non-TCP backstop: egress escaped or probe failed (exit=$_udp_rc): $_udp_out"
+        fi
+    else
+        fail "non-TCP fixture could not create the internal network"
+    fi
+else
+    fail "non-TCP control failed (exit=$_udp_control_rc): $_udp_control"
 fi
+docker network rm "$_NTNET" >/dev/null 2>&1 || true
 
 fi  # section 13b
 # ============================================================
@@ -1781,7 +1782,7 @@ if [ "$_SECTION_ON" = true ]; then
 if [ "$HAS_CLAUDE" = true ]; then
     setup_project claude "integ-compat"
     # First launch creates the sandbox authentically.
-    run_sandy_headless -- -p "reply with exactly one word: floor" >/dev/null 2>&1
+    run_sandy_headless -- -p "reply with exactly one word: floor" >/dev/null 2>&1 || fail "headless fixture launch failed (see launch logs)"
     resolve_sandbox
     if [ -n "$SANDBOX_DIR" ] && [ -d "$SANDBOX_DIR" ]; then
         _marker="$SANDBOX_DIR/.sandy_created_version"
@@ -1789,12 +1790,12 @@ if [ "$HAS_CLAUDE" = true ]; then
 
         # (a) Below-floor marker → sandy must refuse with the recreation hint.
         echo "0.5.0" > "$_marker"
-        _out="$(run_sandy_headless -- -p "should not run")"
+        _out="$(run_sandy_headless -- -p "should not run")" && _headless_rc=0 || _headless_rc=$?
         # The 2.0 message names the rename, not a generic floor (#248), so it
         # no longer says "below the ... refuses to launch against it"; this
         # grepped the 1.x wording and failed against a correct refusal. Anchor
         # on the refusal line and on the migration command it prints.
-        if echo "$_out" | grep -q "cannot be used by" && echo "$_out" | grep -q "reset-sandbox"; then
+        if [ "$_headless_rc" -eq 6 ] && echo "$_out" | grep -q "cannot be used by" && echo "$_out" | grep -q "reset-sandbox"; then
             pass "below-floor sandbox is hard-refused at launch"
         else
             fail "below-floor sandbox is hard-refused at launch"
@@ -1809,14 +1810,14 @@ if [ "$HAS_CLAUDE" = true ]; then
 
         # (b) Restore an above-floor marker → sandy proceeds (no refuse message).
         echo "${_orig_ver:-$("$SANDY_SCRIPT" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)}" > "$_marker"
-        _out2="$(run_sandy_headless -- -p "reply with exactly one word: ok")"
+        _out2="$(run_sandy_headless -- -p "reply with exactly one word: ok")" && _headless_rc=0 || _headless_rc=$?
         # Same message as (a). With the 1.x wording this negative check could
         # never fail -- the string no longer exists -- so it proved nothing.
-        if echo "$_out2" | grep -q "cannot be used by"; then
-            fail "above-floor sandbox launches without the floor refusal"
-            echo "    (output: $(echo "$_out2" | head -4 | tr '\n' ' '))" >&2
-        else
+        if _headless_answer "$_headless_rc" ok "$_out2"; then
             pass "above-floor sandbox launches without the floor refusal"
+        else
+            fail "above-floor sandbox launches and answers (exit=$_headless_rc)"
+            echo "    (output: $(echo "$_out2" | head -4 | tr '\n' ' '))" >&2
         fi
     else
         fail "compat floor: sandbox dir resolved after first launch"
@@ -1917,14 +1918,13 @@ if [ -n "$_combo" ]; then
     _combo_env=()
     [ -n "${GEMINI_API_KEY:-}" ] && _combo_env+=("GEMINI_API_KEY=$GEMINI_API_KEY")
     [ -n "${OPENAI_API_KEY:-}" ] && _combo_env+=("OPENAI_API_KEY=$OPENAI_API_KEY")
-    _out="$(run_sandy_headless "${_combo_env[@]+"${_combo_env[@]}"}" -- -p "reply one word: alpha")"
-
+    _out="$(run_sandy_headless "${_combo_env[@]+"${_combo_env[@]}"}" -- -p "reply one word: alpha")" && _headless_rc=0 || _headless_rc=$?
     # Positive-first, matching §8: the routed agent must have answered. A routed
     # agent's own API blip (gemini 5xx, codex 401-then-fallback) is sandy doing
     # its job → SKIP, not FAIL; empty output (didn't launch) still FAILS.
-    if [ -n "$_out" ] && echo "$_out" | grep -vi "reply one word" | grep -qi "alpha"; then
+    if _headless_answer "$_headless_rc" alpha "$_out"; then
         pass "combo $_combo → headless routes to $_routed, which responds"
-    elif [ -n "$_out" ] \
+    elif [ "$_headless_rc" -lt 124 ] && [ -n "$_out" ] \
          && echo "$_out" | grep -qiE "status: *[45][0-9][0-9]|critical error|503|500|RESOURCE_EXHAUSTED|quota|UNAVAILABLE|$_API_ERR_RE"; then
         skip "combo $_combo → routed $_routed reached API but it errored, not a sandy fault ($(echo "$_out" | grep -oiE 'status: *[0-9]+|critical error|RESOURCE_EXHAUSTED|quota|HTTP error: [45][0-9][0-9]|[45][0-9][0-9] [A-Za-z]+' | head -1))"
     else
@@ -1969,8 +1969,7 @@ if [ "$HAS_CLAUDE" = true ] || docker image inspect sandy-claude-code &>/dev/nul
     _OF_OUT="$(run_sandy_headless \
         "ANTHROPIC_API_KEY=sk-fake-test-key-do-not-use" \
         "CLAUDE_CODE_OAUTH_TOKEN=fake-oauth-token-do-not-use" \
-        -- -vvv -p "noop")"
-
+        -- -vvv -p "noop")" && _headless_rc=0 || _headless_rc=$?
     # (a) the runtime suppression warning fires (proves the both-set branch ran).
     if echo "$_OF_OUT" | grep -q "not forwarding ANTHROPIC_API_KEY"; then
         pass "both creds set → OAuth-first suppression warning fires at launch"
@@ -2077,7 +2076,7 @@ if [ "$_SECTION_ON" = true ]; then
 # inherits this suite's credential/auto-approve env for its --start.
 _acc_daemon="$_INT_SELF_DIR/acceptance-daemon.sh"
 if [ -f "$_acc_daemon" ]; then
-    _acc_out="$(mktemp)"
+    _acc_out="$(mktemp "$SANDY_INTEG_LOG_DIR/acceptance.XXXXXX")"
     set +e   # a failing harness exits non-zero; don't let set -e abort the suite
     SANDY="$SANDY_SCRIPT" bash "$_acc_daemon" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
@@ -2086,12 +2085,11 @@ if [ -f "$_acc_daemon" ]; then
     # printing its RESULT line, which under set -e aborts the suite BEFORE
     # fail() runs -- reporting a dead harness as "0 failed". Measured.
     _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1 || true)"
-    if [ "$_acc_rc" -eq 0 ]; then
+    if python3 "$_INT_SELF_DIR/result_checks.py" acceptance "$_acc_rc" < "$_acc_out"; then
         pass "daemon-mode acceptance (${_acc_res:-all assertions passed})"
     else
         fail "daemon-mode acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
-    rm -f "$_acc_out"
 else
     skip "daemon-mode acceptance (acceptance-daemon.sh not found)"
 fi
@@ -2111,7 +2109,7 @@ if [ "$_SECTION_ON" = true ]; then
 # not a side effect of running it here. Same invocation contract as §19.
 _acc_upd="$_INT_SELF_DIR/acceptance-update-sessions.sh"
 if [ -f "$_acc_upd" ]; then
-    _acc_out="$(mktemp)"
+    _acc_out="$(mktemp "$SANDY_INTEG_LOG_DIR/acceptance.XXXXXX")"
     set +e
     SANDY="$SANDY_SCRIPT" bash "$_acc_upd" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
@@ -2120,12 +2118,11 @@ if [ -f "$_acc_upd" ]; then
     # printing its RESULT line, which under set -e aborts the suite BEFORE
     # fail() runs -- reporting a dead harness as "0 failed". Measured.
     _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1 || true)"
-    if [ "$_acc_rc" -eq 0 ]; then
+    if python3 "$_INT_SELF_DIR/result_checks.py" acceptance "$_acc_rc" < "$_acc_out"; then
         pass "fleet-update acceptance (${_acc_res:-all assertions passed})"
     else
         fail "fleet-update acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
-    rm -f "$_acc_out"
 else
     skip "fleet-update acceptance (acceptance-update-sessions.sh not found)"
 fi
@@ -2146,7 +2143,7 @@ if [ "$_SECTION_ON" = true ]; then
 # time) inside the harness itself.
 _acc_topo="$_INT_SELF_DIR/acceptance-pane-topology.sh"
 if [ -f "$_acc_topo" ]; then
-    _acc_out="$(mktemp)"
+    _acc_out="$(mktemp "$SANDY_INTEG_LOG_DIR/acceptance.XXXXXX")"
     set +e   # a failing harness exits non-zero; don't let set -e abort the suite
     SANDY="$SANDY_SCRIPT" bash "$_acc_topo" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
@@ -2155,12 +2152,11 @@ if [ -f "$_acc_topo" ]; then
     # printing its RESULT line, which under set -e aborts the suite BEFORE
     # fail() runs -- reporting a dead harness as "0 failed". Measured.
     _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1 || true)"
-    if [ "$_acc_rc" -eq 0 ]; then
+    if python3 "$_INT_SELF_DIR/result_checks.py" acceptance "$_acc_rc" < "$_acc_out"; then
         pass "multi-agent pane-topology acceptance (${_acc_res:-all assertions passed})"
     else
         fail "multi-agent pane-topology acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
-    rm -f "$_acc_out"
 else
     skip "multi-agent pane-topology acceptance (acceptance-pane-topology.sh not found)"
 fi
@@ -2314,7 +2310,7 @@ if [ "$_SECTION_ON" = true ]; then
 # to this suite's sandy.
 _acc_handoff="$_INT_SELF_DIR/acceptance-handoff-dirs.sh"
 if [ -f "$_acc_handoff" ]; then
-    _acc_out="$(mktemp)"
+    _acc_out="$(mktemp "$SANDY_INTEG_LOG_DIR/acceptance.XXXXXX")"
     set +e   # a failing harness exits non-zero; don't let set -e abort the suite
     SANDY="$SANDY_SCRIPT" bash "$_acc_handoff" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
@@ -2323,12 +2319,11 @@ if [ -f "$_acc_handoff" ]; then
     # printing its RESULT line, which under set -e aborts the suite BEFORE
     # fail() runs -- reporting a dead harness as "0 failed". Measured.
     _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1 || true)"
-    if [ "$_acc_rc" -eq 0 ]; then
+    if python3 "$_INT_SELF_DIR/result_checks.py" acceptance "$_acc_rc" < "$_acc_out"; then
         pass "handoff-handoff directories acceptance (${_acc_res:-all assertions passed})"
     else
         fail "handoff-handoff directories acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
-    rm -f "$_acc_out"
 else
     skip "handoff-handoff directories acceptance (acceptance-handoff-dirs.sh not found)"
 fi
@@ -2351,7 +2346,7 @@ if [ "$_SECTION_ON" = true ]; then
 # SANDY pinned to this suite's sandy.
 _acc_provision="$_INT_SELF_DIR/acceptance-provision.sh"
 if [ -f "$_acc_provision" ]; then
-    _acc_out="$(mktemp)"
+    _acc_out="$(mktemp "$SANDY_INTEG_LOG_DIR/acceptance.XXXXXX")"
     set +e   # a failing harness exits non-zero; don't let set -e abort the suite
     SANDY="$SANDY_SCRIPT" bash "$_acc_provision" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
@@ -2360,12 +2355,11 @@ if [ -f "$_acc_provision" ]; then
     # printing its RESULT line, which under set -e aborts the suite BEFORE
     # fail() runs -- reporting a dead harness as "0 failed". Measured.
     _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1 || true)"
-    if [ "$_acc_rc" -eq 0 ]; then
+    if python3 "$_INT_SELF_DIR/result_checks.py" acceptance "$_acc_rc" < "$_acc_out"; then
         pass "provision-non-interactive sandbox provisioning acceptance (${_acc_res:-all assertions passed})"
     else
         fail "provision-non-interactive sandbox provisioning acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
-    rm -f "$_acc_out"
 else
     skip "provision-non-interactive sandbox provisioning acceptance (acceptance-provision.sh not found)"
 fi
@@ -2390,7 +2384,7 @@ if [ "$_SECTION_ON" = true ]; then
 # to this suite's sandy.
 _acc_uds="$_INT_SELF_DIR/acceptance-uds-delivery.sh"
 if [ -f "$_acc_uds" ]; then
-    _acc_out="$(mktemp)"
+    _acc_out="$(mktemp "$SANDY_INTEG_LOG_DIR/acceptance.XXXXXX")"
     set +e   # a failing harness exits non-zero; don't let set -e abort the suite
     SANDY="$SANDY_SCRIPT" bash "$_acc_uds" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
@@ -2399,14 +2393,13 @@ if [ -f "$_acc_uds" ]; then
     # fail the section, so it is carried into the summary line, where it stays
     # visible instead of becoming a silent permanent state.
     _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed( \([0-9]+ skipped\))?( \([0-9]+ noted[^)]*\))?' "$_acc_out" | tail -1 || true)"
-    if grep -q 'RESULT: 0 passed, 0 failed' "$_acc_out"; then
+    if [ "$_acc_rc" -eq 0 ] && grep -q 'RESULT: 0 passed, 0 failed' "$_acc_out"; then
         skip "uds-delivery cross-session delivery acceptance (${_acc_res:-skipped}) — no Claude credentials"
-    elif [ "$_acc_rc" -eq 0 ]; then
+    elif python3 "$_INT_SELF_DIR/result_checks.py" acceptance "$_acc_rc" < "$_acc_out"; then
         pass "uds-delivery cross-session delivery acceptance (${_acc_res:-all assertions passed})"
     else
         fail "uds-delivery cross-session delivery acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
-    rm -f "$_acc_out"
 else
     skip "uds-delivery cross-session delivery acceptance (acceptance-uds-delivery.sh not found)"
 fi
@@ -2424,18 +2417,17 @@ if [ "$_SECTION_ON" = true ]; then
 # container left running. Needs credentials (each session takes real turns).
 _acc_ns="$_INT_SELF_DIR/acceptance-named-sessions.sh"
 if [ -f "$_acc_ns" ]; then
-    _acc_out="$(mktemp)"
+    _acc_out="$(mktemp "$SANDY_INTEG_LOG_DIR/acceptance.XXXXXX")"
     set +e
     SANDY="$SANDY_SCRIPT" bash "$_acc_ns" 2>&1 | tee "$_acc_out"
     _acc_rc=${PIPESTATUS[0]}
     set -e
     _acc_res="$(grep -oE 'RESULT: [0-9]+ passed, [0-9]+ failed' "$_acc_out" | tail -1 || true)"
-    if [ "$_acc_rc" -eq 0 ]; then
+    if python3 "$_INT_SELF_DIR/result_checks.py" acceptance "$_acc_rc" < "$_acc_out"; then
         pass "named-sessions acceptance (${_acc_res:-all assertions passed})"
     else
         fail "named-sessions acceptance (${_acc_res:-NO RESULT LINE — the harness died before printing one; exited $_acc_rc}) — see harness output above"
     fi
-    rm -f "$_acc_out"
 else
     skip "named-sessions acceptance (acceptance-named-sessions.sh not found)"
 fi
@@ -2452,7 +2444,7 @@ TOTAL=$((PASS + FAIL + SKIP))
 if [ "$FAIL" -eq 0 ]; then
     printf "\033[0;32mAll %d tests passed" "$((PASS))"
     if [ "$SKIP" -gt 0 ]; then
-        printf " (%d skipped — missing credentials)" "$SKIP"
+        printf " (%d skipped — see reasons above)" "$SKIP"
     fi
     printf ".\033[0m\n"
 else
@@ -2461,28 +2453,10 @@ else
         printf "  \033[0;31m- %s\033[0m\n" "$e"
     done
     if [ "$SKIP" -gt 0 ]; then
-        printf "\033[0;33m(%d tests skipped — missing credentials)\033[0m\n" "$SKIP"
+        printf "\033[0;33m(%d tests skipped — see reasons above)\033[0m\n" "$SKIP"
     fi
 fi
 _print_timing_table
-
-# Warn about any SANDY_INTEG_ONLY token that matched no known section id —
-# catches typos that would otherwise silently run nothing.
-if [ -n "${SANDY_INTEG_ONLY:-}" ]; then
-    for _tok in $(printf '%s' "$SANDY_INTEG_ONLY" | tr ',' ' '); do
-        [ -n "$_tok" ] || continue
-        _tok_matched=false
-        for _sid in ${_SEC_IDS[@]+"${_SEC_IDS[@]}"}; do
-            if [ "$_sid" = "$_tok" ]; then
-                _tok_matched=true
-                break
-            fi
-        done
-        if [ "$_tok_matched" = false ]; then
-            printf "\033[0;33mWarning: SANDY_INTEG_ONLY token '%s' matched no section (typo?)\033[0m\n" "$_tok"
-        fi
-    done
-fi
 
 # `|| true` is not decoration. This is a COSMETIC footer -- a timestamp, a commit
 # id, clean/dirty -- and it runs AFTER COMPLETED=true, so a non-zero return here

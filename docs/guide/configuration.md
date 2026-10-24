@@ -164,3 +164,5 @@ Usage inside a session:
 | OpenCode | manual: `opencode "explain $(sandy-ss-paths 1)"` (no slash-command surface in v0) |
 
 No default — leaving `SANDY_SCREENSHOT_DIR` unset disables the feature entirely. macOS users typically point at `~/Desktop` (the macOS default for `Cmd+Shift+4` captures) or a custom folder configured via `defaults write com.apple.screencapture location <path>`. The mount is read-only by design; the agent should never modify your screenshot folder.
+
+Choose a specific directory: Sandy rejects `/` and your whole home directory, including symlink aliases of either path.
