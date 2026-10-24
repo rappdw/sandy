@@ -274,3 +274,24 @@ child destination. For example, `work/data` cannot be projected read-only onto
 `work/results` while `work` is writable: `work/data` remains a writable alias. Resolved mounts
 appear through the existing introspection mount list. Node and jq projections
 are tested for parity on Linux and macOS without a runtime.
+
+## 12. `agent_wrapper` — starting the agent, not just configuring it (2.9.0)
+
+`agent_args` adds fixed tokens to the argv sandy builds. It cannot express a feature that must run something *before* the agent, or whose arguments are only known at launch. Copying such a launcher into the payload changed nothing, because the pane still ran the bare agent.
+
+```json
+"agent_wrapper": { "codex": "payload/codex/launch" }
+```
+
+**What it means.** The agent's interactive pane runs `<wrapper> <agent> <sandy's native args...>`. Sandy still builds the whole command, so model, effort, permission flags, feature `agent_args`, operator args and the CLI pass-through are all in the wrapper's `"$@"`, in order. The wrapper decides only how that command is started, and is expected to `exec` it. It is a prefix, not a replacement, because a replacement would have to re-derive everything sandy decides, and would drift from it.
+
+**Why one per agent.** Nesting two wrappers would make each one's argv depend on sorted feature order, which neither author can see. Two features wrapping the same launched agent fail the launch, naming both. This could be widened to defined nesting later. Refusing now and permitting later breaks nothing, while the reverse would.
+
+**Why the payload must be read-only.** The wrapper decides what the agent runs. If the agent could edit it, the agent could grant itself any launch. So the path must start with `payload/` and the feature's `payload` mount must be `ro`. Otherwise the manifest is refused.
+
+**Where it does not apply.** Headless (`-p`), `--remote` and `sandy --login` panes are never wrapped. A claude wrapper with named Claude sessions active is refused, because those sessions are started outside the pane and "claude is wrapped" would be true for one pane and false for the work.
+
+**No fallback.** A wrapper that refuses (exits non-zero) leaves the agent not started, and the pane shows its stderr. A launcher that cannot do its job must not quietly turn into an unwrapped launch.
+
+**Reporting.** The marker's `agent_wrappers` (`{agent: {feature, path}}`) and `--print-state` record what the last launch actually wrapped, with the usual null / `{}` / populated states. Gate on `--print-schema`'s `manifest.top_level_keys` containing `agent_wrapper`. Older launchers reject the unknown key, and with it the whole manifest.
+

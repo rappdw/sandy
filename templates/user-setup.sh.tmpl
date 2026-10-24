@@ -825,6 +825,13 @@ _sandy_wrap_cmd_exit_pause() {
         printf '%s' "$cmd"
         return 0
     fi
+    # agent_wrapper (set by _sandy_build_agent_cmd for this pane's agent). Every
+    # builder hands over one simple command starting with the agent binary, so
+    # a prefix makes the wrapper's argv exactly that command. No fallback: if
+    # the wrapper fails, the pane shows it and waits, like any agent exit.
+    if [ -n "${_SANDY_AW_PATH:-}" ]; then
+        cmd="$(printf '%q' "$_SANDY_AW_PATH") $cmd"
+    fi
     if [ "${SANDY_VERBOSE:-0}" -ge 1 ]; then
         printf '%s' "${cmd}; _exit=\$?; echo ''; echo \"[sandy] ${label} exited (code: \$_exit)\"; read -p 'Press Enter to exit...'"
     else
@@ -1480,6 +1487,24 @@ _sandy_build_agent_cmd() {
         grok)     _sandy_aa_val="${SANDY_AGENT_ARGS_GROK:-}" ;;
         mirror)   _sandy_aa_val="${SANDY_AGENT_ARGS_MIRROR:-}" ;;
     esac
+    # agent_wrapper: the host resolved at most one path per agent (empty when
+    # none, or when this launch is not wrapped). _sandy_wrap_cmd_exit_pause
+    # puts it in front of the agent command it is handed. Only a path under
+    # the feature payload root is used; anything else is a forged value.
+    _SANDY_AW_PATH=""
+    case "$1" in
+        claude)   _SANDY_AW_PATH="${SANDY_AGENT_WRAPPER_CLAUDE:-}" ;;
+        gemini)   _SANDY_AW_PATH="${SANDY_AGENT_WRAPPER_GEMINI:-}" ;;
+        codex)    _SANDY_AW_PATH="${SANDY_AGENT_WRAPPER_CODEX:-}" ;;
+        opencode) _SANDY_AW_PATH="${SANDY_AGENT_WRAPPER_OPENCODE:-}" ;;
+        grok)     _SANDY_AW_PATH="${SANDY_AGENT_WRAPPER_GROK:-}" ;;
+        mirror)   _SANDY_AW_PATH="${SANDY_AGENT_WRAPPER_MIRROR:-}" ;;
+    esac
+    case "$_SANDY_AW_PATH" in
+        ""|/opt/sandy/features/?*/?*) ;;
+        *) _SANDY_AW_PATH="" ;;
+    esac
+    case "$_SANDY_AW_PATH" in *..*) _SANDY_AW_PATH="" ;; esac
     _sandy_aa_pre=()
     if [ -n "$_sandy_aa_val" ]; then
         # `|| true`: user-setup.sh runs under `set -e` with an ERR trap, and
