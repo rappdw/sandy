@@ -1314,6 +1314,36 @@ build_codex_cmd() {
     if [ -n "$_sandy_codex_effort" ]; then
         cmd+=" -c $(printf "%q" "model_reasoning_effort=$_sandy_codex_effort")"
     fi
+    (
+    # BEGIN codex activity runtime check
+    # The host forwards this only when it mounted the managed hooks. Probe the
+    # installed CLI here, including the operator's config/feature overrides;
+    # never force hooks on. Warnings must not become part of the command stdout.
+    if [ "${SANDY_CODEX_ACTIVITY:-0}" = 1 ]; then
+        local _cx_version _cx_features _cx_arg
+        local _cx_feature_args=()
+        _cx_version="$(codex --version 2>/dev/null || true)"
+        if [[ "$_cx_version" =~ ([0-9]+)\.([0-9]+)\.([0-9]+) ]] && { [ "${BASH_REMATCH[1]}" -gt 0 ] || [ "${BASH_REMATCH[2]}" -ge 164 ]; }; then
+            # 0.164.0 is the measured floor, not a claim about earlier releases.
+            while [ "$#" -gt 0 ]; do
+                _cx_arg="$1"; shift
+                case "$_cx_arg" in
+                    -c|--config|--enable|--disable)
+                        if [ "$#" -gt 0 ]; then _cx_feature_args+=("$_cx_arg" "$1"); shift; fi ;;
+                    --config=*|--enable=*|--disable=*) _cx_feature_args+=("$_cx_arg") ;;
+                    -c?*) _cx_feature_args+=("$_cx_arg") ;;
+                esac
+            done
+            _cx_features="$(codex features list ${_cx_feature_args[@]+"${_cx_feature_args[@]}"} 2>/dev/null || true)"
+            if ! printf '%s\n' "$_cx_features" | awk '$1 == "hooks" && $NF == "true" {on=1} END {exit !on}'; then
+                echo '[sandy] SANDY_CODEX_ACTIVITY: Codex hooks are disabled or their status could not be read; session activity may not be recorded. Enable hooks in Codex to record it.' >&2
+            fi
+        else
+            echo "[sandy] SANDY_CODEX_ACTIVITY: ${_cx_version:-unknown Codex version}; activity hooks require Codex >= 0.164.0 (validated floor). Recording is not guaranteed; rebuild with sandy --rebuild." >&2
+        fi
+    fi
+    # END codex activity runtime check
+    )
     cmd+="$(_sandy_translate_args codex "$@")"
     _sandy_wrap_cmd_exit_pause "Codex CLI" "$cmd"
 }

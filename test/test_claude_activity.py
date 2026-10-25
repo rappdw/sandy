@@ -34,6 +34,9 @@ def day(t):
 
 
 class Base(unittest.TestCase):
+    agent = "claude"
+    helper_args = ()
+
     def setUp(self):
         self.td = Path(tempfile.mkdtemp())
         self.helper = self.td / "sandy-claude-activity"
@@ -53,7 +56,7 @@ class Base(unittest.TestCase):
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.td),
                "SANDY_ACTIVITY_DIR": str(self.out), "SANDY_ACTIVITY_MARKER": str(self.marker),
                "SANDY_ACTIVITY_SESSIONS": str(self.tsv), "SANDY_ACTIVITY_NOW": str(self.t)}
-        r = subprocess.run([sys.executable, "-I", str(self.helper)], input=raw if raw is not None else json.dumps(p),
+        r = subprocess.run([sys.executable, "-I", str(self.helper), *self.helper_args], input=raw if raw is not None else json.dumps(p),
                            capture_output=True, text=True, env=env, timeout=20)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "", "a hook must print nothing (UserPromptSubmit stdout reaches the prompt)")
@@ -82,7 +85,7 @@ class States(Base):
         self.assertEqual(set(ls[0]), {"v", "ts", "sandbox", "agent", "session_id", "session_name", "seq",
                                       "event", "state", "subagents_active", "detail"})
         self.assertEqual((ls[0]["v"], ls[0]["agent"], ls[0]["sandbox"], ls[0]["session_name"]),
-                         (1, "claude", "proj-1a2b3c4d", None))
+                         (1, self.agent, "proj-1a2b3c4d", None))
         self.assertTrue(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", ls[0]["ts"]))
         self.assertEqual(self.latest()["v"], 1)
 
@@ -220,7 +223,7 @@ class Robustness(Base):
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.td),
                "SANDY_ACTIVITY_DIR": str(self.out), "SANDY_ACTIVITY_MARKER": str(self.marker),
                "SANDY_ACTIVITY_SESSIONS": str(self.tsv), "SANDY_ACTIVITY_NOW": str(self.t)}
-        procs = [subprocess.Popen([sys.executable, "-I", str(self.helper)], stdin=subprocess.PIPE, env=env)
+        procs = [subprocess.Popen([sys.executable, "-I", str(self.helper), *self.helper_args], stdin=subprocess.PIPE, env=env)
                  for _ in range(40)]
         for i, p in enumerate(procs):
             p.stdin.write(json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "c%d" % i}).encode())

@@ -25110,6 +25110,14 @@ unset _S210_D _S210_BLK _S210_P1 _S210_P2 _S210_P3 _S210_P4 _S210_P5 _S210_F1 _S
 unset -f _s210_pol _s210_stale
 
 
+echo ""
+echo "§211: SANDY_CODEX_ACTIVITY — shared session record, managed hooks, and launch warnings"
+# The Python checks execute the extracted helper, requirements block and
+# runtime/stale-image checks. Stubs replace only Docker and the Codex binary.
+check "§211 shared activity bytes, Codex events, gates, fresh read-only requirements, silent hooks, version/feature/stale warnings and passive key" \
+    env SANDY_SCRIPT="$SANDY_SCRIPT" python3 "$(dirname "$0")/test_codex_activity.py"
+
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
