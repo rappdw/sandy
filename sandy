@@ -107,6 +107,7 @@ SANDY_PASSIVE_KEYS=(
     SANDY_CLAUDE_AUTH
     SANDY_TOOL_AUDIT
     SANDY_CLAUDE_USAGE
+    SANDY_CLAUDE_ACTIVITY
     SANDY_CLAUDE_CONNECTORS
     SANDY_SUSPICIOUS
     SANDY_CROSS_SESSION_INBOUND
@@ -2053,6 +2054,7 @@ DISCORD_BOT_TOKEN|secret|||0.7.6|stable|Discord bot token for the channel relay.
 DISCORD_ALLOWED_SENDERS|string|||0.7.6|stable|Comma-separated Discord user IDs allowed to send messages.
 SANDY_TOOL_AUDIT|bool|0||1.4.0|stable|Seed a Claude Code PreToolUse audit hook (HF-incident Issue 6) that appends {ts,tool,args} JSONL to ~/.claude/tool-audit.jsonl for per-session tool-use telemetry — instrumenting the agent harness itself, not just the box. Only-if-absent: a user's own PreToolUse hook is never clobbered. Passive-safe (only ADDS visibility). Claude-only (no equivalent seam for codex/gemini/opencode). Not tamper-proof against a determined agent (runs in-box) — telemetry for the primary wrong-but-not-evil adversary. Default 0 (off).
 SANDY_CLAUDE_USAGE|bool|1||2.9.0|stable|Claude Code status line shows which credential the session bills against (the operator's label from $SANDY_HOME/credential-labels, its fingerprint, or the account login's email), its plan usage (7-day and 5-hour windows) and the last reply's output rate, and records each usage change to ~/.claude/rate-limits/ in the sandbox. Makes sandy's statusLine a managed key; a statusLine command in the host settings.json keeps running, its output printed above sandy's line. 0 restores the earlier behaviour: sandy's model/effort/context line only when no statusLine is configured, and nothing recorded. Claude-only. Passive-safe in both directions (display and a sandbox-local record only). Default 1.
+SANDY_CLAUDE_ACTIVITY|bool|1||2.9.0|stable|Records each Claude Code session's turn state to ~/.claude/activity/ in the sandbox: activity-latest.json (one entry per session: working, waiting, idle or ended, the running subagent count, and the time of its last hook event) and one JSONL line per change in activity-YYYY-MM-DD.jsonl, kept 14 days. Hook commands in the policy settings, so they run beside the user's own hooks; zero tokens and no prompt change. An interrupted turn fires no hook, so its state stays working or waiting until the next event. Claude-only. Passive-safe in both directions (a sandbox-local record only). Default 1.
 SANDY_CLAUDE_CONNECTORS|bool|0||1.9.0|stable|Expose the claude.ai ACCOUNT connectors (Gmail, Google Drive, ...) inside the sandbox (#129). Default 0 = SUPPRESSED. The OAuth token sandy mounts is account-scoped, so without this every connector the user ever enabled on claude.ai was reachable from EVERY sandbox -- including untrusted-repo sessions, with no extra prompt -- which is ambient authority crossing the per-project boundary sandy exists to draw. Implemented by seeding Claude Code's disableClaudeAiConnectors as a MANAGED settings.json key (always overwritten, both directions): Claude resolves it true-in-ANY-settings-scope-wins, so writing false is not enough to expose them -- an inherited true from the host settings.json would win. VALUE-AWARE TIER: 0 is passive-safe wherever it is set, but =1 WEAKENS the sandbox, so a workspace .sandy/config setting it triggers the per-workspace approval prompt like SANDY_EGRESS_NO_ISOLATION=1. Claude-only (the account-connector rider is a Claude Code phenomenon); gates AUTO-FETCHED connectors only -- a server passed explicitly via --mcp-config still follows the normal MCP trust flow.
 SANDY_SUSPICIOUS|bool|0||1.9.0|experimental|Hardened-credential posture for a workspace you actively distrust (#130) -- the pre-broker slice of #121. When 1: (a) the mounted Claude .credentials.json is REWRITTEN to drop claudeAiOauth.refreshToken, so an exfiltrated copy is worth only the remaining access-token lifetime (hours) instead of permanent renewable account access; the strip is verified after the rewrite and FAILS CLOSED -- if it cannot be performed or verified, no credentials file is mounted at all; (b) if ANTHROPIC_API_KEY is set and no long-lived CLAUDE_CODE_OAUTH_TOKEN is, the API key is used and OAuth credentials are not mounted (clean, instantly-revocable compartmentalization); (c) claude.ai account connectors are forced off, overriding an approved SANDY_CLAUDE_CONNECTORS=1; (d) egress DEFAULTS to strict -- an explicit egress setting still wins but is named loudly. Since 1.12.0 this also covers SANDY_CLAUDE_AUTH=profile (#252): the ephemeral copy of the Console profile has its refresh_token stripped (the host profile is never touched) and cred_mode becomes profile-access-only; a strip that cannot be performed or verified mounts NO profile at all. The resolved posture is recorded as cred_mode in /etc/sandy-session.json so a run protection level is provable after the fact. Passive-safe to turn ON from a committed .sandy/config (a repo may make itself tighter); =0 from a workspace is approval-gated (never looser). HONEST LIMITS: in-session token refresh stops working once the access token expires (rerun sandy or /login -- acceptable for a deliberately short suspicious session); a long-lived CLAUDE_CODE_OAUTH_TOKEN is NOT shrunk by this (recorded honestly as cred_mode oauth-token, with a warning); Claude-only for the credential specifics; real prevention (token never in-container) is #121.
 SANDY_CROSS_SESSION_INBOUND|enum:accept,hold,refuse|||1.10.0|experimental|Claude-only. Pins Claude Code crossSessionInbound (accept = deliver messages from other sessions on this container without a prompt; hold = queue for approval; refuse = drop with a sender-visible status) by writing the SAME resolved value into TWO places every launch, merge-preserving and idempotent: the sandbox's own claude/settings.json (mounted RW as the container's ~/.claude/settings.json, i.e. Claude Code userSettings) and the WORKSPACE project file .claude/settings.local.json (mounted :ro). This split is measured, not assumed, against Claude Code 2.1.251: accept only takes effect when present in userSettings (workspace-file accept alone is a no-op there); hold/refuse are honored from either, and the workspace file's copy is tighten-only so it cannot be loosened by a stale accept and still wins over userSettings when a repo hand-edits it stricter. Never writes ~/.claude/settings.json on the HOST. Default is CONDITIONAL, which is why the schema default is empty, and as of 2.4.0 (#380) it is keyed on a DECLARED NEED rather than on any entry: accept iff a SELECTED feature manifest declares `"receives": ["cross_session"]` AND this is not a headless (-p), --remote or --provision run (none of those leave a session for anything to deliver into), else refuse. An entry alone, with no feature declaring the need, resolves refuse. (Pre-2.6.0 sandy also accepted on the strength of a feature entry alone -- announced for removal in README's Deprecated table in 2.5.0 (#382) and removed in 2.6.0; see CLAUDE.md "Cross-session inbound".) A declared need is independent of whether any entry process runs at all -- `receives` is its own, separate, privileged statement of what a feature needs to receive, decoupled from whether that feature ships an `entry`. Value-aware tier: hold and refuse are passive-safe wherever set; accept set via a workspace .sandy/config is approval-gated (it lets any process at the workspace uid inside the container inject a turn) -- unchanged, whichever default path resolved it. Residual: the userSettings target is RW in-container (required for /plugin install), so unlike the :ro workspace copy it is agent-mutable mid-session; sandy resets it on the next launch, not mid-session. Recorded in /etc/sandy-session.json as cross_session_inbound, with cross_session_inbound_source (one of explicit, feature:<name> or default) naming WHY. See docs/security/CROSS_SESSION_INBOUND.md.
@@ -8865,6 +8867,192 @@ _line="$(printf '%s' "$_in" | jq -c '{ts:(now|todateiso8601), tool:(.tool_name /
 [ -n "$_line" ] && printf '%s\n' "$_line" >> "$HOME/.claude/tool-audit.jsonl" 2>/dev/null || true
 exit 0
 TOOL_AUDIT_HELPER
+
+# sandy-claude-activity: Claude Code hook command for SANDY_CLAUDE_ACTIVITY.
+# Registered for the turn and subagent hook events in the policy settings
+# (/etc/claude-code/managed-settings.json), so it runs beside any hooks the
+# user configured and the agent cannot unregister it. The label lets a launch
+# tell an image that has the helper from one that predates it.
+LABEL sandy.claude_activity=1
+RUN cat > /usr/local/bin/sandy-claude-activity <<'CLAUDE_ACTIVITY_HELPER' \
+    && chmod +x /usr/local/bin/sandy-claude-activity
+#!/usr/bin/python3 -I
+# sandy-claude-activity: reads one Claude Code hook payload on stdin and records
+# the session's state to ~/.claude/activity/ (the sandbox's own claude/ dir on
+# the host): activity-latest.json, {"v":1,"sessions":{<session_id>: entry}},
+# replaced atomically, plus one JSONL line per change in
+# activity-YYYY-MM-DD.jsonl. Timestamps are UTC.
+#
+# States, measured on Claude Code 2.1.310:
+#   working  UserPromptSubmit, PreToolUse, PostToolUse
+#   waiting  Notification permission_prompt
+#   idle     Stop, StopFailure, Notification idle_prompt, SessionStart
+#   ended    SessionEnd
+# An interrupted turn (Esc, or a permission prompt denied) fires no hook at
+# all, so its state stays working or waiting until the next event. That is
+# reported through last_event_ts, never guessed here.
+#
+# subagents_active counts the agent ids seen at SubagentStart and not yet at
+# SubagentStop. Claude Code also fires SubagentStop for its own internal agents
+# with ids that never started, so those are ignored, not decremented.
+#
+# Prints nothing and always exits 0: stdout of a UserPromptSubmit hook is added
+# to the prompt, and a failing PreToolUse hook could block a tool.
+import datetime, fcntl, json, os, re, sys, tempfile, time
+from pathlib import Path
+WORKING = ("UserPromptSubmit", "PreToolUse", "PostToolUse")
+IDLE = ("Stop", "StopFailure")
+PRUNE_S = 24 * 3600
+KEEP_DAYS = 14
+MAX_SUBAGENTS = 256
+def now():
+    v = os.environ.get("SANDY_ACTIVITY_NOW", "")
+    return int(v) if v.isdigit() else int(time.time())
+def iso(t):
+    return datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def ident(v):
+    return v if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", v) else None
+def read_json(path):
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        with path.open() as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError, TypeError):
+        return None
+def sandbox():
+    m = read_json(Path(os.environ.get("SANDY_ACTIVITY_MARKER", "/etc/sandy-session.json"))) or {}
+    return ident(m.get("sandbox_name"))
+def session_name(sid):
+    # sandy's own record of the named sessions it brought up (first line is
+    # the launch header): slug, state, session id, name, ...
+    p = Path(os.environ.get("SANDY_ACTIVITY_SESSIONS") or Path.home() / ".claude" / ".sandy-sessions.tsv")
+    try:
+        if p.is_symlink():
+            return None
+        with p.open() as f:
+            next(f, None)
+            for row in f:
+                c = row.rstrip("\n").split("\t")
+                if len(c) >= 4 and c[2] == sid and c[3]:
+                    return "".join(ch for ch in c[3] if ch >= " ")[:200]
+    except OSError:
+        pass
+    return None
+def transition(e, event, p):
+    state, ids = e.get("state"), list(e.get("subagent_ids") or [])
+    if event in WORKING:
+        state = "working"
+    elif event in IDLE:
+        state = "idle"
+    elif event == "Notification":
+        nt = p.get("notification_type")
+        if nt == "permission_prompt":
+            state = "waiting"
+        elif nt == "idle_prompt":
+            state = "idle"
+    elif event == "SessionStart":
+        # compact fires mid-turn and keeps the same running agents.
+        if p.get("source") != "compact":
+            state, ids = "idle", []
+    elif event == "SessionEnd":
+        state, ids = "ended", []
+    elif event == "SubagentStart":
+        a = ident(p.get("agent_id"))
+        if a and a not in ids and len(ids) < MAX_SUBAGENTS:
+            ids.append(a)
+    elif event == "SubagentStop":
+        a = ident(p.get("agent_id"))
+        if a in ids:
+            ids.remove(a)
+    return state, ids
+def write_atomic(out, name, text):
+    fd, tmp = tempfile.mkstemp(prefix="." + name + ".", dir=str(out))
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, out / name)
+        tmp = None
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+def main():
+    try:
+        p = json.loads(sys.stdin.read(1 << 20) or "null")
+    except ValueError:
+        return
+    if not isinstance(p, dict):
+        return
+    event, sid = ident(p.get("hook_event_name")), ident(p.get("session_id"))
+    if not event or not sid:
+        return
+    out = Path(os.environ.get("SANDY_ACTIVITY_DIR") or Path.home() / ".claude" / "activity")
+    if out.is_symlink():
+        return
+    out.mkdir(parents=True, exist_ok=True)
+    t = now()
+    lock = os.open(str(out / ".lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        latest = read_json(out / "activity-latest.json") or {}
+        sessions = latest.get("sessions") if isinstance(latest.get("sessions"), dict) else {}
+        e = sessions.get(sid) if isinstance(sessions.get(sid), dict) else None
+        new = e is None
+        if new:
+            e = {"seq": 0, "state": None, "subagent_ids": []}
+        state, ids = transition(e, event, p)
+        if state is None:
+            state = "idle"
+        changed = new or state != e.get("state") or len(ids) != len(e.get("subagent_ids") or [])
+        seq = e.get("seq") if isinstance(e.get("seq"), int) and not isinstance(e.get("seq"), bool) else 0
+        if changed:
+            seq += 1
+        rec = {"v": 1, "ts": iso(t), "sandbox": sandbox(), "agent": "claude",
+               "session_id": sid, "session_name": session_name(sid), "seq": seq,
+               "event": event, "state": state, "subagents_active": len(ids),
+               "detail": ident(p.get("notification_type")) if event == "Notification" else None}
+        entry = dict(rec)
+        entry.update({"last_event": event, "last_event_ts": iso(t), "subagent_ids": ids})
+        if not changed:
+            entry["ts"], entry["event"], entry["detail"] = e.get("ts"), e.get("event"), e.get("detail")
+        sessions[sid] = entry
+        for k in list(sessions):
+            s = sessions[k]
+            if k == sid or not isinstance(s, dict):
+                continue
+            last = s.get("last_event_ts")
+            try:
+                age = t - int(datetime.datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp())
+            except (TypeError, ValueError):
+                age = PRUNE_S + 1
+            if s.get("state") in ("idle", "ended") and age > PRUNE_S:
+                del sessions[k]
+        write_atomic(out, "activity-latest.json", json.dumps({"v": 1, "sessions": sessions}, separators=(",", ":")) + "\n")
+        if changed:
+            day = out / ("activity-%s.jsonl" % rec["ts"][:10])
+            fd = os.open(str(day), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+            with os.fdopen(fd, "a") as f:
+                f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            cutoff = iso(t - KEEP_DAYS * 86400)[:10]
+            for old in out.glob("activity-????-??-??.jsonl"):
+                if old.name[9:19] < cutoff:
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
+    finally:
+        os.close(lock)
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass
+    sys.exit(0)
+CLAUDE_ACTIVITY_HELPER
 
 # User
 RUN useradd -m -s /bin/bash -u 1001 sandy
@@ -20349,16 +20537,54 @@ RUN_FLAGS+=(-e "SANDY_LAUNCH_ID=$_sandy_launch_id")
 #
 # Mounted :ro, so this is also a value the agent cannot edit -- unlike the
 # settings.json seed, which is rw inside the container by design.
-if _sandy_agent_has claude && [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ]; then
-    _sandy_policy_dir="$SANDBOX_DIR/claude-policy"
+#
+# SANDY_CLAUDE_ACTIVITY (default on) registers sandy-claude-activity for the
+# turn and subagent hook events in the same file. Hooks from every settings
+# source run, so the policy layer is where these go: beside the user's own
+# hooks, never merged into them or replacing them, and out of the agent's
+# reach. The command swallows a missing helper (an image predating it) and
+# exits 0, so a hook can never block a tool; the stale-image check below says
+# so instead.
+#
+# The content depends on this launch's config, so the file is written fresh
+# under this launch's own directory (#400), never rewritten in place.
+# BEGIN claude policy settings
+_sandy_policy_skip=false
+_sandy_policy_act=false
+if _sandy_agent_has claude; then
+    [ "${SANDY_SKIP_PERMISSIONS:-true}" = "true" ] && _sandy_policy_skip=true
+    if [ "${SANDY_CLAUDE_ACTIVITY:-1}" != "0" ]; then
+        _sandy_policy_act=true
+    else
+        info "SANDY_CLAUDE_ACTIVITY=0: Claude session activity is not recorded to ~/.claude/activity/ this launch."
+    fi
+fi
+if [ "$_sandy_policy_skip" = true ] || [ "$_sandy_policy_act" = true ]; then
+    _sandy_policy_dir="$(_sandy_launch_dir)/claude-policy"
     mkdir -p "$_sandy_policy_dir"
-    printf '{\n  "skipAutoPermissionPrompt": true\n}\n' > "$_sandy_policy_dir/managed-settings.json"
+    {
+        printf '{\n'
+        [ "$_sandy_policy_skip" = true ] && printf '  "skipAutoPermissionPrompt": true%s\n' "$([ "$_sandy_policy_act" = true ] && printf ',')"
+        if [ "$_sandy_policy_act" = true ]; then
+            printf '  "hooks": {\n'
+            _sandy_policy_sep=""
+            for _sandy_policy_ev in SessionStart UserPromptSubmit PreToolUse PostToolUse Notification Stop StopFailure SubagentStart SubagentStop SessionEnd; do
+                printf '%s    "%s": [{"matcher": "*", "hooks": [{"type": "command", "command": "/usr/local/bin/sandy-claude-activity 2>/dev/null; exit 0", "timeout": 5}]}]' "$_sandy_policy_sep" "$_sandy_policy_ev"
+                _sandy_policy_sep=$',\n'
+            done
+            printf '\n  }\n'
+        fi
+        printf '}\n'
+    } > "$_sandy_policy_dir/managed-settings.json"
+    chmod 0644 "$_sandy_policy_dir/managed-settings.json"
     # Mount the DIRECTORY, not the file: /etc/claude-code does not exist in the
     # image, and a directory mountpoint is the least surprising thing to ask
     # docker to create under a --read-only rootfs.
     RUN_FLAGS+=(-v "$_sandy_policy_dir":/etc/claude-code:ro)
-    [ "${SANDY_VERBOSE:-0}" != "0" ] && info "Policy settings /etc/claude-code/managed-settings.json (auto-mode prompt suppressed)"
+    [ "${SANDY_VERBOSE:-0}" != "0" ] && info "Policy settings /etc/claude-code/managed-settings.json (auto-mode prompt suppressed: $_sandy_policy_skip; activity hooks: $_sandy_policy_act)"
+    unset _sandy_policy_sep _sandy_policy_ev
 fi
+# END claude policy settings
 [ "${SANDY_VERBOSE:-0}" != "0" ] && info "Session marker /etc/sandy-session.json nonce=${_sandy_session_nonce} egress=${_sandy_egress_mode}"
 if _sandy_agent_has claude; then
     # Channels env vars: for single-agent 'claude' these drive the in-container plugin path;
@@ -20958,6 +21184,21 @@ if [ -n "$SANDY_AGENT_WRAPPER_CLAUDE$SANDY_AGENT_WRAPPER_GEMINI$SANDY_AGENT_WRAP
     unset _sandy_aw_img_label
 fi
 # --- END stale-image agent wrapper refusal (agent_wrapper) ------------------
+
+# --- BEGIN stale-image activity warning (SANDY_CLAUDE_ACTIVITY) -------------
+# The policy settings register sandy-claude-activity, but an image predating
+# it (a deferred rebuild, #218) has no helper, and its hook command exits 0 on
+# purpose so a hook can never block a tool. Nothing would be recorded and
+# nothing would say why, so say it here. A warning, not a refusal: the agent
+# itself runs correctly, only the record is missing.
+if [ "${_sandy_policy_act:-false}" = true ]; then
+    _sandy_act_img_label="$(trap - ERR; docker image inspect -f '{{index .Config.Labels "sandy.claude_activity"}}' "$IMAGE_NAME" 2>/dev/null)" || _sandy_act_img_label=""
+    if [ "$_sandy_act_img_label" != 1 ]; then
+        warn "image $IMAGE_NAME predates SANDY_CLAUDE_ACTIVITY (a deferred rebuild, #218, or another old cached image), so no session activity is recorded in ~/.claude/activity/ this launch. Rebuild once build resources are reachable: sandy --rebuild"
+    fi
+    unset _sandy_act_img_label
+fi
+# --- END stale-image activity warning (SANDY_CLAUDE_ACTIVITY) ---------------
 
 # --- BEGIN stale-image launch-staging fallback (#400) -----------------------
 # The files this launch changed in the agent homes are staged beside their

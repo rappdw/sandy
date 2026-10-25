@@ -9661,8 +9661,9 @@ unset _S111_PROG_BAD
 
 check "§111(1) sandy writes a managed-settings.json (mutation: relying on the settings.json seed alone lets the migration delete it on every new sandbox)" \
     grep -q 'managed-settings.json' "$_S111"
+# Run, not grepped, in §210(3): the file's JSON for each skip/activity setting.
 check "§111(2) it carries skipAutoPermissionPrompt: true" \
-    bash -c 'grep -A2 "claude-policy/managed-settings.json" "$1" | grep -q skipAutoPermissionPrompt || grep -q "skipAutoPermissionPrompt.*true.*managed\|managed-settings.json\"" "$1"' -- "$_S111"
+    bash -c 'awk "/^# BEGIN claude policy settings/,/^# END claude policy settings/" "$1" | grep -q "printf .  \"skipAutoPermissionPrompt\": true"' -- "$_S111"
 # /etc/claude-code is the hardcoded Linux policy dir -- the env override
 # function returns undefined in this build, so there is no path knob.
 check "§111(3) mounted at /etc/claude-code, the policy dir Claude Code actually reads" \
@@ -9671,8 +9672,9 @@ check "§111(3) mounted at /etc/claude-code, the policy dir Claude Code actually
 # an agent could edit it. A policy file the agent can rewrite is not a policy.
 check "§111(4) the policy mount is READ-ONLY (mutation: dropping :ro lets the agent rewrite its own permission policy)" \
     bash -c 'grep -q "_sandy_policy_dir\":/etc/claude-code:ro" "$1"' -- "$_S111"
-check "§111(5) it is gated on claude AND skip-permissions (mutation: writing it unconditionally would suppress the prompt even when the user deliberately turned skip off)" \
-    bash -c 'grep -B2 "_sandy_policy_dir=" "$1" | grep -q "_sandy_agent_has claude.*SANDY_SKIP_PERMISSIONS"' -- "$_S111"
+# Run, not grepped, in §210(3) and (6).
+check "§111(5) the suppression is gated on claude AND skip-permissions (mutation: writing it unconditionally would suppress the prompt even when the user deliberately turned skip off)" \
+    bash -c 'awk "/^# BEGIN claude policy settings/,/^# END claude policy settings/" "$1" | grep -A1 "^if _sandy_agent_has claude; then" | grep -q "SANDY_SKIP_PERMISSIONS:-true}\" = \"true\" ] && _sandy_policy_skip=true"' -- "$_S111"
 unset _S111
 
 echo ""
@@ -25014,6 +25016,98 @@ unset _S209_D _S209_PAR _S209_SEEN _s209_b _s209_j _s209_a _s209_c _S209_LIB _S2
 unset _S209_O1 _S209_O2 _S209_O3 _S209_O4 _S209_O5 _S209_O6 _S209_O7 _S209_O8 _S209_O9 _S209_O10 _S209_OX _S209_C1 _S209_C2 _S209_C3 _S209_C4 _S209_C5 _S209_C6
 unset _S209_R1 _S209_R2 _S209_R3 _S209_R4 _S209_R5 _S209_R6
 unset -f _s209_mk _s209_m _s209_host _s209_run
+
+
+echo ""
+echo "§210: SANDY_CLAUDE_ACTIVITY — the turn state of each Claude session, recorded by hooks in the policy settings"
+# ============================================================
+# The helper is run for real by test/test_claude_activity.py (extracted from
+# the Dockerfile.base heredoc, fed payloads shaped like a measured 2.1.310 TUI
+# run). Here: the host half, by running the real policy-settings block of sandy and
+# its stale-image block under stubs, and the hook command as Claude Code runs it.
+_S210_D="$(cd "$(mktemp -d)" && pwd -P)"
+check "§210(1) sandy-claude-activity behaves as specified: states, seq, subagent ids, prune, retention, no stdout, no write through a link, no lost update (test/test_claude_activity.py)" \
+    env SANDY_SCRIPT="$SANDY_SCRIPT" python3 "$(dirname "$0")/test_claude_activity.py"
+
+_S210_BLK="$(awk '/^# BEGIN claude policy settings/,/^# END claude policy settings/' "$SANDY_SCRIPT")"
+# _s210_pol <has-claude 0|1> <SANDY_SKIP_PERMISSIONS> <SANDY_CLAUDE_ACTIVITY> -> "<run flags>|<info lines>", file in $_S210_D/<case>/
+_s210_pol() {
+    local d="$_S210_D/p-$1-$2-$3"
+    mkdir -p "$d/sb"
+    HAS="$1" D="$d" SANDY_SKIP_PERMISSIONS="$2" SANDY_CLAUDE_ACTIVITY="$3" bash -c '
+        set -euo pipefail
+        _sandy_agent_has(){ [ "$HAS" = 1 ]; }; info(){ echo "INFO: $*"; }
+        SANDBOX_DIR="$D/sb"; _sandy_launch_id=L1
+        _sandy_launch_dir(){ printf "%s/launch/%s" "$SANDBOX_DIR" "$_sandy_launch_id"; }
+        RUN_FLAGS=(); SANDY_VERBOSE=0
+        eval "$1"
+        printf "%s|" "${RUN_FLAGS[*]:-}"' _ "$_S210_BLK" 2>&1 | tr '\n' ' '
+}
+_S210_P1="$(_s210_pol 1 true 1)"
+_S210_P2="$(_s210_pol 1 false 1)"
+_S210_P3="$(_s210_pol 1 true 0)"
+_S210_P4="$(_s210_pol 1 false 0)"
+_S210_P5="$(_s210_pol 0 true 1)"
+_S210_F1="$_S210_D/p-1-true-1/sb/launch/L1/claude-policy/managed-settings.json"
+_S210_F2="$_S210_D/p-1-false-1/sb/launch/L1/claude-policy/managed-settings.json"
+_S210_F3="$_S210_D/p-1-true-0/sb/launch/L1/claude-policy/managed-settings.json"
+check "§210(pre) the policy-settings block was extracted and ran (mutation: rename its markers and every check below goes vacuous; got: $_S210_P1)" \
+    bash -c 'printf "%s" "$1" | grep -q "sandy-claude-activity" && [ -s "$2" ]' _ "$_S210_BLK" "$_S210_F1"
+_S210_EV="SessionStart UserPromptSubmit PreToolUse PostToolUse Notification Stop StopFailure SubagentStart SubagentStop SessionEnd"
+if command -v jq >/dev/null 2>&1; then
+    check "§210(2) activity on: every measured hook event runs sandy-claude-activity, matching everything, with a timeout (mutation: drop Notification and an interrupted permission prompt reads as working forever)" \
+        bash -c 'for e in $2; do jq -e --arg e "$e" ".hooks[\$e][0].matcher == \"*\" and (.hooks[\$e][0].hooks[0].command | test(\"^/usr/local/bin/sandy-claude-activity \")) and (.hooks[\$e][0].hooks[0].timeout | numbers)" "$1" >/dev/null || exit 1; done; [ "$(jq ".hooks | length" "$1")" = 10 ]' _ "$_S210_F1" "$_S210_EV"
+    check "§210(3) the hooks are written whether or not skip-permissions is on, and skipAutoPermissionPrompt only when it is (mutation: hanging the hooks off the old skip-permissions gate drops them for every user who turned skip off)" \
+        bash -c 'jq -e ".skipAutoPermissionPrompt == true and (.hooks | length) == 10" "$1" >/dev/null && jq -e "(has(\"skipAutoPermissionPrompt\") | not) and (.hooks | length) == 10" "$2" >/dev/null' _ "$_S210_F1" "$_S210_F2"
+    check "§210(4) SANDY_CLAUDE_ACTIVITY=0 writes no hooks and says so, and the auto-mode suppression stays (got: $_S210_P3)" \
+        bash -c 'jq -e "has(\"hooks\") | not" "$1" >/dev/null && jq -e ".skipAutoPermissionPrompt == true" "$1" >/dev/null && case "$2" in *"INFO: SANDY_CLAUDE_ACTIVITY=0"*) ;; *) exit 1 ;; esac' _ "$_S210_F3" "$_S210_P3"
+else
+    skip "§210(2)-(4) policy-settings JSON checks need jq on the host"
+fi
+check "§210(5) the policy file is mounted read-only from THIS launch's own directory (mutation: :rw lets the agent unregister its hooks; a fixed path is rewritten in place under a container that read it, #400; got: $_S210_P1)" \
+    bash -c 'case "$1" in *"-v $2/p-1-true-1/sb/launch/L1/claude-policy:/etc/claude-code:ro|"*) ;; *) exit 1 ;; esac' _ "$_S210_P1" "$_S210_D"
+check "§210(6) no policy file and no mount when neither needs one, or when claude is not in the launch (got: $_S210_P4 / $_S210_P5)" \
+    bash -c 'for o in "$1" "$2"; do case "$o" in *"|"*) ;; *) exit 1 ;; esac; case "$o" in *claude-code*) exit 1 ;; esac; done; [ ! -e "$3/p-1-false-0/sb/launch" ] && [ ! -e "$3/p-0-true-1/sb/launch" ]' _ "$_S210_P4" "$_S210_P5" "$_S210_D"
+
+# The hook command, run the way Claude Code runs it (sh -c), on an image with no
+# helper: it must exit 0 and print nothing. A non-zero PreToolUse hook can block
+# the tool, and UserPromptSubmit stdout is added to the prompt.
+if command -v jq >/dev/null 2>&1; then
+    _S210_CMD="$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$_S210_F1")"
+    _S210_HC="$(printf '{}' | env -i PATH=/usr/bin:/bin sh -c "$_S210_CMD" 2>&1; echo "RC=$?")"
+    check "§210(7) with the helper missing (an image predating it) the hook command exits 0 and prints nothing (mutation: drop the exit 0 and every tool call errors on a stale image; got: $_S210_HC)" \
+        bash -c '[ "$1" = "RC=0" ]' _ "$_S210_HC"
+else
+    skip "§210(7) hook-command check needs jq on the host"
+fi
+
+# Stale image: the label lives in Dockerfile.base beside the helper, so every
+# agent image built FROM it inherits it.
+_S210_SB="$(awk '/^# --- BEGIN stale-image activity warning/,/^# --- END stale-image activity warning/' "$SANDY_SCRIPT")"
+mkdir -p "$_S210_D/dk"
+_s210_stale() {   # <label value> <_sandy_policy_act>
+    printf '#!/bin/sh\necho called >> "%s/dk/calls"\nprintf "%%s\\n" "%s"\n' "$_S210_D" "$1" > "$_S210_D/dk/docker"
+    chmod +x "$_S210_D/dk/docker"; rm -f "$_S210_D/dk/calls"
+    PATH="$_S210_D/dk:$PATH" bash -c '
+        set -euo pipefail
+        warn(){ echo "WARN: $*"; }
+        IMAGE_NAME=sandy-claude; _sandy_policy_act="$2"
+        eval "$1"; echo RC=0' _ "$_S210_SB" "$2" 2>&1 | tr '\n' '|'
+    [ -f "$_S210_D/dk/calls" ] && printf 'DOCKER' || printf 'NODOCKER'
+}
+_S210_S1="$(_s210_stale "" true)"
+_S210_S2="$(_s210_stale 1 true)"
+_S210_S3="$(_s210_stale "" false)"
+check "§210(8) an image without the sandy.claude_activity label warns that nothing will be recorded and still launches; with the label, or with the record off, it is silent (got: $_S210_S1 / $_S210_S2 / $_S210_S3)" \
+    bash -c 'case "$1" in *"predates SANDY_CLAUDE_ACTIVITY"*"RC=0|DOCKER") ;; *) exit 1 ;; esac; [ "$2" = "RC=0|DOCKER" ] && [ "$3" = "RC=0|NODOCKER" ]' _ "$_S210_S1" "$_S210_S2" "$_S210_S3"
+_S210_BASE="$(awk "/<<'DOCKERFILE_BASE'\$/{f=1;next} f&&/^DOCKERFILE_BASE\$/{exit} f" "$SANDY_SCRIPT")"
+check "§210(9) Dockerfile.base installs the helper and carries the label the launch checks (mutation: a label on one agent image only lets the others warn forever, or never)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "LABEL sandy.claude_activity=1" && printf "%s\n" "$1" | grep -q "^RUN cat > /usr/local/bin/sandy-claude-activity <<.CLAUDE_ACTIVITY_HELPER."' _ "$_S210_BASE"
+check "§210(10) SANDY_CLAUDE_ACTIVITY is a passive key with a metadata row (a repo turning its own record off needs no prompt; it is a sandbox-local record, not isolation)" \
+    bash -c 'grep -qx "    SANDY_CLAUDE_ACTIVITY" "$1" && grep -q "^SANDY_CLAUDE_ACTIVITY|bool|1|" "$1"' _ "$SANDY_SCRIPT"
+rm -rf "$_S210_D"
+unset _S210_D _S210_BLK _S210_P1 _S210_P2 _S210_P3 _S210_P4 _S210_P5 _S210_F1 _S210_F2 _S210_F3 _S210_EV _S210_CMD _S210_HC _S210_SB _S210_S1 _S210_S2 _S210_S3 _S210_BASE
+unset -f _s210_pol _s210_stale
 
 
 # BEGIN SUMMARY

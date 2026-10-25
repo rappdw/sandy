@@ -1329,6 +1329,33 @@ if [ "$HAS_CLAUDE" = true ]; then
         else
             fail "claude sandbox has no gemini/ or codex/ subdirs"
         fi
+
+        # SANDY_CLAUDE_ACTIVITY (default on): the hooks live in the POLICY
+        # settings, which no in-sandbox test can exercise (/etc/claude-code is
+        # mounted read-only there). This launch is the proof that Claude Code
+        # runs them: one session went working, then idle, in this sandbox.
+        _act_res="$(python3 - "$SANDBOX_DIR" <<'PY'
+import json, os, sys
+d = os.path.join(sys.argv[1], "claude", "activity")
+try:
+    names = sorted(n for n in os.listdir(d) if n.startswith("activity-") and n.endswith(".jsonl"))
+    lines = [json.loads(x) for n in names for x in open(os.path.join(d, n)) if x.strip()]
+except (OSError, ValueError) as e:
+    print("unreadable: %s" % e); sys.exit(0)
+for sid in {l.get("session_id") for l in lines}:
+    seq = [(l.get("event"), l.get("state")) for l in lines if l.get("session_id") == sid]
+    if ("UserPromptSubmit", "working") in seq and ("Stop", "idle") in seq[seq.index(("UserPromptSubmit", "working")):]:
+        if lines[-1].get("sandbox") == os.path.basename(sys.argv[1].rstrip("/")):
+            print("ok"); sys.exit(0)
+print("no session went working then idle: %s" % [(l.get("event"), l.get("state"), l.get("sandbox")) for l in lines][-8:])
+PY
+)"
+        if [ "$_act_res" = ok ]; then
+            pass "claude/activity/ records the headless turn (working, then idle) via the policy-settings hooks"
+        else
+            fail "claude/activity/ records the headless turn (working, then idle) via the policy-settings hooks"
+            echo "    ($_act_res)" >&2
+        fi
     else
         skip "sandbox layout checks (claude session failed)"
     fi
