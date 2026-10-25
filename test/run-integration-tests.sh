@@ -449,6 +449,40 @@ resolve_sandbox() {
     fi
 }
 
+# Codex 0.164.0 exec fires hooks. A fresh sandbox with no user hook trust
+# bypass proves managed registration, not merely that the helper can run.
+check_codex_activity() {
+    local result
+    result="$(python3 - "$SANDBOX_DIR" <<'PYACT'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+try:
+    rows = [json.loads(line) for f in sorted((root / 'codex/activity').glob('activity-*.jsonl'))
+            for line in f.read_text().splitlines()]
+    assert rows, 'no activity records'
+    assert all(r['v'] == 1 and r['agent'] == 'codex' and r['session_name'] is None
+               and r['sandbox'] == root.name for r in rows), 'wrong record identity'
+    for sid in {r['session_id'] for r in rows}:
+        events = [(r['event'], r['state']) for r in rows if r['session_id'] == sid]
+        if ('UserPromptSubmit', 'working') in events:
+            tail = events[events.index(('UserPromptSubmit', 'working')) + 1:]
+            if ('Stop', 'idle') in tail and ('SessionEnd', 'ended') in tail:
+                print('ok'); break
+    else:
+        raise AssertionError('no completed turn: %s' % [(r['event'], r['state']) for r in rows])
+except (OSError, ValueError, KeyError, AssertionError) as e:
+    print(str(e))
+PYACT
+)"
+    if [ "$result" = ok ]; then
+        pass "codex/activity/ records working, idle and ended through managed hooks without user hook trust"
+    else
+        fail "codex/activity/ records working, idle and ended through managed hooks without user hook trust"
+        echo "    ($result)" >&2
+    fi
+}
+
 # Ensure a sandy image is built. Uses `sandy --build-only` which builds the
 # image(s) for the given SANDY_AGENT and exits before any container runs — no
 # credentials required. Returns 0 if the image exists (either already or after
@@ -1078,6 +1112,7 @@ if [ "$HAS_OPENAI_API_KEY" = true ]; then
     fi
 
     resolve_sandbox
+    if _headless_answer "$_headless_rc" pineapple "$_out"; then check_codex_activity; fi
 
     if [ -n "$SANDBOX_DIR" ] && [ -d "$SANDBOX_DIR" ]; then
         # Config.toml seeding
@@ -1506,6 +1541,7 @@ if [ "$HAS_CODEX_OAUTH" = true ]; then
     fi
 
     resolve_sandbox
+    if _headless_answer "$_headless_rc" test "$_out"; then check_codex_activity; fi
 else
     skip "codex OAuth read-only mount (no ~/.codex/auth.json)"
 fi

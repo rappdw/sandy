@@ -592,6 +592,29 @@ SANDY_SSH=agent SANDY_EGRESS_PROXY=1 \
 
 ---
 
+# Codex session activity (2.9.0, PR #488)
+
+These checks require the **host**. Never run the Docker or Sandy lifecycle commands inside an existing Sandy sandbox.
+
+```sh
+SANDY_AGENT=codex bash ./sandy --rebuild --build-only
+bash test/run-tests.sh
+SANDY_INTEG_ONLY=2,7,9 bash test/run-integration-tests.sh
+```
+
+Sections 2 and 9 cover API-key and OAuth Codex launches, respectively; a missing credential skips that path. After a successful answer, each requires a managed-hook history containing working → idle → ended with `agent: codex`, a null `session_name`, and the correct sandbox identity. Section 7 checks Claude's unchanged policy hooks. No Codex user-hook trust bypass is passed.
+
+Additional acceptance in a disposable, fresh Codex workspace:
+
+- Launch the TUI with `SANDY_AGENT=codex bash /path/to/sandy`. Confirm it reaches the input prompt without a hook trust review. Ask for a shell command, then ask for a long-running command and press Esc. The sandbox's `codex/activity/` history should record `Interrupt` as `idle`. A subagent turn should raise and then lower `subagents_active` on the parent's session.
+- Compare `/status` and the selected model with activity enabled and disabled (`SANDY_CODEX_ACTIVITY=0`). The hooks-only requirements must leave approval policy, sandbox mode and model unchanged. Repeat with `SANDY_SKIP_PERMISSIONS=false` to exercise the non-default approval choice.
+- Relaunch with `SANDY_AGENT_ARGS='-c features.hooks=false'`: expect an activity warning, a usable agent, and no new activity rows. Repeat with `[features] hooks = false` in that disposable sandbox's Codex config. This checks the managed layer respects the operator's feature setting.
+- On the host, run a fresh Codex daemon with `--start`, attach with `--attach`, confirm it is usable without a hook-trust review, then use `--stop`. Repeat through a configured `agent_wrapper` that execs its arguments. Do not mark daemon readiness as passed merely because the container exists.
+
+The bare Codex 0.164.0 PTY/exec probes have already established event order and user-layer feature-off/wrapper behavior. The checks above establish the managed mount and its effective configuration; their results must be recorded separately.
+
+---
+
 # Cleanup
 
 ```sh
