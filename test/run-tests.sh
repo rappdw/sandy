@@ -25118,6 +25118,57 @@ check "§211 shared activity bytes, Codex events, gates, fresh read-only require
     env SANDY_SCRIPT="$SANDY_SCRIPT" python3 "$(dirname "$0")/test_codex_activity.py"
 
 
+echo ""
+echo "§212: a second signal during teardown resumes it instead of abandoning it"
+# ============================================================
+# A failed --start signals the supervisor and an immediate --stop signals it
+# again. _sandy_on_signal used to run cleanup (a no-op once its guard is set)
+# and exit, abandoning the first teardown before its docker rm -f, so under
+# --restart unless-stopped the container lived on: the nightly's "--stop
+# cleans it up" failure. Asserted on sandy's REAL cleanup() and handler, with
+# a docker stub whose container removal is slow enough to land the second
+# TERM inside it.
+_S212_D="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$_S212_D/bin"
+cat > "$_S212_D/bin/docker" <<'S212_DOCKER'
+#!/bin/sh
+echo "docker $*" >> "$S212_LOG"
+case "$1 $2" in "rm -f") echo "rm-start" >> "$S212_LOG"; sleep 2; echo "rm-done" >> "$S212_LOG" ;; esac
+exit 0
+S212_DOCKER
+chmod +x "$_S212_D/bin/docker"
+{
+    for _s212_f in $(awk '/^cleanup\(\) \{/{f=1} f; f&&/^}/{exit}' "$SANDY_SCRIPT" | grep -o -E '_sandy_[a-z_]+' | sort -u); do
+        [ "$_s212_f" = _sandy_release_lock ] && continue
+        echo "$_s212_f() { :; }"
+    done
+    echo '_sandy_release_lock() { echo lock-released >> "$S212_LOG"; }'
+    awk '/^cleanup\(\) \{/{f=1} f; f&&/^}/{exit}' "$SANDY_SCRIPT"
+    awk "/^_sandy_on_signal\\(\\) \\{/{f=1} f; f&&/^trap '_sandy_on_signal 143' TERM\$/{exit}" "$SANDY_SCRIPT"
+    echo 'CONTAINER_NAME=c212; NETWORK_NAME=n212'
+    echo 'echo ready >> "$S212_LOG"'
+    echo 'while :; do sleep 30 & wait $!; done'
+} > "$_S212_D/prog.sh"
+check "§212(pre) sandy's cleanup() and its signal handler were extracted (mutation: rename either and the check below goes vacuous)" \
+    bash -c 'grep -q "^cleanup() {" "$1" && grep -q "^_sandy_on_signal() {" "$1" && grep -q "_sandy_on_signal 143" "$1"' _ "$_S212_D/prog.sh"
+_S212_LOG="$_S212_D/log"
+: > "$_S212_LOG"
+_S212_RC="$(
+    S212_LOG="$_S212_LOG" PATH="$_S212_D/bin:$PATH" bash "$_S212_D/prog.sh" </dev/null >/dev/null 2>&1 &
+    _p=$!
+    _i=0; until grep -q ready "$_S212_LOG" 2>/dev/null || [ $_i -ge 100 ]; do sleep 0.1; _i=$((_i + 1)); done
+    kill -TERM "$_p" 2>/dev/null
+    _i=0; until grep -q rm-start "$_S212_LOG" 2>/dev/null || [ $_i -ge 100 ]; do sleep 0.1; _i=$((_i + 1)); done
+    kill -TERM "$_p" 2>/dev/null
+    _rc=0; wait "$_p" || _rc=$?
+    echo "$_rc"
+)"
+_S212_GOT="$(tr '\n' '|' < "$_S212_LOG")"
+check "§212(1) a second TERM landing inside the container removal lets the teardown finish: container removed, network removed, lock released, exit 143 (mutation: drop the _SANDY_CLEANED early return in _sandy_on_signal and the network and lock steps never run; got rc=$_S212_RC: $_S212_GOT)" \
+    bash -c 'case "$2" in *"rm-start|rm-done|"*"docker network rm n212|"*"lock-released|"*) ;; *) exit 1 ;; esac; [ "$1" = 143 ]' _ "$_S212_RC" "$_S212_GOT"
+rm -rf "$_S212_D"
+unset _S212_D _S212_LOG _S212_RC _S212_GOT _s212_f
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary

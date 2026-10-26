@@ -486,16 +486,22 @@ ck "the payload EXISTS in the container (premise: a missing path fails a write f
 # for the wrong reason -- three of these reported PASS against an empty id on
 # the first real run of this phase, while the premise check correctly failed.
 # A phase whose premise is red must not report green assertions beneath it.
-_g_uid="$(docker exec "$CG" id -u 2>/dev/null || echo 0)"
-_g_err="$([ -n "$CG" ] && docker exec "$CG" sh -c 'echo pwned > /opt/sandy/features/acc-erofs/thing' 2>&1 || echo "NO-CONTAINER")"
+# As the HOST uid, which is the uid the agent runs as after the entrypoint's
+# gosu drop and the owner of the payload file on a Linux host. A bare `docker
+# exec` is ROOT (no --user on the container), and root owns nothing here: on
+# Linux the ownership check then compared 0 with the runner's uid and failed
+# on every nightly that ran, while the write checks only showed that root
+# cannot write a read-only mount.
+_g_uid="$(id -u)"; _g_gid="$(id -g)"
+_g_err="$([ -n "$CG" ] && docker exec -u "$_g_uid:$_g_gid" "$CG" sh -c 'echo pwned > /opt/sandy/features/acc-erofs/thing' 2>&1 || echo "NO-CONTAINER")"
 ck "a write to the :ro payload FAILS from inside the container" \
-   "[ -n \"$CG\" ] && ! docker exec \"$CG\" sh -c 'echo pwned > /opt/sandy/features/acc-erofs/thing' 2>/dev/null"
+   "[ -n \"$CG\" ] && ! docker exec -u \"$_g_uid:$_g_gid\" \"$CG\" sh -c 'echo pwned > /opt/sandy/features/acc-erofs/thing' 2>/dev/null"
 ck "...and fails with a READ-ONLY FILE SYSTEM error, not a permission error -- proving the MOUNT is the boundary, not the bits (got: $_g_err)" \
    "[ -n \"$CG\" ] && printf '%s' \"$_g_err\" | grep -qi 'read-only'"
 ck "...the file is still owned by the container user, so bits alone would NOT have stopped it (this is what makes the check above meaningful)" \
-   "[ -n \"$CG\" ] && [ \"\$(docker exec \"$CG\" stat -c %u /opt/sandy/features/acc-erofs/thing 2>/dev/null)\" = \"$_g_uid\" ]"
+   "[ -n \"$CG\" ] && [ \"\$(docker exec -u \"$_g_uid:$_g_gid\" \"$CG\" stat -c %u /opt/sandy/features/acc-erofs/thing 2>/dev/null)\" = \"$_g_uid\" ]"
 ck "creating a NEW file in the payload also fails (the whole directory is :ro, not just the file)" \
-   "[ -n \"$CG\" ] && ! docker exec \"$CG\" sh -c 'touch /opt/sandy/features/acc-erofs/evil' 2>/dev/null"
+   "[ -n \"$CG\" ] && ! docker exec -u \"$_g_uid:$_g_gid\" \"$CG\" sh -c 'touch /opt/sandy/features/acc-erofs/evil' 2>/dev/null"
 ck "the payload is unchanged on the host after the attempt" \
    "[ -n \"$CG\" ] && grep -q 'payload-seen' \"$_G_FEAT/payload/thing\""
 "$SANDY" --stop --workspace "$WS" >/dev/null 2>&1 || true
