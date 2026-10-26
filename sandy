@@ -18177,7 +18177,15 @@ cleanup() {
 # it can't double-run, and exit 128+signum. The re-entrancy guard in cleanup is
 # the backstop. This fixes the old bug where cleanup never exited, so bash
 # resumed the script in a torn-down state after a signal (issue #14).
-_sandy_on_signal() { cleanup; trap - EXIT; exit "$1"; }
+#
+# A signal that lands while a teardown is already running must NOT exit: the
+# guard makes this cleanup a no-op, so exiting here would abandon the first
+# teardown partway, before its `docker rm -f`. Under --restart unless-stopped
+# that container then restarts forever with nobody watching it. A failed
+# --start signals the supervisor and an immediate --stop signals it again,
+# which is how the nightly's "--stop cleans it up" check failed. Returning
+# resumes the interrupted teardown, and the first handler exits when it ends.
+_sandy_on_signal() { [ -n "${_SANDY_CLEANED:-}" ] && return 0; cleanup; trap - EXIT; exit "$1"; }
 trap 'rc=$?; cleanup; exit $rc' EXIT
 trap '_sandy_on_signal 130' INT
 trap '_sandy_on_signal 143' TERM
