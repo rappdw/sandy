@@ -5602,6 +5602,11 @@ _sandy_rsy_path_ok() { printf '%s' "$1" | grep -qE '^/[A-Za-z0-9._/@+-]+$'; }
 _SANDY_RSY_NEVER=(sandy-session.json gemini-system-settings.json relay-state/ feature-state/
                   agent-args-composed/ launch/ proxy.log .protected-existed-at-launch claude/sessions/)
 _SANDY_RSY_ARCH_DIRS=(cargo go npm-global pip uv venv)
+# Non-interactive transport for every --rsync / --rsync-from transfer. -T on the
+# command line overrides a host's `RequestTTY yes` in ssh_config, which would
+# otherwise print "Pseudo-terminal will not be allocated" once per transfer.
+# A caller's RSYNC_RSH (e.g. a port) is kept; -T is appended to it.
+_SANDY_RSYNC_RSH="${RSYNC_RSH:-ssh} -T"
 # Credential-bearing files, named in the plan (#374 decision 2). Matched BY
 # NAME, so the plan says so: anything else in these directories is copied too.
 _SANDY_RSY_CRED_DIRS=(codex grok gemini opencode mirror)
@@ -5806,7 +5811,7 @@ exit 0
 PROBE
     } > "$_rsy_tmp/probe.sh"
     info "Probing ${_rsy_host}…"
-    if ! ssh "$_rsy_host" sh -s < "$_rsy_tmp/probe.sh" > "$_rsy_tmp/probe.out" 2>"$_rsy_tmp/probe.err"; then
+    if ! ssh -T "$_rsy_host" sh -s < "$_rsy_tmp/probe.sh" > "$_rsy_tmp/probe.out" 2>"$_rsy_tmp/probe.err"; then
         error "--rsync: could not reach $_rsy_host over ssh:"
         sed 's/^/    /' "$_rsy_tmp/probe.err" >&2
         exit 1
@@ -5846,7 +5851,7 @@ PROBE
 
     # Never overwrite a sandbox that already exists there: it may be the one
     # in use on that host, and a copy over it is a silent merge of two histories.
-    if ssh "$_rsy_host" "test -e $_rsy_ddir || test -e $_rsy_ddir.claude.json" </dev/null 2>/dev/null; then
+    if ssh -T "$_rsy_host" "test -e $_rsy_ddir || test -e $_rsy_ddir.claude.json" </dev/null 2>/dev/null; then
         error "--rsync: $_rsy_host already has a sandbox for that workspace: $_rsy_ddir"
         error "Nothing was copied. If it is disposable, remove it there first:"
         error "  ssh $_rsy_host sandy --remove-sandbox --workspace $_rsy_dwd"
@@ -5931,12 +5936,15 @@ PROBE
 
     # A 2.x sandbox under a 1.x sandy is the #248 breakage (the container home
     # moved in 2.0) with no floor to catch it from that side.
-    _rsy_cmaj="$(cut -d. -f1 < "$_rsy_src/.sandy_created_version" 2>/dev/null || true)"
+    _rsy_cmaj="$(cut -d. -f1 "$_rsy_src/.sandy_created_version" 2>/dev/null || true)"
     _rsy_dmaj="${_rsy_dver%%.*}"
     if [ -n "$_rsy_cmaj" ] && [ -n "$_rsy_dmaj" ] && [ "$_rsy_dmaj" -eq "$_rsy_dmaj" ] 2>/dev/null \
        && [ "$_rsy_cmaj" -eq "$_rsy_cmaj" ] 2>/dev/null && [ "$_rsy_dmaj" -lt "$_rsy_cmaj" ]; then
         error "--rsync: this sandbox was created by sandy $_rsy_cmaj.x; $_rsy_host runs sandy $_rsy_dver. Upgrade sandy there first."
         exit 1
+    fi
+    if [ -z "$_rsy_cmaj" ]; then
+        warn "--rsync: this sandbox has no .sandy_created_version, so the sandy major-version check against $_rsy_host is skipped."
     fi
 
     if [ "$_rsy_dry" = true ]; then
@@ -5964,26 +5972,26 @@ PROBE
     fi
 
     info "Copying to ${_rsy_host}…"
-    ssh "$_rsy_host" "mkdir -p $_rsy_dsandy_home/sandboxes" </dev/null \
+    ssh -T "$_rsy_host" "mkdir -p $_rsy_dsandy_home/sandboxes" </dev/null \
         || { error "--rsync: could not create $_rsy_dsandy_home/sandboxes on $_rsy_host."; exit 1; }
-    rsync -a "${_rsy_excl[@]}" "$_rsy_src/" "$_rsy_host:$_rsy_ddir/" \
+    rsync -a -e "$_SANDY_RSYNC_RSH" "${_rsy_excl[@]}" "$_rsy_src/" "$_rsy_host:$_rsy_ddir/" \
         || { error "--rsync: rsync failed; $_rsy_host may hold a partial copy at $_rsy_ddir."; exit 1; }
     if [ -n "$_rsy_oldp" ]; then
-        rsync -a "$_rsy_src/claude/projects/$_rsy_oldp/" "$_rsy_host:$_rsy_ddir/claude/projects/$_rsy_newp/" \
+        rsync -a -e "$_SANDY_RSYNC_RSH" "$_rsy_src/claude/projects/$_rsy_oldp/" "$_rsy_host:$_rsy_ddir/claude/projects/$_rsy_newp/" \
             || { error "--rsync: copying session history failed."; exit 1; }
     fi
     if [ -f "$_rsy_tmp/WORKSPACE.json" ]; then
-        rsync -a "$_rsy_tmp/WORKSPACE.json" "$_rsy_host:$_rsy_ddir/WORKSPACE.json" \
+        rsync -a -e "$_SANDY_RSYNC_RSH" "$_rsy_tmp/WORKSPACE.json" "$_rsy_host:$_rsy_ddir/WORKSPACE.json" \
             || { error "--rsync: copying WORKSPACE.json failed."; exit 1; }
     fi
     if [ -f "$_rsy_tmp/claude.json" ]; then
-        rsync -a "$_rsy_tmp/claude.json" "$_rsy_host:$_rsy_ddir.claude.json" \
+        rsync -a -e "$_SANDY_RSYNC_RSH" "$_rsy_tmp/claude.json" "$_rsy_host:$_rsy_ddir.claude.json" \
             || { error "--rsync: copying .claude.json failed."; exit 1; }
     fi
 
     # C1: exit 0 only when the goal state holds, so check it rather than trust
     # the transfers' exit codes.
-    if ! ssh "$_rsy_host" "test -d $_rsy_ddir && test -f $_rsy_ddir/WORKSPACE.json" </dev/null 2>/dev/null; then
+    if ! ssh -T "$_rsy_host" "test -d $_rsy_ddir && test -f $_rsy_ddir/WORKSPACE.json" </dev/null 2>/dev/null; then
         error "--rsync: the copy did not verify on $_rsy_host ($_rsy_ddir)."
         exit 1
     fi
@@ -6082,7 +6090,7 @@ exit 0
 PROBE
     } > "$_rsf_tmp/probe.sh"
     info "Probing ${_rsf_host}…"
-    if ! ssh "$_rsf_host" sh -s < "$_rsf_tmp/probe.sh" > "$_rsf_tmp/probe.out" 2>"$_rsf_tmp/probe.err"; then
+    if ! ssh -T "$_rsf_host" sh -s < "$_rsf_tmp/probe.sh" > "$_rsf_tmp/probe.out" 2>"$_rsf_tmp/probe.err"; then
         error "--rsync-from: could not reach $_rsf_host over ssh:"
         sed 's/^/    /' "$_rsf_tmp/probe.err" >&2
         exit 1
@@ -6144,7 +6152,7 @@ DETAIL
         printf '{ %s; } | while IFS= read -r c; do echo "cred=${c#"$SDIR"/}"; done\n' "$(_sandy_rsy_cred_find_sh "$_rsf_sdir")"
         echo 'exit 0'
     } > "$_rsf_tmp/detail.sh"
-    if ! ssh "$_rsf_host" sh -s < "$_rsf_tmp/detail.sh" > "$_rsf_tmp/detail.out" 2>"$_rsf_tmp/detail.err"; then
+    if ! ssh -T "$_rsf_host" sh -s < "$_rsf_tmp/detail.sh" > "$_rsf_tmp/detail.out" 2>"$_rsf_tmp/detail.err"; then
         error "--rsync-from: could not inspect the source sandbox on $_rsf_host:"
         sed 's/^/    /' "$_rsf_tmp/detail.err" >&2
         exit 1
@@ -6261,20 +6269,20 @@ DETAIL
     _rsf_stage="$SANDY_HOME/sandboxes/.rsync-from.$_rsf_dname.$$"
     rm -rf "$_rsf_stage"
     info "Copying from ${_rsf_host}…"
-    rsync -a "${_rsf_excl[@]}" "$_rsf_host:$_rsf_sdir/" "$_rsf_stage/" \
+    rsync -a -e "$_SANDY_RSYNC_RSH" "${_rsf_excl[@]}" "$_rsf_host:$_rsf_sdir/" "$_rsf_stage/" \
         || { error "--rsync-from: rsync failed; nothing was installed here."; exit 1; }
     if [ -n "$_rsf_oldp" ]; then
-        rsync -a "$_rsf_host:$_rsf_sdir/claude/projects/$_rsf_oldp/" "$_rsf_stage/claude/projects/$_rsf_newp/" \
+        rsync -a -e "$_SANDY_RSYNC_RSH" "$_rsf_host:$_rsf_sdir/claude/projects/$_rsf_oldp/" "$_rsf_stage/claude/projects/$_rsf_newp/" \
             || { error "--rsync-from: copying session history failed; nothing was installed here."; exit 1; }
     fi
     if [ "$_rsf_haswsj" = yes ]; then
-        rsync -a "$_rsf_host:$_rsf_sdir/WORKSPACE.json" "$_rsf_tmp/WORKSPACE.src.json" \
+        rsync -a -e "$_SANDY_RSYNC_RSH" "$_rsf_host:$_rsf_sdir/WORKSPACE.json" "$_rsf_tmp/WORKSPACE.src.json" \
             || { error "--rsync-from: copying WORKSPACE.json failed; nothing was installed here."; exit 1; }
         _sandy_rsy_ws_rewrite "$_rsf_tmp/WORKSPACE.src.json" "$_rsf_stage/WORKSPACE.json" "$_rsf_dname" "$_rsf_wd"
     fi
     if [ -n "$_rsf_hascj" ]; then
         if [ "$_rsf_hascj" = in ]; then _rsf_cjrem="$_rsf_sdir/claude/.claude.json"; else _rsf_cjrem="$_rsf_sdir.claude.json"; fi
-        rsync -a "$_rsf_host:$_rsf_cjrem" "$_rsf_tmp/claude.src.json" \
+        rsync -a -e "$_SANDY_RSYNC_RSH" "$_rsf_host:$_rsf_cjrem" "$_rsf_tmp/claude.src.json" \
             || { error "--rsync-from: copying .claude.json failed; nothing was installed here."; exit 1; }
         mkdir -p "$_rsf_stage/claude"
         _sandy_rsy_cj_rewrite "$_rsf_tmp/claude.src.json" "$_rsf_stage/claude/.claude.json" "$_rsf_scws" "$_rsf_dcws" \
