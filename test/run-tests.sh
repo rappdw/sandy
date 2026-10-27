@@ -15932,6 +15932,10 @@ else
 mkdir -p "$_S154_DIR/bin"
 cat > "$_S154_DIR/bin/ssh" <<'STUB'
 #!/bin/bash
+# Every sandy ssh is non-interactive, so it must pass -T (which overrides a
+# host's `RequestTTY yes`); refusing otherwise makes each happy-path check prove it.
+if [ "${1:-}" != -T ]; then echo "ssh stub: call without -T: $*" >&2; exit 97; fi
+shift
 host="$1"; shift
 echo "$host" >> "${SSH_STUB_LOG:-/dev/null}"
 if [ "$1" = sh ] && [ "$2" = -s ]; then exec env -u SANDY_HOME HOME="$REMOTE_HOME" FAKE_REMOTE=1 sh -s; fi
@@ -15940,12 +15944,17 @@ STUB
 cat > "$_S154_DIR/bin/rsync" <<'STUB'
 #!/usr/bin/env python3
 import os, sys, shutil
-ex, paths = [], []
-for a in sys.argv[1:]:
+ex, paths, rsh = [], [], None
+args = sys.argv[1:]
+while args:
+    a = args.pop(0)
+    if a == "-e": rsh = args.pop(0); continue
     if a == "-a": continue
     if a.startswith("--exclude="): ex.append(a[len("--exclude="):]); continue
     if a.startswith("-"): sys.exit("rsync stub: unsupported flag " + a)
     paths.append(a)
+if rsh is None or not rsh.endswith(" -T"): sys.exit("rsync stub: transport without -T: %r" % rsh)
+with open(os.environ.get("RSYNC_STUB_LOG", os.devnull), "a") as f: f.write(rsh + "\n")
 src, dst = paths
 def strip(p): return p.split(":", 1)[1] if (":" in p and not p.startswith("/")) else p
 src, dst = strip(src), strip(dst)
@@ -16057,6 +16066,25 @@ check "§154(11) same arch and same container path: venv/ and cargo/ are copied"
 check "§154(12) credential files ARE copied (#374 decision 2)..." test -f "$_S154_D/codex/auth.json"
 check "§154(13) ...and each one is NAMED in the plan, so the confirmation covered it" \
     bash -c 'case "$1" in *"Credentials     COPIED"*"codex/auth.json"*) exit 0 ;; esac; exit 1' _ "$_S154_OUT"
+
+# --- M: no version marker + a caller's RSYNC_RSH --------------------------------
+# A sandbox with no .sandy_created_version used to leak the shell's own
+# "No such file or directory" (the < redirect failed before 2>/dev/null took
+# effect) and skip the major-version guard silently. A caller's RSYNC_RSH must
+# survive, with -T appended. The strict stubs above refuse any ssh/rsync
+# without -T, so every copy in this section also proves no tty is requested.
+_s154_mk M dev/proj; mkdir -p "$_S154_DIR/M/rhome/dev/proj"
+rm -f "$_S154_DIR/M/lhome/.sandy/sandboxes/"*/.sandy_created_version
+: > "$_S154_DIR/M/rsh.log"
+RSYNC_RSH="ssh -o Port=2222" RSYNC_STUB_LOG="$_S154_DIR/M/rsh.log" \
+    _s154_run M --workspace "$_S154_DIR/M/lhome/dev/proj" --yes
+check "§154(13a) a sandbox with no version marker still copies (rc=$_S154_RC)" test "$_S154_RC" -eq 0
+check "§154(13b) ...without leaking the shell's missing-file error" \
+    bash -c 'case "$1" in *"No such file or directory"*) exit 1 ;; esac; exit 0' _ "$_S154_OUT"
+check "§154(13c) ...and says the major-version check was skipped, naming the cause" \
+    bash -c 'case "$1" in *"no .sandy_created_version"*"check"*"skipped"*) exit 0 ;; esac; exit 1' _ "$_S154_OUT"
+check "§154(13d) a caller's RSYNC_RSH is kept for every transfer, with -T appended" \
+    bash -c 'test -s "$1" && ! grep -qvxF "ssh -o Port=2222 -T" "$1"' _ "$_S154_DIR/M/rsh.log"
 
 # --- B: the container path changes -------------------------------------------
 _s154_mk B dev/proj; mkdir -p "$_S154_DIR/B/rhome/work/proj2"
@@ -22277,6 +22305,10 @@ else
 mkdir -p "$_S187_DIR/bin"
 cat > "$_S187_DIR/bin/ssh" <<'STUB'
 #!/bin/bash
+# Every sandy ssh is non-interactive, so it must pass -T (which overrides a
+# host's `RequestTTY yes`); refusing otherwise makes each happy-path check prove it.
+if [ "${1:-}" != -T ]; then echo "ssh stub: call without -T: $*" >&2; exit 97; fi
+shift
 host="$1"; shift
 echo "$host" >> "${SSH_STUB_LOG:-/dev/null}"
 if [ "$1" = sh ] && [ "$2" = -s ]; then exec env -u SANDY_HOME HOME="$REMOTE_HOME" FAKE_REMOTE=1 sh -s; fi
@@ -22285,12 +22317,17 @@ STUB
 cat > "$_S187_DIR/bin/rsync" <<'STUB'
 #!/usr/bin/env python3
 import os, sys, shutil
-ex, paths = [], []
-for a in sys.argv[1:]:
+ex, paths, rsh = [], [], None
+args = sys.argv[1:]
+while args:
+    a = args.pop(0)
+    if a == "-e": rsh = args.pop(0); continue
     if a == "-a": continue
     if a.startswith("--exclude="): ex.append(a[len("--exclude="):]); continue
     if a.startswith("-"): sys.exit("rsync stub: unsupported flag " + a)
     paths.append(a)
+if rsh is None or not rsh.endswith(" -T"): sys.exit("rsync stub: transport without -T: %r" % rsh)
+with open(os.environ.get("RSYNC_STUB_LOG", os.devnull), "a") as f: f.write(rsh + "\n")
 src, dst = paths
 fail = os.environ.get("RSYNC_FAIL_MATCH", "")
 if fail and (fail in src or fail in dst): sys.exit("rsync stub: injected failure")
