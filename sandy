@@ -1919,12 +1919,34 @@ _sandy_configured_hooks_rel() {
 # /etc, /Volumes or /private/var was mounted with no prompt and no warning.
 # This predicate is what makes "a link at a protected path is dangerous wherever
 # it points" expressible in that scan.
+#
+# #494: the scan calls this once per link that points outside both the
+# workspace and $HOME, and each call used to read the three lists through
+# `done < <(...)`. Under macOS bash 3.2 every one of those left three
+# descriptors open until the scan finished (measured: 9 -> 86 -> 161 -> 236 fds
+# over 75 calls), so a workspace with ~80 such links hit the default 256-fd limit
+# mid-scan. bash printed "cannot duplicate fd", the failed redirection made the
+# predicate answer "not protected", and the rest of the scan ran on a broken
+# shell. bash 5 (CI) closes them, so nothing there ever saw it. The lists are
+# now read ONCE into _SANDY_PROTECTED_RELS by a command substitution and split
+# without any redirection; each call compares in memory and opens nothing.
+# _sandy_resolve_symlinks clears _SANDY_PROTECTED_RELS_LOADED before every scan,
+# so a list that depends on config (.github/workflows) is never stale.
 _sandy_is_protected_rel() {
-    local _r="$1" _p
+    local _r="$1" _p _all _nl=$'\n'
     [ -n "$_r" ] || return 1
-    while IFS= read -r _p; do [ "$_r" = "$_p" ] && return 0; done < <(_sandy_protected_files)
-    while IFS= read -r _p; do [ "$_r" = "$_p" ] && return 0; done < <(_sandy_protected_dirs)
-    while IFS= read -r _p; do [ "$_r" = "$_p" ] && return 0; done < <(_sandy_protected_git_files)
+    if [ "${_SANDY_PROTECTED_RELS_LOADED:-}" != 1 ]; then
+        _SANDY_PROTECTED_RELS=()
+        _all="$(_sandy_protected_files; _sandy_protected_dirs; _sandy_protected_git_files)$_nl"
+        while [ -n "$_all" ]; do
+            _p="${_all%%"$_nl"*}"; _all="${_all#*"$_nl"}"
+            if [ -n "$_p" ]; then _SANDY_PROTECTED_RELS+=("$_p"); fi
+        done
+        _SANDY_PROTECTED_RELS_LOADED=1
+    fi
+    for _p in ${_SANDY_PROTECTED_RELS[@]+"${_SANDY_PROTECTED_RELS[@]}"}; do
+        [ "$_r" = "$_p" ] && return 0
+    done
     return 1
 }
 
@@ -14694,6 +14716,7 @@ _sandy_resolve_symlinks() {
     # Check for symlinks that escape the workspace (potential sandbox escape).
     # We track both the display info and the mount info needed to make them work.
     REAL_WORK_DIR="$(cd "$WORK_DIR" && pwd -P)"
+    _SANDY_PROTECTED_RELS_LOADED=""   # #494: re-read the protected lists for this scan
     DANGEROUS_SYMLINKS=()
     # Parallel arrays: resolved host path and the container path where it should be mounted
     SYMLINK_HOST_PATHS=()
