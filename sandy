@@ -353,6 +353,19 @@ warn()  { echo -e "${YELLOW}[sandy]${NC} $*"; }
 error() { echo -e "${RED}[sandy]${NC} $*" >&2; }
 sha256() { shasum -a 256 2>/dev/null || sha256sum; }
 
+# #493: give the terminal back in a usable state after an interactive client
+# returns. tmux turns on mouse reporting, focus events and bracketed paste,
+# and resets them only when it exits cleanly. A container that dies under the
+# client (or a client killed mid-session) leaves them on, so every mouse move
+# in the host shell then types SGR reports like `35;93;1M`, and mosh preserves
+# that state across reconnects. The sequences are no-ops on a terminal that
+# already has the modes off, so this runs on every return, not only on the
+# failures sandy can detect. Writes only when stdout is a terminal.
+_sandy_tty_restore() {
+    [ -t 1 ] || return 0
+    printf '\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l\033[?1004l\033[?2004l\033[?25h'
+}
+
 # Signal an unrecoverable startup refusal to a waiting `sandy --start` client.
 # The launch path runs INSIDE the detached supervisor under --start, so a bare
 # `exit 1` there is invisible to the client, which then polls its full 600s
@@ -12483,6 +12496,7 @@ if [ "$SANDY_ATTACH" = "true" ]; then
     # failure would trip set -e before the DEC-C exit-code decision below.
     _sandy_attach_rc=0
     docker exec -it -u "$(id -u)" "$_sandy_attach_container" tmux attach -d -t sandy || _sandy_attach_rc=$?
+    _sandy_tty_restore
     [ "$SANDY_VERBOSE" -ge 2 ] && info "  (tmux attach exited rc=$_sandy_attach_rc)"
 
     # DEC-C exit-code decision (made AFTER attach returns, not from its rc):
@@ -19292,6 +19306,16 @@ RUN_FLAGS+=(--security-opt no-new-privileges:true)
 RUN_FLAGS+=(--cap-drop ALL)
 RUN_FLAGS+=(--cap-add SETUID --cap-add SETGID)
 RUN_FLAGS+=(--cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER)
+# KILL (#493): with --init below, tini is PID 1 (root) and forwards every
+# signal it receives to its child -- which the entrypoint has already
+# gosu-dropped to the host uid. Without CAP_KILL root may not signal another
+# uid, kill() fails with EPERM, and tini treats that as FATAL ("Unexpected
+# error when forwarding signal: 'Operation not permitted'") and exits, taking
+# the container and the session with it. Any signal that reached PID 1 did
+# this; it surfaced on a host reached over mosh. Only root in the container
+# holds it, and root runs nothing after the entrypoint's gosu drop;
+# no-new-privileges keeps the agent at the host uid from regaining it.
+RUN_FLAGS+=(--cap-add KILL)
 RUN_FLAGS+=(--pids-limit 512)
 # --init (#392): Docker's own init (docker-init/tini) becomes PID 1 and reaps
 # every process that gets orphaned in the container. Without it PID 1 is the
@@ -21425,6 +21449,7 @@ fi
 # the last command, so the EXIT trap's `rc=$?` carried the agent's code).
 _run_rc=0
 docker run "${RUN_FLAGS[@]}" "$IMAGE_NAME" "$@" || _run_rc=$?
+[ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ] || _sandy_tty_restore
 
 if [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ]; then
     # H1 — never enter the block-and-wait below if the detached launch failed.
