@@ -674,6 +674,7 @@ Add entries to all four arrays (`SKILL_PACK_NAMES`, `SKILL_PACK_REPOS`, `SKILL_P
 --security-opt no-new-privileges:true
 --cap-drop ALL
 --cap-add SETUID --cap-add SETGID --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER
+--cap-add KILL
 --pids-limit 512
 --init
 --read-only
@@ -1089,6 +1090,7 @@ Sandy wraps Claude Code in a tmux session:
 - **Window name**: `sandy: <PROJECT_NAME>`
 - **Auto-resume**: If session files (`.jsonl`) exist in `~/.claude/projects/<WORKSPACE_KEY>/` and no overriding flags (`--new`, `-p`, `--resume`, `--continue`), sandy automatically adds `--continue` to resume the last session. `WORKSPACE_KEY` is the container workspace path with all `/` replaced by `-` (e.g., `/home/sandy/dev/sandy` → `-home-claude-dev-sandy`)
 - **Fallback**: If `--continue` fails (stale session), retry without it
+- **Terminal restore (#493)**: tmux enables mouse reporting, focus events and bracketed paste, and turns them off only when it exits cleanly. When the interactive `docker run` or the `--attach` client returns, and stdout is a terminal, sandy writes the sequences that turn them off and show the cursor (`ESC[?1000l ?1002l ?1003l ?1005l ?1006l ?1015l ?1004l ?2004l ?25h`). It does this on every return, because on an already-reset terminal they do nothing. A container that dies under the client then leaves a usable shell instead of one that types `35;93;1M…` on every mouse move. The daemon supervisor never writes them.
 
 ### Tmux Configuration
 
@@ -1370,7 +1372,7 @@ An image built before this can still carry an empty version file, and an empty v
 | Root filesystem | `--read-only` |
 | User | Non-root (`sandy`, mapped to host UID) |
 | Privilege escalation | `--security-opt no-new-privileges:true` |
-| Capabilities | `--cap-drop ALL`, add back only SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER |
+| Capabilities | `--cap-drop ALL`, add back only SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER, KILL |
 | Process limit | `--pids-limit 512` |
 | Init / zombie reaping | `--init` (2.5.0, #392): Docker's `docker-init` is PID 1, reaps orphaned processes and forwards signals. Without it an orphan became a permanent zombie holding one of the 512 slots |
 | Network | Per-instance isolated bridge, LAN blocked |
@@ -2055,10 +2057,11 @@ Builds that are **required** — a missing image, a changed Dockerfile/hash, a r
 --cap-add CHOWN
 --cap-add DAC_OVERRIDE
 --cap-add FOWNER
+--cap-add KILL
 --read-only
 ```
 
-Capabilities SETUID/SETGID are needed for `gosu` privilege drop. CHOWN/DAC_OVERRIDE/FOWNER are needed for the entrypoint to fix ownership of tmpfs and persistent mounts.
+Capabilities SETUID/SETGID are needed for `gosu` privilege drop. CHOWN/DAC_OVERRIDE/FOWNER are needed for the entrypoint to fix ownership of tmpfs and persistent mounts. KILL (#493) is needed by `--init`'s tini (PID 1, root) to forward signals to its child, which the entrypoint has already dropped to the host uid. Without it, `kill()` fails with EPERM, tini exits on "Unexpected error when forwarding signal", and the container ends. No process at the host uid holds any of these capabilities after the drop.
 
 ### B.7 Network Ranges (Linux iptables)
 
@@ -2760,6 +2763,7 @@ A client with no TTY skips the pre-pass entirely; every gate then fails closed i
 --cap-drop ALL
 --cap-add SETUID --cap-add SETGID
 --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER
+--cap-add KILL
 --pids-limit 512
 --init
 --read-only
