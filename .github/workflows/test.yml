@@ -16,7 +16,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y jq shellcheck
       - name: Host properties and harness regression tests
         run: bash test/run-tests.sh --host-only --require-tools --log-dir /tmp/sandy-test-logs
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: host-test-logs
@@ -33,7 +33,7 @@ jobs:
           echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Run contracts on macOS
         run: bash test/run-tests.sh --only harness,contracts --require-tools --log-dir /tmp/sandy-test-logs
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: macos-contract-logs
@@ -78,7 +78,7 @@ jobs:
 
       - name: Run production container contracts
         run: bash test/run-tests.sh --only container --log-dir /tmp/sandy-test-logs
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: container-test-logs
