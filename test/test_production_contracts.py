@@ -257,6 +257,53 @@ class ProductionContracts(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn(str(self.home / "outside"), run.stdout)
 
+    RESOLVER = ("_sandy_protected_files", "_sandy_protected_git_files", "_sandy_protected_dirs",
+                "_sandy_is_protected_rel", "_sandy_resolve_symlinks")
+
+    def counted_resolver(self):
+        # Each list generator appends its name to $COUNT_FILE, then runs the
+        # production body, so the test sees how often the scan read the lists.
+        code = "".join(function(name) for name in self.RESOLVER)
+        for name in self.RESOLVER[:3]:
+            code += ('eval "_orig' + name + '() $(declare -f ' + name + ' | tail -n +2)"\n'
+                     + name + '() { echo ' + name + ' >> "$COUNT_FILE"; _orig' + name + '; }\n')
+        return code
+
+    def test_symlink_scan_reads_the_protected_lists_once(self):
+        # macOS bash 3.2 kept three descriptors open per protected-path check
+        # until the scan ended, so ~80 links outside $HOME exhausted the
+        # 256-fd default. CI's bash 5 cannot show the leak; what it CAN show
+        # is the property the fix rests on: the lists are read once per scan,
+        # not once per link, and every link is still classified.
+        outside = self.root / "outside"
+        outside.mkdir()
+        for i in range(300):
+            (outside / f"t{i}").write_text("x")
+            (self.ws / f"l{i}").symlink_to(outside / f"t{i}")
+        (outside / "npmrc").write_text("x")
+        (self.ws / ".npmrc").symlink_to(outside / "npmrc")
+        (self.sb / ".sandy-approved-symlinks.list").write_text(".npmrc -> " + str(outside / "npmrc") + "\n")
+        count = self.root / "count"
+        code = self.counted_resolver() + '\n_sandy_resolve_symlinks\nprintf "%s\\n" "${DANGEROUS_SYMLINKS[@]}"\n'
+        run = self.run_source(code, COUNT_FILE=str(count))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.splitlines(), [".npmrc -> " + str(outside / "npmrc")])
+        self.assertEqual(sorted(count.read_text().split()), sorted(self.RESOLVER[:3]))
+
+    def test_symlink_scan_rereads_the_protected_lists_each_scan(self):
+        # .github/workflows is protected only while SANDY_ALLOW_WORKFLOW_EDIT
+        # is off, so a list cached by one scan must not answer for the next.
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.ws / ".github").mkdir()
+        (self.ws / ".github/workflows").symlink_to(outside)
+        code = (self.counted_resolver() + '\nSANDY_ALLOW_WORKFLOW_EDIT=1 _sandy_resolve_symlinks\n'
+                + 'echo first-scan-ok\nSANDY_ALLOW_WORKFLOW_EDIT=0\n_sandy_resolve_symlinks\n')
+        run = self.run_source(code, COUNT_FILE=str(self.root / "count"))
+        self.assertIn("first-scan-ok", run.stdout)
+        self.assertEqual(run.returncode, 1, run.stderr)
+        self.assertIn(".github/workflows -> " + str(outside), run.stderr)
+
     def settings_code(self):
         staging = span('_sandy_launch_id=""   # minted once per launch, right after the sandbox dir exists\n',
                        '\njson_merge() {')
