@@ -204,6 +204,60 @@ class ProductionContracts(unittest.TestCase):
         body = span("# Pre-existing-debris auto-cleanup:", "# Protected dirs: existence-gated.")
         return function("_sandy_protected_dirs") + "_sandy_is_git_repo=false" + body.split("_sandy_is_git_repo=false", 1)[1]
 
+    TTY_OFF = ("\x1b[?1000l", "\x1b[?1002l", "\x1b[?1003l", "\x1b[?1006l", "\x1b[?2004l", "\x1b[?25h")
+
+    def test_attach_client_restores_the_terminal_after_the_session_dies(self):
+        # #493: tmux turns mouse reporting on and resets it only on a clean
+        # exit. Run the real --attach dispatcher on a pty, against a docker
+        # stub whose "tmux attach" turns mouse mode on and then dies the way
+        # a crashed container does; the terminal must end with the modes off.
+        import pty
+        import select
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "docker"
+        stub.write_text(
+            '#!/bin/bash\n'
+            'case "$1" in\n'
+            '  ps) echo cid0493 ;;\n'
+            '  exec) case "$*" in *"tmux attach"*) printf "\\033[?1000h\\033[?1006h\\033[?2004h"; exit 1 ;;'
+            ' *has-session*) exit 1 ;; esac ;;\n'
+            '  inspect) echo false ;;\n'
+            'esac\nexit 0\n')
+        stub.chmod(0o755)
+        (self.home / ".sandy").mkdir(exist_ok=True)
+        master, slave = pty.openpty()
+        env = {**self.env, "PATH": str(bin_dir) + ":" + os.environ["PATH"], "TERM": "xterm"}
+        process = subprocess.Popen(["bash", str(Path(__file__).resolve().parent.parent / "sandy"),
+                                    "--attach", "--workspace", str(self.ws)],
+                                   stdin=slave, stdout=slave, stderr=slave, env=env, cwd=str(self.ws))
+        os.close(slave)
+        output = b""
+        while True:
+            ready, _, _ = select.select([master], [], [], 20)
+            if not ready:
+                process.kill()
+                self.fail("attach did not finish; output so far: " + output.decode(errors="replace"))
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output += chunk
+        process.wait(timeout=10)
+        os.close(master)
+        text = output.decode(errors="replace")
+        self.assertIn("\x1b[?1000h", text, "the stub attach never ran: " + text[-2000:])
+        tail = text.split("\x1b[?1000h", 1)[1]
+        for sequence in self.TTY_OFF:
+            self.assertIn(sequence, tail)
+
+    def test_terminal_restore_writes_nothing_off_a_terminal(self):
+        run = self.run_source(function("_sandy_tty_restore") + "_sandy_tty_restore\n")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout, "")
+
     def test_cleanup_non_git_empty_and_populated_directories(self):
         code = self.cleanup_code()
         (self.ws / ".vscode").mkdir()
@@ -256,6 +310,53 @@ class ProductionContracts(unittest.TestCase):
         run = self.run_source(code)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn(str(self.home / "outside"), run.stdout)
+
+    RESOLVER = ("_sandy_protected_files", "_sandy_protected_git_files", "_sandy_protected_dirs",
+                "_sandy_is_protected_rel", "_sandy_resolve_symlinks")
+
+    def counted_resolver(self):
+        # Each list generator appends its name to $COUNT_FILE, then runs the
+        # production body, so the test sees how often the scan read the lists.
+        code = "".join(function(name) for name in self.RESOLVER)
+        for name in self.RESOLVER[:3]:
+            code += ('eval "_orig' + name + '() $(declare -f ' + name + ' | tail -n +2)"\n'
+                     + name + '() { echo ' + name + ' >> "$COUNT_FILE"; _orig' + name + '; }\n')
+        return code
+
+    def test_symlink_scan_reads_the_protected_lists_once(self):
+        # macOS bash 3.2 kept three descriptors open per protected-path check
+        # until the scan ended, so ~80 links outside $HOME exhausted the
+        # 256-fd default. CI's bash 5 cannot show the leak; what it CAN show
+        # is the property the fix rests on: the lists are read once per scan,
+        # not once per link, and every link is still classified.
+        outside = self.root / "outside"
+        outside.mkdir()
+        for i in range(300):
+            (outside / f"t{i}").write_text("x")
+            (self.ws / f"l{i}").symlink_to(outside / f"t{i}")
+        (outside / "npmrc").write_text("x")
+        (self.ws / ".npmrc").symlink_to(outside / "npmrc")
+        (self.sb / ".sandy-approved-symlinks.list").write_text(".npmrc -> " + str(outside / "npmrc") + "\n")
+        count = self.root / "count"
+        code = self.counted_resolver() + '\n_sandy_resolve_symlinks\nprintf "%s\\n" "${DANGEROUS_SYMLINKS[@]}"\n'
+        run = self.run_source(code, COUNT_FILE=str(count))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.splitlines(), [".npmrc -> " + str(outside / "npmrc")])
+        self.assertEqual(sorted(count.read_text().split()), sorted(self.RESOLVER[:3]))
+
+    def test_symlink_scan_rereads_the_protected_lists_each_scan(self):
+        # .github/workflows is protected only while SANDY_ALLOW_WORKFLOW_EDIT
+        # is off, so a list cached by one scan must not answer for the next.
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.ws / ".github").mkdir()
+        (self.ws / ".github/workflows").symlink_to(outside)
+        code = (self.counted_resolver() + '\nSANDY_ALLOW_WORKFLOW_EDIT=1 _sandy_resolve_symlinks\n'
+                + 'echo first-scan-ok\nSANDY_ALLOW_WORKFLOW_EDIT=0\n_sandy_resolve_symlinks\n')
+        run = self.run_source(code, COUNT_FILE=str(self.root / "count"))
+        self.assertIn("first-scan-ok", run.stdout)
+        self.assertEqual(run.returncode, 1, run.stderr)
+        self.assertIn(".github/workflows -> " + str(outside), run.stderr)
 
     def settings_code(self):
         staging = span('_sandy_launch_id=""   # minted once per launch, right after the sandbox dir exists\n',

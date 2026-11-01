@@ -36,7 +36,7 @@ The rest of this doc walks each finding with the repro and suggested fix.
 Before probing, I mapped what sandy actually guarantees from `sandy:2717-3070` (`RUN_FLAGS` construction) and `SPECIFICATION.md`:
 
 **Kernel/process layer (strong):**
-- `--cap-drop ALL` plus a minimal set: `SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER`
+- `--cap-drop ALL` plus a minimal set: `SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER, KILL` (KILL since #493: tini, PID 1, forwards signals to the uid-dropped child)
 - `--security-opt no-new-privileges:true`
 - Seccomp filter mode (`/proc/self/status: Seccomp: 2`)
 - `--read-only` root, tmpfs /home/claude + /tmp

@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import time
 import unittest
 import zipfile
 
@@ -103,6 +104,44 @@ else:
                     self.assertFalse(copy.parent.exists())
                 self.assertEqual(host.read_text(), original)
                 host.unlink()
+
+    def check_tini_forwards_signals_to_the_dropped_child(self):
+        """#493: a signal delivered to PID 1 must reach the agent, not end the container."""
+        start = 'RUN_FLAGS+=(--security-opt no-new-privileges:true)\n'
+        end = 'RUN_FLAGS+=(--pids-limit 512)\n'
+        flags_source = 'RUN_FLAGS=()\n' + start + production_contracts.span(start, end) + 'printf "%s\\0" "${RUN_FLAGS[@]}"\n'
+        run = subprocess.run(['bash', '-c', flags_source], capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        flags = run.stdout.rstrip('\0').split('\0')
+        self.assertIn('--cap-drop', flags)
+        name = 'sandy-test-tini-signal-' + str(os.getpid())
+        # PID 1 is tini (--init, as in production); its child gosu-drops to a
+        # non-root uid exactly as the entrypoint does, then traps WINCH.
+        child = 'trap "echo GOT_WINCH" WINCH; echo READY; while :; do sleep 0.2; done'
+        args = (['docker', 'run', '-d', '--name', name, '--init', '--network', 'none'] + flags
+                + ['--entrypoint', 'bash', 'sandy-claude-code', '-c', 'exec gosu 4242:4242 bash -c ' + repr(child)])
+        try:
+            self.command('tini-signal-start', args, self.home, 60)
+            for _ in range(50):
+                logs = subprocess.run(['docker', 'logs', name], capture_output=True, text=True, timeout=10)
+                if 'READY' in logs.stdout:
+                    break
+                time.sleep(0.2)
+            self.assertIn('READY', logs.stdout, logs.stdout + logs.stderr)
+            self.command('tini-signal-send', ['docker', 'kill', '--signal=WINCH', name], self.home, 30)
+            for _ in range(25):
+                logs = subprocess.run(['docker', 'logs', name], capture_output=True, text=True, timeout=10)
+                if 'GOT_WINCH' in logs.stdout or 'FATAL' in logs.stderr:
+                    break
+                time.sleep(0.2)
+            state = subprocess.run(['docker', 'inspect', '-f', '{{.State.Running}}', name],
+                                   capture_output=True, text=True, timeout=10).stdout.strip()
+            self.assertNotIn('Unexpected error when forwarding signal', logs.stderr)
+            self.assertEqual(state, 'true', 'container ended on a forwarded signal: ' + logs.stderr)
+            self.assertIn('GOT_WINCH', logs.stdout, 'the dropped child never received the signal')
+            print('PASS tini: a signal sent to PID 1 reaches the uid-dropped child and the container survives', flush=True)
+        finally:
+            subprocess.run(['docker', 'rm', '-f', name], capture_output=True, timeout=30)
 
     def command(self, name, args, cwd, timeout=600):
         log = self.logs / (name + '.log')
@@ -266,6 +305,7 @@ else:
         other, other_protected = self.project('independent')
         self.launch(other, other_protected, 'isolated')
         self.check_gemini_refresh_mounts()
+        self.check_tini_forwards_signals_to_the_dropped_child()
 
 
 if __name__ == '__main__':
