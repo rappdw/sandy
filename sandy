@@ -17752,20 +17752,33 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
             exit 1
         fi
         _sandy_proj_build_rc=0
-        docker build -q --no-cache \
+        # The build's output goes to a log rather than being dropped. It used
+        # to run with -q, which discards every RUN step's output, so a failed
+        # build showed only buildkit's one-line summary ("exit code: 100") and
+        # never the error that caused it (apt's `E:` line). Off a terminal,
+        # buildkit writes plain progress, so the log holds each step's output.
+        # On failure its tail is shown and the file kept; on success removed.
+        _sandy_proj_log="$(mktemp "${TMPDIR:-/tmp}/sandy-project-build.XXXXXX" 2>/dev/null)" || _sandy_proj_log=/dev/null
+        { docker build --no-cache \
             --label sandy.managed=1 \
             --build-arg BASE_IMAGE="$IMAGE_NAME" \
             -t "$PROJECT_IMAGE_NAME" \
             -f "$_sandy_proj_ctx/Dockerfile" "$_sandy_proj_ctx" || _sandy_proj_build_rc=$?
+        } > "$_sandy_proj_log" 2>&1
         rm -rf "$_sandy_proj_ctx"
         if [ "$_sandy_proj_build_rc" -ne 0 ]; then
-            error "The .sandy/Dockerfile build failed (exit $_sandy_proj_build_rc)."
+            error "The .sandy/Dockerfile build failed (exit $_sandy_proj_build_rc). Last lines of the build output:"
+            # Control characters stripped (tab and newline kept): the output
+            # includes whatever the Dockerfile's RUN steps fetched and printed.
+            tail -n 40 "$_sandy_proj_log" | LC_ALL=C tr -d '\000-\010\013-\037\177' | sed 's/^/    /' >&2
+            [ "$_sandy_proj_log" = /dev/null ] || error "Full build log: $_sandy_proj_log"
             error "Note: sandy's reachability probe covers only its OWN build hosts (deb.debian.org,"
             error "registry.npmjs.org), not whatever this Dockerfile fetches. If the failure is a"
             error "download, check that the hosts this Dockerfile uses are reachable from here."
             error "The build is sent .sandy/ WITHOUT config and .secrets; a COPY of either fails here."
             exit "$_sandy_proj_build_rc"
         fi
+        [ "$_sandy_proj_log" = /dev/null ] || rm -f "$_sandy_proj_log"
         echo "$PROJECT_HASH" > "$PROJECT_HASH_FILE"
         fi
     else
