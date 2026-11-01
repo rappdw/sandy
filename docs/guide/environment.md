@@ -101,14 +101,17 @@ The sandy base image does not include CUDA. Use `.sandy/Dockerfile` to layer GPU
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-# Add NVIDIA CUDA apt repository (arch-aware — maps aarch64 to sbsa for Debian)
+# Add NVIDIA CUDA apt repository (arch-aware — maps aarch64 to sbsa for Debian).
+# debian13 matches sandy's base image (Debian 13, trixie); the debian12 repo
+# fails there, because trixie's apt rejects its SHA-1-bound signing key.
 RUN CUDA_ARCH="$(uname -m)"; [ "$CUDA_ARCH" = "aarch64" ] && CUDA_ARCH="sbsa"; \
-    curl -fsSL "https://developer.download.nvidia.com/compute/cuda/repos/debian12/${CUDA_ARCH}/cuda-keyring_1.1-1_all.deb" \
+    curl -fsSL "https://developer.download.nvidia.com/compute/cuda/repos/debian13/${CUDA_ARCH}/cuda-keyring_1.1-1_all.deb" \
         -o /tmp/cuda-keyring.deb \
     && dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
     && apt-get update \
     && apt-get install -y --no-install-recommends cuda-toolkit \
     && rm -rf /var/lib/apt/lists/*
+ENV PATH=/usr/local/cuda/bin:${PATH}
 ```
 
 For a lighter setup that skips system CUDA and uses pre-built wheels:
@@ -116,7 +119,7 @@ For a lighter setup that skips system CUDA and uses pre-built wheels:
 ```dockerfile
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
-RUN pip install --user torch torchvision torchaudio
+RUN pip install --no-cache-dir --break-system-packages torch torchvision torchaudio
 ```
 
 **Platform notes:**

@@ -258,6 +258,52 @@ class ProductionContracts(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(run.stdout, "")
 
+    PHASE3 = ('PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"\n', '\n# --- Platform already detected')
+
+    def project_build(self, docker_rc):
+        # Run the real Phase 3 block with the gate approving and a docker stub
+        # whose build prints the way a failing apt step does, ESC included.
+        (self.ws / ".sandy").mkdir()
+        (self.ws / ".sandy" / "Dockerfile").write_text("ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN false\n")
+        tmp = self.root / "tmp"
+        tmp.mkdir()
+        start, end = self.PHASE3
+        code = (
+            'sha256() { shasum -a 256 2>/dev/null || sha256sum; }\n'
+            '_sandy_context_hash() { echo ctxhash; }\n'
+            '_sandy_project_dockerfile_approved() { return 0; }\n'
+            '_sandy_build_allowed() { return 0; }\n'
+            '_sandy_stage_project_context() { local d; d="$(mktemp -d)"; cp "$1/Dockerfile" "$d/"; echo "$d"; }\n'
+            'docker() {\n'
+            '  case "$1" in\n'
+            '    image) [ "$2" = inspect ] && [ "$3" = -f ] && echo sha256:parent; return 1 ;;\n'
+            '    build) printf "#5 [2/2] RUN false\\n#5 0.4 E: \\033[31mThe repository is not signed.\\033[0m\\n"\n'
+            '           echo "ERROR: failed to solve: exit code: 100" >&2; return "$DOCKER_RC" ;;\n'
+            '  esac\n'
+            '}\n'
+            'SANDBOX_NAME=Ws-deadbeef; IMAGE_NAME=sandy-claude-code; NEEDS_BUILD=false; SKILLS_REBUILT=false\n'
+            + start + span(start, end) + '\necho "IMAGE=$IMAGE_NAME"\n')
+        run = self.run_source(code, TMPDIR=str(tmp), DOCKER_RC=str(docker_rc))
+        return run, sorted(tmp.glob("sandy-project-build.*"))
+
+    def test_failed_project_build_shows_its_output_and_keeps_the_log(self):
+        run, logs = self.project_build(17)
+        self.assertEqual(run.returncode, 17, run.stderr)
+        self.assertIn("E: [31mThe repository is not signed.[0m", run.stderr)
+        self.assertNotIn("\x1b", run.stderr)
+        self.assertIn("exit code: 100", run.stderr)
+        self.assertEqual(len(logs), 1, run.stderr)
+        self.assertIn("Full build log: " + str(logs[0]), run.stderr)
+        self.assertIn("\x1b[31m", logs[0].read_text())
+
+    def test_successful_project_build_removes_its_log(self):
+        run, logs = self.project_build(0)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("IMAGE=sandy-project-ws-deadbeef", run.stdout)
+        self.assertNotIn("E: ", run.stderr + run.stdout)
+        self.assertEqual(logs, [])
+        self.assertTrue((self.sb / ".project_build_hash").is_file())
+
     def test_cleanup_non_git_empty_and_populated_directories(self):
         code = self.cleanup_code()
         (self.ws / ".vscode").mkdir()
