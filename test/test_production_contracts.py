@@ -260,7 +260,7 @@ class ProductionContracts(unittest.TestCase):
 
     PHASE3 = ('PROJECT_DOCKERFILE="$WORK_DIR/.sandy/Dockerfile"\n', '\n# --- Platform already detected')
 
-    def project_build(self, docker_rc):
+    def project_build(self, docker_rc, tty=False):
         # Run the real Phase 3 block with the gate approving and a docker stub
         # whose build prints the way a failing apt step does, ESC included.
         (self.ws / ".sandy").mkdir()
@@ -277,13 +277,42 @@ class ProductionContracts(unittest.TestCase):
             'docker() {\n'
             '  case "$1" in\n'
             '    image) [ "$2" = inspect ] && [ "$3" = -f ] && echo sha256:parent; return 1 ;;\n'
-            '    build) printf "#5 [2/2] RUN false\\n#5 0.4 E: \\033[31mThe repository is not signed.\\033[0m\\n"\n'
+            '    build) echo "progress=${BUILDKIT_PROGRESS:-unset}"\n'
+            '           printf "#5 [2/2] RUN false\\n#5 0.4 E: \\033[31mThe repository is not signed.\\033[0m\\n"\n'
             '           echo "ERROR: failed to solve: exit code: 100" >&2; return "$DOCKER_RC" ;;\n'
             '  esac\n'
             '}\n'
             'SANDBOX_NAME=Ws-deadbeef; IMAGE_NAME=sandy-claude-code; NEEDS_BUILD=false; SKILLS_REBUILT=false\n'
             + start + span(start, end) + '\necho "IMAGE=$IMAGE_NAME"\n')
-        run = self.run_source(code, TMPDIR=str(tmp), DOCKER_RC=str(docker_rc))
+        if not tty:
+            run = self.run_source(code, TMPDIR=str(tmp), DOCKER_RC=str(docker_rc))
+            return run, sorted(tmp.glob("sandy-project-build.*"))
+        # stderr on a pty, the way an interactive launch sees it.
+        import pty
+        import select
+        prefix = 'set -euo pipefail\ninfo() { :; }; warn() { echo "$*" >&2; }; error() { echo "$*" >&2; }\n'
+        master, slave = pty.openpty()
+        process = subprocess.Popen(["bash", "-c", prefix + code], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=slave, text=True,
+                                   env={**self.env, "TMPDIR": str(tmp), "DOCKER_RC": str(docker_rc)})
+        os.close(slave)
+        output = b""
+        while True:
+            ready, _, _ = select.select([master], [], [], 20)
+            if not ready:
+                process.kill()
+                self.fail("project build did not finish; output so far: " + output.decode(errors="replace"))
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output += chunk
+        stdout = process.communicate(timeout=10)[0]
+        os.close(master)
+        run = subprocess.CompletedProcess(process.args, process.returncode, stdout,
+                                          output.decode(errors="replace").replace("\r\n", "\n"))
         return run, sorted(tmp.glob("sandy-project-build.*"))
 
     def test_failed_project_build_shows_its_output_and_keeps_the_log(self):
@@ -295,6 +324,26 @@ class ProductionContracts(unittest.TestCase):
         self.assertEqual(len(logs), 1, run.stderr)
         self.assertIn("Full build log: " + str(logs[0]), run.stderr)
         self.assertIn("\x1b[31m", logs[0].read_text())
+
+    def test_project_build_on_a_terminal_shows_its_output_as_it_runs(self):
+        # A long layer must not look like a hung launch: on a terminal the
+        # RUN output is shown while it builds, even when the build succeeds.
+        run, logs = self.project_build(0, tty=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("IMAGE=sandy-project-ws-deadbeef", run.stdout)
+        self.assertIn("progress=plain", run.stderr)
+        self.assertIn("E: [31mThe repository is not signed.[0m", run.stderr)
+        self.assertNotIn("\x1b", run.stderr)
+        self.assertEqual(logs, [])
+
+    def test_failed_project_build_on_a_terminal_keeps_the_log(self):
+        run, logs = self.project_build(17, tty=True)
+        self.assertEqual(run.returncode, 17, run.stderr)
+        self.assertNotIn("\x1b", run.stderr)
+        self.assertEqual(len(logs), 1, run.stderr)
+        self.assertIn("Full build log: " + str(logs[0]), run.stderr)
+        self.assertIn("\x1b[31m", logs[0].read_text())
+        self.assertIn("exit code: 100", logs[0].read_text())
 
     def test_successful_project_build_removes_its_log(self):
         run, logs = self.project_build(0)

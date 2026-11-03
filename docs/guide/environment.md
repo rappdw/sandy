@@ -191,6 +191,7 @@ Sandy detects this file and builds a project-specific image layered on top of th
 - Rebuilds automatically when the Dockerfile changes or the base sandy image updates
 - Is cached per-project (tagged as `sandy-project-<name>-<hash>`)
 - Uses the `.sandy/` directory as build context, so you can `COPY` files from there
+- Shows the build's output as it runs when launched from a terminal (a big layer like a TeX or CUDA toolchain can take many minutes). Off a terminal it is quiet; either way, a failed build prints its last 40 lines and keeps the full log in `$TMPDIR/sandy-project-build.*`
 
 This is the right approach for system packages (`apt-get`), large binary tools, or anything that needs root to install. See [`examples/`](../../examples/) for ready-to-use configurations.
 
