@@ -304,6 +304,105 @@ class ProductionContracts(unittest.TestCase):
         self.assertEqual(logs, [])
         self.assertTrue((self.sb / ".project_build_hash").is_file())
 
+    def proxy_locks(self):
+        # #498 fixtures: a launch in progress (live holder), one that has made
+        # its lock but not written its pid yet, a reboot leftover (dead
+        # holder), and a proxy with no lock at all.
+        locks = self.home / ".sandy" / "sandboxes"
+        dead = subprocess.Popen(["true"]); dead.wait()
+        for name, pid in (("live", str(os.getpid())), ("unwritten", None), ("dead", str(dead.pid))):
+            (locks / ("." + name + ".lock")).mkdir(parents=True)
+            if pid is not None:
+                (locks / ("." + name + ".lock") / "pid").write_text(pid + "\n")
+        return ("live", "unwritten", "dead", "nolock")
+
+    def test_stranded_proxy_reaper_spares_a_launch_in_progress(self):
+        names = self.proxy_locks()
+        rows = "".join("sandy-proxy-%s|sandy-proxy:latest\\n" % n for n in names)
+        code = (function("_sandy_lock_state") + function("_sandy_sandbox_lock_held")
+                + function("_sandy_reap_stranded_proxies")
+                + 'docker() {\n'
+                  '  case "$1 $2" in\n'
+                  '    "ps -a") case "$*" in *"name=^/sandy-proxy-"*) printf "' + rows + '" ;; esac ;;\n'
+                  '    "rm -f") echo "RM $3" >> "$RM_LOG" ;;\n'
+                  '  esac\n'
+                  '  return 0\n'
+                  '}\n'
+                  '_sandy_reap_stranded_proxies\n')
+        rm_log = self.root / "removed"
+        rm_log.touch()
+        run = self.run_source(code, RM_LOG=str(rm_log))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        removed = sorted(line[3:] for line in rm_log.read_text().splitlines())
+        self.assertEqual(removed, ["sandy-proxy-dead", "sandy-proxy-nolock"], run.stdout + run.stderr)
+
+    def test_gc_spares_the_proxy_of_a_launch_in_progress(self):
+        names = self.proxy_locks()
+        rows = "".join("id%d|sandy-proxy-%s|running||sandy-proxy:latest\\n" % (i, n) for i, n in enumerate(names))
+        code = (function("_sandy_lock_state") + function("_sandy_sandbox_lock_held")
+                + function("_sandy_dead_owner_containers_list")
+                + 'docker() { [ "$1 $2" = "ps -a" ] && printf "' + rows + '"; return 0; }\n'
+                  '_sandy_dead_owner_containers_list reap\n')
+        run = self.run_source(code)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(sorted(run.stdout.split()), ["sandy-proxy-dead", "sandy-proxy-nolock"], run.stdout + run.stderr)
+
+    PRE_RUN = ('# #498: the proxy must still exist.', '\n_run_rc=0\ndocker run "${RUN_FLAGS[@]}"')
+
+    def pre_run_check(self, proxy_exists):
+        start, end = self.PRE_RUN
+        log = self.root / "daemon.log"
+        code = (function("_sandy_daemon_fatal")
+                + 'docker() { [ "$1" = inspect ] && [ "$PROXY_EXISTS" = 1 ]; }\n'
+                  'PROXY_CONTAINER=sandy-proxy-ws-deadbeef\n'
+                + start + span(start, end) + '\necho LAUNCHED\n')
+        return self.run_source(code, PROXY_EXISTS="1" if proxy_exists else "0",
+                               SANDY_DAEMON_LOG=str(log)), Path(str(log) + ".fatal")
+
+    def test_launch_refuses_an_agent_whose_proxy_was_removed(self):
+        run, fatal = self.pre_run_check(False)
+        self.assertEqual(run.returncode, 1, run.stderr)
+        self.assertNotIn("LAUNCHED", run.stdout)
+        self.assertIn("sandy-proxy-ws-deadbeef was removed before the agent started", run.stderr)
+        self.assertTrue(fatal.exists(), "a --start client would wait out its timeout")
+        run, fatal = self.pre_run_check(True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("LAUNCHED", run.stdout)
+
+    def test_stop_returns_only_after_the_supervisor_exits(self):
+        # #498: a supervisor whose cleanup removes the agent first and then
+        # keeps tearing down. --stop must not report the session stopped
+        # while that teardown (proxy, networks, the workspace lock) runs.
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        agent, exited = self.root / "agent-present", self.root / "supervisor-exited"
+        agent.touch()
+        supervisor = subprocess.Popen(
+            ["bash", "-c", 'trap \'rm -f "$1"; sleep 2; touch "$2"; exit 0\' TERM; while :; do sleep 0.1; done',
+             "fake-supervisor", str(agent), str(exited)])
+        self.addCleanup(lambda: supervisor.poll() is None and supervisor.kill())
+        # A real supervisor is disowned, so init reaps it; reap this one the
+        # same way, or kill -0 keeps seeing a zombie.
+        import threading
+        threading.Thread(target=supervisor.wait, daemon=True).start()
+        stub = bin_dir / "docker"
+        stub.write_text('#!/bin/bash\n'
+                        'case "$1" in\n'
+                        '  ps) [ -f "$AGENT_MARK" ] && echo cid498 ;;\n'
+                        '  inspect) case "$*" in *daemon_pid*) echo "$SUP_PID" ;; *) echo ws-deadbeef ;; esac ;;\n'
+                        'esac\nexit 0\n')
+        stub.chmod(0o755)
+        (self.home / ".sandy").mkdir(exist_ok=True)
+        env = {**self.env, "PATH": str(bin_dir) + ":" + os.environ["PATH"],
+               "AGENT_MARK": str(agent), "SUP_PID": str(supervisor.pid)}
+        run = subprocess.run(["bash", str(ROOT / "sandy"), "--stop", "--workspace", str(self.ws)],
+                             env=env, cwd=str(self.ws), stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertFalse(agent.exists(), "the stub supervisor never received TERM: " + run.stderr)
+        self.assertTrue(exited.exists(), "--stop returned while the supervisor was still tearing down")
+        self.assertNotIn("still finishing its teardown", run.stderr)
+
     def test_cleanup_non_git_empty_and_populated_directories(self):
         code = self.cleanup_code()
         (self.ws / ".vscode").mkdir()
