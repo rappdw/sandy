@@ -6128,7 +6128,9 @@ if [[ "${1:-}" == "--rsync-from" ]]; then
     # --- source probe, round trip 1: where things are on the remote ----------
     _rsf_tmp="$(mktemp -d 2>/dev/null || mktemp -d -t sandy-rsync-from)"
     _rsf_stage=""
-    trap 'rm -rf "$_rsf_tmp"; [ -n "$_rsf_stage" ] && rm -rf "$_rsf_stage"' EXIT
+    # The stage holds a copied sandbox, so it can hold a read-only Go module
+    # cache too: make it writable before removing it (#339).
+    trap 'rm -rf "$_rsf_tmp"; [ -n "$_rsf_stage" ] && { chmod -R u+w "$_rsf_stage" 2>/dev/null; rm -rf "$_rsf_stage"; }' EXIT
     {
         printf 'SWS=%s; REL=%s; SSH_HOME=%s\n' "$(_sandy_sq "$_rsf_sws")" "$(_sandy_sq "$_rsf_rel")" "$(_sandy_sq "$_rsf_ssh")"
         cat <<'PROBE'
@@ -6322,6 +6324,7 @@ DETAIL
     # --- fetch into staging, rewrite, then rename into place -----------------
     mkdir -p "$SANDY_HOME/sandboxes" || { error "--rsync-from: cannot create $SANDY_HOME/sandboxes"; exit 1; }
     _rsf_stage="$SANDY_HOME/sandboxes/.rsync-from.$_rsf_dname.$$"
+    chmod -R u+w "$_rsf_stage" 2>/dev/null || true
     rm -rf "$_rsf_stage"
     info "Copying from ${_rsf_host}…"
     rsync -a -e "$_SANDY_RSYNC_RSH" "${_rsf_excl[@]}" "$_rsf_host:$_rsf_sdir/" "$_rsf_stage/" \
@@ -6730,7 +6733,19 @@ if [[ "${1:-}" == "--remove-sandbox" ]]; then
         case "$_rms_n" in
             */*) error "--remove-sandbox: refusing (name contains a slash): $_rms_n"; exit 1 ;;
         esac
-        rm -rf "$_rms_dir"
+        # Make the tree writable first, as --reset-sandbox does (#339). Go's
+        # module cache is 0444 files in 0555 directories, and a 0555 directory
+        # denies its OWNER the unlink of its children, so a bare rm -rf failed
+        # partway and set -e aborted HERE -- before the lock, feature-instance
+        # and approval reaping below -- leaving half a sandbox. chmod -R does
+        # not follow symlinks met during the walk (GNU and BSD default -P), and
+        # it runs on the canonical path the containment check just verified.
+        chmod -R u+w "$_rms_real_dir" 2>/dev/null || true
+        if ! rm -rf "$_rms_real_dir"; then
+            error "--remove-sandbox: could not fully remove $_rms_dir."
+            error "  Files there may belong to another user. Fix their ownership, then re-run this command."
+            exit 1
+        fi
         # D8: the feature-owned per-sandbox state lives OUTSIDE the sandbox dir,
         # under $SANDY_HOME/features/<feature>/, so removing the sandbox alone
         # would strand an instance tree and a selection record that nothing else

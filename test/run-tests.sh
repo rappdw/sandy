@@ -25206,6 +25206,50 @@ check "§212(1) a second TERM landing inside the container removal lets the tear
 rm -rf "$_S212_D"
 unset _S212_D _S212_LOG _S212_RC _S212_GOT _s212_f
 
+section "§213: --remove-sandbox removes a sandbox holding a read-only Go module cache"
+# ============================================================
+# Same trap as §146 (#339), in the command that removes a WHOLE sandbox. Go's
+# module cache is 0444 files inside 0555 directories, and a 0555 directory
+# denies its OWNER the unlink of its children. The bare `rm -rf` failed partway
+# and set -e aborted there -- after part of the tree was gone but BEFORE the
+# lock dir, the feature instance and the approval files were reaped. Reported
+# from the field on a sandbox whose go/pkg/mod held miekg/dns.
+#
+# The fixture is the reproduction, plus one item from each reap that runs AFTER
+# the rm, so an abort at the rm is visible as stranded state, not only as rc.
+_S213_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+_S213_WS="$(cd "$(mktemp -d)" && pwd -P)"
+_S213_H="$(printf '%s' "$_S213_WS" | { shasum -a 256 2>/dev/null || sha256sum; })"
+_S213_H16="${_S213_H:0:16}"; _S213_H="${_S213_H%% *}"; _S213_H="${_S213_H:0:8}"
+_S213_B="$(basename "$_S213_WS" | tr -cd 'a-zA-Z0-9._-')"; _S213_B="${_S213_B:-project}"
+_S213_N="${_S213_B}-${_S213_H}"
+_S213_SB="$_S213_DIR/sandboxes/$_S213_N"
+mkdir -p "$_S213_SB/cargo" "$_S213_SB/go/pkg/mod/x" "$_S213_SB/venv" \
+         "$_S213_DIR/sandboxes/.${_S213_N}.lock" \
+         "$_S213_DIR/features/f213/instances/$_S213_N" "$_S213_DIR/approvals"
+printf '{"workspace_path":"%s"}\n' "$_S213_WS" > "$_S213_SB/WORKSPACE.json"
+echo mod > "$_S213_SB/go/pkg/mod/x/f.go"
+echo inbox > "$_S213_DIR/features/f213/instances/$_S213_N/state"
+echo hash > "$_S213_DIR/approvals/passive-$_S213_H16.list"
+chmod 0444 "$_S213_SB/go/pkg/mod/x/f.go"
+chmod 0555 "$_S213_SB/go/pkg/mod/x" "$_S213_SB/go/pkg/mod" "$_S213_SB/go/pkg" "$_S213_SB/go"
+_S213_RC=0
+SANDY_HOME="$_S213_DIR" bash "$SANDY_SCRIPT" --remove-sandbox --workspace "$_S213_WS" \
+    --yes >/dev/null 2>&1 </dev/null || _S213_RC=$?
+
+check "§213(pre) the fixture really is unremovable by a bare rm -rf (mutation guard for the fixture itself; skipped meaning: running as root)" \
+    bash -c 'd="$(mktemp -d)"; mkdir -p "$d/a/b"; : > "$d/a/b/f"; chmod 0444 "$d/a/b/f"; chmod 0555 "$d/a/b" "$d/a"; rc=0; rm -rf "$d/a" 2>/dev/null || rc=$?; chmod -R u+w "$d"; rm -rf "$d"; [ "$(id -u)" = 0 ] || [ "$rc" != 0 ]'
+check "§213(1) --remove-sandbox EXITS 0 with a read-only Go module cache present (mutation: drop the chmod and this is 1; got $_S213_RC)" \
+    bash -c 'test "$1" = 0' _ "$_S213_RC"
+check "§213(2) the sandbox directory is actually GONE" \
+    bash -c '[ ! -e "$1" ]' _ "$_S213_SB"
+check "§213(3) the reaps that run AFTER the rm all ran: lock dir, feature instance and approval file gone (an abort at the rm strands all three)" \
+    bash -c '[ ! -e "$1/sandboxes/.$2.lock" ] && [ ! -e "$1/features/f213/instances/$2" ] && [ ! -e "$1/approvals/passive-$3.list" ]' _ "$_S213_DIR" "$_S213_N" "$_S213_H16"
+
+chmod -R u+w "$_S213_DIR" 2>/dev/null || true
+rm -rf "$_S213_DIR" "$_S213_WS"
+unset _S213_DIR _S213_WS _S213_H _S213_H16 _S213_B _S213_N _S213_SB _S213_RC
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
