@@ -17786,13 +17786,27 @@ if [ -f "$PROJECT_DOCKERFILE" ] && _sandy_project_dockerfile_approved "$PROJECT_
         # never the error that caused it (apt's `E:` line). Off a terminal,
         # buildkit writes plain progress, so the log holds each step's output.
         # On failure its tail is shown and the file kept; on success removed.
+        # On a terminal the output is ALSO shown as it arrives: a large layer
+        # (a TeX or CUDA toolchain) can take many minutes, and a silent build
+        # reads as a hung launch. Progress is forced plain there, since tee
+        # would otherwise hand buildkit a pipe and the log its cursor moves.
         _sandy_proj_log="$(mktemp "${TMPDIR:-/tmp}/sandy-project-build.XXXXXX" 2>/dev/null)" || _sandy_proj_log=/dev/null
-        { docker build --no-cache \
-            --label sandy.managed=1 \
-            --build-arg BASE_IMAGE="$IMAGE_NAME" \
-            -t "$PROJECT_IMAGE_NAME" \
-            -f "$_sandy_proj_ctx/Dockerfile" "$_sandy_proj_ctx" || _sandy_proj_build_rc=$?
-        } > "$_sandy_proj_log" 2>&1
+        if [ -t 2 ]; then
+            BUILDKIT_PROGRESS=plain docker build --no-cache \
+                --label sandy.managed=1 \
+                --build-arg BASE_IMAGE="$IMAGE_NAME" \
+                -t "$PROJECT_IMAGE_NAME" \
+                -f "$_sandy_proj_ctx/Dockerfile" "$_sandy_proj_ctx" 2>&1 \
+                | tee "$_sandy_proj_log" \
+                | LC_ALL=C tr -d '\000-\010\013-\037\177' >&2 || _sandy_proj_build_rc=$?
+        else
+            { docker build --no-cache \
+                --label sandy.managed=1 \
+                --build-arg BASE_IMAGE="$IMAGE_NAME" \
+                -t "$PROJECT_IMAGE_NAME" \
+                -f "$_sandy_proj_ctx/Dockerfile" "$_sandy_proj_ctx" || _sandy_proj_build_rc=$?
+            } > "$_sandy_proj_log" 2>&1
+        fi
         rm -rf "$_sandy_proj_ctx"
         if [ "$_sandy_proj_build_rc" -ne 0 ]; then
             error "The .sandy/Dockerfile build failed (exit $_sandy_proj_build_rc). Last lines of the build output:"
