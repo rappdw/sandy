@@ -26,7 +26,7 @@ workspace that already has a daemon session errors with a hint to `--attach` or
 **Exit codes** — `--attach`: `0` = the session ended while you were attached,
 `3` = you detached cleanly and the session is still running, `4` = no such
 session (`5` is a `--stop` code, unreachable on `--attach`). `--stop`: `0` = stopped, `4` = no such session,
-`5` = teardown failed.
+`5` = teardown failed. `--stop` returns only after the session's supervisor has finished its teardown (proxy, networks, lock), so `--stop` or `--stop-all` followed straight away by `--start` is safe. So is starting several workspaces at once: a launch never removes another launch's proxy while that launch is still starting (#498).
 
 This is what [`sandy-ui`](https://github.com/rappdw/sandy-ui) uses to keep a
 session alive across a VSCode quit/relaunch.

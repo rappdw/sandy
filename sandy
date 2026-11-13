@@ -3329,6 +3329,7 @@ ${_sbname}"
         [ -n "$_cname" ] || continue
         _sbname="${_cname#sandy-proxy-}"
         printf '%s\n' "$_kept_agents" | grep -qxF "$_sbname" && continue   # paired agent KEPT — skip
+        _sandy_sandbox_lock_held "$_sbname" && continue   # a launch owns it (#498)
         printf '%s\n' "$_cname"
     done <<< "$_proxy_rows"
 
@@ -3366,10 +3367,27 @@ ${_sbname}"
 # reboot case (the foreground agent was --rm, so nothing remains). Any live or
 # merely-stopped session still has its agent container, so it is never touched.
 #
+# EXCEPT A SESSION THAT IS STILL LAUNCHING (#498): its proxy starts several
+# seconds before its agent's `docker run`, so in that window "no agent
+# container" is true of a perfectly healthy session. Another workspace's launch
+# reaping it then left the new agent on a sidecar with no DNS and no route
+# (EAI_AGAIN until restarted), and Docker could even hand the agent the
+# proxy's freed address. A launch holds its workspace lock from before the
+# proxy starts until teardown, so a proxy whose lock has a live (or not yet
+# written) holder is never stranded; after a reboot the holder is dead and the
+# proxy is reaped as before. --gc's pass 2 applies the same rule.
+#
 # Classification is by IMAGE, never by name prefix: a workspace whose basename
 # is `proxy` produces an AGENT container literally named sandy-proxy-<hash>,
 # which was a real pre-1.3.0 --gc regression. Only containers whose image is
 # sandy-proxy are considered, so that agent is never mistaken for a sidecar.
+# True when sandbox $1's workspace lock has a live holder, or one whose pid is
+# not written yet (_sandy_lock_state "unknown"): a launch or session owns it.
+_sandy_sandbox_lock_held() {
+    [ -d "$SANDY_HOME/sandboxes/.$1.lock" ] || return 1
+    _sandy_lock_state "$SANDY_HOME/sandboxes/.$1.lock"
+    [ "$_SANDY_LOCK_STATE" != "stale" ]
+}
 _sandy_reap_stranded_proxies() {
     [ -z "${_SANDY_APPROVE_REPORT:-}" ] || return 0   # --approvals: no Docker (#296)
     command -v docker >/dev/null 2>&1 || return 0
@@ -3388,6 +3406,8 @@ _sandy_reap_stranded_proxies() {
         if docker ps -a --filter "name=^/sandy-${_sb}$" --format '{{.Names}}' 2>/dev/null | grep -qx "sandy-${_sb}"; then
             continue
         fi
+        # A launch still between its proxy and its agent (#498).
+        _sandy_sandbox_lock_held "$_sb" && continue
         warn "Removing stranded egress proxy $_name (its agent container is gone)."
         docker rm -f "$_name" >/dev/null 2>&1 || true
     done <<< "$_rows"
@@ -12556,15 +12576,23 @@ if [ "$SANDY_STOP" = "true" ]; then
         _sandy_stop_waited=0
         _sandy_stop_timeout_s=15
         _sandy_stop_still=""
+        # Wait for the SUPERVISOR to exit, not only the agent (#498):
+        # cleanup() removes the agent first and then the proxy, networks and
+        # the workspace lock, so returning when the agent vanished left that
+        # teardown running behind --stop / --stop-all, and an immediate
+        # --start of the same workspace found the lock still held.
         while [ "$_sandy_stop_waited" -lt "$_sandy_stop_timeout_s" ]; do
             _sandy_stop_still="$(docker ps -q "${_sandy_daemon_filter[@]}" 2>/dev/null | head -1)" || true
-            [ -z "$_sandy_stop_still" ] && break
+            [ -z "$_sandy_stop_still" ] && ! kill -0 "$_sandy_stop_pid" 2>/dev/null && break
             sleep 1
             _sandy_stop_waited=$((_sandy_stop_waited + 1))
         done
         if [ -n "$_sandy_stop_still" ]; then
             error "Daemon session did not stop within ${_sandy_stop_timeout_s}s (supervisor pid $_sandy_stop_pid)."
             exit 5
+        fi
+        if kill -0 "$_sandy_stop_pid" 2>/dev/null; then
+            warn "The agent stopped, but supervisor pid $_sandy_stop_pid is still finishing its teardown; until it exits, a --start of this workspace finds the workspace locked."
         fi
         info "Daemon session stopped."
         exit 0
@@ -21474,6 +21502,17 @@ fi
 # below. The final `exit "$_run_rc"` at end-of-script preserves the pre-H1
 # behavior where the interactive path exited with docker run's status (it was
 # the last command, so the EXIT trap's `rc=$?` carried the agent's code).
+# #498: the proxy must still exist. If something removed it after its
+# readiness check, the agent would start on an --internal sidecar with no
+# DNS and no route and fail every request (EAI_AGAIN) until restarted, so
+# refuse here, naming the cause, instead of starting a stranded session.
+if [ -n "${PROXY_CONTAINER:-}" ] && ! docker inspect "$PROXY_CONTAINER" >/dev/null 2>&1; then
+    error "The egress proxy $PROXY_CONTAINER was removed before the agent started;"
+    error "  a session started without it would have no DNS or network. Launch again."
+    error "  (Another tool removing sandy-proxy-* containers would cause this.)"
+    _sandy_daemon_fatal
+    exit 1
+fi
 _run_rc=0
 docker run "${RUN_FLAGS[@]}" "$IMAGE_NAME" "$@" || _run_rc=$?
 [ "${SANDY_DAEMON_SUPERVISOR:-0}" = "1" ] || _sandy_tty_restore
