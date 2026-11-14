@@ -55,7 +55,8 @@ workstation or GPU box you reach from a laptop). Sandy owns exactly one of them.
   any VPN) and `sandy --attach`. Moving a running session *to* a different
   machine is something sandy does not do; the session stays on the host that
   started it. `sandy --rsync <host>` copies a sandbox's state to another host so
-  a new session can start there, and `sandy --rsync-from <host>` pulls one from
+  a new session can start there (and the workspace too, when that host has
+  none), and `sandy --rsync-from <host>` pulls one from
   another host to this one. Both refuse while a session is live.
 
 These transports run on the **host**, outside sandy's containers, so they are
