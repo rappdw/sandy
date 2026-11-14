@@ -6107,7 +6107,7 @@ _S91_SANDY="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 # Curated exception lists -- each entry is an intentional, hand-verified
 # exception to the parser<->cli_flags identity, not a loophole papering over
 # drift. See the independently-verified framing facts this PR was built on.
-_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --keep-history --purge-history --sandbox --orphans --fix --all --dest-workspace --dest-sandy-home --src-workspace --src-sandy-home --json"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor/--provision/--rsync/--rsync-from); not standalone cli_flags entries, must instead appear in >=1 description
+_S91_SUBOPT="--dry-run --yes --idle-for --keep-approvals --keep-history --purge-history --sandbox --orphans --fix --all --dest-workspace --dest-sandy-home --src-workspace --src-sandy-home --no-workspace --exclude --json"   # sub-options of a parent flag (--gc/--stop-all/--update-sessions/--reset-sandbox/--remove-sandbox/--doctor/--provision/--rsync/--rsync-from); not standalone cli_flags entries, must instead appear in >=1 description
 _S91_PRIVATE="--print-protected-paths"                        # real, private/debug fast-path flag; deliberately unadvertised
 _S91_FORWARDED="--resume"                                     # a real cli_flags entry with ZERO parser cases (forwarded verbatim to the agent, sandy:4103/4127)
 
@@ -15943,7 +15943,7 @@ exec env -u SANDY_HOME HOME="$REMOTE_HOME" FAKE_REMOTE=1 sh -c "$*"
 STUB
 cat > "$_S154_DIR/bin/rsync" <<'STUB'
 #!/usr/bin/env python3
-import os, sys, shutil
+import os, sys, shutil, fnmatch
 ex, paths, rsh = [], [], None
 args = sys.argv[1:]
 while args:
@@ -15956,6 +15956,8 @@ while args:
 if rsh is None or not rsh.endswith(" -T"): sys.exit("rsync stub: transport without -T: %r" % rsh)
 with open(os.environ.get("RSYNC_STUB_LOG", os.devnull), "a") as f: f.write(rsh + "\n")
 src, dst = paths
+fail = os.environ.get("RSYNC_FAIL_MATCH", "")
+if fail and (fail in src or fail in dst): sys.exit("rsync stub: injected failure")
 def strip(p): return p.split(":", 1)[1] if (":" in p and not p.startswith("/")) else p
 src, dst = strip(src), strip(dst)
 def excluded(rel, isdir):
@@ -15963,18 +15965,23 @@ def excluded(rel, isdir):
         dironly = p.endswith("/"); q = p.strip("/")
         if dironly and not isdir: continue
         if p.startswith("/"):
-            if rel == q: return True
-        elif os.path.basename(rel) == q: return True
+            if fnmatch.fnmatchcase(rel, q): return True
+        elif fnmatch.fnmatchcase(os.path.basename(rel), q): return True
     return False
+def put(s_, d_):   # rsync -a: a symlink arrives as a symlink, never followed
+    if os.path.islink(s_): os.symlink(os.readlink(s_), d_)
+    else: shutil.copy2(s_, d_)
 if src.endswith("/"):
     root = src.rstrip("/"); os.makedirs(dst, exist_ok=True)
     for d, dirs, files in os.walk(root):
         reld = os.path.relpath(d, root); reld = "" if reld == "." else reld
         dirs[:] = [x for x in dirs if not excluded(os.path.join(reld, x), True)]
+        for x in [x for x in dirs if os.path.islink(os.path.join(d, x))]:
+            put(os.path.join(d, x), os.path.join(dst, reld, x)); dirs.remove(x)
         for x in dirs: os.makedirs(os.path.join(dst, reld, x), exist_ok=True)
         for f in files:
             r = os.path.join(reld, f)
-            if not excluded(r, False): shutil.copy2(os.path.join(d, f), os.path.join(dst, r))
+            if not excluded(r, False): put(os.path.join(d, f), os.path.join(dst, r))
 else:
     if dst.endswith("/"): dst = os.path.join(dst, os.path.basename(src))
     os.makedirs(os.path.dirname(dst), exist_ok=True); shutil.copy2(src, dst)
@@ -16145,9 +16152,9 @@ check "§154(23) a live session holding the lock is refused -- copying mid-write
 check "§154(23b) --dry-run against a live session still prints the plan and exits 0, and says a real run would refuse" \
     bash -c 'test "$1" -eq 0 && case "$2" in *"Container path"*"would REFUSE"*) exit 0 ;; esac; exit 1' _ "$_S154_RC" "$_S154_OUT"
 _s154_mk R5 dev/proj
-_s154_run R5 --workspace "$_S154_DIR/R5/lhome/dev/proj" --yes
-check "§154(24) a destination with no such workspace is refused before anything is copied" \
-    bash -c 'test "$1" -eq 1 && test -z "$2"' _ "$_S154_RC" "$(_s154_dest R5)"
+_s154_run R5 --workspace "$_S154_DIR/R5/lhome/dev/proj" --no-workspace --yes
+check "§154(24) with --no-workspace, a destination with no such workspace is refused before anything is copied, and the error names the way out (#509)" \
+    bash -c 'test "$1" -eq 1 && test -z "$2" && test ! -e "$3" && case "$4" in *"drop --no-workspace"*) exit 0 ;; esac; exit 1' _ "$_S154_RC" "$(_s154_dest R5)" "$_S154_DIR/R5/rhome/dev/proj" "$_S154_OUT"
 _s154_mk R6 dev/proj; mkdir -p "$_S154_DIR/R6/rhome/dev/proj"
 SSH_STUB_LOG="$_S154_DIR/ssh.log" _s154_run R6 --workspace "$_S154_DIR/R6/lhome/dev/proj" -oProxyCommand=true --yes
 check "§154(25) an option-shaped host is refused and ssh is NEVER invoked -- a leading '-' reaches ssh as an option, and -oProxyCommand is command execution" \
@@ -16162,6 +16169,80 @@ _s154_run L7 --workspace "$_S154_DIR/L7/lhome/dev/proj" --dest-workspace '~/work
 _S154_D="$(_s154_dest L7)"
 check "§154(26) a 2.7-layout source (claude/.claude.json) is sent as the sibling, rewritten, and NOT also inside claude/ (rc=$_S154_RC)" \
     bash -c 'test "$1" -eq 0 && grep -qF "\"/home/sandy/work/p7\"" "$2.claude.json" && test ! -e "$2/claude/.claude.json"' _ "$_S154_RC" "$_S154_D"
+
+# --- W: the workspace itself (#509) -------------------------------------------
+# A destination with no workspace gets one: copied FIRST (the sandbox is named
+# for its canonical path), whole -- .git, untracked and ignored files, symlinks
+# as links. An existing one is never written to. Each property is asserted on
+# what ARRIVES, and the fixtures put a file on both sides of every decision.
+_s154_ws() {   # FIXTURE: populate the SOURCE workspace
+    _SW="$_S154_DIR/$1/lhome/dev/proj"
+    mkdir -p "$_SW/.git/refs" "$_SW/src" "$_SW/data" "$_SW/.venv/bin" "$_SW/web/node_modules/pkg"
+    printf 'ref: refs/heads/main\n' > "$_SW/.git/HEAD"
+    printf 'secret.txt\n*.log\n' > "$_SW/.gitignore"
+    printf 'IGNORED\n' > "$_SW/secret.txt"; printf 'LOG\n' > "$_SW/run.log"
+    printf 'TOKEN=x\n' > "$_SW/.env"; printf 'code\n' > "$_SW/src/main.py"
+    printf 'big\n' > "$_SW/data/blob"; printf 'py\n' > "$_SW/.venv/bin/python"
+    printf 'js\n' > "$_SW/web/node_modules/pkg/index.js"; printf 'app\n' > "$_SW/web/app.js"
+    ln -s src/main.py "$_SW/link"
+}
+_s154_mk W1 dev/proj; _s154_ws W1
+_s154_run W1 --workspace "$_S154_DIR/W1/lhome/dev/proj" --yes
+_S154_DWS="$_S154_DIR/W1/rhome/dev/proj"
+check "§154(W1) a destination with NO workspace: the copy succeeds and creates it (rc=$_S154_RC)" \
+    bash -c 'test "$1" -eq 0 && test -d "$2"' _ "$_S154_RC" "$_S154_DWS"
+check "§154(W2) ...whole: .git, an untracked file, gitignored files and .env all arrive (mutation: dropping the workspace rsync fails this)" \
+    bash -c 'test -f "$1/.git/HEAD" && test -f "$1/src/main.py" && test -f "$1/secret.txt" && test -f "$1/run.log" && test -f "$1/.env"' _ "$_S154_DWS"
+check "§154(W3) ...a symlink arrives as a symlink, not as a copy of its target" \
+    bash -c 'test -L "$1/link" && test "$(readlink "$1/link")" = src/main.py' _ "$_S154_DWS"
+check "§154(W4) ...and the sandbox lands under the name the NEW workspace's canonical path hashes to, with WORKSPACE.json naming it" \
+    bash -c 'test "$(basename "$1")" = "$2" && grep -qF "\"workspace_path\": \"$3\"," "$1/WORKSPACE.json"' _ "$(_s154_dest W1)" "$(_s154_expect "$_S154_DWS")" "$(cd "$_S154_DWS" && pwd -P)"
+check "§154(W5) the plan says the workspace is copied and NAMES its credential file (.env)" \
+    bash -c 'case "$1" in *"Workspace copy  COPIED first"*"Workspace creds COPIED"*".env"*) exit 0 ;; esac; exit 1' _ "$_S154_OUT"
+
+_s154_mk W2 dev/proj; _s154_ws W2; mkdir -p "$_S154_DIR/W2/rhome/dev/proj"
+printf 'THEIRS\n' > "$_S154_DIR/W2/rhome/dev/proj/MINE"
+printf 'THEIR VERSION\n' > "$_S154_DIR/W2/rhome/dev/proj/.env"
+_s154_run W2 --workspace "$_S154_DIR/W2/lhome/dev/proj" --exclude data/ --yes
+check "§154(W6) an EXISTING destination workspace is never written to: its own files intact, nothing of the source's added (rc=$_S154_RC; mutation: copying into it fails this)" \
+    bash -c 'test "$1" -eq 0 && grep -q THEIRS "$2/MINE" && grep -q "THEIR VERSION" "$2/.env" && test ! -e "$2/src" && test ! -e "$2/.git" && test -n "$3"' _ "$_S154_RC" "$_S154_DIR/W2/rhome/dev/proj" "$(_s154_dest W2)"
+check "§154(W7) ...the plan says so, and an --exclude that can therefore do nothing is warned about, not silently dropped" \
+    bash -c 'case "$1" in *"already exists there"*) ;; *) exit 1 ;; esac; case "$1" in *"--exclude has no effect"*) exit 0 ;; esac; exit 1' _ "$_S154_OUT"
+
+_s154_mk W3 dev/proj; _s154_ws W3
+_s154_run W3 --workspace "$_S154_DIR/W3/lhome/dev/proj" --exclude data/ --exclude '*.log' --exclude /secret.txt --yes
+check "§154(W8) --exclude PATTERN (repeatable, rsync syntax) keeps exactly those out, and nothing else (rc=$_S154_RC)" \
+    bash -c 'test "$1" -eq 0 && test ! -e "$2/data" && test ! -e "$2/run.log" && test ! -e "$2/secret.txt" && test -f "$2/src/main.py" && test -f "$2/.git/HEAD"' _ "$_S154_RC" "$_S154_DIR/W3/rhome/dev/proj"
+
+_s154_mk W4 dev/proj; _s154_ws W4
+LOCAL_ARCH=arm64 REMOTE_ARCH=x86_64 _s154_run W4 --workspace "$_S154_DIR/W4/lhome/dev/proj" --yes
+check "§154(W9) across a CPU architecture change, the workspace .venv/ and node_modules/ (at any depth) are skipped and named in the plan; the rest arrives (rc=$_S154_RC)" \
+    bash -c 'test "$1" -eq 0 && test ! -e "$2/.venv" && test ! -e "$2/web/node_modules" && test -f "$2/web/app.js" && case "$3" in *"excluding: /.venv/ node_modules/"*) exit 0 ;; esac; exit 1' _ "$_S154_RC" "$_S154_DIR/W4/rhome/dev/proj" "$_S154_OUT"
+_s154_mk W4b dev/proj; _s154_ws W4b
+_s154_run W4b --workspace "$_S154_DIR/W4b/lhome/dev/proj" --yes
+check "§154(W9b) ...and on the SAME architecture they are copied" \
+    bash -c 'test -f "$1/.venv/bin/python" && test -f "$1/web/node_modules/pkg/index.js"' _ "$_S154_DIR/W4b/rhome/dev/proj"
+
+_s154_mk W5 dev/proj; _s154_ws W5
+RSYNC_FAIL_MATCH=/rhome/dev/proj/ _s154_run W5 --workspace "$_S154_DIR/W5/lhome/dev/proj" --yes
+check "§154(W10) a FAILED workspace copy copies no sandbox, and says where the partial workspace is (rc=$_S154_RC; mutation: not stopping on that failure fails this)" \
+    bash -c 'test "$1" -eq 1 && test -z "$2" && case "$3" in *"partial copy at"*"sandbox was not copied"*) exit 0 ;; esac; exit 1' _ "$_S154_RC" "$(_s154_dest W5)" "$_S154_OUT"
+
+_s154_mk W6 dev/proj; _s154_ws W6
+_s154_run W6 --workspace "$_S154_DIR/W6/lhome/dev/proj" --dry-run
+check "§154(W11) --dry-run with no destination workspace plans the copy, exits 0, and creates NOTHING there" \
+    bash -c 'test "$1" -eq 0 && test ! -e "$2" && test -z "$3" && case "$4" in *"Workspace copy  COPIED first"*) exit 0 ;; esac; exit 1' _ "$_S154_RC" "$_S154_DIR/W6/rhome/dev/proj" "$(_s154_dest W6)" "$_S154_OUT"
+
+_s154_mk W7 dev/proj; _s154_ws W7; mkdir -p "$_S154_DIR/W7/rhome"; : > "$_S154_DIR/W7/rhome/dev"
+_s154_run W7 --workspace "$_S154_DIR/W7/lhome/dev/proj" --yes
+check "§154(W12) a destination path through a FILE is refused before anything moves, naming why" \
+    bash -c 'test "$1" -eq 1 && test -z "$2" && test -f "$3" && case "$4" in *"exists but is not a directory"*) exit 0 ;; esac; exit 1' _ "$_S154_RC" "$(_s154_dest W7)" "$_S154_DIR/W7/rhome/dev" "$_S154_OUT"
+
+_s154_mk W8 dev/proj; _s154_ws W8; mkdir -p "$_S154_DIR/W8/rhome/real"; ln -s real "$_S154_DIR/W8/rhome/via"
+_s154_run W8 --workspace "$_S154_DIR/W8/lhome/dev/proj" --dest-workspace '~/via/proj' --yes
+check "§154(W13) a new workspace under a SYMLINKED parent: the sandbox is named for the canonical path it will have (rc=$_S154_RC)" \
+    bash -c 'test "$1" -eq 0 && test -f "$2/src/main.py" && test "$(basename "$3")" = "$4"' _ "$_S154_RC" "$_S154_DIR/W8/rhome/real/proj" "$(_s154_dest W8)" "$(_s154_expect "$_S154_DIR/W8/rhome/real/proj")"
+unset _SW _S154_DWS; unset -f _s154_ws
 fi
 rm -rf "$_S154_DIR"
 unset _S154_R1D _S154_SANDY _S154_DIR _S154_HLP _S154_LAUNCH _S154_LCWS _S154_D _S154_OUT _S154_RC _S154_RC_REAL _S154_PID _s154_p _s154_c
@@ -22316,7 +22397,7 @@ exec env -u SANDY_HOME HOME="$REMOTE_HOME" FAKE_REMOTE=1 sh -c "$*"
 STUB
 cat > "$_S187_DIR/bin/rsync" <<'STUB'
 #!/usr/bin/env python3
-import os, sys, shutil
+import os, sys, shutil, fnmatch
 ex, paths, rsh = [], [], None
 args = sys.argv[1:]
 while args:
@@ -22338,18 +22419,23 @@ def excluded(rel, isdir):
         dironly = p.endswith("/"); q = p.strip("/")
         if dironly and not isdir: continue
         if p.startswith("/"):
-            if rel == q: return True
-        elif os.path.basename(rel) == q: return True
+            if fnmatch.fnmatchcase(rel, q): return True
+        elif fnmatch.fnmatchcase(os.path.basename(rel), q): return True
     return False
+def put(s_, d_):   # rsync -a: a symlink arrives as a symlink, never followed
+    if os.path.islink(s_): os.symlink(os.readlink(s_), d_)
+    else: shutil.copy2(s_, d_)
 if src.endswith("/"):
     root = src.rstrip("/"); os.makedirs(dst, exist_ok=True)
     for d, dirs, files in os.walk(root):
         reld = os.path.relpath(d, root); reld = "" if reld == "." else reld
         dirs[:] = [x for x in dirs if not excluded(os.path.join(reld, x), True)]
+        for x in [x for x in dirs if os.path.islink(os.path.join(d, x))]:
+            put(os.path.join(d, x), os.path.join(dst, reld, x)); dirs.remove(x)
         for x in dirs: os.makedirs(os.path.join(dst, reld, x), exist_ok=True)
         for f in files:
             r = os.path.join(reld, f)
-            if not excluded(r, False): shutil.copy2(os.path.join(d, f), os.path.join(dst, r))
+            if not excluded(r, False): put(os.path.join(d, f), os.path.join(dst, r))
 else:
     if dst.endswith("/"): dst = os.path.join(dst, os.path.basename(src))
     os.makedirs(os.path.dirname(dst), exist_ok=True); shutil.copy2(src, dst)
@@ -22482,6 +22568,55 @@ check "§187(24) a 2.7-layout source (claude/.claude.json) is read, rewritten an
 # --- one copy of each rule: push and pull share them -------------------------
 check "§187(23) push and pull use the SAME never-copied list, arch dirs and rewrite helpers (not two copies that can drift)" \
     bash -c 'for s in "--rsync" "--rsync-from"; do x="$(awk -v s="if [[ \"\${1:-}\" == \"$s\" ]]; then" "index(\$0,s)==1{p=1;next} p&&index(\$0,\"# --- sandy --\")==1{exit} p{print}" "$1")"; [ -n "$x" ] || exit 1; for h in _SANDY_RSY_NEVER _SANDY_RSY_ARCH_DIRS _sandy_rsy_ws_rewrite _sandy_rsy_cj_rewrite _sandy_rsy_host_ok; do case "$x" in *"$h"*) ;; *) exit 1 ;; esac; done; done' _ "$_S187_SANDY"
+
+# --- W: the workspace itself (#509) -------------------------------------------
+# A workspace missing HERE is pulled too, when named with --workspace: into a
+# hidden sibling, renamed into place with the sandbox, so a failed pull leaves
+# neither. An existing one is never written to.
+_s187_ws() {   # FIXTURE SRC_REL: populate the REMOTE workspace
+    _SW="$_S187_DIR/$1/rhome/$2"
+    mkdir -p "$_SW/.git" "$_SW/src" "$_SW/.venv/bin" "$_SW/web/node_modules/pkg" "$_SW/data"
+    printf 'ref: refs/heads/main\n' > "$_SW/.git/HEAD"; printf 'secret.txt\n' > "$_SW/.gitignore"
+    printf 'IGNORED\n' > "$_SW/secret.txt"; printf 'TOKEN=x\n' > "$_SW/.env"
+    printf 'code\n' > "$_SW/src/main.py"; printf 'py\n' > "$_SW/.venv/bin/python"
+    printf 'js\n' > "$_SW/web/node_modules/pkg/index.js"; printf 'big\n' > "$_SW/data/blob"
+    ln -s src/main.py "$_SW/link"
+}
+_s187_mk WA dev/proj; _s187_ws WA dev/proj; rm -rf "$_S187_DIR/WA/lhome/dev/proj"
+_s187_run WA --workspace "$_S187_DIR/WA/lhome/dev/proj" --yes
+_S187_LW="$_S187_DIR/WA/lhome/dev/proj"
+check "§187(W1) a workspace missing HERE, named with --workspace, is pulled whole: .git, ignored files, .env, symlink as a link (rc=$_S187_RC)" \
+    bash -c 'test "$1" -eq 0 && test -f "$2/.git/HEAD" && test -f "$2/secret.txt" && test -f "$2/.env" && test -L "$2/link"' _ "$_S187_RC" "$_S187_LW"
+check "§187(W2) ...and the sandbox is installed under the name its canonical path hashes to" \
+    test -f "$_S187_DIR/WA/lhome/.sandy/sandboxes/$(_s187_expect "$_S187_LW")/WORKSPACE.json"
+check "§187(W3) ...with no hidden staging directory left beside it, and its credential file named in the plan" \
+    bash -c '! ls -a "$1" | grep -q "^\.sandy-rsync-from\." && case "$2" in *"Workspace creds COPIED"*".env"*) exit 0 ;; esac; exit 1' _ "$_S187_DIR/WA/lhome/dev" "$_S187_OUT"
+
+_s187_mk WB dev/proj; _s187_ws WB dev/proj; printf 'MINE\n' > "$_S187_DIR/WB/lhome/dev/proj/MINE"
+_s187_run WB --workspace "$_S187_DIR/WB/lhome/dev/proj" --yes
+check "§187(W4) an EXISTING workspace here is never written to: nothing of the remote's added (rc=$_S187_RC; mutation: pulling into it fails this)" \
+    bash -c 'test "$1" -eq 0 && grep -q MINE "$2/MINE" && test ! -e "$2/src" && test ! -e "$2/.git" && case "$3" in *"already exists here"*) exit 0 ;; esac; exit 1' _ "$_S187_RC" "$_S187_DIR/WB/lhome/dev/proj" "$_S187_OUT"
+
+_s187_mk WC dev/proj; _s187_ws WC dev/proj; rm -rf "$_S187_DIR/WC/lhome/dev/proj"
+_s187_run WC --workspace "$_S187_DIR/WC/lhome/dev/proj" --no-workspace --yes
+check "§187(W5) --no-workspace keeps today's refusal for a missing workspace, and copies nothing" \
+    bash -c 'test "$1" -ne 0 && test -z "$2" && test ! -e "$3" && case "$4" in *"drop --no-workspace"*) exit 0 ;; esac; exit 1' _ "$_S187_RC" "$(_s187_here WC)" "$_S187_DIR/WC/lhome/dev/proj" "$_S187_OUT"
+
+_s187_mk WD dev/proj; _s187_ws WD dev/proj; rm -rf "$_S187_DIR/WD/lhome/dev/proj"
+REMOTE_ARCH=aarch64 LOCAL_ARCH=x86_64 _s187_run WD --workspace "$_S187_DIR/WD/lhome/dev/proj" --exclude data/ --yes
+check "§187(W6) --exclude and the architecture-change excludes apply to the pulled workspace; the rest arrives (rc=$_S187_RC)" \
+    bash -c 'test "$1" -eq 0 && test ! -e "$2/data" && test ! -e "$2/.venv" && test ! -e "$2/web/node_modules" && test -f "$2/src/main.py"' _ "$_S187_RC" "$_S187_DIR/WD/lhome/dev/proj"
+
+_s187_mk WE dev/proj; _s187_ws WE dev/proj; rm -rf "$_S187_DIR/WE/lhome/dev/proj"
+RSYNC_FAIL_MATCH=/.sandy/sandboxes/ _s187_run WE --workspace "$_S187_DIR/WE/lhome/dev/proj" --yes
+check "§187(W7) a SANDBOX transfer failing after the workspace was staged installs NEITHER, and leaves no staging (rc=$_S187_RC; mutation: renaming the workspace in before the sandbox is fetched fails this)" \
+    bash -c 'test "$1" -ne 0 && test ! -e "$2" && test -z "$3" && ! ls -a "$4" | grep -q "^\.sandy-rsync-from\."' _ "$_S187_RC" "$_S187_DIR/WE/lhome/dev/proj" "$(_s187_here WE)" "$_S187_DIR/WE/lhome/dev"
+
+_s187_mk WF dev/proj; _s187_ws WF dev/proj; rm -rf "$_S187_DIR/WF/lhome/dev/proj"
+_s187_run WF --workspace "$_S187_DIR/WF/lhome/dev/proj" --dry-run
+check "§187(W8) --dry-run plans the workspace pull and creates nothing here" \
+    bash -c 'test "$1" -eq 0 && test ! -e "$2" && test -z "$3" && case "$4" in *"Workspace copy  COPIED first"*) exit 0 ;; esac; exit 1' _ "$_S187_RC" "$_S187_DIR/WF/lhome/dev/proj" "$(_s187_here WF)" "$_S187_OUT"
+unset _SW _S187_LW; unset -f _s187_ws
 fi
 rm -rf "$_S187_DIR"
 unset _S187_SANDY _S187_DIR _S187_OUT _S187_RC _S187_D _S187_RN _F _DR _W _SH _NAME _SB _CWS _PD _dw _s187_h

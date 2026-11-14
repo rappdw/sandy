@@ -140,4 +140,4 @@ Read the referenced section before editing these areas. Each carries non-obvious
 | Features (`$SANDY_HOME/features/*/feature.json`) | `docs/design/FEATURE-MANIFEST.md` | strict parse or refuse; unknown keys refuse the manifest; both projectors byte-identical (§135) |
 | Cross-session inbound | `docs/security/CROSS_SESSION_INBOUND.md` | sandy's explicit write is load-bearing; written to both settings files; re-measure on Claude Code bumps |
 | Image builds and freshness | SPEC §5, §17 | every build goes through `_sandy_build_allowed`; agent version files must be non-empty |
-| `--rsync` / `--rsync-from` | SPEC §1 "Maintenance Flags" | rename dir + history + `.claude.json` key + `WORKSPACE.json` for the destination; shared helpers in both directions |
+| `--rsync` / `--rsync-from` | SPEC §1 "Maintenance Flags" | rename dir + history + `.claude.json` key + `WORKSPACE.json` for the destination; a missing workspace is copied first and an existing one is never written to (#509); shared helpers in both directions |
