@@ -25469,33 +25469,40 @@ check "§214(5) SANDY_AUTO_APPROVE_PRIVILEGED=1 does not get it through either: 
 # real script without the pre-pass, the way §200 does (codex, egress off,
 # offline, -p), against a docker stub that logs every call and answers every
 # one with success and no output: images exist, so there is nothing to build;
-# curl fails, so the one reachability probe defers the refresh. The agent
-# container is the `run` carrying `--name sandy-ws-<hash>` (the version and
-# passwd probes are `run --rm --entrypoint cat`). The control proves the gate
-# ran BEFORE mount assembly (the approved link's -v is built from what it
-# found; a stale entry is pruned); the refusals prove it ran BEFORE `docker run`.
+# curl fails, so the one reachability probe defers the refresh; gh prints
+# nothing and fails, so sandy takes its "No gh CLI token found" path and no
+# real gh (a network round trip, a real token in the docker log) ever runs.
+# The agent container is the `run` carrying `--name sandy-ws-<hash>`. The
+# control proves the gate ran BEFORE mount assembly (the approved link's -v is
+# built from what it found; a stale entry is pruned); the refusals prove it ran
+# BEFORE any `docker run` at all: every run (the passwd/group probes included)
+# comes after the gate, so a refused launch logs none, and a refusal that
+# starts some other container on its way out is caught too.
 cat > "$_S214_DIR/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$S214_DOCKER_LOG"
 exit 0
 EOF
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$S214_CURL_LOG"\nexit 1\n' > "$_S214_DIR/bin/curl"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$S214_GH_LOG"\nexit 1\n' > "$_S214_DIR/bin/gh"
 printf '#!/bin/sh\nexit 0\n' > "$_S214_DIR/bin/sudo"
 cp "$_S214_DIR/bin/sudo" "$_S214_DIR/bin/iptables"
-chmod +x "$_S214_DIR/bin/docker" "$_S214_DIR/bin/curl" "$_S214_DIR/bin/sudo" "$_S214_DIR/bin/iptables"
+chmod +x "$_S214_DIR/bin/docker" "$_S214_DIR/bin/curl" "$_S214_DIR/bin/gh" "$_S214_DIR/bin/sudo" "$_S214_DIR/bin/iptables"
 # $1 = SANDY_AUTO_APPROVE_PRIVILEGED value, empty = unset. Same output shape as
-# _s214_run; the docker and curl logs are emptied first.
+# _s214_run; the docker, curl and gh logs are emptied first. No host gh
+# account, config dir or token reaches the fixture.
 _s214_fg() {
-    : > "$_S214_DIR/docker.log"; : > "$_S214_DIR/curl.log"
+    : > "$_S214_DIR/docker.log"; : > "$_S214_DIR/curl.log"; : > "$_S214_DIR/gh.log"
     (
         for _v in $(compgen -e); do
             case "$_v" in SANDY_*) unset "$_v" ;; esac
         done
+        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME
         [ -z "$1" ] || export SANDY_AUTO_APPROVE_PRIVILEGED="$1"
         _rc=0
         cd "$_S214_WS" && PATH="$_S214_DIR/bin:$PATH" SANDY_HOME="$_S214_DIR/home" HOME="$_S214_DIR" \
-            SANDY_AGENT=codex SANDY_EGRESS=off SANDY_OFFLINE=1 SANDY_CODEX_AUTH=openai-api OPENAI_API_KEY=fixture \
-            S214_DOCKER_LOG="$_S214_DIR/docker.log" S214_CURL_LOG="$_S214_DIR/curl.log" \
+            SANDY_AGENT=codex SANDY_EGRESS=off SANDY_OFFLINE=1 SANDY_CODEX_AUTH=api_key OPENAI_API_KEY=fixture \
+            S214_DOCKER_LOG="$_S214_DIR/docker.log" S214_CURL_LOG="$_S214_DIR/curl.log" S214_GH_LOG="$_S214_DIR/gh.log" \
             bash "$_S214_SCRIPT" -p fixture </dev/null 2>&1 || _rc=$?
         printf '\nRC=%s\n' "$_rc"
     )
@@ -25509,8 +25516,9 @@ printf '%s\n' "approved-link -> $_S214_DIR/out-a" "gone-link -> $_S214_DIR/out-g
 _S214_OUT="$(_s214_fg "")"
 _S214_RC="$(_s214_rc "$_S214_OUT")"
 [ "$_S214_RC" = 0 ] || _s214_diag "§214(6) foreground control run" "$_S214_OUT"
-check "§214(6) foreground control: with no new link a plain launch gets PAST the gate to the agent's docker run (rc 0, got ${_S214_RC:-none}; without this the refusals below could be an earlier failure)" \
-    bash -c 'test "$1" = 0 && grep -q -- "$3" "$2"' _ "$_S214_RC" "$_S214_DIR/docker.log" "$_S214_RUNPAT"
+check "§214(6) foreground control: with no new link a plain launch gets PAST the gate to the agent's docker run (rc 0, got ${_S214_RC:-none}; without this the refusals below could be an earlier failure), on the dummy API key and the stub gh's no-token path" \
+    bash -c 'test "$1" = 0 && grep -q -- "$3" "$2" && ! printf "%s" "$4" | grep -q "No Codex credentials" && printf "%s" "$4" | grep -q "No gh CLI token found" && grep -q "^auth token" "$5"' \
+    _ "$_S214_RC" "$_S214_DIR/docker.log" "$_S214_RUNPAT" "$_S214_OUT" "$_S214_DIR/gh.log"
 check "§214(6b) ...and the foreground gate itself ran before mount assembly: it pruned the stale entry, and the agent run mounts the approved link's target (mutation: drop or defer the foreground call)" \
     bash -c 'test "$(cat "$1")" = "$2" && grep -m1 -- "$3" "$4" | grep -qF -- "$5"' \
     _ "$_S214_L" "approved-link -> $_S214_DIR/out-a" "$_S214_RUNPAT" "$_S214_DIR/docker.log" "$_S214_MNT"
@@ -25518,27 +25526,27 @@ mv "$_S214_DIR/new-link.parked" "$_S214_WS/new-link"
 cp "$_S214_L" "$_S214_DIR/list.before"
 
 # shared by (7) and (8): refused, list untouched, link named, and the launch
-# had reached the image checks yet never issued the agent's docker run
+# had reached the image checks yet never issued ANY docker run
 _s214_fg_refused() {   # $1 = rc  $2 = output
     test -n "$1" && test "$1" != 0 \
         && cmp -s "$_S214_DIR/list.before" "$_S214_L" \
         && printf '%s' "$2" | grep -q "present at previous approval" \
         && printf '%s' "$2" | grep -qF "new-link -> $_S214_DIR/out-b" \
         && grep -q '^image inspect sandy-codex' "$_S214_DIR/docker.log" \
-        && ! grep -q -- "$_S214_RUNPAT" "$_S214_DIR/docker.log"
+        && ! grep -q '^run ' "$_S214_DIR/docker.log"
 }
 _S214_OUT="$(_s214_fg "")"
 _S214_RC="$(_s214_rc "$_S214_OUT")"
 _S214_OK=0; _s214_fg_refused "$_S214_RC" "$_S214_OUT" || _S214_OK=$?
 [ "$_S214_OK" = 0 ] || _s214_diag "§214(7) foreground new-link run" "$_S214_OUT"
-check "§214(7) FOREGROUND: a new escaping link stops a plain launch BEFORE the agent's docker run: non-zero (got ${_S214_RC:-none}), list byte-identical, link named, launch had reached the image checks, no agent run in the docker log (mutations: refusal only under SANDY_APPROVE_ONLY; foreground call deleted or moved past docker run; C42b)" \
+check "§214(7) FOREGROUND: a new escaping link stops a plain launch BEFORE the agent's docker run: non-zero (got ${_S214_RC:-none}), list byte-identical, link named, launch had reached the image checks, no docker run of any kind in the log (mutations: refusal only under SANDY_APPROVE_ONLY; foreground call deleted or moved past docker run; a refusal that starts a container before exiting; C42b)" \
     test "$_S214_OK" = 0
 
 _S214_OUT="$(_s214_fg 1)"
 _S214_RC="$(_s214_rc "$_S214_OUT")"
 _S214_OK=0; _s214_fg_refused "$_S214_RC" "$_S214_OUT" || _S214_OK=$?
 [ "$_S214_OK" = 0 ] || _s214_diag "§214(8) foreground auto-approve run" "$_S214_OUT"
-check "§214(8) FOREGROUND with SANDY_AUTO_APPROVE_PRIVILEGED=1: still refused the same way, no agent docker run (got rc ${_S214_RC:-none})" \
+check "§214(8) FOREGROUND with SANDY_AUTO_APPROVE_PRIVILEGED=1: still refused the same way, no docker run (got rc ${_S214_RC:-none})" \
     test "$_S214_OK" = 0
 
 rm -rf "$_S214_DIR"
