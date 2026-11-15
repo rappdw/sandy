@@ -28,8 +28,10 @@ dialog, so sandy answers Claude Code's first-run ones before it starts: the
 theme picker, the folder-trust prompt for your workspace, the auto-mode offer
 and the bypass-permissions warning. The trust and first-run answers are also
 written inside the container, so the host does not need `node` (before #505 a
-host without `node` skipped the trust step silently). One limit: `--start` reports ready as soon as the session exists. It
-does not yet check that the agent got past every dialog, so after changing
+host without `node` skipped the trust step silently).
+
+One limit: `--start` reports ready as soon as the session exists. It does not
+yet check that the agent got past every dialog, so after changing
 credentials or Claude Code versions, `sandy --attach` once to look.
 
 **Exit codes** — `--attach`: `0` = the session ended while you were attached,

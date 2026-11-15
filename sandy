@@ -678,6 +678,97 @@ _sandy_write_atomic() {   # $1 = destination path; content on stdin
     rm -f "$_t"; return 1
 }
 
+# Force top-level boolean keys to true in a JSON object file without node or
+# jq (#505, the no-tool settings branch). Usage:
+#   _sandy_json_force_top_true FILE KEY... > NEWFILE
+# Prints the file with each KEY set to true: an absent key is inserted after
+# the opening brace, a literal false is replaced in place, a true is left as
+# it is. Everything else in the file is copied byte for byte. It tokenizes
+# strings, escapes and nesting, so a KEY inside a nested object is not
+# mistaken for the top-level one. It refuses (rc 2, reason on stderr) rather
+# than guess: not one object, an unterminated string, unbalanced brackets,
+# trailing data, a duplicated KEY, a KEY whose value is not true or false, or
+# any top-level key containing an escape (it could spell a KEY).
+# Overridden keys are named on stderr as "OVERRIDE <key>".
+_sandy_json_force_top_true() {
+    local _f="$1"; shift
+    [ -s "$_f" ] || { echo "empty file" >&2; return 2; }
+    awk -v keys="$*" '
+        function fail(m) { print m | "cat 1>&2"; bad = 1; exit 2 }
+        function ws(ch) { return ch == " " || ch == "\t" || ch == "\r" || ch == "\n" }
+        BEGIN { RS = "\001"; nk = split(keys, K, " "); for (q = 1; q <= nk; q++) want[K[q]] = 1 }
+        { s = s $0 }
+        END {
+            if (bad) exit 2
+            if (NR > 1) fail("the file contains a control character")
+            n = length(s); i = 1
+            while (i <= n && ws(substr(s, i, 1))) i++
+            if (substr(s, i, 1) != "{") fail("not a JSON object")
+            open = i; depth = 0; cl = 0
+            for (; i <= n; i++) {
+                c = substr(s, i, 1)
+                if (c == "\"") {
+                    j = i + 1; str = ""; esc = 0
+                    while (j <= n) {
+                        d = substr(s, j, 1)
+                        if (d == "\\") { esc = 1; str = str d substr(s, j + 1, 1); j += 2; continue }
+                        if (d == "\"") break
+                        str = str d; j++
+                    }
+                    if (j > n) fail("unterminated string")
+                    if (depth == 1) {
+                        k = j + 1
+                        while (k <= n && ws(substr(s, k, 1))) k++
+                        if (substr(s, k, 1) == ":") {
+                            if (esc) fail("a top-level key contains an escape")
+                            if (str in want) {
+                                cnt[str]++
+                                v = k + 1
+                                while (v <= n && ws(substr(s, v, 1))) v++
+                                e = v
+                                while (e <= n && substr(s, e, 1) ~ /[a-z]/) e++
+                                pos[str] = v; val[str] = substr(s, v, e - v)
+                            }
+                        }
+                    }
+                    i = j; continue
+                }
+                if (c == "{" || c == "[") depth++
+                else if (c == "}" || c == "]") { depth--; if (depth == 0) { cl = i; break } }
+            }
+            if (!cl) fail("unbalanced brackets")
+            for (t = cl + 1; t <= n; t++) if (!ws(substr(s, t, 1))) fail("data after the object")
+            # Replacements, highest position first, then one insertion after the brace.
+            ins = ""
+            for (q = 1; q <= nk; q++) {
+                key = K[q]
+                if (cnt[key] > 1) fail("key " key " appears more than once")
+                if (cnt[key] == 1) {
+                    if (val[key] == "true") continue
+                    if (val[key] != "false") fail("key " key " is not true or false")
+                    rp[++nr] = pos[key]; rk[nr] = key
+                } else {
+                    ins = ins (ins == "" ? "" : ", ") "\"" key "\": true"
+                }
+            }
+            for (a = 1; a <= nr; a++) for (b = a + 1; b <= nr; b++) if (rp[b] > rp[a]) {
+                tp = rp[a]; rp[a] = rp[b]; rp[b] = tp; tk = rk[a]; rk[a] = rk[b]; rk[b] = tk
+            }
+            for (a = 1; a <= nr; a++) {
+                s = substr(s, 1, rp[a] - 1) "true" substr(s, rp[a] + 5)
+                print "OVERRIDE " rk[a] | "cat 1>&2"
+            }
+            if (ins != "") {
+                m = open + 1
+                while (m <= length(s) && ws(substr(s, m, 1))) m++
+                if (substr(s, m, 1) != "}") ins = ins ","
+                s = substr(s, 1, open) ins substr(s, open + 1)
+            }
+            printf "%s", s
+        }
+    ' "$_f"
+}
+
 # Merge JSON keys into a file. Usage: json_merge <file> '{"key":"value"}'
 json_merge() {
     command -v node &>/dev/null || return 0
@@ -10225,9 +10316,10 @@ esac
 # host does the same with node when it has node; a host without node skipped it
 # silently, and a daemon came up parked on the trust dialog. The image always
 # has node, so this is the copy that cannot be skipped. Idempotent: it writes
-# only when a key is missing, through an exclusive temp renamed in. An
-# unreadable file is left alone, so Claude Code reports it rather than sandy
-# replacing it.
+# only when a key is missing or not true, through an exclusive temp renamed in,
+# keeping the file mode. It reads regular files only (no link, FIFO or device:
+# a FIFO would block the launch here). An unparseable file is left alone, so
+# Claude Code reports it rather than sandy replacing it.
 if _sandy_has_claude && [ -n "${SANDY_WORKSPACE:-}" ]; then
     _cj="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.claude.json"
     if [ -L "$_cj" ]; then
@@ -10238,17 +10330,29 @@ if _sandy_has_claude && [ -n "${SANDY_WORKSPACE:-}" ]; then
         node - "$_cj" "$SANDY_WORKSPACE" <<'SANDY_PRETRUST' || sandy_err "could not pre-trust $SANDY_WORKSPACE in $_cj (#505)"
 const fs = require("fs");
 const f = process.argv[2], w = process.argv[3];
-let d = {};
-if (fs.existsSync(f)) {
-    try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch (e) { process.exit(1); }
+const no = (m) => { console.error("[sandy] ERROR: " + f + " " + m); process.exit(1); };
+let d = {}, st = null;
+try { st = fs.lstatSync(f); } catch (e) { if (e.code !== "ENOENT") no("cannot be examined: " + e.code); }
+if (st) {
+    // Regular files only, checked on the descriptor actually read: O_NOFOLLOW
+    // refuses a link, O_NONBLOCK keeps a FIFO from blocking the open, and
+    // fstat closes the window between the lstat and the open.
+    if (!st.isFile()) no("is not a regular file");
+    let fd;
+    try { fd = fs.openSync(f, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
+    catch (e) { no("cannot be opened: " + e.code); }
+    st = fs.fstatSync(fd);
+    if (!st.isFile()) no("is not a regular file");
+    try { d = JSON.parse(fs.readFileSync(fd, "utf8")); } catch (e) { process.exit(1); }
+    fs.closeSync(fd);
     if (!d || typeof d !== "object" || Array.isArray(d)) process.exit(1);
 }
-let changed = !fs.existsSync(f);
+let changed = !st;
 if (changed) d.theme = "dark";
 const set = (o, k, v) => { if (o[k] !== v) { o[k] = v; changed = true; } };
 for (const k of ["hasCompletedOnboarding", "hasSeenAutoDefaultNudge", "hasSeenAutoDefaultNotice"]) set(d, k, true);
 if (!d.projects || typeof d.projects !== "object" || Array.isArray(d.projects)) { d.projects = {}; changed = true; }
-if (!d.projects[w] || typeof d.projects[w] !== "object") { d.projects[w] = {}; changed = true; }
+if (!d.projects[w] || typeof d.projects[w] !== "object" || Array.isArray(d.projects[w])) { d.projects[w] = {}; changed = true; }
 if (d.projects[w].hasTrustDialogAccepted !== true) {
     d.projects[w].hasTrustDialogAccepted = true;
     d.projects[w].hasCompletedProjectOnboarding = true;
@@ -10257,7 +10361,8 @@ if (d.projects[w].hasTrustDialogAccepted !== true) {
 if (!changed) process.exit(0);
 const t = f + ".sandy-tmp." + process.pid;
 try { fs.unlinkSync(t); } catch (e) {}
-fs.writeFileSync(t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" });
+// Keep the existing mode (a 0600 file stays 0600); a new file is 0600.
+fs.writeFileSync(t, JSON.stringify(d, null, 2) + "\n", { flag: "wx", mode: st ? (st.mode & 0o777) : 0o600 });
 fs.renameSync(t, f);
 SANDY_PRETRUST
     fi
@@ -17039,10 +17144,31 @@ if _sandy_agent_has claude; then
         ' > "$_seed_tmp" 2>/dev/null && mv "$_seed_tmp" "$SEED_SETTINGS"
         if [ -n "$_seed_tmp" ]; then rm -f "$_seed_tmp"; fi
     else
-        # Last resort: write defaults only if no file exists yet.
-        if [ ! -f "$SEED_SETTINGS" ]; then
-            skip_perm="true"
-            [ "${SANDY_SKIP_PERMISSIONS:-true}" = "false" ] && skip_perm="false"
+        # Last resort: write defaults when there is no file yet. An existing
+        # file keeps its content, but while SANDY_SKIP_PERMISSIONS is on the
+        # two prompt-skip keys are still forced true (#505), by a tokenizer
+        # that edits only those values. A file it cannot edit with certainty
+        # fails the launch, naming the file: a daemon must not come up parked
+        # on the bypass dialog.
+        skip_perm="true"
+        [ "${SANDY_SKIP_PERMISSIONS:-true}" = "false" ] && skip_perm="false"
+        if [ -s "$SEED_SETTINGS" ] && [ "$skip_perm" = "true" ]; then
+            _nt_t="$SEED_SETTINGS.sandy-nt.$$"
+            rm -f "$_nt_t"
+            _nt_err="$( ( set -C; _sandy_json_force_top_true "$SEED_SETTINGS" skipDangerousModePermissionPrompt skipAutoPermissionPrompt > "$_nt_t" ) 2>&1 )" && _nt_rc=0 || _nt_rc=$?
+            if [ "$_nt_rc" -ne 0 ]; then
+                rm -f "$_nt_t"
+                echo "[sandy] ERROR: cannot force skipDangerousModePermissionPrompt/skipAutoPermissionPrompt to true in the sandbox settings.json without node or jq on this host (${_nt_err:-unknown reason}). SANDY_SKIP_PERMISSIONS is on, and leaving them would park Claude Code on the bypass-permissions dialog. Install node or jq on the host, or fix or remove $SANDBOX_DIR/claude/settings.json (#505)." >&2
+                _sandy_daemon_fatal
+                exit 1
+            fi
+            for _nt_k in $(printf '%s\n' "$_nt_err" | sed -n 's/^OVERRIDE //p'); do
+                warn "sandbox settings.json set $_nt_k to false; overriding to true because SANDY_SKIP_PERMISSIONS is on (#505)."
+            done
+            if cmp -s "$_nt_t" "$SEED_SETTINGS"; then rm -f "$_nt_t"; else mv -f "$_nt_t" "$SEED_SETTINGS"; fi
+            unset _nt_t _nt_err _nt_rc _nt_k
+        fi
+        if [ ! -s "$SEED_SETTINGS" ]; then
             # #129: connectors default OFF here too. This branch runs when neither
             # node nor jq exists, and omitting the key would leave account
             # connectors ON for exactly the hosts with the fewest tools -- a
