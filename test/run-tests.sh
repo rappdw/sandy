@@ -2059,8 +2059,7 @@ check "persisted symlink approval list path declared" \
     grep -q '\.sandy-approved-symlinks\.list' "$SANDY_SCRIPT_PATH"
 check "symlink approval uses comm -23 for new-entry detection" \
     grep -q 'comm -23.*_current_tmp.*_approved_tmp' "$SANDY_SCRIPT_PATH"
-check "new symlink hard-errors with specific message" \
-    grep -q "Symlink escape detected that wasn't present at previous approval" "$SANDY_SCRIPT_PATH"
+# "new symlink hard-errors with specific message": run, not grepped, in §214.
 check "persisted list refreshed to prune removed entries" \
     grep -q 'cp "\$_current_tmp" "\$_approved_list"' "$SANDY_SCRIPT_PATH"
 
@@ -25384,6 +25383,87 @@ check "§213(3) the reaps that run AFTER the rm all ran: lock dir, feature insta
 chmod -R u+w "$_S213_DIR" 2>/dev/null || true
 rm -rf "$_S213_DIR" "$_S213_WS"
 unset _S213_DIR _S213_WS _S213_H _S213_H16 _S213_B _S213_N _S213_SB _S213_RC
+
+section "§214: a NEW escaping symlink after a first approval stops the launch"
+# ============================================================
+# §43's presence grep for the hard-error message could not see whether the
+# block still STOPS: with its cleanup and `exit 1` deleted it prints the error,
+# falls through to the refresh `cp`, approves the new link silently and the
+# launch continues (mutant C42b, 2026-11-15 test review; it survived every host
+# and contract check). This runs the real gate through the SANDY_APPROVE_ONLY
+# pre-pass -- the same _sandy_resolve_symlinks a foreground launch calls --
+# with a stub docker, and asserts the outcome: non-zero exit, the approved list
+# byte-identical, the new link named. A positive control (same fixture without
+# the new link) must get PAST the gate and prune a stale entry, which proves the
+# probe reached the gate and read the list at the computed sandbox path, so the
+# refusal below is the gate's and not some earlier failure.
+_S214_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+mkdir -p "$_S214_DIR/bin" "$_S214_DIR/home" "$_S214_DIR/ws" "$_S214_DIR/out-a" "$_S214_DIR/out-b"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$_S214_DIR/bin/docker"; chmod +x "$_S214_DIR/bin/docker"
+_S214_WS="$_S214_DIR/ws"
+_S214_H="$(printf '%s' "$_S214_WS" | { shasum -a 256 2>/dev/null || sha256sum; })"
+_S214_H="${_S214_H%% *}"; _S214_H="${_S214_H:0:8}"
+_S214_SB="$_S214_DIR/home/sandboxes/ws-$_S214_H"
+_S214_L="$_S214_SB/.sandy-approved-symlinks.list"
+mkdir -p "$_S214_SB"
+# Targets under the fixture $HOME and outside $SANDY_HOME: the only escapes the
+# gate considers (others are skipped, or refused as sandy state, before it).
+ln -s "$_S214_DIR/out-a" "$_S214_WS/approved-link"
+# Runs the real script from the fixture workspace with every SANDY_* variable
+# of the launching shell removed (inside sandy, the live session's would leak
+# in). $1 = SANDY_AUTO_APPROVE_PRIVILEGED value, empty = unset. Prints the
+# output, then RC=<n>.
+_s214_run() {
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in SANDY_*) unset "$_v" ;; esac
+        done
+        [ -z "$1" ] || export SANDY_AUTO_APPROVE_PRIVILEGED="$1"
+        _rc=0
+        cd "$_S214_WS" && PATH="$_S214_DIR/bin:$PATH" SANDY_HOME="$_S214_DIR/home" HOME="$_S214_DIR" \
+            SANDY_APPROVE_ONLY=1 bash "$_S214_SCRIPT" </dev/null 2>&1 || _rc=$?
+        printf '\nRC=%s\n' "$_rc"
+    )
+}
+_s214_rc() { printf '%s\n' "$1" | sed -n 's/^RC=\([0-9][0-9]*\)$/\1/p' | tail -n 1; }
+_s214_diag() {   # $1 = label  $2 = captured output
+    printf '    \033[0;33m^ %s: captured (last 400 bytes): %s\033[0m\n' \
+        "$1" "$(printf '%s' "$2" | tail -c 400 | tr '\n' ' ' | cat -v)"
+}
+_S214_SCRIPT="$SANDY_SCRIPT"
+
+# --- positive control: the approved link, plus a stale entry to prune -------
+printf '%s\n' "approved-link -> $_S214_DIR/out-a" "gone-link -> $_S214_DIR/out-gone" | sort -u > "$_S214_L"
+_S214_OUT="$(_s214_run "")"
+_S214_RC="$(_s214_rc "$_S214_OUT")"
+[ "$_S214_RC" = 0 ] || _s214_diag "§214(pre) control run" "$_S214_OUT"
+check "§214(pre) control: with no new link the pre-pass gets PAST the gate (rc 0, got ${_S214_RC:-none}), and the gate ran: it pruned the stale entry from the list at the computed sandbox path (without this, every refusal below could be an earlier failure)" \
+    bash -c 'test "$1" = 0 && test "$(cat "$2")" = "$3"' _ "$_S214_RC" "$_S214_L" "approved-link -> $_S214_DIR/out-a"
+
+# --- the case under test: one link added since the approval ----------------
+ln -s "$_S214_DIR/out-b" "$_S214_WS/new-link"
+cp "$_S214_L" "$_S214_DIR/list.before"
+_S214_OUT="$(_s214_run "")"
+_S214_RC="$(_s214_rc "$_S214_OUT")"
+[ "${_S214_RC:-0}" != 0 ] || _s214_diag "§214(1) new-link run" "$_S214_OUT"
+check "§214(1) a new escaping link after approval STOPS the launch, stdin /dev/null (mutation C42b: the block prints its error and falls through, rc 0; got ${_S214_RC:-none})" \
+    bash -c 'test -n "$1" && test "$1" != 0' _ "$_S214_RC"
+check "§214(2) ...and the approved list is byte-identical: the new link was NOT approved (mutation C42b: the refresh cp copies it in)" \
+    cmp -s "$_S214_DIR/list.before" "$_S214_L"
+check "§214(3) ...and the error names the new link, through the hard-error message, not a prompt" \
+    bash -c 'printf "%s" "$1" | grep -q "present at previous approval" && printf "%s" "$1" | grep -qF "new-link -> $2/out-b" && ! printf "%s" "$1" | grep -q "Proceed anyway"' _ "$_S214_OUT" "$_S214_DIR"
+check "§214(4) ...and the refusal is the last thing the launch does: nothing after the re-approval guidance (mutation: deleting only exit 1 still stops, but by a later cp of a removed temp file)" \
+    bash -c 'printf "%s\n" "$1" | grep -v "^RC=" | grep -v "^[[:space:]]*\$" | tail -n 1 | grep -qF "$2"' _ "$_S214_OUT" "$_S214_L"
+
+_S214_OUT="$(_s214_run 1)"
+_S214_RC="$(_s214_rc "$_S214_OUT")"
+check "§214(5) SANDY_AUTO_APPROVE_PRIVILEGED=1 does not get it through either: refused, list unchanged, link named (got rc ${_S214_RC:-none})" \
+    bash -c 'test -n "$1" && test "$1" != 0 && cmp -s "$2" "$3" && printf "%s" "$4" | grep -qF "new-link -> $5/out-b"' \
+    _ "$_S214_RC" "$_S214_DIR/list.before" "$_S214_L" "$_S214_OUT" "$_S214_DIR"
+
+rm -rf "$_S214_DIR"
+unset _S214_DIR _S214_WS _S214_H _S214_SB _S214_L _S214_OUT _S214_RC _S214_SCRIPT
+unset -f _s214_run _s214_rc _s214_diag
 
 # BEGIN SUMMARY
 # ============================================================
