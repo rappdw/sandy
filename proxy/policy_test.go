@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"testing"
 )
@@ -14,6 +15,19 @@ func testPolicy(mode string, allow ...string) *Policy {
 		return []net.IP{net.ParseIP("8.8.8.8")}, nil
 	}
 	return p
+}
+
+// refuseDial makes any upstream dial a test failure. A deny test must install
+// it: with the real dialer, a block that was removed would dial the refused
+// address, the dial would fail (no route, timeout), and Egress would return
+// "dial failed: ..." -- a non-empty reason that a deny != "" check accepts.
+// Egress dials on the caller's goroutine, but t.Errorf plus an error keeps
+// this safe if that ever changes.
+func refuseDial(t *testing.T) func(network, address string) (net.Conn, error) {
+	return func(network, address string) (net.Conn, error) {
+		t.Errorf("Egress dialed %s %s, which the policy must refuse before dialing", network, address)
+		return nil, errors.New("refuseDial: dial attempted")
+	}
 }
 
 func TestIsPrivateIP(t *testing.T) {
@@ -93,11 +107,13 @@ func TestPermitDNS(t *testing.T) {
 
 func TestEgress_Strict(t *testing.T) {
 	p := testPolicy(modeStrict, "api.anthropic.com")
-	if _, deny := p.Egress("evil.com", 443); deny == "" {
-		t.Error("strict Egress allowed a non-allowlisted host")
+	p.dial = refuseDial(t)
+	const want = "not in allowlist"
+	if _, deny := p.Egress("evil.com", 443); deny != want {
+		t.Errorf("strict Egress non-allowlisted host deny = %q, want %q", deny, want)
 	}
-	if _, deny := p.Egress("10.0.0.5", 443); deny == "" {
-		t.Error("strict Egress allowed a raw IP")
+	if _, deny := p.Egress("10.0.0.5", 443); deny != want {
+		t.Errorf("strict Egress raw IP deny = %q, want %q", deny, want)
 	}
 	if _, deny := p.Egress("ex ample.com", 443); deny != "malformed host" {
 		t.Errorf("strict Egress malformed host deny = %q, want 'malformed host'", deny)
@@ -110,12 +126,14 @@ func TestEgress_PermissiveBlocksPrivate(t *testing.T) {
 	p.lookupIP = func(string) ([]net.IP, error) {
 		return []net.IP{net.ParseIP("192.168.1.50")}, nil
 	}
-	if _, deny := p.Egress("intranet.corp", 443); deny == "" {
-		t.Error("permissive Egress allowed a name resolving to a private IP")
+	p.dial = refuseDial(t)
+	const want = "private/LAN address blocked (add to SANDY_ALLOW_HOSTS to allow)"
+	if _, deny := p.Egress("intranet.corp", 443); deny != want {
+		t.Errorf("permissive Egress name resolving to a private IP: deny = %q, want %q", deny, want)
 	}
 	// A raw private IP literal (via CONNECT) must be blocked too.
-	if _, deny := p.Egress("169.254.169.254", 80); deny == "" {
-		t.Error("permissive Egress allowed the cloud-metadata address")
+	if _, deny := p.Egress("169.254.169.254", 80); deny != want {
+		t.Errorf("permissive Egress cloud-metadata literal: deny = %q, want %q", deny, want)
 	}
 }
 
@@ -139,13 +157,15 @@ func TestEgress_PermissiveExceptionAllowsPrivate(t *testing.T) {
 // target or an explicit host:port entry is a deliberate LAN-exception and
 // bypasses the re-check.
 func TestEgress_StrictResolvedIPRecheck(t *testing.T) {
+	const strictRecheckDeny = "allowlisted name resolved to private/LAN address; refused"
 	t.Run("allowlisted name resolving to cloud metadata is refused", func(t *testing.T) {
 		p := testPolicy(modeStrict, "internal.example.com")
 		p.lookupIP = func(string) ([]net.IP, error) {
 			return []net.IP{net.ParseIP("169.254.169.254")}, nil
 		}
-		if _, deny := p.Egress("internal.example.com", 443); deny == "" {
-			t.Error("strict Egress allowed an allowlisted name resolving to the cloud-metadata address")
+		p.dial = refuseDial(t)
+		if _, deny := p.Egress("internal.example.com", 443); deny != strictRecheckDeny {
+			t.Errorf("allowlisted name resolving to the cloud-metadata address: deny = %q, want %q", deny, strictRecheckDeny)
 		}
 	})
 
@@ -154,8 +174,9 @@ func TestEgress_StrictResolvedIPRecheck(t *testing.T) {
 		p.lookupIP = func(string) ([]net.IP, error) {
 			return []net.IP{net.ParseIP("10.0.0.5")}, nil
 		}
-		if _, deny := p.Egress("internal.example.com", 443); deny == "" {
-			t.Error("strict Egress allowed an allowlisted name resolving to a private RFC1918 address")
+		p.dial = refuseDial(t)
+		if _, deny := p.Egress("internal.example.com", 443); deny != strictRecheckDeny {
+			t.Errorf("allowlisted name resolving to a private RFC1918 address: deny = %q, want %q", deny, strictRecheckDeny)
 		}
 	})
 
