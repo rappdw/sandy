@@ -60,6 +60,50 @@ case "${SANDY_LAUNCH_ID:-}" in
         unset _sl _slt ;;
 esac
 
+# #505: pre-trust the workspace and set the first-run flags in .claude.json
+# HERE, after the staged copies are in place and before any agent starts. The
+# host does the same with node when it has node; a host without node skipped it
+# silently, and a daemon came up parked on the trust dialog. The image always
+# has node, so this is the copy that cannot be skipped. Idempotent: it writes
+# only when a key is missing, through an exclusive temp renamed in. An
+# unreadable file is left alone, so Claude Code reports it rather than sandy
+# replacing it.
+if _sandy_has_claude && [ -n "${SANDY_WORKSPACE:-}" ]; then
+    _cj="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.claude.json"
+    if [ -L "$_cj" ]; then
+        sandy_err "$_cj is a symlink; not pre-trusting the workspace through it (#505)"
+    elif ! command -v node >/dev/null 2>&1; then
+        sandy_err "node is missing from the image; cannot pre-trust the workspace (#505)"
+    else
+        node - "$_cj" "$SANDY_WORKSPACE" <<'SANDY_PRETRUST' || sandy_err "could not pre-trust $SANDY_WORKSPACE in $_cj (#505)"
+const fs = require("fs");
+const f = process.argv[2], w = process.argv[3];
+let d = {};
+if (fs.existsSync(f)) {
+    try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch (e) { process.exit(1); }
+    if (!d || typeof d !== "object" || Array.isArray(d)) process.exit(1);
+}
+let changed = !fs.existsSync(f);
+if (changed) d.theme = "dark";
+const set = (o, k, v) => { if (o[k] !== v) { o[k] = v; changed = true; } };
+for (const k of ["hasCompletedOnboarding", "hasSeenAutoDefaultNudge", "hasSeenAutoDefaultNotice"]) set(d, k, true);
+if (!d.projects || typeof d.projects !== "object" || Array.isArray(d.projects)) { d.projects = {}; changed = true; }
+if (!d.projects[w] || typeof d.projects[w] !== "object") { d.projects[w] = {}; changed = true; }
+if (d.projects[w].hasTrustDialogAccepted !== true) {
+    d.projects[w].hasTrustDialogAccepted = true;
+    d.projects[w].hasCompletedProjectOnboarding = true;
+    changed = true;
+}
+if (!changed) process.exit(0);
+const t = f + ".sandy-tmp." + process.pid;
+try { fs.unlinkSync(t); } catch (e) {}
+fs.writeFileSync(t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" });
+fs.renameSync(t, f);
+SANDY_PRETRUST
+    fi
+    unset _cj
+fi
+
 sandy_log "Setting up language toolchains"
 # Cargo: writable registry cache + cargo-install binaries
 export CARGO_HOME="$HOME/.cargo"

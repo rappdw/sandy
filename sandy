@@ -10220,6 +10220,50 @@ case "${SANDY_LAUNCH_ID:-}" in
         unset _sl _slt ;;
 esac
 
+# #505: pre-trust the workspace and set the first-run flags in .claude.json
+# HERE, after the staged copies are in place and before any agent starts. The
+# host does the same with node when it has node; a host without node skipped it
+# silently, and a daemon came up parked on the trust dialog. The image always
+# has node, so this is the copy that cannot be skipped. Idempotent: it writes
+# only when a key is missing, through an exclusive temp renamed in. An
+# unreadable file is left alone, so Claude Code reports it rather than sandy
+# replacing it.
+if _sandy_has_claude && [ -n "${SANDY_WORKSPACE:-}" ]; then
+    _cj="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.claude.json"
+    if [ -L "$_cj" ]; then
+        sandy_err "$_cj is a symlink; not pre-trusting the workspace through it (#505)"
+    elif ! command -v node >/dev/null 2>&1; then
+        sandy_err "node is missing from the image; cannot pre-trust the workspace (#505)"
+    else
+        node - "$_cj" "$SANDY_WORKSPACE" <<'SANDY_PRETRUST' || sandy_err "could not pre-trust $SANDY_WORKSPACE in $_cj (#505)"
+const fs = require("fs");
+const f = process.argv[2], w = process.argv[3];
+let d = {};
+if (fs.existsSync(f)) {
+    try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch (e) { process.exit(1); }
+    if (!d || typeof d !== "object" || Array.isArray(d)) process.exit(1);
+}
+let changed = !fs.existsSync(f);
+if (changed) d.theme = "dark";
+const set = (o, k, v) => { if (o[k] !== v) { o[k] = v; changed = true; } };
+for (const k of ["hasCompletedOnboarding", "hasSeenAutoDefaultNudge", "hasSeenAutoDefaultNotice"]) set(d, k, true);
+if (!d.projects || typeof d.projects !== "object" || Array.isArray(d.projects)) { d.projects = {}; changed = true; }
+if (!d.projects[w] || typeof d.projects[w] !== "object") { d.projects[w] = {}; changed = true; }
+if (d.projects[w].hasTrustDialogAccepted !== true) {
+    d.projects[w].hasTrustDialogAccepted = true;
+    d.projects[w].hasCompletedProjectOnboarding = true;
+    changed = true;
+}
+if (!changed) process.exit(0);
+const t = f + ".sandy-tmp." + process.pid;
+try { fs.unlinkSync(t); } catch (e) {}
+fs.writeFileSync(t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" });
+fs.renameSync(t, f);
+SANDY_PRETRUST
+    fi
+    unset _cj
+fi
+
 sandy_log "Setting up language toolchains"
 # Cargo: writable registry cache + cargo-install binaries
 export CARGO_HOME="$HOME/.cargo"
@@ -16809,6 +16853,16 @@ if _sandy_agent_has claude; then
             const skip = (process.env.SANDY_SKIP_PERMISSIONS || 'true') !== 'false';
             const defaults = {spinnerTipsEnabled:false, skipDangerousModePermissionPrompt:skip, skipAutoPermissionPrompt:skip, statusLine:{ type:'command', command:'/usr/local/bin/sandy-claude-statusline', padding:0 }};
             for (const [k,v] of Object.entries(defaults)) { if (!(k in s)) s[k]=v; }
+            // #505: while SANDY_SKIP_PERMISSIONS is on, the two prompt-skip keys
+            // are MANAGED, not only-if-absent. A host false rode in through the
+            // merge base and left the bypass warning dialog up, which no one can
+            // answer under --start. With skip off they stay only-if-absent.
+            if (skip) for (const k of ['skipDangerousModePermissionPrompt', 'skipAutoPermissionPrompt']) {
+                if (s[k] !== true) {
+                    if (k in s) console.error('[sandy] WARN: host settings.json sets ' + k + ' to ' + JSON.stringify(s[k]) + '; overriding to true because SANDY_SKIP_PERMISSIONS is on (#505). Set SANDY_SKIP_PERMISSIONS=false to keep the prompt.');
+                    s[k] = true;
+                }
+            }
             // SANDY_CLAUDE_USAGE: the statusLine becomes managed. The host
             // command is not lost: the launch passes it to the helper, which
             // runs it first. Only the padding the user chose is kept.
@@ -16928,6 +16982,15 @@ if _sandy_agent_has claude; then
         if [ -z "$_base_src" ] || [ ! -s "$_base_src" ]; then
             _seed_empty=true
         fi
+        # #505: name a host false the managed keys below override (the node
+        # branch warns from inside its program).
+        if [ "$skip_perm" = true ] && [ "$_seed_empty" = false ]; then
+            for _sk in skipDangerousModePermissionPrompt skipAutoPermissionPrompt; do
+                _skv="$(jq -c --arg k "$_sk" 'if type == "object" and has($k) and .[$k] != true then .[$k] else empty end' "$_base_src" 2>/dev/null)" || _skv=""
+                [ -n "$_skv" ] && warn "host settings.json sets $_sk to $_skv; overriding to true because SANDY_SKIP_PERMISSIONS is on (#505). Set SANDY_SKIP_PERMISSIONS=false to keep the prompt."
+            done
+            unset _sk _skv
+        fi
         _seed_tmp="$(mktemp "$SEED_SETTINGS.XXXXXX" 2>/dev/null)" || _seed_tmp=""
         [ -n "$_seed_tmp" ] && { if [ "$_seed_empty" = true ]; then printf '{}\n'; else cat "$_base_src"; fi; } | jq --arg skip "$skip_perm" --arg connectors "${SANDY_CLAUDE_CONNECTORS:-0}" --arg usage "${SANDY_CLAUDE_USAGE:-1}" --argjson prev "$_prev_plugins" '
             (if . == null then {} else . end) |
@@ -16938,8 +17001,10 @@ if _sandy_agent_has claude; then
             # three of these, so the distinction matters. Object-valued //= uses
             # below are unaffected: an object is always truthy.
             (if has("spinnerTipsEnabled") then . else .spinnerTipsEnabled = false end) |
-            (if has("skipDangerousModePermissionPrompt") then . else .skipDangerousModePermissionPrompt = ($skip == "true") end) |
-            (if has("skipAutoPermissionPrompt") then . else .skipAutoPermissionPrompt = ($skip == "true") end) |
+            # #505: MANAGED while skip is on (a host false left the bypass
+            # dialog up under --start); only-if-absent while it is off.
+            (if $skip == "true" then .skipDangerousModePermissionPrompt = true elif has("skipDangerousModePermissionPrompt") then . else .skipDangerousModePermissionPrompt = false end) |
+            (if $skip == "true" then .skipAutoPermissionPrompt = true elif has("skipAutoPermissionPrompt") then . else .skipAutoPermissionPrompt = false end) |
             .statusLine //= {"type":"command","command":"/usr/local/bin/sandy-claude-statusline","padding":0} |
             # SANDY_CLAUDE_USAGE: managed statusLine, the host command wrapped
             # by the helper (see the node branch). Padding is kept.
@@ -18774,7 +18839,7 @@ if _sandy_agent_has claude && [ ! -f "$CLAUDE_JSON" ]; then
         # Same failure class as the auto-mode nudge below and the custom-API-key
         # modal: a first-run prompt that turns a daemon session inert while every
         # structural check passes. Measured against 2.1.263 and again on 2.1.270.
-        printf '{"tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding":true,"theme":"dark"}\n' | _sandy_write_atomic "$CLAUDE_JSON"
+        printf '{"tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding":true,"hasSeenAutoDefaultNudge":true,"hasSeenAutoDefaultNotice":true,"theme":"dark"}\n' | _sandy_write_atomic "$CLAUDE_JSON"
     fi
 fi
 # #338: heal a sandbox crossed from 1.x, BEFORE the container starts. That
@@ -18802,6 +18867,13 @@ if _sandy_agent_has claude; then
     # theme picker. `theme` is deliberately NOT re-merged: the seed sets it once,
     # and a user who picks another theme with /theme must keep it.
     json_merge "$CLAUDE_JSON" '{"tipsDisabled":true,"installMethod":"native","hasCompletedOnboarding":true,"hasSeenAutoDefaultNudge":true,"hasSeenAutoDefaultNotice":true}'
+    # #505: without node on the host, json_merge above and the trust write
+    # below are both skipped. Name it rather than discard it: user-setup.sh
+    # applies the same keys inside the container (where node always exists)
+    # before Claude Code starts, so the launch still comes up past the dialogs.
+    if ! command -v node >/dev/null 2>&1; then
+        info "node is not on this host's PATH: the container pre-trusts the workspace and sets the first-run flags in .claude.json instead (#505)."
+    fi
     # Pre-trust the workspace so Claude Code doesn't show the trust dialog.
     # Sandy provides whole-session isolation — the trust prompt is redundant.
     node -e '
@@ -18819,7 +18891,8 @@ if _sandy_agent_has claude; then
         // section 87 extracts this program up to the first line naming it.
         if (d.projects[w].hasTrustDialogAccepted !== true) { d.projects[w].hasTrustDialogAccepted = true; d.projects[w].hasCompletedProjectOnboarding = true; }
         { const __t = f + ".sandy-tmp." + process.pid; try { fs.unlinkSync(__t); } catch (e) {} fs.writeFileSync(__t, JSON.stringify(d, null, 2) + "\n", { flag: "wx" }); fs.renameSync(__t, f); }  // exclusive temp, renamed in (#400)
-    ' "$CLAUDE_JSON" "$SANDY_WORKSPACE" 2>/dev/null || true
+    ' "$CLAUDE_JSON" "$SANDY_WORKSPACE" 2>/dev/null \
+        || { command -v node >/dev/null 2>&1 && warn "Could not pre-trust the workspace host-side (node failed on $CLAUDE_JSON); the container applies it at start (#505)."; true; }
 fi
 if _sandy_agent_has claude; then
     _sandy_stage_commit "$CLAUDE_JSON_LIVE"

@@ -590,7 +590,7 @@ class ProductionContracts(unittest.TestCase):
             mutant = code.replace('_SANDY_AGENTS[0]', '_SANDY_AGENTS[1]')
             self.assertNotEqual(self.run_source(mutant).stdout, run.stdout)
 
-    def test_real_settings_seed_preserves_plugins_and_false_on_both_parsers(self):
+    def test_real_settings_seed_preserves_plugins_and_manages_skip_keys_on_both_parsers(self):
         for parser in ("node", "jq"):
             with self.subTest(parser=parser):
                 if not shutil.which(parser):
@@ -611,7 +611,8 @@ class ProductionContracts(unittest.TestCase):
                 self.assertEqual(run.returncode, 0, run.stderr)
                 first = json.loads(target.read_text())
                 self.assertEqual(first["flavor"], "A")
-                self.assertIs(first["skipAutoPermissionPrompt"], False)
+                # #505: a host false is overridden while SANDY_SKIP_PERMISSIONS is on.
+                self.assertIs(first["skipAutoPermissionPrompt"], True)
                 first["enabledPlugins"] = {"fixture-plugin": True}
                 target.write_text(json.dumps(first))
                 host.write_text(json.dumps({"flavor": "B"}))
@@ -621,6 +622,14 @@ class ProductionContracts(unittest.TestCase):
                 self.assertEqual(second["flavor"], "B")
                 self.assertTrue(second["enabledPlugins"]["fixture-plugin"])
                 self.assertIs(second["skipAutoPermissionPrompt"], True)
+                # With SANDY_SKIP_PERMISSIONS=false the keys are only-if-absent again,
+                # so a host false is kept.
+                host.write_text(json.dumps({"flavor": "C", "skipAutoPermissionPrompt": False}))
+                run = self.run_source(code, PATH=str(bindir), SANDBOX_IS_NEW="false", SANDY_SKIP_PERMISSIONS="false")
+                self.assertEqual(run.returncode, 0, run.stderr)
+                third = json.loads(target.read_text())
+                self.assertEqual(third["flavor"], "C")
+                self.assertIs(third["skipAutoPermissionPrompt"], False)
 
 
 if __name__ == "__main__":
