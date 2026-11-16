@@ -97,31 +97,28 @@ fail()  { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "  \033[0;31m✗ %s\033[0m\
 # run on a bare host report "all passed" while having run fewer assertions.
 SKIPPED=0
 skip()  { SKIPPED=$((SKIPPED + 1)); printf "  \033[0;33m– skipped: %s\033[0m\n" "$*"; }
-# Every check writes to ONE scratch log; only a failed or skipped check moves it
-# to a unique check.XXXXXX name, so a passing check costs no mktemp/rm fork
-# pair (about 3,000 of them per run, 13 s on the Mac). A check whose command
-# is a shell function that itself calls check would share that file, so a
-# nested call falls back to its own fresh log. cleanup() removes the shared one.
-_CHECK_DEPTH=0
+# Every check gets its own log, named from a counter rather than by mktemp, so
+# a check costs no mktemp fork (about 3,000 per run). A fresh file per check,
+# never a reused one: a background process an earlier check left running may
+# still hold its log open, and must not write into a later check's. A failed
+# or skipped check's log is renamed to a unique check.XXXXXX, as before;
+# cleanup() removes any check.p* left behind.
+_CHECK_SEQ=0
 check() {
     # check "description" <command...>
     local desc="$1"; shift
-    local shared="$SANDY_TEST_LOG_DIR/check.current" log rc=0
-    _CHECK_DEPTH=$((_CHECK_DEPTH + 1))
-    if [ "$_CHECK_DEPTH" -eq 1 ]; then
-        log="$shared"
-    else
-        log="$(mktemp "$SANDY_TEST_LOG_DIR/check.XXXXXX")"
-    fi
+    local log kept rc=0
+    _CHECK_SEQ=$((_CHECK_SEQ + 1))
+    log="$SANDY_TEST_LOG_DIR/check.p$_CHECK_SEQ"
     "$@" >"$log" 2>&1 || rc=$?
-    _CHECK_DEPTH=$((_CHECK_DEPTH - 1))
-    if [ "$rc" -ne 0 ] && [ "$log" = "$shared" ]; then
-        log="$(mktemp "$SANDY_TEST_LOG_DIR/check.XXXXXX")"
-        mv -f "$shared" "$log"
+    if [ "$rc" -ne 0 ]; then
+        kept="$(mktemp "$SANDY_TEST_LOG_DIR/check.XXXXXX")"
+        mv -f "$log" "$kept"
+        log="$kept"
     fi
     if [ "$rc" -eq 0 ]; then
         pass "$desc"
-        [ "$log" = "$shared" ] || rm -f "$log"
+        rm -f "$log"
     elif [ "$rc" -eq 77 ]; then
         skip "$desc (see $log)"
         cat "$log"
@@ -201,7 +198,7 @@ _SCHEMA_CACHE="$(mktemp)"
 cleanup() {
     _emit_summary
     rm -rf "$TEST_PROJECT" "$SANDBOX_DIR" "$_SCHEMA_CACHE" ${_PATH_FARM_MASTER:+"$_PATH_FARM_MASTER"} 2>/dev/null || true
-    rm -f "${SANDY_TEST_LOG_DIR:-/nonexistent}/check.current" 2>/dev/null || true
+    [ -z "${SANDY_TEST_LOG_DIR:-}" ] || rm -f "$SANDY_TEST_LOG_DIR"/check.p* 2>/dev/null || true
 }
 trap cleanup EXIT
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
@@ -213,18 +210,25 @@ bash "$SCRIPT" --print-protected-paths >/dev/null
 
 # ONE --print-schema run, read by every check that asserts on the schema's
 # CONTENT. Its output depends on nothing but the script (no HOME, SANDY_HOME,
-# cwd, PATH or SANDY_* input), and each run cost 0.6 s on Linux and 6 s on the
-# Mac, 48 times. Checks that test the INVOCATION itself (its exit status,
-# stderr, environment handling or docker spawns: §92, §93, §100, §185) still
-# run it live, and so must any check that runs a modified copy of sandy.
-# Asserted here, before anything reads it: a run that exits non-zero or prints
-# no single JSON document stops the group rather than failing 40 checks.
+# cwd, PATH or SANDY_* input), and it ran 48 times. Checks that test the
+# INVOCATION itself (its exit status, stderr, environment handling or docker
+# spawns: §92, §93, §100, §185) still run it live, and so must any check that
+# runs a modified copy of sandy. Asserted here, before anything reads it: a run
+# that fails, prints nothing, or prints something other than one JSON document
+# stops the group rather than failing 40 checks.
 _SCHEMA_CACHE_RC=0
 bash "$SCRIPT" --print-schema >"$_SCHEMA_CACHE" 2>/dev/null || _SCHEMA_CACHE_RC=$?
-if [ "$_SCHEMA_CACHE_RC" -ne 0 ] || [ ! -s "$_SCHEMA_CACHE" ] \
-    || ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$_SCHEMA_CACHE" >/dev/null 2>&1; then
-    printf '\033[0;31m✗ sandy --print-schema (exit %s, %s bytes) did not produce one JSON document; every schema check reads it\033[0m\n' \
-        "$_SCHEMA_CACHE_RC" "$(wc -c <"$_SCHEMA_CACHE" | tr -d ' ')" >&2
+_SCHEMA_CACHE_BAD=""
+if [ "$_SCHEMA_CACHE_RC" -ne 0 ]; then
+    _SCHEMA_CACHE_BAD="exited $_SCHEMA_CACHE_RC"
+elif [ ! -s "$_SCHEMA_CACHE" ]; then
+    _SCHEMA_CACHE_BAD="exited 0 but printed nothing"
+elif ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$_SCHEMA_CACHE" >/dev/null 2>&1; then
+    _SCHEMA_CACHE_BAD="exited 0 but its $(wc -c <"$_SCHEMA_CACHE" | tr -d ' ') bytes are not one JSON document"
+fi
+if [ -n "$_SCHEMA_CACHE_BAD" ]; then
+    printf '\033[0;31m✗ sandy --print-schema %s; every schema check reads its output, so the host group stops here\033[0m\n' \
+        "$_SCHEMA_CACHE_BAD" >&2
     exit 1
 fi
 
@@ -24573,13 +24577,14 @@ _s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_PUSH="" >/d
 check "§205(9) each token reaches gh through GH_TOKEN, never argv" \
     bash -c 'grep -qx "api repos/someorg/repo --jq .permissions.push|tok=tokB" "$1" && ! cut -d"|" -f1 "$1" | grep -q "tok[ABC]"' _ "$_S205_D/log"
 _s205_t0=$SECONDS
-# One account hangs and the next answers (no push): one wait proves the
-# abandonment, the second call proves the pick goes on past it, and the
-# fall-through is the same. Two hanging accounts cost 10 s for nothing more.
-_s205_r="$(_s205f "$(_s205 "hostact:tokA,pusher:tokB" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_HANG=tokA STUB_PUSH="")")"
+# One account hangs and the next answers that it can push: the one wait proves
+# the abandonment, and picking the second proves the pick goes on past it and
+# still reads that answer (§205(2)/(3) cover the fall-through to the host's
+# active account). Two hanging accounts cost 10 s for nothing more.
+_s205_r="$(_s205f "$(_s205 "hostact:tokA,pusher:tokB" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_HANG=tokA STUB_PUSH="tokB")")"
 _s205_dt=$((SECONDS - _s205_t0))
-check "§205(10) a push check that hangs is abandoned after about 5 s, the next account is still asked, then the host's active account is used (took ${_s205_dt}s, got: $_s205_r)" \
-    bash -c '[ "$1" = "hostact|host active account|calls=2" ] && [ "$2" -le 7 ]' _ "$_s205_r" "$_s205_dt"
+check "§205(10) a push check that hangs is abandoned after about 5 s, and the next account is still asked and its answer used (took ${_s205_dt}s, got: $_s205_r)" \
+    bash -c '[ "$1" = "pusher|can push to someorg/repo|calls=2" ] && [ "$2" -le 7 ]' _ "$_s205_r" "$_s205_dt"
 # The container side applies the host's choice and decides nothing.
 _S205_CT="$(awk '/^    # Make the account the HOST chose active/{p=1} p{print} p&&/^    fi$/{exit}' "$SANDY_SCRIPT")"
 _s205_ct() { : > "$_S205_D/log"; env -i PATH="$_S205_D/bin:$PATH" STUB_LOG="$_S205_D/log" SANDY_GH_ACTIVE="$1" bash -c 'set -euo pipefail; sandy_log() { :; }; IFS="," read -ra _gh_pairs <<< "a:t1,b:t2"; eval "$1"' _ "$_S205_CT" 2>"$_S205_D/err"; cat "$_S205_D/log"; }
