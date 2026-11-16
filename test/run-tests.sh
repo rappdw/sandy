@@ -26272,6 +26272,111 @@ rm -rf "$_S214_DIR"
 unset _S214_DIR _S214_TMPL _S214_PROG _S214_BLOCK _S214_HOSTF _S214_SBF _S214_HOSTBLK _f _o _t _s214_ino _s214_rc _s214_mv _s214_pt _s214_tm _s214_lit _s214_pid _s214_i _s214_out
 unset -f _s214_run _s214_q _s214_seed _s214_host 2>/dev/null || true
 
+echo ""
+section "§222: launch guards STOP the launch before any image or container work (moved from integration §1 and §15a)"
+# ============================================================
+# These ran only in run-integration-tests.sh (§1 and §15a), on a schedule, on
+# Linux, and asserted only that the error text appeared. That cannot see a
+# guard that prints its error and falls through: with the `exit 1` of the
+# --remote or the discord guard deleted (mutants C21b, C22b, 2026-11-15 test
+# review), the message still prints and the launch goes on to inspect and
+# build images. No host check caught either. Here each guard runs for real,
+# from a clean environment, against a stub docker that answers `info` and
+# fails everything else, and must (a) exit non-zero, (b) print its message,
+# (c) issue no docker command that inspects, builds or runs anything.
+_S222_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+mkdir -p "$_S222_D/bin" "$_S222_D/ws" "$_S222_D/home"
+cat > "$_S222_D/bin/docker" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$S222_DOCKER_LOG"
+[ "$1" = info ] && exit 0
+exit 1
+STUB
+cp "$_S222_D/bin/docker" "$_S222_D/bin/tmux"
+chmod +x "$_S222_D/bin/docker" "$_S222_D/bin/tmux"
+# _s222_launch TAG [VAR=VALUE...] bash SANDY ARGS...: run from the fixture
+# workspace with nothing inherited but PATH and TMPDIR (inside sandy, the live
+# session's SANDY_* would leak in). Output, rc and the docker log land in
+# $_S222_D/TAG.out, TAG.rc and TAG.docker.
+_s222_launch() {
+    local tag="$1" rc=0; shift
+    : > "$_S222_D/$tag.docker"
+    ( cd "$_S222_D/ws" && env -i PATH="$_S222_D/bin:$PATH" TMPDIR="${TMPDIR:-/tmp}" TERM=dumb \
+        HOME="$_S222_D/home" SANDY_HOME="$_S222_D/home/.sandy" S222_DOCKER_LOG="$_S222_D/$tag.docker" \
+        "$@" ) </dev/null >"$_S222_D/$tag.out" 2>&1 || rc=$?
+    printf '%s\n' "$rc" > "$_S222_D/$tag.rc"
+}
+# _s222_stopped TAG MESSAGE: non-zero, MESSAGE printed (a fixed string), and no
+# docker call past the preflight (info, network ls, ps). On failure it prints
+# what it saw, which check() shows.
+_s222_stopped() {
+    bash -c '
+        d="$1"; t="$2"; m="$3"; rc="$(cat "$d/$t.rc")"
+        if [ "$rc" != 0 ] && grep -qF -- "$m" "$d/$t.out" &&
+           ! grep -Eq "^(image|build|buildx|builder|pull|load|create|run|start|exec|compose|container)( |$)" "$d/$t.docker"; then
+            exit 0
+        fi
+        echo "rc=$rc; expected message: $m"; echo "--- output:"; cat "$d/$t.out"; echo "--- docker calls:"; cat "$d/$t.docker"
+        exit 1' _ "$_S222_D" "$1" "$2"
+}
+_S222_MSG_REMOTE="--remote is only supported with SANDY_AGENT=claude (solo)"
+_S222_MSG_DISCORD="SANDY_CHANNELS=discord is only supported with SANDY_AGENT=claude (solo)"
+_S222_MSG_PACKS="SANDY_SKILL_PACKS requires claude in SANDY_AGENT"
+
+_s222_launch packs-codex SANDY_AGENT=codex SANDY_SKILL_PACKS=gstack bash "$SANDY_SCRIPT" -p test
+check "§222(1) SANDY_SKILL_PACKS + codex stops before any Docker work (integration §1)" \
+    _s222_stopped packs-codex "$_S222_MSG_PACKS"
+_s222_launch packs-opencode SANDY_AGENT=opencode SANDY_SKILL_PACKS=gstack bash "$SANDY_SCRIPT" -p test
+check "§222(2) SANDY_SKILL_PACKS + opencode stops before any Docker work" \
+    _s222_stopped packs-opencode "$_S222_MSG_PACKS"
+for _S222_A in codex gemini opencode claude,gemini; do
+    _s222_launch "remote-$_S222_A" SANDY_AGENT="$_S222_A" bash "$SANDY_SCRIPT" --remote
+done
+check "§222(3) --remote + codex stops before any Docker work (mutation C21b: the guard's exit 1 deleted, so the launch goes on to inspect and build images)" \
+    _s222_stopped remote-codex "$_S222_MSG_REMOTE"
+check "§222(4) --remote + gemini stops before any Docker work" \
+    _s222_stopped remote-gemini "$_S222_MSG_REMOTE"
+check "§222(5) --remote + opencode stops before any Docker work" \
+    _s222_stopped remote-opencode "$_S222_MSG_REMOTE"
+check "§222(6) --remote + claude,gemini (multi-agent) stops before any Docker work" \
+    _s222_stopped remote-claude,gemini "$_S222_MSG_REMOTE"
+for _S222_A in codex opencode; do
+    _s222_launch "discord-$_S222_A" SANDY_AGENT="$_S222_A" SANDY_CHANNELS=discord bash "$SANDY_SCRIPT" -p test
+done
+check "§222(7) SANDY_CHANNELS=discord + codex stops before any Docker work (mutation C22b: the guard's exit 1 deleted)" \
+    _s222_stopped discord-codex "$_S222_MSG_DISCORD"
+check "§222(8) SANDY_CHANNELS=discord + opencode stops before any Docker work" \
+    _s222_stopped discord-opencode "$_S222_MSG_DISCORD"
+_s222_launch both SANDY_AGENT=both bash "$SANDY_SCRIPT" -p test
+check "§222(9) the removed SANDY_AGENT=both alias errors with the migration hint, not a silent claude,gemini" \
+    _s222_stopped both "SANDY_AGENT=both is no longer supported"
+_s222_launch plus SANDY_AGENT=codex+claude bash "$SANDY_SCRIPT" -p test
+check "§222(10) SANDY_AGENT=codex+claude is rejected as an invalid agent" \
+    _s222_stopped plus "Invalid agent 'codex+claude'"
+_s222_launch llm-open SANDY_LOCAL_LLM_HOST=0.0.0.0:11434 bash "$SANDY_SCRIPT" -p test
+check "§222(11) SANDY_LOCAL_LLM_HOST=0.0.0.0:port is rejected as world-open" \
+    _s222_stopped llm-open "world-open or empty"
+_s222_launch llm-bare SANDY_LOCAL_LLM_HOST=127.0.0.1 bash "$SANDY_SCRIPT" -p test
+check "§222(12) SANDY_LOCAL_LLM_HOST without a port is rejected" \
+    _s222_stopped llm-bare "not in host:port format"
+_s222_launch all SANDY_AGENT=all bash "$SANDY_SCRIPT" --help
+check "§222(13) control: SANDY_AGENT=all is accepted as an alias (--help exits 0, no \"Invalid agent\")" \
+    bash -c 'test "$(cat "$1/all.rc")" = 0 && ! grep -q "Invalid agent" "$1/all.out"' _ "$_S222_D"
+# (14), integration §15a: a read-only SANDY_HOME fails at preflight with the
+# chmod hint. Root ignores directory modes, so the probe cannot run as root.
+mkdir -p "$_S222_D/ro-home"; chmod 0555 "$_S222_D/ro-home"
+_s222_launch ro-home SANDY_HOME="$_S222_D/ro-home" bash "$SANDY_SCRIPT" -p noop
+chmod 0755 "$_S222_D/ro-home"
+if [ "$(id -u)" = 0 ]; then
+    check "§222(14) read-only SANDY_HOME (root ignores directory modes, so this cannot run as root)" sh -c 'exit 77'
+else
+    check "§222(14) a read-only SANDY_HOME stops with \"is not writable\" before any Docker work (integration §15a)" \
+        _s222_stopped ro-home "is not writable"
+fi
+rm -rf "$_S222_D"
+unset _S222_D _S222_A _S222_MSG_REMOTE _S222_MSG_DISCORD _S222_MSG_PACKS
+unset -f _s222_launch _s222_stopped
+
 # BEGIN SUMMARY
 # ============================================================
 # Summary
