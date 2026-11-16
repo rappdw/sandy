@@ -2113,6 +2113,9 @@ EOF
 # Usage: _sandy_key_meta_field SANDY_MODEL type  -> "string"
 #        _sandy_key_meta_field SANDY_MODEL index -> prints nothing; sets
 #        _SANDY_KM_I to the key's row in the _SANDY_KM_* arrays, or -1.
+# Both forms go through the same search and the printed field is read at
+# _SANDY_KM_I, so there is one answer to "which row"; every call resets it to
+# -1 first, so an absent key can never inherit the previous key's row (§170).
 #
 # The table is parsed ONCE, on the first call, into parallel indexed arrays
 # (bash 3.2 has no associative arrays): _SANDY_KM_KEY[i] and its six fields at
@@ -2122,11 +2125,12 @@ EOF
 # this one self-contained function on purpose: §170 extracts it alone and
 # runs it.
 #
-# Fill the cache in the shell that loops, before the loop: arrays filled inside
-# a command substitution die with it, so `x="$(_sandy_key_meta_field K f)"` on
+# Call it in the shell that loops, not inside $(...): arrays filled inside a
+# command substitution die with it, so `x="$(_sandy_key_meta_field K f)"` on
 # a cold cache answers correctly but re-parses the whole table every call
-# (measured ~6 ms each, slower than the old awk lookup). _sandy_emit_schema
-# warms it up front, and _emit_key_object reads the arrays via `index`.
+# (measured ~6 ms each, slower than the old awk lookup). _emit_key_object
+# therefore uses `index` in its own shell and reads the arrays directly; its
+# first call fills the cache for the rest of --print-schema.
 #
 # Read to EOF, never stop at a match. The old lookup piped the heredoc into an
 # awk that exited on the match: an early exit closes the pipe while the
@@ -2171,12 +2175,12 @@ _sandy_key_meta_field() {
     done
     if [ "$_SANDY_KM_I" -lt 0 ]; then return 0; fi
     case "$field" in
-        type)        printf '%s\n' "${_SANDY_KM_TYPE[_km_i]}" ;;
-        default)     printf '%s\n' "${_SANDY_KM_DEFAULT[_km_i]}" ;;
-        pattern)     printf '%s\n' "${_SANDY_KM_PATTERN[_km_i]}" ;;
-        since)       printf '%s\n' "${_SANDY_KM_SINCE[_km_i]}" ;;
-        stability)   printf '%s\n' "${_SANDY_KM_STABILITY[_km_i]}" ;;
-        description) printf '%s\n' "${_SANDY_KM_DESC[_km_i]}" ;;
+        type)        printf '%s\n' "${_SANDY_KM_TYPE[_SANDY_KM_I]}" ;;
+        default)     printf '%s\n' "${_SANDY_KM_DEFAULT[_SANDY_KM_I]}" ;;
+        pattern)     printf '%s\n' "${_SANDY_KM_PATTERN[_SANDY_KM_I]}" ;;
+        since)       printf '%s\n' "${_SANDY_KM_SINCE[_SANDY_KM_I]}" ;;
+        stability)   printf '%s\n' "${_SANDY_KM_STABILITY[_SANDY_KM_I]}" ;;
+        description) printf '%s\n' "${_SANDY_KM_DESC[_SANDY_KM_I]}" ;;
     esac
 }
 
@@ -2481,8 +2485,6 @@ _sandy_emit_version() {
 _sandy_emit_schema() {
     local commit
     commit="$(_sandy_commit_hash)"
-    # Parse the key metadata here, in this shell, before the key loops.
-    _sandy_key_meta_field "" index
 
     printf '{'
     _json_kv schema_version "$SANDY_SCHEMA_VERSION"
