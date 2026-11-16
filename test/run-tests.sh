@@ -11664,8 +11664,8 @@ if command -v flock >/dev/null 2>&1; then
     # Stopping the relay alone is not enough: the loop restarts it forever,
     # behind a backoff that grows to `sleep 60`, holding the entry lock on fd
     # 9. In production nothing stops it but container teardown, and there is
-    # no pid file, so the window's subshell records the loop's pid ($!) on its
-    # way out. The pid is only killed while the fixture's OWN lock is still
+    # no pid file, so the window's subshell records the loop's pid ($!) when
+    # it is forked (see the disown shim below). The pid is only killed while the fixture's OWN lock is still
     # held: the loop holds it for as long as it lives, so a free lock means the
     # loop is gone and the recorded pid may already belong to someone else.
     _s123_stop_supervisor() {
@@ -11699,16 +11699,20 @@ if command -v flock >/dev/null 2>&1; then
         (
             trap - ERR
             set +e
-            # $! is the supervisor loop _sandy_supervise_entry backgrounded.
-            # An EXIT trap records it on both ways out: the normal return,
-            # and the window's `exit 1` for a relay that died at startup.
-            trap 'printf "%s\n" "${!:-}" > "$h/loop.pid"' EXIT
             sandy_log() { :; }
             HOME="$h"; WORKSPACE="$h/ws"
             unset SANDY_HANDOFF_RELAY SANDY_RELAY_STATE
             SANDY_FEATURE_ENTRIES="w=$h/r.sh"
             SANDY_FEATURE_STATE_ROOT="$h/fs"
             . "$_S123_DIR/supervisor.sh"
+            # Record the loop's pid AT THE FORK. _sandy_supervise_entry runs
+            # `( loop ) ... &` and, as its very next command, a plain
+            # `disown`; a function shadows that builtin, and at that moment
+            # $! is the loop, read in the shell that forked it. An EXIT trap
+            # is NOT used: on bash 3.2 $! is empty inside it when the
+            # subshell leaves through the window's `exit 1` (the relay that
+            # exits 3), so that loop was never killed on macOS (#521).
+            disown() { printf '%s\n' "${!:-}" > "$h/loop.pid"; builtin disown "$@"; }
             # Same capture rule as _s123_resolve: the function's refusal is an
             # `exit 1` that kills this subshell, so the status is read outside
             # it rather than echoed from within (which would never run).
