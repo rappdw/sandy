@@ -23,6 +23,17 @@ workspace that already has a daemon session errors with a hint to `--attach` or
 `--stop` rather than clobbering it. `--start` is interactive-only (it rejects
 `-p`/`--print`).
 
+**First-run dialogs.** Nobody is attached to a daemon session to answer a
+dialog, so sandy answers Claude Code's first-run ones before it starts: the
+theme picker, the folder-trust prompt for your workspace, the auto-mode offer
+and the bypass-permissions warning. The trust and first-run answers are also
+written inside the container, so the host does not need `node` (before #505 a
+host without `node` skipped the trust step silently).
+
+One limit: `--start` reports ready as soon as the session exists. It does not
+yet check that the agent got past every dialog, so after changing
+credentials or Claude Code versions, `sandy --attach` once to look.
+
 **Exit codes** — `--attach`: `0` = the session ended while you were attached,
 `3` = you detached cleanly and the session is still running, `4` = no such
 session (`5` is a `--stop` code, unreachable on `--attach`). `--stop`: `0` = stopped, `4` = no such session,

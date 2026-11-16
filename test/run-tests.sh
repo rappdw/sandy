@@ -5876,7 +5876,7 @@ _S90="$SANDY_SCRIPT"
 _s90_seed_block="$(sed -n '/SEED_SETTINGS="\$SANDBOX_DIR\/claude\/settings.json"/,/^fi  # end Claude settings seeding$/p' "$_S90")"
 _s90_node_start="$(printf '%s\n' "$_s90_seed_block" | grep -n -m1 'command -v node' | cut -d: -f1)"
 _s90_jq_start="$(printf '%s\n' "$_s90_seed_block" | grep -n -m1 'elif command -v jq' | cut -d: -f1)"
-_s90_lastresort_start="$(printf '%s\n' "$_s90_seed_block" | grep -n -m1 'Last resort: write defaults only if no file exists yet' | cut -d: -f1)"
+_s90_lastresort_start="$(printf '%s\n' "$_s90_seed_block" | grep -n -m1 'Last resort: write defaults when there is no file yet' | cut -d: -f1)"
 _s90_seed_total="$(printf '%s\n' "$_s90_seed_block" | wc -l | tr -d ' ')"
 _s90_node_branch="$(printf '%s\n' "$_s90_seed_block" | sed -n "${_s90_node_start},$((_s90_jq_start - 1))p")"
 _s90_jq_branch="$(printf '%s\n' "$_s90_seed_block" | sed -n "${_s90_jq_start},$((_s90_lastresort_start - 1))p")"
@@ -26008,6 +26008,193 @@ check "§221(3) control: for an agent set without claude nothing is linked (the 
 rm -rf "$_S221_D"
 unset _S221_D _S221_OPEN _S221_BODY _S221_OUT _s
 unset -f _s221_run
+
+# ============================================================
+echo ""
+section "§214: #505 — a host without node still comes up past the trust, nudge and bypass dialogs"
+# ============================================================
+# Two holes behind one symptom: an unattended start parked on a dialog while
+# --start reported ready.
+#  (a) .claude.json: the trust write and json_merge are host-side node, run
+#      with 2>/dev/null || true, so a host without node skipped both with no
+#      word. user-setup.sh now applies the same keys inside the container.
+#  (b) settings.json: the two prompt-skip keys were only-if-absent, so a host
+#      false rode in through the merge base. While SANDY_SKIP_PERMISSIONS is
+#      on they are now managed, with a warning naming the override.
+# Everything here runs the real code, extracted from the script or template.
+_S214_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+_S214_TMPL="$(cd "$(dirname "$0")/.." && pwd)/templates/user-setup.sh.tmpl"
+
+# --- (a) the container-side program -----------------------------------
+_S214_PROG="$(awk '/<<.SANDY_PRETRUST./{f=1; next} /^SANDY_PRETRUST$/{f=0} f' "$_S214_TMPL")"
+check "§214(0) extracted the container pre-trust program (mutation: a renamed heredoc empties it and every check below goes vacuous)" \
+    bash -c 'printf "%s" "$1" | grep -q "hasTrustDialogAccepted"' _ "$_S214_PROG"
+if ! command -v node >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    skip "§214(a) needs node and jq to run the container program"
+else
+    _s214_run() { printf '%s\n' "$_S214_PROG" | node - "$1" /home/sandy/dev/proj; }
+    _s214_q() { jq -c "$2" "$1" 2>/dev/null || echo PARSE-ERROR; }
+    # 1: a fresh file (what a no-node host leaves when it had no ~/.claude.json
+    #    and the printf seed did not run, e.g. an image older than the seed)
+    _f="$_S214_DIR/fresh.json"
+    _s214_run "$_f"
+    check "§214(1) no .claude.json: created with trust, onboarding, both nudge flags and a theme (mutation: drop any of them and the matching dialog comes back)" \
+        test "$(_s214_q "$_f" '[.projects["/home/sandy/dev/proj"].hasTrustDialogAccepted, .hasCompletedOnboarding, .hasSeenAutoDefaultNudge, .hasSeenAutoDefaultNotice, .theme]')" = '[true,true,true,true,"dark"]'
+    # 2: the no-node seed (printf) or a verbatim host copy: keys missing, an
+    #    operator key and another project present
+    _f="$_S214_DIR/seeded.json"
+    printf '%s\n' '{"theme":"light","operatorKey":"keep","projects":{"/other":{"hasTrustDialogAccepted":false}}}' > "$_f"
+    _s214_run "$_f"
+    check "§214(2) an existing file gains trust for the workspace and the flags" \
+        test "$(_s214_q "$_f" '[.projects["/home/sandy/dev/proj"].hasTrustDialogAccepted, .hasSeenAutoDefaultNudge, .hasCompletedOnboarding]')" = '[true,true,true]'
+    check "§214(3) ...and nothing else changes: theme, operator keys and other projects are kept" \
+        test "$(_s214_q "$_f" '[.theme, .operatorKey, .projects["/other"].hasTrustDialogAccepted]')" = '["light","keep",false]'
+    # 4: nothing to do -> no write at all (the file a container read is not replaced)
+    _s214_ino="$(ls -i "$_f" | awk '{print $1}')"
+    _s214_run "$_f"
+    check "§214(4) an already-complete file is not rewritten (same inode: the rename never ran)" \
+        test "$(ls -i "$_f" | awk '{print $1}')" = "$_s214_ino"
+    # 5: unreadable -> exit non-zero, file untouched (Claude Code reports it)
+    _f="$_S214_DIR/bad.json"
+    printf '{not json\n' > "$_f"
+    _s214_rc=0; _s214_run "$_f" 2>/dev/null || _s214_rc=$?
+    check "§214(5) an unparseable file is left byte-identical and the program fails (got rc $_s214_rc)" \
+        bash -c '[ "$1" != 0 ] && [ "$(cat "$2")" = "{not json" ]' _ "$_s214_rc" "$_f"
+    # 5b: parseable but malformed: the workspace entry is an array. JSON.stringify
+    #     drops named properties set on an array, so without the Array.isArray
+    #     guard the program exits 0 and trust never persists.
+    _f="$_S214_DIR/arr.json"
+    printf '%s\n' '{"projects":{"/home/sandy/dev/proj":[]}}' > "$_f"
+    _s214_run "$_f"
+    check "§214(5b) an array-valued projects[workspace] is replaced and trusted (mutation: drop the Array.isArray guard and it stays [])" \
+        test "$(_s214_q "$_f" '.projects["/home/sandy/dev/proj"].hasTrustDialogAccepted')" = 'true'
+    # 5c: a non-regular file is refused before any read. A FIFO would block
+    #     readFileSync forever and hang the launch before the first pane. Bounded:
+    #     a poll loop kills a hung program after ~10s (no GNU timeout on macOS).
+    _f="$_S214_DIR/fifo.json"
+    mkfifo "$_f"
+    # The rc is captured with || so set -e cannot end the subshell before it is
+    # recorded (which would read as a hang).
+    ( _rc=0; printf '%s\n' "$_S214_PROG" | node - "$_f" /home/sandy/dev/proj >/dev/null 2>"$_S214_DIR/fifo.err" || _rc=$?; echo "$_rc" > "$_S214_DIR/fifo.rc" ) &
+    _s214_pid=$!
+    _s214_i=0
+    while [ ! -s "$_S214_DIR/fifo.rc" ] && [ "$_s214_i" -lt 100 ]; do sleep 0.1; _s214_i=$((_s214_i + 1)); done
+    if [ ! -s "$_S214_DIR/fifo.rc" ]; then
+        # Kill the blocked reader. Never open the FIFO to unblock it: with the
+        # reader gone that open would itself block forever.
+        pkill -P "$_s214_pid" 2>/dev/null || true; kill "$_s214_pid" 2>/dev/null || true
+        echo hung > "$_S214_DIR/fifo.rc"
+    fi
+    wait "$_s214_pid" 2>/dev/null || true
+    check "§214(5c) a FIFO at .claude.json is refused at once, named, and left a FIFO (got $(cat "$_S214_DIR/fifo.rc"); mutation: drop the lstat/O_NONBLOCK guard and this hangs)" \
+        bash -c '[ "$(cat "$1")" = 1 ] && grep -q "is not a regular file" "$2" && [ -p "$3" ]' _ "$_S214_DIR/fifo.rc" "$_S214_DIR/fifo.err" "$_f"
+    rm -f "$_f"
+    # 5d: the rewrite keeps the file mode (it can hold account fields)
+    _f="$_S214_DIR/mode.json"
+    printf '%s\n' '{"theme":"dark"}' > "$_f"; chmod 600 "$_f"
+    _s214_run "$_f"
+    check "§214(5d) a 0600 .claude.json is still 0600 after the rewrite (mutation: drop the mode option and umask 022 widens it to 0644)" \
+        bash -c '[ "$1" = true ] && case "$(ls -l "$2")" in -rw-------*) true ;; *) false ;; esac' _ "$(_s214_q "$_f" '.projects["/home/sandy/dev/proj"].hasTrustDialogAccepted')" "$_f"
+fi
+# 6: where it runs. After the staged copies are moved into place (or the
+#    staged .claude.json would overwrite the result) and before any pane starts.
+_s214_mv="$(grep -n -m1 'mv -f "\$_sl" "\$_slt"' "$_S214_TMPL" | cut -d: -f1)"
+_s214_pt="$(grep -n -m1 "<<'SANDY_PRETRUST'" "$_S214_TMPL" | cut -d: -f1)"
+_s214_tm="$(grep -n -m1 'tmux new-session' "$_S214_TMPL" | cut -d: -f1)"
+check "§214(6) user-setup.sh pre-trusts AFTER the staged move ($_s214_mv) and BEFORE the first pane ($_s214_tm); got $_s214_pt" \
+    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] && [ "$1" -lt "$2" ] && [ "$2" -lt "$3" ]' _ "$_s214_mv" "$_s214_pt" "$_s214_tm"
+check "§214(7) the container step is gated on claude and SANDY_WORKSPACE, and a failure is named, not swallowed" \
+    bash -c 'grep -q "_sandy_has_claude && \[ -n \"\${SANDY_WORKSPACE:-}\" \]" "$1" && grep -q "SANDY_PRETRUST. || sandy_err" "$1"' _ "$_S214_TMPL"
+# 8: the host side says so instead of discarding it. Behavioural: run the
+#    real host block with and without node on PATH and read what it prints.
+_S214_HOSTBLK="$(awk '/# #505: without node on the host/{f=1} f{print} f&&/Could not pre-trust the workspace host-side/{exit}' "$SANDY_SCRIPT")"
+_s214_host() {   # $1 = bin dir -> what the block prints
+    env -i PATH="$1" CLAUDE_JSON="$_S214_DIR/host-cj.json" SANDY_WORKSPACE=/home/sandy/dev/proj "$BASH" -c '
+        info() { printf "INFO %s\n" "$*"; }; warn() { printf "WARN %s\n" "$*"; }
+        eval "$1"' _ "$_S214_HOSTBLK" 2>&1
+}
+mkdir -p "$_S214_DIR/hb-none" "$_S214_DIR/hb-node"
+_s214_out="$(_s214_host "$_S214_DIR/hb-none")"
+check "§214(8a) a host without node prints the info line naming the container fallback, and no failure warning (mutation: make info a no-op and this goes red)" \
+    bash -c 'printf "%s" "$1" | grep -q "^INFO node is not on this host.s PATH: the container pre-trusts" && ! printf "%s" "$1" | grep -q "^WARN"' _ "$_s214_out"
+if command -v node >/dev/null 2>&1; then
+    ln -s "$(command -v node)" "$_S214_DIR/hb-node/node"
+    _s214_out="$(_s214_host "$_S214_DIR/hb-node")"
+    check "§214(8b) with node the info line is absent and the host writes the trust itself" \
+        bash -c '! printf "%s" "$1" | grep -q "node is not on this host" && grep -q hasTrustDialogAccepted "$2"' _ "$_s214_out" "$_S214_DIR/host-cj.json"
+else
+    skip "§214(8b) needs node"
+fi
+# 9: the no-node printf seed carries the nudge flags itself
+_s214_lit="$(grep -m1 "printf '{\"tipsDisabled\":true,\"installMethod\":\"native\",\"hasCompletedOnboarding\":true" "$SANDY_SCRIPT" | sed "s/.*printf '//; s/\\\\n'.*//")"
+check "§214(9) the no-node fresh seed sets both auto-mode nudge flags (json_merge is a no-op without node)" \
+    bash -c 'printf "%s" "$1" | jq -e ".hasSeenAutoDefaultNudge == true and .hasSeenAutoDefaultNotice == true and .hasCompletedOnboarding == true" >/dev/null' _ "$_s214_lit"
+
+# --- (b) managed prompt-skip keys, every branch -----------------------
+_S214_BLOCK="$(awk '/^if _sandy_agent_has claude; then$/{b=$0; getline; if ($0 ~ /SEED_SETTINGS=/) {f=1; print b}} f{print} f&&/^fi  # end Claude settings seeding/{exit}' "$SANDY_SCRIPT")"
+check "§214(10) extracted the settings-seeding block" \
+    bash -c 'printf "%s" "$1" | grep -q "end Claude settings seeding"' _ "$_S214_BLOCK"
+# _s214_seed <node|jq> <host settings body> <SANDY_SKIP_PERMISSIONS> -> settings.json, warnings to $_S214_DIR/warn.<tag>
+_s214_seed() {
+    local _c _b
+    _c="$(mktemp -d "$_S214_DIR/c.XXXXXX")"; _b="$_c/bin"
+    mkdir -p "$_b" "$_c/home/.claude" "$_c/sb/claude"
+    for _x in mv rm cp cat mktemp readlink awk sed tr cmp; do ln -s "$(command -v "$_x")" "$_b/$_x"; done
+    [ "$1" = none ] || ln -s "$(command -v "$1")" "$_b/$1"
+    printf '%s\n' "$2" > "$_c/home/.claude/settings.json"
+    # $5: an existing sandbox settings.json (a previous launch left it)
+    [ -z "${5:-}" ] || printf '%s\n' "$5" > "$_c/sb/claude/settings.json"
+    env -i PATH="$_b" HOME="$_c/home" SANDBOX_DIR="$_c/sb" SANDY_SKIP_PERMISSIONS="$3" "$BASH" -c '
+        _sandy_agent_has() { return 0; }
+        info() { :; }; warn() { printf "[sandy] WARN: %s\n" "$*" >&2; }
+        SANDBOX_IS_NEW=false
+        eval "$2"
+        _sandy_launch_id=test
+        eval "$1"
+        _sandy_stage_commit "$SANDBOX_DIR/claude/settings.json"
+        _sandy_launch_apply_staged "$SANDBOX_DIR"
+        cat "$SANDBOX_DIR/claude/settings.json"
+    ' _ "$_S214_BLOCK" "$(sed -n '/^# --- Host-to-container handoff (#400)/,/^# Merge JSON keys into a file/p' "$SANDY_SCRIPT" | sed '$d')" 2>"$_S214_DIR/warn.$4" \
+        && echo 0 > "$_S214_DIR/rc.$4" || echo "$?" > "$_S214_DIR/rc.$4"
+}
+_S214_HOSTF='{"skipDangerousModePermissionPrompt":false,"skipAutoPermissionPrompt":false,"theme":"dark"}'
+if ! command -v jq >/dev/null 2>&1; then
+    skip "§214(b) needs jq"
+else
+    for _t in node jq; do
+        if ! command -v "$_t" >/dev/null 2>&1; then skip "§214(b:$_t) needs $_t"; continue; fi
+        _o="$(_s214_seed "$_t" "$_S214_HOSTF" true "$_t-on")"
+        check "§214(11:$_t) a host false is overridden to true while SANDY_SKIP_PERMISSIONS is on (mutation: only-if-absent keeps false and the bypass dialog parks a daemon)" \
+            test "$(printf '%s' "$_o" | jq -c '[.skipDangerousModePermissionPrompt, .skipAutoPermissionPrompt, .permissions.defaultMode]')" = '[true,true,"bypassPermissions"]'
+        check "§214(12:$_t) ...and the override is named, per key" \
+            bash -c 'grep -q "skipDangerousModePermissionPrompt to false; overriding" "$1" && grep -q "skipAutoPermissionPrompt to false; overriding" "$1"' _ "$_S214_DIR/warn.$_t-on"
+        _o="$(_s214_seed "$_t" "$_S214_HOSTF" false "$_t-off")"
+        check "§214(13:$_t) with SANDY_SKIP_PERMISSIONS=false the host false is kept and nothing warns" \
+            bash -c 'test "$(printf "%s" "$1" | jq -c "[.skipDangerousModePermissionPrompt, .skipAutoPermissionPrompt]")" = "[false,false]" && ! grep -q overriding "$2"' _ "$_o" "$_S214_DIR/warn.$_t-off"
+        _o="$(_s214_seed "$_t" '{"theme":"dark"}' true "$_t-clean")"
+        check "§214(14:$_t) a host without the keys gets true and no warning" \
+            bash -c 'test "$(printf "%s" "$1" | jq -c "[.skipDangerousModePermissionPrompt, .skipAutoPermissionPrompt]")" = "[true,true]" && ! grep -q overriding "$2"' _ "$_o" "$_S214_DIR/warn.$_t-clean"
+    done
+    # --- the no-tool branch (neither node nor jq) on an EXISTING sandbox file.
+    # It used to write defaults only when the file was absent, so a false left
+    # by an earlier SANDY_SKIP_PERMISSIONS=false launch survived (#513 review).
+    # A nested key of the same name must not be mistaken for the top-level one.
+    _S214_SBF='{"skipDangerousModePermissionPrompt": false, "mine": {"skipAutoPermissionPrompt": false}, "enabledPlugins": {"p@m": true}}'
+    _o="$(_s214_seed none '{}' true none-on "$_S214_SBF")"
+    check "§214(15) no node, no jq: an existing sandbox false is forced true, the absent key added, the rest kept (mutation: only-if-absent leaves false)" \
+        test "$(printf '%s' "$_o" | jq -c '[.skipDangerousModePermissionPrompt, .skipAutoPermissionPrompt, .mine.skipAutoPermissionPrompt, .enabledPlugins["p@m"]]' 2>/dev/null)" = '[true,true,false,true]'
+    check "§214(16) ...and the override is named (rc $(cat "$_S214_DIR/rc.none-on"))" \
+        bash -c '[ "$(cat "$2")" = 0 ] && grep -q "skipDangerousModePermissionPrompt to false; overriding to true" "$1" && ! grep -q "set skipAutoPermissionPrompt" "$1"' _ "$_S214_DIR/warn.none-on" "$_S214_DIR/rc.none-on"
+    _o="$(_s214_seed none '{}' false none-off "$_S214_SBF")"
+    check "§214(17) no node, no jq, SANDY_SKIP_PERMISSIONS=false: the existing file is left as it was" \
+        test "$(printf '%s' "$_o" | jq -c '[.skipDangerousModePermissionPrompt, (has("skipAutoPermissionPrompt"))]' 2>/dev/null)" = '[false,false]'
+    _o="$(_s214_seed none '{}' true none-bad '{"skipDangerousModePermissionPrompt": "no"}')"
+    check "§214(18) no node, no jq: a file it cannot edit with certainty fails the launch, named, rather than leaving the dialog (rc $(cat "$_S214_DIR/rc.none-bad"))" \
+        bash -c '[ "$(cat "$2")" != 0 ] && grep -q "ERROR: cannot force skipDangerousModePermissionPrompt" "$1" && grep -q "is not true or false" "$1"' _ "$_S214_DIR/warn.none-bad" "$_S214_DIR/rc.none-bad"
+fi
+rm -rf "$_S214_DIR"
+unset _S214_DIR _S214_TMPL _S214_PROG _S214_BLOCK _S214_HOSTF _S214_SBF _S214_HOSTBLK _f _o _t _s214_ino _s214_rc _s214_mv _s214_pt _s214_tm _s214_lit _s214_pid _s214_i _s214_out
+unset -f _s214_run _s214_q _s214_seed _s214_host 2>/dev/null || true
 
 # BEGIN SUMMARY
 # ============================================================

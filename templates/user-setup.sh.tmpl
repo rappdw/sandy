@@ -60,6 +60,64 @@ case "${SANDY_LAUNCH_ID:-}" in
         unset _sl _slt ;;
 esac
 
+# #505: pre-trust the workspace and set the first-run flags in .claude.json
+# HERE, after the staged copies are in place and before any agent starts. The
+# host does the same with node when it has node; a host without node skipped it
+# silently, and a daemon came up parked on the trust dialog. The image always
+# has node, so this is the copy that cannot be skipped. Idempotent: it writes
+# only when a key is missing or not true, through an exclusive temp renamed in,
+# keeping the file mode. It reads regular files only (no link, FIFO or device:
+# a FIFO would block the launch here). An unparseable file is left alone, so
+# Claude Code reports it rather than sandy replacing it.
+if _sandy_has_claude && [ -n "${SANDY_WORKSPACE:-}" ]; then
+    _cj="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.claude.json"
+    if [ -L "$_cj" ]; then
+        sandy_err "$_cj is a symlink; not pre-trusting the workspace through it (#505)"
+    elif ! command -v node >/dev/null 2>&1; then
+        sandy_err "node is missing from the image; cannot pre-trust the workspace (#505)"
+    else
+        node - "$_cj" "$SANDY_WORKSPACE" <<'SANDY_PRETRUST' || sandy_err "could not pre-trust $SANDY_WORKSPACE in $_cj (#505)"
+const fs = require("fs");
+const f = process.argv[2], w = process.argv[3];
+const no = (m) => { console.error("[sandy] ERROR: " + f + " " + m); process.exit(1); };
+let d = {}, st = null;
+try { st = fs.lstatSync(f); } catch (e) { if (e.code !== "ENOENT") no("cannot be examined: " + e.code); }
+if (st) {
+    // Regular files only, checked on the descriptor actually read: O_NOFOLLOW
+    // refuses a link, O_NONBLOCK keeps a FIFO from blocking the open, and
+    // fstat closes the window between the lstat and the open.
+    if (!st.isFile()) no("is not a regular file");
+    let fd;
+    try { fd = fs.openSync(f, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
+    catch (e) { no("cannot be opened: " + e.code); }
+    st = fs.fstatSync(fd);
+    if (!st.isFile()) no("is not a regular file");
+    try { d = JSON.parse(fs.readFileSync(fd, "utf8")); } catch (e) { process.exit(1); }
+    fs.closeSync(fd);
+    if (!d || typeof d !== "object" || Array.isArray(d)) process.exit(1);
+}
+let changed = !st;
+if (changed) d.theme = "dark";
+const set = (o, k, v) => { if (o[k] !== v) { o[k] = v; changed = true; } };
+for (const k of ["hasCompletedOnboarding", "hasSeenAutoDefaultNudge", "hasSeenAutoDefaultNotice"]) set(d, k, true);
+if (!d.projects || typeof d.projects !== "object" || Array.isArray(d.projects)) { d.projects = {}; changed = true; }
+if (!d.projects[w] || typeof d.projects[w] !== "object" || Array.isArray(d.projects[w])) { d.projects[w] = {}; changed = true; }
+if (d.projects[w].hasTrustDialogAccepted !== true) {
+    d.projects[w].hasTrustDialogAccepted = true;
+    d.projects[w].hasCompletedProjectOnboarding = true;
+    changed = true;
+}
+if (!changed) process.exit(0);
+const t = f + ".sandy-tmp." + process.pid;
+try { fs.unlinkSync(t); } catch (e) {}
+// Keep the existing mode (a 0600 file stays 0600); a new file is 0600.
+fs.writeFileSync(t, JSON.stringify(d, null, 2) + "\n", { flag: "wx", mode: st ? (st.mode & 0o777) : 0o600 });
+fs.renameSync(t, f);
+SANDY_PRETRUST
+    fi
+    unset _cj
+fi
+
 sandy_log "Setting up language toolchains"
 # Cargo: writable registry cache + cargo-install binaries
 export CARGO_HOME="$HOME/.cargo"
