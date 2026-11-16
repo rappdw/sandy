@@ -336,7 +336,7 @@ else
 $_CH_HELPERS
 $BUILD_CLAUDE_BODY
 build_claude_cmd" 2>/dev/null)"
-        if echo "$out" | grep -qE -- "$expect_re"; then
+        if grep -qE -- "$expect_re" <<<"$out"; then
             pass "$desc"
         else
             fail "$desc (got: $out)"
@@ -950,8 +950,7 @@ info "28d. Codex config allowlist, dispatch, alias, update regex"
 # in-container CODEX_HOME and never forwards it.)
 _CODEX_VARS_MISSING=""
 for _k in OPENAI_API_KEY CODEX_MODEL SANDY_CODEX_AUTH; do
-    if ! awk '/^SANDY_(PRIVILEGED|PASSIVE)_KEYS=\(/,/^\)$/' "$SANDY_SCRIPT" \
-         | grep -qE "^[[:space:]]+${_k}$"; then
+    if ! grep -qE "^[[:space:]]+${_k}$" <<<"$(awk '/^SANDY_(PRIVILEGED|PASSIVE)_KEYS=\(/,/^\)$/' "$SANDY_SCRIPT")"; then
         _CODEX_VARS_MISSING="${_CODEX_VARS_MISSING} ${_k}"
     fi
 done
@@ -961,7 +960,7 @@ else
     fail "config allowlist missing codex variables:${_CODEX_VARS_MISSING}"
 fi
 # CODEX_HOME must NOT be in the allowlist (removed as dead key, PR 4.1).
-if awk '/^SANDY_(PRIVILEGED|PASSIVE)_KEYS=\(/,/^\)$/' "$SANDY_SCRIPT" | grep -qE '^[[:space:]]+CODEX_HOME$'; then
+if grep -qE '^[[:space:]]+CODEX_HOME$' <<<"$(awk '/^SANDY_(PRIVILEGED|PASSIVE)_KEYS=\(/,/^\)$/' "$SANDY_SCRIPT")"; then
     fail "CODEX_HOME removed from config allowlist (dead key)"
 else
     pass "CODEX_HOME removed from config allowlist (dead key)"
@@ -1175,7 +1174,7 @@ _CCRED_OUT="$(bash -c "
     cat \"\$CODEX_CRED_TMPDIR/auth.json\"
     rm -rf \"\$CODEX_CRED_TMPDIR\"
 " 2>/dev/null)"
-if printf '%s' "$_CCRED_OUT" | grep -q '"OPENAI_API_KEY":"sk-test-12345"'; then
+if grep -q '"OPENAI_API_KEY":"sk-test-12345"' <<<"$_CCRED_OUT"; then
     pass "load_codex_credentials api_key path materializes ephemeral auth.json"
 else
     fail "load_codex_credentials api_key path materializes ephemeral auth.json"
@@ -1320,8 +1319,7 @@ info "28i. OpenCode config allowlist, dispatch, alias, update regex"
 
 _OPENCODE_VARS_MISSING=""
 for _k in OPENCODE_MODEL SANDY_OPENCODE_AUTH SANDY_LOCAL_LLM_HOST; do
-    if ! awk '/^SANDY_(PRIVILEGED|PASSIVE)_KEYS=\(/,/^\)$/' "$SANDY_SCRIPT" \
-         | grep -qE "^[[:space:]]+${_k}$"; then
+    if ! grep -qE "^[[:space:]]+${_k}$" <<<"$(awk '/^SANDY_(PRIVILEGED|PASSIVE)_KEYS=\(/,/^\)$/' "$SANDY_SCRIPT")"; then
         _OPENCODE_VARS_MISSING="${_OPENCODE_VARS_MISSING} ${_k}"
     fi
 done
@@ -1424,7 +1422,7 @@ else
     # extracted span ends in a comment line the "; echo" lands inside that
     # comment and never runs -- the check then fails with a validator that is
     # entirely correct (2.6.0 put a "# END removed key" comment at this span's end).
-    if SANDY_LOCAL_LLM_HOST=127.0.0.1:11434 bash -c "$_LLM_VALIDATOR"$'\n'"echo OK" 2>/dev/null | grep -q OK; then
+    if grep -q OK <<<"$(SANDY_LOCAL_LLM_HOST=127.0.0.1:11434 bash -c "$_LLM_VALIDATOR"$'\n'"echo OK" 2>/dev/null)"; then
         pass "SANDY_LOCAL_LLM_HOST validator accepts 127.0.0.1:11434"
     else
         fail "SANDY_LOCAL_LLM_HOST validator accepts 127.0.0.1:11434"
@@ -5874,9 +5872,9 @@ _S90="$SANDY_SCRIPT"
 # checked in isolation (not just "somewhere in the file") so a regression in one
 # branch cannot hide behind the other two passing.
 _s90_seed_block="$(sed -n '/SEED_SETTINGS="\$SANDBOX_DIR\/claude\/settings.json"/,/^fi  # end Claude settings seeding$/p' "$_S90")"
-_s90_node_start="$(printf '%s\n' "$_s90_seed_block" | grep -n -m1 'command -v node' | cut -d: -f1)"
-_s90_jq_start="$(printf '%s\n' "$_s90_seed_block" | grep -n -m1 'elif command -v jq' | cut -d: -f1)"
-_s90_lastresort_start="$(printf '%s\n' "$_s90_seed_block" | grep -n -m1 'Last resort: write defaults when there is no file yet' | cut -d: -f1)"
+_s90_node_start="$(grep -n -m1 'command -v node' <<<"$_s90_seed_block" | cut -d: -f1)"
+_s90_jq_start="$(grep -n -m1 'elif command -v jq' <<<"$_s90_seed_block" | cut -d: -f1)"
+_s90_lastresort_start="$(grep -n -m1 'Last resort: write defaults when there is no file yet' <<<"$_s90_seed_block" | cut -d: -f1)"
 _s90_seed_total="$(printf '%s\n' "$_s90_seed_block" | wc -l | tr -d ' ')"
 _s90_node_branch="$(printf '%s\n' "$_s90_seed_block" | sed -n "${_s90_node_start},$((_s90_jq_start - 1))p")"
 _s90_jq_branch="$(printf '%s\n' "$_s90_seed_block" | sed -n "${_s90_jq_start},$((_s90_lastresort_start - 1))p")"
@@ -8779,7 +8777,7 @@ _s105_out="$(SANDY_HOME="$_s105_home" bash -c '
     printf "cleaned=%s\n" "$([ -d "$_p" ] && echo no || echo yes)"
 ' 2>/dev/null)" || true
 
-_s105_f() { printf '%s\n' "$_s105_out" | grep -m1 "^$1=" | cut -d= -f2-; }
+_s105_f() { grep -m1 "^$1=" <<<"$_s105_out" | cut -d= -f2-; }
 check "§105(1) SANDY_HOME is redirected to a sandy-test-home.* temp dir" \
     bash -c 'case "$(basename "$1")" in sandy-test-home.*) exit 0;; *) exit 1;; esac' _ "$(_s105_f iso)"
 # The build gate's FIRST condition is `[ ! -f "$HASH_FILE" ]`, so an unseeded
@@ -8889,7 +8887,7 @@ _s106_c1() {
     printf '%s' '--foo --bar' > "$d/agent-args.claude"
     out="$(_s106_resolve "$d" "" claude)"
     rm -rf "$d"
-    printf '%s\n' "$out" | grep -qx 'CLAUDE=--foo --bar'
+    grep -qx 'CLAUDE=--foo --bar' <<<"$out"
 }
 check "§106(1) file alone -> args resolve" _s106_c1
 
@@ -8899,7 +8897,7 @@ _s106_c2() {
     d="$(mktemp -d)"
     out="$(_s106_resolve "$d" "--baz" claude)"
     rm -rf "$d"
-    printf '%s\n' "$out" | grep -qx 'CLAUDE=--baz'
+    grep -qx 'CLAUDE=--baz' <<<"$out"
 }
 check "§106(2) SANDY_AGENT_ARGS fallback unchanged (no file present)" _s106_c2
 
@@ -8911,8 +8909,8 @@ _s106_c3() {
     printf '%s' '--foo' > "$d/agent-args.claude"
     out="$(_s106_resolve "$d" "--baz" claude)"
     rm -rf "$d"
-    printf '%s\n' "$out" | grep -qx 'CLAUDE=--foo' || return 1
-    printf '%s\n' "$out" | grep -q 'overrides SANDY_AGENT_ARGS for claude' || return 1
+    grep -qx 'CLAUDE=--foo' <<<"$out" || return 1
+    grep -q 'overrides SANDY_AGENT_ARGS for claude' <<<"$out" || return 1
 }
 check "§106(3) both present: file wins (exact equality), notice emitted, never merged" _s106_c3
 
@@ -8923,7 +8921,7 @@ _s106_c4() {
     printf '   \n  \n' > "$d/agent-args.claude"
     out="$(_s106_resolve "$d" "--baz" claude)"
     rm -rf "$d"
-    printf '%s\n' "$out" | grep -qx 'CLAUDE=--baz'
+    grep -qx 'CLAUDE=--baz' <<<"$out"
 }
 check "§106(4) whitespace-only file = absent (falls back to SANDY_AGENT_ARGS)" _s106_c4
 
@@ -8935,7 +8933,7 @@ _s106_c5() {
     printf -- '--one\n--two\n' > "$d/agent-args.claude"
     out="$(_s106_resolve "$d" "" claude)"
     rm -rf "$d"
-    printf '%s\n' "$out" | grep -qx 'CLAUDE=--one --two'
+    grep -qx 'CLAUDE=--one --two' <<<"$out"
 }
 check "§106(5) multi-line file: every line survives (no silent truncation)" _s106_c5
 
@@ -8946,13 +8944,13 @@ _s106_c6() {
     d="$(mktemp -d)"
     printf -- '-p --foo' > "$d/agent-args.claude"
     out="$(_s106_resolve "$d" "" claude)"
-    printf '%s\n' "$out" | grep -qx 'CLAUDE=--foo' || { rm -rf "$d"; return 1; }
-    printf '%s\n' "$out" | grep -q 'agent-args.claude' || { rm -rf "$d"; return 1; }
-    printf '%s\n' "$out" | grep -q 'ignoring mode flag' || { rm -rf "$d"; return 1; }
+    grep -qx 'CLAUDE=--foo' <<<"$out" || { rm -rf "$d"; return 1; }
+    grep -q 'agent-args.claude' <<<"$out" || { rm -rf "$d"; return 1; }
+    grep -q 'ignoring mode flag' <<<"$out" || { rm -rf "$d"; return 1; }
     printf -- '-p' > "$d/agent-args.claude"
     out2="$(_s106_resolve "$d" "--baz" claude)"
     rm -rf "$d"
-    printf '%s\n' "$out2" | grep -qx 'CLAUDE=--baz'
+    grep -qx 'CLAUDE=--baz' <<<"$out2"
 }
 check "§106(6) mode flags dropped (warning names the file); -p-only file = absent" _s106_c6
 
@@ -8965,9 +8963,9 @@ _s106_c7() {
     printf '%s' '--cx' > "$d/agent-args.codex"
     out="$(_s106_resolve "$d" "" claude,codex)"
     rm -rf "$d"
-    printf '%s\n' "$out" | grep -qx 'CLAUDE=--ca' || return 1
-    printf '%s\n' "$out" | grep -qx 'CODEX=--cx' || return 1
-    printf '%s\n' "$out" | grep -qx 'GEMINI=' || return 1
+    grep -qx 'CLAUDE=--ca' <<<"$out" || return 1
+    grep -qx 'CODEX=--cx' <<<"$out" || return 1
+    grep -qx 'GEMINI=' <<<"$out" || return 1
 }
 check "§106(7) host-side per-agent isolation across a multi-agent combo" _s106_c7
 
@@ -8979,7 +8977,7 @@ _s106_c8() {
     out="$(SANDBOX_DIR="$d" SANDY_AGENT_ARGS="" SANDY_AGENT_ARGS_CLAUDE=INJECTED S106_AGENTS=codex \
         bash "$_S106_RUN" "$_S106_FILTER_BLK" "$_S106_PERAGENT_BLK" 2>&1)"
     rm -rf "$d"
-    printf '%s\n' "$out" | grep -qx 'CLAUDE='
+    grep -qx 'CLAUDE=' <<<"$out"
 }
 check "§106(8) NEGATIVE: env forgery of SANDY_AGENT_ARGS_CLAUDE is overwritten" _s106_c8
 
@@ -9131,7 +9129,7 @@ _s106_c11() {
     printf '%s' '--foo' > "$d/claude/agent-args.claude"
     out="$(_s106_resolve "$d" "" claude)"
     rm -rf "$d"
-    printf '%s\n' "$out" | grep -qx 'CLAUDE='
+    grep -qx 'CLAUDE=' <<<"$out"
 }
 check "§106(11) NEGATIVE: a copy under claude/ (agent-writable tree) is ignored" _s106_c11
 
@@ -9387,9 +9385,9 @@ _S108_OUT="$( cd "$_S108_T/ws" && PATH="$_S108_T/bin:$PATH" SANDY_HOME="$_S108_T
 # showing the output is unactionable -- these two checks failed for a full
 # session with no way to see that the capture was "timeout: command not found".
 _s108_diag() {   # $1=captured output  $2=label
-    printf '%s' "$1" | grep -q "Symlinks that point outside the workspace" && return 0
+    grep -q "Symlinks that point outside the workspace" <<<"$1" && return 0
     printf '    \033[0;33m^ %s captured (first 200 bytes): %s\033[0m\n' \
-        "$2" "$(printf '%s' "$1" | head -c 200 | tr '\n' ' ' | cat -v)"
+        "$2" "$(head -c 200 <<<"$1" | tr '\n' ' ' | cat -v)"
 }
 _s108_diag "$_S108_OUT" "§108(10/11) APPROVE_ONLY run"
 check "§108(10) APPROVE_ONLY REACHES the symlink approval (mutation: the pre-fix early exit produces no symlink output at all)" \
@@ -9710,7 +9708,7 @@ section "§113: the API-error skip recognizer knows real provider failures, and 
 _S113_RE="$(grep -m1 '^_API_ERR_RE=' "$(dirname "$0")/run-integration-tests.sh" | cut -d= -f2- | sed "s/^'//;s/'\$//" || true)"
 check "§113(0) extracted a non-empty recognizer (mutation: a rename empties this, and an empty ERE matches EVERYTHING — every check below would pass vacuously)" \
     test -n "$_S113_RE"
-_s113() { printf '%s' "$1" | grep -qiE "$_S113_RE"; }
+_s113() { grep -qiE "$_S113_RE" <<<"$1"; }
 check "§113(1) SKIPS the no-credits stream error (the reported false-FAIL, verbatim)" \
     _s113 'ERROR: stream disconnected before completion: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.'
 check "§113(2) SKIPS the exceeded-quota phrasing" \
@@ -10672,7 +10670,7 @@ check "§114(16h) phase E proves criterion 8 end-to-end: a real headless launch 
 # Guarded, a missing pattern becomes a FAILED CHECK (16i already asserts
 # non-empty) instead of an aborted run. That is the difference between one red
 # line and a suite that stops reporting.
-_S114_START_LINE="$(printf '%s\n' "$_S114_ACC_E" | grep -m1 '_starts=' || true)"
+_S114_START_LINE="$(grep -m1 '_starts=' <<<"$_S114_ACC_E" || true)"
 _S114_START_PAT="$(printf '%s' "$_S114_START_LINE" | sed -e "s/.*grep -c '//" -e "s/'.*//" || true)"
 check "§114(16i) extracted the restart-count pattern from phase E" \
     bash -c '[ -n "$1" ]' -- "$_S114_START_PAT"
@@ -13158,7 +13156,7 @@ check "§132(9d) IgnoreUnknown is placed ABOVE every Host block, so a later edit
     bash -c 'printf "%s\n" "$1" | grep -qx "PLACEMENT=top"' -- "$_S132_DEF"
 check "§132(9e) ...and scoping it to a non-matching Host block IS fatal — the premise that makes (9d) load-bearing. Comparing top against 'inside Host *' proves nothing: Host * matches everything, so both parse and the rule cannot fail" \
     bash -c 'printf "%s\n" "$1" | grep -qx "SCOPEDPREMISE=fail"' -- "$_S132_DEF"
-check "§132(9f) a QUOTED IdentityFile containing a space is named by its basename, not split — the naive awk extraction yields the literal word 'Application' from a real macOS path (got: $(printf '%s\n' "$_S132_DEF" | grep '^W=.*NOT staged' | head -1))" \
+check "§132(9f) a QUOTED IdentityFile containing a space is named by its basename, not split — the naive awk extraction yields the literal word 'Application' from a real macOS path (got: $(grep -m1 '^W=.*NOT staged' <<<"$_S132_DEF" || true))" \
     bash -c 'printf "%s\n" "$1" | grep -q "^W=.*NOT staged.*nvsync\.key" && ! printf "%s\n" "$1" | grep -q "^W=.*NOT staged.*Lib"' -- "$_S132_DEF"
 check "§132(9g) ...and a repeated IdentityFile is named once, not twice" \
     bash -c '[ "$(printf "%s\n" "$1" | grep "^W=.*NOT staged" | grep -o "corp_secret" | wc -l | tr -d " ")" = 1 ]' -- "$_S132_DEF"
@@ -13248,10 +13246,10 @@ _s133_fixture "$_S133_ROOT/dead" "$_S133_DEADPID"
 _S133_DEAD_RC=0
 _S133_DEAD="$(PATH="$_S133_ROOT/bin:$PATH" SANDY_HOME="$_S133_ROOT/dead" "$SANDY_SCRIPT" --provision --all --dry-run 2>&1)" || _S133_DEAD_RC=$?
 
-if printf '%s' "$_S133_LIVE" | grep -q 'requires a reachable Docker daemon'; then
+if grep -q 'requires a reachable Docker daemon' <<<"$_S133_LIVE"; then
     skip "§133 needs a reachable Docker daemon (--provision gates on one before the --all planner)"
 else
-check "§133(1) a LIVE sandbox with a missing pair is counted as live-skipped, not queued (got: $(printf '%s' "$_S133_LIVE" | grep -m1 'sandbox(es) to provision' || echo none))" \
+check "§133(1) a LIVE sandbox with a missing pair is counted as live-skipped, not queued (got: $(grep -m1 'sandbox(es) to provision' <<<"$_S133_LIVE" || echo none))" \
     bash -c 'printf "%s" "$1" | grep -q "0 sandbox(es) to provision, 0 already correct, 1 live (skipped)"' _ "$_S133_LIVE"
 check "§133(2) ...and it is named with the remedy, so the operator can act on it" \
     bash -c 'printf "%s" "$1" | grep -q "proj-aaaaaaaa.*live session"' _ "$_S133_LIVE"
@@ -13259,7 +13257,7 @@ check "§133(3) ...and the run exits 1: the goal state is UNMET and no work here
     test "$_S133_LIVE_RC" -eq 1
 check "§133(4) ...and NOTHING claims it was provisioned — the misleading 'provisioned, but the pair is still ...' line is what this section exists to kill" \
     bash -c '! printf "%s" "$1" | grep -q "provisioned, but the pair is still"' _ "$_S133_LIVE"
-check "§133(5:control) the SAME fixture with a DEAD lock pid IS queued for provisioning (got: $(printf '%s' "$_S133_DEAD" | grep -m1 'sandbox(es) to provision' || echo none))" \
+check "§133(5:control) the SAME fixture with a DEAD lock pid IS queued for provisioning (got: $(grep -m1 'sandbox(es) to provision' <<<"$_S133_DEAD" || echo none))" \
     bash -c 'printf "%s" "$1" | grep -q "1 sandbox(es) to provision, 0 already correct, 0 live (skipped)"' _ "$_S133_DEAD"
 check "§133(6:control) ...and --dry-run then exits 0 with nothing started (got rc=$_S133_DEAD_RC)" \
     test "$_S133_DEAD_RC" -eq 0
@@ -14067,9 +14065,9 @@ check "§138(1) ...and it is a table with entries, not an empty heading" \
 _S138_MISSING=""
 while IFS= read -r _s138_line; do
     [ -n "$_s138_line" ] || continue
-    _s138_key="$(printf '%s' "$_s138_line" | grep -oE 'SANDY_[A-Z_]+' | head -1)"
+    _s138_key="$(awk 'match($0, /SANDY_[A-Z_]+/) { print substr($0, RSTART, RLENGTH); exit }' <<<"$_s138_line")"
     [ -n "$_s138_key" ] || continue
-    printf '%s' "$_S138_TABLE" | grep -q "$_s138_key" \
+    grep -q "$_s138_key" <<<"$_S138_TABLE" \
         || _S138_MISSING="$_S138_MISSING $_s138_key"
 done <<S138_EOF
 $(grep -E '^[[:space:]]*(warn "|echo "\[sandy\] WARN)' "$_S138_SANDY" | grep -i deprecat)
@@ -14090,7 +14088,7 @@ check "§138(3) the scan actually found deprecation warnings to check (got $_S13
 _S138_STALE=""
 while IFS= read -r _s138_row; do
     case "$_s138_row" in '| `SANDY_'*) ;; *) continue ;; esac
-    _s138_k="$(printf '%s' "$_s138_row" | grep -oE 'SANDY_[A-Z_]+' | head -1)"
+    _s138_k="$(awk 'match($0, /SANDY_[A-Z_]+/) { print substr($0, RSTART, RLENGTH); exit }' <<<"$_s138_row")"
     [ -n "$_s138_k" ] || continue
     grep -q "$_s138_k" "$_S138_SANDY" || _S138_STALE="$_S138_STALE $_s138_k"
 done <<S138_EOF2
@@ -14823,7 +14821,7 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
         _s143_j="$(node "$_S143_DIR/p.js" "$_S143_DIR/$_s143_c.json" 2>&1 || true)"
         _s143_q="$(jq -r -f "$_S143_DIR/p.jq" "$_S143_DIR/$_s143_c.json" 2>&1 || true)"
         [ "$_s143_j" = "$_s143_q" ] || _S143_PAR="diff-at-$_s143_c"
-        printf '%s' "$_s143_j" | grep -q '^ERR' || _S143_PAR="no-refusal-at-$_s143_c"
+        grep -q '^ERR' <<<"$_s143_j" || _S143_PAR="no-refusal-at-$_s143_c"
     done
     check "§143(7) PARITY: node and jq refuse all four identically, byte for byte — a jq-only host must not wave through what node rejects (the jq projector dropped a check exactly this way once)" \
         bash -c 'test "$1" = ok' _ "$_S143_PAR"
@@ -15913,7 +15911,7 @@ _S153_BANOUT="$(bash -c '
     _sandy_fe_list=""; SANDY_FEATURE_ENTRIES=""
     eval "$2"
 ' _ "$_S153_APPLYBLK" "$_S153_BAN" "$_S153_DIR/root" 2>&1)"
-check "§153(27) an APPLIED feature is named at launch with what it contributed — no SANDY_VERBOSE required (got: $(printf '%s' "$_S153_BANOUT" | grep -m1 '^INFO features:'))" \
+check "§153(27) an APPLIED feature is named at launch with what it contributed — no SANDY_VERBOSE required (got: $(grep -m1 '^INFO features:' <<<"$_S153_BANOUT" || true))" \
     bash -c 'case "$1" in *"applied (1 mount"*) exit 0 ;; esac; exit 1' _ "$_S153_BANOUT"
 check "§153(28) ...including which agents received args, since a mount without the wiring is the failure this feature exists to make visible" \
     bash -c 'case "$1" in *"args:claude"*) exit 0 ;; esac; exit 1' _ "$_S153_BANOUT"
@@ -17202,7 +17200,7 @@ else
 _s162_mk A
 _s162_pre A y
 _S162_HA="$(_s162_hash "$_S162_DIR/A/ws/.sandy")"
-printf '%s' "$_S162_OUT" | grep -q "Build this .sandy/Dockerfile" || _s162_diag "§162(1) pre-pass y"
+grep -q "Build this .sandy/Dockerfile" <<<"$_S162_OUT" || _s162_diag "§162(1) pre-pass y"
 check "§162(1) the APPROVE_ONLY pre-pass REACHES the Dockerfile prompt (mutation: dropping the call from _sandy_approve_only_finish restores the unanswerable-in-daemon-mode bug)" \
     bash -c 'printf "%s" "$1" | grep -q "Build this .sandy/Dockerfile"' _ "$_S162_OUT"
 check "§162(2) answering y writes the approval file, keyed on the build-context hash, and the pass exits 0" \
@@ -17539,7 +17537,7 @@ _s166_mk() {
     printf '%s\n%s\n' "$ws" "$sb"
 }
 _s166_named() { # the entries listed under the NOT-kept header, one per line
-    printf '%s\n' "$1" | awk -v h="$2" 'index($0,h)==1{f=1;next} f&&/^$/{exit} f{print $2}' | sort
+    awk -v h="$2" 'index($0,h)==1{f=1;next} f&&/^$/{exit} f{print $2}' <<<"$1" | sort
 }
 { read -r _S166_WS; read -r _S166_SB; } <<<"$(_s166_mk A)"
 mkdir -p "$_S166_SB/claude/connector/delivery-state" "$_S166_SB/claude/zz-spool-nobody-knows" "$_S166_SB/codex/sessions" "$_S166_SB/handoff/inbox"
@@ -20085,7 +20083,7 @@ _S175_README="$(cd "$(dirname "$0")/.." && pwd)/README.md"
 _S175_TABLE="$(awk '/^## Deprecated$/{f=1} f&&/^## /&&!/^## Deprecated$/{exit} f' "$_S175_README")"
 _S175_MISS=""
 for _s175_t in 'relay{}' 'SANDY_RELAY_STATE' '/opt/sandy/relay-state' '/usr/local/bin/sandy-handoff-sessions' 'relay-conditional unset default' 'SANDY_HANDOFF_RELAY` as the internal channel'; do
-    printf '%s' "$_S175_TABLE" | grep -F "$_s175_t" | grep -qF '2.5.0 (exception)' || _S175_MISS="$_S175_MISS [$_s175_t]"
+    awk -v t="$_s175_t" 'index($0, t) && index($0, "2.5.0 (exception)") { f = 1 } END { exit !f }' <<<"$_S175_TABLE" || _S175_MISS="$_S175_MISS [$_s175_t]"
 done
 check "§175(4) README's Deprecated table lists every 2.5.0 surface with since '2.5.0 (exception)' (missing:${_S175_MISS:- none})" \
     bash -c '[ -z "$1" ]' _ "$_S175_MISS"
@@ -20878,7 +20876,7 @@ check "§177(4-pre) both the SPEC tree and the code's sandbox mkdirs were read (
 _S177_MISS=""
 for _s177_t in $_S177_TOPS; do
     case "$_s177_t" in workspace-*) _s177_t="workspace-*" ;; esac
-    printf '%s\n' "$_S177_TREE" | grep -qF -- "── $_s177_t/" || _S177_MISS="$_S177_MISS $_s177_t"
+    grep -qF -- "── $_s177_t/" <<<"$_S177_TREE" || _S177_MISS="$_S177_MISS $_s177_t"
 done
 check "§177(4) every directory a launch creates under the sandbox is in the SPEC Directory Layout tree (missing:${_S177_MISS:- none})" \
     bash -c '[ -z "$1" ]' -- "$_S177_MISS"
@@ -21233,7 +21231,7 @@ check "§179(3) ...no .reap.* dir left behind, and nothing counted as fixed" \
 # --- (4) retake: the name is taken again before the moved lock can go back ---
 _S179_OUT4="$(_s179_run retake retake)"
 _H="$_S179_D/retake"
-_S179_M4="$(find "$_H/sandboxes" -name '.ws-retake.lock.reap.*' -type d 2>/dev/null | head -n 1)"
+_S179_M4="$(find "$_H/sandboxes" -name '.ws-retake.lock.reap.*' -type d 2>/dev/null || true)"; _S179_M4="${_S179_M4%%$'\n'*}"
 check "§179(4) the third launch's lock holds the name, untouched" \
     bash -c '[ "$(cat "$1/owner")" = C ]' -- "$_H/sandboxes/.ws-retake.lock"
 check "§179(4) the displaced LIVE lock is left intact, not deleted, and not nested inside the new one" \
@@ -23779,7 +23777,7 @@ chmod +x "$_S201_T"/bin/*; : > "$_S201_T/grokreal"
 _S201_GOOD=0; _S201_BAD=0; _S201_FAILS=""
 while IFS= read -r _r; do
     [ -n "$_r" ] || continue
-    _v="$(printf '%s' "$_r" | grep -oE '/opt/[a-z-]+/\.version' | head -1)"
+    _v="$(awk 'match($0, /\/opt\/[a-z-]+\/\.version/) { print substr($0, RSTART, RLENGTH); exit }' <<<"$_r")"
     _r="$(printf '%s' "$_r" | sed -e "s#/usr/local/bin/claude#claude#g" -e "s#/opt/#$_S201_T/opt/#g")"
     for _m in good bad; do
         rm -rf "$_S201_T/opt"; _rc=0
@@ -23787,7 +23785,7 @@ while IFS= read -r _r; do
         if [ "$_m" = good ]; then
             if [ "$_rc" -eq 0 ] && [ "$(cat "$_S201_T$_v" 2>/dev/null)" = 1.2.3 ]; then _S201_GOOD=$((_S201_GOOD + 1)); else _S201_FAILS="$_S201_FAILS good:$_v(rc=$_rc)"; fi
         else
-            if [ "$_rc" -ne 0 ] && printf '%s' "$_err" | grep -q '^sandy: '; then _S201_BAD=$((_S201_BAD + 1)); else _S201_FAILS="$_S201_FAILS bad:$_v(rc=$_rc)"; fi
+            if [ "$_rc" -ne 0 ] && grep -q '^sandy: ' <<<"$_err"; then _S201_BAD=$((_S201_BAD + 1)); else _S201_FAILS="$_S201_FAILS bad:$_v(rc=$_rc)"; fi
         fi
     done
 done <<EOF
@@ -24245,7 +24243,7 @@ check "§204(1c) section text is trimmed of leading/trailing blank lines, and a 
 _s204_refuses() {  # $1 file name, $2 content, $3 expected error fragment
     local d; d="$(mktemp -d "$_S204_D/bad.XXXXXX")"
     printf '%s' "$2" > "$d/$1"
-    bash -c 'eval "$1"; if _sandy_sessions_parse "$2" ""; then echo ACCEPTED; else printf "%s\n" "$_SANDY_CS_ERR"; fi' _ "$_S204_PARSE" "$d" 2>&1 | grep -qF "$3"
+    grep -qF "$3" <<<"$(bash -c 'eval "$1"; if _sandy_sessions_parse "$2" ""; then echo ACCEPTED; else printf "%s\n" "$_SANDY_CS_ERR"; fi' _ "$_S204_PARSE" "$d" 2>&1)"
 }
 _s204_nl=$'\n'
 for _s204_case in \
@@ -25113,12 +25111,12 @@ for _s209_case in "rw payload/bin/w" "ro bin/w" "ro payload/../x/w"; do
     # shellcheck disable=SC2086
     _s209_mk "$_S209_R5" amap "$(_s209_m $_s209_case)"
     _S209_OX="$(_s209_host "$_S209_R5" codex)"
-    printf '%s' "$_S209_OX" | grep -q "^APPLY_RC=" || _S209_BAD="${_S209_BAD:-}|$_s209_case"
+    grep -q "^APPLY_RC=" <<<"$_S209_OX" || _S209_BAD="${_S209_BAD:-}|$_s209_case"
 done
 _S209_R6="$_S209_D/r6"; mkdir -p "$_S209_R6"
 _s209_mk "$_S209_R6" amap '{"sandboxes":{"include":["*"]},"agents":{"include":["*"]},"agent_wrapper":{"codex":"payload/bin/w"}}'
 _S209_OX="$(_s209_host "$_S209_R6" codex)"
-printf '%s' "$_S209_OX" | grep -q "^APPLY_RC=" || _S209_BAD="${_S209_BAD:-}|no payload mount"
+grep -q "^APPLY_RC=" <<<"$_S209_OX" || _S209_BAD="${_S209_BAD:-}|no payload mount"
 check "§209(11) the manifest is refused when the wrapper is not on a read-only payload: rw payload, a path off the payload, a .. path, no payload mount (accepted:${_S209_BAD:-nothing})" \
     bash -c '[ -z "$1" ]' _ "${_S209_BAD:-}"
 
@@ -25574,8 +25572,8 @@ cp "$_S214_L" "$_S214_DIR/list.before"
 _s214_fg_refused() {   # $1 = rc  $2 = output
     test -n "$1" && test "$1" != 0 \
         && cmp -s "$_S214_DIR/list.before" "$_S214_L" \
-        && printf '%s' "$2" | grep -q "present at previous approval" \
-        && printf '%s' "$2" | grep -qF "new-link -> $_S214_DIR/out-b" \
+        && grep -q "present at previous approval" <<<"$2" \
+        && grep -qF "new-link -> $_S214_DIR/out-b" <<<"$2" \
         && grep -q '^image inspect sandy-codex' "$_S214_DIR/docker.log" \
         && ! grep -q '^run ' "$_S214_DIR/docker.log"
 }
