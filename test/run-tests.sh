@@ -25670,11 +25670,19 @@ else
         ' "$1"
     }
     _A6_ONE="1/1//home/sandy/.claude/hooks/cmux-notify.sh"
+    # A host settings key, which the seed copies in before the cmux merge runs.
+    mkdir -p "$_A6_DIR/cmux/.claude"
+    printf '{"a6HostKey":"host-value"}\n' > "$_A6_DIR/cmux/.claude/settings.json"
     _a6_launch cmux SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 CMUX_WORKSPACE_ID=fixture-ws
     _A6_N1="$(_a6_cmux_count "$_A6_SB/claude/settings.json")"
     [ "$_A6_RC" = 0 ] && [ "$_A6_N1" = "$_A6_ONE" ] || _a6_diag "§216(1)" cmux
     check "§216(1) a launch inside cmux registers the cmux-notify Notification hook in the sandbox settings.json, exactly once (mutation C03: registration deleted; got ${_A6_N1:-nothing}, rc ${_A6_RC:-none})" \
         bash -c 'test "$1" = 0 && test "$2" = "$3" && grep -q "cmux detected" "$4"' _ "$_A6_RC" "$_A6_N1" "$_A6_ONE" "$_A6_DIR/cmux/out"
+    # The merge must add to the file the seed wrote, not replace it: the host
+    # key and a key sandy always seeds (spinnerTipsEnabled) survive it
+    # (mutation: the merge starts from {} instead of the parsed file).
+    check "§216(1b) ...and the merge keeps the rest of settings.json: the host key and the seeded spinnerTipsEnabled=false are still there" \
+        node -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.exit(s.a6HostKey === "host-value" && s.spinnerTipsEnabled === false ? 0 : 1);' "$_A6_SB/claude/settings.json"
     check "§216(2) ...and the hook it names is installed, executable, in the sandbox ~/.claude/hooks" \
         test -x "$_A6_SB/claude/hooks/cmux-notify.sh"
     if command -v jq >/dev/null 2>&1; then
@@ -25890,7 +25898,8 @@ section "§221: user-setup links baked-in skill packs into ~/.claude/skills and 
 # that sandy generates (the generate_user_setup heredoc), with /opt/skills
 # relocated to a fixture tree.
 _S221_D="$(cd "$(mktemp -d)" && pwd -P)"
-_S221_BODY="$(awk '/^    cat > "\$SANDY_HOME\/user-setup.sh.new" <<.USERSETUP.$/ {f=1; next} f && /^USERSETUP$/ {exit} f' "$SANDY_SCRIPT" \
+_S221_OPEN="    cat > \"\$SANDY_HOME/user-setup.sh.new\" <<'USERSETUP'"   # compared as a plain string
+_S221_BODY="$(awk -v o="$_S221_OPEN" '$0 == o {f=1; next} f && $0 == "USERSETUP" {exit} f' "$SANDY_SCRIPT" \
     | awk '/^sandy_log "Activating skill packs"$/ {f=1} f && /^# Resilient file writer/ {exit} f')"
 mkdir -p "$_S221_D/opt/skills/gstack/review" "$_S221_D/opt/skills/gstack/browse" "$_S221_D/opt/skills/gstack/node_modules" \
     "$_S221_D/opt/skills/gstack/notaskill" "$_S221_D/opt/skills/gstack/bin" "$_S221_D/opt/skills/gstack/.browsers" "$_S221_D/home"
@@ -25921,7 +25930,7 @@ _S221_OUT="$(_s221_run false)"
 check "§221(3) control: for an agent set without claude nothing is linked (the browsers path is still set: it is not claude-specific)" \
     bash -c '! printf "%s\n" "$1" | grep -q "^link " && printf "%s\n" "$1" | grep -qx "PW=$2/opt/skills/gstack/.browsers"' _ "$_S221_OUT" "$_S221_D"
 rm -rf "$_S221_D"
-unset _S221_D _S221_BODY _S221_OUT _s
+unset _S221_D _S221_OPEN _S221_BODY _S221_OUT _s
 unset -f _s221_run
 
 # BEGIN SUMMARY
