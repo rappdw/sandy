@@ -5475,8 +5475,8 @@ check "last-resort branch: non-skip printf JSON includes statusLine" \
 # --- (f) SANDY_CLAUDE_USAGE: the usage helper and the wrapping, run for real
 # (both helpers extracted from the Dockerfile.base heredoc by the test file). ---
 
-check "sandy-claude-usage + sandy-claude-statusline behave as specified (test/test_claude_usage_statusline.py)" \
-    python3 "$(dirname "$0")/test_claude_usage_statusline.py"
+# The helpers run for real in test/test_claude_usage_statusline.py, in the
+# contracts group (suite_runner.py CONTRACT_FILES), where its skips are counted.
 check "SANDY_CLAUDE_USAGE is forwarded into the container, and the host statusLine command only when there is one" \
     bash -c 'grep -qF "RUN_FLAGS+=(-e \"SANDY_CLAUDE_USAGE=\${SANDY_CLAUDE_USAGE:-1}\")" "$1" && grep -qF "RUN_FLAGS+=(-e \"SANDY_STATUSLINE_WRAP=\$_SANDY_SL_WRAP\")" "$1"' -- "$_S81"
 
@@ -25239,8 +25239,7 @@ section "§210: SANDY_CLAUDE_ACTIVITY — the turn state of each Claude session,
 # run). Here: the host half, by running the real policy-settings block of sandy and
 # its stale-image block under stubs, and the hook command as Claude Code runs it.
 _S210_D="$(cd "$(mktemp -d)" && pwd -P)"
-check "§210(1) sandy-claude-activity behaves as specified: states, seq, subagent ids, prune, retention, no stdout, no write through a link, no lost update (test/test_claude_activity.py)" \
-    env SANDY_SCRIPT="$SANDY_SCRIPT" python3 "$(dirname "$0")/test_claude_activity.py"
+# §210(1), test/test_claude_activity.py, runs in the contracts group (suite_runner.py CONTRACT_FILES).
 
 _S210_BLK="$(awk '/^# BEGIN claude policy settings/,/^# END claude policy settings/' "$SANDY_SCRIPT")"
 # _s210_pol <has-claude 0|1> <SANDY_SKIP_PERMISSIONS> <SANDY_CLAUDE_ACTIVITY> -> "<run flags>|<info lines>", file in $_S210_D/<case>/
@@ -25325,10 +25324,9 @@ unset -f _s210_pol _s210_stale
 
 echo ""
 section "§211: SANDY_CODEX_ACTIVITY — shared session record, managed hooks, and launch warnings"
-# The Python checks execute the extracted helper, requirements block and
-# runtime/stale-image checks. Stubs replace only Docker and the Codex binary.
-check "§211 shared activity bytes, Codex events, gates, fresh read-only requirements, silent hooks, version/feature/stale warnings and passive key" \
-    env SANDY_SCRIPT="$SANDY_SCRIPT" python3 "$(dirname "$0")/test_codex_activity.py"
+# §211, test/test_codex_activity.py (the extracted helper, requirements block
+# and runtime/stale-image checks, under Docker and Codex stubs), runs in the
+# contracts group (suite_runner.py CONTRACT_FILES), so on macOS CI too.
 
 
 echo ""

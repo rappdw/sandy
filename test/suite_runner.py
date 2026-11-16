@@ -14,9 +14,17 @@ import time
 from log_paths import start_run
 
 ROOT = Path(__file__).resolve().parent.parent
+# A group is one command or a list of commands run in order into one log.
+# contracts runs every host-run Python file, each in its own process. The three
+# that are not test_production_contracts.py used to be `check` lines in the host
+# group, where a passing check discards its output: a unittest skip ("OK
+# (skipped=4)" without jq) reached no log and the group said passed. And the
+# macOS job runs harness and contracts only, so it never ran them.
+CONTRACT_FILES = ("test_production_contracts.py", "test_claude_usage_statusline.py",
+                  "test_claude_activity.py", "test_codex_activity.py")
 GROUPS = {
     "harness": [sys.executable, "test/test_harness.py", "-v"],
-    "contracts": [sys.executable, "test/test_production_contracts.py", "-v"],
+    "contracts": [[sys.executable, "test/" + name, "-v"] for name in CONTRACT_FILES],
     "host": ["bash", "test/run-tests.sh"],
     "container": [sys.executable, "test/test_container.py", "-v"],
     "proxy": ["go", "test", "-race", "./..."],
@@ -39,6 +47,31 @@ def show_output(line, group, verbose, in_traceback):
     if not in_traceback:
         return True, False
     return line.startswith(("ERROR: ", "FAIL: ", "Ran ", "FAILED", "OK")), True
+
+
+def run_command(command, cwd, env, output, group, verbose):
+    """Run one command of a group, teeing its output to the group log; return its exit."""
+    process = subprocess.Popen(command, cwd=cwd,
+                               env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, errors="replace", start_new_session=True)
+    in_traceback = False
+    try:
+        for line in process.stdout:
+            output.write(line)
+            show, in_traceback = show_output(line, group, verbose, in_traceback)
+            if show:
+                print(line, end="", flush=True)
+        return process.wait()
+    except KeyboardInterrupt:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        raise
+    finally:
+        process.stdout.close()
 
 
 def finish_suite(results):
@@ -129,35 +162,23 @@ def main():
                     path.write_text('#!/bin/sh\necho "Real runtime disabled in host tests" >&2\nexit 1\n')
                     path.chmod(0o755)
                 env["PATH"] = str(blockers) + os.pathsep + env["PATH"]
-            command = GROUPS[name]
+            commands = GROUPS[name]
+            if not isinstance(commands[0], list):
+                commands = [commands]
             print("\n[{}/{}] {} ({})".format(index, len(selected), GROUP_TITLES[name], name), flush=True)
-            if not shutil.which(command[0]):
+            missing = next((command[0] for command in commands if not shutil.which(command[0])), None)
+            if missing:
                 state, rc = ("failed", 1) if args.require_tools else ("skipped", 77)
-                log.write_text("Missing executable: " + command[0] + "\n")
+                log.write_text("Missing executable: " + missing + "\n")
                 print(log.read_text(), end="")
             else:
+                rc = 0
                 with log.open("w", buffering=1) as output:
-                    process = subprocess.Popen(command, cwd=ROOT / "proxy" if name == "proxy" else ROOT,
-                                               env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                               text=True, errors="replace", start_new_session=True)
-                    in_traceback = False
-                    try:
-                        for line in process.stdout:
-                            output.write(line)
-                            show, in_traceback = show_output(line, name, args.verbose, in_traceback)
-                            if show:
-                                print(line, end="", flush=True)
-                        rc = process.wait()
-                    except KeyboardInterrupt:
-                        os.killpg(process.pid, signal.SIGTERM)
-                        try:
-                            process.wait(timeout=10)
-                        except subprocess.TimeoutExpired:
-                            os.killpg(process.pid, signal.SIGKILL)
-                            process.wait()
-                        raise
-                    finally:
-                        process.stdout.close()
+                    for command in commands:
+                        # The first failure decides the exit; later commands still run.
+                        code = run_command(command, ROOT / "proxy" if name == "proxy" else ROOT,
+                                           env, output, name, args.verbose)
+                        rc = rc or code
                 state = "passed" if rc == 0 else "failed"
             output_text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log.read_text())
             skips = int(state == "skipped") + len(re.findall(r"^\s*– skipped:", output_text, re.M))

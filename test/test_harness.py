@@ -259,6 +259,44 @@ exit 7
             self.assertEqual([row['exit'] for row in result], [0, 6])
             self.assertIn('failure evidence', (run_logs / 'contracts.log').read_text())
 
+    def test_every_command_of_a_group_runs_and_counts(self):
+        # A group may be a list of commands. A skip in any of them must make the
+        # group partial with its reason in the console, and a failure must fail
+        # the group even when a later command passes, which still runs.
+        skipping = ('import unittest\nclass T(unittest.TestCase):\n'
+                    '    def test_x(self): self.skipTest("needs a tool")\n'
+                    'unittest.main(argv=["t", "-v"])\n')
+        cases = {  # state: (first command, second command, suite exit, group exit, skips)
+            'partial': ('print("first ran")', skipping, 0, 0, 1),
+            'failed': ('raise SystemExit(4)', 'print("second ran")', 1, 4, 0),
+        }
+        for state, (first, second, suite_rc, group_rc, skips) in cases.items():
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                logs = Path(directory) / 'logs'
+                groups = {'contracts': [[suite_runner.sys.executable, '-c', first],
+                                        [suite_runner.sys.executable, '-c', second]]}
+                console = io.StringIO()
+                with mock.patch.object(suite_runner, 'GROUPS', groups), \
+                     mock.patch('sys.argv', ['runner', '--only', 'contracts', '--log-dir', str(logs)]), \
+                     contextlib.redirect_stdout(console):
+                    self.assertEqual(suite_runner.main(), suite_rc)
+                row, = json.loads((logs / 'latest' / 'results.json').read_text())
+                self.assertEqual((row['state'], row['exit'], row['skips']), (state, group_rc, skips))
+                log = (logs / 'latest' / 'contracts.log').read_text()
+                if state == 'partial':
+                    self.assertIn('first ran', log)
+                    self.assertIn("skipped 'needs a tool'", console.getvalue())
+                else:
+                    self.assertIn('second ran', log)
+
+    def test_every_python_test_file_belongs_to_a_group(self):
+        # A test file no group runs is coverage that exists but does not run.
+        named = {Path(part).name for spec in suite_runner.GROUPS.values()
+                 for command in (spec if isinstance(spec[0], list) else [spec]) for part in command}
+        files = {path.name for path in (ROOT / 'test').glob('test_*.py')}
+        self.assertTrue(files, 'no test files found')
+        self.assertEqual(files - named, set())
+
     def test_container_fixture_is_a_usable_git_repository(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
