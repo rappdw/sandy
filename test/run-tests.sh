@@ -17715,14 +17715,18 @@ unset -f _s169_seed
 
 section "§170: a config-key metadata lookup survives a table larger than the pipe buffer"
 # ============================================================
-# _sandy_key_meta_field pipes the whole _sandy_key_metadata heredoc into awk.
-# It used to `exit` on the first match; once the table outgrew the pipe buffer
-# the heredoc's cat was still writing, died of SIGPIPE, and pipefail made the
-# lookup exit 141 -- surfacing on macOS (whose pipe buffer is far smaller than
-# Linux's 64K) as a failed `--print-schema` in §92(b), once #391 grew the table
-# from 22.6K to 25.5K. Linux CI never saw it. Reproduced here on ANY host by
-# serving a 2 MB table with the key on the FIRST row, under the real script's
-# set -euo pipefail.
+# _sandy_key_meta_field parses the whole _sandy_key_metadata table once, to
+# EOF, into parallel arrays, then looks keys up by row index (_SANDY_KM_I).
+# It used to pipe the table into an awk that `exit`ed on the first match; once
+# the table outgrew the pipe buffer the heredoc's cat was still writing, died
+# of SIGPIPE, and pipefail made the lookup exit 141 -- surfacing on macOS
+# (whose pipe buffer is far smaller than Linux's 64K) as a failed
+# `--print-schema` in §92(b), once #391 grew the table from 22.6K to 25.5K.
+# Linux CI never saw it. Reproduced here on ANY host by serving a 2 MB table
+# with the key on the FIRST row, under the real script's set -euo pipefail.
+# The parse keeps state between calls, so (3)-(5) also pin the lookup itself:
+# an absent key right after a found one must not inherit its row, and the
+# `index` form --print-schema uses must point at the key's own row.
 _S170_FN="$(sed -n '/^_sandy_key_meta_field() {/,/^}/p' "$SANDY_SCRIPT")"
 check "§170(0) extracted _sandy_key_meta_field" \
     bash -c 'case "$1" in *_sandy_key_metadata*) exit 0 ;; esac; exit 1' _ "$_S170_FN"
@@ -17739,12 +17743,25 @@ _S170_OUT="$(bash -c '
     printf "type="; _sandy_key_meta_field SANDY_FIRST type
     printf "desc="; _sandy_key_meta_field SANDY_FIRST description
     printf "last="; _sandy_key_meta_field SANDY_PAD_39999 since
+    # Absent key straight after a found one (the found row is the LAST row).
+    printf "nope=["; _sandy_key_meta_field SANDY_NOPE type; printf "]\n"
+    _sandy_key_meta_field SANDY_NOPE index
+    printf "nopeidx=%s\n" "$_SANDY_KM_I"
+    _sandy_key_meta_field SANDY_FIRST index
+    printf "idx=%s|%s|%s|%s\n" "$_SANDY_KM_I" "${_SANDY_KM_KEY[_SANDY_KM_I]}" \
+        "${_SANDY_KM_TYPE[_SANDY_KM_I]}" "${_SANDY_KM_DESC[_SANDY_KM_I]}"
     printf "done\n"
 ' _ "$_S170_FN" 2>&1)" || true
-check "§170(1) a key on the FIRST row of a 2 MB table resolves, and the lookup does not die of SIGPIPE under pipefail (mutation: restore the early exit in the awk and this exits 141)" \
+check "§170(1) a key on the FIRST row of a 2 MB table resolves, and the lookup does not die of SIGPIPE under pipefail (mutation: stop the parse before EOF, or read the table through a pipe whose reader exits on the match, and this fails)" \
     bash -c 'printf "%s\n" "$1" | grep -qx "type=bool" && printf "%s\n" "$1" | grep -qx "desc=first row" && printf "%s\n" "$1" | grep -qx done' _ "$_S170_OUT"
 check "§170(2) ...and a key on the LAST row still resolves (reading to EOF must not lose the match)" \
     bash -c 'printf "%s\n" "$1" | grep -qx "last=1.0.0"' _ "$_S170_OUT"
+check "§170(3) an absent key looked up right after a found one prints nothing (mutation: drop the reset of _SANDY_KM_I and it prints the previous row's type)" \
+    bash -c 'grep -qx "nope=\[\]" <<< "$1"' _ "$_S170_OUT"
+check "§170(4) ...and its index form leaves _SANDY_KM_I at -1" \
+    bash -c 'grep -qx "nopeidx=-1" <<< "$1"' _ "$_S170_OUT"
+check "§170(5) the index form --print-schema uses points at the key's own row: _SANDY_KM_I=0, and the arrays there hold its key, type and description (mutation: set _SANDY_KM_I one past the match)" \
+    bash -c 'grep -qx "idx=0|SANDY_FIRST|bool|first row" <<< "$1"' _ "$_S170_OUT"
 unset _S170_FN _S170_OUT
 
 # ============================================================
