@@ -97,12 +97,25 @@ fail()  { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "  \033[0;31m✗ %s\033[0m\
 # run on a bare host report "all passed" while having run fewer assertions.
 SKIPPED=0
 skip()  { SKIPPED=$((SKIPPED + 1)); printf "  \033[0;33m– skipped: %s\033[0m\n" "$*"; }
+# Every check gets its own log, named from a counter rather than by mktemp, so
+# a check costs no mktemp fork (about 3,000 per run). A fresh file per check,
+# never a reused one: a background process an earlier check left running may
+# still hold its log open, and must not write into a later check's. A failed
+# or skipped check's log is renamed to a unique check.XXXXXX, as before;
+# cleanup() removes any check.p* left behind.
+_CHECK_SEQ=0
 check() {
     # check "description" <command...>
     local desc="$1"; shift
-    local log rc=0
-    log="$(mktemp "$SANDY_TEST_LOG_DIR/check.XXXXXX")"
+    local log kept rc=0
+    _CHECK_SEQ=$((_CHECK_SEQ + 1))
+    log="$SANDY_TEST_LOG_DIR/check.p$_CHECK_SEQ"
     "$@" >"$log" 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        kept="$(mktemp "$SANDY_TEST_LOG_DIR/check.XXXXXX")"
+        mv -f "$log" "$kept"
+        log="$kept"
+    fi
     if [ "$rc" -eq 0 ]; then
         pass "$desc"
         rm -f "$log"
@@ -113,6 +126,55 @@ check() {
         fail "$desc (exit=$rc; log=$log)"
         cat "$log"
     fi
+}
+
+# _sleep_stub BIN_DIR LOG [DELAY]: put a `sleep` in a fixture's stub bin dir
+# that appends its arguments to LOG and then waits DELAY seconds (default: not
+# at all) instead. sandy's retry and poll waits (`sleep 1` between probes) are
+# real seconds in production and dead time behind a stub docker that answers at
+# once. LOG is a record a check can assert on. Use a small DELAY where the
+# waiting code is a poll loop, so it does not spin.
+_sleep_stub() {
+    local real
+    real="$(command -v sleep)"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'echo "$*" >> %q\n' "$2"
+        if [ -n "${3:-}" ]; then printf 'exec %q %q\n' "$real" "$3"; else printf 'exit 0\n'; fi
+    } > "$1/sleep"
+    chmod +x "$1/sleep"
+}
+
+# _path_farm DEST [TOOL...]: fill DEST with a symlink to every executable file
+# on $PATH, the first one of each name as a PATH lookup finds it, except the
+# named TOOLs, so a probe can run with a tool missing (`PATH="$DEST"`) while
+# bash, grep, awk and the rest still resolve. Built from $PATH, not from a fixed
+# /usr/bin: macOS has no /usr/bin/bash. The farm costs one `ln` per executable
+# (about 740 here), so it is built once and each caller gets a copy.
+_PATH_FARM_MASTER=""
+_path_farm_build() {
+    local d f b oldifs
+    _PATH_FARM_MASTER="$(mktemp -d)"
+    oldifs="$IFS"; IFS=:
+    set -f            # a PATH entry containing a glob char must not expand here
+    set -- $PATH
+    set +f
+    IFS="$oldifs"
+    for d in "$@"; do
+        [ -d "$d" ] || continue
+        for f in "$d"/*; do
+            [ -f "$f" ] && [ -x "$f" ] || continue
+            b="${f##*/}"
+            [ -e "$_PATH_FARM_MASTER/$b" ] || ln -s "$f" "$_PATH_FARM_MASTER/$b" 2>/dev/null || true
+        done
+    done
+}
+_path_farm() {
+    local dest="$1" t; shift
+    [ -n "$_PATH_FARM_MASTER" ] || _path_farm_build
+    mkdir -p "$dest"
+    cp -RP "$_PATH_FARM_MASTER/." "$dest/"
+    for t in "$@"; do rm -f "$dest/$t"; done
 }
 
 # Print a one-line run-provenance footer: UTC timestamp, short commit + describe,
@@ -132,9 +194,11 @@ _run_provenance() {
 TEST_PROJECT="$(mktemp -d)"
 SANDBOX_DIR="$(mktemp -d)"
 mkdir -p "$SANDBOX_DIR/claude"
+_SCHEMA_CACHE="$(mktemp)"
 cleanup() {
     _emit_summary
-    rm -rf "$TEST_PROJECT" "$SANDBOX_DIR" 2>/dev/null || true
+    rm -rf "$TEST_PROJECT" "$SANDBOX_DIR" "$_SCHEMA_CACHE" ${_PATH_FARM_MASTER:+"$_PATH_FARM_MASTER"} 2>/dev/null || true
+    [ -z "${SANDY_TEST_LOG_DIR:-}" ] || rm -f "$SANDY_TEST_LOG_DIR"/check.p* 2>/dev/null || true
 }
 trap cleanup EXIT
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/sandy"
@@ -143,6 +207,30 @@ SANDY_SCRIPT_PATH="$SCRIPT"
 _SANDY_SCRIPT_PATH="$SCRIPT"
 # Fast-path fixtures are created in the isolated SANDY_HOME, never the real home.
 bash "$SCRIPT" --print-protected-paths >/dev/null
+
+# ONE --print-schema run, read by every check that asserts on the schema's
+# CONTENT. Its output depends on nothing but the script (no HOME, SANDY_HOME,
+# cwd, PATH or SANDY_* input), and it ran 48 times. Checks that test the
+# INVOCATION itself (its exit status, stderr, environment handling or docker
+# spawns: §92, §93, §100, §185) still run it live, and so must any check that
+# runs a modified copy of sandy. Asserted here, before anything reads it: a run
+# that fails, prints nothing, or prints something other than one JSON document
+# stops the group rather than failing 40 checks.
+_SCHEMA_CACHE_RC=0
+bash "$SCRIPT" --print-schema >"$_SCHEMA_CACHE" 2>/dev/null || _SCHEMA_CACHE_RC=$?
+_SCHEMA_CACHE_BAD=""
+if [ "$_SCHEMA_CACHE_RC" -ne 0 ]; then
+    _SCHEMA_CACHE_BAD="exited $_SCHEMA_CACHE_RC"
+elif [ ! -s "$_SCHEMA_CACHE" ]; then
+    _SCHEMA_CACHE_BAD="exited 0 but printed nothing"
+elif ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$_SCHEMA_CACHE" >/dev/null 2>&1; then
+    _SCHEMA_CACHE_BAD="exited 0 but its $(wc -c <"$_SCHEMA_CACHE" | tr -d ' ') bytes are not one JSON document"
+fi
+if [ -n "$_SCHEMA_CACHE_BAD" ]; then
+    printf '\033[0;31m✗ sandy --print-schema %s; every schema check reads its output, so the host group stops here\033[0m\n' \
+        "$_SCHEMA_CACHE_BAD" >&2
+    exit 1
+fi
 
 # Container toolchain, persistence and isolation checks: test_container.py.
 info "9. Workspace .venv overlay — detection and materialization"
@@ -711,7 +799,7 @@ check "XAI_API_KEY is a privileged key" \
 check "GROK_MODEL + SANDY_GROK_AUTH are passive keys" \
     bash -c 'b="$(sed -n "/^SANDY_PASSIVE_KEYS=(/,/^)/p" "$1")"; echo "$b" | grep -qx "    GROK_MODEL" && echo "$b" | grep -qx "    SANDY_GROK_AUTH"' -- "$_GROK_S"
 check "--print-schema agents[] includes grok (sandy-grok)" \
-    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"sandy-grok\""' -- "$_GROK_S"
+    bash -c 'grep -q "\"sandy-grok\"" "$1"' -- "$_SCHEMA_CACHE"
 
 # ============================================================
 info "28b. Codex CLI support — agent helpers and flag translation"
@@ -2055,7 +2143,7 @@ _STATE_JSON="$_INTRO_TMP/state.json"
 
 # --- --print-schema ---
 _SCHEMA_RC=0
-bash "$SANDY_SCRIPT_PATH" --print-schema > "$_SCHEMA_JSON" 2>/dev/null || _SCHEMA_RC=$?
+cp "$_SCHEMA_CACHE" "$_SCHEMA_JSON"; _SCHEMA_RC="$_SCHEMA_CACHE_RC"   # the one run near the top of this file
 check "--print-schema exits 0" test "$_SCHEMA_RC" -eq 0
 check "--print-schema output is valid JSON" \
     python3 -m json.tool < "$_SCHEMA_JSON"
@@ -2396,14 +2484,14 @@ check "SANDY_SCREENSHOT_DIR in privileged-keys list" \
 # 45b. Schema metadata: --print-schema emits the new key.
 check "--print-schema lists SANDY_SCREENSHOT_DIR" \
     bash -c '
-        bash "$1" --print-schema \
+        cat "$1" \
             | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 names=[k[\"name\"] for k in d[\"config\"][\"privileged_keys\"]]
 assert \"SANDY_SCREENSHOT_DIR\" in names, names
 "
-    ' -- "$_SS_SCRIPT"
+    ' -- "$_SCHEMA_CACHE"
 
 # 45c. Mount + env-var emission: when SANDY_SCREENSHOT_DIR is set in the env
 # and the dir exists, sandy adds the bind mount and SANDY_SCREENSHOTS_PATH.
@@ -2539,14 +2627,14 @@ check "SANDY_EXTRA_ENV in privileged-keys list" \
     ' -- "$_EE_SCRIPT"
 check "--print-schema lists SANDY_EXTRA_ENV under privileged" \
     bash -c '
-        bash "$1" --print-schema \
+        cat "$1" \
             | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 names=[k[\"name\"] for k in d[\"config\"][\"privileged_keys\"]]
 assert \"SANDY_EXTRA_ENV\" in names, names
 "
-    ' -- "$_EE_SCRIPT"
+    ' -- "$_SCHEMA_CACHE"
 
 # 47b. Loader behavior — extract the function and exercise it standalone.
 # A live launch would need real config files in $SANDY_HOME plus a Docker
@@ -2976,27 +3064,27 @@ info "50. Egress proxy launcher wiring (M2.7 tri-state)"
 # Config tiers: SANDY_EGRESS_PROXY is passive (per-project opt-in); the
 # allowlist expander SANDY_ALLOW_HOSTS is privileged (it widens reach).
 check "SANDY_EGRESS_PROXY is passive-tier" \
-    bash -c 'bash "$1" --print-schema | python3 -c "
+    bash -c 'cat "$1" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 names=[k[\"name\"] for k in d[\"config\"][\"passive_keys\"]]
 assert \"SANDY_EGRESS_PROXY\" in names, names
-"' -- "$_PX_SCRIPT"
+"' -- "$_SCHEMA_CACHE"
 check "SANDY_ALLOW_HOSTS is privileged-tier" \
-    bash -c 'bash "$1" --print-schema | python3 -c "
+    bash -c 'cat "$1" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 names=[k[\"name\"] for k in d[\"config\"][\"privileged_keys\"]]
 assert \"SANDY_ALLOW_HOSTS\" in names, names
-"' -- "$_PX_SCRIPT"
+"' -- "$_SCHEMA_CACHE"
 check "SANDY_EGRESS_PROXY schema is enum with choices 0/1/2" \
-    bash -c 'bash "$1" --print-schema | python3 -c "
+    bash -c 'cat "$1" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 k=[x for x in d[\"config\"][\"passive_keys\"] if x[\"name\"]==\"SANDY_EGRESS_PROXY\"][0]
 assert k[\"type\"]==\"enum\", k[\"type\"]
 assert k[\"choices\"]==[\"0\",\"1\",\"2\"], k[\"choices\"]
-"' -- "$_PX_SCRIPT"
+"' -- "$_SCHEMA_CACHE"
 
 # Tri-state normalization: 1->permissive, 2->strict, garbage->hard error.
 _PX_NORM="$(sed -n '/^_SANDY_PROXY_ON=false/,/^esac/p' "$_PX_SCRIPT")"
@@ -3974,19 +4062,7 @@ rm -rf "$_ON_BIN"
 # docker, e.g. /usr/bin on many Linux distros) so `command -v docker` fails
 # while every other tool sandy needs stays resolvable.
 _ON_NODOCKER_BIN="$(mktemp -d)"
-_ON_SAVE_IFS="$IFS"; IFS=':'
-for _ON_D in $PATH; do
-    IFS="$_ON_SAVE_IFS"
-    [ -d "$_ON_D" ] || continue
-    for _ON_F in "$_ON_D"/*; do
-        [ -x "$_ON_F" ] && [ -f "$_ON_F" ] || continue
-        _ON_BASE="${_ON_F##*/}"
-        [ "$_ON_BASE" = "docker" ] && continue
-        [ -e "$_ON_NODOCKER_BIN/$_ON_BASE" ] || ln -s "$_ON_F" "$_ON_NODOCKER_BIN/$_ON_BASE" 2>/dev/null
-    done
-    IFS=':'
-done
-IFS="$_ON_SAVE_IFS"
+_path_farm "$_ON_NODOCKER_BIN" docker
 
 _ON_JSON_NODOCKER="$(PATH="$_ON_NODOCKER_BIN" bash "$_SBX_SCRIPT" --print-state 2>/dev/null)"
 check "print-state (docker absent): orphan_networks is null" \
@@ -4084,9 +4160,9 @@ section "§71: sandy --update-sessions — fleet image refresh + rolling restart
 # 71.1 — structural, non-tautological static checks.
 check "cli_flags includes --update-sessions (mutation: remove the cli_flags entry -> fails)" \
     bash -c '
-        names="$(bash "$1" --print-schema | python3 -c "import json,sys; print(chr(10).join(f[\"name\"] for f in json.load(sys.stdin)[\"cli_flags\"]))")"
+        names="$(cat "$1" | python3 -c "import json,sys; print(chr(10).join(f[\"name\"] for f in json.load(sys.stdin)[\"cli_flags\"]))")"
         printf "%s\n" "$names" | grep -qxF -- "--update-sessions"
-    ' -- "$_SBX_SCRIPT"
+    ' -- "$_SCHEMA_CACHE"
 check "sandy.updated_at RUN_FLAGS label is gated on SANDY_UPDATE_RESTART (DEC-U3) (mutation: make the label unconditional, or gate it on a different var -> fails)" \
     bash -c 'grep -B3 -- "--label \"sandy.updated_at=" "$1" | grep -q "SANDY_UPDATE_RESTART"' -- "$_SBX_SCRIPT"
 
@@ -4299,6 +4375,9 @@ cat > "$_U71_BIN/curl" <<'CURLSHIM'
 exit 1
 CURLSHIM
 chmod +x "$_U71_BIN/curl"
+# --update-sessions polls each refresh child's done-marker with `sleep 1`, so a
+# stubbed build that finishes in well under a second still cost a whole one.
+_sleep_stub "$_U71_BIN" "$_U71_BIN/sleep.log" 0.05
 
 # Prime the shared hash files (base image + claude-code image) with ONE real
 # --build-only pass so the two per-session children below both take the
@@ -4398,7 +4477,7 @@ check "--stop-all with no daemon sessions says so" \
 check "--stop-all composes \"\$0\" --stop --workspace per session" \
     grep -qF '"$0" --stop --workspace "${_sa_ws[$_sa_i]}"' "$_SA_SANDY"
 check "--print-schema cli_flags includes --stop-all" \
-    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"--stop-all\""' -- "$_SA_SANDY"
+    bash -c 'grep -q "\"--stop-all\"" "$1"' -- "$_SCHEMA_CACHE"
 rm -rf "$_SA_BIN"
 
 # ============================================================
@@ -4574,12 +4653,12 @@ check "SANDY_AGENT_ARGS is NOT in SANDY_ENV_ONLY_KEYS" \
 
 # (b) --print-schema exposes it as privileged + approval-required.
 check "--print-schema lists SANDY_AGENT_ARGS as privileged + passive_approval_required" \
-    bash -c '"$1" --print-schema 2>/dev/null | python3 -c "
+    bash -c 'cat "$1" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 m=[k for k in d[\"config\"][\"privileged_keys\"] if k[\"name\"]==\"SANDY_AGENT_ARGS\"]
 assert m, \"not in privileged_keys\"
-assert m[0].get(\"passive_approval_required\") is True, m[0]"' -- "$_S77"
+assert m[0].get(\"passive_approval_required\") is True, m[0]"' -- "$_SCHEMA_CACHE"
 
 # (c) Value → argv rule (LOCKED v1): whitespace split, runs collapse, NO embedded
 # spaces (quotes are literal). Reproduces the injection's `read -ra` exactly.
@@ -4729,10 +4808,8 @@ check "--print-state emits dangling_images/orphaned_containers in all four branc
 
 # --- (a2) Post-verify-pass structural checks (B1/B2/Major-3 fixes) ---
 
-check "_sandy_gc_probe_has_session exists and its retry branch uses the 5x/sleep-1 pattern" \
-    bash -c '_f="$(sed -n "/^_sandy_gc_probe_has_session()/,/^}\$/p" "$1")"
-        printf "%s" "$_f" | grep -qE "for _i in 1 2 3 4 5" \
-            && printf "%s" "$_f" | grep -qF "sleep 1"' -- "$_S79"
+# The 5x/sleep-1 retry of _sandy_gc_probe_has_session was a presence grep here;
+# it is now RUN: see "the zombie probe retries" after the --gc --dry-run below.
 
 check "the container reaper invokes the lister with the retrying 'reap' mode" \
     bash -c '_f="$(sed -n "/^_sandy_gc_reap_containers()/,/^}\$/p" "$1")"
@@ -4811,6 +4888,7 @@ _S79_ACTIONS="$(mktemp)"
 _S79_RM_CONTAINERS="$(mktemp)"; : > "$_S79_RM_CONTAINERS"
 _S79_RM_IMAGES="$(mktemp)"; : > "$_S79_RM_IMAGES"
 : > "$_S79_ACTIONS"
+_S79_SLEEPS="$(mktemp)"; : > "$_S79_SLEEPS"
 export _S79_ACTIONS _S79_RM_CONTAINERS _S79_RM_IMAGES
 
 mkdir -p "$_S79_HOME/sandboxes/live-abc123"
@@ -4900,9 +4978,14 @@ case "$1" in
 esac
 DOCKERSHIM
 chmod +x "$_S79_BIN/docker"
+# sleep stub: records each call and returns at once. The zombie fixture (czomb)
+# makes the reap-mode probe retry with `sleep 1`, 5 times per listing, which
+# cost 20 s of real waiting across the --gc runs below. The record is asserted.
+_sleep_stub "$_S79_BIN" "$_S79_SLEEPS"
 
 # --dry-run: plan is printed, nothing logged as an rm/rmi/stop action, exit 0.
 : > "$_S79_ACTIONS"
+: > "$_S79_SLEEPS"
 _S79_DRY_OUT="$(PATH="$_S79_BIN:$PATH" SANDY_HOME="$_S79_HOME" bash "$_S79" --gc --dry-run 2>&1)"
 _S79_DRY_RC=$?
 check "--gc --dry-run exits 0" test "$_S79_DRY_RC" -eq 0
@@ -4927,6 +5010,12 @@ check "--gc --dry-run's plan: that agent's paired proxy SURVIVES too (B2 proxy s
     bash -c '! printf "%s" "$1" | grep -q "sandy-proxy-proxy-bphash"' -- "$_S79_DRY_OUT"
 check "--gc --dry-run's plan: a proxy with NO paired agent at all is listed for removal" \
     bash -c 'printf "%s" "$1" | grep -q "sandy-proxy-orphanx"' -- "$_S79_DRY_OUT"
+# Replaces the presence grep for the 5x/sleep-1 pattern: the reap-mode lister
+# really probes a zombie 5 times with `sleep 1` between, so a container still
+# mid-startup gets about 5 s to create its session.
+check "the zombie probe retries: --gc --dry-run asked czomb has-session 5 times, sleeping 1 s after each (mutation: the retry loop cut to 3 iterations -> 3 and 3) (sleeps: $(tr '\n' ' ' < "$_S79_SLEEPS"))" \
+    bash -c '[ "$(wc -l < "$1" | tr -d " ")" = 5 ] && [ "$(grep -cx 1 "$1")" = 5 ] \
+        && [ "$(grep -c "^CALL: exec -u [0-9]* czomb tmux has-session -t sandy\$" "$2")" = 5 ]' -- "$_S79_SLEEPS" "$_S79_ACTIONS"
 
 # Non-TTY without --yes: refuses, exits 1, nothing logged. Guard the expected-
 # nonzero invocation with `|| rc=$?` so it doesn't trip the suite's set -e / ERR
@@ -4997,19 +5086,7 @@ check "--gc rejects an unrecognized trailing argument (exit 1)" test "$_S79_BOGU
 # docker-absent: overlay every PATH-reachable executable EXCEPT docker (same
 # technique as §69's docker-absent case) so `command -v docker` fails.
 _S79_NODOCKER_BIN="$(mktemp -d)"
-_S79_SAVE_IFS="$IFS"; IFS=':'
-for _S79_D in $PATH; do
-    IFS="$_S79_SAVE_IFS"
-    [ -d "$_S79_D" ] || continue
-    for _S79_F in "$_S79_D"/*; do
-        [ -x "$_S79_F" ] && [ -f "$_S79_F" ] || continue
-        _S79_BASE="${_S79_F##*/}"
-        [ "$_S79_BASE" = "docker" ] && continue
-        [ -e "$_S79_NODOCKER_BIN/$_S79_BASE" ] || ln -s "$_S79_F" "$_S79_NODOCKER_BIN/$_S79_BASE" 2>/dev/null
-    done
-    IFS=':'
-done
-IFS="$_S79_SAVE_IFS"
+_path_farm "$_S79_NODOCKER_BIN" docker
 _S79_NODOCKER_RC=0
 PATH="$_S79_NODOCKER_BIN" bash "$_S79" --gc >/dev/null 2>&1 || _S79_NODOCKER_RC=$?
 check "--gc exits 1 when docker is unreachable" test "$_S79_NODOCKER_RC" -eq 1
@@ -5041,7 +5118,7 @@ assert d[\"dangling_images\"] is None, d[\"dangling_images\"]
 assert d[\"orphaned_containers\"] is None, d[\"orphaned_containers\"]
 " "$1"' -- "$_S79_PS_LIGHT"
 
-rm -rf "$_S79_BIN" "$_S79_HOME" "$_S79_WS" "$_S79_ACTIONS" "$_S79_RM_CONTAINERS" "$_S79_RM_IMAGES" \
+rm -rf "$_S79_BIN" "$_S79_HOME" "$_S79_WS" "$_S79_ACTIONS" "$_S79_RM_CONTAINERS" "$_S79_RM_IMAGES" "$_S79_SLEEPS" \
        "$_S79_EMPTY_BIN" "$_S79_EMPTY_HOME" "$_S79_NODOCKER_BIN" 2>/dev/null || true
 
 # --- (c) M4 regression: skills in-use set must also consult host
@@ -5130,13 +5207,16 @@ case "$1" in
 esac
 DOCKERSHIM
 chmod +x "$_S79R_BIN/docker"
+# Same recording sleep stub as above: the two failed probes would each wait 1 s.
+_S79R_SLEEPS="$(mktemp)"; : > "$_S79R_SLEEPS"
+_sleep_stub "$_S79R_BIN" "$_S79R_SLEEPS"
 echo 0 > "$_S79R_COUNTER"
 _S79R_OUT="$(PATH="$_S79R_BIN:$PATH" SANDY_HOME="$_S79R_HOME" bash "$_S79" --gc --dry-run 2>&1)"
 check "Major-3: a mid-startup daemon (has-session fails twice, then succeeds) is NOT reaped" \
     bash -c 'printf "%s" "$1" | grep -qF "Nothing to reclaim."' -- "$_S79R_OUT"
 check "Major-3: the retry actually ran multiple probes before succeeding" \
     bash -c '[ "$(cat "$1")" -ge 3 ]' -- "$_S79R_COUNTER"
-rm -rf "$_S79R_BIN" "$_S79R_HOME" "$_S79R_COUNTER" 2>/dev/null || true
+rm -rf "$_S79R_BIN" "$_S79R_HOME" "$_S79R_COUNTER" "$_S79R_SLEEPS" 2>/dev/null || true
 
 # NOTE: real reclaim against a live Docker daemon (actual container/image
 # removal, timing/races under a concurrent launch, the orphaned-skills-image
@@ -5235,7 +5315,7 @@ check "--reset-sandbox under a live lock removes nothing (pip survives)" test -d
 rm -rf "$_RSB_FH2" "$_RSB_WS2"
 # cli_flags advertises it
 check "--print-schema cli_flags includes --reset-sandbox" \
-    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"--reset-sandbox\""' -- "$_RSB_SANDY"
+    bash -c 'grep -q "\"--reset-sandbox\"" "$1"' -- "$_SCHEMA_CACHE"
 
 # ============================================================
 echo ""
@@ -5487,7 +5567,7 @@ check "--help documents SANDY_EFFORT" \
     bash -c 'grep -q "SANDY_EFFORT" "$1"' -- "$_S84"
 # --print-schema exposes it as a passive enum key
 check "--print-schema lists SANDY_EFFORT as a passive enum key" \
-    bash -c '"$1" --print-schema 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); e=[k for k in d[\"config\"][\"passive_keys\"] if k[\"name\"]==\"SANDY_EFFORT\"]; assert e and e[0][\"type\"]==\"enum\", e"' -- "$_S84"
+    bash -c 'cat "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); e=[k for k in d[\"config\"][\"passive_keys\"] if k[\"name\"]==\"SANDY_EFFORT\"]; assert e and e[0][\"type\"]==\"enum\", e"' -- "$_SCHEMA_CACHE"
 # marker effort field: string when set, null when unset (behavioral, no docker)
 _eff_mk() { local SANDY_EFFORT="$1" j="null"; [ -n "${SANDY_EFFORT:-}" ] && j="\"$SANDY_EFFORT\""; printf '{"effort":%s}\n' "$j"; }
 check "marker effort field: set→JSON string, unset→null" \
@@ -6018,7 +6098,7 @@ _S91_EXTRACTED_COUNT="$(wc -l < "$_S91_EXTRACTED_FILE" | tr -d ' ')"
 # interpolation risk -- see the §89 PYBACK lesson) writing standalone scripts
 # to temp files rather than inlining python inside a bash -c string. ---
 _S91_SCHEMA_JSON="$(mktemp)"
-bash "$_S91_SANDY" --print-schema > "$_S91_SCHEMA_JSON" 2>/dev/null
+cp "$_SCHEMA_CACHE" "$_S91_SCHEMA_JSON"
 
 _S91_NAMES_FILE="$(mktemp)"
 _S91_DESC_FILE="$(mktemp)"
@@ -7108,8 +7188,7 @@ check "§99(16) nonexistent --sandbox target -> error names it" \
 
 # --- (17) --print-schema advertises --remove-sandbox ---
 check "§99(17) --print-schema cli_flags includes --remove-sandbox" \
-    bash -c 'PATH="$1:$PATH" bash "$2" --print-schema 2>/dev/null | grep -q "\"--remove-sandbox\""' \
-    -- "$_S99_BIN" "$_S99_SANDY"
+    grep -q '"--remove-sandbox"' "$_SCHEMA_CACHE"
 
 # --- (2) real removal: A is gone ---
 PATH="$_S99_BIN:$PATH" SANDY_HOME="$_S99_FH" bash "$_S99_SANDY" \
@@ -7200,19 +7279,7 @@ _S99_FH8="$(mktemp -d)"
 IFS=$'\t' read -r _S99_E_NAME _S99_E_WS <<< "$(_s99_mk_live_ws_sandbox "$_S99_FH8")"
 _S99_E_DIR="$_S99_FH8/sandboxes/$_S99_E_NAME"
 _S99_NODOCKER_BIN="$(mktemp -d)"
-_S99_SAVE_IFS="$IFS"; IFS=':'
-for _s99_d in $PATH; do
-    IFS="$_S99_SAVE_IFS"
-    [ -d "$_s99_d" ] || continue
-    for _s99_f in "$_s99_d"/*; do
-        [ -x "$_s99_f" ] && [ -f "$_s99_f" ] || continue
-        _s99_base="${_s99_f##*/}"
-        [ "$_s99_base" = "docker" ] && continue
-        [ -e "$_S99_NODOCKER_BIN/$_s99_base" ] || ln -s "$_s99_f" "$_S99_NODOCKER_BIN/$_s99_base" 2>/dev/null
-    done
-    IFS=':'
-done
-IFS="$_S99_SAVE_IFS"
+_path_farm "$_S99_NODOCKER_BIN" docker
 PATH="$_S99_NODOCKER_BIN" SANDY_HOME="$_S99_FH8" bash "$_S99_SANDY" \
     --remove-sandbox --sandbox "$_S99_E_NAME" --yes >/dev/null 2>&1 || true
 _S99_NODOCKER_RC=$?
@@ -7872,7 +7939,7 @@ rm -rf "$_S101_SCRATCH"
 # --- (i) introspection ---
 
 check "--print-schema cli_flags includes --doctor" \
-    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"--doctor\""' -- "$_S101_SANDY"
+    bash -c 'grep -q "\"--doctor\"" "$1"' -- "$_SCHEMA_CACHE"
 
 # ============================================================
 section "§102: sandy --provision — non-interactive sandbox creation via the real launch path (#177)"
@@ -9697,7 +9764,7 @@ check "§114(1d) metadata row: SANDY_HANDOFF_RELAY is type path, since 1.10.0, a
     bash -c 'grep -q "^SANDY_HANDOFF_RELAY|path|||1.10.0|deprecated|" "$1"' -- "$_S114_SANDY"
 check "§114(1e) --print-schema carries both keys in the right tier with the right type" \
     bash -c '
-        cd "$(dirname "$1")" && ./sandy --print-schema 2>/dev/null | python3 -c "
+        cat "$1" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 priv={k[\"name\"] for k in d[\"config\"][\"privileged_keys\"]}
@@ -9707,7 +9774,7 @@ assert \"SANDY_CROSS_SESSION_INBOUND\" in pas, \"csi not passive\"
 assert pas[\"SANDY_CROSS_SESSION_INBOUND\"][\"type\"] == \"enum\", \"csi not enum\"
 assert pas[\"SANDY_CROSS_SESSION_INBOUND\"][\"choices\"] == [\"accept\",\"hold\",\"refuse\"], \"csi choices wrong\"
 "
-    ' -- "$_S114_SANDY"
+    ' -- "$_SCHEMA_CACHE"
 
 # --- (2) value-aware gate: accept is gated, hold/refuse are not --------------
 _S114_PVP_FN="$(awk '/^_sandy_passive_value_privileged\(\) \{/,/^}$/' "$_S114_SANDY")"
@@ -9798,26 +9865,7 @@ check "§114(4g) ~/.claude/settings.json (the HOME/user-scope file) is NEVER tou
 # `PATH="$farm" bash -c ...` exit 127 -- and because that call was unguarded,
 # the ERR trap aborted the whole suite mid-run. Linux has /usr/bin/bash, so CI
 # never saw it. First match wins, preserving $PATH order.
-_s114_make_stripped_bin() {
-    local dest="$1"; shift
-    mkdir -p "$dest"
-    local excl=" $* "
-    local d f b oldifs
-    oldifs="$IFS"; IFS=:
-    set -f            # a PATH entry containing a glob char must not expand here
-    set -- $PATH
-    set +f
-    IFS="$oldifs"
-    for d in "$@"; do
-        [ -d "$d" ] || continue
-        for f in "$d"/*; do
-            [ -f "$f" ] && [ -x "$f" ] || continue
-            b="$(basename "$f")"
-            case "$excl" in *" $b "*) continue ;; esac
-            [ -e "$dest/$b" ] || ln -sf "$f" "$dest/$b" 2>/dev/null || true
-        done
-    done
-}
+_s114_make_stripped_bin() { _path_farm "$@"; }   # the shared farm (top of file)
 
 # --- (5) jq branch (node absent, jq present) ----------------------------------
 _S114_NOJQ_HAS_JQ=0
@@ -10106,15 +10154,14 @@ check "§114(9c) the feature-entries non-start skip block precedes the feature-s
 # --- (10) both settings files remain protected (self-pin can't be loosened) --
 check "§114(10) .claude/settings.local.json AND .claude/settings.json are both in _sandy_protected_files" \
     bash -c '
-        cd "$(dirname "$1")"
-        ./sandy --print-schema 2>/dev/null | python3 -c "
+        cat "$1" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 files=set(d[\"protected_paths\"][\"files\"])
 assert \".claude/settings.local.json\" in files, files
 assert \".claude/settings.json\" in files, files
 "
-    ' -- "$_S114_SANDY"
+    ' -- "$_SCHEMA_CACHE"
 
 # --- (11) feature-entries non-start validation (was: SANDY_HANDOFF_RELAY
 # host-side validation) ---------------------------------------------------
@@ -10743,12 +10790,12 @@ check "§116(8) the host OAuth copy targets the SANDBOX, never an ephemeral tmpd
         ! printf "%s\n" "$1" | grep -q '"'"'cp "\$HOME/.codex/auth.json" "\$CODEX_CRED_TMPDIR'"'"'
     ' -- "$_S116_FN"
 check "§116(9) --print-schema advertises sandbox_auth_json in the codex probe order" \
-    bash -c 'cd "$(dirname "$1")" && ./sandy --print-schema 2>/dev/null | python3 -c "
+    bash -c 'cat "$1" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 c=[a for a in d[\"agents\"] if a[\"name\"]==\"codex\"][0]
 assert c[\"credentials\"][\"probe_order\"]==[\"OPENAI_API_KEY\",\"sandbox_auth_json\",\"host_auth_json\"], c
-"' -- "$_S116_SANDY"
+"' -- "$_SCHEMA_CACHE"
 unset _S116_SANDY _S116_FN
 
 # ============================================================
@@ -10843,7 +10890,7 @@ check "§117(8) SANDY_CLAUDE_AUTH=oauth suppresses the key even with NO OAuth fi
 # of the account refresh token) so it stays passive-safe; `oauth` forces the
 # account credential in even when a key is available, so it is approval-gated.
 check "§117(9) SANDY_CLAUDE_AUTH=oauth is approval-gated from a passive source" \
-    bash -c '"$1" --print-schema >/dev/null 2>&1; printf "%s" "$(awk "/_sandy_passive_value_privileged\(\)/,/^}/" "$1")" | grep -q "SANDY_CLAUDE_AUTH.*oauth"' -- "$SANDY_SCRIPT"
+    bash -c 'printf "%s" "$(awk "/_sandy_passive_value_privileged\(\)/,/^}/" "$1")" | grep -q "SANDY_CLAUDE_AUTH.*oauth"' -- "$SANDY_SCRIPT"
 check "§117(10) SANDY_CLAUDE_AUTH=api_key is NOT approval-gated (it is the tightening direction)" \
     bash -c '! printf "%s" "$(awk "/_sandy_passive_value_privileged\(\)/,/^}/" "$1")" | grep -q "SANDY_CLAUDE_AUTH.*api_key"' -- "$SANDY_SCRIPT"
 
@@ -10918,7 +10965,7 @@ rm -rf "$_S117_FX"
 check "§117(22) ANTHROPIC_PROFILE is a PRIVILEGED key (a committed config must not be able to pick an org:admin profile)" \
     bash -c 'awk "/^SANDY_PRIVILEGED_KEYS=\(/,/^\)/" "$1" | grep -qx "    ANTHROPIC_PROFILE"' -- "$SANDY_SCRIPT"
 check "§117(23) --print-schema lists profile as a SANDY_CLAUDE_AUTH choice" \
-    bash -c '"$1" --print-schema 2>/dev/null | tr -d " \n" | grep -q "\"name\":\"SANDY_CLAUDE_AUTH\",\"type\":\"enum\",\"choices\":\[\"auto\",\"api_key\",\"oauth\",\"profile\"\]"' -- "$SANDY_SCRIPT"
+    bash -c 'tr -d " \n" <"$1" | grep -q "\"name\":\"SANDY_CLAUDE_AUTH\",\"type\":\"enum\",\"choices\":\[\"auto\",\"api_key\",\"oauth\",\"profile\"\]"' -- "$_SCHEMA_CACHE"
 # cred_mode: first-match-wins, and a host token may still be SET in the env (it
 # is withheld at the forwarding site), so the profile test must come first.
 check "§117(24) cred_mode tests the profile BEFORE the env token, so the marker cannot claim oauth-token for a profile session" \
@@ -10927,7 +10974,7 @@ check "§117(24) cred_mode tests the profile BEFORE the env token, so the marker
 # The documented probe order must match the code, or a consumer reading
 # --print-schema plans around a precedence sandy no longer implements.
 check "§117(5) --print-schema probe_order puts host_credentials_file ahead of ANTHROPIC_API_KEY" \
-    bash -c '"$1" --print-schema 2>/dev/null | tr -d " \n" | grep -q "\"probe_order\":\[\"CLAUDE_CODE_OAUTH_TOKEN\",\"host_credentials_file\",\"ANTHROPIC_API_KEY\"\]"' -- "$SANDY_SCRIPT"
+    bash -c 'tr -d " \n" <"$1" | grep -q "\"probe_order\":\[\"CLAUDE_CODE_OAUTH_TOKEN\",\"host_credentials_file\",\"ANTHROPIC_API_KEY\"\]"' -- "$_SCHEMA_CACHE"
 
 # ============================================================
 section "§118: codex config.toml sandbox_mode is repaired by VALUE, not just key presence"
@@ -11048,7 +11095,7 @@ _S119_EXEMPT="SANDY_AUTO_APPROVE_PRIVILEGED SANDY_DEBUG_CLEANUP"
 _S119_EXEMPT_ARGS=()
 for _S119_K in $_S119_EXEMPT; do _S119_EXEMPT_ARGS+=(-e "$_S119_K"); done
 
-_S119_MISSING="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' \
+_S119_MISSING="$(tr ',' '\n' <"$_SCHEMA_CACHE" \
     | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([A-Z][A-Z0-9_]*\)".*/\1/p' | sort -u \
     | grep -vxF "${_S119_EXEMPT_ARGS[@]}" \
     | while IFS= read -r _k; do
@@ -11059,7 +11106,7 @@ check "§119(1) no config key is missing from the configuration guide (or, for a
 
 # Non-vacuity: the extractor must actually be finding keys. Without this a typo
 # in the sed would yield an empty key list and (1) would pass trivially forever.
-_S119_COUNT="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' \
+_S119_COUNT="$(tr ',' '\n' <"$_SCHEMA_CACHE" \
     | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([A-Z][A-Z0-9_]*\)".*/\1/p' | sort -u | wc -l | tr -d ' ')"
 check "§119(2) the key extractor found a plausible number of keys (>40), so (1) cannot pass vacuously" \
     bash -c '[ "$1" -gt 40 ]' -- "$_S119_COUNT"
@@ -11082,7 +11129,7 @@ _S119_FLAG_EXEMPT="--help --version"
 _S119_FLAG_EXEMPT_ARGS=()
 for _S119_F in $_S119_FLAG_EXEMPT; do _S119_FLAG_EXEMPT_ARGS+=(-e "$_S119_F"); done
 _S119_FLAGROWS="$(grep '^| `--' "$_S119_README" || true)"
-_S119_FLAGS_MISSING="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' \
+_S119_FLAGS_MISSING="$(tr ',' '\n' <"$_SCHEMA_CACHE" \
     | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\(--[a-z-]*\)".*/\1/p' | sort -u \
     | grep -vxF "${_S119_FLAG_EXEMPT_ARGS[@]}" \
     | while IFS= read -r _f; do
@@ -11091,7 +11138,7 @@ _S119_FLAGS_MISSING="$("$SANDY_SCRIPT" --print-schema 2>/dev/null | tr ',' '\n' 
 check "§119(4) every cli_flag has a row in the configuration guide's flags TABLE (prose does not count)${_S119_FLAGS_MISSING:+ — missing: $_S119_FLAGS_MISSING}" \
     bash -c '[ -z "$1" ]' -- "$_S119_FLAGS_MISSING"
 check "§119(5) the flag extractor found a plausible number of flags (>15), so (4) cannot pass vacuously" \
-    bash -c '[ "$("$2" --print-schema 2>/dev/null | tr "," "\n" | sed -n "s/.*\"name\"[[:space:]]*:[[:space:]]*\"\(--[a-z-]*\)\".*/\1/p" | sort -u | wc -l)" -gt 15 ]' -- "" "$SANDY_SCRIPT"
+    bash -c '[ "$(tr "," "\n" <"$2" | sed -n "s/.*\"name\"[[:space:]]*:[[:space:]]*\"\(--[a-z-]*\)\".*/\1/p" | sort -u | wc -l)" -gt 15 ]' -- "" "$_SCHEMA_CACHE"
 
 check "§119(3) the two 1.10.0 keys this guard was written for are present" \
     bash -c 'grep -q SANDY_CLAUDE_AUTH "$1" && grep -q SANDY_CROSS_SESSION_INBOUND "$1"' -- "$_S119_README"
@@ -15187,7 +15234,7 @@ check "§148(12) sandy's own per-agent block orders feature args BEFORE the oper
 # so all three are diffed here. This is §135(20)'s drift, one layer out.
 # Only the top_level_keys array: it holds no nested brackets, so a [^]]* run is
 # exact and needs no alternation (BSD sed has none in a BRE).
-_S148_SCHEMA_KEYS="$(bash "$_S148_SANDY" --print-schema 2>/dev/null | sed -n 's/.*"top_level_keys":\[\([^]]*\)\].*/\1/p' | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S148_SCHEMA_KEYS="$(cat "$_SCHEMA_CACHE" | sed -n 's/.*"top_level_keys":\[\([^]]*\)\].*/\1/p' | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
 _S148_JS_KEYS="$(sed -n 's/^const KNOWN = \[\(.*\)\];$/\1/p' "$_S148_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
 _S148_JQ_KEYS="$(sed -n 's/^def known: \[\(.*\)\];$/\1/p' "$_S148_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
 check "§148(13) --print-schema publishes the manifest's accepted top-level keys (the capability signal a consumer gates on instead of a version number) (got: $_S148_SCHEMA_KEYS)" \
@@ -15200,7 +15247,7 @@ check "§148(15) ...and equals the JQ projector's, so a jq-only host accepts exa
 # --- (16) the agent list a consumer validates against ------------------------
 # The consumer was told to read --print-schema's agents[].name rather than
 # hardcode the set. That is only safe if it equals what the projectors accept.
-_S148_SCHEMA_AGENTS="$(bash "$_S148_SANDY" --print-schema 2>/dev/null | tr '{' '\n' | sed -n 's/.*"name":"\([a-z]*\)","image":"sandy-.*/\1/p' | tr '\n' ' ' | sed 's/ *$//')"
+_S148_SCHEMA_AGENTS="$(tr '{' '\n' <"$_SCHEMA_CACHE" | sed -n 's/.*"name":"\([a-z]*\)","image":"sandy-.*/\1/p' | tr '\n' ' ' | sed 's/ *$//')"
 _S148_JS_AGENTS="$(sed -n 's/^const AGENTS = \[\(.*\)\];$/\1/p' "$_S148_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
 _S148_JQ_AGENTS="$(sed -n 's/^def agents_known: \[\(.*\)\];$/\1/p' "$_S148_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
 check "§148(16) --print-schema's agents[].name equals the set agent_args accepts — a consumer validating against the published list cannot be refused for a name sandy advertises (schema: $_S148_SCHEMA_AGENTS / js: $_S148_JS_AGENTS)" \
@@ -15738,7 +15785,7 @@ if command -v node >/dev/null 2>&1; then
     # run at this line and every check after it silently never executed. The
     # two non-empty assertions below are what keep `|| true` from making the
     # equality vacuous.
-    _S153_PUB="$("$_S153_SANDY" --print-schema 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let t=[];try{t=(JSON.parse(s).manifest||{}).agent_args_compose||[]}catch(e){};process.stdout.write(t.map(e=>e.agent+"\t"+e.flag+"\t"+e.policy).join("\n"))})' 2>/dev/null || true)"
+    _S153_PUB="$(cat "$_SCHEMA_CACHE" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let t=[];try{t=(JSON.parse(s).manifest||{}).agent_args_compose||[]}catch(e){};process.stdout.write(t.map(e=>e.agent+"\t"+e.flag+"\t"+e.policy).join("\n"))})' 2>/dev/null || true)"
     _S153_OWN="$(bash -c 'eval "$1"; _sandy_aa_compose_table' _ "$_S153_BLK" 2>/dev/null || true)"
     check "§153(22a) --print-schema published a NON-EMPTY agent_args_compose table (mutation: an empty one makes the equality below pass by comparing nothing to nothing)" \
         bash -c 'test -n "$1"' _ "$_S153_PUB"
@@ -17122,7 +17169,7 @@ check "§162(9) no hand-off at all keeps the pre-#296 fail-closed behaviour" \
 check "§162(10) the --start client forwards the decline into the supervisor env (the one step the pty runs above cannot reach without forking a real supervisor)" \
     grep -q '"SANDY_DOCKERFILE_DECLINED_HASH=\$_sandy_df_declined"' "$_S162_SANDY"
 check "§162(11) --print-schema describes the bypass as covering the Dockerfile gate and NOT the symlink gate (#296 item 3; R8 in the 2026-09-04 review)" \
-    bash -c '"$1" --print-schema | python3 -c "import json,sys; d=[k for k in json.load(sys.stdin)[\"config\"][\"env_only_keys\"] if k[\"name\"]==\"SANDY_AUTO_APPROVE_PRIVILEGED\"][0][\"description\"]; assert \".sandy/Dockerfile\" in d and \"NOT bypass the dangerous-symlink\" in d"' _ "$_S162_SANDY"
+    bash -c 'cat "$1" | python3 -c "import json,sys; d=[k for k in json.load(sys.stdin)[\"config\"][\"env_only_keys\"] if k[\"name\"]==\"SANDY_AUTO_APPROVE_PRIVILEGED\"][0][\"description\"]; assert \".sandy/Dockerfile\" in d and \"NOT bypass the dangerous-symlink\" in d"' _ "$_SCHEMA_CACHE"
 
 # --- B (#295 items 4-6): the prompt says WHICH question it is asking --------
 # "Is this content acceptable" is half the question; "did you put this here"
@@ -18791,7 +18838,7 @@ fi
 # KNOWN/jq known generically, so "receives" landing in all three is already
 # covered there without any edit. This adds the FOURTH list #380 introduces:
 # the closed set receives itself accepts.
-_S173_SCHEMA_RV="$(bash "$_S173_SANDY" --print-schema 2>/dev/null | sed -n 's/.*"receives_values":\[\([^]]*\)\].*/\1/p' | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
+_S173_SCHEMA_RV="$(cat "$_SCHEMA_CACHE" | sed -n 's/.*"receives_values":\[\([^]]*\)\].*/\1/p' | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
 _S173_JS_RV="$(sed -n 's/^const RECEIVES = \[\(.*\)\];$/\1/p' "$_S173_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
 _S173_JQ_RV="$(sed -n 's/^def receives_known: \[\(.*\)\];$/\1/p' "$_S173_SANDY" | tr -d '" ' | tr ',' ' ' | sed 's/ *$//')"
 _S173_SH_RV="$(_sandy_fm_receives_known 2>/dev/null || awk '/^_sandy_fm_receives_known\(\) \{/{f=1;next} f&&/^EOF$/{exit} f&&!/^    cat <</{print}' "$_S173_SANDY" | tr '\n' ' ' | sed 's/ *$//')"
@@ -20228,7 +20275,7 @@ fi
 #     drift must cost a deliberate edit here, never be absorbed by reading it
 #     back out of the source under test. ------------------------------------
 if command -v python3 >/dev/null 2>&1; then
-    _S176C_SCHEMA="$(bash "$SANDY_SCRIPT" --print-schema 2>/dev/null)"
+    _S176C_SCHEMA="$(cat "$_SCHEMA_CACHE")"
     check "§176(c1) --print-schema: schema_version is 4" \
         bash -c 'printf "%s" "$1" | python3 -c "import json,sys; assert json.load(sys.stdin)[\"schema_version\"]==4"' _ "$_S176C_SCHEMA"
     check "§176(c2) --print-schema: compatibility.current_schema_version==4, supported==[4], deprecated==[]" \
@@ -20868,6 +20915,7 @@ chmod +x "$_S178_BIN/docker"
 # check reads "no newer version" (no spurious agent rebuild).
 printf '#!/usr/bin/env bash\nexit 0\n' > "$_S178_BIN/curl"
 chmod +x "$_S178_BIN/curl"
+_sleep_stub "$_S178_BIN" "$_S178_BIN/sleep.log" 0.05   # the --update-sessions poll; see §71
 
 # Prime the shared build cache once, so the per-session children no-op.
 # SANDY_PROXY_REF/GITHUB_HEAD_REF are cleared here and in the refresh below:
@@ -23088,7 +23136,7 @@ check "§195(8) the internal carrier refuses a value other than codex, before an
 check "§195(9) ...and refuses a login session combined with -p (a login is foreground and interactive)" \
     bash -c 'case "$1" in "1|"*"cannot be combined"*) exit 0 ;; esac; exit 1' _ "$(_s195_carrier codex -p hi)"
 check "§195(10) --print-schema advertises --login" \
-    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -qF "\"name\":\"--login\""' _ "$SANDY_SCRIPT"
+    bash -c 'grep -qF "\"name\":\"--login\"" "$1"' _ "$_SCHEMA_CACHE"
 rm -rf "$_S195_D"
 unset _S195_D
 unset -f _s195 _s195_carrier 2>/dev/null || true
@@ -23158,14 +23206,7 @@ check "§196(9) a missing workspace and an unknown argument both exit 1" \
 check "§196(10) it never calls docker" \
     bash -c '[ ! -e "$1" ]' _ "$_S196_D/docker-called"
 if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
-    mkdir -p "$_S196_D/nojq"
-    for _s196_d in $(printf '%s' "$PATH" | tr ':' ' '); do
-        for _s196_f in "$_s196_d"/*; do
-            _s196_n="$(basename "$_s196_f")"
-            [ "$_s196_n" = jq ] && continue
-            [ -e "$_S196_D/nojq/$_s196_n" ] || ln -s "$_s196_f" "$_S196_D/nojq/$_s196_n" 2>/dev/null || true
-        done
-    done
+    _path_farm "$_S196_D/nojq" jq
     env -i PATH="$_S196_D/bin:$_S196_D/nojq" HOME="$_S196_D" SANDY_HOME="$_S196_H" bash "$SANDY_SCRIPT" --accounts --json </dev/null > "$_S196_D/out-node.json" 2>&1 || true
     check "§196(11) the node projector reports exactly what the jq one does" \
         cmp -s "$_S196_D/out.json" "$_S196_D/out-node.json"
@@ -23173,7 +23214,7 @@ else
     skip "§196(11) needs both jq and node to compare the projectors"
 fi
 check "§196(12) --print-schema advertises --accounts" \
-    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -qF "\"name\":\"--accounts\""' _ "$SANDY_SCRIPT"
+    bash -c 'grep -qF "\"name\":\"--accounts\"" "$1"' _ "$_SCHEMA_CACHE"
 # Multi-agent sandboxes, in their own SANDY_HOME so the counts above stand.
 # --accounts used to read only Claude Code: a claude,codex sandbox showed one
 # Claude row and nothing of codex, and a profileFetchedAt written as epoch
@@ -23316,7 +23357,7 @@ check "§196(30) codex on its ephemeral API-key auth.json is recorded as api-key
 _s196_rc=0; printf 'x' | bash "$SANDY_SCRIPT" --fingerprint-token extra >/dev/null 2>&1 || _s196_rc=$?
 _s196_rc2=0; bash "$SANDY_SCRIPT" --fingerprint-token </dev/null >/dev/null 2>&1 || _s196_rc2=$?
 check "§196(31) --fingerprint-token refuses an argument (a secret in argv) and empty stdin, and is in --print-schema" \
-    bash -c '[ "$1" = 1 ] && [ "$2" = 1 ] && bash "$3" --print-schema 2>/dev/null | grep -qF "\"name\":\"--fingerprint-token\""' _ "$_s196_rc" "$_s196_rc2" "$SANDY_SCRIPT"
+    bash -c '[ "$1" = 1 ] && [ "$2" = 1 ] && grep -qF "\"name\":\"--fingerprint-token\"" "$3"' _ "$_s196_rc" "$_s196_rc2" "$_SCHEMA_CACHE"
 # ...and end to end through the REAL marker writer (the §177 extraction), so
 # the block's output reaches /etc/sandy-session.json as valid JSON.
 _S196_WRITER="$(awk '/^_sandy_effort_json="null"/{p=1} p{print} p&&/^_sandy_session_final="\$\{_sandy_session_file%\.sandy-tmp\.\*\}"$/{exit}' "$SANDY_SCRIPT")"
@@ -23416,7 +23457,7 @@ _S197_I="$(_s197 auto tok '{"claudeAiOauth":{}}' 0 '')"
 check "§197(8) connectors off: no warning, whatever the credential" \
     bash -c 'case "$1" in *"warn=") exit 0 ;; esac; exit 1' _ "$_S197_I"
 check "§197(9) --print-schema describes the new oauth behaviour" \
-    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "oauth: mount OAuth and never forward the API key or a long-lived CLAUDE_CODE_OAUTH_TOKEN"' _ "$SANDY_SCRIPT"
+    bash -c 'grep -q "oauth: mount OAuth and never forward the API key or a long-lived CLAUDE_CODE_OAUTH_TOKEN" "$1"' _ "$_SCHEMA_CACHE"
 unset _S197_SEL _S197_MODE _S197_WARN _S197_FWD _S197_A _S197_B _S197_C _S197_D _S197_E _S197_F _S197_G _S197_H _S197_I
 unset -f _s197 2>/dev/null || true
 
@@ -23513,7 +23554,7 @@ check "§198(14) install.sh with no reachable release fails and installs nothing
     bash -c '[ "$1" = "1||" ] && ! grep -q "/sandy$" "$2"' _ "$(_s198_inst)" "$_S198_D/fx/log"
 mv "$_S198_D/fx/release.json.off" "$_S198_D/fx/release.json"
 check "§198(15) SANDY_CHANNEL is registered env-only in --print-schema" \
-    bash -c 'bash "$1" --print-schema 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if \"SANDY_CHANNEL\" in json.dumps(d[\"config\"][\"env_only_keys\"]) else 1)"' _ "$SANDY_SCRIPT"
+    bash -c 'cat "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if \"SANDY_CHANNEL\" in json.dumps(d[\"config\"][\"env_only_keys\"]) else 1)"' _ "$_SCHEMA_CACHE"
 rm -rf "$_S198_D"
 unset _S198_D _S198_SHA _S198_NAG
 unset -f _s198_up _s198_inst 2>/dev/null || true
@@ -23523,7 +23564,7 @@ section "§199: every config key in --print-schema carries a base_type derived f
 # Decision 3 (2026-10-05). A consumer rendering keys by `type` broke on the
 # first `path` field it met; base_type gives every key a JSON kind to fall
 # back on (bool, int, or string), so a type added later degrades instead.
-_S199_OUT="$(bash "$SANDY_SCRIPT" --print-schema 2>/dev/null | python3 -c '
+_S199_OUT="$(cat "$_SCHEMA_CACHE" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 keys = []
@@ -24023,7 +24064,7 @@ elif mode == 'launch':
     launch(original, refuse=True)
 elif mode == 'mutations': mutation_checks()
 elif mode == 'schema':
-    data = json.loads(subprocess.check_output(['bash', sys.argv[1], '--print-schema'], text=True))
+    data = json.loads(Path(sys.argv[3]).read_text())  # the suite's one --print-schema run
     assert data['schema_version'] == 4
     assert 'submounts' in data['manifest']['top_level_keys']
     assert data['manifest']['submount_keys'] == ['parent', 'path', 'from', 'mode', 'agents']
@@ -24050,7 +24091,7 @@ check "§202(4) entire launch: emitted records become ordered parent and child -
 check "§202(5) disable every submount decision on scratch copies and detect each mutation" \
     python3 "$_S202_D/check.py" "$SANDY_SCRIPT" mutations
 check "§202(6) additive manifest capability, closed submount keys, schema_version still 4" \
-    python3 "$_S202_D/check.py" "$SANDY_SCRIPT" schema
+    python3 "$_S202_D/check.py" "$SANDY_SCRIPT" schema "$_SCHEMA_CACHE"
 rm -rf "$_S202_D"
 unset _S202_D
 fi
@@ -24476,14 +24517,14 @@ section "§205: which gh account a sandbox uses — chosen on the host, recorded
 # The host-side picker and its push check, extracted from sandy and run
 # against a stub gh that answers repos/<r> with push=true only for tokens in
 # STUB_PUSH, logs its argv and environment token, fails every call when
-# STUB_FAIL=1, and hangs when STUB_HANG=1.
+# STUB_FAIL=1, and hangs for the tokens listed in STUB_HANG.
 _S205_FN="$(awk '/^_sandy_gh_can_push\(\) \{$/{p=1} p{print} p&&/^\}$/{exit}' "$SANDY_SCRIPT"; awk '/^_sandy_gh_pick_account\(\) \{$/{p=1} p{print} p&&/^\}$/{exit}' "$SANDY_SCRIPT")"
 _S205_D="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$_S205_D/bin"
 cat > "$_S205_D/bin/gh" <<'STUB'
 #!/bin/bash
 printf '%s|tok=%s\n' "$*" "${GH_TOKEN:-}" >> "$STUB_LOG"
-[ "${STUB_HANG:-0}" = 1 ] && sleep 30
+case " ${STUB_HANG:-} " in *" ${GH_TOKEN:-none} "*) sleep 30 ;; esac
 [ "${STUB_FAIL:-0}" = 1 ] && exit 1
 [ "$1" = api ] || exit 1
 case " $STUB_PUSH " in *" $GH_TOKEN "*) echo true ;; *) echo false ;; esac
@@ -24536,10 +24577,22 @@ _s205 "$_S205_A" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_PUSH="" >/d
 check "§205(9) each token reaches gh through GH_TOKEN, never argv" \
     bash -c 'grep -qx "api repos/someorg/repo --jq .permissions.push|tok=tokB" "$1" && ! cut -d"|" -f1 "$1" | grep -q "tok[ABC]"' _ "$_S205_D/log"
 _s205_t0=$SECONDS
-_s205_r="$(_s205f "$(_s205 "hostact:tokA,pusher:tokB" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_HANG=1)")"
+# One account hangs and the next answers that it can push: the one wait proves
+# the abandonment, and picking the second proves the pick goes on past it and
+# still reads that answer (§205(2)/(3) cover the fall-through to the host's
+# active account). Two hanging accounts cost 10 s for nothing more.
+_s205_r="$(_s205f "$(_s205 "hostact:tokA,pusher:tokB" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_HANG=tokA STUB_PUSH="tokB")")"
 _s205_dt=$((SECONDS - _s205_t0))
-check "§205(10) a push check that hangs is abandoned after about 5 s per account, then the host's active account is used (took ${_s205_dt}s, got: $_s205_r)" \
-    bash -c '[ "$1" = "hostact|host active account|calls=2" ] && [ "$2" -le 14 ]' _ "$_s205_r" "$_s205_dt"
+check "§205(10) a push check that hangs is abandoned after about 5 s, and the next account is still asked and its answer used (took ${_s205_dt}s, got: $_s205_r)" \
+    bash -c '[ "$1" = "pusher|can push to someorg/repo|calls=2" ] && [ "$2" -le 7 ]' _ "$_s205_r" "$_s205_dt"
+# ...and when the account after the hang cannot push either, the pick still
+# falls through to the host's active account: the only check of the fallback
+# after a TIMED-OUT push check ((2)/(3) reach it after an answer or a failure).
+_s205_t0=$SECONDS
+_s205_r="$(_s205f "$(_s205 "hostact:tokA,pusher:tokB" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_HANG=tokA STUB_PUSH="")")"
+_s205_dt=$((SECONDS - _s205_t0))
+check "§205(10b) a push check that hangs is abandoned, and with nobody able to push the host's active account is used (took ${_s205_dt}s, got: $_s205_r)" \
+    bash -c '[ "$1" = "hostact|host active account|calls=2" ] && [ "$2" -le 7 ]' _ "$_s205_r" "$_s205_dt"
 # The container side applies the host's choice and decides nothing.
 _S205_CT="$(awk '/^    # Make the account the HOST chose active/{p=1} p{print} p&&/^    fi$/{exit}' "$SANDY_SCRIPT")"
 _s205_ct() { : > "$_S205_D/log"; env -i PATH="$_S205_D/bin:$PATH" STUB_LOG="$_S205_D/log" SANDY_GH_ACTIVE="$1" bash -c 'set -euo pipefail; sandy_log() { :; }; IFS="," read -ra _gh_pairs <<< "a:t1,b:t2"; eval "$1"' _ "$_S205_CT" 2>"$_S205_D/err"; cat "$_S205_D/log"; }
@@ -24549,7 +24602,7 @@ check "§205(11) the container switches gh to the host's choice, and to nothing 
 check "§205(12) the host decides BEFORE it writes the marker, records github{} there, and passes SANDY_GH_ACTIVE (not SANDY_GH_ACCOUNT) to the container" \
     bash -c 'p=$(grep -n "^    if _sandy_gh_pick=\"\$(_sandy_gh_pick_account \"\$GH_ACCOUNTS\"" "$1" | cut -d: -f1); m=$(grep -n "^_sandy_launched_at=" "$1" | cut -d: -f1); [ -n "$p" ] && [ "$p" -lt "$m" ] && grep -q "\"credentials\": {%s},\\\\n  \"github\": {%s}," "$1" && grep -q "RUN_FLAGS+=(-e \"SANDY_GH_ACTIVE=\$_SANDY_GH_ACTIVE\")" "$1" && ! grep -q "RUN_FLAGS+=(-e \"SANDY_GH_ACCOUNT=" "$1"' _ "$SANDY_SCRIPT"
 check "§205(13) SANDY_GH_ACCOUNT is passive-safe and in --print-schema" \
-    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"name\":\"SANDY_GH_ACCOUNT\"" && awk "/^SANDY_PASSIVE_KEYS=\\(/,/^\\)\$/" "$1" | grep -qE "^[[:space:]]+SANDY_GH_ACCOUNT\$"' _ "$SANDY_SCRIPT"
+    bash -c 'grep -q "\"name\":\"SANDY_GH_ACCOUNT\"" "$2" && awk "/^SANDY_PASSIVE_KEYS=\\(/,/^\\)\$/" "$1" | grep -qE "^[[:space:]]+SANDY_GH_ACCOUNT\$"' _ "$SANDY_SCRIPT" "$_SCHEMA_CACHE"
 # --accounts reads the recorded account back.
 _S205_H="$_S205_D/home"
 mkdir -p "$_S205_H/sandboxes/gh-11111111/claude" "$_S205_H/sandboxes/nogh-22222222/claude"
@@ -24696,7 +24749,7 @@ _s208_sel() { env -i PATH="$PATH" SANDY_AGENT="$1" bash -c 'eval "$1" && echo OK
 check "§208(18) mirror alone is valid; mirror in any combo is refused, naming the follow-up issue" \
     bash -c '[ "$1" = OK ] && case "$2" in *"mirror runs alone"*464*) : ;; *) exit 1 ;; esac && case "$3" in *"mirror runs alone"*) : ;; *) exit 1 ;; esac' _ \
     "$(_s208_sel mirror)" "$(_s208_sel claude,mirror)" "$(_s208_sel mirror,codex)"
-bash "$SANDY_SCRIPT" --print-schema > "$_S208_D/schema.json" 2>/dev/null || true
+cp "$_SCHEMA_CACHE" "$_S208_D/schema.json"
 check "§208(19) --print-schema: agent mirror (sandy-mirror), REFLECTION_API_KEY privileged, MIRROR_MODEL passive, .mirror protected" \
     python3 - "$_S208_D/schema.json" <<'PY'
 import json, sys
@@ -24849,7 +24902,7 @@ unset -f _s207
 
 
 # ============================================================
-echo "§209: agent_wrapper — a feature's launcher runs in front of an agent's interactive command"
+section "§209: agent_wrapper — a feature's launcher runs in front of an agent's interactive command"
 # ============================================================
 # A feature names an executable on its read-only payload; the agent's
 # interactive pane runs `<wrapper> <agent> <sandy's args...>`. Asserted on what
@@ -25041,7 +25094,7 @@ check "§209(16) an executable outside the feature payload root is never run; co
 
 # --- the published contract -------------------------------------------------
 check "§209(17) --print-schema lists agent_wrapper among manifest.top_level_keys, the token a feature gates on" \
-    bash -c 'bash "$1" --print-schema 2>/dev/null | grep -q "\"top_level_keys\":\[[^]]*\"agent_wrapper\""' _ "$SANDY_SCRIPT"
+    bash -c 'grep -q "\"top_level_keys\":\[[^]]*\"agent_wrapper\"" "$1"' _ "$_SCHEMA_CACHE"
 _S209_H="$_S209_D/home2"
 mkdir -p "$_S209_H/sandboxes/new-11111111" "$_S209_H/sandboxes/none-22222222" "$_S209_H/sandboxes/old-33333333"
 printf '{\n  "schema": 1,\n  "agents": ["codex"],\n  "agent_wrappers": {"codex": {"feature": "amap", "path": "/opt/sandy/features/amap/bin/w"}},\n  "cred_mode": "full"\n}\n' > "$_S209_H/sandboxes/new-11111111/sandy-session.json"
@@ -25103,7 +25156,7 @@ unset -f _s209_mk _s209_m _s209_host _s209_run
 
 
 echo ""
-echo "§210: SANDY_CLAUDE_ACTIVITY — the turn state of each Claude session, recorded by hooks in the policy settings"
+section "§210: SANDY_CLAUDE_ACTIVITY — the turn state of each Claude session, recorded by hooks in the policy settings"
 # ============================================================
 # The helper is run for real by test/test_claude_activity.py (extracted from
 # the Dockerfile.base heredoc, fed payloads shaped like a measured 2.1.310 TUI
@@ -25195,7 +25248,7 @@ unset -f _s210_pol _s210_stale
 
 
 echo ""
-echo "§211: SANDY_CODEX_ACTIVITY — shared session record, managed hooks, and launch warnings"
+section "§211: SANDY_CODEX_ACTIVITY — shared session record, managed hooks, and launch warnings"
 # The Python checks execute the extracted helper, requirements block and
 # runtime/stale-image checks. Stubs replace only Docker and the Codex binary.
 check "§211 shared activity bytes, Codex events, gates, fresh read-only requirements, silent hooks, version/feature/stale warnings and passive key" \
@@ -25203,7 +25256,7 @@ check "§211 shared activity bytes, Codex events, gates, fresh read-only require
 
 
 echo ""
-echo "§212: a second signal during teardown resumes it instead of abandoning it"
+section "§212: a second signal during teardown resumes it instead of abandoning it"
 # ============================================================
 # A failed --start signals the supervisor and an immediate --stop signals it
 # again. _sandy_on_signal used to run cleanup (a no-op once its guard is set)
