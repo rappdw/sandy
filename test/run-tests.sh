@@ -5475,8 +5475,10 @@ check "last-resort branch: non-skip printf JSON includes statusLine" \
 # --- (f) SANDY_CLAUDE_USAGE: the usage helper and the wrapping, run for real
 # (both helpers extracted from the Dockerfile.base heredoc by the test file). ---
 
-# The helpers run for real in test/test_claude_usage_statusline.py, in the
-# contracts group (suite_runner.py CONTRACT_FILES), where its skips are counted.
+# The helpers run for real in test/test_claude_usage_statusline.py, which the
+# contracts group runs (suite_runner.py CONTRACT_FILES), where its skips count.
+# The host group alone (`--only host`, or this script under SANDY_TEST_CHILD=1)
+# does NOT run it: use `--only contracts`, `--host-only` or no flags.
 check "SANDY_CLAUDE_USAGE is forwarded into the container, and the host statusLine command only when there is one" \
     bash -c 'grep -qF "RUN_FLAGS+=(-e \"SANDY_CLAUDE_USAGE=\${SANDY_CLAUDE_USAGE:-1}\")" "$1" && grep -qF "RUN_FLAGS+=(-e \"SANDY_STATUSLINE_WRAP=\$_SANDY_SL_WRAP\")" "$1"' -- "$_S81"
 
@@ -25239,7 +25241,10 @@ section "§210: SANDY_CLAUDE_ACTIVITY — the turn state of each Claude session,
 # run). Here: the host half, by running the real policy-settings block of sandy and
 # its stale-image block under stubs, and the hook command as Claude Code runs it.
 _S210_D="$(cd "$(mktemp -d)" && pwd -P)"
-# §210(1), test/test_claude_activity.py, runs in the contracts group (suite_runner.py CONTRACT_FILES).
+# §210(1), test/test_claude_activity.py, runs in the contracts group
+# (suite_runner.py CONTRACT_FILES). The host group alone (`--only host`, or
+# this script under SANDY_TEST_CHILD=1) does NOT run it: use `--only contracts`,
+# `--host-only` or no flags.
 
 _S210_BLK="$(awk '/^# BEGIN claude policy settings/,/^# END claude policy settings/' "$SANDY_SCRIPT")"
 # _s210_pol <has-claude 0|1> <SANDY_SKIP_PERMISSIONS> <SANDY_CLAUDE_ACTIVITY> -> "<run flags>|<info lines>", file in $_S210_D/<case>/
@@ -25327,6 +25332,8 @@ section "§211: SANDY_CODEX_ACTIVITY — shared session record, managed hooks, a
 # §211, test/test_codex_activity.py (the extracted helper, requirements block
 # and runtime/stale-image checks, under Docker and Codex stubs), runs in the
 # contracts group (suite_runner.py CONTRACT_FILES), so on macOS CI too.
+# The host group alone (`--only host`, or this script under SANDY_TEST_CHILD=1)
+# does NOT run it: use `--only contracts`, `--host-only` or no flags.
 
 
 echo ""
@@ -26280,8 +26287,9 @@ section "§222: launch guards STOP the launch before any image or container work
 # review), the message still prints and the launch goes on to inspect and
 # build images. No host check caught either. Here each guard runs for real,
 # from a clean environment, against a stub docker that answers `info` and
-# fails everything else, and must (a) exit non-zero, (b) print its message,
-# (c) issue no docker command that inspects, builds or runs anything.
+# fails everything else, and must (a) exit non-zero, (b) print its message on
+# stderr (every one of these guards writes its error there), (c) issue no
+# docker call but the preflight's: info, network ls, ps.
 _S222_D="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
 mkdir -p "$_S222_D/bin" "$_S222_D/ws" "$_S222_D/home"
 cat > "$_S222_D/bin/docker" <<'STUB'
@@ -26294,27 +26302,28 @@ cp "$_S222_D/bin/docker" "$_S222_D/bin/tmux"
 chmod +x "$_S222_D/bin/docker" "$_S222_D/bin/tmux"
 # _s222_launch TAG [VAR=VALUE...] bash SANDY ARGS...: run from the fixture
 # workspace with nothing inherited but PATH and TMPDIR (inside sandy, the live
-# session's SANDY_* would leak in). Output, rc and the docker log land in
-# $_S222_D/TAG.out, TAG.rc and TAG.docker.
+# session's SANDY_* would leak in). stdout, stderr, rc and the docker log land
+# in $_S222_D/TAG.out, TAG.err, TAG.rc and TAG.docker.
 _s222_launch() {
     local tag="$1" rc=0; shift
     : > "$_S222_D/$tag.docker"
     ( cd "$_S222_D/ws" && env -i PATH="$_S222_D/bin:$PATH" TMPDIR="${TMPDIR:-/tmp}" TERM=dumb \
         HOME="$_S222_D/home" SANDY_HOME="$_S222_D/home/.sandy" S222_DOCKER_LOG="$_S222_D/$tag.docker" \
-        "$@" ) </dev/null >"$_S222_D/$tag.out" 2>&1 || rc=$?
+        "$@" ) </dev/null >"$_S222_D/$tag.out" 2>"$_S222_D/$tag.err" || rc=$?
     printf '%s\n' "$rc" > "$_S222_D/$tag.rc"
 }
-# _s222_stopped TAG MESSAGE: non-zero, MESSAGE printed (a fixed string), and no
-# docker call past the preflight (info, network ls, ps). On failure it prints
-# what it saw, which check() shows.
+# _s222_stopped TAG MESSAGE: non-zero, MESSAGE (a fixed string) on stderr, and
+# no docker call other than the preflight's (info, network ls, ps): an
+# allowlist, so a guard that falls through to any other docker verb fails. On
+# failure it prints what it saw, which check() shows.
 _s222_stopped() {
     bash -c '
         d="$1"; t="$2"; m="$3"; rc="$(cat "$d/$t.rc")"
-        if [ "$rc" != 0 ] && grep -qF -- "$m" "$d/$t.out" &&
-           ! grep -Eq "^(image|build|buildx|builder|pull|load|create|run|start|exec|compose|container)( |$)" "$d/$t.docker"; then
+        if [ "$rc" != 0 ] && grep -qF -- "$m" "$d/$t.err" &&
+           ! grep -Evq "^(info|network ls|ps)( |$)" "$d/$t.docker"; then
             exit 0
         fi
-        echo "rc=$rc; expected message: $m"; echo "--- output:"; cat "$d/$t.out"; echo "--- docker calls:"; cat "$d/$t.docker"
+        echo "rc=$rc; expected on stderr: $m"; echo "--- stdout:"; cat "$d/$t.out"; echo "--- stderr:"; cat "$d/$t.err"; echo "--- docker calls:"; cat "$d/$t.docker"
         exit 1' _ "$_S222_D" "$1" "$2"
 }
 _S222_MSG_REMOTE="--remote is only supported with SANDY_AGENT=claude (solo)"
@@ -26359,7 +26368,7 @@ check "§222(12) SANDY_LOCAL_LLM_HOST without a port is rejected" \
     _s222_stopped llm-bare "not in host:port format"
 _s222_launch all SANDY_AGENT=all bash "$SANDY_SCRIPT" --help
 check "§222(13) control: SANDY_AGENT=all is accepted as an alias (--help exits 0, no \"Invalid agent\")" \
-    bash -c 'test "$(cat "$1/all.rc")" = 0 && ! grep -q "Invalid agent" "$1/all.out"' _ "$_S222_D"
+    bash -c 'test "$(cat "$1/all.rc")" = 0 && ! grep -q "Invalid agent" "$1/all.out" "$1/all.err"' _ "$_S222_D"
 # (14), integration §15a: a read-only SANDY_HOME fails at preflight with the
 # chmod hint. Root ignores directory modes, so the probe cannot run as root.
 mkdir -p "$_S222_D/ro-home"; chmod 0555 "$_S222_D/ro-home"

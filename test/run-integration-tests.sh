@@ -959,9 +959,19 @@ section "1. Feature guards: moved to run-tests.sh §222 (host group)"
 # The 13 guard checks that stood here needed neither Docker nor credentials,
 # and asserted only the error text. They run on every PR now as run-tests.sh
 # §222, which also asserts that each guard STOPS the launch (no image or
-# container work after it). The number stays so SANDY_INTEG_ONLY=1 still names it.
+# container work after it). The number stays, and naming it in
+# SANDY_INTEG_ONLY reports a skip: a run that selects only moved checks must
+# not end "All 0 tests passed". A run that did not ask for it just says where
+# the checks went, so the usual skip count is unchanged.
+_moved_to_host() {  # $1 section id, $2 what moved and where
+    if [ -n "${SANDY_INTEG_ONLY:-}" ] && _section_in_list "$1" "$SANDY_INTEG_ONLY"; then
+        skip "$2 (selected, but it runs only in the host group: bash test/run-tests.sh --host-only)"
+    else
+        info "   $2"
+    fi
+}
 if [ "$_SECTION_ON" = true ]; then
-    info "   nothing to run here: see test/run-tests.sh §222"
+    _moved_to_host 1 "§1 feature guards moved to run-tests.sh §222"
 fi  # section 1
 # ============================================================
 section "2. Codex — image build and headless response"
@@ -1851,6 +1861,7 @@ if [ "$_SECTION_ON" = true ]; then
 # `&& rc=0 || rc=$?`.)
 
 # 15a. Read-only SANDY_HOME: moved to run-tests.sh §222(14) (host group).
+_moved_to_host 15 "§15a read-only SANDY_HOME moved to run-tests.sh §222(14)"
 
 # 15b. Corrupt ~/.claude/.credentials.json with no token → clean re-login error.
 # Override HOME to a throwaway dir holding a corrupt creds file; gate on a built

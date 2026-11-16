@@ -266,12 +266,16 @@ exit 7
         skipping = ('import unittest\nclass T(unittest.TestCase):\n'
                     '    def test_x(self): self.skipTest("needs a tool")\n'
                     'unittest.main(argv=["t", "-v"])\n')
-        cases = {  # state: (first command, second command, suite exit, group exit, skips)
-            'partial': ('print("first ran")', skipping, 0, 0, 1),
-            'failed': ('raise SystemExit(4)', 'print("second ran")', 1, 4, 0),
-        }
-        for state, (first, second, suite_rc, group_rc, skips) in cases.items():
-            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+        cases = (  # (name, first, second, suite exit, group state, group exit, skips, text in log)
+            ('skip-in-second', 'print("first ran")', skipping, 0, 'partial', 0, 1, 'first ran'),
+            ('skip-in-both', skipping, skipping, 0, 'partial', 0, 2, "skipped 'needs a tool'"),
+            ('fail-then-pass', 'raise SystemExit(4)', 'print("second ran")', 1, 'failed', 4, 0, 'second ran'),
+            # the FIRST failure decides the exit: not the last one, not the larger one
+            ('fail-4-then-3', 'raise SystemExit(4)', 'raise SystemExit(3)', 1, 'failed', 4, 0, ''),
+            ('fail-3-then-4', 'raise SystemExit(3)', 'raise SystemExit(4)', 1, 'failed', 3, 0, ''),
+        )
+        for name, first, second, suite_rc, state, group_rc, skips, text in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
                 logs = Path(directory) / 'logs'
                 groups = {'contracts': [[suite_runner.sys.executable, '-c', first],
                                         [suite_runner.sys.executable, '-c', second]]}
@@ -282,12 +286,9 @@ exit 7
                     self.assertEqual(suite_runner.main(), suite_rc)
                 row, = json.loads((logs / 'latest' / 'results.json').read_text())
                 self.assertEqual((row['state'], row['exit'], row['skips']), (state, group_rc, skips))
-                log = (logs / 'latest' / 'contracts.log').read_text()
-                if state == 'partial':
-                    self.assertIn('first ran', log)
+                self.assertIn(text, (logs / 'latest' / 'contracts.log').read_text())
+                if skips:
                     self.assertIn("skipped 'needs a tool'", console.getvalue())
-                else:
-                    self.assertIn('second ran', log)
 
     def test_every_python_test_file_belongs_to_a_group(self):
         # A test file no group runs is coverage that exists but does not run.
