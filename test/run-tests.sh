@@ -25687,7 +25687,7 @@ else
         test -x "$_A6_SB/claude/hooks/cmux-notify.sh"
     if command -v jq >/dev/null 2>&1; then
         check "§216(3) ...and the installed hook turns a permission prompt into an OSC 777 notification" \
-            bash -c 'printf "{\"type\":\"permission_prompt\"}" | bash "$1" | grep -qF "]777;notify;Claude Code;Permission needed"' _ "$_A6_SB/claude/hooks/cmux-notify.sh"
+            bash -c 'printf "{\"type\":\"permission_prompt\"}" | bash "$1" > "$2"; grep -qF "]777;notify;Claude Code;Permission needed" "$2"' _ "$_A6_SB/claude/hooks/cmux-notify.sh" "$_A6_DIR/hook.out"
     else
         skip "§216(3) running the installed cmux hook: it parses its input with jq, and jq is not on this host"
     fi
@@ -25853,16 +25853,16 @@ _S220_ENVONLY="$(env -i PATH="$PATH" bash -c 'eval "$1"; printf "%s\n" "${SANDY_
 for _k in $_S220_KEYS; do printf '%s=a6-fixture\n' "$_k" >> "$_S220_D/host.config"; done
 printf 'A6_NOT_A_KEY=a6-fixture\n' >> "$_S220_D/host.config"
 _S220_HOST="$(_s220_load "$_S220_D/host.config" privileged)"
-_S220_N="$(printf '%s\n' "$_S220_KEYS" | grep -c . || true)"
+_S220_N="$(grep -c . <<<"$_S220_KEYS" || true)"
 check "§220(pre) control: $_S220_N metadata keys extracted; from the host file an env-only key (SANDY_AUTO_APPROVE_PRIVILEGED) is ignored, as is a name that is no key at all" \
-    bash -c 'test "$1" -ge 40 && printf "%s\n" "$2" | grep -qx "SANDY_AUTO_APPROVE_PRIVILEGED=-unset-" && printf "%s\n" "$3" | grep -qx SANDY_AUTO_APPROVE_PRIVILEGED && test "$(printf "%s\n" "$2" | grep -c "=a6-fixture")" -gt 0' \
+    bash -c 'test "$1" -ge 40 && grep -qx "SANDY_AUTO_APPROVE_PRIVILEGED=-unset-" <<<"$2" && grep -qx SANDY_AUTO_APPROVE_PRIVILEGED <<<"$3" && test "$(grep -c "=a6-fixture" <<<"$2")" -gt 0' \
     _ "$_S220_N" "$_S220_HOST" "$_S220_ENVONLY"
 _S220_MISS=""
 for _k in $_S220_KEYS; do
-    printf '%s\n' "$_S220_ENVONLY" | grep -qx -- "$_k" && continue
-    printf '%s\n' "$_S220_HOST" | grep -qx -- "$_k=a6-fixture" && continue
+    grep -qx -- "$_k" <<<"$_S220_ENVONLY" && continue
+    grep -qx -- "$_k=a6-fixture" <<<"$_S220_HOST" && continue
     # SANDY_EXTRA_ENV is recorded per file, not exported: the lists compose (#388).
-    [ "$_k" = SANDY_EXTRA_ENV ] && printf '%s\n' "$_S220_HOST" | grep -qx "EXTRA_HOST=a6-fixture" && continue
+    [ "$_k" = SANDY_EXTRA_ENV ] && grep -qx "EXTRA_HOST=a6-fixture" <<<"$_S220_HOST" && continue
     _S220_MISS="$_S220_MISS $_k"
 done
 check "§220(1) every key with a metadata row, env-only keys aside, is honoured from the host config file (mutation C15/C32: a key dropped from SANDY_PASSIVE_KEYS, docs regenerated; dropped:${_S220_MISS:- none})" \
@@ -25874,8 +25874,8 @@ _S220_WS="$(_s220_load "$_S220_D/ws.config" passive)"
 _S220_PEND=" $(printf '%s\n' "$_S220_WS" | sed -n 's/^PENDING=//p') "
 _S220_MISS=""
 for _k in $_S220_KEYS; do
-    printf '%s\n' "$_S220_ENVONLY" | grep -qx -- "$_k" && continue
-    printf '%s\n' "$_S220_WS" | grep -qx -- "$_k=a6-fixture" && continue
+    grep -qx -- "$_k" <<<"$_S220_ENVONLY" && continue
+    grep -qx -- "$_k=a6-fixture" <<<"$_S220_WS" && continue
     case "$_S220_PEND" in *" $_k=a6-fixture "*) continue ;; esac
     _S220_MISS="$_S220_MISS $_k"
 done
@@ -25884,7 +25884,7 @@ check "§220(2) from a workspace .sandy/config each of those keys is honoured or
 printf 'SANDY_SKILL_PACKS=gstack\nSANDY_GEMINI_AUTH=api_key\n' > "$_S220_D/pinned.config"
 _S220_P="$(_s220_load "$_S220_D/pinned.config" passive)"
 check "§220(3) a workspace .sandy/config sets SANDY_SKILL_PACKS and SANDY_GEMINI_AUTH directly, no approval needed (named here, so dropping either key AND its metadata row still fails; mutations C15, C32)" \
-    bash -c 'printf "%s\n" "$1" | grep -qx "SANDY_SKILL_PACKS=gstack" && printf "%s\n" "$1" | grep -qx "SANDY_GEMINI_AUTH=api_key" && printf "%s\n" "$1" | grep -qx "PENDING="' _ "$_S220_P"
+    bash -c 'grep -qx "SANDY_SKILL_PACKS=gstack" <<<"$1" && grep -qx "SANDY_GEMINI_AUTH=api_key" <<<"$1" && grep -qx "PENDING=" <<<"$1"' _ "$_S220_P"
 rm -rf "$_S220_D"
 unset _S220_DEFS _S220_D _S220_KEYS _S220_ENVONLY _S220_HOST _S220_N _S220_MISS _S220_WS _S220_PEND _S220_P _k
 unset -f _s220_load
@@ -25899,8 +25899,14 @@ section "§221: user-setup links baked-in skill packs into ~/.claude/skills and 
 # relocated to a fixture tree.
 _S221_D="$(cd "$(mktemp -d)" && pwd -P)"
 _S221_OPEN="    cat > \"\$SANDY_HOME/user-setup.sh.new\" <<'USERSETUP'"   # compared as a plain string
-_S221_BODY="$(awk -v o="$_S221_OPEN" '$0 == o {f=1; next} f && $0 == "USERSETUP" {exit} f' "$SANDY_SCRIPT" \
-    | awk '/^sandy_log "Activating skill packs"$/ {f=1} f && /^# Resilient file writer/ {exit} f')"
+# One awk over the whole file and no early exit: a reader that quits while a
+# writer still writes is a SIGPIPE (141) under pipefail (macOS, 2026-11-16).
+_S221_BODY="$(awk -v o="$_S221_OPEN" -v a='sandy_log "Activating skill packs"' '
+    h && $0 == "USERSETUP" { h = 0 }
+    h && $0 == a { f = 1 }
+    h && f && index($0, "# Resilient file writer") == 1 { f = 0 }
+    h && f { print }
+    $0 == o { h = 1 }' "$SANDY_SCRIPT")"
 mkdir -p "$_S221_D/opt/skills/gstack/review" "$_S221_D/opt/skills/gstack/browse" "$_S221_D/opt/skills/gstack/node_modules" \
     "$_S221_D/opt/skills/gstack/notaskill" "$_S221_D/opt/skills/gstack/bin" "$_S221_D/opt/skills/gstack/.browsers" "$_S221_D/home"
 for _s in review browse node_modules; do : > "$_S221_D/opt/skills/gstack/$_s/SKILL.md"; done
@@ -25922,13 +25928,13 @@ _S221_OUT="$(_s221_run true)"
 check "§221(pre) the activation stretch was extracted from the user-setup heredoc" \
     bash -c 'case "$1" in *"Activating skill packs"*) exit 0 ;; esac; exit 1' _ "$_S221_BODY"
 check "§221(1) the pack and each of its skills (a dir with SKILL.md, not browse or node_modules) are linked into ~/.claude/skills, and its bin is on PATH (mutation C18: the activation block deleted; got: $(printf '%s' "$_S221_OUT" | tr '\n' ';'))" \
-    bash -c 'test "$(printf "%s\n" "$1" | grep "^link " | sort)" = "$(printf "link gstack -> %s/opt/skills/gstack/\nlink review -> gstack/review\n" "$2" | sort)" && printf "%s\n" "$1" | grep -q "^PATH=$2/opt/skills/gstack/bin:"' \
+    bash -c 'test "$(grep "^link " <<<"$1" | sort)" = "$(printf "link gstack -> %s/opt/skills/gstack/\nlink review -> gstack/review\n" "$2" | sort)" && grep -q "^PATH=$2/opt/skills/gstack/bin:" <<<"$1"' \
     _ "$_S221_OUT" "$_S221_D"
 check "§221(2) ...and PLAYWRIGHT_BROWSERS_PATH points at the pack's browsers (mutation C19: the export replaced by \`:\`)" \
-    bash -c 'printf "%s\n" "$1" | grep -qx "PW=$2/opt/skills/gstack/.browsers"' _ "$_S221_OUT" "$_S221_D"
+    bash -c 'grep -qx "PW=$2/opt/skills/gstack/.browsers" <<<"$1"' _ "$_S221_OUT" "$_S221_D"
 _S221_OUT="$(_s221_run false)"
 check "§221(3) control: for an agent set without claude nothing is linked (the browsers path is still set: it is not claude-specific)" \
-    bash -c '! printf "%s\n" "$1" | grep -q "^link " && printf "%s\n" "$1" | grep -qx "PW=$2/opt/skills/gstack/.browsers"' _ "$_S221_OUT" "$_S221_D"
+    bash -c '! grep -q "^link " <<<"$1" && grep -qx "PW=$2/opt/skills/gstack/.browsers" <<<"$1"' _ "$_S221_OUT" "$_S221_D"
 rm -rf "$_S221_D"
 unset _S221_D _S221_OPEN _S221_BODY _S221_OUT _s
 unset -f _s221_run
