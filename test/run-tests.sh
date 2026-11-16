@@ -24585,6 +24585,14 @@ _s205_r="$(_s205f "$(_s205 "hostact:tokA,pusher:tokB" https://github.com/someorg
 _s205_dt=$((SECONDS - _s205_t0))
 check "§205(10) a push check that hangs is abandoned after about 5 s, and the next account is still asked and its answer used (took ${_s205_dt}s, got: $_s205_r)" \
     bash -c '[ "$1" = "pusher|can push to someorg/repo|calls=2" ] && [ "$2" -le 7 ]' _ "$_s205_r" "$_s205_dt"
+# ...and when the account after the hang cannot push either, the pick still
+# falls through to the host's active account: the only check of the fallback
+# after a TIMED-OUT push check ((2)/(3) reach it after an answer or a failure).
+_s205_t0=$SECONDS
+_s205_r="$(_s205f "$(_s205 "hostact:tokA,pusher:tokB" https://github.com/someorg/repo GIT_TOKEN=tokA STUB_HANG=tokA STUB_PUSH="")")"
+_s205_dt=$((SECONDS - _s205_t0))
+check "§205(10b) a push check that hangs is abandoned, and with nobody able to push the host's active account is used (took ${_s205_dt}s, got: $_s205_r)" \
+    bash -c '[ "$1" = "hostact|host active account|calls=2" ] && [ "$2" -le 7 ]' _ "$_s205_r" "$_s205_dt"
 # The container side applies the host's choice and decides nothing.
 _S205_CT="$(awk '/^    # Make the account the HOST chose active/{p=1} p{print} p&&/^    fi$/{exit}' "$SANDY_SCRIPT")"
 _s205_ct() { : > "$_S205_D/log"; env -i PATH="$_S205_D/bin:$PATH" STUB_LOG="$_S205_D/log" SANDY_GH_ACTIVE="$1" bash -c 'set -euo pipefail; sandy_log() { :; }; IFS="," read -ra _gh_pairs <<< "a:t1,b:t2"; eval "$1"' _ "$_S205_CT" 2>"$_S205_D/err"; cat "$_S205_D/log"; }
