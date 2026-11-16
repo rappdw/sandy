@@ -2108,25 +2108,75 @@ SANDY_HOST_ID|string||^[A-Za-z0-9._-]{1,128}$|1.8.0|stable|Operator override for
 EOF
 }
 
-# Look up a metadata field (type|default|pattern|description) for a key.
-# Usage: _sandy_key_meta_field SANDY_MODEL type → "string"
+# Look up a metadata field (type|default|pattern|since|stability|description)
+# for a key. Prints nothing for a key with no row or an unknown field.
+# Usage: _sandy_key_meta_field SANDY_MODEL type  -> "string"
+#        _sandy_key_meta_field SANDY_MODEL index -> prints nothing; sets
+#        _SANDY_KM_I to the key's row in the _SANDY_KM_* arrays, or -1.
+#
+# The table is parsed ONCE, on the first call, into parallel indexed arrays
+# (bash 3.2 has no associative arrays): _SANDY_KM_KEY[i] and its six fields at
+# the same i. The lookup used to cost a heredoc cat plus two awks per field,
+# 438 times per --print-schema (F12). Nothing is parsed until a caller asks,
+# so a launch that never needs metadata pays nothing. The parse stays inside
+# this one self-contained function on purpose: §170 extracts it alone and
+# runs it.
+#
+# Fill the cache in the shell that loops, before the loop: arrays filled inside
+# a command substitution die with it, so `x="$(_sandy_key_meta_field K f)"` on
+# a cold cache answers correctly but re-parses the whole table every call
+# (measured ~6 ms each, slower than the old awk lookup). _sandy_emit_schema
+# warms it up front, and _emit_key_object reads the arrays via `index`.
+#
+# Read to EOF, never stop at a match. The old lookup piped the heredoc into an
+# awk that exited on the match: an early exit closes the pipe while the
+# heredoc's cat is still writing, cat dies of SIGPIPE, and pipefail turns that
+# into exit 141 for the whole lookup. Only once the table outgrows the pipe
+# buffer -- macOS's is far smaller than Linux's 64K, so it surfaced there
+# first, as a failed --print-schema (§92b, §170). The table is now captured
+# whole and read line by line to the end, so no writer is ever cut off; keep
+# it that way if this ever goes back to a pipeline.
+#
+# Field splitting matches the awk -F'|' it replaced: fields 2-7 are exactly
+# fields 2-7, so a `|` inside a description truncates it there (_km_rest
+# swallows the remainder rather than letting read append it to the last
+# field). IFS holds only `|`, so spaces are kept as-is; read -r keeps
+# backslashes. On a duplicate key the FIRST row wins, as before.
+_SANDY_KM_N=""
 _sandy_key_meta_field() {
-    local key="$1" field="$2"
-    local line
-    # Read to EOF, never `exit` on the match: an early exit closes the pipe while
-    # the heredoc's cat is still writing, cat dies of SIGPIPE, and pipefail
-    # turns that into exit 141 for the whole lookup. Only once the table
-    # outgrows the pipe buffer -- macOS's is far smaller than Linux's 64K, so
-    # it surfaced there first, as a failed --print-schema (§92b, §170).
-    line="$(_sandy_key_metadata | awk -F'|' -v k="$key" '$1==k && !f {print; f=1}')"
-    [ -z "$line" ] && return 0
+    local key="$1" field="$2" _km_i=0
+    if [ -z "${_SANDY_KM_N:-}" ]; then
+        local _km_k _km_t _km_d _km_p _km_s _km_st _km_desc _km_rest _km_n=0
+        _SANDY_KM_KEY=(); _SANDY_KM_TYPE=(); _SANDY_KM_DEFAULT=(); _SANDY_KM_PATTERN=()
+        _SANDY_KM_SINCE=(); _SANDY_KM_STABILITY=(); _SANDY_KM_DESC=()
+        while IFS='|' read -r _km_k _km_t _km_d _km_p _km_s _km_st _km_desc _km_rest; do
+            _SANDY_KM_KEY[_km_n]="$_km_k"
+            _SANDY_KM_TYPE[_km_n]="$_km_t"
+            _SANDY_KM_DEFAULT[_km_n]="$_km_d"
+            _SANDY_KM_PATTERN[_km_n]="$_km_p"
+            _SANDY_KM_SINCE[_km_n]="$_km_s"
+            _SANDY_KM_STABILITY[_km_n]="$_km_st"
+            _SANDY_KM_DESC[_km_n]="$_km_desc"
+            _km_n=$((_km_n + 1))
+        done <<< "$(_sandy_key_metadata)"
+        _SANDY_KM_N="$_km_n"
+    fi
+    _SANDY_KM_I=-1
+    while [ "$_km_i" -lt "$_SANDY_KM_N" ]; do
+        if [ "${_SANDY_KM_KEY[_km_i]}" = "$key" ]; then
+            _SANDY_KM_I="$_km_i"
+            break
+        fi
+        _km_i=$((_km_i + 1))
+    done
+    if [ "$_SANDY_KM_I" -lt 0 ]; then return 0; fi
     case "$field" in
-        type)        echo "$line" | awk -F'|' '{print $2}' ;;
-        default)     echo "$line" | awk -F'|' '{print $3}' ;;
-        pattern)     echo "$line" | awk -F'|' '{print $4}' ;;
-        since)       echo "$line" | awk -F'|' '{print $5}' ;;
-        stability)   echo "$line" | awk -F'|' '{print $6}' ;;
-        description) echo "$line" | awk -F'|' '{print $7}' ;;
+        type)        printf '%s\n' "${_SANDY_KM_TYPE[_km_i]}" ;;
+        default)     printf '%s\n' "${_SANDY_KM_DEFAULT[_km_i]}" ;;
+        pattern)     printf '%s\n' "${_SANDY_KM_PATTERN[_km_i]}" ;;
+        since)       printf '%s\n' "${_SANDY_KM_SINCE[_km_i]}" ;;
+        stability)   printf '%s\n' "${_SANDY_KM_STABILITY[_km_i]}" ;;
+        description) printf '%s\n' "${_SANDY_KM_DESC[_km_i]}" ;;
     esac
 }
 
@@ -2315,13 +2365,19 @@ _json_csv_array() {
 # Args: $1=key  $2=tier (privileged|passive|env_only)
 _emit_key_object() {
     local key="$1" tier="$2"
-    local type default pattern since stability description
-    type="$(_sandy_key_meta_field "$key" type)"
-    default="$(_sandy_key_meta_field "$key" default)"
-    pattern="$(_sandy_key_meta_field "$key" pattern)"
-    since="$(_sandy_key_meta_field "$key" since)"
-    stability="$(_sandy_key_meta_field "$key" stability)"
-    description="$(_sandy_key_meta_field "$key" description)"
+    local type="" default="" pattern="" since="" stability="" description="" _km_i
+    # One index lookup, in this shell, instead of six $(...) field lookups:
+    # see _sandy_key_meta_field for why the cache must be filled out here.
+    _sandy_key_meta_field "$key" index
+    _km_i="$_SANDY_KM_I"
+    if [ "$_km_i" -ge 0 ]; then
+        type="${_SANDY_KM_TYPE[_km_i]}"
+        default="${_SANDY_KM_DEFAULT[_km_i]}"
+        pattern="${_SANDY_KM_PATTERN[_km_i]}"
+        since="${_SANDY_KM_SINCE[_km_i]}"
+        stability="${_SANDY_KM_STABILITY[_km_i]}"
+        description="${_SANDY_KM_DESC[_km_i]}"
+    fi
     [ -z "$type" ] && type="string"
     [ -z "$stability" ] && stability="stable"
 
@@ -2381,9 +2437,11 @@ _emit_key_object() {
 # else just "<SANDY_VERSION>". Strip the version PREFIX to isolate the hash —
 # NOT `##*-`, which for a suffixed version with no hash (e.g. "1.0.0-rc1")
 # would yield the version's own suffix ("rc1") and report it as a commit.
+# An optional $1 is an already-computed sandy_full_version, so a caller that
+# needs both values runs the git lookup once.
 _sandy_commit_hash() {
     local commit
-    commit="$(sandy_full_version)"
+    if [ "$#" -gt 0 ]; then commit="$1"; else commit="$(sandy_full_version)"; fi
     commit="${commit#"$SANDY_VERSION"}"   # "" when no hash, "-<hash>" otherwise
     commit="${commit#-}"                  # drop the leading separator
     printf '%s' "$commit"
@@ -2408,13 +2466,14 @@ _sandy_commit_hash() {
 # via the guaranteed `sandy <full_version>` format of --version, safe on
 # every sandy version) that it's talking to 1.7.0+.
 _sandy_emit_version() {
-    local commit
-    commit="$(_sandy_commit_hash)"
+    local commit full
+    full="$(sandy_full_version)"
+    commit="$(_sandy_commit_hash "$full")"
     printf '{'
     _json_kv schema_version "$SANDY_SCHEMA_VERSION"
     printf ','; _json_kv version "$(_json_escape "$SANDY_VERSION")"
     printf ','; _json_kv commit "$(_json_escape "$commit")"
-    printf ','; _json_kv full_version "$(_json_escape "$(sandy_full_version)")"
+    printf ','; _json_kv full_version "$(_json_escape "$full")"
     printf '}\n'
 }
 
@@ -2422,6 +2481,8 @@ _sandy_emit_version() {
 _sandy_emit_schema() {
     local commit
     commit="$(_sandy_commit_hash)"
+    # Parse the key metadata here, in this shell, before the key loops.
+    _sandy_key_meta_field "" index
 
     printf '{'
     _json_kv schema_version "$SANDY_SCHEMA_VERSION"
