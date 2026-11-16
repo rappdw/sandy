@@ -400,70 +400,15 @@ check "cmux detection checks CMUX_WORKSPACE_ID" \
 check "cmux hook template emits OSC 777" \
     grep -q '777;notify' "$SCRIPT"
 
-# Static analysis: verify the Notification hook is registered in settings.json merge
-check "cmux setup adds Notification hook to settings.json" \
-    grep -q 'Notification' "$SCRIPT"
-
-# Static analysis: verify idempotency check (cmux-notify dedup)
-check "cmux hook dedup prevents duplicates" \
-    grep -q 'cmux-notify' "$SCRIPT"
+# "cmux setup adds Notification hook" and "cmux hook dedup prevents duplicates":
+# run, not grepped, in §216.
 
 # Static analysis: verify cmux setup skipped when host hooks exist
 check "cmux setup skipped when host hooks dir exists" \
     grep -q '! -d.*\.claude/hooks' "$SCRIPT"
 
-# Functional test: run the cmux setup logic via a helper script
-CMUX_SANDBOX="$(mktemp -d)"
-mkdir -p "$CMUX_SANDBOX"
-echo '{"teammateMode":"tmux"}' > "$CMUX_SANDBOX/settings.json"
-
-# Extract and run the cmux auto-setup logic using a temp script (avoids quoting issues)
-cat > "$CMUX_SANDBOX/test-cmux-setup.sh" <<'SETUP_SCRIPT'
-#!/bin/bash
-set -e
-SANDBOX_DIR="$1"
-mkdir -p "$SANDBOX_DIR/hooks"
-cat > "$SANDBOX_DIR/hooks/cmux-notify.sh" <<'CMUXHOOK'
-#!/bin/bash
-INPUT=$(cat)
-EVENT_TYPE=$(echo "$INPUT" | jq -r '.type // "unknown"')
-case "$EVENT_TYPE" in
-    permission_prompt)
-        printf '\e]777;notify;Claude Code;Permission needed\a' ;;
-    idle_prompt)
-        printf '\e]777;notify;Claude Code;Waiting for input\a' ;;
-esac
-CMUXHOOK
-chmod +x "$SANDBOX_DIR/hooks/cmux-notify.sh"
-SETTINGS_FILE="$SANDBOX_DIR/settings.json"
-[ -f "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
-HAS_CMUX=$(jq '[.hooks.Notification // [] | .[] | select(.hooks[]?.command? | contains("cmux-notify"))] | length' "$SETTINGS_FILE")
-if [ "$HAS_CMUX" = "0" ]; then
-    jq '.hooks //= {} | .hooks.Notification //= [] | .hooks.Notification += [{"matcher":"","hooks":[{"type":"command","command":"/home/sandy/.claude/hooks/cmux-notify.sh"}]}]' "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp"
-    mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
-fi
-SETUP_SCRIPT
-chmod +x "$CMUX_SANDBOX/test-cmux-setup.sh"
-
-# Run setup once
-bash "$CMUX_SANDBOX/test-cmux-setup.sh" "$CMUX_SANDBOX"
-
-check "cmux hook script created and executable" \
-    test -x "$CMUX_SANDBOX/hooks/cmux-notify.sh"
-check "cmux hook script contains OSC 777" \
-    grep -q '777;notify' "$CMUX_SANDBOX/hooks/cmux-notify.sh"
-check "cmux hook registered in settings.json" \
-    grep -q 'cmux-notify' "$CMUX_SANDBOX/settings.json"
-check "existing settings preserved after cmux merge" \
-    test "$(jq -r '.teammateMode' "$CMUX_SANDBOX/settings.json")" = "tmux"
-
-# Run setup again — should NOT duplicate the hook
-bash "$CMUX_SANDBOX/test-cmux-setup.sh" "$CMUX_SANDBOX"
-HOOK_COUNT="$(jq '.hooks.Notification | length' "$CMUX_SANDBOX/settings.json")"
-check "cmux hook not duplicated on second run" \
-    test "$HOOK_COUNT" = "1"
-
-rm -rf "$CMUX_SANDBOX"
+# The functional test that ran a jq copy of the merge (never sandy's node
+# merge): replaced by §216, which runs the real launch.
 
 # ============================================================
 info "23. Container hardening flags"
@@ -483,9 +428,7 @@ check "SANDY_GPU config variable supported" \
 check "GPU passthrough uses --gpus flag" \
     grep -q '\-\-gpus' "$SCRIPT"
 
-# Static analysis: verify CLAUDE_CODE_OAUTH_TOKEN is blocked
-check "CLAUDE_CODE_OAUTH_TOKEN blocked" \
-    grep -q 'CLAUDE_CODE_OAUTH_TOKEN=' "$SCRIPT"
+# "CLAUDE_CODE_OAUTH_TOKEN blocked": run, not grepped, in §215(1)-(4).
 
 # ============================================================
 info "24. CLAUDE_CODE_MAX_OUTPUT_TOKENS passed to container"
@@ -519,29 +462,20 @@ check "gstack registered as skill pack" \
 check "gstack repo points to upstream garrytan" \
     grep -q 'garrytan/gstack' "$SCRIPT"
 
-# Static analysis: verify SANDY_SKILL_PACKS is in config allowlist
-check "SANDY_SKILL_PACKS in config allowlist" \
-    grep -q 'SANDY_SKILL_PACKS' "$SCRIPT"
+# "SANDY_SKILL_PACKS in config allowlist": run, not grepped, in §220.
 
 # Static analysis: verify generate_skill_pack_dockerfiles function exists
 check "generate_skill_pack_dockerfiles function defined" \
     grep -q 'generate_skill_pack_dockerfiles()' "$SCRIPT"
 
-# Static analysis: verify Phase 2.5 build block exists
-check "Phase 2.5 skill pack build phase exists" \
-    grep -q 'SKILLS_REBUILT' "$SCRIPT"
+# "Phase 2.5 skill pack build phase exists": run, not grepped, in §217(3).
 
 # Static analysis: verify skill pack auto-update check exists
 
-# Static analysis: verify --rebuild clears skills hash
-check "--rebuild clears skill pack hash" \
-    grep -q 'skills_build_hash' "$SCRIPT"
+# "--rebuild clears skill pack hash": run, not grepped, in §217(4).
 
-# Static analysis: verify runtime skill activation in user-setup
-check "user-setup activates /opt/skills" \
-    grep -q '/opt/skills' "$SCRIPT"
-check "user-setup sets PLAYWRIGHT_BROWSERS_PATH" \
-    grep -q 'PLAYWRIGHT_BROWSERS_PATH' "$SCRIPT"
+# "user-setup activates /opt/skills" and "...sets PLAYWRIGHT_BROWSERS_PATH":
+# run, not grepped, in §221.
 
 # ============================================================
 info "26. Skill pack Dockerfile generation"
@@ -1125,10 +1059,8 @@ check "codex auth.json mount is read-only (:ro) on the api_key path" \
 # via the secret env-file helper (#13) rather than argv -e.
 check "OPENAI_API_KEY forwarded via secret env-file" \
     grep -q '_sandy_add_secret_env OPENAI_API_KEY' "$SANDY_SCRIPT"
-# STRENGTHEN: prove #13's property — the key is no longer on -e argv (which
-# would leak it via `docker inspect`/`ps` on the host).
-check "OPENAI_API_KEY no longer forwarded via -e argv" \
-    bash -c '! grep -q "RUN_FLAGS+=(-e \"OPENAI_API_KEY=" "$1"' -- "$SANDY_SCRIPT"
+# "OPENAI_API_KEY no longer forwarded via -e argv" (#13): run, not grepped, in
+# §215(6), against every spelling.
 
 # Env passthrough: CODEX_MODEL forwarded to container.
 check "CODEX_MODEL passed to container via -e" \
@@ -1165,17 +1097,13 @@ fi
 check "DOCKERFILE_PATH dispatch includes codex → Dockerfile.codex" \
     grep -q 'DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.codex"' "$SANDY_SCRIPT"
 
-# Build hash file: codex gets its own .build_hash_codex.
-check "BUILD_HASH_FILE_NAME dispatch includes codex → .build_hash_codex" \
-    grep -q '.build_hash_codex' "$SANDY_SCRIPT"
+# "BUILD_HASH_FILE_NAME dispatch includes codex": run, not grepped, in §217(1).
 
 # .claude.json seeding gate uses _sandy_agent_has (covers multi-agent combos).
 check ".claude.json seeding gate uses _sandy_agent_has claude" \
     grep -q '_sandy_agent_has claude && .*CLAUDE_JSON' "$SANDY_SCRIPT"
 
-# SANDY_GEMINI_AUTH is in the config allowlist.
-check "config allowlist includes SANDY_GEMINI_AUTH" \
-    grep -q 'SANDY_GEMINI_AUTH' "$SANDY_SCRIPT"
+# "config allowlist includes SANDY_GEMINI_AUTH": run, not grepped, in §220.
 
 # Synthkit skills block for codex: creates SKILL.md files with YAML frontmatter.
 check "codex synthkit seeds ~/.codex/skills/ with SKILL.md files" \
@@ -1471,17 +1399,10 @@ check "load_opencode_credentials function exists" \
 check "DOCKERFILE_PATH dispatch includes opencode → Dockerfile.opencode" \
     grep -q 'DOCKERFILE_PATH="$SANDY_HOME/Dockerfile.opencode"' "$SANDY_SCRIPT"
 
-# Build hash file: opencode gets its own .build_hash_opencode.
-check "BUILD_HASH_FILE_NAME dispatch includes opencode → .build_hash_opencode" \
-    grep -q '\.build_hash_opencode' "$SANDY_SCRIPT"
+# "BUILD_HASH_FILE_NAME dispatch includes opencode": run, not grepped, in §217(2).
 
-# Linux-only: --add-host=host.docker.internal:host-gateway when SANDY_LOCAL_LLM_HOST set.
-check "Linux: SANDY_LOCAL_LLM_HOST adds host.docker.internal:host-gateway" \
-    grep -q 'host.docker.internal:host-gateway' "$SANDY_SCRIPT"
-
-# iptables rule shape: tcp dst gateway --dport port -j ACCEPT.
-check "iptables rule for local LLM uses tcp dport ACCEPT" \
-    grep -qE '\-p tcp -d "\$CONTAINER_GATEWAY" --dport "\$_SANDY_LLM_PORT" -j ACCEPT' "$SANDY_SCRIPT"
+# "Linux: SANDY_LOCAL_LLM_HOST adds host.docker.internal:host-gateway" and
+# "iptables rule for local LLM uses tcp dport ACCEPT": run, not grepped, in §218.
 
 # CONTAINER_GATEWAY captured from docker network inspect.
 check "ensure_network captures CONTAINER_GATEWAY" \
@@ -2060,39 +1981,12 @@ check "persisted symlink approval list path declared" \
 check "symlink approval uses comm -23 for new-entry detection" \
     grep -q 'comm -23.*_current_tmp.*_approved_tmp' "$SANDY_SCRIPT_PATH"
 # "new symlink hard-errors with specific message": run, not grepped, in §214.
-check "persisted list refreshed to prune removed entries" \
-    grep -q 'cp "\$_current_tmp" "\$_approved_list"' "$SANDY_SCRIPT_PATH"
+# "persisted list refreshed to prune removed entries": run, not grepped, in
+# §214(pre) and §214(6b).
 
-# Functional test: exercise the core comm-based comparison logic with fixture
-# files. Scenarios: identical → empty diff; added → listed as new; removed →
-# empty diff (silently pruned).
-_S2_APPROVED_TMP="$(mktemp)"
-_S2_CURRENT_TMP="$(mktemp)"
-_S2_NEW_TMP="$(mktemp)"
-
-# Seed the approved list
-printf 'link1 -> /Users/drapp/.ssh\nlink2 -> /tmp/foo\n' | sort -u > "$_S2_APPROVED_TMP"
-
-# Scenario 1: current set identical to approved → no new entries
-printf 'link1 -> /Users/drapp/.ssh\nlink2 -> /tmp/foo\n' | sort -u > "$_S2_CURRENT_TMP"
-comm -23 "$_S2_CURRENT_TMP" "$_S2_APPROVED_TMP" > "$_S2_NEW_TMP"
-check "identical symlink set → empty new-entry diff (silent proceed)" \
-    test ! -s "$_S2_NEW_TMP"
-
-# Scenario 2: new entry added → detected
-printf 'link1 -> /Users/drapp/.ssh\nlink2 -> /tmp/foo\nevil-link -> /etc/shadow\n' \
-    | sort -u > "$_S2_CURRENT_TMP"
-comm -23 "$_S2_CURRENT_TMP" "$_S2_APPROVED_TMP" > "$_S2_NEW_TMP"
-check "new symlink entry detected as unapproved" \
-    bash -c 'grep -q "evil-link -> /etc/shadow" "$1"' -- "$_S2_NEW_TMP"
-
-# Scenario 3: entry removed → no new entries (silent prune)
-printf 'link1 -> /Users/drapp/.ssh\n' | sort -u > "$_S2_CURRENT_TMP"
-comm -23 "$_S2_CURRENT_TMP" "$_S2_APPROVED_TMP" > "$_S2_NEW_TMP"
-check "removed symlink entries yield empty new-entry diff (silent prune)" \
-    test ! -s "$_S2_NEW_TMP"
-
-rm -f "$_S2_APPROVED_TMP" "$_S2_CURRENT_TMP" "$_S2_NEW_TMP"
+# The functional test that ran `comm -23` on fixture files (it tested comm,
+# not sandy): replaced by §214, which runs the real gate (new link refused,
+# removed link pruned).
 
 # ============================================================
 info "44. Empty stub dir cleanup (post-session + pre-existing debris)"
@@ -2129,10 +2023,8 @@ check "protected-paths launch snapshot file declared" \
 check "cleanup compares launch snapshot to detect new appearances" \
     bash -c 'awk "/^cleanup\\(\\) \\{/,/^}/" "$1" | grep -q "\\.protected-existed-at-launch"' \
     -- "$SANDY_SCRIPT_PATH"
-check "cleanup() reads session-created-stubs and rmdirs entries" \
-    bash -c 'awk "/^cleanup\\(\\) \\{/,/^}/" "$1" | grep -q "\\.session-created-stubs" \
-             && awk "/^cleanup\\(\\) \\{/,/^}/" "$1" | grep -q "rmdir"' \
-    -- "$SANDY_SCRIPT_PATH"
+# "cleanup() reads session-created-stubs and rmdirs entries": run, not grepped,
+# in §219.
 check "pre-existing cleanup uses rmdir (never rm -rf)" \
     bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "rmdir" \
              && ! awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -qE "rm[[:space:]]+-rf"' \
@@ -23975,11 +23867,15 @@ def launch(source, refuse=False):
         docker.write_text('#!' + sys.executable + '\nimport json,os,sys\nwith open(os.environ["S200_DOCKER_LOG"],"a") as f: f.write(json.dumps(sys.argv[1:])+"\\n")\n')
         curl = root / 'bin/curl'; curl.write_text('#!/bin/sh\nexit 0\n')
         sudo = root / 'bin/sudo'; sudo.write_text('#!/bin/sh\nexit 0\n')
-        docker.chmod(0o755); curl.chmod(0o755); sudo.chmod(0o755)
-        env = {k: v for k, v in os.environ.items() if not k.startswith('SANDY_')}
+        # gh prints nothing and fails: the launch takes its no-token path, and
+        # neither the host's gh (a network round trip) nor its token is used.
+        gh = root / 'bin/gh'; gh.write_text('#!/bin/sh\nexit 1\n')
+        docker.chmod(0o755); curl.chmod(0o755); sudo.chmod(0o755); gh.chmod(0o755)
+        env = {k: v for k, v in os.environ.items() if not k.startswith('SANDY_')
+               and k not in ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_HOST', 'XDG_CONFIG_HOME')}
         env.update(HOME=str(root / 'home'), SANDY_HOME=str(root / 'sh'), SANDY_AGENT='codex',
                    SANDY_EGRESS='off', SANDY_OFFLINE='1',
-                   SANDY_CODEX_AUTH='openai-api', OPENAI_API_KEY='fixture',
+                   SANDY_CODEX_AUTH='api_key', OPENAI_API_KEY='fixture',
                    PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'],
                    S200_DOCKER_LOG=str(root / 'docker.log'))
         result = subprocess.run(['bash', str(script), '-p', 'fixture'], cwd=root / 'home/ws', env=env,
@@ -25552,6 +25448,481 @@ check "§214(8) FOREGROUND with SANDY_AUTO_APPROVE_PRIVILEGED=1: still refused t
 rm -rf "$_S214_DIR"
 unset _S214_DIR _S214_WS _S214_H _S214_SB _S214_L _S214_OUT _S214_RC _S214_SCRIPT _S214_RUNPAT _S214_MNT _S214_OK
 unset -f _s214_run _s214_rc _s214_diag _s214_fg _s214_fg_refused
+
+section "§215: credentials reach the agent container the way sandy says: CLAUDE_CODE_OAUTH_TOKEN blanked, OPENAI_API_KEY never on docker's argv"
+# ============================================================
+# Sections 215-219 drive the REAL launcher through a plain foreground launch
+# (-p, egress off, offline) against stubs, the way §214(6)-(8) does, and assert
+# what reached `docker run`. They replace presence greps that the 2026-11-15
+# test review showed survive deleting the code they name (mutants C03, C04,
+# C09, C16, C17, C27, C30, C35, C36, C39, C45).
+#
+# The stubs, shared by 215-219 (removed at the end of §219):
+#   docker    logs every call; answers the network queries (subnet, gateway,
+#             bridge name); saves each `run`'s argv one element per line, and a
+#             copy of its --env-file, under runs/; for the agent's run (the one
+#             with --name) it plays Docker's bind-mount auto-creation: each
+#             workspace-relative path in A6_MOUNTPOINTS that the run mounts over
+#             is created in the workspace, and A6_AGENT_WRITES gets a file.
+#   curl      fails, except the two build-dependency probes when A6_NET=1, so a
+#             missing image builds instead of being deferred.
+#   gh        prints nothing and fails: no host token, no network round trip.
+#   sudo      logs and succeeds, so the Linux iptables rules "apply".
+#   security  fails: a macOS host's keychain is never read.
+#   uname     `uname -s` prints A6_OS (Linux unless a launch says otherwise),
+#             so every launch takes the same path on a macOS host as on CI,
+#             Linux-only ones included; everything else is the real uname.
+_A6_DIR="$(cd "$(mktemp -d)" && pwd -P)"   # macOS: mktemp -d returns a symlink
+mkdir -p "$_A6_DIR/bin"
+_A6_SCRIPT="$SANDY_SCRIPT"
+cat > "$_A6_DIR/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+printf 'docker %s\n' "$*" >> "$A6_LOG/events.log"
+case "$*" in
+    "network inspect "*Subnet*) echo 172.30.0.0/16 ;;
+    "network inspect "*Gateway*) echo 172.30.0.1 ;;
+    "network inspect "*bridge.name*) echo br-sdy-a6 ;;
+esac
+if [ "${1:-}" = run ]; then
+    _n=0
+    while [ -e "$A6_LOG/runs/$_n.args" ]; do _n=$((_n + 1)); done
+    printf '%s\n' "$@" > "$A6_LOG/runs/$_n.args"
+    _prev=""; _agent=0
+    for _a in "$@"; do
+        if [ "$_prev" = --env-file ]; then cp "$_a" "$A6_LOG/runs/$_n.envfile"; fi
+        if [ "$_prev" = --name ]; then _agent=1; fi
+        _prev="$_a"
+    done
+    if [ "$_agent" = 1 ]; then
+        for _m in ${A6_MOUNTPOINTS:-}; do
+            for _a in "$@"; do
+                case "$_a" in
+                    *":$A6_CWS/$_m"|*":$A6_CWS/$_m:ro")
+                        mkdir -p "$A6_WS/$_m"
+                        printf 'mountpoint %s\n' "$_m" >> "$A6_LOG/events.log"
+                        if [ "${A6_AGENT_WRITES:-}" = "$_m" ]; then : > "$A6_WS/$_m/agent-file"; fi
+                        break ;;
+                esac
+            done
+        done
+    fi
+fi
+exit 0
+EOF
+cat > "$_A6_DIR/bin/curl" <<'EOF'
+#!/bin/sh
+printf 'curl %s\n' "$*" >> "$A6_LOG/events.log"
+case "$*" in
+    *deb.debian.org*|*registry.npmjs.org*) [ "${A6_NET:-0}" = 1 ] && exit 0 ;;
+esac
+exit 1
+EOF
+printf '#!/bin/sh\nprintf "gh %%s\\n" "$*" >> "$A6_LOG/events.log"\nexit 1\n' > "$_A6_DIR/bin/gh"
+printf '#!/bin/sh\nprintf "sudo %%s\\n" "$*" >> "$A6_LOG/events.log"\nexit 0\n' > "$_A6_DIR/bin/sudo"
+printf '#!/bin/sh\nprintf "security %%s\\n" "$*" >> "$A6_LOG/events.log"\nexit 44\n' > "$_A6_DIR/bin/security"
+printf '#!/bin/sh\nif [ "$1" = -s ] && [ -n "${A6_OS:-}" ]; then echo "$A6_OS"; exit 0; fi\nexec %s "$@"\n' \
+    "$(command -v uname)" > "$_A6_DIR/bin/uname"
+chmod +x "$_A6_DIR/bin/docker" "$_A6_DIR/bin/curl" "$_A6_DIR/bin/gh" "$_A6_DIR/bin/sudo" "$_A6_DIR/bin/security" "$_A6_DIR/bin/uname"
+
+# _a6_launch CASE [VAR=value ...] [-- sandy-args ...]   (default: -p fixture)
+# CASE names a fixture under $_A6_DIR: CASE/ is $HOME, CASE/ws the workspace
+# and CASE/sh $SANDY_HOME, all kept across launches of the same CASE; the
+# events log and runs/ hold the latest launch only, and its output goes to
+# CASE/out. Every credential, agent and SANDY_* variable of the launching
+# shell is removed first (inside sandy, the live session's would leak in).
+# Sets _A6_RC.
+_a6_launch() {
+    local c="$_A6_DIR/$1"; shift
+    local envs args
+    envs=(); args=(-p fixture)
+    while [ $# -gt 0 ] && [ "$1" != -- ]; do envs+=("$1"); shift; done
+    if [ $# -gt 0 ]; then shift; args=("$@"); fi
+    rm -rf "$c/runs"; mkdir -p "$c/ws" "$c/sh" "$c/runs"; : > "$c/events.log"
+    _A6_RC=0
+    (
+        for _v in $(compgen -e); do
+            case "$_v" in
+                SANDY_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|GEMINI_*|GOOGLE_*|XAI_*|REFLECTION_*|CODEX_*|OPENCODE_*|GROK_*|MIRROR_*|CMUX_*|TELEGRAM_*|DISCORD_*) unset "$_v" ;;
+            esac
+        done
+        unset GH_TOKEN GITHUB_TOKEN GH_HOST XDG_CONFIG_HOME SSH_AUTH_SOCK
+        cd "$c/ws" && env PATH="$_A6_DIR/bin:$PATH" HOME="$c" SANDY_HOME="$c/sh" \
+            A6_LOG="$c" A6_WS="$c/ws" A6_CWS=/home/sandy/ws A6_OS=Linux SANDY_EGRESS=off SANDY_OFFLINE=1 \
+            ${envs[@]+"${envs[@]}"} bash "$_A6_SCRIPT" ${args[@]+"${args[@]}"} </dev/null >"$c/out" 2>&1
+    ) || _A6_RC=$?
+}
+# The agent container's run: the saved argv carrying --name sandy-ws-<hash>.
+_a6_agent_args() {   # $1 = CASE -> path, or nothing
+    local f
+    for f in "$_A6_DIR/$1"/runs/*.args; do
+        [ -f "$f" ] || continue
+        awk 'p=="--name" && index($0,"sandy-ws-")==1 {ok=1} {p=$0} END {exit ok?0:1}' "$f" && printf '%s\n' "$f"
+    done | tail -n 1
+}
+# One argv element equal to $2 directly followed by one equal to $3.
+_a6_pair() {   # $1 = args file  $2 $3
+    [ -f "$1" ] && awk -v a="$2" -v b="$3" 'p==a && $0==b {ok=1} {p=$0} END {exit ok?0:1}' "$1"
+}
+_a6_sandbox() {   # $1 = CASE -> its sandbox dir (the slug sandy computes)
+    local h
+    h="$(printf '%s' "$_A6_DIR/$1/ws" | { shasum -a 256 2>/dev/null || sha256sum; })"
+    h="${h%% *}"
+    printf '%s/%s/sh/sandboxes/ws-%s\n' "$_A6_DIR" "$1" "${h:0:8}"
+}
+_a6_diag() {   # $1 = label  $2 = CASE
+    printf '    \033[0;33m^ %s: rc %s, output (last 400 bytes): %s\033[0m\n' \
+        "$1" "${_A6_RC:-none}" "$(tail -c 400 "$_A6_DIR/$2/out" 2>/dev/null | tr '\n' ' ' | cat -v)"
+}
+
+# --- CLAUDE_CODE_OAUTH_TOKEN: every launch that does not forward the token
+# blanks it (`-e CLAUDE_CODE_OAUTH_TOKEN=`), so a stray value can never reach
+# the container beside the credential sandy chose. Four branches do this; each
+# case below lands in one, which its own output line (or mount) proves, and
+# then asserts the blank is on the agent's argv and the token is nowhere in
+# its env-file. Mutant C09 (all four blanks replaced by `:`) survived the whole
+# host group; each case also kills the mutant that drops only its own branch.
+_A6_CRED='{"claudeAiOauth":{"accessToken":"fixture-at","refreshToken":"fixture-rt","expiresAt":4102444800000,"scopes":["user:inference"]}}'
+mkdir -p "$_A6_DIR/c09-profile/.config/anthropic/credentials" "$_A6_DIR/c09-apikey/.claude" "$_A6_DIR/c09-oauthfile/.claude"
+printf '{"access_token":"fixture-at","refresh_token":"fixture-rt"}\n' > "$_A6_DIR/c09-profile/.config/anthropic/credentials/default.json"
+printf '%s\n' "$_A6_CRED" > "$_A6_DIR/c09-apikey/.claude/.credentials.json"
+printf '%s\n' "$_A6_CRED" > "$_A6_DIR/c09-oauthfile/.claude/.credentials.json"
+# $1 = CASE  $2 = the branch's proof (a fixed string in the output, or
+# "envfile:<line>" for a line the env-file must hold). Prints nothing on
+# success, the first unmet condition otherwise.
+_a6_blanked() {
+    local a e
+    [ "$_A6_RC" = 0 ] || { echo "launch rc $_A6_RC"; return 0; }
+    a="$(_a6_agent_args "$1")"
+    [ -n "$a" ] || { echo "no agent docker run"; return 0; }
+    e="${a%.args}.envfile"
+    case "$2" in
+        envfile:*) grep -qxF -- "${2#envfile:}" "$e" 2>/dev/null || { echo "env-file lacks ${2#envfile:}"; return 0; } ;;
+        *) grep -qF -- "$2" "$_A6_DIR/$1/out" || { echo "not the expected branch (no: $2)"; return 0; } ;;
+    esac
+    _a6_pair "$a" -e "CLAUDE_CODE_OAUTH_TOKEN=" || { echo "no -e CLAUDE_CODE_OAUTH_TOKEN= on the agent's argv"; return 0; }
+    if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' "$e" 2>/dev/null; then echo "token in the env-file"; fi
+}
+_a6_launch c09-profile SANDY_AGENT=claude SANDY_CLAUDE_AUTH=profile
+_A6_WHY="$(_a6_blanked c09-profile "using Anthropic profile 'default'")"
+[ -z "$_A6_WHY" ] || _a6_diag "§215(1)" c09-profile
+check "§215(1) SANDY_CLAUDE_AUTH=profile: the launch blanks CLAUDE_CODE_OAUTH_TOKEN on the agent's docker run (mutation C09; got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+_a6_launch c09-apikey SANDY_AGENT=claude SANDY_CLAUDE_AUTH=api_key ANTHROPIC_API_KEY=sk-fixture-a6
+_A6_WHY="$(_a6_blanked c09-apikey "host OAuth credentials are NOT mounted")"
+[ -z "$_A6_WHY" ] || _a6_diag "§215(2)" c09-apikey
+check "§215(2) SANDY_CLAUDE_AUTH=api_key with a host OAuth file: blanked too (mutation C09; got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+_a6_launch c09-oauthfile SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_A6_WHY="$(_a6_blanked c09-oauthfile "Not forwarding ANTHROPIC_API_KEY")"
+[ -z "$_A6_WHY" ] || _a6_diag "§215(3)" c09-oauthfile
+check "§215(3) auto, host OAuth file mounted, API key withheld: blanked too (mutation C09; got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+_a6_launch c09-keyonly SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_A6_WHY="$(_a6_blanked c09-keyonly "envfile:ANTHROPIC_API_KEY=sk-fixture-a6")"
+[ -z "$_A6_WHY" ] || _a6_diag "§215(4)" c09-keyonly
+check "§215(4) auto, API key only: the key goes in the env-file and the token is blanked (mutation C09; got: ${_A6_WHY:-ok})" \
+    test -z "$_A6_WHY"
+# Control: the one branch that forwards the token instead. It proves (1)-(4)
+# read the agent's argv and env-file for real: the same reader sees the token
+# in the env-file and no blank. The API key is withheld (one credential).
+_a6_launch c09-token SANDY_AGENT=claude CLAUDE_CODE_OAUTH_TOKEN=fixture-token ANTHROPIC_API_KEY=sk-fixture-a6
+_A6_A="$(_a6_agent_args c09-token)"
+check "§215(5) control: with CLAUDE_CODE_OAUTH_TOKEN set it is forwarded through the env-file, not blanked, and the API key is withheld (rc ${_A6_RC:-none})" \
+    bash -c 'test "$1" = 0 && test -n "$2" && f="${2%.args}.envfile" && grep -qx "CLAUDE_CODE_OAUTH_TOKEN=fixture-token" "$f" && ! grep -q "^ANTHROPIC_API_KEY=" "$f" && ! grep -qx "CLAUDE_CODE_OAUTH_TOKEN=" "$2"' \
+    _ "$_A6_RC" "$_A6_A"
+
+# --- OPENAI_API_KEY travels only in the env-file (#13): never as a docker
+# argument, where `ps` and `docker inspect` on the host would show it. The old
+# check grepped for one spelling, `-e "OPENAI_API_KEY=`; the name-only form
+# `-e OPENAI_API_KEY` (Docker copies the value from its own environment)
+# survived it (mutant C27). This asserts no docker call of any kind names the
+# key or carries its value, in any spelling, for codex and for opencode alone.
+for _A6_AG in codex opencode; do
+    _a6_launch "c27-$_A6_AG" SANDY_AGENT="$_A6_AG" SANDY_CODEX_AUTH=api_key OPENAI_API_KEY=sk-fixture-c27
+    _A6_A="$(_a6_agent_args "c27-$_A6_AG")"
+    [ "$_A6_RC" = 0 ] && [ -n "$_A6_A" ] || _a6_diag "§215(6) $_A6_AG" "c27-$_A6_AG"
+    check "§215(6) $_A6_AG: OPENAI_API_KEY reaches the container through the env-file, and no docker call names the key or carries its value (mutation C27: RUN_FLAGS+=(-e OPENAI_API_KEY); rc ${_A6_RC:-none})" \
+        bash -c 'test "$1" = 0 && test -n "$2" && grep -qx "OPENAI_API_KEY=sk-fixture-c27" "${2%.args}.envfile" && ! grep -q -e OPENAI_API_KEY -e sk-fixture-c27 "$3" "$4"/*.args' \
+        _ "$_A6_RC" "$_A6_A" "$_A6_DIR/c27-$_A6_AG/events.log" "$_A6_DIR/c27-$_A6_AG/runs"
+done
+unset _A6_CRED _A6_WHY _A6_A _A6_AG
+unset -f _a6_blanked
+
+section "§216: cmux: the Notification hook is installed and registered once, never twice"
+# ============================================================
+# §22's greps for 'Notification' and 'cmux-notify' each had other matches, so
+# they survived deleting the registration (C03) and the dedup (C04), and its
+# "functional test" ran a jq copy of the merge written in this file, never
+# sandy's node merge. This runs the real launch inside a fake cmux session
+# (CMUX_WORKSPACE_ID set, no host ~/.claude/hooks) and reads the sandbox
+# settings.json the container gets.
+if ! command -v node >/dev/null 2>&1; then
+    skip "§216 cmux hook registration: sandy merges the hook with node, and node is not on this host"
+else
+    _A6_SB="$(_a6_sandbox cmux)"
+    # $1 = settings.json -> "<groups naming cmux-notify>/<hook commands naming it>/<the command>"
+    _a6_cmux_count() {
+        node -e '
+            let s = {}; try { s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch (e) {}
+            const g = ((s.hooks || {}).Notification || []).filter(h => (h.hooks || []).some(x => String(x.command || "").includes("cmux-notify")));
+            const c = [].concat(...g.map(h => (h.hooks || []).filter(x => String(x.command || "").includes("cmux-notify"))));
+            console.log(g.length + "/" + c.length + "/" + (c[0] ? c[0].command : ""));
+        ' "$1"
+    }
+    _A6_ONE="1/1//home/sandy/.claude/hooks/cmux-notify.sh"
+    _a6_launch cmux SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 CMUX_WORKSPACE_ID=fixture-ws
+    _A6_N1="$(_a6_cmux_count "$_A6_SB/claude/settings.json")"
+    [ "$_A6_RC" = 0 ] && [ "$_A6_N1" = "$_A6_ONE" ] || _a6_diag "§216(1)" cmux
+    check "§216(1) a launch inside cmux registers the cmux-notify Notification hook in the sandbox settings.json, exactly once (mutation C03: registration deleted; got ${_A6_N1:-nothing}, rc ${_A6_RC:-none})" \
+        bash -c 'test "$1" = 0 && test "$2" = "$3" && grep -q "cmux detected" "$4"' _ "$_A6_RC" "$_A6_N1" "$_A6_ONE" "$_A6_DIR/cmux/out"
+    check "§216(2) ...and the hook it names is installed, executable, in the sandbox ~/.claude/hooks" \
+        test -x "$_A6_SB/claude/hooks/cmux-notify.sh"
+    if command -v jq >/dev/null 2>&1; then
+        check "§216(3) ...and the installed hook turns a permission prompt into an OSC 777 notification" \
+            bash -c 'printf "{\"type\":\"permission_prompt\"}" | bash "$1" | grep -qF "]777;notify;Claude Code;Permission needed"' _ "$_A6_SB/claude/hooks/cmux-notify.sh"
+    else
+        skip "§216(3) running the installed cmux hook: it parses its input with jq, and jq is not on this host"
+    fi
+    _a6_launch cmux SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 CMUX_WORKSPACE_ID=fixture-ws
+    _A6_N2="$(_a6_cmux_count "$_A6_SB/claude/settings.json")"
+    check "§216(4) a second launch inside cmux still leaves exactly one registration (got ${_A6_N2:-nothing}, rc ${_A6_RC:-none})" \
+        bash -c 'test "$1" = 0 && test "$2" = "$3"' _ "$_A6_RC" "$_A6_N2" "$_A6_ONE"
+    # The seed rebuilds settings.json from the HOST settings.json every launch,
+    # so (4) passes with or without the dedup: what the dedup guards is a host
+    # file that already registers a cmux-notify hook (C04 survived (4)).
+    mkdir -p "$_A6_DIR/cmux-host/.claude"
+    printf '{"hooks":{"Notification":[{"matcher":"","hooks":[{"type":"command","command":"/home/sandy/.claude/hooks/cmux-notify.sh"}]}]}}\n' \
+        > "$_A6_DIR/cmux-host/.claude/settings.json"
+    _a6_launch cmux-host SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 CMUX_WORKSPACE_ID=fixture-ws
+    _A6_N3="$(_a6_cmux_count "$(_a6_sandbox cmux-host)/claude/settings.json")"
+    check "§216(5) when the host settings.json already registers the cmux-notify hook, a launch inside cmux does not add a second (mutation C04: the dedup disabled; got ${_A6_N3:-nothing}, rc ${_A6_RC:-none})" \
+        bash -c 'test "$1" = 0 && test "$2" = "$3" && grep -q "cmux detected" "$4"' _ "$_A6_RC" "$_A6_N3" "$_A6_ONE" "$_A6_DIR/cmux-host/out"
+    # Control: outside cmux the same launch registers nothing, so (1) and (4)
+    # count what the cmux branch did, not something the seed always writes.
+    _a6_launch cmux-off SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+    _A6_N4="$(_a6_cmux_count "$(_a6_sandbox cmux-off)/claude/settings.json")"
+    check "§216(6) control: outside cmux nothing is registered and no hook installed (got ${_A6_N4:-nothing}, rc ${_A6_RC:-none})" \
+        bash -c 'test "$1" = 0 && test "$2" = "0/0/" && test ! -e "$3/claude/hooks/cmux-notify.sh"' _ "$_A6_RC" "$_A6_N4" "$(_a6_sandbox cmux-off)"
+    unset -f _a6_cmux_count
+    unset _A6_SB _A6_ONE _A6_N1 _A6_N2 _A6_N3 _A6_N4
+fi
+
+section "§217: build hashes: each agent image keeps its own, and a skill-pack rebuild carries through to the project image"
+# ============================================================
+# Replaces greps for `.build_hash_codex`, `.build_hash_opencode`,
+# `SKILLS_REBUILT` and `skills_build_hash`, each of which also matched a line
+# that is not the behaviour (C30, C39, C16, C17 survived everything). Builds
+# go to the docker stub with the build-dependency probes answered (A6_NET=1).
+_a6_built() {   # $1 = CASE -> the images this launch built, one per line
+    sed -n 's/^docker build .* -t \([^ ]*\) .*/\1/p' "$_A6_DIR/$1/events.log"
+}
+# Codex and OpenCode each record their image's hash in their own file. With a
+# shared file, building Claude in between overwrites it and the next codex
+# launch rebuilds an image that did not change.
+_a6_launch hashes A6_NET=1 SANDY_AGENT=codex SANDY_CODEX_AUTH=api_key OPENAI_API_KEY=sk-fixture-a6
+_A6_B1="$(_a6_built hashes | tr '\n' ' ')"; _A6_R1="$_A6_RC"
+_a6_launch hashes A6_NET=1 SANDY_AGENT=opencode
+_A6_B2="$(_a6_built hashes | tr '\n' ' ')"; _A6_R2="$_A6_RC"
+_a6_launch hashes A6_NET=1 SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_A6_B3="$(_a6_built hashes | tr '\n' ' ')"; _A6_R3="$_A6_RC"
+check "§217(pre) control: a fresh home builds codex, then opencode, then claude, each launch building its own image (rc $_A6_R1/$_A6_R2/$_A6_R3; built: [$_A6_B1] [$_A6_B2] [$_A6_B3])" \
+    bash -c 'test "$1$2$3" = 000 && case "$4" in *sandy-codex*) ;; *) exit 1 ;; esac && test "$5" = "sandy-opencode " && test "$6" = "sandy-claude-code "' \
+    _ "$_A6_R1" "$_A6_R2" "$_A6_R3" "$_A6_B1" "$_A6_B2" "$_A6_B3"
+_a6_launch hashes A6_NET=1 SANDY_AGENT=codex SANDY_CODEX_AUTH=api_key OPENAI_API_KEY=sk-fixture-a6
+_A6_B4="$(_a6_built hashes | tr '\n' ' ')"; _A6_R4="$_A6_RC"
+check "§217(1) codex relaunched after the claude build reuses its image: nothing rebuilt, its hash in .build_hash_codex (mutation C30: codex dispatched to .build_hash; rc $_A6_R4, built: [$_A6_B4])" \
+    bash -c 'test "$1" = 0 && test -z "$2" && test -s "$3/.build_hash_codex" && grep -q "Sandbox image up to date" "$4"' _ "$_A6_R4" "$_A6_B4" "$_A6_DIR/hashes/sh" "$_A6_DIR/hashes/out"
+_a6_launch hashes A6_NET=1 SANDY_AGENT=opencode
+_A6_B5="$(_a6_built hashes | tr '\n' ' ')"; _A6_R5="$_A6_RC"
+check "§217(2) opencode relaunched likewise: nothing rebuilt, its hash in .build_hash_opencode (mutation C39; rc $_A6_R5, built: [$_A6_B5])" \
+    bash -c 'test "$1" = 0 && test -z "$2" && test -s "$3/.build_hash_opencode"' _ "$_A6_R5" "$_A6_B5" "$_A6_DIR/hashes/sh"
+
+# A skill-pack image rebuilt in a later launch must rebuild the project image
+# built on it; and --rebuild must clear the skill-pack hash even when the
+# launch stops before the skill-pack phase (--build-only does).
+mkdir -p "$_A6_DIR/skills/ws/.sandy"
+printf 'FROM scratch\n' > "$_A6_DIR/skills/ws/.sandy/Dockerfile"
+_A6_SKV=(A6_NET=1 SANDY_AGENT=claude SANDY_SKILL_PACKS=gstack SANDY_AUTO_APPROVE_PRIVILEGED=1 ANTHROPIC_API_KEY=sk-fixture-a6)
+_A6_PRJ="sandy-project-ws-$(basename "$(_a6_sandbox skills)" | sed 's/^ws-//')"
+_a6_launch skills "${_A6_SKV[@]}"
+_A6_B1="$(_a6_built skills | tr '\n' ' ')"; _A6_R1="$_A6_RC"
+_a6_launch skills "${_A6_SKV[@]}"
+_A6_B2="$(_a6_built skills | tr '\n' ' ')"; _A6_R2="$_A6_RC"
+check "§217(3pre) control: the first launch builds base, agent, skill pack and project images; an unchanged relaunch builds nothing (rc $_A6_R1/$_A6_R2; built: [$_A6_B1] [$_A6_B2])" \
+    bash -c 'test "$1$2" = 00 && test "$3" = "sandy-base sandy-claude-code sandy-skills-base-gstack sandy-skills-gstack $5 " && test -z "$4"' \
+    _ "$_A6_R1" "$_A6_R2" "$_A6_B1" "$_A6_B2" "$_A6_PRJ"
+printf 'v0.0.0-a6\n' > "$_A6_DIR/skills/sh/.skill_version_gstack"   # a new skill-pack release
+_a6_launch skills "${_A6_SKV[@]}"
+_A6_B3="$(_a6_built skills | tr '\n' ' ')"; _A6_R3="$_A6_RC"
+check "§217(3) a new skill-pack release rebuilds the skill-pack image and then the project image on top of it, and nothing else (mutation C16: SKILLS_REBUILT=true deleted; rc $_A6_R3, built: [$_A6_B3])" \
+    bash -c 'test "$1" = 0 && test "$2" = "sandy-skills-gstack $3 "' _ "$_A6_R3" "$_A6_B3" "$_A6_PRJ"
+_a6_launch skills "${_A6_SKV[@]}" -- --rebuild --build-only
+_A6_B4="$(_a6_built skills | tr '\n' ' ')"; _A6_R4="$_A6_RC"
+_a6_launch skills "${_A6_SKV[@]}"
+_A6_B5="$(_a6_built skills | tr '\n' ' ')"; _A6_R5="$_A6_RC"
+check "§217(4) --rebuild clears the skill-pack hash: after \`--rebuild --build-only\` (which stops before the skill-pack phase) the next launch rebuilds the skill-pack image (mutation C17: .skills_build_hash dropped from the --rebuild list; rc $_A6_R4/$_A6_R5, built: [$_A6_B4] [$_A6_B5])" \
+    bash -c 'test "$1$2" = 00 && test "$3" = "sandy-base sandy-claude-code " && case "$4" in *sandy-skills-gstack*) exit 0 ;; esac; exit 1' \
+    _ "$_A6_R4" "$_A6_R5" "$_A6_B4" "$_A6_B5"
+unset _A6_B1 _A6_B2 _A6_B3 _A6_B4 _A6_B5 _A6_R1 _A6_R2 _A6_R3 _A6_R4 _A6_R5 _A6_SKV _A6_PRJ
+unset -f _a6_built
+
+section "§218: Linux local LLM: the agent gets host.docker.internal, and the iptables ACCEPT is inserted before it starts"
+# ============================================================
+# Replaces two greps that each matched a sibling line: the proxy's own
+# --add-host (C35) and the cleanup's `iptables -D` of the same rule (C36).
+# `uname -s` answers Linux (A6_OS), so this runs the Linux branch on any host;
+# sudo is the logging stub, so no real rule is touched.
+_A6_LLM=(SANDY_AGENT=codex SANDY_CODEX_AUTH=api_key OPENAI_API_KEY=sk-fixture-a6)
+_A6_RULE="sudo iptables -I DOCKER-USER -i br-sdy-a6 -p tcp -d 172.30.0.1 --dport 11434 -j ACCEPT"
+_a6_launch llm-off "${_A6_LLM[@]}"
+_A6_A="$(_a6_agent_args llm-off)"
+check "§218(pre) control: without SANDY_LOCAL_LLM_HOST the Linux isolation ran (DROP rules inserted on the stub bridge) and neither the mapping nor the port rule appears (rc ${_A6_RC:-none})" \
+    bash -c 'test "$1" = 0 && test -n "$2" && grep -qxF "sudo iptables -I DOCKER-USER -i br-sdy-a6 -d 10.0.0.0/8 -j DROP" "$3" && ! grep -q -- "--dport" "$3" && ! grep -qx "host.docker.internal:host-gateway" "$2"' \
+    _ "$_A6_RC" "$_A6_A" "$_A6_DIR/llm-off/events.log"
+_a6_launch llm "${_A6_LLM[@]}" SANDY_LOCAL_LLM_HOST=127.0.0.1:11434
+_A6_A="$(_a6_agent_args llm)"
+[ "$_A6_RC" = 0 ] && [ -n "$_A6_A" ] || _a6_diag "§218(1)" llm
+check "§218(1) SANDY_LOCAL_LLM_HOST on Linux: the agent's docker run maps host.docker.internal to host-gateway (mutation C35; rc ${_A6_RC:-none})" \
+    _a6_pair "$_A6_A" --add-host host.docker.internal:host-gateway
+# Line numbers in the one ordered log of every stubbed call.
+_A6_INS="$(grep -n -m1 -xF -- "$_A6_RULE" "$_A6_DIR/llm/events.log" | cut -d: -f1 || true)"
+_A6_RUN="$(grep -n -m1 -- '^docker run .* --name sandy-ws-' "$_A6_DIR/llm/events.log" | cut -d: -f1 || true)"
+_A6_DEL="$(grep -n -m1 -xF -- "${_A6_RULE/ -I / -D }" "$_A6_DIR/llm/events.log" | cut -d: -f1 || true)"
+check "§218(2) ...and the tcp ACCEPT for the gateway's port is INSERTED before the agent starts, then deleted after it exits (mutation C36: the insert replaced by \`:\`; lines insert=${_A6_INS:-none} run=${_A6_RUN:-none} delete=${_A6_DEL:-none})" \
+    bash -c 'test -n "$1" && test -n "$2" && test -n "$3" && test "$1" -lt "$2" && test "$2" -lt "$3"' _ "$_A6_INS" "$_A6_RUN" "$_A6_DEL"
+unset _A6_LLM _A6_RULE _A6_A _A6_INS _A6_RUN _A6_DEL
+
+section "§219: the empty stub directories a session's mounts created in the workspace are removed when it exits"
+# ============================================================
+# §44's grep found `.session-created-stubs` and `rmdir` in cleanup() even with
+# the whole removal loop deleted (C45). A claude sandbox with its own
+# workspace-commands and workspace-agents overlays mounts them over
+# .claude/commands and .claude/agents, which the workspace does not have; the
+# docker stub then creates both mount points in the workspace, as Docker does,
+# and writes a file into .claude/agents, as an agent might.
+_a6_launch stubs SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+mkdir -p "$(_a6_sandbox stubs)/workspace-commands" "$(_a6_sandbox stubs)/workspace-agents"
+_a6_launch stubs SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 \
+    A6_MOUNTPOINTS=".claude/commands .claude/agents" A6_AGENT_WRITES=.claude/agents
+check "§219(pre) control: the launch mounted both overlays and the stub created both mount points in the workspace (rc ${_A6_RC:-none})" \
+    bash -c 'test "$1" = 0 && grep -qx "mountpoint .claude/commands" "$2" && grep -qx "mountpoint .claude/agents" "$2"' _ "$_A6_RC" "$_A6_DIR/stubs/events.log"
+check "§219(1) at exit the empty mount point sandy's session created is gone, and its list with it (mutation C45: the removal loop deleted)" \
+    bash -c 'test ! -e "$1/.claude/commands" && test -d "$1/.claude" && test ! -e "$2/.session-created-stubs"' _ "$_A6_DIR/stubs/ws" "$(_a6_sandbox stubs)"
+check "§219(2) ...while the one the agent wrote into is kept, with its file, and the launch says why" \
+    bash -c 'test -f "$1/.claude/agents/agent-file" && grep -qF "$1/.claude/agents: not empty" "$2"' _ "$_A6_DIR/stubs/ws" "$_A6_DIR/stubs/out"
+
+rm -rf "$_A6_DIR"
+unset _A6_DIR _A6_SCRIPT _A6_RC
+unset -f _a6_launch _a6_agent_args _a6_pair _a6_sandbox _a6_diag
+
+section "§220: every registered config key is honoured from a config file, and SANDY_SKILL_PACKS / SANDY_GEMINI_AUTH from a workspace one without approval"
+# ============================================================
+# Removing a key from SANDY_PASSIVE_KEYS makes the loader drop it from every
+# file, silently. The only checks that noticed were the generated-docs sync
+# checks, which the documented regen step makes green again (C15, C32). This
+# runs the real _load_sandy_config over fixture files, against the key list
+# that is NOT regenerated: the _sandy_key_metadata rows.
+_S220_DEFS="$(sed -n '/^SANDY_PRIVILEGED_KEYS=(/,/^)$/p; /^SANDY_PASSIVE_KEYS=(/,/^)$/p; /^SANDY_ENV_ONLY_KEYS=(/,/^)$/p' "$SANDY_SCRIPT")
+$(sed -n '/^_key_in_list()/,/^}$/p; /^_sandy_passive_value_privileged()/,/^}$/p; /^_load_sandy_config()/,/^}$/p; /^_sandy_key_metadata()/,/^}$/p' "$SANDY_SCRIPT")"
+_S220_D="$(cd "$(mktemp -d)" && pwd -P)"
+# $1 = file  $2 = tier  -> "KEY=<value or -unset->" per metadata key, then
+# "PENDING=<queued keys>". env -i: no variable of this shell is mistaken for a
+# value the loader set.
+_s220_load() {
+    env -i PATH="$PATH" bash -c '
+        set -euo pipefail
+        eval "$1"
+        _SANDY_ENV_SET_KEYS=(); _PASSIVE_PRIVILEGED_PENDING=(); _PASSIVE_PRIVILEGED_SOURCES=()
+        _SANDY_EXTRA_ENV_HOST_LISTS=(); _SANDY_EXTRA_ENV_WS_LISTS=()
+        _load_sandy_config "$2" "$3"
+        for k in $(_sandy_key_metadata | cut -d"|" -f1); do eval "v=\${$k--unset-}"; printf "%s=%s\n" "$k" "$v"; done
+        printf "PENDING=%s\n" "${_PASSIVE_PRIVILEGED_PENDING[*]-}"
+        printf "EXTRA_HOST=%s\n" "${_SANDY_EXTRA_ENV_HOST_LISTS[*]-}"' _ "$_S220_DEFS" "$1" "$2" 2>&1 || printf 'RC=%s\n' "$?"
+}
+_S220_KEYS="$(env -i PATH="$PATH" bash -c 'eval "$1"; _sandy_key_metadata | cut -d"|" -f1' _ "$_S220_DEFS")"
+_S220_ENVONLY="$(env -i PATH="$PATH" bash -c 'eval "$1"; printf "%s\n" "${SANDY_ENV_ONLY_KEYS[@]}"' _ "$_S220_DEFS")"
+: > "$_S220_D/host.config"
+for _k in $_S220_KEYS; do printf '%s=a6-fixture\n' "$_k" >> "$_S220_D/host.config"; done
+printf 'A6_NOT_A_KEY=a6-fixture\n' >> "$_S220_D/host.config"
+_S220_HOST="$(_s220_load "$_S220_D/host.config" privileged)"
+_S220_N="$(printf '%s\n' "$_S220_KEYS" | grep -c . || true)"
+check "§220(pre) control: $_S220_N metadata keys extracted; from the host file an env-only key (SANDY_AUTO_APPROVE_PRIVILEGED) is ignored, as is a name that is no key at all" \
+    bash -c 'test "$1" -ge 40 && printf "%s\n" "$2" | grep -qx "SANDY_AUTO_APPROVE_PRIVILEGED=-unset-" && printf "%s\n" "$3" | grep -qx SANDY_AUTO_APPROVE_PRIVILEGED && test "$(printf "%s\n" "$2" | grep -c "=a6-fixture")" -gt 0' \
+    _ "$_S220_N" "$_S220_HOST" "$_S220_ENVONLY"
+_S220_MISS=""
+for _k in $_S220_KEYS; do
+    printf '%s\n' "$_S220_ENVONLY" | grep -qx -- "$_k" && continue
+    printf '%s\n' "$_S220_HOST" | grep -qx -- "$_k=a6-fixture" && continue
+    # SANDY_EXTRA_ENV is recorded per file, not exported: the lists compose (#388).
+    [ "$_k" = SANDY_EXTRA_ENV ] && printf '%s\n' "$_S220_HOST" | grep -qx "EXTRA_HOST=a6-fixture" && continue
+    _S220_MISS="$_S220_MISS $_k"
+done
+check "§220(1) every key with a metadata row, env-only keys aside, is honoured from the host config file (mutation C15/C32: a key dropped from SANDY_PASSIVE_KEYS, docs regenerated; dropped:${_S220_MISS:- none})" \
+    test -z "$_S220_MISS"
+# Workspace tier: each such key is either honoured or queued for approval,
+# never dropped; and these two are honoured outright, values intact.
+cp "$_S220_D/host.config" "$_S220_D/ws.config"
+_S220_WS="$(_s220_load "$_S220_D/ws.config" passive)"
+_S220_PEND=" $(printf '%s\n' "$_S220_WS" | sed -n 's/^PENDING=//p') "
+_S220_MISS=""
+for _k in $_S220_KEYS; do
+    printf '%s\n' "$_S220_ENVONLY" | grep -qx -- "$_k" && continue
+    printf '%s\n' "$_S220_WS" | grep -qx -- "$_k=a6-fixture" && continue
+    case "$_S220_PEND" in *" $_k=a6-fixture "*) continue ;; esac
+    _S220_MISS="$_S220_MISS $_k"
+done
+check "§220(2) from a workspace .sandy/config each of those keys is honoured or queued for approval, none silently dropped (dropped:${_S220_MISS:- none})" \
+    test -z "$_S220_MISS"
+printf 'SANDY_SKILL_PACKS=gstack\nSANDY_GEMINI_AUTH=api_key\n' > "$_S220_D/pinned.config"
+_S220_P="$(_s220_load "$_S220_D/pinned.config" passive)"
+check "§220(3) a workspace .sandy/config sets SANDY_SKILL_PACKS and SANDY_GEMINI_AUTH directly, no approval needed (named here, so dropping either key AND its metadata row still fails; mutations C15, C32)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "SANDY_SKILL_PACKS=gstack" && printf "%s\n" "$1" | grep -qx "SANDY_GEMINI_AUTH=api_key" && printf "%s\n" "$1" | grep -qx "PENDING="' _ "$_S220_P"
+rm -rf "$_S220_D"
+unset _S220_DEFS _S220_D _S220_KEYS _S220_ENVONLY _S220_HOST _S220_N _S220_MISS _S220_WS _S220_PEND _S220_P _k
+unset -f _s220_load
+
+section "§221: user-setup links baked-in skill packs into ~/.claude/skills and points Playwright at the pack's browsers"
+# ============================================================
+# The greps for '/opt/skills' and 'PLAYWRIGHT_BROWSERS_PATH' also matched the
+# skills Dockerfile generator, so deleting the activation block (C18) or its
+# export (C19) left them green; the template sync check went green again after
+# test/regen-template.sh. This runs the activation stretch of the user-setup.sh
+# that sandy generates (the generate_user_setup heredoc), with /opt/skills
+# relocated to a fixture tree.
+_S221_D="$(cd "$(mktemp -d)" && pwd -P)"
+_S221_BODY="$(awk '/^    cat > "\$SANDY_HOME\/user-setup.sh.new" <<.USERSETUP.$/ {f=1; next} f && /^USERSETUP$/ {exit} f' "$SANDY_SCRIPT" \
+    | awk '/^sandy_log "Activating skill packs"$/ {f=1} f && /^# Resilient file writer/ {exit} f')"
+mkdir -p "$_S221_D/opt/skills/gstack/review" "$_S221_D/opt/skills/gstack/browse" "$_S221_D/opt/skills/gstack/node_modules" \
+    "$_S221_D/opt/skills/gstack/notaskill" "$_S221_D/opt/skills/gstack/bin" "$_S221_D/opt/skills/gstack/.browsers" "$_S221_D/home"
+for _s in review browse node_modules; do : > "$_S221_D/opt/skills/gstack/$_s/SKILL.md"; done
+# $1 = "true" or "false" for _sandy_has_claude -> links, then PATH and the
+# Playwright variable as the block leaves them
+_s221_run() {
+    rm -rf "$_S221_D/home/.claude"
+    env -i PATH=/usr/bin:/bin HOME="$_S221_D/home" S221_HC="$1" S221_ROOT="$_S221_D" bash -c '
+        set -e   # as user-setup.sh runs
+        sandy_log() { :; }
+        _sandy_has_claude() { "$S221_HC"; }
+        eval "$(printf "%s\n" "$1" | sed "s#/opt/skills#$S221_ROOT/opt/skills#g")"
+        for l in "$HOME"/.claude/skills/*; do
+            if [ -L "$l" ]; then printf "link %s -> %s\n" "${l##*/}" "$(readlink "$l")"; fi
+        done
+        printf "PATH=%s\nPW=%s\n" "$PATH" "${PLAYWRIGHT_BROWSERS_PATH:-unset}"' _ "$_S221_BODY" 2>&1 || printf 'RC=%s\n' "$?"
+}
+_S221_OUT="$(_s221_run true)"
+check "§221(pre) the activation stretch was extracted from the user-setup heredoc" \
+    bash -c 'case "$1" in *"Activating skill packs"*) exit 0 ;; esac; exit 1' _ "$_S221_BODY"
+check "§221(1) the pack and each of its skills (a dir with SKILL.md, not browse or node_modules) are linked into ~/.claude/skills, and its bin is on PATH (mutation C18: the activation block deleted; got: $(printf '%s' "$_S221_OUT" | tr '\n' ';'))" \
+    bash -c 'test "$(printf "%s\n" "$1" | grep "^link " | sort)" = "$(printf "link gstack -> %s/opt/skills/gstack/\nlink review -> gstack/review\n" "$2" | sort)" && printf "%s\n" "$1" | grep -q "^PATH=$2/opt/skills/gstack/bin:"' \
+    _ "$_S221_OUT" "$_S221_D"
+check "§221(2) ...and PLAYWRIGHT_BROWSERS_PATH points at the pack's browsers (mutation C19: the export replaced by \`:\`)" \
+    bash -c 'printf "%s\n" "$1" | grep -qx "PW=$2/opt/skills/gstack/.browsers"' _ "$_S221_OUT" "$_S221_D"
+_S221_OUT="$(_s221_run false)"
+check "§221(3) control: for an agent set without claude nothing is linked (the browsers path is still set: it is not claude-specific)" \
+    bash -c '! printf "%s\n" "$1" | grep -q "^link " && printf "%s\n" "$1" | grep -qx "PW=$2/opt/skills/gstack/.browsers"' _ "$_S221_OUT" "$_S221_D"
+rm -rf "$_S221_D"
+unset _S221_D _S221_BODY _S221_OUT _s
+unset -f _s221_run
 
 # BEGIN SUMMARY
 # ============================================================
