@@ -11649,6 +11649,38 @@ check "§123(25) SANDY_EXTRA_ENV still REFUSES SANDY_HANDOFF_* — a stale pre-e
 # not. Needs flock (the supervisor refuses without it), so it is skipped loudly
 # rather than silently on a host that lacks it.
 if command -v flock >/dev/null 2>&1; then
+    # _s123_kill_tree <pid>: SIGKILL a process and every descendant. Each
+    # level is SIGSTOPped BEFORE its children are listed, so a supervisor loop
+    # cannot start a replacement relay (or its next backoff sleep) between
+    # the listing and the kill. pgrep -P is the same on Linux procps and BSD,
+    # and nothing here needs setsid or job control, which macOS lacks.
+    _s123_kill_tree() {
+        local _p="$1" _c
+        kill -STOP "$_p" 2>/dev/null || return 0
+        for _c in $(pgrep -P "$_p" 2>/dev/null); do _s123_kill_tree "$_c"; done
+        kill -KILL "$_p" 2>/dev/null || true
+    }
+    # _s123_stop_supervisor <h>: stop the loop _sandy_supervise_entry forked.
+    # Stopping the relay alone is not enough: the loop restarts it forever,
+    # behind a backoff that grows to `sleep 60`, holding the entry lock on fd
+    # 9. In production nothing stops it but container teardown, and there is
+    # no pid file, so the window's subshell records the loop's pid ($!) on its
+    # way out. The pid is only killed while the fixture's OWN lock is still
+    # held: the loop holds it for as long as it lives, so a free lock means the
+    # loop is gone and the recorded pid may already belong to someone else.
+    _s123_stop_supervisor() {
+        local h="$1" _pid="" _i=0
+        _pid="$(cat "$h/loop.pid" 2>/dev/null || true)"
+        case "$_pid" in ''|*[!0-9]*) _pid="" ;; esac
+        if [ -n "$_pid" ] && ! flock -n "$h/.sandy-entry-w.lock" true 2>/dev/null; then
+            _s123_kill_tree "$_pid"
+        fi
+        pkill -f "$h/r.sh" >/dev/null 2>&1 || true
+        # SIGKILL is asynchronous; wait (bounded) for the lock to come free.
+        while [ "$_i" -lt 50 ] && ! flock -n "$h/.sandy-entry-w.lock" true 2>/dev/null; do
+            sleep 0.1; _i=$((_i + 1))
+        done
+    }
     _s123_window() {
         # _s123_window <relay body> -> "rc=<n>"
         #
@@ -11667,6 +11699,10 @@ if command -v flock >/dev/null 2>&1; then
         (
             trap - ERR
             set +e
+            # $! is the supervisor loop _sandy_supervise_entry backgrounded.
+            # An EXIT trap records it on both ways out: the normal return,
+            # and the window's `exit 1` for a relay that died at startup.
+            trap 'printf "%s\n" "${!:-}" > "$h/loop.pid"' EXIT
             sandy_log() { :; }
             HOME="$h"; WORKSPACE="$h/ws"
             unset SANDY_HANDOFF_RELAY SANDY_RELAY_STATE
@@ -11678,7 +11714,7 @@ if command -v flock >/dev/null 2>&1; then
             # it rather than echoed from within (which would never run).
             _sandy_start_entries
         ) >/dev/null 2>&1 || rc=$?
-        pkill -f "$h/r.sh" >/dev/null 2>&1 || true
+        _s123_stop_supervisor "$h"
         echo "rc=$rc"
         return 0
     }
@@ -11694,6 +11730,44 @@ exit 0')"
 sleep 30')"
     check "§123(28) a relay that stays up does NOT fail the session — the window must not false-positive on a healthy relay (got: $_S123_W3)" \
         bash -c '[ "$1" = "rc=0" ]' -- "$_S123_W3"
+    # (28b)/(28c): nothing (26)-(28) started outlives them. The supervisor loop
+    # is a fork of this suite, so its command line is just
+    # `bash test/run-tests.sh`; it is identified by what it holds instead.
+    # Before the fix every host run left three loops behind (parent 1,
+    # SANDY_TEST_CHILD=1, fd 9 on a deleted .sandy-entry-w.lock, a `sleep`
+    # child), restarting their relays for ever and holding process slots.
+    # The fixture dir reaches the probes through the environment, not argv,
+    # so the probing bash cannot match its own command line.
+    check "§123(28b) no supervisor loop or relay from (26)-(28) is still running: all three fixture entry locks are free and no process has a fixture path in its command line (mutation: cleaning up the relay alone, as before, leaves every lock held)" \
+        env S123D="$_S123_DIR" bash -c '
+            n=0
+            for l in "$S123D"/w.*/.sandy-entry-w.lock; do
+                [ -e "$l" ] || continue
+                n=$((n + 1))
+                flock -n "$l" true || { echo "still held: $l"; exit 1; }
+            done
+            [ "$n" -eq 3 ] || { echo "expected 3 fixture locks, probed $n"; exit 1; }
+            if pgrep -f "$S123D/w[.]" >/dev/null 2>&1; then
+                echo "processes with a fixture path in argv:"; pgrep -lf "$S123D/w[.]"; exit 1
+            fi'
+    # /proc/<pid>/environ is the environment at EXEC time. The loop is a fork
+    # of this suite that never execs, so it shows the suite's own HOME and only
+    # (28b)'s lock probe sees it; everything the loop execs (relays, their
+    # children, its backoff sleeps) shows the fixture HOME, which (28c) sees
+    # even when its command line names no fixture path.
+    check "§123(28c) no process exec'd under a (26)-(28) fixture HOME is still running: relays, their own children, and the loop's backoff sleeps (Linux only: needs /proc/<pid>/environ; macOS has no /proc, and (28b) is its coverage there)" \
+        env S123D="$_S123_DIR" bash -c '
+            [ -r /proc/self/environ ] || { echo "no /proc/<pid>/environ on this host"; exit 77; }
+            # The probe must be able to see an environment at all: its own.
+            grep -qzs "^S123D=" "/proc/$$/environ" || { echo "probe cannot read /proc/$$/environ"; exit 1; }
+            # A SIGKILLed process can take a moment to go; poll up to 2s.
+            i=0
+            while :; do
+                hits="$(grep -lzs "^HOME=$S123D/w[.]" /proc/[0-9]*/environ 2>/dev/null || true)"
+                [ -n "$hits" ] || exit 0
+                [ "$i" -lt 20 ] || { echo "leaked: $hits"; exit 1; }
+                sleep 0.1; i=$((i + 1))
+            done'
     check "§123(29) only the FIRST run's outcome is used for the window — a later exit is a runtime loop and cannot un-succeed a launch that already completed" \
         bash -c 'grep -q "if \[ \"\$first\" = 1 \]; then echo \"rc=\$rc\" > \"\$_st/.startup\"; first=0; fi" "$1"' -- "$_S123_DIR/supervisor.sh"
     check "§123(30) a stale verdict from a previous container is cleared before the supervisor starts (the sandbox dir outlives the container)" \
