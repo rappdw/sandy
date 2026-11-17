@@ -3,7 +3,8 @@
 Both helpers are baked into Dockerfile.base by sandy's generate_dockerfile_base
 heredoc; this extracts them from the script (so it tests what ships) and runs
 them against payloads shaped like Claude Code's statusLine JSON. Run by
-run-tests.sh §81; also runnable on its own: python3 test/test_claude_usage_statusline.py
+the contracts group (suite_runner.py); also runnable on its own:
+python3 test/test_claude_usage_statusline.py
 """
 import datetime
 import json

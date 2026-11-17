@@ -43,8 +43,8 @@
 #
 #   Credentials provided    │ Tests that run
 #   ────────────────────────┼──────────────────────────────────────────
-#   (none)                  │ Feature guards only (§1)
-#   OPENAI_API_KEY           │ §1-4: guards, codex build/headless/seeding/container
+#   (none)                  │ no agent turn (§1 guards: now run-tests.sh §222)
+#   OPENAI_API_KEY           │ §2-4: codex build/headless/seeding/container
 #                           │   (pinned SANDY_CODEX_AUTH=api_key, #429)
 #   + ~/.codex/auth.json    │ + §9: OAuth seeding (pinned SANDY_CODEX_AUTH=oauth)
 #   GEMINI_API_KEY          │ §5-6: gemini build/headless/container
@@ -954,108 +954,24 @@ if [ "${SANDY_INTEG_NO_WARM:-0}" != "1" ]; then
     _SEC_COUNT=$(( _SEC_COUNT + 1 ))
 fi
 
-section "1. Feature guards (no credentials needed)"
+section "1. Feature guards: moved to run-tests.sh §222 (host group)"
 # ============================================================
+# The 13 guard checks that stood here needed neither Docker nor credentials,
+# and asserted only the error text. They run on every PR now as run-tests.sh
+# §222, which also asserts that each guard STOPS the launch (no image or
+# container work after it). The number stays, and naming it in
+# SANDY_INTEG_ONLY reports a skip: a run that selects only moved checks must
+# not end "All 0 tests passed". A run that did not ask for it just says where
+# the checks went, so the usual skip count is unchanged.
+_moved_to_host() {  # $1 section id, $2 what moved and where
+    if [ -n "${SANDY_INTEG_ONLY:-}" ] && _section_in_list "$1" "$SANDY_INTEG_ONLY"; then
+        skip "$2 (selected, but it runs only in the host group: bash test/run-tests.sh --host-only)"
+    else
+        info "   $2"
+    fi
+}
 if [ "$_SECTION_ON" = true ]; then
-
-# These just need the sandy script; they exit at the guard before Docker.
-# --help and --version exit before config loading, so we pass -p "test"
-# which gets past arg parsing into the config/guard section. The guards
-# fire and exit before any Docker operations.
-
-_out="$(SANDY_AGENT=codex SANDY_SKILL_PACKS=gstack "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
-if echo "$_out" | grep -qi "SANDY_SKILL_PACKS requires claude\|skill.packs.*not supported"; then
-    pass "SANDY_SKILL_PACKS + codex rejected"
-else
-    fail "SANDY_SKILL_PACKS + codex rejected"
-fi
-
-_out="$(SANDY_AGENT=codex "$SANDY_SCRIPT" --remote 2>&1 || true)"
-if echo "$_out" | grep -q "only supported with SANDY_AGENT=claude"; then
-    pass "--remote + codex rejected"
-else
-    fail "--remote + codex rejected"
-fi
-
-_out="$(SANDY_AGENT=gemini "$SANDY_SCRIPT" --remote 2>&1 || true)"
-if echo "$_out" | grep -q "only supported with SANDY_AGENT=claude"; then
-    pass "--remote + gemini rejected"
-else
-    fail "--remote + gemini rejected"
-fi
-
-_out="$(SANDY_AGENT=claude,gemini "$SANDY_SCRIPT" --remote 2>&1 || true)"
-if echo "$_out" | grep -q "only supported with SANDY_AGENT=claude"; then
-    pass "--remote + claude,gemini rejected"
-else
-    fail "--remote + claude,gemini rejected"
-fi
-
-# The old `both` alias was removed in v0.12 — using it must error out with
-# a pointer to the comma-separated syntax, not silently map to claude,gemini.
-_out="$(SANDY_AGENT=both "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
-if echo "$_out" | grep -q "SANDY_AGENT=both is no longer supported"; then
-    pass "SANDY_AGENT=both errors with migration hint"
-else
-    fail "SANDY_AGENT=both errors with migration hint"
-fi
-
-_out="$(SANDY_AGENT=codex+claude "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
-if echo "$_out" | grep -q "Invalid agent"; then
-    pass "SANDY_AGENT=codex+claude rejected"
-else
-    fail "SANDY_AGENT=codex+claude rejected"
-fi
-
-# SANDY_AGENT=all is now a valid alias for claude,gemini,codex — verify it's accepted.
-_out="$(SANDY_AGENT=all "$SANDY_SCRIPT" --help 2>&1 || true)"
-if ! echo "$_out" | grep -q "Invalid agent"; then
-    pass "SANDY_AGENT=all accepted as alias"
-else
-    fail "SANDY_AGENT=all accepted as alias"
-fi
-
-_out="$(SANDY_AGENT=codex SANDY_CHANNELS=discord "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
-if echo "$_out" | grep -qi "discord.*only supported\|only supported.*claude"; then
-    pass "discord channel + codex rejected"
-else
-    fail "discord channel + codex rejected"
-fi
-
-# OpenCode-specific guards (mirror codex)
-_out="$(SANDY_AGENT=opencode SANDY_SKILL_PACKS=gstack "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
-if echo "$_out" | grep -qi "SANDY_SKILL_PACKS requires claude"; then
-    pass "SANDY_SKILL_PACKS + opencode rejected"
-else
-    fail "SANDY_SKILL_PACKS + opencode rejected"
-fi
-_out="$(SANDY_AGENT=opencode "$SANDY_SCRIPT" --remote 2>&1 || true)"
-if echo "$_out" | grep -q "only supported with SANDY_AGENT=claude"; then
-    pass "--remote + opencode rejected"
-else
-    fail "--remote + opencode rejected"
-fi
-_out="$(SANDY_AGENT=opencode SANDY_CHANNELS=discord "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
-if echo "$_out" | grep -qi "discord.*only supported\|only supported.*claude"; then
-    pass "discord channel + opencode rejected"
-else
-    fail "discord channel + opencode rejected"
-fi
-
-# SANDY_LOCAL_LLM_HOST validation: world-open / malformed values rejected.
-_out="$(SANDY_LOCAL_LLM_HOST=0.0.0.0:11434 "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
-if echo "$_out" | grep -q "world-open or empty"; then
-    pass "SANDY_LOCAL_LLM_HOST=0.0.0.0:port rejected"
-else
-    fail "SANDY_LOCAL_LLM_HOST=0.0.0.0:port rejected"
-fi
-_out="$(SANDY_LOCAL_LLM_HOST=127.0.0.1 "$SANDY_SCRIPT" -p "test" 2>&1 || true)"
-if echo "$_out" | grep -q "not in host:port format"; then
-    pass "SANDY_LOCAL_LLM_HOST=bare-IP rejected"
-else
-    fail "SANDY_LOCAL_LLM_HOST=bare-IP rejected"
-fi
-
+    _moved_to_host 1 "§1 feature guards moved to run-tests.sh §222"
 fi  # section 1
 # ============================================================
 section "2. Codex — image build and headless response"
@@ -1944,18 +1860,8 @@ if [ "$_SECTION_ON" = true ]; then
 # behavior in §2/§5/§7/§11. (set -euo pipefail is active → capture rc with
 # `&& rc=0 || rc=$?`.)
 
-# 15a. Read-only SANDY_HOME → clean "not writable" error, exits before any
-# container (fires at preflight; needs only a running daemon, which §0 confirmed).
-_ro_home="$(mktemp -d)"
-chmod 0555 "$_ro_home"
-_fm_out="$(SANDY_HOME="$_ro_home" timeout 90 "$SANDY_SCRIPT" -p "noop" 2>&1)" && _fm_rc=0 || _fm_rc=$?
-chmod 0755 "$_ro_home" 2>/dev/null || true; rm -rf "$_ro_home"
-if [ "${_fm_rc:-0}" -ne 0 ] && echo "$_fm_out" | grep -q "is not writable"; then
-    pass "read-only SANDY_HOME → clean error + non-zero exit"
-else
-    fail "read-only SANDY_HOME → clean error + non-zero exit"
-    echo "    (rc=$_fm_rc; tail: $(echo "$_fm_out" | tail -3 | tr '\n' ' '))" >&2
-fi
+# 15a. Read-only SANDY_HOME: moved to run-tests.sh §222(14) (host group).
+_moved_to_host 15 "§15a read-only SANDY_HOME moved to run-tests.sh §222(14)"
 
 # 15b. Corrupt ~/.claude/.credentials.json with no token → clean re-login error.
 # Override HOME to a throwaway dir holding a corrupt creds file; gate on a built

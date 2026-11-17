@@ -15,7 +15,7 @@ Steps 1–4 are implemented in the test scripts. Step 5 is applied in `.github/w
 | Group | Command | Dependencies and scope |
 | --- | --- | --- |
 | Harness | `bash test/run-tests.sh --only harness` | Python + Bash; false-pass, logging, and status regressions |
-| Contracts | `bash test/run-tests.sh --only contracts` | Python + Bash + Git; Node and jq for both settings branches |
+| Contracts | `bash test/run-tests.sh --only contracts` | Python + Bash + Git; Node and jq for both settings branches. Runs every host-run Python file (`CONTRACT_FILES` in `test/suite_runner.py`: production contracts, the Claude usage/statusline helpers, Claude and Codex activity), each in its own process, so the macOS job runs them too and a unittest skip makes the group partial |
 | Host | `bash test/run-tests.sh --host-only` | All three host groups; isolated HOME/TMPDIR, Docker/tmux blocked; ShellCheck and other optional tools reported when absent |
 | Container | `bash test/run-tests.sh --only container` | Docker host; production image freshness validation/build; local fixtures, no provider keys |
 | Proxy | `bash test/run-tests.sh --only proxy` | Go toolchain; race-enabled Go tests |

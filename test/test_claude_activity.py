@@ -3,7 +3,7 @@
 The helper is baked into Dockerfile.base by sandy's generate_dockerfile_base
 heredoc; this extracts it from the script (so it tests what ships) and feeds it
 hook payloads shaped like the ones Claude Code 2.1.310 sent in a measured TUI
-run. Run by run-tests.sh §210; also runnable on its own:
+run. Run by the contracts group (suite_runner.py); also runnable on its own:
 python3 test/test_claude_activity.py
 """
 import datetime
