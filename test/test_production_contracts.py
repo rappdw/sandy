@@ -491,6 +491,33 @@ class ProductionContracts(unittest.TestCase):
         self.assertTrue((self.ws / ".idea/.hidden").exists())
         self.assertFalse((self.ws / ".devcontainer").exists())
 
+    def test_cleanup_each_layer_alone_keeps_a_populated_directory(self):
+        # The empty check and rmdir are two layers: with the other one taken
+        # out of the extracted code, either must still keep a populated
+        # protected directory, and a populated parent of an emptied one.
+        code = self.cleanup_code()
+        gate, parent_gate = '[ -z "$(ls -A "$_p" 2>/dev/null)" ] || continue', ' && [ -z "$(ls -A "$_pp" 2>/dev/null)" ]'
+        # Each variant below removes a layer by its exact text. If a rewording
+        # leaves that text absent, the variant is the unchanged code and the
+        # test would pass while testing one layer twice, so say so instead.
+        for anchor in (gate, parent_gate, 'rmdir "$_p"', 'rmdir "$_pp"'):
+            self.assertIn(anchor, code, "the cleanup loop no longer contains this text; update the variants")
+        only_rmdir = code.replace(gate, ':').replace(parent_gate, '')
+        only_gate = code.replace('rmdir "$_p"', 'rm -rf "$_p"').replace('rmdir "$_pp"', 'rm -rf "$_pp"')
+        for name, variant in (("rmdir alone", only_rmdir), ("empty check alone", only_gate)):
+            with self.subTest(name):
+                for d in (".idea", ".github"):
+                    shutil.rmtree(self.ws / d, ignore_errors=True)
+                (self.ws / ".idea").mkdir()
+                (self.ws / ".idea/keep").write_text("keep")
+                (self.ws / ".github/workflows").mkdir(parents=True)
+                (self.ws / ".github/keep").write_text("keep")
+                run = self.run_source(variant)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertTrue((self.ws / ".idea/keep").exists(), name + " removed a populated directory")
+                self.assertTrue((self.ws / ".github/keep").exists(), name + " removed a populated parent")
+                self.assertFalse((self.ws / ".github/workflows").exists(), name + " kept an empty directory")
+
     def test_symlinks_use_the_production_resolver(self):
         names = ("_sandy_protected_files", "_sandy_protected_git_files", "_sandy_protected_dirs",
                  "_sandy_is_protected_rel", "_sandy_resolve_symlinks")

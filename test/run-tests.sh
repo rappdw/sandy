@@ -2111,17 +2111,15 @@ check "cleanup compares launch snapshot to detect new appearances" \
     -- "$SANDY_SCRIPT_PATH"
 # "cleanup() reads session-created-stubs and rmdirs entries": run, not grepped,
 # in §219.
-# "pre-existing cleanup uses rmdir (never rm -rf)": test_production_contracts.py
-# test_cleanup_non_git_empty_and_populated_directories, which fails when its
-# 'if rmdir "$_p"' mutation anchor is gone.
+# "pre-existing cleanup uses rmdir (never rm -rf)": run in
+# test_production_contracts.py test_cleanup_each_layer_alone_keeps_a_populated_directory
+# (rmdir alone, without the empty checks, must keep populated directories).
 # "pre-existing cleanup gated on untracked (git ls-files)": run in
 # test_production_contracts.py test_cleanup_git_preserves_tracked_and_hidden_content
 # (an empty directory still tracked in the index).
-# Kept as a grep: removing the emptiness gate alone changes nothing a fixture
-# can see while the removal is rmdir, which refuses a non-empty directory.
-check "pre-existing cleanup gated on emptiness (ls -A)" \
-    bash -c 'awk "/Pre-existing-debris auto-cleanup/,/_cleaned_debris\\[@\\]/" "$1" | grep -q "ls -A"' \
-    -- "$SANDY_SCRIPT_PATH"
+# "pre-existing cleanup gated on emptiness (ls -A)": run in
+# test_production_contracts.py test_cleanup_each_layer_alone_keeps_a_populated_directory,
+# which also covers rmdir on the parent path.
 
 # Cleanup fixtures execute the production loop in test_production_contracts.py.
 
@@ -11794,7 +11792,7 @@ else
     skip "§123(26-31) startup-window behaviour — no flock on this host, so the supervisor cannot run"
 fi
 rm -rf "$_S123_DIR"
-unset _S123_MARKER _S123_DIR _S123_A _S123_B _S123_D _S123_E _S123_PS _S123_PSH _S123_MOUNTBLK _S123_W1 _S123_W2 _S123_W3
+unset _S123_MARKER _S123_DIR _S123_A _S123_B _S123_D _S123_E _S123_PS _S123_PSH _S123_MOUNTBLK _S123_W1 _S123_W2
 
 # ============================================================
 section "§124: the handoff pair — classification, --print-state reporting, and --provision --all (#265)"
