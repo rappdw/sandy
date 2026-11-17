@@ -478,8 +478,15 @@ class ProductionContracts(unittest.TestCase):
         (self.ws / ".idea").mkdir()
         (self.ws / ".idea/.hidden").write_text("keep")
         (self.ws / ".devcontainer").mkdir()
+        # Tracked in the index, but its only file was deleted from the working
+        # tree: the directory is empty, so only the git ls-files gate keeps it.
+        (self.ws / ".circleci").mkdir()
+        (self.ws / ".circleci/config.yml").write_text("tracked")
+        subprocess.run(["git", "-C", str(self.ws), "add", ".circleci/config.yml"], check=True)
+        (self.ws / ".circleci/config.yml").unlink()
         run = self.run_source(self.cleanup_code())
         self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertTrue((self.ws / ".circleci").is_dir(), "an empty but git-tracked directory was removed")
         self.assertTrue((self.ws / ".vscode/tracked").exists())
         self.assertTrue((self.ws / ".idea/.hidden").exists())
         self.assertFalse((self.ws / ".devcontainer").exists())
