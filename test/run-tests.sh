@@ -508,11 +508,8 @@ info "23. Container hardening flags"
 # "cap-drop ALL is configured": run, not grepped, on the agent's recorded
 # docker run in §225 (and on the proxy's in §207(4)).
 
-# Static analysis: verify GPU passthrough support.
-# "SANDY_GPU config variable supported": covered by the --gpus check below
-# (mutation C07: the GPU block deleted).
-check "GPU passthrough uses --gpus flag" \
-    grep -q '\-\-gpus' "$SCRIPT"
+# "SANDY_GPU config variable supported" and "GPU passthrough uses --gpus
+# flag": run, not grepped, in §225(3)-(5) (mutation C07: the GPU block deleted).
 
 # "CLAUDE_CODE_OAUTH_TOKEN blocked": run, not grepped, in §215(1)-(4).
 
@@ -24862,6 +24859,13 @@ section "§207: #461 — the egress proxy can read its config under any umask, a
 # Shared with §225 (the agent's run), which unsets it.
 _hardening_unmet() {
     [ -s "$1" ] || { echo "no docker run argv recorded"; return 0; }
+    # Split --flag=value into two elements first: Docker accepts both spellings,
+    # and a later --pids-limit=-1 or --security-opt=seccomp=unconfined must not
+    # hide behind the space form the checks below read. A bool flag's explicit
+    # value is kept whole so --read-only=false is not read as --read-only.
+    awk '/^--(read-only|privileged)=/ { print; next }
+         match($0, /^--[a-z-]+=/) { print substr($0, 1, RLENGTH - 1); print substr($0, RLENGTH + 1); next }
+         { print }' "$1" |
     awk -v pids="$2" -v mem="$3" -v allowed=" $4 " '
         p == "--cap-drop" && $0 == "ALL" { cd = 1 }
         p == "--security-opt" && $0 == "no-new-privileges:true" { nnp = 1 }
@@ -24870,19 +24874,20 @@ _hardening_unmet() {
         p == "--memory" { m = $0 }
         p == "--cap-add" && !index(allowed, " " $0 " ") { bad = bad " --cap-add " $0 }
         index($0, "--cap-add=") == 1 || index($0, "--privileged") == 1 { bad = bad " " $0 }
-        (p == "--pid" || p == "--ipc" || p == "--uts" || p == "--userns" || p == "--network") && $0 == "host" { bad = bad " " p " host" }
+        (p == "--pid" || p == "--ipc" || p == "--uts" || p == "--userns" || p == "--network" || p == "--net" || p == "--cgroupns") && $0 == "host" { bad = bad " " p " host" }
         $0 ~ /^--(pid|ipc|uts|userns|network|net)=host$/ { bad = bad " " $0 }
-        $0 == "--read-only" { ro = 1 }
+        $0 == "--read-only" || $0 == "--read-only=true" { ro = 1 }
+        index($0, "--read-only=") == 1 && $0 != "--read-only=true" { ro = 0 }
         { p = $0 }
         END {
             if (!ro) printf " no --read-only"
             if (!cd) printf " no --cap-drop ALL"
             if (!nnp) printf " no --security-opt no-new-privileges:true"
             if (pl != pids) printf " --pids-limit is [%s], want %s", pl, pids
-            if (mem == "-" && m == "") printf " no --memory value"
+            if (mem == "-" && m !~ /^[1-9][0-9]*[bkmg]?$/) printf " --memory is [%s], want a non-zero cap", m
             if (mem != "-" && m != mem) printf " --memory is [%s], want %s", m, mem
             if (bad != "") printf " loosened by:%s", bad
-        }' "$1"
+        }'
 }
 _S207_FN="$(sed -n '/^_sandy_launch_dir()/p' "$SANDY_SCRIPT")
 $(sed -n '/^start_proxy_sidecar() {/,/^}$/p' "$SANDY_SCRIPT")"
@@ -24894,7 +24899,7 @@ case "$1 $2" in
     "network connect") [ -n "${S207_ATTACH_FAIL:-}" ] && { echo "Error response from daemon: network sandbox for container x not found" >&2; exit 1; } ; exit 0 ;;
 esac
 case "$1" in
-    run) printf '%s\n' "$@" > "$S207_ARGV" ;;
+    run) if [ -e "$S207_ARGV" ]; then : > "$S207_ARGV.extra"; else printf '%s\n' "$@" > "$S207_ARGV"; fi ;;
     inspect)
         case "$*" in
             *Health*) echo healthy ;;
@@ -24935,12 +24940,13 @@ check "§207(2) a failed sidecar attach exits non-zero, naming the attach and th
     bash -c 'case "$1" in 0\|*) exit 1 ;; esac; case "$1" in *"Could not attach the egress proxy"*"exited (exit 2"*) exit 0 ;; esac; exit 1' _ "$_S207_FAIL"
 check "§207(3) ...and prints the proxy logs before cleanup can erase them" \
     bash -c 'case "$1" in *S207-PROXY-LOG*) exit 0 ;; esac; exit 1' _ "$_S207_FAIL"
-# The recorded run must be the proxy's own (its image is the last argument),
-# so a probe that recorded nothing, or some other run, cannot pass vacuously.
+# The recorded run must be the proxy's own (its name, and its image as the
+# last argument) and the only one start_proxy_sidecar made, so a probe that
+# recorded nothing, or some other run, cannot pass vacuously.
 _S207_ARGS="$_S207_D/sb-ok/proxy.args"
 _S207_WHY="$(_hardening_unmet "$_S207_ARGS" 128 256m '')"
 check "§207(4) the proxy's docker run is hardened: --read-only, --cap-drop ALL and no --cap-add, no-new-privileges, --pids-limit 128, --memory 256m (unmet:${_S207_WHY:- none})" \
-    bash -c 'test -z "$1" && test "$(tail -n 1 "$2")" = sandy-proxy' _ "$_S207_WHY" "$_S207_ARGS"
+    bash -c 'test -z "$1" && test "$(tail -n 1 "$2")" = sandy-proxy && test ! -e "$2.extra" && awk "p==\"--name\" && \$0==\"sandy-proxy-s207\" {ok=1} {p=\$0} END {exit ok?0:1}" "$2"' _ "$_S207_WHY" "$_S207_ARGS"
 rm -rf "$_S207_D"
 unset _S207_FN _S207_D _S207_OK _S207_FAIL _S207_ARGS _S207_WHY
 unset -f _s207
@@ -25583,6 +25589,7 @@ section "§215: credentials reach the agent container the way sandy says: CLAUDE
 #             with --name) it plays Docker's bind-mount auto-creation: each
 #             workspace-relative path in A6_MOUNTPOINTS that the run mounts over
 #             is created in the workspace, and A6_AGENT_WRITES gets a file.
+#             A bare `docker info` prints A6_DOCKER_INFO (nothing by default).
 #   curl      fails, except the two build-dependency probes when A6_NET=1, so a
 #             missing image builds instead of being deferred.
 #   gh        prints nothing and fails: no host token, no network round trip.
@@ -25601,6 +25608,7 @@ case "$*" in
     "network inspect "*Subnet*) echo 172.30.0.0/16 ;;
     "network inspect "*Gateway*) echo 172.30.0.1 ;;
     "network inspect "*bridge.name*) echo br-sdy-a6 ;;
+    info) [ -z "${A6_DOCKER_INFO:-}" ] || printf '%s\n' "$A6_DOCKER_INFO" ;;
 esac
 if [ "${1:-}" = run ]; then
     _n=0
@@ -25675,7 +25683,7 @@ _a6_agent_args() {   # $1 = CASE -> path, or nothing
     local f
     for f in "$_A6_DIR/$1"/runs/*.args; do
         [ -f "$f" ] || continue
-        awk 'p=="--name" && index($0,"sandy-ws-")==1 {ok=1} {p=$0} END {exit ok?0:1}' "$f" && printf '%s\n' "$f"
+        if awk 'p=="--name" && index($0,"sandy-ws-")==1 {ok=1} {p=$0} END {exit ok?0:1}' "$f"; then printf '%s\n' "$f"; fi
     done | tail -n 1
 }
 # One argv element equal to $2 directly followed by one equal to $3.
@@ -25945,12 +25953,57 @@ section "§225: the agent's docker run is hardened the way SPECIFICATION.md §18
 # This drives a real foreground launch (the §215 harness) and asserts on the
 # argv the agent's `docker run` received. The proxy's own run is §207(4); this
 # launch is egress-off, so no proxy run is recorded here to blur the two.
-_a6_launch hardening SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
-_A6_A="$(_a6_agent_args hardening)"
-[ "$_A6_RC" = 0 ] && [ -n "$_A6_A" ] || _a6_diag "§225" hardening
-_A6_WHY="$(_hardening_unmet "$_A6_A" 512 - 'SETUID SETGID CHOWN DAC_OVERRIDE FOWNER KILL')"
-check "§225(1) the agent's docker run: --read-only, --cap-drop ALL adding back only SETUID SETGID CHOWN DAC_OVERRIDE FOWNER KILL, no-new-privileges, --pids-limit 512, a --memory cap, --init (rc ${_A6_RC:-none}; unmet:${_A6_WHY:- none})" \
-    bash -c 'test "$1" = 0 && test -n "$2" && test -z "$3" && grep -qx -- "--init" "$2" && grep -qx -- "--cpus" "$2"' _ "$_A6_RC" "$_A6_A" "$_A6_WHY"
+# Both foreground modes: headless (-p) and interactive take different
+# RUN_FLAGS=( resets, so a flag appended inside one branch reaches only that
+# mode. CPUS/MEM are pinned so the value, not only the flag, is asserted.
+for _A6_MODE in headless interactive; do
+    # The reset's own stdin flag proves which branch the launch took: headless
+    # on a redirected stdin is -i, interactive is -it.
+    _A6_ARGS=(); _A6_TTY=-it
+    if [ "$_A6_MODE" = headless ]; then _A6_ARGS=(-p fixture); _A6_TTY=-i; fi
+    _a6_launch "hardening-$_A6_MODE" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_CPUS=3 SANDY_MEM=5g -- ${_A6_ARGS[@]+"${_A6_ARGS[@]}"}
+    _A6_A="$(_a6_agent_args "hardening-$_A6_MODE")"
+    [ "$_A6_RC" = 0 ] && [ -n "$_A6_A" ] || _a6_diag "§225 $_A6_MODE" "hardening-$_A6_MODE"
+    _A6_WHY="$(_hardening_unmet "$_A6_A" 512 5g 'SETUID SETGID CHOWN DAC_OVERRIDE FOWNER KILL')"
+    check "§225(1) $_A6_MODE: the agent's docker run: --read-only, --cap-drop ALL adding back only SETUID SETGID CHOWN DAC_OVERRIDE FOWNER KILL, no-new-privileges, --pids-limit 512, --memory 5g, --cpus 3, --init (rc ${_A6_RC:-none}; unmet:${_A6_WHY:- none})" \
+        bash -c 'test "$1" = 0 && test -n "$2" && test -z "$3" && grep -qx -- "$4" "$2" && grep -qx -- "--init" "$2" && awk "p==\"--cpus\" && \$0==\"3\" {ok=1} {p=\$0} END {exit ok?0:1}" "$2"' _ "$_A6_RC" "$_A6_A" "$_A6_WHY" "$_A6_TTY"
+done
+# The daemon supervisor takes the third reset and cannot be launched here; the
+# flags reach it only as unconditional column-0 appends after the last reset.
+_A6_LASTSET="$(grep -nE '^[[:space:]]*RUN_FLAGS=\(' "$_A6_SCRIPT" | tail -1 | cut -d: -f1 || true)"
+_A6_MISS=""
+for _A6_F in 'RUN_FLAGS+=(--security-opt no-new-privileges:true)' 'RUN_FLAGS+=(--cap-drop ALL)' 'RUN_FLAGS+=(--pids-limit 512)' 'RUN_FLAGS+=(--init)' 'RUN_FLAGS+=(--read-only)'; do
+    _A6_L="$(grep -m1 -nxF -- "$_A6_F" "$_A6_SCRIPT" | cut -d: -f1 || true)"
+    [ -n "$_A6_L" ] && [ -n "$_A6_LASTSET" ] && [ "$_A6_L" -gt "$_A6_LASTSET" ] || _A6_MISS="$_A6_MISS [$_A6_F]"
+done
+check "§225(2) every hardening flag is an unconditional column-0 append after the last per-mode RUN_FLAGS=( reset, so the daemon run gets it too (missing or misplaced:${_A6_MISS:- none})" \
+    test -z "$_A6_MISS"
+unset _A6_ARGS _A6_MODE _A6_LASTSET _A6_MISS _A6_F _A6_L _A6_TTY
+
+# GPU passthrough (SPECIFICATION.md §7): with the NVIDIA runtime present the
+# agent gets --gpus, `all` as-is and device IDs as a quoted device list; without
+# it the launch warns and passes no --gpus. Replaces §23's presence grep.
+_A6_NV=" Runtimes: io.containerd.runc.v2 nvidia runc"
+# $1 = CASE  $2 = the value --gpus must carry, or "" for no --gpus at all and
+# the launch's warning that it skipped GPU passthrough.
+_a6_gpus() {
+    local a
+    a="$(_a6_agent_args "$1")"
+    [ "$_A6_RC" = 0 ] && [ -n "$a" ] || return 1
+    if [ -n "$2" ]; then _a6_pair "$a" --gpus "$2"; return; fi
+    ! grep -qx -- --gpus "$a" && grep -qF "NVIDIA Container Toolkit not detected" "$_A6_DIR/$1/out"
+}
+_a6_launch gpu-all SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_GPU=all A6_DOCKER_INFO="$_A6_NV"
+check "§225(3) SANDY_GPU=all with the NVIDIA runtime: the agent's docker run carries --gpus all (rc ${_A6_RC:-none})" \
+    _a6_gpus gpu-all all
+_a6_launch gpu-dev SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_GPU=0,1 A6_DOCKER_INFO="$_A6_NV"
+check "§225(4) SANDY_GPU=0,1: the agent's docker run carries the device list (rc ${_A6_RC:-none})" \
+    _a6_gpus gpu-dev '"device=0,1"'
+_a6_launch gpu-none SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_GPU=all
+check "§225(5) control: SANDY_GPU=all without the NVIDIA runtime warns and passes no --gpus (rc ${_A6_RC:-none})" \
+    _a6_gpus gpu-none ""
+unset _A6_NV
+unset -f _a6_gpus
 unset _A6_A _A6_WHY
 unset -f _hardening_unmet
 
