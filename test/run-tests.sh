@@ -1102,8 +1102,9 @@ fi
 # Feature guards ("SANDY_SKILL_PACKS guard rejects non-claude agents", "--remote
 # guard error says claude-only", "--remote guard condition rejects non-claude
 # and multi-agent", "discord channel guard rejects non-claude agents"): run, not
-# grepped, in §222(1)-(8) (mutations C20, C21, C21b, C22, C22b, and each guard's
-# exit 1 or multi-agent half deleted).
+# grepped, in §222(1)-(8b): each guard is launched with several non-claude
+# agents, and the --remote and discord guards also with claude,gemini
+# (mutations C20, C20b, C20i, C21, C21b, C21c, C22, C22b, C22c).
 
 # ============================================================
 info "28e. Codex infrastructure — mounts, env, credentials, cleanup"
@@ -11296,7 +11297,7 @@ _s121_run() {
         set -u
         RUN_FLAGS=()
         _sandy_add_secret_env() { :; }
-        CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-128000}"
+        unset CLAUDE_CODE_MAX_OUTPUT_TOKENS   # the 128000 default must come from sandy, not here
         eval "$S121_BLK"
         for _f in "${RUN_FLAGS[@]+"${RUN_FLAGS[@]}"}"; do printf "%s\n" "$_f"; done
     ' 2>/dev/null
@@ -26315,6 +26316,12 @@ check "§222(1) SANDY_SKILL_PACKS + codex stops before any Docker work (integrat
 _s222_launch packs-opencode SANDY_AGENT=opencode SANDY_SKILL_PACKS=gstack bash "$SANDY_SCRIPT" -p test
 check "§222(2) SANDY_SKILL_PACKS + opencode stops before any Docker work" \
     _s222_stopped packs-opencode "$_S222_MSG_PACKS"
+# Every other non-claude agent and a non-claude combo (mutation C20i: the guard
+# narrowed to codex and opencode).
+for _S222_A in gemini grok mirror codex,gemini; do
+    _s222_launch "packs-$_S222_A" SANDY_AGENT="$_S222_A" SANDY_SKILL_PACKS=gstack bash "$SANDY_SCRIPT" -p test
+    check "§222(2b) SANDY_SKILL_PACKS + $_S222_A stops before any Docker work" _s222_stopped "packs-$_S222_A" "$_S222_MSG_PACKS"
+done
 for _S222_A in codex gemini opencode claude,gemini; do
     _s222_launch "remote-$_S222_A" SANDY_AGENT="$_S222_A" bash "$SANDY_SCRIPT" --remote
 done
@@ -26333,6 +26340,9 @@ check "§222(7) SANDY_CHANNELS=discord + codex stops before any Docker work (mut
     _s222_stopped discord-codex "$_S222_MSG_DISCORD"
 check "§222(8) SANDY_CHANNELS=discord + opencode stops before any Docker work" \
     _s222_stopped discord-opencode "$_S222_MSG_DISCORD"
+_s222_launch discord-claude,gemini SANDY_AGENT=claude,gemini SANDY_CHANNELS=discord bash "$SANDY_SCRIPT" -p test
+check "§222(8b) SANDY_CHANNELS=discord + claude,gemini (multi-agent) stops before any Docker work (mutation: the guard's multi-agent half deleted)" \
+    _s222_stopped discord-claude,gemini "$_S222_MSG_DISCORD"
 _s222_launch both SANDY_AGENT=both bash "$SANDY_SCRIPT" -p test
 check "§222(9) the removed SANDY_AGENT=both alias errors with the migration hint, not a silent claude,gemini" \
     _s222_stopped both "SANDY_AGENT=both is no longer supported"
