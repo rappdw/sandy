@@ -502,17 +502,16 @@ check "cmux setup skipped when host hooks dir exists" \
 info "23. Container hardening flags"
 # ============================================================
 
-# Static analysis: verify pids-limit is set
-check "pids-limit is configured" \
-    grep -q 'pids-limit' "$SCRIPT"
+# "pids-limit is configured": the agent's --pids-limit 512 is asserted by
+# §175(6) (mutation C06).
 
 # Static analysis: verify cap-drop ALL is set
 check "cap-drop ALL is configured" \
     grep -q 'cap-drop ALL' "$SCRIPT"
 
-# Static analysis: verify GPU passthrough support
-check "SANDY_GPU config variable supported" \
-    grep -q 'SANDY_GPU' "$SCRIPT"
+# Static analysis: verify GPU passthrough support.
+# "SANDY_GPU config variable supported": covered by the --gpus check below
+# (mutation C07: the GPU block deleted).
 check "GPU passthrough uses --gpus flag" \
     grep -q '\-\-gpus' "$SCRIPT"
 
@@ -522,9 +521,8 @@ check "GPU passthrough uses --gpus flag" \
 info "24. CLAUDE_CODE_MAX_OUTPUT_TOKENS passed to container"
 # ============================================================
 
-# Static analysis: verify the env var is passed via docker -e
-check "MAX_OUTPUT_TOKENS in docker -e flags" \
-    grep -q 'CLAUDE_CODE_MAX_OUTPUT_TOKENS=.*128000' "$SCRIPT"
+# "MAX_OUTPUT_TOKENS in docker -e flags": run, not grepped, in §121(pre),
+# §121(1) and §121(3) (mutation C10).
 
 # ============================================================
 info "25. Skill pack infrastructure"
@@ -545,8 +543,7 @@ check "skill_pack_latest_release function defined" \
     grep -q 'skill_pack_latest_release()' "$SCRIPT"
 check "skill_pack_resolve_versions function defined" \
     grep -q 'skill_pack_resolve_versions()' "$SCRIPT"
-check "gstack registered as skill pack" \
-    grep -q 'gstack' "$SCRIPT"
+# "gstack registered as skill pack": run, not grepped, in §164(10) (mutation C13).
 check "gstack repo points to upstream garrytan" \
     grep -q 'garrytan/gstack' "$SCRIPT"
 
@@ -1102,28 +1099,11 @@ TOML
     rm -rf "$_TRUST_TMP"
 fi
 
-# Feature guards: the SANDY_SKILL_PACKS guard must reject non-claude agents.
-# Structure: `if ! _sandy_agent_has claude && [ -n "${SANDY_SKILL_PACKS:-}" ]; then ERROR ...`
-check "SANDY_SKILL_PACKS guard rejects non-claude agents" \
-    grep -q '! _sandy_agent_has claude.*SANDY_SKILL_PACKS' "$SANDY_SCRIPT"
-
-# The --remote and SANDY_CHANNELS=discord guards should also catch codex.
-# These use different structures, so match by pattern in the error text.
-if grep -qE '\-\-remote is only supported with SANDY_AGENT=claude' "$SANDY_SCRIPT"; then
-    pass "--remote guard error says claude-only"
-else
-    fail "--remote guard error says claude-only"
-fi
-
-# The --remote guard condition must reject ANY non-claude agent (including codex).
-# Uses `! _sandy_agent_has claude || [ "$_SANDY_IS_MULTI" = true ]`.
-check "--remote guard condition rejects non-claude and multi-agent" \
-    grep -q '! _sandy_agent_has claude.*_SANDY_IS_MULTI.*true' "$SANDY_SCRIPT"
-
-# Discord guard must reject non-claude agents (covers codex, gemini).
-# The guard uses `$SANDY_AGENT != "claude"` with a case match on *,discord,*.
-check "discord channel guard rejects non-claude agents" \
-    grep -q 'SANDY_CHANNELS=discord is only supported with SANDY_AGENT=claude' "$SANDY_SCRIPT"
+# Feature guards ("SANDY_SKILL_PACKS guard rejects non-claude agents", "--remote
+# guard error says claude-only", "--remote guard condition rejects non-claude
+# and multi-agent", "discord channel guard rejects non-claude agents"): run, not
+# grepped, in §222(1)-(8) (mutations C20, C21, C21b, C22, C22b, and each guard's
+# exit 1 or multi-agent half deleted).
 
 # ============================================================
 info "28e. Codex infrastructure — mounts, env, credentials, cleanup"
@@ -1142,10 +1122,8 @@ check "codex sandbox mounted at /home/sandy/.codex" \
 check "codex auth.json mount is read-only (:ro) on the api_key path" \
     grep -q 'auth.json:/home/sandy/.codex/auth.json:ro' "$SANDY_SCRIPT"
 
-# Env passthrough: OPENAI_API_KEY forwarded to container (codex reads this),
-# via the secret env-file helper (#13) rather than argv -e.
-check "OPENAI_API_KEY forwarded via secret env-file" \
-    grep -q '_sandy_add_secret_env OPENAI_API_KEY' "$SANDY_SCRIPT"
+# "OPENAI_API_KEY forwarded via secret env-file" (#13): run, not grepped, in
+# §194(3) (mutation C26).
 # "OPENAI_API_KEY no longer forwarded via -e argv" (#13): run, not grepped, in
 # §215(6), against every spelling.
 
@@ -2042,7 +2020,10 @@ check "no :ro overlay on settings.json" \
     bash -c '! grep -q "settings\.json:ro" "$1"' -- "$SANDY_SCRIPT_PATH"
 
 # Seed block must preserve enabledPlugins from previous sandbox settings
-# so /plugin install survives across launches.
+# so /plugin install survives across launches. Kept beside
+# test_real_settings_seed_preserves_plugins_and_manages_skip_keys_on_both_parsers:
+# that test skips its node branch where node is not installed, and only
+# --require-tools (CI) makes node mandatory.
 check "seed preserves enabledPlugins across launches" \
     grep -q 'if (prev.enabledPlugins) s.enabledPlugins = prev.enabledPlugins' "$SANDY_SCRIPT_PATH"
 
@@ -2062,8 +2043,8 @@ info "43. Sprint 2 — Persistent symlink approval (S2.2)"
 
 SANDY_SCRIPT_PATH="$(cd "$(dirname "$0")/.." && pwd)/sandy"
 
-check "persisted symlink approval list path declared" \
-    grep -q '\.sandy-approved-symlinks\.list' "$SANDY_SCRIPT_PATH"
+# "persisted symlink approval list path declared": run, not grepped, in
+# test_symlinks_use_the_production_resolver and §214 (mutation C40).
 check "symlink approval uses comm -23 for new-entry detection" \
     grep -q 'comm -23.*_current_tmp.*_approved_tmp' "$SANDY_SCRIPT_PATH"
 # "new symlink hard-errors with specific message": run, not grepped, in §214.
@@ -2515,10 +2496,9 @@ check "validation rejects shell metas in SANDY_SCREENSHOT_DIR" \
     bash -c 'echo "$2" | grep -q "shell metacharacters"' -- "$_SS_VAL_RC" "$_SS_VAL_OUT"
 check "shell-meta rejection exits non-zero" test "$_SS_VAL_RC" -ne 0
 
-# $HOME: hard-error (too broad).
-_SS_VAL_OUT2="$(trap - ERR; SANDY_SCREENSHOT_DIR="$HOME" bash -c "$_SS_VAL_BLOCK" 2>&1)" && _SS_VAL_RC2=0 || _SS_VAL_RC2=$?
-check "validation rejects \$HOME as SANDY_SCREENSHOT_DIR" \
-    bash -c 'echo "$1" | grep -q "too broad"' -- "$_SS_VAL_OUT2"
+# "validation rejects $HOME as SANDY_SCREENSHOT_DIR": run in
+# test_screenshot_directory_rejects_home_through_symlink_aliases ($HOME, a
+# symlink alias of it, and /; mutation X3).
 
 # Missing dir: warn-and-skip (does not hard-error; leaves env unset).
 # The validation sets SANDY_SCREENSHOT_DIR="" on missing dir, so the
@@ -3360,10 +3340,9 @@ check "multi-agent combo selects the sandy-full image" \
     bash -c 'awk "/\\\$_SANDY_IS_MULTI\" = true/{f=1} f&&/IMAGE_NAME=\"sandy-full\"/{print;exit}" "$1" | grep -q sandy-full' -- "$SANDY_SCRIPT"
 
 # (b) Headless multi-agent routes to the FIRST agent only (no tmux panes in -p).
-check "headless multi-agent routes to first agent (comment present)" \
-    grep -q 'Headless mode with multi-agent: route to first agent only' "$SANDY_SCRIPT"
-check "headless multi-agent builds the cmd for _SANDY_AGENTS[0]" \
-    bash -c 'awk "/route to first agent only/{f=1} f&&/_first=\"\\\$\{_SANDY_AGENTS\[0\]\}\"/{print;exit}" "$1" | grep -q _SANDY_AGENTS' -- "$SANDY_SCRIPT"
+# "headless multi-agent routes to first agent" and "...builds the cmd for
+# _SANDY_AGENTS[0]": run, not grepped, in
+# test_multi_agent_headless_dispatches_to_first_agent (mutation X1).
 
 # (c) Interactive multi-agent builds a distinct per-pane command (cmd0 + split).
 check "interactive multi-agent builds per-pane commands (_cmd0, split-window)" \
@@ -20101,7 +20080,7 @@ _S175_L_INIT="$(grep -m1 -n '^RUN_FLAGS+=(--init)$' "$_S175_SANDY" | cut -d: -f1
 _S175_L_LASTSET="$(grep -nE '^[[:space:]]*RUN_FLAGS=\(' "$_S175_SANDY" | tail -1 | cut -d: -f1 || true)"
 _S175_L_PIDS="$(grep -m1 -n '^RUN_FLAGS+=(--pids-limit 512)$' "$_S175_SANDY" | cut -d: -f1 || true)"
 check "§175(6) --init is an unconditional column-0 RUN_FLAGS append after every per-mode RUN_FLAGS=(...) reset, beside --pids-limit (init=${_S175_L_INIT:-?} last-reset=${_S175_L_LASTSET:-?} pids=${_S175_L_PIDS:-?})" \
-    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$1" -gt "$2" ] && [ "$1" -gt "$3" ] && [ $(( $1 - $3 )) -lt 20 ]' _ "$_S175_L_INIT" "$_S175_L_LASTSET" "$_S175_L_PIDS"
+    bash -c '[ -n "$1" ] && [ -n "$2" ] && [ -n "$3" ] && [ "$1" -gt "$2" ] && [ "$1" -gt "$3" ] && [ $(( $1 - $3 )) -lt 20 ]' _ "$_S175_L_INIT" "$_S175_L_LASTSET" "$_S175_L_PIDS"
 unset _S175_MISS _s175_t
 
 # ============================================================
