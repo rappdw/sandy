@@ -24671,11 +24671,13 @@ _s205_r="$(_s205f "$(_s205 "hostact:tokA,pusher:tokB" https://github.com/someorg
 _s205_dt=$((SECONDS - _s205_t0))
 check "§205(10b) a push check that hangs is abandoned, and with nobody able to push the host's active account is used (took ${_s205_dt}s, got: $_s205_r)" \
     bash -c '[ "$1" = "hostact|host active account|calls=2" ] && [ "$2" -le 7 ]' _ "$_s205_r" "$_s205_dt"
-# The container side applies the host's choice and decides nothing.
-_S205_CT="$(awk '/^    # Make the account the HOST chose active/{p=1} p{print} p&&/^    fi$/{exit}' "$SANDY_SCRIPT")"
-_s205_ct() { : > "$_S205_D/log"; env -i PATH="$_S205_D/bin:$PATH" STUB_LOG="$_S205_D/log" SANDY_GH_ACTIVE="$1" bash -c 'set -euo pipefail; sandy_log() { :; }; IFS="," read -ra _gh_pairs <<< "a:t1,b:t2"; eval "$1"' _ "$_S205_CT" 2>"$_S205_D/err"; cat "$_S205_D/log"; }
-check "§205(11) the container switches gh to the host's choice, and to nothing when the choice was not forwarded (it says so)" \
-    bash -c '[ "$1" = "auth switch --user b|tok=" ] && [ -z "$2" ] && grep -q "was chosen but not forwarded" "$3" && ! grep -q "_sandy_gh_pick_account\|gh api" <<< "$4"' _ \
+# The container side applies the host's choice and decides nothing. It decides
+# synchronously (the warning reaches the console) and the background job does
+# the switch after the logins; §224(3)/(8) run that job end to end.
+_S205_CT="$(awk '/^# Make the account the HOST chose active/{p=1} p{print} p&&/^fi$/{exit}' "$SANDY_SCRIPT")"
+_s205_ct() { : > "$_S205_D/log"; env -i PATH="$_S205_D/bin:$PATH" STUB_LOG="$_S205_D/log" SANDY_GH_ACTIVE="$1" bash -c 'set -euo pipefail; sandy_log() { :; }; IFS="," read -ra _sandy_gh_pairs <<< "a:t1,b:t2"; _sandy_gh_switch=""; eval "$1"; printf "switch=%s" "$_sandy_gh_switch"' _ "$_S205_CT" 2>"$_S205_D/err"; cat "$_S205_D/log"; }
+check "§205(11) the container picks the host's choice to switch gh to, and nothing when the choice was not forwarded (it says so), without asking GitHub" \
+    bash -c '[ "$1" = "switch=b" ] && [ "$2" = "switch=" ] && grep -q "was chosen but not forwarded" "$3" && grep -q "_sandy_gh_switch=" <<< "$4" && ! grep -q "_sandy_gh_pick_account\|gh api" <<< "$4"' _ \
     "$(_s205_ct b)" "$(_s205_ct zz)" "$_S205_D/err" "$_S205_CT"
 check "§205(12) the host decides BEFORE it writes the marker, records github{} there, and passes SANDY_GH_ACTIVE (not SANDY_GH_ACCOUNT) to the container" \
     bash -c 'p=$(grep -n "^    if _sandy_gh_pick=\"\$(_sandy_gh_pick_account \"\$GH_ACCOUNTS\"" "$1" | cut -d: -f1); m=$(grep -n "^_sandy_launched_at=" "$1" | cut -d: -f1); [ -n "$p" ] && [ "$p" -lt "$m" ] && grep -q "\"credentials\": {%s},\\\\n  \"github\": {%s}," "$1" && grep -q "RUN_FLAGS+=(-e \"SANDY_GH_ACTIVE=\$_SANDY_GH_ACTIVE\")" "$1" && ! grep -q "RUN_FLAGS+=(-e \"SANDY_GH_ACCOUNT=" "$1"' _ "$SANDY_SCRIPT"
@@ -26383,6 +26385,203 @@ fi
 rm -rf "$_S222_D"
 unset _S222_D _S222_A _S222_MSG_REMOTE _S222_MSG_DISCORD _S222_MSG_PACKS
 unset -f _s222_launch _s222_stopped
+
+# ============================================================
+section "§224: user-setup logs gh in off the critical path; the native-addon and LFS probes are bounded (optimization pass F6, F7)"
+# ============================================================
+# Runs the generated user-setup's own code, extracted from the heredoc, with a
+# stub gh (slow logins) and a logging wrapper around the real git, against a
+# fixture HOME. Asserts what the agent sees: the launch does not wait for the
+# logins, git's credential helpers are complete before it returns, the job
+# logs in every account then switches, and no token is ever an argument.
+_S224_D="$(cd "$(mktemp -d)" && pwd -P)"
+_S224_GIT="$(command -v git || true)"
+_S224_GH="$(awk '/^sandy_log "Configuring git auth"$/{p=1} /^sandy_log "Refreshing plugin marketplaces"$/{exit} p' "$SANDY_SCRIPT")"
+_S224_NATIVE="$(awk '/^# Warn if node_modules contains native addons/{p=1} p{print} p&&/^fi$/{exit}' "$SANDY_SCRIPT")"
+_S224_LFS="$(awk '/^# Set up git-lfs filters/{p=1} p{print} p&&/^fi$/{exit}' "$SANDY_SCRIPT")"
+mkdir -p "$_S224_D/bin"
+cat > "$_S224_D/bin/gh" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$STUB_DIR/gh.argv"
+echo STUB-CHATTER; echo STUB-CHATTER >&2
+case "$1 $2" in
+    "auth login")
+        tok="$(cat)"
+        sleep "${STUB_LOGIN_SLEEP:-0}"
+        printf 'login %s\n' "$tok" >> "$STUB_DIR/events" ;;
+    "auth switch") printf 'switch %s\n' "$4" >> "$STUB_DIR/events" ;;
+    "auth setup-git")
+        # Like gh: --force needs a new enough gh; without --hostname it needs a login.
+        if [ "${3:-}" = --hostname ]; then
+            [ "${STUB_NOFORCE:-0}" = 1 ] && exit 1
+        else
+            grep -q '^login ' "$STUB_DIR/events" 2>/dev/null || exit 1
+        fi
+        git config --global --replace-all credential.https://github.com.helper ''
+        git config --global --add credential.https://github.com.helper "!$0 auth git-credential"
+        printf 'setup-git %s\n' "$*" >> "$STUB_DIR/events" ;;
+esac
+exit 0
+STUB
+cat > "$_S224_D/bin/git" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >> "\$STUB_DIR/git.argv"
+exec "$_S224_GIT" "\$@"
+STUB
+# file(1) wrapper: records what the native-addon check asked about.
+cat > "$_S224_D/bin/file" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$1" >> "$STUB_DIR/file.argv"
+case "$(head -c 4 "$1" 2>/dev/null)" in "$(printf '\177ELF')") echo "$1: ELF 64-bit LSB shared object" ;; *) echo "$1: data" ;; esac
+STUB
+chmod +x "$_S224_D/bin/gh" "$_S224_D/bin/git" "$_S224_D/bin/file"
+# The container side is Linux, where timeout(1) exists; macOS has none, so
+# give the probe a stand-in with the same contract (alarm survives exec).
+if ! command -v timeout >/dev/null 2>&1; then
+    printf '#!/bin/sh\nexec perl -e %s "$@"\n' "'\$t=shift; alarm \$t; exec @ARGV or exit 127'" > "$_S224_D/bin/timeout"
+    chmod +x "$_S224_D/bin/timeout"
+fi
+_S224_BASE='!f() { echo username=x-access-token; echo "password=${GIT_TOKEN}"; }; f'
+# _s224_run NAME CODE [NAME=VALUE...]: a fresh HOME and logs, run CODE the way
+# user-setup does (set -e + an ERR trap), then `wait`. Stdout, stderr and an
+# extra fd 7 all go to the pipe that `$( )` reads to EOF, so the call returns
+# only when nothing the code started still holds them, and `wait` returns
+# only when it left no child of its own. Seconds taken go to NAME.secs.
+_s224_run() {
+    local _n="$1" _code="$2" _t0; shift 2
+    rm -rf "$_S224_D/home" "$_S224_D/events" "$_S224_D/gh.argv" "$_S224_D/git.argv" "$_S224_D/file.argv"
+    mkdir -p "$_S224_D/home"
+    _t0=$(date +%s)
+    { env -i PATH="$_S224_D/bin:$PATH" HOME="$_S224_D/home" STUB_DIR="$_S224_D" "$@" \
+        bash -c 'set -e; trap "echo \"ERR at \$LINENO: \$BASH_COMMAND\" >&2" ERR; sandy_log() { :; }; eval "$1"; wait' _ "$_code" \
+        2>&1 7>&1 || echo "rc=$?"; } | cat > "$_S224_D/$_n.out"
+    echo $(( $(date +%s) - _t0 )) > "$_S224_D/$_n.secs"
+    # Snapshot what the agent would find at the moment the pane starts.
+    cp "$_S224_D/events" "$_S224_D/$_n.events0" 2>/dev/null || : > "$_S224_D/$_n.events0"
+    _s224_helpers > "$_S224_D/$_n.helpers0"
+}
+_s224_helpers() {
+    HOME="$_S224_D/home" "$_S224_GIT" config --global --get-all credential.https://github.com.helper 2>/dev/null || true
+}
+# _s224_wait_for LINE: poll (up to 20 s) for the background job's last event.
+_s224_wait_for() {
+    local _i=0
+    while [ "$_i" -lt 100 ]; do
+        grep -qxF "$1" "$_S224_D/events" 2>/dev/null && return 0
+        sleep 0.2; _i=$((_i + 1))
+    done
+    return 1
+}
+# _s224_wait_helpers N: poll (up to 20 s) until git has N helpers for github.com.
+_s224_wait_helpers() {
+    local _i=0 _h
+    while [ "$_i" -lt 100 ]; do
+        _h="$(_s224_helpers)"
+        [ -n "$_h" ] && [ "$(printf '%s\n' "$_h" | wc -l | tr -d ' ')" = "$1" ] && return 0
+        sleep 0.2; _i=$((_i + 1))
+    done
+    return 1
+}
+_S224_GHB="$_S224_D/bin/gh"
+_S224_WANT_HELPERS="$(printf '\n!%s auth git-credential\n%s' "$_S224_GHB" "$_S224_BASE")"
+check "§224(0) the git-auth, native-addon and LFS blocks were extracted, and git exists (mutation: a renamed marker empties a block and every check goes vacuous)" \
+    bash -c 'grep -q "gh auth login --with-token" <<< "$1" && grep -q "BAD_NATIVE=" <<< "$2" && grep -q "filter=lfs" <<< "$3" && [ -x "$4" ]' \
+    _ "$_S224_GH" "$_S224_NATIVE" "$_S224_LFS" "$_S224_GIT"
+if [ -z "$_S224_GIT" ]; then
+    check "§224 git-auth checks (no git on this host)" sh -c 'exit 77'
+else
+    # Two accounts whose logins take 2 s each: 4 s of network the launch used to wait for.
+    _s224_run multi "$_S224_GH" GH_ACCOUNTS=alice:tokA1,bob:tokB2 GIT_TOKEN=tokB2 SANDY_GH_ACTIVE=alice STUB_LOGIN_SLEEP=2
+    _s224_wait_for "switch alice" || true
+    _s224_ev="$(cat "$_S224_D/events" 2>/dev/null || true)"
+    check "§224(1) the launch returns before the logins finish (took $(cat "$_S224_D/multi.secs")s against 4s of logins), with no login done yet, nothing left holding its output or fd 7, and no child left to reap" \
+        bash -c '[ "$(cat "$1/multi.secs")" -le 2 ] && ! grep -q "^login " "$1/multi.events0" && ! grep -q "^rc=" "$1/multi.out"' _ "$_S224_D"
+    check "§224(2) git's credential helpers for github.com are complete when the launch returns: reset, gh, then the baseline (git works from the first second)" \
+        bash -c '[ "$(cat "$1/multi.helpers0")" = "$2" ]' _ "$_S224_D" "$_S224_WANT_HELPERS"
+    check "§224(3) after the job: gh's helper written first (no network), then every account logged in, in order, then the switch to the host's choice; helpers unchanged" \
+        bash -c '[ "$1" = "$(printf "setup-git auth setup-git --hostname github.com --force\nlogin tokA1\nlogin tokB2\nswitch alice")" ] && [ "$(HOME="$2/home" "$3" config --global --get-all credential.https://github.com.helper)" = "$4" ]' \
+        _ "$_s224_ev" "$_S224_D" "$_S224_GIT" "$_S224_WANT_HELPERS"
+    check "§224(4) the job prints nothing over the agent's TUI (gh's own output is discarded)" \
+        bash -c '! grep -q STUB-CHATTER "$1/multi.out"' _ "$_S224_D"
+    check "§224(5) no token is ever an argument to gh or git, and no file in the agent home holds one" \
+        bash -c '[ -s "$1/gh.argv" ] && [ -s "$1/git.argv" ] && ! grep -qE "tokA1|tokB2" "$1/gh.argv" "$1/git.argv" && ! grep -rqE "tokA1|tokB2" "$1/home"' _ "$_S224_D"
+    # A gh too old for --force: setup-git waits for the logins, as before, and
+    # the baseline helper it removes is put back after it.
+    _s224_run noforce "$_S224_GH" GH_ACCOUNTS=alice:tokA1,bob:tokB2 GIT_TOKEN=tokB2 SANDY_GH_ACTIVE=bob STUB_NOFORCE=1 STUB_LOGIN_SLEEP=1
+    _s224_wait_helpers 3 || true
+    check "§224(6) a gh without --force: only the baseline helper at return; the job logs in, switches, then runs setup-git, and the baseline ends up last again" \
+        bash -c '[ "$(cat "$1/noforce.helpers0")" = "$2" ] && [ "$(cat "$1/events")" = "$(printf "login tokA1\nlogin tokB2\nswitch bob\nsetup-git auth setup-git")" ] && [ "$(HOME="$1/home" "$3" config --global --get-all credential.https://github.com.helper)" = "$4" ]' \
+        _ "$_S224_D" "$_S224_BASE" "$_S224_GIT" "$_S224_WANT_HELPERS"
+    _s224_run single "$_S224_GH" GIT_TOKEN=tokG STUB_LOGIN_SLEEP=0
+    _s224_wait_for "login tokG" || true
+    check "§224(7) no GH_ACCOUNTS: GIT_TOKEN alone is logged in, on stdin, with no switch" \
+        bash -c '[ "$(cat "$1/events")" = "$(printf "setup-git auth setup-git --hostname github.com --force\nlogin tokG")" ] && ! grep -q tokG "$1/gh.argv"' _ "$_S224_D"
+    _s224_run unfwd "$_S224_GH" GH_ACCOUNTS=a:t1,b:t2 GIT_TOKEN=t1 SANDY_GH_ACTIVE=zz
+    _s224_wait_for "login t2" || true
+    sleep 0.5
+    check "§224(8) an active account that was not forwarded is still reported on the console at launch, and nothing is switched" \
+        bash -c 'grep -q "gh account zz was chosen but not forwarded" "$1/unfwd.out" && ! grep -q "^switch" "$1/events" && grep -qx "login t2" "$1/events"' _ "$_S224_D"
+    _s224_run notok "$_S224_GH" SANDY_SSH=token
+    check "§224(9) with no token there is no job, no gh helper and no baseline helper (as before: setup-git failed without a login)" \
+        bash -c '[ ! -s "$1/events" ] && [ -z "$(cat "$1/notok.helpers0")" ]' _ "$_S224_D"
+fi
+# F7: the native-addon probe. pnpm puts a scoped package's addon at depth 8
+# under node_modules (.pnpm/@s+p@1/node_modules/@s/p/build/Release/x.node).
+_S224_WS="$_S224_D/ws"
+_s224_addon() { mkdir -p "$(dirname "$1")"; printf '%s' "${2:-MZ-not-elf}" > "$1"; }
+mkdir -p "$_S224_WS/node_modules"
+_s224_addon "$_S224_WS/node_modules/.pnpm/@s+p@1.0.0/node_modules/@s/p/build/Release/x.node"
+_s224_run nat "$_S224_NATIVE" WORKSPACE="$_S224_WS"
+check "§224(10) a foreign native addon at pnpm's depth (8) still gets the warning, and file(1) is asked about exactly that one path" \
+    bash -c 'grep -q "native addons built for a different platform" "$1/nat.out" && [ "$(cat "$1/file.argv")" = "$2" ]' \
+    _ "$_S224_D" "$_S224_WS/node_modules/.pnpm/@s+p@1.0.0/node_modules/@s/p/build/Release/x.node"
+rm -rf "$_S224_WS/node_modules"; mkdir -p "$_S224_WS/node_modules"
+_s224_addon "$_S224_WS/node_modules/good/build/Release/x.node" "$(printf '\177ELF\002\001\001')"
+_s224_run natelf "$_S224_NATIVE" WORKSPACE="$_S224_WS"
+check "§224(11) a Linux (ELF) addon gets no warning (the check still runs: file(1) was asked)" \
+    bash -c '! grep -q "native addons" "$1/natelf.out" && [ -s "$1/file.argv" ]' _ "$_S224_D"
+# Many addons: the probe must stop at the first, so file(1) gets one path.
+rm -rf "$_S224_WS/node_modules"; mkdir -p "$_S224_WS/node_modules"
+for _s224_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    _s224_addon "$_S224_WS/node_modules/p$_s224_i/x.node"
+done
+_s224_run natmany "$_S224_NATIVE" WORKSPACE="$_S224_WS"
+check "§224(12) with many addons the probe stops at the first: file(1) is asked about one existing path, not a list" \
+    bash -c '[ "$(wc -l < "$1/file.argv" | tr -d " ")" = 1 ] && [ -f "$(cat "$1/file.argv")" ] && grep -q "native addons" "$1/natmany.out"' _ "$_S224_D"
+# Deeper than the bound: the documented trade (the walk stops at depth 8).
+rm -rf "$_S224_WS/node_modules"; mkdir -p "$_S224_WS/node_modules"
+_s224_addon "$_S224_WS/node_modules/a/b/c/d/e/f/g/h/i/x.node"
+_s224_run natdeep "$_S224_NATIVE" WORKSPACE="$_S224_WS"
+check "§224(13) the walk is depth-bounded: an addon at depth 10 is not looked at (the documented trade)" \
+    bash -c '[ ! -s "$1/file.argv" ] && ! grep -q "native addons" "$1/natdeep.out" && ! grep -q "^rc=" "$1/natdeep.out"' _ "$_S224_D"
+# A tree too big to walk: a find that never finishes is cut off after 3 s,
+# silently, and the launch goes on.
+mkdir -p "$_S224_D/slowbin"
+printf '#!/bin/sh\nexec sleep 20\n' > "$_S224_D/slowbin/find"; chmod +x "$_S224_D/slowbin/find"
+_S224_PATH0="$PATH"; PATH="$_S224_D/slowbin:$PATH"
+_s224_run natslow "$_S224_NATIVE" WORKSPACE="$_S224_WS"
+PATH="$_S224_PATH0"
+check "§224(14) a walk that does not finish is abandoned after about 3 s, silently, and the launch goes on (took $(cat "$_S224_D/natslow.secs")s)" \
+    bash -c '[ "$(cat "$1/natslow.secs")" -le 6 ] && [ ! -s "$1/natslow.out" ]' _ "$_S224_D"
+# The LFS probe never descends into node_modules (a package's own
+# .gitattributes is not the workspace's, and that walk was the probe's cost);
+# the workspace's own .gitattributes is still read. A logging grep records
+# exactly which files the probe read. (Whether it then runs `git lfs install`
+# is unchanged and not asserted: find's -exec + exits 0 when nothing matched.)
+rm -rf "$_S224_WS"; mkdir -p "$_S224_WS/.git" "$_S224_WS/node_modules/pkg" "$_S224_WS/sub" "$_S224_D/lfsbin"
+printf '*.bin filter=lfs diff=lfs merge=lfs -text\n' > "$_S224_WS/node_modules/pkg/.gitattributes"
+printf '*.bin filter=lfs diff=lfs merge=lfs -text\n' > "$_S224_WS/sub/.gitattributes"
+printf '*.bin filter=lfs diff=lfs merge=lfs -text\n' > "$_S224_WS/.gitattributes"
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" >> "$STUB_DIR/grep.argv"\nexec %s "$@"\n' "$(command -v grep)" > "$_S224_D/lfsbin/grep"
+chmod +x "$_S224_D/lfsbin/grep"; rm -f "$_S224_D/grep.argv"
+_S224_PATH0="$PATH"; PATH="$_S224_D/lfsbin:$PATH"
+_s224_run lfs "$_S224_LFS" WORKSPACE="$_S224_WS"
+PATH="$_S224_PATH0"
+check "§224(15) the LFS probe reads the workspace's .gitattributes files but none under node_modules, and still runs git lfs install" \
+    bash -c 'grep -qxF "$2/.gitattributes" "$1/grep.argv" && grep -qxF "$2/sub/.gitattributes" "$1/grep.argv" && ! grep -q node_modules "$1/grep.argv" && grep -qx "lfs install" "$1/git.argv"' _ "$_S224_D" "$_S224_WS"
+rm -rf "$_S224_D"
+unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_LFS _S224_BASE _S224_GHB _S224_WANT_HELPERS _S224_WS _S224_PATH0 _s224_ev _s224_i
+unset -f _s224_run _s224_helpers _s224_wait_for _s224_wait_helpers _s224_addon
 
 # BEGIN SUMMARY
 # ============================================================
