@@ -9370,9 +9370,9 @@ _S109="$SANDY_SCRIPT"
 # the two files placed at the sandbox TOP LEVEL precisely so it cannot reach
 # them -- plus the approved-symlinks list that gates this very check.
 check "§109(1) the symlink scan refuses targets under \$SANDY_HOME (mutation: dropping the case arm re-opens agent write access to operator state)" \
-    bash -c 'awk "/^_sandy_resolve_symlinks\(\) \{/,/^\}\$/" "$1" | grep -q "SANDY_HOME\"|\"\\\$SANDY_HOME\"/\\*"' -- "$_S109"
+    bash -c 'awk "/^_sandy_symlink_classify\(\) \{/,/^\}\$/" "$1" | grep -q "SANDY_HOME\"|\"\\\$SANDY_HOME\"/\\*"' -- "$_S109"
 check "§109(2) ...and warns rather than skipping silently (an operator who pointed a symlink there must learn why it vanished)" \
-    bash -c 'awk "/^_sandy_resolve_symlinks\(\) \{/,/^\}\$/" "$1" | grep -q "sandy own state\|sandy.s own state"' -- "$_S109"
+    bash -c 'awk "/^_sandy_symlink_classify\(\) \{/,/^\}\$/" "$1" | grep -q "sandy own state\|sandy.s own state"' -- "$_S109"
 
 # Behavioral: real script, stubbed docker, three symlinks. The third is the
 # regression guard -- an ORDINARY escape must still be offered for approval, so
@@ -12683,11 +12683,18 @@ sed -n '/^_sandy_is_protected_rel() {/,/^}$/p'   "$SANDY_SCRIPT"  > "$_S130_DIR/
 sed -n '/^_sandy_protected_files() {/,/^}$/p'    "$SANDY_SCRIPT" >> "$_S130_DIR/pred.sh"
 sed -n '/^_sandy_protected_dirs() {/,/^}$/p'     "$SANDY_SCRIPT" >> "$_S130_DIR/pred.sh"
 sed -n '/^_sandy_protected_git_files() {/,/^}$/p' "$SANDY_SCRIPT" >> "$_S130_DIR/pred.sh"
-awk '/^    while IFS= read -r -d .. link; do$/,/^        -print0 2>\/dev\/null\)$/' "$SANDY_SCRIPT" > "$_S130_DIR/scan.sh"
+# The scan: its helper functions (optimization pass B2 split the loop out of
+# _sandy_resolve_symlinks), then one call of it.
+: > "$_S130_DIR/scan.sh"
+for _f in _sandy_symlink_classify _sandy_fnmatch_escape _sandy_symlink_skip_parse _sandy_symlink_protected_sweep _sandy_symlink_scan; do
+    sed -n "/^$_f() {/,/^}\$/p" "$SANDY_SCRIPT" >> "$_S130_DIR/scan.sh"
+done
+unset _f
+printf '_sandy_symlink_scan\n' >> "$_S130_DIR/scan.sh"
 check "§130(pre) the gitdir block, the protected predicates and the symlink scan all extracted and parse (mutation: a rename empties one and its checks go vacuous)" \
     bash -c 'bash -n "$1/gitblk.sh" && bash -n "$1/pred.sh" && bash -n "$1/scan.sh" &&
              grep -q GITDIR_HOST "$1/gitblk.sh" && grep -q _sandy_is_protected_rel "$1/pred.sh" &&
-             grep -q DANGEROUS_SYMLINKS "$1/scan.sh"' -- "$_S130_DIR"
+             grep -q DANGEROUS_SYMLINKS "$1/scan.sh" && grep -q "find \"\$WORK_DIR\" -mindepth 1 -maxdepth 8" "$1/scan.sh"' -- "$_S130_DIR"
 
 # --- R5a / R5b: the gitdir ---------------------------------------------------
 # Builds a REAL submodule-worktree layout, writes the given gitdir line, runs
@@ -12760,7 +12767,7 @@ _s130_scan() {   # _s130_scan <link-rel> <target-abs-under-d> <target-kind>
     d="$(cd "$(mktemp -d)" && pwd -P)"
     (
         trap - ERR; set +e
-        warn() { :; }
+        warn() { :; }; info() { :; }
         . "$_S130_DIR/pred.sh"
         HOME="$d/home"; SANDY_HOME="$d/home/.sandy"; WORK_DIR="$d/home/dev/repo"
         mkdir -p "$WORK_DIR" "$SANDY_HOME" "$(dirname "$d/$2")" "$(dirname "$WORK_DIR/$1")"
@@ -25583,8 +25590,8 @@ section "§215: credentials reach the agent container the way sandy says: CLAUDE
 # test review showed survive deleting the code they name (mutants C03, C04,
 # C09, C16, C17, C27, C30, C35, C36, C39, C45).
 #
-# The stubs, shared by 215-219 and 225 (removed at the end of §225, which
-# follows §219):
+# The stubs, shared by 215-219, 225 and 226-229 (removed at the end of §229,
+# which follows §225, which follows §219):
 #   docker    logs every call; answers the network queries (subnet, gateway,
 #             bridge name); saves each `run`'s argv one element per line, and a
 #             copy of its --env-file, under runs/; for the agent's run (the one
@@ -25592,6 +25599,9 @@ section "§215: credentials reach the agent container the way sandy says: CLAUDE
 #             workspace-relative path in A6_MOUNTPOINTS that the run mounts over
 #             is created in the workspace, and A6_AGENT_WRITES gets a file.
 #             A bare `docker info` prints A6_DOCKER_INFO (nothing by default).
+#             With A6_TERM_ON_DETACH=1 a detached run (`run -d`, the --start
+#             supervisor's) is recorded and then SIGTERMs its caller, which
+#             is how --stop ends a supervisor, so §228 can drive one.
 #   curl      fails, except the two build-dependency probes when A6_NET=1, so a
 #             missing image builds instead of being deferred.
 #   gh        prints nothing and fails: no host token, no network round trip.
@@ -25635,6 +25645,7 @@ if [ "${1:-}" = run ]; then
             done
         done
     fi
+    if [ "${A6_TERM_ON_DETACH:-}" = 1 ] && [ "${2:-}" = -d ]; then kill -TERM "$PPID"; fi
 fi
 exit 0
 EOF
@@ -26008,6 +26019,301 @@ unset _A6_NV
 unset -f _a6_gpus
 unset _A6_A _A6_WHY
 unset -f _hardening_unmet
+
+section "§226: the symlink scan prunes node_modules, .venv* and .git and finds what the filtered scan found; a workspace under such a path is scanned too (optimization pass B2, decision D2)"
+# ============================================================
+# WHY. The scan used `-not -path` filters, so find still walked every
+# node_modules, .venv* and .git tree and dropped what it found there (on one
+# workspace 123 s of a 264 s --start, run twice). -prune stops the walk. Two
+# properties, asserted on a real launch (the §215 harness): the links the gate
+# judges (DANGEROUS_SYMLINKS, observed through the approved list: a link
+# missing from it is refused, a listed link not found is pruned from it) and
+# the mounts built from them are what the filtered form produced -- the
+# expected lists below are main's output on this fixture -- and the one
+# intended difference (decision D2): a workspace whose OWN path has a
+# node_modules, .venv* or .git component used to get no scan at all, because
+# the filters matched every path in it, and is now scanned like any other.
+# _s226_tree HOME WS. Left out: node_modules/, a nested node_modules/, .venv/,
+# .venv-foo/, .git/, depth 9, an internal link, a system target. Found: an
+# absolute and a relative escape, names that only look excluded (.gitfoo/,
+# foo.venv/, a LINK named node_modules, which is not a directory to prune),
+# depth 8, and a protected-path link to a target outside $HOME.
+_s226_tree() {
+    local h="$1" w="$2" p
+    mkdir -p "$h/t1" "$h/t2" "$h/t3" "$w"
+    for p in sub a/node_modules/b node_modules .venv .venv-foo .git .gitfoo foo.venv lib d1/d2/d3/d4/d5/d6/d7/d8; do
+        mkdir -p "$w/$p"
+    done
+    ln -s "$h/t1" "$w/top"; ln -s ../../t2 "$w/sub/rel"
+    ln -s "$h/t3" "$w/node_modules/x"; ln -s "$h/t3" "$w/a/node_modules/b/x"
+    ln -s "$h/t3" "$w/.venv/x"; ln -s "$h/t3" "$w/.venv-foo/y"; ln -s "$h/t3" "$w/.git/z"
+    ln -s "$h/t1" "$w/.gitfoo/x"; ln -s "$h/t2" "$w/foo.venv/y"; ln -s "$h/t3" "$w/lib/node_modules"
+    ln -s sub "$w/inner"; ln -s /etc/passwd "$w/sys"; ln -s /etc/hosts "$w/.npmrc"
+    ln -s "$h/t1" "$w/d1/d2/d3/d4/d5/d6/d7/deep"; ln -s "$h/t1" "$w/d1/d2/d3/d4/d5/d6/d7/d8/deeper"
+}
+_s226_expect() {   # $1 = HOME -> the gate's set for _s226_tree, C-sorted
+    printf '%s\n' ".gitfoo/x -> $1/t1" ".npmrc -> $_S226_ETC" "d1/d2/d3/d4/d5/d6/d7/deep -> $1/t1" \
+        "foo.venv/y -> $1/t2" "lib/node_modules -> $1/t3" "sub/rel -> $1/t2" "top -> $1/t1" | LC_ALL=C sort
+}
+_s226_expect_mounts() {   # $1 = HOME -> the symlink mounts for _s226_tree, C-sorted
+    printf '%s\n' "$1/t1:$1/t1" "$1/t2:$1/t2" "$1/t2:/home/sandy/t2" "$1/t3:$1/t3" | LC_ALL=C sort
+}
+# The agent run's -v values whose host side is one of the fixture targets.
+_s226_mounts() {   # $1 = CASE  $2 = HOME
+    local a
+    a="$(_a6_agent_args "$1")"
+    [ -n "$a" ] || return 0
+    awk -v h="$2" 'p=="-v" && (index($0,h"/t")==1 || index($0,h"/wf:")==1) {print} {p=$0}' "$a" | LC_ALL=C sort
+}
+# rc 0, an agent run, the approved list unchanged, and exactly the expected
+# mounts. Prints the first unmet condition.
+_s226_unmet() {   # $1 = CASE  $2 = HOME  $3 = expected list  $4 = expected mounts
+    [ "$_A6_RC" = 0 ] || { echo "launch rc $_A6_RC"; return 0; }
+    [ -n "$(_a6_agent_args "$1")" ] || { echo "no agent docker run"; return 0; }
+    [ "$(LC_ALL=C sort "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list")" = "$3" ] \
+        || { echo "approved list changed: $(tr '\n' ';' < "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list")"; return 0; }
+    [ "$(_s226_mounts "$1" "$2")" = "$4" ] || echo "mounts: $(_s226_mounts "$1" "$2" | tr '\n' ' ')"
+}
+# The protected link's target as the scan records it (readlink -f): on macOS
+# /etc is a link to /private/etc.
+_S226_ETC="$(cd /etc && pwd -P)/hosts"
+_s226_seed() {   # $1 = CASE  $2 = list content
+    mkdir -p "$(_a6_sandbox "$1")"
+    printf '%s\n' "$2" > "$(_a6_sandbox "$1")/.sandy-approved-symlinks.list"
+}
+
+_S226_H="$_A6_DIR/s226"
+_s226_tree "$_S226_H" "$_S226_H/ws"
+_s226_seed s226 "$(_s226_expect "$_S226_H")"
+_a6_launch s226 SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S226_WHY="$(_s226_unmet s226 "$_S226_H" "$(_s226_expect "$_S226_H")" "$(_s226_expect_mounts "$_S226_H")")"
+[ -z "$_S226_WHY" ] || _a6_diag "§226(1)" s226
+check "§226(1) the pruned scan judges exactly the links the filtered scan did (approved list neither refused nor pruned) and mounts the same targets at the same paths (unmet: ${_S226_WHY:-none})" \
+    test -z "$_S226_WHY"
+
+# D2: the same tree in a workspace under node_modules/, .venvs/ and .git/.
+# Before, nothing was found (no mounts, no gate); now the same as above.
+for _S226_P in node_modules .venvs .git; do
+    _S226_C="s226-d2-${_S226_P#.}/$_S226_P"
+    _s226_tree "$_A6_DIR/$_S226_C" "$_A6_DIR/$_S226_C/ws"
+    _s226_seed "$_S226_C" "$(_s226_expect "$_A6_DIR/$_S226_C")"
+    _a6_launch "$_S226_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+    _S226_WHY="$(_s226_unmet "$_S226_C" "$_A6_DIR/$_S226_C" "$(_s226_expect "$_A6_DIR/$_S226_C")" "$(_s226_expect_mounts "$_A6_DIR/$_S226_C")")"
+    [ -z "$_S226_WHY" ] || _a6_diag "§226(2) $_S226_P" "$_S226_C"
+    check "§226(2) D2: a workspace under a $_S226_P/ directory is scanned like any other: same links judged, same mounts (the filtered scan found nothing there; unmet: ${_S226_WHY:-none})" \
+        test -z "$_S226_WHY"
+done
+
+# A workspace whose own directory is named node_modules or .venv: with no
+# approval yet a non-interactive launch must REFUSE (first encounter), naming
+# a link. The filtered scan found nothing here, and so does the pruned one
+# without -mindepth 1 (it prunes the workspace root itself): both run.
+for _S226_P in node_modules .venv; do
+    _S226_C="s226-own-${_S226_P#.}"
+    _s226_tree "$_A6_DIR/$_S226_C" "$_A6_DIR/$_S226_C/$_S226_P"
+    _a6_launch "$_S226_C" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 -- --workspace "$_A6_DIR/$_S226_C/$_S226_P" -p fixture
+    _S226_OK=0
+    { [ "$_A6_RC" != 0 ] && grep -q "need interactive approval" "$_A6_DIR/$_S226_C/out" \
+        && grep -qF "top -> $_A6_DIR/$_S226_C/t1" "$_A6_DIR/$_S226_C/out" \
+        && [ -z "$(_a6_agent_args "$_S226_C")" ]; } || _S226_OK=1
+    [ "$_S226_OK" = 0 ] || _a6_diag "§226(3) $_S226_P" "$_S226_C"
+    check "§226(3) a workspace whose own directory is named $_S226_P is scanned: its escaping links reach the gate, which refuses a first encounter without a terminal (mutation: dropping -mindepth 1 prunes the root and the launch runs; rc ${_A6_RC:-none})" \
+        test "$_S226_OK" = 0
+done
+unset _S226_H _S226_WHY _S226_P _S226_C _S226_OK
+
+section "§227: SANDY_SYMLINK_SCAN_SKIP leaves a directory out of the symlink scan, never a protected path, and names an entry that matches nothing (optimization pass B2, decision D12a)"
+# ============================================================
+# The key is passive (a workspace .sandy/config may set it, no approval),
+# because leaving a directory out can only remove mounts: a link the scan
+# never sees is neither prompted for nor mounted, and dangles in the
+# container. The one link the scan must still see is one at a protected path,
+# which the protected-path mount loop would otherwise mount by following it.
+# Set here from the WORKSPACE config, with no approval and no terminal.
+_s227_tree() {   # $1 = HOME  $2 = WS
+    mkdir -p "$1/t1" "$1/t2" "$1/t3" "$1/wf" "$2/scratch/deep" "$2/.github" "$2/.sandy"
+    ln -s "$1/t2" "$2/scratch/far"; ln -s "$1/t1" "$2/scratch/deep/x"; ln -s /etc/hosts "$2/scratch/.npmrc"
+    ln -s "$1/wf" "$2/.github/workflows"; ln -s "$1/t1" "$2/.github/other"
+    ln -s "$1/t3" "$2/keep"; ln -s scratch "$2/scrlink"
+    printf 'SANDY_SYMLINK_SCAN_SKIP=scratch, .github/ ,missing-dir,scrlink\n' > "$2/.sandy/config"
+}
+_S227_H="$_A6_DIR/s227"
+_s227_tree "$_S227_H" "$_S227_H/ws"
+_S227_A="$(printf '%s\n' ".github/workflows -> $_S227_H/wf" "keep -> $_S227_H/t3" | LC_ALL=C sort)"
+_s226_seed s227 "$_S227_A"
+_a6_launch s227 SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+_S227_WHY="$(_s226_unmet s227 "$_S227_H" "$_S227_A" "$(printf '%s\n' "$_S227_H/t3:$_S227_H/t3" "$_S227_H/wf:$_S227_H/wf" | LC_ALL=C sort)")"
+[ -z "$_S227_WHY" ] || _a6_diag "§227(1)" s227
+check "§227(1) links under skipped directories are neither prompted for nor mounted: the launch runs with an approved list that lacks them, keeps that list, and mounts only keep's and .github/workflows' targets (unmet: ${_S227_WHY:-none})" \
+    test -z "$_S227_WHY"
+check "§227(2) an entry that matches no directory is named in a warning, and so is one that is a symlink (mutation: the warning removed)" \
+    bash -c 'grep -qF "$2" "$1" && grep -qF "$3" "$1" && ! grep -qF "$4" "$1"' _ "$_A6_DIR/s227/out" \
+    "'missing-dir' matches no directory" "'scrlink' matches no directory" "'scratch' matches no directory"
+
+# The protected link under the skipped .github/ is still found: approve only
+# keep, and the launch must refuse .github/workflows as new.
+_s227_tree "$_A6_DIR/s227p" "$_A6_DIR/s227p/ws"
+_s226_seed s227p "keep -> $_A6_DIR/s227p/t3"
+_a6_launch s227p SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+check "§227(3) a link at a protected path under a skipped directory still reaches the gate: refused as new, no agent run (mutation: the protected-path sweep removed; rc ${_A6_RC:-none})" \
+    bash -c 'test "$1" != 0 && grep -q "present at previous approval" "$2" && grep -qF ".github/workflows -> $3/wf" "$2" && test -z "$4"' \
+    _ "$_A6_RC" "$_A6_DIR/s227p/out" "$_A6_DIR/s227p" "$(_a6_agent_args s227p)"
+
+# Control: the same tree without the key is refused for the skipped links,
+# so (1) is not passing on links the scan would never have found anyway.
+_s227_tree "$_A6_DIR/s227c" "$_A6_DIR/s227c/ws"
+rm -f "$_A6_DIR/s227c/ws/.sandy/config"
+_s226_seed s227c "$(printf '%s\n' ".github/workflows -> $_A6_DIR/s227c/wf" "keep -> $_A6_DIR/s227c/t3")"
+_a6_launch s227c SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+check "§227(4) control: without the key the same launch refuses scratch/far, scratch/deep/x and .github/other as new (rc ${_A6_RC:-none})" \
+    bash -c 'test "$1" != 0 && grep -qF "scratch/far -> $3/t2" "$2" && grep -qF "scratch/deep/x -> $3/t1" "$2" && grep -qF ".github/other -> $3/t1" "$2"' \
+    _ "$_A6_RC" "$_A6_DIR/s227c/out" "$_A6_DIR/s227c"
+
+# Never silent: a scan still running after 2 s says so, and one over 5 s
+# prints its duration and names the key. A find stub delays only the scan's
+# own find (the one with -maxdepth 8) by 6 s; the approval pass is enough to
+# run it. The fast launches above print neither line.
+_S227_SB="$_A6_DIR/s227-slowbin"
+mkdir -p "$_S227_SB"
+printf '#!/bin/sh\ncase " $* " in *" -maxdepth 8 "*) sleep 6 ;; esac\nexec %s "$@"\n' "$(command -v find)" > "$_S227_SB/find"
+chmod +x "$_S227_SB/find"
+mkdir -p "$_A6_DIR/s227s/ws"
+_a6_launch s227s PATH="$_S227_SB:$_A6_DIR/bin:$PATH" SANDY_APPROVE_ONLY=1 --
+check "§227(5) a slow scan says it is scanning after 2 s, then prints its duration naming SANDY_SYMLINK_SCAN_SKIP; a fast one prints neither (mutations: the 2 s notice or the duration line removed; rc ${_A6_RC:-none})" \
+    bash -c 'test "$1" = 0 && grep -qF "Scanning workspace for symlinks" "$2" && grep -q "Symlink scan took [0-9]*s\..*SANDY_SYMLINK_SCAN_SKIP" "$2" && ! grep -qF "Scanning workspace for symlinks" "$3" && ! grep -q "Symlink scan took" "$3"' \
+    _ "$_A6_RC" "$_A6_DIR/s227s/out" "$_A6_DIR/s227/out"
+unset _S227_H _S227_A _S227_WHY _S227_SB
+
+section "§228: under --start the supervisor mounts only what the approval pass resolved and approved, re-checked; a missing or corrupt list means scan again (optimization pass B2, decision D12c)"
+# ============================================================
+# The --start client's approval pass (SANDY_APPROVE_ONLY) scans and resolves
+# the gate on the client's terminal; the supervisor used to scan the whole
+# workspace again. The pass now writes its links to launch/<id>/symlinks.list
+# and the supervisor mounts from it. The workspace can change in between, so:
+# a link added after the pass is not mounted, a retargeted link's new target
+# is not mounted, the gate still refuses both at the next launch, and a
+# protected-path (or .gstack) link planted in between is still refused. The supervisor is
+# driven for real (SANDY_DAEMON_SUPERVISOR=1, the argv the client re-execs);
+# the docker stub records its detached run and then SIGTERMs it, as --stop does.
+_s228_ws() {   # $1 = CASE: HOME/t1..t5, ws links a -> t1 and b -> t2, both approved
+    local h="$_A6_DIR/$1"
+    mkdir -p "$h/t1" "$h/t2" "$h/t3" "$h/t5" "$h/ws"
+    ln -s "$h/t1" "$h/ws/a"; ln -s "$h/t2" "$h/ws/b"
+    _s226_seed "$1" "$(printf '%s\n' "a -> $h/t1" "b -> $h/t2")"
+}
+_s228_pass() {   # $1 = CASE -> sets _S228_ID (empty when none)
+    rm -f "$_A6_DIR/$1/result"
+    _a6_launch "$1" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_APPROVE_ONLY=1 SANDY_APPROVE_ONLY_RESULT="$_A6_DIR/$1/result" --
+    _S228_ID="$(sed -n 's/^symlinks_list=//p' "$_A6_DIR/$1/result" 2>/dev/null || true)"
+}
+_s228_sup() {   # $1 = CASE  $2 = list id
+    _a6_launch "$1" SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6 SANDY_DAEMON_SUPERVISOR=1 \
+        SANDY_PREPASS_SYMLINKS="$2" A6_TERM_ON_DETACH=1 -- --start --workspace "$_A6_DIR/$1/ws"
+}
+# The list as "rel -> target" lines (C-sorted), or BAD when its frame is wrong.
+_s228_list() {   # $1 = list file  $2 = canonical workspace
+    tr '\0' '\n' < "$1" | awk -v w="$2" '
+        NR==1 {ok=($0=="sandy-symlinks-v1")} NR==2 {ok=ok && ($0==w)} NR==3 {n=$0+0}
+        NR>3 && NR<=3+2*n { if ((NR-4)%2==0) r=$0; else print r " -> " $0 }
+        {last=$0} END {if (!ok || NR!=4+2*n || last!="end") print "BAD"}' | LC_ALL=C sort
+}
+
+_s228_ws s228
+_s228_pass s228
+_S228_SB="$(_a6_sandbox s228)"
+_S228_H="$_A6_DIR/s228"
+check "§228(1) the approval pass passes the gate and writes the links it resolved to a fresh launch/<id>/symlinks.list, named in its result file (rc ${_A6_RC:-none}, id '${_S228_ID:-}')" \
+    bash -c 'test "$1" = 0 && [[ "$2" =~ ^[0-9a-f]{16}$ ]] && test -f "$3/launch/$2/symlinks.list" && test "$4" = "$5"' \
+    _ "$_A6_RC" "${_S228_ID:-none}" "$_S228_SB" "$(_s228_list "$_S228_SB/launch/${_S228_ID:-none}/symlinks.list" "$_S228_H/ws" 2>/dev/null || true)" \
+    "$(printf '%s\n' "a -> $_S228_H/t1" "b -> $_S228_H/t2" | LC_ALL=C sort)"
+
+# Between the pass and the supervisor: a new link, and b retargeted.
+ln -s "$_S228_H/t3" "$_S228_H/ws/n"
+rm -f "$_S228_H/ws/b"; ln -s "$_S228_H/t5" "$_S228_H/ws/b"
+_s228_sup s228 "${_S228_ID:-}"
+_S228_M="$(_s226_mounts s228 "$_S228_H")"
+[ "$_S228_M" = "$_S228_H/t1:$_S228_H/t1" ] || _a6_diag "§228(2)" s228
+check "§228(2) the supervisor does not scan: it mounts a's target only -- not the link added after the pass, not b's new target, not b's old one -- and says b changed (mutations: the supervisor scans anyway, it mounts a target the list does not hold; mounts: $(printf '%s' "$_S228_M" | tr '\n' ' '))" \
+    bash -c 'test "$1" = "$2" && grep -q "b changed target after the approval pass" "$3" && ! grep -q "present at previous approval\|need interactive approval" "$3"' \
+    _ "$_S228_M" "$_S228_H/t1:$_S228_H/t1" "$_A6_DIR/s228/out"
+check "§228(3) ...and the gate ran on what it mounts: the approved list now holds a alone (b's approved form is gone, so its new target is new next time)" \
+    bash -c 'test "$(cat "$1")" = "$2"' _ "$_S228_SB/.sandy-approved-symlinks.list" "a -> $_S228_H/t1"
+_a6_launch s228 SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+check "§228(4) the next launch's gate refuses both: the added link and b's new target, named, no agent run (rc ${_A6_RC:-none})" \
+    bash -c 'test "$1" != 0 && grep -q "present at previous approval" "$2" && grep -qF "n -> $3/t3" "$2" && grep -qF "b -> $3/t5" "$2" && test -z "$4"' \
+    _ "$_A6_RC" "$_A6_DIR/s228/out" "$_S228_H" "$(_a6_agent_args s228)"
+
+# A protected-path link planted between the pass and the supervisor: the
+# supervisor does not rescan, but it does look at every protected path.
+_s228_ws s228p
+_s228_pass s228p
+ln -s /etc/hosts "$_A6_DIR/s228p/ws/.npmrc"
+_s228_sup s228p "${_S228_ID:-}"
+check "§228(5) a protected-path link planted after the pass is refused by the supervisor's gate, no agent run (mutation: the list-mode protected-path sweep removed; pass id '${_S228_ID:-}', rc ${_A6_RC:-none})" \
+    bash -c '[[ "$1" =~ ^[0-9a-f]{16}$ ]] && grep -q "present at previous approval" "$2" && grep -qF ".npmrc -> $4" "$2" && test -z "$3"' \
+    _ "${_S228_ID:-none}" "$_A6_DIR/s228p/out" "$(_a6_agent_args s228p)" "$_S226_ETC"
+# The same for .gstack, the one other workspace path sandy mounts by name
+# (read-write, under the gstack pack): a link planted there after the pass
+# would be a mount of its target, so the supervisor judges it.
+_s228_ws s228g
+_s228_pass s228g
+mkdir -p "$_A6_DIR/s228g/secret"
+ln -s "$_A6_DIR/s228g/secret" "$_A6_DIR/s228g/ws/.gstack"
+_s228_sup s228g "${_S228_ID:-}"
+check "§228(5b) a .gstack link planted after the pass is refused by the supervisor's gate, no agent run (mutation: .gstack left out of the list-mode sweep; rc ${_A6_RC:-none})" \
+    bash -c '[[ "$1" =~ ^[0-9a-f]{16}$ ]] && grep -q "present at previous approval" "$2" && grep -qF ".gstack -> $4/secret" "$2" && test -z "$3"' \
+    _ "${_S228_ID:-none}" "$_A6_DIR/s228g/out" "$(_a6_agent_args s228g)" "$_A6_DIR/s228g"
+
+# Missing list: scan again. It mounts what the scan finds (not "nothing"),
+# and refuses what is not approved (not "everything").
+_s228_ws s228m
+_s228_sup s228m 0123456789abcdef
+_S228_M="$(_s226_mounts s228m "$_A6_DIR/s228m")"
+check "§228(6) a missing list is named and the supervisor scans: both approved targets mounted (mutation: a missing list mounts nothing; mounts: $(printf '%s' "$_S228_M" | tr '\n' ' '))" \
+    bash -c 'grep -q "symlink list is missing" "$1" && test "$2" = "$3"' _ "$_A6_DIR/s228m/out" "$_S228_M" \
+    "$(printf '%s\n' "$_A6_DIR/s228m/t1:$_A6_DIR/s228m/t1" "$_A6_DIR/s228m/t2:$_A6_DIR/s228m/t2" | LC_ALL=C sort)"
+ln -s "$_A6_DIR/s228m/t3" "$_A6_DIR/s228m/ws/n"
+_s228_sup s228m 0123456789abcdef
+check "§228(7) ...and that scan's gate refuses a link nobody approved, no agent run (rc ${_A6_RC:-none})" \
+    bash -c 'grep -q "symlink list is missing" "$1" && grep -q "present at previous approval" "$1" && grep -qF "n -> $2/t3" "$1" && test -z "$3"' \
+    _ "$_A6_DIR/s228m/out" "$_A6_DIR/s228m" "$(_a6_agent_args s228m)"
+
+# Corrupt list (a real one, truncated): named, and the supervisor scans, so an
+# unapproved link is refused rather than slipping past a half-read list.
+_s228_ws s228c
+_s228_pass s228c
+_S228_F="$(_a6_sandbox s228c)/launch/${_S228_ID:-none}/symlinks.list"
+_S228_OK=1
+if [ -f "$_S228_F" ]; then
+    _S228_N="$(wc -c < "$_S228_F" | tr -d ' ')"
+    head -c "$((_S228_N - 4))" "$_S228_F" > "$_S228_F.t" && mv -f "$_S228_F.t" "$_S228_F" && _S228_OK=0
+fi
+ln -s "$_A6_DIR/s228c/t3" "$_A6_DIR/s228c/ws/n"
+_s228_sup s228c "${_S228_ID:-}"
+check "§228(8) a corrupt (truncated) list is named and the supervisor scans: the unapproved link is refused, no agent run (mutation: a list read without its frame check; rc ${_A6_RC:-none})" \
+    bash -c 'test "$1" = 0 && grep -q "symlink list is corrupt" "$2" && grep -q "present at previous approval" "$2" && grep -qF "n -> $3/t3" "$2" && test -z "$4"' \
+    _ "$_S228_OK" "$_A6_DIR/s228c/out" "$_A6_DIR/s228c" "$(_a6_agent_args s228c)"
+unset _S228_ID _S228_SB _S228_H _S228_M _S228_F _S228_N _S228_OK
+
+section "§229: the --start approval pass makes no docker call and generates no build files (optimization pass B2, F5)"
+# ============================================================
+# The pass decides nothing from Docker; it used to run `docker info` and both
+# reapers (`network ls`, `ps -a`) and generate the build files, all of which
+# the supervisor does again. It runs from a client that has just passed the
+# Docker preflight. The control is a plain launch through the same stub,
+# which does log docker calls and does write build files.
+_s228_ws s229
+_s228_pass s229
+_S229_LOG="$(grep '^docker ' "$_A6_DIR/s229/events.log" 2>/dev/null || true)"
+check "§229(1) the approval pass reached the gate (rc 0, a link list written) with zero docker calls (mutations: the docker-info preflight, the network reaper or the proxy reaper run again in the pass; logged: $(printf '%s' "${_S229_LOG:0:200}" | tr '\n' ';'))" \
+    bash -c 'test "$1" = 0 && [[ "$2" =~ ^[0-9a-f]{16}$ ]] && ! grep -q "^docker " "$3"' _ "$_A6_RC" "${_S228_ID:-none}" "$_A6_DIR/s229/events.log"
+check "§229(2) ...and generated no build files: no Dockerfile*, entrypoint.sh or tmux.conf in SANDY_HOME (mutations: ensure_build_files or ensure_agent_dockerfile run in the pass)" \
+    bash -c 'test -z "$(ls "$1" | grep -E "^(Dockerfile|entrypoint\.sh|tmux\.conf)" || true)"' _ "$_A6_DIR/s229/sh"
+_a6_launch s229 SANDY_AGENT=claude ANTHROPIC_API_KEY=sk-fixture-a6
+check "§229(3) control: a plain launch through the same stubs calls docker info and writes the build files (rc ${_A6_RC:-none})" \
+    bash -c 'grep -q "^docker info" "$1" && test -f "$2/Dockerfile.base"' _ "$_A6_DIR/s229/events.log" "$_A6_DIR/s229/sh"
+unset _S228_ID _S229_LOG _S226_ETC
+unset -f _s226_tree _s226_expect _s226_expect_mounts _s226_mounts _s226_unmet _s226_seed _s227_tree _s228_ws _s228_pass _s228_sup _s228_list
 
 rm -rf "$_A6_DIR"
 unset _A6_DIR _A6_SCRIPT _A6_RC
