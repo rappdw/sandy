@@ -26406,26 +26406,32 @@ printf '%s\n' "$*" >> "$STUB_DIR/gh.argv"
 echo STUB-CHATTER; echo STUB-CHATTER >&2
 # gh's config dir, resolved the way gh resolves it. hosts.yml holds one
 # "acct <user> <token>" line per login and "user: <active>"; like gh, every
-# login makes its own account active. Written by rename, so a reader never
-# sees half a file.
+# login makes its own account active. Rewritten in place, so an existing
+# file keeps its mode and any entry the stub did not make (as with gh, whose
+# hosts.yml is 0600 and holds every host); only gh's real dir is read while
+# a job runs, and the job fills that by rename.
 dir="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}"
 _hosts() {   # $1 = the account to make active
     mkdir -p "$dir"
     { grep '^acct ' "$dir/hosts.yml" 2>/dev/null; printf 'user: %s\n' "$1"; } > "$dir/hosts.yml.$$"
-    mv -f "$dir/hosts.yml.$$" "$dir/hosts.yml"
+    cat "$dir/hosts.yml.$$" > "$dir/hosts.yml"; rm -f "$dir/hosts.yml.$$"
     printf 'v: 1\n' > "$dir/config.yml"
 }
 case "$1 $2" in
     "auth login")
         tok="$(cat)"
-        ps -axww -o args= >> "$STUB_DIR/ps.snap" 2>/dev/null || true
+        # Only this run's processes (its process group: nothing in it calls
+        # setsid), so another agent's copy of this test on the same box
+        # cannot leak its fake tokens into the snapshot.
+        pg="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+        ps -axww -o pgid=,args= 2>/dev/null | awk -v g="$pg" '$1 == g' >> "$STUB_DIR/ps.snap" || true
         sleep "${STUB_LOGIN_SLEEP:-0}"
         user="$tok"
         case ",${TOKMAP:-}," in *",$tok="*) user="${TOKMAP#*$tok=}"; user="${user%%,*}" ;; esac
         mkdir -p "$dir"
         { grep '^acct ' "$dir/hosts.yml" 2>/dev/null | grep -v "^acct $user "; printf 'acct %s %s\n' "$user" "$tok"; } > "$dir/acct.$$"
         { cat "$dir/acct.$$"; printf 'user: %s\n' "$user"; } > "$dir/hosts.yml.$$"; rm -f "$dir/acct.$$"
-        mv -f "$dir/hosts.yml.$$" "$dir/hosts.yml"; printf 'v: 1\n' > "$dir/config.yml"
+        cat "$dir/hosts.yml.$$" > "$dir/hosts.yml"; rm -f "$dir/hosts.yml.$$"; printf 'v: 1\n' > "$dir/config.yml"
         printf 'login %s\n' "$tok" >> "$STUB_DIR/events" ;;
     "auth switch")
         _hosts "$4"
@@ -26442,7 +26448,7 @@ case "$1 $2" in
         if [ "${3:-}" = --hostname ]; then
             [ "${STUB_NOFORCE:-0}" = 1 ] && exit 1
         else
-            grep -q '^login ' "$STUB_DIR/events" 2>/dev/null || exit 1
+            grep -q '^user: ' "$dir/hosts.yml" 2>/dev/null || exit 1
         fi
         git config --global --replace-all credential.https://github.com.helper ''
         git config --global --add credential.https://github.com.helper "!$0 auth git-credential"
@@ -26471,7 +26477,7 @@ fi
 _S224_TOKMAP="x224a=alice,x224b=bob,x224c=carol,x224g=gee,t1=a,t2=b"
 _S224_BASE='!f() { echo username=x-access-token; echo "password=${GIT_TOKEN}"; }; f'
 # _s224_run NAME CODE [NAME=VALUE...]: a fresh HOME and logs, run CODE the way
-# user-setup does (set -e + an ERR trap), then `wait`. Stdout, stderr and an
+# user-setup does (set -e + an ERR trap, umask S224_UMASK or 022), then `wait`. Stdout, stderr and an
 # extra fd 7 all go to the pipe that `$( )` reads to EOF, so the call returns
 # only when nothing the code started still holds them, and `wait` returns
 # only when it left no child of its own. Seconds taken go to NAME.secs.
@@ -26479,9 +26485,10 @@ _s224_run() {
     local _n="$1" _code="$2" _t0; shift 2
     rm -rf "$_S224_D/home" "$_S224_D/events" "$_S224_D/gh.argv" "$_S224_D/git.argv" "$_S224_D/file.argv" "$_S224_D/ps.snap"
     mkdir -p "$_S224_D/home"
+    if [ -n "${_S224_SEED:-}" ]; then cp -Rp "$_S224_SEED/." "$_S224_D/home/"; fi
     _t0=$(date +%s)
     { env -i PATH="$_S224_D/bin:$PATH" HOME="$_S224_D/home" STUB_DIR="$_S224_D" TOKMAP="$_S224_TOKMAP" "$@" \
-        bash -c 'set -e; trap "echo \"ERR at \$LINENO: \$BASH_COMMAND\" >&2" ERR; sandy_log() { :; }; eval "$1"; wait' _ "$_code" \
+        bash -c 'umask "${S224_UMASK:-022}"; set -e; trap "echo \"ERR at \$LINENO: \$BASH_COMMAND\" >&2" ERR; sandy_log() { :; }; eval "$1"; wait' _ "$_code" \
         2>&1 7>&1 || echo "rc=$?"; } | cat > "$_S224_D/$_n.out"
     echo $(( $(date +%s) - _t0 )) > "$_S224_D/$_n.secs"
     # Snapshot what the agent would find at the moment the pane starts.
@@ -26578,12 +26585,23 @@ WANT
         bash -c '[ "$(wc -l < "$1/seen" | tr -d " ")" -ge 5 ] && ! grep -v "^user=\(alice\)\{0,1\} pw=x224a$" "$1/seen" && grep -q "^user= " "$1/seen" && [ "$(tail -n 1 "$1/seen")" = "user=alice pw=x224a" ] && grep -qx "switch alice" "$1/events"' _ "$_S224_D"
     check "§224(9c) the staging dir is gone afterwards and gh's config is in its real place" \
         bash -c '[ "$(cd "$1/home/.config" && ls -A)" = gh ] && [ -f "$1/home/.config/gh/hosts.yml" ] && [ -f "$1/home/.config/gh/config.yml" ]' _ "$_S224_D"
-    # A GH_CONFIG_DIR already set is where gh's config ends up, not ~/.config/gh.
-    _s224_run ghdir "$_S224_GH" GH_ACCOUNTS=bob:x224b,alice:x224a GIT_TOKEN=x224a SANDY_GH_ACTIVE=alice GH_CONFIG_DIR="$_S224_D/home/custom-gh"
+    # A GH_CONFIG_DIR already set is where gh's config ends up, not
+    # ~/.config/gh. It already holds a 0600 hosts.yml with an entry of its own
+    # (another account), which the job's staged copy must carry through, with
+    # its content and its mode, and a 0644 config.yml. Under a 077 umask a
+    # copy that does not keep modes would make that 0600, so this launch runs
+    # under one: for a 0600 file no umask can show the difference.
+    mkdir -p "$_S224_D/seed/custom-gh"
+    printf 'acct other x224o\nuser: other\n' > "$_S224_D/seed/custom-gh/hosts.yml"
+    printf 'v: 0\n' > "$_S224_D/seed/custom-gh/config.yml"
+    chmod 0600 "$_S224_D/seed/custom-gh/hosts.yml"; chmod 0644 "$_S224_D/seed/custom-gh/config.yml"
+    _S224_SEED="$_S224_D/seed"
+    _s224_run ghdir "$_S224_GH" GH_ACCOUNTS=bob:x224b,alice:x224a GIT_TOKEN=x224a SANDY_GH_ACTIVE=alice GH_CONFIG_DIR="$_S224_D/home/custom-gh" S224_UMASK=077
+    _S224_SEED=""
     _s224_wait_for "switch alice" || true
     sleep 0.3
-    check "§224(9d) a GH_CONFIG_DIR set beforehand is respected: the result lands there, with the chosen account active, and nowhere else" \
-        bash -c 'grep -qx "user: alice" "$1/home/custom-gh/hosts.yml" && [ ! -e "$1/home/.config/gh" ] && [ "$(cd "$1/home" && ls -A | grep -v "^.gitconfig$")" = custom-gh ]' _ "$_S224_D"
+    check "§224(9d) a GH_CONFIG_DIR set beforehand is respected: the result lands there, with the chosen account active, and nowhere else; the hosts.yml already there keeps its own entry and its 0600 mode, and config.yml its 0644 (the stage starts from a mode-preserving copy)" \
+        bash -c 'f="$1/home/custom-gh/hosts.yml"; grep -qx "user: alice" "$f" && grep -qx "acct other x224o" "$f" && [ "$(ls -l "$f" | cut -c1-10)" = "-rw-------" ] && [ "$(ls -l "$1/home/custom-gh/config.yml" | cut -c1-10)" = "-rw-r--r--" ] && [ ! -e "$1/home/.config/gh" ] && [ "$(cd "$1/home" && ls -A | grep -v "^.gitconfig$")" = custom-gh ]' _ "$_S224_D"
     _s224_run notok "$_S224_GH" SANDY_SSH=token
     check "§224(9) with no token there is no job, no gh helper and no baseline helper (as before: setup-git failed without a login)" \
         bash -c '[ ! -s "$1/events" ] && [ -z "$(cat "$1/notok.helpers0")" ]' _ "$_S224_D"
@@ -26721,7 +26739,7 @@ check "§224(18) rule 5 still sees the host-ACTIVE token: with no other rule it 
     bash -c 'grep -qx "SANDY_GH_ACTIVE=bob" "$1/hrule5/agent.args" && grep -qx "GIT_TOKEN=h224b" "$1/hrule5/agent.envfile"' _ "$_S224_D"
 unset -f _s224_host
 rm -rf "$_S224_D"
-unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_LFS _S224_BASE _S224_GHB _S224_WANT_HELPERS _S224_WS _S224_PATH0 _S224_TOKMAP _s224_ev _s224_i _s224_done
+unset _S224_D _S224_GIT _S224_GH _S224_NATIVE _S224_LFS _S224_BASE _S224_GHB _S224_WANT_HELPERS _S224_WS _S224_PATH0 _S224_TOKMAP _S224_SEED _s224_ev _s224_i _s224_done
 unset -f _s224_run _s224_helpers _s224_wait_for _s224_wait_helpers _s224_addon
 
 # BEGIN SUMMARY
